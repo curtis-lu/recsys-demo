@@ -18,20 +18,16 @@ def _params():
 def _metrics():
     return {
         "overall": {"map@1": 0.5, "map@3": 0.6, "map@5": 0.65,
-                    "map@10": 0.7, "precision@1": 0.4, "ndcg@1": 0.55,
+                    "map@10": 0.7, "precision@1": 0.4,
                     "recall@1": 0.3},
         "per_item": {"A": {"hit_rate@1": 0.2, "hit_rate@2": 0.4,
                            "mean_pos": 3.0,
                            "map_attr@1": 0.5, "map_attr@3": 0.6,
-                           "map_attr@2": 0.55,
-                           "ndcg_attr@1": 0.45, "ndcg_attr@3": 0.5,
-                           "ndcg_attr@2": 0.48},
+                           "map_attr@2": 0.55},
                      "B": {"hit_rate@1": 0.1, "hit_rate@2": 0.3,
                            "mean_pos": 5.0,
                            "map_attr@1": 0.3, "map_attr@3": 0.35,
-                           "map_attr@2": 0.32,
-                           "ndcg_attr@1": 0.25, "ndcg_attr@3": 0.3,
-                           "ndcg_attr@2": 0.28}},
+                           "map_attr@2": 0.32}},
         "dataset_overview": {
             "totals": {"n_rows": 100, "n_entities": 10, "n_items": 2,
                        "n_snap_dates": 1, "n_positives": 20,
@@ -55,7 +51,6 @@ def _metrics():
             "by_item": {
                 "hit_rate@1": 0.15, "hit_rate@2": 0.35, "mean_pos": 4.0,
                 "map_attr@1": 0.4, "map_attr@2": 0.435, "map_attr@3": 0.475,
-                "ndcg_attr@1": 0.35, "ndcg_attr@2": 0.38, "ndcg_attr@3": 0.4,
             },
         },
         "n_queries": 10, "n_excluded_queries": 0,
@@ -472,13 +467,6 @@ def test_metrics_section_no_guardrail_verdict():
         assert bad not in text
 
 
-def test_metrics_section_hides_ndcg():
-    m = _metrics()
-    m["per_segment"] = {"seg1": {"map@1": 0.5, "ndcg@1": 0.6, "recall@1": 0.3}}
-    s = rb.build_metrics_section(m, _params(), metric_ci=_metric_ci())
-    assert "ndcg" not in " ".join(t.to_string().lower() for t in s.tables)
-
-
 def test_metrics_section_detail_tables_collapsed():
     s = rb.build_metrics_section(_metrics(), _params(), metric_ci=_metric_ci())
     assert any(s.collapsed_tables)      # 明細收合
@@ -591,6 +579,39 @@ def test_metrics_section_none_when_off():
     p = _params()
     p["evaluation"]["report"]["sections"] = {"primary_map": False}
     assert rb.build_metrics_section(_metrics(), p, metric_ci=_metric_ci()) is None
+
+
+def test_section_on_refuses_a_name_outside_the_declared_set():
+    """Pre-check (ADR-0019 decision 6): a switch the report asks about must be
+    one A34 keeps declared. Without it a new ``_section_on("x")`` call reads a
+    key no conf declares and silently defaults to on — the ``diagnosis_links``
+    drift."""
+    with pytest.raises(ValueError, match="'per_segment' is not in"):
+        rb._section_on(_params(), "per_segment")
+
+
+def test_every_listed_section_is_read_by_the_report():
+    """The third side of A34 (ADR-0019 decision 6). A34 keeps the YAML equal to
+    ``EVALUATION_REPORT_SECTIONS`` and ``_section_on`` keeps the report's names
+    inside it, but neither notices a name left in the constant after its
+    ``_section_on`` call is deleted: a dead switch again, everything green.
+    The names here come from the call sites in the source, not from the
+    constant."""
+    import ast
+    import inspect
+
+    from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
+
+    read = set()
+    for node in ast.walk(ast.parse(inspect.getsource(rb))):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "_section_on"):
+            name = node.args[1]
+            assert isinstance(name, ast.Constant) and isinstance(
+                name.value, str
+            ), f"_section_on call at line {node.lineno} has no literal name"
+            read.add(name.value)
+    assert read == EVALUATION_REPORT_SECTIONS
 
 
 # ---- Task 6: per-item 細部拆解 ----
@@ -848,32 +869,6 @@ class TestDropMetricKeysAboveItemCount:
         assert rb.drop_metric_keys_above_item_count(["map@5"], 0) == ["map@5"]
 
 
-class TestVisibleMetricKeys:
-    def test_drops_ndcg_keys(self):
-        keys = ["map@3", "ndcg@3", "precision@3", "recall@3", "ndcg@all"]
-        assert rb._visible_metric_keys(keys) == [
-            "map@3", "precision@3", "recall@3"
-        ]
-
-    def test_preserves_input_order(self):
-        assert rb._visible_metric_keys(["recall@1", "ndcg@1", "map@1"]) == [
-            "recall@1", "map@1"
-        ]
-
-    def test_does_not_drop_unrelated_keys_that_merely_contain_ndcg(self):
-        """只濾「以 prefix 起頭」的 key，不是子字串比對。"""
-        assert rb._visible_metric_keys(["my_ndcg@1"]) == ["my_ndcg@1"]
-
-
-def test_baseline_overall_table_hides_ndcg():
-    # overall 拆成 mAP/recall/precision 三張 explicit-family 表，天然不含 ndcg。
-    s = rb.build_baseline_section(
-        _metrics(), _baseline_metrics_full(), _params()
-    )
-    assert "ndcg" not in " ".join(t.to_string().lower() for t in s.tables)
-    assert any(tt == "overall mAP@k (M/B/Δ)" for tt in s.table_titles)
-
-
 def test_glossary_section_always_built():
     s = rb.build_glossary_section(_params())
     assert "recall@k (per-item)" in " ".join(
@@ -899,38 +894,19 @@ def test_assemble_report_new_spine_order():
         assert title in html
 
 
-def test_assemble_report_has_no_ndcg_end_to_end():
-    """端到端護欄：完整 report.html 整份不得出現 ndcg。fixture 刻意讓
-    per_segment 與 baseline 兩條 key-agnostic 路徑都被走到——它們把 metrics
-    dict 的 key 直接攤平，是 ndcg 最容易漏出去的地方（metrics_spark 仍算 ndcg，
-    只是刻意不呈現）。section 級測試涵蓋不到這種整份洩漏，故獨立一條網子。"""
-    m = _metrics()
-    m["per_segment"] = {
-        "young": {"map@1": 0.6, "ndcg@1": 0.55, "recall@1": 0.3},
-        "old": {"map@1": 0.4, "ndcg@1": 0.35, "recall@1": 0.2},
-    }
-    html = rb.assemble_report(
-        m, _params(), baseline_metrics=_baseline_metrics_full()
-    )
-    assert "ndcg" not in html.lower()
-
-
 def _baseline_metrics_full():
     """Baseline metrics dict mirroring _metrics() per_item / macro shape."""
     return {
-        "overall": {"map@1": 0.4, "map@3": 0.5, "ndcg@1": 0.45,
+        "overall": {"map@1": 0.4, "map@3": 0.5,
                     "precision@1": 0.3, "recall@1": 0.25},
         "per_item": {
             "A": {"hit_rate@1": 0.15, "hit_rate@2": 0.30, "mean_pos": 3.5,
-                  "map_attr@1": 0.40, "map_attr@2": 0.45, "map_attr@3": 0.50,
-                  "ndcg_attr@1": 0.35, "ndcg_attr@2": 0.40, "ndcg_attr@3": 0.42},
+                  "map_attr@1": 0.40, "map_attr@2": 0.45, "map_attr@3": 0.50},
             "B": {"hit_rate@1": 0.08, "hit_rate@2": 0.20, "mean_pos": 5.5,
-                  "map_attr@1": 0.25, "map_attr@2": 0.28, "map_attr@3": 0.30,
-                  "ndcg_attr@1": 0.20, "ndcg_attr@2": 0.22, "ndcg_attr@3": 0.25}},
+                  "map_attr@1": 0.25, "map_attr@2": 0.28, "map_attr@3": 0.30}},
         "macro_avg": {"by_item": {
             "hit_rate@1": 0.115, "hit_rate@2": 0.25, "mean_pos": 4.5,
             "map_attr@1": 0.325, "map_attr@2": 0.365, "map_attr@3": 0.40,
-            "ndcg_attr@1": 0.275, "ndcg_attr@2": 0.31, "ndcg_attr@3": 0.335,
         }},
     }
 
@@ -972,9 +948,6 @@ def test_glossary_has_attr_entries():
     s = rb.build_glossary_section(_params())
     terms = set(s.tables[0]["指標"])
     assert "map_attr@k" in terms
-    # ndcg 兩條已退場——glossary 與 report_comparison.html 共用同一份 _GLOSSARY
-    assert "ndcg@k" not in terms
-    assert "ndcg_attr@k" not in terms
 
 
 def test_glossary_has_macro_average_entry():
@@ -1252,7 +1225,7 @@ def test_baseline_section_overall_map_table_mbdelta_rows_k_cols():
     """新結構：overall mAP 表 rows=[Model,Baseline,Δ]、cols=@k。"""
     m = _metrics()
     base = {
-        "overall": {"map@1": 0.40, "ndcg@1": 0.50},
+        "overall": {"map@1": 0.40},
         "per_item": {"A": {"hit_rate@1": 0.1}},
     }
     s = rb.build_baseline_section(m, base, _params())
@@ -1281,7 +1254,7 @@ def test_baseline_section_overall_tables_use_k_superset_columns():
 
 
 def test_baseline_section_has_two_per_item_compare_tables():
-    """recall / map_attr each get a M/B/Δ-interleaved table (ndcg is not shown).
+    """recall / map_attr each get a M/B/Δ-interleaved table.
 
     Titles are matched by prefix, not exact equality: bug 5 (ADR-0020)
     appends a "參與 macro 的 item 數 ..." coverage suffix to these titles
@@ -1300,9 +1273,6 @@ def test_baseline_section_has_two_per_item_compare_tables():
         matches = [t for t in s.table_titles if t.startswith(prefix)]
         assert len(matches) == 1, prefix
         assert "參與 macro 的 item 數" in matches[0]
-    assert not any(
-        t.startswith("per-item ndcg_attr@k (M/B/Δ)") for t in s.table_titles
-    )
 
 
 def _title_starting_with(titles: list[str], prefix: str) -> str:
@@ -1339,7 +1309,7 @@ def test_baseline_section_per_item_recall_table_three_cols_per_k():
 
 
 def test_baseline_section_per_item_attr_tables_use_primary_map_k():
-    """map_attr / ndcg_attr cols come from primary_map_k = [1, 3, 'all'];
+    """map_attr cols come from primary_map_k = [1, 3, 'all'];
     'all' resolves to n_items (=2 in fixture) for lookup. bug 8 (ADR-0020)
     clamps K=3 out (3 > n_items=2), leaving [1, all]."""
     m = _metrics()
@@ -1365,22 +1335,20 @@ def test_baseline_section_omits_per_item_compare_when_no_baseline_per_item():
     for title in (
         "per-item recall@k (M/B/Δ)",
         "per-item map_attr@k (M/B/Δ)",
-        "per-item ndcg_attr@k (M/B/Δ)",
     ):
         assert title not in s.table_titles
 
 
 def _metrics_min():
     return {
-        "overall": {"map@2": 0.8, "precision@2": 0.5,
-                    "ndcg@2": 0.9, "recall@2": 1.0},
+        "overall": {"map@2": 0.8, "precision@2": 0.5, "recall@2": 1.0},
         "per_item": {
-            "A": {"map_attr@2": 0.75, "ndcg_attr@2": 0.8,
+            "A": {"map_attr@2": 0.75,
                   "hit_rate@2": 1.0, "mean_pos": 1.5, "n_pos": 2},
-            "B": {"map_attr@2": 1.0, "ndcg_attr@2": 1.0,
+            "B": {"map_attr@2": 1.0,
                   "hit_rate@2": 1.0, "mean_pos": 1.0, "n_pos": 1},
         },
-        "macro_avg": {"by_item": {"map_attr@2": 0.875, "ndcg_attr@2": 0.9,
+        "macro_avg": {"by_item": {"map_attr@2": 0.875,
                                   "hit_rate@2": 1.0, "mean_pos": 1.25}},
         "observation_items": [],
         "n_queries": 3,

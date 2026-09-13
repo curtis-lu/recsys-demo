@@ -112,7 +112,7 @@ class TestGenerateHtmlReport:
 
     def test_table_titles_rendered(self):
         t1 = pd.DataFrame({"metric": ["map"], "value": [0.5]})
-        t2 = pd.DataFrame({"metric": ["ndcg"], "value": [0.6]})
+        t2 = pd.DataFrame({"metric": ["recall"], "value": [0.6]})
         t3 = pd.DataFrame({"metric": ["mrr"], "value": [0.7]})
         sections = [
             ReportSection(
@@ -308,7 +308,7 @@ class TestSaveReport:
 class TestSaveMetricsJson:
     def test_json_roundtrip(self):
         metrics = {
-            "overall": {"map": 0.5, "ndcg": 0.6},
+            "overall": {"map": 0.5, "recall": 0.6},
             "per_item": {"exchange_fx": {"hit_rate@5": 0.7}},
         }
         with tempfile.TemporaryDirectory() as tmpdir:

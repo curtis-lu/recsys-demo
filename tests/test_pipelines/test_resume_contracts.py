@@ -147,28 +147,37 @@ RESUME_CONTRACTS = {
     # (ADR-0018 decision 5), so generate_report's pages input comes from the
     # zero-read no_diagnosis_pages stub — memory-only, and free to re-run.
     ("evaluation", ()): {
-        # eval_predictions/metrics are memory-only: report regeneration
-        # re-runs the metric chain. Documented cost, pinned here.
-        "generate_report": {
-            "prepare_eval_data",
-            "compute_metrics",
-            "compute_baseline_metrics",
-            "no_diagnosis_pages",
-        },
+        # Redrawing the report re-runs no Spark node (ADR-0018 decision 2):
+        # generate_report reads four landed JSONs plus parameters, and its
+        # pages list comes from the zero-read stub. Before evaluation_metrics
+        # and baseline_metrics had catalog entries this set also held
+        # prepare_eval_data, compute_metrics and compute_baseline_metrics — a
+        # "redraw" re-joined the predictions and recomputed every metric.
+        #
+        # Why the cheaper contract is accepted. What the redraw reads back from
+        # disk is checked, not trusted: generate_report refuses any landed
+        # input whose config_fingerprint disagrees with the current computed
+        # settings (ADR-0020 decision 2), so it cannot draw old metrics under
+        # new settings. What the fingerprint does not see is data. After a
+        # label_table backfill the old contract did recompute the metrics and
+        # the baseline, but still reused the landed metric CI and report
+        # aggregates, so that report already mixed two data states; the new
+        # one reuses all four, so every number comes from one run. Picking up
+        # new data takes --from-node prepare_eval_data or a full run
+        # (docs/pipelines/evaluation.md section 7.4 says so).
+        #
+        # Un-land evaluation_metrics or baseline_metrics and this turns red.
+        "generate_report": {"no_diagnosis_pages"},
     },
     ("evaluation", (("post_training", True),)): {
-        # Same metric-chain cost as above. render_diagnosis_pages is also
-        # memory-only (its output is a list of paths, meaningful only for the
-        # run that wrote them) — resuming at generate_report re-renders the
-        # pages from the diagnosis JSONs, which is the cheap half-second path,
-        # not a Spark job. This was the monitoring contract before the
-        # diagnoses moved to --post-training only; it moved here unchanged.
-        "generate_report": {
-            "prepare_eval_data",
-            "compute_metrics",
-            "compute_baseline_metrics",
-            "render_diagnosis_pages",
-        },
+        # Same landing and reasoning as above. render_diagnosis_pages stays
+        # memory-only on purpose (its output is a list of paths, meaningful
+        # only for the run that wrote them); it re-renders the pages from the
+        # landed diagnosis JSONs, the half-second path. When those JSONs are
+        # not on disk the slice pulls the diagnosis nodes back as well, which
+        # is correct and outside this contract: contracts describe the
+        # "previous full run succeeded" scenario.
+        "generate_report": {"render_diagnosis_pages"},
     },
 }
 

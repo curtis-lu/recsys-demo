@@ -311,10 +311,27 @@ Layer 1 — config-static (implemented here; aggregated by
   compatibility layer for a key this repo no longer has, and the next reader
   would have to work out which of the two names is real. Leave the code slot
   ``A33`` retired-not-renumbered afterwards, per A16/A17/A18.
+* A34 — ``evaluation.report.sections`` declares exactly the switches the
+  report reads: its key set equals ``EVALUATION_REPORT_SECTIONS``, the constant
+  ``evaluation/report_builder._section_on`` checks every name against. Both
+  directions (ADR-0019 decision 6): a declared key nothing reads is a switch
+  that does nothing (four shipped that way until #351), and a name the report
+  reads that no conf declares is a section on by default with no line to turn
+  it off (``diagnosis_links``). Containment in one direction passes one of the
+  two. The constant lives in ``core/`` because ``core/`` must not import the
+  report layer. A ``sections`` block that declares no switch (absent, null or
+  empty) is not checked, a visible opt-out to every default; once any switch
+  is declared the block is checked in full. Predicate:
+  ``report_section_key_errors`` (returns errors; the evaluation command raises
+  before Spark starts, collected with A22). NOT aggregated by
+  ``validate_config_consistency``, for A24's reason: that gate runs at the
+  entry of every command while only evaluation reads these keys, so a conf
+  still carrying a dead switch must not stop dataset, training or inference
+  (issue #158).
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
-flags), A22 (``--post-training``), A24/A26 (config keys whose harm belongs
+flags), A22 (``--post-training``), A24/A26/A34 (config keys whose harm belongs
 to one pipeline), A28 (the resolved catalog), A30 (``--env`` + the filesystem).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10
@@ -1469,6 +1486,89 @@ def legacy_evaluation_key_errors(parameters: dict) -> list[str]:
         for old, new in LEGACY_EVALUATION_KEYS.items()
         if old in eval_params
     ]
+
+
+#: The ``evaluation.report.sections`` switches the report reads: one name per
+#: ``_section_on(parameters, name)`` call in ``evaluation/report_builder.py``,
+#: which refuses any name not listed here (A34). ``baseline`` and
+#: ``diagnostics`` are also read directly by the nodes that skip computing
+#: (``compute_baseline_metrics`` / ``compute_report_aggregates``); those reads
+#: bypass the ``_section_on`` pre-check, so a new direct read of a name that is
+#: not listed here is caught by nothing. ``report_builder`` imports this
+#: constant, not the other way round: ``core/`` has no import-time dependency on
+#: the layers above it, and ``report_builder`` drags pandas and plotly in.
+EVALUATION_REPORT_SECTIONS: frozenset[str] = frozenset({
+    "dataset_overview",
+    "primary_map",
+    "diagnostics",
+    "baseline",
+    "diagnosis_links",
+})
+
+
+def report_section_key_errors(parameters: dict) -> list[str]:
+    """A34 — ``evaluation.report.sections`` declares exactly
+    :data:`EVALUATION_REPORT_SECTIONS`.
+
+    Equality, checked in both directions, because each direction alone let a
+    real drift through (ADR-0019 decision 6):
+
+    * declared but not read: ``guardrail_recall``, ``per_item_attr``,
+      ``category`` and ``per_segment`` were declared and set to ``true`` for
+      months while nothing asked about them — switching one off changed
+      nothing, and the troubleshooting table told users to do exactly that;
+    * read but not declared: ``diagnosis_links`` was asked about by the report
+      but absent from the conf, so it was on by default with no line to turn
+      it off.
+
+    A check that fires only when the report asks for a name (the pre-check in
+    ``_section_on``) never sees the first shape, which is why this runs on the
+    conf itself.
+
+    A ``sections`` block that declares no switch at all (absent, null, or an
+    empty mapping) is not checked: declaring nothing is a visible opt-out to
+    every default, not a key that drifted quietly. Once any switch is
+    declared, the block is checked in full.
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    if not isinstance(eval_params, Mapping):
+        return []
+    report = eval_params.get("report", {}) or {}
+    if not isinstance(report, Mapping):
+        return []
+    sections = report.get("sections")
+    if sections is None:
+        return []
+    if not isinstance(sections, Mapping):
+        return [
+            f"A34: evaluation.report.sections={sections!r} must be a mapping "
+            f"of switch name to bool, one key per switch the report reads: "
+            f"{sorted(EVALUATION_REPORT_SECTIONS)}."
+        ]
+    if not sections:
+        return []
+    declared = set(sections)
+    errors = []
+    unread = declared - EVALUATION_REPORT_SECTIONS
+    if unread:
+        # key=str: YAML can hand over a non-str key (``on:`` loads as True),
+        # and sorting it against str keys would raise instead of reporting.
+        errors.append(
+            f"A34: evaluation.report.sections declares "
+            f"{sorted(unread, key=str)}, which "
+            f"the report never reads — setting it changes nothing. Delete the "
+            f"key(s). The switches the report reads are "
+            f"{sorted(EVALUATION_REPORT_SECTIONS)}."
+        )
+    undeclared = EVALUATION_REPORT_SECTIONS - declared
+    if undeclared:
+        errors.append(
+            f"A34: evaluation.report.sections does not declare "
+            f"{sorted(undeclared)}, which the report reads — the section is on "
+            f"by default and this conf has no line to turn it off. Declare it "
+            f"(true keeps the current behaviour)."
+        )
+    return errors
 
 
 def validate_config_consistency(parameters: dict) -> None:

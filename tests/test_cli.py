@@ -2125,6 +2125,50 @@ class TestRebuildSlicedAwayWarning:
         assert set(_REBUILD_TARGET_NODES) <= real
 
 
+class TestReportSectionKeysA34:
+    """A34 is wired to the evaluation command and fails before Spark starts.
+
+    The two tests are a pair. ``exit_code == 1`` alone is satisfied by any
+    earlier failure; the control shows that the same conf minus the dead
+    switch gets past the entry checks, so the first test's exit is A34's.
+    """
+
+    @staticmethod
+    def _invoke_with_sections(tmp_path, sections):
+        _setup_conf(tmp_path)
+        with open(tmp_path / "conf" / "base" / "parameters_evaluation.yaml",
+                  "w") as f:
+            yaml.dump({"evaluation": {"snap_date": "2026-01-31",
+                                      "report": {"sections": sections}}}, f)
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(
+                    app, ["evaluation", "--model-version", "mv"])
+        finally:
+            os.chdir(old_cwd)
+        return result, mock_spark
+
+    def test_a_dead_switch_exits_before_spark_starts(self, tmp_path):
+        from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
+
+        sections = {name: True for name in EVALUATION_REPORT_SECTIONS}
+        sections["per_segment"] = True
+        result, mock_spark = self._invoke_with_sections(tmp_path, sections)
+        assert result.exit_code == 1
+        mock_spark.assert_not_called()
+
+    def test_control_the_declared_switches_reach_spark(self, tmp_path):
+        from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
+
+        _result, mock_spark = self._invoke_with_sections(
+            tmp_path, {name: True for name in EVALUATION_REPORT_SECTIONS})
+        mock_spark.assert_called_once()
+
+
 class TestDateSplitOverlapA24:
     """A24 is wired to the dataset command, not to the global aggregator."""
 

@@ -165,8 +165,8 @@ class TestFingerprintRerunNodes:
     """
 
     FINGERPRINTED_PRODUCERS = {
-        "compute_baseline_metrics", "compute_report_aggregates",
-        "compute_metric_ci",
+        "compute_metrics", "compute_baseline_metrics",
+        "compute_report_aggregates", "compute_metric_ci",
     }
     MODES = TestRegistryDiagnosesFollowTheMode.MODES
 

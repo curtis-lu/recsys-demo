@@ -13,7 +13,6 @@ from recsys_tfb.evaluation.report_builder import (
     _resolve_display_k,
     _k_to_lookup,
     _n_items,
-    _visible_metric_keys,
     build_glossary_section,
     drop_metric_keys_above_item_count,
     macro_coverage_suffix_mb,
@@ -126,9 +125,7 @@ def _build_overall_section(metrics_a: dict, comparison: dict) -> ReportSection:
     # @K above the item count are dropped here (same n_items as the per-item
     # section below).
     keys = drop_metric_keys_above_item_count(
-        _visible_metric_keys(
-            sorted(set(overall_a) | set(overall_b) | set(overall_d))
-        ),
+        sorted(set(overall_a) | set(overall_b) | set(overall_d)),
         _n_items(metrics_a),
     )
     tbl = pd.DataFrame(
@@ -246,9 +243,7 @@ def _build_category_section(
     # bug 8 (ADR-0020): same key filter as _build_overall_section, against
     # the category count — 3 categories must not print precision@4 / @5.
     keys = drop_metric_keys_above_item_count(
-        _visible_metric_keys(
-            sorted(set(overall_a) | set(overall_b) | set(overall_d))
-        ),
+        sorted(set(overall_a) | set(overall_b) | set(overall_d)),
         n_cat,
     )
     side_a, side_b = "Model", "Compare"

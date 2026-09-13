@@ -956,6 +956,12 @@ class TestConsumersSegmentByTheLandedList:
         # What the report says about segments travels with the metrics.
         assert result["segments"] == {
             k: self._SEGMENTS[k] for k in ("joined", "sources", "missing")}
+        # It lands as metrics.json, so it records the computed settings it
+        # was made with and generate_report can refuse a stale one
+        # (ADR-0018 decision 2, ADR-0020 decision 2).
+        from recsys_tfb.evaluation.config_fingerprint import fingerprint
+
+        assert result["config_fingerprint"] == fingerprint(self._parameters())
 
     def test_compute_baseline_metrics(self, spark):
         from recsys_tfb.pipelines.evaluation.nodes_spark import (

@@ -189,6 +189,8 @@ ADR-0014 在 training 收了 21 處。evaluation 的 13 處全在 `nodes_spark.p
 
 單獨刪鍵不夠的理由：症狀掃掉了，下次再長出來沒人擋。
 
+**實作註（2026-09-13，#351）**：不變量代號是 **A34**，predicate 是 `core/consistency.py::report_section_key_errors`，接在 evaluation 指令的入口（跟 A22 同一處、起 Spark 之前），不進 `validate_config_consistency`——那道閘每個指令都跑，而只有 evaluation 讀這些鍵，舊設定留著死開關不該擋住 dataset、training、inference（A24 的理由，#158）；`_section_on` 的前置檢查 raise `ValueError`。本份沒寫到的一個邊界這樣定：`evaluation.report.sections` 一個鍵都沒宣告（整塊不在、是 `null`、或是空的 `{}`）時不檢查。一個都不宣告是明顯的「全部用預設」，不是某個鍵悄悄漂走；只要宣告了任何一個鍵，就逐鍵雙向比對。另外補一條原始碼掃描測試（`tests/test_evaluation/test_report_builder.py::test_every_listed_section_is_read_by_the_report`）：常數裡的每個名字都要有一個 `_section_on` 呼叫在讀。少了它，刪掉某個 `_section_on` 呼叫、常數與 YAML 沒跟著刪，A34 與前置檢查都照樣綠，死開關就回來了。
+
 ## 決定 7：稽核 G 升格為 bug，本份只登記機制去重
 
 `restrict_to_common`（`comparison_nodes.py`）自己做兩次 item collect ＋ 兩次 count ＋ 一次 intersect count，而 `comparison/alignment.py::common_universe` 內部**再 collect 一次**同樣的 item 集合。複核發現更重的事：兩處對「共同母體」的**定義不同**——node 用 `[time]+entity` 做 `intersect()`，`alignment.py` 用 `entity` 做 `left_semi`，而 `alignment.py` 自己的註解逐字說明為什麼 `intersect` 是錯的（NULL 的語意）。印進 `report_comparison.html` coverage 段的數字，跟實際被保留的母體不是同一個量。

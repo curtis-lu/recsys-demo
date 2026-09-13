@@ -88,11 +88,11 @@
 </nav>
 
 <h1>排序推薦評估指標概念地圖</h1>
-<p class="sub">precision / recall / MAP / nDCG / hit_rate / HR · per-query 與 per-item 的語意與關係</p>
+<p class="sub">precision / recall / MAP / hit_rate / HR · per-query 與 per-item 的語意與關係</p>
 
 <div class="lead">
 這份文件釐清排序推薦常見評估指標（<code>precision@K</code> / <code>recall@K</code> /
-<code>map@K</code> / <code>ndcg@K</code> / <code>hit_rate@K</code> / <code>HR@K</code> /
+<code>map@K</code> / <code>hit_rate@K</code> / <code>HR@K</code> /
 <code>mean_pos</code> …）的精確語意，以及 <strong>per-query</strong> 與 <strong>per-item</strong>
 兩種切法的差異。讀完你能回答：哪個指標回答什麼問題、為什麼同樣叫 recall 數值卻不同、
 per-item 的 precision 到底存不存在。
@@ -140,7 +140,7 @@ per-item 的 precision 到底存不存在。
     <tr><td>把什麼收斂成一個數</td><td>一整列（一位客戶的全產品排序）</td><td>一個 column 裡的格子</td></tr>
     <tr><td>回答的問題</td><td>「對一位<strong>典型客戶</strong>，這份推薦清單排得好不好？」</td><td>「對<strong>某個產品</strong>，模型把它擺對位置了嗎？」</td></tr>
     <tr><td>誰會問</td><td>模型負責人／管理層（整體清單品質）</td><td>產品負責人（我這條產品被服務得好嗎）</td></tr>
-    <tr><td>指標字彙</td><td><code>map@K</code> <code>ndcg@K</code> <code>precision@K</code> <code>recall@K</code> <code>HR@K</code></td><td><code>hit_rate@K</code> <code>map_attr@K</code> <code>ndcg_attr@K</code> <code>mean_pos</code></td></tr>
+    <tr><td>指標字彙</td><td><code>map@K</code> <code>precision@K</code> <code>recall@K</code> <code>HR@K</code></td><td><code>hit_rate@K</code> <code>map_attr@K</code> <code>mean_pos</code></td></tr>
   </tbody>
 </table>
 
@@ -154,14 +154,14 @@ per-item 的 precision 到底存不存在。
 <h2 id="layer">③ 計算流程：三層</h2>
 <p>不論用什麼工具實作，這些指標的計算都可拆成「格子 → 每列 → 對客戶平均」三層：</p>
 <pre>Layer 1  每一格算貢獻值
-         pos, cum_rel, prec_at_pos, dcg_term,
-         top_k@K(=pos≤K?1:0), ap_contrib@K, ndcg_contrib@K
+         pos, cum_rel, prec_at_pos,
+         top_k@K(=pos≤K?1:0), ap_contrib@K
                   │
         ┌─────────┴──────────┐
         ▼                    ▼
 Layer 2  per-query           （per-item 不經 Layer 2，
   一列 → 一個數              直接從 Layer 1 的格子收斂）
-  map@K ndcg@K
+  map@K
   precision@K recall@K
         │                    │
         ▼                    ▼
@@ -182,7 +182,6 @@ recall@K 的分母 total_rel 都是「一整列」的概念）；<strong>per-ite
     <tr><td><code>precision@K</code></td><td>(top-K 裡 label=1 的個數) / <strong>K</strong></td><td>「我推前 K 個，有幾成是命中的」</td></tr>
     <tr><td><code>recall@K</code></td><td>(top-K 裡 label=1 的個數) / <strong>total_rel</strong></td><td>「這客戶想要的，我前 K 個撈回幾成」</td></tr>
     <tr><td><code>map@K</code></td><td>該列的 Average Precision@K</td><td>precision 沿排名累積的加權版（越前面命中越加分）</td></tr>
-    <tr><td><code>ndcg@K</code></td><td>DCG@K / iDCG@K</td><td>有 log 折扣的排序品質（位置越前權重越高），正規化到 [0,1]</td></tr>
     <tr><td><code>HR@K</code><br><span class="small">（經典 top-N 指標）</span></td><td>1 if (top-K 內 ≥1 個 label=1) else 0</td><td>「這位客戶的清單，至少中一個了嗎」；分子是 0/1 指示，不是個數</td></tr>
   </tbody>
 </table>
@@ -214,7 +213,6 @@ per-item 多了一個「<strong>對哪個邊下條件</strong>」的軸。固定
     <tr><td><code>hit_rate@K</code><br>＝per-item recall@K</td><td>TP/(TP+FN)</td><td>label=1</td><td>想要 P 的客戶，幾成被推進 top-K</td></tr>
     <tr><td><code>mean_pos</code></td><td>E[pos｜label=1]</td><td>label=1</td><td>被想要時平均排第幾名（越小越好）</td></tr>
     <tr><td><code>map_attr@K</code></td><td>mean(ap_contrib@K)</td><td>label=1</td><td>P 對「客戶 AP@K」的平均貢獻碎片</td></tr>
-    <tr><td><code>ndcg_attr@K</code></td><td>mean(ndcg_contrib@K)</td><td>label=1</td><td>P 對「客戶 nDCG@K」的平均貢獻碎片</td></tr>
     <tr><td>per-item <code>precision@K</code></td><td>TP/(TP+FP)</td><td>rank≤K</td><td>把 P 推進某客戶 top-K 時，他真的想要的比例</td></tr>
     <tr><td><code>exposure@K</code></td><td>(TP+FP)/N</td><td>無</td><td>P 被推進 top-K 的客戶佔比（純供給面，不需 label）</td></tr>
     <tr><td>base rate</td><td>(TP+FN)/N</td><td>無</td><td>P 的母體正樣本率</td></tr>
@@ -310,14 +308,12 @@ total_rel = 這列 label 總和（這客戶想要幾個產品）
 │ precision@K  命中數 / K          推 K 個有幾成準                │
 │ recall@K     命中數 / total_rel  想要的撈回幾成（客戶等權）      │
 │ map@K        AP@K                 累積精確度（前面命中更值錢）    │
-│ ndcg@K       DCG/iDCG             log 折扣排序品質，[0,1]        │
 │ HR@K         1[top-K 有 ≥1 命中]  至少中一個的客戶比例           │
 └───────────────────────────────────────────────────────────────┘
 ┌─ per-item（挑一產品 column → 看條件）─────────────────────────┐
 │ 條件 label=1 ─ hit_rate@K  ＝per-item recall（命中事件等權）    │
 │              ├ mean_pos    被想要時平均排第幾（越小越好）       │
-│              ├ map_attr@K  對客戶 AP@K 的平均貢獻碎片           │
-│              └ ndcg_attr@K 對客戶 nDCG@K 的平均貢獻碎片         │
+│              └ map_attr@K  對客戶 AP@K 的平均貢獻碎片           │
 │ 條件 rank≤K ── precision@K P 進 top-K 時真的想要的比例          │
 │ 不條件 ─────── exposure@K  P 被推進 top-K 的客戶佔比            │
 │              └ base rate   母體正樣本率                         │

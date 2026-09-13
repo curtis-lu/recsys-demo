@@ -23,10 +23,17 @@ def test_item_categories_block():
 
 def test_report_display_and_sections():
     rep = _load()["report"]
-    assert rep["sections"]["category"] is True
-    assert rep["sections"]["per_item_attr"] is True
-    assert rep["display"]["primary_map_k"] == [1, 3, 5, "all"]
-    assert rep["display"]["guardrail_recall_k"] == [1, 2, 3, 4, 5]
+    # Exactly the switches the report reads (ADR-0019 decision 6, A34). Spelled
+    # out here rather than read from EVALUATION_REPORT_SECTIONS, so this test
+    # is an independent statement of the decision.
+    assert rep["sections"] == {
+        "dataset_overview": True, "primary_map": True, "diagnostics": True,
+        "baseline": True, "diagnosis_links": True,
+    }
+    assert rep["display"] == {
+        "primary_map_k": [1, 3, 5, "all"],
+        "guardrail_recall_k": [1, 2, 3, 4, 5],
+    }
     # Diagnostics are aggregated in Spark now -> no row-sampling cap.
     assert "sample_rows" not in rep["diagnostics"]
     assert rep["diagnostics"]["include_distributions"] is True

@@ -426,6 +426,10 @@ def compute_metrics(
     landed ``evaluation_segment_columns``), and copies its ``joined`` /
     ``sources`` / ``missing`` into the result as ``segments``: the report says
     which table each column came from and which one lacked a column.
+
+    The result lands as ``evaluation_metrics`` (``metrics.json``, ADR-0018
+    decision 2) and carries ``config_fingerprint``, which ``generate_report``
+    checks before drawing from it.
     """
     from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
 
@@ -436,6 +440,7 @@ def compute_metrics(
     result["segments"] = {
         k: segment_columns[k] for k in ("joined", "sources", "missing")
     }
+    result["config_fingerprint"] = fingerprint(parameters)
     logger.info(
         "Spark metrics computed: n_queries=%d, n_excluded=%d",
         result["n_queries"],
@@ -927,7 +932,8 @@ def compute_report_aggregates(
     """主報表診斷區的 Spark 聚合，落地成 JSON。
 
     從 ``generate_report`` 拆出來（Plan 1.5）。理由不只是效能：它讓
-    ``generate_report`` 變成純函式，主報表因此能離線重繪；也把這 6 次全掃的
+    ``generate_report`` 變成純函式；指標與 baseline 也落地之後（ADR-0018 決定 2），
+    ``--only-node generate_report`` 不重算任何指標就能重繪主報表。也把這 6 次全掃的
     失敗點從 pipeline 的**最後一個 node** 往上游移。
 
     Both the stub and the full result carry ``config_fingerprint``: the JSON
@@ -980,23 +986,24 @@ def generate_report(
     診斷頁由 ``render_diagnosis_pages`` 產生（Plan 1.5 拆出），這裡只收它回傳
     的路徑清單、放一個連結進主報表。
 
-    Pre-check (inputs): ``baseline_metrics``, ``metric_ci`` and
-    ``report_aggregates`` were computed with the current computed settings
-    (``evaluation.config_fingerprint``). ``--only-node generate_report``
+    Pre-check (inputs): ``evaluation_metrics``, ``baseline_metrics``,
+    ``metric_ci`` and ``report_aggregates`` were computed with the current
+    computed settings (``evaluation.config_fingerprint``). All four are
+    landed JSON (ADR-0018 decision 2), and ``--only-node generate_report``
     stops at "the JSON exists", so without this a setting changed since the
     last run is drawn from the old JSON with exit code 0 (ADR-0020 bug 2);
     with it the run raises, naming the key and the node to ``--from-node``.
     Only computed settings count, so changing ``report.display.*`` and the
-    other drawn keys still redraws in seconds.
+    other drawn keys still redraws without recomputing anything.
 
-    Not in the check: ``evaluation_metrics``, which is memory-only and
-    carries no fingerprint yet (it is recomputed on every slice that reaches
-    this node; it joins the list once #339 lands it), and
-    ``diagnosis_pages``, a list of paths whose sources
+    Not in the check: ``diagnosis_pages``, a list of paths whose sources
     ``render_diagnosis_pages`` has already checked.
     """
     require_computed_with_current_config(
         [
+            LoadedArtifact(catalog_name="evaluation_metrics",
+                           payload=evaluation_metrics,
+                           produced_by="compute_metrics"),
             LoadedArtifact(catalog_name="baseline_metrics",
                            payload=baseline_metrics,
                            produced_by="compute_baseline_metrics"),

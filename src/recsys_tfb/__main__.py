@@ -18,6 +18,7 @@ from recsys_tfb.core.consistency import (
     entity_columns_declared_errors,
     inference_grid_errors,
     post_training_snap_date_errors,
+    report_section_key_errors,
     resolved_env_dir,
     resolved_inference_rebuild_dates,
     resolved_rebuild_dates,
@@ -1648,8 +1649,15 @@ def evaluation(
     # compare-only branch before it is read), so anyone this blocks gets an
     # identical run by dropping the flag.
     snap_date_errs = post_training_snap_date_errors(params, post_training=post_training)
-    if snap_date_errs:
-        logger.error("\n".join(snap_date_errs))
+    # (A34) evaluation.report.sections declares exactly the switches the
+    # report reads. Not aggregated by validate_config_consistency, for A24's
+    # reason (issue #158): that gate runs at the entry of every command while
+    # only evaluation reads these keys, so a conf still carrying a dead switch
+    # must not stop dataset, training or inference. Collected with A22 so one
+    # run reports both.
+    section_errs = report_section_key_errors(params)
+    if snap_date_errs or section_errs:
+        logger.error("\n".join([*snap_date_errs, *section_errs]))
         raise typer.Exit(code=1)
 
     get_or_create_spark_session(_load_spark_config(config, "evaluation"))

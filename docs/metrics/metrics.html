@@ -2,7 +2,7 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
-<title>recsys_tfb — 指標說明（mAP / NDCG / per-item，程式實算）</title>
+<title>recsys_tfb — 指標說明（mAP / per-item，程式實算）</title>
 <style>
   body{font-family:-apple-system,"Segoe UI","PingFang TC","Microsoft JhengHei",sans-serif;
     max-width:980px;margin:0 auto;padding:24px 34px;color:#1f2328;line-height:1.65;background:#fff}
@@ -24,7 +24,7 @@
 </head>
 <body>
 
-<h1>指標說明：mAP / NDCG / per-item</h1>
+<h1>指標說明：mAP / per-item</h1>
 <p class="sub">每個指標<b>程式實際怎麼算</b>（對照 <code>src/recsys_tfb/evaluation/metrics.py</code> 與 <code>metrics_spark.py</code> 的公式）、輸出格式、報表怎麼分段、常見疑問。排序概念的數學自學見手冊 <a href="../handbooks/gbdt/gbdt_learning_to_rank.md"><code>gbdt_learning_to_rank.md</code></a>。</p>
 
 <div class="note">
@@ -39,12 +39,12 @@
   ▼
 逐列貢獻（add_row_contributions）
   cum_rel = 到此名次累計正例     prec_at_pos = cum_rel / pos
-  dcg_term = label / log2(pos+1)  top_k@K = 1 if pos≤K else 0
+  top_k@K = 1 if pos≤K else 0
   ▼  groupBy(query)
-每組指標（compute_per_query_metrics）：map@K · ndcg@K · precision@K · recall@K
+每組指標（compute_per_query_metrics）：map@K · precision@K · recall@K
   ▼  mean over groups
 總表指標（summary）              ▼  attribute 到 item，macro over items
-                                per-item 指標：hit_rate@K · map_attr@K · ndcg_attr@K · mean_pos
+                                per-item 指標：hit_rate@K · map_attr@K · mean_pos
 </div>
 
 <h2>1. 主指標：mAP</h2>
@@ -68,11 +68,10 @@ prec_at_pos = cumsum(label) / pos  <span class="m"># 到此名次的精確率</s
 <table>
   <tr><th>指標 @K</th><th>每組公式</th><th>意思</th></tr>
   <tr><td><code>map@K</code></td><td>Σ(prec_at_pos · label · [pos≤K]) / total_rel</td><td>只看前 K 名的 AP</td></tr>
-  <tr><td><code>ndcg@K</code></td><td>Σ( dcg_term · [pos≤K] ) / iDCG@K</td><td>有位置折扣的排序品質；已被理想排序正規化到 [0,1]</td></tr>
   <tr><td><code>precision@K</code></td><td>hits@K / K</td><td>前 K 名裡有多少比例是正例</td></tr>
   <tr><td><code>recall@K</code></td><td>hits@K / total_rel</td><td>該組正例有多少比例被排進前 K</td></tr>
 </table>
-<p class="sub">其中 <code>dcg_term = label / log2(pos+1)</code>；<code>iDCG@K = Σ_{i=1..min(total_rel,K)} 1/log2(i+1)</code>（理想排序的 DCG，把正例全擺最前面）；<code>hits@K = Σ(label·[pos≤K])</code>。總表指標是這些每組值的平均。</p>
+<p class="sub">其中 <code>hits@K = Σ(label·[pos≤K])</code>。總表指標是這些每組值的平均。</p>
 <div class="note"><b>K 的退化情況</b>：當 <code>K ≥ 每組候選 item 數</code> 時，前 K 名涵蓋全組 → <code>precision@K</code> 趨近「正例佔比」、<code>recall@K</code> 恆為 1，兩者失去鑑別力。看 @K 指標時要對照每組候選數。</p>
 
 <h2>3. per-item 指標（macro over items）</h2>
@@ -80,7 +79,6 @@ prec_at_pos = cumsum(label) / pos  <span class="m"># 到此名次的精確率</s
 <table>
   <tr><th>指標</th><th>意思</th></tr>
   <tr><td><code>map_attr@K</code></td><td>per-item 歸因的 mAP@K（該 item 的正例貢獻平均）</td></tr>
-  <tr><td><code>ndcg_attr@K</code></td><td>per-item 歸因的 NDCG@K</td></tr>
   <tr><td><code>hit_rate@K</code></td><td>該 item 的邊際 recall：它的正例有多少比例被排進前 K</td></tr>
   <tr><td><code>mean_pos</code></td><td>該 item 在 P-positive 列上的平均名次</td></tr>
 </table>
@@ -95,8 +93,8 @@ prec_at_pos = cumsum(label) / pos  <span class="m"># 到此名次的精確率</s
 <table>
   <tr><th>分段</th><th>內容</th></tr>
   <tr><td>dataset overview</td><td>評估資料規模（group 數、正例率等，<code>compute_dataset_overview</code>）</td></tr>
-  <tr><td>summary</td><td>總表 mAP ＋ 各 K 的 map@K / ndcg@K / precision@K / recall@K，與 baseline 並列</td></tr>
-  <tr><td>per-item</td><td>各 item 的 map_attr@K / ndcg_attr@K / hit_rate@K / mean_pos</td></tr>
+  <tr><td>summary</td><td>總表 mAP ＋ 各 K 的 map@K / precision@K / recall@K，與 baseline 並列</td></tr>
+  <tr><td>per-item</td><td>各 item 的 map_attr@K / hit_rate@K / mean_pos</td></tr>
   <tr><td>per-segment</td><td>依 <code>segment_columns</code> 分群的指標（欄從該模式的母體表或 <code>segment_sources</code> 覆寫表 join 進來；母體表沒有這欄時該段不出現、報表註明，見 <a href="../pipelines/evaluation.md">evaluation.md</a> §3.2）</td></tr>
   <tr><td>comparison（<code>--compare</code>）</td><td>與另一 model_version / 外部表在共同客戶上的對比（見 <a href="../pipelines/evaluation.md">evaluation.md</a>）</td></tr>
 </table>

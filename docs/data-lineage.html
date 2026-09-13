@@ -483,8 +483,8 @@ C000010   0.83    1.92                1      （示意）</div>
   <div class="meta"><b>產生</b>：training · compute_test_mAP_spark（讀 training_eval_predictions 算 test 排序指標）　|
   <b>下游</b>：training（log_experiment → MLflow）　|
   <b>path</b>：<code>data/models/&lt;model_version&gt;/evaluation_results.json</code></div>
-  <p class="note">這是 <b>training</b> pipeline 的產物（test mAP），<b>不是</b> evaluation pipeline。evaluation pipeline 產的是 report.html / enriched_eval_predictions。</p>
-  <div class="ex">{ "test_map": 0.41, "ndcg@5": 0.55, "per_item_map": { "prod_A": 0.48, ... } }  （示意）</div>
+  <p class="note">這是 <b>training</b> pipeline 的產物（test mAP），<b>不是</b> evaluation pipeline。evaluation pipeline 產的是 report.html、metrics.json（evaluation_metrics）與 enriched_eval_predictions。</p>
+  <div class="ex">{ "test_map": 0.41, "per_item_map": { "prod_A": 0.48, ... } }  （示意）</div>
 </div>
 
 <div class="card" id="diagnostics">
@@ -557,10 +557,10 @@ C000010   0.83    0.71                 1      （示意）</div>
 
 <div class="card" id="evaluation_report">
   <h4>evaluation_report <span class="badge b-report">報表</span><span class="vl vl-mv">model_version</span></h4>
-  <div class="meta"><b>產生</b>：evaluation · generate_report（吃 eval_predictions + evaluation_metrics + baseline_metrics）　|
+  <div class="meta"><b>產生</b>：evaluation · generate_report（吃 evaluation_metrics + baseline_metrics + evaluation_metric_ci + evaluation_report_aggregates + evaluation_diagnosis_pages）　|
   <b>下游</b>：—（終端產物，給人看）　|
   <b>path</b>：<code>data/evaluation/&lt;model_version&gt;/&lt;snap_date&gt;/report.html</code></div>
-  <p class="sub">eval_predictions 由 prepare_eval_data 把預測（情境 1 = training_eval_predictions；情境 2 = ranked_predictions）⋈ label_table 而來。evaluation_metrics / baseline_metrics 是 in-memory 中間產物，不持久化於 catalog。</p>
+  <p class="sub">eval_predictions 由 prepare_eval_data 把預測（情境 1 = training_eval_predictions；情境 2 = ranked_predictions）⋈ label_table 而來。evaluation_metrics / baseline_metrics 落地為 <code>JSONDataset</code>：<code>data/evaluation/&lt;model_version&gt;/&lt;snap_date&gt;/metrics.json</code> 與同目錄的 <code>baseline_metrics.json</code>，皆含 <code>config_fingerprint</code>；<code>report.sections.baseline: false</code> 時 baseline 那份是 <code>{"enabled": false, "config_fingerprint": ...}</code> stub。</p>
 </div>
 
 <div class="card" id="enriched_eval_predictions">
@@ -581,7 +581,7 @@ C000010   0.83    0.71                 1      （示意）</div>
 
 <p class="sub" style="margin-top:30px;color:#9198a1">
 未列為 catalog 產物的中間物（MemoryDataset / driver-local handle）：score_manifest · validated_predictions · eval_predictions ·
-evaluation_metrics · baseline_metrics · *_parquet_handle · *_lgb_handle ·
+*_parquet_handle · *_lgb_handle ·
 *_model_input_unfiltered。這些只在單次 DAG 內銜接，不持久化。
 </p>
 

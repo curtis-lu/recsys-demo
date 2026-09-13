@@ -49,6 +49,24 @@ def test_a22_wired_into_evaluation_command_before_spark():
     ), "A22 must fail before the Spark cold start, like A21"
 
 
+def test_a34_wired_into_evaluation_command_before_spark():
+    # A34 reads evaluation-only keys, so like A24 it must stay off the global
+    # aggregator (#158: a conf still carrying a dead report switch must not
+    # stop dataset, training or inference) and live on the evaluation command
+    # instead. Source inspection for the same reason as A22 above; the
+    # behavioural half is TestReportSectionKeysA34 in test_consistency.py.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "report_section_key_errors" not in inspect.getsource(
+        validate_config_consistency
+    ), "A34 must stay off the global aggregator (#158 precedent)"
+    src = inspect.getsource(m.evaluation)
+    assert "report_section_key_errors(params)" in src
+    assert src.index("report_section_key_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A34 must fail before the Spark cold start, like A22"
+
+
 def test_a8_search_space_schema_surfaces_via_validate():
     import pytest
 

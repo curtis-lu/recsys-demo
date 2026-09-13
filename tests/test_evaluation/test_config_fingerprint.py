@@ -63,7 +63,7 @@ SPEC_DRAWN_LEAVES = [
     "evaluation.report.display.primary_map_k",
     "evaluation.report.display.guardrail_recall_k",
     "evaluation.report.sections.primary_map",
-    "evaluation.report.sections.per_segment",
+    "evaluation.report.sections.diagnosis_links",
 ]
 
 CONFIG_SHIFT_EXTRA = (
@@ -99,7 +99,7 @@ def _params() -> dict:
                           "sample": {"seed": 42},
                           "suppression": {"enabled": True}},
             "report": {
-                "sections": {"primary_map": True, "per_segment": True,
+                "sections": {"primary_map": True, "diagnosis_links": True,
                              "baseline": True, "diagnostics": True},
                 "display": {"primary_map_k": [1, 3, 5, "all"],
                             "guardrail_recall_k": [1, 2]},

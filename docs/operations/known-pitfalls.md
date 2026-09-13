@@ -358,7 +358,7 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 ## 18. 報表的 AP@k 分母是 R，不是 min(k, R)——所以 `map@1` 恆等於 `recall@1`
 
 - **症狀（第一分鐘認出它）**：寫報表定義或解釋數字時，照 AP@k 的教科書慣例（分母 `min(k, R)`）寫下公式，然後發現 `map@1` 與 `precision@1` 對不上，卻與 `recall@1` 逐位相同。
-- **根因**：`src/recsys_tfb/evaluation/metrics_spark.py:409` 是 `map@K = _ap_sum / total_rel`，`total_rel` ＝該 query 的正例總數 R，**沒有 `min(k, R)` 截斷**。同檔 :412 的 `recall@K` 分母也是 `total_rel`。K=1 時兩者分子恰好相等，於是 `map@1 == recall@1`。（檔內確實有 `min(total_rel, K)`，但那是 nDCG 的 iDCG 正規化，與 AP 分母無關。）
+- **根因**：`src/recsys_tfb/evaluation/metrics_spark.py` 的 `compute_per_query_metrics` 寫的是 `map@K = _ap_sum_K / total_rel`，`total_rel` ＝該 query 的正例總數 R，**沒有 `min(k, R)` 截斷**。同一個函式裡 `recall@K` 的分母也是 `total_rel`。K=1 時兩者分子恰好相等，於是 `map@1 == recall@1`。（#351 之前檔內確實有 `min(total_rel, K)`，但那是 nDCG 的 iDCG 正規化，與 AP 分母無關；NDCG 停算後這段 iDCG 正規化程式已隨之刪除，`min(k, R)` 這件事在本檔完全不存在了。）
 - **規則**：**寫地基公式一律照 code 追一次，別照領域慣例寫**。這條同時是「拿具體數字驗算定義」的範例：憑記憶寫的定義一問就破。
 - **驗證方式**：同一份報表裡比對 `map@1` 與 `recall@1`、`precision@1` 三個數字；前兩者相同即確認。
 

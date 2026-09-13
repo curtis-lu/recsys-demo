@@ -55,20 +55,19 @@ evaluation:
   #     JSON 的 node）；只做 --only-node generate_report 會被擋下，錯誤訊息會寫出變了
   #     哪個鍵、該 --from-node 哪個 node。
   #   「畫的」：sections 其餘鍵、display.*。只改報表長相，改完 --only-node generate_report 即可。
+  # sections 的鍵必須剛好是報表讀的這五個：多寫一個（沒人讀、設了沒用）或少寫一個
+  # （讀了卻關不掉），evaluation 指令一進來就擋（A34，清單在 core/consistency.py 的
+  # EVALUATION_REPORT_SECTIONS）。
   report:
     sections:
       dataset_overview: true
-      primary_map: true
-      guardrail_recall: true
-      per_item_attr: true
-      category: true             # 同時受 item_categories.enabled 控制
-      per_segment: true
+      primary_map: true          # 衡量指標段：overall、per-item、per-segment、大類
       diagnostics: true          # 算的：false 時 compute_report_aggregates 只寫 stub
       baseline: true             # 算的：false 時 compute_baseline_metrics 只寫 stub
+      diagnosis_links: true      # 主報表指向診斷頁的入口（只有 --post-training 有頁可指）
     display:                     # 畫的
       primary_map_k: [1, 3, 5, "all"]
       guardrail_recall_k: [1, 2, 3, 4, 5]
-      recall_colorscale: {low: 0.0, high: 1.0}
     diagnostics:                 # 算的
       include_distributions: true
       include_calibration: true
