@@ -94,6 +94,11 @@ date: 2026-09-13
 
 **碰到什麼**：per-item 那種缺 key 的觸發前提是 bug 7（兩側母體不同），修 7 之後這條主要剩 overall 整側空的情況——仍要修，因為那個情況跟 7 無關。
 
+**實作時補的兩條（2026-09-13，#345）**：
+
+- 同一個「缺值當 0」在 `report_builder.py::_per_item_metric_compare_table` 還有一份：Macro 列的 Δ 不經 `build_comparison_result`，是表格自己算的（稽核複核〈動它之前要知道的事〉點過）。一起改成兩側都有才算。
+- 「表格上方加一行」落在該表的標題：`overall — <側名> 側無可比的 query（全部零正例），Δ 欄留空`。比照 bug 5 揭露 macro item 數的做法——標題就是緊貼表格上方的那一行。比較報表的大類 overall 表是同一種攤鍵的表，一併套用。
+
 ### bug 5：當月零正例的 item 從 macro 平均的分母消失
 
 **決定**：**揭露，不改定義**。`macro` 那幾張表的表頭或第一列印「參與 macro 的 item 數 N／全部 M」；分母仍是「有正例的 item 數」。
@@ -142,6 +147,8 @@ date: 2026-09-13
 **決定**：`restrict_to_common` 對 B 側**一律丟掉自帶的 label、重新 join 現在的 `label_table`**。`evaluation/comparison/restrict.py` 的 docstring「both sides are scored against the same ground truth」因此變成真的。
 
 **為什麼不是記錄來源就好**：「同一份答案」是比較報表存在的前提。多一次 join 的代價，在 ADR-0018 物化之後是讀一張表。
+
+**碰到什麼（2026-09-13，#345 實作時記下）**：這條只換 B 側。`--compare-only` 的 A 側讀 `enriched_eval_predictions`，label 是寫那個分區的標準 run 補的；`label_table` 之後回補過，就變成 A 舊、B 新。`evaluation.md` 的重跑矩陣本來就要求 `label_table` 回補後跑標準 full run（會重寫 A 的分區），所以不另外擋，只在 `evaluation.md`〈限制與注意事項〉寫明。
 
 ### bug 8：大類只有 3 類，報表照印 @4、@5
 
@@ -198,6 +205,8 @@ date: 2026-09-13
 **為什麼不是只去重、數字不動**：數字現在就是用被同一個 repo 判定為錯誤語意的運算算出來的；變的方向是「跟實際一致」。
 
 **碰到什麼**：`report_comparison.html` 的 coverage 數字會跳（有 NULL 鍵、或兩側月份不同時）。ADR-0015 已經記過一次「數字會跳是預期的」，本份是第二次，理由寫在同一段旁邊。
+
+**實作時補的一條（2026-09-13，#345）**：「從裁切後的 frame 數」——裁切後有 A、B 兩個 frame，本份沒寫數哪一個。兩者的 query group 集合在候選不對稱時會不同：某個共同 entity 在 B 側只被評了 A 沒有的 item，item 裁切後 B 側這個 group 是空的，A 側還在。實作取**兩側裁切後都還在**的 group（A 側裁切結果的 query group 對 B 側的做 `left_semi`）。理由：欄名叫 common，而且跟 bug 4「Δ 只在兩側都有時才算」同一個精神；只數 A 側，會把只進 A 指標的 group 算成共同。代價是一次 shuffle join，跟舊的 `intersect` 同級。候選對稱時，數 A 側、數 B 側、數兩側交集三者相等。
 
 ### bug 15：同一個 model_version 換模式寫同一張表，`rank` INT vs BIGINT 撞 `_evolve_schema`
 
