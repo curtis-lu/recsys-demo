@@ -68,7 +68,7 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.metrics import macro_from_per_item, metric_params
-from recsys_tfb.evaluation.segments import UNMATCHED_SEGMENT, segment_key
+from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT, segment_key
 from recsys_tfb.utils.ranking import rank_by_score_then_item
 
 logger = logging.getLogger(__name__)
@@ -167,21 +167,19 @@ def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
     return mapping
 
 
-def _active_segment_column(
+def _require_segment_columns_in_frame(
     df: SparkDataFrame, segment_columns: Sequence[str]
-) -> str | None:
-    """The column per-segment metrics group by: the first of ``segment_columns``.
+) -> None:
+    """Pre-check (input): every passed segment column is in the frame.
 
     ``segment_columns`` is what ``prepare_eval_data`` actually joined this run
-    (the landed ``evaluation_segment_columns``), not the configured list. The
-    frame's columns prove nothing: ``enriched_eval_predictions`` is shared by
-    both run modes, so a column the other mode joined sits in this run's rows
-    all NULL, and picking it grows a fake unmatched group (ADR-0020 bug 6).
-    One segment dimension per run, as before.
-
-    Raises when a passed column is not in the frame: the list and the frame
-    come from the same producer, so disagreeing is a wiring error, and
-    skipping the column would hide it.
+    (the landed ``evaluation_segment_columns``), not the configured list, and
+    it alone decides what is segmented by. The frame's columns prove nothing:
+    ``enriched_eval_predictions`` is shared by both run modes, so a column the
+    other mode joined sits in this run's rows all NULL, and picking it grows a
+    fake unmatched group (ADR-0020 bug 6). A passed column the frame lacks
+    means the list and the frame come from different runs: a wiring error
+    that skipping the column would hide.
     """
     missing = [c for c in segment_columns if c not in df.columns]
     if missing:
@@ -191,7 +189,6 @@ def _active_segment_column(
             f"(evaluation_segment_columns), so the frame and that list come "
             f"from different runs."
         )
-    return segment_columns[0] if segment_columns else None
 
 
 def collapse_to_categories(
@@ -220,7 +217,7 @@ def collapse_to_categories(
     score_col = schema["score"]
     group_cols = [time_col] + entity_cols
 
-    _active_segment_column(eval_predictions, segment_columns)
+    _require_segment_columns_in_frame(eval_predictions, segment_columns)
 
     spark = eval_predictions.sparkSession
     map_rows = [(p, c) for p, c in mapping.items()]
@@ -255,7 +252,7 @@ def compute_dataset_overview(
     ``item_col_override`` lets the caller profile the collapsed
     category-grain DF (item column still named after schema item_col, but
     semantics = category). ``by_segment`` groups by the first of
-    ``segment_columns`` (see ``_active_segment_column``).
+    ``segment_columns`` (see ``_require_segment_columns_in_frame``).
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -274,8 +271,9 @@ def compute_dataset_overview(
     positive_rate = (n_positives / n_rows) if n_rows else 0.0
     avg_pos_per_entity = (n_positives / n_entities) if n_entities else 0.0
 
-    # 與 per_segment 用同一個 active segment 欄，by_segment 的 key 才會一致。
-    active_seg_col = _active_segment_column(eval_predictions, segment_columns)
+    _require_segment_columns_in_frame(eval_predictions, segment_columns)
+    # 與 per_segment 用同一個 segment 欄（第一欄），by_segment 的 key 才會一致。
+    active_seg_col = segment_columns[0] if segment_columns else None
     total_queries = (
         eval_predictions.select(*group_cols).distinct().count()
         if active_seg_col else 0
@@ -711,7 +709,9 @@ def _compute_core(
     group_cols = [time_col] + entity_cols
 
     eval_params = parameters.get("evaluation", {}) or {}
-    active_seg_col = _active_segment_column(eval_predictions, segment_columns)
+    _require_segment_columns_in_frame(eval_predictions, segment_columns)
+    # One segment dimension per run: the first joined column.
+    active_seg_col = segment_columns[0] if segment_columns else None
     # macro_average does not take k: metric.k reaches the macro through the
     # per-item K grid (_resolve_k_grids), so by_item's map_attr@{metric.k} is
     # the headline point estimate truncated at k.
@@ -847,7 +847,8 @@ def compute_overall_per_item(
     group_cols = [time_col] + entity_cols
 
     eval_params = parameters.get("evaluation", {}) or {}
-    active_seg_col = _active_segment_column(eval_predictions, segment_columns)
+    _require_segment_columns_in_frame(eval_predictions, segment_columns)
+    active_seg_col = segment_columns[0] if segment_columns else None
     n_items = eval_predictions.select(item_col).distinct().count()
     # Same grids as _compute_core (metric.k on the per-item side only), so
     # baseline and model keys line up.
@@ -900,7 +901,7 @@ def compute_all_metrics(
     ``segment_columns``. Per-segment slices group by the first of those; pass
     what ``prepare_eval_data`` joined (``evaluation_segment_columns``), never
     ``evaluation.segment_columns`` filtered by the frame's columns (see
-    ``_active_segment_column``). Empty means no per-segment slice. A NULL
+    ``_require_segment_columns_in_frame``). Empty means no per-segment slice. A NULL
     segment value is the ``segments.UNMATCHED_SEGMENT`` group: present in
     ``per_segment``, ``per_item_segment`` and ``dataset_overview.by_segment``,
     absent from every macro.

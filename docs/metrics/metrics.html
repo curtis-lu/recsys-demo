@@ -97,7 +97,7 @@ prec_at_pos = cumsum(label) / pos  <span class="m"># 到此名次的精確率</s
   <tr><td>dataset overview</td><td>評估資料規模（group 數、正例率等，<code>compute_dataset_overview</code>）</td></tr>
   <tr><td>summary</td><td>總表 mAP ＋ 各 K 的 map@K / ndcg@K / precision@K / recall@K，與 baseline 並列</td></tr>
   <tr><td>per-item</td><td>各 item 的 map_attr@K / ndcg_attr@K / hit_rate@K / mean_pos</td></tr>
-  <tr><td>per-segment</td><td>依 <code>segment_columns</code> 分群的指標（需 <code>segment_sources</code> 提供欄；否則該段不出現，見 README §4）</td></tr>
+  <tr><td>per-segment</td><td>依 <code>segment_columns</code> 分群的指標（欄從該模式的母體表或 <code>segment_sources</code> 覆寫表 join 進來；母體表沒有這欄時該段不出現、報表註明，見 <a href="../pipelines/evaluation.md">evaluation.md</a> §3.2）</td></tr>
   <tr><td>comparison（<code>--compare</code>）</td><td>與另一 model_version / 外部表在共同客戶上的對比（見 <a href="../pipelines/evaluation.md">evaluation.md</a>）</td></tr>
 </table>
 <p class="sub">可選：<code>item_categories</code> 設定可把 item 收合成類別後再算指標（<code>collapse_to_categories</code>）。</p>

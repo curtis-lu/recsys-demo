@@ -568,7 +568,7 @@ C000010   0.83    0.71                 1      （示意）</div>
   <div class="meta"><b>產生</b>：evaluation · persist_eval_predictions（把 label join + rank + segment enrichment 後的 eval_predictions 寫回 Hive）　|
   <b>下游</b>：evaluation（<code>--compare-only</code> 由 catalog auto-load 讀回，B4 validator 檢查 partition）　|
   <b>partition</b>：snap_date（外加 model_version）；columns: auto（schema 從 DataFrame 推得）</div>
-  <p class="sub">若 segment_sources 在兩次 run 之間改變，需先 drop 此表再重跑（ALTER TABLE schema evolution 是待辦 follow-up）。</p>
+  <p class="sub">兩種模式共用此表，schema 是聯集：另一模式 join 過的 segment 欄，在這次寫入的列上是 NULL。所以分群一律照同時落地的 <code>evaluation_segment_columns</code>（<code>segment_columns.json</code>），不看表上有哪些欄（見 evaluation.md §3.2）。</p>
 </div>
 
 <div class="card" id="evaluation_comparison_report">

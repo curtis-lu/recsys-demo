@@ -329,6 +329,41 @@ def test_dataset_section_has_no_segment_notes_without_segments_info():
     assert "(unmatched)" not in " ".join(s.bullets)
 
 
+def test_metrics_section_puts_unmatched_last_and_says_it_is_not_in_macro():
+    """The unmatched group is defined where its row appears (presentation
+    rule: definitions next to the number), and sits after the real segments
+    in the per-segment tables."""
+    m = _metrics()
+    m["per_segment"] = {
+        "(unmatched)": {"map@1": 0.1, "precision@1": 0.1, "recall@1": 0.1},
+        "X": {"map@1": 0.6, "precision@1": 0.5, "recall@1": 0.3},
+    }
+    m["macro_avg"]["by_segment"] = {
+        "map@1": 0.6, "precision@1": 0.5, "recall@1": 0.3}
+    s = rb.build_metrics_section(m, _params())
+    table, title = next((t, tt) for t, tt in zip(s.tables, s.table_titles)
+                        if "per-segment map@k" in tt)
+    assert list(table.index)[-1] == "(unmatched)"
+    assert "(unmatched) 不含在 Macro" in title
+
+    del m["per_segment"]["(unmatched)"]
+    s = rb.build_metrics_section(m, _params())
+    assert not [tt for tt in s.table_titles if "(unmatched)" in tt]
+
+
+def test_baseline_per_segment_table_puts_unmatched_last():
+    m = _metrics_with_seg_cat()
+    b = _baseline_with_seg_cat()
+    m["per_segment"]["(unmatched)"] = {"map@1": 0.1, "map@2": 0.1, "map@3": 0.1}
+    b["per_segment"]["(unmatched)"] = {"map@1": 0.05, "map@2": 0.05,
+                                       "map@3": 0.05}
+    s = rb.build_baseline_section(m, b, _params())
+    table = next(t for t, tt in zip(s.tables, s.table_titles)
+                 if "per-segment mAP@k" in tt)
+    assert list(table.index)[-3:] == [
+        "(unmatched) · Model", "(unmatched) · Baseline", "(unmatched) · Δ"]
+
+
 def test_dataset_section_per_segment_has_candidate_col():
     s = rb.build_dataset_overview_section(_metrics(), _params())
     idx = next(i for i, tt in enumerate(s.table_titles) if "per-segment" in tt)

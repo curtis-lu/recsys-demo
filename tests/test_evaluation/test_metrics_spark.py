@@ -675,6 +675,35 @@ def test_unmatched_segment_is_named_counted_and_kept_out_of_macro(spark):
     assert by_seg["(unmatched)"]["query_share"] == pytest.approx(1 / 3)
 
 
+def test_a_real_segment_ending_like_the_unmatched_name_stays_in_the_macro(spark):
+    """Unmatched cells leave the macro by their segment name, not by any
+    string pattern: a real segment value that merely ends in "_(unmatched)"
+    is a segment. (Before bug 12 nested per_item_segment, its keys were
+    "<item>_<segment>" strings and a suffix match was the tempting shortcut.)
+
+    C0 mass: A_mass 1, C_mass 2/3; C1 "vip_(unmatched)": B cell 1, so the
+    by_item_segment macro is 8/9. A suffix match drops the vip cell: 5/6.
+    """
+    df = spark.createDataFrame(
+        [
+            ("20240331", "C0", "A", 0.9, 1, "mass"),
+            ("20240331", "C0", "B", 0.5, 0, "mass"),
+            ("20240331", "C0", "C", 0.1, 1, "mass"),
+            ("20240331", "C1", "A", 0.3, 0, "vip_(unmatched)"),
+            ("20240331", "C1", "B", 0.8, 1, "vip_(unmatched)"),
+            ("20240331", "C1", "C", 0.6, 0, "vip_(unmatched)"),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label",
+                "cust_segment_typ"],
+    )
+    result = ms.compute_all_metrics(
+        df, _make_parameters(k_values=[3]),
+        segment_columns=["cust_segment_typ"],
+    )
+    assert result["macro_avg"]["by_item_segment"]["map_attr@3"] == \
+        pytest.approx(8 / 9)
+
+
 def _with_stale_all_null_segment(spark):
     """The segment fixture plus a column another run mode joined in once: the
     enriched table is shared by both modes, so its schema is the union and

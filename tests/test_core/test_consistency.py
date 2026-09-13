@@ -572,6 +572,19 @@ class TestSegmentSourceOverrideErrors:
         assert len(errs) == 1
         assert "'holding_combo_code'" in errs[0]
 
+    def test_an_override_keyed_by_a_column_not_segmented_by_is_an_error(self):
+        """Overrides are looked up by column name. The old A10 matched through
+        segment_column and left the key free, so an old config keyed by an
+        alias would otherwise pass, never be joined, and the column would
+        silently come from the population table instead."""
+        from recsys_tfb.core.consistency import segment_source_override_errors
+        override = dict(self._COMPLETE, segment_column="cust_segment_typ")
+        errs = segment_source_override_errors(self._params(
+            ["cust_segment_typ"], {"cs": override}))
+        assert len(errs) == 1
+        assert "evaluation.segment_sources.cs" in errs[0]
+        assert "is not in evaluation.segment_columns" in errs[0]
+
     def test_cli_entry_blocks_an_incomplete_override(self):
         p = _base()
         p["evaluation"] = {

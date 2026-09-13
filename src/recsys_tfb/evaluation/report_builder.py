@@ -16,7 +16,7 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.baselines import resolve_lookback_months
 from recsys_tfb.evaluation.metrics import metric_params
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
-from recsys_tfb.evaluation.segments import UNMATCHED_SEGMENT
+from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
 
 def _resolve_display_k(raw_k: list, n_items: int) -> list:
@@ -491,8 +491,7 @@ def build_dataset_overview_section(
     by_seg = ov.get("by_segment", {}) or {}
     if by_seg:
         seg_rows = {}
-        for seg, d in sorted(by_seg.items(),
-                             key=lambda kv: (kv[0] == UNMATCHED_SEGMENT, kv[0])):
+        for seg, d in _unmatched_last(dict(sorted(by_seg.items()))).items():
             seg_rows[seg] = {
                 "正例數": d.get("n_positives"),
                 "候選列數": d.get("n_rows"),
@@ -532,6 +531,18 @@ def build_dataset_overview_section(
     )
 
 
+def _unmatched_last(by_segment: dict) -> dict:
+    """同一份 dict，(unmatched) 移到最後、其餘順序不動。
+
+    它不是一個 segment，列出來是為了交代它有多少 query；三處分群表（基本統計、
+    衡量指標、baseline 對照）用同一個順序，讀者才不會在某張表把它當第一個群。
+    """
+    rest = {k: v for k, v in by_segment.items() if k != UNMATCHED_SEGMENT}
+    if UNMATCHED_SEGMENT in by_segment:
+        rest[UNMATCHED_SEGMENT] = by_segment[UNMATCHED_SEGMENT]
+    return rest
+
+
 def _segment_notes(segments: dict | None, by_segment: dict) -> list[str]:
     """讀分群表前要知道的事：欄取自哪張表、哪張表缺欄、(unmatched) 怎麼算。
 
@@ -549,7 +560,7 @@ def _segment_notes(segments: dict | None, by_segment: dict) -> list[str]:
     if joined:
         notes.append(
             "分群欄："
-            + "、".join(f"{c} 取自 {sources.get(c, '?')}" for c in joined)
+            + "、".join(f"{c} 取自 {sources[c]}" for c in joined)
             + f"；per-segment 表以 {joined[0]} 分群。"
         )
     for col, table in (segments.get("missing") or {}).items():
@@ -745,12 +756,16 @@ def build_metrics_section(
     # ===== Block A：per-query 指標（map / precision / recall）=====
     _add(_families_by_k_table(overall, ks, n_items),
          "A · per-query｜overall（列＝map/precision/recall）", False)
-    per_segment = metrics.get("per_segment", {})
+    per_segment = _unmatched_last(metrics.get("per_segment", {}) or {})
     if per_segment:
         macro_seg = metrics.get("macro_avg", {}).get("by_segment", {})
+        # (unmatched) 的定義貼在它出現的表上：列在最後、不在 Macro 列裡。
+        unmatched = (f"；{UNMATCHED_SEGMENT} 不含在 Macro"
+                     if UNMATCHED_SEGMENT in per_segment else "")
         for fam in ("map", "precision", "recall"):
             _add(_entities_by_k_table(per_segment, macro_seg, ks, n_items, fam),
-                 f"A · per-query｜per-segment {fam}@k（列＝segment）", True)
+                 f"A · per-query｜per-segment {fam}@k（列＝segment{unmatched}）",
+                 True)
     cat = metrics.get("category")
     cks = None
     if cat:
@@ -1060,7 +1075,9 @@ def build_baseline_section(
     seg_b = (baseline_metrics or {}).get("per_segment", {}) or {}
     if seg_a and seg_b:
         rows: dict[str, dict] = {}
-        for seg in sorted(set(seg_a) | set(seg_b)):
+        for seg in _unmatched_last(
+            {s: None for s in sorted(set(seg_a) | set(seg_b))}
+        ):
             a, b = seg_a.get(seg, {}) or {}, seg_b.get(seg, {}) or {}
             for who, src in ((f"{seg} · Model", a), (f"{seg} · Baseline", b)):
                 rows[who] = {

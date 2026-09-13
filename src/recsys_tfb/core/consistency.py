@@ -56,10 +56,10 @@ Layer 1 — config-static (implemented here; aggregated by
     - A9c — a ``sample_weights`` key whose product component (when
       ``schema.item`` is a weight key) ∉ ``resolved_item_values`` (mirrors A5).
       Predicate: ``weight_unknown_items``.
-* A10 — an ``evaluation.segment_sources.<column>`` override for a column in
-  ``evaluation.segment_columns`` is incomplete (``table``, ``key_columns``,
-  ``segment_column`` all required) or delivers a ``segment_column`` other than
-  ``<column>``. A column without an override is not an error: it comes from
+* A10 — an ``evaluation.segment_sources.<key>`` override has a key that is not
+  in ``evaluation.segment_columns``, is incomplete (``table``,
+  ``key_columns``, ``segment_column`` all required), or delivers a
+  ``segment_column`` other than its key. A column without an override is not an error: it comes from
   the run mode's population table, and whether that table has the column is
   read from the metastore at run time by ``prepare_eval_data`` (ADR-0020
   bug 6), which this layer cannot see. Predicate:
@@ -902,13 +902,24 @@ def segment_source_override_errors(parameters: dict) -> list[str]:
     therefore passes here and shows up at run time as "population table has
     no column" in the log WARN and the report, both naming the column.
 
-    An override is found by the column's name, so its ``segment_column`` must
-    be that name; anything else would join a column nothing groups by.
+    An override is found by the column's name, so its key must be in
+    ``segment_columns`` and its ``segment_column`` must be that name. A key
+    outside the list is never joined, and the column it was meant for quietly
+    comes from the population table instead (an old config keyed by an alias,
+    valid when this check matched through ``segment_column``, lands here); a
+    different ``segment_column`` would join a column nothing groups by.
     """
     ev = parameters.get("evaluation", {}) or {}
     overrides = ev.get("segment_sources", {}) or {}
-    errors = []
-    for col in ev.get("segment_columns", []) or []:
+    segment_columns = ev.get("segment_columns", []) or []
+    errors = [
+        f"evaluation.segment_sources.{key} is not in evaluation.segment_columns "
+        f"{list(segment_columns)}. Overrides are looked up by the column they "
+        f"deliver, so this one is never joined; rename the key to that column "
+        f"(and list it in segment_columns) or remove the entry."
+        for key in overrides if key not in segment_columns
+    ]
+    for col in segment_columns:
         if col not in overrides:
             continue
         cfg = overrides[col] or {}

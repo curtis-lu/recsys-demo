@@ -20,32 +20,6 @@ from pyspark.sql import SparkSession
 
 logger = logging.getLogger(__name__)
 
-#: The group a query lands in when its segment column exists but holds NULL
-#: for it: the population table (or an override table) has no value for that
-#: key. Reported and counted like any group, never averaged into a macro: one
-#: made-up group weighted like a real one would drag the average (ADR-0020
-#: bug 6). Parenthesised so no plausible real segment value spells it.
-UNMATCHED_SEGMENT = "(unmatched)"
-
-
-def segment_key(value) -> str:
-    """The dict key a segment value is reported under.
-
-    NULL becomes :data:`UNMATCHED_SEGMENT`; anything else is stringified. A
-    real value that already spells the sentinel raises: it would merge into
-    the unmatched group and silently leave every macro.
-    """
-    if value is None:
-        return UNMATCHED_SEGMENT
-    key = value if isinstance(value, str) else str(value)
-    if key == UNMATCHED_SEGMENT:
-        raise ValueError(
-            f"segment value {key!r} is the name evaluation reserves for "
-            f"queries with no segment value; it would be merged with them and "
-            f"left out of every macro average. Rename that value upstream."
-        )
-    return key
-
 
 def _read_segment_source(
     spark: SparkSession, source_config: dict
@@ -73,7 +47,7 @@ def join_segment_columns(
     a row per item), so the join cannot fan ``df`` out. A same-named column
     already on ``df`` (e.g. carried in by ``label_table``) is dropped first:
     the source is authoritative for it. A key with no row in ``source`` gets
-    NULL, which the metric layer reports as :data:`UNMATCHED_SEGMENT`.
+    NULL, which the metric layer reports as ``segment_keys.UNMATCHED_SEGMENT``.
     """
     missing_keys = [k for k in key_columns if k not in source.columns]
     if missing_keys:

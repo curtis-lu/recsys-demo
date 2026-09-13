@@ -119,7 +119,7 @@ evaluation:
 **對不到與缺欄是兩件事：**
 
 - 母體表**有**這欄、某些 query 在上面沒有值（或覆寫表對不到那個 key）：這群叫 `(unmatched)`，出現在分群表、印 query 數與佔比，但**不進任何 macro 平均**——一個假客群不該等權拉動平均。真實 segment 值剛好叫 `(unmatched)` 時直接失敗，不會被併進去。
-- 母體表**沒有**這欄：這欄本次不算 per-segment，log 印 WARN、報表「基本統計」段印「`<表>` 無欄 `<欄>`」，pipeline 照常跑完。`segment_columns` 的欄名打錯也走這條路（一致性檢查在 Spark 起來前跑，看不到母體表），靠訊息裡的欄名分辨。
+- 母體表**沒有**這欄：這欄本次不算 per-segment，log 印 WARN、報表「基本統計」段印「`<表>` 無欄 `<欄>`」，pipeline 照常跑完。`segment_columns` 的欄名打錯也走這條路（一致性檢查在 Spark 起來前跑，看不到母體表），靠訊息裡的欄名分辨。那句註記只印在「基本統計」段；關掉該段（`report.sections.dataset_overview: false`）時，看 log 的 WARN 或 `segment_columns.json` 的 `missing`。表名：母體表記的是 catalog 條目名（`sample_pool`／`inference_population`），覆寫表記設定的 `table`。
 
 示例環境的 `conf/sql/etl/inference_population/inference_population.sql` 只有 `(snap_date, cust_id)`，所以示例的監控模式會走「缺欄」這條路。要在示例裡看到分群，是那支 SQL 要多帶分群欄，框架不用改。
 
@@ -136,7 +136,7 @@ evaluation:
       segment_column: holding_combo      # 必須等於上面的鍵
 ```
 
-有覆寫的欄改讀那張表（依 `key_columns` 去重後 left join），不看母體表。三個欄位缺一個、或 `segment_column` 與鍵不同，CLI 入口的一致性檢查（A10）直接擋下；覆寫表讀不到或缺欄，執行時立即中止——覆寫是明確的設定，跟「母體表剛好沒有這欄」不同。`segment_sources` 裡、鍵不在 `segment_columns` 的條目不會被 join。
+有覆寫的欄改讀那張表（依 `key_columns` 去重後 left join），不看母體表。三個欄位缺一個、或 `segment_column` 與鍵不同，CLI 入口的一致性檢查（A10）直接擋下；覆寫表讀不到或缺欄，執行時立即中止——覆寫是明確的設定，跟「母體表剛好沒有這欄」不同。覆寫用欄名查，所以 `segment_sources` 的鍵必須是 `segment_columns` 裡的欄名：鍵不在清單裡的條目（例如舊寫法把鍵取成別名、靠 `segment_column` 對應）A10 同樣擋下——不擋的話它會通過檢查、從不被 join，那一欄悄悄改從母體表取。
 
 目前 metric pipeline 只用 `joined` 的第一欄計算 per-segment 與 per-item-segment 指標；若要評估多種分群，應分次調整欄位順序並執行 evaluation。
 
@@ -595,6 +595,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 | 報表正例率異常低 | label 觀察窗未成熟，或 sparse label 的缺 row 不代表負例 | 延後監控、補齊 label，確認資料語意 |
 | post-training 與 training 指標不一致 | model/date 不同、K 定義不同，或 report 讀錯版本 | 比對 CLI log、training manifest 與 `k_values` |
 | `evaluation.segment_sources.<欄> is missing [...]`／`has segment_column=...`，還沒起 Spark（A10） | 覆寫缺 `table`、`key_columns` 或 `segment_column`，或 `segment_column` 不等於鍵 | 補齊；或刪掉這個覆寫，改從母體表取 |
+| `evaluation.segment_sources.<鍵> is not in evaluation.segment_columns`，還沒起 Spark（A10） | 覆寫的鍵不是 `segment_columns` 裡的欄名（常見於舊寫法：鍵取別名、靠 `segment_column` 對應） | 把鍵改成它提供的欄名，並確認該欄列在 `segment_columns`；不需要的話刪掉這個條目 |
 | segment source table 無法讀取 | 覆寫的 table 名稱、database 或權限錯誤 | 用 Spark/Hive 確認表存在且可讀 |
 | segment source missing columns | 覆寫的 `key_columns` 或 `segment_column` 拼錯 | 比對覆寫表 schema；覆寫必須提供全部欄位 |
 | log `population table '...' has no such column`；報表寫「`<表>` 無欄 `<欄>`」 | 該模式的母體表沒有這欄，或 `segment_columns` 欄名打錯 | 核對欄名；確實要分群就讓母體表帶這欄，或用 `segment_sources` 覆寫指到有這欄的表 |
