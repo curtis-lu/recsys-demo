@@ -9,6 +9,7 @@ from pyspark.sql import functions as F
 from recsys_tfb.core.logging import log_data_volume
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.config_fingerprint import (
+    LoadedArtifact,
     fingerprint,
     require_computed_with_current_config,
 )
@@ -701,9 +702,14 @@ def render_diagnosis_pages(parameters: dict, *diagnosis_results) -> list[str]:
 
     require_computed_with_current_config(
         [
-            (f"evaluation_{name}", result, f"diagnose_{name}",
-             contract.extra_config_keys_for(importlib.import_module(
-                 f"recsys_tfb.diagnosis.metric.{name}")))
+            LoadedArtifact(
+                catalog_name=f"evaluation_{name}",
+                payload=result,
+                produced_by=f"diagnose_{name}",
+                extra_keys=contract.extra_config_keys_for(
+                    importlib.import_module(
+                        f"recsys_tfb.diagnosis.metric.{name}")),
+            )
             for name, result in zip(names, diagnosis_results)
         ],
         parameters,
@@ -727,6 +733,22 @@ def _describe_node_input(value) -> str:
         return f"the result of {value['diagnosis']!r}"
     if "evaluation" in value:
         return "the parameters dict"
+    if "config_fingerprint" not in value:
+        # Neither key present: not a mis-ordered input (those still carry
+        # config_fingerprint), but a JSON written before #342 gave diagnosis
+        # results a name and a fingerprint at all. A --from-node on the
+        # diagnosis nodes alone would recompute them but leave
+        # baseline_metrics / metric_ci / report_aggregates on their old,
+        # unfingerprinted disk state, so the fix is the whole pipeline, not a
+        # slice.
+        return (
+            "a dict with neither a 'diagnosis' nor a 'config_fingerprint' "
+            "key: this looks like a result written before results carried "
+            "their name and fingerprint (before #342). Re-run the whole "
+            "pipeline (no --from-node / --only-node) — from-node-ing just "
+            "the diagnoses would still leave metric CI / report aggregates "
+            "unfingerprinted, costing extra Spark rounds"
+        )
     return ("a dict with no 'diagnosis' key (possibly a JSON written before "
             "diagnosis results carried their name)")
 
@@ -837,11 +859,15 @@ def generate_report(
     """
     require_computed_with_current_config(
         [
-            ("baseline_metrics", baseline_metrics,
-             "compute_baseline_metrics", ()),
-            ("evaluation_metric_ci", metric_ci, "compute_metric_ci", ()),
-            ("evaluation_report_aggregates", report_aggregates,
-             "compute_report_aggregates", ()),
+            LoadedArtifact(catalog_name="baseline_metrics",
+                           payload=baseline_metrics,
+                           produced_by="compute_baseline_metrics"),
+            LoadedArtifact(catalog_name="evaluation_metric_ci",
+                           payload=metric_ci,
+                           produced_by="compute_metric_ci"),
+            LoadedArtifact(catalog_name="evaluation_report_aggregates",
+                           payload=report_aggregates,
+                           produced_by="compute_report_aggregates"),
         ],
         parameters,
     )

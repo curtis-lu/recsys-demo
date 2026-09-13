@@ -70,14 +70,19 @@ SCOPE = ScopeNote(
 #: contract's optional symbol, see
 #: ``diagnosis.metric.contract.extra_config_keys_for``). This JSON's config
 #: fingerprint includes them, so redrawing alone after changing any of them is
-#: refused. Where ``_compute.py`` reads them:
+#: refused. Named by the ``_compute.py`` function(s) that read each key, not
+#: line numbers (those rot silently as the file changes):
 #:
-#: * ``dataset.sample_group_keys``: lines 202, 266, 286
-#: * ``dataset.sample_ratio``: line 204. Missing from ADR-0020 decision 2,
-#:   added from the code
-#: * ``dataset.sample_ratio_overrides``: lines 205, 287, 651
-#: * ``training.sample_weight_keys``: lines 226, 267, 290
-#: * ``training.sample_weights``: lines 228, 291, 653
+#: * ``dataset.sample_group_keys``: ``_offset_for_values``,
+#:   ``offset_context_columns``, ``unmatched_override_keys``
+#: * ``dataset.sample_ratio``: ``_offset_for_values``. Missing from ADR-0020
+#:   decision 2, added from the code
+#: * ``dataset.sample_ratio_overrides``: ``_offset_for_values``,
+#:   ``unmatched_override_keys``, ``compute``
+#: * ``training.sample_weight_keys``: ``_offset_for_values``,
+#:   ``offset_context_columns``, ``unmatched_override_keys``
+#: * ``training.sample_weights``: ``_offset_for_values``,
+#:   ``unmatched_override_keys``, ``compute``
 #:
 #: ``schema`` is outside ``evaluation`` too but not listed: it holds the
 #: framework-wide column roles that every evaluation artifact depends on, so

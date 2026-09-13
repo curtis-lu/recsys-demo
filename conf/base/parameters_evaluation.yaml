@@ -51,8 +51,10 @@ evaluation:
   # 這一區的鍵分兩類（ADR-0020 決定二；完整對照表在
   # src/recsys_tfb/evaluation/config_fingerprint.py 的 COMPUTED_KEYS）：
   #   「算的」：sections.baseline、sections.diagnostics、diagnostics.*。它們決定要不要算、
-  #     怎麼算，會進落地 JSON 的設定指紋。改了要從產出那份 JSON 的 node 重跑；只做
-  #     --only-node generate_report 會被擋下，錯誤訊息會寫出變了哪個鍵、該 --from-node 哪個 node。
+  #     怎麼算，會進落地 JSON 的設定指紋。改了要照錯誤訊息點名的 --from-node 重跑
+  #     （對照表在 evaluation/config_fingerprint.py 的 COMPUTED_KEYS；不一定是產出那份
+  #     JSON 的 node）；只做 --only-node generate_report 會被擋下，錯誤訊息會寫出變了
+  #     哪個鍵、該 --from-node 哪個 node。
   #   「畫的」：sections 其餘鍵、display.*。只改報表長相，改完 --only-node generate_report 即可。
   report:
     sections:

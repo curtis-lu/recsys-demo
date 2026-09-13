@@ -390,6 +390,27 @@ def test_render_refuses_a_missing_result(tmp_path, monkeypatch):
         render_diagnosis_pages(params, *_node_outputs(params)[:-1])
 
 
+def test_render_refuses_a_legacy_pre_fingerprint_result(tmp_path, monkeypatch):
+    """A dict result written before #342 has neither 'diagnosis' nor
+    'config_fingerprint'. The wiring TypeError must say so and recommend a
+    full re-run rather than a from-node on the diagnoses alone: that would
+    leave baseline_metrics / metric_ci / report_aggregates on their old,
+    unfingerprinted disk state, costing extra Spark rounds to discover."""
+    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        render_diagnosis_pages,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    params = _render_params()
+    results = _node_outputs(params)
+    results[0] = {"delta": 0.01}  # pre-#342 shape: no name, no fingerprint
+    with pytest.raises(TypeError) as exc:
+        render_diagnosis_pages(params, *results)
+    msg = str(exc.value)
+    assert "before results carried their name and fingerprint" in msg
+    assert "Re-run the whole pipeline (no --from-node / --only-node)" in msg
+
+
 def test_render_draws_this_runs_results_not_files_left_on_disk(
     tmp_path, monkeypatch,
 ):

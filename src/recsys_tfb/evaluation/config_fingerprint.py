@@ -69,10 +69,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, NamedTuple, Sequence
 
 __all__ = [
-    "COMPUTED_KEYS", "fingerprint", "require_computed_with_current_config",
+    "COMPUTED_KEYS", "LoadedArtifact", "fingerprint",
+    "require_computed_with_current_config",
 ]
 
 #: Computed settings: ``(dotted path from the parameters root, node to re-run
@@ -115,10 +116,60 @@ COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
     ("evaluation.report.sections.diagnostics", "compute_baseline_metrics"),
 )
 
-_RERUN_NODE = dict(COMPUTED_KEYS)
 _KEY_ORDER = {path: i for i, (path, _) in enumerate(COMPUTED_KEYS)}
 _ABSENT = object()
 _MAX_REPR = 80
+
+
+class LoadedArtifact(NamedTuple):
+    """One landed evaluation artifact to check against today's settings.
+
+    A plain positional 4-tuple let ``catalog_name`` and ``produced_by`` —
+    both ``str`` — swap without a type error, silently corrupting only the
+    advice text (``docs/operations/known-pitfalls.md`` §12 positional trap).
+    Construct this with keyword arguments; that makes such a swap visible at
+    the call site instead of a silent value error inside the message.
+    """
+    catalog_name: str
+    payload: Any
+    produced_by: str
+    extra_keys: Sequence[str] = ()
+
+
+def _tag_non_str_keys(value: Any) -> Any:
+    """Recursively rewrite dict keys so every key reaching ``json.dumps`` is a
+    ``str``.
+
+    Why this is needed: YAML can produce non-``str`` dict keys (e.g.
+    ``dataset.sample_ratio_overrides: {1: 0.5}``), and two problems follow.
+    First, ``json.dumps(..., sort_keys=True)`` sorts by the *original* key
+    objects before stringifying them, so a dict mixing an ``int`` and a
+    ``str`` key raises ``TypeError`` (``'<' not supported between instances
+    of 'str' and 'int'``) — crashing the node on a legal config. Second, JSON
+    itself has no non-string keys, so ``json.dumps({1: 0.5})`` and
+    ``json.dumps({"1": 0.5})`` both serialise to ``{"1": 0.5}`` — identical
+    fingerprints for two configs that behave differently, because every
+    lookup against these dicts (e.g. ``config_shift``'s ``_key_from_values``)
+    keys by ``str`` and ``{1: 0.5}`` therefore never matches.
+
+    A ``str`` key is kept as-is so stored ``values`` stay readable for the
+    common case. A non-``str`` key ``k`` is rewritten to
+    ``f"<{type(k).__name__}>{k!r}"`` (e.g. ``int`` key ``1`` -> ``"<int>1"``):
+    the ``<...>`` tag cannot be produced by any plain ``str`` key on the same
+    dict without itself starting with a ``<type>`` prefix, which config keys
+    do not, so a real ``str`` key and a tagged non-``str`` key never collide
+    with each other. Lists/tuples recurse into elements so a non-``str`` key
+    nested inside one is caught too.
+    """
+    if isinstance(value, dict):
+        return {
+            (k if isinstance(k, str) else f"<{type(k).__name__}>{k!r}"):
+                _tag_non_str_keys(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_tag_non_str_keys(v) for v in value]
+    return value
 
 
 def fingerprint(parameters: dict, extra_keys: Sequence[str] = ()) -> dict:
@@ -128,14 +179,16 @@ def fingerprint(parameters: dict, extra_keys: Sequence[str] = ()) -> dict:
     and from what, instead of only "something changed". Values are normalised
     through a JSON round trip (``default=str``) so that what a landed JSON
     holds after being read back compares equal to what is computed now, e.g. a
-    YAML ``datetime.date`` against its string.
+    YAML ``datetime.date`` against its string. Dict keys are tagged first via
+    :func:`_tag_non_str_keys` (see there for why).
     """
     values: dict[str, Any] = {}
     for path in (*(p for p, _ in COMPUTED_KEYS), *extra_keys):
         found, value = _lookup(parameters, path)
         if found:
             values[path] = json.loads(json.dumps(
-                value, sort_keys=True, ensure_ascii=False, default=str))
+                _tag_non_str_keys(value), sort_keys=True, ensure_ascii=False,
+                default=str))
     digest = hashlib.sha256(json.dumps(
         values, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
     ).encode("utf-8")).hexdigest()
@@ -143,14 +196,15 @@ def fingerprint(parameters: dict, extra_keys: Sequence[str] = ()) -> dict:
 
 
 def require_computed_with_current_config(
-    artifacts: Iterable[tuple[str, Any, str, Sequence[str]]],
+    artifacts: Iterable[LoadedArtifact],
     parameters: dict,
 ) -> None:
     """Pre-check (inputs): every artifact was computed with today's settings.
 
-    ``artifacts`` holds ``(catalog name, payload, producing node, extra_keys)``.
-    A pre-check, not a postcondition: a mismatch means the inputs on disk are
-    older than the config, not that the calling node is wrong.
+    ``artifacts`` holds :class:`LoadedArtifact` entries — construct each with
+    keyword arguments (see that class for why). A pre-check, not a
+    postcondition: a mismatch means the inputs on disk are older than the
+    config, not that the calling node is wrong.
 
     Collect-all: every stale artifact is listed in one raise, so whoever fixes
     it does not re-run, hit the next one, and re-run again.
@@ -169,31 +223,35 @@ def require_computed_with_current_config(
     stale_producers: list[str] = []
     first_computed: int | None = None
 
-    for catalog_name, payload, producer, extra_keys in artifacts:
-        extra = tuple(extra_keys)
+    for artifact in artifacts:
+        extra = tuple(artifact.extra_keys)
         if extra not in current_by_extra:
             current_by_extra[extra] = fingerprint(parameters, extra)
         current = current_by_extra[extra]
 
-        stored = payload.get("config_fingerprint") \
-            if isinstance(payload, dict) else None
+        stored = artifact.payload.get("config_fingerprint") \
+            if isinstance(artifact.payload, dict) else None
         if not (isinstance(stored, dict) and "sha256" in stored
                 and isinstance(stored.get("values"), dict)):
             problems.append(
-                f"  - {catalog_name} (written by {producer}) has no "
-                "config_fingerprint: written before fingerprints existed, or "
-                "not by this pipeline."
+                f"  - {artifact.catalog_name} (written by "
+                f"{artifact.produced_by}) has no config_fingerprint: written "
+                "before fingerprints existed, or not by this pipeline."
             )
-            stale_producers.append(producer)
+            stale_producers.append(artifact.produced_by)
             continue
         if stored["sha256"] == current["sha256"]:
             continue
 
         old_values, new_values = stored["values"], current["values"]
         paths = [*new_values, *(p for p in old_values if p not in new_values)]
-        order = [*(p for p, _ in COMPUTED_KEYS), *extra]
-        paths = sorted(paths, key=lambda p: order.index(p)
-                       if p in order else len(order))
+        # _KEY_ORDER only covers COMPUTED_KEYS; an extra key (not in it) ties
+        # at len(_KEY_ORDER) and keeps its relative position via sort
+        # stability — `paths` is already in COMPUTED_KEYS-then-extra_keys
+        # order because that is the order `fingerprint()` walks to build
+        # `values`. A dict .get() here (O(1)) replaces the previous
+        # `order.index(p)` (O(n) per comparison inside the sort).
+        paths = sorted(paths, key=lambda p: _KEY_ORDER.get(p, len(_KEY_ORDER)))
         lines = []
         for path in paths:
             leaves = _changed_leaves(path, old_values.get(path, _ABSENT),
@@ -210,10 +268,10 @@ def require_computed_with_current_config(
             lines.append("      (hash differs but no value does: the "
                          "fingerprint was written by another hashing version)")
         problems.append(
-            f"  - {catalog_name} (written by {producer}) was computed with "
-            "different settings:\n" + "\n".join(lines)
+            f"  - {artifact.catalog_name} (written by {artifact.produced_by}) "
+            "was computed with different settings:\n" + "\n".join(lines)
         )
-        stale_producers.append(producer)
+        stale_producers.append(artifact.produced_by)
 
     if not problems:
         return
@@ -235,12 +293,12 @@ def require_computed_with_current_config(
 
 
 def _lookup(parameters: dict, path: str) -> tuple[bool, Any]:
-    node: Any = parameters
+    cursor: Any = parameters
     for seg in path.split("."):
-        if not isinstance(node, dict) or seg not in node:
+        if not isinstance(cursor, dict) or seg not in cursor:
             return False, None
-        node = node[seg]
-    return True, node
+        cursor = cursor[seg]
+    return True, cursor
 
 
 def _canonical(value: Any) -> str:
@@ -257,9 +315,10 @@ def _changed_leaves(path: str, old: Any, new: Any) -> list[tuple[str, Any, Any]]
     """
     if _canonical(old) == _canonical(new):
         return []
-    old_ok = isinstance(old, dict) or old is _ABSENT
-    new_ok = isinstance(new, dict) or new is _ABSENT
-    if (isinstance(old, dict) or isinstance(new, dict)) and old_ok and new_ok:
+    old_dict_or_absent = isinstance(old, dict) or old is _ABSENT
+    new_dict_or_absent = isinstance(new, dict) or new is _ABSENT
+    if (isinstance(old, dict) or isinstance(new, dict)) \
+            and old_dict_or_absent and new_dict_or_absent:
         o = old if isinstance(old, dict) else {}
         n = new if isinstance(new, dict) else {}
         leaves: list[tuple[str, Any, Any]] = []

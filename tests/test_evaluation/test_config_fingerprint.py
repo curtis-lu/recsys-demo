@@ -15,6 +15,7 @@ import pytest
 
 from recsys_tfb.evaluation.config_fingerprint import (
     COMPUTED_KEYS,
+    LoadedArtifact,
     fingerprint,
     require_computed_with_current_config,
 )
@@ -194,9 +195,51 @@ def test_fingerprint_survives_a_json_round_trip():
     fp = fingerprint(params)
     assert json.loads(json.dumps(fp)) == fp
     require_computed_with_current_config(
-        [("evaluation_metric_ci", json.loads(json.dumps(
-            {"enabled": False, "config_fingerprint": fp})),
-          "compute_metric_ci", ())],
+        [LoadedArtifact(
+            catalog_name="evaluation_metric_ci",
+            payload=json.loads(json.dumps(
+                {"enabled": False, "config_fingerprint": fp})),
+            produced_by="compute_metric_ci")],
+        params,
+    )
+
+
+# ------------------------------------------------------- non-string dict keys
+
+
+def test_int_vs_str_dict_key_changes_the_hash():
+    """YAML can write ``{1: 0.5}`` or ``{"1": 0.5}``; every lookup against a
+    dict like this (e.g. ``dataset.sample_ratio_overrides``) keys by str, so
+    only the second ever matches at runtime. Fingerprinting them the same
+    would let a real behaviour change ({1: ...} -> {"1": ...}) report "no
+    change" and skip the required re-run."""
+    int_keyed = _set(_params(), "evaluation.metric", {1: 0.5})
+    str_keyed = _set(_params(), "evaluation.metric", {"1": 0.5})
+    assert fingerprint(int_keyed)["sha256"] != fingerprint(str_keyed)["sha256"]
+
+
+def test_mixed_key_types_does_not_raise():
+    """A dict mixing int and str keys is legal YAML; ``json.dumps(...,
+    sort_keys=True)`` raises TypeError comparing them directly, crashing the
+    node on a legal config."""
+    mixed = _set(_params(), "evaluation.metric", {1: 0.5, "a": 0.3})
+    fingerprint(mixed)  # must not raise
+
+
+def test_int_keyed_config_is_stable_and_round_trips():
+    """Same int-keyed config fingerprinted twice agrees, and the stored
+    ``values`` survive a JSON round trip and still compare equal to a fresh
+    fingerprint via ``require_computed_with_current_config`` (no false
+    raise)."""
+    params = _set(_params(), "evaluation.metric", {1: 0.5})
+    fp1 = fingerprint(params)
+    fp2 = fingerprint(copy.deepcopy(params))
+    assert fp1 == fp2
+    stored = json.loads(json.dumps(
+        {"enabled": False, "config_fingerprint": fp1}))
+    require_computed_with_current_config(
+        [LoadedArtifact(catalog_name="evaluation_metric_ci", payload=stored,
+                        produced_by="compute_metric_ci")],
         params,
     )
 
@@ -211,9 +254,13 @@ def _payload(params, extra=()):
 def test_fresh_artifacts_pass():
     params = _params()
     require_computed_with_current_config(
-        [("evaluation_metric_ci", _payload(params), "compute_metric_ci", ()),
-         ("evaluation_config_shift", _payload(params, CONFIG_SHIFT_EXTRA),
-          "diagnose_config_shift", CONFIG_SHIFT_EXTRA)],
+        [LoadedArtifact(catalog_name="evaluation_metric_ci",
+                        payload=_payload(params),
+                        produced_by="compute_metric_ci"),
+         LoadedArtifact(catalog_name="evaluation_config_shift",
+                        payload=_payload(params, CONFIG_SHIFT_EXTRA),
+                        produced_by="diagnose_config_shift",
+                        extra_keys=CONFIG_SHIFT_EXTRA)],
         params,
     )
 
@@ -223,7 +270,9 @@ def test_changed_key_names_the_leaf_values_and_rerun_node():
     new = _set(copy.deepcopy(old), "evaluation.metric.min_positives", 5)
     with pytest.raises(ValueError) as exc:
         require_computed_with_current_config(
-            [("evaluation_metric_ci", _payload(old), "compute_metric_ci", ())],
+            [LoadedArtifact(catalog_name="evaluation_metric_ci",
+                            payload=_payload(old),
+                            produced_by="compute_metric_ci")],
             new,
         )
     msg = str(exc.value)
@@ -238,8 +287,9 @@ def test_missing_fingerprint_names_the_artifact():
     for payload in ({"enabled": False}, None, {"config_fingerprint": "x"}):
         with pytest.raises(ValueError) as exc:
             require_computed_with_current_config(
-                [("evaluation_report_aggregates", payload,
-                  "compute_report_aggregates", ())],
+                [LoadedArtifact(catalog_name="evaluation_report_aggregates",
+                                payload=payload,
+                                produced_by="compute_report_aggregates")],
                 params,
             )
         msg = str(exc.value)
@@ -256,9 +306,12 @@ def test_rule_1_earliest_computed_key_wins_over_message_order():
     new = _set(new, "evaluation.k_values", [1, 5])
     with pytest.raises(ValueError) as exc:
         require_computed_with_current_config(
-            [("evaluation_report_aggregates", _payload(old),
-              "compute_report_aggregates", ()),
-             ("evaluation_metric_ci", _payload(old), "compute_metric_ci", ())],
+            [LoadedArtifact(catalog_name="evaluation_report_aggregates",
+                            payload=_payload(old),
+                            produced_by="compute_report_aggregates"),
+             LoadedArtifact(catalog_name="evaluation_metric_ci",
+                            payload=_payload(old),
+                            produced_by="compute_metric_ci")],
             new,
         )
     msg = str(exc.value)
@@ -275,10 +328,13 @@ def test_rule_2_one_artifact_with_only_its_own_key_changed():
                {"x|1": 0.25})
     with pytest.raises(ValueError) as exc:
         require_computed_with_current_config(
-            [("evaluation_item_ability", _payload(old), "diagnose_item_ability",
-              ()),
-             ("evaluation_config_shift", _payload(old, CONFIG_SHIFT_EXTRA),
-              "diagnose_config_shift", CONFIG_SHIFT_EXTRA)],
+            [LoadedArtifact(catalog_name="evaluation_item_ability",
+                            payload=_payload(old),
+                            produced_by="diagnose_item_ability"),
+             LoadedArtifact(catalog_name="evaluation_config_shift",
+                            payload=_payload(old, CONFIG_SHIFT_EXTRA),
+                            produced_by="diagnose_config_shift",
+                            extra_keys=CONFIG_SHIFT_EXTRA)],
             new,
         )
     msg = str(exc.value)
@@ -290,8 +346,9 @@ def test_rule_2_one_artifact_with_only_its_own_key_changed():
 def test_rule_2_one_artifact_without_fingerprint():
     with pytest.raises(ValueError) as exc:
         require_computed_with_current_config(
-            [("evaluation_suppression", {"enabled": False},
-              "diagnose_suppression", ())],
+            [LoadedArtifact(catalog_name="evaluation_suppression",
+                            payload={"enabled": False},
+                            produced_by="diagnose_suppression")],
             _params(),
         )
     assert "--from-node diagnose_suppression" in str(exc.value)
@@ -302,10 +359,13 @@ def test_rule_3_several_artifacts_no_computed_key_suggests_full_run():
     new = _set(copy.deepcopy(old), "dataset.sample_ratio", 0.5)
     with pytest.raises(ValueError) as exc:
         require_computed_with_current_config(
-            [("evaluation_config_shift", _payload(old, CONFIG_SHIFT_EXTRA),
-              "diagnose_config_shift", CONFIG_SHIFT_EXTRA),
-             ("evaluation_suppression", {"enabled": False},
-              "diagnose_suppression", ())],
+            [LoadedArtifact(catalog_name="evaluation_config_shift",
+                            payload=_payload(old, CONFIG_SHIFT_EXTRA),
+                            produced_by="diagnose_config_shift",
+                            extra_keys=CONFIG_SHIFT_EXTRA),
+             LoadedArtifact(catalog_name="evaluation_suppression",
+                            payload={"enabled": False},
+                            produced_by="diagnose_suppression")],
             new,
         )
     msg = str(exc.value)
@@ -320,7 +380,9 @@ def test_long_values_are_truncated_in_the_message():
                [f"col_{i:03d}" for i in range(100)])
     with pytest.raises(ValueError) as exc:
         require_computed_with_current_config(
-            [("evaluation_metric_ci", _payload(old), "compute_metric_ci", ())],
+            [LoadedArtifact(catalog_name="evaluation_metric_ci",
+                            payload=_payload(old),
+                            produced_by="compute_metric_ci")],
             new,
         )
     msg = str(exc.value)
