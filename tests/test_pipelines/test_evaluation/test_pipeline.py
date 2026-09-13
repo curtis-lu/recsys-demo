@@ -151,6 +151,66 @@ class TestRegistryDiagnosesFollowTheMode:
         assert node.func({"evaluation": {}}) == []
 
 
+class TestFingerprintRerunNodes:
+    """``COMPUTED_KEYS``' re-run nodes precede every fingerprinted producer.
+
+    ``require_computed_with_current_config`` answers a changed computed key
+    with ``--from-node <that key's node>``. The advice is only right if that
+    node's forward slice contains every node that writes a JSON with a
+    ``config_fingerprint``; otherwise following it leaves a stale artifact
+    behind and the next report raises again (or, worse, one checked by nobody
+    stays stale). The producer lists are written out here, not derived from
+    the pipeline, so a new producer has to be added on purpose.
+    """
+
+    FINGERPRINTED_PRODUCERS = {
+        "compute_baseline_metrics", "compute_report_aggregates",
+        "compute_metric_ci",
+    }
+    MODES = TestRegistryDiagnosesFollowTheMode.MODES
+
+    def _producers(self, kwargs):
+        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+
+        producers = set(self.FINGERPRINTED_PRODUCERS)
+        if kwargs.get("post_training"):
+            producers |= {f"diagnose_{name}" for name in DIAGNOSES}
+        return producers
+
+    def test_every_rerun_node_exists_in_every_mode(self):
+        from recsys_tfb.evaluation.config_fingerprint import COMPUTED_KEYS
+
+        for label, kwargs in self.MODES.items():
+            names = [n.name for n in create_pipeline(**kwargs).nodes]
+            missing = sorted({node for _, node in COMPUTED_KEYS} - set(names))
+            assert missing == [], f"[{label}] {missing}"
+
+    def test_rerun_nodes_are_listed_in_topological_order(self):
+        from recsys_tfb.evaluation.config_fingerprint import COMPUTED_KEYS
+
+        for label, kwargs in self.MODES.items():
+            names = [n.name for n in create_pipeline(**kwargs).nodes]
+            positions = [names.index(node) for _, node in COMPUTED_KEYS]
+            assert positions == sorted(positions), (
+                f"[{label}] {[node for _, node in COMPUTED_KEYS]}"
+            )
+
+    def test_latest_rerun_node_slice_covers_every_fingerprinted_producer(self):
+        from recsys_tfb.evaluation.config_fingerprint import COMPUTED_KEYS
+
+        for label, kwargs in self.MODES.items():
+            pipeline = create_pipeline(**kwargs)
+            names = [n.name for n in pipeline.nodes]
+            latest = max({node for _, node in COMPUTED_KEYS}, key=names.index)
+            sliced, _plan = pipeline.slice_from(latest, lambda _name: True)
+            left_out = sorted(
+                self._producers(kwargs) - {n.name for n in sliced.nodes}
+            )
+            assert left_out == [], (
+                f"[{label}] --from-node {latest} does not re-run {left_out}"
+            )
+
+
 class TestEvaluationPipelinePostTraining:
     """post_training=True — read from training_eval_predictions."""
 
