@@ -170,7 +170,7 @@ ADR-0014 在 training 收了 21 處。evaluation 的 13 處全在 `nodes_spark.p
 - **C-(b)**：`_render_section_extras` 從 `report/pages.py` 提成公開名字，消掉跨套件私有 import（node 規則 12）。
 - **跳脫契約原樣保留**：`evaluation/report.py` 的 `description` 繼續不跳脫，並在該處寫一行「為什麼」（`build_diagnosis_links_section` 靠它）。兩層渲染器不做。
 - **D-1**：`comparison/report.py` 從 `report_builder` import 的底線函式裡，**真的要搬的是三個**：`_per_item_metric_compare_table`、`_resolve_display_k`、`_n_items`，提到公開的 `evaluation/report_tables.py`。另外兩個不搬：`_visible_metric_keys` 由 ADR-0018 決定 4 刪除（NDCG 停算後沒有東西要藏），`_k_to_lookup` 是死 import、刪掉。放 `evaluation/` 不放 `report/`，因為它們帶著 metrics dict 的鍵名知識，屬於 evaluation 不屬於中性呈現層（node 規則 8：兩個呼叫端都在 evaluation 內）。
-- **D-2 不做**：`report.display.guardrail_recall_k` 在主報表是**死的**（`report_builder.py` 讀了它算出 `rec_ks`，之後沒有任何使用點），活的只有比較報表那一邊（`comparison/report.py` 讀同一個鍵，鍵缺席時預設 `[1,3,5]`）。「統一預設值」等於悄悄改比較報表的欄數，撞報表凍結。所以：**鍵留著**（比較報表在讀），主報表那段死碼（`rec_ks`）刪掉，`docs/pipelines/evaluation.md` 寫明這個鍵只影響比較報表。
+- **D-2 不做**：`report.display.guardrail_recall_k` 在主報表是**死的**（`report_builder.py` 讀了它算出 `rec_ks`，之後沒有任何使用點），活的只有比較報表那一邊（`comparison/report.py` 讀同一個鍵，鍵缺席時預設 `[1,3,5]`）。「統一預設值」等於悄悄改比較報表的欄數，而且沒有人提出需求（2026-09-13 更正：原寫「撞報表凍結」，凍結已依 [ADR-0020](0020-evaluation-bug-round-intended-behaviours.md) 解除，理由改成沒有需求）。所以：**鍵留著**（比較報表在讀），主報表那段死碼（`rec_ks`）刪掉，`docs/pipelines/evaluation.md` 寫明這個鍵只影響比較報表。
 
 ## 決定 6：`report.sections` 的死開關刪掉，加一條**雙向**一致性不變量，常數住在 `core/`
 
@@ -227,13 +227,13 @@ ADR-0014 在 training 收了 21 處。evaluation 的 13 處全在 `nodes_spark.p
 | 沒做 | 為什麼 |
 |---|---|
 | 兩層渲染器（稽核 C 的建議形狀） | 跳脫契約沒解，硬合會讓診斷入口靜默退化。見決定 5 |
-| 統一 `guardrail_recall_k` 預設值（D-2） | 會改比較報表欄數，撞報表凍結。見決定 5 |
-| 主報表診斷區改成第 N＋1 項 registry 診斷（稽核 B） | 搬報表的一塊，撞凍結 |
+| 統一 `guardrail_recall_k` 預設值（D-2） | 會改比較報表欄數，且沒有需求。見決定 5（報表凍結已解除，ADR-0020） |
+| 主報表診斷區改成第 N＋1 項 registry 診斷（稽核 B） | 搬報表的一塊，屬結構重整，另開一票（報表凍結已解除，ADR-0020） |
 | compare 模式「算」與「畫」分開、比較數字落 JSON（稽核 F） | 沒有效能證據、沒有讀者要那份數字 |
-| 指標家族參數化（稽核 J-2） | 撞版面凍結；停算那一半在 ADR-0018 |
+| 指標家族參數化（稽核 J-2） | 跨三模組的重構，另一輪；停算那一半在 ADR-0018（報表凍結已解除，ADR-0020） |
 | 刪 `evaluation/statistics.py`、`calibration.py`（稽核 I） | 已在 `c88746a` 修掉，無事可做 |
 | training 的 7 個 diagnosis node 搬來 evaluation | 跟 `overall_map` 跨月合併同一個接縫，`deliberate-non-goals.md` 要另開一輪；本份不預留位置 |
-| `metric.k` 九處讀取收成一份（稽核 H） | 修法會動概覽段的 CI 註腳文字，那一句在 bug 那一輪解凍後才能動；不是結構題 |
+| `metric.k` 九處讀取收成一份（稽核 H） | 行為題不是結構題，歸 bug 輪（ADR-0020〈設計 H〉） |
 | 關 #163 | 通用問題，由使用者裁 |
 
 ---

@@ -106,7 +106,7 @@ label_table ────────┼─► prepare_eval_data ──► Hive: 
 - **決定 5 的第 1 件（監控模式不組 registry 診斷 node）是決定 1 的前置條件**，順序上不准落在它後面。
 - **守衛本身也要補強**：改成「欄位存在**且**在抽樣裡不是全 NULL」（抽樣已經是 driver 端的 pandas frame，`pdf[SCORE_COL].notna().any()` 零成本）。理由跟原守衛一樣：靜默算錯比炸掉糟。
 - `draw_diagnosis_sample`（`diagnosis/metric/sample.py`）「`score_uncalibrated` 存在就帶進抽樣」的邏輯在監控模式下會帶進一欄 NULL；抽樣的其他讀者（metric CI）不讀它，無害，但要在該處寫一行為什麼。
-- 同型的「欄位存在就用」還有一處：`compute_dataset_overview` 與 per-segment 聚合挑 `active_seg_col` 的方式是「`evaluation.segment_columns` 裡第一個出現在 frame 欄位裡的」。一個 segment 欄要全 NULL，得是這次沒 join 它、而表 schema 裡還留著——config 側被不變量 A10 擋住（`segment_columns` 必須有對應的 `segment_sources`，有 source 就會 join），剩下的是資料側的 bug 6（join 對不到）。所以這一處不需要本份再加守衛，但 bug 6 的修法要記得它。
+- 同型的「欄位存在就用」還有一處：`compute_dataset_overview` 與 per-segment 聚合挑 `active_seg_col` 的方式是「`evaluation.segment_columns` 裡第一個出現在 frame 欄位裡的」。（2026-09-13 更正：本段原本寫「config 側被 A10 擋住，不需要守衛」，那是在 segment 來源還寫死 `sample_pool` 時成立的。[ADR-0020](0020-evaluation-bug-round-intended-behaviours.md) bug 6 讓 segment 跟著各模式的母體表走，監控母體可能沒有某個 segment 欄，於是 post-training 那次 join 進來的欄在監控模式的 frame 裡會是全 NULL——「這次有哪些 segment 欄可用」因此改由母體表的 metadata 決定，消費者不再看 frame 的欄位。修法在 ADR-0020。）
 - `docs/pipelines/evaluation.md` §7.3「post-training 與 monitoring 共用同一個分區」那段要加上「而且共用同一個 schema，另一模式的欄位讀回來是 NULL」。要不要分成兩張表，見〈沒有解決的事〉。
 
 ### 切片的 `can_load` 要看分區，不看表
@@ -192,7 +192,7 @@ NDCG 在 `evaluation/metrics_spark.py` 有三個產生點：`add_row_contributio
 
 **別碰的**：`conf/base/parameters_training.yaml` 與 `models/lightgbm_adapter.py` 裡的 `ndcg` 是 LightGBM 自己的 early-stopping 指標，跟這裡的評估指標是兩件事。
 
-**為什麼不做參數化**（稽核 J 的建議）：跨三個模組、十幾處寫死清單，而且 `report_builder` 的表格版面跟家族是耦合的（`for fam in ("map", "precision", "recall")` 決定「一個家族一張表」）——改版面就撞報表凍結。停算是可以單獨驗收的一半（HTML 逐位元不變），參數化是另一輪的事。
+**為什麼不做參數化**（稽核 J 的建議）：跨三個模組、十幾處寫死清單，而且 `report_builder` 的表格版面跟家族是耦合的（`for fam in ("map", "precision", "recall")` 決定「一個家族一張表」）——改版面是另一個等級的改動。停算是可以單獨驗收的一半（HTML 逐位元不變），參數化是另一輪的事。（2026-09-13 更正：本句原本寫「改版面就撞報表凍結」；報表凍結已依 [ADR-0020](0020-evaluation-bug-round-intended-behaviours.md) 解除，理由只剩前半。）
 
 ---
 
@@ -239,7 +239,7 @@ registry 診斷（`diagnosis/metric/contract.py::DIAGNOSES`，現行 `config_shi
 | `eval_predictions.cache()` | 不落地、記憶體量級不可控、`--compare-only` 還是要一張表 |
 | 新開一個 driver 端 parquet 條目，Hive 表照舊在最後寫 | 一張表兩個名字；Hive 表已存在且已有讀者 |
 | 只改「可離線重繪」那句註解，不落地 metrics JSON | 驗證尺與指標歷史兩個收益都拿不到。見決定 2 |
-| 指標家族參數化（稽核 J-2） | 撞報表版面凍結；停算是可單獨驗收的一半。見決定 4 |
+| 指標家族參數化（稽核 J-2） | 跨三模組的重構，另一輪；停算是可單獨驗收的一半。見決定 4（報表凍結已解除，ADR-0020） |
 | 監控模式用 config 開關關掉需要原始分數的診斷 | ADR-0013：模式決定形狀，不是 config。而且開關忘了關就是原問題 |
 | 監控模式保留 `render_diagnosis_pages`、只給它 `parameters` | 按檔名讀磁碟、in-degree 0 排到最前，會撿到上一次 post-training 的 JSON。見決定 5 |
 | `generate_report` 給 `diagnosis_pages` 一個預設值 | 尾端預設值吞 arity 錯誤，`known-pitfalls.md` §12 |
@@ -302,7 +302,7 @@ PR 怎麼切交給 `/to-spec`、`/to-ticket`，**偏粗不偏細**：切點只�
 
 - **post-training 與 monitoring 共用同一個 `(model_version, snap_date)` 分區、同一個 schema**（`docs/pipelines/evaluation.md` §7.3 ＋ 決定 1〈同一張表、兩種模式〉）。最後一次跑的覆寫前一次；另一模式的欄位讀回來是 NULL。決定 1 沒有把它變好也沒變壞。要分開有兩條路：加 scenario 分區（同表、同 schema，NULL 欄問題不解）或兩張表（`--compare-only` 與 `MODEL_VERSION_SOURCES` 都要知道讀哪張）。那是另一個決定。
 - **`--compare` 模式的比較數字沒有 JSON**（稽核 F）：`generate_comparison_report` 自己算兩次全量指標再組 HTML。決定 2 的形狀可以直接套過去，但本輪不做——它沒有效能證據，也沒有讀者要那份數字。
-- **主報表的診斷區與 registry 是兩套機制**（稽核 B）：撞「別調報表的呈現」凍結，等使用者對報表給明確反饋。
+- **主報表的診斷區與 registry 是兩套機制**（稽核 B）：不在本輪。2026-09-13 更正——原寫「撞報表凍結」，凍結已依 [ADR-0020](0020-evaluation-bug-round-intended-behaviours.md) 解除；仍不做的理由是它搬一整塊報表、屬結構重整，要做另開一票。
 - **`compute_dataset_overview` 之後排名第二的 `aggregate_overall`**（654,000 個 query group 時 1,299 秒 executor 時間、次線性成長）：這輪沒有它的假設，先做完決定 1 再量一次。
 - **training 那 7 個 diagnosis node 要不要搬來 evaluation**：跟 `overall_map` 跨月合併是同一個接縫，`deliberate-non-goals.md` 明寫要另開一輪，本份不預留位置。
 
