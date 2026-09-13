@@ -130,7 +130,7 @@ flowchart TB
   n_predict["predict_and_write_scores<br/><small>外層迴圈桶、內層迴圈 item ・ 一桶讀進 driver 一次<br/>每個 (桶, item) 算完先過<b>塊層 4 項檢查</b>，再寫成<b>恰好一個分區</b><br/>分區已存在即跳過（--rebuild-dates 可推翻）</small>"]
   d_manifest(["score_manifest<br/><small>processed／skipped／rebuilt／empty<br/>＋分區帳（供 partition_completeness）</small>"])
   d_unranked(["unranked_predictions<br/><small>model_version / snap_date, item, entity_bucket</small>"])
-  n_rank["rank_predictions<br/><small>裁月份 → 丟掉 entity_bucket → (time, entity) 組內 row_number()</small>"]
+  n_rank["rank_predictions<br/><small>裁月份 → 丟掉 entity_bucket → (time, entity) 組內 row_number()<br/>score 降冪、同分按 item 升冪（utils/ranking）</small>"]
   d_staging(["ranked_staging<br/><small>model_version / snap_date, item</small>"])
   gate{{"validate_predictions<br/><small><b>整批層</b> 4 項檢查（塊層那 4 項已在評分時跑過）<br/>成功路徑 2 個 Spark action ・ 回傳的是裁完月份的 frame</small>"}}
   d_validated(["validated_predictions<br/><small>＝ ranked_staging 裁到本次月份</small>"])

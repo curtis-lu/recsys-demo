@@ -403,6 +403,12 @@ def _validate(pdf: pd.DataFrame, parameters: dict, schema: dict) -> list[str]:
             f"這裡刻意不退回 schema.score：理論 offset 活在模型輸出的 log-odds "
             f"空間，校準後的分數是另一個空間的量，兩者相減得到的 Δ 沒有意義。"
         )
+    if len(pdf) and not pdf[SCORE_COL].notna().any():
+        # 欄位在、值全空＝讀不到，理由同 item_ability 的守衛（空抽樣不算）。
+        raise ValueError(
+            f"config_shift 需要 {SCORE_COL!r} 欄的值，但抽樣裡這一欄全是空值"
+            "（常見原因：這批預測沒有原始分數，欄位是共用表補上的 NULL）。"
+        )
     query_cols = [schema["time"], *schema["entity"]]
     required = [*query_cols, schema["item"], schema["label"]]
     missing = [c for c in required if c not in pdf.columns]

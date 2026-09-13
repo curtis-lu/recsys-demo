@@ -691,7 +691,7 @@ class TestPredictAndWriteScores:
         with pytest.raises(ValueError, match="exactly one partition"):
             require_single_partition(pdf, PARTITION_COLS)
 
-    def test_saved_columns_are_entity_score_and_partition_cols(
+    def test_saved_columns_are_entity_scores_and_partition_cols(
         self, population_features, preprocessor, parameters
     ):
         table = FakeScoreTable()
@@ -700,8 +700,75 @@ class TestPredictAndWriteScores:
             unranked_predictions=table,
         )
         assert list(table.saved[0].columns) == [
-            "cust_id", "score", "snap_date", "prod_name", ENTITY_BUCKET_COL,
+            "cust_id", "score", "score_uncalibrated",
+            "snap_date", "prod_name", ENTITY_BUCKET_COL,
         ]
+
+    # Raw scores: ItemSensitiveModel scores an item by its code in
+    # `category_mappings` ("fund_bond", "exchange_fx", "fund_stock" -> 0, 1, 2).
+    # The calibrator is fitted on exactly those three raw values with labels
+    # 0, 0, 1, so isotonic regression maps 0 -> 0, 1 -> 0, 2 -> 1. Both columns
+    # therefore have values known without running the node, and they differ on
+    # exchange_fx — the row that tells "raw" from "calibrated".
+    RAW_BY_ITEM = {"fund_bond": 0.0, "exchange_fx": 1.0, "fund_stock": 2.0}
+    CALIBRATED_BY_ITEM = {"fund_bond": 0.0, "exchange_fx": 0.0, "fund_stock": 1.0}
+
+    @staticmethod
+    def _calibrated_item_sensitive_model():
+        from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
+
+        model = CalibratedModelAdapter(ItemSensitiveModel(), method="isotonic")
+        model.fit_calibrator(
+            np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]),
+            np.array([0.0, 0.0, 1.0]),
+        )
+        return model
+
+    @staticmethod
+    def _scores_by_item(table, column):
+        by_item: dict[str, set[float]] = {}
+        for pdf in table.saved:
+            for _, row in pdf.iterrows():
+                by_item.setdefault(row["prod_name"], set()).add(float(row[column]))
+        return {item: values.pop() for item, values in by_item.items()
+                if len(values) == 1}
+
+    def test_raw_score_is_the_score_when_no_calibrator_is_wrapped(
+        self, population_features, preprocessor, parameters
+    ):
+        table = FakeScoreTable()
+        predict_and_write_scores(
+            ItemSensitiveModel(), population_features, preprocessor, parameters,
+            unranked_predictions=table,
+        )
+        assert self._scores_by_item(table, "score_uncalibrated") == self.RAW_BY_ITEM
+        assert self._scores_by_item(table, "score") == self.RAW_BY_ITEM
+
+    def test_calibration_switched_off_writes_the_raw_score_to_both_columns(
+        self, population_features, preprocessor, parameters
+    ):
+        parameters["inference"]["use_calibration"] = False
+        table = FakeScoreTable()
+        predict_and_write_scores(
+            self._calibrated_item_sensitive_model(), population_features,
+            preprocessor, parameters, unranked_predictions=table,
+        )
+        assert self._scores_by_item(table, "score_uncalibrated") == self.RAW_BY_ITEM
+        assert self._scores_by_item(table, "score") == self.RAW_BY_ITEM
+
+    def test_calibration_on_keeps_the_raw_score_beside_the_calibrated_one(
+        self, population_features, preprocessor, parameters
+    ):
+        """The column exists for this case: calibration on is the default, and
+        without it the raw output is gone for good (ADR-0018 decision 5)."""
+        parameters["inference"]["use_calibration"] = True
+        table = FakeScoreTable()
+        predict_and_write_scores(
+            self._calibrated_item_sensitive_model(), population_features,
+            preprocessor, parameters, unranked_predictions=table,
+        )
+        assert self._scores_by_item(table, "score_uncalibrated") == self.RAW_BY_ITEM
+        assert self._scores_by_item(table, "score") == self.CALIBRATED_BY_ITEM
 
     def test_model_version_column_is_left_to_the_catalog(
         self, population_features, preprocessor, parameters
@@ -1343,6 +1410,29 @@ class TestRankPredictions:
         pdf = result.toPandas()
         ranks = dict(zip(pdf["prod_name"], pdf["rank"]))
         assert ranks == {"exchange_fx": 1, "fund_bond": 2, "fund_stock": 3}
+
+    def test_tied_scores_are_ranked_by_item_name_ascending(self, spark, parameters):
+        """bug 11：同分按 item 名升冪，evaluation 重排用的也是這一條。
+
+        兩個 entity 的同分列在輸入裡順序刻意相反：同分規則沒定義時，名次跟著
+        列到達的順序走，兩個 entity 不可能同時對。
+        """
+        unranked = spark.createDataFrame(pd.DataFrame({
+            "cust_id": ["C001"] * 3 + ["C002"] * 3,
+            "score": [0.5, 0.5, 0.9] * 2,
+            "snap_date": ["2024-03-31"] * 6,
+            "prod_name": ["fund_stock", "exchange_fx", "fund_bond",
+                          "exchange_fx", "fund_stock", "fund_bond"],
+            ENTITY_BUCKET_COL: ["0"] * 6,
+        }))
+        pdf = rank_predictions(unranked, {}, parameters).toPandas()
+        ranks = {
+            (cid, item): r
+            for cid, item, r in zip(pdf["cust_id"], pdf["prod_name"], pdf["rank"])
+        }
+        for cid in ("C001", "C002"):
+            assert [ranks[(cid, "fund_bond")], ranks[(cid, "exchange_fx")],
+                    ranks[(cid, "fund_stock")]] == [1, 2, 3], cid
 
     def test_rank_per_group(self, spark, parameters):
         unranked = spark.createDataFrame(pd.DataFrame({

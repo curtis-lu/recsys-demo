@@ -143,13 +143,26 @@ RESUME_CONTRACTS = {
         # upstream has to re-run — no population/feature join, no preprocessing.
         "predict_and_write_scores": set(),
     },
+    # Monitoring mode (no post_training): no registry diagnosis is wired
+    # (ADR-0018 decision 5), so generate_report's pages input comes from the
+    # zero-read no_diagnosis_pages stub — memory-only, and free to re-run.
     ("evaluation", ()): {
         # eval_predictions/metrics are memory-only: report regeneration
         # re-runs the metric chain. Documented cost, pinned here.
-        # render_diagnosis_pages is also memory-only (its output is a list of
-        # paths, meaningful only for the run that wrote them) — resuming at
-        # generate_report re-renders the pages from the diagnosis JSONs, which
-        # is the cheap half-second path, not a Spark job.
+        "generate_report": {
+            "prepare_eval_data",
+            "compute_metrics",
+            "compute_baseline_metrics",
+            "no_diagnosis_pages",
+        },
+    },
+    ("evaluation", (("post_training", True),)): {
+        # Same metric-chain cost as above. render_diagnosis_pages is also
+        # memory-only (its output is a list of paths, meaningful only for the
+        # run that wrote them) — resuming at generate_report re-renders the
+        # pages from the diagnosis JSONs, which is the cheap half-second path,
+        # not a Spark job. This was the monitoring contract before the
+        # diagnoses moved to --post-training only; it moved here unchanged.
         "generate_report": {
             "prepare_eval_data",
             "compute_metrics",

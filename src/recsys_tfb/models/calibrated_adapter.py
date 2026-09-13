@@ -86,7 +86,15 @@ class CalibratedModelAdapter(ModelAdapter):
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Return calibrated scores, or raw scores if calibrator is not fitted."""
-        raw = self._base.predict(X)
+        return self.calibrate(self._base.predict(X))
+
+    def calibrate(self, raw: np.ndarray) -> np.ndarray:
+        """Map raw base-model scores to calibrated ones (identity when unfitted).
+
+        Public so a caller that keeps both scores runs the base model once and
+        calibrates that array. Calling ``predict`` and ``predict_uncalibrated``
+        instead is two full passes of the booster for the same rows.
+        """
         if self._calibrator is None:
             return raw
         if self._method == "isotonic":

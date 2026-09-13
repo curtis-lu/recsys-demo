@@ -50,7 +50,7 @@ def _two_customer_raw(spark):
 def _enriched(spark, k_values=(3,)):
     df = _two_customer_raw(spark)
     group_cols = ["snap_date", "cust_id"]
-    df = ms.rank_within_query(df, group_cols, "score")
+    df = ms.rank_within_query(df, group_cols, "score", "prod_name")
     df = ms.add_query_total_rel(df, group_cols, "label")
     df = df.filter(F.col("total_rel") > 0)
     df = ms.add_row_contributions(df, group_cols, "label", list(k_values))
@@ -109,15 +109,17 @@ def test_resolve_k_values_dedup_and_sort():
 def test_rank_within_query_assigns_1_based_pos(spark):
     df = spark.createDataFrame(
         [
-            ("d", "C0", 0.5),
-            ("d", "C0", 0.9),
-            ("d", "C0", 0.1),
-            ("d", "C1", 0.8),
-            ("d", "C1", 0.3),
+            ("d", "C0", "A", 0.5),
+            ("d", "C0", "B", 0.9),
+            ("d", "C0", "C", 0.1),
+            ("d", "C1", "A", 0.8),
+            ("d", "C1", "B", 0.3),
         ],
-        schema=["snap_date", "cust_id", "score"],
+        schema=["snap_date", "cust_id", "prod_name", "score"],
     )
-    result = ms.rank_within_query(df, ["snap_date", "cust_id"], "score").collect()
+    result = ms.rank_within_query(
+        df, ["snap_date", "cust_id"], "score", "prod_name"
+    ).collect()
     by_score = {(r["cust_id"], r["score"]): r["pos"] for r in result}
     assert by_score[("C0", 0.9)] == 1
     assert by_score[("C0", 0.5)] == 2
@@ -128,10 +130,12 @@ def test_rank_within_query_assigns_1_based_pos(spark):
 
 def test_rank_within_query_independent_groups(spark):
     df = spark.createDataFrame(
-        [("d", "C0", 0.9), ("d", "C1", 0.9)],
-        schema=["snap_date", "cust_id", "score"],
+        [("d", "C0", "A", 0.9), ("d", "C1", "A", 0.9)],
+        schema=["snap_date", "cust_id", "prod_name", "score"],
     )
-    result = ms.rank_within_query(df, ["snap_date", "cust_id"], "score").collect()
+    result = ms.rank_within_query(
+        df, ["snap_date", "cust_id"], "score", "prod_name"
+    ).collect()
     assert all(r["pos"] == 1 for r in result)
 
 

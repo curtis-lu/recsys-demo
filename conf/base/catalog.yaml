@@ -476,6 +476,7 @@ unranked_predictions:
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
+    - {name: score_uncalibrated, type: DOUBLE}  # 校準前的原始分數；沒套用校準時等於 score
   partition_filter:
     model_version: ${model_version}
   partition_cols:
@@ -495,6 +496,7 @@ ranked_staging:
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
+    - {name: score_uncalibrated, type: DOUBLE}  # 校準前的原始分數；沒套用校準時等於 score
     - {name: rank, type: BIGINT}
   partition_filter:
     model_version: ${model_version}
@@ -515,6 +517,7 @@ ranked_predictions:
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
+    - {name: score_uncalibrated, type: DOUBLE}  # 校準前的原始分數；沒套用校準時等於 score
     - {name: rank, type: BIGINT}
   partition_filter:
     model_version: ${model_version}

@@ -151,6 +151,12 @@ def _validate(pdf: pd.DataFrame, schema: dict) -> None:
             f"suppression 需要 {SCORE_COL!r} 欄，但輸入沒有這一欄。與家族其餘"
             "模組一致，不退回 schema.score。"
         )
+    if len(pdf) and not pdf[SCORE_COL].notna().any():
+        # 欄位在、值全空＝讀不到，理由同 item_ability 的守衛（空抽樣不算）。
+        raise ValueError(
+            f"suppression 需要 {SCORE_COL!r} 欄的值，但抽樣裡這一欄全是空值"
+            "（常見原因：這批預測沒有原始分數，欄位是共用表補上的 NULL）。"
+        )
     query_cols = [schema["time"], *schema["entity"]]
     required = [*query_cols, schema["item"], schema["label"]]
     missing = [c for c in required if c not in pdf.columns]

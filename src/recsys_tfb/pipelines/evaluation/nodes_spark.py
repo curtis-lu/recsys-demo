@@ -81,6 +81,10 @@ def prepare_eval_data(
     For external segment sources, delegates to
     ``segments.join_segment_sources`` (storage backend isolated behind its
     source seam).
+
+    Pre-check (input): ``label_table`` has no duplicated identity key in the
+    evaluated month; raises with the number of duplicated keys (why it raises
+    rather than deduplicating is written at the check).
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -150,6 +154,33 @@ def prepare_eval_data(
     pred_snap_dates = ranked_predictions.select(time_col).distinct()
     labels = labels.join(pred_snap_dates, on=time_col, how="inner")
 
+    # Pre-check (input): label_table holds at most one row per identity key in
+    # the evaluated month. The LEFT JOIN below copies a prediction row once per
+    # matching label row, so a duplicated key silently inflates that query's
+    # candidate set and shifts every rank in it; no count or metric raises.
+    # Not dropDuplicates: that picks one answer arbitrarily and makes the row
+    # counts line up, which hides the problem better than leaving it (bug 10).
+    # Not core/consistency.py: a user-defined source table's quality is not a
+    # framework invariant — the same boundary as inference_population's
+    # uniqueness in deliberate-non-goals.md. Checked on `labels` after the
+    # month join, so it counts exactly the rows about to be joined. The
+    # message carries counts only, never key values (they are entity ids).
+    n_duplicated_keys = (
+        labels.groupBy(*identity_cols)
+        .agg(F.count(F.lit(1)).alias("_n_label_rows"))
+        .filter(F.col("_n_label_rows") > 1)
+        .count()
+    )
+    if n_duplicated_keys:
+        raise ValueError(
+            f"{n_duplicated_keys} duplicated label_table key(s) on "
+            f"{identity_cols} at evaluation.snap_date={snap_date!r}. Each extra "
+            f"row would copy its prediction row in the join with the "
+            f"predictions, inflating that query's candidates and shifting its "
+            f"ranks. Deduplicate label_table upstream; evaluation does not "
+            f"pick one of the rows for you."
+        )
+
     # In --post-training mode the predictions source is training_eval_predictions,
     # which already stores `label` alongside `score` (written by the training
     # `predict` node). The merge join below keys on identity_cols only, so a
@@ -180,7 +211,15 @@ def prepare_eval_data(
     # convention (pipelines/dataset/steps/model_input.py, LEFT + COALESCE(0)).
     eval_predictions = ranked_predictions.join(labels, on=identity_cols, how="left")
     if label_col in eval_predictions.columns:
-        eval_predictions = eval_predictions.fillna({label_col: 0})
+        # INT, the type training_eval_predictions declares for `label`. The
+        # two modes take the label from different tables — that one in
+        # --post-training, the user-defined label_table in monitoring (the
+        # example's synthetic one is BIGINT) — and both write the same
+        # enriched_eval_predictions, whose schema never casts. Same failure as
+        # `rank` below (bug 15); it surfaced on the first real monitoring run.
+        eval_predictions = eval_predictions.fillna({label_col: 0}).withColumn(
+            label_col, F.col(label_col).cast("int")
+        )
 
     # Downstream report rendering selects schema["rank"] from eval_predictions.
     # When the predictions source is
@@ -194,10 +233,20 @@ def prepare_eval_data(
         score_col = schema["score"]
         entity_cols = schema["entity"]
         query_cols = [time_col] + entity_cols
-        # rank_within_query adds a "pos" 1-based rank within each
-        # (snap_date, cust_id), ordered by score desc.
-        eval_predictions = rank_within_query(eval_predictions, query_cols, score_col)
-        eval_predictions = eval_predictions.withColumnRenamed("pos", rank_col)
+        # rank_within_query adds a "pos" 1-based rank within each query
+        # group, by score desc with ties by item asc — the rule inference
+        # publishes `rank` with, so both modes rank the same rows alike.
+        eval_predictions = rank_within_query(
+            eval_predictions, query_cols, score_col, schema["item"]
+        )
+        # BIGINT, the type ranked_predictions declares for `rank`. Both modes
+        # write the same enriched_eval_predictions (columns: "auto"), whose
+        # schema is fixed by the first write and never cast afterwards, so
+        # row_number()'s INT here against the monitoring side's BIGINT is a
+        # type conflict on whichever run comes second (bug 15).
+        eval_predictions = eval_predictions.withColumn(
+            rank_col, F.col("pos").cast("bigint")
+        ).drop("pos")
         logger.info(
             "prepare_eval_data: injected '%s' column via rank_within_query "
             "(predictions source did not provide it)",
@@ -550,6 +599,27 @@ def render_diagnosis_pages(parameters: dict, *_dag_deps) -> list[str]:
         out_dir, len(pages), len(results),
     )
     return [str(p) for p in pages]
+
+
+def no_diagnosis_pages(parameters: dict) -> list[str]:
+    """監控模式的 ``evaluation_diagnosis_pages``：永遠是空清單，什麼都不讀。
+
+    監控模式不組 registry 診斷（ADR-0018 決定 5），但 ``generate_report`` 仍要
+    第六個輸入。三條路裡只有這條不出錯：
+
+    * **不接**：``core/runner.py`` 是位置綁定，少一個輸入 Runner 開跑前就
+      raise「requires input … not produced by any prior node」。
+    * **給 ``generate_report`` 的 ``diagnosis_pages`` 一個預設值**：尾端預設值
+      會吞掉 arity 錯誤，六個必填正是 ``known-pitfalls.md`` §12 那次修出來的。
+    * **沿用 ``render_diagnosis_pages``、只給它 ``parameters``**：它按檔名從磁碟
+      讀，回空清單的條件是「目錄裡沒有 JSON」而不是「這次沒算」。同一個
+      ``(model_version, snap_date)`` 先跑過 ``--post-training``，監控報表就會
+      長出指向那批診斷頁的入口，退出碼 0。
+
+    這個 node 不讀磁碟、不讀 ``parameters`` 的值，所以拓撲排序把它排在哪裡
+    都無所謂。
+    """
+    return []
 
 
 def compute_report_aggregates(

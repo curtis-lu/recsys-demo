@@ -31,6 +31,13 @@
 %%   不含 config 指紋——改了 parameters_evaluation.yaml 再 --only-node 重繪，
 %%   會得到新舊兩套設定混在一起的報表，且退出碼 0。
 
+%% 兩種模式的形狀不同（ADR-0018 決定 5）
+%%   registry 診斷與 render_diagnosis_pages 只在 --post-training 組出來；
+%%   監控模式（預設，含 --compare）改組 no_diagnosis_pages：零讀取、回空清單，
+%%   只為了讓 generate_report 的第六個位置輸入有人產出。它不能沿用
+%%   render_diagnosis_pages——那個按檔名讀磁碟，會撿到同一個
+%%   (model_version, snap_date) 先前 post-training 留下的頁面。
+
 %% 為什麼 render_diagnosis_pages 的 inputs 是虛線
 %%   它宣告了四份診斷產物當 inputs，但函式簽章是 (parameters, *_dag_deps)，
 %%   **刻意不讀值**——結果按檔名 diagnosis/<name>.json 讀。列出它們買到兩件事：
@@ -65,7 +72,7 @@ flowchart TB
   cfg_cat[/"evaluation.item_categories.mapping<br/><small>啟用時整套指標對大類粒度再跑第二輪</small>"/]
 
   %% ---------------------- 主鏈：整理 ----------------------
-  n_prep["prepare_eval_data<br/><small>篩 model_version 與 snap_date ・ left join 補 label<br/>post-training 依 score 重算 rank ・ join segment 欄</small>"]
+  n_prep["prepare_eval_data<br/><small>篩 model_version 與 snap_date ・ label_table 重複 key 就擋 ・ left join 補 label<br/>post-training 依 score（同分按 item）重算 rank、轉 BIGINT ・ join segment 欄</small>"]
   d_eval(["eval_predictions<br/><small>一列 ＝ 一個 (time, entity, item) 候選<br/>5 個消費者・未 cache</small>"])
 
   %% ---------------------- 指標流 ----------------------
@@ -81,16 +88,21 @@ flowchart TB
   d_sample(["diagnosis_sample"])
   n_ci["compute_metric_ci<br/><small>per-item AP 與 macro 的 cluster bootstrap（cluster ＝ entity）</small>"]
   d_ci(["evaluation_metric_ci<br/><small>JSON</small>"])
-  n_cs["diagnose_config_shift"]
-  d_cs(["evaluation_config_shift<br/><small>JSON</small>"])
-  n_ia["diagnose_item_ability"]
-  d_ia(["evaluation_item_ability<br/><small>JSON</small>"])
-  n_mc["diagnose_model_capacity"]
-  d_mc(["evaluation_model_capacity<br/><small>JSON</small>"])
-  n_sup["diagnose_suppression"]
-  d_sup(["evaluation_suppression<br/><small>JSON</small>"])
-  n_pages["render_diagnosis_pages<br/><small>按檔名讀 diagnosis/&lt;name&gt;.json ・ 停用的那項就沒有那一頁</small>"]
-  d_pages(["evaluation_diagnosis_pages"])
+  subgraph POST[" 僅 --post-training：registry 診斷 ＋ 分頁 "]
+    n_cs["diagnose_config_shift"]
+    d_cs(["evaluation_config_shift<br/><small>JSON</small>"])
+    n_ia["diagnose_item_ability"]
+    d_ia(["evaluation_item_ability<br/><small>JSON</small>"])
+    n_mc["diagnose_model_capacity"]
+    d_mc(["evaluation_model_capacity<br/><small>JSON</small>"])
+    n_sup["diagnose_suppression"]
+    d_sup(["evaluation_suppression<br/><small>JSON</small>"])
+    n_pages["render_diagnosis_pages<br/><small>按檔名讀 diagnosis/&lt;name&gt;.json ・ 停用的那項就沒有那一頁</small>"]
+  end
+  subgraph MON[" 僅監控模式（預設，含 --compare） "]
+    n_nopages["no_diagnosis_pages<br/><small>零讀取 ・ 回空清單：只為了 generate_report 的第六個位置輸入</small>"]
+  end
+  d_pages(["evaluation_diagnosis_pages<br/><small>兩種模式各由一個 node 產出</small>"])
 
   %% ---------------------- 匯流與落地 ----------------------
   n_report["generate_report<br/><small><b>純函式</b>：6 個必填輸入、無 varargs、不含任何 Spark 物件或 action</small>"]
@@ -144,6 +156,7 @@ flowchart TB
   d_mc -. " " .-> n_pages
   d_sup -. " " .-> n_pages
   n_pages --> d_pages
+  n_nopages --> d_pages
 
   d_metrics --> n_report
   d_baseline --> n_report
@@ -177,7 +190,7 @@ flowchart TB
   class src_ranked,src_teval,src_label,src_seg src
   class cfg_cat cfg
   class art_gain art
-  class n_prep,n_metrics,n_baseline,n_agg,n_sample,n_ci,n_cs,n_ia,n_mc,n_sup,n_pages,n_report,n_persist,n_validate,n_loadb,n_restrict,n_creport nd
+  class n_prep,n_metrics,n_baseline,n_agg,n_sample,n_ci,n_cs,n_ia,n_mc,n_sup,n_pages,n_nopages,n_report,n_persist,n_validate,n_loadb,n_restrict,n_creport nd
   class d_ci,d_cs,d_ia,d_mc,d_sup,d_agg data
   class d_eval,d_metrics,d_baseline,d_sample,d_pages,d_braw,d_common mem
   class o_report,o_enriched,o_creport out

@@ -120,6 +120,158 @@ def test_prepare_eval_data_injects_rank_when_missing(spark):
     assert list(c1_rows.sort_values("rank")["rank"]) == [1, 2]
 
 
+_ENRICH_PARAMS = {
+    "schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+        "label": "label", "score": "score", "rank": "rank"}},
+    "model_version": "v1",
+    "evaluation": {"snap_date": "2025-01-31"},
+}
+
+
+def _post_training_predictions(spark):
+    """``training_eval_predictions`` 的形狀：帶 label、不帶 rank（catalog 宣告型別）。"""
+    return spark.createDataFrame(
+        [("c1", "2025-01-31", "A", 0.9, 0.8, 1),
+         ("c1", "2025-01-31", "B", 0.1, 0.2, 0)],
+        "cust_id STRING, snap_date STRING, prod_name STRING, score DOUBLE, "
+        "score_uncalibrated DOUBLE, label INT",
+    )
+
+
+def _monitoring_predictions(spark):
+    """``ranked_predictions`` 的形狀：帶 rank（BIGINT）、不帶 label。"""
+    return spark.createDataFrame(
+        [("c1", "2025-01-31", "A", 0.9, 0.8, 1),
+         ("c1", "2025-01-31", "B", 0.1, 0.2, 2)],
+        "cust_id STRING, snap_date STRING, prod_name STRING, score DOUBLE, "
+        "score_uncalibrated DOUBLE, rank BIGINT",
+    )
+
+
+def _labels(spark, label_type="INT"):
+    """``label_table`` 是使用者自訂的表，label 的整數寬度不由框架決定。"""
+    return spark.createDataFrame(
+        [("c1", "2025-01-31", "A", 1)],
+        f"cust_id STRING, snap_date STRING, prod_name STRING, label {label_type}",
+    )
+
+
+def test_prepare_eval_data_injected_rank_is_bigint(spark):
+    """bug 15：post-training 補出來的 rank 跟 ``ranked_predictions`` 宣告的
+    BIGINT 同型。``row_number()`` 給的是 INT，而兩種模式寫同一張
+    ``enriched_eval_predictions``——型別不同的那一次寫入會被擋下（見下一條）。
+    """
+    from pyspark.sql.types import LongType
+
+    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
+
+    result = prepare_eval_data(
+        _post_training_predictions(spark), _labels(spark), _ENRICH_PARAMS,
+    )
+    assert isinstance(result.schema["rank"].dataType, LongType)
+
+
+@pytest.mark.parametrize("label_type", ["INT", "BIGINT"])
+@pytest.mark.parametrize(
+    "first", ["post_training", "monitoring"],
+    ids=["post-training-then-monitoring", "monitoring-then-post-training"],
+)
+def test_both_modes_write_the_same_enriched_table_in_either_order(
+    spark, first, label_type,
+):
+    """同一個 model_version 換模式寫同一張 enriched 表，第二次不炸（bug 15）。
+
+    表是 ``columns: "auto"``：schema 由第一次寫入推得，``_evolve_schema`` 對
+    同名不同型直接 raise（「Schema evolution never casts」）。兩種模式來源不同
+    的欄有兩個，型別都必須一樣：
+
+    * ``rank``：一種模式補出來（``row_number`` 是 INT），另一種讀上游（BIGINT）。
+    * ``label``：post-training 讀 ``training_eval_predictions``（宣告 INT），
+      監控模式讀 ``label_table``——使用者自訂的表，示例環境的合成資料是
+      BIGINT。所以 ``label_type`` 兩種都跑：只測 INT 的話這條撞型別看不到
+      （本機實跑監控模式才撞出來）。
+
+    跑在獨立的 test DB，理由同 ``test_persist_and_catalog_load_roundtrip``
+    （``known-pitfalls.md`` §14：共用 warehouse 的真表曾被測試洗掉）。
+    """
+    import shutil
+    from pathlib import Path
+
+    from pyspark.sql.types import IntegerType, LongType
+
+    from recsys_tfb.io.hive_table_dataset import HiveTableDataset
+    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
+
+    db, table = "test_rank_type_across_modes", "enriched_eval_predictions"
+
+    def _clean():
+        spark.sql(f"DROP TABLE IF EXISTS {db}.{table}")
+        raw = spark.conf.get("spark.sql.warehouse.dir", "spark-warehouse")
+        table_dir = Path(raw[len("file:"):] if raw.startswith("file:") else raw)
+        table_dir = table_dir / f"{db}.db" / table
+        if table_dir.exists():
+            shutil.rmtree(table_dir)
+
+    enriched = {
+        "post_training": lambda: prepare_eval_data(
+            _post_training_predictions(spark), _labels(spark, label_type),
+            _ENRICH_PARAMS),
+        "monitoring": lambda: prepare_eval_data(
+            _monitoring_predictions(spark), _labels(spark, label_type),
+            _ENRICH_PARAMS),
+    }
+    second = "monitoring" if first == "post_training" else "post_training"
+
+    spark.sql(f"CREATE DATABASE IF NOT EXISTS {db}")
+    _clean()
+    try:
+        ds = HiveTableDataset(
+            database=db, table=table, columns="auto",
+            partition_filter={"model_version": "MV_X"},
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            external=False,
+        )
+        ds.save(enriched[first]())
+        ds.save(enriched[second]())
+
+        out = ds.load()
+        assert isinstance(out.schema["rank"].dataType, LongType)
+        assert isinstance(out.schema["label"].dataType, IntegerType)
+        assert out.count() == 2
+    finally:
+        _clean()
+
+
+@pytest.mark.parametrize(
+    "predictions", [_post_training_predictions, _monitoring_predictions],
+    ids=["post-training", "monitoring"],
+)
+def test_prepare_eval_data_raises_on_duplicated_label_keys(spark, predictions):
+    """bug 10：``label_table`` 同一個 key 有兩列就擋，訊息帶重複的 key 數。
+
+    下面的 LEFT JOIN 會把該候選複製成多列：query 的候選集膨脹、rank 全錯，
+    列數與指標都不報錯。不用 ``dropDuplicates``——那是隨便挑一個答案。
+
+    fixture 的形狀各有用意：B 重複三列（數的是 key，不是多出來的列）；別的
+    月份也有重複（只檢查這次評估的月份）。兩者任一數錯，數字就不是 2。
+    """
+    from recsys_tfb.pipelines.evaluation.nodes_spark import prepare_eval_data
+
+    labels = spark.createDataFrame(
+        [("c1", "2025-01-31", "A", 1),
+         ("c1", "2025-01-31", "A", 1),
+         ("c1", "2025-01-31", "B", 0),
+         ("c1", "2025-01-31", "B", 0),
+         ("c1", "2025-01-31", "B", 1),
+         ("c1", "2024-12-31", "A", 1),
+         ("c1", "2024-12-31", "A", 1)],
+        "cust_id STRING, snap_date STRING, prod_name STRING, label INT",
+    )
+    with pytest.raises(ValueError, match="2 duplicated label_table key"):
+        prepare_eval_data(predictions(spark), labels, _ENRICH_PARAMS)
+
+
 def test_prepare_eval_data_preserves_existing_rank_column(spark):
     """When the predictions input already has a `rank` column (non-post-training
     mode sourced from ranked_predictions), prepare_eval_data must NOT re-rank
