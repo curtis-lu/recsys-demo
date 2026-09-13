@@ -171,6 +171,33 @@ def test_declared_inputs_override_the_default():
     assert contract.inputs_for(mod) == ("gain_ledger", "parameters")
 
 
+def test_extra_config_keys_default_to_none():
+    """沒宣告 ``EXTRA_CONFIG_KEYS`` 的模組只依賴 ``evaluation`` 的共用列舉。"""
+    assert contract.extra_config_keys_for(types.SimpleNamespace()) == ()
+
+
+def test_declared_extra_config_keys_are_returned_as_a_tuple():
+    mod = types.SimpleNamespace(EXTRA_CONFIG_KEYS=["dataset.x", "training.y"])
+    assert contract.extra_config_keys_for(mod) == ("dataset.x", "training.y")
+
+
+def test_config_shift_declares_every_setting_it_reads_outside_evaluation():
+    """期望值抄自 ``config_shift/_compute.py`` 實際讀的鍵，不是從模組導出。
+
+    漏一個的後果：改了那個鍵、只重繪，診斷頁照印舊設定算的 offset，不 raise。
+    ``dataset.sample_ratio`` 是 ADR-0020 決定二漏列、依程式碼補上的。
+    """
+    from recsys_tfb.diagnosis.metric import config_shift
+
+    assert contract.extra_config_keys_for(config_shift) == (
+        "dataset.sample_group_keys",
+        "dataset.sample_ratio",
+        "dataset.sample_ratio_overrides",
+        "training.sample_weight_keys",
+        "training.sample_weights",
+    )
+
+
 def test_compute_params_strip_the_evaluation_prefix():
     mod = types.SimpleNamespace(
         INPUTS=("gain_ledger", "evaluation_item_ability", "parameters"))

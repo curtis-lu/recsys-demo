@@ -86,9 +86,20 @@ DIAGNOSES: tuple[str, ...] = (
     "config_shift", "item_ability", "model_capacity", "suppression",
 )
 
+#: 可選符號 ``EXTRA_CONFIG_KEYS``：這項診斷在 ``evaluation`` 子樹**以外**讀的
+#: 設定鍵（從 parameters 根算起的點路徑，例如 ``"dataset.sample_ratio"``）。
+#: ``evaluation`` 裡「算的」鍵由 ``evaluation.config_fingerprint.COMPUTED_KEYS``
+#: 統一列舉；這份 JSON 的設定指紋＝那份列舉 ＋ 這裡宣告的鍵。
+#:
+#: 為什麼由診斷自己宣告、不寫進那份共用列舉：只有這項診斷讀它們，放進共用列舉
+#: 會讓改 ``dataset.sample_ratio`` 也把 metric CI、report aggregates 判成過期。
+#: 為什麼組合在 node 做、指紋模組不 import 這裡：依賴方向同 :func:`inputs_for`
+#: （ADR-0020 決定二）。漏宣告的後果是**靜默**的：改了那個鍵只重繪，頁面照印舊
+#: 設定算的結果，不 raise——所以每項宣告都有一條測試把鍵名逐字寫出來。
+
 __all__ = [
     "DEFAULT_INPUTS", "DIAGNOSES", "check_module", "compute_params_for",
-    "inputs_for",
+    "extra_config_keys_for", "inputs_for",
 ]
 
 
@@ -100,6 +111,15 @@ def inputs_for(mod) -> tuple[str, ...]:
     不變量測試守住，這裡只負責「讀」。
     """
     return tuple(getattr(mod, "INPUTS", DEFAULT_INPUTS))
+
+
+def extra_config_keys_for(mod) -> tuple[str, ...]:
+    """這項診斷在 ``evaluation`` 以外依賴的設定鍵；沒宣告就是空 tuple。
+
+    形狀比照 :func:`inputs_for`：只負責「讀」，不驗證。空 tuple 是合法的常態
+    ——多數診斷在 ``evaluation`` 以外只讀 ``schema``，而 ``schema`` 不在指紋裡。
+    """
+    return tuple(getattr(mod, "EXTRA_CONFIG_KEYS", ()))
 
 
 def compute_params_for(mod) -> tuple[str, ...]:
