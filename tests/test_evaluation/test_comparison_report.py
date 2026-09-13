@@ -162,7 +162,7 @@ def test_per_item_section_discloses_macro_item_coverage():
     assert sec is not None
     for title in sec.table_titles:
         assert "參與 macro 的 item 數" in title
-        assert "M 2／B 2／全部 2" in title  # both sides: p1,p2 in per_item, n_items=2
+        assert "M 2／B 2／全部 2）" in title  # both sides: p1,p2 in per_item, n_items=2
 
 
 def test_category_section_discloses_macro_item_coverage():
@@ -186,7 +186,7 @@ def test_category_section_discloses_macro_item_coverage():
     per_item_titles = [t for t in sec.table_titles if t != "大類 overall"]
     assert per_item_titles
     for title in per_item_titles:
-        assert "M 1／B 1／全部 1" in title
+        assert "M 1／B 1／全部 1）" in title
 
 
 def _overall_up_to_k5() -> dict:

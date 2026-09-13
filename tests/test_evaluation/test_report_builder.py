@@ -1257,7 +1257,7 @@ def test_baseline_section_per_item_recall_table_three_cols_per_k():
     ) < 1e-9
     # bug 5: title discloses both sides' macro item coverage (fixture: A/B on
     # both sides, no n_pos in either -> default min_positives=0 counts both).
-    assert "M 2／B 2／全部 2" in title
+    assert "M 2／B 2／全部 2）" in title
 
 
 def test_baseline_section_per_item_attr_tables_use_primary_map_k():
