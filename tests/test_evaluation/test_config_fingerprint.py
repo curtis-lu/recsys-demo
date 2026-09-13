@@ -22,6 +22,11 @@ from recsys_tfb.evaluation.config_fingerprint import (
 
 #: The closed enumeration as the issue writes it (dotted from the params root).
 SPEC_COMPUTED_PATHS = {
+    # Not from issue #342: the run mode (--post-training / monitoring),
+    # added by F7 (a later code-review round) because it changes which
+    # predictions table prepare_eval_data reads and is injected into
+    # `parameters` at the top level like model_version/snap_date.
+    "post_training",
     "evaluation.snap_date",
     "evaluation.k_values",
     "evaluation.segment_columns",
@@ -38,6 +43,7 @@ SPEC_COMPUTED_PATHS = {
 #: One leaf per enumerated key, including leaves under the ``.*`` subtrees, so
 #: a subtree listed by its root is shown to cover what sits below it.
 SPEC_COMPUTED_LEAVES = [
+    "post_training",
     "evaluation.snap_date",
     "evaluation.k_values",
     "evaluation.segment_columns",
@@ -73,6 +79,7 @@ def _params() -> dict:
     return {
         "model_version": "mv_test",
         "snap_date": "20260131",
+        "post_training": False,
         "dataset": {
             "sample_group_keys": ["segment_a", "label"],
             "sample_ratio": 1.0,
@@ -242,6 +249,34 @@ def test_int_keyed_config_is_stable_and_round_trips():
                         produced_by="compute_metric_ci")],
         params,
     )
+
+
+# ------------------------------------------------------- run mode (post_training)
+
+
+def test_post_training_changes_the_hash():
+    """(#342 F7) --post-training and monitoring runs of the same
+    (model_version, snap_date) write the same catalog paths but
+    prepare_eval_data reads a different predictions table; the fingerprint
+    must tell the two populations apart."""
+    on = _set(_params(), "post_training", True)
+    off = _set(_params(), "post_training", False)
+    assert fingerprint(on)["sha256"] != fingerprint(off)["sha256"]
+
+
+def test_post_training_mismatch_names_the_key_and_rerun_node():
+    old = _set(_params(), "post_training", True)
+    new = _set(copy.deepcopy(old), "post_training", False)
+    with pytest.raises(ValueError) as exc:
+        require_computed_with_current_config(
+            [LoadedArtifact(catalog_name="evaluation_metric_ci",
+                            payload=_payload(old),
+                            produced_by="compute_metric_ci")],
+            new,
+        )
+    msg = str(exc.value)
+    assert "post_training" in msg
+    assert "--from-node prepare_eval_data" in msg
 
 
 # ------------------------------------------------ require_computed_with_...

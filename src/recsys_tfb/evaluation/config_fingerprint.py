@@ -25,6 +25,19 @@ return a stub and ``diagnostics: false`` does the same for
 ``compute_report_aggregates``; treated as drawn, flipping them back and
 re-drawing yields a report with a section silently missing.
 
+One row of :data:`COMPUTED_KEYS`, ``post_training``, is not a YAML config
+setting at all: it is the ``--post-training`` / monitoring run mode, injected
+into ``parameters`` at the top level by the CLI exactly like ``model_version``
+and ``snap_date`` are (never nested under ``evaluation``). It earns a row for
+the same reason those two are recognisable identity, not fingerprinted: it
+changes which predictions table ``prepare_eval_data`` reads, so two runs of
+the same ``(model_version, snap_date)`` in different modes must not have their
+artifacts read interchangeably. Node-level unit tests that build ``parameters``
+by hand and never set this key see it absent both when a node writes its
+fingerprint and when another node later checks it, so they stay unaffected;
+only a real mode switch between two runs makes it present on one side and
+absent (or the other value) on the other.
+
 Why a closed list, not a hash of the whole ``evaluation`` subtree
 =================================================================
 * ``evaluation.compare`` is injected into that subtree by the CLI at run time
@@ -96,7 +109,26 @@ __all__ = [
 #: ``tests/test_pipelines/test_evaluation/test_pipeline.py::
 #: TestFingerprintRerunNodes`` pins it in both modes: a row whose node sorts
 #: after a fingerprinted producer turns that test red.
+#:
+#: The first row, ``post_training``, is not a user config key: it is the
+#: ``--post-training`` / monitoring run mode, a CLI flag injected into
+#: ``parameters`` at the top level the same way ``model_version`` and
+#: ``snap_date`` are (``__main__.py`` ``evaluation()``'s ``runtime_params``).
+#: It belongs in this enumeration because it changes a Spark computation the
+#: same way any other row here does: ``prepare_eval_data`` reads a different
+#: predictions table (``training_eval_predictions`` vs ``ranked_predictions``)
+#: depending on it. Without it, a ``--post-training`` run followed by a
+#: monitoring ``--only-node generate_report`` on the same ``(model_version,
+#: snap_date)`` writes/reads the same catalog paths, the fingerprints of the
+#: unrelated keys match, and the report mixes metric CI / report aggregates
+#: computed on one population with metrics computed on the other, exit code 0.
+#: Unit tests that build ``parameters`` without a ``post_training`` key see it
+#: absent on both the write side (``fingerprint()`` in the producing node) and
+#: the check side (``require_computed_with_current_config``), so those stay
+#: green; only a real mode switch between two runs makes it present-then-absent
+#: or True-then-False.
 COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
+    ("post_training", "prepare_eval_data"),
     ("evaluation.snap_date", "prepare_eval_data"),
     # Read first today by draw_diagnosis_sample_node (diagnosis/metric/
     # sample.py). Listed at prepare_eval_data anyway: eval_predictions is

@@ -1702,6 +1702,14 @@ def evaluation(
         "calibration_variant_id": cal_v if cal_v is not None else _NONE_PLACEHOLDER,
         "model_version": mv,
         "snap_date": snap_date,
+        # Also in pipeline_kwargs (which nodes create_pipeline wires in). Both
+        # are needed: pipeline_kwargs picks the DAG shape, this makes the mode
+        # visible in `parameters` (config_fingerprint.COMPUTED_KEYS reads it
+        # from there) so a --post-training run followed by a monitoring
+        # --only-node generate_report on the same (model_version, snap_date)
+        # is caught as stale rather than silently mixing the two populations'
+        # metric CI / report aggregates into one report (#342 F7).
+        "post_training": post_training,
     }
 
     pipeline_kwargs = {

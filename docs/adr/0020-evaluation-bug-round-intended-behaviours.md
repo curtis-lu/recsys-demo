@@ -50,6 +50,7 @@ date: 2026-09-13
 3. 讀 JSON 的 node（`generate_report`、`render_diagnosis_pages`）逐份比對指紋與現在的設定；不合就 raise，訊息點名**哪個鍵變了、該從哪個 node 重跑**（例：「`metric.min_positives` 已變，請 `--from-node compute_metrics`」）。標為前置檢查。
 4. 「先多算一些」現況已成立，本份只把它寫成規則：`k_values` 是全集、`display.primary_map_k` 只挑要印的；分群對 `segment_columns` 全算、報表挑要印的；大類與細粒度都算。**不准把「畫的」鍵偷渡進計算層**——例如為了省時間只算 `display.primary_map_k` 那幾個 K。
 5. 分類表進 `docs/pipelines/evaluation.md` §7「設定與重跑矩陣」，取代現在那張。
+6. **後續更新（flow 規則 2）**：同輪 code review（F7）發現 `--post-training`／監控模式的切換也屬於「算的」——`prepare_eval_data` 依它讀不同的預測表（`training_eval_predictions` vs `ranked_predictions`），但它是 CLI 注入的 run mode，不是 `evaluation.*` 底下的使用者設定，原始封閉列舉沒收它，導致同一 `(model_version, snap_date)` 兩種模式互跑時指紋一致、放行混母體的報表。已補進 `COMPUTED_KEYS` 第一列（`post_training` → `prepare_eval_data`）。
 
 **為什麼不是雜湊進路徑**（`data/evaluation/<mv>/<snap>/<雜湊>/…`）：舊檔自然失效是它唯一的好處；代價是每改一次設定多一棵目錄樹，`--compare-only`、`scripts/render_diagnosis.py`、manifest 的 artifacts 清單全部要學會挑目錄。指紋在檔內，路徑不動，讀者只多一個 raise。
 

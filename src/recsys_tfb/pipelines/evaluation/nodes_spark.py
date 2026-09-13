@@ -540,6 +540,20 @@ def make_diagnosis_node(name: str):
     （``core/node.py:8``），不設的話多個 node 同名，``--only-node`` 指不到、
     log 分不出誰是誰，而 pipeline 照樣跑得完。
 
+    **前置檢查（precondition）**：宣告的 input 裡，凡是 ``evaluation_<upstream>``
+    形狀且 ``<upstream>`` 本身也在 ``contract.DIAGNOSES`` 裡的（目前只有
+    ``model_capacity`` 讀 ``evaluation_item_ability``），在呼叫 ``compute`` 之前
+    先用 :func:`require_computed_with_current_config` 驗它的指紋。理由：這個
+    factory 底下所有診斷共用同一份 body，``--only-node diagnose_model_capacity``
+    會把落地的舊 ``evaluation_item_ability`` JSON 當 input 讀進來計算，而下面
+    的 ``stamp`` 只會蓋上**這次**的指紋——若不在這裡另外驗上游，往後
+    ``render_diagnosis_pages`` 看到的是一份蓋著新指紋、內容卻算在舊
+    ``item_ability`` 結果上的產物，檢查不出來。寫成通用迴圈（掃 ``declared``
+    找符合形狀的 input），不是 model_capacity 專用分支：未來任何診斷讀另一項
+    診斷的落地結果都自動被涵蓋。非 registry 診斷的 ``evaluation_*`` input（目前
+    不存在）不會被這段檢查到——它只認得出「這個名字對應 ``DIAGNOSES`` 裡的
+    某一項」。
+
     Every output, the disabled stub included, gets two keys added here rather
     than in the four ``_compute.py`` files: this factory is the one exit all
     diagnosis nodes share, so one place covers every diagnosis present and
@@ -585,6 +599,42 @@ def make_diagnosis_node(name: str):
                     "draw_diagnosis_sample_node gate out of sync with the "
                     "consumer flag"
                 )
+
+        # Pre-check (input): any declared input that is itself another
+        # registry diagnosis's landed result must have been computed with
+        # today's settings, the same freshness check render_diagnosis_pages
+        # runs before drawing. Without this, `--only-node diagnose_{name}`
+        # loads a stale evaluation_<upstream> JSON, computes on it, and this
+        # node's own `stamp` below records the CURRENT fingerprint — so the
+        # later render check sees a fresh-looking result and old numbers
+        # reach the page (model_capacity reads evaluation_item_ability this
+        # way).
+        #
+        # Generic over the registry, not a model_capacity special case:
+        # any declared input named `evaluation_<upstream>` where <upstream>
+        # is itself in contract.DIAGNOSES is checked the same way.
+        # `gain_ledger` (a training artifact, no fingerprint) and
+        # `diagnosis_sample` (memory-only, checked above instead) are not
+        # registry diagnoses and so are left alone. A non-registry
+        # `evaluation_*` input would likewise not be checked — none exists
+        # today, and adding one back would need this loop taught about it.
+        for input_name, value in zip(declared, node_inputs):
+            if not input_name.startswith("evaluation_"):
+                continue
+            upstream = input_name[len("evaluation_"):]
+            if upstream not in contract.DIAGNOSES:
+                continue
+            upstream_mod = importlib.import_module(
+                f"recsys_tfb.diagnosis.metric.{upstream}")
+            require_computed_with_current_config(
+                [LoadedArtifact(
+                    catalog_name=input_name,
+                    payload=value,
+                    produced_by=f"diagnose_{upstream}",
+                    extra_keys=contract.extra_config_keys_for(upstream_mod),
+                )],
+                parameters,
+            )
 
         out = mod.compute(*node_inputs)
         # 純量鍵通用地印出來，不為每項診斷各寫一句摘要：那樣 Plan 2-5 每加

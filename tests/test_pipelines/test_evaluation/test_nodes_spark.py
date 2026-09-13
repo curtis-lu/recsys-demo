@@ -1176,6 +1176,132 @@ def test_generated_node_delegates_to_the_named_module(monkeypatch):
     assert called["sample"] is sample
 
 
+def _install_fake_upstream_and_downstream(monkeypatch):
+    """A fake diagnosis pair shaped like ``model_capacity`` reading
+    ``evaluation_item_ability``, generalised with made-up names so the
+    precondition is proven generic rather than special-cased.
+
+    ``fake_downstream.INPUTS`` names ``evaluation_fake_upstream`` — a
+    landed result of another registry diagnosis — plus ``parameters``.
+    ``contract.DIAGNOSES`` is patched to contain both names, which is what
+    ``make_diagnosis_node._run``'s new pre-check keys off of (an
+    ``evaluation_<x>`` input where ``<x>`` is itself in ``DIAGNOSES``).
+
+    Returns the dict ``compute`` records its received upstream payload into,
+    so a test can tell whether ``compute`` ran at all and with what.
+    """
+    import sys
+    import types
+
+    from recsys_tfb.diagnosis.metric import contract
+
+    upstream_mod = types.ModuleType("recsys_tfb.diagnosis.metric.fake_upstream")
+    upstream_mod.EXTRA_CONFIG_KEYS = ("dataset.only_upstream_reads_this",)
+    upstream_mod.compute = lambda *a: {}  # never called directly in these tests
+
+    downstream_mod = types.ModuleType(
+        "recsys_tfb.diagnosis.metric.fake_downstream")
+    downstream_mod.INPUTS = ("evaluation_fake_upstream", "parameters")
+    received = {}
+
+    def _compute(evaluation_fake_upstream, parameters):
+        received["upstream_payload"] = evaluation_fake_upstream
+        return {"marker": "downstream_computed"}
+
+    downstream_mod.compute = _compute
+
+    monkeypatch.setitem(
+        sys.modules, "recsys_tfb.diagnosis.metric.fake_upstream", upstream_mod)
+    monkeypatch.setitem(
+        sys.modules, "recsys_tfb.diagnosis.metric.fake_downstream",
+        downstream_mod)
+    monkeypatch.setattr(
+        contract, "DIAGNOSES", ("fake_upstream", "fake_downstream"))
+    return received
+
+
+def test_downstream_diagnosis_refuses_a_stale_upstream_result(monkeypatch):
+    """(#342 F8) ``--only-node diagnose_fake_downstream`` loading a stale
+    ``evaluation_fake_upstream`` JSON must raise, naming the changed key and
+    the upstream's rerun node — the same freshness check
+    ``render_diagnosis_pages`` runs, but here it must run *inside* the
+    downstream diagnosis's own node, before it stamps the CURRENT fingerprint
+    over a result actually computed on stale input."""
+    import copy
+
+    from recsys_tfb.evaluation.config_fingerprint import fingerprint
+    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+
+    _install_fake_upstream_and_downstream(monkeypatch)
+
+    old_params = {"dataset": {"only_upstream_reads_this": 1},
+                  "evaluation": {"diagnosis": {}}}
+    new_params = copy.deepcopy(old_params)
+    new_params["dataset"]["only_upstream_reads_this"] = 2
+
+    stale_upstream_payload = {
+        "enabled": True, "diagnosis": "fake_upstream",
+        "config_fingerprint": fingerprint(
+            old_params, ("dataset.only_upstream_reads_this",)),
+    }
+
+    node_fn = make_diagnosis_node("fake_downstream")
+    with pytest.raises(ValueError) as exc:
+        node_fn(stale_upstream_payload, new_params)
+    msg = str(exc.value)
+    assert "dataset.only_upstream_reads_this: 1 -> 2" in msg
+    assert "--from-node diagnose_fake_upstream" in msg
+
+
+def test_downstream_diagnosis_computes_on_a_fresh_upstream_result(monkeypatch):
+    from recsys_tfb.evaluation.config_fingerprint import fingerprint
+    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+
+    received = _install_fake_upstream_and_downstream(monkeypatch)
+
+    params = {"dataset": {"only_upstream_reads_this": 1},
+              "evaluation": {"diagnosis": {}}}
+    fresh_upstream_payload = {
+        "enabled": True, "diagnosis": "fake_upstream",
+        "config_fingerprint": fingerprint(
+            params, ("dataset.only_upstream_reads_this",)),
+    }
+
+    node_fn = make_diagnosis_node("fake_downstream")
+    out = node_fn(fresh_upstream_payload, params)
+    assert out["marker"] == "downstream_computed"
+    assert received["upstream_payload"] is fresh_upstream_payload
+
+
+def test_disabled_downstream_diagnosis_skips_the_upstream_check(monkeypatch):
+    """A disabled downstream returns its stub before reaching compute (and
+    before this precondition), so a stale upstream must not raise here —
+    the existing enabled-gate ordering is unchanged."""
+    from recsys_tfb.evaluation.config_fingerprint import fingerprint
+    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+
+    _install_fake_upstream_and_downstream(monkeypatch)
+
+    old_params = {"dataset": {"only_upstream_reads_this": 1},
+                  "evaluation": {"diagnosis": {
+                      "fake_downstream": {"enabled": False}}}}
+    stale_upstream_payload = {
+        "enabled": True, "diagnosis": "fake_upstream",
+        "config_fingerprint": fingerprint(
+            old_params, ("dataset.only_upstream_reads_this",)),
+    }
+    # Change the key after stamping the payload, so it really is stale
+    # relative to `old_params` as passed to the disabled downstream node.
+    old_params["dataset"]["only_upstream_reads_this"] = 2
+
+    node_fn = make_diagnosis_node("fake_downstream")
+    out = node_fn(stale_upstream_payload, old_params)
+    assert out == {
+        "enabled": False, "diagnosis": "fake_downstream",
+        "config_fingerprint": fingerprint(old_params),
+    }
+
+
 def test_each_diagnosis_node_gets_a_distinct_name():
     """``Node.name`` 預設取 ``func.__name__``（core/node.py:8）。
 
