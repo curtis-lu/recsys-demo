@@ -81,7 +81,9 @@ def test_purchase_counts_raises_when_window_empty(spark):
     message = str(exc.value)
     assert "2025-01-31" in message
     assert "2026-01-31" in message
-    assert "2026-01" in message  # the month actually present in label_table
+    # The months list itself: a bare "2026-01" is always satisfied by the
+    # window bound "2026-01-31" above, whatever the list says.
+    assert "label_table has months: ['2026-01']" in message
 
 
 def test_purchase_counts_no_longer_falls_back_when_no_history(spark):

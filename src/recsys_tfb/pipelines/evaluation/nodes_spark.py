@@ -395,9 +395,7 @@ def compute_baseline_metrics(
         build_baseline_frame,
         compute_monthly_purchase_counts,
         compute_purchase_counts,
-    )
-    from recsys_tfb.evaluation.baselines import (
-        lookback_months as resolve_lookback_months,
+        resolve_lookback_months,
     )
     from recsys_tfb.evaluation.metrics_spark import compute_overall_per_item
 
