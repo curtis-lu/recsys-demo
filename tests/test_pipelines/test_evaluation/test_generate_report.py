@@ -5,15 +5,32 @@ these tests call it to produce the ``report_aggregates`` payload, then feed
 that into ``generate_report`` — exactly the two-step path the pipeline wires.
 """
 
+import copy
+import importlib
 import inspect
+import json
+import re
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
+from recsys_tfb.evaluation.config_fingerprint import fingerprint
 from recsys_tfb.pipelines.evaluation.nodes_spark import (
     compute_report_aggregates,
     generate_report,
 )
+
+
+def _unread_stub(params):
+    """A disabled baseline / metric-CI payload carrying ``params``' fingerprint.
+
+    ``generate_report`` checks every landed input's fingerprint, so the old
+    ``None`` placeholders no longer pass; this is what the producers write
+    when their section is off.
+    """
+    return {"enabled": False, "config_fingerprint": fingerprint(params)}
 
 
 def _params(diagnostics=False):
@@ -58,7 +75,8 @@ def test_generate_report_html_no_diagnostics(spark):
     params = _params(False)
     aggregates = compute_report_aggregates(_eval_pred(spark), params)
     html = generate_report(_metrics(), params,
-                            None, None, aggregates, None)
+                            _unread_stub(params), _unread_stub(params),
+                            aggregates, None)
     assert html.startswith("<!DOCTYPE html>")
     assert "概覽" in html
     # diagnostics off → 沒有可收合的診斷 section（<details class="section">）。
@@ -69,8 +87,10 @@ def test_generate_report_html_no_diagnostics(spark):
 def test_generate_report_with_diagnostics(spark):
     params = _params(True)
     aggregates = compute_report_aggregates(_eval_pred(spark), params)
+    assert aggregates["config_fingerprint"] == fingerprint(params)
     html = generate_report(_metrics(), params,
-                            None, None, aggregates, None)
+                            _unread_stub(params), _unread_stub(params),
+                            aggregates, None)
     # 診斷升為頂層「per-item 細部拆解」段（非收合 section）；其明細數字表用
     # 逐表收合 <details class="table-collapse">。
     assert "per-item 細部拆解" in html
@@ -113,10 +133,12 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
     small_aggregates = compute_report_aggregates(_eval_pred_n(spark, 100), params)
     large_aggregates = compute_report_aggregates(_eval_pred_n(spark, 3000), params)
     small = generate_report(
-        _metrics(), params, None, None, small_aggregates, None,
+        _metrics(), params, _unread_stub(params), _unread_stub(params),
+        small_aggregates, None,
     )
     large = generate_report(
-        _metrics(), params, None, None, large_aggregates, None,
+        _metrics(), params, _unread_stub(params), _unread_stub(params),
+        large_aggregates, None,
     )
     assert abs(len(large) - len(small)) < 20000
 
@@ -277,6 +299,191 @@ def test_no_diagnosis_pages_means_no_links_section():
 
 
 # =====================================================================
+# render_diagnosis_pages draws this run's results (#342, ADR-0020 bug 9)
+# =====================================================================
+
+
+def _render_params(**enabled):
+    """Every registry diagnosis disabled unless named in ``enabled``."""
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+
+    params = copy.deepcopy(_DIAG_PARAMS)
+    params["model_version"] = "mv_render_test"
+    params["snap_date"] = "20260131"
+    diag = params["evaluation"]["diagnosis"]
+    for name in DIAGNOSES:
+        diag[name] = {"enabled": bool(enabled.get(name, False))}
+    return params
+
+
+def _node_outputs(params, sample=None):
+    """Each diagnosis's ``make_diagnosis_node`` output, in ``DIAGNOSES`` order.
+
+    Built by the real node factory, not hand-written dicts: the factory adds
+    the name and the fingerprint, and a hand-written dict would test the
+    test's idea of that shape. Disabled diagnoses read no input besides the
+    sample, so the rest are None.
+    """
+    from recsys_tfb.diagnosis.metric import contract
+    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+
+    outputs = []
+    for name in contract.DIAGNOSES:
+        mod = importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
+        upstream = [sample if key == "diagnosis_sample" else None
+                    for key in contract.inputs_for(mod)[:-1]]
+        outputs.append(make_diagnosis_node(name)(*upstream, params))
+    return outputs
+
+
+def test_render_refuses_diagnosis_results_in_the_wrong_order(
+    tmp_path, monkeypatch,
+):
+    """Both results are dicts and the count is right: only a content check
+    catches this (known-pitfalls.md §12)."""
+    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        render_diagnosis_pages,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    params = _render_params()
+    results = _node_outputs(params)
+    results[0], results[1] = results[1], results[0]
+    with pytest.raises(TypeError,
+                       match=r"should be the result of 'config_shift'"):
+        render_diagnosis_pages(params, *results)
+
+
+def test_render_refuses_parameters_swapped_with_a_result(tmp_path, monkeypatch):
+    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        render_diagnosis_pages,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    params = _render_params()
+    results = _node_outputs(params)
+    with pytest.raises(TypeError,
+                       match="first input must be the parameters dict"):
+        render_diagnosis_pages(results[0], params, *results[1:])
+
+
+def test_render_refuses_a_missing_result(tmp_path, monkeypatch):
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        render_diagnosis_pages,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    params = _render_params()
+    with pytest.raises(TypeError,
+                       match=rf"expected {len(DIAGNOSES)} diagnosis results"):
+        render_diagnosis_pages(params, *_node_outputs(params)[:-1])
+
+
+def test_render_draws_this_runs_results_not_files_left_on_disk(
+    tmp_path, monkeypatch,
+):
+    """A drawable JSON an earlier run left in the directory must not appear
+    when this run did not compute that diagnosis.
+
+    Every diagnosis is disabled here. The file-name implementation found that
+    ``config_shift.json`` and drew a page from it, so the main report gained a
+    link to the old result, with exit code 0.
+    """
+    from recsys_tfb.evaluation.report_builder import (
+        build_diagnosis_links_section,
+    )
+    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        _diagnosis_pages_dir,
+        render_diagnosis_pages,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    params = _render_params()
+    leftover_dir = _diagnosis_pages_dir(params)
+    leftover_dir.mkdir(parents=True)
+    (leftover_dir / "config_shift.json").write_text(
+        json.dumps(_diag_results()["config_shift"]), encoding="utf-8")
+
+    pages = render_diagnosis_pages(params, *_node_outputs(params))
+
+    assert not [p for p in pages if "config-shift" in p]
+    assert pages == []
+    assert build_diagnosis_links_section(pages, params) is None
+
+
+def test_render_refuses_results_computed_with_other_settings(
+    tmp_path, monkeypatch,
+):
+    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        render_diagnosis_pages,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    computed_with = _render_params()
+    computed_with["evaluation"]["metric"] = {"min_positives": 5}
+    with pytest.raises(ValueError) as exc:
+        render_diagnosis_pages(_render_params(),
+                               *_node_outputs(computed_with))
+    msg = str(exc.value)
+    assert "evaluation.metric.min_positives" in msg
+    assert "--from-node compute_metrics" in msg
+
+
+_PLOTLY_DIV_ID = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def test_render_pages_match_the_file_based_path(tmp_path, monkeypatch):
+    """Behaviour guard: the same results draw the same pages whether read by
+    file name (the old path) or taken as inputs (the new one).
+
+    Old path: ``assemble_diagnosis_pages(load_results(dir)[0], ...)``. The new
+    path gets catalog-loaded dicts, so the results go through a JSON file and
+    back here too. Plotly makes a fresh div id each time; the comparison
+    strips it.
+    """
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+    from recsys_tfb.diagnosis.metric.results import load_results
+    from recsys_tfb.evaluation.report_builder import assemble_diagnosis_pages
+    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        _diagnosis_pages_dir,
+        render_diagnosis_pages,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    params = _render_params(config_shift=True)
+    sample = (_diag_sample_pdf(),
+              {"n_queries": 40, "sampling_description": SAMPLING_DESCRIPTION})
+    diag_dir = _diagnosis_pages_dir(params)
+    diag_dir.mkdir(parents=True)
+    for name, result in zip(DIAGNOSES, _node_outputs(params, sample)):
+        (diag_dir / f"{name}.json").write_text(json.dumps(result),
+                                               encoding="utf-8")
+    read_back = [
+        json.loads((diag_dir / f"{name}.json").read_text(encoding="utf-8"))
+        for name in DIAGNOSES
+    ]
+
+    file_based = assemble_diagnosis_pages(
+        load_results(diag_dir)[0], params, tmp_path / "file_based")
+    from_inputs = [Path(p) for p in render_diagnosis_pages(params, *read_back)]
+
+    assert sorted(p.name for p in file_based) == \
+        sorted(p.name for p in from_inputs)
+    assert "01-config-shift.html" in {p.name for p in from_inputs}
+    by_name = {p.name: p for p in from_inputs}
+    for old in file_based:
+        new = by_name[old.name]
+        if old.suffix == ".html":
+            assert _PLOTLY_DIV_ID.sub("ID", old.read_text(encoding="utf-8")) \
+                == _PLOTLY_DIV_ID.sub("ID", new.read_text(encoding="utf-8")), \
+                old.name
+        else:
+            assert old.read_bytes() == new.read_bytes(), old.name
+
+
+# =====================================================================
 # generate_report 變純函式（Plan 1.5 Task 4）
 # =====================================================================
 
@@ -333,3 +540,64 @@ def test_generate_report_body_has_no_spark_actions():
     assert not forbidden, (
         f"generate_report 函式體仍有 Spark action 呼叫：{forbidden}"
     )
+
+
+# =====================================================================
+# generate_report draws only what the current settings computed
+# (#342, ADR-0020 decision 2)
+# =====================================================================
+
+
+def _params_computed_without_baseline():
+    params = _params(False)
+    params["evaluation"]["diagnosis"] = {"ci": {"enabled": False}}
+    params["evaluation"]["report"]["sections"]["baseline"] = False
+    return params
+
+
+def _landed_inputs(params):
+    """The three landed inputs, as their producers write them under ``params``.
+
+    Every section involved is off, so each producer returns its stub before
+    touching a DataFrame and no Spark session is needed.
+    """
+    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        compute_baseline_metrics,
+        compute_metric_ci,
+    )
+
+    return (compute_baseline_metrics(None, None, params),
+            compute_metric_ci(None, params),
+            compute_report_aggregates(None, params))
+
+
+def test_generate_report_refuses_a_computed_setting_flipped_after_the_run():
+    """ADR-0020 section 3's demonstration, unit version: computed with
+    ``sections.baseline: false``, flipped back to ``true`` and only redrawn,
+    it must raise, not return a report quietly missing its baseline section."""
+    computed_with = _params_computed_without_baseline()
+    baseline, metric_ci, aggregates = _landed_inputs(computed_with)
+    now = copy.deepcopy(computed_with)
+    now["evaluation"]["report"]["sections"]["baseline"] = True
+
+    with pytest.raises(ValueError) as exc:
+        generate_report(_metrics(), now, baseline, metric_ci, aggregates, None)
+
+    msg = str(exc.value)
+    assert "evaluation.report.sections.baseline" in msg
+    assert "--from-node compute_baseline_metrics" in msg
+
+
+def test_generate_report_redraws_when_only_drawn_settings_changed():
+    """A changed drawn key only needs a redraw; a fingerprint that counted
+    drawn keys would block every layout tweak."""
+    computed_with = _params_computed_without_baseline()
+    baseline, metric_ci, aggregates = _landed_inputs(computed_with)
+    now = copy.deepcopy(computed_with)
+    now["evaluation"]["report"]["display"]["primary_map_k"] = [1, "all"]
+    now["evaluation"]["report"]["sections"]["primary_map"] = False
+
+    html = generate_report(_metrics(), now, baseline, metric_ci, aggregates,
+                           None)
+
+    assert html.startswith("<!DOCTYPE html>")

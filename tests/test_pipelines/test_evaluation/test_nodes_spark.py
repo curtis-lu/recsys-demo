@@ -674,9 +674,13 @@ class TestComputeBaselineMetrics:
             self._label_table(spark),
             self._parameters(),
         )
+        from recsys_tfb.evaluation.config_fingerprint import fingerprint
+
         assert set(result.keys()) == {
             "overall", "per_item", "purchase_counts", "monthly_counts",
+            "config_fingerprint",
         }
+        assert result["config_fingerprint"] == fingerprint(self._parameters())
         assert "A" in result["per_item"]
         # purchase_counts comes from _label_table fixture (snap=2024-06-30
         # falls inside the [2024-01-31, 2025-01-31) lookback window for the
@@ -689,20 +693,24 @@ class TestComputeBaselineMetrics:
             "A": {"2024-06": 3}, "B": {"2024-06": 1}, "C": {"2024-06": 0},
         }
 
-    def test_returns_none_when_section_disabled(self, spark):
+    def test_returns_a_fingerprinted_stub_when_section_disabled(self):
+        """Not ``None``: a ``null`` JSON cannot carry the fingerprint, and
+        ``generate_report`` would then refuse it as unfingerprinted. Returns
+        before touching either DataFrame, hence no Spark session."""
+        from recsys_tfb.evaluation.config_fingerprint import fingerprint
         from recsys_tfb.pipelines.evaluation.nodes_spark import (
             compute_baseline_metrics,
         )
 
-        result = compute_baseline_metrics(
-            self._eval_predictions(spark),
-            self._label_table(spark),
-            self._parameters(baseline_section=False),
-        )
-        assert result is None
+        params = self._parameters(baseline_section=False)
+        result = compute_baseline_metrics(None, None, params)
+        assert result == {
+            "enabled": False, "config_fingerprint": fingerprint(params),
+        }
 
 
-def test_compute_metric_ci_disabled_returns_stub(spark):
+def test_compute_metric_ci_disabled_returns_stub():
+    from recsys_tfb.evaluation.config_fingerprint import fingerprint
     from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metric_ci
     params = {
         "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
@@ -710,7 +718,20 @@ def test_compute_metric_ci_disabled_returns_stub(spark):
                                "score": "score", "rank": "rank"}},
         "evaluation": {"diagnosis": {"ci": {"enabled": False}}},
     }
-    assert compute_metric_ci(None, params) == {"enabled": False}
+    assert compute_metric_ci(None, params) == {
+        "enabled": False, "config_fingerprint": fingerprint(params),
+    }
+
+
+def test_compute_report_aggregates_disabled_returns_fingerprinted_stub():
+    from recsys_tfb.evaluation.config_fingerprint import fingerprint
+    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        compute_report_aggregates,
+    )
+    params = {"evaluation": {"report": {"sections": {"diagnostics": False}}}}
+    assert compute_report_aggregates(None, params) == {
+        "enabled": False, "config_fingerprint": fingerprint(params),
+    }
 
 
 def test_compute_metric_ci_end_to_end_small(spark):
@@ -747,6 +768,8 @@ def test_compute_metric_ci_end_to_end_small(spark):
     assert out["enabled"] is True
     assert "A" in out["per_item"] and "macro" in out and "sample" in out
     assert out["sample"]["n_queries_sampled"] == 2
+    from recsys_tfb.evaluation.config_fingerprint import fingerprint
+    assert out["config_fingerprint"] == fingerprint(params)
 
 
 def test_compute_metric_ci_raises_when_enabled_but_sample_none(spark):
@@ -1051,11 +1074,49 @@ def test_sample_not_drawn_when_only_non_sample_diagnoses_enabled(
 
 
 def test_generated_node_writes_stub_when_disabled():
+    """The stub carries the name and the fingerprint too: a disabled
+    diagnosis is still a landed JSON that ``render_diagnosis_pages`` checks."""
+    from recsys_tfb.evaluation.config_fingerprint import fingerprint
     from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
 
     node_fn = make_diagnosis_node("config_shift")
     params = {"evaluation": {"diagnosis": {"config_shift": {"enabled": False}}}}
-    assert node_fn(None, params) == {"enabled": False}
+    assert node_fn(None, params) == {
+        "enabled": False,
+        "diagnosis": "config_shift",
+        "config_fingerprint": fingerprint(params, (
+            "dataset.sample_group_keys", "dataset.sample_ratio",
+            "dataset.sample_ratio_overrides", "training.sample_weight_keys",
+            "training.sample_weights",
+        )),
+    }
+
+
+def test_diagnosis_fingerprint_moves_only_with_its_own_extra_keys():
+    """``config_shift`` reads ``dataset.sample_ratio_overrides``; ``item_ability``
+    does not. Shared-key fingerprints would make one stale with the other."""
+    import copy
+    import importlib
+
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES, inputs_for
+    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+
+    before = {
+        "dataset": {"sample_ratio_overrides": {"k|1": 0.5}},
+        "evaluation": {"diagnosis": {n: {"enabled": False} for n in DIAGNOSES}},
+    }
+    after = copy.deepcopy(before)
+    after["dataset"]["sample_ratio_overrides"] = {"k|1": 0.25}
+
+    def fingerprint_of(name, params):
+        mod = importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
+        upstream = [None] * (len(inputs_for(mod)) - 1)
+        return make_diagnosis_node(name)(*upstream, params)["config_fingerprint"]
+
+    assert fingerprint_of("config_shift", before) != \
+        fingerprint_of("config_shift", after)
+    assert fingerprint_of("item_ability", before) == \
+        fingerprint_of("item_ability", after)
 
 
 def test_generated_node_raises_when_enabled_but_sample_none():
@@ -1089,14 +1150,27 @@ def test_generated_node_delegates_to_the_named_module(monkeypatch):
         return {"marker": "from_fake"}
 
     fake.compute = _compute
+    fake.EXTRA_CONFIG_KEYS = ("dataset.only_fake_reads_this",)
     monkeypatch.setitem(
         sys.modules, "recsys_tfb.diagnosis.metric.fake_diag", fake)
 
+    from recsys_tfb.evaluation.config_fingerprint import fingerprint
+
     node_fn = make_diagnosis_node("fake_diag")
     sample = ("pdf-sentinel", {"sampling_description": "x"})
-    out = node_fn(sample, {})
+    params = {"dataset": {"only_fake_reads_this": 3}}
+    out = node_fn(sample, params)
 
-    assert out == {"marker": "from_fake"}
+    # The computed path carries the name and a fingerprint over the module's
+    # own declared keys: with the key present in params, a fingerprint that
+    # ignored EXTRA_CONFIG_KEYS would hash differently.
+    assert out == {
+        "marker": "from_fake",
+        "diagnosis": "fake_diag",
+        "config_fingerprint": fingerprint(
+            params, ("dataset.only_fake_reads_this",)),
+    }
+    assert out["config_fingerprint"] != fingerprint(params)
     # compute 拿到的是整個 tuple，不是解包後的 sample_pdf——契約在
     # contract._SIGNATURES 釘住，抄形狀時最容易改壞的就是這裡。
     assert called["sample"] is sample

@@ -8,6 +8,10 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.logging import log_data_volume
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.evaluation.config_fingerprint import (
+    fingerprint,
+    require_computed_with_current_config,
+)
 from recsys_tfb.evaluation.diagnostics_spark import aggregate_report_diagnostics
 from recsys_tfb.evaluation.report_builder import (
     assemble_diagnosis_pages,
@@ -363,13 +367,17 @@ def compute_baseline_metrics(
     eval_predictions: SparkDataFrame,
     label_table: SparkDataFrame,
     parameters: dict,
-) -> Optional[dict]:
+) -> dict:
     """Popularity-baseline metrics, aligned row-for-row with eval_predictions.
 
     Re-scores each eval_predictions row with the product's historical
     purchase count, then runs the slim metrics path (overall + per_item).
-    Returns None when the baseline report section is disabled — the second
-    metrics pass is then skipped entirely.
+    When the baseline report section is disabled the second metrics pass is
+    skipped entirely and a stub ``{"enabled": False, "config_fingerprint":
+    ...}`` is returned. Not ``None`` (the old return): a ``null`` has nowhere
+    to carry the fingerprint, so ``generate_report`` could not tell "switched
+    off under the current settings" from "left over from an older run"
+    (ADR-0018 decision 2, ADR-0020 decision 2).
 
     Returns dict with keys:
       - overall:        dict[str, float]   slim metrics
@@ -378,6 +386,9 @@ def compute_baseline_metrics(
             aggregated across eval snap_dates (sum). Drives the report's
             popularity-composition table; consumers must treat absence
             as backward-compatible (older results may omit it).
+      - config_fingerprint: the computed settings it was made with
+            (``evaluation.config_fingerprint``), checked by
+            ``generate_report``.
     """
     from recsys_tfb.evaluation.baselines import (
         build_baseline_frame,
@@ -392,7 +403,7 @@ def compute_baseline_metrics(
         logger.info(
             "Baseline report section disabled — skipping baseline metrics"
         )
-        return None
+        return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
 
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -446,6 +457,7 @@ def compute_baseline_metrics(
     )
     metrics["purchase_counts"] = purchase_counts
     metrics["monthly_counts"] = monthly_counts
+    metrics["config_fingerprint"] = fingerprint(parameters)
     logger.info(
         "Baseline metrics computed (overall + per_item) for snap_dates=%s; "
         "purchase_counts has %d products, monthly_counts spans %d months",
@@ -465,12 +477,15 @@ def compute_metric_ci(
     傳入（同 seed→內容與各自重抽相同）。停用時回傳 stub（catalog 仍寫出
     ``{"enabled": false}``）。輸出含 ``sample`` metadata——CI 是抽樣估計，
     報表必須標示樣本規模。
+
+    Both the stub and the full result carry ``config_fingerprint``: the JSON
+    lands, and ``generate_report`` refuses one computed under other settings.
     """
     eval_params = parameters.get("evaluation", {}) or {}
     ci_cfg = ((eval_params.get("diagnosis", {}) or {}).get("ci", {}) or {})
     if not ci_cfg.get("enabled", True):
         logger.info("metric CI disabled — writing stub")
-        return {"enabled": False}
+        return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
 
     if diagnosis_sample is None:
         raise ValueError(
@@ -484,6 +499,7 @@ def compute_metric_ci(
     sample_pdf, sample_meta = diagnosis_sample
     out = bootstrap_per_item_ci(sample_pdf, parameters)
     out["sample"] = sample_meta
+    out["config_fingerprint"] = fingerprint(parameters)
     logger.info(
         "metric CI computed on %d sampled queries (n_boot=%d)",
         sample_meta["n_queries_sampled"], out["n_boot"],
@@ -522,6 +538,19 @@ def make_diagnosis_node(name: str):
     ``__name__`` 明設：``Node.name`` 預設取 ``func.__name__``
     （``core/node.py:8``），不設的話多個 node 同名，``--only-node`` 指不到、
     log 分不出誰是誰，而 pipeline 照樣跑得完。
+
+    Every output, the disabled stub included, gets two keys added here rather
+    than in the four ``_compute.py`` files: this factory is the one exit all
+    diagnosis nodes share, so one place covers every diagnosis present and
+    future (ADR-0020 bug 9).
+
+    * ``"diagnosis": name`` lets ``render_diagnosis_pages`` check that its
+      i-th input really is ``DIAGNOSES[i]``. Every result is a dict, so a
+      count or type check alone lets reordered inputs through.
+    * ``"config_fingerprint"`` covers the shared computed settings plus the
+      module's own ``EXTRA_CONFIG_KEYS`` (``contract.extra_config_keys_for``),
+      so changing a ``dataset.*`` key that only ``config_shift`` reads marks
+      only that JSON stale.
     """
     def _run(*node_inputs) -> dict:
         import importlib
@@ -536,11 +565,16 @@ def make_diagnosis_node(name: str):
                 f"({', '.join(declared)}), got {len(node_inputs)}"
             )
         parameters = node_inputs[-1]
+        stamp = {
+            "diagnosis": name,
+            "config_fingerprint": fingerprint(
+                parameters, contract.extra_config_keys_for(mod)),
+        }
         cfg = (((parameters.get("evaluation", {}) or {})
                 .get("diagnosis", {}) or {}).get(name, {}) or {})
         if not cfg.get("enabled", True):
             logger.info("%s disabled — writing stub", name)
-            return {"enabled": False}
+            return {"enabled": False, **stamp}
         if "diagnosis_sample" in declared:
             sample_idx = declared.index("diagnosis_sample")
             if node_inputs[sample_idx] is None:
@@ -559,6 +593,7 @@ def make_diagnosis_node(name: str):
             if isinstance(v, (int, float, str, bool))
         }
         logger.info("%s computed: %s", name, scalars)
+        out.update(stamp)
         return out
 
     _run.__name__ = f"diagnose_{name}"
@@ -589,52 +624,111 @@ def _diagnosis_pages_dir(parameters: dict):
             / "diagnosis")
 
 
-def render_diagnosis_pages(parameters: dict, *_dag_deps) -> list[str]:
-    """把已落地的診斷 JSON 組成多頁 HTML，回傳寫出的檔案路徑。
+def render_diagnosis_pages(parameters: dict, *diagnosis_results) -> list[str]:
+    """Draw the diagnosis pages from this run's results; return written paths.
 
-    ``*_dag_deps`` **刻意不讀值**。它們是 ``evaluation_<name>`` 那些診斷產物，
-    在這裡只當 DAG 的 happens-before 邊，買到兩件事：
+    **Why it draws its inputs instead of reading ``diagnosis/<name>.json``.**
+    What is drawn must be what this run computed. Reading the directory by
+    file name drew whatever sat there: a diagnosis this run did not compute
+    still got a page, and a link in the main report, from an earlier run's
+    JSON, with exit code 0 (ADR-0020 bug 9). The inputs are the
+    ``evaluation_<name>`` results, loaded from the catalog when slicing skips
+    their nodes; a result left over from other settings is caught by the
+    fingerprint pre-check below.
 
-    1. **執行順序**（主要理由）。拓撲排序只看 ``node.inputs``
-       （``core/pipeline.py:69-73``）。只宣告 ``parameters`` 的話這個 node
-       的 in-degree 是 0——``parameters`` 沒有生產者——於是 Kahn 會把它排在
-       **診斷節點之前**，整條 pipeline 正常跑時它就會先執行，讀到上一次執行
-       留下的舊 JSON，或者什麼都讀不到。而它照樣「成功」。
-    2. **切片擴張**。``Pipeline._slice_with_expansion``（``core/pipeline.py:154``）
-       沿 ``node.inputs`` 往上找生產者，只在 ``can_load`` 為 False 時拉進來。
-       所以 ``--only-node render_diagnosis_pages`` 在**診斷 JSON 已落地**時
-       不會重算（那正是想要的行為：便宜地重繪），在 JSON 不存在時（全新
-       model_version、或清過檔）才自動補算。
+    **Why varargs stay.** The registry's length is dynamic and the Runner
+    binds inputs by position (``core/runner.py``), so a fixed signature would
+    change with every diagnosis added.
 
-    結果本身按**檔名**讀（``diagnosis/<name>.json``），與離線工具
-    ``scripts/render_diagnosis.py`` 共用 ``diagnosis.metric.results.load_results``。
-    為什麼不用位置對應：Plan 2-5 每加一項診斷都要補一條 ``catalog.yaml``
-    entry；忘了補的話位置對應會安靜地走記憶體——頁面正常產出、磁碟上卻沒有那
-    份 JSON，離線重繪少一頁而沒有任何訊息。按檔名讀則當場進 ``missing``。
+    **Why the pre-check reads content, not only the count.** ``parameters``
+    and every result are dicts, so a reordered inputs list matches in count
+    and in type and would draw one diagnosis under another's title; a
+    matching count is not a fix (``docs/operations/known-pitfalls.md`` §12).
+    ``make_diagnosis_node`` stamps each result with its name, so the i-th
+    input must name ``DIAGNOSES[i]``.
 
-    **刻意不吞例外**：寫頁失敗直接紅，比「報表產出了、但少了診斷入口」好認
-    ——後者要比對兩次執行的 HTML 才看得出來。
+    Pre-checks (inputs), both raising before any page is written:
+
+    1. Wiring, ``TypeError``: ``parameters`` is a dict with an ``evaluation``
+       key; there is one result per registry diagnosis; the i-th is a dict
+       whose ``"diagnosis"`` is ``DIAGNOSES[i]``.
+    2. Freshness, ``ValueError``: every result's ``config_fingerprint``
+       matches the current settings (the shared ``COMPUTED_KEYS`` plus that
+       diagnosis's ``EXTRA_CONFIG_KEYS``); the message names the key that
+       changed and the node to ``--from-node``.
+
+    **What reading by file name used to guard for free**: a registry
+    diagnosis with no catalog entry. The catalog then makes a MemoryDataset,
+    the page is drawn and no JSON lands, so offline redraw and slice resumes
+    never see it. ``tests/test_diagnosis/test_metric/test_contract.py::
+    test_every_registry_diagnosis_has_a_catalog_entry`` guards that now.
+
+    The inputs still order the DAG as well: they are what places this node
+    after every diagnosis node, and what lets ``--only-node`` pull a
+    diagnosis whose JSON is missing back in.
+
+    ``contract.DIAGNOSES`` is read as a module attribute, as in
+    ``_registry_diagnosis_enabled``, so a monkeypatched registry is the one
+    both checked and drawn. Page-writing errors are not swallowed: a red run
+    is easier to spot than a report that silently lost its diagnosis link.
     """
-    from recsys_tfb.diagnosis.metric.results import load_results
+    import importlib
+
+    from recsys_tfb.diagnosis.metric import contract
+
+    names = contract.DIAGNOSES
+    if not (isinstance(parameters, dict) and "evaluation" in parameters):
+        raise TypeError(
+            "render_diagnosis_pages: the first input must be the parameters "
+            "dict (a dict with an 'evaluation' key), got "
+            f"{_describe_node_input(parameters)}. Check the order of this "
+            "node's inputs in pipeline.py."
+        )
+    if len(diagnosis_results) != len(names):
+        raise TypeError(
+            f"render_diagnosis_pages: expected {len(names)} diagnosis results "
+            f"({', '.join(names)}), got {len(diagnosis_results)}"
+        )
+    for i, (name, result) in enumerate(zip(names, diagnosis_results)):
+        if isinstance(result, dict) and result.get("diagnosis") == name:
+            continue
+        raise TypeError(
+            f"render_diagnosis_pages: diagnosis input {i + 1} should be the "
+            f"result of {name!r} (contract.DIAGNOSES[{i}]), got "
+            f"{_describe_node_input(result)}. Check the order of this node's "
+            "inputs in pipeline.py."
+        )
+
+    require_computed_with_current_config(
+        [
+            (f"evaluation_{name}", result, f"diagnose_{name}",
+             contract.extra_config_keys_for(importlib.import_module(
+                 f"recsys_tfb.diagnosis.metric.{name}")))
+            for name, result in zip(names, diagnosis_results)
+        ],
+        parameters,
+    )
 
     out_dir = _diagnosis_pages_dir(parameters)
-    results, missing, unknown = load_results(out_dir)
-    if missing:
-        logger.info(
-            "diagnosis results not on disk, no page for: %s",
-            ", ".join(missing),
-        )
-    if unknown:
-        logger.info(
-            "JSON files outside the diagnosis registry, ignored: %s",
-            ", ".join(unknown),
-        )
-    pages = assemble_diagnosis_pages(results, parameters, out_dir)
+    pages = assemble_diagnosis_pages(
+        dict(zip(names, diagnosis_results)), parameters, out_dir)
     logger.info(
         "diagnosis pages written to %s (%d files from %d results)",
-        out_dir, len(pages), len(results),
+        out_dir, len(pages), len(diagnosis_results),
     )
     return [str(p) for p in pages]
+
+
+def _describe_node_input(value) -> str:
+    """What a mis-wired input is, for ``render_diagnosis_pages``' messages."""
+    if not isinstance(value, dict):
+        return f"a {type(value).__name__}"
+    if "diagnosis" in value:
+        return f"the result of {value['diagnosis']!r}"
+    if "evaluation" in value:
+        return "the parameters dict"
+    return ("a dict with no 'diagnosis' key (possibly a JSON written before "
+            "diagnosis results carried their name)")
 
 
 def no_diagnosis_pages(parameters: dict) -> list[str]:
@@ -650,11 +744,14 @@ def no_diagnosis_pages(parameters: dict) -> list[str]:
     * **A default for ``generate_report``'s ``diagnosis_pages``**: a trailing
       default swallows arity errors, and its six required parameters are what
       ``known-pitfalls.md`` §12 fixed.
-    * **Reusing ``render_diagnosis_pages`` with only ``parameters``**: it reads
-      the pages directory by file name, so it returns empty when that directory
-      holds no JSON, not when this run computed nothing. After an earlier
+    * **Reusing ``render_diagnosis_pages`` with only ``parameters``**: it
+      requires one named, fingerprinted result per registry diagnosis and
+      raises ``TypeError`` otherwise, and this mode computes none of them.
+      Feeding it results would mean wiring the diagnosis nodes back in, which
+      is what decision 5 removed. (Before #342 it read the pages directory by
+      file name, which made this option worse still: after an earlier
       ``--post-training`` run of the same ``(model_version, snap_date)`` the
-      monitoring report would link to that run's pages, with exit code 0.
+      monitoring report linked to that run's pages, with exit code 0.)
 
     ``parameters`` is taken (unread) because ADR-0018 fixes this signature. It
     reads neither the disk nor that value, which is also why its place in the
@@ -672,6 +769,9 @@ def compute_report_aggregates(
     從 ``generate_report`` 拆出來（Plan 1.5）。理由不只是效能：它讓
     ``generate_report`` 變成純函式，主報表因此能離線重繪；也把這 6 次全掃的
     失敗點從 pipeline 的**最後一個 node** 往上游移。
+
+    Both the stub and the full result carry ``config_fingerprint``: the JSON
+    lands, and ``generate_report`` refuses one computed under other settings.
     """
     eval_params = parameters.get("evaluation", {}) or {}
     report_cfg = eval_params.get("report", {}) or {}
@@ -679,7 +779,7 @@ def compute_report_aggregates(
     diag_cfg = report_cfg.get("diagnostics", {}) or {}
     if not sections_cfg.get("diagnostics", True):
         logger.info("report diagnostics section disabled — writing stub")
-        return {"enabled": False}
+        return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
 
     schema = get_schema(parameters)
     item_col, score_col = schema["item"], schema["score"]
@@ -700,15 +800,16 @@ def compute_report_aggregates(
         sdf.unpersist()
     out["enabled"] = True
     logger.info("report aggregates computed: %s", sorted(out))
+    out["config_fingerprint"] = fingerprint(parameters)
     return out
 
 
 def generate_report(
     evaluation_metrics: dict,
     parameters: dict,
-    baseline_metrics: Optional[dict],
-    metric_ci: Optional[dict],
-    report_aggregates: Optional[dict],
+    baseline_metrics: dict,
+    metric_ci: dict,
+    report_aggregates: dict,
     diagnosis_pages: Optional[list],
 ) -> str:
     """Build the HTML report. Metrics dicts drive §0–§8; the diagnostics
@@ -718,7 +819,32 @@ def generate_report(
 
     診斷頁由 ``render_diagnosis_pages`` 產生（Plan 1.5 拆出），這裡只收它回傳
     的路徑清單、放一個連結進主報表。
+
+    Pre-check (inputs): ``baseline_metrics``, ``metric_ci`` and
+    ``report_aggregates`` were computed with the current computed settings
+    (``evaluation.config_fingerprint``). ``--only-node generate_report``
+    stops at "the JSON exists", so without this a setting changed since the
+    last run is drawn from the old JSON with exit code 0 (ADR-0020 bug 2);
+    with it the run raises, naming the key and the node to ``--from-node``.
+    Only computed settings count, so changing ``report.display.*`` and the
+    other drawn keys still redraws in seconds.
+
+    Not in the check: ``evaluation_metrics``, which is memory-only and
+    carries no fingerprint yet (it is recomputed on every slice that reaches
+    this node; it joins the list once #339 lands it), and
+    ``diagnosis_pages``, a list of paths whose sources
+    ``render_diagnosis_pages`` has already checked.
     """
+    require_computed_with_current_config(
+        [
+            ("baseline_metrics", baseline_metrics,
+             "compute_baseline_metrics", ()),
+            ("evaluation_metric_ci", metric_ci, "compute_metric_ci", ()),
+            ("evaluation_report_aggregates", report_aggregates,
+             "compute_report_aggregates", ()),
+        ],
+        parameters,
+    )
     return assemble_report(
         evaluation_metrics, parameters,
         baseline_metrics=baseline_metrics,

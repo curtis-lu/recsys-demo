@@ -172,7 +172,8 @@ def test_declared_inputs_override_the_default():
 
 
 def test_extra_config_keys_default_to_none():
-    """沒宣告 ``EXTRA_CONFIG_KEYS`` 的模組只依賴 ``evaluation`` 的共用列舉。"""
+    """A module declaring no ``EXTRA_CONFIG_KEYS`` depends only on the shared
+    ``evaluation`` list."""
     assert contract.extra_config_keys_for(types.SimpleNamespace()) == ()
 
 
@@ -182,10 +183,12 @@ def test_declared_extra_config_keys_are_returned_as_a_tuple():
 
 
 def test_config_shift_declares_every_setting_it_reads_outside_evaluation():
-    """期望值抄自 ``config_shift/_compute.py`` 實際讀的鍵，不是從模組導出。
+    """Expected keys are copied from what ``config_shift/_compute.py`` reads,
+    not derived from the module.
 
-    漏一個的後果：改了那個鍵、只重繪，診斷頁照印舊設定算的 offset，不 raise。
-    ``dataset.sample_ratio`` 是 ADR-0020 決定二漏列、依程式碼補上的。
+    A missing one fails silently: change that key, redraw only, and the page
+    still shows offsets computed under the old value. ``dataset.sample_ratio``
+    was missing from ADR-0020 decision 2 and was added from the code.
     """
     from recsys_tfb.diagnosis.metric import config_shift
 
@@ -280,9 +283,12 @@ def test_diagnosis_node_rejects_a_short_inputs_list():
 def test_every_registry_diagnosis_has_a_catalog_entry():
     """registry 有的診斷，``catalog.yaml`` 必須有對應的 JSONDataset。
 
-    漏掉的話 catalog 會自動建一個 MemoryDataset：pipeline 跑得完、頁面也產得
-    出來，但**磁碟上沒有那份 JSON**——離線重繪少一頁，而且沒有任何訊息。
-    Plan 2-5 每加一項診斷都要補一條 entry，所以這個動作會重複四次。
+    漏掉的話 catalog 會自動建一個 MemoryDataset：``render_diagnosis_pages``
+    吃的是 inputs，所以頁照畫、pipeline 跑得完，但**磁碟上沒有那份 JSON**——
+    ``scripts/render_diagnosis.py`` 離線重繪看不到它，``--only-node`` 等切片
+    接續也讀不到而得整段重算，而且沒有任何訊息。這個防護原本由「render 按
+    檔名讀、讀不到就進 missing」順帶提供；render 改吃 inputs 之後（#342，
+    ADR-0020 bug 9）只剩這條測試擋。
 
     連 ``type`` 一起驗：只驗 key 存在的話，寫成 MemoryDataset 照樣通過，而那
     正是要擋的東西。
@@ -299,7 +305,8 @@ def test_every_registry_diagnosis_has_a_catalog_entry():
     for name in DIAGNOSES:
         key = f"evaluation_{name}"
         assert key in catalog, (
-            f"{key} 不在 catalog.yaml——診斷結果不會落地，離線重繪看不到它"
+            f"{key} 不在 catalog.yaml——catalog 會改生 MemoryDataset，頁照畫"
+            "但 JSON 不落地，離線重繪與切片接續都看不到它"
         )
         assert catalog[key]["type"] == "JSONDataset", (
             f"{key} 的 type 是 {catalog[key]['type']}，"
@@ -307,5 +314,5 @@ def test_every_registry_diagnosis_has_a_catalog_entry():
         )
         assert catalog[key]["filepath"].endswith(f"diagnosis/{name}.json"), (
             f"{key} 的 filepath 不是 diagnosis/{name}.json——"
-            "render_diagnosis_pages 按檔名讀，路徑不對就讀不到"
+            "scripts/render_diagnosis.py 按檔名讀，路徑不對離線重繪就讀不到"
         )

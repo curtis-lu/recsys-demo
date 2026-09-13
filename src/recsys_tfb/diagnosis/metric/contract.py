@@ -21,7 +21,8 @@
   說明才會落在它描述的那張圖旁邊。簽章不變，所以 :data:`_SIGNATURES` 不受影響。
 
 **``DIAGNOSES`` 不是使用者面的開關。** 它宣告的是「這項診斷在程式碼裡存在」
-——決定 catalog 鍵、頁面編號、以及 ``render_diagnosis_pages`` 會去找哪些檔案。
+——決定 catalog 鍵、頁面編號、以及 ``render_diagnosis_pages`` 依序收到哪些結果
+（第 i 個 input 必須帶著第 i 個名字，名字由 ``make_diagnosis_node`` 加上）。
 使用者要關掉一項診斷，動的是 ``evaluation.diagnosis.<name>.enabled``：那條路
 會讓 ``compute`` 寫一份 ``{"enabled": False}`` stub，``render`` 讀到後回空
 tuple，於是那一頁不存在。
@@ -86,16 +87,21 @@ DIAGNOSES: tuple[str, ...] = (
     "config_shift", "item_ability", "model_capacity", "suppression",
 )
 
-#: 可選符號 ``EXTRA_CONFIG_KEYS``：這項診斷在 ``evaluation`` 子樹**以外**讀的
-#: 設定鍵（從 parameters 根算起的點路徑，例如 ``"dataset.sample_ratio"``）。
-#: ``evaluation`` 裡「算的」鍵由 ``evaluation.config_fingerprint.COMPUTED_KEYS``
-#: 統一列舉；這份 JSON 的設定指紋＝那份列舉 ＋ 這裡宣告的鍵。
+#: Optional symbol ``EXTRA_CONFIG_KEYS``: the settings a diagnosis reads
+#: **outside** the ``evaluation`` subtree, as dotted paths from the parameters
+#: root (e.g. ``"dataset.sample_ratio"``). The computed ``evaluation``
+#: settings are listed once, in ``evaluation.config_fingerprint.COMPUTED_KEYS``;
+#: a diagnosis JSON's config fingerprint is that list plus the keys declared
+#: here.
 #:
-#: 為什麼由診斷自己宣告、不寫進那份共用列舉：只有這項診斷讀它們，放進共用列舉
-#: 會讓改 ``dataset.sample_ratio`` 也把 metric CI、report aggregates 判成過期。
-#: 為什麼組合在 node 做、指紋模組不 import 這裡：依賴方向同 :func:`inputs_for`
-#: （ADR-0020 決定二）。漏宣告的後果是**靜默**的：改了那個鍵只重繪，頁面照印舊
-#: 設定算的結果，不 raise——所以每項宣告都有一條測試把鍵名逐字寫出來。
+#: Declared by the diagnosis rather than added to the shared list because only
+#: that diagnosis reads them: in the shared list, changing
+#: ``dataset.sample_ratio`` would also mark the metric CI and the report
+#: aggregates stale. Combined in the node, with the fingerprint module never
+#: importing this package: the same dependency direction as :func:`inputs_for`
+#: (ADR-0020 decision 2). A missed declaration fails **silently**: change that
+#: key, redraw only, and the page still shows results computed under the old
+#: value, no raise. So each declaration has a test spelling its keys out.
 
 __all__ = [
     "DEFAULT_INPUTS", "DIAGNOSES", "check_module", "compute_params_for",
@@ -114,10 +120,11 @@ def inputs_for(mod) -> tuple[str, ...]:
 
 
 def extra_config_keys_for(mod) -> tuple[str, ...]:
-    """這項診斷在 ``evaluation`` 以外依賴的設定鍵；沒宣告就是空 tuple。
+    """Settings outside ``evaluation`` this diagnosis depends on; ``()`` if none.
 
-    形狀比照 :func:`inputs_for`：只負責「讀」，不驗證。空 tuple 是合法的常態
-    ——多數診斷在 ``evaluation`` 以外只讀 ``schema``，而 ``schema`` 不在指紋裡。
+    Same shape as :func:`inputs_for`: it only reads, never validates. An empty
+    tuple is the normal case: most diagnoses read nothing outside
+    ``evaluation`` except ``schema``, which no fingerprint covers.
     """
     return tuple(getattr(mod, "EXTRA_CONFIG_KEYS", ()))
 

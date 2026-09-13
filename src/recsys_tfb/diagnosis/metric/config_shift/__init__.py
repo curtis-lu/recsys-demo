@@ -66,18 +66,23 @@ SCOPE = ScopeNote(
     reference_points=(),
 )
 
-#: ``evaluation`` 以外、會改變 ``compute`` 結果的設定鍵（契約的可選符號，見
-#: ``diagnosis.metric.contract.extra_config_keys_for``）。這份 JSON 的設定指紋
-#: 把它們納入，改了其中任何一個，只重繪診斷頁會被擋下。讀取點（``_compute.py``）：
+#: Settings outside ``evaluation`` that change ``compute``'s result (the
+#: contract's optional symbol, see
+#: ``diagnosis.metric.contract.extra_config_keys_for``). This JSON's config
+#: fingerprint includes them, so redrawing alone after changing any of them is
+#: refused. Where ``_compute.py`` reads them:
 #:
-#: * ``dataset.sample_group_keys``：202、266、286 行
-#: * ``dataset.sample_ratio``：204 行。ADR-0020 決定二漏列，依程式碼補上
-#: * ``dataset.sample_ratio_overrides``：205、287、651 行
-#: * ``training.sample_weight_keys``：226、267、290 行
-#: * ``training.sample_weights``：228、291、653 行
+#: * ``dataset.sample_group_keys``: lines 202, 266, 286
+#: * ``dataset.sample_ratio``: line 204. Missing from ADR-0020 decision 2,
+#:   added from the code
+#: * ``dataset.sample_ratio_overrides``: lines 205, 287, 651
+#: * ``training.sample_weight_keys``: lines 226, 267, 290
+#: * ``training.sample_weights``: lines 228, 291, 653
 #:
-#: ``schema`` 也在 ``evaluation`` 以外，但不列：它是整條框架的欄位角色，改了
-#: 它 evaluation 的每份產物都得重跑，不是這項診斷獨有的依賴。
+#: ``schema`` is outside ``evaluation`` too but not listed: it holds the
+#: framework-wide column roles that every evaluation artifact depends on, so
+#: declaring it here would single out this diagnosis for a change that makes
+#: all of them stale.
 EXTRA_CONFIG_KEYS = (
     "dataset.sample_group_keys",
     "dataset.sample_ratio",

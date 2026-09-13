@@ -52,9 +52,9 @@ class TestRegistryDiagnosesFollowTheMode:
     guarantee; wired in, the default mode crashed at the first diagnosis, in
     production too. Monitoring mode's ``evaluation_diagnosis_pages`` comes from
     the zero-read ``no_diagnosis_pages`` instead, not from
-    ``render_diagnosis_pages``: that one reads the disk by file name and would
-    pick up the pages an earlier post-training run of the same
-    ``(model_version, snap_date)`` left behind.
+    ``render_diagnosis_pages``: that one requires one named, fingerprinted
+    result per registry diagnosis, and this mode computes none (why the stub,
+    see ``no_diagnosis_pages``' docstring).
 
     The three ``--compare`` nodes are added outside the mode switch, so each
     mode with a comparison must still match its own shape.
@@ -390,9 +390,9 @@ class TestGenerateReportNodeWiring:
 class TestRenderDiagnosisPagesNodeWiring:
     """診斷產物接到 ``render_diagnosis_pages``，而且只接到它。
 
-    這個 node 的 ``*_dag_deps`` **刻意不讀值**——結果按檔名讀（見
-    ``diagnosis.metric.results.load_results``）。inputs 存在的理由有兩個，
-    測試分別對應：執行順序（主要）與切片擴張（次要）。
+    這個 node 畫的就是這些 inputs 的值（#342 之前按檔名讀磁碟、inputs 只當
+    依賴宣告）。同一組 inputs 另外買到兩件事，測試分別對應：執行順序與切片
+    擴張。
 
     只有 ``--post-training`` 組出這個 node（監控模式見
     ``TestRegistryDiagnosesFollowTheMode``），所以這裡都建 post-training 的 DAG。
@@ -413,9 +413,10 @@ class TestRenderDiagnosisPagesNodeWiring:
         """**主要理由**：拓撲排序只看 ``node.inputs``。
 
         拿掉診斷 inputs 的話這個 node 的 in-degree 是 0（``parameters`` 沒有
-        生產者），Kahn 會把它排到診斷節點**之前**——整條 pipeline 正常跑時
-        它先執行、讀到上次留下的舊 JSON，而且照樣「成功」。這條測試釘的是
-        「它在所有診斷之後」，不是 inputs 字串長什麼樣。
+        生產者），Kahn 會把它排到診斷節點**之前**。#342 之前它按檔名讀，那樣
+        會讀到上次留下的舊 JSON 而且照樣「成功」；現在它畫的是 inputs，排在
+        所有診斷之後就是它拿得到這次結果的前提。這條測試釘的是「它在所有診斷
+        之後」，不是 inputs 字串長什麼樣。
         """
         from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
 
@@ -424,7 +425,7 @@ class TestRenderDiagnosisPagesNodeWiring:
         for diag in DIAGNOSES:
             assert names.index(f"diagnose_{diag}") < me, (
                 f"render_diagnosis_pages 排在 diagnose_{diag} 之前，"
-                "會讀到上一次執行留下的 JSON"
+                "拿不到這次執行的診斷結果"
             )
 
     def test_slicing_pulls_in_the_diagnosis_nodes_when_nothing_is_on_disk(self):

@@ -1,8 +1,8 @@
 """``diagnosis.metric.results`` —— 診斷落地產物的 loader。
 
-這份 loader 同時服務 pipeline（``render_diagnosis_pages``）與離線工具
-（``scripts/render_diagnosis.py``），所以它的回傳契約 ``(results, missing,
-unknown)`` 兩邊都依賴，改動要同時看兩個呼叫端。
+呼叫端是離線工具 ``scripts/render_diagnosis.py``，它依賴回傳契約
+``(results, missing, unknown)``。pipeline 的 ``render_diagnosis_pages`` 自
+#342 起改畫自己的 inputs，不再呼叫這份 loader。
 """
 import json
 

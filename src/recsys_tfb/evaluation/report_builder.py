@@ -713,7 +713,11 @@ def _od(a, b):
 def build_baseline_section(
     metrics: dict, baseline_metrics: dict | None, parameters: dict
 ) -> ReportSection | None:
-    if not _section_on(parameters, "baseline") or baseline_metrics is None:
+    # compute_baseline_metrics writes {"enabled": False, "config_fingerprint":
+    # ...} when the section is off, so the stub can carry its fingerprint;
+    # None stays accepted for callers that pass no baseline at all.
+    if (not _section_on(parameters, "baseline") or baseline_metrics is None
+            or baseline_metrics.get("enabled") is False):
         return None
     from recsys_tfb.evaluation.compare import build_comparison_result
 

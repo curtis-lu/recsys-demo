@@ -748,6 +748,16 @@ def test_baseline_category_overall_map_compare_table():
     assert abs(tbl.loc["Δ", "@1"] - 0.10) < 1e-9
 
 
+def test_baseline_section_absent_when_the_baseline_was_not_computed():
+    """``compute_baseline_metrics`` writes a stub, not ``None``, when the
+    section is off: the stub has to carry the config fingerprint. The section
+    builder must read that stub as "no baseline", not as a baseline whose
+    every metric is missing."""
+    stub = {"enabled": False,
+            "config_fingerprint": {"sha256": "0" * 64, "values": {}}}
+    assert rb.build_baseline_section(_metrics(), stub, _params()) is None
+
+
 def test_baseline_omits_seg_cat_tables_when_absent():
     """Backward compat: baseline without per_segment/category -> no extra
     tables (older artifacts, or model without those slices)."""

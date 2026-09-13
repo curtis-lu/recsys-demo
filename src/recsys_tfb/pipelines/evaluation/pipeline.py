@@ -141,10 +141,12 @@ def create_pipeline(
                 )
                 for name in DIAGNOSES
             ],
-            # inputs 裡的診斷產物**只當依賴宣告**，node 本身按檔名讀（見
-            # nodes_spark.render_diagnosis_pages 的 docstring）。列出它們是為了
-            # (1) 讓拓撲排序把這個 node 排在所有診斷之後、(2) 讓 --only-node 的
-            # 切片擴張在 JSON 不存在時能往上拉到診斷節點。
+            # These inputs are the values that get drawn: the node draws the
+            # diagnosis results it is given, one per DIAGNOSES entry in
+            # registry order, and checks each result's name and config
+            # fingerprint before drawing (see its docstring). The same inputs
+            # also place it after every diagnosis node and let --only-node
+            # pull a diagnosis whose JSON is missing back in.
             Node(
                 render_diagnosis_pages,
                 inputs=["parameters",
