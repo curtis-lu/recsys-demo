@@ -775,6 +775,26 @@ def test_baseline_shows_lookback_window():
     assert "12" in s.description
 
 
+def test_baseline_lookback_sentence_prints_the_nodes_actual_default():
+    """bug 1 (ADR-0020): the node (compute_baseline_metrics) defaults
+    lookback_months to 12 when evaluation.baseline.lookback_months is unset;
+    the report used to default to None instead and print no lookback
+    sentence at all for that same run — two different beliefs about what was
+    actually computed. Both must now read the same shared default (12)."""
+    s = rb.build_baseline_section(
+        _metrics(), _baseline_metrics_full(), _params()  # no evaluation.baseline key
+    )
+    assert "過去 12 個月" in s.description
+
+
+def test_baseline_lookback_sentence_reflects_a_configured_value():
+    """Guardrail: an explicit lookback_months still prints its own value."""
+    p = _params_lookback()
+    p["evaluation"]["baseline"]["lookback_months"] = 6
+    s = rb.build_baseline_section(_metrics(), _baseline_metrics_full(), p)
+    assert "過去 6 個月" in s.description
+
+
 def test_baseline_overall_three_tables_k_as_columns():
     s = rb.build_baseline_section(
         _metrics(), _baseline_metrics_full(), _params()
@@ -804,7 +824,13 @@ def test_baseline_popularity_avg_per_month_when_lookback():
 
 
 def test_baseline_section_renders_popularity_table():
-    """purchase_counts -> popularity composition table prepended."""
+    """purchase_counts -> popularity composition table prepended.
+
+    ``平均每月`` is now always present (bug 1, ADR-0020): lookback_months
+    resolves via the shared helper's default (12) even when
+    evaluation.baseline is unset, so there is no longer an "unknown
+    lookback" case that omits this column.
+    """
     m = _metrics()
     base = {
         "overall": {"map@1": 0.4},
@@ -817,7 +843,7 @@ def test_baseline_section_renders_popularity_table():
     idx = s.table_titles.index("popularity 排名組成")
     tbl = s.tables[idx]
     # Sorted desc by count, with rank starting at 1.
-    assert list(tbl.columns) == ["count", "rank"]
+    assert list(tbl.columns) == ["count", "平均每月", "rank"]
     assert list(tbl.index) == ["B", "A", "C"]
     assert list(tbl["count"]) == [200, 50, 10]
     assert list(tbl["rank"]) == [1, 2, 3]

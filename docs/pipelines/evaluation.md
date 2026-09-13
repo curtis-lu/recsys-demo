@@ -159,7 +159,7 @@ baseline 對每個評估日期 `S`，統計 `label_table` 在 `[S - lookback_mon
 
 baseline 會在與模型相同的 evaluation rows 上重新排名，計算 overall 與 per-item 指標，再於報表呈現 Model、Baseline 與差異。
 
-若指定回看期間完全沒有 label rows，目前實作會記錄 warning 並退回使用完整 `label_table`。此 fallback 可能包含評估日之後的資料而造成 leakage；看到該 warning 時不應直接採信 baseline，應先補齊歷史資料或修正 lookback。
+若指定回看期間完全沒有 label rows，會直接 raise（bug 1, ADR-0020）——不再退回完整 `label_table`。舊行為的退回會把評估日之後的資料算進 baseline，讓 popularity 用答案排名，報表卻照印「以過去 N 個月的歷史購買計數重排」；使用者裁定 baseline 是重要資訊，沒算出來要 raise，不做靜默 fallback。錯誤訊息含視窗範圍與 `label_table` 實際有的月份；解法是補齊 `label_table` 歷史、調整 `evaluation.baseline.lookback_months`，或把 `evaluation.report.sections.baseline` 設 `false` 直接不算這段。
 
 將 `report.sections.baseline` 設為 `false` 時，pipeline 會直接跳過第二次 baseline metric computation。
 
@@ -576,7 +576,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 | per-segment section 沒出現 | `per_segment` section 關閉，或目標欄位不是第一個 active segment | 檢查 `report.sections.per_segment`、enriched schema 與 `segment_columns` 順序 |
 | product category unknown product | mapping 引用了未宣告 item | 對齊 `schema.categorical_values[item]` |
 | category 結果不符合預期 | item 重複映射或 max-child 語意不適合業務 | 確認每個 item 只屬於一類，重新檢視 category 定義 |
-| baseline warning `falling back to full label_table` | lookback window 沒有歷史資料 | 補歷史 labels 或調整期間；不要直接採信可能 leakage 的 baseline |
+| baseline raise `No label_table history in [...) ... label_table has months: [...]` | lookback window 沒有歷史資料（bug 1，不再是 warning + fallback） | 補歷史 labels、調整 `evaluation.baseline.lookback_months`，或把 `evaluation.report.sections.baseline` 設 `false` |
 | `--compare` key 不存在 | CLI key 不在 `compare_sources` | 檢查 YAML key 與錯誤訊息列出的 available keys |
 | compare source 沒有該日期資料 | Model B source、model version 或日期不一致 | 查來源 table 的 model/date partitions |
 | external item unmapped | `prod_mapping` 未涵蓋外部 item | 補 mapping；確認可接受時才使用 `unmapped_policy: drop` |
@@ -598,7 +598,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 - Model B 已帶 label 時會沿用來源 label，不會強制以目前 `label_table` 覆寫；跨時間產生的 enriched／training sources 必須確認 ground truth snapshot 一致。
 - score 相同時按 item 升冪決定名次（與 inference 同一條規則，`utils/ranking.py`）。名次因此可重現，但同分本身仍代表模型分不出高下。
 - zero-positive query groups 會排除於排序指標，因此報表不代表完整 inference entity 母體。
-- popularity baseline 在 lookback 空窗時會 fallback 至完整 label table，可能產生 leakage。
+- popularity baseline 在 lookback 空窗時會 raise（bug 1），不再 fallback 至完整 label table 產生 leakage；只有 `evaluation.report.sections.baseline: false` 才會整段跳過不算。
 - product category 同 item 重複映射目前不會報錯，後出現的 category 會覆蓋前者。
 - 比較報表呈現指標差異但沒有 bootstrap、confidence interval 或顯著性檢定。
 - evaluation metrics 沒有獨立 JSON／table sink，無法直接形成長期監控時序。

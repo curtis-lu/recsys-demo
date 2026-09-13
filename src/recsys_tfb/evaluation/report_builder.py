@@ -734,10 +734,14 @@ def build_baseline_section(
     )
     # overall 三表用 k superset（使用者指定，k 放欄位）
     k_super = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_items)
-    lookback = (
-        ((parameters.get("evaluation", {}) or {}).get("baseline", {}) or {})
-        .get("lookback_months")
+    # Same helper the node (compute_baseline_metrics) reads — lazy import,
+    # same style as `compare` above (bug 1, ADR-0020): before this helper
+    # existed this line read .get("lookback_months") with no default, so an
+    # unset key printed nothing here while the node had in fact used 12.
+    from recsys_tfb.evaluation.baselines import (
+        lookback_months as resolve_lookback_months,
     )
+    lookback = resolve_lookback_months(parameters)
 
     tables: list[pd.DataFrame] = []
     titles: list[str] = []
@@ -860,10 +864,10 @@ def build_baseline_section(
         }
         _add(pd.DataFrame(data).T, "大類 overall mAP@k (M/B/Δ)", True)
 
-    lookback_note = (
-        f"popularity 以過去 {lookback} 個月的歷史購買計數重排。"
-        if lookback else ""
-    )
+    # Always printed now (bug 1): lookback is resolved via the shared helper
+    # above and is never unset, so there is no longer a "config didn't say"
+    # case to suppress this sentence for.
+    lookback_note = f"popularity 以過去 {lookback} 個月的歷史購買計數重排。"
     return ReportSection(
         title="baseline — popularity 對照",
         description=(
