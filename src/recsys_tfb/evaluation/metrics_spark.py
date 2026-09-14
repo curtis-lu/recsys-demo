@@ -266,25 +266,39 @@ def compute_dataset_overview(
     label_col = schema["label"]
     group_cols = [time_col, *entity_cols]   # 一個 query＝time×entity
 
-    n_rows = eval_predictions.count()
-    n_entities = eval_predictions.select(*entity_cols).distinct().count()
-    n_items = eval_predictions.select(item_col).distinct().count()
-    n_snap_dates = eval_predictions.select(time_col).distinct().count()
-    n_positives = int(
-        eval_predictions.agg(F.sum(F.col(label_col))).collect()[0][0] or 0
-    )
-    positive_rate = (n_positives / n_rows) if n_rows else 0.0
-    avg_pos_per_entity = (n_positives / n_entities) if n_entities else 0.0
-
     _require_segment_columns_in_frame(eval_predictions, segment_columns)
     # 與 per_segment 用同一個 segment 欄（第一欄），by_segment 的 key 才會一致。
     active_seg_col = segment_columns[0] if segment_columns else None
-    total_queries = (
-        eval_predictions.select(*group_cols).distinct().count()
-        if active_seg_col else 0
-    )
+
+    # 總量一次 agg、一次 collect，不是每個數字各一次 action（ADR-0018 決定 3）。
+    # distinct 數 struct 不數裸欄：裸 countDistinct 跳過任一欄為 NULL 的列，
+    # struct 本身永不為 NULL，NULL 才會像 select(...).distinct().count() 一樣
+    # 算成一個值。
+    total_aggs = [
+        F.count(F.lit(1)).alias("n_rows"),
+        F.countDistinct(F.struct(*entity_cols)).alias("n_entities"),
+        F.countDistinct(F.struct(item_col)).alias("n_items"),
+        F.countDistinct(F.struct(time_col)).alias("n_snap_dates"),
+        F.sum(F.col(label_col)).alias("n_positives"),
+    ]
+    if active_seg_col:
+        total_aggs.append(
+            F.countDistinct(F.struct(*group_cols)).alias("n_queries")
+        )
+    totals = eval_predictions.agg(*total_aggs).collect()[0]
+
+    n_rows = totals["n_rows"]
+    n_entities = totals["n_entities"]
+    n_items = totals["n_items"]
+    n_snap_dates = totals["n_snap_dates"]
+    n_positives = int(totals["n_positives"] or 0)
+    positive_rate = (n_positives / n_rows) if n_rows else 0.0
+    avg_pos_per_entity = (n_positives / n_entities) if n_entities else 0.0
+    total_queries = totals["n_queries"] if active_seg_col else 0
 
     def _group(col: str, with_queries: bool = False, to_key=None) -> dict:
+        # 分群內沿用裸 countDistinct（鍵含 NULL 的列不算），跟上面總量的計法
+        # 不同是既有行為；改成 struct 會改輸出，不在決定 3 的範圍。
         aggs = [
             F.count(F.lit(1)).alias("n_rows"),
             F.sum(F.col(label_col)).alias("n_positives"),
