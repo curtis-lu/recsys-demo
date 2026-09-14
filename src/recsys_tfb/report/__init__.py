@@ -1,6 +1,7 @@
 """Neutral presentation layer: how things are shown, no diagnostic judgement.
 
-Who imports it (``grep -rn "recsys_tfb.report" src/ scripts/``):
+Who imports it from outside the package (``grep -rn "recsys_tfb.report" src/
+scripts/``, hits inside ``report/`` itself left out):
 
 * ``evaluation/report.py`` — ``render_table`` and ``render_section_extras``
   from ``report.pages``, so the main report and the diagnosis pages render

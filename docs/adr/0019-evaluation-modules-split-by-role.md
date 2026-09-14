@@ -95,7 +95,7 @@ src/recsys_tfb/pipelines/evaluation/
 
 src/recsys_tfb/evaluation/   共用庫：有 training／diagnosis／scripts 呼叫端，或被它們的依賴拉住
   metrics.py  metrics_spark.py  report_builder.py  report.py  compare.py
-  diagnostics_spark.py  distributions.py  report_tables.py（新，見決定 5）
+  diagnostics_spark.py  distributions.py   （決定 5 原寫的 report_tables.py 不開，見決定 5 的更正）
   comparison/report.py
 ```
 

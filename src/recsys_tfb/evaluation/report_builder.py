@@ -197,6 +197,13 @@ def _dataset_overview(metrics: dict) -> dict:
 
 
 def count_items(metrics: dict) -> int:
+    """``dataset_overview.totals.n_items`` of a metrics bundle, ``0`` when absent.
+
+    ``0`` means "unknown", not "no items": a slim baseline bundle carries no
+    overview. Callers rely on that reading — ``resolve_display_k`` skips its
+    K filter at ``0``, and ``build_baseline_section`` falls back to the
+    fine-grained count with ``or n_items``.
+    """
     return int((_dataset_overview(metrics).get("totals", {}) or {}).get("n_items", 0))
 
 
