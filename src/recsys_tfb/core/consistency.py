@@ -2306,8 +2306,8 @@ def carry_column_collision_errors(
 _COMPARE_KINDS = {"model_version", "external_hive"}
 _VALID_UNMAPPED = {"fail", "drop"}
 # Same-stack Hive tables a model_version compare source may read from.
-# Mirror of evaluation.comparison.sources.MODEL_VERSION_SOURCES; A11 is the
-# config-static gate, the loader checks again at read time.
+# Mirror of pipelines.evaluation.steps.compare_sources.MODEL_VERSION_SOURCES;
+# A11 is the config-static gate, the loader checks again at read time.
 _VALID_MODEL_VERSION_SOURCES = {
     "enriched_eval_predictions",
     "ranked_predictions",
@@ -2577,7 +2577,7 @@ def post_training_snap_date_errors(parameters: dict, post_training: bool) -> lis
     unconditional predicate would block a valid run.
 
     Reads the nested ``parameters['evaluation']['snap_date']`` — the same shape
-    ``evaluation.nodes_spark.prepare_eval_data`` reads, deliberately without
+    ``pipelines.evaluation.nodes.prepare_eval_data`` reads, deliberately without
     the CLI's flat-config fallback, so the value this guard checks cannot
     diverge from the value the run filters on.
 

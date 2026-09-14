@@ -13,7 +13,7 @@ def _no_segments(parameters):
     own JSON is: the readers of ``enriched_eval_predictions`` refuse a
     partition prepared under other settings.
     """
-    from recsys_tfb.evaluation.config_fingerprint import fingerprint
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
 
     return {"joined": [], "sources": {}, "missing": {},
             "config_fingerprint": fingerprint(parameters)}
@@ -31,7 +31,7 @@ def _prepare_eval_data(predictions, labels, parameters):
     For tests of the prediction/label join. They configure no segment column,
     so the population is read for nothing but its (empty) column list.
     """
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+    from recsys_tfb.pipelines.evaluation.nodes import (
         make_prepare_eval_data_node,
     )
 
@@ -476,8 +476,8 @@ class TestSegmentsFollowThePopulation:
         """c2 is not in the population: its segment is NULL, which the metric
         layer reports as the unmatched group."""
         import pandas as pd
-        from recsys_tfb.evaluation.config_fingerprint import fingerprint
-        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
+        from recsys_tfb.pipelines.evaluation.nodes import (
             make_prepare_eval_data_node,
         )
 
@@ -502,7 +502,7 @@ class TestSegmentsFollowThePopulation:
 
     def test_post_training_sample_pool_is_finer_grained_without_fanout(self, spark):
         import pandas as pd
-        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        from recsys_tfb.pipelines.evaluation.nodes import (
             make_prepare_eval_data_node,
         )
 
@@ -523,7 +523,7 @@ class TestSegmentsFollowThePopulation:
 
     def test_an_override_table_wins_over_the_population(self, spark):
         import pandas as pd
-        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        from recsys_tfb.pipelines.evaluation.nodes import (
             make_prepare_eval_data_node,
         )
 
@@ -558,7 +558,7 @@ class TestSegmentsFollowThePopulation:
         warning names the table and the column so a typo is recognisable."""
         import logging
         import pandas as pd
-        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        from recsys_tfb.pipelines.evaluation.nodes import (
             make_prepare_eval_data_node,
         )
 
@@ -797,7 +797,7 @@ class TestComputeBaselineMetrics:
         return spark.createDataFrame(pd.DataFrame(rows))
 
     def test_returns_overall_and_per_item(self, spark):
-        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        from recsys_tfb.pipelines.evaluation.nodes import (
             compute_baseline_metrics,
         )
 
@@ -807,7 +807,7 @@ class TestComputeBaselineMetrics:
             _no_segments(self._parameters()),
             self._parameters(),
         )
-        from recsys_tfb.evaluation.config_fingerprint import fingerprint
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
 
         assert set(result.keys()) == {
             "overall", "per_item", "purchase_counts", "monthly_counts",
@@ -830,8 +830,8 @@ class TestComputeBaselineMetrics:
         """Not ``None``: a ``null`` JSON cannot carry the fingerprint, and
         ``generate_report`` would then refuse it as unfingerprinted. Returns
         before touching either DataFrame, hence no Spark session."""
-        from recsys_tfb.evaluation.config_fingerprint import fingerprint
-        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
+        from recsys_tfb.pipelines.evaluation.nodes import (
             compute_baseline_metrics,
         )
 
@@ -843,8 +843,8 @@ class TestComputeBaselineMetrics:
 
 
 def test_compute_metric_ci_disabled_returns_stub():
-    from recsys_tfb.evaluation.config_fingerprint import fingerprint
-    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metric_ci
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
+    from recsys_tfb.pipelines.evaluation.nodes import compute_metric_ci
     params = {
         "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
                                "item": "prod_name", "label": "label",
@@ -857,8 +857,8 @@ def test_compute_metric_ci_disabled_returns_stub():
 
 
 def test_compute_report_aggregates_disabled_returns_fingerprinted_stub():
-    from recsys_tfb.evaluation.config_fingerprint import fingerprint
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
+    from recsys_tfb.pipelines.evaluation.nodes import (
         compute_report_aggregates,
     )
     params = {"evaluation": {"report": {"sections": {"diagnostics": False}}}}
@@ -868,7 +868,7 @@ def test_compute_report_aggregates_disabled_returns_fingerprinted_stub():
 
 
 def test_compute_metric_ci_end_to_end_small(spark):
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+    from recsys_tfb.pipelines.evaluation.nodes import (
         compute_metric_ci,
         draw_diagnosis_sample_node,
     )
@@ -902,13 +902,13 @@ def test_compute_metric_ci_end_to_end_small(spark):
     assert out["enabled"] is True
     assert "A" in out["per_item"] and "macro" in out and "sample" in out
     assert out["sample"]["n_queries_sampled"] == 2
-    from recsys_tfb.evaluation.config_fingerprint import fingerprint
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
     assert out["config_fingerprint"] == fingerprint(params)
 
 
 def test_compute_metric_ci_raises_when_enabled_but_sample_none(spark):
     import pytest as _pytest
-    from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metric_ci
+    from recsys_tfb.pipelines.evaluation.nodes import compute_metric_ci
     params = {
         "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
                                "item": "prod_name", "label": "label",
@@ -931,7 +931,7 @@ class TestConsumersSegmentByTheLandedList:
 
     @classmethod
     def _segments(cls):
-        from recsys_tfb.evaluation.config_fingerprint import fingerprint
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
 
         return {
             "joined": ["cust_segment_typ"],
@@ -968,7 +968,7 @@ class TestConsumersSegmentByTheLandedList:
         ).withColumn("stale_seg", F.lit(None).cast("string"))
 
     def test_compute_metrics(self, spark):
-        from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metrics
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
 
         result = compute_metrics(
             self._frame(spark), self._segments(), self._parameters())
@@ -980,12 +980,12 @@ class TestConsumersSegmentByTheLandedList:
         # It lands as metrics.json, so it records the computed settings it
         # was made with and generate_report can refuse a stale one
         # (ADR-0018 decision 2, ADR-0020 decision 2).
-        from recsys_tfb.evaluation.config_fingerprint import fingerprint
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
 
         assert result["config_fingerprint"] == fingerprint(self._parameters())
 
     def test_compute_baseline_metrics(self, spark):
-        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        from recsys_tfb.pipelines.evaluation.nodes import (
             compute_baseline_metrics,
         )
 
@@ -995,7 +995,7 @@ class TestConsumersSegmentByTheLandedList:
         assert set(result["per_segment"]) == {"mass", "hnw"}
 
     def test_draw_diagnosis_sample_node(self, spark):
-        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        from recsys_tfb.pipelines.evaluation.nodes import (
             draw_diagnosis_sample_node,
         )
 
@@ -1008,7 +1008,7 @@ class TestConsumersSegmentByTheLandedList:
         """Only the model side has segment columns; the compared side is a
         prediction table of its own. No rendered section shows segments, so
         the observable is what each side is asked to segment by."""
-        from recsys_tfb.pipelines.evaluation import comparison_nodes
+        from recsys_tfb.pipelines.evaluation import nodes
 
         asked = []
 
@@ -1016,12 +1016,12 @@ class TestConsumersSegmentByTheLandedList:
             asked.append((df, list(segment_columns)))
             return {}
 
-        monkeypatch.setattr(comparison_nodes, "compute_all_metrics", fake_metrics)
-        monkeypatch.setattr(comparison_nodes, "build_comparison_result",
+        monkeypatch.setattr(nodes, "compute_all_metrics", fake_metrics)
+        monkeypatch.setattr(nodes, "build_comparison_result",
                             lambda *a, **k: {})
-        monkeypatch.setattr(comparison_nodes, "assemble_comparison_report",
+        monkeypatch.setattr(nodes, "assemble_comparison_report",
                             lambda *a, **k: "<html/>")
-        comparison_nodes.generate_comparison_report(
+        nodes.generate_comparison_report(
             "model_side", "compared_side", {}, self._segments(),
             self._parameters())
         assert asked == [("model_side", ["cust_segment_typ"]),
@@ -1061,7 +1061,7 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
         return one.unionByName(other)
 
     def test_compute_metrics(self, spark):
-        from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metrics
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
 
         params = self._parameters()
         both = compute_metrics(self._two_months(spark), _no_segments(params),
@@ -1072,7 +1072,7 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
         assert both == alone
 
     def test_compute_baseline_metrics(self, spark):
-        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        from recsys_tfb.pipelines.evaluation.nodes import (
             compute_baseline_metrics,
         )
 
@@ -1085,7 +1085,7 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
         assert both == alone
 
     def test_compute_report_aggregates(self, spark):
-        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        from recsys_tfb.pipelines.evaluation.nodes import (
             compute_report_aggregates,
         )
 
@@ -1095,7 +1095,7 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
         assert both == alone
 
     def test_draw_diagnosis_sample_node(self, spark):
-        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        from recsys_tfb.pipelines.evaluation.nodes import (
             draw_diagnosis_sample_node,
         )
 
@@ -1108,7 +1108,7 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
     def test_compute_metrics_refuses_a_month_with_no_rows(self, spark):
         """Postcondition: the evaluated month's partition is empty or was never
         written, and reading the table raised nothing."""
-        from recsys_tfb.pipelines.evaluation.nodes_spark import compute_metrics
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
 
         params = self._parameters(snap_date="2025-03-31")
         with pytest.raises(
@@ -1133,12 +1133,12 @@ class TestReadersRefuseAPartitionPreparedUnderOtherSettings:
 
     @staticmethod
     def _call(name, frame, labels, segments, params):
-        from recsys_tfb.pipelines.evaluation import nodes_spark
+        from recsys_tfb.pipelines.evaluation import nodes
 
         if name == "compute_baseline_metrics":
-            return nodes_spark.compute_baseline_metrics(
+            return nodes.compute_baseline_metrics(
                 frame, labels, segments, params)
-        return getattr(nodes_spark, name)(frame, segments, params)
+        return getattr(nodes, name)(frame, segments, params)
 
     @pytest.mark.parametrize("name", _READERS)
     def test_a_changed_segment_setting_names_the_join_to_re_run(self, name):
@@ -1167,13 +1167,13 @@ class TestReadersRefuseAPartitionPreparedUnderOtherSettings:
 
 class TestCiConsumerEnabled:
     def test_default_true(self):
-        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        from recsys_tfb.pipelines.evaluation.nodes import (
             _ci_consumer_enabled,
         )
         assert _ci_consumer_enabled({}) is True
 
     def test_respects_disabled(self):
-        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        from recsys_tfb.pipelines.evaluation.nodes import (
             _ci_consumer_enabled,
         )
         params = {"evaluation": {"diagnosis": {"ci": {"enabled": False}}}}
@@ -1208,7 +1208,7 @@ class TestDrawDiagnosisSampleNode:
     def test_returns_none_and_skips_draw_when_all_disabled(self, spark):
         from unittest.mock import patch
         from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-        from recsys_tfb.pipelines.evaluation import nodes_spark
+        from recsys_tfb.pipelines.evaluation import nodes
         params = self._params()
         params["evaluation"]["diagnosis"].update({
             "ci": {"enabled": False},
@@ -1217,27 +1217,27 @@ class TestDrawDiagnosisSampleNode:
             **{name: {"enabled": False} for name in DIAGNOSES},
         })
         with patch(
-            "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample"
+            "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample"
         ) as spy:
-            result = nodes_spark.draw_diagnosis_sample_node(self._eval_predictions(spark), _no_segments(params), params)
+            result = nodes.draw_diagnosis_sample_node(self._eval_predictions(spark), _no_segments(params), params)
         assert result is None
         assert spy.call_count == 0
 
     def test_draws_when_one_enabled(self):
         from unittest.mock import patch
         import pandas as pd
-        from recsys_tfb.pipelines.evaluation import nodes_spark
+        from recsys_tfb.pipelines.evaluation import nodes
         params = self._params()
         params["evaluation"]["diagnosis"].update({
             "ci": {"enabled": True},
         })
         with patch(
-            "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
+            "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample",
             return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
         ) as spy, patch.object(
-            nodes_spark, "restrict_to_eval_snap_date", _kept_month_of
+            nodes, "restrict_to_eval_snap_date", _kept_month_of
         ):
-            nodes_spark.draw_diagnosis_sample_node(None, _no_segments(params), params)
+            nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
         # exact args, not just count: the draw gets the month-restricted table
         # (ADR-0018 decision 1), not the table itself, and params uncopied.
         spy.assert_called_once_with(
@@ -1247,12 +1247,12 @@ class TestDrawDiagnosisSampleNode:
         # Faithfulness / behaviour-preservation: the node is a pass-through of
         # draw_diagnosis_sample. Same seed -> identical content.
         from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
-        from recsys_tfb.pipelines.evaluation import nodes_spark
+        from recsys_tfb.pipelines.evaluation import nodes
         params = self._params()  # both consumers default-enabled
         direct_pdf, direct_meta = draw_diagnosis_sample(
             self._eval_predictions(spark), params
         )
-        node_pdf, node_meta = nodes_spark.draw_diagnosis_sample_node(self._eval_predictions(spark), _no_segments(params), params)
+        node_pdf, node_meta = nodes.draw_diagnosis_sample_node(self._eval_predictions(spark), _no_segments(params), params)
         assert node_meta == direct_meta
         assert (
             node_pdf.sort_values(list(node_pdf.columns))
@@ -1266,7 +1266,7 @@ class TestDrawDiagnosisSampleNode:
     def test_draw_diagnosis_sample_called_once_across_consumers(self):
         from unittest.mock import patch
         import pandas as pd
-        from recsys_tfb.pipelines.evaluation import nodes_spark
+        from recsys_tfb.pipelines.evaluation import nodes
         params = self._params()  # ci default-enabled
         stub_pdf = pd.DataFrame({
             "snap_date": ["20240331"], "cust_id": ["H1"],
@@ -1274,16 +1274,16 @@ class TestDrawDiagnosisSampleNode:
         })
         stub = (stub_pdf, {"n_queries_sampled": 1})
         with patch(
-            "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
+            "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample",
             return_value=stub,
         ) as spy, patch(
-            "recsys_tfb.diagnosis.metric.uncertainty.bootstrap_per_item_ci",
+            "recsys_tfb.pipelines.evaluation.nodes.bootstrap_per_item_ci",
             return_value={"n_boot": 1},
         ), patch.object(
-            nodes_spark, "restrict_to_eval_snap_date", _kept_month_of
+            nodes, "restrict_to_eval_snap_date", _kept_month_of
         ):
-            sample = nodes_spark.draw_diagnosis_sample_node(None, _no_segments(params), params)
-            nodes_spark.compute_metric_ci(sample, params)
+            sample = nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
+            nodes.compute_metric_ci(sample, params)
         # exactly one draw, with the node's own inputs — the consumer must NOT
         # re-draw (it consumes the shared sample).
         spy.assert_called_once_with(
@@ -1291,10 +1291,10 @@ class TestDrawDiagnosisSampleNode:
 
     def test_node_logs_free_pandas_data_volume(self, spark, caplog):
         import logging
-        from recsys_tfb.pipelines.evaluation import nodes_spark
+        from recsys_tfb.pipelines.evaluation import nodes
         params = self._params()  # all enabled
         with caplog.at_level(logging.INFO):
-            nodes_spark.draw_diagnosis_sample_node(self._eval_predictions(spark), _no_segments(params), params)
+            nodes.draw_diagnosis_sample_node(self._eval_predictions(spark), _no_segments(params), params)
         vols = [
             r.volume for r in caplog.records
             if getattr(r, "event", None) == "data_volume"
@@ -1316,7 +1316,7 @@ class TestRegistryDiagnosisEnabled:
     """
 
     def test_defaults_true(self):
-        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        from recsys_tfb.pipelines.evaluation.nodes import (
             _registry_diagnosis_enabled,
         )
         assert _registry_diagnosis_enabled({}) is True
@@ -1326,7 +1326,7 @@ class TestRegistryDiagnosisEnabled:
 
         from recsys_tfb.diagnosis.metric import contract
         from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-        from recsys_tfb.pipelines.evaluation.nodes_spark import (
+        from recsys_tfb.pipelines.evaluation.nodes import (
             _registry_diagnosis_enabled,
         )
         all_off = {"evaluation": {"diagnosis": {
@@ -1373,7 +1373,7 @@ def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
     """
     from unittest.mock import patch
     import pandas as pd
-    from recsys_tfb.pipelines.evaluation import nodes_spark
+    from recsys_tfb.pipelines.evaluation import nodes
     params = {
         "schema": {"columns": {
             "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
@@ -1387,12 +1387,12 @@ def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
         }},
     }
     with patch(
-        "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
+        "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample",
         return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
     ) as spy, patch.object(
-        nodes_spark, "restrict_to_eval_snap_date", _kept_month_of
+        nodes, "restrict_to_eval_snap_date", _kept_month_of
     ):
-        result = nodes_spark.draw_diagnosis_sample_node(None, _no_segments(params), params)
+        result = nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
     assert result is not None, (
         "sample gate ignored the registry diagnoses — config_shift is enabled "
         "but no sample was drawn"
@@ -1422,7 +1422,7 @@ def test_sample_not_drawn_when_only_non_sample_diagnoses_enabled(
     from unittest.mock import patch
 
     from recsys_tfb.diagnosis.metric import contract
-    from recsys_tfb.pipelines.evaluation import nodes_spark
+    from recsys_tfb.pipelines.evaluation import nodes
 
     fake = types.ModuleType("recsys_tfb.diagnosis.metric.fake_capacity")
     fake.INPUTS = ("gain_ledger", "parameters")
@@ -1443,9 +1443,9 @@ def test_sample_not_drawn_when_only_non_sample_diagnoses_enabled(
     }
 
     with caplog.at_level(logging.INFO), patch(
-        "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample"
+        "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample"
     ) as spy:
-        result = nodes_spark.draw_diagnosis_sample_node(None, _no_segments(params), params)
+        result = nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
 
     assert result is None
     assert spy.call_count == 0
@@ -1457,8 +1457,8 @@ def test_sample_not_drawn_when_only_non_sample_diagnoses_enabled(
 def test_generated_node_writes_stub_when_disabled():
     """The stub carries the name and the fingerprint too: a disabled
     diagnosis is still a landed JSON that ``render_diagnosis_pages`` checks."""
-    from recsys_tfb.evaluation.config_fingerprint import fingerprint
-    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
+    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
 
     node_fn = make_diagnosis_node("config_shift")
     params = {"evaluation": {"diagnosis": {"config_shift": {"enabled": False}}}}
@@ -1480,7 +1480,7 @@ def test_diagnosis_fingerprint_moves_only_with_its_own_extra_keys():
     import importlib
 
     from recsys_tfb.diagnosis.metric.contract import DIAGNOSES, inputs_for
-    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
 
     before = {
         "dataset": {"sample_ratio_overrides": {"k|1": 0.5}},
@@ -1503,7 +1503,7 @@ def test_diagnosis_fingerprint_moves_only_with_its_own_extra_keys():
 def test_generated_node_raises_when_enabled_but_sample_none():
     import pytest as _pytest
 
-    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
 
     node_fn = make_diagnosis_node("config_shift")
     with _pytest.raises(ValueError, match="draw_diagnosis_sample_node"):
@@ -1521,7 +1521,7 @@ def test_generated_node_delegates_to_the_named_module(monkeypatch):
     import sys
     import types
 
-    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
 
     called = {}
     fake = types.ModuleType("recsys_tfb.diagnosis.metric.fake_diag")
@@ -1535,7 +1535,7 @@ def test_generated_node_delegates_to_the_named_module(monkeypatch):
     monkeypatch.setitem(
         sys.modules, "recsys_tfb.diagnosis.metric.fake_diag", fake)
 
-    from recsys_tfb.evaluation.config_fingerprint import fingerprint
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
 
     node_fn = make_diagnosis_node("fake_diag")
     sample = ("pdf-sentinel", {"sampling_description": "x"})
@@ -1610,8 +1610,8 @@ def test_downstream_diagnosis_refuses_a_stale_upstream_result(monkeypatch):
     over a result actually computed on stale input."""
     import copy
 
-    from recsys_tfb.evaluation.config_fingerprint import fingerprint
-    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
+    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
 
     _install_fake_upstream_and_downstream(monkeypatch)
 
@@ -1635,8 +1635,8 @@ def test_downstream_diagnosis_refuses_a_stale_upstream_result(monkeypatch):
 
 
 def test_downstream_diagnosis_computes_on_a_fresh_upstream_result(monkeypatch):
-    from recsys_tfb.evaluation.config_fingerprint import fingerprint
-    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
+    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
 
     received = _install_fake_upstream_and_downstream(monkeypatch)
 
@@ -1658,8 +1658,8 @@ def test_disabled_downstream_diagnosis_skips_the_upstream_check(monkeypatch):
     """A disabled downstream returns its stub before reaching compute (and
     before this precondition), so a stale upstream must not raise here —
     the existing enabled-gate ordering is unchanged."""
-    from recsys_tfb.evaluation.config_fingerprint import fingerprint
-    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
+    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
 
     _install_fake_upstream_and_downstream(monkeypatch)
 
@@ -1690,7 +1690,7 @@ def test_each_diagnosis_node_gets_a_distinct_name():
     任何一個，log 也分不出誰是誰。而 pipeline 照樣跑得完——這是靜默的。
     """
     from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
 
     names = [make_diagnosis_node(n).__name__ for n in DIAGNOSES]
     assert names == [f"diagnose_{n}" for n in DIAGNOSES]

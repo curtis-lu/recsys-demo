@@ -64,7 +64,7 @@ def test_inference_and_evaluation_rank_the_same_tied_data_identically(spark):
     """Inference publishes ``rank``; evaluation re-ranks when the source has none
     (``--post-training``) and after the comparison mode shrinks the candidate
     set. Both must land on the same ranks for the same rows."""
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+    from recsys_tfb.pipelines.evaluation.nodes import (
         make_prepare_eval_data_node,
     )
     from recsys_tfb.pipelines.inference.nodes import rank_predictions

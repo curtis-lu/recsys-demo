@@ -20,7 +20,7 @@ date: 2026-09-01
 | `n_prod_A_full` / `n_prod_B_full` / `n_prod_common` | `n_item_A_full` / `n_item_B_full` / `n_item_common` | 相異 `item` 數（意義未變，只去掉行業專屬名稱） |
 | `dropped_prods_A` / `dropped_prods_B` | `dropped_items_A` / `dropped_items_B` | 被剔除的 item 清單（意義未變） |
 
-實作在 `pipelines/evaluation/comparison_nodes.py::restrict_to_common`，渲染在 `evaluation/comparison/report.py::_build_coverage_section`。
+實作在 `pipelines/evaluation/nodes.py::restrict_to_common`，渲染在 `evaluation/comparison/report.py::_build_coverage_section`。
 
 ## 為什麼是 query group，不是 entity 組合
 

@@ -33,21 +33,19 @@ def create_pipeline(
         ``prepare_eval_data`` here to say which segment columns the
         partition's rows were joined with.
     """
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+    from recsys_tfb.pipelines.evaluation.nodes import (
         compute_baseline_metrics,
         compute_metric_ci,
         compute_metrics,
         compute_report_aggregates,
+        generate_comparison_report,
         generate_report,
+        load_compare_predictions,
         make_diagnosis_node,
         make_draw_diagnosis_sample_node,
         make_prepare_eval_data_node,
         no_diagnosis_pages,
         render_diagnosis_pages,
-    )
-    from recsys_tfb.pipelines.evaluation.comparison_nodes import (
-        generate_comparison_report,
-        load_compare_predictions,
         restrict_to_common,
         validate_enriched_eval_predictions_present,
     )

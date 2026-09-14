@@ -1,32 +1,67 @@
-"""Evaluation pipeline nodes — Spark backend."""
+"""Evaluation pipeline nodes, for every run mode ``pipeline.py`` wires
+(monitoring, ``--post-training``, ``--compare``, ``--compare-only``).
 
+Every node is defined here except the registry diagnosis nodes: the
+``make_diagnosis_node`` factory builds one per ``contract.DIAGNOSES`` entry, so
+the architecture audit's AST scan does not see their definitions (ADR-0019
+decision 2). The mechanisms only these nodes call live in ``steps/``; the
+library shared with training, diagnosis and ``scripts/`` is
+``recsys_tfb.evaluation``.
+"""
+
+import importlib
 import logging
+from pathlib import Path
 from typing import Optional
 
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
 
+from recsys_tfb.core.consistency import DataConsistencyError
 from recsys_tfb.core.logging import log_data_volume
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.config_fingerprint import (
-    PARTITION_CONTENT_KEYS,
-    LoadedArtifact,
-    fingerprint,
-    require_computed_with_current_config,
+from recsys_tfb.diagnosis.metric import contract
+from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
+from recsys_tfb.diagnosis.metric.uncertainty import bootstrap_per_item_ci
+from recsys_tfb.evaluation.baselines import (
+    build_baseline_frame,
+    compute_monthly_purchase_counts,
+    compute_purchase_counts,
+    resolve_lookback_months,
 )
+from recsys_tfb.evaluation.compare import build_comparison_result
+from recsys_tfb.evaluation.comparison.report import assemble_comparison_report
 from recsys_tfb.evaluation.diagnostics_spark import aggregate_report_diagnostics
-from recsys_tfb.evaluation.segments import (
-    join_segment_columns,
-    join_segment_sources,
+from recsys_tfb.evaluation.metrics_spark import (
+    compute_all_metrics,
+    compute_overall_per_item,
+    rank_within_query,
 )
 from recsys_tfb.evaluation.report_builder import (
     assemble_diagnosis_pages,
     assemble_report,
 )
+from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
+    load_compare_predictions as _load_compare,
+)
+from recsys_tfb.pipelines.evaluation.steps.compare_universe import (
+    restrict_to_common as _restrict,
+)
+from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+    PARTITION_CONTENT_KEYS,
+    LoadedArtifact,
+    fingerprint,
+    require_computed_with_current_config,
+)
+from recsys_tfb.pipelines.evaluation.steps.segments import (
+    join_segment_columns,
+    join_segment_sources,
+)
 from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
     eval_snap_date,
     restrict_to_eval_snap_date,
 )
+from recsys_tfb.utils.spark import get_or_create_spark_session
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +71,7 @@ def _require_prepared_with_current_config(
 ) -> None:
     """Pre-check (inputs): the ``enriched_eval_predictions`` partition about to
     be read was written under today's
-    :data:`~recsys_tfb.evaluation.config_fingerprint.PARTITION_CONTENT_KEYS`.
+    :data:`~recsys_tfb.pipelines.evaluation.steps.config_fingerprint.PARTITION_CONTENT_KEYS`.
 
     ``prepare_eval_data`` lands ``evaluation_segment_columns`` together with the
     partition, so that JSON's fingerprint stands for both. Unchecked,
@@ -92,15 +127,10 @@ def _registry_diagnosis_enabled(parameters: dict) -> bool:
     時，樣本不會被抽，消費節點拿到 None 而 fail-loud。
 
     ``contract.DIAGNOSES`` 走**模組屬性**存取（``contract.DIAGNOSES``），不是
-    ``from ... import DIAGNOSES``。兩種寫法在這裡都能被 monkeypatch（本函式
-    的 import 在呼叫當下才執行，兩者都是每次呼叫重新解析），但模組屬性存取
-    讀起來更明確是「當下的 registry 值」，不必先確認 import 是模組層級還是
-    函式內才敢信任 monkeypatch 生效。
+    ``from ... import DIAGNOSES``。``contract`` 在模組層 import，所以只有模組
+    屬性存取是每次呼叫重新解析、monkeypatch 得到的；``from ... import
+    DIAGNOSES`` 會在 import 本模組時就把當下的 tuple 綁死。
     """
-    import importlib
-
-    from recsys_tfb.diagnosis.metric import contract
-
     diag = ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
     sample_consumers = [
         name for name in contract.DIAGNOSES
@@ -141,9 +171,16 @@ def make_prepare_eval_data_node(population_name: str):
         (joined column -> table it came from), ``missing`` (column -> the
         population table that lacks it) and ``config_fingerprint``.
 
-        Pre-check (input): ``label_table`` has no duplicated identity key in
-        the evaluated month; raises with the number of duplicated keys (why
-        it raises rather than deduplicating is written at the check).
+        Pre-checks (inputs), each raising before anything is written:
+
+        * ``parameters['model_version']`` is set (``RuntimeError``): the CLI
+          resolves it before the pipeline runs.
+        * ``evaluation.snap_date`` is set (``ValueError``): the config gives it.
+        * The predictions hold rows for that month (``ValueError``): the
+          upstream run scored it.
+        * ``label_table`` has no duplicated identity key in that month
+          (``ValueError``, with the number of duplicated keys; why it raises
+          rather than deduplicating is written at the check).
         """
         schema = get_schema(parameters)
         time_col = schema["time"]
@@ -154,8 +191,10 @@ def make_prepare_eval_data_node(population_name: str):
 
         labels = label_table
 
-        # Filter predictions to the resolved model_version (resolved upstream by
-        # __main__.py via core.versioning.resolve_model_version).
+        # Decision — which model_version: the one __main__.py resolved via
+        # core.versioning.resolve_model_version, never every version the table
+        # holds. Chosen wrong, one month's candidates would carry several
+        # models' scores and every rank would mix them, with nothing raising.
         model_version = parameters.get("model_version")
         if model_version is None:
             raise RuntimeError(
@@ -181,12 +220,13 @@ def make_prepare_eval_data_node(population_name: str):
                 model_version,
             )
 
-        # Filter predictions to the configured evaluation snap_date. evaluation.
-        # snap_date is an ISO date string (YYYY-MM-DD); the snap_date partition
-        # column on ranked_predictions / training_eval_predictions is STRING, so
-        # .cast("string") is a no-op here and stays correct if it is ever DATE.
-        # Applies to both pipeline modes (this node serves monitoring and
-        # --post-training). Fails loud — never silently evaluates the whole table.
+        # Decision — which month: evaluation.snap_date, in both pipeline modes
+        # (this node serves monitoring and --post-training), failing loud when
+        # it is unset or has no rows. Chosen wrong, the run would silently
+        # evaluate the whole table. evaluation.snap_date is an ISO date string
+        # (YYYY-MM-DD); the snap_date partition column on ranked_predictions /
+        # training_eval_predictions is STRING, so .cast("string") is a no-op
+        # here and stays correct if it is ever DATE.
         snap_date = str(eval_params.get("snap_date") or "").strip()
         if not snap_date:
             raise ValueError(
@@ -243,16 +283,15 @@ def make_prepare_eval_data_node(population_name: str):
                 f"pick one of the rows for you."
             )
 
-        # In --post-training mode the predictions source is training_eval_predictions,
-        # which already stores `label` alongside `score` (written by the training
-        # `predict` node). The merge join below keys on identity_cols only, so a
-        # `label` on the label_table side would survive as a second `label` column
-        # -> AnalysisException: reference 'label' is ambiguous. Drop it from the
-        # label_table side: the predictions table's own label is exactly what the
-        # model's test mAP was scored against, keeping post-training metrics
-        # consistent with the training pipeline. The label_table join is still
-        # required for segment columns. Monitoring mode (ranked_predictions) has no
-        # `label`, so the condition is False there and behaviour is unchanged.
+        # Decision — whose label under --post-training: the one
+        # training_eval_predictions stores alongside `score` (written by the
+        # training `predict` node), not label_table's. It is exactly what the
+        # model's test mAP was scored against; chosen wrong, post-training
+        # metrics would disagree with the training pipeline's. One side has to
+        # lose it anyway: the merge join below keys on identity_cols only, so a
+        # `label` on both sides -> AnalysisException: reference 'label' is
+        # ambiguous. Monitoring mode (ranked_predictions) has no `label`, so the
+        # condition is False there and behaviour is unchanged.
         if label_col in ranked_predictions.columns and label_col in labels.columns:
             labels = labels.drop(label_col)
             logger.info(
@@ -261,6 +300,7 @@ def make_prepare_eval_data_node(population_name: str):
                 label_col,
             )
 
+        # Decision — how labels attach: LEFT JOIN, a missing label counts as 0.
         # LEFT JOIN — preserve every prediction row so per-customer ranking is over
         # the model's full candidate set (in dev: cust × 8 prod) regardless of
         # whether label_table covers that (cust, prod) pair. label_table's
@@ -283,15 +323,19 @@ def make_prepare_eval_data_node(population_name: str):
                 label_col, F.col(label_col).cast("int")
             )
 
+        # Decision — a missing rank is computed here, a present one is trusted.
         # Downstream report rendering selects schema["rank"] from eval_predictions.
         # When the predictions source is
         # training_eval_predictions (--post-training mode), `rank` is absent because
         # the table no longer stores it (Spark mAP recomputes rank internally via
         # rank_within_query). Add it here when missing so downstream stays uniform;
         # when present (ranked_predictions source), trust the upstream value.
+        # Chosen the other way, the report would replace the ranking inference
+        # published with this node's own; the cost of this way is that a `rank`
+        # column ever added to training_eval_predictions is used as is, tie-break
+        # included, with no message (ADR-0014 records that hazard).
         rank_col = schema["rank"]
         if rank_col not in eval_predictions.columns:
-            from recsys_tfb.evaluation.metrics_spark import rank_within_query
             score_col = schema["score"]
             entity_cols = schema["entity"]
             query_cols = [time_col] + entity_cols
@@ -427,7 +471,6 @@ def make_draw_diagnosis_sample_node(registry_diagnoses_wired: bool):
         # month this model_version was evaluated on.
         eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
 
-        from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
         sample_pdf, sample_meta = draw_diagnosis_sample(
             eval_predictions, parameters,
             segment_columns=segment_columns["joined"],
@@ -483,8 +526,6 @@ def compute_metrics(
     It does not catch a reader that forgot to restrict (that reader is another
     node); the AST test in ``test_pipeline.py`` does.
     """
-    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
-
     _require_prepared_with_current_config(segment_columns, parameters)
     # Decision — evaluate one month: the table holds every month this
     # model_version was evaluated on.
@@ -541,20 +582,12 @@ def compute_baseline_metrics(
             popularity-composition table; consumers must treat absence
             as backward-compatible (older results may omit it).
       - config_fingerprint: the computed settings it was made with
-            (``evaluation.config_fingerprint``), checked by
+            (``steps.config_fingerprint``), checked by
             ``generate_report``.
 
     Pre-check (inputs), past the stub: the partition was prepared under
     today's settings (``_require_prepared_with_current_config``).
     """
-    from recsys_tfb.evaluation.baselines import (
-        build_baseline_frame,
-        compute_monthly_purchase_counts,
-        compute_purchase_counts,
-        resolve_lookback_months,
-    )
-    from recsys_tfb.evaluation.metrics_spark import compute_overall_per_item
-
     eval_params = parameters.get("evaluation", {}) or {}
     sections = (eval_params.get("report", {}) or {}).get("sections", {}) or {}
     if not sections.get("baseline", True):
@@ -646,6 +679,10 @@ def compute_metric_ci(
 
     Both the stub and the full result carry ``config_fingerprint``: the JSON
     lands, and ``generate_report`` refuses one computed under other settings.
+
+    Pre-check (input): with the CI enabled, ``diagnosis_sample`` is not
+    ``None`` (``ValueError``). ``None`` there means
+    ``draw_diagnosis_sample_node``'s gate disagrees with this node's flag.
     """
     eval_params = parameters.get("evaluation", {}) or {}
     ci_cfg = ((eval_params.get("diagnosis", {}) or {}).get("ci", {}) or {})
@@ -659,8 +696,6 @@ def compute_metric_ci(
             "evaluation.diagnosis.ci.enabled is true — draw_diagnosis_sample_node "
             "gate is out of sync with the consumer enable flag"
         )
-
-    from recsys_tfb.diagnosis.metric.uncertainty import bootstrap_per_item_ci
 
     sample_pdf, sample_meta = diagnosis_sample
     out = bootstrap_per_item_ci(sample_pdf, parameters)
@@ -691,6 +726,10 @@ def make_diagnosis_node(name: str):
     Plan 1.5 的教訓是「寬簽章讓個數不對不再是錯誤」，所以這裡刻意用
     ``*node_inputs`` 接、立刻核對個數，不用 ``*args`` 直接轉呼叫——後者會讓
     少給一個 input 靜默地把某個位置參數錯當成 ``parameters``。
+
+    ``_run`` 自己的兩個 raise 都是**前置檢查（precondition）**：input 個數不符
+    （``TypeError``，接線錯）、吃抽樣的診斷拿到 ``None`` 樣本（``ValueError``，
+    抽樣閘門與這項診斷的開關不同步）。都不是這個 node 算錯了。
 
     ``parameters`` 一律取 ``node_inputs[-1]``——這是 ``INPUTS`` 的不變量
     （§3 之一，contract 測試守著）：宣告了 ``INPUTS`` 的模組必須把
@@ -733,10 +772,6 @@ def make_diagnosis_node(name: str):
       only that JSON stale.
     """
     def _run(*node_inputs) -> dict:
-        import importlib
-
-        from recsys_tfb.diagnosis.metric import contract
-
         mod = importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
         declared = contract.inputs_for(mod)
         if len(node_inputs) != len(declared):
@@ -830,8 +865,6 @@ def _diagnosis_pages_dir(parameters: dict):
     退回 ``evaluation.snap_date`` 是給單元測試用的（那裡沒有 runtime_params）；
     dash 一律剝掉，因為 catalog 拿到的就是剝過的值。
     """
-    from pathlib import Path
-
     eval_params = parameters.get("evaluation", {}) or {}
     snap = parameters.get("snap_date") or eval_params.get("snap_date", "unknown")
     return (Path("data") / "evaluation"
@@ -888,10 +921,6 @@ def render_diagnosis_pages(parameters: dict, *diagnosis_results) -> list[str]:
     both checked and drawn. Page-writing errors are not swallowed: a red run
     is easier to spot than a report that silently lost its diagnosis link.
     """
-    import importlib
-
-    from recsys_tfb.diagnosis.metric import contract
-
     names = contract.DIAGNOSES
     if not (isinstance(parameters, dict) and "evaluation" in parameters):
         raise TypeError(
@@ -1073,7 +1102,7 @@ def generate_report(
 
     Pre-check (inputs): ``evaluation_metrics``, ``baseline_metrics``,
     ``metric_ci`` and ``report_aggregates`` were computed with the current
-    computed settings (``evaluation.config_fingerprint``). All four are
+    computed settings (``steps.config_fingerprint``). All four are
     landed JSON (ADR-0018 decision 2), and ``--only-node generate_report``
     stops at "the JSON exists", so without this a setting changed since the
     last run is drawn from the old JSON with exit code 0 (ADR-0020 bug 2);
@@ -1108,3 +1137,165 @@ def generate_report(
         metric_ci=metric_ci,
         diagnosis_pages=diagnosis_pages,
     )
+
+
+def load_compare_predictions(parameters: dict) -> SparkDataFrame:
+    """Pipeline shim: resolve a SparkSession and dispatch to source loader."""
+    spark = get_or_create_spark_session()
+    return _load_compare(parameters, spark)
+
+
+def restrict_to_common(
+    eval_predictions: SparkDataFrame,
+    compare_predictions_raw: SparkDataFrame,
+    parameters: dict,
+) -> tuple[SparkDataFrame, SparkDataFrame, dict]:
+    """Pipeline shim: call the pure restrict function + capture coverage dict.
+
+    Returns ``(a_common, b_common, coverage_partial)`` — coverage_partial
+    carries full-universe sizes, the common sizes and dropped item lists so
+    the report can show what was filtered.
+
+    Population size is counted in **query groups** — distinct ``[time] +
+    entity`` combinations, every column of ``schema.entity`` — because that is
+    the unit mAP divides by. Reporting it in any other unit puts two different
+    scales side by side in one table with nothing telling the reader they
+    differ. See ``docs/adr/0015-compare-population-counted-in-query-groups.md``.
+
+    The common count is taken from what the restriction kept, not re-derived
+    from the raw frames (ADR-0020 bug 14). It used to ``intersect`` the raw
+    query groups, which matches ``NULL == NULL``, while the restriction's
+    equi-join drops null keys — so it counted groups no metric ever saw.
+
+    ``eval_predictions`` is ``enriched_eval_predictions`` read back from Hive,
+    every month this ``model_version`` was evaluated on; the node keeps the
+    evaluated month before anything else (ADR-0018 decision 1). It does not
+    check the partition's ``segment_columns.json`` fingerprint: under
+    ``--compare`` the same run's segmenting readers do, and ``--compare-only``
+    is left unchecked on purpose (ADR-0020 bug 6, #352 correction).
+    """
+    # Decision — compare the evaluated month only: the table holds every month
+    # this model_version was evaluated on.
+    eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
+
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    query_group_cols = [time_col, *schema["entity"]]
+
+    # Decision — B is scored against A's labels: not the label B landed with,
+    # and not a fresh label_table join, since A's own label is not the current
+    # label_table under --post-training / --compare-only. One answer for both
+    # sides in every mode (ADR-0020 bug 7; the full why is in
+    # steps/compare_universe.py).
+    a_common, b_common, universe = _restrict(
+        eval_predictions, compare_predictions_raw, parameters
+    )
+
+    a_groups_full = eval_predictions.select(*query_group_cols).distinct().count()
+    b_groups_full = compare_predictions_raw.select(*query_group_cols).distinct().count()
+    # Groups both restricted frames still hold. A left-semi equi-join, so null
+    # keys never match — the same null rule as the restriction's own joins. On
+    # symmetric candidate sets this equals either side's kept group count; when
+    # one side scored a common entity only on items the other lacks, that group
+    # is in one side's metrics but not in "common".
+    groups_common = (
+        a_common.select(*query_group_cols).distinct()
+        .join(
+            b_common.select(*query_group_cols).distinct(),
+            on=query_group_cols, how="left_semi",
+        )
+        .count()
+    )
+    common_items = universe.common_items
+
+    src = (parameters.get("evaluation", {}) or {}).get("compare", {}) or {}
+    coverage_partial = {
+        "kind_a": "model_version",
+        "model_version_a": parameters.get("model_version", "(this run)"),
+        "kind_b": src.get("kind", ""),
+        "model_version_b": src.get("model_version", "n/a"),
+        "table_b": src.get("table", "n/a"),
+        "n_query_group_A_full": a_groups_full,
+        "n_query_group_B_full": b_groups_full,
+        "n_query_group_common": groups_common,
+        "n_item_A_full": len(universe.a_items),
+        "n_item_B_full": len(universe.b_items),
+        "n_item_common": len(common_items),
+        "dropped_items_A": sorted(universe.a_items - common_items),
+        "dropped_items_B": sorted(universe.b_items - common_items),
+    }
+    return a_common, b_common, coverage_partial
+
+
+def generate_comparison_report(
+    eval_predictions_common: SparkDataFrame,
+    compare_predictions_common: SparkDataFrame,
+    coverage_partial: dict,
+    segment_columns: dict,
+    parameters: dict,
+) -> str:
+    """Run compute_all_metrics on both sides + assemble HTML.
+
+    Only this run's side segments, by what ``prepare_eval_data`` joined
+    (``segment_columns``; under ``--compare-only`` the copy landed next to the
+    enriched partition). Its frame can hold a column the other run mode joined,
+    all NULL, so the frame's columns are not asked (ADR-0020 bug 6). The
+    compared side is another prediction table with no segment columns.
+    """
+    metrics_a = compute_all_metrics(
+        eval_predictions_common, parameters,
+        segment_columns=segment_columns["joined"],
+    )
+    metrics_b = compute_all_metrics(
+        compare_predictions_common, parameters, segment_columns=[]
+    )
+
+    src = (parameters.get("evaluation", {}) or {}).get("compare", {}) or {}
+    label_a = "Model"
+    label_b = src.get("label", "Compare")
+    comparison = build_comparison_result(metrics_a, metrics_b, label_a, label_b)
+
+    return assemble_comparison_report(
+        metrics_a, metrics_b, comparison, coverage_partial, parameters
+    )
+
+
+def validate_enriched_eval_predictions_present(
+    enriched_eval_predictions: SparkDataFrame,
+    parameters: dict,
+) -> None:
+    """B4 invariant — fail loud if ``enriched_eval_predictions`` holds no rows
+    for the evaluated month under this ``model_version``.
+
+    A zero-output gate: it passes nothing on. ``restrict_to_common`` reads the
+    table and keeps the evaluated month itself, like every other reader
+    (ADR-0018 decision 1). The catalog has already pruned the table to this
+    ``model_version`` via ``partition_filter``; this node keeps the evaluated
+    month and asserts a row remains, otherwise raises
+    ``DataConsistencyError`` saying what to run first.
+
+    Slicing never pulls a zero-output node back in (R3 in
+    ``docs/agents/architecture-constraints.md``), so ``--compare-only
+    --from-node load_compare_predictions`` skips it. That does not open a
+    missing-partition hole: the CLI checks the partition listing before any
+    node runs (``__main__.py::_compare_only_input_errors``). What only this
+    gate sees is a partition that is listed but holds no rows.
+
+    Used only in ``--compare-only`` mode. In the other modes
+    ``prepare_eval_data`` writes the partition earlier in the same run, so B4
+    cannot fire.
+
+    Its raise is a pre-check (input): an earlier run was to write those rows,
+    and nothing in this run computed them.
+    """
+    mv = parameters.get("model_version", "unknown")
+    hive_db = (parameters.get("hive") or {}).get("db", "ml_recsys")
+
+    if restrict_to_eval_snap_date(enriched_eval_predictions, parameters).isEmpty():
+        raise DataConsistencyError(
+            f"(B4) {hive_db}.enriched_eval_predictions has no partition "
+            f"for evaluation.snap_date={eval_snap_date(parameters)!r} "
+            f"model_version={mv!r}. "
+            "Run `python -m recsys_tfb evaluation` (with or without "
+            "--compare) first to populate the partition."
+        )

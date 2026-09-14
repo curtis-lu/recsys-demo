@@ -273,7 +273,7 @@ def test_diagnosis_node_rejects_a_short_inputs_list():
     改用 ``*args`` 直接轉呼叫（不核對個數），少給一個 input 只會讓某個位置
     參數被錯當成 ``parameters`` 餵進去，而不會有任何錯誤訊息。
     """
-    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
 
     node_fn = make_diagnosis_node("config_shift")
     with pytest.raises(TypeError, match="expected 2 inputs"):

@@ -390,7 +390,7 @@ evaluation_comparison_report:
 
 # --- Training pipeline — test-set 預測結果（供下游 evaluation 重複使用）---
 # 由 training/nodes.py::predict_and_write_test_predictions 寫入；同 pipeline
-# 內由 compute_test_mAP_spark 與 evaluation/nodes_spark.py::prepare_eval_data
+# 內由 compute_test_mAP_spark 與 evaluation/nodes.py::prepare_eval_data
 # (--post-training mode) 讀回。只有 test window 內至少 1 個 positive label 的
 # 客戶會被 scoring 並寫入；不存 rank ──Spark mAP 端會用 rank_within_query
 # 重算。

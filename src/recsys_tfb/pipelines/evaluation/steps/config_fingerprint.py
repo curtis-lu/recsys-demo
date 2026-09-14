@@ -66,8 +66,9 @@ and the combining happens in ``pipelines/evaluation/`` nodes
 checking), the same direction ``pipeline.py`` already uses for
 ``contract.inputs_for``. Importing nothing from the project also keeps this
 usable from the pure ``generate_report`` path and from offline tools without
-dragging Spark in. ``tests/test_evaluation/test_config_fingerprint.py`` scans
-the imports.
+dragging Spark in.
+``tests/test_pipelines/test_evaluation/test_config_fingerprint.py`` scans the
+imports.
 
 What the fingerprint compares
 =============================

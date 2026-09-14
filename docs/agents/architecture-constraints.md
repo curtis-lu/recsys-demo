@@ -194,7 +194,7 @@ print(n, dict(b))"
 | 121–160 | 4 |
 | > 160 | 3 |
 
-最長的五個：`predict_and_write_scores` 263 行（`inference/nodes.py`）、`tune_hyperparameters` 185 行（`training/nodes.py`）、`predict_and_write_test_predictions` 179 行（`training/nodes.py`）、`validate_predictions` 146 行（`inference/nodes.py`）、`prepare_eval_data` 143 行（`evaluation/nodes_spark.py`）。
+最長的五個：`predict_and_write_scores` 263 行（`inference/nodes.py`）、`tune_hyperparameters` 185 行（`training/nodes.py`）、`predict_and_write_test_predictions` 179 行（`training/nodes.py`）、`validate_predictions` 146 行（`inference/nodes.py`）、`prepare_eval_data` 143 行（`evaluation/nodes.py`）。
 
 > **⚠ 上面那組數字是三張票合併後重量的結果，不是任何一張單獨的結果。** #229、#232、#230 三次改動都從 57／56 那個基準分支出去，各自在自己的 PR 裡量過一次；**下面三段引言記的是各自的 delta，把它們相加會得到錯的數字**。合併後的真值只有一個來源：重跑上面那段指令。這正是「別引用它，重量一次」在同一天內就被驗證了一次的實例。
 >
@@ -421,7 +421,7 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 它讀的是 AST 裡的 import 語句，所以兩類東西走得過去：
 
 - **先 import 套件、再走屬性。** 一個模組 import `recsys_tfb.pipelines.training`，之後讀 `training.steps.hpo_resume`。
-- **字串組出來的 import**（`importlib.import_module("recsys_tfb.pipelines.training.steps.hpo_resume")`）。任何靜態掃描都看不到，不是這條的特例。⚠ `importlib.import_module` 在 `src/` 有六處**確實在用**，只是沒有一處指向 `steps/`：`pipelines/__init__.py` 的 `_REGISTRY` 查表（指向 pipeline 套件），以及 `evaluation/pipeline.py`、`evaluation/nodes_spark.py`、`evaluation/report_builder.py` 的 `recsys_tfb.diagnosis.metric.{name}`。
+- **字串組出來的 import**（`importlib.import_module("recsys_tfb.pipelines.training.steps.hpo_resume")`）。任何靜態掃描都看不到，不是這條的特例。⚠ `importlib.import_module` 在 `src/` 有六處**確實在用**，只是沒有一處指向 `steps/`：`pipelines/__init__.py` 的 `_REGISTRY` 查表（指向 pipeline 套件），以及 `evaluation/pipeline.py`、`evaluation/nodes.py`、`evaluation/report_builder.py` 的 `recsys_tfb.diagnosis.metric.{name}`。
 
 現況全樹兩類都沒有指向 `steps/` 的命中。值得釘的是 import 語句那個形式——會被順手寫出來的是它，另外兩種要刻意才寫得出來。
 
@@ -436,7 +436,7 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 | 你要做的事 | 正確寫法 | 現成範例 |
 |---|---|---|
 | 依 query group 分組 | `[schema["time"], *schema["entity"]]` | `evaluation/metrics_spark.py::rank_within_query`、`diagnosis/model/population_spark.py` |
-| 依 entity 分組、算母體 | 整份 `schema["entity"]` | `evaluation/comparison/alignment.py::common_universe` |
+| 依 entity 分組、算母體 | 整份 `schema["entity"]` | `pipelines/evaluation/steps/compare_universe.py::common_universe` |
 | 需要**比 query group 更粗**的單位（切分、抽樣） | 讓使用者宣告，不要自己挑一欄 | `core/schema.py::get_entity_grouping`（讀 `dataset.train_split_keys`／`val_sample_keys`，由 consistency 的 A29 驗證是 `schema.entity` 的非空子集） |
 
 **檢查**：AST 掃描 `src/recsys_tfb/` **與 `tests/`** 底下所有 `.py`（`rglob`）。三種形態都算違反：
@@ -717,10 +717,10 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 | `__main__.py` | `evaluation` | 讀 `evaluation.snap_date` 設定鍵 ＋ 兩處 run context／log extra |
 | `core/consistency.py` | `post_training_snap_date_errors` | A22 讀 `evaluation.snap_date` |
 | `evaluation/comparison/report.py` | `assemble_comparison_report` | 比較報表 metadata 讀同一個設定鍵 |
-| `evaluation/comparison/sources.py` | `load_compare_predictions` | 同上 |
+| `pipelines/evaluation/steps/compare_sources.py` | `load_compare_predictions` | 同上 |
 | `evaluation/report_builder.py` | `assemble_report` | 報表 metadata 讀同一個設定鍵 |
-| `pipelines/evaluation/nodes_spark.py` | `prepare_eval_data` | 同上 |
-| `pipelines/evaluation/nodes_spark.py` | `_diagnosis_pages_dir` | 同上（診斷頁目錄名） |
+| `pipelines/evaluation/nodes.py` | `prepare_eval_data` | 同上 |
+| `pipelines/evaluation/nodes.py` | `_diagnosis_pages_dir` | 同上（診斷頁目錄名） |
 | `pipelines/evaluation/steps/snap_date_scope.py` | `eval_snap_date` | 同上。`enriched_eval_predictions` 的每個讀者都經 `restrict_to_eval_snap_date` 從這裡拿評估月份（[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1），所以是一筆、不是每個讀者一筆。#352 加入時同步刪掉 `comparison_nodes.py::validate_enriched_eval_predictions_present` 那筆（它改成跟這裡拿），總數不變 |
 
 **二、「那是它自己的欄位」（3 筆）**
