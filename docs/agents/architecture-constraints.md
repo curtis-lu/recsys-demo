@@ -194,7 +194,7 @@ print(n, dict(b))"
 | 121–160 | 4 |
 | > 160 | 3 |
 
-最長的五個：`predict_and_write_scores` 263 行（`inference/nodes.py`）、`tune_hyperparameters` 185 行（`training/nodes.py`）、`predict_and_write_test_predictions` 179 行（`training/nodes.py`）、`validate_predictions` 146 行（`inference/nodes.py`）、`prepare_eval_data` 143 行（`evaluation/nodes.py`）。
+最長的五個：`predict_and_write_scores` 263 行（`inference/nodes.py`）、`tune_hyperparameters` 185 行（`training/nodes.py`）、`predict_and_write_test_predictions` 179 行（`training/nodes.py`）、`validate_predictions` 146 行（`inference/nodes.py`）、`prepare_eval_data` 143 行（`evaluation/nodes_spark.py`）。
 
 > **⚠ 上面那組數字是三張票合併後重量的結果，不是任何一張單獨的結果。** #229、#232、#230 三次改動都從 57／56 那個基準分支出去，各自在自己的 PR 裡量過一次；**下面三段引言記的是各自的 delta，把它們相加會得到錯的數字**。合併後的真值只有一個來源：重跑上面那段指令。這正是「別引用它，重量一次」在同一天內就被驗證了一次的實例。
 >
@@ -421,7 +421,7 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 它讀的是 AST 裡的 import 語句，所以兩類東西走得過去：
 
 - **先 import 套件、再走屬性。** 一個模組 import `recsys_tfb.pipelines.training`，之後讀 `training.steps.hpo_resume`。
-- **字串組出來的 import**（`importlib.import_module("recsys_tfb.pipelines.training.steps.hpo_resume")`）。任何靜態掃描都看不到，不是這條的特例。⚠ `importlib.import_module` 在 `src/` 有六處**確實在用**，只是沒有一處指向 `steps/`：`pipelines/__init__.py` 的 `_REGISTRY` 查表（指向 pipeline 套件），以及 `evaluation/pipeline.py`、`evaluation/nodes.py`、`evaluation/report_builder.py` 的 `recsys_tfb.diagnosis.metric.{name}`。
+- **字串組出來的 import**（`importlib.import_module("recsys_tfb.pipelines.training.steps.hpo_resume")`）。任何靜態掃描都看不到，不是這條的特例。⚠ `importlib.import_module` 在 `src/` 有七處**確實在用**，只是沒有一處指向 `steps/`：`pipelines/__init__.py` 的 `_REGISTRY` 查表（指向 pipeline 套件），以及 `evaluation/pipeline.py`、`evaluation/nodes.py`、`evaluation/report_builder.py` 的 `recsys_tfb.diagnosis.metric.{name}`。
 
 現況全樹兩類都沒有指向 `steps/` 的命中。值得釘的是 import 語句那個形式——會被順手寫出來的是它，另外兩種要刻意才寫得出來。
 

@@ -1,12 +1,19 @@
 """Evaluation pipeline nodes, for every run mode ``pipeline.py`` wires
 (monitoring, ``--post-training``, ``--compare``, ``--compare-only``).
 
-Every node is defined here except the registry diagnosis nodes: the
-``make_diagnosis_node`` factory builds one per ``contract.DIAGNOSES`` entry, so
-the architecture audit's AST scan does not see their definitions (ADR-0019
-decision 2). The mechanisms only these nodes call live in ``steps/``; the
-library shared with training, diagnosis and ``scripts/`` is
-``recsys_tfb.evaluation``.
+Every node body lives in this module. Three kinds are built by factories here
+rather than defined at top level: ``prepare_eval_data``
+(``make_prepare_eval_data_node``), ``draw_diagnosis_sample_node``
+(``make_draw_diagnosis_sample_node``) and one ``diagnose_<name>`` per
+``contract.DIAGNOSES`` entry (``make_diagnosis_node``). The architecture
+audit's AST scan reads top-level definitions only, so it does not see those
+nodes' definitions (ADR-0019 decision 2).
+
+The mechanisms these nodes call come from two places: ``steps/``, which nothing
+outside this pipeline imports, and the ``recsys_tfb.evaluation`` library. The
+library also holds ``baselines``, although only these nodes call its Spark
+functions, because the shared report builder imports it (ADR-0019, correction
+to the caller facts).
 """
 
 import importlib
@@ -126,10 +133,11 @@ def _registry_diagnosis_enabled(parameters: dict) -> bool:
     否則閘門與消費端會漂移：使用者關掉 ci、只開一項吃抽樣的 registry 診斷
     時，樣本不會被抽，消費節點拿到 None 而 fail-loud。
 
-    ``contract.DIAGNOSES`` 走**模組屬性**存取（``contract.DIAGNOSES``），不是
-    ``from ... import DIAGNOSES``。``contract`` 在模組層 import，所以只有模組
-    屬性存取是每次呼叫重新解析、monkeypatch 得到的；``from ... import
-    DIAGNOSES`` 會在 import 本模組時就把當下的 tuple 綁死。
+    ``contract.DIAGNOSES`` is read as a module attribute, not through
+    ``from ... import DIAGNOSES``. ``contract`` is imported at module level, so
+    only the attribute read is resolved on every call and sees a monkeypatched
+    registry; ``from ... import DIAGNOSES`` would bind the tuple once, when
+    this module is imported.
     """
     diag = ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
     sample_consumers = [
@@ -171,11 +179,13 @@ def make_prepare_eval_data_node(population_name: str):
         (joined column -> table it came from), ``missing`` (column -> the
         population table that lacks it) and ``config_fingerprint``.
 
-        Pre-checks (inputs), each raising before anything is written:
+        Pre-checks. Each fails because something before this node did not
+        supply what it needs:
 
-        * ``parameters['model_version']`` is set (``RuntimeError``): the CLI
-          resolves it before the pipeline runs.
-        * ``evaluation.snap_date`` is set (``ValueError``): the config gives it.
+        * ``parameters['model_version']`` is set (``RuntimeError``) and
+          ``evaluation.snap_date`` is set (``ValueError``). These two read
+          settings only, so they are runtime backstops: the CLI resolves the
+          version, the config gives the month.
         * The predictions hold rows for that month (``ValueError``): the
           upstream run scored it.
         * ``label_table`` has no duplicated identity key in that month
@@ -284,14 +294,16 @@ def make_prepare_eval_data_node(population_name: str):
             )
 
         # Decision — whose label under --post-training: the one
-        # training_eval_predictions stores alongside `score` (written by the
-        # training `predict` node), not label_table's. It is exactly what the
-        # model's test mAP was scored against; chosen wrong, post-training
-        # metrics would disagree with the training pipeline's. One side has to
-        # lose it anyway: the merge join below keys on identity_cols only, so a
-        # `label` on both sides -> AnalysisException: reference 'label' is
-        # ambiguous. Monitoring mode (ranked_predictions) has no `label`, so the
-        # condition is False there and behaviour is unchanged.
+        # training_eval_predictions stores alongside `score` (written by
+        # training's predict_and_write_test_predictions), not label_table's. It
+        # is exactly what the model's test mAP was scored against. Taking
+        # label_table's instead, post-training metrics would disagree with
+        # training's wherever label_table's answer for a key has changed since,
+        # with no error. One side has to lose it anyway: the merge join below
+        # keys on identity_cols only, so a `label` on both sides ->
+        # AnalysisException: reference 'label' is ambiguous. Monitoring mode
+        # (ranked_predictions) has no `label`, so the condition is False there
+        # and behaviour is unchanged.
         if label_col in ranked_predictions.columns and label_col in labels.columns:
             labels = labels.drop(label_col)
             logger.info(
@@ -301,7 +313,7 @@ def make_prepare_eval_data_node(population_name: str):
             )
 
         # Decision — how labels attach: LEFT JOIN, a missing label counts as 0.
-        # LEFT JOIN — preserve every prediction row so per-customer ranking is over
+        # It preserves every prediction row so per-customer ranking is over
         # the model's full candidate set (in dev: cust × 8 prod) regardless of
         # whether label_table covers that (cust, prod) pair. label_table's
         # per-group cust_pool semantics (conf/sql/etl/label/label_{ccard,exchange,
@@ -330,10 +342,12 @@ def make_prepare_eval_data_node(population_name: str):
         # the table no longer stores it (Spark mAP recomputes rank internally via
         # rank_within_query). Add it here when missing so downstream stays uniform;
         # when present (ranked_predictions source), trust the upstream value.
-        # Chosen the other way, the report would replace the ranking inference
-        # published with this node's own; the cost of this way is that a `rank`
-        # column ever added to training_eval_predictions is used as is, tie-break
-        # included, with no message (ADR-0014 records that hazard).
+        # Today both ways give the same ranks: rank_within_query breaks ties the
+        # way inference does (see below). The choice shows once one side's rule
+        # changes: recomputing would silently replace the ranking inference
+        # published; trusting means a `rank` column ever added to
+        # training_eval_predictions is used as is, tie-break included, with no
+        # message (ADR-0014 records that hazard).
         rank_col = schema["rank"]
         if rank_col not in eval_predictions.columns:
             score_col = schema["score"]
@@ -362,8 +376,12 @@ def make_prepare_eval_data_node(population_name: str):
         # Decision — where each segment column comes from (ADR-0020 bug 6):
         # its evaluation.segment_sources override when one is configured,
         # otherwise this run mode's population table, the table the evaluated
-        # rows were drawn from, keyed by (time, entity). Joined onto the final
-        # eval table, not label_table, so the label side stays minimal.
+        # rows were drawn from, keyed by (time, entity). Chosen wrong (the one
+        # fixed table both modes used before bug 6), a monitoring run's
+        # entities missing from that table fell into a segment named "None"
+        # that entered the per-segment average with equal weight. Joined onto
+        # the final eval table, not label_table, so the label side stays
+        # minimal.
         segment_columns = list(eval_params.get("segment_columns", []) or [])
         configured = eval_params.get("segment_sources", {}) or {}
         overrides = {c: configured[c] for c in segment_columns if c in configured}
@@ -727,9 +745,11 @@ def make_diagnosis_node(name: str):
     ``*node_inputs`` 接、立刻核對個數，不用 ``*args`` 直接轉呼叫——後者會讓
     少給一個 input 靜默地把某個位置參數錯當成 ``parameters``。
 
-    ``_run`` 自己的兩個 raise 都是**前置檢查（precondition）**：input 個數不符
-    （``TypeError``，接線錯）、吃抽樣的診斷拿到 ``None`` 樣本（``ValueError``，
-    抽樣閘門與這項診斷的開關不同步）。都不是這個 node 算錯了。
+    Both of ``_run``'s own raises are pre-checks (inputs): a wrong input count
+    (``TypeError``, mis-wired inputs) and a ``None`` sample for a diagnosis
+    that consumes it (``ValueError``, the sample gate out of sync with this
+    diagnosis's flag). Neither means this node computed something wrong. The
+    upstream-fingerprint check described below is the third pre-check.
 
     ``parameters`` 一律取 ``node_inputs[-1]``——這是 ``INPUTS`` 的不變量
     （§3 之一，contract 測試守著）：宣告了 ``INPUTS`` 的模組必須把

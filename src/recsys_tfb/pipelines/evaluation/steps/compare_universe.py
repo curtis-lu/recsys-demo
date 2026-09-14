@@ -181,8 +181,8 @@ def restrict_to_common(
         # to assemble the whole table and ship a copy to every executor. Let
         # Spark pick from the real size. ``left_semi`` restricts without adding
         # columns, so ``df``'s schema is untouched. The item join keeps its
-        # hint: that universe is bounded by config. See
-        # ``alignment.common_universe`` for the full rule.
+        # hint: that universe is bounded by config. See ``common_universe``
+        # above for the full rule.
         df = df.join(common_entities, on=entity_cols, how="left_semi")
         df = df.join(F.broadcast(item_df), on=item_col, how="inner")
         if rank_col in df.columns:

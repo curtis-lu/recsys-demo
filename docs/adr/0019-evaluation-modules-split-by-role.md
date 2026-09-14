@@ -126,6 +126,12 @@ node 規則 8 存在的理由是「讀者看一次目錄列表就分得出對外
 
 **信心中等的原因**：ADR-0014 在 training 遇到同型問題（7 個 diagnosis node 在 `diagnosis/model/`）時選了**不搬**（決定 6），理由是搬會製造薄殼、而且那些 node 未來要搬去別處。evaluation 這四個模組不會製造薄殼（它們本來就是機制，不是 node），也沒有「未來要搬去別處」的計畫，所以 ADR-0014 的理由在這裡不成立——但那是推論，不是實證。**衝突時以本 ADR 為準；實作時發現 α 站不住，改這裡。**
 
+**實作後審查提出的風險（2026-09-14，#365；記下來，本張沒處理）**：
+
+- **import `steps/` 模組會帶進整條 pipeline。** `pipelines/evaluation/__init__.py` re-export `create_pipeline`，所以 import `steps/config_fingerprint.py` 會先載入 `pipeline.py`，連帶載入 pyspark 與 mlflow；它在 `evaluation/` 時不會。它的 docstring 原本寫「離線工具 import 它不必拖進 Spark」，這句已經改掉。目前 `src/` 與 `scripts/` 沒有這種讀者；四條 pipeline 的 `steps/` 都有同一個性質。
+- **`config_fingerprint.py` 比較像契約，不像內部步驟。** `__main__.py` 為了讓 `COMPUTED_KEYS` 讀得到而把 `post_training` 放進 `parameters`；`diagnosis/metric/contract.py` 的 `EXTRA_CONFIG_KEYS` 是指紋的另一半。兩者今天都不 import 它。哪天 pipeline 以外有人要 import `COMPUTED_KEYS`，S3 會逼它搬回 `evaluation/`。
+- **node 與 step 同名。** `nodes.py::restrict_to_common` 先留評估月份、第三個回傳值是 coverage dict；它呼叫的 `steps/compare_universe.py::restrict_to_common`（以 `_restrict` 別名 import）不留月份、第三個回傳值是 `CommonUniverse`。兩者參數個數相同，讀者從名字分不出來，import 錯一個不一定當場報錯。改名會動 AST，不在純結構票裡做。
+
 ---
 
 # 實作前的閘門
@@ -141,8 +147,8 @@ node 規則 8 存在的理由是「讀者看一次目錄列表就分得出對外
 **更正（實作時發現，2026-09-14，#365）**：
 
 - **閘門 5 的「既有 4 筆」是 3 筆。** `comparison_nodes.py` 那筆 #352 就刪了（它改成跟 `steps/snap_date_scope.py::eval_snap_date` 拿評估月份）。重指的是 `nodes_spark.py` 兩筆（→ `nodes.py`）與 `comparison/sources.py` 一筆（→ `steps/compare_sources.py`），使用者 2026-09-14 核准。〈方案 β〉那段「`comparison_nodes.py` 一筆」同樣不成立。
-- **閘門 3 的 AST 比對擴成模組 body 的每一個 top-level 節點**，含模組層賦值與常數，不只 `def`／`class`：只比函式的話，常數少抄一個元素照樣放行。允許的差異是 import 陳述（含從函式體內移出的）、docstring、註解；另加一道 import 綁定比對，確認移出來的 import 綁到同一個物件。`# Decision —` 是註解，本來就不進 AST。
-- **〈方案 α〉的「付出的」寫測試檔留在 `tests/test_evaluation/`、只改 import 路徑。** 實作照 dataset／inference 搬完 `steps/` 後的慣例，把 step 測試 `git mv` 到 `tests/test_pipelines/test_evaluation/`：`test_comparison_alignment.py` ＋ `test_comparison_restrict.py` 併成 `test_compare_universe.py`，`test_comparison_sources.py` 改名 `test_compare_sources.py`，`test_nodes_spark.py` 改名 `test_nodes.py`。
+- **閘門 3 的 AST 比對擴成模組 body 的每一個 top-level 節點**，含模組層賦值與常數，不只 `def`／`class`：只比函式的話，常數少抄一個元素照樣放行。允許的差異是 import 陳述（含從函式體內移出的）、docstring、註解；另加一道 import 綁定比對，確認移出來的 import 綁到同一個 dotted 目標（比的是字串，不是物件）。`# Decision —` 是註解，本來就不進 AST。
+- **測試檔的位置跟〈方案 α〉的「付出的」寫的不一樣。** 那段寫測試留在 `tests/test_evaluation/`、只改 import 路徑。實作照 dataset／inference 搬完 `steps/` 後的慣例，把 step 測試 `git mv` 到 `tests/test_pipelines/test_evaluation/`：`test_segments.py`、`test_config_fingerprint.py` 同名搬過去，`test_comparison_sources.py` 改名 `test_compare_sources.py`，`test_comparison_alignment.py` ＋ `test_comparison_restrict.py` 併成 `test_compare_universe.py`；node 測試 `test_nodes_spark.py` 改名 `test_nodes.py`。
 
 ---
 
@@ -241,10 +247,10 @@ ADR-0014 在 training 收了 21 處。evaluation 的 13 處全在 `nodes_spark.p
 - **7 處 `raise` 標種類**（決定 3 標了 3 處；`compute_metric_ci` 的 `n_boot` 檢查 → 前置檢查；`make_diagnosis_node` 的 arity 與 `None` 檢查 → 前置檢查；B4 → 前置檢查）。ADR-0018 決定 1 新增的 `n_snap_dates == 1` → **後置條件**。
 - **`steps/__init__.py` 只有 docstring**（S3 的 `test_steps_packages_re_export_nothing`）。
 - **`nodes.py` 逐模組 import `steps/`**，import 那一行就說出步驟來自哪個 concern。
-- **命名**：搬進 `steps/` 的模組用 concern 命名（`snap_date_scope`、`baselines`、`segments`、`compare_sources`、`compare_universe`），不用「helper」「common」；跨模組呼叫得到的函式無底線（node 規則 12）。
+- **命名**：搬進 `steps/` 的模組用 concern 命名（`snap_date_scope`、`segments`、`compare_sources`、`compare_universe`、`config_fingerprint`；原寫的 `baselines` 不搬，見〈呼叫端事實〉的更正），不用「helper」「common」；跨模組呼叫得到的函式無底線（node 規則 12）。
 - **graphify 重建**；`docs/diagrams/evaluation-pipeline.mmd` 若只改了檔名指涉就跟著改。
 
-**更正（實作時發現，2026-09-14，#365）**：合併後 `nodes.py` 的 `raise` 是 12 處，不是 7 處。多出來的都在本份之後才加，而且 docstring 已經標了種類：`prepare_eval_data` 的 label 重複鍵檢查（ADR-0020 bug 10，前置檢查）、`render_diagnosis_pages` 的三處接線檢查（ADR-0020 bug 9，前置檢查）。`compute_metric_ci` 裡已經沒有 `n_boot` 檢查；它剩下的 raise 是「CI 開著、樣本卻是 `None`」，標**前置檢查**。
+**更正（實作時發現，2026-09-14，#365）**：合併後 `nodes.py` 的 `raise` 是 12 處：上面列的 7 處加 `n_snap_dates == 1` 是 8 處，多出來的 4 處都在本份之後才加，而且 docstring 已經標了種類：`prepare_eval_data` 的 label 重複鍵檢查（ADR-0020 bug 10，前置檢查）、`render_diagnosis_pages` 的三處接線檢查（ADR-0020 bug 9，前置檢查）。`compute_metric_ci` 裡已經沒有 `n_boot` 檢查；它剩下的 raise 是「CI 開著、樣本卻是 `None`」，標**前置檢查**。
 
 ---
 

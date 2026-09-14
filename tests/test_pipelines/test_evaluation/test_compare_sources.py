@@ -1,4 +1,4 @@
-"""Tests for comparison.sources — load_compare_predictions."""
+"""Tests for steps.compare_sources — load_compare_predictions."""
 
 import pytest
 from recsys_tfb.core.consistency import DataConsistencyError
