@@ -252,7 +252,13 @@ def compute_dataset_overview(
     *,
     segment_columns: Sequence[str] = (),
 ) -> dict:
-    """Dataset profiling for the report §1. Pure Spark agg, small collect.
+    """Dataset profiling for the report §1.
+
+    Cost: one ``agg`` + ``collect`` for every total, then one ``groupBy`` +
+    ``collect`` per grouping column (time, item, and the segment column when
+    there is one) — a fixed number of actions, whatever the data size
+    (ADR-0018 decision 3). What reaches the driver is bounded by the number
+    of distinct time / item / segment values, not by rows.
 
     ``item_col_override`` lets the caller profile the collapsed
     category-grain DF (item column still named after schema item_col, but
@@ -266,25 +272,42 @@ def compute_dataset_overview(
     label_col = schema["label"]
     group_cols = [time_col, *entity_cols]   # 一個 query＝time×entity
 
-    n_rows = eval_predictions.count()
-    n_entities = eval_predictions.select(*entity_cols).distinct().count()
-    n_items = eval_predictions.select(item_col).distinct().count()
-    n_snap_dates = eval_predictions.select(time_col).distinct().count()
-    n_positives = int(
-        eval_predictions.agg(F.sum(F.col(label_col))).collect()[0][0] or 0
-    )
+    # 與 per_segment 用同一個 segment 欄（第一欄），by_segment 的 key 才會一致。
+    active_seg_col = segment_columns[0] if segment_columns else None
+
+    # Distinct totals count a struct, never the bare columns: bare
+    # countDistinct drops every row with a NULL in any of its columns, while a
+    # struct is never NULL itself, so NULL counts as one value — exactly what
+    # the select(...).distinct().count() these replace did.
+    total_aggs = [
+        F.count(F.lit(1)).alias("n_rows"),
+        F.countDistinct(F.struct(*entity_cols)).alias("n_entities"),
+        F.countDistinct(F.struct(item_col)).alias("n_items"),
+        F.countDistinct(F.struct(time_col)).alias("n_snap_dates"),
+        F.sum(F.col(label_col)).alias("n_positives"),
+    ]
+    if active_seg_col:
+        total_aggs.append(
+            F.countDistinct(F.struct(*group_cols)).alias("n_queries")
+        )
+    totals = eval_predictions.agg(*total_aggs).collect()[0]
+
+    n_rows = totals["n_rows"]
+    n_entities = totals["n_entities"]
+    n_items = totals["n_items"]
+    n_snap_dates = totals["n_snap_dates"]
+    n_positives = int(totals["n_positives"] or 0)
     positive_rate = (n_positives / n_rows) if n_rows else 0.0
     avg_pos_per_entity = (n_positives / n_entities) if n_entities else 0.0
 
     _require_segment_columns_in_frame(eval_predictions, segment_columns)
-    # 與 per_segment 用同一個 segment 欄（第一欄），by_segment 的 key 才會一致。
-    active_seg_col = segment_columns[0] if segment_columns else None
-    total_queries = (
-        eval_predictions.select(*group_cols).distinct().count()
-        if active_seg_col else 0
-    )
+    total_queries = totals["n_queries"] if active_seg_col else 0
 
     def _group(col: str, with_queries: bool = False, to_key=None) -> dict:
+        # Inside a group, n_entities / n_queries stay bare countDistinct: an
+        # entity or query key with a NULL in it is not counted (the group row
+        # itself is kept). That differs from the totals above on purpose —
+        # switching to struct here would change the published numbers.
         aggs = [
             F.count(F.lit(1)).alias("n_rows"),
             F.sum(F.col(label_col)).alias("n_positives"),
