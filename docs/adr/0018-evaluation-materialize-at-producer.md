@@ -32,7 +32,7 @@ evaluation pipeline 拿模型排好的候選名單跟真實答案對一遍，出
 | 目標 | 現在 | 做完之後 |
 |---|---|---|
 | 同一條 join 鏈被掃幾次 | 57 | 1 次 join ＋ N 次讀物化表，N 用同一把尺量出來 |
-| `compute_dataset_overview` 發幾個 job | 148 | ≤ 20 |
+| `compute_dataset_overview` 發幾個 job | 148 | ≤ 20（2026-09-14 實測 32，目標改成實測值，見決定 3〈實作更正〉） |
 | NDCG 相關的 action | 每個 K 兩次 | 0 |
 
 量尺是 Spark event log 離線解析（jobGroup 標籤歸因、重掃偵測）。量測台架已刪，重建方式見〈驗收〉；上面三個「現在」的數字來自已刪的台架，**repo 裡無法重驗**，重建台架後第一件事是重量一次基線。
@@ -193,6 +193,18 @@ label_table ────────┼─► prepare_eval_data ──► Hive: 
 - **`countDistinct(struct(…))` 只用在總量，分群內照舊是裸 `countDistinct`。** 票面寫「distinct 計數一律寫成 struct」，但分群內的 `n_entities`／`n_queries` 本來就是裸 `countDistinct`（鍵裡任一欄是 NULL 就不算），全部換成 struct 會改掉分群的數字，跟「JSON 逐字相同」和「每個分群欄一次 `groupBy` 不變」衝突。本決定正文說的「兩種寫法並存」指的就是這個。所以只合併總量那幾個，分群那段不動。
 - **兩種計法並存留下一個既有的不一致，本張刻意沒修。** 鍵含 NULL 時，`by_segment` 的 `query_share` 分母（總量，NULL 算一個值）算到那些 query，分子（分群內，NULL 不算）算不到，所以各段加總不到 1。新測試照本張前的行為把它釘住，測試註解寫明「這是本張前的行為，不是正確的行為」。要不要修是另一個決定：修了就改公開數字，也要先確定 NULL 鍵在上游擋不擋。
 - **逐字比對用 JSON 字串，不只用 dict 的 `==`。** dict 的 `==` 看不出 `6` 變成 `6.0`。變異檢查多了一條「`n_rows` 轉成 float」，只有 JSON 比對抓得到。
+- **job 數 64 → 32，沒到 ≤ 20；使用者 2026-09-14 決定收下。** 物化後的 main（`11577da`）與本張（`7cdb109`）用同一份資料、同一個台架量，jobGroup 在 `compute_dataset_overview` 外面再包一層。`compute_metrics` 那兩次呼叫合計：post-training 64 → 32、監控 49 → 24；SQL execution（掃表次數）post-training 18 → 8、監控 14 → 6。`compute_metrics` 整個 node：post-training 103 → 71、監控 80 → 55。上面那張表的「148」是物化前、在已刪台架上量的，不能跟這裡直接比。
+  到不了 20，是因為一次呼叫還剩 4 次掃表：總量 1 次，加上按 time、按 item、按 segment 各 1 次 `groupBy`，後三次照本決定不動。示例的監控月份沒有 join 到 segment 欄（`segment_columns.json` 的 `joined` 是空的），所以那邊是 3 次。而在 AQE 下，一次掃表不只一個 job：實測細粒度那次每次掃表 3 個 job，大類那次 5 個。多出的兩個應該來自 `collapse_to_categories` 的 join 與 `groupBy`，但沒有逐 stage 追。算起來 post-training 是 4 × 3 ＋ 4 × 5 ＝ 32，監控是 3 × 3 ＋ 3 × 5 ＝ 24。要壓到 20 以下，只能把總量和三次分群合成一次 `GROUPING SETS`，那就推翻了「每個分群欄一次 `groupBy` 不變」；而下面的牆鐘顯示資料越大收益越小，所以不做。**「≤ 20」改成實測的 32（post-training）／24（監控）。**
+- **牆鐘沒有變差。** 受控實驗在同一個 process 裡同時載入新舊兩版函式，照 `compute_all_metrics` 的呼叫方式（細粒度一次、大類一次）一起計時。frame 不 cache，跟 pipeline 一樣每次 action 都重掃。每種資料量先斷言新舊輸出的 JSON 相同再計時；暖身一輪不計，之後 5 輪、每輪對調先後。
+
+  | 資料量 | 舊版牆鐘 | 新版牆鐘 | 同一輪的 新／舊 |
+  |---|---|---|---|
+  | 示例分區：5,232 列、654 個 query group | 2.12–2.33 秒 | 1.24–1.40 秒 | 0.57–0.62 |
+  | 複製 100 倍：523,200 列、65,400 個 query group | 4.16–4.33 秒 | 3.33–3.54 秒 | 0.78–0.84 |
+  | 複製 1,000 倍：5,232,000 列、654,000 個 query group | 25.1–26.8 秒 | 22.3–24.5 秒 | 0.88–0.93 |
+
+  三種資料量的牆鐘區間都不重疊，新版都比較快，但資料越大差距越小。523 萬列時 executor 時間的區間重疊（舊 48.2–53.2 秒、新 47.4–56.6 秒），看不出誰省。推測是 `Expand` 把省下的掃表吃了回去，沒有拆開量。這些是示例資料放大後的秒數，生產的 distinct 數與分群數都不同，秒數不能搬（perf 規則 8）。量測條件：`local[*]`、driver 4g、AQE 開、`advisoryPartitionSizeInBytes 16m`，load 1.3–3.9。紀錄在 worktree 的 `data/verification/branch_vs_main.md`（不進版控）。
+- **產物與 main 逐字相同。** 兩種模式各跑一次：`metrics.json` 裡細粒度與 `category` 兩份 `dataset_overview` 的 JSON 相同，`report_aggregates.json` 位元組相同，分區 digest 相同，`compare_runs.py` 只有 `manifest.json` 不同（時間戳、run id；post-training 那次還有 `git_commit`，它記的是跑的當下 worktree 的 HEAD，不是 `PYTHONPATH` 指到的程式碼）。
 
 ---
 
@@ -338,7 +350,7 @@ PR 怎麼切交給 `/to-spec`、`/to-ticket`，**偏粗不偏細**：切點只�
 - **決定 1 之後量過、但本份沒改的三件事**（2026-09-14，#353）。量測條件（三件共用）：物化後的 main（`11577da`）、示例資料 `model_version f1e8ac63`，post-training 分區 5,232 列、654 個 query group；`--post-training --compare self`；`local[*]`、driver 4g、AQE 開、`advisoryPartitionSizeInBytes 16m`。同機有其他 session 在跑，**秒數只看量級**，job 數是結構性的（同模式兩次跑逐一相同）。量測紀錄在 worktree 的 `data/verification/main_baseline.md`（不進版控）。要不要改，每件都是另一個決定。
   - **`aggregate_overall`（原本排名第二）：job 數沒東西可收，時間不是它自己的。** 一次跑共 8 次呼叫、36 個 job，每次本來就只有一次 `agg`＋`collect`。executor 時間合計 56 秒，跟 `compute_dataset_overview` 六次呼叫的 64 秒同量級。但它是 `_compute_core` 裡 `enriched.cache()` 與 `per_query.cache()` 之後的**第一個 action**，兩份快取都在這一步物化，所以那 56 秒主要是逐列貢獻與逐 query 指標的成本，懶惰計算堆到了這裡（perf 規則 3）。要提假設，先把快取物化拆出來量。
   - **母體表 join 前沒先篩月份：Spark 不會自動裁。** `sample_pool` 沒有分區欄（`conf/base/catalog.yaml` 沒宣告），`explain` 裡 scan 只推了 `IsNotNull(snap_date)`、`IsNotNull(cust_id)`，沒有月份條件，所以整張表都掃（119,536 列，評估月只有 9,008 列，佔 7.5%）。受控實驗只計時 join 加 noop 寫出，`eval_predictions` 先 cache，跑 3 輪、每輪對調先後：executor 時間全表 123–436 ms、先篩 94–108 ms。區間不重疊，但差距是毫秒級。生產的 `sample_pool` 有多大沒量過，差距會放大多少只是推論。
-  - **比較模式的 coverage 計數比舊的 `intersect` 貴 4–6 倍，示例資料上答案相同。** 只計時 `restrict_to_common` 裡 `groups_common` 那一個 `count()`：兩側原始讀取先 cache，裁切的 lineage 不 cache，跟 pipeline 一樣。新寫法 14 個 job、executor 2.7–5.3 秒；舊寫法（`02202e0` 之前，對未裁切的 frame 做 `intersect`）5 個 job、0.69–0.83 秒。3 輪對調，區間不重疊。兩種寫法算出的 query group 數都是 654。貴在兩側裁切的 lineage 各重算一次。要省的話不能換回 `intersect`，那正是 [ADR-0020](0020-evaluation-bug-round-intended-behaviours.md) bug 14 修掉的東西（數的母體跟實際保留的不是同一個）。
+  - **比較模式的 coverage 計數比舊的 `intersect` 貴（executor 時間 3.9–6.4 倍），示例資料上答案相同。** 只計時 `restrict_to_common` 裡 `groups_common` 那一個 `count()`：兩側原始讀取先 cache，裁切的 lineage 不 cache，跟 pipeline 一樣。新寫法 14 個 job、executor 2.7–5.3 秒；舊寫法（`02202e0` 之前，對未裁切的 frame 做 `intersect`）5 個 job、0.69–0.83 秒。3 輪對調，區間不重疊。兩種寫法算出的 query group 數都是 654。貴在兩側裁切的 lineage 各重算一次。要省的話不能換回 `intersect`，那正是 [ADR-0020](0020-evaluation-bug-round-intended-behaviours.md) bug 14 修掉的東西（數的母體跟實際保留的不是同一個）。
 - **training 那 7 個 diagnosis node 要不要搬來 evaluation**：跟 `overall_map` 跨月合併是同一個接縫，`deliberate-non-goals.md` 明寫要另開一輪，本份不預留位置。
 
 ---
