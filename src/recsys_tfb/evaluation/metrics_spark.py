@@ -252,7 +252,13 @@ def compute_dataset_overview(
     *,
     segment_columns: Sequence[str] = (),
 ) -> dict:
-    """Dataset profiling for the report §1. Pure Spark agg, small collect.
+    """Dataset profiling for the report §1.
+
+    Cost: one ``agg`` + ``collect`` for every total, then one ``groupBy`` +
+    ``collect`` per grouping column (time, item, and the segment column when
+    there is one) — a fixed number of actions, whatever the data size
+    (ADR-0018 decision 3). What reaches the driver is bounded by the number
+    of distinct time / item / segment values, not by rows.
 
     ``item_col_override`` lets the caller profile the collapsed
     category-grain DF (item column still named after schema item_col, but
@@ -266,14 +272,13 @@ def compute_dataset_overview(
     label_col = schema["label"]
     group_cols = [time_col, *entity_cols]   # 一個 query＝time×entity
 
-    _require_segment_columns_in_frame(eval_predictions, segment_columns)
     # 與 per_segment 用同一個 segment 欄（第一欄），by_segment 的 key 才會一致。
     active_seg_col = segment_columns[0] if segment_columns else None
 
-    # 總量一次 agg、一次 collect，不是每個數字各一次 action（ADR-0018 決定 3）。
-    # distinct 數 struct 不數裸欄：裸 countDistinct 跳過任一欄為 NULL 的列，
-    # struct 本身永不為 NULL，NULL 才會像 select(...).distinct().count() 一樣
-    # 算成一個值。
+    # Distinct totals count a struct, never the bare columns: bare
+    # countDistinct drops every row with a NULL in any of its columns, while a
+    # struct is never NULL itself, so NULL counts as one value — exactly what
+    # the select(...).distinct().count() these replace did.
     total_aggs = [
         F.count(F.lit(1)).alias("n_rows"),
         F.countDistinct(F.struct(*entity_cols)).alias("n_entities"),
@@ -294,11 +299,15 @@ def compute_dataset_overview(
     n_positives = int(totals["n_positives"] or 0)
     positive_rate = (n_positives / n_rows) if n_rows else 0.0
     avg_pos_per_entity = (n_positives / n_entities) if n_entities else 0.0
+
+    _require_segment_columns_in_frame(eval_predictions, segment_columns)
     total_queries = totals["n_queries"] if active_seg_col else 0
 
     def _group(col: str, with_queries: bool = False, to_key=None) -> dict:
-        # 分群內沿用裸 countDistinct（鍵含 NULL 的列不算），跟上面總量的計法
-        # 不同是既有行為；改成 struct 會改輸出，不在決定 3 的範圍。
+        # Inside a group, n_entities / n_queries stay bare countDistinct: an
+        # entity or query key with a NULL in it is not counted (the group row
+        # itself is kept). That differs from the totals above on purpose —
+        # switching to struct here would change the published numbers.
         aggs = [
             F.count(F.lit(1)).alias("n_rows"),
             F.sum(F.col(label_col)).alias("n_positives"),

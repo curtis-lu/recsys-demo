@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from recsys_tfb.evaluation import metrics_spark as ms
@@ -87,13 +89,24 @@ def test_dataset_overview_no_by_segment_without_seg_col(spark):
 
 
 # ---------------------------------------------------------------------------
-# 鍵含 NULL 時的計數（ADR-0018 決定 3）。整份 dict 逐字釘住：收斂 job 數之後
-# 輸出不准變。期望值是手算的，兩種計法並存是既有行為：
+# 鍵含 NULL 時的計數（ADR-0018 決定 3）。整份輸出逐字釘住：收斂 job 數之後
+# 輸出不准變。比 JSON 字串而不只比 dict，因為 dict 的 == 看不出 6 變成 6.0。
+# 期望值是從資料列手算的，兩種計法並存是既有行為：
 #   totals 的 n_entities／n_items／n_snap_dates、by_segment 分母的 query 總數
 #       → NULL 算成一個值（跟 select(...).distinct().count() 一樣）
 #   分群內的 n_entities／n_queries
-#       → 鍵裡任一欄是 NULL 的列不算（裸 countDistinct 的計法）
+#       → 鍵裡任一欄是 NULL 就不算進 distinct（裸 countDistinct 的計法）；
+#         分群那一列本身照樣保留
+# 這裡釘的是「本張前的行為」，不是「正確的行為」：鍵含 NULL 時分子不算、
+# 分母算，by_segment 的 query_share 加總不到 1（見下面 by_segment 那條）。
 # ---------------------------------------------------------------------------
+
+
+def _assert_same_json(actual, expected):
+    assert actual == expected
+    assert json.dumps(actual, sort_keys=True) == json.dumps(
+        expected, sort_keys=True
+    )
 
 
 def _df_null_keys(spark):
@@ -141,16 +154,17 @@ def _expected_null_keys():
     }
 
 
-def test_dataset_overview_null_keys_count_null_as_a_value(spark):
+def test_dataset_overview_null_keys_without_segment(spark):
     ov = ms.compute_dataset_overview(_df_null_keys(spark), _params())
     expected = _expected_null_keys()
     assert ov["totals"] == expected["totals"]
-    assert ov == expected
+    _assert_same_json(ov, expected)
 
 
 def test_dataset_overview_null_keys_by_segment(spark):
     # query 總數＝(snap_date, cust_id) 含 NULL 的 distinct＝4：
     # (0331,c1)、(0331,NULL)、(NULL,c2)、(0229,c2)
+    # 各 segment 的 n_queries 不算含 NULL 的鍵 → query_share 加總＝2/4，不是 1
     ov = ms.compute_dataset_overview(
         _df_null_keys(spark), _params(), segment_columns=["seg"]
     )
@@ -165,7 +179,7 @@ def test_dataset_overview_null_keys_by_segment(spark):
               "positive_rate": 1 / 2, "n_queries": 1, "query_share": 1 / 4},
     }
     assert ov["by_segment"] == expected["by_segment"]
-    assert ov == expected
+    _assert_same_json(ov, expected)
 
 
 def test_dataset_overview_null_keys_two_column_entity(
@@ -187,7 +201,7 @@ def test_dataset_overview_null_keys_two_column_entity(
     )
     # entity＝(b1,c1)、(b1,NULL)、(NULL,NULL)＝3；兩列 (b1,NULL) 只算一個。
     # query 總數＝(0331,b1,c1)、(0331,b1,NULL)、(0331,NULL,NULL)、(0229,b1,c1)＝4
-    assert ov == {
+    _assert_same_json(ov, {
         "totals": {
             "n_rows": 5,
             "n_entities": 3,
@@ -215,4 +229,4 @@ def test_dataset_overview_null_keys_two_column_entity(
             "Y": {"n_rows": 1, "n_positives": 0, "n_entities": 0,
                   "positive_rate": 0 / 1, "n_queries": 0, "query_share": 0 / 4},
         },
-    }
+    })
