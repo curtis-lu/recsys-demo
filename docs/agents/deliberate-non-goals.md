@@ -92,6 +92,41 @@
 **在等什麼**：上游掛一個顯式的 `feature_build_version`，折進版本計算。
 **什麼時候可以刪**：上游掛上去之後。
 
+### 別直接動手讓 evaluation 的 `aggregate_overall` 變快
+
+**這在講什麼**：`aggregate_overall`（`evaluation/metrics_spark.py`，把逐 query 指標平均成整體指標那一步）在 evaluation 的成本剖析裡排第二貴，看起來是下一個該優化的目標。
+**為什麼現在不做**：它的「貴」大多不是它自己的。每次呼叫本來就只有一次 `agg`＋`collect`，job 數沒有東西可收；而它是 `_compute_core` 裡兩份 `.cache()`（逐列貢獻、逐 query 指標）之後的第一個 action，快取物化的時間全堆到了這一步。#353 量過（2026-09-14）：它的 executor 時間跟 `compute_dataset_overview` 同量級，但拆不出多少是它自己的。還沒有「怎麼省」的假設就動手，正是 `docs/agents/pipeline-performance-work.md` 規則 1、3 擋的事。
+**在等什麼**：有人把快取物化跟 `aggregate_overall` 本身拆開量。
+**什麼時候可以刪**：拆開量完、決定做或不做之後。
+
+### 別把 evaluation 的 post-training 與監控兩種模式拆成兩張表（或多加一個模式分區欄）
+
+**這在講什麼**：`enriched_eval_predictions` 對同一個 `(model_version, snap_date)` 只有一格分區，兩種模式寫同一格：後跑的覆寫先跑的，而且 schema 是兩種模式的聯集，另一種模式才有的欄讀回來是 NULL。看起來很該分開。
+**為什麼現在不做**：分開有兩條路、代價不同，是另一個決定，不是修 bug。加模式分區欄：同表同 schema，NULL 欄的問題還在。拆兩張表：`--compare-only` 與 `MODEL_VERSION_SOURCES` 都得知道讀哪張。它對分群的影響已經繞過：分群欄以 `prepare_eval_data` 寫出的 `segment_columns.json` 為準，不看 frame 裡有哪些欄。設計脈絡在 ADR-0018 決定 1〈同一張表、兩種模式〉。
+**什麼時候可以刪**：使用者決定要不要分、怎麼分之後。
+
+### 別替 `--compare` 的比較報表另外落地一份指標 JSON
+
+**這在講什麼**：主報表的指標有 `metrics.json`，比較報表沒有。`generate_comparison_report` 自己跑兩次全量指標再組 HTML，數字只在 HTML 裡；所以 `--only-node generate_comparison_report` 等於重算兩次全量指標。
+**為什麼現在不做**：沒有讀者要那份數字，也沒有效能證據說重算兩次是問題。形狀是現成的：照主報表拆成「算指標、產 JSON」和「吃 JSON、畫 HTML」兩個 node。
+**真要做時一起做的兩件事**：續跑合約補一條接續點（`tests/test_pipelines/test_resume_contracts.py` 的 `RESUME_CONTRACTS`）；JSON 的路徑要含比較對象的識別，否則換一個比較對象重跑，會讀到上一個對象的數字。
+**什麼時候可以刪**：出現要讀比較數字的人，或量到重算是瓶頸。
+
+### 別把主報表的「per-item 細部拆解」併進診斷 registry
+
+**這在講什麼**：「Spark 聚合給報表用」有兩套機制。registry 那套（`diagnosis/` 底下的各項診斷）有圖點預算、共用色階、範圍說明；`compute_report_aggregates` 加 `build_item_detail_section` 那套，自己一份 JSON 轉換、自己一套 plotly，三樣都沒有。稽核建議把後者做成 registry 的一項診斷，`compute_report_aggregates` 退休。
+**為什麼現在不做**：那會把「per-item 細部拆解」整段從 `report.html` 搬到獨立的診斷頁，是搬一整塊報表的結構重整，不是修 bug。另有一個不動版面的替代案：段落留在原位，只改用 registry 的圖與色階設施，但第二套機制還在。兩案怎麼選沒有裁決過。
+**也別順手做**：刪掉 `calibration_bins` 和它的兩個設定鍵（`include_calibration`、`n_calibration_bins`）。它現在確實算了卻沒有地方畫，但這件事也沒被裁決過，要做先問。
+**證據與兩案的細節**：`docs/notes/2026-09-09-evaluation-audit.md` 的設計問題 B。
+**什麼時候可以刪**：使用者決定統一或不統一之後。
+
+### 別把指標家族做成 registry（「加一種指標要改好幾個檔」那件事）
+
+**這在講什麼**：指標名稱的寫死清單散在 `evaluation/metrics_spark.py`、`evaluation/report_builder.py`、`evaluation/comparison/report.py` 與 `evaluation/metrics.py`，加一種指標要改好幾處。#351 的 NDCG 停算只做了「刪掉沒人讀的那一種」，沒有做參數化。
+**為什麼現在不做**：參數化是跨三個模組的重構，而且報表的表格版面跟指標家族綁在一起（`report_builder.py` 裡「一個家族一張表」的迴圈，搜 `for fam in`），改版面是另一個決定。
+**證據**：`docs/notes/2026-09-09-evaluation-audit.md` 的設計問題 J。
+**什麼時候可以刪**：真的要加新的指標家族，或使用者決定開這一輪時。
+
 ## 三、這些是刻意的取捨，不是 bug
 
 ### `etl_audit_log` 被 kill（`SIGTERM`／`SIGKILL`）時會丟掉整批 audit 紀錄
