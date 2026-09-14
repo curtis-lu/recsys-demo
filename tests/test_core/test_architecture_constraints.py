@@ -1455,10 +1455,11 @@ LITERAL_COLUMN_EXCEPTIONS = frozenset({
     ("src/recsys_tfb/__main__.py", "training"),
     ("src/recsys_tfb/core/consistency.py", "post_training_snap_date_errors"),
     ("src/recsys_tfb/evaluation/comparison/report.py", "assemble_comparison_report"),
-    ("src/recsys_tfb/evaluation/comparison/sources.py", "load_compare_predictions"),
+    ("src/recsys_tfb/pipelines/evaluation/steps/compare_sources.py",
+     "load_compare_predictions"),
     ("src/recsys_tfb/evaluation/report_builder.py", "assemble_report"),
-    ("src/recsys_tfb/pipelines/evaluation/nodes_spark.py", "_diagnosis_pages_dir"),
-    ("src/recsys_tfb/pipelines/evaluation/nodes_spark.py", "prepare_eval_data"),
+    ("src/recsys_tfb/pipelines/evaluation/nodes.py", "_diagnosis_pages_dir"),
+    ("src/recsys_tfb/pipelines/evaluation/nodes.py", "prepare_eval_data"),
     # The one read every reader of enriched_eval_predictions goes through
     # (ADR-0018 decision 1); signed off in #352.
     ("src/recsys_tfb/pipelines/evaluation/steps/snap_date_scope.py",

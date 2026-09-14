@@ -228,7 +228,7 @@ pipelines/<name>/
 - **「純模組（零 pyspark）」不是根層的判準。** `pipelines/dataset/steps/feature_columns.py` 是零 pyspark 的純模組，而它在 `steps/` 裡。純度是**模組層級**的性質、跟位置無關，要釘就用 AST 測試釘那一個模組。現況兩個純模組用了兩種掛法：`month_plans.py` 由 `architecture-constraints.md` S2 釘在 `tests/test_core/test_architecture_constraints.py`（直接掃描 ＋ 可達性，兩個測試缺一不可），`chunk_plans.py` 由自己的測試檔 `tests/test_pipelines/test_inference/test_chunk_plans.py` 釘（`test_no_pyspark_import` ＋ `test_no_project_import`）。
 - **一條 pipeline 根層可以沒有任何契約模組。** 那代表它沒有 pipeline 開跑前的對外契約，是資訊不是缺陷。dataset 有 `month_plans.py` 在根層，是因為 `__main__.py` 在 pipeline 開跑前就要算好月份計畫再注進 catalog（[ADR-0007](../adr/0007-month-plans-travel-through-the-catalog.md)）；training 有 `cache_sources.py`，同一個理由、同一個呼叫端（[ADR-0014](../adr/0014-training-modules-split-by-role.md)）；inference 的分塊計畫發生在 node 內，所以它根層只有 `pipeline.py` 與 `nodes.py`。
 
-`steps/__init__.py` **不 re-export 任何東西**：`nodes.py` 逐模組 import，import 那一行就說出這個步驟來自哪個 concern。這條自 #234 起由 S3 的 `test_steps_packages_re_export_nothing` 擋著——三個 `steps/__init__.py` 只能有 docstring。
+`steps/__init__.py` **不 re-export 任何東西**：`nodes.py` 逐模組 import，import 那一行就說出這個步驟來自哪個 concern。這條自 #234 起由 S3 的 `test_steps_packages_re_export_nothing` 擋著——四個 `steps/__init__.py` 只能有 docstring。
 
 **誰擋得住**：**部分擋得住，而且只有一個方向。**
 
@@ -369,13 +369,12 @@ result = feature_table.filter(months_filter_as_date(time_col, months)).select(
 
 ---
 
-# 已登記的例外（2 筆）
+# 已登記的例外（1 筆）
 
 **看到這些不必以為判準是裝飾。** 它們各有登記過的理由：
 
 | 違例 | 違反哪條 | 為什麼還在 |
 |---|---|---|
-| `pipelines/evaluation/nodes_spark.py` 帶 backend 後綴 | 12 | evaluation pipeline 尚未依本檔重整；`pipeline.py` 同時從 `nodes_spark.py` 與 `comparison_nodes.py` 取 node，還有一個動態 `importlib.import_module` |
 | `pipelines/training/` 的部分 node `def` 在 `recsys_tfb.diagnosis.model` 底下 | 8 | #222 重整 training 時**刻意不搬**（ADR-0014 決定 6）：搬進來會生出 7 個違反規則 3 的薄殼，而且這 7 個 node 未來要搬去 evaluation，現在搬等於白做。這也是 S1 無法一般化到所有 pipeline 的原因 |
 
 要新增一筆到這張表，**必須先問使用者**（同 `architecture-constraints.md` 節三的例外登記規則）。

@@ -1,8 +1,8 @@
-"""Tests for evaluation.segments — Hive-table segment-source join."""
+"""Tests for steps.segments — Hive-table segment-source join."""
 
 import pytest
 
-from recsys_tfb.evaluation.segments import join_segment_sources
+from recsys_tfb.pipelines.evaluation.steps.segments import join_segment_sources
 
 
 def _df(spark):

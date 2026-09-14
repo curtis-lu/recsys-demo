@@ -2,10 +2,10 @@
 
 Stdlib only, on purpose. The metric layer (``evaluation/metrics_spark.py``) and
 the report builder (``evaluation/report_builder.py``, which runs no Spark) both
-key segments this way. ``evaluation/segments.py``, where the Spark joins live,
-is set to move into ``pipelines/evaluation/steps/`` under ADR-0019, and modules
-outside that pipeline may not import a ``steps/`` module (architecture
-constraint S3), so the shared name cannot live there.
+key segments this way. ``pipelines/evaluation/steps/segments.py``, where the
+Spark joins live, is a ``steps/`` module, and modules outside that pipeline may
+not import one (architecture constraint S3), so the shared name cannot live
+there.
 """
 
 #: The group a query lands in when its segment column exists but holds NULL

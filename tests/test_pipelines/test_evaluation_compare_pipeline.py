@@ -83,7 +83,7 @@ def test_b4_validator_raises_when_partition_empty(spark):
     """Empty DataFrame in (simulates catalog filter returned nothing).
     Validator must raise DataConsistencyError tagged (B4).
     """
-    from recsys_tfb.pipelines.evaluation.comparison_nodes import (
+    from recsys_tfb.pipelines.evaluation.nodes import (
         validate_enriched_eval_predictions_present,
     )
 
@@ -102,7 +102,7 @@ def test_b4_validator_raises_when_snap_date_filter_yields_empty(spark):
     """DataFrame has rows but no rows match the configured evaluation.snap_date.
     Validator filters then raises B4.
     """
-    from recsys_tfb.pipelines.evaluation.comparison_nodes import (
+    from recsys_tfb.pipelines.evaluation.nodes import (
         validate_enriched_eval_predictions_present,
     )
 
@@ -120,7 +120,7 @@ def test_b4_validator_passes_when_partition_present(spark):
     """The evaluated month has a row → the gate returns, passing nothing on
     (zero-output since ADR-0018 decision 1; restrict_to_common restricts the
     table itself)."""
-    from recsys_tfb.pipelines.evaluation.comparison_nodes import (
+    from recsys_tfb.pipelines.evaluation.nodes import (
         validate_enriched_eval_predictions_present,
     )
 
@@ -216,9 +216,9 @@ def test_enriched_table_catalog_roundtrip(spark):
 
 @pytest.fixture
 def month_restriction_off(monkeypatch):
-    from recsys_tfb.pipelines.evaluation import comparison_nodes
+    from recsys_tfb.pipelines.evaluation import nodes
 
-    monkeypatch.setattr(comparison_nodes, "restrict_to_eval_snap_date",
+    monkeypatch.setattr(nodes, "restrict_to_eval_snap_date",
                         lambda df, parameters: df)
 
 
@@ -228,7 +228,7 @@ def test_side_a_is_restricted_to_the_evaluated_month(
     """Side A is the whole table for this model_version, every month it was
     evaluated on; B comes from its own source, already one month. Coverage
     counts A after the restriction: one month × 3 entities, not two months."""
-    from recsys_tfb.pipelines.evaluation.comparison_nodes import restrict_to_common
+    from recsys_tfb.pipelines.evaluation.nodes import restrict_to_common
 
     params = {**two_column_entity_params,
               "evaluation": {"snap_date": "2026-01-31"}}
@@ -301,7 +301,7 @@ def test_two_column_entity_ranking_and_coverage(
     """
     from collections import defaultdict
 
-    from recsys_tfb.pipelines.evaluation.comparison_nodes import restrict_to_common
+    from recsys_tfb.pipelines.evaluation.nodes import restrict_to_common
 
     a_common, _b_common, coverage = restrict_to_common(
         two_col_a, two_col_b, two_column_entity_params
@@ -359,7 +359,7 @@ def test_coverage_common_counts_what_restriction_kept_not_a_null_matching_inters
     equi-join drops null keys, so no metric ever saw them. Expected: 2 dates ×
     the 2 non-null shared entities.
     """
-    from recsys_tfb.pipelines.evaluation.comparison_nodes import restrict_to_common
+    from recsys_tfb.pipelines.evaluation.nodes import restrict_to_common
 
     entities = (("b1", "c1"), ("b1", "c2"), ("b1", None))
     a_rows, b_rows = [], []
@@ -393,7 +393,7 @@ def test_coverage_common_excludes_a_group_only_one_side_kept(
     item restriction empties that group on B while A keeps it on p1 — so it is
     in A's metrics and not in B's, and not common.
     """
-    from recsys_tfb.pipelines.evaluation.comparison_nodes import restrict_to_common
+    from recsys_tfb.pipelines.evaluation.nodes import restrict_to_common
 
     date = "2026-01-31"
     a = spark.createDataFrame(
@@ -430,7 +430,7 @@ def test_restrict_node_collects_each_sides_items_once(
     """
     from pyspark.sql import DataFrame
 
-    from recsys_tfb.pipelines.evaluation.comparison_nodes import restrict_to_common
+    from recsys_tfb.pipelines.evaluation.nodes import restrict_to_common
 
     collected = []
     real_collect = DataFrame.collect

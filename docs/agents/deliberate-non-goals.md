@@ -173,7 +173,7 @@
 
 ### 架構稽核用檔名（`nodes*.py`）猜「這個模組裡有沒有 node」，兩個方向都會猜錯
 
-**現況**：issue #163，狀態查 `gh`。稽核本身在 `tests/test_core/test_architecture_constraints.py`，搜 `rglob("nodes*.py")`。dataset 那一帶後來改由另一條規則守住，所以 #163 是被**繞開**而不是解決。對 dataset 以外仍然失準（例：`pipelines/evaluation/comparison_nodes.py` 不符 `nodes*` 這個前綴）。
+**現況**：issue #163，狀態查 `gh`。稽核本身在 `tests/test_core/test_architecture_constraints.py`，搜 `rglob("nodes*.py")`。dataset 那一帶後來改由另一條規則守住，所以 #163 是被**繞開**而不是解決。對 dataset 以外仍然失準（例：training 有 node `def` 在 `recsys_tfb/diagnosis/model/` 底下，不在任何 `pipelines/**/nodes*.py` 裡，這個掃描看不到）。
 **別做**：靠改檔名迴避，或新增一條讓自己合規的規則。
 **什麼時候可以刪**：使用者裁決之後。
 

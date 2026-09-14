@@ -16,8 +16,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from recsys_tfb.evaluation.config_fingerprint import fingerprint
-from recsys_tfb.pipelines.evaluation.nodes_spark import (
+from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
+from recsys_tfb.pipelines.evaluation.nodes import (
     compute_report_aggregates,
     generate_report,
 )
@@ -346,7 +346,7 @@ def _node_outputs(params, sample=None):
     sample, so the rest are None.
     """
     from recsys_tfb.diagnosis.metric import contract
-    from recsys_tfb.pipelines.evaluation.nodes_spark import make_diagnosis_node
+    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
 
     outputs = []
     for name in contract.DIAGNOSES:
@@ -371,7 +371,7 @@ def test_render_refuses_diagnosis_results_in_the_wrong_order(
     """Both results are dicts and the count is right: only a content check
     catches this (known-pitfalls.md §12)."""
     from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+    from recsys_tfb.pipelines.evaluation.nodes import (
         render_diagnosis_pages,
     )
 
@@ -386,7 +386,7 @@ def test_render_refuses_diagnosis_results_in_the_wrong_order(
 
 
 def test_render_refuses_parameters_swapped_with_a_result(tmp_path, monkeypatch):
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+    from recsys_tfb.pipelines.evaluation.nodes import (
         render_diagnosis_pages,
     )
 
@@ -400,7 +400,7 @@ def test_render_refuses_parameters_swapped_with_a_result(tmp_path, monkeypatch):
 
 def test_render_refuses_a_missing_result(tmp_path, monkeypatch):
     from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+    from recsys_tfb.pipelines.evaluation.nodes import (
         render_diagnosis_pages,
     )
 
@@ -417,7 +417,7 @@ def test_render_refuses_a_legacy_pre_fingerprint_result(tmp_path, monkeypatch):
     full re-run rather than a from-node on the diagnoses alone: that would
     leave baseline_metrics / metric_ci / report_aggregates on their old,
     unfingerprinted disk state, costing extra Spark rounds to discover."""
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+    from recsys_tfb.pipelines.evaluation.nodes import (
         render_diagnosis_pages,
     )
 
@@ -445,7 +445,7 @@ def test_render_draws_this_runs_results_not_files_left_on_disk(
     from recsys_tfb.evaluation.report_builder import (
         build_diagnosis_links_section,
     )
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+    from recsys_tfb.pipelines.evaluation.nodes import (
         _diagnosis_pages_dir,
         render_diagnosis_pages,
     )
@@ -467,7 +467,7 @@ def test_render_draws_this_runs_results_not_files_left_on_disk(
 def test_render_refuses_results_computed_with_other_settings(
     tmp_path, monkeypatch,
 ):
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+    from recsys_tfb.pipelines.evaluation.nodes import (
         render_diagnosis_pages,
     )
 
@@ -498,7 +498,7 @@ def test_render_pages_match_the_file_based_path(tmp_path, monkeypatch):
     from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
     from recsys_tfb.diagnosis.metric.results import load_results
     from recsys_tfb.evaluation.report_builder import assemble_diagnosis_pages
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+    from recsys_tfb.pipelines.evaluation.nodes import (
         _diagnosis_pages_dir,
         render_diagnosis_pages,
     )
@@ -547,7 +547,7 @@ def test_generate_report_takes_no_spark_dataframe():
     假綠（那條路徑本來就不碰 sdf）。
 
     **不能只用字串比對 ``"SparkDataFrame" in str(annotation)``**：
-    ``nodes_spark.py`` 沒有 ``from __future__ import annotations``，所以
+    ``nodes.py`` 沒有 ``from __future__ import annotations``，所以
     annotation 是活的型別物件，``str()`` 印出的是
     ``"<class 'pyspark.sql.dataframe.DataFrame'>"`` —— 不含字面
     ``"SparkDataFrame"`` 這個 alias 名稱，字串比對永遠命中不到，改壞了也
@@ -559,7 +559,7 @@ def test_generate_report_takes_no_spark_dataframe():
 
     from pyspark.sql import DataFrame as SparkDataFrame
 
-    from recsys_tfb.pipelines.evaluation.nodes_spark import generate_report
+    from recsys_tfb.pipelines.evaluation.nodes import generate_report
 
     def _is_spark_dataframe(annotation) -> bool:
         if annotation is SparkDataFrame:
@@ -584,7 +584,7 @@ def test_generate_report_body_has_no_spark_actions():
     """
     import inspect
 
-    from recsys_tfb.pipelines.evaluation.nodes_spark import generate_report
+    from recsys_tfb.pipelines.evaluation.nodes import generate_report
 
     source = inspect.getsource(generate_report)
     forbidden = [tok for tok in (".select(", ".cache(", ".unpersist(")
@@ -613,7 +613,7 @@ def _landed_inputs(params):
     Every section involved is off, so each producer returns its stub before
     touching a DataFrame and no Spark session is needed.
     """
-    from recsys_tfb.pipelines.evaluation.nodes_spark import (
+    from recsys_tfb.pipelines.evaluation.nodes import (
         compute_baseline_metrics,
         compute_metric_ci,
     )

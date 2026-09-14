@@ -64,10 +64,12 @@ Dependency direction: diagnoses declare their extra keys in their own package,
 and the combining happens in ``pipelines/evaluation/`` nodes
 (``make_diagnosis_node`` when writing, ``render_diagnosis_pages`` when
 checking), the same direction ``pipeline.py`` already uses for
-``contract.inputs_for``. Importing nothing from the project also keeps this
-usable from the pure ``generate_report`` path and from offline tools without
-dragging Spark in. ``tests/test_evaluation/test_config_fingerprint.py`` scans
-the imports.
+``contract.inputs_for``. The module itself imports nothing from the project;
+``tests/test_pipelines/test_evaluation/test_config_fingerprint.py`` pins that by
+scanning its imports. That no longer makes it Spark-free to import: since it
+moved into ``pipelines/evaluation/steps/`` (#365), importing it runs the
+package's ``__init__``, which loads ``pipeline.py`` and with it pyspark. Nothing
+outside this pipeline imports it today, and S3 would forbid it.
 
 What the fingerprint compares
 =============================

@@ -126,7 +126,7 @@ class TestRegistryDiagnosesFollowTheMode:
 
         import pandas as pd
 
-        from recsys_tfb.evaluation.config_fingerprint import fingerprint
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
 
         params = {"evaluation": {"diagnosis": {"ci": {"enabled": False}}}}
         segments = {"joined": [], "config_fingerprint": fingerprint(params)}
@@ -139,10 +139,10 @@ class TestRegistryDiagnosesFollowTheMode:
             # No frame here, so the month restriction is a pass-through; what
             # is counted is the draw.
             with patch(
-                "recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample",
+                "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample",
                 return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
             ) as spy, patch(
-                "recsys_tfb.pipelines.evaluation.nodes_spark."
+                "recsys_tfb.pipelines.evaluation.nodes."
                 "restrict_to_eval_snap_date",
                 lambda df, parameters: df,
             ):
@@ -176,7 +176,7 @@ class TestFingerprintRerunNodes:
     ``prepare_eval_data`` is left out on purpose. Its
     ``evaluation_segment_columns`` is compared on ``PARTITION_CONTENT_KEYS``
     only, the rows already re-run from ``prepare_eval_data``, so no row's
-    advice can leave it stale (``tests/test_evaluation/
+    advice can leave it stale (``tests/test_pipelines/test_evaluation/
     test_config_fingerprint.py`` pins both directions).
     """
 
@@ -195,7 +195,7 @@ class TestFingerprintRerunNodes:
         return producers
 
     def test_every_rerun_node_exists_in_every_mode(self):
-        from recsys_tfb.evaluation.config_fingerprint import COMPUTED_KEYS
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import COMPUTED_KEYS
 
         for label, kwargs in self.MODES.items():
             names = [n.name for n in create_pipeline(**kwargs).nodes]
@@ -203,7 +203,7 @@ class TestFingerprintRerunNodes:
             assert missing == [], f"[{label}] {missing}"
 
     def test_rerun_nodes_are_listed_in_topological_order(self):
-        from recsys_tfb.evaluation.config_fingerprint import COMPUTED_KEYS
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import COMPUTED_KEYS
 
         for label, kwargs in self.MODES.items():
             names = [n.name for n in create_pipeline(**kwargs).nodes]
@@ -213,7 +213,7 @@ class TestFingerprintRerunNodes:
             )
 
     def test_latest_rerun_node_slice_covers_every_fingerprinted_producer(self):
-        from recsys_tfb.evaluation.config_fingerprint import COMPUTED_KEYS
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import COMPUTED_KEYS
 
         for label, kwargs in self.MODES.items():
             pipeline = create_pipeline(**kwargs)

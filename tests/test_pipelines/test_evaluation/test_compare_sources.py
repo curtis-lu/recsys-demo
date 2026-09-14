@@ -1,8 +1,8 @@
-"""Tests for comparison.sources — load_compare_predictions."""
+"""Tests for steps.compare_sources — load_compare_predictions."""
 
 import pytest
 from recsys_tfb.core.consistency import DataConsistencyError
-from recsys_tfb.evaluation.comparison.sources import load_compare_predictions
+from recsys_tfb.pipelines.evaluation.steps.compare_sources import load_compare_predictions
 
 
 def _params_for_mv(mv: str, snap: str = "2026-01-31") -> dict:

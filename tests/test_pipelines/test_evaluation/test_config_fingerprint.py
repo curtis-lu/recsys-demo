@@ -1,4 +1,4 @@
-"""``evaluation.config_fingerprint``: which settings make a landed JSON stale.
+"""``steps.config_fingerprint``: which settings make a landed JSON stale.
 
 The expected key lists below are copied from issue #342 / ADR-0020 decision 2,
 not derived from ``COMPUTED_KEYS``: a test whose expectation is read from the
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from recsys_tfb.evaluation.config_fingerprint import (
+from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
     COMPUTED_KEYS,
     PARTITION_CONTENT_KEYS,
     LoadedArtifact,
@@ -492,7 +492,7 @@ def test_long_values_are_truncated_in_the_message():
 def test_module_imports_no_project_or_spark_code():
     """Pure stdlib: ``diagnosis/`` depends on nothing here and the node layer
     does the combining (ADR-0020 decision 2, dependency direction)."""
-    import recsys_tfb.evaluation.config_fingerprint as mod
+    import recsys_tfb.pipelines.evaluation.steps.config_fingerprint as mod
 
     tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
     imported = set()

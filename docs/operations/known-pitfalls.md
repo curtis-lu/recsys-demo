@@ -297,7 +297,7 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
   python -c "
   import inspect
   from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-  from recsys_tfb.pipelines.evaluation.nodes_spark import generate_report
+  from recsys_tfb.pipelines.evaluation.nodes import generate_report
   from recsys_tfb.pipelines.evaluation.pipeline import create_pipeline
   sig = list(inspect.signature(generate_report).parameters)
   node = next(n for n in create_pipeline().nodes if n.name == 'generate_report')

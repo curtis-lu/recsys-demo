@@ -72,10 +72,18 @@ date: 2026-09-13
 
 | 只有這條 pipeline 用（**候選搬進 `steps/`**） | 唯一呼叫端 |
 |---|---|
-| `baselines.py` | `nodes_spark.py::compute_baseline_metrics` |
+| `baselines.py`（**不搬**，見本節末的更正） | `nodes_spark.py::compute_baseline_metrics` |
 | `segments.py` | `nodes_spark.py::prepare_eval_data` |
 | `comparison/sources.py` | `comparison_nodes.py::load_compare_predictions`（`core/consistency.py` 有一段註解說 A11 是它 `MODEL_VERSION_SOURCES` 的鏡像——是註解，不是 import；搬了要改註解） |
 | `comparison/restrict.py` ＋ `comparison/alignment.py` | `comparison_nodes.py::restrict_to_common`（restrict 內部 import alignment） |
+| `config_fingerprint.py`（本表寫的時候還不存在，見本節末的更正） | `nodes_spark.py`（import 四個公開名） |
+
+**更正（實作時發現，2026-09-14，#365）**：上面兩張表寫在 Phase 0／1 之前，實作時有兩處對不上。
+
+- **`baselines.py` 不搬，留在 `evaluation/`。** Phase 0 之後 `report_builder.py` 在模組層 import `baselines.resolve_lookback_months`（ADR-0020 bug 1 把 lookback 的預設值收成一份）。`report_builder` 是共用庫，`baselines` 搬進 `steps/` 就違反 S3，所以照第一張表自己的判準，它屬於「被共用庫拉住」那一堆。
+  - 沒走的路：照 #344 拆 `segment_keys.py` 的做法，把純設定讀取的 `resolve_lookback_months`（14 行）拆到留在 `evaluation/` 的新模組，其餘 Spark 部分照搬進 `steps/`。代價是為 14 行多一個模組、多一個要解釋的檔。
+  - 走的路的代價：`evaluation/` 裡留下一個主要讀者是 `nodes.py` 的 Spark 模組，本份說的「混合層」沒有完全消失。〈方案 α〉「`evaluation/` 剩下的每一個檔都有 pipeline 以外的讀者」這句，對 `baselines.py` 只在「被 `report_builder` 拉住」的意義上成立。信心中等。
+- **`config_fingerprint.py` 搬進 `steps/`（使用者 2026-09-14 決定）。** 它是 Phase 0 才加的，所以本表沒分到它。`src/` 裡唯一 import 它的是 node 模組；`__main__.py` 與 `diagnosis/metric/contract.py` 只在註解裡提到它的 `COMPUTED_KEYS`。照本份的規則（只有這條 pipeline 用的機制進 `steps/`）搬。
 
 ### 方案 α（建議）：只有這條 pipeline 用的機制搬進 `steps/`
 
@@ -88,7 +96,7 @@ src/recsys_tfb/pipelines/evaluation/
   steps/
     __init__.py            只有 docstring（S3 擋 re-export）
     snap_date_scope.py     restrict_to_eval_snap_date（ADR-0018 決定 1 新增的機制）
-    baselines.py           ← evaluation/baselines.py
+    config_fingerprint.py  ← evaluation/config_fingerprint.py（#365 加入，見〈呼叫端事實〉的更正）
     segments.py            ← evaluation/segments.py
     compare_sources.py     ← evaluation/comparison/sources.py
     compare_universe.py    ← evaluation/comparison/alignment.py ＋ restrict.py
@@ -96,6 +104,8 @@ src/recsys_tfb/pipelines/evaluation/
 src/recsys_tfb/evaluation/   共用庫：有 training／diagnosis／scripts 呼叫端，或被它們的依賴拉住
   metrics.py  metrics_spark.py  report_builder.py  report.py  compare.py
   diagnostics_spark.py  distributions.py   （決定 5 原寫的 report_tables.py 不開，見決定 5 的更正）
+  baselines.py      （原列在 steps/，留在這裡，見〈呼叫端事實〉的更正）
+  segment_keys.py   （#344 從 segments.py 拆出；report_builder、metrics_spark 在用）
   comparison/report.py
 ```
 
@@ -116,6 +126,12 @@ node 規則 8 存在的理由是「讀者看一次目錄列表就分得出對外
 
 **信心中等的原因**：ADR-0014 在 training 遇到同型問題（7 個 diagnosis node 在 `diagnosis/model/`）時選了**不搬**（決定 6），理由是搬會製造薄殼、而且那些 node 未來要搬去別處。evaluation 這四個模組不會製造薄殼（它們本來就是機制，不是 node），也沒有「未來要搬去別處」的計畫，所以 ADR-0014 的理由在這裡不成立——但那是推論，不是實證。**衝突時以本 ADR 為準；實作時發現 α 站不住，改這裡。**
 
+**實作後審查提出的風險（2026-09-14，#365；記下來，本張沒處理）**：
+
+- **import `steps/` 模組會帶進整條 pipeline。** `pipelines/evaluation/__init__.py` re-export `create_pipeline`，所以 import `steps/config_fingerprint.py` 會先載入 `pipeline.py`，連帶載入 pyspark 與 mlflow；它在 `evaluation/` 時不會。它的 docstring 原本寫「離線工具 import 它不必拖進 Spark」，這句已經改掉。目前 `src/` 與 `scripts/` 沒有這種讀者；四條 pipeline 的 `steps/` 都有同一個性質。
+- **`config_fingerprint.py` 比較像契約，不像內部步驟。** `__main__.py` 為了讓 `COMPUTED_KEYS` 讀得到而把 `post_training` 放進 `parameters`；`diagnosis/metric/contract.py` 的 `EXTRA_CONFIG_KEYS` 是指紋的另一半。兩者今天都不 import 它。哪天 pipeline 以外有人要 import `COMPUTED_KEYS`，S3 會逼它搬回 `evaluation/`。
+- **node 與 step 同名。** `nodes.py::restrict_to_common` 先留評估月份、第三個回傳值是 coverage dict；它呼叫的 `steps/compare_universe.py::restrict_to_common`（以 `_restrict` 別名 import）不留月份、第三個回傳值是 `CommonUniverse`。兩者參數個數相同，讀者從名字分不出來，import 錯一個不一定當場報錯。改名會動 AST，不在純結構票裡做。
+
 ---
 
 # 實作前的閘門
@@ -127,6 +143,12 @@ node 規則 8 存在的理由是「讀者看一次目錄列表就分得出對外
 3. **AST 逐函式比對腳本備好**：搬移前後每個 `def`／`class` 的 AST dump 逐字相同（允許的差異只有 import 行與新增的 `# Decision —` 註解）。#173、#174、#198 都是這樣證明的。
 4. **`conf/` 對本 PR 的 base commit byte-identical**——本份不動任何設定（決定 6 那一步改 `conf/`，所以它不在這張 PR，見該決定）。基準是「本 PR 的 base」而不是 main，因為 ADR-0018 的 Phase 1 已經改過 `conf/`。`pipeline.py` 的 diff 只准是 import 路徑那幾行，`Node(...)` 建構逐字不變——這句只管 `pipeline.py`；閘門 5 那張登記表在 `tests/` 底下，它的變更不受這句限制。
 5. **`LITERAL_COLUMN_EXCEPTIONS` 的變更先拿給使用者簽**。那張表在 `tests/test_core/test_architecture_constraints.py`，以 `(路徑, 函式名)` 登記允許出現 `snap_date` 字面值的地方，表頭寫「Adding one needs the user's sign-off」。本份與 ADR-0018 一起會動到它：α 底下既有 4 筆路徑作廢要重指（`nodes_spark.py` 兩筆、`comparison_nodes.py` 一筆、`comparison/sources.py` 一筆），ADR-0018 新增 1 筆（`steps/snap_date_scope.py`）。**重指不是新增，但同一張表、同一個簽核規則，一次拿去簽。**
+
+**更正（實作時發現，2026-09-14，#365）**：
+
+- **閘門 5 的「既有 4 筆」是 3 筆。** `comparison_nodes.py` 那筆 #352 就刪了（它改成跟 `steps/snap_date_scope.py::eval_snap_date` 拿評估月份）。重指的是 `nodes_spark.py` 兩筆（→ `nodes.py`）與 `comparison/sources.py` 一筆（→ `steps/compare_sources.py`），使用者 2026-09-14 核准。〈方案 β〉那段「`comparison_nodes.py` 一筆」同樣不成立。
+- **閘門 3 的 AST 比對擴成模組 body 的每一個 top-level 節點**，含模組層賦值與常數，不只 `def`／`class`：只比函式的話，常數少抄一個元素照樣放行。允許的差異是 import 陳述（含從函式體內移出的）、docstring、註解；另加一道 import 綁定比對，確認移出來的 import 綁到同一個 dotted 目標（比的是字串，不是物件）。`# Decision —` 是註解，本來就不進 AST。
+- **測試檔的位置跟〈方案 α〉的「付出的」寫的不一樣。** 那段寫測試留在 `tests/test_evaluation/`、只改 import 路徑。實作照 dataset／inference 搬完 `steps/` 後的慣例，把 step 測試 `git mv` 到 `tests/test_pipelines/test_evaluation/`：`test_segments.py`、`test_config_fingerprint.py` 同名搬過去，`test_comparison_sources.py` 改名 `test_compare_sources.py`，`test_comparison_alignment.py` ＋ `test_comparison_restrict.py` 併成 `test_compare_universe.py`；node 測試 `test_nodes_spark.py` 改名 `test_nodes.py`。
 
 ---
 
@@ -157,6 +179,8 @@ node 規則 8：`nodes.py` 是「這條 pipeline 的 ML 故事唯一的家」。
 ADR-0014 在 training 收了 21 處。evaluation 的 13 處全在 `nodes_spark.py`，而它是葉節點（只有 `pipeline.py` 在 `create_pipeline()` 裡延後 import 它），循環 import 的可能性低，多半是習慣。但同一條路上 `report_builder.py` 另有兩處函式內 import `diagnosis.metric.contract.DIAGNOSES`，而 `diagnosis/metric/*` 反過來 import `evaluation.metrics`——那兩處才可能真的是繞循環。**先跑一次 `python -c "import recsys_tfb.pipelines.evaluation.nodes"` 把每一處提到模組層試，炸的那幾處留在函式內、上面寫一行「循環：A → B → A」。** 沒炸的全部收。
 
 不寫成「全部收」的理由：ADR-0014 決定 6 的教訓——沒查清楚就搬，會製造薄殼或循環，然後被下一個 PR 改回去。
+
+**實作註（2026-09-14，#365）**：13 處全部收到模組層，沒有一處炸。除了 `python -c "import recsys_tfb.pipelines.evaluation.nodes"`，也逐一先 import 每個被收的模組、再 import `nodes`，一樣沒炸：`diagnosis/metric/*` 反過來 import 的是 `evaluation.metrics`，不是 node 模組，所以不成環。收了之後有 7 處測試的 `patch` 目標原本打在來源模組（`recsys_tfb.diagnosis.metric.sample.draw_diagnosis_sample` 等），靠的是函式內 import 的晚綁定；改成打 `recsys_tfb.pipelines.evaluation.nodes.<name>`，逐處改回舊目標的結果記在 PR 說明。`report_builder.py` 的兩處函式內 import 不在本張範圍。
 
 ## 決定 5：報表層的兩把小刀，不做兩層渲染器
 
@@ -223,8 +247,10 @@ ADR-0014 在 training 收了 21 處。evaluation 的 13 處全在 `nodes_spark.p
 - **7 處 `raise` 標種類**（決定 3 標了 3 處；`compute_metric_ci` 的 `n_boot` 檢查 → 前置檢查；`make_diagnosis_node` 的 arity 與 `None` 檢查 → 前置檢查；B4 → 前置檢查）。ADR-0018 決定 1 新增的 `n_snap_dates == 1` → **後置條件**。
 - **`steps/__init__.py` 只有 docstring**（S3 的 `test_steps_packages_re_export_nothing`）。
 - **`nodes.py` 逐模組 import `steps/`**，import 那一行就說出步驟來自哪個 concern。
-- **命名**：搬進 `steps/` 的模組用 concern 命名（`snap_date_scope`、`baselines`、`segments`、`compare_sources`、`compare_universe`），不用「helper」「common」；跨模組呼叫得到的函式無底線（node 規則 12）。
+- **命名**：搬進 `steps/` 的模組用 concern 命名（`snap_date_scope`、`segments`、`compare_sources`、`compare_universe`、`config_fingerprint`；原寫的 `baselines` 不搬，見〈呼叫端事實〉的更正），不用「helper」「common」；跨模組呼叫得到的函式無底線（node 規則 12）。
 - **graphify 重建**；`docs/diagrams/evaluation-pipeline.mmd` 若只改了檔名指涉就跟著改。
+
+**更正（實作時發現，2026-09-14，#365）**：合併後 `nodes.py` 的 `raise` 是 12 處：上面列的 7 處加 `n_snap_dates == 1` 是 8 處，多出來的 4 處都在本份之後才加，而且 docstring 已經標了種類：`prepare_eval_data` 的 label 重複鍵檢查（ADR-0020 bug 10，前置檢查）、`render_diagnosis_pages` 的三處接線檢查（ADR-0020 bug 9，前置檢查）。`compute_metric_ci` 裡已經沒有 `n_boot` 檢查；它剩下的 raise 是「CI 開著、樣本卻是 `None`」，標**前置檢查**。
 
 ---
 
@@ -235,6 +261,8 @@ ADR-0014 在 training 收了 21 處。evaluation 的 13 處全在 `nodes_spark.p
 **登記表與稽核**：`tests/test_core/test_architecture_constraints.py` 的 `LITERAL_COLUMN_EXCEPTIONS`（4 筆路徑重指，見閘門 5）；`architecture-constraints.md` S6 那一節的登記表說明跟著改——表列的四筆路徑，以及表頭寫死的筆數（「14 筆／11 筆」那種數字，重指之後要重數）；同檔 S4 那一節拿 `comparison_nodes.py`、`comparison/restrict.py` 當實例的三處。
 **文件**：`docs/pipelines/evaluation.md`、`docs/agents/pipeline-node-design.md`（例外表）、`docs/agents/architecture-constraints.md`（上述四處）、`docs/agents/deliberate-non-goals.md`（#163 那條的例子）、`docs/operations/known-pitfalls.md` §12（varargs 那段若提到 `nodes_spark`）、`docs/adr/0015-compare-population-counted-in-query-groups.md`（提到 `comparison_nodes.py` 的那一處）、`docs/diagrams/`、`conf/base/catalog.yaml` 的註解（「由 `comparison_nodes.py::persist_eval_predictions` 寫入」那句）、`core/consistency.py` 的鏡像註解。
 **log 介面**：`nodes_spark` 這個 logger 名會變成 `nodes`；#198 記過「以 logger 名過濾的監控會靜默失效」，PR 說明要列出來。
+
+**更正（2026-09-14，#365）**：`evaluation.baselines` 不歸零（不搬，見〈呼叫端事實〉的更正）；模組路徑清單補 `evaluation.config_fingerprint`；登記表是 3 筆重指（見〈實作前的閘門〉的更正）。
 
 ---
 

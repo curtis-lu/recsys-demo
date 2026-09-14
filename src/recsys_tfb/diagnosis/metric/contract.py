@@ -90,9 +90,9 @@ DIAGNOSES: tuple[str, ...] = (
 #: Optional symbol ``EXTRA_CONFIG_KEYS``: the settings a diagnosis reads
 #: **outside** the ``evaluation`` subtree, as dotted paths from the parameters
 #: root (e.g. ``"dataset.sample_ratio"``). The computed ``evaluation``
-#: settings are listed once, in ``evaluation.config_fingerprint.COMPUTED_KEYS``;
-#: a diagnosis JSON's config fingerprint is that list plus the keys declared
-#: here.
+#: settings are listed once, in
+#: ``pipelines.evaluation.steps.config_fingerprint.COMPUTED_KEYS``; a diagnosis
+#: JSON's config fingerprint is that list plus the keys declared here.
 #:
 #: Declared by the diagnosis rather than added to the shared list because only
 #: that diagnosis reads them: in the shared list, changing
