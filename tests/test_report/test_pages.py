@@ -263,9 +263,9 @@ def test_range_index_is_not_rendered_as_a_data_column():
     ``0 mean +0.445``，讀者得先判斷第一欄是不是資料。"""
     import pandas as pd
 
-    from recsys_tfb.report.pages import _render_table
+    from recsys_tfb.report.pages import render_table
 
-    html = _render_table(pd.DataFrame({"統計量": ["mean", "p50"], "值": [0.4, 0.7]}))
+    html = render_table(pd.DataFrame({"統計量": ["mean", "p50"], "值": [0.4, 0.7]}))
     assert "<th>0</th>" not in html
     assert "mean" in html
 
@@ -274,8 +274,24 @@ def test_meaningful_index_is_still_rendered():
     """被 set_index 過的 index 是 row label，藏起來表格就讀不懂了。"""
     import pandas as pd
 
-    from recsys_tfb.report.pages import _render_table
+    from recsys_tfb.report.pages import render_table
 
     frame = pd.DataFrame({"值": [0.4, 0.7]}, index=["ccard_ins", "fund_bond"])
-    html = _render_table(frame)
+    html = render_table(frame)
     assert "ccard_ins" in html
+
+
+def test_a_negative_that_rounds_to_zero_renders_as_zero():
+    """A delta of ``-1e-9`` prints as ``0``, never ``-0``.
+
+    Goes through ``render_table`` rather than the cell formatter: the main
+    report and the diagnosis pages both render tables through it, so this is
+    the one path that guards both.
+    """
+    import pandas as pd
+
+    from recsys_tfb.report.pages import render_table
+
+    html = render_table(pd.DataFrame({"Δ": [-1e-9]}))
+    assert "<td>0</td>" in html
+    assert "-0" not in html

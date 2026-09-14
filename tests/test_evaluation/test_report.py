@@ -10,12 +10,11 @@ import plotly.graph_objects as go
 
 from recsys_tfb.evaluation.report import (
     ReportSection,
-    _fmt_no_sci,
-    _render_table,
     generate_html_report,
     save_metrics_json,
     save_report,
 )
+from recsys_tfb.report.pages import _fmt_no_sci, render_table
 
 
 def _make_figure():
@@ -249,7 +248,7 @@ class TestFmtNoSci:
 
 
 class TestRenderTable:
-    """_render_table formats every cell so no column flips to sci notation,
+    """render_table formats every cell so no column flips to sci notation,
     big ints get thousands separators, and NaN/None render blank."""
 
     def _mixed_df(self):
@@ -265,27 +264,27 @@ class TestRenderTable:
         )
 
     def test_no_scientific_notation(self):
-        html = _render_table(self._mixed_df())
+        html = render_table(self._mixed_df())
         for bad in ("e-05", "e+08", "e-0", "e+0", "5.000000e-01"):
             assert bad not in html, f"found sci-notation token {bad!r}"
 
     def test_formatted_values_present(self):
-        html = _render_table(self._mixed_df())
+        html = render_table(self._mixed_df())
         assert "0.000034" in html
         assert "120,000,000" in html  # both the float and the int column
 
     def test_int_column_gets_thousands_separator(self):
-        html = _render_table(self._mixed_df())
+        html = render_table(self._mixed_df())
         # the raw, separator-less integer must not survive
         assert ">120000000<" not in html
 
     def test_nan_and_none_render_blank(self):
-        html = _render_table(self._mixed_df())
+        html = render_table(self._mixed_df())
         assert "NaN" not in html
         assert "<td></td>" in html
 
     def test_string_cells_pass_through(self):
-        html = _render_table(self._mixed_df())
+        html = render_table(self._mixed_df())
         assert "exchange_fx" in html
         assert "fund_bond" in html
 

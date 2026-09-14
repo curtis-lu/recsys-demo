@@ -9,13 +9,12 @@ import pandas as pd
 from recsys_tfb.evaluation.compare import build_comparison_result
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
 from recsys_tfb.evaluation.report_builder import (
-    _per_item_metric_compare_table,
-    _resolve_display_k,
-    _k_to_lookup,
-    _n_items,
     build_glossary_section,
+    count_items,
     drop_metric_keys_above_item_count,
     macro_coverage_suffix_mb,
+    per_item_metric_compare_table,
+    resolve_display_k,
 )
 
 
@@ -126,7 +125,7 @@ def _build_overall_section(metrics_a: dict, comparison: dict) -> ReportSection:
     # section below).
     keys = drop_metric_keys_above_item_count(
         sorted(set(overall_a) | set(overall_b) | set(overall_d)),
-        _n_items(metrics_a),
+        count_items(metrics_a),
     )
     tbl = pd.DataFrame(
         {
@@ -180,9 +179,9 @@ def _build_per_item_section(
     disp = (
         (parameters.get("evaluation", {}) or {}).get("report", {}) or {}
     ).get("display", {}) or {}
-    n_items = _n_items(metrics_a)
-    rec_ks = _resolve_display_k(disp.get("guardrail_recall_k", [1, 3, 5]), n_items)
-    attr_ks = _resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_items)
+    n_items = count_items(metrics_a)
+    rec_ks = resolve_display_k(disp.get("guardrail_recall_k", [1, 3, 5]), n_items)
+    attr_ks = resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_items)
 
     macro_a = (metrics_a.get("macro_avg", {}) or {}).get("by_item")
     macro_b = (metrics_b.get("macro_avg", {}) or {}).get("by_item")
@@ -196,7 +195,7 @@ def _build_per_item_section(
         ("hit_rate", "recall@{k}", rec_ks, "per-item recall@k (M/B/Δ)"),
         ("map_attr", "map_attr@{k}", attr_ks, "per-item map_attr@k (M/B/Δ)"),
     ):
-        tbl = _per_item_metric_compare_table(
+        tbl = per_item_metric_compare_table(
             per_item_a, per_item_b, per_item_delta,
             ks, n_items, metric_key, col_fmt,
             macro_a=macro_a, macro_b=macro_b,
@@ -230,9 +229,9 @@ def _build_category_section(
     per_item_b = cat_b.get("per_item", {}) or {}
     per_item_delta = comparison_cat.get("per_item_delta", {}) or {}
     disp = (eval_params.get("report", {}) or {}).get("display", {}) or {}
-    n_cat = _n_items(cat_a)
-    rec_ks = _resolve_display_k(disp.get("guardrail_recall_k", [1, 3, 5]), n_cat)
-    attr_ks = _resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_cat)
+    n_cat = count_items(cat_a)
+    rec_ks = resolve_display_k(disp.get("guardrail_recall_k", [1, 3, 5]), n_cat)
+    attr_ks = resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_cat)
     macro_a = (cat_a.get("macro_avg", {}) or {}).get("by_item")
     macro_b = (cat_b.get("macro_avg", {}) or {}).get("by_item")
 
@@ -265,7 +264,7 @@ def _build_category_section(
         ("hit_rate", "recall@{k}", rec_ks, "大類 per-item recall@k (M/B/Δ)"),
         ("map_attr", "map_attr@{k}", attr_ks, "大類 per-item map_attr@k (M/B/Δ)"),
     ):
-        tbl = _per_item_metric_compare_table(
+        tbl = per_item_metric_compare_table(
             per_item_a, per_item_b, per_item_delta,
             ks, n_cat, metric_key, col_fmt,
             macro_a=macro_a, macro_b=macro_b,

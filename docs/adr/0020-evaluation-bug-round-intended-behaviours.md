@@ -96,7 +96,7 @@ date: 2026-09-13
 
 **實作時補的兩條（2026-09-13，#345）**：
 
-- 同一個「缺值當 0」在 `report_builder.py::_per_item_metric_compare_table` 還有一份：Macro 列的 Δ 不經 `build_comparison_result`，是表格自己算的（稽核複核〈動它之前要知道的事〉點過）。一起改成兩側都有才算。
+- 同一個「缺值當 0」在 `report_builder.py::per_item_metric_compare_table` 還有一份：Macro 列的 Δ 不經 `build_comparison_result`，是表格自己算的（稽核複核〈動它之前要知道的事〉點過）。一起改成兩側都有才算。
 - 「表格上方加一行」落在該表的標題：`overall — <側名> 側無可比的 query（全部零正例），Δ 欄留空`。比照 bug 5 揭露 macro item 數的做法——標題就是緊貼表格上方的那一行。比較報表的大類 overall 表是同一種攤鍵的表，一併套用。
 - 〈碰到什麼〉的因果寫窄了：兩側 key 分岔不只來自 bug 7。兩側用同一份 label、但候選不對稱（某側對某個 entity 只評了部分 item）時，一側會少掉正例，per-item 的 key 一樣分岔；overall 只空一側也需要 label 或候選其中之一不對稱。修法不受影響——它不看分岔的原因。
 
