@@ -134,5 +134,5 @@ CLI 進入點跑、在 Spark session 存在之前、一次收集全部缺項，�
 
 **讀取端不做靜默 fallback**：`evaluation/report_builder._dataset_overview` 讀到只有舊鍵
 的檔案就 raise，訊息裡指向那支腳本。理由是 fallback 要藏的那個失敗正是值得失敗的
-那個——`n_items` 讀成 0 會讓 `_resolve_display_k` 把 `"all"` 解成 `map@0`，每個指標查
+那個——`n_items` 讀成 0 會讓 `resolve_display_k` 把 `"all"` 解成 `map@0`，每個指標查
 不到值，跨版本比較報表整張變空白，讀起來像「這個模型什麼都沒排到」而不是「這個檔太舊」。

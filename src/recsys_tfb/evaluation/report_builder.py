@@ -20,7 +20,7 @@ from recsys_tfb.evaluation.report import ReportSection, generate_html_report
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
 
-def _resolve_display_k(raw_k: list, n_items: int) -> list:
+def resolve_display_k(raw_k: list, n_items: int) -> list:
     """Map mixed int/'all' display k list to concrete column suffixes.
 
     Returns labels as strings/ints that are used both as dict keys and for
@@ -50,7 +50,7 @@ def _resolve_display_k(raw_k: list, n_items: int) -> list:
 def _k_exceeds_item_count(k: int | str, n_items: int) -> bool:
     """True for an int K above ``n_items`` — the one bug 8 rule (ADR-0020).
 
-    Shared by the display-list filter (``_resolve_display_k``) and the
+    Shared by the display-list filter (``resolve_display_k``) and the
     metric-key filter (``drop_metric_keys_above_item_count``), so the two
     cannot disagree about which columns and rows a grain drops. ``"all"``
     never exceeds, and ``n_items <= 0`` (item count unknown) filters nothing.
@@ -65,7 +65,7 @@ def drop_metric_keys_above_item_count(keys, n_items: int) -> list:
 
     For tables that print every computed metric key as a row (the comparison
     report's overall and category-overall tables), where there is no display
-    K list to filter. Same rule and reason as ``_resolve_display_k``: past
+    K list to filter. Same rule and reason as ``resolve_display_k``: past
     the item count precision@K keeps falling only because its denominator is
     K, so those rows are meaningless rather than wrong — nothing flags them.
     K == n_items stays, keys without an ``@<int>`` suffix stay, order is
@@ -97,11 +97,11 @@ def _metrics_section_ks(n_items: int) -> list:
     One derivation for those tables and for the two CI notes that point into
     them (``build_overview_section``'s and ``build_metrics_section``'s). A
     note naming ``map_attr@{metric.k}`` is only true while that column
-    survives the ``_resolve_display_k`` clamp; with a second copy of the list
+    survives the ``resolve_display_k`` clamp; with a second copy of the list
     the note could keep naming a column the table dropped, and nothing would
     raise — the reader just gets pointed at a column that is not there.
     """
-    return _resolve_display_k(list(_METRICS_SECTION_K), n_items)
+    return resolve_display_k(list(_METRICS_SECTION_K), n_items)
 
 
 _MACRO_LABEL = "Macro 平均"
@@ -165,8 +165,8 @@ def _dataset_overview(metrics: dict) -> dict:
     deprecated: a dual read would be a permanent compatibility layer for a
     spelling this repo no longer produces, and the next reader would have to
     work out which of the two is real. The failure a fallback would be hiding is
-    the one worth failing on: ``_n_items`` returning ``0`` makes
-    ``_resolve_display_k`` resolve ``"all"`` to ``map@0``, every metric lookup
+    the one worth failing on: ``count_items`` returning ``0`` makes
+    ``resolve_display_k`` resolve ``"all"`` to ``map@0``, every metric lookup
     misses, and a cross-version comparison renders as a full table of blanks
     that reads like "the model scored nothing" rather than "this file is old".
 
@@ -196,7 +196,14 @@ def _dataset_overview(metrics: dict) -> dict:
     return overview
 
 
-def _n_items(metrics: dict) -> int:
+def count_items(metrics: dict) -> int:
+    """``dataset_overview.totals.n_items`` of a metrics bundle, ``0`` when absent.
+
+    ``0`` means "unknown", not "no items": a slim baseline bundle carries no
+    overview. Callers rely on that reading — ``resolve_display_k`` skips its
+    K filter at ``0``, and ``build_baseline_section`` falls back to the
+    fine-grained count with ``or n_items``.
+    """
     return int((_dataset_overview(metrics).get("totals", {}) or {}).get("n_items", 0))
 
 
@@ -248,7 +255,7 @@ def macro_coverage_suffix_mb(
     """Title suffix disclosing both sides' macro coverage on an M/B/Δ table (bug 5).
 
     Returns ``""`` unless both ``macro_a`` and ``macro_b`` are not ``None`` —
-    the same condition ``_per_item_metric_compare_table`` uses to add the
+    the same condition ``per_item_metric_compare_table`` uses to add the
     Macro row (an empty dict counts as present there, and so here).
 
     Generic "M"/"B" labels (not "Model"/"Baseline") so the same helper reads
@@ -276,8 +283,8 @@ def build_overview_section(
     """
     overall = metrics.get("overall", {})
     disp = _report_cfg(parameters).get("display", {}) or {}
-    n_items = _n_items(metrics)
-    ks = _resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_items)
+    n_items = count_items(metrics)
+    ks = resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_items)
 
     tables: list[pd.DataFrame] = []
     titles: list[str] = []
@@ -605,7 +612,7 @@ def _per_item_metric_table(
     return pd.DataFrame(data).T
 
 
-def _per_item_metric_compare_table(
+def per_item_metric_compare_table(
     per_item_a: dict,
     per_item_b: dict,
     per_item_delta: dict,
@@ -720,7 +727,7 @@ def build_metrics_section(
     # per-item 列序全報表統一按字母（與 per-item 細部拆解的 item-share 表對齊）
     per_item = dict(sorted((metrics.get("per_item", {}) or {}).items()))
     macro_item = metrics.get("macro_avg", {}).get("by_item", {})
-    n_items = _n_items(metrics)
+    n_items = count_items(metrics)
     ks = _metrics_section_ks(n_items)  # one K list for every table
 
     tables: list[pd.DataFrame] = []
@@ -763,7 +770,7 @@ def build_metrics_section(
     cat = metrics.get("category")
     cks = None
     if cat:
-        n_cat = _n_items(cat)
+        n_cat = count_items(cat)
         cks = _metrics_section_ks(n_cat)
         _add(_families_by_k_table(cat.get("overall", {}), cks, n_cat),
              "A · per-query｜大類 overall（列＝map/precision/recall）", True)
@@ -951,15 +958,12 @@ def build_baseline_section(
         metrics, baseline_metrics, "Model", "Baseline"
     )
     disp = _report_cfg(parameters).get("display", {}) or {}
-    n_items = _n_items(metrics)
-    rec_ks = _resolve_display_k(
-        disp.get("guardrail_recall_k", [1, 2, 3, 4, 5]), n_items
-    )
-    attr_ks = _resolve_display_k(
+    n_items = count_items(metrics)
+    attr_ks = resolve_display_k(
         disp.get("primary_map_k", [1, 3, 5, "all"]), n_items
     )
     # overall 三表用 k superset（使用者指定，k 放欄位）
-    k_super = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_items)
+    k_super = resolve_display_k([1, 2, 3, 4, 5, "all"], n_items)
     # Same helper the node (compute_baseline_metrics) reads (bug 1,
     # ADR-0020): before it existed this line read .get("lookback_months")
     # with no default, so an unset key printed nothing here while the node
@@ -1054,7 +1058,7 @@ def build_baseline_section(
              "per-item map_attr@k (M/B/Δ)"),
         ):
             _add(
-                _per_item_metric_compare_table(
+                per_item_metric_compare_table(
                     per_item_a, per_item_b, per_item_delta,
                     ks, n_items, metric_key, col_fmt,
                     macro_a=macro_a, macro_b=macro_b,
@@ -1091,8 +1095,8 @@ def build_baseline_section(
     cat_a = (metrics.get("category") or {}).get("overall", {}) or {}
     cat_b = ((baseline_metrics or {}).get("category") or {}).get("overall", {}) or {}
     if cat_a and cat_b:
-        n_cat = _n_items(metrics.get("category") or {}) or n_items
-        cks = _resolve_display_k([1, 2, 3, 4, 5, "all"], n_cat)
+        n_cat = count_items(metrics.get("category") or {}) or n_items
+        cks = resolve_display_k([1, 2, 3, 4, 5, "all"], n_cat)
         data = {}
         for who, src in (("Model", cat_a), ("Baseline", cat_b)):
             data[who] = {

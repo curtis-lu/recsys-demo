@@ -74,7 +74,7 @@ pipeline 會先依 `model_version` 與 `snap_date` 篩選預測。日期沒有�
 
 帶 `--post-training` 時另有一道更前面的把關（一致性不變量 A22）：`evaluation.snap_date` 必須是 `dataset.test_snap_dates` 的成員，否則在 Spark 起來之前就報錯退出。這條之所以不能只靠上面那個「零列就中止」的檢查：`training_eval_predictions` 累積該 `model_version` **歷來預測過的每一個月**（test 日期不進版本身分，見 [ADR-0001](../adr/0001-test-dates-out-of-dataset-version-identity.md)），所以一個已經從 `test_snap_dates` 移除的月份照樣抓得到 rows，跑出一份看起來完全正常、卻在量目前設定不評估的月份的報表。**monitoring（不帶旗標）模式不受此限**——它讀 inference 產出的 `ranked_predictions`，月份本來就不必是 test 月份；這也是這條檢查由 CLI 帶旗標呼叫、而不是寫成一般 config predicate 的原因（Layer-1 在 CLI entry 執行，看不到旗標）。
 
-`k_values` 決定 metric computation；`report.display.primary_map_k` 與 `guardrail_recall_k` 只決定報表顯示哪些已計算結果。display 中使用的 K 應包含在 `k_values`，否則報表對應欄位會沒有值。display 清單在每個粒度會先濾掉大於該粒度 item 數的 K（`"all"` 保留；bug 8, ADR-0020）：預設 `primary_map_k: [1, 3, 5, "all"]` 遇到 3 個大類只印 @1、@3、@all——只是過濾不印，計算層照 `k_values` 全集算。比較報表裡把算過的鍵整批攤開的 overall／大類 overall 表，套同一條規則：K 大於該粒度 item 數的鍵不印。
+`k_values` 決定 metric computation；`report.display.primary_map_k` 與 `guardrail_recall_k` 只決定報表顯示哪些已計算結果，而 `guardrail_recall_k` **只影響比較報表**（`report_comparison.html` 的 per-item recall@k 與大類 per-item recall@k 兩張表；主報表不讀這個鍵，鍵缺席時比較報表用 `[1, 3, 5]`）。display 中使用的 K 應包含在 `k_values`，否則報表對應欄位會沒有值。display 清單在每個粒度會先濾掉大於該粒度 item 數的 K（`"all"` 保留；bug 8, ADR-0020）：預設 `primary_map_k: [1, 3, 5, "all"]` 遇到 3 個大類只印 @1、@3、@all——只是過濾不印，計算層照 `k_values` 全集算。比較報表裡把算過的鍵整批攤開的 overall／大類 overall 表，套同一條規則：K 大於該粒度 item 數的鍵不印。
 
 主要指標包括：
 

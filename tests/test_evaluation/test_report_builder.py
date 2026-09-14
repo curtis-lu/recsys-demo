@@ -521,7 +521,7 @@ def test_metrics_section_item_coverage_counts_only_items_meeting_min_positives()
 def test_macro_coverage_suffixes_follow_each_tables_macro_row_condition():
     """The single-sided suffix appears only for a truthy macro (the Macro row
     test of _per_item_metric_table); the M/B one only when both macros are
-    not None (the test of _per_item_metric_compare_table, where {} counts)."""
+    not None (the test of per_item_metric_compare_table, where {} counts)."""
     per_item = {"A": {"n_pos": 1}}
     p = _params()
     assert rb.macro_coverage_suffix(per_item, 2, p, {}) == ""
@@ -814,7 +814,7 @@ class TestLegacyDatasetOverviewRefused:
             lambda: rb.build_overview_section(legacy, _params()),
             lambda: rb.build_dataset_overview_section(legacy, _params()),
             lambda: rb.build_completeness_section(legacy, _params()),
-            lambda: cmp_report._n_items(legacy),
+            lambda: cmp_report.count_items(legacy),
         ):
             with pytest.raises(ValueError, match="predates the #327 key rename"):
                 call()
@@ -822,7 +822,7 @@ class TestLegacyDatasetOverviewRefused:
     def test_a_bundle_with_no_dataset_overview_is_left_alone(self):
         """baseline 的 slim bundle 本來就沒有 dataset_overview，不得被誤擋。"""
         assert rb._dataset_overview({"overall": {"map@1": 0.5}}) == {}
-        assert rb._n_items({"overall": {"map@1": 0.5}}) == 0
+        assert rb.count_items({"overall": {"map@1": 0.5}}) == 0
 
 
 class TestResolveDisplayKClampsToItemCount:
@@ -835,24 +835,24 @@ class TestResolveDisplayKClampsToItemCount:
     keeping "all" always."""
 
     def test_drops_k_above_n_items_keeps_all(self):
-        assert rb._resolve_display_k([1, 3, 5, "all"], 3) == [1, 3, "all"]
+        assert rb.resolve_display_k([1, 3, 5, "all"], 3) == [1, 3, "all"]
 
     def test_keeps_everything_when_n_items_covers_it(self):
-        assert rb._resolve_display_k([1, 3, 5, "all"], 5) == [1, 3, 5, "all"]
+        assert rb.resolve_display_k([1, 3, 5, "all"], 5) == [1, 3, 5, "all"]
 
     def test_does_not_add_all_when_caller_list_lacks_it(self):
-        assert rb._resolve_display_k([1, 3, 5], 3) == [1, 3]
+        assert rb.resolve_display_k([1, 3, 5], 3) == [1, 3]
 
     def test_skips_the_filter_when_n_items_is_zero_or_unknown(self):
         """n_items<=0 means overview data is missing (e.g. baseline's slim
         per_item bundle) — filtering would collapse every table down to
         just "@all"."""
-        assert rb._resolve_display_k([1, 3, 5, "all"], 0) == [1, 3, 5, "all"]
+        assert rb.resolve_display_k([1, 3, 5, "all"], 0) == [1, 3, 5, "all"]
 
 
 class TestDropMetricKeysAboveItemCount:
     """bug 8 (ADR-0020) for key-agnostic tables: the same K > n_items rule as
-    _resolve_display_k, applied to metric keys instead of a display list."""
+    resolve_display_k, applied to metric keys instead of a display list."""
 
     def test_drops_only_integer_k_above_the_count(self):
         keys = ["map@3", "precision@4", "recall@5", "mean_pos", "map@all"]

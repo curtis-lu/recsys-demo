@@ -1,67 +1,13 @@
 """HTML report generation for evaluation results."""
 
 import json
-import math
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
 import plotly.graph_objects as go
 import plotly.offline
 
-from recsys_tfb.report.pages import _render_section_extras
+from recsys_tfb.report.pages import render_section_extras, render_table
 from recsys_tfb.report.types import ReportSection  # noqa: F401
-
-
-def _fmt_no_sci(x: float) -> str:
-    """Format a float for report tables without scientific notation.
-
-    Integer-valued -> thousands-separated integer (``12,345,678``); otherwise
-    fixed 6-decimal with trailing zeros stripped (``0.000034``, ``0.5``).
-    Magnitudes below display precision collapse to ``"0"`` and never render as
-    ``"-0"``.
-    """
-    x = float(x)
-    if x.is_integer():
-        return f"{int(x):,}"
-    s = f"{x:,.6f}".rstrip("0").rstrip(".")
-    return "0" if s in ("-0", "-", "") else s
-
-
-def _fmt_cell(x):
-    """Per-cell formatter for report tables. Numbers go through the
-    no-scientific-notation rules (big ints also get thousands separators),
-    NaN/None render blank, and non-numeric cells (strings, lists) pass through
-    unchanged."""
-    if x is None or x is pd.NA:
-        return ""
-    if isinstance(x, bool):
-        return str(x)
-    if isinstance(x, (int, np.integer)):
-        return f"{int(x):,}"
-    if isinstance(x, (float, np.floating)):
-        if math.isnan(x):
-            return ""
-        return _fmt_no_sci(float(x))
-    return x
-
-
-def _render_table(table: pd.DataFrame) -> str:
-    """Render a DataFrame to HTML with no scientific notation.
-
-    pandas formats a whole float column uniformly, so one extreme value flips
-    the entire column to exponential. Formatting every cell up front sidesteps
-    that (and keeps object-dtype columns working too). ``applymap`` is used
-    because ``DataFrame.map`` does not exist on pandas 1.5.x.
-
-    預設 ``RangeIndex`` 不顯示（``0 1 2 3`` 的自動流水號在報表上是雜訊，讀者
-    得花一秒判斷它是不是一欄資料）；被 ``set_index`` 過的 index 是 row label，
-    照常顯示。與 ``report/pages.py::_show_index`` 同一條規則——兩個渲染器對
-    同一個 ``ReportSection`` 必須產生一致的表格，不然同一份資料在主報表與
-    診斷頁會長得不一樣。
-    """
-    show_index = not isinstance(table.index, pd.RangeIndex)
-    return table.applymap(_fmt_cell).to_html(index=show_index)
 
 
 def generate_html_report(
@@ -160,10 +106,13 @@ def generate_html_report(
         else:
             html_parts.append(f'<div class="section" id="{section_id}">')
             html_parts.append(f"<h2>{section.title}</h2>")
+        # Not escaped, unlike report/pages.py: build_diagnosis_links_section
+        # puts an <a href=…> in description, and escaping it would print the
+        # diagnosis entry point as literal text.
         html_parts.append(f'<p class="description">{section.description}</p>')
         # 與 report/pages.py 共用同一個 helper：兩邊各寫一份的話，之後只改其中
         # 一邊，另一邊會靜默丟掉 formula/bullets 而不報任何錯。
-        html_parts.extend(_render_section_extras(section))
+        html_parts.extend(render_section_extras(section))
 
         for fig in section.figures:
             html_parts.append(
@@ -185,12 +134,12 @@ def generate_html_report(
                 # 區隔，避免動到 section 級 <details> 的樣式與測試。
                 html_parts.append('<details class="table-collapse">')
                 html_parts.append(f"<summary>{title or '明細表'}</summary>")
-                html_parts.append(_render_table(table))
+                html_parts.append(render_table(table))
                 html_parts.append("</details>")
             else:
                 if title:
                     html_parts.append(f"<h3>{title}</h3>")
-                html_parts.append(_render_table(table))
+                html_parts.append(render_table(table))
 
         html_parts.append("</details>" if section.collapsible else "</div>")
 

@@ -295,6 +295,21 @@ def test_main_report_links_out_without_duplicating_numbers(tmp_path):
         assert number_word not in text, f"主報表複製了診斷數字：{number_word}"
 
 
+def test_main_report_renders_the_diagnosis_link_as_an_anchor(tmp_path):
+    """The link sits in ``description``, so the main report renderer must not
+    escape it — escaped, the entry point prints as literal ``<a href=…>`` text
+    and nothing raises."""
+    from recsys_tfb.evaluation.report import generate_html_report
+    from recsys_tfb.evaluation.report_builder import (
+        assemble_diagnosis_pages,
+        build_diagnosis_links_section,
+    )
+
+    written = assemble_diagnosis_pages(_diag_results(), {}, out_dir=tmp_path)
+    html = generate_html_report([build_diagnosis_links_section(written, {})])
+    assert '<p class="description"><a href="diagnosis/index.html">' in html
+
+
 def test_no_diagnosis_pages_means_no_links_section():
     """一頁都沒寫出來時不放入口——連出去是 404 的連結比沒有連結更糟。"""
     from recsys_tfb.evaluation.report_builder import (

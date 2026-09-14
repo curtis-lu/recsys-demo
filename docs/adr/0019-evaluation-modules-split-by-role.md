@@ -95,7 +95,7 @@ src/recsys_tfb/pipelines/evaluation/
 
 src/recsys_tfb/evaluation/   共用庫：有 training／diagnosis／scripts 呼叫端，或被它們的依賴拉住
   metrics.py  metrics_spark.py  report_builder.py  report.py  compare.py
-  diagnostics_spark.py  distributions.py  report_tables.py（新，見決定 5）
+  diagnostics_spark.py  distributions.py   （決定 5 原寫的 report_tables.py 不開，見決定 5 的更正）
   comparison/report.py
 ```
 
@@ -171,6 +171,13 @@ ADR-0014 在 training 收了 21 處。evaluation 的 13 處全在 `nodes_spark.p
 - **跳脫契約原樣保留**：`evaluation/report.py` 的 `description` 繼續不跳脫，並在該處寫一行「為什麼」（`build_diagnosis_links_section` 靠它）。兩層渲染器不做。
 - **D-1**：`comparison/report.py` 從 `report_builder` import 的底線函式裡，**真的要搬的是三個**：`_per_item_metric_compare_table`、`_resolve_display_k`、`_n_items`，提到公開的 `evaluation/report_tables.py`。另外兩個不搬：`_visible_metric_keys` 由 ADR-0018 決定 4 刪除（NDCG 停算後沒有東西要藏），`_k_to_lookup` 是死 import、刪掉。放 `evaluation/` 不放 `report/`，因為它們帶著 metrics dict 的鍵名知識，屬於 evaluation 不屬於中性呈現層（node 規則 8：兩個呼叫端都在 evaluation 內）。
 - **D-2 不做**：`report.display.guardrail_recall_k` 在主報表是**死的**（`report_builder.py` 讀了它算出 `rec_ks`，之後沒有任何使用點），活的只有比較報表那一邊（`comparison/report.py` 讀同一個鍵，鍵缺席時預設 `[1,3,5]`）。「統一預設值」等於悄悄改比較報表的欄數，而且沒有人提出需求（2026-09-13 更正：原寫「撞報表凍結」，凍結已依 [ADR-0020](0020-evaluation-bug-round-intended-behaviours.md) 解除，理由改成沒有需求）。所以：**鍵留著**（比較報表在讀），主報表那段死碼（`rec_ks`）刪掉，`docs/pipelines/evaluation.md` 寫明這個鍵只影響比較報表。
+
+**更正（實作時發現，2026-09-14，#364）**：上面有兩處照寫會出問題，實作改成下面這樣。
+
+- **C-(a) 的格式器不放 `report/fmt.py`、不改公開名**，留在 `report/pages.py` 當模組私有的 `_fmt_cell`（連同它用的 `_fmt_no_sci`）。統一之後，它在 `src/` 唯一的呼叫端是同模組的 `render_table`；`evaluation/report.py` 改 import `render_table`，不再直接碰格式器。底線＝只有本模組呼叫（node 規則 12），所以不需要公開名——「兩個都要改成公開名」那句的前提是 `evaluation/report.py` 要 import 格式器，這個前提不成立。放進 `fmt.py` 還會讓那個模組的 docstring 當場變假：它寫「按量的語意決定格式」與「壞值一律回空字串」，而 `_fmt_cell` 按 Python 型別分派，`inf` 回 `'inf'`、字串與 list 原樣回傳。這跟上面否決把 `render_table` 放進 `fmt.py` 是同一把尺。
+- **D-1 不開 `evaluation/report_tables.py`，改成在 `report_builder.py` 原地改公開名**：`per_item_metric_compare_table`、`resolve_display_k`、`count_items`。三個函式依賴 `report_builder.py` 裡另外 7 個名字，而 `report_builder.py` 自己留下的函式又反過來用其中 4 個（`_k_to_lookup`、`_MACRO_LABEL`、`_dataset_overview`、`_k_exceeds_item_count`）。開新模組、閉包一起搬，`report_builder.py` 就得回頭 import 這 4 個私有名，正是 D-1 要消滅的同一種病。上面只解釋了「放 `evaluation/` 不放 `report/`」，沒解釋為什麼要新模組；`comparison/report.py` 本來就從 `report_builder` import 三個公開名，這條模組耦合已經存在、也被接受。
+- **`_n_items` 的公開名是 `count_items`，不是 `n_items`**：`report_builder.py` 與 `comparison/report.py` 都有 `n_items = _n_items(metrics…)` 這種行，改成同名就變成 `n_items = n_items(…)`，Python 把 `n_items` 當區域變數，執行時 `UnboundLocalError`。
+- **連帶影響〈收尾要 grep 的兩份清單〉**：`_fmt_cell` 不會歸零（它合法地留在 `report/pages.py`）；`_k_to_lookup` 與 `rec_ks` 也不歸零——`_k_to_lookup` 在 `report_builder.py` 還有十幾個使用點，`rec_ks` 在 `comparison/report.py` 是活的區域變數。只刪 `comparison/report.py` 的 `_k_to_lookup` 死 import 與 `report_builder.py` 的 `rec_ks` 死賦值。
 
 ## 決定 6：`report.sections` 的死開關刪掉，加一條**雙向**一致性不變量，常數住在 `core/`
 

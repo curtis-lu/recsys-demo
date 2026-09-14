@@ -84,7 +84,26 @@ def _escape(text: Any) -> str:
     )
 
 
+def _fmt_no_sci(x: float) -> str:
+    """Format a float for report tables without scientific notation.
+
+    Integer-valued -> thousands-separated integer (``12,345,678``); otherwise
+    fixed 6-decimal with trailing zeros stripped (``0.000034``, ``0.5``).
+    Magnitudes below display precision collapse to ``"0"`` and never render as
+    ``"-0"``.
+    """
+    x = float(x)
+    if x.is_integer():
+        return f"{int(x):,}"
+    s = f"{x:,.6f}".rstrip("0").rstrip(".")
+    return "0" if s in ("-0", "-", "") else s
+
+
 def _fmt_cell(x: Any) -> Any:
+    """Per-cell formatter for report tables. Numbers go through the
+    no-scientific-notation rules (big ints also get thousands separators),
+    NaN/None render blank, and non-numeric cells (strings, lists) pass through
+    unchanged."""
     if x is None or x is pd.NA:
         return ""
     if isinstance(x, bool):
@@ -94,7 +113,7 @@ def _fmt_cell(x: Any) -> Any:
     if isinstance(x, (float, np.floating)):
         if math.isnan(x):
             return ""
-        return f"{float(x):,.6f}".rstrip("0").rstrip(".")
+        return _fmt_no_sci(float(x))
     return x
 
 
@@ -112,7 +131,18 @@ def _show_index(table: pd.DataFrame) -> bool:
     return not isinstance(table.index, pd.RangeIndex)
 
 
-def _render_table(table: pd.DataFrame) -> str:
+def render_table(table: pd.DataFrame) -> str:
+    """Render a DataFrame to HTML with no scientific notation.
+
+    pandas formats a whole float column uniformly, so one extreme value flips
+    the entire column to exponential. Formatting every cell up front sidesteps
+    that (and keeps object-dtype columns working too). ``applymap`` is used
+    because ``DataFrame.map`` does not exist on pandas 1.5.x.
+
+    The main report (``evaluation/report.py``) and the diagnosis pages both
+    render tables through this one function, so a ``ReportSection`` table
+    reads the same in either place.
+    """
     return table.applymap(_fmt_cell).to_html(index=_show_index(table))
 
 
@@ -142,7 +172,7 @@ def _render_scope_note(scope: ScopeNote) -> str:
     return "\n".join(parts)
 
 
-def _render_section_extras(section) -> list[str]:
+def render_section_extras(section) -> list[str]:
     """``formula`` 與 ``bullets`` 的 HTML；兩者皆空時回空 list。
 
     回空 list 而不是空字串是刻意的：呼叫端 ``extend`` 之後**一個標籤都不會多**，
@@ -184,7 +214,7 @@ def _render_page_html(page: Page) -> str:
             parts.append('<div class="section">')
             parts.append(f"<h2>{_escape(section.title)}</h2>")
         parts.append(f'<p class="description">{_escape(section.description)}</p>')
-        parts.extend(_render_section_extras(section))
+        parts.extend(render_section_extras(section))
 
         for fig in section.figures:
             parts.append(fig.to_html(full_html=False, include_plotlyjs=False))
@@ -192,7 +222,7 @@ def _render_page_html(page: Page) -> str:
         for i, table in enumerate(section.tables):
             if i < len(section.table_titles) and section.table_titles[i]:
                 parts.append(f"<h3>{_escape(section.table_titles[i])}</h3>")
-            parts.append(_render_table(table))
+            parts.append(render_table(table))
 
         parts.append("</details>" if section.collapsible else "</div>")
 
