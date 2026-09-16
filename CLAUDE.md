@@ -41,7 +41,7 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 
 1. 唯一真實 venv＝`/Users/curtislu/projects/recsys_tfb/.venv`；各 worktree 的 `.venv` 是指向它的 symlink，不建獨立 venv。
 2. **(R1)** Edit/Write worktree 檔案的絕對路徑必含 `.worktrees/<name>`——改錯邊的徵兆是「輸出跟 baseline 完全相同」。
-3. **(R2)** `cd` 在 Bash 呼叫之間會持續：每個指令以 `cd <worktree-root> && ...` 開頭，或全用絕對路徑。
+3. **(R2)** 路徑一律寫絕對路徑。`cd` 在 Bash 呼叫之間會持續，靠它容易改錯邊；而 `cd … &&` 後面接相對路徑，權限檢查事先算不出讀哪個檔，會一直跳提醒。只有 CLI 與 `scripts/local_spark_setup.py` 用 `Path.cwd()` 找 `conf/`、`data/`，必須 `cd <wt> && …`，後面的路徑照樣寫絕對路徑（見下方兩個指令塊）。
 4. **(R3)** 每個 worktree 用自己的真 `data/` 樹，不 symlink 到 main。
 5. 跑測試/CLI 一律：`PYTHONPATH=<wt>/src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest|recsys_tfb ...`（裸跑會抓到 main 的 src，靜默測錯 code）。
 6. 跨 worktree git 一律 `git -C <abs-worktree>`。
@@ -49,21 +49,20 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 **每次在 worktree 動 python 前先跑 pre-flight**（Spark cold start 2–4 分鐘，失敗才發現的成本很高；任一失敗先修再繼續）：
 
 ```bash
-cd /Users/curtislu/projects/recsys_tfb/.worktrees/<name> && pwd          # 在 worktree root
-readlink .venv && /Users/curtislu/projects/recsys_tfb/.venv/bin/python -V   # venv 對齊（Python 3.10.9）
-export SPARK_CONF_DIR=$PWD/conf/spark-local                              # --check-isolation 讀此變數，未設會 FAIL: SPARK_CONF_DIR=''
-PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python scripts/local_spark_setup.py --check-isolation  # data/ 隔離閘
-grep -n "你這次改的鍵:" conf/base/parameters_*.yaml                      # 換成實際改的鍵名，確認印出的是 worktree 的新值
+# <wt> = /Users/curtislu/projects/recsys_tfb/.worktrees/<name>；每行是一個獨立的 Bash 呼叫（R2）
+readlink <wt>/.venv                                                      # venv 對齊：應指向 /Users/curtislu/projects/recsys_tfb/.venv
+/Users/curtislu/projects/recsys_tfb/.venv/bin/python -V                 # Python 3.10.9
+cd <wt> && SPARK_CONF_DIR=<wt>/conf/spark-local PYTHONPATH=<wt>/src /Users/curtislu/projects/recsys_tfb/.venv/bin/python <wt>/scripts/local_spark_setup.py --check-isolation  # data/ 隔離閘，印出的 root 應為 <wt>；SPARK_CONF_DIR 未設會 FAIL
+grep -rn "你這次改的鍵:" <wt>/conf/base/                                 # 換成實際改的鍵名，確認印出的是 worktree 的新值
 # （注意：鍵多為巢狀縮排，grep 不要加 ^ 行首錨定——舊版此行用 ^(objective|metric|snap_date) 永遠零命中，等於沒檢查）
 ```
 
 ## 本機 Spark（無 Docker：local[*] + 內嵌 Derby + 本機 warehouse；完整步驟見 local-spark-setup.md）
 
 ```bash
-cd <repo-or-worktree-root>
-export SPARK_CONF_DIR=$PWD/conf/spark-local
-PYTHONPATH=src .venv/bin/python scripts/local_spark_setup.py            # 首次 / --reset
-PYTHONPATH=src .venv/bin/python -m recsys_tfb <pipeline> --env local    # 所有 pipeline 同一條路
+# <root> = repo 或 worktree 的絕對路徑；兩行都要 cd（R2），其餘路徑寫絕對路徑
+cd <root> && SPARK_CONF_DIR=<root>/conf/spark-local PYTHONPATH=<root>/src /Users/curtislu/projects/recsys_tfb/.venv/bin/python <root>/scripts/local_spark_setup.py   # 首次 / --reset
+cd <root> && SPARK_CONF_DIR=<root>/conf/spark-local PYTHONPATH=<root>/src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb <pipeline> --env local   # 所有 pipeline 同一條路
 ```
 
 - 端到端 smoke：`bash scripts/local_e2e.sh`；互動查表：`bash scripts/local_spark_shell.sh`（pyspark）／`… sql`。
