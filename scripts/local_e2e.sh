@@ -16,7 +16,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-VENV=/Users/curtislu/projects/recsys_tfb/.venv/bin/python
+# 直譯器：預設用這個 repo／worktree 自己的 .venv，可用 RECSYS_PYTHON 覆寫。
+# 不寫死絕對路徑——寫死的話，除了原作者那台機器以外任何 clone 都跑不起來。
+# 也不退回系統 python3：本專案釘 Python 3.10.9，退回會靜默跑在錯的直譯器上。
+VENV="${RECSYS_PYTHON:-$ROOT/.venv/bin/python}"
+if [ ! -x "$VENV" ]; then
+  echo "找不到可執行的 Python：$VENV" >&2
+  echo "請在 $ROOT 建立 .venv（Python 3.10.9），或設 RECSYS_PYTHON=<python 路徑> 後重跑。" >&2
+  exit 1
+fi
 export SPARK_CONF_DIR="$ROOT/conf/spark-local"
 export PYTHONPATH="$ROOT/src"
 

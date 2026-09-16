@@ -94,6 +94,8 @@ PYTHONPATH=src python -m recsys_tfb training --env local
 
 `local_spark_setup.py` 會建立本機 warehouse 與 metastore，並把合成 parquet 載入成 `ml_recsys.*` 表；`--reset` 會清掉 warehouse 與 metastore 重建。`--env local` 是本機環境的識別符，`conf/local/` 已經在 repo 裡。
 
+要一次跑完整條鏈（含 inference，並在結尾斷言三張推論表的分區結構），用 `bash scripts/local_e2e.sh`。它預設使用 repo 根目錄的 `.venv/bin/python`，要指定別的直譯器就設 `RECSYS_PYTHON=<python 路徑>`；找不到可執行的直譯器時會直接中止，不會退回系統 python。這支腳本開頭會 `--reset`，本機 warehouse 與 metastore 會被清掉重建。
+
 跑之前先確認**作業系統時區與 `conf/spark-local` 設定的 Spark 時區一致**。兩者不同時，以月份為單位的日期過濾可能篩不到任何資料，而且不會報錯，只會得到 0 列。
 
 完整的本機環境說明見 [local-spark-setup.md](../dev-setup/local-spark-setup.md)。接自己的資料從 [README §3 快速上手](../../../README.md) 開始。
