@@ -593,6 +593,8 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 
 ## 8. 常見錯誤與排查
 
+檢查分幾層、各在什麼時候擋下、哪些擋不住：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
+
 | 症狀或訊息 | 常見原因 | 檢查與修正 |
 |---|---|---|
 | 找不到 model version directory | 版本 ID 錯誤，或 training 未完成 manifest | 檢查 `data/models/<version>/manifest.json` |

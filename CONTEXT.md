@@ -94,6 +94,10 @@ calibration 抽樣設定的版本身分，位在 base_dataset_version 底下。�
 **不變量代號**:
 一致性規則的編號：A 系列檢查設定，B 系列檢查資料。精確定義與完整清單：`src/recsys_tfb/core/consistency.py` 模組 docstring 的 Invariant legend。
 
+**資料閘**:
+pipeline 裡專門檢查資料、本身不改資料的一步。dataset 有三個：開頭的 `validate_data_consistency`、編碼後的精度閘（B8）、最後的粒度閘（B10）。
+_Avoid_: 資料驗證（太籠統，開跑前的設定檢查也算驗證）
+
 ### 流程與產物
 
 **離線推論**:

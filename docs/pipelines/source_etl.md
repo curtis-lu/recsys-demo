@@ -202,7 +202,7 @@ quality_checks:
 各自回報（`check` 欄位分別是 `max_duplicate_key_ratio` 與 `primary_key_not_null`），
 所以拿掉這個鍵會同時關掉兩者。dataset pipeline 讀的三張表——`sample_pool`、
 `label_table`、`feature_table`——由不變量 A32 在 CLI 進入點確保這個鍵還在，
-見 `src/recsys_tfb/core/consistency.py` 的 invariant legend。
+見 `src/recsys_tfb/core/consistency.py` 的 invariant legend。這道輸出檢查在整個框架的檢查裡屬於哪一層：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
 
 ### 3.7 建表與 schema evolution
 
