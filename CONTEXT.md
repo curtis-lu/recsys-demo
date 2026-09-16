@@ -122,3 +122,18 @@ evaluation 以 `inference_population` 當母體的評估模式。
 
 **重抽單位**（ADR-0023，尚未實作）:
 算信賴區間時一起被重抽的 entity 欄位子集。
+
+**校準**:
+把 score 當成機率來看時，「模型說會發生的比例」與「實際發生的比例」有多接近。與排序好壞無關，兩者可以一好一壞。
+_Avoid_: 準確度、準不準（太模糊，會被讀成排序）
+
+**門檻**（ADR-0024，尚未實作）:
+把 score 切成「預測為正」與「預測為負」的那個切點。排序本身不需要門檻——只有二元指標要。
+
+**`pr_auc`**（ADR-0024，尚未實作）:
+precision-recall 曲線下的面積，母體是全部候選列（依 ADR-0024 由分箱近似，內插規則與 sklearn 不同）。
+_Avoid_: average precision、AP（排序的 AP 是 `map@K` 與 `ap_contrib@K`，意思不同）
+
+**`roc_auc`**（ADR-0024，尚未實作）:
+ROC 曲線下的面積，母體是全部候選列。
+_Avoid_: 跟 `raw_within_item_auc`／`query_centered_auc` 混用（那兩個的母體是「只含有正例的 query」的診斷抽樣，不可與本項相比）
