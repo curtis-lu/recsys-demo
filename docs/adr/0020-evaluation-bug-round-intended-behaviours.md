@@ -204,6 +204,8 @@ date: 2026-09-13
 
 **為什麼不是 evaluation 直接用上游的 rank**：比較模式裁切後候選集會縮，那時必須重排，「直接用」無法無條件套用。
 
+> **2026-09-16 補記（ADR-0021）**：ADR-0021 新增選用欄位角色 `event` 之後，同一個 query group 裡同一個 item 可以有多列，「按 item 名升冪」就不再決定得了順序——本節講的「沒定義」會原樣回來。所以宣告 `event` 時，同分規則要延伸成「按 item 名，再按 `event`」。本節的決定沒有被推翻，只是決勝欄多一個。
+
 **碰到什麼**：inference 已落地的 `ranked_predictions` 同分列的 rank 值會變。inference 尚未部署，不需要遷移。
 
 ### bug 12：`per_item_segment` 的 key 用底線串接會撞號
