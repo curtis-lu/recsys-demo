@@ -43,7 +43,7 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 2. **(R1)** Edit/Write worktree 檔案的絕對路徑必含 `.worktrees/<name>`——改錯邊的徵兆是「輸出跟 baseline 完全相同」。
 3. **(R2)** `cd` 在 Bash 呼叫之間會持續：每個指令以 `cd <worktree-root> && ...` 開頭，或全用絕對路徑。
 4. **(R3)** 每個 worktree 用自己的真 `data/` 樹，不 symlink 到 main。
-5. 跑測試/CLI 一律：`PYTHONPATH=<wt>/src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest|recsys_tfb ...`（裸跑會抓到 main 的 src，靜默測錯 code）。
+5. venv 的 editable install 指向 main 的 `src`，裸跑會靜默跑到 main 的 code。**CLI／`scripts/`** 一律 `PYTHONPATH=<wt>/src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m recsys_tfb ...`。**pytest 不帶前綴**：`/Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest <wt>/tests/...`——`tests/conftest.py` 已把該樹的 `src` 設進 `PYTHONPATH`（連 Spark worker、子行程都涵蓋，守它的是 `tests/test_conftest.py`），前綴只會讓每次都跳權限提醒。
 6. 跨 worktree git 一律 `git -C <abs-worktree>`。
 
 **每次在 worktree 動 python 前先跑 pre-flight**（Spark cold start 2–4 分鐘，失敗才發現的成本很高；任一失敗先修再繼續）：

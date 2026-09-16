@@ -37,14 +37,23 @@ committed). This is the single rule set. Follow it; don't improvise.
 
 The editable install points at **main's `src`**. So:
 
-- **pytest**: `pyproject.toml` has `pythonpath=["src"]`, so pytest run from a
-  worktree prepends *that worktree's* `src` and tests the right code. The
-  explicit, unambiguous form (also avoids the relative-symlink ELOOP from
-  `.venv/bin/pytest`):
+- **pytest**: no `PYTHONPATH=` prefix. Two mechanisms together make every
+  process load *that worktree's* `src`:
+  - `pyproject.toml` `pythonpath=["src"]` fixes the pytest process itself — but
+    only its `sys.path`, which child processes do not inherit.
+  - `tests/conftest.py` writes the tree's `src` into the `PYTHONPATH`
+    environment variable at startup, so Spark Python workers and
+    `subprocess`-spawned `python` load it too. Without it they silently load
+    main's `src` and the test still passes (measured 2026-09-17; guarded by
+    `tests/test_conftest.py`, which only bites when run inside a worktree).
+
+  Use `python -m pytest`, not `.venv/bin/pytest` (relative-symlink ELOOP):
   ```bash
-  PYTHONPATH=<abs-worktree>/src \
-    /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest <paths> -q
+  /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest <abs-worktree>/tests/<paths> -q
   ```
+  Adding the prefix anyway is harmless but makes Claude Code ask for
+  permission on every run (an env-var prefix cannot be checked against
+  `permissions.blockReadsOutsideWorkingDirectories`).
 - **CLI** (`python -m recsys_tfb …`): bare invocation picks up **main's
   `src`** (editable-install target), silently running the wrong code. Always:
   ```bash
