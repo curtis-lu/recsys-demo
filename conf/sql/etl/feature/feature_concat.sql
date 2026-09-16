@@ -17,20 +17,21 @@ feature_info as (
     select * from ${target_db}.feature_info where snap_date = '${target_date}'
 ),
 pool_cust as (
-    select distinct cust_id
+    select distinct snap_date, cust_id
     from (
-        select cust_id from feature_aum
+        select snap_date, cust_id from feature_aum
         union all
-        select cust_id from feature_sav
+        select snap_date, cust_id from feature_sav
         union all
-        select cust_id from feature_ccard
+        select snap_date, cust_id from feature_ccard
         union all
-        select cust_id from feature_info
+        select snap_date, cust_id from feature_info
     ) t
-)
+),
 feature_concat as (
 
     select
+        pool_cust.snap_date,
         pool_cust.cust_id,
         feature_aum.total_aum,
         feature_aum.fund_aum,
