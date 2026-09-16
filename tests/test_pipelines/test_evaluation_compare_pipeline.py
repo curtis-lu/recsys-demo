@@ -79,9 +79,9 @@ def _base_params_for_validator():
     }
 
 
-def test_b4_validator_raises_when_partition_empty(spark):
+def test_enriched_validator_raises_when_partition_empty(spark):
     """Empty DataFrame in (simulates catalog filter returned nothing).
-    Validator must raise DataConsistencyError tagged (B4).
+    Validator must raise DataConsistencyError naming the empty table.
     """
     from recsys_tfb.pipelines.evaluation.nodes import (
         validate_enriched_eval_predictions_present,
@@ -92,15 +92,17 @@ def test_b4_validator_raises_when_partition_empty(spark):
         "cust_id STRING, snap_date STRING, prod_name STRING, "
         "score DOUBLE, rank INT, label INT",
     )
-    with pytest.raises(DataConsistencyError, match="B4"):
+    with pytest.raises(
+        DataConsistencyError, match="enriched_eval_predictions has no partition"
+    ):
         validate_enriched_eval_predictions_present(
             empty, _base_params_for_validator()
         )
 
 
-def test_b4_validator_raises_when_snap_date_filter_yields_empty(spark):
+def test_enriched_validator_raises_when_snap_date_filter_yields_empty(spark):
     """DataFrame has rows but no rows match the configured evaluation.snap_date.
-    Validator filters then raises B4.
+    Validator filters then raises.
     """
     from recsys_tfb.pipelines.evaluation.nodes import (
         validate_enriched_eval_predictions_present,
@@ -112,7 +114,9 @@ def test_b4_validator_raises_when_snap_date_filter_yields_empty(spark):
     )
     params = _base_params_for_validator()
     params["evaluation"]["snap_date"] = "2099-01-01"  # mismatch
-    with pytest.raises(DataConsistencyError, match="B4"):
+    with pytest.raises(
+        DataConsistencyError, match="enriched_eval_predictions has no partition"
+    ):
         validate_enriched_eval_predictions_present(df, params)
 
 

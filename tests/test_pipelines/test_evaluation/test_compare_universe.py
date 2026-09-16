@@ -132,7 +132,7 @@ def test_empty_entity_intersection_raises(spark):
 
 
 def test_empty_entity_message_still_reports_both_side_counts(spark):
-    """The B3 message keeps its two population numbers (#275 must not drop them)."""
+    """The empty-universe message keeps its two population numbers (#275 must not drop them)."""
     a = spark.createDataFrame(
         [("c1", "p1"), ("c2", "p1")], ["cust_id", "prod_name"]
     )
@@ -153,7 +153,7 @@ def test_null_only_intersection_fails_the_gate_instead_of_passing_it(spark):
     """A null-keyed shared entity is not a usable common entity.
 
     ``intersect`` counts ``NULL == NULL`` as a match, so it would let this
-    universe through the B3 gate — and the equi-join in ``restrict_to_common``
+    universe through the empty-universe gate — and the equi-join in ``restrict_to_common``
     would then drop the row, leaving both sides empty with no error raised
     anywhere. The gate uses the same join semantics as the restriction it
     guards, so the two cannot disagree and this fails loud.

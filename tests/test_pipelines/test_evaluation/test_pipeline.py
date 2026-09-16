@@ -323,7 +323,7 @@ class TestEvaluationPipelineCompareOnly:
         assert "parameters" in pipeline.inputs
 
     def test_the_gate_passes_nothing_on_and_the_restriction_reads_the_table(self):
-        """ADR-0018 decision 1: the B4 gate is zero-output, and
+        """ADR-0018 decision 1: the enriched-partition gate is zero-output, and
         ``restrict_to_common`` reads ``enriched_eval_predictions`` itself."""
         nodes = {n.name: n for n in create_pipeline(compare_only=True).nodes}
         assert nodes["validate_enriched_eval_predictions_present"].outputs == []

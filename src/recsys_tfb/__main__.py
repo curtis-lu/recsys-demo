@@ -398,7 +398,8 @@ def _compare_only_input_errors(plan, catalog, catalog_config) -> list[str]:
     missing one gets its own line. ``plan`` is the month plan for the table
     (:func:`_evaluation_month_plans`), or None when no month is configured.
 
-    Checked before any node runs, not left to the B4 gate node alone: slicing
+    Checked before any node runs, not left to the
+    ``validate_enriched_eval_predictions_present`` gate node alone: slicing
     skips a zero-output node, so under ``--compare-only --from-node
     load_compare_predictions`` the gate never runs, and a missing partition
     came back as an empty model side with exit code 0. A missing JSON used to

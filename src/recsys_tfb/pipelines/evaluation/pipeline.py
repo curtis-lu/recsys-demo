@@ -27,7 +27,7 @@ def create_pipeline(
         standalone and comparison reports produced.
       * --compare-only X — short pipeline that reads the
         ``enriched_eval_predictions`` an earlier run wrote, gates on the
-        evaluated month being there (B4, zero-output), and only produces
+        evaluated month being there (zero-output), and only produces
         report_comparison.html. It also loads ``evaluation_segment_columns``,
         landed by the run that wrote that partition, since there is no
         ``prepare_eval_data`` here to say which segment columns the
@@ -53,7 +53,7 @@ def create_pipeline(
     if compare_only:
         # CLI A12 ensures compare_source is not None when compare_only is True.
         # The catalog loads "enriched_eval_predictions" with WHERE
-        # model_version=${model_version}; the gate raises B4 when the evaluated
+        # model_version=${model_version}; the gate raises when the evaluated
         # month has no rows and passes nothing on, so restrict_to_common reads
         # the table and keeps the month itself, like every reader.
         return Pipeline([

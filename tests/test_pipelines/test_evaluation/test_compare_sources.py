@@ -287,7 +287,9 @@ def test_external_hive_unmapped_fail_raises(spark, monkeypatch, ext_predictions_
     p = _params_for_ext(policy="fail")
     p["evaluation"]["compare"]["prod_mapping"] = {"ext_fund_a": "fund_stock"}  # missing fund_b, usd
     monkeypatch.setattr(spark, "table", lambda t: ext_predictions_view)
-    with pytest.raises(DataConsistencyError, match=r"B2.*ext_fund_b|ext_usd"):
+    with pytest.raises(
+        DataConsistencyError, match=r"absent from prod_mapping: .*ext_fund_b.*ext_usd"
+    ):
         load_compare_predictions(p, spark)
 
 

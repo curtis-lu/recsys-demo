@@ -449,7 +449,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 
 | 階段 | node | 處理內容 |
 |---|---|---|
-| 驗證 Model A | `validate_enriched_eval_predictions_present` | 確認這個 model_version 在 `evaluation.snap_date` 有 rows，沒有就 raise（B4）。沒有 output，不傳東西給下一步 |
+| 驗證 Model A | `validate_enriched_eval_predictions_present` | 確認這個 model_version 在 `evaluation.snap_date` 有 rows，沒有就 raise。沒有 output，不傳東西給下一步 |
 | 載入 Model B | `load_compare_predictions` | 載入設定的 comparison source |
 | 對齊母體 | `restrict_to_common` | 讀 `enriched_eval_predictions`、先篩到評估月份，再取共同範圍並重新排名 |
 | 比較報表 | `generate_comparison_report` | 產生 `report_comparison.html` |
@@ -457,7 +457,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 這條路沒有 `prepare_eval_data`，它讀的兩樣東西都是寫 enriched partition 的那次標準 run 一起寫的：這個月的 partition，以及 `evaluation_segment_columns`（`segment_columns.json`，`generate_comparison_report` 用它決定分群）。兩者會被分開刪掉（清掉 `data/`、DROP 表），缺哪個都會被擋下、說出缺的是哪個：
 
 - **partition 不在、或 `segment_columns.json` 不在**：CLI 在任何 node 執行前就停下，每缺一樣列一行（表名與月份、檔案路徑），最後寫出該先跑的 `python -m recsys_tfb evaluation --model-version …`。這一步只看 partition 清單與檔案在不在，不讀資料。放在 CLI、不只靠下面的閘門，是因為切片會跳過沒有輸出的 node：`--compare-only` 加上 `--from-node` 時閘門不會跑。
-- **partition 列得出來但那個月沒有列**：`validate_enriched_eval_predictions_present` 擋下（B4），訊息寫出表名、月份與 model_version。
+- **partition 列得出來但那個月沒有列**：`validate_enriched_eval_predictions_present` 擋下，訊息寫出表名、月份與 model_version。
 
 兩種都是先重跑一次同 model_version、同月份的標準 evaluation。
 
@@ -625,7 +625,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 | external item unmapped | `prod_mapping` 未涵蓋外部 item | 補 mapping；確認可接受時才使用 `unmapped_policy: drop` |
 | common customers 或 items 為空 | 雙方日期、ID 型別或 item mapping 不一致 | 對齊日期與型別，修正 mapping |
 | 比較 coverage 大幅縮水 | 候選母體、客戶母體或外部 mapping 不一致 | 檢查 comparison report coverage 與 dropped items |
-| B4 enriched partition missing | 直接使用 `--compare-only`，但 Model A 尚未標準評估 | 先執行標準 evaluation 或 `--compare` |
+| `enriched_eval_predictions has no partition` | 直接使用 `--compare-only`，但 Model A 尚未標準評估 | 先執行標準 evaluation 或 `--compare` |
 | compare-only 讀到錯誤情境 | 同 model/date enriched partition 曾被另一種模式覆寫 | 以正確 `--post-training` 狀態重跑標準 evaluation |
 | diagnostics 過慢 | 多次 Spark aggregation、items 或 bins 過多 | 關閉不需要的 diagnostics sections 或縮減 K／items |
 | `Unknown node` | node 名稱拼錯或 compare mode 的 DAG 不同 | 先用相同模式執行 `--list-nodes` |
