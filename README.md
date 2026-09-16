@@ -464,6 +464,7 @@ pointwise、pairwise、listwise 的差異見 [`gbdt_learning_to_rank.md`](docs/h
 | 從分類基礎學到 learning-to-rank | 依序閱讀 [`binary classification`](docs/handbooks/gbdt/gbdt_binary_classification.md) → [`class imbalance`](docs/handbooks/gbdt/gbdt_class_imbalance.md) → [`multi-item imbalance`](docs/handbooks/gbdt/gbdt_multiitem_imbalance.md) → [`learning-to-rank`](docs/handbooks/gbdt/gbdt_learning_to_rank.md) |
 | 本機執行與 pipeline 接續 | [`local-spark-setup.md`](docs/operations/dev-setup/local-spark-setup.md)、[`pipeline-slicing.md`](docs/operations/user-guides/pipeline-slicing.md)、[`training.md` §4.7／§7.3（HPO 中斷接續）](docs/pipelines/training.md) |
 | 多評估一個月份（不重訓） | [`adding-an-eval-month.md`](docs/operations/user-guides/adding-an-eval-month.md) |
+| 取用發布版本、設定放哪、怎麼升級 | [`using-a-release.md`](docs/operations/user-guides/using-a-release.md) |
 | 排查訓練 OOM（非數值特徵欄 → object 矩陣） | [`known-pitfalls.md` §8](docs/operations/known-pitfalls.md)（怎麼認出）、[`dataset.md` §8.1](docs/pipelines/dataset.md)（怎麼修）、[`training.md` §9.1](docs/pipelines/training.md)（修完仍不夠時） |
 
 > 公司生產環境的 Spark／Hive 連線已配置好；只有本機開發或排查連線問題時，才需要閱讀 [`spark-connection-architecture.md`](docs/operations/dev-setup/spark-connection-architecture.md) 與 [`worktree-venv-setup.md`](docs/operations/dev-setup/worktree-venv-setup.md)。概念手冊另提供 `*_offline.html`，可在無網路環境直接開啟。
