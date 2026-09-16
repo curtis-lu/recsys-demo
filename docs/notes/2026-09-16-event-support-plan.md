@@ -19,7 +19,7 @@
 | **P7d** | 「至少一正一負」組過濾、熱門度基準線改點擊率（皆選用）、大類從資料欄位取 | 共識 Q17 | — | 預設關，輸出不變 | 開啟後的測試 |
 | **P8** | training 產出交接包 | 共識 Q15 | P4、P5 | 現有產物不變，只多一個檔 | 交接包內容與 preprocessor 一致 |
 | **P9** | 文件：來源 SQL 的時間正確性責任與範例、`time` 只保證到週、@K 指標在短清單上的解讀、**宣告 `event` 後 mAP 的語意**（按列算，同一個 item 的多列互相競爭名次） | ADR-0021、0022、共識 Q23 | P3、P5 | — | fresh 讀者照文件寫出不偷看的 SQL；讀者答得出「同一廣告曝光兩次，mAP 怎麼算」 |
-| **P10** | 預測品質指標家族：`prediction_quality` 的 node、JSON 產物、主報表一段（precision／recall／F1／`pr_auc`／ROC-AUC／分箱表，整體＋per-item） | ADR-0024 | **無**（不依賴 P1–P9；要在合成資料上實跑就排在 P1 之後） | 預設關，所有現有產物與報表逐值不變；主指標的計算路徑一行未動 | 一次 `groupBy(item, bin)` 的聚合；門檻掃描與分箱表由同一張 bin 表推出；零正例 query 也進得了分母 |
+| **P10** | 預測品質指標家族：`prediction_quality` 的 node、JSON 產物、主報表一段（precision／recall／F1／`pr_auc`／`roc_auc`／分箱表，整體＋per-item） | ADR-0024 | **無**（不依賴 P1–P9；要在合成資料上實跑就排在 P1 之後）。⚠ 與 **P7c** 的十等份表是同一種東西，先做的那張定形狀 | 框架預設關；報表與各 JSON 的**指標值**逐值不變；主指標的計算路徑一行未動。⚠ 各產物的 `config_fingerprint` **會變**（新增兩筆 `COMPUTED_KEYS`），舊產物要重算——ADR-0020 決定二的預期行為，不是 regression | 一次 `groupBy(item, bin)` 的聚合含 `count`／`sum(label)`／`sum(score)`；門檻掃描與分箱表由同一張 bin 表推出；零正例 query 也進得了分母；報表印出 bin 寬與兩段母體差 |
 
 ## 相依
 
