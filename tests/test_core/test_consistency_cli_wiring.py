@@ -67,6 +67,22 @@ def test_a34_wired_into_evaluation_command_before_spark():
     ), "A34 must fail before the Spark cold start, like A22"
 
 
+def test_a12_a13_wired_into_evaluation_command_before_spark():
+    # A12/A13 read only the two CLI flags and evaluation.compare_sources, so a
+    # mistyped --compare key must not cost a Spark cold start before it is
+    # reported. They used to run after the session was built, the one exception
+    # among the command-specific checks (A21/A22/A23/A24/A26/A27/A34 all run
+    # before it). Source inspection for the same reason as A22 above.
+    src = inspect.getsource(m.evaluation)
+    spark = src.index("get_or_create_spark_session(")
+    assert src.index("compare_mutual_exclusive_errors(") < spark, (
+        "A13 must fail before the Spark cold start, like A22"
+    )
+    assert src.index("compare_source_key_exists(") < spark, (
+        "A12 must fail before the Spark cold start, like A22"
+    )
+
+
 def test_a8_search_space_schema_surfaces_via_validate():
     import pytest
 

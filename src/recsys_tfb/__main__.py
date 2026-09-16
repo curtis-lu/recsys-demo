@@ -1722,27 +1722,14 @@ def evaluation(
         logger.error("\n".join([*snap_date_errs, *section_errs]))
         raise typer.Exit(code=1)
 
-    get_or_create_spark_session(_load_spark_config(config, "evaluation"))
-    data_dir = _find_data_dir()
-
-    models_dir = data_dir / "models"
-    mv = resolve_model_version(models_dir, model_version)
-    if model_version is not None and not (models_dir / mv).is_dir():
-        logger.error("Model version directory not found: %s", models_dir / mv)
-        raise typer.Exit(code=1)
-
-    base_v, train_v, cal_v = _dataset_versions_from_model_manifest(
-        models_dir / mv, data_dir
-    )
-
     try:
         params_eval = config.get_parameters_by_name("parameters_evaluation")
     except KeyError:
         params_eval = {}
 
-    eval_config = params_eval.get("evaluation", params_eval)
-    snap_date = str(eval_config.get("snap_date", "unknown")).replace("-", "")
-
+    # A13 and A12 read only the two flags and evaluation.compare_sources, so
+    # they run before the Spark cold start: a mistyped --compare key should
+    # cost seconds, not a session build.
     # A13: mutual-exclusive
     errs = compare_mutual_exclusive_errors(compare, compare_only)
     if errs:
@@ -1757,6 +1744,22 @@ def evaluation(
         # sharing in _deep_merge, but breaks silently if `evaluation:` ever appears
         # in another parameters_*.yaml.
         params.setdefault("evaluation", {})["compare"] = compare_source_dict
+
+    get_or_create_spark_session(_load_spark_config(config, "evaluation"))
+    data_dir = _find_data_dir()
+
+    models_dir = data_dir / "models"
+    mv = resolve_model_version(models_dir, model_version)
+    if model_version is not None and not (models_dir / mv).is_dir():
+        logger.error("Model version directory not found: %s", models_dir / mv)
+        raise typer.Exit(code=1)
+
+    base_v, train_v, cal_v = _dataset_versions_from_model_manifest(
+        models_dir / mv, data_dir
+    )
+
+    eval_config = params_eval.get("evaluation", params_eval)
+    snap_date = str(eval_config.get("snap_date", "unknown")).replace("-", "")
 
     logger.info(
         "Evaluation — model_version: %s (%s), post_training: %s, compare: %s%s",
