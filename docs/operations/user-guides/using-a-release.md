@@ -7,14 +7,14 @@
 ## 1. 版本、tag 與 branch
 
 ```
-tag      v0.1.0 ──► 某一個 commit         貼上去就不會動
+tag      v0.1.1 ──► 某一個 commit         貼上去就不會動
 branch   main ──●──●──●──●──►             持續往前長，內容隨時會變
-version  pyproject.toml 的 version = "0.1.0"
+version  pyproject.toml 的 version 欄位    每次發布時對齊 tag 名稱
 ```
 
 - **tag** 是釘在某個 commit 上的名字。checkout 同一個 tag，任何時候拿到的都是同一份程式碼。
 - **branch** 會持續前進。追 branch 等於每次同步都可能拿到不同的行為。
-- **version** 是 `pyproject.toml` 裡的字串，發布時與 tag 名稱一致：tag `v0.1.0` 對應 `version = "0.1.0"`。
+- **version** 是 `pyproject.toml` 裡的字串，發布時與 tag 名稱對齊：tag `v0.1.1` 對應 `version = "0.1.1"`。checkout 之後想確認自己手上是哪一版，看這個欄位。
 
 **請用 tag 取版本。** `release/*` branch 是維護舊版修正的工作分支，內容會變動。
 
