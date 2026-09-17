@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 廣告情境示例的端到端實跑，全 local[*]：
-#   原始表 → source_etl 四條 → dataset → training → inference → evaluation --post-training → digest
+#   原始表 → source_etl 四條（feature_etl 後比對特徵不偷看）→ dataset → training → inference
+#   → evaluation --post-training → digest
 #
 # 對應銀行示例的 scripts/local_e2e.sh，多了 source_etl 與 evaluation 兩段：銀行示例直接
 # 寫出來源表、跳過 source_etl，而這個示例要讓後面幾張票的新路徑（event、多張特徵表、
@@ -50,6 +51,8 @@ run() {
 T_START=$SECONDS
 run "setup（原始表）"          "$PY" setup_local.py
 run "feature_etl"              "$PY" -m recsys_tfb feature_etl --env local
+# 框架不檢查特徵有沒有偷看（ADR-0022 決定 3），這個示例自己比：SQL 的值與照定義重算的值逐列相同
+run "check 特徵不偷看"          "$PY" check_features.py
 run "label_etl"                "$PY" -m recsys_tfb label_etl --env local
 run "sample_pool_etl"          "$PY" -m recsys_tfb sample_pool_etl --env local
 run "inference_population_etl" "$PY" -m recsys_tfb inference_population_etl --env local

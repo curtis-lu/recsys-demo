@@ -1,4 +1,5 @@
-# 依賴 label_etl 產出的 label_table：候選就是那一週真的曝光過的組合。
+# 依賴 label_etl 產出的 label_table（候選就是那一週真的曝光過的組合），以及 feature_etl
+# 產出的 feature_user（分層用的年資）。
 sample_pool_etl:
   dry_run: false
   target_dates:

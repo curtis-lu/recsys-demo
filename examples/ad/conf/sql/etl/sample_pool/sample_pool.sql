@@ -3,16 +3,17 @@
 -- 候選數因人而異（銀行示例是每位客戶都配滿全部產品）。
 --
 -- user_segment 供分層抽樣（dataset.sample_group_keys）與 evaluation 分群；它只在
--- 這張表，不在 feature_table。
+-- 這張表，不在 feature_table。年資取 feature_user 算好的 tenure_days，不直接讀
+-- user_profile：取哪一天的快照才不偷看，只在 feature_user.sql 決定一次。
 WITH segment AS (
     SELECT
         user_id,
         CASE
-            WHEN datediff('${target_date}', signup_date) < 90  THEN 'new'
-            WHEN datediff('${target_date}', signup_date) < 365 THEN 'regular'
+            WHEN tenure_days < 90  THEN 'new'
+            WHEN tenure_days < 365 THEN 'regular'
             ELSE 'loyal'
         END AS user_segment
-    FROM ${raw_db}.user_profile
+    FROM ${target_db}.feature_user
     WHERE snap_date = '${target_date}'
 )
 SELECT

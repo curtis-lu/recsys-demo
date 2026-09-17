@@ -38,6 +38,8 @@ EXCLUDED_JSON_KEYS = ("config_fingerprint",)
 
 # catalog 條目名
 SOURCE_TABLES = ("feature_table", "label_table", "sample_pool", "inference_population")
+# feature_etl 的表名；event 角色（#378）與多張特徵表（#380）落地前，框架讀不到它
+ETL_ONLY_TABLES = ("feature_realtime",)
 DATASET_TABLES = (
     "train_model_input", "train_dev_model_input", "calibration_model_input",
     "val_model_input", "test_model_input",
@@ -52,11 +54,17 @@ class Tables:
         from recsys_tfb.core.config import ConfigLoader
 
         config = ConfigLoader("conf", env="local")
-        self._db = config.get_parameters()["hive"]["db"]
+        params = config.get_parameters()
+        self._db = params["hive"]["db"]
         self._catalog = config.get_catalog_config()
+        self._etl_db = params["feature_etl"]["variables"]["target_db"]
 
     def __getitem__(self, entry: str) -> str:
         return f"{self._db}.{self._catalog[entry]['table']}"
+
+    def etl_only(self, name: str) -> str:
+        """source_etl 寫出、但不在 catalog 的表（框架今天讀不到它）。"""
+        return f"{self._etl_db}.{name}"
 
 
 def table_fingerprint(spark, table: str, where: str | None = None) -> dict:
@@ -128,7 +136,10 @@ def build(model_version: str) -> dict:
 
         return {
             "versions": versions,
-            "source_etl": {t: table_fingerprint(spark, tables[t]) for t in SOURCE_TABLES},
+            "source_etl": {
+                **{t: table_fingerprint(spark, tables[t]) for t in SOURCE_TABLES},
+                **{t: table_fingerprint(spark, tables.etl_only(t)) for t in ETL_ONLY_TABLES},
+            },
             "dataset": {
                 **{t: table_fingerprint(spark, tables[t]) for t in DATASET_TABLES},
                 **{f: file_fingerprint(dataset_dir / f) for f in DATASET_JSON},
