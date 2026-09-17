@@ -10,6 +10,16 @@ os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 # 走 127.0.0.1 恆正確。setdefault 保留外部顯式覆寫空間。
 # （2026-07-07，known-pitfalls.md §7）
 os.environ.setdefault("SPARK_LOCAL_IP", "127.0.0.1")
+# 子行程也要載「這棵樹」的 src：venv 的 editable install 指向 main 的 src，
+# pyproject 的 pythonpath=["src"] 只改得到 pytest 本行程的 sys.path。Spark 的
+# Python worker 與 subprocess 起的 python 不繼承 sys.path、只繼承環境變數——
+# 不寫進 PYTHONPATH，在 worktree 跑測試時它們會靜默載到 main 的程式碼，測試照綠。
+# 寫在這裡，指令就不必帶 PYTHONPATH= 前綴。守它的測試：tests/test_conftest.py。
+# （2026-09-17）
+_SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+os.environ["PYTHONPATH"] = os.pathsep.join(
+    p for p in (_SRC, os.environ.get("PYTHONPATH")) if p
+)
 
 
 @pytest.fixture(autouse=True)
