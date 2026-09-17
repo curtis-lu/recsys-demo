@@ -26,7 +26,7 @@ schema:
     label: label                 # 這一週在這個版位有沒有點過這個素材
     score: score
     rank: rank
-  # 本票 item 清單逐一列出；「從資料數」是後面的票。必須等於 generate_data.py 產出的組合
+  # item 清單逐一列出；改成「從資料數」是 #379。必須等於 generate_data.py 產出的組合
   # （tests/examples/test_ad_example.py 守這一條）。
   categorical_values:
     ad_creative:

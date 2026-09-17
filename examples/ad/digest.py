@@ -4,16 +4,23 @@
 「還沒打開自己的開關」時跑一次 ``run_e2e.sh --compare``，拿這份跟 baseline_digest.json
 比：一樣＝框架改動沒碰壞廣告情境；不一樣時，分層的結果直接指出從哪一層開始變。
 
-分層記錄而不是整條一個雜湊，理由是規劃檔的「分開才驗得出是誰改變了版本 ID」：
-source_etl 一樣、dataset 不一樣，問題就在 dataset，不必從頭查。
+分層記錄而不是整條一個雜湊，理由與規劃檔（docs/notes/2026-09-16-event-support-plan.md）
+把 event／item 清單／多張特徵表拆成三張票相同：「合在一起，任何一個版本號變了都分不出
+是誰造成的」。source_etl 一樣、dataset 不一樣，問題就在 dataset，不必從頭查。
 
 內容指紋的算法：每列對所有欄（依欄名排序）取 xxhash64，整張表加總。與列的順序無關，
 也不需要把資料拉回 driver。版本分區欄（base_dataset_version 等）不進指紋——版本號
 另外記，這樣「內容一樣、只有版本號變了」與「內容變了」分得開。模型分數四捨五入到
 小數第 6 位再進指紋，避免浮點尾數在不同機器上抖動造成假警報。
 
+evaluation 的 JSON 產物全部攤平後進指紋，但**排除 ``config_fingerprint``**：它是設定
+的雜湊，框架新增一個「算的」設定鍵就會變（ADR-0024 的預測品質指標就會），指標值卻
+一個都沒動。放進來的話，那種改動會讓這裡紅，而「指標值逐值不變」反而驗不出來。
+
 有些欄位同一份程式碼跑兩次本來就不同（例如帶時間戳的欄位）；那些列在
 baseline_digest.json 的 ``noisy``，比對時略過並印出來，不當作差異。
+
+資料庫名與表名從 conf 讀（``hive.db``、catalog 各條目的 ``table``），不寫死。
 
 用法（在 examples/ad/ 底下，由 run_e2e.sh 呼叫）：
     python digest.py --model-version <mv> --out data/digest.json [--compare baseline_digest.json]
@@ -25,26 +32,37 @@ import json
 import sys
 from pathlib import Path
 
-DB = "ad_recsys"
 VERSION_COLS = ("base_dataset_version", "train_variant_id", "calibration_variant_id", "model_version")
 SCORE_COLS = ("score", "score_uncalibrated")
+EXCLUDED_JSON_KEYS = ("config_fingerprint",)
 
+# catalog 條目名
 SOURCE_TABLES = ("feature_table", "label_table", "sample_pool", "inference_population")
-# 邏輯名 → Hive 表名（catalog.yaml）
-DATASET_TABLES = {
-    "train_model_input": "recsys_prod_train_model_input",
-    "train_dev_model_input": "recsys_prod_train_dev_model_input",
-    "calibration_model_input": "recsys_prod_calibration_model_input",
-    "val_model_input": "recsys_prod_val_model_input",
-    "test_model_input": "recsys_prod_test_model_input",
-}
+DATASET_TABLES = (
+    "train_model_input", "train_dev_model_input", "calibration_model_input",
+    "val_model_input", "test_model_input",
+)
 DATASET_JSON = ("preprocessor.json", "category_mappings.json")
+
+
+class Tables:
+    """catalog 條目名 → 完整 Hive 表名，讀自 conf/（與 pipeline 看到的同一份）。"""
+
+    def __init__(self) -> None:
+        from recsys_tfb.core.config import ConfigLoader
+
+        config = ConfigLoader("conf", env="local")
+        self._db = config.get_parameters()["hive"]["db"]
+        self._catalog = config.get_catalog_config()
+
+    def __getitem__(self, entry: str) -> str:
+        return f"{self._db}.{self._catalog[entry]['table']}"
 
 
 def table_fingerprint(spark, table: str, where: str | None = None) -> dict:
     from pyspark.sql import functions as F
 
-    df = spark.table(f"{DB}.{table}")
+    df = spark.table(table)
     if where:
         df = df.where(where)
     cols = sorted(c for c in df.columns if c not in VERSION_COLS)
@@ -57,17 +75,19 @@ def table_fingerprint(spark, table: str, where: str | None = None) -> dict:
 
 
 def single_value(spark, table: str, col: str) -> str:
-    values = [r[0] for r in spark.table(f"{DB}.{table}").select(col).distinct().collect()]
+    values = [r[0] for r in spark.table(table).select(col).distinct().collect()]
     if len(values) != 1:
-        sys.exit(f"{DB}.{table}.{col} 有 {len(values)} 個值 {values}：data/ 裡混了別輪的產物，先跑 setup_local.py 清掉")
+        sys.exit(f"{table}.{col} 有 {len(values)} 個值 {values}：data/ 裡混了別輪的產物，先跑 setup_local.py 清掉")
     return str(values[0])
 
 
 def json_leaves(obj, prefix: str = "") -> dict:
-    """把 JSON 攤平成 路徑 → 值；數字四捨五入到小數第 6 位。"""
+    """把 JSON 攤平成 路徑 → 值；數字四捨五入到小數第 6 位；略過 EXCLUDED_JSON_KEYS。"""
     out = {}
     if isinstance(obj, dict):
         for k in sorted(obj):
+            if k in EXCLUDED_JSON_KEYS:
+                continue
             out.update(json_leaves(obj[k], f"{prefix}.{k}" if prefix else str(k)))
     elif isinstance(obj, list):
         for i, v in enumerate(obj):
@@ -90,12 +110,13 @@ def file_fingerprint(path: Path) -> dict:
 def build(model_version: str) -> dict:
     from pyspark.sql import SparkSession
 
+    tables = Tables()
     spark = SparkSession.builder.appName("ad_example_digest").getOrCreate()
     try:
         versions = {
-            "base_dataset_version": single_value(spark, DATASET_TABLES["val_model_input"], "base_dataset_version"),
-            "train_variant_id": single_value(spark, DATASET_TABLES["train_model_input"], "train_variant_id"),
-            "calibration_variant_id": single_value(spark, DATASET_TABLES["calibration_model_input"], "calibration_variant_id"),
+            "base_dataset_version": single_value(spark, tables["val_model_input"], "base_dataset_version"),
+            "train_variant_id": single_value(spark, tables["train_model_input"], "train_variant_id"),
+            "calibration_variant_id": single_value(spark, tables["calibration_model_input"], "calibration_variant_id"),
             "model_version": model_version,
         }
         mv_filter = f"model_version = '{model_version}'"
@@ -107,20 +128,21 @@ def build(model_version: str) -> dict:
 
         return {
             "versions": versions,
-            "source_etl": {t: table_fingerprint(spark, t) for t in SOURCE_TABLES},
+            "source_etl": {t: table_fingerprint(spark, tables[t]) for t in SOURCE_TABLES},
             "dataset": {
-                **{name: table_fingerprint(spark, t) for name, t in DATASET_TABLES.items()},
+                **{t: table_fingerprint(spark, tables[t]) for t in DATASET_TABLES},
                 **{f: file_fingerprint(dataset_dir / f) for f in DATASET_JSON},
             },
             "training": {
-                "training_eval_predictions": table_fingerprint(spark, "training_eval_predictions", mv_filter),
+                "training_eval_predictions": table_fingerprint(
+                    spark, tables["training_eval_predictions"], mv_filter),
             },
             "inference": {
-                "ranked_predictions": table_fingerprint(spark, "ranked_predictions", mv_filter),
+                "ranked_predictions": table_fingerprint(spark, tables["ranked_predictions"], mv_filter),
             },
+            # metrics／baseline_metrics／segment_columns／report_aggregates 與 diagnosis/ 底下的診斷
             "evaluation": {
-                "metrics.json": file_fingerprint(eval_dir / "metrics.json"),
-                "baseline_metrics.json": file_fingerprint(eval_dir / "baseline_metrics.json"),
+                str(p.relative_to(eval_dir)): file_fingerprint(p) for p in sorted(eval_dir.rglob("*.json"))
             },
         }
     finally:

@@ -1,5 +1,8 @@
-# 與銀行示例的差別只有兩類：mlflow 實驗名，以及 HPO 次數與迭代數調小——本示例的
-# 目的是「每張票都能在幾分鐘內整條實跑」，不是把模型調好。
+# 與根目錄 conf/base/parameters_training.yaml（銀行示例）不同的地方：
+#   - sample_weight_keys：item 欄名換成 ad_creative
+#   - n_trials／num_iterations／early_stopping_rounds 調小；search_space 只搜三個參數，範圍也不同
+#   - log_period: 0（不印每輪指標）；spark.app_name、mlflow.experiment_name 換名
+# 調小的理由：本示例的目的是「每張票都能在幾分鐘內整條實跑」，不是把模型調好。
 spark:
   app_name: recsys_tfb_ad_example-training
 

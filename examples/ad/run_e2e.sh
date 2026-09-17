@@ -71,6 +71,64 @@ PY
 echo "▶ model_version=$MODEL_VERSION"
 
 run "inference"                "$PY" -m recsys_tfb inference --env local --model-version "$MODEL_VERSION"
+
+# 推論三張表的分區結構：與 scripts/local_e2e.sh 末段同一組斷言（理由見那裡的註解，
+# #185／#187／#188、ADR-0010 §5–§6），只是資料庫名、item 欄名、item 清單都從 conf 讀——
+# 那份寫死了 ml_recsys 與 prod_name。這幾件事只有實跑後看目錄名才看得到，digest 的
+# 內容指紋看不到（分區欄錯位時列的內容可以完全一樣）。
+run "assert 推論表分區結構"     "$PY" - "$MODEL_VERSION" <<'PY'
+import sys
+from pathlib import Path
+
+from recsys_tfb.core.config import ConfigLoader
+
+expected_mv = sys.argv[1]
+params = ConfigLoader("conf", env="local").get_parameters()
+item_col = params["schema"]["columns"]["item"]
+products = set(params["inference"]["products"])
+n_buckets = int(params["inference"].get("entity_buckets", 10))
+db = Path("data/local_warehouse") / f"{params['hive']['db']}.db"
+
+failures = []
+for table in ("unranked_predictions", "ranked_staging", "ranked_predictions"):
+    leaves = sorted(db.glob(f"{table}/model_version=*/snap_date=*/{item_col}=*"))
+    if not leaves:
+        failures.append(f"{table}: 找不到 model_version=*/snap_date=*/{item_col}=* 分區目錄")
+        continue
+    items_seen = {p.name.split("=", 1)[1] for p in leaves}
+    versions_seen = {p.parent.parent.name.split("=", 1)[1] for p in leaves}
+    if items_seen != products:
+        failures.append(f"{table}: {item_col} 分區值 {sorted(items_seen)} != inference.products")
+    elif versions_seen != {expected_mv}:
+        failures.append(f"{table}: 最外層 model_version 分區值 {sorted(versions_seen)} != 這次跑的 {expected_mv}")
+    else:
+        print(f"  ✓ {table}: model_version={expected_mv}，{len(items_seen)} 個 {item_col} 分區")
+
+buckets = sorted(db.glob(f"unranked_predictions/model_version=*/snap_date=*/{item_col}=*/entity_bucket=*"))
+if not buckets:
+    failures.append("unranked_predictions: 找不到 entity_bucket=* 分區目錄")
+else:
+    per_bucket = {}
+    for leaf in buckets:
+        per_bucket.setdefault(int(leaf.name.split("=", 1)[1]), set()).add(leaf.parent.name.split("=", 1)[1])
+    out_of_range = sorted(b for b in per_bucket if not 0 <= b < n_buckets)
+    ragged = {b: sorted(items) for b, items in per_bucket.items() if items != products}
+    if out_of_range:
+        failures.append(f"unranked_predictions: entity_bucket 值 {out_of_range} 落在 [0, {n_buckets}) 之外")
+    if ragged:
+        failures.append(f"unranked_predictions: 這些桶的 item 分區不完整 {ragged}")
+    if not out_of_range and not ragged:
+        print(f"  ✓ unranked_predictions: {len(per_bucket)}/{n_buckets} 個桶有資料，每桶 {len(products)} 個 item 分區")
+
+for table in ("ranked_staging", "ranked_predictions"):
+    if sorted(db.glob(f"{table}/**/entity_bucket=*")):
+        failures.append(f"{table}: 出現 entity_bucket 分區（機制欄漏進對外表）")
+
+if failures:
+    print("\n".join("  ✗ " + f for f in failures), file=sys.stderr)
+    sys.exit(1)
+PY
+
 run "evaluation --post-training" "$PY" -m recsys_tfb evaluation --env local --post-training --model-version "$MODEL_VERSION"
 
 if [ "$COMPARE" = 1 ]; then

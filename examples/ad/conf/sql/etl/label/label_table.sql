@@ -4,7 +4,7 @@
 -- item 在這裡由兩個屬性拼成一欄（CONTEXT.md：item 恆為一欄）。分隔字元要與
 -- generate_data.py 的 ITEM_SEPARATOR、conf 的 categorical_values 一致。
 --
--- 同一素材同一週被曝光多次時在這裡聚合成一列（MAX）。本票還沒有 event 角色，
+-- 同一素材同一週被曝光多次時在這裡聚合成一列（MAX）。這份 conf 不宣告 event 角色（#378），
 -- identity 必須是 (snap_date, user_id, slot_id, ad_creative)，重複會被下面的
 -- max_duplicate_key_ratio 與 dataset 的粒度閘擋下。
 --

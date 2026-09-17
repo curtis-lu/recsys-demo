@@ -8,12 +8,15 @@
 資料形狀依 ADR-0021：一次曝光一列、帶到秒的時間；``time`` 是週（每週一），
 ``entity`` 是使用者 × 版位，``item`` 是活動 × 素材格式在 SQL 裡拼成的一欄。
 
-刻意留給後面幾張票用、但本票的 SQL 不用的形狀：
+刻意留給後面幾張票用、但目前的 SQL（不宣告 event、只有一張特徵表）不用的形狀：
 
-- 同一週、同一使用者、同一版位、同一素材被曝光不只一次（``event`` 角色）。
-- 使用者特徵與版位特徵各有自己的粒度（多張特徵表各自宣告 join 欄位）。
+- 同一週、同一使用者、同一版位、同一素材被曝光不只一次（``event`` 角色，#378）。
+- 有些使用者一週在同一版位的曝光次數超過 item 種數（同上，``"all"`` 不截斷）。
+- 使用者特徵與版位特徵各有自己的粒度（多張特徵表各自宣告 join 欄位，#380）。
 
-數字不是生產的樣子：點擊率刻意調高到 5–15%，因為母體只有幾百人，照真實的 1%
+沒有的形狀（README〈資料涵蓋了什麼〉）：只在後期才出現的 item、逐筆曝光的即時特徵。
+
+數字不是生產的樣子：點擊率刻意調高到十幾 %，因為母體只有幾百人，照真實的 1%
 一週只會有個位數正例。生產規模的估算不在本示例的範圍（見 README）。
 
 用法（在 examples/ad/ 底下）：
@@ -42,7 +45,7 @@ WEEKS = [
 
 # item ＝ campaign_id + ITEM_SEPARATOR + creative_format（在 label／sample_pool SQL 拼）。
 # 用 "-" 而不是 "|"：item 值會成為 Hive 分區目錄名、MLflow 指標名與檔名的一部分，
-# 那幾處對特殊字元的處理本票不驗（規劃檔 P7a、P8 的範圍）。
+# 那幾處對特殊字元的處理還沒驗過（規劃檔 P7a、P8 的範圍）。
 ITEM_SEPARATOR = "-"
 CAMPAIGNS = ["c01", "c02", "c03", "c04"]
 FORMATS = ["banner", "video", "native"]
@@ -57,16 +60,26 @@ SLOTS = pd.DataFrame({
     "page_type": ["home", "feed", "article"],
 })
 SLOT_LOGIT = {"home_top": 0.4, "feed_mid": 0.0, "article_end": -0.5}
-SLOT_IMPRESSION_RATE = {"home_top": 2.5, "feed_mid": 3.5, "article_end": 1.5}
+# 每週每版位的曝光次數（Poisson 平均）。feed_mid 平均 7 次時，每週有幾個 (使用者, 版位)
+# 的曝光超過 item 種數 12——event 角色（#378）要驗的「"all" 不截斷」只在這種組上發生。
+SLOT_IMPRESSION_RATE = {"home_top": 5.0, "feed_mid": 7.0, "article_end": 3.0}
 
 AGE_BANDS = ["18-24", "25-34", "35-49", "50+"]
 DEVICES = ["mobile", "desktop", "tablet"]
 REGIONS = ["north", "central", "south", "east"]
 
-# 年齡層偏好哪個活動、裝置偏好哪種格式：讓特徵真的帶訊號，模型才有東西可學
+# 年齡層偏好哪個活動、裝置偏好哪種格式：讓特徵真的帶訊號，模型才有東西可學。
+# 強度的選法：一組只有兩三個候選時，隨便排的 mAP 也有 0.7，排序指標分不出好壞；
+# 所以候選數拉到平均 4 個左右、親和力加強，讓「隨便排／照熱門排／照特徵排」拉得開。
+# 不起 Spark 的估算（test 週、有正例的組、整組 AP）：隨便排 0.585、照過去點擊數排 0.615、
+# 照 train 週 (年齡層, 裝置, 版位, item) 分群的點擊率排 0.770。
 AGE_CAMPAIGN_AFFINITY = {"18-24": "c03", "25-34": "c01", "35-49": "c02", "50+": "c04"}
 DEVICE_FORMAT_AFFINITY = {"mobile": "video", "desktop": "banner", "tablet": "native"}
-BASE_LOGIT = -2.6
+BASE_LOGIT = -3.2
+AGE_AFFINITY_LOGIT = 1.8
+DEVICE_AFFINITY_LOGIT = 1.4
+PROPENSITY_SD = 0.6
+FATIGUE_LOGIT = 0.5  # 同一週同一素材每多看一次，點擊意願下降多少
 
 
 def _users(rng: np.random.Generator, n_users: int) -> pd.DataFrame:
@@ -81,7 +94,7 @@ def _users(rng: np.random.Generator, n_users: int) -> pd.DataFrame:
             for d in rng.integers(1, 730, size=n_users)
         ],
         # 看不到的個人點擊傾向；特徵只能從過去的點擊率間接學到
-        "propensity": rng.normal(0.0, 0.6, size=n_users),
+        "propensity": rng.normal(0.0, PROPENSITY_SD, size=n_users),
         "activity": rng.uniform(0.3, 1.0, size=n_users),
     })
 
@@ -128,9 +141,9 @@ def _impressions(rng: np.random.Generator, users: pd.DataFrame) -> pd.DataFrame:
                         BASE_LOGIT
                         + user.propensity
                         + SLOT_LOGIT[slot_id]
-                        + (0.9 if AGE_CAMPAIGN_AFFINITY[user.age_band] == campaign else 0.0)
-                        + (0.7 if DEVICE_FORMAT_AFFINITY[user.device_type] == fmt else 0.0)
-                        - 0.5 * exposure  # 同一週看第二次以上，點擊意願下降
+                        + (AGE_AFFINITY_LOGIT if AGE_CAMPAIGN_AFFINITY[user.age_band] == campaign else 0.0)
+                        + (DEVICE_AFFINITY_LOGIT if DEVICE_FORMAT_AFFINITY[user.device_type] == fmt else 0.0)
+                        - FATIGUE_LOGIT * exposure
                     )
                     ts = week_start + dt.timedelta(seconds=int(sec))
                     rows.append((
