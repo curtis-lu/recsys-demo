@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from recsys_tfb.core.date_ranges import as_date_list, expand_date_range
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric._common import to_logit
 from recsys_tfb.evaluation.metrics import (
@@ -183,6 +184,37 @@ def _query_key(pdf: pd.DataFrame, query_cols: list[str]) -> pd.Series:
     return out
 
 
+def resolve_snap_date(args: argparse.Namespace, parameters: dict) -> str:
+    """The single ``evaluation.snap_date`` this diagnosis reads.
+
+    ``--snap-date`` always wins over config. Otherwise the config value is
+    expanded (a ``{start, end, step}`` range, or a list, or a single date)
+    into its date list. This script only ever looks at one date — comparing
+    ``str(list)`` against a STRING time partition would otherwise silently
+    match zero rows, so more than one configured date is a hard error instead
+    (#374).
+    """
+    if args.snap_date:
+        return str(args.snap_date)
+    raw = (parameters.get("evaluation", {}) or {}).get("snap_date")
+    if isinstance(raw, dict):
+        raw = expand_date_range(
+            raw, "parameters_evaluation.yaml -> evaluation.snap_date"
+        )
+    dates = as_date_list(raw)
+    if not dates:
+        raise ValueError(
+            "evaluation.snap_date is missing. Set it in parameters or pass "
+            "--snap-date."
+        )
+    if len(dates) > 1:
+        raise ValueError(
+            f"evaluation.snap_date 設了 {len(dates)} 個日期；這支診斷一次只看"
+            f"一個日期，請用 --snap-date 指定其中一個：{', '.join(dates)}"
+        )
+    return dates[0]
+
+
 def load_enriched_eval_predictions(
     args: argparse.Namespace,
     parameters: dict,
@@ -193,15 +225,8 @@ def load_enriched_eval_predictions(
 
     catalog = load_catalog(args.catalog)
     hive_table, catalog_meta = resolve_enriched_eval_table(catalog, parameters)
-    snap_date = args.snap_date or str(
-        (parameters.get("evaluation", {}) or {}).get("snap_date") or ""
-    )
+    snap_date = resolve_snap_date(args, parameters)
     model_version = args.model_version or parameters.get("model_version")
-    if not snap_date:
-        raise ValueError(
-            "evaluation.snap_date is missing. Set it in parameters or pass "
-            "--snap-date."
-        )
     if not model_version:
         raise ValueError(
             "model_version is required for enriched_eval_predictions. Pass "
