@@ -38,6 +38,7 @@ week_calendar   每週一         ┘                             └─ feature
 - **候選數不固定。** 候選＝那一週真的曝光過的素材，一個 query group 平均兩三個，不是 12 個全配（商銀示例是每位客戶配滿全部產品）。
 - **特徵不偷看。** 行為特徵只數 `event_date < snap_date` 的曝光（過去 28 天）；這是來源 SQL 的責任，框架不檢查（ADR-0022）。
 - **點擊率刻意偏高（約 14%）。** 母體只有幾百人，照真實的 1% 一週只有個位數正例。這份資料的數字不代表生產。
+- **有訊號，但弱。** 年齡層偏好某個活動、裝置偏好某種格式、個人點擊傾向，都寫進了產生器。test 週 202 個有正例的 query group 上，模型 mAP@12 是 0.712，熱門度基準 0.692。一組只有兩三個候選，怎麼排分數都不低，所以兩者差距小；這個示例是拿來驗「路徑跑得通、輸出沒變」，不是拿來比模型好壞。
 
 各週的用途：
 
@@ -67,11 +68,43 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 
 ## 耗時
 
-（待填）
+整條約 **4 分鐘**。量測：2026-09-17，macOS 8 核、local[*]，機器上另有別的 session 在跑（load average 2.5～5.5）；同一份程式碼連跑兩次，兩次都是 227 秒。
+
+| 步驟 | 秒（第 1 次／第 2 次） |
+|---|---|
+| setup（產生原始表、寫進 Hive） | 7／8 |
+| feature_etl | 28／28 |
+| label_etl | 14／15 |
+| sample_pool_etl | 14／13 |
+| inference_population_etl | 14／14 |
+| dataset | 16／16 |
+| training（HPO 5 次） | 43／40 |
+| inference | 54／56 |
+| evaluation --post-training | 28／27 |
+| digest | 8／8 |
+
+每一步都是獨立的 CLI 指令，**秒數都含一次 Spark 啟動**。log 裡從建立 `run_id` 到 `SparkSession ready` 約 1 秒；加上 Python 載入，每一步的固定成本是幾秒等級（沒有單獨量）。資料量：原始曝光約 2.1 萬列、`sample_pool` 16,348 列、`feature_table` 12,000 列。這些數字只說明「本機幾分鐘跑得完」，推不出生產成本（見〈沒做的事〉）。
 
 ## 基準 digest
 
-（待填）
+`baseline_digest.json` 是後面每張票判斷「廣告情境沒壞」的比較點，由 `digest.py` 產生。它分層記錄，不是整條一個雜湊——哪一層開始不同，問題就從那一層查：
+
+| 層 | 記什麼 |
+|---|---|
+| `versions` | `base_dataset_version`、`train_variant_id`、`calibration_variant_id`、`model_version` |
+| `source_etl` | 四張來源表的列數與內容指紋 |
+| `dataset` | 五個 split 的 model_input 列數與內容指紋；`preprocessor.json`、`category_mappings.json` 的內容指紋 |
+| `training` | `training_eval_predictions`（分數四捨五入到小數第 6 位） |
+| `inference` | `ranked_predictions`（同上） |
+| `evaluation` | `metrics.json`、`baseline_metrics.json` 攤平後的指紋（數字四捨五入到小數第 6 位） |
+
+- **內容指紋**：每列對所有欄（依欄名排序）取 `xxhash64` 後整張表加總，與列的順序無關。版本分區欄不進指紋，所以「只有版本號變了」與「內容變了」分得開。
+- **沒有會抖動的欄位。** 同一份程式碼連跑兩次，45 個欄位逐一相同（包括模型分數與評估指標），所以 `noisy` 是空的。哪天出現了本來就會變的欄位，把它的路徑前綴與理由寫進 `noisy`，比對時會略過並印出來。
+
+後面的票怎麼用：
+
+1. **還沒打開自己的開關時**，跑 `bash examples/ad/run_e2e.sh --compare`，必須一致——這證明框架改動沒碰壞廣告情境。
+2. **打開開關之後**，輸出本來就該變。確認變的是預期的那幾層後，用新的 `data/digest.json` 取代 `baseline_digest.json`，更新裡面的 `measured`，並在 PR 說明寫出哪幾層變了、為什麼。
 
 ## 這組 conf 刻意沒打開的東西
 
