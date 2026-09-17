@@ -1460,6 +1460,9 @@ LITERAL_COLUMN_EXCEPTIONS = frozenset({
     ("src/recsys_tfb/evaluation/report_builder.py", "assemble_report"),
     ("src/recsys_tfb/pipelines/evaluation/nodes.py", "_diagnosis_pages_dir"),
     ("src/recsys_tfb/pipelines/evaluation/nodes.py", "prepare_eval_data"),
+    # The config loader's list of date settings that accept a range, which
+    # names this key among them (#374).
+    ("src/recsys_tfb/core/date_ranges.py", "<module>"),
     # The one read every reader of enriched_eval_predictions goes through
     # (ADR-0018 decision 1); signed off in #352, renamed from eval_snap_date
     # when the setting became one date or several (#374).

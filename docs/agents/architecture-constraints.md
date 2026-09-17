@@ -721,6 +721,7 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 | `evaluation/report_builder.py` | `assemble_report` | 報表 metadata 讀同一個設定鍵 |
 | `pipelines/evaluation/nodes.py` | `prepare_eval_data` | 同上 |
 | `pipelines/evaluation/nodes.py` | `_diagnosis_pages_dir` | 同上（診斷頁目錄名） |
+| `core/date_ranges.py` | `<module>` | `DATE_LIST_KEYS` 列出可以寫成日期區間的設定鍵，`("evaluation", "snap_date")` 是其中一個；`ConfigLoader` 載入時據此展開（#374）。第一版寫成一整串 `"evaluation.snap_date"` 再切開，掃描器看不到，審查時改成看得到的寫法並登記——帳目要完整 |
 | `pipelines/evaluation/steps/snap_date_scope.py` | `eval_snap_dates` | 同上。`enriched_eval_predictions` 的每個讀者都經 `restrict_to_eval_snap_dates` 從這裡拿評估日期（一個或多個，[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1），所以是一筆、不是每個讀者一筆。#352 加入時同步刪掉 `comparison_nodes.py::validate_enriched_eval_predictions_present` 那筆（它改成跟這裡拿），總數不變。#374 讓設定可以是多個日期時由 `eval_snap_date` 改名而來（使用者同意的替換，總數不變） |
 
 **二、「那是它自己的欄位」（3 筆）**

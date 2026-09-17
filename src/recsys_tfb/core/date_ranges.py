@@ -22,6 +22,12 @@ the point of expanding early: version IDs are computed from the loaded dict
 (``core/versioning.py::_hash8`` dumps it as-is), and a second spelling of the
 same dates must not mint a second identity.
 
+"The list it stands for" is exactly that spelling: quoted ``YYYY-MM-DD`` text,
+ascending. Lists are hashed as written and are not normalised here (doing so
+would move every existing version ID), so a list in another order, or of
+unquoted YAML dates, is a different identity from the range that names the
+same days: rewriting it as a range rebuilds once.
+
 The range has no "up to today" form on purpose: an end that moves with the run
 date would give the same config a different version ID tomorrow.
 """
@@ -31,15 +37,19 @@ from __future__ import annotations
 import calendar
 import datetime as _dt
 
-#: Dotted key paths, inside each ``parameters*.yaml``, that accept a range.
-#: Dotted rather than tuples so no element spells an example column name
-#: (architecture-constraints S6).
-DATE_LIST_KEYS: tuple[str, ...] = (
-    "dataset.train_snap_dates",
-    "dataset.calibration_snap_dates",
-    "dataset.val_snap_dates",
-    "dataset.test_snap_dates",
-    "evaluation.snap_date",
+#: ``(section, key)`` pairs, inside each ``parameters*.yaml``, that accept a
+#: range. ``("evaluation", "snap_date")`` spells an example column name and is
+#: registered under S6 (architecture-constraints R6): it is a read of that
+#: config key, the same kind as the other registered reads.
+#: ``inference.snap_dates`` is here because monitoring evaluation reads what
+#: inference scored, so the two are naturally written as the same range.
+DATE_LIST_KEYS: tuple[tuple[str, str], ...] = (
+    ("dataset", "train_snap_dates"),
+    ("dataset", "calibration_snap_dates"),
+    ("dataset", "val_snap_dates"),
+    ("dataset", "test_snap_dates"),
+    ("evaluation", "snap_date"),
+    ("inference", "snap_dates"),
 )
 
 STEPS: tuple[str, ...] = ("day", "week", "month_start", "month_end")
@@ -209,14 +219,13 @@ def expand_date_ranges(config: dict[str, dict]) -> dict[str, dict]:
         if not _is_parameters_stem(stem) or not isinstance(data, dict):
             continue
         new_data = data
-        for dotted in DATE_LIST_KEYS:
-            section_name, key = dotted.split(".")
+        for section_name, key in DATE_LIST_KEYS:
             section = new_data.get(section_name)
             if not isinstance(section, dict) or not isinstance(section.get(key), dict):
                 continue
             try:
                 expanded = expand_date_range(
-                    section[key], f"{stem}.yaml -> {dotted}"
+                    section[key], f"{stem}.yaml -> {section_name}.{key}"
                 )
             except DateRangeError as exc:
                 errors.append(f"  {exc}")
@@ -227,6 +236,6 @@ def expand_date_ranges(config: dict[str, dict]) -> dict[str, dict]:
         result[stem] = new_data
     if errors:
         raise DateRangeError(
-            f"{len(errors)} 個日期區間設定無法展開:\n" + "\n".join(errors)
+            f"{len(errors)} 個日期區間設定無法展開：\n" + "\n".join(errors)
         )
     return result

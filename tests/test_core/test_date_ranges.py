@@ -87,6 +87,31 @@ class TestLoaderExpandsRanges:
         assert compute_base_dataset_version(params, schema) == "0675afb8"
         assert compute_train_variant_id(params) == "913be727"
 
+    def test_the_same_days_listed_out_of_order_are_a_different_version(
+        self, tmp_path
+    ):
+        """The documented limit of "same version": a range equals the list it
+        stands for, which is ascending quoted text. Lists are hashed as written
+        (normalising them would move every existing version ID), so this pins
+        that a reordered list is NOT silently merged with the range — the docs
+        tell users that rewriting such a list as a range rebuilds once."""
+        base = {"val_snap_dates": ["2024-01-31"]}
+        _write_yaml(tmp_path / "a" / "base" / "parameters_dataset.yaml", {"dataset": {
+            **base, "train_snap_dates": _month_end_range("2023-01-31", "2023-02-28"),
+        }})
+        _write_yaml(tmp_path / "b" / "base" / "parameters_dataset.yaml", {"dataset": {
+            **base, "train_snap_dates": ["2023-02-28", "2023-01-31"],
+        }})
+        schema = {"time": "t", "entity": ["e"], "item": "i"}
+
+        def version(root):
+            params = ConfigLoader(str(root), env="local").get_parameters_by_name(
+                "parameters_dataset"
+            )
+            return compute_base_dataset_version(params, schema)
+
+        assert version(tmp_path / "a") != version(tmp_path / "b")
+
     def test_every_dataset_split_and_the_evaluation_date_accept_a_range(
         self, tmp_path
     ):
@@ -112,6 +137,20 @@ class TestLoaderExpandsRanges:
             "test_snap_dates": ["2025-05-31", "2025-06-30"],
         }
         assert params["evaluation"]["snap_date"] == ["2025-05-31", "2025-06-30"]
+
+    def test_inference_dates_accept_a_range(self, tmp_path):
+        """Monitoring evaluation reads what inference scored, so the two are
+        naturally written as the same range; unexpanded, inference crashed
+        after Spark started (``snap_dates[0]`` on a dict)."""
+        _write_yaml(
+            tmp_path / "base" / "parameters_inference.yaml",
+            {"inference": {"snap_dates": _month_end_range("2026-01-31", "2026-03-31")}},
+        )
+        params = ConfigLoader(str(tmp_path), env="local").get_parameters()
+
+        assert params["inference"]["snap_dates"] == [
+            "2026-01-31", "2026-02-28", "2026-03-31",
+        ]
 
     def test_lists_and_single_dates_are_left_exactly_as_written(self, tmp_path):
         dataset = {
