@@ -603,6 +603,8 @@ data/inference/<model_version>/<first_snap_date_without_hyphens>/
 
 ## 8. 常見錯誤與排查
 
+檢查分幾層、各在什麼時候擋下、哪些擋不住：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
+
 | 症狀或訊息 | 常見原因 | 檢查與修正 |
 |---|---|---|
 | `No 'best' symlink found` | 尚未 promotion 就使用預設模式 | 審核模型後執行 `promote_model.py`，或明確指定版本 |

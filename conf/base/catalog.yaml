@@ -416,7 +416,7 @@ training_eval_predictions:
 # 同一次 run 的其他 node 與之後的 --compare-only 都讀回這張表；表裡是這個
 # model_version 評估過的所有月份，每個讀者先篩到 evaluation.snap_date
 # （pipelines/evaluation/steps/snap_date_scope.py）。--compare-only 另由
-# validate_enriched_eval_predictions_present（B4）檢查這個月有資料。
+# validate_enriched_eval_predictions_present 檢查這個月有資料。
 # columns: "auto" ── schema 從 DataFrame 推得；segment_sources 設定在兩次 run
 # 之間改變時，HiveTableDataset 會自動 append-only 演化（ALTER TABLE ADD
 # COLUMNS／缺欄補 NULL），不需先 drop table。

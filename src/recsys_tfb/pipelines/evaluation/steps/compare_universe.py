@@ -114,7 +114,7 @@ def common_universe(
     and ``b_items`` are each side's full item set, the inputs of that
     intersection.
 
-    Raises ``DataConsistencyError`` (B3) when either intersection is empty —
+    Raises ``DataConsistencyError`` when either intersection is empty —
     caller will surface this as ``fail loud``.
     """
     a_entities = a.select(*entity_cols).distinct()
@@ -122,7 +122,7 @@ def common_universe(
     # A left-semi join, not ``intersect``. Both compute the same set for
     # non-null keys, but they disagree on nulls: ``intersect`` treats
     # ``NULL == NULL`` as a match, while the equi-join that ``restrict_to_common``
-    # then runs drops null keys. Using the join here keeps the B3 gate and the
+    # then runs drops null keys. Using the join here keeps the empty-universe gate and the
     # restriction that follows it agreeing on what "common" means — otherwise a
     # universe whose only shared entity is null-keyed passes the gate and then
     # restricts to zero rows, silently.
@@ -134,7 +134,7 @@ def common_universe(
     # populations and therefore run only when we are already raising.
     if common_entities.isEmpty():
         raise DataConsistencyError(
-            f"(B3) compare common_entities is empty — A has {a_entities.count()} "
+            f"compare common_entities is empty — A has {a_entities.count()} "
             f"entities, B has {b_entities.count()} entities, intersection = 0. "
             f"Check that both sides cover the same time column value and that "
             f"the entity columns {entity_cols} carry matching types."
@@ -145,7 +145,7 @@ def common_universe(
     common_items = a_items & b_items
     if not common_items:
         raise DataConsistencyError(
-            f"(B3) compare common_items is empty — A has {len(a_items)} items, "
+            f"compare common_items is empty — A has {len(a_items)} items, "
             f"B has {len(b_items)} items (after mapping), intersection = 0. "
             "Check prod_mapping config."
         )

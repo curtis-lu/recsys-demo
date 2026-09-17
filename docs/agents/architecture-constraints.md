@@ -656,7 +656,7 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 |---|---|---|
 | `pipelines/dataset/pipeline.py` | `validate_data_consistency` | **Layer-2 資料一致性閘不會跑**。用 `--from-node` 接續 dataset pipeline 時，資料層不變量未經檢查。**例外：被模式明確點名時會跑**——`--only-test-months` 就是這樣把它留在清單裡的（見 F5） |
 | `pipelines/training/pipeline.py` | `log_experiment` | MLflow 實驗記錄不會寫。不影響產物正確性，影響可追溯性 |
-| `pipelines/evaluation/pipeline.py` | `validate_enriched_eval_predictions_present` | `--compare-only` 的 B4 閘門不會跑（例：`--compare-only --from-node load_compare_predictions`）。分區**不在**仍擋得住：CLI 在任何 node 之前查分區清單與 `segment_columns.json`（`__main__.py::_compare_only_input_errors`）。只剩「分區列得出來、但這個月沒有列」會漏，比較報表的 A 側會是空的。它原本有輸出、由 `restrict_to_common` 讀，[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1 改成每個讀者自己讀表篩月份後才變成零輸出。#352 加入，使用者 2026-09-14 同意 |
+| `pipelines/evaluation/pipeline.py` | `validate_enriched_eval_predictions_present` | `--compare-only` 的這道閘門不會跑（例：`--compare-only --from-node load_compare_predictions`）。分區**不在**仍擋得住：CLI 在任何 node 之前查分區清單與 `segment_columns.json`（`__main__.py::_compare_only_input_errors`）。只剩「分區列得出來、但這個月沒有列」會漏，比較報表的 A 側會是空的。它原本有輸出、由 `restrict_to_common` 讀，[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1 改成每個讀者自己讀表篩月份後才變成零輸出。#352 加入，使用者 2026-09-14 同意 |
 
 **位置只給檔案、不給行號**：兩個 node 名都是 `Node(name=...)` 或函式名的字面值，grep 得到；而行號會被同檔任何一次增刪默默弄錯——本檔原本寫 `pipeline.py:28` 與 `pipeline.py:202`，前者被 #203 加的模組級常數推到 92、後者早就差了一行，而 A7 的稽核測試只比對 node 名的 Counter、抓不到行號腐爛。F5 同理。
 

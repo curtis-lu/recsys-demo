@@ -1284,7 +1284,7 @@ def validate_enriched_eval_predictions_present(
     enriched_eval_predictions: SparkDataFrame,
     parameters: dict,
 ) -> None:
-    """B4 invariant — fail loud if ``enriched_eval_predictions`` holds no rows
+    """Fail loud if ``enriched_eval_predictions`` holds no rows
     for the evaluated month under this ``model_version``.
 
     A zero-output gate: it passes nothing on. ``restrict_to_common`` reads the
@@ -1302,8 +1302,8 @@ def validate_enriched_eval_predictions_present(
     gate sees is a partition that is listed but holds no rows.
 
     Used only in ``--compare-only`` mode. In the other modes
-    ``prepare_eval_data`` writes the partition earlier in the same run, so B4
-    cannot fire.
+    ``prepare_eval_data`` writes the partition earlier in the same run, so this
+    gate cannot fire.
 
     Its raise is a pre-check (input): an earlier run was to write those rows,
     and nothing in this run computed them.
@@ -1313,7 +1313,7 @@ def validate_enriched_eval_predictions_present(
 
     if restrict_to_eval_snap_date(enriched_eval_predictions, parameters).isEmpty():
         raise DataConsistencyError(
-            f"(B4) {hive_db}.enriched_eval_predictions has no partition "
+            f"{hive_db}.enriched_eval_predictions has no partition "
             f"for evaluation.snap_date={eval_snap_date(parameters)!r} "
             f"model_version={mv!r}. "
             "Run `python -m recsys_tfb evaluation` (with or without "

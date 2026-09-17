@@ -1924,7 +1924,8 @@ class TestCompareOnlyNamesWhatIsMissing:
     ``segment_columns.json`` one standard run landed together. Either one
     missing stops the command before any node, one line per missing input plus
     the run to do first. Before any node, because slicing skips the zero-output
-    B4 gate: with ``--from-node`` the gate never runs."""
+    ``validate_enriched_eval_predictions_present`` gate: with ``--from-node``
+    the gate never runs."""
 
     _ARGV = ["evaluation", "--model-version", _EVAL_MV, "--compare-only", "self"]
 

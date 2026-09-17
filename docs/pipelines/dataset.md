@@ -327,7 +327,7 @@ python -m recsys_tfb dataset \
 
 ## 5. 執行流程
 
-calibration nodes 只有在 `enable_calibration: true` 時加入。
+calibration nodes 只有在 `enable_calibration: true` 時加入。資料閘、精度閘、粒度閘三個檢查步驟在整個框架的檢查裡屬於哪一層、擋不住什麼：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
 
 | 階段 | node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|

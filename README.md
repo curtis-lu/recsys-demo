@@ -461,6 +461,7 @@ pointwise、pairwise、listwise 的差異見 [`gbdt_learning_to_rank.md`](docs/h
 | 加 item、加特徵或判斷重跑範圍 | 本文件 §4「修改後要重跑哪些流程」，以及對應的 pipeline 文件 |
 | 理解 mAP、per-item 與報表 | [`metrics.html`](docs/metrics/metrics.html) |
 | 理解版本化、一致性檢查與其他設計取捨 | [`design-principles.md`](docs/design-principles.md) |
+| 檢查分幾層、各在什麼時候擋下、哪些擋不住 | [`pipeline-checks.md`](docs/operations/user-guides/pipeline-checks.md) |
 | 從分類基礎學到 learning-to-rank | 依序閱讀 [`binary classification`](docs/handbooks/gbdt/gbdt_binary_classification.md) → [`class imbalance`](docs/handbooks/gbdt/gbdt_class_imbalance.md) → [`multi-item imbalance`](docs/handbooks/gbdt/gbdt_multiitem_imbalance.md) → [`learning-to-rank`](docs/handbooks/gbdt/gbdt_learning_to_rank.md) |
 | 本機執行與 pipeline 接續 | [`local-spark-setup.md`](docs/operations/dev-setup/local-spark-setup.md)、[`pipeline-slicing.md`](docs/operations/user-guides/pipeline-slicing.md)、[`training.md` §4.7／§7.3（HPO 中斷接續）](docs/pipelines/training.md) |
 | 多評估一個月份（不重訓） | [`adding-an-eval-month.md`](docs/operations/user-guides/adding-an-eval-month.md) |

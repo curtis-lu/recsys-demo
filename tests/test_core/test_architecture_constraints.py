@@ -325,7 +325,7 @@ class TestA7ZeroOutputNodesRegistered:
 
         assert found == Counter({
             ("dataset", "validate_data_consistency"): 1,
-            # --compare-only's B4 gate; the CLI checks the partition listing
+            # --compare-only's enriched-partition gate; the CLI checks the partition listing
             # before any node, so a slice skipping it still stops (#352).
             ("evaluation", "validate_enriched_eval_predictions_present"): 1,
             ("training", "log_experiment"): 1,

@@ -123,7 +123,7 @@ def _load_external_hive(
     if unmapped:
         if policy == "fail":
             raise DataConsistencyError(
-                f"(B2) compare external prods absent from prod_mapping: "
+                f"compare external prods absent from prod_mapping: "
                 f"{sorted(unmapped)}. Either add to prod_mapping or set "
                 "unmapped_policy=drop."
             )
