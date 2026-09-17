@@ -3,12 +3,16 @@
 --
 -- 兩條不偷看的規則（「往回算」是來源 SQL 的責任，框架不檢查，ADR-0022 決定 2、3）：
 --
--- 1. 快照取「週一 00:00 已經算好」的最後一份。快照 D 記的是 D 當天結束時的狀態，
---    隔天清晨才算好（available_at）。取 snap_date = 週一那份，等於拿週一整天結束後的
---    狀態去排週一一早的曝光；週中換了裝置的人，裝置就對不上。
+-- 1. 快照取「週一 00:00 已經算好」的最後一份（available_at 不晚於那一刻）。快照 D 記的是
+--    D 當天結束時的狀態，隔天清晨才算好，批次偶爾晚一天。只看日期的寫法都會出錯：
+--    取週一那份，是拿週一整天結束後的狀態去排週一一早的曝光；取前兩天（週六）那份，
+--    在週六那份晚一天算好的週，拿到的是週一 00:00 還不存在的快照。
+--    「週一 00:00」是 Spark session 時區的午夜——CAST(date AS TIMESTAMP) 照 session 時區
+--    解讀，本示例是 conf/spark-local 設的 Asia/Taipei，與產生器的時間同一個時區。
 -- 2. 行為只數 event_date < snap_date：這一週的曝光發生在排序之後。
 --
--- check_features.py 在 run_e2e.sh 裡把這張表與照定義重算的值逐列比對。
+-- profile_snap_date 記下取的是哪一天的快照，只給 check_features.py 核對，不進 feature_table。
+-- check_features.py 在 run_e2e.sh 裡逐列核對它，以及由這張表併出的 feature_table 每一欄特徵。
 --
 -- snap_date 取週曆表的欄位，不寫 to_date('${target_date}') 常數（README〈踩到的框架問題〉
 -- 規則 1）。本資料夾每支 SQL 的 snap_date 都來自某張表的欄位。
@@ -23,7 +27,7 @@ latest AS (
     GROUP BY p.user_id
 ),
 profile AS (
-    SELECT p.user_id, p.age_band, p.device_type, p.region, p.signup_date
+    SELECT p.user_id, p.snap_date AS profile_snap_date, p.age_band, p.device_type, p.region, p.signup_date
     FROM ${raw_db}.user_profile p
     JOIN latest l
       ON p.user_id   = l.user_id
@@ -42,6 +46,7 @@ activity AS (
 SELECT
     w.snap_date,
     p.user_id,
+    p.profile_snap_date,
     p.age_band,
     p.device_type,
     p.region,

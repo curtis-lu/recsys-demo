@@ -7,8 +7,9 @@
 -- (snap_date, user_id, slot_id, ad_creative) ＋ event（impression_id）。
 --
 -- 不偷看的界線：瀏覽只算 [曝光前 30 分鐘, 曝光那一刻)。上界寫成 <= 或往後放寬都會出事——
--- 使用者點了廣告之後幾分鐘內會去瀏覽同類內容，多算到曝光之後，這個特徵就變成
--- 「有沒有點」的答案（generate_data.py 的 POST_CLICK_BROWSE_SECONDS）。
+-- 使用者點了廣告之後幾分鐘內會去瀏覽同類內容，其中一半與點擊記在同一秒；多算到曝光
+-- 那一秒或之後，這個特徵就變成「有沒有點」的答案（generate_data.py 的
+-- POST_CLICK_BROWSE_SECONDS、POST_CLICK_SAME_SECOND_RATE）。
 -- check_features.py 在 run_e2e.sh 裡把這張表與照定義重算的值逐列比對。
 --
 -- snap_date 取週曆表的欄位（README〈踩到的框架問題〉規則 1）。

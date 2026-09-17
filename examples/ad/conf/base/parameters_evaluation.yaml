@@ -4,7 +4,7 @@
 evaluation:
   snap_date: "2025-12-29"   # 須在 dataset.test_snap_dates 裡（A22）
 
-  # 一個 query group 最多 12 個 item，實際平均兩三個（每週每版位只看到幾個素材）
+  # 一個 query group 最多 12 個 item，實際平均約 4 個（每週每版位只看到幾個素材）
   k_values: [1, 2, 3, 5, "all"]
 
   segment_columns:

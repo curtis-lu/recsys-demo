@@ -68,10 +68,15 @@ def test_generated_items_equal_the_declared_list(params, raw):
 
 
 def test_sql_builds_item_with_the_generator_separator():
-    sql = (CONF / "sql" / "etl" / "label" / "label_table.sql").read_text()
-    separators = re.findall(r"concat\(\s*i\.campaign_id\s*,\s*'([^']*)'\s*,\s*i\.creative_format\s*\)", sql)
-    assert separators, "label_table.sql 裡找不到拼 item 的 concat"
-    assert set(separators) == {ITEM_SEPARATOR}
+    # item 在不只一支 SQL 裡拼（候選的 label_table、即時特徵的 feature_realtime），掃全部
+    pattern = r"concat\(\s*(?:\w+\.)?campaign_id\s*,\s*'([^']*)'\s*,\s*(?:\w+\.)?creative_format\s*\)"
+    separators = {
+        path.relative_to(CONF / "sql" / "etl").as_posix(): set(re.findall(pattern, path.read_text()))
+        for path in sorted((CONF / "sql" / "etl").rglob("*.sql"))
+    }
+    building = {f: s for f, s in separators.items() if s}
+    assert {"label/label_table.sql", "feature/feature_realtime.sql"} <= set(building)
+    assert building == {f: {ITEM_SEPARATOR} for f in building}
 
 
 def test_catalog_has_the_same_entries_as_the_root_conf():
@@ -172,11 +177,15 @@ def test_clicks_follow_recent_same_category_browsing(raw):
 def test_peeking_past_the_impression_sees_the_click(raw):
     # 偷看的陷阱真的存在：點擊後幾分鐘內會瀏覽同類內容，窗口放到曝光之後，
     # 「有沒有瀏覽」幾乎就是「有沒有點」。feature_realtime.sql 的上界寫錯，特徵就是答案
-    after = browse_counts(raw, 1, POST_CLICK_BROWSE_SECONDS + 1).merge(
+    after = browse_counts(raw, 0, POST_CLICK_BROWSE_SECONDS + 1).merge(
         raw["impression_log"][["impression_id", "clicked"]], on="impression_id")
     peeked = after["same_category"] > 0
     assert peeked[after["clicked"] == 1].mean() > 0.9
     assert peeked[after["clicked"] == 0].mean() < 0.1
+    # 連 < 寫成 <= 都會偷看：有不少點擊後的瀏覽就記在曝光那一秒
+    same_second = browse_counts(raw, 0, 1).merge(
+        raw["impression_log"][["impression_id", "clicked"]], on="impression_id")
+    assert (same_second.loc[same_second["clicked"] == 1, "same_category"] > 0).mean() > 0.3
 
 
 def test_user_profile_is_daily_and_ready_only_after_the_day_ends(raw):
@@ -189,9 +198,19 @@ def test_user_profile_is_daily_and_ready_only_after_the_day_ends(raw):
 
 
 def test_the_same_day_snapshot_differs_from_the_one_ready_at_week_start(raw):
-    # as-of（ADR-0022）有意義的前提：週中有人換裝置，取「週一那份」會拿到週一一早還不存在的狀態
+    # as-of（ADR-0022）有意義的前提之一：週日或週一換了裝置的人，「週一那份」記的是
+    # 週一結束時的狀態，週一 00:00 還不存在
     as_of = weekly_profile(raw, WEEKS[1:])
     same_day = raw["user_profile"].assign(snap_date=lambda d: d["snap_date"].astype(str))
     joined = as_of.merge(same_day, on=["snap_date", "user_id"], suffixes=("", "_same_day"))
     assert len(joined) == len(as_of)
     assert (joined["device_type"] != joined["device_type_same_day"]).any()
+
+
+def test_which_snapshot_is_ready_depends_on_available_at_not_only_the_date(raw):
+    # 前提之二：只看日期、固定取前兩天（週六）那份的寫法不對。批次晚一天的那週，
+    # 週一 00:00 只拿得到週五那份——SQL 必須讀 available_at
+    as_of = weekly_profile(raw, WEEKS[1:])
+    two_days_before = (pd.to_datetime(as_of["snap_date"]) - pd.Timedelta(days=2)).dt.strftime("%Y-%m-%d")
+    assert (as_of["profile_snap_date"] != two_days_before).any()
+    assert (as_of["profile_snap_date"] == two_days_before).any()

@@ -16,10 +16,13 @@
 - 使用者特徵與版位特徵各有自己的粒度（多張特徵表各自宣告 join 欄位，#380）。
 - **即時特徵**：曝光前 30 分鐘內瀏覽過活動同類內容，點擊意願較高。同一組同一素材的
   多次曝光，這個值各不相同——聚合成一週一列就丟掉了（ADR-0021〈考慮過、沒選的做法〉）。
-- **偷看的陷阱**：點擊之後幾分鐘內會去瀏覽同類內容。算即時特徵時多算到曝光之後，
-  會得到一個離線很強、線上不存在的假訊號。
-- **快照日 ≠ time**：使用者快照每天一份，隔天清晨才算好（``available_at``），有人會在
-  週中換裝置。取「排序當下拿得到的最後一份」和取「同一天那份」結果不同（ADR-0022）。
+- **偷看的陷阱**：點擊之後幾分鐘內會去瀏覽同類內容，其中一半與點擊記在同一秒。
+  算即時特徵時多算到曝光之後（連 ``<`` 寫成 ``<=`` 也算），會得到一個離線很強、
+  線上不存在的假訊號。
+- **快照日 ≠ time**：使用者快照每天一份，記當天結束時的狀態，隔天清晨才算好
+  （``available_at``），批次偶爾晚一天。有人會在一天中的某個時刻換裝置，點擊看的是
+  曝光那一刻的裝置。取「排序當下拿得到的最後一份」，與取「同一天那份」、取「前兩天那份」
+  結果都不同（ADR-0022）。
 - **沒見過的屬性組合**：``c04``、``video`` 從第一週就有，``c04-video`` 從 val 週才出現。
 
 數字不是生產的樣子：點擊率刻意調高到十幾 %，因為母體只有幾百人，照真實的 1%
@@ -54,7 +57,7 @@ WEEK_SECONDS = 7 * 24 * 3600
 # 所有時間欄都是這個時區的當地時間（與 conf/spark-local 的 session 時區相同）
 LOCAL_TZ = "Asia/Taipei"
 
-# item ＝ campaign_id + ITEM_SEPARATOR + creative_format（在 label／sample_pool SQL 拼）。
+# item ＝ campaign_id + ITEM_SEPARATOR + creative_format（在 label_table／feature_realtime SQL 拼）。
 # 用 "-" 而不是 "|"：item 值會成為 Hive 分區目錄名、MLflow 指標名與檔名的一部分，
 # 那幾處對特殊字元的處理還沒驗過（規劃檔 P7a、P8 的範圍）。
 ITEM_SEPARATOR = "-"
@@ -98,12 +101,17 @@ DEVICE_AFFINITY_LOGIT = 1.4
 PROPENSITY_SD = 0.6
 FATIGUE_LOGIT = 0.5  # 同一週同一版位同一素材每多看一次，點擊意願下降多少
 
-# 裝置：每週有這個比例的使用者在那一週的某一天換主要裝置，當天 00:00 起生效。
-# 點擊看的是曝光那一刻的裝置，快照只記到前一天，所以取錯快照會讓裝置特徵對不上。
+# 裝置：每週有這個比例的使用者在那一週的某個時刻（到秒）換主要裝置。點擊看的是曝光
+# 那一刻的裝置，快照 D 記的是 D 當天結束時的狀態——D 下午才換的人，D 早上的曝光還是
+# 舊裝置，拿快照 D 去排 D 的曝光就是用到未來的狀態。
 DEVICE_SWITCH_RATE = 0.05
-# 快照 D 記的是 D 當天結束時的狀態，D+1 的 05:00 起、再晚 0～180 分鐘才算好（每天不同）。
+# 快照 D 在 D+1 的 05:00 起、再晚 0～180 分鐘才算好（每天不同）。批次偶爾晚一天，
+# 週末沒人顧比較常晚：週六那份晚一天時，週一 00:00 只拿得到週五那份，
+# 「取前兩天那份」這種不看 available_at 的寫法就取錯。
 PROFILE_READY_HOUR = 5
 PROFILE_READY_JITTER_MINUTES = 180
+PROFILE_LATE_RATE_WEEKDAY = 0.1
+PROFILE_LATE_RATE_WEEKEND = 0.5
 # 快照涵蓋第一週之前一週（讓第一週也有「前一天」的快照）到最後一週的週日
 PROFILE_FIRST_DAY = dt.date.fromisoformat(WEEKS[0]) - dt.timedelta(days=7)
 PROFILE_LAST_DAY = dt.date.fromisoformat(WEEKS[-1]) + dt.timedelta(days=6)
@@ -117,6 +125,7 @@ RECENT_INTEREST_LOGIT = 1.5
 BROWSE_BEFORE_IMPRESSION = 1.0   # 每次曝光前 30 分鐘內的瀏覽次數（Poisson 平均），類別隨機
 BACKGROUND_BROWSE_PER_WEEK = 10  # 有上站的那一週，與曝光無關、散在整週的瀏覽次數
 POST_CLICK_BROWSE_SECONDS = 300  # 點擊後這麼多秒內，瀏覽一次該活動那一類內容（偷看的陷阱）
+POST_CLICK_SAME_SECOND_RATE = 0.5  # 其中這個比例與點擊記在同一秒（落地頁與點擊同時記錄）
 
 
 def _users(rng: np.random.Generator, n_users: int) -> pd.DataFrame:
@@ -137,58 +146,62 @@ def _users(rng: np.random.Generator, n_users: int) -> pd.DataFrame:
     })
 
 
-def _device_switches(rng: np.random.Generator, users: pd.DataFrame) -> pd.DataFrame:
-    """換裝置的紀錄：一列是某人從 effective_date 00:00 起改用 device_type。依人、再依日期排好。"""
-    rows = []
+def _device_switches(rng: np.random.Generator, users: pd.DataFrame) -> dict[str, list[tuple[dt.datetime, str]]]:
+    """換裝置的紀錄：使用者 → [(生效時刻, 新裝置)]，依時間排好。沒換過的人不在裡面。"""
+    switches: dict[str, list[tuple[dt.datetime, str]]] = {}
     for user in users.itertuples(index=False):
         current = user.device_type
         for week in WEEKS:
             if rng.random() >= DEVICE_SWITCH_RATE:
                 continue
-            day = dt.date.fromisoformat(week) + dt.timedelta(days=int(rng.integers(0, 7)))
+            at = dt.datetime.fromisoformat(week) + dt.timedelta(seconds=int(rng.integers(0, WEEK_SECONDS)))
             current = str(rng.choice([d for d in DEVICES if d != current]))
-            rows.append((user.user_id, day, current))
-    return pd.DataFrame(rows, columns=["user_id", "effective_date", "device_type"])
+            switches.setdefault(user.user_id, []).append((at, current))
+    return switches
 
 
-def _device_on(initial: str, switches: list[tuple[dt.date, str]], day: dt.date) -> str:
+def _device_at(initial: str, switches: list[tuple[dt.datetime, str]], moment: dt.datetime) -> str:
+    """moment 那一刻（含）已經生效的裝置。曝光的點擊與每日快照都用這一個定義。"""
     device = initial
     for effective, new in switches:
-        if effective > day:
+        if effective > moment:
             break
         device = new
     return device
 
 
-def _user_profile(rng: np.random.Generator, users: pd.DataFrame, switches: pd.DataFrame) -> pd.DataFrame:
-    """每天一份快照。available_at 是這份快照算好、線上拿得到的時刻，一定在 snap_date 之後。"""
-    days = pd.date_range(PROFILE_FIRST_DAY, PROFILE_LAST_DAY, freq="D")
-    ready = pd.Series(
-        days + pd.Timedelta(days=1, hours=PROFILE_READY_HOUR)
-        + pd.to_timedelta(rng.integers(0, PROFILE_READY_JITTER_MINUTES + 1, size=len(days)), unit="m"),
-        index=days,
-    )
-    profile = pd.DataFrame({"snap_date": days}).merge(
-        users[["user_id", "age_band", "device_type", "region", "signup_date"]], how="cross",
-    )
-    # switches 依人依日期排好，後面的覆蓋前面的
-    for sw in switches.itertuples(index=False):
-        changed = (profile["user_id"] == sw.user_id) & (profile["snap_date"] >= pd.Timestamp(sw.effective_date))
-        profile.loc[changed, "device_type"] = sw.device_type
-    profile.insert(1, "available_at", profile["snap_date"].map(ready))
-    profile["snap_date"] = profile["snap_date"].dt.date
-    return profile
+def _user_profile(
+    rng: np.random.Generator, users: pd.DataFrame, switches: dict[str, list[tuple[dt.datetime, str]]],
+) -> pd.DataFrame:
+    """每天一份快照。available_at 是這份快照算好、線上拿得到的時刻，一定在 snap_date 隔天之後。"""
+    days = [PROFILE_FIRST_DAY + dt.timedelta(days=i) for i in range((PROFILE_LAST_DAY - PROFILE_FIRST_DAY).days + 1)]
+    late_rate = np.array([PROFILE_LATE_RATE_WEEKEND if d.weekday() >= 5 else PROFILE_LATE_RATE_WEEKDAY for d in days])
+    late = rng.random(len(days)) < late_rate
+    jitter = rng.integers(0, PROFILE_READY_JITTER_MINUTES + 1, size=len(days))
+    rows = []
+    for day, is_late, minutes in zip(days, late, jitter):
+        ready = (
+            dt.datetime.combine(day, dt.time(PROFILE_READY_HOUR))
+            + dt.timedelta(days=1 + int(is_late), minutes=int(minutes))
+        )
+        end_of_day = dt.datetime.combine(day, dt.time(23, 59, 59))
+        for user in users.itertuples(index=False):
+            device = _device_at(user.device_type, switches.get(user.user_id, []), end_of_day)
+            rows.append((day, ready, user.user_id, user.age_band, device, user.region, user.signup_date))
+    return pd.DataFrame(rows, columns=[
+        "snap_date", "available_at", "user_id", "age_band", "device_type", "region", "signup_date",
+    ])
 
 
 def _impressions(
-    rng: np.random.Generator, users: pd.DataFrame, switches: pd.DataFrame,
+    rng: np.random.Generator, users: pd.DataFrame, switches: dict[str, list[tuple[dt.datetime, str]]],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """曝光紀錄與瀏覽紀錄一起產：點擊要看曝光前的瀏覽，點擊之後又會產生瀏覽。
 
-    時間一律用「距 ORIGIN 幾秒」的整數算，最後才轉成 datetime。每個人分兩階段：
+    時間一律用「距 PROFILE_FIRST_DAY 00:00 幾秒」的整數算，最後才轉成 datetime。每個人分兩階段：
     先定下所有週的曝光時刻、素材，以及跟點擊無關的瀏覽；再依時間順序逐次決定點擊，
-    點了就補一筆點擊後的瀏覽。點擊後的瀏覽只會落在這次曝光之後，所以依時間順序處理時，
-    輪到的每一次曝光都已經看得到它之前的全部瀏覽。
+    點了就補一筆點擊後的瀏覽。點擊後的瀏覽不早於這次曝光那一秒，而每次曝光只看它那一秒
+    之前的瀏覽，所以依時間順序處理時，輪到的每一次曝光都已經看得到它該看的全部瀏覽。
     """
     origin = dt.datetime.combine(PROFILE_FIRST_DAY, dt.time())
     items = [(c, f) for c in CAMPAIGNS for f in FORMATS]
@@ -197,10 +210,6 @@ def _impressions(
     p_early[items.index(LATE_ITEM)] = 0.0
     p_late[items.index(LATE_ITEM)] *= LATE_ITEM_LAUNCH_BOOST
     p_early, p_late = p_early / p_early.sum(), p_late / p_late.sum()
-    switches_by_user = {
-        u: list(zip(g["effective_date"], g["device_type"])) for u, g in switches.groupby("user_id")
-    }
-
     imp_rows, browse_rows = [], []
     for user in users.itertuples(index=False):
         shown: list[tuple[int, int, str, int]] = []  # (秒, 那一週的起點秒, slot_id, item 索引)
@@ -229,7 +238,7 @@ def _impressions(
         for times in browse.values():
             times.sort()
 
-        user_switches = switches_by_user.get(user.user_id, [])
+        user_switches = switches.get(user.user_id, [])
         seen: dict[tuple[int, str, int], int] = {}
         for sec, week_start, slot_id, idx in shown:
             campaign, fmt = items[idx]
@@ -239,7 +248,7 @@ def _impressions(
             same_category = browse[CAMPAIGN_CATEGORY[campaign]]
             # [曝光前 30 分鐘, 曝光那一秒)：含下界、不含曝光本身那一秒
             recent = bisect_left(same_category, sec) - bisect_left(same_category, sec - RECENT_WINDOW_SECONDS)
-            device = _device_on(user.device_type, user_switches, ts.date())
+            device = _device_at(user.device_type, user_switches, ts)
             logit = (
                 BASE_LOGIT
                 + user.propensity
@@ -252,7 +261,10 @@ def _impressions(
             clicked = int(rng.random() < 1.0 / (1.0 + math.exp(-logit)))
             imp_rows.append((ts, ts.date(), user.user_id, slot_id, campaign, fmt, clicked))
             if clicked:
-                insort(same_category, sec + int(rng.integers(1, POST_CLICK_BROWSE_SECONDS, endpoint=True)))
+                # 同一秒的那一筆，正是 SQL 的上界寫成 <= 時會多算進去的
+                same_second = rng.random() < POST_CLICK_SAME_SECOND_RATE
+                delay = 0 if same_second else int(rng.integers(1, POST_CLICK_BROWSE_SECONDS, endpoint=True))
+                insort(same_category, sec + delay)
         for category, times in browse.items():
             browse_rows.extend((origin + dt.timedelta(seconds=s), user.user_id, category) for s in times)
 
