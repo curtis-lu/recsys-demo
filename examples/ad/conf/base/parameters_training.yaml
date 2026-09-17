@@ -1,0 +1,86 @@
+# 與銀行示例的差別只有兩類：mlflow 實驗名，以及 HPO 次數與迭代數調小——本示例的
+# 目的是「每張票都能在幾分鐘內整條實跑」，不是把模型調好。
+spark:
+  app_name: recsys_tfb_ad_example-training
+
+spark_lifecycle:
+  release_during_hpo: true
+
+training:
+  algorithm: lightgbm
+  algorithm_params:
+    objective: binary
+    metric: binary_logloss
+    verbosity: -1
+    log_period: 0
+    num_threads: 4
+  calibration:
+    enabled: true
+    method: sigmoid
+  sample_weight_keys:
+    - ad_creative
+  sample_weights: {}
+  hpo_objective: macro_per_item_map
+  n_trials: 5
+  num_iterations: 200
+  early_stopping_rounds: 30
+  final_model_strategy: hpo_best
+  feature_selection:
+    exclude: []
+  search_space:
+    - name: learning_rate
+      type: float
+      low: 0.01
+      high: 0.2
+      log: true
+    - name: num_leaves
+      type: int
+      low: 4
+      high: 32
+    - name: min_child_samples
+      type: int
+      low: 10
+      high: 100
+
+mlflow:
+  experiment_name: recsys_tfb_ad_example
+  tracking_uri: "${env.MLFLOW_TRACKING_URI|mlruns}"
+  strict: false
+
+cache:
+  root: data/recsys_cache
+
+diagnostics:
+  feature_stats:
+    enabled: true
+    sample_rows: 500000
+    high_null_threshold: 0.5
+  feature_importance:
+    enabled: true
+  gain_ledger:
+    enabled: true
+  shap:
+    enabled: true
+    background: global
+    sample_rows: 2000
+    top_k: 30
+    min_rows_per_item: 30
+    max_budget: 4000000
+    profile_positive: true
+    positive_min_rows: 20
+    positive_sample_per_item: 30
+    divergence_metric: jaccard_topk
+    divergence_top_k: 15
+    per_item_beeswarm: true
+    quadrant_enabled: true
+    quadrant_top_k_decision: 1
+    quadrant_sample_per_cell: 30
+    quadrant_min_rows: 10
+    case_top_k: 15
+  hpo_search:
+    enabled: true
+    patience: 10
+    boundary_hi: 0.98
+    boundary_lo: 0.02
+
+hpo_checkpointing: true

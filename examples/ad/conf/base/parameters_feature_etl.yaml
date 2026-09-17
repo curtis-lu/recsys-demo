@@ -1,0 +1,66 @@
+# 特徵分三個粒度算，最後併成框架今天唯一收得下的一張 feature_table（time ＋ entity）。
+# 分開算是刻意的：使用者特徵以 user_id 接、版位特徵以 slot_id 接，正是 ADR-0022
+# 「多張特徵表各自宣告 join 欄位」要處理的形狀；那張票落地後可以直接拿
+# feature_user／feature_slot 當獨立的特徵表，不必重寫 SQL。
+feature_etl:
+  dry_run: false   # 沒寫時 --env local 只 render SQL 不寫表（__main__._run_etl）
+  # 資料的第 2～11 週。第 1 週 2025-10-27 只給後面的週當回看窗。
+  target_dates:
+    - "2025-11-03"
+    - "2025-11-10"
+    - "2025-11-17"
+    - "2025-11-24"
+    - "2025-12-01"
+    - "2025-12-08"
+    - "2025-12-15"
+    - "2025-12-22"
+    - "2025-12-29"
+    - "2026-01-05"
+  variables:
+    target_db: "ad_recsys"
+    raw_db: "ad_raw"
+
+  source_checks: {}
+
+  tables:
+    - name: feature_user
+      sql_file: feature/feature_user.sql
+      partition_by:
+        snap_date: DATE
+      primary_key: [snap_date, user_id]
+      quality_checks:
+        min_row_count: 1
+        max_duplicate_key_ratio: 0.0
+
+    - name: feature_slot
+      sql_file: feature/feature_slot.sql
+      partition_by:
+        snap_date: DATE
+      primary_key: [snap_date, slot_id]
+      quality_checks:
+        min_row_count: 1
+        max_duplicate_key_ratio: 0.0
+
+    - name: feature_user_slot
+      sql_file: feature/feature_user_slot.sql
+      partition_by:
+        snap_date: DATE
+      primary_key: [snap_date, user_id, slot_id]
+      depends_on: [feature_user, feature_slot]
+      quality_checks:
+        min_row_count: 1
+        max_duplicate_key_ratio: 0.0
+
+    - name: feature_table
+      sql_file: feature/feature_table.sql
+      partition_by:
+        snap_date: DATE
+      primary_key: [snap_date, user_id, slot_id]
+      depends_on: [feature_user, feature_slot, feature_user_slot]
+      quality_checks:
+        min_row_count: 1
+        max_duplicate_key_ratio: 0.0
+
+  audit:
+    database: "${target_db}"
+    table: etl_audit_log

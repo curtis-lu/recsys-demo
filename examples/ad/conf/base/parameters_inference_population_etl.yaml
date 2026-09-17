@@ -1,0 +1,33 @@
+# 依賴 feature_etl 產出的 feature_table。粒度 (snap_date, user_id, slot_id)：
+# 每個 entity 一列，框架評分時再展開成 × 全部 item。
+inference_population_etl:
+  dry_run: false
+  target_dates:
+    - "2025-11-03"
+    - "2025-11-10"
+    - "2025-11-17"
+    - "2025-11-24"
+    - "2025-12-01"
+    - "2025-12-08"
+    - "2025-12-15"
+    - "2025-12-22"
+    - "2025-12-29"
+    - "2026-01-05"
+  variables:
+    target_db: "ad_recsys"
+
+  source_checks: {}
+
+  tables:
+    - name: inference_population
+      sql_file: inference_population/inference_population.sql
+      partition_by:
+        snap_date: DATE
+      primary_key: [snap_date, user_id, slot_id]
+      quality_checks:
+        min_row_count: 1
+        max_duplicate_key_ratio: 0.0
+
+  audit:
+    database: "${target_db}"
+    table: etl_audit_log
