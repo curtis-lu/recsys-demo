@@ -20,7 +20,7 @@ def _no_segments(parameters):
 
 
 def _kept_month_of(df, parameters):
-    """Stand-in for ``restrict_to_eval_snap_date`` in tests that pass no frame:
+    """Stand-in for ``restrict_to_eval_snap_dates`` in tests that pass no frame:
     marks what the node forwarded as the restricted one."""
     return ("kept month of", df)
 
@@ -676,6 +676,66 @@ def test_prepare_eval_data_raises_when_snap_date_unset(spark):
         _prepare_eval_data(predictions, labels, parameters)
 
 
+def _months_frames(spark, months):
+    """Predictions and labels for customers c1/c2 × items A/B in each month."""
+    import pandas as pd
+
+    keys = [(m, c, p) for m in months for c in ("c1", "c2") for p in ("A", "B")]
+    predictions = spark.createDataFrame(pd.DataFrame({
+        "snap_date": [m for m, _, _ in keys],
+        "cust_id": [c for _, c, _ in keys],
+        "prod_name": [p for _, _, p in keys],
+        "score": [0.9 if p == "A" else 0.1 for _, _, p in keys],
+        "rank": [1 if p == "A" else 2 for _, _, p in keys],
+        "model_version": ["v1"] * len(keys),
+    }))
+    labels = spark.createDataFrame(pd.DataFrame({
+        "snap_date": [m for m, _, _ in keys],
+        "cust_id": [c for _, c, _ in keys],
+        "prod_name": [p for _, _, p in keys],
+        "label": [1 if p == "A" else 0 for _, _, p in keys],
+    }))
+    return predictions, labels
+
+
+def _prepare_params(snap_date):
+    return {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "label": "label", "score": "score", "rank": "rank"}},
+        "model_version": "v1",
+        "evaluation": {"snap_date": snap_date},
+    }
+
+
+def test_prepare_eval_data_keeps_every_configured_date(spark):
+    """Two of three months configured (#374): both kept, whole query groups
+    (2 customers × 2 items each), the third month dropped."""
+    predictions, labels = _months_frames(
+        spark, ["2025-01-31", "2025-02-28", "2025-03-31"])
+    result = _prepare_eval_data(
+        predictions, labels, _prepare_params(["2025-01-31", "2025-03-31"])
+    ).toPandas()
+    assert sorted(result["snap_date"].value_counts().items()) == [
+        ("2025-01-31", 4), ("2025-03-31", 4)]
+
+
+def test_prepare_eval_data_names_the_one_configured_date_with_no_predictions(spark):
+    """Three months configured, the predictions hold two. A check on the
+    filtered frame as a whole passes (it has rows), so the missing month would
+    silently drop out of the evaluation."""
+    predictions, labels = _months_frames(spark, ["2025-01-31", "2025-02-28"])
+    params = _prepare_params(["2025-01-31", "2025-02-28", "2025-03-31"])
+    with pytest.raises(ValueError) as excinfo:
+        _prepare_eval_data(predictions, labels, params)
+    message = str(excinfo.value)
+    assert ("No predictions found for 1 of 3 evaluation.snap_date dates: "
+            "['2025-03-31']") in message, message
+    # The months that are there are listed as present, not as missing.
+    assert "snap_dates present in predictions: ['2025-01-31', '2025-02-28']" \
+        in message, message
+
+
 def test_prepare_eval_data_left_joins_labels_and_fills_missing_with_zero(spark):
     """prepare_eval_data must LEFT JOIN predictions with labels so that
     predictions for (cust, prod) pairs with no label_table row are kept,
@@ -824,6 +884,38 @@ class TestComputeBaselineMetrics:
         # the same totals down by "2024-06" and reconciles with purchase_counts.
         assert result["monthly_counts"] == {
             "A": {"2024-06": 3}, "B": {"2024-06": 1}, "C": {"2024-06": 0},
+        }
+
+    def test_several_dates_record_each_windows_covered_months(self, spark):
+        """#374: two evaluated dates, two lookback windows. History at
+        2024-06-30 falls in both; history at 2025-01-31 only in the February
+        window (the January window ends before its own date). Counts sum over
+        the windows; each window's months with label rows are recorded so the
+        report can divide by window-months, not by one window's 12."""
+        import pandas as pd
+
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_baseline_metrics,
+        )
+
+        params = self._parameters()
+        params["evaluation"]["snap_date"] = ["2025-01-31", "2025-02-28"]
+        labels = self._label_table(spark).unionByName(spark.createDataFrame(
+            pd.DataFrame({
+                "snap_date": ["2025-01-31"] * 3, "cust_id": ["h0"] * 3,
+                "prod_name": ["A", "B", "C"], "label": [1, 0, 0],
+            })))
+        result = compute_baseline_metrics(
+            TestEnrichedReadersKeepTheEvaluatedMonth._two_months(spark),
+            labels, _no_segments(params), params)
+        assert result["window_months_covered"] == {
+            "2025-01-31": 1, "2025-02-28": 2}
+        # A: 3 in the January window, 3 + 1 in the February one.
+        assert result["purchase_counts"] == {"A": 7, "B": 2, "C": 0}
+        assert result["monthly_counts"] == {
+            "A": {"2024-06": 6, "2025-01": 1},
+            "B": {"2024-06": 2, "2025-01": 0},
+            "C": {"2024-06": 0, "2025-01": 0},
         }
 
     def test_returns_a_fingerprinted_stub_when_section_disabled(self):
@@ -1118,6 +1210,33 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
             compute_metrics(self._two_months(spark), _no_segments(params),
                             params)
 
+    def test_compute_metrics_evaluates_every_configured_date_together(self, spark):
+        """#374: two dates configured, both months' query groups go into one
+        set of metrics — 2 customers × 2 months = 4 query groups."""
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+
+        params = self._parameters(snap_date=["2025-01-31", "2025-02-28"])
+        result = compute_metrics(self._two_months(spark), _no_segments(params),
+                                 params)
+        overview = result["dataset_overview"]
+        assert overview["totals"]["n_snap_dates"] == 2
+        assert sorted(overview["by_snap_date"]) == ["2025-01-31", "2025-02-28"]
+        assert result["n_queries"] + result["n_excluded_queries"] == 4
+
+    def test_compute_metrics_refuses_a_configured_date_with_no_rows(self, spark):
+        """Two dates configured, the partition holds one of them: expected 2,
+        evaluated 1."""
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+
+        params = self._parameters(snap_date=["2025-01-31", "2025-03-31"])
+        with pytest.raises(
+            ValueError,
+            match=r"compute_metrics postcondition: 1 evaluated months .*"
+                  r"expected exactly 2",
+        ):
+            compute_metrics(self._two_months(spark), _no_segments(params),
+                            params)
+
 
 class TestReadersRefuseAPartitionPreparedUnderOtherSettings:
     """The partition is read back from Hive, so a slice starting after
@@ -1235,7 +1354,7 @@ class TestDrawDiagnosisSampleNode:
             "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample",
             return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
         ) as spy, patch.object(
-            nodes, "restrict_to_eval_snap_date", _kept_month_of
+            nodes, "restrict_to_eval_snap_dates", _kept_month_of
         ):
             nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
         # exact args, not just count: the draw gets the month-restricted table
@@ -1280,7 +1399,7 @@ class TestDrawDiagnosisSampleNode:
             "recsys_tfb.pipelines.evaluation.nodes.bootstrap_per_item_ci",
             return_value={"n_boot": 1},
         ), patch.object(
-            nodes, "restrict_to_eval_snap_date", _kept_month_of
+            nodes, "restrict_to_eval_snap_dates", _kept_month_of
         ):
             sample = nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
             nodes.compute_metric_ci(sample, params)
@@ -1390,7 +1509,7 @@ def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
         "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample",
         return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
     ) as spy, patch.object(
-        nodes, "restrict_to_eval_snap_date", _kept_month_of
+        nodes, "restrict_to_eval_snap_dates", _kept_month_of
     ):
         result = nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
     assert result is not None, (

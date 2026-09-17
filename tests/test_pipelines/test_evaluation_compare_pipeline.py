@@ -140,6 +140,27 @@ def test_b4_validator_passes_when_partition_present(spark):
     ) is None
 
 
+def test_enriched_validator_names_a_configured_date_whose_partition_is_empty(spark):
+    """#374: two dates configured, one has rows. The table as a whole is not
+    empty, so only a per-date check sees the listed-but-empty month."""
+    from recsys_tfb.pipelines.evaluation.nodes import (
+        validate_enriched_eval_predictions_present,
+    )
+
+    df = spark.createDataFrame(
+        [("c1", "2026-01-31", "p1", 0.9, 1, 1)],
+        ["cust_id", "snap_date", "prod_name", "score", "rank", "label"],
+    )
+    params = _base_params_for_validator()
+    params["evaluation"]["snap_date"] = ["2026-01-31", "2026-02-28"]
+    with pytest.raises(DataConsistencyError) as excinfo:
+        validate_enriched_eval_predictions_present(df, params)
+    message = str(excinfo.value)
+    assert "no partition for evaluation.snap_date date(s) ['2026-02-28']" \
+        in message, message
+    assert "2026-01-31" not in message, message
+
+
 def test_enriched_table_catalog_roundtrip(spark):
     """End-to-end: HiveTableDataset saves what ``prepare_eval_data`` returns
     to the local warehouse with partition_filter(model_version) +
@@ -222,7 +243,7 @@ def test_enriched_table_catalog_roundtrip(spark):
 def month_restriction_off(monkeypatch):
     from recsys_tfb.pipelines.evaluation import nodes
 
-    monkeypatch.setattr(nodes, "restrict_to_eval_snap_date",
+    monkeypatch.setattr(nodes, "restrict_to_eval_snap_dates",
                         lambda df, parameters: df)
 
 
@@ -252,6 +273,48 @@ def test_side_a_is_restricted_to_the_evaluated_month(
     assert {r["snap_date"] for r in a_common.collect()} == {"2026-01-31"}
     assert coverage["n_query_group_A_full"] == 3
     assert coverage["n_query_group_common"] == 3
+
+
+def test_several_evaluated_dates_are_compared_per_query_group(
+    spark, two_column_entity_params
+):
+    """#374 through the node: January and February evaluated, March in the
+    table but not configured. B (time column DATE, as an external table may
+    carry it) has all three entities in January but only (b1, c1) in
+    February. The common population is 3 + 1 query groups; A's February rows
+    for (b1, c2) and (b2, c1) must not be compared."""
+    from pyspark.sql import functions as F
+
+    from recsys_tfb.pipelines.evaluation.nodes import restrict_to_common
+
+    params = {**two_column_entity_params,
+              "evaluation": {"snap_date": ["2026-01-31", "2026-02-28"]}}
+    entities = (("b1", "c1"), ("b1", "c2"), ("b2", "c1"))
+    a_rows = [(date, branch, cust, item, score, label)
+              for date in ("2026-01-31", "2026-02-28", "2026-03-31")
+              for branch, cust in entities
+              for item, score, label in (("p1", 0.9, 1), ("p2", 0.1, 0))]
+    b_rows = [(date, branch, cust, item, score)
+              for date, branch, cust in (
+                  [("2026-01-31", b, c) for b, c in entities]
+                  + [("2026-02-28", "b1", "c1")])
+              for item, score in (("p1", 0.6), ("p2", 0.5))]
+    a = spark.createDataFrame(a_rows, _LABELED_PREDS_DDL)
+    b = spark.createDataFrame(b_rows, _PREDS_DDL).withColumn(
+        "snap_date", F.to_date("snap_date"))
+
+    a_common, b_common, coverage = restrict_to_common(a, b, params)
+
+    expected_groups = {("2026-01-31", "b1", "c1"), ("2026-01-31", "b1", "c2"),
+                       ("2026-01-31", "b2", "c1"), ("2026-02-28", "b1", "c1")}
+    qg = ["snap_date", "branch_id", "cust_id"]
+    assert {(str(r[0]), r[1], r[2]) for r in a_common.select(*qg).collect()} \
+        == expected_groups
+    assert {(str(r[0]), r[1], r[2]) for r in b_common.select(*qg).collect()} \
+        == expected_groups
+    assert coverage["n_query_group_A_full"] == 6     # 2 evaluated dates × 3
+    assert coverage["n_query_group_B_full"] == 4
+    assert coverage["n_query_group_common"] == 4
 
 
 @pytest.fixture

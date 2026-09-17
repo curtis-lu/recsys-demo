@@ -1770,6 +1770,7 @@ _REAL_CATALOG = yaml.safe_load(
 
 def _run_evaluation_command(
     tmp_path, argv, *, landed=(), segment_columns_json=True, extra_patches=(),
+    snap_date="2026-01-31",
 ):
     """Invoke the evaluation command with its month-plan and --compare-only
     inputs real: ``enriched_eval_predictions`` and ``evaluation_segment_columns``
@@ -1778,6 +1779,8 @@ def _run_evaluation_command(
     ``landed`` months are listed under this run's model_version; one month under
     :data:`_FOREIGN_VERSION` is always listed too and must never count, so the
     entry's ``${model_version}`` partition filter is exercised, not assumed.
+    ``snap_date`` is written to ``evaluation.snap_date`` as given: a date, a
+    list of dates or a ``{start, end, step}`` range.
 
     Returns ``(result, captured)``: the CLI result and the slice plan, if one
     was built.
@@ -1790,7 +1793,7 @@ def _run_evaluation_command(
     catalog["enriched_eval_predictions"]["database"] = "ml_recsys"
     (base / "catalog.yaml").write_text(yaml.dump(catalog))
     (base / "parameters_evaluation.yaml").write_text(yaml.dump({"evaluation": {
-        "snap_date": "2026-01-31",
+        "snap_date": snap_date,
         "compare_sources": {"self": {
             "kind": "model_version", "label": "self",
             "model_version": _EVAL_MV, "source": "ranked_predictions"}},
@@ -1857,7 +1860,7 @@ class TestEvaluationMonthPlan:
         plans = _evaluation_month_plans(
             self._catalog(self._listing(
                 [{"as_of": "2025-12-31"}, {"as_of": "2026-01-31"}])),
-            snap_date="2026-01-31", time_col="as_of",
+            snap_dates=["2026-01-31"], time_col="as_of",
         )
         assert plans["enriched_eval_predictions"].to_process == []
 
@@ -1866,7 +1869,7 @@ class TestEvaluationMonthPlan:
 
         plans = _evaluation_month_plans(
             self._catalog(self._listing([{"as_of": "2025-12-31"}])),
-            snap_date="2026-01-31", time_col="as_of",
+            snap_dates=["2026-01-31"], time_col="as_of",
         )
         assert plans["enriched_eval_predictions"].to_process == [
             pd.Timestamp("2026-01-31")]
@@ -1877,11 +1880,73 @@ class TestEvaluationMonthPlan:
         with caplog.at_level(logging.WARNING):
             plans = _evaluation_month_plans(
                 self._catalog(SimpleNamespace()),
-                snap_date="2026-01-31", time_col="snap_date",
+                snap_dates=["2026-01-31"], time_col="snap_date",
             )
         assert plans["enriched_eval_predictions"].to_process == [
             pd.Timestamp("2026-01-31")]
         assert "enriched_eval_predictions" in caplog.text
+
+    def test_every_evaluated_date_is_planned(self):
+        """#374: three dates configured, one landed — the other two pending."""
+        from recsys_tfb.__main__ import _evaluation_month_plans
+
+        plans = _evaluation_month_plans(
+            self._catalog(self._listing([{"as_of": "2026-01-31"}])),
+            snap_dates=["2026-01-31", "2026-02-28", "2026-03-31"],
+            time_col="as_of",
+        )
+        assert plans["enriched_eval_predictions"].to_process == [
+            pd.Timestamp("2026-02-28"), pd.Timestamp("2026-03-31")]
+
+
+class TestEvaluationRunNamesItsDates:
+    """The path segment an evaluation run writes under, and the months its plan
+    covers, for one date and for several (#374). Driven through the command so
+    the value asserted is the one handed to the pipeline run and the manifest.
+    """
+
+    @staticmethod
+    def _run(tmp_path, snap_date):
+        execute = MagicMock(return_value=True)
+        manifest = MagicMock()
+        result, _ = _run_evaluation_command(
+            tmp_path, ["evaluation", "--model-version", _EVAL_MV],
+            snap_date=snap_date,
+            extra_patches=(
+                patch("recsys_tfb.__main__._execute_pipeline", execute),
+                patch("recsys_tfb.__main__._write_pipeline_manifest", manifest),
+            ),
+        )
+        assert result.exit_code == 0, result.output
+        runtime_params = execute.call_args.args[2]
+        plan = execute.call_args.kwargs["month_plans"]["enriched_eval_predictions"]
+        written = manifest.call_args.kwargs
+        return runtime_params, plan, written
+
+    def test_one_date_keeps_its_yyyymmdd_segment(self, tmp_path):
+        runtime_params, plan, written = self._run(tmp_path, "2026-01-31")
+        assert runtime_params["snap_date"] == "20260131"
+        assert plan.to_process == [pd.Timestamp("2026-01-31")]
+        assert written["version_dir"].parts[-2:] == (_EVAL_MV, "20260131")
+        assert written["extra_metadata"]["snap_date"] == "20260131"
+
+    def test_several_dates_name_the_earliest_and_the_latest(self, tmp_path):
+        dates = ["2026-02-28", "2026-01-31", "2026-03-31"]
+        runtime_params, plan, written = self._run(tmp_path, dates)
+        assert runtime_params["snap_date"] == "20260131-20260331"
+        assert plan.to_process == [pd.Timestamp(d) for d in sorted(dates)]
+        assert written["version_dir"].parts[-2:] == (
+            _EVAL_MV, "20260131-20260331")
+        assert written["extra_metadata"]["snap_date"] == "20260131-20260331"
+
+    def test_a_range_reaches_the_command_as_its_dates(self, tmp_path):
+        runtime_params, plan, _written = self._run(
+            tmp_path,
+            {"start": "2026-01-31", "end": "2026-03-31", "step": "month_end"})
+        assert runtime_params["snap_date"] == "20260131-20260331"
+        assert plan.to_process == [pd.Timestamp("2026-01-31"),
+                                   pd.Timestamp("2026-02-28"),
+                                   pd.Timestamp("2026-03-31")]
 
 
 class TestAnEvaluationMonthNotWrittenPullsTheJoinBack:
@@ -1930,7 +1995,7 @@ class TestCompareOnlyNamesWhatIsMissing:
     _ARGV = ["evaluation", "--model-version", _EVAL_MV, "--compare-only", "self"]
 
     def _invoke(self, tmp_path, segment_columns_json, landed=("2026-01-31",),
-                extra_argv=()):
+                extra_argv=(), snap_date="2026-01-31"):
         emitted = []
 
         class _Capture(logging.Handler):
@@ -1944,7 +2009,7 @@ class TestCompareOnlyNamesWhatIsMissing:
         execute = MagicMock(return_value=False)
         result, _ = _run_evaluation_command(
             tmp_path, [*self._ARGV, *extra_argv], landed=landed,
-            segment_columns_json=segment_columns_json,
+            segment_columns_json=segment_columns_json, snap_date=snap_date,
             extra_patches=(
                 patch("recsys_tfb.__main__.logger", recorder),
                 patch("recsys_tfb.__main__._execute_pipeline", execute),
@@ -1973,6 +2038,17 @@ class TestCompareOnlyNamesWhatIsMissing:
         assert "enriched_eval_predictions has no partition for 2026-01-31" \
             in log, log
         assert "segment_columns.json" not in log, log
+
+    def test_each_evaluated_date_is_checked_for_its_partition(self, tmp_path):
+        """#374: three dates configured, January landed. The two that did not
+        land are named; the one that did is not."""
+        result, execute, log = self._invoke(
+            tmp_path, segment_columns_json=True, landed=("2026-01-31",),
+            snap_date=["2026-01-31", "2026-02-28", "2026-03-31"])
+        assert result.exit_code == 1
+        execute.assert_not_called()
+        assert ("enriched_eval_predictions has no partition for "
+                "2026-02-28,2026-03-31") in log, log
 
     def test_control_both_present_reach_the_pipeline(self, tmp_path):
         result, execute, _log = self._invoke(tmp_path, segment_columns_json=True)

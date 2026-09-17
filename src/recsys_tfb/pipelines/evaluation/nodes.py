@@ -25,6 +25,7 @@ from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError
+from recsys_tfb.core.date_ranges import as_date_list, dates_label
 from recsys_tfb.core.logging import log_data_volume
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric import contract
@@ -65,8 +66,9 @@ from recsys_tfb.pipelines.evaluation.steps.segments import (
     join_segment_sources,
 )
 from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
-    eval_snap_date,
-    restrict_to_eval_snap_date,
+    eval_snap_dates,
+    eval_snap_dates_without_rows,
+    restrict_to_eval_snap_dates,
 )
 from recsys_tfb.utils.spark import get_or_create_spark_session
 
@@ -186,9 +188,9 @@ def make_prepare_eval_data_node(population_name: str):
           ``evaluation.snap_date`` is set (``ValueError``). These two read
           settings only, so they are runtime backstops: the CLI resolves the
           version, the config gives the month.
-        * The predictions hold rows for that month (``ValueError``): the
-          upstream run scored it.
-        * ``label_table`` has no duplicated identity key in that month
+        * The predictions hold rows for every configured date (``ValueError``
+          naming the dates without rows): the upstream run scored them.
+        * ``label_table`` has no duplicated identity key in those months
           (``ValueError``, with the number of duplicated keys; why it raises
           rather than deduplicating is written at the check).
         """
@@ -230,34 +232,46 @@ def make_prepare_eval_data_node(population_name: str):
                 model_version,
             )
 
-        # Decision — which month: evaluation.snap_date, in both pipeline modes
-        # (this node serves monitoring and --post-training), failing loud when
-        # it is unset or has no rows. Chosen wrong, the run would silently
-        # evaluate the whole table. evaluation.snap_date is an ISO date string
-        # (YYYY-MM-DD); the snap_date partition column on ranked_predictions /
-        # training_eval_predictions is STRING, so .cast("string") is a no-op
-        # here and stays correct if it is ever DATE.
-        snap_date = str(eval_params.get("snap_date") or "").strip()
-        if not snap_date:
+        # Decision — which months: evaluation.snap_date, one date or several
+        # (#374), in both pipeline modes (this node serves monitoring and
+        # --post-training), failing loud when it is unset or when any one date
+        # has no rows. Chosen wrong, the run would silently evaluate the whole
+        # table, or silently drop a month from a several-date evaluation. Each
+        # date is an ISO date string (YYYY-MM-DD); the snap_date partition
+        # column on ranked_predictions / training_eval_predictions is STRING, so
+        # .cast("string") is a no-op here and stays correct if it is ever DATE.
+        snap_dates = as_date_list(eval_params.get("snap_date"))
+        if not snap_dates:
             raise ValueError(
                 "evaluation.snap_date not configured. Set evaluation.snap_date "
                 "(ISO YYYY-MM-DD) in conf/base/parameters_evaluation.yaml."
             )
-        logger.info("Filtering predictions to snap_date=%s", snap_date)
-        predictions_at_snap = ranked_predictions.filter(
-            F.col(time_col).cast("string") == snap_date
-        )
-        if predictions_at_snap.isEmpty():
+        # The dates as the messages below print them: one date prints as it
+        # always did, several as their list.
+        snap_date_text = snap_dates[0] if len(snap_dates) == 1 else snap_dates
+        logger.info("Filtering predictions to snap_date=%s", snap_date_text)
+        # Per date, not on the filtered frame as a whole: with several dates the
+        # whole frame has rows as soon as one month does.
+        missing_dates = eval_snap_dates_without_rows(ranked_predictions, parameters)
+        if missing_dates:
             available = sorted(
                 str(r[time_col])
                 for r in ranked_predictions.select(time_col).distinct().collect()
             )
+            asked = (
+                f"evaluation.snap_date={snap_date_text!r}"
+                if len(snap_dates) == 1 else
+                f"{len(missing_dates)} of {len(snap_dates)} evaluation.snap_date "
+                f"dates: {missing_dates}"
+            )
             raise ValueError(
-                f"No predictions found for evaluation.snap_date={snap_date!r} "
+                f"No predictions found for {asked} "
                 f"(model_version={model_version}). snap_dates present in "
                 f"predictions: {available}"
             )
-        ranked_predictions = predictions_at_snap
+        ranked_predictions = restrict_to_eval_snap_dates(
+            ranked_predictions, parameters
+        )
 
         # Filter labels to snap_dates in predictions
         pred_snap_dates = ranked_predictions.select(time_col).distinct()
@@ -286,7 +300,7 @@ def make_prepare_eval_data_node(population_name: str):
         if n_duplicated_keys:
             raise ValueError(
                 f"{n_duplicated_keys} duplicated label_table key(s) on "
-                f"{identity_cols} at evaluation.snap_date={snap_date!r}. Each extra "
+                f"{identity_cols} at evaluation.snap_date={snap_date_text!r}. Each extra "
                 f"row would copy its prediction row in the join with the "
                 f"predictions, inflating that query's candidates and shifting its "
                 f"ranks. Deduplicate label_table upstream; evaluation does not "
@@ -487,7 +501,7 @@ def make_draw_diagnosis_sample_node(registry_diagnoses_wired: bool):
         _require_prepared_with_current_config(segment_columns, parameters)
         # Decision — sample the evaluated month only: the table holds every
         # month this model_version was evaluated on.
-        eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
+        eval_predictions = restrict_to_eval_snap_dates(eval_predictions, parameters)
 
         sample_pdf, sample_meta = draw_diagnosis_sample(
             eval_predictions, parameters,
@@ -538,30 +552,38 @@ def compute_metrics(
     Pre-check (inputs): the partition was prepared under today's settings
     (``_require_prepared_with_current_config``).
 
-    Postcondition: exactly one month was evaluated. The restriction leaves at
-    most one, so what this refuses is zero, an empty or never-written
-    partition for the month; reading a Hive table raises nothing for either.
-    It does not catch a reader that forgot to restrict (that reader is another
-    node); the AST test in ``test_pipeline.py`` does.
+    Postcondition: every configured date was evaluated, i.e. the number of
+    months in the result equals the number of configured dates. The
+    restriction leaves at most that many, so what this refuses is fewer, an
+    empty or never-written partition for some date; reading a Hive table
+    raises nothing for either. The dates are evaluated together, as one set of
+    query groups (#374). It does not catch a reader that forgot to restrict
+    (that reader is another node); the AST test in ``test_pipeline.py`` does.
     """
     _require_prepared_with_current_config(segment_columns, parameters)
-    # Decision — evaluate one month: the table holds every month this
-    # model_version was evaluated on.
-    eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
+    # Decision — evaluate the configured dates only: the table holds every
+    # month this model_version was evaluated on.
+    eval_predictions = restrict_to_eval_snap_dates(eval_predictions, parameters)
 
     result = compute_all_metrics(
         eval_predictions, parameters,
         segment_columns=segment_columns["joined"],
     )
     n_snap_dates = result["dataset_overview"]["totals"]["n_snap_dates"]
-    if n_snap_dates != 1:
+    snap_dates = eval_snap_dates(parameters)
+    if n_snap_dates != len(snap_dates):
+        one = len(snap_dates) == 1
         raise ValueError(
             f"compute_metrics postcondition: {n_snap_dates} evaluated months "
             f"in enriched_eval_predictions for evaluation.snap_date="
-            f"{eval_snap_date(parameters)!r} "
+            f"{snap_dates[0] if one else snap_dates!r} "
             f"(model_version={parameters.get('model_version')!r}), expected "
-            "exactly 1. That month's partition is empty or was never "
-            "written; re-run with --from-node prepare_eval_data."
+            f"exactly {len(snap_dates)}. "
+            + ("That month's partition is empty or was never written"
+               if one else
+               "Some of those months' partitions are empty or were never "
+               "written")
+            + "; re-run with --from-node prepare_eval_data."
         )
     result["segments"] = {
         k: segment_columns[k] for k in ("joined", "sources", "missing")
@@ -599,6 +621,11 @@ def compute_baseline_metrics(
             aggregated across eval snap_dates (sum). Drives the report's
             popularity-composition table; consumers must treat absence
             as backward-compatible (older results may omit it).
+      - monthly_counts: dict[str, dict[str, int]]  the same counts per
+            item per calendar month, summed over the windows.
+      - window_months_covered: dict[str, int]  only when several dates are
+            evaluated (#374): per evaluated date, the months with label rows
+            in its lookback window. Absent means one date.
       - config_fingerprint: the computed settings it was made with
             (``steps.config_fingerprint``), checked by
             ``generate_report``.
@@ -615,10 +642,10 @@ def compute_baseline_metrics(
         return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
 
     _require_prepared_with_current_config(segment_columns, parameters)
-    # Decision — score the evaluated month only: the table holds every month
-    # this model_version was evaluated on, and the lookback window below is
+    # Decision — score the evaluated dates only: the table holds every month
+    # this model_version was evaluated on, and the lookback windows below are
     # anchored on the months found in the frame.
-    eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
+    eval_predictions = restrict_to_eval_snap_dates(eval_predictions, parameters)
 
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -649,18 +676,53 @@ def compute_baseline_metrics(
     # Per-(month, item) breakdown of the same windows → report's monthly
     # popularity trend. Summed over months, each item reconciles with
     # purchase_counts (both sum the same per-snap-per-month counts).
-    monthly = compute_monthly_purchase_counts(
-        label_table, snap_dates, lookback_months, parameters
-    )
     monthly_counts: dict[str, dict[str, int]] = {}
-    for r in (
-        monthly.groupBy("month", item_col)
-        .agg(F.sum(F.col(score_col)).alias(score_col))
-        .collect()
-    ):
-        monthly_counts.setdefault(str(r[item_col]), {})[str(r["month"])] = int(
-            r[score_col]
+    window_months_covered: Optional[dict[str, int]] = None
+    if len(snap_dates) == 1:
+        monthly = compute_monthly_purchase_counts(
+            label_table, snap_dates, lookback_months, parameters
         )
+        for r in (
+            monthly.groupBy("month", item_col)
+            .agg(F.sum(F.col(score_col)).alias(score_col))
+            .collect()
+        ):
+            monthly_counts.setdefault(str(r[item_col]), {})[str(r["month"])] = int(
+                r[score_col]
+            )
+    else:
+        # Several evaluated dates (#374), one lookback window each. The same
+        # counts, tagged with the window they came from, so one collect gives
+        # both the trend (summed over windows) and how many months with label
+        # rows each window had. The report divides the per-month average by
+        # the sum of those, not by one window's lookback: purchase_counts is
+        # summed over all windows. Written only here, so a single-date result
+        # stays exactly what it was.
+        window_col = "_baseline_window"
+        monthly = None
+        for s in sorted(snap_dates):
+            one = compute_monthly_purchase_counts(
+                label_table, [s], lookback_months, parameters
+            ).withColumn(window_col, F.lit(s))
+            monthly = one if monthly is None else monthly.unionByName(one)
+        months_by_window: dict[str, set] = {s: set() for s in snap_dates}
+        summed: dict[str, dict[str, float]] = {}
+        for r in (
+            monthly.groupBy(window_col, "month", item_col)
+            .agg(F.sum(F.col(score_col)).alias(score_col))
+            .collect()
+        ):
+            month = str(r["month"])
+            months_by_window[r[window_col]].add(month)
+            per_item = summed.setdefault(str(r[item_col]), {})
+            per_item[month] = per_item.get(month, 0.0) + r[score_col]
+        monthly_counts = {
+            item: {month: int(v) for month, v in per_month.items()}
+            for item, per_month in summed.items()
+        }
+        window_months_covered = {
+            s: len(months_by_window[s]) for s in sorted(snap_dates)
+        }
     baseline_frame = build_baseline_frame(eval_predictions, counts, parameters)
     # per_segment / category slices for the report's by-segment / 大類 vs
     # baseline comparison. Gated by what turns them on for the model (the
@@ -674,6 +736,8 @@ def compute_baseline_metrics(
     )
     metrics["purchase_counts"] = purchase_counts
     metrics["monthly_counts"] = monthly_counts
+    if window_months_covered is not None:
+        metrics["window_months_covered"] = window_months_covered
     metrics["config_fingerprint"] = fingerprint(parameters)
     logger.info(
         "Baseline metrics computed (overall + per_item) for snap_dates=%s; "
@@ -882,14 +946,20 @@ def _diagnosis_pages_dir(parameters: dict):
     的**同一組值**，不是另外猜一次。同樣的做法見
     ``diagnosis.model.paths.diagnostics_dir``。
 
-    退回 ``evaluation.snap_date`` 是給單元測試用的（那裡沒有 runtime_params）；
-    dash 一律剝掉，因為 catalog 拿到的就是剝過的值。
+    runtime 的值原樣使用：它就是 catalog 代換進路徑的那個字串。退回
+    ``evaluation.snap_date`` 是給單元測試用的（那裡沒有 runtime_params），走的是
+    CLI 算路徑段的同一個 ``dates_label``：一個日期＝剝掉 dash 的 ``YYYYMMDD``，
+    多個日期＝``<最早>-<最晚>``（#374）。以前這裡對兩者都剝 dash；多個日期的
+    路徑段裡那個 dash 是名字的一部分，剝掉就對不上 catalog 的目錄。
     """
     eval_params = parameters.get("evaluation", {}) or {}
-    snap = parameters.get("snap_date") or eval_params.get("snap_date", "unknown")
+    snap = parameters.get("snap_date")
+    if not snap:
+        dates = as_date_list(eval_params.get("snap_date"))
+        snap = dates_label(dates) if dates else "unknown"
     return (Path("data") / "evaluation"
             / str(parameters.get("model_version", "unknown"))
-            / str(snap).replace("-", "")
+            / str(snap)
             / "diagnosis")
 
 
@@ -1079,7 +1149,7 @@ def compute_report_aggregates(
 
     # Decision — aggregate the evaluated month only: the table holds every
     # month this model_version was evaluated on.
-    eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
+    eval_predictions = restrict_to_eval_snap_dates(eval_predictions, parameters)
 
     schema = get_schema(parameters)
     item_col, score_col = schema["item"], schema["score"]
@@ -1189,14 +1259,14 @@ def restrict_to_common(
 
     ``eval_predictions`` is ``enriched_eval_predictions`` read back from Hive,
     every month this ``model_version`` was evaluated on; the node keeps the
-    evaluated month before anything else (ADR-0018 decision 1). It does not
+    evaluated dates before anything else (ADR-0018 decision 1). It does not
     check the partition's ``segment_columns.json`` fingerprint: under
     ``--compare`` the same run's segmenting readers do, and ``--compare-only``
     is left unchecked on purpose (ADR-0020 bug 6, #352 correction).
     """
-    # Decision — compare the evaluated month only: the table holds every month
+    # Decision — compare the evaluated dates only: the table holds every month
     # this model_version was evaluated on.
-    eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
+    eval_predictions = restrict_to_eval_snap_dates(eval_predictions, parameters)
 
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -1217,11 +1287,18 @@ def restrict_to_common(
     # keys never match — the same null rule as the restriction's own joins. On
     # symmetric candidate sets this equals either side's kept group count; when
     # one side scored a common entity only on items the other lacks, that group
-    # is in one side's metrics but not in "common".
+    # is in one side's metrics but not in "common". The time is matched as
+    # text, as in the restriction itself (steps/compare_universe.py: B's time
+    # column may be DATE while A's partition is STRING).
+    def _groups_with_text_time(df: SparkDataFrame) -> SparkDataFrame:
+        return df.select(
+            F.col(time_col).cast("string").alias(time_col), *schema["entity"]
+        ).distinct()
+
     groups_common = (
-        a_common.select(*query_group_cols).distinct()
+        _groups_with_text_time(a_common)
         .join(
-            b_common.select(*query_group_cols).distinct(),
+            _groups_with_text_time(b_common),
             on=query_group_cols, how="left_semi",
         )
         .count()
@@ -1285,14 +1362,16 @@ def validate_enriched_eval_predictions_present(
     parameters: dict,
 ) -> None:
     """Fail loud if ``enriched_eval_predictions`` holds no rows
-    for the evaluated month under this ``model_version``.
+    for an evaluated date under this ``model_version``.
 
     A zero-output gate: it passes nothing on. ``restrict_to_common`` reads the
-    table and keeps the evaluated month itself, like every other reader
+    table and keeps the evaluated dates itself, like every other reader
     (ADR-0018 decision 1). The catalog has already pruned the table to this
     ``model_version`` via ``partition_filter``; this node keeps the evaluated
-    month and asserts a row remains, otherwise raises
-    ``DataConsistencyError`` saying what to run first.
+    dates and asserts each one has a row, otherwise raises
+    ``DataConsistencyError`` naming the dates without rows and what to run
+    first. Per date: with several dates configured, the kept rows are not
+    empty as soon as one month has rows (#374).
 
     Slicing never pulls a zero-output node back in (R3 in
     ``docs/agents/architecture-constraints.md``), so ``--compare-only
@@ -1311,10 +1390,17 @@ def validate_enriched_eval_predictions_present(
     mv = parameters.get("model_version", "unknown")
     hive_db = (parameters.get("hive") or {}).get("db", "ml_recsys")
 
-    if restrict_to_eval_snap_date(enriched_eval_predictions, parameters).isEmpty():
+    kept = restrict_to_eval_snap_dates(enriched_eval_predictions, parameters)
+    missing = eval_snap_dates_without_rows(kept, parameters)
+    if missing:
+        asked = (
+            f"evaluation.snap_date={missing[0]!r}"
+            if len(eval_snap_dates(parameters)) == 1 else
+            f"evaluation.snap_date date(s) {missing}"
+        )
         raise DataConsistencyError(
             f"{hive_db}.enriched_eval_predictions has no partition "
-            f"for evaluation.snap_date={eval_snap_date(parameters)!r} "
+            f"for {asked} "
             f"model_version={mv!r}. "
             "Run `python -m recsys_tfb evaluation` (with or without "
             "--compare) first to populate the partition."

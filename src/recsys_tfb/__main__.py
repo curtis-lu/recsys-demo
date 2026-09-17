@@ -7,6 +7,7 @@ import typer
 
 from recsys_tfb.core.catalog import DataCatalog, MemoryDataset
 from recsys_tfb.core.config import ConfigLoader
+from recsys_tfb.core.date_ranges import as_date_list, dates_label
 from recsys_tfb.core.logging import RunContext, setup_logging
 from recsys_tfb.core.runner import Runner
 from recsys_tfb.core.consistency import (
@@ -358,15 +359,17 @@ def _collect_existing_snap_dates(
     return existing
 
 
-def _evaluation_month_plans(catalog, *, snap_date, time_col: str) -> dict:
-    """``{"enriched_eval_predictions": SnapDatePlan}`` for the evaluated month.
+def _evaluation_month_plans(catalog, *, snap_dates, time_col: str) -> dict:
+    """``{"enriched_eval_predictions": SnapDatePlan}`` for the evaluated dates.
 
     ``prepare_eval_data`` writes that table and every later node reads it back
     (ADR-0018 decision 1). The table exists from the first evaluation of a
     ``model_version`` onwards, so a slice asking only ``exists()`` would let
     ``--from-node compute_metrics`` start on a month never written — the
-    ADR-0012 trap. With the plan, ``can_load`` asks for the month's partition:
-    missing pulls ``prepare_eval_data`` back into the slice, landed does not.
+    ADR-0012 trap. With the plan, ``can_load`` asks for each evaluated date's
+    partition (all of them, when ``evaluation.snap_date`` lists several, #374):
+    any missing pulls ``prepare_eval_data`` back into the slice, all landed
+    does not.
 
     ``catalog`` must be resolved with this run's ``model_version``: the entry's
     ``partition_filter`` is what scopes the listing to it. Metadata-only. A
@@ -384,19 +387,20 @@ def _evaluation_month_plans(catalog, *, snap_date, time_col: str) -> dict:
         existing = []
     else:
         existing = landed_months(lister(), time_col=time_col, dataset_name=name)
-    return {name: plan_incremental_snap_dates(configured=[snap_date],
+    return {name: plan_incremental_snap_dates(configured=list(snap_dates),
                                               existing=existing)}
 
 
 def _compare_only_input_errors(plan, catalog, catalog_config) -> list[str]:
     """What ``--compare-only`` reads from an earlier standard run and cannot find.
 
-    That mode has no ``prepare_eval_data``: it reads this month's
-    ``enriched_eval_predictions`` partition and the ``segment_columns.json`` the
-    same standard run landed with it. The two are written together but can be
+    That mode has no ``prepare_eval_data``: it reads the evaluated dates'
+    ``enriched_eval_predictions`` partitions and the ``segment_columns.json`` the
+    same standard run landed with them. The two are written together but can be
     deleted apart (a cleaned ``data/`` directory, a dropped table), so each
     missing one gets its own line. ``plan`` is the month plan for the table
-    (:func:`_evaluation_month_plans`), or None when no month is configured.
+    (:func:`_evaluation_month_plans`), or None when no month is configured;
+    every configured date without a partition is named (#374).
 
     Checked before any node runs, not left to the
     ``validate_enriched_eval_predictions_present`` gate node alone: slicing
@@ -1701,7 +1705,8 @@ def evaluation(
 
     config, params, run_context = _load_config_and_setup("evaluation", env)
 
-    # (A22) --post-training evaluates one configured test month. Wired here,
+    # (A22) --post-training evaluates configured test months only (every date
+    # of evaluation.snap_date must be one, #374). Wired here,
     # not in validate_config_consistency: that runs at CLI entry and cannot see
     # this flag, and monitoring mode (no flag) reads inference output whose
     # month need not be a test month. Checked before Spark starts, like A21.
@@ -1760,7 +1765,11 @@ def evaluation(
     )
 
     eval_config = params_eval.get("evaluation", params_eval)
-    snap_date = str(eval_config.get("snap_date", "unknown")).replace("-", "")
+    # One date or several (#374). The path segment every catalog entry, the
+    # manifest and the `latest` symlink use: YYYYMMDD for one date, as it always
+    # was, `<earliest>-<latest>` for several.
+    eval_dates = as_date_list(eval_config.get("snap_date"))
+    snap_date = dates_label(eval_dates) if eval_dates else "unknown"
 
     logger.info(
         "Evaluation — model_version: %s (%s), post_training: %s, compare: %s%s",
@@ -1769,6 +1778,11 @@ def evaluation(
         " (compare-only)" if compare_only else "",
     )
     logger.info("Evaluation — snap_date: %s", snap_date)
+    if len(eval_dates) > 1:
+        logger.info(
+            "Evaluation — %d dates evaluated together: %s",
+            len(eval_dates), ", ".join(eval_dates),
+        )
 
     runtime_params = {
         "base_dataset_version": base_v,
@@ -1798,10 +1812,10 @@ def evaluation(
     _, listing_catalog_config = _resolve_catalog(config, params, runtime_params)
     listing_catalog = DataCatalog(listing_catalog_config)
     month_plans = None
-    if eval_config.get("snap_date"):
+    if eval_dates:
         # Without a configured month the nodes raise their own message.
         month_plans = _evaluation_month_plans(
-            listing_catalog, snap_date=str(eval_config["snap_date"]).strip(),
+            listing_catalog, snap_dates=eval_dates,
             time_col=get_schema(params)["time"],
         )
     if compare_only:

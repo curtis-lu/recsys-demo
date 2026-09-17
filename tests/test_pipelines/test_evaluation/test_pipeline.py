@@ -143,7 +143,7 @@ class TestRegistryDiagnosesFollowTheMode:
                 return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
             ) as spy, patch(
                 "recsys_tfb.pipelines.evaluation.nodes."
-                "restrict_to_eval_snap_date",
+                "restrict_to_eval_snap_dates",
                 lambda df, parameters: df,
             ):
                 result = node.func(None, segments, params)
@@ -392,7 +392,7 @@ class TestSegmentColumnsWiring:
 
 def _readers_that_skip_the_month_restriction(pipeline):
     """Names of nodes wired to ``enriched_eval_predictions`` whose body has no
-    used ``restrict_to_eval_snap_date(<that input's parameter>, ...)`` call.
+    used ``restrict_to_eval_snap_dates(<that input's parameter>, ...)`` call.
 
     The body comes from the node's function object (``inspect.getsource``),
     not from a module path: node modules get renamed and split (ADR-0019), and
@@ -415,7 +415,7 @@ def _readers_that_skip_the_month_restriction(pipeline):
             isinstance(call, ast.Call)
             and id(call) not in discarded
             and getattr(call.func, "id", getattr(call.func, "attr", None))
-            == "restrict_to_eval_snap_date"
+            == "restrict_to_eval_snap_dates"
             and call.args
             and isinstance(call.args[0], ast.Name)
             and call.args[0].id == bound_to
@@ -432,19 +432,19 @@ def _forgets_the_month(enriched_eval_predictions, parameters):
 
 def _restricts_the_wrong_frame(other, enriched_eval_predictions, parameters):
     from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
-        restrict_to_eval_snap_date,
+        restrict_to_eval_snap_dates,
     )
 
-    other = restrict_to_eval_snap_date(other, parameters)
+    other = restrict_to_eval_snap_dates(other, parameters)
     return enriched_eval_predictions.count() + other.count()
 
 
 def _discards_the_restriction(enriched_eval_predictions, parameters):
     from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
-        restrict_to_eval_snap_date,
+        restrict_to_eval_snap_dates,
     )
 
-    restrict_to_eval_snap_date(enriched_eval_predictions, parameters)
+    restrict_to_eval_snap_dates(enriched_eval_predictions, parameters)
     return enriched_eval_predictions.count()
 
 

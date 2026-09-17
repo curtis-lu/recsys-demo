@@ -464,6 +464,29 @@ def test_render_draws_this_runs_results_not_files_left_on_disk(
     assert build_diagnosis_links_section(pages, params) is None
 
 
+@pytest.mark.parametrize("runtime, configured, segment", [
+    # The CLI's runtime value is what the catalog substitutes into
+    # data/evaluation/${model_version}/${snap_date}/, so it is used as is.
+    ("20260131", "2026-01-31", "20260131"),
+    ("20260131-20260331", ["2026-01-31", "2026-03-31"], "20260131-20260331"),
+    # No runtime value (unit tests): the same label from the setting.
+    (None, "2026-01-31", "20260131"),
+    (None, ["2026-03-31", "2026-01-31", "2026-02-28"], "20260131-20260331"),
+])
+def test_diagnosis_pages_dir_is_the_catalogs_path_segment(
+    runtime, configured, segment,
+):
+    """#374: several dates name their directory ``<earliest>-<latest>``; the
+    dash in it is part of the name, not a date separator to strip."""
+    from recsys_tfb.pipelines.evaluation.nodes import _diagnosis_pages_dir
+
+    params = {"model_version": "mv", "evaluation": {"snap_date": configured}}
+    if runtime is not None:
+        params["snap_date"] = runtime
+    assert _diagnosis_pages_dir(params).parts == (
+        "data", "evaluation", "mv", segment, "diagnosis")
+
+
 def test_render_refuses_results_computed_with_other_settings(
     tmp_path, monkeypatch,
 ):

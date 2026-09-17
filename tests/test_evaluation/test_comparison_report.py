@@ -62,6 +62,24 @@ def test_returns_html_string():
     assert "<html" in out.lower()
 
 
+def test_metadata_shows_one_date_as_configured():
+    m_a, m_b = _metrics(0.6), _metrics(0.4)
+    out = assemble_comparison_report(
+        m_a, m_b, _comparison(m_a, m_b), _coverage(), _params())
+    assert "<tr><th>Snap Date</th><td>2026-01-31</td></tr>" in out
+
+
+def test_metadata_shows_several_dates_as_a_range():
+    """#374: several evaluated dates read as earliest ~ latest plus a count."""
+    m_a, m_b = _metrics(0.6), _metrics(0.4)
+    p = _params()
+    p["evaluation"]["snap_date"] = ["2026-01-31", "2026-03-31", "2026-02-28"]
+    out = assemble_comparison_report(
+        m_a, m_b, _comparison(m_a, m_b), _coverage(), p)
+    assert ("<tr><th>Snap Date</th><td>2026-01-31 ~ 2026-03-31（3 個日期）"
+            "</td></tr>") in out
+
+
 def test_labels_visible_in_html():
     m_a, m_b = _metrics(0.6), _metrics(0.4)
     comp = _comparison(m_a, m_b)

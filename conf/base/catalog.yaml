@@ -412,11 +412,12 @@ training_eval_predictions:
 
 # --- Evaluation pipeline — 評估列（prepare_eval_data 的輸出，ADR-0018 決定 1）---
 # prepare_eval_data 做完 label join、rank 與 segment enrichment 後直接寫進這張表
-# （每個 snap_date 一個 partition，dynamic overwrite 只換這一格），join 只算這一次。
-# 同一次 run 的其他 node 與之後的 --compare-only 都讀回這張表；表裡是這個
-# model_version 評估過的所有月份，每個讀者先篩到 evaluation.snap_date
-# （pipelines/evaluation/steps/snap_date_scope.py）。--compare-only 另由
-# validate_enriched_eval_predictions_present 檢查這個月有資料。
+# （每個 snap_date 一個 partition，dynamic overwrite 只換這次評估的日期那幾格），
+# join 只算這一次。同一次 run 的其他 node 與之後的 --compare-only 都讀回這張表；
+# 表裡是這個 model_version 評估過的所有月份，每個讀者先篩到 evaluation.snap_date
+# 的日期（一個或多個；pipelines/evaluation/steps/snap_date_scope.py）。
+# --compare-only 另由 validate_enriched_eval_predictions_present 檢查每個評估
+# 日期都有資料。
 # columns: "auto" ── schema 從 DataFrame 推得；segment_sources 設定在兩次 run
 # 之間改變時，HiveTableDataset 會自動 append-only 演化（ALTER TABLE ADD
 # COLUMNS／缺欄補 NULL），不需先 drop table。

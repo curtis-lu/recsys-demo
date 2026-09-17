@@ -1461,9 +1461,10 @@ LITERAL_COLUMN_EXCEPTIONS = frozenset({
     ("src/recsys_tfb/pipelines/evaluation/nodes.py", "_diagnosis_pages_dir"),
     ("src/recsys_tfb/pipelines/evaluation/nodes.py", "prepare_eval_data"),
     # The one read every reader of enriched_eval_predictions goes through
-    # (ADR-0018 decision 1); signed off in #352.
+    # (ADR-0018 decision 1); signed off in #352, renamed from eval_snap_date
+    # when the setting became one date or several (#374).
     ("src/recsys_tfb/pipelines/evaluation/steps/snap_date_scope.py",
-     "eval_snap_date"),
+     "eval_snap_dates"),
     # Observability field whitelist -- a log field named after the time role,
     # not a DataFrame column.
     ("src/recsys_tfb/core/logging.py", "<module>"),

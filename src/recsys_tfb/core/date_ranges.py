@@ -153,9 +153,11 @@ def as_date_list(value) -> list[str]:
 
     For readers of a key that may be a single date *or* a list — today only
     ``evaluation.snap_date``. A single value becomes a one-element list; a
-    list keeps its order; each date is stripped and written as ``YYYY-MM-DD``
-    when YAML parsed it into a date. Nothing configured gives ``[]``: whether
-    that is an error is the caller's call, with the caller's message.
+    list keeps its order, minus repeats (a date written twice counts once:
+    readers count the dates and name a path after them); each date is stripped
+    and written as ``YYYY-MM-DD`` when YAML parsed it into a date. Nothing
+    configured gives ``[]``: whether that is an error is the caller's call,
+    with the caller's message.
 
     Not reformatted beyond that: readers compare these texts with a STRING
     time partition that was written from rows selected with this same setting.
@@ -166,7 +168,7 @@ def as_date_list(value) -> list[str]:
         if isinstance(v, (_dt.date, _dt.datetime)):
             v = (v.date() if isinstance(v, _dt.datetime) else v).isoformat()
         text = "" if v is None else str(v).strip()
-        if text:
+        if text and text not in dates:
             dates.append(text)
     return dates
 

@@ -2566,7 +2566,11 @@ def compare_mutual_exclusive_errors(compare: str | None, compare_only: str | Non
 
 
 def post_training_snap_date_errors(parameters: dict, post_training: bool) -> list[str]:
-    """(A22) Under ``--post-training``, evaluation.snap_date must be a test month.
+    """(A22) Under ``--post-training``, every evaluation.snap_date must be a test month.
+
+    ``evaluation.snap_date`` is one date or a list of dates (#374); with
+    several, each must be in ``dataset.test_snap_dates`` and the message names
+    the ones that are not.
 
     Returns error strings (empty list when fine); the CLI raises. Wired like
     A13 — it lives here, but the evaluation command calls it explicitly and
@@ -2618,6 +2622,35 @@ def post_training_snap_date_errors(parameters: dict, post_training: bool) -> lis
     configured = sorted({_iso_date(d) for d in declared})
 
     raw = (parameters.get("evaluation", {}) or {}).get("snap_date")
+    # Several evaluated dates (#374): each must be a test month, and the
+    # message names the ones that are not. One date — written plainly or as a
+    # one-element list — keeps the single-date messages below word for word.
+    if isinstance(raw, list) and len(raw) > 1:
+        unreadable_snaps = [v for v in raw if _iso_date(v) is None]
+        if unreadable_snaps:
+            return [
+                f"(A22) evaluation.snap_date holds {unreadable_snaps!r}, not a "
+                f"readable ISO date (YYYY-MM-DD). --post-training evaluates "
+                f"configured test months only; each date must be one of "
+                f"{configured}."
+            ]
+        not_test = [s for s in (_iso_date(v) for v in raw) if s not in configured]
+        if not_test:
+            return [
+                f"(A22) evaluation.snap_date date(s) {not_test!r} are not test "
+                f"months (dataset.test_snap_dates: {configured}). "
+                "--post-training reads training_eval_predictions, which "
+                "accumulates every month ever predicted for this model_version, "
+                "so an unlisted month can still return rows and yield a "
+                "normal-looking report for a month this config does not "
+                "evaluate. Add them to dataset.test_snap_dates and rerun "
+                "dataset + predict, or drop them from evaluation.snap_date. "
+                "(Monitoring mode — no --post-training — is not subject to "
+                "this rule.)"
+            ]
+        return []
+    if isinstance(raw, list) and len(raw) == 1:
+        raw = raw[0]
     snap = _iso_date(raw)
     if snap is None:
         return [

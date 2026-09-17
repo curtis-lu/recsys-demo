@@ -270,6 +270,14 @@ class TestAsDateList:
     def test_unquoted_yaml_date_reads_as_iso_text(self):
         assert as_date_list(datetime.date(2026, 1, 31)) == ["2026-01-31"]
 
+    def test_a_date_written_twice_counts_once(self):
+        """Readers count the dates (the evaluated-month postcondition) and name
+        a path after them; a repeat would fail the first late and make the
+        second read ``20260131-20260131``."""
+        assert as_date_list(["2026-01-31", "2026-02-28", " 2026-01-31"]) == [
+            "2026-01-31", "2026-02-28",
+        ]
+
     @pytest.mark.parametrize("value", [None, "", "  ", []])
     def test_nothing_configured_is_an_empty_list(self, value):
         assert as_date_list(value) == []

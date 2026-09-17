@@ -129,6 +129,8 @@ python -m recsys_tfb evaluation \
 
 `--post-training` 讓它讀步驟 3 產生的預測。
 
+也可以一次評估多個月，把新舊月份合成一份報表：`snap_date` 寫成清單或 `{start, end, step}` 區間，每個月都要在 `dataset.test_snap_dates` 裡，寫法見 [evaluation.md §3.1](../../pipelines/evaluation.md#31-評估日期與-k)。
+
 **成功的話**，這個檔案會出現：
 
 ```

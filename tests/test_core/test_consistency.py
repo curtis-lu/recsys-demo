@@ -1603,6 +1603,37 @@ class TestPostTrainingSnapDateA22:
         assert len(errs) == 1
         assert "not a readable ISO date" in errs[0]
 
+    # --- several evaluated dates (#374) ---
+
+    def test_post_training_accepts_several_configured_months(self):
+        params = _eval_params(
+            ["2026-01-31", "2026-02-28"], "2026-01-31", "2026-02-28")
+        assert post_training_snap_date_errors(params, post_training=True) == []
+
+    def test_several_months_name_only_the_ones_that_are_not_test_months(self):
+        params = _eval_params(
+            ["2026-01-31", "2026-09-30", "2026-10-31"], "2026-01-31", "2026-02-28")
+        errs = post_training_snap_date_errors(params, post_training=True)
+        assert len(errs) == 1
+        assert ("evaluation.snap_date date(s) ['2026-09-30', '2026-10-31'] "
+                "are not test months") in errs[0], errs[0]
+        assert "dataset.test_snap_dates: ['2026-01-31', '2026-02-28']" \
+            in errs[0], errs[0]
+
+    def test_several_months_with_an_unreadable_one_name_it(self):
+        params = _eval_params(["2026-01-31", "31/01/2026"], "2026-01-31")
+        errs = post_training_snap_date_errors(params, post_training=True)
+        assert len(errs) == 1
+        assert "not a readable ISO date" in errs[0]
+        assert "['31/01/2026']" in errs[0], errs[0]
+
+    def test_a_one_element_list_reads_like_the_single_date(self):
+        params = _eval_params(["2026-09-30"], "2026-01-31", "2026-02-28")
+        errs = post_training_snap_date_errors(params, post_training=True)
+        assert len(errs) == 1
+        assert errs[0].startswith(
+            "(A22) evaluation.snap_date='2026-09-30' is not a test month"), errs[0]
+
 
 # =============================================================================
 # A24 — date splits must be mutually disjoint (dataset command)

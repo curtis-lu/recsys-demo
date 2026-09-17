@@ -1,8 +1,15 @@
 evaluation:
-  # Evaluation 的 snap_date。必須是 ISO 日期格式（YYYY-MM-DD）：evaluation
+  # Evaluation 的 snap_date：一個日期，或多個日期合起來評估（所有日期的
+  # query group 進同一份指標與報表）。三種寫法：
+  #   snap_date: "2026-01-31"                          # 一個日期
+  #   snap_date: ["2026-01-31", "2026-02-28"]          # 逐一列出
+  #   snap_date: {start: "2026-01-31", end: "2026-03-31", step: month_end}
+  #                                                    # 區間，含頭含尾
+  # 區間的 step 是 day／week／month_start／month_end，起迄兩端都必須落在
+  # step 上，載入時展開成清單。日期一律 ISO 格式（YYYY-MM-DD）：evaluation
   # pipeline 會把它和 DATE-typed snap_date column cast 成字串後比較
-  # （cast 結果就是 YYYY-MM-DD）。Evaluation 輸出路徑會以
-  # .replace("-", "") 正規化為 YYYYMMDD/ 子目錄。
+  # （cast 結果就是 YYYY-MM-DD）。輸出路徑的子目錄：一個日期是 YYYYMMDD/，
+  # 多個日期是 <最早>-<最晚>/（只看起迄）。詳見 docs/pipelines/evaluation.md §3.1。
   snap_date: "2026-01-31"
 
   # 單一 k superset。此處列出的每個 k 都會被算進所有 @K metric、所有粒度
