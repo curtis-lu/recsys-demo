@@ -156,6 +156,9 @@ flowchart TB
   d_segcols --> n_baseline
   d_segcols --> n_sample
   d_segcols -- "--compare-only：讀寫 enriched 那次落地的" --> n_creport
+  d_segcols -- "只取 joined：分區指紋的一部分（#374）" --> n_agg
+  d_segcols --> n_restrict
+  d_segcols --> n_validate
 
   o_enriched --> n_metrics
   cfg_cat --> n_metrics

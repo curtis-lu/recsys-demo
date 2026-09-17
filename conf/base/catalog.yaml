@@ -417,11 +417,12 @@ training_eval_predictions:
 # 表裡是這個 model_version 評估過的所有月份，每個讀者先篩到 evaluation.snap_date
 # 的日期（一個或多個；pipelines/evaluation/steps/snap_date_scope.py）。
 # --compare-only 另由 validate_enriched_eval_predictions_present 檢查每個評估
-# 日期都有資料。
+# 日期都有資料、指紋也對（兩類問題一次列完）。
 # 框架自有欄 eval_partition_fingerprint（#374）：寫這一格的那次執行的分區內容
-# 設定（post_training／segment_columns／segment_sources，不含 snap_date）的 sha256。
+# 設定（post_training／segment_columns／segment_sources，不含 snap_date）加上
+# 那次實際 join 進去的分群欄（segment_columns.json 的 joined）的 sha256。
 # 同一個日期會被不同目錄的執行（單月、區間）寫到，讀表的 node 逐日期比對它，
-# 擋下「這格後來被另一組設定蓋掉」；B 側比較來源只丟掉這欄、不驗。
+# 擋下「這格後來被另一組設定或另一份母體蓋掉」；B 側比較來源只丟掉這欄、不驗。
 # columns: "auto" ── schema 從 DataFrame 推得；segment_sources 設定在兩次 run
 # 之間改變時，HiveTableDataset 會自動 append-only 演化（ALTER TABLE ADD
 # COLUMNS／缺欄補 NULL），不需先 drop table。

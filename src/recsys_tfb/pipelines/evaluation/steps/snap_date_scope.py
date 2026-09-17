@@ -29,7 +29,8 @@ one entry for it rather than one per reader.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple, Optional
+from functools import reduce
+from typing import TYPE_CHECKING, NamedTuple
 
 from pyspark.sql import functions as F
 
@@ -91,25 +92,70 @@ def restrict_to_eval_snap_dates(df: DataFrame, parameters: dict) -> DataFrame:
 def eval_snap_dates_without_rows(df: DataFrame, parameters: dict) -> list[str]:
     """The evaluated dates ``df`` holds no row for, in configured order.
 
-    One ``isEmpty()`` per date, each on that date's partition alone, so a
-    missing month is named even when the other months have rows: a check on the
-    restricted frame as a whole passes as soon as any one date has a row. With
-    one date this is the single ``isEmpty()`` a single-date run always paid.
+    Checked per date (:func:`_first_row_per_date`), so a missing month is named
+    even when the other months have rows: a check on the restricted frame as a
+    whole passes as soon as any one date has a row.
     """
     time_col = get_schema(parameters)["time"]
-    return [
-        date for date in eval_snap_dates(parameters)
-        if df.filter(_on_dates(time_col, [date])).isEmpty()
+    dates = eval_snap_dates(parameters)
+    found = _first_row_per_date(df, time_col, dates, F.lit(True))
+    return [date for date in dates if date not in found]
+
+
+def _first_row_per_date(
+    df: DataFrame, time_col: str, dates: list[str], value: Column,
+) -> dict:
+    """``{date: value}`` from one row of each date's rows in ``df``; a date
+    with no row is absent.
+
+    One action and one Spark job whatever the number of dates, each date a
+    one-row read of its own partition: per date ``filter → coalesce(1) →
+    limit(1)``, the branches unioned and collected once. Nothing aggregates or
+    scans a whole column. Measured on Spark 3.3.2 with AQE on (the evaluation
+    tests' local session, in-memory and partitioned-parquet sources alike,
+    counted with ``SparkContext.statusTracker``): 1 job for one date and for
+    three. Without ``coalesce(1)`` the same union took 4 jobs for three dates,
+    since each branch's ``limit`` then needs a single-partition shuffle of its
+    own; a plain ``limit(1).collect()`` on a frame with several input
+    partitions can take 2, scanning them in batches. ``coalesce(1)`` reads a
+    date's files in one task, and the limit stops that task at the first row.
+    """
+    parts = [
+        df.filter(_on_dates(time_col, [date]))
+        .select(F.lit(date).alias("date"), value.alias("value"))
+        .coalesce(1)
+        .limit(1)
+        for date in dates
     ]
+    union = reduce(lambda left, right: left.unionByName(right), parts)
+    return {row["date"]: row["value"] for row in union.collect()}
 
 
-def stamp_partition_fingerprint(df: DataFrame, parameters: dict) -> DataFrame:
-    """``df`` with :data:`PARTITION_FINGERPRINT_COLUMN` set to today's
-    :func:`partition_fingerprint` on every row. ``prepare_eval_data`` writes
-    the partition through this."""
+def stamp_partition_fingerprint(
+    df: DataFrame, parameters: dict, joined: list[str],
+) -> DataFrame:
+    """``df`` with :data:`PARTITION_FINGERPRINT_COLUMN` set to
+    :func:`partition_fingerprint` of today's settings and ``joined``, the
+    segment columns this run actually joined, on every row.
+    ``prepare_eval_data`` writes the partition through this."""
     return df.withColumn(
-        PARTITION_FINGERPRINT_COLUMN, F.lit(partition_fingerprint(parameters))
+        PARTITION_FINGERPRINT_COLUMN,
+        F.lit(partition_fingerprint(parameters, joined)),
     )
+
+
+class EvalPartitionsNotCurrentError(ValueError):
+    """Some evaluated date's partition was not written for what the reader
+    reads it as (:func:`restrict_to_current_eval_partitions`).
+
+    Carries ``dates_without_rows`` from the same check, so a caller that also
+    refuses dates without rows (the ``--compare-only`` gate) can name both in
+    one raise instead of stopping at the first kind.
+    """
+
+    def __init__(self, message: str, dates_without_rows: list[str]):
+        super().__init__(message)
+        self.dates_without_rows = dates_without_rows
 
 
 class EvalPartitions(NamedTuple):
@@ -128,21 +174,26 @@ class EvalPartitions(NamedTuple):
 
 
 def restrict_to_current_eval_partitions(
-    df: DataFrame, parameters: dict, *, written_with: Optional[dict] = None,
+    df: DataFrame, parameters: dict, segment_columns: dict, *,
+    recorded_settings: bool = False,
 ) -> EvalPartitions:
     """The evaluated dates' rows of ``enriched_eval_predictions``, after
-    checking each date's partition was written under the settings the caller
-    reads it for.
+    checking each date's partition was written for what the caller reads it
+    as.
 
-    Those settings are today's (:func:`partition_fingerprint` of
-    ``parameters``), or, when ``written_with`` is given, the ones recorded in
-    that landed ``evaluation_segment_columns`` payload
-    (:func:`recorded_partition_fingerprint`). The comparison readers pass it:
-    under ``--compare-only`` the partition is read for what an earlier standard
-    run of this directory wrote, and ``post_training`` is inert there, so
-    today's value of it says nothing about the partition (the reason that path
-    never checked the JSON against today's settings, #352 correction). In the
-    other modes the same run wrote that JSON, so the two agree.
+    ``segment_columns`` is the ``evaluation_segment_columns`` this run's
+    directory holds: the reader groups by its ``joined`` list, so a partition
+    must have been written with exactly those columns joined. The settings
+    part is today's (``parameters``), except with ``recorded_settings``, which
+    only ``--compare-only`` passes: there the settings recorded in that same
+    JSON (:func:`recorded_partition_fingerprint`). ``--post-training`` is inert
+    on that path, so today's value of it says nothing about which population an
+    earlier standard run wrote (the reason that path never checked the JSON
+    against today's settings, #352 correction). Everywhere else today's
+    settings are what the rows are read for, the ``--compare`` mode included:
+    a slice such as ``--compare X --only-node generate_comparison_report``
+    reads partitions an earlier run wrote, whose directory JSON says the same
+    old settings as they do.
 
     Pre-check (inputs), ``ValueError``, collect-all: every evaluated date whose
     rows carry another fingerprint (another run rewrote that date since, under
@@ -151,15 +202,16 @@ def restrict_to_current_eval_partitions(
     rewriting them: ``--from-node prepare_eval_data``, or under
     ``--compare-only`` a standard run of those dates first.
 
-    Cost: one Spark action (one ``collect``). With one date, ``limit(1)`` on
-    that partition, the size of the ``isEmpty()`` it stands in for: a partition
-    is written by one dynamic overwrite, so every row in it carries the same
-    fingerprint and one row answers for all (the premise this check rests on;
-    rows put into a partition any other way can hide a second value from it).
-    With several dates, the distinct ``(date, fingerprint)`` pairs of all of
-    them in one collect, not one action per date: a scan of that one column
-    over those partitions, where a partition showing more than one value is
-    reported as written under other settings.
+    Cost: every reader of the table pays one extra small action — one Spark
+    job reading one row per evaluated date (:func:`_first_row_per_date`); the
+    number of dates only adds branches to that action, and no column is
+    scanned whole. The ``--compare-only`` gate's own per-date emptiness check
+    comes out of the same action (``dates_without_rows``).
+
+    The premise, the same for one date and for several: a partition is written
+    by one dynamic overwrite, so every row in it carries the same fingerprint
+    and one row answers for all of them. Rows put into a partition any other
+    way can hide a second value from this check.
 
     B side of a comparison: not checked here. A compared model's table carries
     its own run's settings, so ``steps/compare_sources.py`` only drops the
@@ -167,12 +219,23 @@ def restrict_to_current_eval_partitions(
     """
     time_col = get_schema(parameters)["time"]
     dates = eval_snap_dates(parameters)
-    if written_with is None:
-        current, against = partition_fingerprint(parameters), "the current settings"
+    joined = (segment_columns.get("joined")
+              if isinstance(segment_columns, dict) else None)
+    if not isinstance(joined, list):
+        raise ValueError(
+            "evaluation_segment_columns (segment_columns.json) has no 'joined' "
+            "list, so which segment columns its partitions hold is unknown. "
+            "Re-run with --from-node prepare_eval_data."
+        )
+    if not recorded_settings:
+        current = partition_fingerprint(parameters, joined)
+        against = ("the current settings and the segment columns this run's "
+                   "directory joined")
     else:
-        current = recorded_partition_fingerprint(written_with)
-        against = ("the settings recorded in evaluation_segment_columns "
-                   "(segment_columns.json) of this run's directory")
+        current = recorded_partition_fingerprint(segment_columns)
+        against = ("the settings and segment columns recorded in "
+                   "evaluation_segment_columns (segment_columns.json) of this "
+                   "run's directory")
         if current is None:
             raise ValueError(
                 "evaluation_segment_columns (segment_columns.json) has no "
@@ -180,59 +243,45 @@ def restrict_to_current_eval_partitions(
                 "written under are unknown: written before fingerprints "
                 "existed. Re-run the standard evaluation of these dates."
             )
-    kept = df.filter(_on_dates(time_col, dates))
-    fingerprints = _partition_fingerprints(kept, time_col, dates)
+    fingerprints = _first_row_per_date(
+        df, time_col, dates,
+        F.col(PARTITION_FINGERPRINT_COLUMN)
+        if PARTITION_FINGERPRINT_COLUMN in df.columns
+        else F.lit(None).cast("string"),
+    )
 
     stale = []
     for date in dates:
-        found = fingerprints.get(date)
-        if found is None:
+        if date not in fingerprints:
             continue
-        if any(value is None for value in found):
+        found = fingerprints[date]
+        if found is None:
             stale.append(
                 f"  - {date}: written before partitions carried a settings "
                 "fingerprint (#374)"
             )
-        elif set(found) != {current}:
+        elif found != current:
             stale.append(
                 f"  - {date}: written under other settings (the settings "
                 "changed since, or a later run rewrote this date: one over "
-                "other dates that include it, or in the other run mode)"
+                "other dates that include it, in the other run mode, or when "
+                "the population table had other segment columns)"
             )
+    dates_without_rows = [d for d in dates if d not in fingerprints]
     if stale:
-        raise ValueError(
+        message = (
             "enriched_eval_predictions holds evaluated date(s) not written under "
-            f"{against} ({', '.join(PARTITION_FINGERPRINT_KEYS)}); reading "
-            "them would evaluate rows those settings do not make:\n"
+            f"{against} ({', '.join(PARTITION_FINGERPRINT_KEYS)}, joined "
+            f"{joined}); reading them would evaluate rows those settings do "
+            "not make:\n"
             + "\n".join(stale)
             + "\nRe-run with --from-node prepare_eval_data, which rewrites them "
             "(under --compare-only, which has no prepare_eval_data, re-run the "
             "standard evaluation of these dates first)."
         )
+        raise EvalPartitionsNotCurrentError(message, dates_without_rows)
     return EvalPartitions(
-        frame=kept.drop(PARTITION_FINGERPRINT_COLUMN),
-        dates_without_rows=[d for d in dates if d not in fingerprints],
+        frame=df.filter(_on_dates(time_col, dates))
+        .drop(PARTITION_FINGERPRINT_COLUMN),
+        dates_without_rows=dates_without_rows,
     )
-
-
-def _partition_fingerprints(
-    kept: DataFrame, time_col: str, dates: list[str],
-) -> dict[str, list[Optional[str]]]:
-    """``{date: fingerprints seen}`` for the evaluated dates ``kept`` has rows
-    for, in one Spark job (see :func:`restrict_to_current_eval_partitions`)."""
-    value = (
-        F.col(PARTITION_FINGERPRINT_COLUMN)
-        if PARTITION_FINGERPRINT_COLUMN in kept.columns
-        else F.lit(None).cast("string")
-    ).alias("fingerprint")
-    if len(dates) == 1:
-        rows = kept.select(value).limit(1).collect()
-        return {dates[0]: [rows[0]["fingerprint"]]} if rows else {}
-    found: dict[str, list[Optional[str]]] = {}
-    for row in (
-        kept.select(F.col(time_col).cast("string").alias("date"), value)
-        .distinct()
-        .collect()
-    ):
-        found.setdefault(row["date"], []).append(row["fingerprint"])
-    return found

@@ -195,7 +195,8 @@ PARTITION_FINGERPRINT_KEYS: tuple[str, ...] = tuple(
 )
 
 #: The framework's own column on every ``enriched_eval_predictions`` row:
-#: :func:`partition_fingerprint` of the run that wrote the row's partition.
+#: :func:`partition_fingerprint` of the run that wrote the row's partition
+#: (these settings plus the segment columns that run actually joined).
 #:
 #: Why the partition carries it, and the ``evaluation_segment_columns`` JSON's
 #: fingerprint no longer speaks for the partition (#374): that JSON sits in the
@@ -282,32 +283,56 @@ def fingerprint(parameters: dict, extra_keys: Sequence[str] = ()) -> dict:
     return {"sha256": _sha256(values), "values": values}
 
 
-def partition_fingerprint(parameters: dict) -> str:
-    """The sha256 over :data:`PARTITION_FINGERPRINT_KEYS`, stored on every row.
+#: Where :func:`partition_fingerprint` hashes the segment columns actually
+#: joined, next to the settings' dotted paths. Named after the landed artifact
+#: field it mirrors (``evaluation_segment_columns``' ``joined``), which no
+#: config path can spell.
+_JOINED = "evaluation_segment_columns.joined"
+
+
+def partition_fingerprint(parameters: dict, joined: Sequence[str]) -> str:
+    """The sha256 stored on every row of a partition ``prepare_eval_data``
+    writes: :data:`PARTITION_FINGERPRINT_KEYS` plus ``joined``, the segment
+    columns that run actually joined.
+
+    Why ``joined`` is in it: the settings do not say what the rows hold. A
+    segment column the population table lacks is skipped, not raised, so two
+    runs with identical settings write different rows when the population
+    changed between them. January–February joined ``tier``; the population
+    then lost it and February was re-run alone (``tier`` NULL in the
+    partition, that run's JSON ``joined: []``); resuming January–February, its
+    own JSON still says ``joined: [tier]`` and every setting matches, so all of
+    February would fall into the unmatched segment, exit code 0. With the
+    joined list hashed in, a reader expecting ``[tier]`` refuses February.
+    Same settings and the same population still give the same hash on every
+    date, whichever run wrote it.
 
     Same normalisation as :func:`fingerprint`. Only the hash is stored: it
-    repeats on every row, and a mismatch is fixed the same way whichever key
+    repeats on every row, and a mismatch is fixed the same way whichever part
     moved (``--from-node prepare_eval_data``).
     """
-    return _sha256(_declared_values(parameters, PARTITION_FINGERPRINT_KEYS))
+    return _sha256({**_declared_values(parameters, PARTITION_FINGERPRINT_KEYS),
+                    _JOINED: list(joined)})
 
 
 def recorded_partition_fingerprint(payload: Any) -> Optional[str]:
-    """The :func:`partition_fingerprint` of the run that wrote ``payload``, a
-    landed artifact carrying ``config_fingerprint``; ``None`` if it has none.
+    """The :func:`partition_fingerprint` the run that landed ``payload`` (an
+    ``evaluation_segment_columns`` JSON) stamped on its partitions; ``None`` if
+    ``payload`` has no ``config_fingerprint`` or no ``joined`` list.
 
     Taken from the recorded values, which :func:`fingerprint` normalised the
-    same way :func:`partition_fingerprint` normalises live parameters, so a
-    run's ``evaluation_segment_columns`` JSON yields exactly the hash that run
-    stamped on its partitions. For readers that must compare a partition with
-    the run that wrote a directory rather than with today's parameters
+    same way :func:`partition_fingerprint` normalises live parameters, plus the
+    recorded ``joined``. For readers that must compare a partition with the
+    run that wrote a directory rather than with today's parameters
     (``--compare-only``, where ``post_training`` is inert).
     """
     stored = payload.get("config_fingerprint") if isinstance(payload, dict) else None
-    if not (isinstance(stored, dict) and isinstance(stored.get("values"), dict)):
+    if not (isinstance(stored, dict) and isinstance(stored.get("values"), dict)
+            and isinstance(payload.get("joined"), list)):
         return None
-    return _sha256({path: value for path, value in stored["values"].items()
-                    if path in PARTITION_FINGERPRINT_KEYS})
+    return _sha256({**{path: value for path, value in stored["values"].items()
+                       if path in PARTITION_FINGERPRINT_KEYS},
+                    _JOINED: list(payload["joined"])})
 
 
 def _declared_values(parameters: dict, paths: Iterable[str]) -> dict[str, Any]:

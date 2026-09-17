@@ -81,7 +81,9 @@ def _base_params_for_validator():
 
 def _landed_segments(params):
     """``evaluation_segment_columns`` as a standard run under ``params`` lands
-    it: the A-side readers take the partition settings it records (#374)."""
+    it, no segment column joined: the A-side readers take its ``joined`` list
+    (and, under --compare-only, the settings it records) as part of the
+    partition fingerprint to expect (#374)."""
     from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
         fingerprint,
     )
@@ -91,12 +93,13 @@ def _landed_segments(params):
 
 
 def _as_written(df, params):
-    """``df`` as the partition ``prepare_eval_data`` under ``params`` writes."""
+    """``df`` as the partition ``prepare_eval_data`` under ``params`` writes,
+    no segment column joined."""
     from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
         stamp_partition_fingerprint,
     )
 
-    return stamp_partition_fingerprint(df, params)
+    return stamp_partition_fingerprint(df, params, [])
 
 
 def test_enriched_validator_raises_when_partition_empty(spark):
@@ -211,6 +214,40 @@ def test_enriched_validator_refuses_a_partition_another_run_rewrote(spark):
             _landed_segments(monitoring), params)
 
 
+def test_enriched_validator_names_every_problem_in_one_raise(spark):
+    """#374 review: three evaluated dates, three different problems — January
+    rewritten by another run, February without rows, March written before
+    partitions carried a fingerprint. One raise names all three, so a re-run
+    that fixes one does not stop at the next."""
+    from pyspark.sql import functions as F
+
+    from recsys_tfb.pipelines.evaluation.nodes import (
+        validate_enriched_eval_predictions_present,
+    )
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+        PARTITION_FINGERPRINT_COLUMN,
+    )
+
+    params = _base_params_for_validator()
+    params["evaluation"]["snap_date"] = ["2026-01-31", "2026-02-28", "2026-03-31"]
+    rows = [("c1", "2026-01-31", "p1", 0.9, 1, 1),
+            ("c1", "2026-03-31", "p1", 0.9, 1, 1)]
+    df = spark.createDataFrame(
+        rows, ["cust_id", "snap_date", "prod_name", "score", "rank", "label"])
+    table = _as_written(df, {**params, "post_training": True}).withColumn(
+        PARTITION_FINGERPRINT_COLUMN,
+        F.when(F.col("snap_date") == "2026-03-31", F.lit(None).cast("string"))
+        .otherwise(F.col(PARTITION_FINGERPRINT_COLUMN)))
+    with pytest.raises(ValueError) as excinfo:
+        validate_enriched_eval_predictions_present(
+            table, _landed_segments(params), params)
+    message = str(excinfo.value)
+    assert "2026-01-31: written under other settings" in message, message
+    assert "no partition for evaluation.snap_date date(s) ['2026-02-28']" \
+        in message, message
+    assert "2026-03-31: written before" in message, message
+
+
 def test_compare_only_reads_a_post_training_partition_without_the_flag(spark):
     """--post-training is inert under --compare-only, so today's value of it
     says nothing about the partition: a post-training run's partition, read
@@ -247,6 +284,73 @@ def test_restrict_to_common_refuses_side_a_another_run_rewrote(
         restrict_to_common(a, b, _landed_segments(params), params)
 
 
+def _wired_node(name, **pipeline_kwargs):
+    return next(n for n in create_pipeline(**pipeline_kwargs).nodes
+                if n.name == name)
+
+
+def _call_wired(node, **datasets):
+    """``node`` called the way the Runner calls it: inputs by position, each
+    taken from ``datasets`` by the catalog name the pipeline wires."""
+    return node.func(*[datasets[name] for name in node.inputs])
+
+
+_COMPARE_SOURCE = {"kind": "hive", "model_version": "v1"}
+
+
+def _compare_sides(spark, params, written_under):
+    rows = [("2026-01-31", "b1", "c1", "p1", 0.9, 1),
+            ("2026-01-31", "b1", "c1", "p2", 0.1, 0)]
+    return dict(
+        enriched_eval_predictions=_as_written(
+            spark.createDataFrame(rows, _LABELED_PREDS_DDL), written_under),
+        compare_predictions_raw=spark.createDataFrame(
+            [r[:5] for r in rows], _PREDS_DDL),
+        evaluation_segment_columns=_landed_segments(written_under),
+        parameters=params,
+    )
+
+
+@pytest.mark.parametrize("change", ["segment_columns", "run_mode"])
+def test_compare_mode_resume_refuses_a_partition_written_under_other_settings(
+    spark, two_column_entity_params, change,
+):
+    """#374 review: ``--compare X --only-node generate_comparison_report`` runs
+    only load_compare_predictions, restrict_to_common and the report. After
+    the segment settings changed, or the run mode switched, the partition and
+    that directory's JSON both still say the old settings; outside
+    --compare-only, today's settings are the ones to read for, so
+    restrict_to_common must refuse the partition."""
+    before = {**two_column_entity_params,
+              "evaluation": {"snap_date": "2026-01-31",
+                             "segment_columns": ["tier"]},
+              "post_training": False}
+    now = {**before, "evaluation": dict(before["evaluation"])}
+    if change == "segment_columns":
+        now["evaluation"]["segment_columns"] = ["region"]
+    else:
+        now["post_training"] = True
+    node = _wired_node("restrict_to_common", compare_source=_COMPARE_SOURCE)
+    with pytest.raises(ValueError,
+                       match=r"2026-01-31: written under other settings"):
+        _call_wired(node, **_compare_sides(spark, now, before))
+
+
+def test_compare_only_restriction_reads_a_post_training_partition_without_the_flag(
+    spark, two_column_entity_params,
+):
+    """The --compare-only wiring keeps comparing with what the directory's
+    JSON records: --post-training is inert there."""
+    post_training = {**two_column_entity_params,
+                     "evaluation": {"snap_date": "2026-01-31"},
+                     "post_training": True}
+    node = _wired_node("restrict_to_common", compare_only=True,
+                       compare_source=_COMPARE_SOURCE)
+    a_common, _b, _coverage = _call_wired(node, **_compare_sides(
+        spark, {**post_training, "post_training": False}, post_training))
+    assert a_common.count() == 2
+
+
 def test_a_rewritten_hive_partition_is_refused_on_read(spark):
     """The premises, on a real table: the column is added by schema evolution
     (older partitions read back NULL), and a dynamic overwrite of one month
@@ -255,9 +359,6 @@ def test_a_rewritten_hive_partition_is_refused_on_read(spark):
 
     from recsys_tfb.io.hive_table_dataset import HiveTableDataset
     from recsys_tfb.pipelines.evaluation.nodes import compute_report_aggregates
-    from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
-        stamp_partition_fingerprint,
-    )
 
     test_db, test_table = "test_partition_fingerprint", "enriched_eval_predictions"
 
@@ -285,23 +386,25 @@ def test_a_rewritten_hive_partition_is_refused_on_read(spark):
             partition_cols=[{"name": "snap_date", "type": "STRING"}],
             external=False,
         )
+        segments = _landed_segments(params)
         ds.save(_month("2026-01-31"))                        # before #374
-        ds.save(stamp_partition_fingerprint(_month("2026-02-28"), params))
+        ds.save(_as_written(_month("2026-02-28"), params))
         with pytest.raises(ValueError) as excinfo:
-            compute_report_aggregates(ds.load(), params)
+            compute_report_aggregates(ds.load(), segments, params)
         message = str(excinfo.value)
         assert "2026-01-31: written before" in message, message
         assert "2026-02-28" not in message, message
 
-        ds.save(stamp_partition_fingerprint(_month("2026-01-31"), other))
+        ds.save(_as_written(_month("2026-01-31"), other))
         with pytest.raises(ValueError) as excinfo:
-            compute_report_aggregates(ds.load(), params)
+            compute_report_aggregates(ds.load(), segments, params)
         message = str(excinfo.value)
         assert "2026-01-31: written under other settings" in message, message
         assert "2026-02-28" not in message, message
 
-        ds.save(stamp_partition_fingerprint(_month("2026-01-31"), params))
-        assert compute_report_aggregates(ds.load(), params)["enabled"] is True
+        ds.save(_as_written(_month("2026-01-31"), params))
+        assert compute_report_aggregates(
+            ds.load(), segments, params)["enabled"] is True
     finally:
         _clean()
 
@@ -394,7 +497,7 @@ def month_restriction_off(monkeypatch):
 
     monkeypatch.setattr(
         nodes, "restrict_to_current_eval_partitions",
-        lambda df, parameters, written_with=None: EvalPartitions(df, []))
+        lambda df, parameters, *_, **__: EvalPartitions(df, []))
 
 
 def test_side_a_is_restricted_to_the_evaluated_month(

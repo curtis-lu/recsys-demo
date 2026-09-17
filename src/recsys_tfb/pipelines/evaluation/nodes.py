@@ -1,10 +1,11 @@
 """Evaluation pipeline nodes, for every run mode ``pipeline.py`` wires
 (monitoring, ``--post-training``, ``--compare``, ``--compare-only``).
 
-Every node body lives in this module. Three kinds are built by factories here
+Every node body lives in this module. Four kinds are built by factories here
 rather than defined at top level: ``prepare_eval_data``
 (``make_prepare_eval_data_node``), ``draw_diagnosis_sample_node``
-(``make_draw_diagnosis_sample_node``) and one ``diagnose_<name>`` per
+(``make_draw_diagnosis_sample_node``), ``restrict_to_common``
+(``make_restrict_to_common_node``, #374) and one ``diagnose_<name>`` per
 ``contract.DIAGNOSES`` entry (``make_diagnosis_node``). The architecture
 audit's AST scan reads top-level definitions only, so it does not see those
 nodes' definitions (ADR-0019 decision 2).
@@ -68,6 +69,7 @@ from recsys_tfb.pipelines.evaluation.steps.segments import (
     join_segment_sources,
 )
 from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+    EvalPartitionsNotCurrentError,
     eval_snap_dates,
     eval_snap_dates_without_rows,
     restrict_to_current_eval_partitions,
@@ -449,10 +451,13 @@ def make_prepare_eval_data_node(population_name: str):
         }
 
         # Decision — every row carries the settings its partition is written
-        # under (#374). One date's partition is written by runs over different
-        # date sets, whose JSON above lands in different directories, so only
-        # the rows can tell a later reader which run wrote them last.
-        eval_predictions = stamp_partition_fingerprint(eval_predictions, parameters)
+        # under, and the segment columns actually joined (#374). One date's
+        # partition is written by runs over different date sets, whose JSON
+        # above lands in different directories, so only the rows can tell a
+        # later reader which run wrote them last; and a column the population
+        # lacked is skipped, so the settings alone do not say what was joined.
+        eval_predictions = stamp_partition_fingerprint(
+            eval_predictions, parameters, joined)
 
         logger.info("Eval data prepared via Spark join")
         return eval_predictions, segments
@@ -515,7 +520,7 @@ def make_draw_diagnosis_sample_node(registry_diagnoses_wired: bool):
         # model_version was evaluated on, each rewritten by whichever run
         # covered it last.
         eval_predictions = restrict_to_current_eval_partitions(
-            eval_predictions, parameters).frame
+            eval_predictions, parameters, segment_columns).frame
 
         sample_pdf, sample_meta = draw_diagnosis_sample(
             eval_predictions, parameters,
@@ -580,7 +585,7 @@ def compute_metrics(
     # under today's settings: the table holds every month this model_version
     # was evaluated on.
     eval_predictions = restrict_to_current_eval_partitions(
-        eval_predictions, parameters).frame
+        eval_predictions, parameters, segment_columns).frame
 
     result = compute_all_metrics(
         eval_predictions, parameters,
@@ -666,7 +671,7 @@ def compute_baseline_metrics(
     # evaluated on, and the lookback windows below are anchored on the months
     # found in the frame.
     eval_predictions = restrict_to_current_eval_partitions(
-        eval_predictions, parameters).frame
+        eval_predictions, parameters, segment_columns).frame
 
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -1134,6 +1139,7 @@ def no_diagnosis_pages(parameters: dict) -> list[str]:
 
 def compute_report_aggregates(
     eval_predictions: SparkDataFrame,
+    segment_columns: dict,
     parameters: dict,
 ) -> dict:
     """主報表診斷區的 Spark 聚合，落地成 JSON。
@@ -1146,12 +1152,13 @@ def compute_report_aggregates(
     Both the stub and the full result carry ``config_fingerprint``: the JSON
     lands, and ``generate_report`` refuses one computed under other settings.
 
-    Reads ``enriched_eval_predictions`` but does not check the
-    ``segment_columns.json`` fingerprint: it takes no segment input. Since
-    #374 it checks each evaluated date's partition fingerprint instead
-    (``restrict_to_current_eval_partitions``), which closes the hole ADR-0020
-    bug 6 (#352 correction) had accepted for a slice running only this node on
-    a stale partition.
+    Reads ``enriched_eval_predictions`` but does not compare the
+    ``segment_columns.json`` fingerprint with today's settings: it does not
+    segment. It takes that JSON (#374) for its ``joined`` list only, which with
+    today's settings makes the partition fingerprint each evaluated date must
+    carry (``restrict_to_current_eval_partitions``). That closes the hole
+    ADR-0020 bug 6 (#352 correction) had accepted for a slice running only this
+    node on a stale partition.
     """
     eval_params = parameters.get("evaluation", {}) or {}
     report_cfg = eval_params.get("report", {}) or {}
@@ -1165,7 +1172,7 @@ def compute_report_aggregates(
     # under today's settings: the table holds every month this model_version
     # was evaluated on.
     eval_predictions = restrict_to_current_eval_partitions(
-        eval_predictions, parameters).frame
+        eval_predictions, parameters, segment_columns).frame
 
     schema = get_schema(parameters)
     item_col, score_col = schema["item"], schema["score"]
@@ -1251,13 +1258,58 @@ def load_compare_predictions(parameters: dict) -> SparkDataFrame:
     return _load_compare(parameters, spark)
 
 
-def restrict_to_common(
+def make_restrict_to_common_node(compare_only: bool):
+    """Build ``restrict_to_common`` for ``--compare`` or ``--compare-only``.
+
+    The mode decides which settings side A's partitions are checked against
+    (``restrict_to_current_eval_partitions``, #374), so ``create_pipeline``
+    passes it in, as it does for ``make_prepare_eval_data_node``:
+
+    * ``--compare``: today's settings, like every other reader. The same run
+      normally wrote the partitions, but a slice does not:
+      ``--compare X --only-node generate_comparison_report`` runs only
+      ``load_compare_predictions``, this node and the report, so after a
+      segment setting changed or the run mode switched, the partitions and
+      the directory's ``segment_columns.json`` both still say the old
+      settings. Compared with that JSON, the old rows would pass.
+    * ``--compare-only``: the settings that JSON records. ``--post-training``
+      is inert on that path, so today's value of it says nothing about which
+      population an earlier standard run wrote (ADR-0020 bug 6, #352
+      correction); compared with today's settings, a post-training run's
+      partitions would be refused whenever the flag is left off.
+    """
+    def restrict_to_common(
+        eval_predictions: SparkDataFrame,
+        compare_predictions_raw: SparkDataFrame,
+        segment_columns: dict,
+        parameters: dict,
+    ) -> tuple[SparkDataFrame, SparkDataFrame, dict]:
+        """Keep side A's evaluated dates, after checking its partitions (see
+        ``make_restrict_to_common_node`` for against which settings), then
+        restrict both sides to their common universe (``_restrict_to_common``).
+        Side B is the compared run's own table and is not checked."""
+        # Decision — compare the evaluated dates only, from partitions written
+        # under the settings this mode reads them for: the table holds every
+        # month this model_version was evaluated on.
+        eval_predictions = restrict_to_current_eval_partitions(
+            eval_predictions, parameters, segment_columns,
+            recorded_settings=compare_only,
+        ).frame
+        return _restrict_to_common(
+            eval_predictions, compare_predictions_raw, parameters)
+
+    return restrict_to_common
+
+
+def _restrict_to_common(
     eval_predictions: SparkDataFrame,
     compare_predictions_raw: SparkDataFrame,
-    segment_columns: dict,
     parameters: dict,
 ) -> tuple[SparkDataFrame, SparkDataFrame, dict]:
-    """Pipeline shim: call the pure restrict function + capture coverage dict.
+    """Call the pure restrict function + capture coverage dict.
+
+    ``eval_predictions`` is already kept to the evaluated dates and checked
+    (``make_restrict_to_common_node``).
 
     Returns ``(a_common, b_common, coverage_partial)`` — coverage_partial
     carries full-universe sizes, the common sizes and dropped item lists so
@@ -1274,26 +1326,11 @@ def restrict_to_common(
     query groups, which matches ``NULL == NULL``, while the restriction's
     equi-join drops null keys — so it counted groups no metric ever saw.
 
-    ``eval_predictions`` is ``enriched_eval_predictions`` read back from Hive,
-    every month this ``model_version`` was evaluated on; the node keeps the
-    evaluated dates before anything else (ADR-0018 decision 1). It does not
-    check the ``segment_columns.json`` fingerprint against today's settings:
-    under ``--compare`` the same run's segmenting readers do, and
-    ``--compare-only`` is left unchecked on purpose (ADR-0020 bug 6, #352
+    The node does not check the ``segment_columns.json`` fingerprint against
+    today's settings: under ``--compare`` the same run's segmenting readers do,
+    and ``--compare-only`` is left unchecked on purpose (ADR-0020 bug 6, #352
     correction: ``post_training`` is inert there).
-
-    Pre-check (inputs): each evaluated date's partition was written under the
-    settings ``segment_columns`` (that JSON, landed by the run that wrote this
-    directory) records, not today's, for the same reason
-    (``restrict_to_current_eval_partitions``, #374). Side B is the compared
-    run's own table and is not checked.
     """
-    # Decision — compare the evaluated dates only, from partitions written by
-    # the run this directory's segment_columns.json records: the table holds
-    # every month this model_version was evaluated on.
-    eval_predictions = restrict_to_current_eval_partitions(
-        eval_predictions, parameters, written_with=segment_columns).frame
-
     schema = get_schema(parameters)
     time_col = schema["time"]
     query_group_cols = [time_col, *schema["entity"]]
@@ -1346,6 +1383,12 @@ def restrict_to_common(
     return a_common, b_common, coverage_partial
 
 
+#: The ``--compare`` shape, checked against today's settings. Kept as a
+#: module-level name for callers that exercise the node outside
+#: ``create_pipeline``.
+restrict_to_common = make_restrict_to_common_node(compare_only=False)
+
+
 def generate_comparison_report(
     eval_predictions_common: SparkDataFrame,
     compare_predictions_common: SparkDataFrame,
@@ -1396,11 +1439,15 @@ def validate_enriched_eval_predictions_present(
     first. Per date: with several dates configured, the kept rows are not
     empty as soon as one month has rows (#374).
 
-    It also refuses (``ValueError``) a date whose partition was rewritten
-    since by a run under other settings than ``segment_columns`` records, the
-    JSON the run that wrote this directory landed; why that JSON and not
-    today's settings, see ``restrict_to_common``. Both answers come from one
-    Spark job (``restrict_to_current_eval_partitions``).
+    It also refuses a date whose partition was rewritten since by a run under
+    other settings, or with other segment columns joined, than
+    ``segment_columns`` records (the JSON the run that wrote this directory
+    landed; why that JSON and not today's settings, see
+    ``make_restrict_to_common_node``), and a date whose partition carries no
+    fingerprint. Both answers come from one Spark job
+    (``restrict_to_current_eval_partitions``), and every problem of every kind
+    is named in one ``DataConsistencyError``: dates without rows first, then
+    the partitions not written for this directory.
 
     Slicing never pulls a zero-output node back in (R3 in
     ``docs/agents/architecture-constraints.md``), so ``--compare-only
@@ -1419,19 +1466,31 @@ def validate_enriched_eval_predictions_present(
     mv = parameters.get("model_version", "unknown")
     hive_db = (parameters.get("hive") or {}).get("db", "ml_recsys")
 
-    missing = restrict_to_current_eval_partitions(
-        enriched_eval_predictions, parameters, written_with=segment_columns,
-    ).dates_without_rows
+    # Collect-all: a partition not written for this directory must not hide
+    # the dates without rows from the same check, nor the other way round.
+    not_current = None
+    try:
+        missing = restrict_to_current_eval_partitions(
+            enriched_eval_predictions, parameters, segment_columns,
+            recorded_settings=True,
+        ).dates_without_rows
+    except EvalPartitionsNotCurrentError as error:
+        not_current, missing = error, error.dates_without_rows
+    problems = []
     if missing:
         asked = (
             f"evaluation.snap_date={missing[0]!r}"
             if len(eval_snap_dates(parameters)) == 1 else
             f"evaluation.snap_date date(s) {missing}"
         )
-        raise DataConsistencyError(
+        problems.append(
             f"{hive_db}.enriched_eval_predictions has no partition "
             f"for {asked} "
             f"model_version={mv!r}. "
             "Run `python -m recsys_tfb evaluation` (with or without "
             "--compare) first to populate the partition."
         )
+    if not_current is not None:
+        problems.append(str(not_current))
+    if problems:
+        raise DataConsistencyError("\n".join(problems)) from not_current

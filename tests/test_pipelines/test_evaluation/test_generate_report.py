@@ -58,7 +58,14 @@ def _eval_pred(spark):
          ("20240331", "c2", "A", 0.2, 0, 2),
          ("20240331", "c2", "B", 0.8, 1, 1)],
         schema=["snap_date", "cust_id", "prod_name", "score", "label", "rank"],
-    ), _params())
+    ), _params(), [])
+
+
+def _landed_segments(params):
+    """``evaluation_segment_columns`` as a run under ``params`` lands it, no
+    segment column joined."""
+    return {"joined": [], "sources": {}, "missing": {},
+            "config_fingerprint": fingerprint(params)}
 
 
 def _metrics():
@@ -84,7 +91,8 @@ def _landed_metrics(params):
 
 def test_generate_report_html_no_diagnostics(spark):
     params = _params(False)
-    aggregates = compute_report_aggregates(_eval_pred(spark), params)
+    aggregates = compute_report_aggregates(
+        _eval_pred(spark), _landed_segments(params), params)
     html = generate_report(_landed_metrics(params), params,
                             _unread_stub(params), _unread_stub(params),
                             aggregates, None)
@@ -97,7 +105,8 @@ def test_generate_report_html_no_diagnostics(spark):
 
 def test_generate_report_with_diagnostics(spark):
     params = _params(True)
-    aggregates = compute_report_aggregates(_eval_pred(spark), params)
+    aggregates = compute_report_aggregates(
+        _eval_pred(spark), _landed_segments(params), params)
     assert aggregates["config_fingerprint"] == fingerprint(params)
     html = generate_report(_landed_metrics(params), params,
                             _unread_stub(params), _unread_stub(params),
@@ -126,7 +135,7 @@ def _eval_pred_n(spark, n_customers):
     return stamp_partition_fingerprint(spark.createDataFrame(
         rows,
         schema=["snap_date", "cust_id", "prod_name", "score", "label", "rank"],
-    ), _params())
+    ), _params(), [])
 
 
 def test_diagnostics_report_size_bounded_by_row_count(spark):
@@ -141,8 +150,10 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
     yields a bounded report.
     """
     params = _params_diag_full()
-    small_aggregates = compute_report_aggregates(_eval_pred_n(spark, 100), params)
-    large_aggregates = compute_report_aggregates(_eval_pred_n(spark, 3000), params)
+    small_aggregates = compute_report_aggregates(
+        _eval_pred_n(spark, 100), _landed_segments(params), params)
+    large_aggregates = compute_report_aggregates(
+        _eval_pred_n(spark, 3000), _landed_segments(params), params)
     small = generate_report(
         _landed_metrics(params), params, _unread_stub(params),
         _unread_stub(params), small_aggregates, None,
@@ -648,7 +659,7 @@ def _landed_inputs(params):
 
     return (compute_baseline_metrics(None, None, None, params),
             compute_metric_ci(None, params),
-            compute_report_aggregates(None, params))
+            compute_report_aggregates(None, None, params))
 
 
 def test_generate_report_refuses_a_computed_setting_flipped_after_the_run():

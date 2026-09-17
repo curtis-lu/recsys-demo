@@ -147,7 +147,7 @@ class TestRegistryDiagnosesFollowTheMode:
             ) as spy, patch(
                 "recsys_tfb.pipelines.evaluation.nodes."
                 "restrict_to_current_eval_partitions",
-                lambda df, parameters: EvalPartitions(df, []),
+                lambda df, parameters, *_, **__: EvalPartitions(df, []),
             ):
                 result = node.func(None, segments, params)
             outcome[label] = {"draws": spy.call_count, "sample": result is not None}
@@ -443,7 +443,7 @@ def _restricts_the_wrong_frame(other, enriched_eval_predictions, parameters):
         restrict_to_current_eval_partitions,
     )
 
-    other = restrict_to_current_eval_partitions(other, parameters).frame
+    other = restrict_to_current_eval_partitions(other, parameters, {}).frame
     return enriched_eval_predictions.count() + other.count()
 
 
@@ -452,7 +452,7 @@ def _discards_the_restriction(enriched_eval_predictions, parameters):
         restrict_to_current_eval_partitions,
     )
 
-    restrict_to_current_eval_partitions(enriched_eval_predictions, parameters)
+    restrict_to_current_eval_partitions(enriched_eval_predictions, parameters, {})
     return enriched_eval_predictions.count()
 
 
