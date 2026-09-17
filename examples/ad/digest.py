@@ -140,9 +140,12 @@ def build(model_version: str) -> dict:
             "inference": {
                 "ranked_predictions": table_fingerprint(spark, tables["ranked_predictions"], mv_filter),
             },
-            # metrics／baseline_metrics／segment_columns／report_aggregates 與 diagnosis/ 底下的診斷
+            # metrics／baseline_metrics／segment_columns／report_aggregates 與 diagnosis/ 底下的診斷。
+            # manifest.json 不收：它是執行紀錄（created_at、run_id、git_commit），每次跑都不同，
+            # 不是計算結果（2026-09-17 連跑兩次，61 個欄位只有它不同）
             "evaluation": {
-                str(p.relative_to(eval_dir)): file_fingerprint(p) for p in sorted(eval_dir.rglob("*.json"))
+                str(p.relative_to(eval_dir)): file_fingerprint(p)
+                for p in sorted(eval_dir.rglob("*.json")) if p.name != "manifest.json"
             },
         }
     finally:

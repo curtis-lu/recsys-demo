@@ -1,9 +1,9 @@
 {
   "measured": {
     "date": "2026-09-17",
-    "code_commit": "13e1ad5",
-    "how": "run_e2e.sh 以同一份程式碼連跑兩次，兩份 digest 45 個欄位逐一相同",
-    "environment": "macOS, 8 cores, local[*], PySpark 3.3.2, LightGBM 4.6.0; load average 2.5-5.5"
+    "code_commit": "7f367b1（digest 排除 manifest.json 的改動之後重算，管線產物未重跑）",
+    "how": "run_e2e.sh 以同一份程式碼連跑兩次，61 個欄位只有 evaluation/manifest.json 不同；digest 改為不收 manifest.json 後，以第二次的產物重算，其餘欄位與兩次連跑逐一相同",
+    "environment": "macOS, 8 cores, local[*], PySpark 3.3.2, LightGBM 4.6.0; load average 2.3-8.2"
   },
   "noisy": {},
   "versions": {
@@ -15,7 +15,7 @@
   "source_etl": {
     "feature_table": {
       "rows": 12000,
-      "hash": "-2048128528437382044834",
+      "hash": "291454359920051241764",
       "columns": [
         "age_band",
         "device_type",
@@ -36,8 +36,8 @@
       ]
     },
     "label_table": {
-      "rows": 16348,
-      "hash": "-595694036684707639110",
+      "rows": 29433,
+      "hash": "-113419326420292868696",
       "columns": [
         "ad_creative",
         "label",
@@ -47,8 +47,8 @@
       ]
     },
     "sample_pool": {
-      "rows": 16348,
-      "hash": "1094306180583236528541",
+      "rows": 29433,
+      "hash": "937666436554939621654",
       "columns": [
         "ad_creative",
         "label",
@@ -70,8 +70,8 @@
   },
   "dataset": {
     "train_model_input": {
-      "rows": 8174,
-      "hash": "301298868358284071079",
+      "rows": 14896,
+      "hash": "-450665063682644649381",
       "columns": [
         "ad_creative",
         "age_band",
@@ -95,8 +95,8 @@
       ]
     },
     "train_dev_model_input": {
-      "rows": 822,
-      "hash": "308991880961106023828",
+      "rows": 1586,
+      "hash": "-268978772070825343437",
       "columns": [
         "ad_creative",
         "age_band",
@@ -120,8 +120,8 @@
       ]
     },
     "calibration_model_input": {
-      "rows": 1565,
-      "hash": "-273497789772306732291",
+      "rows": 2888,
+      "hash": "-594551091674396441572",
       "columns": [
         "ad_creative",
         "age_band",
@@ -145,8 +145,8 @@
       ]
     },
     "val_model_input": {
-      "rows": 582,
-      "hash": "-93215441733104081634",
+      "rows": 1588,
+      "hash": "-183958289435704749036",
       "columns": [
         "ad_creative",
         "age_band",
@@ -169,8 +169,8 @@
       ]
     },
     "test_model_input": {
-      "rows": 614,
-      "hash": "88985900925890643241",
+      "rows": 1657,
+      "hash": "58759274578141590434",
       "columns": [
         "ad_creative",
         "age_band",
@@ -203,8 +203,8 @@
   },
   "training": {
     "training_eval_predictions": {
-      "rows": 614,
-      "hash": "160943504630457016461",
+      "rows": 1657,
+      "hash": "-112977235406727607213",
       "columns": [
         "ad_creative",
         "label",
@@ -219,7 +219,7 @@
   "inference": {
     "ranked_predictions": {
       "rows": 14400,
-      "hash": "-307693477287581051447",
+      "hash": "524930297671161781859",
       "columns": [
         "ad_creative",
         "rank",
@@ -232,13 +232,41 @@
     }
   },
   "evaluation": {
-    "metrics.json": {
-      "leaves": 1050,
-      "hash": "6b3c47e18326d668e6dd8e302596157acae2034b56d3bbf51cd65aaf3ba1c84e"
-    },
     "baseline_metrics.json": {
-      "leaves": 347,
-      "hash": "faabe9bb16aab3833af32635cffacb65e08b5655e2bf4b72533b433e65d29802"
+      "leaves": 303,
+      "hash": "620087ebac7c570d019ec83f25ee766b3af83994df4f810ec7383639610953f4"
+    },
+    "diagnosis/config_shift.json": {
+      "leaves": 239,
+      "hash": "6c22f7da73453a44f93b1acb79acab5a65aa3143f46b6c1a244cb5a624036d9a"
+    },
+    "diagnosis/item_ability.json": {
+      "leaves": 843,
+      "hash": "e527789d19fccd841787c6696c7d65dcdf337b4f7bd50753345b15efede13484"
+    },
+    "diagnosis/metric_ci.json": {
+      "leaves": 89,
+      "hash": "5edb51954f88adc2d8323fd3f63f277ccd0da1785973129be87ed5346c47aee4"
+    },
+    "diagnosis/model_capacity.json": {
+      "leaves": 320,
+      "hash": "42060b4c83d87baa88e57f0aae4f3304b9b1fac1e745543899bc02906000b555"
+    },
+    "diagnosis/suppression.json": {
+      "leaves": 3313,
+      "hash": "c1da66fa63e5c3cdbb264dd906367434f7bcb92e0cb96a14665a8bbdd0bb8f60"
+    },
+    "metrics.json": {
+      "leaves": 1030,
+      "hash": "63ab2ed26c94959cf39a92a2ecd5fede7e1277b065eb0414b0b3ed42392e6909"
+    },
+    "report_aggregates.json": {
+      "leaves": 2106,
+      "hash": "66ad98b13f5567c700174db30aeaed9ae020a0fc09e0abbb29830703208dd075"
+    },
+    "segment_columns.json": {
+      "leaves": 2,
+      "hash": "31268c3a2f859e4051d89e24c5914e13bcb78039e1da2f8e8e11d62971149b2b"
     }
   }
 }
