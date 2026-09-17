@@ -183,6 +183,29 @@ def as_date_list(value) -> list[str]:
     return dates
 
 
+def the_only_date(value, *, setting: str, hint: str) -> str:
+    """The one date a single-date reader needs from a setting that may hold several.
+
+    For tools that read the yaml themselves (``scripts/*_diagnosis.py``), so a
+    range arrives unexpanded and is expanded here. Nothing configured and more
+    than one date are both refused: such a tool would otherwise compare the
+    text of a list with a STRING time partition and match zero rows, silently.
+    ``setting`` names the key and ``hint`` how to pick one date instead; both
+    only go into the messages.
+    """
+    if isinstance(value, dict):
+        value = expand_date_range(value, setting)
+    dates = as_date_list(value)
+    if not dates:
+        raise ValueError(f"{setting} is missing. Set it in parameters or pass {hint}.")
+    if len(dates) > 1:
+        raise ValueError(
+            f"{setting} 設了 {len(dates)} 個日期；這裡一次只看一個日期，"
+            f"請用 {hint} 指定其中一個：{', '.join(dates)}"
+        )
+    return dates[0]
+
+
 def dates_label(dates: list[str]) -> str:
     """The path segment for a run over ``dates``: ``YYYYMMDD`` or ``first-last``.
 

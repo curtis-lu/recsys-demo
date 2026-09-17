@@ -16,6 +16,7 @@ from recsys_tfb.core.date_ranges import (
     as_date_list,
     dates_label,
     expand_date_range,
+    the_only_date,
 )
 from recsys_tfb.core.versioning import (
     compute_base_dataset_version,
@@ -320,6 +321,34 @@ class TestAsDateList:
     @pytest.mark.parametrize("value", [None, "", "  ", []])
     def test_nothing_configured_is_an_empty_list(self, value):
         assert as_date_list(value) == []
+
+
+class TestTheOnlyDate:
+    """For a reader that looks at one date, of a setting that may hold several."""
+
+    def test_a_range_of_one_day_is_that_day(self):
+        assert the_only_date(
+            _month_end_range("2026-01-31", "2026-01-31"),
+            setting="evaluation.snap_date", hint="--snap-date",
+        ) == "2026-01-31"
+
+    def test_several_dates_are_refused_and_named(self):
+        with pytest.raises(ValueError) as exc_info:
+            the_only_date(
+                ["2026-01-31", "2026-02-28"],
+                setting="evaluation.snap_date", hint="--snap-date",
+            )
+        assert str(exc_info.value) == (
+            "evaluation.snap_date 設了 2 個日期；這裡一次只看一個日期，"
+            "請用 --snap-date 指定其中一個：2026-01-31, 2026-02-28"
+        )
+
+    def test_nothing_configured_is_refused(self):
+        with pytest.raises(
+            ValueError,
+            match=r"^evaluation\.snap_date is missing\. Set it in parameters or pass --snap-date\.$",
+        ):
+            the_only_date(None, setting="evaluation.snap_date", hint="--snap-date")
 
 
 class TestDatesLabel:
