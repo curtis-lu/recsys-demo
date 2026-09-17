@@ -1326,10 +1326,13 @@ def _restrict_to_common(
     query groups, which matches ``NULL == NULL``, while the restriction's
     equi-join drops null keys — so it counted groups no metric ever saw.
 
-    The node does not check the ``segment_columns.json`` fingerprint against
-    today's settings: under ``--compare`` the same run's segmenting readers do,
-    and ``--compare-only`` is left unchecked on purpose (ADR-0020 bug 6, #352
-    correction: ``post_training`` is inert there).
+    The node does not compare ``segment_columns.json``'s own fingerprint with
+    today's settings; it checks the partitions it reads instead. Under
+    ``--compare`` A's partitions are checked against today's settings, so a
+    sliced ``--only-node generate_comparison_report`` after a settings change
+    raises. Under ``--compare-only`` they are checked against the settings that
+    JSON records, because ``post_training`` is inert there (ADR-0020 bug 6, #352
+    correction, and its #374 addendum).
     """
     schema = get_schema(parameters)
     time_col = schema["time"]

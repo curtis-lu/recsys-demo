@@ -334,6 +334,32 @@ def test_external_hive_names_a_configured_date_without_rows(
     assert "has no rows for snap_date(s) ['2026-03-31']" in message, message
 
 
+def test_external_hive_checks_each_date_in_parallel_not_in_one_task(
+    spark, monkeypatch, ext_predictions_view
+):
+    """A user's table need not be partitioned by time. The one-task read that
+    is cheap on the framework's own time-partitioned tables (``coalesce(1)``
+    then ``limit(1)``) would scan such a table whole in a single task when a
+    date is missing; Spark's ``isEmpty`` scans it in parallel. So this source
+    is checked date by date with ``isEmpty`` and no single-partition plan."""
+    from pyspark.sql import DataFrame
+
+    plans = []
+    real_is_empty = DataFrame.isEmpty
+
+    def is_empty(self):
+        plans.append(self._jdf.queryExecution().optimizedPlan().toString())
+        return real_is_empty(self)
+
+    monkeypatch.setattr(DataFrame, "isEmpty", is_empty)
+    monkeypatch.setattr(spark, "table", lambda t: ext_predictions_view)
+    dates = ["2025-12-31", "2026-01-31"]
+    load_compare_predictions(_params_for_ext(dates), spark)
+
+    assert [d for d in dates if any(d in plan for plan in plans)] == dates, plans
+    assert not any("Repartition" in plan for plan in plans), plans
+
+
 def test_external_hive_prod_mapping_n_to_1_collapse(spark, monkeypatch):
     # Two external prods both map to "fund_stock" — should collapse with max(score)
     df = spark.createDataFrame(

@@ -89,15 +89,30 @@ def restrict_to_eval_snap_dates(df: DataFrame, parameters: dict) -> DataFrame:
     return df.filter(_on_dates(time_col, eval_snap_dates(parameters)))
 
 
-def eval_snap_dates_without_rows(df: DataFrame, parameters: dict) -> list[str]:
+def eval_snap_dates_without_rows(
+    df: DataFrame, parameters: dict, *, time_partitioned: bool = True,
+) -> list[str]:
     """The evaluated dates ``df`` holds no row for, in configured order.
 
-    Checked per date (:func:`_first_row_per_date`), so a missing month is named
-    even when the other months have rows: a check on the restricted frame as a
-    whole passes as soon as any one date has a row.
+    Checked per date, so a missing month is named even when the other months
+    have rows: a check on the restricted frame as a whole passes as soon as any
+    one date has a row.
+
+    ``time_partitioned`` says whether ``df`` is read from a table partitioned by
+    the time column, as the framework's own tables are. Then one job reads one
+    row per date (:func:`_first_row_per_date`). A user's table (the
+    ``external_hive`` compare source) may not be: the date filter then prunes
+    nothing, and that one-task read would scan the whole table in a single task
+    when a date is missing. There each date gets its own ``isEmpty``, which
+    Spark scans in parallel: one job per date, bounded by the date count.
     """
     time_col = get_schema(parameters)["time"]
     dates = eval_snap_dates(parameters)
+    if not time_partitioned:
+        return [
+            date for date in dates
+            if df.filter(_on_dates(time_col, [date])).isEmpty()
+        ]
     found = _first_row_per_date(df, time_col, dates, F.lit(True))
     return [date for date in dates if date not in found]
 

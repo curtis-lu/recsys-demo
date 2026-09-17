@@ -67,13 +67,17 @@ def load_compare_predictions(parameters: dict, spark: SparkSession) -> SparkData
     raise RuntimeError(f"unknown compare source kind={kind!r}")
 
 
-def _no_rows_for(df: SparkDataFrame, parameters: dict) -> str | None:
+def _no_rows_for(
+    df: SparkDataFrame, parameters: dict, *, time_partitioned: bool = True,
+) -> str | None:
     """``snap_date=…`` naming the evaluated dates ``df`` has no row for, or None.
 
     One configured date prints as it always did; with several, the missing
-    ones print as a list.
+    ones print as a list. ``time_partitioned``: see
+    ``eval_snap_dates_without_rows``.
     """
-    missing = eval_snap_dates_without_rows(df, parameters)
+    missing = eval_snap_dates_without_rows(
+        df, parameters, time_partitioned=time_partitioned)
     if not missing:
         return None
     if len(eval_snap_dates(parameters)) == 1:
@@ -136,7 +140,8 @@ def _load_external_hive(
     raw = spark.table(table)
     # Column rename: alias external names → our canonical schema names
     df = raw.select(*[F.col(ext).alias(internal) for internal, ext in cols.items()])
-    no_rows = _no_rows_for(df, parameters)
+    # The user's table: nothing says it is partitioned by the time column.
+    no_rows = _no_rows_for(df, parameters, time_partitioned=False)
     if no_rows:
         raise DataConsistencyError(
             f"compare external_hive table={table!r} has no rows for {no_rows}"
