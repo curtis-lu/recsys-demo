@@ -97,8 +97,16 @@ from recsys_tfb.evaluation.metrics_spark import rank_within_query
 _TIME_TEXT = "__compare_time_text"
 
 
-def _query_groups(df: SparkDataFrame, time_col: str, entity_cols: list[str]):
-    """``df``'s distinct query groups, the time column cast to string."""
+def query_groups_with_text_time(
+    df: SparkDataFrame, time_col: str, entity_cols: list[str],
+) -> SparkDataFrame:
+    """``df``'s distinct query groups, the time column cast to string.
+
+    The one place a two-way comparison builds query groups to match across the
+    sides: the intersection below and the coverage count in the
+    ``restrict_to_common`` node both use it, so they cannot disagree on how a
+    DATE and a STRING time compare.
+    """
     return df.select(
         F.col(time_col).cast("string").alias(time_col), *entity_cols
     ).distinct()
@@ -151,8 +159,8 @@ def common_universe(
     caller will surface this as ``fail loud``.
     """
     group_cols = [time_col, *entity_cols]
-    a_groups = _query_groups(a, time_col, entity_cols)
-    b_groups = _query_groups(b, time_col, entity_cols)
+    a_groups = query_groups_with_text_time(a, time_col, entity_cols)
+    b_groups = query_groups_with_text_time(b, time_col, entity_cols)
     # A left-semi join, not ``intersect``. Both compute the same set for
     # non-null keys, but they disagree on nulls: ``intersect`` treats
     # ``NULL == NULL`` as a match, while the equi-join that ``restrict_to_common``

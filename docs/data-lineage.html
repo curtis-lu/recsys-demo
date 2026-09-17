@@ -566,7 +566,7 @@ C000010   0.83    0.71                 1      （示意）</div>
 <div class="card" id="enriched_eval_predictions">
   <h4>enriched_eval_predictions <span class="badge b-hive">Hive</span><span class="vl vl-mv">model_version</span></h4>
   <div class="meta"><b>產生</b>：evaluation · prepare_eval_data（label join + rank + segment enrichment 後直接寫回 Hive，這個 model_version 本月的 partition；dynamic partition overwrite）　|
-  <b>下游</b>：evaluation（compute_metrics／compute_baseline_metrics／compute_report_aggregates／draw_diagnosis_sample_node／restrict_to_common 各自讀表、以 restrict_to_eval_snap_dates 篩回本次評估日期（一個或多個）；<code>--compare-only</code> 沒有 prepare_eval_data，由 catalog auto-load 讀回，B4 validator 檢查 partition）　|
+  <b>下游</b>：evaluation（compute_metrics／compute_baseline_metrics／compute_report_aggregates／draw_diagnosis_sample_node／restrict_to_common 各自讀表、以 restrict_to_current_eval_partitions 篩回本次評估日期（一個或多個）並驗分區指紋；<code>--compare-only</code> 沒有 prepare_eval_data，由 catalog auto-load 讀回，B4 validator 檢查 partition）　|
   <b>partition</b>：snap_date（外加 model_version）；columns: auto（schema 從 DataFrame 推得）</div>
   <p class="sub">兩種模式共用此表，schema 是聯集：另一模式 join 過的 segment 欄，在這次寫入的列上是 NULL。所以分群一律照同時落地的 <code>evaluation_segment_columns</code>（<code>segment_columns.json</code>），不看表上有哪些欄（見 evaluation.md §3.2）。</p>
 </div>

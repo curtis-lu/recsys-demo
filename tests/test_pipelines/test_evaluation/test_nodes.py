@@ -20,9 +20,13 @@ def _no_segments(parameters):
 
 
 def _kept_month_of(df, parameters):
-    """Stand-in for ``restrict_to_eval_snap_dates`` in tests that pass no frame:
-    marks what the node forwarded as the restricted one."""
-    return ("kept month of", df)
+    """Stand-in for ``restrict_to_current_eval_partitions`` in tests that pass
+    no frame: marks what the node forwarded as the restricted one."""
+    from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+        EvalPartitions,
+    )
+
+    return EvalPartitions(("kept month of", df), [])
 
 
 def _prepare_eval_data(predictions, labels, parameters):
@@ -708,6 +712,23 @@ def _prepare_params(snap_date):
     }
 
 
+def test_prepare_eval_data_stamps_every_row_with_the_partition_fingerprint(spark):
+    """#374: each row carries the settings its partition is written under, so
+    a reader can tell when another run rewrote that date since."""
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+        PARTITION_FINGERPRINT_COLUMN,
+        partition_fingerprint,
+    )
+
+    predictions, labels = _months_frames(spark, ["2025-01-31", "2025-02-28"])
+    params = _prepare_params(["2025-01-31", "2025-02-28"])
+    params["post_training"] = False
+    result = _prepare_eval_data(predictions, labels, params)
+    stamped = {r[0] for r in
+               result.select(PARTITION_FINGERPRINT_COLUMN).distinct().collect()}
+    assert stamped == {partition_fingerprint(params)}
+
+
 def test_prepare_eval_data_keeps_every_configured_date(spark):
     """Two of three months configured (#374): both kept, whole query groups
     (2 customers × 2 items each), the third month dropped."""
@@ -831,17 +852,24 @@ class TestComputeBaselineMetrics:
             },
         }
 
-    @staticmethod
-    def _eval_predictions(spark):
+    @classmethod
+    def _eval_predictions(cls, spark):
+        """The partition as ``prepare_eval_data`` under :meth:`_parameters`
+        writes it, settings fingerprint included."""
         import pandas as pd
-        return spark.createDataFrame(pd.DataFrame({
+
+        from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+            stamp_partition_fingerprint,
+        )
+
+        return stamp_partition_fingerprint(spark.createDataFrame(pd.DataFrame({
             "snap_date": ["2025-01-31"] * 6,
             "cust_id": ["c1", "c1", "c1", "c2", "c2", "c2"],
             "prod_name": ["A", "B", "C", "A", "B", "C"],
             "label": [1, 0, 1, 0, 1, 0],
             "score": [0.9, 0.5, 0.1, 0.2, 0.8, 0.3],
             "rank": [1, 2, 3, 3, 1, 2],
-        }))
+        })), cls._parameters())
 
     @staticmethod
     def _label_table(spark):
@@ -989,7 +1017,11 @@ def test_compute_metric_ci_end_to_end_small(spark):
         },
     }
     # The sample is now drawn once by draw_diagnosis_sample_node and passed in.
-    sample = draw_diagnosis_sample_node(df, _no_segments(params), params)
+    from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+        stamp_partition_fingerprint,
+    )
+    sample = draw_diagnosis_sample_node(
+        stamp_partition_fingerprint(df, params), _no_segments(params), params)
     out = compute_metric_ci(sample, params)
     assert out["enabled"] is True
     assert "A" in out["per_item"] and "macro" in out and "sample" in out
@@ -1050,14 +1082,20 @@ class TestConsumersSegmentByTheLandedList:
             },
         }
 
-    @staticmethod
-    def _frame(spark):
+    @classmethod
+    def _frame(cls, spark):
         from pyspark.sql import functions as F
 
-        return TestComputeBaselineMetrics._eval_predictions(spark).withColumn(
-            "cust_segment_typ",
-            F.when(F.col("cust_id") == "c1", "mass").otherwise("hnw"),
-        ).withColumn("stale_seg", F.lit(None).cast("string"))
+        from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+            stamp_partition_fingerprint,
+        )
+
+        return stamp_partition_fingerprint(
+            TestComputeBaselineMetrics._eval_predictions(spark).withColumn(
+                "cust_segment_typ",
+                F.when(F.col("cust_id") == "c1", "mass").otherwise("hnw"),
+            ).withColumn("stale_seg", F.lit(None).cast("string")),
+            cls._parameters())
 
     def test_compute_metrics(self, spark):
         from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
@@ -1237,6 +1275,96 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
             compute_metrics(self._two_months(spark), _no_segments(params),
                             params)
 
+    # --- partitions rewritten by another run (#374) ------------------------
+
+    _READERS = ("compute_metrics", "compute_baseline_metrics",
+                "compute_report_aggregates", "draw_diagnosis_sample_node")
+
+    @staticmethod
+    def _read(name, frame, spark, params):
+        from recsys_tfb.pipelines.evaluation import nodes
+
+        if name == "compute_baseline_metrics":
+            return nodes.compute_baseline_metrics(
+                frame, TestComputeBaselineMetrics._label_table(spark),
+                _no_segments(params), params)
+        if name == "compute_report_aggregates":
+            return nodes.compute_report_aggregates(frame, params)
+        return getattr(nodes, name)(frame, _no_segments(params), params)
+
+    @staticmethod
+    def _rewrite(frame, month, params):
+        """``frame`` with ``month``'s partition as a run under ``params``
+        would leave it."""
+        from pyspark.sql import functions as F
+
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            PARTITION_FINGERPRINT_COLUMN,
+            partition_fingerprint,
+        )
+
+        return frame.withColumn(
+            PARTITION_FINGERPRINT_COLUMN,
+            F.when(F.col("snap_date") == month,
+                   F.lit(partition_fingerprint(params)))
+            .otherwise(F.col(PARTITION_FINGERPRINT_COLUMN)))
+
+    @pytest.mark.parametrize("name", _READERS)
+    def test_a_month_another_run_rewrote_is_refused_by_name(self, spark, name):
+        """January and February evaluated together; February then rewritten
+        by a post-training run of February alone. Resuming the first run from
+        any reader reads the range directory's JSON, whose fingerprint still
+        matches, so only the partition's own fingerprint can refuse February."""
+        params = self._parameters(snap_date=["2025-01-31", "2025-02-28"])
+        february_alone = self._parameters(snap_date="2025-02-28")
+        february_alone["post_training"] = True
+        table = self._rewrite(self._two_months(spark), "2025-02-28",
+                              february_alone)
+        with pytest.raises(ValueError) as excinfo:
+            self._read(name, table, spark, params)
+        message = str(excinfo.value)
+        assert "2025-02-28: written under other settings" in message, message
+        assert "2025-01-31" not in message, message
+
+    def test_a_single_date_resume_refuses_its_month_a_range_run_rewrote(
+        self, spark,
+    ):
+        """The other direction: February alone first, then a range run under
+        other settings rewrote February; resuming February alone refuses it."""
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+
+        params = self._parameters(snap_date="2025-02-28")
+        range_run = self._parameters(snap_date=["2025-01-31", "2025-02-28"])
+        range_run["post_training"] = True
+        table = self._rewrite(self._two_months(spark), "2025-02-28", range_run)
+        with pytest.raises(ValueError,
+                           match=r"2025-02-28: written under other settings"):
+            compute_metrics(table, _no_segments(params), params)
+
+    def test_a_partition_written_before_fingerprints_is_refused(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            PARTITION_FINGERPRINT_COLUMN,
+        )
+
+        params = self._parameters()
+        table = self._two_months(spark).drop(PARTITION_FINGERPRINT_COLUMN)
+        with pytest.raises(ValueError, match=r"2025-01-31: written before"):
+            compute_metrics(table, _no_segments(params), params)
+
+    def test_a_range_resume_reads_a_month_a_same_settings_single_run_wrote(
+        self, spark,
+    ):
+        """Same settings, other dates: not a rewrite. Stamped as February
+        alone would stamp it, the range run reads February as its own."""
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+
+        params = self._parameters(snap_date=["2025-01-31", "2025-02-28"])
+        table = self._rewrite(self._two_months(spark), "2025-02-28",
+                              self._parameters(snap_date="2025-02-28"))
+        result = compute_metrics(table, _no_segments(params), params)
+        assert result["dataset_overview"]["totals"]["n_snap_dates"] == 2
+
 
 class TestReadersRefuseAPartitionPreparedUnderOtherSettings:
     """The partition is read back from Hive, so a slice starting after
@@ -1312,17 +1440,21 @@ class TestDrawDiagnosisSampleNode:
             }}},
         }
 
-    @staticmethod
-    def _eval_predictions(spark):
+    @classmethod
+    def _eval_predictions(cls, spark):
+        from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+            stamp_partition_fingerprint,
+        )
+
         rows = []
         for cust in ["H1", "H2", "H3", "H4"]:
             rows.append(("20240331", cust, "hot", 0.9, 1))
             rows.append(("20240331", cust, "cold", 0.1, 0))
         rows.append(("20240331", "C1", "hot", 0.9, 0))
         rows.append(("20240331", "C1", "cold", 0.1, 1))
-        return spark.createDataFrame(
+        return stamp_partition_fingerprint(spark.createDataFrame(
             rows, schema=["snap_date", "cust_id", "prod_name", "score", "label"]
-        )
+        ), cls._params())
 
     def test_returns_none_and_skips_draw_when_all_disabled(self, spark):
         from unittest.mock import patch
@@ -1354,7 +1486,7 @@ class TestDrawDiagnosisSampleNode:
             "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample",
             return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
         ) as spy, patch.object(
-            nodes, "restrict_to_eval_snap_dates", _kept_month_of
+            nodes, "restrict_to_current_eval_partitions", _kept_month_of
         ):
             nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
         # exact args, not just count: the draw gets the month-restricted table
@@ -1367,9 +1499,14 @@ class TestDrawDiagnosisSampleNode:
         # draw_diagnosis_sample. Same seed -> identical content.
         from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
         from recsys_tfb.pipelines.evaluation import nodes
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            PARTITION_FINGERPRINT_COLUMN,
+        )
         params = self._params()  # both consumers default-enabled
+        # The node draws from the table as read: fingerprint checked, dropped.
         direct_pdf, direct_meta = draw_diagnosis_sample(
-            self._eval_predictions(spark), params
+            self._eval_predictions(spark).drop(PARTITION_FINGERPRINT_COLUMN),
+            params,
         )
         node_pdf, node_meta = nodes.draw_diagnosis_sample_node(self._eval_predictions(spark), _no_segments(params), params)
         assert node_meta == direct_meta
@@ -1399,7 +1536,7 @@ class TestDrawDiagnosisSampleNode:
             "recsys_tfb.pipelines.evaluation.nodes.bootstrap_per_item_ci",
             return_value={"n_boot": 1},
         ), patch.object(
-            nodes, "restrict_to_eval_snap_dates", _kept_month_of
+            nodes, "restrict_to_current_eval_partitions", _kept_month_of
         ):
             sample = nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
             nodes.compute_metric_ci(sample, params)
@@ -1509,7 +1646,7 @@ def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
         "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample",
         return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
     ) as spy, patch.object(
-        nodes, "restrict_to_eval_snap_dates", _kept_month_of
+        nodes, "restrict_to_current_eval_partitions", _kept_month_of
     ):
         result = nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
     assert result is not None, (

@@ -136,6 +136,7 @@ date: 2026-09-13
   - **不比的地方**：`--compare-only` 照舊不比（理由同上一段：`--post-training` 在那條路上是啞的）；`generate_comparison_report` 不比。
   - **接受的漏洞**：`compute_report_aggregates` 與 `restrict_to_common` 讀表但不讀這份 JSON。一次只跑一個 node 的切片可以繞過三個比對者：例如先在舊 partition 上 `--only-node compute_report_aggregates`，再只重跑 `prepare_eval_data` 與 `compute_metrics`，報表會混用兩個 partition 算出的數字；`--compare` 模式的 `--only-node generate_comparison_report` 會在舊 partition 上重做比較。兩者跟 `docs/pipelines/evaluation.md` §7.4「`exists()` 只驗存在」同一類。還有一個機率很低的：Runner 先存分區、再存這份 JSON，兩次存檔之間中斷時，分區已是新設定、JSON 還是舊設定；這時把設定改回舊值再 `--from-node compute_metrics`，指紋比對通過，分群照舊清單讀新分區。反過來先存 JSON 會更糟（不改回設定就放行），所以順序不動。
   - **這份 JSON 缺席**：標準／`--compare` 模式的切片會把 `prepare_eval_data` 拉回來（`JSONDataset.exists()`）；`--compare-only` 在 CLI 入口擋下，訊息寫出檔案路徑與該先跑的指令。
+  - （#374 起「這份 JSON 的指紋代表 partition」不再成立，分區改為自帶指紋；見文末〈補充（#374）〉。）
 
   為什麼落地成 JSON 而不是各消費者自己查母體表（本份第二版的寫法，審查指出走不通）：`--compare-only` 那條路沒有 `prepare_eval_data`、`--post-training` 旗標在那條路上是啞的，消費者根本不知道該查哪張母體表；而它讀回來的 enriched 分區裡 segment 欄是 persist 當時 join 的，跟同時寫下的 JSON 一致。落地之後它也符合 node 規則 1（撈得出來看：出事時直接開那份檔）。這個機制目前住在 `evaluation/segments.py`（`join_segment_sources` 所在），ADR-0019 方案 α 落地後才搬進 `pipelines/evaluation/steps/`。
 
@@ -296,3 +297,28 @@ date: 2026-09-13
 - 決定：2026-09-13 逐條討論，共 19 題；「算的／畫的」分開與「segment 跟著母體走」兩條是使用者在討論中改寫的方向，不是稽核或複核提出的。
 - 順序與驗證框架：[ADR-0018](0018-evaluation-materialize-at-producer.md)〈順序〉〈驗收〉。
 - 本份第一版的三處層級錯誤（bug 6 的 A10、bug 2 的分類表與指紋範圍、bug 9 的理由）由 2026-09-13 的 fresh-context 審查抓到，已改寫進正文。
+
+---
+
+## 補充（#374）：`segment_columns.json` 的指紋不再代表分區，分區自帶指紋
+
+**為什麼原本的前提失效。** bug 6 的 #352 更正寫「這份 JSON 跟 partition 同一次寫，它的指紋代表兩者」。那句話暗含一個前提：一個日期的分區，最後一次一定是寫這個目錄（`data/evaluation/<model_version>/<日期段>/`）的那次執行寫的。#374 讓 `evaluation.snap_date` 可以是多個日期之後，同一個日期的分區會被目錄不同的執行寫到：單跑 3 月寫 `20260331/`，1–3 月一起跑寫 `20260131-20260331/`。反例（使用者 2026-09-17 選定修法「甲」）：
+
+```text
+1. 1–3 月（設定 A）      → 1、2、3 月分區＝A；20260131-20260331/segment_columns.json＝A
+2. 單跑 3 月（設定 B）   → 3 月分區＝B；      20260331/segment_columns.json＝B
+3. 接續 1–3 月 --from-node compute_metrics（設定 A）
+   → 比的是 20260131-20260331/ 那份 JSON：A＝A 放行 → 實際讀到 B 的 3 月，退出碼 0
+```
+
+反方向（先單月、再區間蓋掉、再接續單月）一樣。`post_training` 是分區內容設定之一，所以監控／post-training 混跑也屬於這一類。
+
+**改成什麼。**
+
+- `prepare_eval_data` 寫出的每一列多一個框架自有的欄 `eval_partition_fingerprint`，值是 `PARTITION_CONTENT_KEYS` **扣掉 `evaluation.snap_date`** 的 sha256（`pipelines/evaluation/steps/config_fingerprint.py::partition_fingerprint`）。扣掉的理由：一個日期分區的內容只取決於模式與分群設定，不取決於同一次還評估了哪些別的日期；不扣的話，設定相同的單月執行與區間執行會互相擋。
+- 每個讀 `enriched_eval_predictions` 的 node 改經 `steps/snap_date_scope.py::restrict_to_current_eval_partitions`：篩日期、確認每個日期的分區指紋、把這欄丟掉再往下用。指紋不同或是 NULL（#374 之前寫的分區，表的 schema 演化補 NULL）就 raise，一次列出所有有問題的日期，建議 `--from-node prepare_eval_data`。`tests/test_pipelines/test_evaluation/test_pipeline.py` 的 AST 測試改成要求讀者呼叫它。
+- 比對的基準：標準模式的讀者比「今天的設定」。`--compare-only` 的兩個 A 側讀者（`validate_enriched_eval_predictions_present`、`restrict_to_common`）改比「這個目錄的 `segment_columns.json` 記錄的設定」（`recorded_partition_fingerprint`），因為那條路上 `--post-training` 是啞的，拿今天的值去比會擋掉每一個 post-training 寫的分區——正是上面〈不比的地方〉不比的理由。兩個 node 因此多收 `evaluation_segment_columns` 這個輸入。`--compare` 模式下那份 JSON 是同一次執行剛寫的，兩種基準一致。
+- 成本：單一日期時對那個分區 `limit(1)` 取一列（一個分區由一次 dynamic overwrite 寫成，整格同一個指紋，所以一列就夠）；多個日期時一次 `select(日期, 指紋).distinct().collect()`，不是每個日期一個 job。缺資料（某日期零列）由同一個 job 回報，交給呼叫端處理（`compute_metrics` 的後置檢查、`--compare-only` 的閘門）。
+- B 側（比較對象的 enriched 表）不驗，只把這欄丟掉：它帶的是 B 自己那次執行的設定。
+- `_require_prepared_with_current_config`（這份 JSON 對今天設定的比對）保留：分群清單仍然從它來。
+- 上面〈接受的漏洞〉裡「`compute_report_aggregates` 與 `restrict_to_common` 讀表但不讀這份 JSON」那一條，因為它們現在比分區自己的指紋而關上；「Runner 先存分區、再存 JSON 之間中斷」那一條，分區這一半也由分區指紋擋下。

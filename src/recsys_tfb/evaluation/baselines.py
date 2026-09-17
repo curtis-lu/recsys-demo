@@ -33,6 +33,15 @@ def resolve_lookback_months(parameters: dict) -> int:
     )
 
 
+def _window_bounds(snap_date: str, lookback_months: int) -> tuple[str, str]:
+    """``(lower, upper)`` of the ``[snap_date - lookback_months, snap_date)``
+    window, as ``YYYY-MM-DD``. Shared by every windowing path here so the
+    windows cannot drift apart."""
+    upper = pd.Timestamp(snap_date)
+    lower = upper - pd.DateOffset(months=lookback_months)
+    return str(lower.date()), str(upper.date())
+
+
 def _lookback_window(
     label_table: SparkDataFrame,
     snap_date: str,
@@ -56,11 +65,8 @@ def _lookback_window(
     Not a ``core/consistency.py`` gate: this is the baseline's own scoring
     window, not the B2 feature-leakage invariant.
     """
-    upper = pd.Timestamp(snap_date)
-    lower = upper - pd.DateOffset(months=lookback_months)
-    window = label_table.filter(
-        (ts >= F.lit(str(lower.date()))) & (ts < F.lit(str(upper.date())))
-    )
+    lower, upper = _window_bounds(snap_date, lookback_months)
+    window = label_table.filter((ts >= F.lit(lower)) & (ts < F.lit(upper)))
     if window.limit(1).count() == 0:
         available = sorted({
             str(r[0])
@@ -69,7 +75,7 @@ def _lookback_window(
             ).distinct().collect()
         })
         raise ValueError(
-            f"No label_table history in [{lower.date()}, {upper.date()}) "
+            f"No label_table history in [{lower}, {upper}) "
             f"for evaluation.snap_date={snap_date!r} (lookback_months="
             f"{lookback_months}). label_table has months: {available}. "
             "The baseline cannot be scored without pre-snap_date history — "
@@ -177,6 +183,69 @@ def compute_monthly_purchase_counts(
     for df in per_snap[1:]:
         result = result.unionByName(df)
     return result
+
+
+def compute_monthly_purchase_counts_by_window(
+    label_table: SparkDataFrame,
+    snap_dates: list[str],
+    lookback_months: int,
+    parameters: dict,
+) -> SparkDataFrame:
+    """Per ``(window_date, calendar-month, item)`` purchase count, one scan.
+
+    For several evaluated dates (#374): the counts
+    :func:`compute_monthly_purchase_counts` gives, kept apart per window
+    (``window_date`` is the evaluated date the window ends at) instead of
+    summed. The caller needs both the per-month trend and how many months with
+    label rows each window had, and the months of one window cannot be told
+    from the summed ones: windows overlap, and a boundary month can hold rows
+    for one window and not the other.
+
+    One scan of ``label_table``: it is filtered once to the span every window
+    falls in, then joined with the small table of window bounds (one row per
+    evaluated date, so the broadcast is bounded by config). A per-window
+    filter unioned together would read the table once per date.
+
+    Same window rule as the other paths (:func:`_window_bounds`). It does not
+    repeat the empty-window pre-check: a window with no label rows gives no
+    rows here, and :func:`compute_purchase_counts`, which the baseline node
+    calls first, raises for that window.
+
+    Returns columns ``("window_date", "month", item_col, score_col)``.
+    """
+    if not snap_dates:
+        raise ValueError(
+            "compute_monthly_purchase_counts_by_window requires a non-empty "
+            "snap_dates list"
+        )
+
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    item_col = schema["item"]
+    label_col = schema["label"]
+    score_col = schema["score"]
+
+    bounds = [(s, *_window_bounds(s, lookback_months)) for s in snap_dates]
+    span_lower = min(lower for _, lower, _ in bounds)
+    span_upper = max(upper for _, _, upper in bounds)
+    windows = label_table.sparkSession.createDataFrame(
+        bounds, "window_date string, window_lower string, window_upper string"
+    )
+    ts = F.to_date(F.col(time_col))
+    rows = label_table.filter(
+        (ts >= F.lit(span_lower)) & (ts < F.lit(span_upper))
+    ).withColumn("_label_day", ts)
+    in_window = (
+        (F.col("_label_day") >= F.to_date(F.col("window_lower")))
+        & (F.col("_label_day") < F.to_date(F.col("window_upper")))
+    )
+    return (
+        rows.join(F.broadcast(windows), in_window, "inner")
+        .withColumn("month", F.date_format(F.col("_label_day"), "yyyy-MM"))
+        .groupBy("window_date", "month", item_col)
+        .agg(F.sum(F.col(label_col)).cast("double").alias(score_col))
+        .select("window_date", "month", item_col, score_col)
+    )
 
 
 def build_baseline_frame(

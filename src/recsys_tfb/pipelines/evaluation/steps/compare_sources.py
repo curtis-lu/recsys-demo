@@ -22,8 +22,10 @@ from pyspark.sql import DataFrame as SparkDataFrame, SparkSession
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError
-from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+    PARTITION_FINGERPRINT_COLUMN,
+)
 from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
     eval_snap_dates,
     eval_snap_dates_without_rows,
@@ -48,8 +50,8 @@ def load_compare_predictions(parameters: dict, spark: SparkSession) -> SparkData
             "parameters['evaluation']['compare'] missing — CLI must dispatch "
             "the chosen compare source dict here before pipeline run."
         )
-    if not as_date_list(eval_params.get("snap_date")):
-        raise RuntimeError("evaluation.snap_date missing")
+    # Fails before any table is read when no date is configured (ValueError).
+    eval_snap_dates(parameters)
 
     schema = get_schema(parameters)
     # Empty/missing hive.db → bare table name (the loader resolves via Spark's
@@ -110,7 +112,11 @@ def _load_model_version(
             f"compare model_version={mv!r} has no rows for {no_rows} "
             f"in source={source!r}"
         )
-    df = restrict_to_eval_snap_dates(df, parameters)
+    # enriched_eval_predictions carries each partition's settings fingerprint
+    # (#374). B's are the settings of B's own run, so they are not checked
+    # against this run's; the column is dropped so it does not travel on.
+    df = restrict_to_eval_snap_dates(df, parameters).drop(
+        PARTITION_FINGERPRINT_COLUMN)
     logger.info(
         "Loaded compare predictions: table=%s model_version=%s rows=%d",
         table_name, mv, df.count(),

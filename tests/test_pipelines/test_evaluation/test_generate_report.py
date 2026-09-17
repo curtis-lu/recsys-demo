@@ -21,6 +21,9 @@ from recsys_tfb.pipelines.evaluation.nodes import (
     compute_report_aggregates,
     generate_report,
 )
+from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+    stamp_partition_fingerprint,
+)
 
 
 def _unread_stub(params):
@@ -47,13 +50,15 @@ def _params(diagnostics=False):
 
 
 def _eval_pred(spark):
-    return spark.createDataFrame(
+    """The partition as ``prepare_eval_data`` under :func:`_params` writes it,
+    settings fingerprint included."""
+    return stamp_partition_fingerprint(spark.createDataFrame(
         [("20240331", "c1", "A", 0.9, 1, 1),
          ("20240331", "c1", "B", 0.1, 0, 2),
          ("20240331", "c2", "A", 0.2, 0, 2),
          ("20240331", "c2", "B", 0.8, 1, 1)],
         schema=["snap_date", "cust_id", "prod_name", "score", "label", "rank"],
-    )
+    ), _params())
 
 
 def _metrics():
@@ -118,10 +123,10 @@ def _eval_pred_n(spark, n_customers):
         s = (i % 100) / 100.0
         rows.append(("20240331", f"c{i}", "A", s, i % 2, 1 if s > 0.5 else 2))
         rows.append(("20240331", f"c{i}", "B", 1.0 - s, (i + 1) % 2, 2 if s > 0.5 else 1))
-    return spark.createDataFrame(
+    return stamp_partition_fingerprint(spark.createDataFrame(
         rows,
         schema=["snap_date", "cust_id", "prod_name", "score", "label", "rank"],
-    )
+    ), _params())
 
 
 def test_diagnostics_report_size_bounded_by_row_count(spark):

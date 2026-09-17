@@ -87,7 +87,9 @@ import json
 from typing import Any, Iterable, NamedTuple, Optional, Sequence
 
 __all__ = [
-    "COMPUTED_KEYS", "LoadedArtifact", "PARTITION_CONTENT_KEYS", "fingerprint",
+    "COMPUTED_KEYS", "LoadedArtifact", "PARTITION_CONTENT_KEYS",
+    "PARTITION_FINGERPRINT_COLUMN", "PARTITION_FINGERPRINT_KEYS", "fingerprint",
+    "partition_fingerprint", "recorded_partition_fingerprint",
     "require_computed_with_current_config",
 ]
 
@@ -173,9 +175,37 @@ COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
 #: Moving every row to ``prepare_eval_data`` instead would end the loop by
 #: re-joining the predictions on any setting change. Neither is needed: no
 #: other row changes what ``prepare_eval_data`` computes.
+#:
+#: The JSON's comparison speaks for the segment list only. The partition
+#: itself carries :data:`PARTITION_FINGERPRINT_COLUMN` since #374 (see there).
 PARTITION_CONTENT_KEYS: tuple[str, ...] = tuple(
     path for path, node in COMPUTED_KEYS if node == "prepare_eval_data"
 )
+
+#: What one date's ``enriched_eval_predictions`` partition holds depends on:
+#: :data:`PARTITION_CONTENT_KEYS` without ``evaluation.snap_date``.
+#:
+#: Why ``evaluation.snap_date`` is left out: a partition holds one date, and
+#: its rows depend on the run mode and the segment settings, not on which other
+#: dates the same run evaluated. Kept in, a single-date run of March and a
+#: January–March run with identical settings would refuse each other's March,
+#: though the rows are the same.
+PARTITION_FINGERPRINT_KEYS: tuple[str, ...] = tuple(
+    path for path in PARTITION_CONTENT_KEYS if path != "evaluation.snap_date"
+)
+
+#: The framework's own column on every ``enriched_eval_predictions`` row:
+#: :func:`partition_fingerprint` of the run that wrote the row's partition.
+#:
+#: Why the partition carries it, and the ``evaluation_segment_columns`` JSON's
+#: fingerprint no longer speaks for the partition (#374): that JSON sits in the
+#: run's directory (``<model_version>/<dates label>/``), and one date's
+#: partition is now written by runs with different directories — March alone
+#: writes ``20260331/``, January–March writes ``20260131-20260331/``. After
+#: January–March (settings A), March alone (settings B), then a resume of
+#: January–March from ``compute_metrics`` (A), the range directory's JSON still
+#: says A while March holds B's rows. Only the rows can say who wrote them last.
+PARTITION_FINGERPRINT_COLUMN = "eval_partition_fingerprint"
 
 _KEY_ORDER = {path: i for i, (path, _) in enumerate(COMPUTED_KEYS)}
 _ABSENT = object()
@@ -247,17 +277,55 @@ def fingerprint(parameters: dict, extra_keys: Sequence[str] = ()) -> dict:
     YAML ``datetime.date`` against its string. Dict keys are tagged first via
     :func:`_tag_non_str_keys` (see there for why).
     """
+    values = _declared_values(
+        parameters, (*(p for p, _ in COMPUTED_KEYS), *extra_keys))
+    return {"sha256": _sha256(values), "values": values}
+
+
+def partition_fingerprint(parameters: dict) -> str:
+    """The sha256 over :data:`PARTITION_FINGERPRINT_KEYS`, stored on every row.
+
+    Same normalisation as :func:`fingerprint`. Only the hash is stored: it
+    repeats on every row, and a mismatch is fixed the same way whichever key
+    moved (``--from-node prepare_eval_data``).
+    """
+    return _sha256(_declared_values(parameters, PARTITION_FINGERPRINT_KEYS))
+
+
+def recorded_partition_fingerprint(payload: Any) -> Optional[str]:
+    """The :func:`partition_fingerprint` of the run that wrote ``payload``, a
+    landed artifact carrying ``config_fingerprint``; ``None`` if it has none.
+
+    Taken from the recorded values, which :func:`fingerprint` normalised the
+    same way :func:`partition_fingerprint` normalises live parameters, so a
+    run's ``evaluation_segment_columns`` JSON yields exactly the hash that run
+    stamped on its partitions. For readers that must compare a partition with
+    the run that wrote a directory rather than with today's parameters
+    (``--compare-only``, where ``post_training`` is inert).
+    """
+    stored = payload.get("config_fingerprint") if isinstance(payload, dict) else None
+    if not (isinstance(stored, dict) and isinstance(stored.get("values"), dict)):
+        return None
+    return _sha256({path: value for path, value in stored["values"].items()
+                    if path in PARTITION_FINGERPRINT_KEYS})
+
+
+def _declared_values(parameters: dict, paths: Iterable[str]) -> dict[str, Any]:
+    """Each present path's value, normalised through a JSON round trip."""
     values: dict[str, Any] = {}
-    for path in (*(p for p, _ in COMPUTED_KEYS), *extra_keys):
+    for path in paths:
         found, value = _lookup(parameters, path)
         if found:
             values[path] = json.loads(json.dumps(
                 _tag_non_str_keys(value), sort_keys=True, ensure_ascii=False,
                 default=str))
-    digest = hashlib.sha256(json.dumps(
+    return values
+
+
+def _sha256(values: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(
         values, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
     ).encode("utf-8")).hexdigest()
-    return {"sha256": digest, "values": values}
 
 
 def require_computed_with_current_config(

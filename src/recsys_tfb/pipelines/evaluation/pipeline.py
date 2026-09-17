@@ -56,10 +56,14 @@ def create_pipeline(
         # model_version=${model_version}; the gate raises when the evaluated
         # month has no rows and passes nothing on, so restrict_to_common reads
         # the table and keeps the month itself, like every reader.
+        # Both A-side readers also take evaluation_segment_columns: it records
+        # the settings the run that wrote this directory stamped on its
+        # partitions, which they check each partition against (#374).
         return Pipeline([
             Node(
                 validate_enriched_eval_predictions_present,
-                inputs=["enriched_eval_predictions", "parameters"],
+                inputs=["enriched_eval_predictions",
+                        "evaluation_segment_columns", "parameters"],
             ),
             Node(
                 load_compare_predictions,
@@ -69,7 +73,7 @@ def create_pipeline(
             Node(
                 restrict_to_common,
                 inputs=["enriched_eval_predictions", "compare_predictions_raw",
-                        "parameters"],
+                        "evaluation_segment_columns", "parameters"],
                 outputs=["eval_predictions_common", "compare_predictions_common",
                          "compare_coverage_partial"],
             ),
@@ -204,7 +208,7 @@ def create_pipeline(
             Node(
                 restrict_to_common,
                 inputs=["enriched_eval_predictions", "compare_predictions_raw",
-                        "parameters"],
+                        "evaluation_segment_columns", "parameters"],
                 outputs=["eval_predictions_common", "compare_predictions_common",
                          "compare_coverage_partial"],
             ),

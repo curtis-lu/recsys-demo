@@ -581,18 +581,18 @@ src/recsys_tfb/evaluation/statistics.py:8 in compute_product_statistics(): 'prod
 
 `test_the_report_names_a_location_not_just_a_count` 用等值把整行釘住。
 
-**例外登記機制**：測試檔的模組級常數 `LITERAL_COLUMN_EXCEPTIONS`，內容是 `(repo 相對的模組路徑, 所在函式名)`，跟 S4 的 `ENTITY_FIRST_COLUMN_EXCEPTIONS` 同一種形狀，也同樣是**過濾器**而非 Counter——登記一筆會讓那個函式裡所有字面值一起靜音。逐筆理由見 [R6](#r6-src-的字面示例欄名s6-的例外-14-筆)。
+**例外登記機制**：測試檔的模組級常數 `LITERAL_COLUMN_EXCEPTIONS`，內容是 `(repo 相對的模組路徑, 所在函式名)`，跟 S4 的 `ENTITY_FIRST_COLUMN_EXCEPTIONS` 同一種形狀，也同樣是**過濾器**而非 Counter——登記一筆會讓那個函式裡所有字面值一起靜音。逐筆理由見 [R6](#r6-src-的字面示例欄名s6-的例外-13-筆)。
 
-### ⚠ 這張登記表有 14 筆，那是規則在運作、不是規則被稀釋
+### ⚠ 這張登記表有 13 筆，那是規則在運作、不是規則被稀釋
 
 S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠是錯的」。S6 擋的是一種**拼法**，而有三類拼法是合法的：
 
 | 類別 | 為什麼合法 | 筆數 |
 |---|---|---|
-| `evaluation.snap_date` 等**設定鍵**的讀取 | 那是 config 鍵名，不是 DataFrame 欄名。time 語彙刻意保留（ADR-0017） | 11 |
+| `evaluation.snap_date` 等**設定鍵**的讀取 | 那是 config 鍵名，不是 DataFrame 欄名。time 語彙刻意保留（ADR-0017） | 10 |
 | `core/logging` 的觀測欄白名單、`source_etl` 稽核表的欄名 | 那是**它們自己的**欄位，只是拼法相同 | 3 |
 
-開局是 15 筆，第 15 筆是 `core/schema` 的內建預設，標註為暫時的。**#328 已把預設與那一筆登記一起拿掉**，所以現在剩下的 14 筆全部是上表那兩類——沒有一筆是暫時的了。
+開局是 15 筆，第 15 筆是 `core/schema` 的內建預設，標註為暫時的。**#328 已把預設與那一筆登記一起拿掉**，所以剩下的全部是上表那兩類——沒有一筆是暫時的了。之後的增減：#374 加了 `core/date_ranges.py` 一筆，同時讓 `prepare_eval_data` 與 `load_compare_predictions` 改經 `eval_snap_dates` 讀設定鍵、刪掉它們各自那一筆，現在是 13 筆。
 
 所以這張表同時是另一件事的完整帳目：**框架目前還借用了多少示例字彙**。要翻案 time 語彙的保留決定（ADR-0017 決定一），這個數字就是起點。
 
@@ -656,7 +656,7 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 |---|---|---|
 | `pipelines/dataset/pipeline.py` | `validate_data_consistency` | **Layer-2 資料一致性閘不會跑**。用 `--from-node` 接續 dataset pipeline 時，資料層不變量未經檢查。**例外：被模式明確點名時會跑**——`--only-test-months` 就是這樣把它留在清單裡的（見 F5） |
 | `pipelines/training/pipeline.py` | `log_experiment` | MLflow 實驗記錄不會寫。不影響產物正確性，影響可追溯性 |
-| `pipelines/evaluation/pipeline.py` | `validate_enriched_eval_predictions_present` | `--compare-only` 的這道閘門不會跑（例：`--compare-only --from-node load_compare_predictions`）。分區**不在**仍擋得住：CLI 在任何 node 之前查分區清單與 `segment_columns.json`（`__main__.py::_compare_only_input_errors`）。只剩「分區列得出來、但這個月沒有列」會漏，比較報表的 A 側會是空的。它原本有輸出、由 `restrict_to_common` 讀，[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1 改成每個讀者自己讀表篩月份後才變成零輸出。#352 加入，使用者 2026-09-14 同意 |
+| `pipelines/evaluation/pipeline.py` | `validate_enriched_eval_predictions_present` | `--compare-only` 的這道閘門不會跑（例：`--compare-only --from-node load_compare_predictions`）。分區**不在**仍擋得住：CLI 在任何 node 之前查分區清單與 `segment_columns.json`（`__main__.py::_compare_only_input_errors`）。只剩「分區列得出來、但某個評估日期沒有列」會漏，比較報表的 A 側會少那幾個日期（全部沒有列時是空的）。分區被另一組設定的執行蓋掉則不漏：`restrict_to_common` 讀表時自己逐日期比對分區指紋（#374）。它原本有輸出、由 `restrict_to_common` 讀，[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1 改成每個讀者自己讀表篩月份後才變成零輸出。#352 加入，使用者 2026-09-14 同意 |
 
 **位置只給檔案、不給行號**：兩個 node 名都是 `Node(name=...)` 或函式名的字面值，grep 得到；而行號會被同檔任何一次增刪默默弄錯——本檔原本寫 `pipeline.py:28` 與 `pipeline.py:202`，前者被 #203 加的模組級常數推到 92、後者早就差了一行，而 A7 的稽核測試只比對 node 名的 Counter、抓不到行號腐爛。F5 同理。
 
@@ -703,11 +703,11 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 > 這張是**過濾器**——登記過的 `(模組, 函式)` 會被跳過，所以登記一筆會讓那個函式裡**所有**取第一欄的地方一起靜音。**登記的粒度是函式，不是行。** 要登記就把該函式為什麼整個豁免寫清楚。
 
 
-## R6. `src/` 的字面示例欄名（S6 的例外）── 14 筆
+## R6. `src/` 的字面示例欄名（S6 的例外）── 13 筆
 
-**這張表開局就不是零，而那是規則在運作**——理由與三類合法拼法見 [S6](#s6-src-不得出現示例部署的字面欄名) 的「⚠ 這張登記表有 14 筆」那一段。這張表同時是「框架目前還借用了多少示例字彙」的完整帳目。
+**這張表開局就不是零，而那是規則在運作**——理由與三類合法拼法見 [S6](#s6-src-不得出現示例部署的字面欄名) 的「⚠ 這張登記表有 13 筆」那一段。這張表同時是「框架目前還借用了多少示例字彙」的完整帳目。
 
-**一、`evaluation.snap_date` 這個設定鍵的讀取（11 筆）** —— time 語彙刻意保留（[ADR-0017](../adr/0017-framework-vocabulary-boundary.md) 決定一）。
+**一、`evaluation.snap_date` 這個設定鍵的讀取（10 筆）** —— time 語彙刻意保留（[ADR-0017](../adr/0017-framework-vocabulary-boundary.md) 決定一）。
 
 | 位置 | 函式 | 那個字面值在做什麼 |
 |---|---|---|
@@ -717,12 +717,10 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 | `__main__.py` | `evaluation` | 讀 `evaluation.snap_date` 設定鍵 ＋ 兩處 run context／log extra |
 | `core/consistency.py` | `post_training_snap_date_errors` | A22 讀 `evaluation.snap_date` |
 | `evaluation/comparison/report.py` | `assemble_comparison_report` | 比較報表 metadata 讀同一個設定鍵 |
-| `pipelines/evaluation/steps/compare_sources.py` | `load_compare_predictions` | 同上 |
 | `evaluation/report_builder.py` | `assemble_report` | 報表 metadata 讀同一個設定鍵 |
-| `pipelines/evaluation/nodes.py` | `prepare_eval_data` | 同上 |
 | `pipelines/evaluation/nodes.py` | `_diagnosis_pages_dir` | 同上（診斷頁目錄名） |
 | `core/date_ranges.py` | `<module>` | `DATE_LIST_KEYS` 列出可以寫成日期區間的設定鍵，`("evaluation", "snap_date")` 是其中一個；`ConfigLoader` 載入時據此展開（#374）。第一版寫成一整串 `"evaluation.snap_date"` 再切開，掃描器看不到，審查時改成看得到的寫法並登記——帳目要完整 |
-| `pipelines/evaluation/steps/snap_date_scope.py` | `eval_snap_dates` | 同上。`enriched_eval_predictions` 的每個讀者都經 `restrict_to_eval_snap_dates` 從這裡拿評估日期（一個或多個，[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1），所以是一筆、不是每個讀者一筆。#352 加入時同步刪掉 `comparison_nodes.py::validate_enriched_eval_predictions_present` 那筆（它改成跟這裡拿），總數不變。#374 讓設定可以是多個日期時由 `eval_snap_date` 改名而來（使用者同意的替換，總數不變） |
+| `pipelines/evaluation/steps/snap_date_scope.py` | `eval_snap_dates` | 同上。`enriched_eval_predictions` 的每個讀者都經 `restrict_to_current_eval_partitions` 從這裡拿評估日期（一個或多個，[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1），所以是一筆、不是每個讀者一筆。#352 加入時同步刪掉 `comparison_nodes.py::validate_enriched_eval_predictions_present` 那筆（它改成跟這裡拿），總數不變。#374 讓設定可以是多個日期時由 `eval_snap_date` 改名而來（使用者同意的替換），同時 `prepare_eval_data` 與 `load_compare_predictions` 也改跟這裡拿，它們各自那筆刪掉 |
 
 **二、「那是它自己的欄位」（3 筆）**
 

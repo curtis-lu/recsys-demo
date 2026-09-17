@@ -51,7 +51,8 @@
 %%   compute_baseline_metrics／compute_report_aggregates／
 %%   draw_diagnosis_sample_node／restrict_to_common 全部從 enriched_eval_predictions
 %%   讀表，讀到的是這個 model_version 評估過的所有月份，各自用
-%%   restrict_to_eval_snap_dates 篩回本次評估日期（一個或多個）。--compare-only 沒有
+%%   restrict_to_current_eval_partitions 篩回本次評估日期（一個或多個），並逐日期
+%%   比對分區自帶的設定指紋（#374）。--compare-only 沒有
 %%   prepare_eval_data，一樣直接讀這張表；validate_enriched_eval_predictions_present
 %%   維持零輸出檢查（B4：該月無資料就擋）。
 
@@ -97,7 +98,7 @@ flowchart TB
 
   %% ---------------------- 主鏈：整理 ----------------------
   n_prep["prepare_eval_data<br/><small>篩 model_version 與 snap_date ・ label_table 重複 key 就擋 ・ left join 補 label<br/>post-training 依 score（同分按 item）重算 rank、轉 BIGINT ・ join segment 欄（母體表缺欄只 WARN）</small>"]
-  o_enriched(["enriched_eval_predictions　★Hive<br/><small>join 在此算一次、以本月 partition 落地（dynamic overwrite）・ 一列 ＝ 一個 (time, entity, item) 候選<br/>存有這個 model_version 評估過的所有月份 ・ 每個讀者各自 restrict_to_eval_snap_dates 篩回本次評估日期</small>"])
+  o_enriched(["enriched_eval_predictions　★Hive<br/><small>join 在此算一次、以本月 partition 落地（dynamic overwrite）・ 一列 ＝ 一個 (time, entity, item) 候選<br/>存有這個 model_version 評估過的所有月份 ・ 每個讀者各自 restrict_to_current_eval_partitions 篩回本次評估日期並驗分區指紋</small>"])
   d_segcols(["evaluation_segment_columns<br/><small>JSON ・ joined ／ sources ／ missing<br/>分群的 node 照 joined 分群、不看 frame 欄位</small>"])
 
   %% ---------------------- 指標流 ----------------------

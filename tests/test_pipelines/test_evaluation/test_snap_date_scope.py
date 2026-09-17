@@ -8,10 +8,15 @@ evaluated.
 
 import pytest
 
+from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+    PARTITION_FINGERPRINT_COLUMN,
+)
 from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
     eval_snap_dates,
     eval_snap_dates_without_rows,
+    restrict_to_current_eval_partitions,
     restrict_to_eval_snap_dates,
+    stamp_partition_fingerprint,
 )
 
 
@@ -112,3 +117,170 @@ def test_dates_without_rows_is_empty_when_every_date_has_rows(spark):
         _two_months(spark), _params("2026-01-31")) == []
     assert eval_snap_dates_without_rows(
         _two_months(spark), _params("2025-12-31")) == ["2025-12-31"]
+
+
+# --- Each partition carries the settings it was written under (#374) --------
+#
+# One date's partition can be written by a single-date run (``20260331/``) and
+# by a several-date run (``20260131-20260331/``). The JSON fingerprint in each
+# run's directory only speaks for what that directory's run wrote, so it cannot
+# tell a reader that another run rewrote the partition since. Each row carries
+# the fingerprint instead.
+
+_Q1 = ["2026-01-31", "2026-02-28", "2026-03-31"]
+
+
+def _settings(snap_date, segment_columns=("tier",), post_training=None):
+    """Parameters that differ only in the partition-content settings."""
+    params = _params(snap_date)
+    params["evaluation"]["segment_columns"] = list(segment_columns)
+    if post_training is not None:
+        params["post_training"] = post_training
+    return params
+
+
+def _written(spark, months, params):
+    """What prepare_eval_data leaves in ``months`` when run with ``params``."""
+    frame = spark.createDataFrame(
+        [(m, who) for m in months for who in ("a", "b")], ["as_of", "who"])
+    return stamp_partition_fingerprint(frame, params)
+
+
+def _table(spark, *writes):
+    """The table after ``writes`` in order: a later write replaces its months,
+    as a dynamic partition overwrite does."""
+    by_month = {}
+    for months, params in writes:
+        for month in months:
+            by_month[month] = params
+    frames = [_written(spark, [m], p) for m, p in sorted(by_month.items())]
+    table = frames[0]
+    for frame in frames[1:]:
+        table = table.unionByName(frame)
+    return table
+
+
+def test_a_month_rewritten_by_a_single_date_run_stops_the_range_resume(spark):
+    """Q1 under settings A; March re-run alone under settings B; resuming the
+    Q1 run (A) must not read B's March. Its directory's JSON still says A."""
+    a_range, b_single = _settings(_Q1), _settings("2026-03-31", ("region",))
+    table = _table(spark, (_Q1, a_range), (["2026-03-31"], b_single))
+    with pytest.raises(ValueError) as excinfo:
+        restrict_to_current_eval_partitions(table, a_range)
+    message = str(excinfo.value)
+    assert "2026-03-31" in message, message
+    assert "2026-01-31" not in message and "2026-02-28" not in message, message
+    assert "--from-node prepare_eval_data" in message, message
+
+
+def test_a_month_rewritten_by_a_range_run_stops_the_single_date_resume(spark):
+    """The other direction: March alone under A, then Q1 under B rewrites
+    March; resuming the March run (A) must not read B's March."""
+    a_single, b_range = _settings("2026-03-31"), _settings(_Q1, ("region",))
+    table = _table(spark, (["2026-03-31"], a_single), (_Q1, b_range))
+    with pytest.raises(ValueError, match=r"2026-03-31"):
+        restrict_to_current_eval_partitions(table, a_single)
+
+
+def test_a_run_mode_switch_is_a_different_partition(spark):
+    """post_training is a partition-content setting: monitoring rows are not
+    the post-training population."""
+    monitoring = _settings("2026-03-31", post_training=False)
+    table = _table(spark, (["2026-03-31"], monitoring))
+    with pytest.raises(ValueError, match=r"2026-03-31"):
+        restrict_to_current_eval_partitions(
+            table, _settings("2026-03-31", post_training=True))
+
+
+def test_same_settings_over_other_dates_do_not_block_each_other(spark):
+    """A single-date run and a range run with the same settings write the same
+    rows for the date they share, so neither refuses the other's partition."""
+    a_range, a_single = _settings(_Q1), _settings("2026-03-31")
+    table = _table(spark, (_Q1, a_range), (["2026-03-31"], a_single))
+
+    as_range = restrict_to_current_eval_partitions(table, a_range)
+    as_single = restrict_to_current_eval_partitions(table, a_single)
+
+    assert as_range.frame.count() == 6
+    assert as_single.frame.count() == 2
+    assert PARTITION_FINGERPRINT_COLUMN not in as_range.frame.columns
+    assert as_range.dates_without_rows == [] == as_single.dates_without_rows
+
+
+def test_a_partition_written_before_fingerprints_is_named_as_such(spark):
+    """The table's schema evolves on write, so a partition written before #374
+    reads back with the column NULL; a table never rewritten has no column."""
+    from pyspark.sql import functions as F
+
+    a_range = _settings(_Q1)
+    table = _table(spark, (_Q1, a_range)).withColumn(
+        PARTITION_FINGERPRINT_COLUMN,
+        F.when(F.col("as_of") == "2026-02-28", F.lit(None).cast("string"))
+        .otherwise(F.col(PARTITION_FINGERPRINT_COLUMN)))
+    with pytest.raises(ValueError) as excinfo:
+        restrict_to_current_eval_partitions(table, a_range)
+    message = str(excinfo.value)
+    assert "2026-02-28: written before" in message, message
+    assert "2026-01-31" not in message, message
+
+    no_column = table.drop(PARTITION_FINGERPRINT_COLUMN)
+    with pytest.raises(ValueError, match=r"2026-03-31: written before"):
+        restrict_to_current_eval_partitions(no_column, _settings("2026-03-31"))
+
+
+def test_every_stale_month_is_named_in_one_raise(spark):
+    a_range, b = _settings(_Q1), _settings(_Q1, ("region",))
+    table = _table(spark, (_Q1, b))
+    with pytest.raises(ValueError) as excinfo:
+        restrict_to_current_eval_partitions(table, a_range)
+    for month in _Q1:
+        assert month in str(excinfo.value)
+
+
+def test_a_configured_month_without_rows_is_reported_not_raised(spark):
+    """No rows is not a fingerprint mismatch: the caller decides (the
+    --compare-only gate raises, compute_metrics' postcondition raises)."""
+    a_range = _settings(_Q1)
+    table = _table(spark, (["2026-01-31", "2026-03-31"], a_range))
+    partitions = restrict_to_current_eval_partitions(table, a_range)
+    assert partitions.dates_without_rows == ["2026-02-28"]
+    assert partitions.frame.count() == 4
+
+
+def _spy_actions(monkeypatch):
+    from pyspark.sql import DataFrame
+
+    calls = []
+    real_collect = DataFrame.collect
+
+    def collect(self):
+        calls.append(("collect",
+                      self._jdf.queryExecution().optimizedPlan().toString()))
+        return real_collect(self)
+
+    def is_empty(self):
+        calls.append(("isEmpty", ""))
+        raise AssertionError("per-date isEmpty is what the check replaces")
+
+    monkeypatch.setattr(DataFrame, "collect", collect)
+    monkeypatch.setattr(DataFrame, "isEmpty", is_empty)
+    return calls
+
+
+def test_one_date_costs_one_limited_collect(spark, monkeypatch):
+    """A partition is written by one dynamic overwrite, so all its rows share
+    one fingerprint: one row is enough, the cost of the isEmpty it replaces."""
+    params = _settings("2026-03-31")
+    table = _table(spark, (_Q1, params))
+    calls = _spy_actions(monkeypatch)
+    restrict_to_current_eval_partitions(table, params)
+    assert [kind for kind, _ in calls] == ["collect"]
+    assert "GlobalLimit 1" in calls[0][1], calls[0][1]
+
+
+def test_several_dates_cost_one_collect_not_one_per_date(spark, monkeypatch):
+    params = _settings(_Q1)
+    table = _table(spark, (_Q1, params))
+    calls = _spy_actions(monkeypatch)
+    restrict_to_current_eval_partitions(table, params)
+    assert [kind for kind, _ in calls] == ["collect"]

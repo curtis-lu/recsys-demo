@@ -426,7 +426,9 @@ python -m recsys_tfb evaluation \
 從指標接續（`--from-node compute_metrics`）也不重做 join：`prepare_eval_data` 把連好 label、rank 與 segment 的列直接寫進 `enriched_eval_predictions`，之後的 node 讀表（[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1）。前次完整 run 成功時，只補跑兩個不做 join 的 node：`draw_diagnosis_sample_node`（抽樣只在記憶體）與監控模式的 `no_diagnosis_pages`；清單同樣釘在 `RESUME_CONTRACTS` 的 `"compute_metrics"`。兩個情況會把 `prepare_eval_data` 拉回來或擋下：
 
 - **評估日期的 partition 不在**：這張表從第一次評估之後就一直存在，所以 CLI 不問「表在不在」，問「`evaluation.snap_date` 的每一個日期的 partition 在不在」。任一個不在就把 `prepare_eval_data` 拉回切片，全都在就直接讀。
-- **partition 在，但寫的時候設定不同**：`prepare_eval_data` 跟 partition 一起寫的 `segment_columns.json` 帶設定指紋。讀表的 node（`compute_metrics`、`compute_baseline_metrics`、`draw_diagnosis_sample_node`）先比對其中四個決定 partition 內容的鍵（`post_training`、`evaluation.snap_date`、`evaluation.segment_columns`、`evaluation.segment_sources`），不合就 raise，指示 `--from-node prepare_eval_data`。只比四個鍵的理由：改 `k_values` 這類只影響後段計算的設定，照訊息從 `compute_metrics` 重跑不會重寫 partition，全部都比的話會一直被擋。
+- **partition 在，但寫的時候設定不同**：兩道比對，擋的是兩件事。
+  - `prepare_eval_data` 跟 partition 一起寫的 `segment_columns.json` 帶設定指紋。分群的讀表 node（`compute_metrics`、`compute_baseline_metrics`、`draw_diagnosis_sample_node`）先比對其中四個決定 partition 內容的鍵（`post_training`、`evaluation.snap_date`、`evaluation.segment_columns`、`evaluation.segment_sources`），不合就 raise，指示 `--from-node prepare_eval_data`。只比四個鍵的理由：改 `k_values` 這類只影響後段計算的設定，照訊息從 `compute_metrics` 重跑不會重寫 partition，全部都比的話會一直被擋。
+  - 每個 partition 的每一列另外帶 `eval_partition_fingerprint`（#374）：寫它的那次執行的 `post_training`、`segment_columns`、`segment_sources`（不含 `snap_date`）。**每個**讀表 node 讀之前逐日期比對，不合或是空值就 raise，列出所有有問題的日期，指示 `--from-node prepare_eval_data`。這道擋的是「這個日期後來被另一次執行蓋掉」：同一個日期會被目錄不同的執行寫到（單跑 3 月寫 `20260331/`、1–3 月一起跑寫 `20260131-20260331/`），目錄裡那份 JSON 只代表自己那次寫的東西，看不出分區後來被誰蓋過。詳細的反例與理由見 7.1 節。
 
 `--from-node` 使用拓撲順序語意，會執行指定 node 與拓撲序中其後的 nodes；`--only-node` 則不執行下游 consumers。只要 pipeline 實際執行，CLI 仍會寫 evaluation manifest 並更新 `data/evaluation/latest`，所以單 node 模式應視為進階除錯工具。
 
@@ -449,7 +451,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 | 空的診斷頁清單（僅監控模式） | `no_diagnosis_pages` | parameters（值不讀） | 回空清單、不讀磁碟。`generate_report` 是位置綁定，第六個輸入必須有人產出；不沿用 `render_diagnosis_pages`，因為它要求每項 registry 診斷各一份帶名字的結果，而監控模式一份都沒算 | `evaluation_diagnosis_pages` |
 | 標準報表 | `generate_report` | `evaluation_metrics`、parameters、`baseline_metrics`、`evaluation_metric_ci`、`evaluation_report_aggregates`、`evaluation_diagnosis_pages`（6 個必填參數，皆無預設值） | 產生互動式 HTML；純函式，不含任何 Spark 物件或 action。畫之前比對 `evaluation_metrics`、`baseline_metrics`、`evaluation_metric_ci`、`evaluation_report_aggregates` 的設定指紋，不合就 raise | `evaluation_report` |
 
-讀 `enriched_eval_predictions` 的 node，第一步都先篩到 `evaluation.snap_date` 的日期（一個或多個）：表裡是這個 model_version 評估過的**所有月份**，catalog 只替你篩掉別的 model_version。忘了篩不會報錯，只會把所有月份一起算進去，所以 `tests/test_pipelines/test_evaluation/test_pipeline.py` 有一條 AST 測試：接上這張表、函式裡卻沒呼叫 `restrict_to_eval_snap_dates` 的 node 會讓測試失敗。讀表的 node 之中，分群的那三個另外先比對 `segment_columns.json` 的指紋（見 4.6 節）。
+讀 `enriched_eval_predictions` 的 node，第一步都先篩到 `evaluation.snap_date` 的日期（一個或多個）：表裡是這個 model_version 評估過的**所有月份**，catalog 只替你篩掉別的 model_version。篩的同時逐日期確認分區指紋（見 4.6 節），再把指紋欄丟掉往下用。忘了篩不會報錯，只會把所有月份一起算進去，所以 `tests/test_pipelines/test_evaluation/test_pipeline.py` 有一條 AST 測試：接上這張表、函式裡卻沒呼叫 `restrict_to_current_eval_partitions` 的 node 會讓測試失敗（只呼叫只篩不驗的 `restrict_to_eval_snap_dates` 也算沒做）。讀表的 node 之中，分群的那三個另外先比對 `segment_columns.json` 的指紋（見 4.6 節）。
 
 `diagnose_*` 這幾列由 registry（`diagnosis.metric.contract.DIAGNOSES`）導出：現行 4 項（`config_shift`／`item_ability`／`model_capacity`／`suppression`）各是一個同形狀的 `diagnose_<name>` node（由 `make_diagnosis_node` 產生）；新增或移除診斷時 registry 與此表一起變。
 
@@ -471,17 +473,18 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 
 | 階段 | node | 處理內容 |
 |---|---|---|
-| 驗證 Model A | `validate_enriched_eval_predictions_present` | 確認這個 model_version 在 `evaluation.snap_date` 的每一個日期都有 rows，缺哪個就列出來並 raise。沒有 output，不傳東西給下一步 |
-| 載入 Model B | `load_compare_predictions` | 載入設定的 comparison source |
-| 對齊母體 | `restrict_to_common` | 讀 `enriched_eval_predictions`、先篩到評估日期，再取共同範圍並重新排名 |
+| 驗證 Model A | `validate_enriched_eval_predictions_present` | 確認這個 model_version 在 `evaluation.snap_date` 的每一個日期都有 rows、而且分區指紋跟 `segment_columns.json` 記錄的設定一致，缺哪個或不合哪個就列出來並 raise。沒有 output，不傳東西給下一步 |
+| 載入 Model B | `load_compare_predictions` | 載入設定的 comparison source；B 是 enriched 表時，丟掉它的分區指紋欄、不驗 |
+| 對齊母體 | `restrict_to_common` | 讀 `enriched_eval_predictions`、先篩到評估日期並確認分區指紋（同上，比 `segment_columns.json`），再取共同範圍並重新排名 |
 | 比較報表 | `generate_comparison_report` | 產生 `report_comparison.html` |
 
 這條路沒有 `prepare_eval_data`，它讀的兩樣東西都是寫 enriched partition 的那次標準 run 一起寫的：評估日期的 partition，以及 `evaluation_segment_columns`（`segment_columns.json`，`generate_comparison_report` 用它決定分群）。兩者會被分開刪掉（清掉 `data/`、DROP 表），缺哪個都會被擋下、說出缺的是哪個：
 
 - **partition 不在、或 `segment_columns.json` 不在**：CLI 在任何 node 執行前就停下，每缺一樣列一行（表名與缺 partition 的所有日期、檔案路徑），最後寫出該先跑的 `python -m recsys_tfb evaluation --model-version …`。這一步只看 partition 清單與檔案在不在，不讀資料。放在 CLI、不只靠下面的閘門，是因為切片會跳過沒有輸出的 node：`--compare-only` 加上 `--from-node` 時閘門不會跑。
 - **partition 列得出來但某個日期沒有列**：`validate_enriched_eval_predictions_present` 擋下，訊息寫出表名、沒有列的日期與 model_version。
+- **某個日期的 partition 後來被另一次執行蓋掉**（#374）：閘門與 `restrict_to_common` 都擋下，訊息列出日期。這裡比的是「這個目錄的 `segment_columns.json` 記錄的設定」，不是今天的設定：`--post-training` 在這條路上是啞的，拿今天的值比，照常不帶旗標讀 post-training 寫的分區就會被誤擋。
 
-兩種都是先重跑一次同 model_version、同月份的標準 evaluation。
+三種都是先重跑一次同 model_version、同月份的標準 evaluation。
 
 比較時，Model B 一律沿用 Model A 的 label（依 `time + entity + item` 對上）（bug 7，ADR-0020）。
 
@@ -501,7 +504,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 | `metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/metrics.json`（`evaluation_metrics`：overall、per-item、per-segment、macro、overview 與 category 指標，帶 `config_fingerprint`） | 標準、`--compare` |
 | `baseline_metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/baseline_metrics.json`（`baseline_metrics`；`report.sections.baseline: false` 時是 `{"enabled": false}` stub，一樣帶指紋） | 標準、`--compare` |
 | `segment_columns.json` | `data/evaluation/<model_version>/<YYYYMMDD>/segment_columns.json`（`evaluation_segment_columns`，見 3.2 節） | 標準、`--compare` 寫；`--compare-only` 讀 |
-| `enriched_eval_predictions` | Hive，以 `model_version` 與 `snap_date` partition | 標準、`--compare` |
+| `enriched_eval_predictions` | Hive，以 `model_version` 與 `snap_date` partition；每列帶 `eval_partition_fingerprint`（寫這格的執行的分區內容設定，見 7.1 節） | 標準、`--compare` |
 | `latest` alias | `data/evaluation/latest` | 指向最近完成的 evaluation 目錄 |
 
 上表路徑裡的 `<YYYYMMDD>` 是評估日期去掉 `-`。評估多個日期時，這一段是 `<最早>-<最晚>`，例如 1 到 3 月月底寫入 `data/evaluation/<model_version>/20260131-20260331/`；`enriched_eval_predictions` 仍是每個日期各一個 partition。目錄名只看起迄兩端，後果見 7.1 節。
@@ -560,6 +563,17 @@ report path 會將 ISO 日期移除 `-`，例如 `2026-01-31` 寫入 `data/evalu
 
 評估多個日期時，目錄名是 `<最早>-<最晚>`，例如 `2026-01-31` 到 `2026-03-31` 寫入 `data/evaluation/<model_version>/20260131-20260331/`。**目錄名只看起迄兩端**：起迄相同、中間日期不同的兩組設定（例如 1、2、3 月與只有 1、3 月）寫到同一個目錄，後跑的覆寫先跑的，跟改了任何其他設定再重跑一樣。落地 JSON 的設定指紋含 `evaluation.snap_date` 的完整清單，所以換了日期組合之後只做部分重跑，讀到舊組合算的 JSON 會被擋下，不會把兩組日期的結果混進同一份報表。
 
+**同一個日期的 partition 會被不同目錄的執行寫到，所以 partition 自帶設定指紋。** `enriched_eval_predictions` 一個日期一個 partition，但寫它的執行可能是單跑那個月、也可能是一段區間；兩者的目錄不同，各自的 `segment_columns.json` 只代表自己那次寫了什麼。反例：
+
+```text
+1. 1–3 月（設定 A）              → 1、2、3 月 partition＝A；20260131-20260331/ 的 JSON＝A
+2. 單跑 3 月（設定 B）           → 3 月 partition＝B；      20260331/ 的 JSON＝B
+3. 接續 1–3 月 --from-node compute_metrics（設定 A）
+   → 只看 20260131-20260331/ 的 JSON 會放行，實際讀到 B 的 3 月
+```
+
+所以每一列另外帶 `eval_partition_fingerprint`：寫它的那次執行的 `post_training`、`evaluation.segment_columns`、`evaluation.segment_sources` 算出的 sha256（`steps/config_fingerprint.py::partition_fingerprint`）。**不含 `evaluation.snap_date`**：一個日期 partition 的內容只取決於模式與分群設定，跟同一次還評估了哪些別的日期無關；含進去的話，設定相同的單月執行與區間執行會互相擋。每個讀表 node 讀之前逐日期比對，上例第 3 步會 raise 並點名 3 月，反方向（先單月、再用別的設定跑區間、再接續單月）一樣。成本：單一日期時對那個 partition 取一列（一個 partition 由一次 dynamic overwrite 寫成，整格同一個值），多個日期時一次查完所有日期，不是每個日期一個 job。理由與取捨見 [ADR-0020](../adr/0020-evaluation-bug-round-intended-behaviours.md) 文末〈補充（#374）〉。
+
 同一個 model version 與日期下修改 K、segments、categories、baseline、report sections 或 compare source，都會覆寫相同報表路徑；標準／`--compare` 模式也會覆寫相同 enriched partition。
 manifest 會保存最後一次執行的 evaluation parameters、git commit、run ID、`post_training` 與 slicing metadata。
 
@@ -605,12 +619,12 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 - 使用 `--compare-only` 前，先確認最後一次建立 Model A enriched data 的模式。
 - 若同一模型同一日期需要長期保留兩種評估情境，現有儲存鍵不足，需另加 scenario partition 或獨立 evaluation version。
 
-指紋機制（§7.2 新增的「切換執行模式」列）只擋得住**同一次評估流程**裡、模式切換之後才做的部分重跑（例如跑完 `--post-training` 再用另一種模式 `--only-node generate_report`）：每份落地產物的指紋都含 `post_training`，不合就 raise，並指示從 `prepare_eval_data` 重跑。`prepare_eval_data` 跟 partition 一起寫的 `segment_columns.json` 也帶指紋，讀表的 node 只比對其中四個決定 partition 內容的鍵（`post_training` 是其中之一，見 4.6 節）。它擋不住上面說的 partition 覆寫——那是**兩次各自完整**的執行之間的事，指紋比對的是設定，不是 `enriched_eval_predictions` 內容本身，覆寫風險仍在，仍需照上面幾條手動判斷。
+指紋機制（§7.2 新增的「切換執行模式」列）只擋得住**同一次評估流程**裡、模式切換之後才做的部分重跑（例如跑完 `--post-training` 再用另一種模式 `--only-node generate_report`）：每份落地產物的指紋都含 `post_training`，不合就 raise，並指示從 `prepare_eval_data` 重跑。`prepare_eval_data` 跟 partition 一起寫的 `segment_columns.json` 也帶指紋，讀表的 node 只比對其中四個決定 partition 內容的鍵（`post_training` 是其中之一，見 4.6 節）；partition 自己也帶指紋（含 `post_training`，見 7.1 節），所以「另一種模式的完整執行蓋掉了這個月，再回頭接續前一種模式」會在讀表時被擋下。擋不住的是**不接續、直接把兩種模式各自完整跑完**：後跑的那次會重寫 partition 與報表，前一次的結果就沒了——指紋比對的是設定，不會替你保留被覆寫的內容，仍需照上面幾條手動判斷。
 
 ### 7.4 部分重跑的安全邊界
 
 - `catalog.exists()` 只能確認產物存在，不能證明內容來自目前 evaluation settings、label snapshot 或預測資料。設定這一半由指紋補上：落地 JSON 帶 `config_fingerprint`，讀到與目前「算的」設定不合的 JSON 會 raise（見 7.2 節）。label snapshot 與預測資料沒有指紋，資料變了仍要自己決定重跑。
-- **這條對 row-level 資料也成立。** `enriched_eval_predictions` 落地之後（[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1），從 `prepare_eval_data` 之後接續會讀表、不重做 join。CLI 只替你問「這個月的 partition 在不在」（不在就把 `prepare_eval_data` 拉回來），`segment_columns.json` 的指紋替你擋「決定 partition 內容的設定變了」（見 4.6 節）；partition 在、設定也沒變，但 `label_table` 回補或預測重發布過，讀到的就是舊的列，不會報錯。資料變了要 `--from-node prepare_eval_data` 或 full run。
+- **這條對 row-level 資料也成立。** `enriched_eval_predictions` 落地之後（[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1），從 `prepare_eval_data` 之後接續會讀表、不重做 join。CLI 只替你問「評估日期的 partition 在不在」（不在就把 `prepare_eval_data` 拉回來），`segment_columns.json` 與 partition 自帶的指紋替你擋「決定 partition 內容的設定變了、或 partition 被另一組設定的執行蓋掉」（見 4.6 節）；partition 在、設定也沒變，但 `label_table` 回補或預測重發布過，讀到的就是舊的列，不會報錯。資料變了要 `--from-node prepare_eval_data` 或 full run。
 - `generate_report` 的輸入裡只有 `evaluation_diagnosis_pages` 是 memory-only，指標、baseline、metric CI、report aggregates 都已落地，因此從該 node 接續只補跑 `render_diagnosis_pages`（監控模式是 `no_diagnosis_pages`），不重算任何指標（見 4.6 節）。已落地的 JSON 讀回時照指紋檢查，不是照單全收；改了 `evaluation.diagnosis.*` 而只做這個接續，會在 `render_diagnosis_pages` 被指紋擋下並提示 `--from-node draw_diagnosis_sample_node`，不會悄悄沿用舊結果。指紋只看設定、不看資料：`label_table` 回補或預測重發布之後只做這個接續，畫出來的是上一次 run 的指標（#351 之前這個接續會順便重算指標與 baseline，但 metric CI 與 report aggregates 本來就沿用舊的）。資料變了要 `--from-node prepare_eval_data` 或 full run。
 - `enriched_eval_predictions` 是 evaluation 唯一的 row-level 落地產物：`prepare_eval_data` 寫一次，同一次 run 的其他 node 與之後的 `--compare-only` 都讀它；`--compare-only` 會先驗證指定 model/date partition 非空。
 - `--compare-only` 不會更新 enriched partition，也不會重新產生標準 report。
@@ -627,6 +641,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 | 找不到 `best` | 尚未 promotion，卻省略 `--model-version` | 對候選模型明確傳入版本，或先完成人工 promotion |
 | 評估到上一版模型 | `--post-training` 仍省略 `--model-version` | post-training 不會自動選最新模型；指定 candidate ID |
 | `No predictions found for evaluation.snap_date`（多個日期時是 `No predictions found for N of M evaluation.snap_date dates: [...]`） | 日期錯誤、模式用錯、對應 partition 未產生；多個日期時只有列出的那幾個沒有預測 | 檢查 model、日期、`training_eval_predictions`／`ranked_predictions` |
+| `enriched_eval_predictions holds evaluated date(s) not written under ...`，列出 `<日期>: written under other settings` 或 `<日期>: written before partitions carried a settings fingerprint` | 前者：那個日期的 partition 後來被另一組設定（另一種模式、別的分群設定）的執行蓋掉，常見於單月與區間交錯跑再接續（見 7.1 節）。後者：partition 是 #374 之前寫的 | `--from-node prepare_eval_data` 重寫那些日期；`--compare-only` 沒有 `prepare_eval_data`，先用想比的設定重跑那些日期的標準 evaluation |
 | `compute_metrics postcondition: N evaluated months ... expected exactly M` | 某個評估日期的 `enriched_eval_predictions` partition 是空的或沒寫過（多半是從 `prepare_eval_data` 之後接續） | 照訊息 `--from-node prepare_eval_data` 重跑 |
 | `N duplicated label_table key(s) on [...]` | `label_table` 在該月的 `time + entity + item` 上有重複列 | 在上游去重。evaluation 不替你挑一列：重複的 key 會讓 LEFT JOIN 把候選複製成多列、rank 全錯，而且不會報錯 |
 | `Type conflict writing to Hive table '…enriched_eval_predictions' (rank: … ／ label: …)` | 這張表是舊版寫的：當時 `--post-training` 補出來的 `rank` 是 INT（現在是 BIGINT），監控模式的 `label` 沿用 `label_table` 的型別（現在一律 INT） | 表內容可由重跑 evaluation 重建：DROP 這張表，再對需要的月份重跑。同一模式重跑也會撞，不是只有換模式；這張表跨所有 model_version 與月份，DROP 之後到重跑之前 `--compare-only` 找不到 Model A |

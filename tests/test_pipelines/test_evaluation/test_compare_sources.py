@@ -196,6 +196,30 @@ def test_model_version_source_default_is_enriched_eval_predictions(
     assert rows == [("c1", "p1", 0.92), ("c1", "p2", 0.71), ("c2", "p1", 0.80)]
 
 
+def test_model_version_source_enriched_drops_the_partition_fingerprint_unchecked(
+    spark,
+):
+    """#374: B's enriched table carries the settings of B's own run, not this
+    run's, so it is not checked; the column is dropped so it does not travel
+    into the comparison."""
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+        PARTITION_FINGERPRINT_COLUMN,
+    )
+
+    df = spark.createDataFrame(
+        [("c1", "2026-01-31", "p1", 0.92, 1, 1, "MV_A", "written-by-b's-run")],
+        ["cust_id", "snap_date", "prod_name", "score", "label", "rank",
+         "model_version", PARTITION_FINGERPRINT_COLUMN],
+    )
+    df.createOrReplaceTempView("enriched_eval_predictions")
+    try:
+        out = load_compare_predictions(_params_for_mv("MV_A"), spark)
+        assert PARTITION_FINGERPRINT_COLUMN not in out.columns
+        assert out.count() == 1
+    finally:
+        spark.catalog.dropTempView("enriched_eval_predictions")
+
+
 def test_model_version_source_enriched_explicit(
     spark, enriched_eval_predictions_view
 ):

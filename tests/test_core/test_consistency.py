@@ -1627,6 +1627,15 @@ class TestPostTrainingSnapDateA22:
         assert "not a readable ISO date" in errs[0]
         assert "['31/01/2026']" in errs[0], errs[0]
 
+    def test_a_date_listed_twice_reads_like_the_single_date(self):
+        """"Several dates" is counted after repeats are dropped, as every other
+        reader of the key counts it (``len(as_date_list(value)) > 1``)."""
+        params = _eval_params(["2026-09-30", "2026-09-30"], "2026-01-31")
+        errs = post_training_snap_date_errors(params, post_training=True)
+        assert len(errs) == 1
+        assert errs[0].startswith(
+            "(A22) evaluation.snap_date='2026-09-30' is not a test month"), errs[0]
+
     def test_a_one_element_list_reads_like_the_single_date(self):
         params = _eval_params(["2026-09-30"], "2026-01-31", "2026-02-28")
         errs = post_training_snap_date_errors(params, post_training=True)

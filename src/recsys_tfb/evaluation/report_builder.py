@@ -1428,8 +1428,12 @@ def build_completeness_section(
 
 
 def several_eval_dates(configured) -> bool:
-    """Whether the configured evaluation date value names more than one date."""
-    return isinstance(configured, list) and len(set(as_date_list(configured))) > 1
+    """Whether the configured evaluation date value names more than one date.
+
+    ``len(as_date_list(value)) > 1``, the one test the repo uses for "several
+    dates" (``as_date_list`` already drops repeats).
+    """
+    return len(as_date_list(configured)) > 1
 
 
 def eval_dates_display(configured):
@@ -1442,7 +1446,7 @@ def eval_dates_display(configured):
     """
     if not isinstance(configured, list):
         return configured
-    dates = sorted(set(as_date_list(configured)))
+    dates = sorted(as_date_list(configured))
     if not dates:
         return "unknown"
     if len(dates) == 1:

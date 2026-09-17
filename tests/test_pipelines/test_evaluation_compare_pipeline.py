@@ -79,6 +79,26 @@ def _base_params_for_validator():
     }
 
 
+def _landed_segments(params):
+    """``evaluation_segment_columns`` as a standard run under ``params`` lands
+    it: the A-side readers take the partition settings it records (#374)."""
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+        fingerprint,
+    )
+
+    return {"joined": [], "sources": {}, "missing": {},
+            "config_fingerprint": fingerprint(params)}
+
+
+def _as_written(df, params):
+    """``df`` as the partition ``prepare_eval_data`` under ``params`` writes."""
+    from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+        stamp_partition_fingerprint,
+    )
+
+    return stamp_partition_fingerprint(df, params)
+
+
 def test_enriched_validator_raises_when_partition_empty(spark):
     """Empty DataFrame in (simulates catalog filter returned nothing).
     Validator must raise DataConsistencyError naming the empty table.
@@ -92,11 +112,12 @@ def test_enriched_validator_raises_when_partition_empty(spark):
         "cust_id STRING, snap_date STRING, prod_name STRING, "
         "score DOUBLE, rank INT, label INT",
     )
+    params = _base_params_for_validator()
     with pytest.raises(
         DataConsistencyError, match="enriched_eval_predictions has no partition"
     ):
         validate_enriched_eval_predictions_present(
-            empty, _base_params_for_validator()
+            empty, _landed_segments(params), params
         )
 
 
@@ -117,7 +138,8 @@ def test_enriched_validator_raises_when_snap_date_filter_yields_empty(spark):
     with pytest.raises(
         DataConsistencyError, match="enriched_eval_predictions has no partition"
     ):
-        validate_enriched_eval_predictions_present(df, params)
+        validate_enriched_eval_predictions_present(
+            _as_written(df, params), _landed_segments(params), params)
 
 
 def test_b4_validator_passes_when_partition_present(spark):
@@ -135,8 +157,9 @@ def test_b4_validator_passes_when_partition_present(spark):
         ],
         ["cust_id", "snap_date", "prod_name", "score", "rank", "label"],
     )
+    params = _base_params_for_validator()
     assert validate_enriched_eval_predictions_present(
-        df, _base_params_for_validator()
+        _as_written(df, params), _landed_segments(params), params
     ) is None
 
 
@@ -154,11 +177,133 @@ def test_enriched_validator_names_a_configured_date_whose_partition_is_empty(spa
     params = _base_params_for_validator()
     params["evaluation"]["snap_date"] = ["2026-01-31", "2026-02-28"]
     with pytest.raises(DataConsistencyError) as excinfo:
-        validate_enriched_eval_predictions_present(df, params)
+        validate_enriched_eval_predictions_present(
+            _as_written(df, params), _landed_segments(params), params)
     message = str(excinfo.value)
     assert "no partition for evaluation.snap_date date(s) ['2026-02-28']" \
         in message, message
     assert "2026-01-31" not in message, message
+
+
+def _one_row(spark):
+    return spark.createDataFrame(
+        [("c1", "2026-01-31", "p1", 0.9, 1, 1)],
+        ["cust_id", "snap_date", "prod_name", "score", "rank", "label"],
+    )
+
+
+def test_enriched_validator_refuses_a_partition_another_run_rewrote(spark):
+    """#374: the directory's segment_columns.json was landed by a monitoring
+    run; the January partition was rewritten since by a post-training run
+    (whose own JSON went to another directory). --compare-only must not read
+    those rows as that directory's."""
+    from recsys_tfb.pipelines.evaluation.nodes import (
+        validate_enriched_eval_predictions_present,
+    )
+
+    params = _base_params_for_validator()
+    monitoring = {**params, "post_training": False}
+    post_training = {**params, "post_training": True}
+    with pytest.raises(ValueError,
+                       match=r"2026-01-31: written under other settings"):
+        validate_enriched_eval_predictions_present(
+            _as_written(_one_row(spark), post_training),
+            _landed_segments(monitoring), params)
+
+
+def test_compare_only_reads_a_post_training_partition_without_the_flag(spark):
+    """--post-training is inert under --compare-only, so today's value of it
+    says nothing about the partition: a post-training run's partition, read
+    with the flag omitted, is checked against what that run's JSON records and
+    passes (the #352 reason --compare-only never compared the JSON with
+    today's settings)."""
+    from recsys_tfb.pipelines.evaluation.nodes import (
+        validate_enriched_eval_predictions_present,
+    )
+
+    params = _base_params_for_validator()
+    post_training = {**params, "post_training": True}
+    assert validate_enriched_eval_predictions_present(
+        _as_written(_one_row(spark), post_training),
+        _landed_segments(post_training), {**params, "post_training": False},
+    ) is None
+
+
+def test_restrict_to_common_refuses_side_a_another_run_rewrote(
+    spark, two_column_entity_params,
+):
+    """Side A is this run's enriched table and is checked; side B is the
+    compared run's own table and is not (see test_compare_sources.py)."""
+    from recsys_tfb.pipelines.evaluation.nodes import restrict_to_common
+
+    params = {**two_column_entity_params,
+              "evaluation": {"snap_date": "2026-01-31"}}
+    rows = [("2026-01-31", "b1", "c1", "p1", 0.9, 1)]
+    a = _as_written(spark.createDataFrame(rows, _LABELED_PREDS_DDL),
+                    {**params, "post_training": True})
+    b = spark.createDataFrame([r[:5] for r in rows], _PREDS_DDL)
+    with pytest.raises(ValueError,
+                       match=r"2026-01-31: written under other settings"):
+        restrict_to_common(a, b, _landed_segments(params), params)
+
+
+def test_a_rewritten_hive_partition_is_refused_on_read(spark):
+    """The premises, on a real table: the column is added by schema evolution
+    (older partitions read back NULL), and a dynamic overwrite of one month
+    replaces that month's fingerprint and leaves the other month's alone."""
+    import shutil
+
+    from recsys_tfb.io.hive_table_dataset import HiveTableDataset
+    from recsys_tfb.pipelines.evaluation.nodes import compute_report_aggregates
+    from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+        stamp_partition_fingerprint,
+    )
+
+    test_db, test_table = "test_partition_fingerprint", "enriched_eval_predictions"
+
+    def _clean():
+        spark.sql(f"DROP TABLE IF EXISTS {test_db}.{test_table}")
+        d = _warehouse_table_dir(spark, test_db, test_table)
+        if d.exists():
+            shutil.rmtree(d)
+
+    def _month(month):
+        return spark.createDataFrame(
+            [("c1", month, "p1", 0.9, 1, 1), ("c1", month, "p2", 0.1, 2, 0)],
+            ["cust_id", "snap_date", "prod_name", "score", "rank", "label"],
+        )
+
+    params = {**_base_params_for_validator(),
+              "evaluation": {"snap_date": ["2026-01-31", "2026-02-28"]}}
+    other = {**params, "post_training": True}
+    spark.sql(f"CREATE DATABASE IF NOT EXISTS {test_db}")
+    _clean()
+    try:
+        ds = HiveTableDataset(
+            database=test_db, table=test_table, columns="auto",
+            partition_filter={"model_version": "MV_X"},
+            partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            external=False,
+        )
+        ds.save(_month("2026-01-31"))                        # before #374
+        ds.save(stamp_partition_fingerprint(_month("2026-02-28"), params))
+        with pytest.raises(ValueError) as excinfo:
+            compute_report_aggregates(ds.load(), params)
+        message = str(excinfo.value)
+        assert "2026-01-31: written before" in message, message
+        assert "2026-02-28" not in message, message
+
+        ds.save(stamp_partition_fingerprint(_month("2026-01-31"), other))
+        with pytest.raises(ValueError) as excinfo:
+            compute_report_aggregates(ds.load(), params)
+        message = str(excinfo.value)
+        assert "2026-01-31: written under other settings" in message, message
+        assert "2026-02-28" not in message, message
+
+        ds.save(stamp_partition_fingerprint(_month("2026-01-31"), params))
+        assert compute_report_aggregates(ds.load(), params)["enabled"] is True
+    finally:
+        _clean()
 
 
 def test_enriched_table_catalog_roundtrip(spark):
@@ -243,8 +388,13 @@ def test_enriched_table_catalog_roundtrip(spark):
 def month_restriction_off(monkeypatch):
     from recsys_tfb.pipelines.evaluation import nodes
 
-    monkeypatch.setattr(nodes, "restrict_to_eval_snap_dates",
-                        lambda df, parameters: df)
+    from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+        EvalPartitions,
+    )
+
+    monkeypatch.setattr(
+        nodes, "restrict_to_current_eval_partitions",
+        lambda df, parameters, written_with=None: EvalPartitions(df, []))
 
 
 def test_side_a_is_restricted_to_the_evaluated_month(
@@ -265,10 +415,11 @@ def test_side_a_is_restricted_to_the_evaluated_month(
     for branch, cust in (("b1", "c1"), ("b1", "c2"), ("b2", "c1")):
         for item, score in (("p1", 0.6), ("p2", 0.5)):
             b_rows.append(("2026-01-31", branch, cust, item, score))
-    a = spark.createDataFrame(a_rows, _LABELED_PREDS_DDL)
+    a = _as_written(spark.createDataFrame(a_rows, _LABELED_PREDS_DDL), params)
     b = spark.createDataFrame(b_rows, _PREDS_DDL)
 
-    a_common, _b_common, coverage = restrict_to_common(a, b, params)
+    a_common, _b_common, coverage = restrict_to_common(
+        a, b, _landed_segments(params), params)
 
     assert {r["snap_date"] for r in a_common.collect()} == {"2026-01-31"}
     assert coverage["n_query_group_A_full"] == 3
@@ -299,11 +450,12 @@ def test_several_evaluated_dates_are_compared_per_query_group(
                   [("2026-01-31", b, c) for b, c in entities]
                   + [("2026-02-28", "b1", "c1")])
               for item, score in (("p1", 0.6), ("p2", 0.5))]
-    a = spark.createDataFrame(a_rows, _LABELED_PREDS_DDL)
+    a = _as_written(spark.createDataFrame(a_rows, _LABELED_PREDS_DDL), params)
     b = spark.createDataFrame(b_rows, _PREDS_DDL).withColumn(
         "snap_date", F.to_date("snap_date"))
 
-    a_common, b_common, coverage = restrict_to_common(a, b, params)
+    a_common, b_common, coverage = restrict_to_common(
+        a, b, _landed_segments(params), params)
 
     expected_groups = {("2026-01-31", "b1", "c1"), ("2026-01-31", "b1", "c2"),
                        ("2026-01-31", "b2", "c1"), ("2026-02-28", "b1", "c1")}
@@ -371,7 +523,8 @@ def test_two_column_entity_ranking_and_coverage(
     from recsys_tfb.pipelines.evaluation.nodes import restrict_to_common
 
     a_common, _b_common, coverage = restrict_to_common(
-        two_col_a, two_col_b, two_column_entity_params
+        two_col_a, two_col_b, _landed_segments(two_column_entity_params),
+        two_column_entity_params,
     )
 
     # --- behaviour 1: re-ranking groups by time × EVERY entity column --------
@@ -439,7 +592,8 @@ def test_coverage_common_counts_what_restriction_kept_not_a_null_matching_inters
     b = spark.createDataFrame(b_rows, _PREDS_DDL)
 
     a_common, b_common, coverage = restrict_to_common(
-        a, b, two_column_entity_params
+        a, b, _landed_segments(two_column_entity_params),
+        two_column_entity_params,
     )
 
     qg = ["snap_date", "branch_id", "cust_id"]
@@ -475,7 +629,8 @@ def test_coverage_common_excludes_a_group_only_one_side_kept(
     )
 
     a_common, b_common, coverage = restrict_to_common(
-        a, b, two_column_entity_params
+        a, b, _landed_segments(two_column_entity_params),
+        two_column_entity_params,
     )
 
     qg = ["snap_date", "branch_id", "cust_id"]
@@ -508,7 +663,8 @@ def test_restrict_node_collects_each_sides_items_once(
 
     monkeypatch.setattr(DataFrame, "collect", _spy)
     _a, _b, coverage = restrict_to_common(
-        two_col_a, two_col_b, two_column_entity_params
+        two_col_a, two_col_b, _landed_segments(two_column_entity_params),
+        two_column_entity_params,
     )
     monkeypatch.undo()
 
