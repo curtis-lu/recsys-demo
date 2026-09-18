@@ -919,7 +919,7 @@ def _run_etl(
     # anything else escaping render (e.g. an un-quoted YAML target_dates
     # entry parsed as datetime.date by safe_load, or a sql_file pointing at
     # a directory) must still be logged, not left to a bare traceback —
-    # #370 review fix 8.
+    # (#370).
     try:
         render_errors = runner.check_renders(date_list, restart_from)
     except Exception:
@@ -935,7 +935,7 @@ def _run_etl(
         # key=str: a YAML variables block with a non-string key (e.g. the
         # bare scalar `on:`, which PyYAML reads as the bool True, or `2025:`
         # as an int) must not crash this log line with "'<' not supported
-        # between instances of 'int' and 'str'" — #370 review fix 7.
+        # between instances of 'int' and 'str'" — (#370).
         for name, value in sorted(merged_vars.items(), key=lambda kv: str(kv[0]))
     )
     logger.info("Effective ETL variables for %s: %s", stage, effective)

@@ -239,7 +239,7 @@ class SQLRunner:
         The pure selection shared by ``_get_tables_to_run`` (the real run,
         which logs a ``Skipping`` line per dropped table) and
         ``check_renders`` (the preflight, called on every invocation
-        including ``--source-check`` — #370 review fix 10: before this
+        including ``--source-check`` — #370: before this
         split, both callers ran the *logging* ``_get_tables_to_run``, so a
         single ``--restart-from`` run printed every ``Skipping X`` line
         twice).

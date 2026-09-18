@@ -211,7 +211,7 @@ class TestCheckRenders:
         assert errors == []
 
     def test_restart_from_does_not_log_skipping(self, sql_dir, caplog):
-        # #370 review fix 10: _run_etl calls check_renders() and then run()
+        # #370: _run_etl calls check_renders() and then run()
         # on the same invocation, and both used to call the *logging*
         # _get_tables_to_run — one --restart-from run printed every
         # "Skipping X (restart mode)" line twice. check_renders must be

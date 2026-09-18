@@ -834,7 +834,7 @@ class TestEtlCliVarsA35:
     def test_each_a35_failure_exits_before_spark(
         self, tmp_path, case_id, variables, cli_vars
     ):
-        # #370 review fix 1 (M1): a LEGAL SQL file must exist so A35's own
+        # #370: a LEGAL SQL file must exist so A35's own
         # exit is the only thing standing between this run and Spark — a
         # tmp tree with no SQL file at all (the old shape of this test) is
         # blocked by check_renders's FileNotFoundError regardless of
@@ -976,7 +976,7 @@ class TestEtlCliVarsA35:
             os.chdir(old)
 
     def test_source_check_runs_check_renders_sqlrunner_not_mocked(self, tmp_path):
-        # #370 review fix 2 (M2): --source-check must still run check_renders
+        # #370: --source-check must still run check_renders
         # — the same one invocation should preflight-and-then-run, not
         # preflight only on the write path. SQLRunner is real here (not
         # mocked) so a conditional "skip check_renders when source_check_only"
@@ -1004,7 +1004,7 @@ class TestEtlCliVarsA35:
     def test_f_null_var_required_even_when_restart_from_skips_its_table(
         self, tmp_path
     ):
-        # #370 review fix 3 (M4): (f) — a YAML `~` variable with no matching
+        # #370: (f) — a YAML `~` variable with no matching
         # --var — must fire even when --restart-from means this run will
         # never touch the one table that uses it. Two real tables (SQLRunner
         # not mocked): only feature_a's SQL references ${needs_var}, and the
@@ -1052,7 +1052,7 @@ class TestEtlCliVarsA35:
             os.chdir(old)
 
     def test_k_variable_value_containing_dollar_brace_is_blocked(self, tmp_path):
-        # #370 review fix 5, new rule (k): a variable's final value
+        # #370 A35 (k): a variable's final value
         # containing '${' is rejected outright (order-dependent expansion +
         # Spark's own silent-empty-string substitution when it does not
         # expand). No --var involved — the YAML default itself is the
@@ -1078,7 +1078,7 @@ class TestEtlCliVarsA35:
     def test_non_string_variable_name_does_not_crash_the_effective_log_line(
         self, tmp_path
     ):
-        # #370 review fix 7: a YAML variables block with a non-string key
+        # #370: a YAML variables block with a non-string key
         # (here a bare int key, same failure shape as PyYAML's bool-like
         # `on:`) must not crash __main__.py's "Effective ETL variables" log
         # line (sorted(merged_vars.items())) with "'<' not supported between
@@ -1104,7 +1104,7 @@ class TestEtlCliVarsA35:
     def test_unexpected_exception_in_check_renders_is_logged_not_bare_traceback(
         self, tmp_path
     ):
-        # #370 review fix 8: an unexpected exception surfacing through
+        # #370: an unexpected exception surfacing through
         # check_renders (here IsADirectoryError — sql_file points at a
         # directory, not a file) must be caught and logged
         # (logger.exception + Exit 1), like runner.run's own `except

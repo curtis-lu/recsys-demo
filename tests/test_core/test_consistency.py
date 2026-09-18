@@ -3301,7 +3301,7 @@ class TestA35EtlCliVars:
         assert len(errors) == 1
         assert "(A35)" in errors[0] and "target_date" in errors[0]
 
-    # #370 review fix 4: (h) owns target_date unconditionally — a null or a
+    # #370: (h) owns target_date unconditionally — a null or a
     # non-string value must NOT also trigger (f)/(g), which would hand out
     # mutually contradictory instructions for the same key (fix variables.target_date
     # per (h) by removing it, but (f)/(g) tell the reader to supply or quote it).
@@ -3327,7 +3327,7 @@ class TestA35EtlCliVars:
         assert len(errors) == 1
         assert "(A35)" in errors[0] and "mapping" in errors[0]
 
-    # (k) a variable's final value contains '${' — #370 review fix 5.
+    # (k) a variable's final value contains '${' — (#370).
     def test_k_yaml_value_containing_dollar_brace_is_blocked(self):
         errors = self._errors({"raw_db": "${env.OTHER}"}, [])
         assert len(errors) == 1
@@ -3359,7 +3359,7 @@ class TestA35EtlCliVars:
         assert len(errors) == 1
         assert "(A35)" in errors[0] and "target_db" in errors[0]
 
-    # #370 review fix 6: a name repeated via --var must not print the same
+    # #370: a name repeated via --var must not print the same
     # (b)/(c)/(d) message once per repetition.
     def test_b_undeclared_name_repeated_prints_once(self):
         errors = self._errors({"raw_db": "x"}, ["typo=1", "typo=2"])
@@ -3375,7 +3375,7 @@ class TestA35EtlCliVars:
         target_date_rejections = [e for e in errors if "not allowed" in e]
         assert len(target_date_rejections) == 1
 
-    # #370 review fix 7: a non-string variable NAME must not crash sorted().
+    # #370: a non-string variable NAME must not crash sorted().
     def test_non_string_variable_name_does_not_crash_sorted(self):
         errors = self._errors({2025: "x", "raw_db": "y"}, ["typo=1"])
         assert any("(A35)" in e for e in errors)  # no TypeError raised
