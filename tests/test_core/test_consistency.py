@@ -3204,3 +3204,175 @@ class TestModelInputGrainErrorsB10:
         errors = model_input_grain_errors(
             {"train": SplitRowCounts(1_000_000, 1_000_200)})
         assert "1.0002x" in errors[0]
+
+
+class TestA35EtlCliVars:
+    """A35 — the four source ETL commands' repeatable ``--var key=value``
+    flag must be well-formed, declared, and safe to merge onto the stage's
+    YAML ``variables`` (#370). One case per checked failure mode (a-j), plus
+    the all-clear.
+    """
+
+    def _errors(self, variables=None, raw_vars=None):
+        from recsys_tfb.core.consistency import etl_cli_var_errors
+        return etl_cli_var_errors(variables, raw_vars)
+
+    def test_all_clear_returns_empty(self):
+        assert self._errors(
+            {"target_db": "ml_feature", "raw_db": "ml_raw"},
+            ["raw_db=ml_raw_override"],
+        ) == []
+
+    def test_no_vars_and_no_variables_is_clean(self):
+        assert self._errors(None, None) == []
+        assert self._errors({}, []) == []
+
+    # (a) --var item without '='
+    def test_a_missing_equals_sign(self):
+        errors = self._errors({"raw_db": "x"}, ["raw_db"])
+        assert len(errors) == 1
+        assert "(A35)" in errors[0] and "'='" in errors[0]
+
+    # (b) --var name not declared in YAML variables
+    def test_b_undeclared_name(self):
+        errors = self._errors({"raw_db": "x"}, ["typo_db=y"])
+        assert len(errors) == 1
+        assert "(A35)" in errors[0] and "typo_db" in errors[0]
+        assert "not declared" in errors[0]
+
+    # (c) --var target_date=...
+    def test_c_var_target_date_rejected(self):
+        errors = self._errors({"raw_db": "x"}, ["target_date=2025-01-31"])
+        assert len(errors) == 1
+        assert "(A35)" in errors[0] and "target_date" in errors[0]
+        assert "--target-dates" in errors[0]
+
+    # (d) --var target_db=...
+    def test_d_var_target_db_rejected(self):
+        errors = self._errors({"target_db": "ml_feature"}, ["target_db=other_db"])
+        assert len(errors) == 1
+        assert "(A35)" in errors[0] and "target_db" in errors[0]
+        assert "YAML" in errors[0]
+
+    # (e) same name passed via --var twice
+    def test_e_duplicate_var_name(self):
+        errors = self._errors(
+            {"raw_db": "x"}, ["raw_db=a", "raw_db=b"]
+        )
+        assert len(errors) == 1
+        assert "(A35)" in errors[0] and "raw_db" in errors[0]
+        assert "more than once" in errors[0] or "2 times" in errors[0]
+
+    # (f) YAML null with no --var override
+    def test_f_null_without_override_is_blocked(self):
+        errors = self._errors({"raw_db": None}, [])
+        assert len(errors) == 1
+        assert "(A35)" in errors[0] and "raw_db" in errors[0]
+        assert "null" in errors[0] or "~" in errors[0]
+
+    def test_f_null_with_override_passes(self):
+        errors = self._errors({"raw_db": None}, ["raw_db=ml_raw"])
+        assert errors == []
+
+    def test_f_checked_regardless_of_any_restart_from_notion(self):
+        # A35 has no restart_from parameter at all: the check must not vary
+        # with which tables a run would touch this time.
+        import inspect
+        assert "restart_from" not in inspect.signature(
+            __import__(
+                "recsys_tfb.core.consistency", fromlist=["etl_cli_var_errors"]
+            ).etl_cli_var_errors
+        ).parameters
+
+    # (g) YAML value neither string nor null
+    def test_g_non_string_yaml_value_rejected(self):
+        errors = self._errors({"raw_db": 2025}, [])
+        assert len(errors) == 1
+        assert "(A35)" in errors[0] and "raw_db" in errors[0]
+        assert "2025" in errors[0]
+
+    def test_g_boolean_and_list_values_also_rejected(self):
+        errors = self._errors({"flag": True, "items": [1, 2]}, [])
+        assert len(errors) == 2
+
+    # (h) YAML declares target_date
+    def test_h_yaml_declares_target_date_blocked(self):
+        errors = self._errors({"target_date": "2025-01-31"}, [])
+        assert len(errors) == 1
+        assert "(A35)" in errors[0] and "target_date" in errors[0]
+
+    # (i) YAML target_db: ~
+    def test_i_yaml_target_db_null_blocked(self):
+        errors = self._errors({"target_db": None}, [])
+        assert len(errors) == 1
+        assert "(A35)" in errors[0] and "target_db" in errors[0]
+
+    # (j) variables not a mapping
+    def test_j_variables_not_a_mapping(self):
+        errors = self._errors(["not", "a", "mapping"], [])
+        assert len(errors) == 1
+        assert "(A35)" in errors[0] and "mapping" in errors[0]
+
+    def test_multiple_errors_collected_in_one_pass(self):
+        errors = self._errors(
+            {"raw_db": "x"}, ["raw_db", "typo=1", "target_date=2025-01-31"]
+        )
+        assert len(errors) >= 3
+        assert all("(A35)" in e for e in errors)
+
+
+class TestParseEtlVarFlags:
+    """The shared ``KEY=VALUE`` split used by A35's predicate and the
+    override merge (#370) — one implementation, tested once.
+    """
+
+    def test_splits_on_first_equals_only(self):
+        from recsys_tfb.core.consistency import parse_etl_var_flags
+        parsed, errors = parse_etl_var_flags(["a=b=c"])
+        assert parsed == [("a", "b=c")]
+        assert errors == []
+
+    def test_empty_value_is_legal(self):
+        from recsys_tfb.core.consistency import parse_etl_var_flags
+        parsed, errors = parse_etl_var_flags(["a="])
+        assert parsed == [("a", "")]
+        assert errors == []
+
+    def test_missing_equals_is_a_parse_error_not_a_pair(self):
+        from recsys_tfb.core.consistency import parse_etl_var_flags
+        parsed, errors = parse_etl_var_flags(["no_equals_here"])
+        assert parsed == []
+        assert len(errors) == 1 and "(A35)" in errors[0]
+
+    def test_none_input_is_empty(self):
+        from recsys_tfb.core.consistency import parse_etl_var_flags
+        assert parse_etl_var_flags(None) == ([], [])
+
+
+class TestMergedEtlVariables:
+    """CLI overrides win; the YAML dict handed in is never mutated (#370)."""
+
+    def test_cli_overrides_yaml(self):
+        from recsys_tfb.core.consistency import merged_etl_variables
+        merged = merged_etl_variables({"raw_db": "ml_raw"}, ["raw_db=override"])
+        assert merged == {"raw_db": "override"}
+
+    def test_yaml_only_keys_survive(self):
+        from recsys_tfb.core.consistency import merged_etl_variables
+        merged = merged_etl_variables(
+            {"raw_db": "ml_raw", "target_db": "ml_feature"}, ["raw_db=override"]
+        )
+        assert merged == {"raw_db": "override", "target_db": "ml_feature"}
+
+    def test_original_dict_not_mutated(self):
+        from recsys_tfb.core.consistency import merged_etl_variables
+        original = {"raw_db": "ml_raw"}
+        merged_etl_variables(original, ["raw_db=override"])
+        assert original == {"raw_db": "ml_raw"}
+
+    def test_no_cli_vars_returns_equivalent_copy(self):
+        from recsys_tfb.core.consistency import merged_etl_variables
+        original = {"raw_db": "ml_raw"}
+        merged = merged_etl_variables(original, None)
+        assert merged == original
+        assert merged is not original

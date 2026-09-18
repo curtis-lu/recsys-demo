@@ -329,11 +329,54 @@ Layer 1 — config-static (implemented here; aggregated by
   entry of every command while only evaluation reads these keys, so a conf
   still carrying a dead switch must not stop dataset, training or inference
   (issue #158).
+* A35 — the four source ETL commands' repeatable ``--var key=value`` flag
+  (feature_etl/label_etl/sample_pool_etl/inference_population_etl, #370) must
+  be well-formed, declared, and safe to merge onto the stage's YAML
+  ``variables``: (a) every item has a ``=``; (b) every name is already
+  declared in ``variables`` — ``SQLRunner``/``SQLRenderer`` only ever
+  substitute declared names, so a typo'd flag is otherwise a silent no-op;
+  (c) ``--var target_date=...`` is rejected — ``target_date`` is bound per
+  iteration from ``--target-dates``/``target_dates``
+  (``sql_runner.py``'s ``_table_variables``) and would silently overwrite it;
+  (d) ``--var target_db=...`` is rejected — which Hive database gets written
+  is meant to leave a file diff in the YAML, and the dataset pipeline
+  downstream reads a different key (``hive.db``) that ``--var`` would not
+  change, so overriding it here would look effective while quietly
+  disconnecting the two; (e) the same name passed to ``--var`` more than once
+  (no "last wins" is defined); (f) a YAML ``variables`` value of ``null``
+  (``~`` — "must come from --var") with no matching ``--var`` this run,
+  checked unconditionally regardless of ``--restart-from`` (a table skipped
+  this run may still be reached by a later ``--restart-from`` run against the
+  same config); (g) a YAML ``variables`` value that is neither a string nor
+  null (a number, bool, list, ...) — ``SQLRenderer.render`` does
+  ``str.replace`` and would raise a raw ``TypeError`` mid-render, possibly
+  after earlier tables already wrote; (h) YAML ``variables`` declaring
+  ``target_date`` at all, even a string — it is silently overwritten per date
+  regardless, so the key only misleads a reader of the YAML; (i) YAML
+  ``variables.target_db: ~`` — null asks for a ``--var`` override, but (d)
+  means ``target_db`` can never be set that way, so it is unsatisfiable by
+  construction; (j) checked first and structurally: ``variables`` itself must
+  be a mapping (absent is fine) or the checks above cannot even run.
+  Predicates: ``etl_cli_var_errors`` (returns errors; the ETL command raises
+  before Spark starts) and the shared parsing/merge helpers
+  ``parse_etl_var_flags`` / ``merged_etl_variables`` — one ``KEY=VALUE`` split
+  implementation for both the gate and the actual override, so a change to
+  the split rule cannot leave them disagreeing about what a flag means. NOT
+  aggregated by ``validate_config_consistency``, for A21/A30's reason: it
+  reads the ``--var`` CLI flags, which that gate is never given. Checked
+  before the new SQL-side backstop this issue also adds:
+  ``SQLRunner.check_renders`` renders (without touching Spark) every table a
+  run would touch, for every target date, sharing ``_table_variables`` with
+  the real run so a residual ``${...}`` (any name, not only word characters —
+  ``SQLRenderer.render``'s unresolved-variable regex was widened for this)
+  or a missing SQL file is caught in the same pass, before the Spark cold
+  start.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
 flags), A22 (``--post-training``), A24/A26/A34 (config keys whose harm belongs
-to one pipeline), A28 (the resolved catalog), A30 (``--env`` + the filesystem).
+to one pipeline), A28 (the resolved catalog), A30 (``--env`` + the
+filesystem), A35 (the ``--var`` CLI flags).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10
 implemented and wired):
@@ -2446,6 +2489,192 @@ def resolved_env_dir(conf_dir: Path | str, env: str) -> Path:
         f"Directories under {root}: {existing} (of these, only env overlays "
         f"are valid here — conf/sql and conf/spark-local are not)."
     )
+
+
+def parse_etl_var_flags(
+    raw_vars: list[str] | None,
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Split each ``--var KEY=VALUE`` string on the first ``=``.
+
+    The one ``KEY=VALUE`` split implementation shared by :func:`etl_cli_var_errors`
+    (A35) and :func:`merged_etl_variables`, and callable by the CLI itself for
+    the "effective variables" log line — so a change to the split rule (e.g.
+    allowing ``=`` inside a value) cannot leave the validator, the merge, and
+    the log disagreeing about what one flag meant.
+
+    Returns ``(parsed, parse_errors)``: ``parsed`` is the ordered list of
+    ``(key, value)`` pairs for well-formed items (duplicates kept, in the
+    order given — callers that care about "seen twice" want every occurrence);
+    ``parse_errors`` is one ``(A35)`` message per item with no ``=``. A
+    malformed item contributes nothing to ``parsed``: there is no sane
+    ``(key, value)`` to hand back for it.
+    """
+    parsed: list[tuple[str, str]] = []
+    errors: list[str] = []
+    for raw in raw_vars or []:
+        if "=" not in raw:
+            errors.append(
+                f"(A35) --var {raw!r} has no '='. Use --var key=value, e.g. "
+                f"--var raw_db=my_raw_db (repeat --var for more than one)."
+            )
+            continue
+        key, value = raw.split("=", 1)
+        parsed.append((key, value))
+    return parsed, errors
+
+
+def etl_cli_var_errors(
+    variables, raw_vars: list[str] | None
+) -> list[str]:
+    """(A35) ETL ``--var`` overrides must be well-formed, declared, and safe.
+
+    Guards every way a repeatable ``--var key=value`` flag on the four source
+    ETL commands (feature_etl/label_etl/sample_pool_etl/
+    inference_population_etl, #370) could silently do the wrong thing,
+    collected in one pass (collect-all) so a config with several problems is
+    fixed in one run. ``variables`` is the stage's YAML ``variables`` block
+    (e.g. ``etl_config.get("variables")``); ``raw_vars`` is the list of
+    ``--var`` strings exactly as typed.
+
+    Checks, in the order run:
+
+    (j) ``variables`` itself must be a mapping (absent/``None`` is fine) —
+        checked first because every later check calls ``.items()``/``in`` on
+        it, which would raise on a list or scalar instead of reporting.
+    (h) a declared ``variables.target_date`` — even a plain string value is
+        silently overwritten per date by ``--target-dates``/``target_dates``
+        (``sql_runner.py``'s ``_table_variables``), so keeping the key only
+        misleads a reader of the YAML.
+    (i) ``variables.target_db: ~`` (null) — null means "must come from
+        --var", but (d) below means target_db can never come from --var, so
+        this is unsatisfiable by construction.
+    (g) any other YAML value that is neither a string nor null (a number,
+        bool, list, ...) — ``SQLRenderer.render`` does ``str.replace`` and
+        would raise a raw ``TypeError`` mid-render.
+    (a) a --var item with no '=' (delegated to :func:`parse_etl_var_flags`).
+    (e) the same --var name passed more than once.
+    (c) ``--var target_date=...`` — rejected; use --target-dates instead.
+    (d) ``--var target_db=...`` — rejected; edit the YAML instead.
+    (b) a --var name absent from the declared ``variables`` — a typo'd flag
+        would otherwise be a silent no-op, never reaching the SQL.
+    (f) a YAML ``variables`` value of ``null`` with no matching --var this
+        run — checked unconditionally, independent of ``--restart-from``: a
+        table skipped this run may still be reached by a later
+        ``--restart-from`` run against the same config.
+
+    Returns error strings (empty when everything is fine); the ETL command
+    (``__main__._run_etl``) logs and exits before Spark starts. NOT
+    aggregated by ``validate_config_consistency``: that gate runs at the
+    entry of every command and is never given the ``--var`` flags, mirroring
+    A12/A21/A30.
+    """
+    errors: list[str] = []
+
+    if variables is not None and not isinstance(variables, Mapping):
+        errors.append(
+            f"(A35) variables must be a mapping of name to value; got "
+            f"{type(variables).__name__}: {variables!r}."
+        )
+        variables = {}
+    variables = variables or {}
+
+    if "target_date" in variables:
+        errors.append(
+            "(A35) variables.target_date is declared in the YAML. Every "
+            "date from target_dates/--target-dates is bound to "
+            "${target_date} for that iteration, silently overwriting "
+            "whatever is declared here. Remove variables.target_date and "
+            "use target_dates/--target-dates instead."
+        )
+
+    if "target_db" in variables and variables["target_db"] is None:
+        errors.append(
+            "(A35) variables.target_db is null (~), which asks for a value "
+            "via --var — but --var target_db=... is not allowed (writing to "
+            "a different Hive database must show up as a file diff in the "
+            "YAML, and the dataset pipeline downstream reads a separate "
+            "key, hive.db, that --var would not change), so this can never "
+            "be satisfied. Set variables.target_db to an explicit string in "
+            "the YAML."
+        )
+
+    for name, value in variables.items():
+        if name == "target_db" and value is None:
+            continue  # covered by the target_db-specific message above
+        if value is not None and not isinstance(value, str):
+            errors.append(
+                f"(A35) variables.{name}={value!r} is not a string (got "
+                f"{type(value).__name__}). Quote it in the YAML, e.g. "
+                f"{name}: {str(value)!r}, or use null (~) to require --var."
+            )
+
+    parsed, parse_errors = parse_etl_var_flags(raw_vars)
+    errors.extend(parse_errors)
+
+    counts: dict[str, int] = {}
+    for key, _value in parsed:
+        counts[key] = counts.get(key, 0) + 1
+    for name in sorted(n for n, c in counts.items() if c > 1):
+        errors.append(
+            f"(A35) --var {name}=... was passed {counts[name]} times. Pass "
+            f"each variable at most once."
+        )
+
+    for key, _value in parsed:
+        if key == "target_date":
+            errors.append(
+                "(A35) --var target_date=... is not allowed: each "
+                "--target-dates value is bound to ${target_date} for that "
+                "run and would silently overwrite it. Use --target-dates "
+                "instead."
+            )
+        elif key == "target_db":
+            errors.append(
+                "(A35) --var target_db=... is not allowed: edit "
+                "variables.target_db in the stage's parameters YAML "
+                "instead, so which database gets written leaves a file "
+                "diff. (The dataset pipeline downstream reads a separate "
+                "key, hive.db, that --var would not change anyway.)"
+            )
+        elif key not in variables:
+            errors.append(
+                f"(A35) --var {key}=... is not declared in variables. "
+                f"Declared names: {sorted(variables.keys())}. Check for a "
+                f"typo, or add `{key}: ~` to variables in the stage's "
+                f"parameters YAML first."
+            )
+
+    cli_keys = {key for key, _value in parsed}
+    for name, value in variables.items():
+        if name == "target_db":
+            continue  # covered by the target_db-specific null message above
+        if value is None and name not in cli_keys:
+            errors.append(
+                f"(A35) variables.{name} is null (~) in the YAML, which "
+                f"requires a value via --var {name}=..., but none was "
+                f"passed for this run."
+            )
+
+    return errors
+
+
+def merged_etl_variables(variables, raw_vars: list[str] | None) -> dict:
+    """Merge ``--var`` overrides onto the YAML ``variables`` dict (CLI wins).
+
+    Callers MUST run :func:`etl_cli_var_errors` first and stop on any error
+    — this function assumes clean input (e.g. it silently applies a
+    malformed --var item's key/value split the same way
+    :func:`parse_etl_var_flags` did, which the gate above already rejected)
+    and exists only to keep the ``KEY=VALUE`` split logic in one place.
+    Returns a NEW dict; the caller's YAML ``variables`` mapping is not
+    mutated, so the ``etl_config`` handed to ``SQLRunner`` is a copy, not the
+    ``ConfigLoader``-owned dict.
+    """
+    merged = dict(variables or {})
+    parsed, _parse_errors = parse_etl_var_flags(raw_vars)
+    for key, value in parsed:
+        merged[key] = value
+    return merged
 
 
 def _iso_date(value) -> str | None:

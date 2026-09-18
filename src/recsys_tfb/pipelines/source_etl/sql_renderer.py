@@ -21,8 +21,12 @@ class SQLRenderer:
         rendered = template
         for key, value in variables.items():
             rendered = rendered.replace(f"${{{key}}}", value)
-        # Warn about unresolved variables
-        unresolved = re.findall(r"\$\{(\w+)}", rendered)
+        # Catch any residual ${...} — not only \w+ names. A stray
+        # "${env.X}" or "${hiveconf:x}" has a non-word character inside the
+        # braces, so the old \w+-only regex never matched it and the literal
+        # text sailed through to Spark unresolved (#370 bug 2). Collecting
+        # every "${...}" regardless of what is inside catches all of them.
+        unresolved = re.findall(r"\$\{([^}]*)\}", rendered)
         if unresolved:
             raise ValueError(
                 f"Unresolved template variables in {sql_file}: {unresolved}"

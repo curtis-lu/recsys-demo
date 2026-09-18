@@ -161,6 +161,116 @@ class TestRestartFromValidation:
             runner.run(target_dates=["2024-01-31"], restart_from="nonexistent")
 
 
+class TestCheckRenders:
+    """#370: an open-ETL-run preflight that renders every table this run
+    would touch, for every target date, without Spark or any file write —
+    and shares the exact variable-building step with the real run
+    (_table_variables) so a preflight PASS is evidence about what actually
+    runs, not about a second, possibly-different substitution.
+    """
+
+    def test_returns_empty_when_everything_renders_cleanly(self, sql_dir):
+        config = _base_config()
+        runner = SQLRunner(config, sql_dir, dry_run=True)
+        assert runner.check_renders(["2024-01-31"]) == []
+
+    def test_no_spark_needed(self, sql_dir):
+        # SQLRunner(dry_run=True) never touches Spark; check_renders must not
+        # either — no spark fixture is passed in at all.
+        config = _base_config()
+        runner = SQLRunner(config, sql_dir, dry_run=True)
+        runner.check_renders(["2024-01-31", "2024-02-29"])  # no exception -> no Spark call needed
+
+    def test_no_files_written(self, sql_dir, tmp_path):
+        out_dir = tmp_path / "rendered_sql"
+        config = _base_config()
+        runner = SQLRunner(config, sql_dir, dry_run=True, rendered_sql_dir=out_dir)
+        runner.check_renders(["2024-01-31"])
+        assert not out_dir.exists()
+
+    def test_broken_table_is_collected(self, sql_dir):
+        (sql_dir / "feature" / "feature_aum.sql").write_text(
+            "--partition by: snap_date\n\nSELECT '${env.BROKEN}' AS x\n"
+        )
+        config = _base_config()
+        runner = SQLRunner(config, sql_dir, dry_run=True)
+        errors = runner.check_renders(["2024-01-31"])
+        assert len(errors) == 1
+        assert "feature_aum.sql" in errors[0]
+        assert "Unresolved template variables" in errors[0]
+
+    def test_restart_from_limits_which_tables_are_checked(self, sql_dir):
+        # A residual ${...} in a table BEFORE restart_from must not surface:
+        # this run will not touch that table at all.
+        (sql_dir / "feature" / "feature_aum.sql").write_text(
+            "--partition by: snap_date\n\nSELECT '${env.BROKEN}' AS x\n"
+        )
+        config = _base_config()
+        runner = SQLRunner(config, sql_dir, dry_run=True)
+        errors = runner.check_renders(["2024-01-31"], restart_from="feature_sav")
+        assert errors == []
+
+    def test_missing_sql_file_is_collected(self, sql_dir):
+        config = _base_config()
+        config["tables"][1]["sql_file"] = "feature/does_not_exist.sql"
+        runner = SQLRunner(config, sql_dir, dry_run=True)
+        errors = runner.check_renders(["2024-01-31"])
+        assert len(errors) == 1
+        assert "does_not_exist.sql" in errors[0]
+
+    def test_invalid_restart_from_is_collected_not_raised(self, sql_dir):
+        config = _base_config()
+        runner = SQLRunner(config, sql_dir, dry_run=True)
+        errors = runner.check_renders(["2024-01-31"], restart_from="nonexistent")
+        assert len(errors) == 1
+        assert "not found in tables" in errors[0]
+
+    def test_same_message_across_dates_is_deduped(self, sql_dir):
+        (sql_dir / "feature" / "feature_aum.sql").write_text(
+            "--partition by: snap_date\n\nSELECT '${env.BROKEN}' AS x\n"
+        )
+        config = _base_config()
+        runner = SQLRunner(config, sql_dir, dry_run=True)
+        errors = runner.check_renders(["2024-01-31", "2024-02-29"])
+        assert len(errors) == 1
+
+    def test_check_renders_and_real_run_substitute_identical_variables(
+        self, sql_dir, monkeypatch
+    ):
+        """The stability guarantee #370 asked for: check_renders and the real
+        run (_process_single_table via run(dry_run=True)) must build the
+        exact same variables dict for the same (table, snap_date) pair, via
+        one shared _table_variables — otherwise a preflight pass says
+        nothing about what the real run will substitute.
+        """
+        config = _base_config()
+        runner = SQLRunner(config, sql_dir, dry_run=True)
+        real_render = runner._renderer.render
+
+        seen_check = []
+        monkeypatch.setattr(
+            runner._renderer, "render",
+            lambda sql_file, variables: (
+                seen_check.append((sql_file, dict(variables))),
+                real_render(sql_file, variables),
+            )[1],
+        )
+        runner.check_renders(["2024-01-31"])
+
+        seen_run = []
+        monkeypatch.setattr(
+            runner._renderer, "render",
+            lambda sql_file, variables: (
+                seen_run.append((sql_file, dict(variables))),
+                real_render(sql_file, variables),
+            )[1],
+        )
+        runner.run(target_dates=["2024-01-31"], run_id="run1")
+
+        assert seen_check == seen_run
+        assert len(seen_check) == 3  # feature_aum, feature_sav, feature_concat
+
+
 class TestRenderedSqlDir:
     def test_files_written_in_dry_run(self, sql_dir, tmp_path):
         """rendered_sql_dir writes one .sql file per table per snap_date."""
