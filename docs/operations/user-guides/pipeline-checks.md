@@ -220,17 +220,19 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
 
 它們產出的是其他 pipeline 讀的來源表。除了 ① 之外，檢查分成下面幾類：
 
-- **跑之前**（會擋）
+- **跑之前**（會擋，Spark 還沒啟動）
   - `--target-dates` 沒給、設定裡也沒有 `target_dates`。
   - `--source-check` 和 `--restart-from` 一起用；`--restart-from` 的表名不存在。
   - 表的設定：`partition_by` 必須是非空的「欄名 → Hive 型別」對照，例如 `snap_date: DATE`；`depends_on` 引用的表必須排在它前面。
-- **查上游**（`source_checks`）：**只有帶 `--source-check` 時才跑**，而且那一次只檢查、不寫表。
+  - `--var` 與 YAML `variables` 的檢查（`A35`）：`--var` 帶到沒在 `variables` 宣告的名字、同一個名字帶了兩次、`--var` 缺 `=`、`variables` 的值不是字串或 `~`、`variables` 本身不是「名字 → 值」的對照、某個 `~` 名字沒有對應的 `--var`、某個變數的最終值裡有 `${target_date}` 以外的 `${...}`（變數之間依宣告順序逐一代換，換不換得到看順序，沒換到的到了 Spark 會被默默換成空字串；`${target_date}` 永遠最後換，所以可以用）。`target_date`、`target_db` 這兩個保留名都不能出現在 `--var`（`--var target_date=...`、`--var target_db=...` 都擋）；`target_date` 連寫進 YAML `variables` 也擋，`target_db` 寫成正常字串值不受影響，只有寫成 `target_db: ~` 才擋。這些問題會一次全部列出。
+  - 把這次要跑的所有表、所有日期的 SQL 都先換一遍：換完還剩任何 `${...}`（包括 `${hiveconf:x}` 這類 Spark 自己的變數語法，以及只在 YAML 才會被換的 `${env.X}` 寫進 SQL 檔的情況）、SQL 檔案不存在，都在這裡擋下，不用等真正執行到那張表才發現。
+- **查上游**（`source_checks`）：**只有帶 `--source-check` 時才跑**，而且那一次只檢查、不寫表。這一次一樣會做上面「跑之前」那些檢查，所以可以用同一行指令（含同一組 `--var`）先加 `--source-check` 預檢一次，通過後拿掉這個旗標正式執行；source check 本身不讀 `variables`，行為不變。
   - 會擋：該月分區不存在；有設 `min_row_count`（大於 0）時，列數不夠；有寫 `expected_columns` 時，實際欄位缺欄或型別不同，`allow_new_columns: false` 時多出新欄也擋。
   - 只警告：這個階段沒設定任何 `source_checks`。
-- **執行 SQL 時**（會擋）：SQL 裡還有沒替換的 `${變數}`；`partition_by` 的欄不在 SELECT 輸出裡；表已經存在時，SQL 拿掉了原本就有的欄。
+- **執行 SQL 時**（會擋）：`partition_by` 的欄不在 SELECT 輸出裡；表已經存在時，SQL 拿掉了原本就有的欄。
 - **寫完才查輸出**（`quality_checks`：列數、主鍵重複或空值、空值比例）：表已經寫進去之後才查。沒通過會中止後面的表，但**不會撤回已經寫進去的那一張**。沒設定 `quality_checks` 的表，不查資料的值。
 
-**dry run 例外**：`dry_run` 沒設定時，`--env local` 預設開啟（目前 `feature_etl`、`label_etl` 就是這樣）。dry run 不會真的執行 SQL，所以上面「執行 SQL 時」只剩 `${變數}` 那一條會查，「寫完才查輸出」整段不跑。
+**dry run 例外**：`dry_run` 沒設定時，`--env local` 預設開啟（目前 `feature_etl`、`label_etl` 就是這樣）。「跑之前」的變數檢查與 SQL 換一遍在 Spark 啟動前就做，不受 `dry_run` 影響，所以就算開了 dry run 也一樣會查。dry run 不會真的執行 SQL，所以「執行 SQL 時」整段不查，「寫完才查輸出」也整段不跑。
 
 ---
 

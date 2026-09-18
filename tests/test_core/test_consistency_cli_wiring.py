@@ -268,3 +268,30 @@ def test_a27_is_checked_before_a21():
     assert src.index("inference_grid_errors(") < src.index(
         "resolved_inference_rebuild_dates("
     )
+
+
+def test_a35_wired_into_run_etl_before_spark():
+    # A35 reads the --var CLI flags, which validate_config_consistency (run
+    # at the entry of every command) is never given — mirroring A12/A21/A30.
+    # _run_etl is the one shared executor behind all four ETL commands
+    # (feature_etl/label_etl/sample_pool_etl/inference_population_etl), so
+    # pinning it here covers all four without four near-duplicate tests.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "etl_cli_var_errors" not in inspect.getsource(
+        validate_config_consistency
+    ), "A35 must stay off the global aggregator (A12/A21/A30 precedent)"
+
+    src = inspect.getsource(m._run_etl)
+    assert "etl_cli_var_errors(" in src
+    spark = src.index("get_or_create_spark_session(")
+    assert src.index("etl_cli_var_errors(") < spark, (
+        "A35 must fail before the Spark cold start, like A21/A23/A24/A26/A27"
+    )
+    # check_renders (the SQL-side backstop A35's docstring pairs it with)
+    # must also run before Spark, and on the --source-check path too — a
+    # residual ${...} would otherwise be discovered only after Hive was hit.
+    assert "check_renders(" in src
+    assert src.index("check_renders(") < spark, (
+        "check_renders must fail before the Spark cold start"
+    )
