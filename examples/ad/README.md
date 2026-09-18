@@ -64,10 +64,10 @@ campaign_dim   ┘
 | 算即時特徵時偷看的後果 | 有：點擊後 5 分鐘內會瀏覽同類內容（一半就在點擊那一秒），窗口放到曝光那一秒或之後，「有沒有瀏覽」幾乎就是「有沒有點」。`check_features.py` 擋得住（變異檢查見〈怎麼跑〉） | #380 的 as-of 文件與範例 |
 | 使用者特徵、版位特徵各自的粒度 | 有：`feature_user`（snap_date, user_id）、`feature_slot`（snap_date, slot_id） | #380 多張特徵表 |
 | 快照日與 `time` 不同（as-of join） | 有：`user_profile` 每天一份，`available_at` 在隔天 05:00～08:00，批次晚一天的日子（平日 10%、週末 50%）再晚 24 小時；每週約 5% 的人在一天中的某個時刻換裝置，點擊看曝光那一刻的裝置。10 週 × 400 人裡，「週一 00:00 拿得到的最後一份」不是週六那份的有 3,200 列（8 週），其中裝置因此不同的 29 列；取「週一那份」會拿到不同裝置的有 87 列。今天的 `feature_user.sql` 以週為單位取後者，這是一個已經被 `check_features.py` 驗過的 as-of 範例，#380 把 `feature_user` 拆成獨立特徵表時可以直接用。**逐筆曝光的 as-of 還沒算**（ADR-0022 表格第一列：每次曝光用它當下拿得到的那一份）：它的 join 欄位要算在一次曝光一列的候選列上，而候選列要到 #378 宣告 event 之後才是一次曝光一列。資料已經撐得住——39,314 筆曝光裡，照曝光當下取快照與照週一取快照，裝置不同的有 620 筆 | #380；逐筆的要 #378＋#380 |
-| 沒見過的 item 屬性組合 | 有：`c04`、`video` 從第一週就有，`c04-video` 從 val 週 2025-12-22 才第一次曝光，train 與 calibration 都沒有它。上線後給 4 倍流量（`LATE_ITEM_LAUNCH_BOOST`），test 週有 45 個正例；代價是從 val 週起其他 11 個 item 的曝光占比各降約 9%，item 分布在 train 與 val／test 之間本來就不同 | #379 item 清單從資料數；item 以多個屬性欄宣告（還沒開票，見〈沒做的事〉） |
+| 沒見過的 item 屬性組合 | 有：`c04`、`video` 從第一週就有，`c04-video` 從 val 週 2025-12-22 才第一次曝光，train 與 calibration 都沒有它。上線後給 4 倍流量（`LATE_ITEM_LAUNCH_BOOST`），test 週有 45 個正例；代價是從 val 週起其他 11 個 item 的曝光占比各降約 9%，item 分布在 train 與 val／test 之間本來就不同 | #379 item 清單從資料數；#394 item 宣告成多欄 |
 | 低點擊率（分數擠在低端） | **沒有**：點擊率約 15% | #381 預測品質 |
 
-**`c04-video` 在今天的 conf 下是「沒見過的 item 值」，不是「沒見過的屬性組合」。** 框架要求 item 那一欄一定是模型特徵（`pipelines/dataset/steps/feature_columns.py::require_item_is_a_feature`），而活動、格式這兩個屬性沒有地方以 item 的粒度進模型——特徵表以 `time ＋ entity` 接，`carry_columns` 帶的欄不是特徵。所以模型只看到 `ad_creative` 這個類別值，train 沒出現過就不認得；它看不出 `c04`、`video` 其實都見過。實跑時框架對這件事沒有任何警告（類別編號從 conf 的清單讀，train 有沒有出現不影響；#379 要加的就是這個警告）。test 週這個 item 的 45 個正例上，模型的平均名次 3.4、`map_attr@12` 0.515，熱門度基準是 4.4、0.409——這是模型只認得使用者與版位特徵、不認得這個 item 時的表現，屬性能進模型之後拿來對照。
+**`c04-video` 對模型來說是一個沒見過的 item 值。** 框架要求 item 那一欄一定是模型特徵（`pipelines/dataset/steps/feature_columns.py::require_item_is_a_feature`），模型看到的是 `ad_creative` 這一個類別值，不是活動、格式兩個屬性，所以 train 沒出現過就不認得。item 宣告成多欄（#394）之後也一樣：那張票省掉的是拼欄與逐一列出組合，模型看的仍是組合。實跑時框架對這件事沒有任何警告（類別編號從 conf 的清單讀，train 有沒有出現不影響；#379 要加的就是這個警告）。test 週這個 item 的 45 個正例上，模型的平均名次 3.4、`map_attr@12` 0.515，熱門度基準是 4.4、0.409。
 
 低點擊率沒做：母體幾百人，1% 一週只剩個位數正例，其他票反而驗不了。要驗就在 #381 裡改 `generate_data.py`，並更新基準 digest。
 
@@ -155,7 +155,7 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 
 ## 踩到的框架問題
 
-### 1. time 欄必須叫 `snap_date`
+### 1. time 欄必須叫 `snap_date`（#390 的第二件）
 
 `src/recsys_tfb/pipelines/source_etl/checks.py` 的輸出檢查把 `WHERE snap_date = …` 寫死了，而 A32 強制 `sample_pool`、`label_table`、`feature_table` 都要做這些檢查。time 欄換別的名字，source_etl 就壞。所以這個示例的週也叫 `snap_date`。
 
@@ -181,4 +181,5 @@ Cannot write nullable values to non-null column 'snap_date'
 - **生產規模的資料量估算。** 因為部署層的每日曝光量未知，本機合成資料量推不出生產成本；硬估會變成日後被引用的假數字。
 - **監控模式的 evaluation。** 理由見〈怎麼跑〉。
 - **修 #390。** 因為它改的是所有部署第一次建表的方式，而且要先查清楚 2026-04 為什麼改成現在的做法，應該單獨審；#373 只避開。
-- **item 以多個屬性欄宣告。** 廣告的 id 通常不進模型，模型看的是活動、格式這些屬性；這樣 `c04-video` 才會是「屬性都認得、組合沒見過」。今天的框架做不到（見〈資料涵蓋了什麼〉末段），而且它推翻了「item 恆為一欄，多屬性在來源 SQL 拼好」（`CONTEXT.md` 的 **item**、#379 的 Out of scope），要另外決定、另開票。資料已經備好：原始表的 `campaign_id`、`creative_format` 是分開的兩欄。
+- **item 宣告成多欄。** 使用者要能直接寫 `item: [campaign_id, creative_format]`，不必在 SQL 拼、也不必逐一列出所有組合；模型看的仍是組合。今天的框架 item 恆為一欄，改它會推翻 `CONTEXT.md` 的 **item** 與 #379 原本的 Out of scope，由 #394 處理。資料已經備好：原始表的 `campaign_id`、`creative_format` 是分開的兩欄。
+- **修 #390 的第二件（輸出檢查寫死 `snap_date`）。** 理由同上：改的是框架，#373 只沿用 `snap_date` 這個欄名避開。

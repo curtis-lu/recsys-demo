@@ -144,8 +144,8 @@ def test_query_groups_see_different_numbers_of_items(raw):
 
 def test_an_item_first_appears_after_train_and_calibration(params, raw):
     # item 清單從資料數（#379）要驗「驗證期間的新 item 只警告」。新的是組合，不是屬性：
-    # 活動與格式各自早就出現過。今天的 conf 把 item 當一個類別值進模型，所以模型看到的是
-    # 沒見過的值；item 能以多個屬性欄進模型之後，才是「屬性都認得、組合沒見過」
+    # 活動與格式各自早就出現過。模型把 item 當一個類別值，看到的是沒見過的值；item 宣告成
+    # 多欄（#394）也不改這一點，那張票省掉的是拼欄與逐一列出組合
     log = raw["impression_log"].assign(week=lambda d: week_of(d["event_date"]))
     campaign, fmt = LATE_ITEM
     is_late = (log["campaign_id"] == campaign) & (log["creative_format"] == fmt)
