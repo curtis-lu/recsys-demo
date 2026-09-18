@@ -110,7 +110,8 @@ feature_etl:
 
 | 設定 | 必要性 | 說明 |
 |---|---|---|
-| `variables.target_db` | 建議必填 | 中介表與最終表寫入的 Hive database，也可在 SQL 中以 `${target_db}` 引用 |
+| `variables` | 選填 | 提供 SQL 範本 `${...}` 變數的預設值；每個名字可在執行時用 `--var key=value` 覆寫，寫法與三種值的意義見下方說明 |
+| `variables.target_db` | 建議必填 | 中介表與最終表寫入的 Hive database，也可在 SQL 中以 `${target_db}` 引用；只能在這裡設定，不能用 `--var` 覆寫，也不能寫成 `~`（原因見下方說明） |
 | `target_dates` | 二選一 | 未提供 CLI `--target-dates` 時使用的日期清單 |
 | `dry_run` | 選填 | `true` 時只 render SQL，不執行 Hive DDL／DML，也不寫 audit |
 | `rendered_sql_dir` | 選填 | 保存最終 SQL；路徑結構為 `<dir>/<run_id>/<target_date>/<table>.sql` |
@@ -118,6 +119,20 @@ feature_etl:
 | `tables` | 必填 | 依執行順序排列的輸出表清單 |
 | `audit` | 選填 | audit Hive table 的 database 與 table 名稱 |
 
+`variables` 底下每個名字的值有三種寫法：
+
+- 字串：這次執行沒有用 `--var` 帶同名的值時，就使用它當預設值。
+- `~`（YAML 的 null）：代表這次執行**必須**用 `--var` 帶這個名字的值，沒帶就擋下；用 `--restart-from` 接續、就算用到它的那張表被略過了，也一樣要帶。這樣規則只有一句「寫了 `~` 就一定要帶」，看設定檔就知道會不會被擋，不必逐支 SQL 去查哪張表用到它；接續時照抄上一次的整行指令即可。
+- 其他型別（數字、布林……）：會被擋下，改成加引號的字串即可，例如 `my_var: "2025"`。
+
+`target_date` 與 `target_db` 這兩個名字保留給框架自己用，不能經 `--var` 帶值：
+
+- `target_date`：每個日期由 `--target-dates`（或 YAML `target_dates`）逐一帶入 SQL。若也能從 `--var` 帶，這個值會被每個日期的實際值蓋掉、等於白帶，所以直接擋下，改用 `--target-dates`。`variables` 裡宣告 `target_date` 一樣會被擋，理由相同——寫了也不會有任何作用。
+- `target_db`：決定表寫入哪個 database，也決定 audit 表位置與輸出檢查讀哪個 database。只能在這份 YAML 改：這樣「寫到哪裡」一定會留下設定檔的變更紀錄，方便事後追查；而且下游 `dataset` pipeline 讀的是另一份設定 `hive.db`，不會跟著這裡的值變動，若讓它能用 `--var` 覆寫，兩邊會默默不一致。`variables` 裡把它寫成 `target_db: ~` 一樣會被擋下——`~` 的意思是「這個值只能從 `--var` 帶」，但 `target_db` 又不准從 `--var` 帶，兩條規則互相衝突，只好直接擋。
+
+以上任何一種情況——`--var` 帶到沒宣告的名字、同一個名字帶了兩次、`--var` 缺少 `=`、`variables` 的值型別不合法、`variables` 本身不是「名字 → 值」的對照，或用到 `target_date`／`target_db` 這兩個保留名——都屬於不變量 `A35`，訊息以 `(A35)` 開頭，會在同一次執行裡把所有問題一次列出，並且在 Spark 啟動前完成檢查，見 `src/recsys_tfb/core/consistency.py` 的 invariant legend。
+
+YAML 寫 `my_var: "${env.MY_VAR}"` 這種用環境變數帶值的寫法照樣可用：`${env.X}` 在載入設定時就換掉了，`--var` 在它之後才覆寫，兩者不衝突。dry run 的行為也不受這些檢查影響——不管有沒有開 dry run，這些檢查都一樣會做。
 
 ### 3.3 Table 層級設定
 
@@ -136,9 +151,9 @@ feature_etl:
 
 每支 SQL 應回傳一個 `SELECT`，由框架負責建立 table、schema 對齊及包裝 `INSERT OVERWRITE`。SQL 可使用：
 
-- `${target_date}`：目前處理的日期，由 `--target-dates` 或 `target_dates` 依序帶入。
-- `${target_db}`：YAML `variables.target_db`。
-- `variables` 中自行增加的其他字串變數。
+- `${target_date}`：目前處理的日期，由 `--target-dates` 或 `target_dates` 依序帶入；這個名字不能用 `--var` 覆寫。
+- `${target_db}`：YAML `variables.target_db`；同樣不能用 `--var` 覆寫，只能改 YAML。
+- `variables` 中自行增加的其他字串變數；執行時可用 `--var key=value` 覆寫同名的值，見 [4.1 CLI 選項](#41-cli-選項)。
 
 ```sql
 SELECT
@@ -149,7 +164,7 @@ FROM feature_store.feat_aum
 WHERE snap_date = '${target_date}'
 ```
 
-所有 `${...}` 變數都必須能被解析，否則會在執行 SQL 前失敗。SQL 的輸出必須包含 `partition_by` 宣告的所有欄位；框架會依設定型別 cast partition 欄位，並將其放在 projection 最後方。
+在 Spark 啟動前，框架會把這次要執行的所有表、所有日期的 SQL 都先換一遍：換完只要還剩任何 `${...}`，就會擋下，訊息是 `Unresolved template variables in <檔名>: [...]`。這包含兩種容易誤用的寫法：`${hiveconf:x}`、`${env:X}` 這類 Spark 自己的變數語法，框架不支援；`${env.X}` 只在 YAML 設定檔裡會被換成環境變數，寫在 SQL 檔裡不會。兩者換一遍之後都算沒被解析，所以 SQL 裡不能用。要用環境變數，就在 `variables` 寫 `my_var: "${env.MY_VAR}"`，SQL 裡寫 `${my_var}`。SQL 的輸出必須包含 `partition_by` 宣告的所有欄位；框架會依設定型別 cast partition 欄位，並將其放在 projection 最後方。
 
 ### 3.5 上游 source checks
 
@@ -221,8 +236,18 @@ quality_checks:
 |---|---|---|
 | `--env`, `-e` | `local` | 選擇 `conf/<env>` 設定環境 |
 | `--target-dates` | YAML `target_dates` | 逗號分隔的日期，例如 `2026-01-31,2026-02-28` |
+| `--var key=value` | 無 | 覆寫 YAML `variables` 裡同名的值；只在第一個 `=` 切開（值裡可以再有 `=`），`key=` 代表空字串 |
 | `--source-check` | 關閉 | 只執行該 stage 的上游 preflight，不執行 ETL |
 | `--restart-from` | 無 | 從指定 table 開始，略過清單中更早的 tables |
+
+帶多個變數就重複 `--var`：
+
+```bash
+python -m recsys_tfb feature_etl --env production --target-dates 2026-01-31 \
+  --var raw_db=raw_lake --var allowed_values="'a','b'"
+```
+
+分隔多個變數靠重複 `--var`，不是逗號，所以值裡有逗號（例如上面的 `'a','b'`）也不會被切開；這跟 `--target-dates` 用逗號分隔日期是兩種不同的規則。
 
 `--source-check` 與 `--restart-from` 不能同時使用。source ETL 也不支援 DAG pipeline 的 `--from-node`、`--only-node`、`--list-nodes` 或 CLI `--dry-run`。
 
@@ -283,12 +308,12 @@ python -m recsys_tfb feature_etl --env production \
 
 ## 5. 執行流程
 
-正式執行時，每個 target date 依序經過：
+變數檢查與 SQL 代換在 Spark 啟動前，對這次要執行的所有表、所有日期一次做完；下表列的其餘階段才依日期逐一進行：
 
 | 階段 | 處理內容 | 失敗行為 |
 |---|---|---|
 | 載入設定 | 解析 YAML、table 順序與 `depends_on` | 設定不合法時，在執行 SQL 前中止 |
-| Render SQL | 將 `${target_date}`、`${target_db}` 等變數代入 SQL | 有未解析變數時中止 |
+| 檢查變數並 Render SQL（Spark 啟動前，一次處理所有表與所有日期） | 檢查 `--var`／`variables` 是否合法（`A35`），讀取每張表的 SQL 檔，將 `${target_date}`、`${target_db}`、`--var` 覆寫值代入 | 變數不合法、SQL 檔案不存在，或代入後仍有殘留 `${...}` 時，Spark 都不會啟動 |
 | 探測輸出 schema | 以 `LIMIT 0` 取得 SELECT 欄位與型別 | SQL 或上游 schema 錯誤時中止 |
 | 建表或對齊 schema | 首次 CTAS；既有表則 append-only schema evolution | 移除欄位或 partition 欄缺失時中止 |
 | 寫入 partition | 以 `INSERT OVERWRITE` 寫入該日期 | Spark／Hive 錯誤時中止 |
@@ -325,6 +350,8 @@ ORDER BY created_at DESC;
 
 audit table 不分區，並以 append 方式保存歷次執行紀錄。只有設定 `min_row_count` 時，audit 的 `row_count` 才會取得該檢查算出的實際列數；未設定時即使資料存在，也可能記為 `0`。
 
+執行開始時，log 會印一行這次生效的所有變數與值，並標出哪些來自 `--var`。audit table 不會多存一份變數值，所以 log 被清掉之後，就查不到那次執行實際用的變數值。
+
 ## 7. 重跑與恢復
 
 | 情境 | 建議方式 |
@@ -349,7 +376,9 @@ source ETL 的輸出不會因 SQL 或來源資料內容改變而自動產生新�
 | `Source check FAILED ... partition_exists` | 上游 partition 尚未產出或 partition key 設錯 | 以 `SHOW PARTITIONS <table>` 確認日期格式與欄位 |
 | `Source check FAILED ... row_count` | 上游載入不完整或門檻設定過高 | 查詢該 partition 實際列數，確認上游完成狀態與合理門檻 |
 | `Source check FAILED ... schema_drift` | 缺欄、型別改變或出現不允許的新欄位 | 比對 `DESCRIBE <table>` 與 `expected_columns`，修正上游或更新契約 |
-| `Unresolved template variables` | SQL 使用了 YAML `variables` 未定義的 `${...}` | 補上變數或修正 SQL placeholder 名稱 |
+| `(A35) ...`（開頭；`--var`／`variables` 設定不合法） | `--var` 帶到沒在 `variables` 宣告的名字、同一個名字帶了兩次、`--var` 缺少 `=`、`variables` 的值不是字串或 `~`、`variables` 本身不是「名字 → 值」的對照、某個 `~` 名字沒有對應的 `--var`，或用到 `target_date`／`target_db` 這兩個保留名 | 這些問題會一次全部列出，且在 Spark 啟動前擋下；照訊息逐條修正 `--var` 參數或 YAML `variables` 後重跑 |
+| `Unresolved template variables in <檔名>: [...]` | SQL 換完後還有沒被解析的 `${...}`：可能是 `variables` 沒定義這個名字；也可能是 Spark 自己的變數語法（例如 `${hiveconf:x}`），或只在 YAML 才會被換的 `${env.X}` 寫進了 SQL 檔 | 在 `variables` 補上這個名字的預設值，或用 `--var` 帶值；要用環境變數時，在 `variables` 寫 `my_var: "${env.MY_VAR}"`，SQL 改用 `${my_var}` |
+| `No such file or directory: '<路徑>'` | `sql_file` 路徑打錯，或該表的 SQL 檔案還沒建立 | 確認 `conf/sql/etl/...` 路徑與檔名；這項檢查在 Spark 啟動前就會做完，不用等執行到那張表才發現 |
 | `depends on ... but ... does not appear before it` | `depends_on` 指向不存在或排列在後方的 table | 調整 `tables` list 順序或修正 table 名稱 |
 | `Partition columns missing from SELECT output` | SQL 未輸出 `partition_by` 宣告的欄位 | 將 partition 欄位加入 SELECT，並確認命名一致 |
 | `Output quality check FAILED` | 列數、重複鍵、NULL 或 primary key schema 不符合契約 | 先查失敗 table/date，再修正 SQL、primary key 或合理門檻，最後依提示接續 |
@@ -364,6 +393,7 @@ source ETL 的輸出不會因 SQL 或來源資料內容改變而自動產生新�
 - `max_null_ratio` 是整張 partition 的資料格總體比例，不是逐欄上限；需要欄位級規則時應在 SQL 或額外檢查中明確處理。
 - audit 在 run 結束時批次寫入；audit 寫入失敗只會記錄 error log，不會反向將已成功的 ETL 判定為失敗。
 - source ETL 不理解特徵洩漏、label 觀察窗或候選資格等業務語意，這些仍需在 SQL review 與資料驗收時確認。
+- `--var` 只提供給 source ETL 系列指令（`feature_etl`、`label_etl`、`sample_pool_etl`、`inference_population_etl`）。其他 DAG pipeline（`dataset`、`training`、`inference`、`evaluation`）沒有這個旗標，它們 SQL／設定裡的 `${...}` 是另一套 catalog 代換機制，語法相似但不是同一件事。
 
 ## 10. 相關文件
 
