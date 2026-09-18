@@ -125,11 +125,27 @@ evaluation 以 `inference_population` 當母體的評估模式。
 **per-item attribution**:
 把 query group 層級的指標拆成各 item 的貢獻，只在該 item 為正例的列上彙整；指標名帶 `_attr`（例如 `map_attr@K`），不是單一 item 自己的 mAP。
 
+**大類**:
+item 的分組，一個 item 只屬於一個大類（例如三種基金併成「基金」）；evaluation 會在大類粒度上把指標再算一次。
+_Avoid_: segment、分群（那是 entity 的切片）
+
+**分群**:
+依 entity 的某個屬性把 query group 切片、各片分開算指標；設定鍵沿用 `segment` 字樣。
+_Avoid_: 大類（那是 item 的分組）
+
 **macro**:
 以 item 為單位先算、再跨 item 平均的指標彙整方式。
 
 **重抽單位**（ADR-0023，尚未實作）:
 算信賴區間時一起被重抽的 entity 欄位子集。
+
+**熱門度基準線**:
+不看模型、只按每個 item 過去一段時間的正例數（或正例率）排出名次的對照組，用來回答「模型有沒有比只看熱門度好」。
+_Avoid_: popularity baseline、購買數基準（正例不一定是購買）
+
+**正例率**:
+同一段時間裡，一個 item 的正例數 ÷ 它當過候選的次數。`sample_pool` 的一列就是一次當候選；`label_table` 的列數不是（它可能只收正例，或只收篩過的 entity）。
+_Avoid_: 點擊率、申辦率、CTR（那是正例率在各示例裡的名字）
 
 **校準**:
 把 score 當成機率來看時，「模型說會發生的比例」與「實際發生的比例」有多接近。與排序好壞無關，兩者可以一好一壞。
