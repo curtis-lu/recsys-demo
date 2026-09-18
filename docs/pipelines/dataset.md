@@ -73,6 +73,22 @@ dataset:
     - "2026-01-31"
 ```
 
+四個 `*_snap_dates` 都可以改寫成「起日～迄日」區間，不必逐一列出：
+
+```yaml
+dataset:
+  train_snap_dates:
+    start: "2025-01-31"
+    end: "2025-10-31"
+    step: month_end      # day | week | month_start | month_end
+```
+
+- **含頭含尾，而且起日與迄日都必須落在 `step` 上。** 上例展開成 2025-01-31、2025-02-28……2025-10-31 共 10 個日期。`week` 從起日起每 7 天一個，迄日必須剛好是起日加整數週；`month_start`／`month_end` 的起迄必須是月初／月底。沒落在 step 上時（例如 `month_end` 卻寫 `2025-01-30`）直接報錯、指令退出，**不會**自動挪到最近的日期——挪了就等於悄悄換掉一整段切分。
+- **區間與逐一列出是同一份設定。** 設定檔一載入就把區間展開成 `YYYY-MM-DD` 字串清單（`core/date_ranges.py`），之後所有檢查、所有 node、版本雜湊看到的都是清單，所以兩種寫法得到**同一個 `base_dataset_version`**。
+- **前提：原本的清單是「加引號、依日期遞增」的寫法**（上面的示例就是）。清單照寫的樣子進雜湊，不會被排序或補引號——那樣做會讓所有既有的版本 ID 一起變。所以如果你原本的清單順序不同、或日期沒加引號（YAML 會讀成日期物件），改寫成區間會翻一次 `base_dataset_version`、重建一次產物；之後就穩定了。
+- 區間沒有「最近 N 天」這種相對寫法：迄日若跟著執行日期走，同一份設定明天重跑會得到不同的版本 ID。
+- `conf/<env>/` 的覆蓋層可以只蓋區間裡的一個鍵（例如只改 `end`），因為展開發生在覆蓋之後。
+
 train、calibration、val、test 日期集合必須互斥（一致性不變量 A24，在 `dataset` 指令啟動 Spark 前檢查；按日比對而非按字面，同一天的不同寫法也算重疊）。日期本身仍須寫成 `YYYY-MM-DD`。`train_dev_ratio` 不會切日期，而是把一個 entity 的所有日期與 items 一起分配至 train 或 train-dev，避免同一 entity 同時出現在兩側。
 
 「一個 entity」指哪些欄由 `train_split_keys` 宣告，**預設是完整的 `schema.entity`**。單欄 entity 下沒有第二種讀法；多欄時若你的洩漏單位比 query group 粗（例如 entity 是 `[cust_id, acct_id]`，而同一客戶的多個帳戶不得跨邊），就填上較粗的那個子集。填了不在 `entity` 裡的欄名會被不變量 A29 在 CLI 進入點擋下。為什麼這個鍵與 `val_sample_keys` 是兩個而不是一個，見 [ADR-0016](../adr/0016-split-unit-declared-by-two-keys.md)。
@@ -577,6 +593,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | `DataConsistencyError: ... un-encoded non-numeric type(s)`，讀 parquet 前秒級失敗 | 字串／非數值欄進了 `feature_columns`，既沒宣告 categorical 也沒 drop（不變量 B6） | 錯誤訊息逐欄點名兇手；每欄二選一，見下方 §8.1。改完會 bump `base_dataset_version`、需重建 dataset |
 | categorical dtype 為 decimal/double/float | 連續值誤標類別，或代碼欄型別不適合 | 真正連續特徵移出 categorical；代碼欄在 source ETL cast 為 string/int |
 | `(A24) dataset.X_snap_dates [...] and dataset.Y_snap_dates [...] name the same calendar day` | train/calibration/val/test 使用相同日期 | 重新切分日期，確保集合互斥。此檢查在 Spark 啟動前執行，**按日比對而非按字面**，所以同一天的不同寫法也抓得到；訊息會分別印出兩邊各自的原始寫法 |
+| `N 個日期區間設定無法展開` | 某個 `{start, end, step}` 區間寫錯：起迄沒落在 step 上、迄日早於起日、`step` 拼錯、少鍵或多鍵 | 訊息逐一點名是哪個檔的哪個鍵、哪一端不對；所有寫錯的區間一次列完。規則見 §3.1 |
 | `feature_table missing required ... snap_dates` | source ETL 未產出某些日期 | 補跑 feature ETL 或修正日期設定 |
 | identity categorical missing declarations | item 等 identity 類別無法從 feature table fit | 在 `schema.categorical_values` 提供完整值域 |
 | log 出現 `unknowns in column ...` | 非 train 日期出現 mapping 未見的新類別 | 檢查是否為資料異常；必要時延伸 train mapping 或調整來源清理 |

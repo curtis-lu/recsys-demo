@@ -9,9 +9,11 @@ from recsys_tfb.pipelines.evaluation.steps.compare_universe import (
     restrict_to_common,
 )
 
+_MONTH = "2026-01-31"
 
-def _entity_tuples(df: SparkDataFrame) -> set[tuple]:
-    """Collect an entity DataFrame in the test — fixtures here are tiny.
+
+def _group_tuples(df: SparkDataFrame) -> set[tuple]:
+    """Collect a query-group DataFrame in the test — fixtures here are tiny.
 
     Production never does this: the whole point of #275 is that the entity
     side stays in Spark. See ``test_entity_side_never_returns_to_driver``.
@@ -23,11 +25,11 @@ def _entity_tuples(df: SparkDataFrame) -> set[tuple]:
 def df_a(spark):
     return spark.createDataFrame(
         [
-            ("c1", "p1"), ("c1", "p2"),
-            ("c2", "p1"), ("c2", "p3"),
-            ("c3", "p1"),
+            (_MONTH, "c1", "p1"), (_MONTH, "c1", "p2"),
+            (_MONTH, "c2", "p1"), (_MONTH, "c2", "p3"),
+            (_MONTH, "c3", "p1"),
         ],
-        ["cust_id", "prod_name"],
+        ["snap_date", "cust_id", "prod_name"],
     )
 
 
@@ -35,20 +37,22 @@ def df_a(spark):
 def df_b(spark):
     return spark.createDataFrame(
         [
-            ("c2", "p1"), ("c2", "p2"),
-            ("c3", "p2"), ("c3", "p3"),
-            ("c4", "p1"),
+            (_MONTH, "c2", "p1"), (_MONTH, "c2", "p2"),
+            (_MONTH, "c3", "p2"), (_MONTH, "c3", "p3"),
+            (_MONTH, "c4", "p1"),
         ],
-        ["cust_id", "prod_name"],
+        ["snap_date", "cust_id", "prod_name"],
     )
 
 
-def test_intersection_entities_and_items(df_a, df_b):
-    universe = common_universe(df_a, df_b, ["cust_id"], "prod_name")
-    # The entity DataFrame carries one row per entity, one column per
-    # schema.entity column — so callers always join on the whole entity.
-    assert universe.common_entities.columns == ["cust_id"]
-    assert _entity_tuples(universe.common_entities) == {("c2",), ("c3",)}
+def test_intersection_query_groups_and_items(df_a, df_b):
+    universe = common_universe(df_a, df_b, "snap_date", ["cust_id"], "prod_name")
+    # The query-group DataFrame carries one row per query group: the time
+    # column (as text) plus one column per schema.entity column — so callers
+    # always join on the whole group.
+    assert universe.common_query_groups.columns == ["snap_date", "cust_id"]
+    assert _group_tuples(universe.common_query_groups) == {
+        (_MONTH, "c2"), (_MONTH, "c3")}
     assert universe.common_items == {"p1", "p2", "p3"}
     # Each side's full item set rides along for coverage (ADR-0020 bug 14).
     assert universe.a_items == {"p1", "p2", "p3"}
@@ -63,21 +67,40 @@ def test_intersection_uses_every_entity_column(spark):
     it; intersecting entities drops it.
     """
     a = spark.createDataFrame(
-        [("b1", "c1", "p1"), ("b1", "c2", "p1")],
-        ["branch_id", "cust_id", "prod_name"],
+        [(_MONTH, "b1", "c1", "p1"), (_MONTH, "b1", "c2", "p1")],
+        ["snap_date", "branch_id", "cust_id", "prod_name"],
     )
     b = spark.createDataFrame(
-        [("b1", "c2", "p1"), ("b2", "c1", "p1")],
-        ["branch_id", "cust_id", "prod_name"],
+        [(_MONTH, "b1", "c2", "p1"), (_MONTH, "b2", "c1", "p1")],
+        ["snap_date", "branch_id", "cust_id", "prod_name"],
     )
-    universe = common_universe(a, b, ["branch_id", "cust_id"], "prod_name")
-    assert universe.common_entities.columns == ["branch_id", "cust_id"]
-    assert _entity_tuples(universe.common_entities) == {("b1", "c2")}
+    universe = common_universe(
+        a, b, "snap_date", ["branch_id", "cust_id"], "prod_name")
+    assert universe.common_query_groups.columns == [
+        "snap_date", "branch_id", "cust_id"]
+    assert _group_tuples(universe.common_query_groups) == {(_MONTH, "b1", "c2")}
     assert universe.common_items == {"p1"}
 
 
+def test_intersection_keeps_an_entity_only_in_the_months_both_sides_have(spark):
+    """#374: several evaluated months. c1 is on both sides, but B scored it in
+    January only, so (February, c1) is not common; c2 is common in both."""
+    a = spark.createDataFrame(
+        [(m, c, "p1") for m in ("2026-01-31", "2026-02-28") for c in ("c1", "c2")],
+        ["snap_date", "cust_id", "prod_name"],
+    )
+    b = spark.createDataFrame(
+        [("2026-01-31", "c1", "p1"), ("2026-01-31", "c2", "p1"),
+         ("2026-02-28", "c2", "p1")],
+        ["snap_date", "cust_id", "prod_name"],
+    )
+    universe = common_universe(a, b, "snap_date", ["cust_id"], "prod_name")
+    assert _group_tuples(universe.common_query_groups) == {
+        ("2026-01-31", "c1"), ("2026-01-31", "c2"), ("2026-02-28", "c2")}
+
+
 def test_entity_side_never_returns_to_driver(df_a, df_b, monkeypatch):
-    """The entity intersection stays in Spark; only items come back (#275).
+    """The query-group intersection stays in Spark; only items come back (#275).
 
     Production entity populations are millions of rows, and a ``.collect()``
     of them lands in the driver's *Python* heap — the one
@@ -97,9 +120,9 @@ def test_entity_side_never_returns_to_driver(df_a, df_b, monkeypatch):
 
     monkeypatch.setattr(SparkDataFrame, "collect", spy)
 
-    universe = common_universe(df_a, df_b, ["cust_id"], "prod_name")
+    universe = common_universe(df_a, df_b, "snap_date", ["cust_id"], "prod_name")
 
-    assert isinstance(universe.common_entities, SparkDataFrame)
+    assert isinstance(universe.common_query_groups, SparkDataFrame)
     assert collected_columns == [["prod_name"], ["prod_name"]]
     assert universe.common_items == {"p1", "p2", "p3"}
 
@@ -119,38 +142,54 @@ def test_empty_check_does_not_count_on_the_happy_path(df_a, df_b, monkeypatch):
 
     monkeypatch.setattr(SparkDataFrame, "count", spy)
 
-    common_universe(df_a, df_b, ["cust_id"], "prod_name")
+    common_universe(df_a, df_b, "snap_date", ["cust_id"], "prod_name")
 
     assert counted == []
 
 
-def test_empty_entity_intersection_raises(spark):
-    a = spark.createDataFrame([("c1", "p1")], ["cust_id", "prod_name"])
-    b = spark.createDataFrame([("c9", "p1")], ["cust_id", "prod_name"])
-    with pytest.raises(DataConsistencyError, match="common_entities"):
-        common_universe(a, b, ["cust_id"], "prod_name")
-
-
-def test_empty_entity_message_still_reports_both_side_counts(spark):
-    """The empty-universe message keeps its two population numbers (#275 must not drop them)."""
-    a = spark.createDataFrame(
-        [("c1", "p1"), ("c2", "p1")], ["cust_id", "prod_name"]
+def _one_month(spark, rows):
+    return spark.createDataFrame(
+        [(_MONTH, *row) for row in rows],
+        "snap_date string, cust_id string, prod_name string",
     )
-    b = spark.createDataFrame([("c9", "p1")], ["cust_id", "prod_name"])
+
+
+def test_empty_query_group_intersection_raises(spark):
+    a = _one_month(spark, [("c1", "p1")])
+    b = _one_month(spark, [("c9", "p1")])
+    with pytest.raises(DataConsistencyError, match="common_query_groups"):
+        common_universe(a, b, "snap_date", ["cust_id"], "prod_name")
+
+
+def test_same_entities_in_different_months_share_no_query_group(spark):
+    """Both sides score c1, but A in January and B in February: no query group
+    is common, so the gate raises instead of comparing two different months."""
+    a = spark.createDataFrame([("2026-01-31", "c1", "p1")],
+                              ["snap_date", "cust_id", "prod_name"])
+    b = spark.createDataFrame([("2026-02-28", "c1", "p1")],
+                              ["snap_date", "cust_id", "prod_name"])
+    with pytest.raises(DataConsistencyError, match="common_query_groups"):
+        common_universe(a, b, "snap_date", ["cust_id"], "prod_name")
+
+
+def test_empty_query_group_message_still_reports_both_side_counts(spark):
+    """The empty-universe message keeps its two population numbers (#275 must not drop them)."""
+    a = _one_month(spark, [("c1", "p1"), ("c2", "p1")])
+    b = _one_month(spark, [("c9", "p1")])
     with pytest.raises(DataConsistencyError) as excinfo:
-        common_universe(a, b, ["cust_id"], "prod_name")
-    assert "A has 2 entities, B has 1 entities" in str(excinfo.value)
+        common_universe(a, b, "snap_date", ["cust_id"], "prod_name")
+    assert "A has 2 query groups, B has 1 query groups" in str(excinfo.value)
 
 
 def test_empty_item_intersection_raises(spark):
-    a = spark.createDataFrame([("c1", "p1")], ["cust_id", "prod_name"])
-    b = spark.createDataFrame([("c1", "p9")], ["cust_id", "prod_name"])
+    a = _one_month(spark, [("c1", "p1")])
+    b = _one_month(spark, [("c1", "p9")])
     with pytest.raises(DataConsistencyError, match="common_items"):
-        common_universe(a, b, ["cust_id"], "prod_name")
+        common_universe(a, b, "snap_date", ["cust_id"], "prod_name")
 
 
 def test_null_only_intersection_fails_the_gate_instead_of_passing_it(spark):
-    """A null-keyed shared entity is not a usable common entity.
+    """A null-keyed shared entity is not a usable common query group.
 
     ``intersect`` counts ``NULL == NULL`` as a match, so it would let this
     universe through the empty-universe gate — and the equi-join in ``restrict_to_common``
@@ -158,14 +197,10 @@ def test_null_only_intersection_fails_the_gate_instead_of_passing_it(spark):
     anywhere. The gate uses the same join semantics as the restriction it
     guards, so the two cannot disagree and this fails loud.
     """
-    a = spark.createDataFrame(
-        [("c1", "p1"), (None, "p1")], "cust_id string, prod_name string"
-    )
-    b = spark.createDataFrame(
-        [("c9", "p1"), (None, "p1")], "cust_id string, prod_name string"
-    )
-    with pytest.raises(DataConsistencyError, match="common_entities"):
-        common_universe(a, b, ["cust_id"], "prod_name")
+    a = _one_month(spark, [("c1", "p1"), (None, "p1")])
+    b = _one_month(spark, [("c9", "p1"), (None, "p1")])
+    with pytest.raises(DataConsistencyError, match="common_query_groups"):
+        common_universe(a, b, "snap_date", ["cust_id"], "prod_name")
 
 
 def _params() -> dict:
@@ -231,6 +266,70 @@ def test_restricts_to_common_entities_and_items(a_df, b_df):
     a_expected = sorted([("c1", "p1"), ("c1", "p2"), ("c2", "p1"), ("c2", "p3")])
     assert a_rows == a_expected
     assert b_rows == expected
+
+
+def _two_month_sides(spark, b_time_type="string"):
+    """A: c1 and c2 in January and February. B: c2 in both months, c1 in
+    January only. ``b_time_type`` is the type of B's time column."""
+    months = ("2026-01-31", "2026-02-28")
+    a = spark.createDataFrame(
+        [(m, c, p, score, label)
+         for m in months for c in ("c1", "c2")
+         for p, score, label in (("p1", 0.9, 1), ("p2", 0.2, 0))],
+        "snap_date string, cust_id string, prod_name string, score double, "
+        "label int",
+    )
+    b_rows = [(m, c, p, score)
+              for m, c in (("2026-01-31", "c1"), ("2026-01-31", "c2"),
+                           ("2026-02-28", "c2"))
+              for p, score in (("p1", 0.3), ("p2", 0.6))]
+    b = spark.createDataFrame(
+        b_rows,
+        "snap_date string, cust_id string, prod_name string, score double",
+    )
+    if b_time_type != "string":
+        from pyspark.sql import functions as F
+
+        b = b.withColumn("snap_date", F.to_date("snap_date"))
+    return a, b
+
+
+def _keys(df):
+    return sorted((str(r["snap_date"]), r["cust_id"], r["prod_name"])
+                  for r in df.collect())
+
+
+_COMMON_TWO_MONTH_KEYS = sorted(
+    (m, c, p)
+    for m, c in (("2026-01-31", "c1"), ("2026-01-31", "c2"), ("2026-02-28", "c2"))
+    for p in ("p1", "p2")
+)
+
+
+def test_a_month_b_did_not_score_for_an_entity_is_dropped_from_a(spark):
+    """#374: the common population is query groups, not entities. c1 is on
+    both sides, but B scored it in January only; keeping A's February c1 rows
+    would compare the two models on different populations."""
+    a, b = _two_month_sides(spark)
+    a_c, b_c, _ = restrict_to_common(a, b, _params())
+    assert _keys(a_c) == _COMMON_TWO_MONTH_KEYS
+    assert _keys(b_c) == _COMMON_TWO_MONTH_KEYS
+
+
+def test_query_groups_match_when_the_time_columns_differ_in_type(spark):
+    """An external_hive side can carry its time column as DATE while A's
+    partition is STRING. The groups are matched on the time as text, so the
+    result is the same as with two STRING columns, and B's labels still
+    come from A."""
+    a, b = _two_month_sides(spark, b_time_type="date")
+    assert dict(b.dtypes)["snap_date"] == "date"
+    a_c, b_c, _ = restrict_to_common(a, b, _params())
+    assert _keys(a_c) == _COMMON_TWO_MONTH_KEYS
+    assert _keys(b_c) == _COMMON_TWO_MONTH_KEYS
+    labels = {(str(r["snap_date"]), r["cust_id"], r["prod_name"]): r["label"]
+              for r in b_c.collect()}
+    assert labels == {key: 1 if key[2] == "p1" else 0
+                      for key in _COMMON_TWO_MONTH_KEYS}
 
 
 def test_rank_recomputed_within_common(a_df, b_df):

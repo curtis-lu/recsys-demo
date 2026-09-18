@@ -189,6 +189,37 @@ def test_monthly_purchase_counts_breaks_window_into_months(spark):
     assert a_total == 3 and b_total == 1
 
 
+def test_monthly_counts_by_window_reads_label_table_once(spark):
+    """#374, several evaluated dates: every window's per-month counts from one
+    scan of label_table, not one scan per window.
+
+    Windows (12 months): 2025-01-31 → [2024-01-31, 2025-01-31) holds both
+    history snaps; 2024-12-31 → [2023-12-31, 2024-12-31) holds 2024-06-30 only
+    (its own date is excluded).
+    """
+    from recsys_tfb.evaluation.baselines import (
+        compute_monthly_purchase_counts_by_window,
+    )
+
+    monthly = compute_monthly_purchase_counts_by_window(
+        _label_table(spark), ["2025-01-31", "2024-12-31"], 12, _parameters()
+    )
+    by_key = {(r["window_date"], r["month"], r["prod_name"]): r["score"]
+              for r in monthly.collect()}
+    assert by_key == {
+        ("2025-01-31", "2024-06", "A"): 2, ("2025-01-31", "2024-12", "A"): 1,
+        ("2025-01-31", "2024-06", "B"): 1, ("2025-01-31", "2024-12", "B"): 0,
+        ("2025-01-31", "2024-06", "C"): 0, ("2025-01-31", "2024-12", "C"): 0,
+        ("2024-12-31", "2024-06", "A"): 2, ("2024-12-31", "2024-06", "B"): 1,
+        ("2024-12-31", "2024-06", "C"): 0,
+    }
+    # The optimized logical plan names each read of an in-memory frame once
+    # (the physical one prints both AQE plans); the window bounds are a
+    # second, separate frame whose first column is window_date.
+    plan = monthly._jdf.queryExecution().optimizedPlan().toString()
+    assert plan.count("LogicalRDD [snap_date#") == 1, plan
+
+
 def test_monthly_purchase_counts_rejects_empty_snap_dates(spark):
     import pytest
     from recsys_tfb.evaluation.baselines import compute_monthly_purchase_counts

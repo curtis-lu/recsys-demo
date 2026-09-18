@@ -62,6 +62,13 @@ inference:
 
 `snap_dates` 決定本次要從 `feature_table` 取出的時間切點。pipeline 支援一次處理多個日期，並對每個日期建立獨立的 Hive partitions。
 
+也可以寫成區間，規則與 dataset 的日期設定相同（含頭含尾、起迄必須落在 `step` 上，見 [dataset §3.1](dataset.md#31-日期與-split)）：
+
+```yaml
+inference:
+  snap_dates: {start: "2026-01-31", end: "2026-03-31", step: month_end}
+```
+
 日期值應使用 ISO `YYYY-MM-DD`，並與 `schema.time` 欄位可轉換成的日期一致。任一設定日期在 `feature_table` 完全不存在時會 fail-fast，不會只發布其他有資料的日期。
 
 修改 `snap_dates` 不會產生新的 `model_version`；它只改變本次要寫入或覆寫的 prediction partitions。

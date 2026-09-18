@@ -12,6 +12,7 @@ from recsys_tfb.evaluation.report_builder import (
     build_glossary_section,
     count_items,
     drop_metric_keys_above_item_count,
+    eval_dates_display,
     macro_coverage_suffix_mb,
     per_item_metric_compare_table,
     resolve_display_k,
@@ -39,7 +40,7 @@ def assemble_comparison_report(
     eval_params = parameters.get("evaluation", {}) or {}
     metadata = {
         "Comparison": f"{label_a} vs {label_b}",
-        "Snap Date": eval_params.get("snap_date", "unknown"),
+        "Snap Date": eval_dates_display(eval_params.get("snap_date", "unknown")),
         "Generated At": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     return generate_html_report(

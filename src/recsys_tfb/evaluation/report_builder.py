@@ -13,6 +13,7 @@ from datetime import datetime
 import pandas as pd
 
 from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
+from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.baselines import resolve_lookback_months
 from recsys_tfb.evaluation.metrics import metric_params
@@ -991,6 +992,21 @@ def build_baseline_section(
     covered = len(months)
     window_partial = 0 < covered < lookback
     per_month_divisor = covered if window_partial else lookback
+    # Several evaluated dates (#374): one window per date, and purchase_counts
+    # sums them all, so the per-month average divides by the window-months
+    # behind that sum — each window's covered months under the same partial
+    # rule as above — not by one window's lookback (N times too high). The
+    # node writes window_months_covered only then; the distinct months of
+    # monthly_counts cannot stand in for it, since overlapping windows share
+    # months and a boundary month can hold rows for one window and not the other.
+    windows = (baseline_metrics or {}).get("window_months_covered") or {}
+    several_dates = len(windows) > 1
+    if several_dates:
+        full_window_months = len(windows) * lookback
+        per_month_divisor = sum(
+            c if 0 < c < lookback else lookback for c in windows.values()
+        )
+        window_partial = per_month_divisor < full_window_months
 
     # [1] popularity 排名組成（總計 count + 平均每月）；各月明細/趨勢＝Phase 2。
     pcounts = (baseline_metrics or {}).get("purchase_counts") or {}
@@ -1118,12 +1134,31 @@ def build_baseline_section(
         if window_partial else
         f"popularity 以過去 {lookback} 個月的歷史購買計數重排。"
     )
+    trend_note = ""
+    if several_dates:
+        n_windows = len(windows)
+        lookback_note = (
+            f"popularity 對 {n_windows} 個評估日期各以該日期之前 {lookback} 個月"
+            f"的歷史購買計數重排；排名組成的 count 是這 {n_windows} 個視窗的"
+            f"合計，平均每月＝count ÷ {per_month_divisor}"
+            + (
+                f"（各視窗內 label_table 有資料的月數加總：實際只涵蓋 "
+                f"{per_month_divisor} 個視窗月，滿額 {full_window_months} 個）。"
+                if window_partial else
+                f"（{n_windows} 個視窗 × 每個 {lookback} 個月）。"
+            )
+        )
+        trend_note = (
+            "視窗彼此重疊時，同一個月會被每個涵蓋它的視窗各算一次，"
+            "所以月度趨勢表的逐月數字是重複計數後的合計。"
+        )
     return ReportSection(
         title="baseline — popularity 對照",
         description=(
             f"Model 相對 popularity baseline 的位置。{lookback_note}popularity "
             "排名組成為各 item 跨月合計（總計＋平均每月）；月度趨勢表把同一批計數"
             "拆到各 item 逐月（列＝item、欄＝月份，合計逐 item 對齊排名組成）。"
+            f"{trend_note}"
             "overall 的 mAP／recall／precision 各一張表、"
             "k 放欄位、點標題展開。對照層級：overall（三家族）、per-item"
             "（recall／map_attr 兩張，k＝[1,3,5,all] 控寬）、per-segment 與大類"
@@ -1392,6 +1427,33 @@ def build_completeness_section(
     )
 
 
+def several_eval_dates(configured) -> bool:
+    """Whether the configured evaluation date value names more than one date.
+
+    ``len(as_date_list(value)) > 1``, the one test the repo uses for "several
+    dates" (``as_date_list`` already drops repeats).
+    """
+    return len(as_date_list(configured)) > 1
+
+
+def eval_dates_display(configured):
+    """The report metadata's date cell for the configured evaluation date value.
+
+    Takes the value, not ``parameters``, so the config key stays read where it
+    is registered (S6). A single date is shown exactly as configured, as it
+    always was. Several dates (#374) read as ``earliest ~ latest（N 個日期）``:
+    the list itself is long and unordered as written.
+    """
+    if not isinstance(configured, list):
+        return configured
+    dates = sorted(as_date_list(configured))
+    if not dates:
+        return "unknown"
+    if len(dates) == 1:
+        return dates[0]
+    return f"{dates[0]} ~ {dates[-1]}（{len(dates)} 個日期）"
+
+
 def assemble_report(
     metrics: dict,
     parameters: dict,
@@ -1420,13 +1482,24 @@ def assemble_report(
     ]
     sections = [s for s in candidates if s is not None]
     eval_params = parameters.get("evaluation", {}) or {}
+    configured_dates = eval_params.get("snap_date", "unknown")
     metadata = {
         "Model Version": parameters.get("model_version", "unknown"),
-        "Snap Date": eval_params.get("snap_date", "unknown"),
+        "Snap Date": eval_dates_display(configured_dates),
+    }
+    if several_eval_dates(configured_dates):
+        # Right under the dates, the one place every reader passes. The
+        # bootstrap CIs (main report and diagnosis pages) were built for one
+        # date; issue #389 fixes them, and removes this line.
+        metadata["⚠ 信賴區間"] = (
+            "多個日期合併評估時，本報表與診斷頁的信賴區間可能偏窄或有偏，"
+            "詳見 issue #389。"
+        )
+    metadata.update({
         "Generated At": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "Total Queries": metrics.get("n_queries"),
         "Excluded Queries": metrics.get("n_excluded_queries"),
-    }
+    })
     return generate_html_report(
         sections, title="Model Evaluation Report", metadata=metadata
     )

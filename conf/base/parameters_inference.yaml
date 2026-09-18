@@ -14,6 +14,7 @@ inference:
   # ⚠ 改這個值不是零成本：它是 unranked_predictions 的 partition col，改了等於該
   # model_version 的該表要重建（舊桶的分區沒人清，validate 會擋下來）。
   entity_buckets: 10
+  # 也可寫成區間 {start, end, step}，規則同 parameters_dataset.yaml 開頭的說明
   snap_dates:             # ★要評分的時間切點清單（你的資料）
     - "2025-12-31"
   products:               # ★評分母體 item；須 == schema.categorical_values[item]（A4 驗）

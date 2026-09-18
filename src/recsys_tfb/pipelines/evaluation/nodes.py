@@ -1,10 +1,11 @@
 """Evaluation pipeline nodes, for every run mode ``pipeline.py`` wires
 (monitoring, ``--post-training``, ``--compare``, ``--compare-only``).
 
-Every node body lives in this module. Three kinds are built by factories here
+Every node body lives in this module. Four kinds are built by factories here
 rather than defined at top level: ``prepare_eval_data``
 (``make_prepare_eval_data_node``), ``draw_diagnosis_sample_node``
-(``make_draw_diagnosis_sample_node``) and one ``diagnose_<name>`` per
+(``make_draw_diagnosis_sample_node``), ``restrict_to_common``
+(``make_restrict_to_common_node``, #374) and one ``diagnose_<name>`` per
 ``contract.DIAGNOSES`` entry (``make_diagnosis_node``). The architecture
 audit's AST scan reads top-level definitions only, so it does not see those
 nodes' definitions (ADR-0019 decision 2).
@@ -25,6 +26,7 @@ from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError
+from recsys_tfb.core.date_ranges import as_date_list, dates_label
 from recsys_tfb.core.logging import log_data_volume
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric import contract
@@ -33,6 +35,7 @@ from recsys_tfb.diagnosis.metric.uncertainty import bootstrap_per_item_ci
 from recsys_tfb.evaluation.baselines import (
     build_baseline_frame,
     compute_monthly_purchase_counts,
+    compute_monthly_purchase_counts_by_window,
     compute_purchase_counts,
     resolve_lookback_months,
 )
@@ -52,6 +55,7 @@ from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
     load_compare_predictions as _load_compare,
 )
 from recsys_tfb.pipelines.evaluation.steps.compare_universe import (
+    query_groups_with_text_time,
     restrict_to_common as _restrict,
 )
 from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
@@ -65,8 +69,12 @@ from recsys_tfb.pipelines.evaluation.steps.segments import (
     join_segment_sources,
 )
 from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
-    eval_snap_date,
-    restrict_to_eval_snap_date,
+    EvalPartitionsNotCurrentError,
+    eval_snap_dates,
+    eval_snap_dates_without_rows,
+    restrict_to_current_eval_partitions,
+    restrict_to_eval_snap_dates,
+    stamp_partition_fingerprint,
 )
 from recsys_tfb.utils.spark import get_or_create_spark_session
 
@@ -76,16 +84,21 @@ logger = logging.getLogger(__name__)
 def _require_prepared_with_current_config(
     segment_columns: dict, parameters: dict
 ) -> None:
-    """Pre-check (inputs): the ``enriched_eval_predictions`` partition about to
-    be read was written under today's
+    """Pre-check (inputs): the ``evaluation_segment_columns`` this run's
+    directory holds was landed under today's
     :data:`~recsys_tfb.pipelines.evaluation.steps.config_fingerprint.PARTITION_CONTENT_KEYS`.
 
-    ``prepare_eval_data`` lands ``evaluation_segment_columns`` together with the
-    partition, so that JSON's fingerprint stands for both. Unchecked,
-    ``--from-node compute_metrics`` after a change to ``segment_columns`` reads
-    the partition joined under the old list and writes ``metrics.json`` under
-    the new fingerprint, which ``generate_report`` then accepts, exit code 0.
-    Only those rows are compared; why, see ``PARTITION_CONTENT_KEYS``.
+    ``prepare_eval_data`` lands that JSON together with the partitions, and the
+    readers group by its ``joined`` list. Unchecked, ``--from-node
+    compute_metrics`` after a change to ``segment_columns`` segments by the old
+    list and writes ``metrics.json`` under the new fingerprint, which
+    ``generate_report`` then accepts, exit code 0. Only those rows are compared;
+    why, see ``PARTITION_CONTENT_KEYS``.
+
+    It no longer stands for the partitions themselves (#374): one date's
+    partition is also written by runs over other dates, whose JSON lands in
+    another directory. Each partition carries its own fingerprint, checked by
+    ``restrict_to_current_eval_partitions``.
     """
     require_computed_with_current_config(
         [LoadedArtifact(
@@ -186,9 +199,9 @@ def make_prepare_eval_data_node(population_name: str):
           ``evaluation.snap_date`` is set (``ValueError``). These two read
           settings only, so they are runtime backstops: the CLI resolves the
           version, the config gives the month.
-        * The predictions hold rows for that month (``ValueError``): the
-          upstream run scored it.
-        * ``label_table`` has no duplicated identity key in that month
+        * The predictions hold rows for every configured date (``ValueError``
+          naming the dates without rows): the upstream run scored them.
+        * ``label_table`` has no duplicated identity key in those months
           (``ValueError``, with the number of duplicated keys; why it raises
           rather than deduplicating is written at the check).
         """
@@ -230,34 +243,42 @@ def make_prepare_eval_data_node(population_name: str):
                 model_version,
             )
 
-        # Decision — which month: evaluation.snap_date, in both pipeline modes
-        # (this node serves monitoring and --post-training), failing loud when
-        # it is unset or has no rows. Chosen wrong, the run would silently
-        # evaluate the whole table. evaluation.snap_date is an ISO date string
-        # (YYYY-MM-DD); the snap_date partition column on ranked_predictions /
-        # training_eval_predictions is STRING, so .cast("string") is a no-op
-        # here and stays correct if it is ever DATE.
-        snap_date = str(eval_params.get("snap_date") or "").strip()
-        if not snap_date:
-            raise ValueError(
-                "evaluation.snap_date not configured. Set evaluation.snap_date "
-                "(ISO YYYY-MM-DD) in conf/base/parameters_evaluation.yaml."
-            )
-        logger.info("Filtering predictions to snap_date=%s", snap_date)
-        predictions_at_snap = ranked_predictions.filter(
-            F.col(time_col).cast("string") == snap_date
-        )
-        if predictions_at_snap.isEmpty():
+        # Decision — which months: evaluation.snap_date, one date or several
+        # (#374), in both pipeline modes (this node serves monitoring and
+        # --post-training), failing loud when it is unset or when any one date
+        # has no rows. Chosen wrong, the run would silently evaluate the whole
+        # table, or silently drop a month from a several-date evaluation. Each
+        # date is an ISO date string (YYYY-MM-DD); the snap_date partition
+        # column on ranked_predictions / training_eval_predictions is STRING, so
+        # .cast("string") is a no-op here and stays correct if it is ever DATE.
+        # eval_snap_dates raises when none is configured.
+        snap_dates = eval_snap_dates(parameters)
+        # The dates as the messages below print them: one date prints as it
+        # always did, several as their list.
+        snap_date_text = snap_dates[0] if len(snap_dates) == 1 else snap_dates
+        logger.info("Filtering predictions to snap_date=%s", snap_date_text)
+        # Per date, not on the filtered frame as a whole: with several dates the
+        # whole frame has rows as soon as one month does.
+        missing_dates = eval_snap_dates_without_rows(ranked_predictions, parameters)
+        if missing_dates:
             available = sorted(
                 str(r[time_col])
                 for r in ranked_predictions.select(time_col).distinct().collect()
             )
+            asked = (
+                f"evaluation.snap_date={snap_date_text!r}"
+                if len(snap_dates) == 1 else
+                f"{len(missing_dates)} of {len(snap_dates)} evaluation.snap_date "
+                f"dates: {missing_dates}"
+            )
             raise ValueError(
-                f"No predictions found for evaluation.snap_date={snap_date!r} "
+                f"No predictions found for {asked} "
                 f"(model_version={model_version}). snap_dates present in "
                 f"predictions: {available}"
             )
-        ranked_predictions = predictions_at_snap
+        ranked_predictions = restrict_to_eval_snap_dates(
+            ranked_predictions, parameters
+        )
 
         # Filter labels to snap_dates in predictions
         pred_snap_dates = ranked_predictions.select(time_col).distinct()
@@ -286,7 +307,7 @@ def make_prepare_eval_data_node(population_name: str):
         if n_duplicated_keys:
             raise ValueError(
                 f"{n_duplicated_keys} duplicated label_table key(s) on "
-                f"{identity_cols} at evaluation.snap_date={snap_date!r}. Each extra "
+                f"{identity_cols} at evaluation.snap_date={snap_date_text!r}. Each extra "
                 f"row would copy its prediction row in the join with the "
                 f"predictions, inflating that query's candidates and shifting its "
                 f"ranks. Deduplicate label_table upstream; evaluation does not "
@@ -429,6 +450,15 @@ def make_prepare_eval_data_node(population_name: str):
             "config_fingerprint": fingerprint(parameters),
         }
 
+        # Decision — every row carries the settings its partition is written
+        # under, and the segment columns actually joined (#374). One date's
+        # partition is written by runs over different date sets, whose JSON
+        # above lands in different directories, so only the rows can tell a
+        # later reader which run wrote them last; and a column the population
+        # lacked is skipped, so the settings alone do not say what was joined.
+        eval_predictions = stamp_partition_fingerprint(
+            eval_predictions, parameters, joined)
+
         logger.info("Eval data prepared via Spark join")
         return eval_predictions, segments
 
@@ -485,9 +515,12 @@ def make_draw_diagnosis_sample_node(registry_diagnoses_wired: bool):
             return None
 
         _require_prepared_with_current_config(segment_columns, parameters)
-        # Decision — sample the evaluated month only: the table holds every
-        # month this model_version was evaluated on.
-        eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
+        # Decision — sample the evaluated dates only, and only partitions
+        # written under today's settings: the table holds every month this
+        # model_version was evaluated on, each rewritten by whichever run
+        # covered it last.
+        eval_predictions = restrict_to_current_eval_partitions(
+            eval_predictions, parameters, segment_columns).frame
 
         sample_pdf, sample_meta = draw_diagnosis_sample(
             eval_predictions, parameters,
@@ -535,33 +568,44 @@ def compute_metrics(
     decision 2) and carries ``config_fingerprint``, which ``generate_report``
     checks before drawing from it.
 
-    Pre-check (inputs): the partition was prepared under today's settings
-    (``_require_prepared_with_current_config``).
+    Pre-checks (inputs): the landed segment list was prepared under today's
+    settings (``_require_prepared_with_current_config``), and so was each
+    evaluated date's partition (``restrict_to_current_eval_partitions``).
 
-    Postcondition: exactly one month was evaluated. The restriction leaves at
-    most one, so what this refuses is zero, an empty or never-written
-    partition for the month; reading a Hive table raises nothing for either.
-    It does not catch a reader that forgot to restrict (that reader is another
-    node); the AST test in ``test_pipeline.py`` does.
+    Postcondition: every configured date was evaluated, i.e. the number of
+    months in the result equals the number of configured dates. The
+    restriction leaves at most that many, so what this refuses is fewer, an
+    empty or never-written partition for some date; reading a Hive table
+    raises nothing for either. The dates are evaluated together, as one set of
+    query groups (#374). It does not catch a reader that forgot to restrict
+    (that reader is another node); the AST test in ``test_pipeline.py`` does.
     """
     _require_prepared_with_current_config(segment_columns, parameters)
-    # Decision — evaluate one month: the table holds every month this
-    # model_version was evaluated on.
-    eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
+    # Decision — evaluate the configured dates only, from partitions written
+    # under today's settings: the table holds every month this model_version
+    # was evaluated on.
+    eval_predictions = restrict_to_current_eval_partitions(
+        eval_predictions, parameters, segment_columns).frame
 
     result = compute_all_metrics(
         eval_predictions, parameters,
         segment_columns=segment_columns["joined"],
     )
     n_snap_dates = result["dataset_overview"]["totals"]["n_snap_dates"]
-    if n_snap_dates != 1:
+    snap_dates = eval_snap_dates(parameters)
+    if n_snap_dates != len(snap_dates):
+        one = len(snap_dates) == 1
         raise ValueError(
             f"compute_metrics postcondition: {n_snap_dates} evaluated months "
             f"in enriched_eval_predictions for evaluation.snap_date="
-            f"{eval_snap_date(parameters)!r} "
+            f"{snap_dates[0] if one else snap_dates!r} "
             f"(model_version={parameters.get('model_version')!r}), expected "
-            "exactly 1. That month's partition is empty or was never "
-            "written; re-run with --from-node prepare_eval_data."
+            f"exactly {len(snap_dates)}. "
+            + ("That month's partition is empty or was never written"
+               if one else
+               "Some of those months' partitions are empty or were never "
+               "written")
+            + "; re-run with --from-node prepare_eval_data."
         )
     result["segments"] = {
         k: segment_columns[k] for k in ("joined", "sources", "missing")
@@ -599,12 +643,19 @@ def compute_baseline_metrics(
             aggregated across eval snap_dates (sum). Drives the report's
             popularity-composition table; consumers must treat absence
             as backward-compatible (older results may omit it).
+      - monthly_counts: dict[str, dict[str, int]]  the same counts per
+            item per calendar month, summed over the windows.
+      - window_months_covered: dict[str, int]  only when several dates are
+            evaluated (#374): per evaluated date, the months with label rows
+            in its lookback window. Absent means one date.
       - config_fingerprint: the computed settings it was made with
             (``steps.config_fingerprint``), checked by
             ``generate_report``.
 
-    Pre-check (inputs), past the stub: the partition was prepared under
-    today's settings (``_require_prepared_with_current_config``).
+    Pre-checks (inputs), past the stub: the landed segment list and each
+    evaluated date's partition were prepared under today's settings
+    (``_require_prepared_with_current_config``,
+    ``restrict_to_current_eval_partitions``).
     """
     eval_params = parameters.get("evaluation", {}) or {}
     sections = (eval_params.get("report", {}) or {}).get("sections", {}) or {}
@@ -615,10 +666,12 @@ def compute_baseline_metrics(
         return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
 
     _require_prepared_with_current_config(segment_columns, parameters)
-    # Decision — score the evaluated month only: the table holds every month
-    # this model_version was evaluated on, and the lookback window below is
-    # anchored on the months found in the frame.
-    eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
+    # Decision — score the evaluated dates only, from partitions written under
+    # today's settings: the table holds every month this model_version was
+    # evaluated on, and the lookback windows below are anchored on the months
+    # found in the frame.
+    eval_predictions = restrict_to_current_eval_partitions(
+        eval_predictions, parameters, segment_columns).frame
 
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -649,18 +702,44 @@ def compute_baseline_metrics(
     # Per-(month, item) breakdown of the same windows → report's monthly
     # popularity trend. Summed over months, each item reconciles with
     # purchase_counts (both sum the same per-snap-per-month counts).
-    monthly = compute_monthly_purchase_counts(
-        label_table, snap_dates, lookback_months, parameters
-    )
     monthly_counts: dict[str, dict[str, int]] = {}
-    for r in (
-        monthly.groupBy("month", item_col)
-        .agg(F.sum(F.col(score_col)).alias(score_col))
-        .collect()
-    ):
-        monthly_counts.setdefault(str(r[item_col]), {})[str(r["month"])] = int(
-            r[score_col]
+    window_months_covered: Optional[dict[str, int]] = None
+    if len(snap_dates) == 1:
+        monthly = compute_monthly_purchase_counts(
+            label_table, snap_dates, lookback_months, parameters
         )
+        for r in (
+            monthly.groupBy("month", item_col)
+            .agg(F.sum(F.col(score_col)).alias(score_col))
+            .collect()
+        ):
+            monthly_counts.setdefault(str(r[item_col]), {})[str(r["month"])] = int(
+                r[score_col]
+            )
+    else:
+        # Several evaluated dates (#374), one lookback window each. The same
+        # counts kept apart per window (one scan of label_table), so one
+        # collect gives both the trend (summed over windows) and how many
+        # months with label rows each window had. The report divides the
+        # per-month average by the sum of those, not by one window's lookback:
+        # purchase_counts is summed over all windows. Written only here, so a
+        # single-date result stays exactly what it was.
+        months_by_window: dict[str, set] = {s: set() for s in snap_dates}
+        summed: dict[str, dict[str, float]] = {}
+        for r in compute_monthly_purchase_counts_by_window(
+            label_table, snap_dates, lookback_months, parameters
+        ).collect():
+            month = str(r["month"])
+            months_by_window[r["window_date"]].add(month)
+            per_item = summed.setdefault(str(r[item_col]), {})
+            per_item[month] = per_item.get(month, 0.0) + r[score_col]
+        monthly_counts = {
+            item: {month: int(v) for month, v in per_month.items()}
+            for item, per_month in summed.items()
+        }
+        window_months_covered = {
+            s: len(months_by_window[s]) for s in sorted(snap_dates)
+        }
     baseline_frame = build_baseline_frame(eval_predictions, counts, parameters)
     # per_segment / category slices for the report's by-segment / 大類 vs
     # baseline comparison. Gated by what turns them on for the model (the
@@ -674,6 +753,8 @@ def compute_baseline_metrics(
     )
     metrics["purchase_counts"] = purchase_counts
     metrics["monthly_counts"] = monthly_counts
+    if window_months_covered is not None:
+        metrics["window_months_covered"] = window_months_covered
     metrics["config_fingerprint"] = fingerprint(parameters)
     logger.info(
         "Baseline metrics computed (overall + per_item) for snap_dates=%s; "
@@ -882,14 +963,20 @@ def _diagnosis_pages_dir(parameters: dict):
     的**同一組值**，不是另外猜一次。同樣的做法見
     ``diagnosis.model.paths.diagnostics_dir``。
 
-    退回 ``evaluation.snap_date`` 是給單元測試用的（那裡沒有 runtime_params）；
-    dash 一律剝掉，因為 catalog 拿到的就是剝過的值。
+    runtime 的值原樣使用：它就是 catalog 代換進路徑的那個字串。退回
+    ``evaluation.snap_date`` 是給單元測試用的（那裡沒有 runtime_params），走的是
+    CLI 算路徑段的同一個 ``dates_label``：一個日期＝剝掉 dash 的 ``YYYYMMDD``，
+    多個日期＝``<最早>-<最晚>``（#374）。以前這裡對兩者都剝 dash；多個日期的
+    路徑段裡那個 dash 是名字的一部分，剝掉就對不上 catalog 的目錄。
     """
     eval_params = parameters.get("evaluation", {}) or {}
-    snap = parameters.get("snap_date") or eval_params.get("snap_date", "unknown")
+    snap = parameters.get("snap_date")
+    if not snap:
+        dates = as_date_list(eval_params.get("snap_date"))
+        snap = dates_label(dates) if dates else "unknown"
     return (Path("data") / "evaluation"
             / str(parameters.get("model_version", "unknown"))
-            / str(snap).replace("-", "")
+            / str(snap)
             / "diagnosis")
 
 
@@ -1052,6 +1139,7 @@ def no_diagnosis_pages(parameters: dict) -> list[str]:
 
 def compute_report_aggregates(
     eval_predictions: SparkDataFrame,
+    segment_columns: dict,
     parameters: dict,
 ) -> dict:
     """主報表診斷區的 Spark 聚合，落地成 JSON。
@@ -1064,10 +1152,13 @@ def compute_report_aggregates(
     Both the stub and the full result carry ``config_fingerprint``: the JSON
     lands, and ``generate_report`` refuses one computed under other settings.
 
-    Reads ``enriched_eval_predictions`` but does not check the partition's
-    ``segment_columns.json`` fingerprint: it takes no segment input. A slice
-    that runs only this node on a stale partition is a hole ADR-0020 bug 6
-    (#352 correction) accepts.
+    Reads ``enriched_eval_predictions`` but does not compare the
+    ``segment_columns.json`` fingerprint with today's settings: it does not
+    segment. It takes that JSON (#374) for its ``joined`` list only, which with
+    today's settings makes the partition fingerprint each evaluated date must
+    carry (``restrict_to_current_eval_partitions``). That closes the hole
+    ADR-0020 bug 6 (#352 correction) had accepted for a slice running only this
+    node on a stale partition.
     """
     eval_params = parameters.get("evaluation", {}) or {}
     report_cfg = eval_params.get("report", {}) or {}
@@ -1077,9 +1168,11 @@ def compute_report_aggregates(
         logger.info("report diagnostics section disabled — writing stub")
         return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
 
-    # Decision — aggregate the evaluated month only: the table holds every
-    # month this model_version was evaluated on.
-    eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
+    # Decision — aggregate the evaluated dates only, from partitions written
+    # under today's settings: the table holds every month this model_version
+    # was evaluated on.
+    eval_predictions = restrict_to_current_eval_partitions(
+        eval_predictions, parameters, segment_columns).frame
 
     schema = get_schema(parameters)
     item_col, score_col = schema["item"], schema["score"]
@@ -1165,12 +1258,58 @@ def load_compare_predictions(parameters: dict) -> SparkDataFrame:
     return _load_compare(parameters, spark)
 
 
-def restrict_to_common(
+def make_restrict_to_common_node(compare_only: bool):
+    """Build ``restrict_to_common`` for ``--compare`` or ``--compare-only``.
+
+    The mode decides which settings side A's partitions are checked against
+    (``restrict_to_current_eval_partitions``, #374), so ``create_pipeline``
+    passes it in, as it does for ``make_prepare_eval_data_node``:
+
+    * ``--compare``: today's settings, like every other reader. The same run
+      normally wrote the partitions, but a slice does not:
+      ``--compare X --only-node generate_comparison_report`` runs only
+      ``load_compare_predictions``, this node and the report, so after a
+      segment setting changed or the run mode switched, the partitions and
+      the directory's ``segment_columns.json`` both still say the old
+      settings. Compared with that JSON, the old rows would pass.
+    * ``--compare-only``: the settings that JSON records. ``--post-training``
+      is inert on that path, so today's value of it says nothing about which
+      population an earlier standard run wrote (ADR-0020 bug 6, #352
+      correction); compared with today's settings, a post-training run's
+      partitions would be refused whenever the flag is left off.
+    """
+    def restrict_to_common(
+        eval_predictions: SparkDataFrame,
+        compare_predictions_raw: SparkDataFrame,
+        segment_columns: dict,
+        parameters: dict,
+    ) -> tuple[SparkDataFrame, SparkDataFrame, dict]:
+        """Keep side A's evaluated dates, after checking its partitions (see
+        ``make_restrict_to_common_node`` for against which settings), then
+        restrict both sides to their common universe (``_restrict_to_common``).
+        Side B is the compared run's own table and is not checked."""
+        # Decision — compare the evaluated dates only, from partitions written
+        # under the settings this mode reads them for: the table holds every
+        # month this model_version was evaluated on.
+        eval_predictions = restrict_to_current_eval_partitions(
+            eval_predictions, parameters, segment_columns,
+            recorded_settings=compare_only,
+        ).frame
+        return _restrict_to_common(
+            eval_predictions, compare_predictions_raw, parameters)
+
+    return restrict_to_common
+
+
+def _restrict_to_common(
     eval_predictions: SparkDataFrame,
     compare_predictions_raw: SparkDataFrame,
     parameters: dict,
 ) -> tuple[SparkDataFrame, SparkDataFrame, dict]:
-    """Pipeline shim: call the pure restrict function + capture coverage dict.
+    """Call the pure restrict function + capture coverage dict.
+
+    ``eval_predictions`` is already kept to the evaluated dates and checked
+    (``make_restrict_to_common_node``).
 
     Returns ``(a_common, b_common, coverage_partial)`` — coverage_partial
     carries full-universe sizes, the common sizes and dropped item lists so
@@ -1187,17 +1326,14 @@ def restrict_to_common(
     query groups, which matches ``NULL == NULL``, while the restriction's
     equi-join drops null keys — so it counted groups no metric ever saw.
 
-    ``eval_predictions`` is ``enriched_eval_predictions`` read back from Hive,
-    every month this ``model_version`` was evaluated on; the node keeps the
-    evaluated month before anything else (ADR-0018 decision 1). It does not
-    check the partition's ``segment_columns.json`` fingerprint: under
-    ``--compare`` the same run's segmenting readers do, and ``--compare-only``
-    is left unchecked on purpose (ADR-0020 bug 6, #352 correction).
+    The node does not compare ``segment_columns.json``'s own fingerprint with
+    today's settings; it checks the partitions it reads instead. Under
+    ``--compare`` A's partitions are checked against today's settings, so a
+    sliced ``--only-node generate_comparison_report`` after a settings change
+    raises. Under ``--compare-only`` they are checked against the settings that
+    JSON records, because ``post_training`` is inert there (ADR-0020 bug 6, #352
+    correction, and its #374 addendum).
     """
-    # Decision — compare the evaluated month only: the table holds every month
-    # this model_version was evaluated on.
-    eval_predictions = restrict_to_eval_snap_date(eval_predictions, parameters)
-
     schema = get_schema(parameters)
     time_col = schema["time"]
     query_group_cols = [time_col, *schema["entity"]]
@@ -1217,11 +1353,14 @@ def restrict_to_common(
     # keys never match — the same null rule as the restriction's own joins. On
     # symmetric candidate sets this equals either side's kept group count; when
     # one side scored a common entity only on items the other lacks, that group
-    # is in one side's metrics but not in "common".
+    # is in one side's metrics but not in "common". The time is matched as
+    # text, by the same helper the restriction uses (B's time column may be
+    # DATE while A's partition is STRING).
+    entity_cols = schema["entity"]
     groups_common = (
-        a_common.select(*query_group_cols).distinct()
+        query_groups_with_text_time(a_common, time_col, entity_cols)
         .join(
-            b_common.select(*query_group_cols).distinct(),
+            query_groups_with_text_time(b_common, time_col, entity_cols),
             on=query_group_cols, how="left_semi",
         )
         .count()
@@ -1245,6 +1384,12 @@ def restrict_to_common(
         "dropped_items_B": sorted(universe.b_items - common_items),
     }
     return a_common, b_common, coverage_partial
+
+
+#: The ``--compare`` shape, checked against today's settings. Kept as a
+#: module-level name for callers that exercise the node outside
+#: ``create_pipeline``.
+restrict_to_common = make_restrict_to_common_node(compare_only=False)
 
 
 def generate_comparison_report(
@@ -1282,17 +1427,30 @@ def generate_comparison_report(
 
 def validate_enriched_eval_predictions_present(
     enriched_eval_predictions: SparkDataFrame,
+    segment_columns: dict,
     parameters: dict,
 ) -> None:
-    """Fail loud if ``enriched_eval_predictions`` holds no rows
-    for the evaluated month under this ``model_version``.
+    """Fail loud if ``enriched_eval_predictions`` holds no rows for an
+    evaluated date under this ``model_version``, or rows another run wrote.
 
     A zero-output gate: it passes nothing on. ``restrict_to_common`` reads the
-    table and keeps the evaluated month itself, like every other reader
+    table and keeps the evaluated dates itself, like every other reader
     (ADR-0018 decision 1). The catalog has already pruned the table to this
     ``model_version`` via ``partition_filter``; this node keeps the evaluated
-    month and asserts a row remains, otherwise raises
-    ``DataConsistencyError`` saying what to run first.
+    dates and asserts each one has a row, otherwise raises
+    ``DataConsistencyError`` naming the dates without rows and what to run
+    first. Per date: with several dates configured, the kept rows are not
+    empty as soon as one month has rows (#374).
+
+    It also refuses a date whose partition was rewritten since by a run under
+    other settings, or with other segment columns joined, than
+    ``segment_columns`` records (the JSON the run that wrote this directory
+    landed; why that JSON and not today's settings, see
+    ``make_restrict_to_common_node``), and a date whose partition carries no
+    fingerprint. Both answers come from one Spark job
+    (``restrict_to_current_eval_partitions``), and every problem of every kind
+    is named in one ``DataConsistencyError``: dates without rows first, then
+    the partitions not written for this directory.
 
     Slicing never pulls a zero-output node back in (R3 in
     ``docs/agents/architecture-constraints.md``), so ``--compare-only
@@ -1311,11 +1469,31 @@ def validate_enriched_eval_predictions_present(
     mv = parameters.get("model_version", "unknown")
     hive_db = (parameters.get("hive") or {}).get("db", "ml_recsys")
 
-    if restrict_to_eval_snap_date(enriched_eval_predictions, parameters).isEmpty():
-        raise DataConsistencyError(
+    # Collect-all: a partition not written for this directory must not hide
+    # the dates without rows from the same check, nor the other way round.
+    not_current = None
+    try:
+        missing = restrict_to_current_eval_partitions(
+            enriched_eval_predictions, parameters, segment_columns,
+            recorded_settings=True,
+        ).dates_without_rows
+    except EvalPartitionsNotCurrentError as error:
+        not_current, missing = error, error.dates_without_rows
+    problems = []
+    if missing:
+        asked = (
+            f"evaluation.snap_date={missing[0]!r}"
+            if len(eval_snap_dates(parameters)) == 1 else
+            f"evaluation.snap_date date(s) {missing}"
+        )
+        problems.append(
             f"{hive_db}.enriched_eval_predictions has no partition "
-            f"for evaluation.snap_date={eval_snap_date(parameters)!r} "
+            f"for {asked} "
             f"model_version={mv!r}. "
             "Run `python -m recsys_tfb evaluation` (with or without "
             "--compare) first to populate the partition."
         )
+    if not_current is not None:
+        problems.append(str(not_current))
+    if problems:
+        raise DataConsistencyError("\n".join(problems)) from not_current

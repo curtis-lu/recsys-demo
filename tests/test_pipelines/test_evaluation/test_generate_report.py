@@ -21,6 +21,9 @@ from recsys_tfb.pipelines.evaluation.nodes import (
     compute_report_aggregates,
     generate_report,
 )
+from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+    stamp_partition_fingerprint,
+)
 
 
 def _unread_stub(params):
@@ -47,13 +50,22 @@ def _params(diagnostics=False):
 
 
 def _eval_pred(spark):
-    return spark.createDataFrame(
+    """The partition as ``prepare_eval_data`` under :func:`_params` writes it,
+    settings fingerprint included."""
+    return stamp_partition_fingerprint(spark.createDataFrame(
         [("20240331", "c1", "A", 0.9, 1, 1),
          ("20240331", "c1", "B", 0.1, 0, 2),
          ("20240331", "c2", "A", 0.2, 0, 2),
          ("20240331", "c2", "B", 0.8, 1, 1)],
         schema=["snap_date", "cust_id", "prod_name", "score", "label", "rank"],
-    )
+    ), _params(), [])
+
+
+def _landed_segments(params):
+    """``evaluation_segment_columns`` as a run under ``params`` lands it, no
+    segment column joined."""
+    return {"joined": [], "sources": {}, "missing": {},
+            "config_fingerprint": fingerprint(params)}
 
 
 def _metrics():
@@ -79,7 +91,8 @@ def _landed_metrics(params):
 
 def test_generate_report_html_no_diagnostics(spark):
     params = _params(False)
-    aggregates = compute_report_aggregates(_eval_pred(spark), params)
+    aggregates = compute_report_aggregates(
+        _eval_pred(spark), _landed_segments(params), params)
     html = generate_report(_landed_metrics(params), params,
                             _unread_stub(params), _unread_stub(params),
                             aggregates, None)
@@ -92,7 +105,8 @@ def test_generate_report_html_no_diagnostics(spark):
 
 def test_generate_report_with_diagnostics(spark):
     params = _params(True)
-    aggregates = compute_report_aggregates(_eval_pred(spark), params)
+    aggregates = compute_report_aggregates(
+        _eval_pred(spark), _landed_segments(params), params)
     assert aggregates["config_fingerprint"] == fingerprint(params)
     html = generate_report(_landed_metrics(params), params,
                             _unread_stub(params), _unread_stub(params),
@@ -118,10 +132,10 @@ def _eval_pred_n(spark, n_customers):
         s = (i % 100) / 100.0
         rows.append(("20240331", f"c{i}", "A", s, i % 2, 1 if s > 0.5 else 2))
         rows.append(("20240331", f"c{i}", "B", 1.0 - s, (i + 1) % 2, 2 if s > 0.5 else 1))
-    return spark.createDataFrame(
+    return stamp_partition_fingerprint(spark.createDataFrame(
         rows,
         schema=["snap_date", "cust_id", "prod_name", "score", "label", "rank"],
-    )
+    ), _params(), [])
 
 
 def test_diagnostics_report_size_bounded_by_row_count(spark):
@@ -136,8 +150,10 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
     yields a bounded report.
     """
     params = _params_diag_full()
-    small_aggregates = compute_report_aggregates(_eval_pred_n(spark, 100), params)
-    large_aggregates = compute_report_aggregates(_eval_pred_n(spark, 3000), params)
+    small_aggregates = compute_report_aggregates(
+        _eval_pred_n(spark, 100), _landed_segments(params), params)
+    large_aggregates = compute_report_aggregates(
+        _eval_pred_n(spark, 3000), _landed_segments(params), params)
     small = generate_report(
         _landed_metrics(params), params, _unread_stub(params),
         _unread_stub(params), small_aggregates, None,
@@ -464,6 +480,29 @@ def test_render_draws_this_runs_results_not_files_left_on_disk(
     assert build_diagnosis_links_section(pages, params) is None
 
 
+@pytest.mark.parametrize("runtime, configured, segment", [
+    # The CLI's runtime value is what the catalog substitutes into
+    # data/evaluation/${model_version}/${snap_date}/, so it is used as is.
+    ("20260131", "2026-01-31", "20260131"),
+    ("20260131-20260331", ["2026-01-31", "2026-03-31"], "20260131-20260331"),
+    # No runtime value (unit tests): the same label from the setting.
+    (None, "2026-01-31", "20260131"),
+    (None, ["2026-03-31", "2026-01-31", "2026-02-28"], "20260131-20260331"),
+])
+def test_diagnosis_pages_dir_is_the_catalogs_path_segment(
+    runtime, configured, segment,
+):
+    """#374: several dates name their directory ``<earliest>-<latest>``; the
+    dash in it is part of the name, not a date separator to strip."""
+    from recsys_tfb.pipelines.evaluation.nodes import _diagnosis_pages_dir
+
+    params = {"model_version": "mv", "evaluation": {"snap_date": configured}}
+    if runtime is not None:
+        params["snap_date"] = runtime
+    assert _diagnosis_pages_dir(params).parts == (
+        "data", "evaluation", "mv", segment, "diagnosis")
+
+
 def test_render_refuses_results_computed_with_other_settings(
     tmp_path, monkeypatch,
 ):
@@ -620,7 +659,7 @@ def _landed_inputs(params):
 
     return (compute_baseline_metrics(None, None, None, params),
             compute_metric_ci(None, params),
-            compute_report_aggregates(None, params))
+            compute_report_aggregates(None, None, params))
 
 
 def test_generate_report_refuses_a_computed_setting_flipped_after_the_run():

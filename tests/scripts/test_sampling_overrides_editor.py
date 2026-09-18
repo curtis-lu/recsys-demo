@@ -949,6 +949,59 @@ class TestToYamlCli:
         assert "b|1" in r.output and "b|0" in r.output
 
 
+class TestProfileReadsTrainDatesWrittenAsARange:
+    """``profile`` reads the dataset yaml itself, without ``ConfigLoader``.
+
+    So it has to expand a ``{start, end, step}`` range on its own (#374); left
+    alone it would profile the range dict's three keys as if they were dates.
+    Spark is cut at ``profile_stats``: the dates it receives are the claim.
+    """
+
+    def _invoke(self, tmp_path, monkeypatch, train_snap_dates):
+        import scripts.sampling_overrides_editor as editor
+
+        seen = {}
+
+        def fake_profile_stats(df, snaps, **kwargs):
+            seen["snaps"] = snaps
+            raise ValueError("stop after the dates were read")
+
+        monkeypatch.setattr(editor, "_load_spark_df", lambda source: object())
+        monkeypatch.setattr(editor, "profile_stats", fake_profile_stats)
+        params = tmp_path / "d.yaml"
+        params.write_text(yaml.safe_dump({"dataset": {
+            "train_snap_dates": train_snap_dates,
+            "sample_group_keys": ["prod_name", "label"],
+        }}))
+        base = tmp_path / "b.yaml"
+        base.write_text(
+            "schema:\n  columns:\n    time: snap_date\n"
+            "    entity: [cust_id]\n    item: prod_name\n    label: label\n")
+        train = tmp_path / "t.yaml"
+        train.write_text("training:\n  sample_weight_keys: [prod_name, label]\n")
+        result = CliRunner().invoke(app, [
+            "profile", "db.t", "--params", str(params),
+            "--train-params", str(train), "--base-params", str(base)])
+        return result, seen
+
+    def test_range_is_profiled_as_the_dates_it_stands_for(self, tmp_path, monkeypatch):
+        result, seen = self._invoke(tmp_path, monkeypatch, {
+            "start": "2025-01-31", "end": "2025-03-31", "step": "month_end"})
+
+        assert seen["snaps"] == [
+            pd.Timestamp("2025-01-31"), pd.Timestamp("2025-02-28"),
+            pd.Timestamp("2025-03-31"),
+        ], result.output
+
+    def test_bad_range_exits_with_the_reason(self, tmp_path, monkeypatch):
+        result, seen = self._invoke(tmp_path, monkeypatch, {
+            "start": "2025-01-30", "end": "2025-03-31", "step": "month_end"})
+
+        assert result.exit_code == 1
+        assert "snaps" not in seen
+        assert "is not a last day of a month" in result.output
+
+
 # ---------------------------------------------------------------------------
 # The browser is the real implementation; aggregate_surfaces is its Python
 # mirror. Every other test in this file checks the JS by matching source

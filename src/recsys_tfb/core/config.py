@@ -4,6 +4,8 @@ from pathlib import Path
 
 import yaml
 
+from recsys_tfb.core.date_ranges import expand_date_ranges
+
 
 class ConfigEnvError(ValueError):
     """Raised when a required ${env.NAME} placeholder has no environment variable set."""
@@ -151,6 +153,10 @@ class ConfigLoader:
             env = env_config.get(stem, {})
             self._config[stem] = _deep_merge(base, env)
         self._config = _resolve_env(self._config)
+        # After the env overlay, so an overlay can replace a whole range or
+        # just its ``end``; before anyone reads a value, so a range and the
+        # list it stands for are the same config to every reader and hash.
+        self._config = expand_date_ranges(self._config)
 
     def get_catalog_config(
         self, runtime_params: dict[str, str] | None = None

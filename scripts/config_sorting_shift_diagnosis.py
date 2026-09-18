@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from recsys_tfb.core.date_ranges import the_only_date
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric._common import to_logit
 from recsys_tfb.evaluation.metrics import (
@@ -183,6 +184,21 @@ def _query_key(pdf: pd.DataFrame, query_cols: list[str]) -> pd.Series:
     return out
 
 
+def resolve_snap_date(args: argparse.Namespace, parameters: dict) -> str:
+    """The single ``evaluation.snap_date`` this diagnosis reads.
+
+    ``--snap-date`` always wins over config; otherwise the config has to name
+    exactly one date. Why that is refused rather than guessed:
+    ``core.date_ranges.the_only_date`` (#374).
+    """
+    if args.snap_date:
+        return str(args.snap_date)
+    return the_only_date(
+        (parameters.get("evaluation", {}) or {}).get("snap_date"),
+        setting="evaluation.snap_date", hint="--snap-date",
+    )
+
+
 def load_enriched_eval_predictions(
     args: argparse.Namespace,
     parameters: dict,
@@ -193,15 +209,8 @@ def load_enriched_eval_predictions(
 
     catalog = load_catalog(args.catalog)
     hive_table, catalog_meta = resolve_enriched_eval_table(catalog, parameters)
-    snap_date = args.snap_date or str(
-        (parameters.get("evaluation", {}) or {}).get("snap_date") or ""
-    )
+    snap_date = resolve_snap_date(args, parameters)
     model_version = args.model_version or parameters.get("model_version")
-    if not snap_date:
-        raise ValueError(
-            "evaluation.snap_date is missing. Set it in parameters or pass "
-            "--snap-date."
-        )
     if not model_version:
         raise ValueError(
             "model_version is required for enriched_eval_predictions. Pass "

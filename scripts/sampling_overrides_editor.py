@@ -39,6 +39,7 @@ from recsys_tfb.core.consistency import (
     weight_key_arity_mismatch,
     weight_unknown_items,
 )
+from recsys_tfb.core.date_ranges import expand_date_range
 from recsys_tfb.core.schema import get_schema
 PROFILING_DIR = Path("data/profiling")
 
@@ -1042,6 +1043,11 @@ def profile(
     schema_cfg = yaml.safe_load(base_params.read_text()).get("schema", {})
     snap_dates = ds["train_snap_dates"]
     try:
+        # This yaml is read here, not through ConfigLoader, so a
+        # {start, end, step} range has to be expanded here too (#374).
+        if isinstance(snap_dates, dict):
+            snap_dates = expand_date_range(
+                snap_dates, f"{params} -> dataset.train_snap_dates")
         keys = resolve_keys(ds, training_cfg, schema_cfg)
     except ValueError as e:
         typer.echo(f"ERROR: {e}", err=True)
