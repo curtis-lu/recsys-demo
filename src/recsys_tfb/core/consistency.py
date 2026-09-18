@@ -390,11 +390,27 @@ Layer 1 — config-static (implemented here; aggregated by
   ``SQLRenderer.render``'s unresolved-variable regex was widened for this)
   or a missing SQL file is caught in the same pass, before the Spark cold
   start.
+* A36 — training needs at least one ``dataset.test_snap_dates`` month.
+  Without one, nothing in the training pipeline objects early:
+  ``cache_test_model_input`` loops zero times and returns ``{}``, and the run
+  goes through the whole HPO search and the final fit before
+  ``predict_and_write_test_predictions`` fails inside ``open_parquet_dataset``
+  with a message that never names this key (#133). Absent, ``null`` and ``[]``
+  fail the same check; the message says whether the key was absent or empty.
+  Predicate: ``missing_test_month_errors`` (returns errors; the training
+  command raises before Spark starts, collected with A26 — same key). NOT
+  aggregated by ``validate_config_consistency``, for A24's reason: the dataset
+  command reads an absent or empty list as "no test months" and runs, and
+  ``test_snap_dates`` is in no version ID (``versioning.COVERAGE_ONLY_KEYS``).
+  Blocks every training invocation, sliced or not, ``--list-nodes`` and
+  ``--dry-run`` included — the predicate's docstring says why that is
+  intended. No runtime backstop in the node, like A24/A28. Issue #133 calls
+  this A29; that code was taken by the time it was built.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
-flags), A22 (``--post-training``), A24/A26/A34 (config keys whose harm belongs
-to one pipeline), A28 (the resolved catalog), A30 (``--env`` + the
+flags), A22 (``--post-training``), A23/A24/A26/A27/A34/A36 (config keys whose
+harm belongs to one pipeline), A28 (the resolved catalog), A30 (``--env`` + the
 filesystem), A35 (the ``--var`` CLI flags).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10
@@ -3233,6 +3249,54 @@ def duplicate_test_month_errors(parameters: dict) -> list[str]:
             f"(YYYY-MM-DD) and drop the others."
         )
     return errors
+
+
+def missing_test_month_errors(parameters: dict) -> list[str]:
+    """(A36) training needs at least one ``dataset.test_snap_dates`` month.
+
+    Returns error strings (empty list when fine); the training command raises.
+
+    With no test month, nothing in the training pipeline stops the run early:
+    ``cache_test_model_input`` loops zero times and returns ``{}`` without a
+    word, and the first thing to notice is ``predict_and_write_test_predictions``
+    — after the whole HPO search and the final fit — failing inside
+    ``open_parquet_dataset`` with a message about parquet roots that never
+    names this key (#133).
+
+    Absent, ``null`` and ``[]`` fail one check, because the downstream code
+    reads all three as "no months" and the fix is the same. The message still
+    says which it saw: "empty" would send someone whose yaml has no such line
+    looking for one.
+
+    Training-only on purpose. The dataset pipeline reads an absent or empty
+    list as "no test months" and runs (``month_plans`` defaults it to ``[]``),
+    and ``test_snap_dates`` is excluded from every version ID
+    (``versioning.COVERAGE_ONLY_KEYS``), so a dataset built before any test
+    month exists is legitimate.
+
+    It blocks *every* training invocation, not only the ones that would reach
+    a node reading test months: slices that never touch them (``--only-node
+    compute_feature_importance``, say) are refused as well, and so are
+    ``--list-nodes`` and ``--dry-run``, as A26 already does. That is the
+    intent. The first half of an empty-list run does work — the Runner saves
+    each output as its node finishes, so the model is on disk before the
+    predict node fails — but ``docs/pipelines/training.md`` section 4.6 rules
+    out using ``--only-node`` to build a model version that never completed,
+    and a training run without test predictions never completes.
+    """
+    ds = parameters.get("dataset") or {}
+    if ds.get("test_snap_dates"):
+        return []
+    state = "absent" if "test_snap_dates" not in ds else "empty"
+    return [
+        f"(A36) dataset.test_snap_dates is {state}, and training needs at "
+        f"least one test month: it predicts on those months, scores the model "
+        f"on them and computes its SHAP diagnostics from them. Without one "
+        f"the run would only fail after the whole HPO search, with an error "
+        f"that does not name this key. Add a month the dataset pipeline has "
+        f"already built. (The dataset command runs without one; only training "
+        f"needs it.)"
+    ]
 
 
 def inference_grid_errors(parameters: dict) -> list[str]:

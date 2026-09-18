@@ -53,7 +53,7 @@
 | `enable_calibration` | 選填 | 是否建立 calibration keys 與 model input | `base_dataset_version` |
 | `calibration_snap_dates` | 啟用時必填 | calibration 使用的日期 | `base_dataset_version` |
 | `val_snap_dates` | 必填 | HPO validation 日期 | `base_dataset_version` |
-| `test_snap_dates` | 必填 | 最終 test 日期 | 不影響任何版本（見 7.1） |
+| `test_snap_dates` | training 必填（至少一個月，A36）；dataset 沒寫或空清單都照樣跑 | 最終 test 日期 | 不影響任何版本（見 7.1） |
 
 ```yaml
 dataset:

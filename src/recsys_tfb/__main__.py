@@ -20,6 +20,7 @@ from recsys_tfb.core.consistency import (
     etl_cli_var_errors,
     inference_grid_errors,
     merged_etl_variables,
+    missing_test_month_errors,
     parse_etl_var_flags,
     post_training_snap_date_errors,
     report_section_key_errors,
@@ -1419,9 +1420,17 @@ def training(
     # spellings collapse there, whereas the training cache keys on the YYYYMMDD
     # directory name and would count that month's rows twice. Before A21 so
     # "this month is named twice" is reported ahead of anything about the flag.
-    month_spelling_errors = duplicate_test_month_errors(params)
-    if month_spelling_errors:
-        for line in month_spelling_errors:
+    #
+    # (A36) training needs at least one test month (#133). Without one nothing
+    # in the pipeline objects until predict_and_write_test_predictions, after
+    # the whole HPO search. Off the aggregator for the same reason: the dataset
+    # command runs without one. Collected with A26 because both judge this one
+    # key (they cannot both fire — an empty list has no second spelling).
+    test_month_errors = (
+        missing_test_month_errors(params) + duplicate_test_month_errors(params)
+    )
+    if test_month_errors:
+        for line in test_month_errors:
             logger.error(line)
         raise typer.Exit(code=1)
 
