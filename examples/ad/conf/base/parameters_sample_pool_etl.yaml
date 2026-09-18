@@ -1,0 +1,34 @@
+# 依賴 label_etl 產出的 label_table（候選就是那一週真的曝光過的組合），以及 feature_etl
+# 產出的 feature_user（分層用的年資）。
+sample_pool_etl:
+  dry_run: false
+  target_dates:
+    - "2025-11-03"
+    - "2025-11-10"
+    - "2025-11-17"
+    - "2025-11-24"
+    - "2025-12-01"
+    - "2025-12-08"
+    - "2025-12-15"
+    - "2025-12-22"
+    - "2025-12-29"
+    - "2026-01-05"
+  variables:
+    target_db: "ad_recsys"
+    raw_db: "ad_raw"
+
+  source_checks: {}
+
+  tables:
+    - name: sample_pool
+      sql_file: sample_pool/sample_pool.sql
+      partition_by:
+        snap_date: DATE
+      primary_key: [snap_date, user_id, slot_id, ad_creative]
+      quality_checks:
+        min_row_count: 1
+        max_duplicate_key_ratio: 0.0
+
+  audit:
+    database: "${target_db}"
+    table: etl_audit_log

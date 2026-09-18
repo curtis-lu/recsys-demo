@@ -1,0 +1,68 @@
+# run_e2e.sh 只跑 --post-training 模式（讀 training 的 test 預測）。evaluation.snap_date
+# 只有一個值，post-training 要它在 test_snap_dates 裡（A22），監控模式要它在 inference
+# 評分過的週裡；一份 conf 滿足不了兩邊，所以監控模式不在這條實跑路徑上。
+evaluation:
+  snap_date: "2025-12-29"   # 須在 dataset.test_snap_dates 裡（A22）
+
+  # 一個 query group 最多 12 個 item，實際平均約 4 個（每週每版位只看到幾個素材）
+  k_values: [1, 2, 3, 5, "all"]
+
+  segment_columns:
+    - user_segment
+  segment_sources: {}
+
+  # 大類＝活動：同一個活動的三種素材格式歸一類
+  item_categories:
+    enabled: true
+    unmapped: singleton
+    mapping:
+      c01: [c01-banner, c01-native, c01-video]
+      c02: [c02-banner, c02-native, c02-video]
+      c03: [c03-banner, c03-native, c03-video]
+      c04: [c04-banner, c04-native, c04-video]
+
+  # 以「月」為單位的回看窗；週資料一樣能用，只是語意是月（evaluation/baselines.py）
+  baseline:
+    lookback_months: 12
+
+  report:
+    sections:
+      dataset_overview: true
+      primary_map: true
+      diagnostics: true
+      baseline: true
+      diagnosis_links: true
+    display:
+      primary_map_k: [1, 3, "all"]
+      guardrail_recall_k: [1, 2, 3, 5]
+    diagnostics:
+      include_distributions: true
+      include_calibration: true
+      n_calibration_bins: 10
+
+  metric:
+    weight_alpha: 0.0
+    k: null
+    min_positives: 0
+    shrinkage_k: 0
+
+  diagnosis:
+    sample:
+      max_queries: 250000
+      min_pos_queries_per_item: 50
+      seed: 42
+    ci:
+      enabled: true
+      n_boot: 200
+    config_shift:
+      enabled: true
+    item_ability:
+      enabled: true
+      top_n: 30
+    model_capacity:
+      enabled: true
+    suppression:
+      enabled: true
+      top_examples: 50
+
+  compare_sources: {}

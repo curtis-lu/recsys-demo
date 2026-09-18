@@ -1,0 +1,52 @@
+# 廣告情境示例（線上廣告推薦的離線訓練與評估）。
+# 本資料夾的每份 yaml 都對應 repo 根目錄 conf/base/ 的同名檔；每個鍵的完整說明
+# 在那裡，這裡只註解「和銀行示例不一樣、為什麼」。怎麼跑見 examples/ad/README.md。
+#
+# ⚠ 這組 conf 只用框架「今天就支援」的功能：不宣告 event、只有一張 feature_table、
+# item 清單逐一列出、預測品質指標家族不開。後面的票各自打開自己的開關
+# （docs/notes/2026-09-16-event-support-plan.md）。
+
+project_name: recsys_tfb_ad_example
+random_seed: 42
+
+hive:
+  db: ad_recsys   # 與銀行示例的 ml_recsys 分開：兩邊的本機 metastore 本來就不同，換名是讓 log 一眼分得出是哪個示例
+
+spark:
+  app_name: recsys_tfb_ad_example
+
+schema:
+  columns:
+    # 一週一個時段（每週一）。ADR-0021：time 維持「時段」；到秒的曝光時間將來放 event。
+    # 欄名必須叫 snap_date：source_etl 的輸出檢查把 WHERE snap_date = … 寫死了
+    # （pipelines/source_etl/checks.py），換名 source_etl 就壞。
+    time: snap_date
+    entity: [user_id, slot_id]   # 替「某個使用者在某個版位」排一次
+    item: ad_creative            # 活動 × 素材格式，在 label／sample_pool SQL 拼成一欄
+    label: label                 # 這一週在這個版位有沒有點過這個素材
+    score: score
+    rank: rank
+  # item 清單逐一列出；改成「從資料數」是 #379。必須等於 generate_data.py 產出的組合
+  # （tests/examples/test_ad_example.py 守這一條）。
+  categorical_values:
+    ad_creative:
+      - c01-banner
+      - c01-native
+      - c01-video
+      - c02-banner
+      - c02-native
+      - c02-video
+      - c03-banner
+      - c03-native
+      - c03-video
+      - c04-banner
+      - c04-native
+      - c04-video
+
+logging:
+  level: INFO
+  console: true
+  file:
+    enabled: true
+    path: logs/
+    format: json

@@ -1,0 +1,59 @@
+dataset:
+  # 一週一個 snap_date（每週一）。第一週 2025-10-27 只當特徵回看窗，不進任何 split。
+  train_snap_dates:
+    - "2025-11-03"
+    - "2025-11-10"
+    - "2025-11-17"
+    - "2025-11-24"
+    - "2025-12-01"
+    - "2025-12-08"
+
+  sample_ratio: 1.0
+  # user_segment 由 sample_pool SQL 從註冊年資算出，只在 sample_pool，不在 feature_table
+  # ——所以不必像銀行示例的 cust_segment_typ 那樣同時列進 drop_columns（B7）。
+  sample_group_keys:
+    - "user_segment"
+    - "ad_creative"
+    - "label"
+  # 熱門素材的負例抽一半：讓抽樣這條路真的被走到，不是為了模型好
+  sample_ratio_overrides:
+    "loyal|c01-banner|0": 0.5
+    "regular|c01-banner|0": 0.5
+    "new|c01-banner|0": 0.5
+
+  carry_columns:
+    - user_segment
+
+  train_dev_ratio: 0.1
+  # 同一個使用者的不同版位不得跨 train／train_dev：entity 是 [user_id, slot_id]，
+  # 洩漏單位是使用者（A29 的用途正是這種情況）。
+  train_split_keys: ["user_id"]
+
+  enable_calibration: true
+  calibration_snap_dates: ["2025-12-15"]
+  calibration_sample_ratio: 1.0
+  calibration_sample_ratio_overrides: {}
+
+  val_snap_dates:
+    - "2025-12-22"
+  # 母體只有幾百人，val 不抽樣（銀行示例是 0.5，理由是生產母體百萬級）
+  val_sample_ratio: 1.0
+
+  test_snap_dates:
+    - "2025-12-29"
+
+  numeric_precision_policy: block
+
+  prepare_model_input:
+    # 只列 feature_table 裡有的欄（列了不存在的欄會警告）；label 由框架自動排除
+    drop_columns:
+      - "snap_date"
+      - "user_id"
+      - "slot_id"   # 版位的特性由 slot_position／page_type 帶進模型；ID 本身是 identity
+    categorical_columns:
+      - "ad_creative"
+      - "age_band"
+      - "device_type"
+      - "region"
+      - "slot_position"
+      - "page_type"

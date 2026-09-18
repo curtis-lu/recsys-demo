@@ -1,0 +1,7 @@
+# 從 examples/ad/ 執行時，框架與 Spark 把所有本機狀態寫在目前目錄底下
+data/
+logs/
+mlruns/
+metastore_db/
+spark-warehouse/
+derby.log

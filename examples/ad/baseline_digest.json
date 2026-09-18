@@ -1,0 +1,287 @@
+{
+  "measured": {
+    "date": "2026-09-18",
+    "code_commit": "8f78f84",
+    "how": "run_e2e.sh 以同一份程式碼連跑兩次，62 個欄位逐一相同",
+    "environment": "macOS, 8 cores, local[*], PySpark 3.3.2, LightGBM 4.6.0; load average 6.5 and 7.0 at the two starts"
+  },
+  "noisy": {},
+  "versions": {
+    "base_dataset_version": "f6b1febb",
+    "train_variant_id": "f6541cb7",
+    "calibration_variant_id": "d0a3d672",
+    "model_version": "fce0781f"
+  },
+  "source_etl": {
+    "feature_table": {
+      "rows": 12000,
+      "hash": "-760344960859363912963",
+      "columns": [
+        "age_band",
+        "device_type",
+        "page_type",
+        "region",
+        "slot_ctr_4w",
+        "slot_id",
+        "slot_imp_4w",
+        "slot_position",
+        "snap_date",
+        "tenure_days",
+        "us_click_4w",
+        "us_imp_4w",
+        "user_click_4w",
+        "user_ctr_4w",
+        "user_id",
+        "user_imp_4w"
+      ]
+    },
+    "label_table": {
+      "rows": 29206,
+      "hash": "-70820064696756471644",
+      "columns": [
+        "ad_creative",
+        "label",
+        "slot_id",
+        "snap_date",
+        "user_id"
+      ]
+    },
+    "sample_pool": {
+      "rows": 29206,
+      "hash": "1142134628710474146418",
+      "columns": [
+        "ad_creative",
+        "label",
+        "slot_id",
+        "snap_date",
+        "user_id",
+        "user_segment"
+      ]
+    },
+    "inference_population": {
+      "rows": 12000,
+      "hash": "-446732665886186987397",
+      "columns": [
+        "slot_id",
+        "snap_date",
+        "user_id"
+      ]
+    },
+    "feature_realtime": {
+      "rows": 39314,
+      "hash": "-1929645548689076514999",
+      "columns": [
+        "ad_creative",
+        "browse_30m",
+        "browse_same_category_30m",
+        "event_ts",
+        "impression_id",
+        "prior_exposures_this_week",
+        "slot_id",
+        "snap_date",
+        "user_id"
+      ]
+    }
+  },
+  "dataset": {
+    "train_model_input": {
+      "rows": 14621,
+      "hash": "-254503834602536716504",
+      "columns": [
+        "ad_creative",
+        "age_band",
+        "device_type",
+        "label",
+        "page_type",
+        "region",
+        "slot_ctr_4w",
+        "slot_id",
+        "slot_imp_4w",
+        "slot_position",
+        "snap_date",
+        "tenure_days",
+        "us_click_4w",
+        "us_imp_4w",
+        "user_click_4w",
+        "user_ctr_4w",
+        "user_id",
+        "user_imp_4w",
+        "user_segment"
+      ]
+    },
+    "train_dev_model_input": {
+      "rows": 1463,
+      "hash": "41462419361124099484",
+      "columns": [
+        "ad_creative",
+        "age_band",
+        "device_type",
+        "label",
+        "page_type",
+        "region",
+        "slot_ctr_4w",
+        "slot_id",
+        "slot_imp_4w",
+        "slot_position",
+        "snap_date",
+        "tenure_days",
+        "us_click_4w",
+        "us_imp_4w",
+        "user_click_4w",
+        "user_ctr_4w",
+        "user_id",
+        "user_imp_4w",
+        "user_segment"
+      ]
+    },
+    "calibration_model_input": {
+      "rows": 2970,
+      "hash": "542439201285848235721",
+      "columns": [
+        "ad_creative",
+        "age_band",
+        "device_type",
+        "label",
+        "page_type",
+        "region",
+        "slot_ctr_4w",
+        "slot_id",
+        "slot_imp_4w",
+        "slot_position",
+        "snap_date",
+        "tenure_days",
+        "us_click_4w",
+        "us_imp_4w",
+        "user_click_4w",
+        "user_ctr_4w",
+        "user_id",
+        "user_imp_4w",
+        "user_segment"
+      ]
+    },
+    "val_model_input": {
+      "rows": 1685,
+      "hash": "12932706816110953221",
+      "columns": [
+        "ad_creative",
+        "age_band",
+        "device_type",
+        "label",
+        "page_type",
+        "region",
+        "slot_ctr_4w",
+        "slot_id",
+        "slot_imp_4w",
+        "slot_position",
+        "snap_date",
+        "tenure_days",
+        "us_click_4w",
+        "us_imp_4w",
+        "user_click_4w",
+        "user_ctr_4w",
+        "user_id",
+        "user_imp_4w"
+      ]
+    },
+    "test_model_input": {
+      "rows": 1731,
+      "hash": "-345253238698346642065",
+      "columns": [
+        "ad_creative",
+        "age_band",
+        "device_type",
+        "label",
+        "page_type",
+        "region",
+        "slot_ctr_4w",
+        "slot_id",
+        "slot_imp_4w",
+        "slot_position",
+        "snap_date",
+        "tenure_days",
+        "us_click_4w",
+        "us_imp_4w",
+        "user_click_4w",
+        "user_ctr_4w",
+        "user_id",
+        "user_imp_4w"
+      ]
+    },
+    "preprocessor.json": {
+      "leaves": 52,
+      "hash": "12cb6aeb80f1877917549bd25b43b722359851499c7dcd9ac0be39734375c312"
+    },
+    "category_mappings.json": {
+      "leaves": 29,
+      "hash": "1b329e0b09b839612efb67dfb9cf8053a060b70754c800a324ef795695b7a153"
+    }
+  },
+  "training": {
+    "training_eval_predictions": {
+      "rows": 1731,
+      "hash": "105737462037711277271",
+      "columns": [
+        "ad_creative",
+        "label",
+        "score",
+        "score_uncalibrated",
+        "slot_id",
+        "snap_date",
+        "user_id"
+      ]
+    }
+  },
+  "inference": {
+    "ranked_predictions": {
+      "rows": 14400,
+      "hash": "-1153018332327301681807",
+      "columns": [
+        "ad_creative",
+        "rank",
+        "score",
+        "score_uncalibrated",
+        "slot_id",
+        "snap_date",
+        "user_id"
+      ]
+    }
+  },
+  "evaluation": {
+    "baseline_metrics.json": {
+      "leaves": 302,
+      "hash": "e80c8daed02976f75ec70d93b08c5da17028b0682eb3e67bfe42e85562eb9b2a"
+    },
+    "diagnosis/config_shift.json": {
+      "leaves": 238,
+      "hash": "e3699cc486c9f3c4bdb91a071c734007ee0d277c0603a6c6d4ca6c217edfe8aa"
+    },
+    "diagnosis/item_ability.json": {
+      "leaves": 882,
+      "hash": "15869cdb34b09ecf181ece521c6aa4a4e2c3d7bddcb88f7d1d0b25b53361030f"
+    },
+    "diagnosis/metric_ci.json": {
+      "leaves": 88,
+      "hash": "43f79c21db230a377cce971543dc2bccb4418b01c30231189b0c3f129eba44be"
+    },
+    "diagnosis/model_capacity.json": {
+      "leaves": 320,
+      "hash": "8b9e535ddb6b3efafe28ce76275d3882e28817249424f92c56019009ce8b9c62"
+    },
+    "diagnosis/suppression.json": {
+      "leaves": 3338,
+      "hash": "ed481b52d7fbdd71f111885049c001b95cb5b2bc0c636ca5f429a8387c39f7df"
+    },
+    "metrics.json": {
+      "leaves": 1066,
+      "hash": "aa4e7d47c679e1da134014018d51252d1390843a3c8bc1b669cbf46ecfcd40c4"
+    },
+    "report_aggregates.json": {
+      "leaves": 1958,
+      "hash": "701d0c79b238f4294ce360449b42100e80d7bbd930d84ea24b6f00e0e8f4d868"
+    },
+    "segment_columns.json": {
+      "leaves": 2,
+      "hash": "31268c3a2f859e4051d89e24c5914e13bcb78039e1da2f8e8e11d62971149b2b"
+    }
+  }
+}
