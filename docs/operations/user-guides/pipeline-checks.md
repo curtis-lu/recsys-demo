@@ -95,6 +95,7 @@ python -m recsys_tfb <指令> --env <env>
   - `dataset.train_snap_dates` 一定要寫，而且不能是空清單（`A23`）。
   - `dataset.train_snap_dates`、`calibration_snap_dates`、`val_snap_dates`、`test_snap_dates` 四個清單不能有同一天（`A24`）。日期按日曆比，`2026-1-31` 和 `2026-01-31` 算同一天。拿同一個月訓練又拿它評估，評估數字會好看得不真實。
 - **training**
+  - `dataset.test_snap_dates` 一定要寫，而且不能是空清單（`A36`）。training 要在這些月份上預測、算指標、做 SHAP 診斷；不擋的話，要等超參數搜尋整輪跑完才會失敗，錯誤訊息也沒提到這個設定。dataset 指令沒寫或空清單都照樣跑，所以這條只在 training 查。training 的每一種跑法都查，包含 `--from-node`、`--only-node`、`--list-nodes`、`--dry-run`。
   - `dataset.test_snap_dates` 裡，同一天不能寫成只差在有沒有 `-` 的兩種格式，例如 `2026-01-31` 和 `20260131`（`A26`）。不擋的話，那個月的每一列會被算兩次。
   - `catalog.yaml` 的 `training_eval_predictions` 條目，`columns:` 必須包含 `schema.columns.entity` 的每一欄（`A28`）。少寫的欄在寫入時會被默默丟掉。
 - **inference**
