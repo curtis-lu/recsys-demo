@@ -1,7 +1,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 
@@ -17,8 +17,11 @@ from recsys_tfb.core.consistency import (
     date_split_overlap_errors,
     duplicate_test_month_errors,
     entity_columns_declared_errors,
+    etl_cli_var_errors,
     inference_grid_errors,
+    merged_etl_variables,
     missing_test_month_errors,
+    parse_etl_var_flags,
     post_training_snap_date_errors,
     report_section_key_errors,
     resolved_env_dir,
@@ -827,12 +830,26 @@ def _run_etl(
     target_dates: Optional[str],
     restart_from: Optional[str],
     source_check_only: bool = False,
+    cli_vars: Optional[List[str]] = None,
 ) -> None:
-    """Shared executor for the feature/label/sample_pool ETL sub-commands.
+    """Shared executor for the feature/label/sample_pool/inference_population
+    ETL sub-commands.
 
-    ``stage`` is one of ``feature_etl``, ``label_etl``, ``sample_pool_etl``
-    and is used both as the pipeline name (for logging/config lookup) and as
-    the top-level YAML key of its parameters file.
+    ``stage`` is one of ``feature_etl``, ``label_etl``, ``sample_pool_etl``,
+    ``inference_population_etl`` and is used both as the pipeline name (for
+    logging/config lookup) and as the top-level YAML key of its parameters
+    file. ``cli_vars`` is the raw ``--var KEY=VALUE`` strings, repeatable
+    (#370).
+
+    Order (#370 rewired this to front-load every ETL-config check — A35, the
+    ``SQLRunner`` build, and ``check_renders`` — before the Spark cold
+    start, mirroring A21/A23/A24/A26/A27/A30's "fail before Spark" rule for
+    the other commands): the mutual-exclusion check, then config load, then
+    read the stage's parameters/date_list, then A35, then merge + build
+    ``SQLRunner`` (its own ``_validate_order`` can still raise), then
+    ``check_renders`` (run for ``--source-check`` too, per #370: the same
+    one invocation should preflight-and-then-run, not preflight only on the
+    write path), then the effective-variables log line, and only then Spark.
     """
     from recsys_tfb.pipelines.source_etl.sql_runner import SQLRunner, SourceCheckError
     from recsys_tfb.utils.spark import get_or_create_spark_session
@@ -843,9 +860,6 @@ def _run_etl(
         raise typer.Exit(code=1)
 
     config, params, run_context = _load_config_and_setup(stage, env)
-
-    spark_configs = _load_spark_config(config, stage)
-    get_or_create_spark_session(spark_configs)
 
     conf_dir = _find_conf_dir()
 
@@ -862,16 +876,73 @@ def _run_etl(
         logger.error("No target_dates provided. Use --target-dates or set in config.")
         raise typer.Exit(code=1)
 
+    # (A35) --var must be well-formed, declared, and safe to merge — before
+    # the SQLRunner is even built, so a typo'd flag never gets a chance to
+    # render (or worse, write) anything.
+    var_errors = etl_cli_var_errors(etl_config.get("variables"), cli_vars)
+    if var_errors:
+        logger.error("\n".join(var_errors))
+        raise typer.Exit(code=1)
+
+    merged_vars = merged_etl_variables(etl_config.get("variables"), cli_vars)
+    # A NEW dict for SQLRunner, not a mutation of etl_config (which
+    # ConfigLoader owns) — only the "variables" key differs.
+    runner_config = {**etl_config, "variables": merged_vars}
+
     rendered_sql_dir_str = etl_config.get("rendered_sql_dir")
     rendered_sql_dir = Path(rendered_sql_dir_str) if rendered_sql_dir_str else None
 
-    runner = SQLRunner(
-        config=etl_config,
-        sql_dir=sql_dir,
-        dry_run=False if source_check_only else dry_run,  # 檢查唯讀、必須實查 Hive
-        rendered_sql_dir=rendered_sql_dir,
-        stage=stage,
+    try:
+        runner = SQLRunner(
+            config=runner_config,
+            sql_dir=sql_dir,
+            dry_run=False if source_check_only else dry_run,  # 檢查唯讀、必須實查 Hive
+            rendered_sql_dir=rendered_sql_dir,
+            stage=stage,
+        )
+    except ValueError as exc:
+        # SQLRunner._validate_order's own, already-readable message — one
+        # line, no traceback, matching how every other command-line
+        # ConfigConsistencyError-flavoured ValueError is reported.
+        logger.error("%s", exc)
+        raise typer.Exit(code=1)
+    except Exception:
+        # Anything else building the runner (e.g. a malformed tables/
+        # source_checks entry) should not bypass the log with a raw
+        # traceback — same rule as runner.run's own except Exception below.
+        logger.exception("Failed to initialize the ETL runner for %s", stage)
+        raise typer.Exit(code=1)
+
+    # SQL-side backstop for the same #370 stability goal: render every table
+    # this run would touch, for every target date, before Spark starts — for
+    # --source-check too, so one invocation always preflights. check_renders
+    # only ever raises for a bad restart_from (ValueError, collected inside);
+    # anything else escaping render (e.g. an un-quoted YAML target_dates
+    # entry parsed as datetime.date by safe_load, or a sql_file pointing at
+    # a directory) must still be logged, not left to a bare traceback —
+    # (#370).
+    try:
+        render_errors = runner.check_renders(date_list, restart_from)
+    except Exception:
+        logger.exception("check_renders failed for %s", stage)
+        raise typer.Exit(code=1)
+    if render_errors:
+        logger.error("\n".join(render_errors))
+        raise typer.Exit(code=1)
+
+    cli_keys = {key for key, _value in parse_etl_var_flags(cli_vars)[0]}
+    effective = ", ".join(
+        f"{name}={value!r}" + (" (--var)" if name in cli_keys else "")
+        # key=str: a YAML variables block with a non-string key (e.g. the
+        # bare scalar `on:`, which PyYAML reads as the bool True, or `2025:`
+        # as an int) must not crash this log line with "'<' not supported
+        # between instances of 'int' and 'str'" — (#370).
+        for name, value in sorted(merged_vars.items(), key=lambda kv: str(kv[0]))
     )
+    logger.info("Effective ETL variables for %s: %s", stage, effective)
+
+    spark_configs = _load_spark_config(config, stage)
+    get_or_create_spark_session(spark_configs)
 
     if source_check_only:
         try:
@@ -913,9 +984,19 @@ def feature_etl(
         help="只跑該 stage 的上游 source_checks（preflight），不執行 ETL／不寫表；"
              "全部跑完後有任一失敗即以非零碼結束。",
     ),
+    var: Optional[List[str]] = typer.Option(
+        None, "--var",
+        help="Override one SQL template variable declared in this stage's "
+             "variables: block (KEY=VALUE). Repeatable for more than one "
+             "variable. The name must already be declared in the YAML; "
+             "target_date and target_db cannot be set this way — see (A35).",
+    ),
 ):
     """Run the feature ETL pipeline (feature_aum/sav/ccard/info/concat/table)."""
-    _run_etl("feature_etl", env, target_dates, restart_from, source_check_only=source_check)
+    _run_etl(
+        "feature_etl", env, target_dates, restart_from,
+        source_check_only=source_check, cli_vars=var,
+    )
 
 
 @app.command(name="label_etl")
@@ -936,9 +1017,19 @@ def label_etl(
         help="只跑該 stage 的上游 source_checks（preflight），不執行 ETL／不寫表；"
              "全部跑完後有任一失敗即以非零碼結束。",
     ),
+    var: Optional[List[str]] = typer.Option(
+        None, "--var",
+        help="Override one SQL template variable declared in this stage's "
+             "variables: block (KEY=VALUE). Repeatable for more than one "
+             "variable. The name must already be declared in the YAML; "
+             "target_date and target_db cannot be set this way — see (A35).",
+    ),
 ):
     """Run the label ETL pipeline (label_ccard/exchange/fund/table)."""
-    _run_etl("label_etl", env, target_dates, restart_from, source_check_only=source_check)
+    _run_etl(
+        "label_etl", env, target_dates, restart_from,
+        source_check_only=source_check, cli_vars=var,
+    )
 
 
 @app.command(name="sample_pool_etl")
@@ -959,9 +1050,19 @@ def sample_pool_etl(
         help="只跑該 stage 的上游 source_checks（preflight），不執行 ETL／不寫表；"
              "全部跑完後有任一失敗即以非零碼結束。",
     ),
+    var: Optional[List[str]] = typer.Option(
+        None, "--var",
+        help="Override one SQL template variable declared in this stage's "
+             "variables: block (KEY=VALUE). Repeatable for more than one "
+             "variable. The name must already be declared in the YAML; "
+             "target_date and target_db cannot be set this way — see (A35).",
+    ),
 ):
     """Run the sample_pool ETL pipeline. Requires feature_etl and label_etl outputs."""
-    _run_etl("sample_pool_etl", env, target_dates, restart_from, source_check_only=source_check)
+    _run_etl(
+        "sample_pool_etl", env, target_dates, restart_from,
+        source_check_only=source_check, cli_vars=var,
+    )
 
 
 @app.command(name="inference_population_etl")
@@ -982,11 +1083,18 @@ def inference_population_etl(
         help="只跑該 stage 的上游 source_checks（preflight），不執行 ETL／不寫表；"
              "全部跑完後有任一失敗即以非零碼結束。",
     ),
+    var: Optional[List[str]] = typer.Option(
+        None, "--var",
+        help="Override one SQL template variable declared in this stage's "
+             "variables: block (KEY=VALUE). Repeatable for more than one "
+             "variable. The name must already be declared in the YAML; "
+             "target_date and target_db cannot be set this way — see (A35).",
+    ),
 ):
     """Run the inference population ETL pipeline (inference_population)."""
     _run_etl(
         "inference_population_etl", env, target_dates, restart_from,
-        source_check_only=source_check,
+        source_check_only=source_check, cli_vars=var,
     )
 
 

@@ -49,6 +49,33 @@ class TestRender:
         with pytest.raises(ValueError, match="Unresolved template variables"):
             renderer.render("feature/feature_concat.sql", {"target_date": "2024-01-31"})
 
+    def test_unresolved_non_word_name_env_dot_x_raises(self, tmp_sql_dir):
+        # #370 bug (1): the old regex \$\{(\w+)} requires the name to be a
+        # single \w+ token, so "${env.X}" (a dot inside) was never even
+        # matched by the residue scan. It did not "sail through to Spark
+        # unresolved" — a real Spark session's own ${...} substitution
+        # (spark.sql.variable.substitute, on by default) would have silently
+        # turned it into an empty string instead of raising, per this
+        # ticket's review. This test only needs SQLRenderer.render to raise;
+        # SQLRunner.check_renders puts that raise before Spark ever starts.
+        sql = tmp_sql_dir / "feature" / "feature_env.sql"
+        sql.write_text(
+            "--partition by: snap_date\n\nSELECT '${env.X}' AS x\n"
+        )
+        renderer = SQLRenderer(tmp_sql_dir)
+        with pytest.raises(ValueError, match="Unresolved template variables"):
+            renderer.render("feature/feature_env.sql", {})
+
+    def test_unresolved_hiveconf_style_name_raises(self, tmp_sql_dir):
+        # Same bug, different non-word separator (":").
+        sql = tmp_sql_dir / "feature" / "feature_hiveconf.sql"
+        sql.write_text(
+            "--partition by: snap_date\n\nSELECT '${hiveconf:x}' AS x\n"
+        )
+        renderer = SQLRenderer(tmp_sql_dir)
+        with pytest.raises(ValueError, match="Unresolved template variables"):
+            renderer.render("feature/feature_hiveconf.sql", {})
+
 
 class TestStripHeaderComments:
     def test_strips_leading_comments(self):

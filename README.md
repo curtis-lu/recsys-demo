@@ -107,7 +107,7 @@ training 的 HPO 另有 checkpoint 機制，執行中斷後可沿用既有 Optun
 
 - 建模三張表分別提供 `feature_etl`、`label_etl`、`sample_pool_etl`；inference 母體由 `inference_population_etl` 產出（主鍵 `time, entity`，對應 training 的 `sample_pool`）。
 - 使用者可自行定義 SQL 與中介表，框架依 YAML 中的 `tables` 順序逐一執行；`depends_on` 會驗證相依表是否已排在上游。
-- SQL 支援 `${target_date}` 等變數，可透過 `--target-dates` 一次處理多個日期。
+- SQL 支援 `${target_date}` 等變數，可透過 `--target-dates` 一次處理多個日期；其他自訂變數可用 `--var key=value` 在執行時覆寫。
 - 支援 `--source-check` 唯讀 preflight，在寫入前檢查上游 partition 是否存在、資料筆數及 schema 是否符合預期。
 - 每張輸出表可設定 primary key 與品質檢查，目前支援最少筆數、重複鍵比例、NULL 比例及必要欄位檢查。
 - 支援多欄位 partition，並以 `INSERT OVERWRITE` 覆寫指定日期的 partition，方便安全重跑。

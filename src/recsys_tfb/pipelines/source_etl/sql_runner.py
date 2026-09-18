@@ -233,22 +233,95 @@ class SQLRunner:
             audit = AuditWriter(spark, resolved_audit)
         return spark, audit
 
-    def _get_tables_to_run(self, restart_from: str | None) -> list[TableConfig]:
-        """Filter the tables list based on restart_from parameter."""
+    def _tables_from(self, restart_from: str | None) -> list[TableConfig]:
+        """Slice ``self._tables`` at ``restart_from``, without logging.
+
+        The pure selection shared by ``_get_tables_to_run`` (the real run,
+        which logs a ``Skipping`` line per dropped table) and
+        ``check_renders`` (the preflight, called on every invocation
+        including ``--source-check`` — #370: before this
+        split, both callers ran the *logging* ``_get_tables_to_run``, so a
+        single ``--restart-from`` run printed every ``Skipping X`` line
+        twice).
+        """
         if not restart_from:
             return self._tables
-            
+
         table_names = [t.name for t in self._tables]
         if restart_from not in table_names:
             raise ValueError(
                 f"restart_from='{restart_from}' not found in tables: {table_names}"
             )
-            
+
         start_idx = next(i for i, t in enumerate(self._tables) if t.name == restart_from)
-        for table in self._tables[:start_idx]:
-            logger.info("Skipping %s (restart mode)", table.name)
-            
         return self._tables[start_idx:]
+
+    def _get_tables_to_run(self, restart_from: str | None) -> list[TableConfig]:
+        """Filter the tables list based on restart_from parameter, logging
+        one ``Skipping`` line per dropped table (the real run's own view —
+        see ``_tables_from`` for the silent selection ``check_renders`` uses)."""
+        tables = self._tables_from(restart_from)
+        if restart_from:
+            for table in self._tables[: len(self._tables) - len(tables)]:
+                logger.info("Skipping %s (restart mode)", table.name)
+        return tables
+
+    def _table_variables(self, snap_date: str) -> dict:
+        """The exact variable set one table's render substitutes for one
+        snap_date — CLI/YAML ``variables`` (with ``--var`` overrides already
+        merged in by ``__main__._run_etl``, #370) plus ``target_date``.
+
+        The single place ``_process_single_table`` (the real run) and
+        ``check_renders`` (the preflight) both call, so the two can never
+        render different SQL for the same inputs: a preflight PASS would
+        otherwise be evidence about a different substitution than the one
+        the real run performs.
+        """
+        return {**self._variables, "target_date": snap_date}
+
+    def check_renders(
+        self, target_dates: list[str], restart_from: str | None = None
+    ) -> list[str]:
+        """Preflight: render every table this run would touch, for every
+        target date, collecting every problem instead of stopping at the
+        first (#370).
+
+        Touches neither Spark nor the filesystem beyond ``SQLRenderer.read``
+        — no ``CREATE DATABASE``, no rendered-SQL write, no ``spark.sql``.
+        Uses the exact same table selection (``_tables_from`` — the silent
+        half of ``_get_tables_to_run``, so this does not print ``Skipping``
+        a second time) and the exact same per-table variables
+        (``_table_variables``) as the real run, so this is evidence about
+        what ``run()`` will actually substitute, not about a second,
+        possibly-different rendering path.
+
+        Collects two exception types SQLRenderer.render can raise: a
+        ``ValueError`` (residual ``${...}`` after substitution) and a
+        ``FileNotFoundError`` (the table's ``sql_file`` does not exist). An
+        invalid ``restart_from`` is collected the same way rather than
+        propagated, so it takes its place beside every other problem this
+        pass finds instead of aborting before any of them are reported.
+        Identical messages (the same problem seen for more than one
+        target_date) are deduplicated by message text, in first-seen order.
+        """
+        try:
+            tables = self._tables_from(restart_from)
+        except ValueError as exc:
+            return [str(exc)]
+
+        errors: list[str] = []
+        seen: set[str] = set()
+        for snap_date in target_dates:
+            variables = self._table_variables(snap_date)
+            for table in tables:
+                try:
+                    self._renderer.render(table.sql_file, variables)
+                except (ValueError, FileNotFoundError) as exc:
+                    message = str(exc)
+                    if message not in seen:
+                        seen.add(message)
+                        errors.append(message)
+        return errors
 
     def _process_single_table(
         self,
@@ -259,7 +332,7 @@ class SQLRunner:
         audit: AuditWriter | None,
     ) -> bool:
         """Execute a single table rendering, Spark SQL processing, and output quality check."""
-        variables = {**self._variables, "target_date": snap_date}
+        variables = self._table_variables(snap_date)
         select_sql = self._renderer.render(table.sql_file, variables)
 
         if self._dry_run:
