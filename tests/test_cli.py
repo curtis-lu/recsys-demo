@@ -179,6 +179,17 @@ def _scoreable_inference_conf(tmp_path):
     })
 
 
+def _trainable_dataset() -> dict:
+    """A ``dataset`` block the training command accepts: it names a test month.
+
+    Without one A36 (#133) stops training before Spark starts, so a test about
+    anything later in the command would exit on A36 instead — and one that
+    only checks "exit 1" or "Spark was never started" would stay green for the
+    wrong reason.
+    """
+    return {"sample_ratio": 0.1, "test_snap_dates": ["2026-01-31"]}
+
+
 def _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111"):
     """Create base dataset dir with one train_variant and corresponding latest symlinks."""
     dataset_dir = tmp_path / "data" / "dataset"
@@ -263,7 +274,7 @@ class TestCLI:
         """Training pipeline resolves base + train_variant via latest symlinks."""
         _setup_conf(
             tmp_path,
-            params_dataset={"dataset": {"sample_ratio": 0.1}},
+            params_dataset={"dataset": _trainable_dataset()},
             params_training={"lr": 0.01},
         )
 
@@ -305,7 +316,7 @@ class TestCLI:
         """
         _setup_conf(
             tmp_path,
-            params_dataset={"dataset": {"sample_ratio": 0.1}},
+            params_dataset={"dataset": _trainable_dataset()},
             params_training={"lr": 0.01},
         )
         _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
@@ -344,7 +355,7 @@ class TestCLI:
         """Training pipeline accepts --base-dataset-version and --train-variant."""
         _setup_conf(
             tmp_path,
-            params_dataset={"dataset": {"sample_ratio": 0.1}},
+            params_dataset={"dataset": _trainable_dataset()},
             params_training={"lr": 0.01},
         )
 
@@ -486,7 +497,7 @@ class TestCLI:
         assert "chunks_skipped" not in manifest["scoring_chunks"]
 
     def test_training_pipeline_fails_without_inputs(self, tmp_path):
-        _setup_conf(tmp_path)
+        _setup_conf(tmp_path, params_dataset={"dataset": _trainable_dataset()})
 
         _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
 
@@ -495,6 +506,9 @@ class TestCLI:
         try:
             result = runner.invoke(app, ["training"])
             assert result.exit_code == 1
+            # The reason, not only the code: every pre-Spark gate (A36 among
+            # them) also exits 1, and would keep this test green.
+            assert "requires input" in result.output + str(result.exception)
         finally:
             os.chdir(old_cwd)
 
@@ -2327,6 +2341,58 @@ class TestDuplicateTestMonthA26:
             os.chdir(old_cwd)
 
 
+class TestTestSnapDatesRequiredA36:
+    """A36 is wired to the training command, not to the global aggregator (#133)."""
+
+    def _run(self, tmp_path, command, dataset):
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {"sample_ratio": 0.1, **dataset}},
+            params_training={"lr": 0.01},
+        )
+        _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(app, [command])
+        finally:
+            os.chdir(old_cwd)
+        return result, mock_spark
+
+    def test_no_test_month_exits_before_spark_starts(self, tmp_path):
+        # Before A36 this config went through the whole HPO search and only
+        # failed at predict_and_write_test_predictions.
+        result, mock_spark = self._run(
+            tmp_path, "training", {"test_snap_dates": []})
+        assert result.exit_code == 1
+        # The load-bearing assertions: exit_code alone is satisfied by the
+        # mocked session blowing up further down the command, and "Spark was
+        # never started" alone by any other pre-Spark check rejecting it.
+        mock_spark.assert_not_called()
+        assert "(A36)" in result.output
+
+    def test_a_configured_month_reaches_the_cold_start(self, tmp_path):
+        # The discriminating half: without it the test above is also passed by
+        # an A36 that rejects every training config outright.
+        _, mock_spark = self._run(
+            tmp_path, "training", {"test_snap_dates": ["2026-01-31"]})
+        mock_spark.assert_called()
+
+    def test_a_dataset_run_with_no_test_month_is_unaffected(self, tmp_path):
+        # The dataset command accepts an empty list. This goes red the moment
+        # A36 is tidied into validate_config_consistency, which every command
+        # runs.
+        _, mock_spark = self._run(tmp_path, "dataset", {
+            "train_snap_dates": ["2026-01-31"],
+            "test_snap_dates": [],
+        })
+        mock_spark.assert_called()
+
+
 class TestRebuildSlicedAwayWarning:
     """``--rebuild-dates`` with a slicing flag is the normal path here, so it
     warns only when the slice drops the node the flag drives — the one case
@@ -2832,7 +2898,7 @@ class TestEntityColumnsDeclaredA28:
         _setup_conf(
             tmp_path,
             params_dataset={
-                "dataset": {"sample_ratio": 0.1},
+                "dataset": _trainable_dataset(),
                 "schema": {"columns": {"entity": ["cust_id", "acct_id"]}},
             },
             params_training={"lr": 0.01},
@@ -2866,9 +2932,11 @@ class TestEntityColumnsDeclaredA28:
             ) as mock_spark:
                 result = runner.invoke(app, ["training"])
             assert result.exit_code == 1
-            # The load-bearing assertion: exit_code alone is satisfied by the
-            # mocked session blowing up further down the command.
+            # The load-bearing assertions: exit_code alone is satisfied by the
+            # mocked session blowing up further down the command, and "Spark
+            # was never started" alone by any other pre-Spark gate (A36).
             mock_spark.assert_not_called()
+            assert "(A28)" in result.output
         finally:
             os.chdir(old_cwd)
 
@@ -2904,7 +2972,7 @@ class TestSchemaRolesRequiredAtTheEntryPoint:
 
     @staticmethod
     def _conf_without(tmp_path, role):
-        _setup_conf(tmp_path, params_dataset={"dataset": {"sample_ratio": 0.1}})
+        _setup_conf(tmp_path, params_dataset={"dataset": _trainable_dataset()})
         # Overwrite rather than pass a partial block through _setup_conf: that
         # helper fills in whatever the caller left out, which is what keeps the
         # other ~50 tests here from each declaring a schema. Here the omission
@@ -2929,9 +2997,12 @@ class TestSchemaRolesRequiredAtTheEntryPoint:
             ) as mock_spark:
                 result = runner.invoke(app, ["training"])
             assert result.exit_code == 1
-            # The load-bearing assertion: exit_code alone is satisfied by the
-            # mocked session blowing up further down the command.
+            # The load-bearing assertions: exit_code alone is satisfied by the
+            # mocked session blowing up further down the command, and "Spark
+            # was never started" alone by any other pre-Spark gate (A36).
             mock_spark.assert_not_called()
+            assert "Missing schema.columns" in (
+                result.output + str(result.exception))
         finally:
             os.chdir(old_cwd)
 
@@ -2940,7 +3011,7 @@ class TestSchemaRolesRequiredAtTheEntryPoint:
         by a check that rejects every training config outright."""
         _setup_conf(
             tmp_path,
-            params_dataset={"dataset": {"sample_ratio": 0.1}},
+            params_dataset={"dataset": _trainable_dataset()},
         )
         _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
 

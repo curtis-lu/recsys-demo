@@ -2041,6 +2041,52 @@ class TestTestSnapDatesSpellingA26:
 
 
 # =============================================================================
+# A36 — training needs at least one dataset.test_snap_dates month
+#       (wired on the training command, #133)
+# =============================================================================
+
+from recsys_tfb.core.consistency import missing_test_month_errors
+
+
+class TestTestSnapDatesRequiredA36:
+    def test_a_configured_month_passes(self):
+        assert missing_test_month_errors(_test_months("2026-01-31")) == []
+
+    def test_empty_list_is_reported(self):
+        # The case #133 is about: nothing stops it today, and training only
+        # fails at predict_and_write_test_predictions, after the whole HPO
+        # search, with a message about parquet roots rather than this key.
+        errs = missing_test_month_errors(_test_months())
+        assert len(errs) == 1
+        assert "A36" in errs[0]
+        assert "dataset.test_snap_dates" in errs[0]
+        assert "is empty" in errs[0]
+
+    def test_absent_key_is_reported_as_absent(self):
+        # Downstream reads an absent key as `or []`, so it is the same run as
+        # an empty list — but "empty" would send the operator looking for a
+        # line that is not in their yaml.
+        for params in ({}, {"dataset": {}}):
+            errs = missing_test_month_errors(params)
+            assert len(errs) == 1, params
+            assert "is absent" in errs[0], params
+
+    def test_yaml_null_is_reported(self):
+        # `test_snap_dates:` with nothing after it loads as None; the key is
+        # there, so the message says empty rather than absent.
+        errs = missing_test_month_errors({"dataset": {"test_snap_dates": None}})
+        assert len(errs) == 1
+        assert "is empty" in errs[0]
+
+    def test_not_aggregated_by_validate_config_consistency(self):
+        # The aggregator runs at the entry of EVERY command, and the dataset
+        # command legitimately builds with no test month. Aggregating A36 would
+        # block that — the #158 shape A24/A26 were wired around.
+        from recsys_tfb.core.consistency import validate_config_consistency
+        validate_config_consistency(_test_months())
+
+
+# =============================================================================
 # A27 — the inference scoring grid (snap_dates x entity_buckets x products)
 #       must be non-degenerate (wired on the inference command)
 # =============================================================================

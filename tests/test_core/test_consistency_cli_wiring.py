@@ -169,6 +169,23 @@ def test_a26_wired_into_training_command_before_spark():
     ), "A26 must fail before the Spark cold start, like A21/A23/A24"
 
 
+def test_a36_wired_into_training_command_before_spark():
+    # The whole point of A36 (#133) is timing: the same missing month already
+    # fails today, but only after the HPO search. Wired off the aggregator for
+    # A24's reason — the dataset command legitimately runs with no test month.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "missing_test_month_errors" not in inspect.getsource(
+        validate_config_consistency
+    ), "A36 must stay off the global aggregator (#158 precedent)"
+
+    src = inspect.getsource(m.training)
+    assert "missing_test_month_errors(params)" in src
+    assert src.index("missing_test_month_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A36 must fail before the Spark cold start, like A21/A23/A24/A26"
+
+
 def test_a26_is_checked_before_a21():
     # A21 resolves --rebuild-dates against dataset.test_snap_dates. If the
     # month is spelled two ways, "is this flag value a configured month" has
