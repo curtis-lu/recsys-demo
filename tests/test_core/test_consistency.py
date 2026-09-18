@@ -3359,6 +3359,46 @@ class TestA35EtlCliVars:
         assert len(errors) == 1
         assert "(A35)" in errors[0] and "target_db" in errors[0]
 
+    # (i) a value referencing ONLY ${target_date} passes — #370 review
+    # round 2's K1: this works on main and is unaffected by declaration
+    # order (_table_variables always substitutes target_date last, and (h)
+    # forbids declaring it in the YAML at all).
+    def test_k_i_target_date_only_reference_is_allowed(self):
+        errors = self._errors(
+            {"win_start": "add_months('${target_date}', -12)"}, []
+        )
+        assert errors == []
+
+    def test_k_i_target_date_referenced_more_than_once_is_still_allowed(self):
+        errors = self._errors(
+            {"win_start": "${target_date} to ${target_date}"}, []
+        )
+        assert errors == []
+
+    # (ii) a value mixing ${target_date} with another reference is still
+    # rejected, and the message names only the OTHER reference.
+    def test_k_ii_target_date_plus_another_reference_is_blocked(self):
+        errors = self._errors(
+            {"win_start": "${target_date}_${raw_db}", "raw_db": "x"}, []
+        )
+        assert len(errors) == 1
+        # The rejected-tokens list names only the other reference — the
+        # explanatory prose is free to mention target_date (it explains the
+        # exemption), so this checks the enumerated list itself, not the
+        # whole message.
+        assert "references ['${raw_db}']" in errors[0]
+
+    # (iii) the message never includes the rest of the value (it may hold a
+    # secret pulled in via a YAML ${env.X}) — only the variable name and the
+    # rejected ${...} fragment(s).
+    def test_k_iii_message_does_not_leak_the_rest_of_the_value(self):
+        errors = self._errors(
+            {"pw": "SECRET_PART_abc${bad_ref}_SECRET_PART_xyz"}, []
+        )
+        assert len(errors) == 1
+        assert "${bad_ref}" in errors[0]
+        assert "SECRET_PART" not in errors[0]
+
     # #370: a name repeated via --var must not print the same
     # (b)/(c)/(d) message once per repetition.
     def test_b_undeclared_name_repeated_prints_once(self):

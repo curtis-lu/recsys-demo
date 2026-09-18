@@ -1052,15 +1052,23 @@ class TestEtlCliVarsA35:
             os.chdir(old)
 
     def test_k_variable_value_containing_dollar_brace_is_blocked(self, tmp_path):
-        # #370 A35 (k): a variable's final value
-        # containing '${' is rejected outright (order-dependent expansion +
-        # Spark's own silent-empty-string substitution when it does not
-        # expand). No --var involved — the YAML default itself is the
-        # offending value. Deliberately "${other_var}" and not
+        # #370 A35 (k): a variable's final value referencing another user
+        # variable via '${...}' is rejected outright (order-dependent
+        # expansion + Spark's own silent-empty-string substitution when it
+        # does not expand). No --var involved — the YAML default itself is
+        # the offending value. Deliberately "${other_var}" and not
         # "${env.OTHER}": the latter is resolved by ConfigLoader at load
         # time (core/config.py), before A35 ever sees the value, so it would
-        # test the wrong layer.
+        # test the wrong layer. A legal SQL file is written (same fix as
+        # M1's batch) so (k)'s own exit is the only thing this test pins —
+        # without it, a run with no SQL file at all is blocked by
+        # check_renders's FileNotFoundError regardless of (k).
         _setup_etl_conf(tmp_path, variables={"raw_db": "${other_var}"})
+        _write_etl_sql(
+            tmp_path, "feature/feature_table.sql",
+            "--partition by: snap_date\n\n"
+            "SELECT CAST('${target_date}' AS DATE) AS snap_date, 'x' AS val\n",
+        )
         old = os.getcwd(); os.chdir(tmp_path)
         try:
             with patch(
@@ -1072,6 +1080,42 @@ class TestEtlCliVarsA35:
             assert "(A35)" in result.output
             assert "raw_db" in result.output
             mock_spark.assert_not_called()
+        finally:
+            os.chdir(old)
+
+    def test_k_i_target_date_only_reference_dry_runs_and_renders_the_date(
+        self, tmp_path
+    ):
+        # #370 review round 2, K1: this exact shape
+        # (win_start: "add_months('${target_date}', -12)", referenced in SQL
+        # as ${win_start}) works on main and must keep working — (k) must
+        # not block a value that only references ${target_date}. SQLRunner
+        # is real (not mocked): the dry-run log line is the evidence that
+        # the date was actually substituted, not just that no error fired.
+        _setup_etl_conf(
+            tmp_path,
+            variables={
+                "target_db": "ml_recsys",
+                "win_start": "add_months('${target_date}', -12)",
+            },
+        )
+        _write_etl_sql(
+            tmp_path, "feature/feature_table.sql",
+            "--partition by: snap_date\n\n"
+            "SELECT * FROM ${target_db}.raw_table "
+            "WHERE snap_date >= ${win_start}\n",
+        )
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(
+                    app, ["feature_etl", "--target-dates", "2025-01-31"])
+            assert result.exit_code == 0, result.output
+            assert "(A35)" not in result.output
+            assert "add_months('2025-01-31', -12)" in result.output
+            mock_spark.assert_called()  # dry_run still warms Spark; A35/check_renders do not block
         finally:
             os.chdir(old)
 

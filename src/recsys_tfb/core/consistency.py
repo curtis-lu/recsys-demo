@@ -360,16 +360,22 @@ Layer 1 — config-static (implemented here; aggregated by
   so it is unsatisfiable by construction; (j) checked first and
   structurally: ``variables`` itself must be a mapping (absent is fine) or
   the checks above cannot even run; (k) a variable's FINAL value (the YAML
-  string, or the ``--var`` override when given) containing ``${`` — render
-  substitutes one key at a time in the dict's iteration order, so whether a
-  ``${...}`` inside a value expands depends on key order the config author
-  cannot see, and an unexpanded one is not caught as "unresolved" either: a
-  real Spark session's own ``${...}`` substitution
+  string, or the ``--var`` override when given) referencing another user
+  variable via ``${...}`` — render substitutes one key at a time in the
+  dict's iteration order, so whether such a reference expands depends on key
+  order the config author cannot see, and an unexpanded one is not caught as
+  "unresolved" either: a real Spark session's own ``${...}`` substitution
   (``spark.sql.variable.substitute``, on by default) silently turns it into
   an empty string rather than raising (measured against local Spark 3.3.2
-  during this ticket's review). (b) is reported once per distinct name, not
-  once per repetition — a name repeated three times gets one (e) "passed 3
-  times" plus at most one (b)/(c)/(d), not three of each.
+  during this ticket's review). ``${target_date}`` is exempt from (k) even
+  inside another variable's value — ``_table_variables`` always substitutes
+  it last and it can never be declared in the YAML (h), so a reference to it
+  cannot be affected by order — but a value mixing ``${target_date}`` with
+  any OTHER reference is still rejected, and (k)'s message never prints the
+  value, only the rejected ``${...}`` fragment(s), since the value may carry
+  a secret pulled in via a YAML ``${env.X}``. (b) is reported once per
+  distinct name, not once per repetition — a name repeated three times gets
+  one (e) "passed 3 times" plus at most one (b)/(c)/(d), not three of each.
   Predicates: ``etl_cli_var_errors`` (returns errors; the ETL command raises
   before Spark starts) and the shared parsing/merge helpers
   ``parse_etl_var_flags`` / ``merged_etl_variables`` — one ``KEY=VALUE`` split
@@ -600,6 +606,7 @@ from __future__ import annotations
 
 import datetime as _datetime
 import math
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import NamedTuple
@@ -2584,21 +2591,31 @@ def etl_cli_var_errors(
         table skipped this run may still be reached by a later
         ``--restart-from`` run against the same config.
     (k) a variable's FINAL value — the YAML string, or the ``--var``
-        override when one was given — containing ``${``. ``SQLRenderer.render``
-        substitutes one key at a time, in the dict's iteration order (a
-        single-pass ``str.replace`` per key), so whether a ``${...}`` *inside*
-        a value gets expanded depends on where that key happens to sit
-        relative to the variable it names — the same YAML/``--var`` combo can
-        render two different SQL strings depending on dict order, which no
-        config author can see or control. And when it does NOT get expanded,
-        it is not "unresolved" either: a real Spark session has its own
-        ``${...}`` substitution (``spark.sql.variable.substitute``, on by
-        default) that silently turns a residual ``${...}`` into an empty
-        string (measured against local Spark 3.3.2 during this ticket's
-        review: ``'${nope}'`` -> ``''``) rather than raising — the exact
-        silent-wrong-answer failure mode A35 exists to prevent, just one
-        substitution layer further down. Write the literal final value
-        directly instead of referencing another variable.
+        override when one was given — referencing another user variable via
+        ``${...}``. ``SQLRenderer.render`` substitutes one key at a time, in
+        the dict's iteration order (a single-pass ``str.replace`` per key),
+        so whether a ``${...}`` *inside* a value gets expanded depends on
+        where that key happens to sit relative to the variable it names — the
+        same YAML/``--var`` combo can render two different SQL strings
+        depending on dict order, which no config author can see or control.
+        And when it does NOT get expanded, it is not "unresolved" either: a
+        real Spark session has its own ``${...}`` substitution
+        (``spark.sql.variable.substitute``, on by default) that silently
+        turns a residual ``${...}`` into an empty string (measured against
+        local Spark 3.3.2 during this ticket's review: ``'${nope}'`` ->
+        ``''``) rather than raising — the exact silent-wrong-answer failure
+        mode A35 exists to prevent, just one substitution layer further down.
+        ``${target_date}`` is the one exception and is never flagged: a
+        review of this ticket found the order-dependence argument does not
+        apply to it — ``_table_variables`` always substitutes ``target_date``
+        last, and it can never be declared in the YAML in the first place
+        (h), so a reference to it is unaffected by declaration order and
+        always expands. A value referencing ``${target_date}`` plus at least
+        one OTHER variable is still rejected — only ``${target_date}``
+        references, alone, are exempt. The error message names only the
+        rejected ``${...}`` fragment(s), never the value's other contents —
+        the value may have been assembled from a YAML ``${env.X}``, so it may
+        hold a secret.
 
     Returns error strings (empty when everything is fine); the ETL command
     (``__main__._run_etl``) logs and exits before Spark starts. NOT
@@ -2703,27 +2720,42 @@ def etl_cli_var_errors(
 
     # (k) — see the docstring above for the full reasoning (render's
     # declaration-order substitution + Spark's own silent-empty-string
-    # fallback). ``target_date`` is skipped: (h) already owns it and its
-    # declared value never reaches render anyway (``_table_variables``
-    # always overwrites it with the real snap_date). ``target_db`` is
-    # checked against its YAML value only — a ``--var`` override for it is
-    # already rejected by (d), so there is no legitimate CLI-sourced final
-    # value to check.
+    # fallback). ``target_date`` as a NAME is skipped: (h) already owns it
+    # and its declared value never reaches render anyway
+    # (``_table_variables`` always overwrites it with the real snap_date).
+    # ``target_db`` is checked against its YAML value only — a ``--var``
+    # override for it is already rejected by (d), so there is no legitimate
+    # CLI-sourced final value to check. Within another variable's value,
+    # ``${target_date}`` REFERENCES are exempt (see docstring) — every other
+    # ``${...}`` token is rejected, and the message names only the rejected
+    # token(s), never the value itself (which may hold a secret pulled in
+    # via a YAML ``${env.X}``).
     cli_override = dict(parsed)  # last occurrence wins, matching merged_etl_variables
     for name, value in variables.items():
         if name == "target_date":
             continue
         final_value = value if name == "target_db" else cli_override.get(name, value)
-        if isinstance(final_value, str) and "${" in final_value:
+        if not isinstance(final_value, str):
+            continue
+        tokens = re.findall(r"\$\{[^}]*\}", final_value)
+        bad_tokens = [t for t in dict.fromkeys(tokens) if t != "${target_date}"]
+        if bad_tokens:
             errors.append(
-                f"(A35) variables.{name}'s final value {final_value!r} "
-                f"contains '${{'. SQLRenderer.render substitutes variables "
-                f"one at a time in declaration order, so whether this gets "
-                f"expanded depends on where {name!r} sits relative to the "
-                f"variable it names — and if it does not, a real Spark "
-                f"session silently turns it into an empty string instead of "
-                f"raising (spark.sql.variable.substitute, on by default). "
-                f"Write the final literal value directly."
+                f"(A35) variables.{name} references {bad_tokens} inside its "
+                f"value (the value itself is not printed — it may have been "
+                f"assembled from a YAML ${{env.X}} and hold a secret). "
+                f"SQLRenderer.render substitutes user variables one at a "
+                f"time in declaration order, so whether a reference to "
+                f"another variable expands depends on where {name!r} sits "
+                f"relative to it. ${{target_date}} is the one exception — "
+                f"``_table_variables`` always substitutes it last, and it "
+                f"can never be declared in the YAML (h), so it is "
+                f"unaffected by order. Anything else that does not expand "
+                f"is not caught as unresolved either: a real Spark session "
+                f"silently turns it into an empty string instead of "
+                f"raising. Write the final literal value; an expression "
+                f"that must vary per date may reference ${{target_date}}, "
+                f"or be written directly into the SQL file."
             )
 
     return errors
