@@ -23,9 +23,17 @@ class SQLRenderer:
             rendered = rendered.replace(f"${{{key}}}", value)
         # Catch any residual ${...} — not only \w+ names. A stray
         # "${env.X}" or "${hiveconf:x}" has a non-word character inside the
-        # braces, so the old \w+-only regex never matched it and the literal
-        # text sailed through to Spark unresolved (#370 bug 2). Collecting
-        # every "${...}" regardless of what is inside catches all of them.
+        # braces, so the old \w+-only regex never matched it. That is not
+        # harmless: it does NOT "sail through to Spark unresolved" — a real
+        # Spark session has its own ${...} substitution
+        # (spark.sql.variable.substitute, on by default) that silently
+        # turns a residual ${...} into an empty string (measured against
+        # local Spark 3.3.2 during #370's review: '${nope}' -> '') rather
+        # than raising, or an environment value for ${env:X}. So the old
+        # regex's blind spot did not fail loud, it failed by quietly
+        # changing what the query matches — e.g. `WHERE x = '${env.NOPE}'`
+        # silently becomes `WHERE x = ''`. Collecting every "${...}"
+        # regardless of what is inside (#370) catches all of them first.
         unresolved = re.findall(r"\$\{([^}]*)\}", rendered)
         if unresolved:
             raise ValueError(

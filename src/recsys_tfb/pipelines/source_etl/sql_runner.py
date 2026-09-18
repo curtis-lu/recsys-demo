@@ -233,22 +233,38 @@ class SQLRunner:
             audit = AuditWriter(spark, resolved_audit)
         return spark, audit
 
-    def _get_tables_to_run(self, restart_from: str | None) -> list[TableConfig]:
-        """Filter the tables list based on restart_from parameter."""
+    def _tables_from(self, restart_from: str | None) -> list[TableConfig]:
+        """Slice ``self._tables`` at ``restart_from``, without logging.
+
+        The pure selection shared by ``_get_tables_to_run`` (the real run,
+        which logs a ``Skipping`` line per dropped table) and
+        ``check_renders`` (the preflight, called on every invocation
+        including ``--source-check`` — #370 review fix 10: before this
+        split, both callers ran the *logging* ``_get_tables_to_run``, so a
+        single ``--restart-from`` run printed every ``Skipping X`` line
+        twice).
+        """
         if not restart_from:
             return self._tables
-            
+
         table_names = [t.name for t in self._tables]
         if restart_from not in table_names:
             raise ValueError(
                 f"restart_from='{restart_from}' not found in tables: {table_names}"
             )
-            
+
         start_idx = next(i for i, t in enumerate(self._tables) if t.name == restart_from)
-        for table in self._tables[:start_idx]:
-            logger.info("Skipping %s (restart mode)", table.name)
-            
         return self._tables[start_idx:]
+
+    def _get_tables_to_run(self, restart_from: str | None) -> list[TableConfig]:
+        """Filter the tables list based on restart_from parameter, logging
+        one ``Skipping`` line per dropped table (the real run's own view —
+        see ``_tables_from`` for the silent selection ``check_renders`` uses)."""
+        tables = self._tables_from(restart_from)
+        if restart_from:
+            for table in self._tables[: len(self._tables) - len(tables)]:
+                logger.info("Skipping %s (restart mode)", table.name)
+        return tables
 
     def _table_variables(self, snap_date: str) -> dict:
         """The exact variable set one table's render substitutes for one
@@ -272,10 +288,12 @@ class SQLRunner:
 
         Touches neither Spark nor the filesystem beyond ``SQLRenderer.read``
         — no ``CREATE DATABASE``, no rendered-SQL write, no ``spark.sql``.
-        Uses the exact same table list (``_get_tables_to_run``) and the exact
-        same per-table variables (``_table_variables``) as the real run, so
-        this is evidence about what ``run()`` will actually substitute, not
-        about a second, possibly-different rendering path.
+        Uses the exact same table selection (``_tables_from`` — the silent
+        half of ``_get_tables_to_run``, so this does not print ``Skipping``
+        a second time) and the exact same per-table variables
+        (``_table_variables``) as the real run, so this is evidence about
+        what ``run()`` will actually substitute, not about a second,
+        possibly-different rendering path.
 
         Collects two exception types SQLRenderer.render can raise: a
         ``ValueError`` (residual ``${...}`` after substitution) and a
@@ -287,7 +305,7 @@ class SQLRunner:
         target_date) are deduplicated by message text, in first-seen order.
         """
         try:
-            tables = self._get_tables_to_run(restart_from)
+            tables = self._tables_from(restart_from)
         except ValueError as exc:
             return [str(exc)]
 

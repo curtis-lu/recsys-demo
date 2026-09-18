@@ -900,13 +900,31 @@ def _run_etl(
             stage=stage,
         )
     except ValueError as exc:
+        # SQLRunner._validate_order's own, already-readable message — one
+        # line, no traceback, matching how every other command-line
+        # ConfigConsistencyError-flavoured ValueError is reported.
         logger.error("%s", exc)
+        raise typer.Exit(code=1)
+    except Exception:
+        # Anything else building the runner (e.g. a malformed tables/
+        # source_checks entry) should not bypass the log with a raw
+        # traceback — same rule as runner.run's own except Exception below.
+        logger.exception("Failed to initialize the ETL runner for %s", stage)
         raise typer.Exit(code=1)
 
     # SQL-side backstop for the same #370 stability goal: render every table
     # this run would touch, for every target date, before Spark starts — for
-    # --source-check too, so one invocation always preflights.
-    render_errors = runner.check_renders(date_list, restart_from)
+    # --source-check too, so one invocation always preflights. check_renders
+    # only ever raises for a bad restart_from (ValueError, collected inside);
+    # anything else escaping render (e.g. an un-quoted YAML target_dates
+    # entry parsed as datetime.date by safe_load, or a sql_file pointing at
+    # a directory) must still be logged, not left to a bare traceback —
+    # #370 review fix 8.
+    try:
+        render_errors = runner.check_renders(date_list, restart_from)
+    except Exception:
+        logger.exception("check_renders failed for %s", stage)
+        raise typer.Exit(code=1)
     if render_errors:
         logger.error("\n".join(render_errors))
         raise typer.Exit(code=1)
@@ -914,7 +932,11 @@ def _run_etl(
     cli_keys = {key for key, _value in parse_etl_var_flags(cli_vars)[0]}
     effective = ", ".join(
         f"{name}={value!r}" + (" (--var)" if name in cli_keys else "")
-        for name, value in sorted(merged_vars.items())
+        # key=str: a YAML variables block with a non-string key (e.g. the
+        # bare scalar `on:`, which PyYAML reads as the bool True, or `2025:`
+        # as an int) must not crash this log line with "'<' not supported
+        # between instances of 'int' and 'str'" — #370 review fix 7.
+        for name, value in sorted(merged_vars.items(), key=lambda kv: str(kv[0]))
     )
     logger.info("Effective ETL variables for %s: %s", stage, effective)
 

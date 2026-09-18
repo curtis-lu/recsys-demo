@@ -3301,6 +3301,20 @@ class TestA35EtlCliVars:
         assert len(errors) == 1
         assert "(A35)" in errors[0] and "target_date" in errors[0]
 
+    # #370 review fix 4: (h) owns target_date unconditionally — a null or a
+    # non-string value must NOT also trigger (f)/(g), which would hand out
+    # mutually contradictory instructions for the same key (fix variables.target_date
+    # per (h) by removing it, but (f)/(g) tell the reader to supply or quote it).
+    def test_h_yaml_target_date_null_is_still_exactly_one_error(self):
+        errors = self._errors({"target_date": None}, [])
+        assert len(errors) == 1
+        assert "(A35)" in errors[0] and "target_date" in errors[0]
+
+    def test_h_yaml_target_date_non_string_is_still_exactly_one_error(self):
+        errors = self._errors({"target_date": 2025}, [])
+        assert len(errors) == 1
+        assert "(A35)" in errors[0] and "target_date" in errors[0]
+
     # (i) YAML target_db: ~
     def test_i_yaml_target_db_null_blocked(self):
         errors = self._errors({"target_db": None}, [])
@@ -3312,6 +3326,59 @@ class TestA35EtlCliVars:
         errors = self._errors(["not", "a", "mapping"], [])
         assert len(errors) == 1
         assert "(A35)" in errors[0] and "mapping" in errors[0]
+
+    # (k) a variable's final value contains '${' — #370 review fix 5.
+    def test_k_yaml_value_containing_dollar_brace_is_blocked(self):
+        errors = self._errors({"raw_db": "${env.OTHER}"}, [])
+        assert len(errors) == 1
+        assert "(A35)" in errors[0] and "raw_db" in errors[0] and "${" in errors[0]
+
+    def test_k_var_override_containing_dollar_brace_is_blocked(self):
+        # The override, not the (clean) YAML default, is the final value.
+        errors = self._errors({"raw_db": "clean"}, ["raw_db=${env.OTHER}"])
+        assert len(errors) == 1
+        assert "(A35)" in errors[0] and "raw_db" in errors[0]
+
+    def test_k_clean_override_of_a_dollar_brace_yaml_default_passes(self):
+        # The YAML default contains '${' but is fully overridden — the FINAL
+        # value (from --var) is clean, so (k) must not fire.
+        errors = self._errors({"raw_db": "${env.OTHER}"}, ["raw_db=clean_value"])
+        assert errors == []
+
+    def test_k_does_not_pile_onto_target_date_or_target_db(self):
+        # target_date is (h)'s alone; target_db's null is (i)'s alone. (k)
+        # must not add a second, redundant error for either.
+        errors = self._errors({"target_date": "${x}", "target_db": None}, [])
+        assert len(errors) == 2
+        assert not any("final value" in e for e in errors)
+
+    def test_k_target_db_yaml_value_is_still_checked(self):
+        # target_db cannot be overridden via --var (that's (d)'s job), but a
+        # bad YAML value for it is still (k)'s to catch.
+        errors = self._errors({"target_db": "${env.X}"}, [])
+        assert len(errors) == 1
+        assert "(A35)" in errors[0] and "target_db" in errors[0]
+
+    # #370 review fix 6: a name repeated via --var must not print the same
+    # (b)/(c)/(d) message once per repetition.
+    def test_b_undeclared_name_repeated_prints_once(self):
+        errors = self._errors({"raw_db": "x"}, ["typo=1", "typo=2"])
+        not_declared = [e for e in errors if "not declared" in e]
+        assert len(not_declared) == 1
+        passed_n_times = [e for e in errors if "times" in e]
+        assert len(passed_n_times) == 1 and "2 times" in passed_n_times[0]
+
+    def test_c_var_target_date_repeated_prints_once(self):
+        errors = self._errors(
+            {"raw_db": "x"}, ["target_date=2025-01-31", "target_date=2025-02-28"]
+        )
+        target_date_rejections = [e for e in errors if "not allowed" in e]
+        assert len(target_date_rejections) == 1
+
+    # #370 review fix 7: a non-string variable NAME must not crash sorted().
+    def test_non_string_variable_name_does_not_crash_sorted(self):
+        errors = self._errors({2025: "x", "raw_db": "y"}, ["typo=1"])
+        assert any("(A35)" in e for e in errors)  # no TypeError raised
 
     def test_multiple_errors_collected_in_one_pass(self):
         errors = self._errors(

@@ -834,7 +834,21 @@ class TestEtlCliVarsA35:
     def test_each_a35_failure_exits_before_spark(
         self, tmp_path, case_id, variables, cli_vars
     ):
+        # #370 review fix 1 (M1): a LEGAL SQL file must exist so A35's own
+        # exit is the only thing standing between this run and Spark — a
+        # tmp tree with no SQL file at all (the old shape of this test) is
+        # blocked by check_renders's FileNotFoundError regardless of
+        # whether A35 fires, which is a different, unrelated gate. The SQL
+        # references only ${target_date}, which check_renders/run always
+        # supply themselves, so it renders cleanly under every case's
+        # (possibly malformed) `variables`/`--var` combination — the ONLY
+        # thing that can still stop this run is A35 itself.
         _setup_etl_conf(tmp_path, variables=variables)
+        _write_etl_sql(
+            tmp_path, "feature/feature_table.sql",
+            "--partition by: snap_date\n\n"
+            "SELECT CAST('${target_date}' AS DATE) AS snap_date, 'x' AS val\n",
+        )
         old = os.getcwd(); os.chdir(tmp_path)
         try:
             argv = ["feature_etl", "--target-dates", "2025-01-31"]
@@ -851,7 +865,14 @@ class TestEtlCliVarsA35:
             os.chdir(old)
 
     def test_multiple_a35_errors_listed_in_one_run(self, tmp_path):
+        # Same fix-1 (M1) reasoning as above: a legal SQL file, so A35's own
+        # exit is what this test is actually pinning.
         _setup_etl_conf(tmp_path, variables={"raw_db": "x"})
+        _write_etl_sql(
+            tmp_path, "feature/feature_table.sql",
+            "--partition by: snap_date\n\n"
+            "SELECT CAST('${target_date}' AS DATE) AS snap_date, 'x' AS val\n",
+        )
         old = os.getcwd(); os.chdir(tmp_path)
         try:
             with patch(
@@ -931,7 +952,13 @@ class TestEtlCliVarsA35:
             os.chdir(old)
 
     def test_source_check_with_bad_var_exits_before_spark(self, tmp_path):
+        # Same fix-1 (M1) reasoning: a legal SQL file so A35 is the only gate.
         _setup_etl_conf(tmp_path, variables={"raw_db": "x"})
+        _write_etl_sql(
+            tmp_path, "feature/feature_table.sql",
+            "--partition by: snap_date\n\n"
+            "SELECT CAST('${target_date}' AS DATE) AS snap_date, 'x' AS val\n",
+        )
         old = os.getcwd(); os.chdir(tmp_path)
         try:
             with patch(
@@ -944,6 +971,159 @@ class TestEtlCliVarsA35:
                 ])
             assert result.exit_code == 1, result.output
             assert "(A35)" in result.output
+            mock_spark.assert_not_called()
+        finally:
+            os.chdir(old)
+
+    def test_source_check_runs_check_renders_sqlrunner_not_mocked(self, tmp_path):
+        # #370 review fix 2 (M2): --source-check must still run check_renders
+        # — the same one invocation should preflight-and-then-run, not
+        # preflight only on the write path. SQLRunner is real here (not
+        # mocked) so a conditional "skip check_renders when source_check_only"
+        # regression shows up as Spark actually starting.
+        _setup_etl_conf(tmp_path)
+        _write_etl_sql(
+            tmp_path, "feature/feature_table.sql",
+            "--partition by: snap_date\n\nSELECT '${env.X}' AS x\n",
+        )
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(app, [
+                    "feature_etl", "--source-check",
+                    "--target-dates", "2025-01-31",
+                ])
+            assert result.exit_code == 1, result.output
+            assert "Unresolved template variables" in result.output
+            mock_spark.assert_not_called()
+        finally:
+            os.chdir(old)
+
+    def test_f_null_var_required_even_when_restart_from_skips_its_table(
+        self, tmp_path
+    ):
+        # #370 review fix 3 (M4): (f) — a YAML `~` variable with no matching
+        # --var — must fire even when --restart-from means this run will
+        # never touch the one table that uses it. Two real tables (SQLRunner
+        # not mocked): only feature_a's SQL references ${needs_var}, and the
+        # run restarts from feature_b (which does not). Blocking here is a
+        # deliberate over-approximation (the spec: "不管 --restart-from 跳過
+        # 哪些表都照樣擋") — a later --restart-from-less run against the same
+        # config would still need the value.
+        _setup_conf(tmp_path)
+        base_dir = tmp_path / "conf" / "base"
+        params = {
+            "feature_etl": {
+                "variables": {"target_db": "ml_recsys", "needs_var": None},
+                "tables": [
+                    {"name": "feature_a", "sql_file": "feature/feature_a.sql",
+                     "partition_by": {"snap_date": "DATE"}},
+                    {"name": "feature_b", "sql_file": "feature/feature_b.sql",
+                     "partition_by": {"snap_date": "DATE"}},
+                ],
+            }
+        }
+        with open(base_dir / "parameters_feature_etl.yaml", "w") as f:
+            yaml.dump(params, f)
+        _write_etl_sql(
+            tmp_path, "feature/feature_a.sql",
+            "--partition by: snap_date\n\nSELECT '${needs_var}' AS x\n",
+        )
+        _write_etl_sql(
+            tmp_path, "feature/feature_b.sql",
+            "--partition by: snap_date\n\nSELECT 'y' AS y\n",
+        )
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(app, [
+                    "feature_etl", "--target-dates", "2025-01-31",
+                    "--restart-from", "feature_b",
+                ])
+            assert result.exit_code == 1, result.output
+            assert "(A35)" in result.output
+            assert "needs_var" in result.output
+            mock_spark.assert_not_called()
+        finally:
+            os.chdir(old)
+
+    def test_k_variable_value_containing_dollar_brace_is_blocked(self, tmp_path):
+        # #370 review fix 5, new rule (k): a variable's final value
+        # containing '${' is rejected outright (order-dependent expansion +
+        # Spark's own silent-empty-string substitution when it does not
+        # expand). No --var involved — the YAML default itself is the
+        # offending value. Deliberately "${other_var}" and not
+        # "${env.OTHER}": the latter is resolved by ConfigLoader at load
+        # time (core/config.py), before A35 ever sees the value, so it would
+        # test the wrong layer.
+        _setup_etl_conf(tmp_path, variables={"raw_db": "${other_var}"})
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(
+                    app, ["feature_etl", "--target-dates", "2025-01-31"])
+            assert result.exit_code == 1, result.output
+            assert "(A35)" in result.output
+            assert "raw_db" in result.output
+            mock_spark.assert_not_called()
+        finally:
+            os.chdir(old)
+
+    def test_non_string_variable_name_does_not_crash_the_effective_log_line(
+        self, tmp_path
+    ):
+        # #370 review fix 7: a YAML variables block with a non-string key
+        # (here a bare int key, same failure shape as PyYAML's bool-like
+        # `on:`) must not crash __main__.py's "Effective ETL variables" log
+        # line (sorted(merged_vars.items())) with "'<' not supported between
+        # instances of 'int' and 'str'". SQLRunner is mocked — the point
+        # here is only the log line, not check_renders/run.
+        _setup_etl_conf(tmp_path, variables={2025: "x", "raw_db": "y"})
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session",
+                return_value=MagicMock(),
+            ), patch(
+                "recsys_tfb.pipelines.source_etl.sql_runner.SQLRunner"
+            ) as MockRunner:
+                MockRunner.return_value.check_renders.return_value = []
+                result = runner.invoke(
+                    app, ["feature_etl", "--target-dates", "2025-01-31"])
+            assert result.exit_code == 0, result.output
+            assert "TypeError" not in result.output
+        finally:
+            os.chdir(old)
+
+    def test_unexpected_exception_in_check_renders_is_logged_not_bare_traceback(
+        self, tmp_path
+    ):
+        # #370 review fix 8: an unexpected exception surfacing through
+        # check_renders (here IsADirectoryError — sql_file points at a
+        # directory, not a file) must be caught and logged
+        # (logger.exception + Exit 1), like runner.run's own `except
+        # Exception` — not left to bypass the log with a bare traceback.
+        # SQLRunner is real (not mocked): the point is that _run_etl's own
+        # try/except around check_renders is what catches this.
+        _setup_etl_conf(tmp_path)
+        sql_path = tmp_path / "conf" / "sql" / "etl" / "feature" / "feature_table.sql"
+        sql_path.parent.mkdir(parents=True, exist_ok=True)
+        sql_path.mkdir()  # a directory where a .sql FILE is expected
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(
+                    app, ["feature_etl", "--target-dates", "2025-01-31"])
+            assert result.exit_code == 1, result.output
+            assert "check_renders failed" in result.output
             mock_spark.assert_not_called()
         finally:
             os.chdir(old)

@@ -210,6 +210,19 @@ class TestCheckRenders:
         errors = runner.check_renders(["2024-01-31"], restart_from="feature_sav")
         assert errors == []
 
+    def test_restart_from_does_not_log_skipping(self, sql_dir, caplog):
+        # #370 review fix 10: _run_etl calls check_renders() and then run()
+        # on the same invocation, and both used to call the *logging*
+        # _get_tables_to_run — one --restart-from run printed every
+        # "Skipping X (restart mode)" line twice. check_renders must be
+        # silent; run() still logs it once (test_dry_run_restart_from pins
+        # that half).
+        config = _base_config()
+        runner = SQLRunner(config, sql_dir, dry_run=True)
+        with caplog.at_level("INFO"):
+            runner.check_renders(["2024-01-31"], restart_from="feature_concat")
+        assert not any("Skipping" in m for m in caplog.messages)
+
     def test_missing_sql_file_is_collected(self, sql_dir):
         config = _base_config()
         config["tables"][1]["sql_file"] = "feature/does_not_exist.sql"
