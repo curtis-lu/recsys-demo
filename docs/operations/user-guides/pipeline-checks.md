@@ -224,7 +224,7 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
   - `--target-dates` 沒給、設定裡也沒有 `target_dates`。
   - `--source-check` 和 `--restart-from` 一起用；`--restart-from` 的表名不存在。
   - 表的設定：`partition_by` 必須是非空的「欄名 → Hive 型別」對照，例如 `snap_date: DATE`；`depends_on` 引用的表必須排在它前面。
-  - `--var` 與 YAML `variables` 的檢查（`A35`）：`--var` 帶到沒在 `variables` 宣告的名字、同一個名字帶了兩次、`--var` 缺 `=`、`variables` 的值不是字串或 `~`、`variables` 本身不是「名字 → 值」的對照、某個 `~` 名字沒有對應的 `--var`、某個變數的最終值本身包含 `${`（代換依宣告順序逐一進行，沒換到的到了 Spark 會被默默換成空字串）。`target_date`、`target_db` 這兩個保留名都不能出現在 `--var`（`--var target_date=...`、`--var target_db=...` 都擋）；`target_date` 連寫進 YAML `variables` 也擋，`target_db` 寫成正常字串值不受影響，只有寫成 `target_db: ~` 才擋。這些問題會一次全部列出。
+  - `--var` 與 YAML `variables` 的檢查（`A35`）：`--var` 帶到沒在 `variables` 宣告的名字、同一個名字帶了兩次、`--var` 缺 `=`、`variables` 的值不是字串或 `~`、`variables` 本身不是「名字 → 值」的對照、某個 `~` 名字沒有對應的 `--var`、某個變數的最終值裡有 `${target_date}` 以外的 `${...}`（變數之間依宣告順序逐一代換，換不換得到看順序，沒換到的到了 Spark 會被默默換成空字串；`${target_date}` 永遠最後換，所以可以用）。`target_date`、`target_db` 這兩個保留名都不能出現在 `--var`（`--var target_date=...`、`--var target_db=...` 都擋）；`target_date` 連寫進 YAML `variables` 也擋，`target_db` 寫成正常字串值不受影響，只有寫成 `target_db: ~` 才擋。這些問題會一次全部列出。
   - 把這次要跑的所有表、所有日期的 SQL 都先換一遍：換完還剩任何 `${...}`（包括 `${hiveconf:x}` 這類 Spark 自己的變數語法，以及只在 YAML 才會被換的 `${env.X}` 寫進 SQL 檔的情況）、SQL 檔案不存在，都在這裡擋下，不用等真正執行到那張表才發現。
 - **查上游**（`source_checks`）：**只有帶 `--source-check` 時才跑**，而且那一次只檢查、不寫表。這一次一樣會做上面「跑之前」那些檢查，所以可以用同一行指令（含同一組 `--var`）先加 `--source-check` 預檢一次，通過後拿掉這個旗標正式執行；source check 本身不讀 `variables`，行為不變。
   - 會擋：該月分區不存在；有設 `min_row_count`（大於 0）時，列數不夠；有寫 `expected_columns` 時，實際欄位缺欄或型別不同，`allow_new_columns: false` 時多出新欄也擋。

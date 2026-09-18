@@ -121,7 +121,7 @@ feature_etl:
 
 `variables` 底下每個名字的值有三種寫法：
 
-- 字串：這次執行沒有用 `--var` 帶同名的值時，就使用它當預設值。這個字串的最終值（不管來自 YAML 還是 `--var`）不能再包含 `${`；YAML 裡的 `${env.X}` 不算，它在載入設定時就已經換成環境變數的值（見下方）。理由是：代換依變數宣告順序逐一進行，值裡若還有 `${...}`，換不換得到要看它排在其他變數的前面還是後面，同一份設定換個宣告順序結果就不同；沒換到的 `${...}` 到了 Spark 會被默默換成空字串（Spark 預設開著 `spark.sql.variable.substitute`，對不認得的 `${...}` 不會報錯），跑完只是悄悄少了資料。請直接寫最終值。
+- 字串：這次執行沒有用 `--var` 帶同名的值時，就使用它當預設值。這個字串的最終值（不管來自 YAML 還是 `--var`）裡，唯一可以出現的 `${...}` 是 `${target_date}`，例如 `win_start: "add_months('${target_date}', -12)"`；出現其他 `${...}` 就擋下。理由是：變數之間依宣告順序逐一代換，值裡引用別的變數時，換不換得到要看兩者誰排前面，同一份設定換個宣告順序結果就不同；沒換到的 `${...}` 到了 Spark 會被默默換成空字串（Spark 預設開著 `spark.sql.variable.substitute`，對不認得的 `${...}` 不會報錯），跑完只是悄悄少了資料。`${target_date}` 例外，因為它永遠最後才換，結果不受順序影響。其他值請直接寫最終值；要隨日期變的運算式，就引用 `${target_date}`，或直接寫進 SQL 檔。YAML 裡的 `${env.X}` 在載入設定時就換成環境變數的值（見下方），所以不受這條限制，除非環境變數的值本身就含有 `${`。
 - `~`（YAML 的 null）：代表這次執行**必須**用 `--var` 帶這個名字的值，沒帶就擋下；用 `--restart-from` 接續、就算用到它的那張表被略過了，也一樣要帶。這樣規則只有一句「寫了 `~` 就一定要帶」，看設定檔就知道會不會被擋，不必逐支 SQL 去查哪張表用到它；接續時照抄上一次的整行指令即可。
 - 其他型別（數字、布林……）：會被擋下，改成加引號的字串即可，例如 `my_var: "2025"`。
 
@@ -130,7 +130,7 @@ feature_etl:
 - `target_date`：每個日期由 `--target-dates`（或 YAML `target_dates`）逐一帶入 SQL。若也能從 `--var` 帶，這個值會被每個日期的實際值蓋掉、等於白帶，所以 `--var target_date=...` 直接擋下，改用 `--target-dates`。`variables` 裡宣告 `target_date`（不管值是什麼）一樣會被擋，理由相同——寫了也不會有任何作用。
 - `target_db`：決定表寫入哪個 database，也決定 audit 表位置與輸出檢查讀哪個 database。`--var target_db=...` 會被擋下：只能在這份 YAML 改，這樣「寫到哪裡」一定會留下設定檔的變更紀錄，方便事後追查；而且下游 `dataset` pipeline 讀的是另一份設定 `hive.db`，不會跟著這裡的值變動，若讓它能用 `--var` 覆寫，兩邊會默默不一致。但這條限制只擋 `--var`，**不擋 YAML 裡的正常字串值**——`variables.target_db` 寫成字串（像 §3.1 範例裡的 `target_db: ml_recsys`）是正常且建議的設定。只有寫成 `target_db: ~` 才會被擋，因為 `~` 的意思是「這個值只能從 `--var` 帶」，但 `target_db` 又不准從 `--var` 帶，兩條規則互相衝突，只好直接擋。
 
-以上任何一種情況——`--var` 帶到沒宣告的名字、同一個名字帶了兩次、`--var` 缺少 `=`、`variables` 的值型別不合法、`variables` 本身不是「名字 → 值」的對照、某個 `~` 名字沒有用 `--var` 帶、某個變數的最終值本身包含 `${`、`--var` 帶了 `target_date` 或 `target_db`、YAML `variables` 宣告了 `target_date`，或 `variables.target_db` 寫成 `~`——都屬於不變量 `A35`，訊息以 `(A35)` 開頭，會在同一次執行裡把所有問題一次列出，並且在 Spark 啟動前完成檢查，見 `src/recsys_tfb/core/consistency.py` 的 invariant legend。
+以上任何一種情況——`--var` 帶到沒宣告的名字、同一個名字帶了兩次、`--var` 缺少 `=`、`variables` 的值型別不合法、`variables` 本身不是「名字 → 值」的對照、某個 `~` 名字沒有用 `--var` 帶、某個變數的最終值裡有 `${target_date}` 以外的 `${...}`、`--var` 帶了 `target_date` 或 `target_db`、YAML `variables` 宣告了 `target_date`，或 `variables.target_db` 寫成 `~`——都屬於不變量 `A35`，訊息以 `(A35)` 開頭，會在同一次執行裡把所有問題一次列出，並且在 Spark 啟動前完成檢查，見 `src/recsys_tfb/core/consistency.py` 的 invariant legend。
 
 YAML 寫 `my_var: "${env.MY_VAR}"` 這種用環境變數帶值的寫法照樣可用：`${env.X}` 在載入設定時就換掉了，`--var` 在它之後才覆寫，兩者不衝突。這些檢查不受 dry run 影響——不管有沒有開 dry run，都一樣會做。
 
@@ -313,7 +313,7 @@ python -m recsys_tfb feature_etl --env production \
 | 階段 | 處理內容 | 失敗行為 |
 |---|---|---|
 | 載入設定 | 解析 YAML、table 順序與 `depends_on` | 設定不合法時，在執行 SQL 前中止 |
-| Render SQL | 對這張表、這個日期，重新讀 SQL 檔並代入 `${target_date}`、`${target_db}`、`--var` 覆寫值 | 理論上不會再失敗——同一套代換邏輯已經在 Spark 啟動前，對這次所有表與日期驗證過一次 |
+| Render SQL | 對這張表、這個日期，重新讀 SQL 檔並代入 `${target_date}`、`${target_db}`、`--var` 覆寫值 | 有未解析的 `${...}` 或 SQL 檔不存在時中止。代換用的是 Spark 啟動前檢查時同一段程式，所以通常只會發生在兩者之間 SQL 檔被改動的情況 |
 | 探測輸出 schema | 以 `LIMIT 0` 取得 SELECT 欄位與型別 | SQL 或上游 schema 錯誤時中止 |
 | 建表或對齊 schema | 首次 CTAS；既有表則 append-only schema evolution | 移除欄位或 partition 欄缺失時中止 |
 | 寫入 partition | 以 `INSERT OVERWRITE` 寫入該日期 | Spark／Hive 錯誤時中止 |
@@ -376,7 +376,7 @@ source ETL 的輸出不會因 SQL 或來源資料內容改變而自動產生新�
 | `Source check FAILED ... partition_exists` | 上游 partition 尚未產出或 partition key 設錯 | 以 `SHOW PARTITIONS <table>` 確認日期格式與欄位 |
 | `Source check FAILED ... row_count` | 上游載入不完整或門檻設定過高 | 查詢該 partition 實際列數，確認上游完成狀態與合理門檻 |
 | `Source check FAILED ... schema_drift` | 缺欄、型別改變或出現不允許的新欄位 | 比對 `DESCRIBE <table>` 與 `expected_columns`，修正上游或更新契約 |
-| `(A35) ...`（開頭；`--var`／`variables` 設定不合法） | `--var` 帶到沒在 `variables` 宣告的名字、同一個名字帶了兩次、`--var` 缺少 `=`、`variables` 的值不是字串或 `~`、`variables` 本身不是「名字 → 值」的對照、某個 `~` 名字沒有對應的 `--var`、某個變數的最終值本身包含 `${`、`--var` 帶了 `target_date` 或 `target_db`、YAML `variables` 宣告了 `target_date`，或 `variables.target_db` 寫成 `~` | 這些問題會一次全部列出，且在 Spark 啟動前擋下；照訊息逐條修正 `--var` 參數或 YAML `variables` 後重跑 |
+| `(A35) ...`（開頭；`--var`／`variables` 設定不合法） | `--var` 帶到沒在 `variables` 宣告的名字、同一個名字帶了兩次、`--var` 缺少 `=`、`variables` 的值不是字串或 `~`、`variables` 本身不是「名字 → 值」的對照、某個 `~` 名字沒有對應的 `--var`、某個變數的最終值裡有 `${target_date}` 以外的 `${...}`、`--var` 帶了 `target_date` 或 `target_db`、YAML `variables` 宣告了 `target_date`，或 `variables.target_db` 寫成 `~` | 這些問題會一次全部列出，且在 Spark 啟動前擋下；照訊息逐條修正 `--var` 參數或 YAML `variables` 後重跑 |
 | `Unresolved template variables in <檔名>: [...]` | SQL 換完後還有沒被解析的 `${...}`：可能是 `variables` 沒定義這個名字；也可能是 Spark 自己的變數語法（例如 `${hiveconf:x}`），或只在 YAML 才會被換的 `${env.X}` 寫進了 SQL 檔 | 在 `variables` 補上這個名字的預設值，或用 `--var` 帶值；要用環境變數時，在 `variables` 寫 `my_var: "${env.MY_VAR}"`，SQL 改用 `${my_var}` |
 | `No such file or directory: '<路徑>'` | `sql_file` 路徑打錯，或該表的 SQL 檔案還沒建立 | 確認 `conf/sql/etl/...` 路徑與檔名；這項檢查在 Spark 啟動前就會做完，不用等執行到那張表才發現 |
 | `depends on ... but ... does not appear before it` | `depends_on` 指向不存在或排列在後方的 table | 調整 `tables` list 順序或修正 table 名稱 |
