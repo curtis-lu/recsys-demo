@@ -1,7 +1,11 @@
 dataset:
   # --- Train 月底 snap_date list ---
-  # 顯式列出（避免上游 cadence 變動時 silently 吞下，符合 ML lineage 慣例）
-  # 產生：pd.date_range(start, end, freq="ME").strftime("%Y-%m-%d").tolist()
+  # 由設定決定、不由資料決定（避免上游 cadence 變動時 silently 吞下，符合 ML lineage 慣例）。
+  # 四個 *_snap_dates 都有兩種寫法，版本 ID 相同（載入時區間先展開成清單，core/date_ranges.py）：
+  #   逐一列出（如下），或寫成區間——
+  #     train_snap_dates: {start: "2025-01-31", end: "2025-10-31", step: month_end}
+  #   step ∈ day | week | month_start | month_end；含頭含尾，起迄都必須落在 step 上，
+  #   沒落在上面就報錯（不會自動挪日期）。詳見 docs/pipelines/dataset.md §3.1。
   train_snap_dates:
     - "2025-01-31"
     - "2025-02-28"

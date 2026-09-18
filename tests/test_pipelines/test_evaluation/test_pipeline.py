@@ -127,6 +127,9 @@ class TestRegistryDiagnosesFollowTheMode:
         import pandas as pd
 
         from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
+        from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+            EvalPartitions,
+        )
 
         params = {"evaluation": {"diagnosis": {"ci": {"enabled": False}}}}
         segments = {"joined": [], "config_fingerprint": fingerprint(params)}
@@ -143,8 +146,8 @@ class TestRegistryDiagnosesFollowTheMode:
                 return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
             ) as spy, patch(
                 "recsys_tfb.pipelines.evaluation.nodes."
-                "restrict_to_eval_snap_date",
-                lambda df, parameters: df,
+                "restrict_to_current_eval_partitions",
+                lambda df, parameters, *_, **__: EvalPartitions(df, []),
             ):
                 result = node.func(None, segments, params)
             outcome[label] = {"draws": spy.call_count, "sample": result is not None}
@@ -392,7 +395,12 @@ class TestSegmentColumnsWiring:
 
 def _readers_that_skip_the_month_restriction(pipeline):
     """Names of nodes wired to ``enriched_eval_predictions`` whose body has no
-    used ``restrict_to_eval_snap_date(<that input's parameter>, ...)`` call.
+    used ``restrict_to_current_eval_partitions(<that input's parameter>, ...)``
+    call.
+
+    That call both keeps the evaluated dates and checks each date's partition
+    was written under the settings the reader reads it for (#374); the plain
+    ``restrict_to_eval_snap_dates`` does only the first, so it does not count.
 
     The body comes from the node's function object (``inspect.getsource``),
     not from a module path: node modules get renamed and split (ADR-0019), and
@@ -415,7 +423,7 @@ def _readers_that_skip_the_month_restriction(pipeline):
             isinstance(call, ast.Call)
             and id(call) not in discarded
             and getattr(call.func, "id", getattr(call.func, "attr", None))
-            == "restrict_to_eval_snap_date"
+            == "restrict_to_current_eval_partitions"
             and call.args
             and isinstance(call.args[0], ast.Name)
             and call.args[0].id == bound_to
@@ -432,20 +440,30 @@ def _forgets_the_month(enriched_eval_predictions, parameters):
 
 def _restricts_the_wrong_frame(other, enriched_eval_predictions, parameters):
     from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
-        restrict_to_eval_snap_date,
+        restrict_to_current_eval_partitions,
     )
 
-    other = restrict_to_eval_snap_date(other, parameters)
+    other = restrict_to_current_eval_partitions(other, parameters, {}).frame
     return enriched_eval_predictions.count() + other.count()
 
 
 def _discards_the_restriction(enriched_eval_predictions, parameters):
     from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
-        restrict_to_eval_snap_date,
+        restrict_to_current_eval_partitions,
     )
 
-    restrict_to_eval_snap_date(enriched_eval_predictions, parameters)
+    restrict_to_current_eval_partitions(enriched_eval_predictions, parameters, {})
     return enriched_eval_predictions.count()
+
+
+def _restricts_without_checking_the_partitions(enriched_eval_predictions,
+                                               parameters):
+    from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+        restrict_to_eval_snap_dates,
+    )
+
+    return restrict_to_eval_snap_dates(
+        enriched_eval_predictions, parameters).count()
 
 
 class TestEveryEnrichedReaderKeepsTheEvaluatedMonth:
@@ -487,10 +505,14 @@ class TestEveryEnrichedReaderKeepsTheEvaluatedMonth:
             Node(_discards_the_restriction,
                  inputs=["enriched_eval_predictions", "parameters"],
                  outputs="n_discarded"),
+            Node(_restricts_without_checking_the_partitions,
+                 inputs=["enriched_eval_predictions", "parameters"],
+                 outputs="n_unchecked"),
         ])
         assert sorted(_readers_that_skip_the_month_restriction(pipeline)) == [
             "_discards_the_restriction", "_forgets_the_month",
             "_restricts_the_wrong_frame",
+            "_restricts_without_checking_the_partitions",
         ]
 
 

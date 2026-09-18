@@ -44,9 +44,9 @@ def create_pipeline(
         make_diagnosis_node,
         make_draw_diagnosis_sample_node,
         make_prepare_eval_data_node,
+        make_restrict_to_common_node,
         no_diagnosis_pages,
         render_diagnosis_pages,
-        restrict_to_common,
         validate_enriched_eval_predictions_present,
     )
 
@@ -56,10 +56,16 @@ def create_pipeline(
         # model_version=${model_version}; the gate raises when the evaluated
         # month has no rows and passes nothing on, so restrict_to_common reads
         # the table and keeps the month itself, like every reader.
+        # Both A-side readers also take evaluation_segment_columns: it records
+        # the settings and the joined segment columns the run that wrote this
+        # directory stamped on its partitions, which they check each partition
+        # against (#374). Only this mode takes the settings from that JSON;
+        # see make_restrict_to_common_node.
         return Pipeline([
             Node(
                 validate_enriched_eval_predictions_present,
-                inputs=["enriched_eval_predictions", "parameters"],
+                inputs=["enriched_eval_predictions",
+                        "evaluation_segment_columns", "parameters"],
             ),
             Node(
                 load_compare_predictions,
@@ -67,9 +73,9 @@ def create_pipeline(
                 outputs="compare_predictions_raw",
             ),
             Node(
-                restrict_to_common,
+                make_restrict_to_common_node(compare_only=True),
                 inputs=["enriched_eval_predictions", "compare_predictions_raw",
-                        "parameters"],
+                        "evaluation_segment_columns", "parameters"],
                 outputs=["eval_predictions_common", "compare_predictions_common",
                          "compare_coverage_partial"],
             ),
@@ -128,7 +134,10 @@ def create_pipeline(
         ),
         Node(
             compute_report_aggregates,
-            inputs=["enriched_eval_predictions", "parameters"],
+            # evaluation_segment_columns for its joined list: part of the
+            # fingerprint each partition read here must carry (#374).
+            inputs=["enriched_eval_predictions", "evaluation_segment_columns",
+                    "parameters"],
             outputs="evaluation_report_aggregates",
         ),
         Node(
@@ -201,10 +210,13 @@ def create_pipeline(
                 inputs=["parameters"],
                 outputs="compare_predictions_raw",
             ),
+            # Checks partitions against today's settings, not the directory
+            # JSON's: a --only-node generate_comparison_report slice reads
+            # partitions an earlier run wrote, whose JSON is as old (#374).
             Node(
-                restrict_to_common,
+                make_restrict_to_common_node(compare_only=False),
                 inputs=["enriched_eval_predictions", "compare_predictions_raw",
-                        "parameters"],
+                        "evaluation_segment_columns", "parameters"],
                 outputs=["eval_predictions_common", "compare_predictions_common",
                          "compare_coverage_partial"],
             ),

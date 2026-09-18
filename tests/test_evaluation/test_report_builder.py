@@ -919,6 +919,42 @@ def test_assemble_metadata_has_model_version_and_generated_at():
     assert "Generated At" in html
 
 
+def _metadata_block(html):
+    start = html.index('<div class="metadata">')
+    return html[start:html.index("</div>", start)]
+
+
+def test_metadata_one_date_is_shown_as_configured_without_a_ci_warning():
+    """A single date keeps its metadata rows exactly: the same five, the date
+    as written, no several-date wording anywhere in the page."""
+    p = _params()
+    p["evaluation"]["snap_date"] = "2026-01-31"
+    html = rb.assemble_report(_metrics(), p, metric_ci=_metric_ci())
+    block = _metadata_block(html)
+    assert [row.split("</th>")[0] for row in block.split("<tr><th>")[1:]] == [
+        "Model Version", "Snap Date", "Generated At", "Total Queries",
+        "Excluded Queries"]
+    assert "<tr><th>Snap Date</th><td>2026-01-31</td></tr>" in block
+    assert "#389" not in html
+    assert "個日期" not in html
+
+
+def test_metadata_several_dates_show_the_range_and_warn_about_the_ci():
+    """#374: the date row reads as a range with its count, and one sentence
+    right under it warns that the CIs may be off (issue #389)."""
+    p = _params()
+    p["evaluation"]["snap_date"] = ["2026-02-28", "2026-01-31", "2026-03-31"]
+    html = rb.assemble_report(_metrics(), p, metric_ci=_metric_ci())
+    block = _metadata_block(html)
+    assert ("<tr><th>Snap Date</th><td>2026-01-31 ~ 2026-03-31（3 個日期）"
+            "</td></tr>") in block, block
+    rows = block.split("<tr><th>")[1:]
+    labels = [row.split("</th>")[0] for row in rows]
+    warning = rows[labels.index("Snap Date") + 1]
+    assert "信賴區間" in warning and "#389" in warning, warning
+    assert html.count("#389") == 1
+
+
 def test_dataset_overview_adds_by_category_when_present():
     m = _metrics()
     m["category"] = {"dataset_overview": {"by_item": {
@@ -1142,6 +1178,56 @@ def test_baseline_fully_covered_lookback_window_keeps_the_plain_sentence():
     assert "實際只涵蓋" not in s.description
     pop = s.tables[s.table_titles.index("popularity 排名組成")]
     assert pop.loc["A", "平均每月"] == 2.0      # 24 / 12
+
+
+def test_baseline_several_dates_divide_by_every_windows_months():
+    """#374: two evaluated dates, two full 12-month windows. count sums both
+    windows, so the per-month average divides by 2 × 12 = 24 window-months:
+    240 / 24 = 10.0 (dividing by one window's 12 would print 20.0)."""
+    base = {
+        "overall": {"map@1": 0.4},
+        "purchase_counts": {"A": 240},
+        "monthly_counts": {"A": {f"2025-{mo:02d}": 20 for mo in range(1, 13)}},
+        "window_months_covered": {"2026-01-31": 12, "2026-02-28": 12},
+    }
+    s = rb.build_baseline_section(_metrics(), base, _params_lookback())
+    pop = s.tables[s.table_titles.index("popularity 排名組成")]
+    assert pop.loc["A", "平均每月"] == 10.0
+    assert "對 2 個評估日期各以該日期之前 12 個月" in s.description
+    assert "÷ 24" in s.description
+    assert "實際只涵蓋" not in s.description
+    # The plain one-window sentence would misstate the divisor here.
+    assert "popularity 以過去 12 個月的歷史購買計數重排。" not in s.description
+    assert "重複計數" in s.description
+
+
+def test_baseline_several_dates_with_partial_windows_divide_by_covered_months():
+    """Window one has label rows in 2 of its 12 months, window two in 3: the
+    divisor is 2 + 3 = 5 window-months, 240 / 5 = 48.0."""
+    base = {
+        "overall": {"map@1": 0.4},
+        "purchase_counts": {"A": 240},
+        "monthly_counts": {"A": {"2025-11": 100, "2025-12": 100, "2026-01": 40}},
+        "window_months_covered": {"2026-01-31": 2, "2026-02-28": 3},
+    }
+    s = rb.build_baseline_section(_metrics(), base, _params_lookback())
+    pop = s.tables[s.table_titles.index("popularity 排名組成")]
+    assert pop.loc["A", "平均每月"] == 48.0
+    assert "實際只涵蓋 5 個視窗月" in s.description
+    assert "滿額 24 個" in s.description
+
+
+def test_baseline_one_date_says_nothing_about_several_dates():
+    """No window_months_covered (a single-date result): none of the
+    several-date wording appears."""
+    base = {
+        "overall": {"map@1": 0.4},
+        "purchase_counts": {"A": 24},
+        "monthly_counts": {"A": {"2025-11": 12, "2025-12": 12}},
+    }
+    s = rb.build_baseline_section(_metrics(), base, _params_lookback())
+    for text in ("評估日期", "視窗月", "重複計數"):
+        assert text not in s.description, text
 
 
 def test_baseline_section_renders_popularity_table():

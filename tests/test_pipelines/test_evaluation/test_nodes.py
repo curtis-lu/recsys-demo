@@ -19,10 +19,14 @@ def _no_segments(parameters):
             "config_fingerprint": fingerprint(parameters)}
 
 
-def _kept_month_of(df, parameters):
-    """Stand-in for ``restrict_to_eval_snap_date`` in tests that pass no frame:
-    marks what the node forwarded as the restricted one."""
-    return ("kept month of", df)
+def _kept_month_of(df, parameters, *_segments, **_mode):
+    """Stand-in for ``restrict_to_current_eval_partitions`` in tests that pass
+    no frame: marks what the node forwarded as the restricted one."""
+    from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+        EvalPartitions,
+    )
+
+    return EvalPartitions(("kept month of", df), [])
 
 
 def _prepare_eval_data(predictions, labels, parameters):
@@ -676,6 +680,159 @@ def test_prepare_eval_data_raises_when_snap_date_unset(spark):
         _prepare_eval_data(predictions, labels, parameters)
 
 
+def _months_frames(spark, months):
+    """Predictions and labels for customers c1/c2 × items A/B in each month."""
+    import pandas as pd
+
+    keys = [(m, c, p) for m in months for c in ("c1", "c2") for p in ("A", "B")]
+    predictions = spark.createDataFrame(pd.DataFrame({
+        "snap_date": [m for m, _, _ in keys],
+        "cust_id": [c for _, c, _ in keys],
+        "prod_name": [p for _, _, p in keys],
+        "score": [0.9 if p == "A" else 0.1 for _, _, p in keys],
+        "rank": [1 if p == "A" else 2 for _, _, p in keys],
+        "model_version": ["v1"] * len(keys),
+    }))
+    labels = spark.createDataFrame(pd.DataFrame({
+        "snap_date": [m for m, _, _ in keys],
+        "cust_id": [c for _, c, _ in keys],
+        "prod_name": [p for _, _, p in keys],
+        "label": [1 if p == "A" else 0 for _, _, p in keys],
+    }))
+    return predictions, labels
+
+
+def _prepare_params(snap_date):
+    return {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "label": "label", "score": "score", "rank": "rank"}},
+        "model_version": "v1",
+        "evaluation": {"snap_date": snap_date},
+    }
+
+
+def test_prepare_eval_data_stamps_every_row_with_the_partition_fingerprint(spark):
+    """#374: each row carries the settings its partition is written under, so
+    a reader can tell when another run rewrote that date since."""
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+        PARTITION_FINGERPRINT_COLUMN,
+        partition_fingerprint,
+    )
+
+    predictions, labels = _months_frames(spark, ["2025-01-31", "2025-02-28"])
+    params = _prepare_params(["2025-01-31", "2025-02-28"])
+    params["post_training"] = False
+    result = _prepare_eval_data(predictions, labels, params)
+    stamped = {r[0] for r in
+               result.select(PARTITION_FINGERPRINT_COLUMN).distinct().collect()}
+    # No segment column configured, so nothing joined.
+    assert stamped == {partition_fingerprint(params, [])}
+
+
+class TestAPartitionCarriesTheSegmentColumnsActuallyJoined:
+    """#374 review: the settings alone do not say what a partition holds. A
+    segment column the population table lacks is skipped (not raised), so two
+    runs with identical settings write different rows when the population
+    changed between them. Driven through prepare_eval_data, the real writer,
+    and compute_metrics, a reader."""
+
+    MONTHS = ["2025-01-31", "2025-02-28"]
+
+    @staticmethod
+    def _params(snap_date):
+        params = _prepare_params(snap_date)
+        params["evaluation"].update({"segment_columns": ["tier"],
+                                     "k_values": [1, 2]})
+        return params
+
+    @staticmethod
+    def _population(spark, months, with_tier):
+        if with_tier:
+            return spark.createDataFrame(
+                [(m, c, "gold") for m in months for c in ("c1", "c2")],
+                ["snap_date", "cust_id", "tier"])
+        return spark.createDataFrame(
+            [(m, c) for m in months for c in ("c1", "c2")],
+            ["snap_date", "cust_id"])
+
+    @classmethod
+    def _run(cls, spark, snap_date, months, with_tier):
+        """One prepare_eval_data run: ``(its partition rows, its JSON)``."""
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            make_prepare_eval_data_node,
+        )
+
+        predictions, labels = _months_frames(spark, months)
+        return make_prepare_eval_data_node("inference_population")(
+            predictions, labels, cls._population(spark, months, with_tier),
+            cls._params(snap_date))
+
+    def test_a_month_rewritten_without_a_joined_column_is_refused(self, spark):
+        """January–February joined ``tier``; the population then lost it and
+        February was re-run alone (``tier`` skipped, NULL in the partition).
+        Resuming the range: its JSON still says joined=[tier] and the
+        settings match, so without the joined list in the fingerprint all of
+        February would land in the unmatched segment, exit 0."""
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+
+        range_rows, range_segments = self._run(
+            spark, self.MONTHS, self.MONTHS, with_tier=True)
+        february_rows, february_segments = self._run(
+            spark, "2025-02-28", ["2025-02-28"], with_tier=False)
+        assert february_segments["joined"] == []
+        table = range_rows.filter("snap_date = '2025-01-31'").unionByName(
+            february_rows, allowMissingColumns=True)
+
+        with pytest.raises(ValueError) as excinfo:
+            compute_metrics(table, range_segments, self._params(self.MONTHS))
+        message = str(excinfo.value)
+        assert "2025-02-28: written under other settings" in message, message
+        assert "2025-01-31" not in message, message
+
+    def test_same_settings_and_population_over_other_dates_are_read(self, spark):
+        """Same settings, same population: the month a single-date run wrote
+        is the range run's month too."""
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+
+        range_rows, range_segments = self._run(
+            spark, self.MONTHS, self.MONTHS, with_tier=True)
+        february_rows, _ = self._run(
+            spark, "2025-02-28", ["2025-02-28"], with_tier=True)
+        table = range_rows.filter("snap_date = '2025-01-31'").unionByName(
+            february_rows)
+        result = compute_metrics(table, range_segments, self._params(self.MONTHS))
+        assert result["dataset_overview"]["totals"]["n_snap_dates"] == 2
+
+
+def test_prepare_eval_data_keeps_every_configured_date(spark):
+    """Two of three months configured (#374): both kept, whole query groups
+    (2 customers × 2 items each), the third month dropped."""
+    predictions, labels = _months_frames(
+        spark, ["2025-01-31", "2025-02-28", "2025-03-31"])
+    result = _prepare_eval_data(
+        predictions, labels, _prepare_params(["2025-01-31", "2025-03-31"])
+    ).toPandas()
+    assert sorted(result["snap_date"].value_counts().items()) == [
+        ("2025-01-31", 4), ("2025-03-31", 4)]
+
+
+def test_prepare_eval_data_names_the_one_configured_date_with_no_predictions(spark):
+    """Three months configured, the predictions hold two. A check on the
+    filtered frame as a whole passes (it has rows), so the missing month would
+    silently drop out of the evaluation."""
+    predictions, labels = _months_frames(spark, ["2025-01-31", "2025-02-28"])
+    params = _prepare_params(["2025-01-31", "2025-02-28", "2025-03-31"])
+    with pytest.raises(ValueError) as excinfo:
+        _prepare_eval_data(predictions, labels, params)
+    message = str(excinfo.value)
+    assert ("No predictions found for 1 of 3 evaluation.snap_date dates: "
+            "['2025-03-31']") in message, message
+    # The months that are there are listed as present, not as missing.
+    assert "snap_dates present in predictions: ['2025-01-31', '2025-02-28']" \
+        in message, message
+
+
 def test_prepare_eval_data_left_joins_labels_and_fills_missing_with_zero(spark):
     """prepare_eval_data must LEFT JOIN predictions with labels so that
     predictions for (cust, prod) pairs with no label_table row are kept,
@@ -771,17 +928,24 @@ class TestComputeBaselineMetrics:
             },
         }
 
-    @staticmethod
-    def _eval_predictions(spark):
+    @classmethod
+    def _eval_predictions(cls, spark):
+        """The partition as ``prepare_eval_data`` under :meth:`_parameters`
+        writes it, settings fingerprint included."""
         import pandas as pd
-        return spark.createDataFrame(pd.DataFrame({
+
+        from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+            stamp_partition_fingerprint,
+        )
+
+        return stamp_partition_fingerprint(spark.createDataFrame(pd.DataFrame({
             "snap_date": ["2025-01-31"] * 6,
             "cust_id": ["c1", "c1", "c1", "c2", "c2", "c2"],
             "prod_name": ["A", "B", "C", "A", "B", "C"],
             "label": [1, 0, 1, 0, 1, 0],
             "score": [0.9, 0.5, 0.1, 0.2, 0.8, 0.3],
             "rank": [1, 2, 3, 3, 1, 2],
-        }))
+        })), cls._parameters(), [])
 
     @staticmethod
     def _label_table(spark):
@@ -826,6 +990,38 @@ class TestComputeBaselineMetrics:
             "A": {"2024-06": 3}, "B": {"2024-06": 1}, "C": {"2024-06": 0},
         }
 
+    def test_several_dates_record_each_windows_covered_months(self, spark):
+        """#374: two evaluated dates, two lookback windows. History at
+        2024-06-30 falls in both; history at 2025-01-31 only in the February
+        window (the January window ends before its own date). Counts sum over
+        the windows; each window's months with label rows are recorded so the
+        report can divide by window-months, not by one window's 12."""
+        import pandas as pd
+
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_baseline_metrics,
+        )
+
+        params = self._parameters()
+        params["evaluation"]["snap_date"] = ["2025-01-31", "2025-02-28"]
+        labels = self._label_table(spark).unionByName(spark.createDataFrame(
+            pd.DataFrame({
+                "snap_date": ["2025-01-31"] * 3, "cust_id": ["h0"] * 3,
+                "prod_name": ["A", "B", "C"], "label": [1, 0, 0],
+            })))
+        result = compute_baseline_metrics(
+            TestEnrichedReadersKeepTheEvaluatedMonth._two_months(spark),
+            labels, _no_segments(params), params)
+        assert result["window_months_covered"] == {
+            "2025-01-31": 1, "2025-02-28": 2}
+        # A: 3 in the January window, 3 + 1 in the February one.
+        assert result["purchase_counts"] == {"A": 7, "B": 2, "C": 0}
+        assert result["monthly_counts"] == {
+            "A": {"2024-06": 6, "2025-01": 1},
+            "B": {"2024-06": 2, "2025-01": 0},
+            "C": {"2024-06": 0, "2025-01": 0},
+        }
+
     def test_returns_a_fingerprinted_stub_when_section_disabled(self):
         """Not ``None``: a ``null`` JSON cannot carry the fingerprint, and
         ``generate_report`` would then refuse it as unfingerprinted. Returns
@@ -862,7 +1058,7 @@ def test_compute_report_aggregates_disabled_returns_fingerprinted_stub():
         compute_report_aggregates,
     )
     params = {"evaluation": {"report": {"sections": {"diagnostics": False}}}}
-    assert compute_report_aggregates(None, params) == {
+    assert compute_report_aggregates(None, None, params) == {
         "enabled": False, "config_fingerprint": fingerprint(params),
     }
 
@@ -897,7 +1093,11 @@ def test_compute_metric_ci_end_to_end_small(spark):
         },
     }
     # The sample is now drawn once by draw_diagnosis_sample_node and passed in.
-    sample = draw_diagnosis_sample_node(df, _no_segments(params), params)
+    from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+        stamp_partition_fingerprint,
+    )
+    sample = draw_diagnosis_sample_node(
+        stamp_partition_fingerprint(df, params, []), _no_segments(params), params)
     out = compute_metric_ci(sample, params)
     assert out["enabled"] is True
     assert "A" in out["per_item"] and "macro" in out and "sample" in out
@@ -958,14 +1158,20 @@ class TestConsumersSegmentByTheLandedList:
             },
         }
 
-    @staticmethod
-    def _frame(spark):
+    @classmethod
+    def _frame(cls, spark):
         from pyspark.sql import functions as F
 
-        return TestComputeBaselineMetrics._eval_predictions(spark).withColumn(
-            "cust_segment_typ",
-            F.when(F.col("cust_id") == "c1", "mass").otherwise("hnw"),
-        ).withColumn("stale_seg", F.lit(None).cast("string"))
+        from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+            stamp_partition_fingerprint,
+        )
+
+        return stamp_partition_fingerprint(
+            TestComputeBaselineMetrics._eval_predictions(spark).withColumn(
+                "cust_segment_typ",
+                F.when(F.col("cust_id") == "c1", "mass").otherwise("hnw"),
+            ).withColumn("stale_seg", F.lit(None).cast("string")),
+            cls._parameters(), cls._segments()["joined"])
 
     def test_compute_metrics(self, spark):
         from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
@@ -1090,8 +1296,10 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
         )
 
         params = self._parameters()
-        both = compute_report_aggregates(self._two_months(spark), params)
-        alone = compute_report_aggregates(self._one_month(spark), params)
+        both = compute_report_aggregates(
+            self._two_months(spark), _no_segments(params), params)
+        alone = compute_report_aggregates(
+            self._one_month(spark), _no_segments(params), params)
         assert both == alone
 
     def test_draw_diagnosis_sample_node(self, spark):
@@ -1117,6 +1325,124 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
         ):
             compute_metrics(self._two_months(spark), _no_segments(params),
                             params)
+
+    def test_compute_metrics_evaluates_every_configured_date_together(self, spark):
+        """#374: two dates configured, both months' query groups go into one
+        set of metrics — 2 customers × 2 months = 4 query groups."""
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+
+        params = self._parameters(snap_date=["2025-01-31", "2025-02-28"])
+        result = compute_metrics(self._two_months(spark), _no_segments(params),
+                                 params)
+        overview = result["dataset_overview"]
+        assert overview["totals"]["n_snap_dates"] == 2
+        assert sorted(overview["by_snap_date"]) == ["2025-01-31", "2025-02-28"]
+        assert result["n_queries"] + result["n_excluded_queries"] == 4
+
+    def test_compute_metrics_refuses_a_configured_date_with_no_rows(self, spark):
+        """Two dates configured, the partition holds one of them: expected 2,
+        evaluated 1."""
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+
+        params = self._parameters(snap_date=["2025-01-31", "2025-03-31"])
+        with pytest.raises(
+            ValueError,
+            match=r"compute_metrics postcondition: 1 evaluated months .*"
+                  r"expected exactly 2",
+        ):
+            compute_metrics(self._two_months(spark), _no_segments(params),
+                            params)
+
+    # --- partitions rewritten by another run (#374) ------------------------
+
+    _READERS = ("compute_metrics", "compute_baseline_metrics",
+                "compute_report_aggregates", "draw_diagnosis_sample_node")
+
+    @staticmethod
+    def _read(name, frame, spark, params):
+        from recsys_tfb.pipelines.evaluation import nodes
+
+        if name == "compute_baseline_metrics":
+            return nodes.compute_baseline_metrics(
+                frame, TestComputeBaselineMetrics._label_table(spark),
+                _no_segments(params), params)
+        if name == "compute_report_aggregates":
+            return nodes.compute_report_aggregates(
+                frame, _no_segments(params), params)
+        return getattr(nodes, name)(frame, _no_segments(params), params)
+
+    @staticmethod
+    def _rewrite(frame, month, params):
+        """``frame`` with ``month``'s partition as a run under ``params``
+        would leave it."""
+        from pyspark.sql import functions as F
+
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            PARTITION_FINGERPRINT_COLUMN,
+            partition_fingerprint,
+        )
+
+        return frame.withColumn(
+            PARTITION_FINGERPRINT_COLUMN,
+            F.when(F.col("snap_date") == month,
+                   F.lit(partition_fingerprint(params, [])))
+            .otherwise(F.col(PARTITION_FINGERPRINT_COLUMN)))
+
+    @pytest.mark.parametrize("name", _READERS)
+    def test_a_month_another_run_rewrote_is_refused_by_name(self, spark, name):
+        """January and February evaluated together; February then rewritten
+        by a post-training run of February alone. Resuming the first run from
+        any reader reads the range directory's JSON, whose fingerprint still
+        matches, so only the partition's own fingerprint can refuse February."""
+        params = self._parameters(snap_date=["2025-01-31", "2025-02-28"])
+        february_alone = self._parameters(snap_date="2025-02-28")
+        february_alone["post_training"] = True
+        table = self._rewrite(self._two_months(spark), "2025-02-28",
+                              february_alone)
+        with pytest.raises(ValueError) as excinfo:
+            self._read(name, table, spark, params)
+        message = str(excinfo.value)
+        assert "2025-02-28: written under other settings" in message, message
+        assert "2025-01-31" not in message, message
+
+    def test_a_single_date_resume_refuses_its_month_a_range_run_rewrote(
+        self, spark,
+    ):
+        """The other direction: February alone first, then a range run under
+        other settings rewrote February; resuming February alone refuses it."""
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+
+        params = self._parameters(snap_date="2025-02-28")
+        range_run = self._parameters(snap_date=["2025-01-31", "2025-02-28"])
+        range_run["post_training"] = True
+        table = self._rewrite(self._two_months(spark), "2025-02-28", range_run)
+        with pytest.raises(ValueError,
+                           match=r"2025-02-28: written under other settings"):
+            compute_metrics(table, _no_segments(params), params)
+
+    def test_a_partition_written_before_fingerprints_is_refused(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            PARTITION_FINGERPRINT_COLUMN,
+        )
+
+        params = self._parameters()
+        table = self._two_months(spark).drop(PARTITION_FINGERPRINT_COLUMN)
+        with pytest.raises(ValueError, match=r"2025-01-31: written before"):
+            compute_metrics(table, _no_segments(params), params)
+
+    def test_a_range_resume_reads_a_month_a_same_settings_single_run_wrote(
+        self, spark,
+    ):
+        """Same settings, other dates: not a rewrite. Stamped as February
+        alone would stamp it, the range run reads February as its own."""
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+
+        params = self._parameters(snap_date=["2025-01-31", "2025-02-28"])
+        table = self._rewrite(self._two_months(spark), "2025-02-28",
+                              self._parameters(snap_date="2025-02-28"))
+        result = compute_metrics(table, _no_segments(params), params)
+        assert result["dataset_overview"]["totals"]["n_snap_dates"] == 2
 
 
 class TestReadersRefuseAPartitionPreparedUnderOtherSettings:
@@ -1193,17 +1519,21 @@ class TestDrawDiagnosisSampleNode:
             }}},
         }
 
-    @staticmethod
-    def _eval_predictions(spark):
+    @classmethod
+    def _eval_predictions(cls, spark):
+        from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+            stamp_partition_fingerprint,
+        )
+
         rows = []
         for cust in ["H1", "H2", "H3", "H4"]:
             rows.append(("20240331", cust, "hot", 0.9, 1))
             rows.append(("20240331", cust, "cold", 0.1, 0))
         rows.append(("20240331", "C1", "hot", 0.9, 0))
         rows.append(("20240331", "C1", "cold", 0.1, 1))
-        return spark.createDataFrame(
+        return stamp_partition_fingerprint(spark.createDataFrame(
             rows, schema=["snap_date", "cust_id", "prod_name", "score", "label"]
-        )
+        ), cls._params(), [])
 
     def test_returns_none_and_skips_draw_when_all_disabled(self, spark):
         from unittest.mock import patch
@@ -1235,7 +1565,7 @@ class TestDrawDiagnosisSampleNode:
             "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample",
             return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
         ) as spy, patch.object(
-            nodes, "restrict_to_eval_snap_date", _kept_month_of
+            nodes, "restrict_to_current_eval_partitions", _kept_month_of
         ):
             nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
         # exact args, not just count: the draw gets the month-restricted table
@@ -1248,9 +1578,14 @@ class TestDrawDiagnosisSampleNode:
         # draw_diagnosis_sample. Same seed -> identical content.
         from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
         from recsys_tfb.pipelines.evaluation import nodes
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            PARTITION_FINGERPRINT_COLUMN,
+        )
         params = self._params()  # both consumers default-enabled
+        # The node draws from the table as read: fingerprint checked, dropped.
         direct_pdf, direct_meta = draw_diagnosis_sample(
-            self._eval_predictions(spark), params
+            self._eval_predictions(spark).drop(PARTITION_FINGERPRINT_COLUMN),
+            params,
         )
         node_pdf, node_meta = nodes.draw_diagnosis_sample_node(self._eval_predictions(spark), _no_segments(params), params)
         assert node_meta == direct_meta
@@ -1280,7 +1615,7 @@ class TestDrawDiagnosisSampleNode:
             "recsys_tfb.pipelines.evaluation.nodes.bootstrap_per_item_ci",
             return_value={"n_boot": 1},
         ), patch.object(
-            nodes, "restrict_to_eval_snap_date", _kept_month_of
+            nodes, "restrict_to_current_eval_partitions", _kept_month_of
         ):
             sample = nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
             nodes.compute_metric_ci(sample, params)
@@ -1390,7 +1725,7 @@ def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
         "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample",
         return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
     ) as spy, patch.object(
-        nodes, "restrict_to_eval_snap_date", _kept_month_of
+        nodes, "restrict_to_current_eval_partitions", _kept_month_of
     ):
         result = nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
     assert result is not None, (

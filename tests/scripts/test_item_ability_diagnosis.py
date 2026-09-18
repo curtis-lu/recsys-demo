@@ -1,9 +1,13 @@
+import argparse
+
 import numpy as np
 import pandas as pd
+import pytest
 
 from scripts.item_ability_diagnosis import (
     analyze_items,
     query_center_scores,
+    resolve_snap_date,
     weighted_auc,
 )
 
@@ -71,3 +75,52 @@ def test_query_center_scores_subtracts_group_mean():
     centered = query_center_scores(groups, z)
 
     np.testing.assert_allclose(centered, np.array([1.0, 0.0, -1.0, -1.0, 1.0]))
+
+
+def _args(snap_date=None):
+    return argparse.Namespace(snap_date=snap_date)
+
+
+def test_resolve_snap_date_single_string_is_used_as_is():
+    parameters = {"evaluation": {"snap_date": "2026-01-31"}}
+
+    assert resolve_snap_date(_args(), parameters) == "2026-01-31"
+
+
+def test_resolve_snap_date_range_with_same_start_and_end_resolves_one_date():
+    parameters = {
+        "evaluation": {
+            "snap_date": {
+                "start": "2026-01-31",
+                "end": "2026-01-31",
+                "step": "month_end",
+            }
+        }
+    }
+
+    assert resolve_snap_date(_args(), parameters) == "2026-01-31"
+
+
+def test_resolve_snap_date_multiple_dates_without_cli_override_fails_loud():
+    parameters = {"evaluation": {"snap_date": ["2026-01-31", "2026-02-28"]}}
+
+    with pytest.raises(ValueError) as exc_info:
+        resolve_snap_date(_args(), parameters)
+
+    message = str(exc_info.value)
+    assert "一次只看一個日期" in message
+    assert "2026-01-31" in message
+    assert "2026-02-28" in message
+
+
+def test_resolve_snap_date_cli_override_wins_over_multiple_configured_dates():
+    parameters = {"evaluation": {"snap_date": ["2026-01-31", "2026-02-28"]}}
+
+    assert resolve_snap_date(_args("2026-03-31"), parameters) == "2026-03-31"
+
+
+def test_resolve_snap_date_missing_raises():
+    parameters = {"evaluation": {}}
+
+    with pytest.raises(ValueError, match="evaluation.snap_date is missing"):
+        resolve_snap_date(_args(), parameters)

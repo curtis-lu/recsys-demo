@@ -130,8 +130,9 @@ Layer 1 — config-static (implemented here; aggregated by
   (raises ``ConfigConsistencyError`` directly and returns the normalised list;
   not aggregated by ``validate`` — it reads a CLI flag, which
   ``validate_config_consistency`` never sees. Mirrors A12).
-* A22 — under ``--post-training``, ``evaluation.snap_date`` must be a member of
-  ``dataset.test_snap_dates``. Post-training evaluation reads
+* A22 — under ``--post-training``, every date of ``evaluation.snap_date`` (one
+  date or several, #374) must be a member of ``dataset.test_snap_dates``; with
+  several, the message names the ones that are not. Post-training evaluation reads
   ``training_eval_predictions``, which accumulates every month ever predicted
   for a ``model_version`` (test dates left the version identity in ADR-0001),
   so an unlisted month can still return rows and produce a normal-looking
@@ -549,6 +550,7 @@ from typing import NamedTuple
 
 import pandas as pd
 
+from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
 from recsys_tfb.core.schema import ENTITY_GROUPING_KEYS, get_schema
 
@@ -2566,7 +2568,11 @@ def compare_mutual_exclusive_errors(compare: str | None, compare_only: str | Non
 
 
 def post_training_snap_date_errors(parameters: dict, post_training: bool) -> list[str]:
-    """(A22) Under ``--post-training``, evaluation.snap_date must be a test month.
+    """(A22) Under ``--post-training``, every evaluation.snap_date must be a test month.
+
+    ``evaluation.snap_date`` is one date or a list of dates (#374); with
+    several, each must be in ``dataset.test_snap_dates`` and the message names
+    the ones that are not.
 
     Returns error strings (empty list when fine); the CLI raises. Wired like
     A13 — it lives here, but the evaluation command calls it explicitly and
@@ -2618,6 +2624,36 @@ def post_training_snap_date_errors(parameters: dict, post_training: bool) -> lis
     configured = sorted({_iso_date(d) for d in declared})
 
     raw = (parameters.get("evaluation", {}) or {}).get("snap_date")
+    # Several evaluated dates (#374): each must be a test month, and the
+    # message names the ones that are not. One date — written plainly or as a
+    # one-element list — keeps the single-date messages below word for word.
+    dates = as_date_list(raw)
+    if len(dates) > 1:
+        unreadable_snaps = [v for v in dates if _iso_date(v) is None]
+        if unreadable_snaps:
+            return [
+                f"(A22) evaluation.snap_date holds {unreadable_snaps!r}, not a "
+                f"readable ISO date (YYYY-MM-DD). --post-training evaluates "
+                f"configured test months only; each date must be one of "
+                f"{configured}."
+            ]
+        not_test = [s for s in (_iso_date(v) for v in dates) if s not in configured]
+        if not_test:
+            return [
+                f"(A22) evaluation.snap_date date(s) {not_test!r} are not test "
+                f"months (dataset.test_snap_dates: {configured}). "
+                "--post-training reads training_eval_predictions, which "
+                "accumulates every month ever predicted for this model_version, "
+                "so an unlisted month can still return rows and yield a "
+                "normal-looking report for a month this config does not "
+                "evaluate. Add them to dataset.test_snap_dates and rerun "
+                "dataset + predict, or drop them from evaluation.snap_date. "
+                "(Monitoring mode — no --post-training — is not subject to "
+                "this rule.)"
+            ]
+        return []
+    if isinstance(raw, list) and len(dates) == 1:
+        raw = dates[0]
     snap = _iso_date(raw)
     if snap is None:
         return [

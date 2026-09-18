@@ -45,6 +45,31 @@ def test_model_version_filters_correctly(spark, ranked_predictions_view):
     assert rows == [("c1", "p1", 0.9), ("c1", "p2", 0.7)]
 
 
+def test_model_version_keeps_every_configured_date(spark, ranked_predictions_view):
+    """#374: two dates configured, B's rows at both kept, MV_B's excluded."""
+    p = _params_for_mv("MV_A", ["2025-12-31", "2026-01-31"])
+    p["evaluation"]["compare"]["source"] = "ranked_predictions"
+    out = load_compare_predictions(p, spark)
+    rows = sorted((r["snap_date"], r["prod_name"], r["score"]) for r in out.collect())
+    assert rows == [("2025-12-31", "p1", 0.5), ("2026-01-31", "p1", 0.9),
+                    ("2026-01-31", "p2", 0.7)]
+
+
+def test_model_version_names_a_configured_date_without_rows(
+    spark, ranked_predictions_view
+):
+    """B has 2026-01-31 but not 2026-02-28: the loader refuses, naming the
+    missing month. Left alone, that month would silently fall out of the
+    common query groups and the comparison would cover fewer months than
+    configured."""
+    p = _params_for_mv("MV_A", ["2026-01-31", "2026-02-28"])
+    p["evaluation"]["compare"]["source"] = "ranked_predictions"
+    with pytest.raises(DataConsistencyError) as excinfo:
+        load_compare_predictions(p, spark)
+    message = str(excinfo.value)
+    assert "has no rows for snap_date(s) ['2026-02-28']" in message, message
+
+
 def test_model_version_unknown_raises(spark, ranked_predictions_view):
     p = _params_for_mv("MV_GHOST")
     p["evaluation"]["compare"]["source"] = "ranked_predictions"
@@ -171,6 +196,30 @@ def test_model_version_source_default_is_enriched_eval_predictions(
     assert rows == [("c1", "p1", 0.92), ("c1", "p2", 0.71), ("c2", "p1", 0.80)]
 
 
+def test_model_version_source_enriched_drops_the_partition_fingerprint_unchecked(
+    spark,
+):
+    """#374: B's enriched table carries the settings of B's own run, not this
+    run's, so it is not checked; the column is dropped so it does not travel
+    into the comparison."""
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+        PARTITION_FINGERPRINT_COLUMN,
+    )
+
+    df = spark.createDataFrame(
+        [("c1", "2026-01-31", "p1", 0.92, 1, 1, "MV_A", "written-by-b's-run")],
+        ["cust_id", "snap_date", "prod_name", "score", "label", "rank",
+         "model_version", PARTITION_FINGERPRINT_COLUMN],
+    )
+    df.createOrReplaceTempView("enriched_eval_predictions")
+    try:
+        out = load_compare_predictions(_params_for_mv("MV_A"), spark)
+        assert PARTITION_FINGERPRINT_COLUMN not in out.columns
+        assert out.count() == 1
+    finally:
+        spark.catalog.dropTempView("enriched_eval_predictions")
+
+
 def test_model_version_source_enriched_explicit(
     spark, enriched_eval_predictions_view
 ):
@@ -262,6 +311,53 @@ def test_external_hive_column_rename_and_snap_filter(spark, monkeypatch, ext_pre
     assert {"cust_id", "snap_date", "prod_name", "score"}.issubset(cols)
     snaps = {r["snap_date"] for r in out.collect()}
     assert snaps == {"2026-01-31"}  # filtered to eval snap
+
+
+def test_external_hive_keeps_every_configured_date(
+    spark, monkeypatch, ext_predictions_view
+):
+    p = _params_for_ext(["2025-12-31", "2026-01-31"])
+    monkeypatch.setattr(spark, "table", lambda t: ext_predictions_view)
+    out = load_compare_predictions(p, spark)
+    assert sorted({(r["snap_date"], r["cust_id"]) for r in out.collect()}) == [
+        ("2025-12-31", "c3"), ("2026-01-31", "c1"), ("2026-01-31", "c2")]
+
+
+def test_external_hive_names_a_configured_date_without_rows(
+    spark, monkeypatch, ext_predictions_view
+):
+    p = _params_for_ext(["2026-01-31", "2026-03-31"])
+    monkeypatch.setattr(spark, "table", lambda t: ext_predictions_view)
+    with pytest.raises(DataConsistencyError) as excinfo:
+        load_compare_predictions(p, spark)
+    message = str(excinfo.value)
+    assert "has no rows for snap_date(s) ['2026-03-31']" in message, message
+
+
+def test_external_hive_checks_each_date_in_parallel_not_in_one_task(
+    spark, monkeypatch, ext_predictions_view
+):
+    """A user's table need not be partitioned by time. The one-task read that
+    is cheap on the framework's own time-partitioned tables (``coalesce(1)``
+    then ``limit(1)``) would scan such a table whole in a single task when a
+    date is missing; Spark's ``isEmpty`` scans it in parallel. So this source
+    is checked date by date with ``isEmpty`` and no single-partition plan."""
+    from pyspark.sql import DataFrame
+
+    plans = []
+    real_is_empty = DataFrame.isEmpty
+
+    def is_empty(self):
+        plans.append(self._jdf.queryExecution().optimizedPlan().toString())
+        return real_is_empty(self)
+
+    monkeypatch.setattr(DataFrame, "isEmpty", is_empty)
+    monkeypatch.setattr(spark, "table", lambda t: ext_predictions_view)
+    dates = ["2025-12-31", "2026-01-31"]
+    load_compare_predictions(_params_for_ext(dates), spark)
+
+    assert [d for d in dates if any(d in plan for plan in plans)] == dates, plans
+    assert not any("Repartition" in plan for plan in plans), plans
 
 
 def test_external_hive_prod_mapping_n_to_1_collapse(spark, monkeypatch):

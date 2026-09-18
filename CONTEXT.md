@@ -64,6 +64,10 @@ _Avoid_: 事件紀錄、event log（會和 **event** 混淆）
 依 time 切出的資料段：`train`、`train_dev`（和 train 同時段、以 entity 互斥切出）、`calibration`、`val`、`test`。
 _Avoid_: fold
 
+**日期區間**:
+time 設定的另一種寫法：起日、迄日、間隔（`{start, end, step}`），含頭含尾。設定一載入就展開成它代表的 time 值清單，所以與「加引號、依日期遞增」的逐一列出是同一份設定、同一個版本 ID。精確規則：`src/recsys_tfb/core/date_ranges.py` 模組 docstring。
+_Avoid_: 時間窗、lookback（那是 baseline 往回看的月數）
+
 **model_input**:
 某個 split 組好、可以直接餵給模型的資料列。
 
