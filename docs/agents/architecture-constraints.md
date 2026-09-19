@@ -47,7 +47,7 @@
 
 | # | 規則 | 管到哪 | 這個檢查看不到 |
 |---|---|---|---|
-| [A1](#a1-資料流產物一律經-catalognode-不得自己讀寫它們) | 資料流產物一律經 catalog；node 不得自己讀寫它們 | `pipelines/` 底下的 node 函式與 `Node(...)` | 間接寫入（經專案 helper）；`steps/` 底下的程式碼 |
+| [A1](#a1-資料流產物一律經-catalognode-不得自己讀寫它們) | 資料流產物一律經 catalog；node 不得自己讀寫它們 | `pipelines/` 底下的 node 函式與 `Node(...)` | 間接寫入（經專案 helper）；`steps/` 底下的程式碼；`def` 不在 `nodes*.py` 裡的 node（例：`diagnosis/model/`，**那裡有未登記的直接寫檔**） |
 | [A2](#a2-node-函式不得依賴可變全域狀態) | node 函式不得依賴可變全域狀態 | 同上 | `core/`、`utils/` 不在掃描範圍（另由 R2 盯著） |
 | [A3](#a3-不得用-print) | 不得用 `print()` | 整個 `src/recsys_tfb/` | — |
 | [A4](#a4-src-不得-import-notebooks) | `src/` 不得 import `notebooks/` | 整個 `src/recsys_tfb/` | 「把探索性程式碼搬進 `src/`」抓不到 |
@@ -277,9 +277,18 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
   **另一個掃不到的寫入，刻意不進 R4**：`pipelines/training/steps/local_cache.py` 的 `populate_cache_from_hive`，經 `utils/hdfs.copy_hdfs_to_local` 把 Hive 分區複製到 driver 本機。不登記的理由是 R4 收的是「**診斷副產物**」，而一份 Hive 表的本機複本不是診斷副產物（使用者 2026-08-30 裁決，ADR-0014 閘門 G2）。記在這一段，是因為「掃描看不到它」這件事仍然為真——它只是該被記在這裡，而不是被塞進一張語意不合的表。
 
   **第三個掃不到的寫入，同樣刻意不進 R4**（2026-09-04，#285）：`tune_hyperparameters` 的 val 矩陣經 `io/disk_matrix.py` 的 `open_disk_matrix` 在 `data/_scratch` 建檔。理由同上——它不是診斷副產物；而且它比前一個更不像產物：**檔案在映射完成的當下就被 unlink**，跑完什麼都不留，連「要不要清」都不成立。它算寫入是因為需要那塊磁碟空間（生產 37～89 GiB），而那正是操作者需要知道的事——所以它記在 `docs/pipelines/training.md` §2 的執行前準備與 §9.2，不是記在一張講產物的表上。
-- **`steps/` 底下的程式碼。** (c) 與 (d) 只讀 `pipelines/**/nodes*.py`（`test_architecture_constraints.py:172`、`:190` 的 `rglob("nodes*.py")`）。所以搬進 `steps/` 的程式碼不在稽核範圍內——`pipelines/dataset/steps/` 自 #176 起、`pipelines/inference/steps/` 自 #197 起（約 500 行）都是。
+- **`steps/` 底下的程式碼。** (c) 與 (d) 只讀 `pipelines/**/nodes*.py`（`test_architecture_constraints.py` 的 `test_node_modules_do_not_touch_the_catalog` 與 `test_direct_writes_match_registry`，搜 `rglob("nodes*.py")`）。所以搬進 `steps/` 的程式碼不在稽核範圍內——`pipelines/dataset/steps/` 自 #176 起、`pipelines/inference/steps/` 自 #197 起（約 500 行）都是。
 
-  **這不是豁免**：`steps/` 裡出現 `catalog.load`／`catalog.save` 一樣違反 A1，只是**沒有測試會發現**，靠 code review。#197 當下實查過 `pipelines/inference/steps/` 零命中。要不要把 glob 放寬到 `pipelines/**/*.py` 是一張獨立的票（放寬會一併把 `dataset/steps/` 納入，需先確認那邊也乾淨）。
+  **這不是豁免**：`steps/` 裡出現 `catalog.load`／`catalog.save` 一樣違反 A1，只是**沒有測試會發現**，靠 code review。2026-09-19 對整個 `pipelines/**/*.py` 實查，catalog 存取零命中。
+
+  **不放寬 glob 是使用者的裁決**（2026-09-19，#163），理由與什麼時候重開見 [`deliberate-non-goals.md`](deliberate-non-goals.md)。放寬也不是換個 glob 就好：當天實測，寫檔檢查 (d) 會多出兩個**不是違例**的命中——`training/steps/hpo_resume.py`（HPO 中斷接續的 study 與 checkpoint）和 `source_etl/sql_runner.py`（這個套件沒有任何 `Node(...)`，本來就不歸 A1 管）。
+- **`def` 不在 `nodes*.py` 裡的 node。** (c) 與 (d) 用**檔名**挑要掃的檔，不是看「檔案裡有沒有被註冊成 node 的函式」。所以 `pipeline.py` 註冊了、但 `def` 寫在別的檔的 node，整個看不到。2026-09-19 盤點有兩處：
+  - training 的 7 個診斷 node，`def` 在 `src/recsys_tfb/diagnosis/model/`（對照表在 `pipelines/training/nodes.py` 的模組 docstring）。**這裡有實際後果**：`compute_shap_diagnostics`（`shap_per_item.py`）自己存圖，`compute_quadrant_cases` 經同檔的 `_render_case`（`shap_cases.py`）自己存圖，兩處都搜 `savefig`；目錄由 `diagnosis/model/paths.py` 的 helper `mkdir`。照 R4 的定義，它們就是「自己寫診斷副產物的 node」，但**不在 R4 表上**，測試也看不到。
+  - evaluation 的 `load_compare_predictions`，`def` 在 `pipelines/evaluation/steps/compare_sources.py`（#365 搬進去）。當天實查零命中。
+
+  **重盤方法**（上面的清單會過時，別直接引用）：取每個 `pipelines/*/pipeline.py` 裡 `Node(...)` 的第一參數，找它的 `def` 在哪個檔；不在 `pipelines/**/nodes*.py` 的就在盲區裡。
+
+  **這個盲區只記在這裡**（使用者 2026-09-19 裁決，#163）：不放寬掃描、不把上面那兩個存圖的 node 補進 R4、也不改它們。理由與什麼時候重開見 [`deliberate-non-goals.md`](deliberate-non-goals.md)。在那之前，這些 node 新增 catalog 存取或寫檔，**沒有測試會發現**，靠 code review。
 
 ## A2. node 函式不得依賴可變全域狀態
 
@@ -685,7 +694,7 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 > 差別在兩端：`tune_hyperparameters` 在表上、不在測試裡（間接寫入，掃不到）；5 個 cache node 在測試裡、不在表上（它們刪的是本機 parquet cache，不是診斷副產物）。
 >
 > **2026-08-30 起測試那一組由 2 筆變 6 筆**（ADR-0014 決定 1，使用者已批准）。原本的第 2 筆是 `_materialize_parquet_handle`——一個 helper 裝著 5 個 cache node 的全部四個決策，所以讀任何一個 cache node 都讀不出這個 cache 決定了什麼。決策上浮到各 node 之後，`shutil.rmtree` 也跟著回到各 node 的 body：5 個 node 真的各自會刪檔，登記變大是誠實的。
-> 機制（路徑計算、複製、HDFS 拉取）進了 `pipelines/training/steps/local_cache.py`，**但刪檔沒有跟著搬**——(d) 只掃 `pipelines/**/nodes*.py`，搬進 `steps/` 就沒有任何測試看得到它。這是時序問題不是規則問題：等把 glob 放寬到 `pipelines/**/*.py` 那張票（#163 一帶）做完，這個決定該重新檢討。
+> 機制（路徑計算、複製、HDFS 拉取）進了 `pipelines/training/steps/local_cache.py`，**但刪檔沒有跟著搬**——(d) 只掃 `pipelines/**/nodes*.py`，搬進 `steps/` 就沒有任何測試看得到它。這是稽核範圍的後果，不是一條關於刪檔的規則。使用者 2026-09-19 裁決不放寬 glob（#163），所以這個安排維持；哪天放寬了，這個決定該重新檢討。
 
 
 ## R5. 取 `schema.entity` 第一欄（S4 的例外）── 0 筆
