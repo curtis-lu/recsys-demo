@@ -71,7 +71,7 @@ inference:
 
 日期值應使用 ISO `YYYY-MM-DD`，並與 `schema.time` 欄位可轉換成的日期一致。任一設定日期在 `feature_table` 完全不存在時會 fail-fast，不會只發布其他有資料的日期。
 
-修改 `snap_dates` 不會產生新的 `model_version`；它只改變本次要寫入或覆寫的 prediction partitions。
+修改 `snap_dates` 不會產生新的 `model_version`；它只改變本次要寫入或覆寫的 prediction partitions。已經評分過的日期再列一次，分數不會重算，要重算得帶 `--rebuild-dates`（§7.1）。
 
 ### 3.2 固定候選集合
 
@@ -559,28 +559,29 @@ model_version
 
 `model_version` 已包含上游 dataset IDs 與 model-defining training settings；`snap_dates`、`use_calibration` 與 inference 執行設定不會改變它。
 
-因此同一模型、日期與 item 下：
+因此同一模型、日期與 item 下，**分數寫過一次之後，重跑預設不會重算**：
 
-- 重跑 inference 會覆寫相同 Hive partition。
-- 切換 `use_calibration` 也會覆寫同一 partition。
-- feature table 同日期資料回補後重跑，仍會覆寫相同 partition。
+- 評分節點決定做不做一個 chunk，只看 `unranked_predictions` 裡那個 `(snap_date, 桶, item)` 分區在不在（§5.3〈續跑〉），不看它是用哪一份設定、哪一版特徵算的。在，就跳過。
+- 所以切換 `use_calibration`、或 feature table 同日期資料回補之後，不帶 `--rebuild-dates` 重跑，已寫的分數一個都不會變。後面的排名、驗證、發布照樣跑，把**舊分數**重排一次、寫回同一個 partition，run 成功結束。回補的情形更容易看走眼：中間特徵表會照新資料重建，但被跳過的 chunk 不會去讀它。
+- 要重算，帶 `--rebuild-dates <日期>`：那些日期的所有 chunk 重新評分，排名與發布再覆寫同一個 partition。
 
-manifest 保存最後一次成功 run 的 inference parameters，但 Hive partition 本身沒有額外 `inference_version` 可區分上述變化。
+一次 run 有沒有沿用舊分數，看 log 的 `[chunks] predict:` 那一行：`skipped` 大於 0，就有分區沿用了舊分數。
+
+manifest 保存最後一次成功 run 的 inference parameters，但 Hive partition 本身沒有額外 `inference_version` 可區分上述變化。**所以 manifest 記的 `use_calibration` 不一定是分區裡分數算的時候用的值**：切換之後沒帶 `--rebuild-dates` 的那一次，manifest 寫新值，分數是舊值算的。要知道分區裡的分數有沒有套校準，看分區本身：`score` 等於 `score_uncalibrated` 就是沒套。
 
 ### 7.2 設定與重跑矩陣
 
 | 修改內容 | 建議重跑方式 | 原因 |
 |---|---|---|
 | 新增推論日期 | full inference | 建立新日期 partitions |
-| 同日期 feature data 回補 | full inference | 重算該日期所有 score、rank 與 validation |
-| `use_calibration` | full inference | score 內容改變，但 partition key 不變 |
+| 同日期 feature data 回補 | full inference ＋ `--rebuild-dates <日期>` | 中間特徵表每次 full run 都會重建，但評分只看分區在不在；不帶 `--rebuild-dates` 的話已寫的 chunk 全部跳過，發布的仍是舊分數（§7.1） |
+| `use_calibration` | full inference ＋ `--rebuild-dates <日期>` | score 內容改變，但 partition key 不變；不帶 `--rebuild-dates` 的話已寫的 chunk 全部跳過，分數不變（§7.1） |
 | promotion 到新 `best` | full inference | promotion 只更新 symlink，不會自動產生預測 |
 | 指定另一個 model version | full inference | 載入不同模型與 preprocessor，寫入新 model partitions |
 | 只修改 ranking node | `--from-node rank_predictions` | 可重用目前 model/date 的 `unranked_predictions`；補跑的評分節點會跳過所有既有 chunk |
 | 只修改評分邏輯 | `--from-node predict_and_write_scores --rebuild-dates <日期>` | 重用已落地的中間特徵表，但強制重算 chunk。不帶 `--rebuild-dates` 的話所有 chunk 都會被當成已完成而跳過 |
 | 只想重新驗證 staging 並發布 | `--from-node validate_predictions` | 重用 staging；補跑評分節點只為了取得 manifest |
 | 只檢查 staging，不發布 | `--only-node validate_predictions` | validation 成功後即結束 |
-| 上游 feature 回補後要重算某月 | `--rebuild-dates <日期>` | 「分區已存在」不再是一個無法推翻的判斷 |
 | 調整 `entity_buckets` | full inference ＋ 先 DROP `unranked_predictions` | 桶數是該表的分區欄；舊桶的分區沒人清，`partition_completeness` 會擋下發布 |
 | 修改 products | 先依 item 變更流程重建上游，再 full inference | products 必須與 schema item 集合一致 |
 | 修改 schema 或 preprocessor | `dataset → training → evaluation → promotion → inference` | 模型與前處理契約改變 |
@@ -626,7 +627,6 @@ data/inference/<model_version>/<first_snap_date_without_hyphens>/
 | `No scoring rows found` | 設定日期沒有 entity，或前處理後資料為空 | 查 feature table row count 與日期條件 |
 | A4 products mismatch | `inference.products` 與 schema item 清單不一致 | 同步兩處完整 item 集合 |
 | 訊息帶 `(A27) inference.snap_dates` / `entity_buckets` / `products` | 評分格點 `snap_dates × entity_buckets × products` 有一軸是空的或 0 | 在 `parameters_inference.yaml` 補上該鍵。**訊息會一次列出全部有問題的軸**，所以一輪就能改完；這一關在起 Spark 之前，看到它代表還沒有付任何 cold start |
-| `score_range` | raw score 小於 0 或大於 1 | 檢查 objective、calibration 與 `use_calibration` |
 | `no_missing` | identity、score 或 rank 出現 NULL | 查 staging 的欄位 NULL count 與上游 feature keys |
 | `completeness` | query group 候選數不是 products 數 | 查 feature key 重複、join fan-out 或候選遺漏 |
 | `rank_consistency` | rank 範圍或 score 順序異常 | 重新執行 `rank_predictions`，檢查 staging 是否被外部改寫 |
@@ -638,7 +638,7 @@ data/inference/<model_version>/<first_snap_date_without_hyphens>/
 | Driver OOM | 單一桶的特徵矩陣太大 | **先調高 `inference.entity_buckets`**（這是這個旋鈕存在的理由）；桶數已在健康窗口上界附近時再加 driver memory |
 | `--rebuild-dates` 收下了但什麼都沒重算 | 切片把評分節點排除掉了 | log 會印 `[rebuild] WARNING: … had no effect`；改用 `--from-node predict_and_write_scores` 或不帶切片旗標 |
 
-validation 失敗時，先從 exception 的 checks 清單判斷是模型輸出、候選母體、feature identity 或 ranking 問題，再查相同 model/date 的 `ranked_staging`。
+validation 失敗時，先從 exception 的 checks 清單判斷是模型輸出、候選母體、feature identity 或 ranking 問題，再查相同 model/date 的 `ranked_staging`。修好之後重跑時注意：整批層失敗的時候，所有 chunk 的分數都已經寫出去了。修的若是上游資料、校準或評分邏輯，重跑要帶 `--rebuild-dates <日期>`，否則那些 chunk 全部跳過，驗證的還是舊分數（§7.1）。
 
 ## 9. 限制與注意事項
 
@@ -656,7 +656,7 @@ validation 失敗時，先從 exception 的 checks 清單判斷是模型輸出�
 - rank consistency 會檢查整體 rank 範圍與依 rank 排列的 score 方向，但不是一般用途的任意外部排名驗證器。
 - `use_calibration: true` 不會要求模型一定有 calibrator；未校準模型仍回傳原始分數。
 - model manifest 缺失時會 fallback dataset latest，可能造成模型與前處理版本錯配。
-- inference 沒有獨立 version hash；同 model/date 下修改 calibration、feature data 或程式邏輯會覆寫既有 partitions。
+- inference 沒有獨立 version hash；同 model/date 下修改 calibration、feature data 或程式邏輯之後，要帶 `--rebuild-dates` 才會重算分數，不帶的話已寫的分數分區會被跳過（§7.1）。
 - 多日期 run 只建立一個以第一個日期命名的 driver-local manifest 目錄。
 - promotion 只改變 `best` symlink；正式 prediction table 仍保留各 model versions，且不會自動清理。
 - production 發布沒有內建業務 eligibility、法遵規則或人工抽查閘；這些仍需在 scoring dataset 與營運流程中明確實作。
