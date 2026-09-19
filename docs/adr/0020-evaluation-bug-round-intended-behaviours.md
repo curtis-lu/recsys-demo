@@ -207,6 +207,12 @@ date: 2026-09-13
 
 > **2026-09-16 補記（ADR-0021）**：ADR-0021 新增選用欄位角色 `event` 之後，同一個 query group 裡同一個 item 可以有多列，「按 item 名升冪」就不再決定得了順序——本節講的「沒定義」會原樣回來。所以宣告 `event` 時，同分規則要延伸成「按 item 名，再按 `event`」。本節的決定沒有被推翻，只是決勝欄多一個。
 
+> **2026-09-19 補記（#355）**：本節只接了兩個 Spark 位置，driver 端還有 4 處 numpy 排名照輸入列的順序決勝：`evaluation/metrics.py` 的 `compute_mean_ap` 與 `positive_row_contributions`（HPO 評分、metric CI、診斷都經過它們）、`diagnosis/metric/item_ability/_compute.py::descending_ranks`、suppression 的帳本排序。#355 把它們接上同一條規則：`utils/ranking.py` 多一個 numpy 版 `order_by_score_then_item`，4 處都呼叫它，不各自手刻。兩版住同一個檔，是為了讓「規則只有一條」看得見；模組因此不在檔頭 import pyspark（Spark 版在函式內 import），因為 numpy 那邊的呼叫端有刻意不碰 pyspark 的模組。
+>
+> 「按 item 名升冪」的「名」要讀成 **item 欄本身的值**：Spark 照欄位型別排（整數欄 2 在 10 前面），numpy 版比照，不先轉字串（字串會排成 `"10"` 在 `"2"` 前面）。診斷原本會先把 item 轉成字串，#355 改成拿原始值決勝、字串只當名字用。
+>
+> 同一張票順手收掉同一個根因的其他形態（ADR-0018 決定 1〈實作更正〉記的列序依賴）：bootstrap 的 cluster 與 query 編號改成照 key 排序給、`item_ability` 的名次清單由小到大排、`report_aggregates.json` 的兩張長表排序後落地。`percentile_approx` 沒動，記在 #366。
+
 **碰到什麼**：inference 已落地的 `ranked_predictions` 同分列的 rank 值會變。inference 尚未部署，不需要遷移。
 
 ### bug 12：`per_item_segment` 的 key 用底線串接會撞號

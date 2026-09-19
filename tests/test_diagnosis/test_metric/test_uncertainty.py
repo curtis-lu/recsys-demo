@@ -312,7 +312,7 @@ def test_paired_aggregation_matches_compute_macro_per_item_map():
     rng = np.random.default_rng(0)
     row_w = rng.integers(1, 5, len(frame)).astype(float)
 
-    contrib, row_idx = positive_row_contributions(groups, y, score, None)
+    contrib, row_idx = positive_row_contributions(groups, items, y, score, None)
     _, item_inv = np.unique(items[row_idx], return_inverse=True)
     mine = _weighted_macro(
         contrib, item_inv, int(item_inv.max()) + 1, row_w[row_idx],

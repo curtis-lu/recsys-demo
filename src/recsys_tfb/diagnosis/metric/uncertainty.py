@@ -49,21 +49,27 @@ def bootstrap_per_item_ci(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
     n_boot = int((diag_cfg.get("ci", {}) or {}).get("n_boot", 200))
     seed = int((diag_cfg.get("sample", {}) or {}).get("seed", 42))
 
-    # query id（time × entity）與 cluster id（entity only）
+    # query id（time × entity）與 cluster id（entity only）。編號照 key 排序
+    # 給（sort=True），不照出現順序：抽樣列的順序由 Spark 決定，換平行度就會
+    # 變；照出現順序編號時，同一個 seed 抽到的「第 k 號 cluster」就換了一個
+    # 人，CI 跟著變（#352、#355）。
     query_key = (
         sample_pdf[time_col].astype(str)
         + "|"
         + sample_pdf[entity_cols].astype(str).agg("|".join, axis=1)
     )
-    groups = pd.factorize(query_key)[0]
+    groups = pd.factorize(query_key, sort=True)[0]
     cluster_key = sample_pdf[entity_cols].astype(str).agg("|".join, axis=1)
-    clusters = pd.factorize(cluster_key)[0]
+    clusters = pd.factorize(cluster_key, sort=True)[0]
 
     y = sample_pdf[label_col].to_numpy()
     score = sample_pdf[score_col].to_numpy(dtype=np.float64)
     items = sample_pdf[item_col].astype(str).to_numpy()
 
-    contrib, row_idx = positive_row_contributions(groups, y, score, k)
+    # 同分照 item 的原始值排（數字 item 照數字大小），字串版只當名字用。
+    contrib, row_idx = positive_row_contributions(
+        groups, sample_pdf[item_col].to_numpy(), y, score, k
+    )
     if len(contrib) == 0:
         return {
             "enabled": True, "k": k, "n_boot": n_boot, "seed": seed,
@@ -290,8 +296,9 @@ def paired_bootstrap_delta(
         return (0.0, 0.0)
 
     k = metric_kwargs.get("k", None)
-    groups = pd.factorize(frame["group"])[0]
-    cluster_codes = pd.factorize(frame["cluster"])[0]
+    # 編號照 key 排序給、不照出現順序——理由同 bootstrap_per_item_ci。
+    groups = pd.factorize(frame["group"], sort=True)[0]
+    cluster_codes = pd.factorize(frame["cluster"], sort=True)[0]
     items = frame["item"].astype(str).to_numpy()
     y = frame["label"].to_numpy()
     score = frame["score"].to_numpy(dtype=np.float64)
@@ -325,9 +332,12 @@ def paired_bootstrap_delta(
 
     # contributions 與 item 索引空間在迴圈外算好——cluster 重抽不改變 query
     # 內的排序，所以每側只需算一次（見 _weighted_macro 的 docstring）。
-    contrib_base, ridx_base = positive_row_contributions(groups, y, score, k)
+    item_values = frame["item"].to_numpy()  # 同分照原始值排；items 只當 key
+    contrib_base, ridx_base = positive_row_contributions(
+        groups, item_values, y, score, k
+    )
     contrib_shift, ridx_shift = positive_row_contributions(
-        groups, y, score_shifted, k
+        groups, item_values, y, score_shifted, k
     )
     if len(contrib_base) == 0 or len(contrib_shift) == 0:
         return (0.0, 0.0)

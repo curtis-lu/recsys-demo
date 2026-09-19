@@ -67,6 +67,41 @@ class TestScoreBoxStatsByLabel:
         assert pairs == {("A", 1), ("A", 0), ("B", 1), ("B", 0)}
 
 
+class TestLongFramesComeOutInKeyOrder:
+    """``groupBy`` hands rows back in whatever order the shuffle produced, and
+    ``report_aggregates.json`` used to land them in that order — a different
+    file for the same data once the parallelism changed (#352, #355). The
+    matrices are reindexed by sorted item and rank already; these two long
+    frames are the ones that were not."""
+
+    # Items listed in reverse so that arrival order is not already sorted.
+    ROWS = [
+        (item, s / 10, s % 2)
+        for item in ("E", "D", "C", "B", "A") for s in range(10)
+    ]
+
+    def _sdf(self, spark, rows):
+        return _sdf(spark, rows, ["item", "score", "label"]).repartition(5)
+
+    def test_histogram_rows_sorted_by_item_then_bin(self, spark):
+        out = score_histogram_counts(
+            self._sdf(spark, self.ROWS), "item", "score", nbins=4)
+        keys = list(zip(out["item"], out["bin_center"]))
+        assert len(keys) > 5 and keys == sorted(keys)
+
+    def test_constant_score_histogram_rows_sorted_by_item(self, spark):
+        rows = [(item, 0.5, 0) for item, _, _ in self.ROWS]
+        out = score_histogram_counts(
+            self._sdf(spark, rows), "item", "score", nbins=4)
+        assert list(out["item"]) == ["A", "B", "C", "D", "E"]
+
+    def test_box_rows_sorted_by_item_then_label(self, spark):
+        out = score_box_stats_by_label(
+            self._sdf(spark, self.ROWS), "item", "score", "label")
+        keys = list(zip(out["item"], out["label"]))
+        assert len(keys) == 10 and keys == sorted(keys)
+
+
 class TestRankCountMatrix:
     def test_counts_per_item_rank(self, spark):
         # 2 items, 2 customers; ranks 1..2 within each query.

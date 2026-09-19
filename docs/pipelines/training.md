@@ -116,6 +116,12 @@ training:
 | `mean_ap` | 先計算每個 query group 的 AP，再對 query 等權平均 |
 | `macro_per_item_map` | 將 mAP attribution 依 item 彙整後做 macro average，讓各 item 等權參與選模 |
 
+兩個目標在 query group 內同分時，都照 item 升冪決定名次，跟 evaluation 的指標同一條規則（`utils/ranking.py`）。所以同一份 val 資料不論列以什麼順序讀進來，每個 trial 的分數都一樣。這條規則是 #355 加的，之前同分照 val 列讀進來的順序排。換版時要知道的三件事：
+
+- `model_version` 與 `search_id` 都不變：兩者只看設定，不看程式碼。
+- 只有 val 裡有同分的 query group，trial 的分數才會變；變了的話，同一份設定重跑 HPO 可能選到不同參數。
+- #355 之前中斷、之後才接續的 HPO（§7.3），已完成的 trial 是舊規則算的分數、新 trial 是新規則，同一個 study 裡混著兩種分數。要一致就加 `--fresh-hpo` 重搜。
+
 `search_space` 的每個項目必須有唯一的 `name`，且 `type` 為 `int`、`float` 或 `categorical`。數值參數需提供 `low` 與 `high`，可選擇 `step` 或 `log`；類別參數需提供非空的 `choices`。
 目前不支援 `when` 條件式空間或字串 expression bounds，傳入時會在 CLI 入口 fail-fast。
 
@@ -778,7 +784,7 @@ batch 由 `PREDICT_BATCH_BYTES` = 64 MiB 除以欄寬決定列數）。矩陣的
 那一天的那個形狀（教訓見 known-pitfalls §4）。
 
 ⚠ **脫鉤的是矩陣，不是「HPO 從此與列數無關」。** 每列仍有幾個常駐陣列——`y_val`、`groups_val`、
-（`macro_per_item_map` 時的）`items_val`，以及每個 trial 的預測值——它們都還是線性的，
+`items_val`（item 的排序代碼，#355 起兩種目標都載），以及每個 trial 的預測值——它們都還是線性的，
 而且本來就是。差別在係數：一列的矩陣是 `欄數 × itemsize`（1,000 欄 float32 ＝ 4,000 B），
 那幾個陣列加起來是**幾十 bytes** 的量級。所以是兩位數到三位數倍的縮減，不是變成常數。
 

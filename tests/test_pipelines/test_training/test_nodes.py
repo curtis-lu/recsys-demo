@@ -897,12 +897,13 @@ def test_tune_defaults_ranking_metric(monkeypatch):
     # patched there; nodes.get_adapter still exists but the HPO path no
     # longer reads it.
     monkeypatch.setattr(hpo_scoring, "get_adapter", lambda algo: FakeAdapter())
-    monkeypatch.setattr(hpo_scoring, "compute_mean_ap", lambda g, y, p: 0.5)
+    monkeypatch.setattr(hpo_scoring, "compute_mean_ap", lambda g, i, y, p: 0.5)
 
     def fake_extract(handle, meta, params, **kw):
         X = np.zeros((4, 2)); y = np.array([1, 0, 1, 0])
         g = np.array([0, 0, 1, 1], dtype=np.int64)
-        return X, y, g
+        items = np.array(["a", "b", "a", "b"], dtype=object)
+        return (X, y, g, items) if kw.get("with_items") else (X, y, g)
 
     monkeypatch.setattr(
         nodes, "extract_Xy_with_groups", fake_extract

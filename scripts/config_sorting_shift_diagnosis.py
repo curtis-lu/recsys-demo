@@ -376,7 +376,7 @@ def _bootstrap_macro_values(
     draws: np.ndarray,
     mp: dict,
 ) -> np.ndarray:
-    contrib, row_idx = positive_row_contributions(groups, y, score, mp["k"])
+    contrib, row_idx = positive_row_contributions(groups, items, y, score, mp["k"])
     if len(contrib) == 0:
         return np.full(draws.shape[0], np.nan)
     item_of = items[row_idx]

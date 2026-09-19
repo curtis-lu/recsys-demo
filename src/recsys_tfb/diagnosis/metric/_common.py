@@ -62,7 +62,14 @@ def sample_arrays(
     """診斷抽樣 → ``(groups, items, y, ht_weights, row_weights)``。
 
     ``groups``：query id（``time`` × ``entity`` 併鍵後 ``pd.factorize``）。
+    編號照 key 排序給（``sort=True``），不照出現順序：抽樣列的順序由 Spark
+    決定、換平行度就會變，照出現順序編號的話，依 query 順序列出的東西
+    （壓制範例、名次清單）也跟著變（#355）。家族裡自己 factorize
+    ``groups``／``clusters`` 的地方同一個理由，都帶 ``sort=True``。
     ``items``／``y``：schema 對應欄直接投影成陣列，兩邊逐字相同的一行。
+    ``items`` 保留原始型別、不轉字串：它同時是同分的決勝值，數字 item 要照
+    數字大小比才跟 Spark 的名次一致（``utils.ranking``）。要當名字用的地方
+    自己 ``str()``。
 
     ``ht_weights`` 缺 ``inclusion_weight`` 欄時是 ``None``（走未加權路徑，
     供 ``compute_macro_per_item_map`` 等函式 ``weights=None`` 的語意判斷）；
@@ -81,11 +88,11 @@ def sample_arrays(
     multipliers`` 拿它直接當陣列索引，要求連續編碼，不能是任意 int）。這兩個
     不是同一個東西，硬塞進同一個回傳值只會製造一個沒有人真正需要的中間型別
     ——呼叫端各自用 ``query_key(pdf, schema["entity"])`` 現組，需要
-    factorize 的自己再包一層 ``pd.factorize(...)[0]``。
+    factorize 的自己再包一層 ``pd.factorize(..., sort=True)[0]``。
     """
     query_cols = [schema["time"], *schema["entity"]]
-    groups = pd.factorize(query_key(pdf, query_cols))[0]
-    items = pdf[schema["item"]].astype(str).to_numpy()
+    groups = pd.factorize(query_key(pdf, query_cols), sort=True)[0]
+    items = pdf[schema["item"]].to_numpy()
     y = pdf[schema["label"]].to_numpy(dtype=np.int64)
     if "inclusion_weight" in pdf.columns:
         w = pdf["inclusion_weight"].to_numpy(dtype=np.float64)
@@ -131,13 +138,20 @@ def per_item_ap(
     score: np.ndarray,
     mp: dict,
 ) -> tuple[dict[str, float], dict[str, int], float]:
-    """每個 item 的 AP（未加權）＋ macro。原本在 ``item_ability/_compute.py``
+    """每個 item 的 AP（未加權）＋ macro。
+
+    ``items`` 傳 item 欄的原始值：同分時照它排名（``utils.ranking``），數字
+    item 要照數字大小比，所以不能先轉成字串；回傳的 key 才轉字串。
+
+    原本在 ``item_ability/_compute.py``
     與 ``scripts/item_ability_diagnosis.py``／``scripts/suppression_ledger_
     diagnosis.py`` 各自維護一份逐位元組相同的副本，``suppression`` 是第四個
     消費者，門檻到了（見本檔案模組 docstring：兩個以上實例逐字相同才抽），
     Task 5.1 把它搬到這裡共用。
     """
-    contrib, row_idx = positive_row_contributions(groups, y, score, mp["k"])
+    contrib, row_idx = positive_row_contributions(
+        groups, items, y, score, mp["k"]
+    )
     if len(contrib) == 0:
         return {}, {}, 0.0
     pos_items = items[row_idx].astype(str)

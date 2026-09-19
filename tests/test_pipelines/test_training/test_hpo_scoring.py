@@ -26,9 +26,24 @@ class TestHpoScore:
 
     def test_mean_ap_matches_compute_mean_ap(self):
         from recsys_tfb.evaluation.metrics import compute_mean_ap
-        expected = compute_mean_ap(self.GROUPS, self.Y, self.SCORE)
-        result = _hpo_score("mean_ap", self.GROUPS, None, self.Y, self.SCORE)
+        expected = compute_mean_ap(self.GROUPS, self.ITEMS, self.Y, self.SCORE)
+        result = _hpo_score("mean_ap", self.GROUPS, self.ITEMS, self.Y, self.SCORE)
         assert result == pytest.approx(expected)
+
+    @pytest.mark.parametrize("objective", ["mean_ap", "macro_per_item_map"])
+    def test_tied_scores_rank_by_item_under_both_objectives(self, objective):
+        """One query, two tied pairs. By item ascending the positives "b" and
+        "d" sit at ranks 2 and 4 (mAP 1/2); by input order they would sit at 1
+        and 3 (mAP 5/6). Each item has one positive, so the per-item macro is
+        (1/2 + 1/2) / 2 as well."""
+        result = _hpo_score(
+            objective,
+            np.array([0, 0, 0, 0]),
+            np.array(["b", "a", "d", "c"]),
+            np.array([1, 0, 1, 0]),
+            np.array([0.9, 0.9, 0.5, 0.5]),
+        )
+        assert result == pytest.approx(0.5)
 
     def test_macro_per_item_map_matches_primitive(self):
         from recsys_tfb.evaluation.metrics import compute_macro_per_item_map
@@ -110,7 +125,8 @@ class TestTrialScorer:
             train_weights=np.array([1.0, 3.0]),
             train_dev_weights=np.array([2.0, 4.0]),
             X_val=np.zeros((4, 2)), y_val=np.array([1, 0, 1, 0]),
-            groups_val=np.array([0, 0, 1, 1], dtype=np.int64), items_val=None,
+            groups_val=np.array([0, 0, 1, 1], dtype=np.int64),
+            items_val=np.array([0, 1, 0, 1], dtype=np.int64),
             algorithm="lightgbm", algorithm_params={}, search_space=[],
             hpo_objective="mean_ap", seed=42, num_iterations=5,
             early_stopping_rounds=2, n_trials=len(scores),
@@ -362,7 +378,8 @@ class TestWeightsReachTheTrainedModel:
         lgb_train, lgb_dev = LightGBMAdapter().prepare_train_inputs(
             train_h, dev_h, prep, params, str(tmp_path / "variant"))
 
-        X_v, y_v, g_v = extract_Xy_with_groups(dev_h, prep, params)
+        X_v, y_v, g_v, i_v = extract_Xy_with_groups(
+            dev_h, prep, params, with_items=True)
         # Fixed hyper-parameters for both runs, so any difference in the
         # models is the weights and nothing else.
         monkeypatch.setattr(
@@ -371,7 +388,7 @@ class TestWeightsReachTheTrainedModel:
             train_lgb_handle=lgb_train, train_dev_lgb_handle=lgb_dev,
             train_weights=lgb_train.sample_weights(params, prep),
             train_dev_weights=lgb_dev.sample_weights(params, prep),
-            X_val=X_v, y_val=y_v, groups_val=g_v, items_val=None,
+            X_val=X_v, y_val=y_v, groups_val=g_v, items_val=i_v,
             algorithm="lightgbm",
             algorithm_params=dict(params["training"]["algorithm_params"]),
             search_space=[], hpo_objective="mean_ap", seed=42,

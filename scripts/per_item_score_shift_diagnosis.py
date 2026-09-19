@@ -394,7 +394,7 @@ def _bootstrap_macro_values(
     draws: np.ndarray,
     mp: dict,
 ) -> np.ndarray:
-    contrib, row_idx = positive_row_contributions(groups, y, score, mp["k"])
+    contrib, row_idx = positive_row_contributions(groups, items, y, score, mp["k"])
     if len(contrib) == 0:
         return np.full(draws.shape[0], np.nan)
     item_of = items[row_idx]
@@ -437,7 +437,7 @@ def per_item_map_rows(
     mp: dict,
 ) -> list[dict[str, Any]]:
     def per_item_values(score: np.ndarray) -> tuple[dict[str, float], dict[str, int]]:
-        contrib, row_idx = positive_row_contributions(groups, y, score, mp["k"])
+        contrib, row_idx = positive_row_contributions(groups, items, y, score, mp["k"])
         if len(contrib) == 0:
             return {}, {}
         pos_items = items[row_idx].astype(str)

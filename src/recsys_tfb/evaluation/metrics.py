@@ -1,9 +1,12 @@
 """Ranking primitives on numpy arrays, plus the shared reader of ``evaluation.metric``.
 
 This is a pure-numpy leaf module: its imports are ``logging`` / ``typing`` /
-``numpy`` only. Do not add a project import — ``diagnosis.metric.*``,
-``evaluation.metrics_spark``, ``evaluation.report_builder`` and several
-``scripts/`` import from here, so a project import risks a cycle.
+``numpy``, plus ``utils.ranking`` for the within-query order. Do not add any
+other project import — ``diagnosis.metric.*``, ``evaluation.metrics_spark``,
+``evaluation.report_builder`` and several ``scripts/`` import from here, so a
+project import risks a cycle. ``utils.ranking`` is the exception because it
+imports nothing from the project, so it cannot close one; it is where the tie
+rule lives, shared with the Spark ranking (#355).
 
 What lives here:
 
@@ -27,6 +30,8 @@ import logging
 from typing import Optional
 
 import numpy as np
+
+from recsys_tfb.utils.ranking import order_by_score_then_item
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +87,10 @@ def compute_ap(y_true: np.ndarray, y_score: np.ndarray) -> Optional[float]:
 
 
 def compute_mean_ap(
-    groups: np.ndarray, y_true: np.ndarray, y_score: np.ndarray
+    groups: np.ndarray,
+    items: np.ndarray,
+    y_true: np.ndarray,
+    y_score: np.ndarray,
 ) -> float:
     """Mean of per-group Average Precision.
 
@@ -94,22 +102,20 @@ def compute_mean_ap(
     (per-customer AP averaged over customers) rather than treating the whole
     val set as a single ranking problem.
 
-    Implementation: ``O(N log N)`` via a single ``np.lexsort`` on
-    ``(groups, -y_score)`` followed by a slice-per-group walk. The naive
+    Implementation: ``O(N log N)`` via one sort on ``(groups, -y_score,
+    items)`` followed by a slice-per-group walk. The naive
     ``for g in np.unique(groups): mask = groups == g`` is ``O(N × G)`` and
     becomes unusable at production scale (5M rows × 200k groups ~ 10 min).
 
-    Tied y_score within a group resolves by stable input order (``np.lexsort``
-    is mergesort-based). This is a stronger guarantee than the previous
-    ``np.argsort`` default, whose tie-break was implementation-defined.
+    Tied y_score within a group resolves by ``items`` ascending — the rule the
+    Spark metrics rank with, :mod:`recsys_tfb.utils.ranking` — so the same rows
+    score the same whatever order they arrive in. ``items`` only breaks ties.
     """
     if len(groups) == 0:
         return 0.0
 
-    # np.lexsort takes keys in REVERSE priority order: the LAST key is primary.
-    # Primary = groups (so each group's rows become contiguous); secondary =
-    # -y_score (so within each group rows are in descending score order).
-    sort_idx = np.lexsort((-y_score, groups))
+    # Each group's rows contiguous, score descending, ties by item ascending.
+    sort_idx = order_by_score_then_item(groups, y_score, items)
     g_sorted = groups[sort_idx]
     y_sorted = y_true[sort_idx].astype(np.float64, copy=False)
 
@@ -128,7 +134,7 @@ def compute_mean_ap(
         n_pos = y.sum()
         if n_pos == 0:
             continue
-        # y is already in score-descending order (from the lexsort), so
+        # y is already in score-descending order (from the sort), so
         # cumsum gives top-k precision directly — same formula as compute_ap.
         positions = np.arange(1, len(y) + 1, dtype=np.float64)
         precisions = np.cumsum(y) / positions
@@ -141,6 +147,7 @@ def compute_mean_ap(
 
 def positive_row_contributions(
     groups: np.ndarray,
+    items: np.ndarray,
     y_true: np.ndarray,
     y_score: np.ndarray,
     k: Optional[int] = None,
@@ -149,7 +156,9 @@ def positive_row_contributions(
 
     contrib[i] is the within-query cumulative precision of positive row
     row_idx[i] (zeroed when its rank exceeds ``k``). Queries with no
-    positive rows contribute nothing. Shared by
+    positive rows contribute nothing. Within a query rows rank by score
+    descending, ties by ``items`` ascending (:mod:`recsys_tfb.utils.ranking`);
+    ``items`` takes the raw item values and only breaks ties. Shared by
     :func:`compute_macro_per_item_map` and the diagnosis bootstrap
     (``diagnosis.metric.uncertainty``) — cluster resampling never changes
     within-query ranking, so contributions are computed exactly once.
@@ -166,7 +175,7 @@ def positive_row_contributions(
     if len(groups) == 0:
         return np.array([], dtype=np.float64), np.array([], dtype=np.int64)
 
-    sort_idx = np.lexsort((-y_score, groups))
+    sort_idx = order_by_score_then_item(groups, y_score, items)
     g_sorted = groups[sort_idx]
     y_sorted = y_true[sort_idx].astype(np.float64, copy=False)
 
@@ -321,12 +330,16 @@ def compute_macro_per_item_map(
     Empty input, or no positive rows anywhere, returns ``0.0``. If every
     item is excluded by ``min_positives``, also returns ``0.0``.
 
-    Implementation mirrors :func:`compute_mean_ap`: one ``np.lexsort`` on
-    ``(groups, -y_score)`` (``O(N log N)``) via
+    Implementation mirrors :func:`compute_mean_ap`: one sort on
+    ``(groups, -y_score, items)`` (``O(N log N)``) via
     :func:`positive_row_contributions`, then a vectorized per-item
-    aggregation via ``np.unique`` + ``np.bincount``.
+    aggregation via ``np.unique`` + ``np.bincount``. ``items`` is both the
+    tie-break and the per-item key, so HPO may pass the order-preserving codes
+    of :func:`recsys_tfb.utils.ranking.item_sort_codes` in place of the values.
     """
-    contrib_all, row_idx = positive_row_contributions(groups, y_true, y_score, k)
+    contrib_all, row_idx = positive_row_contributions(
+        groups, items, y_true, y_score, k
+    )
     # Validate/broadcast before the empty-input return so a malformed weight
     # vector raises regardless of whether the input happened to be empty.
     w_pos = (

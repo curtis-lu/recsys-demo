@@ -106,6 +106,7 @@ from recsys_tfb.pipelines.training.steps.predict_months import (
     warn_about_surplus_partitions,
     written_prediction_partitions,
 )
+from recsys_tfb.utils.ranking import item_sort_codes
 from recsys_tfb.utils.spark import release_spark_session
 
 logger = logging.getLogger(__name__)
@@ -689,18 +690,19 @@ def tune_hyperparameters(
     # unlinked as soon as it is mapped, so cleanup needs nothing from this
     # node; see `io/disk_matrix.py`, including why a full disk here would
     # otherwise corrupt the matrix in silence.
+    #
+    # Decision — both objectives read the item column. Tied scores rank by
+    # item, the rule the evaluation metrics use (`utils/ranking.py`, #355), so
+    # a trial's score does not depend on the order the val rows were read in.
+    # The raw values become order-preserving codes once, here: every trial
+    # ranks the same items, and sorting a string per row on each trial is work
+    # the search would repeat for nothing.
     with log_step(logger, "extract_features"):
-        if hpo_objective == "macro_per_item_map":
-            X_v, y_v, groups_v, items_v = extract_Xy_with_groups(
-                val_parquet_handle, preprocessor_metadata, parameters,
-                with_items=True, on_disk_label="hpo_val_matrix",
-            )
-        else:
-            X_v, y_v, groups_v = extract_Xy_with_groups(
-                val_parquet_handle, preprocessor_metadata, parameters,
-                on_disk_label="hpo_val_matrix",
-            )
-            items_v = None
+        X_v, y_v, groups_v, items_v = extract_Xy_with_groups(
+            val_parquet_handle, preprocessor_metadata, parameters,
+            with_items=True, on_disk_label="hpo_val_matrix",
+        )
+        items_v = item_sort_codes(items_v)
 
     checkpointing = parameters.get("hpo_checkpointing", True)
     search_id = _resolve_search_id(parameters)

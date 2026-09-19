@@ -11,9 +11,22 @@ def test_descending_ranks_are_one_based_highest_score_first():
     """名次 1 給同一 query 內分數最高的列；跨 query 各自從 1 起算。"""
     groups = np.array([0, 0, 0, 1, 1])
     score = np.array([0.1, 0.9, 0.5, 0.2, 0.8])
+    items = np.array(["a", "b", "c", "a", "b"])
     # q0: 0.9→1, 0.5→2, 0.1→3 ; q1: 0.8→1, 0.2→2
     np.testing.assert_array_equal(
-        descending_ranks(groups, score), np.array([3.0, 1.0, 2.0, 2.0, 1.0])
+        descending_ranks(groups, score, items),
+        np.array([3.0, 1.0, 2.0, 2.0, 1.0]),
+    )
+
+
+def test_descending_ranks_break_ties_by_item():
+    """同分照 item 升冪排（utils.ranking），不照列進來的順序：c 與 a 同分，
+    a 在前。"""
+    groups = np.zeros(3, dtype=np.int64)
+    score = np.array([0.5, 0.9, 0.5])
+    items = np.array(["c", "b", "a"])
+    np.testing.assert_array_equal(
+        descending_ranks(groups, score, items), np.array([3.0, 1.0, 2.0])
     )
 
 

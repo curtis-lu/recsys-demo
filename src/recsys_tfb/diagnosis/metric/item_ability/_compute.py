@@ -80,6 +80,7 @@ from recsys_tfb.diagnosis.metric._common import (
 )
 from recsys_tfb.diagnosis.metric.uncertainty import iter_stratified_cluster_multipliers
 from recsys_tfb.evaluation.metrics import metric_params
+from recsys_tfb.utils.ranking import order_by_score_then_item
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ FIELD_NOTES: dict[str, str] = {
     "p90_positive_rank": "正例名次的第 90 百分位數（較差的一端），未加權。",
     "positive_ranks": (
         "該 item 每一個正例列在各自 query 內的名次（1-based，1＝排最前）原始值"
-        "列表。"
+        "列表，由小到大排。"
     ),
     "ap": (
         "該 item 的 average precision（依 evaluation.metric 的 k／shrinkage "
@@ -149,8 +150,14 @@ def query_center_scores(groups: np.ndarray, z: np.ndarray) -> np.ndarray:
     return z - (sums / counts)[groups]
 
 
-def descending_ranks(groups: np.ndarray, score: np.ndarray) -> np.ndarray:
+def descending_ranks(
+    groups: np.ndarray, score: np.ndarray, items: np.ndarray,
+) -> np.ndarray:
     """One-based rank within each query, highest score = rank 1; lower is better.
+
+    Ties rank by ``items`` ascending, the rule the published and evaluated
+    ranks use (``utils.ranking``) — so a tied positive gets the same rank here
+    as in the main metrics, whatever order the sample rows arrived in.
 
     回傳原始名次（不除以 query size）：名次直接讀得懂（「排第 3」），而百分位
     （rank ÷ query size）在 query 候選數不固定時才需要，且「0.125」這種數字讀
@@ -160,7 +167,7 @@ def descending_ranks(groups: np.ndarray, score: np.ndarray) -> np.ndarray:
     out = np.full(len(score), np.nan, dtype=np.float64)
     if len(score) == 0:
         return out
-    order = np.lexsort((-score, groups))
+    order = order_by_score_then_item(groups, score, items)
     g_sorted = groups[order]
     boundaries = np.concatenate([
         [0],
@@ -341,7 +348,8 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     # clusters 這裡要**已經 factorize** 過的連續 int 陣列（下面
     # iter_stratified_cluster_multipliers 拿它直接當索引），sample_arrays
     # 刻意不回傳 clusters（config_shift 要的是另一種型別），故自己現組。
-    clusters = pd.factorize(query_key(sample_pdf, entity_cols))[0]
+    # sort=True：編號照 key 排序給，理由見 sample_arrays 的 groups。
+    clusters = pd.factorize(query_key(sample_pdf, entity_cols), sort=True)[0]
     n_entities = int(clusters.max()) + 1
 
     # strata 同一套來源，與 config_shift／uncertainty 一致：缺欄（未分層抽樣）
@@ -356,8 +364,15 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         z, logit_notes = to_logit(sample_pdf[SCORE_COL].to_numpy(dtype=np.float64))
         out["logit_notes"] = logit_notes
         out["notes"].extend(logit_notes)
+        # 先把列排成固定順序（query id → 分數 → item）再算。下面的 query 平均、
+        # 每個 item 的平均相對分數都是逐列加總，加總順序跟著列序走，換個 Spark
+        # 平行度就差在小數最後一位；排過之後同一份樣本逐位元相同（#355）。
+        canon = order_by_score_then_item(groups, z, items)
+        groups, items, y, ht_weight, clusters, strata, z = (
+            a[canon] for a in (groups, items, y, ht_weight, clusters, strata, z)
+        )
         rel = query_center_scores(groups, z)
-        rank = descending_ranks(groups, z)
+        rank = descending_ranks(groups, z, items)
         ap_by_item, n_pos_ap, macro_map = per_item_ap(groups, items, y, z, mp)
     out["macro_per_item_map"] = macro_map
 
@@ -430,8 +445,9 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
             mean_neg = float(np.mean(neg_rel)) if len(neg_rel) else None
 
             per_item.append({
-                "item": item,
-                "ap": ap_by_item.get(item),
+                # items 是原始值（sample_arrays），per_item_ap 的 key 是字串。
+                "item": str(item),
+                "ap": ap_by_item.get(str(item)),
                 "n_pos": int(pos_mask.sum()),
                 "n_neg": int(neg_mask.sum()),
                 "query_centered_auc": centered_auc,
@@ -462,8 +478,10 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
                 "p90_positive_rank": (
                     None if len(pos_rank) == 0 else float(np.nanpercentile(pos_rank, 90))
                 ),
-                "positive_ranks": [int(r) for r in pos_rank],
-                "n_pos_ap": int(n_pos_ap.get(item, 0)),
+                # 由小到大：清單本身沒有順序的意思，照列的順序排的話，
+                # 換個 Spark 平行度就是另一份 JSON（#355）。
+                "positive_ranks": sorted(int(r) for r in pos_rank),
+                "n_pos_ap": int(n_pos_ap.get(str(item), 0)),
             })
             logger.info(
                 "item_ability per-item %d/%d (item=%s, raw_auc=%s, centered_auc=%s)",
