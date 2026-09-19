@@ -1835,6 +1835,29 @@ class TestFitUsesTrainMonthsOnly:
         assert {r.risk_attr for r in encoded.select("risk_attr").distinct().collect()} == {-1}
 
 
+class TestFitRejectsContinuousCategorical:
+    """B5's runtime backstop in the fit, for the runs that skip the gate.
+
+    ``--only-node`` / ``--from-node fit_preprocessor_metadata`` never run
+    ``validate_data_consistency``. On a double categorical the vocabulary
+    collection is not exact — it keeps one NaN per row — and does not raise,
+    so without the backstop the run finishes with a wrong mapping.
+    """
+
+    def test_double_categorical_raises_without_the_gate(self, feature_table, parameters):
+        ft = feature_table.withColumn(
+            "risk_score",
+            F.when(F.col("cust_id") == F.lit(_ENTITIES[0]), F.lit(float("nan")))
+             .otherwise(F.lit(1.5)),
+        )
+        params = _gate_params(parameters, categorical_extra=["risk_score"])
+        with pytest.raises(
+            DataConsistencyError,
+            match=r"'risk_score' is a continuous-numeric type \(type=double\)",
+        ):
+            fit_preprocessor_metadata(ft, params)
+
+
 class TestIdentityCategoricalNotEncoded:
     """D16 — identity categoricals are deliberately left un-encoded here.
 
