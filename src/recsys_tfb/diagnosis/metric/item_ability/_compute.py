@@ -124,7 +124,7 @@ FIELD_NOTES: dict[str, str] = {
     "p90_positive_rank": "正例名次的第 90 百分位數（較差的一端），未加權。",
     "positive_ranks": (
         "該 item 每一個正例列在各自 query 內的名次（1-based，1＝排最前）原始值"
-        "列表，由小到大排。"
+        "列表。"
     ),
     "ap": (
         "該 item 的 average precision（依 evaluation.metric 的 k／shrinkage "
@@ -366,7 +366,8 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         out["notes"].extend(logit_notes)
         # 先把列排成固定順序（query id → 分數 → item）再算。下面的 query 平均、
         # 每個 item 的平均相對分數都是逐列加總，加總順序跟著列序走，換個 Spark
-        # 平行度就差在小數最後一位；排過之後同一份樣本逐位元相同（#355）。
+        # 平行度就差在小數最後一位；positive_ranks 清單也照列序列出。排過之後
+        # 同一份樣本逐位元相同（#355）。
         canon = order_by_score_then_item(groups, z, items)
         groups, items, y, ht_weight, clusters, strata, z = (
             a[canon] for a in (groups, items, y, ht_weight, clusters, strata, z)
@@ -478,9 +479,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
                 "p90_positive_rank": (
                     None if len(pos_rank) == 0 else float(np.nanpercentile(pos_rank, 90))
                 ),
-                # 由小到大：清單本身沒有順序的意思，照列的順序排的話，
-                # 換個 Spark 平行度就是另一份 JSON（#355）。
-                "positive_ranks": sorted(int(r) for r in pos_rank),
+                "positive_ranks": [int(r) for r in pos_rank],
                 "n_pos_ap": int(n_pos_ap.get(str(item), 0)),
             })
             logger.info(
