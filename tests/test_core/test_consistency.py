@@ -662,6 +662,49 @@ class TestCategoricalDtypeErrors:
         assert "categorical_columns" in msg and "drop_columns" in msg
 
 
+class TestCategoricalDtypeAllowList:
+    """B5 since #407 — an allow-list: string, the integer family, boolean.
+
+    Everything outside it is rejected, including a type nobody listed. Before
+    #407 only decimal/double/float were: a date/timestamp/binary categorical
+    passed, got a full-table vocabulary scan, then crashed the preprocessor's
+    JSON save; a complex one crashed the encoder. Rejecting them breaks no
+    configuration that produced a usable feature.
+    """
+
+    # Hive varchar(n)/char(n) read back as "string" in Spark 3.3.2 (checked on a
+    # Hive table, 2026-09-19), so they are covered by "string".
+    @pytest.mark.parametrize(
+        "dt", ["string", "tinyint", "smallint", "int", "bigint", "boolean"])
+    def test_supported_types_pass(self, dt):
+        assert categorical_dtype_errors(["c"], {"c": dt}) == []
+
+    @pytest.mark.parametrize("dt", [
+        "date", "timestamp", "binary",
+        "array<string>", "struct<a:int>", "map<string,int>",
+        "void", "interval day to second",
+    ])
+    def test_every_other_type_is_rejected(self, dt):
+        errs = categorical_dtype_errors(["c"], {"c": dt})
+        assert len(errs) == 1
+        assert "'c'" in errs[0] and f"type={dt}" in errs[0]
+
+    @pytest.mark.parametrize("dt, remedy", [
+        ("date", "derive a numeric feature"),
+        ("timestamp", "derive a numeric feature"),
+        ("binary", "hex("),
+        ("array<string>", "flatten"),
+        ("struct<a:int>", "flatten"),
+    ])
+    def test_each_family_is_told_its_own_way_out(self, dt, remedy):
+        """The remedy is the point of rejecting early: a user who only hears
+        "not allowed" edits the config twice."""
+        (msg,) = categorical_dtype_errors(["c"], {"c": dt})
+        assert remedy in msg
+        assert "source ETL" in msg
+        assert "drop_columns" in msg
+
+
 class TestDiagnosisMetricParamsA15:
     def _params(self, metric=None, sample=None, ci=None, item_ability=None):
         ev = {}
@@ -1193,6 +1236,36 @@ class TestNonnumericFeatureErrors:
         )
         assert len(errs) == 2
         assert "aaa" in errs[0] and "zzz" in errs[1]
+
+
+class TestNonnumericFeatureErrorsAdviceByType:
+    """#407 — B6 must not send a column into B5's rejection.
+
+    B6's usual way out is "declare it categorical". For a type B5 rejects
+    (date, binary, complex) that advice sends the user from one error straight
+    into the other, so with the column's type in hand B6 gives B5's way out.
+    """
+
+    _SUGGEST_CATEGORICAL = "add it to dataset.prepare_model_input.categorical_columns"
+
+    def test_a_date_column_is_not_told_to_become_categorical(self):
+        (msg,) = nonnumeric_feature_errors(
+            {"open_date": "nonnumeric"}, set(), dtypes={"open_date": "date"})
+        assert self._SUGGEST_CATEGORICAL not in msg
+        assert "cannot be declared categorical" in msg
+        assert "derive a numeric feature" in msg
+        assert "drop_columns" in msg
+
+    def test_a_string_column_still_is(self):
+        (msg,) = nonnumeric_feature_errors(
+            {"segment": "nonnumeric"}, set(), dtypes={"segment": "string"})
+        assert self._SUGGEST_CATEGORICAL in msg
+
+    def test_without_types_the_advice_is_unchanged(self):
+        """The training-read backstop (io/extract.py) reads parquet types and
+        passes none; its message stays what it was."""
+        (msg,) = nonnumeric_feature_errors({"open_date": "nonnumeric"}, set())
+        assert self._SUGGEST_CATEGORICAL in msg
 
 
 # --- B9: model_input feature columns are all the declared storage type ---

@@ -425,17 +425,20 @@ implemented and wired):
   (deferred).
 * B2 — label-window leakage columns reach features (specified but DEFERRED).
 * B5 — a column declared in ``dataset.prepare_model_input.categorical_columns``
-  is a continuous-numeric type (decimal/double/float) in feature_table. decimal
-  collects to Python ``decimal.Decimal`` (not JSON-serializable → the opaque
-  ``fit_preprocessor_metadata`` save crash this gate front-runs); double/float
-  serialize but are near-certain mis-tags. Predicate:
+  has a type outside ``CATEGORICAL_DTYPES`` (string, the integer family,
+  boolean) in feature_table. An allow-list since #407; before it B5 rejected
+  only decimal/double/float, and date/timestamp/binary crashed the
+  ``fit_preprocessor_metadata`` save after a full scan while complex types
+  crashed the encoder. Each rejection names its type family's way out, shared
+  with B6 and the config tool through ``categorical_dtype_problem``. Predicate:
   ``categorical_dtype_errors`` (pure, no Spark); wired via
   ``validate_data_consistency`` alongside B1 (reads ``feature_table.dtypes``,
   metastore metadata only — no scan). Runtime backstop:
-  ``require_no_continuous_categoricals`` (``pipelines/dataset/steps/categoricals.py``),
-  run by ``fit_preprocessor_metadata`` — a sliced run skips the gate, and the
-  one-pass vocabulary collection there is not exact on a double/float column
-  (``collect_set`` keeps each NaN and does not normalise -0.0).
+  ``require_supported_categorical_dtypes`` (``pipelines/dataset/steps/categoricals.py``),
+  run by ``fit_preprocessor_metadata`` before its vocabulary scan — a sliced run
+  skips the gate, and the one-pass vocabulary collection there is not exact on a
+  double/float column (``collect_set`` keeps each NaN and does not normalise
+  -0.0).
 * B6 — a feature column that is non-numeric (string / binary / date / timestamp /
   complex) and is NOT declared categorical (so never integer-encoded): it becomes
   an ``object``-dtype model feature → driver OOM at ``pdf_to_X`` ``to_numpy`` and
@@ -443,7 +446,10 @@ implemented and wired):
   (with the ``spark_dtype_is_numeric`` classifier). Wired at TWO call sites — the
   dataset gate ``validate_data_consistency`` (prevents a rebuilt dataset baking it
   in) and a training-read backstop in ``io/extract.py`` (fails fast on an
-  already-built parquet, before the expensive pandas read). B4 is unused.
+  already-built parquet, before the expensive pandas read). The gate passes the
+  column types in, so a column B5 would reject as a categorical is not told to
+  become one (#407); the backstop passes none and keeps the generic advice.
+  B4 is unused.
 
   **The two sites classify different frames, so what "numeric" buys differs.**
   ``spark_dtype_is_numeric`` reads ``feature_table``, *before* the cast, so what
@@ -1822,10 +1828,79 @@ def item_coverage_errors(
     return errors
 
 
-# Spark DataFrame.dtypes simpleString forms that are continuous-numeric and
-# therefore an illegal type for a declared categorical (B5). decimal carries a
-# precision/scale suffix ("decimal(15,0)"), so it is matched by prefix below.
+# B5 — the Spark ``DataFrame.dtypes`` simpleStrings a declared categorical may
+# have. An allow-list rather than a list of what is banned, so a type nobody
+# thought of is rejected before the vocabulary scan instead of failing after it.
+# Hive ``varchar(n)`` / ``char(n)`` read back as "string" (Spark 3.3.2).
+CATEGORICAL_DTYPES = frozenset(
+    {"string", "tinyint", "smallint", "int", "bigint", "boolean"}
+)
+
+# decimal carries a precision/scale suffix ("decimal(15,0)"), so it is matched
+# by prefix below.
 _CONTINUOUS_NUMERIC_DTYPES = {"double", "float"}
+_DATETIME_DTYPES = {"date", "timestamp"}
+_COMPLEX_DTYPE_PREFIXES = ("array<", "struct<", "map<")
+
+
+class CategoricalDtypeProblem(NamedTuple):
+    """Why a type cannot be a categorical's, in three parts a message reads
+    in order: what the type is, what goes wrong, what to do instead."""
+
+    kind: str
+    why: str
+    way_out: str
+
+
+def categorical_dtype_problem(dt: str) -> CategoricalDtypeProblem | None:
+    """Why ``dt`` cannot be a categorical's type.
+
+    ``None`` when it can. The one place a type family's advice is written, so
+    B5 (a column declared categorical), B6 (a column that would have to be) and
+    ``scripts/suggest_categorical_cols.py`` (a column a human must decide on)
+    never tell the user two different things about the same column.
+    """
+    if dt in CATEGORICAL_DTYPES:
+        return None
+    if dt.startswith("decimal") or dt in _CONTINUOUS_NUMERIC_DTYPES:
+        return CategoricalDtypeProblem(
+            "a continuous-numeric type",
+            "a decimal categorical is not JSON-serializable (the preprocessor "
+            "save crashes after the full vocabulary scan) and a double/float "
+            "one is almost always a mis-tag",
+            "keep it as a numeric feature, or, if it is a numeric code, cast it "
+            "to string or integer in the source ETL",
+        )
+    if dt in _DATETIME_DTYPES:
+        return CategoricalDtypeProblem(
+            "a date/time type",
+            "used as a category it only ever matches the dates the train months "
+            "happened to contain, and the preprocessor cannot store it (the "
+            "JSON save crashes after the full vocabulary scan)",
+            "derive a numeric feature from it in the source ETL (e.g. days "
+            "since the snapshot)",
+        )
+    if dt == "binary":
+        return CategoricalDtypeProblem(
+            "a binary type (bytes — a 0/1 flag is boolean or integer instead)",
+            "the preprocessor cannot store bytes (the JSON save crashes after "
+            "the full vocabulary scan)",
+            "if it is a code, convert it to a string in the source ETL — "
+            "hex(col) gives each value exactly one string, so no category is "
+            "lost",
+        )
+    if dt.startswith(_COMPLEX_DTYPE_PREFIXES):
+        return CategoricalDtypeProblem(
+            "a complex type",
+            "the encoder cannot encode a complex value",
+            "flatten it into scalar string/integer/boolean columns in the "
+            "source ETL",
+        )
+    return CategoricalDtypeProblem(
+        "an unsupported type",
+        "nothing in the preprocessor is known to handle it",
+        "convert it to string, an integer type or boolean in the source ETL",
+    )
 
 
 def categorical_dtype_errors(
@@ -1835,17 +1910,26 @@ def categorical_dtype_errors(
     """B5 invariant — the single definition.
 
     A column declared in ``dataset.prepare_model_input.categorical_columns``
-    must not be a continuous-numeric type (``decimal`` / ``double`` / ``float``)
-    in ``feature_table``:
+    must have one of the :data:`CATEGORICAL_DTYPES` in ``feature_table``:
+    string, an integer type, or boolean. Every other type fails somewhere
+    downstream, and before this gate it failed late — after a full scan of the
+    train months:
 
-    - ``decimal`` collects to Python ``decimal.Decimal``, which is not
-      JSON-serializable — ``fit_preprocessor_metadata`` crashes when saving the
-      preprocessor metadata, but only after the full vocabulary scan (the
-      opaque, expensive failure this gate replaces).
-    - ``double`` / ``float`` serialize fine but a continuous value used as a
+    - ``decimal``, ``date``, ``timestamp``, ``binary`` collect to Python values
+      ``json.dump`` cannot write, so the preprocessor save crashes.
+    - ``double`` / ``float`` serialize, but a continuous value used as a
       category is almost always a mis-tag, float-equality lookup in the
       ``F.create_map`` encoding is fragile, and the vocabulary collection is not
       exact on one (see ``collect_vocabularies_from_data``).
+    - complex types (array / struct / map) crash the encoder.
+
+    An allow-list, not a list of those: a type not named here is rejected too,
+    rather than being let through to find out. Rejecting them broke no
+    configuration that used to produce a usable feature (#407): the only ones
+    that finished were columns entirely NULL over the train months, whose empty
+    vocabulary encodes every row to the same sentinel. Each rejection names the way out
+    for its type family (:func:`categorical_dtype_problem`) — the reason to
+    fail early rather than merely fail.
 
     ``feature_table_dtypes`` maps a feature_table column name to its Spark
     ``DataFrame.dtypes`` simpleString (e.g. ``"decimal(15,0)"``, ``"double"``,
@@ -1860,17 +1944,17 @@ def categorical_dtype_errors(
         dt = feature_table_dtypes.get(col)
         if dt is None:
             continue  # identity categorical / not a feature_table column
-        if dt.startswith("decimal") or dt in _CONTINUOUS_NUMERIC_DTYPES:
-            errors.append(
-                f"categorical column {col!r} is a continuous-numeric type "
-                f"(type={dt}) in feature_table — a decimal categorical is not "
-                f"JSON-serializable (fit_preprocessor_metadata save crashes) "
-                f"and a double/float categorical is almost always a mis-tag. "
-                f"If {col!r} is a numeric feature, remove it from "
-                f"dataset.prepare_model_input.categorical_columns; if it is not "
-                f"a model feature, add it to "
-                f"dataset.prepare_model_input.drop_columns."
-            )
+        problem = categorical_dtype_problem(dt)
+        if problem is None:
+            continue
+        errors.append(
+            f"categorical column {col!r} is {problem.kind} (type={dt}) in "
+            f"feature_table — {problem.why}. A categorical must be string, an integer "
+            f"type or boolean. Remove {col!r} from "
+            f"dataset.prepare_model_input.categorical_columns and {problem.way_out}; "
+            f"if it is not a model feature, add it to "
+            f"dataset.prepare_model_input.drop_columns instead."
+        )
     return errors
 
 
@@ -2130,6 +2214,7 @@ def numeric_precision_errors(
 def nonnumeric_feature_errors(
     feature_kinds: dict[str, str],
     will_be_encoded: set[str],
+    dtypes: dict[str, str] | None = None,
 ) -> list[str]:
     """B6 invariant — the single definition.
 
@@ -2147,17 +2232,41 @@ def nonnumeric_feature_errors(
     set of feature columns that are non-numeric now but become numeric
     downstream (declared categoricals, incl. deferred identity categoricals).
     Returns collect-all error strings sorted by column; empty means OK.
+
+    ``dtypes`` (Spark simpleStrings, optional) decides the way out. "Declare it
+    categorical" is wrong advice for a type B5 rejects — it sends the user from
+    this error straight into that one — so a column whose type cannot be a
+    categorical gets B5's way out instead (#407). Without ``dtypes`` every
+    column gets the categorical-or-drop advice: the training-read backstop
+    passes none, and its real remedy is rebuilding the dataset anyway (see the
+    B6 legend).
     """
+    dtypes = dtypes or {}
     errors: list[str] = []
     for col in sorted(feature_kinds):
-        if feature_kinds[col] != "numeric" and col not in will_be_encoded:
+        if feature_kinds[col] == "numeric" or col in will_be_encoded:
+            continue
+        problem = None if col not in dtypes else categorical_dtype_problem(dtypes[col])
+        prefix = (
+            f"feature column {col!r} is non-numeric and is not declared "
+            f"categorical, so it would become an un-encoded object-dtype "
+            f"model feature (OOM at pdf_to_X.to_numpy, then a LightGBM "
+            f"float-cast error). "
+        )
+        if problem is None:
             errors.append(
-                f"feature column {col!r} is non-numeric and is not declared "
-                f"categorical, so it would become an un-encoded object-dtype "
-                f"model feature (OOM at pdf_to_X.to_numpy, then a LightGBM "
-                f"float-cast error). If {col!r} is a categorical feature, add it "
+                prefix
+                + f"If {col!r} is a categorical feature, add it "
                 f"to dataset.prepare_model_input.categorical_columns (it is then "
                 f"integer-encoded); if it is not a model feature, add it to "
+                f"dataset.prepare_model_input.drop_columns."
+            )
+        else:
+            errors.append(
+                prefix
+                + f"It cannot be declared categorical either: it is {problem.kind} "
+                f"(type={dtypes[col]}) — {problem.why}. If {col!r} should be a "
+                f"model feature, {problem.way_out}; if not, add it to "
                 f"dataset.prepare_model_input.drop_columns."
             )
     return errors

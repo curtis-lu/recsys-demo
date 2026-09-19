@@ -1201,6 +1201,21 @@ class TestValidateDataConsistencyB6:
         with pytest.raises(DataConsistencyError, match="rogue_str"):
             validate_data_consistency(sample_pool, label_table, rogue, parameters)
 
+    def test_unencoded_date_feature_is_not_told_to_become_categorical(
+        self, spark, feature_table, sample_pool, label_table, parameters
+    ):
+        """#407 — the gate hands the column types to B6.
+
+        Without them B6 falls back to "add it to categorical_columns", which for
+        a date sends the user straight into B5's rejection.
+        """
+        dated = feature_table.withColumn("open_date", F.to_date(F.lit("2020-01-01")))
+        with pytest.raises(DataConsistencyError) as ei:
+            validate_data_consistency(sample_pool, label_table, dated, parameters)
+        msg = str(ei.value)
+        assert "'open_date'" in msg
+        assert "cannot be declared categorical" in msg
+
     def test_boolean_feature_not_flagged(
         self, spark, feature_table, sample_pool, label_table, parameters
     ):
@@ -1835,14 +1850,36 @@ class TestFitUsesTrainMonthsOnly:
         assert {r.risk_attr for r in encoded.select("risk_attr").distinct().collect()} == {-1}
 
 
-class TestFitRejectsContinuousCategorical:
+class TestFitRejectsUnsupportedCategoricalDtype:
     """B5's runtime backstop in the fit, for the runs that skip the gate.
 
     ``--only-node`` / ``--from-node fit_preprocessor_metadata`` never run
     ``validate_data_consistency``. On a double categorical the vocabulary
     collection is not exact — it keeps one NaN per row — and does not raise,
-    so without the backstop the run finishes with a wrong mapping.
+    so without the backstop the run finishes with a wrong mapping. A date one
+    used to scan the whole train window and then crash the JSON save (#407).
     """
+
+    def test_date_categorical_raises_before_the_vocabulary_scan(
+        self, feature_table, parameters, monkeypatch
+    ):
+        """Before, not merely at all: the backstop is there to fail in seconds,
+        so a backstop moved below the scan still raises yet has lost its point.
+        The spy makes that move fail instead of pass."""
+        import recsys_tfb.pipelines.dataset.nodes as dataset_nodes
+
+        def _scan_must_not_run(*args, **kwargs):
+            raise AssertionError("the vocabulary scan ran before the dtype pre-check")
+
+        monkeypatch.setattr(
+            dataset_nodes, "collect_vocabularies_from_data", _scan_must_not_run)
+        ft = feature_table.withColumn("open_date", F.to_date(F.lit("2020-01-01")))
+        params = _gate_params(parameters, categorical_extra=["open_date"])
+        with pytest.raises(
+            DataConsistencyError,
+            match=r"'open_date' is a date/time type \(type=date\)",
+        ):
+            fit_preprocessor_metadata(ft, params)
 
     def test_double_categorical_raises_without_the_gate(self, feature_table, parameters):
         ft = feature_table.withColumn(

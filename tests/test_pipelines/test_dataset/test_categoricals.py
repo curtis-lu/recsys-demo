@@ -66,10 +66,13 @@ _COLUMNS = [f.name for f in _SCHEMA.fields]
 
 @pytest.fixture
 def mixed_types(spark):
-    """Every scalar discrete type B5 lets through, with duplicates and NULLs.
+    """Every type B5 lets through, plus date/timestamp/binary, with duplicates
+    and NULLs.
 
-    Scalar only: nested floats (``array<double>``) pass B5 yet differ from the
-    per-column form, but no complex-typed categorical survives the encoder.
+    B5 has rejected the last three since #407, but the function still promises
+    the per-column form's output on them, so they stay. Scalar only: nested
+    floats (``array<double>``) differ from the per-column form, and B5 rejects
+    every complex type.
 
     Spread over several partitions so the partial per-partition sets really are
     merged, as they are on a cluster.
