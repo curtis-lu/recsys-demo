@@ -15,7 +15,7 @@
 
 | 名詞 | 一句話定義 |
 |---|---|
-| `gain_ledger` | Gain 帳本：把每個產品被 id 切點隔出後、子樹內用了多少 context 切點與 Gain 記成帳，量個人化容量夠不夠（§2） |
+| `gain_ledger` | Gain 帳本：把每個產品被 id 切點隔出後、子樹內用了多少 context 切點與 Gain 記成帳，看模型在每個產品上換到多少個人化 Gain（§2） |
 | `context_gain_share` | 某產品分到的 context Gain 占「全產品 context Gain 總和」的比例；低＝模型在這個產品上換到的個人化 Gain 少，但說不出原因（§2.2、§2.3） |
 | `context_gain_isolated` | isolated 欄：只在「可達集合縮到只剩該產品」時才累積的 context Gain；產品少、樹淺時普遍偏小甚至為 0，是輔助資訊、勿當主判準（§2.4） |
 | 餓死型 / 特徵缺失型 | 判別力差的兩種成因：訊號在、但模型沒分到容量去學（餓死型）／資料裡沒有能分開正負例的特徵（特徵缺失型）。兩型的 `context_gain_share` 都會低，帳本分不出是哪一型（§2.1、§2.3） |
