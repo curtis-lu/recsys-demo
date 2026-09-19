@@ -55,6 +55,7 @@ from recsys_tfb.pipelines.dataset.steps.categoricals import (
     collect_vocabularies_from_data,
     read_declared_vocabularies,
     require_declared_categoricals,
+    require_no_continuous_categoricals,
 )
 from recsys_tfb.pipelines.dataset.steps.feature_columns import (
     compute_feature_columns,
@@ -516,9 +517,10 @@ def fit_preprocessor_metadata(
     """Fit the preprocessor: each categorical's vocabulary, and what a feature is.
 
     Pre-checks (inputs, ADR-0008 §3): ``feature_table`` must carry every
-    ``train_snap_dates`` month, and every identity categorical must be declared
-    in ``schema.categorical_values``. Registered backstop: ``schema.item`` must
-    survive into ``feature_columns``.
+    ``train_snap_dates`` month, every identity categorical must be declared
+    in ``schema.categorical_values``, and no categorical read from the data may
+    be continuous-numeric (B5 again — a sliced run skips the gate). Registered
+    backstop: ``schema.item`` must survive into ``feature_columns``.
 
     Only small metadata (distinct category values) reaches the driver.
 
@@ -566,6 +568,11 @@ def fit_preprocessor_metadata(
     # Pre-check: nothing downstream can supply a vocabulary the schema owes.
     cat_values = schema.get("categorical_values", {})
     require_declared_categoricals(cat_values, from_schema)
+    # Pre-check (runtime backstop of B5): the vocabulary collection below is
+    # exact only on discrete types, and a sliced run skips the Layer-2 gate that
+    # normally rejects the rest — a double column holding NaN would get a wrong
+    # vocabulary, not an error. Schema metadata only, no Spark job.
+    require_no_continuous_categoricals(from_data, dict(feature_table.dtypes))
     with log_step(logger, "collect_category_mappings"):
         category_mappings = {
             **collect_vocabularies_from_data(train_features, from_data),

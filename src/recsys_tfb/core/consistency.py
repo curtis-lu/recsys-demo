@@ -431,7 +431,11 @@ implemented and wired):
   serialize but are near-certain mis-tags. Predicate:
   ``categorical_dtype_errors`` (pure, no Spark); wired via
   ``validate_data_consistency`` alongside B1 (reads ``feature_table.dtypes``,
-  metastore metadata only — no scan).
+  metastore metadata only — no scan). Runtime backstop:
+  ``require_no_continuous_categoricals`` (``pipelines/dataset/steps/categoricals.py``),
+  run by ``fit_preprocessor_metadata`` — a sliced run skips the gate, and the
+  one-pass vocabulary collection there is not exact on a double/float column
+  (``collect_set`` keeps each NaN and does not normalise -0.0).
 * B6 — a feature column that is non-numeric (string / binary / date / timestamp /
   complex) and is NOT declared categorical (so never integer-encoded): it becomes
   an ``object``-dtype model feature → driver OOM at ``pdf_to_X`` ``to_numpy`` and
@@ -1836,11 +1840,12 @@ def categorical_dtype_errors(
 
     - ``decimal`` collects to Python ``decimal.Decimal``, which is not
       JSON-serializable — ``fit_preprocessor_metadata`` crashes when saving the
-      preprocessor metadata, but only after the full per-column ``distinct()``
-      pass (the opaque, expensive failure this gate replaces).
+      preprocessor metadata, but only after the full vocabulary scan (the
+      opaque, expensive failure this gate replaces).
     - ``double`` / ``float`` serialize fine but a continuous value used as a
-      category is almost always a mis-tag, and float-equality lookup in the
-      ``F.create_map`` encoding is fragile.
+      category is almost always a mis-tag, float-equality lookup in the
+      ``F.create_map`` encoding is fragile, and the vocabulary collection is not
+      exact on one (see ``collect_vocabularies_from_data``).
 
     ``feature_table_dtypes`` maps a feature_table column name to its Spark
     ``DataFrame.dtypes`` simpleString (e.g. ``"decimal(15,0)"``, ``"double"``,
