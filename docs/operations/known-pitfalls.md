@@ -427,3 +427,10 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 - **規則**：**建立 memmap 之前先檢查可用空間**，不足就 raise（`src/recsys_tfb/io/disk_matrix.py` 的 `require_free_space`；需求量已知＝`列數 × 欄數 × itemsize`）。訊息要含**需求量、可用量、檔案落點**——落點是必要的，因為矩陣落在專案根目錄底下，那常常不是操作者正在盯的那顆磁碟。有 `os.posix_fallocate` 的平台再加一道（它真的把 block 配出來，不夠會當場 `ENOSPC`），但**那是加分不是主力**：**macOS 沒有這個 API**，而 macOS 就是本 repo 的開發機，所以事前檢查是每一次本機執行實際走的那條路。兩條路都丟 `OSError`／`ENOSPC`，呼叫端只要處理一種。
 
 - **驗證方式：不要測「磁碟真的滿了」。** 上面第 ①–③ 步已經證明那個情境**在程式內偵測不到**——測試會綠，而綠的原因正是 bug 本身。要測的是**閘門會擋**：宣告一個大於可用空間的形狀，斷言它 raise、且**目錄裡沒有留下任何檔案**。這個測試的變異檢查有個容易看走眼的地方：拿掉閘門之後它必須紅在「**DID NOT RAISE**」，不是紅在 numpy 的 `OverflowError`——形狀開太大（例如 `2**40 × 2**20`）會先炸在型別轉換，那是紅對了答案、錯了理由，換一個磁碟裝不下但 numpy 映得出來的形狀（例如 512 GiB）才真的踩到 sparse file 那條路。範例：`tests/test_io/test_disk_matrix.py::TestOpenDiskMatrix::test_refuses_before_creating_anything`。
+
+## 22. 本機只把 `local[*]` 換成 `local[2]`，列序不一定會變——拿它驗「不隨列序變」會假綠（2026-09-19，#355）
+
+- **症狀（第一分鐘認出它）**：「換平行度前後產物逐字相同」的比對，**改動前的程式碼也通過**。沒跑舊程式對照的話，你只會看到「新程式通過」，以為修好了。
+- **根因**：本機合成資料小（一個月約 5 千列），同一份資料在 `local[*]` 與 `local[2]` 下走出的 shuffle 與讀檔順序可以完全一樣。#352 在另一份資料上用同一招看到了差異，所以「`local[2]` 會改變列序」不是恆真。
+- **規則**：驗「產物不隨列序變」時，**先用改動前的程式碼跑同一組比對，確認它會不同**，比對才算有鑑別力。本機要真的打亂列序，用 `SPARK_CONF_DIR` 指向一份複本 conf：`spark.master local[2]`、`spark.sql.shuffle.partitions 7`、`spark.sql.adaptive.enabled false`（不要改 `conf/spark-local/` 本身）。另外，合成資料的抽樣權重全是 1，小數權重造成的加總順序差異在本機實跑看不到，要靠單元測試（範例：`tests/test_diagnosis/test_metric/test_row_order.py` 用 1/0.37 的權重）。
+- **驗證方式**：2026-09-19 實測（`f1e8ac63`，`evaluation --post-training`）：只換 `local[2]` 時，舊程式碼 10 份 JSON 只有 `manifest.json`（時間戳）不同；加上 shuffle 分區 7 與關 AQE 後，舊程式碼 8 份不同，#355 之後只剩 Spark 端聚合的浮點末位。
