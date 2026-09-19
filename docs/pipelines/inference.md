@@ -567,7 +567,7 @@ model_version
 - 要重算，帶 `--rebuild-dates <日期>`：那些日期的所有 chunk 重新評分，排名與發布再覆寫同一個 partition。
 - 重算跑到一半中斷的話，重試也要帶同一組 `--rebuild-dates`。不帶的話，已經重算和還沒重算的分區都在，全部被跳過，同一個 query group 裡會混著新舊分數。
 
-一次 run 有沒有沿用舊分數，看 log 的 `[chunks] predict: to_process=… skipped=…` 那一行，事後則看 `manifest.json` 的 `scoring_chunks.counts.skipped`：大於 0，就有分區沿用了舊分數。同一段 log 還會印 `Calibration disabled by config, using uncalibrated scores` 之類的校準訊息，那講的是這一次的設定，不代表被跳過的分區是這樣算的。
+一次 run 有沒有沿用舊分數，看 log 的 `[chunks] predict: to_process=… skipped=…` 那一行，事後則看 `manifest.json` 的 `scoring_chunks.counts.skipped`（它只記最後一次成功的 run）：大於 0，就有分區沿用了舊分數。同一段 log 還會印 `Calibration disabled by config, using uncalibrated scores` 之類的校準訊息，那講的是這一次的設定，不代表被跳過的分區是這樣算的。
 
 manifest 保存最後一次成功 run 的 inference parameters，但 Hive partition 本身沒有額外 `inference_version` 可區分上述變化。**所以 manifest 記的 `use_calibration` 不一定是分區裡分數算的時候用的值**：切換之後沒帶 `--rebuild-dates` 的那一次，manifest 寫新值，分數是舊值算的。要知道分區裡的分數有沒有套校準，看分區本身：`score` 等於 `score_uncalibrated` 就是沒套。
 
