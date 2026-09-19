@@ -1843,8 +1843,17 @@ _DATETIME_DTYPES = {"date", "timestamp"}
 _COMPLEX_DTYPE_PREFIXES = ("array<", "struct<", "map<")
 
 
-def categorical_dtype_problem(dt: str) -> tuple[str, str, str] | None:
-    """Why ``dt`` cannot be a categorical's type, as (kind, why, way out).
+class CategoricalDtypeProblem(NamedTuple):
+    """Why a type cannot be a categorical's, in three parts a message reads
+    in order: what the type is, what goes wrong, what to do instead."""
+
+    kind: str
+    why: str
+    way_out: str
+
+
+def categorical_dtype_problem(dt: str) -> CategoricalDtypeProblem | None:
+    """Why ``dt`` cannot be a categorical's type.
 
     ``None`` when it can. The one place a type family's advice is written, so
     B5 (a column declared categorical), B6 (a column that would have to be) and
@@ -1854,7 +1863,7 @@ def categorical_dtype_problem(dt: str) -> tuple[str, str, str] | None:
     if dt in CATEGORICAL_DTYPES:
         return None
     if dt.startswith("decimal") or dt in _CONTINUOUS_NUMERIC_DTYPES:
-        return (
+        return CategoricalDtypeProblem(
             "a continuous-numeric type",
             "a decimal categorical is not JSON-serializable (the preprocessor "
             "save crashes after the full vocabulary scan) and a double/float "
@@ -1863,7 +1872,7 @@ def categorical_dtype_problem(dt: str) -> tuple[str, str, str] | None:
             "to string or integer in the source ETL",
         )
     if dt in _DATETIME_DTYPES:
-        return (
+        return CategoricalDtypeProblem(
             "a date/time type",
             "used as a category it only ever matches the dates the train months "
             "happened to contain, and the preprocessor cannot store it (the "
@@ -1872,7 +1881,7 @@ def categorical_dtype_problem(dt: str) -> tuple[str, str, str] | None:
             "since the snapshot)",
         )
     if dt == "binary":
-        return (
+        return CategoricalDtypeProblem(
             "a binary type (bytes — a 0/1 flag is boolean or integer instead)",
             "the preprocessor cannot store bytes (the JSON save crashes after "
             "the full vocabulary scan)",
@@ -1881,13 +1890,13 @@ def categorical_dtype_problem(dt: str) -> tuple[str, str, str] | None:
             "lost",
         )
     if dt.startswith(_COMPLEX_DTYPE_PREFIXES):
-        return (
+        return CategoricalDtypeProblem(
             "a complex type",
             "the encoder cannot encode a complex value",
             "flatten it into scalar string/integer/boolean columns in the "
             "source ETL",
         )
-    return (
+    return CategoricalDtypeProblem(
         "an unsupported type",
         "nothing in the preprocessor is known to handle it",
         "convert it to string, an integer type or boolean in the source ETL",
@@ -1916,7 +1925,9 @@ def categorical_dtype_errors(
 
     An allow-list, not a list of those: a type not named here is rejected too,
     rather than being let through to find out. Rejecting them broke no
-    configuration that used to finish (#407). Each rejection names the way out
+    configuration that used to produce a usable feature (#407): the only ones
+    that finished were columns entirely NULL over the train months, whose empty
+    vocabulary encodes every row to the same sentinel. Each rejection names the way out
     for its type family (:func:`categorical_dtype_problem`) — the reason to
     fail early rather than merely fail.
 
@@ -1936,12 +1947,11 @@ def categorical_dtype_errors(
         problem = categorical_dtype_problem(dt)
         if problem is None:
             continue
-        kind, why, way_out = problem
         errors.append(
-            f"categorical column {col!r} is {kind} (type={dt}) in "
-            f"feature_table — {why}. A categorical must be string, an integer "
+            f"categorical column {col!r} is {problem.kind} (type={dt}) in "
+            f"feature_table — {problem.why}. A categorical must be string, an integer "
             f"type or boolean. Remove {col!r} from "
-            f"dataset.prepare_model_input.categorical_columns and {way_out}; "
+            f"dataset.prepare_model_input.categorical_columns and {problem.way_out}; "
             f"if it is not a model feature, add it to "
             f"dataset.prepare_model_input.drop_columns instead."
         )
@@ -2252,12 +2262,11 @@ def nonnumeric_feature_errors(
                 f"dataset.prepare_model_input.drop_columns."
             )
         else:
-            kind, why, way_out = problem
             errors.append(
                 prefix
-                + f"It cannot be declared categorical either: it is {kind} "
-                f"(type={dtypes[col]}) — {why}. If {col!r} should be a model "
-                f"feature, {way_out}; if not, add it to "
+                + f"It cannot be declared categorical either: it is {problem.kind} "
+                f"(type={dtypes[col]}) — {problem.why}. If {col!r} should be a "
+                f"model feature, {problem.way_out}; if not, add it to "
                 f"dataset.prepare_model_input.drop_columns."
             )
     return errors

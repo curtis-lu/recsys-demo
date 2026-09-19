@@ -205,11 +205,9 @@ dataset:
 - 真正的連續數值特徵不需列入任一清單。
 - 宣告為 categorical 的 feature 欄位**只能是字串、整數（tinyint／smallint／int／bigint）或布林**（不變量 B5，白名單：沒列到的型別一律擋下）。其他型別在 source ETL 先處理：
   - decimal／double／float：真正的連續值就留作數值特徵；數字代碼轉成 string 或 integer。
-  - date／timestamp：換成數值特徵（例如距 snap_date 的天數）。當類別的話，模型只認得 train 月份出現過的那幾個日期。
+  - date／timestamp：換成數值特徵（例如距快照日的天數）。當類別的話，模型只認得 train 月份出現過的那幾個日期。
   - binary（bytes，不是 0／1 旗標；0／1 旗標是布林或整數欄，可以當類別）：是代碼就用 `hex()` 轉成字串，一個值對一個字串，不丟資訊。
   - 複合型（array／struct／map）：攤平成多個字串／整數／布林欄。
-
-  以前這些型別不會在閘門被擋，要掃完整個 train 時段、存 preprocessor 時才爆（#407）。
 - 一般 categorical feature 不需設定 `schema.categorical_values`；其 category mapping 會從 `train_snap_dates` 範圍內的 `feature_table` 自動建立。
 - identity categorical 若不在 `feature_table`，必須在 `parameters.yaml` 的 `schema.categorical_values` 明確提供完整值域。
 
@@ -596,7 +594,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | override references unknown item | override key 中的 item 未宣告或拼錯 | 用 sampling editor 重建 key，並對齊 `schema.categorical_values` |
 | weight column unavailable | training 權重維度未進入 model input | 將非 identity 欄位加入 `carry_columns` 後重跑 dataset |
 | `Data consistency check failed`，sample_pool item 不一致 | `sample_pool` 缺少宣告 item，或含有未知 item | 檢查本次日期範圍的 distinct item，修正 source ETL 或 schema |
-| `DataConsistencyError: ... un-encoded non-numeric type(s)`，讀 parquet 前秒級失敗 | 字串／非數值欄進了 `feature_columns`，既沒宣告 categorical 也沒 drop（不變量 B6） | 錯誤訊息逐欄點名兇手；每欄二選一，見下方 §8.1。改完會 bump `base_dataset_version`、需重建 dataset |
+| `DataConsistencyError: ... un-encoded non-numeric type(s)`，讀 parquet 前秒級失敗 | 字串／非數值欄進了 `feature_columns`，既沒宣告 categorical 也沒 drop（不變量 B6） | 錯誤訊息逐欄點名兇手；每欄依型別決定怎麼處理，見下方 §8.1。改完會 bump `base_dataset_version`、需重建 dataset |
 | `categorical column '...' is a ... type`（B5） | categorical 欄的型別不是字串／整數／布林：連續值誤標類別，或日期、binary、複合型被設成類別 | 錯誤訊息依型別給解法；整理見 §3.5 的型別規則。不是特徵就 drop |
 | `(A24) dataset.X_snap_dates [...] and dataset.Y_snap_dates [...] name the same calendar day` | train/calibration/val/test 使用相同日期 | 重新切分日期，確保集合互斥。此檢查在 Spark 啟動前執行，**按日比對而非按字面**，所以同一天的不同寫法也抓得到；訊息會分別印出兩邊各自的原始寫法 |
 | `N 個日期區間設定無法展開` | 某個 `{start, end, step}` 區間寫錯：起迄沒落在 step 上、迄日早於起日、`step` 拼錯、少鍵或多鍵 | 訊息逐一點名是哪個檔的哪個鍵、哪一端不對；所有寫錯的區間一次列完。規則見 §3.1 |
@@ -617,7 +615,7 @@ B6 擋下來時，錯誤訊息會**逐欄點名**（`feature column 'cust_segmen
 
 - **是有用的類別特徵**（例：客群別、通路）→ 加進 `dataset.prepare_model_input.categorical_columns`。它會在 Spark 端就被編成整數，仍是模型特徵。
 - **不是模型特徵**（例：ID、自由文字）→ 加進 `dataset.prepare_model_input.drop_columns`。
-- **是 date／timestamp／binary／複合型欄**（訊息會寫 `It cannot be declared categorical either`）→ 不能加進 `categorical_columns`，B5 會擋。要當特徵，就在 source ETL 轉換：日期換成數值特徵，binary 用 `hex()` 轉字串，複合型攤平。不要就 drop。
+- **是 date／timestamp／binary／複合型欄** → 不能加進 `categorical_columns`，會被類別欄的型別檢查擋下。資料閘報出的訊息會直接寫 `It cannot be declared categorical either`；training 讀取時的 backstop 不看型別，訊息仍是通用的「宣告成 categorical 或 drop」，照上面這條處理即可。要當特徵，就在 source ETL 轉換：日期換成數值特徵，binary 用 `hex()` 轉字串，複合型攤平。不要就 drop。
 
 > ⚠ **這會 bump `base_dataset_version`，需要重建整個 dataset**——兩個鍵都參與 dataset 版本雜湊。閘門本身只讓你**知道是哪幾欄**、並防止未來重建時再犯，不會替你改 config。
 

@@ -146,8 +146,8 @@ def suggest_categorical_columns_spark(
     from pyspark.sql.types import BooleanType, NumericType, StringType
 
     string_bool_cols: list[str] = []
-    numeric_cols: list[str] = []
-    continuous_cols: set[str] = set()
+    integer_cols: list[str] = []
+    continuous_cols: list[str] = []
     review: list[tuple[str, str]] = []
 
     for field in df.schema.fields:
@@ -155,19 +155,18 @@ def suggest_categorical_columns_spark(
         if isinstance(dt, (StringType, BooleanType)):
             string_bool_cols.append(field.name)
         elif isinstance(dt, NumericType):
-            numeric_cols.append(field.name)
             # B5's own allow-list decides, so this tool can never suggest a
             # categorical the gate then refuses: the integer types may be one,
             # double/float/decimal may not.
-            if dt.simpleString() not in CATEGORICAL_DTYPES:
-                continuous_cols.add(field.name)
+            if dt.simpleString() in CATEGORICAL_DTYPES:
+                integer_cols.append(field.name)
+            else:
+                continuous_cols.append(field.name)
         else:
             review.append((field.name, dt.simpleString()))
     review.sort()
 
-    counted_cols = [
-        c for c in numeric_cols if c not in continuous_cols
-    ] + string_bool_cols
+    counted_cols = integer_cols + string_bool_cols
     agg_exprs = [F.count("*").alias("__n_rows__")] + [
         F.approx_count_distinct(F.col(c), rsd=0.05).alias(c)
         for c in counted_cols
@@ -177,17 +176,19 @@ def suggest_categorical_columns_spark(
 
     implicit: list[tuple[str, int]] = []
     numeric_categorical: set[str] = set()
-    numeric_features: list[str] = []
-    for col in numeric_cols:
-        if col in continuous_cols:
-            numeric_features.append(col)
-            continue
+    high_card_integers: set[str] = set()
+    for col in integer_cols:
         n_distinct = int(row[col])
         if n_distinct <= max_numerical_cardinality:
             numeric_categorical.add(col)
             implicit.append((col, n_distinct))
         else:
-            numeric_features.append(col)
+            high_card_integers.add(col)
+    # Schema order, as before the integer/continuous split.
+    numeric_features = [
+        f.name for f in df.schema.fields
+        if f.name in high_card_integers or f.name in continuous_cols
+    ]
 
     string_categorical: set[str] = set()
     drop_suggestions: list[tuple[str, int]] = []
@@ -215,16 +216,13 @@ def suggest_categorical_columns_spark(
 
 
 def _review_way_out(spark_type: str) -> str:
-    """B5's way out for a review column's type, or plain "drop it".
+    """B5's way out for a review column's type.
 
     Taken from ``core/consistency.py`` rather than written here, so the tool and
     the gate give a column the same advice.
     """
-    problem = categorical_dtype_problem(spark_type)
-    if problem is None:  # not reachable for a review type; kept honest anyway
-        return "drop it"
-    _kind, _why, way_out = problem
-    return f"{way_out}; or drop it"
+    # A review type is never string/boolean/numeric, so it always has a problem.
+    return f"{categorical_dtype_problem(spark_type).way_out}; or drop it"
 
 
 def format_yaml_output(

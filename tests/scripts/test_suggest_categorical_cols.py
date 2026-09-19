@@ -414,9 +414,8 @@ class TestReviewBlockInYaml:
         advice is B5's way out for that type, never "declare categorical"."""
         out = format_yaml_output(
             ["seg"], [("raw_id", 99)], [("d", "date"), ("blob", "binary")])
-        review = [line for line in out.splitlines()
-                  if '"d"' in line or '"blob"' in line or "review:" in line and "non-numeric" in line]
-        assert review, "review block not found"
+        review = [line for line in out.splitlines() if line.startswith("#")]
+        assert len(review) == 3, out  # header + one line per review column
         assert not any("declare categorical" in line for line in review)
         assert not any("categorical_columns OR" in line for line in review)
         (d_line,) = [line for line in review if '"d"' in line]

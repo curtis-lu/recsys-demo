@@ -669,7 +669,7 @@ class TestCategoricalDtypeAllowList:
     #407 only decimal/double/float were: a date/timestamp/binary categorical
     passed, got a full-table vocabulary scan, then crashed the preprocessor's
     JSON save; a complex one crashed the encoder. Rejecting them breaks no
-    configuration that used to finish.
+    configuration that produced a usable feature.
     """
 
     # Hive varchar(n)/char(n) read back as "string" in Spark 3.3.2 (checked on a
@@ -687,7 +687,7 @@ class TestCategoricalDtypeAllowList:
     def test_every_other_type_is_rejected(self, dt):
         errs = categorical_dtype_errors(["c"], {"c": dt})
         assert len(errs) == 1
-        assert f"'c'" in errs[0] and f"type={dt}" in errs[0]
+        assert "'c'" in errs[0] and f"type={dt}" in errs[0]
 
     @pytest.mark.parametrize("dt, remedy", [
         ("date", "derive a numeric feature"),

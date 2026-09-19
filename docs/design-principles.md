@@ -201,9 +201,9 @@ dataset 使用 identity key、sampling site 與 random seed 計算固定 hash bu
 
 ### 類別欄位由工具建議、使用者確認
 
-`scripts/suggest_categorical_cols.py` 依資料型別與 cardinality 產生候選清單，但不會直接修改設定。數字代碼可能是類別，也可能是真正的連續變數，僅靠 dtype 或 distinct count 無法可靠判定；工具無法判斷的欄（date／timestamp／binary／複合型）會列進一個待人工確認的 review 區塊，交由使用者決定，而不是替你猜。這些型別不能當類別欄（B5 只收字串、整數、布林），能做的是 drop，或回 source ETL 轉換。
+`scripts/suggest_categorical_cols.py` 依資料型別與 cardinality 產生候選清單，但不會直接修改設定。數字代碼可能是類別，也可能是真正的連續變數，僅靠 dtype 或 distinct count 無法可靠判定；工具無法判斷的欄（date／timestamp／binary／複合型）會列進一個待人工確認的 review 區塊，交由使用者決定，而不是替你猜。這些型別不能當類別欄——類別欄只收字串、整數、布林——所以能做的是 drop，或回 source ETL 轉換。
 
-使用者確認後，類別欄位寫入 `parameters_dataset.yaml`。設定一致性與 dataset data gate 再檢查 item 是否保留為類別特徵，以及連續 decimal／double／float 欄位是否被誤標。
+使用者確認後，類別欄位寫入 `parameters_dataset.yaml`。設定一致性與 dataset data gate 再檢查 item 是否保留為類別特徵，以及每個類別欄的型別是不是字串、整數或布林之一（連續數值、日期、binary、複合型都會被擋下）。
 
 ### 抽樣與權重由 profiling 輔助、業務目標決定
 
