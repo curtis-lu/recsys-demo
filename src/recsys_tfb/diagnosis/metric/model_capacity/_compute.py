@@ -339,7 +339,7 @@ def compute(
         "summary": dict(_EMPTY_SUMMARY),
         "per_item": [],
         # 未分配（pre-item）按特徵拆解 ＋ item 切點深度摘要——由 gain_ledger 直接
-        # 帶入（Q3-#1/#2）。舊版 ledger／粗帳本降級為 None。必須在**每條** return
+        # 帶入。舊版 ledger／粗帳本降級為 None。必須在**每條** return
         # 路徑都存在（key-set 契約），故放在 out 初始化。
         "pre_item": None,
         "first_item_split_depth": None,

@@ -15,8 +15,8 @@ deletes are composed here. The architecture audit
 scans ``pipelines/**/nodes*.py`` and nothing else, so a delete moved in here
 would leave that registry and stop being watched by anything at all. ADR-0014
 decision 1 records this as a consequence of the audit's reach rather than a rule
-about deletes: widening the glob is issue #163, and once it lands the placement
-should be revisited.
+about deletes. The user decided not to widen the glob (issue #163, 2026-09-19);
+if that is ever reopened, the placement should be revisited.
 
 ``month_dir`` is **imported** from ``steps/predict_months.py``, never copied
 here, and the direction is forced rather than preferred: that module may not

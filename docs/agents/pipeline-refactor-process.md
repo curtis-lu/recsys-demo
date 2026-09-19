@@ -132,7 +132,7 @@ inference 的順序是行為全部先（#191–#196）→ 純結構最後（#198
 
 **不照做會發生什麼**：你以為稽核在守著新目錄，其實它掃不到。而這個失效沒有任何訊號——測試照樣全綠。
 
-**為什麼不是「順手把 glob 放寬」**：那是獨立的票（#163），而且判準明說不得靠改檔名迴避、也不得新增一條讓自己合規的規則。細節見 [`architecture-constraints.md`](architecture-constraints.md) 與 [`deliberate-non-goals.md`](deliberate-non-goals.md)。**要做先問使用者。**
+**為什麼不是「順手把 glob 放寬」**：使用者 2026-09-19 裁決不放寬（#163），而且判準明說不得靠改檔名迴避、也不得新增一條讓自己合規的規則。細節見 [`architecture-constraints.md`](architecture-constraints.md) 與 [`deliberate-non-goals.md`](deliberate-non-goals.md)。**要做先問使用者。**
 
 **誰擋得住**：沒人。
 
