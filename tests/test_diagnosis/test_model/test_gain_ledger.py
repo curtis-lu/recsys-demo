@@ -165,7 +165,7 @@ def test_coarse_ledger_still_has_total_split_count():
     assert result["first_item_split_depth"] is None
 
 
-# ---- 新輸出：pre_item 按特徵拆解（Q3-#1）----
+# ---- 新輸出：pre_item 按特徵拆解 ----
 
 def test_pre_item_breakdown_reconciles_to_unaccounted():
     """未分配（pre-item）＝item 切點之前的非 item 切點。其 gain 加總必須等於
@@ -198,7 +198,7 @@ def test_pre_item_by_feature_sorted_by_gain_desc():
     assert feats == ["f_big", "f_small"], f"未按 gain 遞減：{feats}"
 
 
-# ---- 新輸出：first_item_split_depth（Q3-#2）----
+# ---- 新輸出：first_item_split_depth ----
 
 def test_first_item_split_depth_summary():
     """每棵樹最淺 item 切點的深度（node_depth，root=1）。
