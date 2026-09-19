@@ -35,7 +35,7 @@
 2. **schema 角色正確**：`conf/base/parameters.yaml` 的 `time`、`entity`、`item` 與 `label` 必須對應實際欄位。
 3. **item 集合一致**：`sample_pool` 在本次日期範圍內的 item 集合必須與 `schema.categorical_values.<item>` 完全一致；`label_table` 不可產生未宣告 item。
 4. **日期切分互斥**：train、calibration、val 與 test 日期不可重疊，並應由使用者依時間先後安排，避免資料洩漏。
-5. **類別欄位已人工確認**：可先使用 `scripts/suggest_categorical_cols.py` 依型別與 cardinality 產生候選清單——低 cardinality 欄建議進 `categorical_columns`、高 cardinality 字串欄進 `drop_columns`，其餘型別欄（date／timestamp／binary／複合型）另列一個待人工判斷的 review 區塊；再由你決定各欄歸屬（工具只建議、不改設定。輸出格式與大表加速選項見 §3.5）。
+5. **類別欄位已人工確認**：可先使用 `scripts/suggest_categorical_cols.py` 依型別與 cardinality 產生候選清單——低 cardinality 的字串／布林／整數欄建議進 `categorical_columns`、高 cardinality 字串欄進 `drop_columns`，其餘型別欄（date／timestamp／binary／複合型）另列一個待人工判斷的 review 區塊（它們不能當類別欄，只能 drop 或回 source ETL 轉換）；再由你決定各欄歸屬（工具只建議、不改設定。輸出格式與大表加速選項見 §3.5）。
 6. **抽樣設定已檢視**：可使用 `scripts/sampling_overrides_editor.py` 檢視各分層樣本量並產生 override。
 7. **calibration 設定對齊**：若 dataset 啟用 calibration，training 端也應有相應設定；不需要將 score 解讀為機率時通常不必啟用。
 
@@ -200,10 +200,16 @@ dataset:
 
 - `schema.item` 必須列在 `categorical_columns`，否則模型無法區分 query group 內的 items。
 - 同一欄不可同時出現在 `categorical_columns` 與 `drop_columns`。
-- 字串／非數值欄若要當特徵，**必須**列入 `categorical_columns`（會被 integer-encode）；否則**必須**列入 `drop_columns`。若未處理，該字串欄本會靜默變成 object-dtype 特徵並在訓練時 OOM；此情形現由不變量 B6 攔下（fail-fast）：dataset 建構的第一個 node（`validate_data_consistency`）會擋住，training 讀取時亦有 backstop（被點名之後怎麼決定，見 §8.1）。
+- 字串欄若要當特徵，**必須**列入 `categorical_columns`（會被 integer-encode）；否則**必須**列入 `drop_columns`。date／timestamp／binary／複合型欄不能當 categorical（見下方型別規則），要當特徵只能先在 source ETL 轉成數值或字串，否則列入 `drop_columns`。若未處理，該字串欄本會靜默變成 object-dtype 特徵並在訓練時 OOM；此情形現由不變量 B6 攔下（fail-fast）：dataset 建構的第一個 node（`validate_data_consistency`）會擋住，training 讀取時亦有 backstop（被點名之後怎麼決定，見 §8.1）。
   - ⚠ **該欄若同時列在 `carry_columns`，上面兩個選項只有 `drop_columns` 可用。** B6 的錯誤訊息會建議「宣告成 categorical 或 drop」，但對 carry 欄選前者只是把 B6 換成下一個錯誤：欄位留在 `feature_table` 側，`build_model_input` 兩側各帶一份，改撞 `Reference 'x' is ambiguous`。B7 會同時報出來（collect-all），但 B6 那則排在前面，由上往下照做會先繞一圈。判斷方式見 §3.4 的配對規則。
 - 真正的連續數值特徵不需列入任一清單。
-- 宣告為 categorical 的 feature 欄位不可是 Decimal、Double 或 Float；數字代碼應先在 source ETL 轉為 string 或 integer。
+- 宣告為 categorical 的 feature 欄位**只能是字串、整數（tinyint／smallint／int／bigint）或布林**（不變量 B5，白名單：沒列到的型別一律擋下）。其他型別在 source ETL 先處理：
+  - decimal／double／float：真正的連續值就留作數值特徵；數字代碼轉成 string 或 integer。
+  - date／timestamp：換成數值特徵（例如距 snap_date 的天數）。當類別的話，模型只認得 train 月份出現過的那幾個日期。
+  - binary（bytes，不是 0／1 旗標；0／1 旗標是布林或整數欄，可以當類別）：是代碼就用 `hex()` 轉成字串，一個值對一個字串，不丟資訊。
+  - 複合型（array／struct／map）：攤平成多個字串／整數／布林欄。
+
+  以前這些型別不會在閘門被擋，要掃完整個 train 時段、存 preprocessor 時才爆（#407）。
 - 一般 categorical feature 不需設定 `schema.categorical_values`；其 category mapping 會從 `train_snap_dates` 範圍內的 `feature_table` 自動建立。
 - identity categorical 若不在 `feature_table`，必須在 `parameters.yaml` 的 `schema.categorical_values` 明確提供完整值域。
 
@@ -211,9 +217,9 @@ dataset:
 
 工具吃一個 Hive 表或 parquet 路徑，把 YAML 片段寫到 `data/profiling/<stem>_categorical.yaml`（供人工貼回上面的設定，不會自動改 config）。它把**每一個**欄位分類，不靜默漏欄：
 
-- 低 cardinality 欄 → `categorical_columns:`；高 cardinality 字串欄 → `drop_columns:`（附 nunique）；
-- date／timestamp／binary／複合型 → 一個**註解式 review 區塊**：這些同屬 object-dtype OOM 兇手（見上一則設定原則與 §8.1），但工具無法判該當 categorical 還是 drop，故只列出、由你把每欄搬進上面兩塊之一；
-- 高 cardinality 數值欄留作連續特徵（不列入任一清單）。
+- 低 cardinality 的字串／布林／整數欄 → `categorical_columns:`；高 cardinality 字串欄 → `drop_columns:`（附 nunique）。double／float／decimal 不論幾個值都不建議成類別（B5 不收），留作數值特徵；
+- date／timestamp／binary／複合型 → 一個**註解式 review 區塊**：這些同屬 object-dtype OOM 兇手（見上一則設定原則與 §8.1），而且不能當 categorical（B5 會擋）。工具不能替你回上游轉換，所以只列出，每欄旁邊附上該型別的轉換方式；由你決定 drop，或回 source ETL 轉換；
+- 高 cardinality 整數欄留作連續特徵（不列入任一清單）。
 
 terminal 摘要與 YAML 列出同一組欄位，並附一行對帳（例如 `8 columns = 2 categorical + 1 numeric-feature + 1 drop-suggested + 4 review`），可據此確認沒有欄位被漏掉。
 
@@ -591,7 +597,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | weight column unavailable | training 權重維度未進入 model input | 將非 identity 欄位加入 `carry_columns` 後重跑 dataset |
 | `Data consistency check failed`，sample_pool item 不一致 | `sample_pool` 缺少宣告 item，或含有未知 item | 檢查本次日期範圍的 distinct item，修正 source ETL 或 schema |
 | `DataConsistencyError: ... un-encoded non-numeric type(s)`，讀 parquet 前秒級失敗 | 字串／非數值欄進了 `feature_columns`，既沒宣告 categorical 也沒 drop（不變量 B6） | 錯誤訊息逐欄點名兇手；每欄二選一，見下方 §8.1。改完會 bump `base_dataset_version`、需重建 dataset |
-| categorical dtype 為 decimal/double/float | 連續值誤標類別，或代碼欄型別不適合 | 真正連續特徵移出 categorical；代碼欄在 source ETL cast 為 string/int |
+| `categorical column '...' is a ... type`（B5） | categorical 欄的型別不是字串／整數／布林：連續值誤標類別，或日期、binary、複合型被設成類別 | 錯誤訊息依型別給解法；整理見 §3.5 的型別規則。不是特徵就 drop |
 | `(A24) dataset.X_snap_dates [...] and dataset.Y_snap_dates [...] name the same calendar day` | train/calibration/val/test 使用相同日期 | 重新切分日期，確保集合互斥。此檢查在 Spark 啟動前執行，**按日比對而非按字面**，所以同一天的不同寫法也抓得到；訊息會分別印出兩邊各自的原始寫法 |
 | `N 個日期區間設定無法展開` | 某個 `{start, end, step}` 區間寫錯：起迄沒落在 step 上、迄日早於起日、`step` 拼錯、少鍵或多鍵 | 訊息逐一點名是哪個檔的哪個鍵、哪一端不對；所有寫錯的區間一次列完。規則見 §3.1 |
 | `feature_table missing required ... snap_dates` | source ETL 未產出某些日期 | 補跑 feature ETL 或修正日期設定 |
@@ -607,14 +613,15 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 
 ### 8.1 B6 點名之後，怎麼決定每一欄
 
-B6 擋下來時，錯誤訊息會**逐欄點名**（`feature column 'cust_segment' is non-numeric and is not declared categorical...`）。對每一個被點名的欄，二選一：
+B6 擋下來時，錯誤訊息會**逐欄點名**（`feature column 'cust_segment' is non-numeric and is not declared categorical...`）。對每一個被點名的欄：
 
 - **是有用的類別特徵**（例：客群別、通路）→ 加進 `dataset.prepare_model_input.categorical_columns`。它會在 Spark 端就被編成整數，仍是模型特徵。
 - **不是模型特徵**（例：ID、自由文字）→ 加進 `dataset.prepare_model_input.drop_columns`。
+- **是 date／timestamp／binary／複合型欄**（訊息會寫 `It cannot be declared categorical either`）→ 不能加進 `categorical_columns`，B5 會擋。要當特徵，就在 source ETL 轉換：日期換成數值特徵，binary 用 `hex()` 轉字串，複合型攤平。不要就 drop。
 
 > ⚠ **這會 bump `base_dataset_version`，需要重建整個 dataset**——兩個鍵都參與 dataset 版本雜湊。閘門本身只讓你**知道是哪幾欄**、並防止未來重建時再犯，不會替你改 config。
 
-`scripts/suggest_categorical_cols.py` 可以加速這個決定（用法見 §3）：它把高 cardinality 字串欄建議進 `drop_columns`，並把 date／timestamp／binary／複合型欄放進待人工判斷的 review 區塊——那些同屬 object-dtype OOM 兇手，但工具不替你決定該 categorical 還是 drop。
+`scripts/suggest_categorical_cols.py` 可以加速這個決定（用法見 §3）：它把高 cardinality 字串欄建議進 `drop_columns`，並把 date／timestamp／binary／複合型欄放進待人工判斷的 review 區塊——那些同屬 object-dtype OOM 兇手，也不能當 categorical，只能 drop 或回 source ETL 轉換。
 
 **不處理會怎樣**：該欄會原封不動穿過整條 dataset pipeline 成為特徵，training 讀取時整張矩陣塌縮成 object dtype（每格 ~34 B vs float64 8 B），在 `to_numpy` 被 OOM killer 殺掉。合成資料不含這類欄位，所以**本機永遠不會重現，生產環境必爆**。事故全貌見 [2026-07 調查紀錄](../notes/2026-07-11-training-oom-investigation.md)。
 

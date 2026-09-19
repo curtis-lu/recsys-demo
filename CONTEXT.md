@@ -74,6 +74,10 @@ _Avoid_: 時間窗、lookback（那是 baseline 往回看的月數）
 **前處理器**:
 在 train 時段上 fit 出來的特徵清單與類別編號表（產物 `preprocessor`、`category_mappings`）；training 與推論都重用同一份。
 
+**類別欄**:
+值是一組離散標籤的特徵欄；前處理器把每個標籤換成它在類別編號表裡的位置。能用的型別見不變量 B5（`src/recsys_tfb/core/consistency.py`）。
+_Avoid_: 把 0／1 旗標叫「binary 欄」（在本 repo，binary 指 bytes 型別；0／1 旗標是布林或整數欄）
+
 **item 清單**:
 模型認得的 item 值的集合，是 item 類別編號的來源。
 _Avoid_: 產品清單；也不要和 `inference.products`（離線推論的候選清單）混用

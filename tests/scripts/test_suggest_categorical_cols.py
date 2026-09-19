@@ -34,11 +34,11 @@ class TestSuggestCategoricalColumnsSpark:
         assert result.categorical == ["b"]
         assert result.implicit == []
 
-    def test_low_cardinality_numeric_is_implicit(self, spark):
+    def test_low_cardinality_integer_is_implicit(self, spark):
         from pyspark.sql.types import (
-            DoubleType,
             IntegerType,
             LongType,
+            ShortType,
             StructField,
             StructType,
         )
@@ -47,18 +47,47 @@ class TestSuggestCategoricalColumnsSpark:
             [
                 StructField("i", IntegerType()),
                 StructField("l", LongType()),
-                StructField("d", DoubleType()),
+                StructField("s", ShortType()),
             ]
         )
-        rows = [(1, 10, 1.5), (2, 20, 2.5), (1, 10, 1.5), (2, 20, 2.5)]
+        rows = [(1, 10, 3), (2, 20, 4), (1, 10, 3), (2, 20, 4)]
         df = spark.createDataFrame(rows, schema)
         result = suggest_categorical_columns_spark(
             df, max_numerical_cardinality=5
         )
-        assert set(result.categorical) == {"i", "l", "d"}
         # Preserves schema order
-        assert result.categorical == ["i", "l", "d"]
-        assert {name for name, _ in result.implicit} == {"i", "l", "d"}
+        assert result.categorical == ["i", "l", "s"]
+        assert {name for name, _ in result.implicit} == {"i", "l", "s"}
+
+    def test_low_cardinality_continuous_numeric_stays_a_feature(self, spark):
+        """#407 — B5 rejects a double/float/decimal categorical, so suggesting
+        one only hands the user a config the gate refuses. Few distinct values
+        do not make them codes; kept as numeric features they lose nothing."""
+        from decimal import Decimal
+
+        from pyspark.sql.types import (
+            DecimalType,
+            DoubleType,
+            FloatType,
+            StructField,
+            StructType,
+        )
+
+        schema = StructType(
+            [
+                StructField("d", DoubleType()),
+                StructField("f", FloatType()),
+                StructField("dec", DecimalType(15, 0)),
+            ]
+        )
+        rows = [(1.5, 0.5, Decimal("7")), (2.5, 1.0, Decimal("8"))] * 2
+        df = spark.createDataFrame(rows, schema)
+        result = suggest_categorical_columns_spark(
+            df, max_numerical_cardinality=5
+        )
+        assert result.categorical == []
+        assert result.implicit == []
+        assert result.numeric_features == ["d", "f", "dec"]
 
     def test_high_cardinality_numeric_is_a_numeric_feature(self, spark):
         rows = [(i,) for i in range(200)]
@@ -379,6 +408,28 @@ class TestReviewBlockInYaml:
         # ...but as comments only, so the config keys stay categorical + drop
         parsed = yaml.safe_load(out)
         assert parsed == {"categorical_columns": ["seg"], "drop_columns": ["raw_id"]}
+
+    def test_review_columns_are_not_told_to_become_categorical(self):
+        """#407 — every review type is one B5 rejects as a categorical, so the
+        advice is B5's way out for that type, never "declare categorical"."""
+        out = format_yaml_output(
+            ["seg"], [("raw_id", 99)], [("d", "date"), ("blob", "binary")])
+        review = [line for line in out.splitlines()
+                  if '"d"' in line or '"blob"' in line or "review:" in line and "non-numeric" in line]
+        assert review, "review block not found"
+        assert not any("declare categorical" in line for line in review)
+        assert not any("categorical_columns OR" in line for line in review)
+        (d_line,) = [line for line in review if '"d"' in line]
+        (blob_line,) = [line for line in review if '"blob"' in line]
+        assert "derive a numeric feature" in d_line
+        assert "hex(" in blob_line
+
+    def test_terminal_review_advice_matches(self):
+        summary = _render_summary_lines(_sample_scan(), "s", 20, 6, Path("o.yaml"))
+        start = next(i for i, line in enumerate(summary) if "needing review" in line)
+        review = summary[start:start + 3]
+        assert not any("declare categorical" in line for line in review)
+        assert "source ETL" in review[0]
 
     def test_no_review_leaves_output_unchanged(self):
         with_none = format_yaml_output(["seg"], [("raw_id", 99)], None)

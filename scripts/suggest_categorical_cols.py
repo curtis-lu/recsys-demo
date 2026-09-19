@@ -17,11 +17,13 @@ The output YAML is written to data/profiling/<stem>_categorical.yaml
 parquet inputs and from the raw table name for Hive inputs.
 
 Completeness (no column silently ignored): EVERY column lands in one bucket —
-low-card → ``categorical_columns``; high-card string → ``drop_columns`` (an
-un-encoded string feature becomes an object-dtype model feature and OOMs
-training, consistency invariant B6); high-card numeric → kept a numeric
-feature; and date/timestamp/binary/complex → a COMMENTED review block (same B6
-risk, but the script cannot decide categorical-vs-drop, so a human must). The
+low-card string/boolean/integer → ``categorical_columns``; high-card string →
+``drop_columns`` (an un-encoded string feature becomes an object-dtype model
+feature and OOMs training, consistency invariant B6); high-card integer and any
+double/float/decimal → kept a numeric feature (B5 rejects those three as
+categoricals, however few values they have); and date/timestamp/binary/complex
+→ a COMMENTED review block (same B6 risk, and B5 rejects them as categoricals
+too, so a human must drop each or convert it in the source ETL). The
 terminal summary enumerates the same columns as the YAML plus a reconciliation
 line. Review every block before copying.
 
@@ -40,6 +42,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import typer
+
+from recsys_tfb.core.consistency import CATEGORICAL_DTYPES, categorical_dtype_problem
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame as SparkDataFrame
@@ -64,16 +68,18 @@ class ColumnScan:
     Every schema column lands in EXACTLY ONE of these buckets — no column is
     silently ignored:
 
-    * ``categorical`` — low-card string/bool OR low-card numeric (schema order).
+    * ``categorical`` — low-card string/bool OR low-card integer (schema order).
     * ``drop_suggestions`` — high-card string ``(col, approx_nunique)``.
-    * ``numeric_features`` — high-card numeric, kept as a numeric feature (not
-      emitted to YAML; tracked so completeness reconciles).
+    * ``numeric_features`` — high-card integer, or double/float/decimal of any
+      cardinality, kept as a numeric feature (not emitted to YAML; tracked so
+      completeness reconciles).
     * ``review`` — date/timestamp/binary/complex ``(col, spark_type)``:
       non-numeric AND not string-encodable here, so a B6 object-dtype OOM risk
-      if left as an un-encoded feature. The script cannot decide — a human must
-      declare each categorical (→ integer-encoded) or drop it.
+      if left as an un-encoded feature, and B5 rejects each as a categorical.
+      The script cannot decide — a human must drop each or convert it in the
+      source ETL.
 
-    ``implicit`` is the low-card *numeric* subset of ``categorical`` (kept
+    ``implicit`` is the low-card *integer* subset of ``categorical`` (kept
     separately only for the summary display).
     """
 
@@ -119,8 +125,11 @@ def suggest_categorical_columns_spark(
 
     Three-way partition by Spark type, so no column is silently ignored:
 
-    * numeric — nunique <= ``max_numerical_cardinality`` → implicit categorical;
+    * integer — nunique <= ``max_numerical_cardinality`` → implicit categorical;
       else a numeric feature (``numeric_features``).
+    * double/float/decimal → a numeric feature, never counted. B5 rejects them
+      as categoricals (#407), so suggesting one would hand over a config the
+      gate refuses; few distinct values do not make a column a code.
     * string/boolean — nunique <= ``max_string_cardinality`` → categorical;
       else ``drop_suggestions`` (an un-encoded high-card string becomes an
       object-dtype model feature → training OOM, consistency B6).
@@ -129,7 +138,7 @@ def suggest_categorical_columns_spark(
       un-encoded feature. NOT cardinality-counted (``approx_count_distinct`` on
       complex types errors); surfaced with its Spark type for a human decision.
 
-    Cardinality for numeric + string/bool columns is computed in ONE aggregation
+    Cardinality for integer + string/bool columns is computed in ONE aggregation
     (no extra scan). Returns a :class:`ColumnScan`; see its docstring for the
     per-bucket contract and the completeness invariant.
     """
@@ -138,6 +147,7 @@ def suggest_categorical_columns_spark(
 
     string_bool_cols: list[str] = []
     numeric_cols: list[str] = []
+    continuous_cols: set[str] = set()
     review: list[tuple[str, str]] = []
 
     for field in df.schema.fields:
@@ -146,11 +156,18 @@ def suggest_categorical_columns_spark(
             string_bool_cols.append(field.name)
         elif isinstance(dt, NumericType):
             numeric_cols.append(field.name)
+            # B5's own allow-list decides, so this tool can never suggest a
+            # categorical the gate then refuses: the integer types may be one,
+            # double/float/decimal may not.
+            if dt.simpleString() not in CATEGORICAL_DTYPES:
+                continuous_cols.add(field.name)
         else:
             review.append((field.name, dt.simpleString()))
     review.sort()
 
-    counted_cols = numeric_cols + string_bool_cols
+    counted_cols = [
+        c for c in numeric_cols if c not in continuous_cols
+    ] + string_bool_cols
     agg_exprs = [F.count("*").alias("__n_rows__")] + [
         F.approx_count_distinct(F.col(c), rsd=0.05).alias(c)
         for c in counted_cols
@@ -162,6 +179,9 @@ def suggest_categorical_columns_spark(
     numeric_categorical: set[str] = set()
     numeric_features: list[str] = []
     for col in numeric_cols:
+        if col in continuous_cols:
+            numeric_features.append(col)
+            continue
         n_distinct = int(row[col])
         if n_distinct <= max_numerical_cardinality:
             numeric_categorical.add(col)
@@ -194,6 +214,19 @@ def suggest_categorical_columns_spark(
     )
 
 
+def _review_way_out(spark_type: str) -> str:
+    """B5's way out for a review column's type, or plain "drop it".
+
+    Taken from ``core/consistency.py`` rather than written here, so the tool and
+    the gate give a column the same advice.
+    """
+    problem = categorical_dtype_problem(spark_type)
+    if problem is None:  # not reachable for a review type; kept honest anyway
+        return "drop it"
+    _kind, _why, way_out = problem
+    return f"{way_out}; or drop it"
+
+
 def format_yaml_output(
     categorical: list[str],
     drop_suggestions: list[tuple[str, int]] | None = None,
@@ -203,18 +236,19 @@ def format_yaml_output(
     """Format categorical + drop + review columns as a YAML snippet.
 
     ``review`` (date/timestamp/binary/complex) is emitted as a COMMENTED block:
-    each is a B6 OOM risk if kept un-encoded, but the script cannot decide
-    categorical-vs-drop, so it is surfaced as comments only — the YAML still
-    parses to just ``categorical_columns`` + ``drop_columns``, forcing a
-    conscious human move of each review column into one of the two real blocks.
+    each is a B6 OOM risk if kept un-encoded and B5 rejects it as a categorical,
+    so the only move inside this config is ``drop_columns``; the alternative is
+    converting it in the source ETL, which the script cannot do. Surfaced as
+    comments only — the YAML still parses to just ``categorical_columns`` +
+    ``drop_columns`` — with each type's way out beside it.
 
     Example output:
         categorical_columns:
           - "col_a"
         drop_columns:
           - "raw_id"   # nunique=4200 high-card string — review: declare categorical or drop
-        # --- review: non-numeric columns (B6 OOM risk ...) ---
-        #   - "event_date"   # type=date — un-encoded → object-dtype OOM; ...
+        # --- review: non-numeric columns that cannot be categorical either ... ---
+        #   - "event_date"   # type=date — derive a numeric feature from it in the source ETL ...; or drop it
     """
     lines = ["categorical_columns:"]
     if subset is not None and subset.is_subset:
@@ -240,14 +274,12 @@ def format_yaml_output(
         lines.append("  # （無高 cardinality 字串欄；此清單供人工確認）")
     if review:
         lines.append(
-            "# --- review: non-numeric columns (B6 OOM risk if kept "
-            "un-encoded — move each to categorical_columns OR drop_columns) ---"
+            "# --- review: non-numeric columns that cannot be categorical either "
+            "(B6 OOM risk if kept, B5 rejects them as categoricals) — move each "
+            "to drop_columns, or convert it in the source ETL ---"
         )
         for col, typ in review:
-            lines.append(
-                f'#   - "{col}"   # type={typ} — un-encoded → object-dtype OOM; '
-                f"declare categorical (encoded) or drop"
-            )
+            lines.append(f'#   - "{col}"   # type={typ} — {_review_way_out(typ)}')
     return "\n".join(lines) + "\n"
 
 
@@ -359,10 +391,10 @@ def _render_summary_lines(
         lines.append("")
         lines.append(
             "Non-numeric columns needing review (date/timestamp/binary/complex "
-            "→ B6 risk; declare categorical or drop):"
+            "cannot be categorical — drop, or convert in the source ETL):"
         )
         for col, typ in scan.review:
-            lines.append(f"  - {col} (type={typ})")
+            lines.append(f"  - {col} (type={typ}): {_review_way_out(typ)}")
     lines.append("")
     lines.append(f"Written to: {output_path}")
     return lines

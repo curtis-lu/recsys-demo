@@ -59,10 +59,10 @@ def collect_vocabularies_from_data(
     one with whichever sign arrived first — where ``distinct()`` folds each to a
     single value. A column holding NaN or ``-0.0`` would get a different
     vocabulary without an error, and a NaN-heavy one would hold every NaN in one
-    task's memory. B5 rules such a column out; :func:`require_no_continuous_categoricals`
-    is the step that says so, and the caller runs it first. (Nested floats —
-    ``array<double>`` — differ the same way and pass B5, but the encoder cannot
-    encode any complex-typed categorical, so they never get that far.)
+    task's memory. B5 rules such a column out, along with every other type
+    outside string / integer / boolean (nested floats such as ``array<double>``
+    differ the same way); :func:`require_supported_categorical_dtypes` is the
+    step that says so, and the caller runs it first.
 
     Cost: one scan of ``df``. What reaches the driver is bounded by category
     cardinality, not by row count.
@@ -74,20 +74,22 @@ def collect_vocabularies_from_data(
     return {col: list(row[i]) for i, col in enumerate(columns)}
 
 
-def require_no_continuous_categoricals(
+def require_supported_categorical_dtypes(
     columns: list[str],
     dtypes: dict[str, str],
 ) -> None:
-    """Pre-check, runtime backstop of B5: no column to collect is continuous-numeric.
+    """Pre-check, runtime backstop of B5: every column to collect has a type a
+    categorical may have — string, an integer type, or boolean.
 
     The Layer-2 gate already runs B5, but ``fit_preprocessor_metadata`` does not
     consume the gate's output, so a sliced run (``--only-node`` or
     ``--from-node fit_preprocessor_metadata``) skips it. Without this step such
     a run would hand a ``double``/``float`` column to
     :func:`collect_vocabularies_from_data`, which returns a wrong vocabulary
-    without raising whenever the column holds a NaN or a ``-0.0``; a ``decimal``
-    one would crash the preprocessor's JSON save, after the scan. The rule itself stays in ``core/consistency.py`` — this only
-    raises on what it reports.
+    without raising whenever the column holds a NaN or a ``-0.0``; a
+    ``decimal``/``date``/``timestamp``/``binary`` one would crash the
+    preprocessor's JSON save after the scan. The rule itself stays in
+    ``core/consistency.py`` — this only raises on what it reports.
 
     ``dtypes`` is ``dict(df.dtypes)``: schema metadata, no Spark job.
     """
