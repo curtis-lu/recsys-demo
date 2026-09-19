@@ -43,7 +43,7 @@ inference 預設不使用最新訓練完成的模型，而是解析 `data/models
 5. **母體 grain 唯一**：`inference_population` 對 `time + entity` 唯一，由其 ETL 的 `primary_key` + `quality_checks` 在產出階段保證。`feature_table` 同樣應對 `time + entity` 唯一，否則 enrichment 的 left join 會 fan-out 放大評分母體，最後通常被 completeness 或 duplicate check 阻擋。
 6. **候選 item 集合一致**：`inference.products` 必須與 `schema.categorical_values[item]` 為相同集合；CLI 會在啟動時執行雙向一致性檢查。
 7. **前處理欄位完整**：評分日期的 `feature_table` 必須提供模型所需欄位。缺欄會在套用 preprocessor 或比對模型 feature names 時中止。
-8. **Score 契約正確**：發布閘固定要求 `score` 介於 `[0, 1]`。使用未校準的 learning-to-rank raw score 前，必須確認輸出符合這個契約。
+8. **Score 的尺度由模型決定**：發布閘不檢查 `score` 的範圍（§6.1）。有套校準的模型輸出落在 `[0, 1]`；未校準的 learning-to-rank raw score 是無界實數，照樣會發布。下游若把 score 當機率讀，要自己確認用的是校準過的模型。
 9. **Driver 資源足夠**：模型評分把母體按 entity 分成 `inference.entity_buckets` 個桶，一次只有**一個桶**的特徵在 driver 上（約 `母體列數 / entity_buckets × 特徵數 × 4 B`），算完就落地、不累積。所以記憶體是設定值的函數而不是母體大小的函數——母體長大時調高桶數即可，不必改程式碼。桶數的健康窗口見 §3.3。
 
 模型 manifest 缺失或缺少 dataset version 欄位時，CLI 目前會記錄 warning，並回退到 dataset 的 `latest` 版本。
@@ -149,7 +149,7 @@ inference:
 
 若下游只使用組內排序，校準通常不是必要條件；若下游會把 score 解讀為申請機率、點擊機率或期望收益，則應在 training 使用獨立 calibration split。
 
-不論此設定為何，現有 publication gate 都要求 score 位於 `[0, 1]`。部分 ranking objective 的 raw score 不符合此限制，可能需要啟用 calibration 或調整 validation contract。
+publication gate 不檢查 score 的範圍（`score_range` 已刪除，理由見 §6.1）。未校準的 ranking objective 輸出無界實數，照樣可以發布。
 
 ### 3.5 Schema 與 Spark
 
@@ -354,7 +354,7 @@ item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始�
 
 | 在哪 | 有什麼 | 誰讀 |
 |---|---|---|
-| log 的 `[chunks] predict:` 一行 | processed／skipped／rebuilt／surplus 的**計數**（不含清單，理由見 `docs/agents/deliberate-non-goals.md`） | 跑的當下的人 |
+| log 的 `[chunks] predict:` 一行 | to_process／skipped／rebuilt／surplus 的**計數**（to_process 含之後才發現是空桶的 chunk）（不含清單，理由見 `docs/agents/deliberate-non-goals.md`） | 跑的當下的人 |
 | `score_manifest`（節點的第一個 output） | **四份**逐 chunk 清單（processed／skipped／rebuilt／empty）＋ `expected_partitions`／`written_partitions` | `rank_predictions` 與 `validate_predictions`；**memory-only，跑完就沒了** |
 | `chunk_report.json`（節點的第二個 output，見 §6.3） | 上面那四份 ＋ **第五份 `chunks_surplus`**（原本只到一行 warning）＋ 摘要 ＋ 寫它的 `run_id`，落在磁碟上 | 事後回來問「那一次到底跳過了哪些」的人 |
 
@@ -462,12 +462,12 @@ Hive tables 採 dynamic partition overwrite，只覆寫本次 DataFrame 實際�
 2. 每個設定日期都有 production partitions。
 3. 每個 query group 的 rows 數等於 products 數。
 4. identity 沒有重複或 NULL。
-5. score 全部位於 `[0, 1]`，分布沒有異常集中或全為常數。
+5. score 分布沒有異常集中或全為常數；有套校準的模型，score 應全部位於 `[0, 1]`（發布閘不檢查這一條，§6.1）。
 6. rank 從 1 開始，並與 score 降冪一致。
 7. 各 item 的 rows 數與 entity 母體一致。
 8. 抽樣檢視排序結果，確認 eligibility、法遵與基本業務常識。
 9. 檢視 `build_inference_population_features` 的 feature coverage log：每個 snap_date 的缺特徵成員數是否在預期範圍；異常偏高代表 feature ETL 與母體不對齊。
-10. 檢視 `[chunks] predict:` log 的 processed／skipped／rebuilt／surplus 四個數字。全新的一個月應該是 processed ＝ item 數 × 有資料的桶數、其餘為 0；surplus 非 0 代表有舊桶的分區留在表上（通常是 `entity_buckets` 被改過）。**事後才回來看的話 log 未必還在**——`manifest.json` 的 `scoring_chunks.by_snap_date` 有同樣的數字按月拆開，`chunk_report.json` 有逐 chunk 清單。
+10. 檢視 `[chunks] predict:` log 的 to_process／skipped／rebuilt／surplus 四個數字。全新的一個月應該是 to_process ＝ item 數 × 桶數、其餘為 0；surplus 非 0 代表有舊桶的分區留在表上（通常是 `entity_buckets` 被改過）。**事後才回來看的話 log 未必還在**——`manifest.json` 的 `scoring_chunks.by_snap_date` 按月拆開，而且把 to_process 再分成真的寫出去的 `processed` 與空桶的 `empty`（全新的一個月 processed ＝ item 數 × 有資料的桶數）；`chunk_report.json` 有逐 chunk 清單。
 11. `ranked_predictions` 的分區目錄**不該**出現 `entity_bucket=`。出現就代表機制欄漏進了對外契約。
 
 範例查詢：
@@ -646,7 +646,6 @@ validation 失敗時，先從 exception 的 checks 清單判斷是模型輸出�
 
 - 母體成員資格由 `inference_population` 定義；`feature_table` 只提供特徵。缺特徵的母體成員仍會被評分（特徵欄為 NULL），只在 log 留下每月的缺特徵成員數，不會被自動排除——是否排除由下游決定。
 - 目前每個 entity 共用同一份 products 清單，不支援 per-entity eligibility。
-- score 必須位於 `[0, 1]`；這對未校準的 ranking objective 是額外限制。
 - 模型評分必須在 driver（生產禁 UDF），所以每個 `(entity 桶, item)` chunk 的特徵會被收集到 pandas，不是完全 distributed inference。與 #188 之前的差別是**不再累積**：算完就落地，driver 上同時只有一個桶。
 - **driver 峰值只有下界推算，沒有實測。** `pdf_to_X` 的 `X_df.values` 會把 frame 攤成單一 numpy 陣列，共同 dtype 由所有欄決定。**#283 之後特徵側已經同質**——`cast_numeric_features_to_storage_type` 把所有數值特徵欄（decimal／double／float／整數族／boolean）轉成 `dataset.numeric_feature_storage_type` 宣告的型別，所以共同 dtype 就是宣告值（預設 float32），不再有「一欄 int64 讓整個矩陣翻倍」那條路。仍是下界的理由有兩個：**延後編碼的 identity 類別欄**在 `pdf_to_X` 才成為 `Categorical.codes`，不經過 Spark 側的 cast（實測 float32 ＋ int8／int16 codes 還是 float32，但類別數 >32767 讓 codes 變 int32 時共同型別會回到 float64）；以及實際值取決於生產 `feature_table` 的欄數與 chunk 大小。
 - **這道發布閘買到的是「順序」，不是「原子性」。** production 只在整批驗證通過後才被觸碰，但 `publish_predictions` 的寫入同樣是 `insertInto` ＋ dynamic overwrite，跨分區的 commit 不是全有全無。逐 chunk 化把失敗視窗從「整條 run」縮到「最後那一次寫」，那是真實的收益，但它不等於原子發布。
