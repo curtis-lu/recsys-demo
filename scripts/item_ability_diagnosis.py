@@ -392,7 +392,7 @@ def per_item_ap(
     score: np.ndarray,
     mp: dict,
 ) -> tuple[dict[str, float], dict[str, int], float]:
-    contrib, row_idx = positive_row_contributions(groups, y, score, mp["k"])
+    contrib, row_idx = positive_row_contributions(groups, items, y, score, mp["k"])
     if len(contrib) == 0:
         return {}, {}, 0.0
     pos_items = items[row_idx].astype(str)

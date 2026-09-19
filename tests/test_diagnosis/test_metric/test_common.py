@@ -35,8 +35,9 @@ def test_sample_arrays_without_inclusion_weight_returns_none_ht_weights():
     """缺 inclusion_weight 欄：ht_weights 必須是 None（未加權路徑的語意標記），
     row_weights 是全 1 的 float 陣列。這兩條路對 mAP 的 weights 參數是位元
     等價的，所以只驗數值守不住『有沒有加權』——必須斷言 `is None` 這個結構性
-    差異。順帶釘住：groups 的 factorize 分群、y 為 int64、item 欄一律被
-    astype(str) 強制轉字串（故意用數字型 item id 行使這條轉換）。"""
+    差異。順帶釘住：groups 的 factorize 分群、y 為 int64、item 欄保留原始
+    型別（故意用數字型 item id）：它是同分的決勝值，數字要照數字大小比才跟
+    Spark 的名次一致（#355 之前這裡會 astype(str)）。"""
     import numpy as np
     import pandas as pd
     from recsys_tfb.diagnosis.metric._common import sample_arrays
@@ -44,7 +45,7 @@ def test_sample_arrays_without_inclusion_weight_returns_none_ht_weights():
     pdf = pd.DataFrame({
         "t": [1, 1, 2],
         "e": ["a", "a", "b"],
-        "item": [10, 20, 10],                                  # 數字型 → 行使 astype(str)
+        "item": [10, 20, 10],                                  # 數字型 → 不得轉字串
         "y": [1, 0, 1],
     })
     groups, items, y, ht_weights, row_weights = sample_arrays(pdf, schema)
@@ -52,8 +53,8 @@ def test_sample_arrays_without_inclusion_weight_returns_none_ht_weights():
     assert row_weights.dtype == np.float64
     np.testing.assert_array_equal(row_weights, np.ones(3))
     np.testing.assert_array_equal(groups, [0, 0, 1])           # (1,a),(1,a),(2,b)
-    np.testing.assert_array_equal(items, ["10", "20", "10"])   # 數字被轉成字串
-    assert all(isinstance(x, str) for x in items)              # 每個都是字串，證明 astype(str)
+    np.testing.assert_array_equal(items, [10, 20, 10])         # 原始值
+    assert not any(isinstance(x, str) for x in items)          # 沒被轉成字串
     np.testing.assert_array_equal(y, [1, 0, 1])
     assert y.dtype == np.int64
 

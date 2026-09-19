@@ -20,6 +20,12 @@ from recsys_tfb.evaluation.metrics import (
 )
 
 
+def _items(groups: np.ndarray) -> np.ndarray:
+    """A distinct item per row, for fixtures whose scores never tie inside a
+    group — the item only breaks ties, so its values do not matter there."""
+    return np.arange(len(groups)).astype(str)
+
+
 class TestComputeAP:
     def test_known_values(self):
         y_true = np.array([1, 0, 1, 0])
@@ -54,7 +60,7 @@ class TestComputeMeanAP:
         y_true = np.array([1, 0, 1, 0, 0, 0, 1])
         y_score = np.array([0.9, 0.8, 0.7, 0.6, 0.9, 0.8, 0.7])
         expected = (5 / 6 + 1 / 3) / 2
-        assert compute_mean_ap(groups, y_true, y_score) == pytest.approx(expected)
+        assert compute_mean_ap(groups, _items(groups), y_true, y_score) == pytest.approx(expected)
 
     def test_skips_no_positive_group(self):
         # group 0: AP = 1.0  (single positive at top)
@@ -63,19 +69,19 @@ class TestComputeMeanAP:
         groups = np.array([0, 0, 1, 1, 2, 2])
         y_true = np.array([1, 0, 0, 0, 1, 0])
         y_score = np.array([0.9, 0.1, 0.5, 0.4, 0.9, 0.1])
-        assert compute_mean_ap(groups, y_true, y_score) == pytest.approx(1.0)
+        assert compute_mean_ap(groups, _items(groups), y_true, y_score) == pytest.approx(1.0)
 
     def test_all_no_positive_returns_zero(self):
         groups = np.array([0, 0, 1, 1])
         y_true = np.array([0, 0, 0, 0])
         y_score = np.array([0.9, 0.8, 0.7, 0.6])
-        assert compute_mean_ap(groups, y_true, y_score) == 0.0
+        assert compute_mean_ap(groups, _items(groups), y_true, y_score) == 0.0
 
     def test_single_group_equals_single_ap(self):
         groups = np.array([7, 7, 7, 7])
         y_true = np.array([1, 0, 1, 0])
         y_score = np.array([0.9, 0.8, 0.7, 0.6])
-        assert compute_mean_ap(groups, y_true, y_score) == pytest.approx(
+        assert compute_mean_ap(groups, _items(groups), y_true, y_score) == pytest.approx(
             compute_ap(y_true, y_score)
         )
 
@@ -83,30 +89,26 @@ class TestComputeMeanAP:
         groups = np.array([], dtype=np.int64)
         y_true = np.array([], dtype=np.int64)
         y_score = np.array([], dtype=np.float64)
-        assert compute_mean_ap(groups, y_true, y_score) == 0.0
+        assert compute_mean_ap(groups, _items(groups), y_true, y_score) == 0.0
 
-    def test_stable_tie_breaking_within_group(self):
-        """When y_score has ties within a group, the lexsort-based impl uses
-        stable order — input position breaks the tie. This locks down the
-        new invariant that the same input ALWAYS produces the same AP
-        (the old quicksort-based impl was implementation-defined on ties).
+    def test_ties_within_a_group_are_broken_by_item(self):
+        """Tied scores rank by item ascending — the rule the Spark metrics rank
+        with (``utils.ranking``) — not by where the rows sit in the input.
 
-        Group 0 layout (input already in score-desc; tied pairs):
-          pos 0: score=0.9, y=1
-          pos 1: score=0.9, y=0     (tied with pos 0; stable keeps it after)
-          pos 2: score=0.5, y=1
-          pos 3: score=0.5, y=0     (tied with pos 2; stable keeps it after)
+        One group, two tied pairs, items chosen so that input order and item
+        order disagree:
+          score 0.9: "b"(y=1), "a"(y=0)  → item order a, b
+          score 0.5: "d"(y=1), "c"(y=0)  → item order c, d
 
-        sorted y = [1, 0, 1, 0]
-        cumsum   = [1, 1, 2, 2]
-        pos      = [1, 2, 3, 4]
-        precisions = [1.0, 0.5, 2/3, 0.5]
-        AP = (1*1 + 0*0.5 + 1*2/3 + 0*0.5) / 2 = (1 + 2/3) / 2 = 5/6
+        sorted y   = [0, 1, 0, 1]
+        precisions = [0, 1/2, 1/3, 1/2]
+        AP = (1/2 + 1/2) / 2 = 1/2   (input order would give 5/6)
         """
         groups = np.array([0, 0, 0, 0])
+        items = np.array(["b", "a", "d", "c"])
         y_score = np.array([0.9, 0.9, 0.5, 0.5])
         y_true = np.array([1, 0, 1, 0])
-        assert compute_mean_ap(groups, y_true, y_score) == pytest.approx(5 / 6)
+        assert compute_mean_ap(groups, items, y_true, y_score) == pytest.approx(0.5)
 
     def test_groups_unsorted_input(self):
         """Group ids in input do not need to be contiguous or sorted — the
@@ -119,7 +121,7 @@ class TestComputeMeanAP:
         y_true = np.array([1, 0, 0, 0, 1, 1, 0])
         y_score = np.array([0.9, 0.9, 0.8, 0.8, 0.7, 0.7, 0.6])
         expected = (5 / 6 + 1 / 3) / 2
-        assert compute_mean_ap(groups, y_true, y_score) == pytest.approx(expected)
+        assert compute_mean_ap(groups, _items(groups), y_true, y_score) == pytest.approx(expected)
 
     def test_random_many_groups_matches_naive_reference(self):
         """Random multi-group correctness check at moderate scale.
@@ -150,7 +152,7 @@ class TestComputeMeanAP:
             )
         expected = float(np.mean(expected_aps)) if expected_aps else 0.0
 
-        actual = compute_mean_ap(groups, y_true, y_score)
+        actual = compute_mean_ap(groups, _items(groups), y_true, y_score)
         assert actual == pytest.approx(expected, rel=1e-12)
 
 
@@ -389,10 +391,10 @@ class TestWeightedMap:
         argument combination, including the empty-input early returns."""
         empty = np.array([], dtype=np.int64)
         for args in (
-            (self.GROUPS, self.Y, self.SCORE),
-            (self.GROUPS, self.Y, self.SCORE, 2),          # k truncation
-            (self.GROUPS, np.zeros_like(self.Y), self.SCORE),  # no positives
-            (empty, empty, np.array([], dtype=np.float64)),    # empty input
+            (self.GROUPS, self.ITEMS, self.Y, self.SCORE),
+            (self.GROUPS, self.ITEMS, self.Y, self.SCORE, 2),          # k truncation
+            (self.GROUPS, self.ITEMS, np.zeros_like(self.Y), self.SCORE),  # no positives
+            (empty, np.array([]), empty, np.array([], dtype=np.float64)),  # empty input
         ):
             out = positive_row_contributions(*args)
             assert isinstance(out, tuple) and len(out) == 2, args
@@ -401,6 +403,17 @@ class TestWeightedMap:
         assert "weights" not in inspect.signature(
             positive_row_contributions
         ).parameters
+
+    def test_contributions_break_ties_by_item(self):
+        """The tied fixture of ``test_ties_within_a_group_are_broken_by_item``:
+        item order puts the positives "b" (row 0) and "d" (row 2) at ranks 2
+        and 4. Input order would put them at 1 and 3."""
+        contrib, row_idx = positive_row_contributions(
+            np.array([0, 0, 0, 0]), np.array(["b", "a", "d", "c"]),
+            np.array([1, 0, 1, 0]), np.array([0.9, 0.9, 0.5, 0.5]),
+        )
+        assert row_idx.tolist() == [0, 2]
+        assert contrib.tolist() == pytest.approx([1 / 2, 2 / 4])
 
     # --- 2. uniform weights == unweighted ---
 
@@ -544,7 +557,7 @@ class TestWeightedMap:
     def test_align_helper_selects_the_positive_row_weights(self):
         w = np.array([2.0, 2.0, 1.0, 1.0, 5.0, 5.0])
         contrib, row_idx = positive_row_contributions(
-            self.GROUPS, self.Y, self.SCORE
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE
         )
         w_pos = align_positive_row_weights(w, len(self.GROUPS), row_idx)
         assert w_pos.shape == contrib.shape
@@ -552,7 +565,7 @@ class TestWeightedMap:
 
     def test_align_helper_rejects_wrong_length(self):
         _contrib, row_idx = positive_row_contributions(
-            self.GROUPS, self.Y, self.SCORE
+            self.GROUPS, self.ITEMS, self.Y, self.SCORE
         )
         with pytest.raises(ValueError, match="row-aligned"):
             align_positive_row_weights(

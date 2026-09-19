@@ -29,8 +29,13 @@ def score_histogram_counts(
     """Per-item histogram bin counts over a single set of global bin edges.
 
     Returns long-format columns ``[item_col, "bin_center", "count",
-    "bin_width"]`` (item x non-empty-bin rows). Shared edges across items make
-    the overlay histogram directly comparable.
+    "bin_width"]`` (item x non-empty-bin rows), sorted by item then bin. Shared
+    edges across items make the overlay histogram directly comparable.
+
+    Sorted because ``groupBy`` returns rows in shuffle order, which moves with
+    the parallelism; unsorted, the same data landed as a different
+    ``report_aggregates.json`` (#355). :func:`score_box_stats_by_label` sorts
+    for the same reason.
     """
     bounds = sdf.agg(
         F.min(score_col).alias("lo"), F.max(score_col).alias("hi")
@@ -46,7 +51,7 @@ def score_histogram_counts(
         counts = sdf.groupBy(item_col).count().toPandas()
         counts["bin_center"] = lo
         counts["bin_width"] = 1.0
-        return counts[cols]
+        return counts[cols].sort_values(item_col).reset_index(drop=True)
 
     raw_bin = F.floor((F.col(score_col) - F.lit(lo)) / F.lit(width))
     bin_idx = F.least(F.lit(nbins - 1), F.greatest(F.lit(0), raw_bin)).cast("int")
@@ -58,6 +63,7 @@ def score_histogram_counts(
     )
     counts["bin_center"] = lo + (counts["_bin"] + 0.5) * width
     counts["bin_width"] = width
+    counts = counts.sort_values([item_col, "_bin"]).reset_index(drop=True)
     return counts[cols]
 
 
@@ -93,11 +99,13 @@ def score_box_stats_by_label(
     label_col: str,
     accuracy: int = 10000,
 ) -> pd.DataFrame:
-    """Boxplot stats per (item, label): one row per (item, label)."""
+    """Boxplot stats per (item, label): one row per (item, label), sorted by
+    item then label (why: :func:`score_histogram_counts`)."""
     rows = (
         sdf.groupBy(item_col, label_col)
         .agg(F.percentile_approx(F.col(score_col), _PCTS, accuracy).alias("p"))
         .toPandas()
+        .sort_values([item_col, label_col])
     )
     return _box_stats(rows, [item_col, label_col])
 

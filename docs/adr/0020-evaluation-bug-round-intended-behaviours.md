@@ -207,6 +207,14 @@ date: 2026-09-13
 
 > **2026-09-16 補記（ADR-0021）**：ADR-0021 新增選用欄位角色 `event` 之後，同一個 query group 裡同一個 item 可以有多列，「按 item 名升冪」就不再決定得了順序——本節講的「沒定義」會原樣回來。所以宣告 `event` 時，同分規則要延伸成「按 item 名，再按 `event`」。本節的決定沒有被推翻，只是決勝欄多一個。
 
+> **2026-09-19 補記（#355）**：本節只接了兩個 Spark 位置，driver 端還有 4 處 numpy 排名照輸入列的順序決勝：`evaluation/metrics.py` 的 `compute_mean_ap` 與 `positive_row_contributions`（HPO 評分、metric CI、診斷都經過它們）、`diagnosis/metric/item_ability/_compute.py::descending_ranks`、suppression 的帳本排序。#355 把它們接上同一條規則：`utils/ranking.py` 多一個 numpy 版 `order_by_score_then_item`，4 處都呼叫它，不各自手刻。兩版住同一個檔，是為了讓「規則只有一條」看得見；模組因此不在檔頭 import pyspark（Spark 版在函式內 import），因為 numpy 那邊的呼叫端有刻意不碰 pyspark 的模組。同理拿掉了 `utils/__init__.py` 對 `get_or_create_spark_session` 的轉手匯出：沒有人從套件層 import 它，但它讓 `import recsys_tfb.utils.<任何子模組>` 都會載入 pyspark。`tests/test_utils/test_ranking.py::test_numpy_callers_still_import_without_pyspark` 守這件事。
+>
+> 「按 item 名升冪」的「名」要讀成 **item 欄本身的值**：Spark 照欄位型別排（整數欄 2 在 10 前面），numpy 版比照，不先轉字串（字串會排成 `"10"` 在 `"2"` 前面）。診斷原本會先把 item 轉成字串，#355 改成拿原始值決勝、字串只當名字用。
+>
+> 同一張票順手收掉同一個根因的其他形態（ADR-0018 決定 1〈實作更正〉記的列序依賴）：bootstrap 的 cluster 與 query 編號改成照 key 排序給；`item_ability` 先把列排成固定順序再算（它的 query 平均與名次清單原本跟著列序走）；`config_shift` 的兩個加權正例數改用 `math.fsum`（權重是 1/ratio 這種小數時，照列序加總會差在最後一位）；抽樣 metadata 的 `items_below_floor_after_sampling` 照 item 排序；`report_aggregates.json` 的兩張長表排序後落地。`percentile_approx` 沒動，記在 #366。
+>
+> 驗收實跑（2026-09-19，合成資料）：單把 `spark.master` 從 `local[*]` 換成 `local[2]`，在這份小資料上列序根本沒變——#355 之前的程式碼也逐位元相同，那個比對證明不了任何事。改用 `local[2]`＋`spark.sql.shuffle.partitions=7`＋關掉 AQE：#355 之前的程式碼有 8 份 JSON 不同（4 份診斷、`metric_ci.json`、`report_aggregates.json`、兩份指標）；#355 之後診斷與 `metric_ci.json` 逐位元相同，剩下的差異全是 Spark 端聚合的浮點末位（相對差 ≤ 1.6e-15，在 `metrics.json`、`baseline_metrics.json` 與 `report_aggregates.json` 的校準平均）。合成資料的抽樣權重全是 1，小數權重那一條只有單元測試守著（`tests/test_diagnosis/test_metric/test_row_order.py`）。
+
 **碰到什麼**：inference 已落地的 `ranked_predictions` 同分列的 rank 值會變。inference 尚未部署，不需要遷移。
 
 ### bug 12：`per_item_segment` 的 key 用底線串接會撞號

@@ -46,9 +46,17 @@ def test_refactor_leaves_paired_bootstrap_bit_identical():
     在重構前的 `paired_bootstrap_delta` 上對同一組 fixture 跑一次拿到
     ``(-0.03205111434108531, 0.125683145273914)``，`git stash pop` 還原後
     再對重構後的實作跑同一組輸入比對逐位元相同，才把這兩個數字抄進來。
+
+    **2026-09-19 換過一次（#355），是刻意的行為改變。** cluster 編號從「照
+    出現順序」改成「照 key 排序」，同一個 seed 抽到的人換了，CI 跟著變。新值
+    同樣不是拿新實作回填：把 fixture 先照 ``cluster`` 排好（此時出現順序＝
+    排序後的順序），交給 #355 之前的實作（main ``81cd90a``）跑，得到
+    ``(-0.04272727272727278, 0.13592885648806696)``；新實作對原 fixture 跑出
+    逐位元相同的值，才抄進來。同一支腳本對原 fixture 跑舊實作，重現了上面
+    那組舊黃金值，證明腳本與本測試是同一個設定。
     """
-    GOLDEN_LO = -0.03205111434108531
-    GOLDEN_HI = 0.125683145273914
+    GOLDEN_LO = -0.04272727272727278
+    GOLDEN_HI = 0.13592885648806696
     f = _frame()
     mp = {"k": None, "weight_alpha": 0.0, "min_positives": 0, "shrinkage_k": 0.0}
     lo, hi = paired_bootstrap_delta(f, mp, {"a": 0.3}, n_boot=50, seed=42)

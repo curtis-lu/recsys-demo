@@ -81,6 +81,7 @@ from recsys_tfb.diagnosis.metric._common import (
     diag_cfg, per_item_ap, query_key, to_logit,
 )
 from recsys_tfb.evaluation.metrics import metric_params
+from recsys_tfb.utils.ranking import order_by_score_then_item
 
 logger = logging.getLogger(__name__)
 
@@ -333,17 +334,23 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     label_col = schema["label"]
     top_examples = out["top_examples"]
 
-    groups = pd.factorize(query_key(sample_pdf, query_cols))[0]
+    # sort=True：編號照 key 排序給，理由見 _common.sample_arrays 的 groups。
+    groups = pd.factorize(query_key(sample_pdf, query_cols), sort=True)[0]
     query_keys = query_key(sample_pdf, query_cols).astype(str).to_numpy()
-    clusters = pd.factorize(query_key(sample_pdf, entity_cols))[0]
+    clusters = pd.factorize(query_key(sample_pdf, entity_cols), sort=True)[0]
     items = sample_pdf[item_col].astype(str).to_numpy()
+    # 同分照 item 的原始值排（utils.ranking；數字 item 照數字大小），
+    # 上面的字串版只當名字用。
+    item_values = sample_pdf[item_col].to_numpy()
     y = sample_pdf[label_col].to_numpy(dtype=np.int64)
     z, logit_notes = to_logit(sample_pdf[SCORE_COL].to_numpy(dtype=np.float64))
     out["logit_notes"] = logit_notes
     out["notes"].extend(logit_notes)
 
     with log_step(logger, "suppression.per_item_ap"):
-        ap_by_item, _n_pos_ap, macro_map = per_item_ap(groups, items, y, z, mp)
+        ap_by_item, _n_pos_ap, macro_map = per_item_ap(
+            groups, item_values, y, z, mp
+        )
     out["macro_per_item_map"] = macro_map
 
     unique_items = sorted(set(items.tolist()))
@@ -365,7 +372,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         }
 
     n = len(sample_pdf)
-    sort_idx = np.lexsort((-z, groups))
+    sort_idx = order_by_score_then_item(groups, z, item_values)
     g_sorted = groups[sort_idx]
     y_sorted = y[sort_idx].astype(np.float64)
     item_sorted = items[sort_idx]

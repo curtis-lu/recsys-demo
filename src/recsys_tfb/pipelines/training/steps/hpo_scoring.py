@@ -52,21 +52,25 @@ PREDICT_BATCH_BYTES: int = 64 * 1024**2
 def _hpo_score(
     objective_name: str,
     groups: np.ndarray,
-    items: Optional[np.ndarray],
+    items: np.ndarray,
     y_true: np.ndarray,
     y_score: np.ndarray,
 ) -> float:
     """Score val predictions for one HPO trial under the chosen objective.
 
-    ``mean_ap``            — per-query mAP (``items`` unused).
+    ``mean_ap``            — per-query mAP.
     ``macro_per_item_map`` — macro average of per-item attributed mAP.
+
+    Both break tied scores by ``items``, the rule the evaluation metrics use
+    (``utils.ranking``), so both need it: the item values, or their
+    :func:`~recsys_tfb.utils.ranking.item_sort_codes`.
 
     Unknown ``objective_name`` raises ``ValueError``: a **pre-check** on the
     value handed in. A25 rejects the same value at CLI entry, so reaching this
     line means the caller assembled ``parameters`` without passing that gate.
     """
     if objective_name == "mean_ap":
-        return compute_mean_ap(groups, y_true, y_score)
+        return compute_mean_ap(groups, items, y_true, y_score)
     if objective_name == "macro_per_item_map":
         return compute_macro_per_item_map(groups, items, y_true, y_score)
     raise ValueError(
@@ -183,7 +187,7 @@ class TrialScorer:
         X_val,
         y_val: np.ndarray,
         groups_val: np.ndarray,
-        items_val: Optional[np.ndarray],
+        items_val: np.ndarray,
         algorithm: str,
         algorithm_params: dict,
         search_space: dict,
