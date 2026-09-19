@@ -702,7 +702,7 @@ def tune_hyperparameters(
             val_parquet_handle, preprocessor_metadata, parameters,
             with_items=True, on_disk_label="hpo_val_matrix",
         )
-        items_v = item_sort_codes(items_v)
+    items_v = item_sort_codes(items_v)
 
     checkpointing = parameters.get("hpo_checkpointing", True)
     search_id = _resolve_search_id(parameters)

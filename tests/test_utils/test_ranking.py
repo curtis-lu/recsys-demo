@@ -44,6 +44,27 @@ def _ranks(pdf: pd.DataFrame, rank_col: str) -> dict:
     }
 
 
+def test_numpy_callers_still_import_without_pyspark():
+    """``evaluation/metrics.py`` calls itself a pure-numpy leaf and
+    ``diagnosis/metric/_common.py`` a pyspark-free one; both now import
+    ``utils.ranking``. That keeps pyspark out only if neither the module nor
+    the ``recsys_tfb.utils`` package imports it on load.
+
+    A subprocess with pyspark blocked, because in this session pyspark is
+    already loaded and ``sys.modules`` could not tell."""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; sys.modules['pyspark'] = None;"
+         "import recsys_tfb.evaluation.metrics;"
+         "import recsys_tfb.diagnosis.metric._common"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+
+
 def _numpy_ranks(groups, score, items) -> np.ndarray:
     """1-based rank of every input row, from the numpy order."""
     from recsys_tfb.utils.ranking import order_by_score_then_item

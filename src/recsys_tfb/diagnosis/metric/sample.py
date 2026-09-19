@@ -301,9 +301,11 @@ def draw_diagnosis_sample(
         .size()
         .items()
     }
+    # sorted：item_counts 是 groupBy 照 shuffle 順序 collect 回來的，這份 dict
+    # 會隨 sample_meta 寫進三份診斷 JSON，照那個順序就是換平行度換一份檔（#355）。
     below = {
         it: per_item_sampled.get(it, 0)
-        for it in item_counts
+        for it in sorted(item_counts)
         if it not in take_all_items and per_item_sampled.get(it, 0) < floor
     }
     if below:

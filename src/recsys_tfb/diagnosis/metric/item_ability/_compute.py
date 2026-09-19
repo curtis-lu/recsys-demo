@@ -156,8 +156,10 @@ def descending_ranks(
     """One-based rank within each query, highest score = rank 1; lower is better.
 
     Ties rank by ``items`` ascending, the rule the published and evaluated
-    ranks use (``utils.ranking``) — so a tied positive gets the same rank here
-    as in the main metrics, whatever order the sample rows arrived in.
+    ranks use (``utils.ranking``), whatever order the sample rows arrived in.
+    Same rule, not necessarily the same ranks: this module ranks
+    ``score_uncalibrated`` and the main metrics rank ``score``, which order the
+    rows alike only when calibration is off or strictly increasing.
 
     回傳原始名次（不除以 query size）：名次直接讀得懂（「排第 3」），而百分位
     （rank ÷ query size）在 query 候選數不固定時才需要，且「0.125」這種數字讀

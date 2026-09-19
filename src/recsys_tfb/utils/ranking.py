@@ -19,7 +19,12 @@ on every run and by each place, and nothing raises (ADR-0020 bug 11, #355).
 
 **What it does not cover.** Training's quadrant assignment
 (``diagnosis/model/population_spark.py``) already spells the same order inline;
-it ranks for a training diagnosis, not a published or evaluated rank.
+it ranks for a training diagnosis, not a published or evaluated rank. The
+manual spike scripts ``scripts/item_ability_diagnosis.py``,
+``scripts/suppression_ledger_diagnosis.py`` and
+``scripts/per_item_score_shift_optuna_diagnosis.py`` still sort with their own
+``np.lexsort`` and hand string items to the metric primitives; they predate
+``diagnosis/metric/`` and were left out of #355.
 
 **Why the item.** Time and entity are the window's partition, so the item is the
 one column left that tells two tied rows of a query apart — ``(time, entity,
@@ -35,7 +40,9 @@ string copy of the item for labels pass the raw column here.
 ``hashing.spark_bucket``; placing it under ``evaluation/`` would open the first
 inference → evaluation import edge for the sake of one window. pyspark is
 imported inside the Spark function only: the numpy callers include modules kept
-pyspark-free on purpose (``diagnosis/metric/_common.py``).
+pyspark-free on purpose (``diagnosis/metric/_common.py``). That is also why the
+``recsys_tfb.utils`` package re-exports nothing — importing any submodule loads
+the package first.
 """
 
 from __future__ import annotations
@@ -93,6 +100,8 @@ def item_sort_codes(items: np.ndarray) -> np.ndarray:
 
     Lets a caller that ranks the same items many times — HPO scores every trial
     on one validation set — pay for sorting the item values once, and hand the
-    codes to :func:`order_by_score_then_item` in place of the values.
+    codes to :func:`order_by_score_then_item` in place of the values. The codes
+    go through this function again inside every call, but on small integers
+    that is one hash pass, not a sort of strings.
     """
     return pd.factorize(np.asarray(items), sort=True)[0]

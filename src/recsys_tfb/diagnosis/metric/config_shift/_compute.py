@@ -752,8 +752,11 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
                 # mAP 與 min_positives/shrinkage_k/weight_alpha 吃的是**加權**計數
                 # （metrics.py 的 weights 路徑），只報 raw 會讓讀者用一個母體去篩
                 # 另一個母體算出來的數字。兩個都給，讓讀者自己看。
+                # math.fsum 而不是 .sum()：權重是 1/ratio 這種小數，照列序加總
+                # 會差在最後一位，而列序由 Spark 決定（#355）；fsum 是精確和，
+                # 跟順序無關。
                 "n_pos_raw": int(item_pos.sum()),
-                "n_pos_effective": float(w_pos_rows[item_pos].sum()),
+                "n_pos_effective": math.fsum(w_pos_rows[item_pos]),
                 "offset_min": float(np.min(offs[mask])) if mask.any() else None,
                 "offset_max": float(np.max(offs[mask])) if mask.any() else None,
             })
@@ -770,7 +773,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         "n_entities": int(clusters.nunique()),
         "n_items": int(len(set(items.tolist()))),
         "n_positive_rows": int(y.sum()),
-        "n_positive_rows_effective": float(w_pos_rows[pos_mask].sum()),
+        "n_positive_rows_effective": math.fsum(w_pos_rows[pos_mask]),  # 為何 fsum：見 per_item
     }
 
     logger.info(

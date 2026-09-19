@@ -283,3 +283,24 @@ def test_sampling_description_helper_uses_thousands_separators():
     assert "1,200" in desc
     assert "18,800" in desc
     assert "分層" in desc
+
+
+def test_items_below_floor_are_listed_in_item_order(spark):
+    """The per-item positive counts come back from a Spark ``groupBy`` in
+    shuffle order; ``items_below_floor_after_sampling`` used to keep that order,
+    and it rides along in ``sample_meta`` into three diagnosis JSONs (#355).
+
+    Five items, each with 6 positive queries of its own (above the floor of 5,
+    so none is taken in full), sampled down to 6 queries in total: every item
+    ends below the floor."""
+    rows = []
+    for item in ("ee", "dd", "cc", "bb", "aa"):
+        for i in range(6):
+            cust = f"{item}{i}"
+            rows.append(("20240331", cust, item, 0.9, 1))
+    sdf = spark.createDataFrame(
+        rows, schema=["snap_date", "cust_id", "prod_name", "score", "label"]
+    ).repartition(5)
+    _pdf, meta = draw_diagnosis_sample(sdf, _params(max_queries=6, floor=5))
+    below = list(meta["items_below_floor_after_sampling"])
+    assert len(below) >= 3 and below == sorted(below)

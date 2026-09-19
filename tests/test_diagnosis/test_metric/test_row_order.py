@@ -9,7 +9,11 @@ picked by first occurrence (#355).
 
 The fixture is built to hit those places: scores come from a three-value set so
 most queries hold ties, and several (positive, suppressor) pairs carry the same
-allocated gap, so the top-N example cut falls inside a tie.
+allocated gap, so the top-N example cut falls inside a tie. The down-sampled
+stratum's weight is 1/0.37, not a round number: integer weights add up to the
+same float in any order, so they would hide a sum taken in row order. And the
+item runs as a string and as an integer whose numeric order is not its string
+order, because the diagnoses rank on the raw item value.
 """
 
 import math
@@ -48,24 +52,29 @@ PARAMS = {
     }},
 }
 
-ITEMS = ("ccard_ins", "exchange_fx", "fund_bond", "fund_stock")
+ITEMS = {
+    "str": ("ccard_ins", "exchange_fx", "fund_bond", "fund_stock"),
+    # "10" < "100" < "2" < "7" as strings; 2 < 7 < 10 < 100 as numbers.
+    "int": (2, 10, 100, 7),
+}
 
 
-def _tied_sample() -> pd.DataFrame:
+def _tied_sample(item_type: str = "str") -> pd.DataFrame:
+    items = ITEMS[item_type]
     rng = np.random.default_rng(3)
     rows = []
     for c in range(30):
-        labels = (rng.random(len(ITEMS)) < 0.35).astype(int)
+        labels = (rng.random(len(items)) < 0.35).astype(int)
         if labels.sum() == 0:
-            labels[rng.integers(0, len(ITEMS))] = 1
-        for item, label in zip(ITEMS, labels):
+            labels[rng.integers(0, len(items))] = 1
+        for item, label in zip(items, labels):
             s = float(rng.choice([0.2, 0.5, 0.8]))
             rows.append({
                 "snap_date": "2026-01-31", "cust_id": f"c{c:02d}",
                 "prod_name": item, "label": int(label),
                 "score_uncalibrated": s, "score": s,
                 "stratum": "hash_ratio" if c % 3 else "take_all",
-                "inclusion_weight": 2.0 if c % 3 else 1.0,
+                "inclusion_weight": 1 / 0.37 if c % 3 else 1.0,
             })
     return pd.DataFrame(rows)
 
@@ -100,10 +109,11 @@ def _assert_same(a, b, path="$"):
         assert a == b, f"{path}: {a!r} != {b!r}"
 
 
+@pytest.mark.parametrize("item_type", list(ITEMS))
 @pytest.mark.parametrize("name", list(DIAGNOSES))
-def test_output_does_not_depend_on_the_order_of_the_rows(name):
+def test_output_does_not_depend_on_the_order_of_the_rows(name, item_type):
     run = DIAGNOSES[name]
-    sample = _tied_sample()
+    sample = _tied_sample(item_type)
     expected = run(sample)
     rng = np.random.default_rng(0)
     for trial in range(3):
