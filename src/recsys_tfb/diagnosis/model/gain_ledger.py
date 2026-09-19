@@ -2,15 +2,16 @@
 
 從每棵樹的 root 走訪，把切點 gain 分成兩帳：item-id 切點的 gain（isolate-by-item 的
 成本）與已經過 item-id 切點「conditioned」之後的 context 切點 gain（item 隔出來之後
-還花了多少 gain 精修判別力）。「item 隔出來之後幾乎沒有後續 context gain」＝該 item
-葉預算餓死的結構鐵證——診斷框架項目 8。
+還花了多少 gain 精修判別力）。「item 隔出來之後幾乎沒有後續 context gain」只說明模型
+沒在該 item 上換到個人化 gain，不說明原因：可能是沒分到容量（餓死型），也可能是資料裡
+沒有能分開它正負例的特徵（特徵缺失型）——兩型在帳本上長得一樣，帳本分不出來。
 
 另外三個全域輸出（供 ``model_capacity`` 呈現層用，不影響上面兩帳）：
 ``total_split_count``（非葉節點總數，讓 split 三分能算未分配殘差＝total−item−
 context）、``pre_item``（item 切點**之前**的未 conditioned 切點按特徵拆解，其 gain
-加總恆等於未分配殘差 ``total_gain−item_id_gain−context_gain``；Q3-#1）、
+加總恆等於未分配殘差 ``total_gain−item_id_gain−context_gain``）、
 ``first_item_split_depth``（每棵樹最淺 item 切點的 ``node_depth`` 分位摘要，root=1，
-量 item 條件化坐落多深；Q3-#2）。粗帳本降級路徑只有 ``total_split_count``，
+量 item 條件化坐落多深）。粗帳本降級路徑只有 ``total_split_count``，
 ``pre_item``／``first_item_split_depth`` 為 ``None``（需 reachable 走訪才算得出）。
 
 雙層結構（可測性）：``_ledger_from_trees`` 是純 pandas/dict 核心（只吃
@@ -158,7 +159,7 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
 
     # 未分配（pre-item）＝任何 item 切點**之前**（``conditioned=False``）的非 item
     # 切點，模型還沒條件化到「哪個 item」就用的全域 context——按特徵記帳，讓
-    # ``model_capacity`` 能拆解「未分配那塊是哪些特徵撐起來的」（診斷框架 Q3-#1）。
+    # ``model_capacity`` 能拆解「未分配那塊是哪些特徵撐起來的」。
     # 這批切點在既有邏輯裡不進任何帳；其 gain 加總恆等於
     # ``total_gain − item_id_gain − context_gain``（＝未分配殘差）。
     pre_item_gain_by_feat: dict = {}
@@ -166,7 +167,7 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
     pre_item_gain_sum = 0.0
     pre_item_split_count = 0
     # 每棵樹「最淺的 item 切點」節點深度（node_depth，root=1）：item 條件化坐落
-    # 多深＝它上方壓了多少全域 context（Q3-#2）。只收有 item 切點的樹。
+    # 多深＝它上方壓了多少全域 context。只收有 item 切點的樹。
     first_item_split_depths: list = []
 
     for _, tdf in trees.groupby("tree_index"):
@@ -269,7 +270,7 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
     )
 
     # pre-item（未分配）按特徵，gain 遞減排序——讀者最想先看哪個全域特徵吃掉
-    # 最多未分配 gain（Q3-#1）。
+    # 最多未分配 gain。
     pre_item_by_feature = {
         f: {
             "gain": pre_item_gain_by_feat[f],
