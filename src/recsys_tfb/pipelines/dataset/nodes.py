@@ -570,8 +570,8 @@ def fit_preprocessor_metadata(
     require_declared_categoricals(cat_values, from_schema)
     # Pre-check (runtime backstop of B5): the vocabulary collection below is
     # exact only on discrete types, and a sliced run skips the Layer-2 gate that
-    # normally rejects the rest — a double column would get a wrong vocabulary,
-    # not an error. Schema metadata only, no Spark job.
+    # normally rejects the rest — a double column holding NaN would get a wrong
+    # vocabulary, not an error. Schema metadata only, no Spark job.
     require_no_continuous_categoricals(from_data, dict(feature_table.dtypes))
     with log_step(logger, "collect_category_mappings"):
         category_mappings = {

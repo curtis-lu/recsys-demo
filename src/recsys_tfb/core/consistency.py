@@ -435,7 +435,7 @@ implemented and wired):
   ``require_no_continuous_categoricals`` (``pipelines/dataset/steps/categoricals.py``),
   run by ``fit_preprocessor_metadata`` — a sliced run skips the gate, and the
   one-pass vocabulary collection there is not exact on a double/float column
-  (``collect_set`` keeps each NaN, and keeps -0.0 apart from 0.0).
+  (``collect_set`` keeps each NaN and does not normalise -0.0).
 * B6 — a feature column that is non-numeric (string / binary / date / timestamp /
   complex) and is NOT declared categorical (so never integer-encoded): it becomes
   an ``object``-dtype model feature → driver OOM at ``pdf_to_X`` ``to_numpy`` and

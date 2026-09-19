@@ -34,7 +34,10 @@ def collect_vocabularies_from_data(
 
     Sorted, because a value's *index* in this list is its encoded value: an
     unstable order would re-encode the same data differently between runs and
-    quietly invalidate an already-trained model against a refit preprocessor.
+    quietly invalidate an already-trained model against a refit preprocessor —
+    and, with no model involved, the months ``apply_preprocessor_to_features``
+    already wrote, since a full run refits here but encodes only the months it
+    has not written yet.
 
     NULL is excluded rather than given an index — the encoder maps anything
     outside the vocabulary to the unknown sentinel, so a NULL and an
@@ -42,19 +45,24 @@ def collect_vocabularies_from_data(
     ``collect_set`` drops NULL itself.
 
     One aggregation over every column, not a ``distinct()`` per column. The
-    per-column form cost five Spark jobs and a full scan of ``df`` per column,
-    so it grew with the categorical count; this is one scan and three jobs
-    whatever the count (both measured on ``local[2]`` with AQE on, 2026-09-19).
+    per-column form cost a full scan of ``df`` and two to five Spark jobs per
+    column, so it grew with the categorical count; this is one scan and a fixed
+    one to three jobs whatever the count (the exact numbers move with AQE and
+    with how ``df`` is partitioned — measured on ``local[*]``, 2026-09-19).
     ``sort_array`` rather than ``sorted`` on the driver because it is the
     ordering ``ORDER BY`` uses — the per-column form's — so every value keeps
     the index it had, by construction rather than by a Python/Spark coincidence.
 
     Not exact on a ``double``/``float`` column: in Spark 3.3.2 ``collect_set``
-    keeps every NaN occurrence as its own element and keeps ``-0.0`` apart from
-    ``0.0``, where ``distinct()`` folds each to one value. The vocabulary would
-    change without an error, and a NaN-heavy column would hold every NaN in one
+    keeps every NaN occurrence as its own element, and does not normalise
+    ``-0.0`` — depending on how the rows are partitioned it keeps both zeros, or
+    one with whichever sign arrived first — where ``distinct()`` folds each to a
+    single value. A column holding NaN or ``-0.0`` would get a different
+    vocabulary without an error, and a NaN-heavy one would hold every NaN in one
     task's memory. B5 rules such a column out; :func:`require_no_continuous_categoricals`
-    is the step that says so, and the caller runs it first.
+    is the step that says so, and the caller runs it first. (Nested floats —
+    ``array<double>`` — differ the same way and pass B5, but the encoder cannot
+    encode any complex-typed categorical, so they never get that far.)
 
     Cost: one scan of ``df``. What reaches the driver is bounded by category
     cardinality, not by row count.
@@ -77,8 +85,8 @@ def require_no_continuous_categoricals(
     ``--from-node fit_preprocessor_metadata``) skips it. Without this step such
     a run would hand a ``double``/``float`` column to
     :func:`collect_vocabularies_from_data`, which returns a wrong vocabulary
-    without raising; a ``decimal`` one would crash the preprocessor's JSON save,
-    after the scan. The rule itself stays in ``core/consistency.py`` — this only
+    without raising whenever the column holds a NaN or a ``-0.0``; a ``decimal``
+    one would crash the preprocessor's JSON save, after the scan. The rule itself stays in ``core/consistency.py`` — this only
     raises on what it reports.
 
     ``dtypes`` is ``dict(df.dtypes)``: schema metadata, no Spark job.

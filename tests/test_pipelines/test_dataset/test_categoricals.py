@@ -55,6 +55,10 @@ _SCHEMA = T.StructType([
     T.StructField("big", T.LongType()),
     T.StructField("flag", T.BooleanType()),
     T.StructField("d", T.DateType()),
+    T.StructField("tiny", T.ByteType()),
+    T.StructField("small", T.ShortType()),
+    T.StructField("ts", T.TimestampType()),
+    T.StructField("raw", T.BinaryType()),
     T.StructField("all_null", T.StringType()),
 ])
 _COLUMNS = [f.name for f in _SCHEMA.fields]
@@ -62,7 +66,10 @@ _COLUMNS = [f.name for f in _SCHEMA.fields]
 
 @pytest.fixture
 def mixed_types(spark):
-    """Every discrete type B5 lets through, with duplicates and NULLs in each.
+    """Every scalar discrete type B5 lets through, with duplicates and NULLs.
+
+    Scalar only: nested floats (``array<double>``) pass B5 yet differ from the
+    per-column form, but no complex-typed categorical survives the encoder.
 
     Spread over several partitions so the partial per-partition sets really are
     merged, as they are on a cluster.
@@ -75,6 +82,10 @@ def mixed_types(spark):
             [2**40, -(2**35), 1][k % 3],
             None if k % 13 == 0 else bool(k % 2),
             dt.date(2024, 1 + k % 12, 1),
+            [-3, 0, 7][k % 3],
+            [300, -300][k % 2],
+            dt.datetime(2024, 1, 1 + k % 5, 0, 0, k % 3),
+            bytearray([k % 4, 0x80 + k % 2]),
             None,
         ))
     return spark.createDataFrame(rows, schema=_SCHEMA).repartition(8)
@@ -119,7 +130,11 @@ def _jobs_run_by(spark, fn) -> int:
     try:
         fn()
     finally:
-        sc.setLocalProperty("spark.jobGroup.id", None)
+        # setJobGroup sets three properties; clear all three so later tests in
+        # this session are not tagged with this group's description.
+        for key in ("spark.jobGroup.id", "spark.job.description",
+                    "spark.job.interruptOnCancel"):
+            sc.setLocalProperty(key, None)
     # Job-start events reach the status store through the async listener bus;
     # drain it so the count cannot race the last job's registration.
     sc._jsc.sc().listenerBus().waitUntilEmpty()
