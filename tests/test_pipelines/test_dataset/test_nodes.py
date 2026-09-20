@@ -1718,7 +1718,7 @@ class TestQueryGroupCompleteness:
 
     def _group_sizes(self, mi, params):
         schema = get_schema(params)
-        group_cols = [schema["time"]] + schema["entity"]
+        group_cols = schema["query_group_columns"]
         return mi.groupBy(*group_cols).count().toPandas()["count"].tolist()
 
     def test_val_and_test_groups_hold_every_declared_item(

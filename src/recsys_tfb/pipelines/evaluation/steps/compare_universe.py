@@ -7,10 +7,11 @@ Finding the universe
 ``common_universe``: given two prediction DataFrames, return the common query
 groups (as a Spark DataFrame) and the common items (as a Python set).
 
-**Why query groups, not entities.** A query group is ``[time] + entity`` —
-the unit each ranking is made in and mAP divides by. With one evaluated date
-every row shares one time value, so "common entities" and "common query
-groups" are the same set. With several dates (#374) they are not: an entity B
+**Why query groups, not entities.** A query group is
+``schema["query_group_columns"]`` — the unit each ranking is made in and mAP
+divides by. With one evaluated date every row shares one time value, so
+"common entities" and "common query groups" are the same set. With several
+dates (#374) they are not: an entity B
 scored in January only would, keyed by entity, keep A's February rows for it,
 and the two sides' metrics would be computed over different populations with
 nothing raising.
@@ -70,10 +71,11 @@ B side: takes A's label, joined on the identity columns, so both sides are
    and counts as 0 — which only happens when the two sides' candidate sets
    are asymmetric.
 
-Re-ranks both sides within the query group — ``[time] + entity``, every
-column of ``schema.entity`` — because the candidate set just shrank. That is
-the same grouping ``compute_test_mAP_spark`` ranks by, so the metrics the
-comparison report shows are the metrics the main line computes.
+Re-ranks both sides within the query group —
+``schema["query_group_columns"]``, every column of it — because the candidate
+set just shrank. That is the same grouping ``compute_test_mAP_spark`` ranks
+by, so the metrics the comparison report shows are the metrics the main line
+computes.
 
 Also returns the ``CommonUniverse`` it restricted by. Coverage reads its item
 sets from there rather than collecting them a second time (ADR-0020 bug 14).
@@ -98,7 +100,7 @@ _TIME_TEXT = "__compare_time_text"
 
 
 def query_groups_with_text_time(
-    df: SparkDataFrame, time_col: str, entity_cols: list[str],
+    df: SparkDataFrame, time_col: str, query_group_cols: list[str],
 ) -> SparkDataFrame:
     """``df``'s distinct query groups, the time column cast to string.
 
@@ -106,10 +108,30 @@ def query_groups_with_text_time(
     sides: the intersection below and the coverage count in the
     ``restrict_to_common`` node both use it, so they cannot disagree on how a
     DATE and a STRING time compare.
+
+    Takes the whole ``query_group_columns`` rather than the time and the
+    entity separately, so a query group that grows a column grows here too
+    without this signature being revisited. ``time_col`` stays a parameter
+    because it names the one member that needs the cast.
+
+    The old signature (``time_col`` + the entity columns) put the time in the
+    key by construction. This one cannot, so the membership is checked instead
+    of assumed: a ``time_col`` outside ``query_group_cols`` would skip the cast
+    *and* drop the time from the key — the module docstring's first failure
+    mode, arriving silently. No caller can reach it today (both pass values
+    from one ``get_schema`` call), which is what makes it worth a loud check
+    rather than a comment.
     """
-    return df.select(
-        F.col(time_col).cast("string").alias(time_col), *entity_cols
-    ).distinct()
+    if time_col not in query_group_cols:
+        raise ValueError(
+            f"query_groups_with_text_time: time column {time_col!r} is not in "
+            f"the query group {query_group_cols}. Both must come from the same "
+            "get_schema() result."
+        )
+    return df.select(*[
+        F.col(c).cast("string").alias(c) if c == time_col else F.col(c)
+        for c in query_group_cols
+    ]).distinct()
 
 
 class CommonUniverse(NamedTuple):
@@ -130,18 +152,21 @@ def common_universe(
     a: SparkDataFrame,
     b: SparkDataFrame,
     time_col: str,
-    entity_cols: list[str],
+    query_group_cols: list[str],
     item_col: str,
 ) -> CommonUniverse:
     """Return ``CommonUniverse(common_query_groups, common_items, a_items, b_items)``.
 
     ``common_query_groups`` is a **lazy** DataFrame with exactly
-    ``[time_col] + entity_cols``, one row per shared query group, the time as
-    text — an entity is the combination of **every** column in
-    ``schema.entity``, in declaration order. Callers join on the whole row;
-    intersecting only the first entity column would keep entities that exist
-    on one side alone, and leaving out the time would keep an entity's months
-    that only one side scored.
+    ``query_group_cols``, one row per shared query group, the time as text.
+    That list is taken whole, in the order ``get_schema`` derived it — every
+    column of ``schema.entity`` in declaration order, not just the first.
+    Callers join on the whole row; intersecting only the first entity column
+    would keep entities that exist on one side alone, and leaving out the time
+    would keep an entity's months that only one side scored.
+
+    ``time_col`` must be one of ``query_group_cols``; the helper above refuses
+    otherwise.
 
     Lazy means every consumer re-evaluates the intersection's shuffle. That is
     deliberate: caching it here would leak, because the DataFrames the caller
@@ -158,9 +183,8 @@ def common_universe(
     Raises ``DataConsistencyError`` when either intersection is empty —
     caller will surface this as ``fail loud``.
     """
-    group_cols = [time_col, *entity_cols]
-    a_groups = query_groups_with_text_time(a, time_col, entity_cols)
-    b_groups = query_groups_with_text_time(b, time_col, entity_cols)
+    a_groups = query_groups_with_text_time(a, time_col, query_group_cols)
+    b_groups = query_groups_with_text_time(b, time_col, query_group_cols)
     # A left-semi join, not ``intersect``. Both compute the same set for
     # non-null keys, but they disagree on nulls: ``intersect`` treats
     # ``NULL == NULL`` as a match, while the equi-join that ``restrict_to_common``
@@ -168,7 +192,8 @@ def common_universe(
     # restriction that follows it agreeing on what "common" means — otherwise a
     # universe whose only shared entity is null-keyed passes the gate and then
     # restricts to zero rows, silently.
-    common_query_groups = a_groups.join(b_groups, on=group_cols, how="left_semi")
+    common_query_groups = a_groups.join(
+        b_groups, on=query_group_cols, how="left_semi")
     # ``isEmpty()`` stays in the JVM — no rows cross into Python — and stops
     # once one row materialises. It is not free: the join underneath is a
     # shuffle, so both sides are shuffled before that row exists. What it does
@@ -179,8 +204,8 @@ def common_universe(
             f"compare common_query_groups is empty — A has {a_groups.count()} "
             f"query groups, B has {b_groups.count()} query groups, "
             f"intersection = 0. Check that both sides cover the same "
-            f"{time_col!r} values and that the entity columns {entity_cols} "
-            f"carry matching types."
+            f"{time_col!r} values and that the query group columns "
+            f"{query_group_cols} carry matching types."
         )
 
     a_items = {r[0] for r in a.select(item_col).distinct().collect()}
@@ -202,22 +227,28 @@ def restrict_to_common(
     parameters: dict,
 ) -> tuple[SparkDataFrame, SparkDataFrame, CommonUniverse]:
     schema = get_schema(parameters)
-    entity_cols = schema["entity"]
     item_col = schema["item"]
     time_col = schema["time"]
     score_col = schema["score"]
     rank_col = schema["rank"]
     label_col = schema["label"]
     identity_cols = schema["identity_columns"]
-    query_group_cols = [time_col, *entity_cols]
+    query_group_cols = schema["query_group_columns"]
 
-    universe = common_universe(a, b, time_col, entity_cols, item_col)
+    universe = common_universe(a, b, time_col, query_group_cols, item_col)
     common_items = universe.common_items
     # The time as text under a temporary name on both sides of the semi join,
     # so each side's own time column (STRING or DATE) is left as it was.
     common_groups = universe.common_query_groups.withColumnRenamed(
         time_col, _TIME_TEXT
     )
+    # The same query group, spelled the way both sides of the semi join below
+    # carry it: every column as declared, with the time under its temporary
+    # text name. Derived from ``query_group_cols`` rather than respelled, so a
+    # query group that grows a column is joined on that column here too.
+    common_group_join_key = [
+        _TIME_TEXT if c == time_col else c for c in query_group_cols
+    ]
 
     spark = a.sparkSession
     item_df = spark.createDataFrame([(i,) for i in common_items], [item_col])
@@ -233,7 +264,7 @@ def restrict_to_common(
         # bounded by config. See ``common_universe`` above for the full rule.
         df = (
             df.withColumn(_TIME_TEXT, F.col(time_col).cast("string"))
-            .join(common_groups, on=[_TIME_TEXT, *entity_cols], how="left_semi")
+            .join(common_groups, on=common_group_join_key, how="left_semi")
             .drop(_TIME_TEXT)
         )
         df = df.join(F.broadcast(item_df), on=item_col, how="inner")

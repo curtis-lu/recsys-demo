@@ -235,7 +235,7 @@ def load_enriched_eval_predictions(
 
 def validate_and_prepare(pdf: pd.DataFrame, schema: dict) -> tuple[pd.DataFrame, list[str]]:
     notes: list[str] = []
-    query_cols = [schema["time"], *schema["entity"]]
+    query_cols = schema["query_group_columns"]
     base_required = [*query_cols, schema["item"], schema["label"]]
 
     missing = [c for c in [*base_required, schema["score"]] if c not in pdf.columns]
@@ -267,7 +267,7 @@ def maybe_cap_queries(
     if max_queries <= 0:
         raise ValueError("--max-queries must be positive.")
 
-    query_cols = [schema["time"], *schema["entity"]]
+    query_cols = schema["query_group_columns"]
     qkey = _query_key(pdf, query_cols)
     n_queries = int(qkey.nunique())
     if n_queries <= max_queries:
@@ -441,7 +441,7 @@ def analyze_items(
     top_n: int,
 ) -> dict:
     total_t0 = time.monotonic()
-    query_cols = [schema["time"], *schema["entity"]]
+    query_cols = schema["query_group_columns"]
     entity_cols = schema["entity"]
     item_col = schema["item"]
     label_col = schema["label"]

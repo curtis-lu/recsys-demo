@@ -195,7 +195,7 @@ def load_enriched_eval_predictions(
 
 def validate_and_prepare(pdf: pd.DataFrame, schema: dict) -> tuple[pd.DataFrame, list[str]]:
     notes: list[str] = []
-    query_cols = [schema["time"], *schema["entity"]]
+    query_cols = schema["query_group_columns"]
     base_required = [*query_cols, schema["item"], schema["label"]]
 
     missing = [c for c in [*base_required, schema["score"]] if c not in pdf.columns]
@@ -237,7 +237,7 @@ def split_by_entity(
         )
 
     def n_queries(part: pd.DataFrame) -> int:
-        return int(part[[schema["time"], *entity_cols]].drop_duplicates().shape[0])
+        return int(part[schema["query_group_columns"]].drop_duplicates().shape[0])
 
     return tune, holdout, {
         "split_unit": "entity",
@@ -261,7 +261,7 @@ def cap_queries(
     if max_queries <= 0:
         raise ValueError("--search-max-queries must be positive.")
 
-    query_cols = [schema["time"], *schema["entity"]]
+    query_cols = schema["query_group_columns"]
     qkey = _query_key(pdf, query_cols)
     n_queries = int(qkey.nunique())
     if n_queries <= max_queries:
@@ -294,7 +294,7 @@ def arrays_for_metric(
     pdf: pd.DataFrame,
     schema: dict,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    query_cols = [schema["time"], *schema["entity"]]
+    query_cols = schema["query_group_columns"]
     groups = pd.factorize(_query_key(pdf, query_cols))[0]
     items = pdf[schema["item"]].astype(str).to_numpy()
     y = pdf[schema["label"]].to_numpy(dtype=np.int64)

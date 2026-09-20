@@ -161,12 +161,10 @@ def draw_diagnosis_sample(
             :func:`_guard_reserved_columns`。
     """
     schema = get_schema(parameters)
-    time_col = schema["time"]
-    entity_cols = schema["entity"]
     item_col = schema["item"]
     label_col = schema["label"]
     score_col = schema["score"]
-    query_cols = [time_col] + entity_cols
+    query_cols = schema["query_group_columns"]
 
     cfg = (
         ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
@@ -294,7 +292,7 @@ def draw_diagnosis_sample(
     pos_sampled = sample_pdf[sample_pdf[label_col] == 1]
     per_item_sampled = {
         str(k): int(v)
-        for k, v in pos_sampled.drop_duplicates([*query_cols, item_col])
+        for k, v in pos_sampled.drop_duplicates(schema["identity_columns"])
         .groupby(item_col)
         .size()
         .items()

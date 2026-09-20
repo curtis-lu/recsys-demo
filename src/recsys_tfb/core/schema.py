@@ -32,6 +32,34 @@ _DEFAULTS = {
 _SCALAR_KEYS = ("time", "item", "label", "score", "rank")
 
 
+#: The column lists :func:`get_schema` derives. None of them is settable: under
+#: ``schema`` they miss the ``columns`` lookup, and under ``schema.columns`` the
+#: ``if k in _ROLE_KEYS`` filter drops them (S5 in
+#: docs/agents/architecture-constraints.md refuses both spellings out loud).
+#: They are excluded from :func:`get_schema_for_hash`, so adding them moved no
+#: version ID.
+#:
+#: Three keys rather than one because they are three different questions, and
+#: the answers only coincide under today's roles (ADR-0025 decision 2):
+#:
+#: - ``query_group_columns`` -- **the scope ranks are compared within.** Widens
+#:   to ``time + entity + occasion`` once the optional ``occasion`` role lands.
+#: - ``base_key_columns`` -- **an entity at a time.** What an entity-level table
+#:   (a feature table, a segment source) joins onto candidate rows by. Never
+#:   widens with ``occasion``: those tables have no column for one. The name
+#:   follows what the code already called it (``base_key``,
+#:   ``require_base_key_columns`` in the dataset pipeline).
+#: - ``identity_columns`` -- **one candidate row.** ``time + entity + item``
+#:   today; ``occasion`` and ``event`` join it when declared.
+#:
+#: ``identity_columns``' **order is a rule, not a spelling**: deterministic
+#: sampling buckets by hashing its columns joined in order, so reordering it
+#: draws a different sample from the same data. Nothing may reorder the columns
+#: already in it; new roles are appended at the positions ADR-0025 fixes.
+#: Pinned by ``tests/test_core/test_schema.py``.
+_DERIVED_KEYS = ("query_group_columns", "base_key_columns", "identity_columns")
+
+
 #: Roles the user has to declare, because they name columns that already exist
 #: in the user's own tables. The framework has no basis for guessing them: a
 #: default here is a silent assumption that the deployment is the example one
@@ -77,8 +105,9 @@ def get_schema(parameters: dict) -> dict:
     :data:`_REQUIRED_ROLES` must be declared there; ``label`` / ``score`` /
     ``rank`` fall back to :data:`_DEFAULTS`.
 
-    The ``entity`` field is always normalised to a list.  An automatically
-    derived ``identity_columns`` field is appended as ``[time] + entity + [item]``.
+    The ``entity`` field is always normalised to a list. Three derived column
+    lists are appended -- see :data:`_DERIVED_KEYS` for what each one means and
+    why they are separate keys rather than one.
     ``categorical_values`` is sourced from ``parameters["schema"]["categorical_values"]``
     (default ``{}``) and provides explicit category declarations for columns
     whose distinct values cannot be discovered from ``feature_table`` alone
@@ -90,7 +119,8 @@ def get_schema(parameters: dict) -> dict:
 
     Returns:
         A new dict with keys: time, entity, item, label, score, rank,
-        identity_columns, categorical_values.
+        query_group_columns, base_key_columns, identity_columns,
+        categorical_values.
 
     Raises:
         ValueError: If any of :data:`_REQUIRED_ROLES` is not declared.
@@ -109,7 +139,11 @@ def get_schema(parameters: dict) -> dict:
     if isinstance(schema["entity"], str):
         schema["entity"] = [schema["entity"]]
 
-    # Derive identity_columns
+    # Derive the three column lists. Each builds its own list object, so a
+    # caller that mutates one cannot reach the others.
+    schema["query_group_columns"] = [schema["time"]] + schema["entity"]
+    schema["base_key_columns"] = [schema["time"]] + schema["entity"]
+    # Order is a rule, not a spelling -- see _DERIVED_KEYS.
     schema["identity_columns"] = (
         [schema["time"]] + schema["entity"] + [schema["item"]]
     )
@@ -124,8 +158,10 @@ def get_schema(parameters: dict) -> dict:
 def get_schema_for_hash(parameters: dict) -> dict:
     """Return canonical schema dict intended for version hashing.
 
-    Same resolution logic as :func:`get_schema` but excludes the derived
-    ``identity_columns`` field. ``categorical_values`` IS included so
+    Same resolution logic as :func:`get_schema` but excludes every field in
+    :data:`_DERIVED_KEYS` -- they are functions of the roles already hashed, so
+    hashing them would change nothing but the digest.
+    ``categorical_values`` IS included so
     changes to declared category lists (e.g. adding a new product) bust
     the base dataset version.
     """

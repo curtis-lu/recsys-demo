@@ -236,7 +236,7 @@ def validate_and_prepare(
     schema: dict,
 ) -> tuple[pd.DataFrame, list[str]]:
     notes: list[str] = []
-    query_cols = [schema["time"], *schema["entity"]]
+    query_cols = schema["query_group_columns"]
     base_required = [*query_cols, schema["item"], schema["label"]]
 
     missing = [c for c in [*base_required, schema["score"]] if c not in pdf.columns]
@@ -248,10 +248,10 @@ def validate_and_prepare(
     out = pdf[keep].copy()
     out[schema["label"]] = out[schema["label"]].astype(int)
     out[schema["item"]] = out[schema["item"]].astype(str)
-    duplicated = out.duplicated([*query_cols, schema["item"]], keep=False)
+    duplicated = out.duplicated(schema["identity_columns"], keep=False)
     if bool(duplicated.any()):
         examples = (
-            out.loc[duplicated, [*query_cols, schema["item"]]]
+            out.loc[duplicated, schema["identity_columns"]]
             .drop_duplicates()
             .head(5)
             .to_dict(orient="records")
@@ -280,7 +280,7 @@ def maybe_cap_queries(
     if max_queries <= 0:
         raise ValueError("--max-queries must be positive.")
 
-    query_cols = [schema["time"], *schema["entity"]]
+    query_cols = schema["query_group_columns"]
     qkey = _query_key(pdf, query_cols)
     n_queries = int(qkey.nunique())
     if n_queries <= max_queries:
@@ -392,7 +392,7 @@ def analyze_suppression(
     top_examples: int,
 ) -> dict:
     total_t0 = time.monotonic()
-    query_cols = [schema["time"], *schema["entity"]]
+    query_cols = schema["query_group_columns"]
     entity_cols = schema["entity"]
     item_col = schema["item"]
     label_col = schema["label"]

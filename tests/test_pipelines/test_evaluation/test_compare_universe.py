@@ -46,7 +46,7 @@ def df_b(spark):
 
 
 def test_intersection_query_groups_and_items(df_a, df_b):
-    universe = common_universe(df_a, df_b, "snap_date", ["cust_id"], "prod_name")
+    universe = common_universe(df_a, df_b, "snap_date", ["snap_date", "cust_id"], "prod_name")
     # The query-group DataFrame carries one row per query group: the time
     # column (as text) plus one column per schema.entity column — so callers
     # always join on the whole group.
@@ -75,7 +75,7 @@ def test_intersection_uses_every_entity_column(spark):
         ["snap_date", "branch_id", "cust_id", "prod_name"],
     )
     universe = common_universe(
-        a, b, "snap_date", ["branch_id", "cust_id"], "prod_name")
+        a, b, "snap_date", ["snap_date", "branch_id", "cust_id"], "prod_name")
     assert universe.common_query_groups.columns == [
         "snap_date", "branch_id", "cust_id"]
     assert _group_tuples(universe.common_query_groups) == {(_MONTH, "b1", "c2")}
@@ -94,7 +94,7 @@ def test_intersection_keeps_an_entity_only_in_the_months_both_sides_have(spark):
          ("2026-02-28", "c2", "p1")],
         ["snap_date", "cust_id", "prod_name"],
     )
-    universe = common_universe(a, b, "snap_date", ["cust_id"], "prod_name")
+    universe = common_universe(a, b, "snap_date", ["snap_date", "cust_id"], "prod_name")
     assert _group_tuples(universe.common_query_groups) == {
         ("2026-01-31", "c1"), ("2026-01-31", "c2"), ("2026-02-28", "c2")}
 
@@ -120,7 +120,7 @@ def test_entity_side_never_returns_to_driver(df_a, df_b, monkeypatch):
 
     monkeypatch.setattr(SparkDataFrame, "collect", spy)
 
-    universe = common_universe(df_a, df_b, "snap_date", ["cust_id"], "prod_name")
+    universe = common_universe(df_a, df_b, "snap_date", ["snap_date", "cust_id"], "prod_name")
 
     assert isinstance(universe.common_query_groups, SparkDataFrame)
     assert collected_columns == [["prod_name"], ["prod_name"]]
@@ -142,7 +142,7 @@ def test_empty_check_does_not_count_on_the_happy_path(df_a, df_b, monkeypatch):
 
     monkeypatch.setattr(SparkDataFrame, "count", spy)
 
-    common_universe(df_a, df_b, "snap_date", ["cust_id"], "prod_name")
+    common_universe(df_a, df_b, "snap_date", ["snap_date", "cust_id"], "prod_name")
 
     assert counted == []
 
@@ -158,7 +158,7 @@ def test_empty_query_group_intersection_raises(spark):
     a = _one_month(spark, [("c1", "p1")])
     b = _one_month(spark, [("c9", "p1")])
     with pytest.raises(DataConsistencyError, match="common_query_groups"):
-        common_universe(a, b, "snap_date", ["cust_id"], "prod_name")
+        common_universe(a, b, "snap_date", ["snap_date", "cust_id"], "prod_name")
 
 
 def test_same_entities_in_different_months_share_no_query_group(spark):
@@ -169,7 +169,7 @@ def test_same_entities_in_different_months_share_no_query_group(spark):
     b = spark.createDataFrame([("2026-02-28", "c1", "p1")],
                               ["snap_date", "cust_id", "prod_name"])
     with pytest.raises(DataConsistencyError, match="common_query_groups"):
-        common_universe(a, b, "snap_date", ["cust_id"], "prod_name")
+        common_universe(a, b, "snap_date", ["snap_date", "cust_id"], "prod_name")
 
 
 def test_empty_query_group_message_still_reports_both_side_counts(spark):
@@ -177,7 +177,7 @@ def test_empty_query_group_message_still_reports_both_side_counts(spark):
     a = _one_month(spark, [("c1", "p1"), ("c2", "p1")])
     b = _one_month(spark, [("c9", "p1")])
     with pytest.raises(DataConsistencyError) as excinfo:
-        common_universe(a, b, "snap_date", ["cust_id"], "prod_name")
+        common_universe(a, b, "snap_date", ["snap_date", "cust_id"], "prod_name")
     assert "A has 2 query groups, B has 1 query groups" in str(excinfo.value)
 
 
@@ -185,7 +185,7 @@ def test_empty_item_intersection_raises(spark):
     a = _one_month(spark, [("c1", "p1")])
     b = _one_month(spark, [("c1", "p9")])
     with pytest.raises(DataConsistencyError, match="common_items"):
-        common_universe(a, b, "snap_date", ["cust_id"], "prod_name")
+        common_universe(a, b, "snap_date", ["snap_date", "cust_id"], "prod_name")
 
 
 def test_null_only_intersection_fails_the_gate_instead_of_passing_it(spark):
@@ -200,7 +200,7 @@ def test_null_only_intersection_fails_the_gate_instead_of_passing_it(spark):
     a = _one_month(spark, [("c1", "p1"), (None, "p1")])
     b = _one_month(spark, [("c9", "p1"), (None, "p1")])
     with pytest.raises(DataConsistencyError, match="common_query_groups"):
-        common_universe(a, b, "snap_date", ["cust_id"], "prod_name")
+        common_universe(a, b, "snap_date", ["snap_date", "cust_id"], "prod_name")
 
 
 def _params() -> dict:

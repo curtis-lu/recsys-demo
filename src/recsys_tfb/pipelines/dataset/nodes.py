@@ -589,7 +589,6 @@ def apply_preprocessor_to_features(
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
-    entity_cols = schema["entity"]
     identity_cols = schema["identity_columns"]
 
     feature_columns = preprocessor_metadata["feature_columns"]
@@ -597,7 +596,7 @@ def apply_preprocessor_to_features(
     category_mappings = preprocessor_metadata["category_mappings"]
     drop_cols = preprocessor_metadata["drop_columns"]
 
-    base_key = [time_col] + entity_cols
+    base_key = schema["base_key_columns"]
     months = month_plan.to_process
 
     # Pre-checks. The drop_columns one only warns: a stale name in that list
@@ -842,12 +841,15 @@ def build_model_input(
     Post-condition: identity, label and every feature column survive the joins.
     """
     schema = get_schema(parameters)
-    time_col = schema["time"]
-    entity_cols = schema["entity"]
-    item_col = schema["item"]
     label_col = schema["label"]
     identity_cols = schema["identity_columns"]
-    base_key = [time_col] + entity_cols
+    # Two names, because the two joins below want two different things and one
+    # `base_key` used to serve both (ADR-0025 decision 2). They hold the same
+    # columns today and part company the moment an `occasion` is declared:
+    # `label_table` is at candidate grain and follows identity, while
+    # `feature_table` is entity-level and cannot widen.
+    label_join_key = identity_cols
+    feature_join_key = schema["base_key_columns"]
 
     feature_columns = preprocessor_metadata["feature_columns"]
 
@@ -855,10 +857,9 @@ def build_model_input(
     # fall back to a base-key-only label join when item was absent, which
     # silently multiplied every (time, entity) by label_table's item count and
     # took `item`'s values from label_table. No caller can reach that branch —
-    # identity_columns is derived ([time] + entity + [item], core/schema.py) and
+    # identity_columns is derived by core/schema.py::get_schema and
     # every node feeding this one passes it — but its failure mode is a silently
     # N-times-too-large dataset, so a missing column is an error, not a mode.
-    label_join_key = base_key + [item_col]
     require_columns_present(keys.columns, label_join_key, "build_model_input keys")
 
     # Decision — a key with no label row is a negative, not a gap. sample_pool
@@ -873,7 +874,7 @@ def build_model_input(
     # sample_pool's; LightGBM handles missing values, and dropping the row would
     # instead change which query groups exist (ADR-0005 §3).
     dataset = join_features_missing_as_null(
-        dataset, preprocessed_feature_table, base_key,
+        dataset, preprocessed_feature_table, feature_join_key,
     )
 
     # Decision — what a model_input row is made of: identity, the label, every
@@ -1112,6 +1113,6 @@ def filter_groups_with_positives(
     there rather than here.
     """
     schema = get_schema(parameters)
-    group_cols = [schema["time"]] + schema["entity"]
+    group_cols = schema["query_group_columns"]
     label_col = schema["label"]
     return drop_groups_without_positives(model_input, group_cols, label_col)

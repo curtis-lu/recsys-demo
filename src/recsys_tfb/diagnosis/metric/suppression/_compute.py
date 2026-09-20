@@ -155,7 +155,7 @@ def _validate(pdf: pd.DataFrame, schema: dict) -> None:
             f"suppression 需要 {score_col!r} 欄的值，但抽樣裡這一欄全是空值"
             "（照算會在 NULL 上取 logit，只得到 NaN）。"
         )
-    query_cols = [schema["time"], *schema["entity"]]
+    query_cols = schema["query_group_columns"]
     required = [*query_cols, schema["item"], schema["label"]]
     missing = [c for c in required if c not in pdf.columns]
     if missing:
@@ -206,7 +206,7 @@ def cross_purchase_stats(sample_pdf: pd.DataFrame, schema: dict) -> list[dict]:
         代表它在某組合裡是分母，其 n_k 必然 > 0，這裡仍防禦性地回 None）
         才會是 None。
     """
-    query_cols = [schema["time"], *schema["entity"]]
+    query_cols = schema["query_group_columns"]
     item_col = schema["item"]
     label_col = schema["label"]
 
@@ -325,7 +325,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         return out
 
     entity_cols = schema["entity"]
-    query_cols = [schema["time"], *entity_cols]
+    query_cols = schema["query_group_columns"]
     item_col = schema["item"]
     label_col = schema["label"]
     top_examples = out["top_examples"]

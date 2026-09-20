@@ -12,6 +12,7 @@
 | 新增或修改一個 node | A1、A2、A5、A6、A7 ＋ F4、F5 ＋ [`pipeline-node-design.md`](pipeline-node-design.md) |
 | 動 `pipelines/dataset/` 的 node | 上一列 ＋ S1、S2 |
 | 寫任何讀 `schema.entity` 的程式碼（分組、切分、抽樣、算母體） | S4 |
+| 寫下一份「名次在哪個範圍內比」或「拿什麼去接 entity 層級的表」的欄位清單 | S7 ＋ [ADR-0025](../adr/0025-query-group-widened-by-occasion-role.md) |
 | 在測試或 `src/` 裡寫一份 `parameters` 的 `schema` 區塊 | S5 |
 | 在 `src/` 裡寫下任何具體欄名（字串、預設參數、log 欄位） | S6 ＋ [ADR-0017](../adr/0017-framework-vocabulary-boundary.md) |
 | 新增 catalog 條目 | A1 ＋ F10 |
@@ -41,9 +42,9 @@
 
 ---
 
-## 13 條約束一覽
+## 14 條約束一覽
 
-`tests/test_core/test_architecture_constraints.py` 執行，**39 個測試，2.86–3.23 秒**（2026-09-09 共 9 次量測，橫跨 `load average 2.5–4.1`；S6 加進來之後——它只掃 `src/` 的 142 個檔，但那是本檔第三次各自完整解析同一批檔案）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔前幾版分別量到 26 個測試 1.06–1.10 秒、20 個測試 1.4–1.7 秒、17 個測試 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
+`tests/test_core/test_architecture_constraints.py` 執行，**52 個測試，6.17–6.20 秒**（2026-09-20 共 3 次量測，`load average 1.95`；S7 加進來之後——它是本檔第四次各自完整解析同一批檔案，而且多掃了 `scripts/`）。前一版：39 個測試 2.86–3.23 秒（2026-09-09，9 次量測，`load average 2.5–4.1`）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔前幾版分別量到 26 個測試 1.06–1.10 秒、20 個測試 1.4–1.7 秒、17 個測試 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
 
 | # | 規則 | 管到哪 | 這個檢查看不到 |
 |---|---|---|---|
@@ -58,8 +59,9 @@
 | [S2](#s2-pipelinesdatasetmonth_planspy-不得-import-pyspark) | `pipelines/dataset/month_plans.py` 不得 import pyspark | 只管那一個模組 | `pyspark` 仍會進 `sys.modules`（刻意不驗，見該條） |
 | [S3](#s3-pipeline-以外的-src-模組不得-import-該-pipeline-的-steps) | pipeline 以外的 `src/` 模組不得 import 該 pipeline 的 `steps/` | 三條 pipeline 的 `steps/`，掃整個 `src/`（測試刻意不掃） | 先 import 套件再走屬性（`training.steps.hpo_resume`）；現況零命中 |
 | [S4](#s4-不得取-schemaentity-的第一欄) | 不得取 `schema.entity` 的第一欄 | `src/recsys_tfb/` ＋ `tests/` | `scripts/` 不在範圍內（**現有一處，已裁決不修**）；解包等其他取法；值一離開綁定它的語句就看不到（含同模組的 helper 參數） |
-| [S5](#s5-schema-設定的角色名必須在-columns-底下且不得宣告-identity_columns) | `schema` 設定的角色名必須在 `columns` 底下，且不得宣告 `identity_columns` | `src/recsys_tfb/` ＋ `tests/` 裡的 `{"schema": {...}}` 字面值 | `conf/` 的 YAML；`schema` 區塊先綁到變數再組進 parameters；`scripts/` 不在範圍內（**是假陽性，不是缺陷**） |
+| [S5](#s5-schema-設定的角色名必須在-columns-底下且不得宣告推導欄) | `schema` 設定的角色名必須在 `columns` 底下，且不得宣告推導欄（`identity_columns`／`query_group_columns`／`base_key_columns`） | `src/recsys_tfb/` ＋ `tests/` 裡的 `{"schema": {...}}` 字面值 | `conf/` 的 YAML；`schema` 區塊先綁到變數再組進 parameters；`scripts/` 不在範圍內（**是假陽性，不是缺陷**） |
 | [S6](#s6-src-不得出現示例部署的字面欄名) | `src/` 不得出現示例部署的字面欄名（`snap_date`／`cust_id`／`prod_name`） | `src/recsys_tfb/`（**只有這一棵**；`tests/`／`scripts/` 刻意在外） | 註解；f-string 片段與任何子字串；字串拼接出來的欄名；不在那三個名字裡的其他示例欄名；`conf/` 的 YAML |
+| [S7](#s7-query-groupbase-keyidentity-只能從-get_schema-取不得手拼) | query group／base key／identity 只能從 `get_schema` 取，不得手拼 | `src/recsys_tfb/` ＋ `tests/` ＋ `scripts/`（比 S4／S5／S6 多一棵，見該條） | 欄名不是從 schema 讀出來的（模組常數、字面字串）；清單多出任何一欄就放行（刻意）；`conf/` 的 YAML |
 
 **CLI 層（`__main__.py`）、`core/`、`io/` 不在 A1／A2 管轄內**——那幾層本來就負責 I/O 與程序級資源。
 
@@ -494,7 +496,7 @@ pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity
 
 ---
 
-## S5. `schema` 設定的角色名必須在 `columns` 底下，且不得宣告 `identity_columns`
+## S5. `schema` 設定的角色名必須在 `columns` 底下，且不得宣告推導欄
 
 `get_schema`（`core/schema.py`）讀的是 `parameters["schema"]["columns"]`。少寫 `columns` 這一層，**整份宣告不會被合併、也不會有警告**——它被整塊忽略。#328 之前連錯都不算，每個呼叫端拿到的都是 `_DEFAULTS`；#328 把 `time`／`entity`／`item` 的內建預設拿掉之後，這三個角色少宣告會 **raise**，剩下三個仍然安靜掉進預設：
 
@@ -523,13 +525,13 @@ pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity
 | # | 規則 | 為什麼 |
 |---|---|---|
 | 1 | 一個 `schema` 設定 dict 底下不得直接出現角色名（`time`／`entity`／`item`／`label`／`score`／`rank`） | 它們必須在 `columns` 底下才讀得到 |
-| 2 | 任何深度都不得宣告 `identity_columns` | 它是 `get_schema` **推導**出來的（`[time] + entity + [item]`），不是設定鍵 |
+| 2 | 任何深度都不得宣告 `identity_columns`／`query_group_columns`／`base_key_columns` | 三個都是 `get_schema` **推導**出來的（`core/schema.py::_DERIVED_KEYS`），不是設定鍵。宣告了一律安靜被丟掉，而想宣告 `query_group_columns` 的人問的正是 [ADR-0025](../adr/0025-query-group-widened-by-occasion-role.md) 用角色回答的那一題 |
 
 **第 2 條擋的是第 1 條的半吊子修法。** 只有第 1 條的話，把 `identity_columns` 一起包進 `columns` 就通過稽核了——但 `get_schema` 的 `if k in _ROLE_KEYS` 過濾照樣把它丟掉，護欄等於祝福了一個假修法。這不是假想：`tests/test_pipelines/test_evaluation/test_nodes_spark.py` 在本條上線前就已經**有 8 處**落在這個形狀（`columns` 寫對、裡面照樣宣告 `identity_columns`），而票上原本的掃描腳本看不到它們——那支腳本要求角色名直接出現在 `schema` 底下，寫對 `columns` 的站點就再也不會被列出來。
 
 **`categorical_values` 是 `columns` 的合法兄弟**，`get_schema` 從 `schema.categorical_values` 讀它，所以它留在 `schema` 這一層是對的，不要一起包進 `columns`。
 
-**檢查**：AST 掃描 `src/recsys_tfb/` 與 `tests/` 底下所有 `.py`（`rglob`），找每一個字面量 `{"schema": {...}}`，然後看它自己的鍵與它的 `columns` 子 dict 的鍵。掃描範圍是 `SCHEMA_SCAN_ROOTS` 這個字典，角色名清單是 `SCHEMA_ROLE_KEYS`（對照 `core/schema.py::_ROLE_KEYS`——六個角色的完整清單；`_DEFAULTS` 自 #328 起只剩 `label`／`score`／`rank` 三個，不能拿來當這份對照），推導欄名是 `DERIVED_SCHEMA_KEY`；掃描器本身是 `_schema_layer_offenders`。失敗訊息逐鍵指出位置——**行號指的是那個鍵自己那一行**，不是 `schema` 這個 dict 開頭那一行，這樣 40 行的 parameters 區塊才送得到正確的那一列：
+**檢查**：AST 掃描 `src/recsys_tfb/` 與 `tests/` 底下所有 `.py`（`rglob`），找每一個字面量 `{"schema": {...}}`，然後看它自己的鍵與它的 `columns` 子 dict 的鍵。掃描範圍是 `SCHEMA_SCAN_ROOTS` 這個字典，角色名清單是 `SCHEMA_ROLE_KEYS`（對照 `core/schema.py::_ROLE_KEYS`——六個角色的完整清單；`_DEFAULTS` 自 #328 起只剩 `label`／`score`／`rank` 三個，不能拿來當這份對照），推導欄名是 `DERIVED_SCHEMA_KEYS`；掃描器本身是 `_schema_layer_offenders`。失敗訊息逐鍵指出位置——**行號指的是那個鍵自己那一行**，不是 `schema` 這個 dict 開頭那一行，這樣 40 行的 parameters 區塊才送得到正確的那一列：
 
 ```
 tests/params.py:3: schema.entity -- a role belongs under schema.columns
@@ -616,6 +618,74 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 - **不在那三個名字裡的其他示例欄名**：`cust_segment_typ`、`prod_type`、`aum_*` 之類。清單是 `EXAMPLE_COLUMN_NAMES`，擴充它會逼出新的例外登記，代價要先算過。
 - **`conf/` 的 YAML 不在範圍內**（同 S5）。掃的是 Python 字面值。
 - **`tests/` 與 `scripts/` 不在範圍內**，見上，這是裁決不是遺漏。
+
+---
+
+## S7. query group／base key／identity 只能從 `get_schema` 取，不得手拼
+
+`get_schema` 推導三組欄位清單（`core/schema.py::_DERIVED_KEYS`）：
+
+| 鍵 | 它回答的問題 | `occasion` 宣告之後 |
+|---|---|---|
+| `query_group_columns` | **名次在哪個範圍內比** | 變寬（`time` ＋ `entity` ＋ `occasion`） |
+| `base_key_columns` | **哪個 entity、哪個時段**——entity 層級的表（特徵表、分群來源、母體表）拿它接到候選列上 | **永遠不變**：那些表裡沒有場合的欄 |
+| `identity_columns` | **哪一列候選** | 變寬（順序是規定，見下） |
+
+本條禁止把其中任何一組重新拼出來。
+
+### 為什麼這是約束，不是風格
+
+開票時（#427）程式裡手拼的 `[time] + entity` 有二十多處，**意思至少兩種**：上表的前兩格。今天兩者同值，所以沒有任何東西分得出誰是誰——包括寫的人。[ADR-0025](../adr/0025-query-group-widened-by-occasion-role.md) 的選用角色 `occasion` 讓第一格變寬、第二格不能變，那一刻每一處手拼都會安靜地留在舊意思上。
+
+**留錯了不會報錯。** 下面三處尤其危險，它們也不受「離線推論忽略新角色、監控模式在 CLI 入口擋下」那道保護：
+
+- 比較報表（`--compare`）對齊兩邊 query group、數「共同的 query group 數」的地方（`pipelines/evaluation/steps/compare_universe.py` 的 `common_universe`／`restrict_to_common`、`pipelines/evaluation/nodes.py::_restrict_to_common`）
+- 以 query 為單位的診斷抽樣（`diagnosis/metric/sample.py::draw_diagnosis_sample`）
+- 診斷母體的分組（`diagnosis/model/population_spark.py::select_shap_population`）
+
+反方向也有一個容易歸錯的：**整條離線推論 pipeline 用的是 base key**，包含它的排名 partition（`pipelines/inference/nodes.py::rank_predictions`）。那個 partition 表面上完全符合「界定名次比較的範圍」，但 ADR-0025 決定它維持 `time` ＋ `entity`——批次評分的當下沒有任何「場合」存在，候選是框架替每個 entity 乘上全部 item 產生的。**這是一個決定，不是推導出來的**，所以它必須寫在這裡而不是留給下一個人重推。
+
+### `identity_columns` 的欄位順序是規定，不是寫法
+
+決定性抽樣的分桶把 identity 各欄**依序**串起來再雜湊（`spark_bucket`）。順序一變，同一份資料就抽出不同的列——不報錯、形狀也不變。所以既有欄位的相對順序不得調動，新角色只能加在 ADR-0025 定下的位置。釘住它的是 `tests/test_core/test_schema.py::TestIdentityColumnOrderIsARule`。
+
+### 檢查
+
+AST 掃描 `src/recsys_tfb/`、`tests/`、`scripts/` 底下所有 `.py`，把每一個「用 `+` 或 list 字面值組出來的欄位清單」解析成角色序列，命中 `RESPELLINGS` 這張表就報。掃描器是 `_respelled_key_offenders`，角色解析是 `_schema_role`／`_list_roles`，跨行追名字的是 `_schema_role_names`（遞移、流不敏感，理由同 S4 的 `_entity_list_names`）。
+
+擋得住的三種寫法（各有一個 tmp-tree 測試釘住）：
+
+```python
+[schema["time"]] + schema["entity"]          # [a] + b
+[schema["time"], *schema["entity"]]          # [a, *b]
+a.join(b, on=[schema["time"], *schema["entity"]])   # on=[…]
+```
+
+外加兩種把 identity 拼回來的寫法：`[time] + entity + [item]`，以及 `base_key + [item]`（dataset 原本就是這個形狀）。巢狀命中只報最外層——`[time] + entity + [item]` 內含 `[time] + entity`，兩個都報會把讀者送到同一處兩次，而內層那則還會建議錯的替代品。
+
+失敗訊息長這樣，`time + entity*` 這一類刻意**不替你選**前兩格中的哪一格——選哪個是「這個站點在做什麼」的判斷：
+
+```
+src/recsys_tfb/evaluation/metrics_spark.py:221 in collapse_to_categories(): time + entity* --
+  use schema["query_group_columns"] if this bounds a ranking comparison,
+  schema["base_key_columns"] if it joins an entity-level table
+```
+
+**掃描範圍比 S4／S5／S6 多一棵 `scripts/`**，這是刻意的：那三條管的是「程式怎麼讀 schema」，本條管的是「一個意思在所有寫得下它的地方都只有一個來源」。一支在 `occasion` 部署下把 query group 拼錯的診斷腳本，錯得跟 node 一樣，只是錯在沒人看的地方。`scripts/` 的 18 處已隨本條一起改完（五支診斷腳本，16 處 query group ＋ 2 處 identity），所以這棵樹是乾淨起步的，不需要 grandfather 清單。
+
+**「兩者都不是」不要硬塞。** ADR-0025 只定義三組鍵；一個站點想要的若不是其中任何一組，把它塞進最近的那一格是錯的，而且錯得安靜。本票就犯過一次：SHAP 案例 manifest 的標籤先被歸成 base key，審查才指出它要指認的是**哪一列**——base key 不隨 `occasion` 變寬，所以同一個 entity、同一個時段、不同場合的兩列會拿到一模一樣的標籤（兩個不同的輸入映射成同一個結果）。改法不是登記例外，是從 identity 減掉已經是外層鍵的 `item`。**判定時先問「它把兩個不同的輸入映射成同一個結果了嗎」，再問它該歸哪一格。**
+
+**沒有例外登記表。** 唯一不在掃描範圍內的是 `core/schema.py` 本身（常數 `DERIVED_KEY_DEFINITION_SITE`）——**那是定義處，不是破例**：禁止重拼定義的規則不可能適用於定義自己，而且這個豁免加不了第二筆，除非把 `get_schema` 搬走。`TestS7DerivedKeysAreReadNotRespelled::test_the_skip_is_the_only_thing_keeping_schema_py_quiet` 把那個豁免複製到 tmp 樹外證明它確實承重，不是一句沒人驗過的空話。
+
+### 這個檢查看不到
+
+- **從衍生欄「減一欄」組出來的清單。** `[c for c in identity_cols if c != item_col]`（推論的 `keep_identity`、SHAP 案例 manifest 的標籤）看不到，而且這是對的：它有單一來源，identity 變寬它就跟著變寬。掃描要擋的是「重新拼一份」，不是「從那一份裁一段」。
+- **欄名不是從 schema 讀出來的時候。** 掃描認的是 `...["time"]`／`...["entity"]` 這種讀法。`[_TIME_TEXT, *entity_cols]`（模組常數）或 `["snap_date", "cust_id"]`（字面字串）都看不到。前者在 `compare_universe.py` 真的出現過，本票改成從 `query_group_columns` 推導；下一個寫這種形狀的人不會被擋。
+- **清單多出任何一欄就放行**，這是刻意的：`[time, *entity, label]`（`prepare_model_input_config` 的預設 `drop_columns`，意思是「不准當特徵的欄」）不是這三組的任何一組，硬塞進去才是錯的。代價是 `[time, *entity, item, event]` 這種未來的寫法也會被放行。
+- **左邊是什麼不看**（同 S4）。任何帶 `"time"` 鍵的 dict 都讀成角色，這會誤報而不會漏報——誤報是會被發現的那個方向。
+- **流不敏感**：一個名字在模組內只判一次。中途改綁別的東西之後仍讀作原角色。
+- **`conf/` 的 YAML 不在範圍內**（同 S5、S6）。掃的是 Python。
+- **它證明不了歸類是對的。** 本條擋的是「又手拼了一處」，不是「這一處歸對了組」。歸類判錯的後果只在宣告 `occasion` 時出現，而今天沒有任何設定走得到——第一個驗得到的地方是 ADR-0025 形狀二的示例實跑（含離線推論）。**測試全綠不等於二十多處都歸對了。**
 
 ---
 

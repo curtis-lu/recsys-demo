@@ -41,7 +41,7 @@ _Avoid_: target、y
 ### 排序的結構
 
 **query group**:
-一次排序的範圍，由 time 與 entity 決定，宣告了 occasion 時再加上 occasion；名次只在同一個 query group 內比較。
+一次排序的範圍，由 time 與 entity 決定，宣告了 occasion 時再加上 occasion；名次只在同一個 query group 內比較。程式裡是 `get_schema` 的 `query_group_columns`。
 _Avoid_: session、清單
 
 **候選**:
@@ -52,8 +52,8 @@ _Avoid_: 推薦項
 認出一筆候選的欄位組合：time、entity、item，宣告了 occasion、event 時再加上它們。
 _Avoid_: 主鍵（來源表設定裡的 `primary_key` 是另一回事）
 
-**base key**（ADR-0025，尚未實作）:
-某個 entity 在某個時段的鍵：time 與 entity。entity 層級的表（特徵表、分群來源）用它接到候選列上；它不隨 occasion 變寬。沒宣告 occasion 時它與 query group 的欄位相同，但兩者是不同的東西。
+**base key**（ADR-0025）:
+某個 entity 在某個時段的鍵：time 與 entity。entity 層級的表（特徵表、分群來源）用它接到候選列上；它不隨 occasion 變寬。沒宣告 occasion 時它與 query group 的欄位相同，但兩者是不同的東西。程式裡是 `get_schema` 的 `base_key_columns`。
 _Avoid_: 拿它當 query group 的同義詞
 
 ### 資料

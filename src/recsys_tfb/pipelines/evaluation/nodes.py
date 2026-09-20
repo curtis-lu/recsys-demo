@@ -375,11 +375,19 @@ def make_prepare_eval_data_node(population_name: str):
         rank_col = schema["rank"]
         if rank_col not in eval_predictions.columns:
             score_col = schema["score"]
-            entity_cols = schema["entity"]
-            query_cols = [time_col] + entity_cols
+            query_cols = schema["query_group_columns"]
             # rank_within_query adds a "pos" 1-based rank within each query
             # group, by score desc with ties by item asc — the rule inference
             # publishes `rank` with, so both modes rank the same rows alike.
+            #
+            # "The same" holds because this side groups by the query group
+            # while inference groups by the base key, and the two are equal
+            # until an `occasion` is declared (ADR-0025 decision 2). At that
+            # point evaluation's groups get finer and inference's do not, so
+            # the two rankings part; what keeps that from being a live bug is
+            # the CLI gate that refuses monitoring mode with the new roles
+            # declared, not anything here. The ticket that lands `occasion`
+            # owns re-deciding this branch.
             eval_predictions = rank_within_query(
                 eval_predictions, query_cols, score_col, schema["item"]
             )
@@ -400,7 +408,8 @@ def make_prepare_eval_data_node(population_name: str):
         # Decision — where each segment column comes from (ADR-0020 bug 6):
         # its evaluation.segment_sources override when one is configured,
         # otherwise this run mode's population table, the table the evaluated
-        # rows were drawn from, keyed by (time, entity). Chosen wrong (the one
+        # rows were drawn from, keyed by the base key -- it is an entity-level
+        # table, so it has no column for anything finer. Chosen wrong (the one
         # fixed table both modes used before bug 6), a monitoring run's
         # entities missing from that table fell into a segment named "None"
         # that entered the per-segment average with equal weight. Joined onto
@@ -428,7 +437,7 @@ def make_prepare_eval_data_node(population_name: str):
                            if c not in overrides and c not in missing]
         if from_population:
             eval_predictions = join_segment_columns(
-                eval_predictions, population, [time_col, *schema["entity"]],
+                eval_predictions, population, schema["base_key_columns"],
                 from_population, source_name=population_name,
             )
         if overrides:
@@ -1339,7 +1348,7 @@ def _restrict_to_common(
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
-    query_group_cols = [time_col, *schema["entity"]]
+    query_group_cols = schema["query_group_columns"]
 
     # Decision — B is scored against A's labels: not the label B landed with,
     # and not a fresh label_table join, since A's own label is not the current
@@ -1359,11 +1368,10 @@ def _restrict_to_common(
     # is in one side's metrics but not in "common". The time is matched as
     # text, by the same helper the restriction uses (B's time column may be
     # DATE while A's partition is STRING).
-    entity_cols = schema["entity"]
     groups_common = (
-        query_groups_with_text_time(a_common, time_col, entity_cols)
+        query_groups_with_text_time(a_common, time_col, query_group_cols)
         .join(
-            query_groups_with_text_time(b_common, time_col, entity_cols),
+            query_groups_with_text_time(b_common, time_col, query_group_cols),
             on=query_group_cols, how="left_semi",
         )
         .count()

@@ -215,12 +215,10 @@ def collapse_to_categories(
         raise ValueError("collapse_to_categories called with categories disabled")
 
     schema = get_schema(parameters)
-    time_col = schema["time"]
-    entity_cols = schema["entity"]
     item_col = schema["item"]
     label_col = schema["label"]
     score_col = schema["score"]
-    group_cols = [time_col] + entity_cols
+    group_cols = schema["query_group_columns"]
 
     _require_segment_columns_in_frame(eval_predictions, segment_columns)
 
@@ -270,7 +268,7 @@ def compute_dataset_overview(
     entity_cols = schema["entity"]
     item_col = item_col_override or schema["item"]
     label_col = schema["label"]
-    group_cols = [time_col, *entity_cols]   # 一個 query＝time×entity
+    group_cols = schema["query_group_columns"]
 
     # 與 per_segment 用同一個 segment 欄（第一欄），by_segment 的 key 才會一致。
     active_seg_col = segment_columns[0] if segment_columns else None
@@ -700,12 +698,10 @@ def _compute_core(
     category-grain passes.
     """
     schema = get_schema(parameters)
-    time_col = schema["time"]
-    entity_cols = schema["entity"]
     item_col = schema["item"]
     label_col = schema["label"]
     score_col = schema["score"]
-    group_cols = [time_col] + entity_cols
+    group_cols = schema["query_group_columns"]
 
     eval_params = parameters.get("evaluation", {}) or {}
     _require_segment_columns_in_frame(eval_predictions, segment_columns)
@@ -838,12 +834,10 @@ def compute_overall_per_item(
     query has a positive label.
     """
     schema = get_schema(parameters)
-    time_col = schema["time"]
-    entity_cols = schema["entity"]
     item_col = schema["item"]
     label_col = schema["label"]
     score_col = schema["score"]
-    group_cols = [time_col] + entity_cols
+    group_cols = schema["query_group_columns"]
 
     eval_params = parameters.get("evaluation", {}) or {}
     _require_segment_columns_in_frame(eval_predictions, segment_columns)

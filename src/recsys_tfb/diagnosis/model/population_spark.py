@@ -39,11 +39,12 @@ def select_shap_population(
     per_cell = int(cfg.get("quadrant_sample_per_cell", 30))
 
     schema = get_schema(parameters)
-    time_col = schema["time"]
-    entity_cols = schema["entity"]
     item_col = schema["item"]
     label_col = schema["label"]
-    group_cols = [time_col] + entity_cols
+    # The rank window is a query group; the two joins back to ``test_model_input``
+    # are at candidate grain, so they take identity (ADR-0025 decision 2).
+    group_cols = schema["query_group_columns"]
+    identity_cols = schema["identity_columns"]
 
     labeled = None
     try:
@@ -60,7 +61,7 @@ def select_shap_population(
             .when(~is_top & is_pos, F.lit("FN"))
             .otherwise(F.lit("TN"))
         )
-        ck = F.concat_ws("|", *[F.col(c).cast("string") for c in group_cols + [item_col]])
+        ck = F.concat_ws("|", *[F.col(c).cast("string") for c in identity_cols])
         # 下面兩條分支各自 toPandas() 一次(兩個 action)。不 persist 的話,rank 的
         # shuffle 會整個重跑一遍。StorageLevel 顯式寫出、不靠預設:這份中間結果在生產
         # 資料量下裝不進 executor 記憶體時要能落磁碟,而不是被丟掉重算。
@@ -74,9 +75,9 @@ def select_shap_population(
             labeled.withColumn("_cell_rn", F.row_number().over(w_cell))
             .where(F.col("_cell_rn") <= F.lit(per_cell))
         )
-        keyset = sampled.select(*group_cols, item_col, "quadrant")
+        keyset = sampled.select(*identity_cols, "quadrant")
         pop_pdf = keyset.join(
-            test_model_input, on=group_cols + [item_col], how="inner").toPandas()
+            test_model_input, on=identity_cols, how="inner").toPandas()
 
         # ---- 輸出 2:全格極值案例(role=high/low)----
         # 不對稱 tiebreak:同分格 high/low 落不同列;真正單行格才落同一列。
@@ -89,14 +90,14 @@ def select_shap_population(
         lows = (labeled.withColumn("_rn", F.row_number().over(w_low))
                 .where(F.col("_rn") == F.lit(1)).withColumn("role", F.lit("low")))
         extremes = highs.unionByName(lows).select(
-            *group_cols, item_col, "quadrant", "role",
+            *identity_cols, "quadrant", "role",
             F.col("_rank").alias("rank"), F.col("score").alias("score"),
             F.col(label_col).alias("label"))
         # test_model_input 也有 label 欄 → drop 以免 join 後 ambiguous(label 非特徵)。
         feats_only = (test_model_input.drop(label_col)
                       if label_col in test_model_input.columns else test_model_input)
         case_pdf = extremes.join(
-            feats_only, on=group_cols + [item_col], how="inner").toPandas()
+            feats_only, on=identity_cols, how="inner").toPandas()
     except Exception as e:  # best-effort:選樣失敗不中斷訓練(spec §12)
         logger.warning("select_shap_population failed: %s", e)
         return None, None
