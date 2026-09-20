@@ -20,8 +20,12 @@ _Avoid_: 客戶、customer、user
 被排序的東西，恆為一欄；由多個屬性組成時，在來源 SQL 先拼成一欄。
 _Avoid_: 產品、廣告、product
 
-**event**（ADR-0021，尚未實作）:
-同一個 time、entity、item 底下有多筆時，用來分辨每一筆的選用欄位角色，由一欄或多欄組成，例如事件 ID 或到秒的時間戳。
+**occasion**（ADR-0025，尚未實作）:
+一次排序的場合：同一刻、一起被排的那一組候選所屬的選用欄位角色，由一欄或多欄組成，例如請求 ID。宣告之後它是 query group 的一部分。
+_Avoid_: session、request、shortlist、場次；也不要叫它 event（event 分辨的是列，不界定誰跟誰比）
+
+**event**（ADR-0021、ADR-0025，尚未實作）:
+同一個 query group、同一個 item 底下有多筆時，用來分辨每一筆的選用欄位角色，由一欄或多欄組成，例如曝光 ID 或到秒的時間戳。它不是 query group 的一部分。
 _Avoid_: row_key、請求鍵、曝光鍵
 
 **label**:
@@ -32,12 +36,12 @@ _Avoid_: target、y
 模型給一筆候選的分數，是排出名次的依據。
 
 **rank**:
-一筆候選在所屬 query group 內依 score 由高到低的名次，從 1 起算。score 相同時按 item 由小到大排（照 item 本身的值比，數字就照數字大小）；這只讓名次可重現，不代表模型分得出高下。
+一筆候選在所屬 query group 內依 score 由高到低的名次，從 1 起算。score 相同時按 item 由小到大排（照 item 本身的值比，數字就照數字大小），item 也相同時再按 event 由小到大排；這只讓名次可重現，不代表模型分得出高下。
 
 ### 排序的結構
 
 **query group**:
-一次排序的範圍，由 time 與 entity 決定；名次只在同一個 query group 內比較。
+一次排序的範圍，由 time 與 entity 決定，宣告了 occasion 時再加上 occasion；名次只在同一個 query group 內比較。
 _Avoid_: session、清單
 
 **候選**:
@@ -45,8 +49,12 @@ query group 裡被排出名次的一列；宣告 event 時，同一個 item 可�
 _Avoid_: 推薦項
 
 **identity**:
-認出一筆候選的欄位組合：time、entity、item，宣告了 event 時再加上 event。
+認出一筆候選的欄位組合：time、entity、item，宣告了 occasion、event 時再加上它們。
 _Avoid_: 主鍵（來源表設定裡的 `primary_key` 是另一回事）
+
+**base key**（ADR-0025）:
+某個 entity 在某個時段的鍵：time 與 entity。entity 層級的表（特徵表、分群來源）用它接到候選列上；它不隨 occasion 變寬。沒宣告 occasion 時它與 query group 的欄位相同，但兩者是不同的東西。
+_Avoid_: 拿它當 query group 的同義詞
 
 ### 資料
 
@@ -157,7 +165,14 @@ _Avoid_: 準確度、準不準（太模糊，會被讀成排序）
 
 **`pr_auc`**（ADR-0024，尚未實作）:
 precision-recall 曲線下的面積，母體是全部候選列（依 ADR-0024 由分箱近似，內插規則與 sklearn 不同）。
-_Avoid_: average precision、AP（排序的 AP 是 `map@K` 與 `ap_contrib@K`，意思不同）
+_Avoid_: average precision、AP（排序的 AP 是 `map@K` 與 `ap_contrib@K`，意思不同）；也不要跟 `pooled_average_precision` 混用（那是另一個定義，兩者不可對帳）
+
+**`pooled_average_precision`**、**`macro_per_item_average_precision`**（ADR-0025，尚未實作）:
+把每一筆候選當成一次二元預測算出的 average precision，是 HPO 可以選的目標。前者把全部候選列倒在一起算；後者每個 item 各算一次再平均。精確算法，與 `pr_auc` 的分箱近似定義不同。
+_Avoid_: `pr_auc`、aucpr；也不要單獨叫 average precision 或 AP（那是排序指標 `map@K` 的說法）
+
+**無正例的 query group**:
+裡面沒有任何一筆候選的 label 是正例的 query group。排序指標算不了它；把候選當二元預測的指標需要它。留多少由使用者決定（ADR-0025，尚未實作）。
 
 **`roc_auc`**（ADR-0024，尚未實作）:
 ROC 曲線下的面積，母體是全部候選列。
