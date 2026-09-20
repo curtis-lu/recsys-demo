@@ -39,7 +39,7 @@ evaluation 另有三種執行模式：
 
 執行 evaluation 前，建議依序確認：
 
-1. **模型版本存在**：evaluation 會讀取 `data/models/<model_version>/manifest.json`，取得該模型使用的 base、train 與可選 calibration dataset IDs。
+1. **模型版本存在**：evaluation 會讀取 `data/models/<model_version>/manifest.json`，取得該模型使用的 base 與 train dataset IDs。#411 之前的模型 manifest 多帶一個 `calibration_variant_id`，讀取時會略過，不影響評估。
 2. **選對評估情境**：候選模型的 test 評估使用 `--post-training`；已發布批次結果的監控使用預設模式。
 3. **候選模型明確指定版本**：省略 `--model-version` 時一律解析 `data/models/best`。尚未 promotion 的新模型必須明確傳入版本，否則可能評估到上一個正式模型。
 4. **預測 partition 已存在**：post-training 模式需要對應 `training_eval_predictions`；監控模式需要 inference 已成功發布對應的 `ranked_predictions`。

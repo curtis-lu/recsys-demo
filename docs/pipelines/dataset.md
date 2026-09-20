@@ -1,6 +1,6 @@
 # dataset pipeline
 
-> 將 `feature_table`、`label_table` 與 `sample_pool` 轉換為 train、train-dev、calibration、validation 與 test 所需的模型輸入。
+> 將 `feature_table`、`label_table` 與 `sample_pool` 轉換為 train、train-dev、validation 與 test 所需的模型輸入。
 > 主要流程為：資料一致性檢查 → 日期切分與抽樣 → fit 前處理器 → 組裝各 split 的 `*_model_input`。
 
 ## 1. Pipeline 總覽
@@ -21,11 +21,10 @@
 |---|---|---|
 | `train` | `train_snap_dates` 內抽樣後的大部分 entity | 模型訓練 |
 | `train_dev` | 與 train 相同日期，依 `train_dev_ratio` 切出的 entity | 單次模型訓練的 early stopping |
-| `calibration` | `calibration_snap_dates`，選用 | fit 機率校準器，不參與模型建樹與 HPO |
 | `val` | `val_snap_dates` | HPO 跨 trials 選擇最佳超參數 |
 | `test` | `test_snap_dates` | 模型完成後的最終離線評估 |
 
-`train` 與 `train_dev` 共用同一段日期，並以 entity 做互斥切分；calibration、val 與 test 則使用各自的時間區間。
+`train` 與 `train_dev` 共用同一段日期，並以 entity 做互斥切分；val 與 test 則使用各自的時間區間。
 
 ## 2. 執行前準備
 
@@ -34,10 +33,9 @@
 1. **來源表已就緒**：`feature_table` 與 `sample_pool` 必須涵蓋所有設定日期；`label_table` 可以是只保存正例的 sparse table，但 label 觀察窗必須成熟。
 2. **schema 角色正確**：`conf/base/parameters.yaml` 的 `time`、`entity`、`item` 與 `label` 必須對應實際欄位。
 3. **item 集合一致**：`sample_pool` 在本次日期範圍內的 item 集合必須與 `schema.categorical_values.<item>` 完全一致；`label_table` 不可產生未宣告 item。
-4. **日期切分互斥**：train、calibration、val 與 test 日期不可重疊，並應由使用者依時間先後安排，避免資料洩漏。
+4. **日期切分互斥**：train、val 與 test 日期不可重疊，並應由使用者依時間先後安排，避免資料洩漏。
 5. **類別欄位已人工確認**：可先使用 `scripts/suggest_categorical_cols.py` 依型別與 cardinality 產生候選清單——低 cardinality 的字串／布林／整數欄建議進 `categorical_columns`、高 cardinality 字串欄進 `drop_columns`，其餘型別欄（date／timestamp／binary／複合型）另列一個待人工判斷的 review 區塊（它們不能當類別欄，只能 drop 或回 source ETL 轉換）；再由你決定各欄歸屬（工具只建議、不改設定。輸出格式與大表加速選項見 §3.5）。
 6. **抽樣設定已檢視**：可使用 `scripts/sampling_overrides_editor.py` 檢視各分層樣本量並產生 override。
-7. **calibration 設定對齊**：若 dataset 啟用 calibration，training 端也應有相應設定；不需要將 score 解讀為機率時通常不必啟用。
 
 > pipeline 只會檢查日期是否重疊，不會判斷 train、val、test 是否依時間正確排序，也無法自動識別特徵或 label 的未來資訊。
 
@@ -50,8 +48,6 @@
 | `train_snap_dates` | 必填 | fit preprocessor 與建立 train/train-dev 的日期 | `base_dataset_version` |
 | `train_dev_ratio` | 必填 | 從 train 日期內切給 train-dev 的 entity 比例 | `train_variant_id` |
 | `train_split_keys` | 選填 | 切分單位：`schema.entity` 的非空子集，預設完整 entity | `train_variant_id` |
-| `enable_calibration` | 選填 | 是否建立 calibration keys 與 model input | `base_dataset_version` |
-| `calibration_snap_dates` | 啟用時必填 | calibration 使用的日期 | `base_dataset_version` |
 | `val_snap_dates` | 必填 | HPO validation 日期 | `base_dataset_version` |
 | `test_snap_dates` | training 必填（至少一個月，A36）；dataset 沒寫或空清單都照樣跑 | 最終 test 日期 | 不影響任何版本（見 7.1） |
 
@@ -61,10 +57,6 @@ dataset:
     - "2025-01-31"
     - "2025-02-28"
   train_dev_ratio: 0.1
-
-  enable_calibration: true
-  calibration_snap_dates:
-    - "2025-11-30"
 
   val_snap_dates:
     - "2025-12-31"
@@ -89,7 +81,7 @@ dataset:
 - 區間沒有「最近 N 天」這種相對寫法：迄日若跟著執行日期走，同一份設定明天重跑會得到不同的版本 ID。
 - `conf/<env>/` 的覆蓋層可以只蓋區間裡的一個鍵（例如只改 `end`），因為展開發生在覆蓋之後。
 
-train、calibration、val、test 日期集合必須互斥（一致性不變量 A24，在 `dataset` 指令啟動 Spark 前檢查；按日比對而非按字面，同一天的不同寫法也算重疊）。日期本身仍須寫成 `YYYY-MM-DD`。`train_dev_ratio` 不會切日期，而是把一個 entity 的所有日期與 items 一起分配至 train 或 train-dev，避免同一 entity 同時出現在兩側。
+train、val、test 日期集合必須互斥（一致性不變量 A24，在 `dataset` 指令啟動 Spark 前檢查；按日比對而非按字面，同一天的不同寫法也算重疊）。日期本身仍須寫成 `YYYY-MM-DD`。`train_dev_ratio` 不會切日期，而是把一個 entity 的所有日期與 items 一起分配至 train 或 train-dev，避免同一 entity 同時出現在兩側。
 
 「一個 entity」指哪些欄由 `train_split_keys` 宣告，**預設是完整的 `schema.entity`**。單欄 entity 下沒有第二種讀法；多欄時若你的洩漏單位比 query group 粗（例如 entity 是 `[cust_id, acct_id]`，而同一客戶的多個帳戶不得跨邊），就填上較粗的那個子集。填了不在 `entity` 裡的欄名會被不變量 A29 在 CLI 進入點擋下。為什麼這個鍵與 `val_sample_keys` 是兩個而不是一個，見 [ADR-0016](../adr/0016-split-unit-declared-by-two-keys.md)。
 
@@ -98,7 +90,7 @@ train、calibration、val、test 日期集合必須互斥（一致性不變量 A
 | 設定 | 預設 | 說明 | 版本影響 |
 |---|---|---|---|
 | `sample_ratio` | 無 | 未命中 override 時使用的 train 抽樣比例 | `train_variant_id` |
-| `sample_group_keys` | `[time]` | 分層維度，順序也決定 override key 的組成方式 | `train_variant_id` ＋ `calibration_variant_id` |
+| `sample_group_keys` | `[time]` | 分層維度，順序也決定 override key 的組成方式 | `train_variant_id` |
 | `sample_ratio_overrides` | `{}` | 各分層的抽樣比例覆寫 | `train_variant_id` |
 | `random_seed` | `42` | 位於 `parameters.yaml`，控制決定性抽樣 | 目前未納入 dataset version hash |
 
@@ -134,20 +126,18 @@ override key 通常不建議手動輸入；使用 `scripts/sampling_overrides_ed
 
 例如 `cust_segment_typ` 只用於控制抽樣比例時，只需存在於 `sample_pool`；若模型也要使用它，則需保留在 `feature_table`，讓前處理與 model input 組裝能取得該欄位。完整的 `sample_pool` SQL 範例見 [`source_etl.md`](source_etl.md#sample-pool-需要包含抽樣欄位)。
 
-### 3.3 Calibration 與 validation 抽樣
+### 3.3 Validation 抽樣
 
 | 設定 | 預設 | 說明 | 版本影響 |
 |---|---|---|---|
-| `calibration_sample_ratio` | `1.0` | calibration 的預設抽樣比例 | `calibration_variant_id` |
-| `calibration_sample_ratio_overrides` | `{}` | calibration 的分層比例覆寫 | `calibration_variant_id` |
 | `val_sample_ratio` | `1.0` | 依 entity 縮減 val 母體（`conf/base` 目前設 `0.5`；這一欄是**程式碼的 fallback**，不是 conf 的值） | `base_dataset_version` |
 | `val_sample_keys` | 完整 `entity` | 抽樣單位：`schema.entity` 的非空子集 | `base_dataset_version` |
 
-calibration 與 train 共用 `sample_group_keys`，但使用不同 sampling site，因此即使 seed 相同也不會刻意取得相同 bucket。test 不提供抽樣比例，會保留設定日期內的完整候選母體。
+test 不提供抽樣比例，會保留設定日期內的完整候選母體。
 
 ### 3.4 Carry columns
 
-`carry_columns` 用來將 `sample_pool` 中不屬於 identity 的欄位帶入 train、train-dev 與 calibration model input，常見用途是提供 training 的 `sample_weight_keys`。
+`carry_columns` 用來將 `sample_pool` 中不屬於 identity 的欄位帶入 train 與 train-dev model input，常見用途是提供 training 的 `sample_weight_keys`。
 
 ```yaml
 dataset:
@@ -158,7 +148,7 @@ dataset:
 注意事項：
 
 - 欄位必須實際存在於 `sample_pool`。
-- val 與 test keys 不會攜帶這些欄位。這不是疏漏：train／train-dev／calibration 走
+- val 與 test keys 不會攜帶這些欄位。這不是疏漏：train／train-dev 走
   抽樣式的 key 選取（會帶 carry），val／test 只取 identity。sample weights 只作用於
   train 側，而 per-segment 評估是在 evaluation 階段另外從 `sample_pool` 取 segment，
   所以 val／test 不需要這些欄位。
@@ -169,7 +159,6 @@ dataset:
   dataset 的第一個 node 擋下並同時給出兩種修法（見
   [ADR-0004](../adr/0004-carry-drop-columns-intersection.md)）。identity 欄與 label
   不適用此規則——它們不會被複製第二份。
-- sample weights 只套用於 train 與 train-dev；calibration 即使帶有欄位也不加權。
 - 修改 `carry_columns` 會改變 model input schema，因此會更新 `base_dataset_version`。
 
 若 training 新增權重維度卻未將該欄位放入 identity、categorical features 或 `carry_columns`，CLI 設定閘會在 pipeline 啟動前阻擋。
@@ -228,7 +217,7 @@ terminal 摘要與 YAML 列出同一組欄位，並附一行對帳（例如 `8 c
 
 > ⚠ `--where` 與 `--sample-fraction` 都只看**子集**，會**低估** cardinality——子集裡判為低卡的欄只是「至少這麼低」的下界，全表可能更高。因此 summary 會印出本次 scan scope，子集模式的 YAML 也在 `categorical_columns:` 頂加上一段「採用前請複查」的警告註解。（已被建議 `drop` 的高卡欄不受**此低估**影響——子集裡已超過門檻，代表全表也一定超過。）掃分散的多個分區、而非單一連續窗口，可降低「與分區鍵相關的欄」被藏住的風險。
 
-preprocessor 只使用 `train_snap_dates` 範圍內的 feature rows fit category mapping，再將同一份 metadata 套用至 train、calibration、val、test 與 inference。未在 train 出現的新類別會編碼為 `-1` 並記錄 warning。
+preprocessor 只使用 `train_snap_dates` 範圍內的 feature rows fit category mapping，再將同一份 metadata 套用至 train、val、test 與 inference。未在 train 出現的新類別會編碼為 `-1` 並記錄 warning。
 
 model input 寫出前，**所有數值 feature 欄**（decimal／double／float／整數族／boolean）都會轉成 `dataset.numeric_feature_storage_type` 宣告的型別（預設 float32），降低後續 driver 讀取與模型訓練的記憶體成本。收斂範圍涵蓋整數與 boolean 的理由：`pdf_to_X` 用 `DataFrame.values` 攤平，pandas 只挑一個共同 dtype，所以一欄沒轉就決定了整個矩陣的型別。
 
@@ -242,7 +231,7 @@ model input 寫出前，**所有數值 feature 欄**（decimal／double／float�
 | 設定鍵 | 作用對象 | 生效處 | 語意 |
 |---|---|---|---|
 | `prepare_model_input.drop_columns` | **`feature_table`** 的欄 | `compute_feature_columns` | 黑名單：不得成為模型特徵 |
-| `carry_columns` | **`sample_pool`** 的欄 | `select_train_keys`／`select_calibration_keys` | 白名單：keys 除 identity 外還要多帶這些欄 |
+| `carry_columns` | **`sample_pool`** 的欄 | `select_train_keys` | 白名單：keys 除 identity 外還要多帶這些欄 |
 | `feature_columns` | 推導結果，存進 `preprocessor.json` | `compute_feature_columns` | identity categoricals ＋（`feature_table` 欄 − drop − 非 categorical 的 identity 欄 − label） |
 
 `feature_columns` **不是設定鍵**，沒有地方可以直接寫它；它是前兩者與 schema 推導出來
@@ -260,7 +249,7 @@ model input 寫出前，**所有數值 feature 欄**（decimal／double／float�
 model_input.columns == identity ∪ {label} ∪ feature_columns ∪ (carry_columns ∩ 該 split keys 的欄)
 ```
 
-train／train-dev／calibration 的 keys 帶 carry，val／test 不帶，所以同一條規則在不同
+train／train-dev 的 keys 帶 carry，val／test 不帶，所以同一條規則在不同
 split 展開出不同的欄位集合（見 §3.4 與
 [ADR-0004](../adr/0004-carry-drop-columns-intersection.md)）。
 
@@ -272,7 +261,7 @@ split 展開出不同的欄位集合（見 §3.4 與
 |---|---|---|
 | `--env`, `-e` | `local` | 選擇設定環境 |
 | `--rebuild-dates <d1,d2>` | 無 | 強制重算指定 test 月份（即使 partition 已存在）；值必須是 `test_snap_dates` 的子集 |
-| `--only-test-months` | 關閉 | 宣告「這次只加評估月份」：只跑資料閘與 test 鏈，train／val／calibration 的產物不重算。與 `--from-node`／`--only-node` 正交、可併用；上游缺料時當場報錯。它是**模式**不是切片，差別見 §5.1 |
+| `--only-test-months` | 關閉 | 宣告「這次只加評估月份」：只跑資料閘與 test 鏈，train／val 的產物不重算。與 `--from-node`／`--only-node` 正交、可併用；上游缺料時當場報錯。它是**模式**不是切片，差別見 §5.1 |
 | `--from-node <name>` | 無 | 從指定 node 與其後的 nodes 開始執行 |
 | `--only-node <name>` | 無 | 只執行指定 node，以及缺少輸入時必要的上游 nodes |
 | `--dry-run` | 關閉 | 顯示切片執行計畫後離開，不執行 pipeline |
@@ -347,7 +336,7 @@ python -m recsys_tfb dataset \
 
 ## 5. 執行流程
 
-calibration nodes 只有在 `enable_calibration: true` 時加入。資料閘、精度閘、粒度閘三個檢查步驟在整個框架的檢查裡屬於哪一層、擋不住什麼：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
+資料閘、精度閘、粒度閘三個檢查步驟在整個框架的檢查裡屬於哪一層、擋不住什麼：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
 
 | 階段 | node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
@@ -355,20 +344,19 @@ calibration nodes 只有在 `enable_calibration: true` 時加入。資料閘、�
 | Train 抽樣 | `select_sample_keys` | `sample_pool` | 依 train 日期、分層比例與 overrides 做決定性抽樣 | `sample_keys` |
 | Train 切分 | `split_train_keys` | `sample_keys` | 依 entity 將資料互斥切成 train 與 train-dev | `train_keys`、`train_dev_keys` |
 | Val/Test keys | `select_val_keys`、`select_test_keys` | `sample_pool`（test 另收 `test_keys_month_plan`） | 建立 val 與 test identity keys；val 可依 entity 縮減。test 只處理計畫中的月份 | `val_keys`、`test_keys` |
-| Calibration keys | `select_calibration_keys` | `sample_pool` | 依 calibration 日期與比例抽樣 | `calibration_keys` |
 | Fit 前處理器 | `fit_preprocessor_metadata` | `feature_table` | 只使用 train 日期建立 feature 清單與 category mappings | `preprocessor`、`category_mappings` |
 | 套用前處理 | `apply_preprocessor_to_features` | `feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 編碼 feature categoricals；只處理計畫中的月份 | `preprocessed_feature_table` |
 | 精度閘 | `validate_numeric_precision` | `preprocessed_feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 不變量 B8：讀剛落地那幾個月份的 parquet footer 統計值（零掃描），確認會被 cast 的欄（decimal、整數族與 boolean——有格點的那些）在該欄自己的解析度下撐得過 `numeric_feature_storage_type`；同時產出每欄的 headroom 報告 | `numeric_precision_report` |
 | 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor（test 另收 `test_model_input_month_plan`） | left join label 與 feature，補齊缺失 label，選取欄位並把所有數值特徵欄轉成 `numeric_feature_storage_type` 宣告的型別（預設 float32） | 各 split 的 model input |
 | 評估母體過濾 | `filter_val_model_input`、`filter_test_model_input` | 未過濾的 val/test input | 移除整組沒有正例的 query groups | `val_model_input`、`test_model_input` |
-| 粒度閘 | `validate_model_input_grain` | train／train_dev（開啟時另加 calibration）的 keys 與 model_input | 不變量 B10：讀 parquet footer 的列數（零掃描），確認每張 model_input 的列數等於它的 keys 表。擋的是右表（`label_table`／`preprocessed_feature_table`）有重複 join 鍵造成的靜默放大；同時產出每個 split 的列數報告。**val／test 不在範圍內**——它們列數相符的那一版是 `*_unfiltered`，那是不落地的記憶體中間結果，沒有 footer 可讀；test 還多一層，`build_test_model_input` 會先把 `test_keys` 縮到本次月份，所以它對得上的本來就不是整張 `test_keys`（見 [ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md) 2026-09-07 修訂） | `model_input_grain_report` |
+| 粒度閘 | `validate_model_input_grain` | train／train_dev 的 keys 與 model_input | 不變量 B10：讀 parquet footer 的列數（零掃描），確認每張 model_input 的列數等於它的 keys 表。擋的是右表（`label_table`／`preprocessed_feature_table`）有重複 join 鍵造成的靜默放大；同時產出每個 split 的列數報告。**val／test 不在範圍內**——它們列數相符的那一版是 `*_unfiltered`，那是不落地的記憶體中間結果，沒有 footer 可讀；test 還多一層，`build_test_model_input` 會先把 `test_keys` 縮到本次月份，所以它對得上的本來就不是整張 `test_keys`（見 [ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md) 2026-09-07 修訂） | `model_input_grain_report` |
 
 model input 的組裝規則：
 
 1. keys 與 `label_table` 依 `time + entity + item` left join；沒有 label row 時補為 `0`。
 2. 再與 `preprocessed_feature_table` 依 `time + entity` left join。
 3. 輸出 identity、label、feature columns，以及 keys 帶入的 carry columns。
-4. val/test 才會移除零正例 query groups；train、train-dev 與 calibration 保留所有 rows。
+4. val/test 才會移除零正例 query groups；train 與 train-dev 保留所有 rows。
 
 #### 兩個 left join 各自的契約
 
@@ -378,7 +366,7 @@ model input 的組裝規則：
 
 這個恆等式**只有在右表的 join 鍵唯一時才成立**，而那是上游契約、不是這裡保證的事。
 `validate_model_input_grain`（不變量 B10）就是實際去核對它的地方，涵蓋
-train／train_dev／calibration 三個 split。
+train／train_dev 兩個 split。
 
 | join miss | 產生什麼 | 為什麼這是預期行為 |
 |---|---|---|
@@ -394,7 +382,7 @@ miss 率只有在生產跑過一次才知道，本機量不到，所以「先量
 
 ### 5.1 test 分支是增量的
 
-`apply_preprocessor_to_features`、`select_test_keys`、`build_test_model_input` 三個 node 只處理**尚未落地**的月份。train／train-dev／val／calibration **不是**增量的：它們一旦被執行就整批重算，把逐位元相同的內容覆寫回同一批 partition。
+`apply_preprocessor_to_features`、`select_test_keys`、`build_test_model_input` 三個 node 只處理**尚未落地**的月份。train／train-dev／val **不是**增量的：它們一旦被執行就整批重算，把逐位元相同的內容覆寫回同一批 partition。
 
 省掉那次重算的方法是**不執行它們**，不是讓它們變成增量的。`--only-test-months` 就是這樣做的——它是 `create_pipeline` 的**模式**參數（不是切片），只組出資料閘加上 test 鏈，其餘節點根本不進 pipeline；留下哪些節點以 `pipelines/dataset/pipeline.py` 的 `ONLY_TEST_MONTHS_NODES` 為準。反過來說，**增量性與這個旗標無關**：上面三個 node 帶不帶旗標都只處理尚未落地的月份，旗標改的是節點集，不是增量性。模式與切片的分工見 [ADR-0013](../adr/0013-pipeline-modes-and-slicing-are-separate.md)，使用動線見[新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)。
 
@@ -419,8 +407,7 @@ miss 率只有在生產跑過一次才知道，本機量不到，所以「先量
 | Base | `preprocessor`、`category_mappings` | `data/dataset/<base_dataset_version>/` |
 | Base | `preprocessed_feature_table`、`val_keys`、`test_keys`、`val_model_input`、`test_model_input` | Hive，以 `base_dataset_version` partition |
 | Train variant | `sample_keys`、`train_keys`、`train_dev_keys`、`train_model_input`、`train_dev_model_input` | Hive，以 base + `train_variant_id` partition |
-| Calibration variant | `calibration_keys`、`calibration_model_input` | Hive，以 base + `calibration_variant_id` partition |
-| Metadata | base、train variant、calibration variant 的 `manifest.json` | 對應版本目錄 |
+| Metadata | base、train variant 的 `manifest.json` | 對應版本目錄 |
 | Alias | 各層的 `latest` symlink | 指向最近完成的版本目錄 |
 
 Hive 的實際 table 名稱與 partition 欄位以 `conf/base/catalog.yaml` 為準。
@@ -456,17 +443,16 @@ HAVING SUM(label) <= 0;
 
 ## 7. 版本、重跑與恢復
 
-### 7.1 三層 dataset 版本
+### 7.1 兩層 dataset 版本
 
 dataset 每次啟動都會計算以下版本：
 
 | 版本 | 精確計算依據 | 主要產物 |
 |---|---|---|
-| `base_dataset_version` | `parameters_dataset.yaml` 中除了七個抽樣 keys 與 `test_snap_dates` 以外的所有內容，加上完整 schema 與 `feature_table` schema fingerprint | preprocessor、共用 feature、val/test |
+| `base_dataset_version` | `parameters_dataset.yaml` 中除了五個抽樣 keys 與 `test_snap_dates` 以外的所有內容，加上完整 schema 與 `feature_table` schema fingerprint | preprocessor、共用 feature、val/test |
 | `train_variant_id` | 只包含 `sample_ratio`、`sample_ratio_overrides`、`sample_group_keys`、`train_dev_ratio`、`train_split_keys` | train/train-dev keys 與 inputs |
-| `calibration_variant_id` | 只包含 `calibration_sample_ratio`、`calibration_sample_ratio_overrides`、`sample_group_keys` | calibration keys 與 input |
 
-會從 base payload 排除的抽樣 keys 有七個：
+會從 base payload 排除的抽樣 keys 有五個：
 
 ```text
 sample_ratio
@@ -474,19 +460,17 @@ sample_ratio_overrides
 sample_group_keys
 train_dev_ratio
 train_split_keys
-calibration_sample_ratio
-calibration_sample_ratio_overrides
 ```
 
 `val_sample_keys` **刻意不在這份清單裡**：val 產物只由 `base_dataset_version` 分割，把它排除掉就等於讓 val 的抽樣單位改了卻靜默沿用舊 parquet。推導見 [ADR-0016](../adr/0016-split-unit-declared-by-two-keys.md)。
 
-除了這七個 keys，還有第八個被排除的 key —— `test_snap_dates`：
+除了這五個 keys，還有第六個被排除的 key —— `test_snap_dates`：
 
 ```text
 test_snap_dates
 ```
 
-它被排除的理由與抽樣 keys 不同。抽樣 keys 是因為「另有一層 variant ID 承接」；`test_snap_dates` 則是因為**它不定義產物身分，只定義資料覆蓋範圍**。test 資料不進任何模型擬合（`val` 驅動 early stopping、`calibration` 決定校準後輸出，兩者都留在 base payload 裡），所以在 `test_snap_dates` 加一個月份時：
+它被排除的理由與抽樣 keys 不同。抽樣 keys 是因為「另有一層 variant ID 承接」；`test_snap_dates` 則是因為**它不定義產物身分，只定義資料覆蓋範圍**。test 資料不進任何模型擬合（`val` 驅動 early stopping，所以它留在 base payload 裡），所以在 `test_snap_dates` 加一個月份時：
 
 - `base_dataset_version` 與 `model_version` 都不變，因此**不需要重訓**；
 - 新月份的 test 產物以 dynamic partition 寫入，既有月份的產物與評估報表原封不動（累積語意）；
@@ -504,31 +488,24 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 
 下表列出目前 `parameters_dataset.yaml` 的所有設定：
 
-| 設定 | Base | Train variant | Calibration variant | 說明 |
-|---|:---:|:---:|:---:|---|
-| `train_snap_dates` | ✓ |  |  | 改變 fit preprocessor 與 train 資料時間範圍 |
-| `sample_ratio` |  | ✓ |  | 只改變 train 抽樣 |
-| `sample_ratio_overrides` |  | ✓ |  | 只改變 train 各分層抽樣 |
-| `sample_group_keys` |  | ✓ | ✓ | train 與 calibration 共用分層 key，因此兩個 variant 都翻新 |
-| `carry_columns` | ✓ |  |  | 改變 model input schema |
-| `train_dev_ratio` |  | ✓ |  | 只改變 train/train-dev entity 切分 |
-| `train_split_keys` |  | ✓ |  | 只改變 train/train-dev 的切分單位；val/test 產物完全不動 |
-| `enable_calibration` | ✓ |  |  | 改變 pipeline 結構及是否建立 calibration 產物 |
-| `calibration_snap_dates` | ✓ |  |  | 日期範圍屬於 base；不是 calibration 抽樣 variant |
-| `calibration_sample_ratio` |  |  | ✓ | 只改變 calibration 抽樣 |
-| `calibration_sample_ratio_overrides` |  |  | ✓ | 只改變 calibration 各分層抽樣 |
-| `val_snap_dates` | ✓ |  |  | 改變 validation 資料 |
-| `val_sample_ratio` | ✓ |  |  | val 屬於 base layer，不屬於 train sampling |
-| `val_sample_keys` | ✓ |  |  | 同上；不登記進 train sampling，否則 val 會靜默沿用舊資料 |
-| `test_snap_dates` |  |  |  | 只改變 test 覆蓋範圍，不改變任何產物身分（見 7.1） |
-| `prepare_model_input.drop_columns` | ✓ |  |  | 改變 feature 清單與 model input |
-| `prepare_model_input.categorical_columns` | ✓ |  |  | 改變 category mappings、encoding 與 feature 清單 |
+| 設定 | Base | Train variant | 說明 |
+|---|:---:|:---:|---|
+| `train_snap_dates` | ✓ |  | 改變 fit preprocessor 與 train 資料時間範圍 |
+| `sample_ratio` |  | ✓ | 只改變 train 抽樣 |
+| `sample_ratio_overrides` |  | ✓ | 只改變 train 各分層抽樣 |
+| `sample_group_keys` |  | ✓ | train 的分層 key |
+| `carry_columns` | ✓ |  | 改變 model input schema |
+| `train_dev_ratio` |  | ✓ | 只改變 train/train-dev entity 切分 |
+| `train_split_keys` |  | ✓ | 只改變 train/train-dev 的切分單位；val/test 產物完全不動 |
+| `val_snap_dates` | ✓ |  | 改變 validation 資料 |
+| `val_sample_ratio` | ✓ |  | val 屬於 base layer，不屬於 train sampling |
+| `val_sample_keys` | ✓ |  | 同上；不登記進 train sampling，否則 val 會靜默沿用舊資料 |
+| `test_snap_dates` |  |  | 只改變 test 覆蓋範圍，不改變任何產物身分（見 7.1） |
+| `prepare_model_input.drop_columns` | ✓ |  | 改變 feature 清單與 model input |
+| `prepare_model_input.categorical_columns` | ✓ |  | 改變 category mappings、encoding 與 feature 清單 |
 
 特殊情況：
 
-- `enable_calibration: false` 時，CLI 不會計算或建立 `calibration_variant_id`。此時只修改 `calibration_sample_ratio` 或 `calibration_sample_ratio_overrides`，不會改變任何實際產生的 dataset version。
-- 即使 `enable_calibration: false`，`calibration_snap_dates` 仍位於 base payload；修改它仍會翻新 `base_dataset_version`。
-- `sample_group_keys` 同時進入 train 與 calibration variant；calibration 關閉時只會翻新 train variant。
 - `test_snap_dates` 是唯一一個「改了卻不翻新任何版本」的日期設定。改動它之後 dataset 會在**同一個** `base_dataset_version` 底下補上新月份的 partition；既有月份不受影響，也不需要重訓。
 
 ### 7.3 設定檔外的版本因素
@@ -547,7 +524,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 
 | 因素 | 為何不翻新 | 操作注意 |
 |---|---|---|
-| `parameters.yaml` 的 `random_seed` | 不在三層 hash payload | 會改變 train/train-dev、train sampling、calibration sampling 與 val sampling 結果；修改後應人工視為資料版本變更並完整重建 |
+| `parameters.yaml` 的 `random_seed` | 不在兩層 hash payload | 會改變 train/train-dev、train sampling 與 val sampling 結果；修改後應人工視為資料版本變更並完整重建 |
 | `project_name`、`hive`、`spark`、`logging` | 不屬於 dataset hash 的 schema payload | 一般只影響執行環境或觀測性 |
 | `conf/base/catalog.yaml` | catalog 設定不進 hash | 修改 table/path/partition 時需自行確認是否誤讀或覆寫既有版本 |
 | `feature_table` 的資料值 | fingerprint 只看欄名、型別與順序 | 同 schema 的資料回補不會翻版，必須重跑相同版本 partitions |
@@ -562,8 +539,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | 修改內容 | 版本結果 | 建議 |
 |---|---|---|
 | train ratio、override、分層 keys、train-dev ratio | 新 train variant，base version 不變 | 完整執行最安全；熟悉切片者可依執行計畫只重建 train 路徑 |
-| calibration ratio 或 override | 新 calibration variant，base/train version 不變 | 完整執行最安全；熟悉切片者可只重建 calibration 路徑 |
-| train／val／calibration 日期、calibration 開關、categorical/drop、carry columns | 新 base version | 完整執行 dataset |
+| train／val 日期、categorical/drop、carry columns | 新 base version | 完整執行 dataset |
 | 只在 `test_snap_dates` 加一個月份 | 版本全部不變 | 執行 dataset 補上新月份，再跑 predict 與該月份的 evaluation；不重訓。步驟見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md) |
 | schema roles 或 item values | 新 base version | 先確認 source tables，再完整執行 dataset |
 | `feature_table` 欄名、型別或順序 | 新 base version | 完整執行 dataset |
@@ -583,7 +559,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 - `validate_model_input_grain` 同樣有輸出（`model_input_grain_report`），行為與上一條一致：不會被當成側效應 node 跳過，但也沒有下游會把它拉回來。
 - `val_model_input_unfiltered` 與 `test_model_input_unfiltered` 是記憶體中間結果；若只從 filter node 接續，框架會自動補跑對應 build node。**這也是 B10 擋不到 val／test 的原因**：不落地就沒有 footer。
 - 切片執行會在 manifest 記錄 `resumed_from` 或 `only_node`，供後續追溯。
-- 開跑前 CLI 會對 base、train variant、calibration variant 各先寫一份 `status: running` 的 `manifest.json` stub（崩潰溯源用，**不**更新 `latest` symlink，也不覆寫既有 manifest），成功完成後再覆寫為 `status: completed` 並更新 `latest`；`--dry-run` / `--list-nodes` 不寫 stub。
+- 開跑前 CLI 會對 base、train variant 各先寫一份 `status: running` 的 `manifest.json` stub（崩潰溯源用，**不**更新 `latest` symlink，也不覆寫既有 manifest），成功完成後再覆寫為 `status: completed` 並更新 `latest`；`--dry-run` / `--list-nodes` 不寫 stub。
 
 ## 8. 常見錯誤與排查
 
@@ -596,7 +572,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | `Data consistency check failed`，sample_pool item 不一致 | `sample_pool` 缺少宣告 item，或含有未知 item | 檢查本次日期範圍的 distinct item，修正 source ETL 或 schema |
 | `DataConsistencyError: ... un-encoded non-numeric type(s)`，讀 parquet 前秒級失敗 | 字串／非數值欄進了 `feature_columns`，既沒宣告 categorical 也沒 drop（不變量 B6） | 錯誤訊息逐欄點名兇手；每欄依型別決定怎麼處理，見下方 §8.1。改完會 bump `base_dataset_version`、需重建 dataset |
 | `categorical column '...' is a ... type`（B5） | categorical 欄的型別不是字串／整數／布林：連續值誤標類別，或日期、binary、複合型被設成類別 | 錯誤訊息依型別給解法；整理見 §3.5 的型別規則。不是特徵就 drop |
-| `(A24) dataset.X_snap_dates [...] and dataset.Y_snap_dates [...] name the same calendar day` | train/calibration/val/test 使用相同日期 | 重新切分日期，確保集合互斥。此檢查在 Spark 啟動前執行，**按日比對而非按字面**，所以同一天的不同寫法也抓得到；訊息會分別印出兩邊各自的原始寫法 |
+| `(A24) dataset.X_snap_dates [...] and dataset.Y_snap_dates [...] name the same calendar day` | train/val/test 使用相同日期 | 重新切分日期，確保集合互斥。此檢查在 Spark 啟動前執行，**按日比對而非按字面**，所以同一天的不同寫法也抓得到；訊息會分別印出兩邊各自的原始寫法 |
 | `N 個日期區間設定無法展開` | 某個 `{start, end, step}` 區間寫錯：起迄沒落在 step 上、迄日早於起日、`step` 拼錯、少鍵或多鍵 | 訊息逐一點名是哪個檔的哪個鍵、哪一端不對；所有寫錯的區間一次列完。規則見 §3.1 |
 | `feature_table missing required ... snap_dates` | source ETL 未產出某些日期 | 補跑 feature ETL 或修正日期設定 |
 | identity categorical missing declarations | item 等 identity 類別無法從 feature table fit | 在 `schema.categorical_values` 提供完整值域 |

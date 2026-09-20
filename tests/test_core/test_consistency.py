@@ -1725,7 +1725,7 @@ from recsys_tfb.core.consistency import date_split_overlap_errors
 
 
 def _split_params(**splits) -> dict:
-    """A ``parameters`` dict carrying only the four snap_date split keys."""
+    """A ``parameters`` dict carrying only the three snap_date split keys."""
     return {"dataset": {f"{name}_snap_dates": dates for name, dates in splits.items()}}
 
 
@@ -1733,7 +1733,6 @@ class TestDateSplitOverlapA24:
     def test_disjoint_splits_pass(self):
         params = _split_params(
             train=["2026-01-31", "2026-02-28"],
-            calibration=["2026-03-31"],
             val=["2026-04-30"],
             test=["2026-05-31"],
         )
@@ -1742,13 +1741,12 @@ class TestDateSplitOverlapA24:
     def test_overlap_names_both_splits_and_the_shared_dates(self):
         params = _split_params(
             train=["2026-01-31", "2026-02-28"],
-            calibration=["2026-02-28"],
+            test=["2026-02-28"],
             val=["2026-04-30"],
-            test=["2026-05-31"],
         )
         errs = date_split_overlap_errors(params)
         assert len(errs) == 1
-        assert "train" in errs[0] and "calibration" in errs[0]
+        assert "train" in errs[0] and "test" in errs[0]
         assert "2026-02-28" in errs[0]
         # The clean pair must not be dragged into the message.
         assert "val" not in errs[0]
@@ -1784,15 +1782,13 @@ class TestDateSplitOverlapA24:
         # make a three-way collision take three edit-rerun cycles to clear.
         params = _split_params(
             train=["2026-04-30"],
-            calibration=["2026-04-30"],
             val=["2026-04-30"],
-            test=["2026-05-31"],
+            test=["2026-04-30"],
         )
         errs = date_split_overlap_errors(params)
         assert len(errs) == 3
         joined = " ".join(errs)
-        for a, b in (("train", "calibration"), ("train", "val"),
-                     ("calibration", "val")):
+        for a, b in (("train", "val"), ("train", "test"), ("val", "test")):
             assert any(a in e and b in e for e in errs), (a, b, joined)
 
     def test_only_train_configured_passes(self):
@@ -3305,12 +3301,12 @@ class TestModelInputGrainErrorsB10:
     def test_collects_every_split_sorted(self):
         errors = model_input_grain_errors({
             "train": SplitRowCounts(10, 20),
-            "calibration": SplitRowCounts(10, 30),
-            "train_dev": SplitRowCounts(5, 5),
+            "train_dev": SplitRowCounts(5, 15),
+            "val": SplitRowCounts(5, 5),
         })
         assert len(errors) == 2
-        assert "calibration" in errors[0]
-        assert "train" in errors[1]
+        assert "train_model_input" in errors[0]
+        assert "train_dev_model_input" in errors[1]
 
     def test_needs_no_spark(self):
         import inspect
@@ -3628,6 +3624,23 @@ class TestRetiredCalibrationKeysA37:
         assert len(errors) == 1
         assert "training.calibration" in errors[0]
 
+    def test_each_retired_dataset_key_is_reported_by_name(self):
+        """The four keys #414 retired with the calibration data split.
+
+        One per key, not one dict holding all four: a predicate that only
+        looked at ``enable_calibration`` would pass the other three, and a
+        single combined fixture could not tell the two apart.
+        """
+        for key, value in (
+            ("enable_calibration", True),
+            ("calibration_snap_dates", ["2026-01-31"]),
+            ("calibration_sample_ratio", 1.0),
+            ("calibration_sample_ratio_overrides", {"mass": 0.5}),
+        ):
+            errors = retired_calibration_key_errors({"dataset": {key: value}})
+            assert len(errors) == 1, key
+            assert f"dataset.{key}" in errors[0], key
+
     def test_a_retired_inference_key_is_reported_by_name(self):
         errors = retired_calibration_key_errors(
             {"inference": {"use_calibration": True}}
@@ -3650,16 +3663,30 @@ class TestRetiredCalibrationKeysA37:
             assert retired_calibration_key_errors(
                 {"inference": {"use_calibration": value}}
             ), value
+        # The dataset side has its own falsy shapes: the switch written off,
+        # and an empty date list. Both still move base_dataset_version.
+        assert retired_calibration_key_errors(
+            {"dataset": {"enable_calibration": False}}
+        )
+        assert retired_calibration_key_errors(
+            {"dataset": {"calibration_snap_dates": []}}
+        )
 
     def test_every_retired_key_is_listed_in_one_message(self):
         """One message, every key — the user deletes once instead of running,
         fixing one key, and running again."""
         errors = retired_calibration_key_errors({
+            "dataset": {
+                "enable_calibration": False,
+                "calibration_snap_dates": [],
+                "calibration_sample_ratio": 1.0,
+                "calibration_sample_ratio_overrides": {},
+            },
             "training": {"calibration": {"enabled": False}},
             "inference": {"use_calibration": False},
         })
         assert len(errors) == 1
-        for key in ("training.calibration", "inference.use_calibration"):
+        for key in RETIRED_CALIBRATION_KEYS:
             assert key in errors[0]
 
     def test_the_message_says_what_to_do_about_it(self):
@@ -3672,14 +3699,19 @@ class TestRetiredCalibrationKeysA37:
 
     def test_a_config_without_the_keys_at_all_is_clean(self):
         assert retired_calibration_key_errors({}) == []
-        assert retired_calibration_key_errors({"training": {}, "inference": {}}) == []
         assert retired_calibration_key_errors(
-            {"training": {"objective": "binary"}, "inference": {"entity_buckets": 8}}
+            {"dataset": {}, "training": {}, "inference": {}}
         ) == []
+        assert retired_calibration_key_errors({
+            "dataset": {"train_snap_dates": ["2026-01-31"], "sample_ratio": 1.0},
+            "training": {"objective": "binary"},
+            "inference": {"entity_buckets": 8},
+        }) == []
 
     def test_a_non_mapping_section_is_not_a_crash(self):
         assert retired_calibration_key_errors({"training": None}) == []
         assert retired_calibration_key_errors({"inference": "nonsense"}) == []
+        assert retired_calibration_key_errors({"dataset": ["not", "a", "map"]}) == []
 
     def test_wired_into_validate_config_consistency(self):
         params = {
@@ -3699,8 +3731,15 @@ class TestRetiredCalibrationKeysA37:
         parameters = ConfigLoader("conf", env="local").get_parameters()
         assert retired_calibration_key_errors(parameters) == []
 
-    def test_this_ticket_retires_the_two_calibrator_keys(self):
-        """T1 (#413) covers the keys the calibrator itself read. The dataset-side
-        keys join this tuple with the calibration data split (#414)."""
-        assert "training.calibration" in RETIRED_CALIBRATION_KEYS
-        assert "inference.use_calibration" in RETIRED_CALIBRATION_KEYS
+    def test_the_tuple_is_complete(self):
+        """Six keys: two the calibrator read (#413) and four that configured the
+        calibration data split (#414). Spelled out rather than counted, so
+        dropping one and adding another cannot cancel out."""
+        assert RETIRED_CALIBRATION_KEYS == (
+            "dataset.enable_calibration",
+            "dataset.calibration_snap_dates",
+            "dataset.calibration_sample_ratio",
+            "dataset.calibration_sample_ratio_overrides",
+            "training.calibration",
+            "inference.use_calibration",
+        )

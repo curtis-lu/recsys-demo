@@ -128,12 +128,12 @@ ADR-0008 明確拒絕過這個放寬，理由很直接：**放寬之後 `select_
 
 ### 實際長什麼樣
 
-照做的（`pipelines/dataset/nodes.py:207`）：
+照做的（`pipelines/dataset/nodes.py` 的 `select_train_keys`）：
 
 ```python
 # Decision — eligibility: only rows in the configured train months can be
 # drawn. A month belongs to exactly one split (A24), so this is also what
-# keeps train disjoint from val / test / calibration.
+# keeps train disjoint from val / test.
 pool = restrict_to_months_or_all(sample_pool, time_col, train_months)
 ```
 
@@ -159,23 +159,30 @@ pool = prepare_train_pool(sample_pool, parameters)
 
 ### 實際長什麼樣
 
-`select_train_keys`（`nodes.py:183`）與 `select_calibration_keys`（`nodes.py:242`）做的是同樣四個決策：有資格的月份、每組留多少、誰活下來、輸出哪些欄。兩個 node 各自把四個決策逐條寫了一遍：
+⚠ **這一節的例子是歷史的，repo 裡現在只剩一半。** 規則從 `select_train_keys` 與
+`select_calibration_keys` 這一對歸納出來，而 #411／#414 移除 calibration 之後
+`select_calibration_keys` 已經不存在，今天也沒有第二對 node 做同樣四個決策。別去
+grep 這個名字，也別因為「找不到第二個例子」就以為規則作廢——下一個要新增同型 node
+的人就會用到它。
+
+當時兩個 node 做的是同樣四個決策：有資格的月份、每組留多少、誰活下來、輸出哪些欄。
+兩個 node 各自把四個決策逐條寫了一遍：
 
 ```python
-# select_train_keys
+# select_train_keys（今天仍在）
 pool = restrict_to_months_or_all(sample_pool, time_col, train_months)
 keys = with_effective_sample_ratio(keys, group_keys, sample_ratio, overrides)
 keys = keep_rows_drawn_under_ratio(keys, identity_key, seed, site="sample_keys")
 
-# select_calibration_keys
+# select_calibration_keys（已隨 #414 刪除）
 pool = restrict_to_months_or_all(sample_pool, time_col, cal_months)
 keys = with_effective_sample_ratio(keys, group_keys, cal_ratio, cal_overrides)
 keys = keep_rows_drawn_under_ratio(keys, identity_key, seed, site="calibration_keys")
 ```
 
-被共用的是**機制**：`restrict_to_months_or_all`、`with_effective_sample_ratio`、`keep_rows_drawn_under_ratio` 都在 `steps/` 裡，各自只裝一件事。沒有一個 `_select_keys(split_name, parameters)` 把四個決策包起來。
+被共用的是**機制**：`restrict_to_months_or_all`、`with_effective_sample_ratio`、`keep_rows_drawn_under_ratio` 都在 `steps/` 裡（今天仍在），各自只裝一件事。沒有一個 `_select_keys(split_name, parameters)` 把四個決策包起來。
 
-而 `select_calibration_keys` 的 docstring 只需要說出那**唯一的差別**：兩個 split 共用 `random_seed`，所以抽樣 `site` 不同名，calibration 才不會抽到跟 train 完全相同的列（#140）。
+而第二個 node 的 docstring 只需要說出那**唯一的差別**：兩個 split 共用 `random_seed`，所以抽樣 `site` 不同名，第二個 split 才不會抽到跟 train 完全相同的列（#140）。
 
 **誰擋得住**：沒有機械檢查。
 
@@ -243,7 +250,7 @@ pipelines/<name>/
 ```python
 # Decision — eligibility: only rows in the configured train months can be
 # drawn. A month belongs to exactly one split (A24), so this is also what
-# keeps train disjoint from val / test / calibration.
+# keeps train disjoint from val / test.
 pool = restrict_to_months_or_all(sample_pool, time_col, train_months)
 ```
 

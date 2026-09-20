@@ -1,6 +1,7 @@
 """Version management for pipeline artifacts.
 
-Provides three-layer hash-based version IDs for dataset pipeline:
+Provides two-layer hash-based version IDs for the dataset pipeline, plus the
+model version the training pipeline derives from them:
 
 - ``base_dataset_version``: derived from non-sampling dataset params + full
   schema, minus the coverage-only keys (``test_snap_dates``) and the gate-policy
@@ -9,9 +10,8 @@ Provides three-layer hash-based version IDs for dataset pipeline:
   val/test model_input). Test months accumulate *under* one version rather than
   minting a new one.
 - ``train_variant_id``: derived from train-sampling params only. Keys
-  train/train_dev model_input under the base dataset directory.
-- ``calibration_variant_id``: derived from calibration-sampling params only.
-  Keys calibration model_input under the base dataset directory.
+  train/train_dev model_input under the base dataset directory. It is the
+  only variant layer — #411 removed the calibration one.
 - ``model_version``: derived from the *model-defining* subset of training
   params only — the ``training:`` block minus the pure logging/threading
   knobs in ``MODEL_VERSION_IRRELEVANT_PARAMS``. Ops-only config
@@ -81,19 +81,18 @@ TRAIN_SAMPLING_KEYS: frozenset[str] = frozenset({
     "train_dev_ratio",
     "train_split_keys",
 })
-CALIBRATION_SAMPLING_KEYS: frozenset[str] = frozenset({
-    "calibration_sample_ratio",
-    "calibration_sample_ratio_overrides",
-    "sample_group_keys",
-})
-ALL_SAMPLING_KEYS: frozenset[str] = TRAIN_SAMPLING_KEYS | CALIBRATION_SAMPLING_KEYS
+#: Every sampling key stripped from ``base_dataset_version``. Train is the only
+#: sampling layer left since #411 removed the calibration split, so this is
+#: currently an alias; it stays a separate name because the stripping rule
+#: ("sampling never keys the base version") is the thing being expressed, not
+#: "the train keys happen to be these".
+ALL_SAMPLING_KEYS: frozenset[str] = TRAIN_SAMPLING_KEYS
 
 # Dataset keys that define data *coverage* only, never artifact identity.
 # ``test_snap_dates`` is the model's audience, not its input: it feeds no fit
 # step, so adding an evaluation month must not bust ``base_dataset_version``
-# (and, transitively, ``model_version``). ``val_snap_dates`` /
-# ``calibration_snap_dates`` deliberately stay in the payload — they drive
-# early stopping and calibration respectively, i.e. they define the model.
+# (and, transitively, ``model_version``). ``val_snap_dates`` deliberately stays
+# in the payload — it drives early stopping, i.e. it defines the model.
 # See docs/adr/0001-test-dates-out-of-dataset-version-identity.md.
 COVERAGE_ONLY_KEYS: frozenset[str] = frozenset({"test_snap_dates"})
 
@@ -146,7 +145,7 @@ def compute_base_dataset_version(
     The resulting ID keys pipeline outputs that are invariant under sampling
     changes. ``params`` is the ``parameters_dataset`` dict; any keys in
     ``ALL_SAMPLING_KEYS`` under ``params["dataset"]`` are stripped before
-    hashing so train/calibration sampling experiments do not invalidate
+    hashing so train sampling experiments do not invalidate
     val/test/preprocessor artifacts. ``COVERAGE_ONLY_KEYS`` is stripped the
     same way so adding an evaluation month is O(1): coverage grows, identity
     (and therefore ``model_version``) does not change. ``GATE_POLICY_KEYS`` is
@@ -174,13 +173,6 @@ def compute_train_variant_id(params: dict) -> str:
     ds = params.get("dataset", {}) if isinstance(params, dict) else {}
     subset = {k: ds[k] for k in TRAIN_SAMPLING_KEYS if k in ds}
     return _hash8({"train_sampling": subset})
-
-
-def compute_calibration_variant_id(params: dict) -> str:
-    """Hash only the calibration-sampling subset of dataset params."""
-    ds = params.get("dataset", {}) if isinstance(params, dict) else {}
-    subset = {k: ds[k] for k in CALIBRATION_SAMPLING_KEYS if k in ds}
-    return _hash8({"calibration_sampling": subset})
 
 
 def _model_version_payload(params: dict) -> dict:
@@ -211,7 +203,6 @@ def compute_model_version(
     params: dict,
     base_dataset_version: str,
     train_variant_id: str,
-    calibration_variant_id: str | None = None,
 ) -> str:
     """Compute model version ID from model-defining training params + variants.
 
@@ -226,10 +217,7 @@ def compute_model_version(
         sort_keys=True,
         default_flow_style=False,
     )
-    parts = [canonical, base_dataset_version, train_variant_id]
-    if calibration_variant_id is not None:
-        parts.append(calibration_variant_id)
-    combined = "".join(parts)
+    combined = "".join([canonical, base_dataset_version, train_variant_id])
     return hashlib.sha256(combined.encode()).hexdigest()[:8]
 
 
@@ -237,7 +225,6 @@ def compute_search_id(
     params: dict,
     base_dataset_version: str = "",
     train_variant_id: str = "",
-    calibration_variant_id: str | None = None,
 ) -> str:
     """HPO 搜尋身分：與 model_version 相同的 model-defining 輸入，唯一拿掉 n_trials。
 
@@ -253,8 +240,6 @@ def compute_search_id(
         training.pop("n_trials", None)
     canonical = yaml.dump(payload, sort_keys=True, default_flow_style=False)
     parts = ["search_id|", canonical, base_dataset_version, train_variant_id]
-    if calibration_variant_id is not None:
-        parts.append(calibration_variant_id)
     return hashlib.sha256("".join(parts).encode()).hexdigest()[:8]
 
 
@@ -312,15 +297,19 @@ def resolve_base_dataset_version(dataset_dir: Path, version: str | None) -> str:
 
 
 def resolve_variant_id(base_dir: Path, variant_kind: str, variant: str | None) -> str:
-    """Resolve a train/calibration variant ID under a base dataset directory.
+    """Resolve a variant ID under a base dataset directory.
 
-    ``variant_kind`` must be ``"train"`` or ``"calibration"``. If *variant* is
-    provided, return it directly. Otherwise follow the ``latest`` symlink
+    ``variant_kind`` must be ``"train"`` — the only variant layer left after
+    #411 removed the calibration one. The argument stays because the directory
+    name and the ``--<kind>-variant`` hint in the error are both derived from
+    it, and because a wrong kind must fail loudly rather than look for a
+    ``latest`` symlink under a directory that was never written. If *variant*
+    is provided, return it directly. Otherwise follow the ``latest`` symlink
     inside ``{base_dir}/{variant_kind}_variants``.
     """
-    if variant_kind not in ("train", "calibration"):
+    if variant_kind != "train":
         raise ValueError(
-            f"variant_kind must be 'train' or 'calibration', got {variant_kind!r}"
+            f"variant_kind must be 'train', got {variant_kind!r}"
         )
 
     if variant is not None:
@@ -384,7 +373,6 @@ def build_manifest_metadata(
     status: str | None = None,
     base_dataset_version: str | None = None,
     train_variant_id: str | None = None,
-    calibration_variant_id: str | None = None,
     model_version: str | None = None,
     parent_version: str | None = None,
     variant_kind: str | None = None,
@@ -411,8 +399,6 @@ def build_manifest_metadata(
         metadata["base_dataset_version"] = base_dataset_version
     if train_variant_id is not None:
         metadata["train_variant_id"] = train_variant_id
-    if calibration_variant_id is not None:
-        metadata["calibration_variant_id"] = calibration_variant_id
     if model_version is not None:
         metadata["model_version"] = model_version
     if parent_version is not None:

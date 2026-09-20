@@ -33,7 +33,7 @@ dataset:
   # 未指定的組合用預設 sample_ratio
 
   # --- Carry columns（沿用欄位）---
-  # ★非 identity、要從 sample_pool 帶進 train/train_dev/calibration model_input
+  # ★非 identity、要從 sample_pool 帶進 train/train_dev model_input
   # parquet 的欄位清單（供 training.sample_weights 分群；權重實際只套 train/train_dev）。
   # 寬鬆超集策略：一次列足想用的維度，weight 表只取需要的子集 → 改 weight 不需
   # 重產 dataset。⚠改此清單會 bust base_dataset_version（parquet schema 變、整批重算）。
@@ -60,15 +60,6 @@ dataset:
   #   base_dataset_version 不動（val／test 產物完全不受影響）。
   # 保持註解狀態＝維持預設；一旦寫成實鍵就會翻 train_variant_id，即使值等同預設。
   # train_split_keys: ["cust_id"]
-
-  # --- Calibration（optional）---
-  enable_calibration: true
-  calibration_snap_dates: ["2025-11-30"]
-  calibration_sample_ratio: 1.0
-  calibration_sample_ratio_overrides: {}
-  # 格式同 sample_ratio_overrides，用 "|" 組合序列化為 key
-  # 範例：{"mass|fund_mix": 0.8}
-  # 未指定時 calibration 使用 calibration_sample_ratio 作為預設
 
   # --- Validation（驗證集）---
   val_snap_dates:

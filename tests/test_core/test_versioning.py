@@ -12,11 +12,9 @@ from recsys_tfb.core.schema import ENTITY_GROUPING_KEYS, get_schema_for_hash
 from recsys_tfb.core.versioning import (
     ALL_SAMPLING_KEYS,
     GATE_POLICY_KEYS,
-    CALIBRATION_SAMPLING_KEYS,
     TRAIN_SAMPLING_KEYS,
     build_manifest_metadata,
     compute_base_dataset_version,
-    compute_calibration_variant_id,
     compute_feature_table_fingerprint,
     compute_model_version,
     compute_search_id,
@@ -58,20 +56,27 @@ def _base_params() -> dict:
             "sample_ratio_overrides": {},
             "sample_group_keys": ["cust_segment_typ"],
             "train_dev_ratio": 0.1,
-            "calibration_snap_dates": ["2024-02-29"],
-            "calibration_sample_ratio": 1.0,
-            "calibration_sample_ratio_overrides": {},
         },
     }
 
 
 class TestSamplingKeySets:
-    def test_train_and_calibration_share_group_keys(self):
+    def test_group_keys_are_a_train_sampling_key(self):
         assert "sample_group_keys" in TRAIN_SAMPLING_KEYS
-        assert "sample_group_keys" in CALIBRATION_SAMPLING_KEYS
 
-    def test_all_sampling_keys_is_union(self):
-        assert ALL_SAMPLING_KEYS == TRAIN_SAMPLING_KEYS | CALIBRATION_SAMPLING_KEYS
+    def test_all_sampling_keys_is_the_train_set(self):
+        """Train is the only sampling layer since #414 removed the calibration
+        split, so everything stripped from base_dataset_version is train's."""
+        assert ALL_SAMPLING_KEYS == TRAIN_SAMPLING_KEYS
+
+    def test_no_retired_calibration_sampling_key_is_stripped(self):
+        """A dataset conf can no longer spell these (A37), so stripping one
+        would be stripping a key that cannot be there — and would quietly keep
+        working if someone re-added it."""
+        for key in (
+            "calibration_sample_ratio", "calibration_sample_ratio_overrides",
+        ):
+            assert key not in ALL_SAMPLING_KEYS
 
 
 class TestComputeFeatureTableFingerprint:
@@ -132,13 +137,6 @@ class TestComputeBaseDatasetVersion:
         assert compute_base_dataset_version(p1, _sample_schema()) == \
             compute_base_dataset_version(p2, _sample_schema())
 
-    def test_calibration_sample_ratio_overrides_does_not_affect_base(self):
-        p1 = _base_params()
-        p2 = _base_params()
-        p2["dataset"]["calibration_sample_ratio_overrides"] = {"prod_x": 0.3}
-        assert compute_base_dataset_version(p1, _sample_schema()) == \
-            compute_base_dataset_version(p2, _sample_schema())
-
     def test_sample_group_keys_does_not_affect_base(self):
         p1 = _base_params()
         p2 = _base_params()
@@ -168,14 +166,6 @@ class TestComputeBaseDatasetVersion:
         p1 = _base_params()
         p2 = _base_params()
         p2["dataset"]["val_snap_dates"] = ["2024-01-31", "2024-02-29"]
-        assert compute_base_dataset_version(p1, _sample_schema()) != \
-            compute_base_dataset_version(p2, _sample_schema())
-
-    def test_calibration_snap_dates_affects_base(self):
-        # calibration 決定校準後的輸出 → 同樣是模型的輸入，必須留在 hash 裡。
-        p1 = _base_params()
-        p2 = _base_params()
-        p2["dataset"]["calibration_snap_dates"] = ["2024-03-31"]
         assert compute_base_dataset_version(p1, _sample_schema()) != \
             compute_base_dataset_version(p2, _sample_schema())
 
@@ -275,13 +265,6 @@ class TestComputeTrainVariantId:
         p2["dataset"]["sample_ratio"] = 0.5
         assert compute_train_variant_id(p1) != compute_train_variant_id(p2)
 
-    def test_calibration_sample_ratio_does_not_affect_train_variant(self):
-        p1 = _base_params()
-        p2 = _base_params()
-        p2["dataset"]["calibration_sample_ratio"] = 0.5
-        p2["dataset"]["calibration_sample_ratio_overrides"] = {"x": 0.3}
-        assert compute_train_variant_id(p1) == compute_train_variant_id(p2)
-
     def test_sample_group_keys_affects_train_variant(self):
         p1 = _base_params()
         p2 = _base_params()
@@ -301,29 +284,6 @@ class TestComputeTrainVariantId:
         p2 = _base_params()
         p2["training"] = {"feature_selection": {"exclude": ["feat_x"]}}
         assert compute_train_variant_id(p1) == compute_train_variant_id(p2)
-
-
-class TestComputeCalibrationVariantId:
-    def test_returns_8_char_hex(self):
-        assert _HEX8_RE.match(compute_calibration_variant_id(_base_params()))
-
-    def test_calibration_sample_ratio_overrides_affects_calibration_variant(self):
-        p1 = _base_params()
-        p2 = _base_params()
-        p2["dataset"]["calibration_sample_ratio_overrides"] = {"prod_x": 0.3}
-        assert compute_calibration_variant_id(p1) != compute_calibration_variant_id(p2)
-
-    def test_sample_ratio_does_not_affect_calibration_variant(self):
-        p1 = _base_params()
-        p2 = _base_params()
-        p2["dataset"]["sample_ratio"] = 0.5
-        assert compute_calibration_variant_id(p1) == compute_calibration_variant_id(p2)
-
-    def test_sample_group_keys_affects_calibration_variant(self):
-        p1 = _base_params()
-        p2 = _base_params()
-        p2["dataset"]["sample_group_keys"] = ["cust_segment_typ", "prod_name"]
-        assert compute_calibration_variant_id(p1) != compute_calibration_variant_id(p2)
 
 
 class TestComputeModelVersion:
@@ -357,10 +317,15 @@ class TestComputeModelVersion:
         )
         assert a != b
 
-    def test_calibration_variant_affects_hash(self):
-        a = compute_model_version({"lr": 0.01}, "base1234", "trai1234")
-        b = compute_model_version({"lr": 0.01}, "base1234", "trai1234", "cal12345")
-        assert a != b
+    def test_takes_exactly_two_version_layers(self):
+        """#414 removed the third (calibration) layer from the signature.
+
+        A stale caller still passing it must fail loudly rather than have the
+        extra ID folded into the hash under a name that no longer means
+        anything.
+        """
+        with pytest.raises(TypeError):
+            compute_model_version({"lr": 0.01}, "base1234", "trai1234", "cal12345")
 
     def test_feature_selection_changes_hash(self):
         # training.feature_selection lives in the model_version-hashed training:
@@ -370,11 +335,6 @@ class TestComputeModelVersion:
         b = {"training": {"feature_selection": {"exclude": ["feat_x"]}}}
         assert compute_model_version(a, "base1234", "trai1234") != \
             compute_model_version(b, "base1234", "trai1234")
-
-    def test_calibration_none_equivalent_to_omitted(self):
-        a = compute_model_version({"lr": 0.01}, "base1234", "trai1234")
-        b = compute_model_version({"lr": 0.01}, "base1234", "trai1234", None)
-        assert a == b
 
     def test_logging_threading_knobs_do_not_affect_hash(self):
         base = {"training": {"algorithm_params": {"learning_rate": 0.01}}}
@@ -543,7 +503,6 @@ class TestResolveBaseDatasetVersion:
 class TestResolveVariantId:
     def test_returns_specified_variant(self, tmp_path):
         assert resolve_variant_id(tmp_path, "train", "abcd1234") == "abcd1234"
-        assert resolve_variant_id(tmp_path, "calibration", "abcd1234") == "abcd1234"
 
     def test_follows_latest_symlink_for_train(self, tmp_path):
         base_dir = tmp_path / "base1234"
@@ -556,16 +515,21 @@ class TestResolveVariantId:
 
         assert resolve_variant_id(base_dir, "train", None) == "trai1234"
 
-    def test_follows_latest_symlink_for_calibration(self, tmp_path):
+    def test_calibration_is_no_longer_a_variant_kind(self, tmp_path):
+        """#414 removed the calibration variant layer. A caller still asking
+        for it must raise rather than look for a ``latest`` symlink under a
+        directory this pipeline never writes — the directory may still exist
+        from a pre-#411 run, and following it would resolve a version ID that
+        nothing in the framework can produce again."""
         base_dir = tmp_path / "base1234"
         cal_root = base_dir / "calibration_variants"
         cal_root.mkdir(parents=True)
         v1 = cal_root / "cal12345"
         v1.mkdir()
-        latest = cal_root / "latest"
-        latest.symlink_to(v1.resolve())
+        (cal_root / "latest").symlink_to(v1.resolve())
 
-        assert resolve_variant_id(base_dir, "calibration", None) == "cal12345"
+        with pytest.raises(ValueError, match="variant_kind"):
+            resolve_variant_id(base_dir, "calibration", None)
 
     def test_raises_when_no_latest(self, tmp_path):
         base_dir = tmp_path / "base1234"
@@ -664,16 +628,21 @@ class TestBuildManifestMetadata:
         assert "calibration_variant_id" not in meta
         assert "model_version" not in meta
 
-    def test_training_manifest_with_calibration(self):
-        meta = build_manifest_metadata(
-            version="def67890",
-            pipeline="training",
-            parameters={"lr": 0.01},
-            base_dataset_version="abc12345",
-            train_variant_id="trai1234",
-            calibration_variant_id="cal12345",
-        )
-        assert meta["calibration_variant_id"] == "cal12345"
+    def test_calibration_variant_id_is_not_a_manifest_field(self):
+        """#414 removed the layer, so writing the field is no longer possible.
+
+        Reading one off an old manifest still is — that is a separate path and
+        `tests/test_cli.py` covers it.
+        """
+        with pytest.raises(TypeError):
+            build_manifest_metadata(
+                version="def67890",
+                pipeline="training",
+                parameters={"lr": 0.01},
+                base_dataset_version="abc12345",
+                train_variant_id="trai1234",
+                calibration_variant_id="cal12345",
+            )
 
     def test_inference_manifest(self):
         meta = build_manifest_metadata(
@@ -807,10 +776,10 @@ class TestComputeSearchId:
         p2 = _tp(); p2["training"]["algorithm_params"]["verbosity"] = 1
         assert compute_search_id(p1, "b", "t") == compute_search_id(p2, "b", "t")
 
-    def test_calibration_variant_affects_when_present(self):
-        a = compute_search_id(_tp(), "b", "t", "cal1")
-        b = compute_search_id(_tp(), "b", "t", "cal2")
-        assert a != b
+    def test_takes_exactly_two_version_layers(self):
+        """Mirrors ``compute_model_version``: #414 dropped the third layer."""
+        with pytest.raises(TypeError):
+            compute_search_id(_tp(), "b", "t", "cal1")
 
 
 class TestFindLatestCompletedModelVersion:
@@ -911,10 +880,22 @@ class TestSplitUnitKeysVersionRouting:
         Going red here means an existing user's artifacts were orphaned. That
         is a decision to take deliberately (and to write into the release
         note), never a number to re-record until the test passes again.
+
+        ``base_dataset_version`` was re-recorded exactly once, by #414, and
+        that is the deliberate case the paragraph above describes: removing
+        calibration deletes four keys from every ``dataset:`` block, the block
+        is hashed whole, so the ID moves for everyone. It is in the upgrade
+        note (rebuild the dataset, retrain, re-promote by hand). ``0675afb8``
+        was the pre-#414 value.
+
+        ``train_variant_id`` is NOT re-recorded and must not be: the
+        train-sampling subset is untouched by #414, so ADR-0016's zero-
+        migration claim still has its original evidence. If that line ever
+        goes red, the two keys this class is about really did move.
         """
         params = _base_params()
 
-        assert compute_base_dataset_version(params, _sample_schema()) == "0675afb8"
+        assert compute_base_dataset_version(params, _sample_schema()) == "d108b398"
         assert compute_train_variant_id(params) == "913be727"
 
     def test_neither_key_reaches_the_schema_hash_payload(self):

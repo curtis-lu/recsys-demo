@@ -556,14 +556,10 @@ def _resolve_search_id(parameters: dict) -> str:
     sid = parameters.get("search_id")
     if sid:
         return str(sid)
-    cvi = parameters.get("calibration_variant_id")
-    if not isinstance(cvi, str) or cvi.startswith("__"):  # "__none__" placeholder
-        cvi = None
     return compute_search_id(
         parameters,
         str(parameters.get("base_dataset_version", "")),
         str(parameters.get("train_variant_id", "")),
-        cvi,
     )
 
 

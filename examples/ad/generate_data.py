@@ -69,7 +69,7 @@ CAMPAIGN_WEIGHT = {"c01": 0.40, "c02": 0.30, "c03": 0.20, "c04": 0.10}
 FORMAT_WEIGHT = {"banner": 0.55, "video": 0.25, "native": 0.20}
 
 # 這個組合在 LATE_ITEM_FIRST_WEEK 之前一次都不曝光；它的活動與格式在別的組合裡從第一週就有。
-# 放在 val 週：train 與 calibration 都沒看過它，val 與 test 都有。
+# 放在 val 週：train 沒看過它，val 與 test 都有。
 LATE_ITEM = ("c04", "video")
 LATE_ITEM_FIRST_WEEK = "2025-12-22"
 # 新素材上線後先給較多流量。照原本的權重（2.5%），test 週只有 5 個正例，看不出模型怎麼排它

@@ -39,7 +39,6 @@ from recsys_tfb.core.schema import (
 from recsys_tfb.core.versioning import (
     build_manifest_metadata,
     compute_base_dataset_version,
-    compute_calibration_variant_id,
     compute_feature_table_fingerprint,
     compute_model_version,
     compute_search_id,
@@ -516,7 +515,7 @@ def _maybe_warn_rebuild_sliced_away(pipe, rebuild_advice) -> list[str]:
     ]
 
 
-def _format_only_test_months_plan(enable_calibration: bool) -> list[str]:
+def _format_only_test_months_plan() -> list[str]:
     """``[plan]`` lines naming what ``--only-test-months`` left out.
 
     Diffed against the full pipeline rather than restated from a second list:
@@ -529,12 +528,7 @@ def _format_only_test_months_plan(enable_calibration: bool) -> list[str]:
     nothing they can check, and checking is the point at the moment they are
     deciding whether this run really is "just adding an eval month".
     """
-    full = [
-        node.name
-        for node in get_pipeline(
-            "dataset", enable_calibration=enable_calibration
-        ).nodes
-    ]
+    full = [node.name for node in get_pipeline("dataset").nodes]
     kept = set(ONLY_TEST_MONTHS_NODES)
     left_out = [name for name in full if name not in kept]
     return [
@@ -1109,8 +1103,8 @@ def dataset(
     ),
     only_test_months: bool = typer.Option(
         False, "--only-test-months",
-        help="宣告「這次只加評估月份」：只跑資料閘與 test 鏈。train／val／"
-             "calibration 的產物不重算——多一個 test 月不會改變它們的內容。"
+        help="宣告「這次只加評估月份」：只跑資料閘與 test 鏈。train／val "
+             "的產物不重算——多一個 test 月不會改變它們的內容。"
              "與 --from-node／--only-node 正交，可併用。上游缺料時當場報錯。",
     ),
     from_node: Optional[str] = typer.Option(
@@ -1178,10 +1172,6 @@ def dataset(
     except KeyError:
         params_dataset = {}
 
-    enable_calibration = (
-        params_dataset.get("dataset", {}).get("enable_calibration", False)
-    )
-
     spark = get_or_create_spark_session()
     # Version-free on purpose: the source tables are the only entries readable
     # before the versions below exist, because they carry no ${...} placeholder.
@@ -1200,21 +1190,15 @@ def dataset(
         params_dataset, schema_hash, feature_table_fingerprint=feature_table_fp,
     )
     train_v = compute_train_variant_id(params_dataset)
-    cal_v = (
-        compute_calibration_variant_id(params_dataset) if enable_calibration else None
-    )
 
     logger.info("feature_table_fingerprint: %s (%d cols)",
                 feature_table_fp, len(feature_table_columns))
     logger.info("base_dataset_version: %s", base_v)
     logger.info("train_variant_id:     %s", train_v)
-    if cal_v is not None:
-        logger.info("calibration_variant_id: %s", cal_v)
 
     runtime_params = {
         "base_dataset_version": base_v,
         "train_variant_id": train_v,
-        "calibration_variant_id": cal_v if cal_v is not None else _NONE_PLACEHOLDER,
         "model_version": "best",  # placeholder to avoid unresolved templates
         "snap_date": _NONE_PLACEHOLDER,
         # A user-supplied setting, unlike the listing below: it stays in
@@ -1243,12 +1227,9 @@ def dataset(
         params, existing=existing_snap_dates, rebuild=rebuild,
     )
 
-    pipeline_kwargs = {
-        "enable_calibration": enable_calibration,
-        "only_test_months": only_test_months,
-    }
+    pipeline_kwargs = {"only_test_months": only_test_months}
     if only_test_months:
-        for line in _format_only_test_months_plan(enable_calibration):
+        for line in _format_only_test_months_plan():
             logger.info(line)
 
     # Pre-run crash-safe provenance stubs (skip-if-present, no `latest` symlink);
@@ -1265,11 +1246,6 @@ def dataset(
             "version": train_v, "pipeline": "dataset", "parameters": params_dataset,
             "parent_version": base_v, "variant_kind": "train",
         }, run_context.run_id)
-        if cal_v is not None:
-            _write_manifest_stub(stub_base_dir / "calibration_variants" / cal_v, {
-                "version": cal_v, "pipeline": "dataset", "parameters": params_dataset,
-                "parent_version": base_v, "variant_kind": "calibration",
-            }, run_context.run_id)
 
     executed = _execute_pipeline(
         "dataset", pipeline_kwargs, runtime_params, config, params, env,
@@ -1342,22 +1318,6 @@ def dataset(
         run_id=run_context.run_id,
         symlink_target=base_dir / "train_variants" / "latest",
     )
-
-    if cal_v is not None:
-        cal_variant_dir = base_dir / "calibration_variants" / cal_v
-        _write_pipeline_manifest(
-            version_dir=cal_variant_dir,
-            metadata_kwargs={
-                "version": cal_v,
-                "pipeline": "dataset",
-                "parameters": params_dataset,
-                "parent_version": base_v,
-                "variant_kind": "calibration",
-                "artifacts": _dir_artifacts(cal_variant_dir),
-            },
-            run_id=run_context.run_id,
-            symlink_target=base_dir / "calibration_variants" / "latest",
-        )
 
     logger.info("Pipeline 'dataset' completed successfully")
 
@@ -1498,24 +1458,16 @@ def training(
     except KeyError:
         params_training = {}
 
-    # No calibration layer any more (#411): the third variant ID is always
-    # absent here. The parameter itself leaves ``compute_model_version`` with
-    # the calibration data split (#414).
-    cal_v = None
-
-    mv = compute_model_version(params_training, base_v, train_v, cal_v)
-    sid = compute_search_id(params_training, base_v, train_v, cal_v)
+    mv = compute_model_version(params_training, base_v, train_v)
+    sid = compute_search_id(params_training, base_v, train_v)
     logger.info("Model version: %s", mv)
     logger.info("search_id: %s", sid)
     logger.info("base_dataset_version: %s", base_v)
     logger.info("train_variant_id:     %s", train_v)
-    if cal_v is not None:
-        logger.info("calibration_variant_id: %s", cal_v)
 
     runtime_params = {
         "base_dataset_version": base_v,
         "train_variant_id": train_v,
-        "calibration_variant_id": cal_v if cal_v is not None else _NONE_PLACEHOLDER,
         "model_version": mv,
         "search_id": sid,
         "_fresh_hpo": fresh_hpo,
@@ -1537,10 +1489,6 @@ def training(
             "base_dataset_version": base_v,
             "train_variant_id": train_v,
         }
-        # Omit when None: the manifest uses no _NONE_PLACEHOLDER sentinel (unlike
-        # runtime_params, whose placeholder is for the Spark substitution layer).
-        if cal_v is not None:
-            stub_kwargs["calibration_variant_id"] = cal_v
         _write_manifest_stub(data_dir / "models" / mv, stub_kwargs, run_context.run_id)
 
     executed = _execute_pipeline(
@@ -1572,8 +1520,6 @@ def training(
         "train_variant_id": train_v,
         "artifacts": _dir_artifacts(version_dir),
     }
-    if cal_v is not None:
-        metadata_kwargs["calibration_variant_id"] = cal_v
 
     extra = _sample_weight_extra(version_dir) or {}
     extra.update(_group_filter_extra(version_dir) or {})
@@ -1595,11 +1541,17 @@ def training(
 def _dataset_versions_from_model_manifest(
     model_dir: Path,
     data_dir: Path,
-) -> tuple[str, str, str | None]:
-    """Return (base_dataset_version, train_variant_id, calibration_variant_id) for a model.
+) -> tuple[str, str]:
+    """Return (base_dataset_version, train_variant_id) for a model.
 
     Reads the model's manifest; falls back to ``latest`` resolutions per layer
     when fields are missing.
+
+    Reads by name, never by shape, which is what makes a pre-#411 manifest
+    loadable: one written while calibration existed carries a third
+    ``calibration_variant_id`` field, and it is simply not read. Nothing here
+    validates the set of keys, so the extra one costs nothing and an operator
+    does not have to hand-edit old manifests to score with an old model.
     """
     try:
         manifest = read_manifest(model_dir)
@@ -1617,8 +1569,7 @@ def _dataset_versions_from_model_manifest(
     train_v = manifest.get("train_variant_id") or resolve_variant_id(
         base_dir, "train", None
     )
-    cal_v = manifest.get("calibration_variant_id")
-    return base_v, train_v, cal_v
+    return base_v, train_v
 
 
 @app.command(name="inference")
@@ -1689,7 +1640,7 @@ def inference(
         logger.error("Model version directory not found: %s", models_dir / mv)
         raise typer.Exit(code=1)
 
-    base_v, train_v, cal_v = _dataset_versions_from_model_manifest(
+    base_v, train_v = _dataset_versions_from_model_manifest(
         models_dir / mv, data_dir
     )
 
@@ -1705,13 +1656,10 @@ def inference(
     logger.info("Model version: %s (%s)", mv, model_version if model_version else "best")
     logger.info("base_dataset_version: %s", base_v)
     logger.info("train_variant_id:     %s", train_v)
-    if cal_v is not None:
-        logger.info("calibration_variant_id: %s", cal_v)
 
     runtime_params = {
         "base_dataset_version": base_v,
         "train_variant_id": train_v,
-        "calibration_variant_id": cal_v if cal_v is not None else _NONE_PLACEHOLDER,
         "model_version": mv,
         "snap_date": snap_date,
         "source_model_version": model_version,
@@ -1751,8 +1699,6 @@ def inference(
         "base_dataset_version": base_v,
         "train_variant_id": train_v,
     }
-    if cal_v is not None:
-        metadata_kwargs["calibration_variant_id"] = cal_v
 
     _write_pipeline_manifest(
         version_dir=version_dir,
@@ -1868,7 +1814,7 @@ def evaluation(
         logger.error("Model version directory not found: %s", models_dir / mv)
         raise typer.Exit(code=1)
 
-    base_v, train_v, cal_v = _dataset_versions_from_model_manifest(
+    base_v, train_v = _dataset_versions_from_model_manifest(
         models_dir / mv, data_dir
     )
 
@@ -1895,7 +1841,6 @@ def evaluation(
     runtime_params = {
         "base_dataset_version": base_v,
         "train_variant_id": train_v,
-        "calibration_variant_id": cal_v if cal_v is not None else _NONE_PLACEHOLDER,
         "model_version": mv,
         "snap_date": snap_date,
         # Also in pipeline_kwargs (which nodes create_pipeline wires in). Both

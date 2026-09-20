@@ -206,10 +206,11 @@ def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
     frame this pipeline reads, which is why each step below narrows before the
     next one runs.
 
-    The same four decisions appear in ``select_calibration_keys``, spelled out
-    there rather than shared through a helper: a helper holding four decisions
-    is what ADR-0008 §2 forbids, and the duplication is what makes each node
-    readable on its own.
+    The four decisions below are spelled out in the node body rather than
+    shared through a helper: a helper holding four decisions is what ADR-0008
+    §2 forbids, and spelling them out is what makes the node readable on its
+    own. ``select_val_keys`` / ``select_test_keys`` make the same decisions the
+    same way.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -225,7 +226,7 @@ def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
 
     # Decision — eligibility: only rows in the configured train months can be
     # drawn. A month belongs to exactly one split (A24), so this is also what
-    # keeps train disjoint from val / test / calibration. The "_or_all" is not
+    # keeps train disjoint from val / test. The "_or_all" is not
     # a shorthand: an empty month list leaves the pool *whole* rather than
     # empty. Unreachable today (``train_snap_dates`` is a required key), and
     # preserved rather than tightened because tightening it would change
@@ -257,46 +258,6 @@ def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
     # working columns are dropped here.
     return keys.select(*key_output_columns(identity_key, carry_columns))
 
-
-def select_calibration_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
-    """Select calibration identity keys: same four decisions as the train split.
-
-    One thing differs beyond the config keys: the sampling ``site``. It is what
-    stops calibration drawing the same rows as train — the two share
-    ``random_seed``, so without a distinct namespace the calibration set would
-    be a subset of the train draw (#140).
-    """
-    schema = get_schema(parameters)
-    time_col = schema["time"]
-    identity_key = schema["identity_columns"]
-
-    ds = parameters["dataset"]
-    seed = parameters.get("random_seed", 42)
-    group_keys = ds.get("sample_group_keys", [time_col])
-    carry_columns = ds.get("carry_columns", []) or []
-    cal_ratio = ds.get("calibration_sample_ratio", 1.0)
-    cal_overrides = ds.get("calibration_sample_ratio_overrides", {})
-    cal_months = [pd.Timestamp(d) for d in ds["calibration_snap_dates"]]
-
-    # Decision — eligibility: only rows in the configured calibration months —
-    # except that an empty month list leaves the pool whole, as it does for
-    # train. See ``select_train_keys`` for why that asymmetry is preserved.
-    pool = restrict_to_months_or_all(sample_pool, time_col, cal_months)
-    keys = pool.select(*sampling_columns(group_keys, identity_key, carry_columns))
-
-    if draw_can_drop_rows(cal_ratio, cal_overrides):
-        # Decision — how much of each stratum to keep.
-        keys = with_effective_sample_ratio(keys, group_keys, cal_ratio, cal_overrides)
-        # Decision — who survives, drawn under calibration's own site.
-        keys = keep_rows_drawn_under_ratio(
-            keys, identity_key, seed, site="calibration_keys",
-        )
-        log_sampled_keys(cal_ratio, group_keys, cal_overrides, "calibration_keys")
-    else:
-        log_sampled_keys(cal_ratio, group_keys, cal_overrides, site=None)
-
-    # Decision — identity key plus carry columns.
-    return keys.select(*key_output_columns(identity_key, carry_columns))
 
 
 def split_train_keys(
@@ -976,8 +937,6 @@ def validate_model_input_grain(
     train_dev_keys: DataFrame,
     train_dev_model_input: DataFrame,
     parameters: dict,
-    calibration_keys: DataFrame | None = None,
-    calibration_model_input: DataFrame | None = None,
 ) -> dict:
     """Pin each model_input's row count to its keys table's (B10).
 
@@ -1005,7 +964,6 @@ def validate_model_input_grain(
 
         train_keys        -> build_train_model_input        -> train_model_input
         train_dev_keys    -> build_train_dev_model_input    -> train_dev_model_input
-        calibration_keys  -> build_calibration_model_input  -> calibration_model_input
 
     Each row is a build node with nothing between its two ends, which is what
     makes equality the right comparison. The one thing worth checking rather
@@ -1015,10 +973,6 @@ def validate_model_input_grain(
     ``train_dev_model_input``) would make the gate always-false rather than
     merely absent, so ``test_the_pairing_is_keys_then_its_own_model_input``
     pins the argument order against the pipeline's input list.
-
-    ``calibration_keys`` only exists when ``--calibration`` is on, which is why
-    its two arguments default to None: the pipeline names them in this node's
-    input list only in that branch, and the Runner binds inputs positionally.
 
     **val and test are absent by necessity.** Neither has a landed frame at its
     keys' grain to compare against, and for test the missing frame would not be
@@ -1055,14 +1009,6 @@ def validate_model_input_grain(
         ("train", train_keys, train_model_input, train_scope),
         ("train_dev", train_dev_keys, train_dev_model_input, train_scope),
     ]
-    if calibration_model_input is not None:
-        pairs.append((
-            "calibration", calibration_keys, calibration_model_input,
-            {
-                "base_dataset_version": base_version,
-                "calibration_variant_id": parameters["calibration_variant_id"],
-            },
-        ))
 
     by_split: dict[str, SplitRowCounts] = {}
     splits: dict[str, dict] = {}
@@ -1113,10 +1059,6 @@ def validate_model_input_grain(
         # counts to another.
         "base_dataset_version": base_version,
         "train_variant_id": parameters["train_variant_id"],
-        "calibration_variant_id": (
-            parameters["calibration_variant_id"]
-            if calibration_model_input is not None else None
-        ),
         "splits": splits,
         # Named in the artifact, not only in this docstring: a reader who pulls
         # the report to ask "was my dataset checked" must not have to infer from
@@ -1160,13 +1102,13 @@ def filter_groups_with_positives(
     metrics_spark filters them again anyway, so keeping them only inflates the
     Hive table and wastes predict time.
 
-    train / train_dev / calibration are NOT filtered here, and it is no longer
-    because "their losses use every row" — that holds for ``binary`` and for
+    train / train_dev are NOT filtered here, and it is no longer because
+    "their losses use every row" — that holds for ``binary`` and for
     ``rank_xendcg``, but not for ``lambdarank``, whose gradient contribution
     over an all-negative group is exactly zero. train / train_dev get those
-    groups dropped at training time instead, per objective; calibration keeps
-    them under every objective. See the comment above the val / test nodes in
-    ``pipeline.py`` for why the split is drawn there rather than here.
+    groups dropped at training time instead, per objective. See the comment
+    above the val / test nodes in ``pipeline.py`` for why the split is drawn
+    there rather than here.
     """
     schema = get_schema(parameters)
     group_cols = [schema["time"]] + schema["entity"]

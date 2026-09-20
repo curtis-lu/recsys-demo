@@ -45,7 +45,6 @@ import datetime as _dt
 #: inference scored, so the two are naturally written as the same range.
 DATE_LIST_KEYS: tuple[tuple[str, str], ...] = (
     ("dataset", "train_snap_dates"),
-    ("dataset", "calibration_snap_dates"),
     ("dataset", "val_snap_dates"),
     ("dataset", "test_snap_dates"),
     ("evaluation", "snap_date"),

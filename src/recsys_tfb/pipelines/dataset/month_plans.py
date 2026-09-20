@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 def collect_dataset_snap_dates(parameters: dict) -> list[pd.Timestamp]:
-    """Return sorted union of train/cal/val/test snap_dates as pd.Timestamps.
+    """Return sorted union of train/val/test snap_dates as pd.Timestamps.
 
     Single source of truth for "which snap_dates does the dataset pipeline use".
     Used by apply_preprocessor_to_features (all splits) — fit_preprocessor_metadata
@@ -41,7 +41,6 @@ def collect_dataset_snap_dates(parameters: dict) -> list[pd.Timestamp]:
     ds = parameters["dataset"]
     dates: set[pd.Timestamp] = set()
     dates.update(pd.Timestamp(d) for d in ds["train_snap_dates"])
-    dates.update(pd.Timestamp(d) for d in ds.get("calibration_snap_dates", []))
     dates.update(pd.Timestamp(d) for d in ds.get("val_snap_dates", []))
     dates.update(pd.Timestamp(d) for d in ds.get("test_snap_dates", []))
     return sorted(dates)

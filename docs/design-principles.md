@@ -92,7 +92,7 @@ source ETL、dataset、inference 的資料組裝，以及 evaluation 的逐筆 j
 - category encoding 對照
 - `drop_columns`
 
-之後再將相同 metadata 套用到 train、calibration、val、test 與 inference。val、test 或未來資料不參與 encoding dictionary 的建立，避免前處理階段的資料洩漏。
+之後再將相同 metadata 套用到 train、val、test 與 inference。val、test 或未來資料不參與 encoding dictionary 的建立，避免前處理階段的資料洩漏。
 
 前處理器因此不只是 convenience artifact，而是訓練與推論之間的欄位合約。模型、test 預測與 inference 必須使用同一份 feature 順序與類別編碼。
 
@@ -144,12 +144,11 @@ SHAP 特徵歸因透過 `attribution.feature_attributions(model, X, feature_name
 |---|---|---|
 | `base_dataset_version` | 非抽樣 dataset 設定（**`test_snap_dates` 除外**，見下）、完整 schema、`feature_table` 欄名／型別／順序 | `preprocessor`、共用特徵表、val／test 資料 |
 | `train_variant_id` | train 抽樣比例、override、分層 keys、`train_dev_ratio`、`train_split_keys` | train／train_dev 資料 |
-| `calibration_variant_id` | calibration 抽樣比例、override、分層 keys | calibration 資料 |
 | `model_version` | 上述資料版本與 model-defining training 設定 | 模型、test 預測、inference／evaluation 結果 |
 
 版本以設定內容的 canonical representation 計算 8 碼 SHA-256 hash。相同版本輸入會得到相同版本 ID，不同實驗可以在相同 Hive table 或 artifact root 下並存。
 
-同一個原則往下推一層，得到一個刻意的例外：**`test_snap_dates` 不進 `base_dataset_version`**。test 資料不進任何模型擬合（`val` 驅動 early stopping、`calibration` 決定校準後輸出，兩者都留著），因此它決定的是「評估看了哪幾個月」這個**覆蓋範圍**，不是產物身分。多評估一個月因而不翻版本、不需要重訓，新舊月份的報表並存於同一個模型身分底下。理由與否決過的選項見 [ADR-0001](adr/0001-test-dates-out-of-dataset-version-identity.md)；操作見 [新增一個評估月份](operations/user-guides/adding-an-eval-month.md)。
+同一個原則往下推一層，得到一個刻意的例外：**`test_snap_dates` 不進 `base_dataset_version`**。test 資料不進任何模型擬合（`val` 驅動 early stopping，所以它留著），因此它決定的是「評估看了哪幾個月」這個**覆蓋範圍**，不是產物身分。多評估一個月因而不翻版本、不需要重訓，新舊月份的報表並存於同一個模型身分底下。理由與否決過的選項見 [ADR-0001](adr/0001-test-dates-out-of-dataset-version-identity.md)；操作見 [新增一個評估月份](operations/user-guides/adding-an-eval-month.md)。
 
 ### 只讓真正影響產物的設定翻版
 
@@ -181,7 +180,7 @@ training 的 manifest 讓 inference 與 evaluation 可以從 `model_version` 反
 
 dataset 使用 identity key、sampling site 與 random seed 計算固定 hash bucket。相同資料與設定會選出相同樣本，不受 Spark partition 排列或重跑次數影響。
 
-不同 sampling site，例如 train 與 calibration，即使共用 seed 也會使用不同 namespace，避免兩個用途意外取得完全相同的抽樣結果。
+不同 sampling site 即使共用 seed 也會使用不同 namespace，避免兩個用途意外取得完全相同的抽樣結果。今天只有 train keys 會抽樣（#414 移除 calibration 之後），namespace 仍然保留，因為 seed 是全 repo 共用的。
 
 ### 版本 ID 不代表來源資料內容完全相同
 

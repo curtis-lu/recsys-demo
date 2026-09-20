@@ -240,9 +240,6 @@ def parameters():
             "sample_group_keys": ["cust_segment_typ", "prod_name"],
             "sample_ratio_overrides": {},
             "train_dev_ratio": 0.2,
-            "enable_calibration": False,
-            "calibration_snap_dates": [],
-            "calibration_sample_ratio": 1.0,
             "val_snap_dates": _SNAP_DATES[3:4],
             "val_sample_ratio": 1.0,
             "test_snap_dates": _SNAP_DATES[4:5],
@@ -1172,7 +1169,6 @@ class TestApplyPreprocessorUnknownWarning:
             },
             "dataset": {
                 "train_snap_dates": ["2024-01-31"],
-                "calibration_snap_dates": [],
                 "val_snap_dates": [],
                 "test_snap_dates": [],
             },
@@ -1587,27 +1583,23 @@ class TestScopedNodesHandleHiveStringDates:
 # survives.
 # =============================================================================
 
-from recsys_tfb.pipelines.dataset.nodes import (
-    filter_groups_with_positives,
-    select_calibration_keys,
-)
+from recsys_tfb.pipelines.dataset.nodes import filter_groups_with_positives
 
 
-def _four_split_params(parameters, **overrides):
-    """``parameters`` reshaped so all four key-selecting splits are populated.
+def _all_split_params(parameters, **overrides):
+    """``parameters`` reshaped so every key-selecting split is populated.
 
-    The module fixture spends all five months on train/val/test, leaving none
-    for calibration — and a month may belong to exactly one split (invariant
-    A24, enforced on the ``dataset`` command), so they cannot silently share
-    one. Train gives up its third month to calibration; every month still comes
-    from ``_SNAP_DATES``, so resizing the fixture still resizes this.
+    A month may belong to exactly one split (invariant A24, enforced on the
+    ``dataset`` command), so the splits cannot silently share one. Every month
+    still comes from ``_SNAP_DATES``, so resizing the fixture still resizes
+    this. The third month is spare since #414 removed the calibration split;
+    it is left on train rather than deleted, so ``_SNAP_DATES`` stays the one
+    place the fixture's size is written down.
     """
     dataset = {
         **parameters["dataset"],
         "sample_ratio": 1.0,
-        "train_snap_dates": _SNAP_DATES[:2],
-        "calibration_snap_dates": _SNAP_DATES[2:3],
-        "enable_calibration": True,
+        "train_snap_dates": _SNAP_DATES[:3],
         "val_snap_dates": _SNAP_DATES[3:4],
         "test_snap_dates": _SNAP_DATES[4:5],
     }
@@ -1640,7 +1632,7 @@ def _columns_by_derivation_rule(keys, preprocessor, params) -> set[str]:
 class TestModelInputSchemaPerSplit:
     """D4 — every split's schema follows one derivation rule (ADR-0004).
 
-    train / train_dev / calibration are sampled with carry columns and so carry
+    train / train_dev are sampled with carry columns and so carry
     ``carry_columns``; val / test select identity only. ADR-0004 records that
     asymmetry as a *derived* result — sample weights only apply to train-side
     splits, and per-segment evaluation reads segments from ``sample_pool`` later
@@ -1650,7 +1642,7 @@ class TestModelInputSchemaPerSplit:
 
     @pytest.fixture
     def built(self, feature_table, label_table, sample_pool, parameters):
-        params = _four_split_params(parameters, carry_columns=["channel_preference"])
+        params = _all_split_params(parameters, carry_columns=["channel_preference"])
         preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
         pft = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(params), params,
@@ -1661,7 +1653,6 @@ class TestModelInputSchemaPerSplit:
         keys_by_split = {
             "train": train_keys,
             "train_dev": train_dev_keys,
-            "calibration": select_calibration_keys(sample_pool, params),
             "val": select_val_keys(sample_pool, params),
             "test": select_test_keys(sample_pool, _test_keys_plan(params), params),
         }
@@ -1733,7 +1724,7 @@ class TestQueryGroupCompleteness:
     def test_val_and_test_groups_hold_every_declared_item(
         self, feature_table, label_table, sample_pool, parameters
     ):
-        params = _four_split_params(parameters)
+        params = _all_split_params(parameters)
         preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
         pft = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(params), params,
@@ -1982,7 +1973,7 @@ class TestUnknownEncodingRateIsAssertable:
             },
             "dataset": {
                 "train_snap_dates": [_SNAP_DATES[0]],
-                "calibration_snap_dates": [], "val_snap_dates": [], "test_snap_dates": [],
+                "val_snap_dates": [], "test_snap_dates": [],
             },
         }
         return apply_preprocessor_to_features(ft, preprocessor, _encode_plan(params), params)
@@ -2106,93 +2097,57 @@ class TestSelectKeysOverridePath:
         assert 0 < result.count() < _expected_key_count(params, "train")
 
 
-class TestSelectCalibrationKeys:
-    """D23 — the calibration node, and its independence from the train draw.
+from recsys_tfb.pipelines.dataset.steps.sampling import (
+    keep_rows_drawn_under_ratio,
+    with_effective_sample_ratio,
+)
 
-    ``select_calibration_keys`` registers as a pipeline node whenever
-    ``enable_calibration`` is set, and had no unit test of its own.
+
+class TestSamplingSiteNamespacing:
+    """D23 — ``site`` namespaces a draw, and that is what makes it a namespace.
+
+    Until #414 this was covered through ``select_calibration_keys``: train and
+    calibration shared ``random_seed``, and without distinct sites the
+    calibration set was a subset of the train draw (#140). That node is gone
+    and with it the only pair of row-level draws, so the mechanism is pinned
+    here on the step itself — otherwise removing the second caller would have
+    silently removed the only test of the argument that keeps future callers
+    apart.
     """
 
-    def test_selects_the_calibration_months_at_full_population(
+    def _draw(self, keys, identity_key, *, site, seed=42):
+        drawn = keep_rows_drawn_under_ratio(
+            with_effective_sample_ratio(keys, [], 0.5, {}),
+            identity_key, seed, site=site,
+        )
+        return {tuple(r) for r in drawn.select(*identity_key).toPandas()
+                .itertuples(index=False)}
+
+    def test_two_sites_draw_different_rows_from_the_same_seed(
         self, sample_pool, parameters
     ):
-        params = _four_split_params(parameters)
-        result = select_calibration_keys(sample_pool, params)
-        assert result.count() == _expected_key_count(params, "calibration")
-        assert sorted(result.columns) == _identity_columns(params)
-        months = {
-            str(pd.Timestamp(d).date())
-            for d in result.select("snap_date").distinct().toPandas()["snap_date"]
-        }
-        assert months == set(params["dataset"]["calibration_snap_dates"])
+        """Same frame, same ratio, same seed — only ``site`` differs."""
+        identity_key = get_schema(parameters)["identity_columns"]
+        keys = sample_pool.select(*identity_key)
 
-    def test_carry_columns_reach_calibration_keys(self, sample_pool, parameters):
-        """Calibration makes the same carry decision train does."""
-        params = _four_split_params(parameters, carry_columns=["channel_preference"])
-        result = select_calibration_keys(sample_pool, params)
-        assert "channel_preference" in result.columns
+        a = self._draw(keys, identity_key, site="sample_keys")
+        b = self._draw(keys, identity_key, site="some_other_split_keys")
 
-    def test_the_two_nodes_pass_different_sampling_sites(
-        self, sample_pool, parameters, monkeypatch
+        assert a and b, "a ratio of 0.5 drew nothing — the test is vacuous"
+        assert a != b
+
+    def test_the_same_site_draws_the_same_rows_twice(
+        self, sample_pool, parameters
     ):
-        """The wiring, asserted structurally rather than through the draw.
+        """The other half: the draw is deterministic, so the difference above
+        is the site and not run-to-run noise."""
+        identity_key = get_schema(parameters)["identity_columns"]
+        keys = sample_pool.select(*identity_key)
 
-        Whether two hash sites happen to produce different key sets depends on
-        where 24 particular entities land; whether the two nodes *ask* for
-        different sites does not. A spy answers the actual question — #140's
-        concern is that the two share a seed and would otherwise draw the same
-        rows.
-        """
-        import recsys_tfb.pipelines.dataset.nodes as nodes
-        from recsys_tfb.pipelines.dataset.steps.sampling import keep_rows_drawn_under_ratio
-
-        seen = {}
-
-        def _spy(keys, identity_key, seed, *, site):
-            seen[site] = seen.get(site, 0) + 1
-            return keep_rows_drawn_under_ratio(keys, identity_key, seed, site=site)
-
-        # The draw is the step that takes ``site``; spying on it is spying on
-        # the wiring. Both splits must sample for it to be reached at all, so
-        # the ratios below are what put each node on its drawing path.
-        monkeypatch.setattr(nodes, "keep_rows_drawn_under_ratio", _spy)
-        params = _four_split_params(
-            parameters, sample_ratio=0.5, calibration_sample_ratio=0.5,
+        assert (
+            self._draw(keys, identity_key, site="sample_keys")
+            == self._draw(keys, identity_key, site="sample_keys")
         )
-        select_train_keys(sample_pool, params)
-        select_calibration_keys(sample_pool, params)
-
-        assert len(seen) == 2, f"both nodes used the same sampling site: {seen}"
-        assert set(seen.values()) == {1}
-
-    def test_different_sites_draw_different_rows(self, sample_pool, parameters):
-        """And the site argument is what makes the draws differ.
-
-        Same pool, same months, same ratio, same seed — only ``site`` differs.
-        Paired with the spy above: that one pins the wiring, this one pins that
-        the wiring matters.
-        """
-        # The two splits are given the *same* months here so ``site`` is the
-        # only thing left that can differ. A24 forbids that overlap on the
-        # ``dataset`` command, not in the node — which is what makes it usable
-        # as an isolating fixture and useless as a config.
-        months = list(_SNAP_DATES[:2])
-        params = _four_split_params(
-            parameters,
-            sample_ratio=0.5,
-            calibration_sample_ratio=0.5,
-            train_snap_dates=months,
-            calibration_snap_dates=months,
-        )
-
-        def _draw(node):
-            keys = node(sample_pool, params)
-            return {tuple(r) for r in keys.toPandas().itertuples(index=False)}
-
-        train_draw = _draw(select_train_keys)
-        cal_draw = _draw(select_calibration_keys)
-        assert train_draw and cal_draw
-        assert train_draw != cal_draw
 
 
 class TestSelectValKeysSampling:
@@ -3126,7 +3081,6 @@ class TestValidateNumericPrecisionCoversTheWidenedCast:
 from recsys_tfb.pipelines.dataset.nodes import validate_model_input_grain
 
 _TRAIN_VARIANT = "tv000001"
-_CAL_VARIANT = "cv000001"
 
 
 def _grain_params(parameters) -> dict:
@@ -3134,7 +3088,6 @@ def _grain_params(parameters) -> dict:
         **parameters,
         "base_dataset_version": _BASE_VERSION,
         "train_variant_id": _TRAIN_VARIANT,
-        "calibration_variant_id": _CAL_VARIANT,
     }
 
 
@@ -3144,8 +3097,8 @@ def _land(spark, tmp_path, df, name, *, variant_col="train_variant_id",
 
     Partitioned by the two columns the gate's path filter reads and no more:
     ``snap_date`` is a partition column in the real catalog too, but the gate
-    never looks at it (train / train_dev / calibration carry no month plan —
-    they rebuild in full), so adding it here would only make the fixture longer.
+    never looks at it (train / train_dev carry no month plan — they rebuild in
+    full), so adding it here would only make the fixture longer.
     The partition_filter columns are dropped on read because
     ``HiveTableDataset.load`` drops them; the gate reads paths, not columns, so
     this is fidelity rather than a dependency.
@@ -3267,30 +3220,27 @@ class TestValidateModelInputGrain:
             )
         assert "train_variant_id" in str(exc.value)
 
-    def test_calibration_is_checked_only_when_it_is_wired(
+    def test_only_train_and_train_dev_are_checked(
         self, spark, tmp_path, feature_table, label_table, sample_pool, parameters,
     ):
+        """The gate's whole scope, named rather than left to the reader.
+
+        Until #414 the node took two trailing optional arguments for the
+        calibration pair; the report's split list is what said whether they had
+        been wired. With the branch gone the list is fixed, and asserting it is
+        what would catch a split being dropped from the gate by accident.
+        """
         keys, model_input = self._built(
             spark, feature_table, label_table, sample_pool, parameters)
         landed_keys = _land(spark, tmp_path, keys, "k")
         landed_mi = _land(spark, tmp_path, model_input, "mi")
 
-        without = validate_model_input_grain(
+        report = validate_model_input_grain(
             landed_keys, landed_mi, landed_keys, landed_mi,
             _grain_params(parameters),
         )
-        assert sorted(without["splits"]) == ["train", "train_dev"]
-
-        with_cal = validate_model_input_grain(
-            landed_keys, landed_mi, landed_keys, landed_mi,
-            _grain_params(parameters),
-            _land(spark, tmp_path, keys, "ck",
-                  variant_col="calibration_variant_id", variant=_CAL_VARIANT),
-            _land(spark, tmp_path, model_input, "cmi",
-                  variant_col="calibration_variant_id", variant=_CAL_VARIANT),
-        )
-        assert sorted(with_cal["splits"]) == [
-            "calibration", "train", "train_dev"]
+        assert sorted(report["splits"]) == ["train", "train_dev"]
+        assert "calibration_variant_id" not in report
 
     def test_the_report_says_which_splits_are_out_of_scope_and_why(
         self, spark, tmp_path, feature_table, label_table, sample_pool, parameters,
