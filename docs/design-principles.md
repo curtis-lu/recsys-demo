@@ -180,7 +180,7 @@ training 的 manifest 讓 inference 與 evaluation 可以從 `model_version` 反
 
 dataset 使用 identity key、sampling site 與 random seed 計算固定 hash bucket。相同資料與設定會選出相同樣本，不受 Spark partition 排列或重跑次數影響。
 
-不同 sampling site 即使共用 seed 也會使用不同 namespace，避免兩個用途意外取得完全相同的抽樣結果。今天只有 train keys 會抽樣（#414 移除 calibration 之後），namespace 仍然保留，因為 seed 是全 repo 共用的。
+不同 sampling site 即使共用 seed 也會使用不同 namespace，避免兩個用途意外取得完全相同的抽樣結果。#414 移除 calibration 之後仍有三個 site：train keys（`sample_keys`）、train／train-dev 切分（`split_train_dev`）、val 抽樣（`val_keys`）。
 
 ### 版本 ID 不代表來源資料內容完全相同
 

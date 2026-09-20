@@ -81,11 +81,16 @@ TRAIN_SAMPLING_KEYS: frozenset[str] = frozenset({
     "train_dev_ratio",
     "train_split_keys",
 })
-#: Every sampling key stripped from ``base_dataset_version``. Train is the only
-#: sampling layer left since #411 removed the calibration split, so this is
-#: currently an alias; it stays a separate name because the stripping rule
-#: ("sampling never keys the base version") is the thing being expressed, not
-#: "the train keys happen to be these".
+#: The sampling keys **stripped** from ``base_dataset_version`` — which is not
+#: the same as "every key that drives a draw", and the name predates the
+#: distinction. val samples too (``val_sample_ratio`` / ``val_sample_keys``,
+#: drawn under ``site="val_keys"``) and its keys deliberately stay in the
+#: payload, because base is the only ID val artifacts are split by: stripping
+#: them would let a new val draw read back the old val parquet (ADR-0016, and
+#: the ``TRAIN_SAMPLING_KEYS`` comment above). So this set has exactly one
+#: member layer since #414 removed the calibration one, making it an alias
+#: today; it keeps its own name because what it expresses is the stripping
+#: rule, not "the train keys happen to be these".
 ALL_SAMPLING_KEYS: frozenset[str] = TRAIN_SAMPLING_KEYS
 
 # Dataset keys that define data *coverage* only, never artifact identity.

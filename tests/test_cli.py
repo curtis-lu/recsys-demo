@@ -3730,13 +3730,30 @@ class TestAPreCalibrationModelManifestStillResolves:
     the two live IDs; the command half says nothing *later* in inference or
     evaluation trips over the extra field, which is where a "manifest looks
     wrong" check would actually live.
+
+    **The IDs on disk deliberately differ from the ones in the manifest.**
+    ``_dataset_versions_from_model_manifest`` falls back to the ``latest``
+    symlinks per layer when a field is missing, so a fixture whose symlinks
+    resolve to the manifest's own IDs cannot tell "read the manifest" apart
+    from "read nothing and fall back" — both produce the same answer and the
+    test passes with the manifest read deleted. The ``latest`` links here point
+    at ``fallback``/``fb000000``, which is what makes the assertions below
+    discriminating.
     """
+
+    #: What the model's manifest says. Not what ``latest`` points at.
+    MANIFEST_BASE_V = "abc12345"
+    MANIFEST_TRAIN_V = "11111111"
+    #: What the ``latest`` symlinks resolve to — the fallback answer, which
+    #: every assertion below must NOT get.
+    FALLBACK_BASE_V = "fallback"
+    FALLBACK_TRAIN_V = "fb000000"
 
     STALE_MANIFEST = {
         "version": "a1b2c3d4",
         "pipeline": "training",
-        "base_dataset_version": "abc12345",
-        "train_variant_id": "11111111",
+        "base_dataset_version": MANIFEST_BASE_V,
+        "train_variant_id": MANIFEST_TRAIN_V,
         "calibration_variant_id": "cccccccc",
         "parameters": {"training": {"calibration": {"enabled": True}}},
     }
@@ -3760,7 +3777,11 @@ class TestAPreCalibrationModelManifestStillResolves:
         (tmp_path / "conf" / "base" / "parameters_evaluation.yaml").write_text(
             yaml.dump({"evaluation": {"snap_date": "2026-01-31"}})
         )
-        _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
+        # latest -> the fallback IDs, NOT the manifest's: see the class
+        # docstring for why that gap is the whole point.
+        _make_base_and_train_variant(
+            tmp_path, base_v=self.FALLBACK_BASE_V, train_v=self.FALLBACK_TRAIN_V,
+        )
         models_dir = tmp_path / "data" / "models"
         version_dir = models_dir / "a1b2c3d4"
         version_dir.mkdir(parents=True)
@@ -3768,13 +3789,22 @@ class TestAPreCalibrationModelManifestStillResolves:
         (models_dir / "best").symlink_to(version_dir.resolve())
         return version_dir
 
+    def test_the_fixture_can_tell_the_manifest_from_the_fallback(self, tmp_path):
+        """Guards the guard: if these ever coincide every test below is vacuous."""
+        assert self.MANIFEST_BASE_V != self.FALLBACK_BASE_V
+        assert self.MANIFEST_TRAIN_V != self.FALLBACK_TRAIN_V
+
+        self._conf(tmp_path)
+        dataset_dir = tmp_path / "data" / "dataset"
+        assert (dataset_dir / "latest").resolve().name == self.FALLBACK_BASE_V
+
     def test_the_resolver_returns_the_two_live_ids(self, tmp_path):
         from recsys_tfb.__main__ import _dataset_versions_from_model_manifest
 
         version_dir = self._conf(tmp_path)
         assert _dataset_versions_from_model_manifest(
             version_dir, tmp_path / "data"
-        ) == ("abc12345", "11111111")
+        ) == (self.MANIFEST_BASE_V, self.MANIFEST_TRAIN_V)
 
     @pytest.mark.parametrize("command", ["inference", "evaluation"])
     def test_the_command_resolves_the_versions_off_the_stale_manifest(
@@ -3805,8 +3835,8 @@ class TestAPreCalibrationModelManifestStillResolves:
             os.chdir(old_cwd)
 
         assert result.exit_code == 0, result.output
-        assert captured.get("base_dataset_version") == "abc12345", captured
-        assert captured.get("train_variant_id") == "11111111", captured
+        assert captured.get("base_dataset_version") == self.MANIFEST_BASE_V, captured
+        assert captured.get("train_variant_id") == self.MANIFEST_TRAIN_V, captured
         # The stale field must not be carried forward as a substitution
         # variable either: no catalog entry spells ${calibration_variant_id}
         # any more, so an unused one would only mislead the next reader.

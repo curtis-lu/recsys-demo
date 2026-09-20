@@ -209,8 +209,10 @@ def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
     The four decisions below are spelled out in the node body rather than
     shared through a helper: a helper holding four decisions is what ADR-0008
     §2 forbids, and spelling them out is what makes the node readable on its
-    own. ``select_val_keys`` / ``select_test_keys`` make the same decisions the
-    same way.
+    own. No other node makes this same set of four since #414 removed
+    ``select_calibration_keys``: ``select_val_keys`` draws per *entity* over a
+    de-duplicated population and carries nothing, and ``select_test_keys``
+    makes no draw at all.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -257,7 +259,6 @@ def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
     # columns that travel on to model_input for downstream weighting. The draw's
     # working columns are dropped here.
     return keys.select(*key_output_columns(identity_key, carry_columns))
-
 
 
 def split_train_keys(

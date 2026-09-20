@@ -882,11 +882,17 @@ class TestSplitUnitKeysVersionRouting:
         note), never a number to re-record until the test passes again.
 
         ``base_dataset_version`` was re-recorded exactly once, by #414, and
-        that is the deliberate case the paragraph above describes: removing
-        calibration deletes four keys from every ``dataset:`` block, the block
-        is hashed whole, so the ID moves for everyone. It is in the upgrade
-        note (rebuild the dataset, retrain, re-promote by hand). ``0675afb8``
-        was the pre-#414 value.
+        that is the deliberate case the paragraph above describes. Which of
+        the four deleted keys actually moved it is worth stating, because
+        "four keys went, so of course it moved" is not the reason:
+        ``calibration_sample_ratio`` / ``_overrides`` were sampling keys and
+        were stripped before hashing, so deleting them moves nothing. It is
+        ``enable_calibration`` and ``calibration_snap_dates`` that were in the
+        payload — and this fixture only ever spelled the latter, so
+        ``0675afb8`` -> ``d108b398`` is that one key leaving. A real conf
+        spells both. Either way the ID moves for everyone, which is what the
+        upgrade note covers (rebuild the dataset, retrain, re-promote by
+        hand).
 
         ``train_variant_id`` is NOT re-recorded and must not be: the
         train-sampling subset is untouched by #414, so ADR-0016's zero-
