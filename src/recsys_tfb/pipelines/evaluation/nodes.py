@@ -292,7 +292,10 @@ def make_prepare_eval_data_node(population_name: str):
         # counts line up, which hides the problem better than leaving it (bug 10).
         # Not core/consistency.py: a user-defined source table's quality is not a
         # framework invariant — the same boundary as inference_population's
-        # uniqueness in deliberate-non-goals.md. Checked on `labels` after the
+        # uniqueness, which is guaranteed by source_etl's `primary_key` +
+        # `quality_checks` and is a deliberate exception to the rule that new
+        # consistency invariants go into `core/consistency.py`.
+        # Checked on `labels` after the
         # month join, so it counts exactly the rows about to be joined. The
         # message carries counts only, never key values (they are entity ids).
         # Cost: one Spark action per run, a groupBy over one month of label rows

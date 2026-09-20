@@ -50,7 +50,7 @@ date: 2026-09-16
 5. **命名。** 曲線面積叫 `pr_auc`，不叫 `average_precision`：repo 裡 AP 已經是排序指標的名字（`map@K`、`ap_contrib@K`——一個 query 內被點的排多前面），同名放在同一份 JSON 會被讀錯。
    ROC-AUC 同樣有撞名問題：`diagnosis/metric/item_ability` 已經有 `raw_within_item_auc`／`query_centered_auc`，它的 `SCOPE` 明寫母體是「只含有正例的 query 的抽樣」、**不可與任何外部 AUC 比較**。本家族的 `roc_auc` 母體是全部曝光，所以報表段落必須把母體寫在數字旁邊，兩個 AUC 不得相減或並排比較。
 6. **粒度是「整體 ＋ 每個 item」**，分群（segment）先不做。per-item 要有**預算旋鈕**（照 `evaluation.diagnosis.item_ability` 的 `top_n` 先例）：這個情境的 item 是廣告組合，基數可能上千（示例部署的 22 個是商銀的事實，不是廣告的），`item × 1000 箱` 回 driver 的量要有上限。
-   **這不推翻 `docs/agents/deliberate-non-goals.md` 的〈per-item 指標沒有 precision〉**（那條標「永久」）。兩者是不同的量：那條講的是 `@K` 家族——`precision@K` 的分母是 K，是 per-query 的概念，攤不到單一 item 頭上（`metrics_spark.py::aggregate_per_item` 的 NOTE 就是這件事）。本家族 per-item 的 precision 分母是「該 item 在門檻以上的曝光數」，跟 K 無關。
+   **這不推翻既有決策〈per-item 指標沒有 precision〉**（那條標「永久」）。兩者是不同的量：那條講的是 `@K` 家族——`precision@K` 的分母是 K，是 per-query 的概念，攤不到單一 item 頭上（`metrics_spark.py::aggregate_per_item` 的 NOTE 就是這件事）。本家族 per-item 的 precision 分母是「該 item 在門檻以上的曝光數」，跟 K 無關。
 7. **報表必須寫出三件事**，缺一個就會被讀錯：
    - F1 最佳門檻是在這份資料上挑的，**而且解析度等於 bin 寬**（要把 bin 寬印出來）；不能直接搬去線上當設定值。
    - 本段的母體是**全部曝光**，主指標段的母體是**有正例的 query group**（被排除的數量在主指標的 `n_excluded_queries`）。兩段的 precision 不可互相比較。

@@ -30,7 +30,6 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 | 本機跑 Spark pipeline | `docs/operations/dev-setup/local-spark-setup.md`（或 local-spark skill）＋ 下方指令塊 |
 | pipeline 部分執行（模式 vs 切片、加月份的 auto-included、接續前提） | `docs/operations/user-guides/pipeline-slicing.md`；旗標本身的用法在該 pipeline 文件 §4 |
 | 踩到怪錯誤（ELOOP / 改了沒生效 / 組合跑才 fail） | `docs/operations/known-pitfalls.md` |
-| 覺得某處「該修但沒修」、或準備順手做掉一個延後項 | `docs/agents/deliberate-non-goals.md`（刻意不做的事＋理由。**票號與進度不在裡面**，查 `gh`） |
 | HPO 中斷接續 | `docs/pipelines/training.md` §4.7（操作）＋ §7.3（恢復語意與 `_hpo/` 清理） |
 | 想多評估一個月份（加 `test_snap_dates`） | `docs/operations/user-guides/adding-an-eval-month.md`（不翻版本、不重訓；四步驟＋驗收） |
 | 抽樣權重設定 | `docs/operations/user-guides/sampling-overrides-editor.md`（部分 config 靠 `scripts/sampling_overrides_editor.py`、`scripts/suggest_categorical_cols.py` 推導，非手填） |

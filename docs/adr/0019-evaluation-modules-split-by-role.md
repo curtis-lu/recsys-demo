@@ -43,7 +43,7 @@ date: 2026-09-13
 三件登記在案的違例，都指向同一個根因：
 
 1. **`nodes_spark.py` 帶 backend 後綴**——`pipeline-node-design.md`〈已登記的例外〉第一筆。pandas 雙軌制早就拆掉了，後綴指向不存在的東西（node 規則 6 的反面、規則 12）。
-2. **`comparison_nodes.py` 不符合架構稽核的 `nodes*.py` glob**——`deliberate-non-goals.md` 記的 #163 盲點。稽核以為 evaluation 的 node 只在一個檔。
+2. **`comparison_nodes.py` 不符合架構稽核的 `nodes*.py` glob**——這正是 #163 那個盲點。稽核以為 evaluation 的 node 只在一個檔。
 3. **`pipeline.py` 同時從兩個檔取 node**，還有一個動態 `importlib.import_module`（那一個是合法的：它組的是 `recsys_tfb.diagnosis.metric.{name}`，不指向 `steps/`，`architecture-constraints.md` 已登記）。
 
 另外還有沒登記、但判準管得到的：
@@ -158,7 +158,7 @@ node 規則 8 存在的理由是「讀者看一次目錄列表就分得出對外
 
 node 規則 8：`nodes.py` 是「這條 pipeline 的 ML 故事唯一的家」。compare 的五個 node 是同一條 pipeline 的三分之一，分開放的唯一理由是歷史。併進去之後 #163 那個 `nodes*.py` glob 盲點對 evaluation 自然消失——**但 #163 本身不關**，它是通用問題，關不關由使用者裁。
 
-**否決的替代**：留兩個檔、把第二個改名成 `nodes_compare.py` 讓 glob 抓到。這是「靠改檔名迴避稽核」，`deliberate-non-goals.md` 明文禁止。
+**否決的替代**：留兩個檔、把第二個改名成 `nodes_compare.py` 讓 glob 抓到。這是「靠改檔名迴避稽核」，而不放寬 glob 是使用者 2026-09-19 的裁決（#163，見 `docs/agents/architecture-constraints.md` A1）——改檔名是繞過那個裁決，不是遵守它。
 
 ## 決定 2：`make_diagnosis_node` 工廠留在 `nodes.py`
 
@@ -259,7 +259,7 @@ ADR-0014 在 training 收了 21 處。evaluation 的 13 處全在 `nodes_spark.p
 **模組路徑**：`pipelines.evaluation.nodes_spark`、`pipelines.evaluation.comparison_nodes`、`evaluation.baselines`、`evaluation.segments`、`evaluation.comparison.sources`、`evaluation.comparison.restrict`、`evaluation.comparison.alignment`。
 **符號名**：`persist_eval_predictions`（ADR-0018 刪掉的）、`_fmt_cell`、`_render_table`、`_render_section_extras`、`_k_to_lookup`、`rec_ks`、`_HIDDEN_METRIC_PREFIXES`、`_visible_metric_keys`（後兩個 ADR-0018 決定 4 刪掉的）。`validate_enriched_eval_predictions_present` 不改名（ADR-0018 決定 1 只改它的語意）。
 **登記表與稽核**：`tests/test_core/test_architecture_constraints.py` 的 `LITERAL_COLUMN_EXCEPTIONS`（4 筆路徑重指，見閘門 5）；`architecture-constraints.md` S6 那一節的登記表說明跟著改——表列的四筆路徑，以及表頭寫死的筆數（「14 筆／11 筆」那種數字，重指之後要重數）；同檔 S4 那一節拿 `comparison_nodes.py`、`comparison/restrict.py` 當實例的三處。
-**文件**：`docs/pipelines/evaluation.md`、`docs/agents/pipeline-node-design.md`（例外表）、`docs/agents/architecture-constraints.md`（上述四處）、`docs/agents/deliberate-non-goals.md`（#163 那條的例子）、`docs/operations/known-pitfalls.md` §12（varargs 那段若提到 `nodes_spark`）、`docs/adr/0015-compare-population-counted-in-query-groups.md`（提到 `comparison_nodes.py` 的那一處）、`docs/diagrams/`、`conf/base/catalog.yaml` 的註解（「由 `comparison_nodes.py::persist_eval_predictions` 寫入」那句）、`core/consistency.py` 的鏡像註解。
+**文件**：`docs/pipelines/evaluation.md`、`docs/agents/pipeline-node-design.md`（例外表）、`docs/agents/architecture-constraints.md`（上述四處）、`docs/operations/known-pitfalls.md` §12（varargs 那段若提到 `nodes_spark`）、`docs/adr/0015-compare-population-counted-in-query-groups.md`（提到 `comparison_nodes.py` 的那一處）、`docs/diagrams/`、`conf/base/catalog.yaml` 的註解（「由 `comparison_nodes.py::persist_eval_predictions` 寫入」那句）、`core/consistency.py` 的鏡像註解。
 **log 介面**：`nodes_spark` 這個 logger 名會變成 `nodes`；#198 記過「以 logger 名過濾的監控會靜默失效」，PR 說明要列出來。
 
 **更正（2026-09-14，#365）**：`evaluation.baselines` 不歸零（不搬，見〈呼叫端事實〉的更正）；模組路徑清單補 `evaluation.config_fingerprint`；登記表是 3 筆重指（見〈實作前的閘門〉的更正）。
@@ -276,7 +276,7 @@ ADR-0014 在 training 收了 21 處。evaluation 的 13 處全在 `nodes_spark.p
 | compare 模式「算」與「畫」分開、比較數字落 JSON（稽核 F） | 沒有效能證據、沒有讀者要那份數字 |
 | 指標家族參數化（稽核 J-2） | 跨三模組的重構，另一輪；停算那一半在 ADR-0018（報表凍結已解除，ADR-0020） |
 | 刪 `evaluation/statistics.py`、`calibration.py`（稽核 I） | 已在 `c88746a` 修掉，無事可做 |
-| training 的 7 個 diagnosis node 搬來 evaluation | 跟 `overall_map` 跨月合併同一個接縫，`deliberate-non-goals.md` 要另開一輪；本份不預留位置 |
+| training 的 7 個 diagnosis node 搬來 evaluation | 跟 `overall_map` 跨月合併同一個接縫，使用者要求另開一輪討論；本份不預留位置 |
 | `metric.k` 九處讀取收成一份（稽核 H） | 行為題不是結構題，歸 bug 輪（ADR-0020〈設計 H〉） |
 | 關 #163 | 通用問題，由使用者裁 |
 

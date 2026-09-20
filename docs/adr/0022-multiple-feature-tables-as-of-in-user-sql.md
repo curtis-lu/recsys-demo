@@ -28,7 +28,7 @@ date: 2026-09-16
 2. **「往回算」全部在使用者的來源 SQL 做。** SQL 在每一列候選上先算好 join 需要的欄（例如「該用哪一天的快照」），dataset 仍然只做等值 join。
 3. **框架不檢查「特徵有沒有算到曝光之後」。** 改在 `docs/pipelines/source_etl.md` 寫清楚這是來源 SQL 的責任，並附範例與自我檢查清單。
 
-   本決定**不廢止**既有的延後項 B2（`core/consistency.py` 的 Invariant legend：「label-window leakage columns reach features (specified but DEFERRED)」，`docs/agents/deliberate-non-goals.md` 記它在等排程）。兩者擋的不是同一件事：B2 擋「label 觀察窗算出來的欄位被當成特徵」，本決定講的是「特徵的時間對齊」。B2 的去留不在本輪範圍。
+   本決定**不廢止**既有的延後項 B2（`core/consistency.py` 的 Invariant legend：「label-window leakage columns reach features (specified but DEFERRED)」，在等排程）。兩者擋的不是同一件事：B2 擋「label 觀察窗算出來的欄位被當成特徵」，本決定講的是「特徵的時間對齊」。B2 的去留不在本輪範圍。
 4. **離線推論遇到多張特徵表時，在 CLI 入口直接擋下。** `inference` pipeline 只會接一張 `feature_table`，其他張會被漏掉。
 
 ## 考慮過、沒選的做法

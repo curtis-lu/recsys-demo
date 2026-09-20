@@ -434,11 +434,12 @@ processed／skipped 月份清單，與重構前的 baseline 逐字相同**。
   （本次順手把 import 恢復成字母序，`encodable_` 在 `encode_` 之前）。三道之後
   6 個 .py 的 `ast.dump` 完全相同。**沒做 ① ③ 直接比會 DIFF**——那不是語意改動，
   但也不能拿沒正規化的比對當通過。
-- **這個模組自此全部是公開名。** `deliberate-non-goals.md` 原本登記「混合命名是刻意的
+- **這個模組自此全部是公開名。** 舊版「刻意不做的事」地雷圖原本登記「混合命名是刻意的
   現況」——`encodable_categoricals`／`warn_unknown_encodings`（#185）已是公開名、這兩個
-  還不是。混合狀態消失，該列一併刪除。
+  還不是。混合狀態消失，該列一併刪除（該地雷圖檔案已於 2026-09-20 整份刪除，見
+  `docs/agents/issue-tracker.md`）。
 - **三處登記全部撤掉**：`pipeline-node-design.md`〈已登記的例外〉3 筆 → 2 筆；
-  `deliberate-non-goals.md` 刪該列；本節加這段修訂。另補一處本次才發現的連動——
+  該地雷圖同步刪該列；本節加這段修訂。另補一處本次才發現的連動——
   `architecture-constraints.md` 節三導言逐項複述那張表的內容（「evaluation 尚未依判準
   重整、training 的 7 個 diagnosis node 刻意不搬、`recsys_tfb.preprocessing` 的兩個
   底線名」），不改就會跟只剩 2 筆的表直接打架。同款矛盾在 #199 也發生過一次。

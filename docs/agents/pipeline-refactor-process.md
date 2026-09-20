@@ -132,7 +132,7 @@ inference 的順序是行為全部先（#191–#196）→ 純結構最後（#198
 
 **不照做會發生什麼**：你以為稽核在守著新目錄，其實它掃不到。而這個失效沒有任何訊號——測試照樣全綠。
 
-**為什麼不是「順手把 glob 放寬」**：使用者 2026-09-19 裁決不放寬（#163），而且判準明說不得靠改檔名迴避、也不得新增一條讓自己合規的規則。細節見 [`architecture-constraints.md`](architecture-constraints.md) 與 [`deliberate-non-goals.md`](deliberate-non-goals.md)。**要做先問使用者。**
+**為什麼不是「順手把 glob 放寬」**：使用者 2026-09-19 裁決不放寬（#163），而且判準明說不得靠改檔名迴避、也不得新增一條讓自己合規的規則。細節見 [`architecture-constraints.md`](architecture-constraints.md) A1 的〈這個檢查看不到〉。**要做先問使用者。**
 
 **誰擋得住**：沒人。
 
@@ -234,7 +234,6 @@ inference 的順序是行為全部先（#191–#196）→ 純結構最後（#198
 |---|---|
 | 重整成什麼形狀（node 邊界、body、機制放哪） | [`pipeline-node-design.md`](pipeline-node-design.md) |
 | 可機械檢查的約束、框架事實、例外登記 | [`architecture-constraints.md`](architecture-constraints.md) |
-| 刻意不做的事（動手前必掃） | [`deliberate-non-goals.md`](deliberate-non-goals.md) |
 | 測試 baseline 怎麼建、弄壞驗證怎麼還原、PR 推了新 commit 的坑 | [`known-pitfalls.md`](../operations/known-pitfalls.md) §5、§5b、§16 |
 | 假綠的形態對照、mutation 下在哪一行 | `test-false-green` skill |
 | 派工與審查 prompt 怎麼寫 | `dispatch-subagents` skill |
