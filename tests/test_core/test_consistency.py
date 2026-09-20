@@ -3743,3 +3743,162 @@ class TestRetiredCalibrationKeysA37:
             "training.calibration",
             "inference.use_calibration",
         )
+
+
+# =============================================================================
+# A38 — an optional-role column must not be declared a model feature
+# A39 — the prediction write target must declare every optional-role column
+# =============================================================================
+
+from recsys_tfb.core.consistency import (
+    optional_role_as_feature_errors,
+    optional_role_columns,
+    optional_role_columns_declared_errors,
+)
+
+
+def _event_params(event=None, categorical=("prod_name",)):
+    """The example roles, optionally declaring ``event``.
+
+    ``categorical_columns`` carries the item because A2 requires it to; a
+    fixture without it would make every A38 test below also true of a config
+    that A2 already rejects.
+    """
+    columns = {"time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}
+    if event is not None:
+        columns["event"] = event
+    return {
+        "schema": {"columns": columns},
+        "dataset": {
+            "prepare_model_input": {"categorical_columns": list(categorical)}
+        },
+    }
+
+
+class TestOptionalRoleColumns:
+    """The shared answer to "which columns did an optional role add"."""
+
+    def test_none_declared_is_empty(self):
+        assert optional_role_columns(_event_params()) == []
+
+    def test_a_declared_string_role_yields_one_column(self):
+        assert optional_role_columns(_event_params(event="impression_id")) == [
+            "impression_id",
+        ]
+
+    def test_a_declared_list_role_keeps_declaration_order(self):
+        assert optional_role_columns(
+            _event_params(event=["event_ts", "impression_id"])
+        ) == ["event_ts", "impression_id"]
+
+
+class TestOptionalRoleAsFeatureA38:
+    def test_no_optional_role_declared_passes(self):
+        assert optional_role_as_feature_errors(_event_params()) == []
+
+    def test_declared_but_not_listed_as_categorical_passes(self):
+        assert optional_role_as_feature_errors(
+            _event_params(event="impression_id")
+        ) == []
+
+    def test_an_event_column_in_categorical_columns_is_reported(self):
+        errs = optional_role_as_feature_errors(
+            _event_params(
+                event="impression_id",
+                categorical=("prod_name", "impression_id"),
+            )
+        )
+        assert len(errs) == 1
+        assert "A38" in errs[0]
+        assert "impression_id" in errs[0]
+        assert "event" in errs[0]
+
+    def test_the_message_points_at_the_feature_table(self):
+        """A gate that only refuses sends the user looking for a way round it.
+        The legitimate want — a feature about when the event happened — has an
+        answer, and the message has to carry it."""
+        errs = optional_role_as_feature_errors(
+            _event_params(event="event_ts", categorical=("prod_name", "event_ts"))
+        )
+        assert "feature table" in errs[0]
+
+    def test_every_offending_column_is_reported_at_once(self):
+        errs = optional_role_as_feature_errors(
+            _event_params(
+                event=["event_ts", "impression_id"],
+                categorical=("prod_name", "event_ts", "impression_id"),
+            )
+        )
+        assert len(errs) == 2
+        assert {"event_ts", "impression_id"} == {
+            c for c in ("event_ts", "impression_id")
+            if any(c in e for e in errs)
+        }
+
+    def test_the_item_exit_is_untouched(self):
+        """The discriminating case: ``schema.item`` reaches the model through
+        exactly this list, and A2 *requires* it to. A predicate that refused
+        every identity column here would contradict A2 and pass every test
+        above."""
+        assert optional_role_as_feature_errors(
+            _event_params(event="impression_id", categorical=("prod_name",))
+        ) == []
+
+    def test_an_absent_categorical_columns_key_passes(self):
+        params = _event_params(event="impression_id")
+        params["dataset"]["prepare_model_input"] = {}
+        assert optional_role_as_feature_errors(params) == []
+
+
+class TestOptionalRoleColumnsDeclaredA39:
+    def test_no_optional_role_declared_passes_whatever_the_catalog_says(self):
+        assert optional_role_columns_declared_errors(
+            _event_params(), ["cust_id", "score"], "training_eval_predictions",
+        ) == []
+
+    def test_a_declaration_covering_the_event_column_passes(self):
+        assert optional_role_columns_declared_errors(
+            _event_params(event="impression_id"),
+            ["cust_id", "snap_date", "prod_name", "impression_id", "score"],
+            "training_eval_predictions",
+        ) == []
+
+    def test_a_missing_event_column_is_reported(self):
+        errs = optional_role_columns_declared_errors(
+            _event_params(event="impression_id"),
+            ["cust_id", "snap_date", "prod_name", "score"],
+            "training_eval_predictions",
+        )
+        assert len(errs) == 1
+        assert "A39" in errs[0]
+        assert "impression_id" in errs[0]
+        assert "training_eval_predictions" in errs[0]
+
+    def test_the_message_names_the_downstream_symptom(self):
+        """Without it the operator reads "duplicate identity keys" from
+        evaluation and goes looking upstream at label_table, which is correct."""
+        errs = optional_role_columns_declared_errors(
+            _event_params(event="impression_id"), ["cust_id"], "t",
+        )
+        assert "indistinguishable" in errs[0]
+
+    def test_every_missing_column_of_one_role_is_named_in_one_error(self):
+        errs = optional_role_columns_declared_errors(
+            _event_params(event=["event_ts", "impression_id"]),
+            ["cust_id"],
+            "training_eval_predictions",
+        )
+        assert len(errs) == 1
+        assert "event_ts" in errs[0] and "impression_id" in errs[0]
+
+    def test_none_means_the_entry_infers_its_schema_and_drops_nothing(self):
+        assert optional_role_columns_declared_errors(
+            _event_params(event="impression_id"), None, "some_auto_table",
+        ) == []
+
+    def test_an_extra_declared_column_is_not_an_error(self):
+        assert optional_role_columns_declared_errors(
+            _event_params(event="impression_id"),
+            ["cust_id", "impression_id", "score", "label", "snap_date"],
+            "training_eval_predictions",
+        ) == []
