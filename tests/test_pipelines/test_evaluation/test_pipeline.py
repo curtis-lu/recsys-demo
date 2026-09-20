@@ -134,7 +134,15 @@ class TestRegistryDiagnosesFollowTheMode:
             EvalPartitions,
         )
 
-        params = {"evaluation": {"diagnosis": {"ci": {"enabled": False}}}}
+        # The schema block is required since #378: the sample gate asks
+        # whether an optional role makes its consumers inapplicable, and
+        # `get_schema` refuses a config that declares no roles at all.
+        params = {
+            "schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            }},
+            "evaluation": {"diagnosis": {"ci": {"enabled": False}}},
+        }
         segments = {"joined": [], "config_fingerprint": fingerprint(params)}
         outcome = {}
         for label in ("monitoring", "post-training"):

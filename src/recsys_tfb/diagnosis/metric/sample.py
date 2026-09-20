@@ -149,6 +149,11 @@ def draw_diagnosis_sample(
     所以退回舊行為（配置且存在於 frame 的欄）。
 
     sample_pdf 欄位：query cols（time + entity）、item、label、score，
+    **不含選用角色（``event``）的欄**——本抽樣的四個消費者在宣告了那些角色時
+    全部跳過（``_common.schema_skip_reason``），所以這份表根本不會被抽；加寬
+    這份欄位清單是替一個沒有消費者的產物付錢。這也是為什麼下面以
+    ``identity_columns`` 去重是安全的：跑得到這一行，就表示沒有宣告選用角色，
+    identity 就是 query cols ＋ item。
     ＋上述 segment 欄
     （存在者，供 by_segment 分組用；不存在則靜默略過），外加
     ``stratum``（``take_all`` / ``hash_ratio``）與 ``inclusion_weight``

@@ -900,12 +900,23 @@ def compute_overall_per_item(
     *,
     segment_columns: Sequence[str] = (),
     with_category: bool = False,
+    event_cols: Sequence[str] | None = None,
 ) -> dict:
     """Slim metric bundle: ``overall`` + ``per_item`` (+ optional slices).
 
     Composes the same Layer-1/2/3 building blocks as ``_compute_core`` but
     skips per-item-segment, macro_avg, and dataset_overview. Used by the
     popularity baseline, whose report section consumes these keys.
+
+    ``event_cols`` names the tie-break columns after the item. ``None`` — every
+    caller but one — means "read ``schema.columns.event``", which is right for
+    any frame at candidate grain. The exception is this function's own
+    recursion for the category pass: ``collapse_to_categories`` aggregates by
+    (query group, category), so its output holds one row per pair and no
+    ``event`` column at all. That call passes ``()`` explicitly. Getting it
+    wrong is not a wrong number but an ``AnalysisException`` for a column the
+    frame does not have, raised in the middle of an evaluation run — which is
+    how it was found.
 
     Slices (each costed against the model's matching pass, so the baseline
     comparison stays symmetric only when the model already computed them):
@@ -937,7 +948,7 @@ def compute_overall_per_item(
 
     df = rank_within_query(
         eval_predictions, group_cols, score_col, item_col,
-        schema.get("event", []),
+        schema.get("event", []) if event_cols is None else list(event_cols),
     )
     df = add_query_total_rel(df, group_cols, label_col)
     df_with_pos = df.filter(F.col("total_rel") > 0)
@@ -968,7 +979,12 @@ def compute_overall_per_item(
 
     if with_category and _build_category_mapping(parameters) is not None:
         collapsed = collapse_to_categories(eval_predictions, parameters)
-        result["category"] = compute_overall_per_item(collapsed, parameters)
+        # `event_cols=()`: the collapse has aggregated those columns away —
+        # see this function's docstring, and the twin call in
+        # `compute_all_metrics`.
+        result["category"] = compute_overall_per_item(
+            collapsed, parameters, event_cols=(),
+        )
     return result
 
 

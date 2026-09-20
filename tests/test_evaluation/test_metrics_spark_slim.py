@@ -138,3 +138,53 @@ def test_with_category_silently_skips_when_no_mapping(spark):
         _eval_predictions(spark), _parameters(), with_category=True
     )
     assert "category" not in result
+
+
+# ---------------------------------------------------------------------------
+# 宣告 event 時的大類面（#378 回歸測試，與 test_metrics_spark_category.py 同一個 bug）
+# ---------------------------------------------------------------------------
+
+
+def test_slim_category_pass_works_when_event_is_declared(spark):
+    """compute_overall_per_item 為了大類面遞迴呼叫自己，而遞迴那一次吃的是
+    collapse_to_categories 的輸出——那張表以 (query group, 大類) 聚合過，event
+    欄已經不在了。遞迴時沿用逐列那一面的決勝欄，Spark 會說 Column 'imp_id'
+    does not exist，而且是在 evaluation 跑到一半、算熱門度基準線的時候。
+
+    與 test_metrics_spark_category.py 的那一條是同一個 bug 的兩條路徑：主指標
+    走 _compute_core，基準線走這裡。修好其中一條另一條照樣會炸。
+    """
+    from recsys_tfb.evaluation.metrics_spark import compute_overall_per_item
+
+    params = {
+        "schema": {
+            "columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+                "label": "label", "score": "score", "rank": "rank",
+                "event": "imp_id",
+            },
+            "categorical_values": {"prod_name": ["fund_stock", "fund_bond", "exchange_fx"]},
+        },
+        "evaluation": {
+            "item_categories": {
+                "enabled": True, "unmapped": "singleton",
+                "mapping": {"fund": ["fund_stock", "fund_bond"]},
+            },
+        },
+    }
+    df = spark.createDataFrame(
+        [
+            ("20240331", "c1", "fund_bond", "i1", 0.9, 1),
+            ("20240331", "c1", "fund_bond", "i2", 0.7, 0),
+            ("20240331", "c1", "exchange_fx", "i3", 0.2, 0),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "imp_id", "score", "label"],
+    )
+    result = compute_overall_per_item(df, params, with_category=True)
+    assert "category" in result
+    # per_item 只收「有正例的 item」（aggregate_per_item 在該 item 為正例的列
+    # 上彙整），所以兩面都只有 fund_bond／fund；exchange_fx 全是負例。
+    assert set(result["per_item"]) == {"fund_bond"}
+    assert set(result["category"]["per_item"]) == {"fund"}
+    # 大類面確實跑完、而且回的是聚合後那張表的數字。
+    assert result["category"]["overall"]

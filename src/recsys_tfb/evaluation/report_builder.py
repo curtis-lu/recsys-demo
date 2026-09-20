@@ -1449,16 +1449,19 @@ def skipped_diagnosis_bullets(parameters: dict) -> list[str]:
     """每一項在目前 schema 下跳過的診斷，各一句「哪一項、為什麼」。
 
     走 ``contract.DIAGNOSES``（不是自己抄一份名單），所以之後新增的診斷自動
-    被問到。沒有任何一項被跳過時回空 list，主報表因此逐字不變。
+    被問到；``"ci"`` 另外補上——它是共用診斷抽樣的第四個消費者，但不在那份
+    registry 裡（它是頭號指標的信賴區間，不是一頁診斷）。沒有任何一項被跳過時
+    回空 list，主報表因此逐字不變。
     """
     from recsys_tfb.diagnosis.metric._common import schema_skip_reason
     from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
 
     out = []
-    for name in DIAGNOSES:
+    for name in (*DIAGNOSES, "ci"):
         reason = schema_skip_reason(parameters, name)
         if reason:
-            out.append(f"診斷「{name}」本次未算：{reason}")
+            label = "頭號指標的信賴區間" if name == "ci" else f"診斷「{name}」"
+            out.append(f"{label}本次未算：{reason}")
     return out
 
 

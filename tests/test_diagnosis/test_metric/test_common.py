@@ -205,7 +205,7 @@ def test_no_diagnosis_is_skipped_without_the_event_role():
     assert [n for n in DIAGNOSES if schema_skip_reason(params, n)] == []
 
 
-def test_the_three_query_ranking_diagnoses_are_skipped_with_event():
+def test_every_query_ranking_consumer_is_skipped_with_event():
     """判準是「這項診斷假不假設同組內 item 唯一」，逐項對程式碼確認過：這三項
     都在 driver 上以 order_by_score_then_item(..., items) 取組內名次，沒有接
     event 的決勝欄，所以同 item 同分的多列順序由列到達的順序決定。"""
@@ -213,9 +213,10 @@ def test_the_three_query_ranking_diagnoses_are_skipped_with_event():
 
     params = _skip_params(event="imp_id")
     assert {
-        "config_shift", "item_ability", "suppression",
+        "config_shift", "item_ability", "suppression", "ci",
     } == {
-        n for n in ("config_shift", "item_ability", "suppression", "model_capacity")
+        n for n in ("config_shift", "item_ability", "suppression",
+                    "model_capacity", "ci")
         if schema_skip_reason(params, n)
     }
 
@@ -260,6 +261,9 @@ def test_the_report_says_why_a_skipped_page_is_missing():
 
     assert skipped_diagnosis_bullets(_skip_params()) == []
     lines = skipped_diagnosis_bullets(_skip_params(event="imp_id"))
-    assert len(lines) == 3
+    # 三項 registry 診斷 ＋ 頭號指標的信賴區間（共用抽樣的第四個消費者，不在
+    # contract.DIAGNOSES 裡，所以只列 DIAGNOSES 會漏掉它）。
+    assert len(lines) == 4
     assert all("event" in line for line in lines)
     assert any("suppression" in line for line in lines)
+    assert any("信賴區間" in line for line in lines)
