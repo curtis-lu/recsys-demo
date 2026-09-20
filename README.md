@@ -38,7 +38,7 @@
 
 **推論輸出** —— inference pipeline 會使用指定或已核准的 `model_version` 產生版本化排序結果，最終發布至 Hive 表 `ranked_predictions`。每筆資料包含 `time`、`entity`、`item`、`score`、`rank` 與 `model_version`；排序結果必須先通過 `validate_predictions` 的完整性與排名一致性檢查，才會由 `publish_predictions` 發布。
 
-> `score` 表示模型輸出的排序分數；只有在模型或校準流程具有相應定義時，才可解讀為事件發生機率。
+> `score` 表示模型輸出的排序分數，不保證可解讀為事件發生機率——框架不提供機率校準機制（見 5. FAQ Q4）。
 
 ### 限制條件
 
@@ -67,12 +67,13 @@
 
 框架依據 `parameters.yaml`、`parameters_*.yaml` 中會影響產物的設定內容，以及各層上游版本的關聯，計算 8 碼 hash，讓資料集、前處理器、模型與預測結果能互相對齊，也讓不同抽樣或模型實驗可以並存。純執行環境、logging 或監控類設定不會改變產物版本。
 
-- `base_dataset_version`：由 train／val／calibration 日期、前處理設定、schema，以及 `feature_table` 的欄位名稱、型別與順序決定；對應前處理器、共用特徵表與 val/test 資料。**`test_snap_dates` 不在其中**——它只定義評估的覆蓋範圍，加一個評估月份不翻版本、不需要重訓（見 [`adding-an-eval-month.md`](docs/operations/user-guides/adding-an-eval-month.md)）。
-- `train_variant_id`：由 train 的抽樣比例、分層 override 與 `train_dev_ratio` 決定；對應 train/train_dev 資料。
-- `calibration_variant_id`：啟用機率校準時，由 calibration 的抽樣設定決定。
-- `model_version`：由上述資料版本及會影響模型的 training 設定決定，包含演算法參數、HPO、特徵選擇、機率校準與樣本權重等。
+- `base_dataset_version`：由 train／val 日期、前處理設定、schema，以及 `feature_table` 的欄位名稱、型別與順序決定；對應前處理器、共用特徵表與 val/test 資料。**`test_snap_dates` 不在其中**——它只定義評估的覆蓋範圍，加一個評估月份不翻版本、不需要重訓（見 [`adding-an-eval-month.md`](docs/operations/user-guides/adding-an-eval-month.md)）。
+- `train_variant_id`：由 train 的抽樣比例、分層 override 與 `train_dev_ratio` 決定；對應 train/train_dev 資料，是唯一的 variant 層（#411 移除了 calibration 那一層）。
+- `model_version`：由上述資料版本及會影響模型的 training 設定決定，包含演算法參數、HPO、特徵選擇與樣本權重等。
 
 相同輸入設定會得到相同版本；只調整 train 抽樣時，不必重建不受抽樣影響的前處理器與 val/test 資料。`latest` 代表最近成功產生的資料版本，`best` 則代表經人工核准、供 inference 預設使用的模型版本。
+
+**升級注意**：#411 把校準相關設定鍵從 `dataset:` 子樹整包移除，而 `base_dataset_version` 是對整個 `dataset:` 子樹（扣除上述例外）取 hash，所以這次升級會讓 `base_dataset_version` **一次性全部翻新**——既有資料集需要重建、模型需要重訓並重新人工 promote；`train_variant_id` 不受影響。這是刻意的版本決策，不是 regression（見 [`using-a-release.md`](docs/operations/user-guides/using-a-release.md) §7）。
 
 ### 保留人工決策關卡
 
@@ -117,9 +118,9 @@ training 的 HPO 另有 checkpoint 機制，執行中斷後可沿用既有 Optun
 
 ### dataset pipeline
 
-將 `sample_pool` 依照各資料集的日期範圍與抽樣設定，產出並持久化 `train_keys`、`train_dev_keys`、`val_keys`、`test_keys`，以及啟用機率校準時的 `calibration_keys`。
+將 `sample_pool` 依照各資料集的日期範圍與抽樣設定，產出並持久化 `train_keys`、`train_dev_keys`、`val_keys`、`test_keys`。
 
-前處理器只使用 `train_snap_dates` 範圍內的 `feature_table` 建立，再套用至所有資料區間，產出共用的 `preprocessed_feature_table`。最後，各組 `*_keys` 依 `time + entity` 連接特徵，並依 `time + entity + item` 連接 `label_table`，產出 `train_model_input`、`train_dev_model_input`、`val_model_input`、`test_model_input`，以及可選的 `calibration_model_input`，供後續模型訓練、校準與評估使用。
+前處理器只使用 `train_snap_dates` 範圍內的 `feature_table` 建立，再套用至所有資料區間，產出共用的 `preprocessed_feature_table`。最後，各組 `*_keys` 依 `time + entity` 連接特徵，並依 `time + entity + item` 連接 `label_table`，產出 `train_model_input`、`train_dev_model_input`、`val_model_input`、`test_model_input`，供後續模型訓練與評估使用。
 
 - **資料一致性閘門**：在抽樣與前處理前，先檢查 item 集合是否與設定一致，並防止連續數值欄位被誤設為 categorical。
 - **決定性分層抽樣**：可在 `parameters_dataset.yaml` 設定 `sample_group_keys`、預設抽樣比例與各分層 override；抽樣由 identity key、使用場景與 random seed 計算固定 hash，因此相同輸入可重現相同結果。
@@ -128,21 +129,21 @@ training 的 HPO 另有 checkpoint 機制，執行中斷後可沿用既有 Optun
 - **類別欄位建議**：`scripts/suggest_categorical_cols.py` 依欄位型別與 cardinality 產出 categorical 候選清單，再由使用者確認是否納入 encoding。
 - **避免前處理資料洩漏**：preprocessor 僅從訓練期間 fit，內容包含 `feature_columns`、`categorical_columns`、category encoding 對照與 `drop_columns`；訓練與推論共用相同 metadata，確保欄位順序與編碼一致。
 - **建立完整模型輸入**：`label_table` 未匹配到的候選項目視為負例 (`label = 0`)；所有數值特徵欄（含整數與 boolean）統一轉為 `dataset.numeric_feature_storage_type` 宣告的型別（預設 float32），以降低後續 driver 端訓練的記憶體用量。
-- **移除無法評估的 query group**：僅針對 `val_model_input` 與 `test_model_input`，移除同一個 `(time, entity)` 下所有 item 的 label 皆為 0 的群組。這類群組沒有正例，無法衡量正例是否被排到前面，對 evaluation 的 mAP 沒有貢獻；train、train_dev 與 calibration 則保留全部樣本。
+- **移除無法評估的 query group**：僅針對 `val_model_input` 與 `test_model_input`，移除同一個 `(time, entity)` 下所有 item 的 label 皆為 0 的群組。這類群組沒有正例，無法衡量正例是否被排到前面，對 evaluation 的 mAP 沒有貢獻；train 與 train_dev 則保留全部樣本。
 
 ### training pipeline
 
-讀取 dataset pipeline 產出的 `train_model_input`、`train_dev_model_input`、`val_model_input`、`test_model_input`，以及啟用機率校準時的 `calibration_model_input`，依指定的資料版本訓練一個供所有 item 共用的模型。流程會先將各 split 快取至 driver，再進行模型格式轉換、超參數搜尋、最終模型產生、可選的機率校準，最後對 test set 產生預測、計算排序指標並輸出模型診斷。
+讀取 dataset pipeline 產出的 `train_model_input`、`train_dev_model_input`、`val_model_input`、`test_model_input`，依指定的資料版本訓練一個供所有 item 共用的模型。流程會先將各 split 快取至 driver，再進行模型格式轉換、超參數搜尋、最終模型產生，最後對 test set 產生預測、計算排序指標並輸出模型診斷。
 
 - **可擴充的模型介面**：訓練流程透過 `ModelAdapter` 封裝演算法差異，目前提供 LightGBM adapter，支援 pointwise `binary` 與 learning-to-rank `lambdarank`／`rank_xendcg` objective；不論使用哪種訓練目標，模型仍以 query group 內的排序表現進行評估。
 - **Driver-local 訓練快取**：各 split 會由 Hive／HDFS 複製為 driver-local Parquet，再由 adapter 轉換為演算法適用的可重用格式；例如 LightGBM 會建立 `.bin`，避免每次 HPO trial 重複掃描 Hive、轉換資料與分箱。
-- **訓練階段特徵選擇**：可透過 `training.feature_selection.exclude` 排除不使用的特徵，不需重建 dataset；HPO、最終訓練、校準、test 預測與 inference 會共用同一份特徵清單，避免訓練與推論欄位不一致。
+- **訓練階段特徵選擇**：可透過 `training.feature_selection.exclude` 排除不使用的特徵，不需重建 dataset；HPO、最終訓練、test 預測與 inference 會共用同一份特徵清單，避免訓練與推論欄位不一致。
 - **可設定的樣本權重**：可依 item、客群或其他帶入 model input 的欄位組合設定權重，且只作用於 train／train_dev；框架會產生套用報告，列出未匹配的設定，避免權重設定錯誤卻無聲失效。
 - **超參數搜尋與資料集職責分離**：Optuna HPO 使用 train 訓練、train_dev 執行 early stopping，並以 val 的排序指標選擇最佳超參數；`hpo_objective` 可選擇整體 query mAP 或各 item 等權重的 macro mAP。
 - **HPO 崩潰恢復**：啟用 `hpo_checkpointing` 時會保存 Optuna study 與目前最佳模型，訓練中斷後可只補跑剩餘 trials；若要放棄既有搜尋結果，可使用 `--fresh-hpo` 從頭開始。
-- **最終模型與機率校準**：HPO 完成後可直接沿用最佳 trial 模型，或以最佳參數在 train + train_dev 上重新訓練；若下游需要將 score 解讀為機率，可選擇使用獨立 calibration split 執行 sigmoid 或 isotonic calibration。
+- **最終模型**：HPO 完成後可直接沿用最佳 trial 模型，或以最佳參數在 train + train_dev 上重新訓練（框架已不提供機率校準機制，#411）。
 - **測試評估與模型診斷**：最終模型會對 test set 產生 `training_eval_predictions`，計算整體 mAP 與 per-item mAP attribution，並可輸出特徵統計、feature importance 與 SHAP 診斷（含 per-item 帶方向的特徵 profile、採購者對照與跨 item 偏離度 `item_idiosyncrasy`、象限（TP/FP/FN/TN）per-(item×象限) 聚合 profile 與極值案例 SHAP 圖）；模型、參數、指標與診斷也可記錄至 MLflow。
-- **版本化但不自動上線**：模型與其上游 `base_dataset_version`、`train_variant_id`、可選的 `calibration_variant_id` 及有效 training 設定共同決定 `model_version`。training 完成後不會自動供 inference 使用，仍須人工檢視評估結果並透過 `scripts/promote_model.py` 將核准版本設為 `best`。
+- **版本化但不自動上線**：模型與其上游 `base_dataset_version`、`train_variant_id` 及有效 training 設定共同決定 `model_version`。training 完成後不會自動供 inference 使用，仍須人工檢視評估結果並透過 `scripts/promote_model.py` 將核准版本設為 `best`。
 
 ### evaluation pipeline
 
@@ -256,13 +257,13 @@ python -m recsys_tfb label_etl --env production --target-dates 2026-01-31
 python -m recsys_tfb sample_pool_etl --env production --target-dates 2026-01-31
 ```
 
-確認單日資料正確後，再將 `--target-dates` 擴充為 train、calibration、val 與 test 所需的所有日期。source ETL 的完整設定與重跑方式見 [`docs/pipelines/source_etl.md`](docs/pipelines/source_etl.md)。
+確認單日資料正確後，再將 `--target-dates` 擴充為 train、val 與 test 所需的所有日期。source ETL 的完整設定與重跑方式見 [`docs/pipelines/source_etl.md`](docs/pipelines/source_etl.md)。
 
 ### 設定資料切分與前處理
 
 在 `conf/base/parameters_dataset.yaml` 完成以下設定：
 
-- `train_snap_dates`、`calibration_snap_dates`、`val_snap_dates`、`test_snap_dates` 必須互斥，並依時間先後切分，避免用未來資料評估過去模型。
+- `train_snap_dates`、`val_snap_dates`、`test_snap_dates` 必須互斥，並依時間先後切分，避免用未來資料評估過去模型（`calibration_snap_dates` 等校準相關設定鍵已隨 #411 移除，留在設定檔裡會被 CLI 的 A37 檢查擋下）。
 - `sample_group_keys` 定義分層抽樣維度，例如 `customer_segment + function_code + label`。
 - `carry_columns` 列出後續 sample weight 需要使用、但不屬於 identity 的欄位。
 - `prepare_model_input.categorical_columns` 列出類別欄，且必須包含 item 欄位 `function_code`。
@@ -290,10 +291,10 @@ python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_over
 
 - 初版可使用 pointwise `binary` objective；若要直接優化組內排序，再比較 `lambdarank` 或 `rank_xendcg`。
 - `hpo_objective: mean_ap` 讓每個 query group 等權；`macro_per_item_map` 則讓每個 item 等權，適合避免熱門功能主導調參結果。
-- 只有下游需要將 `score` 當機率使用時才啟用 calibration；dataset 的 `enable_calibration` 與 training 的 `calibration.enabled` 必須一起設定。
+- 框架已不提供機率校準機制（#411 移除）；`dataset.enable_calibration`、`training.calibration` 等退役設定鍵只要出現就會被 CLI 擋下（A37），刪除即可。下游若需要機率語意，責任在下游（見 5. FAQ Q4）。
 - 初次 smoke test 可降低 `n_trials` 與 `num_iterations`，確認資料流正確後再恢復正式搜尋規模。
 
-> 目前 inference 的 `validate_predictions` 會檢查 `score` 是否介於 0 與 1；若使用未校準的 ranking objective，需確認模型輸出符合此契約，或同步調整驗證規則。
+> inference 的 `validate_predictions` **不檢查** `score` 是否介於 0 與 1——`score_range` 刻意不在 `BATCH_CHECKS` 裡（`src/recsys_tfb/pipelines/inference/steps/validation.py`）。理由：`binary` objective 的輸出是 sigmoid，`[0, 1]` 由建構方式保證、這個檢查永遠不會紅；ranking objective 的原始輸出無界，同一個檢查會變成誤報。兩種都沒有資訊量（[ADR-0011](docs/adr/0011-inference-validation-two-layers.md) §2）。下游若需要 `score` 落在某個範圍，那是下游自己要驗的事。
 
 在 `conf/base/parameters_evaluation.yaml` 設定符合頁面展示空間的 `k_values`。例如首頁只顯示 3 個功能，就應特別關注 mAP@3 與 Recall@3，並設定重要客群的 `segment_columns`，避免整體指標掩蓋特定客群的退化。
 
@@ -331,7 +332,7 @@ python -m recsys_tfb evaluation --env production
 - 三張來源表在 identity key 上沒有重複，且各日期、各 item 的資料量符合預期。
 - `feature_table` 沒有使用 label 觀察窗內或未來才會產生的欄位。
 - 每個 query group 有足夠的候選 item；val／test 中有正例的 query group 數量足以代表真實使用情境。
-- train、calibration、val、test 的日期互斥，且 test 保持為最終 held-out 資料。
+- train、val、test 的日期互斥，且 test 保持為最終 held-out 資料。
 - 抽樣與 sample weight 沒有讓冷門功能或重要客群消失，未匹配的 weight key 已被檢視。
 - test 報表中的模型指標優於 popularity baseline，且 per-item、per-segment 指標沒有明顯退化。
 - `ranked_predictions` 每個 query group 都包含完整候選集合，`rank` 從 1 開始且與 `score` 由高到低一致。
@@ -354,7 +355,7 @@ python -m recsys_tfb evaluation --env production
 3. `sample_pool` 包含所有要比較的候選項目，而不是只保留 `label = 1` 的正例。
 4. `schema.categorical_values.<item>`、`inference.products` 與 `sample_pool` 使用相同的 item 集合；`label_table` 可以只包含其中一部分，但不可出現未宣告的 item。
 5. 特徵只使用 `time` 當下已知的資訊；label 觀察窗尚未結束的日期不能放進 train、val 或 test。
-6. train、calibration、val、test 日期彼此不重疊，並依時間先後排列。
+6. train、val、test 日期彼此不重疊，並依時間先後排列。
 7. item 必須列在 `categorical_columns`，且不可同時出現在 `drop_columns` 或 `training.feature_selection.exclude`。
 8. 不同 entity 若有不同候選資格，必須在建立 scoring dataset 時過濾，不可只期待模型將不適用的 item 排到最後。
 
@@ -366,11 +367,11 @@ python -m recsys_tfb evaluation --env production
 | 把「label 資料尚未到齊」當成 `label = 0` | 大量正例被誤標為負例，離線指標與模型方向失真 | 先確認觀察窗已結束、來源 partition 已到齊；只有「確定沒有發生事件」才能視為 0 |
 | 特徵使用快照日之後才產生的欄位 | test 指標異常漂亮，但推論時無法取得相同資訊 | feature SQL 必須採 point-in-time join，排除申請結果、觀察窗行為及事後彙總欄位 |
 | item 清單只改了一處 | CLI 被一致性檢查擋下，或某些 item 無法訓練、推論 | 同步修改 `schema.categorical_values`、sample pool SQL 與 `inference.products`；label SQL 不可產出未宣告的 item |
-| 日期雖未重疊，但 val／test 早於 train，或 label 尚未成熟 | 產生時間穿越或不完整 ground truth | 明確採用 `train → calibration → val → test` 的時間順序，並為每個日期保留完整 label 觀察窗 |
+| 日期雖未重疊，但 val／test 早於 train，或 label 尚未成熟 | 產生時間穿越或不完整 ground truth | 明確採用 `train → val → test` 的時間順序，並為每個日期保留完整 label 觀察窗 |
 | 連續數值欄誤放入 `categorical_columns`，或同一欄同時 categorical 與 drop | 編碼語意錯誤、前處理失敗，或該欄實際未進入模型 | 類別代碼先轉成 string／int；真正的連續數值欄不需列入 `categorical_columns` |
 | 手動填寫 `sample_ratio_overrides` 或 `sample_weights`，但 key 與資料不一致 | 抽樣或權重規則沒有套用，冷門 item／重要客群可能消失 | 使用 `sampling_overrides_editor.py` 產生 key，並檢查 training manifest 中的 unmatched keys |
 | 新的 weight 維度沒有放入 `carry_columns` | training 讀不到原始分群欄，weight 靜默落回 1.0 或被設定閘擋下 | 將欄位加入 `parameters_dataset.yaml` 的 `carry_columns`，重跑 dataset |
-| 使用 ranking objective，卻沿用 `binary_logloss` 或直接把 score 當機率 | early stopping 指標語意錯誤，或 inference 的 score range 檢查失敗 | ranking objective 搭配 `ndcg`／`map`；需要機率時使用 calibration，並確認 inference 的 score 契約 |
+| 使用 ranking objective，卻沿用 `binary_logloss` 或直接把 score 當機率 | early stopping 指標語意錯誤，或 inference 的 score range 檢查失敗 | ranking objective 搭配 `ndcg`／`map`；下游若需要機率語意，改用 `binary` objective 或自行在下游校準（框架已不提供機率校準機制），並確認 inference 的 score 契約 |
 | evaluation 用錯模式或日期 | 報表為空、讀到錯誤資料集，或使用尚未完成的 ground truth | 訓練後 test 評估使用 `--post-training`；上線後監控使用預設模式，並等待該期 label 觀察窗結束 |
 | training 完成後直接執行 inference | inference 找不到 `best`，或仍使用上一版模型 | 先審核評估結果，再以 `promote_model.py <model_version>` 人工發布 |
 
@@ -392,7 +393,7 @@ python -m recsys_tfb evaluation --env production
 |---|---|
 | source SQL、來源 partition 或同日期資料回補 | 重跑受影響日期的 source ETL，再重跑 dataset 與下游；同 schema 的資料回補不一定會改變版本 hash |
 | schema、feature 欄位、categorical/drop、`carry_columns` | `dataset → training → evaluation`，核准後再 inference |
-| train／calibration 抽樣比例 | `dataset → training → evaluation` |
+| train 抽樣比例 | `dataset → training → evaluation` |
 | objective、HPO、feature selection、sample weight | `training → evaluation`，不需重建 dataset |
 | inference 日期 | 只重跑 inference；上線後 evaluation 要等 label 成熟 |
 | evaluation 指標、分群或報表設定 | 只重跑 evaluation；已有 `enriched_eval_predictions` 且只做比較時可使用 `--compare-only` |
@@ -413,28 +414,27 @@ FAQ 只回答框架概念與選項如何取捨；若是設定無法執行、資�
 
 排序與分類的數學差異，見手冊 [`gbdt_learning_to_rank.md`](docs/handbooks/gbdt/gbdt_learning_to_rank.md)。
 
-**Q2. 為什麼資料要切成 train / train_dev / val / calibration / test 五份？各做什麼？**
+**Q2. 為什麼資料要切成 train / train_dev / val / test 四份？各做什麼？**
 
 | split | 設定（`parameters_dataset.yaml`） | 角色 |
 |---|---|---|
 | `train` | `train_snap_dates` | 建樹的主訓練資料 |
 | `train_dev` | 從 `train` 同期按 `train_dev_ratio` 切出 | early-stopping 監控集：單次訓練內決定樹長到第幾棵就停 |
 | `val` | `val_snap_dates` | HPO 目標集：跨多次試驗，使用排序指標選擇最佳超參數 |
-| `calibration` | `calibration_snap_dates`（可選） | 機率校準的 fit 資料 |
 | `test` | `test_snap_dates` | 最終 held-out，產生 `training_eval_predictions` 供上線前評估 |
 
-各 split 應使用不同且時間向前的快照日，例如 train 2025-01～10 → calibration 2025-11 → val 2025-12 → test 2026-01，避免拿未來資料回頭評估。
+各 split 應使用不同且時間向前的快照日，例如 train 2025-01～10 → val 2025-11 → test 2025-12，避免拿未來資料回頭評估。（原本另有 `calibration` split 供機率校準 fit 資料使用，#411 隨校準器一起移除。）
 
 **Q3. objective 要選 `binary` 還是 `lambdarank`？**
 
 - `binary` 是建議的第一版 baseline：逐筆預測後再排序，流程較容易驗證，而且仍以排序指標評估。
-- `lambdarank`／`rank_xendcg` 適合希望訓練目標直接考慮 query group 內相對順序的情境，但需搭配 `ndcg`／`map` metric，並確認 score 是否需要 calibration。
+- `lambdarank`／`rank_xendcg` 適合希望訓練目標直接考慮 query group 內相對順序的情境，但需搭配 `ndcg`／`map` metric，並注意它的原始 score 無界、不能當機率讀（見 Q4）。
 
 pointwise、pairwise、listwise 的差異見 [`gbdt_learning_to_rank.md`](docs/handbooks/gbdt/gbdt_learning_to_rank.md)。
 
-**Q4. 排序只看相對名次，為什麼還要做機率校準？**
+**Q4. 可以把 `score` 當成機率讀嗎？**
 
-純排序不需要校準。只有下游要將 `score` 解讀為機率，例如計算期望收益或跨日期比較絕對水準時才需要。啟用時，dataset 的 `enable_calibration` 與 training 的 `training.calibration.enabled` 必須一起設定。
+不建議。這個框架的目標是**排序**，`score` 就是模型的原始輸出：`binary` objective 下它是 sigmoid、落在 `[0, 1]` 但不保證校準得準；ranking objective 下它是無界實數。框架**不提供**機率校準機制（原本的校準器已於 #411 移除，config 還留著 `training.calibration` 或 `inference.use_calibration` 會在 CLI 入口被擋下）。下游若要機率語意，責任在下游。
 
 **Q5. 模型訓練好後怎麼上線？**
 

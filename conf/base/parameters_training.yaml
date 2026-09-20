@@ -10,7 +10,7 @@ spark:
   # spark.driver.memory: 8g
 
 # ops block（與 spark:／mlflow:／cache: 同層）——不影響 model_version。
-# HPO 與其後的 finalize/calibrate 全是 driver-local，Spark 從 cache_* 節點結束到
+# HPO 與其後的 finalize_model 全是 driver-local，Spark 從 cache_* 節點結束到
 # predict_and_write_test_predictions 之間完全閒置，可能數小時。閒置的 application
 # 會被叢集端回收，context 在 JVM 端死掉，之後寫 Hive 就撞 stopped SparkContext。
 # 改成主動釋放，由下一個用到 Spark 的節點依 canonical configs 重建。
@@ -89,9 +89,6 @@ training:
     # 成立、校準目標 t 沒有對應物——適用範圍見
     # docs/operations/user-guides/sampling-overrides-editor.md §3.6。
     # --------------------------------------------------------------------
-  calibration:
-    enabled: true              # bool；★ 要把 score 當機率時才開
-    method: sigmoid            # ∈ {isotonic, sigmoid}
   # --- Composite-key sample weights（模型層調權，如冷門產品 boost）---
   # sample_weight_keys: weight key 由哪些欄位組成（順序＝ "|" 串接順序），與
   #   dataset.sample_group_keys 對稱（可不同）。預設 [prod_name]＝直接對產品調權。
@@ -106,7 +103,7 @@ training:
     - prod_name
   # sample_weights: ★key ＝ sample_weight_keys 值用 "|" 串接、value ＝ 任意正數
   #   （>1 boost、<1 down-weight）。稀疏：只列 != 1.0 的組，其餘 = 1.0。
-  #   只作用於 train/train_dev（val/calibration/evaluation 不加權）。打錯/不存在的值
+  #   只作用於 train/train_dev（val/evaluation 不加權）。打錯/不存在的值
   #   → 不中（weight 1.0），記入 manifest.json 的 sample_weight.unmatched_keys。
   #   A9b 驗 key 段數、A9c 驗 product 分量；改 keys 或此表 bust model_version、
   #   不動 train_variant_id。
@@ -184,8 +181,8 @@ mlflow:
   strict: false
 
 # Driver-local parquet cache：materialize 後的 model inputs，重跑時可跳過 Hive
-# scan。由 base_dataset_version / train_variant_id / calibration_variant_id 三
-# 層 key 決定；`test_model_input` 例外——它**一個 test 月份一個目錄**
+# scan。由 base_dataset_version / train_variant_id 兩層 key 決定；
+# `test_model_input` 例外——它**一個 test 月份一個目錄**
 # （test_months/<YYYYMMDD>/，各自持有自己的 _SUCCESS）。目錄名只宣稱它自己那
 # 一個月，名字與內容不會分歧。
 # ⚠ 「加一個月只複製那一個月」要等 test 日期退出 base_dataset_version

@@ -183,8 +183,13 @@ def keep_rows_drawn_under_ratio(
 
     ``crc32(identity_key | site | seed) % HASH_BUCKETS < _effective_ratio *
     HASH_BUCKETS``, so the same key draws the same way across reruns and
-    partition layouts. ``site`` namespaces the draw: two callers sharing a seed
-    (train vs calibration) would otherwise select the same rows.
+    partition layouts. ``site`` namespaces the draw, so two callers sharing a
+    seed do not select the same rows. This helper has one caller today
+    (``select_train_keys``, ``site="sample_keys"``) — #414 removed the
+    calibration split, which was the second — but the seed is shared with
+    ``split_train_keys`` (``site="split_train_dev"``) and ``select_val_keys``
+    (``site="val_keys"``, via :func:`keep_entities_drawn_under_ratio`), so the
+    namespacing is still doing work.
 
     Requires the frame to already carry ``_effective_ratio``
     (:func:`with_effective_sample_ratio`), and leaves its working columns on the

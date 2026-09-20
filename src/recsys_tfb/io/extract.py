@@ -1094,10 +1094,10 @@ def extract_Xy_with_groups(
     on the heap, under that name — byte-identical either way, see
     :func:`_stream_matrix`. Only ``tune_hyperparameters`` asks for it: it is
     the one caller that holds a matrix across every fit of the search, so its
-    resident memory otherwise grows with the val row count. The ``.bin`` prep,
-    the refit and the calibration read each hold theirs for a single fit and
-    are left alone, which is also why :func:`extract_Xy` has no such
-    parameter — none of its callers would pass it.
+    resident memory otherwise grows with the val row count. The ``.bin`` prep
+    and the refit each hold theirs for a single fit and are left alone, which
+    is also why :func:`extract_Xy` has no such parameter — none of its callers
+    would pass it.
 
     ``with_weights`` vs ``with_weight_keys``: see :func:`extract_Xy`. Same two
     meanings, same mutual exclusion.

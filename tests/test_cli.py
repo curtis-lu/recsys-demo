@@ -662,7 +662,7 @@ class TestEvaluationCLIFlags:
             main_mod, "resolve_model_version", lambda models_dir, mv: "mv_test")
         monkeypatch.setattr(
             main_mod, "_dataset_versions_from_model_manifest",
-            lambda models_dir, data_dir: ("basev", "trainv", None))
+            lambda models_dir, data_dir: ("basev", "trainv"))
         monkeypatch.setattr(
             main_mod, "_execute_pipeline", _fake_execute_pipeline)
         monkeypatch.setattr(
@@ -1593,15 +1593,17 @@ def test_maybe_warn_retrain_fires_when_model_pulled_in(tmp_path):
     assert "ab12cd34" in text and "finalize_model" in text and "old11111" in text
 
 
-def test_maybe_warn_retrain_fires_under_calibration(tmp_path):
-    # Under calibration the `model` dataset is produced by calibrate_model, not
-    # finalize_model; the trigger must still fire on the missing `model`.
+def test_maybe_warn_retrain_keys_on_the_dataset_not_the_node_name(tmp_path):
+    # The trigger is "`model` was missing", never "finalize_model was pulled
+    # in": whichever node produces `model` is a DAG-shape detail. This used to
+    # be pinned with `calibrate_model`, the second producer calibration added
+    # (#411 removed it); a renamed producer must keep firing.
     from recsys_tfb.__main__ import _maybe_warn_retrain
-    plan = _plan_with_auto({"calibrate_model": ("model",)})
+    plan = _plan_with_auto({"some_other_model_producer": ("model",)})
     lines = _maybe_warn_retrain(
         plan, {"models_dir": tmp_path, "model_version": "ab12cd34"})
     text = "\n".join(lines)
-    assert "ab12cd34" in text and "calibrate_model" in text
+    assert "ab12cd34" in text and "some_other_model_producer" in text
 
 
 def test_maybe_warn_retrain_silent_when_model_present(tmp_path):
@@ -2027,7 +2029,7 @@ class TestANewMonthPullsBackTheProducersThatOwnIt:
     """
 
     def _sliced(self, pending):
-        pipe = get_pipeline("dataset", enable_calibration=True)
+        pipe = get_pipeline("dataset")
         plans = {name: _plan(pending) for name in INCREMENTAL_DATASETS}
         _, plan = pipe.slice_only(
             "filter_test_model_input", _make_can_load(_FakeCatalog(_LANDED), plans)
@@ -2270,7 +2272,7 @@ def _run_evaluation_command(
             return_value=spark,
         ), patch(
             "recsys_tfb.__main__._dataset_versions_from_model_manifest",
-            return_value=("basev000", "trainv00", None),
+            return_value=("basev000", "trainv00"),
         ), patch("recsys_tfb.__main__._format_slice_plan", spy):
             for p in extra_patches:
                 p.start()
@@ -3091,7 +3093,6 @@ class TestOnlyTestMonthsFlag:
                 "train_dev_ratio": 0.2,
                 "train_snap_dates": ["2026-01-31"],
                 "test_snap_dates": ["2026-02-28"],
-                "enable_calibration": True,
             }},
         )
 
@@ -3144,27 +3145,25 @@ class TestOnlyTestMonthsFlag:
         assert pipe is not None, "pipeline never reached the Runner"
         assert [n.name for n in pipe.nodes] == list(ONLY_TEST_MONTHS_NODES)
 
-    def test_without_the_flag_the_runner_still_gets_all_seventeen(self, tmp_path):
+    def test_without_the_flag_the_runner_still_gets_all_fifteen(self, tmp_path):
         self._conf(tmp_path)
         _, pipe = self._run_dataset(tmp_path, [])
         assert pipe is not None
-        assert len(pipe.nodes) == 17
+        assert len(pipe.nodes) == 15
 
     def test_plan_line_counts_and_names_what_it_left_out(self, tmp_path):
         from recsys_tfb.__main__ import _format_only_test_months_plan
         from recsys_tfb.pipelines import get_pipeline
 
-        lines = _format_only_test_months_plan(enable_calibration=True)
-        assert "6 of the dataset pipeline's 17 nodes" in lines[0]
-        assert "11 left out" in lines[0]
+        lines = _format_only_test_months_plan()
+        assert "6 of the dataset pipeline's 15 nodes" in lines[0]
+        assert "9 left out" in lines[0]
 
         # The names, compared against the pipelines themselves: a message that
         # carried its own copy of the list could disagree with what ran.
-        full = [n.name for n in get_pipeline("dataset", enable_calibration=True).nodes]
+        full = [n.name for n in get_pipeline("dataset").nodes]
         kept = {
-            n.name for n in get_pipeline(
-                "dataset", enable_calibration=True, only_test_months=True
-            ).nodes
+            n.name for n in get_pipeline("dataset", only_test_months=True).nodes
         }
         listed = lines[1].split(":", 1)[1].strip().split(", ")
         assert listed == [name for name in full if name not in kept]
@@ -3336,9 +3335,9 @@ class TestTrainSnapDatesA23:
 class TestEntityColumnsDeclaredA28:
     """A28 is wired to the training command, and fires before Spark starts.
 
-    Placement is the point: the node that writes these columns runs after HPO,
-    train_model and calibrate_model, so the same check inside it would report a
-    one-word catalog typo only after the whole search had been paid for.
+    Placement is the point: the node that writes these columns runs after HPO
+    and finalize_model, so the same check inside it would report a one-word
+    catalog typo only after the whole search had been paid for.
     """
 
     @staticmethod
@@ -3570,3 +3569,275 @@ class TestInferenceGridA27:
             mock_spark.assert_called()
         finally:
             os.chdir(old_cwd)
+
+
+class TestRetiredCalibrationKeysBlockEveryCommand:
+    """A37 at the CLI entry: a conf that still spells a calibration key stops
+    the run before the 2-4 minute Spark cold start, naming every key at once.
+
+    Calibration was removed in #411. The failure this replaces is the quiet
+    one: the keys simply stop being read, so an operator who left
+    ``training.calibration.enabled: true`` in place would get an uncalibrated
+    model and no indication that the setting had been ignored.
+
+    **Every conf here is otherwise valid**, and that is load-bearing: a
+    minimal one exits 1 on A36 (training) or A27 (inference) anyway, so
+    ``exit_code != 0`` would be satisfied by the wrong invariant and the
+    message assertions would be carrying the whole test alone.
+    """
+
+    def _conf(self, tmp_path, *, dataset=None, training=None, inference=None):
+        params_inference = {
+            "inference": {
+                "snap_dates": ["2026-01-31"],
+                "products": ["prod_a"],
+                "entity_buckets": 10,
+            },
+            "schema": {"categorical_values": {"prod_name": ["prod_a"]}},
+        }
+        if inference:
+            params_inference["inference"].update(inference)
+        # train_snap_dates on top of _trainable_dataset(): the dataset command
+        # needs it (A23) and training does not, and this class invokes both.
+        params_dataset = {
+            **_trainable_dataset(),
+            "train_snap_dates": ["2026-02-28"],
+            **(dataset or {}),
+        }
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": params_dataset},
+            params_training={"training": {"objective": "binary"}, **(training or {})},
+            params_inference=params_inference,
+        )
+        _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
+        models_dir = tmp_path / "data" / "models"
+        version_dir = models_dir / "a1b2c3d4"
+        version_dir.mkdir(parents=True)
+        (version_dir / "manifest.json").write_text(json.dumps({
+            "version": "a1b2c3d4",
+            "base_dataset_version": "abc12345",
+            "train_variant_id": "11111111",
+        }))
+        (models_dir / "best").symlink_to(version_dir.resolve())
+
+    def _invoke(self, tmp_path, argv):
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(app, argv)
+            return result, mock_spark
+        finally:
+            os.chdir(old_cwd)
+
+    def test_a_clean_conf_reaches_the_cold_start(self, tmp_path):
+        """The discriminating half, and it runs first: without it every
+        assertion below is also satisfied by a gate that rejects everything."""
+        self._conf(tmp_path)
+        _, mock_spark = self._invoke(tmp_path, ["training"])
+        mock_spark.assert_called()
+        _, mock_spark = self._invoke(tmp_path, ["inference"])
+        mock_spark.assert_called()
+        _, mock_spark = self._invoke(tmp_path, ["dataset"])
+        mock_spark.assert_called()
+
+    def test_training_key_exits_before_spark_starts(self, tmp_path):
+        self._conf(tmp_path, training={"training": {"calibration": {"enabled": True}}})
+        result, mock_spark = self._invoke(tmp_path, ["training"])
+        assert result.exit_code != 0
+        assert "A37" in result.output
+        assert "training.calibration" in result.output
+        mock_spark.assert_not_called()
+
+    def test_inference_key_exits_before_spark_starts(self, tmp_path):
+        self._conf(tmp_path, inference={"use_calibration": True})
+        result, mock_spark = self._invoke(tmp_path, ["inference"])
+        assert result.exit_code != 0
+        assert "A37" in result.output
+        assert "inference.use_calibration" in result.output
+        mock_spark.assert_not_called()
+
+    def test_each_dataset_key_exits_before_spark_starts(self, tmp_path):
+        """The four keys #414 retired with the calibration data split.
+
+        Run against ``dataset``, the command that used to read them. One
+        invocation per key: a gate wired to only the switch would let the other
+        three through, and a single combined conf could not tell that apart.
+        """
+        for key, value in (
+            ("enable_calibration", True),
+            ("calibration_snap_dates", ["2026-03-31"]),
+            ("calibration_sample_ratio", 1.0),
+            ("calibration_sample_ratio_overrides", {"mass": 0.5}),
+        ):
+            # A fresh conf tree per key: _setup_conf creates conf/base and
+            # refuses to run twice over the same one.
+            root = tmp_path / key
+            self._conf(root, dataset={key: value})
+            result, mock_spark = self._invoke(root, ["dataset"])
+            assert result.exit_code != 0, key
+            assert "A37" in result.output, key
+            assert f"dataset.{key}" in result.output, key
+            mock_spark.assert_not_called()
+
+    def test_an_empty_calibration_date_list_is_still_blocked(self, tmp_path):
+        # The shape an operator reaches for when they mean "off". It still
+        # sits in the subtree hashed into base_dataset_version.
+        self._conf(tmp_path, dataset={"calibration_snap_dates": []})
+        result, mock_spark = self._invoke(tmp_path, ["dataset"])
+        assert result.exit_code != 0
+        assert "dataset.calibration_snap_dates" in result.output
+        mock_spark.assert_not_called()
+
+    def test_a_disabled_block_is_still_blocked(self, tmp_path):
+        # The key's presence is the failure, not its value: it sits inside the
+        # subtree hashed into model_version, so leaving it behind would make
+        # two upgraded conf trees compute different version IDs.
+        self._conf(tmp_path, training={"training": {"calibration": {"enabled": False}}})
+        result, mock_spark = self._invoke(tmp_path, ["training"])
+        assert result.exit_code != 0
+        assert "training.calibration" in result.output
+        mock_spark.assert_not_called()
+
+    def test_every_retired_key_is_named_in_one_run(self, tmp_path):
+        # Collect-all: one edit fixes the conf, instead of one run per key.
+        self._conf(
+            tmp_path,
+            training={"training": {"calibration": {"enabled": True}}},
+            inference={"use_calibration": False},
+        )
+        result, mock_spark = self._invoke(tmp_path, ["training"])
+        assert result.exit_code != 0
+        assert "training.calibration" in result.output
+        assert "inference.use_calibration" in result.output
+        mock_spark.assert_not_called()
+
+
+class TestAPreCalibrationModelManifestStillResolves:
+    """#414: a model trained before the removal carries a third version field.
+
+    ``calibration_variant_id`` was written onto every model manifest while the
+    calibration layer existed. #411 chose no migration: an operator keeps
+    scoring and evaluating with those models, and must not have to hand-edit
+    old manifests first. The field is read by nothing now — the guarantee is
+    that nothing validates the manifest's key set either, so the leftover is
+    inert rather than an error.
+
+    Both halves are here on purpose. The unit half says the resolver returns
+    the two live IDs; the command half says nothing *later* in inference or
+    evaluation trips over the extra field, which is where a "manifest looks
+    wrong" check would actually live.
+
+    **The IDs on disk deliberately differ from the ones in the manifest.**
+    ``_dataset_versions_from_model_manifest`` falls back to the ``latest``
+    symlinks per layer when a field is missing, so a fixture whose symlinks
+    resolve to the manifest's own IDs cannot tell "read the manifest" apart
+    from "read nothing and fall back" — both produce the same answer and the
+    test passes with the manifest read deleted. The ``latest`` links here point
+    at ``fallback``/``fb000000``, which is what makes the assertions below
+    discriminating.
+    """
+
+    #: What the model's manifest says. Not what ``latest`` points at.
+    MANIFEST_BASE_V = "abc12345"
+    MANIFEST_TRAIN_V = "11111111"
+    #: What the ``latest`` symlinks resolve to — the fallback answer, which
+    #: every assertion below must NOT get.
+    FALLBACK_BASE_V = "fallback"
+    FALLBACK_TRAIN_V = "fb000000"
+
+    STALE_MANIFEST = {
+        "version": "a1b2c3d4",
+        "pipeline": "training",
+        "base_dataset_version": MANIFEST_BASE_V,
+        "train_variant_id": MANIFEST_TRAIN_V,
+        "calibration_variant_id": "cccccccc",
+        "parameters": {"training": {"calibration": {"enabled": True}}},
+    }
+
+    def _conf(self, tmp_path):
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": _trainable_dataset()},
+            params_training={"training": {"objective": "binary"}},
+            params_inference={
+                "inference": {
+                    "snap_dates": ["2026-01-31"],
+                    "products": ["prod_a"],
+                    "entity_buckets": 10,
+                },
+                "schema": {"categorical_values": {"prod_name": ["prod_a"]}},
+            },
+        )
+        # _setup_conf has no evaluation hook; the evaluation command needs a
+        # snap_date and A22 needs it to be a test month.
+        (tmp_path / "conf" / "base" / "parameters_evaluation.yaml").write_text(
+            yaml.dump({"evaluation": {"snap_date": "2026-01-31"}})
+        )
+        # latest -> the fallback IDs, NOT the manifest's: see the class
+        # docstring for why that gap is the whole point.
+        _make_base_and_train_variant(
+            tmp_path, base_v=self.FALLBACK_BASE_V, train_v=self.FALLBACK_TRAIN_V,
+        )
+        models_dir = tmp_path / "data" / "models"
+        version_dir = models_dir / "a1b2c3d4"
+        version_dir.mkdir(parents=True)
+        (version_dir / "manifest.json").write_text(json.dumps(self.STALE_MANIFEST))
+        (models_dir / "best").symlink_to(version_dir.resolve())
+        return version_dir
+
+    def test_the_fixture_can_tell_the_manifest_from_the_fallback(self, tmp_path):
+        """Guards the guard: if these ever coincide every test below is vacuous."""
+        assert self.MANIFEST_BASE_V != self.FALLBACK_BASE_V
+        assert self.MANIFEST_TRAIN_V != self.FALLBACK_TRAIN_V
+
+        self._conf(tmp_path)
+        dataset_dir = tmp_path / "data" / "dataset"
+        assert (dataset_dir / "latest").resolve().name == self.FALLBACK_BASE_V
+
+    def test_the_resolver_returns_the_two_live_ids(self, tmp_path):
+        from recsys_tfb.__main__ import _dataset_versions_from_model_manifest
+
+        version_dir = self._conf(tmp_path)
+        assert _dataset_versions_from_model_manifest(
+            version_dir, tmp_path / "data"
+        ) == (self.MANIFEST_BASE_V, self.MANIFEST_TRAIN_V)
+
+    @pytest.mark.parametrize("command", ["inference", "evaluation"])
+    def test_the_command_resolves_the_versions_off_the_stale_manifest(
+        self, tmp_path, command
+    ):
+        """Asserted on ``runtime_params``, not on "Spark started".
+
+        Both commands start Spark *before* reading the manifest, so
+        ``get_or_create_spark_session`` having been called says nothing about
+        whether the read survived the extra field. What the pipeline was
+        handed does.
+        """
+        captured = {}
+
+        def _spy(pipeline_name, pipeline_kwargs, runtime_params, *a, **kw):
+            captured.update(runtime_params)
+            return False  # short-circuit before any post-run manifest work
+
+        self._conf(tmp_path)
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ), patch("recsys_tfb.__main__._execute_pipeline", _spy):
+                result = runner.invoke(app, [command])
+        finally:
+            os.chdir(old_cwd)
+
+        assert result.exit_code == 0, result.output
+        assert captured.get("base_dataset_version") == self.MANIFEST_BASE_V, captured
+        assert captured.get("train_variant_id") == self.MANIFEST_TRAIN_V, captured
+        # The stale field must not be carried forward as a substitution
+        # variable either: no catalog entry spells ${calibration_variant_id}
+        # any more, so an unused one would only mislead the next reader.
+        assert "calibration_variant_id" not in captured, captured

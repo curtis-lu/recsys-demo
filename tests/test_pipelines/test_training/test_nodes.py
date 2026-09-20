@@ -12,9 +12,7 @@ from recsys_tfb.evaluation.metrics import compute_ap
 from recsys_tfb.io.extract import extract_Xy
 from recsys_tfb.io.handles import LgbDatasetHandle, ParquetHandle
 from recsys_tfb.models.base import ModelAdapter
-from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.pipelines.training.nodes import (
-    calibrate_model,
     finalize_model,
     log_experiment,
     tune_hyperparameters,
@@ -695,7 +693,9 @@ class TestLogExperiment:
         assert runs.iloc[0]["metrics.best_iteration"] == 123
         assert runs.iloc[0]["params.algorithm"] == "lightgbm"
         assert runs.iloc[0]["params.final_model_strategy"] == "hpo_best"
-        assert runs.iloc[0]["params.calibrated"] == "False"
+        # Nothing claims anything about calibration any more (#411): the
+        # parameter is gone from the run, not logged as False.
+        assert "params.calibrated" not in runs.columns
 
     def test_mlflow_failure_does_not_raise(
         self, lgb_handles, training_parameters, tmp_path, monkeypatch, caplog
@@ -754,41 +754,6 @@ class TestLogExperiment:
         with pytest.raises(RuntimeError):
             log_experiment(model, {"learning_rate": 0.1}, 123, evaluation_results, {}, {}, {}, params)
 
-    def test_logs_calibration_info(
-        self, lgb_handles, preprocessor_metadata, training_parameters, tmp_path
-    ):
-        best_params = {"learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
-                       "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8}
-        model = _quick_train_adapter(lgb_handles, training_parameters)
-
-        evaluation_results = {
-            "overall_map": 0.76,
-            "per_item_map_attr": {"exchange_fx": 0.8, "exchange_usd": 0.7},
-            "n_queries": 10,
-            "n_excluded_queries": 2,
-            "uncalibrated": {
-                "overall_map": 0.75,
-                "per_item_map_attr": {"exchange_fx": 0.78, "exchange_usd": 0.69},
-            },
-            "calibration_method": "isotonic",
-        }
-
-        params = {**training_parameters, "mlflow": {
-            "experiment_name": "test_calibrated",
-            "tracking_uri": str(tmp_path / "mlruns"),
-        }}
-
-        log_experiment(model, best_params, 123, evaluation_results, {}, {}, {}, params)
-
-        import mlflow
-        mlflow.set_tracking_uri(str(tmp_path / "mlruns"))
-        experiment = mlflow.get_experiment_by_name("test_calibrated")
-        runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
-        assert len(runs) == 1
-        assert runs.iloc[0]["params.calibrated"] == "True"
-        assert runs.iloc[0]["params.calibration_method"] == "isotonic"
-        assert runs.iloc[0]["metrics.uncalibrated_overall_map"] == 0.75
-
 
 def test_log_experiment_logs_diagnostics(monkeypatch, tmp_path):
     import recsys_tfb.pipelines.training.nodes as nodes
@@ -826,53 +791,6 @@ def test_log_experiment_logs_diagnostics(monkeypatch, tmp_path):
     assert logged_metrics["n_single_value_features"] == 1
     assert logged_metrics["n_high_null_features"] == 0
     assert len(logged_artifacts) == 1  # whole diagnostics dir uploaded once
-
-
-# ---- Tests: calibrate_model ----
-
-
-class TestCalibrateModel:
-    def _train_quick_model(self, lgb_handles, preprocessor_metadata, training_parameters):
-        return _quick_train_adapter(lgb_handles, training_parameters)
-
-    def test_returns_calibrated_adapter(
-        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
-    ):
-        model = self._train_quick_model(lgb_handles, preprocessor_metadata, training_parameters)
-        train_h, *_ = synthetic_model_inputs
-        calibrated = calibrate_model(model, train_h, preprocessor_metadata, training_parameters)
-        assert isinstance(calibrated, CalibratedModelAdapter)
-
-    def test_default_method_isotonic(
-        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
-    ):
-        model = self._train_quick_model(lgb_handles, preprocessor_metadata, training_parameters)
-        train_h, *_ = synthetic_model_inputs
-        calibrated = calibrate_model(model, train_h, preprocessor_metadata, training_parameters)
-        assert calibrated.method == "isotonic"
-
-    def test_sigmoid_method(
-        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
-    ):
-        model = self._train_quick_model(lgb_handles, preprocessor_metadata, training_parameters)
-        train_h, *_ = synthetic_model_inputs
-        params = {**training_parameters, "training": {
-            **training_parameters["training"],
-            "calibration": {"method": "sigmoid"},
-        }}
-        calibrated = calibrate_model(model, train_h, preprocessor_metadata, params)
-        assert calibrated.method == "sigmoid"
-
-    def test_calibrated_predict_returns_valid_scores(
-        self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
-    ):
-        model = self._train_quick_model(lgb_handles, preprocessor_metadata, training_parameters)
-        train_h, _, val_h, train_df, _, val_df = synthetic_model_inputs
-        calibrated = calibrate_model(model, train_h, preprocessor_metadata, training_parameters)
-        X_val, _ = extract_Xy(val_h, preprocessor_metadata, training_parameters)
-        preds = calibrated.predict(X_val)
-        assert len(preds) == len(val_df)
-        assert np.all(np.isfinite(preds))
 
 
 def test_tune_defaults_ranking_metric(monkeypatch):
@@ -1474,62 +1392,3 @@ def test_refit_on_full_matches_the_matrix_hpo_trained_on(
             train_h, dev_h, None, {}, 1, prep, _refit_params(objective),
         )
     assert f"Refitted on full train+train_dev (n={expected_rows}," in caplog.text
-
-
-def test_calibration_keeps_every_row_under_lambdarank(tmp_path, caplog):
-    """The calibration split is NOT filtered, under any objective.
-
-    Calibration fits on the whole score distribution; dropping the
-    all-negative query groups shifts the baseline it calibrates against. This
-    is the only place that says so with a test — the reason otherwise lives
-    in comments, and "add calibration to the filter list" is exactly the
-    tidy-looking change nobody would notice.
-    """
-    import logging
-
-    import numpy as np
-    import pandas as pd
-    from recsys_tfb.io.handles import ParquetHandle
-    from recsys_tfb.models.base import ModelAdapter
-    from recsys_tfb.pipelines.training.nodes import calibrate_model
-
-    class _ConstantScores(ModelAdapter):
-        """Scores that vary with the feature, so a sigmoid fit has something to fit."""
-
-        def train(self, *a, **k): ...
-        def predict(self, X): return X[:, 0].astype(float)
-        def save(self, filepath): ...
-        def load(self, filepath): ...
-        def feature_importance(self, kind="split"): return {}
-        def log_to_mlflow(self): ...
-        def prepare_train_inputs(self, *a, **k): ...
-
-    # 3 query groups of 2; c3 is all-negative — the shape lambdarank drops
-    # from train / train_dev.
-    df = pd.DataFrame({
-        "cust_id": ["c1", "c1", "c2", "c2", "c3", "c3"],
-        "snap_date": pd.to_datetime(["2025-01-31"] * 6),
-        "prod_name": ["fund", "ccard"] * 3,
-        "feat_a": np.array([1, 2, 3, 4, 5, 6], dtype="float32"),
-        "label": [1, 0, 0, 1, 0, 0],
-    })
-    path = tmp_path / "cal.parquet"
-    df.to_parquet(path)
-
-    params = {
-        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
-                               "item": "prod_name", "label": "label"}},
-        "training": {"algorithm_params": {"objective": "lambdarank"},
-                     "calibration": {"method": "sigmoid"}},
-    }
-    prep = {
-        "feature_columns": ["feat_a", "prod_name"],
-        "categorical_columns": ["prod_name"],
-        "category_mappings": {"prod_name": ["fund", "ccard"]},
-    }
-
-    with caplog.at_level(logging.INFO,
-                         logger="recsys_tfb.pipelines.training.nodes"):
-        calibrate_model(_ConstantScores(), ParquetHandle(str(path)), prep, params)
-    # All 6 rows, including c3's two. 4 would mean the filter reached here.
-    assert "n_samples=6" in caplog.text

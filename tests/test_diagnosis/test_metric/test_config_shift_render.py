@@ -41,7 +41,7 @@ def _result() -> dict:
     """一份形狀與 ``compute`` 實際輸出一致的結果（每次回新的 deep copy）。"""
     return copy.deepcopy({
         "enabled": True,
-        "score_col_used": "score_uncalibrated",
+        "score_col_used": "score",
         "metric_params": {
             "min_positives": 1, "shrinkage_k": 0.0, "weight_alpha": 0.0,
         },

@@ -9,7 +9,7 @@
     --json:#ffec99; --json-b:#f08c00;
     --model:#b2f2bb; --model-b:#2f9e44;
     --report:#eebefa; --report-b:#ae3ec9;
-    --src:#f1f3f5; --base:#e7f5ff; --train:#fff4e6; --cal:#f3f0ff; --mv:#ebfbee;
+    --src:#f1f3f5; --base:#e7f5ff; --train:#fff4e6; --mv:#ebfbee;
   }
   body{font-family:-apple-system,"Segoe UI","PingFang TC","Microsoft JhengHei",sans-serif;
     max-width:1080px;margin:0 auto;padding:24px 34px;color:#1f2328;line-height:1.65;background:#fff}
@@ -37,7 +37,7 @@
   .b-report{background:var(--report);border-color:var(--report-b);color:#5f1a6e}
   .vl{font-size:10.5px;padding:1px 7px;border-radius:9px;margin-left:6px;vertical-align:middle}
   .vl-src{background:var(--src)} .vl-base{background:var(--base)} .vl-train{background:var(--train)}
-  .vl-cal{background:var(--cal)} .vl-mv{background:var(--mv)}
+  .vl-mv{background:var(--mv)}
   .meta{font-size:12px;color:#3a4148;margin:4px 0 8px}
   .meta b{color:#1f2328}
   table.sc{border-collapse:collapse;width:100%;font-size:12px;margin:6px 0}
@@ -98,12 +98,11 @@ label、score、rank 框架自帶預設欄名），其餘特徵 / 分群 / carry
   <span class="vlane" style="background:var(--src)">source（無版本）</span>
   <span class="vlane" style="background:var(--base)">base_dataset_version</span>
   <span class="vlane" style="background:var(--train)">train_variant_id</span>
-  <span class="vlane" style="background:var(--cal)">calibration_variant_id</span>
   <span class="vlane" style="background:var(--mv)">model_version</span>
 </div>
-<p class="sub" style="margin-top:8px">三層資料版本：<code>base_dataset_version</code> = 與抽樣無關的不變產物；
-<code>train_variant_id</code> = 依 train 抽樣；<code>calibration_variant_id</code> = 依 calibration 抽樣。
-另有 <code>model_version</code> = 訓練/校準後的模型與其下游，它是模型端的版本鍵，不屬於上面三層資料版本。</p>
+<p class="sub" style="margin-top:8px">兩層資料版本：<code>base_dataset_version</code> = 與抽樣無關的不變產物；
+<code>train_variant_id</code> = 依 train 抽樣，是唯一的 variant 層。
+另有 <code>model_version</code> = 訓練後的模型與其下游，它是模型端的版本鍵，不屬於上面兩層資料版本。</p>
 
 <h2>Lineage 總覽</h2>
 <p class="sub">階段由上而下：<code>source_etl → dataset → training →（分叉）inference / evaluation</code>。
@@ -111,7 +110,7 @@ label、score、rank 框架自帶預設欄名），其餘特徵 / 分群 / carry
 叢集之間的實線標註實際流動的資料；虛線框是該階段讀取、但由別的階段產出的輸入，框內標明來源。
 叢集內的逐表上下游見下方各表卡的「產生 / 下游」（未建卡的產物見 <code>catalog.yaml</code>）。</p>
 
-<svg viewBox="0 0 1000 1130" width="100%" style="font-family:-apple-system,'PingFang TC',sans-serif;border:1px solid #eee;border-radius:8px;background:#fff">
+<svg viewBox="0 0 1000 1048" width="100%" style="font-family:-apple-system,'PingFang TC',sans-serif;border:1px solid #eee;border-radius:8px;background:#fff">
   <defs>
     <marker id="ar" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto">
       <path d="M0,0 L7,3 L0,6 Z" fill="#495057"/></marker>
@@ -138,8 +137,8 @@ label、score、rank 框架自帶預設欄名），其餘特徵 / 分群 / carry
   <line x1="385" y1="120" x2="385" y2="142" stroke="#495057" stroke-width="1.5" marker-end="url(#ar)"/>
   <text x="397" y="136" font-size="10.5" fill="#1971c2">feature_table · label_table · sample_pool</text>
 
-  <!-- ===== dataset (3 version lanes) ===== -->
-  <rect x="40" y="146" width="920" height="288" rx="12" fill="none" stroke="#adb5bd" stroke-dasharray="4 3"/>
+  <!-- ===== dataset (2 version lanes) ===== -->
+  <rect x="40" y="146" width="920" height="206" rx="12" fill="none" stroke="#adb5bd" stroke-dasharray="4 3"/>
   <text x="52" y="164" font-size="13" font-weight="bold">dataset</text>
   <text x="120" y="164" font-size="10.5" fill="#59636e">抽樣 + 前處理 + 組 model_input（keys LEFT JOIN label_table，再 LEFT JOIN preprocessed_feature_table）</text>
 
@@ -172,23 +171,15 @@ label、score、rank 框架自帶預設欄名），其餘特徵 / 分群 / carry
     <text x="527" y="307">train_model_input · train_dev_model_input</text>
   </g>
 
-  <!-- calibration-variant lane -->
-  <rect x="52" y="348" width="896" height="74" rx="9" fill="var(--cal)" stroke="#d0bfff"/>
-  <text x="62" y="364" font-size="11" font-weight="bold" fill="#6741d9">calibration_variant_id（依 calibration 抽樣，可選）</text>
-  <g font-size="10.5" text-anchor="middle">
-    <rect x="62" y="372" width="140" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
-    <text x="132" y="389">calibration_keys</text>
-    <rect x="212" y="372" width="210" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
-    <text x="317" y="389">calibration_model_input</text>
-  </g>
-
+  <!-- 下方所有元素整體上移 82（＝被移除的 calibration 泳道高度 74 + 間距 8），座標保持原值 -->
+  <g transform="translate(0,-82)">
   <line x1="500" y1="434" x2="500" y2="460" stroke="#495057" stroke-width="1.5" marker-end="url(#ar)"/>
   <text x="512" y="452" font-size="10.5" fill="#1971c2">*_model_input（+ preprocessor）</text>
 
   <!-- ===== training ===== -->
   <rect x="120" y="464" width="760" height="128" rx="12" fill="var(--mv)" stroke="#69db7c"/>
   <text x="132" y="482" font-size="13" font-weight="bold">training</text>
-  <text x="198" y="482" font-size="10.5" fill="#59636e">cache → HPO 調參 → 訓練 →（校準）→ 寫 test 預測 + 診斷</text>
+  <text x="198" y="482" font-size="10.5" fill="#59636e">cache → HPO 調參 → 訓練 → 寫 test 預測 + 診斷</text>
   <g font-size="10.5" text-anchor="middle">
     <rect x="132" y="492" width="120" height="26" rx="6" fill="var(--model)" stroke="var(--model-b)"/>
     <text x="192" y="509">model (model.txt)</text>
@@ -295,6 +286,7 @@ label、score、rank 框架自帶預設欄名），其餘特徵 / 分群 / carry
   <text x="582" y="1068" font-size="10" fill="#495057">直接落地 enriched_eval_predictions（label：情境 1 沿用預測自帶的，</text>
   <text x="582" y="1082" font-size="10" fill="#495057">情境 2 取自 label_table）；各指標／報表節點讀回此表計算，</text>
   <text x="582" y="1096" font-size="10" fill="#495057">--compare-only 也直接讀回此表</text>
+  </g>
 </svg>
 
 <p class="sub">※ 跨階段的輸入有兩種畫法：別階段產出的主幹產物（<code>model</code>、<code>training_eval_predictions</code>、<code>gain_ledger</code>、<code>ranked_predictions</code>）畫成叢集之間的實線，同時在下游叢集內以虛線框標明來源；其餘來源表與 <code>preprocessor</code> 為避免長跨線，圖上不畫線，只在下游叢集內以虛線框列出輸入與來源。各項的完整流向（含已畫線的 <code>gain_ledger</code>）如下：
@@ -340,7 +332,7 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
   <tr><td><a href="#preprocessed_feature_table"><code>preprocessed_feature_table</code></a><br><span class="vl vl-base" style="margin-left:0">base_dataset_version</span></td>
     <td><code>time × entity</code></td><td><code>(base_dataset_version, time, entity)</code></td>
     <td><span class="gtag g-none">框架不檢查</span></td>
-    <td><code>apply_preprocessor_to_features</code> 只做逐列過濾與編碼，唯一性等於落地當下的 <code>feature_table</code>（上游的檢查不繼承，來源有重複就原樣傳下來），這一步零檢查；放大要到下游才可能被看見，而且只有 train／train_dev／calibration 側有 B10 這道列數閘，val／test 沒有。</td></tr>
+    <td><code>apply_preprocessor_to_features</code> 只做逐列過濾與編碼，唯一性等於落地當下的 <code>feature_table</code>（上游的檢查不繼承，來源有重複就原樣傳下來），這一步零檢查；放大要到下游才可能被看見，而且只有 train／train_dev 側有 B10 這道列數閘，val／test 沒有。</td></tr>
   <tr><td><a href="#val_keys"><code>val_keys</code></a><br><span class="vl vl-base" style="margin-left:0">base_dataset_version</span></td>
     <td><code>time × entity × item</code></td><td><code>(base_dataset_version, time, entity, item)</code></td>
     <td><span class="gtag g-build">由寫法保證</span></td>
@@ -372,19 +364,11 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
   <tr><td><a href="#train_model_input"><code>train_model_input</code></a><br><span class="vl vl-train" style="margin-left:0">train_variant_id</span></td>
     <td><code>time × entity × item</code></td><td><code>(base_dataset_version, train_variant_id, time, entity, item)</code></td>
     <td><span class="gtag g-none">框架不檢查</span></td>
-    <td>沒有直接檢查主鍵唯一的檢查；間接的閘：<code>validate_model_input_grain</code>（B10）比對本表與 train_keys 的列數，不等即中止。B10 擋的是右表 join 鍵重複造成的放大；它是列數等式，不是主鍵檢查——keys 自己重複時兩邊等量增加，等式照樣成立。範圍只有 train／train_dev／calibration，不含 val／test。</td></tr>
+    <td>沒有直接檢查主鍵唯一的檢查；間接的閘：<code>validate_model_input_grain</code>（B10）比對本表與 train_keys 的列數，不等即中止。B10 擋的是右表 join 鍵重複造成的放大；它是列數等式，不是主鍵檢查——keys 自己重複時兩邊等量增加，等式照樣成立。範圍只有 train／train_dev，不含 val／test。</td></tr>
   <tr><td><a href="#train_model_input"><code>train_dev_model_input</code></a><br><span class="vl vl-train" style="margin-left:0">train_variant_id</span></td>
     <td><code>time × entity × item</code></td><td><code>(base_dataset_version, train_variant_id, time, entity, item)</code></td>
     <td><span class="gtag g-none">框架不檢查</span></td>
     <td>同 train_model_input，對 train_dev_keys：沒有直接檢查主鍵唯一的檢查；間接的閘只有 B10 列數閘，擋右表 join 鍵重複造成的放大，keys 自己重複時列數等式照樣成立。</td></tr>
-  <tr><td><a href="#calibration_keys"><code>calibration_keys</code></a><br><span class="vl vl-cal" style="margin-left:0">calibration_variant_id</span></td>
-    <td><code>time × entity × item</code></td><td><code>(base_dataset_version, calibration_variant_id, time, entity, item)</code></td>
-    <td><span class="gtag g-none">框架不檢查</span></td>
-    <td>同 sample_keys：沿用 <code>sample_pool</code>，不檢查也不去重。</td></tr>
-  <tr><td><a href="#calibration_model_input"><code>calibration_model_input</code></a><br><span class="vl vl-cal" style="margin-left:0">calibration_variant_id</span></td>
-    <td><code>time × entity × item</code></td><td><code>(base_dataset_version, calibration_variant_id, time, entity, item)</code></td>
-    <td><span class="gtag g-none">框架不檢查</span></td>
-    <td>同 train_model_input 的列數閘 B10，但只在 dataset 端開啟 calibration（<code>enable_calibration</code>）、這張表被建出來時才有這一步。沒有直接檢查主鍵唯一的檢查；間接的閘只有 B10 列數閘，擋右表 join 鍵重複造成的放大，keys 自己重複時列數等式照樣成立。</td></tr>
   <tr><td><a href="#training_eval_predictions"><code>training_eval_predictions</code></a><br><span class="vl vl-mv" style="margin-left:0">model_version</span></td>
     <td><code>time × entity × item</code>（只留有正例的 query group）</td><td><code>(model_version, time, entity, item)</code></td>
     <td><span class="gtag g-none">框架不檢查</span></td>
@@ -412,7 +396,7 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
 </table>
 </div>
 <p class="note">來源表的「有檢查」只在 source_etl 產出時成立，而且是寫完之後才查（壞 partition 不回滾），查的是使用者在 config 宣告的 <code>primary_key</code>：dataset／inference 讀取時不重驗，使用者自備、沒經過 source_etl 的表就沒有這一層（例外：<code>label_table</code> 的評估月份仍會被 evaluation 的 <code>prepare_eval_data</code> 重驗）。<code>consistency.py</code> 的 A32 只確認 dataset pipeline 讀的<b>三張</b>表（<code>DATASET_SOURCE_TABLES</code> ＝ <code>sample_pool</code>／<code>label_table</code>／<code>feature_table</code>，<code>inference_population</code> 不在內）在 <code>*_etl</code> 設定裡宣告了 <code>quality_checks.max_duplicate_key_ratio</code>，且值在 [0, 1)；它不看資料，也守不住整個檢查：source_etl 要 <code>primary_key</code> 與這個鍵<b>同時在</b>才會跑，<code>primary_key</code> 被刪時 A32 不會紅；自備表把 <code>*_etl</code> 裡那筆表宣告刪掉時，A32 也直接略過、不報錯。
-全表最弱的三處：① 自備來源表——<code>feature_table</code>／<code>label_table</code>／<code>sample_pool</code>／<code>inference_population</code> 這四列的檢查只在「由 source_etl 產出」時成立，而框架明文允許使用者自備來源表（<code>consistency.py</code> 的 B10 段把這件事列為「上游的 <code>max_duplicate_key_ratio</code> 合約關不掉這個洞」的理由之一）。下游有幾道檢查不依賴「來源表由 source_etl 產出」這個前提（自備表也會跑），但各自範圍有限，都不等於全表保證：B10 只涵蓋 train／train_dev／calibration 的 model_input（不含 val／test），而且只比列數；<code>unranked_predictions</code> 的 chunk <code>no_duplicates</code> 只驗本次執行實際寫的 chunk、只看單一 chunk 內；<code>validate_predictions</code> 的 <code>completeness</code>／<code>rank_consistency</code> 只在 inference 發布前看每個 query group 的列數與 rank 範圍；<code>prepare_eval_data</code> 的 label 重驗只驗 <code>label_table</code> 的評估月份。所以自備 <code>feature_table</code> 有重複時，val／test 的 model_input 不會被這幾道擋下。② model_input 自己的主鍵唯一性沒有直接檢查：train／train_dev／calibration 只有 B10 列數閘（只擋右表放大），val／test 連這道間接的閘都沒有；而且 B10 會不會紅取決於重複落在<b>哪個月</b>、以及那個鍵在不在 keys 表裡：落在 train／train_dev／calibration 月份、而且那個鍵確實出現在對應的 keys 表裡時，join 會放大列數讓 B10 紅；鍵不在 keys 表裡就不會放大，B10 照樣綠。只落在 val／test 月份時 B10 不會動；這時唯一還會紅的是 <code>prepare_eval_data</code> 的 label 重驗，而且只在該月被列進 <code>evaluation.snap_date</code> 時才發生。B10 也是所有 build 節點落地<b>之後</b>才跑的獨立節點，它紅的時候被放大的表已經寫進 Hive，後續單獨執行或用 <code>--from-node</code> 續跑的節點仍讀得到。③ keys 表（<code>sample_keys</code>／<code>train_keys</code>／<code>train_dev_keys</code>／<code>calibration_keys</code>）：只沿用 <code>sample_pool</code> 在 source_etl 產出時的檢查，keys 表本身沒有任何檢查；B10 的列數等式對「keys 自己重複」是盲的（兩邊等量增加），所以這種重複會一路帶到 model_input 都沒有人紅。附註：<code>ranked_staging</code> 寫入時同樣沒有閘，但它的內容在發布前會被 <code>validate_predictions</code> 讀到。</p>
+全表最弱的三處：① 自備來源表——<code>feature_table</code>／<code>label_table</code>／<code>sample_pool</code>／<code>inference_population</code> 這四列的檢查只在「由 source_etl 產出」時成立，而框架明文允許使用者自備來源表（<code>consistency.py</code> 的 B10 段把這件事列為「上游的 <code>max_duplicate_key_ratio</code> 合約關不掉這個洞」的理由之一）。下游有幾道檢查不依賴「來源表由 source_etl 產出」這個前提（自備表也會跑），但各自範圍有限，都不等於全表保證：B10 只涵蓋 train／train_dev 的 model_input（不含 val／test），而且只比列數；<code>unranked_predictions</code> 的 chunk <code>no_duplicates</code> 只驗本次執行實際寫的 chunk、只看單一 chunk 內；<code>validate_predictions</code> 的 <code>completeness</code>／<code>rank_consistency</code> 只在 inference 發布前看每個 query group 的列數與 rank 範圍；<code>prepare_eval_data</code> 的 label 重驗只驗 <code>label_table</code> 的評估月份。所以自備 <code>feature_table</code> 有重複時，val／test 的 model_input 不會被這幾道擋下。② model_input 自己的主鍵唯一性沒有直接檢查：train／train_dev 只有 B10 列數閘（只擋右表放大），val／test 連這道間接的閘都沒有；而且 B10 會不會紅取決於重複落在<b>哪個月</b>、以及那個鍵在不在 keys 表裡：落在 train／train_dev 月份、而且那個鍵確實出現在對應的 keys 表裡時，join 會放大列數讓 B10 紅；鍵不在 keys 表裡就不會放大，B10 照樣綠。只落在 val／test 月份時 B10 不會動；這時唯一還會紅的是 <code>prepare_eval_data</code> 的 label 重驗，而且只在該月被列進 <code>evaluation.snap_date</code> 時才發生。B10 也是所有 build 節點落地<b>之後</b>才跑的獨立節點，它紅的時候被放大的表已經寫進 Hive，後續單獨執行或用 <code>--from-node</code> 續跑的節點仍讀得到。③ keys 表（<code>sample_keys</code>／<code>train_keys</code>／<code>train_dev_keys</code>）：只沿用 <code>sample_pool</code> 在 source_etl 產出時的檢查，keys 表本身沒有任何檢查；B10 的列數等式對「keys 自己重複」是盲的（兩邊等量增加），所以這種重複會一路帶到 model_input 都沒有人紅。附註：<code>ranked_staging</code> 寫入時同樣沒有閘，但它的內容在發布前會被 <code>validate_predictions</code> 讀到。</p>
 
 <h2>各表表卡</h2>
 <div class="anchornav">
@@ -431,9 +415,6 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
   <a href="#sample_keys">sample_keys</a>
   <a href="#train_keys">train_keys / train_dev_keys</a>
   <a href="#train_model_input">train_model_input / train_dev_model_input</a>
-  <b>dataset（calibration-variant）：</b>
-  <a href="#calibration_keys">calibration_keys</a>
-  <a href="#calibration_model_input">calibration_model_input</a>
   <b>training：</b>
   <a href="#model">model</a>
   <a href="#best_params">best_params</a>
@@ -493,9 +474,9 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
 <div class="card" id="sample_pool">
   <h4>sample_pool <span class="badge b-hive">Hive</span><span class="vl vl-src">source</span></h4>
   <div class="meta"><b>產生</b>：source_etl · sample_pool_etl（sample_pool.sql）　|
-  <b>下游</b>：dataset（validate_data_consistency、select_train/val/test/calibration_keys）、evaluation（prepare_eval_data，<code>--post-training</code> 時取分群欄）　|
+  <b>下游</b>：dataset（validate_data_consistency、select_train/val/test_keys）、evaluation（prepare_eval_data，<code>--post-training</code> 時取分群欄）　|
   <b>partition</b>：snap_date</div>
-  <div class="grain"><span class="gtag g-check">有檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>）　|　<b>實體主鍵</b>：<code>(time, entity, item)</code>（來源表，無版本欄）　|　唯一性只在 source_etl 產出時檢查：sample_pool_etl 寫完每個 <code>snap_date</code> 的 partition <b>之後</b>，才比對 config 宣告的 <code>primary_key</code>（現行宣告與上面的實體主鍵相同，框架不驗這件事）的重複率（<code>max_duplicate_key_ratio</code>，現行 config 為 0.0；是「≤ 閾值即過」，不是保證零重複），超過即中止這次 ETL——但<b>那個 partition 已經寫進表裡，不會被回滾</b>，所以後續單獨執行的 dataset 仍讀得到它。重複率的分母只算主鍵無 NULL 的列（NULL 由 <code>primary_key_not_null</code> 另外報）。dataset 讀取時不重驗、也不去重：<code>select_train_keys</code>／<code>select_calibration_keys</code> 直接沿用，重複會原樣帶進 sample_keys／calibration_keys（只有 val_keys／test_keys 自己去重）；自備表不經過 source_etl 的檢查，由上游負責。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
+  <div class="grain"><span class="gtag g-check">有檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>）　|　<b>實體主鍵</b>：<code>(time, entity, item)</code>（來源表，無版本欄）　|　唯一性只在 source_etl 產出時檢查：sample_pool_etl 寫完每個 <code>snap_date</code> 的 partition <b>之後</b>，才比對 config 宣告的 <code>primary_key</code>（現行宣告與上面的實體主鍵相同，框架不驗這件事）的重複率（<code>max_duplicate_key_ratio</code>，現行 config 為 0.0；是「≤ 閾值即過」，不是保證零重複），超過即中止這次 ETL——但<b>那個 partition 已經寫進表裡，不會被回滾</b>，所以後續單獨執行的 dataset 仍讀得到它。重複率的分母只算主鍵無 NULL 的列（NULL 由 <code>primary_key_not_null</code> 另外報）。dataset 讀取時不重驗、也不去重：<code>select_train_keys</code> 直接沿用，重複會原樣帶進 sample_keys（只有 val_keys／test_keys 自己去重）；自備表不經過 source_etl 的檢查，由上游負責。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
     <tr><td>snap_date</td><td>date</td><td><span class="role">time</span></td></tr>
@@ -529,12 +510,12 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
 
 <!-- ===================== dataset: base ===================== -->
 <h3>dataset — base_dataset_version 層</h3>
-<p class="sub">下列 dataset 層 Hive 表的 partition 由外而內列出：<code>base_dataset_version</code>（版本 partition；train-variant 層另加 <code>train_variant_id</code>、calibration 層另加 <code>calibration_variant_id</code>，由 catalog 的 <code>partition_filter</code> 決定）→ <code>snap_date</code>。dataset 層所有 Hive 表的 <code>snap_date</code> 都是 STRING partition 欄；來源表的 <code>snap_date</code> 才是 DATE。</p>
+<p class="sub">下列 dataset 層 Hive 表的 partition 由外而內列出：<code>base_dataset_version</code>（版本 partition；train-variant 層另加 <code>train_variant_id</code>，由 catalog 的 <code>partition_filter</code> 決定）→ <code>snap_date</code>。dataset 層所有 Hive 表的 <code>snap_date</code> 都是 STRING partition 欄；來源表的 <code>snap_date</code> 才是 DATE。</p>
 
 <div class="card" id="preprocessor">
   <h4>preprocessor <span class="badge b-json">JSON</span><span class="vl vl-base">base</span></h4>
   <div class="meta"><b>產生</b>：dataset · fit_preprocessor_metadata（在 train 期 feature_table 上 fit，與抽樣解耦）　|
-  <b>下游</b>：dataset（apply_preprocessor_to_features、validate_numeric_precision、build_model_input 各 split）、training（select_features → <code>preprocessor_view</code> → prepare_lgb_train_inputs / tune_hyperparameters / finalize_model / calibrate_model / predict_and_write_test_predictions；診斷節點 compute_feature_statistics、compute_gain_ledger、compute_shap_diagnostics、compute_quadrant_profiles、compute_quadrant_cases 直接讀 preprocessor）、inference（build_inference_population_features、predict_and_write_scores）　|
+  <b>下游</b>：dataset（apply_preprocessor_to_features、validate_numeric_precision、build_model_input 各 split）、training（select_features → <code>preprocessor_view</code> → prepare_lgb_train_inputs / tune_hyperparameters / finalize_model / predict_and_write_test_predictions；診斷節點 compute_feature_statistics、compute_gain_ledger、compute_shap_diagnostics、compute_quadrant_profiles、compute_quadrant_cases 直接讀 preprocessor）、inference（build_inference_population_features、predict_and_write_scores）　|
   <b>path</b>：<code>data/dataset/&lt;base_dataset_version&gt;/preprocessor.json</code></div>
   <p class="sub">類別欄編碼字典與前處理 metadata（transform 時用）。是跨 dataset / training / inference <b>共用</b>的前處理合約。內含四個鍵（見下）；其中 <code>category_mappings</code> 每欄的值是 list，<b>索引即編碼</b>（資料來源的類別欄為排序後的相異值，identity 類別欄如 item 依 <code>schema.categorical_values</code> 宣告的順序），不在 list 內的值（含 NULL）編成 <code>-1</code>。</p>
   <div class="ex">{ "categorical_columns": [&lt;item&gt;, &lt;cat_col&gt;, ...],
@@ -554,9 +535,9 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
 
 <div class="card" id="preprocessed_feature_table">
   <h4>preprocessed_feature_table <span class="badge b-hive">Hive</span><span class="vl vl-base">base</span></h4>
-  <div class="meta"><b>產生</b>：dataset · apply_preprocessor_to_features（對設定月份〔train / calibration / val / test 的聯集〕中尚未落地的月份編碼，各 split 共用；已落地的月份不重算（ADR-0002），<code>--rebuild-dates</code>（限 <code>test_snap_dates</code> 內的月份）可強制重算）　|
+  <div class="meta"><b>產生</b>：dataset · apply_preprocessor_to_features（對設定月份〔train / val / test 的聯集〕中尚未落地的月份編碼，各 split 共用；已落地的月份不重算（ADR-0002），<code>--rebuild-dates</code>（限 <code>test_snap_dates</code> 內的月份）可強制重算）　|
   <b>下游</b>：dataset（validate_numeric_precision、build_model_input 各 split）　|　<b>partition</b>：base_dataset_version / snap_date</div>
-  <div class="grain"><span class="gtag g-none">框架不檢查</span><b>顆粒度</b>：<code>time × entity</code>（示例 <code>snap_date × cust_id</code>）　|　<b>實體主鍵</b>：<code>(time, entity)</code>，另含版本欄 <code>base_dataset_version</code>　|　框架不檢查、由上游負責：本節點只做逐列過濾與編碼，不去重也不聚合，唯一性等於落地當下的 <code>feature_table</code>——來源有重複就原樣傳下去，並在 build_model_input 的 join 放大列數（train／train_dev／calibration 側有 B10 這道間接的列數閘擋這種放大，val／test 在 dataset 階段沒有）。已落地的月份不會被重算，<code>--rebuild-dates</code> 又只涵蓋 <code>test_snap_dates</code> 內的月份（A21），所以落地當下若帶著重複，之後 <code>feature_table</code> 修好，這張表已落地的月份不會自動跟著變。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
+  <div class="grain"><span class="gtag g-none">框架不檢查</span><b>顆粒度</b>：<code>time × entity</code>（示例 <code>snap_date × cust_id</code>）　|　<b>實體主鍵</b>：<code>(time, entity)</code>，另含版本欄 <code>base_dataset_version</code>　|　框架不檢查、由上游負責：本節點只做逐列過濾與編碼，不去重也不聚合，唯一性等於落地當下的 <code>feature_table</code>——來源有重複就原樣傳下去，並在 build_model_input 的 join 放大列數（train／train_dev 側有 B10 這道間接的列數閘擋這種放大，val／test 在 dataset 階段沒有）。已落地的月份不會被重算，<code>--rebuild-dates</code> 又只涵蓋 <code>test_snap_dates</code> 內的月份（A21），所以落地當下若帶著重複，之後 <code>feature_table</code> 修好，這張表已落地的月份不會自動跟著變。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
   <p class="note">版本層是 <b>base_dataset_version</b>（catalog 的 partition_filter 只有 base_dataset_version），<b>不依賴 train 抽樣</b>——即使 catalog 註解把它列在「train-variant 區塊」。</p>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
@@ -573,7 +554,7 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
   <div class="meta"><b>產生</b>：dataset · select_val_keys / select_test_keys（取 val / test 期 <code>sample_pool</code> 的 identity 並去重）　|
   <b>下游</b>：dataset（build_val_model_input / build_test_model_input）　|　<b>partition</b>：base_dataset_version / snap_date</div>
   <div class="grain"><span class="gtag g-build">由寫法保證</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>）　|　<b>實體主鍵</b>：<code>(time, entity, item)</code>，另含版本欄 <code>base_dataset_version</code>　|　由節點自己的寫法保證不重複、不靠上游（<code>sample_pool</code> 有重複也一樣）：兩個節點都對 identity 做 <code>dropDuplicates</code>；val 若再抽樣，是對去重後的 keys 按 entity 保留（<code>keep_entities_drawn_under_ratio</code>，semi-join 式，不放大列數）。test_keys 是累積所有月份的表，每次只寫尚未落地的月份（<code>--rebuild-dates</code> 指名的月份除外；重建也是整個分區覆寫，不會疊出重複）。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
-  <p class="sub">只含 identity 三欄（<b>不</b> carry 任何 carry 欄，與 train/calibration keys 不同）。版本層為 base（不依 train 抽樣變體）。<b>val</b>：預設取全部 identity；<code>val_sample_ratio</code> &lt; 1 時按 entity（<code>val_sample_keys</code>，預設完整 entity）整批抽樣（現行 conf 為 0.5）。<b>test</b>：full population、不抽樣，只處理尚未落地的月份。</p>
+  <p class="sub">只含 identity 三欄（<b>不</b> carry 任何 carry 欄，與 train keys 不同）。版本層為 base（不依 train 抽樣變體）。<b>val</b>：預設取全部 identity；<code>val_sample_ratio</code> &lt; 1 時按 entity（<code>val_sample_keys</code>，預設完整 entity）整批抽樣（現行 conf 為 0.5）。<b>test</b>：full population、不抽樣，只處理尚未落地的月份。</p>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>角色</th></tr>
     <tr><td>snap_date</td><td>string</td><td><span class="role">time</span></td></tr>
@@ -631,8 +612,8 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
   <h4>train_model_input · train_dev_model_input <span class="badge b-hive">Hive</span><span class="vl vl-train">train-variant</span></h4>
   <div class="meta"><b>產生</b>：dataset · build_train_model_input / build_train_dev_model_input（keys LEFT JOIN label_table，再 LEFT JOIN preprocessed_feature_table，鍵同 val/test_model_input 卡所述）　|
   <b>下游</b>：training（cache_train_model_input / cache_train_dev_model_input → 訓練 / early-stopping）、dataset（validate_model_input_grain）　|　<b>partition</b>：base_dataset_version / train_variant_id / snap_date</div>
-  <div class="grain"><span class="gtag g-none">框架不檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>）　|　<b>實體主鍵</b>：<code>(time, entity, item)</code>，另含版本欄 <code>base_dataset_version</code>、<code>train_variant_id</code>　|　<b>沒有直接檢查主鍵唯一的檢查</b>；間接的閘：<code>validate_model_input_grain</code>（不變量 B10）比對列數，不符即中止——每張 model_input 的 parquet footer 列數要等於它的 keys 表（train_keys／train_dev_keys），擋的是右表 join 鍵重複造成的放大。這是<b>比對列數，不是逐鍵檢查</b>：keys 本身有重複時兩邊等量增加，等式照樣成立（keys 的重複見 train_keys 與 sample_keys 卡）。B10 的範圍只有 train／train_dev／calibration，不含 val／test。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
-  <p class="sub">與 val/test_model_input 差別：<b>有</b> carry 欄（<code>carry_columns</code> 指定），且 dataset 端 <b>不</b>濾零正例群組（train / train_dev / calibration 表跨 model_version 共用，不綁 objective）。是否丟零正例群組由訓練端依 objective 決定，僅 lambdarank 會丟（<code>objective_drops_zero_positive_groups</code>）。</p>
+  <div class="grain"><span class="gtag g-none">框架不檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>）　|　<b>實體主鍵</b>：<code>(time, entity, item)</code>，另含版本欄 <code>base_dataset_version</code>、<code>train_variant_id</code>　|　<b>沒有直接檢查主鍵唯一的檢查</b>；間接的閘：<code>validate_model_input_grain</code>（不變量 B10）比對列數，不符即中止——每張 model_input 的 parquet footer 列數要等於它的 keys 表（train_keys／train_dev_keys），擋的是右表 join 鍵重複造成的放大。這是<b>比對列數，不是逐鍵檢查</b>：keys 本身有重複時兩邊等量增加，等式照樣成立（keys 的重複見 train_keys 與 sample_keys 卡）。B10 的範圍只有 train／train_dev，不含 val／test。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
+  <p class="sub">與 val/test_model_input 差別：<b>有</b> carry 欄（<code>carry_columns</code> 指定），且 dataset 端 <b>不</b>濾零正例群組（train / train_dev 表跨 model_version 共用，不綁 objective）。是否丟零正例群組由訓練端依 objective 決定，僅 lambdarank 會丟（<code>objective_drops_zero_positive_groups</code>）。</p>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
     <tr><td>snap_date, cust_id, prod_name</td><td>—</td><td>identity（prod_name 同時為 item 特徵，在 model_input 內維持原字串；由訓練端的 pdf_to_X 才轉碼）</td></tr>
@@ -644,36 +625,15 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
 2025-03-31  C000001   prod_A           0      …          …          （示意）</div>
 </div>
 
-<!-- ===================== dataset: calibration-variant ===================== -->
-<h3>dataset — calibration_variant_id 層（可選，enable_calibration）</h3>
-
-<div class="card" id="calibration_keys">
-  <h4>calibration_keys <span class="badge b-hive">Hive</span><span class="vl vl-cal">calibration-variant</span></h4>
-  <div class="meta"><b>產生</b>：dataset · select_calibration_keys（對 calibration_snap_dates 期 sample_pool 抽樣）　|
-  <b>下游</b>：dataset（build_calibration_model_input、validate_model_input_grain）　|　<b>partition</b>：base_dataset_version / calibration_variant_id / snap_date</div>
-  <div class="grain"><span class="gtag g-none">框架不檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>；<code>sample_pool</code> 的列子集）　|　<b>實體主鍵</b>：<code>(time, entity, item)</code>，另含版本欄 <code>base_dataset_version</code>、<code>calibration_variant_id</code>（不同抽樣變體落在不同 partition，不互相覆寫）　|　框架不檢查、由上游負責：本節點不去重，唯一性直接沿用 <code>sample_pool</code>（與 sample_keys 同形，抽樣只減不增）。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
-  <p class="sub">schema 同 sample_keys（identity + carry 欄）。抽樣 <code>site</code> 與 train 不同 → 即使同 seed 也抽到獨立的桶。</p>
-</div>
-
-<div class="card" id="calibration_model_input">
-  <h4>calibration_model_input <span class="badge b-hive">Hive</span><span class="vl vl-cal">calibration-variant</span></h4>
-  <div class="meta"><b>產生</b>：dataset · build_calibration_model_input　|
-  <b>下游</b>：training（cache_calibration_model_input → calibrate_model）、dataset（validate_model_input_grain）　|　<b>partition</b>：base_dataset_version / calibration_variant_id / snap_date</div>
-  <div class="grain"><span class="gtag g-none">框架不檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>）　|　<b>實體主鍵</b>：<code>(time, entity, item)</code>，另含版本欄 <code>base_dataset_version</code>、<code>calibration_variant_id</code>　|　<b>沒有直接檢查主鍵唯一的檢查</b>；間接的閘：<code>validate_model_input_grain</code>（不變量 B10）比對本表與 <code>calibration_keys</code> 的 parquet footer 列數，不符即中止，擋的是右表 join 鍵重複造成的放大；同樣是<b>比對列數，不是逐鍵檢查</b>（keys 本身有重複時，列數等式照樣成立）。<b>只在 <code>enable_calibration: true</code> 時才有</b>：關閉時這張表不產生，B10 也不含 calibration 這一對。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
-  <p class="sub">schema 同 train_model_input（identity + label + 編碼特徵 + carry；prod_name 維持原字串、數值特徵統一 cast 成 <code>numeric_feature_storage_type</code>）。僅在 <code>enable_calibration: true</code> 時產生。dataset 端<b>不</b>濾零正例群組；calibration 在任何 objective 下都不丟零正例群組（校準要看完整的分數分佈）。</p>
-  <div class="ex">snap_date   cust_id   prod_name(item)  label  …特徵欄…   …carry 欄…
-2025-11-30  C000007   prod_A           1      …          …          （示意）</div>
-</div>
-
 <!-- ===================== training ===================== -->
 <h3>training — model_version 層（driver-local 產物 + 1 張 Hive）</h3>
 
 <div class="card" id="model">
   <h4>model <span class="badge b-model">模型</span><span class="vl vl-mv">model_version</span></h4>
-  <div class="meta"><b>產生</b>：training · finalize_model（→ 校準時再經 calibrate_model 包裝）　|
+  <div class="meta"><b>產生</b>：training · finalize_model　|
   <b>下游</b>：training（predict_and_write_test_predictions、compute_feature_statistics、compute_feature_importance、compute_gain_ledger、compute_shap_diagnostics、compute_quadrant_profiles、compute_quadrant_cases、log_experiment）、inference（predict_and_write_scores）　|
-  <b>path</b>：<code>data/models/&lt;model_version&gt;/model.txt</code>（driver-local，由 LightGBM 的 <code>save_model</code> 寫；同目錄另有 <code>model_meta.json</code>，校準時還有 <code>calibrator.pkl</code>；皆不認 hdfs://）</div>
-  <p class="sub">單一共用 LightGBM booster（pointwise <code>binary</code> 或 LTR <code>lambdarank</code>/<code>rank_xendcg</code>，由 parameters_training.yaml 決定）。校準開啟時 model 是校準後包裝（calibrate_model 的輸出仍命名 <code>model</code>）。載入時靠 <code>model_meta.json</code> 的 <code>calibrated</code> 決定要不要套上校準包裝，所以只搬 <code>model.txt</code> 會丟掉校準。</p>
+  <b>path</b>：<code>data/models/&lt;model_version&gt;/model.txt</code>（driver-local，由 LightGBM 的 <code>save_model</code> 寫；同目錄另有 <code>model_meta.json</code>，只記 <code>algorithm</code>、<code>adapter_class</code> 與 <code>saved_at</code>；皆不認 hdfs://）</div>
+  <p class="sub">單一共用 LightGBM booster（pointwise <code>binary</code> 或 LTR <code>lambdarank</code>/<code>rank_xendcg</code>，由 parameters_training.yaml 決定）。<code>finalize_model</code> 直接產出 <code>model</code>，中間沒有任何包裝層。載入時靠 <code>model_meta.json</code> 的 <code>algorithm</code> 挑 adapter；這個 sidecar 不在時會 fallback 成 LightGBM 並記 warning，所以只搬 <code>model.txt</code> 會丟掉 adapter 的選擇依據。</p>
 </div>
 
 <div class="card" id="best_params">
@@ -696,13 +656,13 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>說明</th></tr>
     <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
-    <tr><td>score</td><td>double</td><td>模型分數（校準後）</td></tr>
-    <tr><td>score_uncalibrated</td><td>double</td><td>原始輸出；校準關閉時等於 score</td></tr>
+    <tr><td>score</td><td>double</td><td>模型分數</td></tr>
+    <tr><td>score_uncalibrated</td><td>double</td><td>deprecated：由寫法保證恆等於 score，會在後續的發布版本移除（#412）</td></tr>
     <tr><td>label</td><td>int</td><td>ground truth</td></tr>
   </table>
   <div class="ex">snap_date=2026-01-31 / prod_name=prod_A（partition）
 cust_id   score   score_uncalibrated  label
-C000010   0.83    1.92                1      （示意）</div>
+C000010   0.83    0.83                1      （示意）</div>
 </div>
 
 <div class="card" id="evaluation_results">
@@ -711,7 +671,7 @@ C000010   0.83    1.92                1      （示意）</div>
   <b>下游</b>：training（log_experiment → MLflow）　|
   <b>path</b>：<code>data/models/&lt;model_version&gt;/evaluation_results.json</code></div>
   <p class="note">這是 <b>training</b> pipeline 的產物（test mAP），<b>不是</b> evaluation pipeline。evaluation pipeline 產的是 report.html、metrics.json（evaluation_metrics）與 enriched_eval_predictions。</p>
-  <p class="sub"><code>per_item_map_attr</code> 不是每個 item 自己的 mAP，而是該 item 的正例列 <code>ap_contrib</code> 的平均。校準開啟（且校準前後分數不同）時另有 <code>uncalibrated</code>（同樣的 <code>overall_map</code>／<code>per_item_map_attr</code>）與 <code>calibration_method</code> 兩個鍵。</p>
+  <p class="sub"><code>per_item_map_attr</code> 不是每個 item 自己的 mAP，而是該 item 的正例列 <code>ap_contrib</code> 的平均。<code>compute_test_mAP_spark</code> 只產出這一份指標，沒有第二份。</p>
   <div class="ex">{ "overall_map": 0.65, "per_item_map_attr": { "prod_A": 0.93, ... },
   "n_queries": 654, "n_excluded_queries": 0 }  （示意）</div>
 </div>
@@ -753,11 +713,11 @@ C000010   0.83    1.92                1      （示意）</div>
     <tr><th>欄位</th><th>型別</th><th>說明</th></tr>
     <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
     <tr><td>score</td><td>double</td><td>模型分數（未排名）</td></tr>
-    <tr><td>score_uncalibrated</td><td>double</td><td>校準前的原始分數；沒套用校準時等於 score</td></tr>
+    <tr><td>score_uncalibrated</td><td>double</td><td>deprecated：由寫法保證恆等於 score，會在後續的發布版本移除（#412）</td></tr>
   </table>
   <div class="ex">model_version=&lt;mv&gt; / snap_date=2026-02-28 / prod_name=prod_A / entity_bucket=3（partition）
 cust_id   score   score_uncalibrated
-C000010   0.83    0.71   （示意）</div>
+C000010   0.83    0.83   （示意）</div>
   <p class="sub"><code>entity_bucket</code> 是機制欄不是契約欄：評分必須在 driver（禁 UDF），所以按 entity 雜湊切塊；
   而 <code>insertInto</code> ＋ dynamic overwrite 會把 frame 裡出現的分區整個替換，所以塊的邊界必須等於分區的邊界，
   否則後一個桶的寫入會刪掉前一個桶的列且零錯誤訊息。<code>rank_predictions</code> 讀完就丟，
@@ -777,12 +737,12 @@ C000010   0.83    0.71   （示意）</div>
     <tr><th>欄位</th><th>型別</th><th>說明</th></tr>
     <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
     <tr><td>score</td><td>double</td><td><span class="role">score</span></td></tr>
-    <tr><td>score_uncalibrated</td><td>double</td><td>校準前的原始分數；沒套用校準時等於 score</td></tr>
+    <tr><td>score_uncalibrated</td><td>double</td><td>deprecated：由寫法保證恆等於 score，會在後續的發布版本移除（#412）</td></tr>
     <tr><td>rank</td><td>bigint</td><td><span class="role">rank</span>（query group 內名次；同分按 item 升冪）</td></tr>
   </table>
   <div class="ex">model_version=&lt;mv&gt; / snap_date=2026-02-28 / prod_name=prod_A（partition）
 cust_id   score   score_uncalibrated   rank
-C000010   0.83    0.71                 1      （示意）</div>
+C000010   0.83    0.83                 1      （示意）</div>
 </div>
 
 <!-- ===================== evaluation ===================== -->

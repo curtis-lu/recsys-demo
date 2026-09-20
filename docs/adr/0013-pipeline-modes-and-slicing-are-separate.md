@@ -47,6 +47,8 @@ ONLY_TEST_MONTHS_NODES = (
 
 本次之前，`create_pipeline` 的模式參數在本 repo 已經有五個（`evaluation` 三個：`post_training` / `compare_source` / `compare_only`；`dataset` 與 `training` 各一個 `enable_calibration`），而切片入口只有兩個、四個 pipeline 共用。ADR-0012 的 preset 設計等於為既有機制已覆蓋的需求發明第二套。
 
+> **現況（#411）**：`dataset` 與 `training` 的 `enable_calibration` 模式參數已隨 calibration 移除刪除。此處記錄的是 ADR-0013 決策當時既有機制的盤點，用來論證「這不是發明新機制」；結論（`--only-test-months` 沿用既有的模式參數形狀，不是切片）不受影響——它援引的是 `compare_only` 那個前例，不依賴 `enable_calibration` 本身存在。
+
 ### 二、preset 要讀懂得先跑一段推理，而那段推理本身就是成本
 
 preset 只寫兩個節點名這件事，需要一整段關於 producer map 的推理才讀得懂：擴張只沿 `node.outputs` 建的 producer map 走 → 零輸出的節點永遠不會被自動拉回 → 所以資料閘必須被顯式列入 → 所以常數裡是「一個終點 ＋ 一個例外」而不是「一組同類的節點」。

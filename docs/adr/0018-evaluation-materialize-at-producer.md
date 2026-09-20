@@ -80,7 +80,7 @@ label_table ────────┼─► prepare_eval_data ──► Hive: 
 這是本份改過一次立場的地方，理由要寫清楚。第一版設計多了一個 `keep_snap_date` node：讀表、篩月、輸出記憶體裡的 `eval_predictions`，五個消費者不動。它被否決，理由是 repo 自己的規則，不是偏好：
 
 - **node 規則 1**：node 邊界要落在「撈得出來看」的產物上。那個 node 的輸出沒有 catalog 條目、沒有 log、沒有測試單獨讀它——正是該合併掉的邊界。
-- **node 規則 5**：決策重複寫兩份，機制才共用。dataset pipeline 就是這樣做的：`select_train_keys`、`select_calibration_keys`、`build_test_model_input` 各自呼叫一次 `restrict_to_months`（`pipelines/dataset/steps/scoping.py`），catalog 對來源表什麼都不設。「要哪幾個月」是每個 node 的一個決定，不是 catalog 或某個中介 node 的事。
+- **node 規則 5**：決策重複寫兩份，機制才共用。dataset pipeline 就是這樣做的：`select_train_keys`、`select_calibration_keys`、`build_test_model_input` 各自呼叫一次 `restrict_to_months`（`pipelines/dataset/steps/scoping.py`），catalog 對來源表什麼都不設。「要哪幾個月」是每個 node 的一個決定，不是 catalog 或某個中介 node 的事。（2026-09-20 更正：`select_calibration_keys` 已隨 #414 刪除，上面這串名字不要照抄。現行呼叫端是 `select_train_keys`（走同族的 `restrict_to_months_or_all`）、`select_val_keys` 與 `fit_preprocessor_metadata`，`build_test_model_input` 走的是同族的 `months_filter_as_date`。**這一條援引的型態不受影響**——每個 node 自己決定要哪幾個月，機制共用。）
 
 **代價一：五個 node 各多一行，而且忘了篩不會有錯誤訊息。** 以後有人加第六個消費者忘了篩，會**安靜地把所有月份算進去**（`enriched_eval_predictions` 累積這個 model_version 評估過的每個月）。兩層護欄：
 
@@ -108,6 +108,18 @@ label_table ────────┼─► prepare_eval_data ──► Hive: 
 - `draw_diagnosis_sample`（`diagnosis/metric/sample.py`）「`score_uncalibrated` 存在就帶進抽樣」的邏輯在監控模式下會帶進一欄 NULL；抽樣的其他讀者（metric CI）不讀它，無害，但要在該處寫一行為什麼。
 - 同型的「欄位存在就用」還有一處：`compute_dataset_overview` 與 per-segment 聚合挑 `active_seg_col` 的方式是「`evaluation.segment_columns` 裡第一個出現在 frame 欄位裡的」。（2026-09-13 更正：本段原本寫「config 側被 A10 擋住，不需要守衛」，那是在 segment 來源還寫死 `sample_pool` 時成立的。[ADR-0020](0020-evaluation-bug-round-intended-behaviours.md) bug 6 讓 segment 跟著各模式的母體表走，監控母體可能沒有某個 segment 欄，於是 post-training 那次 join 進來的欄在監控模式的 frame 裡會是全 NULL——「這次有哪些 segment 欄可用」因此改由母體表的 metadata 決定，消費者不再看 frame 的欄位。修法在 ADR-0020。）
 - `docs/pipelines/evaluation.md` §7.3「post-training 與 monitoring 共用同一個分區」那段要加上「而且共用同一個 schema，另一模式的欄位讀回來是 NULL」。要不要分成兩張表，見〈沒有解決的事〉。
+
+> **2026-09-20 更正（#411 移除 calibration）：`score_uncalibrated` 不再是「校準前的原始分數」，
+> 只是一個 deprecated 的佔位欄。** 校準器刪除之後 `score` 本身就是模型的原始 booster 輸出，
+> 這一欄**恆等於 `score`**；`conf/base/catalog.yaml` 的四張預測表仍然宣告它、註解標著 deprecated，
+> 會在後續的發布版本移除（追蹤票 #412），而各 registry 診斷已經不讀它（見決定 5 的更正）。
+> **本段其餘推論不受影響**：`columns: "auto"` 的 schema 是兩種模式的聯集、另一模式的欄讀回來是
+> NULL、所以「欄位存在就用」的守衛要多問一句「是不是全 NULL」——那幾件事是**兩種模式寫同一張表**
+> 的後果，跟這一欄是不是校準前的分數無關。守衛的形狀因此照原樣留著，只是守的欄改成 schema 的
+> score 角色欄（`schema["score"]`）。**上面第三個項目符號（`draw_diagnosis_sample` 把
+> `score_uncalibrated` 帶進抽樣）已經作廢**：`diagnosis/metric/sample.py` 的 `keep_cols` 現在
+> 只留 schema 角色欄與 segment 欄，沒有人再把這一欄帶出來；同理，下面 2026-09-14 那條
+> 〈監控模式的 `score_uncalibrated` 不是 NULL〉講的那行註解也已隨之改寫。
 
 ### 切片的 `can_load` 要看分區，不看表
 
@@ -241,6 +253,23 @@ registry 診斷（`diagnosis/metric/contract.py::DIAGNOSES`，現行 `config_shi
 
 這一欄**只有 training 會寫**（`training/nodes.py` 的 predict node 同時寫 `score` 與 `score_uncalibrated`，寫進 `training_eval_predictions`）。inference 只寫 `score`，而且預設 `inference.use_calibration: true`，原始分數就丟了。於是預設的監控模式（讀 `ranked_predictions`）跑到第一個診斷 node 就炸——**生產也一樣**，不只是示例環境。
 
+> **2026-09-20 更正（#411 移除 calibration）：上面這個現象已經不成立。留著，是因為它是決定 5
+> 當初的成因。** 校準器整個刪除（#413）之後沒有「校準後的分數」這種東西：`score` 就是模型的原始
+> booster 輸出，`score_uncalibrated` 變成恆等於它的 deprecated 佔位欄（#412 移除）。三件事跟著
+> 翻掉：
+>
+> - **「校準是事後貼上去的單調變換，拿校準後的分數做減法與 logit 會得到一個看起來像數字、
+>   實際上什麼都不是的東西」這個論證失去適用對象**，不能再拿它當任何事的理由。各
+>   `_compute.py` 的守衛形狀不變，只是守的欄改成 schema 的 score 角色欄（`schema["score"]`）；
+>   診斷數值與從前校準關閉時逐值相同。
+> - **「inference 只寫 `score`、原始分數就丟了」不成立**：`inference.use_calibration` 這個設定鍵
+>   現在只要出現就報錯（不變量 A37，`core/consistency.py` 的 `RETIRED_CALIBRATION_KEYS`，
+>   在 CLI entry、Spark 啟動前擋下），而 inference 寫的 `score` 本來就是原始分數。
+> - **監控模式跑到第一個診斷 node 就炸**這件事，現在不會因為分數空間而發生。
+>
+> **決定的行為沒有變**（監控模式仍然不組 registry 診斷 node），**但理由換了**，見〈決定〉
+> 第 1 件的更正。
+
 ### 決定
 
 兩件事分開做：
@@ -251,15 +280,46 @@ registry 診斷（`diagnosis/metric/contract.py::DIAGNOSES`，現行 `config_shi
 
    定案：監控模式用一個**零磁碟讀取**的 stub node `no_diagnosis_pages(parameters) -> []`，輸出 `evaluation_diagnosis_pages`。它不讀任何東西，所以拓撲位置無所謂。這是 ADR-0013「模式決定形狀」底下的一個明列 node，不是 workaround；node docstring 要寫它為什麼存在（`generate_report` 位置綁定、`render_diagnosis_pages` 按檔名讀磁碟）。**不**用「`generate_report` 加一個 `diagnosis_pages=None` 預設值」——`known-pitfalls.md` §12 記過，尾端預設值會吞掉 arity 錯誤，`generate_report` 的六個必填正是那次修出來的。
 
+   **2026-09-20 更正（#411）：行為不變，理由換掉。** 舊理由「因為它們需要 `score_uncalibrated`，
+   而監控模式的預測來源沒有原始分數」已經不成立（見〈現象〉的更正）。逐項核對三個吃診斷抽樣的
+   診斷之後，成立的理由只剩一條，而且範圍比舊理由窄得多：
+
+   - **`item_ability` 與 `suppression` 在監控模式下技術上跑得動，維持不組是刻意不擴大範圍。**
+     兩者的 `_validate`（`diagnosis/metric/item_ability/_compute.py`、
+     `diagnosis/metric/suppression/_compute.py`）只要求四類欄：query 欄（`schema["time"]` ＋
+     `schema["entity"]`）、`schema["item"]`、`schema["label"]`，以及 score 欄。監控模式的
+     `prepare_eval_data` **有** join `label_table`（`pipelines/evaluation/pipeline.py`：兩種模式
+     接的 node inputs 都含 `label_table`，差別只在預測來源與母體表），所以 label 在。
+     **「監控模式沒有 label」是錯的，不要拿它當理由。**
+   - **`config_shift` 仍然拿不到它要的 context 欄。** 它比上面兩項多要 offset 的 context 欄
+     （`offset_context_columns`：`dataset.sample_group_keys` ∪ `training.sample_weight_keys`
+     扣掉 item 與 label），缺了就 raise。那些欄要進到診斷抽樣只有一條路——被 `prepare_eval_data`
+     當 segment 欄從母體表 join 進來（`diagnosis/metric/sample.py` 的 `keep_cols` 只留 schema
+     角色欄與 segment 欄）。而監控模式的母體表是
+     `inference_population` 不是 `sample_pool`，**不保證**帶這些欄；帶不到時
+     `prepare_eval_data` 只把它記進 `evaluation_segment_columns` 的 `missing`、不報錯，要到
+     `config_shift._validate` 才 raise。
+   - 所以現在的理由是 **ADR-0013 的「模式決定形狀」＋ `config_shift` 這一項的資料前提**，
+     **不是**一條普遍的資料限制。`model_capacity` 不吃抽樣，本來就不在這個討論裡。
+
    **連帶**：`--compare`（`create_pipeline(post_training=False, compare_source=…)`）的三個 compare node 是在 `post_training` 判斷之外加的，所以監控模式的 `--compare` 也不跑 registry 診斷。`docs/pipelines/evaluation.md` §4.3、§4.4 要寫明「監控模式（含 `--compare`）不含 registry 診斷，要診斷用 `--post-training`」。
 
 2. **inference 也寫 `score_uncalibrated`。** `predict_and_write_scores`（`inference/nodes.py`）多寫一欄原始 booster 輸出（校準關閉時等於 `score`，跟 training 的寫法一致）；`unranked_predictions`、`ranked_staging`、`ranked_predictions` 三個 catalog 條目的 `columns` 各加一欄——`HiveTableDataset.save` 結尾的 `df.select(*declared)` 會**靜默丟掉**未宣告的欄（`io/hive_table_dataset.py` 的 `declared_columns` docstring），漏一個條目那一欄就不見、沒有錯誤。不變量 A28 幫不上忙：它只管 `schema.entity` 各欄、只接在 training 指令上。inference 尚未部署，不需要遷移。（2026-09-13 實作註：值跟 training 一致，機制沒有照抄。training 對同一批列呼叫 `predict` 與 `predict_uncalibrated` 各一次，booster 跑兩遍；inference 每個 chunk 只跑一遍 booster、把校準套在那份原始分數上，為此 `CalibratedModelAdapter` 多一個公開的 `calibrate`。）
 
 為什麼第 2 件還要做，既然第 1 件之後監控模式不跑診斷了：原始分數是模型的事實，丟掉之後任何事後分析都拿不回來；多一欄 DOUBLE 的成本跟它未來的用途（例如 `--compare` 外部來源要對齊分數空間）比起來可以忽略。
 
+**2026-09-20 更正（#411）：這一欄現在的意義只剩 deprecated 佔位。** 校準器刪除之後 `score` 本身
+就是原始 booster 輸出，`score_uncalibrated` 恆等於它；四張預測表的 catalog 宣告與 deprecated 註解
+還在，會在後續的發布版本移除（追蹤票 #412）。上面括號裡那段 2026-09-13 的實作註也作廢：
+`CalibratedModelAdapter` 已隨 #413 刪除，training 與 inference 現在都只跑一遍 booster、把同一份
+分數寫進兩欄。**「原始分數是模型的事實，丟掉就拿不回來」這個理由仍然成立**，只是它現在由
+`score` 這一欄自己承擔，不需要第二欄——這正是 #412 可以直接刪欄、不必補償的原因。
+
 ### 守衛補強（見決定 1〈同一張表、兩種模式〉）
 
 需要原始分數的那幾項診斷「讀不到就 raise」的規則**不動**，但「讀不到」的定義從「欄位不存在」改成「欄位不存在，或在抽樣裡全 NULL」。原因是決定 1 之後同一張表的另一模式會把這一欄以 NULL 送回來。
+
+**2026-09-20 更正（#411／#415）：守衛的形狀不動，但它擋的那個成因已經消失。** 三個診斷現在讀的是 `schema["score"]`（見決定 5 的更正），而 `score` 是**兩種模式都會寫**的欄，不會因為「另一模式沒寫」而整欄 NULL——原本寫這一段時擔心的 `score_uncalibrated` 才會。兩道守衛（欄不存在／欄全 NULL）都保留：離線的 `scripts/*_diagnosis.py` 可以餵進手組的 frame，一整欄 NULL 照算會在 NULL 上取 logit、只得到 NaN 而不報錯，這個成本極低的擋板值得留著。程式碼的註解已照這個說法改寫，不再引用共用表的 NULL 情境。
 
 ### 這條的實作歸 bug 那一輪
 
@@ -280,7 +340,7 @@ registry 診斷（`diagnosis/metric/contract.py::DIAGNOSES`，現行 `config_shi
 | 監控模式用 config 開關關掉需要原始分數的診斷 | ADR-0013：模式決定形狀，不是 config。而且開關忘了關就是原問題 |
 | 監控模式保留 `render_diagnosis_pages`、只給它 `parameters` | 按檔名讀磁碟、in-degree 0 排到最前，會撿到上一次 post-training 的 JSON。見決定 5 |
 | `generate_report` 給 `diagnosis_pages` 一個預設值 | 尾端預設值吞 arity 錯誤，`known-pitfalls.md` §12 |
-| 診斷讀不到原始分數時退回 `score` | 靜默算錯。見決定 5 |
+| 診斷讀不到原始分數時退回 `score` | 靜默算錯。見決定 5。（2026-09-20，#411：兩者現在是同一個空間、同一個值，這個選項失去內容；「讀不到就 raise」的守衛形狀照樣留著） |
 
 ---
 

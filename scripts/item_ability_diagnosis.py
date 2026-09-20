@@ -8,8 +8,11 @@ answers one narrow ability-layer question:
 
 The main proxy is query-centered within-item AUC:
 
-    relative_score(q, j) = logit(score_uncalibrated(q, j))
-                           - mean_k logit(score_uncalibrated(q, k))
+    relative_score(q, j) = logit(score(q, j))
+                           - mean_k logit(score(q, k))
+
+``score`` here is the schema score role column (``schema.columns.score``),
+read from config rather than hard-coded.
 
 Then, for each item, AUC is computed over ``relative_score`` and the item
 label. Raw within-item AUC is reported only as a contamination check: when raw
@@ -52,7 +55,6 @@ from recsys_tfb.evaluation.metrics import (
 )
 
 ENRICHED_EVAL_ENTRY = "enriched_eval_predictions"
-SCORE_COL = "score_uncalibrated"
 logger = logging.getLogger("item_ability_diagnosis")
 
 
@@ -126,7 +128,6 @@ def required_columns(schema: dict) -> list[str]:
         *schema["entity"],
         schema["item"],
         schema["label"],
-        SCORE_COL,
         schema["score"],
     ]
 
@@ -237,11 +238,11 @@ def validate_and_prepare(pdf: pd.DataFrame, schema: dict) -> tuple[pd.DataFrame,
     query_cols = [schema["time"], *schema["entity"]]
     base_required = [*query_cols, schema["item"], schema["label"]]
 
-    missing = [c for c in [*base_required, SCORE_COL] if c not in pdf.columns]
+    missing = [c for c in [*base_required, schema["score"]] if c not in pdf.columns]
     if missing:
         raise ValueError(f"Input data missing required columns: {missing}")
 
-    keep = [*base_required, SCORE_COL]
+    keep = [*base_required, schema["score"]]
     logger.info("Validating pandas input: rows=%d, columns=%s", len(pdf), list(pdf.columns))
     out = pdf[keep].copy()
     out[schema["label"]] = out[schema["label"]].astype(int)
@@ -464,7 +465,7 @@ def analyze_items(
 
     logger.info("Computing logit scores, query-centered scores, rank percentiles, and AP")
     t0 = time.monotonic()
-    z, logit_notes = to_logit(pdf[SCORE_COL].to_numpy(dtype=np.float64))
+    z, logit_notes = to_logit(pdf[schema["score"]].to_numpy(dtype=np.float64))
     rel = query_center_scores(groups, z)
     rank_pct = rank_percentiles(groups, z)
     ap_by_item, n_pos_ap, macro_map = per_item_ap(groups, items, y, z, mp)
@@ -603,7 +604,7 @@ def analyze_items(
 
     return {
         "metric_params": mp,
-        "score_col_used": SCORE_COL,
+        "score_col_used": schema["score"],
         "logit_notes": logit_notes,
         "n_rows": int(len(pdf)),
         "n_queries": int(len(np.unique(groups))),
@@ -802,6 +803,8 @@ def table_html(rows: list[dict], columns: list[tuple[str, str]], limit: int | No
 
 def render_html(report: dict) -> str:
     result = report["result"]
+    # 分數欄名照實印，不寫死：來自 schema 的 score 角色欄（#415）。
+    sc = html.escape(str(result["score_col_used"]))
     rows = result["per_item"]
     notes = report.get("notes", []) + result.get("logit_notes", [])
     notes_html = "".join(f"<li>{html.escape(n)}</li>" for n in notes)
@@ -848,7 +851,7 @@ def render_html(report: dict) -> str:
 <tr><th>score column</th><td><code>{html.escape(result["score_col_used"])}</code></td></tr>
 <tr><th>bootstrap</th><td>{result["n_boot"]} entity bootstrap draws, seed={result["bootstrap_seed"]}</td></tr>
 </tbody></table>
-<p class="muted">Relative score is <code>logit(score_uncalibrated) - query mean logit(score_uncalibrated)</code>. This removes the per-query level that ranking never compares across customers.</p>
+<p class="muted">Relative score is <code>logit({sc}) - query mean logit({sc})</code>. This removes the per-query level that ranking never compares across customers.</p>
 {"<ul>" + notes_html + "</ul>" if notes_html else ""}
 
 <h2>1. Per-Item Ability Table</h2>

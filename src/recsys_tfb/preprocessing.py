@@ -297,8 +297,8 @@ def cast_numeric_features_to_storage_type(
     #
     # 1,000 columns is where this now is, not where it is headed: since #283
     # every numeric feature column enters the projection, and
-    # ``build_model_input`` runs five times per dataset run (train / train_dev /
-    # val / test / calibration) with the inference pipeline sharing this helper.
+    # ``build_model_input`` runs four times per dataset run (train / train_dev /
+    # val / test) with the inference pipeline sharing this helper.
     #
     # Two things the loop got for free that the select has to pay for, both
     # pinned by tests in tests/test_preprocessing.py:

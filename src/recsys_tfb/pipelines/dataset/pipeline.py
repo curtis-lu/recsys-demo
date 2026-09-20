@@ -59,13 +59,11 @@ def _keep_named(nodes: list[Node], names: tuple[str, ...]) -> list[Node]:
     return [node for node in nodes if node.name in wanted]
 
 
-def create_pipeline(
-    enable_calibration: bool = False, only_test_months: bool = False
-) -> Pipeline:
+def create_pipeline(only_test_months: bool = False) -> Pipeline:
     """Build the dataset pipeline.
 
     Modes:
-      * default — the full DAG (15 nodes, or 17 with calibration).
+      * default — the full DAG (15 nodes).
       * ``--only-test-months`` — the data gate plus the test chain, for a run
         that only adds ``test_snap_dates`` months. See
         :data:`ONLY_TEST_MONTHS_NODES`.
@@ -80,7 +78,6 @@ def create_pipeline(
         build_test_model_input,
         filter_groups_with_positives,
         fit_preprocessor_metadata,
-        select_calibration_keys,
         select_test_keys,
         select_train_keys,
         select_val_keys,
@@ -198,8 +195,8 @@ def create_pipeline(
         ),
         # test uses its own wrapper: `test_keys` is a persistent Hive table
         # holding every month, so reading it back has to be re-scoped to this
-        # run's months. train/val/calibration read keys written by this run and
-        # need no such wrapper.
+        # run's months. train/val read keys written by this run and need no
+        # such wrapper.
         Node(
             build_test_model_input,
             inputs=[
@@ -214,7 +211,7 @@ def create_pipeline(
         # zero-positive groups anyway, so retaining them just wastes Hive
         # storage and downstream predict / extract memory.
         #
-        # train / train_dev / calibration tables are NOT filtered here, and
+        # train / train_dev tables are NOT filtered here, and
         # the reason is no longer "their losses use every row" — that holds
         # for `binary` (pointwise, every row) and for `rank_xendcg` (its
         # target distribution over an all-zero group is a random ranking, so
@@ -227,11 +224,7 @@ def create_pipeline(
         # train_dev while building the lgb binary. It is not done here
         # because these tables are shared across model_versions, and binding
         # them to one objective would force a dataset rebuild on every
-        # objective switch.
-        #
-        # calibration stays whole under every objective: calibration reads
-        # the full score distribution, and dropping the all-negative groups
-        # would shift its baseline. ---
+        # objective switch. ---
         Node(
             filter_groups_with_positives,
             inputs=["val_model_input_unfiltered", "parameters"],
@@ -249,30 +242,8 @@ def create_pipeline(
         ),
     ]
 
-    if enable_calibration:
-        nodes.extend([
-            Node(
-                select_calibration_keys,
-                inputs=["sample_pool", "parameters"],
-                outputs="calibration_keys",
-            ),
-            Node(
-                build_model_input,
-                inputs=[
-                    "calibration_keys", "preprocessed_feature_table", "label_table",
-                    "preprocessor", "parameters",
-                ],
-                outputs="calibration_model_input",
-                name="build_calibration_model_input",
-            ),
-        ])
-
     # --- B10 grain gate: every model_input this run landed must hold exactly
-    #     as many rows as the keys table it was built from. Declared after the
-    #     calibration branch because its input list is what changes with it:
-    #     the calibration pair is appended only when those two tables exist,
-    #     and `validate_model_input_grain` takes them as trailing optional
-    #     arguments for that reason (the Runner binds inputs positionally).
+    #     as many rows as the keys table it was built from.
     #
     #     Its position in this list carries no ordering weight — it depends on
     #     every build node's output, so Kahn can only reach it last. What the
@@ -289,44 +260,24 @@ def create_pipeline(
     #     val / test are absent by necessity, not oversight: see the node's
     #     docstring.
     #
-    #     The input list is spelled out twice rather than built by appending,
-    #     and that is deliberate: `test_static_coverage_floor` skips any node
-    #     whose `inputs=` is not a list of literals, and a skipped node is one
-    #     A1 (catalog-only dataflow) and A5/A6 stop reading. The cost is five
-    #     repeated strings, guarded by
-    #     `test_the_calibration_input_list_is_the_base_list_plus_two`. ---
-    if enable_calibration:
-        nodes.append(
-            Node(
-                validate_model_input_grain,
-                inputs=[
-                    "train_keys", "train_model_input",
-                    "train_dev_keys", "train_dev_model_input",
-                    "parameters",
-                    "calibration_keys", "calibration_model_input",
-                ],
-                outputs="model_input_grain_report",
-                name="validate_model_input_grain",
-            )
+    #     The input list is a list of literals on purpose:
+    #     `test_static_coverage_floor` skips any node whose `inputs=` is not
+    #     one, and a skipped node is one A1 (catalog-only dataflow) and A5/A6
+    #     stop reading. #414 removed the calibration branch that used to append
+    #     a second spelling of this list. ---
+    nodes.append(
+        Node(
+            validate_model_input_grain,
+            inputs=[
+                "train_keys", "train_model_input",
+                "train_dev_keys", "train_dev_model_input",
+                "parameters",
+            ],
+            outputs="model_input_grain_report",
+            name="validate_model_input_grain",
         )
-    else:
-        nodes.append(
-            Node(
-                validate_model_input_grain,
-                inputs=[
-                    "train_keys", "train_model_input",
-                    "train_dev_keys", "train_dev_model_input",
-                    "parameters",
-                ],
-                outputs="model_input_grain_report",
-                name="validate_model_input_grain",
-            )
-        )
+    )
 
-    # After the calibration branch, so the mode is decided against the full
-    # node list however it was built. Neither calibration node is on the test
-    # chain, so the two flags do not interact — pinned by a test rather than
-    # left to be re-derived.
     if only_test_months:
         nodes = _keep_named(nodes, ONLY_TEST_MONTHS_NODES)
 

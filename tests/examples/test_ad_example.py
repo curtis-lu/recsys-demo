@@ -91,7 +91,7 @@ def test_catalog_has_the_same_entries_as_the_root_conf():
 def test_etl_target_dates_cover_every_split_date(params):
     ds = params["dataset"]
     needed = (
-        set(ds["train_snap_dates"]) | set(ds["calibration_snap_dates"])
+        set(ds["train_snap_dates"])
         | set(ds["val_snap_dates"]) | set(ds["test_snap_dates"])
         | set(params["inference"]["snap_dates"])
     )
@@ -100,6 +100,24 @@ def test_etl_target_dates_cover_every_split_date(params):
     # 第一週只當特徵的回看窗，不排序：它之前沒有行為紀錄
     assert WEEKS[0] not in needed
     assert set(params["feature_etl"]["target_dates"]) == set(WEEKS[1:])
+
+
+def test_the_old_calibration_week_is_still_produced_but_used_by_no_split(params):
+    """#414 移除 calibration 之後，2025-12-15 那一週不屬於任何 split。
+
+    ETL 的目標日期刻意不動（#416 要拿升級前後的每一層產物逐層比對，改了 ETL
+    範圍就會多出一個與本次無關的差異）。所以這一週照樣產生、照樣落地，只是沒有
+    split 讀它——這個不對稱是刻意的，寫成測試才不會被當成漏掉的設定補回去。
+    """
+    ds = params["dataset"]
+    orphan = "2025-12-15"
+    in_a_split = (
+        set(ds["train_snap_dates"]) | set(ds["val_snap_dates"])
+        | set(ds["test_snap_dates"]) | set(params["inference"]["snap_dates"])
+    )
+    assert orphan not in in_a_split
+    for stage in ("feature_etl", "label_etl", "sample_pool_etl"):
+        assert orphan in set(params[stage]["target_dates"]), stage
 
 
 def test_generator_is_deterministic():
@@ -142,7 +160,7 @@ def test_query_groups_see_different_numbers_of_items(raw):
     assert per_group.nunique() > 1
 
 
-def test_an_item_first_appears_after_train_and_calibration(params, raw):
+def test_an_item_first_appears_after_train(params, raw):
     # item 清單從資料數（#379）要驗「驗證期間的新 item 只警告」。新的是組合，不是屬性：
     # 活動與格式各自早就出現過。模型把 item 當一個類別值，看到的是沒見過的值；item 宣告成
     # 多欄（#394）也不改這一點，那張票省掉的是拼欄與逐一列出組合
@@ -152,7 +170,7 @@ def test_an_item_first_appears_after_train_and_calibration(params, raw):
     first_week = log.loc[is_late, "week"].min()
     ds = params["dataset"]
     assert first_week in ds["val_snap_dates"]
-    assert first_week > max(ds["train_snap_dates"] + ds["calibration_snap_dates"])
+    assert first_week > max(ds["train_snap_dates"])
     before = log[log["week"] < first_week]
     assert campaign in set(before["campaign_id"]) and fmt in set(before["creative_format"])
 

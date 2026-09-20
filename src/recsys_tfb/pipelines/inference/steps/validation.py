@@ -70,11 +70,14 @@ CHUNK_CHECKS = (
 #: because a name here with no function is a check that silently stopped
 #: running — and the layering assertions would keep passing.
 #:
-#: ``score_range`` is deliberately absent: on every path that applies a
-#: calibrator the ``[0, 1]`` bound holds by construction and the check cannot
-#: go red, and on an uncalibrated ranking objective the raw booster output is
-#: unbounded and the check is a false alarm — decoration or wrong, with no
-#: third case (ADR-0011 §2).
+#: ``score_range`` is deliberately absent, and the two objectives A7 allows
+#: are what rules it out. Under a ``binary`` objective LightGBM's output is a
+#: sigmoid, so ``[0, 1]`` holds by construction and the check cannot go red.
+#: Under a ranking objective the raw booster output is an unbounded real
+#: number, so the same check is a false alarm. Decoration or wrong, with no
+#: third case (ADR-0011 §2). The argument used to be made with a calibrator
+#: supplying the bounded side; #411 removed calibration and the conclusion is
+#: unchanged, because the bounded side was never the calibrator's alone.
 BATCH_CHECKS = (
     "partition_completeness",
     "completeness",
@@ -86,23 +89,22 @@ BATCH_CHECKS = (
 #: ``score_varies_within_group`` fails the run. Below it, the tied groups are
 #: logged and publication continues.
 #:
-#: **Not a tuning knob — it separates two measured regimes.** A tie is not
-#: only produced by the bug this check hunts. ``IsotonicRegression`` fits a
-#: monotone function with *plateaus*, so a group whose raw scores all land on
-#: one plateau comes out exactly tied even though everything upstream is
-#: correct — and ``training.calibration.method: isotonic`` is a supported
-#: setting. Measured on a synthetic fit (50k calibration rows at a ~5%
-#: positive rate, 200k entities x 8 items): **61 of 200,000 groups tied
-#: (0.03%)**, against **zero** on the uncalibrated scores. At production scale
-#: a ``> 0`` rule would therefore block every correct isotonic run — the same
-#: shape of false alarm that sank the product-form partition count on small
-#: populations (ADR-0011 §3).
+#: **A proportion rather than ``> 0``, and the value is deliberately loose.**
+#: The failure this check exists to catch is a degenerate item value written by
+#: *code*: it applies to every chunk and ties **100%** of groups. A half is the
+#: coarsest boundary that names "most groups", which is what that failure looks
+#: like.
 #:
-#: The failure it does have to catch sits four orders of magnitude away: a
-#: degenerate item value is written by *code*, so it applies to every chunk and
-#: ties **100%** of groups. Anywhere between the two regimes works; a half is
-#: the coarsest boundary that names "most groups", which is what the failure
-#: looks like and what no benign mechanism produces.
+#: ⚠ **The measurement that justified the *lower* side of this range is gone.**
+#: It was an isotonic calibrator's plateaus — a group whose raw scores all
+#: landed on one plateau came out exactly tied with nothing upstream wrong
+#: (measured: 61 of 200,000 groups, 0.03%, against zero on the raw scores).
+#: #411 removed calibration, so that benign tie source no longer exists, and
+#: nobody has measured what a legitimate tie rate looks like without it. The
+#: value is **kept unchanged on purpose**: tightening it would be guessing at
+#: production-scale behaviour from no data, and a false alarm here blocks a
+#: publication. Tighten it only after measuring, and see ADR-0011 §3 for the
+#: shape of false alarm that measuring is protecting against.
 CONSTANT_GROUP_FAILURE_RATIO = 0.5
 
 
@@ -296,12 +298,11 @@ def score_varies_within_group_failure(summary) -> dict | None:
     stays green: the group is complete, the ranks are 1..N, and the lag check's
     ``>`` is false on a tie (ADR-0011 §1, example two).
 
-    **A proportion, not ``> 0``**, and that is load-bearing — see
-    :data:`CONSTANT_GROUP_FAILURE_RATIO` for the two measured regimes it
-    separates. Ties below the threshold are what a correct isotonic run looks
-    like, so they are warned about and published; silence would make an
-    arbitrary internal ranking unfindable, and raising would block a supported
-    calibration setting.
+    **A proportion, not ``> 0``** — see :data:`CONSTANT_GROUP_FAILURE_RATIO`
+    for what the threshold separates and why its current value is held rather
+    than tightened. Ties below it are warned about and published: silence would
+    make an arbitrary internal ranking unfindable, and raising on the first tie
+    would block a publication on a rate nobody has measured.
 
     Groups of size one are excluded upstream, in the aggregation: a group of one
     cannot vary, and a single-item configuration would otherwise make every
@@ -312,9 +313,8 @@ def score_varies_within_group_failure(summary) -> dict | None:
     constant_ratio = summary["n_constant"] / max(summary["n_groups"], 1)
     logger.warning(
         "%d of %d query group(s) (%.3f%%) score every product "
-        "identically; their internal ranking is arbitrary. Ties are "
-        "expected in small numbers when a calibrator maps a group's "
-        "raw scores onto one plateau.",
+        "identically; their internal ranking is arbitrary (decided by the "
+        "tie rule, not by the model).",
         summary["n_constant"], summary["n_groups"], 100 * constant_ratio,
     )
     if constant_ratio <= CONSTANT_GROUP_FAILURE_RATIO:

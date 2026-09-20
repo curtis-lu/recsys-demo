@@ -165,31 +165,6 @@ train_dev_model_input:
   partition_cols:
     - {name: snap_date, type: STRING}
 
-# --- Dataset calibration-variant layer ---
-calibration_keys:
-  type: HiveTableDataset
-  database: ${hive.db}
-  table: recsys_prod_calibration_keys
-  external: false
-  columns: "auto"
-  partition_filter:
-    base_dataset_version: ${base_dataset_version}
-    calibration_variant_id: ${calibration_variant_id}
-  partition_cols:
-    - {name: snap_date, type: STRING}
-
-calibration_model_input:
-  type: HiveTableDataset
-  database: ${hive.db}
-  table: recsys_prod_calibration_model_input
-  external: false
-  columns: "auto"
-  partition_filter:
-    base_dataset_version: ${base_dataset_version}
-    calibration_variant_id: ${calibration_variant_id}
-  partition_cols:
-    - {name: snap_date, type: STRING}
-
 # --- Training ---
 model:
   type: ModelAdapterDataset
@@ -206,10 +181,6 @@ best_iteration:
 hpo_best_model:
   type: ModelAdapterDataset
   filepath: data/models/${model_version}/hpo/model.txt
-
-trained_model:
-  type: ModelAdapterDataset
-  filepath: data/models/${model_version}/trained/model.txt
 
 predict_manifest:
   type: JSONDataset

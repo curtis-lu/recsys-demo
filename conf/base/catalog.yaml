@@ -1,7 +1,6 @@
 # Production overrides — Hive tables on HDFS。
-# 三層 versioning：base_dataset_version 對應「與抽樣無關」的不變產物；
-# train_variant_id 對應「依 train sampling」的產物；calibration_variant_id
-# 對應「依 calibration sampling」的產物。Hive 表為固定名稱，版本以
+# 兩層 versioning：base_dataset_version 對應「與抽樣無關」的不變產物；
+# train_variant_id 對應「依 train sampling」的產物。Hive 表為固定名稱，版本以
 # partition_filter 的 partition column 區分；driver-local artifacts（如
 # preprocessor.json）落在 data/dataset/${base_dataset_version}/ 版本化路徑。
 
@@ -109,7 +108,7 @@ numeric_precision_report:
 #
 # 為什麼值得落地：pass/fail 答不出「這個 split 到底幾列」。下游的記憶體估算、
 # 「這個月是不是比上個月大很多」都要這個數字，而它是零掃描拿到的，別處沒有。
-# 報告內含 train_variant_id／calibration_variant_id：檔名只帶
+# 報告內含 train_variant_id：檔名只帶
 # base_dataset_version，換 train variant 重跑會覆蓋同一個檔。
 #
 # ⚠ 真的有 split 對不上時 run 會中止，這個檔**不會**落地（node 沒回傳）。
@@ -190,31 +189,6 @@ train_dev_model_input:
   partition_cols:
     - {name: snap_date, type: STRING}
 
-# --- Dataset calibration-variant layer（依 base + calibration_variant 區分）---
-calibration_keys:
-  type: HiveTableDataset
-  database: ${hive.db}
-  table: recsys_prod_calibration_keys
-  external: false
-  columns: "auto"
-  partition_filter:
-    base_dataset_version: ${base_dataset_version}
-    calibration_variant_id: ${calibration_variant_id}
-  partition_cols:
-    - {name: snap_date, type: STRING}
-
-calibration_model_input:
-  type: HiveTableDataset
-  database: ${hive.db}
-  table: recsys_prod_calibration_model_input
-  external: false
-  columns: "auto"
-  partition_filter:
-    base_dataset_version: ${base_dataset_version}
-    calibration_variant_id: ${calibration_variant_id}
-  partition_cols:
-    - {name: snap_date, type: STRING}
-
 # --- Training pipeline — binary / 非 DataFrame artifact（driver-local）---
 # ModelAdapterDataset / JSONDataset 用 Python 內建 open() 寫檔，不認 hdfs:// scheme，
 # 因此寫到 driver-local fs（與 cached_* 同一原則）。
@@ -232,22 +206,12 @@ best_iteration:
 
 # hpo/ subdirectory is REQUIRED: ModelAdapterDataset writes a model_meta.json
 # sidecar next to its filepath; sharing a directory with `model` would let the
-# two datasets overwrite each other's sidecar (calibration flag cross-talk).
+# two datasets overwrite each other's sidecar.
 # Persisted (with best_iteration) so `training --from-node finalize_model`
 # can skip tune_hyperparameters entirely.
 hpo_best_model:
   type: ModelAdapterDataset
   filepath: data/models/${model_version}/hpo/model.txt
-
-# calibration 開啟時 finalize_model 的輸出（calibrate_model 再把它包成 `model`）。
-# 落地買的是「`--from-node calibrate_model` 不會把 finalize_model 拉回重跑」——
-# 在 final_model_strategy: refit_on_full 下那是一次完整 refit。契約釘在
-# tests/test_pipelines/test_resume_contracts.py 的 calibration 變體。
-# trained/ 子目錄同 hpo/ 的理由：ModelAdapterDataset 會在 filepath 旁寫
-# model_meta.json sidecar，與 `model` 共用目錄會互相覆寫 calibration 旗標。
-trained_model:
-  type: ModelAdapterDataset
-  filepath: data/models/${model_version}/trained/model.txt
 
 # predict_and_write_test_predictions 對每個設定月份的決定：months_processed／
 # months_skipped／months_rebuilt 三份**清單**（外加這一次實際寫了什麼）。落地的
@@ -402,7 +366,7 @@ training_eval_predictions:
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
-    - {name: score_uncalibrated, type: DOUBLE}  # 模型原始輸出；calibration 關閉時等於 score
+    - {name: score_uncalibrated, type: DOUBLE}  # deprecated，恆等於 score，會在後續的發布版本移除，見 #412
     - {name: label, type: INT}
   partition_filter:
     model_version: ${model_version}
@@ -513,7 +477,7 @@ unranked_predictions:
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
-    - {name: score_uncalibrated, type: DOUBLE}  # 校準前的原始分數；沒套用校準時等於 score
+    - {name: score_uncalibrated, type: DOUBLE}  # deprecated，恆等於 score，會在後續的發布版本移除，見 #412
   partition_filter:
     model_version: ${model_version}
   partition_cols:
@@ -533,7 +497,7 @@ ranked_staging:
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
-    - {name: score_uncalibrated, type: DOUBLE}  # 校準前的原始分數；沒套用校準時等於 score
+    - {name: score_uncalibrated, type: DOUBLE}  # deprecated，恆等於 score，會在後續的發布版本移除，見 #412
     - {name: rank, type: BIGINT}
   partition_filter:
     model_version: ${model_version}
@@ -554,7 +518,7 @@ ranked_predictions:
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
-    - {name: score_uncalibrated, type: DOUBLE}  # 校準前的原始分數；沒套用校準時等於 score
+    - {name: score_uncalibrated, type: DOUBLE}  # deprecated，恆等於 score，會在後續的發布版本移除，見 #412
     - {name: rank, type: BIGINT}
   partition_filter:
     model_version: ${model_version}

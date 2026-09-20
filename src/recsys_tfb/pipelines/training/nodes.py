@@ -51,7 +51,6 @@ import mlflow
 import optuna
 import pandas as pd
 import pyarrow.dataset as pads
-from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import HPO_OBJECTIVES, REBUILD_SNAP_DATES_KEY
 from recsys_tfb.core.group_utils import (
@@ -75,7 +74,6 @@ from recsys_tfb.io.extract import (
 )
 from recsys_tfb.io.handles import ParquetHandle, handle_paths, open_parquet_dataset
 from recsys_tfb.models.base import ModelAdapter, get_adapter
-from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.models.feature_selection import apply_feature_selection
 from recsys_tfb.pipelines.training.steps import (
     experiment_log,
@@ -503,45 +501,6 @@ def cache_test_model_input(
     return handles
 
 
-def cache_calibration_model_input(calibration_model_input, parameters: dict) -> ParquetHandle:
-    """Driver-local parquet copy of the calibration split, keyed by its own variant.
-
-    ``calibration_variant_id``, not ``train_variant_id``: the calibration draw
-    has its own ratio and its own sampling site, so it retires on its own
-    schedule. Share the train variant's directory and re-sampling calibration
-    alone would keep hitting the old copy — the calibrator would be fitted on the
-    draw the config no longer asks for, and every downstream probability would be
-    quietly calibrated against it.
-    """
-    # Pre-check — a non-Spark input is a misconfigured environment, not a cache
-    # problem. Say so before a path is composed for it.
-    require_spark_input(calibration_model_input, "calibration_model_input")
-    local_path = resolve_cache_path("calibration_model_input", parameters)
-
-    # Decision — a directory with no marker is an interrupted copy: drop it and
-    # copy again rather than fit a calibrator on a silent subset. Rebuilding is
-    # the right move only while Hive is reachable; the consumer-side guard
-    # (io.handles.require_complete_cache) refuses instead.
-    if is_partial_cache(local_path):
-        log_partial_cache_cleared(local_path)
-        shutil.rmtree(local_path, ignore_errors=True)
-
-    # Decision — a hit is "the marker is present", never freshness. Same trade as
-    # the other splits: no metadata query per run, at the price of a
-    # stale-but-complete copy surviving an upstream backfill unannounced.
-    if cache_is_complete(local_path):
-        log_cache_hit("calibration_model_input", local_path)
-        return ParquetHandle(path=local_path)
-
-    log_cache_miss("calibration_model_input", local_path)
-    populate_cache_from_hive(
-        calibration_model_input.sql_ctx.sparkSession,
-        "calibration_model_input", parameters, local_path,
-    )
-    mark_cache_complete(local_path)
-    return ParquetHandle(path=local_path)
-
-
 def select_features(preprocessor_metadata: dict, parameters: dict) -> dict:
     """Apply training-stage feature selection, returning a preprocessor view.
 
@@ -549,7 +508,7 @@ def select_features(preprocessor_metadata: dict, parameters: dict) -> dict:
     consumes this (possibly subset) view instead of the raw dataset-built
     ``preprocessor``, so ``training.feature_selection.exclude`` is applied
     exactly once and stays consistent across bin-build, HPO, finalize,
-    calibration, test scoring, and diagnostics. Empty/absent selection returns
+    test scoring, and diagnostics. Empty/absent selection returns
     the input unchanged, so non-selection runs are byte-identical.
     """
     return apply_feature_selection(preprocessor_metadata, parameters)
@@ -597,14 +556,10 @@ def _resolve_search_id(parameters: dict) -> str:
     sid = parameters.get("search_id")
     if sid:
         return str(sid)
-    cvi = parameters.get("calibration_variant_id")
-    if not isinstance(cvi, str) or cvi.startswith("__"):  # "__none__" placeholder
-        cvi = None
     return compute_search_id(
         parameters,
         str(parameters.get("base_dataset_version", "")),
         str(parameters.get("train_variant_id", "")),
-        cvi,
     )
 
 
@@ -633,7 +588,7 @@ def tune_hyperparameters(
     passing that gate (tests, direct calls). It is a runtime backstop, and the
     person to find is whoever wrote the config, not whoever produced the data.
     """
-    # HPO and everything after it (finalize / calibrate) is driver-local: Spark
+    # HPO and everything after it (finalize_model) is driver-local: Spark
     # sits completely idle from here until predict_and_write_test_predictions,
     # possibly for hours. An idle application gets reclaimed by the cluster, the
     # context dies on the JVM side, and the Hive write that comes later hits
@@ -976,35 +931,6 @@ def finalize_model(
     return adapter
 
 
-def calibrate_model(
-    model: ModelAdapter,
-    calibration_parquet_handle,
-    preprocessor_metadata: dict,
-    parameters: dict,
-) -> ModelAdapter:
-    """Wrap model with probability calibration."""
-    method = (
-        parameters.get("training", {})
-        .get("calibration", {})
-        .get("method", "isotonic")
-    )
-
-    with log_step(logger, "extract_features"):
-        X_cal, y_cal = extract_Xy(
-            calibration_parquet_handle, preprocessor_metadata, parameters
-        )
-
-    with log_step(logger, "fit_calibrator"):
-        calibrated = CalibratedModelAdapter(model, method=method)
-        calibrated.fit_calibrator(X_cal, y_cal)
-
-    logger.info(
-        "Model calibrated: method=%s, n_samples=%d", method, len(y_cal)
-    )
-    return calibrated
-
-
-
 def predict_and_write_test_predictions(
     model: ModelAdapter,
     test_parquet_handle: dict[str, ParquetHandle],
@@ -1024,9 +950,12 @@ def predict_and_write_test_predictions(
 
     For each (snap_date, prod_name) partition of the months being processed:
         - load only that partition's rows via pyarrow filter
-        - slice X via pdf_to_X; predict; (predict_uncalibrated if Calibrated)
+        - slice X via pdf_to_X; predict
         - build a pandas DataFrame with (every schema.entity column, score,
-          score_uncalibrated, label) + partition cols snap_date, prod_name
+          score_uncalibrated, label) + partition cols snap_date, prod_name.
+          ``score_uncalibrated`` is written equal to ``score``: the column is
+          deprecated and kept only so the landed table's shape does not change
+          (#412 removes it).
         - training_eval_predictions.save(df) — exactly one partition's
           rows per save, so dynamic-partition overwrite cleanly overwrites
           a single partition and successive saves don't collide
@@ -1153,7 +1082,6 @@ def predict_and_write_test_predictions(
     snap_dates_seen: set[str] = set()
     items_seen: set[str] = set()
     n_rows_written = 0
-    is_calibrated = isinstance(model, CalibratedModelAdapter)
 
     for _, row in partition_pdf.iterrows():
         snap_date = str(row[time_col])
@@ -1191,9 +1119,6 @@ def predict_and_write_test_predictions(
 
             X = pdf_to_X(part_pdf, preprocessor_metadata, parameters)
             y_score = model.predict(X)
-            score_uncalibrated = (
-                model.predict_uncalibrated(X) if is_calibrated else y_score
-            )
 
             out_pdf = pd.DataFrame({
                 # Every entity column, not just the first: the identity of a
@@ -1203,7 +1128,11 @@ def predict_and_write_test_predictions(
                 # it never declared is dropped by `save` in silence.
                 **{c: part_pdf[c].astype(str).values for c in entity_cols},
                 "score": y_score,
-                "score_uncalibrated": score_uncalibrated,
+                # Deprecated, and equal to `score` by construction: nothing
+                # rescales a model's output any more (#411). It stays declared
+                # so the managed table keeps its column count, which is what a
+                # position-based write depends on; #412 takes both away.
+                "score_uncalibrated": y_score,
                 label_col: part_pdf[label_col].values,
                 time_col: snap_date,
                 item_col: prod_name,
@@ -1290,11 +1219,6 @@ def log_experiment(
                 # is right.
                 experiment_log.log_evaluation_metrics(evaluation_results)
 
-                # Decision — a calibrated run says so, and carries the
-                # uncalibrated score beside it. Without the pair, "did
-                # calibration help" is unanswerable from the run alone.
-                experiment_log.log_calibration_outcome(evaluation_results)
-
                 # The adapter logs its own artifact: only it knows the flavour.
                 model.log_to_mlflow()
 
@@ -1345,9 +1269,10 @@ def compute_test_mAP_spark(
                            — replaces the old per_product_ap; carries the same
                            interpretation when n_products dimension is full.
         n_queries / n_excluded_queries
-        uncalibrated       (only when score != score_uncalibrated) sub-dict with
-                           overall_map / per_item_map_attr in the same shape
-        calibration_method (only when calibration was applied)
+
+    One set of metrics, always. There used to be a second, "before
+    calibration" set, emitted when ``score`` and ``score_uncalibrated``
+    disagreed; #411 removed the only thing that could make them disagree.
 
     predict_manifest is an in-DAG dependency only — its content is logged
     for observability but the actual data is read back from
@@ -1374,16 +1299,6 @@ def compute_test_mAP_spark(
         n_prods, overall_map_key, item_map_attr_key, predict_manifest,
     )
 
-    with log_step(logger, "detect_calibration"):
-        calibration_applied = (
-            training_eval_predictions.filter(
-                F.col("score") != F.col("score_uncalibrated")
-            )
-            .limit(1)
-            .count()
-            > 0
-        )
-
     # The action is not on this line: compute_all_metrics counts and collects
     # several times inside evaluation/metrics_spark.py. Rule 10's "follow one
     # level" applies — this is the expensive block, not a lazy plan.
@@ -1400,35 +1315,11 @@ def compute_test_mAP_spark(
         "n_excluded_queries": cal["n_excluded_queries"],
     }
 
-    if calibration_applied:
-        # The renames are lazy, so they stay outside the timed block.
-        uncal_df = (
-            training_eval_predictions
-            .withColumnRenamed("score", "_score_calibrated")
-            .withColumnRenamed("score_uncalibrated", "score")
-        )
-        with log_step(logger, "compute_metrics_uncalibrated"):
-            uncal = compute_all_metrics(uncal_df, parameters)
-        result["uncalibrated"] = {
-            "overall_map": float(uncal["overall"].get(overall_map_key, 0.0)),
-            "per_item_map_attr": {
-                p: float(v.get(item_map_attr_key, 0.0))
-                for p, v in uncal["per_item"].items()
-            },
-        }
-        result["calibration_method"] = (
-            parameters.get("training", {}).get("calibration", {}).get("method", "isotonic")
-        )
-        logger.info(
-            "compute_test_mAP_spark: calibrated=%.4f uncalibrated=%.4f",
-            result["overall_map"], result["uncalibrated"]["overall_map"],
-        )
-    else:
-        logger.info(
-            "compute_test_mAP_spark: mAP=%.4f items=%d excluded_queries=%d",
-            result["overall_map"],
-            len(result["per_item_map_attr"]),
-            result["n_excluded_queries"],
-        )
+    logger.info(
+        "compute_test_mAP_spark: mAP=%.4f items=%d excluded_queries=%d",
+        result["overall_map"],
+        len(result["per_item_map_attr"]),
+        result["n_excluded_queries"],
+    )
 
     return result

@@ -704,25 +704,10 @@ class TestPredictAndWriteScores:
             "snap_date", "prod_name", ENTITY_BUCKET_COL,
         ]
 
-    # Raw scores: ItemSensitiveModel scores an item by its code in
-    # `category_mappings` ("fund_bond", "exchange_fx", "fund_stock" -> 0, 1, 2).
-    # The calibrator is fitted on exactly those three raw values with labels
-    # 0, 0, 1, so isotonic regression maps 0 -> 0, 1 -> 0, 2 -> 1. Both columns
-    # therefore have values known without running the node, and they differ on
-    # exchange_fx — the row that tells "raw" from "calibrated".
+    # ItemSensitiveModel scores an item by its code in `category_mappings`
+    # ("fund_bond", "exchange_fx", "fund_stock" -> 0, 1, 2), so both written
+    # columns have values known without running the node.
     RAW_BY_ITEM = {"fund_bond": 0.0, "exchange_fx": 1.0, "fund_stock": 2.0}
-    CALIBRATED_BY_ITEM = {"fund_bond": 0.0, "exchange_fx": 0.0, "fund_stock": 1.0}
-
-    @staticmethod
-    def _calibrated_item_sensitive_model():
-        from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
-
-        model = CalibratedModelAdapter(ItemSensitiveModel(), method="isotonic")
-        model.fit_calibrator(
-            np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]),
-            np.array([0.0, 0.0, 1.0]),
-        )
-        return model
 
     @staticmethod
     def _scores_by_item(table, column):
@@ -733,7 +718,7 @@ class TestPredictAndWriteScores:
         return {item: values.pop() for item, values in by_item.items()
                 if len(values) == 1}
 
-    def test_raw_score_is_the_score_when_no_calibrator_is_wrapped(
+    def test_the_model_output_is_what_gets_published(
         self, population_features, preprocessor, parameters
     ):
         table = FakeScoreTable()
@@ -741,34 +726,53 @@ class TestPredictAndWriteScores:
             ItemSensitiveModel(), population_features, preprocessor, parameters,
             unranked_predictions=table,
         )
-        assert self._scores_by_item(table, "score_uncalibrated") == self.RAW_BY_ITEM
         assert self._scores_by_item(table, "score") == self.RAW_BY_ITEM
 
-    def test_calibration_switched_off_writes_the_raw_score_to_both_columns(
+    def test_score_uncalibrated_is_written_equal_to_score(
         self, population_features, preprocessor, parameters
     ):
-        parameters["inference"]["use_calibration"] = False
+        """The column is deprecated (#412) and kept only so the four managed
+        prediction tables keep their column count — the writes bind by
+        position. Nothing rescales the model's output any more (#411), so the
+        two columns are equal by construction rather than by coincidence."""
         table = FakeScoreTable()
         predict_and_write_scores(
-            self._calibrated_item_sensitive_model(), population_features,
-            preprocessor, parameters, unranked_predictions=table,
+            ItemSensitiveModel(), population_features, preprocessor, parameters,
+            unranked_predictions=table,
         )
         assert self._scores_by_item(table, "score_uncalibrated") == self.RAW_BY_ITEM
-        assert self._scores_by_item(table, "score") == self.RAW_BY_ITEM
+        for pdf in table.saved:
+            assert (pdf["score"] == pdf["score_uncalibrated"]).all()
 
-    def test_calibration_on_keeps_the_raw_score_beside_the_calibrated_one(
+    def test_the_node_never_asks_the_model_to_rescale(
         self, population_features, preprocessor, parameters
     ):
-        """The column exists for this case: calibration on is the default, and
-        without it the raw output is gone for good (ADR-0018 decision 5)."""
-        parameters["inference"]["use_calibration"] = True
+        """The discriminating half of the two above: a model that *offers* the
+        old calibration hooks must not have them called.
+
+        Without this, re-introducing the branch would leave both tests green on
+        a plain adapter that simply has nothing to call.
+        """
+        class _OffersCalibrationHooks(ItemSensitiveModel):
+            def __init__(self):
+                self.calls = []
+
+            def predict_uncalibrated(self, X):  # pragma: no cover - must not run
+                self.calls.append("predict_uncalibrated")
+                return self.predict(X)
+
+            def calibrate(self, scores):  # pragma: no cover - must not run
+                self.calls.append("calibrate")
+                return scores
+
+        model = _OffersCalibrationHooks()
         table = FakeScoreTable()
         predict_and_write_scores(
-            self._calibrated_item_sensitive_model(), population_features,
-            preprocessor, parameters, unranked_predictions=table,
+            model, population_features, preprocessor, parameters,
+            unranked_predictions=table,
         )
-        assert self._scores_by_item(table, "score_uncalibrated") == self.RAW_BY_ITEM
-        assert self._scores_by_item(table, "score") == self.CALIBRATED_BY_ITEM
+        assert model.calls == []
+        assert self._scores_by_item(table, "score") == self.RAW_BY_ITEM
 
     def test_model_version_column_is_left_to_the_catalog(
         self, population_features, preprocessor, parameters

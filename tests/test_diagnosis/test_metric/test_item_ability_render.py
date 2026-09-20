@@ -81,7 +81,7 @@ def _result() -> dict:
     """
     return copy.deepcopy({
         "enabled": True,
-        "score_col_used": "score_uncalibrated",
+        "score_col_used": "score",
         "metric_params": {
             "k": None, "min_positives": 1, "shrinkage_k": 0.0, "weight_alpha": 0.0,
         },

@@ -71,6 +71,10 @@ train_variant_id:     ca1c510d   ca1c510d
 calibration_variant:  9f4592de   9f4592de
 ```
 
+（`calibration_variant`／`compute_calibration_variant_id` 已隨 #411 移除；這裡保留的是
+be2d95a 當時的三層版本 ID 實測記錄，不代表現況——現況版本身分只剩 `base_dataset_version`
+與 `train_variant_id` 兩層，不影響本節「零遷移」的結論。）
+
 ## 為什麼第一版不允許 `entity` 以外的欄
 
 限制成 `entity` 的子集，這兩個鍵就只是在說「entity 有多粗」。放寬成任意欄（例如按 `region` 切）會讓它變成通用分組機制，而「這個分組與 query group 的關係」沒有任何地方在檢查。那是另一個功能，要做另開票。

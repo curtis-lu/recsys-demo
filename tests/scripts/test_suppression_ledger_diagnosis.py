@@ -50,7 +50,7 @@ def _ledger_pdf():
             "cust_id",
             "prod_name",
             "label",
-            "score_uncalibrated",
+            "score",
             "seg",
         ],
     )

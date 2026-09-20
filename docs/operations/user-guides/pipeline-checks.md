@@ -93,7 +93,7 @@ python -m recsys_tfb <指令> --env <env>
 
 - **dataset**
   - `dataset.train_snap_dates` 一定要寫，而且不能是空清單（`A23`）。
-  - `dataset.train_snap_dates`、`calibration_snap_dates`、`val_snap_dates`、`test_snap_dates` 四個清單不能有同一天（`A24`）。日期按日曆比，`2026-1-31` 和 `2026-01-31` 算同一天。拿同一個月訓練又拿它評估，評估數字會好看得不真實。
+  - `dataset.train_snap_dates`、`val_snap_dates`、`test_snap_dates` 三個清單不能有同一天（`A24`）。日期按日曆比，`2026-1-31` 和 `2026-01-31` 算同一天。拿同一個月訓練又拿它評估，評估數字會好看得不真實。
 - **training**
   - `dataset.test_snap_dates` 一定要寫，而且不能是空清單（`A36`）。training 要在這些月份上預測、算指標、做 SHAP 診斷；不擋的話，要等超參數搜尋整輪跑完才會失敗，錯誤訊息也沒提到這個設定。dataset 指令沒寫或空清單都照樣跑，所以這條只在 training 查。training 的每一種跑法都查，包含 `--from-node`、`--only-node`、`--list-nodes`、`--dry-run`。
   - `dataset.test_snap_dates` 裡，同一天不能寫成只差在有沒有 `-` 的兩種格式，例如 `2026-01-31` 和 `20260131`（`A26`）。不擋的話，那個月的每一列會被算兩次。
@@ -109,7 +109,7 @@ python -m recsys_tfb <指令> --env <env>
 
 ### Spark 啟動後才查
 
-- `--model-version`、`--base-dataset-version` 指的版本資料夾存在。沒指定版本時，training 要找得到最新一版 dataset 與它底下最新一版抽樣結果（開 calibration 時還有 calibration 的抽樣結果），inference 和 evaluation 要找得到 promote 過的模型。
+- `--model-version`、`--base-dataset-version` 指的版本資料夾存在。沒指定版本時，training 要找得到最新一版 dataset 與它底下最新一版 train 抽樣結果，inference 和 evaluation 要找得到 promote 過的模型。
 - `--from-node`／`--only-node` 的步驟名稱存在，而且兩個不能同時給。
 - `catalog.yaml` 每個條目的格式，例如要寫 `type`、可寫入的表要寫 `columns`、`external: true` 要寫 `location`。training 是例外：它在開跑前就讀過一次整份 `catalog.yaml`，所以這些格式錯誤在 training 開跑前就會擋下。
 
@@ -136,7 +136,7 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
 - 只查這一次處理的月份，只讀 parquet 檔尾的統計。`dataset.numeric_precision_policy: truncate` 時改成只警告。
 
 **資料閘 3：粒度閘**（最後一步）
-- `train`、`train_dev`、`calibration` 的 model_input 列數，必須等於組它用的 key 表（每一列是一筆抽到的候選）（`B10`）。列數變多，代表 `label_table` 或編碼後的特徵表在 join 鍵上有重複列。val、test 不查。只讀 parquet 檔尾的列數。
+- `train`、`train_dev` 的 model_input 列數，必須等於組它用的 key 表（每一列是一筆抽到的候選）（`B10`）。列數變多，代表 `label_table` 或編碼後的特徵表在 join 鍵上有重複列。val、test 不查。只讀 parquet 檔尾的列數。
 
 **做事途中順便查的**
 - 會擋：
@@ -153,7 +153,6 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
   - **要預測的月份**：`dataset.test_snap_dates` 的每個月，都必須已經由 dataset 建好。
   - **本機 cache**：樣本權重的長度跟 LightGBM `.bin` cache 的列數對不上，要清掉 cache 目錄重建；磁碟空間不夠。
   - **`training.algorithm`**：必須是有註冊的演算法，目前只有 `lightgbm`。
-  - **`training.calibration.method`**：只能是 `isotonic` 或 `sigmoid`。注意這一條要到校準那一步才查，在 HPO 之後。
 - 只警告：
   - 上次中途掛掉留下的不完整 cache，自動清掉重抓；LightGBM 的 `.bin` cache 跟目前設定對不上，自動重建。
   - 過濾掉沒有正例的 query group 之後，train 或 train_dev 剩下的太少。
@@ -191,7 +190,7 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
     - 兩邊至少要有一個共同的 entity 和一個共同的 item。
   - **診斷（`--post-training`）**：
     - config_shift 診斷打開、而且抽樣分層或樣本權重有用到 label 欄時，對應的抽樣比例（`dataset.sample_ratio`、`dataset.sample_ratio_overrides`）與樣本權重（`training.sample_weights`）必須大於 0。
-    - 有打開、而且需要原始分數的診斷，預測表必須有 `score_uncalibrated` 欄，而且不能全是空值。
+    - 有打開、而且需要原始分數的診斷，預測表必須有 schema 宣告的 score 角色欄（`schema["score"]`，預設 `score`；`item_ability`／`suppression`／`config_shift` 已改讀這欄，不再讀已 deprecated 的 `score_uncalibrated`，#415），而且不能全是空值。
 - 只警告：
   - `evaluation.segment_columns` 指到母體表沒有的欄。
   - `unmapped_policy: drop` 時，外部表裡對不上 `prod_mapping` 的 item 被丟掉。
@@ -247,7 +246,7 @@ dataset 的三個資料閘都在此列；就算切片自動補跑了前面的步
 
 - 改了程式。
 - 來源表的某個月被回補過。
-- 改了不進版本號的設定，例如 `inference.use_calibration`（要不要套用校準）：已經寫出的評分分區不會重算，除非帶 `--rebuild-dates`。
+- 改了不進版本號的設定，例如 `inference.entity_buckets` 以外的 inference 執行設定：已經寫出的評分分區不會重算，除非帶 `--rebuild-dates`。
 - 改了上游的設定，卻沒有重跑上游：training 預設用最新一版 dataset，inference 和 evaluation 預設用 promote 過的模型，都不會發現上游的設定已經不一樣。
 
 什麼時候會出事、怎麼強制重算，見 [`pipeline-slicing.md`](pipeline-slicing.md) 的〈接續前提〉。

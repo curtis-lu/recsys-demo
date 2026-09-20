@@ -36,11 +36,7 @@
 
 **標籤沒齊則不會報錯**——那些候選會被當成負例，指標安靜地偏低，報表看起來完全正常。標籤的觀察窗有沒有結束，只有你自己知道，框架不會擋你。
 
-**② `dataset.calibration_snap_dates` 不是空清單。**
-
-空清單不代表「不做校準」。它會讓校準集收進母體裡的**每一個**月份——包含你剛加的新月份。那個月的評估因此變成模型「先看過答案」的分數，會虛高。沒有任何檢查會擋你。
-
-**③ 抄下目前的三個版本號。** 跑完要拿它們比對。
+**② 抄下目前的三個版本號。** 跑完要拿它們比對。
 
 ```bash
 ls -1 data/models/          # 目錄名就是 model_version
@@ -77,12 +73,12 @@ python -m recsys_tfb dataset \
 ```
 base_dataset_version: <跟你抄下來的一模一樣>
 train_variant_id:     <跟你抄下來的一模一樣>
-[plan] only-test-months: 5 of the dataset pipeline's 15 nodes; ...
+[plan] only-test-months: 6 of the dataset pipeline's 15 nodes; ...
 [months] dataset=test_keys         processed=2026-02-28 skipped=2026-01-31
 [months] dataset=test_model_input  processed=2026-02-28 skipped=2026-01-31
 ```
 
-`processed` 是新月份、`skipped` 是舊月份，就對了。兩個數字看起來不一樣不必緊張：`15 nodes` 是 `dataset.enable_calibration: true` 時的節點數（關掉是 13），而另外還有一行 `dataset=preprocessed_feature_table`，它涵蓋的月份範圍更廣、訓練月份也算在內。
+`processed` 是新月份、`skipped` 是舊月份，就對了。另外還有一行 `dataset=preprocessed_feature_table`，它涵蓋的月份範圍更廣、訓練月份也算在內，月份清單跟前兩行不一樣是正常的。
 
 **最常壞的一種**：`base_dataset_version` 跟你抄下來的不一樣。
 
@@ -188,7 +184,7 @@ ls -d data/evaluation/<model_version>/*/
 | `FileNotFoundError`，路徑帶著新月份 | 步驟 2 沒跑成功。回去重跑步驟 2 |
 | `No predictions found for evaluation.snap_date` | 步驟 3 沒跑。回去重跑步驟 3 |
 | `test month '<月份>' ... has no rows in the test cache` | 這個月在設定裡但 dataset 還沒產出它。先跑步驟 2 |
-| 訊息帶 `(A24) ... name the same calendar day` | 這個月份已經在 train／val／calibration 其中一組裡了。從不該擁有它的那一組移除 |
+| 訊息帶 `(A24) ... name the same calendar day` | 這個月份已經在 train／val 其中一組裡了。從不該擁有它的那一組移除 |
 | 訊息帶 `(A26) ... spells one month more than one way` | 同一個月在 `dataset.test_snap_dates` 裡出現了兩種寫法（例如 `2026-01-31` 與 `20260131`）。只留 `YYYY-MM-DD` 那一種，刪掉其餘 |
 | 訊息帶 `(A22) evaluation.snap_date=... is not a test month` | 步驟 4 的日期不在 `dataset.test_snap_dates` 裡。漏做了步驟 1，補做步驟 1–3 |
 | 訊息帶 `--rebuild-dates`，還沒起 Spark 就退出 | 你要重算的月份不在 `dataset.test_snap_dates` 裡。先把它加進去 |

@@ -72,8 +72,13 @@ class TestRawScoreIsDeclaredOnEveryInferenceOutput:
     """三張推論表都要宣告 ``score_uncalibrated``（ADR-0018 決定 5）。
 
     ``HiveTableDataset.save`` 結尾的 ``df.select(*declared)`` 會**靜默丟掉**
-    未宣告的欄：漏宣告任何一張，原始分數就在那一站消失，下游讀不到、也沒有
-    錯誤訊息。所以三張逐一斷言，不是只看最後那張 production 表。
+    未宣告的欄：漏宣告任何一張，那一欄就在那一站消失、沒有錯誤訊息。所以三張
+    逐一斷言，不是只看最後那張 production 表。
+
+    ⚠ 這一欄現在已 deprecated：#411 移除校準器之後它恆等於 ``score``，原始分數
+    由 ``score`` 自己承擔，所以「漏宣告就丟失原始分數」這個原始理由已經不成立。
+    這條測試現在守的是**欄數契約**——在 #412 把欄位拿掉之前，三張表的宣告不得
+    各自漂移。#412 會連同這條測試一起刪。
     """
 
     def test_every_inference_output_declares_the_raw_score_as_double(self):

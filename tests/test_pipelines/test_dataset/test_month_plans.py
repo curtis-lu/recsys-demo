@@ -40,8 +40,12 @@ def _ts(*dates: str) -> list[pd.Timestamp]:
     return [pd.Timestamp(d) for d in dates]
 
 
-#: train/cal/val/test are four *different* months each, so a plan that reads the
+#: train/val/test are three *different* months each, so a plan that reads the
 #: wrong config key cannot coincidentally produce the right list.
+#: ``calibration_snap_dates`` is spelled here deliberately and is NOT in
+#: ``ALL_MONTHS``: #414 retired the key, and a month plan that still folded it
+#: in would quietly re-preprocess a month no split reads. Its month (2026-02-28)
+#: appears nowhere else, so if the union ever grows back it grows visibly.
 PARAMS = {
     "dataset": {
         "train_snap_dates": ["2026-01-31"],
@@ -51,7 +55,7 @@ PARAMS = {
     }
 }
 
-ALL_MONTHS = _ts("2026-01-31", "2026-02-28", "2026-03-31", "2026-04-30", "2026-05-31")
+ALL_MONTHS = _ts("2026-01-31", "2026-03-31", "2026-04-30", "2026-05-31")
 TEST_MONTHS = _ts("2026-04-30", "2026-05-31")
 
 
@@ -59,8 +63,8 @@ class TestConfiguredSource:
     """Which configured months each artifact is entitled to."""
 
     def test_preprocessed_feature_table_takes_every_split(self):
-        # It feeds train / train_dev / val / calibration / test alike, so its
-        # months are the union — not the test months the other two use.
+        # It feeds train / train_dev / val / test alike, so its months are
+        # the union — not the test months the other two use.
         plans = build_month_plans(PARAMS)
         assert plans["preprocessed_feature_table"].to_process == ALL_MONTHS
 
@@ -259,7 +263,6 @@ class TestCollectDatasetSnapDates:
         params = {
             "dataset": {
                 "train_snap_dates": ["2025-03-31", "2025-01-31", "2025-02-28"],
-                "calibration_snap_dates": ["2025-04-30"],
                 "val_snap_dates": ["2025-05-31"],
                 "test_snap_dates": ["2025-06-30"],
             }
@@ -269,18 +272,29 @@ class TestCollectDatasetSnapDates:
             pd.Timestamp("2025-01-31"),
             pd.Timestamp("2025-02-28"),
             pd.Timestamp("2025-03-31"),
-            pd.Timestamp("2025-04-30"),
             pd.Timestamp("2025-05-31"),
             pd.Timestamp("2025-06-30"),
         ]
+
+    def test_a_retired_calibration_date_is_not_in_the_union(self):
+        """#414: the key is retired, so a month only it names belongs to no
+        split. Folding it in would re-preprocess a month nothing reads and
+        would add a month to the dataset for an upgraded conf that still
+        carried the key."""
+        params = {
+            "dataset": {
+                "train_snap_dates": ["2025-01-31"],
+                "calibration_snap_dates": ["2025-04-30"],
+            }
+        }
+        assert collect_dataset_snap_dates(params) == [pd.Timestamp("2025-01-31")]
 
     def test_deduplicates_overlapping_entries(self):
         # Different splits must not duplicate; the helper does not check overlap (that's A24, core/consistency.py)
         params = {
             "dataset": {
                 "train_snap_dates": ["2025-01-31", "2025-02-28"],
-                "calibration_snap_dates": ["2025-02-28"],  # dup with train
-                "val_snap_dates": [],
+                "val_snap_dates": ["2025-02-28"],  # dup with train
                 "test_snap_dates": [],
             }
         }
@@ -291,7 +305,6 @@ class TestCollectDatasetSnapDates:
         params = {
             "dataset": {
                 "train_snap_dates": ["2025-01-31"],
-                "calibration_snap_dates": [],
                 "val_snap_dates": [],
                 "test_snap_dates": [],
             }
@@ -302,7 +315,6 @@ class TestCollectDatasetSnapDates:
     def test_missing_train_snap_dates_raises(self):
         params = {
             "dataset": {
-                "calibration_snap_dates": ["2025-04-30"],
                 "val_snap_dates": ["2025-05-31"],
                 "test_snap_dates": ["2025-06-30"],
             }
@@ -311,7 +323,7 @@ class TestCollectDatasetSnapDates:
             collect_dataset_snap_dates(params)
 
     def test_optional_splits_default_to_empty(self):
-        # Missing cal/val/test keys fall back to .get(..., []); must not raise
+        # Missing val/test keys fall back to .get(..., []); must not raise
         params = {"dataset": {"train_snap_dates": ["2025-01-31"]}}
         result = collect_dataset_snap_dates(params)
         assert result == [pd.Timestamp("2025-01-31")]

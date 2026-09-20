@@ -178,8 +178,9 @@ grep 會被那句解釋「為什麼不用 `df.count()`」的 docstring 自己命
    `STORED AS PARQUET` 保證）。使用者自備的 `feature_table` 不在檢查範圍——與 B8
    選擇讀 `preprocessed_feature_table` 是同一個理由，也與本 ADR「不規定來源表儲存
    格式」的立場一致。
-3. **五個 split 只擋得住三個，這是限制不是疏漏。** train／train_dev／calibration 直接
-   落地自 `build_model_input`。val／test 不行：val 那邊列數會等於 `val_keys` 的是
+3. **四個 split 只擋得住兩個，這是限制不是疏漏。** train／train_dev 直接落地自
+   `build_model_input`（原本還有第三個 calibration split 同樣直接落地，已隨 #411 移除）。
+   val／test 不行：val 那邊列數會等於 `val_keys` 的是
    `val_model_input_unfiltered`；test 那邊是 `test_model_input_unfiltered`，而它對得上的
    **不是** `test_keys` 而是「`test_keys` 裡屬於本次月份的那個子集」——`test_keys` 是含
    全部月份的常駐表，`build_test_model_input` 會先用 `month_plan` 重新縮範圍才往下送。
@@ -201,9 +202,10 @@ grep 會被那句解釋「為什麼不用 `df.count()`」的 docstring 自己命
 
 - 框架允許使用者自備 `feature_table`（不經本 repo 的 `source_etl`）。那種部署下上游 PK
   檢查不存在，`feature_table` 的唯一性再度無人保證。**#306 的 B10 補了下游的位、沒補
-  上游的洞**：它不檢查 `feature_table` 本身，而是比對三個 split 的 model_input 與 keys
-  列數，所以重複鍵造成的放大會被擋下來，但歸因（是哪張表、哪一列）仍要自己往回查，
-  且只涵蓋 train／train_dev／calibration 的月份（見上方 2026-09-07 修訂）。
+  上游的洞**：它不檢查 `feature_table` 本身，而是比對兩個 split（train／train_dev；原本
+  還涵蓋 calibration，已隨 #411 移除）的 model_input 與 keys 列數，所以重複鍵造成的放大
+  會被擋下來，但歸因（是哪張表、哪一列）仍要自己往回查，且只涵蓋 train／train_dev 的月份
+  （見上方 2026-09-07 修訂）。
 - 非 cross-join 的 `sample_pool` 部署會讓 group 完整性失去結構保證。同上，出現再說。
 - 補上 `max_duplicate_key_ratio` 之後，`feature_table` 的重複鍵會在 ETL 階段 raise。
   這個檢查在寫下本 ADR 時從未在生產跑過，**首次啟用可能揭露既有的資料問題**，不該在沒有人

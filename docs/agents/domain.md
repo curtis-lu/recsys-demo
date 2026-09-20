@@ -10,7 +10,7 @@ How the engineering skills should consume this repo's domain documentation when 
 
 **精確定義來源（要逐字照抄的名稱去這裡查）：**
 
-- **`src/recsys_tfb/core/versioning.py` 模組 docstring** — 三層版本 ID（`base_dataset_version` / `train_variant_id` / `calibration_variant_id`）與 `model_version` 的定義：各自由哪些設定推導、key 住哪些產物。
+- **`src/recsys_tfb/core/versioning.py` 模組 docstring** — 兩層版本 ID（`base_dataset_version` / `train_variant_id`；#411 移除了原本的 `calibration_variant_id` 那一層）與 `model_version` 的定義：各自由哪些設定推導、key 住哪些產物。
 - **`src/recsys_tfb/core/consistency.py` 模組 docstring** — 一致性不變量的 legend（A 系列＝設定層、B 系列＝資料層），是這些代號的唯一真實來源。
 
 **理解來源（要知道「為什麼這樣切、代價是什麼」時去這裡讀）：**

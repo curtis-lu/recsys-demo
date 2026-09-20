@@ -29,11 +29,6 @@ dataset:
   # 洩漏單位是使用者（A29 的用途正是這種情況）。
   train_split_keys: ["user_id"]
 
-  enable_calibration: true
-  calibration_snap_dates: ["2025-12-15"]
-  calibration_sample_ratio: 1.0
-  calibration_sample_ratio_overrides: {}
-
   val_snap_dates:
     - "2025-12-22"
   # 母體只有幾百人，val 不抽樣（銀行示例是 0.5，理由是生產母體百萬級）

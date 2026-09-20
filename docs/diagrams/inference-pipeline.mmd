@@ -80,10 +80,6 @@
 %%     inference.products（決定內層迴圈跑幾圈，也就是每個 entity 配幾個 item）
 %%     與 inference.entity_buckets（決定外層迴圈跑幾圈，也就是 driver 峰值與
 %%     落地的分區數）。inference.snap_dates 只是過濾條件，仍然不畫。
-%%   - calibration：inference.use_calibration 只是評分節點內部一次 if
-%%     （model.predict() vs model.predict_uncalibrated()），不改變任何一條邊。
-%%     這跟 dataset 圖的 calibration 分支（會多出節點）性質不同，所以那邊寫
-%%     「不畫這個分支」，這邊是「根本沒有分支可畫」。
 %%   - 續跑的規劃（steps/chunk_plans.plan_scoring_chunks）：它決定評分節點跑幾個
 %%     chunk，但不改變任何一條邊——跳過的 chunk 與寫出的 chunk 走同一條線。
 %%   - build_inference_population_features 的 feature coverage 報表：只算數字

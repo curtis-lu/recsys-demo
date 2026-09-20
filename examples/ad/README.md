@@ -64,7 +64,7 @@ campaign_dim   ┘
 | 算即時特徵時偷看的後果 | 有：點擊後 5 分鐘內會瀏覽同類內容（一半就在點擊那一秒），窗口放到曝光那一秒或之後，「有沒有瀏覽」幾乎就是「有沒有點」。`check_features.py` 擋得住（變異檢查見〈怎麼跑〉） | #380 的 as-of 文件與範例 |
 | 使用者特徵、版位特徵各自的粒度 | 有：`feature_user`（snap_date, user_id）、`feature_slot`（snap_date, slot_id） | #380 多張特徵表 |
 | 快照日與 `time` 不同（as-of join） | 有：`user_profile` 每天一份，`available_at` 在隔天 05:00～08:00，批次晚一天的日子（平日 10%、週末 50%）再晚 24 小時；每週約 5% 的人在一天中的某個時刻換裝置，點擊看曝光那一刻的裝置。10 週 × 400 人裡，「週一 00:00 拿得到的最後一份」不是週六那份的有 3,200 列（8 週），其中裝置因此不同的 29 列；取「週一那份」會拿到不同裝置的有 87 列。今天的 `feature_user.sql` 以週為單位取後者，這是一個已經被 `check_features.py` 驗過的 as-of 範例，#380 把 `feature_user` 拆成獨立特徵表時可以直接用。**逐筆曝光的 as-of 還沒算**（ADR-0022 表格第一列：每次曝光用它當下拿得到的那一份）：它的 join 欄位要算在一次曝光一列的候選列上，而候選列要到 #378 宣告 event 之後才是一次曝光一列。資料已經撐得住——39,314 筆曝光裡，照曝光當下取快照與照週一取快照，裝置不同的有 620 筆 | #380；逐筆的要 #378＋#380 |
-| 沒見過的 item 屬性組合 | 有：`c04`、`video` 從第一週就有，`c04-video` 從 val 週 2025-12-22 才第一次曝光，train 與 calibration 都沒有它。上線後給 4 倍流量（`LATE_ITEM_LAUNCH_BOOST`），test 週有 45 個正例；代價是從 val 週起其他 11 個 item 的曝光占比各降約 9%，item 分布在 train 與 val／test 之間本來就不同 | #379 item 清單從資料數；#394 item 宣告成多欄 |
+| 沒見過的 item 屬性組合 | 有：`c04`、`video` 從第一週就有，`c04-video` 從 val 週 2025-12-22 才第一次曝光，train 沒有它。上線後給 4 倍流量（`LATE_ITEM_LAUNCH_BOOST`），test 週有 45 個正例；代價是從 val 週起其他 11 個 item 的曝光占比各降約 9%，item 分布在 train 與 val／test 之間本來就不同 | #379 item 清單從資料數；#394 item 宣告成多欄 |
 | 低點擊率（分數擠在低端） | **沒有**：點擊率約 15% | #381 預測品質 |
 
 **`c04-video` 對模型來說是一個沒見過的 item 值。** 框架要求 item 那一欄一定是模型特徵（`pipelines/dataset/steps/feature_columns.py::require_item_is_a_feature`），模型看到的是 `ad_creative` 這一個類別值，不是活動、格式兩個屬性，所以 train 沒出現過就不認得。item 宣告成多欄（#394）之後也一樣：那張票省掉的是拼欄與逐一列出組合，模型看的仍是組合。實跑時框架對這件事沒有任何警告（類別編號從 conf 的清單讀，train 有沒有出現不影響；#379 要加的就是這個警告）。test 週這個 item 的 45 個正例上，模型的平均名次 3.4、`map_attr@12` 0.515，熱門度基準是 4.4、0.409。
@@ -77,7 +77,7 @@ campaign_dim   ┘
 |---|---|
 | 2025-10-27 | 只當特徵的回看窗，不進任何 split |
 | 2025-11-03 ～ 2025-12-08（6 週） | train／train_dev（依 `user_id` 切，同一人不跨兩邊） |
-| 2025-12-15 | calibration |
+| 2025-12-15 | 不進任何 split。原本是 calibration 週；#411 移除 calibration 後資料照產、ETL 目標日期不動（這樣升級前後每一層才比得起來），只是沒有 split 讀它 |
 | 2025-12-22 | val |
 | 2025-12-29 | test；evaluation 評這一週 |
 | 2026-01-05 | inference 評分 |
@@ -126,16 +126,16 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 
 | 層 | 記什麼 |
 |---|---|
-| `versions` | `base_dataset_version`、`train_variant_id`、`calibration_variant_id`、`model_version` |
+| `versions` | `base_dataset_version`、`train_variant_id`、`model_version` |
 | `source_etl` | 四張來源表的列數與內容指紋；feature_etl 另外產出、框架今天讀不到的 `feature_realtime` 也記在這層 |
-| `dataset` | 五個 split 的 model_input 列數與內容指紋；`preprocessor.json`、`category_mappings.json` 的內容指紋 |
+| `dataset` | 四個 split 的 model_input 列數與內容指紋；`preprocessor.json`、`category_mappings.json` 的內容指紋 |
 | `training` | `training_eval_predictions`（分數四捨五入到小數第 6 位） |
 | `inference` | `ranked_predictions`（同上） |
 | `evaluation` | 評估目錄下每份 JSON 攤平後的指紋（`metrics.json`、`baseline_metrics.json`、`report_aggregates.json`、`segment_columns.json`、`diagnosis/` 五份診斷；數字四捨五入到小數第 6 位） |
 
 - **內容指紋**：每列對所有欄（依欄名排序）取 `xxhash64` 後整張表加總，與列的順序無關。版本分區欄不進指紋，所以「只有版本號變了」與「內容變了」分得開。
 - **排除的東西**：JSON 裡的 `config_fingerprint`（設定的雜湊，新增一個「算的」設定鍵就會變，指標值卻沒動；放進來的話 #381 那種改動會讓這裡紅，「指標值逐值不變」反而驗不出來）；評估目錄的 `manifest.json`（執行紀錄，含執行時間、run_id、git commit）。
-- **沒有會抖動的欄位。** 2026-09-18 以 `8f78f84` 連跑兩次，62 個欄位逐一相同（包括模型分數、評估指標與診斷），所以 `noisy` 是空的。（2026-09-17 第一次量時，只有 `manifest.json` 兩次不同，所以才排除它。）哪天出現了本來就會變的欄位，把它的路徑前綴與理由寫進 `noisy`，比對時會略過並印出來。
+- **沒有會抖動的欄位。** 2026-09-18 以 `8f78f84` 連跑兩次，62 個欄位逐一相同（包括模型分數、評估指標與診斷），所以 `noisy` 是空的。（2026-09-17 第一次量時，只有 `manifest.json` 兩次不同，所以才排除它。）拿掉 calibration（#411）之後少了四個欄位（`calibration_variant_id` 與 `calibration_model_input` 的三欄），現在是 58 個；那次沒有重做「連跑兩次」的抖動量測，`noisy` 維持空的。哪天出現了本來就會變的欄位，把它的路徑前綴與理由寫進 `noisy`，比對時會略過並印出來。
 
 後面的票怎麼用：
 

@@ -39,7 +39,7 @@ evaluation 另有三種執行模式：
 
 執行 evaluation 前，建議依序確認：
 
-1. **模型版本存在**：evaluation 會讀取 `data/models/<model_version>/manifest.json`，取得該模型使用的 base、train 與可選 calibration dataset IDs。
+1. **模型版本存在**：evaluation 會讀取 `data/models/<model_version>/manifest.json`，取得該模型使用的 base 與 train dataset IDs。#411 之前的模型 manifest 多帶一個 `calibration_variant_id`，讀取時會略過，不影響評估。
 2. **選對評估情境**：候選模型的 test 評估使用 `--post-training`；已發布批次結果的監控使用預設模式。
 3. **候選模型明確指定版本**：省略 `--model-version` 時一律解析 `data/models/best`。尚未 promotion 的新模型必須明確傳入版本，否則可能評估到上一個正式模型。
 4. **預測 partition 已存在**：post-training 模式需要對應 `training_eval_predictions`；監控模式需要 inference 已成功發布對應的 `ranked_predictions`。
@@ -622,7 +622,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 因此：
 
 - 不要假設 enriched partition 同時保存 training test 與 production monitoring 兩種母體。
-- 兩種模式也共用同一個 schema（聯集）：另一模式寫過的欄，在這次寫入的列上是 NULL。例如先跑 `--post-training`（segment 欄從 `sample_pool` join 進來）再跑監控、而 `inference_population` 沒有那一欄，監控讀回來的列就帶著那個 segment 欄、值全是 NULL。每個讀表的 node 都會拿到這些欄，但不受影響：分群一律照 `evaluation_segment_columns`，不看 frame 有哪些欄（見 3.2 節）。`score_uncalibrated` 兩種模式都有寫（inference 也寫這一欄），只有 inference 開始寫它之前留下的分區才會是 NULL；需要它的 registry 診斷只在 `--post-training` 組出來，監控模式唯一讀抽樣的 `compute_metric_ci` 不讀它。
+- 兩種模式也共用同一個 schema（聯集）：另一模式寫過的欄，在這次寫入的列上是 NULL。例如先跑 `--post-training`（segment 欄從 `sample_pool` join 進來）再跑監控、而 `inference_population` 沒有那一欄，監控讀回來的列就帶著那個 segment 欄、值全是 NULL。每個讀表的 node 都會拿到這些欄，但不受影響：分群一律照 `evaluation_segment_columns`，不看 frame 有哪些欄（見 3.2 節）。`score_uncalibrated` 兩種模式都有寫（inference 也寫這一欄），只有 inference 開始寫它之前留下的分區才會是 NULL；這一欄已 deprecated、恆等於 `score`，欄位保留只為維持表的欄數（追蹤票 #412）。registry 診斷已改讀 schema 宣告的 score 角色欄（`schema["score"]`），不再讀 `score_uncalibrated`；只在 `--post-training` 組出來是模式本身的設計決定（[ADR-0013](../adr/0013-pipeline-modes-and-slicing-are-separate.md)），不是因為監控模式缺這一欄——監控模式唯一讀抽樣的 `compute_metric_ci` 也不讀它。
 - 使用 `--compare-only` 前，先確認最後一次建立 Model A enriched data 的模式。
 - 若同一模型同一日期需要長期保留兩種評估情境，現有儲存鍵不足，需另加 scenario partition 或獨立 evaluation version。
 

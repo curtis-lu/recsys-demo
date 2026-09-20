@@ -61,7 +61,7 @@ _Avoid_: 主鍵（來源表設定裡的 `primary_key` 是另一回事）
 _Avoid_: 事件紀錄、event log（會和 **event** 混淆）
 
 **split**:
-依 time 切出的資料段：`train`、`train_dev`（和 train 同時段、以 entity 互斥切出）、`calibration`、`val`、`test`。
+依 time 切出的資料段：`train`、`train_dev`（和 train 同時段、以 entity 互斥切出）、`val`、`test`。
 _Avoid_: fold
 
 **日期區間**:
@@ -91,10 +91,7 @@ _Avoid_: 產品清單；也不要和 `inference.products`（離線推論的候�
 dataset 產物的版本身分。精確定義：`src/recsys_tfb/core/versioning.py` 模組 docstring。
 
 **train_variant_id**:
-train 與 train_dev 抽樣設定的版本身分，位在 base_dataset_version 底下。精確定義同上。
-
-**calibration_variant_id**:
-calibration 抽樣設定的版本身分，位在 base_dataset_version 底下。精確定義同上。
+train 與 train_dev 抽樣設定的版本身分，位在 base_dataset_version 底下，是唯一的 variant 層（#411 移除了 calibration 那一層，`calibration_variant_id` 已不存在）。精確定義同上。
 
 **model_version**:
 模型的版本身分。精確定義同上。
@@ -152,7 +149,7 @@ _Avoid_: popularity baseline、購買數基準（正例不一定是購買）
 _Avoid_: 點擊率、申辦率、CTR（那是正例率在各示例裡的名字）
 
 **校準**:
-把 score 當成機率來看時，「模型說會發生的比例」與「實際發生的比例」有多接近。與排序好壞無關，兩者可以一好一壞。
+把 score 當成機率來看時，「模型說會發生的比例」與「實際發生的比例」有多接近。與排序好壞無關，兩者可以一好一壞。框架**不提供**校準機制（#411 移除）；這個詞今天只出現在評估報表的校準曲線，那是一張觀察圖，不會改變任何分數。
 _Avoid_: 準確度、準不準（太模糊，會被讀成排序）
 
 **門檻**（ADR-0024，尚未實作）:

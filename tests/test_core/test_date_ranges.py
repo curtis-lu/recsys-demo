@@ -49,17 +49,29 @@ class TestLoaderExpandsRanges:
     def test_a_range_hashes_to_the_version_its_list_had_before_ranges_existed(
         self, tmp_path
     ):
-        """The acceptance test of #374, pinned to values from before the change.
+        """The acceptance test of #374: a range hashes to what its list hashes.
 
-        ``tests/test_core/test_versioning.py`` pins ``0675afb8``／``913be727``
+        ``tests/test_core/test_versioning.py`` pins ``d108b398``／``913be727``
         for a literal fixture whose ``train_snap_dates`` lists the twelve month
-        ends of 2023 (recorded from ``main`` at be2d95a). The same fixture is
-        written here with that list as a range and read the way the dataset
-        command reads it (``__main__.py`` hashes
-        ``get_parameters_by_name("parameters_dataset")``). Comparing a range
-        against a list computed today would pass even if both hashed wrongly;
-        only a value carried over from before can testify that nothing moved.
+        ends of 2023. The same fixture is written here with that list as a
+        range and read the way the dataset command reads it (``__main__.py``
+        hashes ``get_parameters_by_name("parameters_dataset")``), so the two
+        constants agreeing is the range-equals-list claim.
+
+        **The pre-change anchor is gone and is not coming back.** These were
+        recorded from ``main`` at be2d95a, before ranges existed, and that is
+        what used to make them testify that nothing had moved. #414 re-recorded
+        ``base_dataset_version`` deliberately (see the docstring on
+        ``test_a_config_declaring_neither_key_still_hashes_to_the_old_answer``),
+        so for that half the value now only says "same as the literal fixture".
+        ``train_variant_id`` still carries its original be2d95a value and still
+        testifies. Do not re-record that one to make a test pass.
         """
+        # Must stay key-for-key identical to ``_base_params()`` in
+        # test_versioning.py, apart from train_snap_dates being a range here
+        # and a list there — that difference is the whole test. #414 deleted
+        # the three calibration keys from both at once, and both constants
+        # moved together for the same reason.
         dataset = {
             "train_snap_dates": _month_end_range("2023-01-31", "2023-12-31"),
             "val_snap_dates": ["2024-01-31"],
@@ -68,9 +80,6 @@ class TestLoaderExpandsRanges:
             "sample_ratio_overrides": {},
             "sample_group_keys": ["cust_segment_typ"],
             "train_dev_ratio": 0.1,
-            "calibration_snap_dates": ["2024-02-29"],
-            "calibration_sample_ratio": 1.0,
-            "calibration_sample_ratio_overrides": {},
         }
         schema = {
             "time": "snap_date",
@@ -85,7 +94,7 @@ class TestLoaderExpandsRanges:
             "parameters_dataset"
         )
 
-        assert compute_base_dataset_version(params, schema) == "0675afb8"
+        assert compute_base_dataset_version(params, schema) == "d108b398"
         assert compute_train_variant_id(params) == "913be727"
 
     def test_the_same_days_listed_out_of_order_are_a_different_version(
@@ -120,9 +129,13 @@ class TestLoaderExpandsRanges:
             tmp_path / "base" / "parameters_dataset.yaml",
             {"dataset": {
                 "train_snap_dates": _month_end_range("2025-01-31", "2025-02-28"),
-                "calibration_snap_dates": _month_end_range("2025-03-31", "2025-03-31"),
                 "val_snap_dates": _month_end_range("2025-04-30", "2025-04-30"),
                 "test_snap_dates": _month_end_range("2025-05-31", "2025-06-30"),
+                # Not registered since #414 retired it: an unregistered key is
+                # left exactly as written, which is what the assertion below
+                # pins. Expanding it would mean the registry had grown a key
+                # nothing reads.
+                "calibration_snap_dates": _month_end_range("2025-03-31", "2025-03-31"),
             }},
         )
         _write_yaml(
@@ -133,9 +146,9 @@ class TestLoaderExpandsRanges:
 
         assert params["dataset"] == {
             "train_snap_dates": ["2025-01-31", "2025-02-28"],
-            "calibration_snap_dates": ["2025-03-31"],
             "val_snap_dates": ["2025-04-30"],
             "test_snap_dates": ["2025-05-31", "2025-06-30"],
+            "calibration_snap_dates": _month_end_range("2025-03-31", "2025-03-31"),
         }
         assert params["evaluation"]["snap_date"] == ["2025-05-31", "2025-06-30"]
 

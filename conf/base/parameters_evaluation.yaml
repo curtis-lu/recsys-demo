@@ -129,15 +129,15 @@ evaluation:
       n_boot: 200
 
     # 診斷 1／4：配置引入的排序偏移。純 config 算術＋2 次 mAP＋每 item 一次
-    # 替換實驗。用 score_uncalibrated（offset 活在模型輸出的 log-odds 空間，
-    # 校準層是後貼的）。
+    # 替換實驗。讀 schema 的 score 角色欄（offset 活在模型輸出的 log-odds
+    # 空間，而 #411 移除校準器之後 score 就是模型原始輸出）。
     config_shift:
       enabled: true
 
     # 診斷 2／4：item 排序能力——同一 item 內正例列 vs 負例列的加權 AUC，
     # raw（原始分數）與 query_centered（扣掉各自 query 平均後）各算一次；
-    # 差值即客戶活躍度被誤計入 item 推薦能力的量。用 score_uncalibrated（與
-    # config_shift 同一個 log-odds 空間）。top_n＝正例名次百分位分布只看
+    # 差值即客戶活躍度被誤計入 item 推薦能力的量。讀 schema 的 score 角色欄
+    # （與 config_shift 同一個 log-odds 空間）。top_n＝正例名次百分位分布只看
     # macro per-item AP 最低的前幾個 item。
     item_ability:
       enabled: true

@@ -68,7 +68,7 @@ def _params(top_examples: int = 50) -> dict:
 
 def _row(cust: str, item: str, label: int, score: float) -> dict:
     return {"snap_date": "2026-01-31", "cust_id": cust, "prod_name": item,
-            "label": label, "score_uncalibrated": score, "score": 0.5,
+            "label": label, "score": score,
             "stratum": "take_all", "inclusion_weight": 1.0}
 
 

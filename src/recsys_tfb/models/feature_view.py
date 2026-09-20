@@ -75,9 +75,9 @@ def model_feature_columns(model: ModelAdapter, preprocessor: dict) -> list[str]:
     # No declaration, so there is no second opinion to check the artifact
     # against and the assertion is skipped rather than run against itself.
     # Every adapter in this repo declares one once it holds a fitted model
-    # (LightGBMAdapter returns None only before load(); CalibratedModelAdapter
-    # forwards to its base), so this branch is doubles in tests, not
-    # production — and it is logged rather than silent for that reason.
+    # (LightGBMAdapter returns None only before load()), so this branch is
+    # doubles in tests, not production — and it is logged rather than silent
+    # for that reason.
     logger.info(
         "Model declares no feature_names(); falling back to the "
         "preprocessor's %d feature columns", len(artifact_feature_columns),

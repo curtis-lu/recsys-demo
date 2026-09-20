@@ -24,7 +24,7 @@ def _params(top_examples=50):
 
 def _row(cust, item, label, score):
     return {"snap_date": "2026-01-31", "cust_id": cust, "prod_name": item,
-            "label": label, "score_uncalibrated": score, "score": 0.5,
+            "label": label, "score": score,
             "stratum": "take_all", "inclusion_weight": 1.0}
 
 
@@ -140,8 +140,7 @@ def _scale_sample(n_queries: int, n_items: int, seed: int = 99) -> pd.DataFrame:
         "cust_id": cust,
         "prod_name": item,
         "label": label,
-        "score_uncalibrated": score,
-        "score": 0.5,
+        "score": score,
         "stratum": "take_all",
         "inclusion_weight": 1.0,
     })
@@ -164,7 +163,7 @@ def _reference_pair_ledger(sample: pd.DataFrame, params: dict) -> dict:
     groups = pd.factorize(query_key(sample, query_cols))[0]
     items = sample[schema["item"]].astype(str).to_numpy()
     y = sample[schema["label"]].to_numpy(dtype=np.int64)
-    z, _ = to_logit(sample["score_uncalibrated"].to_numpy(dtype=np.float64))
+    z, _ = to_logit(sample["score"].to_numpy(dtype=np.float64))
 
     sort_idx = np.lexsort((-z, groups))
     g_sorted = groups[sort_idx]
@@ -324,10 +323,10 @@ def test_cross_purchase_is_restricted_to_the_shared_axis():
 
 
 @pytest.mark.parametrize("null", [np.nan, None], ids=["nan", "none"])
-def test_an_all_null_uncalibrated_score_counts_as_unreadable(null):
+def test_an_all_null_score_column_counts_as_unreadable(null):
     """欄位在、值全空也要 raise——理由見 test_item_ability 的同名測試。"""
     sample = _two_query_sample()
-    sample["score_uncalibrated"] = null
+    sample["score"] = null
     with pytest.raises(ValueError, match="全是空值"):
         compute((sample, {"n_queries": 2}), _params())
 

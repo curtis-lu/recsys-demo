@@ -21,7 +21,6 @@ def _make_parameters() -> dict:
             },
         },
         "evaluation": {"k_values": ["all"]},
-        "training": {"calibration": {"method": "isotonic"}},
     }
 
 
@@ -34,9 +33,13 @@ def _make_df(spark, rows):
     return spark.createDataFrame(pdf)
 
 
-def test_compute_mAP_spark_no_calibration_returns_flat_dict(spark):
-    """When score == score_uncalibrated for every row, the result has NO
-    'uncalibrated' sub-dict and NO 'calibration_method' key.
+def test_compute_mAP_spark_returns_one_flat_dict(spark):
+    """One set of metrics, always.
+
+    There used to be a second, "before calibration" set, emitted when `score`
+    and `score_uncalibrated` disagreed. #411 removed calibration — the only
+    thing that could make them disagree — so the node no longer reads
+    `score_uncalibrated` and no longer emits the second set.
     """
     from recsys_tfb.pipelines.training.nodes import compute_test_mAP_spark
 
@@ -67,14 +70,15 @@ def test_compute_mAP_spark_no_calibration_returns_flat_dict(spark):
     assert result["n_excluded_queries"] == 0
 
 
-def test_compute_mAP_spark_with_calibration_emits_uncalibrated_subdict(spark):
-    """When score != score_uncalibrated for any row, the result has an
-    'uncalibrated' sub-dict and a 'calibration_method' string (from
-    parameters['training']['calibration']['method']).
+def test_a_disagreeing_score_uncalibrated_column_is_ignored(spark):
+    """The discriminating half: a table whose deprecated column disagrees with
+    `score` gets the same flat result, scored on `score` alone.
+
+    Such a table can only come from a pre-#411 run. Reading it would revive the
+    second metric set under a model that was never calibrated.
     """
     from recsys_tfb.pipelines.training.nodes import compute_test_mAP_spark
 
-    # Calibrated scores agree with labels; uncalibrated DISagree (worse mAP)
     rows = [
         {"cust_id": "c1", "snap_date": "2025-01-31", "prod_name": "prod_A",
          "score": 0.9, "score_uncalibrated": 0.1, "label": 1},
@@ -87,9 +91,8 @@ def test_compute_mAP_spark_with_calibration_emits_uncalibrated_subdict(spark):
 
     result = compute_test_mAP_spark(df, manifest, _make_parameters())
 
-    assert "uncalibrated" in result
-    assert result["calibration_method"] == "isotonic"
-    # Calibrated ranks c1's positive at top -> calibrated overall_map == 1.0
+    assert "uncalibrated" not in result
+    assert "calibration_method" not in result
+    # `score` puts c1's positive on top, so the metric is the calibrated-side
+    # number of the old two-set result — i.e. it scored `score`, not the other.
     assert result["overall_map"] == pytest.approx(1.0, abs=1e-6)
-    # Uncalibrated ranks c1's negative at top -> uncalibrated mAP < calibrated
-    assert result["uncalibrated"]["overall_map"] < result["overall_map"]

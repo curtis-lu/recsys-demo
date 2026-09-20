@@ -7,7 +7,7 @@
 
 作法：對評估月 test_model_input 取「目標 item label=1」的 query，抓同
 query 的目標列與壓制者列，各自 ``booster.predict(pred_contrib=True)``
-（raw/logit 空間＝score_uncalibrated 同一把尺），逐特徵相減後跨 query
+（raw/logit 空間＝模型分數欄同一把尺），逐特徵相減後跨 query
 彙總。特徵切片走 ``recsys_tfb.io.extract.pdf_to_X``，與生產 predict
 路徑逐位元一致。
 
@@ -78,7 +78,7 @@ def load_rows_hive(table: str, snap_date: str, items: list[str],
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--model-file", required=True, help="model.txt（raw booster；即 score_uncalibrated）")
+    ap.add_argument("--model-file", required=True, help="model.txt（raw booster；即預測表的 score 欄）")
     ap.add_argument("--preprocessor-json", required=True)
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--hive-table", help="<db>.recsys_prod_test_model_input")

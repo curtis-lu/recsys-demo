@@ -195,23 +195,27 @@ def test_inclusion_weight_changes_the_auc():
         b["per_item"][0]["raw_within_item_auc"]
 
 
-def test_requires_uncalibrated_score():
-    sample = _sample().drop(columns=["score_uncalibrated"])
-    with pytest.raises(ValueError, match="score_uncalibrated"):
+def test_requires_the_schema_score_column():
+    """讀的是 schema 的 score 角色欄，缺了就 raise（#415）。
+
+    ``match`` 釘印出來的欄名而不是訊息模板，理由見 ``test_config_shift`` 的同型測試。
+    """
+    sample = _sample().drop(columns=["score"])
+    with pytest.raises(ValueError, match=r"'score'"):
         compute((sample, {"n_queries": 40}), _params())
 
 
 @pytest.mark.parametrize("null", [np.nan, None], ids=["nan", "none"])
-def test_an_all_null_uncalibrated_score_counts_as_unreadable(null):
+def test_an_all_null_score_column_counts_as_unreadable(null):
     """欄位在、值全空，跟沒有這一欄一樣要 raise（ADR-0018 決定 5 的守衛補強）。
 
-    兩種模式寫同一張 enriched 表時，另一模式沒有的欄讀回來是全 NULL。只看
-    「欄位在不在」的守衛會放行，接著在 NULL 上取 logit——一堆 NaN，沒有錯誤。
+    只看「欄位在不在」的守衛會放行一整欄 NULL，接著在 NULL 上取 logit——
+    一堆 NaN，沒有錯誤。
     ``nan``／``None`` 兩種都測：Spark 的全 NULL double 欄經 ``toPandas`` 回來是
     哪一種，取決於有沒有走 Arrow。
     """
     sample = _sample()
-    sample["score_uncalibrated"] = null
+    sample["score"] = null
     with pytest.raises(ValueError, match="全是空值"):
         compute((sample, {"n_queries": 40}), _params())
 
@@ -249,8 +253,7 @@ def _sample():
                 "snap_date": "2026-01-31", "cust_id": f"c{c:02d}",
                 "prod_name": item,
                 "label": int(rng.random() < 0.3),
-                "score_uncalibrated": float(rng.uniform(0.05, 0.95)),
-                "score": 0.5,
+                "score": float(rng.uniform(0.05, 0.95)),
                 "stratum": "take_all",
                 "inclusion_weight": 1.0,
             })

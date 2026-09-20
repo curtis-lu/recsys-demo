@@ -89,7 +89,7 @@ def main() -> None:
     for table, path in TABLES.items():
         df = spark.read.parquet(path.resolve().as_uri())
         # 合成 parquet 的 snap_date 是 timestamp[us]；不 cast DATE 的話對 'YYYY-MM-DD' 字串
-        # filter 會 0 row（val/test/calibration 全空）。
+        # filter 會 0 row（val/test 全空）。
         if "snap_date" in df.columns and isinstance(
             df.schema["snap_date"].dataType, TimestampType
         ):

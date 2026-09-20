@@ -6,8 +6,8 @@ the field names. The split follows how the two fail. A server being unreachable
 is loud and already handled. A renamed field is silent: the run still succeeds,
 and whoever was plotting the old name simply stops getting a line.
 
-So every string here is wire format for readers outside this repo. Ten of them
-happen to be pinned by ``tests/test_pipelines/test_training/test_nodes.py``;
+So every string here is wire format for readers outside this repo. Seven of
+them happen to be pinned by ``tests/test_pipelines/test_training/test_nodes.py``;
 ``map_attr_*``, ``n_queries``, ``n_excluded_queries``, ``n_quadrant_cells`` and
 ``n_cases_rendered`` are pinned by nothing at all. Treat them all as published
 — the test suite is not what makes them stable.
@@ -63,24 +63,6 @@ def log_evaluation_metrics(evaluation_results: dict) -> None:
 
     mlflow.log_metric("n_queries", evaluation_results["n_queries"])
     mlflow.log_metric("n_excluded_queries", evaluation_results["n_excluded_queries"])
-
-
-def log_calibration_outcome(evaluation_results: dict) -> None:
-    """Whether this model is calibrated, and what calibration changed.
-
-    The presence of an ``uncalibrated`` block is the signal, rather than a
-    separate flag: the calibration node is what puts the block there, so there
-    is no second source that could disagree with the numbers beside it.
-    """
-    if "uncalibrated" in evaluation_results:
-        mlflow.log_param("calibrated", True)
-        mlflow.log_param("calibration_method", evaluation_results["calibration_method"])
-        mlflow.log_metric(
-            "uncalibrated_overall_map",
-            evaluation_results["uncalibrated"]["overall_map"],
-        )
-    else:
-        mlflow.log_param("calibrated", False)
 
 
 def log_diagnostics_summary(

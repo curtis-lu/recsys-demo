@@ -32,7 +32,7 @@ import json
 import sys
 from pathlib import Path
 
-VERSION_COLS = ("base_dataset_version", "train_variant_id", "calibration_variant_id", "model_version")
+VERSION_COLS = ("base_dataset_version", "train_variant_id", "model_version")
 SCORE_COLS = ("score", "score_uncalibrated")
 EXCLUDED_JSON_KEYS = ("config_fingerprint",)
 
@@ -41,7 +41,7 @@ SOURCE_TABLES = ("feature_table", "label_table", "sample_pool", "inference_popul
 # feature_etl 的表名；event 角色（#378）與多張特徵表（#380）落地前，框架讀不到它
 FEATURE_ETL_ONLY_TABLES = ("feature_realtime",)
 DATASET_TABLES = (
-    "train_model_input", "train_dev_model_input", "calibration_model_input",
+    "train_model_input", "train_dev_model_input",
     "val_model_input", "test_model_input",
 )
 DATASET_JSON = ("preprocessor.json", "category_mappings.json")
@@ -124,7 +124,6 @@ def build(model_version: str) -> dict:
         versions = {
             "base_dataset_version": single_value(spark, tables["val_model_input"], "base_dataset_version"),
             "train_variant_id": single_value(spark, tables["train_model_input"], "train_variant_id"),
-            "calibration_variant_id": single_value(spark, tables["calibration_model_input"], "calibration_variant_id"),
             "model_version": model_version,
         }
         mv_filter = f"model_version = '{model_version}'"

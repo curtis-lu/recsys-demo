@@ -17,9 +17,6 @@ training:
     verbosity: -1
     log_period: 0
     num_threads: 4
-  calibration:
-    enabled: true
-    method: sigmoid
   sample_weight_keys:
     - ad_creative
   sample_weights: {}

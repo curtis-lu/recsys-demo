@@ -1,16 +1,15 @@
 {
   "measured": {
-    "date": "2026-09-18",
-    "code_commit": "8f78f84",
-    "how": "run_e2e.sh 以同一份程式碼連跑兩次，62 個欄位逐一相同",
-    "environment": "macOS, 8 cores, local[*], PySpark 3.3.2, LightGBM 4.6.0; load average 6.5 and 7.0 at the two starts"
+    "date": "2026-09-20",
+    "code_commit": "56f743f",
+    "how": "run_e2e.sh 跑 feat/remove-calibration；與 base commit 2041ae9 上「校準三個開關關掉、calibration_snap_dates 清空」的同一條 e2e 逐層比對，source_etl／dataset／training／inference 四層的列數與內容指紋逐一相同，evaluation 的數值也逐一相同（詳見 #416）",
+    "environment": "macOS, 8 cores, local[*], PySpark 3.3.2, LightGBM 4.6.0; 兩條 e2e 同時跑，開跑時 load average 3.3，跑完時 6.8"
   },
   "noisy": {},
   "versions": {
-    "base_dataset_version": "f6b1febb",
+    "base_dataset_version": "37a00a43",
     "train_variant_id": "f6541cb7",
-    "calibration_variant_id": "d0a3d672",
-    "model_version": "fce0781f"
+    "model_version": "563e1d34"
   },
   "source_etl": {
     "feature_table": {
@@ -134,31 +133,6 @@
         "user_segment"
       ]
     },
-    "calibration_model_input": {
-      "rows": 2970,
-      "hash": "542439201285848235721",
-      "columns": [
-        "ad_creative",
-        "age_band",
-        "device_type",
-        "label",
-        "page_type",
-        "region",
-        "slot_ctr_4w",
-        "slot_id",
-        "slot_imp_4w",
-        "slot_position",
-        "snap_date",
-        "tenure_days",
-        "us_click_4w",
-        "us_imp_4w",
-        "user_click_4w",
-        "user_ctr_4w",
-        "user_id",
-        "user_imp_4w",
-        "user_segment"
-      ]
-    },
     "val_model_input": {
       "rows": 1685,
       "hash": "12932706816110953221",
@@ -219,7 +193,7 @@
   "training": {
     "training_eval_predictions": {
       "rows": 1731,
-      "hash": "105737462037711277271",
+      "hash": "-287704232612621339210",
       "columns": [
         "ad_creative",
         "label",
@@ -234,7 +208,7 @@
   "inference": {
     "ranked_predictions": {
       "rows": 14400,
-      "hash": "-1153018332327301681807",
+      "hash": "893970504486440713315",
       "columns": [
         "ad_creative",
         "rank",
@@ -253,15 +227,15 @@
     },
     "diagnosis/config_shift.json": {
       "leaves": 238,
-      "hash": "e3699cc486c9f3c4bdb91a071c734007ee0d277c0603a6c6d4ca6c217edfe8aa"
+      "hash": "ff7a28be746c208cc51b5a3bbcb439f71551892073aaa3d56dff59008dce789c"
     },
     "diagnosis/item_ability.json": {
       "leaves": 882,
-      "hash": "15869cdb34b09ecf181ece521c6aa4a4e2c3d7bddcb88f7d1d0b25b53361030f"
+      "hash": "de3ee2b0bf2c9b49068d0713220860fd0acb769f6c515767f71d0f27cde86413"
     },
     "diagnosis/metric_ci.json": {
       "leaves": 88,
-      "hash": "43f79c21db230a377cce971543dc2bccb4418b01c30231189b0c3f129eba44be"
+      "hash": "fe3c607a5888b3fa57532e34e7c0e6b6ab89f584c65c58fe2a4ba23a27b124ff"
     },
     "diagnosis/model_capacity.json": {
       "leaves": 320,
@@ -269,15 +243,15 @@
     },
     "diagnosis/suppression.json": {
       "leaves": 3338,
-      "hash": "ed481b52d7fbdd71f111885049c001b95cb5b2bc0c636ca5f429a8387c39f7df"
+      "hash": "810ee3e9c808be0a84886166f636a3a06e124f229f7e45f08d1101df84c4bcbe"
     },
     "metrics.json": {
       "leaves": 1066,
       "hash": "aa4e7d47c679e1da134014018d51252d1390843a3c8bc1b669cbf46ecfcd40c4"
     },
     "report_aggregates.json": {
-      "leaves": 1958,
-      "hash": "701d0c79b238f4294ce360449b42100e80d7bbd930d84ea24b6f00e0e8f4d868"
+      "leaves": 2150,
+      "hash": "91674aa6dac9596db14c6ba02057b8d8edd871d18453a1eb21c55a961a12b25b"
     },
     "segment_columns.json": {
       "leaves": 2,

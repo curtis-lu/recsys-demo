@@ -47,48 +47,52 @@ class ModelAdapterDataset(AbstractDataset):
             adapter = get_adapter("lightgbm")
             meta = {}
 
-        adapter.load(self._filepath)
-
-        # Wrap with CalibratedModelAdapter if model was saved with calibration
+        # Refuse a model this framework can no longer honour. Calibration was
+        # removed in #411, so the wrapper class that turned the sidecar's
+        # `calibrated: true` back into a calibrated model does not exist — and
+        # the `calibrator.pkl` beside it has no reader. Two worse endings are
+        # what this replaces: an ImportError naming a module the operator never
+        # configured, or loading the base model in silence and publishing raw
+        # scores under a model whose consumers were promised probabilities.
+        #
+        # Presence is not the test, truth is: every model saved while
+        # calibration was off carries `calibrated: false`, and those load
+        # normally. So does a sidecar written after #411, which omits the key.
         if meta.get("calibrated", False):
-            from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
-
-            wrapper = CalibratedModelAdapter(
-                adapter, method=meta["calibration_method"]
+            raise ValueError(
+                f"{meta_path} says this model was saved with a calibrator "
+                f"attached. Calibration was removed from the framework (#411) "
+                f"and there is nothing left to load the calibrator with. "
+                f"Retrain with the current version — the new model scores the "
+                f"same rows in the same order, without the probability "
+                f"rescaling."
             )
-            wrapper._load_calibrator(self._filepath)
-            return wrapper
 
+        adapter.load(self._filepath)
         return adapter
 
     def save(self, data: ModelAdapter) -> None:
         os.makedirs(os.path.dirname(self._filepath) or ".", exist_ok=True)
         data.save(self._filepath)
 
-        # Detect calibration wrapper
-        from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
-
-        calibrated = isinstance(data, CalibratedModelAdapter)
-        base_adapter = data.base if calibrated else data
-
-        # Determine algorithm name from registry (using base adapter)
+        # Determine algorithm name from registry
         from recsys_tfb.models.base import ADAPTER_REGISTRY
 
         algorithm = "unknown"
-        adapter_class = type(base_adapter)
+        adapter_class = type(data)
         for name, cls in ADAPTER_REGISTRY.items():
             if cls is adapter_class:
                 algorithm = name
                 break
 
+        # No calibration flag, not even `false`: the framework has no such
+        # concept any more, and writing `false` would keep the key alive in
+        # every new sidecar for a reader that no longer exists.
         meta = {
             "algorithm": algorithm,
             "adapter_class": f"{adapter_class.__module__}.{adapter_class.__qualname__}",
             "saved_at": datetime.now(timezone.utc).isoformat(),
-            "calibrated": calibrated,
         }
-        if calibrated:
-            meta["calibration_method"] = data.method
 
         with open(self._meta_filepath, "w") as f:
             json.dump(meta, f, indent=2)

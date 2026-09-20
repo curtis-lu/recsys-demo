@@ -34,9 +34,9 @@ keys 裡有 item 就照 item 粒度 join，沒有就退回只用 `(time, entity)
 - `identity_columns` 是推導欄位（`core/schema.py:55`，恆為 `[time] + entity + [item]`），使用者
   無法讓它不含 item。
 - 組裝只有一份實作（`build_model_input`，`pipelines/dataset/nodes.py`；`build_test_model_input`
-  先把 keys 限縮到當次月份再呼叫它），合計註冊成五個 pipeline 節點（`pipelines/dataset/pipeline.py`
-  的 train / train_dev / val / test / calibration，最後一個只在 `enable_calibration` 時註冊），
-  五個餵進去的 keys 全是 identity。
+  先把 keys 限縮到當次月份再呼叫它），合計註冊成四個 pipeline 節點（`pipelines/dataset/pipeline.py`
+  的 train / train_dev / val / test；原本還有第五個 calibration 節點、只在 `enable_calibration`
+  時註冊，已隨 #411／#414 移除），四個餵進去的 keys 全是 identity。
 - `pipelines/dataset/steps/model_input.py` 只被同套件內部引用，沒有「外部 API 彈性」需要保留。
 
 → **移除三元式**，改 `require_columns_present(keys.columns, base_key + [item_col], ...)`。這讓

@@ -12,12 +12,10 @@ from recsys_tfb.diagnosis.model import (
 from recsys_tfb.diagnosis.model.gain_ledger import compute_gain_ledger
 from recsys_tfb.diagnosis.model.population_spark import select_shap_population
 from recsys_tfb.pipelines.training.nodes import (
-    cache_calibration_model_input,
     cache_test_model_input,
     cache_train_dev_model_input,
     cache_train_model_input,
     cache_val_model_input,
-    calibrate_model,
     compute_test_mAP_spark,
     finalize_model,
     log_experiment,
@@ -30,12 +28,12 @@ from recsys_tfb.pipelines.training.nodes import (
 )
 
 
-def create_pipeline(enable_calibration: bool = False) -> Pipeline:
-    # finalize_model produces the trained model; under calibration it lands in
-    # `trained_model` so calibrate_model can wrap it. Strategy
-    # (hpo_best / refit_on_full) is read from parameters at runtime — not a
-    # DAG-shape concern.
-    final_model_output = "trained_model" if enable_calibration else "model"
+def create_pipeline() -> Pipeline:
+    # finalize_model produces `model` directly. Strategy (hpo_best /
+    # refit_on_full) is read from parameters at runtime — not a DAG-shape
+    # concern. There is no second model-producing node and no conditional
+    # branch here: calibration, the one thing that ever wrapped the finalized
+    # model, was removed in #411.
 
     nodes = [
         # Training-stage feature selection chokepoint: emit a (possibly subset)
@@ -71,15 +69,6 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
             outputs="test_parquet_handle",
         ),
     ]
-
-    if enable_calibration:
-        nodes.append(
-            Node(
-                cache_calibration_model_input,
-                inputs=["calibration_model_input", "parameters"],
-                outputs="calibration_parquet_handle",
-            ),
-        )
 
     nodes.append(
         Node(
@@ -127,21 +116,9 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
                 "hpo_best_model", "best_params", "best_iteration",
                 "preprocessor_view", "parameters",
             ],
-            outputs=final_model_output,
+            outputs="model",
         ),
     )
-
-    if enable_calibration:
-        nodes.append(
-            Node(
-                calibrate_model,
-                inputs=[
-                    "trained_model", "calibration_parquet_handle",
-                    "preprocessor_view", "parameters",
-                ],
-                outputs="model",
-            ),
-        )
 
     nodes.extend([
         Node(
@@ -175,9 +152,9 @@ def create_pipeline(enable_calibration: bool = False) -> Pipeline:
         #
         # `model` is a new input for compute_feature_statistics specifically — a
         # deliberate coupling, argued in its docstring. It also moves that node
-        # after calibrate_model in the topological order; see the calibrate_model
-        # entry in tests/test_pipelines/test_resume_contracts.py for what that
-        # costs a resume.
+        # after finalize_model in the topological order, which is what drags the
+        # train handle into a `--from-node finalize_model` slice; see that entry
+        # in tests/test_pipelines/test_resume_contracts.py.
         Node(
             compute_feature_statistics,
             inputs=["train_parquet_handle", "model", "preprocessor", "parameters"],

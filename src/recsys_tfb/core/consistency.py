@@ -152,7 +152,7 @@ Layer 1 — config-static (implemented here; aggregated by
   the dataset pipeline reads the key, so this is wired on the dataset command
   rather than aggregated (see the predicate for what aggregating it costs).
   Predicate: ``train_snap_dates_errors``.
-* A24 — the four ``dataset.{train,calibration,val,test}_snap_dates`` splits
+* A24 — the three ``dataset.{train,val,test}_snap_dates`` splits
   must be mutually disjoint. A month in two splits trains the model and then
   measures it, so every metric from the second split silently becomes an
   in-sample number and nothing downstream notices. Dates are compared as
@@ -406,6 +406,22 @@ Layer 1 — config-static (implemented here; aggregated by
   ``--dry-run`` included — the predicate's docstring says why that is
   intended. No runtime backstop in the node, like A24/A28. Issue #133 calls
   this A29; that code was taken by the time it was built.
+* A37 — a conf still spelling a config key that named the calibration
+  mechanism removed in #411. Nothing reads these keys any more, so left in
+  place they produce an uncalibrated model, a successful run, and no signal
+  that the setting was ignored. **The key's presence is the failure, whatever
+  the value**: they sit inside the subtrees hashed into
+  ``base_dataset_version`` / ``model_version``, so a conf that keeps
+  ``calibration: {enabled: false}`` computes different version IDs than one
+  that deleted it, and requiring deletion is what makes two upgraded conf trees
+  agree. Every retired key is listed in one message — the fix is a single edit.
+  Keys: :data:`RETIRED_CALIBRATION_KEYS` — the two the calibrator itself read
+  (#413) plus the four that configured the calibration data split (#414).
+  Predicate: ``retired_calibration_key_errors``, aggregated by
+  ``validate_config_consistency`` — unlike A24/A36 the harm belongs to no
+  single pipeline, because the version IDs every command resolves are computed
+  from these subtrees. Not a migration tool with a delete-by date, unlike A33:
+  the mechanism is gone, not renamed.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
@@ -556,9 +572,9 @@ implemented and wired):
   holds. ``block.getRowCount()`` is the quantity B8's reader was already
   reading to interpret its min/max statistics; B10 only sums it.
 
-  **Three of the five splits are covered, and that is a limit, not an
-  oversight.** train / train_dev / calibration land straight out of
-  ``build_model_input``. val and test do not. For val the frame whose row count
+  **Two of the four splits are covered, and that is a limit, not an
+  oversight.** train / train_dev land straight out of ``build_model_input``.
+  val and test do not. For val the frame whose row count
   equals ``val_keys``' is ``val_model_input_unfiltered``; for test it is
   ``test_model_input_unfiltered``, which matches **not** ``test_keys`` but only
   this run's months of it — ``build_test_model_input`` re-scopes those keys to
@@ -1579,6 +1595,84 @@ def legacy_evaluation_key_errors(parameters: dict) -> list[str]:
     ]
 
 
+#: Config keys that named the calibration mechanism removed in #411, written as
+#: dotted paths from the top of ``parameters``.
+#:
+#: **This is not A33's migration tool with a delete-by date.** The keys do not
+#: point at a renamed setting, they point at a mechanism that no longer exists
+#: anywhere in the framework, so the check stays for as long as anyone might
+#: still be carrying a pre-#411 conf.
+#:
+#: Complete as of #414: T1 (#413) retired the two keys the calibrator itself
+#: read, and T2 (#414) added the four that configured the calibration data
+#: split. Listed in the order a conf tree spells them — dataset, training,
+#: inference — so the message reads in the order the operator will edit.
+RETIRED_CALIBRATION_KEYS: tuple[str, ...] = (
+    "dataset.enable_calibration",
+    "dataset.calibration_snap_dates",
+    "dataset.calibration_sample_ratio",
+    "dataset.calibration_sample_ratio_overrides",
+    "training.calibration",
+    "inference.use_calibration",
+)
+
+
+def _dotted_key_present(parameters: Mapping, dotted: str) -> bool:
+    """Is ``dotted`` (e.g. ``"training.calibration"``) spelled in ``parameters``?
+
+    Presence of the *key*, never the truth of its value: ``None`` and ``False``
+    are spelled, and that is what A37 is asking. Any non-mapping on the way down
+    means the path is not spelled at all — a conf that writes ``training: null``
+    has no ``training.calibration`` to delete.
+    """
+    node = parameters
+    *parents, leaf = dotted.split(".")
+    for part in parents:
+        if not isinstance(node, Mapping):
+            return False
+        node = node.get(part)
+    return isinstance(node, Mapping) and leaf in node
+
+
+def retired_calibration_key_errors(parameters: dict) -> list[str]:
+    """A37 — a conf still spelling a calibration key after #411 removed it.
+
+    The failure it replaces is silent. Nothing reads these keys any more, so an
+    operator who left ``training.calibration.enabled: true`` in place gets an
+    uncalibrated model, a successful run, and no signal at all that the setting
+    they wrote was ignored.
+
+    **Presence is the failure, whatever the value** — including ``false``, an
+    empty block and an empty list. The whole ``training:`` subtree is hashed
+    into ``model_version`` and the whole ``dataset:`` subtree into
+    ``base_dataset_version``, so a conf that keeps ``enable_calibration: false``
+    or ``calibration_snap_dates: []`` computes different version IDs than one
+    that deleted them. Requiring deletion is what makes two upgraded conf trees
+    agree.
+
+    One message listing every key, not one per key: the fix is a single edit,
+    and a per-key message would make an operator re-run to discover the next
+    one.
+    """
+    if not isinstance(parameters, Mapping):
+        return []
+    present = [
+        dotted for dotted in RETIRED_CALIBRATION_KEYS
+        if _dotted_key_present(parameters, dotted)
+    ]
+    if not present:
+        return []
+    return [
+        "A37: calibration was removed from the framework (#411), and the "
+        "config key(s) " + ", ".join(repr(k) for k in present) + " are read by "
+        "nothing. Delete them; there is no replacement setting. The value does "
+        "not matter — `false` and an empty block are rejected too, because "
+        "these keys sit inside the subtrees hashed into base_dataset_version / "
+        "model_version, so leaving one behind computes a different version ID "
+        "than deleting it."
+    ]
+
+
 #: The ``evaluation.report.sections`` switches the report reads: one name per
 #: ``_section_on(parameters, name)`` call in ``evaluation/report_builder.py``,
 #: which refuses any name not listed here (A34). ``baseline`` and
@@ -1766,6 +1860,8 @@ def validate_config_consistency(parameters: dict) -> None:
     # A33 is a migration-period check; it leaves with the migration (see
     # A33 in the module docstring).
     errors.extend(legacy_evaluation_key_errors(parameters))
+
+    errors.extend(retired_calibration_key_errors(parameters))
 
     if errors:
         raise ConfigConsistencyError(
@@ -3138,9 +3234,9 @@ def post_training_snap_date_errors(parameters: dict, post_training: bool) -> lis
     return []
 
 
-#: The four ``dataset.*_snap_dates`` splits A24 keeps disjoint, in the order
+#: The three ``dataset.*_snap_dates`` splits A24 keeps disjoint, in the order
 #: their pairs are reported.
-_DATE_SPLIT_NAMES = ("train", "calibration", "val", "test")
+_DATE_SPLIT_NAMES = ("train", "val", "test")
 
 
 def _split_day_labels(values) -> dict:

@@ -111,6 +111,8 @@ mkdir -p conf/production
 
 框架沒有「未知鍵」檢查。`conf/<env>/` 裡留著一個新版已經改名或移除的鍵，不會有任何訊息，那個鍵只是再也沒有人讀它，該項行為會退回預設值——可能是 `conf/base/` 裡的新預設，也可能是寫在程式碼裡的預設。所以升級後如果行為變了卻找不到原因，先檢查自己的設定層有沒有對不上的鍵名。
 
+**例外：校準相關的退役鍵會報錯。** #411 移除機率校準機制後留下的六個設定鍵（`RETIRED_CALIBRATION_KEYS`：`dataset.enable_calibration`、`dataset.calibration_snap_dates`、`dataset.calibration_sample_ratio`、`dataset.calibration_sample_ratio_overrides`、`training.calibration`、`inference.use_calibration`），只要**出現**在設定裡就會被擋下，值設成 `false` 或 `[]` 一樣算數——因為它們位在算進 `base_dataset_version` / `model_version` 的子樹裡，留著會讓沒刪的 conf 樹算出跟已刪的 conf 樹不同的版本 ID。這是不變量 A37，predicate 是 `retired_calibration_key_errors`（`src/recsys_tfb/core/consistency.py`），常數定義在同一個模組。
+
 ## 6. 確認這份程式碼在你的機器上跑得起來
 
 repo 附的不是資料，是**產生器**：`data/` 在版本控制裡是空的，`scripts/generate_synthetic_data.py` 會在需要時產生合成資料，`scripts/local_spark_setup.py` 發現缺檔時會自動呼叫它。所以你 clone 下來看到空的 `data/` 是正常的。
@@ -160,6 +162,7 @@ diff -ru recsys_tfb-v0.1.1/conf recsys_tfb-v0.2.0/conf              # 或兩版�
 另外兩件不會出現在設定差異裡、但會改變行為的事：
 
 - 版本 ID 的計算方式若有變動（`src/recsys_tfb/core/versioning.py`），既有的資料集與模型版本不會被判定成命中，下一次執行會整批重算。
+  **移除機率校準的那一版就是這種情況**（#411）：校準相關的設定鍵整包從 `dataset:` 子樹拿掉，而 `base_dataset_version` 是對那整個子樹取 hash，所以每個 `base_dataset_version` 都會換一個值——既有資料集要重建、模型要重訓，並重新用 `scripts/promote_model.py` 人工 promote。`train_variant_id` 的算法沒動，值不受影響。這是刻意的版本決策，不是 bug；留在設定檔裡的校準鍵會被上一節那個例外擋下。
 - 來源表 schema 的變動由上游決定，跟版本無關，但同樣會讓結果變化。
 
 換版本之後先重跑 §6 確認環境仍然完整，再接自己的資料。

@@ -108,10 +108,9 @@ def test_predict_and_write_emits_one_save_per_partition(tmp_path):
     parquet_path = _make_test_parquet(tmp_path)
     handle = ParquetHandle(path=str(parquet_path))
 
-    # Mock model: predict returns increasing scores; not calibrated
+    # Mock model: predict returns increasing scores
     model = MagicMock()
     model.predict.side_effect = lambda X: np.arange(len(X)).astype(float) + 0.5
-    # Not a CalibratedModelAdapter (isinstance check fails -> raw == score)
     model.__class__.__name__ = "LightGBMAdapter"
 
     # Mock HiveTableDataset handle — capture every save() call
@@ -160,9 +159,14 @@ def test_predict_and_write_emits_one_save_per_partition(tmp_path):
     assert manifest["n_rows_written"] == len(all_written)
 
 
-def test_predict_and_write_score_uncalibrated_equals_score_when_not_calibrated(tmp_path):
-    """When the model is not a CalibratedModelAdapter, score_uncalibrated
-    must equal score row-for-row in every written partition.
+def test_predict_and_write_score_uncalibrated_equals_score(tmp_path):
+    """``score_uncalibrated`` equals ``score`` row-for-row, always.
+
+    The column is deprecated (#412) and kept only so the managed table keeps
+    its column count. Nothing rescales a model's output any more (#411), so
+    there is no longer a branch that could put a different number there — and
+    the node must not reach for one, e.g. by calling a ``predict_uncalibrated``
+    that a mock would happily answer.
     """
     from recsys_tfb.io.handles import ParquetHandle
     from recsys_tfb.pipelines.training.nodes import (
@@ -191,45 +195,10 @@ def test_predict_and_write_score_uncalibrated_equals_score_when_not_calibrated(t
 
     for df in saves:
         assert (df["score"] == df["score_uncalibrated"]).all()
-
-
-def test_predict_and_write_calibrated_branch_calls_predict_uncalibrated(tmp_path):
-    """When the model IS a CalibratedModelAdapter, predict_uncalibrated
-    is called to populate score_uncalibrated separately from score.
-    """
-    from recsys_tfb.io.handles import ParquetHandle
-    from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
-    from recsys_tfb.pipelines.training.nodes import (
-        predict_and_write_test_predictions,
-    )
-
-    parquet_path = _make_test_parquet(tmp_path)
-    handle = ParquetHandle(path=str(parquet_path))
-
-    # spec=CalibratedModelAdapter makes isinstance check pass
-    model = MagicMock(spec=CalibratedModelAdapter)
-    model.predict.side_effect = lambda X: np.array([0.9] * len(X))
-    model.predict_uncalibrated.side_effect = lambda X: np.array([0.1] * len(X))
-
-    saves: list[pd.DataFrame] = []
-    write_ds = MagicMock()
-    write_ds.save.side_effect = lambda df: saves.append(df)
-    write_ds.existing_partition_values.return_value = []  # nothing written yet
-
-    predict_and_write_test_predictions(
-        model=model,
-        test_parquet_handle=handle,
-        preprocessor_metadata=_make_prep_meta(),
-        parameters=_make_parameters(),
-        training_eval_predictions=write_ds,
-    )
-
-    # predict_uncalibrated must have been called once per partition
-    assert model.predict_uncalibrated.call_count == 4
-
-    for df in saves:
-        assert (df["score"] == 0.9).all()
-        assert (df["score_uncalibrated"] == 0.1).all()
+        assert (df["score"] == 0.42).all()
+    # The model is asked for one score per partition and nothing else.
+    assert model.predict.call_count == len(saves)
+    model.predict_uncalibrated.assert_not_called()
 
 
 def test_predict_covers_every_month_when_given_a_per_month_mapping(tmp_path):

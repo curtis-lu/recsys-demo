@@ -148,8 +148,8 @@ def draw_diagnosis_sample(
     它們沒有那份清單，也拿 ``evaluation.segment_columns`` 夾帶自己要的脈絡欄，
     所以退回舊行為（配置且存在於 frame 的欄）。
 
-    sample_pdf 欄位：query cols（time + entity）、item、label、score、
-    （存在時）score_uncalibrated＋上述 segment 欄
+    sample_pdf 欄位：query cols（time + entity）、item、label、score，
+    ＋上述 segment 欄
     （存在者，供 by_segment 分組用；不存在則靜默略過），外加
     ``stratum``（``take_all`` / ``hash_ratio``）與 ``inclusion_weight``
     （納入機率的倒數，query 級：同一 query 的所有候選列同權重）。
@@ -181,17 +181,15 @@ def draw_diagnosis_sample(
     else:
         seg_cols = list((parameters.get("evaluation", {}) or {})
                         .get("segment_columns", []) or [])
-    # score_uncalibrated rides along whenever the frame has the column. Read
-    # back from enriched_eval_predictions in monitoring mode it is usually real
-    # (inference writes it, ADR-0018 decision 5), but a partition written
-    # before that can hold it all NULL, the column coming from the other mode's
-    # rows in the shared table. Harmless either way: that mode's only sample
-    # reader (compute_metric_ci) never reads it, and the registry diagnoses that
-    # do are wired in --post-training only.
+    # No column rides along beyond the schema roles and the segment columns.
+    # The sample used to also carry score_uncalibrated for the registry
+    # diagnoses; #411 removed the calibrator, so schema["score"] *is* the raw
+    # model output and those diagnoses read it (#415). The deprecated column
+    # still sits on the prediction tables (#412 removes it) but nothing here
+    # reads it.
     keep_cols = list(dict.fromkeys(
         c
-        for c in [*query_cols, item_col, label_col, score_col,
-                  "score_uncalibrated", *seg_cols]
+        for c in [*query_cols, item_col, label_col, score_col, *seg_cols]
         if c in eval_predictions.columns
     ))
     _guard_reserved_columns(keep_cols, seg_cols)

@@ -50,7 +50,7 @@ def compute_feature_statistics(
     regenerate this JSON (18 nodes, now 13). What it does cost is
     ``--only-node compute_feature_statistics``, which now needs a
     ``model_version``-scoped input rather than only ``base_dataset_version`` ones,
-    and ``--from-node calibrate_model``, which picks up this node's train handle.
+    and ``--from-node finalize_model``, which picks up this node's train handle.
     Both slices are pinned in ``tests/test_pipelines/test_resume_contracts.py``.
     """
     cfg = parameters.get("diagnostics", {}).get("feature_stats", {})
