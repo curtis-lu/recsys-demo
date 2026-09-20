@@ -411,7 +411,7 @@ PR 怎麼切交給 `/to-spec`、`/to-ticket`，**偏粗不偏細**：切點只�
   - **`aggregate_overall`（原本排名第二）：job 數沒東西可收，時間不是它自己的。** 一次跑共 8 次呼叫、36 個 job，每次本來就只有一次 `agg`＋`collect`。executor 時間合計 56 秒，跟 `compute_dataset_overview` 六次呼叫的 64 秒同量級。但它是 `_compute_core` 裡 `enriched.cache()` 與 `per_query.cache()` 之後的**第一個 action**，兩份快取都在這一步物化，所以那 56 秒主要是逐列貢獻與逐 query 指標的成本，懶惰計算堆到了這裡（perf 規則 3）。要提假設，先把快取物化拆出來量。
   - **母體表 join 前沒先篩月份：Spark 不會自動裁。** `sample_pool` 沒有分區欄（`conf/base/catalog.yaml` 沒宣告），`explain` 裡 scan 只推了 `IsNotNull(snap_date)`、`IsNotNull(cust_id)`，沒有月份條件，所以整張表都掃（119,536 列，評估月只有 9,008 列，佔 7.5%）。受控實驗只計時 join 加 noop 寫出，`eval_predictions` 先 cache，跑 3 輪、每輪對調先後：executor 時間全表 123–436 ms、先篩 94–108 ms。區間不重疊，但差距是毫秒級。生產的 `sample_pool` 有多大沒量過，差距會放大多少只是推論。
   - **比較模式的 coverage 計數比舊的 `intersect` 貴（executor 時間 3.9–6.4 倍），示例資料上答案相同。** 只計時 `restrict_to_common` 裡 `groups_common` 那一個 `count()`：兩側原始讀取先 cache，裁切的 lineage 不 cache，跟 pipeline 一樣。新寫法 14 個 job、executor 2.7–5.3 秒；舊寫法（`02202e0` 之前，對未裁切的 frame 做 `intersect`）5 個 job、0.69–0.83 秒。3 輪對調，區間不重疊。兩種寫法算出的 query group 數都是 654。貴在兩側裁切的 lineage 各重算一次。要省的話不能換回 `intersect`，那正是 [ADR-0020](0020-evaluation-bug-round-intended-behaviours.md) bug 14 修掉的東西（數的母體跟實際保留的不是同一個）。
-- **training 那 7 個 diagnosis node 要不要搬來 evaluation**：跟 `overall_map` 跨月合併是同一個接縫，`deliberate-non-goals.md` 明寫要另開一輪，本份不預留位置。
+- **training 那 7 個 diagnosis node 要不要搬來 evaluation**：跟 `overall_map` 跨月合併是同一個接縫，使用者明寫要另開一輪，本份不預留位置。
 
 ---
 

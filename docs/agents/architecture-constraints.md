@@ -115,7 +115,7 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 **方向是「跑完從磁碟讀回贏家」**，不是「讓 callable 可 pickle」：`hpo_resume.write_checkpoint` 每次刷新最佳成績就已經把模型存到磁碟。⚠ **但現況的 checkpoint 不能直接多行程用**——模型（`model.txt`）與 meta（`best_meta.json`）是兩個獨立檔案、兩次獨立的 `os.replace`，中間沒有跨檔鎖、也沒有版本指標，多個 writer 同時刷新時讀者可能拿到 A worker 的模型配 B worker 的 score／params（`JournalStorage` 保護的是 study 的 trial 記錄，不保護這對檔案）。啟用平行前必須先解決其一：單一 writer、檔案鎖，或版本化的 checkpoint 目錄 ＋ 一個原子寫入的 manifest 指向當前贏家。
 
-**目前沒有任何票或需求要求平行 HPO**（`deliberate-non-goals.md`），這條記的是「真要做的時候該解哪個問題」，不是待辦。**這一段在 2026-08-30（#229）改寫過**：舊版寫的是「內嵌的 Optuna 閉包不可 pickle，是第一個擋路的東西」，兩層都錯——pickle 送過去的是程式碼不是模型，而且兩種平行化模式都不需要 pickle objective。
+**目前沒有任何票或需求要求平行 HPO**，這條記的是「真要做的時候該解哪個問題」，不是待辦。**這一段在 2026-08-30（#229）改寫過**：舊版寫的是「內嵌的 Optuna 閉包不可 pickle，是第一個擋路的東西」，兩層都錯——pickle 送過去的是程式碼不是模型，而且兩種平行化模式都不需要 pickle objective。
 
 ## F4. Node 極薄：沒有 namespace、沒有 tags
 
@@ -281,14 +281,14 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
 
   **這不是豁免**：`steps/` 裡出現 `catalog.load`／`catalog.save` 一樣違反 A1，只是**沒有測試會發現**，靠 code review。2026-09-19 對整個 `pipelines/**/*.py` 實查，catalog 存取零命中。
 
-  **不放寬 glob 是使用者的裁決**（2026-09-19，#163），理由與什麼時候重開見 [`deliberate-non-goals.md`](deliberate-non-goals.md)。放寬也不是換個 glob 就好：當天實測，寫檔檢查 (d) 會多出兩個**不是違例**的命中——`training/steps/hpo_resume.py`（HPO 中斷接續的 study 與 checkpoint）和 `source_etl/sql_runner.py`（這個套件沒有任何 `Node(...)`，本來就不歸 A1 管）。
+  **不放寬 glob 是使用者的裁決**（2026-09-19，#163）。理由：看不到的地方裡真的有寫檔的只有 `diagnosis/model/`，而使用者傾向大幅簡化診斷，現在補可能白做；而檢查本身要留著——跑不到一秒，而且真的影響過設計（`pipelines/training/nodes.py` 的 5 個 cache node 刻意把刪檔留在 node 裡，就是為了讓它看得到，見 R4 表下的注記）。**什麼時候重開**：`diagnosis/model/` 的診斷簡化有了定案（那些 node 拿掉，或決定保留），或使用者重開這件事。放寬也不是換個 glob 就好：當天實測，寫檔檢查 (d) 會多出兩個**不是違例**的命中——`training/steps/hpo_resume.py`（HPO 中斷接續的 study 與 checkpoint）和 `source_etl/sql_runner.py`（這個套件沒有任何 `Node(...)`，本來就不歸 A1 管）。
 - **`def` 不在 `nodes*.py` 裡的 node。** (c) 與 (d) 用**檔名**挑要掃的檔，不是看「檔案裡有沒有被註冊成 node 的函式」。所以 `pipeline.py` 註冊了、但 `def` 寫在別的檔的 node，整個看不到。2026-09-19 盤點有兩處：
   - training 的 7 個診斷 node，`def` 在 `src/recsys_tfb/diagnosis/model/`（對照表在 `pipelines/training/nodes.py` 的模組 docstring）。**這裡有實際後果**：`compute_shap_diagnostics`（`shap_per_item.py`）自己存圖，`compute_quadrant_cases` 經同檔的 `_render_case`（`shap_cases.py`）自己存圖，兩處都搜 `savefig`；目錄由 `diagnosis/model/paths.py` 的 helper `mkdir`。照 R4 的定義，它們就是「自己寫診斷副產物的 node」，但**不在 R4 表上**，測試也看不到。
   - evaluation 的 `load_compare_predictions`，`def` 在 `pipelines/evaluation/steps/compare_sources.py`（#365 搬進去）。當天實查零命中。
 
   **重盤方法**（上面的清單會過時，別直接引用）：取每個 `pipelines/*/pipeline.py` 裡 `Node(...)` 的第一參數，找它的 `def` 在哪個檔；不在 `pipelines/**/nodes*.py` 的就在盲區裡。
 
-  **這個盲區只記在這裡**（使用者 2026-09-19 裁決，#163）：不放寬掃描、不把上面那兩個存圖的 node 補進 R4、也不改它們。理由與什麼時候重開見 [`deliberate-non-goals.md`](deliberate-non-goals.md)。在那之前，這些 node 新增 catalog 存取或寫檔，**沒有測試會發現**，靠 code review。
+  **這個盲區只記在這裡**（使用者 2026-09-19 裁決，#163）：不放寬掃描、不把上面那兩個存圖的 node 補進 R4、也不改它們（理由與什麼時候重開見上一節）。**也不得靠改檔名讓稽核看得到，或新增一條讓自己合規的規則**——那是繞過裁決，不是遵守它。在那之前，這些 node 新增 catalog 存取或寫檔，**沒有測試會發現**，靠 code review。
 
 ## A2. node 函式不得依賴可變全域狀態
 

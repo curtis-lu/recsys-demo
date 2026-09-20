@@ -131,7 +131,7 @@ _materialize_parquet_handle    ──→   cache_train_model_input
            → 這個寫檔動作從此無人看管
 ```
 
-**把 glob 放寬到 `pipelines/**/*.py` 是一個真的選項，但它是一張獨立的票、還沒做**（`architecture-constraints.md` 的 A1〈這個檢查看不到〉：「要不要把 glob 放寬到 `pipelines/**/*.py` 是一張獨立的票（放寬會一併把 `dataset/steps/` 納入，需先確認那邊也乾淨）」；`deliberate-non-goals.md` 節四把 #163 列為「等使用者裁決」）。
+**把 glob 放寬到 `pipelines/**/*.py` 是一個真的選項，但它是一張獨立的票、還沒做**（`architecture-constraints.md` 的 A1〈這個檢查看不到〉：「要不要把 glob 放寬到 `pipelines/**/*.py` 是一張獨立的票（放寬會一併把 `dataset/steps/` 納入，需先確認那邊也乾淨）」；#163 當時仍列為「等使用者裁決」，尚未拍板）。
 
 **所以這不是「規則禁止」，是「時序上還不能」**：在那張票做完之前，`rmtree` 搬進 `steps/` 就是進死角。等它做完，這個決定可以重新檢討。
 
@@ -143,7 +143,7 @@ _materialize_parquet_handle    ──→   cache_train_model_input
 
 **代價。** R4 **表格**從 3 筆變 2 筆，直接寫檔的**測試集合**也少這一個。登記縮小也要簽核，但方向是好的。catalog 條目要指到 model version 目錄，維持「它出現在 manifest 的 artifacts 清單裡」這件事。
 
-**為什麼不改成 `outputs=None`。** 那條路要把 A7／R3（零輸出 side-effect node）登記從 2 筆擴到 3 筆，而 `deliberate-non-goals.md` 明寫「別為了讓自己的新程式碼合規而擴充登記」。**縮小一個登記比擴大另一個好。**
+**為什麼不改成 `outputs=None`。** 那條路要把 A7／R3（零輸出 side-effect node）登記從 2 筆擴到 3 筆，而 A7／R3 的例外登記**要加一筆必須先問使用者**（`docs/agents/architecture-constraints.md`）——不得為了讓自己新寫的程式碼合規就去加一筆。**縮小一個登記比擴大另一個好。**
 
 > ⚠ **不要用「切片會跳過零輸出 node」當理由。** 那個說法對這個 node 不成立：`core/pipeline.py` 的 `slice_from` 是 `self._sorted[idx:]`，**按拓撲位置切**；F5 講的「零輸出 node 拉不回來」是指**自動擴張**（producer map 由 `node.outputs` 建）。而 `sample_weight_report` 零消費者，所以擴張兩種情況下都不會把它拉回來——**有沒有 catalog 條目，切片行為完全一樣**。
 
@@ -200,7 +200,7 @@ finally:
 
 **代價。** cache 存在 executor 端（不碰 driver），生命週期就是這個 node。**峰值記憶體／磁碟需求沒有用生產資料量量過**——實作時要量一次再定 StorageLevel，見〈這份沒有回答的事〉。買不到「撈得出來看」與接續點——那要等 ADR-0015。
 
-**這一節被推翻過的東西，留著當紀錄**：本 ADR 初稿曾提議「落地成一張叫 `ranked_predictions` 的表、切三個 node、用 `Node(writes=[...])` 保住 best-effort」。三處錯誤：(1) `ranked_predictions` 是 inference 的 production 輸出（`conf/base/catalog.yaml:434`），撞名；(2) 落地不省 shuffle——兩條下游各自的 cell window 不變；(3) `writes=` 的登記理由是「逐 partition 寫、避免 driver 物化整表」（R1 兩筆皆然），而 `labeled` 是 Spark DataFrame、`insertInto` 本來就分散式，借那個機制純粹是為了把 `.save()` 塞回 node 的 try/except，屬於 `deliberate-non-goals.md` 禁止的「為了讓自己的程式碼合規而擴充登記」。
+**這一節被推翻過的東西，留著當紀錄**：本 ADR 初稿曾提議「落地成一張叫 `ranked_predictions` 的表、切三個 node、用 `Node(writes=[...])` 保住 best-effort」。三處錯誤：(1) `ranked_predictions` 是 inference 的 production 輸出（`conf/base/catalog.yaml:434`），撞名；(2) 落地不省 shuffle——兩條下游各自的 cell window 不變；(3) `writes=` 的登記理由是「逐 partition 寫、避免 driver 物化整表」（R1 兩筆皆然），而 `labeled` 是 Spark DataFrame、`insertInto` 本來就分散式，借那個機制純粹是為了把 `.save()` 塞回 node 的 try/except，屬於「為了讓自己的程式碼合規而擴充登記」——而例外登記要加一筆必須先問使用者（`docs/agents/architecture-constraints.md`）。
 
 ## 決定 4：Optuna 閉包改成 class——**只是可讀性改善，不解決平行執行**
 
@@ -232,7 +232,7 @@ class TrialScorer:
 
 **為什麼還是做這個改動。** 改動無害、讀起來誠實，而且順手做掉。但**沒有任何票或需求要求平行 HPO**——那條登記是一句沒被驗證過的假設，本 ADR 初稿照抄它當成主要理由，是被它誤導。留著不修，下一個人會重犯。
 
-**界線提醒**：`deliberate-non-goals.md` 規定「HPO 搜尋診斷必須留在 `tune_hyperparameters` 尾端、不得抽成 DAG node」——那條管的是**診斷寫出**，不是這個閉包。拉成 callable 不違反它，但重構時不得順手把診斷升格成 node。
+**界線提醒**：HPO 搜尋診斷刻意留在 `tune_hyperparameters` 尾端、不抽成 DAG node——這樣它對續跑合約（`RESUME_CONTRACTS`）是隱形的，`--from-node finalize_model` 跳過 HPO 的行為才不會變。那件事管的是**診斷寫出**，不是這個閉包。拉成 callable 不違反它，但重構時不得順手把診斷升格成 node。
 
 ## 決定 5：多欄 entity 改成**真的支援**，不是加守衛擋掉
 
@@ -545,7 +545,7 @@ cust_id_col = entity_cols[0]
 
 **難點是 `log_experiment`**：它有 10 個輸入，5 個是 diagnosis 產物。三條路各有代價——留 training 則 diagnosis 不獨立；移 diagnosis 則純訓練跑完 MLflow 什麼都不記；拆成 `log_experiment` ＋ `log_diagnostics`（補記到同一個 MLflow run）要傳 run_id、也要決定 run 什麼時候關。
 
-**為什麼不在這份裁決**：(a) 它會動到 evaluation，而本次盤點只查了 training；(b) `log_experiment` 的 MLflow run 生命週期沒人查過；(c) `deliberate-non-goals.md` 已經把「SHAP／象限診斷搬到 evaluation」列為使用者要另開 grill 的接縫問題。
+**為什麼不在這份裁決**：(a) 它會動到 evaluation，而本次盤點只查了 training；(b) `log_experiment` 的 MLflow run 生命週期沒人查過；(c) 「SHAP／象限診斷搬到 evaluation」已被列為使用者要另開 grill 的接縫問題。
 
 **什麼時候做**：另一場 grill。決定 7 的漏點 1 已經先把一條邊拿掉；漏點 2（`cache.root`）與第 8 條是還沒解的前提。
 
@@ -696,7 +696,7 @@ ID、#415 讓文件與 ADR 對齊。上面預告的三處全部命中，逐條�
 3. **「一個 helper 承載幾個決策」是語意判定。** `_materialize_parquet_handle` 那 4 個裡，本份對兩個有保留——「非 Spark 輸入 → TypeError」比較像型別守衛、「`force_refresh` 清不掉硬失敗」偏錯誤處理，真正改變資料的只有「什麼算 cache hit」與「半成品清掉重建」。決定 1 不受這個保留影響（決策不論 2 個還是 4 個都該上浮），但拆出幾個具名步驟會受影響。
 4. **決定 1 的連鎖效應是從測試碼推的**（`test_architecture_constraints.py` 的 `set(found)` 比對邏輯），沒有實際搬檔跑一次看它怎麼紅。
 5. **`docs/pipelines/training.md`（686 行）只讀了部分章節**，若其他章節另有與判準衝突的敘述，本份沒有涵蓋。
-6. **象限診斷不是已退場的那個 `quadrant`——這件事有證據，不必再問。** 退場的是**AUC 門檻切象限**（`diagnosis/__init__.py` 模組 docstring：「``triage``（per-item 判定＋建議槓桿）與 ``quadrant``（AUC 門檻切象限）就是因為違反它而整層退場」；對應的 A17 已 retired）。training 現行的 `compute_quadrant_profiles`／`compute_quadrant_cases` 是 **rank-based、無門檻**（`population_spark.py` 的 `_rank <= top_k_decision`）。而 `deliberate-non-goals.md` 直接點名它們是活的，並警告「列名單只會再一次被讀成『這些是死碼』（2026-08-25 就發生過）」。**盤點文件把這條列為『沒有證據能證實、動之前要問使用者』，那是錯的——證據有三份。**
+6. **象限診斷不是已退場的那個 `quadrant`——這件事有證據，不必再問。** 退場的是**AUC 門檻切象限**（`diagnosis/__init__.py` 模組 docstring：「``triage``（per-item 判定＋建議槓桿）與 ``quadrant``（AUC 門檻切象限）就是因為違反它而整層退場」；對應的 A17 已 retired）。training 現行的 `compute_quadrant_profiles`／`compute_quadrant_cases` 是 **rank-based、無門檻**（`population_spark.py` 的 `_rank <= top_k_decision`）。把現存模組列成名單本身就危險——列了就會被讀成「這些是死碼」，2026-08-25 真的發生過，被誤判的三個模組全都是活的。**盤點文件把這條列為『沒有證據能證實、動之前要問使用者』，那是錯的——證據有三份。**
 7. **`select_shap_population` 平手的實際頻率沒量過**，見〈刻意不做〉第 2 條。
 8. **決定 3 的 `persist` 在生產資料量下要吃多少 executor 記憶體／磁碟，沒有量過**（閘門 G7）。文件裡的 2.2 億列來自 `nodes.py:1141` 的既有註解，不是為這件事量的。StorageLevel 要等實測再定。
 
@@ -713,5 +713,4 @@ ID、#415 讓文件與 ADR 對齊。上面預告的三處全部命中，逐條�
 | dataset 那次同型裁決的完整論證 | [ADR-0008](0008-dataset-modules-split-by-role.md) |
 | node 邊界該不該合併的實例論證 | [ADR-0010](0010-inference-chunked-scoring-shape.md) §4 |
 | 「模型當特徵權威」那條的原始論證 | [ADR-0011](0011-inference-validation-two-layers.md) §5 |
-| 刻意不做的事（動手前掃一眼） | [`deliberate-non-goals.md`](../agents/deliberate-non-goals.md) |
 | 程式碼現在長什麼樣 | `graphify-out/GRAPH_REPORT.md` |

@@ -333,7 +333,7 @@ item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始�
 
 | 在哪 | 有什麼 | 誰讀 |
 |---|---|---|
-| log 的 `[chunks] predict:` 一行 | to_process／skipped／rebuilt／surplus 的**計數**（to_process 含之後才發現是空桶的 chunk）（不含清單，理由見 `docs/agents/deliberate-non-goals.md`） | 跑的當下的人 |
+| log 的 `[chunks] predict:` 一行 | to_process／skipped／rebuilt／surplus 的**計數**（to_process 含之後才發現是空桶的 chunk）（不含清單：生產約 5,280 個 chunk，清單塞進一行 log 會生出好幾 MB 的紀錄；想知道是哪幾個的人在事後，去翻版本目錄裡的 `chunk_report.json`） | 跑的當下的人 |
 | `score_manifest`（節點的第一個 output） | **四份**逐 chunk 清單（processed／skipped／rebuilt／empty）＋ `expected_partitions`／`written_partitions` | `rank_predictions` 與 `validate_predictions`；**memory-only，跑完就沒了** |
 | `chunk_report.json`（節點的第二個 output，見 §6.3） | 上面那四份 ＋ **第五份 `chunks_surplus`**（原本只到一行 warning）＋ 摘要 ＋ 寫它的 `run_id`，落在磁碟上 | 事後回來問「那一次到底跳過了哪些」的人 |
 

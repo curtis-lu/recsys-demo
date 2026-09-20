@@ -181,7 +181,7 @@
 
 ## 六 · 地雷圖裡會擋到 training 重構的條目
 
-出處全部是 [`docs/agents/deliberate-non-goals.md`](../agents/deliberate-non-goals.md)。**四條會直接擋住動線**：
+出處全部是當時的 `docs/agents/deliberate-non-goals.md`（**該檔已於 2026-09-20 整份刪除**，經過見 `docs/agents/issue-tracker.md`〈票的範圍宣告〉；下面四條是 2026-08-25 當下的狀態，原文保留不改寫，別當現況用）。**四條會直接擋住動線**：
 
 1. **HPO 搜尋診斷必須留在 `tune_hyperparameters` 尾端，不得抽成 DAG node**——這樣對 `RESUME_CONTRACTS` 隱形，`--from-node finalize_model` 跳過 HPO 的行為不變。重構那段只能搬位置，不能升格成 node。
 2. **`overall_map` 跨月合併與「SHAP／象限診斷搬到 evaluation」是同一個接縫問題，使用者決定先 grill 不先做。** 那 7 個 node 的歸屬不得在這次重構裡自行裁決。
