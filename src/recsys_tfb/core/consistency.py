@@ -2722,6 +2722,7 @@ class SplitRowCounts(NamedTuple):
 
 def model_input_grain_errors(
     by_split: Mapping[str, SplitRowCounts],
+    identity_columns: Sequence[str] | None = None,
 ) -> list[str]:
     """B10 invariant — the single definition.
 
@@ -2748,6 +2749,18 @@ def model_input_grain_errors(
 
     Collect-all and sorted by split: two runs of the same config read the same
     way, and one investigation covers every offending split.
+
+    **The rule did not change when ``event`` arrived; the wording did.** A
+    duplicated join key is still an upstream table being wrong, and the two
+    impressions of one item are not a duplicated key — they differ in the
+    ``event`` columns, which are part of identity (ADR-0025's correction to
+    ADR-0021, which had called this a reversal of meaning). What a reader of
+    this message cannot otherwise tell is *which* columns count as one key
+    here, and that is the half that moves with the declared roles. So
+    ``identity_columns`` is named in the message when the caller passes it.
+    Optional rather than required: the predicate stays callable from a test
+    that only cares about the counts, and an omitted list simply drops that
+    clause.
     """
     errors: list[str] = []
     for split in sorted(by_split):
@@ -2759,13 +2772,18 @@ def model_input_grain_errors(
         ratio = (
             f" ({model_input_rows / keys_rows:,.4f}x)" if keys_rows else ""
         )
+        key_clause = (
+            f" One key here is {list(identity_columns)}."
+            if identity_columns else ""
+        )
         errors.append(
             f"B10: {split}_model_input holds {model_input_rows:,} row(s) but "
             f"{split}_keys holds {keys_rows:,}{ratio}. build_model_input LEFT "
             f"joins the keys to label_table and to preprocessed_feature_table "
             f"on the keys' own grain, so the two counts can only differ if a "
             f"right table holds one of those join keys more than once — the "
-            f"silently N-times-too-large dataset that node's comment names. "
+            f"silently N-times-too-large dataset that node's comment names."
+            f"{key_clause} "
             f"Check the duplicate-key contract on label_table and on "
             f"feature_table (source_etl quality_checks: "
             f"max_duplicate_key_ratio, plus primary_key — A32 passes when both "

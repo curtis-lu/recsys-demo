@@ -3309,9 +3309,31 @@ class TestModelInputGrainErrorsB10:
         assert "train_dev_model_input" in errors[1]
 
     def test_needs_no_spark(self):
+        """Counts and column names only — no frame, no handle, no path. What
+        this pins is that obtaining the two row counts stays the caller's
+        problem (``utils.parquet_stats``), which is what lets the rule be
+        tested by handing it a dict."""
         import inspect
         sig = inspect.signature(model_input_grain_errors)
-        assert list(sig.parameters) == ["by_split"]
+        assert list(sig.parameters) == ["by_split", "identity_columns"]
+        assert sig.parameters["identity_columns"].default is None
+
+    def test_the_message_names_the_identity_columns_when_given_them(self):
+        """"One key" is what the reader has to know to go looking for the
+        duplicate, and which columns make up a key moves with the declared
+        roles (ADR-0025). The rule itself did not change: two impressions of
+        one item differ in `event`, so they were never one key."""
+        errors = model_input_grain_errors(
+            {"train": SplitRowCounts(10, 20)},
+            ["snap_date", "cust_id", "prod_name", "imp_id"],
+        )
+        assert "imp_id" in errors[0]
+        assert "['snap_date', 'cust_id', 'prod_name', 'imp_id']" in errors[0]
+
+    def test_the_message_stands_without_the_identity_columns(self):
+        errors = model_input_grain_errors({"train": SplitRowCounts(10, 20)})
+        assert "One key here is" not in errors[0]
+        assert "build_model_input LEFT" in errors[0]
 
     def test_a_small_fan_out_still_shows_a_ratio_that_is_not_one(self):
         # ``:.4g`` would render this as "1x" — agreement, in the message of an

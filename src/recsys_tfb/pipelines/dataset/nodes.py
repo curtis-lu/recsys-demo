@@ -1097,7 +1097,9 @@ def validate_model_input_grain(
     # mismatches below are both "this gate has something to say about a split",
     # and an operator fixing one wants to see the other in the same pass. Same
     # shape B8 uses.
-    errors += model_input_grain_errors(by_split)
+    errors += model_input_grain_errors(
+        by_split, get_schema(parameters)["identity_columns"],
+    )
     if errors:
         raise DataConsistencyError(
             f"Model input grain check failed ({len(errors)} issue(s)):\n- "
