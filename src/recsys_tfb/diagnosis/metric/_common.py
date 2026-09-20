@@ -90,7 +90,7 @@ def sample_arrays(
     ——呼叫端各自用 ``query_key(pdf, schema["entity"])`` 現組，需要
     factorize 的自己再包一層 ``pd.factorize(..., sort=True)[0]``。
     """
-    query_cols = [schema["time"], *schema["entity"]]
+    query_cols = schema["query_group_columns"]
     groups = pd.factorize(query_key(pdf, query_cols), sort=True)[0]
     items = pdf[schema["item"]].to_numpy()
     y = pdf[schema["label"]].to_numpy(dtype=np.int64)

@@ -40,8 +40,14 @@ def test_sample_arrays_without_inclusion_weight_returns_none_ht_weights():
     Spark 的名次一致（#355 之前這裡會 astype(str)）。"""
     import numpy as np
     import pandas as pd
+    from recsys_tfb.core.schema import get_schema
     from recsys_tfb.diagnosis.metric._common import sample_arrays
-    schema = {"time": "t", "entity": ["e"], "item": "item", "label": "y"}
+    # Resolved through get_schema, not hand-built: a literal dict has no
+    # query_group_columns, and sample_arrays reads that rather than respelling
+    # [time] + entity (S7).
+    schema = get_schema({"schema": {"columns": {
+        "time": "t", "entity": ["e"], "item": "item", "label": "y",
+    }}})
     pdf = pd.DataFrame({
         "t": [1, 1, 2],
         "e": ["a", "a", "b"],
@@ -63,8 +69,14 @@ def test_sample_arrays_with_inclusion_weight_populates_both():
     """有 inclusion_weight：ht_weights 與 row_weights 都是該權重陣列。"""
     import numpy as np
     import pandas as pd
+    from recsys_tfb.core.schema import get_schema
     from recsys_tfb.diagnosis.metric._common import sample_arrays
-    schema = {"time": "t", "entity": ["e"], "item": "item", "label": "y"}
+    # Resolved through get_schema, not hand-built: a literal dict has no
+    # query_group_columns, and sample_arrays reads that rather than respelling
+    # [time] + entity (S7).
+    schema = get_schema({"schema": {"columns": {
+        "time": "t", "entity": ["e"], "item": "item", "label": "y",
+    }}})
     pdf = pd.DataFrame({
         "t": [1, 1, 2],
         "e": ["a", "a", "b"],

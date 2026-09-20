@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from recsys_tfb.core.schema import get_schema
 from scripts.suppression_ledger_diagnosis import (
     analyze_suppression,
     resolve_snap_date,
@@ -25,13 +26,15 @@ def _params(k=None):
 
 
 def _schema():
-    return {
+    # Resolved, not hand-built: the script reads query_group_columns /
+    # identity_columns, which only get_schema produces (S7).
+    return get_schema({"schema": {"columns": {
         "time": "snap_date",
         "entity": ["cust_id"],
         "item": "prod_name",
         "label": "label",
         "score": "score",
-    }
+    }}})
 
 
 def _ledger_pdf():

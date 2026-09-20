@@ -284,7 +284,7 @@ def _validate(pdf: pd.DataFrame, schema: dict) -> None:
             f"item_ability 需要 {score_col!r} 欄的值，但抽樣裡這一欄全是空值"
             "（照算會在 NULL 上取 logit，只得到 NaN）。"
         )
-    query_cols = [schema["time"], *schema["entity"]]
+    query_cols = schema["query_group_columns"]
     required = [*query_cols, schema["item"], schema["label"]]
     missing = [c for c in required if c not in pdf.columns]
     if missing:

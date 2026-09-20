@@ -121,7 +121,10 @@ def build_inference_population_features(
     entity_cols = schema["entity"]
     item_col = schema["item"]
     identity_cols = schema["identity_columns"]
-    join_key = [time_col] + entity_cols
+    # The feature table is entity-level, so what it joins on is the base key —
+    # never the query group, which offline inference does not widen anyway
+    # (ADR-0025 decision 2).
+    join_key = schema["base_key_columns"]
 
     n_buckets = entity_buckets(parameters)
     snap_dates = snap_dates_as_dates(parameters)
@@ -550,11 +553,14 @@ def rank_predictions(
     ranked = restrict_to_snap_dates(unranked_predictions, parameters)
 
     schema = get_schema(parameters)
-    time_col = schema["time"]
-    entity_cols = schema["entity"]
     score_col = schema["score"]
     rank_col = schema["rank"]
-    group_cols = [time_col] + entity_cols
+    # Decision — offline inference ranks within the base key, not within the
+    # query group (ADR-0025 decision 2). The two coincide today. They part once
+    # an ``occasion`` is declared, and this side keeps the base key: a batch
+    # scoring run has no occasion to rank inside — its candidates are this
+    # framework's own entity × item expansion, not a set some request laid out.
+    group_cols = schema["base_key_columns"]
 
     # Decision — the bucket stops here. It exists so one save touches one
     # partition (ADR-0010 section 3, constraint C) and it is not part of any
@@ -621,13 +627,13 @@ def validate_predictions(
     ranked_predictions = restrict_to_snap_dates(ranked_predictions, parameters)
 
     schema = get_schema(parameters)
-    time_col = schema["time"]
-    entity_cols = schema["entity"]
     score_col = schema["score"]
     rank_col = schema["rank"]
     products = parameters["inference"]["products"]
     n_products = len(products)
-    group_cols = [time_col] + entity_cols
+    # The groups ``rank_predictions`` ranked, so these checks are asked of the
+    # same partitions the ranks were produced in — the base key (ADR-0025).
+    group_cols = schema["base_key_columns"]
 
     failures = []
 

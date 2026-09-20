@@ -157,7 +157,7 @@ def _reference_pair_ledger(sample: pd.DataFrame, params: dict) -> dict:
     from recsys_tfb.evaluation.metrics import metric_params
 
     schema = get_schema(params)
-    query_cols = [schema["time"], *schema["entity"]]
+    query_cols = schema["query_group_columns"]
     mp = metric_params(params)
 
     groups = pd.factorize(query_key(sample, query_cols))[0]

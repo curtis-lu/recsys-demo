@@ -118,9 +118,10 @@ def _render_case(shap_row, feature_cols, top_k, item, quadrant, role, meta_row, 
         return None
 
 
-def _manifest_entry(meta_row, png_path, diag_dir, time_col, entity_cols):
+def _manifest_entry(meta_row, png_path, diag_dir, case_label_cols):
     # manifest 鍵用實際 schema 欄名(泛用框架,不寫死銀行的 snap_date/cust)。
-    base = {c: str(meta_row[c]) for c in [time_col] + entity_cols}
+    # ``case_label_cols`` 見 ``compute_quadrant_cases``:identity 去掉 item。
+    base = {c: str(meta_row[c]) for c in case_label_cols}
     base.update({"rank": int(meta_row["rank"]), "score": float(meta_row["score"]),
                  "label": int(meta_row["label"])})
     if png_path is None:
@@ -153,8 +154,15 @@ def compute_quadrant_cases(model, case_rows, preprocessor: dict, parameters: dic
     case_top_k = int(cfg.get("case_top_k", 15))
     schema = get_schema(parameters)
     item_col = schema["item"]
-    time_col = schema["time"]
-    entity_cols = schema["entity"]
+    identity_cols = schema["identity_columns"]
+    # manifest 標籤要指認「這張圖畫的是哪一列」,所以它是 identity——去掉 item
+    # 只因為 item 已經是 manifest 的外層鍵,重複寫一次沒有資訊。
+    #
+    # 刻意不是 base key:base key 不隨 occasion 變寬(ADR-0025 決定 2),
+    # 那會讓同一個 entity、同一個時段、不同場合的兩列拿到一模一樣的標籤——
+    # 兩個不同的輸入映射成同一個結果。這裡從 identity 減一欄,identity 變寬
+    # 它就跟著變寬。今天兩種寫法逐值相同,所以本次改動不動 manifest 的內容。
+    case_label_cols = [c for c in identity_cols if c != item_col]
     # Decision — which features, and in what order: ask the model, not
     # apply_feature_selection(preprocessor, parameters). This is not a drift fix:
     # the exclude list lives in the `training:` block, so editing it bumps
@@ -180,7 +188,7 @@ def compute_quadrant_cases(model, case_rows, preprocessor: dict, parameters: dic
         roles = pdf["role"].values
 
         def _gkey(i):
-            return tuple(str(pdf.iloc[i][c]) for c in [time_col] + entity_cols)
+            return tuple(str(pdf.iloc[i][c]) for c in identity_cols)
 
         manifest: dict = {}
         for item in pd.unique(items):
@@ -202,7 +210,7 @@ def compute_quadrant_cases(model, case_rows, preprocessor: dict, parameters: dic
                     hi_png = _render_case(shap_values[hi], feature_cols, case_top_k,
                                           item, q, "high", pdf.iloc[hi], cdir)
                     cell["high"] = _manifest_entry(pdf.iloc[hi], hi_png, ddir,
-                                                   time_col, entity_cols)
+                                                   case_label_cols)
                 # low:單行格(與 high 同列)→ 不重畫;只有 high 的退化輸入 → low 記 empty
                 if lo is None:
                     cell["low"] = {"rendered": False, "reason": "empty"}
@@ -213,7 +221,7 @@ def compute_quadrant_cases(model, case_rows, preprocessor: dict, parameters: dic
                     lo_png = _render_case(shap_values[lo], feature_cols, case_top_k,
                                           item, q, "low", pdf.iloc[lo], cdir)
                     cell["low"] = _manifest_entry(pdf.iloc[lo], lo_png, ddir,
-                                                  time_col, entity_cols)
+                                                  case_label_cols)
                 item_entry[q] = cell
             manifest[str(item)] = item_entry
     except Exception as e:  # best-effort:診斷失敗不中斷訓練

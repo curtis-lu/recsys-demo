@@ -1107,7 +1107,7 @@ def extract_Xy_with_groups(
     schema = get_schema(parameters)
     label_col = schema["label"]
     item_col = schema["item"]
-    group_cols = [schema["time"]] + schema["entity"]
+    group_cols = schema["query_group_columns"]
 
     logger.info(
         "extract_Xy_with_groups start path=%s n_feature_cols=%d label=%s "

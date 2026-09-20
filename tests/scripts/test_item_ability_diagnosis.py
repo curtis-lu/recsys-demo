@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from recsys_tfb.core.schema import get_schema
+
 from scripts.item_ability_diagnosis import (
     analyze_items,
     query_center_scores,
@@ -34,13 +36,14 @@ def test_query_centered_auc_removes_query_level_false_signal():
         {"snap_date": "2026-07-17", "cust_id": "Ben", "prod_name": "B", "label": 0, "score": 3.0},
         {"snap_date": "2026-07-17", "cust_id": "Ben", "prod_name": "J", "label": 0, "score": 2.0},
     ])
-    schema = {
+    # Resolved, not hand-built: the script reads query_group_columns (S7).
+    schema = get_schema({"schema": {"columns": {
         "time": "snap_date",
         "entity": ["cust_id"],
         "item": "prod_name",
         "label": "label",
         "score": "score",
-    }
+    }}})
     params = {
         "evaluation": {
             "metric": {

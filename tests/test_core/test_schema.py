@@ -6,8 +6,10 @@ import pytest
 
 from recsys_tfb.core.schema import (
     ENTITY_GROUPING_KEYS,
+    _DERIVED_KEYS,
     get_entity_grouping,
     get_schema,
+    get_schema_for_hash,
 )
 
 
@@ -116,6 +118,111 @@ class TestIdentityColumnsDerivation:
         assert result["identity_columns"] == [
             "snap_date", "branch_id", "cust_id", "prod_name"
         ]
+
+
+class TestDerivedColumnLists:
+    """The three derived lists, and the one rule that is not about values.
+
+    ``query_group_columns`` and ``base_key_columns`` hold the same columns
+    today and that is the whole reason they are two keys: the twenty-odd sites
+    that used to spell ``[time] + entity`` by hand meant one or the other, and
+    nothing in the code said which. ``occasion`` (ADR-0025) widens the first
+    and must never widen the second, so the split has to exist *before* the
+    values differ — after they differ it is too late to tell the sites apart.
+    """
+
+    def test_query_group_is_time_plus_entity(self):
+        schema = get_schema(_params(entity=["branch_id", "cust_id"]))
+        assert schema["query_group_columns"] == [
+            "snap_date", "branch_id", "cust_id"
+        ]
+
+    def test_base_key_is_time_plus_entity(self):
+        schema = get_schema(_params(entity=["branch_id", "cust_id"]))
+        assert schema["base_key_columns"] == ["snap_date", "branch_id", "cust_id"]
+
+    def test_the_two_agree_under_todays_roles(self):
+        schema = get_schema(_params(entity=["branch_id", "cust_id"]))
+        assert schema["query_group_columns"] == schema["base_key_columns"]
+
+    def test_each_list_is_its_own_object(self):
+        """Mutating one must not reach the others.
+
+        They are equal today, so a shared object would go unnoticed until a
+        caller appended to what it thought was its own list and silently moved
+        another site's join key.
+        """
+        schema = get_schema(_params())
+        schema["query_group_columns"].append("occasion_id")
+        assert schema["base_key_columns"] == ["snap_date", "cust_id"]
+        assert schema["identity_columns"] == ["snap_date", "cust_id", "prod_name"]
+
+    def test_get_schema_returns_every_declared_derived_key(self):
+        """``_DERIVED_KEYS`` is the list, not this test's own copy.
+
+        It is also what S5 mirrors to refuse declaring one, so a key added
+        there and never derived would leave that constraint guarding a field
+        nothing produces.
+        """
+        schema = get_schema(_params())
+        assert set(_DERIVED_KEYS) <= set(schema)
+
+    def test_no_derived_key_reaches_the_version_hash(self):
+        """Each is a function of roles already hashed, so hashing one would
+        move every existing user's ``base_dataset_version`` for nothing."""
+        hashed = get_schema_for_hash(_params())
+        assert set(_DERIVED_KEYS) & set(hashed) == set()
+
+    def test_derived_lists_are_not_settable(self):
+        """Declaring one under ``schema.columns`` cannot override the derived value.
+
+        The ``_ROLE_KEYS`` filter drops it. Pinned because a user who writes
+        one would otherwise get no error and no effect -- the same silent drop
+        S5 exists to refuse for ``identity_columns``.
+        """
+        params = _params()
+        params["schema"]["columns"]["query_group_columns"] = ["nonsense"]
+        params["schema"]["columns"]["base_key_columns"] = ["nonsense"]
+        schema = get_schema(params)
+        assert schema["query_group_columns"] == ["snap_date", "cust_id"]
+        assert schema["base_key_columns"] == ["snap_date", "cust_id"]
+
+
+class TestIdentityColumnOrderIsARule:
+    """``identity_columns``' order is part of the spec, not a spelling.
+
+    Deterministic sampling buckets rows by hashing these columns joined in
+    order (``spark_bucket`` / the dataset pipeline's ``_bucket``), so the same
+    data reordered draws a *different* sample -- silently, with no error and no
+    shape change. ADR-0025 decision 1 fixes the order for that reason and
+    forbids any later widening (``occasion``, ``event``, #394's multi-column
+    item) from moving the columns already in it.
+
+    This is the test that fails if someone "tidies" the derivation.
+    """
+
+    def test_order_is_time_then_entity_then_item(self):
+        schema = get_schema(_params(entity=["branch_id", "cust_id"]))
+        assert schema["identity_columns"] == [
+            "snap_date", "branch_id", "cust_id", "prod_name",
+        ]
+
+    def test_entity_columns_keep_declaration_order(self):
+        """Not sorted, not de-duplicated into a set -- as declared."""
+        schema = get_schema(_params(entity=["zz_last", "aa_first"]))
+        assert schema["identity_columns"] == [
+            "snap_date", "zz_last", "aa_first", "prod_name",
+        ]
+
+    def test_identity_starts_with_the_query_group(self):
+        """Identity extends the query group; it does not re-order it.
+
+        The prefix relation is what lets a site that groups and a site that
+        joins be told apart by name rather than by re-deriving both.
+        """
+        schema = get_schema(_params(entity=["branch_id", "cust_id"]))
+        qg = schema["query_group_columns"]
+        assert schema["identity_columns"][: len(qg)] == qg
 
 
 class TestPureFunction:

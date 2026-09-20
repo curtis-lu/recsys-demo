@@ -263,7 +263,7 @@ def validate_and_prepare(
     schema: dict,
 ) -> tuple[pd.DataFrame, str, list[str]]:
     notes: list[str] = []
-    query_cols = [schema["time"], *schema["entity"]]
+    query_cols = schema["query_group_columns"]
     base_required = [*query_cols, schema["item"], schema["label"]]
 
     missing = [c for c in [*base_required, schema["score"]] if c not in pdf.columns]
@@ -415,7 +415,7 @@ def run_diagnosis(
     n_boot: int,
     seed: int,
 ) -> dict:
-    query_cols = [schema["time"], *schema["entity"]]
+    query_cols = schema["query_group_columns"]
     entity_cols = schema["entity"]
     item_col = schema["item"]
     label_col = schema["label"]

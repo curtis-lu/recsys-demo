@@ -866,25 +866,33 @@ def _bindings(targets, value):
     return pairs
 
 
-def _entity_list_names(tree):
-    """Names bound to the entity columns anywhere in ``tree``.
+def _bound_names(tree, classify):
+    """``{name: label}`` for every name ``classify`` puts a label on.
 
-    Transitive (``b = a`` inherits) and flow-insensitive (a name is judged once
-    per module, not per branch). Both are deliberate: the shape being caught is
+    ``classify(node, known)`` labels one bound expression or returns None. It
+    receives the labels found so far, so it can follow ``b = a``; the loop
+    reruns to a fixed point, so the order the bindings appear in does not
+    matter.
+
+    Transitive and flow-insensitive, both deliberate. The shape being caught is
 
         entity_cols = schema["entity"]
         ...
         cust_col = entity_cols[0]
 
-    which is how two of the four original sites were written, and following it
+    which is how two of S4's four original sites were written, and following it
     across an intervening rename costs one fixed-point loop. The cost of
-    flow-insensitivity is a name rebound to something else later reading as
-    entity columns -- a false positive, which is the direction that gets
+    flow-insensitivity is a name rebound to something else later still reading
+    as its first label -- a false positive, which is the direction that gets
     noticed rather than the direction that ships a wrong number.
+
+    Shared by S4 and S7 rather than written twice: they differ only in what
+    counts as a label, and two copies of a fixed-point loop drift in exactly
+    the way S7 itself exists to stop.
     """
-    names = set()
+    known = {}
     while True:
-        before = len(names)
+        before = len(known)
         for node in ast.walk(tree):
             if isinstance(node, ast.Assign):
                 targets, value = node.targets, node.value
@@ -893,12 +901,23 @@ def _entity_list_names(tree):
             else:
                 continue
             for target, bound in _bindings(targets, value):
-                if _entity_list_source(bound) is not None or (
-                    isinstance(bound, ast.Name) and bound.id in names
-                ):
-                    names.add(target.id)
-        if len(names) == before:
-            return sorted(names)
+                label = classify(bound, known)
+                if label is not None:
+                    known[target.id] = label
+        if len(known) == before:
+            return known
+
+
+def _entity_list_names(tree):
+    """Names bound to the entity columns anywhere in ``tree``."""
+    def classify(node, known):
+        if _entity_list_source(node) is not None:
+            return ENTITY_KEY
+        if isinstance(node, ast.Name) and node.id in known:
+            return ENTITY_KEY
+        return None
+
+    return sorted(_bound_names(tree, classify))
 
 
 def _entity_first_column_offenders(root, exceptions=None, label=""):
@@ -1168,10 +1187,13 @@ SCHEMA_ROLE_KEYS = frozenset(
     {"time", "entity", "item", "label", "score", "rank"}
 )
 
-#: ``get_schema`` *derives* this as ``[time] + entity + [item]``. It is not a
-#: settable key at any depth: under ``schema`` it misses the ``columns`` lookup,
-#: and under ``schema.columns`` the ``if k in _ROLE_KEYS`` filter drops it.
-DERIVED_SCHEMA_KEY = "identity_columns"
+#: The keys ``get_schema`` *derives* (``core/schema.py::_DERIVED_KEYS``). None
+#: is settable at any depth: under ``schema`` they miss the ``columns`` lookup,
+#: and under ``schema.columns`` the ``if k in _ROLE_KEYS`` filter drops them.
+#: All three are listed, not just ``identity_columns``: a declared
+#: ``query_group_columns`` is dropped exactly as silently, and a user who
+#: reaches for one is asking the very question ADR-0025 answers elsewhere.
+DERIVED_SCHEMA_KEYS = ("identity_columns", "query_group_columns", "base_key_columns")
 
 
 class _KeyValue(NamedTuple):
@@ -1236,12 +1258,13 @@ def _schema_layer_offenders(root, label=""):
                     "belongs under schema.columns"
                 )
             for prefix, holder in (("schema", entries), ("schema.columns", nested)):
-                if DERIVED_SCHEMA_KEY in holder:
-                    offenders.append(
-                        f"{rel}:{holder[DERIVED_SCHEMA_KEY].key.lineno}: "
-                        f"{prefix}.{DERIVED_SCHEMA_KEY} -- get_schema derives "
-                        "this; a declared one is dropped"
-                    )
+                for derived in DERIVED_SCHEMA_KEYS:
+                    if derived in holder:
+                        offenders.append(
+                            f"{rel}:{holder[derived].key.lineno}: "
+                            f"{prefix}.{derived} -- get_schema derives "
+                            "this; a declared one is dropped"
+                        )
     return sorted(offenders)
 
 
@@ -1285,8 +1308,8 @@ class TestS5SchemaColumnsLayer:
         assert offenders == [], (
             "a schema config declared keys that get_schema never reads (S5): "
             f"{offenders}. Column roles go under schema.columns; "
-            "identity_columns is derived by core/schema.py::get_schema as "
-            "[time] + entity + [item] and must not be declared at any depth. "
+            f"{', '.join(DERIVED_SCHEMA_KEYS)} are derived by "
+            "core/schema.py::get_schema and must not be declared at any depth. "
             "See S5 in docs/agents/architecture-constraints.md."
         )
 
@@ -1323,6 +1346,22 @@ class TestS5SchemaColumnsLayer:
             "S5's role list drifted from core/schema.py::_ROLE_KEYS. Mirror "
             "the new list here (and check whether the new role belongs in "
             "_REQUIRED_ROLES too). See S5 in "
+            "docs/agents/architecture-constraints.md."
+        )
+
+    def test_the_derived_key_list_matches_core_schema(self):
+        """Same hole, other list: a derived key this misses is declarable again.
+
+        ``query_group_columns`` and ``base_key_columns`` are dropped exactly as
+        silently as ``identity_columns`` was, so a fourth derived key added to
+        ``core/schema`` and not mirrored here reopens the hole for that key
+        alone -- green suite, narrower constraint.
+        """
+        from recsys_tfb.core.schema import _DERIVED_KEYS
+
+        assert frozenset(DERIVED_SCHEMA_KEYS) == frozenset(_DERIVED_KEYS), (
+            "S5's derived-key list drifted from core/schema.py::_DERIVED_KEYS. "
+            "Mirror the new list here. See S5 in "
             "docs/agents/architecture-constraints.md."
         )
 
@@ -1703,6 +1742,339 @@ class TestS6NoLiteralExampleColumnNames:
             tmp_path, exceptions=frozenset({("one.py", "allowed")}),
         )
         assert found == ["two.py:2 in other(): 'cust_id'"]
+
+
+# ---------------------------------------------------------------------------
+# S7 -- query group / base key / identity are read, never respelled
+# ---------------------------------------------------------------------------
+
+#: Roots S7 scans. Wider than the ``src`` + ``tests`` pair S4/S5/S6 share, on
+#: purpose: those three are about how code *reads* a schema, while this one is
+#: about a meaning staying single-sourced everywhere it is written down. A
+#: one-off diagnosis script that respells the query group is exactly as wrong
+#: under an ``occasion`` deployment as a node is -- it just goes wrong where
+#: nobody is watching. All 18 of ``scripts/``'s sites were converted with the
+#: rest (#427), so the root starts clean rather than needing a grandfather list.
+KEY_SCAN_ROOTS = {
+    "src/recsys_tfb": SRC,
+    "tests": TESTS,
+    "scripts": Path(__file__).resolve().parents[2] / "scripts",
+}
+
+#: The module that *derives* these lists is the one place allowed to build
+#: them -- it is where the definition lives, so a rule against respelling the
+#: definition cannot apply to it. This is scope, not a signed-off exception:
+#: there is no judgement in it and no second entry can be added without moving
+#: ``get_schema`` itself.
+#:
+#: The skip is whole-file, not line-ranged. A line-range would have to track
+#: the derivation as it moves, and the rest of the module has no reason to
+#: build these lists -- so the cost of the coarser rule is one module's worth
+#: of blind spot, and the benefit is an exemption with no moving parts.
+DERIVED_KEY_DEFINITION_SITE = SRC / "core" / "schema.py"
+
+#: What each ``...["<key>"]`` read evaluates to. Scalars name one column; the
+#: rest name a list of them.
+SCALAR_SCHEMA_ROLES = {"time": "time", "item": "item"}
+LIST_SCHEMA_ROLES = {
+    "entity": "entity*",
+    "query_group_columns": "query_group",
+    "base_key_columns": "base_key",
+    "identity_columns": "identity",
+}
+
+#: Role sequences that mean "this expression rebuilt a list ``get_schema``
+#: already derives", mapped to what to write instead. ``("time", "entity*")``
+#: is ambiguous by construction -- telling the two apart is a judgement about
+#: what the site is *for*, which is exactly why the message asks rather than
+#: picks (ADR-0025 decision 2).
+RESPELLINGS = {
+    ("time", "entity*"): (
+        'schema["query_group_columns"] if this bounds a ranking comparison, '
+        'schema["base_key_columns"] if it joins an entity-level table'
+    ),
+    ("time", "entity*", "item"): 'schema["identity_columns"]',
+    ("query_group", "item"): 'schema["identity_columns"]',
+    ("base_key", "item"): 'schema["identity_columns"]',
+}
+
+
+def _schema_role(node, names):
+    """The schema role this expression evaluates to, or None.
+
+    What sits on the left of ``["time"]`` is deliberately not inspected, for
+    the reason S4 gives: ``schema["time"]``, ``get_schema(p)["time"]`` and
+    ``params["schema"]["columns"]["time"]`` are one expression as far as this
+    constraint is concerned, and pinning a spelling only moves the blind spot.
+    The cost is that an unrelated dict with a ``"time"`` key reads as the role
+    -- a false positive, and false positives are the direction that gets
+    noticed.
+    """
+    if isinstance(node, ast.Subscript):
+        key = node.slice
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            return None
+        return SCALAR_SCHEMA_ROLES.get(key.value) or LIST_SCHEMA_ROLES.get(key.value)
+    if isinstance(node, ast.Name):
+        return names.get(node.id)
+    return None
+
+
+def _list_roles(node, names):
+    """The roles this list-building expression concatenates, or None.
+
+    None means "not built out of schema roles alone". One unreadable part is
+    enough to return it: a list this scan cannot read in full is one it must
+    not judge, so ``[time_col, *entity_cols, some_other_col]`` is left alone
+    rather than guessed at.
+    """
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _list_roles(node.left, names)
+        right = _list_roles(node.right, names)
+        return None if left is None or right is None else left + right
+    if isinstance(node, ast.List):
+        roles = []
+        for elt in node.elts:
+            if isinstance(elt, ast.Starred):
+                role = _schema_role(elt.value, names)
+                if role not in LIST_SCHEMA_ROLES.values():
+                    return None
+            else:
+                role = _schema_role(elt, names)
+                if role not in SCALAR_SCHEMA_ROLES.values():
+                    return None
+            roles.append(role)
+        return tuple(roles)
+    role = _schema_role(node, names)
+    return (role,) if role in LIST_SCHEMA_ROLES.values() else None
+
+
+def _schema_role_names(tree):
+    """``{name: role}`` for names bound to a schema role anywhere in ``tree``.
+
+    ``_schema_role`` already has :func:`_bound_names`' classifier signature and
+    already follows ``ast.Name`` through what it has been given, so this is the
+    shared loop with the role reader plugged straight in.
+    """
+    return _bound_names(tree, _schema_role)
+
+
+def _respelled_key_offenders(root, label=""):
+    """``path:line in func(): <roles> -- use <fix>`` for every respelling.
+
+    ``root`` is scanned recursively; paths are reported relative to it, with
+    ``label`` prefixed, exactly as S4 does.
+    """
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        if path == DERIVED_KEY_DEFINITION_SITE:
+            continue
+        tree = ast.parse(path.read_text())
+        names = _schema_role_names(tree)
+        owner = _innermost_function_by_line(tree)
+        matched = {
+            id(node): node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.List, ast.BinOp))
+            and _list_roles(node, names) in RESPELLINGS
+        }
+        # Only the outermost match is reported: ``[time] + entity + [item]``
+        # contains ``[time] + entity``, and naming both sends the reader to one
+        # site twice, with the inner message advising the wrong replacement.
+        nested = {
+            id(child)
+            for node in matched.values()
+            for child in ast.walk(node)
+            if child is not node and id(child) in matched
+        }
+        rel = str(path.relative_to(root))
+        rel = f"{label}/{rel}" if label else rel
+        for key, node in matched.items():
+            if key in nested:
+                continue
+            roles = _list_roles(node, names)
+            func = owner.get(node.lineno, "<module>")
+            where = func if func == "<module>" else f"{func}()"
+            offenders.append(
+                f"{rel}:{node.lineno} in {where}: "
+                f"{' + '.join(roles)} -- use {RESPELLINGS[roles]}"
+            )
+    return sorted(offenders)
+
+
+class TestS7DerivedKeysAreReadNotRespelled:
+    """S7: no module rebuilds a column list ``get_schema`` already derives.
+
+    Why a constraint and not a convention. ``[time] + entity`` was written by
+    hand in twenty-odd places and meant at least two different things: the
+    scope ranks are compared in, and the key an entity-level table joins on.
+    They hold the same columns today, so nothing distinguished them and nothing
+    could. ADR-0025's optional ``occasion`` role widens the first and must
+    never widen the second -- at which point every respelling silently keeps
+    the old meaning, and the ones that are wrong produce numbers rather than
+    errors (the comparison report's "common query groups" count, the
+    per-query diagnosis sample, the diagnosis population's grouping).
+
+    So the scan is not here to tidy spellings. It is here so that the next
+    widening is a one-line change in ``core/schema.py`` instead of a
+    twenty-site re-judgement that nobody will be asked to repeat.
+    """
+
+    def test_no_module_respells_a_derived_key(self):
+        offenders = []
+        for label, root in sorted(KEY_SCAN_ROOTS.items()):
+            offenders += _respelled_key_offenders(root, label=label)
+        assert offenders == [], (
+            "a column list get_schema already derives was rebuilt by hand:\n"
+            + "\n".join(offenders)
+        )
+
+    def test_the_scan_roots_are_real_and_pinned(self):
+        """All three trees are clean, so dropping one leaves the scan green.
+
+        The same false green S4 and S5 pin, and this constraint is the most
+        exposed to it: every one of the twelve tests below passes on a tmp
+        tree, so with the real roots unpinned, deleting ``scripts/`` -- the
+        root this constraint argues hardest for, and the only one it does not
+        share with S4/S5/S6 -- costs nothing and nothing turns red.
+
+        Each root is also checked to really hold modules: a root pointed at a
+        renamed or missing path scans nothing, just as silently.
+        """
+        assert set(KEY_SCAN_ROOTS) == {"src/recsys_tfb", "tests", "scripts"}, (
+            "S7's scan roots changed. scripts/ is in scope on purpose and is "
+            "why this list differs from S4/S5/S6's: those three are about how "
+            "code reads a schema, this one is about a meaning having one "
+            "source everywhere it is written down. Removing a root needs the "
+            "user's sign-off. See S7 in "
+            "docs/agents/architecture-constraints.md."
+        )
+        for label, root in KEY_SCAN_ROOTS.items():
+            found = sum(1 for _ in root.rglob("*.py"))
+            assert found > 10, f"{label} -> {root} holds {found} .py files"
+
+    def test_catches_the_plus_spelling(self, tmp_path):
+        (tmp_path / "m.py").write_text(
+            "def f(schema):\n"
+            '    return [schema["time"]] + schema["entity"]\n'
+        )
+        found = _respelled_key_offenders(tmp_path)
+        assert len(found) == 1
+        assert found[0].startswith("m.py:2 in f(): time + entity*")
+
+    def test_catches_the_starred_spelling(self, tmp_path):
+        (tmp_path / "m.py").write_text(
+            "def f(schema):\n"
+            '    return [schema["time"], *schema["entity"]]\n'
+        )
+        found = _respelled_key_offenders(tmp_path)
+        assert len(found) == 1
+        assert found[0].startswith("m.py:2 in f(): time + entity*")
+
+    def test_catches_it_inside_a_keyword_argument(self, tmp_path):
+        """``on=[...]`` is the spelling that does the damage silently."""
+        (tmp_path / "m.py").write_text(
+            "def f(a, b, schema):\n"
+            '    return a.join(b, on=[schema["time"], *schema["entity"]])\n'
+        )
+        found = _respelled_key_offenders(tmp_path)
+        assert len(found) == 1
+        assert found[0].startswith("m.py:2 in f(): time + entity*")
+
+    def test_catches_a_respelled_identity(self, tmp_path):
+        (tmp_path / "m.py").write_text(
+            "def f(schema):\n"
+            '    return [schema["time"]] + schema["entity"] + [schema["item"]]\n'
+        )
+        found = _respelled_key_offenders(tmp_path)
+        assert found == [
+            'm.py:2 in f(): time + entity* + item -- use schema["identity_columns"]'
+        ]
+
+    def test_an_identity_reports_once_not_twice(self, tmp_path):
+        """The inner ``[time] + entity`` must not be reported as its own site."""
+        (tmp_path / "m.py").write_text(
+            "def f(schema):\n"
+            '    return [schema["time"], *schema["entity"], schema["item"]]\n'
+        )
+        assert len(_respelled_key_offenders(tmp_path)) == 1
+
+    def test_catches_identity_rebuilt_from_a_derived_key(self, tmp_path):
+        """The shape the dataset pipeline had: ``base_key + [item]``."""
+        (tmp_path / "m.py").write_text(
+            "def f(schema):\n"
+            '    base_key = schema["base_key_columns"]\n'
+            "    return base_key + [schema[\"item\"]]\n"
+        )
+        found = _respelled_key_offenders(tmp_path)
+        assert found == [
+            'm.py:3 in f(): base_key + item -- use schema["identity_columns"]'
+        ]
+
+    def test_follows_a_role_through_a_local_name(self, tmp_path):
+        """The two-line shape: read into locals, respell further down."""
+        (tmp_path / "m.py").write_text(
+            "def f(schema):\n"
+            '    time_col = schema["time"]\n'
+            '    entity_cols = schema["entity"]\n'
+            "    cols = entity_cols\n"
+            "    return [time_col] + cols\n"
+        )
+        found = _respelled_key_offenders(tmp_path)
+        assert len(found) == 1
+        assert found[0].startswith("m.py:5 in f(): time + entity*")
+
+    def test_reading_a_derived_key_is_fine(self, tmp_path):
+        (tmp_path / "m.py").write_text(
+            "def f(schema):\n"
+            '    return schema["query_group_columns"], schema["base_key_columns"]\n'
+        )
+        assert _respelled_key_offenders(tmp_path) == []
+
+    def test_a_list_with_an_extra_column_is_left_alone(self, tmp_path):
+        """Not a respelling: it is a different list that happens to start alike.
+
+        ``prepare_model_input_config``'s default ``drop_columns`` is exactly
+        this -- "columns that must not become features", which is neither of
+        the derived keys and must not be pushed into one.
+        """
+        (tmp_path / "m.py").write_text(
+            "def f(schema):\n"
+            '    return [schema["time"], *schema["entity"], schema["label"]]\n'
+        )
+        assert _respelled_key_offenders(tmp_path) == []
+
+    def test_the_definition_site_is_skipped_and_nothing_else_is(self):
+        """Only ``core/schema.py`` is out of scope, and it really is in the tree.
+
+        A path constant that stops matching (a move, a rename) would silently
+        turn the skip into "skip nothing", which is the safe direction -- but
+        it would also make this exemption's reason unfindable. Asserting the
+        file exists keeps the constant honest. The sibling assertion is the
+        one that matters: skipping is by exact path, so no other module under
+        ``core/`` inherits it.
+        """
+        assert DERIVED_KEY_DEFINITION_SITE.is_file()
+        sibling = SRC / "core" / "consistency.py"
+        assert sibling != DERIVED_KEY_DEFINITION_SITE
+        assert _respelled_key_offenders(SRC / "core") == []
+
+    def test_the_skip_is_the_only_thing_keeping_schema_py_quiet(self, tmp_path):
+        """Proof the skip is load-bearing, not decorative.
+
+        ``get_schema``'s own derivation is a textbook respelling -- it is the
+        definition. Copied out from under the exempt path it is reported, so
+        this constraint would fire on the very code it exists to protect if
+        the skip were dropped, rather than the skip being a no-op nobody
+        checked.
+        """
+        (tmp_path / "copy_of_schema.py").write_text(
+            "def get_schema(schema):\n"
+            '    schema["query_group_columns"] = [schema["time"]] + schema["entity"]\n'
+        )
+        found = _respelled_key_offenders(tmp_path)
+        assert len(found) == 1
+        assert found[0].startswith("copy_of_schema.py:2 in get_schema(): time + entity*")
 
 
 class TestR2FrameworkGlobalsRegistry:
