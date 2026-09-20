@@ -30,7 +30,7 @@ ADR-0021 只容得下形狀一：query group 寫死是 `time` ＋ `entity`。
 
 - **`occasion`**：一次排序的場合，一欄或多欄。query group ＝ `time` ＋ `entity` ＋ `occasion`。
 - **`event`**（ADR-0021）：同一個 query group、同一個 item 底下有多列時分辨每一列。**不進 query group。**
-- identity ＝ `time` ＋ `entity` ＋ `occasion` ＋ `item` ＋ `event`，沒宣告的角色不算。
+- identity ＝ `time` ＋ `entity` ＋ `occasion` ＋ `item` ＋ `event`，沒宣告的角色不算。**這個順序是規定，不是寫法**：決定性抽樣的分桶把 identity 各欄依序串起來再雜湊，順序一變，同一份資料就抽出不同的列。沒宣告新角色時順序與今天相同（`time`、`entity`、`item`），所以既有部署的抽樣結果不變；之後任何加寬 identity 的改動（例如 #394 的 item 多欄）都不得調動既有欄位的相對順序。
 - 形狀一只宣告 `event`；形狀二只宣告 `occasion`；兩個都宣告也合法。
 - 兩個角色都是宣告了才進 identity、才進版本雜湊（ADR-0021 決定 3 的做法，延伸到 `occasion`）。
 - 離線推論忽略兩個角色、監控模式在 CLI 入口擋下（ADR-0021 決定 5，延伸到 `occasion`）。
@@ -42,7 +42,11 @@ ADR-0021 只容得下形狀一：query group 寫死是 `time` ＋ `entity`。
 - `query_group_columns` ＝ `time` ＋ `entity`（＋ `occasion`）。
 - `base_key_columns` ＝ `time` ＋ `entity`，**永遠不含 `occasion`**——entity 層級的表（特徵表、分群來源）用它接到候選列上。名字沿用程式裡既有的說法（dataset 的 `base_key`、`require_base_key_columns`）。
 
-為什麼要分兩格：程式裡手拼的 `[time] + entity` 有二十多處，意思至少兩種——「界定名次比較的範圍」與「以 entity 層級的表去接」。今天兩者同值所以看不出來；`occasion` 讓第一種變寬、第二種不能變（特徵表裡沒有場合的欄位）。先收成有名字的欄位（純搬移、行為不變），之後加寬 query group 或 identity 都只改 `get_schema` 一處。整條離線推論 pipeline（含它的排名 partition）用的是 base key，因為它的 query group 依決定 1 維持 `time` ＋ `entity`。
+為什麼要分兩格：程式裡手拼的 `[time] + entity` 有二十多處，意思至少兩種——「界定名次比較的範圍」與「以 entity 層級的表去接」。今天兩者同值所以看不出來；`occasion` 讓第一種變寬、第二種不能變（特徵表裡沒有場合的欄位）。先收成有名字的欄位（純搬移、行為不變），之後加寬 query group 或 identity 都只改 `get_schema` 一處。
+
+整條離線推論 pipeline（含它的排名 partition 與每組候選數的檢查）用的是 base key。這是一個決定，不是推導出來的：批次評分的當下沒有任何「場合」存在——候選是框架替每個 entity 乘上全部 item 產生的，不是哪一次請求擺出來的——所以離線推論排名的範圍是「這個 entity 在這個時段」。它的排名 partition 表面上符合「界定名次比較的範圍」，歸類時最容易被歸錯。
+
+反過來，下面這些**一定要跟著 query group 走**，歸錯了不會報錯、只會安靜地給出錯的數字：比較報表（`--compare`）對齊兩邊 query group 並數「共同的 query group 數」的地方、以 query 為單位的診斷抽樣、診斷母體的分組。它們不受「監控模式在入口擋下」保護。
 
 ### 3. 沒有正例的 query group 留多少，由三個鍵決定
 
@@ -51,7 +55,15 @@ ADR-0021 只容得下形狀一：query group 寫死是 `time` ＋ `entity`。
 為什麼需要：
 
 - 把每一列當成二元預測的指標（決定 4、ADR-0024 的家族）對正例佔比很敏感。算在丟過的表上會系統性偏高；形狀二下組只有一列時，val 剩下的全是正例，指標恆為滿分。全部留下又放不下，所以留一個比例、用權重補回去。
-- `lambdarank` 在沒有正例的組上梯度恆為零，training 本來就替它丟；提前到 dataset 丟，訓練表小很多，而且有正例的組保持完整（逐列抽樣會把小組抽成只剩正例）。`binary` 與 `rank_xendcg` **不適用**——後者 repo 有實測，在全是負例的組上照樣會學。
+- `lambdarank` 在沒有正例的組上梯度恆為零，training 本來就替它丟；提前到 dataset 丟，訓練表小很多，而且這一步不會拆散任何一組（逐列抽樣會把小組抽成只剩正例）。
+- `binary` 與 `rank_xendcg` 會從無正例的組學到東西（後者 repo 有實測，在全是負例的組上照樣長樹），所以「丟掉也不損失」**只對 `lambdarank` 成立**。對這兩個目標，train 的 r < 1 是一種**整組的負例降採樣**，訓練母體的正例佔比會上升——性質與既有的逐列抽樣（`sample_ratio_overrides` 壓低負例）相同。**刻意不設「目標不是 `lambdarank` 就擋下 r < 1」的入口檢查**：降採樣負例是這類資料放得進表的必要手段，框架今天也不擋逐列的那一種；train 端不帶權重，因為排序只看分數高低。文件要把這個性質寫明。
+
+**步驟的先後與適用範圍**（實作票不得自行決定）：
+
+- train 的順序是：逐列抽樣（在 `sample_pool` 的鍵上、label 接上之前）→ train／train_dev 切分 → 接 label 與特徵 → 本步驟。所以本步驟看到的是**逐列抽樣之後還在的列**：「有正例的組全留」的意思是本步驟不再丟它們的任何一列，不是「逐列抽樣不會動它們」。某一組的正例若已被逐列抽樣抽掉，它在本步驟就是無正例的組。要讓小的 query group 保持完整，`sample_ratio` 要設 1（不逐列抽）。
+- r ＝ 1.0 時本步驟不丟任何一組；r ＝ 0 時與今天 val／test 的過濾逐列相同。
+- train 的鍵同時套用在 train 與 train_dev，兩邊各自對自己的組判定、用同一個 r。train／train_dev 是以 entity 互斥切開的，一個 query group 不會跨兩邊。train_dev 是 early stopping 的驗證集，它的母體因此跟著變——與既有的逐列抽樣性質相同（train_dev 本來就是從抽樣後的鍵切出來的）；`lambdarank` 下 training 本來就替兩邊丟掉無正例的組，所以 r ＝ 0 不改變它的早停母體。
+- val／test 沒有逐列抽樣（val 只有整個 entity 的抽樣），所以上面的先後問題只存在於 train。
 
 為什麼是三個頂層鍵、不是一個含三個值的鍵：版本雜湊照 `dataset` 的頂層鍵名分層（ADR-0016）。train 那個登記進 `TRAIN_SAMPLING_KEYS`（折進 `train_variant_id`）；val／test 兩個不登記（留在 `base_dataset_version`，那是 val／test 產物唯一的版本 ID）。一個鍵只能整個登記或整個不登記：前者讓「改 val 的 r」靜默讀回舊的 val 表，後者讓「只改 train 的 r」連前處理器與 val／test 一起重算。
 
@@ -69,7 +81,7 @@ ADR-0021 只容得下形狀一：query group 寫死是 `time` ＋ `entity`。
 
 ## 更正 ADR-0021
 
-- **決定 4 後面那段「兩處的語意會反轉」不對。** 粒度閘 B10 與 evaluation 對 identity 的重複檢查，宣告 `event` 之後語意**不變**：「同一筆候選出現兩次」仍然是上游壞了，只是「同一筆」的定義多了欄位。同一個 item 的多次曝光 `event` 不同，本來就不是同一筆。要改的只有錯誤訊息的文字。所有重複檢查全部保留。
+- **〈考慮過、沒選的做法〉那一節裡以「代價要老實說：」開頭的那一段，說兩處的語意會「反轉」——不對**（該段已在 ADR-0021 就地加註）。 粒度閘 B10 與 evaluation 對 identity 的重複檢查，宣告 `event` 之後語意**不變**：「同一筆候選出現兩次」仍然是上游壞了，只是「同一筆」的定義多了欄位。同一個 item 的多次曝光 `event` 不同，本來就不是同一筆。要改的只有錯誤訊息的文字。所有重複檢查全部保留。
 - **決定 4 列的「要逐處帶上 `event` 的地方」，在決定 2 落地後大半自動成立**：label join、抽樣分桶、val／test 取鍵的去重都取 `identity_columns`，identity 加寬它們就跟著加寬。真正要逐處改的只剩同分規則與 `k_values` 的 `"all"`。
 - 同分規則定為「先比 `item`、再比 `event` 各欄由小到大」。已知代價：`event` 是時間戳時，同分的早曝光永遠排前面；在「宣告了 `event` 但沒接逐筆即時特徵」的設定下實測過，方向讓 mAP 差約 0.02（#378 留言）。考慮過用 identity 的雜湊決勝（與時間無關），沒選：Spark 與 numpy 兩份規則要算出同一個雜湊值，得在 dataset 多落一欄。改成讓評估報表印出同分列的佔比。
 - ADR-0021 決定 1（`time` 維持時段）、3、5 沿用。
@@ -89,5 +101,6 @@ ADR-0021 只容得下形狀一：query group 寫死是 `time` ＋ `entity`。
 - 決定 2 的歸類判錯時，後果只在宣告 `occasion` 時出現，既有示例驗不出來。第一個驗得到的地方是形狀二的示例實跑（含離線推論），而示例目前沒有「一次請求」的欄位，要先造資料。
 - val／test 的 r > 0 時，固定整數 K 的組內排序指標逐值不變（Spark 與 numpy 兩邊都在計算時跳過無正例的組），但算在過濾之前的量會變：item 種數、由它解析出的 `"all"` 的 K、`dataset_overview` 的總數。這是母體變大的誠實反映。
 - 權重欄必須一路帶到預測表，而且 catalog 要宣告它——預測表的欄位是寫死的清單，落地時沒宣告的欄會被靜默丟掉。ADR-0024 的家族要從「數列數」改成「加總權重」，並在 test 的 r 為 0 時於入口擋下；否則它報表上「母體：全部曝光」那句是假的（ADR-0024 決定 3 說的「過濾之前」指 evaluation 內的過濾，dataset 在更早就丟過了）。
+- `CLAUDE.md`〈這個專案是什麼〉寫著「對每個 query group（`time` × `entity`）」。在 `occasion` 落地之前這句仍然是真的，所以本 ADR 不改它；`occasion` 落地的那張 PR 要一起改（改 `CLAUDE.md` 前照該檔的規矩載入 `maintain-agent-rules`）。`CONTEXT.md` 在這段期間以「尚未實作」的標記與它並存。
 - 新角色的欄位不得成為特徵，連 `categorical_columns` 那個出口也不開（`item` 是靠它成為特徵的）。
 - r 該設多少、HPO 把 val 拉到 driver 撐不撐得住，都沒量過；repo 裡的合成資料推不出生產的數字。
