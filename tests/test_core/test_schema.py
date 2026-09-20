@@ -174,18 +174,20 @@ class TestDerivedColumnLists:
         assert set(_DERIVED_KEYS) & set(hashed) == set()
 
     def test_derived_lists_are_not_settable(self):
-        """Declaring one under ``schema.columns`` cannot override the derived value.
+        """Declaring one under ``schema.columns`` raises, naming every one.
 
-        The ``_ROLE_KEYS`` filter drops it. Pinned because a user who writes
-        one would otherwise get no error and no effect -- the same silent drop
-        S5 exists to refuse for ``identity_columns``.
+        Until #378 the ``_ROLE_KEYS`` filter dropped it instead: no error and
+        no effect, the silent drop S5 exists to refuse for
+        ``identity_columns``. S5 is a static scan of Python literals, so a
+        ``conf/`` YAML that declares one needs this runtime half.
         """
         params = _params()
         params["schema"]["columns"]["query_group_columns"] = ["nonsense"]
         params["schema"]["columns"]["base_key_columns"] = ["nonsense"]
-        schema = get_schema(params)
-        assert schema["query_group_columns"] == ["snap_date", "cust_id"]
-        assert schema["base_key_columns"] == ["snap_date", "cust_id"]
+        with pytest.raises(ValueError) as exc:
+            get_schema(params)
+        assert "query_group_columns" in str(exc.value)
+        assert "base_key_columns" in str(exc.value)
 
 
 class TestIdentityColumnOrderIsARule:
@@ -368,3 +370,128 @@ class TestRenamedSchemaFixture:
         with pytest.raises(ValueError) as exc:
             get_schema(mis_nested)
         assert "time, entity, item" in str(exc.value)
+
+
+class TestOptionalEventRole:
+    """``event`` is absent unless declared, and widens identity when it is.
+
+    The role exists so a query group can hold the same item more than once —
+    one row per impression, each with its own realtime features (ADR-0021,
+    ADR-0025 decision 1). Everything here is about the *declared vs absent*
+    split, because absent is the state every deployment that predates #378 is
+    in and the one that must not move.
+    """
+
+    def test_absent_unless_declared(self):
+        assert "event" not in get_schema(_params())
+
+    def test_identity_is_unchanged_when_absent(self):
+        assert get_schema(_params())["identity_columns"] == [
+            "snap_date", "cust_id", "prod_name",
+        ]
+
+    def test_a_declared_string_normalises_to_a_list(self):
+        """Same normalisation ``entity`` gets, so callers never branch on type."""
+        assert get_schema(_params(event="impression_id"))["event"] == [
+            "impression_id",
+        ]
+
+    def test_a_declared_list_is_kept(self):
+        schema = get_schema(_params(event=["event_ts", "impression_id"]))
+        assert schema["event"] == ["event_ts", "impression_id"]
+
+    def test_event_is_appended_after_item(self):
+        """ADR-0025 decision 1 fixes the position: the columns already in
+        ``identity_columns`` do not move, so an existing deployment that adds
+        ``event`` keeps drawing the same deterministic sample for the rows it
+        already had."""
+        schema = get_schema(_params(event=["event_ts", "impression_id"]))
+        assert schema["identity_columns"] == [
+            "snap_date", "cust_id", "prod_name", "event_ts", "impression_id",
+        ]
+
+    def test_event_does_not_widen_the_query_group(self):
+        """Two impressions of one item compete for rank inside one ranking;
+        they do not form two rankings. ``occasion`` is the role that widens
+        the query group, and it is a later ticket."""
+        schema = get_schema(_params(event="impression_id"))
+        assert schema["query_group_columns"] == ["snap_date", "cust_id"]
+
+    def test_event_does_not_widen_the_base_key(self):
+        """An entity-level table (a feature table) has no column for an
+        impression, so the key it joins by must not grow one."""
+        schema = get_schema(_params(event="impression_id"))
+        assert schema["base_key_columns"] == ["snap_date", "cust_id"]
+
+
+class TestOptionalRolesAndTheVersionHash:
+    """Declared ⇒ hashed; absent ⇒ not a key of the payload at all.
+
+    Both halves are load-bearing. An undeclared ``event`` that reached the
+    payload as ``None`` would move ``base_dataset_version`` for every
+    deployment that never asked for the role; a declared one that stayed out
+    would let a deployment switch to one row per impression and silently read
+    back the artifacts of the old shape.
+    """
+
+    def test_absent_event_adds_no_key_to_the_payload(self):
+        assert "event" not in get_schema_for_hash(_params())
+
+    def test_absent_event_leaves_the_payload_untouched(self):
+        """Equality against the payload keys, not a subset check: a subset
+        check passes just as happily when a key was added."""
+        assert list(get_schema_for_hash(_params())) == [
+            "time", "entity", "item", "label", "score", "rank",
+            "categorical_values",
+        ]
+
+    def test_a_declared_event_is_in_the_payload(self):
+        payload = get_schema_for_hash(_params(event="impression_id"))
+        assert payload["event"] == ["impression_id"]
+
+    def test_declaring_event_changes_the_payload(self):
+        assert get_schema_for_hash(_params()) != get_schema_for_hash(
+            _params(event="impression_id")
+        )
+
+
+class TestUnknownSchemaColumnKeys:
+    """A key naming no role raises, and every one is reported at once.
+
+    Before #378 it was dropped by the merge filter: no message, and — because
+    a dropped key never reaches ``get_schema_for_hash`` — no version ID moved
+    either, so ``evnet: impression_id`` produced a run that finished and
+    ranked one row per item while the operator believed otherwise.
+    """
+
+    def test_an_unknown_key_raises(self):
+        with pytest.raises(ValueError, match="Unknown key"):
+            get_schema(_params(evnet="impression_id"))
+
+    def test_the_message_names_the_offending_key(self):
+        with pytest.raises(ValueError) as exc:
+            get_schema(_params(evnet="impression_id"))
+        assert "evnet" in str(exc.value)
+
+    def test_every_unknown_key_is_reported_at_once(self):
+        """One re-run per typo is the cost this collects away."""
+        with pytest.raises(ValueError) as exc:
+            get_schema(_params(evnet="a", itme="b"))
+        message = str(exc.value)
+        assert "evnet" in message and "itme" in message
+
+    def test_the_message_lists_the_recognised_roles(self):
+        with pytest.raises(ValueError) as exc:
+            get_schema(_params(evnet="a"))
+        message = str(exc.value)
+        for role in ("time", "entity", "item", "label", "score", "rank", "event"):
+            assert role in message
+
+    def test_a_config_with_only_known_roles_is_accepted(self):
+        """The no-op half: naming every settable role at once must pass, or
+        the gate would be rejecting valid configs rather than typos."""
+        schema = get_schema(
+            _params(label="y", score="s", rank="r", event="impression_id")
+        )
+        assert schema["label"] == "y"
+        assert schema["event"] == ["impression_id"]
