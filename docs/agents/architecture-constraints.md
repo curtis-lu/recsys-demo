@@ -338,11 +338,11 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
 兩道檢查的盲區不同，**殘餘盲區是兩者的交集**：
 
 - **建構期檢查**要那一行真的被執行到，所以看不到「從沒被建構起來的 `Node(...)`」。
-- **AST 掃描**只讀得出字面值，且只掃 `pipelines/`：動態組出來的 `inputs`／`outputs`／`writes` 讀不出來就跳過（58 個 `Node` 中有 4 個是這種），`pipelines/` 以外的 `Node(...)` 也不掃（現況為零）。
+- **AST 掃描**只讀得出字面值，且只掃 `pipelines/`：動態組出來的 `inputs`／`outputs`／`writes` 讀不出來就跳過（60 個 `Node` 中有 3 個是這種），`pipelines/` 以外的 `Node(...)` 也不掃（現況為零）。
 
-**兩道相加仍看不到的**，是同時滿足「參數動態組出來（或位在 `pipelines/` 之外）」**且**「沒有任何測試或執行路徑會建構到」的 `Node(...)`。具體形狀：`pipelines/` 底下、掛在條件分支上（例如 `training/pipeline.py` 的 `if enable_calibration:`）、參數又是動態組的 node。現況那 4 個動態 node 全在無條件路徑上，所以**現在為零，但這是現況為零，不是結構上不可能**。
+**兩道相加仍看不到的**，是同時滿足「參數動態組出來（或位在 `pipelines/` 之外）」**且**「沒有任何測試或執行路徑會建構到」的 `Node(...)`。具體形狀：`pipelines/` 底下、掛在條件分支上（例如 `dataset/pipeline.py` 的 `if enable_calibration:`）、參數又是動態組的 node。現況那 3 個動態 node 全在無條件路徑上，所以**現在為零，但這是現況為零，不是結構上不可能**。
 
-`test_static_coverage_floor` 仍把「58 個裡有 54 個可被 AST 判定」釘死；它守的是「AST 這一道別再退步」，不是「A5／A6 總共有多少沒人看」。
+`test_static_coverage_floor` 仍把「60 個裡有 57 個可被 AST 判定」釘死；它守的是「AST 這一道別再退步」，不是「A5／A6 總共有多少沒人看」。
 
 ## A6. 同一 node 的 `input`／`writes` 名不得與 `output` 名相同
 
@@ -690,10 +690,10 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 **離開這張表的**：`persist_sample_weight_report`（2026-08-30，ADR-0014 決定 2；G1 簽核記錄在 issue #222 的切票留言與 #226 票面）。`sample_weight_report` 拿到 catalog 條目之後，node 只 `return diag`，寫檔由 catalog 負責——它不再是「自己寫診斷副產物的 node」，也同步離開下面那組測試釘的集合。登記**縮小**不需要新例外。
 
 > ⚠ **這張表的 2 筆，跟測試釘的 6 筆不是同一組。**
-> 這張表列的是「**會寫診斷副產物的 node**」。測試 (d) 釘的是「**掃描看得到直接寫檔的函式**」＝ `log_experiment` ＋ 5 個 cache node（`cache_train_model_input`、`cache_train_dev_model_input`、`cache_val_model_input`、`cache_test_model_input`、`cache_calibration_model_input`，都在 `pipelines/training/nodes.py`，搜 `shutil.rmtree` 可見）。
-> 差別在兩端：`tune_hyperparameters` 在表上、不在測試裡（間接寫入，掃不到）；5 個 cache node 在測試裡、不在表上（它們刪的是本機 parquet cache，不是診斷副產物）。
+> 這張表列的是「**會寫診斷副產物的 node**」。測試 (d) 釘的是「**掃描看得到直接寫檔的函式**」＝ `log_experiment` ＋ 4 個 cache node（`cache_train_model_input`、`cache_train_dev_model_input`、`cache_val_model_input`、`cache_test_model_input`，都在 `pipelines/training/nodes.py`，搜 `shutil.rmtree` 可見）。
+> 差別在兩端：`tune_hyperparameters` 在表上、不在測試裡（間接寫入，掃不到）；4 個 cache node 在測試裡、不在表上（它們刪的是本機 parquet cache，不是診斷副產物）。
 >
-> **2026-08-30 起測試那一組由 2 筆變 6 筆**（ADR-0014 決定 1，使用者已批准）。原本的第 2 筆是 `_materialize_parquet_handle`——一個 helper 裝著 5 個 cache node 的全部四個決策，所以讀任何一個 cache node 都讀不出這個 cache 決定了什麼。決策上浮到各 node 之後，`shutil.rmtree` 也跟著回到各 node 的 body：5 個 node 真的各自會刪檔，登記變大是誠實的。
+> **2026-08-30 起測試那一組由 2 筆變 6 筆**（ADR-0014 決定 1，使用者已批准），**2026-09-20 的 #413 又降回 5 筆**：`cache_calibration_model_input` 隨校準器一起刪掉，登記縮小不需要新例外。原本的第 2 筆是 `_materialize_parquet_handle`——一個 helper 裝著 5 個 cache node 的全部四個決策，所以讀任何一個 cache node 都讀不出這個 cache 決定了什麼。決策上浮到各 node 之後，`shutil.rmtree` 也跟著回到各 node 的 body：每個 node 真的各自會刪檔，登記變大是誠實的。
 > 機制（路徑計算、複製、HDFS 拉取）進了 `pipelines/training/steps/local_cache.py`，**但刪檔沒有跟著搬**——(d) 只掃 `pipelines/**/nodes*.py`，搬進 `steps/` 就沒有任何測試看得到它。這是稽核範圍的後果，不是一條關於刪檔的規則。使用者 2026-09-19 裁決不放寬 glob（#163），所以這個安排維持；哪天放寬了，這個決定該重新檢討。
 
 

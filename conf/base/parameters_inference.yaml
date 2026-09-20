@@ -5,7 +5,6 @@ spark:
   # spark.sql.shuffle.partitions: 400
 
 inference:
-  use_calibration: true   # bool；★是否套用校準後模型輸出（需該 model 有 calibration）
   # 評分的切塊數：母體依 entity 確定性雜湊分成這麼多桶，外層迴圈跑桶、內層跑 item，
   # 每個 (桶, item) 算完立刻落地成恰好一個分區。這是控制 driver 峰值的旋鈕——
   # 一桶約 (母體 / entity_buckets) × 特徵數 進 driver。

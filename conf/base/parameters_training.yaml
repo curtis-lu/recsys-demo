@@ -10,7 +10,7 @@ spark:
   # spark.driver.memory: 8g
 
 # ops block（與 spark:／mlflow:／cache: 同層）——不影響 model_version。
-# HPO 與其後的 finalize/calibrate 全是 driver-local，Spark 從 cache_* 節點結束到
+# HPO 與其後的 finalize_model 全是 driver-local，Spark 從 cache_* 節點結束到
 # predict_and_write_test_predictions 之間完全閒置，可能數小時。閒置的 application
 # 會被叢集端回收，context 在 JVM 端死掉，之後寫 Hive 就撞 stopped SparkContext。
 # 改成主動釋放，由下一個用到 Spark 的節點依 canonical configs 重建。
@@ -89,9 +89,6 @@ training:
     # 成立、校準目標 t 沒有對應物——適用範圍見
     # docs/operations/user-guides/sampling-overrides-editor.md §3.6。
     # --------------------------------------------------------------------
-  calibration:
-    enabled: true              # bool；★ 要把 score 當機率時才開
-    method: sigmoid            # ∈ {isotonic, sigmoid}
   # --- Composite-key sample weights（模型層調權，如冷門產品 boost）---
   # sample_weight_keys: weight key 由哪些欄位組成（順序＝ "|" 串接順序），與
   #   dataset.sample_group_keys 對稱（可不同）。預設 [prod_name]＝直接對產品調權。

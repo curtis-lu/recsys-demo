@@ -56,7 +56,6 @@ def _params_with_cache_root(cache_root: Path) -> dict:
         "cache": {"root": str(cache_root)},
         "base_dataset_version": "deadbeef",
         "train_variant_id": "v1",
-        "calibration_variant_id": "c1",
         "_cache_partitions": _catalog_partitions(),
     }
 
@@ -391,7 +390,6 @@ class TestPerMonthTestCache:
             "train_model_input",
             "train_dev_model_input",
             "val_model_input",
-            "calibration_model_input",
         ):
             assert resolve_cache_path(name, one) == resolve_cache_path(name, two)
 

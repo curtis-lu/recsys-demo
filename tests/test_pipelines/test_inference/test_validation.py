@@ -266,12 +266,11 @@ class TestPartitionCompleteness:
 class TestScoreRangeIsGone:
     """``score_range`` was deleted, not relocated, and this keeps it deleted.
 
-    On every path that applies a calibrator, ``[0, 1]`` holds by construction
-    and the assertion could not go red; on an uncalibrated ranking objective —
-    a configuration A7 explicitly permits and
-    ``inference.use_calibration: false`` explicitly supports — the raw booster
-    output is unbounded and the assertion is a false alarm. Decorative or
-    wrong, no third case (ADR-0011 §2).
+    Under a ``binary`` objective LightGBM's output is a sigmoid, so ``[0, 1]``
+    holds by construction and the assertion could not go red; under a ranking
+    objective — a configuration A7 explicitly permits — the raw booster output
+    is unbounded and the assertion is a false alarm. Decorative or wrong, no
+    third case (ADR-0011 §2).
     """
 
     def test_a_score_outside_zero_to_one_is_not_a_failure(self, spark, parameters):
@@ -310,14 +309,13 @@ class TestScoreVariesWithinGroup:
     def test_a_few_tied_groups_are_logged_and_published(
         self, spark, parameters, caplog
     ):
-        """A correct isotonic run looks like this, so it must not block publication.
+        """A handful of tied groups is warned about, not raised on.
 
-        ``IsotonicRegression`` fits a monotone function with plateaus: a group
-        whose raw scores all land on one plateau comes out exactly tied with
-        nothing wrong upstream. Measured on a synthetic fit — 61 of 200,000
-        groups (0.03%) tied, against zero uncalibrated. A ``> 0`` rule would
-        fail every correct run at production scale, which is the false alarm
-        the product-form partition count was rejected for.
+        The check fires on ``CONSTANT_GROUP_FAILURE_RATIO``, not on the first
+        tie. What that threshold is guarding against — and why its value is
+        held rather than tightened now that the isotonic plateaus that
+        justified its lower side are gone (#411) — is written out at the
+        constant.
 
         Still logged: a tied group's internal ranking really is arbitrary, and
         silence would make it unfindable.

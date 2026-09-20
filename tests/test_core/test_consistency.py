@@ -3602,3 +3602,105 @@ class TestMergedEtlVariables:
         merged = merged_etl_variables(original, None)
         assert merged == original
         assert merged is not original
+
+
+# --- A37: config keys retired with the calibration removal (#411) ------------
+
+from recsys_tfb.core.consistency import (
+    RETIRED_CALIBRATION_KEYS,
+    retired_calibration_key_errors,
+    validate_config_consistency,
+)
+
+
+class TestRetiredCalibrationKeysA37:
+    """A37 — a conf still spelling a calibration key after #411 removed it.
+
+    Unlike A33 this is not a migration tool with a delete-by date: the keys name
+    a mechanism that no longer exists anywhere in the framework, so the check
+    stays for as long as someone might still be carrying an old conf.
+    """
+
+    def test_a_retired_training_key_is_reported_by_name(self):
+        errors = retired_calibration_key_errors(
+            {"training": {"calibration": {"enabled": True, "method": "isotonic"}}}
+        )
+        assert len(errors) == 1
+        assert "training.calibration" in errors[0]
+
+    def test_a_retired_inference_key_is_reported_by_name(self):
+        errors = retired_calibration_key_errors(
+            {"inference": {"use_calibration": True}}
+        )
+        assert len(errors) == 1
+        assert "inference.use_calibration" in errors[0]
+
+    def test_presence_is_what_counts_not_the_value(self):
+        """``false`` and an empty block are as retired as ``true``.
+
+        The whole ``training:`` subtree is hashed into ``model_version``, so a
+        conf that keeps a disabled block computes a different ID than one that
+        deleted it — which is the disagreement this check exists to prevent.
+        """
+        for value in ({"enabled": False}, None, {}, False):
+            assert retired_calibration_key_errors(
+                {"training": {"calibration": value}}
+            ), value
+        for value in (False, None):
+            assert retired_calibration_key_errors(
+                {"inference": {"use_calibration": value}}
+            ), value
+
+    def test_every_retired_key_is_listed_in_one_message(self):
+        """One message, every key — the user deletes once instead of running,
+        fixing one key, and running again."""
+        errors = retired_calibration_key_errors({
+            "training": {"calibration": {"enabled": False}},
+            "inference": {"use_calibration": False},
+        })
+        assert len(errors) == 1
+        for key in ("training.calibration", "inference.use_calibration"):
+            assert key in errors[0]
+
+    def test_the_message_says_what_to_do_about_it(self):
+        errors = retired_calibration_key_errors(
+            {"training": {"calibration": {"enabled": True}}}
+        )
+        assert "#411" in errors[0]
+        assert "Delete" in errors[0] or "delete" in errors[0]
+        assert "no replacement" in errors[0]
+
+    def test_a_config_without_the_keys_at_all_is_clean(self):
+        assert retired_calibration_key_errors({}) == []
+        assert retired_calibration_key_errors({"training": {}, "inference": {}}) == []
+        assert retired_calibration_key_errors(
+            {"training": {"objective": "binary"}, "inference": {"entity_buckets": 8}}
+        ) == []
+
+    def test_a_non_mapping_section_is_not_a_crash(self):
+        assert retired_calibration_key_errors({"training": None}) == []
+        assert retired_calibration_key_errors({"inference": "nonsense"}) == []
+
+    def test_wired_into_validate_config_consistency(self):
+        params = {
+            "schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            }},
+            "training": {"calibration": {"enabled": False}},
+        }
+        with pytest.raises(ConfigConsistencyError) as exc:
+            validate_config_consistency(params)
+        assert "A37" in str(exc.value)
+        assert "training.calibration" in str(exc.value)
+
+    def test_the_real_conf_has_no_retired_key_left(self):
+        from recsys_tfb.core.config import ConfigLoader
+
+        parameters = ConfigLoader("conf", env="local").get_parameters()
+        assert retired_calibration_key_errors(parameters) == []
+
+    def test_this_ticket_retires_the_two_calibrator_keys(self):
+        """T1 (#413) covers the keys the calibrator itself read. The dataset-side
+        keys join this tuple with the calibration data split (#414)."""
+        assert "training.calibration" in RETIRED_CALIBRATION_KEYS
+        assert "inference.use_calibration" in RETIRED_CALIBRATION_KEYS

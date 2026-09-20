@@ -49,9 +49,7 @@ logger = logging.getLogger(__name__)
 _TEST_MONTH_TOKEN = "!test_month"
 
 # Tokens written into the path verbatim rather than looked up in `parameters`.
-_CACHE_LITERAL_TOKENS = frozenset(
-    {"train_variants", "calibration_variants", "test_months"}
-)
+_CACHE_LITERAL_TOKENS = frozenset({"train_variants", "test_months"})
 
 _CACHE_PATH_LAYOUT: dict[str, tuple[str, ...]] = {
     "val_model_input": ("base_dataset_version",),
@@ -61,11 +59,6 @@ _CACHE_PATH_LAYOUT: dict[str, tuple[str, ...]] = {
     "test_model_input": ("base_dataset_version", "test_months", _TEST_MONTH_TOKEN),
     "train_model_input": ("base_dataset_version", "train_variants", "train_variant_id"),
     "train_dev_model_input": ("base_dataset_version", "train_variants", "train_variant_id"),
-    "calibration_model_input": (
-        "base_dataset_version",
-        "calibration_variants",
-        "calibration_variant_id",
-    ),
 }
 
 
@@ -75,7 +68,6 @@ CACHE_SOURCE_TABLES: dict[str, str] = {
     "test_model_input": "test_model_input",
     "train_model_input": "train_model_input",
     "train_dev_model_input": "train_dev_model_input",
-    "calibration_model_input": "calibration_model_input",
 }
 
 

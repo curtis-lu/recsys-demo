@@ -207,10 +207,6 @@ hpo_best_model:
   type: ModelAdapterDataset
   filepath: data/models/${model_version}/hpo/model.txt
 
-trained_model:
-  type: ModelAdapterDataset
-  filepath: data/models/${model_version}/trained/model.txt
-
 predict_manifest:
   type: JSONDataset
   filepath: data/models/${model_version}/predict_manifest.json

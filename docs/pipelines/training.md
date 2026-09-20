@@ -1,7 +1,7 @@
 # training pipeline
 
 > 讀取 dataset pipeline 產出的各 split `*_model_input`，訓練一個供所有 item 共用的排序模型，並產生版本化模型、test 預測、離線指標與模型診斷。
-> 主要流程為：選擇資料版本 → driver-local cache → 特徵選擇與模型格式轉換 → HPO → 最終模型 → 可選機率校準 → test 評估與診斷。
+> 主要流程為：選擇資料版本 → driver-local cache → 特徵選擇與模型格式轉換 → HPO → 最終模型 → test 評估與診斷。
 
 ## 1. Pipeline 總覽
 
@@ -9,7 +9,7 @@
 |---|---|
 | 主要用途 | 使用版本化 dataset 訓練、評估並保存候選模型 |
 | 執行指令 | `python -m recsys_tfb training` |
-| 上游輸入 | `preprocessor`、`train_model_input`、`train_dev_model_input`、`val_model_input`、`test_model_input`，以及可選的 `calibration_model_input` |
+| 上游輸入 | `preprocessor`、`train_model_input`、`train_dev_model_input`、`val_model_input`、`test_model_input` |
 | 主要輸出 | `model`、HPO 最佳參數與迭代次數、`training_eval_predictions`、test 指標與模型診斷 |
 | 設定檔 | `conf/base/parameters_training.yaml` |
 | I/O 設定 | `conf/base/catalog.yaml` |
@@ -24,7 +24,6 @@ training 會訓練一個跨 item 共用的模型，而不是每個 item 各自�
 | `train` | 每個 HPO trial 的模型訓練資料 | ✓ |
 | `train_dev` | 每個 trial 的 early stopping validation；`refit_on_full` 時會與 train 合併 | ✓ |
 | `val` | 比較不同 HPO trials 的排序指標，選出最佳超參數 |  |
-| `calibration` | 啟用時 fit 機率校準器，不參與建樹、early stopping 或 HPO 選模 |  |
 | `test` | 最終模型完成後的 held-out 評估與診斷 |  |
 
 `train_dev` 與 `val` 不可互換：前者決定單一 trial 何時停止 boosting，後者決定不同 trials 之間哪一組超參數較好。test 只應在最終模型產生後使用，不應反過來調整超參數。
@@ -37,12 +36,11 @@ LightGBM 的 train/train-dev 會轉成可重用的 `.bin`，但這是目前 adap
 執行 training 前，建議依序確認：
 
 1. **Dataset 已完整完成**：指定的 `base_dataset_version` 與 `train_variant_id` 必須存在，且 train、train-dev、val、test model input 均已產出。
-2. **各 split 的資料角色正確**：train、calibration、val、test 日期應互斥並依時間合理安排；test 不可被用於 HPO 或 feature selection 決策。
-3. **Calibration 兩端設定一致**：若 `training.calibration.enabled: true`，dataset 必須先以 `enable_calibration: true` 建立 calibration variant 與 `calibration_model_input`。
-4. **item 保留為模型特徵**：`schema.item` 必須存在於 preprocessor 的 `feature_columns`，也不可被 `training.feature_selection.exclude` 排除。
-5. **Sample weight 欄位可用**：`sample_weight_keys` 中非 identity、label 或 categorical feature 的欄位，必須由 dataset 的 `carry_columns` 帶入 train model input。
-6. **Driver-local 空間足夠**：各 split 會從 Hive／HDFS 複製到 `cache.root`，模型、HPO study、診斷與 checkpoint 也會寫入 driver 本機檔案系統。**HPO 另外要 `data/_scratch` 放得下整份 val 矩陣**（`val 列數 × 特徵欄數 × itemsize`，生產規模 37～89 GiB）；不足時 `tune_hyperparameters` 會在建立前 raise，訊息含需求量、可用量與落點。檔案在映射完成當下就 unlink，跑完不留（見 §9.2）。
-7. **Driver 記憶體足夠**：模型訓練、部分指標計算及診斷會將資料讀入 driver；應依資料量控制 feature 數、HPO 規模與 SHAP／feature statistics 抽樣上限。
+2. **各 split 的資料角色正確**：train、val、test 日期應互斥並依時間合理安排；test 不可被用於 HPO 或 feature selection 決策。
+3. **item 保留為模型特徵**：`schema.item` 必須存在於 preprocessor 的 `feature_columns`，也不可被 `training.feature_selection.exclude` 排除。
+4. **Sample weight 欄位可用**：`sample_weight_keys` 中非 identity、label 或 categorical feature 的欄位，必須由 dataset 的 `carry_columns` 帶入 train model input。
+5. **Driver-local 空間足夠**：各 split 會從 Hive／HDFS 複製到 `cache.root`，模型、HPO study、診斷與 checkpoint 也會寫入 driver 本機檔案系統。**HPO 另外要 `data/_scratch` 放得下整份 val 矩陣**（`val 列數 × 特徵欄數 × itemsize`，生產規模 37～89 GiB）；不足時 `tune_hyperparameters` 會在建立前 raise，訊息含需求量、可用量與落點。檔案在映射完成當下就 unlink，跑完不留（見 §9.2）。
+6. **Driver 記憶體足夠**：模型訓練、部分指標計算及診斷會將資料讀入 driver；應依資料量控制 feature 數、HPO 規模與 SHAP／feature statistics 抽樣上限。
 
 CLI 啟動時會先執行設定一致性檢查，包括 ranking objective 與 metric 是否相容、HPO search space 格式、sample weight key 的欄位與段數、未知 item、feature selection 是否錯誤排除 item，以及 `hpo_objective` 與 `final_model_strategy` 是否為合法值（A25——打錯的話原本要等整輪 HPO 跑完才會炸）。另外三項也在起 Spark 前由 training 指令擋下：`dataset.test_snap_dates` 沒寫或是空清單（A36——原本要等整輪 HPO 跑完、到預測那一步才炸，訊息也沒提到這個設定）、`dataset.test_snap_dates` 用兩種拼法指到同一個月（A26），以及 `training_eval_predictions` 這筆 catalog 條目沒有把 `schema.entity` 的每一欄都寫進 `columns:`（A28——Hive 寫入只留宣告過的欄，少宣告的那一欄會被靜默丟掉，寫出來的每一列都變成在指別的東西）。檢查分幾層、各在什麼時候擋下、哪些擋不住：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
 這些檢查可避免明顯設定錯誤進入長時間訓練，但不能判斷資料是否有 target leakage、日期切分是否符合業務觀察窗，或某個設定是否在統計上合理。
@@ -139,7 +137,7 @@ training:
 | `hpo_best` | 直接保存 val 排序指標最佳 trial 所持有的模型 | 成本最低，模型使用 train 訓練並以 train-dev early stopping |
 | `refit_on_full` | 以最佳超參數將 train + train-dev 合併重訓，迭代數固定為 `best_iteration`，不再 early stop | 使用更多訓練資料，但最終模型不是 HPO 當下評分的同一個 booster |
 
-`refit_on_full` 只合併 train 與 train-dev，不會將 val、calibration 或 test 加入建模資料。ranking objective 下會保留 query group 邊界，避免合併後不同 query 被錯誤視為同一組。
+`refit_on_full` 只合併 train 與 train-dev，不會將 val 或 test 加入建模資料。ranking objective 下會保留 query group 邊界，避免合併後不同 query 被錯誤視為同一組。
 
 ### 3.4 Training-stage feature selection
 
@@ -152,7 +150,7 @@ training:
 ```
 
 `training.feature_selection.exclude` 會在 training 開始時建立 preprocessor view，從 `feature_columns` 排除指定欄位。
-HPO、最終訓練、calibration 與 test scoring 都使用同一份 feature view。**診斷與 inference 不看這份 view，改依模型保存的 feature names 取欄**——模型是唯一記得「這次訓練實際用了哪個子集」的產物，兩邊都因此不受事後改動 `exclude` 影響（見 §5 表後說明）。
+HPO、最終訓練與 test scoring 都使用同一份 feature view。**診斷與 inference 不看這份 view，改依模型保存的 feature names 取欄**——模型是唯一記得「這次訓練實際用了哪個子集」的產物，兩邊都因此不受事後改動 `exclude` 影響（見 §5 表後說明）。
 
 這是模型層的特徵實驗，因此修改後只會更新 `model_version`，不需要重建 dataset。`schema.item` 不可被排除；其他 exclude 名稱也應先確認存在於該 dataset 的 `feature_columns`。
 目前不存在的欄位名稱會被忽略，但仍會進入版本 hash，因此可能產生內容相同、ID 不同的 model version。
@@ -177,7 +175,7 @@ training:
 
 上例是手填的覆寫；要從實際樣本量**推導**這張表（雙因子地板 `v` ＋ 注意力 `A`，並一併處理 ratio 面下採），用 `scripts/sampling_overrides_editor.py`。概念框架、公式、`w_pos`/`w_neg` 與 key 組法、邊界情況見 [`../operations/user-guides/sampling-overrides-editor.md`](../operations/user-guides/sampling-overrides-editor.md)。
 
-權重只套用於 train 與 train-dev，不套用於 val、calibration、test 或 evaluation。
+權重只套用於 train 與 train-dev，不套用於 val、test 或 evaluation。
 類別欄位可在設定中使用人類可讀值：model_input 存的是 category code，runtime 會先依 preprocessor 的 category mappings **把資料側的 code 解回類別值**再比對，所以設定與資料在同一套詞彙裡；identity、label 與 carry columns 本來就是原始值，不經過這一步。資料側若出現 fit 沒看過的值（code `-1`），該列不屬於任何類別，權重固定 `1.0`。
 
 CLI 會檢查：
@@ -190,23 +188,7 @@ training 另會產生 `sample_weight_report.json`，列出實際 train 資料中
 
 **改權重不需要清任何快取。** 權重不存在 LightGBM 的 `.bin` 裡——`.bin` 只裝分箱後的特徵，權重與分箱無關。`prepare_train_inputs` 會在每個 `.bin` 旁寫一份 `train.weight_keys.parquet`（那份 binary 的列的 weight key 欄位，順序與 binary 相同），HPO 每個 trial 載入 `.bin` 之後用**當下的設定**現算權重再套上去。所以改 `sample_weights` 的值只花一次查表，分箱照樣重用；改 `sample_weight_keys`（＝換 key 欄位）則會讓 `.bin` 重建，log 會印出理由。2026-09-09 之前不是這樣，舊行為與症狀見 [`known-pitfalls.md` §17](../operations/known-pitfalls.md)。
 
-### 3.6 機率校準
-
-```yaml
-training:
-  calibration:
-    enabled: true
-    method: sigmoid
-```
-
-校準方法支援 `sigmoid` 與 `isotonic`。啟用時，CLI 會解析 `calibration_variant_id`，pipeline 也會增加 `cache_calibration_model_input` 與 `calibrate_model` nodes。
-
-只有下游需要將 `score` 解讀為機率，例如估算期望收益或比較不同日期的絕對分數水準時，才需要啟用 calibration。
-純粹依 query group 內名次進行推薦時，校準通常不是必要步驟；LTR objective 的原始 score 尤其不應直接解讀為機率。
-
-dataset 的 `enable_calibration` 與 training 的 `training.calibration.enabled` 應同步設定。calibration split 只 fit 校準器，不套 sample weight，也不參與 HPO 或最終 test 指標的母體選擇。
-
-### 3.7 Cache、診斷與 MLflow
+### 3.6 Cache、診斷與 MLflow
 
 下列皆是頂層 ops 設定，不會改變 `model_version`：
 
@@ -324,7 +306,6 @@ local Parquet cache 以 dataset IDs 分層，若目錄存在 `_SUCCESS` 便直�
 | `--env`, `-e` | `local` | 選擇設定環境 |
 | `--base-dataset-version <id>` | `latest` | 指定 base dataset version |
 | `--train-variant <id>` | 該 base 下的 train `latest` | 指定 train variant |
-| `--calibration-variant <id>` | 該 base 下的 calibration `latest` | calibration 啟用時指定 calibration variant |
 | `--rebuild-dates <d1,d2>` | 無 | 指名重算這些 test 月份的預測（丟掉該月本機 cache ＋ 忽略「已完整」而重新預測）。值須為 `dataset.test_snap_dates` 子集（A21）；上游回補時與 dataset 的同名旗標成對使用 |
 | `--from-node <name>` | 無 | 從指定 node 的拓撲位置開始，並執行其後 nodes |
 | `--only-node <name>` | 無 | 只執行指定 node，以及缺少輸入時必要的上游 nodes |
@@ -332,7 +313,7 @@ local Parquet cache 以 dataset IDs 分層，若目錄存在 `_SUCCESS` 便直�
 | `--dry-run` | 關閉 | 顯示切片執行計畫後離開 |
 | `--list-nodes` | 關閉 | 列出 node 名稱與接續成本 |
 
-`--from-node` 與 `--only-node` 互斥；`--list-nodes` 也不能與兩者併用。`--calibration-variant` 只有在 `training.calibration.enabled: true` 時使用。`--rebuild-dates` 與切片旗標可以併用——重算某個月的預測本來就走 `--only-node predict_and_write_test_predictions`；只有當切片把該 node 排除時才會印 `[rebuild] WARNING`——兩種措辭：一步都沒選到是 `had no effect`，選到了「丟舊 cache」那一步卻沒選到預測那一步是 `is only half applied`。
+`--from-node` 與 `--only-node` 互斥；`--list-nodes` 也不能與兩者併用。`--rebuild-dates` 與切片旗標可以併用——重算某個月的預測本來就走 `--only-node predict_and_write_test_predictions`；只有當切片把該 node 排除時才會印 `[rebuild] WARNING`——兩種措辭：一步都沒選到是 `had no effect`，選到了「丟舊 cache」那一步卻沒選到預測那一步是 `is only half applied`。
 
 `--dry-run` 與 `--list-nodes` 不會執行 nodes、寫模型或建立 manifest，但 CLI 仍會載入設定、初始化 Spark、解析 dataset versions、計算 `model_version`／`search_id`，並查詢 catalog 產物是否存在。
 
@@ -342,13 +323,13 @@ local Parquet cache 以 dataset IDs 分層，若目錄存在 `_SUCCESS` 便直�
 python -m recsys_tfb training --env local
 ```
 
-省略版本旗標時，CLI 會先解析 `data/dataset/latest`，再使用該 base 下的 train `latest`；若 calibration 啟用，也會解析該 base 下的 calibration `latest`。
+省略版本旗標時，CLI 會先解析 `data/dataset/latest`，再使用該 base 下的 train `latest`。
 
 完整執行適合：
 
 - 第一次訓練某組 dataset 與 training 設定
 - 上游 dataset version 改變
-- 修改 objective、HPO、sample weights、feature selection、calibration 或 final strategy
+- 修改 objective、HPO、sample weights、feature selection 或 final strategy
 - 不確定既有模型產物或 cache 是否完整
 
 ### 4.3 指定上游資料版本
@@ -358,15 +339,6 @@ python -m recsys_tfb training \
   --env production \
   --base-dataset-version <base_version> \
   --train-variant <train_variant>
-```
-
-啟用 calibration 時可再指定：
-
-```bash
-python -m recsys_tfb training \
-  --base-dataset-version <base_version> \
-  --train-variant <train_variant> \
-  --calibration-variant <calibration_variant>
 ```
 
 固定版本適合重現舊實驗、比較不同 training 設定，或避免 `latest` 在排程期間被其他 dataset run 更新。指定的 base version 不存在時 CLI 會立即中止；variant 也必須存在於該 base 目錄下。
@@ -392,27 +364,18 @@ python -m recsys_tfb training \
 ```
 
 `--from-node` 使用拓撲順序語意：執行指定 node，以及拓撲序中位於其後的所有 nodes，不只 dependency descendants。
-從 `finalize_model` 接續通常用於已完成 HPO，但需要重做 final model、calibration、test 預測、指標或診斷的情況。
+從 `finalize_model` 接續通常用於已完成 HPO，但需要重做 final model、test 預測、指標或診斷的情況。
 
 在前一次完整 run 成功且 catalog 產物仍存在時，框架預期直接讀取 `best_params`、`best_iteration` 與 `hpo_best_model`，不重跑 `tune_hyperparameters`。
-它仍會自動執行較便宜的 `select_features`、train/train-dev/test cache handle nodes；calibration 啟用時也會執行 calibration cache handle。
+它仍會自動執行較便宜的 `select_features`、train/train-dev/test cache handle nodes。這組允許集合釘在 `tests/test_pipelines/test_resume_contracts.py`。
 
 若 HPO 的三個必要產物有任何一個不存在，slice planner 會自動補跑其 producer，可能一路回到 `prepare_lgb_train_inputs` 與 `tune_hyperparameters`。是否真的跳過 HPO，應以 `--dry-run` 當次顯示的計畫為準。
-
-啟用 calibration 時另有一個更後面的接續點：
-
-```bash
-python -m recsys_tfb training \
-  --from-node calibrate_model
-```
-
-只想換 calibration 方法、或重做 calibration 之後的預測與診斷時用它。`finalize_model` 的未校準模型已落地成 `trained_model`，所以**不會**被拉回重跑——`final_model_strategy: refit_on_full` 下那會是一次完整 refit。自動補跑的只有 `select_features` 與 calibration／test 的 cache handle nodes（test handle 是被後面的 `predict_and_write_test_predictions` 需要的，不是 calibration 需要）。這組允許集合釘在 `tests/test_pipelines/test_resume_contracts.py`。
 
 ### 4.6 只執行單一 node
 
 ```bash
 python -m recsys_tfb training \
-  --only-node calibrate_model
+  --only-node compute_feature_importance
 ```
 
 `--only-node` 適合除錯或重新產生單一產物；必要輸入不存在時，仍會自動補入最小上游集合，但不會執行該 node 的下游 consumers。
@@ -444,18 +407,14 @@ python -m recsys_tfb training \
 
 ## 5. 執行流程
 
-calibration nodes 只有在 `training.calibration.enabled: true` 時加入。
-
 | 階段 | node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
 | 特徵選擇 | `select_features` | `preprocessor`、parameters | 套用 training-stage feature exclusion；只餵給下方**訓練**模型的 node，診斷 node 不吃（見表後說明） | `preprocessor_view` |
 | Local cache | `cache_train_model_input`、`cache_train_dev_model_input`、`cache_val_model_input`、`cache_test_model_input` | 各 split Hive table | 將指定 dataset partitions 複製為 driver-local Parquet | 各 split `ParquetHandle`；`cache_test_model_input` 例外，回傳 `{snap_date: ParquetHandle}` 對應（一月一目錄） |
-| Calibration cache | `cache_calibration_model_input` | calibration Hive table | 啟用時建立 calibration local cache | calibration `ParquetHandle` |
 | 模型格式 | `prepare_lgb_train_inputs` | train/train-dev handles、preprocessor view | 由 adapter 建立可重用訓練格式；LightGBM 為 `.bin` | train/train-dev model handles |
 | 權重報告 | `persist_sample_weight_report` | train handle、preprocessor | 比對 weight 設定與實際 train 值（node 只回傳診斷，`sample_weight_report.json` 由 catalog 寫出） | `sample_weight_report` |
 | HPO | `tune_hyperparameters` | train/train-dev model handles、val handle | train 訓練、train-dev early stop、val 排序指標選模 | `best_params`、`best_iteration`、`hpo_best_model` |
-| 最終模型 | `finalize_model` | HPO 產物、train/train-dev handles | 沿用 HPO best 或在 train + train-dev refit | 未校準模型 |
-| 機率校準 | `calibrate_model` | 未校準模型、calibration handle | fit sigmoid 或 isotonic calibrator | 最終 `model` |
+| 最終模型 | `finalize_model` | HPO 產物、train/train-dev handles | 沿用 HPO best 或在 train + train-dev refit | `model` |
 | Test 預測 | `predict_and_write_test_predictions` | model、test handles | 逐月判斷是否需要預測，需要的月份再逐 `(time, item)` partition 預測並寫入 Hive | `training_eval_predictions`、`predict_manifest` |
 | Test 指標 | `compute_test_mAP_spark` | test 預測 | 使用 Spark 計算整體 mAP 與 per-item attribution | `evaluation_results` |
 | 特徵統計 | `compute_feature_statistics` | train handle、model、`preprocessor` | 抽樣計算 null、distinct 與數值分布 | `feature_statistics` |
@@ -469,7 +428,7 @@ calibration nodes 只有在 `training.calibration.enabled: true` 時加入。
 
 **診斷 node 為什麼吃 `preprocessor` 而不是 `preprocessor_view`。** `preprocessor_view` 只活在記憶體裡，沒有 catalog 條目；吃它的 node 一定要連 `select_features` 一起重跑才叫得動。診斷 node 都在模型產出**之後**才跑，所以改問兩個已落地的產物：**用哪些特徵、什麼順序問模型**（`model.feature_names()`），**怎麼編碼問 `preprocessor`**。這五條邊因此消失了（[ADR-0014](../adr/0014-training-modules-split-by-role.md) 決定 7）。
 
-**實際省下的是 HPO。** `compute_feature_statistics` 從前沒有 model 依賴，拓撲序把一個寫進 `data/models/<model_version>/` 的診斷排到「產出模型的 node」之前；`--from-node` 是「跑指定 node 與其後全部」，於是為了重算一份 null rate 的 JSON，`prepare_lgb_train_inputs`、`tune_hyperparameters`、`finalize_model` 全被掃回來。實測 `--from-node compute_feature_statistics` **從 18 個 node 降到 13 個**，不再重跑 HPO。（issue #233 之後再降到 **11 個**——2026-08-31 於本機 `--env local`、calibration 啟用的 21 節點 pipeline 上跑 `--from-node compute_feature_statistics --dry-run` 量的，輸出原文是 `[plan] running 11 of 21 nodes`。`--list-nodes` 不能與 `--from-node` 併用，它印的是每個 node 的 auto-included 清單，不是總數。）
+**實際省下的是 HPO。** `compute_feature_statistics` 從前沒有 model 依賴，拓撲序把一個寫進 `data/models/<model_version>/` 的診斷排到「產出模型的 node」之前；`--from-node` 是「跑指定 node 與其後全部」，於是為了重算一份 null rate 的 JSON，`prepare_lgb_train_inputs`、`tune_hyperparameters`、`finalize_model` 全被掃回來。實測 `--from-node compute_feature_statistics` **從 18 個 node 降到 13 個**，不再重跑 HPO。（issue #233 之後再降到 **11 個**——2026-08-31 於本機 `--env local` 量的，當時 calibration 啟用、pipeline 有 21 個 node（#411 之後是 20 個），`--from-node compute_feature_statistics --dry-run` 的輸出原文是 `[plan] running 11 of 21 nodes`。`--list-nodes` 不能與 `--from-node` 併用，它印的是每個 node 的 auto-included 清單，不是總數。）
 
 **再省下的是預測那一步。** `predict_manifest` 也落地之後（issue #233），`--from-node compute_feature_statistics` 不再把 `predict_and_write_test_predictions` 拉回來，也就不再連帶拉回 `select_features`（predict node 是**套用**模型，吃 `preprocessor_view` 對它是正確的，所以只要它在切片裡，`select_features` 就跟著在）。省下的不是零：那個 node 就算判定全部月份都跳過、一列都不寫，開頭仍要把整張 test cache 的兩個字串欄拉進 driver 算 distinct（生產規模約 2.2 億列）。`compute_test_mAP_spark` 與 `select_shap_population` 因此變成**零補跑**的接續點。
 
@@ -492,16 +451,16 @@ calibration nodes 只有在 `training.calibration.enabled: true` 時加入。
 
 （[ADR-0014](../adr/0014-training-modules-split-by-role.md) 決定 7 的驗收條件，兩條分開測。）
 
-實務差別有兩處，方向相反：`--only-node compute_feature_statistics` 現在需要一個 `model_version` 範圍的輸入（變貴）；`--from-node compute_feature_statistics` 不再掃回 HPO（變便宜，見上）。另外 `--from-node calibrate_model` 會多重建一次 train local cache。
+實務差別有兩處，方向相反：`--only-node compute_feature_statistics` 現在需要一個 `model_version` 範圍的輸入（變貴）；`--from-node compute_feature_statistics` 不再掃回 HPO（變便宜，見上）。
 
 test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 test features 收進記憶體。
-寫入 `training_eval_predictions` 的資料包含 entity、`score`、`score_uncalibrated`、label，以及作為 Hive partitions 的 time、item、`model_version`。calibration 關閉時，`score_uncalibrated` 與 `score` 相同。
+寫入 `training_eval_predictions` 的資料包含 entity、`score`、`score_uncalibrated`、label，以及作為 Hive partitions 的 time、item、`model_version`。`score_uncalibrated` 恆等於 `score`：已 deprecated，欄位保留只為維持表的欄數，#412 會拿掉它。
 
 **逐月增量**：predict 會跳過已經預測完整的月份，所以多評估一個月的成本正比於新月份，而不是累積的總月份數。權威的月份清單是 `dataset.test_snap_dates`（cache 只是資料來源）；某月的完成判準是「該月已寫出的 item partition 集合 ＝ 該月 cache 中出現的 distinct item」——寫到一半中斷、或事後新增一個 item，都會讓該月不再完整而被重做。可以跳過是因為 `(model_version, snap_date)` 的預測是不可變產物：`model_version` 已把定義模型的一切雜湊進去，重算必然得到相同結果。「已存在哪些 partition」由 `training_eval_predictions` 這個 catalog dataset 物件回答（`HiveTableDataset.existing_partition_values()`，metastore-only 查詢，套用該表的 `partition_filter` 因此天然限縮在目前 `model_version`）——predict 拿不到 SparkSession，這是唯一的路。
 
 `predict_manifest` 因此帶三份清單：`months_processed`／`months_skipped`／`months_rebuilt`（後者是被 `--rebuild-dates` 強制重做的子集），落地在 `data/models/<model_version>/predict_manifest.json`——log 留下的是計數，而一個靜默過期的月份跟一個正確跳過的月份在計數上長得一模一樣，所以清單要事後查得到（issue #233）。同一份 manifest 的 `snap_dates`／`items`／`n_rows_written` 講的是**這一次寫了什麼**，不是這個 test set 有哪些月——全部月份都被跳過時它們是空的、`0`，這是正確的。指標不受影響：`compute_test_mAP_spark` 是從 Hive 讀回整個 `model_version` 的預測，被跳過的月份的 partition 本來就還在表裡。跳過的判準是「存在」不是「新鮮」，所以上游對舊月份回補之後要用 `--rebuild-dates` 指名重算——它同時丟掉該月的本機 parquet cache 並重新預測；動線見 [adding-an-eval-month.md](../operations/user-guides/adding-an-eval-month.md)。
 
-`compute_test_mAP_spark` 會從 Hive 讀回目前 `model_version` 的預測並計算排序指標。若模型已校準，也會平行計算原始未校準 score 的結果，讓使用者確認 calibration 是否改變排序表現。
+`compute_test_mAP_spark` 會從 Hive 讀回目前 `model_version` 的預測並計算排序指標。指標只有一套（#411 之前另有一段「校準前」指標）。
 
 ## 6. 產物與驗收
 
@@ -512,7 +471,6 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 | 最終模型 | `model.txt`、`model_meta.json` | `data/models/<model_version>/` |
 | HPO 結果 | `best_params.json`、`best_iteration.json` | `data/models/<model_version>/` |
 | HPO best model | `hpo/model.txt`、`hpo/model_meta.json` | `data/models/<model_version>/hpo/` |
-| 未校準模型（僅 calibration 啟用時） | `trained/model.txt`、`trained/model_meta.json` | `data/models/<model_version>/trained/` |
 | Test 指標 | `evaluation_results.json` | `data/models/<model_version>/` |
 | 權重診斷 | `sample_weight_report.json` | `data/models/<model_version>/` |
 | Test 預測的月份決定 | `predict_manifest.json`（`months_processed`／`months_skipped`／`months_rebuilt` 三份清單） | `data/models/<model_version>/` |
@@ -525,9 +483,11 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 
 SHAP PNG 落於 `diagnostics/summary/` 子目錄：全域 beeswarm 為 `summary/shap_summary_global.png`；`per_item_beeswarm: true` 時每個 item 另有 `summary/per_item/shap_summary__<item>.png`（item 名稱以正規表達式安全化，特殊字元轉底線）。beeswarm 同時呈現 SHAP 幅度與方向。象限案例圖見下方象限診斷小節。
 
-`manifest.json` 的 `artifacts` 清單只列版本目錄**第一層**檔案，**不含 `hpo/`、`trained/` 子目錄**（`hpo/model.txt`、`hpo/model_meta.json`、`trained/model.txt`、`trained/model_meta.json`）——稽核 manifest 時請知悉。`sample_weight_report.json` 與 `predict_manifest.json` 在第一層，所以它們在清單裡。
+`manifest.json` 的 `artifacts` 清單只列版本目錄**第一層**檔案，**不含 `hpo/` 子目錄**（`hpo/model.txt`、`hpo/model_meta.json`）——稽核 manifest 時請知悉。`sample_weight_report.json` 與 `predict_manifest.json` 在第一層，所以它們在清單裡。
 
-`model_meta.json` 會記錄 adapter 與 calibration metadata，使 inference 載入時能正確還原模型包裝。`hpo_best_model` 與（calibration 啟用時的）`trained_model` 各自放在獨立的 `hpo/`／`trained/` 子目錄，避免它們的 sidecar 與最終模型互相覆寫——sidecar 帶著 `calibrated` 旗標，覆寫會決定模型之後被怎麼**載入**。
+`model_meta.json` 記錄 adapter 與演算法名稱，inference 載入時據此選用正確的 adapter。`hpo_best_model` 放在獨立的 `hpo/` 子目錄，避免它的 sidecar 與最終模型互相覆寫——sidecar 決定模型之後被怎麼**載入**。
+
+舊版產出的模型若帶著 `"calibrated": true`，新版載入時會直接 raise（訊息說明校準器已隨 #411 移除，請用新版重訓）；`false` 或沒有這個鍵的模型照常載入。
 
 training 不會建立或更新 `best` model alias。模型必須通過人工審核後，才由 `scripts/promote_model.py` 將指定 `model_version` 設為 inference 預設版本。
 
@@ -535,14 +495,13 @@ training 不會建立或更新 `best` model alias。模型必須通過人工審�
 
 執行完成後至少確認：
 
-1. log 中的 `base_dataset_version`、`train_variant_id`、可選的 `calibration_variant_id`、`model_version` 與 `search_id` 符合預期。
+1. log 中的 `base_dataset_version`、`train_variant_id`、`model_version` 與 `search_id` 符合預期。
 2. `manifest.json` 記錄的上游 dataset IDs 與本次指定版本一致，且 artifacts 清單完整。
 3. `model.txt`、`model_meta.json`、`best_params.json`、`best_iteration.json` 與 `evaluation_results.json` 均存在。
 4. `sample_weight_report.json` 沒有未預期的 `unmatched_keys`。
 5. `training_eval_predictions` 的本次 `model_version` partition 有資料，entity、time、item 與 label 範圍合理。
 6. `evaluation_results.json` 的 `n_queries` 大於零，`overall_map` 與 per-item attribution 可合理解讀。
 7. diagnostics 開啟時，檢查 dead features、高 null／single-value features，以及 SHAP 抽樣覆蓋是否足夠；`item_idiosyncrasy` 中偏離度高的 item 表示共用模型依賴不同特徵組合，是評估 per-item 或兩階段模型的起點；`top_features_positive` 可對照申辦客戶與整體候選的驅動特徵差異。
-8. 若啟用 calibration，比較 calibrated 與 uncalibrated 指標，並確認業務下游確實需要機率語意。
 
 範例查詢：
 
@@ -566,7 +525,6 @@ ORDER BY snap_date, prod_name;
 model-defining training 設定
 + base_dataset_version
 + train_variant_id
-+ calibration_variant_id（calibration 啟用時）
 ```
 
 model-defining training 設定只取 `parameters_training.yaml` 的 `training:` 區塊，並排除 `training.algorithm_params` 下的 `verbosity`、`log_period` 與 `num_threads`。因此：
@@ -583,11 +541,9 @@ model-defining training 設定只取 `parameters_training.yaml` 的 `training:` 
 |---|:---:|:---:|---|
 | `base_dataset_version` | ✓ | ✓ | val、preprocessor 或基礎 model input 改變（**test 月份的增減不在其中**——它已退出 base 的 hash payload，見 ADR-0001） |
 | `train_variant_id` | ✓ | ✓ | train/train-dev 抽樣或切分改變 |
-| `calibration_variant_id` | ✓ | ✓ | 僅 calibration 啟用時加入 |
 | `training.algorithm` | ✓ | ✓ | 演算法改變 |
 | `algorithm_params.objective`、`metric` 與其他模型參數 | ✓ | ✓ | 改變 trial 的模型或評分行為 |
 | `algorithm_params.verbosity`、`log_period`、`num_threads` |  |  | 明確排除的 logging／執行設定 |
-| `calibration.enabled`、`calibration.method` | ✓ | ✓ | 目前整個 calibration 設定皆位於 hashed `training:` block |
 | `sample_weight_keys`、`sample_weights` | ✓ | ✓ | 改變 train/train-dev 權重 |
 | `hpo_objective` | ✓ | ✓ | 改變 val 上的 trial 選擇方式 |
 | `n_trials` | ✓ |  | 新 model version 可延用相同 HPO study 並補 trials |
@@ -628,8 +584,6 @@ HPO 恢復要求 `data/models/_hpo` 位於可持久保存的 driver disk。若�
 
 - catalog 的 `exists()` 只能證明檔案或 partition 存在，不能證明它仍與目前程式碼、來源資料或未納入 hash 的設定一致。
 - `--from-node finalize_model` 要跳過 HPO，必須同時存在 `best_params`、`best_iteration` 與 `hpo_best_model`；缺少任一項都可能自動補跑 HPO。
-- 同理，`--from-node calibrate_model` 要跳過 final model，必須存在 `trained_model`（`trained/model.txt` ＋ `trained/model_meta.json`）；缺了就會把 `finalize_model` 拉回重跑。
-- `--from-node calibrate_model` 另外會重建 **train** local cache（`cache_train_model_input`）。原因是 `compute_feature_statistics` 現在吃 `model`，因而排在 `calibrate_model` 之後（先前它沒有 model 依賴，拓撲序可以把它排到模型產出之前），它的 train handle 就被帶進這個切片。成本是一次 Hive→本機複製，不是重訓。
 - HPO 跑到一半的恢復由 `search_id` journal/checkpoint 處理；HPO node 已完成後跳到 `finalize_model` 則由 catalog-persisted outputs 處理。兩者是不同層次的恢復機制。
 - cache node 的輸出 handle 是記憶體物件，因此接續時會重新執行；底層 local Parquet 有 `_SUCCESS` 時只建立 handle，不會重新從 HDFS 複製。
 - 沒有輸出的設定閘或 sink node，在切片起點之前不會自動重跑。資料或設定來源有疑慮時應使用 full run。
@@ -648,10 +602,9 @@ HPO 恢復要求 `data/models/_hpo` 位於可持久保存的 driver disk。若�
 | 只增加 `n_trials` | 新 `model_version`，相同 `search_id` | 完整啟動 training，沿用 study 補足 trials |
 | feature selection 或 sample weights | 新 `model_version` 與 `search_id` | 不需重建 dataset；完整重跑 training |
 | weight key 新增非既有 model input 欄位 | dataset version 也需更新 | 先加入 `carry_columns` 並重跑 dataset，再 training |
-| calibration 開關或方法 | 新 `model_version` 與 `search_id` | 確認 dataset calibration 產物後完整重跑 |
 | final model strategy | 新 `model_version` 與 `search_id` | 完整重跑；目前此設定也會建立新的 HPO search |
 | diagnostics、MLflow、cache 或 Spark 設定 | 版本不變 | 依變更目的 full run 或從適當 node 接續，避免覆寫同版但語意不同的診斷 |
-| 上游 base/train/calibration variant | 新 `model_version` 與 `search_id` | 使用新 IDs 完整重跑 training |
+| 上游 base/train variant | 新 `model_version` 與 `search_id` | 使用新 IDs 完整重跑 training |
 | 全域 `random_seed` | 目前版本與 search ID 不變 | 人工視為新實驗；避免直接延用既有 HPO study |
 | training Python 程式碼 | 版本不一定改變 | 程式修正可能覆寫相同 model version，應記錄 git commit 並重新驗收 |
 
@@ -662,7 +615,7 @@ training 版本描述的是模型設定與上游資料身分，不是完整的�
 | 症狀或訊息 | 常見原因 | 檢查與修正 |
 |---|---|---|
 | 找不到 base dataset version | 指定 ID 錯誤，或 dataset 尚未完成 | 檢查 `data/dataset/<base_version>/manifest.json` 與 `latest` |
-| 找不到 train/calibration variant | variant 不屬於指定 base，或 calibration dataset 未建立 | 到該 base 目錄確認 `train_variants`／`calibration_variants` |
+| 找不到 train variant | variant 不屬於指定 base | 到該 base 目錄確認 `train_variants` |
 | ranking objective 搭配 binary metric | `lambdarank`／`rank_xendcg` 仍使用 `binary_logloss` | 改用 `ndcg`、`map`，或省略 metric 使用預設 `ndcg` |
 | `training.search_space` 格式錯誤 | 使用舊 dict 格式、重複 name、bound 不合法或用了尚未支援的 `when` | 改為 ParamSpec 有序 list，依錯誤訊息逐項修正 |
 | feature selection excludes item | item 被列入 `training.feature_selection.exclude` | 移除 item；item 必須保留為模型特徵 |
@@ -675,8 +628,6 @@ training 版本描述的是模型設定與上游資料身分，不是完整的�
 | HPO 每次都從頭開始 | `search_id` 已改變、checkpointing 關閉或 driver disk 不持久 | 比對 log 中 search ID，確認 `data/models/_hpo/<search_id>` 存在 |
 | HPO 已達 n_trials 但仍重訓一次 | study 有紀錄但最佳 checkpoint 不可讀 | 檢查 checkpoint 完整性；框架會以 study best params 做一次 recovery refit |
 | `--from-node finalize_model` 仍補跑 HPO | 三個 HPO catalog outputs 有缺漏 | 先用 `--dry-run` 查看 auto-included，修復或重建缺少的產物 |
-| calibration variant 或 input 不存在 | training 開啟 calibration，但 dataset 未建立對應 split | dataset 啟用 calibration 並完整產出後再 training |
-| calibration 後排序指標改變很多 | 單調性、資料量或方法不符合預期，或比較母體不同 | 比較 `evaluation_results` 中 calibrated／uncalibrated 結果並檢查 calibration split |
 | `n_queries = 0` 或 test 預測為空 | test input 沒資料、版本 partition 錯誤，或沒有可評估正例 query | 查 dataset test model input 與 `training_eval_predictions` partitions |
 | SHAP 過慢或記憶體不足 | `sample_rows × n_trees` 太大，或 feature 太多 | 降低 `sample_rows`、`top_k`、`max_budget`，或暫時關閉 SHAP |
 | MLflow 失敗但 training 顯示完成 | `mlflow.strict: false` 為 best-effort 模式 | 檢查 warning 與 tracking URI；需要硬性追蹤時設 `strict: true` |
@@ -696,7 +647,6 @@ training 版本描述的是模型設定與上游資料身分，不是完整的�
 - `random_seed` 會影響模型與 HPO，但目前不納入 `model_version` 或 `search_id`。
 - `num_threads` 被排除於 model version；LightGBM 不保證不同 thread count 下完全 bitwise identical，因此正式環境應固定 core 設定。
 - test evaluation 使用 dataset 已排除零正例 query groups 的母體，不代表 inference 的完整 entity 母體。
-- calibration 只能改善 score 的機率解讀，不保證提升排序指標；對 LTR score 的機率化也需以獨立資料與業務用途驗證。
 - training 成功不代表模型已核准上線。仍需檢查 test 指標、per-item 表現、診斷與業務限制，再人工 promotion。
 
 ### 9.1 建矩陣這一步的峰值，以及兩個觀測陷阱
@@ -752,7 +702,7 @@ batch 由 `STREAM_BATCH_BYTES`（64 MiB）除以欄寬決定列數，不是寫�
 ### 9.2 HPO 期間的 val 矩陣：改佔 disk，不佔記憶體（#285）
 
 `tune_hyperparameters` 是**唯一**抱著一份矩陣跨越整個搜尋的節點——其他讀矩陣的地方（`.bin`
-準備、refit、校準）都是一次 fit 就放掉。生產規模上 val 矩陣是 **37～89 GiB**，而 driver 只有
+準備、refit）都是一次 fit 就放掉。生產規模上 val 矩陣是 **37～89 GiB**，而 driver 只有
 128 GiB，所以 HPO 的常駐記憶體會直接被 val 的列數決定。
 
 **做法**：val 矩陣從 `np.empty` 改成映射一個檔案（`src/recsys_tfb/io/disk_matrix.py`），每個

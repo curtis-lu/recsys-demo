@@ -148,21 +148,13 @@ class TestTrainingPipeline:
         """The node stays: dropping the diagnosis edges does not orphan it.
 
         Its consumer list shrinking to zero would be the signal to delete it; the
-        training nodes above keep it alive — five by default, six once
-        calibration adds `calibrate_model`, which wraps a model and so needs the
-        same view the model was fitted under.
+        training nodes above keep it alive.
         """
         readers = {
             n.name for n in create_pipeline().nodes
             if "preprocessor_view" in n.inputs
         }
         assert readers == set(self.TRAINING_VIEW_CONSUMERS)
-
-        cal_readers = {
-            n.name for n in create_pipeline(enable_calibration=True).nodes
-            if "preprocessor_view" in n.inputs
-        }
-        assert cal_readers == set(self.TRAINING_VIEW_CONSUMERS) | {"calibrate_model"}
 
     def test_diagnosis_nodes_read_landed_artifacts_not_the_memory_only_view(self):
         """Every diagnosis input is addressable, which is what makes
@@ -213,43 +205,6 @@ class TestTrainingPipeline:
         pipeline = create_pipeline()
         names = [n.name for n in pipeline.nodes]
         assert names.index("select_features") < names.index("prepare_lgb_train_inputs")
-
-    # -- Calibration-enabled pipeline tests --
-
-    def test_calibration_pipeline_node_count(self):
-        pipeline = create_pipeline(enable_calibration=True)
-        # select_features + 5 cache nodes + prepare_lgb
-        # + persist_group_filter_report + persist_sample_weight_report
-        # + tune + finalize + calibrate
-        # + predict_and_write + compute_test_mAP_spark
-        # + compute_feature_statistics + compute_feature_importance + compute_gain_ledger
-        # + compute_shap_diagnostics
-        # + select_shap_population + compute_quadrant_profiles + compute_quadrant_cases
-        # + log
-        assert len(pipeline.nodes) == 22
-
-    def test_calibration_pipeline_has_calibrate_node(self):
-        pipeline = create_pipeline(enable_calibration=True)
-        names = [n.name for n in pipeline.nodes]
-        assert "calibrate_model" in names
-        assert "cache_calibration_model_input" in names
-
-    def test_calibration_pipeline_inputs(self):
-        pipeline = create_pipeline(enable_calibration=True)
-        assert "calibration_model_input" in pipeline.inputs
-
-    def test_calibration_pipeline_trained_model_intermediate(self):
-        pipeline = create_pipeline(enable_calibration=True)
-        assert "trained_model" not in pipeline.inputs
-        assert "trained_model" in pipeline.outputs
-
-    def test_calibration_pipeline_topological_order(self):
-        pipeline = create_pipeline(enable_calibration=True)
-        names = [n.name for n in pipeline.nodes]
-        assert names.index("cache_calibration_model_input") < names.index("calibrate_model")
-        assert names.index("tune_hyperparameters") < names.index("finalize_model")
-        assert names.index("finalize_model") < names.index("calibrate_model")
-        assert names.index("calibrate_model") < names.index("predict_and_write_test_predictions")
 
 
 class TestSampleWeightReportIsACatalogArtifact:

@@ -406,6 +406,22 @@ Layer 1 — config-static (implemented here; aggregated by
   ``--dry-run`` included — the predicate's docstring says why that is
   intended. No runtime backstop in the node, like A24/A28. Issue #133 calls
   this A29; that code was taken by the time it was built.
+* A37 — a conf still spelling a config key that named the calibration
+  mechanism removed in #411. Nothing reads these keys any more, so left in
+  place they produce an uncalibrated model, a successful run, and no signal
+  that the setting was ignored. **The key's presence is the failure, whatever
+  the value**: they sit inside the subtrees hashed into
+  ``base_dataset_version`` / ``model_version``, so a conf that keeps
+  ``calibration: {enabled: false}`` computes different version IDs than one
+  that deleted it, and requiring deletion is what makes two upgraded conf trees
+  agree. Every retired key is listed in one message — the fix is a single edit.
+  Keys: :data:`RETIRED_CALIBRATION_KEYS`, which grows as the removal lands
+  (#413 retires the two the calibrator read; #414 adds the dataset-side ones).
+  Predicate: ``retired_calibration_key_errors``, aggregated by
+  ``validate_config_consistency`` — unlike A24/A36 the harm belongs to no
+  single pipeline, because the version IDs every command resolves are computed
+  from these subtrees. Not a migration tool with a delete-by date, unlike A33:
+  the mechanism is gone, not renamed.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
@@ -1579,6 +1595,78 @@ def legacy_evaluation_key_errors(parameters: dict) -> list[str]:
     ]
 
 
+#: Config keys that named the calibration mechanism removed in #411, written as
+#: dotted paths from the top of ``parameters``.
+#:
+#: **This is not A33's migration tool with a delete-by date.** The keys do not
+#: point at a renamed setting, they point at a mechanism that no longer exists
+#: anywhere in the framework, so the check stays for as long as anyone might
+#: still be carrying a pre-#411 conf.
+#:
+#: The list grows with the removal: T1 (#413) retires the two keys the
+#: calibrator itself read, and the dataset-side keys join them when the
+#: calibration data split goes (#414).
+RETIRED_CALIBRATION_KEYS: tuple[str, ...] = (
+    "training.calibration",
+    "inference.use_calibration",
+)
+
+
+def _dotted_key_present(parameters: Mapping, dotted: str) -> bool:
+    """Is ``dotted`` (e.g. ``"training.calibration"``) spelled in ``parameters``?
+
+    Presence of the *key*, never the truth of its value: ``None`` and ``False``
+    are spelled, and that is what A37 is asking. Any non-mapping on the way down
+    means the path is not spelled at all — a conf that writes ``training: null``
+    has no ``training.calibration`` to delete.
+    """
+    node = parameters
+    *parents, leaf = dotted.split(".")
+    for part in parents:
+        if not isinstance(node, Mapping):
+            return False
+        node = node.get(part)
+    return isinstance(node, Mapping) and leaf in node
+
+
+def retired_calibration_key_errors(parameters: dict) -> list[str]:
+    """A37 — a conf still spelling a calibration key after #411 removed it.
+
+    The failure it replaces is silent. Nothing reads these keys any more, so an
+    operator who left ``training.calibration.enabled: true`` in place gets an
+    uncalibrated model, a successful run, and no signal at all that the setting
+    they wrote was ignored.
+
+    **Presence is the failure, whatever the value** — including ``false`` and an
+    empty block. The whole ``training:`` subtree is hashed into
+    ``model_version`` and the whole ``dataset:`` subtree into
+    ``base_dataset_version``, so a conf that keeps a disabled block computes
+    different version IDs than one that deleted it. Requiring deletion is what
+    makes two upgraded conf trees agree.
+
+    One message listing every key, not one per key: the fix is a single edit,
+    and a per-key message would make an operator re-run to discover the next
+    one.
+    """
+    if not isinstance(parameters, Mapping):
+        return []
+    present = [
+        dotted for dotted in RETIRED_CALIBRATION_KEYS
+        if _dotted_key_present(parameters, dotted)
+    ]
+    if not present:
+        return []
+    return [
+        "A37: calibration was removed from the framework (#411), and the "
+        "config key(s) " + ", ".join(repr(k) for k in present) + " are read by "
+        "nothing. Delete them; there is no replacement setting. The value does "
+        "not matter — `false` and an empty block are rejected too, because "
+        "these keys sit inside the subtrees hashed into base_dataset_version / "
+        "model_version, so leaving one behind computes a different version ID "
+        "than deleting it."
+    ]
+
+
 #: The ``evaluation.report.sections`` switches the report reads: one name per
 #: ``_section_on(parameters, name)`` call in ``evaluation/report_builder.py``,
 #: which refuses any name not listed here (A34). ``baseline`` and
@@ -1766,6 +1854,8 @@ def validate_config_consistency(parameters: dict) -> None:
     # A33 is a migration-period check; it leaves with the migration (see
     # A33 in the module docstring).
     errors.extend(legacy_evaluation_key_errors(parameters))
+
+    errors.extend(retired_calibration_key_errors(parameters))
 
     if errors:
         raise ConfigConsistencyError(

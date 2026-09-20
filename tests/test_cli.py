@@ -3570,3 +3570,88 @@ class TestInferenceGridA27:
             mock_spark.assert_called()
         finally:
             os.chdir(old_cwd)
+
+
+class TestRetiredCalibrationKeysBlockEveryCommand:
+    """A37 at the CLI entry: a conf that still spells a calibration key stops
+    the run before the 2-4 minute Spark cold start, naming every key at once.
+
+    Calibration was removed in #411. The failure this replaces is the quiet
+    one: the keys simply stop being read, so an operator who left
+    ``training.calibration.enabled: true`` in place would get an uncalibrated
+    model and no indication that the setting had been ignored.
+    """
+
+    def _invoke(self, tmp_path, argv):
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session"
+            ) as mock_spark:
+                result = runner.invoke(app, argv)
+            return result, mock_spark
+        finally:
+            os.chdir(old_cwd)
+
+    def test_training_key_exits_before_spark_starts(self, tmp_path):
+        _setup_conf(
+            tmp_path,
+            params_training={"training": {"calibration": {"enabled": True}}},
+        )
+        result, mock_spark = self._invoke(tmp_path, ["training"])
+        assert result.exit_code != 0
+        assert "training.calibration" in result.output
+        mock_spark.assert_not_called()
+
+    def test_inference_key_exits_before_spark_starts(self, tmp_path):
+        _setup_conf(
+            tmp_path,
+            params_inference={"inference": {"use_calibration": True}},
+        )
+        result, mock_spark = self._invoke(tmp_path, ["inference"])
+        assert result.exit_code != 0
+        assert "inference.use_calibration" in result.output
+        mock_spark.assert_not_called()
+
+    def test_a_disabled_block_is_still_blocked(self, tmp_path):
+        # The key's presence is the failure, not its value: it sits inside the
+        # subtree hashed into model_version, so leaving it behind would make
+        # two upgraded conf trees compute different version IDs.
+        _setup_conf(
+            tmp_path,
+            params_training={"training": {"calibration": {"enabled": False}}},
+        )
+        result, mock_spark = self._invoke(tmp_path, ["training"])
+        assert result.exit_code != 0
+        assert "training.calibration" in result.output
+        mock_spark.assert_not_called()
+
+    def test_every_retired_key_is_named_in_one_run(self, tmp_path):
+        # Collect-all: one edit fixes the conf, instead of one run per key.
+        _setup_conf(
+            tmp_path,
+            params_training={"training": {"calibration": {"enabled": True}}},
+            params_inference={"inference": {"use_calibration": False}},
+        )
+        result, mock_spark = self._invoke(tmp_path, ["training"])
+        assert result.exit_code != 0
+        assert "training.calibration" in result.output
+        assert "inference.use_calibration" in result.output
+        mock_spark.assert_not_called()
+
+    def test_a_conf_without_the_keys_reaches_the_cold_start(self, tmp_path):
+        # The discriminating half: without it every assertion above is also
+        # satisfied by a gate that rejects every training config outright.
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {
+                "sample_ratio": 0.1,
+                "train_dev_ratio": 0.2,
+                "train_snap_dates": ["2025-12-31"],
+                "test_snap_dates": ["2026-01-31"],
+            }},
+            params_training={"training": {"objective": "binary"}},
+        )
+        _, mock_spark = self._invoke(tmp_path, ["dataset"])
+        mock_spark.assert_called()

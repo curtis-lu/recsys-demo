@@ -89,41 +89,6 @@ RESUME_CONTRACTS = {
             "cache_test_model_input",
         },
     },
-    # calibration-enabled training is a real CLI path (training.calibration.enabled);
-    # its finalize_model resume additionally rebuilds the calibration handle.
-    ("training", (("enable_calibration", True),)): {
-        "finalize_model": {
-            "select_features",
-            "cache_train_model_input",
-            "cache_train_dev_model_input",
-            "cache_test_model_input",
-            "cache_calibration_model_input",
-        },
-        # The resume point `trained_model`'s catalog entry buys (ADR-0014,
-        # "two resume points that got cheaper"): only cheap view/handle
-        # builders may re-run. Un-land `trained_model` and finalize_model
-        # comes back -- under final_model_strategy: refit_on_full that is a
-        # full refit, which is exactly the cost this contract exists to see.
-        # cache_test_model_input is here for a different reason than the two
-        # above it: the forward slice keeps every node AFTER calibrate_model
-        # too, so the test handle is pulled in by predict_and_write_test_
-        # predictions downstream, not by anything calibrate_model needs.
-        # cache_train_model_input joined that second group when
-        # compute_feature_statistics gained its `model` input (ADR-0014
-        # decision 7). Before that edge existed the node had no model
-        # dependency at all, so the topological sort was free to place a
-        # diagnosis of `data/models/${model_version}/` *ahead* of the node that
-        # produces the model; it now lands after calibrate_model, where it
-        # belongs, and drags its train handle into this slice. Accepted rather
-        # than worked around: the ordering is the correct one, and the cost is a
-        # Hive-to-local copy on a resume path, not a retrain.
-        "calibrate_model": {
-            "select_features",
-            "cache_calibration_model_input",
-            "cache_test_model_input",
-            "cache_train_model_input",
-        },
-    },
     ("inference", ()): {
         # score_manifest is memory-only, so resuming at rank re-runs the
         # scoring node. That is cheap *because* scoring resumes: every chunk's
@@ -220,16 +185,6 @@ class TestResumeContracts:
         for name in ("best_params", "best_iteration", "hpo_best_model"):
             assert name in defined, f"{name} must stay defined in catalog.yaml"
 
-    def test_training_skip_finalize_requires_persisted_trained_model(self):
-        # The catalog half of the calibrate_model contract above: without this
-        # entry the slice pulls finalize_model back, which under
-        # final_model_strategy: refit_on_full is a full refit.
-        cfg = yaml.safe_load(
-            (REPO_ROOT / "conf" / "base" / "catalog.yaml").read_text()
-        )
-        assert "trained_model" in cfg
-        assert cfg["trained_model"]["type"] == "ModelAdapterDataset"
-
     def test_predict_manifest_lands_in_the_version_directory(self):
         # The catalog half of the compute_test_mAP_spark contract above, plus
         # where it lands. First level of the model version directory, not a
@@ -249,17 +204,19 @@ class TestResumeContracts:
 
     def test_model_adapter_sidecars_do_not_share_a_directory(self):
         # ModelAdapterDataset writes model_meta.json next to its filepath, and
-        # that sidecar carries the `calibrated` flag -- i.e. it decides how the
-        # model is later LOADED. Any two of these sharing a directory would
-        # overwrite each other's flag, so each needs its own.
+        # that sidecar is what picks the adapter back up on load. Any two of
+        # these sharing a directory would overwrite each other's, so each needs
+        # its own. `trained_model` was a third entry until #411: it existed only
+        # to hold finalize_model's output while calibrate_model wrapped it.
         cfg = yaml.safe_load(
             (REPO_ROOT / "conf" / "base" / "catalog.yaml").read_text()
         )
         dirs = {
             name: Path(cfg[name]["filepath"]).parent
-            for name in ("model", "hpo_best_model", "trained_model")
+            for name in ("model", "hpo_best_model")
         }
         assert len(set(dirs.values())) == len(dirs), dirs
+        assert "trained_model" not in cfg
 
     def test_node_names_unique_within_each_pipeline(self):
         # slice_from/_node_index resolve nodes BY NAME (first match wins);

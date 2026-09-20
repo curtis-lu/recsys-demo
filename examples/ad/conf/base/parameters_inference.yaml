@@ -2,7 +2,6 @@ spark:
   app_name: recsys_tfb_ad_example-inference
 
 inference:
-  use_calibration: true
   # 1,200 個 entity（400 個使用者 × 3 個版位）分 10 桶，每桶都有資料
   entity_buckets: 10
   snap_dates:

@@ -23,8 +23,8 @@
 | `time` | 本次批次評分的時間切點 |
 | `entity` | 接受排序的對象，可由一個或多個欄位組成 |
 | `item` | 該對象的候選項目 |
-| `score` | 模型輸出分數（依 §3.4 決定是否校準） |
-| `score_uncalibrated` | 校準前的原始分數；沒套用校準時與 `score` 相等。給事後分析與需要原始分數的診斷用，發布閘不檢查它 |
+| `score` | 模型輸出分數，就是模型的原始輸出 |
+| `score_uncalibrated` | **Deprecated**，恆等於 `score`。校準器已隨 #411 移除，這一欄只為維持表的欄數而保留，會在後續的發布版本拿掉（追蹤票 #412）。下游請改讀 `score` |
 | `rank` | 同一 `(time, entity)` query group 內依 score 由高到低排列的名次；score 相同時按 item 升冪（evaluation 重排用同一條規則） |
 | `model_version` | 產生本筆結果的模型版本 |
 
@@ -37,13 +37,13 @@ inference 預設不使用最新訓練完成的模型，而是解析 `data/models
 執行 inference 前，建議依序確認：
 
 1. **模型已完成審核**：若使用預設模式，`data/models/best` 必須存在並指向核准版本；若指定 `--model-version`，對應版本目錄必須存在。
-2. **模型產物完整**：至少應有 `model.txt`、`model_meta.json` 與 `manifest.json`。校準模型另需 `calibrator.pkl`。
-3. **Manifest 能回溯 dataset**：模型 manifest 應包含 `base_dataset_version`、`train_variant_id` 與可選的 `calibration_variant_id`，讓 inference 載入正確的 preprocessor。
+2. **模型產物完整**：至少應有 `model.txt`、`model_meta.json` 與 `manifest.json`。`model_meta.json` 若帶著 `"calibrated": true`（#411 之前的產物），載入會直接中止並要求用新版重訓。
+3. **Manifest 能回溯 dataset**：模型 manifest 應包含 `base_dataset_version` 與 `train_variant_id`，讓 inference 載入正確的 preprocessor。舊 manifest 多帶的 `calibration_variant_id` 會被忽略，不影響載入。
 4. **評分母體已就緒**：`inference_population` 必須包含每個 `inference.snap_dates` 的母體列。任一日期完全缺少母體時，`build_inference_population_features` 會立即中止。
 5. **母體 grain 唯一**：`inference_population` 對 `time + entity` 唯一，由其 ETL 的 `primary_key` + `quality_checks` 在產出階段保證。`feature_table` 同樣應對 `time + entity` 唯一，否則 enrichment 的 left join 會 fan-out 放大評分母體，最後通常被 completeness 或 duplicate check 阻擋。
 6. **候選 item 集合一致**：`inference.products` 必須與 `schema.categorical_values[item]` 為相同集合；CLI 會在啟動時執行雙向一致性檢查。
 7. **前處理欄位完整**：評分日期的 `feature_table` 必須提供模型所需欄位。缺欄會在套用 preprocessor 或比對模型 feature names 時中止。
-8. **Score 的尺度由模型決定**：發布閘不檢查 `score` 的範圍（§6.1）。有套校準的模型輸出落在 `[0, 1]`；未校準的 learning-to-rank raw score 是無界實數，照樣會發布。下游若把 score 當機率讀，要自己確認用的是校準過的模型。
+8. **Score 的尺度由模型決定**：發布閘不檢查 `score` 的範圍（§6.1）。`binary` objective 的輸出是 sigmoid，落在 `[0, 1]`；ranking objective 的原始輸出是無界實數，照樣會發布。框架不再提供把 score 轉成機率的機制（#411），下游若要把 score 當機率讀，責任在下游。
 9. **Driver 資源足夠**：模型評分把母體按 entity 分成 `inference.entity_buckets` 個桶，一次只有**一個桶**的特徵在 driver 上（約 `母體列數 / entity_buckets × 特徵數 × 4 B`），算完就落地、不累積。所以記憶體是設定值的函數而不是母體大小的函數——母體長大時調高桶數即可，不必改程式碼。桶數的健康窗口見 §3.3。
 
 模型 manifest 缺失或缺少 dataset version 欄位時，CLI 目前會記錄 warning，並回退到 dataset 的 `latest` 版本。
@@ -130,28 +130,7 @@ inference:
 
 雜湊只吃 entity 欄、不吃時間：排名的 query group 是 `(time, entity)`，桶必須是 group 的函數，否則同一個 entity 的不同 item 會落到不同桶、被獨立評分與驗證。同理，桶的指派在跑之間是穩定的——salt 寫死在程式碼裡而不是設定裡，因為「重新洗牌」會讓已寫的分區全部變成孤兒。
 
-### 3.4 Calibration
-
-```yaml
-inference:
-  use_calibration: true
-```
-
-| 模型狀態 | `use_calibration` | 實際 score |
-|---|:---:|---|
-| 模型包含 calibrator | `true` | 校準後分數 |
-| 模型包含 calibrator | `false` | base model 的原始分數 |
-| 模型不包含 calibrator | `true` 或 `false` | base model 的原始分數 |
-
-`use_calibration: true` 不會替未校準模型臨時建立 calibrator。模型是否包含 calibration 由 training 產物的 `model_meta.json` 與 `calibrator.pkl` 決定。
-
-不論此設定為何，三張推論表都另寫一欄 `score_uncalibrated`＝上表「base model 的原始分數」；上表後兩列的情況下它與 `score` 相等。原始分數一旦丟掉就拿不回來，而 evaluation 的部分診斷只在校準前的分數空間上成立。base model 每個 chunk 只算一次，校準是套在那份原始分數上。
-
-若下游只使用組內排序，校準通常不是必要條件；若下游會把 score 解讀為申請機率、點擊機率或期望收益，則應在 training 使用獨立 calibration split。
-
-publication gate 不檢查 score 的範圍（`score_range` 已刪除，理由見 §6.1）。未校準的 ranking objective 輸出無界實數，照樣可以發布。
-
-### 3.5 Schema 與 Spark
+### 3.4 Schema 與 Spark
 
 inference 會從共用 `parameters.yaml` 讀取 schema：
 
@@ -175,10 +154,10 @@ spark:
   # spark.sql.shuffle.partitions: 400
 ```
 
-目前 `conf/base/catalog.yaml` 的 inference tables 使用示例欄位 `cust_id`、`snap_date`、`prod_name`、`score`、`score_uncalibrated` 與 `rank` 明確宣告 schema。
+目前 `conf/base/catalog.yaml` 的 inference tables 使用示例欄位 `cust_id`、`snap_date`、`prod_name`、`score`、`score_uncalibrated`（deprecated，見 §1）與 `rank` 明確宣告 schema。
 若修改 schema 角色的實際欄名，也必須同步修改 catalog 欄位與 partition 設定。
 
-### 3.6 推論母體（`inference_population`）
+### 3.5 推論母體（`inference_population`）
 
 評分母體由獨立的來源表 `inference_population` 提供，定義「每個 `snap_date` 有哪些 `(time, entity)` 該被評分」。它是 inference 端對應 training 端 `sample_pool` 的母體表——把「誰該被推論（membership）」與「他有什麼特徵（`feature_table` enrichment）」分開。
 
@@ -400,13 +379,15 @@ item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始�
 
 **`score_varies_within_group` 補的是資料層那一半。** `require_item_is_a_feature`（`pipelines/dataset/steps/feature_columns.py`）擋的是「設定漏了 item」，擋不住「設定對，但 pipeline 沒把正確的值餵進去」，而逐 chunk 評分把後者變成 driver 裡的一行。三層合起來是：config 層 `require_item_is_a_feature` → 塊層 `item_values_are_known` → 整批層 `score_varies_within_group`。
 
-**它為什麼是比例而不是「有一組就紅」。** 平手不是只有這個 bug 才生得出來：`IsotonicRegression` 擬出來的是帶**平台**的單調函數，同一組的 raw score 全落在同一段平台時，校準後就完全相等——而 `training.calibration.method: isotonic` 是明文支援的設定。合成量測（5 萬列校準資料、正例率約 5%、20 萬 entity × 8 item）：**20 萬組中有 61 組全平手（0.03%），未校準則是 0 組**。所以「有一組就紅」會讓每一次**正確**的 isotonic 執行都擋在發布前——正是乘積形式在小母體上誤報的同一種形狀。
+**它為什麼是比例而不是「有一組就紅」。** 這道檢查要抓的失效是程式寫出的退化 item 值：它對每一塊都成立，會讓 **100%** 的組全平手。門檻取一半，是「大多數組」最粗的邊界，也就是那個失效的形狀。
+
+⚠ **門檻下緣原本的量測依據已經不存在。** 那個依據是 isotonic 校準器的平台（合成量測：20 萬組中 61 組全平手，0.03%，未校準則是 0 組）——#411 拿掉校準器之後，這個良性平手來源沒了，而「沒有校準器時合法的平手比例是多少」還沒有人量過。所以**門檻刻意維持原值**：在沒有資料的情況下收緊，等於拿發布去賭一個猜測。要收緊請先量（ADR-0011 §3 說明量測要防的是哪一種誤報）。
 
 它要抓的故障在四個數量級之外：item 值退化是**程式碼**寫的，套用到每一個 chunk，會讓 **100%** 的組全平手。門檻取一半，是「大多數組」這個說法最粗的邊界。未超過門檻的平手仍然記 warning——那些組的組內排名確實是任意的，沉默會讓它無從查起。
 
 另一個**知情的**誤報空間：一個從不對 item 分裂的模型本來就會讓同一組的分數合法地相同。刻意沒有用「模型的 item feature importance > 0」的啟動斷言把它關掉——真的遇到時，它報的是一個應該有人看的模型品質問題。
 
-**`score_range`（分數介於 `[0, 1]`）已刪除，而且是刪除不是搬家。** 套了校準的路徑上，`[0, 1]` 由校準器的建構方式保證，這條斷言結構上不可能紅；未校準的 ranking objective（A7 允許、`inference.use_calibration: false` 明文支援）輸出的是無界實數，這條斷言是誤報。裝飾品或錯的，沒有第三種情形（ADR-0011 §2）。`tests/test_pipelines/test_inference/test_validation.py::TestScoreRangeIsGone` 釘住它保持刪除狀態。
+**`score_range`（分數介於 `[0, 1]`）已刪除，而且是刪除不是搬家。** `binary` objective 下 LightGBM 的輸出是 sigmoid，`[0, 1]` 由建構方式保證，這條斷言結構上不可能紅；ranking objective（A7 允許）輸出的是無界實數，這條斷言是誤報。裝飾品或錯的，沒有第三種情形（ADR-0011 §2）。`tests/test_pipelines/test_inference/test_validation.py::TestScoreRangeIsGone` 釘住它保持刪除狀態。
 
 **`partition_completeness` 取代了 #188 之前的 `row_count_match`**，因為後者的兩邊在新結構下都沒了：它比的是 ranked 列數對 `scoring_dataset` 列數，而未展開的 `inference_population_features` 比 ranked 輸出短 `len(products)` 倍，這個比較在每一次**正確**的執行上都會 fail；而且它讀的那個 frame 每次都要重跑一遍母體與特徵的 join。
 
@@ -462,7 +443,7 @@ Hive tables 採 dynamic partition overwrite，只覆寫本次 DataFrame 實際�
 2. 每個設定日期都有 production partitions。
 3. 每個 query group 的 rows 數等於 products 數。
 4. identity 沒有重複或 NULL。
-5. score 分布沒有異常集中或全為常數；有套校準的模型，score 應全部位於 `[0, 1]`（發布閘不檢查這一條，§6.1）。
+5. score 分布沒有異常集中或全為常數；`binary` objective 的模型 score 應全部位於 `[0, 1]`（發布閘不檢查這一條，§6.1）。
 6. rank 從 1 開始，並與 score 降冪一致。
 7. 各 item 的 rows 數與 entity 母體一致。
 8. 抽樣檢視排序結果，確認 eligibility、法遵與基本業務常識。
@@ -557,19 +538,19 @@ model_version
 + item
 ```
 
-`model_version` 已包含上游 dataset IDs 與 model-defining training settings；`snap_dates`、`use_calibration` 與 inference 執行設定不會改變它。
+`model_version` 已包含上游 dataset IDs 與 model-defining training settings；`snap_dates` 與 inference 執行設定不會改變它。
 
 因此同一模型、日期與 item 下，**分數寫過一次之後，重跑預設不會重算**：
 
 - 評分節點決定做不做一個 chunk，只看 `unranked_predictions` 裡那個 `(snap_date, 桶, item)` 分區在不在（§5.3〈續跑〉），不看它是用哪一份設定、哪一版特徵算的。在，就跳過。
-- 所以切換 `use_calibration`、或 feature table 同日期資料回補之後，不帶 `--rebuild-dates` 重跑，已寫的分數一個都不會變。後面的排名、驗證、發布照樣跑，把**舊分數**重排一次、寫回同一個 partition，run 成功結束。回補的情形更容易看走眼：中間特徵表會照新資料重建，但被跳過的 chunk 不會去讀它。
+- 所以 feature table 同日期資料回補之後，不帶 `--rebuild-dates` 重跑，已寫的分數一個都不會變。後面的排名、驗證、發布照樣跑，把**舊分數**重排一次、寫回同一個 partition，run 成功結束。回補的情形更容易看走眼：中間特徵表會照新資料重建，但被跳過的 chunk 不會去讀它。
 - `inference_population` 同日期回補更糟：新成員落進已經寫過的桶，那個桶的 chunk 被跳過，新成員就不會被評分，也不會出現在發布結果裡。驗證只看得到在場的 query group，所以沒有任何檢查會紅。
 - 要重算，帶 `--rebuild-dates <日期>`：那些日期的所有 chunk 重新評分，排名與發布再覆寫同一個 partition。
 - 重算跑到一半中斷的話，重試也要帶同一組 `--rebuild-dates`。不帶的話，已經重算和還沒重算的分區都在，全部被跳過，同一個 query group 裡會混著新舊分數。
 
-一次 run 有沒有沿用舊分數，看 log 的 `[chunks] predict: to_process=… skipped=…` 那一行，事後則看 `manifest.json` 的 `scoring_chunks.counts.skipped`（它只記最後一次成功的 run）：大於 0，就有分區沿用了舊分數。同一段 log 還會印 `Calibration disabled by config, using uncalibrated scores` 之類的校準訊息，那講的是這一次的設定，不代表被跳過的分區是這樣算的。
+一次 run 有沒有沿用舊分數，看 log 的 `[chunks] predict: to_process=… skipped=…` 那一行，事後則看 `manifest.json` 的 `scoring_chunks.counts.skipped`（它只記最後一次成功的 run）：大於 0，就有分區沿用了舊分數。
 
-manifest 保存最後一次成功 run 的 inference parameters，但 Hive partition 本身沒有額外 `inference_version` 可區分上述變化。**所以 manifest 記的 `use_calibration` 不一定是分區裡分數算的時候用的值**：切換之後沒帶 `--rebuild-dates` 的那一次，manifest 寫新值，分數是舊值算的。要知道分區裡的分數有沒有套校準，看分區本身：`score` 等於 `score_uncalibrated` 就是沒套。
+manifest 保存最後一次成功 run 的 inference parameters，但 Hive partition 本身沒有額外 `inference_version` 可區分上述變化。**所以 manifest 記的設定不一定是分區裡分數算的時候用的值**：改了設定之後沒帶 `--rebuild-dates` 的那一次，manifest 寫新值，分數是舊值算的。
 
 ### 7.2 設定與重跑矩陣
 
@@ -577,7 +558,6 @@ manifest 保存最後一次成功 run 的 inference parameters，但 Hive partit
 |---|---|---|
 | 新增推論日期 | full inference | 建立新日期 partitions |
 | 同日期 feature data 或 `inference_population` 回補 | full inference ＋ `--rebuild-dates <日期>` | 中間特徵表每次 full run 都會重建，但評分只看分區在不在；不帶 `--rebuild-dates` 的話已寫的 chunk 全部跳過，發布的仍是舊分數，母體新成員則整個缺席（§7.1） |
-| `use_calibration` | full inference ＋ `--rebuild-dates <日期>` | score 內容改變，但 partition key 不變；不帶 `--rebuild-dates` 的話已寫的 chunk 全部跳過，分數不變（§7.1） |
 | promotion 到新 `best` | full inference | promotion 只更新 symlink，不會自動產生預測 |
 | 指定另一個 model version | full inference | 載入不同模型與 preprocessor，寫入新 model partitions。那個版本以前評分過的日期會被跳過，要重算得帶 `--rebuild-dates`（§7.1） |
 | 只修改 ranking node | `--from-node rank_predictions` | 可重用目前 model/date 的 `unranked_predictions`；補跑的評分節點會跳過所有既有 chunk |
@@ -640,7 +620,7 @@ data/inference/<model_version>/<first_snap_date_without_hyphens>/
 | Driver OOM | 單一桶的特徵矩陣太大 | **先調高 `inference.entity_buckets`**（這是這個旋鈕存在的理由）；桶數已在健康窗口上界附近時再加 driver memory |
 | `--rebuild-dates` 收下了但什麼都沒重算 | 切片把評分節點排除掉了 | log 會印 `[rebuild] WARNING: … had no effect`；改用 `--from-node predict_and_write_scores` 或不帶切片旗標 |
 
-validation 失敗時，先從 exception 的 checks 清單判斷是模型輸出、候選母體、feature identity 或 ranking 問題，再查相同 model/date 的 `ranked_staging`。修好之後重跑時注意：失敗之前已經寫出的 chunk 會被跳過——整批層失敗時是全部 chunk，塊層失敗時是出事那塊之前的 chunk。修的若是上游資料、校準或評分邏輯，重跑要帶 `--rebuild-dates <日期>`，否則跳過的 chunk 留著舊分數（§7.1）。
+validation 失敗時，先從 exception 的 checks 清單判斷是模型輸出、候選母體、feature identity 或 ranking 問題，再查相同 model/date 的 `ranked_staging`。修好之後重跑時注意：失敗之前已經寫出的 chunk 會被跳過——整批層失敗時是全部 chunk，塊層失敗時是出事那塊之前的 chunk。修的若是上游資料或評分邏輯，重跑要帶 `--rebuild-dates <日期>`，否則跳過的 chunk 留著舊分數（§7.1）。
 
 ## 9. 限制與注意事項
 
@@ -653,9 +633,8 @@ validation 失敗時，先從 exception 的 checks 清單判斷是模型輸出�
 - score 相同時按 item 升冪決定名次（`utils/ranking.py`）。這只讓名次可重現、讓 inference 與 evaluation 對同一批列給出相同名次；同分本身仍代表模型分不出高下，item 名的先後不是模型的判斷。
 - completeness check 驗證每組候選數量，不會獨立比對每組的實際 item set；目前依賴內層 item 迴圈與 duplicate check 共同維持候選正確性。
 - `partition_completeness` 驗的是分區的**存在**，不是分區的**內容**。一個內容錯誤但分區齊全的表照樣通過（那是其他五條檢查的職責）。
-- inference 沒有獨立 version hash，續跑的「跳過」判準又是分區存在、不是分區新鮮。所以同 model/date 下改了 calibration、上游資料或程式邏輯之後，要帶 `--rebuild-dates` 才會重算分數，不帶的話已寫的分數分區會被跳過（§7.1）。
+- inference 沒有獨立 version hash，續跑的「跳過」判準又是分區存在、不是分區新鮮。所以同 model/date 下改了上游資料或程式邏輯之後，要帶 `--rebuild-dates` 才會重算分數，不帶的話已寫的分數分區會被跳過（§7.1）。
 - rank consistency 會檢查整體 rank 範圍與依 rank 排列的 score 方向，但不是一般用途的任意外部排名驗證器。
-- `use_calibration: true` 不會要求模型一定有 calibrator；未校準模型仍回傳原始分數。
 - model manifest 缺失時會 fallback dataset latest，可能造成模型與前處理版本錯配。
 - 多日期 run 只建立一個以第一個日期命名的 driver-local manifest 目錄。
 - promotion 只改變 `best` symlink；正式 prediction table 仍保留各 model versions，且不會自動清理。
@@ -663,7 +642,7 @@ validation 失敗時，先從 exception 的 checks 清單判斷是模型輸出�
 
 ## 10. 相關文件
 
-- 模型訓練、feature selection 與 calibration：[`training.md`](training.md)
+- 模型訓練與 feature selection：[`training.md`](training.md)
 - 發布後排序指標與監控：[`evaluation.md`](evaluation.md)
 - 前處理器、model input 與資料版本：[`dataset.md`](dataset.md)
 - 推論使用的 `feature_table` 與母體 `inference_population`：[`source_etl.md`](source_etl.md)

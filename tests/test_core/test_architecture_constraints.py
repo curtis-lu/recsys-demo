@@ -138,7 +138,13 @@ def test_static_coverage_floor():
     # 63/59: evaluation's monitoring-mode `no_diagnosis_pages` Node (#341)
     # added one literal, statically judgeable call; the dynamic four are unchanged.
     # 62/58: #352 deleted `persist_eval_predictions`, one literal call.
-    assert (total, judgeable) == (62, 58), (
+    # 60/57: #413 deleted training's `calibrate_model` and
+    # `cache_calibration_model_input` with the calibrator -- two judgeable
+    # calls -- and the same change made `finalize_model` judgeable for the
+    # first time: its `outputs=` was the variable `final_model_output`
+    # (`"trained_model"` under calibration, `"model"` otherwise), which the
+    # static scan could not read. Net -2 total, -1 judgeable.
+    assert (total, judgeable) == (60, 57), (
         f"Node coverage changed: {judgeable}/{total} statically judgeable. "
         "If this dropped, A5/A6 now have a bigger blind spot -- check why."
     )
@@ -220,11 +226,12 @@ class TestA1NodeIO:
         # shrinking a registry, which is the direction that needs no new
         # exception. Putting the write back in the node puts it back here.
         #
-        # The five cache nodes replaced _materialize_parquet_handle, the helper
+        # The cache nodes replaced _materialize_parquet_handle, the helper
         # that used to hold their shutil.rmtree call along with all four of
         # their cache decisions (ADR-0014 decision 1, approved 2026-08-30).
-        # Five entries where there was one is the honest count: each of them
-        # really does delete a directory. The deletes stayed in nodes.py rather
+        # Four entries where there was one is the honest count: each of them
+        # really does delete a directory. There were five until #411 removed
+        # cache_calibration_model_input with the calibrator. The deletes stayed in nodes.py rather
         # than moving to steps/local_cache.py precisely so this scan -- which
         # reads pipelines/**/nodes*.py and nothing else -- keeps seeing them.
         assert set(found) == {
@@ -233,7 +240,6 @@ class TestA1NodeIO:
             ("training", "cache_train_dev_model_input"),
             ("training", "cache_val_model_input"),
             ("training", "cache_test_model_input"),
-            ("training", "cache_calibration_model_input"),
         }, (
             "a pipeline function gained direct filesystem I/O. Registered in R4 "
             "of docs/agents/architecture-constraints.md; adding one needs sign-off."

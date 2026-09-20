@@ -298,8 +298,7 @@ class LightGBMAdapter(ModelAdapter):
         # train and train_dev take the SAME rule. train_dev is only the
         # early-stopping valid set today, but `final_model_strategy:
         # refit_on_full` concats it into the training matrix -- one rule is
-        # correct under both strategies. The calibration set is deliberately
-        # not filtered: calibration reads the whole score distribution.
+        # correct under both strategies.
         filter_zero_positive = objective_drops_zero_positive_groups(objective)
         filter_counts: dict = (
             {"objective": objective} if filter_zero_positive else {}

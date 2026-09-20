@@ -239,16 +239,6 @@ hpo_best_model:
   type: ModelAdapterDataset
   filepath: data/models/${model_version}/hpo/model.txt
 
-# calibration 開啟時 finalize_model 的輸出（calibrate_model 再把它包成 `model`）。
-# 落地買的是「`--from-node calibrate_model` 不會把 finalize_model 拉回重跑」——
-# 在 final_model_strategy: refit_on_full 下那是一次完整 refit。契約釘在
-# tests/test_pipelines/test_resume_contracts.py 的 calibration 變體。
-# trained/ 子目錄同 hpo/ 的理由：ModelAdapterDataset 會在 filepath 旁寫
-# model_meta.json sidecar，與 `model` 共用目錄會互相覆寫 calibration 旗標。
-trained_model:
-  type: ModelAdapterDataset
-  filepath: data/models/${model_version}/trained/model.txt
-
 # predict_and_write_test_predictions 對每個設定月份的決定：months_processed／
 # months_skipped／months_rebuilt 三份**清單**（外加這一次實際寫了什麼）。落地的
 # 兩個理由：

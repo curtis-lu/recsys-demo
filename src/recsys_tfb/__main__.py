@@ -272,7 +272,7 @@ def _format_retrain_advisory(model_version, retrain_nodes, latest):
 
 def _maybe_warn_retrain(plan, retrain_advice):
     """Return loud-WARN lines when a sliced run will auto-include the model
-    producer (``model`` was missing -> finalize/calibrate pulled in), else ``[]``.
+    producer (``model`` was missing -> finalize_model pulled in), else ``[]``.
 
     ``retrain_advice`` is ``{"models_dir": Path, "model_version": str}`` (passed
     only by the training command) or ``None``.
@@ -281,8 +281,8 @@ def _maybe_warn_retrain(plan, retrain_advice):
         return []
     # auto_included maps node -> tuple[str, ...] of missing dataset names; `in`
     # is element membership. Fire iff the missing dataset is exactly `model`,
-    # i.e. the model producer (finalize_model, or calibrate_model under
-    # calibration) had to be pulled in -> an unexpected retrain.
+    # i.e. the model producer (finalize_model) had to be pulled in -> an
+    # unexpected retrain.
     if not any("model" in missing for missing in plan.auto_included.values()):
         return []
     latest = find_latest_completed_model_version(retrain_advice["models_dir"])
@@ -1373,11 +1373,6 @@ def training(
         None, "--train-variant",
         help="Train variant ID (default: latest under base dataset)",
     ),
-    calibration_variant: Optional[str] = typer.Option(
-        None, "--calibration-variant",
-        help="Calibration variant ID (default: latest under base dataset; "
-             "only used when training.calibration.enabled=true)",
-    ),
     rebuild_dates: Optional[str] = typer.Option(
         None, "--rebuild-dates",
         help="Comma-separated snap_dates to re-predict even though their "
@@ -1453,9 +1448,9 @@ def training(
     # the catalog's knowledge, not the CLI's.
     #
     # Before the cold start below, and long before the node that writes those
-    # columns — that node runs after HPO, train_model and calibrate_model, so
-    # the same check inside it would report a one-word catalog typo only after
-    # the whole search had been paid for. This compares two lists of names and
+    # columns — that node runs after HPO and finalize_model, so the same check
+    # inside it would report a one-word catalog typo only after the whole
+    # search had been paid for. This compares two lists of names and
     # touches no data.
     #
     # runtime_params is deliberately empty: substitution fills partition
@@ -1503,14 +1498,10 @@ def training(
     except KeyError:
         params_training = {}
 
-    enable_calibration = (
-        params_training.get("training", {}).get("calibration", {}).get("enabled", False)
-    )
-    cal_v = (
-        resolve_variant_id(base_dir, "calibration", calibration_variant)
-        if enable_calibration
-        else None
-    )
+    # No calibration layer any more (#411): the third variant ID is always
+    # absent here. The parameter itself leaves ``compute_model_version`` with
+    # the calibration data split (#414).
+    cal_v = None
 
     mv = compute_model_version(params_training, base_v, train_v, cal_v)
     sid = compute_search_id(params_training, base_v, train_v, cal_v)
@@ -1534,7 +1525,7 @@ def training(
         REBUILD_SNAP_DATES_KEY: rebuild,
     }
 
-    pipeline_kwargs = {"enable_calibration": enable_calibration}
+    pipeline_kwargs: dict = {}
 
     # Pre-run crash-safe provenance stub (skip-if-present, no symlink); the
     # post-run write below upgrades it to status=completed + artifacts.

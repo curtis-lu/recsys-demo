@@ -37,7 +37,6 @@ from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.io.extract import pdf_to_X
 from recsys_tfb.models.base import ModelAdapter
-from recsys_tfb.models.calibrated_adapter import CalibratedModelAdapter
 from recsys_tfb.models.feature_view import model_feature_view
 from recsys_tfb.pipelines.inference.steps.chunk_plans import (
     ScoringChunk,
@@ -339,20 +338,15 @@ def predict_and_write_scores(
         len(plan.surplus), len(set(snap_dates)), n_buckets, len(items),
     )
 
-    # Decision — which score is published: the calibrated one only when a
-    # calibrator is actually wrapped and the config asks for it. An uncalibrated
-    # adapter has nothing to apply.
+    # Decision — which score is published: the model's own output, with
+    # nothing between the booster and the table. Calibration was the only thing
+    # that ever sat there, and #411 removed it, so this node no longer asks what
+    # the model is wrapped in or what the config would like applied.
     #
-    # Decision — the raw booster output is written beside it either way, as
-    # `score_uncalibrated` (equal to `score` whenever no calibration is applied).
-    # It is a fact about the model that nothing downstream can recover once it
-    # is dropped, and the diagnoses that work in log-odds space read it
-    # (ADR-0018 decision 5). The booster runs once per chunk: the calibrator is
-    # applied to that raw array rather than predicting a second time.
-    use_calibration = parameters.get("inference", {}).get("use_calibration", True)
-    wraps_calibrator = isinstance(model, CalibratedModelAdapter)
-    if wraps_calibrator and not use_calibration:
-        logger.info("Calibration disabled by config, using uncalibrated scores")
+    # `score_uncalibrated` is still written, equal to `score`. It is deprecated
+    # (#412) and kept only so the four managed prediction tables keep their
+    # column count — the writes bind by position, so dropping the column here
+    # would break a write against an existing table.
 
     # Decision — which empty buckets are legitimate: the ones with no partition
     # in the landed table. Asked once, up front, so the loop's per-bucket
@@ -442,22 +436,14 @@ def predict_and_write_scores(
                 # the name is what reaches the partition column.
                 bucket_pdf[item_col] = item
                 X = pdf_to_X(bucket_pdf, model_view, parameters)
-                raw_scores = (
-                    model.predict_uncalibrated(X) if wraps_calibrator
-                    else model.predict(X)
-                )
-                scores = (
-                    model.calibrate(raw_scores)
-                    if wraps_calibrator and use_calibration
-                    else raw_scores
-                )
+                scores = model.predict(X)
                 out_pdf = pd.DataFrame({
                     **{
                         col: bucket_pdf[col].astype(str).values
                         for col in entity_cols
                     },
                     score_col: scores,
-                    "score_uncalibrated": raw_scores,
+                    "score_uncalibrated": scores,
                     time_col: snap_date,
                     item_col: item,
                     ENTITY_BUCKET_COL: str(bucket),
@@ -703,8 +689,8 @@ def validate_predictions(
         failures.append(completeness_failure(summary, n_products))
 
         # Decision — a table where whole groups score identically is published
-        # anyway below a measured threshold, because that is what a correct
-        # isotonic calibration looks like.
+        # anyway below a measured threshold; see CONSTANT_GROUP_FAILURE_RATIO
+        # for the two regimes that threshold separates.
         failures.append(score_varies_within_group_failure(summary))
 
         # Decision — ranks are 1..N and run in descending score order. The order
