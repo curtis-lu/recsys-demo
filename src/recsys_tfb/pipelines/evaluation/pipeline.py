@@ -181,11 +181,20 @@ def create_pipeline(
             ),
         ]
     else:
-        # Monitoring mode wires no registry diagnosis (ADR-0018 decision 5):
-        # they need score_uncalibrated, which this mode's prediction source
-        # does not guarantee. The mode decides the shape (ADR-0013), not a
-        # config switch. generate_report still needs its sixth input, so the
-        # zero-read stub supplies an empty list; why a stub, see its docstring.
+        # Monitoring mode wires no registry diagnosis (ADR-0018 decision 5).
+        # The reason is no longer "they need score_uncalibrated, which this
+        # mode's source does not have": #411 removed the calibrator, so
+        # schema["score"] IS the raw model output and the diagnoses read that
+        # (#415). item_ability and suppression only need the query columns,
+        # item, label and score, all of which this mode's frame has, so they
+        # would in fact run here. What still holds: the mode decides the shape
+        # (ADR-0013), not a config switch; and config_shift cannot run here
+        # either way, because its offset context columns (derived from
+        # dataset.sample_group_keys / training.sample_weight_keys) come from
+        # sample_pool and monitoring joins inference_population instead.
+        # Leaving the shape alone was a scope decision, not a data limitation.
+        # generate_report still needs its sixth input, so the zero-read stub
+        # supplies an empty list; why a stub, see its docstring.
         nodes.append(
             Node(
                 no_diagnosis_pages,

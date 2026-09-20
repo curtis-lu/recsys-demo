@@ -159,30 +159,50 @@ pool = prepare_train_pool(sample_pool, parameters)
 
 ### 實際長什麼樣
 
-⚠ **這一節的例子是歷史的，repo 裡現在只剩一半。** 規則從 `select_train_keys` 與
-`select_calibration_keys` 這一對歸納出來，而 #411／#414 移除 calibration 之後
-`select_calibration_keys` 已經不存在，今天也沒有第二對 node 做同樣四個決策。別去
-grep 這個名字，也別因為「找不到第二個例子」就以為規則作廢——下一個要新增同型 node
-的人就會用到它。
+`select_train_keys` 與 `select_val_keys`（`src/recsys_tfb/pipelines/dataset/nodes.py`）
+是活的一對。兩個 node 回答的是**同一組四個問題**——哪些月份有資格、每組留多少、
+誰活下來、輸出哪些欄——而且四題的答案都不一樣。四個答案各自寫在各自的 node 裡，
+每一條前面掛一行 `# Decision —`：
 
-當時兩個 node 做的是同樣四個決策：有資格的月份、每組留多少、誰活下來、輸出哪些欄。
-兩個 node 各自把四個決策逐條寫了一遍：
+（`select_train_keys` 的 docstring 寫「#414 移除 `select_calibration_keys` 之後
+沒有第二個 node 做同一組四個決策」，說的是**答案**也一樣的那種孿生 node，今天確實
+沒有了。這裡舉的是**題目相同、答案各異**——那才是這條規則真正要擋的形狀：答案不同
+正是把它們包進一個 helper 會壞掉的原因。）
 
 ```python
-# select_train_keys（今天仍在）
+# select_train_keys：資格＝設定的 train 月份（空清單保留整池，不是清空）
 pool = restrict_to_months_or_all(sample_pool, time_col, train_months)
+# 留多少：per-group override 壓過 split 預設比例
 keys = with_effective_sample_ratio(keys, group_keys, sample_ratio, overrides)
+# 誰活下來：抽在 identity key 上，每次重跑同一把 key 同進同出
 keys = keep_rows_drawn_under_ratio(keys, identity_key, seed, site="sample_keys")
 
-# select_calibration_keys（已隨 #414 刪除）
-pool = restrict_to_months_or_all(sample_pool, time_col, cal_months)
-keys = with_effective_sample_ratio(keys, group_keys, cal_ratio, cal_overrides)
-keys = keep_rows_drawn_under_ratio(keys, identity_key, seed, site="calibration_keys")
+# select_val_keys：資格＝設定的 val 月份（沒有 "_or_all" 的退路）
+val_labels = restrict_to_months(sample_pool, time_col, val_dates)
+# 留多少：整個母體，除非 val_sample_ratio < 1
+all_keys = val_labels.select(*identity_key).dropDuplicates()
+# 誰活下來：抽在 **entity** 上，不是列——mAP 是逐 query group 算的，
+# 一個 group 要嘛整組留、要嘛整組丟
+sampled = keep_entities_drawn_under_ratio(
+    all_keys, sample_cols, val_sample_ratio, seed, site="val_keys",
+)
 ```
 
-被共用的是**機制**：`restrict_to_months_or_all`、`with_effective_sample_ratio`、`keep_rows_drawn_under_ratio` 都在 `steps/` 裡（今天仍在），各自只裝一件事。沒有一個 `_select_keys(split_name, parameters)` 把四個決策包起來。
+被共用的是**機制**：`restrict_to_months_or_all` / `restrict_to_months`
+（`dataset/steps/scoping.py`）、`keep_rows_drawn_under_ratio` /
+`keep_entities_drawn_under_ratio` / `with_effective_sample_ratio`
+（`dataset/steps/sampling.py`）、`get_entity_grouping`（`core/schema.py`），
+各自只裝一件事。**沒有**一個
+`_select_keys(split_name, parameters)` 把四個決策包起來。
 
-而第二個 node 的 docstring 只需要說出那**唯一的差別**：兩個 split 共用 `random_seed`，所以抽樣 `site` 不同名，第二個 split 才不會抽到跟 train 完全相同的列（#140）。
+正是因為四個答案都不同，包起來才會壞：那個 helper 會長出「要不要退回整池」
+「抽列還是抽 entity」「要不要帶 carry 欄」三個旗標，而每個旗標都是一個從 node
+本體被搬走的決策。讀 `select_val_keys` 的人會看到 `_select_keys("val", …)`，
+然後得去讀 helper 才知道 val 是抽 entity 的——**而抽錯單位不會報錯**，只會讓
+mAP 回答另一個問題（`select_val_keys` 的 docstring 與 ADR-0016 記的就是這件事）。
+
+第三個同族的 `select_test_keys` 也在同一支檔案裡，它連抽樣都沒有——三個 node
+攤開來，差別一眼看得到；包成一個 helper 就看不到了。
 
 **誰擋得住**：沒有機械檢查。
 

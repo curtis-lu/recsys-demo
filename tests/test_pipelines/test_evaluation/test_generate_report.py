@@ -198,8 +198,7 @@ def _diag_sample_pdf() -> pd.DataFrame:
                 "prod_name": item, "cust_segment_typ": segment,
                 "label": int((item == "ccard_ins" and c % 2 == 0)
                              or (item == "fund_bond" and c % 5 == 0)),
-                "score_uncalibrated": float(rng.uniform(0.05, 0.95)),
-                "score": 0.5,
+                "score": float(rng.uniform(0.05, 0.95)),
             })
     return pd.DataFrame(rows)
 

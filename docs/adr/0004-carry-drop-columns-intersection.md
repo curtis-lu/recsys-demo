@@ -14,7 +14,7 @@ date: 2026-08-02
 | 設定鍵 | 作用對象 | 生效處 | 語意 |
 |---|---|---|---|
 | `drop_columns` | **`feature_table`** 的欄 | `compute_feature_columns`（`pipelines/dataset/steps/feature_columns.py`） | 黑名單：不得進 `feature_columns` |
-| `carry_columns` | **`sample_pool`** 的欄 | `key_output_columns`（`pipelines/dataset/steps/sampling.py`），由 `select_train_keys`／`select_calibration_keys` 呼叫 | 白名單：keys 除 identity 外還要多帶 |
+| `carry_columns` | **`sample_pool`** 的欄 | `key_output_columns`（`pipelines/dataset/steps/sampling.py`），由 `select_train_keys` 呼叫（`select_calibration_keys` 已隨 #414 移除） | 白名單：keys 除 identity 外還要多帶 |
 | `feature_columns` | 推導結果，存進 `preprocessor_metadata` | 同上 | identity categoricals ＋（feature_table 欄 − drop − 非 categorical identity − label） |
 
 而 `drop_columns` **會物理刪欄**：`apply_preprocessor_to_features` 選出的欄是 base key ＋ 落在
@@ -105,7 +105,7 @@ raise」。實跑真的 `build_model_input` 才發現這個條件**過寬會誤�
 
 ## split 之間的 schema 不對稱是推導結果，不是疏漏
 
-train / train_dev / calibration 走抽樣式的 key 選取因此帶 carry；val / test 只 select identity
+train / train_dev 走抽樣式的 key 選取因此帶 carry（calibration 曾是第三個這樣的 split，已隨 #411／#414 移除）；val / test 只 select identity
 （`select_val_keys`／`select_test_keys`，`pipelines/dataset/nodes.py`）。這個不對稱與需求對齊：
 `sample_weights` 只作用於 train/train_dev，per-segment 評估在 evaluation 階段從 `sample_pool` 取
 segment，val/test 不需要 carry。多出來的欄也不會被誤讀——`extract_Xy` 按

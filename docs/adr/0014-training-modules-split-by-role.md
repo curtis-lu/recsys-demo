@@ -91,7 +91,7 @@ src/recsys_tfb/pipelines/training/
 | G3 | **等別的票**：把稽核 glob 放寬到 `pipelines/**/*.py`（issue #163 一帶） | 不擋本次；但它做完之後，決定 1 應重新檢討 | 那張票獨立進行 |
 | G4 | **列入完成定義、但不在本次 PR**：`_pdf_to_X` 改名（issue #199） | 重構不做完 #199 不算完成 | 獨立的最後一張票 |
 | G5 | **另一份 ADR**：rank 落地 ＋ tie-break 統一 | 決定 3 只做 `.persist()`，落地留給 ADR-0015 | 見〈刻意不做〉第 2 條 |
-| G6 | **懸而未決**：calibration 去留 | 若決定刪除，本份三處要回頭改 | 見〈刻意不做〉第 6 條 |
+| G6 | ~~**懸而未決**：calibration 去留~~ **已關閉（2026-09-20，#411）**：使用者決定移除 | 已不卡任何東西 | 預告的三處都已回頭改完，逐條見〈刻意不做〉第 6 條的修訂 |
 | G7 | **要實測**：`persist` 在生產資料量下的峰值記憶體／磁碟 | 決定 3 的 StorageLevel 選擇 | 量一次再定 |
 
 ---
@@ -280,7 +280,7 @@ cust_id_col = entity_cols[0]
 
 **看不到的東西掛在「指令」上，不掛總閘**——已經有 6 個代號在用這招。而 `__main__.py` 早就在向 catalog 的 dataset 物件問問題（`_collect_existing_snap_dates` 走 `catalog.get_dataset(name).existing_partition_values`），`declared_columns` 正是照那個形狀做的。
 
-**代價是實際的，不只是分類潔癖。** `pipeline.py` 的順序是 HPO → `train_model` → `calibrate_model` → …… → `predict_and_write_test_predictions`。守衛放 node 裡，catalog 少宣告一欄要等**整輪搜尋跑完**才報——那正是決定 3 為了 `final_model_strategy` 立 A25 的同一個理由（本 ADR 自己的 User Story 4）。放在指令上則連 Spark cold start 都還沒付。
+**代價是實際的，不只是分類潔癖。** `pipeline.py` 的順序是 HPO → `train_model` → `calibrate_model` → …… → `predict_and_write_test_predictions`（2026-08-30 當時的順序；`calibrate_model` 已隨 #411 刪除，這條推論不受影響——要等的那一段是 HPO，不是它）。守衛放 node 裡，catalog 少宣告一欄要等**整輪搜尋跑完**才報——那正是決定 3 為了 `final_model_strategy` 立 A25 的同一個理由（本 ADR 自己的 User Story 4）。放在指令上則連 Spark cold start 都還沒付。
 
 **改成怎樣。**
 
@@ -504,6 +504,25 @@ cust_id_col = entity_cols[0]
 
 （本條原本因「calibration 預計移除」而列為不處理。使用者 2026-08-29 決定**去留未定、照重構**，所以放回範圍。）
 
+## 更正（2026-09-20，#411）：這一節兩條都作廢
+
+兩個接續點都長在同一條鏈上——`finalize_model` → `trained_model` → `calibrate_model` → `model`
+——而 #413 把 `calibrate_model` 連同校準器一起刪除，`finalize_model` 現在直接輸出 `model`
+（`pipelines/training/pipeline.py`）。所以：
+
+- **`trained_model` 不落地，而且不該落地。** 那個中間名字存在的唯一理由是裝 `calibrate_model`
+  的輸入；現在 `model` 只有一個生產者，中間物不存在，也就沒有「接續點的必要輸入」可言。
+  `conf/base/catalog.yaml` 沒有這個條目，而
+  `tests/test_pipelines/test_resume_contracts.py::test_model_adapter_sidecars_do_not_share_a_directory`
+  用 `assert "trained_model" not in cfg` 把它釘成缺席。
+- **`calibrate_model` 不進 `RESUME_CONTRACTS`。** `tests/test_pipelines/test_resume_contracts.py`
+  的 `RESUME_CONTRACTS` 已經沒有 calibration 變體，training 只剩 `("training", ())` 一筆，裡面
+  也沒有這個接續點——那個 node 不會被建構，釘它等於釘一個不存在的名字。上面那個「
+  `--from-node calibrate_model` 要把 `finalize_model` 拉回來、`final_model_strategy: refit_on_full`
+  下等於一次完整 refit」的重跑成本，隨著這條邊一起消失，不是被吸收到別處。
+
+規則 7 的推論本身沒有被推翻：它只是失去了適用對象。
+
 ---
 
 # 刻意不做的八件事
@@ -631,6 +650,28 @@ cust_id_col = entity_cols[0]
 使用者 2026-08-29：**還沒決定要不要刪**。所以這次照常重構 calibration 路徑（`cache_calibration_model_input`、`calibrate_model`，以及 `create_pipeline(enable_calibration=...)` 的兩個分支）。
 
 **如果之後決定刪**，本份有三處要回頭改：決定 1 的 6 個變 5 個、`steps/local_cache.py` 的路徑常數少一筆、兩個接續點那節整節作廢。
+
+### 修訂（2026-09-20，#411）
+
+**已決定移除，這一條不再懸而未決，閘門 G6 關閉。** 使用者決定把 calibration 從框架拿掉
+（GitHub issue #411），分三張票：#413 拿掉校準器、#414 拿掉 calibration 資料切段與第三層版本
+ID、#415 讓文件與 ADR 對齊。上面預告的三處全部命中，逐條的實際落點：
+
+- **決定 1 的 6 個變 5 個**：`cache_calibration_model_input` 隨 `calibrate_model` 一起刪除
+  （#413），`tests/test_core/test_architecture_constraints.py` 的
+  `test_direct_writes_match_registry` 現在釘的是 `log_experiment` ＋ 四個 cache node
+  （`cache_train_model_input`、`cache_train_dev_model_input`、`cache_val_model_input`、
+  `cache_test_model_input`）。
+- **`steps/local_cache.py` 的路徑常數少一筆**：`_CACHE_PATH_LAYOUT` 剩四筆，沒有 calibration 那份。
+- **〈兩個變便宜的接續點〉整節作廢**：見該節的 2026-09-20 更正。
+- 連帶：`create_pipeline(enable_calibration=...)` 的兩個分支消失，`finalize_model` 直接產出
+  `model`（`pipelines/training/pipeline.py`）。退役的設定鍵（`dataset.enable_calibration`、
+  `training.calibration`、`inference.use_calibration` 等）現在**只要出現就報錯**，值寫 `false`
+  也一樣——不變量 A37，`core/consistency.py` 的 `RETIRED_CALIBRATION_KEYS`，在 CLI entry、
+  Spark 啟動前擋下。
+
+**本節上方的原文不改**，它記錄的是 2026-08-29 當時「照重構、不預判」的決定；那個決定沒有錯，
+只是它的前提到期了。
 
 ## 7. 「診斷失敗該不該停 pipeline」
 

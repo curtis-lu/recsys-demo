@@ -31,7 +31,8 @@ date: 2026-09-09
 
 predict manifest 那一列**確實會落地**（`data/models/<model_version>/predict_manifest.json`），但它沒有遷移腳本，也不需要：全 repo 只有寫它的那個函式與同函式的一行 log 讀那個鍵，`compute_test_mAP_spark` 與 `select_shap_population` 都只把整份 manifest 當 in-DAG 排序依賴（`pipelines/training/pipeline.py` 的註解、`nodes.py::compute_test_mAP_spark` 的 docstring）。磁碟上的舊 manifest 帶著 `prods`、沒有人會去讀它。
 
-**完全不動的**：`dataset.{train,calibration,val,test}_snap_dates`、
+**完全不動的**：`dataset.{train,val,test}_snap_dates`（決策當時還有
+`dataset.calibration_snap_dates`，已隨 #414 移除——移除前它同樣沒被這輪改名碰過）、
 `inference.snap_dates`、`evaluation.snap_date`、指標的 `by_snap_date` 與
 `n_snap_dates`、`core/logging` 的觀測欄白名單、`source_etl` 稽核表自己的欄名。
 

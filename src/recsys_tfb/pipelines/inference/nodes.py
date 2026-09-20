@@ -689,8 +689,10 @@ def validate_predictions(
         failures.append(completeness_failure(summary, n_products))
 
         # Decision — a table where whole groups score identically is published
-        # anyway below a measured threshold; see CONSTANT_GROUP_FAILURE_RATIO
-        # for the two regimes that threshold separates.
+        # anyway below a threshold that is held, not measured: #411 removed
+        # the calibrator whose isotonic plateau set the lower bound, and the
+        # tie rate that is legitimate without one has never been measured. See
+        # CONSTANT_GROUP_FAILURE_RATIO for the two regimes it separates.
         failures.append(score_varies_within_group_failure(summary))
 
         # Decision — ranks are 1..N and run in descending score order. The order

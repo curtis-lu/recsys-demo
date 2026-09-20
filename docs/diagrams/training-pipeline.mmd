@@ -34,15 +34,14 @@
 %%   [P] 是 dataset pipeline 落地的 JSON；[V] 是 select_features 對它套一次
 %%   training.feature_selection.exclude 之後的產物，memory-only、不在 catalog 裡。
 %%   吃 [V] 的是**訓練鏈**（prepare_lgb_train_inputs、persist_sample_weight_report、
-%%   tune_hyperparameters、finalize_model、predict_and_write_test_predictions；
-%%   開 calibration 時多一個 calibrate_model，共 6 個）。
+%%   tune_hyperparameters、finalize_model、predict_and_write_test_predictions，共 5 個）。
 %%   吃 [P] 的是 select_features 自己，加上**五個 diagnosis node**
 %%   （feature_statistics、gain_ledger、shap_diagnostics、quadrant_profiles、
 %%   quadrant_cases）。
 %%   **這個切分是刻意的，不是漏接線**：diagnosis 改吃落地的 [P] 之後，只跑診斷的
 %%   接續執行不會再把 select_features 與整條訓練鏈拉回來——那正是這次改動要買的東西。
 %%   代價寫在 compute_feature_statistics 的框裡：它同時也吃 model，於是被推到
-%%   calibrate_model 之後。
+%%   finalize_model 之後（#411 移除校準器前，`model` 的生產者是 calibrate_model）。
 %%   哪個 node 才是特徵欄的權威，答案是模型自己：diagnosis 從 model.feature_names()
 %%   建 view，[P] 只提供其餘 metadata。
 
@@ -98,7 +97,7 @@
 %%   它們是 HPO 唯一的產出。落地之後 `training --from-node finalize_model` 可以整段
 %%   跳過搜尋直接換策略重出模型。hpo_best_model 另外放在 hpo/ 子目錄，因為
 %%   ModelAdapterDataset 會在 filepath 旁寫 model_meta.json sidecar，跟 `model`
-%%   共用目錄會互相覆蓋 sidecar（calibration 旗標串味）。
+%%   共用目錄會互相覆蓋 sidecar（algorithm 名稱與 adapter 類別串味）。
 
 %% 唯一一條虛線邊：select_shap_population 的 predict_manifest
 %%   這個參數在函式裡從頭到尾沒被讀過（population_spark.py 全檔只出現在簽名與
@@ -116,8 +115,7 @@
 %%   一份空報表。
 
 %% node 函式不全在 training/nodes.py
-%%   關掉 calibration 的 19 個 node 裡有 7 個的函式在 diagnosis/ 底下（開啟時 21 個，多出的
-%%   兩個函式都在 training/nodes.py）：compute_feature_statistics、
+%%   本圖 19 個 node 裡有 7 個的函式在 diagnosis/ 底下：compute_feature_statistics、
 %%   compute_feature_importance、compute_shap_diagnostics、compute_quadrant_profiles、
 %%   compute_quadrant_cases（diagnosis.model）、compute_gain_ledger
 %%   （diagnosis.model.gain_ledger）、select_shap_population
@@ -135,16 +133,9 @@
 
 %% 刻意不畫
 %%   - parameters：每個 node 都吃，畫出來只會蓋掉真正的資料流。
-%%   - calibration 分支——注意**出廠設定就是開的**（conf/base/parameters_training.yaml
-%%     的 training.calibration.enabled: true，由 __main__.py 的 training command 讀取），
-%%     所以照出廠設定跑，DAG 實際是 21 個 node、8 個碰 Spark。本圖畫的是關掉它的 19
-%%     node 形狀，理由是它未來要移除（docs/agents/deliberate-non-goals.md 有登記）。
-%%     開啟時會多出
-%%     cache_calibration_model_input，且 finalize_model 的輸出改名為 trained_model、
-%%     中間插入 calibrate_model 才產出 `model`。這比 dataset 圖不畫的那個分支更動主鏈
-%%     ——`model` 這個頭牌產物換了生產者——但下游每一條邊都不變（大家還是吃 `model`），
-%%     所以仍然不畫，改在這裡明說。要看它的形狀請直接讀 pipeline.py::create_pipeline
-%%     裡的兩個 `if enable_calibration:` 區塊與 final_model_output。
+%%   - persist_group_filter_report：pipeline 實際有 20 個 node，本圖畫了 19 個。
+%%     漏的這一個吃 train_lgb_handle、產出 group_filter_report，不在任何下游鏈上。
+%%     這是本圖既有的落差，與 #411 移除 calibration 無關，也沒有在本輪一併補上。
 %%   - --rebuild-dates / --fresh-hpo：只推翻「跳過」的決定，跳過的與重算的走同一條線。
 %%   - HPO 的 journal / checkpoint 檔案（data/models/_hpo/<search_id>/）：node 內部的
 %%     續跑機制，不是 catalog 條目，也不改變任何一條邊。
@@ -268,7 +259,7 @@ flowchart TB
   %% -------------------------- 診斷產物 ---------------------------
   subgraph DIAG[" 診斷產物：driver-local pandas；quadrant 兩支是 best-effort "]
     direction TB
-    n_fstat["compute_feature_statistics<br/><small>＋ T · <b>M</b> · P ・ 只讀抽中的列<br/><b>吃 model 是刻意耦合</b>：它把這個 node 推到 calibrate_model<br/>之後，接續執行要多付一段（見 test_resume_contracts.py）</small>"] --> o_fstat(["feature_statistics　<b>[L]</b>"])
+    n_fstat["compute_feature_statistics<br/><small>＋ T · <b>M</b> · P ・ 只讀抽中的列<br/><b>吃 model 是刻意耦合</b>：它把這個 node 推到 finalize_model<br/>之後，接續執行要多付一段（見 test_resume_contracts.py）</small>"] --> o_fstat(["feature_statistics　<b>[L]</b>"])
     n_fimp["compute_feature_importance<br/><small>＋ M</small>"] --> o_fimp(["feature_importance　<b>[L]</b>"])
     n_gain["compute_gain_ledger<br/><small>＋ M · P ・ 逐樹逐切點記帳</small>"] --> o_gain(["gain_ledger<br/><small>evaluation 的 model_capacity 吃 ・ catalog optional<br/>唯一不是 log_experiment 輸入的診斷（沒有 scalar 進 MLflow）<br/>檔案本身仍隨 log_artifacts 整個 diagnostics/ 上傳</small>"])
     n_shap["compute_shap_diagnostics<br/><small>＋ M · P ・ 單次 shap_values 兩用</small>"] --> o_shap(["shap_diagnostics　<b>[L]</b>"])

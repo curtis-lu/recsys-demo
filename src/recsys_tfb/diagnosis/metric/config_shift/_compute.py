@@ -17,7 +17,7 @@ per-item mAP 變化多少（Δ）**。
 
 ⚠ 這個推導的前提是 **pointwise 機率型 objective**（分數可讀成 log-odds）。
 ``training.objective`` 允許 ``lambdarank`` 等 pairwise/listwise 設定，此時
-``score_uncalibrated`` 是無界的原始分數、不是 log-odds，相減沒有理論基礎。
+分數是無界的原始輸出、不是 log-odds，相減沒有理論基礎。
 偵測到分數落在 (0,1) 之外時會在 ``notes`` 標明——但 offset 矩陣與 spread 是
 純 config 算術，與 objective 無關，那部分仍然成立。
 
@@ -45,11 +45,17 @@ context 都成立。context 欄在 query 內非常數時 ``notes`` 會標明。
 
 三個相對於試作腳本（``scripts/config_sorting_shift_diagnosis.py``）的行為修正
 --------------------------------------------------------------------------
-1. **讀不到 ``score_uncalibrated`` 直接 raise，不退回 ``score``。**
-   offset 活在**模型輸出的 log-odds 空間**，校準層是後貼上去的一個單調變換。
-   拿校準後的分數去扣理論 offset，是把兩個不同空間的量相減——得到的 Δ 不是
-   任何東西的估計值，只是一個看起來像數字的數字。這種錯必須吵，因為它靜默
-   時完全看不出來（Δ 照樣會印出一個小數）。
+1. **讀不到分數欄直接 raise，不自己找一欄頂替。**
+   offset 活在**模型輸出的 log-odds 空間**，只有模型原始輸出算得出有意義的
+   Δ；拿另一個空間的量去扣理論 offset，得到的不是任何東西的估計值，只是一個
+   看起來像數字的數字。這種錯必須吵，因為它靜默時完全看不出來（Δ 照樣會印出
+   一個小數）。
+
+   分數欄取自 ``schema["score"]``（``schema.columns.score``，預設 ``score``）
+   ——**不寫死欄名**。本模組一度寫死 ``score_uncalibrated``，因為當時 ``score``
+   可能是校準器的輸出、與 offset 不同空間；校準器已隨 #411 移除，``score``
+   就是模型原始輸出，那個 fallback 顧慮不存在了。``score_uncalibrated`` 這一欄
+   仍在預測表上但已 deprecated（恆等於 ``score``，#412 移除），本模組不讀它。
 2. **offset 查表零命中的 key 要回報，不靜默當成「無 override」。**
    ``overrides.get(key, default)`` 未命中時安靜地退回預設值，於是 offset 全部
    算成 0、Δ 算成 0。而 Δ ≈ 0 正是本模組宣稱「可以把整個方向排除掉」的訊號
@@ -89,9 +95,6 @@ from recsys_tfb.diagnosis.metric._common import (
 from recsys_tfb.evaluation.metrics import compute_macro_per_item_map, metric_params
 
 logger = logging.getLogger(__name__)
-
-#: 唯一可用的分數欄。見模組 docstring 修正 1——不設 fallback 是刻意的。
-SCORE_COL = "score_uncalibrated"
 
 #: context 欄為 NULL 的 group 在報表上的標籤。**只用於顯示**——offset 查表的
 #: key 仍走 ``str(value)``（NaN → ``"nan"``），那是 dataset pipeline 實際組 key
@@ -397,19 +400,20 @@ def row_offsets(
 
 def _validate(pdf: pd.DataFrame, parameters: dict, schema: dict) -> list[str]:
     """必要欄位檢查。回傳 offset 的 context 欄清單。"""
-    if SCORE_COL not in pdf.columns:
+    score_col = schema["score"]
+    if score_col not in pdf.columns:
         raise ValueError(
-            f"config_shift 需要 {SCORE_COL!r} 欄，但輸入沒有這一欄。"
-            f"這裡刻意不退回 schema.score：理論 offset 活在模型輸出的 log-odds "
-            f"空間，校準後的分數是另一個空間的量，兩者相減得到的 Δ 沒有意義。"
+            f"config_shift 需要 schema 的 score 角色欄 {score_col!r}，但輸入"
+            "沒有這一欄。這裡刻意不自己找一欄頂替：理論 offset 活在模型輸出的"
+            " log-odds 空間，換一欄算出來的 Δ 沒有意義（見模組 docstring 修正 1）。"
         )
-    if len(pdf) and not pdf[SCORE_COL].notna().any():
+    if len(pdf) and not pdf[score_col].notna().any():
         # 欄位在、值全空＝讀不到，理由同 item_ability 的守衛（空抽樣不算）。
         # 三個模組各寫一份、不抽進 _common：跟上面「沒有這一欄」的守衛同形，
         # 那一個本來就是各模組各寫、訊息各帶自己的模組名。
         raise ValueError(
-            f"config_shift 需要 {SCORE_COL!r} 欄的值，但抽樣裡這一欄全是空值"
-            "（常見原因：這批預測沒有原始分數，欄位是共用表補上的 NULL）。"
+            f"config_shift 需要 {score_col!r} 欄的值，但抽樣裡這一欄全是空值"
+            "（照算會在 NULL 上取 logit，只得到 NaN）。"
         )
     query_cols = [schema["time"], *schema["entity"]]
     required = [*query_cols, schema["item"], schema["label"]]
@@ -452,7 +456,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
 
     out: dict[str, Any] = {
         "enabled": bool(cfg.get("enabled", True)),
-        "score_col_used": SCORE_COL,
+        "score_col_used": schema["score"],
         "metric_params": mp,
         "context_columns": [],
         "items": [],
@@ -546,14 +550,16 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     # paired_bootstrap_delta 會自己 factorize）——這是 sample_arrays 刻意不
     # 把 clusters 一起回傳的原因，見該函式 docstring。
     clusters = query_key(sample_pdf, entity_cols)
-    z, logit_notes = to_logit(sample_pdf[SCORE_COL].to_numpy(dtype=np.float64))
+    z, logit_notes = to_logit(
+        sample_pdf[schema["score"]].to_numpy(dtype=np.float64)
+    )
     out["notes"].extend(logit_notes)
     if logit_notes:
         # to_logit 只說「分數超出 (0,1)、單位改成原始分數尺度」。真正要講的是
         # 這讓 Δ 的推導前提失效——offset 是 log-odds 上的加性常數，分數不是
         # log-odds 時相減沒有理論基礎。offset 矩陣與 spread 不受影響。
         out["notes"].append(
-            f"Δ 的推導前提是 pointwise 機率型 objective（{SCORE_COL} 可讀成 "
+            f"Δ 的推導前提是 pointwise 機率型 objective（{schema['score']} 可讀成 "
             "log-odds）。偵測到分數落在 (0,1) 之外（例如 training.objective 為 "
             "lambdarank 等 pairwise/listwise 設定），此前提可能不成立。"
             "offset 矩陣與兩個 spread 是純 config 算術，不受此影響。"

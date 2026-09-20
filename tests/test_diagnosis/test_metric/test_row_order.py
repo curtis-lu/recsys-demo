@@ -72,7 +72,7 @@ def _tied_sample(item_type: str = "str") -> pd.DataFrame:
             rows.append({
                 "snap_date": "2026-01-31", "cust_id": f"c{c:02d}",
                 "prod_name": item, "label": int(label),
-                "score_uncalibrated": s, "score": s,
+                "score": s,
                 "stratum": "hash_ratio" if c % 3 else "take_all",
                 "inclusion_weight": 1 / 0.37 if c % 3 else 1.0,
             })

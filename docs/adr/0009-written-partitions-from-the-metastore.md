@@ -13,6 +13,11 @@ date: 2026-08-08
 >
 > 下文的「3 個沒有」「14 個有」是 2026-08-08 當時的分佈，保留是因為**那個排除本身就是決定的
 > 一部分**（它劃出了這個做法成立的邊界）。
+>
+> **再更新（calibration 移除，#411／#414）**：下文表中「`base_dataset_version` ＋
+> `calibration_variant_id`」那 2 條（`calibration_keys`／`calibration_model_input`）已從
+> `catalog.yaml` 刪除。現況是 16 個帶 `partition_cols` 的條目，全部有 `partition_filter`
+> （實測：`conf/base/catalog.yaml` 逐條讀取核對），結論不變。
 
 `HiveTableDataset.save()` 寫完之後會印一行「寫了哪些分區」。原本的取得方式是回頭問剛寫出去的
 那個 `df`：

@@ -21,18 +21,18 @@ def test_weighted_auc_handles_ties_with_half_credit():
 
 def test_query_centered_auc_removes_query_level_false_signal():
     pdf = pd.DataFrame([
-        {"snap_date": "2026-07-17", "cust_id": "Alice", "prod_name": "A", "label": 0, "score_uncalibrated": 8.0},
-        {"snap_date": "2026-07-17", "cust_id": "Alice", "prod_name": "B", "label": 0, "score_uncalibrated": 7.0},
-        {"snap_date": "2026-07-17", "cust_id": "Alice", "prod_name": "J", "label": 1, "score_uncalibrated": 6.0},
-        {"snap_date": "2026-07-17", "cust_id": "Amy", "prod_name": "A", "label": 0, "score_uncalibrated": 9.0},
-        {"snap_date": "2026-07-17", "cust_id": "Amy", "prod_name": "B", "label": 0, "score_uncalibrated": 8.0},
-        {"snap_date": "2026-07-17", "cust_id": "Amy", "prod_name": "J", "label": 1, "score_uncalibrated": 7.0},
-        {"snap_date": "2026-07-17", "cust_id": "Bob", "prod_name": "A", "label": 0, "score_uncalibrated": 3.0},
-        {"snap_date": "2026-07-17", "cust_id": "Bob", "prod_name": "B", "label": 0, "score_uncalibrated": 2.0},
-        {"snap_date": "2026-07-17", "cust_id": "Bob", "prod_name": "J", "label": 0, "score_uncalibrated": 1.0},
-        {"snap_date": "2026-07-17", "cust_id": "Ben", "prod_name": "A", "label": 0, "score_uncalibrated": 4.0},
-        {"snap_date": "2026-07-17", "cust_id": "Ben", "prod_name": "B", "label": 0, "score_uncalibrated": 3.0},
-        {"snap_date": "2026-07-17", "cust_id": "Ben", "prod_name": "J", "label": 0, "score_uncalibrated": 2.0},
+        {"snap_date": "2026-07-17", "cust_id": "Alice", "prod_name": "A", "label": 0, "score": 8.0},
+        {"snap_date": "2026-07-17", "cust_id": "Alice", "prod_name": "B", "label": 0, "score": 7.0},
+        {"snap_date": "2026-07-17", "cust_id": "Alice", "prod_name": "J", "label": 1, "score": 6.0},
+        {"snap_date": "2026-07-17", "cust_id": "Amy", "prod_name": "A", "label": 0, "score": 9.0},
+        {"snap_date": "2026-07-17", "cust_id": "Amy", "prod_name": "B", "label": 0, "score": 8.0},
+        {"snap_date": "2026-07-17", "cust_id": "Amy", "prod_name": "J", "label": 1, "score": 7.0},
+        {"snap_date": "2026-07-17", "cust_id": "Bob", "prod_name": "A", "label": 0, "score": 3.0},
+        {"snap_date": "2026-07-17", "cust_id": "Bob", "prod_name": "B", "label": 0, "score": 2.0},
+        {"snap_date": "2026-07-17", "cust_id": "Bob", "prod_name": "J", "label": 0, "score": 1.0},
+        {"snap_date": "2026-07-17", "cust_id": "Ben", "prod_name": "A", "label": 0, "score": 4.0},
+        {"snap_date": "2026-07-17", "cust_id": "Ben", "prod_name": "B", "label": 0, "score": 3.0},
+        {"snap_date": "2026-07-17", "cust_id": "Ben", "prod_name": "J", "label": 0, "score": 2.0},
     ])
     schema = {
         "time": "snap_date",

@@ -190,7 +190,7 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
     - 兩邊至少要有一個共同的 entity 和一個共同的 item。
   - **診斷（`--post-training`）**：
     - config_shift 診斷打開、而且抽樣分層或樣本權重有用到 label 欄時，對應的抽樣比例（`dataset.sample_ratio`、`dataset.sample_ratio_overrides`）與樣本權重（`training.sample_weights`）必須大於 0。
-    - 有打開、而且需要原始分數的診斷，預測表必須有 `score_uncalibrated` 欄，而且不能全是空值。
+    - 有打開、而且需要原始分數的診斷，預測表必須有 schema 宣告的 score 角色欄（`schema["score"]`，預設 `score`；`item_ability`／`suppression`／`config_shift` 已改讀這欄，不再讀已 deprecated 的 `score_uncalibrated`，#415），而且不能全是空值。
 - 只警告：
   - `evaluation.segment_columns` 指到母體表沒有的欄。
   - `unmapped_policy: drop` 時，外部表裡對不上 `prod_mapping` 的 item 被丟掉。

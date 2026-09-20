@@ -16,7 +16,12 @@ date: 2026-08-10
 
 [ADR-0002](0002-preprocessed-feature-table-incremental.md) 讓 dataset 只處理「設定列出、但尚未落地」的月份，[ADR-0007](0007-month-plans-travel-through-the-catalog.md) 把那個決定搬上 pipeline 定義。兩者都只服務 **test 鏈**的三個節點。
 
-`conf/base/parameters_dataset.yaml` 的 `enable_calibration: true` 是出廠設定，所以 pipeline 實際有 15 個節點（`tests/test_pipelines/test_dataset/test_pipeline.py` 的 `TestDatasetPipeline`）。加一個 `test_snap_dates` 月份時，其中**十個**節點——`select_sample_keys`、`split_train_keys`、`select_val_keys`、`fit_preprocessor_metadata`、`build_train_model_input`、`build_train_dev_model_input`、`build_val_model_input`、`filter_val_model_input`、`select_calibration_keys`、`build_calibration_model_input`——全量重算，並把逐位元相同的內容覆寫回同一批 partition（`io/hive_table_dataset.py` 的 `save()` 沒有 skip 分支）。
+當時 `conf/base/parameters_dataset.yaml` 的 `enable_calibration: true` 是出廠設定，所以 pipeline 那時有 15 個節點（`tests/test_pipelines/test_dataset/test_pipeline.py` 的 `TestDatasetPipeline`）。加一個 `test_snap_dates` 月份時，其中**十個**節點——`select_sample_keys`、`split_train_keys`、`select_val_keys`、`fit_preprocessor_metadata`、`build_train_model_input`、`build_train_dev_model_input`、`build_val_model_input`、`filter_val_model_input`、`select_calibration_keys`、`build_calibration_model_input`——全量重算，並把逐位元相同的內容覆寫回同一批 partition（`io/hive_table_dataset.py` 的 `save()` 沒有 skip 分支）。
+
+> ⚠ **calibration 已移除（#411／#414）**：`enable_calibration` 是退役鍵，出現即報錯（A37）；
+> `select_calibration_keys`、`build_calibration_model_input` 已刪除。pipeline 現在固定 15 個
+> 節點（不再有條件註冊），加一個 `test_snap_dates` 月份全量重算的是**八個**節點——上面清單
+> 扣掉最後兩個。結論（十個節點全量重算是浪費、增量要掛在執行層而非產物層）不受影響。
 
 那不是遺漏。issue #123 的 Out of Scope 明文寫著「train／val／calibration 分支的增量化：本次的差集只服務 test 分支」。本 ADR 記錄的是**現在補上它的決定，以及為什麼機制不是當初預期的那一種**。
 
@@ -31,7 +36,7 @@ date: 2026-08-10
 
 **收邊條件自己不查 `INCREMENTAL_DATASETS`。** 它住在四個指令共用的 `_execute_pipeline` 上，讓共用路徑 import 一個 pipeline 專屬的常數，是把該不該有月份的判斷從「這個指令有沒有注入計畫」偷偷換成「這個名字在不在那份清單裡」；而 `retrain_advice` / `rebuild_advice` 已經是「per-pipeline 覆寫，由該指令注入」的既定形狀。
 
-於是 DAG 自己推出正確的節點集：`preprocessor` 是落地的 JSON、載得到 → `fit_preprocessor_metadata` 不進來；`test_keys` 與 `preprocessed_feature_table` 缺新月份 → 兩個生產者被拉回；train/val/calibration 的 build 不在上游閉包裡 → 不進來。
+於是 DAG 自己推出正確的節點集：`preprocessor` 是落地的 JSON、載得到 → `fit_preprocessor_metadata` 不進來；`test_keys` 與 `preprocessed_feature_table` 缺新月份 → 兩個生產者被拉回；train/val 的 build（原本還有 calibration，已隨 #411 移除）不在上游閉包裡 → 不進來。
 
 > ⚠ **ADR-0013 推翻**：原文此處還有一句「加上一個具名切片旗標 `--only-test-months`，內部等價於 `--only-node filter_test_model_input` 再加上資料閘」。旗標改為 `create_pipeline` 模式後不做上游擴張，因此不再等價。
 
@@ -61,7 +66,7 @@ date: 2026-08-10
 
 這條路徑成立，決定仍然維持——因為它需要使用者主動宣告縮小範圍，而產物層的對應失效不需要任何人做任何事。但**「方向相反」是過度宣稱，正確的說法是「主動觸發 vs 被動預設」**。
 
-同理，`base_dataset_version` 的定義是「扣掉 `test_snap_dates` 的一切」（`core/versioning.py` 的 `COVERAGE_ONLY_KEYS`）這件事，**只覆蓋 base 層**；`train_variant_id` 與 `calibration_variant_id` 不在它的保護範圍內。
+同理，`base_dataset_version` 的定義是「扣掉 `test_snap_dates` 的一切」（`core/versioning.py` 的 `COVERAGE_ONLY_KEYS`）這件事，**只覆蓋 base 層**；`train_variant_id` 不在它的保護範圍內（原本還有 `calibration_variant_id`，已隨 #411 移除，版本身分現在只剩 `base_dataset_version` 與 `train_variant_id` 兩層）。
 
 ## 為什麼是 `_can_load`，不是 `HiveTableDataset.exists()`
 
@@ -108,11 +113,11 @@ ADR-0007 刪掉 `filter_test_model_input` 的防禦性月份過濾時，論證�
 
 ## 後果
 
-- **`scripts/rebuild_eval_month.sh` 改用新旗標。** 重算既有月份與新增月份需要的節點集完全相同，差別只在 month plan 把哪些月放進 `to_process`。這會**移除該腳本目前附帶的一層自癒**：它現在跑的是完整 dataset，順帶把 train/val/calibration 在當前 variant 底下重建一次，因此會意外修好上一節那條 variant 漂移。改用新旗標之後這層消失，**而且沒有東西補上**。
+- **`scripts/rebuild_eval_month.sh` 改用新旗標。** 重算既有月份與新增月份需要的節點集完全相同，差別只在 month plan 把哪些月放進 `to_process`。這會**移除該腳本目前附帶的一層自癒**：它現在跑的是完整 dataset，順帶把 train/val 在當前 variant 底下重建一次（原本還會重建 calibration，已隨 #411 移除），因此會意外修好上一節那條 variant 漂移。改用新旗標之後這層消失，**而且沒有東西補上**。
 
   仍然接受，但理由不是有別的機制頂上——是那層自癒從來不是這個腳本的職責、沒有任何文件宣稱過它，而且移除之後的曝險與 `--only-test-months` 主動線**完全相同**：腳本只是不再意外遮掩一個既已存在的風險，不是新增一類風險。改完之後 `--rebuild-dates` 的語意回歸單一職責：**只決定哪些月份，不決定跑哪些節點**。
 
-- **驗收看 partition 有沒有被寫，不看 wall-clock。** 本機 `local[*]` 與叢集的時間結構不同、會隨負載漂移，是不可重現的證據（`docs/operations/known-pitfalls.md` §4 記著同一個教訓）。判準：加月份後 train／val／calibration 的 model_input partition mtime 與加之前完全相同，輔以 `[plan] running N of M nodes`。這與 PR #135 用過的證據形式相同。
+- **驗收看 partition 有沒有被寫，不看 wall-clock。** 本機 `local[*]` 與叢集的時間結構不同、會隨負載漂移，是不可重現的證據（`docs/operations/known-pitfalls.md` §4 記著同一個教訓）。判準：加月份後 train／val 的 model_input partition mtime 與加之前完全相同（原本還含 calibration_model_input，已隨 #411 移除），輔以 `[plan] running N of M nodes`。這與 PR #135 用過的證據形式相同。
 
 ### 已被 ADR-0013 移除適用的兩條（原文保留供追溯）
 

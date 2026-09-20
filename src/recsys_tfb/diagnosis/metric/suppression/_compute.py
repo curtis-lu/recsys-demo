@@ -85,11 +85,6 @@ from recsys_tfb.utils.ranking import order_by_score_then_item
 
 logger = logging.getLogger(__name__)
 
-#: 唯一可用的分數欄。與家族其餘模組一致：壓制帳本的名次順序雖然是單調不變
-#: 的量（校準是單調變換，不改排序），但 score_margin 的單位需要與家族其餘
-#: 診斷一致（logit 空間），且腳本原版本來就硬性要求這一欄，這裡沿用不改。
-SCORE_COL = "score_uncalibrated"
-
 #: 每個非顯然欄位一句話定義，跟著 JSON 走。純定義，不含判讀（見模組
 #: docstring「不下結論」）。
 FIELD_NOTES: dict[str, str] = {
@@ -148,16 +143,17 @@ CROSS_PURCHASE_FIELD_NOTES: dict[str, str] = {
 
 
 def _validate(pdf: pd.DataFrame, schema: dict) -> None:
-    if SCORE_COL not in pdf.columns:
+    score_col = schema["score"]
+    if score_col not in pdf.columns:
         raise ValueError(
-            f"suppression 需要 {SCORE_COL!r} 欄，但輸入沒有這一欄。與家族其餘"
-            "模組一致，不退回 schema.score。"
+            f"suppression 需要 schema 的 score 角色欄 {score_col!r}，但輸入"
+            "沒有這一欄。與家族其餘模組一致，不自己找一欄頂替。"
         )
-    if len(pdf) and not pdf[SCORE_COL].notna().any():
+    if len(pdf) and not pdf[score_col].notna().any():
         # 欄位在、值全空＝讀不到，理由同 item_ability 的守衛（空抽樣不算）。
         raise ValueError(
-            f"suppression 需要 {SCORE_COL!r} 欄的值，但抽樣裡這一欄全是空值"
-            "（常見原因：這批預測沒有原始分數，欄位是共用表補上的 NULL）。"
+            f"suppression 需要 {score_col!r} 欄的值，但抽樣裡這一欄全是空值"
+            "（照算會在 NULL 上取 logit，只得到 NaN）。"
         )
     query_cols = [schema["time"], *schema["entity"]]
     required = [*query_cols, schema["item"], schema["label"]]
@@ -283,7 +279,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
 
     out: dict[str, Any] = {
         "enabled": bool(cfg.get("enabled", True)),
-        "score_col_used": SCORE_COL,
+        "score_col_used": schema["score"],
         "metric_params": mp,
         "logit_notes": [],
         "top_examples": int(cfg.get("top_examples", 50)),
@@ -343,7 +339,9 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     # 上面的字串版只當名字用。
     item_values = sample_pdf[item_col].to_numpy()
     y = sample_pdf[label_col].to_numpy(dtype=np.int64)
-    z, logit_notes = to_logit(sample_pdf[SCORE_COL].to_numpy(dtype=np.float64))
+    z, logit_notes = to_logit(
+        sample_pdf[schema["score"]].to_numpy(dtype=np.float64)
+    )
     out["logit_notes"] = logit_notes
     out["notes"].extend(logit_notes)
 

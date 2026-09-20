@@ -8,8 +8,10 @@
 對每個 item j，在 item j 的所有列上把正例（該客戶買了 j）與負例（沒買）算
 一次加權 AUC：
 
-    raw_within_item_auc      = AUC(logit(score_uncalibrated), label)
-    query_centered_auc       = AUC(logit(score_uncalibrated) − query 平均, label)
+    raw_within_item_auc      = AUC(logit(score), label)
+    query_centered_auc       = AUC(logit(score) − query 平均, label)
+
+（``score`` ＝ ``schema["score"]`` 指到的欄，預設就叫 ``score``；下同。）
 
 ``query_centered_auc`` 先用 :func:`query_center_scores` 把每個 query 的平均
 logit 分數扣掉，只留「同一位客戶的候選之間誰比較被看好」這個相對訊號；
@@ -43,9 +45,13 @@ bootstrap 迴圈內只做「拿乘數 → 乘上 inclusion_weight → 依既定�
 
 三個相對於試作腳本（``scripts/item_ability_diagnosis.py``）的行為修正
 -----------------------------------------------------------------------
-1. **讀不到 ``score_uncalibrated`` 直接 raise，不退回 ``score``。** 理由與
-   ``config_shift`` 相同：raw／centered AUC 是在模型輸出的 logit 空間上算
-   的，校準後的分數是另一個空間的量，兩者不能混。
+1. **讀不到分數欄直接 raise，不自己找一欄頂替。** 理由與 ``config_shift``
+   相同：raw／centered AUC 是在模型輸出的 logit 空間上算的，換一個空間的量
+   算出來的 AUC 不是同一件事的估計值。分數欄取自 ``schema["score"]``
+   （``schema.columns.score``），**不寫死欄名**——本模組一度寫死
+   ``score_uncalibrated``，那是校準器還在、``score`` 可能是校準輸出時的權宜；
+   校準器已隨 #411 移除，``score`` 就是模型原始輸出。``score_uncalibrated``
+   仍在預測表上但已 deprecated（恆等於 ``score``，#412 移除），本模組不讀它。
 2. **點估計也吃 ``inclusion_weight``。** 試作腳本的 ``weighted_auc(z_i, yy)``
    點估計沒有帶權重（``weight=None`` → 全 1）。診斷抽樣是分層的，不加權的
    話某一層（例如 hash_ratio 降抽層）的客戶會被系統性低估——與
@@ -84,20 +90,17 @@ from recsys_tfb.utils.ranking import order_by_score_then_item
 
 logger = logging.getLogger(__name__)
 
-#: 唯一可用的分數欄。見模組 docstring 修正 1——不設 fallback 是刻意的。
-SCORE_COL = "score_uncalibrated"
-
 #: 每個非顯然欄位一句話定義，跟著 JSON 走。純定義，不含判讀（見模組 docstring
 #: 「不下結論」）。
 FIELD_NOTES: dict[str, str] = {
     "raw_within_item_auc": (
-        "item j 的正例列 vs 負例列，在 logit(score_uncalibrated) 上直接算的"
+        "item j 的正例列 vs 負例列，在 logit(分數欄，見 score_col_used) 上直接算的"
         "加權 AUC（inclusion_weight 加權，同分給 0.5 分）。未扣掉 query 內的"
         "平均分數，客戶整體分數水準與 item 專屬的排序能力混在一起。"
     ),
     "query_centered_auc": (
         "與 raw_within_item_auc 同樣的 AUC 計算，但分數先扣掉各自 query 的"
-        "平均 logit(score_uncalibrated)（見 query_center_scores）——把 query "
+        "平均 logit（同一個分數欄，見 query_center_scores）——把 query "
         "內的整體水準移除，只留 item 相對於同一 query 其他候選的排序能力。"
     ),
     "auc_gap_raw_minus_centered": (
@@ -157,9 +160,8 @@ def descending_ranks(
 
     Ties rank by ``items`` ascending, the rule the published and evaluated
     ranks use (``utils.ranking``), whatever order the sample rows arrived in.
-    Same rule, not necessarily the same ranks: this module ranks
-    ``score_uncalibrated`` and the main metrics rank ``score``, which order the
-    rows alike only when calibration is off or strictly increasing.
+    Same rule and, since #411 removed the calibrator, the same column too:
+    this module and the main metrics both rank ``schema["score"]``.
 
     回傳原始名次（不除以 query size）：名次直接讀得懂（「排第 3」），而百分位
     （rank ÷ query size）在 query 候選數不固定時才需要，且「0.125」這種數字讀
@@ -267,20 +269,20 @@ def _ci_bounds(boot: np.ndarray) -> tuple[Optional[float], Optional[float]]:
 
 
 def _validate(pdf: pd.DataFrame, schema: dict) -> None:
-    if SCORE_COL not in pdf.columns:
+    score_col = schema["score"]
+    if score_col not in pdf.columns:
         raise ValueError(
-            f"item_ability 需要 {SCORE_COL!r} 欄，但輸入沒有這一欄。這裡刻意"
-            "不退回 schema.score：raw／query-centered AUC 是在 "
-            f"logit({SCORE_COL}) 空間上算的，校準後的分數是另一個空間的量，"
-            "用它算出來的 AUC 不是同一件事的估計值。"
+            f"item_ability 需要 schema 的 score 角色欄 {score_col!r}，但輸入"
+            "沒有這一欄。這裡刻意不自己找一欄頂替：raw／query-centered AUC 是在 "
+            f"logit({score_col}) 空間上算的，換一個空間的量算出來的 AUC 不是"
+            "同一件事的估計值。"
         )
-    if len(pdf) and not pdf[SCORE_COL].notna().any():
-        # 欄位在、值全空＝讀不到。兩種模式寫同一張 enriched 表時，另一模式
-        # 沒有的欄讀回來是全 NULL；照算會在 NULL 上取 logit，只得到 NaN。
+    if len(pdf) and not pdf[score_col].notna().any():
+        # 欄位在、值全空＝讀不到：照算會在 NULL 上取 logit，只得到 NaN。
         # 空抽樣不算：零列沒有值可讀，由 compute 走空樣本的 stub。
         raise ValueError(
-            f"item_ability 需要 {SCORE_COL!r} 欄的值，但抽樣裡這一欄全是空值"
-            "（常見原因：這批預測沒有原始分數，欄位是共用表補上的 NULL）。"
+            f"item_ability 需要 {score_col!r} 欄的值，但抽樣裡這一欄全是空值"
+            "（照算會在 NULL 上取 logit，只得到 NaN）。"
         )
     query_cols = [schema["time"], *schema["entity"]]
     required = [*query_cols, schema["item"], schema["label"]]
@@ -313,7 +315,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
 
     out: dict[str, Any] = {
         "enabled": bool(cfg.get("enabled", True)),
-        "score_col_used": SCORE_COL,
+        "score_col_used": schema["score"],
         "metric_params": mp,
         "logit_notes": [],
         "top_n": int(cfg.get("top_n", 30)),
@@ -363,7 +365,9 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     )
 
     with log_step(logger, "item_ability.base_arrays"):
-        z, logit_notes = to_logit(sample_pdf[SCORE_COL].to_numpy(dtype=np.float64))
+        z, logit_notes = to_logit(
+            sample_pdf[schema["score"]].to_numpy(dtype=np.float64)
+        )
         out["logit_notes"] = logit_notes
         out["notes"].extend(logit_notes)
         # 先把列排成固定順序（query id → 分數 → item）再算。下面的 query 平均、

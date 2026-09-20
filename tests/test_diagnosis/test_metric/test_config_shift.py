@@ -36,8 +36,7 @@ def _sample():
                 "prod_name": item, "cust_segment_typ": segment,
                 "label": int((item == "ccard_ins" and c % 2 == 0)
                              or (item == "fund_bond" and c % 5 == 0)),
-                "score_uncalibrated": float(rng.uniform(0.05, 0.95)),
-                "score": 0.5,
+                "score": float(rng.uniform(0.05, 0.95)),
             })
     return pd.DataFrame(rows)
 
@@ -82,17 +81,22 @@ def test_delta_is_invariant_to_adding_a_constant_per_segment():
     assert shifted["delta"] == pytest.approx(base["delta"], abs=1e-9)
 
 
-def test_uses_uncalibrated_score_and_fails_loud_without_it():
-    sample = _sample().drop(columns=["score_uncalibrated"])
-    with pytest.raises(ValueError, match="score_uncalibrated"):
+def test_reads_the_schema_score_column_and_fails_loud_without_it():
+    """讀的是 schema 的 score 角色欄，缺了就 raise（#415）。
+
+    欄名從 ``PARAMS["schema"]["columns"]["score"]`` 來，不寫死——把模組改回
+    寫死 ``score_uncalibrated`` 時，這條會因為 raise 沒發生而轉紅。
+    """
+    sample = _sample().drop(columns=["score"])
+    with pytest.raises(ValueError, match="score 角色欄"):
         compute((sample, {"n_queries": 40}), PARAMS)
 
 
 @pytest.mark.parametrize("null", [np.nan, None], ids=["nan", "none"])
-def test_an_all_null_uncalibrated_score_counts_as_unreadable(null):
+def test_an_all_null_score_column_counts_as_unreadable(null):
     """欄位在、值全空也要 raise——理由見 test_item_ability 的同名測試。"""
     sample = _sample()
-    sample["score_uncalibrated"] = null
+    sample["score"] = null
     with pytest.raises(ValueError, match="全是空值"):
         compute((sample, {"n_queries": 40}), PARAMS)
 
@@ -122,8 +126,7 @@ def _sample_with_coupled_items():
                 "snap_date": "2026-01-31", "cust_id": f"c{c}",
                 "prod_name": item, "cust_segment_typ": "mass",
                 "label": int("abc"[c % 3] == item),
-                "score_uncalibrated": float(rng.uniform(0.05, 0.95)),
-                "score": 0.5,
+                "score": float(rng.uniform(0.05, 0.95)),
             })
     return pd.DataFrame(rows)
 
@@ -179,8 +182,7 @@ def _sample_where_correction_helps():
                 "snap_date": "2026-01-31", "cust_id": f"c{c}",
                 "prod_name": item, "cust_segment_typ": "mass",
                 "label": int(item == "fund_bond"),
-                "score_uncalibrated": float(1.0 / (1.0 + np.exp(-z))),
-                "score": 0.5,
+                "score": float(1.0 / (1.0 + np.exp(-z))),
             })
     return pd.DataFrame(rows)
 
@@ -220,8 +222,7 @@ def _sample_with_two_tier_inclusion_weight():
                 "snap_date": "2026-01-31", "cust_id": f"c{c}",
                 "prod_name": item, "cust_segment_typ": "mass",
                 "label": int(is_pos),
-                "score_uncalibrated": 0.9 if higher else 0.1,
-                "score": 0.5,
+                "score": 0.9 if higher else 0.1,
                 "inclusion_weight": 1.0 if pos_first else 4.0,
             })
     return pd.DataFrame(rows)
@@ -323,8 +324,7 @@ def _sample_with_item_level_context(hi_query_weight=1.0):
                     "snap_date": "2026-01-31", "cust_id": f"c{qid}",
                     "prod_name": item, "prod_tier": _TIER_OF[item],
                     "label": int(k == 1),
-                    "score_uncalibrated": float(rng.uniform(0.05, 0.95)),
-                    "score": 0.5,
+                    "score": float(rng.uniform(0.05, 0.95)),
                     "inclusion_weight": weight,
                 })
     return pd.DataFrame(rows)
@@ -493,8 +493,7 @@ def _sample_with_int_context(dtype):
                 "snap_date": "2026-01-31", "cust_id": f"c{c}",
                 "prod_name": item, "seg": 3,
                 "label": int(item == "a"),
-                "score_uncalibrated": float(rng.uniform(0.05, 0.95)),
-                "score": 0.5,
+                "score": float(rng.uniform(0.05, 0.95)),
             })
     pdf = pd.DataFrame(rows)
     pdf["seg"] = pdf["seg"].astype(dtype)
@@ -560,8 +559,7 @@ def _sample_with_null_context():
                 "snap_date": "2026-01-31", "cust_id": f"c{c}",
                 "prod_name": item, "prod_tier": tier,
                 "label": int(item == "a"),
-                "score_uncalibrated": float(rng.uniform(0.05, 0.95)),
-                "score": 0.5,
+                "score": float(rng.uniform(0.05, 0.95)),
             })
     return pd.DataFrame(rows)
 
@@ -631,7 +629,7 @@ def test_per_item_reports_both_raw_and_effective_positive_counts():
 def _sample_with_unbounded_scores():
     """lambdarank 那類 pairwise/listwise objective 的原始分數：無界、不在 (0,1)。"""
     pdf = _sample()
-    pdf["score_uncalibrated"] = np.linspace(-3.5, 5.25, len(pdf))
+    pdf["score"] = np.linspace(-3.5, 5.25, len(pdf))
     return pdf
 
 

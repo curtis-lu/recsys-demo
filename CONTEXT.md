@@ -61,7 +61,7 @@ _Avoid_: 主鍵（來源表設定裡的 `primary_key` 是另一回事）
 _Avoid_: 事件紀錄、event log（會和 **event** 混淆）
 
 **split**:
-依 time 切出的資料段：`train`、`train_dev`（和 train 同時段、以 entity 互斥切出）、`calibration`、`val`、`test`。
+依 time 切出的資料段：`train`、`train_dev`（和 train 同時段、以 entity 互斥切出）、`val`、`test`。
 _Avoid_: fold
 
 **日期區間**:
@@ -91,10 +91,7 @@ _Avoid_: 產品清單；也不要和 `inference.products`（離線推論的候�
 dataset 產物的版本身分。精確定義：`src/recsys_tfb/core/versioning.py` 模組 docstring。
 
 **train_variant_id**:
-train 與 train_dev 抽樣設定的版本身分，位在 base_dataset_version 底下。精確定義同上。
-
-**calibration_variant_id**:
-calibration 抽樣設定的版本身分，位在 base_dataset_version 底下。精確定義同上。
+train 與 train_dev 抽樣設定的版本身分，位在 base_dataset_version 底下，是唯一的 variant 層（#411 移除了 calibration 那一層，`calibration_variant_id` 已不存在）。精確定義同上。
 
 **model_version**:
 模型的版本身分。精確定義同上。

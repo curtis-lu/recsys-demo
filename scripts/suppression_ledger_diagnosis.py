@@ -6,7 +6,8 @@ answers one narrow ranking-loss question:
     In the same query, which label=0 items are ranked above each label=1 item?
 
 For every positive row ``(q, j)``, the script enumerates negative rows
-``(q, k)`` that appear above it under ``logit(score_uncalibrated)``. It then
+``(q, k)`` that appear above it under ``logit(score)`` (the schema score
+role column, ``schema.columns.score``). It then
 aggregates a suppression ledger by ``positive_item`` and ``suppressor_item``.
 
 The report intentionally keeps one main diagnostic currency: AP gap attributed
@@ -51,7 +52,6 @@ from recsys_tfb.evaluation.metrics import (
 )
 
 ENRICHED_EVAL_ENTRY = "enriched_eval_predictions"
-SCORE_COL = "score_uncalibrated"
 logger = logging.getLogger("suppression_ledger_diagnosis")
 
 
@@ -125,7 +125,6 @@ def required_columns(parameters: dict, schema: dict) -> list[str]:
         *schema["entity"],
         schema["item"],
         schema["label"],
-        SCORE_COL,
         schema["score"],
     ]
 
@@ -240,11 +239,11 @@ def validate_and_prepare(
     query_cols = [schema["time"], *schema["entity"]]
     base_required = [*query_cols, schema["item"], schema["label"]]
 
-    missing = [c for c in [*base_required, SCORE_COL] if c not in pdf.columns]
+    missing = [c for c in [*base_required, schema["score"]] if c not in pdf.columns]
     if missing:
         raise ValueError(f"Input data missing required columns: {missing}")
 
-    keep = [*base_required, SCORE_COL]
+    keep = [*base_required, schema["score"]]
     logger.info("Validating pandas input: rows=%d, columns=%s", len(pdf), list(pdf.columns))
     out = pdf[keep].copy()
     out[schema["label"]] = out[schema["label"]].astype(int)
@@ -405,7 +404,7 @@ def analyze_suppression(
     clusters = pd.factorize(pdf[entity_cols].astype(str).agg("|".join, axis=1))[0]
     items = pdf[item_col].astype(str).to_numpy()
     y = pdf[label_col].to_numpy(dtype=np.int64)
-    z, logit_notes = to_logit(pdf[SCORE_COL].to_numpy(dtype=np.float64))
+    z, logit_notes = to_logit(pdf[schema["score"]].to_numpy(dtype=np.float64))
     ap_by_item, n_pos_ap, macro_map = per_item_ap(groups, items, y, z, mp)
 
     logger.info(
@@ -726,7 +725,7 @@ def analyze_suppression(
     )
     return {
         "metric_params": mp,
-        "score_col_used": SCORE_COL,
+        "score_col_used": schema["score"],
         "logit_notes": logit_notes,
         "n_rows": int(len(pdf)),
         "n_queries": int(len(boundaries) - 1),
@@ -906,6 +905,8 @@ def percentage_glossary_html() -> str:
 
 def render_html(report: dict) -> str:
     result = report["result"]
+    # 分數欄名照實印，不寫死：來自 schema 的 score 角色欄（#415）。
+    sc = html.escape(str(result["score_col_used"]))
     source = report["source"]
     notes = report.get("notes", []) + result.get("logit_notes", [])
     notes_html = "".join(f"<li>{html.escape(n)}</li>" for n in notes)
@@ -947,7 +948,7 @@ def render_html(report: dict) -> str:
 <tr><th>score column</th><td><code>{html.escape(result["score_col_used"])}</code></td></tr>
 <tr><th>metric k</th><td>{html.escape("none" if result["metric_params"]["k"] is None else str(result["metric_params"]["k"]))}</td></tr>
 </tbody></table>
-<p class="muted">Scores are <code>logit(score_uncalibrated)</code>. A suppressor is counted only when it is label=0 and ranked above a label=1 row in the same query.</p>
+<p class="muted">Scores are <code>logit({sc})</code>. A suppressor is counted only when it is label=0 and ranked above a label=1 row in the same query.</p>
 {"<ul>" + notes_html + "</ul>" if notes_html else ""}
 
 <h2>Percentage Glossary</h2>
@@ -969,7 +970,7 @@ def render_html(report: dict) -> str:
 {matrix_html(result["matrices"]["affected_positive_rate"], result["target_summary"], result["by_suppressor"], value_kind="percent")}
 
 <h3>2c. Mean Logit Margin Matrix</h3>
-<p class="muted">Cell = mean logit(score_uncalibrated suppressor) - logit(score_uncalibrated positive) for affected rows. Use this as a score-strength cue, not as the ranking priority.</p>
+<p class="muted">Cell = mean logit({sc} suppressor) - logit({sc} positive) for affected rows. Use this as a score-strength cue, not as the ranking priority.</p>
 {matrix_html(result["matrices"]["mean_logit_margin"], result["target_summary"], result["by_suppressor"], value_kind="number")}
 
 <h2>3. Suppressor Perspective</h2>

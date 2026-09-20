@@ -74,8 +74,7 @@
 框內是 <b>node name</b>，可以直接餵給 <code>--from-node</code> / <code>--only-node</code>（<code>--list-nodes</code> 印的也是這個名字）。
 它跟函式名不一定相同——四個 <code>build_*_model_input</code> 共用同一個 <code>build_model_input</code> 函式，
 對照見下方表格第二欄。<b>刻意不畫</b>：每個 node 都吃的 <code>parameters</code>（<code>*_month_plan</code>
-不屬於這一類，它是 <code>pipeline.py</code> 宣告的真實 input）、以及
-<code>enable_calibration: true</code> 才存在的 calibration 分支。
+不屬於這一類，它是 <code>pipeline.py</code> 宣告的真實 input）。
 AST 掃過，本 pipeline 沒有「宣告了但函式沒讀」的參數——inference 圖上那種虛線邊，這裡沒有對應物。
 </div>
 
@@ -145,9 +144,9 @@ AST 掃過，本 pipeline 沒有「宣告了但函式沒讀」的參數——inf
     base version 底下的<b>所有</b>月份——即使 <code>select_test_keys</code> 這次只寫了新的那個月
     （dynamic partition overwrite）。<code>build_test_model_input</code> 因此必須自己再過濾一次
     <code>month_plan.to_process</code>，否則下游 join 會把每個月都重建一遍，正好是 ADR-0002 要消掉的
-    ∝N 成本。train / val / calibration 讀的 keys 是這次 run 自己寫的，沒有這個問題——
+    ∝N 成本。train / val 讀的 keys 是這次 run 自己寫的，沒有這個問題——
     這就是為什麼只有 test 有自己的 wrapper node，其餘三個共用 <code>build_model_input</code>。</li>
-  <li><b>圖上十四個產出裡只有兩個不落地</b>（開 calibration 是十六個，圖上不畫）。<code>val_model_input_unfiltered</code> 與
+  <li><b>圖上十四個產出裡只有兩個不落地</b>。<code>val_model_input_unfiltered</code> 與
     <code>test_model_input_unfiltered</code> 不在 <code>catalog.yaml</code> 裡，是
     <code>MemoryDataset</code>（圖上虛線膠囊）；只有 filter 過的版本落 Hive。
     零正例 query group 本來就會被 evaluation 的 mAP 排除，兩份都存等於白付儲存。</li>

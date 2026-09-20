@@ -79,7 +79,6 @@
 框內是 <b>node name</b>，可以直接餵給 <code>--from-node</code> / <code>--only-node</code>（<code>--list-nodes</code> 印的也是這個名字）。
 這條 pipeline 的五個 node name 都與函式名相同。<b>刻意不畫</b>：每個 node 都吃的 <code>parameters</code>
 （例外是 <code>inference.products</code> 與 <code>inference.entity_buckets</code>，理由見圖例）、
-<code>use_calibration</code> 的校準開關（它只是評分節點內部一次 if，不改變任何一條邊）、
 續跑的 chunk 規劃（它決定跑幾個 chunk，但跳過的與寫出的走同一條線）、以及
 <code>build_inference_population_features</code> 只寫 log 不下推的特徵覆蓋率報表。
 </div>

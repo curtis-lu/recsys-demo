@@ -39,7 +39,6 @@ from recsys_tfb.evaluation.metrics import (
 )
 
 ENRICHED_EVAL_ENTRY = "enriched_eval_predictions"
-SCORE_COL = "score_uncalibrated"
 
 
 def _deep_merge(a: dict, b: dict) -> dict:
@@ -102,7 +101,6 @@ def required_columns(schema: dict) -> list[str]:
         *schema["entity"],
         schema["item"],
         schema["label"],
-        SCORE_COL,
         schema["score"],
     ]
 
@@ -184,11 +182,11 @@ def validate_and_prepare(pdf: pd.DataFrame, schema: dict) -> tuple[pd.DataFrame,
     query_cols = [schema["time"], *schema["entity"]]
     base_required = [*query_cols, schema["item"], schema["label"]]
 
-    missing = [c for c in [*base_required, SCORE_COL] if c not in pdf.columns]
+    missing = [c for c in [*base_required, schema["score"]] if c not in pdf.columns]
     if missing:
         raise ValueError(f"Input data missing required columns: {missing}")
 
-    keep = [*base_required, SCORE_COL]
+    keep = [*base_required, schema["score"]]
     out = pdf[keep].copy()
     out[schema["label"]] = out[schema["label"]].astype(int)
     out[schema["item"]] = out[schema["item"]].astype(str)
@@ -284,7 +282,7 @@ def arrays_for_metric(
     groups = pd.factorize(_query_key(pdf, query_cols))[0]
     items = pdf[schema["item"]].astype(str).to_numpy()
     y = pdf[schema["label"]].to_numpy(dtype=np.int64)
-    z, logit_notes = to_logit(pdf[SCORE_COL].to_numpy(dtype=np.float64))
+    z, logit_notes = to_logit(pdf[schema["score"]].to_numpy(dtype=np.float64))
     return groups, items, y, z, logit_notes
 
 
@@ -541,7 +539,7 @@ def run_diagnosis(
 
     return {
         "metric_params": mp,
-        "score_col_used": SCORE_COL,
+        "score_col_used": schema["score"],
         "logit_notes": list(dict.fromkeys(tune_notes + hold_notes)),
         "search": tune_meta,
         "holdout": {

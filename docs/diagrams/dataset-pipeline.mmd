@@ -34,11 +34,11 @@
 %%   select_test_keys 這次只寫了新的那個月（dynamic partition overwrite）。
 %%   build_test_model_input 因此必須自己再過濾一次 month_plan.to_process，
 %%   否則下游 join 會把每個月都重建一遍，正好是 ADR-0002 要消掉的 ∝N 成本。
-%%   train / val / calibration 讀的 keys 是這次 run 自己寫的，沒有這個問題，
+%%   train / val 讀的 keys 是這次 run 自己寫的，沒有這個問題，
 %%   所以它們共用 build_model_input，只有 test 有自己的 wrapper node。
 
 %% 落地與否為什麼要分開畫
-%%   圖上十四個產出裡只有兩個不落地（開 calibration 是十六個）：val_model_input_unfiltered 與
+%%   圖上十四個產出裡只有兩個不落地：val_model_input_unfiltered 與
 %%   test_model_input_unfiltered。零正例 query group 會被 ranking metric 排除，
 %%   留著只是浪費 Hive 儲存與下游記憶體，所以只有 filter 過的版本落地。
 %%   圖上實線／虛線膠囊就是這件事。
@@ -46,7 +46,6 @@
 %% 刻意不畫
 %%   - parameters：每個 node 都吃，畫出來只會蓋掉真正的資料流。
 %%     *_month_plan 不屬於這一類——它是 pipeline.py 宣告的 input，是真實的邊。
-%%   - calibration 分支（enable_calibration: true 才存在）。
 %%   - 函式名：四個 build node 共用 build_model_input、filter_val_model_input
 %%     的函式是 filter_groups_with_positives、select_sample_keys 的函式是
 %%     select_train_keys。圖上一律用 node name。

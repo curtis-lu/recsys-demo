@@ -88,6 +88,16 @@ backstop 守在 **config 層**——它擋得住「設定漏了 item」，擋不
 「`base_dataset_version` 逐字相同」當驗收，用的是同一把尺：那是一個結構上不可能失敗的斷言，
 唯一的資訊量是「pipeline 跑完了」。
 
+> **2026-09-20 更正（#411 移除 calibration）：上表前兩列與 `use_calibration` 那句已經過期，
+> 結論不變。** 校準器整個刪掉之後，可達的路徑只剩表的後兩列：`objective: binary` 的 booster
+> 輸出走 sigmoid，`[0, 1]` 仍**由建構方式保證、結構上不可能紅**；ranking objective
+> （`lambdarank`／`rank_xendcg`）的原始 booster 輸出是**無界實數**，這條檢查在那裡仍然是誤報。
+> 「要嘛是裝飾品、要嘛是錯的」因此照樣成立——**有界那一側從來就不是校準器獨有的**，它來自
+> `binary` objective 本身，所以少掉前兩列不影響推論。`inference.use_calibration` 現在不是
+> 「明文支援的設定」而是**只要出現就報錯**（不變量 A37，`core/consistency.py` 的
+> `RETIRED_CALIBRATION_KEYS`，在 CLI entry、Spark 啟動前擋下），A7 那段其餘不變。同一段論證
+> 的現行版本住在 `pipelines/inference/steps/validation.py` 的 `BATCH_CHECKS` docstring。
+
 ## 三、決定一：驗證分兩層
 
 關鍵不對稱是——**在 chunk 裡驗，資料已經在 driver 的 pandas frame 上，成本近乎零；在整批驗，
@@ -199,6 +209,15 @@ chunk 層   item_values_are_known       ← 值不是產品名（已實跑重現
 **100%** 的組全平手。代價是誠實的：**部分**污染（例如續跑混到舊的壞 chunk）本來就看不見——那種
 情況下同一組裡有些 item 分數對、有些錯，組不會全平手，任何門檻都抓不到。
 
+> **2026-09-20 更正（#411）：撐住門檻**下緣**的那個量測作廢了，門檻值刻意維持原樣。** isotonic
+> 平台是校準器的性質，校準器刪除之後那個良性平手來源不存在，而「**沒有**校準器時合法的平手比例
+> 長什麼樣」沒有人量過——上面那個 0.03% 現在只是一筆歷史量測，不是現況的下緣。
+> `CONSTANT_GROUP_FAILURE_RATIO` 因此**維持 0.5 不動**
+> （`pipelines/inference/steps/validation.py`），理由換成上緣那一側：item 值退化是**程式碼**
+> 寫的、套用到每一個 chunk，仍然會讓 **100%** 的組全平手，而 0.5 是「多數組」最粗的邊界。
+> 收緊它等於用沒有資料的猜測去擋一次發布，正是本條用來否決「有一組全平手就 raise」的同一個
+> 代價。**要收緊先量一次。** 這個「沒量過」的狀態記在該常數自己的註解裡。
+
 **一、`score_varies_within_group` 要排除「組大小 1」，否則單 item 設定必然誤報。** 一組只有一列時
 `max == min` 恆真，`len(products) == 1` 的設定於是每一次**正確**執行都會紅——與乘積形式在小母體上
 誤報是同一種形狀（斷言了一個不必成立的前提）。實作的條件因此是 `_size > 1 AND max <= min`；組大小
@@ -300,7 +319,9 @@ view = {**preprocessor, "feature_columns": model.feature_names()}
 
 **加一條 A 系列不變量強制「ranking objective 必須開 calibration」**，讓 `[0, 1]` 恆真。這會為了
 讓一個沒有資訊量的檢查恆真，去限制一個合法的建模選擇。本專案的目標是排序，分數的絕對尺度沒有
-語意；用校準的需求去綁排序的自由度，方向是反的。
+語意；用校準的需求去綁排序的自由度，方向是反的。（2026-09-20：#411 之後已經沒有 calibration
+可以強制，這個選項連提都不成立；留著是因為「用某個附加機制的需求去綁建模自由度」這個形狀還會
+再出現，而那正是當初否決它的理由。）
 
 **六個檢查全部留在整批層，只做技術優化**（合併 `agg`、對 `ranked_staging` 下 `cache()`）。省得到
 成本，省不到第三節那個「早失敗」——而那是主要理由。

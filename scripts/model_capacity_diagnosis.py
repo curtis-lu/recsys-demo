@@ -112,7 +112,9 @@ def ability_by_item(payload: dict, model_version: str, notes: list[str]) -> dict
 def evaluation_ap_by_item(payload: dict) -> tuple[dict[str, float], float | None]:
     if not payload:
         return {}, None
-    block = payload.get("uncalibrated") or payload
+    # 以前 training 在 score 與 score_uncalibrated 不一致時會多寫一份
+    # "uncalibrated" 區塊；#411 移除校準器之後那份不再產生，指標只有一份。
+    block = payload
     per_item = block.get("per_item_map_attr", {}) or {}
     overall = block.get("overall_map")
     return {str(k): float(v) for k, v in per_item.items()}, (
@@ -344,7 +346,7 @@ def summarize(
         else None
     )
     return {
-        "overall_map_uncalibrated": overall_map,
+        "overall_map": overall_map,
         "n_items": len(rows),
         "n_trees": gain_ledger.get("n_trees"),
         "total_gain": gain_ledger.get("total_gain"),
@@ -619,7 +621,7 @@ def render_html(report: dict) -> str:
     code{background:#eef2f7;padding:1px 4px;border-radius:4px}
     """
     cards = [
-        ("uncalibrated mAP", fmt_num(summary["overall_map_uncalibrated"])),
+        ("overall mAP", fmt_num(summary["overall_map"])),
         ("Item Prior Gain / Total", fmt_pct(summary["item_id_gain_share"])),
         ("Post-Item Context Gain / Total", fmt_pct(summary["context_gain_share"])),
         ("Pre-Item / Unassigned Gain / Total", fmt_pct(summary["unaccounted_gain_share"])),

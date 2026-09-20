@@ -93,7 +93,7 @@ def test_segment_columns_kept_when_configured_and_present(spark):
     params = _params(segment_columns=["seg_a", "seg_missing"])
     pdf, _meta = draw_diagnosis_sample(sdf, params)
     assert "seg_a" in pdf.columns          # 配置且存在 → 帶回
-    assert "seg_missing" not in pdf.columns  # 配置但不存在 → 靜默略過（沿 score_uncalibrated 慣例）
+    assert "seg_missing" not in pdf.columns  # 配置但不存在 → 靜默略過
 
 
 @pytest.mark.parametrize("reserved", ["stratum", "inclusion_weight"])

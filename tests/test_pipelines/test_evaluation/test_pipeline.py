@@ -50,9 +50,12 @@ class TestRegistryDiagnosesFollowTheMode:
     """Registry diagnoses are wired in ``--post-training`` only (ADR-0018
     decision 5).
 
-    They need ``score_uncalibrated``, which the monitoring source does not
-    guarantee; wired in, the default mode crashed at the first diagnosis, in
-    production too. Monitoring mode's ``evaluation_diagnosis_pages`` comes from
+    The old reason was that they needed ``score_uncalibrated``, which the
+    monitoring source did not have. #411 removed the calibrator, so they read
+    ``schema["score"]`` now (#415) and two of them would in fact run here; the
+    mode still decides the shape (ADR-0013), and ``config_shift`` still needs
+    offset context columns the monitoring join does not guarantee.
+    Monitoring mode's ``evaluation_diagnosis_pages`` comes from
     the zero-read ``no_diagnosis_pages`` instead, not from
     ``render_diagnosis_pages``: that one requires one named, fingerprinted
     result per registry diagnosis, and this mode computes none (why the stub,
@@ -759,6 +762,6 @@ class TestConfigShiftNodeWiring:
         assert node.outputs == ["evaluation_config_shift"]
 
     def test_config_shift_not_wired_in_monitoring_mode(self):
-        """它要 score_uncalibrated；監控模式不組（ADR-0018 決定 5）。"""
+        """監控模式不組 registry 診斷（ADR-0018 決定 5，理由見類別 docstring）。"""
         pipeline = create_pipeline()
         assert "evaluation_config_shift" not in pipeline.outputs

@@ -154,7 +154,7 @@ spark:
   # spark.sql.shuffle.partitions: 400
 ```
 
-目前 `conf/base/catalog.yaml` 的 inference tables 使用示例欄位 `cust_id`、`snap_date`、`prod_name`、`score`、`score_uncalibrated`（deprecated，見 §1）與 `rank` 明確宣告 schema。
+目前 `conf/base/catalog.yaml` 的 inference tables 使用示例欄位 `cust_id`、`snap_date`、`prod_name`、`score`、`score_uncalibrated`（deprecated，見 §1／追蹤票 #412）與 `rank` 明確宣告 schema。
 若修改 schema 角色的實際欄名，也必須同步修改 catalog 欄位與 partition 設定。
 
 ### 3.5 推論母體（`inference_population`）

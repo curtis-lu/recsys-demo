@@ -8,7 +8,7 @@ question:
     log-odds scores, does macro per-item mAP improve?
 
 Recommended source data is an already enriched evaluation table with one row
-per (time, entity, item), label, score_uncalibrated, and every non-item/non-label
+per (time, entity, item), label, the schema score role column, and every non-item/non-label
 column used by dataset.sample_group_keys or training.sample_weight_keys.
 
 Examples:
@@ -42,7 +42,6 @@ from recsys_tfb.evaluation.metrics import (
 )
 
 ENRICHED_EVAL_ENTRY = "enriched_eval_predictions"
-SCORE_COL = "score_uncalibrated"
 
 
 def _deep_merge(a: dict, b: dict) -> dict:
@@ -170,7 +169,6 @@ def required_columns(parameters: dict, schema: dict) -> list[str]:
         *schema["entity"],
         schema["item"],
         schema["label"],
-        SCORE_COL,
         schema["score"],
         *offset_context_columns(parameters, schema),
     ]
@@ -268,7 +266,7 @@ def validate_and_prepare(
     query_cols = [schema["time"], *schema["entity"]]
     base_required = [*query_cols, schema["item"], schema["label"]]
 
-    missing = [c for c in [*base_required, SCORE_COL] if c not in pdf.columns]
+    missing = [c for c in [*base_required, schema["score"]] if c not in pdf.columns]
     if missing:
         raise ValueError(f"Input data missing required columns: {missing}")
 
@@ -281,11 +279,11 @@ def validate_and_prepare(
             "join these columns before running the script."
         )
 
-    keep = [*base_required, SCORE_COL, *context_cols]
+    keep = [*base_required, schema["score"], *context_cols]
     out = pdf[keep].copy()
     out[schema["label"]] = out[schema["label"]].astype(int)
     out[schema["item"]] = out[schema["item"]].astype(str)
-    return out, SCORE_COL, notes
+    return out, schema["score"], notes
 
 
 def build_offset_frame(
@@ -524,6 +522,8 @@ def interpretation(result: dict, spread_meta: dict) -> str:
 
 def render_html(report: dict) -> str:
     result = report["result"]
+    # 分數欄名照實印，不寫死：來自 schema 的 score 角色欄（#415）。
+    sc = html.escape(str(report["schema"]["score"]))
     spread = report["offset_spread"]
     item_col = report["schema"]["item"]
     interp = interpretation(result, spread)
@@ -574,7 +574,7 @@ def render_html(report: dict) -> str:
 <tr><th>context columns</th><td><code>{html.escape(", ".join(spread["context_columns"]) or "none")}</code></td></tr>
 <tr><th>bootstrap</th><td>{result["n_boot"]} paired entity bootstrap draws, seed={result["bootstrap_seed"]}</td></tr>
 </tbody></table>
-<p class="muted">Recommended data source: <code>enriched_eval_predictions</code> filtered to one snap_date and model_version. It must contain label, score_uncalibrated, query columns, item column, and all context columns above.</p>
+<p class="muted">Recommended data source: <code>enriched_eval_predictions</code> filtered to one snap_date and model_version. It must contain label, the schema score role column, query columns, item column, and all context columns above.</p>
 {"<ul>" + notes_html + "</ul>" if notes_html else ""}
 
 <h2>1. Config Spread By Query Context</h2>
@@ -582,7 +582,7 @@ def render_html(report: dict) -> str:
 {table_html(spread_rows, [("group","group"),("spread","offset spread")])}
 
 <h2>2. mAP Impact</h2>
-<p>Compute <code>F = logit(score_uncalibrated)</code>, then compare current mAP with <code>mAP(F - offset)</code>.</p>
+<p>Compute <code>F = logit({sc})</code>, then compare current mAP with <code>mAP(F - offset)</code>.</p>
 <table><tbody>
 <tr><th>baseline mAP</th><td>{fmt_num(result["baseline_map"])}</td></tr>
 <tr><th>corrected mAP</th><td>{fmt_num(result["corrected_map"])}</td></tr>
@@ -644,7 +644,7 @@ def main() -> None:
     offset_df, spread_meta = build_offset_frame(pdf, parameters, schema)
     result = run_diagnosis(pdf, parameters, schema, score_col, args.n_boot, args.seed)
     report = {
-        "schema": {"item": schema["item"]},
+        "schema": {"item": schema["item"], "score": schema["score"]},
         "source": source_meta,
         "notes": notes,
         "offset_spread": spread_meta,
