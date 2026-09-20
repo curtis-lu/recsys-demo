@@ -182,3 +182,84 @@ def test_per_item_ap_respects_k_truncation():
     ap, counts, macro = per_item_ap(groups, items, y, score, mp)
     assert ap == pytest.approx({"a": 1.0, "b": 0.0})           # b 被 k=1 截斷歸零
     assert macro == pytest.approx(0.5)                         # mean([1.0, 0.0])
+
+
+# ---------------------------------------------------------------------------
+# 宣告 event 時哪幾項診斷跳過（#378）
+# ---------------------------------------------------------------------------
+
+
+def _skip_params(event=None):
+    columns = {"time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}
+    if event is not None:
+        columns["event"] = event
+    return {"schema": {"columns": columns}}
+
+
+def test_no_diagnosis_is_skipped_without_the_event_role():
+    """相容性那一半：既有部署的每一項診斷照跑、輸出逐值不變。"""
+    from recsys_tfb.diagnosis.metric._common import schema_skip_reason
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+
+    params = _skip_params()
+    assert [n for n in DIAGNOSES if schema_skip_reason(params, n)] == []
+
+
+def test_the_three_query_ranking_diagnoses_are_skipped_with_event():
+    """判準是「這項診斷假不假設同組內 item 唯一」，逐項對程式碼確認過：這三項
+    都在 driver 上以 order_by_score_then_item(..., items) 取組內名次，沒有接
+    event 的決勝欄，所以同 item 同分的多列順序由列到達的順序決定。"""
+    from recsys_tfb.diagnosis.metric._common import schema_skip_reason
+
+    params = _skip_params(event="imp_id")
+    assert {
+        "config_shift", "item_ability", "suppression",
+    } == {
+        n for n in ("config_shift", "item_ability", "suppression", "model_capacity")
+        if schema_skip_reason(params, n)
+    }
+
+
+def test_model_capacity_still_runs_with_event():
+    """判別性的那一條：它只讀 booster 的 split gain，完全不碰診斷抽樣。全部
+    跳過的實作會通過上面每一條，卻讓一項本來算得出來的診斷憑空消失。"""
+    from recsys_tfb.diagnosis.metric._common import schema_skip_reason
+
+    assert schema_skip_reason(_skip_params(event="imp_id"), "model_capacity") is None
+
+
+def test_the_reason_names_the_role_and_the_column():
+    from recsys_tfb.diagnosis.metric._common import schema_skip_reason
+
+    reason = schema_skip_reason(_skip_params(event="imp_id"), "suppression")
+    assert "event" in reason and "imp_id" in reason
+
+
+def test_a_skipped_diagnosis_returns_a_stub_rather_than_computing():
+    """compute 必須在碰資料之前就回頭——跳過的理由是「算出來的數字不可重現」，
+    算了再丟掉一樣會把不可重現的數字寫進 JSON。"""
+    import pandas as pd
+    from recsys_tfb.diagnosis.metric.suppression import compute
+
+    params = {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "event": "imp_id"}},
+        "evaluation": {},
+    }
+    out = compute((pd.DataFrame(), {}), params)
+    assert out["enabled"] is False
+    assert "skipped_reason" in out
+    assert any("event" in n for n in out["notes"])
+
+
+def test_the_report_says_why_a_skipped_page_is_missing():
+    """一頁憑空消失正是「看起來正常其實沒量到」，所以理由要落在完整性檢查那
+    一段。原因字串與診斷自己印的那一句同一個來源。"""
+    from recsys_tfb.evaluation.report_builder import skipped_diagnosis_bullets
+
+    assert skipped_diagnosis_bullets(_skip_params()) == []
+    lines = skipped_diagnosis_bullets(_skip_params(event="imp_id"))
+    assert len(lines) == 3
+    assert all("event" in line for line in lines)
+    assert any("suppression" in line for line in lines)

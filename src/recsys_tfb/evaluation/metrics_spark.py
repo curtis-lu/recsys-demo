@@ -385,6 +385,30 @@ def compute_dataset_overview(
         "by_snap_date": _group(time_col),
         "by_item": _group(item_col),
     }
+    # The share of rows whose rank the tie-break decided rather than the score.
+    # Added ONLY when an optional role is declared, so every existing artifact
+    # stays value-for-value what it was; the extra shuffle is likewise only
+    # paid by a deployment that asked for the role.
+    #
+    # Why it is reported at all: with `event` declared and no per-impression
+    # features attached, every row of one item in one query group necessarily
+    # scores the same, so *everything* ties and the rank is decided entirely by
+    # `event` ascending. That direction is not neutral — an event timestamp
+    # ranks the earlier impression first, worth about 0.02 mAP on this repo's
+    # ad example (#378). The framework does not choose for the deployment
+    # (ADR-0025 rejected hashing the identity instead); it prints the number
+    # that says how much the choice could be worth here.
+    if schema.get("event"):
+        n_tied = (
+            eval_predictions.groupBy(*group_cols, schema["score"])
+            .agg(F.count(F.lit(1)).alias("_n"))
+            .filter(F.col("_n") > 1)
+            .agg(F.sum("_n").alias("_tied"))
+            .collect()[0]["_tied"]
+        )
+        n_tied = int(n_tied or 0)
+        result["totals"]["n_tied_rows"] = n_tied
+        result["totals"]["tied_row_share"] = (n_tied / n_rows) if n_rows else 0.0
     if active_seg_col:
         result["by_segment"] = _group(
             active_seg_col, with_queries=True, to_key=segment_key

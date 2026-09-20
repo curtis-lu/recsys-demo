@@ -3985,3 +3985,58 @@ class TestOptionalRoleSourceColumnsB11:
         )
         assert "source SQL" in errs[0]
         assert "remove" in errs[0]
+
+
+# =============================================================================
+# A40 — monitoring-mode evaluation is refused while an optional role is declared
+# =============================================================================
+
+from recsys_tfb.core.consistency import optional_role_monitoring_errors
+
+
+class TestOptionalRoleMonitoringA40:
+    def test_no_role_declared_allows_monitoring(self):
+        assert optional_role_monitoring_errors(
+            _event_params(), post_training=False
+        ) == []
+
+    def test_no_role_declared_allows_post_training(self):
+        assert optional_role_monitoring_errors(
+            _event_params(), post_training=True
+        ) == []
+
+    def test_declared_role_blocks_monitoring(self):
+        errs = optional_role_monitoring_errors(
+            _event_params(event="impression_id"), post_training=False
+        )
+        assert len(errs) == 1
+        assert "A40" in errs[0]
+
+    def test_declared_role_allows_post_training(self):
+        """The discriminating case: post-training reads
+        training_eval_predictions, which A39 makes carry the columns. A gate
+        that blocked both modes would pass every other test here and leave the
+        role unusable."""
+        assert optional_role_monitoring_errors(
+            _event_params(event="impression_id"), post_training=True
+        ) == []
+
+    def test_the_message_names_the_role_and_the_column(self):
+        errs = optional_role_monitoring_errors(
+            _event_params(event="impression_id"), post_training=False
+        )
+        assert "event" in errs[0] and "impression_id" in errs[0]
+
+    def test_the_message_names_the_mode_that_works(self):
+        errs = optional_role_monitoring_errors(
+            _event_params(event="impression_id"), post_training=False
+        )
+        assert "--post-training" in errs[0]
+
+    def test_the_message_says_the_answer_would_be_wrong_not_missing(self):
+        """ADR-0021 decision 5's whole reason for stopping at the entry. An
+        operator who reads "fewer rows" will try to work around the gate."""
+        errs = optional_role_monitoring_errors(
+            _event_params(event="impression_id"), post_training=False
+        )
+        assert "wrong answer" in errs[0]

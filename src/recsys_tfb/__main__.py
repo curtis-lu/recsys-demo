@@ -18,6 +18,7 @@ from recsys_tfb.core.consistency import (
     duplicate_test_month_errors,
     entity_columns_declared_errors,
     optional_role_columns_declared_errors,
+    optional_role_monitoring_errors,
     etl_cli_var_errors,
     inference_grid_errors,
     merged_etl_variables,
@@ -1785,8 +1786,14 @@ def evaluation(
     # must not stop dataset, training or inference. Collected with A22 so one
     # run reports both.
     section_errs = report_section_key_errors(params)
-    if snap_date_errs or section_errs:
-        logger.error("\n".join([*snap_date_errs, *section_errs]))
+    # (A40) monitoring mode cannot evaluate a deployment that declares an
+    # optional column role: inference's rows do not carry those columns and
+    # label_table's do, so the two sides identify rows differently. Wired here
+    # with A22 for the same reason — validate_config_consistency never sees
+    # --post-training — and collected with it so one run reports everything.
+    role_errs = optional_role_monitoring_errors(params, post_training)
+    if snap_date_errs or section_errs or role_errs:
+        logger.error("\n".join([*snap_date_errs, *section_errs, *role_errs]))
         raise typer.Exit(code=1)
 
     try:

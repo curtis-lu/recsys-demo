@@ -448,6 +448,21 @@ Layer 1 — config-static (implemented here; aggregated by
   user who never declared an optional role should never read about one.
   Predicate: ``optional_role_columns_declared_errors``. NOT aggregated, for
   A28's reason — it needs the resolved catalog — and wired beside it.
+* A40 — evaluation's **monitoring** mode (no ``--post-training``) with an
+  optional role declared. Monitoring reads ``ranked_predictions``, which
+  offline inference writes: inference builds its candidates as entity x item
+  and ignores the optional roles entirely (ADR-0025 decision 1), so its rows
+  carry no ``event`` column while ``label_table`` does. Joining the two on
+  identity then matches nothing, or — if the join key silently narrows to the
+  columns both sides have — matches one prediction row against every
+  impression and inflates each query group. **Either way the answer is wrong
+  rather than missing**, which is ADR-0021 decision 5's reason for stopping at
+  the entry instead of letting the run produce a report. ``--post-training``
+  is fully supported: it reads ``training_eval_predictions``, which A39 makes
+  carry the columns. Predicate: ``optional_role_monitoring_errors`` (returns
+  errors; the evaluation command raises, collected with A22/A34). NOT
+  aggregated by ``validate_config_consistency``, for A22's reason: that gate
+  runs at the entry of every command and cannot see ``--post-training``.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
@@ -985,6 +1000,49 @@ def optional_role_source_column_errors(
                 f"remove the {role!r} declaration."
             )
     return errors
+
+
+def optional_role_monitoring_errors(
+    parameters: dict, post_training: bool
+) -> list[str]:
+    """(A40) monitoring-mode evaluation is refused when an optional role is
+    declared.
+
+    Returns error strings (empty list when fine); the evaluation command
+    raises. Takes the flag rather than reading it, so the predicate stays pure
+    the way A22's does.
+
+    Monitoring evaluates what offline inference published, and inference
+    ignores the optional roles by design: its candidates are the framework's
+    own entity x item grid, where no impression exists to name. So its rows
+    have no ``event`` column and ``label_table``'s rows do. What comes out of
+    joining those two is not a smaller answer but a wrong one — the reason
+    ADR-0021 decision 5 puts this at the CLI entry rather than letting the run
+    finish and produce a report someone reads.
+
+    The message names ``--post-training`` because that is the mode that works,
+    not as advice to try a flag at random: it reads
+    ``training_eval_predictions``, whose rows A39 makes carry the columns.
+    """
+    role_columns = {
+        role: get_schema(parameters).get(role, []) for role in _OPTIONAL_ROLE_KEYS
+    }
+    declared = {role: cols for role, cols in role_columns.items() if cols}
+    if post_training or not declared:
+        return []
+    named = "; ".join(
+        f"schema.columns.{role}={cols}" for role, cols in declared.items()
+    )
+    return [
+        f"(A40) evaluation's monitoring mode cannot be used while an optional "
+        f"column role is declared ({named}). Monitoring evaluates "
+        f"ranked_predictions, which offline inference writes from its own "
+        f"entity x item candidate grid — those rows carry no such column, "
+        f"while label_table's do, so the two sides identify rows differently "
+        f"and the join produces a wrong answer rather than a missing one. "
+        f"Run evaluation with --post-training, which reads "
+        f"training_eval_predictions."
+    ]
 
 
 def item_missing_from_categorical(parameters: dict) -> bool:

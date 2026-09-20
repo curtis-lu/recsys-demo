@@ -1403,6 +1403,19 @@ def build_completeness_section(
             metric_p.get("shrinkage_k"),
         "抽樣描述 sampling_description": sample_meta.get("sampling_description"),
     }
+    # 同分列佔比：只有宣告了 event 的部署算得出來，也只有它需要看。這個數字
+    # 是「名次由決勝規則決定、不是由分數決定」的列佔多少——決勝規則按 event
+    # 由小到大，event 是時間戳時等於早的曝光永遠排前面，而那個方向不是中性的
+    # （廣告示例實測約 0.02 mAP，#378）。框架不替使用者選，把數字印出來讓他
+    # 自己判斷這件事在他的資料上有多大。沒宣告時這兩列不存在，既有報表不變。
+    if totals.get("n_tied_rows") is not None:
+        facts["同分列數 n_tied_rows（名次由 item／event 決勝，非由分數決定）"] = (
+            totals.get("n_tied_rows")
+        )
+        share = totals.get("tied_row_share")
+        facts["同分列佔比 tied_row_share"] = (
+            None if share is None else f"{share:.1%}"
+        )
     facts_tbl = pd.DataFrame([facts]).T
     facts_tbl.columns = ["value"]
 
@@ -1415,6 +1428,11 @@ def build_completeness_section(
         "候選集為密集時每 item 候選覆蓋率恆 100%——per-item 正例佔比與正例數"
         "同序，非獨立軸。",
     ]
+    # 跳過的診斷寫在這裡，不寫在診斷索引頁：這一段的題目就是「什麼看起來正常
+    # 其實沒量到」，而一頁憑空消失正是那種看起來正常。原因字串與各診斷自己
+    # 印的那一句同一個來源（``diagnosis.metric._common.schema_skip_reason``），
+    # 兩邊不會漂。沒宣告選用角色時這個迴圈一句也不加，既有報表逐字不變。
+    bullets.extend(skipped_diagnosis_bullets(parameters))
     return ReportSection(
         title="完整性檢查",
         description=(
@@ -1425,6 +1443,23 @@ def build_completeness_section(
         table_titles=["本次執行事實"],
         bullets=bullets,
     )
+
+
+def skipped_diagnosis_bullets(parameters: dict) -> list[str]:
+    """每一項在目前 schema 下跳過的診斷，各一句「哪一項、為什麼」。
+
+    走 ``contract.DIAGNOSES``（不是自己抄一份名單），所以之後新增的診斷自動
+    被問到。沒有任何一項被跳過時回空 list，主報表因此逐字不變。
+    """
+    from recsys_tfb.diagnosis.metric._common import schema_skip_reason
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+
+    out = []
+    for name in DIAGNOSES:
+        reason = schema_skip_reason(parameters, name)
+        if reason:
+            out.append(f"診斷「{name}」本次未算：{reason}")
+    return out
 
 
 def several_eval_dates(configured) -> bool:
