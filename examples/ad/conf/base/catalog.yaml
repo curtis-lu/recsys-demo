@@ -231,6 +231,10 @@ training_eval_predictions:
   columns:
     - {name: user_id, type: STRING}
     - {name: slot_id, type: STRING}
+    # schema.columns.event。沒宣告過的欄會被 HiveTableDataset.save 靜默丟掉，
+    # 少了它這張表就是同一個 item 有多列而分不出來，evaluation 的重複檢查會
+    # 對一份寫出來時是對的表報錯；A39 在 CLI 入口先擋。
+    - {name: impression_id, type: STRING}
     - {name: score, type: DOUBLE}
     - {name: score_uncalibrated, type: DOUBLE}
     - {name: label, type: INT}

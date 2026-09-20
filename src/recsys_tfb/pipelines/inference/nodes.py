@@ -44,6 +44,7 @@ from recsys_tfb.pipelines.inference.steps.chunk_plans import (
     build_chunk_report,
     plan_scoring_chunks,
 )
+from recsys_tfb.pipelines.inference.steps.identity import scored_row_columns
 from recsys_tfb.pipelines.inference.steps.feature_view import (
     model_columns_to_collect,
     require_population_has_model_columns,
@@ -120,7 +121,9 @@ def build_inference_population_features(
     time_col = schema["time"]
     entity_cols = schema["entity"]
     item_col = schema["item"]
-    identity_cols = schema["identity_columns"]
+    # NOT schema["identity_columns"]: offline inference ignores the
+    # optional roles, so a scored row is identified by base key + item.
+    identity_cols = scored_row_columns(schema)
     # The feature table is entity-level, so what it joins on is the base key —
     # never the query group, which offline inference does not widen anyway
     # (ADR-0025 decision 2).
@@ -294,7 +297,9 @@ def predict_and_write_scores(
     time_col = schema["time"]
     entity_cols = schema["entity"]
     item_col = schema["item"]
-    identity_cols = schema["identity_columns"]
+    # NOT schema["identity_columns"]: offline inference ignores the
+    # optional roles, so a scored row is identified by base key + item.
+    identity_cols = scored_row_columns(schema)
     score_col = schema["score"]
 
     items = list(parameters["inference"]["products"])

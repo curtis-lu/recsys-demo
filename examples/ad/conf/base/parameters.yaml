@@ -2,8 +2,9 @@
 # 本資料夾的每份 yaml 都對應 repo 根目錄 conf/base/ 的同名檔；每個鍵的完整說明
 # 在那裡，這裡只註解「和銀行示例不一樣、為什麼」。怎麼跑見 examples/ad/README.md。
 #
-# ⚠ 這組 conf 只用框架「今天就支援」的功能：不宣告 event、只有一張 feature_table、
-# item 清單逐一列出、預測品質指標家族不開。後面的票各自打開自己的開關
+# ⚠ 這組 conf 目前打開的新開關只有 event（#378）：一次曝光一列。其餘仍是框架
+# 今天就支援的功能——只有一張 feature_table、item 清單逐一列出、預測品質指標
+# 家族不開。後面的票各自打開自己的開關
 # （docs/notes/2026-09-16-event-support-plan.md）。
 
 project_name: recsys_tfb_ad_example
@@ -17,13 +18,25 @@ spark:
 
 schema:
   columns:
-    # 一週一個時段（每週一）。ADR-0021：time 維持「時段」；到秒的曝光時間將來放 event。
+    # 一週一個時段（每週一）。ADR-0021：time 維持「時段」；到秒的曝光時間在 event。
     # 欄名必須叫 snap_date：source_etl 的輸出檢查把 WHERE snap_date = … 寫死了
     # （pipelines/source_etl/checks.py），換名 source_etl 就壞。
     time: snap_date
     entity: [user_id, slot_id]   # 替「某個使用者在某個版位」排一次
     item: ad_creative            # 活動 × 素材格式，在 label／sample_pool SQL 拼成一欄
-    label: label                 # 這一週在這個版位有沒有點過這個素材
+    # 一次曝光一列：同一週同一版位同一素材可以被曝光多次，每次是自己一列，label
+    # 是「那一次有沒有被點」。宣告之後 identity ＝ snap_date ＋ user_id ＋ slot_id
+    # ＋ ad_creative ＋ impression_id；query group 不變（event 不進分組），所以同
+    # 一個 item 的多次曝光是在同一個排序裡互相競爭名次。
+    #
+    # 選 impression_id 而不是 event_ts：兩者都認得出一列，但同分時的決勝方向按
+    # event 由小到大，時間戳會讓早的曝光永遠排前面——而產生器有疲乏效果（越早
+    # 的曝光越容易被點），那個方向會系統性地墊高 mAP。impression_id 是流水號、
+    # 也與時間同序，所以這裡沒有躲掉那個偏差，只是把它寫在檯面上：報表的
+    # 「同分列佔比」印出這件事影響多大。真正的解法是接上逐筆即時特徵
+    # （feature_realtime，要 #380）讓分數本來就分得出高下。
+    event: impression_id
+    label: label                 # 這一次曝光有沒有被點
     score: score
     rank: rank
   # item 清單逐一列出；改成「從資料數」是 #379。必須等於 generate_data.py 產出的組合

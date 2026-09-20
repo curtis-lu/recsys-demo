@@ -764,22 +764,30 @@ def _compute_core(
     eval_predictions: SparkDataFrame,
     parameters: dict,
     segment_columns: Sequence[str],
+    *,
+    event_cols: Sequence[str],
 ) -> dict:
     """The fine-grained metric bundle (overall/per_item/per_segment/...).
 
     Body identical to the pre-refactor compute_all_metrics — no category,
     no dataset_overview. Used for both fine-grained and (on a collapsed DF)
     category-grain passes.
+
+    ``event_cols`` is passed in rather than read from ``parameters``, and has
+    no default, because **the two passes need different answers and the frame
+    does not say which**. The fine-grained pass gets
+    ``schema.columns.event``; the category pass gets ``()`` — see the call
+    sites. A default would make the category pass wrong by omission, which is
+    exactly how this was first written: it asked for the ``event`` column on a
+    frame ``collapse_to_categories`` had already aggregated it away from, and
+    Spark raised ``Column 'impression_id' does not exist`` halfway through
+    training.
     """
     schema = get_schema(parameters)
     item_col = schema["item"]
     label_col = schema["label"]
     score_col = schema["score"]
     group_cols = schema["query_group_columns"]
-    # Empty unless the deployment declares `event`. On the category-grain pass
-    # this is still right: collapsing items into categories cannot merge two
-    # rows that differ by event, so the tie-break keeps deciding the same way.
-    event_cols = schema.get("event", [])
 
     eval_params = parameters.get("evaluation", {}) or {}
     _require_segment_columns_in_frame(eval_predictions, segment_columns)
@@ -1027,7 +1035,12 @@ def compute_all_metrics(
     Queries with zero positives are excluded from the metric computation
     (AP is undefined when total_rel = 0).
     """
-    result = _compute_core(eval_predictions, parameters, segment_columns)
+    # The fine-grained pass ranks the rows as they were written: one per
+    # candidate, so `event` is what tells two rows of one item apart.
+    result = _compute_core(
+        eval_predictions, parameters, segment_columns,
+        event_cols=get_schema(parameters).get("event", []),
+    )
     result["dataset_overview"] = compute_dataset_overview(
         eval_predictions, parameters, segment_columns=segment_columns
     )
@@ -1036,7 +1049,15 @@ def compute_all_metrics(
         collapsed = collapse_to_categories(
             eval_predictions, parameters, segment_columns=segment_columns
         )
-        cat = _compute_core(collapsed, parameters, segment_columns)
+        # The category pass ranks a DIFFERENT frame:
+        # `collapse_to_categories` groups by (query group, category) and takes
+        # max(score) / max(label), so it emits exactly one row per pair and
+        # the `event` columns are aggregated away. The category column already
+        # decides every tie, and asking for `event` here is asking for a
+        # column the frame does not have.
+        cat = _compute_core(
+            collapsed, parameters, segment_columns, event_cols=(),
+        )
         cat["dataset_overview"] = compute_dataset_overview(
             collapsed, parameters, segment_columns=segment_columns
         )
