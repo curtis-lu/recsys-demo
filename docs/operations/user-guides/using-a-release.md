@@ -111,7 +111,7 @@ mkdir -p conf/production
 
 框架沒有「未知鍵」檢查。`conf/<env>/` 裡留著一個新版已經改名或移除的鍵，不會有任何訊息，那個鍵只是再也沒有人讀它，該項行為會退回預設值——可能是 `conf/base/` 裡的新預設，也可能是寫在程式碼裡的預設。所以升級後如果行為變了卻找不到原因，先檢查自己的設定層有沒有對不上的鍵名。
 
-**例外：校準相關的退役鍵會報錯。** #411 移除機率校準機制後留下的六個設定鍵（`RETIRED_CALIBRATION_KEYS`：`dataset.enable_calibration`、`dataset.calibration_snap_dates`、`dataset.calibration_sample_ratio`、`dataset.calibration_sample_ratio_overrides`、`training.calibration`、`inference.use_calibration`），只要**出現**在設定裡就會被擋下，值設成 `false` 或 `[]` 一樣算數——因為它們位在算進 `base_dataset_version` / `model_version` 的子樹裡，留著會讓沒刪的 conf 樹算出跟已刪的 conf 樹不同的版本 ID。這是不變量 A37，predicate 是 `retired_calibration_key_errors`（`src/recsys_tfb/core/consistency.py:1637`），常數定義在同檔 `src/recsys_tfb/core/consistency.py:1610`。
+**例外：校準相關的退役鍵會報錯。** #411 移除機率校準機制後留下的六個設定鍵（`RETIRED_CALIBRATION_KEYS`：`dataset.enable_calibration`、`dataset.calibration_snap_dates`、`dataset.calibration_sample_ratio`、`dataset.calibration_sample_ratio_overrides`、`training.calibration`、`inference.use_calibration`），只要**出現**在設定裡就會被擋下，值設成 `false` 或 `[]` 一樣算數——因為它們位在算進 `base_dataset_version` / `model_version` 的子樹裡，留著會讓沒刪的 conf 樹算出跟已刪的 conf 樹不同的版本 ID。這是不變量 A37，predicate 是 `retired_calibration_key_errors`（`src/recsys_tfb/core/consistency.py`），常數定義在同一個模組。
 
 ## 6. 確認這份程式碼在你的機器上跑得起來
 

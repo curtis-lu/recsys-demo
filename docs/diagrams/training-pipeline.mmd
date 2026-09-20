@@ -131,11 +131,13 @@
 %%   失敗只 warning。它寫進 diagnostics_dir/hpo/、由 log_experiment 的 log_artifacts
 %%   撿走，是 architecture-constraints.md R4 登記裡唯一「間接寫入、AST 掃不到」的一筆。
 
+%% 已知落差（不是刻意不畫，是還沒補）
+%%   pipeline 實際有 20 個 node，本圖畫了 19 個：漏的是 persist_group_filter_report
+%%   （吃 train_lgb_handle、產出 group_filter_report，不在任何下游鏈上）。
+%%   與 #411 移除 calibration 無關，也沒有在那一輪一併補上。
+
 %% 刻意不畫
 %%   - parameters：每個 node 都吃，畫出來只會蓋掉真正的資料流。
-%%   - persist_group_filter_report：pipeline 實際有 20 個 node，本圖畫了 19 個。
-%%     漏的這一個吃 train_lgb_handle、產出 group_filter_report，不在任何下游鏈上。
-%%     這是本圖既有的落差，與 #411 移除 calibration 無關，也沒有在本輪一併補上。
 %%   - --rebuild-dates / --fresh-hpo：只推翻「跳過」的決定，跳過的與重算的走同一條線。
 %%   - HPO 的 journal / checkpoint 檔案（data/models/_hpo/<search_id>/）：node 內部的
 %%     續跑機制，不是 catalog 條目，也不改變任何一條邊。
@@ -236,7 +238,7 @@ flowchart TB
     n_predict["predict_and_write_test_predictions<br/><small>增量 ・ ＋ M · V ・ 逐 (snap_date, item) 分區評分並寫出<br/>已完整的月份跳過；完整＝已寫 item 分區恰等於快取的 item 集合</small>"]
     d_manifest(["predict_manifest<br/><small>processed／skipped／rebuilt：決定少做的事要說出來</small>"])
     o_pred(["training_eval_predictions<br/><small>model_version / snap_date, prod_name</small>"])
-    n_map["compute_test_mAP_spark<br/><small>Spark-native mAP ・ 分數與未校準分數不同時多算一份</small>"]
+    n_map["compute_test_mAP_spark<br/><small>Spark-native mAP ・ 指標固定只有一套</small>"]
     o_evalres(["evaluation_results　<b>[L]</b>"])
     n_selpop["select_shap_population<br/><small>Spark 選樣：top@1 定象限 × 每格 crc32 抽樣 ＋ 全格極值<br/>quadrant_enabled=false → (None, None)</small>"]
     d_pop(["shap_population"])

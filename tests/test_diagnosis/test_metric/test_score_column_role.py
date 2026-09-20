@@ -150,11 +150,19 @@ def test_a_renamed_score_column_gives_the_same_numbers():
 
     for name in ("config_shift", "item_ability", "suppression"):
         a, b = default[name], renamed[name]
-        # score_col_used 就是欄名本身，理當不同；其餘一律逐值相同。
-        keys = sorted(set(a) - {"score_col_used", "field_notes"})
-        for key in keys:
-            assert a[key] == pytest.approx(b[key], rel=1e-12, abs=0) \
-                if isinstance(a[key], float) else a[key] == b[key], (name, key)
+        # score_col_used 就是欄名本身，理當不同；field_notes 是文案。其餘逐值相同。
+        for key in sorted(set(a) - {"score_col_used", "field_notes"}):
+            if isinstance(a[key], float):
+                # 頂層純量留一點浮點容差。**只有 11/63 個鍵走這一支**——其餘是
+                # per_item／offset_matrix 這類巢狀結構，走下面那支。
+                assert a[key] == pytest.approx(b[key], rel=1e-12), (name, key)
+            else:
+                # 巢狀結構**精確**比。兩次執行走同一條程式路徑、同一個 seed，值
+                # 應該逐位元相同，容差只會放過真正的差異。
+                # 已知限制：值裡若出現 NaN，`==` 會是 False 而讓這條假紅（NaN 不
+                # 等於自己）。本 fixture 的分數都在 (0.05, 0.95)，取 logit 不產生
+                # NaN；哪天餵進界外分數要先處理這件事，別直接放寬成容差。
+                assert a[key] == b[key], (name, key)
 
 
 def test_the_deprecated_column_is_not_read():

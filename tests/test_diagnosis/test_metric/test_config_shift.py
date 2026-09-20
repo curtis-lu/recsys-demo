@@ -84,11 +84,14 @@ def test_delta_is_invariant_to_adding_a_constant_per_segment():
 def test_reads_the_schema_score_column_and_fails_loud_without_it():
     """讀的是 schema 的 score 角色欄，缺了就 raise（#415）。
 
-    欄名從 ``PARAMS["schema"]["columns"]["score"]`` 來，不寫死——把模組改回
-    寫死 ``score_uncalibrated`` 時，這條會因為 raise 沒發生而轉紅。
+    ``match`` 釘的是**訊息裡印出來的欄名**（帶兩側引號的 ``'score'``），不是
+    「score 角色欄」那句模板——模板在任何變異下都照樣印得出來，釘它等於沒釘。
+    把模組改回寫死 ``score_uncalibrated``，訊息會變成 ``'score_uncalibrated'``，
+    不含 ``'score'`` 這個帶閉引號的形狀，這條就轉紅。
+    （光靠「有沒有 raise」分不出來：fixture 已經沒有那一欄，寫死版讀不到它照樣 raise。）
     """
     sample = _sample().drop(columns=["score"])
-    with pytest.raises(ValueError, match="score 角色欄"):
+    with pytest.raises(ValueError, match=r"'score'"):
         compute((sample, {"n_queries": 40}), PARAMS)
 
 

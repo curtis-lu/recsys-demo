@@ -196,9 +196,12 @@ def test_inclusion_weight_changes_the_auc():
 
 
 def test_requires_the_schema_score_column():
-    """讀的是 schema 的 score 角色欄，缺了就 raise（#415）。"""
+    """讀的是 schema 的 score 角色欄，缺了就 raise（#415）。
+
+    ``match`` 釘印出來的欄名而不是訊息模板，理由見 ``test_config_shift`` 的同型測試。
+    """
     sample = _sample().drop(columns=["score"])
-    with pytest.raises(ValueError, match="score 角色欄"):
+    with pytest.raises(ValueError, match=r"'score'"):
         compute((sample, {"n_queries": 40}), _params())
 
 

@@ -294,7 +294,7 @@ python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_over
 - 框架已不提供機率校準機制（#411 移除）；`dataset.enable_calibration`、`training.calibration` 等退役設定鍵只要出現就會被 CLI 擋下（A37），刪除即可。下游若需要機率語意，責任在下游（見 5. FAQ Q4）。
 - 初次 smoke test 可降低 `n_trials` 與 `num_iterations`，確認資料流正確後再恢復正式搜尋規模。
 
-> 目前 inference 的 `validate_predictions` 會檢查 `score` 是否介於 0 與 1；若使用未校準的 ranking objective，需確認模型輸出符合此契約，或同步調整驗證規則。
+> inference 的 `validate_predictions` **不檢查** `score` 是否介於 0 與 1——`score_range` 刻意不在 `BATCH_CHECKS` 裡（`src/recsys_tfb/pipelines/inference/steps/validation.py`）。理由：`binary` objective 的輸出是 sigmoid，`[0, 1]` 由建構方式保證、這個檢查永遠不會紅；ranking objective 的原始輸出無界，同一個檢查會變成誤報。兩種都沒有資訊量（[ADR-0011](docs/adr/0011-inference-validation-two-layers.md) §2）。下游若需要 `score` 落在某個範圍，那是下游自己要驗的事。
 
 在 `conf/base/parameters_evaluation.yaml` 設定符合頁面展示空間的 `k_values`。例如首頁只顯示 3 個功能，就應特別關注 mAP@3 與 Recall@3，並設定重要客群的 `segment_columns`，避免整體指標掩蓋特定客群的退化。
 

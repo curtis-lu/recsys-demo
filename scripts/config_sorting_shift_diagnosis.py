@@ -522,8 +522,8 @@ def interpretation(result: dict, spread_meta: dict) -> str:
 
 def render_html(report: dict) -> str:
     result = report["result"]
-    # 分數欄名照實印，不寫死：來自 schema 的 score 角色欄（#415）。
-    sc = html.escape(str(report["schema"]["score"]))
+    # 分數欄名照實印，不寫死：與下面 metadata 表同一個來源，兩處不得各走各的（#415）。
+    sc = html.escape(str(result["score_col_used"]))
     spread = report["offset_spread"]
     item_col = report["schema"]["item"]
     interp = interpretation(result, spread)
@@ -644,7 +644,7 @@ def main() -> None:
     offset_df, spread_meta = build_offset_frame(pdf, parameters, schema)
     result = run_diagnosis(pdf, parameters, schema, score_col, args.n_boot, args.seed)
     report = {
-        "schema": {"item": schema["item"], "score": schema["score"]},
+        "schema": {"item": schema["item"]},
         "source": source_meta,
         "notes": notes,
         "offset_spread": spread_meta,

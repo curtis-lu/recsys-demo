@@ -13,7 +13,7 @@
 |---|---|---|
 | `source ETL` | 將上游資料整理為框架規範的來源表 | `feature_table`、`label_table`、`sample_pool` |
 | `dataset` | 抽樣、時間切分、前處理與模型輸入組裝 | `*_keys`、`preprocessor`、`*_model_input` |
-| `training` | 快取資料、HPO、模型訓練、校準與 test 預測 | 版本化模型、診斷、`training_eval_predictions` |
+| `training` | 快取資料、HPO、模型訓練與 test 預測 | 版本化模型、診斷、`training_eval_predictions` |
 | `evaluation` | 連接 ground truth、計算排序指標與產生報表 | 評估結果、HTML 報表 |
 | `inference` | 建立評分母體、套用前處理、預測、排名與發布 | `ranked_predictions` |
 
@@ -77,7 +77,7 @@ node 使用資料集名稱，例如 `feature_table`、`preprocessor`、`model`�
 | 執行位置 | 適合的工作 |
 |---|---|
 | Spark | 大表篩選、join、抽樣、類別編碼、排名、聚合、資料品質檢查 |
-| driver | HPO、模型演算法原生訓練、機率校準、模型 artifact 與診斷 |
+| driver | HPO、模型演算法原生訓練、模型 artifact 與診斷 |
 
 source ETL、dataset、inference 的資料組裝，以及 evaluation 的逐筆 join 與指標聚合，優先使用 Spark SQL／DataFrame。這些步驟不使用 Spark UDF，讓 Catalyst、partition pruning、shuffle 與 spill 機制可以正常作用。
 

@@ -113,7 +113,20 @@ def evaluation_ap_by_item(payload: dict) -> tuple[dict[str, float], float | None
     if not payload:
         return {}, None
     # 以前 training 在 score 與 score_uncalibrated 不一致時會多寫一份
-    # "uncalibrated" 區塊；#411 移除校準器之後那份不再產生，指標只有一份。
+    # "uncalibrated" 區塊，本腳本要的就是那一份（未校準＝模型原始輸出）。
+    # #411 移除校準器之後那份不再產生，頂層就是原始輸出的指標。
+    #
+    # 舊 artifact 不能靜默改讀頂層：那時候的頂層是**校準後**的數字，跟本腳本
+    # 其餘量（gain ledger 走 raw booster）不同空間，換一組數字卻不報錯，是
+    # 最難發現的那種錯。所以認出舊格式就直接 raise。
+    if "uncalibrated" in payload:
+        raise ValueError(
+            "This evaluation_results.json predates #411: it still carries an "
+            "'uncalibrated' block, which means its top-level metrics are the "
+            "calibrated ones. Reading them here would silently mix score "
+            "spaces. Re-run evaluation with the current framework, or read "
+            "the 'uncalibrated' block by hand if you are auditing history."
+        )
     block = payload
     per_item = block.get("per_item_map_attr", {}) or {}
     overall = block.get("overall_map")
