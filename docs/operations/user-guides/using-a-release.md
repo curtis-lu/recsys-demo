@@ -7,14 +7,14 @@
 ## 1. 版本、tag 與 branch
 
 ```
-tag      v0.1.1 ──► 某一個 commit         貼上去就不會動
+tag      v0.2.0 ──► 某一個 commit         貼上去就不會動
 branch   main ──●──●──●──●──►             持續往前長，內容隨時會變
 version  pyproject.toml 的 version 欄位    每次發布時對齊 tag 名稱
 ```
 
 - **tag** 是釘在某個 commit 上的名字。checkout 同一個 tag，任何時候拿到的都是同一份程式碼。
 - **branch** 會持續前進。追 branch 等於每次同步都可能拿到不同的行為。
-- **version** 是 `pyproject.toml` 裡的字串，發布時與 tag 名稱對齊：tag `v0.1.1` 對應 `version = "0.1.1"`。checkout 之後想確認自己手上是哪一版，看這個欄位。
+- **version** 是 `pyproject.toml` 裡的字串，發布時與 tag 名稱對齊：tag `v0.2.0` 對應 `version = "0.2.0"`。checkout 之後想確認自己手上是哪一版，看這個欄位。
 
 **請用 tag 取版本。** `release/*` branch 是維護舊版修正的工作分支，內容會變動。
 
@@ -26,16 +26,16 @@ version  pyproject.toml 的 version 欄位    每次發布時對齊 tag 名稱
 git clone https://github.com/curtis-lu/recsys-demo.git
 cd recsys-demo
 git tag                  # 列出可用的版本
-git checkout v0.1.1
+git checkout v0.2.0
 ```
 
-`git checkout <tag>` 之後 git 會說你在 detached HEAD。這是正常的，代表你停在一個固定的快照上而不是某條 branch 的最前端。要在上面改東西就自己開一條 branch：`git switch -c my-deployment v0.1.1`。
+`git checkout <tag>` 之後 git 會說你在 detached HEAD。這是正常的，代表你停在一個固定的快照上而不是某條 branch 的最前端。要在上面改東西就自己開一條 branch：`git switch -c my-deployment v0.2.0`。
 
 執行環境不能連網時，在能連網的機器上打包該 tag 再搬進去：
 
 ```bash
-git archive --prefix=recsys_tfb-v0.1.1/ --format=tar.gz -o recsys_tfb-v0.1.1.tar.gz v0.1.1
-sha256sum recsys_tfb-v0.1.1.tar.gz     # macOS 沒有這支指令，改用 shasum -a 256
+git archive --prefix=recsys_tfb-v0.2.0/ --format=tar.gz -o recsys_tfb-v0.2.0.tar.gz v0.2.0
+sha256sum recsys_tfb-v0.2.0.tar.gz     # macOS 沒有這支指令，改用 shasum -a 256
 ```
 
 `--prefix` 讓解壓縮後的檔案落在一個資料夾裡，不會散進當前目錄。把上面印出的 hash 帶到目的端重算一次比對，再解壓。
