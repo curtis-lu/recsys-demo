@@ -200,7 +200,7 @@ keys = keep_rows_drawn_under_ratio(keys, identity_key, seed, site="calibration_k
 
 改完跑 `python -m recsys_tfb <pipeline> --list-nodes` 肉眼確認各 node 的接續成本。切片機制本身見 [`pipeline-slicing.md`](../operations/user-guides/pipeline-slicing.md)。
 
-**誰擋得住**：**部分擋得住。** `tests/test_pipelines/test_resume_contracts.py` 的 `RESUME_CONTRACTS` 釘住各 pipeline（含 calibration-enabled training 變體）承諾的接續點與允許補跑集合。改壞會紅燈——要嘛給新產物補 catalog 條目，要嘛修改契約並在 PR 說明為什麼接受變貴。
+**誰擋得住**：**部分擋得住。** `tests/test_pipelines/test_resume_contracts.py` 的 `RESUME_CONTRACTS` 釘住各 pipeline 承諾的接續點與允許補跑集合。改壞會紅燈——要嘛給新產物補 catalog 條目，要嘛修改契約並在 PR 說明為什麼接受變貴。
 
 ---
 

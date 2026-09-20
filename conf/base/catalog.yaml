@@ -392,7 +392,7 @@ training_eval_predictions:
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
-    - {name: score_uncalibrated, type: DOUBLE}  # 模型原始輸出；calibration 關閉時等於 score
+    - {name: score_uncalibrated, type: DOUBLE}  # deprecated，恆等於 score，會在後續的發布版本移除，見 #412
     - {name: label, type: INT}
   partition_filter:
     model_version: ${model_version}
@@ -503,7 +503,7 @@ unranked_predictions:
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
-    - {name: score_uncalibrated, type: DOUBLE}  # 校準前的原始分數；沒套用校準時等於 score
+    - {name: score_uncalibrated, type: DOUBLE}  # deprecated，恆等於 score，會在後續的發布版本移除，見 #412
   partition_filter:
     model_version: ${model_version}
   partition_cols:
@@ -523,7 +523,7 @@ ranked_staging:
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
-    - {name: score_uncalibrated, type: DOUBLE}  # 校準前的原始分數；沒套用校準時等於 score
+    - {name: score_uncalibrated, type: DOUBLE}  # deprecated，恆等於 score，會在後續的發布版本移除，見 #412
     - {name: rank, type: BIGINT}
   partition_filter:
     model_version: ${model_version}
@@ -544,7 +544,7 @@ ranked_predictions:
   columns:
     - {name: cust_id, type: STRING}
     - {name: score, type: DOUBLE}
-    - {name: score_uncalibrated, type: DOUBLE}  # 校準前的原始分數；沒套用校準時等於 score
+    - {name: score_uncalibrated, type: DOUBLE}  # deprecated，恆等於 score，會在後續的發布版本移除，見 #412
     - {name: rank, type: BIGINT}
   partition_filter:
     model_version: ${model_version}

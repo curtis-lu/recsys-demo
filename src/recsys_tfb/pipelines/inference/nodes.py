@@ -338,16 +338,6 @@ def predict_and_write_scores(
         len(plan.surplus), len(set(snap_dates)), n_buckets, len(items),
     )
 
-    # Decision — which score is published: the model's own output, with
-    # nothing between the booster and the table. Calibration was the only thing
-    # that ever sat there, and #411 removed it, so this node no longer asks what
-    # the model is wrapped in or what the config would like applied.
-    #
-    # `score_uncalibrated` is still written, equal to `score`. It is deprecated
-    # (#412) and kept only so the four managed prediction tables keep their
-    # column count — the writes bind by position, so dropping the column here
-    # would break a write against an existing table.
-
     # Decision — which empty buckets are legitimate: the ones with no partition
     # in the landed table. Asked once, up front, so the loop's per-bucket
     # judgement costs nothing.
@@ -436,6 +426,11 @@ def predict_and_write_scores(
                 # the name is what reaches the partition column.
                 bucket_pdf[item_col] = item
                 X = pdf_to_X(bucket_pdf, model_view, parameters)
+                # Decision — what gets published is the model's own output,
+                # with nothing between the booster and the table. Calibration
+                # was the only thing that ever sat there, and #411 removed it,
+                # so this node no longer asks what the model is wrapped in or
+                # what the config would like applied to the raw array.
                 scores = model.predict(X)
                 out_pdf = pd.DataFrame({
                     **{
@@ -443,6 +438,11 @@ def predict_and_write_scores(
                         for col in entity_cols
                     },
                     score_col: scores,
+                    # Deprecated (#412), and equal to `score` by construction.
+                    # Kept only so the four managed prediction tables keep
+                    # their column count: the writes bind by position, so
+                    # dropping it here would break a write against a table
+                    # that still declares it.
                     "score_uncalibrated": scores,
                     time_col: snap_date,
                     item_col: item,

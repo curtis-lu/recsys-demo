@@ -153,7 +153,6 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
   - **要預測的月份**：`dataset.test_snap_dates` 的每個月，都必須已經由 dataset 建好。
   - **本機 cache**：樣本權重的長度跟 LightGBM `.bin` cache 的列數對不上，要清掉 cache 目錄重建；磁碟空間不夠。
   - **`training.algorithm`**：必須是有註冊的演算法，目前只有 `lightgbm`。
-  - **`training.calibration.method`**：只能是 `isotonic` 或 `sigmoid`。注意這一條要到校準那一步才查，在 HPO 之後。
 - 只警告：
   - 上次中途掛掉留下的不完整 cache，自動清掉重抓；LightGBM 的 `.bin` cache 跟目前設定對不上，自動重建。
   - 過濾掉沒有正例的 query group 之後，train 或 train_dev 剩下的太少。
@@ -247,7 +246,7 @@ dataset 的三個資料閘都在此列；就算切片自動補跑了前面的步
 
 - 改了程式。
 - 來源表的某個月被回補過。
-- 改了不進版本號的設定，例如 `inference.use_calibration`（要不要套用校準）：已經寫出的評分分區不會重算，除非帶 `--rebuild-dates`。
+- 改了不進版本號的設定，例如 `inference.entity_buckets` 以外的 inference 執行設定：已經寫出的評分分區不會重算，除非帶 `--rebuild-dates`。
 - 改了上游的設定，卻沒有重跑上游：training 預設用最新一版 dataset，inference 和 evaluation 預設用 promote 過的模型，都不會發現上游的設定已經不一樣。
 
 什麼時候會出事、怎麼強制重算，見 [`pipeline-slicing.md`](pipeline-slicing.md) 的〈接續前提〉。

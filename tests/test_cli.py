@@ -1593,15 +1593,17 @@ def test_maybe_warn_retrain_fires_when_model_pulled_in(tmp_path):
     assert "ab12cd34" in text and "finalize_model" in text and "old11111" in text
 
 
-def test_maybe_warn_retrain_fires_under_calibration(tmp_path):
-    # Under calibration the `model` dataset is produced by calibrate_model, not
-    # finalize_model; the trigger must still fire on the missing `model`.
+def test_maybe_warn_retrain_keys_on_the_dataset_not_the_node_name(tmp_path):
+    # The trigger is "`model` was missing", never "finalize_model was pulled
+    # in": whichever node produces `model` is a DAG-shape detail. This used to
+    # be pinned with `calibrate_model`, the second producer calibration added
+    # (#411 removed it); a renamed producer must keep firing.
     from recsys_tfb.__main__ import _maybe_warn_retrain
-    plan = _plan_with_auto({"calibrate_model": ("model",)})
+    plan = _plan_with_auto({"some_other_model_producer": ("model",)})
     lines = _maybe_warn_retrain(
         plan, {"models_dir": tmp_path, "model_version": "ab12cd34"})
     text = "\n".join(lines)
-    assert "ab12cd34" in text and "calibrate_model" in text
+    assert "ab12cd34" in text and "some_other_model_producer" in text
 
 
 def test_maybe_warn_retrain_silent_when_model_present(tmp_path):
@@ -3336,9 +3338,9 @@ class TestTrainSnapDatesA23:
 class TestEntityColumnsDeclaredA28:
     """A28 is wired to the training command, and fires before Spark starts.
 
-    Placement is the point: the node that writes these columns runs after HPO,
-    train_model and calibrate_model, so the same check inside it would report a
-    one-word catalog typo only after the whole search had been paid for.
+    Placement is the point: the node that writes these columns runs after HPO
+    and finalize_model, so the same check inside it would report a one-word
+    catalog typo only after the whole search had been paid for.
     """
 
     @staticmethod
@@ -3580,7 +3582,40 @@ class TestRetiredCalibrationKeysBlockEveryCommand:
     one: the keys simply stop being read, so an operator who left
     ``training.calibration.enabled: true`` in place would get an uncalibrated
     model and no indication that the setting had been ignored.
+
+    **Every conf here is otherwise valid**, and that is load-bearing: a
+    minimal one exits 1 on A36 (training) or A27 (inference) anyway, so
+    ``exit_code != 0`` would be satisfied by the wrong invariant and the
+    message assertions would be carrying the whole test alone.
     """
+
+    def _conf(self, tmp_path, *, training=None, inference=None):
+        params_inference = {
+            "inference": {
+                "snap_dates": ["2026-01-31"],
+                "products": ["prod_a"],
+                "entity_buckets": 10,
+            },
+            "schema": {"categorical_values": {"prod_name": ["prod_a"]}},
+        }
+        if inference:
+            params_inference["inference"].update(inference)
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": _trainable_dataset()},
+            params_training={"training": {"objective": "binary"}, **(training or {})},
+            params_inference=params_inference,
+        )
+        _make_base_and_train_variant(tmp_path, base_v="abc12345", train_v="11111111")
+        models_dir = tmp_path / "data" / "models"
+        version_dir = models_dir / "a1b2c3d4"
+        version_dir.mkdir(parents=True)
+        (version_dir / "manifest.json").write_text(json.dumps({
+            "version": "a1b2c3d4",
+            "base_dataset_version": "abc12345",
+            "train_variant_id": "11111111",
+        }))
+        (models_dir / "best").symlink_to(version_dir.resolve())
 
     def _invoke(self, tmp_path, argv):
         old_cwd = os.getcwd()
@@ -3594,23 +3629,28 @@ class TestRetiredCalibrationKeysBlockEveryCommand:
         finally:
             os.chdir(old_cwd)
 
+    def test_a_clean_conf_reaches_the_cold_start(self, tmp_path):
+        """The discriminating half, and it runs first: without it every
+        assertion below is also satisfied by a gate that rejects everything."""
+        self._conf(tmp_path)
+        _, mock_spark = self._invoke(tmp_path, ["training"])
+        mock_spark.assert_called()
+        _, mock_spark = self._invoke(tmp_path, ["inference"])
+        mock_spark.assert_called()
+
     def test_training_key_exits_before_spark_starts(self, tmp_path):
-        _setup_conf(
-            tmp_path,
-            params_training={"training": {"calibration": {"enabled": True}}},
-        )
+        self._conf(tmp_path, training={"training": {"calibration": {"enabled": True}}})
         result, mock_spark = self._invoke(tmp_path, ["training"])
         assert result.exit_code != 0
+        assert "A37" in result.output
         assert "training.calibration" in result.output
         mock_spark.assert_not_called()
 
     def test_inference_key_exits_before_spark_starts(self, tmp_path):
-        _setup_conf(
-            tmp_path,
-            params_inference={"inference": {"use_calibration": True}},
-        )
+        self._conf(tmp_path, inference={"use_calibration": True})
         result, mock_spark = self._invoke(tmp_path, ["inference"])
         assert result.exit_code != 0
+        assert "A37" in result.output
         assert "inference.use_calibration" in result.output
         mock_spark.assert_not_called()
 
@@ -3618,10 +3658,7 @@ class TestRetiredCalibrationKeysBlockEveryCommand:
         # The key's presence is the failure, not its value: it sits inside the
         # subtree hashed into model_version, so leaving it behind would make
         # two upgraded conf trees compute different version IDs.
-        _setup_conf(
-            tmp_path,
-            params_training={"training": {"calibration": {"enabled": False}}},
-        )
+        self._conf(tmp_path, training={"training": {"calibration": {"enabled": False}}})
         result, mock_spark = self._invoke(tmp_path, ["training"])
         assert result.exit_code != 0
         assert "training.calibration" in result.output
@@ -3629,29 +3666,13 @@ class TestRetiredCalibrationKeysBlockEveryCommand:
 
     def test_every_retired_key_is_named_in_one_run(self, tmp_path):
         # Collect-all: one edit fixes the conf, instead of one run per key.
-        _setup_conf(
+        self._conf(
             tmp_path,
-            params_training={"training": {"calibration": {"enabled": True}}},
-            params_inference={"inference": {"use_calibration": False}},
+            training={"training": {"calibration": {"enabled": True}}},
+            inference={"use_calibration": False},
         )
         result, mock_spark = self._invoke(tmp_path, ["training"])
         assert result.exit_code != 0
         assert "training.calibration" in result.output
         assert "inference.use_calibration" in result.output
         mock_spark.assert_not_called()
-
-    def test_a_conf_without_the_keys_reaches_the_cold_start(self, tmp_path):
-        # The discriminating half: without it every assertion above is also
-        # satisfied by a gate that rejects every training config outright.
-        _setup_conf(
-            tmp_path,
-            params_dataset={"dataset": {
-                "sample_ratio": 0.1,
-                "train_dev_ratio": 0.2,
-                "train_snap_dates": ["2025-12-31"],
-                "test_snap_dates": ["2026-01-31"],
-            }},
-            params_training={"training": {"objective": "binary"}},
-        )
-        _, mock_spark = self._invoke(tmp_path, ["dataset"])
-        mock_spark.assert_called()

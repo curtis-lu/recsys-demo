@@ -428,13 +428,13 @@ FAQ 只回答框架概念與選項如何取捨；若是設定無法執行、資�
 **Q3. objective 要選 `binary` 還是 `lambdarank`？**
 
 - `binary` 是建議的第一版 baseline：逐筆預測後再排序，流程較容易驗證，而且仍以排序指標評估。
-- `lambdarank`／`rank_xendcg` 適合希望訓練目標直接考慮 query group 內相對順序的情境，但需搭配 `ndcg`／`map` metric，並確認 score 是否需要 calibration。
+- `lambdarank`／`rank_xendcg` 適合希望訓練目標直接考慮 query group 內相對順序的情境，但需搭配 `ndcg`／`map` metric，並注意它的原始 score 無界、不能當機率讀（見 Q4）。
 
 pointwise、pairwise、listwise 的差異見 [`gbdt_learning_to_rank.md`](docs/handbooks/gbdt/gbdt_learning_to_rank.md)。
 
-**Q4. 排序只看相對名次，為什麼還要做機率校準？**
+**Q4. 可以把 `score` 當成機率讀嗎？**
 
-純排序不需要校準。只有下游要將 `score` 解讀為機率，例如計算期望收益或跨日期比較絕對水準時才需要。啟用時，dataset 的 `enable_calibration` 與 training 的 `training.calibration.enabled` 必須一起設定。
+不建議。這個框架的目標是**排序**，`score` 就是模型的原始輸出：`binary` objective 下它是 sigmoid、落在 `[0, 1]` 但不保證校準得準；ranking objective 下它是無界實數。框架**不提供**機率校準機制（原本的校準器已於 #411 移除，config 還留著 `training.calibration` 或 `inference.use_calibration` 會在 CLI 入口被擋下）。下游若要機率語意，責任在下游。
 
 **Q5. 模型訓練好後怎麼上線？**
 
