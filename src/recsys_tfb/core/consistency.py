@@ -617,6 +617,22 @@ implemented and wired):
   drops a large fraction — the bound would hold through a 2x fan-out and read
   as a passing gate. Residual risk, stated so it is not re-discovered as a bug:
   a duplicate key confined to a month that only val/test cover goes unseen.
+* B11 — ``sample_pool`` or ``label_table`` is missing a column a declared
+  optional role names (``schema.columns.event``; ``occasion`` joins it when
+  that role lands). Declaring the role widens ``identity_columns``, which is
+  what ``select_*_keys`` project by and what ``build_model_input`` LEFT joins
+  the labels on, so a source table without the column fails — but as a raw
+  Spark ``AnalysisException`` about an unresolved name, from whichever node
+  happens to touch it first, naming neither the role nor the other table. This
+  turns it into one message, before the label join, naming both. Checked
+  against ``DataFrame.columns`` (metastore metadata, no rows), so it costs
+  nothing and stays inside ADR-0006's cost invariant for this node.
+  ``feature_table`` is deliberately NOT checked: it is entity-level and joins
+  by ``base_key_columns``, which no optional role widens — requiring an
+  impression column there would be the ``occasion``-mis-classification ADR-0025
+  decision 2 warns about, written into a gate. Predicate:
+  ``optional_role_source_column_errors``. Wired in ``validate_data_consistency``
+  (``pipelines/dataset/nodes.py``) with the rest of Layer 2.
 
 Layer 3 — specified but DEFERRED (NOT implemented in this module yet); see
 the plan doc for the full table:
@@ -675,7 +691,7 @@ from __future__ import annotations
 import datetime as _datetime
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
@@ -912,6 +928,61 @@ def optional_role_columns_declared_errors(
                 f"without an error — leaving several indistinguishable rows "
                 f"per item in the published table. Add them to that entry's "
                 f"`columns:`."
+            )
+    return errors
+
+
+#: The source tables B11 requires an optional role's columns in, mapped to the
+#: config key whose SQL produces each. ``feature_table`` is deliberately absent
+#: — see B11 in the module docstring.
+_OPTIONAL_ROLE_SOURCE_TABLES = ("sample_pool", "label_table")
+
+
+def optional_role_source_column_errors(
+    parameters: dict,
+    columns_by_table: Mapping[str, Sequence[str]],
+) -> list[str]:
+    """(B11) every declared optional-role column exists in both source tables.
+
+    Returns error strings (empty list when fine), collected by
+    ``validate_data_consistency``.
+
+    Pure: the caller reads ``DataFrame.columns`` (metastore metadata, no rows)
+    and hands the lists in, the same arrangement A28/A39 use for the catalog.
+
+    Declaring ``event`` widens ``identity_columns``, and that is what
+    ``select_*_keys`` project ``sample_pool`` by and what ``build_model_input``
+    LEFT joins ``label_table`` on. A table missing the column therefore already
+    fails — as an ``AnalysisException`` about an unresolved name, raised by
+    whichever node reached it first, naming neither the role that asked for the
+    column nor the other table that may be missing it too. One message, both
+    tables, before the label join.
+
+    Collect-all across tables and columns: two tables built from the same
+    upstream query are usually missing the same column, and reporting one per
+    run would cost two passes to learn that.
+    """
+    role_columns = {
+        role: get_schema(parameters).get(role, []) for role in _OPTIONAL_ROLE_KEYS
+    }
+    if not any(role_columns.values()):
+        return []
+
+    errors: list[str] = []
+    for table in _OPTIONAL_ROLE_SOURCE_TABLES:
+        present = set(columns_by_table.get(table, ()))
+        for role, cols in role_columns.items():
+            missing = [c for c in cols if c not in present]
+            if not missing:
+                continue
+            errors.append(
+                f"B11: {table} is missing column(s) {missing}, declared by "
+                f"schema.columns.{role}. Declaring {role!r} makes those "
+                f"columns part of a candidate row's identity, which is what "
+                f"the keys are projected by and what the labels are joined "
+                f"on — every row of both {' and '.join(_OPTIONAL_ROLE_SOURCE_TABLES)} "
+                f"must carry them. Add them to that table's source SQL, or "
+                f"remove the {role!r} declaration."
             )
     return errors
 

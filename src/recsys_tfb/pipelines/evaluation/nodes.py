@@ -389,7 +389,8 @@ def make_prepare_eval_data_node(population_name: str):
             # declared, not anything here. The ticket that lands `occasion`
             # owns re-deciding this branch.
             eval_predictions = rank_within_query(
-                eval_predictions, query_cols, score_col, schema["item"]
+                eval_predictions, query_cols, score_col, schema["item"],
+                schema.get("event", []),
             )
             # BIGINT, the type ranked_predictions declares for `rank`. Both modes
             # write the same enriched_eval_predictions (columns: "auto"), whose

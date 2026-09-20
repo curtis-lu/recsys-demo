@@ -815,13 +815,23 @@ def test_tune_defaults_ranking_metric(monkeypatch):
     # patched there; nodes.get_adapter still exists but the HPO path no
     # longer reads it.
     monkeypatch.setattr(hpo_scoring, "get_adapter", lambda algo: FakeAdapter())
-    monkeypatch.setattr(hpo_scoring, "compute_mean_ap", lambda g, i, y, p: 0.5)
+    monkeypatch.setattr(
+        hpo_scoring, "compute_mean_ap", lambda g, i, y, p, ev=(): 0.5,
+    )
 
     def fake_extract(handle, meta, params, **kw):
         X = np.zeros((4, 2)); y = np.array([1, 0, 1, 0])
         g = np.array([0, 0, 1, 1], dtype=np.int64)
         items = np.array(["a", "b", "a", "b"], dtype=object)
-        return (X, y, g, items) if kw.get("with_items") else (X, y, g)
+        out = [X, y, g]
+        if kw.get("with_items"):
+            out.append(items)
+        # An undeclared `event` role yields an empty list, not a missing
+        # return value -- mirroring the real extractor, whose caller must not
+        # have to branch on whether the role exists.
+        if kw.get("with_event"):
+            out.append([])
+        return tuple(out)
 
     monkeypatch.setattr(
         nodes, "extract_Xy_with_groups", fake_extract

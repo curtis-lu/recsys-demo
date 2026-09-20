@@ -99,6 +99,43 @@ def _resolve_k_values(raw: Iterable, n_items: int) -> list[int]:
     return sorted(out)
 
 
+def _resolve_all_k(eval_predictions: SparkDataFrame, schema: dict, item_col: str) -> int:
+    """What ``k_values: "all"`` means for this frame — the K that truncates
+    nothing.
+
+    Two answers, because a query group's candidate count is two different
+    things depending on the declared roles:
+
+    * **No optional role declared** — the distinct item count, exactly as
+      before #378. One row per item per query group is guaranteed by the
+      duplicate checks, so the widest group is at most that many rows, and the
+      number is stable across frames in a way a row count is not (it is also
+      what the report's per-item K truncation reads). Left untouched so every
+      existing deployment's ``"all"`` resolves to the same integer.
+    * **``event`` declared** — the largest number of rows any one query group
+      holds. The item count would now truncate: one entity can be shown the
+      same twelve creatives thirty times in a week, which is thirty rows in
+      one query group against twelve distinct items, and ``map@12`` on a
+      30-row ranking silently answers a different question from the one
+      ``"all"`` names.
+
+    Costs one extra shuffle over the same frame in the declared case only —
+    a ``groupBy(query_group).count()`` whose driver-side result is a single
+    number — and nothing at all in the undeclared case.
+    """
+    if not schema.get("event"):
+        return eval_predictions.select(item_col).distinct().count()
+    per_group = (
+        eval_predictions.groupBy(*schema["query_group_columns"])
+        .agg(F.count(F.lit(1)).alias("_n_rows"))
+        .agg(F.max("_n_rows").alias("_max_rows"))
+        .collect()[0]["_max_rows"]
+    )
+    # An empty frame has no widest group. 0 is what the item-count branch
+    # returns for the same frame, so the two branches degrade alike.
+    return int(per_group or 0)
+
+
 def _resolve_k_grids(
     parameters: dict, n_items: int
 ) -> tuple[list[int], list[int]]:
@@ -361,16 +398,29 @@ def compute_dataset_overview(
 
 
 def rank_within_query(
-    df: SparkDataFrame, group_cols: list[str], score_col: str, item_col: str
+    df: SparkDataFrame,
+    group_cols: list[str],
+    score_col: str,
+    item_col: str,
+    event_cols: list[str] | None = None,
 ) -> SparkDataFrame:
     """Assign ``pos``: 1-based rank within each ``group_cols`` group, by ``score`` desc.
 
-    Ties go by ``item_col`` ascending — the rule inference publishes ``rank``
-    with (``utils.ranking.rank_by_score_then_item``), so re-ranking here gives
-    the same rows the same positions.
+    Ties go by ``item_col`` ascending, then by each of ``event_cols`` — the
+    rule inference publishes ``rank`` with
+    (``utils.ranking.rank_by_score_then_item``), so re-ranking here gives the
+    same rows the same positions.
+
+    ``event_cols`` is needed here and not in inference because only this side
+    can see more than one row per item in a query group: inference builds its
+    candidates as entity x item and ignores the role entirely (ADR-0025
+    decision 1). Absent or empty reproduces the pre-#378 window exactly.
     """
     return df.withColumn(
-        "pos", rank_by_score_then_item(group_cols, score_col, item_col)
+        "pos",
+        rank_by_score_then_item(
+            group_cols, score_col, item_col, event_cols or (),
+        ),
     )
 
 
@@ -702,6 +752,10 @@ def _compute_core(
     label_col = schema["label"]
     score_col = schema["score"]
     group_cols = schema["query_group_columns"]
+    # Empty unless the deployment declares `event`. On the category-grain pass
+    # this is still right: collapsing items into categories cannot merge two
+    # rows that differ by event, so the tie-break keeps deciding the same way.
+    event_cols = schema.get("event", [])
 
     eval_params = parameters.get("evaluation", {}) or {}
     _require_segment_columns_in_frame(eval_predictions, segment_columns)
@@ -714,12 +768,14 @@ def _compute_core(
         name: v for name, v in metric_params(parameters).items() if name != "k"
     }
 
-    n_items = eval_predictions.select(item_col).distinct().count()
-    query_ks, item_ks = _resolve_k_grids(parameters, n_items)
+    all_k = _resolve_all_k(eval_predictions, schema, item_col)
+    query_ks, item_ks = _resolve_k_grids(parameters, all_k)
     n_queries_total = eval_predictions.select(*group_cols).distinct().count()
 
     # ---- Layer 1: row-level enrichment ----
-    df = rank_within_query(eval_predictions, group_cols, score_col, item_col)
+    df = rank_within_query(
+        eval_predictions, group_cols, score_col, item_col, event_cols,
+    )
     df = add_query_total_rel(df, group_cols, label_col)
 
     df_with_pos = df.filter(F.col("total_rel") > 0)
@@ -842,12 +898,15 @@ def compute_overall_per_item(
     eval_params = parameters.get("evaluation", {}) or {}
     _require_segment_columns_in_frame(eval_predictions, segment_columns)
     active_seg_col = segment_columns[0] if segment_columns else None
-    n_items = eval_predictions.select(item_col).distinct().count()
+    all_k = _resolve_all_k(eval_predictions, schema, item_col)
     # Same grids as _compute_core (metric.k on the per-item side only), so
     # baseline and model keys line up.
-    query_ks, item_ks = _resolve_k_grids(parameters, n_items)
+    query_ks, item_ks = _resolve_k_grids(parameters, all_k)
 
-    df = rank_within_query(eval_predictions, group_cols, score_col, item_col)
+    df = rank_within_query(
+        eval_predictions, group_cols, score_col, item_col,
+        schema.get("event", []),
+    )
     df = add_query_total_rel(df, group_cols, label_col)
     df_with_pos = df.filter(F.col("total_rel") > 0)
     if df_with_pos.limit(1).count() == 0:

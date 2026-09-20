@@ -38,6 +38,7 @@ from recsys_tfb.core.consistency import (
     categorical_dtype_errors,
     item_coverage_errors,
     nonnumeric_feature_errors,
+    optional_role_source_column_errors,
     ColumnPrecision,
     SplitRowCounts,
     model_input_grain_errors,
@@ -117,7 +118,7 @@ def validate_data_consistency(
     feature_table: DataFrame,
     parameters: dict,
 ) -> None:
-    """Run the Layer-2 invariants (B1, B5, B6, B7) against the source tables.
+    """Run the Layer-2 invariants (B1, B5, B6, B7, B11) against the source tables.
 
     Side-effect only: raises ``DataConsistencyError`` on violation, returns
     ``None`` when everything holds. Each invariant's meaning lives with its
@@ -188,6 +189,18 @@ def validate_data_consistency(
             drop_cols,
             identity_cols,
             label_col,
+        )
+        # B11 — a declared optional role's columns exist in both candidate-grain
+        # source tables. `.columns` is metastore metadata, so this reads no
+        # rows and stays inside this node's cost invariant. feature_table is
+        # not passed on purpose: it joins by base_key_columns, which no
+        # optional role widens.
+        + optional_role_source_column_errors(
+            parameters,
+            {
+                "sample_pool": sample_pool.columns,
+                "label_table": label_table.columns,
+            },
         )
     )
     if errors:

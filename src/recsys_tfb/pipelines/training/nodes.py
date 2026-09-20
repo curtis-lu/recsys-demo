@@ -653,11 +653,15 @@ def tune_hyperparameters(
     # ranks the same items, and sorting a string per row on each trial is work
     # the search would repeat for nothing.
     with log_step(logger, "extract_features"):
-        X_v, y_v, groups_v, items_v = extract_Xy_with_groups(
+        X_v, y_v, groups_v, items_v, event_keys_v = extract_Xy_with_groups(
             val_parquet_handle, preprocessor_metadata, parameters,
-            with_items=True, on_disk_label="hpo_val_matrix",
+            with_items=True, with_event=True, on_disk_label="hpo_val_matrix",
         )
     items_v = item_sort_codes(items_v)
+    # Same pre-coding, same reason, for each `event` column — the list is
+    # empty unless the deployment declares the role, so a deployment without
+    # one pays nothing and ranks exactly as it did.
+    event_keys_v = [item_sort_codes(k) for k in event_keys_v]
 
     checkpointing = parameters.get("hpo_checkpointing", True)
     search_id = _resolve_search_id(parameters)
@@ -718,6 +722,7 @@ def tune_hyperparameters(
         train_dev_weights=train_dev_lgb_handle.sample_weights(
             parameters, preprocessor_metadata),
         X_val=X_v, y_val=y_v, groups_val=groups_v, items_val=items_v,
+        event_keys_val=event_keys_v,
         algorithm=algorithm,
         algorithm_params=algorithm_params,
         search_space=search_space,

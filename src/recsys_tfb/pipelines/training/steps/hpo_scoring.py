@@ -22,6 +22,7 @@ including why today's checkpoint cannot carry that weight as written.
 import logging
 import time
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Optional
 
 import numpy as np
@@ -55,24 +56,30 @@ def _hpo_score(
     items: np.ndarray,
     y_true: np.ndarray,
     y_score: np.ndarray,
+    event_keys: Sequence[np.ndarray] = (),
 ) -> float:
     """Score val predictions for one HPO trial under the chosen objective.
 
     ``mean_ap``            — per-query mAP.
     ``macro_per_item_map`` — macro average of per-item attributed mAP.
 
-    Both break tied scores by ``items``, the rule the evaluation metrics use
-    (``utils.ranking``), so both need it: the item values, or their
-    :func:`~recsys_tfb.utils.ranking.item_sort_codes`.
+    Both break tied scores by ``items`` and then by ``event_keys``, the rule
+    the evaluation metrics use (``utils.ranking``), so both need them: the raw
+    values, or their :func:`~recsys_tfb.utils.ranking.item_sort_codes`.
+    ``event_keys`` is empty unless the deployment declares ``event``; passing
+    it is what keeps a trial's score independent of the order val rows were
+    read in once a query group can hold one item twice.
 
     Unknown ``objective_name`` raises ``ValueError``: a **pre-check** on the
     value handed in. A25 rejects the same value at CLI entry, so reaching this
     line means the caller assembled ``parameters`` without passing that gate.
     """
     if objective_name == "mean_ap":
-        return compute_mean_ap(groups, items, y_true, y_score)
+        return compute_mean_ap(groups, items, y_true, y_score, event_keys)
     if objective_name == "macro_per_item_map":
-        return compute_macro_per_item_map(groups, items, y_true, y_score)
+        return compute_macro_per_item_map(
+            groups, items, y_true, y_score, event_keys=event_keys,
+        )
     raise ValueError(
         f"unknown training.hpo_objective {objective_name!r}; "
         f"allowed: {', '.join(HPO_OBJECTIVES)}"
@@ -188,6 +195,7 @@ class TrialScorer:
         y_val: np.ndarray,
         groups_val: np.ndarray,
         items_val: np.ndarray,
+        event_keys_val: Sequence[np.ndarray] = (),
         algorithm: str,
         algorithm_params: dict,
         search_space: dict,
@@ -207,6 +215,7 @@ class TrialScorer:
         self.y_val = y_val
         self.groups_val = groups_val
         self.items_val = items_val
+        self.event_keys_val = event_keys_val
         self.algorithm = algorithm
         self.algorithm_params = algorithm_params
         self.search_space = search_space
@@ -291,7 +300,7 @@ class TrialScorer:
         with log_step(logger, "score"):
             score = _hpo_score(
                 self.hpo_objective, self.groups_val, self.items_val,
-                self.y_val, y_pred,
+                self.y_val, y_pred, self.event_keys_val,
             )
 
         if score > self.best["score"]:

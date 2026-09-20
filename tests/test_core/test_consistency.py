@@ -3902,3 +3902,86 @@ class TestOptionalRoleColumnsDeclaredA39:
             ["cust_id", "impression_id", "score", "label", "snap_date"],
             "training_eval_predictions",
         ) == []
+
+
+# =============================================================================
+# B11 — source tables must carry every declared optional-role column
+# =============================================================================
+
+from recsys_tfb.core.consistency import optional_role_source_column_errors
+
+
+def _b11_tables(sample_pool_extra=(), label_extra=()):
+    """The two candidate-grain source tables, with per-test extra columns."""
+    base = ["snap_date", "cust_id", "prod_name"]
+    return {
+        "sample_pool": [*base, "label", *sample_pool_extra],
+        "label_table": [*base, "label", *label_extra],
+    }
+
+
+class TestOptionalRoleSourceColumnsB11:
+    def test_no_optional_role_declared_passes(self):
+        assert optional_role_source_column_errors(
+            _event_params(), _b11_tables()
+        ) == []
+
+    def test_both_tables_carrying_the_column_passes(self):
+        assert optional_role_source_column_errors(
+            _event_params(event="impression_id"),
+            _b11_tables(("impression_id",), ("impression_id",)),
+        ) == []
+
+    def test_a_missing_column_in_sample_pool_is_reported(self):
+        errs = optional_role_source_column_errors(
+            _event_params(event="impression_id"),
+            _b11_tables((), ("impression_id",)),
+        )
+        assert len(errs) == 1
+        assert "B11" in errs[0]
+        assert "sample_pool" in errs[0]
+        assert "impression_id" in errs[0]
+
+    def test_a_missing_column_in_label_table_is_reported(self):
+        errs = optional_role_source_column_errors(
+            _event_params(event="impression_id"),
+            _b11_tables(("impression_id",), ()),
+        )
+        assert len(errs) == 1
+        assert "label_table" in errs[0]
+
+    def test_both_tables_missing_gives_both_errors(self):
+        """Two tables built from the same upstream query are usually missing
+        the same column; one error per run would cost two passes to learn it."""
+        errs = optional_role_source_column_errors(
+            _event_params(event="impression_id"), _b11_tables(),
+        )
+        assert len(errs) == 2
+        assert any("sample_pool" in e for e in errs)
+        assert any("label_table" in e for e in errs)
+
+    def test_every_missing_column_of_one_role_is_named_in_one_error(self):
+        errs = optional_role_source_column_errors(
+            _event_params(event=["event_ts", "impression_id"]),
+            _b11_tables(("event_ts",), ("event_ts", "impression_id")),
+        )
+        assert len(errs) == 1
+        assert "impression_id" in errs[0]
+        assert "event_ts" not in errs[0]
+
+    def test_feature_table_is_not_checked(self):
+        """An entity-level table joins by base_key_columns, which no optional
+        role widens. Requiring an impression column there would write the
+        mis-classification ADR-0025 decision 2 warns about into a gate."""
+        tables = _b11_tables(("impression_id",), ("impression_id",))
+        tables["feature_table"] = ["snap_date", "cust_id", "tenure_days"]
+        assert optional_role_source_column_errors(
+            _event_params(event="impression_id"), tables
+        ) == []
+
+    def test_the_message_says_how_to_fix_it_either_way(self):
+        errs = optional_role_source_column_errors(
+            _event_params(event="impression_id"), _b11_tables(),
+        )
+        assert "source SQL" in errs[0]
+        assert "remove" in errs[0]

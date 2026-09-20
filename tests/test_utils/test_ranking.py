@@ -196,3 +196,161 @@ def test_numpy_and_spark_rank_the_same_tied_rows_identically(spark, item_type):
     assert {
         (c, i): int(r) for c, i, r in zip(pdf["cust_id"], pdf["item"], numpy_ranks)
     } == spark_ranks
+
+
+# ---------------------------------------------------------------------------
+# `event`: the same item more than once inside one query group (#378)
+# ---------------------------------------------------------------------------
+
+#: One query group, one item, three impressions, all tied on score — the shape
+#: a config that declares `event` without per-impression features produces for
+#: every group (nothing distinguishes the rows, so everything ties). Impression
+#: ids out of order on purpose: the rank must come from the value, not the row.
+EVENT_TIED_ROWS = [
+    ("c1", "fund_bond", "imp03", 0.5),
+    ("c1", "fund_bond", "imp01", 0.5),
+    ("c1", "ccard_ins", "imp02", 0.5),
+    ("c1", "fund_bond", "imp02", 0.5),
+]
+
+#: item ascending first, then event ascending — ADR-0025's rule, written out.
+EVENT_EXPECTED = {
+    ("c1", "ccard_ins", "imp02"): 1,
+    ("c1", "fund_bond", "imp01"): 2,
+    ("c1", "fund_bond", "imp02"): 3,
+    ("c1", "fund_bond", "imp03"): 4,
+}
+
+
+def _numpy_ranks_with_event(groups, score, items, event_keys) -> np.ndarray:
+    from recsys_tfb.utils.ranking import order_by_score_then_item
+
+    order = order_by_score_then_item(groups, score, items, event_keys)
+    ranks = np.empty(len(order), dtype=np.int64)
+    g_sorted = groups[order]
+    start = 0
+    for end in [*(np.flatnonzero(np.diff(g_sorted)) + 1), len(order)]:
+        ranks[order[start:end]] = np.arange(1, end - start + 1)
+        start = end
+    return ranks
+
+
+def test_numpy_order_breaks_same_item_ties_by_event_whatever_the_row_order():
+    """Shuffling the input rows must not move a rank. Without the event key the
+    three fund_bond rows are indistinguishable and numpy's sort leaves them in
+    arrival order, so this is the assertion that actually needs the change."""
+    rng = np.random.default_rng(0)
+    for trial in range(5):
+        rows = [EVENT_TIED_ROWS[i] for i in rng.permutation(len(EVENT_TIED_ROWS))]
+        cust = np.array([r[0] for r in rows], dtype=object)
+        items = np.array([r[1] for r in rows], dtype=object)
+        events = np.array([r[2] for r in rows], dtype=object)
+        score = np.array([r[3] for r in rows])
+        ranks = _numpy_ranks_with_event(
+            pd.factorize(cust)[0], score, items, [events],
+        )
+        got = {
+            (c, i, e): int(r)
+            for c, i, e, r in zip(cust, items, events, ranks)
+        }
+        assert got == EVENT_EXPECTED, trial
+
+
+def test_numpy_item_still_outranks_event():
+    """Item is the primary tie-break and `event` only the secondary: a row
+    whose event sorts first must still lose to a smaller item. Pins the key
+    order inside the lexsort, which is otherwise easy to invert unnoticed —
+    both orders are deterministic and reproducible."""
+    groups = np.zeros(2, dtype=np.int64)
+    score = np.full(2, 0.5)
+    items = np.array(["b", "a"], dtype=object)
+    events = np.array(["imp01", "imp99"], dtype=object)
+    assert _numpy_ranks_with_event(groups, score, items, [events]).tolist() == [2, 1]
+
+
+def test_numpy_several_event_columns_apply_in_declared_order():
+    """Two event columns: the first decides, the second only breaks its ties."""
+    groups = np.zeros(3, dtype=np.int64)
+    score = np.full(3, 0.5)
+    items = np.array(["a", "a", "a"], dtype=object)
+    first = np.array([2, 1, 1])
+    second = np.array([0, 9, 3])
+    ranks = _numpy_ranks_with_event(groups, score, items, [first, second])
+    # (1, 3) then (1, 9) then (2, 0)
+    assert ranks.tolist() == [3, 2, 1]
+
+
+def test_numpy_no_event_keys_is_the_old_order():
+    """The compatibility half: an empty `event_keys` must reproduce the
+    pre-#378 order exactly, or every existing deployment's ranks move."""
+    from recsys_tfb.utils.ranking import order_by_score_then_item
+
+    groups = np.array([0, 0, 1, 1], dtype=np.int64)
+    score = np.array([0.5, 0.5, 0.2, 0.9])
+    items = np.array(["b", "a", "z", "y"], dtype=object)
+    assert np.array_equal(
+        order_by_score_then_item(groups, score, items),
+        order_by_score_then_item(groups, score, items, []),
+    )
+
+
+@pytest.mark.spark
+def test_spark_breaks_same_item_ties_by_event(spark):
+    from recsys_tfb.utils.ranking import rank_by_score_then_item
+
+    ranked = spark.createDataFrame(
+        EVENT_TIED_ROWS,
+        "cust_id STRING, item STRING, imp_id STRING, score DOUBLE",
+    ).repartition(3).withColumn(
+        "pos",
+        rank_by_score_then_item(["cust_id"], "score", "item", ["imp_id"]),
+    ).toPandas()
+    assert {
+        (c, i, e): int(r)
+        for c, i, e, r in zip(
+            ranked["cust_id"], ranked["item"], ranked["imp_id"], ranked["pos"],
+        )
+    } == EVENT_EXPECTED
+
+
+@pytest.mark.spark
+@pytest.mark.parametrize("event_type", ["STRING", "INT"])
+def test_numpy_and_spark_rank_the_same_event_rows_identically(spark, event_type):
+    """ADR-0025 says the rule is written twice and both writings agree. The INT
+    case is the one that catches a numpy twin comparing the event column as a
+    string: 2 before 10, not "10" before "2"."""
+    from recsys_tfb.utils.ranking import rank_by_score_then_item
+
+    numeric = {"imp01": 2, "imp02": 10, "imp03": 100}
+    rows = (
+        EVENT_TIED_ROWS if event_type == "STRING"
+        else [(c, i, numeric[e], s) for c, i, e, s in EVENT_TIED_ROWS]
+    )
+    spark_ranked = spark.createDataFrame(
+        rows,
+        f"cust_id STRING, item STRING, imp_id {event_type}, score DOUBLE",
+    ).repartition(3).withColumn(
+        "pos",
+        rank_by_score_then_item(["cust_id"], "score", "item", ["imp_id"]),
+    ).toPandas()
+    spark_ranks = {
+        (c, i, e): int(r)
+        for c, i, e, r in zip(
+            spark_ranked["cust_id"], spark_ranked["item"],
+            spark_ranked["imp_id"], spark_ranked["pos"],
+        )
+    }
+
+    pdf = pd.DataFrame(rows, columns=["cust_id", "item", "imp_id", "score"])
+    numpy_ranks = _numpy_ranks_with_event(
+        pd.factorize(pdf["cust_id"])[0],
+        pdf["score"].to_numpy(),
+        pdf["item"].to_numpy(),
+        [pdf["imp_id"].to_numpy()],
+    )
+    assert {
+        (c, i, e): int(r)
+        for c, i, e, r in zip(
+            pdf["cust_id"], pdf["item"], pdf["imp_id"], numpy_ranks,
+        )
+    } == spark_ranks
