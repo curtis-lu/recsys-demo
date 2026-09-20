@@ -10,7 +10,7 @@ import pytest
 from recsys_tfb.core.schema import ENTITY_GROUPING_KEYS, get_schema_for_hash
 
 from recsys_tfb.core.versioning import (
-    ALL_SAMPLING_KEYS,
+    BASE_VERSION_STRIPPED_SAMPLING_KEYS,
     GATE_POLICY_KEYS,
     TRAIN_SAMPLING_KEYS,
     build_manifest_metadata,
@@ -23,7 +23,7 @@ from recsys_tfb.core.versioning import (
     read_manifest,
     resolve_base_dataset_version,
     resolve_model_version,
-    resolve_variant_id,
+    resolve_train_variant_id,
     update_symlink,
     write_manifest,
 )
@@ -64,10 +64,11 @@ class TestSamplingKeySets:
     def test_group_keys_are_a_train_sampling_key(self):
         assert "sample_group_keys" in TRAIN_SAMPLING_KEYS
 
-    def test_all_sampling_keys_is_the_train_set(self):
-        """Train is the only sampling layer since #414 removed the calibration
-        split, so everything stripped from base_dataset_version is train's."""
-        assert ALL_SAMPLING_KEYS == TRAIN_SAMPLING_KEYS
+    def test_the_stripped_set_is_the_train_set(self):
+        """Train is the only *stripped* sampling layer since #414 removed the
+        calibration one. Not the same claim as "train is the only layer that
+        samples" — val samples too, and the next test is why its keys stay."""
+        assert BASE_VERSION_STRIPPED_SAMPLING_KEYS == TRAIN_SAMPLING_KEYS
 
     def test_no_retired_calibration_sampling_key_is_stripped(self):
         """A dataset conf can no longer spell these (A37), so stripping one
@@ -76,7 +77,7 @@ class TestSamplingKeySets:
         for key in (
             "calibration_sample_ratio", "calibration_sample_ratio_overrides",
         ):
-            assert key not in ALL_SAMPLING_KEYS
+            assert key not in BASE_VERSION_STRIPPED_SAMPLING_KEYS
 
 
 class TestComputeFeatureTableFingerprint:
@@ -500,11 +501,11 @@ class TestResolveBaseDatasetVersion:
             resolve_base_dataset_version(dataset_dir, None)
 
 
-class TestResolveVariantId:
+class TestResolveTrainVariantId:
     def test_returns_specified_variant(self, tmp_path):
-        assert resolve_variant_id(tmp_path, "train", "abcd1234") == "abcd1234"
+        assert resolve_train_variant_id(tmp_path, "abcd1234") == "abcd1234"
 
-    def test_follows_latest_symlink_for_train(self, tmp_path):
+    def test_follows_latest_symlink(self, tmp_path):
         base_dir = tmp_path / "base1234"
         train_root = base_dir / "train_variants"
         train_root.mkdir(parents=True)
@@ -513,33 +514,35 @@ class TestResolveVariantId:
         latest = train_root / "latest"
         latest.symlink_to(v1.resolve())
 
-        assert resolve_variant_id(base_dir, "train", None) == "trai1234"
+        assert resolve_train_variant_id(base_dir, None) == "trai1234"
 
-    def test_calibration_is_no_longer_a_variant_kind(self, tmp_path):
-        """#414 removed the calibration variant layer. A caller still asking
-        for it must raise rather than look for a ``latest`` symlink under a
-        directory this pipeline never writes — the directory may still exist
-        from a pre-#411 run, and following it would resolve a version ID that
-        nothing in the framework can produce again."""
+    def test_it_reads_only_the_train_variants_directory(self, tmp_path):
+        """A pre-#411 tree still has ``calibration_variants/latest`` on disk.
+
+        #414 removed that layer, so a version ID resolved out of it is one
+        nothing in the framework can produce again. The function no longer
+        takes a kind to ask for, and this pins that the surviving path does
+        not reach the leftover directory by any other route.
+        """
         base_dir = tmp_path / "base1234"
-        cal_root = base_dir / "calibration_variants"
-        cal_root.mkdir(parents=True)
-        v1 = cal_root / "cal12345"
-        v1.mkdir()
-        (cal_root / "latest").symlink_to(v1.resolve())
+        for kind, name in (("train", "trai1234"), ("calibration", "cal12345")):
+            root = base_dir / f"{kind}_variants"
+            (root / name).mkdir(parents=True)
+            (root / "latest").symlink_to((root / name).resolve())
 
-        with pytest.raises(ValueError, match="variant_kind"):
-            resolve_variant_id(base_dir, "calibration", None)
+        assert resolve_train_variant_id(base_dir, None) == "trai1234"
 
     def test_raises_when_no_latest(self, tmp_path):
         base_dir = tmp_path / "base1234"
         (base_dir / "train_variants").mkdir(parents=True)
         with pytest.raises(FileNotFoundError, match="latest"):
-            resolve_variant_id(base_dir, "train", None)
+            resolve_train_variant_id(base_dir, None)
 
-    def test_raises_on_bad_variant_kind(self, tmp_path):
-        with pytest.raises(ValueError, match="variant_kind"):
-            resolve_variant_id(tmp_path, "bogus", None)
+    def test_the_error_names_the_flag_that_fixes_it(self, tmp_path):
+        base_dir = tmp_path / "base1234"
+        (base_dir / "train_variants").mkdir(parents=True)
+        with pytest.raises(FileNotFoundError, match="--train-variant"):
+            resolve_train_variant_id(base_dir, None)
 
 
 class TestResolveModelVersion:
@@ -923,4 +926,4 @@ class TestSplitUnitKeysVersionRouting:
     def test_train_split_keys_is_registered_and_val_sample_keys_is_not(self):
         assert "train_split_keys" in TRAIN_SAMPLING_KEYS
         assert "val_sample_keys" not in TRAIN_SAMPLING_KEYS
-        assert "val_sample_keys" not in ALL_SAMPLING_KEYS
+        assert "val_sample_keys" not in BASE_VERSION_STRIPPED_SAMPLING_KEYS

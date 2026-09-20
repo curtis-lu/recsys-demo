@@ -94,8 +94,8 @@ raise」。實跑真的 `build_model_input` 才發現這個條件**過寬會誤�
 
 `snap_date` / `cust_id` / `label` 被 `compute_feature_columns` 自己的
 `(identity − categorical) | {label}` 保證排除，列不列都一樣。但 `dataset.prepare_model_input`
-進 `base_dataset_version` 的 hash（`core/versioning.py:112-117` 只剝 `ALL_SAMPLING_KEYS` 與
-`COVERAGE_ONLY_KEYS`），**清理一次＝整批重算**，換到的是零行為改變。留著也不是純粹的雜訊：它讓
+進 `base_dataset_version` 的 hash（`compute_base_dataset_version` 只剝
+`BASE_VERSION_STRIPPED_SAMPLING_KEYS`、`COVERAGE_ONLY_KEYS` 與 `GATE_POLICY_KEYS`），**清理一次＝整批重算**，換到的是零行為改變。留著也不是純粹的雜訊：它讓
 設定自我說明「這些不是特徵」。
 
 `apply_start_date` / `apply_end_date` **不算冗餘**。它們對這份 `feature_table` 沒作用，但對另一份

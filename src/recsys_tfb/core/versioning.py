@@ -81,17 +81,18 @@ TRAIN_SAMPLING_KEYS: frozenset[str] = frozenset({
     "train_dev_ratio",
     "train_split_keys",
 })
-#: The sampling keys **stripped** from ``base_dataset_version`` — which is not
-#: the same as "every key that drives a draw", and the name predates the
-#: distinction. val samples too (``val_sample_ratio`` / ``val_sample_keys``,
-#: drawn under ``site="val_keys"``) and its keys deliberately stay in the
-#: payload, because base is the only ID val artifacts are split by: stripping
-#: them would let a new val draw read back the old val parquet (ADR-0016, and
-#: the ``TRAIN_SAMPLING_KEYS`` comment above). So this set has exactly one
-#: member layer since #414 removed the calibration one, making it an alias
-#: today; it keeps its own name because what it expresses is the stripping
-#: rule, not "the train keys happen to be these".
-ALL_SAMPLING_KEYS: frozenset[str] = TRAIN_SAMPLING_KEYS
+#: The sampling keys stripped from ``base_dataset_version``. Named for the
+#: stripping rule rather than for its members, because "every key that drives a
+#: draw" is a *different*, larger set and the old name (``ALL_SAMPLING_KEYS``)
+#: read as that one: val samples too (``val_sample_ratio`` /
+#: ``val_sample_keys``, drawn under ``site="val_keys"``) and its keys
+#: deliberately stay in the payload, because base is the only ID val artifacts
+#: are split by — stripping them would let a new val draw read back the old val
+#: parquet (ADR-0016, and the ``TRAIN_SAMPLING_KEYS`` comment above). Train is
+#: the one layer that is stripped, so this is an alias today; it keeps its own
+#: name so that adding a second stripped layer is a one-line change here rather
+#: than a re-reading of ``compute_base_dataset_version``.
+BASE_VERSION_STRIPPED_SAMPLING_KEYS: frozenset[str] = TRAIN_SAMPLING_KEYS
 
 # Dataset keys that define data *coverage* only, never artifact identity.
 # ``test_snap_dates`` is the model's audience, not its input: it feeds no fit
@@ -149,7 +150,8 @@ def compute_base_dataset_version(
 
     The resulting ID keys pipeline outputs that are invariant under sampling
     changes. ``params`` is the ``parameters_dataset`` dict; any keys in
-    ``ALL_SAMPLING_KEYS`` under ``params["dataset"]`` are stripped before
+    ``BASE_VERSION_STRIPPED_SAMPLING_KEYS`` under ``params["dataset"]`` are
+    stripped before
     hashing so train sampling experiments do not invalidate
     val/test/preprocessor artifacts. ``COVERAGE_ONLY_KEYS`` is stripped the
     same way so adding an evaluation month is O(1): coverage grows, identity
@@ -165,7 +167,11 @@ def compute_base_dataset_version(
     stripped = copy.deepcopy(params)
     ds = stripped.get("dataset")
     if isinstance(ds, dict):
-        for key in ALL_SAMPLING_KEYS | COVERAGE_ONLY_KEYS | GATE_POLICY_KEYS:
+        for key in (
+            BASE_VERSION_STRIPPED_SAMPLING_KEYS
+            | COVERAGE_ONLY_KEYS
+            | GATE_POLICY_KEYS
+        ):
             ds.pop(key, None)
     payload: dict = {"dataset": stripped, "schema": schema}
     if feature_table_fingerprint is not None:
@@ -301,31 +307,28 @@ def resolve_base_dataset_version(dataset_dir: Path, version: str | None) -> str:
     return latest.resolve().name
 
 
-def resolve_variant_id(base_dir: Path, variant_kind: str, variant: str | None) -> str:
-    """Resolve a variant ID under a base dataset directory.
+def resolve_train_variant_id(base_dir: Path, variant: str | None) -> str:
+    """Resolve the train variant ID under a base dataset directory.
 
-    ``variant_kind`` must be ``"train"`` — the only variant layer left after
-    #411 removed the calibration one. The argument stays because the directory
-    name and the ``--<kind>-variant`` hint in the error are both derived from
-    it, and because a wrong kind must fail loudly rather than look for a
-    ``latest`` symlink under a directory that was never written. If *variant*
-    is provided, return it directly. Otherwise follow the ``latest`` symlink
-    inside ``{base_dir}/{variant_kind}_variants``.
+    If *variant* is provided, return it directly. Otherwise follow the
+    ``latest`` symlink inside ``{base_dir}/train_variants``.
+
+    Train is the only variant layer: #414 removed the calibration one. This
+    took a ``variant_kind`` argument while there were two, and it is spelled
+    out rather than kept "in case a third arrives" — with one legal value the
+    guard could only fire on a typo neither call site can make, and both call
+    sites passed the literal ``"train"`` anyway. A second layer re-introduces
+    the parameter in one edit.
     """
-    if variant_kind != "train":
-        raise ValueError(
-            f"variant_kind must be 'train', got {variant_kind!r}"
-        )
-
     if variant is not None:
         return variant
 
-    variants_root = base_dir / f"{variant_kind}_variants"
+    variants_root = base_dir / "train_variants"
     latest = variants_root / "latest"
     if not latest.exists():
         raise FileNotFoundError(
             f"No 'latest' symlink found in {variants_root}. "
-            f"Run the dataset pipeline first or specify --{variant_kind}-variant."
+            "Run the dataset pipeline first or specify --train-variant."
         )
     return latest.resolve().name
 

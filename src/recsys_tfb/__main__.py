@@ -47,7 +47,7 @@ from recsys_tfb.core.versioning import (
     read_manifest,
     resolve_base_dataset_version,
     resolve_model_version,
-    resolve_variant_id,
+    resolve_train_variant_id,
     update_symlink,
     write_manifest,
 )
@@ -1451,7 +1451,7 @@ def training(
         logger.error("Base dataset version directory not found: %s", base_dir)
         raise typer.Exit(code=1)
 
-    train_v = resolve_variant_id(base_dir, "train", train_variant)
+    train_v = resolve_train_variant_id(base_dir, train_variant)
 
     try:
         params_training = config.get_parameters_by_name("parameters_training")
@@ -1566,8 +1566,8 @@ def _dataset_versions_from_model_manifest(
         dataset_dir, None
     )
     base_dir = dataset_dir / base_v
-    train_v = manifest.get("train_variant_id") or resolve_variant_id(
-        base_dir, "train", None
+    train_v = manifest.get("train_variant_id") or resolve_train_variant_id(
+        base_dir, None
     )
     return base_v, train_v
 
