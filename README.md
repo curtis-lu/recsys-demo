@@ -8,7 +8,7 @@
 
 ### 資料模型
 
-框架的基本資料顆粒度為 `time` × `entity` × `item`。其中，一個 query group 由 `time` 與 `entity` 組成，框架會比較該群組內所有候選 `item` 的 `score`，再產生 `rank`。
+框架的基本資料顆粒度為 `time` × `entity` × `item`。其中，一個 query group 由 `time` 與 `entity` 組成（宣告了選用角色 `occasion` 時再加上它，例如一次請求），框架會比較該群組內所有候選 `item` 的 `score`，再產生 `rank`。
 
 > `time`、`entity`、`item`、`label`、`score` 與 `rank` 在實際資料表中的欄位名稱，可於 `conf/base/parameters.yaml` 的 `schema` 區塊設定。
 

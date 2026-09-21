@@ -38,17 +38,16 @@ def scored_row_columns(schema: dict) -> list[str]:
     about which sentence the code says. ``base_key + item`` says "an entity at
     a time, and an item", which is a coincidence that happens to hold;
     subtracting says "identity, except the roles this pipeline ignores", which
-    is the actual rule from ADR-0025 and stays the actual rule when
-    ``occasion`` lands and has to be dropped here too — automatically, with no
+    is the actual rule from ADR-0025 and stayed the actual rule when
+    ``occasion`` landed and had to be dropped here too — automatically, with no
     edit to this function. It is also what keeps S7 honest rather than
     exempted: S7 forbids *rebuilding* a derived list and deliberately permits
     *trimming* one, because a trim still has a single source
     (docs/agents/architecture-constraints.md, S7 "這個檢查看不到").
     """
     # Every optional role, not just ``event``: ADR-0025 decision 1 says
-    # offline inference ignores *both*, so ``occasion`` starts being dropped
-    # here the moment it is added to OPTIONAL_ROLE_KEYS, with no edit. That is
-    # the intent, not an accident — but it IS the kind of silent widening the
-    # occasion ticket has to re-read this function to confirm.
+    # offline inference ignores *both*. ``occasion`` arrived here through
+    # OPTIONAL_ROLE_KEYS with no edit; #428 re-read this and confirmed it, and
+    # the ad example's shape-two run exercises it end to end.
     dropped = {c for role in OPTIONAL_ROLE_KEYS for c in schema.get(role, [])}
     return [c for c in schema["identity_columns"] if c not in dropped]

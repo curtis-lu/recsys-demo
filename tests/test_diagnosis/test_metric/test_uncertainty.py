@@ -67,6 +67,32 @@ def test_point_estimates_match_metric_family():
     assert out["n_boot"] == 50
 
 
+def test_queries_are_the_declared_query_group_with_occasion():
+    """With ``occasion`` declared, a query is one occasion (#428).
+
+    C0 was shown B/A in request o1 and C/D in request o2. Ranked within o1,
+    A's click sits at rank 2 → contribution 1/2. Ranked across C0's whole
+    week — what a hand-spelled ``time + entity`` key does — the order is
+    C, B, A, D and A's contribution is 2/3. The Spark headline mAP ranks per
+    occasion, so the second number would put a CI beside it centred on a
+    different quantity, with nothing raised.
+    """
+    params = _params()
+    params["schema"]["columns"]["occasion"] = "req_id"
+    pdf = pd.DataFrame(
+        [
+            ("20240331", "C0", "o1", "B", 0.9, 0),
+            ("20240331", "C0", "o1", "A", 0.4, 1),
+            ("20240331", "C0", "o2", "C", 0.95, 1),
+            ("20240331", "C0", "o2", "D", 0.2, 0),
+        ],
+        columns=["snap_date", "cust_id", "req_id", "prod_name", "score", "label"],
+    )
+    out = bootstrap_per_item_ci(pdf, params)
+    assert out["per_item"]["A"]["ap"] == pytest.approx(0.5)
+    assert out["per_item"]["C"]["ap"] == pytest.approx(1.0)
+
+
 def test_ci_brackets_point_and_is_deterministic():
     out1 = bootstrap_per_item_ci(_pdf(THREE_CUST), _params())
     out2 = bootstrap_per_item_ci(_pdf(THREE_CUST), _params())

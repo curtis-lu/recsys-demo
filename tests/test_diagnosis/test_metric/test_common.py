@@ -189,10 +189,12 @@ def test_per_item_ap_respects_k_truncation():
 # ---------------------------------------------------------------------------
 
 
-def _skip_params(event=None):
+def _skip_params(event=None, occasion=None):
     columns = {"time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}
     if event is not None:
         columns["event"] = event
+    if occasion is not None:
+        columns["occasion"] = occasion
     return {"schema": {"columns": columns}}
 
 
@@ -219,6 +221,36 @@ def test_every_query_ranking_consumer_is_skipped_with_event():
                     "model_capacity", "ci")
         if schema_skip_reason(params, n)
     }
+
+
+def test_only_item_ability_is_skipped_with_only_occasion():
+    """只宣告 occasion（#428）：同組內 item 仍唯一，所以 event 的那條理由不
+    成立，ci、config_shift、suppression 照跑。item_ability 跳過，理由是另一條
+    判準（spec #426 決定 E：「假設每組候選數固定」）——它扣掉每組的平均分數
+    才比較，一組是一次請求時，那個平均取決於這次擺了哪幾個素材，不再是它
+    SCOPE 說的「這個 entity 的整體分數水準」；只擺一個素材的請求扣完恆為 0。"""
+    from recsys_tfb.diagnosis.metric._common import schema_skip_reason
+
+    params = _skip_params(occasion="req_id")
+    assert {
+        n for n in ("config_shift", "item_ability", "suppression",
+                    "model_capacity", "ci")
+        if schema_skip_reason(params, n)
+    } == {"item_ability"}
+    reason = schema_skip_reason(params, "item_ability")
+    assert "occasion" in reason and "req_id" in reason
+
+
+def test_event_decides_when_both_roles_are_declared():
+    """兩個都宣告：同組同 item 多列又回來了，event 那條理由涵蓋四項。"""
+    from recsys_tfb.diagnosis.metric._common import schema_skip_reason
+
+    params = _skip_params(event="imp_id", occasion="req_id")
+    assert {
+        n for n in ("config_shift", "item_ability", "suppression", "ci")
+        if schema_skip_reason(params, n)
+    } == {"config_shift", "item_ability", "suppression", "ci"}
+    assert "event" in schema_skip_reason(params, "ci")
 
 
 def test_model_capacity_still_runs_with_event():

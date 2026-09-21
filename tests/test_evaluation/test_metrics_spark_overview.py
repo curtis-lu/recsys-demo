@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation import metrics_spark as ms
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
@@ -312,3 +313,77 @@ def test_all_resolves_to_the_widest_query_group_with_the_event_role(spark):
     }
     # 2 distinct items, but c1's group holds 4 rows.
     assert ms._resolve_all_k(_event_df(spark), schema, "prod_name") == 4
+
+
+# ---------------------------------------------------------------------------
+# `occasion` declared (#428): the same two numbers, scoped to one occasion
+# ---------------------------------------------------------------------------
+
+
+def _occasion_params():
+    return {"schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+        "label": "label", "score": "score", "rank": "rank",
+        "occasion": "req_id"}},
+        "evaluation": {}}
+
+
+def _occasion_df(spark):
+    """c1 @ 20240331 was shown A/B/C in request r1 and A alone in r2; c2 was
+    shown D alone in r3.
+
+    Items are unique within each request (what the duplicate checks guarantee
+    when only ``occasion`` is declared). Four distinct items, widest occasion
+    three rows — so the two candidate answers for ``"all"`` differ.
+    """
+    return spark.createDataFrame(
+        [
+            ("20240331", "c1", "r1", "A", 0.9, 1),
+            ("20240331", "c1", "r1", "B", 0.5, 0),
+            ("20240331", "c1", "r1", "C", 0.5, 0),
+            ("20240331", "c1", "r2", "A", 0.5, 0),
+            ("20240331", "c2", "r3", "D", 0.3, 0),
+        ],
+        schema=["snap_date", "cust_id", "req_id", "prod_name", "score", "label"],
+    )
+
+
+def test_all_stays_the_item_count_with_only_the_occasion_role(spark):
+    """Four distinct items; no occasion holds more than three rows, and none
+    can hold more than four — items are unique within an occasion. So the
+    item count truncates nothing, and it is the number the report looks
+    ``"all"`` up by. Resolving to the widest occasion (3) would store
+    ``map@3`` where the report asks for ``map@4`` — the blank ``map@all``
+    cell ``event`` already produces (#428)."""
+    schema = get_schema(_occasion_params())
+    assert ms._resolve_all_k(_occasion_df(spark), schema, "prod_name") == 4
+
+
+def test_the_report_finds_map_at_all_with_the_occasion_role(spark):
+    """End to end over the lookup contract: metrics keyed at the K the report
+    will ask for (``dataset_overview.totals.n_items``)."""
+    params = _occasion_params()
+    params["evaluation"] = {"k_values": [1, "all"]}
+    out = ms.compute_all_metrics(_occasion_df(spark), params)
+    n_items = out["dataset_overview"]["totals"]["n_items"]
+    assert f"map@{n_items}" in out["overall"]
+
+
+def test_tied_row_share_is_reported_with_the_occasion_role(spark):
+    """B and C tie at 0.5 inside r1. r2's A also scores 0.5 but is alone in
+    its occasion — under ``time`` + ``entity`` alone the three 0.5 rows would
+    all have counted as tied."""
+    totals = ms.compute_dataset_overview(
+        _occasion_df(spark), _occasion_params()
+    )["totals"]
+    assert totals["n_tied_rows"] == 2
+    assert totals["tied_row_share"] == pytest.approx(2 / 5)
+
+
+def test_evaluated_queries_are_the_occasions_with_a_positive(spark):
+    """Three occasions (r1, r2, r3); only r1 holds a click. So three queries,
+    two excluded, one evaluated — under ``time`` + ``entity`` it would be two
+    queries, c1's pooling r1 with r2."""
+    out = ms.compute_all_metrics(_occasion_df(spark), _occasion_params())
+    assert out["n_queries"] == 3
+    assert out["n_queries"] - out["n_excluded_queries"] == 1

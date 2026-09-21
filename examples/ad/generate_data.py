@@ -8,10 +8,17 @@
 資料形狀依 ADR-0021：一次曝光一列、帶到秒的時間；``time`` 是週（每週一），
 ``entity`` 是使用者 × 版位，``item`` 是活動 × 素材格式在 SQL 裡拼成的一欄。
 
-刻意留給後面幾張票、但目前的 conf（不宣告 event、只有一張特徵表、item 清單逐一列出）
-用不到的形狀（README〈資料涵蓋了什麼〉逐項列出）：
+一次請求可能展示好幾個素材（``request_id``，#428，形狀二）：同一使用者、同一版位、
+同一秒（同一次請求）底下，若干素材同時被排序——``request_id`` 就是這個分組。
+同一次請求裡的素材互不重複（產生器不放回抽樣），所以 conf 宣告 occasion ＝
+request_id 就能讓 identity 唯一，不用再宣告 event（見
+``examples/ad/conf/base/parameters.yaml``）。
 
-- 同一週、同一使用者、同一版位、同一素材被曝光不只一次（``event`` 角色，#378）。
+刻意留給後面幾張票、但目前的 conf（只有一張特徵表、item 清單逐一列出）用不到的形狀
+（README〈資料涵蓋了什麼〉逐項列出）：
+
+- 同一週、同一使用者、同一版位、同一素材被曝光不只一次（``event`` 角色，#378；
+  資料仍撐得住，只是現在分散在不同的請求裡，這份 conf 選擇宣告 occasion 而非 event）。
 - 有些使用者一週在同一版位的曝光次數超過 item 種數（同上，``"all"`` 不截斷）。
 - 使用者特徵與版位特徵各有自己的粒度（多張特徵表各自宣告 join 欄位，#380）。
 - **即時特徵**：曝光前 30 分鐘內瀏覽過活動同類內容，點擊意願較高。同一組同一素材的
@@ -81,9 +88,14 @@ SLOTS = pd.DataFrame({
     "page_type": ["home", "feed", "article"],
 })
 SLOT_LOGIT = {"home_top": 0.4, "feed_mid": 0.0, "article_end": -0.5}
-# 每週每版位的曝光次數（Poisson 平均）。feed_mid 平均 7 次時，每週有幾個 (使用者, 版位)
-# 的曝光超過 item 種數 12——event 角色（#378）要驗的「"all" 不截斷」只在這種組上發生。
-SLOT_IMPRESSION_RATE = {"home_top": 5.0, "feed_mid": 7.0, "article_end": 3.0}
+# 每週每版位的請求次數（Poisson 平均）。每次請求展示 ADS_PER_REQUEST_P 抽出的 k 個
+# 素材，平均約 4 個，所以總曝光量級與改版前（SLOT_IMPRESSION_RATE 5／7／3）相近；
+# feed_mid 請求數 × 平均素材數仍夠高，讓一些 (使用者, 版位) 一週的曝光數超過 item
+# 種數 12——event 角色（#378）要驗的「"all" 不截斷」只在這種組上發生。
+REQUEST_RATE = {"home_top": 1.25, "feed_mid": 1.75, "article_end": 0.75}
+# 一次請求展示幾個素材：k 的分布。平均約 4 個；1 的機率不是 0——那種請求組內只有一個
+# 候選，排序沒有東西可比，mAP 恆為 1（README〈資料涵蓋了什麼〉要講的就是這件事）。
+ADS_PER_REQUEST_P = {1: 0.05, 2: 0.10, 3: 0.20, 4: 0.30, 5: 0.20, 6: 0.15}
 
 AGE_BANDS = ["18-24", "25-34", "35-49", "50+"]
 DEVICES = ["mobile", "desktop", "tablet"]
@@ -122,7 +134,8 @@ CAMPAIGN_CATEGORY = {"c01": "finance", "c02": "travel", "c03": "gaming", "c04": 
 CATEGORIES = sorted(CAMPAIGN_CATEGORY.values())
 RECENT_WINDOW_SECONDS = 30 * 60
 RECENT_INTEREST_LOGIT = 1.5
-BROWSE_BEFORE_IMPRESSION = 1.0   # 每次曝光前 30 分鐘內的瀏覽次數（Poisson 平均），類別隨機
+BROWSE_BEFORE_REQUEST = 1.0   # 每次請求前 30 分鐘內的瀏覽次數（Poisson 平均），類別隨機——
+# 一次頁面瀏覽對應一次請求，不是對應每一個素材
 BACKGROUND_BROWSE_PER_WEEK = 10  # 有上站的那一週，與曝光無關、散在整週的瀏覽次數
 POST_CLICK_BROWSE_SECONDS = 300  # 點擊後這麼多秒內，瀏覽一次該活動那一類內容（偷看的陷阱）
 POST_CLICK_SAME_SECOND_RATE = 0.5  # 其中這個比例與點擊記在同一秒（落地頁與點擊同時記錄）
@@ -199,39 +212,61 @@ def _impressions(
     """曝光紀錄與瀏覽紀錄一起產：點擊要看曝光前的瀏覽，點擊之後又會產生瀏覽。
 
     時間一律用「距 PROFILE_FIRST_DAY 00:00 幾秒」的整數算，最後才轉成 datetime。每個人分兩階段：
-    先定下所有週的曝光時刻、素材，以及跟點擊無關的瀏覽；再依時間順序逐次決定點擊，
+    先定下所有週的請求時刻、各自展示的素材，以及跟點擊無關的瀏覽；再依時間順序逐次決定點擊，
     點了就補一筆點擊後的瀏覽。點擊後的瀏覽不早於這次曝光那一秒，而每次曝光只看它那一秒
     之前的瀏覽，所以依時間順序處理時，輪到的每一次曝光都已經看得到它該看的全部瀏覽。
+
+    一次請求（同一秒）展示好幾個素材：``shown`` 每一列多帶一個 ``local_req``——同一使用者
+    內部、依產生順序遞增的請求序號，同一次請求的所有素材共用同一個值。``shown.sort`` 依
+    時間排序是 stable，同一次請求的列本來就同一個 sec，排序後仍相鄰，local_req 不會被拆散。
+    真正寫進資料的 ``request_id`` 在下面第二個迴圈裡、依最終產生順序（使用者為外層、
+    每人內部依時間）指派，這樣才跟 ``impression_id`` 的編號順序一致。
     """
     origin = dt.datetime.combine(PROFILE_FIRST_DAY, dt.time())
     items = [(c, f) for c in CAMPAIGNS for f in FORMATS]
+    ad_counts = np.array(list(ADS_PER_REQUEST_P.keys()))
+    ad_count_p = np.array(list(ADS_PER_REQUEST_P.values()))
     p_base = np.array([CAMPAIGN_WEIGHT[c] * FORMAT_WEIGHT[f] for c, f in items])
     p_early, p_late = p_base.copy(), p_base.copy()
     p_early[items.index(LATE_ITEM)] = 0.0
     p_late[items.index(LATE_ITEM)] *= LATE_ITEM_LAUNCH_BOOST
     p_early, p_late = p_early / p_early.sum(), p_late / p_late.sum()
     imp_rows, browse_rows = [], []
+    request_counter = 0
     for user in users.itertuples(index=False):
-        shown: list[tuple[int, int, str, int]] = []  # (秒, 那一週的起點秒, slot_id, item 索引)
+        # (秒, 那一週的起點秒, slot_id, item 索引, 這個使用者內的請求序號)
+        shown: list[tuple[int, int, str, int, int]] = []
         browse: dict[str, list[int]] = {c: [] for c in CATEGORIES}
+        local_req = 0
         for week in WEEKS:
             if rng.random() > user.activity:
                 continue
             week_start = int((dt.datetime.fromisoformat(week) - origin).total_seconds())
             p = p_late if week >= LATE_ITEM_FIRST_WEEK else p_early
-            for slot_id, rate in SLOT_IMPRESSION_RATE.items():
-                n = rng.poisson(rate)
-                if n == 0:
+            for slot_id, rate in REQUEST_RATE.items():
+                n_requests = rng.poisson(rate)
+                if n_requests == 0:
                     continue
-                picked = rng.choice(len(items), size=n, p=p)
-                seconds = np.sort(rng.integers(0, WEEK_SECONDS, size=n))
-                shown.extend((week_start + int(s), week_start, slot_id, int(i)) for s, i in zip(seconds, picked))
+                request_seconds = rng.integers(0, WEEK_SECONDS, size=n_requests)
+                request_sizes = rng.choice(ad_counts, size=n_requests, p=ad_count_p)
+                for s, k in zip(request_seconds, request_sizes):
+                    local_req += 1
+                    # 不放回：同一次請求裡的素材互不重複
+                    picked = rng.choice(len(items), size=int(k), replace=False, p=p)
+                    shown.extend(
+                        (week_start + int(s), week_start, slot_id, int(i), local_req)
+                        for i in picked
+                    )
             k = rng.poisson(BACKGROUND_BROWSE_PER_WEEK)
             for s, c in zip(rng.integers(0, WEEK_SECONDS, size=k), rng.integers(0, len(CATEGORIES), size=k)):
                 browse[CATEGORIES[c]].append(week_start + int(s))
         shown.sort(key=lambda r: r[0])  # stable：同一秒保留產生順序，與 SQL 的 ORDER BY event_ts, impression_id 一致
-        for sec, *_ in shown:
-            k = rng.poisson(BROWSE_BEFORE_IMPRESSION)
+        last_req = None
+        for sec, *_, req in shown:
+            if req == last_req:
+                continue  # 一次頁面瀏覽對應一次請求，不是對應請求裡的每一個素材
+            last_req = req
+            k = rng.poisson(BROWSE_BEFORE_REQUEST)
             backs = rng.integers(1, RECENT_WINDOW_SECONDS, size=k, endpoint=True)
             for back, c in zip(backs, rng.integers(0, len(CATEGORIES), size=k)):
                 browse[CATEGORIES[c]].append(sec - int(back))
@@ -240,7 +275,13 @@ def _impressions(
 
         user_switches = switches.get(user.user_id, [])
         seen: dict[tuple[int, str, int], int] = {}
-        for sec, week_start, slot_id, idx in shown:
+        last_req = None
+        request_id = None
+        for sec, week_start, slot_id, idx, req in shown:
+            if req != last_req:
+                request_counter += 1
+                request_id = f"req{request_counter:08d}"
+                last_req = req
             campaign, fmt = items[idx]
             ts = origin + dt.timedelta(seconds=sec)
             exposure = seen.get((week_start, slot_id, idx), 0)
@@ -259,7 +300,7 @@ def _impressions(
                 - FATIGUE_LOGIT * exposure
             )
             clicked = int(rng.random() < 1.0 / (1.0 + math.exp(-logit)))
-            imp_rows.append((ts, ts.date(), user.user_id, slot_id, campaign, fmt, clicked))
+            imp_rows.append((ts, ts.date(), user.user_id, slot_id, request_id, campaign, fmt, clicked))
             if clicked:
                 # 同一秒的那一筆，正是 SQL 的上界寫成 <= 時會多算進去的
                 same_second = rng.random() < POST_CLICK_SAME_SECOND_RATE
@@ -269,7 +310,7 @@ def _impressions(
             browse_rows.extend((origin + dt.timedelta(seconds=s), user.user_id, category) for s in times)
 
     log = pd.DataFrame(imp_rows, columns=[
-        "event_ts", "event_date", "user_id", "slot_id",
+        "event_ts", "event_date", "user_id", "slot_id", "request_id",
         "campaign_id", "creative_format", "clicked",
     ])
     log.insert(0, "impression_id", [f"imp{i:08d}" for i in range(1, len(log) + 1)])
@@ -343,10 +384,14 @@ def main() -> None:
     log = tables["impression_log"].assign(week=lambda d: week_of(d["event_date"]))
     item = log["campaign_id"] + ITEM_SEPARATOR + log["creative_format"]
     group = ["week", "user_id", "slot_id"]
+    per_request = log.groupby("request_id").size()
     print(f"impression_log: {len(log)} 列，點擊率 {log['clicked'].mean():.3f}")
     print(f"  (週, 使用者, 版位, item) 組合 {log.assign(item=item).groupby(group + ['item']).ngroups} 個")
-    print(f"  query group {log.groupby(group).ngroups} 個")
+    print(f"  base key（週, 使用者, 版位）{log.groupby(group).ngroups} 個")
     print(f"  item {item.nunique()} 種：{sorted(item.unique())}")
+    print(f"  request（query group，occasion）{per_request.size} 個")
+    print(f"  每次請求的素材數分布：{dict(sorted(per_request.value_counts().to_dict().items()))}")
+    print(f"  只有 1 個素材的請求佔 {(per_request == 1).mean():.3f}")
     print(f"browse_log: {len(tables['browse_log'])} 列；user_profile: {len(tables['user_profile'])} 列")
     print(f"寫到 {args.out.resolve()}")
 

@@ -22,10 +22,10 @@ label_etl:
       sql_file: label/label_table.sql
       partition_by:
         snap_date: DATE
-      # ＝ identity（宣告 event 之後多了 impression_id）。少寫一欄，
-      # max_duplicate_key_ratio: 0.0 會把「同一素材本週的多次曝光」
-      # 判成重複鍵而擋下整條 ETL。
-      primary_key: [snap_date, user_id, slot_id, ad_creative, impression_id]
+      # ＝ identity（宣告 occasion 之後多了 request_id）。少寫一欄，
+      # max_duplicate_key_ratio: 0.0 會把「同一週同一個素材出現在不同
+      # 請求裡」判成重複鍵而擋下整條 ETL。
+      primary_key: [snap_date, user_id, slot_id, request_id, ad_creative]
       quality_checks:
         min_row_count: 1
         max_duplicate_key_ratio: 0.0

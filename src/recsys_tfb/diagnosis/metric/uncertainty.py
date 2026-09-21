@@ -33,7 +33,7 @@ def bootstrap_per_item_ci(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
     （weight_alpha / min_positives / shrinkage_k；k＝截斷）。
     """
     schema = get_schema(parameters)
-    time_col = schema["time"]
+    query_cols = schema["query_group_columns"]
     entity_cols = schema["entity"]
     item_col = schema["item"]
     label_col = schema["label"]
@@ -49,15 +49,18 @@ def bootstrap_per_item_ci(sample_pdf: pd.DataFrame, parameters: dict) -> dict:
     n_boot = int((diag_cfg.get("ci", {}) or {}).get("n_boot", 200))
     seed = int((diag_cfg.get("sample", {}) or {}).get("seed", 42))
 
-    # query id（time × entity）與 cluster id（entity only）。編號照 key 排序
+    # query id（query group）與 cluster id（entity only）。編號照 key 排序
     # 給（sort=True），不照出現順序：抽樣列的順序由 Spark 決定，換平行度就會
     # 變；照出現順序編號時，同一個 seed 抽到的「第 k 號 cluster」就換了一個
     # 人，CI 跟著變（#352、#355）。
-    query_key = (
-        sample_pdf[time_col].astype(str)
-        + "|"
-        + sample_pdf[entity_cols].astype(str).agg("|".join, axis=1)
-    )
+    #
+    # query 取 query_group_columns，不自己拼 time + entity：宣告 occasion 後
+    # 一個 query 是一個場合，自己拼的鍵會把同一個 entity 同一時段的多個場合
+    # 併成一組排名，算出的 per-item AP 與旁邊 Spark 算的頭號 mAP 不是同一個
+    # 量，而且不會報錯（#428）。沒宣告時兩者是同一個字串，編號與 CI 逐值不變。
+    # cluster 刻意維持 entity：同一個 entity 的多個場合彼此相關，拆開重抽會讓
+    # 區間偏窄（ADR-0023、spec #426 決定 A）。
+    query_key = sample_pdf[query_cols].astype(str).agg("|".join, axis=1)
     groups = pd.factorize(query_key, sort=True)[0]
     cluster_key = sample_pdf[entity_cols].astype(str).agg("|".join, axis=1)
     clusters = pd.factorize(cluster_key, sort=True)[0]

@@ -773,3 +773,52 @@ def test_restrict_node_collects_each_sides_items_once(
 
     assert collected == [["prod_name"], ["prod_name"]]
     assert coverage["dropped_items_B"] == ["p3"]  # item sets still reach coverage
+
+
+def test_common_query_groups_are_counted_in_occasions(
+    spark, two_column_entity_params, month_restriction_off
+):
+    """With ``occasion`` declared, the compare population is counted in
+    occasions (#428, ADR-0025 decision 2).
+
+    Two entities, four requests. A scored r1, r2, r3, r4; B scored r1, r3,
+    r4, r9. Shared: r1, r3, r4 — three query groups. Counted in ``time`` +
+    ``entity`` the same data gives two, a smaller number that looks just as
+    plausible, which is why this site is one ADR-0025 names: nothing downstream
+    raises when it is wrong.
+    """
+    from recsys_tfb.pipelines.evaluation.nodes import restrict_to_common
+
+    params = {**two_column_entity_params,
+              "evaluation": {"snap_date": "2026-01-31"}}
+    params["schema"] = {
+        **params["schema"],
+        "columns": {**params["schema"]["columns"], "occasion": "req_id"},
+    }
+    ddl = ("snap_date string, branch_id string, cust_id string, "
+           "req_id string, prod_name string, score double")
+    d = "2026-01-31"
+    a_rows = [
+        (d, "b1", "c1", "r1", "p1", 0.9, 1), (d, "b1", "c1", "r1", "p2", 0.1, 0),
+        (d, "b1", "c1", "r2", "p1", 0.8, 0),
+        (d, "b1", "c1", "r4", "p2", 0.6, 1),
+        (d, "b1", "c2", "r3", "p1", 0.7, 0), (d, "b1", "c2", "r3", "p2", 0.3, 1),
+    ]
+    b_rows = [
+        (d, "b1", "c1", "r1", "p1", 0.6), (d, "b1", "c1", "r1", "p2", 0.5),
+        (d, "b1", "c1", "r4", "p2", 0.2),
+        (d, "b1", "c1", "r9", "p1", 0.4),
+        (d, "b1", "c2", "r3", "p1", 0.2), (d, "b1", "c2", "r3", "p2", 0.8),
+    ]
+    a = _as_written(spark.createDataFrame(a_rows, f"{ddl}, label int"), params)
+    b = spark.createDataFrame(b_rows, ddl)
+
+    a_common, b_common, coverage = restrict_to_common(
+        a, b, _landed_segments(params), params)
+
+    assert coverage["n_query_group_A_full"] == 4
+    assert coverage["n_query_group_B_full"] == 4
+    assert coverage["n_query_group_common"] == 3
+    # A's r2 had no counterpart in B and is not compared.
+    assert {r["req_id"] for r in a_common.collect()} == {"r1", "r3", "r4"}
+    assert {r["req_id"] for r in b_common.collect()} == {"r1", "r3", "r4"}

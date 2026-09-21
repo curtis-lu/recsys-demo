@@ -4062,3 +4062,116 @@ class TestOptionalRoleMonitoringA40:
             _event_params(event="impression_id"), post_training=False
         )
         assert "wrong answer" in errs[0]
+
+
+# =============================================================================
+# A38 / A39 / A40 / B11 with `occasion` declared (#428)
+# =============================================================================
+
+
+import re
+
+
+def _occasion_params(occasion="request_id", event=None, categorical=("prod_name",)):
+    params = _event_params(event=event, categorical=categorical)
+    params["schema"]["columns"]["occasion"] = occasion
+    return params
+
+
+class TestOccasionReachesEveryOptionalRoleGate:
+    """#378 wrote the four gates against ``OPTIONAL_ROLE_KEYS`` rather than
+    against ``event``; these pin that ``occasion`` actually arrives at each
+    one, and that each message names ``occasion`` — a user who declared only
+    ``occasion`` must never read about ``event``."""
+
+    def test_columns_come_out_in_identity_order(self):
+        """``occasion`` sits before ``item`` in identity and ``event`` after
+        it; the flat list is written out as prediction columns in this order."""
+        assert optional_role_columns(
+            _occasion_params(event="impression_id")
+        ) == ["request_id", "impression_id"]
+
+    def test_a38_an_occasion_column_in_categorical_columns_is_reported(self):
+        errs = optional_role_as_feature_errors(
+            _occasion_params(categorical=("prod_name", "request_id"))
+        )
+        assert len(errs) == 1
+        assert "A38" in errs[0]
+        assert "schema.columns.occasion" in errs[0]
+        # The message used to explain itself with "an event timestamp" and
+        # "when the event happened" — true for `event`, noise for `occasion`.
+        assert re.search(r"\bevent\b", errs[0]) is None
+
+    def test_a39_a_prediction_catalog_without_the_occasion_column_is_reported(self):
+        errs = optional_role_columns_declared_errors(
+            _occasion_params(),
+            ["cust_id", "snap_date", "prod_name", "score"],
+            "training_eval_predictions",
+        )
+        assert len(errs) == 1
+        assert "A39" in errs[0] and "request_id" in errs[0]
+        assert "schema.columns.occasion" in errs[0]
+
+    def test_b11_a_source_table_without_the_occasion_column_is_reported(self):
+        errs = optional_role_source_column_errors(
+            _occasion_params(), _b11_tables(("request_id",), ()),
+        )
+        assert len(errs) == 1
+        assert "B11" in errs[0] and "label_table" in errs[0]
+        assert "schema.columns.occasion" in errs[0]
+
+    def test_a40_monitoring_is_blocked_and_post_training_allowed(self):
+        errs = optional_role_monitoring_errors(
+            _occasion_params(), post_training=False
+        )
+        assert len(errs) == 1
+        assert "A40" in errs[0] and "occasion" in errs[0]
+        assert optional_role_monitoring_errors(
+            _occasion_params(), post_training=True
+        ) == []
+
+
+class TestCompareAgainstInferenceOutputWithAnOptionalRoleA41:
+    """``source: ranked_predictions`` is offline inference's table, built from
+    its own entity × item grid with no optional-role columns — the same reason
+    A40 refuses monitoring mode. Left to run, ``--compare`` failed deep in
+    Spark with an unresolved-column error naming neither the role nor the
+    source (#428)."""
+
+    @staticmethod
+    def _with_source(params, source):
+        params["evaluation"] = {"compare_sources": {"prev": {
+            "kind": "model_version", "label": "prev", "model_version": "v1",
+            **({"source": source} if source else {}),
+        }}}
+        return params
+
+    def test_ranked_predictions_is_refused_with_occasion(self):
+        from recsys_tfb.core.consistency import optional_role_compare_source_errors
+
+        errs = optional_role_compare_source_errors(
+            self._with_source(_occasion_params(), "ranked_predictions"))
+        assert len(errs) == 1
+        assert "A41" in errs[0] and "ranked_predictions" in errs[0]
+        assert "schema.columns.occasion" in errs[0]
+
+    def test_ranked_predictions_is_refused_with_event(self):
+        from recsys_tfb.core.consistency import optional_role_compare_source_errors
+
+        errs = optional_role_compare_source_errors(
+            self._with_source(_event_params(event="imp_id"), "ranked_predictions"))
+        assert len(errs) == 1 and "schema.columns.event" in errs[0]
+
+    @pytest.mark.parametrize("source", [
+        None, "enriched_eval_predictions", "training_eval_predictions"])
+    def test_the_post_training_tables_are_still_allowed(self, source):
+        from recsys_tfb.core.consistency import optional_role_compare_source_errors
+
+        assert optional_role_compare_source_errors(
+            self._with_source(_occasion_params(), source)) == []
+
+    def test_ranked_predictions_is_allowed_without_an_optional_role(self):
+        from recsys_tfb.core.consistency import optional_role_compare_source_errors
+
+        assert optional_role_compare_source_errors(
+            self._with_source(_event_params(), "ranked_predictions")) == []

@@ -71,7 +71,7 @@ from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
-from recsys_tfb.core.schema import get_schema
+from recsys_tfb.core.schema import declares_optional_role, get_schema
 from recsys_tfb.evaluation.metrics import macro_from_per_item, metric_params
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT, segment_key
 from recsys_tfb.utils.ranking import rank_by_score_then_item
@@ -118,6 +118,17 @@ def _resolve_all_k(eval_predictions: SparkDataFrame, schema: dict, item_col: str
       one query group against twelve distinct items, and ``map@12`` on a
       30-row ranking silently answers a different question from the one
       ``"all"`` names.
+    * **Only ``occasion`` declared** — the item count, as undeclared. Items
+      are unique within an occasion (the duplicate checks guarantee it), so
+      no query group can hold more rows than there are items and the item
+      count truncates nothing: ``map@all`` and ``recall@all`` come out the
+      same either way. It must stay the item count because the report looks
+      ``"all"`` up by exactly that number (``report_builder._k_to_lookup``);
+      resolving to the widest occasion here would store ``map@6`` and leave
+      the report's ``map@all`` cell blank, with nothing raised — which is what
+      the ``event`` branch above does today (#428 found it in #378's run).
+      Spec #426 decision D says "any new role"; its reason (a group longer
+      than the item list) only exists with ``event``.
 
     Costs one extra shuffle over the same frame in the declared case only —
     a ``groupBy(query_group).count()`` whose driver-side result is a single
@@ -390,6 +401,12 @@ def compute_dataset_overview(
     # stays value-for-value what it was; the extra shuffle is likewise only
     # paid by a deployment that asked for the role.
     #
+    # With only `occasion` declared, items are unique within a query group
+    # and the tie-break is the item alone (spec #426 decision D), which is the
+    # rule every undeclared deployment already lives with — but the query
+    # groups are small, so a tie decides a larger share of each ranking, and
+    # the number is printed for the same reason.
+    #
     # Why it is reported at all: with `event` declared and no per-impression
     # features attached, every row of one item in one query group necessarily
     # scores the same, so *everything* ties and the rank is decided entirely by
@@ -398,7 +415,7 @@ def compute_dataset_overview(
     # ad example (#378). The framework does not choose for the deployment
     # (ADR-0025 rejected hashing the identity instead); it prints the number
     # that says how much the choice could be worth here.
-    if schema.get("event"):
+    if declares_optional_role(schema):
         n_tied = (
             eval_predictions.groupBy(*group_cols, schema["score"])
             .agg(F.count(F.lit(1)).alias("_n"))

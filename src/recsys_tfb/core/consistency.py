@@ -422,8 +422,8 @@ Layer 1 — config-static (implemented here; aggregated by
   single pipeline, because the version IDs every command resolves are computed
   from these subtrees. Not a migration tool with a delete-by date, unlike A33:
   the mechanism is gone, not renamed.
-* A38 — an optional-role column (``schema.columns.event``; ``occasion`` joins
-  it when that role lands) declared in
+* A38 — an optional-role column (``schema.columns.occasion`` /
+  ``schema.columns.event``) declared in
   ``dataset.prepare_model_input.categorical_columns``. Identity columns have
   one way of becoming model features — being listed there — and ``schema.item``
   uses it (A2 *requires* it to). The optional roles deliberately do not get
@@ -463,6 +463,17 @@ Layer 1 — config-static (implemented here; aggregated by
   errors; the evaluation command raises, collected with A22/A34). NOT
   aggregated by ``validate_config_consistency``, for A22's reason: that gate
   runs at the entry of every command and cannot see ``--post-training``.
+* A41 — a ``model_version`` compare source reading ``ranked_predictions``
+  while an optional role is declared. That table is offline inference's
+  output — the entity x item grid, no optional-role column (ADR-0025
+  decision 1) — so it cannot be matched to this run's rows: A40's reason, in
+  compare mode. Left to run, ``--compare`` failed deep in Spark on an
+  unresolved column naming neither the role nor the source (#428). Separate
+  code from A11 rather than a widened one, for A39's reason: A11 is about a
+  source being well-formed, and a user who declared no optional role should
+  never read about one. Predicate: ``optional_role_compare_source_errors``.
+  Aggregated by ``validate_config_consistency``, beside A11: it takes
+  parameters alone.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
@@ -633,8 +644,8 @@ implemented and wired):
   as a passing gate. Residual risk, stated so it is not re-discovered as a bug:
   a duplicate key confined to a month that only val/test cover goes unseen.
 * B11 — ``sample_pool`` or ``label_table`` is missing a column a declared
-  optional role names (``schema.columns.event``; ``occasion`` joins it when
-  that role lands). Declaring the role widens ``identity_columns``, which is
+  optional role names (``schema.columns.occasion`` / ``schema.columns.event``).
+  Declaring the role widens ``identity_columns``, which is
   what ``select_*_keys`` project by and what ``build_model_input`` LEFT joins
   the labels on, so a source table without the column fails — but as a raw
   Spark ``AnalysisException`` about an unresolved name, from whichever node
@@ -912,12 +923,12 @@ def optional_role_as_feature_errors(parameters: dict) -> list[str]:
         f"(A38) {col!r} is declared by schema.columns.{role_of[col]} and also "
         f"listed in dataset.prepare_model_input.categorical_columns. A column "
         f"in that list becomes a model feature (that is how schema.item "
-        f"becomes one), but {role_of[col]!r} names which row this is, not "
-        f"anything about the candidate: a model that splits on it memorises "
-        f"individual rows, and an event timestamp additionally correlates "
-        f"with within-period effects that do not exist at serving time. "
-        f"Remove {col!r} from categorical_columns; to feed the model "
-        f"something about when the event happened, compute that as its own "
+        f"becomes one), but a {role_of[col]!r} column identifies rows rather "
+        f"than describing the candidate: a model that splits on it memorises "
+        f"which rows were clicked, and one that is a timestamp additionally "
+        f"correlates with within-period effects that do not exist at serving "
+        f"time. Remove {col!r} from categorical_columns; to feed the model "
+        f"something about when the row happened, compute that as its own "
         f"column in a feature table."
         for col in offenders
     ]
@@ -2131,6 +2142,8 @@ def validate_config_consistency(parameters: dict) -> None:
 
     errors.extend(compare_source_well_formed_errors(parameters))
 
+    errors.extend(optional_role_compare_source_errors(parameters))
+
     errors.extend(segment_source_override_errors(parameters))
 
     errors.extend(diagnosis_metric_param_errors(parameters))
@@ -2985,6 +2998,45 @@ def compare_source_well_formed_errors(parameters: dict) -> list[str]:
                     f"not in {sorted(_VALID_UNMAPPED)}"
                 )
     return errs
+
+
+def optional_role_compare_source_errors(parameters: dict) -> list[str]:
+    """(A41) no ``ranked_predictions`` compare source while an optional role is
+    declared.
+
+    Returns error strings (empty list when fine), collected by
+    :func:`validate_config_consistency`.
+
+    ``ranked_predictions`` is offline inference's output: its rows are the
+    framework's own entity x item grid and carry no optional-role column
+    (ADR-0025 decision 1). This run's rows do, so the two sides identify rows
+    differently — A40's reason, in compare mode. The two post-training tables
+    of the same model version carry the columns (A39), so the message names
+    them. Only ``kind: model_version`` has a ``source``; a malformed source is
+    A11's to report and is skipped here.
+    """
+    declared = optional_role_column_map(parameters)
+    if not declared:
+        return []
+    sources = (
+        (parameters.get("evaluation", {}) or {}).get("compare_sources", {}) or {}
+    )
+    named = "; ".join(
+        f"schema.columns.{role}={cols}" for role, cols in declared.items()
+    )
+    return [
+        f"(A41) compare_sources[{key!r}].source='ranked_predictions' cannot be "
+        f"compared while an optional column role is declared ({named}): "
+        f"offline inference writes that table from its own entity x item grid, "
+        f"so its rows carry no such column and cannot be matched to this run's "
+        f"rows. Use source: training_eval_predictions or "
+        f"enriched_eval_predictions (a post-training run of that model "
+        f"version)."
+        for key, src in sources.items()
+        if isinstance(src, dict)
+        and src.get("kind") == "model_version"
+        and src.get("source") == "ranked_predictions"
+    ]
 
 
 def compare_source_key_exists(parameters: dict, key: str | None) -> dict | None:
@@ -3880,9 +3932,9 @@ def entity_columns_declared_errors(
     entity column its catalog entry never declared is dropped there with no
     error, no warning and no log line. The table stays perfectly valid; the
     published rows just identify the wrong thing. Every downstream consumer
-    groups on the full entity tuple (``evaluation/metrics_spark`` uses
-    ``[time] + entity``), so the whole run's metrics silently answer a
-    different question.
+    groups on the full entity tuple (``evaluation/metrics_spark`` groups by
+    ``query_group_columns``, which contains all of it), so the whole run's
+    metrics silently answer a different question.
 
     **This module never reads the catalog** — the caller does, and passes what
     it read. ``declared_columns`` is the answer from the dataset object's

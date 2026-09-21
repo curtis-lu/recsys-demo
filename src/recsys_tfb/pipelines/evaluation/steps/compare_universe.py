@@ -205,7 +205,10 @@ def common_universe(
             f"query groups, B has {b_groups.count()} query groups, "
             f"intersection = 0. Check that both sides cover the same "
             f"{time_col!r} values and that the query group columns "
-            f"{query_group_cols} carry matching types."
+            f"{query_group_cols} carry matching types — and that B was "
+            f"produced under the same schema.columns: a model version run "
+            f"before an optional role (e.g. occasion) was declared has that "
+            f"column NULL, and NULL keys match nothing."
         )
 
     a_items = {r[0] for r in a.select(item_col).distinct().collect()}

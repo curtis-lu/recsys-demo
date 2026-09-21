@@ -20,8 +20,8 @@ _Avoid_: 客戶、customer、user
 被排序的東西，恆為一欄；由多個屬性組成時，在來源 SQL 先拼成一欄。
 _Avoid_: 產品、廣告、product
 
-**occasion**（ADR-0025，尚未實作）:
-一次排序的場合：同一刻、一起被排的那一組候選所屬的選用欄位角色，由一欄或多欄組成，例如請求 ID。宣告之後它是 query group 的一部分。
+**occasion**（ADR-0025）:
+一次排序的場合：同一刻、一起被排的那一組候選所屬的選用欄位角色，由一欄或多欄組成，例如請求 ID。宣告之後它是 query group 的一部分，但不進 base key。宣告了才進 identity 與版本雜湊，宣告之後 `sample_pool` 與 `label_table` 都要帶齊那些欄，而且它不得成為特徵；離線推論忽略它。
 _Avoid_: session、request、shortlist、場次；也不要叫它 event（event 分辨的是列，不界定誰跟誰比）
 
 **event**（ADR-0021、ADR-0025）:
@@ -49,7 +49,7 @@ query group 裡被排出名次的一列；宣告 event 時，同一個 item 可�
 _Avoid_: 推薦項
 
 **identity**:
-認出一筆候選的欄位組合：time、entity、item，宣告了 occasion、event 時再加上它們。
+認出一筆候選的欄位組合：time、entity、item，宣告了 occasion、event 時再加上它們。順序固定是 time、entity、occasion、item、event（決定性抽樣依這個順序串接雜湊，見 ADR-0025）。
 _Avoid_: 主鍵（來源表設定裡的 `primary_key` 是另一回事）
 
 **base key**（ADR-0025）:

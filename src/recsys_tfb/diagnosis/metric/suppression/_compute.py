@@ -129,17 +129,36 @@ FIELD_NOTES: dict[str, str] = {
     ),
 }
 
+def _cross_purchase_notes(query_unit: str) -> dict[str, str]:
+    """cross_purchase_stats 的欄位說明；``query_unit`` 是共現的單位怎麼稱呼。"""
+    return {
+        "n_joint": f"同一個 query 單位（{query_unit}）上 j 與 k 皆 label=1 的單位數。",
+        "n_j": "j 為 label=1 的 query 單位數。",
+        "n_k": "k 為 label=1 的 query 單位數。",
+        "p_k_given_j": "n_joint / n_j——買 j 的 query 單位裡有多少比例也買 k。",
+        "lift": (
+            "p_k_given_j / (n_k / n_units)。lift ≈ 1 代表在這份抽樣樣本上 j、k "
+            "近似獨立；> 1 代表比獨立時更常同時出現。"
+        ),
+    }
+
+
 #: cross_purchase_stats 的欄位說明，跟著它回傳的 list[dict] 走。
-CROSS_PURCHASE_FIELD_NOTES: dict[str, str] = {
-    "n_joint": "同一個 query 單位（time × entity）上 j 與 k 皆 label=1 的單位數。",
-    "n_j": "j 為 label=1 的 query 單位數。",
-    "n_k": "k 為 label=1 的 query 單位數。",
-    "p_k_given_j": "n_joint / n_j——買 j 的 query 單位裡有多少比例也買 k。",
-    "lift": (
-        "p_k_given_j / (n_k / n_units)。lift ≈ 1 代表在這份抽樣樣本上 j、k "
-        "近似獨立；> 1 代表比獨立時更常同時出現。"
-    ),
-}
+CROSS_PURCHASE_FIELD_NOTES: dict[str, str] = _cross_purchase_notes("time × entity")
+
+
+def cross_purchase_field_notes(schema: dict) -> dict[str, str]:
+    """:data:`CROSS_PURCHASE_FIELD_NOTES`, with the query unit said right.
+
+    The unit is the query group. Undeclared it is ``time × entity`` and the
+    dict comes back as is (every existing artifact is unchanged); with
+    ``occasion`` declared it is one occasion, so "the units that bought j" are
+    occasions in which j was clicked — two items clicked at one moment, not
+    one person who clicked both at some point in the period (#428).
+    """
+    if not schema.get("occasion"):
+        return CROSS_PURCHASE_FIELD_NOTES
+    return _cross_purchase_notes("time × entity × occasion：一個場合")
 
 
 def _validate(pdf: pd.DataFrame, schema: dict) -> None:
@@ -311,7 +330,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         "n_units": 0,
         "sample_meta": dict(sample_meta or {}),
         "field_notes": FIELD_NOTES,
-        "cross_purchase_field_notes": CROSS_PURCHASE_FIELD_NOTES,
+        "cross_purchase_field_notes": cross_purchase_field_notes(schema),
         "notes": [],
     }
     if not out["enabled"]:

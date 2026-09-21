@@ -1,10 +1,11 @@
 --partition by: snap_date
 -- 一次曝光一列：曝光那一刻之前的即時特徵。
 --
--- 今天的框架讀不到這張表：它的粒度是一次曝光，要宣告 event 角色（#378）、並以多張特徵表
--- 接進來（#380）才用得上，所以它不在 catalog、也不併進 feature_table。先算出來，是讓
--- 那兩張票有一張「確定沒偷看」的即時特徵表可以接。鍵是那時的 identity：
--- (snap_date, user_id, slot_id, ad_creative) ＋ event（impression_id）。
+-- 今天的框架讀不到這張表：它的粒度是一次曝光，要以多張特徵表接進來（#380）才用得上，
+-- 所以它不在 catalog、也不併進 feature_table。先算出來，是讓那張票有一張「確定沒偷看」的
+-- 即時特徵表可以接。鍵是 impression_id（形狀一、宣告 event 時的 identity 最後一欄）。
+-- 這份 conf 現在宣告的是 occasion（request_id），候選列上沒有 impression_id——接之前這張
+-- 表要多帶 request_id，以 (snap_date, user_id, slot_id, request_id, ad_creative) 接。
 --
 -- 不偷看的界線：瀏覽只算 [曝光前 30 分鐘, 曝光那一刻)。上界寫成 <= 或往後放寬都會出事——
 -- 使用者點了廣告之後幾分鐘內會去瀏覽同類內容，其中一半與點擊記在同一秒；多算到曝光

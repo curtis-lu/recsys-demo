@@ -422,7 +422,7 @@ class TestOptionalEventRole:
     def test_event_does_not_widen_the_query_group(self):
         """Two impressions of one item compete for rank inside one ranking;
         they do not form two rankings. ``occasion`` is the role that widens
-        the query group, and it is a later ticket."""
+        the query group (``TestOptionalOccasionRole``)."""
         schema = get_schema(_params(event="impression_id"))
         assert schema["query_group_columns"] == ["snap_date", "cust_id"]
 
@@ -431,6 +431,64 @@ class TestOptionalEventRole:
         impression, so the key it joins by must not grow one."""
         schema = get_schema(_params(event="impression_id"))
         assert schema["base_key_columns"] == ["snap_date", "cust_id"]
+
+
+class TestOptionalOccasionRole:
+    """``occasion`` is absent unless declared; declared, it widens the query
+    group and identity — and never the base key.
+
+    The role says "these rows were ranked together, at one moment" (one
+    request, say), so ranks are compared within it: query group ＝ ``time`` ＋
+    ``entity`` ＋ ``occasion`` (ADR-0025 decision 1). The base key is what an
+    entity-level table joins by, and such a table has no column for a request
+    — widening it would make every feature join match nothing.
+    """
+
+    def test_absent_unless_declared(self):
+        assert "occasion" not in get_schema(_params())
+
+    def test_a_declared_string_normalises_to_a_list(self):
+        assert get_schema(_params(occasion="request_id"))["occasion"] == [
+            "request_id",
+        ]
+
+    def test_occasion_widens_the_query_group(self):
+        schema = get_schema(
+            _params(entity=["branch_id", "cust_id"],
+                    occasion=["page_view_id", "request_id"])
+        )
+        assert schema["query_group_columns"] == [
+            "snap_date", "branch_id", "cust_id", "page_view_id", "request_id",
+        ]
+
+    def test_occasion_does_not_widen_the_base_key(self):
+        schema = get_schema(_params(occasion="request_id"))
+        assert schema["base_key_columns"] == ["snap_date", "cust_id"]
+
+    def test_occasion_sits_between_entity_and_item_in_identity(self):
+        """ADR-0025 decision 1 fixes the position. Between entity and item —
+        not appended — because that keeps identity's prefix equal to the query
+        group, and ``time``/``entity``/``item`` keep their relative order."""
+        schema = get_schema(_params(occasion="request_id"))
+        assert schema["identity_columns"] == [
+            "snap_date", "cust_id", "request_id", "prod_name",
+        ]
+
+    def test_both_roles_declared_order(self):
+        schema = get_schema(
+            _params(occasion="request_id", event="impression_id")
+        )
+        assert schema["identity_columns"] == [
+            "snap_date", "cust_id", "request_id", "prod_name", "impression_id",
+        ]
+        assert schema["query_group_columns"] == [
+            "snap_date", "cust_id", "request_id",
+        ]
+
+    def test_identity_still_starts_with_the_query_group(self):
+        schema = get_schema(_params(occasion="request_id", event="impression_id"))
+        qg = schema["query_group_columns"]
+        assert schema["identity_columns"][: len(qg)] == qg
 
 
 class TestOptionalRolesAndTheVersionHash:
@@ -461,6 +519,26 @@ class TestOptionalRolesAndTheVersionHash:
     def test_declaring_event_changes_the_payload(self):
         assert get_schema_for_hash(_params()) != get_schema_for_hash(
             _params(event="impression_id")
+        )
+
+    def test_absent_occasion_adds_no_key_to_the_payload(self):
+        assert "occasion" not in get_schema_for_hash(_params(event="impression_id"))
+
+    def test_an_event_only_payload_is_unmoved_by_occasion_existing(self):
+        """A deployment that declared ``event`` under #378 keeps its
+        ``base_dataset_version``: the payload keys are exactly what they were."""
+        assert list(get_schema_for_hash(_params(event="impression_id"))) == [
+            "time", "entity", "item", "label", "score", "rank", "event",
+            "categorical_values",
+        ]
+
+    def test_a_declared_occasion_is_in_the_payload(self):
+        payload = get_schema_for_hash(_params(occasion="request_id"))
+        assert payload["occasion"] == ["request_id"]
+
+    def test_declaring_occasion_changes_the_payload(self):
+        assert get_schema_for_hash(_params()) != get_schema_for_hash(
+            _params(occasion="request_id")
         )
 
 

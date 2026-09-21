@@ -399,12 +399,13 @@ def make_prepare_eval_data_node(population_name: str):
             #
             # "The same" holds because this side groups by the query group
             # while inference groups by the base key, and the two are equal
-            # until an `occasion` is declared (ADR-0025 decision 2). At that
-            # point evaluation's groups get finer and inference's do not, so
-            # the two rankings part; what keeps that from being a live bug is
-            # the CLI gate that refuses monitoring mode with the new roles
-            # declared, not anything here. The ticket that lands `occasion`
-            # owns re-deciding this branch.
+            # until an `occasion` is declared (ADR-0025 decision 2). Declared,
+            # the two rankings part — and this side is the right one: this
+            # branch only runs on training_eval_predictions (--post-training),
+            # whose rows each belong to one occasion, and an occasion is the
+            # scope those rows were ranked in. Inference has no occasion to
+            # rank inside. Monitoring mode, the one place the two would meet,
+            # is refused at the CLI entry while the role is declared (A40).
             eval_predictions = rank_within_query(
                 eval_predictions, query_cols, score_col, schema["item"],
                 schema.get("event", []),
@@ -1365,9 +1366,10 @@ def _restrict_to_common(
     carries full-universe sizes, the common sizes and dropped item lists so
     the report can show what was filtered.
 
-    Population size is counted in **query groups** — distinct ``[time] +
-    entity`` combinations, every column of ``schema.entity`` — because that is
-    the unit mAP divides by. Reporting it in any other unit puts two different
+    Population size is counted in **query groups** — distinct
+    ``query_group_columns`` combinations (time, every column of
+    ``schema.entity``, and ``occasion`` when declared) — because that is the
+    unit mAP divides by. Reporting it in any other unit puts two different
     scales side by side in one table with nothing telling the reader they
     differ. See ``docs/adr/0015-compare-population-counted-in-query-groups.md``.
 

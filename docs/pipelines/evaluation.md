@@ -705,6 +705,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 ## 10. 相關文件
 
 - 宣告 `event` 之後 mAP 的語意（按列算）、同分方向的代價、哪幾項診斷會跳過：[`../operations/user-guides/one-row-per-event.md`](../operations/user-guides/one-row-per-event.md)
+- 宣告 `occasion` 之後一組是一次請求：小的 query group 讓 mAP 偏高、哪幾項診斷會跳過、離線指標在曝光資料上的三個限制：[`../operations/user-guides/impression-data-shapes.md`](../operations/user-guides/impression-data-shapes.md)
 - 模型訓練與 test predictions：[`training.md`](training.md)
 - 正式批次推論與發布閘門：[`inference.md`](inference.md)
 - 上游 label 與來源表：[`source_etl.md`](source_etl.md)

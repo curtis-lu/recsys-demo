@@ -755,6 +755,77 @@ class TestBuildModelInputAtEventGrain:
         assert "2.0000x" in errors[0]
 
 
+class TestBuildModelInputAtOccasionGrain:
+    """One entity-time shown in two requests (#428).
+
+    The two joins in ``build_model_input`` want different keys once
+    ``occasion`` is declared, and this is the only place they part: labels
+    join on identity (which now carries the request), features join on the
+    base key (which must not — the feature table has no request column). A
+    feature join keyed on the widened query group would match nothing; a
+    label join keyed on the base key would hand one request's click to the
+    other request's row of the same item.
+    """
+
+    @staticmethod
+    def _occasion_params(parameters):
+        params = {k: v for k, v in parameters.items()}
+        schema = {k: v for k, v in params["schema"].items()}
+        schema["columns"] = {**schema["columns"], "occasion": "req_id"}
+        params["schema"] = schema
+        return params
+
+    def _keys(self, spark):
+        """Request r1 showed items 0 and 1; request r2 showed item 0 again."""
+        return spark.createDataFrame(
+            pd.DataFrame({
+                "snap_date": pd.to_datetime([_SNAP_DATES[0]] * 3),
+                "cust_id": [_ENTITIES[0]] * 3,
+                "req_id": ["r1", "r1", "r2"],
+                "prod_name": [_PRODUCTS[0], _PRODUCTS[1], _PRODUCTS[0]],
+            })
+        )
+
+    def _labels(self, spark):
+        """Only item 0 in request r1 was clicked."""
+        return spark.createDataFrame(
+            pd.DataFrame({
+                "snap_date": pd.to_datetime([_SNAP_DATES[0]]),
+                "cust_id": [_ENTITIES[0]],
+                "req_id": ["r1"],
+                "prod_name": [_PRODUCTS[0]],
+                "label": [1],
+            })
+        )
+
+    def test_features_join_on_the_base_key_and_labels_on_identity(
+        self, spark, feature_table, parameters
+    ):
+        params = self._occasion_params(parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        pft = apply_preprocessor_to_features(
+            feature_table, preprocessor, _encode_plan(params), params,
+        )
+        keys = self._keys(spark)
+
+        result = build_model_input(
+            keys, pft, self._labels(spark), preprocessor, params
+        )
+
+        # No fan-out and no loss: the entity-level feature row reached all
+        # three candidate rows.
+        assert result.count() == keys.count() == 3
+        assert result.filter(F.col("total_aum").isNull()).count() == 0
+        # The click stays with the request it happened in. Keyed on
+        # (time, entity, item) both item-0 rows would read 1.
+        got = {(r["req_id"], r["prod_name"]): r["label"] for r in result.collect()}
+        assert got == {
+            ("r1", _PRODUCTS[0]): 1,
+            ("r1", _PRODUCTS[1]): 0,
+            ("r2", _PRODUCTS[0]): 0,
+        }
+
+
 class TestFitAndBuild:
     def _train_keys(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}

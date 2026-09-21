@@ -4,11 +4,13 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.pipelines.inference.steps.identity import scored_row_columns
 
 
-def _schema(event=None):
+def _schema(event=None, occasion=None):
     columns = {"time": "snap_date", "entity": ["user_id", "slot_id"],
                "item": "ad_creative"}
     if event is not None:
         columns["event"] = event
+    if occasion is not None:
+        columns["occasion"] = occasion
     return get_schema({"schema": {"columns": columns}})
 
 
@@ -32,6 +34,30 @@ def test_every_declared_event_column_is_dropped():
     assert scored_row_columns(_schema(event=["event_ts", "impression_id"])) == [
         "snap_date", "user_id", "slot_id", "ad_creative",
     ]
+
+
+def test_a_declared_occasion_column_is_dropped():
+    """Inference has no request either: it ranks every configured item for
+    each entity at a time, so its query group stays ``time`` + ``entity``
+    (ADR-0025 decision 2) and its rows carry no occasion column (#428)."""
+    assert scored_row_columns(_schema(occasion="request_id")) == [
+        "snap_date", "user_id", "slot_id", "ad_creative",
+    ]
+
+
+def test_both_roles_are_dropped_together():
+    assert scored_row_columns(
+        _schema(occasion="request_id", event="impression_id")
+    ) == ["snap_date", "user_id", "slot_id", "ad_creative"]
+
+
+def test_what_is_left_is_the_base_key_plus_item_under_occasion():
+    """The value coincides with ``base_key_columns + [item]`` — the key the
+    pipeline's rank partition and completeness check use. If it ever did not,
+    inference would rank on one key and identify rows by another."""
+    schema = _schema(occasion="request_id")
+    cols = scored_row_columns(schema)
+    assert [c for c in cols if c != schema["item"]] == schema["base_key_columns"]
 
 
 def test_the_surviving_order_is_identitys_order():

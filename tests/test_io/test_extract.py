@@ -284,6 +284,47 @@ def test_extract_xy_with_groups_returns_groups(tmp_path: Path) -> None:
     assert len(set(groups.tolist())) == 3
 
 
+def test_lightgbm_gets_one_group_per_occasion(tmp_path: Path) -> None:
+    """With ``occasion`` declared, LightGBM's group count is the occasion count.
+
+    c1 was shown fund/ccard in request r1 and fund alone in r2; c2 was shown
+    fund/ccard in r3. That is three rankings — under ``time`` + ``entity``
+    alone it would be two, and the fund row of r2 would compete with r1's
+    rows for a rank it was never ranked against (#428).
+
+    Built all the way to ``lgb.Dataset`` because that group vector is the one
+    that decides what LightGBM compares: the ids from ``extract_Xy_with_groups``
+    only matter through ``to_contiguous_groups``.
+    """
+    import lightgbm as lgb
+
+    from recsys_tfb.core.group_utils import to_contiguous_groups
+    from recsys_tfb.io.extract import extract_Xy_with_groups
+
+    df = pd.DataFrame(
+        {
+            "cust_id": ["c1", "c1", "c1", "c2", "c2"],
+            "req_id": ["r1", "r1", "r2", "r3", "r3"],
+            "snap_date": pd.to_datetime(["2025-01-31"] * 5),
+            "prod_name": ["fund", "ccard", "fund", "fund", "ccard"],
+            "feat_a": np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32),
+            "label": [1, 0, 0, 0, 1],
+        }
+    )
+    params = {"schema": {"columns": {
+        **_GROUPED_PARAMS["schema"]["columns"], "occasion": "req_id"}}}
+
+    X, y, gid = extract_Xy_with_groups(
+        _make_handle(tmp_path, df), _make_grouped_prep_meta(), params
+    )
+    perm, counts = to_contiguous_groups(gid)
+    ds = lgb.Dataset(X[perm], label=y[perm], group=counts,
+                     params={"verbose": -1}).construct()
+
+    assert len(ds.get_group()) == 3
+    assert sorted(ds.get_group().tolist()) == [1, 2, 2]
+
+
 def test_extract_xy_with_groups_with_items_returns_item_ids(tmp_path: Path) -> None:
     from recsys_tfb.io.extract import extract_Xy_with_groups
 

@@ -6,6 +6,7 @@ from datetime import datetime
 
 import pandas as pd
 
+from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.compare import build_comparison_result
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
 from recsys_tfb.evaluation.report_builder import (
@@ -54,6 +55,13 @@ def _build_coverage_section(
     comparison: dict, cov: dict, parameters: dict
 ) -> ReportSection:
     label_a, label_b = comparison["label_a"], comparison["label_b"]
+    # The query group, said in words. With `occasion` declared the count is
+    # of occasions, and a sentence that still said "time × entity" would
+    # describe a smaller number than the one printed beside it (#428).
+    query_unit = "一個時間 × 一個 entity" + (
+        " × 一個場合（occasion）"
+        if get_schema(parameters).get("occasion") else ""
+    )
     meta = pd.DataFrame(
         {
             label_a: [
@@ -103,7 +111,7 @@ def _build_coverage_section(
         title="Compare 概頁",
         description=(
             "兩個模型的來源、coverage、被剔除的 item。"
-            "n_query_group ＝「一個時間 × 一個 entity」的相異組合數，也就是排名的單位；"
+            f"n_query_group ＝「{query_unit}」的相異組合數，也就是排名的單位；"
             "本報表所有 per-query 指標都以它為分母，所以母體大小與指標同一個尺度。"
             "n_item ＝相異 item 數。後續章節皆在 common universe 上重排重算。"
             "common 欄的 n_query_group 是裁切後兩側都還在的 query group 數"

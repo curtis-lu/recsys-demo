@@ -3,8 +3,9 @@
 Provides get_schema() to retrieve column names from parameters. The three
 roles that name columns in the user's own tables (time / entity / item) have
 no defaults and must be declared; the three this framework produces itself
-(label / score / rank) do. One role is optional (event) — absent unless the
-deployment declares it, and absent is what every existing deployment is.
+(label / score / rank) do. Two roles are optional (occasion, event) — absent
+unless the deployment declares them, and absent is what every existing
+deployment is.
 """
 
 import copy
@@ -35,13 +36,20 @@ _ROLE_KEYS = ("time", "entity", "item", "label", "score", "rank")
 #: artifacts. Precedent: :data:`ENTITY_GROUPING_KEYS`, deliberately outside
 #: ``_ROLE_KEYS`` for the same reason.
 #:
+#: ``occasion`` — **which rows were ranked together, at one moment.** One
+#: column or several (a request id). It joins ``query_group_columns`` — ranks
+#: are compared within one occasion — and ``identity_columns``, but never
+#: ``base_key_columns``: an entity-level table has no column for a request.
+#:
 #: ``event`` — **which row, when a query group holds the same item more than
 #: once.** One column or several (an impression id, or a second-resolution
 #: timestamp). It joins ``identity_columns`` and NOT ``query_group_columns``:
 #: two impressions of one item compete for rank inside the same ranking, they
-#: do not form two rankings (ADR-0025 decision 1). ``occasion``, the role that
-#: widens the query group, is the next ticket and lands here beside it.
-OPTIONAL_ROLE_KEYS = ("event",)
+#: do not form two rankings (ADR-0025 decision 1).
+#:
+#: Listed in identity order, which :func:`recsys_tfb.core.consistency.
+#: optional_role_columns` relies on when it flattens them.
+OPTIONAL_ROLE_KEYS = ("occasion", "event")
 
 
 #: The only keys ``schema`` itself may carry. Anything else there is either a
@@ -81,20 +89,22 @@ _SCALAR_KEYS = ("time", "item", "label", "score", "rank")
 #: the answers only coincide under today's roles (ADR-0025 decision 2):
 #:
 #: - ``query_group_columns`` -- **the scope ranks are compared within.** Widens
-#:   to ``time + entity + occasion`` once the optional ``occasion`` role lands.
+#:   to ``time + entity + occasion`` when the optional ``occasion`` role is
+#:   declared.
 #: - ``base_key_columns`` -- **an entity at a time.** What an entity-level table
 #:   (a feature table, a segment source) joins onto candidate rows by. Never
 #:   widens with ``occasion``: those tables have no column for one. The name
 #:   follows what the code already called it (``base_key``,
 #:   ``require_base_key_columns`` in the dataset pipeline).
 #: - ``identity_columns`` -- **one candidate row.** ``time + entity + item``,
-#:   plus ``event`` when declared; ``occasion`` joins it too once that role
-#:   lands.
+#:   plus ``occasion`` (between entity and item) and ``event`` (after item)
+#:   when declared.
 #:
 #: ``identity_columns``' **order is a rule, not a spelling**: deterministic
 #: sampling buckets by hashing its columns joined in order, so reordering it
 #: draws a different sample from the same data. Nothing may reorder the columns
-#: already in it; new roles are appended at the positions ADR-0025 fixes.
+#: already in it relative to each other; new roles go in at the positions
+#: ADR-0025 fixes (``occasion`` before ``item``, ``event`` after it).
 #: Pinned by ``tests/test_core/test_schema.py``.
 _DERIVED_KEYS = ("query_group_columns", "base_key_columns", "identity_columns")
 
@@ -272,8 +282,9 @@ def get_schema(parameters: dict) -> dict:
     Returns:
         A new dict with keys: time, entity, item, label, score, rank,
         query_group_columns, base_key_columns, identity_columns,
-        categorical_values — plus ``event`` (normalised to a list) when the
-        config declares it, and no ``event`` key at all when it does not.
+        categorical_values — plus ``occasion`` / ``event`` (each normalised
+        to a list) when the config declares it, and no such key at all when
+        it does not.
 
     Raises:
         ValueError: If any of :data:`_REQUIRED_ROLES` is not declared.
@@ -313,15 +324,18 @@ def get_schema(parameters: dict) -> dict:
 
     # Derive the three column lists. Each builds its own list object, so a
     # caller that mutates one cannot reach the others.
-    schema["query_group_columns"] = [schema["time"]] + schema["entity"]
+    occasion = list(schema.get("occasion", []))
+    schema["query_group_columns"] = [schema["time"]] + schema["entity"] + occasion
     schema["base_key_columns"] = [schema["time"]] + schema["entity"]
-    # Order is a rule, not a spelling -- see _DERIVED_KEYS. `event` is appended
-    # AFTER `item` (ADR-0025 decision 1), so an undeclared `event` leaves the
-    # list byte-for-byte what it was and every existing deployment's
-    # deterministic sample is unmoved.
+    # Order is a rule, not a spelling -- see _DERIVED_KEYS. ADR-0025 decision 1:
+    # `occasion` between `entity` and `item` (so identity still starts with the
+    # query group), `event` after `item`. An undeclared role contributes
+    # nothing, so the list is byte-for-byte what it was and every existing
+    # deployment's deterministic sample is unmoved.
     schema["identity_columns"] = (
         [schema["time"]]
         + schema["entity"]
+        + occasion
         + [schema["item"]]
         + list(schema.get("event", []))
     )
@@ -331,6 +345,20 @@ def get_schema(parameters: dict) -> dict:
     )
 
     return schema
+
+
+def declares_optional_role(schema: dict) -> bool:
+    """True when a resolved schema declares any role in :data:`OPTIONAL_ROLE_KEYS`.
+
+    For a place whose rule is "the undeclared shape keeps today's answer; any
+    new role switches to the general one" — today the one caller is whether
+    evaluation reports the tied-row share (spec #426 decision D). Asking about
+    ``event`` alone there would silently leave ``occasion`` on the old answer.
+
+    Not every optional-role branch is this shape: ``k_values: "all"`` asks
+    about ``event`` alone on purpose (``metrics_spark._resolve_all_k``).
+    """
+    return any(schema.get(role) for role in OPTIONAL_ROLE_KEYS)
 
 
 def get_schema_for_hash(parameters: dict) -> dict:
@@ -364,12 +392,12 @@ def validate_schema_config(parameters: dict) -> None:
 
     Enforces:
     - Scalar keys (time, item, label, score, rank) must be non-empty strings.
-    - ``entity`` — and ``event`` when declared — must be a non-empty string or
-      a non-empty list of non-empty strings.
+    - ``entity`` — and ``occasion`` / ``event`` when declared — must be a
+      non-empty string or a non-empty list of non-empty strings.
     - No key of ``schema.columns`` outside :data:`_SETTABLE_COLUMN_KEYS`
       (every unknown one reported at once).
-    - ``identity_columns`` ([time] + entity + [item] + event) must not contain
-      duplicates. This is also what stops two roles overlapping — a column
+    - ``identity_columns`` ([time] + entity + occasion + [item] + event) must
+      not contain duplicates. This is also what stops two roles overlapping — a column
       declared as both ``item`` and ``event`` shows up twice in that list —
       so there is no second overlap rule to keep in step with this one.
     - ``categorical_values`` must be a mapping of non-empty str -> list.

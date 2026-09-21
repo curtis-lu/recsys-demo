@@ -304,6 +304,36 @@ class TestRolesMayNotOverlap:
                 {"schema": {"columns": _columns(event=["imp_id", "imp_id"])}}
             )
 
+    @pytest.mark.parametrize("other", [
+        {"event": "request_id"},       # the two optional roles
+        {"item": "request_id"},
+        {"entity": ["request_id"]},
+        {"time": "request_id"},
+    ])
+    def test_occasion_colliding_with_another_role_raises(self, other):
+        with pytest.raises(ValueError, match="identity_columns contain duplicates"):
+            validate_schema_config(
+                {"schema": {"columns": _columns(occasion="request_id", **other)}}
+            )
+
+
+class TestOccasionRoleShape:
+    """``occasion`` goes through the same helper as ``entity`` and ``event``;
+    the message names the key the user wrote."""
+
+    def test_a_list_is_ok(self):
+        validate_schema_config(
+            {"schema": {"columns": _columns(occasion=["page_view_id", "request_id"])}}
+        )
+
+    def test_empty_list_raises(self):
+        with pytest.raises(ValueError, match="'occasion' list must not be empty"):
+            validate_schema_config({"schema": {"columns": _columns(occasion=[])}})
+
+    def test_wrong_type_raises(self):
+        with pytest.raises(ValueError, match="'occasion' must be a string or list"):
+            validate_schema_config({"schema": {"columns": _columns(occasion=7)}})
+
 
 class TestUnknownColumnKeysAtTheCliGate:
     """The CLI entry refuses an unrecognised ``schema.columns`` key too.
