@@ -3256,6 +3256,62 @@ class TestPredictionQualityParamsA42:
         validate_config_consistency(p)
 
 
+# --- A43: the calibration-bin keys #381 retired ------------------------------
+
+from recsys_tfb.core.consistency import (  # noqa: E402
+    RETIRED_CALIBRATION_BIN_KEYS,
+    retired_calibration_bin_key_errors,
+)
+
+
+class TestRetiredCalibrationBinKeysA43:
+    @pytest.mark.parametrize("key", RETIRED_CALIBRATION_BIN_KEYS)
+    @pytest.mark.parametrize("value", [True, False, 10, None])
+    def test_the_key_is_refused_whatever_its_value(self, key, value):
+        """Presence is the failure (A37's shape): ``false`` switches off
+        nothing that still exists, and the key sits in a fingerprinted
+        subtree, so leaving it behind is not the same conf as deleting it."""
+        leaf = key.rsplit(".", 1)[1]
+        p = {"evaluation": {"report": {"diagnostics": {
+            "include_distributions": True, leaf: value}}}}
+        errors = retired_calibration_bin_key_errors(p)
+        assert len(errors) == 1
+        assert errors[0].startswith("A43:")
+        assert repr(key) in errors[0]
+        # The message points at what replaced it.
+        assert "prediction_quality" in errors[0]
+
+    def test_both_keys_in_one_message(self):
+        p = {"evaluation": {"report": {"diagnostics": {
+            "include_calibration": True, "n_calibration_bins": 10}}}}
+        errors = retired_calibration_bin_key_errors(p)
+        assert len(errors) == 1
+        assert all(repr(k) in errors[0] for k in RETIRED_CALIBRATION_BIN_KEYS)
+
+    def test_a_conf_without_them_passes(self):
+        assert retired_calibration_bin_key_errors({}) == []
+        assert retired_calibration_bin_key_errors({"evaluation": {"report": {
+            "diagnostics": {"include_distributions": True}}}}) == []
+
+    def test_the_shipped_confs_do_not_spell_them(self):
+        from pathlib import Path
+
+        from recsys_tfb.core.config import ConfigLoader
+
+        root = Path(__file__).resolve().parents[2]
+        for conf in (root / "conf", root / "examples" / "ad" / "conf"):
+            params = ConfigLoader(str(conf), env="local").get_parameters()
+            assert retired_calibration_bin_key_errors(params) == [], conf
+
+    def test_not_aggregated_by_validate_config_consistency(self):
+        """Evaluation-only keys, A34's reason (issue #158)."""
+        p = _base({"inference": {"products": ["a", "b"]}})
+        p["evaluation"] = {"report": {"diagnostics": {
+            "include_calibration": True}}}
+        assert retired_calibration_bin_key_errors(p), "premise: this conf is bad"
+        validate_config_consistency(p)
+
+
 # --- A33: migration-period check for the #327 config key rename --------------
 
 from recsys_tfb.core.consistency import (

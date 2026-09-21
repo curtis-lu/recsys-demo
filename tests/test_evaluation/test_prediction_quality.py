@@ -333,12 +333,10 @@ class TestBuildPayload:
         json.dumps(self._payload(spark), allow_nan=False)
 
     def test_bin_tables_round_trip_to_the_same_display_table(self, spark):
-        from recsys_tfb.evaluation.prediction_quality import (
-            bins_from_payload,
-        )
+        from recsys_tfb.evaluation.diagnostics_spark import frame_from_json
 
         payload = self._payload(spark)
-        bins = bins_from_payload(payload["overall"]["bins"])
+        bins = frame_from_json(payload["overall"]["bins"])
         tbl = coarse_bin_table(bins, lo=payload["bins"]["lo"],
                                width=payload["bins"]["width"], n_bins=10,
                                n_display_bins=5)
@@ -359,3 +357,15 @@ class TestBuildPayload:
         assert payload["per_item"]["listed"] == ["A"]
         assert set(payload["per_item"]["summary"]) == {"A"}
         assert payload["per_item"]["n_items"] == 2
+
+
+class TestDenseSweep:
+    def test_every_edge_gets_a_row_and_an_empty_bin_reads_the_one_above(self):
+        """``n_bins`` given: bin 2 is empty, so its edge predicts exactly what
+        bin 3's edge does."""
+        sweep = threshold_sweep(_bins(), lo=0.0, width=0.25, n_bins=4)
+        assert list(sweep["bin"]) == [3, 2, 1, 0]
+        by_bin = sweep.set_index("bin")
+        for col in ("tp", "fp", "precision", "recall", "f1"):
+            assert by_bin.loc[2, col] == pytest.approx(by_bin.loc[3, col])
+        assert by_bin.loc[2, "n"] == 0

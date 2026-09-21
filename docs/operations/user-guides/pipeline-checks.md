@@ -104,6 +104,7 @@ python -m recsys_tfb <指令> --env <env>
   - 帶 `--post-training` 時，`evaluation.snap_date` 一定要寫，而且必須在 `dataset.test_snap_dates` 裡（`A22`）。
   - `evaluation.report.sections` 有寫任何開關的話，開關名稱必須剛好是 `dataset_overview`、`primary_map`、`diagnostics`、`baseline`、`diagnosis_links`、`prediction_quality` 這六個，多一個或少一個都擋（`A34`）。
   - `evaluation.prediction_quality` 的 `n_bins`、`n_display_bins` 是大於等於 1 的整數，而且後者要整除前者；`top_n` 是大於等於 0 的整數；這個區塊裡不能有別的鍵（`A42`）。不擋的話，分箱表最後一格會比其他格窄，而報表不會提；寫 `enabled: true` 也打不開這一段，開關在 `report.sections.prediction_quality`。
+  - `evaluation.report.diagnostics` 底下不能再寫 `include_calibration`、`n_calibration_bins`，不論值是什麼（`A43`）。它們設定的 calibration 分箱表 #381 已經移除，留著不會有任何作用；分數分箱改由預測品質指標家族提供。
   - `--compare` 和 `--compare-only` 只能給一個；給的名稱必須是 `evaluation.compare_sources` 裡的鍵（`A12`、`A13`）。
 - **dataset、training、inference**
   - `--rebuild-dates` 的每個日期要寫成 `YYYY-MM-DD`，而且要在設定的月份清單裡：dataset 和 training 對照 `dataset.test_snap_dates`，inference 對照 `inference.snap_dates`（`A21`）。

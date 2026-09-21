@@ -240,7 +240,7 @@ evaluation:
 
 diagnostics 的 row-level aggregation 在 Spark 執行，只將 histogram、quartile 與 rank matrix 等小型結果交給報表層，不會將完整預測資料嵌入 HTML。
 
-分數分箱（每格的平均分數 vs 實際正例率）不在 `diagnostics` 段，是 `prediction_quality` 段的分箱表（3.7 節）。#381 之前 `report.diagnostics` 另有 `include_calibration`、`n_calibration_bins` 兩個鍵，算一份在 `[0, 1]` 上等寬切、沒有任何讀者的 calibration bins；#381 把三份分箱表收成一份時一併移除。舊設定還寫著這兩個鍵不會報錯，也沒有作用，刪掉即可。
+分數分箱（每格的平均分數 vs 實際正例率）不在 `diagnostics` 段，是 `prediction_quality` 段的分箱表（3.7 節）。#381 之前 `report.diagnostics` 另有 `include_calibration`、`n_calibration_bins` 兩個鍵，算一份在 `[0, 1]` 上等寬切、沒有任何讀者的 calibration bins；#381 把三份分箱表收成一份時一併移除。舊設定還寫著這兩個鍵的話，evaluation 的 CLI 入口會擋下（A43，不論值是什麼），照錯誤訊息刪掉即可；別的指令不受影響。
 
 ### 3.6 模型與外部結果比較
 
@@ -355,6 +355,8 @@ evaluation:
 - **per-item 的 precision 不是 `precision@K`。** per-item 的 precision 分母是該 item 在門檻以上的列數；`precision@K` 的分母是 K（每個 query group 的前 K 名），是 per-query 的概念。
 - **per-item 的 `roc_auc` 不是「item 能力」診斷的 AUC。** 後者的母體是只含有正例的 query 的診斷抽樣，兩者不可並排比較。
 - **分箱表不是校準。** 框架不做校準（#411），分數不保證是機率；平均分數與實際正例率只是並列。本段每個指標都只看分數的大小順序。
+- **一個門檻橫跨所有 query group。** 這要求不同 query group 的分數彼此可比。模型用排序類目標（`lambdarank`、`rank_xendcg`）訓練時，分數只為同一個 query group 內的先後而學，跨 group 用同一個門檻切是模型沒有優化過的用法；`binary` 目標沒有這個問題。報表也印這一句。
+- **極端值會把細箱撐寬。** 範圍取最小～最大，少數特別高的分數會讓多數列擠進少數幾個細箱，門檻解析度跟著變差。分箱表每一格都印列數，看得出來是不是這樣；要改用分位數箱得先另開 ADR（見上）。
 - **per-item 預算。** 只有列數最多的前 `top_n` 個 item 有自己的分箱與指標（item × 細箱要收回 driver）；其餘 item 仍算進整體，報表會寫出一共幾個 item。`top_n: 0` 只看整體。
 - **權重欄。** 分箱時每一列先乘上權重。今天預測表沒有權重欄，每列權重 1；#429 會讓 test 表保留一部分沒有正例的 query group、帶一欄 1／r 的權重，那時在 `compute_prediction_quality` 接上。
 - **成本。** 打開之後多一次取最小、最大分數的聚合，和一次 `groupBy(item, 細箱)` 的全表 shuffle。收回 driver 的量是「細箱數 ×（1 ＋ `top_n`）＋ item 數」列，與資料列數無關。

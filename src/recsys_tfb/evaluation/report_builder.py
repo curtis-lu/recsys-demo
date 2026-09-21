@@ -946,10 +946,15 @@ def _pq_threshold_figure(sweep: pd.DataFrame):
     return fig
 
 
+#: The section's title, shared by its empty and full forms.
+_PQ_TITLE = "預測品質 — 把每一列候選當二元預測"
+
+
 def build_prediction_quality_section(
     prediction_quality: dict | None, metrics: dict, parameters: dict
 ) -> ReportSection | None:
-    """預測品質（ADR-0024）：每一列候選當一次二元預測，照分數分箱。
+    """The prediction-quality section (ADR-0024): every candidate row as one
+    binary prediction, binned by score.
 
     Every number here comes from the fine bin tables in the payload, through
     the same functions ``compute_prediction_quality`` used for the headline
@@ -961,17 +966,19 @@ def build_prediction_quality_section(
     Decision 7's three statements are always printed, each where the number
     it qualifies is: the bin width (the best-F1 threshold's resolution, not an
     online setting), the two populations, and ``pr_auc`` not being an average
-    precision computed elsewhere. Under ``--post-training`` the population
-    note says the dataset pipeline already dropped the query groups without a
-    positive from the test table (#426): "every candidate row" would be false
-    there.
+    precision computed elsewhere. The population note has one form per run
+    mode: under ``--post-training`` the dataset pipeline already dropped the
+    query groups without a positive from the test table (#426), so "every
+    candidate row" would be false there, and with nothing else excluded the
+    two sections' populations are the same, not different.
     """
     if (not _section_on(parameters, "prediction_quality")
             or not prediction_quality
             or prediction_quality.get("enabled") is not True):
         return None
+    from recsys_tfb.evaluation.diagnostics_spark import frame_from_json
     from recsys_tfb.evaluation.prediction_quality import (
-        bins_from_payload,
+        bins_of_item,
         coarse_bin_table,
         threshold_sweep,
     )
@@ -983,7 +990,7 @@ def build_prediction_quality_section(
     summary = overall.get("summary")
     if summary is None:
         return ReportSection(
-            title="預測品質 — 把每一列候選當二元預測",
+            title=_PQ_TITLE,
             description="本次評估沒有任何候選列，這一段沒有東西可算。",
         )
     per_item = prediction_quality["per_item"]
@@ -991,24 +998,31 @@ def build_prediction_quality_section(
     n_rows = summary["n"]
 
     # --- population: this section vs the ranking section (decision 7) -----
+    # One sentence per run mode, not a correction appended to the other: under
+    # --post-training the test table arrives already filtered, so with nothing
+    # excluded here the two sections read the same rows.
     n_excl = metrics.get("n_excluded_queries")
-    ranking_note = (
-        f"主指標段（mAP／precision@K／recall@K）只算有正例的 query group，"
-        f"本次排除 {n_excl} 個（n_excluded_queries）。"
-        if n_excl is not None else
-        "主指標段（mAP／precision@K／recall@K）只算有正例的 query group。"
-    )
-    population = (
-        f"母體：本段算在本次評估的全部 {n_rows:,} 列候選上，不排除任何 query "
-        f"group。{ranking_note}兩段的母體不同，precision 不可互相比較。"
-    )
+    ranking_rule = "主指標段（mAP／precision@K／recall@K）只算有正例的 query group"
+    excluded = (f"，本次排除 {n_excl} 個（n_excluded_queries）"
+                if n_excl is not None else "")
     if parameters.get("post_training"):
-        population += (
-            "⚠ 這是 --post-training：test 表在 dataset 階段已經丟掉沒有正例的 "
-            "query group（filter_test_model_input），所以本段看到的也只有「有正例"
-            "的 query group」裡的候選，不是全部曝光；正例佔比因此比全部曝光高，"
-            "precision 與 pr_auc 會比在全部曝光上算的大。讓使用者決定這類 "
-            "query group 留多少的設定在 #429。"
+        same = n_excl == 0
+        population = (
+            f"母體：本段算在本次評估的全部 {n_rows:,} 列候選上，本身不排除任何 "
+            "query group；但這是 --post-training，test 表在 dataset 階段已經丟掉"
+            "沒有正例的 query group（filter_test_model_input），所以這些列只來自"
+            "「有正例的 query group」，不是全部曝光。正例佔比因此比全部曝光高，"
+            "precision 與 pr_auc 會比在全部曝光上算的大；讓使用者決定這類 query "
+            f"group 留多少的設定在 #429。{ranking_rule}{excluded}。"
+            + ("兩段的母體相同，但 precision 的定義不同（見下方 per-item 那一條），"
+               "仍不可互相比較。" if same else
+               "兩段的母體不同，precision 不可互相比較。")
+        )
+    else:
+        population = (
+            f"母體：本段算在本次評估的全部 {n_rows:,} 列候選上，不排除任何 query "
+            f"group。{ranking_rule}{excluded}。兩段的母體不同，precision 不可"
+            "互相比較。"
         )
 
     card = pd.DataFrame([{
@@ -1018,7 +1032,7 @@ def build_prediction_quality_section(
     }]).T
     card.columns = ["value"]
 
-    fine_bins = bins_from_payload(overall["bins"])
+    fine_bins = frame_from_json(overall["bins"])
     bin_table = coarse_bin_table(
         fine_bins, lo=lo, width=width, n_bins=n_bins, n_display_bins=n_display,
     ).rename(columns=_PQ_BIN_COLUMNS)
@@ -1041,12 +1055,11 @@ def build_prediction_quality_section(
             f"共 {n_items} 個；其餘只算進整體）"
         )
         collapsed.append(False)
-        item_bins = bins_from_payload(per_item["bins"])
+        item_bins = frame_from_json(per_item["bins"])
         long = []
         for item in listed:
-            one = item_bins[item_bins[item_col].astype(str) == item]
             tbl = coarse_bin_table(
-                one[["bin", "n", "n_pos", "score_sum"]], lo=lo, width=width,
+                bins_of_item(item_bins, item_col, item), lo=lo, width=width,
                 n_bins=n_bins, n_display_bins=n_display,
             ).rename(columns=_PQ_BIN_COLUMNS)
             tbl.insert(0, item_col, item)
@@ -1062,7 +1075,7 @@ def build_prediction_quality_section(
         figures.append(_pq_threshold_figure(sweep))
 
     return ReportSection(
-        title="預測品質 — 把每一列候選當二元預測",
+        title=_PQ_TITLE,
         description=(
             "這一段不看同一個 query group 裡的名次，而是把每一列候選當成一次"
             "「會不會是正例」的預測：分數 ≥ 門檻就預測為正。回答的問題是「照分數"
@@ -1090,6 +1103,12 @@ def build_prediction_quality_section(
             "分箱表把每格的平均分數與實際正例率放在一起，只是並列兩個量：框架"
             "不做校準（#411），分數不保證是機率。上面每個指標都只看分數的大小"
             "順序，兩者相近或相差都不改變它們。",
+            "一個門檻橫跨所有 query group，前提是不同 query group 的分數彼此可比。"
+            "模型用排序類目標（lambdarank、rank_xendcg）訓練時，分數只為同一個 "
+            "query group 內的先後而學，跨 group 用同一個門檻切是模型沒有優化過的"
+            "用法；binary 目標沒有這個問題。",
+            "分數範圍取最小～最大，少數極端的高分會把細箱撐寬，多數列擠進少數幾箱；"
+            "看分箱表各格的列數就知道是不是這樣。",
         ],
         figures=figures,
         tables=tables,

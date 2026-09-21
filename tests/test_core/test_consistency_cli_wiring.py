@@ -385,3 +385,17 @@ def test_a41_aggregated_beside_a11():
     assert "optional_role_compare_source_errors" in inspect.getsource(
         validate_config_consistency
     )
+
+
+def test_a43_wired_into_evaluation_command_before_spark():
+    # A43 reads evaluation-only keys: A34's placement, for A34's reason.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "retired_calibration_bin_key_errors" not in inspect.getsource(
+        validate_config_consistency
+    ), "A43 must stay off the global aggregator (#158 precedent)"
+    src = inspect.getsource(m.evaluation)
+    assert "retired_calibration_bin_key_errors(params)" in src
+    assert src.index("retired_calibration_bin_key_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A43 must fail before the Spark cold start, like A34"

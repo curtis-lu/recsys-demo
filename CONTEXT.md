@@ -161,10 +161,10 @@ _Avoid_: 點擊率、申辦率、CTR（那是正例率在各示例裡的名字�
 _Avoid_: 準確度、準不準（太模糊，會被讀成排序）
 
 **門檻**（ADR-0024）:
-把 score 切成「預測為正」與「預測為負」的那個切點。排序本身不需要門檻——只有二元指標要。預測品質段只算得到分數箱的邊界，所以門檻的解析度是箱寬。
+把 score 切成「預測為正」與「預測為負」的那個切點。排序本身不需要門檻——只有二元指標要。
 
 **`pr_auc`**（ADR-0024）:
-precision-recall 曲線下的面積，母體是全部候選列：把同一個分數箱裡的列視為同分之後的 average precision（分箱近似）。箱內的先後已經丟掉，所以不等於在原始分數上算的值。
+precision-recall 曲線下的面積，母體是全部候選列（分箱近似）：同一個分數箱裡的列視為同分，照箱由高到低，Σ（該箱正例佔全部正例的比例 × 該箱下緣的 precision）。箱內的先後已經丟掉，所以不等於在原始分數上算的值。
 _Avoid_: average precision、AP（排序的 AP 是 `map@K` 與 `ap_contrib@K`，意思不同）；也不要跟 `pooled_average_precision` 混用（那是另一個定義，兩者不可對帳）
 
 **`pooled_average_precision`**、**`macro_per_item_average_precision`**（ADR-0025，尚未實作）:

@@ -181,21 +181,34 @@ def _ratio(num: np.ndarray, den: np.ndarray) -> np.ndarray:
     return out
 
 
-def threshold_sweep(bins: pd.DataFrame, *, lo: float, width: float) -> pd.DataFrame:
-    """Confusion counts and precision / recall / F1 at every bin edge.
+def threshold_sweep(
+    bins: pd.DataFrame, *, lo: float, width: float, n_bins: int | None = None,
+) -> pd.DataFrame:
+    """Confusion counts and precision / recall / F1 at every bin edge — the
+    one place they are computed; every other function here reads them from
+    this frame.
 
     One row per non-empty bin ``j``, highest threshold first. Its threshold
     is ``j``'s lower edge ``lo + j * width``, and "predicted positive" means
-    every row in bin ``j`` or above. An empty bin is left out: its edge
-    predicts exactly the rows the next non-empty bin's edge does.
+    every row in bin ``j`` or above. ``n`` / ``n_pos`` are bin ``j``'s own
+    counts, ``tp`` / ``fp`` the running totals from the top bin down to it.
+
+    An empty bin is left out: its edge predicts exactly the rows the next
+    non-empty bin's edge above it does. Pass ``n_bins`` to get a row for
+    every edge ``0 .. n_bins - 1`` anyway, empty bins included — for reading
+    the sweep at edges chosen elsewhere (:func:`coarse_bin_table`).
 
     Precision is NaN where nothing is predicted positive; recall and F1 are
     NaN when the data has no positive — undefined, not zero.
     """
-    b = bins.sort_values("bin", ascending=False)
-    b = b[b["n"] > 0]
-    n = b["n"].to_numpy(dtype=float)
-    pos = b["n_pos"].to_numpy(dtype=float)
+    counts = bins.groupby("bin")[["n", "n_pos"]].sum()
+    if n_bins is None:
+        counts = counts[counts["n"] > 0]
+    else:
+        counts = counts.reindex(range(n_bins), fill_value=0)
+    counts = counts.sort_index(ascending=False)
+    n = counts["n"].to_numpy(dtype=float)
+    pos = counts["n_pos"].to_numpy(dtype=float)
     total_pos, total_neg = pos.sum(), (n - pos).sum()
     tp = np.cumsum(pos)
     fp = np.cumsum(n - pos)
@@ -203,12 +216,13 @@ def threshold_sweep(bins: pd.DataFrame, *, lo: float, width: float) -> pd.DataFr
     recall = _ratio(tp, np.full(tp.shape, total_pos))
     f1 = _ratio(2 * precision * recall, precision + recall)
     return pd.DataFrame({
-        "bin": b["bin"].to_numpy(dtype=int),
-        "threshold": lo + b["bin"].to_numpy(dtype=float) * width,
+        "bin": counts.index.to_numpy(dtype=int),
+        "threshold": lo + counts.index.to_numpy(dtype=float) * width,
+        "n": n, "n_pos": pos,
         "tp": tp, "fp": fp,
         "fn": total_pos - tp, "tn": total_neg - fp,
         "precision": precision, "recall": recall, "f1": f1,
-    }).reset_index(drop=True)
+    })
 
 
 def _native(value):
@@ -230,8 +244,8 @@ def binary_summary(bins: pd.DataFrame, *, lo: float, width: float) -> dict:
     positive, or for ``roc_auc`` no negative — is ``None``, never 0.
     """
     sweep = threshold_sweep(bins, lo=lo, width=width)
-    n = float(bins["n"].sum()) if len(bins) else 0.0
-    n_pos = float(bins["n_pos"].sum()) if len(bins) else 0.0
+    n = float(sweep["n"].sum())
+    n_pos = float(sweep["n_pos"].sum())
     n_neg = n - n_pos
     out = {
         "n": _native(n),
@@ -244,16 +258,14 @@ def binary_summary(bins: pd.DataFrame, *, lo: float, width: float) -> dict:
     if n_pos <= 0:
         return out
 
-    # Highest threshold first, so each bin's precision already counts every
-    # bin above it.
-    b = bins.sort_values("bin", ascending=False)
-    b = b[b["n"] > 0]
-    pos = b["n_pos"].to_numpy(dtype=float)
-    neg = b["n"].to_numpy(dtype=float) - pos
+    # Both read the sweep row by row: a bin's own positives (n_pos), the
+    # precision at its lower edge, and the positives above it (tp - n_pos).
+    pos = sweep["n_pos"].to_numpy(dtype=float)
+    neg = sweep["n"].to_numpy(dtype=float) - pos
     precision = sweep["precision"].to_numpy(dtype=float)
     out["pr_auc"] = float(np.sum(pos / n_pos * precision))
     if n_neg > 0:
-        pos_above = np.cumsum(pos) - pos
+        pos_above = sweep["tp"].to_numpy(dtype=float) - pos
         out["roc_auc"] = float(np.sum(neg * (pos_above + 0.5 * pos))
                                / (n_pos * n_neg))
 
@@ -298,9 +310,8 @@ def build_payload(
     per_item_summary = {}
     if lo is not None:
         for item in listed:
-            item_bins = per_item[per_item[item_col].astype(str) == item]
             per_item_summary[item] = binary_summary(
-                item_bins[BIN_COLUMNS], lo=lo, width=width)
+                bins_of_item(per_item, item_col, item), lo=lo, width=width)
     return {
         "columns": {"item": item_col, "score": score_col,
                     "label": label_col, "weight": weight_col},
@@ -322,11 +333,11 @@ def build_payload(
     }
 
 
-def bins_from_payload(payload_bins: dict) -> pd.DataFrame:
-    """A bin table landed by :func:`build_payload`, as a frame again."""
-    from recsys_tfb.evaluation.diagnostics_spark import frame_from_json
-
-    return frame_from_json(payload_bins)
+def bins_of_item(per_item: pd.DataFrame, item_col: str, item: str) -> pd.DataFrame:
+    """One listed item's rows of the per-item bin table, as
+    :data:`BIN_COLUMNS`. Items compare as strings: the payload's ``listed``
+    and ``summary`` keys are strings once landed as JSON."""
+    return per_item.loc[per_item[item_col].astype(str) == item, BIN_COLUMNS]
 
 
 def coarse_bin_table(
@@ -344,8 +355,8 @@ def coarse_bin_table(
     (A42 keeps that an integer). Every display bin is listed, an empty one
     too, with ``mean_score`` (``score_sum / n``) and ``positive_rate``
     (``n_pos / n``) NaN there. ``precision`` / ``recall`` / ``f1`` are the
-    threshold sweep read at the display bin's lower edge, which is a fine
-    bin edge, so they are exact.
+    :func:`threshold_sweep` read at the display bin's lower edge, which is a
+    fine bin edge, so they are exact and cannot disagree with the sweep.
     """
     per = n_bins // n_display_bins
     b = bins.copy()
@@ -353,13 +364,10 @@ def coarse_bin_table(
     grouped = b.groupby("display")[["n", "n_pos", "score_sum"]].sum()
     grouped = grouped.reindex(range(n_display_bins), fill_value=0)
     n = grouped["n"].to_numpy(dtype=float)
-    pos = grouped["n_pos"].to_numpy(dtype=float)
-    total_pos = pos.sum()
-    # "bins >= this display bin's first fine bin" is a suffix sum here.
-    tp = np.cumsum(pos[::-1])[::-1]
-    predicted = np.cumsum(n[::-1])[::-1]
-    precision = _ratio(tp, predicted)
-    recall = _ratio(tp, np.full(tp.shape, total_pos))
+    first_fine_bins = [d * per for d in range(n_display_bins)]
+    at_edges = threshold_sweep(
+        bins, lo=lo, width=width, n_bins=n_bins,
+    ).set_index("bin").loc[first_fine_bins]
     edges = lo + np.arange(n_display_bins + 1) * per * width
     return pd.DataFrame({
         "score_from": edges[:-1],
@@ -367,8 +375,8 @@ def coarse_bin_table(
         "n": grouped["n"].to_numpy(),
         "n_pos": grouped["n_pos"].to_numpy(),
         "mean_score": _ratio(grouped["score_sum"].to_numpy(), n),
-        "positive_rate": _ratio(pos, n),
-        "precision": precision,
-        "recall": recall,
-        "f1": _ratio(2 * precision * recall, precision + recall),
+        "positive_rate": _ratio(grouped["n_pos"].to_numpy(), n),
+        "precision": at_edges["precision"].to_numpy(),
+        "recall": at_edges["recall"].to_numpy(),
+        "f1": at_edges["f1"].to_numpy(),
     })

@@ -863,6 +863,18 @@ def compute_prediction_quality(
     # Decision — no weight column yet: every row weighs 1. The whole-group
     # sampling of zero-positive groups (#429) adds a 1/r weight column to the
     # predictions; this is where its name goes.
+    #
+    # Decision — bins are global and equal-width over this run's own
+    # min..max score, not a fixed [0, 1]: at click rates of 0.1%-1% the scores
+    # crowd the low end and [0, 1] bins would put nearly every row in the
+    # first few. Equal width keeps per-item bins summing to the overall ones
+    # and fine bins merging into display bins; quantile bins would break both
+    # silently (ADR-0024 decision 4).
+    #
+    # Decision — per-item bins for the `top_n` items with the most rows only
+    # (ties by item): item x bin rows come back to the driver, and an ad
+    # deployment can have thousands of items (ADR-0024 decision 6). Every
+    # item still counts in the overall bins and in the item totals.
     weight_col = None
     aggregated = aggregate_score_bins(
         eval_predictions.select(item_col, score_col, label_col),

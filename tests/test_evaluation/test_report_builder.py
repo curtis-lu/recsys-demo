@@ -1696,6 +1696,25 @@ def test_prediction_quality_under_post_training_says_the_test_table_was_filtered
     assert "filter_test_model_input" not in monitoring
 
 
+def test_prediction_quality_post_training_does_not_call_equal_populations_different():
+    """Under --post-training with nothing excluded by the ranking section,
+    both sections see the same rows; the note must say so, not say "the two
+    populations differ" and then take it back."""
+    metrics = {**_metrics(), "n_queries": 12, "n_excluded_queries": 0}
+    text = _pq_text(rb.build_prediction_quality_section(
+        _pq_payload(), metrics, _pq_params(post_training=True)))
+    assert "兩段的母體相同" in text
+    assert "兩段的母體不同" not in text
+
+
+def test_prediction_quality_says_a_global_threshold_needs_comparable_scores():
+    """A ranking objective trains scores to order rows inside one query
+    group; one threshold across every group is a use it never optimised."""
+    text = _pq_text(rb.build_prediction_quality_section(
+        _pq_payload(), _metrics(), _params()))
+    assert "lambdarank" in text and "跨" in text
+
+
 def test_prediction_quality_says_pr_auc_is_not_an_external_average_precision():
     """Decision 7, the third."""
     text = _pq_text(rb.build_prediction_quality_section(

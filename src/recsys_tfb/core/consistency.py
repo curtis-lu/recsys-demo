@@ -482,10 +482,21 @@ Layer 1 — config-static (implemented here; aggregated by
   would switch nothing). Defaults: ``PREDICTION_QUALITY_DEFAULTS``. Predicate:
   ``prediction_quality_param_errors`` (returns errors; the evaluation command
   raises, collected with A22/A34). NOT aggregated, for A34's reason.
+* A43 — a conf still spelling ``evaluation.report.diagnostics.include_calibration``
+  or ``.n_calibration_bins``. They configured ``calibration_bins``, a score-bin
+  table on ``[0, 1]`` that nothing read; #381 removed it and kept one bin table,
+  the prediction-quality family's. A37's shape: **presence is the failure,
+  whatever the value** — ``false`` switches off nothing that still exists, and
+  the keys sit under ``evaluation.report.diagnostics``, a fingerprinted subtree
+  (``COMPUTED_KEYS``), so a conf that keeps them is not the conf that deleted
+  them. Keys: :data:`RETIRED_CALIBRATION_BIN_KEYS`. Predicate:
+  ``retired_calibration_bin_key_errors`` (returns errors; the evaluation
+  command raises, collected with A22/A34/A42). NOT aggregated, unlike A37: the
+  harm belongs to evaluation alone (A34's reason, issue #158).
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
-flags), A22 (``--post-training``), A23/A24/A26/A27/A34/A36/A42 (config keys whose
+flags), A22 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43 (config keys whose
 harm belongs to one pipeline), A28/A39 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags).
 
@@ -1977,11 +1988,44 @@ def retired_calibration_key_errors(parameters: dict) -> list[str]:
     ]
 
 
+#: A43: the ``evaluation.report.diagnostics`` keys that configured the
+#: ``[0, 1]`` calibration bins #381 removed.
+RETIRED_CALIBRATION_BIN_KEYS: tuple[str, ...] = (
+    "evaluation.report.diagnostics.include_calibration",
+    "evaluation.report.diagnostics.n_calibration_bins",
+)
+
+
+def retired_calibration_bin_key_errors(parameters: dict) -> list[str]:
+    """A43 — refuse the calibration-bin keys #381 retired, whatever their value.
+
+    Same reasoning as A37 (``retired_calibration_key_errors``), one pipeline
+    down: nothing reads them, so left in place they switch nothing and say
+    nothing; and they sit in a fingerprinted subtree, so keeping them is not
+    the same conf as deleting them. Both are named in one message.
+    """
+    present = [
+        dotted for dotted in RETIRED_CALIBRATION_BIN_KEYS
+        if _dotted_key_present(parameters, dotted)
+    ]
+    if not present:
+        return []
+    return [
+        "A43: the score-bin table these key(s) configured was removed in #381 "
+        "and nothing reads " + ", ".join(repr(k) for k in present) + ". "
+        "Delete them. The one score-bin table left is the prediction-quality "
+        "family's (evaluation.prediction_quality, switched on by "
+        "evaluation.report.sections.prediction_quality); its bins span this "
+        "run's min..max score rather than [0, 1]."
+    ]
+
+
 #: The ``evaluation.report.sections`` switches the report reads: one name per
 #: ``_section_on(parameters, name)`` call in ``evaluation/report_builder.py``,
-#: which refuses any name not listed here (A34). ``baseline`` and
-#: ``diagnostics`` are also read directly by the nodes that skip computing
-#: (``compute_baseline_metrics`` / ``compute_report_aggregates``); those reads
+#: which refuses any name not listed here (A34). ``baseline``,
+#: ``diagnostics`` and ``prediction_quality`` are also read directly by the
+#: nodes that skip computing (``compute_baseline_metrics`` /
+#: ``compute_report_aggregates`` / ``compute_prediction_quality``); those reads
 #: bypass the ``_section_on`` pre-check, so a new direct read of a name that is
 #: not listed here is caught by nothing. ``report_builder`` imports this
 #: constant, not the other way round: ``core/`` has no import-time dependency on
