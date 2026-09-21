@@ -111,6 +111,31 @@ def test_disabled_item_ability_stub_is_treated_as_absent():
     assert any("item_ability" in n for n in out["notes"])
 
 
+def test_a_skipped_item_ability_is_not_blamed_on_the_enabled_flag():
+    """兩種 stub 的成因不同，印出來的話也必須不同。
+
+    ``enabled: false`` 是使用者自己關的；宣告 ``event`` 之後被框架跳過的那種，
+    使用者從來沒碰過那個旗標——印「你把 enabled 設成 false 了」會叫他去查一個
+    他沒設過的設定。跳過的原因由上游寫在 ``skipped_reason``，這裡照抄。
+    """
+    stub = {
+        "enabled": False,
+        "skipped_reason": "宣告了 schema.columns.event（imp_id）：……本次跳過。",
+    }
+    out = compute(LEDGER, stub, PARAMS)
+    note = next(n for n in out["notes"] if "item_ability" in n)
+    assert "imp_id" in note
+    assert "enabled=false" not in note
+
+
+def test_a_user_disabled_item_ability_still_names_the_flag():
+    """判別性的另一半：真的是使用者關掉時，旗標名就是他要找的東西。
+    一個永遠印 skipped_reason 的實作會通過上面那條、卻讓這條沒話可說。"""
+    out = compute(LEDGER, {"enabled": False}, PARAMS)
+    note = next(n for n in out["notes"] if "item_ability" in n)
+    assert "enabled=false" in note
+
+
 def test_all_return_paths_share_one_key_set():
     full = compute(LEDGER, {"per_item": []}, PARAMS)
     no_ledger = compute(None, None, PARAMS)

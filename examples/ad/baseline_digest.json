@@ -1,8 +1,8 @@
 {
   "measured": {
     "date": "2026-09-21",
-    "code_commit": "e82bee5",
-    "how": "run_e2e.sh 跑 feat/378-event-role，這組 conf 宣告了 event（#378）。先做相容性驗證：把 examples/ad/ 整個還原成 main 的設定、只留框架程式碼的改動，跑 run_e2e.sh --compare，與 main 的 baseline_digest.json 逐值一致——證明沒宣告 event 的部署行為不變。再打開 event 重跑，得到本檔。預期會變的幾層與原因：(1) dataset 四張 model_input 的列數與指紋——一次曝光一列，不再聚合成一週一列，且 identity 多了 impression_id；(2) training／inference 的指紋——模型是在不同形狀的資料上訓練的；(3) evaluation：config_shift／item_ability／suppression／metric_ci 四份 JSON 縮成 stub（宣告 event 後它們假設的「同組內 item 唯一」不成立，框架自動跳過並寫出原因），metrics.json 多出 n_tied_rows／tied_row_share 兩個值，k_values 的 \"all\" 從 12（item 種數）變成 17（最寬 query group 的列數）。",
+    "code_commit": "07c9b02",
+    "how": "run_e2e.sh 跑 feat/378-event-role，這組 conf 宣告了 event（#378）。先做相容性驗證：把 examples/ad/ 整個還原成 main 的設定、只留框架程式碼的改動，跑 run_e2e.sh --compare，與 main 的 baseline_digest.json 逐值一致——證明沒宣告 event 的部署行為不變。再打開 event 重跑，得到本檔。預期會變的幾層與原因：(1) dataset 四張 model_input 的列數與指紋——一次曝光一列，不再聚合成一週一列，且 identity 多了 impression_id；(2) training／inference 的指紋——模型是在不同形狀的資料上訓練的；(3) evaluation：config_shift／item_ability／suppression／metric_ci 四份 JSON 縮成 stub（宣告 event 後它們假設的「同組內 item 唯一」不成立，框架自動跳過並寫出原因），metrics.json 多出 n_tied_rows／tied_row_share 兩個值，k_values 的 \"all\" 從 12（item 種數）變成 17（最寬 query group 的列數）。 收審查發現後重跑一次：與前一次相比只有 evaluation.diagnosis/model_capacity.json 的指紋變了，因為 item_ability 被跳過時它印的那句話從「使用者把 enabled 設成 false」改成照抄上游的 skipped_reason（使用者從來沒設過那個旗標）。其餘逐值相同。",
     "environment": "macOS, 8 cores, local[*], PySpark 3.3.2, LightGBM 4.6.0; 兩條 e2e 同時跑，開跑時 load average 3.3，跑完時 6.8"
   },
   "noisy": {},
@@ -246,7 +246,7 @@
     },
     "diagnosis/model_capacity.json": {
       "leaves": 321,
-      "hash": "305539a341333749ecec65be8b2c7ab32791c70932b35b94b32b4275e3337959"
+      "hash": "d8a7ba53a5f4498f7121d1121faa2d2de24725b62cbb6256325ac48d631136ff"
     },
     "diagnosis/suppression.json": {
       "leaves": 3,
