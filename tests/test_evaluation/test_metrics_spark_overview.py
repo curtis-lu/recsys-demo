@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation import metrics_spark as ms
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
@@ -312,3 +313,58 @@ def test_all_resolves_to_the_widest_query_group_with_the_event_role(spark):
     }
     # 2 distinct items, but c1's group holds 4 rows.
     assert ms._resolve_all_k(_event_df(spark), schema, "prod_name") == 4
+
+
+# ---------------------------------------------------------------------------
+# `occasion` declared (#428): the same two numbers, scoped to one occasion
+# ---------------------------------------------------------------------------
+
+
+def _occasion_params():
+    return {"schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+        "label": "label", "score": "score", "rank": "rank",
+        "occasion": "req_id"}},
+        "evaluation": {}}
+
+
+def _occasion_df(spark):
+    """c1 @ 20240331 was shown A/B/C in request r1 and A alone in r2; c2 was
+    shown D alone in r3.
+
+    Items are unique within each request (what the duplicate checks guarantee
+    when only ``occasion`` is declared). Four distinct items, widest occasion
+    three rows — so the two candidate answers for ``"all"`` differ.
+    """
+    return spark.createDataFrame(
+        [
+            ("20240331", "c1", "r1", "A", 0.9, 1),
+            ("20240331", "c1", "r1", "B", 0.5, 0),
+            ("20240331", "c1", "r1", "C", 0.5, 0),
+            ("20240331", "c1", "r2", "A", 0.5, 0),
+            ("20240331", "c2", "r3", "D", 0.3, 0),
+        ],
+        schema=["snap_date", "cust_id", "req_id", "prod_name", "score", "label"],
+    )
+
+
+def test_all_resolves_to_the_widest_occasion_with_the_occasion_role(spark):
+    """Four distinct items, but no occasion holds more than three rows.
+
+    Resolving to the item count would not truncate anything here — it would
+    report ``map@4`` on rankings three long, a K that names a list length no
+    ranking has. ADR-0025 decision D: declared role ⇒ widest query group.
+    """
+    schema = get_schema(_occasion_params())
+    assert ms._resolve_all_k(_occasion_df(spark), schema, "prod_name") == 3
+
+
+def test_tied_row_share_is_reported_with_the_occasion_role(spark):
+    """B and C tie at 0.5 inside r1. r2's A also scores 0.5 but is alone in
+    its occasion — under ``time`` + ``entity`` alone the three 0.5 rows would
+    all have counted as tied."""
+    totals = ms.compute_dataset_overview(
+        _occasion_df(spark), _occasion_params()
+    )["totals"]
+    assert totals["n_tied_rows"] == 2
+    assert totals["tied_row_share"] == pytest.approx(2 / 5)

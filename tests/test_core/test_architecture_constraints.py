@@ -1191,7 +1191,7 @@ SCHEMA_SCAN_ROOTS = {"src/recsys_tfb": SRC, "tests": TESTS}
 #: so the copy cannot drift the other way either -- which it had, between
 #: ``event`` landing and this line being written.
 SCHEMA_ROLE_KEYS = frozenset(
-    {"time", "entity", "item", "label", "score", "rank", "event"}
+    {"time", "entity", "item", "label", "score", "rank", "occasion", "event"}
 )
 
 #: The keys ``get_schema`` *derives* (``core/schema.py::_DERIVED_KEYS``). None
