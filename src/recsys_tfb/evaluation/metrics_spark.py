@@ -72,7 +72,11 @@ from pyspark.sql import Window
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import declares_optional_role, get_schema
-from recsys_tfb.evaluation.metrics import macro_from_per_item, metric_params
+from recsys_tfb.evaluation.metrics import (
+    ALL_K_KEY,
+    macro_from_per_item,
+    metric_params,
+)
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT, segment_key
 from recsys_tfb.utils.ranking import rank_by_score_then_item
 
@@ -84,60 +88,67 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _resolve_k_values(raw: Iterable, n_items: int) -> list[int]:
+def _resolve_k_values(raw: Iterable, all_k: int) -> list[int]:
     """Resolve mixed int / 'all' k_values to a sorted unique int list.
 
-    'all' (case-insensitive) resolves to ``n_items``. Duplicates after
-    resolution are collapsed.
+    'all' (case-insensitive) resolves to ``all_k`` (``_resolve_all_k``).
+    Duplicates after resolution are collapsed.
     """
     out: set[int] = set()
     for k in raw:
         if isinstance(k, str) and k.lower() == "all":
-            out.add(n_items)
+            out.add(all_k)
         else:
             out.add(int(k))
     return sorted(out)
 
 
-def _resolve_all_k(eval_predictions: SparkDataFrame, schema: dict, item_col: str) -> int:
+def _resolve_all_k(
+    frame: SparkDataFrame,
+    group_cols: Sequence[str],
+    item_col: str,
+    event_cols: Sequence[str],
+) -> int:
     """What ``k_values: "all"`` means for this frame — the K that truncates
     nothing.
 
-    Two answers, because a query group's candidate count is two different
-    things depending on the declared roles:
+    Two answers, and which one depends on the rows of **this frame**, not on
+    the declared roles (``event_cols`` is what the caller ranks this frame
+    with — see ``_compute_core``):
 
-    * **No optional role declared** — the distinct item count, exactly as
-      before #378. One row per item per query group is guaranteed by the
-      duplicate checks, so the widest group is at most that many rows, and the
-      number is stable across frames in a way a row count is not (it is also
-      what the report's per-item K truncation reads). Left untouched so every
-      existing deployment's ``"all"`` resolves to the same integer.
-    * **``event`` declared** — the largest number of rows any one query group
-      holds. The item count would now truncate: one entity can be shown the
-      same twelve creatives thirty times in a week, which is thirty rows in
-      one query group against twelve distinct items, and ``map@12`` on a
-      30-row ranking silently answers a different question from the one
-      ``"all"`` names.
-    * **Only ``occasion`` declared** — the item count, as undeclared. Items
-      are unique within an occasion (the duplicate checks guarantee it), so
-      no query group can hold more rows than there are items and the item
-      count truncates nothing: ``map@all`` and ``recall@all`` come out the
-      same either way. It must stay the item count because the report looks
-      ``"all"`` up by exactly that number (``report_builder._k_to_lookup``);
-      resolving to the widest occasion here would store ``map@6`` and leave
-      the report's ``map@all`` cell blank, with nothing raised — which is what
-      the ``event`` branch above does today (#428 found it in #378's run).
-      Spec #426 decision D says "any new role"; its reason (a group longer
-      than the item list) only exists with ``event``.
+    * **The frame holds one row per event** (``event_cols`` non-empty) — the
+      largest number of rows any one query group holds. The item count would
+      truncate: one entity can be shown the same twelve creatives thirty times
+      in a week, which is thirty rows in one query group against twelve
+      distinct items, and ``map@12`` on a 30-row ranking silently answers a
+      different question from the one ``"all"`` names.
+    * **Otherwise** — the distinct item count, exactly as before #378. Items
+      are unique within a query group (the duplicate checks guarantee it with
+      no role or with ``occasion`` only), so no group can hold more rows than
+      there are items and the item count truncates nothing. This is also every
+      frame the category pass ranks: ``collapse_to_categories`` leaves one row
+      per (query group, category), so the answer there is the category count,
+      as ``docs/pipelines/evaluation.md`` says. It used to follow the declared
+      role to the widest collapsed group — a number no report looked up.
 
-    Costs one extra shuffle over the same frame in the declared case only —
+    Why not the widest group everywhere, when it truncates nothing either:
+    with no ``event`` rows the two agree on ``map@all`` and ``recall@all``, but
+    the item count is what every existing deployment's ``"all"`` already
+    resolves to, so its artifacts stay value-for-value.
+
+    Readers do not recompute this — they read what the producer used through
+    ``metrics.resolved_all_k`` (#434). ``_compute_core`` writes it into the
+    bundle in the first case; in the second it is
+    ``dataset_overview.totals.n_items`` of the same frame.
+
+    Costs one extra shuffle over the same frame in the event case only —
     a ``groupBy(query_group).count()`` whose driver-side result is a single
-    number — and nothing at all in the undeclared case.
+    number.
     """
-    if not schema.get("event"):
-        return eval_predictions.select(item_col).distinct().count()
+    if not event_cols:
+        return frame.select(item_col).distinct().count()
     per_group = (
-        eval_predictions.groupBy(*schema["query_group_columns"])
+        frame.groupBy(*group_cols)
         .agg(F.count(F.lit(1)).alias("_n_rows"))
         .agg(F.max("_n_rows").alias("_max_rows"))
         .collect()[0]["_max_rows"]
@@ -148,7 +159,7 @@ def _resolve_all_k(eval_predictions: SparkDataFrame, schema: dict, item_col: str
 
 
 def _resolve_k_grids(
-    parameters: dict, n_items: int
+    parameters: dict, all_k: int
 ) -> tuple[list[int], list[int]]:
     """``(query_ks, item_ks)``: the per-query and the per-item K grids.
 
@@ -174,7 +185,7 @@ def _resolve_k_grids(
     path) both resolve through this one function, so the two sides line up.
     """
     eval_params = parameters.get("evaluation", {}) or {}
-    query_ks = _resolve_k_values(eval_params.get("k_values", [5, "all"]), n_items)
+    query_ks = _resolve_k_values(eval_params.get("k_values", [5, "all"]), all_k)
     metric_k = metric_params(parameters)["k"]
     if metric_k is None:
         return query_ks, query_ks
@@ -799,6 +810,10 @@ def _compute_core(
     frame ``collapse_to_categories`` had already aggregated it away from, and
     Spark raised ``Column 'impression_id' does not exist`` halfway through
     training.
+
+    ``event_cols`` also decides what ``"all"`` resolves to (``_resolve_all_k``)
+    and whether the bundle records it under ``metrics.ALL_K_KEY``: it is the
+    one argument that says whether this frame's rows are events.
     """
     schema = get_schema(parameters)
     item_col = schema["item"]
@@ -817,8 +832,12 @@ def _compute_core(
         name: v for name, v in metric_params(parameters).items() if name != "k"
     }
 
-    all_k = _resolve_all_k(eval_predictions, schema, item_col)
+    all_k = _resolve_all_k(eval_predictions, group_cols, item_col, event_cols)
     query_ks, item_ks = _resolve_k_grids(parameters, all_k)
+    # Written only when it can differ from dataset_overview.totals.n_items —
+    # the one other place metrics.resolved_all_k looks — so a bundle computed
+    # without event rows gains no key.
+    recorded_k = {ALL_K_KEY: all_k} if event_cols else {}
     n_queries_total = eval_predictions.select(*group_cols).distinct().count()
 
     # ---- Layer 1: row-level enrichment ----
@@ -837,6 +856,7 @@ def _compute_core(
             **_EMPTY_RESULT,
             "n_queries": n_queries_total,
             "n_excluded_queries": n_excluded_queries,
+            **recorded_k,
         }
 
     enriched = add_row_contributions(df_with_pos, group_cols, label_col, item_ks)
@@ -904,6 +924,7 @@ def _compute_core(
                 "observation_items": observation_items,
                 "n_queries": n_queries_total,
                 "n_excluded_queries": n_excluded_queries,
+                **recorded_k,
             }
         finally:
             per_query.unpersist()
@@ -968,14 +989,16 @@ def compute_overall_per_item(
     eval_params = parameters.get("evaluation", {}) or {}
     _require_segment_columns_in_frame(eval_predictions, segment_columns)
     active_seg_col = segment_columns[0] if segment_columns else None
-    all_k = _resolve_all_k(eval_predictions, schema, item_col)
+    if event_cols is None:
+        event_cols = schema.get("event", [])
+    all_k = _resolve_all_k(eval_predictions, group_cols, item_col, event_cols)
     # Same grids as _compute_core (metric.k on the per-item side only), so
-    # baseline and model keys line up.
+    # baseline and model keys line up. Nothing is recorded: the report reads
+    # this bundle at the model's K (report_builder.build_baseline_section).
     query_ks, item_ks = _resolve_k_grids(parameters, all_k)
 
     df = rank_within_query(
-        eval_predictions, group_cols, score_col, item_col,
-        schema.get("event", []) if event_cols is None else list(event_cols),
+        eval_predictions, group_cols, score_col, item_col, list(event_cols),
     )
     df = add_query_total_rel(df, group_cols, label_col)
     df_with_pos = df.filter(F.col("total_rel") > 0)
@@ -1060,6 +1083,11 @@ def compute_all_metrics(
           "observation_items": [item, ...]（n_pos < evaluation.metric.min_positives 的 item；additive，預設空）
           "n_queries":          int  (total distinct queries before filtering),
           "n_excluded_queries": int  (queries with zero positives → dropped),
+          "all_k":  int  (metrics.ALL_K_KEY; only when schema declares
+                          ``event``, and never inside ``category``) the K
+                          ``"all"`` resolved to — the widest query group.
+                          Read it through
+                          ``metrics.resolved_all_k``, never by counting items.
           "dataset_overview": {
               "totals":       {n_rows, n_entities, n_items, n_snap_dates,
                                n_positives, positive_rate,

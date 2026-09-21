@@ -21,6 +21,8 @@ What lives here:
   fallback semantics cannot drift between copies. A15 in
   ``core/consistency.py`` reads the same block separately, only to validate
   value domains.
+* :func:`resolved_all_k` — the only reader of the K a metrics bundle's
+  ``"all"`` values are stored at, for the reports and for training (#434).
 
 The dict-shaped per-segment / per-item / overall metrics of the evaluation
 pipeline run on Spark — see ``recsys_tfb.evaluation.metrics_spark``.
@@ -66,6 +68,46 @@ def metric_params(parameters: dict) -> dict:
         "min_positives": int(m.get("min_positives", 0) or 0),
         "shrinkage_k": float(m.get("shrinkage_k", 0.0) or 0.0),
     }
+
+
+#: Top-level key of a ``metrics_spark.compute_all_metrics`` bundle: the K
+#: ``evaluation.k_values: "all"`` resolved to. Written only when the ranked
+#: frame holds one row per event — the one case in which it can differ from
+#: the item count (``resolved_all_k``).
+ALL_K_KEY = "all_k"
+
+
+def resolved_all_k(bundle: dict) -> int:
+    """The K a metrics bundle's ``"all"`` values are stored at (``map@{K}``).
+
+    The one reader of that number (#434). ``"all"`` has one producer
+    (``metrics_spark._resolve_all_k``) and several readers — the main report,
+    the comparison report, training's test mAP. Each used to count the items
+    itself; with ``event`` declared the producer's K is the widest query
+    group, not the item count, so every lookup missed and nothing raised (a
+    blank ``map@all`` cell, a test mAP logged as 0.0).
+
+    * ``bundle[ALL_K_KEY]`` when present. The producer writes it only when the
+      frame it ranked held one row per event, the one case in which the widest
+      group can be longer than the item list.
+    * Otherwise ``dataset_overview.totals.n_items`` — the producer's K in every
+      other case, counted over the same frame. Nothing is written then, so the
+      artifact of a deployment without ``event`` stays value-for-value what it
+      was.
+    * ``0`` when the bundle carries neither: a slim baseline bundle, which has
+      no overview. ``0`` means unknown, as ``report_builder.count_items``
+      already reads it; the report reads a baseline at the model's K instead.
+
+    Reads the overview directly rather than through
+    ``report_builder.count_items`` because this module imports nothing from the
+    project. The pre-#327 refusal lives there, and every report section still
+    reads the overview through it.
+    """
+    recorded = bundle.get(ALL_K_KEY)
+    if recorded is not None:
+        return int(recorded)
+    totals = (bundle.get("dataset_overview") or {}).get("totals") or {}
+    return int(totals.get("n_items", 0))
 
 
 def compute_ap(y_true: np.ndarray, y_score: np.ndarray) -> Optional[float]:

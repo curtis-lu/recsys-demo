@@ -376,3 +376,37 @@ class TestAggregateReportDiagnostics:
             include_distributions=False,
         )
         assert set(out) == {"columns", "calibration"}
+
+
+class TestRankAxisCoversEveryRank:
+    """#434: with ``event`` declared a query group holds more rows than there
+    are items, so ranks run past the item count. The rank axis used to stop at
+    the item count and ``reindex`` dropped every rank beyond it."""
+
+    ROWS = [
+        # One query group: A shown three times, B once — ranks 1..4, 2 items.
+        ("A", 1, 0), ("A", 2, 0), ("A", 3, 0), ("B", 4, 1),
+    ]
+
+    def test_ranks_past_the_item_count_are_kept(self, spark):
+        sdf = _sdf(spark, self.ROWS, ["item", "rank", "label"])
+        mat = rank_count_matrix(sdf, "item", "rank")
+        assert list(mat.columns) == [1, 2, 3, 4]
+        assert mat.loc["B", 4] == 1
+        assert mat.values.sum() == len(self.ROWS)
+
+    def test_every_matrix_shares_one_rank_axis(self, spark):
+        """The positive rows stop at rank 4 here, but the axis is the frame's,
+        not the filtered rows' — the three heatmaps line up column for column."""
+        sdf = _sdf(spark, self.ROWS + [("A", 5, 0)], ["item", "rank", "label"])
+        cols = [
+            list(f(sdf, "item", "rank", *extra).columns)
+            for f, extra in (
+                (rank_count_matrix, ()),
+                (positive_rank_count_matrix, ("label",)),
+                (positive_rate_matrix, ("label",)),
+            )
+        ]
+        assert cols == [[1, 2, 3, 4, 5]] * 3
+        pos = positive_rank_count_matrix(sdf, "item", "rank", "label")
+        assert pos.loc["B", 4] == 1

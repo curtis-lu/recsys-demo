@@ -4,6 +4,8 @@ import pytest
 
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation import metrics_spark as ms
+from recsys_tfb.evaluation import report_builder as rb
+from recsys_tfb.evaluation.metrics import ALL_K_KEY, resolved_all_k
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
 
@@ -298,21 +300,20 @@ def test_tied_rows_are_counted_within_a_query_group_not_across(spark):
 def test_all_resolves_to_the_distinct_item_count_without_the_event_role(spark):
     """Unchanged from before #378 — this is the number every existing
     deployment's ``k_values: "all"`` already resolves to."""
-    schema = {"item": "prod_name", "query_group_columns": ["snap_date", "cust_id"]}
-    assert ms._resolve_all_k(_df(spark), schema, "prod_name") == 2
+    assert ms._resolve_all_k(
+        _df(spark), ["snap_date", "cust_id"], "prod_name", event_cols=[],
+    ) == 2
 
 
 def test_all_resolves_to_the_widest_query_group_with_the_event_role(spark):
     """With `event` declared a query group can hold more rows than there are
     items, and the item count would truncate the longest ranking — which is
     exactly what "all" says it does not do."""
-    schema = {
-        "item": "prod_name",
-        "event": ["imp_id"],
-        "query_group_columns": ["snap_date", "cust_id"],
-    }
     # 2 distinct items, but c1's group holds 4 rows.
-    assert ms._resolve_all_k(_event_df(spark), schema, "prod_name") == 4
+    assert ms._resolve_all_k(
+        _event_df(spark), ["snap_date", "cust_id"], "prod_name",
+        event_cols=["imp_id"],
+    ) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -356,17 +357,20 @@ def test_all_stays_the_item_count_with_only_the_occasion_role(spark):
     ``map@3`` where the report asks for ``map@4`` — the blank ``map@all``
     cell ``event`` already produces (#428)."""
     schema = get_schema(_occasion_params())
-    assert ms._resolve_all_k(_occasion_df(spark), schema, "prod_name") == 4
+    assert ms._resolve_all_k(
+        _occasion_df(spark), schema["query_group_columns"], "prod_name",
+        event_cols=schema.get("event", []),
+    ) == 4
 
 
 def test_the_report_finds_map_at_all_with_the_occasion_role(spark):
     """End to end over the lookup contract: metrics keyed at the K the report
-    will ask for (``dataset_overview.totals.n_items``)."""
+    will ask for, and nothing new written to ask it with."""
     params = _occasion_params()
     params["evaluation"] = {"k_values": [1, "all"]}
     out = ms.compute_all_metrics(_occasion_df(spark), params)
-    n_items = out["dataset_overview"]["totals"]["n_items"]
-    assert f"map@{n_items}" in out["overall"]
+    assert ALL_K_KEY not in out
+    assert f"map@{resolved_all_k(out)}" in out["overall"]
 
 
 def test_tied_row_share_is_reported_with_the_occasion_role(spark):
@@ -387,3 +391,103 @@ def test_evaluated_queries_are_the_occasions_with_a_positive(spark):
     out = ms.compute_all_metrics(_occasion_df(spark), _occasion_params())
     assert out["n_queries"] == 3
     assert out["n_queries"] - out["n_excluded_queries"] == 1
+
+
+# ---------------------------------------------------------------------------
+# One source for what "all" resolved to (#434)
+# ---------------------------------------------------------------------------
+
+
+def _event_params_with_categories():
+    """``_event_params`` with k_values ``[1, "all"]`` and A, B folded into one
+    category; C stays its own (``unmapped: singleton``)."""
+    params = _event_params()
+    params["schema"]["categorical_values"] = {"prod_name": ["A", "B", "C"]}
+    params["evaluation"] = {
+        "k_values": [1, "all"],
+        "item_categories": {
+            "enabled": True, "unmapped": "singleton",
+            "mapping": {"AB": ["A", "B"]},
+        },
+    }
+    return params
+
+
+def _wide_event_df(spark):
+    """Three items, and one query group four rows long.
+
+    c1 was shown A three times and B once, and clicked the B at the bottom
+    (rank 4); c3 was shown C once and clicked it. c2 has no click. So the two
+    candidate answers for ``"all"`` differ — 3 items against a 4-row group —
+    and so do the metrics at them:
+
+    * ``map@4`` = mean(AP c1 = 1/4, AP c3 = 1) = 0.625; ``map@3`` = 0.5
+    * ``recall@4`` = 1.0; ``recall@3`` = 0.5
+
+    At category grain c1 collapses to one AB row, so the widest collapsed
+    group is 1 row against 2 categories (AB, C).
+    """
+    return spark.createDataFrame(
+        [
+            ("20240331", "c1", "A", "i1", 0.9, 0),
+            ("20240331", "c1", "A", "i2", 0.9, 0),
+            ("20240331", "c1", "A", "i3", 0.4, 0),
+            ("20240331", "c1", "B", "i4", 0.1, 1),
+            ("20240331", "c2", "A", "i5", 0.2, 0),
+            ("20240331", "c3", "C", "i6", 0.7, 1),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "imp_id", "score", "label"],
+    )
+
+
+def _table(section, title_part):
+    return next(t for t, tt in zip(section.tables, section.table_titles)
+                if title_part in tt)
+
+
+def test_the_report_finds_map_and_recall_at_all_with_the_event_role(spark):
+    """The bug: metrics stored at the widest group (``map@4``), the report
+    asked for the item count (``map@3``), and the ``@all`` cell was blank with
+    nothing raised. Expected values are worked out by hand in
+    ``_wide_event_df``."""
+    params = _event_params_with_categories()
+    out = ms.compute_all_metrics(_wide_event_df(spark), params)
+
+    overall = _table(rb.build_metrics_section(out, params), "overall（")
+    assert overall.loc["map", "@all"] == pytest.approx(0.625)
+    assert overall.loc["recall", "@all"] == pytest.approx(1.0)
+
+    card = rb.build_overview_section(out, params).tables[0]
+    assert card.loc["map@all", "value"] == pytest.approx(0.625)
+
+
+def test_all_k_is_written_only_when_the_frame_holds_event_rows(spark):
+    """Written for the fine-grained pass, where the widest group can outgrow
+    the item list. Not for the category pass — collapsing leaves one row per
+    (query group, category), so no event rows remain — and not at all without
+    the role, which keeps every existing artifact value-for-value."""
+    out = ms.compute_all_metrics(
+        _wide_event_df(spark), _event_params_with_categories())
+    assert out[ALL_K_KEY] == 4
+    assert ALL_K_KEY not in out["category"]
+
+    undeclared = ms.compute_all_metrics(_df(spark), _params())
+    assert ALL_K_KEY not in undeclared
+
+
+def test_category_all_is_the_category_count_with_the_event_role(spark):
+    """The category frame has no event rows, so ``"all"`` resolves there the
+    way it does undeclared: the category count (2), which is what
+    ``docs/pipelines/evaluation.md`` says. It used to follow the declared role
+    to the widest collapsed group (1), store ``map@1`` only, and blank the
+    report's category ``@all`` cell.
+
+    ``precision@all`` is what tells the two apart — ``map`` and ``recall``
+    come out the same at either K, since neither truncates. Each clicked group
+    holds one positive over K = 2, so 0.5; at K = 1 it would be 1.0."""
+    params = _event_params_with_categories()
+    out = ms.compute_all_metrics(_wide_event_df(spark), params)
+
+    cat = _table(rb.build_metrics_section(out, params), "大類 overall")
+    assert cat.loc["map", "@all"] == pytest.approx(1.0)
+    assert cat.loc["precision", "@all"] == pytest.approx(0.5)

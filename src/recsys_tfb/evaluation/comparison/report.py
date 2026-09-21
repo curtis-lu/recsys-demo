@@ -8,11 +8,12 @@ import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.compare import build_comparison_result
+from recsys_tfb.evaluation.metrics import resolved_all_k
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
 from recsys_tfb.evaluation.report_builder import (
     build_glossary_section,
     count_items,
-    drop_metric_keys_above_item_count,
+    drop_metric_keys_above_all_k,
     eval_dates_display,
     macro_coverage_suffix_mb,
     per_item_metric_compare_table,
@@ -124,23 +125,47 @@ def _build_coverage_section(
     )
 
 
+def _each_side_up_to_its_k(
+    overall_a: dict, overall_b: dict, overall_d: dict, all_k_a: int, all_k_b: int,
+) -> tuple[list, dict, dict, dict]:
+    """``(keys, a, b, Δ)`` of an every-key table, each side cut at its own K.
+
+    bug 8 (ADR-0020): these tables print every computed key, so a key whose
+    @K is past the longest list is dropped — precision@K keeps falling there
+    only because its denominator is K. The bound is each side's own
+    ``metrics.resolved_all_k``: the two sides keep their own rows inside the
+    common universe, so with ``event`` their widest groups, and so their
+    ``"all"`` keys, can differ (#434). A single bound — it used to be side
+    A's item count — hides whichever side's ``"all"`` row lies past it.
+
+    Rows are the union of what each side keeps; a side's cell is blank where
+    it cut the key, and so is the Δ. With equal bounds this is exactly the old
+    single filter.
+    """
+    kept_a = drop_metric_keys_above_all_k(overall_a, all_k_a)
+    kept_b = drop_metric_keys_above_all_k(overall_b, all_k_b)
+    both = set(kept_a) & set(kept_b)
+    return (
+        sorted(set(kept_a) | set(kept_b)),
+        {k: overall_a[k] for k in kept_a},
+        {k: overall_b[k] for k in kept_b},
+        {k: v for k, v in overall_d.items() if k in both},
+    )
+
+
 def _build_overall_section(metrics_a: dict, comparison: dict) -> ReportSection:
     label_a, label_b = comparison["label_a"], comparison["label_b"]
     overall_a = comparison["result_a"].get("overall", {}) or {}
     overall_b = comparison["result_b"].get("overall", {}) or {}
-    overall_d = comparison["overall_delta"]
-    # bug 8 (ADR-0020): this table prints every computed key, so rows with an
-    # @K above the item count are dropped here (same n_items as the per-item
-    # section below).
-    keys = drop_metric_keys_above_item_count(
-        sorted(set(overall_a) | set(overall_b) | set(overall_d)),
-        count_items(metrics_a),
+    keys, cells_a, cells_b, cells_d = _each_side_up_to_its_k(
+        overall_a, overall_b, comparison["overall_delta"],
+        resolved_all_k(metrics_a), resolved_all_k(comparison["result_b"]),
     )
     tbl = pd.DataFrame(
         {
-            label_a: [overall_a.get(k) for k in keys],
-            label_b: [overall_b.get(k) for k in keys],
-            "Δ": [overall_d.get(k) for k in keys],
+            label_a: [cells_a.get(k) for k in keys],
+            label_b: [cells_b.get(k) for k in keys],
+            "Δ": [cells_d.get(k) for k in keys],
         },
         index=keys,
     )
@@ -189,8 +214,10 @@ def _build_per_item_section(
         (parameters.get("evaluation", {}) or {}).get("report", {}) or {}
     ).get("display", {}) or {}
     n_items = count_items(metrics_a)
-    rec_ks = resolve_display_k(disp.get("guardrail_recall_k", [1, 3, 5]), n_items)
-    attr_ks = resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_items)
+    # Each side's "all" at its own K (#434); the int columns follow A's.
+    all_k_a, all_k_b = resolved_all_k(metrics_a), resolved_all_k(metrics_b)
+    rec_ks = resolve_display_k(disp.get("guardrail_recall_k", [1, 3, 5]), all_k_a)
+    attr_ks = resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), all_k_a)
 
     macro_a = (metrics_a.get("macro_avg", {}) or {}).get("by_item")
     macro_b = (metrics_b.get("macro_avg", {}) or {}).get("by_item")
@@ -206,8 +233,8 @@ def _build_per_item_section(
     ):
         tbl = per_item_metric_compare_table(
             per_item_a, per_item_b, per_item_delta,
-            ks, n_items, metric_key, col_fmt,
-            macro_a=macro_a, macro_b=macro_b,
+            ks, all_k_a, metric_key, col_fmt,
+            macro_a=macro_a, macro_b=macro_b, all_k_b=all_k_b,
         )
         tables.append(tbl)
         titles.append(f"{title}{item_cov}")
@@ -239,26 +266,26 @@ def _build_category_section(
     per_item_delta = comparison_cat.get("per_item_delta", {}) or {}
     disp = (eval_params.get("report", {}) or {}).get("display", {}) or {}
     n_cat = count_items(cat_a)
-    rec_ks = resolve_display_k(disp.get("guardrail_recall_k", [1, 3, 5]), n_cat)
-    attr_ks = resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_cat)
+    cat_k_a, cat_k_b = resolved_all_k(cat_a), resolved_all_k(cat_b)
+    rec_ks = resolve_display_k(disp.get("guardrail_recall_k", [1, 3, 5]), cat_k_a)
+    attr_ks = resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), cat_k_a)
     macro_a = (cat_a.get("macro_avg", {}) or {}).get("by_item")
     macro_b = (cat_b.get("macro_avg", {}) or {}).get("by_item")
 
     tables, titles = [], []
+    # bug 8 (ADR-0020): same per-side key filter as _build_overall_section,
+    # against each side's category K — 3 categories must not print
+    # precision@4 / @5.
     overall_a = cat_a.get("overall", {}) or {}
     overall_b = cat_b.get("overall", {}) or {}
-    overall_d = comparison_cat["overall_delta"]
-    # bug 8 (ADR-0020): same key filter as _build_overall_section, against
-    # the category count — 3 categories must not print precision@4 / @5.
-    keys = drop_metric_keys_above_item_count(
-        sorted(set(overall_a) | set(overall_b) | set(overall_d)),
-        n_cat,
+    keys, cells_a, cells_b, cells_d = _each_side_up_to_its_k(
+        overall_a, overall_b, comparison_cat["overall_delta"], cat_k_a, cat_k_b,
     )
     side_a, side_b = "Model", "Compare"
     overall_tbl = pd.DataFrame(
-        {side_a: [overall_a.get(k) for k in keys],
-         side_b: [overall_b.get(k) for k in keys],
-         "Δ": [overall_d.get(k) for k in keys]},
+        {side_a: [cells_a.get(k) for k in keys],
+         side_b: [cells_b.get(k) for k in keys],
+         "Δ": [cells_d.get(k) for k in keys]},
         index=keys,
     )
     tables.append(overall_tbl)
@@ -275,8 +302,8 @@ def _build_category_section(
     ):
         tbl = per_item_metric_compare_table(
             per_item_a, per_item_b, per_item_delta,
-            ks, n_cat, metric_key, col_fmt,
-            macro_a=macro_a, macro_b=macro_b,
+            ks, cat_k_a, metric_key, col_fmt,
+            macro_a=macro_a, macro_b=macro_b, all_k_b=cat_k_b,
         )
         tables.append(tbl)
         titles.append(f"{title}{item_cov}")

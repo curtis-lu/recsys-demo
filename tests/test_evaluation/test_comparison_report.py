@@ -380,3 +380,67 @@ def test_coverage_text_names_the_query_unit():
     widened = assemble_comparison_report(
         m_a, m_b, comp, _coverage(), _params(occasion="req_id"))
     assert "「一個時間 × 一個 entity × 一個場合（occasion）」的相異組合數" in widened
+
+
+# ---------------------------------------------------------------------------
+# Each side's "all" is looked up at the K its own bundle recorded (#434)
+# ---------------------------------------------------------------------------
+
+
+def _metrics_at_all_k(all_k: int, map_attr_all: float) -> dict:
+    """A bundle computed with ``event`` declared: 2 items, but ``"all"``
+    resolved to (and is stored at) ``all_k``."""
+    from recsys_tfb.evaluation.metrics import ALL_K_KEY
+
+    m = _metrics()
+    m[ALL_K_KEY] = all_k
+    m["overall"][f"map@{all_k}"] = map_attr_all
+    for cell in m["per_item"].values():
+        cell[f"map_attr@{all_k}"] = map_attr_all
+    m["macro_avg"]["by_item"][f"map_attr@{all_k}"] = map_attr_all
+    return m
+
+
+def test_overall_table_keeps_the_all_row_past_the_item_count():
+    """bug 8's filter used the item count as its bound, so with 2 items it
+    dropped ``map@17`` — the row that *is* ``"all"`` when a query group holds
+    17 rows."""
+    from recsys_tfb.evaluation.comparison.report import _build_overall_section
+
+    m_a, m_b = _metrics_at_all_k(17, 0.5), _metrics_at_all_k(17, 0.3)
+    sec = _build_overall_section(m_a, _comparison(m_a, m_b))
+    tbl = sec.tables[0]
+    assert tbl.loc["map@17", "Model"] == pytest.approx(0.5)
+    assert tbl.loc["map@17", "Δ"] == pytest.approx(0.2)
+
+
+def test_overall_table_filters_each_side_at_its_own_k():
+    """A side's cell past its own K is meaningless (precision's denominator is
+    K), even when the other side's K keeps the row; and then there is no Δ."""
+    import pandas as pd
+    from recsys_tfb.evaluation.comparison.report import _build_overall_section
+
+    m_a, m_b = _metrics(0.6), _metrics(0.4)
+    m_a["overall"]["precision@4"] = 0.1
+    m_b["overall"]["precision@4"] = 0.2
+    m_b["dataset_overview"]["totals"]["n_items"] = 4
+    sec = _build_overall_section(m_a, _comparison(m_a, m_b))
+    tbl = sec.tables[0]
+    assert pd.isna(tbl.loc["precision@4", "Model"])
+    assert tbl.loc["precision@4", "ExtX"] == pytest.approx(0.2)
+    assert pd.isna(tbl.loc["precision@4", "Δ"])
+
+
+def test_per_item_all_column_reads_each_side_at_its_own_k():
+    """Two sides can resolve ``"all"`` differently — each keeps its own rows
+    inside the common universe, so the widest group can differ. Each side's
+    ``@all`` cell comes from its own key, and the Δ is their difference."""
+    from recsys_tfb.evaluation.comparison.report import _build_per_item_section
+
+    m_a, m_b = _metrics_at_all_k(17, 0.5), _metrics_at_all_k(19, 0.3)
+    sec = _build_per_item_section(m_a, m_b, _comparison(m_a, m_b), _params())
+    attr = sec.tables[1]
+    assert attr.loc["p1", "map_attr@all M"] == pytest.approx(0.5)
+    assert attr.loc["p1", "map_attr@all B"] == pytest.approx(0.3)
+    assert attr.loc["p1", "map_attr@all Δ"] == pytest.approx(0.2)
+    assert attr.loc["Macro 平均", "map_attr@all Δ"] == pytest.approx(0.2)

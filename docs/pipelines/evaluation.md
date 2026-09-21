@@ -68,7 +68,7 @@ evaluation:
 |---|---|
 | `snap_date` | 本次評估的時間切點：一個日期，或多個日期（三種寫法見表下）。日期一律使用 `YYYY-MM-DD` |
 | `k_values` | @K 家族（map@K、precision@K、recall@K、map_attr@K）要實際計算的 K 值 superset。`evaluation.metric.k` 是另一個獨立的軸：主指標 per-item macro 點估與 CI 的截斷深度。它非 null 時，per-item 那一族（map_attr、hit_rate）會多算 `@metric.k`，overall／per-segment 的 @K 家族不受影響，所以不必自己把它列進 `k_values` |
-| `"all"` | 在細 item 粒度解析為 distinct item 數；在 category 粒度重新解析為 distinct category 數 |
+| `"all"` | 在細 item 粒度解析為 distinct item 數；在 category 粒度重新解析為 distinct category 數。宣告 `event` 時，細 item 粒度改取最寬 query group 的列數（一組 30 列、12 個 item 時取 12 會截斷），並把這個數寫進評估指標檔 `metrics.json`（catalog 的 `evaluation_metrics`）的 `all_k`；報表、比較報表與 training 的 test mAP 都照同一個鍵查 `@all`，不自己數 item（#434）。category 粒度不變：聚合之後每組每個大類只剩一列 |
 
 `snap_date` 有三種寫法：
 
@@ -94,7 +94,7 @@ pipeline 會先依 `model_version` 與 `snap_date` 篩選預測。**每一個**�
 
 帶 `--post-training` 時另有一道更前面的把關（一致性不變量 A22）：`evaluation.snap_date` 的每一個日期都必須是 `dataset.test_snap_dates` 的成員，否則在 Spark 起來之前就報錯退出；多個日期時，訊息列出不在其中的那幾個。這條之所以不能只靠上面那個「零列就中止」的檢查：`training_eval_predictions` 累積該 `model_version` **歷來預測過的每一個月**（test 日期不進版本身分，見 [ADR-0001](../adr/0001-test-dates-out-of-dataset-version-identity.md)），所以一個已經從 `test_snap_dates` 移除的月份照樣抓得到 rows，跑出一份看起來完全正常、卻在量目前設定不評估的月份的報表。**monitoring（不帶旗標）模式不受此限**——它讀 inference 產出的 `ranked_predictions`，月份本來就不必是 test 月份；這也是這條檢查由 CLI 帶旗標呼叫、而不是寫成一般 config predicate 的原因（Layer-1 在 CLI entry 執行，看不到旗標）。
 
-`k_values` 決定 metric computation；`report.display.primary_map_k` 與 `guardrail_recall_k` 只決定報表顯示哪些已計算結果，而 `guardrail_recall_k` **只影響比較報表**（`report_comparison.html` 的 per-item recall@k 與大類 per-item recall@k 兩張表；主報表不讀這個鍵，鍵缺席時比較報表用 `[1, 3, 5]`）。display 中使用的 K 應包含在 `k_values`，否則報表對應欄位會沒有值。display 清單在每個粒度會先濾掉大於該粒度 item 數的 K（`"all"` 保留；bug 8, ADR-0020）：預設 `primary_map_k: [1, 3, 5, "all"]` 遇到 3 個大類只印 @1、@3、@all——只是過濾不印，計算層照 `k_values` 全集算。比較報表裡把算過的鍵整批攤開的 overall／大類 overall 表，套同一條規則：K 大於該粒度 item 數的鍵不印。
+`k_values` 決定 metric computation；`report.display.primary_map_k` 與 `guardrail_recall_k` 只決定報表顯示哪些已計算結果，而 `guardrail_recall_k` **只影響比較報表**（`report_comparison.html` 的 per-item recall@k 與大類 per-item recall@k 兩張表；主報表不讀這個鍵，鍵缺席時比較報表用 `[1, 3, 5]`）。display 中使用的 K 應包含在 `k_values`，否則報表對應欄位會沒有值。display 清單在每個粒度會先濾掉大於該粒度 `"all"` 所解析的 K 的整數 K（`"all"` 保留；bug 8, ADR-0020）。沒宣告 `event` 時那個 K 就是 item 數：預設 `primary_map_k: [1, 3, 5, "all"]` 遇到 3 個大類只印 @1、@3、@all——只是過濾不印，計算層照 `k_values` 全集算。宣告了 `event` 時界線是最寬 query group 的列數，因為比 item 數深的名次上還有真的列要排。比較報表裡把算過的鍵整批攤開的 overall／大類 overall 表，套同一條規則，但兩側**各自**以自己的 K 為界：兩側各保留自己的列、在同一個 common universe 裡最寬的組可能不一樣長；某側超過自己 K 的格子留空，Δ 也留空。
 
 主要指標包括：
 

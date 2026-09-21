@@ -66,6 +66,7 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.core.versioning import compute_search_id
 from recsys_tfb.diagnosis.hpo import write_hpo_diagnostics
 from recsys_tfb.diagnosis.model import diagnostics_dir
+from recsys_tfb.evaluation.metrics import resolved_all_k
 from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
 from recsys_tfb.io.extract import (
     extract_Xy,
@@ -1285,12 +1286,15 @@ def compute_test_mAP_spark(
     shape consumed by log_experiment.
 
     Keys (post metrics-spark redesign):
-        overall_map        per-query mAP@n_products averaged across queries
+        overall_map        per-query mAP@all averaged across queries
                            (mean of per-query AP@all)
         per_item_map_attr  {item: mean(ap_contrib@all) over item-positive rows}
-                           — replaces the old per_product_ap; carries the same
-                           interpretation when n_products dimension is full.
+                           — replaces the old per_product_ap.
         n_queries / n_excluded_queries
+
+    "all" is the K ``compute_all_metrics`` resolved it to, read back through
+    ``metrics.resolved_all_k``: the item count, or the widest query group
+    once ``event`` is declared.
 
     One set of metrics, always. There used to be a second, "before
     calibration" set, emitted when ``score`` and ``score_uncalibrated``
@@ -1305,27 +1309,28 @@ def compute_test_mAP_spark(
     *previous* run's copy rather than re-running predict. The trade is argued
     once, at that entry in ``conf/base/catalog.yaml``.
     """
-    schema_cfg = get_schema(parameters)
-    item_col = schema_cfg["item"]
+    logger.info("compute_test_mAP_spark: starting — manifest=%s", predict_manifest)
 
-    # Every block below reads the *whole* test prediction table — all months,
+    # The block below reads the *whole* test prediction table — all months,
     # all items — which makes this node one of the likelier places for the
-    # tail of the pipeline to get slow. Without these it has no timing at all.
-    with log_step(logger, "count_distinct_items"):
-        n_prods = training_eval_predictions.select(item_col).distinct().count()
-    overall_map_key = f"map@{n_prods}"
-    item_map_attr_key = f"map_attr@{n_prods}"
-
-    logger.info(
-        "compute_test_mAP_spark: starting — n_prods=%d overall_key=%s item_key=%s manifest=%s",
-        n_prods, overall_map_key, item_map_attr_key, predict_manifest,
-    )
-
+    # tail of the pipeline to get slow. Without it it has no timing at all.
     # The action is not on this line: compute_all_metrics counts and collects
     # several times inside evaluation/metrics_spark.py. Rule 10's "follow one
     # level" applies — this is the expensive block, not a lazy plan.
     with log_step(logger, "compute_metrics"):
         cal = compute_all_metrics(training_eval_predictions, parameters)
+
+    # Decision — "all" is read at the K the metrics were stored at, not at a
+    # count of our own. They differ once `event` is declared (the widest query
+    # group against the item count), and a count of our own then asked for a
+    # key that was never written and logged 0.0 for both numbers (#434).
+    all_k = resolved_all_k(cal)
+    overall_map_key = f"map@{all_k}"
+    item_map_attr_key = f"map_attr@{all_k}"
+    logger.info(
+        "compute_test_mAP_spark: overall_key=%s item_key=%s",
+        overall_map_key, item_map_attr_key,
+    )
 
     result = {
         "overall_map": float(cal["overall"].get(overall_map_key, 0.0)),
