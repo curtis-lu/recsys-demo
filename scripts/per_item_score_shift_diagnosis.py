@@ -97,8 +97,9 @@ def resolve_enriched_eval_table(catalog: dict, parameters: dict) -> tuple[str, d
 
 def required_columns(schema: dict) -> list[str]:
     return [
-        schema["time"],
-        *schema["entity"],
+        # The whole query group, not time + entity: the shared sample groups
+        # by it, and an `occasion` column dropped here fails there (#428).
+        *schema["query_group_columns"],
         schema["item"],
         schema["label"],
         schema["score"],

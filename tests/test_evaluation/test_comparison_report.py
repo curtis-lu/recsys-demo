@@ -26,8 +26,14 @@ def _comparison(a, b):
     return build_comparison_result(a, b, "Model", "ExtX")
 
 
-def _params() -> dict:
+def _params(**extra_columns) -> dict:
+    """``schema`` is here because the coverage text names the query unit from
+    it (#428); every real run has one, validated at the CLI entry."""
     return {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            **extra_columns,
+        }},
         "evaluation": {
             "snap_date": "2026-01-31",
             "report": {
@@ -361,3 +367,16 @@ def test_glossary_section_present():
     assert "詞彙" in out or "Glossary" in out
 
 
+
+
+def test_coverage_text_names_the_query_unit():
+    """Undeclared: the sentence every existing report already carries. With
+    ``occasion`` declared the count beside it is of occasions, so the text
+    says so (#428)."""
+    m_a, m_b = _metrics(), _metrics()
+    comp = _comparison(m_a, m_b)
+    plain = assemble_comparison_report(m_a, m_b, comp, _coverage(), _params())
+    assert "「一個時間 × 一個 entity」的相異組合數" in plain
+    widened = assemble_comparison_report(
+        m_a, m_b, comp, _coverage(), _params(occasion="req_id"))
+    assert "「一個時間 × 一個 entity × 一個場合（occasion）」的相異組合數" in widened

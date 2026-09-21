@@ -74,8 +74,10 @@ Layer 1 — config-static (implemented here; aggregated by
   ``get_schema``, NOT the literal cust_id/snap_date/prod_name names) +
   ``prod_mapping`` + ``unmapped_policy`` ∈ {fail, drop} for
   external_hive); ``model_version`` kind must NOT declare
-  ``columns``/``prod_mapping`` (config leak guard). Predicate:
-  ``compare_source_well_formed_errors``.
+  ``columns``/``prod_mapping`` (config leak guard); and ``source:
+  ranked_predictions`` is refused while an optional role is declared — that
+  is offline inference's table, with no optional-role column, A40's reason
+  in compare mode (#428). Predicate: ``compare_source_well_formed_errors``.
 * A12 — ``--compare X`` / ``--compare-only X`` resolves to a key in
   ``compare_sources``. Predicate: ``compare_source_key_exists`` (raises
   ``ConfigConsistencyError`` directly; not aggregated by validate).
@@ -422,8 +424,8 @@ Layer 1 — config-static (implemented here; aggregated by
   single pipeline, because the version IDs every command resolves are computed
   from these subtrees. Not a migration tool with a delete-by date, unlike A33:
   the mechanism is gone, not renamed.
-* A38 — an optional-role column (``schema.columns.event``; ``occasion`` joins
-  it when that role lands) declared in
+* A38 — an optional-role column (``schema.columns.occasion`` /
+  ``schema.columns.event``) declared in
   ``dataset.prepare_model_input.categorical_columns``. Identity columns have
   one way of becoming model features — being listed there — and ``schema.item``
   uses it (A2 *requires* it to). The optional roles deliberately do not get
@@ -633,8 +635,8 @@ implemented and wired):
   as a passing gate. Residual risk, stated so it is not re-discovered as a bug:
   a duplicate key confined to a month that only val/test cover goes unseen.
 * B11 — ``sample_pool`` or ``label_table`` is missing a column a declared
-  optional role names (``schema.columns.event``; ``occasion`` joins it when
-  that role lands). Declaring the role widens ``identity_columns``, which is
+  optional role names (``schema.columns.occasion`` / ``schema.columns.event``).
+  Declaring the role widens ``identity_columns``, which is
   what ``select_*_keys`` project by and what ``build_model_input`` LEFT joins
   the labels on, so a source table without the column fails — but as a raw
   Spark ``AnalysisException`` about an unresolved name, from whichever node
@@ -912,12 +914,12 @@ def optional_role_as_feature_errors(parameters: dict) -> list[str]:
         f"(A38) {col!r} is declared by schema.columns.{role_of[col]} and also "
         f"listed in dataset.prepare_model_input.categorical_columns. A column "
         f"in that list becomes a model feature (that is how schema.item "
-        f"becomes one), but {role_of[col]!r} names which row this is, not "
-        f"anything about the candidate: a model that splits on it memorises "
-        f"individual rows, and an event timestamp additionally correlates "
-        f"with within-period effects that do not exist at serving time. "
-        f"Remove {col!r} from categorical_columns; to feed the model "
-        f"something about when the event happened, compute that as its own "
+        f"becomes one), but a {role_of[col]!r} column identifies rows rather "
+        f"than describing the candidate: a model that splits on it memorises "
+        f"which rows were clicked, and one that is a timestamp additionally "
+        f"correlates with within-period effects that do not exist at serving "
+        f"time. Remove {col!r} from categorical_columns; to feed the model "
+        f"something about when the row happened, compute that as its own "
         f"column in a feature table."
         for col in offenders
     ]
@@ -2933,6 +2935,7 @@ def compare_source_well_formed_errors(parameters: dict) -> list[str]:
     sources = (
         (parameters.get("evaluation", {}) or {}).get("compare_sources", {}) or {}
     )
+    role_columns = optional_role_column_map(parameters) if sources else {}
     errs: list[str] = []
     for key, src in sources.items():
         if not isinstance(src, dict):
@@ -2966,6 +2969,26 @@ def compare_source_well_formed_errors(parameters: dict) -> list[str]:
                 errs.append(
                     f"(A11) compare_sources[{key!r}].source={src['source']!r} "
                     f"not in {sorted(_VALID_MODEL_VERSION_SOURCES)}"
+                )
+            # ranked_predictions is offline inference's output: its rows are
+            # the framework's entity x item grid and carry no optional-role
+            # column (ADR-0025 decision 1). Comparing against it with a role
+            # declared is A40's case in another mode — and left to run it
+            # failed in Spark on an unresolved column (#428).
+            if src.get("source") == "ranked_predictions" and role_columns:
+                named = "; ".join(
+                    f"schema.columns.{role}={cols}"
+                    for role, cols in role_columns.items()
+                )
+                errs.append(
+                    f"(A11) compare_sources[{key!r}].source='ranked_predictions' "
+                    f"cannot be compared while an optional column role is "
+                    f"declared ({named}): offline inference writes that table "
+                    f"from its own entity x item grid, so its rows carry no "
+                    f"such column and cannot be matched to this run's rows. "
+                    f"Use source: training_eval_predictions or "
+                    f"enriched_eval_predictions (a post-training run of that "
+                    f"model version)."
                 )
         elif kind == "external_hive":
             if "table" not in src:

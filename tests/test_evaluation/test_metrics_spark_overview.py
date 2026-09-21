@@ -348,15 +348,25 @@ def _occasion_df(spark):
     )
 
 
-def test_all_resolves_to_the_widest_occasion_with_the_occasion_role(spark):
-    """Four distinct items, but no occasion holds more than three rows.
-
-    Resolving to the item count would not truncate anything here — it would
-    report ``map@4`` on rankings three long, a K that names a list length no
-    ranking has. ADR-0025 decision D: declared role ⇒ widest query group.
-    """
+def test_all_stays_the_item_count_with_only_the_occasion_role(spark):
+    """Four distinct items; no occasion holds more than three rows, and none
+    can hold more than four — items are unique within an occasion. So the
+    item count truncates nothing, and it is the number the report looks
+    ``"all"`` up by. Resolving to the widest occasion (3) would store
+    ``map@3`` where the report asks for ``map@4`` — the blank ``map@all``
+    cell ``event`` already produces (#428)."""
     schema = get_schema(_occasion_params())
-    assert ms._resolve_all_k(_occasion_df(spark), schema, "prod_name") == 3
+    assert ms._resolve_all_k(_occasion_df(spark), schema, "prod_name") == 4
+
+
+def test_the_report_finds_map_at_all_with_the_occasion_role(spark):
+    """End to end over the lookup contract: metrics keyed at the K the report
+    will ask for (``dataset_overview.totals.n_items``)."""
+    params = _occasion_params()
+    params["evaluation"] = {"k_values": [1, "all"]}
+    out = ms.compute_all_metrics(_occasion_df(spark), params)
+    n_items = out["dataset_overview"]["totals"]["n_items"]
+    assert f"map@{n_items}" in out["overall"]
 
 
 def test_tied_row_share_is_reported_with_the_occasion_role(spark):
@@ -368,3 +378,12 @@ def test_tied_row_share_is_reported_with_the_occasion_role(spark):
     )["totals"]
     assert totals["n_tied_rows"] == 2
     assert totals["tied_row_share"] == pytest.approx(2 / 5)
+
+
+def test_evaluated_queries_are_the_occasions_with_a_positive(spark):
+    """Three occasions (r1, r2, r3); only r1 holds a click. So three queries,
+    two excluded, one evaluated — under ``time`` + ``entity`` it would be two
+    queries, c1's pooling r1 with r2."""
+    out = ms.compute_all_metrics(_occasion_df(spark), _occasion_params())
+    assert out["n_queries"] == 3
+    assert out["n_queries"] - out["n_excluded_queries"] == 1

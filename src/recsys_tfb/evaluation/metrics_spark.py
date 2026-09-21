@@ -118,17 +118,23 @@ def _resolve_all_k(eval_predictions: SparkDataFrame, schema: dict, item_col: str
       one query group against twelve distinct items, and ``map@12`` on a
       30-row ranking silently answers a different question from the one
       ``"all"`` names.
-    * **``occasion`` declared** — the same rule, for the opposite reason. A
-      query group is now one request, and requests are usually shorter than
-      the item list: the item count truncates nothing but names a list length
-      no ranking has, so ``map@12`` sits in the report beside rankings four
-      long. Both declared: still the widest query group.
+    * **Only ``occasion`` declared** — the item count, as undeclared. Items
+      are unique within an occasion (the duplicate checks guarantee it), so
+      no query group can hold more rows than there are items and the item
+      count truncates nothing: ``map@all`` and ``recall@all`` come out the
+      same either way. It must stay the item count because the report looks
+      ``"all"`` up by exactly that number (``report_builder._k_to_lookup``);
+      resolving to the widest occasion here would store ``map@6`` and leave
+      the report's ``map@all`` cell blank, with nothing raised — which is what
+      the ``event`` branch above does today (#428 found it in #378's run).
+      Spec #426 decision D says "any new role"; its reason (a group longer
+      than the item list) only exists with ``event``.
 
     Costs one extra shuffle over the same frame in the declared case only —
     a ``groupBy(query_group).count()`` whose driver-side result is a single
     number — and nothing at all in the undeclared case.
     """
-    if not declares_optional_role(schema):
+    if not schema.get("event"):
         return eval_predictions.select(item_col).distinct().count()
     per_group = (
         eval_predictions.groupBy(*schema["query_group_columns"])

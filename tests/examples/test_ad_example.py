@@ -55,28 +55,31 @@ def test_schema_roles_follow_adr_0021(params):
     assert cols["time"] == "snap_date"
     assert isinstance(cols["entity"], list) and len(cols["entity"]) == 2
     assert isinstance(cols["item"], str)
-    # #378 之後這份 conf 宣告 event ＝ 一次曝光一列。
-    assert cols["event"] == "impression_id"
+    # #428 之後這份 conf 是形狀二：occasion ＝ 一次請求，不再宣告 event（同一次請求
+    # 裡素材互不重複，identity 不需要它就唯一）。
+    assert cols["occasion"] == "request_id"
+    assert "event" not in cols
 
 
-def test_event_widens_identity_but_not_the_query_group(params):
-    """這份 conf 是「形狀一」（ADR-0025）：同一個 entity × 一個時段是一個 query
-    group，同一個 item 在裡面可以有多列。event 進 identity、不進分組——進了分組
-    每次曝光就自成一組、組內只有一列，mAP 恆為 1。"""
+def test_occasion_defines_the_query_group_and_widens_identity(params):
+    """這份 conf 是「形狀二」（ADR-0025）：一次請求（同一刻、同一個 entity）是一個
+    query group，組內的素材互不重複。occasion 進分組、也進 identity——這正是它與
+    event 的差別（event 只進 identity、不進分組）。base key 不跟著變寬：特徵表是
+    entity 層級，沒有請求的欄。"""
     schema = get_schema(params)
     assert schema["identity_columns"] == [
-        "snap_date", "user_id", "slot_id", "ad_creative", "impression_id",
+        "snap_date", "user_id", "slot_id", "request_id", "ad_creative",
     ]
-    assert schema["query_group_columns"] == ["snap_date", "user_id", "slot_id"]
+    assert schema["query_group_columns"] == ["snap_date", "user_id", "slot_id", "request_id"]
     assert schema["base_key_columns"] == ["snap_date", "user_id", "slot_id"]
 
 
-def test_both_candidate_grain_source_tables_declare_the_event_column(params):
-    """B11 擋的是執行期；這一條擋的是 conf 本身——primary_key 少列 impression_id，
-    max_duplicate_key_ratio: 0.0 會把同一素材本週的多次曝光判成重複鍵。"""
+def test_both_candidate_grain_source_tables_declare_the_occasion_column(params):
+    """B11 擋的是執行期；這一條擋的是 conf 本身——primary_key 少列 request_id，
+    max_duplicate_key_ratio: 0.0 會把同一次請求的多個素材判成重複鍵。"""
     for stage in ("label_etl", "sample_pool_etl"):
         for table in params[stage]["tables"]:
-            assert "impression_id" in table["primary_key"], table["name"]
+            assert "request_id" in table["primary_key"], table["name"]
 
 
 def test_generated_items_equal_the_declared_list(params, raw):
@@ -156,7 +159,9 @@ def test_every_week_has_impressions_and_none_fall_outside(raw):
 
 
 def test_same_item_is_shown_more_than_once_in_a_query_group(raw):
-    # event 角色（ADR-0021、#378）要分辨的就是這種列；目前的 label_table.sql 先把它們聚合成一列
+    # 這份 conf 現在宣告 occasion、不宣告 event（#428、形狀二），但資料仍撐得住形狀一
+    # （event 角色，#378）：以 (週, 使用者, 版位) 為組，同一素材還是會被展示不只一次，
+    # 只是現在分散在不同的請求（request_id）裡。
     log = raw["impression_log"].assign(week=lambda d: week_of(d["event_date"]))
     keys = ["week", "user_id", "slot_id", "campaign_id", "creative_format"]
     assert log.duplicated(subset=keys).any()
@@ -164,20 +169,46 @@ def test_same_item_is_shown_more_than_once_in_a_query_group(raw):
 
 
 def test_some_query_group_has_more_impressions_than_items(params, raw):
-    # event 角色落地後一組的列數可以超過 item 種數；k_values 的 "all" 不得在這種組上
-    # 被截斷（ADR-0021 決定 4）。靠的是 SLOT_IMPRESSION_RATE 夠高
+    # 資料仍撐得住形狀一（event 角色，#378）：以 (週, 使用者, 版位)（base key 層級）
+    # 為組，一組的曝光數可以超過 item 種數；k_values 的 "all" 不得在這種組上被截斷
+    # （ADR-0021 決定 4）。靠的是 REQUEST_RATE 與每次請求的素材數夠高
     log = raw["impression_log"].assign(week=lambda d: week_of(d["event_date"]))
     n_items = len(params["schema"]["categorical_values"][params["schema"]["columns"]["item"]])
     assert log.groupby(["week", "user_id", "slot_id"]).size().max() > n_items
 
 
-def test_query_groups_see_different_numbers_of_items(raw):
-    log = raw["impression_log"].assign(
-        week=lambda d: week_of(d["event_date"]),
-        item=lambda d: d["campaign_id"] + ITEM_SEPARATOR + d["creative_format"],
-    )
-    per_group = log.groupby(["week", "user_id", "slot_id"])["item"].nunique()
+def test_query_groups_see_different_numbers_of_ads(raw):
+    # query group（形狀二）＝一次請求；請求展示的素材數不只一種（ADS_PER_REQUEST_P）。
+    per_group = raw["impression_log"].groupby("request_id").size()
     assert per_group.nunique() > 1
+
+
+def test_occasion_query_group_holds_one_moment_and_several_candidates(raw):
+    """形狀二（ADR-0021、#428）驗收：一次請求是一個 query group。
+
+    - 同一個 request_id 只對應一組 (event_ts, user_id, slot_id)——同一刻、同一個 entity。
+    - 組內的素材（campaign_id + ITEM_SEPARATOR + creative_format）互不重複——只宣告
+      occasion 時，identity 要靠這一點才唯一。
+    - 請求通常有好幾個候選（平均 ≥ 3、且有請求 ≥ 5 列），同時也有只有 1 個候選的請求——
+      這種組排序沒有意義、mAP 恆為 1，README 要講的正是這個。
+    - 有足夠比例的請求同時有點擊與沒點擊的列，排序才有東西可比。
+    """
+    log = raw["impression_log"]
+    per_request_moment = log.groupby("request_id")[["event_ts", "user_id", "slot_id"]].nunique()
+    assert (per_request_moment == 1).all().all()
+
+    item = log["campaign_id"] + ITEM_SEPARATOR + log["creative_format"]
+    dup_within_request = log.assign(item=item).duplicated(subset=["request_id", "item"])
+    assert not dup_within_request.any()
+
+    per_request_size = log.groupby("request_id").size()
+    assert per_request_size.mean() >= 3
+    assert (per_request_size >= 5).any()
+    assert (per_request_size == 1).any()
+
+    clicked_by_request = log.groupby("request_id")["clicked"].agg(["min", "max"])
+    mixed = clicked_by_request["min"] != clicked_by_request["max"]
+    assert mixed.mean() >= 0.15
 
 
 def test_an_item_first_appears_after_train(params, raw):

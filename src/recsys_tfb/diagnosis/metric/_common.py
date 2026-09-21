@@ -57,6 +57,22 @@ _QUERY_RANKING_DIAGNOSES = (
     "config_shift", "item_ability", "suppression", "ci",
 )
 
+#: 只宣告 ``occasion`` 時跳過的（#428）。上面那條理由不成立——同組內 item 仍
+#: 唯一（重複檢查保證）——所以 ci、config_shift、suppression 照跑。跳過的依據
+#: 是 spec #426 決定 E 的另一條判準「假設每組候選數固定」，逐項對程式碼確認：
+#:
+#: * ``item_ability``——``query_center_scores`` 扣掉每組平均分數，SCOPE 說這是
+#:   在扣「這個 entity 的整體分數水準」。一組是一次請求時，組裡是那一次被擺
+#:   出來的幾個候選，平均取決於這次擺了誰；只擺一個的請求扣完恆為 0，正負例
+#:   全部同分。名次分位數也把不同大小的組的名次混在一起。
+#:
+#: 已知不一致，刻意接受：沒宣告任何角色、但 ``sample_pool`` 本來就不是完整
+#: entity × item 網格的部署，今天同樣違反這條假設，卻照跑。改成執行期判斷
+#: 「每組候選數是否都相同」會連那些部署一起跳過，違反「沒宣告時輸出逐值不變」；
+#: 以角色為準，是因為宣告 ``occasion`` 就是在宣告「組是被擺出來的那幾個」。
+#: ``model_capacity`` 讀 item_ability 的結果，會照抄它的跳過原因。
+_FIXED_CANDIDATE_SET_DIAGNOSES = ("item_ability",)
+
 
 def schema_skip_reason(parameters: dict, name: str) -> Optional[str]:
     """這項診斷在目前宣告的 schema 下算不算得出來；算不出來就回一句原因。
@@ -70,15 +86,25 @@ def schema_skip_reason(parameters: dict, name: str) -> Optional[str]:
     """
     if name not in _QUERY_RANKING_DIAGNOSES:
         return None
-    event_cols = get_schema(parameters).get("event", [])
-    if not event_cols:
-        return None
-    return (
-        f"宣告了 schema.columns.event（{', '.join(event_cols)}）："
-        f"同一個 query group 裡同一個 item 可以有多列，而這項診斷假設 item "
-        f"在組內唯一——它在 driver 上的名次只以 item 決勝，同 item 同分的多列"
-        f"排序會隨列到達的順序改變。本次跳過。"
-    )
+    schema = get_schema(parameters)
+    event_cols = schema.get("event", [])
+    if event_cols:
+        return (
+            f"宣告了 schema.columns.event（{', '.join(event_cols)}）："
+            f"同一個 query group 裡同一個 item 可以有多列，而這項診斷假設 item "
+            f"在組內唯一——它在 driver 上的名次只以 item 決勝，同 item 同分的多列"
+            f"排序會隨列到達的順序改變。本次跳過。"
+        )
+    occasion_cols = schema.get("occasion", [])
+    if occasion_cols and name in _FIXED_CANDIDATE_SET_DIAGNOSES:
+        return (
+            f"宣告了 schema.columns.occasion（{', '.join(occasion_cols)}）："
+            f"一個 query group 是一次排序的場合，組裡是那一次被擺出來的幾個"
+            f"候選。這項診斷先扣掉每組的平均分數再比較，假設那個平均代表"
+            f"「這個 entity 的整體分數水準」；每組候選不同時，它取決於這一次擺了"
+            f"誰，只有一個候選的組扣完恆為 0。本次跳過。"
+        )
+    return None
 
 
 def diag_cfg(parameters: dict) -> dict:

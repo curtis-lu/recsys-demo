@@ -1479,3 +1479,23 @@ def test_assemble_report_has_no_reconciliation_section():
     assert "對帳" not in html
     assert "Reconciliation" not in html
 
+
+
+def test_core_concept_names_the_occasion_when_declared():
+    """The report's own definition of a query follows the query group (#428).
+
+    Undeclared, the sentence is byte-for-byte what it was; declared, it
+    names the occasion column — otherwise the page defines a unit none of its
+    metrics is computed in.
+    """
+    from recsys_tfb.evaluation.report_builder import build_core_concept_section
+
+    def _p(**extra):
+        return {"schema": {"columns": {
+            "time": "snap_date", "entity": ["user_id", "slot_id"],
+            "item": "ad_creative", **extra}}}
+
+    plain = build_core_concept_section(_p()).description
+    assert "一個 query＝一組（snap_date × user_id×slot_id）。" in plain
+    widened = build_core_concept_section(_p(occasion="request_id")).description
+    assert "一個 query＝一組（snap_date × user_id×slot_id × request_id）。" in widened

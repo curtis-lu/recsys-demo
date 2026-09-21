@@ -390,3 +390,17 @@ def test_step_names_are_fixed_and_the_scale_is_a_field(caplog):
     assert getattr(started["suppression.aggregate_pairs"], "n_pairs", None) == 2
     assert "n_rows=4" in started["suppression.enumerate_pairs"].getMessage()
     assert "n_pairs=2" in started["suppression.aggregate_pairs"].getMessage()
+
+
+def test_cross_purchase_unit_is_the_occasion_when_declared():
+    """Co-occurrence is counted per query unit. With ``occasion`` declared
+    that unit is one occasion, and the field note says so; undeclared it is
+    the same dict object every existing artifact already carries (#428)."""
+    from recsys_tfb.diagnosis.metric.suppression._compute import (
+        CROSS_PURCHASE_FIELD_NOTES, cross_purchase_field_notes,
+    )
+
+    assert cross_purchase_field_notes({"occasion": []}) is CROSS_PURCHASE_FIELD_NOTES
+    widened = cross_purchase_field_notes({"occasion": ["request_id"]})
+    assert "occasion" in widened["n_joint"]
+    assert "（time × entity）" not in widened["n_joint"]

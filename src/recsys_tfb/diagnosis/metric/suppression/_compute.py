@@ -142,6 +142,23 @@ CROSS_PURCHASE_FIELD_NOTES: dict[str, str] = {
 }
 
 
+def cross_purchase_field_notes(schema: dict) -> dict[str, str]:
+    """:data:`CROSS_PURCHASE_FIELD_NOTES`, with the query unit said right.
+
+    The unit is the query group. Undeclared it is ``time × entity`` and the
+    dict comes back as is (every existing artifact is unchanged); with
+    ``occasion`` declared it is one occasion, and "the units that bought j"
+    are occasions in which j was clicked — a reader who reads it as "people
+    who bought j" would take a near-zero lift for a finding (#428).
+    """
+    if not schema.get("occasion"):
+        return CROSS_PURCHASE_FIELD_NOTES
+    return {
+        k: v.replace("（time × entity）", "（time × entity × occasion：一個場合）")
+        for k, v in CROSS_PURCHASE_FIELD_NOTES.items()
+    }
+
+
 def _validate(pdf: pd.DataFrame, schema: dict) -> None:
     score_col = schema["score"]
     if score_col not in pdf.columns:
@@ -311,7 +328,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         "n_units": 0,
         "sample_meta": dict(sample_meta or {}),
         "field_notes": FIELD_NOTES,
-        "cross_purchase_field_notes": CROSS_PURCHASE_FIELD_NOTES,
+        "cross_purchase_field_notes": cross_purchase_field_notes(schema),
         "notes": [],
     }
     if not out["enabled"]:

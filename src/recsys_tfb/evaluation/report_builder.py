@@ -421,8 +421,16 @@ def build_core_concept_section(parameters: dict) -> ReportSection:
     score_col = schema["score"]
     label_col = schema["label"]
 
+    # The query is the query group; undeclared, the sentence is exactly what
+    # it always was. With `occasion` declared it gains the occasion columns —
+    # without them the report's own definition would name a unit no metric on
+    # the page is computed in (#428).
+    occasion_str = "×".join(schema.get("occasion", []))
+    query_str = f"{time_col} × {entity_str}" + (
+        f" × {occasion_str}" if occasion_str else ""
+    )
     description = (
-        f"一個 query＝一組（{time_col} × {entity_str}）。query 內的候選 "
+        f"一個 query＝一組（{query_str}）。query 內的候選 "
         f"{item_col} 依模型分數 {score_col} 由高到低排名；{label_col}=1 的是"
         f"正例。下面每一個數字都是「這個 per-query 排序結果」加總到不同粒度——"
         "同一個量，換一種切法。"

@@ -165,8 +165,9 @@ def offset_context_columns(parameters: dict, schema: dict) -> list[str]:
 
 def required_columns(parameters: dict, schema: dict) -> list[str]:
     return [
-        schema["time"],
-        *schema["entity"],
+        # The whole query group, not time + entity: the shared sample groups
+        # by it, and an `occasion` column dropped here fails there (#428).
+        *schema["query_group_columns"],
         schema["item"],
         schema["label"],
         schema["score"],
