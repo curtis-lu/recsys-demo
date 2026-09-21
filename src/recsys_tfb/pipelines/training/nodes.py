@@ -1290,10 +1290,11 @@ def compute_test_mAP_spark(
                            (mean of per-query AP@all)
         per_item_map_attr  {item: mean(ap_contrib@all) over item-positive rows}
                            — replaces the old per_product_ap.
+        n_queries / n_excluded_queries
+
     "all" is the K ``compute_all_metrics`` resolved it to, read back through
     ``metrics.resolved_all_k``: the item count, or the widest query group
     once ``event`` is declared.
-        n_queries / n_excluded_queries
 
     One set of metrics, always. There used to be a second, "before
     calibration" set, emitted when ``score`` and ``score_uncalibrated``

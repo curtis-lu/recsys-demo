@@ -117,9 +117,9 @@ mAP 就是把每個 query group 的 AP 平均起來。
 
 ### `@K` 在短的 query group 上
 
-`recall@K` 在 `K ≥ 該組列數` 時恆為 1，`precision@K` 退化成該組的正例率。宣告 `event` 之後每組的列數差距通常很大（有人一週看了 19 次、有人只看了 1 次），所以同一個 `K` 在不同組裡的意思差很多。看指標時把 `dataset_overview` 的每組列數一起看。
+`recall@K` 在 `K ≥ 該組列數` 時恆為 1；`precision@K` 的分母永遠是 `K`，所以這時它是「該組正例數 ÷ K」，不是該組的正例率（只有 1 列、而且被點了的組，`precision@34` 是 1／34）。宣告 `event` 之後每組的列數差距通常很大（有人一週看了 19 次、有人只看了 1 次），所以同一個 `K` 在不同組裡的意思差很多。`dataset_overview` 沒有每組列數的分佈；最寬一組有幾列，看下一段的 `all_k`。
 
-`k_values: "all"` 的意思也跟著變：沒宣告 `event` 時它解析成 item 的種數，宣告了則取**最寬的那個 query group 的列數**。不然一組 30 列、12 個 item 時，`"all"` 會變成 `map@12`，那已經截斷了。這個數記在 `evaluation_results.json` 的 `all_k`，指標存在 `map@<all_k>` 底下；報表的 `@all` 欄與 training 記的 test mAP 都讀它。大類那一層不受影響——聚合之後同一組裡每個大類只剩一列，`"all"` 仍是大類種數。名次熱圖的欄也跟著延伸到最深的名次，不在 item 種數截斷。
+`k_values: "all"` 的意思也跟著變：沒宣告 `event` 時它解析成 item 的種數，宣告了則取**最寬的那個 query group 的列數**。不然一組 30 列、12 個 item 時，`"all"` 會變成 `map@12`，那已經截斷了。這個數記在評估指標檔 `metrics.json` 的 `all_k`，指標存在 `map@<all_k>` 底下；報表的 `@all` 欄與 training 記的 test mAP 都讀它。大類那一層不受影響——聚合之後同一組裡每個大類只剩一列，`"all"` 仍是大類種數。名次熱圖的欄也跟著延伸到最深的名次，不在 item 種數截斷。
 
 ## 同分：宣告了 `event` 卻沒有逐筆特徵時，幾乎每一列都同分
 

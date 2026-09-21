@@ -850,9 +850,10 @@ class TestResolveDisplayKClampsToItemCount:
         assert rb.resolve_display_k([1, 3, 5, "all"], 0) == [1, 3, 5, "all"]
 
 
-class TestDropMetricKeysAboveItemCount:
-    """bug 8 (ADR-0020) for key-agnostic tables: the same K > n_items rule as
-    resolve_display_k, applied to metric keys instead of a display list."""
+class TestDropMetricKeysAboveAllK:
+    """bug 8 (ADR-0020) for key-agnostic tables: the same K > all_k rule as
+    resolve_display_k, applied to metric keys instead of a display list.
+    The bounds below are item counts: what all_k is without event."""
 
     def test_drops_only_integer_k_above_the_count(self):
         keys = ["map@3", "precision@4", "recall@5", "mean_pos", "map@all"]

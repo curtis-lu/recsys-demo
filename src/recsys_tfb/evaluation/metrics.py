@@ -71,7 +71,9 @@ def metric_params(parameters: dict) -> dict:
 
 
 #: Top-level key of a ``metrics_spark.compute_all_metrics`` bundle: the K
-#: ``evaluation.k_values: "all"`` resolved to, when that is not the item count.
+#: ``evaluation.k_values: "all"`` resolved to. Written only when the ranked
+#: frame holds one row per event — the one case in which it can differ from
+#: the item count (``resolved_all_k``).
 ALL_K_KEY = "all_k"
 
 

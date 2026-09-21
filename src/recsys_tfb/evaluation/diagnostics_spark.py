@@ -126,6 +126,10 @@ def _n_ranks(sdf: SparkDataFrame, rank_col: str, items: list) -> int:
     Read from the whole frame, not the rows a matrix counts, so all three
     matrices share one axis. Without ``event`` the deepest rank is at most the
     item count and the axis is what it always was.
+
+    Cost: one ``agg(max)`` action per matrix over the frame the caller has
+    cached (``aggregate_report_diagnostics`` requires it) — three per report,
+    each the same size as the ``_all_items`` scan beside it.
     """
     deepest = sdf.agg(F.max(rank_col).alias("_max_rank")).collect()[0]["_max_rank"]
     return max(len(items), int(deepest or 0))

@@ -212,9 +212,10 @@ def count_items(metrics: dict) -> int:
     """``dataset_overview.totals.n_items`` of a metrics bundle, ``0`` when absent.
 
     ``0`` means "unknown", not "no items": a slim baseline bundle carries no
-    overview. Callers rely on that reading — ``resolve_display_k`` skips its
-    K filter at ``0``, and ``build_baseline_section`` falls back to the
-    fine-grained count with ``or n_items``.
+    overview. It is the item count the reports show — in the macro-coverage
+    titles and the comparison report's metadata. It is not the K ``"all"`` is looked up at — that is ``metrics.resolved_all_k``,
+    which falls back to this same number only when the bundle records no
+    ``all_k`` (#434).
     """
     return int((_dataset_overview(metrics).get("totals", {}) or {}).get("n_items", 0))
 
@@ -642,7 +643,8 @@ def per_item_metric_compare_table(
     col_base_fmt: str,
     macro_a: dict | None = None,
     macro_b: dict | None = None,
-    all_k_b: int | None = None,
+    *,
+    all_k_b: int,
 ) -> pd.DataFrame:
     """Per-item table with Model/Baseline/Δ interleaved per k.
 
@@ -657,20 +659,20 @@ def per_item_metric_compare_table(
     value; otherwise the cell is blank (ADR-0020 bug 4).
 
     ``all_k`` / ``all_k_b``: the K each side's ``"all"`` is stored at
-    (``metrics.resolved_all_k`` of that side's bundle). ``all_k_b`` defaults
-    to ``all_k`` — right when B is scored on A's own rows, as the baseline is.
-    Two compared model versions each keep their own rows in the common
-    universe, so with ``event`` their widest groups can differ (#434); then
-    the two ``"all"`` cells are different keys, ``per_item_delta`` (keyed per
-    key) holds neither pairing, and the Δ is taken here as ``a − b``.
+    (``metrics.resolved_all_k`` of that side's bundle). ``all_k_b`` has no
+    default on purpose: a default of "A's K" is exactly the silent wrong
+    lookup #434 fixed. The baseline passes the model's K (it is scored on the
+    model's own rows); two compared model versions each keep their own rows
+    in the common universe, so with ``event`` their widest groups can differ.
+    Then the two ``"all"`` cells are different keys, ``per_item_delta``
+    (keyed per key) holds neither pairing, and the Δ is taken here as
+    ``a − b`` — both are the untruncated value.
     """
-    k_b = all_k if all_k_b is None else all_k_b
-
     def _row(m_a: dict, m_b: dict, m_d: dict | None) -> dict:
         row: dict = {}
         for k in ks:
             key = f"{metric_key}@{_k_to_lookup(k, all_k)}"
-            key_b = f"{metric_key}@{_k_to_lookup(k, k_b)}"
+            key_b = f"{metric_key}@{_k_to_lookup(k, all_k_b)}"
             base = col_base_fmt.format(k=k)
             a = m_a.get(key)
             b = m_b.get(key_b)
@@ -1113,7 +1115,7 @@ def build_baseline_section(
                 per_item_metric_compare_table(
                     per_item_a, per_item_b, per_item_delta,
                     ks, all_k, metric_key, col_fmt,
-                    macro_a=macro_a, macro_b=macro_b,
+                    macro_a=macro_a, macro_b=macro_b, all_k_b=all_k,
                 ),
                 f"{title}{item_cov}", True,
             )
