@@ -16,28 +16,34 @@ from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
 from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.baselines import resolve_lookback_months
-from recsys_tfb.evaluation.metrics import metric_params
+from recsys_tfb.evaluation.metrics import metric_params, resolved_all_k
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
 
-def resolve_display_k(raw_k: list, n_items: int) -> list:
+def resolve_display_k(raw_k: list, all_k: int) -> list:
     """Map mixed int/'all' display k list to concrete column suffixes.
 
     Returns labels as strings/ints that are used both as dict keys and for
-    metric lookups. 'all' resolves to n_items for metric lookup but is
+    metric lookups. 'all' is looked up at ``all_k`` (``_k_to_lookup``) but is
     kept as the label 'all' for display.
 
-    Filters out any int K > n_items (bug 8, ADR-0020): with e.g. 3 product
+    ``all_k`` is the bundle's ``metrics.resolved_all_k``: the K its ``"all"``
+    values are stored at, which is the item count unless the frame held one
+    row per event (then the widest query group, #434).
+
+    Filters out any int K > all_k (bug 8, ADR-0020): with e.g. 3 product
     categories, precision@K's denominator is K itself (not min(K, n_items)),
     so @4/@5 declined purely because the denominator grew, not because the
     model did anything different — those columns aren't wrong, they're
-    meaningless. This is a filter over the given list, not a regenerated
+    meaningless. The bound is the longest list, and that is ``all_k``: with
+    ``event`` rows a 30-row group gives @13 real rows to rank although there
+    are 12 items. This is a filter over the given list, not a regenerated
     one: a caller list without "all" does not gain one, and "all" is always
-    kept. When ``n_items <= 0`` (overview data is missing — e.g. baseline's
-    slim per_item bundle has no dataset_overview) skip the filter entirely,
-    since filtering an unknown item count would collapse every table down
-    to just "@all".
+    kept. When ``all_k <= 0`` (unknown — e.g. baseline's slim per_item
+    bundle has no dataset_overview) skip the filter entirely, since
+    filtering by an unknown bound would collapse every table down to just
+    "@all".
     """
     out = []
     for k in raw_k:
@@ -45,46 +51,50 @@ def resolve_display_k(raw_k: list, n_items: int) -> list:
             out.append("all")
         else:
             out.append(int(k))
-    return [k for k in out if not _k_exceeds_item_count(k, n_items)]
+    return [k for k in out if not _k_exceeds_all_k(k, all_k)]
 
 
-def _k_exceeds_item_count(k: int | str, n_items: int) -> bool:
-    """True for an int K above ``n_items`` — the one bug 8 rule (ADR-0020).
+def _k_exceeds_all_k(k: int | str, all_k: int) -> bool:
+    """True for an int K above ``all_k`` — the one bug 8 rule (ADR-0020).
 
     Shared by the display-list filter (``resolve_display_k``) and the
-    metric-key filter (``drop_metric_keys_above_item_count``), so the two
+    metric-key filter (``drop_metric_keys_above_all_k``), so the two
     cannot disagree about which columns and rows a grain drops. ``"all"``
-    never exceeds, and ``n_items <= 0`` (item count unknown) filters nothing.
+    never exceeds, and ``all_k <= 0`` (unknown) filters nothing.
     """
-    if n_items <= 0 or k == "all":
+    if all_k <= 0 or k == "all":
         return False
-    return int(k) > n_items
+    return int(k) > all_k
 
 
-def drop_metric_keys_above_item_count(keys, n_items: int) -> list:
-    """``keys`` minus those whose ``@K`` suffix is an int K above ``n_items`` (bug 8).
+def drop_metric_keys_above_all_k(keys, all_k: int) -> list:
+    """``keys`` minus those whose ``@K`` suffix is an int K above ``all_k`` (bug 8).
 
     For tables that print every computed metric key as a row (the comparison
     report's overall and category-overall tables), where there is no display
     K list to filter. Same rule and reason as ``resolve_display_k``: past
-    the item count precision@K keeps falling only because its denominator is
-    K, so those rows are meaningless rather than wrong — nothing flags them.
-    K == n_items stays, keys without an ``@<int>`` suffix stay, order is
-    kept, and ``n_items <= 0`` keeps every key.
+    the longest list precision@K keeps falling only because its denominator
+    is K, so those rows are meaningless rather than wrong — nothing flags
+    them. K == all_k stays (it is the ``"all"`` row), keys without an
+    ``@<int>`` suffix stay, order is kept, and ``all_k <= 0`` keeps every key.
     """
     out = []
     for key in keys:
         _, sep, suffix = str(key).rpartition("@")
-        if sep and suffix.isdigit() and _k_exceeds_item_count(int(suffix), n_items):
+        if sep and suffix.isdigit() and _k_exceeds_all_k(int(suffix), all_k):
             continue
         out.append(key)
     return out
 
 
-def _k_to_lookup(k, n_items: int) -> int | str:
-    """Convert display label to metric dict key suffix."""
+def _k_to_lookup(k, all_k: int) -> int | str:
+    """Convert display label to metric dict key suffix.
+
+    ``all_k`` comes from the bundle being read (``metrics.resolved_all_k``),
+    never from counting its items (#434).
+    """
     if k == "all":
-        return n_items
+        return all_k
     return k
 
 
@@ -92,7 +102,7 @@ def _k_to_lookup(k, n_items: int) -> int | str:
 _METRICS_SECTION_K = (1, 2, 3, 4, 5, "all")
 
 
-def _metrics_section_ks(n_items: int) -> list:
+def _metrics_section_ks(all_k: int) -> list:
     """The K columns the metrics section's tables actually show at this grain.
 
     One derivation for those tables and for the two CI notes that point into
@@ -102,7 +112,7 @@ def _metrics_section_ks(n_items: int) -> list:
     the note could keep naming a column the table dropped, and nothing would
     raise — the reader just gets pointed at a column that is not there.
     """
-    return resolve_display_k(list(_METRICS_SECTION_K), n_items)
+    return resolve_display_k(list(_METRICS_SECTION_K), all_k)
 
 
 _MACRO_LABEL = "Macro 平均"
@@ -166,10 +176,11 @@ def _dataset_overview(metrics: dict) -> dict:
     deprecated: a dual read would be a permanent compatibility layer for a
     spelling this repo no longer produces, and the next reader would have to
     work out which of the two is real. The failure a fallback would be hiding is
-    the one worth failing on: ``count_items`` returning ``0`` makes
-    ``resolve_display_k`` resolve ``"all"`` to ``map@0``, every metric lookup
-    misses, and a cross-version comparison renders as a full table of blanks
-    that reads like "the model scored nothing" rather than "this file is old".
+    the one worth failing on: an item count read as ``0`` makes every
+    ``"all"`` lookup ask for ``map@0`` (``metrics.resolved_all_k`` falls back
+    to that count), every metric lookup misses, and a cross-version
+    comparison renders as a full table of blanks that reads like "the model
+    scored nothing" rather than "this file is old".
 
     An overview with *neither* spelling is left alone — a slim metrics bundle
     legitimately carries no ``dataset_overview`` at all, and the baseline
@@ -284,8 +295,8 @@ def build_overview_section(
     """
     overall = metrics.get("overall", {})
     disp = _report_cfg(parameters).get("display", {}) or {}
-    n_items = count_items(metrics)
-    ks = resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), n_items)
+    all_k = resolved_all_k(metrics)
+    ks = resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), all_k)
 
     tables: list[pd.DataFrame] = []
     titles: list[str] = []
@@ -314,7 +325,7 @@ def build_overview_section(
                 "點估 AP 與 CI 都不截斷（metric.k 未設），與衡量指標的全量 macro "
                 "map_attr@all 同一定義。"
             )
-        elif mk in _metrics_section_ks(n_items):
+        elif mk in _metrics_section_ks(all_k):
             trunc_note = (
                 f"點估 AP 與 CI 都截斷在 {mk}（metric.k），與衡量指標的全量 macro "
                 f"map_attr@{mk} 同一定義。"
@@ -331,7 +342,7 @@ def build_overview_section(
 
     # 關鍵指標 2：overall per-query mAP@k（另一種加權，並列不比高下）
     card = {
-        f"map@{k}": overall.get(f"map@{_k_to_lookup(k, n_items)}") for k in ks
+        f"map@{k}": overall.get(f"map@{_k_to_lookup(k, all_k)}") for k in ks
     }
     t_overall = pd.DataFrame([card]).T
     t_overall.columns = ["value"]
@@ -588,14 +599,14 @@ def _segment_notes(segments: dict | None, by_segment: dict) -> list[str]:
 def _per_item_metric_table(
     per_item: dict,
     ks: list,
-    n_items: int,
+    all_k: int,
     metric_key: str,
     col_fmt: str,
     extra_cols: dict[str, str] | None = None,
     macro_metrics: dict | None = None,
 ) -> pd.DataFrame:
     """Rows = items; one column per k named ``col_fmt.format(k=k)``, value
-    pulled from ``per_item[item][f"{metric_key}@{_k_to_lookup(k, n_items)}"]``.
+    pulled from ``per_item[item][f"{metric_key}@{_k_to_lookup(k, all_k)}"]``.
 
     ``extra_cols`` maps an output column name to a flat (non-@k) per_item key,
     e.g. ``{"mean_pos": "mean_pos"}``.
@@ -606,7 +617,7 @@ def _per_item_metric_table(
     """
     def _row(m: dict) -> dict:
         row = {
-            col_fmt.format(k=k): m.get(f"{metric_key}@{_k_to_lookup(k, n_items)}")
+            col_fmt.format(k=k): m.get(f"{metric_key}@{_k_to_lookup(k, all_k)}")
             for k in ks
         }
         for out_name, src_key in (extra_cols or {}).items():
@@ -626,11 +637,12 @@ def per_item_metric_compare_table(
     per_item_b: dict,
     per_item_delta: dict,
     ks: list,
-    n_items: int,
+    all_k: int,
     metric_key: str,
     col_base_fmt: str,
     macro_a: dict | None = None,
     macro_b: dict | None = None,
+    all_k_b: int | None = None,
 ) -> pd.DataFrame:
     """Per-item table with Model/Baseline/Δ interleaved per k.
 
@@ -643,16 +655,26 @@ def per_item_metric_compare_table(
     here as ``macro_a − macro_b`` since macro values aren't part of the
     per-item delta dict. Either way a Δ exists only where both sides have the
     value; otherwise the cell is blank (ADR-0020 bug 4).
+
+    ``all_k`` / ``all_k_b``: the K each side's ``"all"`` is stored at
+    (``metrics.resolved_all_k`` of that side's bundle). ``all_k_b`` defaults
+    to ``all_k`` — right when B is scored on A's own rows, as the baseline is.
+    Two compared model versions each keep their own rows in the common
+    universe, so with ``event`` their widest groups can differ (#434); then
+    the two ``"all"`` cells are different keys, ``per_item_delta`` (keyed per
+    key) holds neither pairing, and the Δ is taken here as ``a − b``.
     """
+    k_b = all_k if all_k_b is None else all_k_b
+
     def _row(m_a: dict, m_b: dict, m_d: dict | None) -> dict:
         row: dict = {}
         for k in ks:
-            lk = _k_to_lookup(k, n_items)
-            key = f"{metric_key}@{lk}"
+            key = f"{metric_key}@{_k_to_lookup(k, all_k)}"
+            key_b = f"{metric_key}@{_k_to_lookup(k, k_b)}"
             base = col_base_fmt.format(k=k)
             a = m_a.get(key)
-            b = m_b.get(key)
-            if m_d is not None:
+            b = m_b.get(key_b)
+            if m_d is not None and key == key_b:
                 d = m_d.get(key)
             else:
                 # Both sides or no Δ (ADR-0020 bug 4): reading a missing side
@@ -679,7 +701,7 @@ def per_item_metric_compare_table(
 
 
 def _per_item_recall_table(
-    per_item: dict, ks: list, n_items: int, macro_metrics: dict | None = None
+    per_item: dict, ks: list, all_k: int, macro_metrics: dict | None = None
 ) -> pd.DataFrame:
     """Rows = items; bare ``@k`` cols (from hit_rate@k) + mean_pos.
 
@@ -687,25 +709,25 @@ def _per_item_recall_table(
     及 per-item map_attr 表的欄名慣例一致（family 不重複塞進欄名）。
     """
     return _per_item_metric_table(
-        per_item, ks, n_items, "hit_rate", "@{k}",
+        per_item, ks, all_k, "hit_rate", "@{k}",
         extra_cols={"mean_pos": "mean_pos"}, macro_metrics=macro_metrics,
     )
 
 
-def _families_by_k_table(overall: dict, ks: list, n_items: int) -> pd.DataFrame:
+def _families_by_k_table(overall: dict, ks: list, all_k: int) -> pd.DataFrame:
     """單一 per-query aggregate → rows=[map, precision, recall]、cols=@k。
 
     給「單一彙總」用（overall、大類 overall）：只有一個實體，故用指標家族當列。
     """
     rows = {}
     for fam in ("map", "precision", "recall"):
-        rows[fam] = {f"@{k}": overall.get(f"{fam}@{_k_to_lookup(k, n_items)}")
+        rows[fam] = {f"@{k}": overall.get(f"{fam}@{_k_to_lookup(k, all_k)}")
                      for k in ks}
     return pd.DataFrame(rows).T
 
 
 def _entities_by_k_table(
-    per_entity: dict, macro: dict | None, ks: list, n_items: int, fam: str
+    per_entity: dict, macro: dict | None, ks: list, all_k: int, fam: str
 ) -> pd.DataFrame:
     """多實體 per-query → rows=實體（Macro 頂列）、cols=@k，單一 metric family。
 
@@ -714,7 +736,7 @@ def _entities_by_k_table(
     src = {_MACRO_LABEL: macro, **per_entity} if macro else dict(per_entity)
     data = {}
     for ent, m in src.items():
-        data[ent] = {f"@{k}": (m or {}).get(f"{fam}@{_k_to_lookup(k, n_items)}")
+        data[ent] = {f"@{k}": (m or {}).get(f"{fam}@{_k_to_lookup(k, all_k)}")
                      for k in ks}
     return pd.DataFrame(data).T
 
@@ -737,7 +759,8 @@ def build_metrics_section(
     per_item = dict(sorted((metrics.get("per_item", {}) or {}).items()))
     macro_item = metrics.get("macro_avg", {}).get("by_item", {})
     n_items = count_items(metrics)
-    ks = _metrics_section_ks(n_items)  # one K list for every table
+    all_k = resolved_all_k(metrics)
+    ks = _metrics_section_ks(all_k)  # one K list for every table
 
     tables: list[pd.DataFrame] = []
     titles: list[str] = []
@@ -764,7 +787,7 @@ def build_metrics_section(
         )
 
     # ===== Block A：per-query 指標（map / precision / recall）=====
-    _add(_families_by_k_table(overall, ks, n_items),
+    _add(_families_by_k_table(overall, ks, all_k),
          "A · per-query｜overall（列＝map/precision/recall）", False)
     per_segment = _unmatched_last(metrics.get("per_segment", {}) or {})
     if per_segment:
@@ -773,20 +796,21 @@ def build_metrics_section(
         unmatched = (f"；{UNMATCHED_SEGMENT} 不含在 Macro"
                      if UNMATCHED_SEGMENT in per_segment else "")
         for fam in ("map", "precision", "recall"):
-            _add(_entities_by_k_table(per_segment, macro_seg, ks, n_items, fam),
+            _add(_entities_by_k_table(per_segment, macro_seg, ks, all_k, fam),
                  f"A · per-query｜per-segment {fam}@k（列＝segment{unmatched}）",
                  True)
     cat = metrics.get("category")
     cks = None
     if cat:
         n_cat = count_items(cat)
-        cks = _metrics_section_ks(n_cat)
-        _add(_families_by_k_table(cat.get("overall", {}), cks, n_cat),
+        cat_k = resolved_all_k(cat)
+        cks = _metrics_section_ks(cat_k)
+        _add(_families_by_k_table(cat.get("overall", {}), cks, cat_k),
              "A · per-query｜大類 overall（列＝map/precision/recall）", True)
 
     # ===== Block B：per-item 歸因（map_attr / recall；無 precision）=====
     b_map = _per_item_metric_table(
-        per_item, ks, n_items, "map_attr", "@{k}", macro_metrics=macro_item,
+        per_item, ks, all_k, "map_attr", "@{k}", macro_metrics=macro_item,
     )
     if metric_ci and metric_ci.get("enabled"):
         ci_items = metric_ci.get("per_item", {}) or {}
@@ -806,7 +830,7 @@ def build_metrics_section(
     item_cov = macro_coverage_suffix(per_item, n_items, parameters, macro_item)
     _add(b_map, f"B · per-item 歸因｜map_attr@k（列＝item，＋CI 上下界）{item_cov}",
          True)
-    _add(_per_item_recall_table(per_item, ks, n_items, macro_metrics=macro_item),
+    _add(_per_item_recall_table(per_item, ks, all_k, macro_metrics=macro_item),
          f"B · per-item 歸因｜recall@k（列＝item）{item_cov}", True)
     if cat:
         cat_macro_item = cat.get("macro_avg", {}).get("by_item", {})
@@ -814,10 +838,10 @@ def build_metrics_section(
         cat_item_cov = macro_coverage_suffix(
             cat_pi, n_cat, parameters, cat_macro_item
         )
-        _add(_per_item_metric_table(cat_pi, cks, n_cat, "map_attr",
+        _add(_per_item_metric_table(cat_pi, cks, cat_k, "map_attr",
                                     "@{k}", macro_metrics=cat_macro_item),
              f"B · 大類 per-item 歸因｜map_attr@k（列＝大類）{cat_item_cov}", True)
-        _add(_per_item_recall_table(cat_pi, cks, n_cat,
+        _add(_per_item_recall_table(cat_pi, cks, cat_k,
                                     macro_metrics=cat_macro_item),
              f"B · 大類 per-item 歸因｜recall@k（列＝大類）{cat_item_cov}", True)
 
@@ -968,11 +992,15 @@ def build_baseline_section(
     )
     disp = _report_cfg(parameters).get("display", {}) or {}
     n_items = count_items(metrics)
+    # One K for both sides, the model's: the baseline is scored on the model's
+    # own rows (build_baseline_frame), so its "all" resolved to the same K,
+    # and its slim bundle records neither that nor an item count (#434).
+    all_k = resolved_all_k(metrics)
     attr_ks = resolve_display_k(
-        disp.get("primary_map_k", [1, 3, 5, "all"]), n_items
+        disp.get("primary_map_k", [1, 3, 5, "all"]), all_k
     )
     # overall 三表用 k superset（使用者指定，k 放欄位）
-    k_super = resolve_display_k([1, 2, 3, 4, 5, "all"], n_items)
+    k_super = resolve_display_k([1, 2, 3, 4, 5, "all"], all_k)
     # Same helper the node (compute_baseline_metrics) reads (bug 1,
     # ADR-0020): before it existed this line read .get("lookback_months")
     # with no default, so an unset key printed nothing here while the node
@@ -1057,7 +1085,7 @@ def build_baseline_section(
         for who, src in (("Model", overall_a), ("Baseline", overall_b),
                          ("Δ", overall_delta)):
             data[who] = {
-                f"@{k}": src.get(f"{fam}@{_k_to_lookup(k, n_items)}")
+                f"@{k}": src.get(f"{fam}@{_k_to_lookup(k, all_k)}")
                 for k in k_super
             }
         _add(pd.DataFrame(data).T, f"overall {label}@k (M/B/Δ)", True)
@@ -1084,7 +1112,7 @@ def build_baseline_section(
             _add(
                 per_item_metric_compare_table(
                     per_item_a, per_item_b, per_item_delta,
-                    ks, n_items, metric_key, col_fmt,
+                    ks, all_k, metric_key, col_fmt,
                     macro_a=macro_a, macro_b=macro_b,
                 ),
                 f"{title}{item_cov}", True,
@@ -1103,32 +1131,32 @@ def build_baseline_section(
             a, b = seg_a.get(seg, {}) or {}, seg_b.get(seg, {}) or {}
             for who, src in ((f"{seg} · Model", a), (f"{seg} · Baseline", b)):
                 rows[who] = {
-                    f"@{k}": src.get(f"map@{_k_to_lookup(k, n_items)}")
+                    f"@{k}": src.get(f"map@{_k_to_lookup(k, all_k)}")
                     for k in k_super
                 }
             rows[f"{seg} · Δ"] = {
-                f"@{k}": _od(a.get(f"map@{_k_to_lookup(k, n_items)}"),
-                            b.get(f"map@{_k_to_lookup(k, n_items)}"))
+                f"@{k}": _od(a.get(f"map@{_k_to_lookup(k, all_k)}"),
+                            b.get(f"map@{_k_to_lookup(k, all_k)}"))
                 for k in k_super
             }
         _add(pd.DataFrame(rows).T, "per-segment mAP@k (M/B/Δ)", True)
 
     # [5] 大類 overall mAP@k M/B/Δ — 大類粒度的 overall mAP 對照；rows＝
-    #     [Model,Baseline,Δ]、cols＝@k。n_cat 取 model 的 category 產品數
+    #     [Model,Baseline,Δ]、cols＝@k。cat_k 取 model 的 category bundle 的 K
     #     （baseline slim bundle 無 dataset_overview，兩側同一 category 集）。
     cat_a = (metrics.get("category") or {}).get("overall", {}) or {}
     cat_b = ((baseline_metrics or {}).get("category") or {}).get("overall", {}) or {}
     if cat_a and cat_b:
-        n_cat = count_items(metrics.get("category") or {}) or n_items
-        cks = resolve_display_k([1, 2, 3, 4, 5, "all"], n_cat)
+        cat_k = resolved_all_k(metrics.get("category") or {}) or all_k
+        cks = resolve_display_k([1, 2, 3, 4, 5, "all"], cat_k)
         data = {}
         for who, src in (("Model", cat_a), ("Baseline", cat_b)):
             data[who] = {
-                f"@{k}": src.get(f"map@{_k_to_lookup(k, n_cat)}") for k in cks
+                f"@{k}": src.get(f"map@{_k_to_lookup(k, cat_k)}") for k in cks
             }
         data["Δ"] = {
-            f"@{k}": _od(cat_a.get(f"map@{_k_to_lookup(k, n_cat)}"),
-                        cat_b.get(f"map@{_k_to_lookup(k, n_cat)}"))
+            f"@{k}": _od(cat_a.get(f"map@{_k_to_lookup(k, cat_k)}"),
+                        cat_b.get(f"map@{_k_to_lookup(k, cat_k)}"))
             for k in cks
         }
         _add(pd.DataFrame(data).T, "大類 overall mAP@k (M/B/Δ)", True)

@@ -116,13 +116,28 @@ def _all_items(sdf: SparkDataFrame, item_col: str) -> list:
     )
 
 
+def _n_ranks(sdf: SparkDataFrame, rank_col: str, items: list) -> int:
+    """Width of the rank axis: the item count, or the deepest rank if deeper.
+
+    Ranks stop at the item count while items are unique within a query group.
+    With ``event`` declared they are not — one entity shown one creative
+    thirty times is thirty ranks against twelve items — and an axis cut at
+    the item count dropped every rank past it with nothing raised (#434).
+    Read from the whole frame, not the rows a matrix counts, so all three
+    matrices share one axis. Without ``event`` the deepest rank is at most the
+    item count and the axis is what it always was.
+    """
+    deepest = sdf.agg(F.max(rank_col).alias("_max_rank")).collect()[0]["_max_rank"]
+    return max(len(items), int(deepest or 0))
+
+
 def _to_matrix(
     long_pd: pd.DataFrame, item_col: str, rank_col: str, value_col: str,
-    items: list,
+    items: list, n_ranks: int,
 ) -> pd.DataFrame:
     """Pivot long (item, rank, value) -> matrix indexed by ``items`` with
-    columns = ranks ``1..len(items)`` (full-query rank range), missing = 0."""
-    ranks = list(range(1, len(items) + 1))
+    columns = ranks ``1..n_ranks`` (``_n_ranks``), missing = 0."""
+    ranks = list(range(1, n_ranks + 1))
     if long_pd.empty:
         return pd.DataFrame(0, index=items, columns=ranks)
     mat = long_pd.pivot_table(
@@ -138,7 +153,8 @@ def rank_count_matrix(
     """Count of (item, rank) occurrences as an item x rank matrix."""
     items = _all_items(sdf, item_col)
     long = sdf.groupBy(item_col, rank_col).count().toPandas()
-    return _to_matrix(long, item_col, rank_col, "count", items)
+    return _to_matrix(
+        long, item_col, rank_col, "count", items, _n_ranks(sdf, rank_col, items))
 
 
 def positive_rank_count_matrix(
@@ -153,7 +169,8 @@ def positive_rank_count_matrix(
         .count()
         .toPandas()
     )
-    return _to_matrix(long, item_col, rank_col, "count", items)
+    return _to_matrix(
+        long, item_col, rank_col, "count", items, _n_ranks(sdf, rank_col, items))
 
 
 def positive_rate_matrix(
@@ -170,8 +187,9 @@ def positive_rate_matrix(
         )
         .toPandas()
     )
-    total = _to_matrix(agg, item_col, rank_col, "total", items)
-    pos = _to_matrix(agg, item_col, rank_col, "pos", items)
+    n_ranks = _n_ranks(sdf, rank_col, items)
+    total = _to_matrix(agg, item_col, rank_col, "total", items, n_ranks)
+    pos = _to_matrix(agg, item_col, rank_col, "pos", items, n_ranks)
     denom = np.where(total.values > 0, total.values, 1)
     rate = np.where(total.values > 0, pos.values / denom, 0.0)
     return pd.DataFrame(rate, index=total.index, columns=total.columns)

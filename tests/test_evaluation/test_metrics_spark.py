@@ -84,20 +84,20 @@ def _make_parameters(k_values=(3,), segment_columns=(), metric=None):
 
 
 def test_resolve_k_values_basic():
-    assert ms._resolve_k_values([5, 10], n_items=20) == [5, 10]
+    assert ms._resolve_k_values([5, 10], all_k=20) == [5, 10]
 
 
-def test_resolve_k_values_all_resolves_to_n_items():
-    assert ms._resolve_k_values([5, "all"], n_items=8) == [5, 8]
+def test_resolve_k_values_all_resolves_to_all_k():
+    assert ms._resolve_k_values([5, "all"], all_k=8) == [5, 8]
 
 
 def test_resolve_k_values_case_insensitive():
-    assert ms._resolve_k_values(["ALL"], n_items=4) == [4]
+    assert ms._resolve_k_values(["ALL"], all_k=4) == [4]
 
 
 def test_resolve_k_values_dedup_and_sort():
     # 'all' resolves to 5, deduped with literal 5; final sorted.
-    assert ms._resolve_k_values([5, "all", 3, 5], n_items=5) == [3, 5]
+    assert ms._resolve_k_values([5, "all", 3, 5], all_k=5) == [3, 5]
 
 
 # ===========================================================================

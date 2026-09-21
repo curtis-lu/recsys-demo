@@ -856,17 +856,17 @@ class TestDropMetricKeysAboveItemCount:
 
     def test_drops_only_integer_k_above_the_count(self):
         keys = ["map@3", "precision@4", "recall@5", "mean_pos", "map@all"]
-        assert rb.drop_metric_keys_above_item_count(keys, 3) == [
+        assert rb.drop_metric_keys_above_all_k(keys, 3) == [
             "map@3", "mean_pos", "map@all",
         ]
 
     def test_keeps_k_equal_to_the_count(self):
-        assert rb.drop_metric_keys_above_item_count(["precision@3"], 3) == [
+        assert rb.drop_metric_keys_above_all_k(["precision@3"], 3) == [
             "precision@3"
         ]
 
     def test_skips_the_filter_when_n_items_is_zero_or_unknown(self):
-        assert rb.drop_metric_keys_above_item_count(["map@5"], 0) == ["map@5"]
+        assert rb.drop_metric_keys_above_all_k(["map@5"], 0) == ["map@5"]
 
 
 def test_glossary_section_always_built():
@@ -1499,3 +1499,88 @@ def test_core_concept_names_the_occasion_when_declared():
     assert "一個 query＝一組（snap_date × user_id×slot_id）。" in plain
     widened = build_core_concept_section(_p(occasion="request_id")).description
     assert "一個 query＝一組（snap_date × user_id×slot_id × request_id）。" in widened
+
+
+# ---------------------------------------------------------------------------
+# "all" is looked up at the K the producer recorded (#434)
+# ---------------------------------------------------------------------------
+
+
+def _metrics_with_recorded_all_k():
+    """What ``compute_all_metrics`` writes with ``event`` declared: 2 items,
+    but the widest query group holds 4 rows, so every ``"all"`` value is
+    stored at ``@4`` and the bundle says so. Looking ``"all"`` up at the item
+    count asks for ``@2`` instead — a real key, holding the wrong number."""
+    from recsys_tfb.evaluation.metrics import ALL_K_KEY
+
+    m = _metrics_with_seg_cat()
+    m[ALL_K_KEY] = 4
+    m["overall"].update({"map@2": 0.1, "map@4": 0.9, "recall@4": 1.0})
+    m["per_segment"]["X"]["map@4"] = 0.8
+    m["per_segment"]["Y"]["map@4"] = 0.7
+    for item, v in (("A", 0.66), ("B", 0.44)):
+        m["per_item"][item].update({"map_attr@4": v, "hit_rate@4": 1.0})
+    m["macro_avg"]["by_item"].update({"map_attr@4": 0.55, "hit_rate@4": 1.0})
+    return m
+
+
+def _baseline_at_recorded_all_k():
+    base = _baseline_with_seg_cat()
+    base["overall"] = {**base["overall"], "map@2": 0.05, "map@4": 0.6}
+    base["per_item"] = {
+        item: {**cell, "map_attr@4": v, "hit_rate@4": 1.0}
+        for (item, cell), v in zip(base["per_item"].items(), (0.5, 0.3))
+    }
+    for seg, v in (("X", 0.5), ("Y", 0.4)):
+        base["per_segment"][seg]["map@4"] = v
+    return base
+
+
+def test_metrics_section_reads_all_at_the_recorded_k():
+    m = _metrics_with_recorded_all_k()
+    s = rb.build_metrics_section(m, _params())
+    overall = s.tables[s.table_titles.index(
+        "A · per-query｜overall（列＝map/precision/recall）")]
+    assert overall.loc["map", "@all"] == pytest.approx(0.9)
+    assert overall.loc["recall", "@all"] == pytest.approx(1.0)
+    seg = next(t for t, tt in zip(s.tables, s.table_titles)
+               if "per-segment map@k" in tt)
+    assert seg.loc["X", "@all"] == pytest.approx(0.8)
+    attr = next(t for t, tt in zip(s.tables, s.table_titles)
+                if "map_attr@k（列＝item" in tt)
+    assert attr.loc["A", "@all"] == pytest.approx(0.66)
+    assert attr.loc["Macro 平均", "@all"] == pytest.approx(0.55)
+
+
+def test_display_k_is_clamped_at_the_recorded_k_not_the_item_count():
+    """bug 8's bound is the K past which @K means nothing: the longest list.
+    With 4-row groups, @3 and @4 rank real rows although there are 2 items."""
+    s = rb.build_metrics_section(_metrics_with_recorded_all_k(), _params())
+    overall = s.tables[s.table_titles.index(
+        "A · per-query｜overall（列＝map/precision/recall）")]
+    assert list(overall.columns) == ["@1", "@2", "@3", "@4", "@all"]
+
+
+def test_overview_card_reads_map_at_all_at_the_recorded_k():
+    card = rb.build_overview_section(
+        _metrics_with_recorded_all_k(), _params()).tables[0]
+    assert card.loc["map@all", "value"] == pytest.approx(0.9)
+
+
+def test_baseline_section_reads_both_sides_at_the_model_recorded_k():
+    """The slim baseline bundle records nothing; it is scored on the model's
+    own rows (``build_baseline_frame``), so the model's K is its K too."""
+    s = rb.build_baseline_section(
+        _metrics_with_recorded_all_k(), _baseline_at_recorded_all_k(),
+        _params(),
+    )
+    overall = s.tables[s.table_titles.index("overall mAP@k (M/B/Δ)")]
+    assert overall.loc["Model", "@all"] == pytest.approx(0.9)
+    assert overall.loc["Baseline", "@all"] == pytest.approx(0.6)
+    assert overall.loc["Δ", "@all"] == pytest.approx(0.3)
+    attr = next(t for t, tt in zip(s.tables, s.table_titles)
+                if tt.startswith("per-item map_attr@k"))
+    assert attr.loc["A", "map_attr@all M"] == pytest.approx(0.66)
+    assert attr.loc["A", "map_attr@all B"] == pytest.approx(0.5)
+    seg = s.tables[s.table_titles.index("per-segment mAP@k (M/B/Δ)")]
+    assert seg.loc["X · Baseline", "@all"] == pytest.approx(0.5)
