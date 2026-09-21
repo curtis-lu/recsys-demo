@@ -144,12 +144,14 @@ def test_static_coverage_floor():
     # first time: its `outputs=` was the variable `final_model_output`
     # (`"trained_model"` under calibration, `"model"` otherwise), which the
     # static scan could not read. Net -2 total, -1 judgeable.
+    # 58/55: #381 added evaluation's `compute_prediction_quality`, one
+    # literal, statically judgeable call.
     # 57/54: #414 deleted the calibration data split -- dataset's
     # `select_calibration_keys` and `build_calibration_model_input`, plus one
     # of the two `validate_model_input_grain` calls (the branch existed only
     # to append the calibration pair to its input list). All three were
     # literal, so total and judgeable both drop by 3.
-    assert (total, judgeable) == (57, 54), (
+    assert (total, judgeable) == (58, 55), (
         f"Node coverage changed: {judgeable}/{total} statically judgeable. "
         "If this dropped, A5/A6 now have a bigger blind spot -- check why."
     )

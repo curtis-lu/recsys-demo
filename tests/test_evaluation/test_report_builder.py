@@ -1585,3 +1585,175 @@ def test_baseline_section_reads_both_sides_at_the_model_recorded_k():
     assert attr.loc["A", "map_attr@all B"] == pytest.approx(0.5)
     seg = s.tables[s.table_titles.index("per-segment mAP@k (M/B/Δ)")]
     assert seg.loc["X · Baseline", "@all"] == pytest.approx(0.5)
+
+
+# ---- 預測品質段（#381，ADR-0024）----
+
+def _pq_payload(listed=("A",), n_items=2):
+    """A ``prediction_quality_metrics`` payload as ``build_payload`` lands it,
+    built from the worked-example bins of ``test_prediction_quality.py``:
+    4 fine bins over [0, 1) (width 0.25), 2 display bins, item A holding
+    every row."""
+    from recsys_tfb.evaluation.prediction_quality import build_payload
+
+    bins = pd.DataFrame({"bin": [0, 1, 3], "n": [4, 2, 2],
+                         "n_pos": [0, 1, 2], "score_sum": [0.4, 0.8, 1.8]})
+    per_item = bins.assign(prod_name="A")[
+        ["prod_name", "bin", "n", "n_pos", "score_sum"]]
+    totals = pd.DataFrame({"prod_name": ["A", "B"][:n_items],
+                           "n": [8, 0][:n_items], "n_pos": [3, 0][:n_items]})
+    aggregated = {
+        "lo": 0.0, "hi": 1.0, "width": 0.25, "overall": bins,
+        "item_totals": totals, "listed_items": list(listed),
+        "per_item": per_item[per_item["prod_name"].isin(listed)],
+    }
+    payload = build_payload(
+        aggregated, item_col="prod_name", score_col="score",
+        label_col="label", weight_col=None, n_bins=4, n_display_bins=2,
+        top_n=len(listed))
+    return {**payload, "enabled": True}
+
+
+def _pq_params(post_training=None):
+    p = _params()
+    if post_training is not None:
+        p["post_training"] = post_training
+    return p
+
+
+def _pq_text(s):
+    return " ".join([s.description, s.formula, *s.bullets, *s.table_titles])
+
+
+def test_prediction_quality_section_absent_for_a_stub_or_none():
+    assert rb.build_prediction_quality_section(
+        {"enabled": False}, _metrics(), _params()) is None
+    assert rb.build_prediction_quality_section(
+        None, _metrics(), _params()) is None
+
+
+def test_prediction_quality_section_absent_when_switched_off():
+    p = _params()
+    p["evaluation"]["report"]["sections"] = {"prediction_quality": False}
+    assert rb.build_prediction_quality_section(
+        _pq_payload(), _metrics(), p) is None
+
+
+def test_prediction_quality_headline_numbers():
+    s = rb.build_prediction_quality_section(
+        _pq_payload(), _metrics(), _params())
+    card = s.tables[0]["value"]
+    assert card["pr_auc"] == pytest.approx(11 / 12)
+    assert card["roc_auc"] == pytest.approx(14.5 / 15)
+    assert card["F1 最佳門檻（分數 ≥）"] == pytest.approx(0.25)
+    assert card["該門檻的 F1"] == pytest.approx(6 / 7)
+    assert card["細箱寬（門檻解析度）"] == pytest.approx(0.25)
+
+
+def test_prediction_quality_bin_table_is_the_display_bins():
+    s = rb.build_prediction_quality_section(
+        _pq_payload(), _metrics(), _params())
+    tbl = s.tables[1]
+    assert len(tbl) == 2
+    assert list(tbl["列數"]) == [6, 2]
+    assert list(tbl["平均分數"]) == pytest.approx([0.2, 0.9])
+    assert list(tbl["實際正例率"]) == pytest.approx([1 / 6, 1.0])
+    # Same sweep as the headline: lower edge 0.5 predicts the two 0.9 rows.
+    assert tbl.loc[1, "以下緣為門檻：precision"] == pytest.approx(1.0)
+    assert tbl.loc[1, "以下緣為門檻：recall"] == pytest.approx(2 / 3)
+
+
+def test_prediction_quality_prints_the_bin_width_and_why_it_matters():
+    """ADR-0024 decision 7, the first of three: the best-F1 threshold's
+    resolution is the bin width, and it is not a setting to carry online."""
+    text = _pq_text(rb.build_prediction_quality_section(
+        _pq_payload(), _metrics(), _params()))
+    assert "0.25" in text
+    assert "解析度" in text
+    assert "線上" in text
+
+
+def test_prediction_quality_states_both_populations_with_numbers():
+    """Decision 7, the second: this section counts every candidate row, the
+    ranking section only query groups with a positive."""
+    metrics = {**_metrics(), "n_queries": 12, "n_excluded_queries": 5}
+    text = _pq_text(rb.build_prediction_quality_section(
+        _pq_payload(), metrics, _params()))
+    assert "8 列" in text
+    assert "排除 5 個" in text
+    assert "不可互相比較" in text
+
+
+def test_prediction_quality_under_post_training_says_the_test_table_was_filtered():
+    """#426: under --post-training the dataset pipeline has already dropped
+    the query groups without a positive, so "every candidate row" would be
+    false there."""
+    text = _pq_text(rb.build_prediction_quality_section(
+        _pq_payload(), _metrics(), _pq_params(post_training=True)))
+    assert "filter_test_model_input" in text
+    monitoring = _pq_text(rb.build_prediction_quality_section(
+        _pq_payload(), _metrics(), _pq_params(post_training=False)))
+    assert "filter_test_model_input" not in monitoring
+
+
+def test_prediction_quality_post_training_does_not_call_equal_populations_different():
+    """Under --post-training with nothing excluded by the ranking section,
+    both sections see the same rows; the note must say so, not say "the two
+    populations differ" and then take it back."""
+    metrics = {**_metrics(), "n_queries": 12, "n_excluded_queries": 0}
+    text = _pq_text(rb.build_prediction_quality_section(
+        _pq_payload(), metrics, _pq_params(post_training=True)))
+    assert "兩段的母體相同" in text
+    assert "兩段的母體不同" not in text
+
+
+def test_prediction_quality_says_a_global_threshold_needs_comparable_scores():
+    """A ranking objective trains scores to order rows inside one query
+    group; one threshold across every group is a use it never optimised."""
+    text = _pq_text(rb.build_prediction_quality_section(
+        _pq_payload(), _metrics(), _params()))
+    assert "lambdarank" in text and "跨" in text
+
+
+def test_prediction_quality_says_pr_auc_is_not_an_external_average_precision():
+    """Decision 7, the third."""
+    text = _pq_text(rb.build_prediction_quality_section(
+        _pq_payload(), _metrics(), _params()))
+    assert "average precision" in text
+    assert "不能拿來跟外部" in text
+
+
+def test_prediction_quality_separates_per_item_precision_from_precision_at_k():
+    text = _pq_text(rb.build_prediction_quality_section(
+        _pq_payload(), _metrics(), _params()))
+    assert "precision@K" in text and "分母是 K" in text
+
+
+def test_prediction_quality_per_item_lists_the_budgeted_items_and_says_how_many():
+    s = rb.build_prediction_quality_section(
+        _pq_payload(listed=("A",), n_items=2), _metrics(), _params())
+    per_item = s.tables[2]
+    assert list(per_item.index) == ["A"]
+    assert per_item.loc["A", "pr_auc"] == pytest.approx(11 / 12)
+    title = s.table_titles[2]
+    assert "前 1 個" in title and "共 2 個" in title
+
+
+def test_assemble_report_places_prediction_quality_after_the_metrics_section():
+    html = rb.assemble_report(
+        _metrics(), _params(), prediction_quality=_pq_payload())
+    assert html.index("衡量指標") < html.index("預測品質")
+    assert html.index("預測品質") < html.index("完整性檢查")
+    # The report's own guard word (test_assemble_report_has_no_reconciliation
+    # _section) stays out even with this section drawn.
+    assert "對帳" not in html
+
+
+def test_overview_navigation_points_at_prediction_quality_only_when_drawn():
+    def nav(prediction_quality):
+        html = rb.assemble_report(
+            _metrics(), _params(), prediction_quality=prediction_quality)
+        return "門檻切在哪" in html
+
+    assert nav(_pq_payload())
+    assert not nav({"enabled": False})

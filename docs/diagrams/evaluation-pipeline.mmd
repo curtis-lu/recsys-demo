@@ -35,7 +35,7 @@
 %%   can_load 直接讀舊檔，不會重跑診斷）；不會再沿線把
 %%   prepare_eval_data / compute_metrics / compute_baseline_metrics
 %%   拉回來重跑全量 Spark。
-%%   generate_report 是純函式（6 個必填輸入、無 varargs）本來就是為了「便宜重繪」
+%%   generate_report 是純函式（7 個必填輸入、無 varargs）本來就是為了「便宜重繪」
 %%   而做的投資，#351 之前這條 catalog 缺口把它抵銷掉，補上後才真的便宜。
 %%   連帶：那些落地的 JSON 路徑只用 (model_version, snap_date) 當 key。
 %%   #342 起每份落地 JSON 內帶 config_fingerprint（只涵蓋「算的」設定）：
@@ -59,7 +59,7 @@
 %% 兩種模式的形狀不同（ADR-0018 決定 5）
 %%   registry 診斷與 render_diagnosis_pages 只在 --post-training 組出來；
 %%   監控模式（預設，含 --compare）改組 no_diagnosis_pages：零讀取、回空清單，
-%%   只為了讓 generate_report 的第六個位置輸入有人產出。它不能沿用
+%%   只為了讓 generate_report 的診斷頁位置輸入有人產出。它不能沿用
 %%   render_diagnosis_pages——那個要求每項 registry 診斷各一份帶名字的結果，
 %%   監控模式一份都沒算。
 
@@ -106,6 +106,8 @@ flowchart TB
   d_metrics(["evaluation_metrics<br/><small>JSON</small>"])
   n_baseline["compute_baseline_metrics<br/><small>popularity baseline：近 lookback_months 的購買數當分數</small>"]
   d_baseline(["baseline_metrics<br/><small>JSON</small>"])
+  n_pq["compute_prediction_quality<br/><small>每一列候選當二元預測 ・ 一次 groupBy(item, 細箱) ・ 不排除無正例的 query group<br/>report.sections.prediction_quality: false（框架預設）時只寫 stub</small>"]
+  d_pq(["prediction_quality_metrics<br/><small>JSON</small>"])
   n_agg["compute_report_aggregates<br/><small>主報表診斷區的 Spark 端聚合（bin 計數／quartile／rank 矩陣）</small>"]
   d_agg(["evaluation_report_aggregates<br/><small>JSON</small>"])
 
@@ -126,12 +128,12 @@ flowchart TB
     n_pages["render_diagnosis_pages<br/><small>畫這次的診斷結果 ・ 先比對名字與設定指紋 ・ 停用的那項就沒有那一頁</small>"]
   end
   subgraph MON[" 僅監控模式（預設，含 --compare） "]
-    n_nopages["no_diagnosis_pages<br/><small>零讀取 ・ 回空清單：只為了 generate_report 的第六個位置輸入</small>"]
+    n_nopages["no_diagnosis_pages<br/><small>零讀取 ・ 回空清單：只為了 generate_report 的診斷頁位置輸入</small>"]
   end
   d_pages(["evaluation_diagnosis_pages<br/><small>兩種模式各由一個 node 產出</small>"])
 
   %% ---------------------- 匯流 ----------------------
-  n_report["generate_report<br/><small><b>純函式</b>：6 個必填輸入、無 varargs、不含任何 Spark 物件或 action</small>"]
+  n_report["generate_report<br/><small><b>純函式</b>：7 個必填輸入、無 varargs、不含任何 Spark 物件或 action</small>"]
   o_report(["evaluation_report　★ report.html<br/><small>data/evaluation/&lt;model_version&gt;/&lt;YYYYMMDD&gt;/</small>"])
 
   %% ---------------------- 比較模式（追加） ----------------------
@@ -157,6 +159,7 @@ flowchart TB
   d_segcols --> n_sample
   d_segcols -- "--compare-only：讀寫 enriched 那次落地的" --> n_creport
   d_segcols -- "只取 joined：分區指紋的一部分（#374）" --> n_agg
+  d_segcols -- "只取 joined" --> n_pq
   d_segcols --> n_restrict
   d_segcols --> n_validate
 
@@ -168,6 +171,8 @@ flowchart TB
   n_baseline --> d_baseline
   o_enriched --> n_agg
   n_agg --> d_agg
+  o_enriched --> n_pq
+  n_pq --> d_pq
 
   o_enriched --> n_sample
   n_sample --> d_sample
@@ -195,6 +200,7 @@ flowchart TB
   d_ci --> n_report
   d_agg --> n_report
   d_pages --> n_report
+  d_pq --> n_report
   n_report --> o_report
 
   o_enriched --> n_restrict
@@ -218,7 +224,7 @@ flowchart TB
   class src_ranked,src_teval,src_label,src_seg src
   class cfg_cat cfg
   class art_gain art
-  class n_prep,n_metrics,n_baseline,n_agg,n_sample,n_ci,n_cs,n_ia,n_mc,n_sup,n_pages,n_nopages,n_report,n_validate,n_loadb,n_restrict,n_creport nd
-  class d_ci,d_cs,d_ia,d_mc,d_sup,d_agg,d_metrics,d_baseline data
+  class n_prep,n_metrics,n_baseline,n_pq,n_agg,n_sample,n_ci,n_cs,n_ia,n_mc,n_sup,n_pages,n_nopages,n_report,n_validate,n_loadb,n_restrict,n_creport nd
+  class d_ci,d_cs,d_ia,d_mc,d_sup,d_agg,d_metrics,d_baseline,d_pq data
   class d_sample,d_pages,d_braw,d_common mem
   class o_report,o_enriched,o_creport out

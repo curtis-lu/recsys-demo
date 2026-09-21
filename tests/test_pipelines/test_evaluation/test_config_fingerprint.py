@@ -39,6 +39,9 @@ SPEC_COMPUTED_PATHS = {
     "evaluation.report.diagnostics",
     "evaluation.report.sections.baseline",
     "evaluation.report.sections.diagnostics",
+    # ADR-0024 decision 1 / #381: the prediction-quality family.
+    "evaluation.prediction_quality",
+    "evaluation.report.sections.prediction_quality",
 }
 
 #: One leaf per enumerated key, including leaves under the ``.*`` subtrees, so
@@ -54,9 +57,12 @@ SPEC_COMPUTED_LEAVES = [
     "evaluation.metric.min_positives",
     "evaluation.diagnosis.sample.seed",
     "evaluation.diagnosis.suppression.enabled",
-    "evaluation.report.diagnostics.n_calibration_bins",
+    "evaluation.report.diagnostics.include_distributions",
     "evaluation.report.sections.baseline",
     "evaluation.report.sections.diagnostics",
+    "evaluation.prediction_quality.n_bins",
+    "evaluation.prediction_quality.top_n",
+    "evaluation.report.sections.prediction_quality",
 ]
 
 #: "Drawn" keys: they change what the report shows, never what is computed.
@@ -94,6 +100,8 @@ def _params() -> dict:
             "segment_sources": {},
             "item_categories": {"enabled": False},
             "baseline": {"lookback_months": 12},
+            "prediction_quality": {"n_bins": 1000, "n_display_bins": 10,
+                                   "top_n": 30},
             "metric": {"weight_alpha": 0.0, "k": None,
                        "min_positives": 0, "shrinkage_k": 0.0},
             "diagnosis": {"ci": {"enabled": True},
@@ -101,11 +109,11 @@ def _params() -> dict:
                           "suppression": {"enabled": True}},
             "report": {
                 "sections": {"primary_map": True, "diagnosis_links": True,
-                             "baseline": True, "diagnostics": True},
+                             "baseline": True, "diagnostics": True,
+                             "prediction_quality": True},
                 "display": {"primary_map_k": [1, 3, 5, "all"],
                             "guardrail_recall_k": [1, 2]},
-                "diagnostics": {"include_calibration": True,
-                                "n_calibration_bins": 10},
+                "diagnostics": {"include_distributions": True},
             },
         },
     }
@@ -338,7 +346,7 @@ def test_rule_1_earliest_computed_key_wins_over_message_order():
     computed keys is suggested, not the first artifact's producer."""
     old = _params()
     new = _set(copy.deepcopy(old),
-               "evaluation.report.diagnostics.n_calibration_bins", 20)
+               "evaluation.report.diagnostics.include_distributions", False)
     new = _set(new, "evaluation.k_values", [1, 5])
     with pytest.raises(ValueError) as exc:
         require_computed_with_current_config(

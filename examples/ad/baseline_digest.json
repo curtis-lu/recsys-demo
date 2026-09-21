@@ -1,8 +1,8 @@
 {
   "measured": {
     "date": "2026-09-21",
-    "code_commit": "ed019dc",
-    "how": "run_e2e.sh 跑 feat/428-occasion-role，這組 conf 宣告 occasion ＝ request_id（#428，形狀二），不再宣告 event。先做相容性驗證：另開一棵 main 的 worktree、只換成本 branch 的 src/ 與 scripts/，用 main 的 examples/ad/（宣告 event、舊產生器）跑 run_e2e.sh --compare，六層與 main 的 baseline_digest.json 逐值一致——證明沒宣告 occasion 的部署行為不變。再用本 branch 的 examples/ad/ 跑，得到本檔。會變的是每一層，原因是資料本身換了：產生器改成一次請求在同一秒展示 1～6 個互不重複的素材，每列多一欄 request_id，原始曝光從 43,541 列變成 42,555 列，瀏覽紀錄改成每次請求抽一次；versions：base_dataset_version 因 occasion 進版本雜湊而翻新，train_variant_id 不變（f6541cb7，抽樣設定沒動），model_version 跟著變；dataset：一組是一次請求，val／test 只留有點擊的請求；evaluation：item_ability 縮成 stub（宣告 occasion 時跳過並寫出原因），config_shift／suppression／metric_ci 照跑（宣告 event 時這三份是 stub），metrics.json 的 k_values \"all\" 解析回 12（item 種數，宣告 event 時是 17），n_tied_rows 為 0。"
+    "code_commit": "e37bda9",
+    "how": "run_e2e.sh --compare 跑 feat/381-prediction-quality：這組 conf 打開預測品質指標家族（report.sections.prediction_quality: true，#381）。先與上一版基準逐層比對：versions、source_etl、dataset、training、inference 五層逐值相同；evaluation 層的 metrics.json、baseline_metrics.json、segment_columns.json 與 diagnosis/ 五份逐值相同（主指標值不變）。只有兩處不同，都是預期的：新增 prediction_quality.json（8,748 個葉節點）；report_aggregates.json 從 2,098 個葉節點變成 1,837 個，少掉的 261 個正好是被移除的 calibration 那一塊（kind 1 ＋ columns 4 ＋ 64 列 × 4 欄）——#381 把沒有讀者的 calibration_bins 收進預測品質的分箱表。本檔即那次執行的 data/digest.json。"
   },
   "noisy": {},
   "versions": {
@@ -255,9 +255,13 @@
       "leaves": 926,
       "hash": "d819710a8553257bc714314a90ab516a506f637f31d2fd423fe251d78f9ca0ee"
     },
+    "prediction_quality.json": {
+      "leaves": 8748,
+      "hash": "17c47ec79c1bbef71fdc52beda6de6cbfa16ce88953dcdb0fae0e0f792214c90"
+    },
     "report_aggregates.json": {
-      "leaves": 2098,
-      "hash": "d59ad106a86f3d20dff68aad422060dca82ebe389a702f6d8c994f8837e29b23"
+      "leaves": 1837,
+      "hash": "b7930493441ceae3b5e8d0ec0a768fba4b845cfdb821ce7438a04707b520d0df"
     },
     "segment_columns.json": {
       "leaves": 2,

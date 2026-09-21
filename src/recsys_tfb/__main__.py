@@ -25,8 +25,10 @@ from recsys_tfb.core.consistency import (
     missing_test_month_errors,
     parse_etl_var_flags,
     post_training_snap_date_errors,
+    prediction_quality_param_errors,
     report_section_key_errors,
     resolved_env_dir,
+    retired_calibration_bin_key_errors,
     resolved_inference_rebuild_dates,
     resolved_rebuild_dates,
     train_snap_dates_errors,
@@ -1786,6 +1788,11 @@ def evaluation(
     # must not stop dataset, training or inference. Collected with A22 so one
     # run reports both.
     section_errs = report_section_key_errors(params)
+    # (A42) evaluation.prediction_quality's parameter domains; evaluation-only
+    # keys, so wired here for A34's reason.
+    section_errs += prediction_quality_param_errors(params)
+    # (A43) the calibration-bin keys #381 retired; evaluation-only, same place.
+    section_errs += retired_calibration_bin_key_errors(params)
     # (A40) monitoring mode cannot evaluate a deployment that declares an
     # optional column role: inference's rows do not carry those columns and
     # label_table's do, so the two sides identify rows differently. Wired here

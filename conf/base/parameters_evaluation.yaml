@@ -53,16 +53,32 @@ evaluation:
   baseline:
     lookback_months: 12
 
+  # 預測品質指標家族（ADR-0024）：把每一列評估資料當一次二元預測，照分數分箱，
+  # 算 precision／recall／F1／pr_auc／roc_auc 與分箱表（每格的平均分數 vs 實際
+  # 正例率），整體＋per-item。開關是下面的 report.sections.prediction_quality
+  # （框架預設關）；這裡只放怎麼算。三個鍵的合法值由 A42 檢查。
+  #   n_bins          細箱數：全域等寬，範圍取本次資料的最小～最大分數（不是 [0, 1]）。
+  #                   門檻只算得到箱的邊界，所以 bin 寬＝F1 最佳門檻的解析度。
+  #   n_display_bins  報表分箱表的格數：每格合併 n_bins ÷ n_display_bins 個細箱，
+  #                   必須整除 n_bins。
+  #   top_n           per-item 預算：只有列數最多的前 top_n 個 item 有自己的分箱與
+  #                   指標（item × 細箱會回 driver）；其餘 item 仍算進整體。0＝不列。
+  prediction_quality:
+    n_bins: 1000
+    n_display_bins: 10
+    top_n: 30
+
   # Report 產生選項
   # 這一區的鍵分兩類（ADR-0020 決定二；完整對照表在
   # src/recsys_tfb/pipelines/evaluation/steps/config_fingerprint.py 的 COMPUTED_KEYS）：
-  #   「算的」：sections.baseline、sections.diagnostics、diagnostics.*。它們決定要不要算、
+  #   「算的」：sections.baseline、sections.diagnostics、sections.prediction_quality、
+  #     diagnostics.*、上面的 prediction_quality.*。它們決定要不要算、
   #     怎麼算，會進落地 JSON 的設定指紋。改了要照錯誤訊息點名的 --from-node 重跑
   #     （對照表在 pipelines/evaluation/steps/config_fingerprint.py 的 COMPUTED_KEYS；不一定是產出那份
   #     JSON 的 node）；只做 --only-node generate_report 會被擋下，錯誤訊息會寫出變了
   #     哪個鍵、該 --from-node 哪個 node。
   #   「畫的」：sections 其餘鍵、display.*。只改報表長相，改完 --only-node generate_report 即可。
-  # sections 的鍵必須剛好是報表讀的這五個：多寫一個（沒人讀、設了沒用）或少寫一個
+  # sections 的鍵必須剛好是報表讀的這六個：多寫一個（沒人讀、設了沒用）或少寫一個
   # （讀了卻關不掉），evaluation 指令一進來就擋（A34，清單在 core/consistency.py 的
   # EVALUATION_REPORT_SECTIONS）。
   report:
@@ -72,13 +88,13 @@ evaluation:
       diagnostics: true          # 算的：false 時 compute_report_aggregates 只寫 stub
       baseline: true             # 算的：false 時 compute_baseline_metrics 只寫 stub
       diagnosis_links: true      # 主報表指向診斷頁的入口（只有 --post-training 有頁可指）
+      prediction_quality: false  # 算的：預測品質指標家族（見上方 prediction_quality）；
+                                 # false 時 compute_prediction_quality 只寫 stub
     display:                     # 畫的
       primary_map_k: [1, 3, 5, "all"]
       guardrail_recall_k: [1, 2, 3, 4, 5]
     diagnostics:                 # 算的
       include_distributions: true
-      include_calibration: true
-      n_calibration_bins: 10
       # 診斷圖在 Spark 端聚合（bin 計數／quartile／rank 矩陣），體積與列數無關，
       # 不再需要 row 抽樣上限。
 

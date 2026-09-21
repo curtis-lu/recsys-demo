@@ -44,8 +44,7 @@ def _params(diagnostics=False):
         "evaluation": {"snap_date": "20240331", "report": {
             "sections": {"diagnostics": diagnostics},
             "display": {"primary_map_k": [1], "guardrail_recall_k": [1]},
-            "diagnostics": {"include_distributions": diagnostics,
-                            "include_calibration": False}}},
+            "diagnostics": {"include_distributions": diagnostics}}},
     }
 
 
@@ -95,7 +94,7 @@ def test_generate_report_html_no_diagnostics(spark):
         _eval_pred(spark), _landed_segments(params), params)
     html = generate_report(_landed_metrics(params), params,
                             _unread_stub(params), _unread_stub(params),
-                            aggregates, None)
+                            aggregates, None, _unread_stub(params))
     assert html.startswith("<!DOCTYPE html>")
     assert "概覽" in html
     # diagnostics off → 沒有可收合的診斷 section（<details class="section">）。
@@ -110,7 +109,7 @@ def test_generate_report_with_diagnostics(spark):
     assert aggregates["config_fingerprint"] == fingerprint(params)
     html = generate_report(_landed_metrics(params), params,
                             _unread_stub(params), _unread_stub(params),
-                            aggregates, None)
+                            aggregates, None, _unread_stub(params))
     # 診斷升為頂層「per-item 細部拆解」段（非收合 section）；其明細數字表用
     # 逐表收合 <details class="table-collapse">。
     assert "per-item 細部拆解" in html
@@ -121,8 +120,6 @@ def _params_diag_full():
     p = _params(True)
     diag = p["evaluation"]["report"]["diagnostics"]
     diag["include_distributions"] = True
-    diag["include_calibration"] = True
-    diag["n_calibration_bins"] = 5
     return p
 
 
@@ -156,11 +153,11 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
         _eval_pred_n(spark, 3000), _landed_segments(params), params)
     small = generate_report(
         _landed_metrics(params), params, _unread_stub(params),
-        _unread_stub(params), small_aggregates, None,
+        _unread_stub(params), small_aggregates, None, _unread_stub(params),
     )
     large = generate_report(
         _landed_metrics(params), params, _unread_stub(params),
-        _unread_stub(params), large_aggregates, None,
+        _unread_stub(params), large_aggregates, None, _unread_stub(params),
     )
     assert abs(len(large) - len(small)) < 20000
 
@@ -646,7 +643,7 @@ def _params_computed_without_baseline():
 
 
 def _landed_inputs(params):
-    """The three landed inputs, as their producers write them under ``params``.
+    """The four landed inputs, as their producers write them under ``params``.
 
     Every section involved is off, so each producer returns its stub before
     touching a DataFrame and no Spark session is needed.
@@ -654,11 +651,13 @@ def _landed_inputs(params):
     from recsys_tfb.pipelines.evaluation.nodes import (
         compute_baseline_metrics,
         compute_metric_ci,
+        compute_prediction_quality,
     )
 
     return (compute_baseline_metrics(None, None, None, params),
             compute_metric_ci(None, params),
-            compute_report_aggregates(None, None, params))
+            compute_report_aggregates(None, None, params),
+            compute_prediction_quality(None, None, params))
 
 
 def test_generate_report_refuses_a_computed_setting_flipped_after_the_run():
@@ -666,13 +665,13 @@ def test_generate_report_refuses_a_computed_setting_flipped_after_the_run():
     ``sections.baseline: false``, flipped back to ``true`` and only redrawn,
     it must raise, not return a report quietly missing its baseline section."""
     computed_with = _params_computed_without_baseline()
-    baseline, metric_ci, aggregates = _landed_inputs(computed_with)
+    baseline, metric_ci, aggregates, pq = _landed_inputs(computed_with)
     now = copy.deepcopy(computed_with)
     now["evaluation"]["report"]["sections"]["baseline"] = True
 
     with pytest.raises(ValueError) as exc:
         generate_report(_landed_metrics(computed_with), now, baseline,
-                        metric_ci, aggregates, None)
+                        metric_ci, aggregates, None, pq)
 
     msg = str(exc.value)
     assert "evaluation.report.sections.baseline" in msg
@@ -687,13 +686,13 @@ def test_generate_report_refuses_metrics_computed_with_other_settings():
     so a redraw after a computed key changed must refuse it by name, not draw
     old metrics under the new settings."""
     computed_with = _params_computed_without_baseline()
-    baseline, metric_ci, aggregates = _landed_inputs(computed_with)
+    baseline, metric_ci, aggregates, pq = _landed_inputs(computed_with)
     now = copy.deepcopy(computed_with)
     now["evaluation"]["metric"] = {"min_positives": 5}
 
     with pytest.raises(ValueError) as exc:
         generate_report(_landed_metrics(computed_with), now, baseline,
-                        metric_ci, aggregates, None)
+                        metric_ci, aggregates, None, pq)
 
     msg = str(exc.value)
     assert "evaluation_metrics (written by compute_metrics)" in msg
@@ -704,11 +703,11 @@ def test_generate_report_refuses_metrics_without_a_fingerprint():
     """Every other input is current; only the metrics predate fingerprints.
     The single stale artifact names its own producer."""
     params = _params_computed_without_baseline()
-    baseline, metric_ci, aggregates = _landed_inputs(params)
+    baseline, metric_ci, aggregates, pq = _landed_inputs(params)
 
     with pytest.raises(ValueError) as exc:
         generate_report(_metrics(), params, baseline, metric_ci, aggregates,
-                        None)
+                        None, pq)
 
     msg = str(exc.value)
     assert ("evaluation_metrics (written by compute_metrics) has no "
@@ -720,13 +719,73 @@ def test_generate_report_redraws_when_only_drawn_settings_changed():
     """A changed drawn key only needs a redraw; a fingerprint that counted
     drawn keys would block every layout tweak."""
     computed_with = _params_computed_without_baseline()
-    baseline, metric_ci, aggregates = _landed_inputs(computed_with)
+    baseline, metric_ci, aggregates, pq = _landed_inputs(computed_with)
     now = copy.deepcopy(computed_with)
     now["evaluation"]["report"]["display"]["primary_map_k"] = [1, "all"]
     now["evaluation"]["report"]["sections"]["primary_map"] = False
 
     html = generate_report(_landed_metrics(computed_with), now, baseline,
                            metric_ci, aggregates,
-                           None)
+                           None, pq)
 
     assert html.startswith("<!DOCTYPE html>")
+
+
+def test_generate_report_refuses_prediction_quality_switched_on_after_the_run():
+    """Computed with the family off (the framework default), switched on and
+    only redrawn: the stub on disk says nothing about the rows, so the redraw
+    must raise rather than print a report without the section (#381)."""
+    computed_with = _params_computed_without_baseline()
+    computed_with["evaluation"]["report"]["sections"][
+        "prediction_quality"] = False
+    baseline, metric_ci, aggregates, pq = _landed_inputs(computed_with)
+    now = copy.deepcopy(computed_with)
+    now["evaluation"]["report"]["sections"]["prediction_quality"] = True
+
+    with pytest.raises(ValueError) as exc:
+        generate_report(_landed_metrics(computed_with), now, baseline,
+                        metric_ci, aggregates, None, pq)
+
+    msg = str(exc.value)
+    assert "evaluation.report.sections.prediction_quality" in msg
+    assert "--from-node compute_metrics" in msg
+
+
+def test_generate_report_refuses_a_prediction_quality_json_without_fingerprint():
+    params = _params_computed_without_baseline()
+    baseline, metric_ci, aggregates, _pq = _landed_inputs(params)
+
+    with pytest.raises(ValueError) as exc:
+        generate_report(_landed_metrics(params), params, baseline, metric_ci,
+                        aggregates, None, {"enabled": False})
+
+    assert ("prediction_quality_metrics (written by "
+            "compute_prediction_quality) has no config_fingerprint"
+            ) in str(exc.value)
+
+
+def test_generate_report_draws_prediction_quality_from_the_nodes_output(spark):
+    """The two-step path the pipeline wires: compute_prediction_quality on
+    the partition, its JSON round-tripped, generate_report drawing it."""
+    from recsys_tfb.pipelines.evaluation.nodes import (
+        compute_prediction_quality,
+    )
+
+    params = _params(False)
+    params["evaluation"]["report"]["sections"]["prediction_quality"] = True
+    params["evaluation"]["prediction_quality"] = {
+        "n_bins": 10, "n_display_bins": 5, "top_n": 1}
+    eval_pred = stamp_partition_fingerprint(
+        _eval_pred(spark).drop("eval_partition_fingerprint"), params, [])
+    pq = compute_prediction_quality(
+        eval_pred, _landed_segments(params), params)
+    pq = json.loads(json.dumps(pq))
+    assert pq["enabled"] is True
+    assert pq["config_fingerprint"] == fingerprint(params)
+    assert pq["overall"]["summary"]["n"] == 4
+    aggregates = compute_report_aggregates(
+        eval_pred, _landed_segments(params), params)
+    html = generate_report(_landed_metrics(params), params,
+                           _unread_stub(params), _unread_stub(params),
+                           aggregates, None, pq)
+    assert "預測品質" in html
