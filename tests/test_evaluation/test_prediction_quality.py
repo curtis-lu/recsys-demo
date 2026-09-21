@@ -260,7 +260,8 @@ class TestAggregateScoreBins:
             summed.sort_index(), overall.sort_index(), check_dtype=False)
 
     def test_weight_column_multiplies_every_sum(self, spark):
-        rows = [r + (w,) for r, w in zip(self.ROWS, [1.0, 1.0, 1.0, 1.0,
+        # c1/A, the positive in bin 9, weighs 2; c3's rows weigh 4.
+        rows = [r + (w,) for r, w in zip(self.ROWS, [2.0, 1.0, 1.0, 1.0,
                                                       4.0, 4.0])]
         out = aggregate_score_bins(
             _frame(spark, rows, weight=True), item_col="item",
@@ -270,9 +271,9 @@ class TestAggregateScoreBins:
         # bin 4: c2/A (w 1) + c3/A (w 4)
         assert overall.loc[4, "n"] == pytest.approx(5.0)
         assert overall.loc[4, "score_sum"] == pytest.approx(0.0055 * 5)
-        # bin 9: one positive of weight 1
-        assert overall.loc[9, "n_pos"] == pytest.approx(1.0)
-        assert out["overall"]["n"].sum() == pytest.approx(12.0)
+        # bin 9: one positive of weight 2
+        assert overall.loc[9, "n_pos"] == pytest.approx(2.0)
+        assert out["overall"]["n"].sum() == pytest.approx(13.0)
 
     def test_top_n_keeps_the_items_with_most_rows(self, spark):
         rows = self.ROWS + [("c4", "B", 0.002, 0)]

@@ -72,3 +72,16 @@ date: 2026-09-16
 - **低正例率是這個設計最脆弱的地方。** 點擊率 0.1%–1% 時分數擠在低端，決定 4 的「範圍取 min/max」是為此；但 F1 最佳門檻仍可能落在單一箱內，所以決定 7 要求把 bin 寬印在旁邊。真的不夠用時的下一步是「分位數箱」，代價是失去 per-item 相加與併箱兩個性質——那要另開一張 ADR，不要在實作時悄悄換掉。
 - **兩種模式都跑**（post-training 與監控），兩邊都有 label。宣告 `event` 的部署在監控模式被擋在入口（ADR-0021 決定 5），與本家族無關。
 - 名字（`prediction_quality`、`pr_auc`、`roc_auc`）與 `CONTEXT.md` 的詞彙一起維護；新詞依 `docs/agents/domain.md` 的規則標「尚未實作」。
+
+## 更正（2026-09-21，#381 實作時）
+
+1. **`pr_auc` 的算法（決定 4 的表格）。** 表格那一列說「PR 空間的內插規則本身與 sklearn 的階梯式定義不同，即使箱細到單列也不會收斂到同一個數」，前提是在 PR 空間用直線（梯形）連接各個箱邊界的點。實作改用 sklearn 的階梯規則，套在「箱號」上、箱內視為同分：`pr_auc`＝Σ（該箱正例 ÷ 全部正例）×（該箱下緣的 precision），也就是把分數換成箱號之後的精確 average precision。理由有三個：
+   - PR 空間的直線內插已知會高估面積，換一種內插並沒有省下任何成本。
+   - 這樣 `pr_auc` 與 `roc_auc` 的語意相同，都是「分箱後分數」的精確值（`roc_auc` 本來就是這樣定義，見同一張表）。
+   - 使用者一開始要的就是 average precision（見〈背景〉）。
+
+   **後果：** 箱細到每一箱只剩同分的列時，`pr_auc` 會等於在原始分數上算的 average precision，那一列的「不會收斂」不再成立。但預設 1000 箱下每箱仍有很多列，決定 7 的「不可與外部算的 AP 對帳」照舊成立，理由從「定義不同」變成「箱內的先後已經丟掉」。名字仍叫 `pr_auc`，決定 5 的撞名理由不變。`CONTEXT.md` 的 `pr_auc` 詞條同步改寫。
+2. **母體（決定 3）。** 「算在 `total_rel > 0` 的 filter 之前」只管得到 evaluation 裡的過濾。`--post-training` 讀的 test 表，在 dataset 階段就已經丟掉沒有正例的 query group（`filter_test_model_input`），所以在這個模式下，本家族看到的母體仍是「有正例的 query group」。報表在這個模式會把這件事印在母體說明裡。讓使用者決定這類 query group 留多少的是 #429（spec #426）；權重欄已在分箱聚合留好位置（`aggregate_score_bins` 的 `weight_col`），#429 落地時接上。
+3. **開關的位置（決定 1）。** 開關是 `evaluation.report.sections.prediction_quality`，與 `baseline` 家族同形狀；`evaluation.prediction_quality` 只放怎麼算（`n_bins`、`n_display_bins`、`top_n`），由新的不變量 A42 檢查值域，並擋下寫在那裡的其他鍵（例如 `enabled`）。
+4. **實跑證據的位置（決定 1）。** 決定 1 說「如果連示例 conf 都不開，`scripts/local_e2e.sh` 走不到這條路」。那支腳本本來就不跑 evaluation；跑廣告示例 evaluation 的是 `examples/ad/run_e2e.sh`。本家族的實跑證據來自它。
+5. **`calibration_bins` 收掉了（〈後果〉第二條）。** 〈後果〉說「要不要收掉由實作決定」。實作把它連同 `evaluation.report.diagnostics` 的 `include_calibration`、`n_calibration_bins` 兩個鍵一起移除。它在 `[0, 1]` 上等寬切，沒有任何讀者；留著的話，就是兩份語意不同的分箱表同時存在，而那正是〈後果〉不接受的。

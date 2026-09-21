@@ -2,10 +2,11 @@
 # 本資料夾的每份 yaml 都對應 repo 根目錄 conf/base/ 的同名檔；每個鍵的完整說明
 # 在那裡，這裡只註解「和銀行示例不一樣、為什麼」。怎麼跑見 examples/ad/README.md。
 #
-# ⚠ 這組 conf 目前打開的新開關是 occasion（#428）：一次請求是一個 query group，
-# 同一次請求可能展示好幾個素材。其餘仍是框架今天就支援的功能——只有一張
-# feature_table、item 清單逐一列出、預測品質指標家族不開。後面的票各自打開
-# 自己的開關（docs/notes/2026-09-16-event-support-plan.md）。
+# ⚠ 這組 conf 目前打開的新開關有兩個：occasion（#428）——一次請求是一個 query
+# group，同一次請求可能展示好幾個素材；預測品質指標家族（#381，開關在
+# parameters_evaluation.yaml 的 report.sections.prediction_quality）。其餘仍是框架
+# 今天就支援的功能——只有一張 feature_table、item 清單逐一列出。後面的票各自
+# 打開自己的開關（docs/notes/2026-09-16-event-support-plan.md）。
 
 project_name: recsys_tfb_ad_example
 random_seed: 42
