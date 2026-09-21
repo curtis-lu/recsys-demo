@@ -13,17 +13,20 @@ Two kinds of settings (ADR-0020 decision 2)
   whether something is computed at all. Changing one means re-running from
   the node :data:`COMPUTED_KEYS` names for it (normally its first reader).
 * **Drawn**: ``evaluation.report.display.*`` and every
-  ``evaluation.report.sections.*`` key except ``baseline`` and
-  ``diagnostics``. They only change what the report shows, so
-  ``--only-node generate_report`` is enough and takes seconds.
+  ``evaluation.report.sections.*`` key except ``baseline``,
+  ``diagnostics`` and ``prediction_quality``. They only change what the
+  report shows, so ``--only-node generate_report`` is enough and takes
+  seconds.
 
 Only computed settings go into the fingerprint. Fingerprinting drawn ones too
 would make every cosmetic change raise, which is the "re-run everything on any
-change" the user rejected. ``sections.baseline`` and ``sections.diagnostics``
-are computed, not drawn: ``baseline: false`` makes ``compute_baseline_metrics``
-return a stub and ``diagnostics: false`` does the same for
-``compute_report_aggregates``; treated as drawn, flipping them back and
-re-drawing yields a report with a section silently missing.
+change" the user rejected. ``sections.baseline``, ``sections.diagnostics``
+and ``sections.prediction_quality`` are computed, not drawn: ``baseline:
+false`` makes ``compute_baseline_metrics`` return a stub, and ``diagnostics:
+false`` / ``prediction_quality: false`` do the same for
+``compute_report_aggregates`` / ``compute_prediction_quality``; treated as
+drawn, flipping them back and re-drawing yields a report with a section
+silently missing.
 
 One row of :data:`COMPUTED_KEYS`, ``post_training``, is not a YAML config
 setting at all: it is the ``--post-training`` / monitoring run mode, injected
@@ -159,6 +162,10 @@ COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
     ("evaluation.report.sections.baseline", "compute_metrics"),
     ("evaluation.report.diagnostics", "compute_metrics"),
     ("evaluation.report.sections.diagnostics", "compute_metrics"),
+    # First read by compute_prediction_quality, which sorts after
+    # compute_metrics in both modes; same reason (ADR-0024).
+    ("evaluation.prediction_quality", "compute_metrics"),
+    ("evaluation.report.sections.prediction_quality", "compute_metrics"),
 )
 
 #: The computed settings that decide what ``prepare_eval_data`` writes: the

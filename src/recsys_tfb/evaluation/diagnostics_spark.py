@@ -7,7 +7,7 @@ by the number of rows.
 
 No UDFs are used (production constraint): binning is arithmetic
 (``floor``/``least``/``greatest``), quartiles use ``percentile_approx``, and the
-rest is ``groupBy`` + ``count``/``avg``/``sum``.
+rest is ``groupBy`` + ``count``/``sum``.
 """
 
 from __future__ import annotations
@@ -199,53 +199,6 @@ def positive_rate_matrix(
     return pd.DataFrame(rate, index=total.index, columns=total.columns)
 
 
-def calibration_bins(
-    sdf: SparkDataFrame,
-    item_col: str,
-    score_col: str,
-    label_col: str,
-    n_bins: int = 10,
-) -> pd.DataFrame:
-    """Per-item calibration points, replicating sklearn ``calibration_curve``
-    (strategy="uniform") semantics: uniform bins over ``[0, 1]``, one point per
-    non-empty bin with ``prob_pred = mean(score)`` and ``prob_true =
-    mean(label)``. An item is skipped when it has fewer than ``n_bins`` rows or
-    no positives. Out-of-range scores are clipped into ``[0, 1]`` (more robust
-    than sklearn, which raises).
-
-    Returns columns ``[item_col, "bin", "prob_pred", "prob_true"]`` sorted by
-    (item, bin).
-    """
-    cols = [item_col, "bin", "prob_pred", "prob_true"]
-    clipped = F.greatest(
-        F.lit(0.0), F.least(F.lit(1.0), F.col(score_col).cast("double"))
-    )
-    raw = F.floor(clipped * F.lit(float(n_bins)))
-    bin_idx = F.least(F.lit(n_bins - 1), F.greatest(F.lit(0), raw)).cast("int")
-    agg = (
-        sdf.withColumn("bin", bin_idx)
-        .groupBy(item_col, "bin")
-        .agg(
-            F.avg(F.col(score_col)).alias("prob_pred"),
-            F.avg(F.col(label_col)).alias("prob_true"),
-            F.count(F.lit(1)).alias("n"),
-        )
-        .toPandas()
-    )
-    if agg.empty:
-        return pd.DataFrame(columns=cols)
-
-    agg["_pos"] = agg["prob_true"] * agg["n"]
-    per_item = agg.groupby(item_col).agg(
-        total=("n", "sum"), pos=("_pos", "sum")
-    )
-    keep = per_item[
-        (per_item["total"] >= n_bins) & (per_item["pos"] > 0)
-    ].index
-    out = agg[agg[item_col].isin(keep)][cols]
-    return out.sort_values([item_col, "bin"]).reset_index(drop=True)
-
-
 #: :func:`frame_to_json` 支援的兩種形狀。
 _LONG = "long"
 _MATRIX = "matrix"
@@ -299,13 +252,16 @@ def aggregate_report_diagnostics(
     rank_col: str,
     label_col: str,
     include_distributions: bool = True,
-    include_calibration: bool = True,
-    n_calibration_bins: int = 10,
 ) -> dict:
     """報表診斷區需要的全部聚合，一次算完並轉成可落地的 dict。
 
     ``sdf`` 必須由呼叫端先投影並 ``cache()``：這裡每個家族各是一次 action，
-    不 cache 就是 6 次全掃。
+    不 cache 就是 5 次全掃。
+
+    分數分箱（每格的平均分數 vs 實際正例率）不在這裡：它是預測品質指標家族
+    （``evaluation/prediction_quality.py``）的分箱表，範圍取資料的最小～最大
+    分數。這裡曾有一份在 ``[0, 1]`` 上等寬切的 calibration bins，沒有任何讀者，
+    #381 把三份分箱表收成那一份時移除（ADR-0024〈後果〉）。
 
     關掉的家族**不放進 payload**（不是放空的）：空的看起來像「量到了、結果
     什麼都沒有」，那是這次重構要避免的誤讀。
@@ -332,8 +288,4 @@ def aggregate_report_diagnostics(
             _MATRIX)
         out["positive_rate"] = frame_to_json(
             positive_rate_matrix(sdf, item_col, rank_col, label_col), _MATRIX)
-    if include_calibration:
-        out["calibration"] = frame_to_json(
-            calibration_bins(sdf, item_col, score_col, label_col,
-                             n_bins=n_calibration_bins), _LONG)
     return out

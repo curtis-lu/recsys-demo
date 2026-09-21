@@ -30,6 +30,7 @@ class TestEvaluationPipelineDefault:
             "enriched_eval_predictions", "evaluation_metric_ci",
             "evaluation_diagnosis_pages",
             "evaluation_report_aggregates",
+            "prediction_quality_metrics",
         }
         assert pipeline.outputs == expected
 
@@ -40,6 +41,7 @@ class TestEvaluationPipelineDefault:
             "prepare_eval_data", "no_diagnosis_pages",
             "draw_diagnosis_sample_node",
             "compute_metrics", "compute_baseline_metrics",
+            "compute_prediction_quality",
             "compute_report_aggregates",
             "compute_metric_ci",
             "generate_report",
@@ -105,8 +107,8 @@ class TestRegistryDiagnosesFollowTheMode:
             assert "no_diagnosis_pages" not in names, label
 
     def test_exactly_one_producer_of_the_diagnosis_pages_in_every_mode(self):
-        """``generate_report`` 位置綁定、六個必填輸入：每種模式都得有人產出它的
-        第六個輸入，而且只能有一個。"""
+        """``generate_report`` 位置綁定、每個輸入都必填：每種模式都得有人產出它的
+        診斷頁輸入，而且只能有一個。"""
         for label, kwargs in self.MODES.items():
             producers = [
                 n.name for n in create_pipeline(**kwargs).nodes
@@ -196,6 +198,7 @@ class TestFingerprintRerunNodes:
 
     FINGERPRINTED_PRODUCERS = {
         "compute_metrics", "compute_baseline_metrics",
+        "compute_prediction_quality",
         "compute_report_aggregates", "compute_metric_ci",
     }
     MODES = TestRegistryDiagnosesFollowTheMode.MODES
@@ -251,6 +254,7 @@ class TestEvaluationPipelinePostTraining:
         assert names == [
             "prepare_eval_data", "draw_diagnosis_sample_node",
             "compute_metrics", "compute_baseline_metrics",
+            "compute_prediction_quality",
             "compute_report_aggregates",
             "compute_metric_ci",
             "diagnose_config_shift",
@@ -277,6 +281,7 @@ class TestEvaluationPipelinePostTraining:
             "evaluation_model_capacity", "evaluation_suppression",
             "evaluation_diagnosis_pages",
             "evaluation_report_aggregates",
+            "prediction_quality_metrics",
         }
         assert pipeline.outputs == expected
 
@@ -293,7 +298,8 @@ class TestEvaluationPipelineCompareMode:
             "prepare_eval_data", "no_diagnosis_pages",
             "load_compare_predictions",
             "draw_diagnosis_sample_node", "compute_metrics",
-            "compute_baseline_metrics", "compute_report_aggregates",
+            "compute_baseline_metrics", "compute_prediction_quality",
+            "compute_report_aggregates",
             "restrict_to_common", "compute_metric_ci",
             "generate_comparison_report",
             "generate_report",

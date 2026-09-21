@@ -25,7 +25,10 @@ from typing import Optional
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
 
-from recsys_tfb.core.consistency import DataConsistencyError
+from recsys_tfb.core.consistency import (
+    PREDICTION_QUALITY_DEFAULTS,
+    DataConsistencyError,
+)
 from recsys_tfb.core.date_ranges import as_date_list, dates_label
 from recsys_tfb.core.logging import log_data_volume
 from recsys_tfb.core.schema import get_schema
@@ -47,6 +50,10 @@ from recsys_tfb.evaluation.metrics_spark import (
     compute_all_metrics,
     compute_overall_per_item,
     rank_within_query,
+)
+from recsys_tfb.evaluation.prediction_quality import (
+    aggregate_score_bins,
+    build_payload,
 )
 from recsys_tfb.evaluation.report_builder import (
     assemble_diagnosis_pages,
@@ -796,6 +803,93 @@ def compute_baseline_metrics(
     return metrics
 
 
+def compute_prediction_quality(
+    eval_predictions: SparkDataFrame,
+    segment_columns: dict,
+    parameters: dict,
+) -> dict:
+    """The prediction-quality family: every evaluated row as one binary
+    prediction, binned by score (ADR-0024).
+
+    Lands as ``prediction_quality_metrics`` (``prediction_quality.json``): the
+    fine bin tables overall and for the ``top_n`` items with the most rows,
+    and the headline numbers computed from them (``pr_auc``, ``roc_auc``, the
+    best-F1 bin edge). ``generate_report`` re-derives the threshold sweep and
+    the bin table from the same bins. What each number means and cannot mean
+    is in ``evaluation/prediction_quality.py``'s docstring.
+
+    Off unless ``evaluation.report.sections.prediction_quality`` is true (the
+    framework's default conf says false; the ad example's says true). Off, it
+    returns the ``{"enabled": False, "config_fingerprint": ...}`` stub, like
+    ``compute_baseline_metrics``, so ``generate_report`` can tell "switched
+    off under today's settings" from "left over from an older run".
+
+    Pre-check (inputs), past the stub: each evaluated date's partition was
+    written under today's settings (``restrict_to_current_eval_partitions``).
+    It takes ``evaluation_segment_columns`` for that check's ``joined`` list
+    only; it does not segment, so it does not compare that JSON's fingerprint
+    (``compute_report_aggregates``' reason).
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    sections = (eval_params.get("report", {}) or {}).get("sections", {}) or {}
+    # Decision — off unless switched on. The family costs one extra shuffle
+    # over every evaluated row, and the ranking deployments this framework
+    # ships with do not read it (ADR-0024 decision 1).
+    if not sections.get("prediction_quality", False):
+        logger.info(
+            "Prediction-quality report section disabled — writing stub")
+        return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
+
+    # Decision — the evaluated dates only, from partitions written under
+    # today's settings: the table holds every month this model_version was
+    # evaluated on.
+    eval_predictions = restrict_to_current_eval_partitions(
+        eval_predictions, parameters, segment_columns).frame
+
+    schema = get_schema(parameters)
+    item_col, score_col = schema["item"], schema["score"]
+    label_col = schema["label"]
+    settings = {
+        **PREDICTION_QUALITY_DEFAULTS,
+        **(eval_params.get("prediction_quality") or {}),
+    }
+    # Decision — every row, query groups without a positive included: nothing
+    # here filters on `total_rel`, unlike the ranking metrics, because a binary
+    # metric computed only where someone responded is systematically larger
+    # (ADR-0024 decision 3). Under --post-training the dataset pipeline has
+    # already dropped those groups from the test table (filter_test_model_input),
+    # which this node cannot undo; the report says so next to the numbers.
+    #
+    # Decision — no weight column yet: every row weighs 1. The whole-group
+    # sampling of zero-positive groups (#429) adds a 1/r weight column to the
+    # predictions; this is where its name goes.
+    weight_col = None
+    aggregated = aggregate_score_bins(
+        eval_predictions.select(item_col, score_col, label_col),
+        item_col=item_col, score_col=score_col, label_col=label_col,
+        n_bins=settings["n_bins"], top_n=settings["top_n"],
+        weight_col=weight_col,
+    )
+    out = build_payload(
+        aggregated, item_col=item_col, score_col=score_col,
+        label_col=label_col, weight_col=weight_col,
+        n_bins=settings["n_bins"],
+        n_display_bins=settings["n_display_bins"],
+        top_n=settings["top_n"],
+    )
+    out["enabled"] = True
+    out["config_fingerprint"] = fingerprint(parameters)
+    overall = out["overall"]["summary"] or {}
+    logger.info(
+        "Prediction quality computed: %s rows, %s positives, pr_auc=%s, "
+        "roc_auc=%s, bin width=%s; %d of %d items listed",
+        overall.get("n"), overall.get("n_pos"), overall.get("pr_auc"),
+        overall.get("roc_auc"), out["bins"]["width"],
+        len(out["per_item"]["listed"]), out["per_item"]["n_items"],
+    )
+    return out
+
+
 def compute_metric_ci(
     diagnosis_sample: Optional[tuple],
     parameters: dict,
@@ -1163,14 +1257,14 @@ def no_diagnosis_pages(parameters: dict) -> list[str]:
     """Monitoring mode's ``evaluation_diagnosis_pages``: always empty, reads nothing.
 
     Monitoring mode wires no registry diagnosis (ADR-0018 decision 5), yet
-    ``generate_report`` still takes a sixth input. Of the three ways to supply
+    ``generate_report`` still takes a diagnosis-pages input. Of the three ways to supply
     it, this is the one that cannot go wrong:
 
     * **Not wiring it**: ``core/runner.py`` binds inputs by position, so the
       Runner raises "requires input … not produced by any prior node" before
       anything runs.
-    * **A default for ``generate_report``'s ``diagnosis_pages``**: a trailing
-      default swallows arity errors, and its six required parameters are what
+    * **A default for ``generate_report``'s ``diagnosis_pages``**: a default
+      swallows arity errors, and its all-required parameters are what
       ``known-pitfalls.md`` §12 fixed.
     * **Reusing ``render_diagnosis_pages`` with only ``parameters``**: it
       requires one named, fingerprinted result per registry diagnosis and
@@ -1197,7 +1291,7 @@ def compute_report_aggregates(
 
     從 ``generate_report`` 拆出來（Plan 1.5）。理由不只是效能：它讓
     ``generate_report`` 變成純函式；指標與 baseline 也落地之後（ADR-0018 決定 2），
-    ``--only-node generate_report`` 不重算任何指標就能重繪主報表。也把這 6 次全掃的
+    ``--only-node generate_report`` 不重算任何指標就能重繪主報表。也把這 5 次全掃的
     失敗點從 pipeline 的**最後一個 node** 往上游移。
 
     Both the stub and the full result carry ``config_fingerprint``: the JSON
@@ -1229,15 +1323,13 @@ def compute_report_aggregates(
     item_col, score_col = schema["item"], schema["score"]
     rank_col, label_col = schema["rank"], schema["label"]
     needed = list(dict.fromkeys([item_col, score_col, rank_col, label_col]))
-    # 每個家族各是一次 action，不 cache 就是 6 次全掃。
+    # 每個家族各是一次 action，不 cache 就是 5 次全掃。
     sdf = eval_predictions.select(*needed).cache()
     try:
         out = aggregate_report_diagnostics(
             sdf, item_col=item_col, score_col=score_col,
             rank_col=rank_col, label_col=label_col,
             include_distributions=diag_cfg.get("include_distributions", True),
-            include_calibration=diag_cfg.get("include_calibration", True),
-            n_calibration_bins=diag_cfg.get("n_calibration_bins", 10),
         )
     finally:
         # 原本的寫法在例外時不會 unpersist。行為上這是純改善：輸出不變。
@@ -1255,6 +1347,7 @@ def generate_report(
     metric_ci: dict,
     report_aggregates: dict,
     diagnosis_pages: Optional[list],
+    prediction_quality_metrics: dict,
 ) -> str:
     """Build the HTML report. Metrics dicts drive §0–§8; the diagnostics
     section (when enabled) reads the already-aggregated Spark JSON from
@@ -1265,8 +1358,9 @@ def generate_report(
     的路徑清單、放一個連結進主報表。
 
     Pre-check (inputs): ``evaluation_metrics``, ``baseline_metrics``,
-    ``metric_ci`` and ``report_aggregates`` were computed with the current
-    computed settings (``steps.config_fingerprint``). All four are
+    ``metric_ci``, ``report_aggregates`` and ``prediction_quality_metrics``
+    were computed with the current computed settings
+    (``steps.config_fingerprint``). All five are
     landed JSON (ADR-0018 decision 2), and ``--only-node generate_report``
     stops at "the JSON exists", so without this a setting changed since the
     last run is drawn from the old JSON with exit code 0 (ADR-0020 bug 2);
@@ -1291,6 +1385,9 @@ def generate_report(
             LoadedArtifact(catalog_name="evaluation_report_aggregates",
                            payload=report_aggregates,
                            produced_by="compute_report_aggregates"),
+            LoadedArtifact(catalog_name="prediction_quality_metrics",
+                           payload=prediction_quality_metrics,
+                           produced_by="compute_prediction_quality"),
         ],
         parameters,
     )
@@ -1300,6 +1397,7 @@ def generate_report(
         report_aggregates=report_aggregates,
         metric_ci=metric_ci,
         diagnosis_pages=diagnosis_pages,
+        prediction_quality=prediction_quality_metrics,
     )
 
 

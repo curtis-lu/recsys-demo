@@ -286,9 +286,14 @@ def macro_coverage_suffix_mb(
 
 
 def build_overview_section(
-    metrics: dict, parameters: dict, metric_ci: dict | None = None
+    metrics: dict, parameters: dict, metric_ci: dict | None = None,
+    prediction_quality_shown: bool = False,
 ) -> ReportSection:
     """概覽（定向）：這份報表回答什麼、規模／分母、關鍵數、往哪找。
+
+    ``prediction_quality_shown`` adds the navigation row for that section;
+    ``assemble_report`` passes whether it built one, so the row never points
+    at a section the report left out.
 
     presentation §一.1：規模／歸一化分母與嚴重度訊號分開標——分母混進關鍵數
     表會被讀成好壞。頭號指標＝macro per-item mAP（item 等權，＋CI 抽樣估計）；
@@ -397,6 +402,11 @@ def build_overview_section(
             "完整性檢查",
         ],
     })
+    if prediction_quality_shown:
+        nav.loc[len(nav)] = [
+            "把每一列候選當二元預測：門檻切在哪、precision／recall 多少",
+            "預測品質",
+        ]
     tables.append(nav)
     titles.append("導覽：想回答什麼 → 看哪一區")
 
@@ -886,6 +896,208 @@ def build_metrics_section(
     )
 
 
+#: The display bin table's columns, as the report prints them. The first six
+#: describe the bin; the last three read the threshold sweep at its lower edge.
+_PQ_BIN_COLUMNS = {
+    "score_from": "分數下緣",
+    "score_to": "分數上緣",
+    "n": "列數",
+    "n_pos": "正例數",
+    "mean_score": "平均分數",
+    "positive_rate": "實際正例率",
+    "precision": "以下緣為門檻：precision",
+    "recall": "以下緣為門檻：recall",
+    "f1": "以下緣為門檻：F1",
+}
+
+
+def _pq_summary_row(summary: dict) -> dict:
+    """One item's (or the whole data's) headline numbers, as table cells."""
+    best = summary.get("best_f1") or {}
+    return {
+        "列數": summary.get("n"),
+        "正例數": summary.get("n_pos"),
+        "正例率": summary.get("positive_rate"),
+        "pr_auc": summary.get("pr_auc"),
+        "roc_auc": summary.get("roc_auc"),
+        "F1 最佳門檻（分數 ≥）": best.get("threshold"),
+        "該門檻的 precision": best.get("precision"),
+        "該門檻的 recall": best.get("recall"),
+        "該門檻的 F1": best.get("f1"),
+    }
+
+
+def _pq_threshold_figure(sweep: pd.DataFrame):
+    """precision / recall / F1 against the threshold, one point per non-empty
+    fine bin edge: the shape the user reads to pick a cut, which a 1000-row
+    table would bury."""
+    import plotly.graph_objects as go
+
+    fig = go.Figure()
+    for col, name in (("precision", "precision"), ("recall", "recall"),
+                      ("f1", "F1")):
+        fig.add_trace(go.Scatter(
+            x=sweep["threshold"], y=sweep[col], mode="lines", name=name))
+    fig.update_layout(
+        title="整體：門檻 → precision／recall／F1（每個非空細箱的下緣一點）",
+        xaxis_title="門檻（分數 ≥ 此值即預測為正）", yaxis_title="值",
+        yaxis_range=[0, 1],
+    )
+    return fig
+
+
+def build_prediction_quality_section(
+    prediction_quality: dict | None, metrics: dict, parameters: dict
+) -> ReportSection | None:
+    """預測品質（ADR-0024）：每一列候選當一次二元預測，照分數分箱。
+
+    Every number here comes from the fine bin tables in the payload, through
+    the same functions ``compute_prediction_quality`` used for the headline
+    numbers (``evaluation/prediction_quality.py``), so the threshold sweep and
+    the bin table cannot disagree. ``metrics`` is read for one thing: the
+    ranking section's excluded query groups, so the population note can put
+    the two populations side by side with numbers.
+
+    Decision 7's three statements are always printed, each where the number
+    it qualifies is: the bin width (the best-F1 threshold's resolution, not an
+    online setting), the two populations, and ``pr_auc`` not being an average
+    precision computed elsewhere. Under ``--post-training`` the population
+    note says the dataset pipeline already dropped the query groups without a
+    positive from the test table (#426): "every candidate row" would be false
+    there.
+    """
+    if (not _section_on(parameters, "prediction_quality")
+            or not prediction_quality
+            or prediction_quality.get("enabled") is not True):
+        return None
+    from recsys_tfb.evaluation.prediction_quality import (
+        bins_from_payload,
+        coarse_bin_table,
+        threshold_sweep,
+    )
+
+    bins_cfg = prediction_quality["bins"]
+    lo, width = bins_cfg["lo"], bins_cfg["width"]
+    n_bins, n_display = bins_cfg["n_bins"], bins_cfg["n_display_bins"]
+    overall = prediction_quality["overall"]
+    summary = overall.get("summary")
+    if summary is None:
+        return ReportSection(
+            title="預測品質 — 把每一列候選當二元預測",
+            description="本次評估沒有任何候選列，這一段沒有東西可算。",
+        )
+    per_item = prediction_quality["per_item"]
+    item_col = prediction_quality["columns"]["item"]
+    n_rows = summary["n"]
+
+    # --- population: this section vs the ranking section (decision 7) -----
+    n_excl = metrics.get("n_excluded_queries")
+    ranking_note = (
+        f"主指標段（mAP／precision@K／recall@K）只算有正例的 query group，"
+        f"本次排除 {n_excl} 個（n_excluded_queries）。"
+        if n_excl is not None else
+        "主指標段（mAP／precision@K／recall@K）只算有正例的 query group。"
+    )
+    population = (
+        f"母體：本段算在本次評估的全部 {n_rows:,} 列候選上，不排除任何 query "
+        f"group。{ranking_note}兩段的母體不同，precision 不可互相比較。"
+    )
+    if parameters.get("post_training"):
+        population += (
+            "⚠ 這是 --post-training：test 表在 dataset 階段已經丟掉沒有正例的 "
+            "query group（filter_test_model_input），所以本段看到的也只有「有正例"
+            "的 query group」裡的候選，不是全部曝光；正例佔比因此比全部曝光高，"
+            "precision 與 pr_auc 會比在全部曝光上算的大。讓使用者決定這類 "
+            "query group 留多少的設定在 #429。"
+        )
+
+    card = pd.DataFrame([{
+        **_pq_summary_row(summary),
+        "細箱寬（門檻解析度）": width,
+        "分數範圍（本次資料的最小～最大）": f"{lo:g} ～ {bins_cfg['hi']:g}",
+    }]).T
+    card.columns = ["value"]
+
+    fine_bins = bins_from_payload(overall["bins"])
+    bin_table = coarse_bin_table(
+        fine_bins, lo=lo, width=width, n_bins=n_bins, n_display_bins=n_display,
+    ).rename(columns=_PQ_BIN_COLUMNS)
+
+    tables = [card, bin_table]
+    titles = [
+        "整體：關鍵數",
+        f"整體：分箱表（{n_display} 格等寬，每格＝{n_bins // n_display} 個細箱）",
+    ]
+    collapsed = [False, False]
+
+    listed = per_item.get("listed") or []
+    n_items = per_item.get("n_items")
+    if listed:
+        rows = {item: _pq_summary_row(per_item["summary"][item])
+                for item in listed}
+        tables.append(pd.DataFrame(rows).T)
+        titles.append(
+            f"per-item：關鍵數（列數最多的前 {len(listed)} 個 {item_col}，"
+            f"共 {n_items} 個；其餘只算進整體）"
+        )
+        collapsed.append(False)
+        item_bins = bins_from_payload(per_item["bins"])
+        long = []
+        for item in listed:
+            one = item_bins[item_bins[item_col].astype(str) == item]
+            tbl = coarse_bin_table(
+                one[["bin", "n", "n_pos", "score_sum"]], lo=lo, width=width,
+                n_bins=n_bins, n_display_bins=n_display,
+            ).rename(columns=_PQ_BIN_COLUMNS)
+            tbl.insert(0, item_col, item)
+            long.append(tbl)
+        tables.append(pd.concat(long, ignore_index=True))
+        titles.append(f"per-item：分箱表（每個 {item_col} {n_display} 格，"
+                      f"讀法同整體分箱表）")
+        collapsed.append(True)
+
+    figures = []
+    sweep = threshold_sweep(fine_bins, lo=lo, width=width)
+    if summary.get("n_pos"):
+        figures.append(_pq_threshold_figure(sweep))
+
+    return ReportSection(
+        title="預測品質 — 把每一列候選當二元預測",
+        description=(
+            "這一段不看同一個 query group 裡的名次，而是把每一列候選當成一次"
+            "「會不會是正例」的預測：分數 ≥ 門檻就預測為正。回答的問題是「照分數"
+            "切一刀，切在哪裡、precision 與 recall 各是多少」，以及每一段分數"
+            "裡實際有多少正例。" + population
+        ),
+        formula=(
+            "precision＝TP÷(TP+FP)　recall＝TP÷全部正例　F1＝2·P·R÷(P+R)"
+            "　門檻只取細箱的下緣；箱內的列視為同分"
+        ),
+        bullets=[
+            f"門檻解析度：分數範圍取本次資料的最小～最大，切成 {n_bins} 個等寬"
+            f"細箱，細箱寬 {width:g}。門檻只算得到細箱的邊界，所以 F1 最佳門檻的"
+            f"解析度就是這個寬度；它也是在這份資料上挑的，換一份資料（下個月、"
+            f"線上）分數分布會變，不能直接搬去當線上的設定值。",
+            "pr_auc＝把箱內的列視為同分之後的 average precision（Σ 每箱正例佔全部"
+            "正例的比例 × 該箱下緣的 precision）；roc_auc＝箱內同分算一半的 ROC "
+            "面積。兩者都是「分箱後分數」的精確值，但箱內的先後已經丟掉，不等於"
+            "在原始分數上算的值——不能拿來跟外部工具（例如 sklearn）在原始分數上"
+            "算的 average precision 或 ROC-AUC 直接比較。",
+            "per-item 的 precision 分母是該 item 在門檻以上的列數；主指標段的 "
+            "precision@K 分母是 K（每個 query group 的前 K 名），是不同的量。",
+            "per-item 的 roc_auc 母體是該 item 的全部候選列，與排序診斷「item "
+            "能力」頁的 AUC（只含有正例的 query 的抽樣）不同，不可並排比較。",
+            "分箱表把每格的平均分數與實際正例率放在一起，只是並列兩個量：框架"
+            "不做校準（#411），分數不保證是機率。上面每個指標都只看分數的大小"
+            "順序，兩者相近或相差都不改變它們。",
+        ],
+        figures=figures,
+        tables=tables,
+        table_titles=titles,
+        collapsed_tables=collapsed,
+    )
+
+
 def _item_share_by_rank(counts_frame: pd.DataFrame) -> pd.DataFrame:
     """欄正規化：每個 rank 欄 ÷ 欄和 → 各 item 在該 rank 位置的佔比。
 
@@ -903,13 +1115,17 @@ def build_item_detail_section(
 
     同一批排名的分數／名次分布側面。沿用 score 分布圖與 rank 計數 heatmap；
     新增 item-share-by-rank（欄正規化，數字表，G#1）＋ positive rate by rank
-    數字表。依「排序不是校準」，calibration 曲線移到獨立診斷報表、本段不畫
-    （即使 payload 有 calibration 鍵）。升為頂層（collapsible=False）。
+    數字表。升為頂層（collapsible=False）。
+
+    分數分箱（每格平均分數 vs 實際正例率）不在這一段：它是「預測品質」段的
+    分箱表（#381，ADR-0024）。#381 之前的 ``report_aggregates.json`` 還帶一個
+    ``calibration`` 鍵（在 ``[0, 1]`` 上等寬切），本段一直不畫它，讀到舊檔也
+    一樣不畫。
     """
     if not _section_on(parameters, "diagnostics"):
         return None
     # 與 build_diagnostics_figures 同一個「有沒有 score_histogram 家族」判斷；
-    # 只有 calibration 沒有分布家族時，本段不畫。
+    # 沒有分布家族時（包括只剩舊檔的 calibration 鍵），本段不畫。
     if not report_aggregates or "score_histogram" not in report_aggregates:
         return None
 
@@ -962,8 +1178,9 @@ def build_item_detail_section(
             "positive rate by rank heatmap；再看數字表：item share by rank（欄"
             "正規化，看誰佔據各名次）。item share 刻意用數字表而非 heatmap——它"
             "是逐欄正規化（每欄加總=1），掛全域色階會誘導跨欄比色誤讀，請在同一"
-            "欄內比。依「排序不是校準」，校準曲線移到獨立診斷報表、本段不畫。rank "
-            "計數的欄和＝總 query 數。明細數字表點標題展開。"
+            "欄內比。rank 計數的欄和＝總 query 數。明細數字表點標題展開。分數分箱"
+            "（每格平均分數 vs 實際正例率）在「預測品質」段，"
+            "evaluation.report.sections.prediction_quality 打開時才有。"
         ),
         figures=figs,
         tables=tables,
@@ -1537,19 +1754,24 @@ def assemble_report(
     report_aggregates: dict | None = None,
     metric_ci: dict | None = None,
     diagnosis_pages: list | None = None,
+    prediction_quality: dict | None = None,
 ) -> str:
     """Assemble every enabled section (the ``candidates`` list below is the
     authoritative order) into the final HTML string.
 
-    8 段 spine（目的驅動、由粗到細、克制）：概覽 → 核心概念 → 基本統計 →
-    衡量指標 → per-item 細部拆解 → baseline → 排序診斷連結 → 完整性檢查 →
-    詞彙表。
+    spine（目的驅動、由粗到細、克制）：概覽 → 核心概念 → 基本統計 →
+    衡量指標 → 預測品質（開了才有）→ per-item 細部拆解 → baseline →
+    排序診斷連結 → 完整性檢查 → 詞彙表。
     """
+    pq_section = build_prediction_quality_section(
+        prediction_quality, metrics, parameters)
     candidates = [
-        build_overview_section(metrics, parameters, metric_ci=metric_ci),
+        build_overview_section(metrics, parameters, metric_ci=metric_ci,
+                               prediction_quality_shown=pq_section is not None),
         build_core_concept_section(parameters),
         build_dataset_overview_section(metrics, parameters),
         build_metrics_section(metrics, parameters, metric_ci=metric_ci),
+        pq_section,
         build_item_detail_section(report_aggregates, parameters),
         build_baseline_section(metrics, baseline_metrics, parameters),
         build_diagnosis_links_section(diagnosis_pages, parameters),

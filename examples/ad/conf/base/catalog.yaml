@@ -257,6 +257,10 @@ baseline_metrics:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/baseline_metrics.json
 
+prediction_quality_metrics:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/prediction_quality.json
+
 evaluation_metric_ci:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/metric_ci.json

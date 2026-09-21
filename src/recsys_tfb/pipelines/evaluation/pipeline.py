@@ -37,6 +37,7 @@ def create_pipeline(
         compute_baseline_metrics,
         compute_metric_ci,
         compute_metrics,
+        compute_prediction_quality,
         compute_report_aggregates,
         generate_comparison_report,
         generate_report,
@@ -132,6 +133,15 @@ def create_pipeline(
                     "evaluation_segment_columns", "parameters"],
             outputs="baseline_metrics",
         ),
+        # Every evaluated row as a binary prediction (ADR-0024); a stub unless
+        # report.sections.prediction_quality is on. It takes the segment JSON
+        # for the partition check only, like compute_report_aggregates.
+        Node(
+            compute_prediction_quality,
+            inputs=["enriched_eval_predictions", "evaluation_segment_columns",
+                    "parameters"],
+            outputs="prediction_quality_metrics",
+        ),
         Node(
             compute_report_aggregates,
             # evaluation_segment_columns for its joined list: part of the
@@ -193,8 +203,8 @@ def create_pipeline(
         # dataset.sample_group_keys / training.sample_weight_keys) come from
         # sample_pool and monitoring joins inference_population instead.
         # Leaving the shape alone was a scope decision, not a data limitation.
-        # generate_report still needs its sixth input, so the zero-read stub
-        # supplies an empty list; why a stub, see its docstring.
+        # generate_report still needs its diagnosis-pages input, so the
+        # zero-read stub supplies an empty list; why a stub, see its docstring.
         nodes.append(
             Node(
                 no_diagnosis_pages,
@@ -208,7 +218,8 @@ def create_pipeline(
             inputs=["evaluation_metrics", "parameters", "baseline_metrics",
                     "evaluation_metric_ci",
                     "evaluation_report_aggregates",
-                    "evaluation_diagnosis_pages"],
+                    "evaluation_diagnosis_pages",
+                    "prediction_quality_metrics"],
             outputs="evaluation_report",
         ),
     ]

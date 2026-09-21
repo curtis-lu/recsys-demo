@@ -474,10 +474,18 @@ Layer 1 — config-static (implemented here; aggregated by
   never read about one. Predicate: ``optional_role_compare_source_errors``.
   Aggregated by ``validate_config_consistency``, beside A11: it takes
   parameters alone.
+* A42 — ``evaluation.prediction_quality`` parameter domains (ADR-0024):
+  ``n_bins`` and ``n_display_bins`` are ints >= 1 and the second divides the
+  first (every display bin merges the same number of fine bins); ``top_n`` is
+  an int >= 0; no other key (the on/off switch is
+  ``evaluation.report.sections.prediction_quality``, so an ``enabled`` here
+  would switch nothing). Defaults: ``PREDICTION_QUALITY_DEFAULTS``. Predicate:
+  ``prediction_quality_param_errors`` (returns errors; the evaluation command
+  raises, collected with A22/A34). NOT aggregated, for A34's reason.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
-flags), A22 (``--post-training``), A23/A24/A26/A27/A34/A36 (config keys whose
+flags), A22 (``--post-training``), A23/A24/A26/A27/A34/A36/A42 (config keys whose
 harm belongs to one pipeline), A28/A39 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags).
 
@@ -1984,7 +1992,80 @@ EVALUATION_REPORT_SECTIONS: frozenset[str] = frozenset({
     "diagnostics",
     "baseline",
     "diagnosis_links",
+    "prediction_quality",
 })
+
+#: ``evaluation.prediction_quality``'s keys and the value each takes when the
+#: conf leaves it out: fine bins over this data's score range (the threshold
+#: resolution), display bins they merge into (the report's bin table), and how
+#: many items get their own bins (the per-item budget, ADR-0024 decision 6).
+#: Here, not in ``evaluation/prediction_quality.py``, so A42 can check a
+#: partly declared block against the same defaults the node applies without
+#: ``core/`` importing the evaluation layer (that module imports pyspark).
+PREDICTION_QUALITY_DEFAULTS: dict[str, int] = {
+    "n_bins": 1000,
+    "n_display_bins": 10,
+    "top_n": 30,
+}
+
+
+def prediction_quality_param_errors(parameters: dict) -> list[str]:
+    """A42 — ``evaluation.prediction_quality`` parameter domains.
+
+    * ``n_bins`` and ``n_display_bins`` are ints >= 1, and ``n_display_bins``
+      divides ``n_bins``: each display bin merges the same number of fine
+      bins. Otherwise the last display bin is narrower than the rest, and the
+      bin table puts two widths side by side with nothing saying so.
+    * ``top_n`` is an int >= 0 (0 lists no item, the overall numbers alone).
+    * No other key. The family's on/off switch is
+      ``evaluation.report.sections.prediction_quality`` (the ``baseline``
+      family's shape, ADR-0024 decision 1); an ``enabled: true`` written here
+      would be read by nothing and switch nothing on.
+
+    ``bool`` is not an int here: YAML ``true`` would pass ``isinstance(v,
+    int)`` and bin by 1.
+
+    Not aggregated by ``validate_config_consistency``: only evaluation reads
+    these keys (A34's reason, issue #158). The evaluation command raises it,
+    collected with A22/A34.
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    if not isinstance(eval_params, Mapping):
+        return []
+    block = eval_params.get("prediction_quality") or {}
+    if not isinstance(block, Mapping):
+        return [
+            f"A42: evaluation.prediction_quality={block!r} must be a mapping "
+            f"with the keys {sorted(PREDICTION_QUALITY_DEFAULTS)}."
+        ]
+    errors = []
+    unknown = sorted(set(block) - set(PREDICTION_QUALITY_DEFAULTS), key=str)
+    if unknown:
+        errors.append(
+            f"A42: evaluation.prediction_quality declares {unknown}, which "
+            f"nothing reads; its keys are "
+            f"{sorted(PREDICTION_QUALITY_DEFAULTS)}. The switch that turns "
+            f"the family on is evaluation.report.sections.prediction_quality."
+        )
+    values = {**PREDICTION_QUALITY_DEFAULTS, **block}
+    floors = {"n_bins": 1, "n_display_bins": 1, "top_n": 0}
+    well_formed = True
+    for key, floor in floors.items():
+        value = values[key]
+        if not (isinstance(value, int) and not isinstance(value, bool)
+                and value >= floor):
+            well_formed = False
+            errors.append(
+                f"A42: evaluation.prediction_quality.{key}={value!r} must be "
+                f"an int >= {floor}."
+            )
+    if well_formed and values["n_bins"] % values["n_display_bins"]:
+        errors.append(
+            f"A42: evaluation.prediction_quality.n_display_bins="
+            f"{values['n_display_bins']} must divide n_bins={values['n_bins']}:"
+            f" each display bin merges the same number of fine bins."
+        )
+    return errors
 
 
 def report_section_key_errors(parameters: dict) -> list[str]:

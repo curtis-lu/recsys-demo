@@ -29,6 +29,9 @@ def test_report_display_and_sections():
     assert rep["sections"] == {
         "dataset_overview": True, "primary_map": True, "diagnostics": True,
         "baseline": True, "diagnosis_links": True,
+        # Off in the framework's conf, on in the ad example's (ADR-0024
+        # decision 1).
+        "prediction_quality": False,
     }
     assert rep["display"] == {
         "primary_map_k": [1, 3, 5, "all"],

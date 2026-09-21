@@ -1038,6 +1038,105 @@ class TestComputeBaselineMetrics:
         }
 
 
+class TestComputePredictionQuality:
+    """compute_prediction_quality: every evaluated row as a binary prediction
+    (ADR-0024)."""
+
+    @staticmethod
+    def _parameters(section=True, **block):
+        params = TestComputeBaselineMetrics._parameters()
+        params["evaluation"]["report"]["sections"]["prediction_quality"] = section
+        if block:
+            params["evaluation"]["prediction_quality"] = block
+        return params
+
+    @staticmethod
+    def _with_a_query_group_without_a_positive(spark):
+        """``TestComputeBaselineMetrics``' partition plus customer c3, whose
+        three rows are all negative."""
+        import pandas as pd
+
+        from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+            stamp_partition_fingerprint,
+        )
+
+        return stamp_partition_fingerprint(spark.createDataFrame(pd.DataFrame({
+            "snap_date": ["2025-01-31"] * 9,
+            "cust_id": ["c1"] * 3 + ["c2"] * 3 + ["c3"] * 3,
+            "prod_name": ["A", "B", "C"] * 3,
+            "label": [1, 0, 1, 0, 1, 0, 0, 0, 0],
+            "score": [0.9, 0.5, 0.1, 0.2, 0.8, 0.3, 0.7, 0.6, 0.4],
+            "rank": [1, 2, 3, 3, 1, 2, 1, 2, 3],
+        })), TestComputeBaselineMetrics._parameters(), [])
+
+    @pytest.mark.parametrize("section", [False, None])
+    def test_returns_a_fingerprinted_stub_unless_switched_on(self, section):
+        """Off in the framework's conf, and off when no conf says anything
+        (``None`` leaves the key out). Returns before touching the frame."""
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            fingerprint,
+        )
+
+        params = self._parameters(section=section)
+        if section is None:
+            del params["evaluation"]["report"]["sections"]["prediction_quality"]
+        result = compute_prediction_quality(None, None, params)
+        assert result == {
+            "enabled": False, "config_fingerprint": fingerprint(params)}
+
+    def test_counts_the_query_group_without_a_positive(self, spark):
+        """ADR-0024 decision 3: nothing between the partition and the bins
+        filters on ``total_rel``; c3's three negatives are in every count."""
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._parameters()
+        result = compute_prediction_quality(
+            self._with_a_query_group_without_a_positive(spark),
+            _no_segments(params), params)
+        summary = result["overall"]["summary"]
+        assert (summary["n"], summary["n_pos"]) == (9, 3)
+        assert result["per_item"]["summary"]["A"]["n"] == 3
+
+    def test_bins_and_budget_come_from_the_conf(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            fingerprint,
+        )
+
+        params = self._parameters(n_bins=8, n_display_bins=4, top_n=1)
+        result = compute_prediction_quality(
+            self._with_a_query_group_without_a_positive(spark),
+            _no_segments(params), params)
+        assert result["bins"]["n_bins"] == 8
+        assert result["bins"]["n_display_bins"] == 4
+        assert result["bins"]["lo"] == pytest.approx(0.1)
+        assert result["bins"]["width"] == pytest.approx(0.1)
+        assert len(result["per_item"]["listed"]) == 1
+        assert result["per_item"]["n_items"] == 3
+        assert result["enabled"] is True
+        assert result["config_fingerprint"] == fingerprint(params)
+
+    def test_the_default_bins_apply_when_the_block_is_absent(self, spark):
+        from recsys_tfb.core.consistency import PREDICTION_QUALITY_DEFAULTS
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._parameters()
+        result = compute_prediction_quality(
+            self._with_a_query_group_without_a_positive(spark),
+            _no_segments(params), params)
+        assert result["bins"]["n_bins"] == PREDICTION_QUALITY_DEFAULTS["n_bins"]
+        assert result["per_item"]["top_n"] == PREDICTION_QUALITY_DEFAULTS["top_n"]
+
+
 def test_compute_metric_ci_disabled_returns_stub():
     from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
     from recsys_tfb.pipelines.evaluation.nodes import compute_metric_ci
@@ -1250,6 +1349,9 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
         params["evaluation"]["snap_date"] = snap_date
         params["evaluation"]["diagnosis"] = {"sample": {
             "max_queries": 10, "min_pos_queries_per_item": 1, "seed": 42}}
+        # On, so compute_prediction_quality reads the frame instead of
+        # returning its stub (#381).
+        params["evaluation"]["report"]["sections"]["prediction_quality"] = True
         return params
 
     @staticmethod
@@ -1300,6 +1402,19 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
             self._two_months(spark), _no_segments(params), params)
         alone = compute_report_aggregates(
             self._one_month(spark), _no_segments(params), params)
+        assert both == alone
+
+    def test_compute_prediction_quality(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._parameters()
+        both = compute_prediction_quality(
+            self._two_months(spark), _no_segments(params), params)
+        alone = compute_prediction_quality(
+            self._one_month(spark), _no_segments(params), params)
+        assert both["overall"]["summary"]["n"] == 6
         assert both == alone
 
     def test_draw_diagnosis_sample_node(self, spark):
@@ -1356,7 +1471,8 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
     # --- partitions rewritten by another run (#374) ------------------------
 
     _READERS = ("compute_metrics", "compute_baseline_metrics",
-                "compute_report_aggregates", "draw_diagnosis_sample_node")
+                "compute_report_aggregates", "draw_diagnosis_sample_node",
+                "compute_prediction_quality")
 
     @staticmethod
     def _read(name, frame, spark, params):

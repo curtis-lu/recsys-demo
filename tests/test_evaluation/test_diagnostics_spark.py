@@ -9,7 +9,6 @@ import pandas as pd
 
 from recsys_tfb.evaluation.diagnostics_spark import (
     aggregate_report_diagnostics,
-    calibration_bins,
     positive_rank_count_matrix,
     positive_rate_matrix,
     rank_count_matrix,
@@ -154,37 +153,6 @@ class TestPositiveRateMatrix:
         assert ((mat.values >= 0.0) & (mat.values <= 1.0)).all()
 
 
-class TestCalibrationBins:
-    def test_bins_and_means(self, spark):
-        # n_bins=5 over [0,1]; bin = min(4, floor(score*5)).
-        rows = [
-            ("A", 0.05, 0), ("A", 0.15, 1),   # bin0=0.05/lab0, bin0=0.15/lab1
-            ("A", 0.45, 1), ("A", 0.55, 1),
-            ("A", 0.95, 1),
-        ]
-        sdf = _sdf(spark, rows, ["item", "score", "label"])
-        out = calibration_bins(sdf, "item", "score", "label", n_bins=5)
-        # 0.05 and 0.15 both land in bin 0 -> prob_pred=0.10, prob_true=0.5
-        b0 = out[(out["item"] == "A") & (out["bin"] == 0)].iloc[0]
-        assert abs(b0["prob_pred"] - 0.10) < 1e-9
-        assert abs(b0["prob_true"] - 0.5) < 1e-9
-        # all prob values within [0,1]
-        assert ((out["prob_true"] >= 0) & (out["prob_true"] <= 1)).all()
-
-    def test_skip_item_with_too_few_rows_or_no_positives(self, spark):
-        rows = (
-            [("A", 0.1 * i, 1 if i % 2 else 0) for i in range(1, 7)]  # 6 rows, has pos
-            + [("B", 0.2, 1), ("B", 0.4, 0)]                          # 2 rows < n_bins
-            + [("C", 0.1 * i, 0) for i in range(1, 7)]                # 6 rows, no pos
-        )
-        sdf = _sdf(spark, rows, ["item", "score", "label"])
-        out = calibration_bins(sdf, "item", "score", "label", n_bins=5)
-        items = set(out["item"])
-        assert "A" in items
-        assert "B" not in items   # too few rows
-        assert "C" not in items   # no positives
-
-
 class TestFrameJson:
     """聚合小 frame 的落地格式。
 
@@ -278,13 +246,8 @@ class TestFrameJson:
 
 
 def _report_sdf(spark):
-    """一份足夠讓六個家族都非空的最小輸入。
-
-    ``calibration_bins`` 會跳過「列數 < n_bins」或「沒有正例」的 item
-    （diagnostics_spark.py:210-212），所以每個 item 要有 >= n_bins 列且至少
-    一個正例——否則 calibration 那格是空 frame，測試看起來過了、其實什麼都
-    沒量到。這裡用 n_calibration_bins=2 壓低門檻。
-    """
+    """一份足夠讓五個家族都非空的最小輸入：每個 item 至少一個正例，
+    positive rank／positive rate 矩陣才不是全零。"""
     rows = []
     for i, item in enumerate(["insur", "loan"]):
         for k in range(4):
@@ -294,25 +257,24 @@ def _report_sdf(spark):
 
 class TestAggregateReportDiagnostics:
     def test_returns_json_safe_payload_for_every_enabled_family(self, spark):
-        """六個聚合各自成為 payload 的一個鍵，且整包可嚴格序列化。
+        """五個聚合各自成為 payload 的一個鍵，且整包可嚴格序列化。
 
         用 ``parse_constant`` 驗嚴格性而不是掃字串：``"NaN" in text`` 會被
         item 名稱裡剛好有那三個字母的情況誤判。
         """
         out = aggregate_report_diagnostics(
             _report_sdf(spark), item_col="prod_name", score_col="score",
-            rank_col="rank", label_col="label", n_calibration_bins=2,
+            rank_col="rank", label_col="label",
         )
         assert set(out) == {
             "columns", "score_histogram", "score_box_by_label",
             "rank_counts", "positive_rank_counts", "positive_rate",
-            "calibration",
         }
         # 每個家族都要有實際資料。長格式驗「有列」就夠；**矩陣家族不行**
         # ——`_to_matrix`（diagnostics_spark.py:116-122）對「有列但全被濾掉」
         # 的輸入會回一個 items×ranks 的**全零**frame，`data` 是
         # [[0,0],[0,0]] 恆為 truthy。只驗 truthy 等於沒驗到「量到東西」。
-        for key in ("score_histogram", "score_box_by_label", "calibration"):
+        for key in ("score_histogram", "score_box_by_label"):
             assert out[key]["data"], f"{key} 是空的，這份 fixture 量不到它"
         for key in ("rank_counts", "positive_rank_counts", "positive_rate"):
             total = sum(abs(v) for row in out[key]["data"] for v in row)
@@ -332,7 +294,7 @@ class TestAggregateReportDiagnostics:
         """
         out = aggregate_report_diagnostics(
             _report_sdf(spark), item_col="prod_name", score_col="score",
-            rank_col="rank", label_col="label", n_calibration_bins=2,
+            rank_col="rank", label_col="label",
         )
         for key in ("rank_counts", "positive_rank_counts", "positive_rate"):
             assert out[key]["kind"] == "matrix", key
@@ -347,7 +309,7 @@ class TestAggregateReportDiagnostics:
         """
         out = aggregate_report_diagnostics(
             _report_sdf(spark), item_col="prod_name", score_col="score",
-            rank_col="rank", label_col="label", n_calibration_bins=2,
+            rank_col="rank", label_col="label",
         )
         assert out["columns"] == {
             "item": "prod_name", "score": "score",
@@ -360,22 +322,22 @@ class TestAggregateReportDiagnostics:
         空的看起來像「量到了、結果什麼都沒有」，那是這次重構要避免的誤讀
         （與 ``assemble_diagnosis_pages`` 對空頁的處理同一個立場）。
 
-        兩個方向都測：只測其中一個的話，把兩個旗標接反了照樣有一條會綠。
         """
         out = aggregate_report_diagnostics(
             _report_sdf(spark), item_col="prod_name", score_col="score",
             rank_col="rank", label_col="label",
-            include_calibration=False,
-        )
-        assert "calibration" not in out
-        assert "rank_counts" in out
-
-        out = aggregate_report_diagnostics(
-            _report_sdf(spark), item_col="prod_name", score_col="score",
-            rank_col="rank", label_col="label", n_calibration_bins=2,
             include_distributions=False,
         )
-        assert set(out) == {"columns", "calibration"}
+        assert set(out) == {"columns"}
+
+    def test_no_calibration_bins_beside_the_prediction_quality_table(self, spark):
+        """#381 kept one score-bin table, prediction_quality's (ADR-0024
+        consequences): a second one binned on [0, 1] had no reader."""
+        out = aggregate_report_diagnostics(
+            _report_sdf(spark), item_col="prod_name", score_col="score",
+            rank_col="rank", label_col="label",
+        )
+        assert "calibration" not in out
 
 
 class TestRankAxisCoversEveryRank:

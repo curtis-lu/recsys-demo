@@ -3176,6 +3176,85 @@ class TestReportSectionKeysA34:
         assert report_section_key_errors(p), "premise: this conf is bad"
         validate_config_consistency(p)
 
+    def test_the_ad_example_conf_declares_exactly_the_read_sections(self):
+        """The ad example is a conf of its own, not an overlay on
+        ``conf/base``, and its only other gate is ``run_e2e.sh`` — minutes of
+        Spark before A34 would say a section is missing."""
+        from pathlib import Path
+
+        from recsys_tfb.core.config import ConfigLoader
+
+        conf = Path(__file__).resolve().parents[2] / "examples" / "ad" / "conf"
+        params = ConfigLoader(str(conf), env="local").get_parameters()
+        assert report_section_key_errors(params) == []
+
+
+# --- A42: evaluation.prediction_quality parameter domains --------------------
+
+from recsys_tfb.core.consistency import (  # noqa: E402
+    PREDICTION_QUALITY_DEFAULTS,
+    prediction_quality_param_errors,
+)
+
+
+def _pq_params(**block):
+    return {"evaluation": {"prediction_quality": block}}
+
+
+class TestPredictionQualityParamsA42:
+    def test_absent_block_uses_defaults(self):
+        assert prediction_quality_param_errors({}) == []
+        assert prediction_quality_param_errors(
+            {"evaluation": {"prediction_quality": None}}) == []
+
+    def test_the_defaults_pass_their_own_check(self):
+        assert prediction_quality_param_errors(
+            _pq_params(**PREDICTION_QUALITY_DEFAULTS)) == []
+
+    @pytest.mark.parametrize("key,value", [
+        ("n_bins", 0), ("n_bins", 2.5), ("n_bins", True), ("n_bins", "1000"),
+        ("n_display_bins", 0), ("n_display_bins", False),
+        ("top_n", -1), ("top_n", True), ("top_n", 1.0),
+    ])
+    def test_a_value_out_of_domain_names_its_key(self, key, value):
+        errors = prediction_quality_param_errors(
+            _pq_params(**{**PREDICTION_QUALITY_DEFAULTS, key: value}))
+        assert len(errors) == 1
+        assert f"evaluation.prediction_quality.{key}=" in errors[0]
+
+    def test_top_n_zero_is_allowed(self):
+        # No item listed: the overall numbers alone, a benign degenerate.
+        assert prediction_quality_param_errors(
+            _pq_params(**{**PREDICTION_QUALITY_DEFAULTS, "top_n": 0})) == []
+
+    def test_display_bins_must_divide_the_fine_bins(self):
+        errors = prediction_quality_param_errors(
+            _pq_params(n_bins=1000, n_display_bins=3))
+        assert len(errors) == 1
+        assert "divide" in errors[0]
+
+    def test_display_bins_divide_the_default_fine_bins(self):
+        # Only n_display_bins declared: checked against the default n_bins.
+        assert prediction_quality_param_errors(
+            _pq_params(n_display_bins=20)) == []
+        errors = prediction_quality_param_errors(_pq_params(n_display_bins=7))
+        assert len(errors) == 1 and "divide" in errors[0]
+
+    def test_an_undeclared_key_is_reported(self):
+        errors = prediction_quality_param_errors(
+            _pq_params(**PREDICTION_QUALITY_DEFAULTS, enabled=True))
+        assert len(errors) == 1
+        assert "'enabled'" in errors[0]
+        # The switch lives with the other sections, and the message says so.
+        assert "report.sections.prediction_quality" in errors[0]
+
+    def test_not_aggregated_by_validate_config_consistency(self):
+        """Evaluation-only keys, A34's reason (issue #158)."""
+        p = _base({"inference": {"products": ["a", "b"]}})
+        p["evaluation"] = {"prediction_quality": {"n_bins": 0}}
+        assert prediction_quality_param_errors(p), "premise: this conf is bad"
+        validate_config_consistency(p)
+
 
 # --- A33: migration-period check for the #327 config key rename --------------
 
