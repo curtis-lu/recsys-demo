@@ -1,6 +1,6 @@
 # recsys_tfb
 
-通用的排序（learning-to-rank）批次建模框架：替每個 query group 把候選 item 依模型分數排出名次。商業銀行產品推薦只是示例部署，這裡的詞一律是框架的抽象說法。
+通用的排序（learning-to-rank）批次建模框架：替每個 query group 把候選 item 依模型分數排出名次。預設的情境是排序——每個 query group 的候選集合是全網格；框架也支援拿展示紀錄來訓練與評估的推薦情境——候選集合是被展示的子集（兩者的差別見 **候選集合**）。商業銀行產品推薦、線上廣告推薦都只是示例部署，這裡的詞一律是框架的抽象說法。
 
 版本 ID 與不變量代號的精確定義在程式碼的模組 docstring，本檔對它們只寫一句意思；兩邊有出入時以 docstring 為準（分工理由見 `docs/agents/domain.md`）。
 
@@ -47,6 +47,12 @@ _Avoid_: session、清單
 **候選**:
 query group 裡被排出名次的一列；宣告 event 時，同一個 item 可以有多列。
 _Avoid_: 推薦項
+
+**候選集合**:
+一個 query group 裡全部的候選，由使用者的 `sample_pool` 決定，框架不檢查它是下面哪一種。
+**全網格**（預設的前提）：這個 entity 有資格的每一個 item 各一列；誰在裡面由資格規則決定，與過去任何一次排序的結果無關。label 為負的意思是「可以選、沒有選」。
+**被展示的子集**：只有過去某個系統挑出來展示過的 item 才有一列，通常一列就是一次展示。label 為負的意思是「看到了、沒有回應」；沒被展示的 item 沒有答案，不是負例。這種資料的形狀用 occasion、event 宣告。
+_Avoid_: 把「每組列數一樣多」當成全網格的定義（差別在誰決定成員，不在列數）
 
 **identity**:
 認出一筆候選的欄位組合：time、entity、item，宣告了 occasion、event 時再加上它們。順序固定是 time、entity、occasion、item、event（決定性抽樣依這個順序串接雜湊，見 ADR-0025）。
@@ -114,7 +120,7 @@ _Avoid_: 資料驗證（太籠統，開跑前的設定檢查也算驗證）
 ### 流程與產物
 
 **離線推論**:
-對一整批 entity 的候選一次評分、排出名次並發布結果表的流程（`inference` pipeline）。
+對一整批 entity 的候選一次評分、排出名次並發布結果表的流程（`inference` pipeline）。它的候選集合由框架自己產生，而且只會是全網格：每個 entity 配上整份 item 清單。
 _Avoid_: 線上推論、即時評分（那是另一種推論）
 
 **promote**:
