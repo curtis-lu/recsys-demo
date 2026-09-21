@@ -80,6 +80,8 @@ date: 2026-09-16
    - 這樣 `pr_auc` 與 `roc_auc` 的語意相同，都是「分箱後分數」的精確值（`roc_auc` 本來就是這樣定義，見同一張表）。
    - 使用者一開始要的就是 average precision（見〈背景〉）。
 
+   **使用者 2026-09-21 拍板採用這個算法**（對照：同一組點用梯形算是 0.958，用階梯算是 0.917，見 `tests/test_evaluation/test_prediction_quality.py` 的 worked example）。
+
    **後果：** 箱細到每一箱只剩同分的列時，`pr_auc` 會等於在原始分數上算的 average precision，那一列的「不會收斂」不再成立。但預設 1000 箱下每箱仍有很多列，決定 7 的「不可與外部算的 AP 對帳」照舊成立，理由從「定義不同」變成「箱內的先後已經丟掉」。名字仍叫 `pr_auc`，決定 5 的撞名理由不變。`CONTEXT.md` 的 `pr_auc` 詞條同步改寫。
 2. **母體（決定 3）。** 「算在 `total_rel > 0` 的 filter 之前」只管得到 evaluation 裡的過濾。`--post-training` 讀的 test 表，在 dataset 階段就已經丟掉沒有正例的 query group（`filter_test_model_input`），所以在這個模式下，本家族看到的母體仍是「有正例的 query group」。報表在這個模式會把這件事印在母體說明裡。讓使用者決定這類 query group 留多少的是 #429（spec #426）；權重欄已在分箱聚合留好位置（`aggregate_score_bins` 的 `weight_col`），#429 落地時接上。
 3. **開關的位置（決定 1）。** 開關是 `evaluation.report.sections.prediction_quality`，與 `baseline` 家族同形狀；`evaluation.prediction_quality` 只放怎麼算（`n_bins`、`n_display_bins`、`top_n`），由新的不變量 A42 檢查值域，並擋下寫在那裡的其他鍵（例如 `enabled`）。
