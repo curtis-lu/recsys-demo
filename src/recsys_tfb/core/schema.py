@@ -350,11 +350,13 @@ def get_schema(parameters: dict) -> dict:
 def declares_optional_role(schema: dict) -> bool:
     """True when a resolved schema declares any role in :data:`OPTIONAL_ROLE_KEYS`.
 
-    For the places whose rule is "the undeclared shape keeps today's answer;
-    any new role switches to the general one" (ADR-0025 decision D: what
-    ``k_values: "all"`` resolves to, whether the tied-row share is reported).
-    Asking about ``event`` alone there silently leaves ``occasion`` on the
-    old answer.
+    For a place whose rule is "the undeclared shape keeps today's answer; any
+    new role switches to the general one" — today the one caller is whether
+    evaluation reports the tied-row share (spec #426 decision D). Asking about
+    ``event`` alone there would silently leave ``occasion`` on the old answer.
+
+    Not every optional-role branch is this shape: ``k_values: "all"`` asks
+    about ``event`` alone on purpose (``metrics_spark._resolve_all_k``).
     """
     return any(schema.get(role) for role in OPTIONAL_ROLE_KEYS)
 

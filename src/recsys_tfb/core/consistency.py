@@ -74,10 +74,8 @@ Layer 1 — config-static (implemented here; aggregated by
   ``get_schema``, NOT the literal cust_id/snap_date/prod_name names) +
   ``prod_mapping`` + ``unmapped_policy`` ∈ {fail, drop} for
   external_hive); ``model_version`` kind must NOT declare
-  ``columns``/``prod_mapping`` (config leak guard); and ``source:
-  ranked_predictions`` is refused while an optional role is declared — that
-  is offline inference's table, with no optional-role column, A40's reason
-  in compare mode (#428). Predicate: ``compare_source_well_formed_errors``.
+  ``columns``/``prod_mapping`` (config leak guard). Predicate:
+  ``compare_source_well_formed_errors``.
 * A12 — ``--compare X`` / ``--compare-only X`` resolves to a key in
   ``compare_sources``. Predicate: ``compare_source_key_exists`` (raises
   ``ConfigConsistencyError`` directly; not aggregated by validate).
@@ -465,6 +463,17 @@ Layer 1 — config-static (implemented here; aggregated by
   errors; the evaluation command raises, collected with A22/A34). NOT
   aggregated by ``validate_config_consistency``, for A22's reason: that gate
   runs at the entry of every command and cannot see ``--post-training``.
+* A41 — a ``model_version`` compare source reading ``ranked_predictions``
+  while an optional role is declared. That table is offline inference's
+  output — the entity x item grid, no optional-role column (ADR-0025
+  decision 1) — so it cannot be matched to this run's rows: A40's reason, in
+  compare mode. Left to run, ``--compare`` failed deep in Spark on an
+  unresolved column naming neither the role nor the source (#428). Separate
+  code from A11 rather than a widened one, for A39's reason: A11 is about a
+  source being well-formed, and a user who declared no optional role should
+  never read about one. Predicate: ``optional_role_compare_source_errors``.
+  Aggregated by ``validate_config_consistency``, beside A11: it takes
+  parameters alone.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
@@ -2133,6 +2142,8 @@ def validate_config_consistency(parameters: dict) -> None:
 
     errors.extend(compare_source_well_formed_errors(parameters))
 
+    errors.extend(optional_role_compare_source_errors(parameters))
+
     errors.extend(segment_source_override_errors(parameters))
 
     errors.extend(diagnosis_metric_param_errors(parameters))
@@ -2935,7 +2946,6 @@ def compare_source_well_formed_errors(parameters: dict) -> list[str]:
     sources = (
         (parameters.get("evaluation", {}) or {}).get("compare_sources", {}) or {}
     )
-    role_columns = optional_role_column_map(parameters) if sources else {}
     errs: list[str] = []
     for key, src in sources.items():
         if not isinstance(src, dict):
@@ -2970,26 +2980,6 @@ def compare_source_well_formed_errors(parameters: dict) -> list[str]:
                     f"(A11) compare_sources[{key!r}].source={src['source']!r} "
                     f"not in {sorted(_VALID_MODEL_VERSION_SOURCES)}"
                 )
-            # ranked_predictions is offline inference's output: its rows are
-            # the framework's entity x item grid and carry no optional-role
-            # column (ADR-0025 decision 1). Comparing against it with a role
-            # declared is A40's case in another mode — and left to run it
-            # failed in Spark on an unresolved column (#428).
-            if src.get("source") == "ranked_predictions" and role_columns:
-                named = "; ".join(
-                    f"schema.columns.{role}={cols}"
-                    for role, cols in role_columns.items()
-                )
-                errs.append(
-                    f"(A11) compare_sources[{key!r}].source='ranked_predictions' "
-                    f"cannot be compared while an optional column role is "
-                    f"declared ({named}): offline inference writes that table "
-                    f"from its own entity x item grid, so its rows carry no "
-                    f"such column and cannot be matched to this run's rows. "
-                    f"Use source: training_eval_predictions or "
-                    f"enriched_eval_predictions (a post-training run of that "
-                    f"model version)."
-                )
         elif kind == "external_hive":
             if "table" not in src:
                 errs.append(f"(A11) compare_sources[{key!r}] kind=external_hive missing 'table'")
@@ -3008,6 +2998,45 @@ def compare_source_well_formed_errors(parameters: dict) -> list[str]:
                     f"not in {sorted(_VALID_UNMAPPED)}"
                 )
     return errs
+
+
+def optional_role_compare_source_errors(parameters: dict) -> list[str]:
+    """(A41) no ``ranked_predictions`` compare source while an optional role is
+    declared.
+
+    Returns error strings (empty list when fine), collected by
+    :func:`validate_config_consistency`.
+
+    ``ranked_predictions`` is offline inference's output: its rows are the
+    framework's own entity x item grid and carry no optional-role column
+    (ADR-0025 decision 1). This run's rows do, so the two sides identify rows
+    differently — A40's reason, in compare mode. The two post-training tables
+    of the same model version carry the columns (A39), so the message names
+    them. Only ``kind: model_version`` has a ``source``; a malformed source is
+    A11's to report and is skipped here.
+    """
+    declared = optional_role_column_map(parameters)
+    if not declared:
+        return []
+    sources = (
+        (parameters.get("evaluation", {}) or {}).get("compare_sources", {}) or {}
+    )
+    named = "; ".join(
+        f"schema.columns.{role}={cols}" for role, cols in declared.items()
+    )
+    return [
+        f"(A41) compare_sources[{key!r}].source='ranked_predictions' cannot be "
+        f"compared while an optional column role is declared ({named}): "
+        f"offline inference writes that table from its own entity x item grid, "
+        f"so its rows carry no such column and cannot be matched to this run's "
+        f"rows. Use source: training_eval_predictions or "
+        f"enriched_eval_predictions (a post-training run of that model "
+        f"version)."
+        for key, src in sources.items()
+        if isinstance(src, dict)
+        and src.get("kind") == "model_version"
+        and src.get("source") == "ranked_predictions"
+    ]
 
 
 def compare_source_key_exists(parameters: dict, key: str | None) -> dict | None:
@@ -3903,9 +3932,9 @@ def entity_columns_declared_errors(
     entity column its catalog entry never declared is dropped there with no
     error, no warning and no log line. The table stays perfectly valid; the
     published rows just identify the wrong thing. Every downstream consumer
-    groups on the full entity tuple (``evaluation/metrics_spark`` uses
-    ``[time] + entity``), so the whole run's metrics silently answer a
-    different question.
+    groups on the full entity tuple (``evaluation/metrics_spark`` groups by
+    ``query_group_columns``, which contains all of it), so the whole run's
+    metrics silently answer a different question.
 
     **This module never reads the catalog** — the caller does, and passes what
     it read. ``declared_columns`` is the answer from the dataset object's

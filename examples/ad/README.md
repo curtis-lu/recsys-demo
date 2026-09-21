@@ -62,7 +62,7 @@ campaign_dim   ┘
 | 一次請求展示多個素材（`occasion`） | 有：10,759 個請求，平均 3.96 個素材／請求，分布 `{1: 532, 2: 1052, 3: 2165, 4: 3239, 5: 2158, 6: 1613}`；只有 1 個素材的請求佔 4.9%（那種組排序沒有意義，mAP 恆為 1） | #428 occasion（已用上） |
 | 同一週、同一 (使用者, 版位, 素材) 被曝光多次 | 有（分散在不同的請求裡） | #378 event（資料仍撐得住，這份 conf 現在用 occasion 示範） |
 | 一個 (使用者, 版位) 一週的曝光次數超過 item 種數 12（`"all"` 不截斷才驗得到） | 有：全部 738 組、test 週 59 組，最多 35 次 | #378 event（資料仍撐得住） |
-| 逐筆曝光的即時特徵 | 有：`feature_realtime`，一次曝光一列，鍵是 `(snap_date, user_id, slot_id, request_id, ad_creative)`。22.9% 的曝光在前 30 分鐘瀏覽過活動同類內容，這些曝光的點擊率 28.4%，其餘 11.1%；同一週同一 (使用者, 版位, 素材) 曝光不只一次的 8,042 組裡，有 3,143 組（39.1%）這個值不是每次都一樣 | #380 |
+| 逐筆曝光的即時特徵 | 有：`feature_realtime`，一次曝光一列，鍵是 `impression_id`（表裡沒有 `request_id` 欄）。22.9% 的曝光在前 30 分鐘瀏覽過活動同類內容，這些曝光的點擊率 28.4%，其餘 11.1%；同一週同一 (使用者, 版位, 素材) 曝光不只一次的 8,042 組裡，有 3,143 組（39.1%）這個值不是每次都一樣 | #380 |
 | 算即時特徵時偷看的後果 | 有：點擊後 5 分鐘內會瀏覽同類內容（一半就在點擊那一秒），窗口放到曝光那一秒或之後，「有沒有瀏覽」幾乎就是「有沒有點」。`check_features.py` 擋得住（變異檢查見〈怎麼跑〉） | #380 的 as-of 文件與範例 |
 | 使用者特徵、版位特徵各自的粒度 | 有：`feature_user`（snap_date, user_id）、`feature_slot`（snap_date, slot_id） | #380 多張特徵表 |
 | 快照日與 `time` 不同（as-of join） | 有：`user_profile` 每天一份，`available_at` 在隔天 05:00～08:00，批次晚一天的日子（平日 10%、週末 50%）再晚 24 小時；每週約 5% 的人在一天中的某個時刻換裝置，點擊看曝光那一刻的裝置。10 週 × 400 人裡，「週一 00:00 拿得到的最後一份」不是週六那份的有 3,200 列（8 週），其中裝置因此不同的 28 列；取「週一那份」會拿到不同裝置的有 86 列。今天的 `feature_user.sql` 以週為單位取後者，這是一個已經被 `check_features.py` 驗過的 as-of 範例，#380 把 `feature_user` 拆成獨立特徵表時可以直接用。**逐筆曝光的 as-of 還沒算**（ADR-0022 表格第一列：每次曝光用它當下拿得到的那一份）：它的 join 欄位就是候選列本身的 `(snap_date, user_id, slot_id, request_id)`，#428 之後每次曝光已經是一次請求裡的一列。資料已經撐得住——38,557 筆曝光裡（限 feature_etl 的 10 週），照曝光當下取快照與照週一取快照，裝置不同的有 1,448 筆 | #380；逐筆的要 #380 |
@@ -103,22 +103,22 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 
 ## 耗時
 
-整條約 **⟪E2E⟫**。量測：⟪E2E⟫。
+整條約 **4 分鐘**。量測：2026-09-21，macOS 8 核、local[*]，兩次開跑時 load average 分別是 1.9 與 2.8；連跑兩次，247 秒與 246 秒（第二次多做了與基準的比對，六層逐值相同）。
 
 | 步驟 | 秒（第 1 次／第 2 次） |
 |---|---|
-| setup（產生原始表、寫進 Hive） | ⟪E2E⟫ |
-| feature_etl | ⟪E2E⟫ |
-| check 特徵不偷看 | ⟪E2E⟫ |
-| label_etl | ⟪E2E⟫ |
-| sample_pool_etl | ⟪E2E⟫ |
-| inference_population_etl | ⟪E2E⟫ |
-| dataset | ⟪E2E⟫ |
-| training（HPO 5 次） | ⟪E2E⟫ |
-| inference | ⟪E2E⟫ |
-| assert 推論表分區結構 | ⟪E2E⟫ |
-| evaluation --post-training | ⟪E2E⟫ |
-| digest | ⟪E2E⟫ |
+| setup（產生原始表、寫進 Hive） | 9／10 |
+| feature_etl | 34／33 |
+| check 特徵不偷看 | 10／9 |
+| label_etl | 13／14 |
+| sample_pool_etl | 14／15 |
+| inference_population_etl | 14／14 |
+| dataset | 16／16 |
+| training（HPO 5 次） | 39／39 |
+| inference | 57／53 |
+| assert 推論表分區結構 | 2／1 |
+| evaluation --post-training | 28／30 |
+| digest | 9／10 |
 
 每一步都是獨立的 CLI 指令，**秒數都含一次 Spark 啟動**。log 裡從建立 `run_id` 到 `SparkSession ready` 約 1 秒；加上 Python 載入，每一步的固定成本是幾秒等級（沒有單獨量）。資料量：原始曝光 42,555 列、瀏覽 45,725 列、使用者快照 33,600 列；`sample_pool` 38,557 列、`feature_table` 12,000 列、`feature_realtime` 38,557 列、train model_input 19,674 列。這些數字只說明「本機幾分鐘跑得完」，推不出生產成本（見〈沒做的事〉）。
 
@@ -137,7 +137,7 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 
 - **內容指紋**：每列對所有欄（依欄名排序）取 `xxhash64` 後整張表加總，與列的順序無關。版本分區欄不進指紋，所以「只有版本號變了」與「內容變了」分得開。
 - **排除的東西**：JSON 裡的 `config_fingerprint`（設定的雜湊，新增一個「算的」設定鍵就會變，指標值卻沒動；放進來的話 #381 那種改動會讓這裡紅，「指標值逐值不變」反而驗不出來）；評估目錄的 `manifest.json`（執行紀錄，含執行時間、run_id、git commit）。
-- **沒有會抖動的欄位。** ⟪E2E⟫ 個欄位逐一相同（包括模型分數、評估指標與診斷），所以 `noisy` 是空的。哪天出現了本來就會變的欄位，把它的路徑前綴與理由寫進 `noisy`，比對時會略過並印出來。
+- **沒有會抖動的欄位。** 2026-09-21 以現在的資料連跑兩次，58 個欄位逐一相同（包括模型分數、評估指標與診斷），所以 `noisy` 是空的。哪天出現了本來就會變的欄位，把它的路徑前綴與理由寫進 `noisy`，比對時會略過並印出來。
 
 後面的票怎麼用：
 
@@ -153,7 +153,7 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 | `event` 角色 | 曾經打開過（#378）：`event: impression_id`，以這份資料跑綠過形狀一（同一 entity × 時段一個 query group，event 只進 identity）。#428 換成 `occasion` 之後不再宣告——想改回去，見 `conf/base/parameters.yaml` 的 schema 註解列出要改哪幾個檔 | #378（已改用 occasion 示範） |
 | `occasion` 角色 | **已打開**（#428）：`occasion: request_id`，`label_table.sql` 與 `sample_pool.sql` 都以一次請求為一個 query group，兩張表的 `primary_key` 與 `training_eval_predictions` 的 catalog 欄位都含 `request_id`。逐筆的即時特徵還接不上（要 #380），所以同一次請求裡的素材分數只靠週級特徵，容易同分——報表的〈完整性檢查〉印出同分列佔比 | #428（完成） |
 | item 清單從資料數 | item 清單（`schema.categorical_values.ad_creative`）逐一列出 12 種，包括 train 沒有的 `c04-video`；離線推論的候選 `inference.products` 另外照抄一份（A4 要求兩者相同） | #379 |
-| 多張特徵表 | 只宣告一張 `feature_table`；使用者、版位兩種粒度已在 `feature_user`、`feature_slot` 分開算好，打開時可以直接各當一張；逐筆曝光的 `feature_realtime` 已算好，要等 occasion 之後才接得上 | #380 |
+| 多張特徵表 | 只宣告一張 `feature_table`；使用者、版位兩種粒度已在 `feature_user`、`feature_slot` 分開算好，打開時可以直接各當一張；逐筆曝光的 `feature_realtime` 已算好，但它以 `impression_id` 為鍵，而這份 conf 的候選列上沒有那一欄；接它之前要讓它多帶 `request_id`（`(snap_date, user_id, slot_id, request_id, ad_creative)` 在一次請求內唯一） | #380 |
 | 預測品質指標家族 | 不開 | #381 |
 
 ## 踩到的框架問題

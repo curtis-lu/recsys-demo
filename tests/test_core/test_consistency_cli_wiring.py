@@ -360,3 +360,14 @@ def test_a40_wired_into_evaluation_command_before_spark():
     assert src.index("optional_role_monitoring_errors(") < src.index(
         "get_or_create_spark_session("
     ), "A40 must fail before the Spark cold start, like A22"
+
+
+def test_a41_aggregated_beside_a11():
+    # A41 takes parameters alone, so it rides the aggregator every command
+    # runs at its entry. Behavioural half: TestCompareAgainstInference
+    # OutputWithAnOptionalRoleA41.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "optional_role_compare_source_errors" in inspect.getsource(
+        validate_config_consistency
+    )

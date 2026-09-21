@@ -304,3 +304,30 @@ def test_items_below_floor_are_listed_in_item_order(spark):
     _pdf, meta = draw_diagnosis_sample(sdf, _params(max_queries=6, floor=5))
     below = list(meta["items_below_floor_after_sampling"])
     assert len(below) >= 3 and below == sorted(below)
+
+
+def test_the_sampling_unit_is_the_occasion_when_declared(spark):
+    """With ``occasion`` declared, a query is one occasion (#428, ADR-0025
+    decision 2 names this site).
+
+    H1 was shown two positive requests (r1, r5) and one with no click (r2).
+    Counted in occasions that is two positive queries for H1 and r2 stays
+    out; counted in ``time`` + ``entity`` it would be one query, and r2's rows
+    would ride into the sample with it — a smaller count and a population
+    that looks just as plausible.
+    """
+    params = _params(max_queries=100, floor=1)
+    params["schema"]["columns"]["occasion"] = "req_id"
+    rows = [
+        ("20240331", "H1", "r1", "hot", 0.9, 1), ("20240331", "H1", "r1", "cold", 0.1, 0),
+        ("20240331", "H1", "r2", "hot", 0.8, 0), ("20240331", "H1", "r2", "cold", 0.2, 0),
+        ("20240331", "H1", "r5", "hot", 0.7, 1), ("20240331", "H1", "r5", "cold", 0.3, 0),
+        ("20240331", "H2", "r3", "hot", 0.9, 1), ("20240331", "H2", "r3", "cold", 0.1, 0),
+        ("20240331", "C1", "r4", "hot", 0.9, 0), ("20240331", "C1", "r4", "cold", 0.1, 1),
+    ]
+    df = spark.createDataFrame(
+        rows, schema=["snap_date", "cust_id", "req_id", "prod_name", "score", "label"]
+    )
+    pdf, meta = draw_diagnosis_sample(df, params)
+    assert meta["n_pos_queries_total"] == 4
+    assert set(pdf["req_id"]) == {"r1", "r3", "r4", "r5"}

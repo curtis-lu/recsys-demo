@@ -402,7 +402,7 @@ def compute_dataset_overview(
     # paid by a deployment that asked for the role.
     #
     # With only `occasion` declared, items are unique within a query group
-    # and the tie-break is the item alone (ADR-0025 decision D), which is the
+    # and the tie-break is the item alone (spec #426 decision D), which is the
     # rule every undeclared deployment already lives with — but the query
     # groups are small, so a tie decides a larger share of each ranking, and
     # the number is printed for the same reason.

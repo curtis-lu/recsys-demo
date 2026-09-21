@@ -71,7 +71,7 @@ _QUERY_RANKING_DIAGNOSES = (
 #: 「每組候選數是否都相同」會連那些部署一起跳過，違反「沒宣告時輸出逐值不變」；
 #: 以角色為準，是因為宣告 ``occasion`` 就是在宣告「組是被擺出來的那幾個」。
 #: ``model_capacity`` 讀 item_ability 的結果，會照抄它的跳過原因。
-_FIXED_CANDIDATE_SET_DIAGNOSES = ("item_ability",)
+_ASSUMES_FIXED_CANDIDATE_SET = ("item_ability",)
 
 
 def schema_skip_reason(parameters: dict, name: str) -> Optional[str]:
@@ -96,7 +96,7 @@ def schema_skip_reason(parameters: dict, name: str) -> Optional[str]:
             f"排序會隨列到達的順序改變。本次跳過。"
         )
     occasion_cols = schema.get("occasion", [])
-    if occasion_cols and name in _FIXED_CANDIDATE_SET_DIAGNOSES:
+    if occasion_cols and name in _ASSUMES_FIXED_CANDIDATE_SET:
         return (
             f"宣告了 schema.columns.occasion（{', '.join(occasion_cols)}）："
             f"一個 query group 是一次排序的場合，組裡是那一次被擺出來的幾個"

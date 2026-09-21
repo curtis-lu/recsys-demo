@@ -1366,9 +1366,10 @@ def _restrict_to_common(
     carries full-universe sizes, the common sizes and dropped item lists so
     the report can show what was filtered.
 
-    Population size is counted in **query groups** — distinct ``[time] +
-    entity`` combinations, every column of ``schema.entity`` — because that is
-    the unit mAP divides by. Reporting it in any other unit puts two different
+    Population size is counted in **query groups** — distinct
+    ``query_group_columns`` combinations (time, every column of
+    ``schema.entity``, and ``occasion`` when declared) — because that is the
+    unit mAP divides by. Reporting it in any other unit puts two different
     scales side by side in one table with nothing telling the reader they
     differ. See ``docs/adr/0015-compare-population-counted-in-query-groups.md``.
 

@@ -4131,7 +4131,7 @@ class TestOccasionReachesEveryOptionalRoleGate:
         ) == []
 
 
-class TestCompareAgainstInferenceOutputWithAnOptionalRoleA11:
+class TestCompareAgainstInferenceOutputWithAnOptionalRoleA41:
     """``source: ranked_predictions`` is offline inference's table, built from
     its own entity × item grid with no optional-role columns — the same reason
     A40 refuses monitoring mode. Left to run, ``--compare`` failed deep in
@@ -4147,31 +4147,31 @@ class TestCompareAgainstInferenceOutputWithAnOptionalRoleA11:
         return params
 
     def test_ranked_predictions_is_refused_with_occasion(self):
-        from recsys_tfb.core.consistency import compare_source_well_formed_errors
+        from recsys_tfb.core.consistency import optional_role_compare_source_errors
 
-        errs = compare_source_well_formed_errors(
+        errs = optional_role_compare_source_errors(
             self._with_source(_occasion_params(), "ranked_predictions"))
         assert len(errs) == 1
-        assert "A11" in errs[0] and "ranked_predictions" in errs[0]
+        assert "A41" in errs[0] and "ranked_predictions" in errs[0]
         assert "schema.columns.occasion" in errs[0]
 
     def test_ranked_predictions_is_refused_with_event(self):
-        from recsys_tfb.core.consistency import compare_source_well_formed_errors
+        from recsys_tfb.core.consistency import optional_role_compare_source_errors
 
-        errs = compare_source_well_formed_errors(
+        errs = optional_role_compare_source_errors(
             self._with_source(_event_params(event="imp_id"), "ranked_predictions"))
         assert len(errs) == 1 and "schema.columns.event" in errs[0]
 
     @pytest.mark.parametrize("source", [
         None, "enriched_eval_predictions", "training_eval_predictions"])
     def test_the_post_training_tables_are_still_allowed(self, source):
-        from recsys_tfb.core.consistency import compare_source_well_formed_errors
+        from recsys_tfb.core.consistency import optional_role_compare_source_errors
 
-        assert compare_source_well_formed_errors(
+        assert optional_role_compare_source_errors(
             self._with_source(_occasion_params(), source)) == []
 
     def test_ranked_predictions_is_allowed_without_an_optional_role(self):
-        from recsys_tfb.core.consistency import compare_source_well_formed_errors
+        from recsys_tfb.core.consistency import optional_role_compare_source_errors
 
-        assert compare_source_well_formed_errors(
+        assert optional_role_compare_source_errors(
             self._with_source(_event_params(), "ranked_predictions")) == []
