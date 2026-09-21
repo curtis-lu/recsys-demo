@@ -4,7 +4,7 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 
 ## 這個專案是什麼
 
-通用的**排序（learning-to-rank）批次建模框架**：對每個 query group（`time` × `entity`，宣告了選用角色 `occasion` 時再加上它）把候選 `item` 依模型分數排名。欄位角色由 `conf/base/parameters.yaml` 的 `schema` 區塊配置；來源表（`feature_table`/`sample_pool`/`label_table`）由使用者自定義。**商業銀行產品推薦只是示例 instantiation，不是框架限定應用**——寫文件時保持抽象框架定位。
+通用的**排序（learning-to-rank）批次建模框架**：對每個 query group（`time` × `entity`，宣告了選用角色 `occasion` 時再加上它）把候選 `item` 依模型分數排名。欄位角色由 `conf/base/parameters.yaml` 的 `schema` 區塊配置；來源表（`feature_table`/`sample_pool`/`label_table`）由使用者自定義。排序是預設情境（每個 query group 的候選集合是全網格），不是定位的全部：框架也支援拿展示紀錄訓練與評估的推薦情境（候選集合是被展示的子集；`CONTEXT.md` 的 **候選集合**）。**商業銀行產品推薦、線上廣告推薦都只是示例 instantiation，不是框架限定應用**——寫文件時保持抽象框架定位。
 
 框架是 **Kedro 風格的手刻實作**（`src/recsys_tfb/core/` 自製 DataCatalog/Node/Pipeline/Runner，`src/recsys_tfb/io/*` 仿 kedro.io；**無 kedro 套件依賴**，Ploomber 僅作排程）。規模與細節見 README.md 與 docs/。
 
