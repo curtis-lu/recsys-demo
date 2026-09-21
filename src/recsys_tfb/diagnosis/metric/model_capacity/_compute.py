@@ -306,6 +306,17 @@ def _ability_lookup(item_ability: Optional[dict]) -> tuple[dict[str, dict], list
             "啟用它）——per_item 的 query_centered_auc 留空。"
         ]
     if not item_ability.get("enabled", True):
+        # 兩種 stub 分開講：使用者自己關掉的，與框架判定「目前宣告的 schema
+        # 下算不出可重現的數字」而跳過的。旗標名只在前者屬實——後者印那句話
+        # 會叫操作者去查一個他從來沒設過的設定。跳過的原因由上游寫在
+        # ``skipped_reason``（``diagnosis.metric._common.schema_skip_reason``），
+        # 這裡照抄，不自己重寫一份。
+        skipped = item_ability.get("skipped_reason")
+        if skipped:
+            return {}, [
+                f"item_ability 本次未算：{skipped}——per_item 的 "
+                "query_centered_auc 留空。"
+            ]
         return {}, [
             "item_ability 在上游被關閉（evaluation.diagnosis.item_ability."
             "enabled=false，落地的是 stub）——per_item 的 query_centered_auc "

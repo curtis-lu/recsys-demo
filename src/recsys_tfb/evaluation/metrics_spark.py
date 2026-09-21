@@ -918,6 +918,16 @@ def compute_overall_per_item(
     frame does not have, raised in the middle of an evaluation run — which is
     how it was found.
 
+    **Why this one defaults and ``_compute_core`` does not**, given the hazard
+    is identical: ``_compute_core`` is private with exactly two call sites, so
+    requiring the argument costs nothing and removes the footgun outright.
+    This one is read by a dozen tests that pass candidate-grain frames and
+    have no opinion about tie-breaks; requiring it there would make every one
+    of them state an answer it does not care about, which is how a required
+    argument turns into a copy-pasted one. The residual risk is a future
+    caller handing this a collapsed frame and forgetting — covered by
+    ``test_slim_category_pass_works_when_event_is_declared``.
+
     Slices (each costed against the model's matching pass, so the baseline
     comparison stays symmetric only when the model already computed them):
       - ``segment_columns``: when non-empty, also emit ``per_segment`` (overall

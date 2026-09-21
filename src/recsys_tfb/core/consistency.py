@@ -715,7 +715,7 @@ import pandas as pd
 from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
 from recsys_tfb.core.schema import (
-    _OPTIONAL_ROLE_KEYS,
+    OPTIONAL_ROLE_KEYS,
     ENTITY_GROUPING_KEYS,
     get_schema,
 )
@@ -836,17 +836,39 @@ def override_unknown_items(parameters: dict) -> list[str]:
     return sorted(bad)
 
 
+def optional_role_column_map(parameters: dict) -> dict[str, list[str]]:
+    """``{role: [column, ...]}`` for every declared optional role; ``{}`` if none.
+
+    The one place this module asks "which columns did the user add by
+    declaring an optional role" — A38, A39, A40 and B11 all read it, so they
+    cannot disagree about the answer, and a second optional role is added to
+    :data:`~recsys_tfb.core.schema.OPTIONAL_ROLE_KEYS` alone.
+
+    Keyed by role rather than flattened because three of the four callers say
+    the role's name in their message, and a user who declared ``event`` must
+    never read about ``occasion``. Undeclared roles are absent rather than
+    mapped to ``[]``, so ``if not declared`` is the whole "nothing to check"
+    test.
+
+    Reads the resolved schema, not the raw config: that is what normalises a
+    one-column ``event: impression_id`` into a list.
+    """
+    schema = get_schema(parameters)
+    return {
+        role: cols
+        for role in OPTIONAL_ROLE_KEYS
+        if (cols := schema.get(role, []))
+    }
+
+
 def optional_role_columns(parameters: dict) -> list[str]:
     """Every column an optional role declares, in identity order; ``[]`` if none.
 
-    One place the rest of this module asks "which columns did the user add by
-    declaring an optional role", so A38, A39 and the report's tie note cannot
-    disagree about the answer. Reads the resolved schema rather than the raw
-    config, which is what normalises a one-column ``event: impression_id`` into
-    a list.
+    The flat view of :func:`optional_role_column_map`, for the one caller that
+    writes the columns out rather than talking about them
+    (``training.nodes.predict_and_write_test_predictions``).
     """
-    schema = get_schema(parameters)
-    return [c for role in _OPTIONAL_ROLE_KEYS for c in schema.get(role, [])]
+    return [c for cols in optional_role_column_map(parameters).values() for c in cols]
 
 
 def optional_role_as_feature_errors(parameters: dict) -> list[str]:
@@ -880,8 +902,8 @@ def optional_role_as_feature_errors(parameters: dict) -> list[str]:
         return []
     role_of = {
         col: role
-        for role in _OPTIONAL_ROLE_KEYS
-        for col in get_schema(parameters).get(role, [])
+        for role, cols in optional_role_column_map(parameters).items()
+        for col in cols
     }
     offenders = [c for c in declared if c in role_of]
     if not offenders:
@@ -929,10 +951,8 @@ def optional_role_columns_declared_errors(
     if declared_columns is None:
         return []
 
-    schema = get_schema(parameters)
     errors: list[str] = []
-    for role in _OPTIONAL_ROLE_KEYS:
-        role_cols = schema.get(role, [])
+    for role, role_cols in optional_role_column_map(parameters).items():
         missing = [c for c in role_cols if c not in declared_columns]
         if missing:
             errors.append(
@@ -977,10 +997,8 @@ def optional_role_source_column_errors(
     upstream query are usually missing the same column, and reporting one per
     run would cost two passes to learn that.
     """
-    role_columns = {
-        role: get_schema(parameters).get(role, []) for role in _OPTIONAL_ROLE_KEYS
-    }
-    if not any(role_columns.values()):
+    role_columns = optional_role_column_map(parameters)
+    if not role_columns:
         return []
 
     errors: list[str] = []
@@ -1024,10 +1042,7 @@ def optional_role_monitoring_errors(
     not as advice to try a flag at random: it reads
     ``training_eval_predictions``, whose rows A39 makes carry the columns.
     """
-    role_columns = {
-        role: get_schema(parameters).get(role, []) for role in _OPTIONAL_ROLE_KEYS
-    }
-    declared = {role: cols for role, cols in role_columns.items() if cols}
+    declared = optional_role_column_map(parameters)
     if post_training or not declared:
         return []
     named = "; ".join(

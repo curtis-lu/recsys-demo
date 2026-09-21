@@ -291,7 +291,10 @@ class TestTwoColumnEntityFixture:
         """
         columns = two_column_entity_params["schema"]["columns"]
         mis_nested = {"schema": dict(columns)}
-        with pytest.raises(ValueError, match="Missing schema.columns"):
+        # Since #378 the message names the real mistake — the roles are one
+        # level too high — instead of reporting them as missing, which sent
+        # the reader off to add keys they had already written.
+        with pytest.raises(ValueError, match="Misplaced key"):
             get_schema(mis_nested)
 
 
@@ -369,7 +372,13 @@ class TestRenamedSchemaFixture:
         mis_nested = {"schema": dict(columns)}
         with pytest.raises(ValueError) as exc:
             get_schema(mis_nested)
-        assert "time, entity, item" in str(exc.value)
+        # Since #378 the message names the real mistake — the roles are one
+        # level too high — instead of listing them as missing, which sent the
+        # reader off to add keys they had already written.
+        message = str(exc.value)
+        assert "Misplaced key(s) in schema" in message
+        for role in ("time", "entity", "item"):
+            assert role in message
 
 
 class TestOptionalEventRole:
@@ -495,3 +504,69 @@ class TestUnknownSchemaColumnKeys:
         )
         assert schema["label"] == "y"
         assert schema["event"] == ["impression_id"]
+
+
+class TestRoleWrittenOneLevelTooHigh:
+    """A role under ``schema:`` instead of ``schema.columns:`` raises.
+
+    S5 (docs/agents/architecture-constraints.md) already refuses this shape,
+    but it is an AST scan of Python literals under ``src/`` and ``tests/`` —
+    and the place a deployment writes its schema is ``conf/*.yaml``, which no
+    scan reads. Until #378's review the runtime half did not exist, so
+    ``schema: {event: ..., columns: {...}}`` resolved to the undeclared shape:
+    no message, no version ID moved, and the run ranked one row per item.
+    """
+
+    @staticmethod
+    def _one_level_up(**over):
+        return {"schema": {
+            "columns": {"time": "snap_date", "entity": ["cust_id"],
+                        "item": "prod_name"},
+            **over,
+        }}
+
+    def test_an_optional_role_one_level_up_raises(self):
+        with pytest.raises(ValueError, match="Misplaced key"):
+            get_schema(self._one_level_up(event="impression_id"))
+
+    def test_a_required_role_one_level_up_raises(self):
+        with pytest.raises(ValueError, match="Misplaced key"):
+            get_schema(self._one_level_up(item="other"))
+
+    def test_a_derived_key_one_level_up_raises(self):
+        """Declaring one is meaningless wherever it is written; up here it was
+        the one spelling neither gate saw."""
+        with pytest.raises(ValueError, match="Misplaced key"):
+            get_schema(self._one_level_up(identity_columns=["a"]))
+
+    def test_every_misplaced_key_is_reported_at_once(self):
+        with pytest.raises(ValueError) as exc:
+            get_schema(self._one_level_up(event="i", score="s"))
+        message = str(exc.value)
+        assert "event" in message and "score" in message
+
+    def test_the_message_says_where_they_belong(self):
+        with pytest.raises(ValueError) as exc:
+            get_schema(self._one_level_up(event="i"))
+        assert "columns" in str(exc.value)
+
+    def test_the_legitimate_schema_keys_still_pass(self):
+        """The discriminating case: ``categorical_values`` sits under
+        ``schema`` by design, so a gate that refused every non-``columns`` key
+        would reject the shape this framework ships."""
+        schema = get_schema({"schema": {
+            "columns": {"time": "snap_date", "entity": ["cust_id"],
+                        "item": "prod_name"},
+            "categorical_values": {"prod_name": ["a", "b"]},
+        }})
+        assert schema["categorical_values"] == {"prod_name": ["a", "b"]}
+
+    def test_the_framework_defaults_conf_passes(self):
+        """The no-op half, on the real config."""
+        from pathlib import Path
+
+        import yaml
+
+        root = Path(__file__).resolve().parents[2]
+        params = yaml.safe_load((root / "conf/base/parameters.yaml").read_text())
+        get_schema(params)

@@ -41,14 +41,21 @@ _ROLE_KEYS = ("time", "entity", "item", "label", "score", "rank")
 #: two impressions of one item compete for rank inside the same ranking, they
 #: do not form two rankings (ADR-0025 decision 1). ``occasion``, the role that
 #: widens the query group, is the next ticket and lands here beside it.
-_OPTIONAL_ROLE_KEYS = ("event",)
+OPTIONAL_ROLE_KEYS = ("event",)
+
+
+#: The only keys ``schema`` itself may carry. Anything else there is either a
+#: role written one level too high (:func:`_mis_nested_role_message`) or a
+#: typo, and both are silent today: ``get_schema`` only ever looks inside
+#: ``columns``.
+_SCHEMA_SECTION_KEYS = ("columns", "categorical_values")
 
 
 #: Every key ``schema.columns`` may carry. Anything else is a typo, and
 #: :func:`_unknown_column_keys_message` says so rather than letting the merge
 #: filter drop it — a dropped ``evnet:`` changes no version ID and produces a
 #: run that finishes and ranks the wrong thing.
-_SETTABLE_COLUMN_KEYS = _ROLE_KEYS + _OPTIONAL_ROLE_KEYS
+_SETTABLE_COLUMN_KEYS = _ROLE_KEYS + OPTIONAL_ROLE_KEYS
 
 
 #: Defaults for the roles this framework produces. The other three are
@@ -171,11 +178,47 @@ def _unknown_column_keys_message(unknown: list[str]) -> str:
     )
 
 
+def _mis_nested_role_keys(schema_section) -> list[str]:
+    """Keys of ``schema`` that name a column role (or a derived list), sorted.
+
+    Those belong one level down, under ``columns``. Up here they are read by
+    nothing at all.
+    """
+    misplaced = set(_SETTABLE_COLUMN_KEYS) | set(_DERIVED_KEYS)
+    return sorted(k for k in schema_section if k in misplaced)
+
+
+def _mis_nested_role_message(keys: list[str]) -> str:
+    """The one message both gates raise, so their wording cannot drift.
+
+    **Why this needs a runtime gate at all.** S5 in
+    docs/agents/architecture-constraints.md already refuses this shape — but
+    it is an AST scan of Python literals under ``src/`` and ``tests/``, and
+    the place a deployment actually writes its schema is ``conf/*.yaml``,
+    which no scan reads. Before this, ``schema: {event: impression_id,
+    columns: {...}}`` resolved to the undeclared shape: no message, no version
+    ID moved, and the run ranked one row per item while the operator believed
+    it was ranking one row per event. That is the same failure
+    :func:`_unknown_column_keys_message` exists to close, one level up — and
+    the reason S5's own text calls this shape "半吊子修法" when only half of
+    it is guarded.
+    """
+    return (
+        "Misplaced key(s) in schema in parameters.yaml: "
+        f"{', '.join(keys)}. Column roles live under 'schema:' -> "
+        "'columns:', not directly under 'schema:'. Written one level up they "
+        "are read by nothing: the run would resolve to the roles you did "
+        "declare, move no version ID, and rank a different shape than you "
+        f"intended. Move them under 'columns:'. ('schema' itself takes only "
+        f"{', '.join(_SCHEMA_SECTION_KEYS)}.)"
+    )
+
+
 def _check_multi_column_role(role: str, value) -> None:
     """A role that may name several columns holds a str or a non-empty list of
     non-empty strs.
 
-    Shared by ``entity`` and by every role in :data:`_OPTIONAL_ROLE_KEYS`; the
+    Shared by ``entity`` and by every role in :data:`OPTIONAL_ROLE_KEYS`; the
     messages name ``role`` so the user reads about the key they actually wrote.
     Raises on the first problem rather than collecting: one role's value is one
     thing to fix, unlike the across-roles checks above.
@@ -236,6 +279,12 @@ def get_schema(parameters: dict) -> dict:
         ValueError: If any of :data:`_REQUIRED_ROLES` is not declared.
     """
     schema_section = parameters.get("schema", {}) or {}
+    # Checked before the columns lookup: a role written one level too high is
+    # also a role that is missing from `columns`, so the missing-role message
+    # would send the user to add a key they already wrote.
+    mis_nested = _mis_nested_role_keys(schema_section)
+    if mis_nested:
+        raise ValueError(_mis_nested_role_message(mis_nested))
     columns = schema_section.get("columns", {}) or {}
 
     unknown = _unknown_column_keys(columns)
@@ -257,7 +306,7 @@ def get_schema(parameters: dict) -> dict:
     # undeclared one must stay absent, not become [] — `"event" in schema` is
     # what the pipelines branch on, and an empty list is a third state that
     # would read as "declared, no columns".
-    for role in _OPTIONAL_ROLE_KEYS:
+    for role in OPTIONAL_ROLE_KEYS:
         if role in schema:
             value = schema[role]
             schema[role] = [value] if isinstance(value, str) else list(value)
@@ -294,7 +343,7 @@ def get_schema_for_hash(parameters: dict) -> dict:
     changes to declared category lists (e.g. adding a new product) bust
     the base dataset version.
 
-    An optional role (:data:`_OPTIONAL_ROLE_KEYS`) enters the payload **only
+    An optional role (:data:`OPTIONAL_ROLE_KEYS`) enters the payload **only
     when declared**, and is emitted after the six fixed roles. Both halves
     matter: an undeclared one must add no key at all, or every existing
     deployment's ``base_dataset_version`` moves for a role it never asked for;
@@ -304,7 +353,7 @@ def get_schema_for_hash(parameters: dict) -> dict:
     schema = get_schema(parameters)
     keys = (
         list(_ROLE_KEYS)
-        + [r for r in _OPTIONAL_ROLE_KEYS if r in schema]
+        + [r for r in OPTIONAL_ROLE_KEYS if r in schema]
         + ["categorical_values"]
     )
     return {k: schema[k] for k in keys}
@@ -345,6 +394,9 @@ def validate_schema_config(parameters: dict) -> None:
         ValueError: If the schema config is malformed.
     """
     schema_section = parameters.get("schema", {}) or {}
+    mis_nested = _mis_nested_role_keys(schema_section)
+    if mis_nested:
+        raise ValueError(_mis_nested_role_message(mis_nested))
     raw_columns = schema_section.get("columns", {})
     if not isinstance(raw_columns, dict):
         raise ValueError(
@@ -382,7 +434,7 @@ def validate_schema_config(parameters: dict) -> None:
     # block per role — `event` has exactly `entity`'s shape, and two copies of
     # this would be two messages to keep in step for no gain. The role name is
     # interpolated, so a user still reads about the key they wrote.
-    for role in ("entity", *_OPTIONAL_ROLE_KEYS):
+    for role in ("entity", *OPTIONAL_ROLE_KEYS):
         if role not in raw_columns:
             continue
         _check_multi_column_role(role, raw_columns[role])

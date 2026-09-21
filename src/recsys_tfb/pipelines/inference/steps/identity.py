@@ -9,7 +9,7 @@ re-derives it and one of them eventually gets it wrong in silence.
 
 from __future__ import annotations
 
-from recsys_tfb.core.schema import _OPTIONAL_ROLE_KEYS
+from recsys_tfb.core.schema import OPTIONAL_ROLE_KEYS
 
 
 def scored_row_columns(schema: dict) -> list[str]:
@@ -45,5 +45,10 @@ def scored_row_columns(schema: dict) -> list[str]:
     *trimming* one, because a trim still has a single source
     (docs/agents/architecture-constraints.md, S7 "這個檢查看不到").
     """
-    dropped = {c for role in _OPTIONAL_ROLE_KEYS for c in schema.get(role, [])}
+    # Every optional role, not just ``event``: ADR-0025 decision 1 says
+    # offline inference ignores *both*, so ``occasion`` starts being dropped
+    # here the moment it is added to OPTIONAL_ROLE_KEYS, with no edit. That is
+    # the intent, not an accident — but it IS the kind of silent widening the
+    # occasion ticket has to re-read this function to confirm.
+    dropped = {c for role in OPTIONAL_ROLE_KEYS for c in schema.get(role, [])}
     return [c for c in schema["identity_columns"] if c not in dropped]
