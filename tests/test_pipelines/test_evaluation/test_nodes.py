@@ -1136,6 +1136,121 @@ class TestComputePredictionQuality:
         assert result["bins"]["n_bins"] == PREDICTION_QUALITY_DEFAULTS["n_bins"]
         assert result["per_item"]["top_n"] == PREDICTION_QUALITY_DEFAULTS["top_n"]
 
+    @staticmethod
+    def _weighted(spark, params, c3_weight):
+        """The same nine rows carrying the zero-positive group weight: 1 on the
+        two groups holding a positive, ``c3_weight`` on c3's three rows (the
+        kept zero-positive group; ``None`` is what a partition written under
+        ratio 0 holds once the ``columns: "auto"`` table has the column)."""
+        import pandas as pd
+        from pyspark.sql import types as T
+
+        from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+        from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+            stamp_partition_fingerprint,
+        )
+
+        pdf = pd.DataFrame({
+            "snap_date": ["2025-01-31"] * 9,
+            "cust_id": ["c1"] * 3 + ["c2"] * 3 + ["c3"] * 3,
+            "prod_name": ["A", "B", "C"] * 3,
+            "label": [1, 0, 1, 0, 1, 0, 0, 0, 0],
+            "score": [0.9, 0.5, 0.1, 0.2, 0.8, 0.3, 0.7, 0.6, 0.4],
+            "rank": [1, 2, 3, 3, 1, 2, 1, 2, 3],
+            ZERO_POSITIVE_GROUP_WEIGHT_COL: [1.0] * 6 + [c3_weight] * 3,
+        })
+        schema = T.StructType([
+            T.StructField("snap_date", T.StringType()),
+            T.StructField("cust_id", T.StringType()),
+            T.StructField("prod_name", T.StringType()),
+            T.StructField("label", T.LongType()),
+            T.StructField("score", T.DoubleType()),
+            T.StructField("rank", T.LongType()),
+            T.StructField(ZERO_POSITIVE_GROUP_WEIGHT_COL, T.DoubleType()),
+        ])
+        rows = [tuple(None if pd.isna(v) else v for v in r)
+                for r in pdf.itertuples(index=False)]
+        return stamp_partition_fingerprint(
+            spark.createDataFrame(rows, schema), params, [])
+
+    def _post_training(self, **dataset):
+        params = self._parameters()
+        params["post_training"] = True
+        params["dataset"] = dataset
+        return params
+
+    def test_post_training_weighs_every_row_by_its_group_weight(self, spark):
+        """#429: a kept zero-positive group stands for 1/r groups, so each of
+        c3's rows counts twice at r = 0.5 — in the totals and per item."""
+        from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._post_training(test_zero_positive_group_ratio=0.5)
+        result = compute_prediction_quality(
+            self._weighted(spark, params, 2.0), _no_segments(params), params)
+        summary = result["overall"]["summary"]
+        assert (summary["n"], summary["n_pos"]) == (12, 3)
+        assert result["per_item"]["summary"]["A"]["n"] == 4
+        assert result["columns"]["weight"] == ZERO_POSITIVE_GROUP_WEIGHT_COL
+
+    def test_the_weight_is_decided_by_the_config_not_by_the_column(self, spark):
+        """Under ratio 0 the column can still exist — NULL, from the
+        ``columns: "auto"`` table another run widened — and summing it would
+        silently drop those rows. Rows count once."""
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._post_training()
+        result = compute_prediction_quality(
+            self._weighted(spark, params, None), _no_segments(params), params)
+        summary = result["overall"]["summary"]
+        assert (summary["n"], summary["n_pos"]) == (9, 3)
+
+    def test_a_null_weight_under_a_positive_ratio_is_refused(self, spark):
+        """The conf says test kept zero-positive groups, the predictions
+        say otherwise — they were written by a model whose test ratio was 0
+        (NULL weights), so conf and --model-version disagree. Summing would
+        drop those rows; counting them would call a filtered table weighted."""
+        from recsys_tfb.core.consistency import DataConsistencyError
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._post_training(test_zero_positive_group_ratio=0.5)
+        with pytest.raises(DataConsistencyError, match="were not written under"):
+            compute_prediction_quality(
+                self._weighted(spark, params, None), _no_segments(params), params)
+
+    def test_a_missing_weight_column_under_a_positive_ratio_is_refused(self, spark):
+        from recsys_tfb.core.consistency import (
+            ZERO_POSITIVE_GROUP_WEIGHT_COL,
+            DataConsistencyError,
+        )
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._post_training(test_zero_positive_group_ratio=0.5)
+        frame = self._weighted(spark, params, 2.0).drop(ZERO_POSITIVE_GROUP_WEIGHT_COL)
+        with pytest.raises(DataConsistencyError, match="were not written under"):
+            compute_prediction_quality(frame, _no_segments(params), params)
+
+    def test_monitoring_mode_counts_rows(self, spark):
+        """Monitoring reads inference output, which no dataset draw touched."""
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._parameters()
+        params["post_training"] = False
+        params["dataset"] = {"test_zero_positive_group_ratio": 0.5}
+        result = compute_prediction_quality(
+            self._weighted(spark, params, 2.0), _no_segments(params), params)
+        assert result["overall"]["summary"]["n"] == 9
+
 
 def test_compute_metric_ci_disabled_returns_stub():
     from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint

@@ -238,6 +238,10 @@ training_eval_predictions:
     - {name: score, type: DOUBLE}
     - {name: score_uncalibrated, type: DOUBLE}
     - {name: label, type: INT}
+    # parameters_dataset.yaml 的 test_zero_positive_group_ratio > 0 時，test 的列帶權重
+    # （有正例的組 1、留下來的無正例組 1／r），evaluation 的預測品質指標拿它加權。
+    # 沒宣告的話寫入時會被靜默丟掉；A45 在 training 入口先擋。
+    - {name: zero_positive_group_weight, type: DOUBLE}
   partition_filter:
     model_version: ${model_version}
   partition_cols:

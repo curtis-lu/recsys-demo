@@ -1528,6 +1528,45 @@ class TestValidateDataConsistencyB7:
             sample_pool, label_table, feature_table, params) is None
 
 
+class TestValidateDataConsistencyB12:
+    """B12 — a feature column named like the zero-positive group weight, while
+    val or test keeps zero-positive groups (ADR-0025 decision 3)."""
+
+    def test_a_feature_named_like_the_weight_is_refused_when_val_keeps_groups(
+        self, spark, feature_table, sample_pool, label_table, parameters
+    ):
+        from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+
+        ft = feature_table.withColumn(ZERO_POSITIVE_GROUP_WEIGHT_COL, F.lit(0.5))
+        params = _gate_params(parameters)
+        params["dataset"]["val_zero_positive_group_ratio"] = 0.5
+        with pytest.raises(DataConsistencyError) as ei:
+            validate_data_consistency(sample_pool, label_table, ft, params)
+        msg = str(ei.value)
+        assert "1 issue(s)" in msg
+        assert "B12" in msg and ZERO_POSITIVE_GROUP_WEIGHT_COL in msg
+
+    def test_nothing_is_refused_while_no_split_keeps_zero_positive_groups(
+        self, spark, feature_table, sample_pool, label_table, parameters
+    ):
+        # The column is a legal feature at the defaults: no weight is added.
+        from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+
+        ft = feature_table.withColumn(ZERO_POSITIVE_GROUP_WEIGHT_COL, F.lit(0.5))
+        validate_data_consistency(sample_pool, label_table, ft, _gate_params(parameters))
+
+    def test_a_dropped_column_by_that_name_is_not_a_collision(
+        self, spark, feature_table, sample_pool, label_table, parameters
+    ):
+        # drop_columns keeps it out of the features, so model_input never holds it.
+        from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+
+        ft = feature_table.withColumn(ZERO_POSITIVE_GROUP_WEIGHT_COL, F.lit(0.5))
+        params = _gate_params(parameters, drop_extra=[ZERO_POSITIVE_GROUP_WEIGHT_COL])
+        params["dataset"]["test_zero_positive_group_ratio"] = 0.5
+        validate_data_consistency(sample_pool, label_table, ft, params)
+
+
 class TestValidateDataConsistencyCollectAll:
     def test_two_unrelated_violations_raise_once_naming_both(
         self, spark, feature_table, sample_pool, label_table, parameters
@@ -1769,7 +1808,7 @@ class TestScopedNodesHandleHiveStringDates:
 # survives.
 # =============================================================================
 
-from recsys_tfb.pipelines.dataset.nodes import filter_groups_with_positives
+from recsys_tfb.pipelines.dataset.nodes import filter_train_keys, filter_val_model_input
 
 
 def _all_split_params(parameters, **overrides):
@@ -1953,12 +1992,74 @@ class TestQueryGroupCompleteness:
             # C001 has one positive; C002 has none.
             "label": [1, 0, 0, 0, 0, 0],
         }))
-        out = filter_groups_with_positives(mi, parameters).toPandas()
+        out = filter_val_model_input(mi, parameters).toPandas()
 
         assert sorted(out["cust_id"].unique()) == ["C001"]
         # All three of C001's candidates survive — negatives included.
         assert len(out) == _n_items(parameters)
         assert set(out["prod_name"]) == set(_PRODUCTS)
+
+
+class TestZeroPositiveGroupsAreJudgedByLabelTable:
+    """ADR-0025 decision 3: "does this group hold a positive" is read from the
+    label ``label_table`` supplies, never from the copy ``sample_pool`` may
+    carry.
+
+    The fixture's ``sample_pool.label`` is overwritten with 0 everywhere, while
+    ``label_table`` still holds the positives. Judged by the wrong column,
+    every group would look empty and ratio 0 would delete all of them — the
+    real positives included — and B10 would pass, because keys and
+    model_input lose the same rows. Both paths are run end to end from
+    ``sample_pool``: train through its keys, val through its model_input.
+    """
+
+    @pytest.fixture
+    def pool_without_positives(self, sample_pool):
+        return sample_pool.withColumn("label", F.lit(0))
+
+    def _groups(self, df, params):
+        group_cols = get_schema(params)["query_group_columns"]
+        return {tuple(r) for r in df.select(*group_cols).distinct().collect()}
+
+    def _groups_with_a_positive(self, label_table, params, months):
+        group_cols = get_schema(params)["query_group_columns"]
+        month_values = [pd.Timestamp(m) for m in months]
+        positives = label_table.filter(
+            (F.col("label") > 0) & F.col("snap_date").isin(month_values))
+        return {tuple(r) for r in positives.select(*group_cols).distinct().collect()}
+
+    def test_train_keeps_the_groups_label_table_says_hold_a_positive(
+        self, pool_without_positives, label_table, parameters
+    ):
+        params = _all_split_params(
+            parameters, train_zero_positive_group_ratio=0.0, train_dev_ratio=0.0)
+        keys, _ = split_train_keys(
+            select_train_keys(pool_without_positives, params), params)
+        kept = filter_train_keys(keys, label_table, params)
+
+        expected = self._groups_with_a_positive(
+            label_table, params, params["dataset"]["train_snap_dates"])
+        assert expected, "label_table holds no positive — the test is vacuous"
+        assert self._groups(kept, params) == expected
+
+    def test_val_keeps_the_groups_label_table_says_hold_a_positive(
+        self, pool_without_positives, label_table, feature_table, parameters
+    ):
+        params = _all_split_params(parameters, val_zero_positive_group_ratio=0.0)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        pft = apply_preprocessor_to_features(
+            feature_table, preprocessor, _encode_plan(params), params,
+        )
+        built = build_model_input(
+            select_val_keys(pool_without_positives, params),
+            pft, label_table, preprocessor, params,
+        )
+        kept = filter_val_model_input(built, params)
+
+        expected = self._groups_with_a_positive(
+            label_table, params, params["dataset"]["val_snap_dates"])
+        assert expected, "label_table holds no positive — the test is vacuous"
+        assert self._groups(kept, params) == expected
 
 
 class TestFitUsesTrainMonthsOnly:

@@ -773,3 +773,99 @@ def test_no_event_column_is_added_when_the_role_is_undeclared(tmp_path):
         "cust_id", "score", "score_uncalibrated", "label", "snap_date",
         "prod_name",
     ]
+
+
+# ---------------------------------------------------------------------------
+# The written frame carries the zero-positive group weight (#429)
+# ---------------------------------------------------------------------------
+
+
+def _make_weighted_test_parquet(tmp_path: Path, weights) -> Path:
+    """Two query groups: c1 holds a positive (weight 1), c2 is a kept
+    zero-positive group (weight ``weights``, a scalar or ``None``)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+
+    df = pd.DataFrame({
+        "cust_id": ["c1", "c1", "c2", "c2"],
+        "snap_date": ["2025-01-31"] * 4,
+        "prod_name": ["prod_A", "prod_B"] * 2,
+        "feat_a": [1.0, 1.1, 1.2, 1.3],
+        "label": [1, 0, 0, 0],
+        ZERO_POSITIVE_GROUP_WEIGHT_COL: [1.0, 1.0, weights, weights],
+    })
+    root = tmp_path / "test_weighted.parquet"
+    pq.write_to_dataset(
+        pa.Table.from_pandas(df, preserve_index=False),
+        root_path=str(root), partition_cols=["snap_date", "prod_name"],
+    )
+    return root
+
+
+def _predict_weighted(tmp_path, dataset, weights=4.0, declared=None):
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.pipelines.training.nodes import (
+        predict_and_write_test_predictions,
+    )
+
+    params = _make_parameters()
+    params["dataset"] = {"test_snap_dates": ["2025-01-31"], **dataset}
+    model = MagicMock()
+    model.predict.side_effect = lambda X: np.arange(len(X)).astype(float) + 0.5
+    model.__class__.__name__ = "LightGBMAdapter"
+    write_ds = _write_ds()
+    write_ds.declared_columns = declared
+    predict_and_write_test_predictions(
+        model=model,
+        test_parquet_handle=ParquetHandle(
+            path=str(_make_weighted_test_parquet(tmp_path, weights))),
+        preprocessor_metadata=_make_prep_meta(),
+        parameters=params,
+        training_eval_predictions=write_ds,
+    )
+    return pd.concat(write_ds.saved, ignore_index=True)
+
+
+def test_the_written_frame_carries_the_zero_positive_group_weight(tmp_path):
+    """The frame is a hardcoded column list, so the weight has to be added by
+    name; without it evaluation counts each kept zero-positive group once
+    instead of 1/r times. A45 is the other half — that the catalog keeps it."""
+    from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+
+    written = _predict_weighted(
+        tmp_path, {"test_zero_positive_group_ratio": 0.25})
+    by_cust = written.groupby("cust_id")[ZERO_POSITIVE_GROUP_WEIGHT_COL].agg(set)
+    assert by_cust["c1"] == {1.0}
+    assert by_cust["c2"] == {4.0}
+
+
+def test_no_weight_column_is_written_at_the_default_test_ratio(tmp_path):
+    """Decided by the config, not by the column: the test table is
+    `columns: "auto"`, so a partition written under ratio 0 still has the
+    column (NULL) once any run added it. The frame every existing deployment
+    writes stays unchanged."""
+    written = _predict_weighted(tmp_path, {}, weights=None)
+    assert list(written.columns) == [
+        "cust_id", "score", "score_uncalibrated", "label", "snap_date",
+        "prod_name",
+    ]
+
+
+def test_a_declared_weight_column_is_written_null_at_the_default_ratio(tmp_path):
+    """A catalog that declares the column keeps working when test's ratio goes
+    back to 0: a Hive save selects every declared column, so a frame without it
+    would fail there. NULL, not 1.0 — no design weight applies to those rows,
+    and evaluation reads a NULL weight as "these predictions were not written
+    under a positive ratio" instead of mistaking them for weighted ones.
+    Values in the cached parquet (left over from an earlier run on the
+    `columns: "auto"` test table) are not read."""
+    from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+
+    written = _predict_weighted(
+        tmp_path, {}, weights=4.0,
+        declared=["cust_id", "score", "score_uncalibrated", "label",
+                  ZERO_POSITIVE_GROUP_WEIGHT_COL])
+    assert ZERO_POSITIVE_GROUP_WEIGHT_COL in written.columns
+    assert written[ZERO_POSITIVE_GROUP_WEIGHT_COL].isna().all()

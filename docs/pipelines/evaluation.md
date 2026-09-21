@@ -347,7 +347,7 @@ evaluation:
 
 1. **門檻解析度＝細箱寬。** 報表印出細箱寬。F1 最佳門檻是在這份資料上挑的，換一份資料（下個月、線上）分數分布會變，不能直接搬去當線上的設定值。
 2. **母體跟主指標段不同。** 本段不排除任何 query group；主指標段只算有正例的 query group（排除的數量在 `n_excluded_queries`）。兩段的 precision 不可互相比較。
-   ⚠ `--post-training` 模式下，test 表在 dataset 階段就已經丟掉沒有正例的 query group（`filter_test_model_input`），所以本段在這個模式看到的也只有「有正例的 query group」裡的候選。正例佔比因此比全部曝光高，precision 與 `pr_auc` 會比在全部曝光上算的大。報表在這個模式會多印這一句。讓使用者決定這類 query group 留多少的設定在 #429。
+   ⚠ `--post-training` 模式下，本段看到的是 dataset 階段過濾過的 test 表（`filter_test_model_input`）：有正例的 query group 全留，沒有正例的只留 `dataset.test_zero_positive_group_ratio`（r）那麼多，每列帶權重 `zero_positive_group_weight`（有正例的組 ＝ 1，留下來的無正例組 ＝ 1／r）。本段的列數、正例數與所有指標都用這個權重加權，代表還原到全部曝光的估計；1／r 是設計權重，不是無偏估計，留下的組少時不穩——報表在母體說明與〈基本統計 — 資料集〉印出 r 與留下來的組數。r 為 0（預設）時 test 表已經沒有無正例的組，二元指標會系統性偏高，所以開了本段又跑 `--post-training` 而 r 為 0 時，evaluation 在 CLI 入口就停下（不變量 A46）。反過來，設定的 r > 0 但被評估的模型是在 r ＝ 0 下建的（預測表沒有權重欄、或權重是 NULL），本段會在計算前停下並說明兩者對不上。監控模式不受影響。設定方式見 [dataset.md §3.7](dataset.md#37-沒有正例的-query-group-留多少)。
 3. **`pr_auc` 不是外部工具算的 average precision。** 它是分箱後的值，不能拿來跟 sklearn 在原始分數上算的 average precision 直接比較。HPO 另外規劃了兩個精確算法的目標 `pooled_average_precision`、`macro_per_item_average_precision`（#430，尚未實作），定義與本段不同，也不可互相比較。名字刻意不叫 average precision：在這個 repo 裡，AP 是排序指標 `map@K` 的說法。
 
 其他要知道的：

@@ -157,7 +157,7 @@ label、score、rank 框架自帶預設欄名），其餘特徵 / 分群 / carry
     <rect x="782" y="196" width="156" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
     <text x="860" y="213">val · test_model_input</text>
   </g>
-  <text x="62" y="244" font-size="10" fill="#495057">val/test_model_input 經 filter_groups_with_positives（丟掉無正例的查詢群組）</text>
+  <text x="62" y="244" font-size="10" fill="#495057">val/test_model_input 經 filter_val/test_model_input（無正例的查詢群組整組留比例 r，預設全丟）</text>
 
   <!-- train-variant lane -->
   <rect x="52" y="266" width="896" height="74" rx="9" fill="var(--train)" stroke="#ffc078"/>
@@ -567,11 +567,11 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
 
 <div class="card" id="val_model_input">
   <h4>val_model_input · test_model_input <span class="badge b-hive">Hive</span><span class="vl vl-base">base</span></h4>
-  <div class="meta"><b>產生</b>：dataset · build_*_model_input → filter_groups_with_positives（丟掉無正例的 (time, entity) 群組）　|
+  <div class="meta"><b>產生</b>：dataset · build_*_model_input → filter_val_model_input／filter_test_model_input（無正例的 query group 整組留下比例 r＝<code>*_zero_positive_group_ratio</code>，預設 0 全丟；r &gt; 0 時多一欄權重 <code>zero_positive_group_weight</code>）　|
   <b>下游</b>：training（cache_val_model_input / cache_test_model_input；test_model_input 另被 select_shap_population 讀）　|
   <b>partition</b>：val＝base_dataset_version / snap_date；test＝base_dataset_version / snap_date / prod_name</div>
-  <div class="grain"><span class="gtag g-none">框架不檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>；只保留至少有一個正例的 query group）　|　<b>實體主鍵</b>：<code>(time, entity, item)</code>，另含版本欄 <code>base_dataset_version</code>　|　沒有直接檢查主鍵唯一的檢查，dataset 階段也沒有間接的閘、由上游負責：列數閘 B10 <b>不涵蓋 val／test</b>（落地的是濾掉零正例群組之後的表，列數本來就少於 keys，不能拿來跟 keys 比對相等；test_keys 又是跨月累積的表，本來就對不上）。右表（<code>label_table</code>、<code>preprocessed_feature_table</code>）若有重複 join 鍵，會放大列數；<code>validate_data_consistency</code>（item 覆蓋、欄位宣告與型別）與 <code>validate_numeric_precision</code>（數值範圍）都不查主鍵重複，所以 dataset 階段不會紅。dataset 之後，<code>label_table</code> 的重複只有 evaluation 的 <code>prepare_eval_data</code> 會對它實際評估的月份（<code>evaluation.snap_date</code>）中止：<code>--post-training</code> 下 A22 只要求評估月份是 test 月份的子集，不要求評完所有 test 月份，所以沒被列進 <code>evaluation.snap_date</code> 的 test 月份，以及沒被評到的 val 月份（<code>--post-training</code> 下 val 月份不可能被評到，因為 A22 限定 test 月份），沒有任何一步會抓它們的 label 重複；<code>preprocessed_feature_table</code> 側的重複在 dataset 階段沒有檢查（source_etl 的檢查在更上游，讀取時不重驗）。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
-  <p class="sub">keys 先 LEFT JOIN label_table（鍵為 time＋entity＋item；沒對到 label 補 0），再 LEFT JOIN preprocessed_feature_table（鍵為 time＋entity；沒對到特徵則特徵欄為 NULL、列不消失）。val/test <b>不</b> carry 任何 carry 欄。已濾除零正例群組（排序指標對這種群組無意義）。</p>
+  <div class="grain"><span class="gtag g-none">框架不檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>；預設只保留至少有一個正例的 query group）　|　<b>實體主鍵</b>：<code>(time, entity, item)</code>，另含版本欄 <code>base_dataset_version</code>　|　沒有直接檢查主鍵唯一的檢查，dataset 階段也沒有間接的閘、由上游負責：列數閘 B10 <b>不涵蓋 val／test</b>（落地的是濾掉零正例群組之後的表，列數本來就少於 keys，不能拿來跟 keys 比對相等；test_keys 又是跨月累積的表，本來就對不上）。右表（<code>label_table</code>、<code>preprocessed_feature_table</code>）若有重複 join 鍵，會放大列數；<code>validate_data_consistency</code>（item 覆蓋、欄位宣告與型別）與 <code>validate_numeric_precision</code>（數值範圍）都不查主鍵重複，所以 dataset 階段不會紅。dataset 之後，<code>label_table</code> 的重複只有 evaluation 的 <code>prepare_eval_data</code> 會對它實際評估的月份（<code>evaluation.snap_date</code>）中止：<code>--post-training</code> 下 A22 只要求評估月份是 test 月份的子集，不要求評完所有 test 月份，所以沒被列進 <code>evaluation.snap_date</code> 的 test 月份，以及沒被評到的 val 月份（<code>--post-training</code> 下 val 月份不可能被評到，因為 A22 限定 test 月份），沒有任何一步會抓它們的 label 重複；<code>preprocessed_feature_table</code> 側的重複在 dataset 階段沒有檢查（source_etl 的檢查在更上游，讀取時不重驗）。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
+  <p class="sub">keys 先 LEFT JOIN label_table（鍵為 time＋entity＋item；沒對到 label 補 0），再 LEFT JOIN preprocessed_feature_table（鍵為 time＋entity；沒對到特徵則特徵欄為 NULL、列不消失）。val/test <b>不</b> carry 任何 carry 欄。預設已濾除零正例群組（排序指標對這種群組無意義）；<code>val_</code>／<code>test_zero_positive_group_ratio</code> &gt; 0 時整組留下一部分，並帶權重欄 <code>zero_positive_group_weight</code>（1 或 1／r）。</p>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
     <tr><td>snap_date, cust_id, prod_name</td><td>—</td><td>identity（prod_name 同時為 item 特徵，在 model_input 內維持原字串；由訓練／推論端的 pdf_to_X 才轉碼）</td></tr>
@@ -613,7 +613,7 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
   <div class="meta"><b>產生</b>：dataset · build_train_model_input / build_train_dev_model_input（keys LEFT JOIN label_table，再 LEFT JOIN preprocessed_feature_table，鍵同 val/test_model_input 卡所述）　|
   <b>下游</b>：training（cache_train_model_input / cache_train_dev_model_input → 訓練 / early-stopping）、dataset（validate_model_input_grain）　|　<b>partition</b>：base_dataset_version / train_variant_id / snap_date</div>
   <div class="grain"><span class="gtag g-none">框架不檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>）　|　<b>實體主鍵</b>：<code>(time, entity, item)</code>，另含版本欄 <code>base_dataset_version</code>、<code>train_variant_id</code>　|　<b>沒有直接檢查主鍵唯一的檢查</b>；間接的閘：<code>validate_model_input_grain</code>（不變量 B10）比對列數，不符即中止——每張 model_input 的 parquet footer 列數要等於它的 keys 表（train_keys／train_dev_keys），擋的是右表 join 鍵重複造成的放大。這是<b>比對列數，不是逐鍵檢查</b>：keys 本身有重複時兩邊等量增加，等式照樣成立（keys 的重複見 train_keys 與 sample_keys 卡）。B10 的範圍只有 train／train_dev，不含 val／test。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
-  <p class="sub">與 val/test_model_input 差別：<b>有</b> carry 欄（<code>carry_columns</code> 指定），且 dataset 端 <b>不</b>濾零正例群組（train / train_dev 表跨 model_version 共用，不綁 objective）。是否丟零正例群組由訓練端依 objective 決定，僅 lambdarank 會丟（<code>objective_drops_zero_positive_groups</code>）。</p>
+  <p class="sub">與 val/test_model_input 差別：<b>有</b> carry 欄（<code>carry_columns</code> 指定），且 dataset 端預設 <b>不</b>濾零正例群組（<code>train_zero_positive_group_ratio</code> 預設 1）；設了 r &lt; 1 時在 keys 上整組丟（<code>filter_train_keys</code>，建表之前，好讓 B10 仍逐列相等），不產生權重欄。訓練端另依 objective 決定，僅 lambdarank 會丟（<code>objective_drops_zero_positive_groups</code>）。</p>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
     <tr><td>snap_date, cust_id, prod_name</td><td>—</td><td>identity（prod_name 同時為 item 特徵，在 model_input 內維持原字串；由訓練端的 pdf_to_X 才轉碼）</td></tr>
@@ -652,7 +652,7 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
   <b>下游</b>：training（compute_test_mAP_spark 讀回算 test mAP、select_shap_population）、evaluation 情境 1（prepare_eval_data，<code>--post-training</code>）　|
   <b>partition</b>：snap_date, prod_name（外加 model_version）</div>
   <div class="grain"><span class="gtag g-none">框架不檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>；只保留至少有一個正例的 query group，沿用 <code>test_model_input</code> 的過濾）　|　<b>實體主鍵</b>：邏輯主鍵是上述三個角色；實體上另含 <code>model_version</code>（partition_filter 注入的版本欄）　|　唯一性<b>框架不檢查、由上游負責</b>：<code>predict_and_write_test_predictions</code> 逐 (time, item) 分區寫出，沒有重複檢查，唯一性沿用 <code>test_model_input</code>（dataset 的 <code>validate_model_input_grain</code> 列數閘不涵蓋 test）。重跑不會疊出重複列，靠的是分區整個覆寫，不是去重。<code>duplicate_test_month_errors</code>（A26）是設定層的閘、不看資料：<code>test_snap_dates</code> 把同一個月拼成兩種寫法，會讓 training cache 把同一個目錄交給 pyarrow 兩次、該月每一列在預測裡被算兩遍，A26 擋的就是這一種成因（強制點在 training 指令）；其他成因造成的重複它不管。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
-  <p class="sub">test 集在 dataset 階段（<code>filter_test_model_input</code>）已丟掉整個 query group（<code>time × entity</code>，示例 <code>snap_date × cust_id</code>）都沒有正例的列，只有留下來的 query group 會被 scoring；同一客戶某月有正例、另一月沒有時，沒有正例那個月的列不會進表。不存 rank——Spark mAP 端用 rank_within_query 重算。</p>
+  <p class="sub">test 集在 dataset 階段（<code>filter_test_model_input</code>）預設已丟掉整個 query group（<code>time × entity</code>，示例 <code>snap_date × cust_id</code>）都沒有正例的列，只有留下來的 query group 會被 scoring；<code>test_zero_positive_group_ratio</code> &gt; 0 時留下的無正例組也會被 scoring，列上帶權重欄 <code>zero_positive_group_weight</code>（catalog 必須宣告它，A45）。不存 rank——Spark mAP 端用 rank_within_query 重算。</p>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>說明</th></tr>
     <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>

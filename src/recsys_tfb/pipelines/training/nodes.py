@@ -61,7 +61,11 @@ from recsys_tfb.core.group_utils import (
     to_contiguous_groups,
 )
 from recsys_tfb.core.logging import log_data_volume, log_step
-from recsys_tfb.core.consistency import optional_role_columns
+from recsys_tfb.core.consistency import (
+    ZERO_POSITIVE_GROUP_WEIGHT_COL,
+    optional_role_columns,
+    test_carries_zero_positive_group_weight,
+)
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.core.versioning import compute_search_id
 from recsys_tfb.diagnosis.hpo import write_hpo_diagnostics
@@ -634,8 +638,11 @@ def tune_hyperparameters(
     if _metric:
         algorithm_params["metric"] = _metric
 
-    # val_model_input is already pre-filtered to positive groups by the dataset
-    # pipeline (filter_val_model_input node) — no in-pandas re-filter here.
+    # val_model_input holds every query group with a positive plus the share of
+    # the ones without that dataset.val_zero_positive_group_ratio keeps (none
+    # at the default 0; filter_val_model_input). No in-pandas re-filter here:
+    # both HPO scores skip a group without a positive by construction, so kept
+    # zero-positive groups leave them unchanged (ADR-0025 decision 3).
     #
     # Decision — the val matrix is mapped from disk, not held
     # on the heap. This is the one caller that keeps a matrix for the whole
@@ -967,9 +974,11 @@ def predict_and_write_test_predictions(
           rows per save, so dynamic-partition overwrite cleanly overwrites
           a single partition and successive saves don't collide
 
-    test_model_input is pre-filtered upstream (filter_test_model_input node
-    in dataset pipeline) so every (snap_date, cust_id) group already has
-    at least one positive label.
+    test_model_input is filtered upstream (filter_test_model_input in the
+    dataset pipeline): every query group holding a positive, plus the share
+    ``dataset.test_zero_positive_group_ratio`` keeps of the ones holding none
+    — none at the default 0. Above 0 the rows carry the zero-positive group
+    weight, and it is written here too.
 
     Returns:
         The manifest. It has a catalog entry (issue #233), so it lands at
@@ -988,6 +997,25 @@ def predict_and_write_test_predictions(
     # the shared predicate so the write and the A39 gate that checks it can
     # never disagree about which columns those are.
     optional_role_cols = optional_role_columns(parameters)
+    # Decision — the zero-positive group weight is read from the test table
+    # only when test kept some of those groups (ADR-0025 decision 3); decided
+    # from the config, not from the cached parquet, which is `columns: "auto"`
+    # and so holds the column as NULL in a partition written under ratio 0
+    # once any run added it. A45 makes the write target declare it.
+    #
+    # Decision — a write target that declares the column always gets it, NULL
+    # when test kept no zero-positive group: a Hive save selects every declared
+    # column, so leaving it out would fail there the day the ratio goes back to
+    # 0. NULL rather than 1.0 because no design weight applies, and evaluation
+    # refuses a NULL weight under a positive ratio (conf and --model-version
+    # disagree) instead of reading it as a weight. Undeclared and ratio 0: the
+    # frame every existing deployment writes, unchanged.
+    carries_weight = test_carries_zero_positive_group_weight(parameters)
+    declared = getattr(training_eval_predictions, "declared_columns", None)
+    write_weight = carries_weight or (
+        isinstance(declared, (list, tuple))
+        and ZERO_POSITIVE_GROUP_WEIGHT_COL in declared
+    )
     model_version = parameters["model_version"]
 
     # partitioning="hive" tells pyarrow to reconstruct (snap_date, prod_name)
@@ -1157,6 +1185,13 @@ def predict_and_write_test_predictions(
                 # position-based write depends on; #412 takes both away.
                 "score_uncalibrated": y_score,
                 label_col: part_pdf[label_col].values,
+                # 1 on a group holding a positive, 1/r on a kept zero-positive
+                # group, NULL when test kept none; absent unless test kept any
+                # or the write target declares it (the two decisions above).
+                **({ZERO_POSITIVE_GROUP_WEIGHT_COL: (
+                    part_pdf[ZERO_POSITIVE_GROUP_WEIGHT_COL].values
+                    if carries_weight else [None] * len(part_pdf)
+                )} if write_weight else {}),
                 time_col: snap_date,
                 item_col: prod_name,
             })

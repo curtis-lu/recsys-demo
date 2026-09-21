@@ -83,6 +83,25 @@ dataset:
   test_snap_dates:
     - "2026-01-31"
 
+  # --- 沒有正例的 query group 留多少（ADR-0025 決定 3）---
+  # 規則只有一條：有正例的 query group 永遠全留；沒有正例的整組決定去留，留下比例 r。
+  # 去留用決定性雜湊對 query group 的欄位分桶，同 seed、同設定 → 同一批組。
+  # 「有沒有正例」看的是 label_table 接上來的 label，不是 sample_pool 自己帶的那欄。
+  # 合法值是 [0, 1] 的數字（不變量 A44 在 CLI 進入點擋下）。預設值就是加鍵之前的行為：
+  #   train 的 r ＝ 1.0（全留；同時管 train 與 train_dev）
+  #   val   的 r ＝ 0.0（全丟）
+  #   test  的 r ＝ 0.0（全丟）
+  # val／test 的 r > 0 時表多一欄 zero_positive_group_weight：有正例的組 ＝ 1、
+  #   留下來的無正例組 ＝ 1／r。它一路帶到 training 的預測表，catalog 必須宣告它（A45）。
+  # train 的 r ＝ 0 只適合 lambdarank；binary、rank_xendcg 下 r < 1 是整組的負例降採樣。
+  #   其餘注意事項（與逐列抽樣的先後、r > 0 時哪些量會變）：docs/pipelines/dataset.md。
+  # ⚠ 版本分層：train 那個翻 train_variant_id；val／test 兩個翻 base_dataset_version
+  #   ——不翻的話，新的 r 會靜默讀回舊的 val／test 表。
+  # 保持註解狀態＝維持預設；一旦寫成實鍵就會翻對應的版本 ID，即使值等同預設。
+  # train_zero_positive_group_ratio: 1.0
+  # val_zero_positive_group_ratio: 0.0
+  # test_zero_positive_group_ratio: 0.0
+
   # --- 數值特徵的儲存型別 ---
   # 模型輸入的數值特徵欄統一收斂到這個型別。合法值 float32 / float64，預設 float32
   # （不變量 A31 在 CLI 進入點秒級擋下打錯的值）。

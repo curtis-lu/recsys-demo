@@ -57,7 +57,7 @@ prec_at_pos = cumsum(label) / pos  <span class="m"># 到此名次的精確率</s
 <span class="c">AP = Σ( prec_at_pos × label ) / Σ label</span>
 </div>
 <p class="sub">直覺：只在「命中正例的名次」上取精確率、再平均。正例都排在前面 → AP 接近 1；排在後面 → AP 低。</p>
-<div class="note"><b>zero-positive group 回傳 <code>None</code>、不計入 mAP</b>：一組裡完全沒有正例時 AP 沒有意義（分母 0）。這也是 dataset 的 <code>filter_groups_with_positives</code> 只對 val/test 丟掉這種組的原因（見 <a href="../pipelines/dataset.md">dataset.md</a>）。</p>
+<div class="note"><b>zero-positive group 回傳 <code>None</code>、不計入 mAP</b>：一組裡完全沒有正例時 AP 沒有意義（分母 0）。這也是 dataset 預設對 val/test 丟掉這種組的原因（<code>filter_val_model_input</code>／<code>filter_test_model_input</code>；要留一部分給二元指標，設 <code>dataset.*_zero_positive_group_ratio</code>，見 <a href="../pipelines/dataset.md">dataset.md</a> §3.7）。</p>
 
 <h3>mAP（跨 group）— <code>compute_mean_ap</code></h3>
 <div class="f"><span class="c">mAP = mean( AP_g  for g in groups if AP_g is not None )</span></div>

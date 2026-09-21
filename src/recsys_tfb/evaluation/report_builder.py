@@ -12,7 +12,12 @@ from datetime import datetime
 
 import pandas as pd
 
-from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
+from recsys_tfb.core.consistency import (
+    EVALUATION_REPORT_SECTIONS,
+    ZERO_POSITIVE_GROUP_WEIGHT_COL,
+    resolved_zero_positive_group_ratio,
+    test_carries_zero_positive_group_weight,
+)
 from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.baselines import resolve_lookback_months
@@ -486,6 +491,32 @@ def build_core_concept_section(parameters: dict) -> ReportSection:
     )
 
 
+def _kept_zero_positive_groups_note(metrics: dict, parameters: dict) -> str:
+    """How many test query groups holding no positive this run evaluated, and
+    at what ratio they were kept — empty unless ``--post-training`` with
+    ``dataset.test_zero_positive_group_ratio`` above 0 (ADR-0025 decision 3).
+
+    The count is ``n_excluded_queries``: the ranking metrics skip every query
+    group without a positive, and under that mode every such group in the data
+    is one the dataset draw kept. Printed because ``1 / r`` is a design
+    weight: few kept groups means the weighted numbers are not stable, and the
+    reader should see the count next to them.
+    """
+    if not parameters.get("post_training"):
+        return ""
+    if not test_carries_zero_positive_group_weight(parameters):
+        return ""
+    ratio = resolved_zero_positive_group_ratio(parameters, "test")
+    n_kept = metrics.get("n_excluded_queries")
+    kept = f"本次評估資料裡有 {n_kept:,} 個" if n_kept is not None else "本次評估資料裡有一些"
+    return (
+        f"test 表保留了比例 r＝{ratio:g} 的無正例 query group"
+        f"（dataset.test_zero_positive_group_ratio）：{kept}，每列帶權重 "
+        f"1／r＝{1 / ratio:.4g}（{ZERO_POSITIVE_GROUP_WEIGHT_COL}）。1／r 是設計"
+        "權重，不是無偏估計：留下的組少時，加權後的比值型指標不穩。"
+    )
+
+
 def build_dataset_overview_section(
     metrics: dict, parameters: dict
 ) -> ReportSection | None:
@@ -556,6 +587,15 @@ def build_dataset_overview_section(
             "不與整體 n_positives 相加。per-segment 正例組成：正例數、候選列數、"
             "正樣本率、query 數與 query 數佔比（該 segment 佔多少 query）。每-query "
             "正例數分佈為後續階段。"
+            + (
+                " " + note + "上面各項總數與比率（列數、item 數、正樣本率）都"
+                "算進了這些組，而且**沒有加權**：它們描述的是 dataset 留下來的這張"
+                "表，會隨 r 改變，不代表全部曝光（要估全部曝光的正例率，看預測品質"
+                "段的加權數字）。與 r ＝ 0 時的報表相比數字變了是預期的，不是 "
+                "regression；固定整數 K 的排序指標則逐值不變。"
+                if (note := _kept_zero_positive_groups_note(metrics, parameters))
+                else ""
+            )
         ),
         tables=tables,
         table_titles=titles,
@@ -967,10 +1007,14 @@ def build_prediction_quality_section(
     it qualifies is: the bin width (the best-F1 threshold's resolution, not an
     online setting), the two populations, and ``pr_auc`` not being an average
     precision computed elsewhere. The population note has one form per run
-    mode: under ``--post-training`` the dataset pipeline already dropped the
-    query groups without a positive from the test table (#426), so "every
-    candidate row" would be false there, and with nothing else excluded the
-    two sections' populations are the same, not different.
+    mode, and ``--post-training`` has two: with the zero-positive group
+    weight in the payload the test table kept a share ``r`` of the groups
+    without a positive, and the counts are weighted back up by ``1 / r``
+    (ADR-0025 decision 3); without it the dataset pipeline dropped them all,
+    so "every candidate row" would be false and, with nothing else excluded,
+    the two sections' populations are the same. A46 refuses the second form
+    at the CLI entry, so a fresh run no longer produces it; it stays for a
+    payload computed before the weight existed.
     """
     if (not _section_on(parameters, "prediction_quality")
             or not prediction_quality
@@ -1005,15 +1049,26 @@ def build_prediction_quality_section(
     ranking_rule = "主指標段（mAP／precision@K／recall@K）只算有正例的 query group"
     excluded = (f"，本次排除 {n_excl} 個（n_excluded_queries）"
                 if n_excl is not None else "")
-    if parameters.get("post_training"):
+    weight_col = prediction_quality["columns"].get("weight")
+    if parameters.get("post_training") and weight_col:
+        population = (
+            f"母體：本段算在本次評估的全部候選列上，本身不排除任何 query group；"
+            "但這是 --post-training，test 表在 dataset 階段只留下有正例的 query "
+            "group 與一部分沒有正例的（filter_test_model_input）。"
+            + _kept_zero_positive_groups_note(metrics, parameters)
+            + f"本段的列數與正例數都是乘上 {weight_col} 之後的加權數（共 "
+            f"{n_rows:,}），代表還原到全部曝光的估計。{ranking_rule}{excluded}。"
+            "兩段的母體不同，precision 不可互相比較。"
+        )
+    elif parameters.get("post_training"):
         same = n_excl == 0
         population = (
             f"母體：本段算在本次評估的全部 {n_rows:,} 列候選上，本身不排除任何 "
             "query group；但這是 --post-training，test 表在 dataset 階段已經丟掉"
             "沒有正例的 query group（filter_test_model_input），所以這些列只來自"
             "「有正例的 query group」，不是全部曝光。正例佔比因此比全部曝光高，"
-            "precision 與 pr_auc 會比在全部曝光上算的大；讓使用者決定這類 query "
-            f"group 留多少的設定在 #429。{ranking_rule}{excluded}。"
+            "precision 與 pr_auc 會比在全部曝光上算的大；要留下這類 query group，"
+            f"設 dataset.test_zero_positive_group_ratio。{ranking_rule}{excluded}。"
             + ("兩段的母體相同，但 precision 的定義不同（見下方 per-item 那一條），"
                "仍不可互相比較。" if same else
                "兩段的母體不同，precision 不可互相比較。")

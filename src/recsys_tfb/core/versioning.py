@@ -74,12 +74,20 @@ logger = logging.getLogger(__name__)
 # base_dataset_version, which is the only ID val artifacts are keyed by —
 # registering it would let the val draw change its unit while silently reusing
 # the old val parquet. See docs/adr/0016-split-unit-declared-by-two-keys.md.
+#
+# ``train_zero_positive_group_ratio`` is registered and its val / test siblings
+# are not, for the same reason and with the same failure on the other side:
+# registering ``val_zero_positive_group_ratio`` would let a new ratio read back
+# the val table drawn under the old one. ADR-0025 decision 3 is why they are
+# three top-level keys rather than one — a single key can only be registered or
+# not as a whole.
 TRAIN_SAMPLING_KEYS: frozenset[str] = frozenset({
     "sample_ratio",
     "sample_ratio_overrides",
     "sample_group_keys",
     "train_dev_ratio",
     "train_split_keys",
+    "train_zero_positive_group_ratio",
 })
 #: The sampling keys stripped from ``base_dataset_version``. Named for the
 #: stripping rule rather than for its members, because "every key that drives a

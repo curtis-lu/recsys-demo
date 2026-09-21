@@ -154,7 +154,8 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 | `occasion` 角色 | **已打開**（#428）：`occasion: request_id`，`label_table.sql` 與 `sample_pool.sql` 都以一次請求為一個 query group，兩張表的 `primary_key` 與 `training_eval_predictions` 的 catalog 欄位都含 `request_id`。逐筆的即時特徵還接不上（要 #380），所以同一次請求裡的素材分數只靠週級特徵，容易同分——報表的〈完整性檢查〉印出同分列佔比 | #428（完成） |
 | item 清單從資料數 | item 清單（`schema.categorical_values.ad_creative`）逐一列出 12 種，包括 train 沒有的 `c04-video`；離線推論的候選 `inference.products` 另外照抄一份（A4 要求兩者相同） | #379 |
 | 多張特徵表 | 只宣告一張 `feature_table`；使用者、版位兩種粒度已在 `feature_user`、`feature_slot` 分開算好，打開時可以直接各當一張；逐筆曝光的 `feature_realtime` 已算好，但它以 `impression_id` 為鍵，而這份 conf 的候選列上沒有那一欄；接它之前要讓它多帶 `request_id`（`(snap_date, user_id, slot_id, request_id, ad_creative)` 在一次請求內唯一） | #380 |
-| 預測品質指標家族 | **已打開**（#381）：`report.sections.prediction_quality: true`，`prediction_quality` 的三個值與框架預設相同。這個示例只跑 `--post-training`，而 test 表在 dataset 階段已經丟掉沒有點擊的請求，所以報表這一段的母體是「有點擊的請求」裡的曝光，不是全部曝光（報表上會印這一句；見 `docs/pipelines/evaluation.md` 3.7 節） | #381（完成） |
+| 預測品質指標家族 | **已打開**（#381）：`report.sections.prediction_quality: true`，`prediction_quality` 的三個值與框架預設相同。這個示例只跑 `--post-training`；test 表留下一半沒有點擊的請求（下一列），報表這一段的數字用權重加權、代表還原到全部曝光的估計 | #381（完成） |
+| 沒有正例的 query group 留多少 | **已打開**（#429）：`val_zero_positive_group_ratio: 0.5`、`test_zero_positive_group_ratio: 0.5`，沒有點擊的請求整個留一半，列上帶權重 `zero_positive_group_weight`（1 或 2），`training_eval_predictions` 的 catalog 欄位宣告了它。train 不設（objective 是 `binary`，r < 1 會變成負例降採樣）。預測品質打開時 test 的 r 必須大於 0（A46），所以這一列與上一列是一起的。0.5 只是示例值 | #429（完成） |
 
 ## 踩到的框架問題
 

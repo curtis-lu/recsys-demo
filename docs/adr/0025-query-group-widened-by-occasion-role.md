@@ -65,6 +65,8 @@ ADR-0021 只容得下形狀一：query group 寫死是 `time` ＋ `entity`。
 - train 的鍵同時套用在 train 與 train_dev，兩邊各自對自己的組判定、用同一個 r。train／train_dev 是以 entity 互斥切開的，一個 query group 不會跨兩邊。train_dev 是 early stopping 的驗證集，它的母體因此跟著變——與既有的逐列抽樣性質相同（train_dev 本來就是從抽樣後的鍵切出來的）；`lambdarank` 下 training 本來就替兩邊丟掉無正例的組，所以 r ＝ 0 不改變它的早停母體。
 - val／test 沒有逐列抽樣（val 只有整個 entity 的抽樣），所以上面的先後問題只存在於 train。
 
+**補記（2026-09-21，#429 實作時由使用者拍板）：train 這一步做在 keys 上、建表之前。** 上面的先後寫的是「接 label 與特徵 → 本步驟」；實作改成「本步驟自己接一次 `label_table`（只接 identity 與 label）判斷去留、只丟 keys 的列 → 再照常建表」。判斷用的仍是 `label_table` 的 label，看到的仍是逐列抽樣與切分之後的列，所以留下哪些組、每組哪些列，與寫在建表之後逐列相同；差別只在特徵 join 的前後。理由是粒度閘 B10：它要求 train／train_dev 的 model_input 列數**等於**建它的 keys，建表之後才丟組，兩邊必然對不上，B10 就分不出「故意丟的」與「右表重複鍵造成的放大」（丟 1,000 列就蓋得住 500 列的放大）。在 keys 上丟，落地的 `train_keys` 就是建表的輸入，B10 照樣逐列相等。代價是 r < 1 時 train 的 label 多接一次（窄表）；r ＝ 1（預設）時整步跳過。val／test 沒有這個問題（B10 本來就不涵蓋它們），維持在建表之後過濾。
+
 為什麼是三個頂層鍵、不是一個含三個值的鍵：版本雜湊照 `dataset` 的頂層鍵名分層（ADR-0016）。train 那個登記進 `TRAIN_SAMPLING_KEYS`（折進 `train_variant_id`）；val／test 兩個不登記（留在 `base_dataset_version`，那是 val／test 產物唯一的版本 ID）。一個鍵只能整個登記或整個不登記：前者讓「改 val 的 r」靜默讀回舊的 val 表，後者讓「只改 train 的 r」連前處理器與 val／test 一起重算。
 
 為什麼判定放在 label 接上之後：「這一組有沒有正例」要用 `label_table` 的 label。`sample_pool` 可能自己帶一欄 label（示例就有，逐列抽樣拿它當分層鍵），但那是使用者 SQL 抄的副本，框架不保證兩者一致。當分層鍵用，不一致的後果是抽樣率偏一點；拿來判「整組丟不丟」，後果是把真正的正例整組刪掉，而且粒度閘比得過。

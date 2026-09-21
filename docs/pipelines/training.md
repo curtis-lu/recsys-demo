@@ -155,6 +155,8 @@ HPO、最終訓練與 test scoring 都使用同一份 feature view。**診斷與
 這是模型層的特徵實驗，因此修改後只會更新 `model_version`，不需要重建 dataset。`schema.item` 不可被排除；其他 exclude 名稱也應先確認存在於該 dataset 的 `feature_columns`。
 目前不存在的欄位名稱會被忽略，但仍會進入版本 hash，因此可能產生內容相同、ID 不同的 model version。
 
+ranking 類目標（`lambdarank`、`rank_xendcg`）建 `.bin` 時，每個 split 會 log 一行「只剩單一種 label 的 query group 佔多少」（`single-label query groups [train]: …`）：這種組沒有兩列 label 不同，ranking 目標從它學不到任何配對。數的是 `.bin` 實際收下的列（`lambdarank` 在丟掉無正例的組之後），只是一行 log，不改變任何產物。佔比高通常是逐列抽樣把小的 query group 抽成只剩一種 label；對策見 [dataset.md §3.7](dataset.md#37-沒有正例的-query-group-留多少)。`.bin` cache 命中時不會重建，也就不會再印這一行——要看就找建 `.bin` 那次的 log。
+
 LightGBM binary cache 會依 `objective` 與保留後的 feature list 隔離，避免同一個 train variant 誤用其他 objective 或其他特徵子集建立的 `.bin`。三個 objective（`lambdarank` / `rank_xendcg` / `binary`）各自一個子目錄；其餘非 ranking objective 共用 `binary`（它們建出的 `.bin` 內容相同）。
 
 此隔離在 2026-09-07 之前是較粗的 objective family（兩個 ranking objective 共用 `lgb/ranking/`）。若你在那之前跑過 ranking objective，舊的 `<cache.root>/<base_dataset_version>/train_variants/<train_variant_id>/lgb/ranking/` 會變成沒有人再讀的孤兒目錄，可直接刪除；`binary` 的路徑未變，不需處理。
@@ -454,7 +456,7 @@ python -m recsys_tfb training \
 實務差別有兩處，方向相反：`--only-node compute_feature_statistics` 現在需要一個 `model_version` 範圍的輸入（變貴）；`--from-node compute_feature_statistics` 不再掃回 HPO（變便宜，見上）。
 
 test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 test features 收進記憶體。
-寫入 `training_eval_predictions` 的資料包含 entity、`score`、`score_uncalibrated`、label，以及作為 Hive partitions 的 time、item、`model_version`。`score_uncalibrated` 恆等於 `score`：已 deprecated，欄位保留只為維持表的欄數，#412 會拿掉它。
+寫入 `training_eval_predictions` 的資料包含 entity、`score`、`score_uncalibrated`、label，以及作為 Hive partitions 的 time、item、`model_version`。`score_uncalibrated` 恆等於 `score`：已 deprecated，欄位保留只為維持表的欄數，#412 會拿掉它。`dataset.test_zero_positive_group_ratio` 大於 0 時另寫一欄 `zero_positive_group_weight`（有正例的 query group ＝ 1，留下來的無正例組 ＝ 1／r），evaluation 的預測品質指標家族用它加權；這張表在 catalog 是明確列出欄位的，所以此時 catalog 必須宣告這一欄，training 在起 Spark 前檢查（A45）。是否寫這一欄看設定，不看 test 表有沒有這一欄：test 表是 `columns: "auto"`，一旦有別的 run 加過這欄，r ＝ 0 寫出的 partition 也會帶著全 NULL 的這一欄。catalog 宣告了這一欄而 r ＝ 0 時照樣寫，值是 NULL（Hive 寫入會選每一個宣告過的欄，少了會失敗）。詳見 [dataset.md §3.7](dataset.md#37-沒有正例的-query-group-留多少)。
 
 **逐月增量**：predict 會跳過已經預測完整的月份，所以多評估一個月的成本正比於新月份，而不是累積的總月份數。權威的月份清單是 `dataset.test_snap_dates`（cache 只是資料來源）；某月的完成判準是「該月已寫出的 item partition 集合 ＝ 該月 cache 中出現的 distinct item」——寫到一半中斷、或事後新增一個 item，都會讓該月不再完整而被重做。可以跳過是因為 `(model_version, snap_date)` 的預測是不可變產物：`model_version` 已把定義模型的一切雜湊進去，重算必然得到相同結果。「已存在哪些 partition」由 `training_eval_predictions` 這個 catalog dataset 物件回答（`HiveTableDataset.existing_partition_values()`，metastore-only 查詢，套用該表的 `partition_filter` 因此天然限縮在目前 `model_version`）——predict 拿不到 SparkSession，這是唯一的路。
 
@@ -646,7 +648,7 @@ training 版本描述的是模型設定與上游資料身分，不是完整的�
 - HPO resume 可延續 completed trials，但重新建立的 TPE sampler 狀態不保證與完全不中斷的單次執行 bitwise identical。
 - `random_seed` 會影響模型與 HPO，但目前不納入 `model_version` 或 `search_id`。
 - `num_threads` 被排除於 model version；LightGBM 不保證不同 thread count 下完全 bitwise identical，因此正式環境應固定 core 設定。
-- test evaluation 使用 dataset 已排除零正例 query groups 的母體，不代表 inference 的完整 entity 母體。
+- test evaluation 使用 dataset 過濾過的母體：預設排除零正例 query groups（`dataset.test_zero_positive_group_ratio` 可整組留下一部分並帶權重），不代表 inference 的完整 entity 母體。
 - training 成功不代表模型已核准上線。仍需檢查 test 指標、per-item 表現、診斷與業務限制，再人工 promotion。
 
 ### 9.1 建矩陣這一步的峰值，以及兩個觀測陷阱

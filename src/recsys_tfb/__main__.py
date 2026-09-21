@@ -26,12 +26,14 @@ from recsys_tfb.core.consistency import (
     parse_etl_var_flags,
     post_training_snap_date_errors,
     prediction_quality_param_errors,
+    prediction_quality_population_errors,
     report_section_key_errors,
     resolved_env_dir,
     retired_calibration_bin_key_errors,
     resolved_inference_rebuild_dates,
     resolved_rebuild_dates,
     train_snap_dates_errors,
+    zero_positive_group_weight_declared_errors,
     ConfigConsistencyError,
     REBUILD_SNAP_DATES_KEY,
 )
@@ -1445,6 +1447,12 @@ def training(
         *optional_role_columns_declared_errors(
             params, gate_declared, "training_eval_predictions"
         ),
+        # A45 — same entry, same read: the zero-positive group weight the test
+        # table carries when dataset.test_zero_positive_group_ratio > 0 would
+        # otherwise be dropped by the save and evaluation would count rows.
+        *zero_positive_group_weight_declared_errors(
+            params, gate_declared, "training_eval_predictions"
+        ),
     ]
     if declaration_errors:
         for line in declaration_errors:
@@ -1799,6 +1807,12 @@ def evaluation(
     # with A22 for the same reason — validate_config_consistency never sees
     # --post-training — and collected with it so one run reports everything.
     role_errs = optional_role_monitoring_errors(params, post_training)
+    # (A46) the prediction-quality family under --post-training needs a test
+    # table that kept some query groups holding no positive; with
+    # dataset.test_zero_positive_group_ratio at 0 the dataset pipeline dropped
+    # them all and every binary metric comes out biased high. Needs the flag,
+    # so wired here with A22/A40.
+    section_errs += prediction_quality_population_errors(params, post_training)
     if snap_date_errs or section_errs or role_errs:
         logger.error("\n".join([*snap_date_errs, *section_errs, *role_errs]))
         raise typer.Exit(code=1)

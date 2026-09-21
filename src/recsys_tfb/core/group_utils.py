@@ -158,6 +158,35 @@ def drop_zero_positive_groups(
     return kept, counts
 
 
+def single_label_group_counts(
+    y: np.ndarray, group_ids: np.ndarray
+) -> dict[str, int]:
+    """``{"groups_total", "groups_single_label"}`` — how many query groups hold
+    rows of one label value only.
+
+    A ranking objective learns from pairs of rows whose labels differ, so such
+    a group gives it nothing to compare: all negatives, all positives, or a
+    single row. Counted rather than filtered — whether a share is too high is
+    the deployment's call, and a row-level draw that thins small groups is the
+    usual cause (ADR-0025 decision H). Two different graded labels are
+    comparable, so only equality counts. Group ids need not be contiguous.
+    """
+    y = np.asarray(y)
+    group_ids = np.asarray(group_ids)
+    if y.shape[0] == 0:
+        return {"groups_total": 0, "groups_single_label": 0}
+    _, inverse = np.unique(group_ids, return_inverse=True)
+    n_groups = int(inverse.max()) + 1
+    lo = np.full(n_groups, np.inf)
+    hi = np.full(n_groups, -np.inf)
+    np.minimum.at(lo, inverse, y.astype(np.float64))
+    np.maximum.at(hi, inverse, y.astype(np.float64))
+    return {
+        "groups_total": n_groups,
+        "groups_single_label": int(np.sum(lo == hi)),
+    }
+
+
 def default_metric_for_objective(
     objective: str | None, metric: str | None
 ) -> str | None:

@@ -853,6 +853,35 @@ class TestZeroPositiveGroupFilter:
         # train_dev: 1 of 3 groups and 2 of 6 rows dropped, 2 groups left.
         assert "1/3 groups" in text and "2/6 rows" in text
 
+    @pytest.mark.parametrize("objective, train, dev", [
+        # lambdarank sees only groups holding a positive: none single-label.
+        ("lambdarank", "0/2", "0/2"),
+        # rank_xendcg keeps the all-negative groups: c3, c4 and d3.
+        ("rank_xendcg", "2/4", "1/3"),
+    ])
+    def test_single_label_share_reaches_the_log(
+        self, tmp_path, caplog, objective, train, dev
+    ):
+        """ADR-0025 decision H: the share of groups a ranking objective can
+        draw no pair from, counted on the rows the .bin actually holds."""
+        import logging
+        with caplog.at_level(
+            logging.INFO, logger="recsys_tfb.models.lightgbm_adapter"
+        ):
+            _prepare_zero_positive(tmp_path, objective)
+        lines = [r.getMessage() for r in caplog.records
+                 if "single-label" in r.getMessage()]
+        assert any("[train]" in m and f"{train} groups" in m for m in lines), lines
+        assert any("[train_dev]" in m and f"{dev} groups" in m for m in lines), lines
+
+    def test_binary_logs_no_single_label_share(self, tmp_path, caplog):
+        import logging
+        with caplog.at_level(
+            logging.INFO, logger="recsys_tfb.models.lightgbm_adapter"
+        ):
+            _prepare_zero_positive(tmp_path, "binary")
+        assert "single-label" not in caplog.text
+
     def test_counts_sidecar_survives_a_cache_hit(self, tmp_path):
         """The numbers outlive the build, so a cache-hit run still reports them.
 

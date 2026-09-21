@@ -493,14 +493,44 @@ Layer 1 — config-static (implemented here; aggregated by
   ``retired_calibration_bin_key_errors`` (returns errors; the evaluation
   command raises, collected with A22/A34/A42). NOT aggregated, unlike A37: the
   harm belongs to evaluation alone (A34's reason, issue #158).
+* A44 — each ``dataset.{train,val,test}_zero_positive_group_ratio`` (ADR-0025
+  decision 3: the share of a split's query groups holding no positive that
+  the dataset pipeline keeps) is a number in [0, 1]. Absent is clean and
+  resolves to today's behaviour (``ZERO_POSITIVE_GROUP_RATIO_DEFAULTS``: train
+  1, val 0, test 0); an explicit YAML ``null`` and a boolean are rejected, for
+  A31's reason. Predicate: ``zero_positive_group_ratio_errors``; resolver:
+  ``resolved_zero_positive_group_ratio``. Aggregated by
+  ``validate_config_consistency``, for A29/A31's reason: the train key feeds
+  ``train_variant_id`` and the other two feed ``base_dataset_version``.
+* A45 — the prediction write target must declare
+  ``ZERO_POSITIVE_GROUP_WEIGHT_COL`` while ``dataset.test_zero_positive_group_ratio``
+  is above 0, for A28/A39's reason: an undeclared column is dropped by
+  ``HiveTableDataset.save`` in silence, and evaluation would then count each
+  kept zero-positive group once instead of ``1 / r`` times. Only the test ratio
+  counts — the table holds test predictions alone. Predicate:
+  ``zero_positive_group_weight_declared_errors``. NOT aggregated, for A28's
+  reason — it needs the resolved catalog — and wired beside A28/A39.
+* A46 — ``evaluation.report.sections.prediction_quality`` on under
+  ``--post-training`` while ``dataset.test_zero_positive_group_ratio`` is 0 (its
+  default). That table is the test table scored, and the dataset pipeline
+  dropped every test query group holding no positive before anything scored
+  it, so the family — every row a binary prediction — comes out biased high
+  and its "every row" population note is false. ADR-0024 decision 3's "before
+  the filter" only reaches the filter inside evaluation; this is the one
+  upstream of it. Monitoring mode is unaffected: nothing upstream filtered its
+  rows. Predicate: ``prediction_quality_population_errors`` (returns errors;
+  the evaluation command raises, collected with A22/A34/A42/A43). The switch
+  is read by ``prediction_quality_on``, shared with the node that computes the
+  family. NOT aggregated, for A22's reason: that gate cannot see
+  ``--post-training``.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
-flags), A22 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43 (config keys whose
-harm belongs to one pipeline), A28/A39 (the resolved catalog), A30 (``--env``
+flags), A22/A46 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43 (config keys whose
+harm belongs to one pipeline), A28/A39/A45 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags).
 
-Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10
+Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
 implemented and wired):
 
 * B1 — sample_pool items ↔ declared items must be equal; label items ⊆
@@ -645,6 +675,10 @@ implemented and wired):
 
   **Two of the four splits are covered, and that is a limit, not an
   oversight.** train / train_dev land straight out of ``build_model_input``.
+  Their zero-positive group draw (ADR-0025 decision 3) runs on the keys,
+  before ``train_keys`` / ``train_dev_keys`` land, precisely so this pairing
+  survives it: a drop after the build would make the counts differ on purpose,
+  and a deliberate drop can hide a fan-out of any smaller size.
   val and test do not. For val the frame whose row count
   equals ``val_keys``' is ``val_model_input_unfiltered``; for test it is
   ``test_model_input_unfiltered``, which matches **not** ``test_keys`` but only
@@ -655,8 +689,8 @@ implemented and wired):
   reach disk and have no footer. Stating test's pair as ``test_keys`` would
   record a comparison that is always-false, which this ticket's own issue warns
   is worse than no gate at all. The tables that do land are the
-  ``filter_groups_with_positives`` outputs, whose row count is *supposed* to be
-  smaller. A one-sided ``<=`` against those was considered and rejected: this
+  ``filter_val_model_input`` / ``filter_test_model_input`` outputs, whose row
+  count is *supposed* to be smaller. A one-sided ``<=`` against those was considered and rejected: this
   repo's ``sample_pool`` is a dense entity x item expansion while
   ``label_table`` is sparse, so most groups carry no positive and the filter
   drops a large fraction — the bound would hold through a 2x fan-out and read
@@ -678,6 +712,17 @@ implemented and wired):
   decision 2 warns about, written into a gate. Predicate:
   ``optional_role_source_column_errors``. Wired in ``validate_data_consistency``
   (``pipelines/dataset/nodes.py``) with the rest of Layer 2.
+* B12 — a model feature named ``ZERO_POSITIVE_GROUP_WEIGHT_COL`` while
+  ``dataset.val_zero_positive_group_ratio`` or ``test_zero_positive_group_ratio``
+  is above 0: the val / test filter nodes add a column by that name to the same
+  frame (ADR-0025 decision 3). Checked against the feature columns derived from
+  ``feature_table``'s metadata — no rows. Only features count (val / test keys
+  carry nothing; a dropped column is no feature), and the train ratio adds no
+  weight. Predicate: ``zero_positive_group_weight_collision_errors``. Wired in
+  ``validate_data_consistency``. Runtime backstop:
+  ``keep_zero_positive_groups_drawn_under_ratio``
+  (``pipelines/dataset/steps/model_input.py``) refuses a frame that already
+  holds the column — a sliced run skips the gate.
 
 Layer 3 — specified but DEFERRED (NOT implemented in this module yet); see
 the plan doc for the full table:
@@ -995,6 +1040,45 @@ def optional_role_columns_declared_errors(
                 f"`columns:`."
             )
     return errors
+
+
+def zero_positive_group_weight_declared_errors(
+    parameters: dict,
+    declared_columns: list[str] | None,
+    target_name: str,
+) -> list[str]:
+    """(A45) the prediction write target must declare the zero-positive group
+    weight while test keeps any zero-positive group.
+
+    Returns error strings (empty list when fine); the training command raises.
+    A28/A39's shape and reason: ``HiveTableDataset.save`` keeps only declared
+    columns, so an undeclared weight is dropped without an error, and
+    evaluation then counts every row once — the kept zero-positive groups
+    stand for ``1 / r`` groups each, so the binary metrics come out biased
+    towards the positives with nothing in the run to say so. ``None`` means
+    ``columns: "auto"``, which declares nothing and so drops nothing.
+
+    Only the test ratio matters here: this table holds test predictions alone;
+    the val weight is read by training in memory and never lands.
+    """
+    if declared_columns is None:
+        return []
+    if not test_carries_zero_positive_group_weight(parameters):
+        return []
+    if ZERO_POSITIVE_GROUP_WEIGHT_COL in declared_columns:
+        return []
+    ratio = resolved_zero_positive_group_ratio(parameters, "test")
+    return [
+        f"(A45) catalog entry {target_name!r} does not declare "
+        f"{ZERO_POSITIVE_GROUP_WEIGHT_COL!r}, but "
+        f"dataset.test_zero_positive_group_ratio={ratio!r} keeps some query "
+        f"groups holding no positive and weights their rows by 1/r. A Hive "
+        f"save keeps only declared columns, so the weight would be dropped "
+        f"without an error and evaluation would count each kept group once "
+        f"instead of 1/r times. Add "
+        f"{{name: {ZERO_POSITIVE_GROUP_WEIGHT_COL}, type: DOUBLE}} to that "
+        f"entry's `columns:`."
+    ]
 
 
 #: The source tables B11 requires an optional role's columns in, mapped to the
@@ -1750,6 +1834,100 @@ def numeric_storage_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
+#: How much of the query groups holding no positive each split keeps, when its
+#: key is absent (ADR-0025 decision 3). The defaults are what the pipeline did
+#: before the keys existed: train kept every group, val and test kept none.
+#: ``train`` also governs train_dev — the two are one split cut by entity, and
+#: the ADR gives them one key.
+ZERO_POSITIVE_GROUP_RATIO_DEFAULTS: dict[str, float] = {
+    "train": 1.0,
+    "val": 0.0,
+    "test": 0.0,
+}
+
+#: The column a val / test table carries when its ratio is above 0: 1 on every
+#: row of a group holding a positive (always kept), ``1 / r`` on every row of a
+#: kept zero-positive group — the inverse of the probability that the row's
+#: group survived the draw. A design weight, not an unbiased estimator (ADR-0025
+#: decision 3). Deliberately a name of its own, not shared with a per-row
+#: training weight a user supplies (#425): the two answer different questions
+#: and must never overwrite each other.
+ZERO_POSITIVE_GROUP_WEIGHT_COL = "zero_positive_group_weight"
+
+
+def _zero_positive_group_ratio_key(split: str) -> str:
+    if split not in ZERO_POSITIVE_GROUP_RATIO_DEFAULTS:
+        raise ValueError(
+            f"No zero-positive group ratio for split {split!r}; the keys cover "
+            f"{sorted(ZERO_POSITIVE_GROUP_RATIO_DEFAULTS)}. train_dev reads "
+            f"the train key (ADR-0025 decision 3)."
+        )
+    return f"{split}_zero_positive_group_ratio"
+
+
+def resolved_zero_positive_group_ratio(parameters: dict, split: str) -> float:
+    """``dataset.<split>_zero_positive_group_ratio`` with its default applied.
+
+    One resolver so "what an absent key means" has a single definition, read by
+    the dataset nodes that draw, the training write that carries the weight,
+    and the evaluation gate that needs to know whether test kept any
+    zero-positive group. Callers may assume the value is legal: A44 rejects
+    anything else at CLI entry.
+    """
+    key = _zero_positive_group_ratio_key(split)
+    ds = parameters.get("dataset") or {}
+    if key not in ds:
+        return ZERO_POSITIVE_GROUP_RATIO_DEFAULTS[split]
+    return float(ds[key])
+
+
+def test_carries_zero_positive_group_weight(parameters: dict) -> bool:
+    """Whether the test table carries :data:`ZERO_POSITIVE_GROUP_WEIGHT_COL` —
+    ``dataset.test_zero_positive_group_ratio`` above 0.
+
+    The one derivation for every reader of that fact: the training write that
+    carries the column into the prediction table, A45 that makes the catalog
+    declare it, the evaluation node that weights by it, the report note that
+    prints it, and A46. Each deciding it for itself is how a write and the
+    gate that checks it end up disagreeing.
+    """
+    return resolved_zero_positive_group_ratio(parameters, "test") > 0.0
+
+
+def zero_positive_group_ratio_errors(parameters: dict) -> list[str]:
+    """A44 — each ``dataset.*_zero_positive_group_ratio`` is a number in [0, 1].
+
+    Absent is clean: every config written before the keys existed is in that
+    state, and the resolver supplies today's behaviour. An explicit YAML
+    ``null`` is rejected rather than read as absent, for A31's reason — it is
+    present in the version payload and would move a version ID while changing
+    nothing. ``True`` is rejected too although Python calls it an int: a
+    ratio written as a boolean is a config mistake, not a request for 1.0.
+
+    Aggregated by ``validate_config_consistency``, for A29/A31's reason: the
+    train key feeds ``train_variant_id`` and the val / test keys feed
+    ``base_dataset_version``, so a bad value moves the artifact paths every
+    later command resolves.
+    """
+    errors: list[str] = []
+    ds = parameters.get("dataset") or {}
+    for split in ZERO_POSITIVE_GROUP_RATIO_DEFAULTS:
+        key = _zero_positive_group_ratio_key(split)
+        if key not in ds:
+            continue
+        value = ds[key]
+        is_number = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if is_number and 0.0 <= value <= 1.0:
+            continue
+        errors.append(
+            f"A44: dataset.{key}={value!r} is not a ratio. It is the share of "
+            f"the {split} query groups holding no positive that are kept, so it "
+            f"must be a number in [0, 1]; delete the line to take the default "
+            f"{ZERO_POSITIVE_GROUP_RATIO_DEFAULTS[split]!r}."
+        )
+    return errors
+
+
 #: The source tables the dataset pipeline reads — the three inputs of
 #: ``validate_data_consistency``. A32 requires each to keep the quality check
 #: below; the other tables the ETL stages produce are deliberately out of scope
@@ -2112,6 +2290,60 @@ def prediction_quality_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
+def prediction_quality_on(parameters: dict) -> bool:
+    """Whether ``evaluation.report.sections.prediction_quality`` switches the
+    family on — **off** when the switch is absent, unlike the report's other
+    sections (ADR-0024 decision 1).
+
+    One reading for the node that computes the family and the A46 gate that
+    refuses it: two ``dict.get`` calls with two defaults is how a gate ends up
+    guarding a family the node never runs, or the reverse.
+    """
+    eval_params = parameters.get("evaluation") or {}
+    report = eval_params.get("report") or {} if isinstance(eval_params, Mapping) else {}
+    sections = report.get("sections") or {} if isinstance(report, Mapping) else {}
+    return bool(sections.get("prediction_quality", False)) if isinstance(
+        sections, Mapping) else False
+
+
+def prediction_quality_population_errors(
+    parameters: dict, post_training: bool
+) -> list[str]:
+    """A46 — the prediction-quality family under ``--post-training`` needs a
+    test table that kept some query groups holding no positive.
+
+    Returns error strings (empty list when fine); the evaluation command raises
+    it, collected with A22/A34/A42/A43. Takes the flag rather than reading it,
+    like A22/A40.
+
+    ``--post-training`` evaluates ``training_eval_predictions``, which is the
+    test table scored — and with ``dataset.test_zero_positive_group_ratio`` at
+    its default 0 the dataset pipeline dropped every zero-positive group from
+    that table before anything was scored. The family treats each row as a
+    binary prediction, so on that table every precision, recall and area comes
+    out biased high, and the report's "population: every row" note is false.
+    ADR-0024 decision 3's "computed before the filter" only reaches the filter
+    inside evaluation; this is the one upstream of it (ADR-0025).
+
+    Monitoring mode is untouched: it LEFT-joins the labels onto offline
+    inference's output, a population no dataset filter ever saw.
+    """
+    if not post_training or not prediction_quality_on(parameters):
+        return []
+    if test_carries_zero_positive_group_weight(parameters):
+        return []
+    return [
+        "A46: evaluation.report.sections.prediction_quality is on under "
+        "--post-training, but dataset.test_zero_positive_group_ratio is 0 (its "
+        "default): the dataset pipeline dropped every test query group holding "
+        "no positive before the model scored it. The prediction-quality family "
+        "treats each row as a binary prediction, so on that table every metric "
+        "comes out biased high and its 'every row' population note is false. "
+        "Set dataset.test_zero_positive_group_ratio above 0 and rebuild the "
+        "dataset (it moves base_dataset_version), or switch the section off."
+    ]
+
+
 def report_section_key_errors(parameters: dict) -> list[str]:
     """A34 — ``evaluation.report.sections`` declares exactly
     :data:`EVALUATION_REPORT_SECTIONS`.
@@ -2282,6 +2514,8 @@ def validate_config_consistency(parameters: dict) -> None:
     errors.extend(entity_grouping_key_errors(parameters))
 
     errors.extend(numeric_storage_param_errors(parameters))
+
+    errors.extend(zero_positive_group_ratio_errors(parameters))
 
     errors.extend(dataset_source_quality_check_errors(parameters))
 
@@ -3034,6 +3268,47 @@ def carry_column_collision_errors(
             f"the dataset, so check which one {col!r} is before editing."
         )
     return errors
+
+
+# ---------------------------------------------------------------------------
+# B12 — a feature column named like the zero-positive group weight
+# ---------------------------------------------------------------------------
+
+
+def zero_positive_group_weight_collision_errors(
+    parameters: dict,
+    feature_columns: Sequence[str],
+) -> list[str]:
+    """B12 — no model feature may be called :data:`ZERO_POSITIVE_GROUP_WEIGHT_COL`
+    while val or test keeps zero-positive groups.
+
+    Returns error strings (empty list when fine), collected by
+    ``validate_data_consistency``. Pure: the caller hands in the feature
+    columns it derived from ``feature_table``'s metadata — no rows.
+
+    Above 0 the ``filter_{val,test}_model_input`` nodes add that column, and a
+    feature by the same name would reach the same frame: the draw refuses to
+    overwrite it (the runtime backstop in
+    ``steps/model_input.keep_zero_positive_groups_drawn_under_ratio``), but
+    only after the whole build has run. Only features count: val / test keys
+    carry nothing, so a carry column cannot reach those tables, and a column
+    listed in ``drop_columns`` never becomes a feature. The train ratio adds no
+    weight, so it cannot collide.
+    """
+    keeps = [
+        split for split in ("val", "test")
+        if resolved_zero_positive_group_ratio(parameters, split) > 0.0
+    ]
+    if not keeps or ZERO_POSITIVE_GROUP_WEIGHT_COL not in feature_columns:
+        return []
+    keys = " and ".join(f"dataset.{s}_zero_positive_group_ratio" for s in keeps)
+    return [
+        f"B12: feature_table column {ZERO_POSITIVE_GROUP_WEIGHT_COL!r} is a model "
+        f"feature, and {keys} > 0 makes the dataset pipeline add a column by "
+        f"that name to the same table (the zero-positive group weight). Rename "
+        f"the source column, or list it in "
+        f"dataset.prepare_model_input.drop_columns if it is not a feature."
+    ]
 
 
 # ---------------------------------------------------------------------------

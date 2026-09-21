@@ -178,7 +178,7 @@ _Avoid_: average precision、AP（排序的 AP 是 `map@K` 與 `ap_contrib@K`，
 _Avoid_: `pr_auc`、aucpr；也不要單獨叫 average precision 或 AP（那是排序指標 `map@K` 的說法）
 
 **無正例的 query group**:
-裡面沒有任何一筆候選的 label 是正例的 query group。排序指標算不了它；把候選當二元預測的指標需要它。留多少由使用者決定（ADR-0025，尚未實作）。
+裡面沒有任何一筆候選的 label 是正例的 query group。排序指標算不了它；把候選當二元預測的指標需要它。每個 split 留多少由 `dataset.*_zero_positive_group_ratio` 決定，整組去留；val／test 留下的組的列帶權重 1／r（ADR-0025）。
 
 **`roc_auc`**（ADR-0024）:
 ROC 曲線下的面積，母體是全部候選列；同一個分數箱裡的列視為同分，同分算一半。

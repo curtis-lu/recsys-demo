@@ -27,7 +27,10 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import (
     PREDICTION_QUALITY_DEFAULTS,
+    ZERO_POSITIVE_GROUP_WEIGHT_COL,
     DataConsistencyError,
+    prediction_quality_on,
+    test_carries_zero_positive_group_weight,
 )
 from recsys_tfb.core.date_ranges import as_date_list, dates_label
 from recsys_tfb.core.logging import log_data_volume
@@ -803,6 +806,32 @@ def compute_baseline_metrics(
     return metrics
 
 
+def _require_zero_positive_group_weights(
+    eval_predictions: SparkDataFrame, weight_col: str,
+) -> None:
+    """Pre-check: every evaluated row carries a zero-positive group weight.
+
+    Raises ``DataConsistencyError`` naming both fixes. One action over one
+    column; ``limit(1)`` stops at the first NULL, so a mismatch answers fast.
+    """
+    missing = weight_col not in eval_predictions.columns
+    if not missing and eval_predictions.filter(
+        F.col(weight_col).isNull()
+    ).limit(1).count() == 0:
+        return
+    what = ("have no column" if missing else "hold a NULL in column")
+    raise DataConsistencyError(
+        f"dataset.test_zero_positive_group_ratio is above 0 in this conf, so the "
+        f"prediction-quality family weights every row by {weight_col!r} — but "
+        f"the evaluated predictions {what} {weight_col!r}: they were not written "
+        f"under a positive test ratio. The model being evaluated "
+        f"(--model-version, or `best`) was trained on a dataset whose test ratio "
+        f"differs from this conf's. Evaluate a model built under this conf, or "
+        f"set dataset.test_zero_positive_group_ratio back to the value that "
+        f"model was built with."
+    )
+
+
 def compute_prediction_quality(
     eval_predictions: SparkDataFrame,
     segment_columns: dict,
@@ -831,11 +860,11 @@ def compute_prediction_quality(
     (``compute_report_aggregates``' reason).
     """
     eval_params = parameters.get("evaluation", {}) or {}
-    sections = (eval_params.get("report", {}) or {}).get("sections", {}) or {}
     # Decision — off unless switched on. The family costs one extra shuffle
     # over every evaluated row, and the ranking deployments this framework
-    # ships with do not read it (ADR-0024 decision 1).
-    if not sections.get("prediction_quality", False):
+    # ships with do not read it (ADR-0024 decision 1). Read through the same
+    # helper A46 uses, so the gate and this node agree on "on".
+    if not prediction_quality_on(parameters):
         logger.info(
             "Prediction-quality report section disabled — writing stub")
         return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
@@ -856,13 +885,18 @@ def compute_prediction_quality(
     # Decision — every row, query groups without a positive included: nothing
     # here filters on `total_rel`, unlike the ranking metrics, because a binary
     # metric computed only where someone responded is systematically larger
-    # (ADR-0024 decision 3). Under --post-training the dataset pipeline has
-    # already dropped those groups from the test table (filter_test_model_input),
-    # which this node cannot undo; the report says so next to the numbers.
+    # (ADR-0024 decision 3). Under --post-training the test table holds only
+    # the share of those groups dataset.test_zero_positive_group_ratio kept
+    # (filter_test_model_input); A46 refuses the run when it kept none.
     #
-    # Decision — no weight column yet: every row weighs 1. The whole-group
-    # sampling of zero-positive groups (#429) adds a 1/r weight column to the
-    # predictions; this is where its name goes.
+    # Decision — under --post-training with that ratio above 0, every row
+    # weighs its zero-positive group weight: a kept zero-positive group stands
+    # for 1/r of them (ADR-0025 decision 3). Decided from the config, not from
+    # whether the column is there: the table is `columns: "auto"`, so once any
+    # run added the column, a partition written under ratio 0 holds it as
+    # NULL, and summing NULL weights would drop those rows in silence.
+    # Monitoring reads offline inference's output, which no dataset draw
+    # touched: every row weighs 1.
     #
     # Decision — bins are global and equal-width over this run's own
     # min..max score, not a fixed [0, 1]: at click rates of 0.1%-1% the scores
@@ -875,9 +909,26 @@ def compute_prediction_quality(
     # (ties by item): item x bin rows come back to the driver, and an ad
     # deployment can have thousands of items (ADR-0024 decision 6). Every
     # item still counts in the overall bins and in the item totals.
-    weight_col = None
+    weight_col = (
+        ZERO_POSITIVE_GROUP_WEIGHT_COL
+        if parameters.get("post_training")
+        and test_carries_zero_positive_group_weight(parameters)
+        else None
+    )
+    # Pre-check (input) — the rows must carry the weight the config promises.
+    # The config says what *today's* dataset settings keep; the predictions
+    # were written by whichever model --model-version (or `best`) names, whose
+    # test ratio is baked into its model_version and may differ. A missing
+    # column, or a NULL weight (training writes NULL when that model's test
+    # kept no zero-positive group), means the two disagree: summing NULL
+    # weights would drop those rows, and counting them would report a filtered
+    # table as a weighted one. One narrow scan of one column, only when
+    # weighting at all.
+    if weight_col is not None:
+        _require_zero_positive_group_weights(eval_predictions, weight_col)
     aggregated = aggregate_score_bins(
-        eval_predictions.select(item_col, score_col, label_col),
+        eval_predictions.select(
+            item_col, score_col, label_col, *([weight_col] if weight_col else [])),
         item_col=item_col, score_col=score_col, label_col=label_col,
         n_bins=settings["n_bins"], top_n=settings["top_n"],
         weight_col=weight_col,

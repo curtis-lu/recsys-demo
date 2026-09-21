@@ -27,12 +27,15 @@ pre-checks. Where a node's *time* actually goes is a question for the Runner's
 """
 
 import logging
+import operator
+from functools import reduce
 
 import pandas as pd
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import (
+    ZERO_POSITIVE_GROUP_WEIGHT_COL,
     DataConsistencyError,
     carry_column_collision_errors,
     categorical_dtype_errors,
@@ -46,8 +49,10 @@ from recsys_tfb.core.consistency import (
     numeric_precision_rows,
     resolved_item_values,
     resolved_numeric_storage,
+    resolved_zero_positive_group_ratio,
     spark_dtype_is_numeric,
     spark_dtype_value_step,
+    zero_positive_group_weight_collision_errors,
 )
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_entity_grouping, get_schema
@@ -69,9 +74,11 @@ from recsys_tfb.pipelines.dataset.steps.feature_columns import (
 )
 from recsys_tfb.pipelines.dataset.steps.precision import landed_partition_files
 from recsys_tfb.pipelines.dataset.steps.model_input import (
-    drop_groups_without_positives,
+    count_zero_positive_groups_kept,
     join_features_missing_as_null,
     join_labels_missing_as_negative,
+    keep_zero_positive_groups_drawn_under_ratio,
+    log_zero_positive_group_draw,
     model_input_columns,
     require_columns_present,
 )
@@ -118,7 +125,7 @@ def validate_data_consistency(
     feature_table: DataFrame,
     parameters: dict,
 ) -> None:
-    """Run the Layer-2 invariants (B1, B5, B6, B7, B11) against the source tables.
+    """Run the Layer-2 invariants (B1, B5, B6, B7, B11, B12) against the source tables.
 
     Side-effect only: raises ``DataConsistencyError`` on violation, returns
     ``None`` when everything holds. Each invariant's meaning lives with its
@@ -202,6 +209,10 @@ def validate_data_consistency(
                 "label_table": label_table.columns,
             },
         )
+        # B12 — no feature may share the zero-positive group weight's name
+        # while val or test adds that column. The feature list is derived from
+        # metadata above, so this reads no rows either.
+        + zero_positive_group_weight_collision_errors(parameters, feature_cols)
     )
     if errors:
         raise DataConsistencyError(
@@ -922,7 +933,7 @@ def build_model_input(
 #: is the same sentence for both; ``extra`` carries what is true of only one of
 #: them, so the shared half still has a single source.
 _NOT_CHECKED_REASON = (
-    "{split}_model_input is the filter_groups_with_positives output, so its "
+    "{split}_model_input is the filter_{split}_model_input output, so its "
     "row count is deliberately below its keys'; the frame that would match, "
     "{split}_model_input_unfiltered, has no catalog entry and so never lands "
     "as parquet — there is no footer to read.{extra}"
@@ -982,9 +993,11 @@ def validate_model_input_grain(
 
     Each row is a build node with nothing between its two ends, which is what
     makes equality the right comparison. The one thing worth checking rather
-    than assuming: ``split_train_keys`` runs *before* the builds, not after, so
-    ``train_keys`` and ``train_dev_keys`` are each already the exact input of
-    their own build node. Crossing a pair (``train_keys`` against
+    than assuming: everything that narrows the train-side keys — the split,
+    and the zero-positive group draw after it (``filter_train_keys``,
+    ADR-0025) — runs *before* the builds, not after, so ``train_keys`` and
+    ``train_dev_keys`` are each already the exact input of their own build
+    node. That is why the draw is on the keys at all. Crossing a pair (``train_keys`` against
     ``train_dev_model_input``) would make the gate always-false rather than
     merely absent, so ``test_the_pairing_is_keys_then_its_own_model_input``
     pins the argument order against the pipeline's input list.
@@ -1108,26 +1121,191 @@ def validate_model_input_grain(
     return report
 
 
-def filter_groups_with_positives(
+def filter_train_keys(
+    keys: DataFrame,
+    label_table: DataFrame,
+    parameters: dict,
+) -> DataFrame:
+    """Keep the train-side query groups holding a positive, and a share of the
+    ones holding none (ADR-0025 decision 3).
+
+    Serves both ``filter_train_keys`` and ``filter_train_dev_keys``: one key,
+    ``dataset.train_zero_positive_group_ratio``, one ratio, and each side judges
+    only its own groups — the split is by entity, so no query group straddles
+    the two.
+
+    **Why on the keys and not on model_input**, unlike val / test: B10 pins
+    ``train_model_input``'s row count to ``train_keys``' to catch a right table
+    that holds a join key twice. Dropping groups after the build would make the
+    two counts differ on purpose, and B10 could no longer tell a deliberate drop
+    from a fan-out — a drop of 1,000 rows hides a 500-row fan-out. Dropping them
+    here, before ``train_keys`` lands, keeps the pair equal. The price is one
+    extra label join, paid only when the ratio is below 1.
+
+    What this step sees is what the row-level draw and the train / train_dev
+    split left: "a group holding a positive is kept whole" means this step drops
+    none of its rows, not that the row draw left it alone. A group whose only
+    positive the row draw removed is a zero-positive group here (ADR-0025).
+    """
+    schema = get_schema(parameters)
+    identity_cols = schema["identity_columns"]
+    group_cols = schema["query_group_columns"]
+    label_col = schema["label"]
+    ratio = resolved_zero_positive_group_ratio(parameters, "train")
+    seed = parameters.get("random_seed", 42)
+
+    # Decision — the default keeps every group, so the keys pass through
+    # untouched: no label join, no Spark action, and train_keys lands exactly
+    # what the split produced — the table every existing train variant holds.
+    if ratio >= 1.0:
+        log_zero_positive_group_draw("train", ratio, None)
+        return keys
+
+    # Decision — whether a group holds a positive is read from label_table,
+    # never from a label column sample_pool may carry. That copy is the user's
+    # SQL and nothing guarantees it agrees; judged by it, a disagreement would
+    # delete real positives together with their group, and B10 would pass
+    # because keys and model_input lose the same rows. Only identity and the
+    # label cross the join, so a carried column cannot collide with it.
+    labels = join_labels_missing_as_negative(
+        keys.select(*identity_cols),
+        label_table.select(*identity_cols, label_col),
+        identity_cols, label_col,
+    )
+
+    # Decision — a group holding a positive is kept whole; a group holding none
+    # is kept whole or dropped whole, `ratio` of them kept. No weight column:
+    # training ranks, and a ranking needs no proportions restored.
+    kept_groups = keep_zero_positive_groups_drawn_under_ratio(
+        labels, group_cols, label_col, ratio, seed,
+    ).select(*group_cols).distinct()
+
+    # Decision — the keys keep their own rows and columns. A semi join on the
+    # query group can only drop a key, never repeat one, so a label_table
+    # holding a key twice cannot fan out here and still reaches B10 through the
+    # build. NULL-safe on every group column: a group whose key holds a NULL is
+    # one group to the draw (the val / test window partitions it like any
+    # other), and a plain equi-join would drop it whatever the draw decided.
+    kept = keys.join(
+        kept_groups,
+        on=reduce(operator.and_, [
+            keys[c].eqNullSafe(kept_groups[c]) for c in group_cols
+        ]),
+        how="left_semi",
+    )
+
+    # Decision — a partial draw reports how many zero-positive groups it kept.
+    # One narrow Spark action (keys and labels only), paid only when 0 < r < 1.
+    counts = None
+    if ratio > 0.0:
+        with log_step(logger, "count_zero_positive_groups"):
+            counts = count_zero_positive_groups_kept(
+                labels, group_cols, label_col, ratio, seed,
+            )
+    log_zero_positive_group_draw("train", ratio, counts)
+    return kept
+
+
+def filter_val_model_input(
     model_input: DataFrame,
     parameters: dict,
 ) -> DataFrame:
-    """Drop (time, *entity) query groups whose label sum is zero.
+    """Keep val's query groups holding a positive, and a share of the ones
+    holding none (``dataset.val_zero_positive_group_ratio``, ADR-0025
+    decision 3).
 
-    Decision — a query group with no positive is dropped rather than scored.
-    Applied to val / test only: mAP is undefined over such a group and
-    metrics_spark filters them again anyway, so keeping them only inflates the
-    Hive table and wastes predict time.
+    At the default 0 this is the filter val always had: a group with no
+    positive is dropped, because a ranking metric cannot be computed over it.
+    Above 0 the kept zero-positive groups stay for the metrics that score every
+    row as a binary prediction, which a table holding only groups with a
+    positive biases high.
 
-    train / train_dev are NOT filtered here, and it is no longer because
-    "their losses use every row" — that holds for ``binary`` and for
-    ``rank_xendcg``, but not for ``lambdarank``, whose gradient contribution
-    over an all-negative group is exactly zero. train / train_dev get those
-    groups dropped at training time instead, per objective. See the comment
-    above the val / test nodes in ``pipeline.py`` for why the split is drawn
-    there rather than here.
+    Applied to the built model_input rather than to the keys (the train side's
+    choice): nothing pins val's row count to its keys (B10 covers train and
+    train_dev only), so there is nothing a later drop could break, and the
+    label is already joined.
+
+    Pre-check (input), inside the draw: a model_input that already holds a
+    column named like the weight is refused rather than overwritten — the
+    runtime backstop of B12, for a sliced run that skipped the gate.
     """
     schema = get_schema(parameters)
     group_cols = schema["query_group_columns"]
     label_col = schema["label"]
-    return drop_groups_without_positives(model_input, group_cols, label_col)
+    ratio = resolved_zero_positive_group_ratio(parameters, "val")
+    seed = parameters.get("random_seed", 42)
+
+    # Decision — above 0 the rows carry their design weight: 1 in a group
+    # holding a positive, 1/r in a kept zero-positive group. At 0 there is
+    # nothing to weight, and the table keeps the columns it always had.
+    weight_col = ZERO_POSITIVE_GROUP_WEIGHT_COL if ratio > 0.0 else None
+
+    # Decision — a group holding a positive is kept whole; a group holding none
+    # is kept whole or dropped whole, `ratio` of them kept. The label is the
+    # one build_model_input joined from label_table.
+    kept = keep_zero_positive_groups_drawn_under_ratio(
+        model_input, group_cols, label_col, ratio, seed, weight_col=weight_col,
+    )
+
+    # Decision — a partial draw reports how many zero-positive groups it kept:
+    # 1/r is a design weight, and the count is what tells an operator whether
+    # the weighted metrics are stable. One Spark action over the group and
+    # label columns, paid only when 0 < r < 1.
+    counts = None
+    if 0.0 < ratio < 1.0:
+        with log_step(logger, "count_zero_positive_groups"):
+            counts = count_zero_positive_groups_kept(
+                model_input, group_cols, label_col, ratio, seed,
+            )
+    log_zero_positive_group_draw("val", ratio, counts)
+    return kept
+
+
+def filter_test_model_input(
+    model_input: DataFrame,
+    parameters: dict,
+) -> DataFrame:
+    """Keep test's query groups holding a positive, and a share of the ones
+    holding none (``dataset.test_zero_positive_group_ratio``, ADR-0025
+    decision 3).
+
+    val's decisions with test's key: a separate node function because the key
+    is the one answer that differs, and reading the wrong one would raise
+    nothing. No month scoping: its input comes from build_test_model_input,
+    which is already scoped (ADR-0007).
+
+    The weight column this adds above 0 travels on: training writes it into
+    ``training_eval_predictions`` (A45 makes the catalog declare it) and the
+    prediction-quality family sums it instead of counting rows.
+
+    Pre-check (input), inside the draw: B12's runtime backstop, as in
+    ``filter_val_model_input``.
+    """
+    schema = get_schema(parameters)
+    group_cols = schema["query_group_columns"]
+    label_col = schema["label"]
+    ratio = resolved_zero_positive_group_ratio(parameters, "test")
+    seed = parameters.get("random_seed", 42)
+
+    # Decision — above 0 the rows carry their design weight: 1 in a group
+    # holding a positive, 1/r in a kept zero-positive group. At 0 there is
+    # nothing to weight, and the table keeps the columns it always had.
+    weight_col = ZERO_POSITIVE_GROUP_WEIGHT_COL if ratio > 0.0 else None
+
+    # Decision — a group holding a positive is kept whole; a group holding none
+    # is kept whole or dropped whole, `ratio` of them kept. The label is the
+    # one build_model_input joined from label_table.
+    kept = keep_zero_positive_groups_drawn_under_ratio(
+        model_input, group_cols, label_col, ratio, seed, weight_col=weight_col,
+    )
+
+    # Decision — a partial draw reports how many zero-positive groups it kept,
+    # for val's reason. One Spark action, paid only when 0 < r < 1.
+    counts = None
+    if 0.0 < ratio < 1.0:
+        with log_step(logger, "count_zero_positive_groups"):
+            counts = count_zero_positive_groups_kept(
+                model_input, group_cols, label_col, ratio, seed,
+            )
+    log_zero_positive_group_draw("test", ratio, counts)
+    return kept
