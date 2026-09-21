@@ -1,20 +1,19 @@
 {
   "measured": {
     "date": "2026-09-21",
-    "code_commit": "07c9b02",
-    "how": "run_e2e.sh 跑 feat/378-event-role，這組 conf 宣告了 event（#378）。先做相容性驗證：把 examples/ad/ 整個還原成 main 的設定、只留框架程式碼的改動，跑 run_e2e.sh --compare，與 main 的 baseline_digest.json 逐值一致——證明沒宣告 event 的部署行為不變。再打開 event 重跑，得到本檔。預期會變的幾層與原因：(1) dataset 四張 model_input 的列數與指紋——一次曝光一列，不再聚合成一週一列，且 identity 多了 impression_id；(2) training／inference 的指紋——模型是在不同形狀的資料上訓練的；(3) evaluation：config_shift／item_ability／suppression／metric_ci 四份 JSON 縮成 stub（宣告 event 後它們假設的「同組內 item 唯一」不成立，框架自動跳過並寫出原因），metrics.json 多出 n_tied_rows／tied_row_share 兩個值，k_values 的 \"all\" 從 12（item 種數）變成 17（最寬 query group 的列數）。 收審查發現後重跑一次：與前一次相比只有 evaluation.diagnosis/model_capacity.json 的指紋變了，因為 item_ability 被跳過時它印的那句話從「使用者把 enabled 設成 false」改成照抄上游的 skipped_reason（使用者從來沒設過那個旗標）。其餘逐值相同。",
-    "environment": "macOS, 8 cores, local[*], PySpark 3.3.2, LightGBM 4.6.0; 兩條 e2e 同時跑，開跑時 load average 3.3，跑完時 6.8"
+    "code_commit": "ed019dc",
+    "how": "run_e2e.sh 跑 feat/428-occasion-role，這組 conf 宣告 occasion ＝ request_id（#428，形狀二），不再宣告 event。先做相容性驗證：另開一棵 main 的 worktree、只換成本 branch 的 src/ 與 scripts/，用 main 的 examples/ad/（宣告 event、舊產生器）跑 run_e2e.sh --compare，六層與 main 的 baseline_digest.json 逐值一致——證明沒宣告 occasion 的部署行為不變。再用本 branch 的 examples/ad/ 跑，得到本檔。會變的是每一層，原因是資料本身換了：產生器改成一次請求在同一秒展示 1～6 個互不重複的素材，每列多一欄 request_id，原始曝光從 43,541 列變成 42,555 列，瀏覽紀錄改成每次請求抽一次；versions：base_dataset_version 因 occasion 進版本雜湊而翻新，train_variant_id 不變（f6541cb7，抽樣設定沒動），model_version 跟著變；dataset：一組是一次請求，val／test 只留有點擊的請求；evaluation：item_ability 縮成 stub（宣告 occasion 時跳過並寫出原因），config_shift／suppression／metric_ci 照跑（宣告 event 時這三份是 stub），metrics.json 的 k_values \"all\" 解析回 12（item 種數，宣告 event 時是 17），n_tied_rows 為 0。"
   },
   "noisy": {},
   "versions": {
-    "base_dataset_version": "36184aec",
+    "base_dataset_version": "68dcd263",
     "train_variant_id": "f6541cb7",
-    "model_version": "36104ee1"
+    "model_version": "615f83a8"
   },
   "source_etl": {
     "feature_table": {
       "rows": 12000,
-      "hash": "-760344960859363912963",
+      "hash": "-225501168820590576888",
       "columns": [
         "age_band",
         "device_type",
@@ -35,24 +34,24 @@
       ]
     },
     "label_table": {
-      "rows": 39314,
-      "hash": "48833481377471484414",
+      "rows": 38557,
+      "hash": "1425200945672896711904",
       "columns": [
         "ad_creative",
-        "impression_id",
         "label",
+        "request_id",
         "slot_id",
         "snap_date",
         "user_id"
       ]
     },
     "sample_pool": {
-      "rows": 39314,
-      "hash": "-224758771621478563717",
+      "rows": 38557,
+      "hash": "-586584585303264252891",
       "columns": [
         "ad_creative",
-        "impression_id",
         "label",
+        "request_id",
         "slot_id",
         "snap_date",
         "user_id",
@@ -69,8 +68,8 @@
       ]
     },
     "feature_realtime": {
-      "rows": 39314,
-      "hash": "-1929645548689076514999",
+      "rows": 38557,
+      "hash": "303741846730362389919",
       "columns": [
         "ad_creative",
         "browse_30m",
@@ -86,16 +85,16 @@
   },
   "dataset": {
     "train_model_input": {
-      "rows": 19155,
-      "hash": "1942791098681769358729",
+      "rows": 19674,
+      "hash": "674527166180862325848",
       "columns": [
         "ad_creative",
         "age_band",
         "device_type",
-        "impression_id",
         "label",
         "page_type",
         "region",
+        "request_id",
         "slot_ctr_4w",
         "slot_id",
         "slot_imp_4w",
@@ -112,16 +111,16 @@
       ]
     },
     "train_dev_model_input": {
-      "rows": 1938,
-      "hash": "34027400698049270486",
+      "rows": 1982,
+      "hash": "119658155981422482263",
       "columns": [
         "ad_creative",
         "age_band",
         "device_type",
-        "impression_id",
         "label",
         "page_type",
         "region",
+        "request_id",
         "slot_ctr_4w",
         "slot_id",
         "slot_imp_4w",
@@ -138,16 +137,16 @@
       ]
     },
     "val_model_input": {
-      "rows": 2288,
-      "hash": "-393554713220523633410",
+      "rows": 1813,
+      "hash": "58280086476804794835",
       "columns": [
         "ad_creative",
         "age_band",
         "device_type",
-        "impression_id",
         "label",
         "page_type",
         "region",
+        "request_id",
         "slot_ctr_4w",
         "slot_id",
         "slot_imp_4w",
@@ -163,16 +162,16 @@
       ]
     },
     "test_model_input": {
-      "rows": 2340,
-      "hash": "-405782867562110618749",
+      "rows": 1921,
+      "hash": "53227801511062302553",
       "columns": [
         "ad_creative",
         "age_band",
         "device_type",
-        "impression_id",
         "label",
         "page_type",
         "region",
+        "request_id",
         "slot_ctr_4w",
         "slot_id",
         "slot_imp_4w",
@@ -198,12 +197,12 @@
   },
   "training": {
     "training_eval_predictions": {
-      "rows": 2340,
-      "hash": "48772617905788640647",
+      "rows": 1921,
+      "hash": "-39982998225099695561",
       "columns": [
         "ad_creative",
-        "impression_id",
         "label",
+        "request_id",
         "score",
         "score_uncalibrated",
         "slot_id",
@@ -215,7 +214,7 @@
   "inference": {
     "ranked_predictions": {
       "rows": 14400,
-      "hash": "510911960114973480125",
+      "hash": "180346148262898914567",
       "columns": [
         "ad_creative",
         "rank",
@@ -230,35 +229,35 @@
   "evaluation": {
     "baseline_metrics.json": {
       "leaves": 302,
-      "hash": "23ee3a4d43da1a6ae210c68c5b8a987dbc2ca6de2c4445cb9c56773482c91301"
+      "hash": "270d44eee5d87c4733d369f4316b48d1705d19ed6f484f99b4af5649bf2cdf59"
     },
     "diagnosis/config_shift.json": {
-      "leaves": 3,
-      "hash": "c917c70c74613d0069e9c2722c85a4d3e8f566773cd9b3f7da54d4624f743c3c"
+      "leaves": 228,
+      "hash": "5d3346ba7f8f8e81197078f720bb95725a9ae075305e3db2ee0ba67299362b05"
     },
     "diagnosis/item_ability.json": {
       "leaves": 3,
-      "hash": "53f65093e2051b250d93a5cf7d852d4adfb3c78b22634d89b7d83619d832d63c"
+      "hash": "9e2cfdc91a7a349bcd0597cc03f69a10284a956a817dbc31a4c1148819f40d3f"
     },
     "diagnosis/metric_ci.json": {
-      "leaves": 2,
-      "hash": "98d4b17d088484c6c2cd714fd12285ae0607a401cbc34c99d75a76a657eef1db"
+      "leaves": 88,
+      "hash": "253417d3d75620af8f5a45d5ff4ce170926f56943b7918195b2f5c8141f95865"
     },
     "diagnosis/model_capacity.json": {
       "leaves": 321,
-      "hash": "d8a7ba53a5f4498f7121d1121faa2d2de24725b62cbb6256325ac48d631136ff"
+      "hash": "23889cf26947f8188e66a6cab17b1f996de408d7ed4a9d76acbf22d91ebb4cff"
     },
     "diagnosis/suppression.json": {
-      "leaves": 3,
-      "hash": "c2b0ed2f685925ce365d9b5eeb6b294f413a8e5a27ea9fc5a0877000f0ee2d5c"
+      "leaves": 3416,
+      "hash": "a9832bd1cc2ef154ff2fc411533736ab37c73ab25c231a41a73f2789aa01b0fa"
     },
     "metrics.json": {
-      "leaves": 1070,
-      "hash": "fb81b915ea3124e93cbcadff52bf37b3070bd46c1f46e8880e33e3ea59e8dbd0"
+      "leaves": 926,
+      "hash": "d819710a8553257bc714314a90ab516a506f637f31d2fd423fe251d78f9ca0ee"
     },
     "report_aggregates.json": {
-      "leaves": 2210,
-      "hash": "0726f9b528106cc9351b68b5235022b84a980b626dfaf8c893737464c02e86a9"
+      "leaves": 2098,
+      "hash": "d59ad106a86f3d20dff68aad422060dca82ebe389a702f6d8c994f8837e29b23"
     },
     "segment_columns.json": {
       "leaves": 2,

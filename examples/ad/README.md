@@ -51,7 +51,7 @@ campaign_dim   ┘
   資料刻意讓錯的界線看得出差別：點擊後的瀏覽有一半與點擊同一秒，`<` 寫成 `<=` 就算進去了；批次週末常晚一天，固定取前兩天那份就會取錯。
 - **點擊率刻意偏高（約 15%）。** 母體只有幾百人，照真實的 1% 一週只有個位數正例。這份資料的數字不代表生產。
 - **時間欄寫檔時標上時區。** 產生器的時間是 Asia/Taipei 當地時間；不帶時區寫進 parquet 的話，Spark 3.3 會當成 UTC 讀，晚 8 小時，和 `event_date` 對不上（2026-09-18 實測）。`generate_data.py::write_parquet` 先標上時區再寫。
-- **排序指標分得出好壞。** 年齡層偏好某個活動、裝置偏好某種格式、個人點擊傾向，都寫進了產生器。test 週 445 個有正例的 query group（request）上，模型 mAP@12 是 ⟪E2E⟫、mAP@1 是 ⟪E2E⟫；熱門度基準分別是 ⟪E2E⟫、⟪E2E⟫。候選數與親和力的強度是為此調的：候選只有一兩個時，隨便排的 mAP 也很高，指標分不出好壞。調的時候用不起 Spark 的估算（test 週、有正例的 request、整組 AP，200 次隨機排列取平均）：隨便排 0.557、照過去點擊數排 0.580、照 train 週 (年齡層, 裝置, 版位, item) 分群的點擊率排 0.741（2026-09-21，`generate_data.py` 現值；分群 CTR 用 train／train_dev 六週）。
+- **排序指標分得出好壞。** 年齡層偏好某個活動、裝置偏好某種格式、個人點擊傾向，都寫進了產生器。test 週 445 個有正例的 query group（request）上，模型 mAP@12 是 0.717、mAP@1 是 0.457；熱門度基準分別是 0.578、0.283。候選數與親和力的強度是為此調的：候選只有一兩個時，隨便排的 mAP 也很高，指標分不出好壞。調的時候用不起 Spark 的估算（test 週、有正例的 request、整組 AP，200 次隨機排列取平均）：隨便排 0.557、照過去點擊數排 0.580、照 train 週 (年齡層, 裝置, 版位, item) 分群的點擊率排 0.741（2026-09-21，`generate_data.py` 現值；分群 CTR 用 train／train_dev 六週）。
 
 ### 資料涵蓋了什麼、沒涵蓋什麼
 
@@ -69,7 +69,7 @@ campaign_dim   ┘
 | 沒見過的 item 屬性組合 | 有：`c04`、`video` 從第一週就有，`c04-video` 從 val 週 2025-12-22 才第一次曝光，train 沒有它。上線後給 4 倍流量（`LATE_ITEM_LAUNCH_BOOST`），test 週有 42 個正例；代價是從 val 週起其他 11 個 item 的曝光占比各降約 10.3%，item 分布在 train 與 val／test 之間本來就不同 | #379 item 清單從資料數；#394 item 宣告成多欄 |
 | 低點擊率（分數擠在低端） | **沒有**：點擊率約 15% | #381 預測品質 |
 
-**`c04-video` 對模型來說是一個沒見過的 item 值。** 框架要求 item 那一欄一定是模型特徵（`pipelines/dataset/steps/feature_columns.py::require_item_is_a_feature`），模型看到的是 `ad_creative` 這一個類別值，不是活動、格式兩個屬性，所以 train 沒出現過就不認得。item 宣告成多欄（#394）之後也一樣：那張票省掉的是拼欄與逐一列出組合，模型看的仍是組合。實跑時框架對這件事沒有任何警告（類別編號從 conf 的清單讀，train 有沒有出現不影響；#379 要加的就是這個警告）。test 週這個 item 的 42 個正例上，模型的平均名次 ⟪E2E⟫、`map_attr@12` ⟪E2E⟫，熱門度基準是 ⟪E2E⟫、⟪E2E⟫。
+**`c04-video` 對模型來說是一個沒見過的 item 值。** 框架要求 item 那一欄一定是模型特徵（`pipelines/dataset/steps/feature_columns.py::require_item_is_a_feature`），模型看到的是 `ad_creative` 這一個類別值，不是活動、格式兩個屬性，所以 train 沒出現過就不認得。item 宣告成多欄（#394）之後也一樣：那張票省掉的是拼欄與逐一列出組合，模型看的仍是組合。實跑時框架對這件事沒有任何警告（類別編號從 conf 的清單讀，train 有沒有出現不影響；#379 要加的就是這個警告）。test 週這個 item 的 42 個正例上，模型的平均名次 3.6、`map_attr@12` 0.435，熱門度基準是 4.6、0.333。
 
 低點擊率沒做：母體幾百人，1% 一週只剩個位數正例，其他票反而驗不了。要驗就在 #381 裡改 `generate_data.py`，並更新基準 digest。
 
@@ -96,7 +96,7 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 - 所有本機狀態（warehouse、metastore、模型、報表、`logs/`、`mlruns/`）都落在 `examples/ad/` 底下，已 gitignore，不會碰到 repo 根目錄的 `data/`。原理：CLI 的 `conf/`、`data/` 都相對目前目錄，而 `conf/spark-local/spark-defaults.conf` 的 warehouse 與 metastore 也是相對路徑；`setup_local.py` 起 Spark 後會核對 warehouse 真的在這裡，不在就中止。
 - evaluation 只跑 `--post-training`。`evaluation.snap_date` 只有一個值：post-training 要它在 `test_snap_dates` 裡（A22），監控模式要它是 inference 評過分的週，一份 conf 兩邊都滿足不了。
 - 不觸發 model promote：inference 與 evaluation 都用 `--model-version` 指定 training 剛產出的版本。
-- feature_etl 之後有一段「特徵不偷看」檢查（`check_features.py`），見〈資料長什麼樣〉。它擋得住偷看：把 SQL 改成六種錯的寫法——瀏覽窗口多看到曝光後 5 分鐘、窗口上界 `<` 寫成 `<=`、快照取週一那份、不看 `available_at` 固定取前兩天那份、疲乏次數把這一次也算進去、行為計數多算到週一當天——各自重跑 feature_etl，六次檢查都紅在被改的那一欄（⟪E2E⟫；例如 `<=` 那一種同類瀏覽次數與定義不同的列數、固定取前兩天那種取錯快照日的列數）。
+- feature_etl 之後有一段「特徵不偷看」檢查（`check_features.py`），見〈資料長什麼樣〉。它擋得住偷看：把 SQL 改成六種錯的寫法——瀏覽窗口多看到曝光後 5 分鐘、窗口上界 `<` 寫成 `<=`、快照取週一那份、不看 `available_at` 固定取前兩天那份、疲乏次數把這一次也算進去、行為計數多算到週一當天——各自重跑 feature_etl，六次檢查都紅在被改的那一欄（2026-09-18，在資料改成「一次請求多個素材」之前量的：例如 `<=` 那一種有 3,019 列的同類瀏覽次數與定義不同，固定取前兩天那種有 3,200 列取錯快照日。改資料之後沒有重做這六次）。
 - inference 之後有一段「推論表分區結構」斷言，與 `scripts/local_e2e.sh` 末段同一組（item 分區目錄名是素材名、`model_version` 在最外層、`entity_bucket` 只在 `unranked_predictions`），名稱從 conf 讀。這些只有看目錄名才看得到，digest 的內容指紋看不到。
 
 `tests/examples/test_ad_example.py` 守不起 Spark 就驗得到的部分：這份 conf 過得了 CLI 入口的檢查；產生器的 item 等於 conf 逐一列出的 item 清單，每支拼 item 的 SQL（`label_table.sql`、`feature_realtime.sql`）用的分隔字元都與產生器相同；catalog 條目與根目錄那份一致（框架新增條目時兩邊要一起加）；ETL 的日期涵蓋每個 split；原始資料真的有上表標「有」的形狀。即時特徵與快照的形狀照 `check_features.py` 的同一份定義算，所以「測試說原始資料有這個形狀」和「實跑說 SQL 算對了」講的是同一個定義。
@@ -120,7 +120,7 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 | evaluation --post-training | ⟪E2E⟫ |
 | digest | ⟪E2E⟫ |
 
-每一步都是獨立的 CLI 指令，**秒數都含一次 Spark 啟動**。log 裡從建立 `run_id` 到 `SparkSession ready` 約 1 秒；加上 Python 載入，每一步的固定成本是幾秒等級（沒有單獨量）。資料量：原始曝光 42,555 列、瀏覽 45,725 列、使用者快照 33,600 列；`sample_pool` ⟪E2E⟫ 列、`feature_table` ⟪E2E⟫ 列、`feature_realtime` ⟪E2E⟫ 列、train model_input ⟪E2E⟫ 列。這些數字只說明「本機幾分鐘跑得完」，推不出生產成本（見〈沒做的事〉）。
+每一步都是獨立的 CLI 指令，**秒數都含一次 Spark 啟動**。log 裡從建立 `run_id` 到 `SparkSession ready` 約 1 秒；加上 Python 載入，每一步的固定成本是幾秒等級（沒有單獨量）。資料量：原始曝光 42,555 列、瀏覽 45,725 列、使用者快照 33,600 列；`sample_pool` 38,557 列、`feature_table` 12,000 列、`feature_realtime` 38,557 列、train model_input 19,674 列。這些數字只說明「本機幾分鐘跑得完」，推不出生產成本（見〈沒做的事〉）。
 
 ## 基準 digest
 

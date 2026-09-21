@@ -7,13 +7,13 @@
 -- 這份 conf 宣告 occasion ＝ request_id（#428，形狀二），所以 identity 是
 -- (snap_date, user_id, slot_id, request_id, ad_creative)：一次請求（到秒）展示的
 -- 好幾個素材，互不重複，各自帶自己的 label。改這裡要連 parameters_label_etl.yaml
--- 的 primary_key 一起改：少列一欄，max_duplicate_key_ratio: 0.0 會把同一次請求的
--- 多個素材判成重複鍵而擋下整條 ETL。
+-- 的 primary_key 一起改：少列 request_id，max_duplicate_key_ratio: 0.0 會把「同一週
+-- 同一個素材出現在不同請求裡」判成重複鍵而擋下整條 ETL。
 --
--- 這是這個示例刻意示範的形狀，不是所有部署都該這樣：沒有逐筆的即時特徵時
--- （feature_realtime 要 #380 才接得進來），同一次請求裡的素材分數只靠週級特徵，
--- 只會製造同分。要回到「一週一列、宣告 event」（#378 已跑綠過的形狀一），把
--- 這裡的 request_id 換回 impression_id，並把 conf 的 occasion 宣告換回 event。
+-- 這是這個示例刻意示範的形狀，不是所有部署都該這樣：一組只是一次請求擺出來的
+-- 1～6 個素材，組很小（docs/operations/user-guides/impression-data-shapes.md）。
+-- 要回到形狀一（一次曝光一列、以一週為一組、宣告 event，#378 跑綠過），把這裡的
+-- request_id 換回 impression_id，並照 parameters.yaml 的註解改其餘幾個檔案。
 --
 -- snap_date 從週曆表取（README〈踩到的框架問題〉規則 1）。
 WITH week AS (

@@ -18,7 +18,8 @@ spark:
 
 schema:
   columns:
-    # 一週一個時段（每週一）。ADR-0021：time 維持「時段」；到秒的請求時間在 occasion。
+    # 一週一個時段（每週一）。ADR-0021：time 維持「時段」，不是曝光那一秒；同一刻
+    # 一起被排的那一次請求由 occasion（request_id）認出。
     # 欄名必須叫 snap_date：source_etl 的輸出檢查把 WHERE snap_date = … 寫死了
     # （pipelines/source_etl/checks.py），換名 source_etl 就壞。
     time: snap_date

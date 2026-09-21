@@ -4,7 +4,9 @@
 
 框架預設不接受這種資料：它假設一個 query group 裡每個 item 只出現一次，多出來的列會被當成上游重複而擋下。宣告 `event` 角色就是告訴框架「這些不是重複，它們是不同的事件」。
 
-**先確認你屬於哪一種：**
+**先確認你要的是 `event`：** 如果你要讓名次只在「同一次請求一起被排的那幾個候選」之間比，要宣告的是 `occasion`，不是 `event`；兩者怎麼選見 [`impression-data-shapes.md`](impression-data-shapes.md)。
+
+**再確認你屬於哪一種：**
 
 - 你想把多次事件**聚合成一列**（例如「這一週有沒有點過」）→ 不要宣告 `event`，在來源 SQL 用 `GROUP BY` ＋ `MAX(label)` 聚起來就好，本文不適用。
 - 你要**保留每一次事件各自一列**，因為每一次的情境不同、label 也不同 → 往下讀。
@@ -174,5 +176,6 @@ training:
 
 - [ADR-0021](../../adr/0021-time-stays-a-period-event-role.md)——`time` 維持時段、`event` 是選用角色。
 - [ADR-0025](../../adr/0025-query-group-widened-by-occasion-role.md)——identity 的組成與欄位順序、同分規則、重複檢查語意的更正。
+- [`impression-data-shapes.md`](impression-data-shapes.md)——`event`、`occasion` 怎麼選；宣告 `occasion` 的操作與代價。
 - `CONTEXT.md`——**event**、**identity**、**query group**、**候選** 的定義。
-- [examples/ad](../../../examples/ad/README.md)——一份真的宣告了 `event` 的設定，可以整條跑起來。
+- [examples/ad](../../../examples/ad/README.md)——曝光資料的示例。它目前宣告的是 `occasion`；#378 時它宣告 `event` 整條跑綠過，README 寫了改回去要動哪幾個檔案。
