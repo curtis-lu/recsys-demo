@@ -17,11 +17,68 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric.uncertainty import paired_bootstrap_delta
 from recsys_tfb.evaluation.metrics import macro_from_per_item, positive_row_contributions
 
 _CLIP_EPS = 1e-12
 _HASH_BUCKETS = 100_000
+
+
+#: 在 driver 上對 query group 內部排名的診斷——也就是宣告 ``event`` 之後算不出
+#: 可重現數字的那幾項。判準（spec #426 決定 E）是「這項診斷是否假設同一個
+#: query group 內 item 唯一」，逐項對程式碼確認過：
+#:
+#: * ``suppression``——把「負例排在正例之上」彙總成 ``groupby(["pos_item",
+#:   "sup_item"])`` 的 item 對，並算 item 對之間的共買 lift。同一個 item 在一組
+#:   裡有多列時會生出 ``(A, A)`` 這種自己壓制自己的對，整張帳本的意思就變了。
+#: * ``item_ability``——量同一個 item 內正例列與負例列的 AUC，並在
+#:   ``descending_ranks`` 取名次。它自己寫明的盲區「item j 的正例列與負例列分屬
+#:   不同 query」在宣告 ``event`` 之後不再成立。
+#: * ``config_shift``——Δ 由 ``compute_macro_per_item_map`` 重排後相減得出。
+#:
+#: 三者都經 ``order_by_score_then_item(..., items)`` 排名，**沒有**接 ``event``
+#: 的決勝欄（本票刻意不替診斷加寬，spec #426 決定 E：「診斷不因新角色擴充」），
+#: 所以同 item 同分的多列順序由列到達的順序決定——正是 #355 移除掉的那種不可
+#: 重現。``model_capacity`` 不在此列：它只讀 booster 的 split gain，完全不碰
+#: 診斷抽樣，宣告什麼角色都與它無關。
+#:
+#: ``"ci"`` 也在裡面，雖然它不在 ``contract.DIAGNOSES`` 裡：它是共用診斷抽樣的
+#: 第四個消費者（``evaluation.diagnosis.ci``），而它的 bootstrap 一樣經
+#: ``positive_row_contributions`` 在 driver 上取組內名次（``uncertainty.py``）。
+#: 頭號 mAP 本身是 Spark 算的、有接 event 決勝欄，所以它是對的；跟著它的 CI 若
+#: 用另一套（任意的）同分順序算，兩個數字會併排印在同一行而彼此不對帳。
+#:
+#: 四項一起跳過還有一個結構上的後果，是刻意的：它們是共用抽樣僅有的消費者，
+#: 所以抽樣節點那一關「每個接線的消費者都停用了」會成立，整份抽樣不會被抽——
+#: 而那份抽樣的欄位本來就不含 ``event`` 的欄（見 :func:`draw_diagnosis_sample`
+#: 的 docstring），拿加寬後的 identity 去對它去重會 ``KeyError``。
+_QUERY_RANKING_DIAGNOSES = (
+    "config_shift", "item_ability", "suppression", "ci",
+)
+
+
+def schema_skip_reason(parameters: dict, name: str) -> Optional[str]:
+    """這項診斷在目前宣告的 schema 下算不算得出來；算不出來就回一句原因。
+
+    回 ``None`` ＝ 照跑。沒宣告任何選用角色時對每一項都回 ``None``，所以既有
+    部署的每一項診斷照跑、輸出逐值不變。
+
+    原因字串同時是報表上印的那一句：跳過而不說為什麼，讀者只會看到一頁憑空
+    消失，分不出「這版還沒有這項」與「這次刻意沒算」（見 ``contract`` 模組
+    docstring 對這兩者的區分）。
+    """
+    if name not in _QUERY_RANKING_DIAGNOSES:
+        return None
+    event_cols = get_schema(parameters).get("event", [])
+    if not event_cols:
+        return None
+    return (
+        f"宣告了 schema.columns.event（{', '.join(event_cols)}）："
+        f"同一個 query group 裡同一個 item 可以有多列，而這項診斷假設 item "
+        f"在組內唯一——它在 driver 上的名次只以 item 決勝，同 item 同分的多列"
+        f"排序會隨列到達的順序改變。本次跳過。"
+    )
 
 
 def diag_cfg(parameters: dict) -> dict:

@@ -29,6 +29,7 @@ from recsys_tfb.core.consistency import DataConsistencyError
 from recsys_tfb.core.date_ranges import as_date_list, dates_label
 from recsys_tfb.core.logging import log_data_volume
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.diagnosis.metric._common import schema_skip_reason
 from recsys_tfb.diagnosis.metric import contract
 from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
 from recsys_tfb.diagnosis.metric.uncertainty import bootstrap_per_item_ci
@@ -121,6 +122,14 @@ def _ci_consumer_enabled(parameters: dict) -> bool:
     Reading it here with the exact same key/default as the consumer prevents
     gate/consumer drift.
     """
+    if schema_skip_reason(parameters, "ci"):
+        # Not applicable under the declared schema, which is a different thing
+        # from the user turning it off — but it reaches this gate the same way,
+        # because the gate's question is only "does anything still want the
+        # sample". compute_metric_ci asks the same helper, so the two cannot
+        # drift into the "gate out of sync with the consumer" state its own
+        # pre-check raises about.
+        return False
     diag = ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
     return bool((diag.get("ci", {}) or {}).get("enabled", True))
 
@@ -161,6 +170,14 @@ def _registry_diagnosis_enabled(parameters: dict) -> bool:
     ]
     return any(
         bool((diag.get(name, {}) or {}).get("enabled", True))
+        # ...and still applicable under the declared schema. Same shape as the
+        # enabled flag on purpose: from this gate's point of view the only
+        # question is "does anything still want the sample", and a diagnosis
+        # its own `compute` will refuse to run does not. Leaving this out is
+        # what made the ad example's evaluation die on
+        # `KeyError: ['impression_id']` — the sample was drawn, and the sample
+        # frame carries no optional-role column to deduplicate identity by.
+        and not schema_skip_reason(parameters, name)
         for name in sample_consumers
     )
 
@@ -389,7 +406,8 @@ def make_prepare_eval_data_node(population_name: str):
             # declared, not anything here. The ticket that lands `occasion`
             # owns re-deciding this branch.
             eval_predictions = rank_within_query(
-                eval_predictions, query_cols, score_col, schema["item"]
+                eval_predictions, query_cols, score_col, schema["item"],
+                schema.get("event", []),
             )
             # BIGINT, the type ranked_predictions declares for `rank`. Both modes
             # write the same enriched_eval_predictions (columns: "auto"), whose
@@ -797,6 +815,14 @@ def compute_metric_ci(
     """
     eval_params = parameters.get("evaluation", {}) or {}
     ci_cfg = ((eval_params.get("diagnosis", {}) or {}).get("ci", {}) or {})
+    skip = schema_skip_reason(parameters, "ci")
+    if skip:
+        logger.info("metric CI not applicable — writing stub: %s", skip)
+        return {
+            "enabled": False,
+            "skipped_reason": skip,
+            "config_fingerprint": fingerprint(parameters),
+        }
     if not ci_cfg.get("enabled", True):
         logger.info("metric CI disabled — writing stub")
         return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
@@ -903,6 +929,18 @@ def make_diagnosis_node(name: str):
         if not cfg.get("enabled", True):
             logger.info("%s disabled — writing stub", name)
             return {"enabled": False, **stamp}
+        # Checked in the same place and for the same reason as the enabled
+        # flag, and BEFORE the sample pre-check below: the sample gate reads
+        # the same helper, so when a role makes this diagnosis inapplicable
+        # there is deliberately no sample to hand it. Leaving this out turns
+        # a correct skip into "gate out of sync with the consumer flag" —
+        # a message that sends the reader looking for a wiring bug that is
+        # not there. The module's own `compute` refuses too; this stub is
+        # what keeps the node from demanding an input nobody drew.
+        skip = schema_skip_reason(parameters, name)
+        if skip:
+            logger.info("%s not applicable — writing stub: %s", name, skip)
+            return {"enabled": False, "skipped_reason": skip, **stamp}
         if "diagnosis_sample" in declared:
             sample_idx = declared.index("diagnosis_sample")
             if node_inputs[sample_idx] is None:

@@ -1077,6 +1077,7 @@ def extract_Xy_with_groups(
     with_weights: bool = False,
     with_weight_keys: bool = False,
     with_items: bool = False,
+    with_event: bool = False,
     on_disk_label: str | None = None,
 ) -> tuple:
     """Like :func:`extract_Xy` but also returns per-row query-group ids.
@@ -1089,6 +1090,15 @@ def extract_Xy_with_groups(
     integer codes the matrix holds for the same column. That is the contract the
     inference side reads: it writes those names into a partition column, so
     handing back codes would silently rename every partition.
+
+    ``event`` (``with_event=True``) is a **list** of raw arrays, one per
+    ``schema.columns.event`` column in declared order — and an empty list when
+    the deployment declares no ``event``. A list rather than a conditional
+    extra return value: the caller passes it straight to
+    ``utils.ranking.order_by_score_then_item``, which treats "no event
+    columns" and "no event role" as the same thing, so an undeclared role
+    needs no branch anywhere downstream. Declared order is load-bearing — it
+    is the tie-break order — and comes from ``get_schema``.
 
     ``on_disk_label`` returns X mapped from a scratch file rather than held
     on the heap, under that name — byte-identical either way, see
@@ -1126,6 +1136,8 @@ def extract_Xy_with_groups(
         aux_cols += weight_key_columns(parameters)
     if with_items:
         aux_cols.append(item_col)
+    event_cols = schema.get("event", []) if with_event else []
+    aux_cols += [c for c in event_cols if c not in aux_cols]
 
     X, aux = _stream_matrix(
         handle, preprocessor_metadata, parameters, aux_cols,
@@ -1153,4 +1165,6 @@ def extract_Xy_with_groups(
         items = aux[item_col].to_numpy()
         log_data_volume(logger, "extract_Xy_with_groups.items", items)
         result.append(items)
+    if with_event:
+        result.append([aux[c].to_numpy() for c in event_cols])
     return tuple(result)

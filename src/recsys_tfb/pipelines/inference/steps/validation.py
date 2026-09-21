@@ -46,6 +46,8 @@ from collections.abc import Collection
 
 import pandas as pd
 
+from recsys_tfb.pipelines.inference.steps.identity import scored_row_columns
+
 logger = logging.getLogger(__name__)
 
 #: Checks that run per chunk, in the driver, with no Spark involvement.
@@ -168,7 +170,9 @@ def validate_scored_chunk(
             the same way.
         known_items: the items this run is configured to score.
     """
-    identity_cols = schema["identity_columns"]
+    # NOT schema["identity_columns"]: see scored_row_columns -- this
+    # pipeline's rows never carry an optional role's columns.
+    identity_cols = scored_row_columns(schema)
     entity_cols = schema["entity"]
     item_col = schema["item"]
     score_col = schema["score"]

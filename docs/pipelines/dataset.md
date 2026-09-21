@@ -613,6 +613,7 @@ B6 擋下來時，錯誤訊息會**逐欄點名**（`feature column 'cust_segmen
 
 ## 10. 相關文件
 
+- 同一個 query group 裡同一個 item 要有多列（一次事件一列）：[`../operations/user-guides/one-row-per-event.md`](../operations/user-guides/one-row-per-event.md)
 - 三張來源表的建立方式：[`source_etl.md`](source_etl.md)
 - 模型訓練與 dataset version 選擇：[`training.md`](training.md)
 - 資料表、partition 與完整 lineage：[`../data-lineage.html`](../data-lineage.html)

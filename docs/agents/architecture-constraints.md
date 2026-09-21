@@ -531,7 +531,7 @@ pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity
 
 **`categorical_values` 是 `columns` 的合法兄弟**，`get_schema` 從 `schema.categorical_values` 讀它，所以它留在 `schema` 這一層是對的，不要一起包進 `columns`。
 
-**檢查**：AST 掃描 `src/recsys_tfb/` 與 `tests/` 底下所有 `.py`（`rglob`），找每一個字面量 `{"schema": {...}}`，然後看它自己的鍵與它的 `columns` 子 dict 的鍵。掃描範圍是 `SCHEMA_SCAN_ROOTS` 這個字典，角色名清單是 `SCHEMA_ROLE_KEYS`（對照 `core/schema.py::_ROLE_KEYS`——六個角色的完整清單；`_DEFAULTS` 自 #328 起只剩 `label`／`score`／`rank` 三個，不能拿來當這份對照），推導欄名是 `DERIVED_SCHEMA_KEYS`；掃描器本身是 `_schema_layer_offenders`。失敗訊息逐鍵指出位置——**行號指的是那個鍵自己那一行**，不是 `schema` 這個 dict 開頭那一行，這樣 40 行的 parameters 區塊才送得到正確的那一列：
+**檢查**：AST 掃描 `src/recsys_tfb/` 與 `tests/` 底下所有 `.py`（`rglob`），找每一個字面量 `{"schema": {...}}`，然後看它自己的鍵與它的 `columns` 子 dict 的鍵。掃描範圍是 `SCHEMA_SCAN_ROOTS` 這個字典，角色名清單是 `SCHEMA_ROLE_KEYS`（對照 `core/schema.py::_SETTABLE_COLUMN_KEYS`——**所有可宣告的角色**，不是只有必填那批；`_DEFAULTS` 自 #328 起只剩 `label`／`score`／`rank` 三個，不能拿來當這份對照），推導欄名是 `DERIVED_SCHEMA_KEYS`；掃描器本身是 `_schema_layer_offenders`。失敗訊息逐鍵指出位置——**行號指的是那個鍵自己那一行**，不是 `schema` 這個 dict 開頭那一行，這樣 40 行的 parameters 區塊才送得到正確的那一列：
 
 ```
 tests/params.py:3: schema.entity -- a role belongs under schema.columns
@@ -541,6 +541,12 @@ tests/params.py:4: schema.identity_columns -- get_schema derives this; a declare
 （這是真的跑出來的。上線當下、24 處還沒改之前，這個掃描一次點名 **94 個鍵、15 個檔**——不是只紅在第一個。）
 
 `TestS5SchemaColumnsLayer::test_the_report_names_a_location_not_just_a_count` 用等值把整行釘住；`TestS5SchemaColumnsLayer::test_the_scan_sees_every_spelling` 用六個 tmp 檔釘住六種寫法，其中 `half_fix.py` 就是上面那個「包進 `columns` 但照樣被丟掉」的形狀——刪掉掃描器的 `schema.columns` 分支，只有它會轉紅。
+
+**更新於 2026-09-21（#378）：這份對照原本釘在 `_ROLE_KEYS`，而且有漏。** #378 新增第七個角色 `event` 時，刻意把它放進另一個 tuple（`OPTIONAL_ROLE_KEYS`）——理由是 `_ROLE_KEYS` 裡的每個鍵都會進版本雜湊，而沒宣告 `event` 的部署不該因此換版本號（ADR-0021 決定 3）。後果是這條掃描**不認得 `event` 是角色名**，於是把它寫在 `schema` 底下（沒包進 `columns`）不會被列出來；`TestS5SchemaColumnsLayer::test_the_role_list_still_mirrors_core_schema` 那條防漂移的斷言也照樣綠，因為它比對的正是 `_ROLE_KEYS`。證據：改之前實跑 `get_schema({"schema": {"event": "impression_id", "columns": {...}}})` 回傳的 `identity_columns` 不含 `event`、`validate_schema_config` 不報錯。兩處都已改成對照 `_SETTABLE_COLUMN_KEYS`。
+
+**教訓（給下一個加角色的人）：** 角色分成兩個 tuple 是為了版本雜湊，不是為了這條掃描。**任何「可以寫在 `schema.columns` 底下的鍵」都要進 `SCHEMA_ROLE_KEYS`**，不管它進不進雜湊。
+
+**這條現在有執行期的另一半（#378）。** S5 掃的是 `src/`＋`tests/` 的 Python 字面值，而使用者真正寫 schema 的地方是 `conf/*.yaml`——那裡沒有任何掃描看得到。`core/schema.py::get_schema` 與 `validate_schema_config` 現在都會擋下「角色名或推導欄名直接出現在 `schema` 底下」（`_mis_nested_role_message`），以及「`schema.columns` 底下的未知鍵」（`_unknown_column_keys_message`）。兩條掃描與兩條執行期檢查是互補的：掃描擋寫 code 的人、執行期擋寫 conf 的人。
 
 **沒有例外登記表。** S5 是「寫設定的形狀」，不是「某個函式可以破例」；一個站點要嘛寫對要嘛寫錯，沒有值得豁免的情形。要放寬只能改掃描範圍，而範圍被 `TestS5SchemaColumnsLayer::test_the_scan_roots_are_real_and_pinned` 釘住。⚠ **S4 有一個同名的測試方法**（`TestS4NoFirstEntityColumn::test_the_scan_roots_are_real_and_pinned`），兩條的掃描範圍是各自釘各自的——引用時連類別名一起寫，不然指不清是哪一條。
 

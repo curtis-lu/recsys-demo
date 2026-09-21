@@ -61,6 +61,7 @@ from recsys_tfb.core.group_utils import (
     to_contiguous_groups,
 )
 from recsys_tfb.core.logging import log_data_volume, log_step
+from recsys_tfb.core.consistency import optional_role_columns
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.core.versioning import compute_search_id
 from recsys_tfb.diagnosis.hpo import write_hpo_diagnostics
@@ -653,11 +654,15 @@ def tune_hyperparameters(
     # ranks the same items, and sorting a string per row on each trial is work
     # the search would repeat for nothing.
     with log_step(logger, "extract_features"):
-        X_v, y_v, groups_v, items_v = extract_Xy_with_groups(
+        X_v, y_v, groups_v, items_v, event_keys_v = extract_Xy_with_groups(
             val_parquet_handle, preprocessor_metadata, parameters,
-            with_items=True, on_disk_label="hpo_val_matrix",
+            with_items=True, with_event=True, on_disk_label="hpo_val_matrix",
         )
     items_v = item_sort_codes(items_v)
+    # Same pre-coding, same reason, for each `event` column — the list is
+    # empty unless the deployment declares the role, so a deployment without
+    # one pays nothing and ranks exactly as it did.
+    event_keys_v = [item_sort_codes(k) for k in event_keys_v]
 
     checkpointing = parameters.get("hpo_checkpointing", True)
     search_id = _resolve_search_id(parameters)
@@ -718,6 +723,7 @@ def tune_hyperparameters(
         train_dev_weights=train_dev_lgb_handle.sample_weights(
             parameters, preprocessor_metadata),
         X_val=X_v, y_val=y_v, groups_val=groups_v, items_val=items_v,
+        event_keys_val=event_keys_v,
         algorithm=algorithm,
         algorithm_params=algorithm_params,
         search_space=search_space,
@@ -977,6 +983,10 @@ def predict_and_write_test_predictions(
     entity_cols = schema_cfg["entity"]
     item_col = schema_cfg["item"]
     label_col = schema_cfg["label"]
+    # Empty unless the deployment declares an optional role; resolved through
+    # the shared predicate so the write and the A39 gate that checks it can
+    # never disagree about which columns those are.
+    optional_role_cols = optional_role_columns(parameters)
     model_version = parameters["model_version"]
 
     # partitioning="hive" tells pyarrow to reconstruct (snap_date, prod_name)
@@ -1127,6 +1137,18 @@ def predict_and_write_test_predictions(
                 # declares all of them is A28, checked at CLI entry — a column
                 # it never declared is dropped by `save` in silence.
                 **{c: part_pdf[c].astype(str).values for c in entity_cols},
+                # Every declared optional-role column, for the entity columns'
+                # reason one line up: with `event` declared the identity of a
+                # scored row includes it, and without it the published table
+                # holds several rows per item that nothing can tell apart —
+                # evaluation's duplicate check then raises on a table that was
+                # correct when written. Empty for every deployment that
+                # declares no optional role, so the frame is unchanged there.
+                # That the write target declares them is A39, checked at CLI
+                # entry beside A28. Values are NOT stringified: `event` may be
+                # a timestamp, and the tie-break compares it by its own type
+                # (`utils/ranking.py`), so `"10" < "2"` would reorder ranks.
+                **{c: part_pdf[c].values for c in optional_role_cols},
                 "score": y_score,
                 # Deprecated, and equal to `score` by construction: nothing
                 # rescales a model's output any more (#411). It stays declared

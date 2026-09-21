@@ -34,7 +34,7 @@ If any of these files don't exist, **proceed silently**. Don't flag their absenc
 
 - 詞在設計討論中定下來的當下就加（`/domain-modeling` 的做法），不要事後補。
 - **只寫「它是什麼」，不寫「框架目前做不做得到」。** 能力與進度會變，寫進詞彙表就會腐爛；那些去查程式碼、ADR 或 `gh`。
-- **例外：已裁定但還沒實作的詞**可以先收進詞彙表，但詞名後面要標「（ADR-00xx，尚未實作）」，實作落地時把標記拿掉。不標的後果是實測過的：現在在 `schema.columns` 宣告一個框架還不認得的角色鍵，`core/schema.py::get_schema` 只保留 `_ROLE_KEYS` 裡的鍵、`validate_schema_config` 也不檢查多餘的鍵，所以它會被**靜默丟掉**——照詞彙表寫設定的人不會收到任何訊息。
+- **例外：已裁定但還沒實作的詞**可以先收進詞彙表，但詞名後面要標「（ADR-00xx，尚未實作）」，實作落地時把標記拿掉。不標的後果：照詞彙表寫設定的人會寫下一個框架還不認得的角色鍵。**更新於 2026-09-21（#378）：那個鍵現在會報錯，不再是靜默丟掉**——`get_schema` 與 `validate_schema_config` 都會拒絕未知的 `schema.columns` 鍵並一次列出全部（`_unknown_column_keys_message`）。所以後果從「跑完了但排錯東西、沒有任何訊息」降級成「跑不起來、訊息說得很清楚」。標記仍然要加：讓人一開始就不要寫，比讓他撞一次牆好。
 - 版本 ID 與不變量代號不重抄定義，只寫一句意思並指向 docstring。
 - 示例部署的業務詞（客戶、產品、廣告）不當框架詞，列在對應詞的 `_Avoid_`（ADR-0017）。
 - 格式照 `/domain-modeling` 的 CONTEXT-FORMAT：每個詞一兩句，同義詞列在 `_Avoid_`，依主題分小節。

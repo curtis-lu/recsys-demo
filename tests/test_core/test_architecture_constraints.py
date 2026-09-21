@@ -1180,11 +1180,18 @@ class TestS4NoFirstEntityColumn:
 SCHEMA_SCAN_ROOTS = {"src/recsys_tfb": SRC, "tests": TESTS}
 
 #: Column roles. ``get_schema`` reads these from ``schema.columns``; written one
-#: level up they are not read at all. Mirrors ``core/schema.py::_ROLE_KEYS``
-#: -- the full role list, which since #328 is a strict superset of
-#: ``_DEFAULTS`` (``time`` / ``entity`` / ``item`` have no default).
+#: level up they are not read at all. Mirrors
+#: ``core/schema.py::_SETTABLE_COLUMN_KEYS`` -- the full settable list, which
+#: since #328 is a strict superset of ``_DEFAULTS`` (``time`` / ``entity`` /
+#: ``item`` have no default) and since #378 also carries the optional roles.
+#:
+#: Spelled out rather than imported, as the rest of this module's constants
+#: are: an audit that reads its own subject cannot notice the subject losing a
+#: name. ``test_the_role_list_covers_every_settable_role`` compares the two,
+#: so the copy cannot drift the other way either -- which it had, between
+#: ``event`` landing and this line being written.
 SCHEMA_ROLE_KEYS = frozenset(
-    {"time", "entity", "item", "label", "score", "rank"}
+    {"time", "entity", "item", "label", "score", "rank", "event"}
 )
 
 #: The keys ``get_schema`` *derives* (``core/schema.py::_DERIVED_KEYS``). None
@@ -1339,14 +1346,26 @@ class TestS5SchemaColumnsLayer:
         just stops covering that role. #328 is the near miss: it changed
         which dict in ``core/schema`` holds the role list, and only the prose
         said so.
-        """
-        from recsys_tfb.core.schema import _ROLE_KEYS
 
-        assert SCHEMA_ROLE_KEYS == frozenset(_ROLE_KEYS), (
-            "S5's role list drifted from core/schema.py::_ROLE_KEYS. Mirror "
-            "the new list here (and check whether the new role belongs in "
-            "_REQUIRED_ROLES too). See S5 in "
-            "docs/agents/architecture-constraints.md."
+        **It then happened for real, which is why this compares against
+        ``_SETTABLE_COLUMN_KEYS`` and not ``_ROLE_KEYS``.** #378 added the
+        seventh role (``event``) to its own tuple, ``OPTIONAL_ROLE_KEYS``,
+        precisely so it would stay out of ``_ROLE_KEYS`` and therefore out of
+        the version hash for deployments that never declare it. This
+        assertion, pinned to ``_ROLE_KEYS``, stayed green throughout -- and
+        S5 quietly stopped covering the new role, so a mis-nested ``event:``
+        was dropped in silence, moved no version ID, and ranked the
+        undeclared shape. The subject of this mirror is "every name that
+        belongs under ``columns``", which is the union, not the required
+        half.
+        """
+        from recsys_tfb.core.schema import _SETTABLE_COLUMN_KEYS
+
+        assert SCHEMA_ROLE_KEYS == frozenset(_SETTABLE_COLUMN_KEYS), (
+            "S5's role list drifted from "
+            "core/schema.py::_SETTABLE_COLUMN_KEYS. Mirror the new list here "
+            "(and check whether the new role belongs in _REQUIRED_ROLES "
+            "too). See S5 in docs/agents/architecture-constraints.md."
         )
 
     def test_the_derived_key_list_matches_core_schema(self):

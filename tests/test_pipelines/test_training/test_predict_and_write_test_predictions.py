@@ -666,3 +666,110 @@ def test_data_volume_names_are_fixed_and_identity_travels_as_fields(tmp_path, ca
             ("2025-02-28", "prod_A"), ("2025-02-28", "prod_B"),
         ]
     }
+
+
+# ---------------------------------------------------------------------------
+# The written frame carries the optional roles' columns (#378)
+# ---------------------------------------------------------------------------
+
+
+def _make_event_test_parquet(tmp_path: Path) -> Path:
+    """Same shape, but one query group holds an item twice.
+
+    (c1, 2025-01-31, prod_A) appears as two impressions with different labels —
+    exactly what declaring `event` is for, and what the old grain could not
+    represent.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    rows = [
+        ("c1", "2025-01-31", "prod_A", "i1", 1.0, 1),
+        ("c1", "2025-01-31", "prod_A", "i2", 1.5, 0),
+        ("c1", "2025-01-31", "prod_B", "i3", 1.1, 0),
+    ]
+    df = pd.DataFrame(
+        rows,
+        columns=["cust_id", "snap_date", "prod_name", "imp_id", "feat_a", "label"],
+    )
+    root = tmp_path / "test_event.parquet"
+    pq.write_to_dataset(
+        pa.Table.from_pandas(df, preserve_index=False),
+        root_path=str(root), partition_cols=["snap_date", "prod_name"],
+    )
+    return root
+
+
+def _make_event_parameters() -> dict:
+    params = _make_parameters()
+    params["schema"] = {
+        "columns": {**params["schema"]["columns"], "event": "imp_id"}
+    }
+    params["dataset"] = {"test_snap_dates": ["2025-01-31"]}
+    return params
+
+
+def test_the_written_frame_carries_the_event_column(tmp_path):
+    """The prediction frame is a hardcoded column list — there is no "carry
+    everything else" path — so the `event` columns have to be added to it by
+    name. Without that the published table holds several rows per item that
+    nothing can tell apart, and evaluation's duplicate check raises on a table
+    that was correct when it was written.
+
+    A39 is the gate that stops a catalog entry dropping the column; this is
+    the other half, that the frame had it in the first place.
+    """
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.pipelines.training.nodes import (
+        predict_and_write_test_predictions,
+    )
+
+    handle = ParquetHandle(path=str(_make_event_test_parquet(tmp_path)))
+    model = MagicMock()
+    model.predict.side_effect = lambda X: np.arange(len(X)).astype(float) + 0.5
+    model.__class__.__name__ = "LightGBMAdapter"
+    write_ds = _write_ds()
+
+    predict_and_write_test_predictions(
+        model=model,
+        test_parquet_handle=handle,
+        preprocessor_metadata=_make_prep_meta(),
+        parameters=_make_event_parameters(),
+        training_eval_predictions=write_ds,
+    )
+
+    written = pd.concat(write_ds.saved, ignore_index=True)
+    assert "imp_id" in written.columns
+    # The two impressions of prod_A stay two distinguishable rows.
+    prod_a = written[written["prod_name"] == "prod_A"]
+    assert len(prod_a) == 2
+    assert set(prod_a["imp_id"]) == {"i1", "i2"}
+
+
+def test_no_event_column_is_added_when_the_role_is_undeclared(tmp_path):
+    """The compatibility half: the frame every existing deployment writes must
+    be unchanged, column for column."""
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.pipelines.training.nodes import (
+        predict_and_write_test_predictions,
+    )
+
+    handle = ParquetHandle(path=str(_make_test_parquet(tmp_path)))
+    model = MagicMock()
+    model.predict.side_effect = lambda X: np.arange(len(X)).astype(float) + 0.5
+    model.__class__.__name__ = "LightGBMAdapter"
+    write_ds = _write_ds()
+
+    predict_and_write_test_predictions(
+        model=model,
+        test_parquet_handle=handle,
+        preprocessor_metadata=_make_prep_meta(),
+        parameters=_make_parameters(),
+        training_eval_predictions=write_ds,
+    )
+
+    written = pd.concat(write_ds.saved, ignore_index=True)
+    assert list(written.columns) == [
+        "cust_id", "score", "score_uncalibrated", "label", "snap_date",
+        "prod_name",
+    ]

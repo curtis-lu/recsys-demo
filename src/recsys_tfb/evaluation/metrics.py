@@ -27,6 +27,7 @@ pipeline run on Spark — see ``recsys_tfb.evaluation.metrics_spark``.
 """
 
 import logging
+from collections.abc import Sequence
 from typing import Optional
 
 import numpy as np
@@ -91,6 +92,7 @@ def compute_mean_ap(
     items: np.ndarray,
     y_true: np.ndarray,
     y_score: np.ndarray,
+    event_keys: Sequence[np.ndarray] = (),
 ) -> float:
     """Mean of per-group Average Precision.
 
@@ -107,15 +109,21 @@ def compute_mean_ap(
     ``for g in np.unique(groups): mask = groups == g`` is ``O(N × G)`` and
     becomes unusable at production scale (5M rows × 200k groups ~ 10 min).
 
-    Tied y_score within a group resolves by ``items`` ascending — the rule the
-    Spark metrics rank with, :mod:`recsys_tfb.utils.ranking` — so the same rows
-    score the same whatever order they arrive in. ``items`` only breaks ties.
+    Tied y_score within a group resolves by ``items`` ascending, then by each
+    array of ``event_keys`` — the rule the Spark metrics rank with,
+    :mod:`recsys_tfb.utils.ranking` — so the same rows score the same whatever
+    order they arrive in. Neither only breaks ties.
+
+    ``event_keys`` is empty unless the deployment declares ``event``, in which
+    case one query group can hold the same item more than once and ``items``
+    alone no longer separates every pair of rows. Empty reproduces the
+    pre-#378 order exactly.
     """
     if len(groups) == 0:
         return 0.0
 
-    # Each group's rows contiguous, score descending, ties by item ascending.
-    sort_idx = order_by_score_then_item(groups, y_score, items)
+    # Each group's rows contiguous, score descending, ties by item then event.
+    sort_idx = order_by_score_then_item(groups, y_score, items, event_keys)
     g_sorted = groups[sort_idx]
     y_sorted = y_true[sort_idx].astype(np.float64, copy=False)
 
@@ -151,6 +159,7 @@ def positive_row_contributions(
     y_true: np.ndarray,
     y_score: np.ndarray,
     k: Optional[int] = None,
+    event_keys: Sequence[np.ndarray] = (),
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-positive-row AP contribution + original-order row indices.
 
@@ -175,7 +184,7 @@ def positive_row_contributions(
     if len(groups) == 0:
         return np.array([], dtype=np.float64), np.array([], dtype=np.int64)
 
-    sort_idx = order_by_score_then_item(groups, y_score, items)
+    sort_idx = order_by_score_then_item(groups, y_score, items, event_keys)
     g_sorted = groups[sort_idx]
     y_sorted = y_true[sort_idx].astype(np.float64, copy=False)
 
@@ -282,6 +291,7 @@ def compute_macro_per_item_map(
     min_positives: int = 0,
     shrinkage_k: float = 0.0,
     weights: Optional[np.ndarray] = None,
+    event_keys: Sequence[np.ndarray] = (),
 ) -> float:
     """Macro average over items of per-item attributed mAP@k.
 
@@ -336,9 +346,14 @@ def compute_macro_per_item_map(
     aggregation via ``np.unique`` + ``np.bincount``. ``items`` is both the
     tie-break and the per-item key, so HPO may pass the order-preserving codes
     of :func:`recsys_tfb.utils.ranking.item_sort_codes` in place of the values.
+
+    ``event_keys`` is only the tie-break, never a per-item key: with ``event``
+    declared, one item's several rows in a query group still all attribute to
+    that item, which is what makes the per-item macro comparable across the
+    two shapes.
     """
     contrib_all, row_idx = positive_row_contributions(
-        groups, items, y_true, y_score, k
+        groups, items, y_true, y_score, k, event_keys
     )
     # Validate/broadcast before the empty-input return so a malformed weight
     # vector raises regardless of whether the input happened to be empty.

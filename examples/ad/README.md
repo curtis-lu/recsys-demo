@@ -58,8 +58,8 @@ campaign_dim   ┘
 
 | 形狀 | 有沒有 | 誰要用 |
 |---|---|---|
-| 同一週、同一 (使用者, 版位, 素材) 被曝光多次 | 有 | #378 event |
-| 一個 (使用者, 版位) 一週的曝光次數超過 item 種數 12（`"all"` 不截斷才驗得到） | 有：全部 99 組、test 週 10 組，最多 19 次 | #378 event |
+| 同一週、同一 (使用者, 版位, 素材) 被曝光多次 | 有 | #378 event（已用上） |
+| 一個 (使用者, 版位) 一週的曝光次數超過 item 種數 12（`"all"` 不截斷才驗得到） | 有：全部 99 組、test 週 10 組，最多 19 次 | #378 event（已用上） |
 | 逐筆曝光的即時特徵 | 有：`feature_realtime`，一次曝光一列，鍵是 `(snap_date, user_id, slot_id, ad_creative, impression_id)`。23% 的曝光在前 30 分鐘瀏覽過活動同類內容，這些曝光的點擊率 28.7%，其餘 10.9%；同一週同一 (使用者, 版位, 素材) 曝光不只一次的 8,545 組裡，有 3,416 組（40%）這個值不是每次都一樣 | #378、#380 |
 | 算即時特徵時偷看的後果 | 有：點擊後 5 分鐘內會瀏覽同類內容（一半就在點擊那一秒），窗口放到曝光那一秒或之後，「有沒有瀏覽」幾乎就是「有沒有點」。`check_features.py` 擋得住（變異檢查見〈怎麼跑〉） | #380 的 as-of 文件與範例 |
 | 使用者特徵、版位特徵各自的粒度 | 有：`feature_user`（snap_date, user_id）、`feature_slot`（snap_date, slot_id） | #380 多張特徵表 |
@@ -148,7 +148,7 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 
 | 功能 | 這份 conf 現在的寫法 | 哪張票打開 |
 |---|---|---|
-| `event` 角色 | 不宣告；`label_table.sql` 把同一週同一素材的多次曝光聚合成一列（`MAX(clicked)`）。打開時 label／sample_pool 改成一次曝光一列，event 欄用 `impression_id`（`feature_realtime` 已用它當鍵） | #378 |
+| `event` 角色 | **已打開**（#378）：`event: impression_id`，`label_table.sql` 與 `sample_pool.sql` 都是一次曝光一列，兩張表的 `primary_key` 與 `training_eval_predictions` 的 catalog 欄位都含 `impression_id`。逐筆的即時特徵還接不上（要 #380），所以同一素材在一組裡的多列分數相同、全是同分——報表的〈完整性檢查〉印出同分列佔比。怎麼用見 [`one-row-per-event.md`](../../docs/operations/user-guides/one-row-per-event.md) | #378（完成） |
 | item 清單從資料數 | item 清單（`schema.categorical_values.ad_creative`）逐一列出 12 種，包括 train 沒有的 `c04-video`；離線推論的候選 `inference.products` 另外照抄一份（A4 要求兩者相同） | #379 |
 | 多張特徵表 | 只宣告一張 `feature_table`；使用者、版位兩種粒度已在 `feature_user`、`feature_slot` 分開算好，打開時可以直接各當一張；逐筆曝光的 `feature_realtime` 已算好，要等 event 角色才接得上 | #380 |
 | 預測品質指標家族 | 不開 | #381 |

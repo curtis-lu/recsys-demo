@@ -24,7 +24,7 @@ from examples.ad.generate_data import (
 )
 from recsys_tfb.core.config import ConfigLoader
 from recsys_tfb.core.consistency import resolved_env_dir, validate_config_consistency
-from recsys_tfb.core.schema import validate_schema_config
+from recsys_tfb.core.schema import get_schema, validate_schema_config
 
 REPO = Path(__file__).resolve().parents[2]
 CONF = REPO / "examples" / "ad" / "conf"
@@ -55,8 +55,28 @@ def test_schema_roles_follow_adr_0021(params):
     assert cols["time"] == "snap_date"
     assert isinstance(cols["entity"], list) and len(cols["entity"]) == 2
     assert isinstance(cols["item"], str)
-    # 讀原始 params 而不是 get_schema()：後者只保留已知角色，宣告了也看不到
-    assert "event" not in cols
+    # #378 之後這份 conf 宣告 event ＝ 一次曝光一列。
+    assert cols["event"] == "impression_id"
+
+
+def test_event_widens_identity_but_not_the_query_group(params):
+    """這份 conf 是「形狀一」（ADR-0025）：同一個 entity × 一個時段是一個 query
+    group，同一個 item 在裡面可以有多列。event 進 identity、不進分組——進了分組
+    每次曝光就自成一組、組內只有一列，mAP 恆為 1。"""
+    schema = get_schema(params)
+    assert schema["identity_columns"] == [
+        "snap_date", "user_id", "slot_id", "ad_creative", "impression_id",
+    ]
+    assert schema["query_group_columns"] == ["snap_date", "user_id", "slot_id"]
+    assert schema["base_key_columns"] == ["snap_date", "user_id", "slot_id"]
+
+
+def test_both_candidate_grain_source_tables_declare_the_event_column(params):
+    """B11 擋的是執行期；這一條擋的是 conf 本身——primary_key 少列 impression_id，
+    max_duplicate_key_ratio: 0.0 會把同一素材本週的多次曝光判成重複鍵。"""
+    for stage in ("label_etl", "sample_pool_etl"):
+        for table in params[stage]["tables"]:
+            assert "impression_id" in table["primary_key"], table["name"]
 
 
 def test_generated_items_equal_the_declared_list(params, raw):

@@ -422,12 +422,53 @@ Layer 1 — config-static (implemented here; aggregated by
   single pipeline, because the version IDs every command resolves are computed
   from these subtrees. Not a migration tool with a delete-by date, unlike A33:
   the mechanism is gone, not renamed.
+* A38 — an optional-role column (``schema.columns.event``; ``occasion`` joins
+  it when that role lands) declared in
+  ``dataset.prepare_model_input.categorical_columns``. Identity columns have
+  one way of becoming model features — being listed there — and ``schema.item``
+  uses it (A2 *requires* it to). The optional roles deliberately do not get
+  that exit: an impression id is a row label, and a model that splits on it
+  memorises which impressions were clicked (ADR-0025). A second-resolution
+  ``event`` timestamp is worse than useless rather than merely useless — it
+  correlates with the fatigue effect the generator puts in the example data,
+  so it trains and evaluates well and generalises to nothing. "Which hour the
+  impression happened" as a feature is a column computed in a feature table,
+  not the identity column reused. Predicate:
+  ``optional_role_as_feature_errors``. Aggregated by
+  ``validate_config_consistency``, like A1/A2: it takes parameters alone, and
+  the mistake costs a whole training run to find otherwise — the column
+  reaches ``model_input``, is encoded, and the run succeeds.
+* A39 — the prediction write target must declare every optional-role column,
+  for A28's reason and with A28's shape. ``HiveTableDataset.save`` ends with
+  ``df.select(*declared)``, so an ``event`` column the catalog entry never
+  declared is dropped in silence: the published table then holds several rows
+  per item that nothing can tell apart, and evaluation's identity duplicate
+  check raises on data that was correct when written. Separate code from A28
+  rather than a widened one: A28's message says "schema.entity is ...", and a
+  user who never declared an optional role should never read about one.
+  Predicate: ``optional_role_columns_declared_errors``. NOT aggregated, for
+  A28's reason — it needs the resolved catalog — and wired beside it.
+* A40 — evaluation's **monitoring** mode (no ``--post-training``) with an
+  optional role declared. Monitoring reads ``ranked_predictions``, which
+  offline inference writes: inference builds its candidates as entity x item
+  and ignores the optional roles entirely (ADR-0025 decision 1), so its rows
+  carry no ``event`` column while ``label_table`` does. Joining the two on
+  identity then matches nothing, or — if the join key silently narrows to the
+  columns both sides have — matches one prediction row against every
+  impression and inflates each query group. **Either way the answer is wrong
+  rather than missing**, which is ADR-0021 decision 5's reason for stopping at
+  the entry instead of letting the run produce a report. ``--post-training``
+  is fully supported: it reads ``training_eval_predictions``, which A39 makes
+  carry the columns. Predicate: ``optional_role_monitoring_errors`` (returns
+  errors; the evaluation command raises, collected with A22/A34). NOT
+  aggregated by ``validate_config_consistency``, for A22's reason: that gate
+  runs at the entry of every command and cannot see ``--post-training``.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
 flags), A22 (``--post-training``), A23/A24/A26/A27/A34/A36 (config keys whose
-harm belongs to one pipeline), A28 (the resolved catalog), A30 (``--env`` + the
-filesystem), A35 (the ``--var`` CLI flags).
+harm belongs to one pipeline), A28/A39 (the resolved catalog), A30 (``--env``
++ the filesystem), A35 (the ``--var`` CLI flags).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10
 implemented and wired):
@@ -591,6 +632,22 @@ implemented and wired):
   drops a large fraction — the bound would hold through a 2x fan-out and read
   as a passing gate. Residual risk, stated so it is not re-discovered as a bug:
   a duplicate key confined to a month that only val/test cover goes unseen.
+* B11 — ``sample_pool`` or ``label_table`` is missing a column a declared
+  optional role names (``schema.columns.event``; ``occasion`` joins it when
+  that role lands). Declaring the role widens ``identity_columns``, which is
+  what ``select_*_keys`` project by and what ``build_model_input`` LEFT joins
+  the labels on, so a source table without the column fails — but as a raw
+  Spark ``AnalysisException`` about an unresolved name, from whichever node
+  happens to touch it first, naming neither the role nor the other table. This
+  turns it into one message, before the label join, naming both. Checked
+  against ``DataFrame.columns`` (metastore metadata, no rows), so it costs
+  nothing and stays inside ADR-0006's cost invariant for this node.
+  ``feature_table`` is deliberately NOT checked: it is entity-level and joins
+  by ``base_key_columns``, which no optional role widens — requiring an
+  impression column there would be the ``occasion``-mis-classification ADR-0025
+  decision 2 warns about, written into a gate. Predicate:
+  ``optional_role_source_column_errors``. Wired in ``validate_data_consistency``
+  (``pipelines/dataset/nodes.py``) with the rest of Layer 2.
 
 Layer 3 — specified but DEFERRED (NOT implemented in this module yet); see
 the plan doc for the full table:
@@ -649,7 +706,7 @@ from __future__ import annotations
 import datetime as _datetime
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
@@ -657,7 +714,11 @@ import pandas as pd
 
 from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
-from recsys_tfb.core.schema import ENTITY_GROUPING_KEYS, get_schema
+from recsys_tfb.core.schema import (
+    OPTIONAL_ROLE_KEYS,
+    ENTITY_GROUPING_KEYS,
+    get_schema,
+)
 
 #: ``parameters`` key the CLI hands the A21-validated ``--rebuild-dates`` value
 #: to nodes under (values normalised to ``YYYY-MM-DD`` by
@@ -773,6 +834,230 @@ def override_unknown_items(parameters: dict) -> list[str]:
         if idx < len(parts) and parts[idx] not in declared:
             bad.add(parts[idx])
     return sorted(bad)
+
+
+def optional_role_column_map(parameters: dict) -> dict[str, list[str]]:
+    """``{role: [column, ...]}`` for every declared optional role; ``{}`` if none.
+
+    The one place this module asks "which columns did the user add by
+    declaring an optional role" — A38, A39, A40 and B11 all read it, so they
+    cannot disagree about the answer, and a second optional role is added to
+    :data:`~recsys_tfb.core.schema.OPTIONAL_ROLE_KEYS` alone.
+
+    Keyed by role rather than flattened because three of the four callers say
+    the role's name in their message, and a user who declared ``event`` must
+    never read about ``occasion``. Undeclared roles are absent rather than
+    mapped to ``[]``, so ``if not declared`` is the whole "nothing to check"
+    test.
+
+    Reads the resolved schema, not the raw config: that is what normalises a
+    one-column ``event: impression_id`` into a list.
+    """
+    schema = get_schema(parameters)
+    return {
+        role: cols
+        for role in OPTIONAL_ROLE_KEYS
+        if (cols := schema.get(role, []))
+    }
+
+
+def optional_role_columns(parameters: dict) -> list[str]:
+    """Every column an optional role declares, in identity order; ``[]`` if none.
+
+    The flat view of :func:`optional_role_column_map`, for the one caller that
+    writes the columns out rather than talking about them
+    (``training.nodes.predict_and_write_test_predictions``).
+    """
+    return [c for cols in optional_role_column_map(parameters).values() for c in cols]
+
+
+def optional_role_as_feature_errors(parameters: dict) -> list[str]:
+    """(A38) an optional-role column must not be declared a categorical feature.
+
+    Returns error strings (empty list when fine), collected by
+    :func:`validate_config_consistency`.
+
+    Identity columns have exactly one way of becoming model features — being
+    listed in ``dataset.prepare_model_input.categorical_columns`` — and
+    ``schema.item`` takes it, so much so that A2 *requires* it to. The optional
+    roles do not get that exit. An impression id is a row label: a tree that
+    splits on it memorises which impressions were clicked, and the split
+    survives every check the framework runs because the column is genuinely in
+    the training data. A second-resolution ``event`` timestamp is the worse
+    case, because it is not noise — it moves with whatever the deployment's
+    within-week dynamics are (in this repo's ad example, the generator's
+    fatigue effect), so the model trains well, evaluates well offline, and has
+    learnt something that does not exist at serving time.
+
+    The legitimate want behind the mistake — "let the model see what time of
+    day the impression was" — is a column computed in a feature table, not the
+    identity column reused. The message says so, because a gate that only
+    refuses sends the user looking for a way around it.
+
+    Collect-all across roles and columns: a config that lists two of them
+    should be fixed in one pass.
+    """
+    declared = _prepare_model_input(parameters).get("categorical_columns")
+    if not declared:
+        return []
+    role_of = {
+        col: role
+        for role, cols in optional_role_column_map(parameters).items()
+        for col in cols
+    }
+    offenders = [c for c in declared if c in role_of]
+    if not offenders:
+        return []
+    return [
+        f"(A38) {col!r} is declared by schema.columns.{role_of[col]} and also "
+        f"listed in dataset.prepare_model_input.categorical_columns. A column "
+        f"in that list becomes a model feature (that is how schema.item "
+        f"becomes one), but {role_of[col]!r} names which row this is, not "
+        f"anything about the candidate: a model that splits on it memorises "
+        f"individual rows, and an event timestamp additionally correlates "
+        f"with within-period effects that do not exist at serving time. "
+        f"Remove {col!r} from categorical_columns; to feed the model "
+        f"something about when the event happened, compute that as its own "
+        f"column in a feature table."
+        for col in offenders
+    ]
+
+
+def optional_role_columns_declared_errors(
+    parameters: dict,
+    declared_columns: list[str] | None,
+    target_name: str,
+) -> list[str]:
+    """(A39) the prediction write target must declare every optional-role column.
+
+    Returns error strings (empty list when fine); the training command raises.
+    A28's shape exactly — including ``None`` meaning ``columns: "auto"``, which
+    declares nothing and so drops nothing — and A28's reason:
+    ``HiveTableDataset.save`` ends with ``df.select(*declared)``, so a column
+    the catalog entry never named is dropped there with no error and no log
+    line.
+
+    What makes it worth its own code rather than a widened A28: the failure
+    downstream is different and reads as a data problem. Dropping an entity
+    column publishes rows that identify the wrong thing; dropping an ``event``
+    column publishes several rows per item that nothing can tell apart, so
+    evaluation's identity duplicate check raises on a table that was correct
+    when it was written, and the operator goes looking upstream at
+    ``label_table``. Naming the role in the message is what shortens that.
+
+    A deployment that declares no optional role gets an empty list without
+    reading the catalog's declaration at all.
+    """
+    if declared_columns is None:
+        return []
+
+    errors: list[str] = []
+    for role, role_cols in optional_role_column_map(parameters).items():
+        missing = [c for c in role_cols if c not in declared_columns]
+        if missing:
+            errors.append(
+                f"(A39) catalog entry {target_name!r} does not declare "
+                f"{role} column(s) {missing}; schema.columns.{role} is "
+                f"{role_cols}. A Hive save keeps only declared columns, so "
+                f"those columns would be dropped from every written row "
+                f"without an error — leaving several indistinguishable rows "
+                f"per item in the published table. Add them to that entry's "
+                f"`columns:`."
+            )
+    return errors
+
+
+#: The source tables B11 requires an optional role's columns in, mapped to the
+#: config key whose SQL produces each. ``feature_table`` is deliberately absent
+#: — see B11 in the module docstring.
+_OPTIONAL_ROLE_SOURCE_TABLES = ("sample_pool", "label_table")
+
+
+def optional_role_source_column_errors(
+    parameters: dict,
+    columns_by_table: Mapping[str, Sequence[str]],
+) -> list[str]:
+    """(B11) every declared optional-role column exists in both source tables.
+
+    Returns error strings (empty list when fine), collected by
+    ``validate_data_consistency``.
+
+    Pure: the caller reads ``DataFrame.columns`` (metastore metadata, no rows)
+    and hands the lists in, the same arrangement A28/A39 use for the catalog.
+
+    Declaring ``event`` widens ``identity_columns``, and that is what
+    ``select_*_keys`` project ``sample_pool`` by and what ``build_model_input``
+    LEFT joins ``label_table`` on. A table missing the column therefore already
+    fails — as an ``AnalysisException`` about an unresolved name, raised by
+    whichever node reached it first, naming neither the role that asked for the
+    column nor the other table that may be missing it too. One message, both
+    tables, before the label join.
+
+    Collect-all across tables and columns: two tables built from the same
+    upstream query are usually missing the same column, and reporting one per
+    run would cost two passes to learn that.
+    """
+    role_columns = optional_role_column_map(parameters)
+    if not role_columns:
+        return []
+
+    errors: list[str] = []
+    for table in _OPTIONAL_ROLE_SOURCE_TABLES:
+        present = set(columns_by_table.get(table, ()))
+        for role, cols in role_columns.items():
+            missing = [c for c in cols if c not in present]
+            if not missing:
+                continue
+            errors.append(
+                f"B11: {table} is missing column(s) {missing}, declared by "
+                f"schema.columns.{role}. Declaring {role!r} makes those "
+                f"columns part of a candidate row's identity, which is what "
+                f"the keys are projected by and what the labels are joined "
+                f"on — every row of both {' and '.join(_OPTIONAL_ROLE_SOURCE_TABLES)} "
+                f"must carry them. Add them to that table's source SQL, or "
+                f"remove the {role!r} declaration."
+            )
+    return errors
+
+
+def optional_role_monitoring_errors(
+    parameters: dict, post_training: bool
+) -> list[str]:
+    """(A40) monitoring-mode evaluation is refused when an optional role is
+    declared.
+
+    Returns error strings (empty list when fine); the evaluation command
+    raises. Takes the flag rather than reading it, so the predicate stays pure
+    the way A22's does.
+
+    Monitoring evaluates what offline inference published, and inference
+    ignores the optional roles by design: its candidates are the framework's
+    own entity x item grid, where no impression exists to name. So its rows
+    have no ``event`` column and ``label_table``'s rows do. What comes out of
+    joining those two is not a smaller answer but a wrong one — the reason
+    ADR-0021 decision 5 puts this at the CLI entry rather than letting the run
+    finish and produce a report someone reads.
+
+    The message names ``--post-training`` because that is the mode that works,
+    not as advice to try a flag at random: it reads
+    ``training_eval_predictions``, whose rows A39 makes carry the columns.
+    """
+    declared = optional_role_column_map(parameters)
+    if post_training or not declared:
+        return []
+    named = "; ".join(
+        f"schema.columns.{role}={cols}" for role, cols in declared.items()
+    )
+    return [
+        f"(A40) evaluation's monitoring mode cannot be used while an optional "
+        f"column role is declared ({named}). Monitoring evaluates "
+        f"ranked_predictions, which offline inference writes from its own "
+        f"entity x item candidate grid — those rows carry no such column, "
+        f"while label_table's do, so the two sides identify rows differently "
+        f"and the join produces a wrong answer rather than a missing one. "
+        f"Run evaluation with --post-training, which reads "
+        f"training_eval_predictions."
+    ]
 
 
 def item_missing_from_categorical(parameters: dict) -> bool:
@@ -1780,6 +2065,11 @@ def validate_config_consistency(parameters: dict) -> None:
             f"task the item must be a model feature; add {item!r} back."
         )
 
+    # A38 — the mirror image of A2, one line below it on purpose: the item
+    # MUST take the categorical_columns exit and an optional role MUST NOT,
+    # and the two rules read as one decision only when they sit together.
+    errors.extend(optional_role_as_feature_errors(parameters))
+
     mm = inference_products_mismatch(parameters)
     if mm["only_in_inference"] or mm["only_in_categorical"]:
         errors.append(
@@ -2447,6 +2737,7 @@ class SplitRowCounts(NamedTuple):
 
 def model_input_grain_errors(
     by_split: Mapping[str, SplitRowCounts],
+    identity_columns: Sequence[str] | None = None,
 ) -> list[str]:
     """B10 invariant — the single definition.
 
@@ -2473,6 +2764,18 @@ def model_input_grain_errors(
 
     Collect-all and sorted by split: two runs of the same config read the same
     way, and one investigation covers every offending split.
+
+    **The rule did not change when ``event`` arrived; the wording did.** A
+    duplicated join key is still an upstream table being wrong, and the two
+    impressions of one item are not a duplicated key — they differ in the
+    ``event`` columns, which are part of identity (ADR-0025's correction to
+    ADR-0021, which had called this a reversal of meaning). What a reader of
+    this message cannot otherwise tell is *which* columns count as one key
+    here, and that is the half that moves with the declared roles. So
+    ``identity_columns`` is named in the message when the caller passes it.
+    Optional rather than required: the predicate stays callable from a test
+    that only cares about the counts, and an omitted list simply drops that
+    clause.
     """
     errors: list[str] = []
     for split in sorted(by_split):
@@ -2484,13 +2787,18 @@ def model_input_grain_errors(
         ratio = (
             f" ({model_input_rows / keys_rows:,.4f}x)" if keys_rows else ""
         )
+        key_clause = (
+            f" One key here is {list(identity_columns)}."
+            if identity_columns else ""
+        )
         errors.append(
             f"B10: {split}_model_input holds {model_input_rows:,} row(s) but "
             f"{split}_keys holds {keys_rows:,}{ratio}. build_model_input LEFT "
             f"joins the keys to label_table and to preprocessed_feature_table "
             f"on the keys' own grain, so the two counts can only differ if a "
             f"right table holds one of those join keys more than once — the "
-            f"silently N-times-too-large dataset that node's comment names. "
+            f"silently N-times-too-large dataset that node's comment names."
+            f"{key_clause} "
             f"Check the duplicate-key contract on label_table and on "
             f"feature_table (source_etl quality_checks: "
             f"max_duplicate_key_ratio, plus primary_key — A32 passes when both "

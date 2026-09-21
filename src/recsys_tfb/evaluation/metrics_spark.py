@@ -99,6 +99,43 @@ def _resolve_k_values(raw: Iterable, n_items: int) -> list[int]:
     return sorted(out)
 
 
+def _resolve_all_k(eval_predictions: SparkDataFrame, schema: dict, item_col: str) -> int:
+    """What ``k_values: "all"`` means for this frame — the K that truncates
+    nothing.
+
+    Two answers, because a query group's candidate count is two different
+    things depending on the declared roles:
+
+    * **No optional role declared** — the distinct item count, exactly as
+      before #378. One row per item per query group is guaranteed by the
+      duplicate checks, so the widest group is at most that many rows, and the
+      number is stable across frames in a way a row count is not (it is also
+      what the report's per-item K truncation reads). Left untouched so every
+      existing deployment's ``"all"`` resolves to the same integer.
+    * **``event`` declared** — the largest number of rows any one query group
+      holds. The item count would now truncate: one entity can be shown the
+      same twelve creatives thirty times in a week, which is thirty rows in
+      one query group against twelve distinct items, and ``map@12`` on a
+      30-row ranking silently answers a different question from the one
+      ``"all"`` names.
+
+    Costs one extra shuffle over the same frame in the declared case only —
+    a ``groupBy(query_group).count()`` whose driver-side result is a single
+    number — and nothing at all in the undeclared case.
+    """
+    if not schema.get("event"):
+        return eval_predictions.select(item_col).distinct().count()
+    per_group = (
+        eval_predictions.groupBy(*schema["query_group_columns"])
+        .agg(F.count(F.lit(1)).alias("_n_rows"))
+        .agg(F.max("_n_rows").alias("_max_rows"))
+        .collect()[0]["_max_rows"]
+    )
+    # An empty frame has no widest group. 0 is what the item-count branch
+    # returns for the same frame, so the two branches degrade alike.
+    return int(per_group or 0)
+
+
 def _resolve_k_grids(
     parameters: dict, n_items: int
 ) -> tuple[list[int], list[int]]:
@@ -348,6 +385,30 @@ def compute_dataset_overview(
         "by_snap_date": _group(time_col),
         "by_item": _group(item_col),
     }
+    # The share of rows whose rank the tie-break decided rather than the score.
+    # Added ONLY when an optional role is declared, so every existing artifact
+    # stays value-for-value what it was; the extra shuffle is likewise only
+    # paid by a deployment that asked for the role.
+    #
+    # Why it is reported at all: with `event` declared and no per-impression
+    # features attached, every row of one item in one query group necessarily
+    # scores the same, so *everything* ties and the rank is decided entirely by
+    # `event` ascending. That direction is not neutral — an event timestamp
+    # ranks the earlier impression first, worth about 0.02 mAP on this repo's
+    # ad example (#378). The framework does not choose for the deployment
+    # (ADR-0025 rejected hashing the identity instead); it prints the number
+    # that says how much the choice could be worth here.
+    if schema.get("event"):
+        n_tied = (
+            eval_predictions.groupBy(*group_cols, schema["score"])
+            .agg(F.count(F.lit(1)).alias("_n"))
+            .filter(F.col("_n") > 1)
+            .agg(F.sum("_n").alias("_tied"))
+            .collect()[0]["_tied"]
+        )
+        n_tied = int(n_tied or 0)
+        result["totals"]["n_tied_rows"] = n_tied
+        result["totals"]["tied_row_share"] = (n_tied / n_rows) if n_rows else 0.0
     if active_seg_col:
         result["by_segment"] = _group(
             active_seg_col, with_queries=True, to_key=segment_key
@@ -361,16 +422,29 @@ def compute_dataset_overview(
 
 
 def rank_within_query(
-    df: SparkDataFrame, group_cols: list[str], score_col: str, item_col: str
+    df: SparkDataFrame,
+    group_cols: list[str],
+    score_col: str,
+    item_col: str,
+    event_cols: list[str] | None = None,
 ) -> SparkDataFrame:
     """Assign ``pos``: 1-based rank within each ``group_cols`` group, by ``score`` desc.
 
-    Ties go by ``item_col`` ascending — the rule inference publishes ``rank``
-    with (``utils.ranking.rank_by_score_then_item``), so re-ranking here gives
-    the same rows the same positions.
+    Ties go by ``item_col`` ascending, then by each of ``event_cols`` — the
+    rule inference publishes ``rank`` with
+    (``utils.ranking.rank_by_score_then_item``), so re-ranking here gives the
+    same rows the same positions.
+
+    ``event_cols`` is needed here and not in inference because only this side
+    can see more than one row per item in a query group: inference builds its
+    candidates as entity x item and ignores the role entirely (ADR-0025
+    decision 1). Absent or empty reproduces the pre-#378 window exactly.
     """
     return df.withColumn(
-        "pos", rank_by_score_then_item(group_cols, score_col, item_col)
+        "pos",
+        rank_by_score_then_item(
+            group_cols, score_col, item_col, event_cols or (),
+        ),
     )
 
 
@@ -690,12 +764,24 @@ def _compute_core(
     eval_predictions: SparkDataFrame,
     parameters: dict,
     segment_columns: Sequence[str],
+    *,
+    event_cols: Sequence[str],
 ) -> dict:
     """The fine-grained metric bundle (overall/per_item/per_segment/...).
 
     Body identical to the pre-refactor compute_all_metrics — no category,
     no dataset_overview. Used for both fine-grained and (on a collapsed DF)
     category-grain passes.
+
+    ``event_cols`` is passed in rather than read from ``parameters``, and has
+    no default, because **the two passes need different answers and the frame
+    does not say which**. The fine-grained pass gets
+    ``schema.columns.event``; the category pass gets ``()`` — see the call
+    sites. A default would make the category pass wrong by omission, which is
+    exactly how this was first written: it asked for the ``event`` column on a
+    frame ``collapse_to_categories`` had already aggregated it away from, and
+    Spark raised ``Column 'impression_id' does not exist`` halfway through
+    training.
     """
     schema = get_schema(parameters)
     item_col = schema["item"]
@@ -714,12 +800,14 @@ def _compute_core(
         name: v for name, v in metric_params(parameters).items() if name != "k"
     }
 
-    n_items = eval_predictions.select(item_col).distinct().count()
-    query_ks, item_ks = _resolve_k_grids(parameters, n_items)
+    all_k = _resolve_all_k(eval_predictions, schema, item_col)
+    query_ks, item_ks = _resolve_k_grids(parameters, all_k)
     n_queries_total = eval_predictions.select(*group_cols).distinct().count()
 
     # ---- Layer 1: row-level enrichment ----
-    df = rank_within_query(eval_predictions, group_cols, score_col, item_col)
+    df = rank_within_query(
+        eval_predictions, group_cols, score_col, item_col, event_cols,
+    )
     df = add_query_total_rel(df, group_cols, label_col)
 
     df_with_pos = df.filter(F.col("total_rel") > 0)
@@ -812,12 +900,33 @@ def compute_overall_per_item(
     *,
     segment_columns: Sequence[str] = (),
     with_category: bool = False,
+    event_cols: Sequence[str] | None = None,
 ) -> dict:
     """Slim metric bundle: ``overall`` + ``per_item`` (+ optional slices).
 
     Composes the same Layer-1/2/3 building blocks as ``_compute_core`` but
     skips per-item-segment, macro_avg, and dataset_overview. Used by the
     popularity baseline, whose report section consumes these keys.
+
+    ``event_cols`` names the tie-break columns after the item. ``None`` — every
+    caller but one — means "read ``schema.columns.event``", which is right for
+    any frame at candidate grain. The exception is this function's own
+    recursion for the category pass: ``collapse_to_categories`` aggregates by
+    (query group, category), so its output holds one row per pair and no
+    ``event`` column at all. That call passes ``()`` explicitly. Getting it
+    wrong is not a wrong number but an ``AnalysisException`` for a column the
+    frame does not have, raised in the middle of an evaluation run — which is
+    how it was found.
+
+    **Why this one defaults and ``_compute_core`` does not**, given the hazard
+    is identical: ``_compute_core`` is private with exactly two call sites, so
+    requiring the argument costs nothing and removes the footgun outright.
+    This one is read by a dozen tests that pass candidate-grain frames and
+    have no opinion about tie-breaks; requiring it there would make every one
+    of them state an answer it does not care about, which is how a required
+    argument turns into a copy-pasted one. The residual risk is a future
+    caller handing this a collapsed frame and forgetting — covered by
+    ``test_slim_category_pass_works_when_event_is_declared``.
 
     Slices (each costed against the model's matching pass, so the baseline
     comparison stays symmetric only when the model already computed them):
@@ -842,12 +951,15 @@ def compute_overall_per_item(
     eval_params = parameters.get("evaluation", {}) or {}
     _require_segment_columns_in_frame(eval_predictions, segment_columns)
     active_seg_col = segment_columns[0] if segment_columns else None
-    n_items = eval_predictions.select(item_col).distinct().count()
+    all_k = _resolve_all_k(eval_predictions, schema, item_col)
     # Same grids as _compute_core (metric.k on the per-item side only), so
     # baseline and model keys line up.
-    query_ks, item_ks = _resolve_k_grids(parameters, n_items)
+    query_ks, item_ks = _resolve_k_grids(parameters, all_k)
 
-    df = rank_within_query(eval_predictions, group_cols, score_col, item_col)
+    df = rank_within_query(
+        eval_predictions, group_cols, score_col, item_col,
+        schema.get("event", []) if event_cols is None else list(event_cols),
+    )
     df = add_query_total_rel(df, group_cols, label_col)
     df_with_pos = df.filter(F.col("total_rel") > 0)
     if df_with_pos.limit(1).count() == 0:
@@ -877,7 +989,12 @@ def compute_overall_per_item(
 
     if with_category and _build_category_mapping(parameters) is not None:
         collapsed = collapse_to_categories(eval_predictions, parameters)
-        result["category"] = compute_overall_per_item(collapsed, parameters)
+        # `event_cols=()`: the collapse has aggregated those columns away —
+        # see this function's docstring, and the twin call in
+        # `compute_all_metrics`.
+        result["category"] = compute_overall_per_item(
+            collapsed, parameters, event_cols=(),
+        )
     return result
 
 
@@ -944,7 +1061,12 @@ def compute_all_metrics(
     Queries with zero positives are excluded from the metric computation
     (AP is undefined when total_rel = 0).
     """
-    result = _compute_core(eval_predictions, parameters, segment_columns)
+    # The fine-grained pass ranks the rows as they were written: one per
+    # candidate, so `event` is what tells two rows of one item apart.
+    result = _compute_core(
+        eval_predictions, parameters, segment_columns,
+        event_cols=get_schema(parameters).get("event", []),
+    )
     result["dataset_overview"] = compute_dataset_overview(
         eval_predictions, parameters, segment_columns=segment_columns
     )
@@ -953,7 +1075,15 @@ def compute_all_metrics(
         collapsed = collapse_to_categories(
             eval_predictions, parameters, segment_columns=segment_columns
         )
-        cat = _compute_core(collapsed, parameters, segment_columns)
+        # The category pass ranks a DIFFERENT frame:
+        # `collapse_to_categories` groups by (query group, category) and takes
+        # max(score) / max(label), so it emits exactly one row per pair and
+        # the `event` columns are aggregated away. The category column already
+        # decides every tie, and asking for `event` here is asking for a
+        # column the frame does not have.
+        cat = _compute_core(
+            collapsed, parameters, segment_columns, event_cols=(),
+        )
         cat["dataset_overview"] = compute_dataset_overview(
             collapsed, parameters, segment_columns=segment_columns
         )

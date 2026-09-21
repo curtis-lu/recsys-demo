@@ -90,7 +90,7 @@ from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric._common import (
     ci_for_corrected_minus_baseline, diag_cfg, query_key, sample_arrays,
-    to_logit,
+    schema_skip_reason, to_logit,
 )
 from recsys_tfb.evaluation.metrics import compute_macro_per_item_map, metric_params
 
@@ -480,6 +480,16 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     }
     if not out["enabled"]:
         out["notes"].append("evaluation.diagnosis.config_shift.enabled = false——未計算。")
+        return out
+
+    # 目前宣告的 schema 下算不算得出來。放在「使用者關掉了」之後：兩者都讓
+    # 這一頁不存在，但理由不同，而先問的那一個會蓋掉另一個的原因字串——
+    # 使用者明說關掉時，該印的是他自己的設定，不是框架的判定。
+    skip = schema_skip_reason(parameters, "config_shift")
+    if skip:
+        out["enabled"] = False
+        out["skipped_reason"] = skip
+        out["notes"].append(skip)
         return out
 
     context_cols = _validate(sample_pdf, parameters, schema)

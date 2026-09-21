@@ -312,3 +312,51 @@ def test_a35_wired_into_run_etl_before_spark():
     assert src.index("check_renders(") < spark, (
         "check_renders must fail before the Spark cold start"
     )
+
+
+def test_a38_reaches_the_global_aggregator():
+    # A38 takes parameters alone and the mistake costs a whole training run to
+    # find otherwise, so it belongs on the aggregator beside A2 — the rule it
+    # mirrors. Behavioural half: TestOptionalRoleAsFeatureA38.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "optional_role_as_feature_errors" in inspect.getsource(
+        validate_config_consistency
+    )
+
+
+def test_a39_wired_into_training_command_before_spark():
+    # A39 needs the resolved catalog, which the aggregator never sees, so like
+    # A28 it lives on the training command. Source inspection for A22's
+    # reason; the behavioural half is TestOptionalRoleColumnsDeclaredA39.
+    src = inspect.getsource(m.training)
+    assert "optional_role_columns_declared_errors(" in src
+    assert src.index("optional_role_columns_declared_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A39 must fail before the Spark cold start, like A28"
+
+
+def test_a39_reads_the_same_catalog_entry_as_a28():
+    # One read, both predicates: an operator missing an entity column and an
+    # event column should fix one `columns:` list once, not learn about the
+    # second only after fixing the first.
+    src = inspect.getsource(m.training)
+    # The catalog is read once into a variable both predicates are handed.
+    # Asserting the shared name rather than two `get_dataset` calls is what
+    # makes a second, independently-read copy fail here.
+    assert src.count("getattr(") == 1, "the catalog entry is read once"
+    assert src.count("gate_declared") >= 3, (
+        "both A28 and A39 must be handed that one read"
+    )
+
+
+def test_a40_wired_into_evaluation_command_before_spark():
+    # A40 needs --post-training, which the aggregator never sees (A22's
+    # reason). The flag must be forwarded, not hardcoded: `True` would disable
+    # the gate entirely and `False` would block post-training runs too, and
+    # both keep the unit tests green because those call the predicate directly.
+    src = inspect.getsource(m.evaluation)
+    assert "optional_role_monitoring_errors(params, post_training)" in src
+    assert src.index("optional_role_monitoring_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A40 must fail before the Spark cold start, like A22"

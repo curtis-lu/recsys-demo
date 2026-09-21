@@ -1492,18 +1492,67 @@ class TestReadersRefuseAPartitionPreparedUnderOtherSettings:
 
 
 class TestCiConsumerEnabled:
+    """The gate reads the schema since #378, so every fixture here declares
+    one. A bare ``{}`` now raises the missing-role error rather than answering
+    — the same second gate ``get_schema`` applies to any caller that never
+    went through the CLI (#274)."""
+
+    @staticmethod
+    def _params(event=None, **evaluation):
+        columns = {"time": "snap_date", "entity": ["cust_id"],
+                   "item": "prod_name"}
+        if event is not None:
+            columns["event"] = event
+        return {"schema": {"columns": columns}, "evaluation": evaluation}
+
     def test_default_true(self):
         from recsys_tfb.pipelines.evaluation.nodes import (
             _ci_consumer_enabled,
         )
-        assert _ci_consumer_enabled({}) is True
+        assert _ci_consumer_enabled(self._params()) is True
 
     def test_respects_disabled(self):
         from recsys_tfb.pipelines.evaluation.nodes import (
             _ci_consumer_enabled,
         )
-        params = {"evaluation": {"diagnosis": {"ci": {"enabled": False}}}}
+        params = self._params(diagnosis={"ci": {"enabled": False}})
         assert _ci_consumer_enabled(params) is False
+
+    def test_false_when_an_optional_role_makes_it_inapplicable(self):
+        """The CI bootstraps on the driver through
+        ``positive_row_contributions``, which ranks within a query group by
+        item alone. With ``event`` declared that order is arbitrary, and the
+        interval would sit on the same report line as a Spark-computed point
+        estimate that used a different one."""
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            _ci_consumer_enabled,
+        )
+        assert _ci_consumer_enabled(self._params(event="imp_id")) is False
+
+    def test_the_registry_gate_also_sees_inapplicability(self):
+        """The sample is drawn iff *either* gate says yes, so fixing only the
+        CI one leaves the sample drawn for diagnoses that will refuse to run —
+        and the sample frame carries no optional-role column, so deduplicating
+        it by identity raises ``KeyError: ['imp_id']``. That is what the ad
+        example's evaluation died on before this gate learnt the same rule."""
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            _registry_diagnosis_enabled,
+        )
+        assert _registry_diagnosis_enabled(self._params()) is True
+        assert _registry_diagnosis_enabled(self._params(event="imp_id")) is False
+
+    def test_the_gate_and_the_consumer_agree(self):
+        """``compute_metric_ci`` raises when the gate says "nobody wants the
+        sample" while it still wants one. Both ask the same helper, so this
+        pins that they cannot drift into that state."""
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            _ci_consumer_enabled, compute_metric_ci,
+        )
+        params = self._params(event="imp_id")
+        assert _ci_consumer_enabled(params) is False
+        out = compute_metric_ci(None, params)
+        assert out["enabled"] is False
+        assert "imp_id" in out["skipped_reason"]
 
 
 class TestDrawDiagnosisSampleNode:
@@ -1650,11 +1699,18 @@ class TestRegistryDiagnosisEnabled:
     目的。
     """
 
+    #: 每個 fixture 都要帶 schema：#378 之後這個閘門除了 enabled 旗標，還問
+    #: 「目前宣告的 schema 下這項診斷算不算得出來」，而 ``get_schema`` 不接受
+    #: 一個沒宣告任何角色的設定。
+    _SCHEMA = {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+    }}
+
     def test_defaults_true(self):
         from recsys_tfb.pipelines.evaluation.nodes import (
             _registry_diagnosis_enabled,
         )
-        assert _registry_diagnosis_enabled({}) is True
+        assert _registry_diagnosis_enabled({"schema": self._SCHEMA}) is True
 
     def test_false_only_when_every_registry_diagnosis_disabled(self):
         import importlib
@@ -1664,7 +1720,7 @@ class TestRegistryDiagnosisEnabled:
         from recsys_tfb.pipelines.evaluation.nodes import (
             _registry_diagnosis_enabled,
         )
-        all_off = {"evaluation": {"diagnosis": {
+        all_off = {"schema": self._SCHEMA, "evaluation": {"diagnosis": {
             name: {"enabled": False} for name in DIAGNOSES
         }}}
         assert _registry_diagnosis_enabled(all_off) is False
@@ -1684,7 +1740,7 @@ class TestRegistryDiagnosisEnabled:
         ]
         assert sample_consumers, "registry 裡至少要有一項吃共用抽樣的診斷，否則這條測試是空的"
         for name in sample_consumers:
-            params = {"evaluation": {"diagnosis": {
+            params = {"schema": self._SCHEMA, "evaluation": {"diagnosis": {
                 other: {"enabled": other == name} for other in DIAGNOSES
             }}}
             assert _registry_diagnosis_enabled(params) is True, name
@@ -1836,13 +1892,37 @@ def test_diagnosis_fingerprint_moves_only_with_its_own_extra_keys():
 
 
 def test_generated_node_raises_when_enabled_but_sample_none():
+    """The wiring-bug message, which must stay reachable: enabled, applicable,
+    and still handed no sample means the gate really is out of sync."""
     import pytest as _pytest
 
     from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
 
     node_fn = make_diagnosis_node("config_shift")
+    params = {"schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+    }}}
     with _pytest.raises(ValueError, match="draw_diagnosis_sample_node"):
-        node_fn(None, {})
+        node_fn(None, params)
+
+
+def test_generated_node_stubs_instead_of_raising_when_not_applicable():
+    """An optional role makes this diagnosis inapplicable, so the sample gate
+    deliberately drew nothing — and the node must read that as a skip, not as
+    the wiring bug above. Getting this wrong is what ended the ad example's
+    evaluation with "gate out of sync with the consumer flag", pointing the
+    reader at a bug that was not there."""
+    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
+
+    node_fn = make_diagnosis_node("config_shift")
+    params = {"schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+        "event": "imp_id",
+    }}}
+    out = node_fn(None, params)
+    assert out["enabled"] is False
+    assert "imp_id" in out["skipped_reason"]
+    assert out["diagnosis"] == "config_shift"
 
 
 def test_generated_node_delegates_to_the_named_module(monkeypatch):

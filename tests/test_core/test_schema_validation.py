@@ -231,3 +231,119 @@ class TestGetSchemaForHash:
         schema = get_schema_for_hash({"schema": {"columns": _columns()}})
         assert set(schema) == set(_ROLE_KEYS) | {"categorical_values"}
         assert set(_DEFAULTS) < set(_ROLE_KEYS)
+
+
+class TestEventRoleShape:
+    """``event`` has ``entity``'s shape, checked by the same helper.
+
+    One helper rather than a second copy of the four checks: the two roles
+    really do accept the same thing, and two copies would be two messages to
+    keep in step. The role name is interpolated, so the user still reads about
+    the key they wrote.
+    """
+
+    def test_a_string_is_ok(self):
+        validate_schema_config(
+            {"schema": {"columns": _columns(event="impression_id")}}
+        )
+
+    def test_a_list_is_ok(self):
+        validate_schema_config(
+            {"schema": {"columns": _columns(event=["event_ts", "impression_id"])}}
+        )
+
+    def test_empty_list_raises(self):
+        with pytest.raises(ValueError, match="'event' list must not be empty"):
+            validate_schema_config({"schema": {"columns": _columns(event=[])}})
+
+    def test_empty_string_raises(self):
+        with pytest.raises(ValueError, match="'event' string must not be empty"):
+            validate_schema_config({"schema": {"columns": _columns(event="  ")}})
+
+    def test_a_non_string_element_raises(self):
+        with pytest.raises(ValueError, match="'event' element at index 1"):
+            validate_schema_config(
+                {"schema": {"columns": _columns(event=["impression_id", 7])}}
+            )
+
+    def test_wrong_type_raises(self):
+        with pytest.raises(ValueError, match="'event' must be a string or list"):
+            validate_schema_config({"schema": {"columns": _columns(event=7)}})
+
+
+class TestRolesMayNotOverlap:
+    """One column cannot hold two roles, and identity uniqueness is what says so.
+
+    Deliberately not a second rule: a column declared twice appears twice in
+    ``identity_columns``, so the duplicate check already in place catches every
+    overlap between ``time`` / ``entity`` / ``item`` / ``event``. A separate
+    overlap rule would be a second definition to keep in step with this one.
+    """
+
+    def test_event_colliding_with_item_raises(self):
+        with pytest.raises(ValueError, match="identity_columns contain duplicates"):
+            validate_schema_config(
+                {"schema": {"columns": _columns(event="prod_name")}}
+            )
+
+    def test_event_colliding_with_entity_raises(self):
+        with pytest.raises(ValueError, match="identity_columns contain duplicates"):
+            validate_schema_config(
+                {"schema": {"columns": _columns(event=["cust_id"])}}
+            )
+
+    def test_event_colliding_with_time_raises(self):
+        with pytest.raises(ValueError, match="identity_columns contain duplicates"):
+            validate_schema_config(
+                {"schema": {"columns": _columns(event="snap_date")}}
+            )
+
+    def test_two_event_columns_spelling_one_name_raises(self):
+        with pytest.raises(ValueError, match="identity_columns contain duplicates"):
+            validate_schema_config(
+                {"schema": {"columns": _columns(event=["imp_id", "imp_id"])}}
+            )
+
+
+class TestUnknownColumnKeysAtTheCliGate:
+    """The CLI entry refuses an unrecognised ``schema.columns`` key too.
+
+    ``get_schema`` refuses it as well; this is the gate a real run hits first,
+    seconds in, before a Spark session exists — the same two-gate arrangement
+    the required roles have.
+    """
+
+    def test_an_unknown_key_raises(self):
+        with pytest.raises(ValueError, match="Unknown key"):
+            validate_schema_config(
+                {"schema": {"columns": _columns(evnet="impression_id")}}
+            )
+
+    def test_every_unknown_key_is_reported_at_once(self):
+        with pytest.raises(ValueError) as exc:
+            validate_schema_config(
+                {"schema": {"columns": _columns(evnet="a", occassion="b")}}
+            )
+        message = str(exc.value)
+        assert "evnet" in message and "occassion" in message
+
+    def test_reported_before_a_missing_role(self):
+        """A typo'd role IS a missing role, so the omission message would send
+        the user to add a key they already wrote. The typo has to come first."""
+        with pytest.raises(ValueError) as exc:
+            validate_schema_config(
+                {"schema": {"columns": {"time": "snap_date", "itme": "prod_name"}}}
+            )
+        assert "Unknown key" in str(exc.value)
+
+    def test_the_framework_defaults_conf_is_unaffected(self):
+        """The no-op half, on the real config rather than a fixture: every key
+        this framework ships names a real role, so the gate changes nothing
+        for an existing deployment."""
+        from pathlib import Path
+
+        import yaml
+
+        root = Path(__file__).resolve().parents[2]
+        params = yaml.safe_load((root / "conf/base/parameters.yaml").read_text())
+        validate_schema_config(params)

@@ -24,8 +24,8 @@ _Avoid_: 產品、廣告、product
 一次排序的場合：同一刻、一起被排的那一組候選所屬的選用欄位角色，由一欄或多欄組成，例如請求 ID。宣告之後它是 query group 的一部分。
 _Avoid_: session、request、shortlist、場次；也不要叫它 event（event 分辨的是列，不界定誰跟誰比）
 
-**event**（ADR-0021、ADR-0025，尚未實作）:
-同一個 query group、同一個 item 底下有多筆時，用來分辨每一筆的選用欄位角色，由一欄或多欄組成，例如事件 ID 或到秒的時間戳。它不是 query group 的一部分。score 與 item 都相同的多筆，名次按 event 由小到大排。
+**event**（ADR-0021、ADR-0025）:
+同一個 query group、同一個 item 底下有多筆時，用來分辨每一筆的選用欄位角色，由一欄或多欄組成，例如事件 ID 或到秒的時間戳。它不是 query group 的一部分。宣告了才進 identity 與版本雜湊，宣告之後 `sample_pool` 與 `label_table` 都要帶齊那些欄，而且它不得成為特徵。
 _Avoid_: row_key、請求鍵、曝光鍵
 
 **label**:
@@ -36,7 +36,7 @@ _Avoid_: target、y
 模型給一筆候選的分數，是排出名次的依據。
 
 **rank**:
-一筆候選在所屬 query group 內依 score 由高到低的名次，從 1 起算。score 相同時按 item 由小到大排（照 item 本身的值比，數字就照數字大小）；這只讓名次可重現，不代表模型分得出高下。
+一筆候選在所屬 query group 內依 score 由高到低的名次，從 1 起算。score 相同時按 item 由小到大排，item 也相同時再按 event 各欄由小到大排（都照欄位本身的值比，數字就照數字大小）；這只讓名次可重現，不代表模型分得出高下。
 
 ### 排序的結構
 

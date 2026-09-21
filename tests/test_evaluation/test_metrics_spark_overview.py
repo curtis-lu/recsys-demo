@@ -230,3 +230,85 @@ def test_dataset_overview_null_keys_two_column_entity(
                   "positive_rate": 0 / 1, "n_queries": 0, "query_share": 0 / 4},
         },
     })
+
+
+# ---------------------------------------------------------------------------
+# `event` declared: the tied-row share, and what "all" resolves to (#378)
+# ---------------------------------------------------------------------------
+
+
+def _event_params():
+    return {"schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+        "label": "label", "score": "score", "rank": "rank",
+        "event": "imp_id"}},
+        "evaluation": {}}
+
+
+def _event_df(spark):
+    """One query group (c1 @ 20240331) holding A three times and B once.
+
+    Two of the three A rows score the same — that pair, and only it, has its
+    rank decided by the tie-break rather than by the score.
+    """
+    return spark.createDataFrame(
+        [
+            ("20240331", "c1", "A", "i1", 0.9, 1),
+            ("20240331", "c1", "A", "i2", 0.9, 0),
+            ("20240331", "c1", "A", "i3", 0.4, 0),
+            ("20240331", "c1", "B", "i4", 0.1, 0),
+            ("20240331", "c2", "A", "i5", 0.2, 0),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "imp_id", "score", "label"],
+    )
+
+
+def test_tied_row_share_is_absent_without_the_event_role(spark):
+    """The compatibility half: the artifact must stay value-for-value what it
+    was for every deployment that declares no optional role."""
+    totals = ms.compute_dataset_overview(_df(spark), _params())["totals"]
+    assert "n_tied_rows" not in totals
+    assert "tied_row_share" not in totals
+
+
+def test_tied_row_share_counts_rows_whose_rank_the_tiebreak_decided(spark):
+    totals = ms.compute_dataset_overview(_event_df(spark), _event_params())["totals"]
+    # The two 0.9 rows of (c1, A). The 0.4 and 0.1 rows are alone at their
+    # score, and c2's single row is alone in its query group.
+    assert totals["n_tied_rows"] == 2
+    assert totals["tied_row_share"] == pytest.approx(2 / 5)
+
+
+def test_tied_rows_are_counted_within_a_query_group_not_across(spark):
+    """c1 and c2 both hold a row scoring 0.2 — across the whole frame that is a
+    tie, but they are in different query groups and never compete, so neither
+    row's rank was decided by the tie-break."""
+    df = spark.createDataFrame(
+        [
+            ("20240331", "c1", "A", "i1", 0.2, 1),
+            ("20240331", "c2", "A", "i2", 0.2, 0),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "imp_id", "score", "label"],
+    )
+    totals = ms.compute_dataset_overview(df, _event_params())["totals"]
+    assert totals["n_tied_rows"] == 0
+
+
+def test_all_resolves_to_the_distinct_item_count_without_the_event_role(spark):
+    """Unchanged from before #378 — this is the number every existing
+    deployment's ``k_values: "all"`` already resolves to."""
+    schema = {"item": "prod_name", "query_group_columns": ["snap_date", "cust_id"]}
+    assert ms._resolve_all_k(_df(spark), schema, "prod_name") == 2
+
+
+def test_all_resolves_to_the_widest_query_group_with_the_event_role(spark):
+    """With `event` declared a query group can hold more rows than there are
+    items, and the item count would truncate the longest ranking — which is
+    exactly what "all" says it does not do."""
+    schema = {
+        "item": "prod_name",
+        "event": ["imp_id"],
+        "query_group_columns": ["snap_date", "cust_id"],
+    }
+    # 2 distinct items, but c1's group holds 4 rows.
+    assert ms._resolve_all_k(_event_df(spark), schema, "prod_name") == 4

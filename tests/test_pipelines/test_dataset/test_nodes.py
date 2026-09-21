@@ -640,6 +640,121 @@ class TestBuildModelInput:
             build_model_input(keys, pft, label_table, preprocessor, parameters)
 
 
+class TestBuildModelInputAtEventGrain:
+    """The same query group holding one item twice (#378).
+
+    The e2e run covers this too, but only end to end: these pin the two
+    properties the acceptance criteria name separately, so a regression says
+    which one broke rather than "the ad example died somewhere".
+    """
+
+    @staticmethod
+    def _event_params(parameters):
+        params = {k: v for k, v in parameters.items()}
+        schema = {k: v for k, v in params["schema"].items()}
+        schema["columns"] = {**schema["columns"], "event": "imp_id"}
+        params["schema"] = schema
+        return params
+
+    def _pft(self, feature_table, parameters):
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        return preprocessor, apply_preprocessor_to_features(
+            feature_table, preprocessor, _encode_plan(parameters), parameters,
+        )
+
+    def _keys(self, spark, n_events):
+        """One (snap_date, cust_id, prod_name) shown ``n_events`` times."""
+        return spark.createDataFrame(
+            pd.DataFrame({
+                "snap_date": pd.to_datetime([_SNAP_DATES[0]] * n_events),
+                "cust_id": [_ENTITIES[0]] * n_events,
+                "prod_name": [_PRODUCTS[0]] * n_events,
+                "imp_id": [f"i{i}" for i in range(n_events)],
+            })
+        )
+
+    def _event_labels(self, spark, positives):
+        """A label table at event grain, which is what declaring `event`
+        requires of it (B11 refuses one without the column — and the failure
+        without that gate is Spark's `USING column imp_id cannot be resolved`,
+        which names neither the role nor the other table)."""
+        return spark.createDataFrame(
+            pd.DataFrame({
+                "snap_date": pd.to_datetime([_SNAP_DATES[0]] * len(positives)),
+                "cust_id": [_ENTITIES[0]] * len(positives),
+                "prod_name": [_PRODUCTS[0]] * len(positives),
+                "imp_id": list(positives),
+                "label": [1] * len(positives),
+            })
+        )
+
+    def test_the_label_join_does_not_fan_out(
+        self, spark, feature_table, parameters
+    ):
+        """Three events of one item in one query group stay three rows, and
+        each takes its own answer.
+
+        The count alone cannot tell the widened join from the old one — both
+        give three rows here. The label values can: keyed on the old
+        (time, entity, item) all three would share one answer, so seeing 1/0/0
+        is what says the join used `imp_id`.
+        """
+        params = self._event_params(parameters)
+        preprocessor, pft = self._pft(feature_table, params)
+        keys = self._keys(spark, 3)
+        labels = self._event_labels(spark, ["i0"])
+
+        result = build_model_input(keys, pft, labels, preprocessor, params)
+
+        assert result.count() == keys.count() == 3
+        assert "imp_id" in result.columns
+        assert result.select("imp_id").distinct().count() == 3
+        got = {r["imp_id"]: r["label"] for r in result.collect()}
+        assert got == {"i0": 1, "i1": 0, "i2": 0}
+
+    def test_rows_differing_only_by_event_are_not_duplicates(
+        self, spark, feature_table, parameters
+    ):
+        """The grain gate compares `keys` against `model_input`, so three
+        events in one query group must pass it. Before #378 those three rows
+        were one candidate seen three times, and the run was supposed to
+        stop."""
+        from recsys_tfb.core.consistency import (
+            SplitRowCounts, model_input_grain_errors,
+        )
+
+        params = self._event_params(parameters)
+        preprocessor, pft = self._pft(feature_table, params)
+        keys = self._keys(spark, 3)
+        labels = self._event_labels(spark, ["i0"])
+        result = build_model_input(keys, pft, labels, preprocessor, params)
+
+        assert model_input_grain_errors(
+            {"train": SplitRowCounts(keys.count(), result.count())},
+            get_schema(params)["identity_columns"],
+        ) == []
+
+    def test_the_grain_gate_still_reports_a_real_fan_out(
+        self, spark, feature_table, label_table, parameters
+    ):
+        """The discriminating half: widening identity must not turn the gate
+        off. A right table holding a join key twice still diverges the counts,
+        and the message names the full identity so the reader knows which
+        columns make one key here."""
+        from recsys_tfb.core.consistency import (
+            SplitRowCounts, model_input_grain_errors,
+        )
+
+        params = self._event_params(parameters)
+        errors = model_input_grain_errors(
+            {"train": SplitRowCounts(3, 6)},
+            get_schema(params)["identity_columns"],
+        )
+        assert len(errors) == 1
+        assert "imp_id" in errors[0]
+        assert "2.0000x" in errors[0]
+
+
 class TestFitAndBuild:
     def _train_keys(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
