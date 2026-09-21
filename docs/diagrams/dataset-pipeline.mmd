@@ -38,16 +38,17 @@
 %%   所以它們共用 build_model_input，只有 test 有自己的 wrapper node。
 
 %% 落地與否為什麼要分開畫
-%%   圖上十四個產出裡只有兩個不落地：val_model_input_unfiltered 與
-%%   test_model_input_unfiltered。零正例 query group 會被 ranking metric 排除，
-%%   留著只是浪費 Hive 儲存與下游記憶體，所以只有 filter 過的版本落地。
+%%   圖上十六個產出裡有四個不落地：train_keys_unfiltered、train_dev_keys_unfiltered、
+%%   val_model_input_unfiltered、test_model_input_unfiltered。落地的都是整組抽樣
+%%   （*_zero_positive_group_ratio，ADR-0025 決定 3）之後的版本。train 那兩個在
+%%   keys 上抽、在建表之前，好讓粒度閘 B10 的「model_input 列數＝keys 列數」照樣成立。
 %%   圖上實線／虛線膠囊就是這件事。
 
 %% 刻意不畫
 %%   - parameters：每個 node 都吃，畫出來只會蓋掉真正的資料流。
 %%     *_month_plan 不屬於這一類——它是 pipeline.py 宣告的 input，是真實的邊。
-%%   - 函式名：四個 build node 共用 build_model_input、filter_val_model_input
-%%     的函式是 filter_groups_with_positives、select_sample_keys 的函式是
+%%   - 函式名：三個 build node 共用 build_model_input、filter_train_keys 與
+%%     filter_train_dev_keys 共用 filter_train_keys、select_sample_keys 的函式是
 %%     select_train_keys。圖上一律用 node name。
 %%   - AST 掃過，本 pipeline 的 node 沒有「宣告了但函式沒讀」的參數
 %%     （inference 圖上那種虛線邊，這裡沒有對應物）。
@@ -95,8 +96,12 @@ flowchart LR
     n_sel_val["select_val_keys"] --> d_val_keys(["val_keys"])
     n_sel_sample["select_sample_keys"] --> d_sample_keys(["sample_keys"])
     d_sample_keys --> n_split["split_train_keys"]
-    n_split --> d_train_dev_keys(["train_dev_keys"])
-    n_split --> d_train_keys(["train_keys"])
+    n_split --> d_train_dev_unf(["train_dev_keys_unfiltered"])
+    n_split --> d_train_unf(["train_keys_unfiltered"])
+    d_train_dev_unf --> n_f_traindev["filter_train_dev_keys<br/><small>＋ B ・ 無正例的組留 r</small>"]
+    d_train_unf --> n_f_train["filter_train_keys<br/><small>＋ B ・ 無正例的組留 r</small>"]
+    n_f_traindev --> d_train_dev_keys(["train_dev_keys"])
+    n_f_train --> d_train_keys(["train_keys"])
   end
 
   sample_pool --> n_sel_sample
@@ -119,10 +124,10 @@ flowchart LR
   subgraph BUILD[" 組裝 model input：keys ⨝ label ⨝ 編碼後 features "]
     direction TB
     n_b_test["build_test_model_input<br/><small>增量 ・ ＋ A · B · C · P<br/>test_keys 含全部月份，先過濾本次 to_process</small>"] --> d_test_unf(["test_model_input_unfiltered"])
-    d_test_unf --> n_f_test["filter_test_model_input<br/><small>增量 ・ 去掉零正例</small>"]
+    d_test_unf --> n_f_test["filter_test_model_input<br/><small>增量 ・ 無正例的組留 r</small>"]
     n_f_test --> o_test(["test_model_input"])
     n_b_val["build_val_model_input<br/><small>＋ A · B · C</small>"] --> d_val_unf(["val_model_input_unfiltered"])
-    d_val_unf --> n_f_val["filter_val_model_input<br/><small>去掉零正例 query group</small>"]
+    d_val_unf --> n_f_val["filter_val_model_input<br/><small>無正例的組留 r</small>"]
     n_f_val --> o_val(["val_model_input"])
     n_b_traindev["build_train_dev_model_input<br/><small>＋ A · B · C</small>"] --> o_traindev(["train_dev_model_input"])
     n_b_train["build_train_model_input<br/><small>＋ A · B · C</small>"] --> o_train(["train_model_input"])
@@ -144,8 +149,8 @@ flowchart LR
 
   class sample_pool,feature_table,label_table src
   class plan cfg
-  class n_sel_sample,n_split,n_sel_val,n_sel_test,n_fit,n_apply,n_b_train,n_b_traindev,n_b_val,n_b_test,n_f_val,n_f_test nd
+  class n_sel_sample,n_split,n_f_train,n_f_traindev,n_sel_val,n_sel_test,n_fit,n_apply,n_b_train,n_b_traindev,n_b_val,n_b_test,n_f_val,n_f_test nd
   class d_sample_keys,d_train_keys,d_train_dev_keys,d_val_keys,d_test_keys,d_catmap,d_pft data
-  class d_val_unf,d_test_unf mem
+  class d_train_unf,d_train_dev_unf,d_val_unf,d_test_unf mem
   class o_train,o_traindev,o_val,o_test,d_preprocessor out
   class gate gt

@@ -1757,3 +1757,51 @@ def test_overview_navigation_points_at_prediction_quality_only_when_drawn():
 
     assert nav(_pq_payload())
     assert not nav({"enabled": False})
+
+
+# --- ADR-0025 decision 3: the kept zero-positive groups, where they show -----
+
+def _kept_params(ratio, post_training=True):
+    p = _pq_params(post_training=post_training)
+    p["dataset"] = {"test_zero_positive_group_ratio": ratio}
+    return p
+
+
+def _weighted_pq_payload():
+    """``_pq_payload`` as ``build_payload`` lands it with the weight column."""
+    from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+
+    payload = _pq_payload()
+    payload["columns"]["weight"] = ZERO_POSITIVE_GROUP_WEIGHT_COL
+    return payload
+
+
+def test_dataset_overview_prints_the_test_ratio_and_the_kept_groups():
+    metrics = {**_metrics(), "n_excluded_queries": 7}
+    s = rb.build_dataset_overview_section(metrics, _kept_params(0.25))
+    assert "r＝0.25" in s.description
+    assert "7 個" in s.description
+    assert "1／r＝4" in s.description
+    assert "不是 regression" in s.description
+
+
+@pytest.mark.parametrize("ratio, post_training", [(0.0, True), (0.25, False)])
+def test_dataset_overview_says_nothing_when_no_zero_positive_group_was_kept(
+    ratio, post_training
+):
+    # ratio 0 kept none; monitoring mode never went through the dataset draw.
+    s = rb.build_dataset_overview_section(
+        _metrics(), _kept_params(ratio, post_training))
+    assert "test_zero_positive_group_ratio" not in s.description
+
+
+def test_prediction_quality_weighted_note_names_the_weight_and_the_ratio():
+    metrics = {**_metrics(), "n_queries": 12, "n_excluded_queries": 5}
+    text = _pq_text(rb.build_prediction_quality_section(
+        _weighted_pq_payload(), metrics, _kept_params(0.5)))
+    assert "zero_positive_group_weight" in text
+    assert "加權" in text
+    assert "r＝0.5" in text
+    # The old claim — only groups with a positive reached the table — would
+    # now be false.
+    assert "所以這些列只來自" not in text

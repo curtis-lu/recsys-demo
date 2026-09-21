@@ -94,9 +94,11 @@ label 0 ＝「可以選、沒有選」                  label 0 ＝「看到了�
 
 對策是只留同時有正例與負例的組再算指標（[#376](https://github.com/curtis-lu/recsys-demo/issues/376) 規劃中的開關，目前還沒有）。在它落地之前，用報表〈規模〉一段估計組有多小：全部列數 ÷ query 數就是平均每組幾列，越接近 1 問題越大。廣告示例 test 週是 1,921 ÷ 445 ≈ 4.3。
 
-### val／test 只留下有正例的組
+### val／test 預設只留下有正例的組
 
-dataset pipeline 在 val 與 test 只留至少有一個正例的組（`filter_groups_with_positives`）。組內排序指標本來就跳過沒有正例的組，所以 mAP 不受影響；受影響的是「算在過濾之前」的量——`dataset_overview` 的列數、正例率，在 test 上是過濾後母體的數字，比全部曝光的正例率高——廣告示例 test 週全部 3,871 次曝光的點擊率是 0.149，過濾後剩 1,921 列，報表印的正例率是 0.300。要留下一部分沒有正例的組是規劃中的功能（[#429](https://github.com/curtis-lu/recsys-demo/issues/429)）。
+dataset pipeline 在 val 與 test 預設只留至少有一個正例的組（`filter_val_model_input`／`filter_test_model_input`）。組內排序指標本來就跳過沒有正例的組，所以 mAP 不受影響；受影響的是「算在過濾之前」的量——`dataset_overview` 的列數、正例率，在 test 上是過濾後母體的數字，比全部曝光的正例率高——廣告示例在設定這個比例之前，test 週全部 3,871 次曝光的點擊率是 0.149，過濾後剩 1,921 列，報表印的正例率是 0.300。
+
+要留下一部分沒有正例的組，設 `dataset.val_zero_positive_group_ratio`／`dataset.test_zero_positive_group_ratio`（整組去留，留下的組的列帶權重 1／r；規則與限制見 [dataset.md §3.7](../../pipelines/dataset.md#37-沒有正例的-query-group-留多少)）。把每一列當二元預測的指標（預測品質指標家族）需要它；廣告示例已經設了。`lambdarank` 搭配形狀二這種小的 query group 時，train 端建議設 `train_zero_positive_group_ratio: 0` 且 `sample_ratio: 1`（只限 `lambdarank`，理由見同一節）。
 
 ## 宣告 `occasion` 要改哪些地方（缺一不可）
 

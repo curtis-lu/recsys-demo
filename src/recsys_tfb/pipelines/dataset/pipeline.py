@@ -63,7 +63,7 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
     """Build the dataset pipeline.
 
     Modes:
-      * default — the full DAG (15 nodes).
+      * default — the full DAG (17 nodes).
       * ``--only-test-months`` — the data gate plus the test chain, for a run
         that only adds ``test_snap_dates`` months. See
         :data:`ONLY_TEST_MONTHS_NODES`.
@@ -76,7 +76,9 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         apply_preprocessor_to_features,
         build_model_input,
         build_test_model_input,
-        filter_groups_with_positives,
+        filter_test_model_input,
+        filter_train_keys,
+        filter_val_model_input,
         fit_preprocessor_metadata,
         select_test_keys,
         select_train_keys,
@@ -108,7 +110,28 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         Node(
             split_train_keys,
             inputs=["sample_keys", "parameters"],
-            outputs=["train_keys", "train_dev_keys"],
+            outputs=["train_keys_unfiltered", "train_dev_keys_unfiltered"],
+        ),
+        # --- Drop part of the train-side query groups holding no positive
+        #     (dataset.train_zero_positive_group_ratio, ADR-0025 decision 3).
+        #     On the keys, before the builds, rather than on model_input like
+        #     val / test: B10 below pins each train-side model_input's row
+        #     count to the keys it was built from, and a drop after the build
+        #     would break that pairing on purpose. The default ratio 1 passes
+        #     the keys through untouched, so train_keys lands what the split
+        #     produced. The two `*_unfiltered` frames have no catalog entry;
+        #     resuming here re-runs the split (it is cheap: no shuffle). ---
+        Node(
+            filter_train_keys,
+            inputs=["train_keys_unfiltered", "label_table", "parameters"],
+            outputs="train_keys",
+            name="filter_train_keys",
+        ),
+        Node(
+            filter_train_keys,
+            inputs=["train_dev_keys_unfiltered", "label_table", "parameters"],
+            outputs="train_dev_keys",
+            name="filter_train_dev_keys",
         ),
         Node(
             select_val_keys,
@@ -206,27 +229,22 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
             outputs="test_model_input_unfiltered",
             name="build_test_model_input",
         ),
-        # --- Drop (time, *entity) groups with no positives. Applied to val/test
-        # only — these are evaluated by mAP, which excludes
-        # zero-positive groups anyway, so retaining them just wastes Hive
-        # storage and downstream predict / extract memory.
+        # --- Keep val / test's query groups holding a positive, and the share
+        #     of the ones holding none that dataset.{val,test}_zero_positive_
+        #     group_ratio asks for (ADR-0025 decision 3). At the default 0 this
+        #     is the filter these tables always had: a ranking metric cannot be
+        #     computed over a group with no positive. Above 0 the kept groups
+        #     serve the metrics that score every row as a binary prediction,
+        #     and the rows carry a design weight (1 or 1/r).
         #
-        # train / train_dev tables are NOT filtered here, and
-        # the reason is no longer "their losses use every row" — that holds
-        # for `binary` (pointwise, every row) and for `rank_xendcg` (its
-        # target distribution over an all-zero group is a random ranking, so
-        # it genuinely learns from those rows), but NOT for `lambdarank`,
-        # whose gradient contribution over such a group is exactly zero.
-        #
-        # So the drop is per-objective, and it happens at training time
-        # instead: `core.group_utils.objective_drops_zero_positive_groups`
-        # decides, `models/lightgbm_adapter.py` applies it to train /
-        # train_dev while building the lgb binary. It is not done here
-        # because these tables are shared across model_versions, and binding
-        # them to one objective would force a dataset rebuild on every
-        # objective switch. ---
+        #     train / train_dev are drawn on their keys instead (above), for
+        #     B10's sake. None of the four is bound to a training objective any
+        #     more: lambdarank still drops zero-positive groups at training
+        #     time (`core.group_utils.objective_drops_zero_positive_groups`),
+        #     and train ratio 0 merely moves that drop here — the table gets
+        #     smaller, the rows lambdarank trains on stay the same. ---
         Node(
-            filter_groups_with_positives,
+            filter_val_model_input,
             inputs=["val_model_input_unfiltered", "parameters"],
             outputs="val_model_input",
             name="filter_val_model_input",
@@ -235,7 +253,7 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         # which is already scoped. Re-filtering would only re-state the line
         # above. See ADR-0007 for the slicing scenario that was considered.
         Node(
-            filter_groups_with_positives,
+            filter_test_model_input,
             inputs=["test_model_input_unfiltered", "parameters"],
             outputs="test_model_input",
             name="filter_test_model_input",

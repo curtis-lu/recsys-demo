@@ -251,7 +251,55 @@ model_input.columns == identity ∪ {label} ∪ feature_columns ∪ (carry_colum
 
 train／train-dev 的 keys 帶 carry，val／test 不帶，所以同一條規則在不同
 split 展開出不同的欄位集合（見 §3.4 與
-[ADR-0004](../adr/0004-carry-drop-columns-intersection.md)）。
+[ADR-0004](../adr/0004-carry-drop-columns-intersection.md)）。val／test 另有一個例外：
+`*_zero_positive_group_ratio` 大於 0 時多一欄 `zero_positive_group_weight`（見 §3.7）。
+
+### 3.7 沒有正例的 query group 留多少
+
+| 設定 | 預設 | 說明 | 版本影響 |
+|---|---|---|---|
+| `train_zero_positive_group_ratio` | `1.0`（全留） | 同時管 train 與 train_dev | `train_variant_id` |
+| `val_zero_positive_group_ratio` | `0.0`（全丟） | | `base_dataset_version` |
+| `test_zero_positive_group_ratio` | `0.0`（全丟） | | `base_dataset_version` |
+
+規則只有一條：**有正例的 query group 永遠全留；沒有正例的 query group 整組決定去留，留下比例 r。** 三個鍵都是 [0, 1] 的數字（不變量 A44 在 CLI 進入點擋下其他值，連 YAML 的 `null` 與 `true` 也擋）。預設值就是加鍵之前的行為，所以 `conf/base` 只以註解列出它們——寫成實鍵會翻對應的版本 ID，即使值等於預設。決定與理由見 [ADR-0025](../adr/0025-query-group-widened-by-occasion-role.md) 決定 3。
+
+為什麼要留：組內排序指標（mAP 等）算不了沒有正例的組，丟掉沒損失；但把每一列當成二元預測的指標（evaluation 的預測品質指標家族）對正例佔比很敏感，算在丟過的表上會系統性偏高。這類資料又大到不能全留，所以留一個比例、用權重補回去。
+
+**怎麼決定去留。** 對 `query_group_columns` 做決定性雜湊分桶，桶號落在 r 以下的組留下。同 `random_seed`、同設定 → 同一批組。「這一組有沒有正例」看的是 **`label_table` 接上來的 label**，不是 `sample_pool` 自己帶的那欄：那欄是來源 SQL 抄的副本，框架不保證兩者一致，拿它判斷的話，一不一致就會把真正的正例連同整組刪掉。
+
+**在哪一步做。**
+
+- val／test：在 `build_*_model_input` 接完 label 之後，由 `filter_val_model_input`／`filter_test_model_input` 做。r ＝ 0 就是這兩個 node 一直以來的過濾，兩者是同一步。
+- train／train_dev：在 keys 上做，發生在建表**之前**（`filter_train_keys`／`filter_train_dev_keys`）。為了判斷有沒有正例，這一步自己接一次 `label_table`（只接 identity 與 label），然後只留 keys 的欄。建表時照舊再接一次 label 與特徵。
+  - 為什麼不跟 val／test 一樣在建表後丟：粒度閘 B10 要求 train／train_dev 的 model_input 列數**等於**它的 keys。建表後才丟組，兩邊列數一定對不上，B10 就分不出「故意丟的」與「右表重複鍵造成的放大」——丟 1,000 列就能蓋住 500 列的放大。先在 keys 上丟，落地的 `train_keys` 就是建表的輸入，B10 照樣逐列相等。這個位置是使用者拍板的（2026-09-21，見 ADR-0025 決定 3 的補記）。
+  - 代價：r < 1 時 train 的 label 多接一次（窄表，只有 identity 與 label），外加一次計數。r ＝ 1（預設）時整步直接跳過，`train_keys` 與加鍵之前逐列相同。
+  - train 的先後是：逐列抽樣（`sample_ratio`／`sample_ratio_overrides`）→ train／train_dev 切分 → 本步驟 → 接 label 與特徵。所以本步驟看到的是**逐列抽樣之後還在的列**：「有正例的組全留」的意思是本步驟不再丟它們的任何一列，不是「逐列抽樣不會動它們」。某一組唯一的正例若被逐列抽樣抽掉了，它在本步驟就是無正例的組。要讓小的 query group 保持完整，`sample_ratio` 要設 1 且不設 override。
+  - train 與 train_dev 用同一個 r，各自對自己的組判定。兩邊以 entity 互斥切開，一個 query group 不會跨兩邊。
+
+**權重欄（只有 val／test）。** r > 0 時表多一欄 `zero_positive_group_weight`（double）：有正例的組的列 ＝ 1，留下來的無正例組的列 ＝ 1／r。train 不產生權重欄：排序只看分數高低，不需要把比例還原回去。
+
+- 這是**設計權重，不是無偏估計**。加權後的比值型指標（precision、pr_auc 這類）會隨組數增加收斂到未抽樣母體的值，但期望值不等於它；r 小、正例率低、留下的組少時，偏差可觀。所以 log 會印出各 split 的 r 與留下來的無正例組數：
+
+  ```text
+  val zero-positive query groups: r=0.3, kept <留下的組數> of <無正例組總數> (weight 1/r=3.333 on their rows is a design weight — few kept groups means an unstable estimate); <有正例的組數> group(s) holding a positive, all kept
+  ```
+
+  r ＝ 0 印「none kept」，r ＝ 1 印「every group kept (not counted)」；計數只在 0 < r < 1 時做（多一次 Spark action）。evaluation 報表的「基本統計 — 資料集」段在 `--post-training` 且 test 的 r > 0 時，也會印出 test 的 r 與這次評估資料裡的無正例組數。
+- 權重欄一路帶到 training 的預測表 `training_eval_predictions`，evaluation 的預測品質指標家族拿它加權，而不是數列數。那張表在 catalog 是**明確列出欄位**的，沒宣告的欄會在寫入時被靜默丟掉，所以 test 的 r > 0 時 catalog 必須宣告 `{name: zero_positive_group_weight, type: DOUBLE}`（不變量 A45 在 training 的 CLI 進入點擋下）。⚠ 明確列出欄位的 Hive 表不會自動加欄：既有的 `training_eval_predictions` 表要先加上這一欄（或換一張新表）再跑 training。
+- 欄名是框架自己的，**不得**與使用者提供的逐列訓練權重（#425）共用。model_input 裡已經有同名的欄時直接報錯，不覆寫。
+- 與 `val_sample_ratio` 並用時權重仍然對：那是對 entity 均勻抽，有正例與無正例的組一視同仁，不改變 1 與 1／r 的相對比例。
+
+**train 的 r 與訓練目標。** train 的 r ＝ 0 只適合 `lambdarank`：它在沒有正例的組上梯度恆為零，training 本來就在建訓練資料時替它丟掉這些組（`core/group_utils.py` 的 `objective_drops_zero_positive_groups`），所以 r ＝ 0 只是把同一件事提前到 dataset，訓練表小很多，模型吃到的列與早停的母體都不變。`binary` 與 `rank_xendcg` 會從無正例的組學到東西（後者 repo 有實測，在全是負例的組上照樣長樹），對它們而言 r < 1 是**整組的負例降採樣**：訓練母體的正例佔比會上升，train_dev（early stopping 的驗證集）的母體也跟著變——性質與既有的逐列抽樣（`sample_ratio_overrides` 壓低負例）相同，框架刻意不擋。建議：`lambdarank` ＋ 小的 query group 時設 `train_zero_positive_group_ratio: 0` 且 `sample_ratio: 1`。training 用 ranking 類目標時，建訓練資料會 log 出「只剩單一種 label 的 query group 佔多少」（這種組沒有可比的配對），讓你判斷逐列抽樣有沒有把小組抽壞。
+
+**r > 0 時什麼不變、什麼會變。**
+
+- 不變：**固定整數 K** 的組內排序指標（evaluation 的 Spark 端與 HPO 的 numpy 端都在計算時跳過無正例的組），逐值相同。
+- 會變：算在過濾之前的量。item 種數（某些 item 可能只出現在無正例的組）、由它解析出來的 `"all"` 的 K 與報表上依 item 種數裁掉的 K、evaluation `dataset_overview` 的各項總數（列數、正樣本率……）。這是母體變大的誠實反映，**不是 regression**。
+
+**evaluation 那一側。** 開了預測品質指標家族（`evaluation.report.sections.prediction_quality: true`）又跑 `--post-training` 時，test 的 r 必須大於 0（不變量 A46 在 evaluation 的 CLI 進入點擋下）：r ＝ 0 的 test 表已經沒有無正例的組，二元指標會系統性偏高。監控模式不受影響——它把 label 用 LEFT JOIN 接到推論結果上，沒經過 dataset 的篩選。
+
+r 該設多少、生產規模下撐不撐得住，repo 裡的合成資料推不出來（生產的 entity 母體是百萬級），要在接近生產的量上實測。
 
 ## 4. 使用方式
 
@@ -342,13 +390,14 @@ python -m recsys_tfb dataset \
 |---|---|---|---|---|
 | 資料閘 | `validate_data_consistency` | 三張來源表、parameters | 檢查 item coverage 與 categorical feature 型別，收集問題後一次中止 | 無 |
 | Train 抽樣 | `select_sample_keys` | `sample_pool` | 依 train 日期、分層比例與 overrides 做決定性抽樣 | `sample_keys` |
-| Train 切分 | `split_train_keys` | `sample_keys` | 依 entity 將資料互斥切成 train 與 train-dev | `train_keys`、`train_dev_keys` |
+| Train 切分 | `split_train_keys` | `sample_keys` | 依 entity 將資料互斥切成 train 與 train-dev | `train_keys_unfiltered`、`train_dev_keys_unfiltered`（不落地） |
+| Train 整組抽樣 | `filter_train_keys`、`filter_train_dev_keys` | 上一步的 keys、`label_table` | 依 `train_zero_positive_group_ratio` 整組丟掉部分無正例的 query group（label 取自 `label_table`）；預設 r ＝ 1 原樣通過（§3.7） | `train_keys`、`train_dev_keys` |
 | Val/Test keys | `select_val_keys`、`select_test_keys` | `sample_pool`（test 另收 `test_keys_month_plan`） | 建立 val 與 test identity keys；val 可依 entity 縮減。test 只處理計畫中的月份 | `val_keys`、`test_keys` |
 | Fit 前處理器 | `fit_preprocessor_metadata` | `feature_table` | 只使用 train 日期建立 feature 清單與 category mappings | `preprocessor`、`category_mappings` |
 | 套用前處理 | `apply_preprocessor_to_features` | `feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 編碼 feature categoricals；只處理計畫中的月份 | `preprocessed_feature_table` |
 | 精度閘 | `validate_numeric_precision` | `preprocessed_feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 不變量 B8：讀剛落地那幾個月份的 parquet footer 統計值（零掃描），確認會被 cast 的欄（decimal、整數族與 boolean——有格點的那些）在該欄自己的解析度下撐得過 `numeric_feature_storage_type`；同時產出每欄的 headroom 報告 | `numeric_precision_report` |
 | 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor（test 另收 `test_model_input_month_plan`） | left join label 與 feature，補齊缺失 label，選取欄位並把所有數值特徵欄轉成 `numeric_feature_storage_type` 宣告的型別（預設 float32） | 各 split 的 model input |
-| 評估母體過濾 | `filter_val_model_input`、`filter_test_model_input` | 未過濾的 val/test input | 移除整組沒有正例的 query groups | `val_model_input`、`test_model_input` |
+| 評估母體過濾 | `filter_val_model_input`、`filter_test_model_input` | 未過濾的 val/test input | 有正例的 query group 全留；無正例的依 `val_`／`test_zero_positive_group_ratio` 整組留下比例 r（預設 0：全丟），r > 0 時加上權重欄（§3.7） | `val_model_input`、`test_model_input` |
 | 粒度閘 | `validate_model_input_grain` | train／train_dev 的 keys 與 model_input | 不變量 B10：讀 parquet footer 的列數（零掃描），確認每張 model_input 的列數等於它的 keys 表。擋的是右表（`label_table`／`preprocessed_feature_table`）有重複 join 鍵造成的靜默放大；同時產出每個 split 的列數報告。**val／test 不在範圍內**——它們列數相符的那一版是 `*_unfiltered`，那是不落地的記憶體中間結果，沒有 footer 可讀；test 還多一層，`build_test_model_input` 會先把 `test_keys` 縮到本次月份，所以它對得上的本來就不是整張 `test_keys`（見 [ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md) 2026-09-07 修訂） | `model_input_grain_report` |
 
 model input 的組裝規則：
@@ -356,7 +405,7 @@ model input 的組裝規則：
 1. keys 與 `label_table` 依 `time + entity + item` left join；沒有 label row 時補為 `0`。
 2. 再與 `preprocessed_feature_table` 依 `time + entity` left join。
 3. 輸出 identity、label、feature columns，以及 keys 帶入的 carry columns。
-4. val/test 才會移除零正例 query groups；train 與 train-dev 保留所有 rows。
+4. 沒有正例的 query group 留多少由三個 `*_zero_positive_group_ratio` 決定（§3.7）：預設 val/test 全丟、train 與 train-dev 全留。
 
 #### 兩個 left join 各自的契約
 
@@ -392,7 +441,7 @@ miss 率只有在生產跑過一次才知道，本機量不到，所以「先量
 - 忘記提供計畫不會靜默全量重建——runner 在第一個節點執行前就 raise；
 - 每張表吃自己那份計畫（`test_keys` 已寫、`test_model_input` 還沒，是正常狀態）。
 
-`test_model_input` 的過濾節點（`filter_test_model_input`）**沒有**月份範圍檢查，跟 val 用同一個節點函式：它的上游已經 scoped 過了。
+`test_model_input` 的過濾節點（`filter_test_model_input`）**沒有**月份範圍檢查：它的上游已經 scoped 過了。它和 val 的決策相同，但各用自己的節點函式，因為兩者讀的 ratio 鍵不同（讀錯不會報錯）。
 
 之所以安全：每個 `snap_date` partition 的內容只是該月 `feature_table` rows 與 `category_mappings` 的函數，與其他月份無關，而 `category_mappings` 只在 train 月份上 fit。所以跳過既有月份不改變任何 partition 的內容，只改變這次要做多少工。
 
@@ -421,7 +470,7 @@ Hive 的實際 table 名稱與 partition 欄位以 `conf/base/catalog.yaml` 為�
 3. `category_mappings.json` 包含所有 categorical columns。
 4. train 與 train-dev 都有資料，且同一 entity 不會同時出現在兩者。
 5. model input 的 identity key 沒有重複，label 僅包含合法值。
-6. val/test 每個保留的 query group 至少有一個正例。
+6. `*_zero_positive_group_ratio` 維持預設 0 時，val/test 每個保留的 query group 至少有一個正例；設了 r > 0 時，無正例的組的列都帶權重 1／r。
 7. carry columns 確實存在於 train/train-dev model input。
 
 範例查詢：
@@ -439,7 +488,7 @@ GROUP BY snap_date, cust_id
 HAVING SUM(label) <= 0;
 ```
 
-第二個查詢應回傳零列。若 schema 的 entity 不只一欄，驗收 query group 時應使用全部 entity 欄位。
+`val_zero_positive_group_ratio` 維持預設 0 時，第二個查詢應回傳零列。若 schema 的 entity 不只一欄（或宣告了 `occasion`），驗收 query group 時應使用全部 query group 欄位。
 
 ## 7. 版本、重跑與恢復
 
@@ -449,10 +498,10 @@ dataset 每次啟動都會計算以下版本：
 
 | 版本 | 精確計算依據 | 主要產物 |
 |---|---|---|
-| `base_dataset_version` | `parameters_dataset.yaml` 中除了五個抽樣 keys 與 `test_snap_dates` 以外的所有內容，加上完整 schema 與 `feature_table` schema fingerprint | preprocessor、共用 feature、val/test |
-| `train_variant_id` | 只包含 `sample_ratio`、`sample_ratio_overrides`、`sample_group_keys`、`train_dev_ratio`、`train_split_keys` | train/train-dev keys 與 inputs |
+| `base_dataset_version` | `parameters_dataset.yaml` 中除了六個 train 抽樣 keys 與 `test_snap_dates` 以外的所有內容，加上完整 schema 與 `feature_table` schema fingerprint | preprocessor、共用 feature、val/test |
+| `train_variant_id` | 只包含 `sample_ratio`、`sample_ratio_overrides`、`sample_group_keys`、`train_dev_ratio`、`train_split_keys`、`train_zero_positive_group_ratio` | train/train-dev keys 與 inputs |
 
-會從 base payload 排除的抽樣 keys 有五個：
+會從 base payload 排除的 train 抽樣 keys 有六個：
 
 ```text
 sample_ratio
@@ -460,11 +509,12 @@ sample_ratio_overrides
 sample_group_keys
 train_dev_ratio
 train_split_keys
+train_zero_positive_group_ratio
 ```
 
-`val_sample_keys` **刻意不在這份清單裡**：val 產物只由 `base_dataset_version` 分割，把它排除掉就等於讓 val 的抽樣單位改了卻靜默沿用舊 parquet。推導見 [ADR-0016](../adr/0016-split-unit-declared-by-two-keys.md)。
+`val_sample_keys`、`val_zero_positive_group_ratio`、`test_zero_positive_group_ratio` **刻意不在這份清單裡**：val／test 產物只由 `base_dataset_version` 分割，把它們排除掉就等於讓 val／test 的抽樣改了卻靜默沿用舊 parquet。推導見 [ADR-0016](../adr/0016-split-unit-declared-by-two-keys.md) 與 [ADR-0025](../adr/0025-query-group-widened-by-occasion-role.md) 決定 3。
 
-除了這五個 keys，還有第六個被排除的 key —— `test_snap_dates`：
+除了這六個 keys，還有一個被排除的 key —— `test_snap_dates`：
 
 ```text
 test_snap_dates
@@ -478,7 +528,7 @@ test_snap_dates
 
 代價是 `parameters_dataset.yaml` 不再是 test 覆蓋範圍的唯一真實來源 —— 同一個 `base_dataset_version` 底下的月份會隨時間累積，**實際有哪些月份要以 Hive partition 為準**（`SHOW PARTITIONS`）；manifest 只記錄**最後一次執行**當下的設定，每次執行覆寫，因此讀不出累積的覆蓋範圍。完整推導與否決過的選項見 [ADR-0001](../adr/0001-test-dates-out-of-dataset-version-identity.md)；操作步驟見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)。
 
-除了上述八個 keys，`parameters_dataset.yaml` 在 `dataset` 區塊新增的其他設定，預設都會納入 `base_dataset_version`。這是保守策略：新設定若可能改變 dataset 產物，會先讓 base version 翻新，避免不同內容共用版本。
+除了上面列出的排除 keys，`parameters_dataset.yaml` 在 `dataset` 區塊新增的其他設定，預設都會納入 `base_dataset_version`。這是保守策略：新設定若可能改變 dataset 產物，會先讓 base version 翻新，避免不同內容共用版本。
 
 每層使用 canonical YAML 計算 8 碼 SHA-256 hash。mapping 的 key 排列順序不影響 hash，但 list 的內容與順序會影響，例如重新排列 `sample_group_keys`、日期清單或 `categorical_values` 都會產生不同版本。
 
@@ -497,9 +547,12 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | `carry_columns` | ✓ |  | 改變 model input schema |
 | `train_dev_ratio` |  | ✓ | 只改變 train/train-dev entity 切分 |
 | `train_split_keys` |  | ✓ | 只改變 train/train-dev 的切分單位；val/test 產物完全不動 |
+| `train_zero_positive_group_ratio` |  | ✓ | 只改變 train/train-dev 留下多少無正例的 query group（§3.7） |
 | `val_snap_dates` | ✓ |  | 改變 validation 資料 |
 | `val_sample_ratio` | ✓ |  | val 屬於 base layer，不屬於 train sampling |
 | `val_sample_keys` | ✓ |  | 同上；不登記進 train sampling，否則 val 會靜默沿用舊資料 |
+| `val_zero_positive_group_ratio` | ✓ |  | 同上（§3.7） |
+| `test_zero_positive_group_ratio` | ✓ |  | test 產物也只由 base 分割，所以留在 base（§3.7） |
 | `test_snap_dates` |  |  | 只改變 test 覆蓋範圍，不改變任何產物身分（見 7.1） |
 | `prepare_model_input.drop_columns` | ✓ |  | 改變 feature 清單與 model input |
 | `prepare_model_input.categorical_columns` | ✓ |  | 改變 category mappings、encoding 與 feature 清單 |
@@ -538,7 +591,8 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 
 | 修改內容 | 版本結果 | 建議 |
 |---|---|---|
-| train ratio、override、分層 keys、train-dev ratio | 新 train variant，base version 不變 | 完整執行最安全；熟悉切片者可依執行計畫只重建 train 路徑 |
+| train ratio、override、分層 keys、train-dev ratio、`train_zero_positive_group_ratio` | 新 train variant，base version 不變 | 完整執行最安全；熟悉切片者可依執行計畫只重建 train 路徑 |
+| `val_`／`test_zero_positive_group_ratio` | 新 base version | 完整執行 dataset；test 的 r 從 0 改成 > 0 時，先讓 `training_eval_predictions` 宣告權重欄（§3.7） |
 | train／val 日期、categorical/drop、carry columns | 新 base version | 完整執行 dataset |
 | 只在 `test_snap_dates` 加一個月份 | 版本全部不變 | 執行 dataset 補上新月份，再跑 predict 與該月份的 evaluation；不重訓。步驟見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md) |
 | schema roles 或 item values | 新 base version | 先確認 source tables，再完整執行 dataset |
@@ -558,6 +612,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 - `validate_numeric_precision` 有輸出（`numeric_precision_report`），所以**不會**被當成側效應 node 跳過；但沒有任何 node 消費那份報告，所以它也不會被自動拉回來——切片起點在它之後就不會跑到它。
 - `validate_model_input_grain` 同樣有輸出（`model_input_grain_report`），行為與上一條一致：不會被當成側效應 node 跳過，但也沒有下游會把它拉回來。
 - `val_model_input_unfiltered` 與 `test_model_input_unfiltered` 是記憶體中間結果；若只從 filter node 接續，框架會自動補跑對應 build node。**這也是 B10 擋不到 val／test 的原因**：不落地就沒有 footer。
+- `train_keys_unfiltered` 與 `train_dev_keys_unfiltered` 同樣不落地；從 `filter_train_keys`／`filter_train_dev_keys` 接續會補跑 `split_train_keys`（它不 shuffle，代價低）。落地的 `train_keys`／`train_dev_keys` 是整組抽樣之後的 keys，正是 build node 的輸入，所以 B10 的配對不受影響。
 - 切片執行會在 manifest 記錄 `resumed_from` 或 `only_node`，供後續追溯。
 - 開跑前 CLI 會對 base、train variant 各先寫一份 `status: running` 的 `manifest.json` stub（崩潰溯源用，**不**更新 `latest` symlink，也不覆寫既有 manifest），成功完成後再覆寫為 `status: completed` 並更新 `latest`；`--dry-run` / `--list-nodes` 不寫 stub。
 
@@ -579,7 +634,10 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | log 出現 `unknowns in column ...` | 非 train 日期出現 mapping 未見的新類別 | 檢查是否為資料異常；必要時延伸 train mapping 或調整來源清理 |
 | 抽樣結果為空或某分層消失 | ratio/override 為 0、key 格式不符或母體太小 | 檢查 profiling、override key 順序與實際分層值 |
 | `sample_group_keys` 欄位不存在 | 分層欄位只存在於 `feature_table`，未寫入 `sample_pool` | 在 `sample_pool_etl` SQL 連接來源欄位並重建 `sample_pool` |
-| val/test 筆數比 sample pool 少很多 | 零正例 query groups 被預期移除 | 查詢 group 的 label sum；這是排序評估母體設計，不一定是錯誤 |
+| val/test 筆數比 sample pool 少很多 | 零正例 query groups 被預期移除（`*_zero_positive_group_ratio` 預設 0） | 查詢 group 的 label sum；這是排序評估母體設計，不一定是錯誤。要留一部分，見 §3.7 |
+| `A44: dataset.*_zero_positive_group_ratio=... is not a ratio` | 值不在 [0, 1]，或寫成字串、布林、`null` | 改成 [0, 1] 的數字，或刪掉那一行用預設值 |
+| `(A45) catalog entry 'training_eval_predictions' does not declare 'zero_positive_group_weight'` | test 的 r > 0，但預測表沒宣告權重欄 | 在該 catalog 條目的 `columns:` 加 `{name: zero_positive_group_weight, type: DOUBLE}`；既有表要先加欄（§3.7） |
+| `'zero_positive_group_weight' is already a column of this frame` | 特徵表或 `sample_pool` 帶了與框架權重欄同名的欄 | 在來源 SQL 改名 |
 | `Unknown node ...` | node 名稱拼錯或 pipeline 已變更 | 先執行 `dataset --list-nodes` 取得目前名稱 |
 | 切片計畫出現昂貴的 `auto-included` | 必要 artifact 不存在或 catalog 無法載入 | 先確認版本 partition 與檔案；不接受補跑成本時先停止修復 |
 | 部分重跑後結果與設定不一致 | skipped artifacts 已過期，或資料閘被跳過 | 使用 full run，並比較 manifest、版本與 source data 更新時間 |
@@ -608,7 +666,7 @@ B6 擋下來時，錯誤訊息會**逐欄點名**（`feature column 'cust_segmen
 - `sample_pool` identity 唯一性由 source ETL 品質檢查負責；dataset 不會在抽樣前再次 deduplicate。
 - label left join 不到時會視為負例 `0`；必須確定 sparse label table 的語意確實如此。
 - feature left join 不到時會留下全 NULL feature 的列，dataset 不會將其視為缺少 entity 的硬錯誤。這是明文契約而非容忍，代價是「特徵缺失」與「特徵值真的是 NULL」在 model input 裡無法區分；契約與量測點見 §5。
-- val/test 會排除零正例 query groups，因此產物不代表完整上線母體。
+- val/test 預設排除零正例 query groups，因此產物不代表完整上線母體；設 `val_`／`test_zero_positive_group_ratio` > 0 會留下一部分並帶上設計權重（§3.7），權重不是無偏估計。
 - 多月份資料仍由 Spark lazy execution、shuffle spill 與 Hive partitions 處理；尖峰資源通常取決於單一 shuffle partition 與資料偏斜，而不是月份數本身。
 
 ## 10. 相關文件

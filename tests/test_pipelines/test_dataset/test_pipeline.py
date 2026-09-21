@@ -21,8 +21,9 @@ class TestDatasetPipeline:
         pipeline = create_pipeline()
         # 3 validate (Layer-2 data gate + B8 precision gate + B10 grain gate)
         # + 4 key-selection + 1 fit + 1 apply_features + 4 build_model_input
-        # + 2 filter (val/test) = 15
-        assert len(pipeline.nodes) == 15
+        # + 2 filter keys (train/train_dev) + 2 filter model_input (val/test)
+        # = 17
+        assert len(pipeline.nodes) == 17
 
     def test_create_pipeline_takes_no_calibration_switch(self):
         """#414 removed the branch. A stale caller passing the old kwarg must
@@ -49,6 +50,7 @@ class TestDatasetPipeline:
             "preprocessed_feature_table", "numeric_precision_report",
             "model_input_grain_report",
             "sample_keys", "train_keys", "train_dev_keys", "val_keys", "test_keys",
+            "train_keys_unfiltered", "train_dev_keys_unfiltered",
         }
         assert pipeline.outputs == expected
 
@@ -76,20 +78,35 @@ class TestDatasetPipeline:
         assert "build_test_model_input" in names
         assert "filter_val_model_input" in names
         assert "filter_test_model_input" in names
+        assert "filter_train_keys" in names
+        assert "filter_train_dev_keys" in names
 
     def test_default_parameters(self):
         pipeline = create_pipeline()
-        assert len(pipeline.nodes) == 15
+        assert len(pipeline.nodes) == 17
 
-    def test_filter_nodes_only_for_val_and_test(self):
-        """train / train_dev go straight to *_model_input; only val and test
-        get the group-positive filter."""
+    def test_train_side_is_drawn_on_the_keys_not_on_model_input(self):
+        """ADR-0025 decision 3 for train / train_dev runs on the keys, before
+        the builds: B10 pins each train-side model_input's row count to the keys
+        table it was built from, so a drop after the build would break the
+        pairing on purpose. val / test keep their model_input filter."""
         pipeline = create_pipeline()
         names = [n.name for n in pipeline.nodes]
-        assert "filter_val_model_input" in names
-        assert "filter_test_model_input" in names
         assert "filter_train_model_input" not in names
         assert "filter_train_dev_model_input" not in names
+        by_name = {n.name: n for n in pipeline.nodes}
+        assert by_name["split_train_keys"].outputs == [
+            "train_keys_unfiltered", "train_dev_keys_unfiltered",
+        ]
+        for split in ("train", "train_dev"):
+            node = by_name[f"filter_{split}_keys"]
+            assert node.inputs == [
+                f"{split}_keys_unfiltered", "label_table", "parameters",
+            ]
+            # The landed keys B10 reads are this node's output, and they are
+            # exactly what the build node reads.
+            assert node.outputs == [f"{split}_keys"]
+            assert f"{split}_keys" in by_name[f"build_{split}_model_input"].inputs
 
     def test_filter_consumes_unfiltered_output(self):
         """Filter node input must be the build node's *_unfiltered output."""
@@ -133,15 +150,21 @@ class TestNodeNameToFunctionBinding:
     - ``build_test_model_input`` runs the *test* wrapper, not the shared
       ``build_model_input`` the other splits use, because it has to re-scope
       the keys it reads back from a persistent Hive table (ADR-0002);
-    - ``filter_test_model_input``, by contrast, runs the *same*
-      ``filter_groups_with_positives`` as val — the month scoping is already
-      done by then and repeating it would guard nothing (ADR-0007).
+    - ``filter_test_model_input`` runs its *own* function rather than val's,
+      although the decisions are the same: the key each reads
+      (``dataset.{val,test}_zero_positive_group_ratio``) is the one answer that
+      differs, and reading the other split's key would raise nothing. Neither
+      repeats the month scoping — that is done by then (ADR-0007);
+    - ``filter_train_keys`` and ``filter_train_dev_keys`` share one function:
+      one key governs both (ADR-0025 decision 3).
     """
 
     BASE_BINDINGS = {
         "validate_data_consistency": nodes.validate_data_consistency,
         "select_sample_keys": nodes.select_train_keys,
         "split_train_keys": nodes.split_train_keys,
+        "filter_train_keys": nodes.filter_train_keys,
+        "filter_train_dev_keys": nodes.filter_train_keys,
         "select_val_keys": nodes.select_val_keys,
         "select_test_keys": nodes.select_test_keys,
         "fit_preprocessor_metadata": nodes.fit_preprocessor_metadata,
@@ -151,8 +174,8 @@ class TestNodeNameToFunctionBinding:
         "build_train_dev_model_input": nodes.build_model_input,
         "build_val_model_input": nodes.build_model_input,
         "build_test_model_input": nodes.build_test_model_input,
-        "filter_val_model_input": nodes.filter_groups_with_positives,
-        "filter_test_model_input": nodes.filter_groups_with_positives,
+        "filter_val_model_input": nodes.filter_val_model_input,
+        "filter_test_model_input": nodes.filter_test_model_input,
         "validate_model_input_grain": nodes.validate_model_input_grain,
     }
     def _bindings(self, pipeline):
@@ -265,15 +288,13 @@ class TestMonthPlanWiring:
             f"precision gate at {gate} runs after a model_input build: {names}"
         )
 
-    def test_the_test_filter_is_the_same_node_function_as_val(self):
+    def test_the_test_filter_takes_no_month_plan(self):
         # ADR-0007: the defensive month filter that used to live in
-        # filter_test_model_input is gone, so the two filter nodes differ only
-        # in which frame they read.
+        # filter_test_model_input is gone — its input is already scoped. It
+        # has its own function again (ADR-0025: it reads test's ratio key),
+        # which is exactly why the absence of a plan input is pinned here
+        # rather than inherited from val.
         by_name = {n.name: n for n in create_pipeline().nodes}
-        assert (
-            by_name["filter_test_model_input"].func
-            is by_name["filter_val_model_input"].func
-        )
         assert self._plan_inputs(by_name["filter_test_model_input"]) == set()
 
 
@@ -309,10 +330,10 @@ class TestOnlyTestMonthsMode:
         assert [n.name for n in pipeline.nodes] == self.EXPECTED
 
     def test_default_shape_is_unchanged_by_the_parameter(self):
-        # Not covered by TestDatasetPipeline's 15: that calls create_pipeline
+        # Not covered by TestDatasetPipeline's 17: that calls create_pipeline
         # without the kwarg, so it would still pass if False were not the
         # default. Spell the default out.
-        assert len(create_pipeline(only_test_months=False).nodes) == 15
+        assert len(create_pipeline(only_test_months=False).nodes) == 17
 
     def test_the_list_matches_the_dag_derived_test_chain(self):
         """Drift guard: the list == what the DAG says the test chain is.

@@ -67,6 +67,7 @@ python -m recsys_tfb <指令> --env <env>
 - **`dataset.prepare_model_input.drop_columns` 與 `categorical_columns`**：同一個欄名不能兩邊都寫（`A1`）。一個說「這欄不要」，一個說「這欄當類別特徵」；不擋的話會默默以「不要」為準。
 - **`dataset.train_split_keys`、`dataset.val_sample_keys`**：有寫的話，必須是 `schema.columns.entity` 裡的欄，不能是空清單（`A29`）。
 - **`dataset.numeric_feature_storage_type`** 只能是 `float32` 或 `float64`；**`dataset.numeric_precision_policy`** 只能是 `block` 或 `truncate`。兩個都可以不寫，但不能寫成 `null`（`A31`）。
+- **`dataset.train_zero_positive_group_ratio`、`val_zero_positive_group_ratio`、`test_zero_positive_group_ratio`**（沒有正例的 query group 留多少）：有寫就必須是 0 到 1 之間的數字，不能是字串、true／false 或 `null`（`A44`）。它們會進版本 ID，寫錯會讓之後每個指令讀到別的版本路徑。
 - **`quality_checks.max_duplicate_key_ratio`**：source ETL 設定裡有 `sample_pool`、`label_table`、`feature_table` 這三張表的話，每一張都要寫，值在 0 到 1 之間、不含 1（`A32`）。拿掉它，那張表的主鍵重複檢查和主鍵空值檢查會一起默默關掉。
 
 **training 設定**
@@ -98,6 +99,7 @@ python -m recsys_tfb <指令> --env <env>
   - `dataset.test_snap_dates` 一定要寫，而且不能是空清單（`A36`）。training 要在這些月份上預測、算指標、做 SHAP 診斷；不擋的話，要等超參數搜尋整輪跑完才會失敗，錯誤訊息也沒提到這個設定。dataset 指令沒寫或空清單都照樣跑，所以這條只在 training 查。training 的每一種跑法都查，包含 `--from-node`、`--only-node`、`--list-nodes`、`--dry-run`。
   - `dataset.test_snap_dates` 裡，同一天不能寫成只差在有沒有 `-` 的兩種格式，例如 `2026-01-31` 和 `20260131`（`A26`）。不擋的話，那個月的每一列會被算兩次。
   - `catalog.yaml` 的 `training_eval_predictions` 條目，`columns:` 必須包含 `schema.columns.entity` 的每一欄（`A28`）。少寫的欄在寫入時會被默默丟掉。
+  - `dataset.test_zero_positive_group_ratio` 大於 0 時，同一個條目的 `columns:` 還必須包含 `zero_positive_group_weight`（`A45`）。少了它，權重在寫入時被默默丟掉，evaluation 會把每個留下的無正例組只算一次、而不是 1／r 次。
 - **inference**
   - `inference.snap_dates`、`inference.products` 不能是空清單；`inference.entity_buckets`（把 entity 分成幾桶、一桶一桶評分）有寫就要大於等於 1，不能寫 `null`（`A27`）。
 - **evaluation**
@@ -105,6 +107,7 @@ python -m recsys_tfb <指令> --env <env>
   - `evaluation.report.sections` 有寫任何開關的話，開關名稱必須剛好是 `dataset_overview`、`primary_map`、`diagnostics`、`baseline`、`diagnosis_links`、`prediction_quality` 這六個，多一個或少一個都擋（`A34`）。
   - `evaluation.prediction_quality` 的 `n_bins`、`n_display_bins` 是大於等於 1 的整數，而且後者要整除前者；`top_n` 是大於等於 0 的整數；這個區塊裡不能有別的鍵（`A42`）。不擋的話，分箱表最後一格會比其他格窄，而報表不會提；寫 `enabled: true` 也打不開這一段，開關在 `report.sections.prediction_quality`。
   - `evaluation.report.diagnostics` 底下不能再寫 `include_calibration`、`n_calibration_bins`，不論值是什麼（`A43`）。它們設定的 calibration 分箱表 #381 已經移除，留著不會有任何作用；分數分箱改由預測品質指標家族提供。
+  - 帶 `--post-training` 又打開 `evaluation.report.sections.prediction_quality` 時，`dataset.test_zero_positive_group_ratio` 必須大於 0（`A46`）。r 為 0（預設）的 test 表已經丟掉所有沒有正例的 query group，把每一列當二元預測的指標會系統性偏高。監控模式不查。
   - `--compare` 和 `--compare-only` 只能給一個；給的名稱必須是 `evaluation.compare_sources` 裡的鍵（`A12`、`A13`）。
 - **dataset、training、inference**
   - `--rebuild-dates` 的每個日期要寫成 `YYYY-MM-DD`，而且要在設定的月份清單裡：dataset 和 training 對照 `dataset.test_snap_dates`，inference 對照 `inference.snap_dates`（`A21`）。
@@ -138,7 +141,7 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
 - 只查這一次處理的月份，只讀 parquet 檔尾的統計。`dataset.numeric_precision_policy: truncate` 時改成只警告。
 
 **資料閘 3：粒度閘**（最後一步）
-- `train`、`train_dev` 的 model_input 列數，必須等於組它用的 key 表（每一列是一筆抽到的候選）（`B10`）。列數變多，代表 `label_table` 或編碼後的特徵表在 join 鍵上有重複列。val、test 不查。只讀 parquet 檔尾的列數。
+- `train`、`train_dev` 的 model_input 列數，必須等於組它用的 key 表（每一列是一筆抽到的候選）（`B10`）。列數變多，代表 `label_table` 或編碼後的特徵表在 join 鍵上有重複列。val、test 不查。只讀 parquet 檔尾的列數。`dataset.train_zero_positive_group_ratio` 小於 1 時，丟組發生在 key 表落地之前，所以這條比對照樣是「相等」。
 
 **做事途中順便查的**
 - 會擋：
@@ -158,6 +161,7 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
 - 只警告：
   - 上次中途掛掉留下的不完整 cache，自動清掉重抓；LightGBM 的 `.bin` cache 跟目前設定對不上，自動重建。
   - 過濾掉沒有正例的 query group 之後，train 或 train_dev 剩下的太少。
+  - 目標是 ranking 類時，印出每個 split「只剩單一種 label 的 query group」佔多少（只是 log，不警告也不擋，判斷交給你）。
   - `training.sample_weights` 一列都沒對到。
   - `--fresh-hpo` 會丟掉已完成的 trial；HPO 的 checkpoint 讀不出來，當作沒有。
   - MLflow 記錄失敗，訓練照樣繼續（`mlflow.strict` 打開時才會擋）。

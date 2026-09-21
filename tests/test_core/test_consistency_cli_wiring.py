@@ -399,3 +399,41 @@ def test_a43_wired_into_evaluation_command_before_spark():
     assert src.index("retired_calibration_bin_key_errors(") < src.index(
         "get_or_create_spark_session("
     ), "A43 must fail before the Spark cold start, like A34"
+
+
+def test_a44_reaches_the_global_aggregator():
+    # A44's keys feed train_variant_id and base_dataset_version, which every
+    # command resolves — A31's placement. Behavioural half:
+    # TestZeroPositiveGroupRatioA44.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "zero_positive_group_ratio_errors" in inspect.getsource(
+        validate_config_consistency
+    )
+
+
+def test_a45_reads_the_catalog_entry_a28_reads_before_spark():
+    # Needs the resolved catalog (A28/A39's placement) and must be handed the
+    # same single read, so one `columns:` edit fixes all three.
+    src = inspect.getsource(m.training)
+    call = "zero_positive_group_weight_declared_errors(\n            params, gate_declared,"
+    assert call in src
+    assert src.index("zero_positive_group_weight_declared_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A45 must fail before the Spark cold start, like A28"
+
+
+def test_a46_wired_into_evaluation_command_before_spark():
+    # Needs --post-training (A22/A40's reason); the flag must be forwarded, not
+    # hardcoded — `False` would disable the gate and `True` would block
+    # monitoring runs that nothing upstream filtered.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "prediction_quality_population_errors" not in inspect.getsource(
+        validate_config_consistency
+    )
+    src = inspect.getsource(m.evaluation)
+    assert "prediction_quality_population_errors(params, post_training)" in src
+    assert src.index("prediction_quality_population_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A46 must fail before the Spark cold start, like A22"

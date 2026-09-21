@@ -4310,3 +4310,200 @@ class TestCompareAgainstInferenceOutputWithAnOptionalRoleA41:
 
         assert optional_role_compare_source_errors(
             self._with_source(_event_params(), "ranked_predictions")) == []
+
+
+# --- ADR-0025 decision 3: the three *_zero_positive_group_ratio keys ---------
+
+_ZP_KEYS = {
+    "train": "train_zero_positive_group_ratio",
+    "val": "val_zero_positive_group_ratio",
+    "test": "test_zero_positive_group_ratio",
+}
+
+
+def _zp_params(**dataset) -> dict:
+    return {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}},
+        "dataset": dataset,
+    }
+
+
+class TestZeroPositiveGroupRatioA44:
+    def test_absent_keys_are_clean(self):
+        from recsys_tfb.core.consistency import zero_positive_group_ratio_errors
+
+        assert zero_positive_group_ratio_errors({}) == []
+        assert zero_positive_group_ratio_errors(_zp_params()) == []
+
+    @pytest.mark.parametrize("value", [0, 0.0, 0.25, 1, 1.0])
+    def test_every_value_in_the_closed_unit_interval_is_legal(self, value):
+        from recsys_tfb.core.consistency import zero_positive_group_ratio_errors
+
+        for key in _ZP_KEYS.values():
+            assert zero_positive_group_ratio_errors(
+                _zp_params(**{key: value})) == [], (key, value)
+
+    @pytest.mark.parametrize("value", [-0.1, 1.5])
+    def test_out_of_range_is_rejected_naming_the_key(self, value):
+        from recsys_tfb.core.consistency import zero_positive_group_ratio_errors
+
+        for key in _ZP_KEYS.values():
+            errs = zero_positive_group_ratio_errors(_zp_params(**{key: value}))
+            assert len(errs) == 1, key
+            assert "A44" in errs[0] and f"dataset.{key}" in errs[0]
+            assert repr(value) in errs[0]
+
+    @pytest.mark.parametrize("value", ["0.5", True, None, [0.5]])
+    def test_a_non_number_is_rejected(self, value):
+        # True is an int to Python and would read as 1.0; "0.5" is a quoted
+        # YAML value; None is `key:` with nothing after it — present in the
+        # version payload, so not the same artifact as an absent key (A31's
+        # reasoning).
+        from recsys_tfb.core.consistency import zero_positive_group_ratio_errors
+
+        errs = zero_positive_group_ratio_errors(
+            _zp_params(val_zero_positive_group_ratio=value))
+        assert len(errs) == 1, value
+        assert "dataset.val_zero_positive_group_ratio" in errs[0]
+
+    def test_every_bad_key_is_reported_in_one_pass(self):
+        from recsys_tfb.core.consistency import zero_positive_group_ratio_errors
+
+        errs = zero_positive_group_ratio_errors(_zp_params(**{
+            key: 2 for key in _ZP_KEYS.values()}))
+        assert len(errs) == 3
+
+    def test_wired_into_validate_config_consistency(self):
+        with pytest.raises(ConfigConsistencyError) as exc:
+            validate_config_consistency(
+                _zp_params(test_zero_positive_group_ratio=1.5))
+        assert "A44" in str(exc.value)
+
+
+class TestResolvedZeroPositiveGroupRatio:
+    def test_absent_keys_resolve_to_todays_behaviour(self):
+        # train keeps every group, val / test keep none — the defaults are
+        # what the pipeline did before the keys existed (ADR-0025 decision 3).
+        from recsys_tfb.core.consistency import resolved_zero_positive_group_ratio
+
+        assert resolved_zero_positive_group_ratio({}, "train") == 1.0
+        assert resolved_zero_positive_group_ratio({}, "val") == 0.0
+        assert resolved_zero_positive_group_ratio({}, "test") == 0.0
+
+    def test_declared_value_wins_and_is_read_from_its_own_key(self):
+        from recsys_tfb.core.consistency import resolved_zero_positive_group_ratio
+
+        params = _zp_params(
+            train_zero_positive_group_ratio=0.1,
+            val_zero_positive_group_ratio=0.2,
+            test_zero_positive_group_ratio=0.3,
+        )
+        assert resolved_zero_positive_group_ratio(params, "train") == 0.1
+        assert resolved_zero_positive_group_ratio(params, "val") == 0.2
+        assert resolved_zero_positive_group_ratio(params, "test") == 0.3
+
+    def test_an_unknown_split_raises(self):
+        # train_dev reads the train key; letting "train_dev" resolve to a
+        # default of its own would give it a different r in silence.
+        from recsys_tfb.core.consistency import resolved_zero_positive_group_ratio
+
+        with pytest.raises(ValueError, match="train_dev"):
+            resolved_zero_positive_group_ratio({}, "train_dev")
+
+
+class TestZeroPositiveGroupWeightDeclaredA45:
+    def _args(self, declared, **dataset):
+        return _zp_params(**dataset), declared, "training_eval_predictions"
+
+    def test_nothing_is_required_while_test_keeps_no_zero_positive_group(self):
+        from recsys_tfb.core.consistency import (
+            zero_positive_group_weight_declared_errors,
+        )
+
+        for dataset in ({}, {"test_zero_positive_group_ratio": 0.0}):
+            assert zero_positive_group_weight_declared_errors(
+                *self._args(["cust_id", "score"], **dataset)) == []
+
+    def test_a_positive_test_ratio_requires_the_weight_column(self):
+        from recsys_tfb.core.consistency import (
+            ZERO_POSITIVE_GROUP_WEIGHT_COL,
+            zero_positive_group_weight_declared_errors,
+        )
+
+        errs = zero_positive_group_weight_declared_errors(
+            *self._args(["cust_id", "score"], test_zero_positive_group_ratio=0.5))
+        assert len(errs) == 1
+        assert "A45" in errs[0]
+        assert ZERO_POSITIVE_GROUP_WEIGHT_COL in errs[0]
+        assert "training_eval_predictions" in errs[0]
+        assert "dataset.test_zero_positive_group_ratio" in errs[0]
+
+    def test_declaring_the_column_satisfies_it(self):
+        from recsys_tfb.core.consistency import (
+            ZERO_POSITIVE_GROUP_WEIGHT_COL,
+            zero_positive_group_weight_declared_errors,
+        )
+
+        assert zero_positive_group_weight_declared_errors(*self._args(
+            ["cust_id", "score", ZERO_POSITIVE_GROUP_WEIGHT_COL],
+            test_zero_positive_group_ratio=1.0,
+        )) == []
+
+    def test_columns_auto_declares_nothing_and_drops_nothing(self):
+        from recsys_tfb.core.consistency import (
+            zero_positive_group_weight_declared_errors,
+        )
+
+        assert zero_positive_group_weight_declared_errors(
+            *self._args(None, test_zero_positive_group_ratio=0.5)) == []
+
+    def test_the_val_ratio_does_not_reach_the_prediction_table(self):
+        # Only test predictions are written to this table; val never lands.
+        from recsys_tfb.core.consistency import (
+            zero_positive_group_weight_declared_errors,
+        )
+
+        assert zero_positive_group_weight_declared_errors(
+            *self._args(["cust_id"], val_zero_positive_group_ratio=0.5)) == []
+
+
+def _pq_on(**dataset) -> dict:
+    params = _zp_params(**dataset)
+    params["evaluation"] = {"report": {"sections": {"prediction_quality": True}}}
+    return params
+
+
+class TestPredictionQualityPopulationA46:
+    def test_post_training_with_the_default_test_ratio_is_refused(self):
+        from recsys_tfb.core.consistency import prediction_quality_population_errors
+
+        for params in (_pq_on(), _pq_on(test_zero_positive_group_ratio=0.0)):
+            errs = prediction_quality_population_errors(params, post_training=True)
+            assert len(errs) == 1
+            assert "A46" in errs[0]
+            assert "dataset.test_zero_positive_group_ratio" in errs[0]
+            assert "evaluation.report.sections.prediction_quality" in errs[0]
+
+    def test_a_positive_test_ratio_is_accepted(self):
+        from recsys_tfb.core.consistency import prediction_quality_population_errors
+
+        assert prediction_quality_population_errors(
+            _pq_on(test_zero_positive_group_ratio=0.1), post_training=True) == []
+
+    def test_monitoring_mode_is_not_affected(self):
+        # Monitoring LEFT-joins labels onto inference output; nothing upstream
+        # dropped a group there.
+        from recsys_tfb.core.consistency import prediction_quality_population_errors
+
+        assert prediction_quality_population_errors(
+            _pq_on(), post_training=False) == []
+
+    def test_the_family_switched_off_is_not_affected(self):
+        from recsys_tfb.core.consistency import prediction_quality_population_errors
+
+        params = _pq_on()
+        params["evaluation"]["report"]["sections"]["prediction_quality"] = False
+        assert prediction_quality_population_errors(params, post_training=True) == []
+        assert prediction_quality_population_errors(
+            _zp_params(), post_training=True) == []

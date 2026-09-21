@@ -927,3 +927,54 @@ class TestSplitUnitKeysVersionRouting:
         assert "train_split_keys" in TRAIN_SAMPLING_KEYS
         assert "val_sample_keys" not in TRAIN_SAMPLING_KEYS
         assert "val_sample_keys" not in BASE_VERSION_STRIPPED_SAMPLING_KEYS
+
+
+class TestZeroPositiveGroupRatioLayering:
+    """ADR-0025 decision 3: the three ``*_zero_positive_group_ratio`` keys land
+    in two different version layers, and that split is the whole reason they
+    are three top-level keys rather than one.
+
+    The val / test half guards a silent failure rather than an inefficiency:
+    base_dataset_version is the only ID the val and test tables are keyed by,
+    so a val / test ratio that did not move it would make a new config read
+    back the table drawn under the old one, exit code 0 (ADR-0016's shape).
+    """
+
+    def test_train_key_is_a_train_sampling_key(self):
+        assert "train_zero_positive_group_ratio" in TRAIN_SAMPLING_KEYS
+
+    def test_val_and_test_keys_are_not_stripped_from_base(self):
+        for key in ("val_zero_positive_group_ratio", "test_zero_positive_group_ratio"):
+            assert key not in BASE_VERSION_STRIPPED_SAMPLING_KEYS, key
+
+    def test_train_key_moves_only_the_train_variant(self):
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"]["train_zero_positive_group_ratio"] = 0.0
+        assert compute_train_variant_id(p1) != compute_train_variant_id(p2)
+        assert compute_base_dataset_version(p1, _sample_schema()) == \
+            compute_base_dataset_version(p2, _sample_schema())
+
+    @pytest.mark.parametrize(
+        "key", ["val_zero_positive_group_ratio", "test_zero_positive_group_ratio"],
+    )
+    def test_val_or_test_key_moves_base_and_not_the_train_variant(self, key):
+        p1 = _base_params()
+        p2 = _base_params()
+        p2["dataset"][key] = 0.2
+        assert compute_base_dataset_version(p1, _sample_schema()) != \
+            compute_base_dataset_version(p2, _sample_schema())
+        assert compute_train_variant_id(p1) == compute_train_variant_id(p2)
+
+    def test_changing_one_declared_value_moves_its_layer(self):
+        # Present-vs-absent above could pass on "the key's name is hashed";
+        # this is the value, which is what an operator actually edits.
+        p1 = _base_params()
+        p2 = _base_params()
+        p1["dataset"]["val_zero_positive_group_ratio"] = 0.1
+        p2["dataset"]["val_zero_positive_group_ratio"] = 0.2
+        assert compute_base_dataset_version(p1, _sample_schema()) != \
+            compute_base_dataset_version(p2, _sample_schema())
+        p1["dataset"]["train_zero_positive_group_ratio"] = 0.0
+        p2["dataset"]["train_zero_positive_group_ratio"] = 0.5
+        assert compute_train_variant_id(p1) != compute_train_variant_id(p2)

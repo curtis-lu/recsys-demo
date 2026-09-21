@@ -32,7 +32,17 @@ RESUME_CONTRACTS = {
     ("dataset", ()): {
         # all upstream artifacts (keys tables, feature/label tables) persisted
         "fit_preprocessor_metadata": set(),
-        "build_train_model_input": set(),
+        # The val / test builds re-run from here and always did: they used to
+        # sort *after* build_train_model_input and ride in as "every node after
+        # it". Since #429 the train keys come out of filter_train_keys, which
+        # becomes ready only after apply_preprocessor_to_features has already
+        # queued the val / test builds, so they now sort *before* it and are
+        # pulled back by their memory-only outputs instead. Same seven nodes
+        # re-run either way; only the column they are reported in moved.
+        "build_train_model_input": {
+            "build_val_model_input",
+            "build_test_model_input",
+        },
     },
     # --only-test-months builds a different pipeline, so it gets its own
     # contract: a mode is not a slice, and the resume costs inside it are not

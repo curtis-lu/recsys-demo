@@ -72,3 +72,28 @@ def test_the_policy_key_is_live_and_that_is_the_point_of_two_keys():
 
     assert "numeric_precision_policy" in GATE_POLICY_KEYS
     assert _dataset_block().get("numeric_precision_policy") in PRECISION_POLICIES
+
+
+_ZERO_POSITIVE_KEYS = (
+    "train_zero_positive_group_ratio",
+    "val_zero_positive_group_ratio",
+    "test_zero_positive_group_ratio",
+)
+
+
+def test_no_zero_positive_group_ratio_is_a_live_yaml_key():
+    # All three feed a version ID (train -> train_variant_id, val/test ->
+    # base_dataset_version), so writing one — even at its default — rebuilds
+    # artifacts for a config that behaves identically. ADR-0025 decision 3.
+    ds = _dataset_block()
+    for key in _ZERO_POSITIVE_KEYS:
+        assert key not in ds, (
+            f"conf/base/parameters_dataset.yaml activates dataset.{key}. Even "
+            f"at its default this busts a version ID. Keep it commented out."
+        )
+
+
+def test_the_zero_positive_group_ratios_are_documented_in_comments():
+    text = _PATH.read_text()
+    for key in _ZERO_POSITIVE_KEYS:
+        assert f"# {key}:" in text, f"{key} has no commented declaration"

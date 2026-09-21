@@ -199,3 +199,40 @@ class TestDropZeroPositiveGroups:
             drop_zero_positive_groups(np.array([1, 0, 0, 1]), bad)
         with pytest.raises(ValueError, match="1-D"):
             drop_zero_positive_groups(bad, np.array([1, 1, 2, 2]))
+
+
+class TestSingleLabelGroupCounts:
+    """ADR-0025 decision H: a query group whose rows all carry one label has no
+    pair a ranking objective can compare — the number training logs."""
+
+    def test_counts_groups_with_one_distinct_label(self):
+        from recsys_tfb.core.group_utils import single_label_group_counts
+
+        y = np.array([1, 0, 0, 0, 1, 1, 2])
+        ids = np.array(["a", "a", "b", "b", "c", "c", "d"])
+        # a mixed; b all 0; c all 1; d a single row -> 3 of 4 single-label.
+        assert single_label_group_counts(y, ids) == {
+            "groups_total": 4, "groups_single_label": 3,
+        }
+
+    def test_two_different_graded_labels_are_comparable(self):
+        from recsys_tfb.core.group_utils import single_label_group_counts
+
+        counts = single_label_group_counts(np.array([1, 2]), np.array([7, 7]))
+        assert counts == {"groups_total": 1, "groups_single_label": 0}
+
+    def test_groups_need_not_be_contiguous(self):
+        from recsys_tfb.core.group_utils import single_label_group_counts
+
+        y = np.array([1, 0, 0, 0])
+        ids = np.array([1, 2, 1, 2])
+        assert single_label_group_counts(y, ids) == {
+            "groups_total": 2, "groups_single_label": 1,
+        }
+
+    def test_empty_input_counts_nothing(self):
+        from recsys_tfb.core.group_utils import single_label_group_counts
+
+        assert single_label_group_counts(np.array([]), np.array([])) == {
+            "groups_total": 0, "groups_single_label": 0,
+        }

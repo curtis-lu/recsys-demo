@@ -135,6 +135,24 @@ def _log_group_filter(split: str, counts: dict) -> None:
     )
 
 
+def _log_single_label_groups(split: str, objective: str, y, group_ids) -> None:
+    """One line per split: the share of query groups a ranking objective can
+    draw no pair from (ADR-0025 decision H). Counted on the rows the binary
+    holds — after lambdarank's zero-positive filter — so it describes what
+    the objective actually trains on. Logged at build time only: a cache hit
+    builds nothing and prints the line of the run that built the binary."""
+    from recsys_tfb.core.group_utils import single_label_group_counts
+
+    counts = single_label_group_counts(y, group_ids)
+    total = counts["groups_total"]
+    single = counts["groups_single_label"]
+    logger.info(
+        "%s single-label query groups [%s]: %d/%d groups (%.1f%%) hold one "
+        "label only and give the objective no pair to compare",
+        objective, split, single, total, 100.0 * single / total if total else 0.0,
+    )
+
+
 class LightGBMAdapter(ModelAdapter):
     """ModelAdapter wrapping LightGBM Booster."""
 
@@ -441,6 +459,7 @@ class LightGBMAdapter(ModelAdapter):
                     y_tr, gid_tr, X_tr, row_tr)
                 filter_counts["train"] = counts
                 _log_group_filter("train", counts)
+            _log_single_label_groups("train", objective, y_tr, gid_tr)
             perm_tr, grp_tr = to_contiguous_groups(gid_tr)
             ds_train = lgb.Dataset(
                 X_tr[perm_tr],
@@ -467,6 +486,7 @@ class LightGBMAdapter(ModelAdapter):
                     drop_zero_positive_groups(y_dev, gid_dev, X_dev, row_dev))
                 filter_counts["train_dev"] = counts
                 _log_group_filter("train_dev", counts)
+            _log_single_label_groups("train_dev", objective, y_dev, gid_dev)
             perm_dev, grp_dev = to_contiguous_groups(gid_dev)
             ds_dev = lgb.Dataset(
                 X_dev[perm_dev],
