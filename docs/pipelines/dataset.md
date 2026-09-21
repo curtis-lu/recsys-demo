@@ -287,7 +287,8 @@ split 展開出不同的欄位集合（見 §3.4 與
 
   r ＝ 0 印「none kept」，r ＝ 1 印「every group kept (not counted)」；計數只在 0 < r < 1 時做（多一次 Spark action）。evaluation 報表的「基本統計 — 資料集」段在 `--post-training` 且 test 的 r > 0 時，也會印出 test 的 r 與這次評估資料裡的無正例組數。
 - 權重欄一路帶到 training 的預測表 `training_eval_predictions`，evaluation 的預測品質指標家族拿它加權，而不是數列數。那張表在 catalog 是**明確列出欄位**的，沒宣告的欄會在寫入時被靜默丟掉，所以 test 的 r > 0 時 catalog 必須宣告 `{name: zero_positive_group_weight, type: DOUBLE}`（不變量 A45 在 training 的 CLI 進入點擋下）。⚠ 明確列出欄位的 Hive 表不會自動加欄：既有的 `training_eval_predictions` 表要先加上這一欄（或換一張新表）再跑 training。
-- 欄名是框架自己的，**不得**與使用者提供的逐列訓練權重（#425）共用。model_input 裡已經有同名的欄時直接報錯，不覆寫。
+- 宣告了這一欄之後把 test 的 r 改回 0 也可以：training 照樣寫這一欄，值是 NULL（沒有設計權重可言）。evaluation 只在設定的 test r > 0 時才用權重，而且會先確認每一列都真的有權重——欄不存在、或有 NULL，代表被評估的模型（`--model-version` 或 `best`）是在不同的 test r 下建的，和目前的設定對不上，evaluation 會停下並說明，不會拿 NULL 去加權（那會把那些列丟掉）。
+- 欄名是框架自己的，**不得**與使用者提供的逐列訓練權重（#425）共用。特徵表裡有同名的特徵欄時，資料閘在 dataset 開頭就擋下（不變量 B12）；切片執行跳過資料閘時，整組抽樣那一步也會報錯，不覆寫。
 - 與 `val_sample_ratio` 並用時權重仍然對：那是對 entity 均勻抽，有正例與無正例的組一視同仁，不改變 1 與 1／r 的相對比例。
 
 **train 的 r 與訓練目標。** train 的 r ＝ 0 只適合 `lambdarank`：它在沒有正例的組上梯度恆為零，training 本來就在建訓練資料時替它丟掉這些組（`core/group_utils.py` 的 `objective_drops_zero_positive_groups`），所以 r ＝ 0 只是把同一件事提前到 dataset，訓練表小很多，模型吃到的列與早停的母體都不變。`binary` 與 `rank_xendcg` 會從無正例的組學到東西（後者 repo 有實測，在全是負例的組上照樣長樹），對它們而言 r < 1 是**整組的負例降採樣**：訓練母體的正例佔比會上升，train_dev（early stopping 的驗證集）的母體也跟著變——性質與既有的逐列抽樣（`sample_ratio_overrides` 壓低負例）相同，框架刻意不擋。建議：`lambdarank` ＋ 小的 query group 時設 `train_zero_positive_group_ratio: 0` 且 `sample_ratio: 1`。training 用 ranking 類目標時，建訓練資料會 log 出「只剩單一種 label 的 query group 佔多少」（這種組沒有可比的配對），讓你判斷逐列抽樣有沒有把小組抽壞。
@@ -295,7 +296,7 @@ split 展開出不同的欄位集合（見 §3.4 與
 **r > 0 時什麼不變、什麼會變。**
 
 - 不變：**固定整數 K** 的組內排序指標（evaluation 的 Spark 端與 HPO 的 numpy 端都在計算時跳過無正例的組），逐值相同。
-- 會變：算在過濾之前的量。item 種數（某些 item 可能只出現在無正例的組）、由它解析出來的 `"all"` 的 K 與報表上依 item 種數裁掉的 K、evaluation `dataset_overview` 的各項總數（列數、正樣本率……）。這是母體變大的誠實反映，**不是 regression**。
+- 會變：算在過濾之前的量。item 種數（某些 item 可能只出現在無正例的組）、由它解析出來的 `"all"` 的 K 與報表上依 item 種數裁掉的 K、evaluation `dataset_overview` 的各項總數與比率（列數、正樣本率……）。這是表裡多了那些組的如實反映，**不是 regression**。注意 `dataset_overview` 的數字**沒有加權**：它描述的是 dataset 留下來的這張表，所以正樣本率這類比率會隨 r 改變，既不是 r ＝ 0 時的值、也不是全部曝光的值；要估全部曝光，看預測品質指標家族的加權數字。
 
 **evaluation 那一側。** 開了預測品質指標家族（`evaluation.report.sections.prediction_quality: true`）又跑 `--post-training` 時，test 的 r 必須大於 0（不變量 A46 在 evaluation 的 CLI 進入點擋下）：r ＝ 0 的 test 表已經沒有無正例的組，二元指標會系統性偏高。監控模式不受影響——它把 label 用 LEFT JOIN 接到推論結果上，沒經過 dataset 的篩選。
 
@@ -637,7 +638,8 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | val/test 筆數比 sample pool 少很多 | 零正例 query groups 被預期移除（`*_zero_positive_group_ratio` 預設 0） | 查詢 group 的 label sum；這是排序評估母體設計，不一定是錯誤。要留一部分，見 §3.7 |
 | `A44: dataset.*_zero_positive_group_ratio=... is not a ratio` | 值不在 [0, 1]，或寫成字串、布林、`null` | 改成 [0, 1] 的數字，或刪掉那一行用預設值 |
 | `(A45) catalog entry 'training_eval_predictions' does not declare 'zero_positive_group_weight'` | test 的 r > 0，但預測表沒宣告權重欄 | 在該 catalog 條目的 `columns:` 加 `{name: zero_positive_group_weight, type: DOUBLE}`；既有表要先加欄（§3.7） |
-| `'zero_positive_group_weight' is already a column of this frame` | 特徵表或 `sample_pool` 帶了與框架權重欄同名的欄 | 在來源 SQL 改名 |
+| `B12: feature_table column 'zero_positive_group_weight' is a model feature` | 特徵表有一欄與框架的權重欄同名，而 val 或 test 的 r > 0 | 在來源 SQL 改名；不是特徵的話列進 `drop_columns` |
+| `'zero_positive_group_weight' is already a column of this frame` | 同上，但 B12 被跳過（切片執行時資料閘不會跑） | 同上 |
 | `Unknown node ...` | node 名稱拼錯或 pipeline 已變更 | 先執行 `dataset --list-nodes` 取得目前名稱 |
 | 切片計畫出現昂貴的 `auto-included` | 必要 artifact 不存在或 catalog 無法載入 | 先確認版本 partition 與檔案；不接受補跑成本時先停止修復 |
 | 部分重跑後結果與設定不一致 | skipped artifacts 已過期，或資料閘被跳過 | 使用 full run，並比較 manifest、版本與 source data 更新時間 |

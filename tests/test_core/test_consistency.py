@@ -4507,3 +4507,42 @@ class TestPredictionQualityPopulationA46:
         assert prediction_quality_population_errors(params, post_training=True) == []
         assert prediction_quality_population_errors(
             _zp_params(), post_training=True) == []
+
+
+class TestZeroPositiveGroupWeightCollisionB12:
+    def test_a_feature_by_that_name_collides_only_when_a_weight_is_added(self):
+        from recsys_tfb.core.consistency import (
+            ZERO_POSITIVE_GROUP_WEIGHT_COL as W,
+            zero_positive_group_weight_collision_errors,
+        )
+
+        features = ["age", W]
+        assert zero_positive_group_weight_collision_errors(_zp_params(), features) == []
+        for key in ("val_zero_positive_group_ratio", "test_zero_positive_group_ratio"):
+            errs = zero_positive_group_weight_collision_errors(
+                _zp_params(**{key: 0.2}), features)
+            assert len(errs) == 1 and "B12" in errs[0] and W in errs[0], key
+        assert zero_positive_group_weight_collision_errors(
+            _zp_params(val_zero_positive_group_ratio=0.2), ["age"]) == []
+
+    def test_the_train_ratio_adds_no_weight_and_so_never_collides(self):
+        from recsys_tfb.core.consistency import (
+            ZERO_POSITIVE_GROUP_WEIGHT_COL as W,
+            zero_positive_group_weight_collision_errors,
+        )
+
+        assert zero_positive_group_weight_collision_errors(
+            _zp_params(train_zero_positive_group_ratio=0.2), [W]) == []
+
+
+class TestTestCarriesZeroPositiveGroupWeight:
+    def test_only_a_positive_test_ratio_carries_the_weight(self):
+        from recsys_tfb.core.consistency import test_carries_zero_positive_group_weight
+
+        assert not test_carries_zero_positive_group_weight({})
+        assert not test_carries_zero_positive_group_weight(
+            _zp_params(test_zero_positive_group_ratio=0.0))
+        assert not test_carries_zero_positive_group_weight(
+            _zp_params(val_zero_positive_group_ratio=0.5))
+        assert test_carries_zero_positive_group_weight(
+            _zp_params(test_zero_positive_group_ratio=0.5))

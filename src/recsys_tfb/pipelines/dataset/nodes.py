@@ -52,6 +52,7 @@ from recsys_tfb.core.consistency import (
     resolved_zero_positive_group_ratio,
     spark_dtype_is_numeric,
     spark_dtype_value_step,
+    zero_positive_group_weight_collision_errors,
 )
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_entity_grouping, get_schema
@@ -124,7 +125,7 @@ def validate_data_consistency(
     feature_table: DataFrame,
     parameters: dict,
 ) -> None:
-    """Run the Layer-2 invariants (B1, B5, B6, B7, B11) against the source tables.
+    """Run the Layer-2 invariants (B1, B5, B6, B7, B11, B12) against the source tables.
 
     Side-effect only: raises ``DataConsistencyError`` on violation, returns
     ``None`` when everything holds. Each invariant's meaning lives with its
@@ -208,6 +209,10 @@ def validate_data_consistency(
                 "label_table": label_table.columns,
             },
         )
+        # B12 — no feature may share the zero-positive group weight's name
+        # while val or test adds that column. The feature list is derived from
+        # metadata above, so this reads no rows either.
+        + zero_positive_group_weight_collision_errors(parameters, feature_cols)
     )
     if errors:
         raise DataConsistencyError(
@@ -1219,6 +1224,10 @@ def filter_val_model_input(
     choice): nothing pins val's row count to its keys (B10 covers train and
     train_dev only), so there is nothing a later drop could break, and the
     label is already joined.
+
+    Pre-check (input), inside the draw: a model_input that already holds a
+    column named like the weight is refused rather than overwritten — the
+    runtime backstop of B12, for a sliced run that skipped the gate.
     """
     schema = get_schema(parameters)
     group_cols = schema["query_group_columns"]
@@ -1268,6 +1277,9 @@ def filter_test_model_input(
     The weight column this adds above 0 travels on: training writes it into
     ``training_eval_predictions`` (A45 makes the catalog declare it) and the
     prediction-quality family sums it instead of counting rows.
+
+    Pre-check (input), inside the draw: B12's runtime backstop, as in
+    ``filter_val_model_input``.
     """
     schema = get_schema(parameters)
     group_cols = schema["query_group_columns"]

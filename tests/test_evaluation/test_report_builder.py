@@ -1782,7 +1782,8 @@ def test_dataset_overview_prints_the_test_ratio_and_the_kept_groups():
     assert "r＝0.25" in s.description
     assert "7 個" in s.description
     assert "1／r＝4" in s.description
-    assert "不是 regression" in s.description
+    assert "沒有加權" in s.description
+    assert "不代表全部曝光" in s.description
 
 
 @pytest.mark.parametrize("ratio, post_training", [(0.0, True), (0.25, False)])

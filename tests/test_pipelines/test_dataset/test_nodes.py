@@ -1528,6 +1528,45 @@ class TestValidateDataConsistencyB7:
             sample_pool, label_table, feature_table, params) is None
 
 
+class TestValidateDataConsistencyB12:
+    """B12 — a feature column named like the zero-positive group weight, while
+    val or test keeps zero-positive groups (ADR-0025 decision 3)."""
+
+    def test_a_feature_named_like_the_weight_is_refused_when_val_keeps_groups(
+        self, spark, feature_table, sample_pool, label_table, parameters
+    ):
+        from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+
+        ft = feature_table.withColumn(ZERO_POSITIVE_GROUP_WEIGHT_COL, F.lit(0.5))
+        params = _gate_params(parameters)
+        params["dataset"]["val_zero_positive_group_ratio"] = 0.5
+        with pytest.raises(DataConsistencyError) as ei:
+            validate_data_consistency(sample_pool, label_table, ft, params)
+        msg = str(ei.value)
+        assert "1 issue(s)" in msg
+        assert "B12" in msg and ZERO_POSITIVE_GROUP_WEIGHT_COL in msg
+
+    def test_nothing_is_refused_while_no_split_keeps_zero_positive_groups(
+        self, spark, feature_table, sample_pool, label_table, parameters
+    ):
+        # The column is a legal feature at the defaults: no weight is added.
+        from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+
+        ft = feature_table.withColumn(ZERO_POSITIVE_GROUP_WEIGHT_COL, F.lit(0.5))
+        validate_data_consistency(sample_pool, label_table, ft, _gate_params(parameters))
+
+    def test_a_dropped_column_by_that_name_is_not_a_collision(
+        self, spark, feature_table, sample_pool, label_table, parameters
+    ):
+        # drop_columns keeps it out of the features, so model_input never holds it.
+        from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+
+        ft = feature_table.withColumn(ZERO_POSITIVE_GROUP_WEIGHT_COL, F.lit(0.5))
+        params = _gate_params(parameters, drop_extra=[ZERO_POSITIVE_GROUP_WEIGHT_COL])
+        params["dataset"]["test_zero_positive_group_ratio"] = 0.5
+        validate_data_consistency(sample_pool, label_table, ft, params)
+
+
 class TestValidateDataConsistencyCollectAll:
     def test_two_unrelated_violations_raise_once_naming_both(
         self, spark, feature_table, sample_pool, label_table, parameters

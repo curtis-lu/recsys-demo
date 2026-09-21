@@ -530,7 +530,7 @@ flags), A22/A46 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43 (config k
 harm belongs to one pipeline), A28/A39/A45 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags).
 
-Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10
+Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
 implemented and wired):
 
 * B1 — sample_pool items ↔ declared items must be equal; label items ⊆
@@ -712,6 +712,17 @@ implemented and wired):
   decision 2 warns about, written into a gate. Predicate:
   ``optional_role_source_column_errors``. Wired in ``validate_data_consistency``
   (``pipelines/dataset/nodes.py``) with the rest of Layer 2.
+* B12 — a model feature named ``ZERO_POSITIVE_GROUP_WEIGHT_COL`` while
+  ``dataset.val_zero_positive_group_ratio`` or ``test_zero_positive_group_ratio``
+  is above 0: the val / test filter nodes add a column by that name to the same
+  frame (ADR-0025 decision 3). Checked against the feature columns derived from
+  ``feature_table``'s metadata — no rows. Only features count (val / test keys
+  carry nothing; a dropped column is no feature), and the train ratio adds no
+  weight. Predicate: ``zero_positive_group_weight_collision_errors``. Wired in
+  ``validate_data_consistency``. Runtime backstop:
+  ``keep_zero_positive_groups_drawn_under_ratio``
+  (``pipelines/dataset/steps/model_input.py``) refuses a frame that already
+  holds the column — a sliced run skips the gate.
 
 Layer 3 — specified but DEFERRED (NOT implemented in this module yet); see
 the plan doc for the full table:
@@ -1052,7 +1063,7 @@ def zero_positive_group_weight_declared_errors(
     """
     if declared_columns is None:
         return []
-    if resolved_zero_positive_group_ratio(parameters, "test") <= 0.0:
+    if not test_carries_zero_positive_group_weight(parameters):
         return []
     if ZERO_POSITIVE_GROUP_WEIGHT_COL in declared_columns:
         return []
@@ -1870,6 +1881,19 @@ def resolved_zero_positive_group_ratio(parameters: dict, split: str) -> float:
     return float(ds[key])
 
 
+def test_carries_zero_positive_group_weight(parameters: dict) -> bool:
+    """Whether the test table carries :data:`ZERO_POSITIVE_GROUP_WEIGHT_COL` —
+    ``dataset.test_zero_positive_group_ratio`` above 0.
+
+    The one derivation for every reader of that fact: the training write that
+    carries the column into the prediction table, A45 that makes the catalog
+    declare it, the evaluation node that weights by it, the report note that
+    prints it, and A46. Each deciding it for itself is how a write and the
+    gate that checks it end up disagreeing.
+    """
+    return resolved_zero_positive_group_ratio(parameters, "test") > 0.0
+
+
 def zero_positive_group_ratio_errors(parameters: dict) -> list[str]:
     """A44 — each ``dataset.*_zero_positive_group_ratio`` is a number in [0, 1].
 
@@ -2289,8 +2313,8 @@ def prediction_quality_population_errors(
     test table that kept some query groups holding no positive.
 
     Returns error strings (empty list when fine); the evaluation command raises
-    it, collected with A22/A34/A42. Takes the flag rather than reading it, like
-    A22/A40.
+    it, collected with A22/A34/A42/A43. Takes the flag rather than reading it,
+    like A22/A40.
 
     ``--post-training`` evaluates ``training_eval_predictions``, which is the
     test table scored — and with ``dataset.test_zero_positive_group_ratio`` at
@@ -2306,7 +2330,7 @@ def prediction_quality_population_errors(
     """
     if not post_training or not prediction_quality_on(parameters):
         return []
-    if resolved_zero_positive_group_ratio(parameters, "test") > 0.0:
+    if test_carries_zero_positive_group_weight(parameters):
         return []
     return [
         "A46: evaluation.report.sections.prediction_quality is on under "
@@ -3244,6 +3268,47 @@ def carry_column_collision_errors(
             f"the dataset, so check which one {col!r} is before editing."
         )
     return errors
+
+
+# ---------------------------------------------------------------------------
+# B12 — a feature column named like the zero-positive group weight
+# ---------------------------------------------------------------------------
+
+
+def zero_positive_group_weight_collision_errors(
+    parameters: dict,
+    feature_columns: Sequence[str],
+) -> list[str]:
+    """B12 — no model feature may be called :data:`ZERO_POSITIVE_GROUP_WEIGHT_COL`
+    while val or test keeps zero-positive groups.
+
+    Returns error strings (empty list when fine), collected by
+    ``validate_data_consistency``. Pure: the caller hands in the feature
+    columns it derived from ``feature_table``'s metadata — no rows.
+
+    Above 0 the ``filter_{val,test}_model_input`` nodes add that column, and a
+    feature by the same name would reach the same frame: the draw refuses to
+    overwrite it (the runtime backstop in
+    ``steps/model_input.keep_zero_positive_groups_drawn_under_ratio``), but
+    only after the whole build has run. Only features count: val / test keys
+    carry nothing, so a carry column cannot reach those tables, and a column
+    listed in ``drop_columns`` never becomes a feature. The train ratio adds no
+    weight, so it cannot collide.
+    """
+    keeps = [
+        split for split in ("val", "test")
+        if resolved_zero_positive_group_ratio(parameters, split) > 0.0
+    ]
+    if not keeps or ZERO_POSITIVE_GROUP_WEIGHT_COL not in feature_columns:
+        return []
+    keys = " and ".join(f"dataset.{s}_zero_positive_group_ratio" for s in keeps)
+    return [
+        f"B12: feature_table column {ZERO_POSITIVE_GROUP_WEIGHT_COL!r} is a model "
+        f"feature, and {keys} > 0 makes the dataset pipeline add a column by "
+        f"that name to the same table (the zero-positive group weight). Rename "
+        f"the source column, or list it in "
+        f"dataset.prepare_model_input.drop_columns if it is not a feature."
+    ]
 
 
 # ---------------------------------------------------------------------------

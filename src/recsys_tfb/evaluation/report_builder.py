@@ -16,6 +16,7 @@ from recsys_tfb.core.consistency import (
     EVALUATION_REPORT_SECTIONS,
     ZERO_POSITIVE_GROUP_WEIGHT_COL,
     resolved_zero_positive_group_ratio,
+    test_carries_zero_positive_group_weight,
 )
 from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.core.schema import get_schema
@@ -503,9 +504,9 @@ def _kept_zero_positive_groups_note(metrics: dict, parameters: dict) -> str:
     """
     if not parameters.get("post_training"):
         return ""
-    ratio = resolved_zero_positive_group_ratio(parameters, "test")
-    if ratio <= 0.0:
+    if not test_carries_zero_positive_group_weight(parameters):
         return ""
+    ratio = resolved_zero_positive_group_ratio(parameters, "test")
     n_kept = metrics.get("n_excluded_queries")
     kept = f"本次評估資料裡有 {n_kept:,} 個" if n_kept is not None else "本次評估資料裡有一些"
     return (
@@ -587,8 +588,11 @@ def build_dataset_overview_section(
             "正樣本率、query 數與 query 數佔比（該 segment 佔多少 query）。每-query "
             "正例數分佈為後續階段。"
             + (
-                " " + note + "上面各項總數（列數、item 數、正樣本率）都算進了"
-                "這些組，是未加權的計數——母體變大的如實反映，不是 regression。"
+                " " + note + "上面各項總數與比率（列數、item 數、正樣本率）都"
+                "算進了這些組，而且**沒有加權**：它們描述的是 dataset 留下來的這張"
+                "表，會隨 r 改變，不代表全部曝光（要估全部曝光的正例率，看預測品質"
+                "段的加權數字）。與 r ＝ 0 時的報表相比數字變了是預期的，不是 "
+                "regression；固定整數 K 的排序指標則逐值不變。"
                 if (note := _kept_zero_positive_groups_note(metrics, parameters))
                 else ""
             )

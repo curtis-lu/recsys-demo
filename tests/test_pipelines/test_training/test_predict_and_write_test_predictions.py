@@ -804,7 +804,7 @@ def _make_weighted_test_parquet(tmp_path: Path, weights) -> Path:
     return root
 
 
-def _predict_weighted(tmp_path, dataset, weights=4.0):
+def _predict_weighted(tmp_path, dataset, weights=4.0, declared=None):
     from recsys_tfb.io.handles import ParquetHandle
     from recsys_tfb.pipelines.training.nodes import (
         predict_and_write_test_predictions,
@@ -816,6 +816,7 @@ def _predict_weighted(tmp_path, dataset, weights=4.0):
     model.predict.side_effect = lambda X: np.arange(len(X)).astype(float) + 0.5
     model.__class__.__name__ = "LightGBMAdapter"
     write_ds = _write_ds()
+    write_ds.declared_columns = declared
     predict_and_write_test_predictions(
         model=model,
         test_parquet_handle=ParquetHandle(
@@ -850,3 +851,21 @@ def test_no_weight_column_is_written_at_the_default_test_ratio(tmp_path):
         "cust_id", "score", "score_uncalibrated", "label", "snap_date",
         "prod_name",
     ]
+
+
+def test_a_declared_weight_column_is_written_null_at_the_default_ratio(tmp_path):
+    """A catalog that declares the column keeps working when test's ratio goes
+    back to 0: a Hive save selects every declared column, so a frame without it
+    would fail there. NULL, not 1.0 — no design weight applies to those rows,
+    and evaluation reads a NULL weight as "these predictions were not written
+    under a positive ratio" instead of mistaking them for weighted ones.
+    Values in the cached parquet (left over from an earlier run on the
+    `columns: "auto"` test table) are not read."""
+    from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+
+    written = _predict_weighted(
+        tmp_path, {}, weights=4.0,
+        declared=["cust_id", "score", "score_uncalibrated", "label",
+                  ZERO_POSITIVE_GROUP_WEIGHT_COL])
+    assert ZERO_POSITIVE_GROUP_WEIGHT_COL in written.columns
+    assert written[ZERO_POSITIVE_GROUP_WEIGHT_COL].isna().all()

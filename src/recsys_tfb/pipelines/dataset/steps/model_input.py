@@ -10,7 +10,7 @@ and why each is the right answer for this task, is the story
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from pyspark.sql import Window
 from pyspark.sql import functions as F
@@ -29,7 +29,17 @@ logger = logging.getLogger(__name__)
 #: path provably the same draw.
 ZERO_POSITIVE_GROUP_SITE = "zero_positive_groups"
 
-_HAS_POSITIVE = "__grp_pos"
+#: Working column of the draw: whether the row's group holds a positive. Not
+#: ``drop_groups_without_positives``' ``__grp_pos`` — that one holds a sum.
+_HAS_POSITIVE = "__grp_has_pos"
+
+
+class ZeroPositiveGroupCounts(NamedTuple):
+    """What one zero-positive group draw kept, by field rather than position."""
+
+    with_positive: int
+    zero_total: int
+    zero_kept: int
 
 
 def require_columns_present(
@@ -166,7 +176,8 @@ def keep_zero_positive_groups_drawn_under_ratio(
 
     Refuses a frame that already holds ``weight_col`` rather than overwriting
     it: a feature column by that name would otherwise be replaced by weights
-    with nothing raised.
+    with nothing raised. This is B12's runtime backstop (``core/consistency.py``
+    checks the same thing on metadata at the start of the dataset pipeline).
     """
     if weight_col is not None and weight_col in df.columns:
         raise ValueError(
@@ -199,9 +210,9 @@ def count_zero_positive_groups_kept(
     label_col: str,
     ratio: float,
     seed: int,
-) -> tuple[int, int, int]:
-    """``(groups holding a positive, zero-positive groups, zero-positive groups
-    kept)`` under the same draw :func:`keep_zero_positive_groups_drawn_under_ratio`
+) -> ZeroPositiveGroupCounts:
+    """Groups holding a positive, zero-positive groups, and zero-positive groups
+    kept, under the same draw :func:`keep_zero_positive_groups_drawn_under_ratio`
     makes.
 
     **One Spark action** over ``df``'s group and label columns — on a lazy
@@ -216,16 +227,18 @@ def count_zero_positive_groups_kept(
         for row in groups.groupBy(F.col(_HAS_POSITIVE), kept.alias("__kept"))
         .count().collect()
     }
-    with_positive = tally.get((True, True), 0)
     zero_kept = tally.get((False, True), 0)
-    zero_total = zero_kept + tally.get((False, False), 0)
-    return with_positive, zero_total, zero_kept
+    return ZeroPositiveGroupCounts(
+        with_positive=tally.get((True, True), 0),
+        zero_total=zero_kept + tally.get((False, False), 0),
+        zero_kept=zero_kept,
+    )
 
 
 def log_zero_positive_group_draw(
     split: str,
     ratio: float,
-    counts: tuple[int, int, int] | None,
+    counts: ZeroPositiveGroupCounts | None,
 ) -> None:
     """Report what the zero-positive group draw kept.
 
@@ -244,10 +257,10 @@ def log_zero_positive_group_draw(
             "%s zero-positive query groups: r=%g, none kept", split, ratio,
         )
         return
-    with_positive, zero_total, zero_kept = counts
     logger.info(
         "%s zero-positive query groups: r=%g, kept %d of %d (weight 1/r=%.4g "
         "on their rows is a design weight — few kept groups means an unstable "
         "estimate); %d group(s) holding a positive, all kept",
-        split, ratio, zero_kept, zero_total, 1.0 / ratio, with_positive,
+        split, ratio, counts.zero_kept, counts.zero_total, 1.0 / ratio,
+        counts.with_positive,
     )

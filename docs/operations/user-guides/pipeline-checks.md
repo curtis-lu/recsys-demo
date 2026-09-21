@@ -133,8 +133,9 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
 - **類別欄的型別**：`dataset.prepare_model_input.categorical_columns` 列的欄，在 `feature_table` 裡不能是 decimal、double、float（`B5`）。decimal 會讓前處理器存檔失敗；double、float 幾乎一定是列錯了。
 - **非數字的特徵欄**：`feature_table` 的特徵欄如果是文字、binary、日期、時間戳或複合型別，就必須列進 `categorical_columns` 或 `drop_columns`（`B6`）。不擋的話，training 讀資料時會失敗。
 - **帶出欄和特徵欄撞名**：`dataset.carry_columns` 列的欄，如果也是 `feature_table` 裡的特徵欄（沒列在 `drop_columns`），就擋（`B7`）。不擋的話，組 model_input 時 Spark 會報欄名有歧義。
+- **特徵欄和權重欄撞名**：`dataset.val_zero_positive_group_ratio` 或 `test_zero_positive_group_ratio` 大於 0 時，`feature_table` 的特徵欄不能叫 `zero_positive_group_weight`（`B12`）。那是 dataset 會加進 val／test 表的權重欄。
 
-後面三條只讀 `feature_table` 的欄位定義，不讀資料。
+後面四條只讀 `feature_table` 的欄位定義，不讀資料。
 
 **資料閘 2：精度閘**（特徵編碼完）
 - 會被轉型的特徵欄（整數、decimal、boolean 這類值有固定間距的欄），最大絕對值不能超過 `dataset.numeric_feature_storage_type` 在那個間距下能精確表示的上限（`B8`）。例：整數欄轉 `float32`，上限是 16,777,216；`decimal(18,2)` 轉 `float32`，上限是 131,072。超過的話，兩個不同的值會變成同一個，排序會悄悄改變。

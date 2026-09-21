@@ -1209,6 +1209,35 @@ class TestComputePredictionQuality:
         summary = result["overall"]["summary"]
         assert (summary["n"], summary["n_pos"]) == (9, 3)
 
+    def test_a_null_weight_under_a_positive_ratio_is_refused(self, spark):
+        """The conf says test kept zero-positive groups, the predictions
+        say otherwise — they were written by a model whose test ratio was 0
+        (NULL weights), so conf and --model-version disagree. Summing would
+        drop those rows; counting them would call a filtered table weighted."""
+        from recsys_tfb.core.consistency import DataConsistencyError
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._post_training(test_zero_positive_group_ratio=0.5)
+        with pytest.raises(DataConsistencyError, match="were not written under"):
+            compute_prediction_quality(
+                self._weighted(spark, params, None), _no_segments(params), params)
+
+    def test_a_missing_weight_column_under_a_positive_ratio_is_refused(self, spark):
+        from recsys_tfb.core.consistency import (
+            ZERO_POSITIVE_GROUP_WEIGHT_COL,
+            DataConsistencyError,
+        )
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._post_training(test_zero_positive_group_ratio=0.5)
+        frame = self._weighted(spark, params, 2.0).drop(ZERO_POSITIVE_GROUP_WEIGHT_COL)
+        with pytest.raises(DataConsistencyError, match="were not written under"):
+            compute_prediction_quality(frame, _no_segments(params), params)
+
     def test_monitoring_mode_counts_rows(self, spark):
         """Monitoring reads inference output, which no dataset draw touched."""
         from recsys_tfb.pipelines.evaluation.nodes import (
