@@ -37,6 +37,17 @@ dataset:
   test_snap_dates:
     - "2025-12-29"
 
+  # 沒有正例的 query group 留一半（ADR-0025 決定 3、#429）。形狀二下一次請求就是一組、
+  # 平均約 4 個素材，多數請求沒有點擊；全丟的話 test 只剩「有人點過」的請求，預測品質
+  # 指標家族（把每一列當二元預測）會系統性偏高——report.sections.prediction_quality
+  # 打開時，evaluation --post-training 在入口就擋下 test 的 r ＝ 0（A46）。
+  # r > 0 時表多一欄 zero_positive_group_weight（1 或 1／r），catalog.yaml 的
+  # training_eval_predictions 要宣告它（A45）。val 也設，讓 val 那條路被走到；HPO 的
+  # 兩個分數都跳過沒有正例的組，所以不受影響。0.5 只是示例值，不是建議值。
+  # train 不設（r ＝ 1）：這組 conf 的 objective 是 binary，r < 1 會是整組的負例降採樣。
+  val_zero_positive_group_ratio: 0.5
+  test_zero_positive_group_ratio: 0.5
+
   numeric_precision_policy: block
 
   prepare_model_input:

@@ -27,6 +27,8 @@ pre-checks. Where a node's *time* actually goes is a question for the Runner's
 """
 
 import logging
+import operator
+from functools import reduce
 
 import pandas as pd
 from pyspark.sql import DataFrame
@@ -1176,8 +1178,16 @@ def filter_train_keys(
     # Decision — the keys keep their own rows and columns. A semi join on the
     # query group can only drop a key, never repeat one, so a label_table
     # holding a key twice cannot fan out here and still reaches B10 through the
-    # build.
-    kept = keys.join(kept_groups, on=group_cols, how="left_semi")
+    # build. NULL-safe on every group column: a group whose key holds a NULL is
+    # one group to the draw (the val / test window partitions it like any
+    # other), and a plain equi-join would drop it whatever the draw decided.
+    kept = keys.join(
+        kept_groups,
+        on=reduce(operator.and_, [
+            keys[c].eqNullSafe(kept_groups[c]) for c in group_cols
+        ]),
+        how="left_semi",
+    )
 
     # Decision — a partial draw reports how many zero-positive groups it kept.
     # One narrow Spark action (keys and labels only), paid only when 0 < r < 1.

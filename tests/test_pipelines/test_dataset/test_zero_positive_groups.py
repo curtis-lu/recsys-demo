@@ -239,6 +239,14 @@ class TestTrainKeys:
         assert out.columns == keys.columns
         assert _sorted_rows(out, keys.columns) == _sorted_rows(keys, keys.columns)
 
+    def test_the_default_never_reads_label_table(self, keys):
+        # Structural, not numerical: at ratio 1 the draw keeps everything, so
+        # a path that joined the labels anyway would return the same rows and
+        # a row comparison could not tell. What it could not do is run without
+        # a label table — and every existing train variant takes this path.
+        out = filter_train_keys(keys, None, _params())
+        assert out is keys
+
     def test_ratio_zero_drops_the_groups_label_table_says_hold_no_positive(
         self, keys, label_table
     ):
@@ -287,6 +295,41 @@ class TestTrainKeys:
             keys, duplicated, _params(train_zero_positive_group_ratio=0.0))
         assert out.count() == _N_POSITIVE_GROUPS * len(_ITEMS)
         assert out.count() == out.distinct().count()
+
+    def test_a_group_with_a_null_key_column_is_drawn_like_any_other(self, spark):
+        """A query group whose key holds a NULL (an entity column the split
+        does not require, or an optional role) is still one group to draw —
+        the val / test window partitions it like any other. Its label never
+        joins (NULL matches nothing), so it is always a zero-positive group;
+        what must not happen is that the train side drops it for a reason the
+        draw never decided, only because a join on NULL matches nothing.
+
+        A ratio just under 1 keeps a group unless its bucket is the very last
+        one, so under this fixed seed every group survives on both paths.
+        """
+        rows = [
+            (pd.Timestamp(_DATE), None, "a", "x"),
+            (pd.Timestamp(_DATE), None, "b", "x"),
+            (pd.Timestamp(_DATE), "Z", "a", "x"),
+        ]
+        keys = spark.createDataFrame(pd.DataFrame(
+            rows, columns=["snap_date", "cust_id", "prod_name", "seg"]))
+        labels = spark.createDataFrame(pd.DataFrame(
+            [(pd.Timestamp(_DATE), "Z", "a", 0)],
+            columns=["snap_date", "cust_id", "prod_name", "label"],
+        ))
+        ratio = 0.99999
+
+        via_model_input = filter_val_model_input(
+            keys.join(labels, ["snap_date", "cust_id", "prod_name"], "left")
+                .fillna({"label": 0}),
+            _params(val_zero_positive_group_ratio=ratio),
+        )
+        assert via_model_input.count() == 3, "the model_input path is the reference"
+        out = filter_train_keys(
+            keys, labels, _params(train_zero_positive_group_ratio=ratio))
+        assert out.count() == 3
+        assert out.filter("cust_id IS NULL").count() == 2
 
     def test_the_val_and_test_keys_do_not_reach_train(self, keys, label_table):
         params = _params(
