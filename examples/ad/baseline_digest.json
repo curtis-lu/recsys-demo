@@ -1,14 +1,14 @@
 {
   "measured": {
     "date": "2026-09-21",
-    "code_commit": "e37bda9",
-    "how": "run_e2e.sh --compare 跑 feat/381-prediction-quality：這組 conf 打開預測品質指標家族（report.sections.prediction_quality: true，#381）。先與上一版基準逐層比對：versions、source_etl、dataset、training、inference 五層逐值相同；evaluation 層的 metrics.json、baseline_metrics.json、segment_columns.json 與 diagnosis/ 五份逐值相同（主指標值不變）。只有兩處不同，都是預期的：新增 prediction_quality.json（8,748 個葉節點）；report_aggregates.json 從 2,098 個葉節點變成 1,837 個，少掉的 261 個正好是被移除的 calibration 那一塊（kind 1 ＋ columns 4 ＋ 64 列 × 4 欄）——#381 把沒有讀者的 calibration_bins 收進預測品質的分箱表。本檔即那次執行的 data/digest.json。"
+    "code_commit": "e975b56",
+    "how": "run_e2e.sh --compare 跑 feat/429-zero-positive-groups：這組 conf 打開 val_zero_positive_group_ratio／test_zero_positive_group_ratio＝0.5（#429），training_eval_predictions 宣告 zero_positive_group_weight。與上一版基準逐層比對：source_etl、inference 兩層逐值相同；train_variant_id 相同，train／train_dev model_input 逐值相同（train 的 ratio 沒設）。不同的都是預期的：base_dataset_version 與 model_version 翻新（val／test 的 ratio 進 base）；val_model_input 1,813→2,815 列、test_model_input 1,921→2,925 列並多一欄權重（log：val 留下 270／541、test 留下 272／534 個無正例的請求）；training_eval_predictions 同樣多出那些列與權重欄；evaluation 的 metrics.json 只有 dataset_overview 各項與 n_queries／n_excluded_queries（0→272）不同，帶整數 K 的排序指標逐值相同（另以 ratio 0 的同一份程式跑出的 metrics.json 逐鍵比對，690 個帶整數 K 的值全部相同）；prediction_quality.json 與 report_aggregates.json 改變（母體多了無正例的請求、分箱改為加權）。同一份 conf 在審查修正前後各跑一次，digest 逐值相同。本檔即最後那次執行的 data/digest.json。"
   },
   "noisy": {},
   "versions": {
-    "base_dataset_version": "68dcd263",
+    "base_dataset_version": "df27c11e",
     "train_variant_id": "f6541cb7",
-    "model_version": "615f83a8"
+    "model_version": "075c7f65"
   },
   "source_etl": {
     "feature_table": {
@@ -137,8 +137,8 @@
       ]
     },
     "val_model_input": {
-      "rows": 1813,
-      "hash": "58280086476804794835",
+      "rows": 2815,
+      "hash": "626531821707021158203",
       "columns": [
         "ad_creative",
         "age_band",
@@ -158,12 +158,13 @@
         "user_click_4w",
         "user_ctr_4w",
         "user_id",
-        "user_imp_4w"
+        "user_imp_4w",
+        "zero_positive_group_weight"
       ]
     },
     "test_model_input": {
-      "rows": 1921,
-      "hash": "53227801511062302553",
+      "rows": 2925,
+      "hash": "190971082280866260719",
       "columns": [
         "ad_creative",
         "age_band",
@@ -183,7 +184,8 @@
         "user_click_4w",
         "user_ctr_4w",
         "user_id",
-        "user_imp_4w"
+        "user_imp_4w",
+        "zero_positive_group_weight"
       ]
     },
     "preprocessor.json": {
@@ -197,8 +199,8 @@
   },
   "training": {
     "training_eval_predictions": {
-      "rows": 1921,
-      "hash": "-39982998225099695561",
+      "rows": 2925,
+      "hash": "356425085987541704251",
       "columns": [
         "ad_creative",
         "label",
@@ -207,7 +209,8 @@
         "score_uncalibrated",
         "slot_id",
         "snap_date",
-        "user_id"
+        "user_id",
+        "zero_positive_group_weight"
       ]
     }
   },
@@ -253,15 +256,15 @@
     },
     "metrics.json": {
       "leaves": 926,
-      "hash": "d819710a8553257bc714314a90ab516a506f637f31d2fd423fe251d78f9ca0ee"
+      "hash": "27f4e88c16ccc0d6eec12ffdcf3bf6b45778dd87ca42811ae352114b55e10c03"
     },
     "prediction_quality.json": {
-      "leaves": 8748,
-      "hash": "17c47ec79c1bbef71fdc52beda6de6cbfa16ce88953dcdb0fae0e0f792214c90"
+      "leaves": 10821,
+      "hash": "8518f7a0158117fd6f9214531b5188df17307ad94433a41be93729bf195a6f48"
     },
     "report_aggregates.json": {
-      "leaves": 1837,
-      "hash": "b7930493441ceae3b5e8d0ec0a768fba4b845cfdb821ce7438a04707b520d0df"
+      "leaves": 1873,
+      "hash": "e9209005750191c9e510578beb3f5d521ef66aa7b175c742088bf877be0abbcb"
     },
     "segment_columns.json": {
       "leaves": 2,
