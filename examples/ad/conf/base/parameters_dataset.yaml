@@ -51,11 +51,15 @@ dataset:
   numeric_precision_policy: block
 
   prepare_model_input:
-    # 只列 feature_table 裡有的欄（列了不存在的欄會警告）；label 由框架自動排除
+    # 同時作用在 feature_table 與 candidate_feature_table（兩張都沒有的欄會警告）。
+    # label 與非類別的 identity 欄（含 request_id）本來就不會變成特徵，前三行只是明寫；
+    # 後兩行是 candidate_feature_table 帶著、但不是特徵的欄
     drop_columns:
       - "snap_date"
       - "user_id"
       - "slot_id"   # 版位的特性由 slot_position／page_type 帶進模型；ID 本身是 identity
+      - "impression_id"   # candidate_feature_table 的曝光 ID：認得出列，不是特徵
+      - "event_ts"        # 同上，曝光那一秒；即時特徵已經照它算好了
     categorical_columns:
       - "ad_creative"
       - "age_band"

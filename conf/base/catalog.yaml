@@ -13,6 +13,15 @@ feature_table:
   table: feature_table
   read_only: true
 
+# 候選層級特徵表（選用，最多一張）：一列是一筆候選的特徵，dataset 以 identity 接上。
+# 有這個條目就算宣告：它的欄成為特徵、schema 進 base_dataset_version，離線推論在入口被 A47 擋下。
+# 條目名固定、實體表名由部署決定；見 docs/adr/0026-feature-tables-by-join-key.md。
+# candidate_feature_table:
+#   type: HiveTableDataset
+#   database: ${hive.db}
+#   table: <實體表名>
+#   read_only: true
+
 label_table:
   type: HiveTableDataset
   database: ${hive.db}

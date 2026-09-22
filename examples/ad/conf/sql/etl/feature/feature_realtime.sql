@@ -1,11 +1,15 @@
 --partition by: snap_date
 -- 一次曝光一列：曝光那一刻之前的即時特徵。
 --
--- 今天的框架讀不到這張表：它的粒度是一次曝光，要以多張特徵表接進來（#380）才用得上，
--- 所以它不在 catalog、也不併進 feature_table。先算出來，是讓那張票有一張「確定沒偷看」的
--- 即時特徵表可以接。鍵是 impression_id（形狀一、宣告 event 時的 identity 最後一欄）。
--- 這份 conf 現在宣告的是 occasion（request_id），候選列上沒有 impression_id——接之前這張
--- 表要多帶 request_id，以 (snap_date, user_id, slot_id, request_id, ad_creative) 接。
+-- 這是這個示例的候選層級特徵表（ADR-0026）：catalog 的 candidate_feature_table 指到它，
+-- dataset 以 identity (snap_date, user_id, slot_id, request_id, ad_creative) 把它接到每一列
+-- 候選上。identity 的每一欄都要在輸出裡；一次請求裡素材不重複，所以這組鍵唯一
+-- （parameters_feature_etl.yaml 的 primary_key 守這一條）。impression_id 與 event_ts 不是
+-- 特徵，parameters_dataset.yaml 的 drop_columns 把它們排除。
+--
+-- 想改回形狀一（宣告 event ＝ impression_id、不宣告 occasion）：identity 變成
+-- (snap_date, user_id, slot_id, ad_creative, impression_id)，這張表本來就帶 impression_id，
+-- 只要把 primary_key 換掉、request_id 從 SELECT 拿掉。
 --
 -- 不偷看的界線：瀏覽只算 [曝光前 30 分鐘, 曝光那一刻)。上界寫成 <= 或往後放寬都會出事——
 -- 使用者點了廣告之後幾分鐘內會去瀏覽同類內容，其中一半與點擊記在同一秒；多算到曝光
@@ -21,6 +25,7 @@ imp AS (
     SELECT
         w.snap_date,
         i.impression_id,
+        i.request_id,
         i.event_ts,
         i.user_id,
         i.slot_id,
@@ -52,6 +57,7 @@ SELECT
     i.snap_date,
     i.user_id,
     i.slot_id,
+    i.request_id,
     i.ad_creative,
     i.impression_id,
     i.event_ts,

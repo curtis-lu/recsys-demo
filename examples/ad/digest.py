@@ -36,10 +36,11 @@ VERSION_COLS = ("base_dataset_version", "train_variant_id", "model_version")
 SCORE_COLS = ("score", "score_uncalibrated")
 EXCLUDED_JSON_KEYS = ("config_fingerprint",)
 
-# catalog 條目名
-SOURCE_TABLES = ("feature_table", "label_table", "sample_pool", "inference_population")
-# feature_etl 的表名；event 角色（#378）與多張特徵表（#380）落地前，框架讀不到它
-FEATURE_ETL_ONLY_TABLES = ("feature_realtime",)
+# catalog 條目名。candidate_feature_table 指到 feature_etl 寫的 feature_realtime（ADR-0026）。
+SOURCE_TABLES = (
+    "feature_table", "candidate_feature_table", "label_table", "sample_pool",
+    "inference_population",
+)
 DATASET_TABLES = (
     "train_model_input", "train_dev_model_input",
     "val_model_input", "test_model_input",
@@ -57,14 +58,9 @@ class Tables:
         params = config.get_parameters()
         self._db = params["hive"]["db"]
         self._catalog = config.get_catalog_config()
-        self._feature_etl_db = params["feature_etl"]["variables"]["target_db"]
 
     def __getitem__(self, entry: str) -> str:
         return f"{self._db}.{self._catalog[entry]['table']}"
-
-    def feature_etl_table(self, name: str) -> str:
-        """feature_etl 寫出、但不在 catalog 的表（框架今天讀不到它）。"""
-        return f"{self._feature_etl_db}.{name}"
 
 
 def table_fingerprint(spark, table: str, where: str | None = None) -> dict:
@@ -135,10 +131,7 @@ def build(model_version: str) -> dict:
 
         return {
             "versions": versions,
-            "source_etl": {
-                **{t: table_fingerprint(spark, tables[t]) for t in SOURCE_TABLES},
-                **{t: table_fingerprint(spark, tables.feature_etl_table(t)) for t in FEATURE_ETL_ONLY_TABLES},
-            },
+            "source_etl": {t: table_fingerprint(spark, tables[t]) for t in SOURCE_TABLES},
             "dataset": {
                 **{t: table_fingerprint(spark, tables[t]) for t in DATASET_TABLES},
                 **{f: file_fingerprint(dataset_dir / f) for f in DATASET_JSON},
@@ -147,9 +140,8 @@ def build(model_version: str) -> dict:
                 "training_eval_predictions": table_fingerprint(
                     spark, tables["training_eval_predictions"], mv_filter),
             },
-            "inference": {
-                "ranked_predictions": table_fingerprint(spark, tables["ranked_predictions"], mv_filter),
-            },
+            # 沒有 inference 層：這份 conf 宣告了候選層級特徵表，離線推論在入口被 A47 擋下
+            # （ADR-0026 決定 5），沒有 ranked_predictions 可記。
             # metrics／baseline_metrics／segment_columns／report_aggregates 與 diagnosis/ 底下的診斷。
             # manifest.json 不收：它是執行紀錄（created_at、run_id、git_commit），每次跑都不同，
             # 不是計算結果（2026-09-17 連跑兩次，61 個欄位只有它不同）

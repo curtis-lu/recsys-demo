@@ -77,7 +77,7 @@ def browse_counts(tables: dict, start: int, end: int) -> pd.DataFrame:
 def realtime_features(tables: dict) -> pd.DataFrame:
     """feature_realtime.sql 該算出的每一列：只看曝光那一秒之前。"""
     imp = tables["impression_log"]
-    out = imp[["impression_id", "user_id", "slot_id", "event_ts"]].assign(
+    out = imp[["impression_id", "request_id", "user_id", "slot_id", "event_ts"]].assign(
         snap_date=week_of(imp["event_date"]),
         ad_creative=imp["campaign_id"] + ITEM_SEPARATOR + imp["creative_format"],
     )
@@ -192,7 +192,9 @@ def main() -> None:
 
     failures = [
         *_mismatches(want_realtime, got_realtime, ["impression_id"],
-                     ["snap_date", "user_id", "slot_id", "ad_creative", "event_ts", *REALTIME_COLUMNS],
+                     # identity 各欄也比：dataset 以它們接這張表（ADR-0026），接錯鍵比算錯值更難發現
+                     ["snap_date", "user_id", "slot_id", "request_id", "ad_creative", "event_ts",
+                      *REALTIME_COLUMNS],
                      "feature_realtime"),
         *_mismatches(want_profile, got_profile, ["snap_date", "user_id"], ["profile_snap_date"], "feature_user"),
         *_mismatches(want_features, got_features, ["snap_date", "user_id", "slot_id"], FEATURE_TABLE_COLUMNS,

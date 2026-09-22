@@ -9,7 +9,7 @@
 |---|---|
 | 主要用途 | 建立版本化的資料切分、前處理器與模型輸入 |
 | 執行指令 | `python -m recsys_tfb dataset` |
-| 上游輸入 | `feature_table`、`label_table`、`sample_pool` |
+| 上游輸入 | `feature_table`、`label_table`、`sample_pool`；選用的 `candidate_feature_table`（§3.8） |
 | 主要輸出 | `preprocessor`、`category_mappings`、`*_keys`、`*_model_input` |
 | 設定檔 | `conf/base/parameters_dataset.yaml` |
 | I/O 設定 | `conf/base/catalog.yaml` |
@@ -30,7 +30,7 @@
 
 執行 dataset 前，建議依序確認：
 
-1. **來源表已就緒**：`feature_table` 與 `sample_pool` 必須涵蓋所有設定日期；`label_table` 可以是只保存正例的 sparse table，但 label 觀察窗必須成熟。
+1. **來源表已就緒**：`feature_table` 與 `sample_pool` 必須涵蓋所有設定日期；宣告了候選層級特徵表時，它必須涵蓋本次執行要讀的每個月份（§3.8）；`label_table` 可以是只保存正例的 sparse table，但 label 觀察窗必須成熟。
 2. **schema 角色正確**：`conf/base/parameters.yaml` 的 `time`、`entity`、`item` 與 `label` 必須對應實際欄位。
 3. **item 集合一致**：`sample_pool` 在本次日期範圍內的 item 集合必須與 `schema.categorical_values.<item>` 完全一致；`label_table` 不可產生未宣告 item。
 4. **日期切分互斥**：train、val 與 test 日期不可重疊，並應由使用者依時間先後安排，避免資料洩漏。
@@ -152,7 +152,7 @@ dataset:
   抽樣式的 key 選取（會帶 carry），val／test 只取 identity。sample weights 只作用於
   train 側，而 per-segment 評估是在 evaluation 階段另外從 `sample_pool` 取 segment，
   所以 val／test 不需要這些欄位。
-- **若同一欄也存在於 `feature_table`，必須同時列入 `prepare_model_input.drop_columns`**
+- **若同一欄也存在於 `feature_table`（或候選層級特徵表，§3.8），必須同時列入 `prepare_model_input.drop_columns`**
   ——否則 `build_model_input` 的 join 兩側各帶一份同名欄，Spark 會報一句看不出設定
   在哪寫錯的 `Reference 'x' is ambiguous`。反方向的修法（把該欄從 `carry_columns`
   拿掉）同樣合法，差別是前者保 carry 棄特徵、後者保特徵棄 carry。不變量 B7 會在
@@ -197,7 +197,7 @@ dataset:
   - date／timestamp：換成數值特徵（例如距快照日的天數）。當類別的話，模型只認得 train 月份出現過的那幾個日期。
   - binary（bytes，不是 0／1 旗標；0／1 旗標是布林或整數欄，可以當類別）：是代碼就用 `hex()` 轉成字串，一個值對一個字串，不丟資訊。
   - 複合型（array／struct／map）：攤平成多個字串／整數／布林欄。
-- 一般 categorical feature 不需設定 `schema.categorical_values`；其 category mapping 會從 `train_snap_dates` 範圍內的 `feature_table` 自動建立。
+- 一般 categorical feature 不需設定 `schema.categorical_values`；其 category mapping 會從 `train_snap_dates` 範圍內、該欄所在的特徵表（`feature_table` 或候選層級特徵表）自動建立。
 - identity categorical 若不在 `feature_table`，必須在 `parameters.yaml` 的 `schema.categorical_values` 明確提供完整值域。
 
 #### 用 `suggest_categorical_cols.py` 產生候選
@@ -217,7 +217,7 @@ terminal 摘要與 YAML 列出同一組欄位，並附一行對帳（例如 `8 c
 
 > ⚠ `--where` 與 `--sample-fraction` 都只看**子集**，會**低估** cardinality——子集裡判為低卡的欄只是「至少這麼低」的下界，全表可能更高。因此 summary 會印出本次 scan scope，子集模式的 YAML 也在 `categorical_columns:` 頂加上一段「採用前請複查」的警告註解。（已被建議 `drop` 的高卡欄不受**此低估**影響——子集裡已超過門檻，代表全表也一定超過。）掃分散的多個分區、而非單一連續窗口，可降低「與分區鍵相關的欄」被藏住的風險。
 
-preprocessor 只使用 `train_snap_dates` 範圍內的 feature rows fit category mapping，再將同一份 metadata 套用至 train、val、test 與 inference。未在 train 出現的新類別會編碼為 `-1` 並記錄 warning。
+preprocessor 只使用 `train_snap_dates` 範圍內的 feature rows fit category mapping，再將同一份 metadata 套用至 train、val、test 與 inference。未在 train 出現的新類別會編碼為 `-1` 並記錄 warning（候選層級特徵表的類別欄一樣編成 `-1`，但不記 warning，見 §9）。
 
 model input 寫出前，**所有數值 feature 欄**（decimal／double／float／整數族／boolean）都會轉成 `dataset.numeric_feature_storage_type` 宣告的型別（預設 float32），降低後續 driver 讀取與模型訓練的記憶體成本。收斂範圍涵蓋整數與 boolean 的理由：`pdf_to_X` 用 `DataFrame.values` 攤平，pandas 只挑一個共同 dtype，所以一欄沒轉就決定了整個矩陣的型別。
 
@@ -230,9 +230,9 @@ model input 寫出前，**所有數值 feature 欄**（decimal／double／float�
 
 | 設定鍵 | 作用對象 | 生效處 | 語意 |
 |---|---|---|---|
-| `prepare_model_input.drop_columns` | **`feature_table`** 的欄 | `compute_feature_columns` | 黑名單：不得成為模型特徵 |
+| `prepare_model_input.drop_columns` | **兩張特徵表**的欄：`feature_table`，以及宣告了的候選層級特徵表（§3.8） | `compute_feature_columns` | 黑名單：不得成為模型特徵 |
 | `carry_columns` | **`sample_pool`** 的欄 | `select_train_keys` | 白名單：keys 除 identity 外還要多帶這些欄 |
-| `feature_columns` | 推導結果，存進 `preprocessor.json` | `compute_feature_columns` | identity categoricals ＋（`feature_table` 欄 − drop − 非 categorical 的 identity 欄 − label） |
+| `feature_columns` | 推導結果，存進 `preprocessor.json` | `compute_feature_columns` | identity categoricals ＋（`feature_table` 欄 ＋ 候選層級特徵表的非 identity 欄 − drop − 非 categorical 的 identity 欄 − label） |
 
 `feature_columns` **不是設定鍵**，沒有地方可以直接寫它；它是前兩者與 schema 推導出來
 的結果。想增減特徵就改 `drop_columns` 或 `categorical_columns`。
@@ -241,7 +241,9 @@ model input 寫出前，**所有數值 feature 欄**（decimal／double／float�
 只保留 `base_key ＋ 有出現在 feature_table 的 feature_columns`，所以被擋在
 `feature_columns` 之外的欄根本不會寫進 `preprocessed_feature_table`。這正是同時
 `carry` 又 `drop` 一個欄能運作的原因：`feature_table` 那一份被刪掉，只剩 keys 帶進來
-的那一份，join 時就不會撞名。
+的那一份，join 時就不會撞名。候選層級特徵表不落地，但結果相同：`build_model_input`
+從它只選 identity 欄與落在 `feature_columns` 裡的欄（`candidate_frame_columns`），被
+drop 的欄同樣不會被帶進 join。
 
 各 split 最後拿到哪些欄，是一條推導規則而不是逐 split 的清單：
 
@@ -302,6 +304,39 @@ split 展開出不同的欄位集合（見 §3.4 與
 
 r 該設多少、生產規模下撐不撐得住，repo 裡的合成資料推不出來（生產的 entity 母體是百萬級），要在接近生產的量上實測。
 
+### 3.8 候選層級特徵表（選用）
+
+`feature_table` 是 **entity 層級特徵表**：一列是某個 entity 在某個時段的特徵，以 base key（`time` ＋ `entity`）接到候選列上，一個部署恰好一張。有些特徵描述的是一筆候選本身，例如「展示前 30 分鐘瀏覽了幾次」：同一個 entity、同一個時段的每一筆候選各有一個值，放不進一個 entity 一列的表。這類特徵放進**候選層級特徵表**：一列是一筆候選的特徵，以 identity（`time`、`entity`、`item`，宣告了 `occasion`／`event` 時再加上它們）接到候選列上。它是選用的，最多一張。
+
+分類看的是 join 的鍵，不是特徵多久算一次：以 identity 接的表都屬於候選層級，不論是不是即時算出來的。其他形狀框架不收，要在來源 SQL 展開成兩類之一：比 base key 粗的表（例如 entity 有兩欄、表裡只有其中一欄）展開到每個 entity、併進 `feature_table`；只以 item 接的表展開到每一列候選、放進候選層級特徵表。它的來源 SQL 怎麼寫才不會偷看未來，見 [`source_etl.md` §3.8](source_etl.md#38-特徵的時間正確性不偷看未來是-sql-的責任)。
+
+**宣告方式**：在 `catalog.yaml` 加一個固定名字的條目 `candidate_feature_table`，指到部署自己的實體表，寫法與 `feature_table` 相同（`conf/base/catalog.yaml` 裡有一段註解掉的範例）：
+
+```yaml
+candidate_feature_table:
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: <實體表名>
+  read_only: true
+```
+
+有這個條目就是宣告，沒有另外的開關。判斷看的是疊上 `--env` 那一層之後的 catalog，所以只寫在某個 `conf/<env>/catalog.yaml` 的條目只對那個環境生效。這張表必須有每一個 identity 欄（不變量 B13，資料閘擋下）。
+
+**它的欄怎麼變成特徵**：
+
+- identity 欄是 join 鍵，不是特徵，也不從它讀類別詞表。`schema.item` 的值域照舊只來自 `schema.categorical_values`：這張表只有被展示過的 item，從它讀會把詞表縮小。
+- 其餘的欄與 `feature_table` 的欄走同一套規則：列在 `categorical_columns` 的編成整數，列在 `drop_columns` 的丟掉，label 欄不當特徵，剩下的是數值特徵。型別規則（B5、B6）與 carry 撞名（B7）兩張表都查。
+- 類別欄的詞表只從這張表的 `train_snap_dates` 月份建立，與 `feature_table` 相同。
+- `preprocessor.json` 的 `feature_columns` 順序固定是：identity 類別欄、`feature_table` 的欄、候選層級特徵表的欄。沒宣告時順序與原本相同。
+- 同一個特徵欄不能兩張表都有（B14）：兩張表接到同一列候選上，同名欄會出現兩次，Spark 報欄名有歧義。在其中一張的來源 SQL 改名；兩份都不是特徵的話，列進 `drop_columns`，它同時作用在兩張表。identity 欄、label 欄與 drop 掉的欄不算重複。
+- `drop_columns` 列了兩張表都沒有的欄時，會記一行 warning：`drop_columns not found in any feature table`。發這行的是 `fit_preprocessor_metadata`，因為它是唯一同時看得到兩張表的 node；只看其中一張，分不出「這個欄名另一張表有」與「打錯字」。
+
+**什麼時候讀、讀哪些月份**：候選層級特徵表不先編碼、不落地。`build_*_model_input` 在抽樣之後才讀它，用前處理器 fit 出來的詞表編碼（train 沒見過的值編成 `-1`），再以 identity left join 接上。理由是大小：它跟 `sample_pool` 一樣大，而 keys 是抽樣後的子集；若像 `feature_table` 那樣在抽樣前先編碼、存成 Hive 表，等於把之後會被抽掉的大量負例也多寫一遍（[ADR-0026](../adr/0026-feature-tables-by-join-key.md) 決定 2）。
+
+它只讀本次執行要讀的月份：一般執行是 `train_snap_dates`、`val_snap_dates` 與 test 還沒落地的月份（`--rebuild-dates` 指名的月份也算）；帶 `--only-test-months` 時只有 test 還沒落地的月份。開跑前 log 會印一行 `[months] dataset=candidate_feature_table read=… not-read=…`。identity 含 `time`，所以這個篩選只影響成本，不影響結果。找不到的列、整個月沒資料各會怎樣，見 §5〈三個 left join 各自的契約〉。
+
+**宣告之後，離線推論在 CLI 入口被擋下**（不變量 A47）。推論的候選是框架自己產生的 entity × 全部 item，沒有一筆被展示過，這張表一列都接不到；原因與範圍見 [`inference.md` §3.6](inference.md#36-宣告了候選層級特徵表的部署不能跑離線推論)。training 與 `evaluation --post-training` 不受影響。版本號怎麼跟著變見 §7.3；有哪些事沒有檢查守著見 §9。
+
 ## 4. 使用方式
 
 ### 4.1 CLI 選項
@@ -316,13 +351,13 @@ r 該設多少、生產規模下撐不撐得住，repo 裡的合成資料推不�
 | `--dry-run` | 關閉 | 顯示切片執行計畫後離開，不執行 pipeline |
 | `--list-nodes` | 關閉 | 列出 node 名稱與從該處接續時的自動補跑成本 |
 
-dataset 不接受版本旗標。每次啟動都會依目前設定、schema 與 `feature_table` schema 重新計算版本；指定既有 dataset 版本是下游 training 的責任。
+dataset 不接受版本旗標。每次啟動都會依目前設定、schema 與 `feature_table` schema（宣告了候選層級特徵表時再加上它的 schema）重新計算版本；指定既有 dataset 版本是下游 training 的責任。
 
 `--rebuild-dates` 的值不是 `test_snap_dates` 的子集時，在 Spark 啟動之前就報錯退出（一致性不變量 A21）。它與 `--from-node`／`--only-node` **可以併用**（切片選 node、rebuild 選月份，兩者正交），但併用時會印一段 WARN：未被選中的上游 node 不會重算，那些 partition 仍是舊的。用法與時機見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)。
 
 `--from-node` 與 `--only-node` 互斥；`--list-nodes` 也不能與兩者併用。`--dry-run` 可單獨使用表示 full-run 計畫，也可搭配切片選項檢視部分重跑計畫。
 
-`--dry-run` 與 `--list-nodes` 不會執行 nodes、寫入 pipeline 產物或更新 manifest；但 CLI 仍會載入設定、初始化 Spark、讀取 `feature_table` schema 以計算版本，並查詢 catalog 產物是否存在。
+`--dry-run` 與 `--list-nodes` 不會執行 nodes、寫入 pipeline 產物或更新 manifest；但 CLI 仍會載入設定、初始化 Spark、讀取特徵表的 schema 以計算版本，並查詢 catalog 產物是否存在。
 
 ### 4.2 完整執行
 
@@ -389,39 +424,43 @@ python -m recsys_tfb dataset \
 
 | 階段 | node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
-| 資料閘 | `validate_data_consistency` | 三張來源表、parameters | 檢查 item coverage 與 categorical feature 型別，收集問題後一次中止 | 無 |
+| 資料閘 | `validate_data_consistency` | 三張來源表、parameters、`candidate_feature_table`（沒宣告時是 `None`） | 檢查 item coverage 與 categorical feature 型別；宣告了候選層級特徵表時，另查它有齊 identity 欄（B13）、沒有和 `feature_table` 重複的特徵欄（B14）。收集問題後一次中止 | 無 |
 | Train 抽樣 | `select_sample_keys` | `sample_pool` | 依 train 日期、分層比例與 overrides 做決定性抽樣 | `sample_keys` |
 | Train 切分 | `split_train_keys` | `sample_keys` | 依 entity 將資料互斥切成 train 與 train-dev | `train_keys_unfiltered`、`train_dev_keys_unfiltered`（不落地） |
 | Train 整組抽樣 | `filter_train_keys`、`filter_train_dev_keys` | 上一步的 keys、`label_table` | 依 `train_zero_positive_group_ratio` 整組丟掉部分無正例的 query group（label 取自 `label_table`）；預設 r ＝ 1 原樣通過（§3.7） | `train_keys`、`train_dev_keys` |
 | Val/Test keys | `select_val_keys`、`select_test_keys` | `sample_pool`（test 另收 `test_keys_month_plan`） | 建立 val 與 test identity keys；val 可依 entity 縮減。test 只處理計畫中的月份 | `val_keys`、`test_keys` |
-| Fit 前處理器 | `fit_preprocessor_metadata` | `feature_table` | 只使用 train 日期建立 feature 清單與 category mappings | `preprocessor`、`category_mappings` |
+| Fit 前處理器 | `fit_preprocessor_metadata` | `feature_table`、`candidate_feature_table` | 只使用 train 日期建立 feature 清單與 category mappings（兩張特徵表都看，§3.8）；`drop_columns` 裡任何一張特徵表都沒有的欄在這裡記 warning | `preprocessor`、`category_mappings` |
 | 套用前處理 | `apply_preprocessor_to_features` | `feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 編碼 feature categoricals；只處理計畫中的月份 | `preprocessed_feature_table` |
-| 精度閘 | `validate_numeric_precision` | `preprocessed_feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 不變量 B8：讀剛落地那幾個月份的 parquet footer 統計值（零掃描），確認會被 cast 的欄（decimal、整數族與 boolean——有格點的那些）在該欄自己的解析度下撐得過 `numeric_feature_storage_type`；同時產出每欄的 headroom 報告 | `numeric_precision_report` |
-| 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor（test 另收 `test_model_input_month_plan`） | left join label 與 feature，補齊缺失 label，選取欄位並把所有數值特徵欄轉成 `numeric_feature_storage_type` 宣告的型別（預設 float32） | 各 split 的 model input |
+| 精度閘 | `validate_numeric_precision` | `preprocessed_feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan`、`candidate_feature_table`、`candidate_feature_table_months` | 不變量 B8：讀剛落地那幾個月份的 parquet footer 統計值（零掃描），確認會被 cast 的欄（decimal、整數族與 boolean——有格點的那些）在該欄自己的解析度下撐得過 `numeric_feature_storage_type`；同時產出每欄的 headroom 報告。宣告了候選層級特徵表時，它不落地、沒有 footer 可讀，改成掃一次它本次執行要讀的月份（類別欄不在內：它們在 cast 之前已編成詞表索引），同一次掃描也確認這些月份每個都有資料；報告多一段 `candidate_feature_table` | `numeric_precision_report` |
+| 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor（test 另收 `test_model_input_month_plan`）、`candidate_feature_table`、`candidate_feature_table_months` | left join label 與 feature（宣告了候選層級特徵表時，在這裡才讀它、編碼、接上），補齊缺失 label，選取欄位並把所有數值特徵欄轉成 `numeric_feature_storage_type` 宣告的型別（預設 float32） | 各 split 的 model input |
 | 評估母體過濾 | `filter_val_model_input`、`filter_test_model_input` | 未過濾的 val/test input | 有正例的 query group 全留；無正例的依 `val_`／`test_zero_positive_group_ratio` 整組留下比例 r（預設 0：全丟），r > 0 時加上權重欄（§3.7） | `val_model_input`、`test_model_input` |
-| 粒度閘 | `validate_model_input_grain` | train／train_dev 的 keys 與 model_input | 不變量 B10：讀 parquet footer 的列數（零掃描），確認每張 model_input 的列數等於它的 keys 表。擋的是右表（`label_table`／`preprocessed_feature_table`）有重複 join 鍵造成的靜默放大；同時產出每個 split 的列數報告。**val／test 不在範圍內**——它們列數相符的那一版是 `*_unfiltered`，那是不落地的記憶體中間結果，沒有 footer 可讀；test 還多一層，`build_test_model_input` 會先把 `test_keys` 縮到本次月份，所以它對得上的本來就不是整張 `test_keys`（見 [ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md) 2026-09-07 修訂） | `model_input_grain_report` |
+| 粒度閘 | `validate_model_input_grain` | train／train_dev 的 keys 與 model_input | 不變量 B10：讀 parquet footer 的列數（零掃描），確認每張 model_input 的列數等於它的 keys 表。擋的是右表（`label_table`／`preprocessed_feature_table`／宣告了的候選層級特徵表）有重複 join 鍵造成的靜默放大；同時產出每個 split 的列數報告。**val／test 不在範圍內**——它們列數相符的那一版是 `*_unfiltered`，那是不落地的記憶體中間結果，沒有 footer 可讀；test 還多一層，`build_test_model_input` 會先把 `test_keys` 縮到本次月份，所以它對得上的本來就不是整張 `test_keys`（見 [ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md) 2026-09-07 修訂） | `model_input_grain_report` |
 
 model input 的組裝規則：
 
-1. keys 與 `label_table` 依 `time + entity + item` left join；沒有 label row 時補為 `0`。
-2. 再與 `preprocessed_feature_table` 依 `time + entity` left join。
-3. 輸出 identity、label、feature columns，以及 keys 帶入的 carry columns。
-4. 沒有正例的 query group 留多少由三個 `*_zero_positive_group_ratio` 決定（§3.7）：預設 val/test 全丟、train 與 train-dev 全留。
+1. keys 與 `label_table` 依 identity（`time + entity + item`，宣告了 `occasion`／`event` 時再加上它們）left join；沒有 label row 時補為 `0`。
+2. 再與 `preprocessed_feature_table` 依 base key（`time + entity`）left join。
+3. 宣告了候選層級特徵表時，再與它依 identity left join：只取本次執行要讀的月份，用前處理器的詞表編碼類別欄（§3.8）。
+4. 輸出 identity、label、feature columns，以及 keys 帶入的 carry columns。
+5. 沒有正例的 query group 留多少由三個 `*_zero_positive_group_ratio` 決定（§3.7）：預設 val/test 全丟、train 與 train-dev 全留。
 
-#### 兩個 left join 各自的契約
+#### 三個 left join 各自的契約
 
-兩個 join 都是 left，而且**列數恆等於 keys 的列數**——keys 的 grain 就是 model input
+三個 join 都是 left（沒宣告候選層級特徵表時是前兩個），而且**列數恆等於 keys 的列數**——keys 的 grain 就是 model input
 的 grain。這一點是後續所有列數斷言的地基，改成 inner join 會靜默改變列數，也會讓 mAP
 的候選集跟著變。
 
 這個恆等式**只有在右表的 join 鍵唯一時才成立**，而那是上游契約、不是這裡保證的事。
 `validate_model_input_grain`（不變量 B10）就是實際去核對它的地方，涵蓋
-train／train_dev 兩個 split。
+train／train_dev 兩個 split（候選層級特徵表只在 val／test 月份才有的重複列因此沒有檢查抓得到，見 §9）。
 
 | join miss | 產生什麼 | 為什麼這是預期行為 |
 |---|---|---|
 | `label_table` 沒有這筆 | `label` 補 `0` | label table 是稀疏的：只有發生過交易的 entity 才有 row，沒有 row 就是負例 |
 | `preprocessed_feature_table` 沒有這筆 | 該列的 feature 欄全為 NULL，**列仍保留** | `sample_pool` 與 `feature_table` 的母體來自不同上游，miss 是結構性的常態；LightGBM 自行處理 missing |
+| 候選層級特徵表沒有這筆 | 該列的候選層級特徵欄全為 NULL，**列仍保留** | 與上一列同一個理由：丟列會悄悄改掉候選集合，mAP 的母體跟著變 |
+
+**整個月都沒有資料則是錯誤，不補 NULL**，這點兩張特徵表相同：少了一個月，那個月每一筆候選的特徵全是 NULL，left join 不會報錯，模型照樣訓練得完，沒有人會發現。`feature_table` 的月份在 fit 與 `apply_preprocessor_to_features` 時查；候選層級特徵表不經過後者，所以由 `fit_preprocessor_metadata` 查 `train_snap_dates` 的每個月、`validate_numeric_precision` 查本次執行要讀的每個月。後者與精度無關，`numeric_precision_policy: truncate` 時照樣擋。
 
 **全 NULL 特徵列是合法輸出，不是 bug。** 看到它不代表資料壞了，代表這個
 `(time, entity)` 在 `feature_table` 裡沒有對應 row。目前刻意不加覆蓋率閘門：真實
@@ -444,7 +483,7 @@ miss 率只有在生產跑過一次才知道，本機量不到，所以「先量
 
 `test_model_input` 的過濾節點（`filter_test_model_input`）**沒有**月份範圍檢查：它的上游已經 scoped 過了。它和 val 的決策相同，但各用自己的節點函式，因為兩者讀的 ratio 鍵不同（讀錯不會報錯）。
 
-之所以安全：每個 `snap_date` partition 的內容只是該月 `feature_table` rows 與 `category_mappings` 的函數，與其他月份無關，而 `category_mappings` 只在 train 月份上 fit。所以跳過既有月份不改變任何 partition 的內容，只改變這次要做多少工。
+之所以安全：每個 `snap_date` partition 的內容只是該月 `feature_table` rows（宣告了候選層級特徵表時再加上它該月的 rows）與 `category_mappings` 的函數，與其他月份無關，而 `category_mappings` 只在 train 月份上 fit。所以跳過既有月份不改變任何 partition 的內容，只改變這次要做多少工。
 
 代價、`--rebuild-dates` 逃生口與完整理由見 [ADR-0002](../adr/0002-preprocessed-feature-table-incremental.md)；計畫為什麼走 catalog 而不是 `parameters`，以及過濾節點為什麼沒有防禦性檢查，見 [ADR-0007](../adr/0007-month-plans-travel-through-the-catalog.md)。
 
@@ -499,7 +538,7 @@ dataset 每次啟動都會計算以下版本：
 
 | 版本 | 精確計算依據 | 主要產物 |
 |---|---|---|
-| `base_dataset_version` | `parameters_dataset.yaml` 中除了六個 train 抽樣 keys 與 `test_snap_dates` 以外的所有內容，加上完整 schema 與 `feature_table` schema fingerprint | preprocessor、共用 feature、val/test |
+| `base_dataset_version` | `parameters_dataset.yaml` 中除了六個 train 抽樣 keys 與 `test_snap_dates` 以外的所有內容，加上完整 schema 與 `feature_table` schema fingerprint；宣告了候選層級特徵表時，再加上它的 schema fingerprint（§7.3） | preprocessor、共用 feature、val/test |
 | `train_variant_id` | 只包含 `sample_ratio`、`sample_ratio_overrides`、`sample_group_keys`、`train_dev_ratio`、`train_split_keys`、`train_zero_positive_group_ratio` | train/train-dev keys 與 inputs |
 
 會從 base payload 排除的 train 抽樣 keys 有六個：
@@ -573,6 +612,8 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | `feature_table` 欄位名稱 | ✓ | 新增或移除欄位都會改變 fingerprint |
 | `feature_table` 欄位型別 | ✓ | 例如 `double` 改為 `float` |
 | `feature_table` 欄位順序 | ✓ | feature 順序會傳入 preprocessor，因此 fingerprint 對順序敏感 |
+| 宣告或拿掉 `candidate_feature_table` 條目 | ✓ | 宣告時，它的 schema fingerprint 以自己的 payload 鍵 `candidate_feature_table_fingerprint` 進 hash，也寫進 base 的 `manifest.json`；沒宣告時 payload 裡沒有這個鍵，所以不用這張表的部署，版本號完全不受它影響 |
+| 候選層級特徵表的欄位名稱、型別、順序 | 只在宣告時 ✓ | 與 `feature_table` 同一套 fingerprint 規則。用另一個 payload 鍵而不是併進 `feature_table` 那一個：兩張表接的鍵不同，同一組欄放在哪一張，是不同的 dataset |
 
 以下內容目前**不會**改變任何 dataset version：
 
@@ -580,8 +621,8 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 |---|---|---|
 | `parameters.yaml` 的 `random_seed` | 不在兩層 hash payload | 會改變 train/train-dev、train sampling 與 val sampling 結果；修改後應人工視為資料版本變更並完整重建 |
 | `project_name`、`hive`、`spark`、`logging` | 不屬於 dataset hash 的 schema payload | 一般只影響執行環境或觀測性 |
-| `conf/base/catalog.yaml` | catalog 設定不進 hash | 修改 table/path/partition 時需自行確認是否誤讀或覆寫既有版本 |
-| `feature_table` 的資料值 | fingerprint 只看欄名、型別與順序 | 同 schema 的資料回補不會翻版，必須重跑相同版本 partitions |
+| `conf/base/catalog.yaml` | catalog 設定不進 hash（唯一的例外是上表的 `candidate_feature_table` 條目有沒有宣告） | 修改 table/path/partition 時需自行確認是否誤讀或覆寫既有版本；把 `feature_table` 或 `candidate_feature_table` 換成指到另一張 schema 相同的實體表，版本號也不變 |
+| `feature_table`、候選層級特徵表的資料值 | fingerprint 只看欄名、型別與順序 | 同 schema 的資料回補不會翻版，必須重跑相同版本 partitions（候選層級特徵表的情形見 §7.5） |
 | `label_table`、`sample_pool` 的資料值或 schema | 目前沒有對兩表計算 fingerprint | 上游回補、候選或 label 改變時需人工完整重跑 |
 | source ETL SQL、dataset Python 程式碼 | 程式碼內容不進 hash | 程式修正後可能覆寫同一版本；manifest 的 git commit 只供追溯 |
 | `parameters_training.yaml` | training 設定不參與 dataset IDs | 可能改變 `model_version`，但不重建 dataset |
@@ -598,6 +639,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | 只在 `test_snap_dates` 加一個月份 | 版本全部不變 | 執行 dataset 補上新月份，再跑 predict 與該月份的 evaluation；不重訓。步驟見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md) |
 | schema roles 或 item values | 新 base version | 先確認 source tables，再完整執行 dataset |
 | `feature_table` 欄名、型別或順序 | 新 base version | 完整執行 dataset |
+| 宣告或拿掉候選層級特徵表，或改它的欄名、型別、順序 | 新 base version | 完整執行 dataset |
 | source table 資料值回補，但 schema 不變 | version ID 可能不變 | 完整重跑受影響版本，避免沿用舊 partition |
 | 全域 `random_seed` | 目前 version ID 不會自動改變 | 視為抽樣版本變更，清楚記錄並完整重建相關產物 |
 
@@ -610,7 +652,8 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 - catalog 的 `exists()` 只能確認產物存在，不能證明內容由目前參數或來源資料產生。**test 分支的增量跳過把這件事變成了正常執行路徑的預設行為**：`feature_table` 對某個舊 test 月份回補之後，該月 partition 不會自動更新且不報錯，得用 `--rebuild-dates` 指名重算（[ADR-0002](../adr/0002-preprocessed-feature-table-incremental.md)）。
 - dataset 的主要 Hive 產物具有版本 partitions，可降低設定改變後誤讀舊資料的風險；來源資料值回補與 seed 變更仍需人工判斷。
 - `validate_data_consistency` 沒有輸出，若它位於切片起點之前便不會自動重跑。source tables 或 item 資料有變時應執行 full run。
-- `validate_numeric_precision` 有輸出（`numeric_precision_report`），所以**不會**被當成側效應 node 跳過；但沒有任何 node 消費那份報告，所以它也不會被自動拉回來——切片起點在它之後就不會跑到它。
+- 候選層級特徵表不落地，train／train_dev／val 的 model input 每次執行都重讀它，所以它的回補在下一次完整執行就生效；已落地的 test 月份照樣被跳過，要用 `--rebuild-dates` 指名重算。
+- `validate_numeric_precision` 有輸出（`numeric_precision_report`），所以**不會**被當成側效應 node 跳過；但沒有任何 node 消費那份報告，所以它也不會被自動拉回來——切片起點在它之後就不會跑到它。候選層級特徵表的缺月檢查（§5）也在這個 node 裡：沒跑到它的那一輪，只剩 `fit_preprocessor_metadata`（如果有跑）查 train 月份，其餘缺的月份會變成一整個月的 NULL 特徵。
 - `validate_model_input_grain` 同樣有輸出（`model_input_grain_report`），行為與上一條一致：不會被當成側效應 node 跳過，但也沒有下游會把它拉回來。
 - `val_model_input_unfiltered` 與 `test_model_input_unfiltered` 是記憶體中間結果；若只從 filter node 接續，框架會自動補跑對應 build node。**這也是 B10 擋不到 val／test 的原因**：不落地就沒有 footer。
 - `train_keys_unfiltered` 與 `train_dev_keys_unfiltered` 同樣不落地；從 `filter_train_keys`／`filter_train_dev_keys` 接續會補跑 `split_train_keys`（它不 shuffle，代價低）。落地的 `train_keys`／`train_dev_keys` 是整組抽樣之後的 keys，正是 build node 的輸入，所以 B10 的配對不受影響。
@@ -627,18 +670,20 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | weight column unavailable | training 權重維度未進入 model input | 將非 identity 欄位加入 `carry_columns` 後重跑 dataset |
 | `Data consistency check failed`，sample_pool item 不一致 | `sample_pool` 缺少宣告 item，或含有未知 item | 檢查本次日期範圍的 distinct item，修正 source ETL 或 schema |
 | `DataConsistencyError: ... un-encoded non-numeric type(s)`，讀 parquet 前秒級失敗 | 字串／非數值欄進了 `feature_columns`，既沒宣告 categorical 也沒 drop（不變量 B6） | 錯誤訊息逐欄點名兇手；每欄依型別決定怎麼處理，見下方 §8.1。改完會 bump `base_dataset_version`、需重建 dataset |
-| `categorical column '...' is a ... type`（B5） | categorical 欄的型別不是字串／整數／布林：連續值誤標類別，或日期、binary、複合型被設成類別 | 錯誤訊息依型別給解法；整理見 §3.5 的型別規則。不是特徵就 drop |
+| `categorical column '...' is a ... type`（B5） | categorical 欄的型別不是字串／整數／布林：連續值誤標類別，或日期、binary、複合型被設成類別 | 錯誤訊息依型別給解法；整理見 §3.5 的型別規則。不是特徵就 drop。訊息寫 `in candidate_feature_table` 時，是候選層級特徵表的欄 |
+| `B13: candidate_feature_table is missing identity column(s) [...]` | 候選層級特徵表缺 identity 欄。最常見的是把一張一個 entity、一個時段一列的表宣告成候選層級 | 在它的來源 SQL 補上缺的欄；那張表若描述的是 entity 而不是一筆候選，它該併進 `feature_table`（§3.8） |
+| `B14: column(s) [...] are in both feature_table and candidate_feature_table` | 同一個特徵欄兩張特徵表都有 | 在其中一張的來源 SQL 改名；兩份都不是特徵就列進 `drop_columns`（§3.8） |
 | `(A24) dataset.X_snap_dates [...] and dataset.Y_snap_dates [...] name the same calendar day` | train/val/test 使用相同日期 | 重新切分日期，確保集合互斥。此檢查在 Spark 啟動前執行，**按日比對而非按字面**，所以同一天的不同寫法也抓得到；訊息會分別印出兩邊各自的原始寫法 |
 | `N 個日期區間設定無法展開` | 某個 `{start, end, step}` 區間寫錯：起迄沒落在 step 上、迄日早於起日、`step` 拼錯、少鍵或多鍵 | 訊息逐一點名是哪個檔的哪個鍵、哪一端不對；所有寫錯的區間一次列完。規則見 §3.1 |
-| `feature_table missing required ... snap_dates` | source ETL 未產出某些日期 | 補跑 feature ETL 或修正日期設定 |
+| `feature_table missing required ... snap_dates`／`candidate_feature_table missing required ... snap_dates` | source ETL 未產出某些日期 | 補跑 feature ETL 或修正日期設定。後者點名的是候選層級特徵表：`train_snap_dates` 在 fit 前處理器時查，其餘要讀的月份在精度閘查（§5） |
 | identity categorical missing declarations | item 等 identity 類別無法從 feature table fit | 在 `schema.categorical_values` 提供完整值域 |
-| log 出現 `unknowns in column ...` | 非 train 日期出現 mapping 未見的新類別 | 檢查是否為資料異常；必要時延伸 train mapping 或調整來源清理 |
+| log 出現 `unknowns in column ...` | 非 train 日期出現 mapping 未見的新類別 | 檢查是否為資料異常；必要時延伸 train mapping 或調整來源清理。只有 `feature_table` 的類別欄會數，候選層級特徵表的不會（§9） |
 | 抽樣結果為空或某分層消失 | ratio/override 為 0、key 格式不符或母體太小 | 檢查 profiling、override key 順序與實際分層值 |
 | `sample_group_keys` 欄位不存在 | 分層欄位只存在於 `feature_table`，未寫入 `sample_pool` | 在 `sample_pool_etl` SQL 連接來源欄位並重建 `sample_pool` |
 | val/test 筆數比 sample pool 少很多 | 零正例 query groups 被預期移除（`*_zero_positive_group_ratio` 預設 0） | 查詢 group 的 label sum；這是排序評估母體設計，不一定是錯誤。要留一部分，見 §3.7 |
 | `A44: dataset.*_zero_positive_group_ratio=... is not a ratio` | 值不在 [0, 1]，或寫成字串、布林、`null` | 改成 [0, 1] 的數字，或刪掉那一行用預設值 |
 | `(A45) catalog entry 'training_eval_predictions' does not declare 'zero_positive_group_weight'` | test 的 r > 0，但預測表沒宣告權重欄 | 在該 catalog 條目的 `columns:` 加 `{name: zero_positive_group_weight, type: DOUBLE}`；既有表要先加欄（§3.7） |
-| `B12: feature_table column 'zero_positive_group_weight' is a model feature` | 特徵表有一欄與框架的權重欄同名，而 val 或 test 的 r > 0 | 在來源 SQL 改名；不是特徵的話列進 `drop_columns` |
+| `B12: feature column 'zero_positive_group_weight' is a model feature` | 特徵表有一欄與框架的權重欄同名，而 val 或 test 的 r > 0 | 在來源 SQL 改名；不是特徵的話列進 `drop_columns` |
 | `'zero_positive_group_weight' is already a column of this frame` | 同上，但 B12 被跳過（切片執行時資料閘不會跑） | 同上 |
 | `Unknown node ...` | node 名稱拼錯或 pipeline 已變更 | 先執行 `dataset --list-nodes` 取得目前名稱 |
 | 切片計畫出現昂貴的 `auto-included` | 必要 artifact 不存在或 catalog 無法載入 | 先確認版本 partition 與檔案；不接受補跑成本時先停止修復 |
@@ -664,11 +709,15 @@ B6 擋下來時，錯誤訊息會**逐欄點名**（`feature column 'cust_segmen
 - train/train-dev 切分與 val entity sampling 目前只使用 `schema.entity` 的第一個欄位；使用複合 entity 時需確認這符合業務語意。
 - 日期只檢查集合互斥，不檢查時間順序與 label 觀察窗。
 - `random_seed` 會改變抽樣結果，但目前未納入 dataset 版本 hash。
-- 版本 hash 包含 `feature_table` schema fingerprint，不包含 source rows 的資料值或 source ETL SQL。
+- 版本 hash 包含 `feature_table` schema fingerprint（宣告了候選層級特徵表時也包含它的），不包含 source rows 的資料值或 source ETL SQL。
 - `sample_pool` identity 唯一性由 source ETL 品質檢查負責；dataset 不會在抽樣前再次 deduplicate。
 - label left join 不到時會視為負例 `0`；必須確定 sparse label table 的語意確實如此。
 - feature left join 不到時會留下全 NULL feature 的列，dataset 不會將其視為缺少 entity 的硬錯誤。這是明文契約而非容忍，代價是「特徵缺失」與「特徵值真的是 NULL」在 model input 裡無法區分；契約與量測點見 §5。
 - val/test 預設排除零正例 query groups，因此產物不代表完整上線母體；設 `val_`／`test_zero_positive_group_ratio` > 0 會留下一部分並帶上設計權重（§3.7），權重不是無偏估計。
+- 宣告了候選層級特徵表時，以下幾件事沒有檢查守著，或要付額外成本（[ADR-0026](../adr/0026-feature-tables-by-join-key.md)〈後果〉）：
+  - **重複的 identity 列只有 train／train_dev 抓得到。** 那是 B10 的既有範圍；只在 val／test 月份才有的重複列會讓那些 split 的列數悄悄變多。真正擋它的是這張表 source ETL 的 `primary_key` 與 `max_duplicate_key_ratio: 0.0`（[`source_etl.md` §3.6](source_etl.md#36-輸出-quality-checks)），而不變量 A32 不守這項設定：A32 只讀 parameters，拿 `sample_pool`、`label_table`、`feature_table` 這三個固定名字去 ETL 設定裡找表。`candidate_feature_table` 是 catalog 的邏輯名，它在 ETL 設定裡的實體表叫什麼由部署決定，A32 看不到 catalog，也就找不到它。所以這個鍵被刪掉時沒有任何東西會報錯。
+  - **類別欄出現 train 沒見過的值時，不會有 warning。** 值照樣編成 `-1`。`feature_table` 的未知值在 `apply_preprocessor_to_features` 數一次；候選層級特徵表在每個 split 組 model input 時才編碼，要數就得每個 split 多一次 Spark 動作。
+  - **B8 每次執行多掃一次這張表本次要讀的月份。** 它不落地，沒有框架自己寫的 parquet footer 可讀，框架也不規定部署的表用什麼格式，所以只能掃。一般執行時四個 split 的組裝本來就各讀一次這些月份，所以讀這張表的量大約多 25%。`numeric_precision_policy: truncate` 只讓超標的值通過，不省這次掃描。
 - 多月份資料仍由 Spark lazy execution、shuffle spill 與 Hive partitions 處理；尖峰資源通常取決於單一 shuffle partition 與資料偏斜，而不是月份數本身。
 
 ## 10. 相關文件
