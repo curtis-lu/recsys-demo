@@ -127,9 +127,11 @@ training:
 | 值 | 選模方式 |
 |---|---|
 | `pooled_average_precision` | val 的全部列倒在一起，依分數由高到低排，算一個 average precision |
-| `macro_per_item_average_precision` | 每個 item 用自己的列各算一個 average precision，再對 item 等權平均，讓曝光量大的 item 不會蓋過曝光量小的。它看不到同一組裡 item 之間誰排前面（見下方） |
+| `macro_per_item_average_precision` | 每個 item 用自己的列各算一個 average precision，再對 item 等權平均，讓曝光量大的 item 不會蓋過曝光量小的。每一列只跟同一個 item 的列比（見下方） |
 
 什麼時候用：拿展示紀錄訓練的部署（`CONTEXT.md` 的 **候選集合**），使用者主要看 precision–recall 面積；而且 query group 很小時（一組只有一兩列），組內排序指標算不出有鑑別力的數字。其他情況維持預設。
+
+兩個之間怎麼選：**分數要跨 item 比較時**（同一次請求挑分數最高的 item，或全部 item 共用一條門檻），選 `pooled_average_precision`；**每個 item 的分數各自使用時**（例如每個 item 各自定一條門檻，決定要給誰），選 `macro_per_item_average_precision`。原因見下面「只拿同一個 item 的列互相比」那一條。
 
 選這兩個之前要知道的事：
 
@@ -139,7 +141,7 @@ training:
 - **跟評估報表的 `pr_auc` 對不起來，這是刻意的。** 這裡是精確算法，值跟直接呼叫 `sklearn.metrics.average_precision_score(y, score, sample_weight=w)` 逐值相同。報表的 `pr_auc`（ADR-0024）算在全量 test 上，用 Spark 分箱近似：同一個分數箱裡的列視為同分、箱內先後丟掉，因為全量精確排序太貴。母體不同（val 對 test），算法也不同（精確對分箱），兩個數不可對帳。名字也刻意不同：不叫 `pr_auc`，也不單獨叫 `average_precision`（repo 裡的 AP 是組內排序的 `map@K`）。
 - **同分怎麼算。** 照 scikit-learn：同分的列合成一個門檻，不照 item 排先後。這跟上面兩個排序指標的規則不同，但一樣跟列讀進來的順序無關。
 - **`pooled_average_precision` 會獎勵「認出哪些 entity 本來就容易有正例」。** 全部列一起排時，把容易有正例的 entity 整組排到前面就能得分，這對組內排序沒有幫助。這類部署主要看的就是這個數，所以它是正式目標；選它的人要知道它在獎勵什麼。
-- **`macro_per_item_average_precision` 看不到同一組裡 item 之間誰排前面。** 每個 item 只拿自己的列互相比：把某個 item 的所有分數都加上同一個常數，它的值完全不變，但每一組裡的排序（框架真正的輸出）已經整個變了。它量的是「同一個 item 的列裡，哪些比較可能是正例」。`pooled_average_precision` 至少會因為全部列一起排而受到 item 之間先後的影響；組內排序本身，只有上面兩個排序指標直接在量。
+- **`macro_per_item_average_precision` 只拿同一個 item 的列互相比。** 例子：兩次請求都展示 A、B，第一次點了 A、第二次點了 B。模型 X 給的分數是：請求 1 的 A 0.9、B 0.2，請求 2 的 A 0.8、B 0.3；模型 Z 只差在請求 2 的 A 給 0.05。X 把沒點的 A 給到 0.8，比點了的 B（0.3）還高：`pooled_average_precision` 會扣分（X 0.83、Z 1.00），`macro_per_item_average_precision` 不會（兩個都是 1.00），因為它只拿這個 0.8 跟 A 點了的那列（0.9）比，0.8 比 0.9 低，就算對。原因：average precision 只看分數的高低順序，不看分數離 0 多近；macro 判斷一列算高還是算低，又只拿同一個 item 的其他列當對照。所以它檢查的是「同一個 item 裡，點了的有沒有比沒點的高」，不檢查「不同 item 之間的分數比不比得起來」——每個 item 的分數各自使用時這樣就夠了，還能讓小 item 不被大 item 蓋過；分數要跨 item 比較時就不夠。
 - **`macro_per_item_average_precision` 只平均 val 裡有正例的 item。** 沒有正例的 item 不進分母，跟 `macro_per_item_map` 一樣。它也跟 `macro_per_item_map` 在 HPO 裡一樣，不讀 `evaluation.metric` 的 `min_positives`／`weight_alpha`／`shrinkage_k`：只有一兩個正例的 item 跟大 item 等權，這種 item 的值很抖，HPO 會被它拉著走。搜尋開始前的 log 會印出「進入平均的 item 數／val 裡全部 item 數」，以及進入平均的 item 的正例數最小值與中位數。item 很多、多數只有一兩個正例時，改用 `pooled_average_precision`（或 `mean_ap`）比較穩。
 - **val 完全沒有正例時，第一個 trial 開始前就報錯。** 這時 average precision 沒有定義；拿任何常數代替，每個 trial 的分數都一樣，第一個 trial 會直接勝出，整個搜尋跑完也不會報錯。
 - **training 讀的 val 可能比設定檔舊。** A48 檢查的是設定檔，training 讀的卻是磁碟上的 dataset 版本（`latest`，或 `--base-dataset-version` 指定的版本）。所以 log 會同時印出設定檔的 r 與 val 裡實際的權重：權重照實際建表時的 1／r 算，分數是對的；兩個數對不上，就表示這版 dataset 不是照現在的設定建的。如果那版 val 是 r ＝ 0 建的，根本沒有 `zero_positive_group_weight` 欄，讀 val 之前就會報錯，請重跑 dataset 或改指定版本。

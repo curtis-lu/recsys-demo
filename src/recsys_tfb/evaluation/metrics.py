@@ -486,11 +486,18 @@ def compute_macro_per_item_average_precision(
     shown a lot does not drown out one shown rarely. Tie rule and ``weights``
     as in :func:`compute_pooled_average_precision`.
 
-    **It cannot see how items are ordered against each other inside a query
-    group** — which is what the framework ranks. Each item's rows are compared
-    only with each other, so adding one constant to every score of an item
-    leaves the value unchanged while the within-group order moves. What it
-    measures is "among one item's rows, which are likelier positives".
+    **It compares a row only with rows of the same item.** Average precision
+    reads the order of scores, not how close they are to 0, and here a row's
+    score counts as high or low only against the same item's other rows. So it
+    checks that an item's positives score above that item's negatives; it does
+    not check that scores are comparable across items. Adding one constant to
+    every score of an item leaves it unchanged, and a negative of item A
+    scored above a positive of item B costs nothing here, while it costs
+    points in :func:`compute_pooled_average_precision`. Fit for scores each
+    item uses on its own (a per-item threshold); for scores compared across
+    items — one item picked per query group, one shared threshold — use the
+    pooled one. Worked example: ``docs/pipelines/training.md`` §3.2; the
+    decision: ADR-0025 decision 4's addendum.
 
     **An item with no positive row in val is left out of the mean**, never
     handed to scikit-learn — it would come back as ``-0.0`` with a warning and
