@@ -153,6 +153,7 @@ def compute_base_dataset_version(
     params: dict,
     schema: dict,
     feature_table_fingerprint: str | None = None,
+    candidate_feature_table_fingerprint: str | None = None,
 ) -> str:
     """Hash non-sampling dataset params, canonical schema, and feature_table fingerprint.
 
@@ -171,6 +172,13 @@ def compute_base_dataset_version(
     busts the version on schema changes so the dataset cache cannot collide
     with a different physical input. ``None`` preserves legacy hashing for
     backward compatibility.
+
+    ``candidate_feature_table_fingerprint`` is the same fingerprint of the
+    optional candidate-level feature table (ADR-0026). Its own payload key
+    rather than a second entry folded into the first: absent, the payload is
+    byte-for-byte the one a deployment without that table has always hashed;
+    and the same schema under the other key is a different dataset, because the
+    two tables join on different keys.
     """
     stripped = copy.deepcopy(params)
     ds = stripped.get("dataset")
@@ -184,6 +192,10 @@ def compute_base_dataset_version(
     payload: dict = {"dataset": stripped, "schema": schema}
     if feature_table_fingerprint is not None:
         payload["feature_table_fingerprint"] = feature_table_fingerprint
+    if candidate_feature_table_fingerprint is not None:
+        payload["candidate_feature_table_fingerprint"] = (
+            candidate_feature_table_fingerprint
+        )
     return _hash8(payload)
 
 
@@ -393,6 +405,7 @@ def build_manifest_metadata(
     parent_version: str | None = None,
     variant_kind: str | None = None,
     feature_table_fingerprint: str | None = None,
+    candidate_feature_table_fingerprint: str | None = None,
     artifacts: list[str] | None = None,
 ) -> dict:
     """Build a manifest metadata dict with standard fields.
@@ -400,7 +413,9 @@ def build_manifest_metadata(
     ``parent_version`` and ``variant_kind`` are written on variant sub-directory
     manifests to link them back to their base dataset manifest.
     ``feature_table_fingerprint`` is written on dataset base manifests so the
-    physical feature_table schema at run time is recoverable from manifest.
+    physical feature_table schema at run time is recoverable from manifest;
+    ``candidate_feature_table_fingerprint`` likewise, and only when that table
+    is declared (ADR-0026).
     """
     metadata: dict = {
         "version": version,
@@ -423,6 +438,10 @@ def build_manifest_metadata(
         metadata["variant_kind"] = variant_kind
     if feature_table_fingerprint is not None:
         metadata["feature_table_fingerprint"] = feature_table_fingerprint
+    if candidate_feature_table_fingerprint is not None:
+        metadata["candidate_feature_table_fingerprint"] = (
+            candidate_feature_table_fingerprint
+        )
     if artifacts is not None:
         metadata["artifacts"] = artifacts
     return metadata

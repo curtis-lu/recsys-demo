@@ -38,6 +38,9 @@ class TestDatasetPipeline:
             "preprocessed_feature_table_month_plan",
             "test_keys_month_plan",
             "test_model_input_month_plan",
+            # Registered by the CLI for every deployment — `None` for the table
+            # when none is declared (ADR-0026).
+            "candidate_feature_table", "candidate_feature_table_months",
         }
 
     def test_pipeline_outputs(self):
@@ -122,7 +125,8 @@ class TestDatasetPipeline:
         assert pipeline.nodes[0].name == "validate_data_consistency"
         first = pipeline.nodes[0]
         assert sorted(first.inputs) == [
-            "feature_table", "label_table", "parameters", "sample_pool"
+            "candidate_feature_table", "feature_table", "label_table",
+            "parameters", "sample_pool",
         ]
         assert first.outputs == []
 
@@ -439,3 +443,55 @@ class TestGrainGateWiring:
         # It gates train / train_dev, neither of which that mode builds. Keeping it would make the mode fail on missing inputs.
         names = [n.name for n in create_pipeline(only_test_months=True).nodes]
         assert "validate_model_input_grain" not in names
+
+
+class TestCandidateFeatureTableWiring:
+    """Where the candidate-level feature table and the months of it this run
+    reads reach (ADR-0026), and that they bind to the right parameters.
+
+    Both go last on every node that takes them, as optional trailing
+    parameters, because the Runner binds ``inputs`` positionally. A node whose
+    list put them anywhere else would hand the table to another parameter —
+    and the ``=None`` defaults would swallow the arity mismatch instead of
+    raising.
+    """
+
+    TABLE = "candidate_feature_table"
+    MONTHS = "candidate_feature_table_months"
+
+    def _by_name(self):
+        return {n.name: n for n in create_pipeline().nodes}
+
+    def test_the_table_reaches_the_gate_the_fit_the_precision_check_and_every_build(self):
+        assert {
+            name for name, node in self._by_name().items() if self.TABLE in node.inputs
+        } == {
+            "validate_data_consistency", "fit_preprocessor_metadata",
+            "validate_numeric_precision",
+            "build_train_model_input", "build_train_dev_model_input",
+            "build_val_model_input", "build_test_model_input",
+        }
+
+    def test_the_months_reach_exactly_the_nodes_that_read_rows_of_it(self):
+        """The gate reads its columns only and the fit restricts to the train
+        months itself; the precision check and the builds read rows of the
+        months this run reads."""
+        assert {
+            name for name, node in self._by_name().items() if self.MONTHS in node.inputs
+        } == {
+            "validate_numeric_precision",
+            "build_train_model_input", "build_train_dev_model_input",
+            "build_val_model_input", "build_test_model_input",
+        }
+
+    def test_each_binds_to_the_parameter_of_its_own_name(self):
+        import inspect
+
+        for node in create_pipeline().nodes:
+            params = list(inspect.signature(node.func).parameters)
+            for name in (self.TABLE, self.MONTHS):
+                if name in node.inputs:
+                    assert node.inputs.index(name) == params.index(name), (
+                        f"{node.name}: {name} is input #{node.inputs.index(name)} "
+                        f"but parameter #{params.index(name)}"
+                    )

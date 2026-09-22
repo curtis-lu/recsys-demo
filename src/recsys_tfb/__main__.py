@@ -21,6 +21,7 @@ from recsys_tfb.core.consistency import (
     optional_role_monitoring_errors,
     etl_cli_var_errors,
     inference_grid_errors,
+    candidate_feature_table_inference_errors,
     merged_etl_variables,
     missing_test_month_errors,
     parse_etl_var_flags,
@@ -59,8 +60,11 @@ from recsys_tfb.core.versioning import (
 )
 from recsys_tfb.pipelines import get_pipeline, list_pipelines
 from recsys_tfb.pipelines.dataset.month_plans import (
+    CANDIDATE_FEATURE_TABLE,
+    CANDIDATE_FEATURE_TABLE_MONTHS,
     INCREMENTAL_DATASETS,
     build_month_plans,
+    candidate_feature_table_months,
     landed_months,
     month_plan_input,
     plan_incremental_snap_dates,
@@ -1190,10 +1194,28 @@ def dataset(
         for f in spark.table(feature_table_fqn).schema.fields
     ]
     feature_table_fp = compute_feature_table_fingerprint(feature_table_columns)
+    # The candidate-level feature table (ADR-0026) is declared by its catalog
+    # entry. Its columns become features, so its schema is part of the
+    # dataset's identity exactly as feature_table's is — and only when it is
+    # declared, so a deployment without one keeps every ID it has.
+    candidate_declared = CANDIDATE_FEATURE_TABLE in source_catalog_config
+    candidate_fp = None
+    if candidate_declared:
+        candidate_cfg = source_catalog_config[CANDIDATE_FEATURE_TABLE]
+        candidate_columns = [
+            (f.name, f.dataType.simpleString())
+            for f in spark.table(
+                f"{candidate_cfg['database']}.{candidate_cfg['table']}"
+            ).schema.fields
+        ]
+        candidate_fp = compute_feature_table_fingerprint(candidate_columns)
+        logger.info("candidate_feature_table_fingerprint: %s (%d cols)",
+                    candidate_fp, len(candidate_columns))
 
     schema_hash = get_schema_for_hash(params)
     base_v = compute_base_dataset_version(
         params_dataset, schema_hash, feature_table_fingerprint=feature_table_fp,
+        candidate_feature_table_fingerprint=candidate_fp,
     )
     train_v = compute_train_variant_id(params_dataset)
 
@@ -1247,6 +1269,10 @@ def dataset(
             "base_dataset_version": base_v,
             # feature_table_fingerprint on base only; variants inherit via parent_version.
             "feature_table_fingerprint": feature_table_fp,
+            **(
+                {"candidate_feature_table_fingerprint": candidate_fp}
+                if candidate_fp is not None else {}
+            ),
         }, run_context.run_id)
         _write_manifest_stub(stub_base_dir / "train_variants" / train_v, {
             "version": train_v, "pipeline": "dataset", "parameters": params_dataset,
@@ -1261,7 +1287,20 @@ def dataset(
         # fourth incremental artifact in month_plans.py is enough, and the
         # injection follows.
         extra_datasets={
-            month_plan_input(name): plan for name, plan in month_plans.items()
+            **{
+                month_plan_input(name): plan
+                for name, plan in month_plans.items()
+            },
+            # Which months of the candidate-level feature table this run reads —
+            # registered whether or not one is declared, so the node inputs are
+            # the same literal list for every deployment.
+            CANDIDATE_FEATURE_TABLE_MONTHS: candidate_feature_table_months(
+                params, month_plans["test_model_input"], only_test_months,
+            ),
+            # `None` is how a node learns none is declared. Only then: a
+            # declared entry is already in the catalog, and registering over it
+            # would silently drop every candidate-level feature.
+            **({} if candidate_declared else {CANDIDATE_FEATURE_TABLE: None}),
         },
         # The same plans again, keyed by artifact: a slice has to stop at
         # "complete for this run", and for these three that is a month
@@ -1285,6 +1324,7 @@ def dataset(
             "parameters": params_dataset,
             "base_dataset_version": base_v,
             "feature_table_fingerprint": feature_table_fp,
+            "candidate_feature_table_fingerprint": candidate_fp,
             "artifacts": _dir_artifacts(base_dir),
         },
         run_id=run_context.run_id,
@@ -1635,6 +1675,19 @@ def inference(
     grid_errors = inference_grid_errors(params)
     if grid_errors:
         for line in grid_errors:
+            logger.error(line)
+        raise typer.Exit(code=1)
+
+    # (A47) no candidate-level feature table. Wired here for A27's reason, and
+    # before Spark for the same one: the catalog entry alone decides it, and a
+    # run allowed through would finish with scores computed on all-NULL
+    # features rather than fail (ADR-0022 decision 4). The version-free catalog
+    # is enough — source entries carry no ${...} placeholder.
+    candidate_errors = candidate_feature_table_inference_errors(
+        CANDIDATE_FEATURE_TABLE in config.get_catalog_config(runtime_params=params)
+    )
+    if candidate_errors:
+        for line in candidate_errors:
             logger.error(line)
         raise typer.Exit(code=1)
 

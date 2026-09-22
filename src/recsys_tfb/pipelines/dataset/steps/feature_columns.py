@@ -106,6 +106,28 @@ def encoded_frame_columns(
     return list(dict.fromkeys(list(base_key) + ft_feature_cols))
 
 
+def candidate_frame_columns(
+    join_key: list[str],
+    feature_columns: list[str],
+    frame_cols: list[str],
+    identity_cols: list[str],
+) -> list[str]:
+    """The columns the candidate-level feature table contributes: its join key,
+    then the features that live in it (ADR-0026).
+
+    Not :func:`encoded_frame_columns`, whose frame carries no identity column
+    beyond its key. This one does — identity *is* its key — and an identity
+    categorical such as ``schema.item`` is also a feature, so "every feature
+    this frame has" would select a second copy of a column ``keys`` already
+    brings. Excluding identity makes the contribution the key plus this table's
+    own features, whatever the key turns out to be.
+    """
+    own = [
+        c for c in feature_columns if c in frame_cols and c not in identity_cols
+    ]
+    return list(dict.fromkeys(list(join_key) + own))
+
+
 def require_item_is_a_feature(
     item_col: str | None,
     feature_columns: list[str],

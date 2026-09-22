@@ -75,6 +75,7 @@ def restrict_to_months_or_all(df: DataFrame, time_col: str, months: list) -> Dat
 
 def require_months_present(
     df: DataFrame, time_col: str, months: list, what: str,
+    table: str = "feature_table",
 ) -> None:
     """Pre-check: every month in ``months`` exists in ``df``.
 
@@ -85,8 +86,9 @@ def require_months_present(
 
     ``what`` names the config key in the message (``train_snap_dates`` for the
     preprocessor fit, ``snap_dates`` for the months a run is about to encode);
-    both callers ask this of ``feature_table``, which is why the subject is
-    fixed in the text.
+    ``table`` names the frame, because two feature tables ask it (ADR-0026) and
+    "feature_table is missing a month" about the other one would send the
+    operator to the wrong table.
 
     Cost: one ``distinct().collect()`` over the time column. What lands on the
     driver is bounded by the month count (typically 12-52), not by row count.
@@ -95,10 +97,56 @@ def require_months_present(
         row[time_col]
         for row in df.select(time_col).distinct().collect()
     }
-    present = {pd.Timestamp(d) for d in present if d is not None}
-    missing = sorted({pd.Timestamp(d) for d in months} - present)
+    require_months_in(present, months, what, table)
+
+
+def require_months_in(present, months: list, what: str, table: str) -> None:
+    """Pre-check on months already collected: every month in ``months`` is in
+    ``present``.
+
+    :func:`require_months_present` minus the collect, for a caller whose own
+    scan already returned the months it saw (the candidate table's B8 scan).
+    One definition of the message either way.
+    """
+    present = {pd.Timestamp(d).normalize() for d in present if d is not None}
+    missing = sorted({pd.Timestamp(d).normalize() for d in months} - present)
     if missing:
         raise ValueError(
-            f"feature_table missing required {what}: "
+            f"{table} missing required {what}: "
             f"{[d.strftime('%Y-%m-%d') for d in missing]}"
         )
+
+
+def months_present_and_max_abs(
+    df: DataFrame, time_col: str, months: list, columns: list[str],
+) -> tuple[set, dict[str, float]]:
+    """One aggregation over ``df``'s ``months``: which of them hold any row, and
+    each of ``columns``' largest absolute value.
+
+    The facts B8 needs about a table this framework does not write (the
+    candidate-level feature table, ADR-0026): there are no footers of its own
+    to read, and its format is the deployment's. The month set comes out of the
+    same scan so the coverage check costs nothing extra.
+
+    Values are compared as doubles: ``abs`` refuses a boolean, and the bound
+    B8 compares against sits far below where a double stops being exact. A
+    column with no non-NULL value over those months reports ``0.0`` — the
+    ``ColumnPrecision`` convention for a column with nothing to lose.
+
+    Cost: one scan of those months; one row per month reaches the driver.
+    """
+    rows = (
+        df.filter(months_filter_as_date(time_col, months))
+        .groupBy(F.to_date(F.col(time_col)).alias("__month"))
+        .agg(
+            F.count(F.lit(1)).alias("__rows"),
+            *[F.max(F.abs(F.col(c).cast("double"))).alias(c) for c in columns],
+        )
+        .collect()
+    )
+    present = {row["__month"] for row in rows}
+    max_abs = {
+        c: max((row[c] for row in rows if row[c] is not None), default=0.0)
+        for c in columns
+    }
+    return present, max_abs

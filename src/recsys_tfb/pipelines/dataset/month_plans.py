@@ -231,3 +231,50 @@ def build_month_plans(
         )
         plans[name] = plan
     return plans
+
+
+#: Catalog name of the optional candidate-level feature table (ADR-0026). A
+#: fixed name, like ``feature_table``: the deployment decides which physical
+#: table it points at, and declaring the entry is what declares the table.
+CANDIDATE_FEATURE_TABLE = "candidate_feature_table"
+
+#: Catalog name of the months of that table this run reads. Deliberately not a
+#: ``*_month_plan`` name: those scope an incremental artifact, and this table is
+#: not one (see :func:`candidate_feature_table_months`).
+CANDIDATE_FEATURE_TABLE_MONTHS = "candidate_feature_table_months"
+
+
+def candidate_feature_table_months(
+    parameters: dict,
+    test_plan: SnapDatePlan,
+    only_test_months: bool,
+) -> list[pd.Timestamp]:
+    """The months of the candidate-level feature table this run reads.
+
+    Not an incremental plan — that table is never landed, so nothing is
+    subtracted for having been written before. The train, train_dev and val
+    builds read their months in full on every run that includes them, and the
+    test build reads the test months its own plan still has to process. Under
+    ``--only-test-months`` the first three builds are not in the pipeline, so
+    their months are not read.
+
+    Its consumers — the months filter in ``build_model_input``, and the B8 scan
+    and month-presence check in ``validate_numeric_precision`` — all read this
+    one list, so what is checked and what is read are one set by construction.
+
+    Logs the list, and the configured months it leaves out, before any Spark
+    work — the same promise the ``[months]`` lines of :func:`build_month_plans`
+    make about the incremental artifacts.
+    """
+    ds = parameters["dataset"]
+    read: set[pd.Timestamp] = set(test_plan.to_process)
+    if not only_test_months:
+        read.update(pd.Timestamp(d) for d in ds["train_snap_dates"])
+        read.update(pd.Timestamp(d) for d in ds.get("val_snap_dates", []))
+    months = sorted(read)
+    logger.info(
+        "[months] dataset=%s read=%s not-read=%s",
+        CANDIDATE_FEATURE_TABLE, _fmt(months),
+        _fmt([d for d in collect_dataset_snap_dates(parameters) if d not in read]),
+    )
+    return months

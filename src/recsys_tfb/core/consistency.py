@@ -523,15 +523,25 @@ Layer 1 — config-static (implemented here; aggregated by
   is read by ``prediction_quality_on``, shared with the node that computes the
   family. NOT aggregated, for A22's reason: that gate cannot see
   ``--post-training``.
+* A47 — offline inference with a candidate-level feature table declared
+  (catalog entry ``candidate_feature_table``, ADR-0026). Inference scores the
+  framework's own entity x item grid, where no candidate was ever shown, so
+  that table has no row for any of them: every candidate-level feature would be
+  NULL, and the run would finish with scores the model was never trained to
+  give. Wrong rather than missing, so it stops at the entry (ADR-0022 decision
+  4). Predicate: ``candidate_feature_table_inference_errors`` (takes whether the
+  catalog declares the entry, as A40 takes its flag; the inference command
+  raises). NOT aggregated: it needs the catalog, and the harm belongs to
+  inference alone.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
 flags), A22/A46 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43 (config keys whose
-harm belongs to one pipeline), A28/A39/A45 (the resolved catalog), A30 (``--env``
+harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
-implemented and wired):
++ B13 + B14 implemented and wired):
 
 * B1 — sample_pool items ↔ declared items must be equal; label items ⊆
   declared items (unknown item values corrupt training or violate invariants).
@@ -654,8 +664,9 @@ implemented and wired):
 
 * B10 — a ``*_model_input`` table holds a different number of rows than the
   ``*_keys`` table it was built from. ``build_model_input`` LEFT joins the keys
-  to ``label_table`` and to ``preprocessed_feature_table`` at the keys' own
-  grain, so the counts can only diverge when a right table holds a join key
+  to ``label_table``, to ``preprocessed_feature_table`` and to the
+  candidate-level feature table when one is declared (ADR-0026), at the keys'
+  own grain, so the counts can only diverge when a right table holds a join key
   more than once — the "silently N-times-too-large dataset" that node's own
   comment names as the failure it fears. ``require_columns_present`` there
   covers only the other cause (a join key missing the item column); nothing
@@ -716,13 +727,24 @@ implemented and wired):
   ``dataset.val_zero_positive_group_ratio`` or ``test_zero_positive_group_ratio``
   is above 0: the val / test filter nodes add a column by that name to the same
   frame (ADR-0025 decision 3). Checked against the feature columns derived from
-  ``feature_table``'s metadata — no rows. Only features count (val / test keys
+  the feature tables' metadata (both, when a candidate-level one is declared)
+  — no rows. Only features count (val / test keys
   carry nothing; a dropped column is no feature), and the train ratio adds no
   weight. Predicate: ``zero_positive_group_weight_collision_errors``. Wired in
   ``validate_data_consistency``. Runtime backstop:
   ``keep_zero_positive_groups_drawn_under_ratio``
   (``pipelines/dataset/steps/model_input.py``) refuses a frame that already
   holds the column — a sliced run skips the gate.
+* B13 — the candidate-level feature table (ADR-0026) is missing a column of
+  ``identity_columns``. It joins on identity, so the join itself would fail —
+  as an unresolved-name ``AnalysisException`` naming neither the table nor the
+  reason. Checked against ``DataFrame.columns`` (metadata, no rows).
+  Predicate: ``candidate_feature_table_key_errors``. Wired in
+  ``validate_data_consistency``.
+* B14 — a column (not identity, not the label, not dropped) is in both
+  ``feature_table`` and the candidate-level feature table. Both are joined onto
+  the same row, so it would arrive twice. Predicate:
+  ``feature_table_overlap_errors``. Wired in ``validate_data_consistency``.
 
 Layer 3 — specified but DEFERRED (NOT implemented in this module yet); see
 the plan doc for the full table:
@@ -1132,6 +1154,71 @@ def optional_role_source_column_errors(
                 f"remove the {role!r} declaration."
             )
     return errors
+
+
+def candidate_feature_table_key_errors(
+    identity_columns: Sequence[str],
+    candidate_columns: Sequence[str],
+) -> list[str]:
+    """(B13) the candidate-level feature table carries every identity column.
+
+    Returns error strings (empty list when fine), collected by
+    ``validate_data_consistency``. Pure: the caller hands in
+    ``DataFrame.columns`` (metastore metadata, no rows).
+
+    One of its rows describes one candidate, so ``build_model_input`` joins it
+    on identity (ADR-0026). Without this check a missing column still fails —
+    as an unresolved-name ``AnalysisException`` from inside the join, naming
+    neither the table nor why it needs the column. The shape it catches most
+    is a table at (time, entity) grain declared as the candidate one: it holds
+    the base key and nothing below it, and belongs in ``feature_table``.
+    """
+    present = set(candidate_columns)
+    missing = [c for c in identity_columns if c not in present]
+    if not missing:
+        return []
+    return [
+        f"B13: candidate_feature_table is missing identity column(s) {missing}. "
+        f"It is joined onto the candidate rows on identity "
+        f"({list(identity_columns)}): one of its rows describes one candidate "
+        f"(ADR-0026). Add the columns to that table's source SQL. If the table "
+        f"describes an entity in a period rather than a candidate, it belongs "
+        f"in feature_table, which joins on (time, entity)."
+    ]
+
+
+def feature_table_overlap_errors(
+    feature_table_columns: Sequence[str],
+    candidate_columns: Sequence[str],
+    drop_columns: Sequence[str],
+    identity_columns: Sequence[str],
+    label_column: str,
+) -> list[str]:
+    """(B14) no column is read from both feature tables.
+
+    Returns error strings (empty list when fine), collected by
+    ``validate_data_consistency``. Pure: column names only.
+
+    ``build_model_input`` joins both tables onto the same row, and each
+    contributes the features it holds; a name both hold would arrive twice and
+    Spark fails with ``Reference 'x' is ambiguous``. Identity columns are not an
+    overlap — they are the join keys — and neither is the label or a dropped
+    column, because neither table selects those. What is left is a name one
+    source SQL has to rename (or both drop).
+    """
+    shared = (
+        set(feature_table_columns) & set(candidate_columns)
+    ) - set(identity_columns) - set(drop_columns) - {label_column}
+    if not shared:
+        return []
+    return [
+        f"B14: column(s) {sorted(shared)} are in both feature_table and "
+        f"candidate_feature_table. A feature is read from one table only: "
+        f"build_model_input joins both onto the same candidate row, so the "
+        f"column would arrive twice and the join fails as an ambiguous "
+        f"reference. Rename it in one table's source SQL, or add it to "
+        f"dataset.prepare_model_input.drop_columns if neither copy is a feature."
+    ]
 
 
 def optional_role_monitoring_errors(
@@ -2664,6 +2751,7 @@ def categorical_dtype_problem(dt: str) -> CategoricalDtypeProblem | None:
 def categorical_dtype_errors(
     categorical_cols: list[str],
     feature_table_dtypes: dict[str, str],
+    table: str = "feature_table",
 ) -> list[str]:
     """B5 invariant — the single definition.
 
@@ -2696,6 +2784,10 @@ def categorical_dtype_errors(
     from this mapping and correctly skipped. Pure (no Spark): the Layer-2 gate
     passes ``dict(feature_table.dtypes)`` in. Returns collect-all error strings
     sorted by column; empty list means OK.
+
+    ``table`` is the feature table the dtypes were read from: the gate asks this
+    once per feature table (ADR-0026), and the message has to send the operator
+    to the one that holds the column.
     """
     errors: list[str] = []
     for col in sorted(categorical_cols):
@@ -2707,7 +2799,7 @@ def categorical_dtype_errors(
             continue
         errors.append(
             f"categorical column {col!r} is {problem.kind} (type={dt}) in "
-            f"feature_table — {problem.why}. A categorical must be string, an integer "
+            f"{table} — {problem.why}. A categorical must be string, an integer "
             f"type or boolean. Remove {col!r} from "
             f"dataset.prepare_model_input.categorical_columns and {problem.way_out}; "
             f"if it is not a model feature, add it to "
@@ -3166,13 +3258,15 @@ def model_input_grain_errors(
         errors.append(
             f"B10: {split}_model_input holds {model_input_rows:,} row(s) but "
             f"{split}_keys holds {keys_rows:,}{ratio}. build_model_input LEFT "
-            f"joins the keys to label_table and to preprocessed_feature_table "
-            f"on the keys' own grain, so the two counts can only differ if a "
-            f"right table holds one of those join keys more than once — the "
+            f"joins the keys to label_table, to preprocessed_feature_table and, "
+            f"when one is declared, to candidate_feature_table, each on the "
+            f"keys' own grain, so the two counts can only differ if a right "
+            f"table holds one of those join keys more than once — the "
             f"silently N-times-too-large dataset that node's comment names."
             f"{key_clause} "
-            f"Check the duplicate-key contract on label_table and on "
-            f"feature_table (source_etl quality_checks: "
+            f"Check the duplicate-key contract on label_table, on "
+            f"feature_table and on candidate_feature_table's source table "
+            f"(source_etl quality_checks: "
             f"max_duplicate_key_ratio, plus primary_key — A32 passes when both "
             f"are absent), and do not de-duplicate downstream: which of the "
             f"duplicate rows is the right one is not knowable here."
@@ -3191,6 +3285,7 @@ def carry_column_collision_errors(
     drop_columns: list[str],
     identity_columns: list[str],
     label_column: str,
+    table: str = "feature_table",
 ) -> list[str]:
     """B7 invariant — the single definition.
 
@@ -3242,7 +3337,10 @@ def carry_column_collision_errors(
     ``feature_table_columns`` is any container of feature_table's column names
     (the gate hands in the keys of the ``feature_table.dtypes`` mapping it has
     already read — metastore metadata, no scan). Pure (no Spark). Returns
-    collect-all error strings sorted by column; empty list means OK.
+    collect-all error strings sorted by column; empty list means OK. ``table``
+    names the feature table those columns came from: the candidate-level one
+    (ADR-0026) is joined onto the same rows, so a carried column in it collides
+    the same way, and is asked separately so the message names the right table.
     """
     dropped = set(drop_columns)
     in_feature_table = set(feature_table_columns)
@@ -3253,7 +3351,7 @@ def carry_column_collision_errors(
             continue
         errors.append(
             f"column {col!r} is in dataset.carry_columns and is also a column of "
-            f"feature_table, so build_model_input would join two frames that "
+            f"{table}, so build_model_input would join two frames that "
             f"both carry {col!r} and Spark fails with "
             f"\"Reference '{col}' is ambiguous\". A column can be carried or be "
             f"a model feature, not both — pick one, in parameters_dataset.yaml: "
@@ -3284,7 +3382,9 @@ def zero_positive_group_weight_collision_errors(
 
     Returns error strings (empty list when fine), collected by
     ``validate_data_consistency``. Pure: the caller hands in the feature
-    columns it derived from ``feature_table``'s metadata — no rows.
+    columns it derived from the feature tables' metadata — no rows. Both
+    tables' features count: a candidate-level one reaches the same frame
+    (ADR-0026).
 
     Above 0 the ``filter_{val,test}_model_input`` nodes add that column, and a
     feature by the same name would reach the same frame: the draw refuses to
@@ -3303,7 +3403,7 @@ def zero_positive_group_weight_collision_errors(
         return []
     keys = " and ".join(f"dataset.{s}_zero_positive_group_ratio" for s in keeps)
     return [
-        f"B12: feature_table column {ZERO_POSITIVE_GROUP_WEIGHT_COL!r} is a model "
+        f"B12: feature column {ZERO_POSITIVE_GROUP_WEIGHT_COL!r} is a model "
         f"feature, and {keys} > 0 makes the dataset pipeline add a column by "
         f"that name to the same table (the zero-positive group weight). Rename "
         f"the source column, or list it in "
@@ -4266,6 +4366,36 @@ def missing_test_month_errors(parameters: dict) -> list[str]:
         f"that does not name this key. Add a month the dataset pipeline has "
         f"already built. (The dataset command runs without one; only training "
         f"needs it.)"
+    ]
+
+
+def candidate_feature_table_inference_errors(declared: bool) -> list[str]:
+    """(A47) offline inference is refused when a candidate-level feature table
+    is declared.
+
+    Returns error strings (empty list when fine); the inference command raises.
+    Takes the fact rather than reading the catalog, so the predicate stays pure
+    the way A40's does.
+
+    Inference builds its candidates itself — each entity times every item — so
+    none of them was shown to anyone, and a table with one row per shown
+    candidate has nothing to join onto any of them. Left to run, every
+    candidate-level feature would be NULL: a model trained on those features
+    would score without them and the run would still finish. ADR-0022 decision 4
+    stops it at the entry; the online scoring for such a deployment lives
+    outside this framework (``docs/notes/2026-09-16-event-support-plan.md``).
+    """
+    if not declared:
+        return []
+    return [
+        "(A47) offline inference cannot run while candidate_feature_table is "
+        "declared in the catalog. Inference scores its own entity x item grid, "
+        "where no candidate was ever shown, so that table has no row for any of "
+        "them: every candidate-level feature would be NULL and the scores would "
+        "be ones the model was never trained to give. Score this deployment with "
+        "the system that computes those features online; training and "
+        "evaluation --post-training are unaffected (ADR-0022 decision 4, "
+        "ADR-0026)."
     ]
 
 

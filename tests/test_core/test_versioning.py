@@ -978,3 +978,80 @@ class TestZeroPositiveGroupRatioLayering:
         p1["dataset"]["train_zero_positive_group_ratio"] = 0.0
         p2["dataset"]["train_zero_positive_group_ratio"] = 0.5
         assert compute_train_variant_id(p1) != compute_train_variant_id(p2)
+
+
+class TestCandidateFeatureTableFingerprint:
+    """The candidate-level feature table's schema is part of base_dataset_version
+    only when one is declared (ADR-0026).
+
+    Its columns become model features, so a deployment that adds one — or
+    changes its columns — must not reuse the dataset artifacts of one that did
+    not. A deployment that declares none must keep every ID it has.
+    """
+
+    _FEATURE_TABLE = [
+        ("snap_date", "date"), ("cust_id", "string"), ("total_aum", "double"),
+    ]
+    _CANDIDATE_TABLE = [
+        ("snap_date", "date"), ("cust_id", "string"), ("prod_name", "string"),
+        ("browse_30m", "bigint"),
+    ]
+
+    def test_without_one_the_id_is_the_one_main_computed(self):
+        """Pinned: recorded at bf526618, before the candidate table existed.
+
+        The structural spelling (call with and without the new keyword, compare)
+        would hold however the payload is built, because leaving the keyword out
+        is the very path under test. Only a value carried over from before the
+        change says nothing moved for an existing deployment.
+        """
+        fp = compute_feature_table_fingerprint(self._FEATURE_TABLE)
+
+        assert fp == "88252218"
+        assert compute_base_dataset_version(
+            _base_params(), _sample_schema(), feature_table_fingerprint=fp,
+        ) == "1f8b6d8f"
+
+    def test_declaring_one_moves_the_id(self):
+        fp = compute_feature_table_fingerprint(self._FEATURE_TABLE)
+        candidate_fp = compute_feature_table_fingerprint(self._CANDIDATE_TABLE)
+
+        assert compute_base_dataset_version(
+            _base_params(), _sample_schema(),
+            feature_table_fingerprint=fp,
+            candidate_feature_table_fingerprint=candidate_fp,
+        ) != "1f8b6d8f"
+
+    def test_its_schema_moves_the_id(self):
+        """Two candidate tables that differ by one column's type are two datasets."""
+        fp = compute_feature_table_fingerprint(self._FEATURE_TABLE)
+        widened = [
+            (name, "double" if name == "browse_30m" else dtype)
+            for name, dtype in self._CANDIDATE_TABLE
+        ]
+
+        versions = {
+            compute_base_dataset_version(
+                _base_params(), _sample_schema(),
+                feature_table_fingerprint=fp,
+                candidate_feature_table_fingerprint=(
+                    compute_feature_table_fingerprint(columns)
+                ),
+            )
+            for columns in (self._CANDIDATE_TABLE, widened)
+        }
+        assert len(versions) == 2
+
+    def test_the_two_tables_are_not_interchangeable(self):
+        """The same schema as the entity-level table or as the candidate-level
+        one is a different dataset: the join key differs, so the rows differ."""
+        a = compute_feature_table_fingerprint(self._FEATURE_TABLE)
+        b = compute_feature_table_fingerprint(self._CANDIDATE_TABLE)
+
+        assert compute_base_dataset_version(
+            _base_params(), _sample_schema(),
+            feature_table_fingerprint=a, candidate_feature_table_fingerprint=b,
+        ) != compute_base_dataset_version(
+            _base_params(), _sample_schema(),
+            feature_table_fingerprint=b, candidate_feature_table_fingerprint=a,
+        )
