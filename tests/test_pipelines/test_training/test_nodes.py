@@ -1195,11 +1195,81 @@ class TestTuneHyperparametersBinaryPredictionObjectives:
             )
 
         assert (
-            f"dataset.val_zero_positive_group_ratio=0.5; query groups holding "
-            f"a positive={n_pos_groups} (rows={int((~kept).sum())}); kept "
-            f"query groups holding none={n_kept_groups} "
-            f"(rows={int(kept.sum())})"
+            f"query groups holding a positive={n_pos_groups} "
+            f"(rows={int((~kept).sum())}); kept query groups holding "
+            f"none={n_kept_groups} (rows={int(kept.sum())}); "
+            f"dataset.val_zero_positive_group_ratio=0.5 in the config; "
+            f"zero_positive_group_weight on kept groups=2 in the val read"
         ) in caplog.text
+
+    def test_the_weight_logged_is_the_one_in_the_data_not_the_config(
+        self, caplog, tmp_path, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters,
+    ):
+        """Training reads the dataset version on disk (latest, or
+        --base-dataset-version), not the one the config would build. A val
+        built at r = 0.5 under a config now saying 0.25 still scores with the
+        weight 2 it carries — and the log has to show that, or a reader
+        judges the score's steadiness by an r it was never computed with."""
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        *_, val_df = synthetic_model_inputs
+        val_h, _ = self._val(tmp_path, val_df)
+        params = self._params(training_parameters, "pooled_average_precision")
+        params["dataset"] = {"val_zero_positive_group_ratio": 0.25}
+
+        with caplog.at_level(logging.INFO):
+            tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata,
+                params,
+            )
+
+        assert (
+            "dataset.val_zero_positive_group_ratio=0.25 in the config; "
+            "zero_positive_group_weight on kept groups=2 in the val read"
+        ) in caplog.text
+
+    @pytest.mark.parametrize("objective", OBJECTIVES)
+    def test_val_without_the_weight_column_stops_before_reading_the_matrix(
+        self, monkeypatch, tmp_path, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters, objective,
+    ):
+        """A val built at r = 0 carries no weight column. A48 checks the
+        config, but training reads whichever dataset version is on disk, so
+        the two can disagree. Without a check up front the read skips the
+        missing column in silence, streams the whole val matrix (tens of GiB
+        in production) and only then fails on a bare KeyError."""
+        from recsys_tfb.io import extract as extract_mod
+
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        _, _, val_h, *_ = synthetic_model_inputs  # the parquet without the column
+
+        def no_stream(*args, **kwargs):
+            raise AssertionError("the val matrix was read")
+
+        monkeypatch.setattr(extract_mod, "_stream_matrix", no_stream)
+        with pytest.raises(ValueError, match="has no zero_positive_group_weight column"):
+            tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata,
+                self._params(training_parameters, objective),
+            )
+
+    @pytest.mark.parametrize("objective", ["mean_ap", "macro_per_item_map"])
+    def test_ranking_objectives_still_run_on_a_val_without_a_positive(
+        self, tmp_path, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters, objective,
+    ):
+        """The early stop is for the two binary-prediction objectives only
+        (#430): the ranking objectives keep scoring such a val as 0.0, as they
+        always have."""
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        *_, val_df = synthetic_model_inputs
+        val_h, _ = self._val(tmp_path, val_df, labels=np.zeros(len(val_df)))
+
+        best_params, _, best_model = tune_hyperparameters(
+            train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata,
+            self._params(training_parameters, objective),
+        )
+        assert isinstance(best_model, ModelAdapter)
 
     def test_macro_logs_which_items_enter_the_mean(
         self, caplog, tmp_path, lgb_handles, synthetic_model_inputs,
@@ -1225,7 +1295,7 @@ class TestTuneHyperparametersBinaryPredictionObjectives:
             )
 
         assert (
-            f"items entering the mean=3/4 positives per entering item: "
+            f"items entering the mean=3 of 4; positives per entering item: "
             f"min={int(pos.min())} median={float(pos.median()):g}"
         ) in caplog.text
 

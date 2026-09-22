@@ -17,13 +17,18 @@ the one setup whose point was to be faster. The real blocker, and the route
 around it (read the winner back from the on-disk checkpoint rather than out of
 memory), are recorded in ``docs/agents/architecture-constraints.md`` F3 —
 including why today's checkpoint cannot carry that weight as written.
+
+:func:`val_composition` and :func:`item_support` describe val once, before
+the search, for the two objectives that score every val row as a binary
+prediction (#430): what the score will be averaged over, printed by
+``tune_hyperparameters`` so a reader can judge how steady it is.
 """
 
 import logging
 import time
 from pathlib import Path
 from collections.abc import Sequence
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import numpy as np
 import optuna
@@ -104,44 +109,71 @@ def _hpo_score(
     )
 
 
-def val_groups_by_kind(
-    groups: np.ndarray, y_true: np.ndarray,
-) -> tuple[int, int, int, int]:
-    """``(groups, rows)`` holding a positive, then ``(groups, rows)`` holding
-    none — four counts over val.
+class ValComposition(NamedTuple):
+    """What val holds, as a binary-prediction objective will score it (#430).
 
-    Decided from the label, never from ``zero_positive_group_weight``: at
-    r = 1 both kinds of group carry weight 1. ``groups`` are the dense ids
+    ``kept_group_weights`` are the distinct ``zero_positive_group_weight``
+    values on the rows of groups holding no positive — ``(1 / r,)`` for the r
+    the dataset version was *built* with, which need not be the r the config
+    says now; empty when no such group is in val.
+    """
+
+    groups_with_positive: int
+    rows_with_positive: int
+    groups_without: int
+    rows_without: int
+    kept_group_weights: tuple
+
+
+def val_composition(
+    groups: np.ndarray, y_true: np.ndarray, weights: np.ndarray,
+) -> ValComposition:
+    """Split val into query groups holding a positive and those holding none.
+
+    Decided from the label, never from the weight: at r = 1 both kinds of
+    group carry weight 1. ``groups`` are the dense ids
     ``extract_Xy_with_groups`` hands back (0 .. n_groups - 1).
     """
     if len(groups) == 0:
-        return 0, 0, 0, 0
+        return ValComposition(0, 0, 0, 0, ())
     has_positive = np.bincount(groups, weights=np.asarray(y_true) > 0) > 0
-    rows_with = int(has_positive[groups].sum())
+    row_has_positive = has_positive[groups]
+    rows_with = int(row_has_positive.sum())
     groups_with = int(has_positive.sum())
-    return (
-        groups_with, rows_with,
-        len(has_positive) - groups_with, len(groups) - rows_with,
+    return ValComposition(
+        groups_with_positive=groups_with,
+        rows_with_positive=rows_with,
+        groups_without=len(has_positive) - groups_with,
+        rows_without=len(groups) - rows_with,
+        kept_group_weights=tuple(
+            float(w) for w in np.unique(np.asarray(weights)[~row_has_positive])),
     )
 
 
-def items_entering_the_mean(
-    items: np.ndarray, y_true: np.ndarray,
-) -> tuple[int, int, int, float]:
-    """``(entering, all, min, median)`` for a per-item mean over val.
+class ItemSupport(NamedTuple):
+    """Which items a per-item mean over val can average, and on how much.
 
-    ``entering`` is the number of items holding at least one positive row —
-    the only ones a per-item average precision can be computed for — out of
-    ``all`` distinct items in val; ``min`` / ``median`` are the positive-row
-    counts among the entering items, so a reader can see how much of the mean
-    rests on items with one or two positives. ``(0, all, 0, 0.0)`` when no
-    item has a positive.
+    ``entering`` items hold at least one positive row — the only ones a
+    per-item average precision is defined for — out of ``all`` distinct items
+    in val. ``fewest`` / ``median`` are the positive-row counts among the
+    entering items, so a reader can see how much of the mean rests on items
+    with one or two positives.
     """
+
+    entering: int
+    all: int
+    fewest: int
+    median: float
+
+
+def item_support(items: np.ndarray, y_true: np.ndarray) -> ItemSupport:
+    """:class:`ItemSupport` over val; ``(0, all, 0, 0.0)`` when no item has a
+    positive."""
     _, counts = np.unique(np.asarray(items)[np.asarray(y_true) > 0], return_counts=True)
     n_items = len(np.unique(items))
     if len(counts) == 0:
-        return 0, n_items, 0, 0.0
-    return len(counts), n_items, int(counts.min()), float(np.median(counts))
+        return ItemSupport(0, n_items, 0, 0.0)
+    return ItemSupport(len(counts), n_items, int(counts.min()), float(np.median(counts)))
 
 
 def _predict_in_row_batches(adapter, X, budget: int | None = None) -> np.ndarray:
@@ -234,11 +266,11 @@ class TrialScorer:
     purpose, so the number a trial is judged by is not the number its
     early stopping optimised against.
 
-    ``weights_val`` is val's ``zero_positive_group_weight``, aligned to the
-    rows of ``X_val`` — present only when the objective scores every row as a
-    binary prediction (#430), ``None`` otherwise. Not to be confused with
-    ``train_weights``: those are the user's training weights and shape the
-    fit; this one only weighs the rows of the score.
+    ``zero_positive_group_weight_val`` is val's column of that name, aligned
+    to the rows of ``X_val`` — present only when the objective scores every
+    row as a binary prediction (#430), ``None`` otherwise. It is not a val
+    counterpart of ``train_weights``: those are the user's training weights
+    and shape the fit; this one only weighs the rows of the score.
 
     ``X_val`` is whatever the caller handed over: anything that indexes and
     slices like a 2-D array. ``tune_hyperparameters`` passes a matrix mapped
@@ -260,7 +292,7 @@ class TrialScorer:
         groups_val: np.ndarray,
         items_val: np.ndarray,
         event_keys_val: Sequence[np.ndarray] = (),
-        weights_val: Optional[np.ndarray] = None,
+        zero_positive_group_weight_val: Optional[np.ndarray] = None,
         algorithm: str,
         algorithm_params: dict,
         search_space: dict,
@@ -281,7 +313,7 @@ class TrialScorer:
         self.groups_val = groups_val
         self.items_val = items_val
         self.event_keys_val = event_keys_val
-        self.weights_val = weights_val
+        self.zero_positive_group_weight_val = zero_positive_group_weight_val
         self.algorithm = algorithm
         self.algorithm_params = algorithm_params
         self.search_space = search_space
@@ -367,7 +399,7 @@ class TrialScorer:
             score = _hpo_score(
                 self.hpo_objective, self.groups_val, self.items_val,
                 self.y_val, y_pred, self.event_keys_val,
-                weights=self.weights_val,
+                weights=self.zero_positive_group_weight_val,
             )
 
         if score > self.best["score"]:

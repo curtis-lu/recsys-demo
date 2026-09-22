@@ -127,20 +127,22 @@ training:
 | 值 | 選模方式 |
 |---|---|
 | `pooled_average_precision` | val 的全部列倒在一起，依分數由高到低排，算一個 average precision |
-| `macro_per_item_average_precision` | 每個 item 用自己的列各算一個 average precision，再對 item 等權平均，讓曝光量大的 item 不會蓋過曝光量小的 |
+| `macro_per_item_average_precision` | 每個 item 用自己的列各算一個 average precision，再對 item 等權平均，讓曝光量大的 item 不會蓋過曝光量小的。它看不到同一組裡 item 之間誰排前面（見下方） |
 
 什麼時候用：拿展示紀錄訓練的部署（`CONTEXT.md` 的 **候選集合**），使用者主要看 precision–recall 面積；而且 query group 很小時（一組只有一兩列），組內排序指標算不出有鑑別力的數字。其他情況維持預設。
 
 選這兩個之前要知道的事：
 
 - **val 要留下沒有正例的 query group。** `dataset.val_zero_positive_group_ratio`（下稱 r）必須大於 0；是 0（預設）或沒寫時，每個指令一啟動就擋下（`A48`，跑 dataset 時就擋）。原因是 r ＝ 0 時，dataset pipeline 已經把 val 裡沒有正例的組全部丟掉，average precision 會算在「按 label 篩過」的母體上。改 r 會翻 `base_dataset_version`，dataset 要重跑。
-- **r 同時決定成本與雜訊。** 每個 trial 都要對整個 val 預測一遍。以組數算，val 會放大成原本的 (p + r × (1 − p)) ／ p 倍，p 是 val 裡有正例的組佔幾成（各組大小差不多時，列數也放大同樣倍數）。例如 p ＝ 10%、r ＝ 0.5 時是 5.5 倍。r 越小 val 越小，但留下的組權重 1／r 越大，分數越抖。val 矩陣大到放不進記憶體時不會報錯，只會每個 trial 都從磁碟重讀，變慢（§2 第 5 點）。搜尋開始前的 log 會印出 val 裡「有正例的組共幾列」與「留下的無正例組共幾列」，可以拿來對照這個倍數。算 average precision 本身不貴：2026-09-22 在本機量（macOS 8 核、scikit-learn 1.5.0、亂數資料、各量一次），2,000 萬列時 pooled 約 10 秒、macro 約 6 秒，遠小於一個 trial 的訓練時間。
+- **r 同時決定成本與雜訊。** 每個 trial 都要對整個 val 預測一遍。以組數算，val 會放大成原本的 (p + r × (1 − p)) ／ p 倍，p 是 val 裡有正例的組佔幾成（各組大小差不多時，列數也放大同樣倍數）。例如 p ＝ 10%、r ＝ 0.5 時是 5.5 倍。r 越小 val 越小，但留下的組權重 1／r 越大，分數越抖。val 矩陣大到放不進記憶體時不會報錯，只會每個 trial 都從磁碟重讀，變慢（§2 第 5 點）。搜尋開始前的 log 會印出 val 裡有正例的組、留下的無正例組各有幾組幾列，可以拿來對照這個倍數。算 average precision 本身不貴：2026-09-22 在本機量（macOS 8 核、scikit-learn 1.5.0、亂數資料、各量一次），2,000 萬列時 pooled 約 10 秒、macro 約 6 秒，遠小於一個 trial 的訓練時間。
 - **權重。** val 的 `zero_positive_group_weight` 欄當 scikit-learn 的 `sample_weight`：有正例的組是 1，留下來的無正例組是 1／r。這是設計權重，不是無偏估計；r 小、組數又少時，trial 之間的差距可能比估計本身的抖動還小。
 - **跟評估報表的 `pr_auc` 對不起來，這是刻意的。** 這裡是精確算法，值跟直接呼叫 `sklearn.metrics.average_precision_score(y, score, sample_weight=w)` 逐值相同。報表的 `pr_auc`（ADR-0024）算在全量 test 上，用 Spark 分箱近似：同一個分數箱裡的列視為同分、箱內先後丟掉，因為全量精確排序太貴。母體不同（val 對 test），算法也不同（精確對分箱），兩個數不可對帳。名字也刻意不同：不叫 `pr_auc`，也不單獨叫 `average_precision`（repo 裡的 AP 是組內排序的 `map@K`）。
 - **同分怎麼算。** 照 scikit-learn：同分的列合成一個門檻，不照 item 排先後。這跟上面兩個排序指標的規則不同，但一樣跟列讀進來的順序無關。
 - **`pooled_average_precision` 會獎勵「認出哪些 entity 本來就容易有正例」。** 全部列一起排時，把容易有正例的 entity 整組排到前面就能得分，這對組內排序沒有幫助。這類部署主要看的就是這個數，所以它是正式目標；選它的人要知道它在獎勵什麼。
+- **`macro_per_item_average_precision` 看不到同一組裡 item 之間誰排前面。** 每個 item 只拿自己的列互相比：把某個 item 的所有分數都加上同一個常數，它的值完全不變，但每一組裡的排序（框架真正的輸出）已經整個變了。它量的是「同一個 item 的列裡，哪些比較可能是正例」。`pooled_average_precision` 至少會因為全部列一起排而受到 item 之間先後的影響；組內排序本身，只有上面兩個排序指標直接在量。
 - **`macro_per_item_average_precision` 只平均 val 裡有正例的 item。** 沒有正例的 item 不進分母，跟 `macro_per_item_map` 一樣。它也跟 `macro_per_item_map` 在 HPO 裡一樣，不讀 `evaluation.metric` 的 `min_positives`／`weight_alpha`／`shrinkage_k`：只有一兩個正例的 item 跟大 item 等權，這種 item 的值很抖，HPO 會被它拉著走。搜尋開始前的 log 會印出「進入平均的 item 數／val 裡全部 item 數」，以及進入平均的 item 的正例數最小值與中位數。item 很多、多數只有一兩個正例時，改用 `pooled_average_precision`（或 `mean_ap`）比較穩。
 - **val 完全沒有正例時，第一個 trial 開始前就報錯。** 這時 average precision 沒有定義；拿任何常數代替，每個 trial 的分數都一樣，第一個 trial 會直接勝出，整個搜尋跑完也不會報錯。
+- **training 讀的 val 可能比設定檔舊。** A48 檢查的是設定檔，training 讀的卻是磁碟上的 dataset 版本（`latest`，或 `--base-dataset-version` 指定的版本）。所以 log 會同時印出設定檔的 r 與 val 裡實際的權重：權重照實際建表時的 1／r 算，分數是對的；兩個數對不上，就表示這版 dataset 不是照現在的設定建的。如果那版 val 是 r ＝ 0 建的，根本沒有 `zero_positive_group_weight` 欄，讀 val 之前就會報錯，請重跑 dataset 或改指定版本。
 
 `search_space` 的每個項目必須有唯一的 `name`，且 `type` 為 `int`、`float` 或 `categorical`。數值參數需提供 `low` 與 `high`，可選擇 `step` 或 `log`；類別參數需提供非空的 `choices`。
 目前不支援 `when` 條件式空間或字串 expression bounds，傳入時會在 CLI 入口 fail-fast。
@@ -156,7 +158,7 @@ training:
 
 | 值 | 行為 | 取捨 |
 |---|---|---|
-| `hpo_best` | 直接保存 val 排序指標最佳 trial 所持有的模型 | 成本最低，模型使用 train 訓練並以 train-dev early stopping |
+| `hpo_best` | 直接保存 val 上 `hpo_objective` 最佳 trial 所持有的模型 | 成本最低，模型使用 train 訓練並以 train-dev early stopping |
 | `refit_on_full` | 以最佳超參數將 train + train-dev 合併重訓，迭代數固定為 `best_iteration`，不再 early stop | 使用更多訓練資料，但最終模型不是 HPO 當下評分的同一個 booster |
 
 `refit_on_full` 只合併 train 與 train-dev，不會將 val 或 test 加入建模資料。ranking objective 下會保留 query group 邊界，避免合併後不同 query 被錯誤視為同一組。
@@ -437,7 +439,7 @@ python -m recsys_tfb training \
 | Local cache | `cache_train_model_input`、`cache_train_dev_model_input`、`cache_val_model_input`、`cache_test_model_input` | 各 split Hive table | 將指定 dataset partitions 複製為 driver-local Parquet | 各 split `ParquetHandle`；`cache_test_model_input` 例外，回傳 `{snap_date: ParquetHandle}` 對應（一月一目錄） |
 | 模型格式 | `prepare_lgb_train_inputs` | train/train-dev handles、preprocessor view | 由 adapter 建立可重用訓練格式；LightGBM 為 `.bin` | train/train-dev model handles |
 | 權重報告 | `persist_sample_weight_report` | train handle、preprocessor | 比對 weight 設定與實際 train 值（node 只回傳診斷，`sample_weight_report.json` 由 catalog 寫出） | `sample_weight_report` |
-| HPO | `tune_hyperparameters` | train/train-dev model handles、val handle | train 訓練、train-dev early stop、val 排序指標選模 | `best_params`、`best_iteration`、`hpo_best_model` |
+| HPO | `tune_hyperparameters` | train/train-dev model handles、val handle | train 訓練、train-dev early stop、val 上以 `hpo_objective` 選模 | `best_params`、`best_iteration`、`hpo_best_model` |
 | 最終模型 | `finalize_model` | HPO 產物、train/train-dev handles | 沿用 HPO best 或在 train + train-dev refit | `model` |
 | Test 預測 | `predict_and_write_test_predictions` | model、test handles | 逐月判斷是否需要預測，需要的月份再逐 `(time, item)` partition 預測並寫入 Hive | `training_eval_predictions`、`predict_manifest` |
 | Test 指標 | `compute_test_mAP_spark` | test 預測 | 使用 Spark 計算整體 mAP 與 per-item attribution | `evaluation_results` |

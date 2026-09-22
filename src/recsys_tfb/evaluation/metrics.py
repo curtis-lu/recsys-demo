@@ -1,15 +1,14 @@
-"""Ranking primitives on numpy arrays, plus the shared reader of ``evaluation.metric``.
+"""Metric primitives on numpy arrays, plus the shared reader of ``evaluation.metric``.
 
-This is a pure-numpy leaf module: its imports are ``logging`` / ``typing`` /
-``numpy``, plus ``utils.ranking`` for the within-query order. Do not add any
+This is a leaf module: its module-level imports are ``logging`` / ``typing``
+/ ``numpy``, plus ``utils.ranking`` for the within-query order. Do not add any
 other project import — ``diagnosis.metric.*``, ``evaluation.metrics_spark``,
 ``evaluation.report_builder`` and several ``scripts/`` import from here, so a
 project import risks a cycle. ``utils.ranking`` is the exception because it
 imports nothing from the project, so it cannot close one; it is where the tie
-rule lives, shared with the Spark ranking (#355). scikit-learn is the one
-third-party import besides numpy, and only inside the two functions that
-need it (the binary-prediction average precision below), so importers of
-this module do not pay its load time.
+rule lives, shared with the Spark ranking (#355). scikit-learn is imported
+only inside the two functions that need it (the binary-prediction average
+precision below), so importers of this module do not pay its load time.
 
 What lives here:
 
@@ -486,6 +485,12 @@ def compute_macro_per_item_average_precision(
     precision per item over that item's rows, then the plain mean, so an item
     shown a lot does not drown out one shown rarely. Tie rule and ``weights``
     as in :func:`compute_pooled_average_precision`.
+
+    **It cannot see how items are ordered against each other inside a query
+    group** — which is what the framework ranks. Each item's rows are compared
+    only with each other, so adding one constant to every score of an item
+    leaves the value unchanged while the within-group order moves. What it
+    measures is "among one item's rows, which are likelier positives".
 
     **An item with no positive row in val is left out of the mean**, never
     handed to scikit-learn — it would come back as ``-0.0`` with a warning and

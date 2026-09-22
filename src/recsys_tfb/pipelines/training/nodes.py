@@ -94,8 +94,8 @@ from recsys_tfb.pipelines.training.steps import (
 )
 from recsys_tfb.pipelines.training.steps.hpo_scoring import (
     TrialScorer,
-    items_entering_the_mean,
-    val_groups_by_kind,
+    item_support,
+    val_composition,
 )
 from recsys_tfb.pipelines.training.steps.local_cache import (
     cache_exists,
@@ -703,34 +703,42 @@ def tune_hyperparameters(
     event_keys_v = [item_sort_codes(k) for k in event_keys_v]
 
     # Decision — say what a binary-prediction objective will average over,
-    # before the search spends hours on it (#430). r and the kept group count
-    # are what a reader needs to judge how steady a score weighted by 1/r is
-    # (ADR-0025 decision 3); the row counts are the cost lever — every trial
-    # predicts every row, and the kept zero-positive groups are what r adds.
+    # before the search spends hours on it (#430). The kept group count and
+    # the weight they carry are what a reader needs to judge how steady a
+    # score weighted by 1/r is (ADR-0025 decision 3); the row counts are the
+    # cost lever — every trial predicts every row, and the kept groups are
+    # what r adds. The weight is read off the data, beside the config's r:
+    # training reads the dataset version on disk, which can predate the config.
     if binary_objective:
-        groups_with, rows_with, groups_without, rows_without = (
-            val_groups_by_kind(groups_v, y_v))
+        val = val_composition(groups_v, y_v, weights_v)
         logger.info(
-            "tune_hyperparameters: %s scores every val row; "
-            "dataset.val_zero_positive_group_ratio=%g; query groups holding a "
-            "positive=%d (rows=%d); kept query groups holding none=%d (rows=%d)",
-            hpo_objective,
+            "tune_hyperparameters: %s scores every val row; query groups "
+            "holding a positive=%d (rows=%d); kept query groups holding "
+            "none=%d (rows=%d); dataset.val_zero_positive_group_ratio=%g in "
+            "the config; zero_positive_group_weight on kept groups=%s in the "
+            "val read",
+            hpo_objective, val.groups_with_positive, val.rows_with_positive,
+            val.groups_without, val.rows_without,
             resolved_zero_positive_group_ratio(parameters, "val"),
-            groups_with, rows_with, groups_without, rows_without,
+            "/".join(f"{w:g}" for w in val.kept_group_weights) or "none",
         )
-        if rows_with == 0:
+        if val.rows_with_positive == 0:
             raise ValueError(
                 f"{hpo_objective}: val holds no positive row, so average "
                 f"precision is undefined and every trial would score alike. "
                 f"Check the val window (dataset.val_snap_dates) and the label "
                 f"source; no trial was run."
             )
+    # Decision — for the per-item mean, also say which items it covers: only
+    # items with a positive in val enter it, and each weighs the same however
+    # few positives it has (#430). Many items on one or two positives means
+    # the mean is noisy; the docs point such a deployment at the pooled one.
     if hpo_objective == "macro_per_item_average_precision":
-        entering, n_items, fewest, median = items_entering_the_mean(items_v, y_v)
+        support = item_support(items_v, y_v)
         logger.info(
-            "tune_hyperparameters: items entering the mean=%d/%d positives "
-            "per entering item: min=%d median=%g",
-            entering, n_items, fewest, median,
+            "tune_hyperparameters: items entering the mean=%d of %d; "
+            "positives per entering item: min=%d median=%g",
+            support.entering, support.all, support.fewest, support.median,
         )
 
     checkpointing = parameters.get("hpo_checkpointing", True)
@@ -793,7 +801,7 @@ def tune_hyperparameters(
             parameters, preprocessor_metadata),
         X_val=X_v, y_val=y_v, groups_val=groups_v, items_val=items_v,
         event_keys_val=event_keys_v,
-        weights_val=weights_v,
+        zero_positive_group_weight_val=weights_v,
         algorithm=algorithm,
         algorithm_params=algorithm_params,
         search_space=search_space,

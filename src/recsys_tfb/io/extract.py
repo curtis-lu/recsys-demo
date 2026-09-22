@@ -1120,8 +1120,11 @@ def extract_Xy_with_groups(
     pipeline wrote on val / test when it kept query groups holding no positive
     (1, or ``1 / r``; ADR-0025 decision 3). Only the HPO objectives that score
     every row as a binary prediction read it (#430). The column exists only
-    when the split's ratio is above 0, which A48 guarantees for those
-    objectives; asked for without it, the read fails naming the column.
+    when the split's ratio was above 0 when the dataset version was built. A48
+    requires that of the config, but the version read can predate the config,
+    so a parquet without the column raises ``ValueError`` before anything is
+    streamed: a **pre-check** on the data, and the person to find is whoever
+    picks the dataset version.
     """
     from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
 
@@ -1152,6 +1155,20 @@ def extract_Xy_with_groups(
     event_cols = schema.get("event", []) if with_event else []
     aux_cols += [c for c in event_cols if c not in aux_cols]
     if with_zero_positive_group_weight:
+        # Checked before the read, not left to it: _stream_matrix drops an
+        # absent aux column in silence, so a missing weight would surface only
+        # after the whole matrix was streamed — tens of GiB for HPO's val.
+        if ZERO_POSITIVE_GROUP_WEIGHT_COL not in open_parquet_dataset(handle.path).schema.names:
+            raise ValueError(
+                f"{handle.path} has no {ZERO_POSITIVE_GROUP_WEIGHT_COL} column: this "
+                f"dataset version was built with the split's "
+                f"*_zero_positive_group_ratio at 0, so it holds no query group "
+                f"without a positive. The config gate (A48) checks the config, "
+                f"but training reads the dataset version on disk (latest, or "
+                f"--base-dataset-version). Rerun the dataset pipeline with the "
+                f"ratio above 0, or point --base-dataset-version at a version "
+                f"built that way."
+            )
         aux_cols.append(ZERO_POSITIVE_GROUP_WEIGHT_COL)
 
     X, aux = _stream_matrix(
