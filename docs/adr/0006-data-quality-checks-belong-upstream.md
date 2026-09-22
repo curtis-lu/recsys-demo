@@ -219,5 +219,5 @@ grep 會被那句解釋「為什麼不用 `df.count()`」的 docstring 自己命
 - 不擋的話，這張表的整數欄與 decimal 欄會在 `build_model_input` 裡被轉成宣告的儲存型別而沒有人檢查，`numeric_precision_policy: block` 的承諾就開了一個洞。
 - 所以 `validate_numeric_precision` 對它做一次聚合：這次要讀的月份、每個要被轉型的欄的絕對值最大值，同一次掃描也回答「哪些月份有資料」。
 
-成本：每次執行多讀一次這張表這次要讀的月份。四個 split 本來就各讀一次自己的月份，所以大約多 25%。entity 層級的 `feature_table` 與 `preprocessed_feature_table` 不受影響，照舊零掃描；`validate_data_consistency` 也照舊零掃描（B13、B14 只看欄名）。
+成本：每次執行多讀一次這張表這次要讀的月份。四個 build 本來就各讀一次這些月份（每個都篩到本次要讀的全部月份），所以大約多 25%；若之後改成各 build 只讀自己 split 的月份，這個比例會變成 50% 以上（ADR-0026〈後果〉）。entity 層級的 `feature_table` 與 `preprocessed_feature_table` 不受影響，照舊零掃描；`validate_data_consistency` 也照舊零掃描（B13、B14 只看欄名）。
 

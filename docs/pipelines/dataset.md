@@ -335,7 +335,7 @@ candidate_feature_table:
 
 它只讀本次執行要讀的月份：一般執行是 `train_snap_dates`、`val_snap_dates` 與 test 還沒落地的月份（`--rebuild-dates` 指名的月份也算）；帶 `--only-test-months` 時只有 test 還沒落地的月份。開跑前 log 會印一行 `[months] dataset=candidate_feature_table read=… not-read=…`。identity 含 `time`，所以這個篩選只影響成本，不影響結果。找不到的列、整個月沒資料各會怎樣，見 §5〈三個 left join 各自的契約〉。
 
-**宣告之後，離線推論在 CLI 入口被擋下**（不變量 A47）。推論的候選是框架自己產生的 entity × 全部 item，沒有一筆被展示過，這張表一列都接不到；原因與範圍見 [`inference.md` §3.6](inference.md#36-宣告了候選層級特徵表的部署不能跑離線推論)。training 與 `evaluation --post-training` 不受影響。版本號怎麼跟著變見 §7.3；有哪些事沒有檢查守著見 §9。
+**宣告之後，離線推論在 CLI 入口被擋下**（不變量 A47）。推論 pipeline 只讀 `feature_table`，而模型需要這張表的欄，放行的話它會在啟動 Spark 之後才以 `Missing feature columns` 失敗；原因與範圍見 [`inference.md` §3.6](inference.md#36-宣告了候選層級特徵表的部署不能跑離線推論)。training 與 `evaluation --post-training` 不受影響。版本號怎麼跟著變見 §7.3；有哪些事沒有檢查守著見 §9。
 
 ## 4. 使用方式
 
@@ -717,7 +717,7 @@ B6 擋下來時，錯誤訊息會**逐欄點名**（`feature column 'cust_segmen
 - 宣告了候選層級特徵表時，以下幾件事沒有檢查守著，或要付額外成本（[ADR-0026](../adr/0026-feature-tables-by-join-key.md)〈後果〉）：
   - **重複的 identity 列只有 train／train_dev 抓得到。** 那是 B10 的既有範圍；只在 val／test 月份才有的重複列會讓那些 split 的列數悄悄變多。真正擋它的是這張表 source ETL 的 `primary_key` 與 `max_duplicate_key_ratio: 0.0`（[`source_etl.md` §3.6](source_etl.md#36-輸出-quality-checks)），而不變量 A32 不守這項設定：A32 只讀 parameters，拿 `sample_pool`、`label_table`、`feature_table` 這三個固定名字去 ETL 設定裡找表。`candidate_feature_table` 是 catalog 的邏輯名，它在 ETL 設定裡的實體表叫什麼由部署決定，A32 看不到 catalog，也就找不到它。所以這個鍵被刪掉時沒有任何東西會報錯。
   - **類別欄出現 train 沒見過的值時，不會有 warning。** 值照樣編成 `-1`。`feature_table` 的未知值在 `apply_preprocessor_to_features` 數一次；候選層級特徵表在每個 split 組 model input 時才編碼，要數就得每個 split 多一次 Spark 動作。
-  - **B8 每次執行多掃一次這張表本次要讀的月份。** 它不落地，沒有框架自己寫的 parquet footer 可讀，框架也不規定部署的表用什麼格式，所以只能掃。一般執行時四個 split 的組裝本來就各讀一次這些月份，所以讀這張表的量大約多 25%。`numeric_precision_policy: truncate` 只讓超標的值通過，不省這次掃描。
+  - **B8 每次執行多掃一次這張表本次要讀的月份。** 它不落地，沒有框架自己寫的 parquet footer 可讀，框架也不規定部署的表用什麼格式，所以只能掃。四個 split 的組裝各讀一次這些月份（每個 build 都篩到本次要讀的全部月份，不只自己 split 的），所以 B8 讓讀這張表的量多約 25%；fit 另外讀 train 月份兩次（月份檢查與詞表）。`numeric_precision_policy: truncate` 只讓超標的值通過，不省這次掃描。
 - 多月份資料仍由 Spark lazy execution、shuffle spill 與 Hive partitions 處理；尖峰資源通常取決於單一 shuffle partition 與資料偏斜，而不是月份數本身。
 
 ## 10. 相關文件

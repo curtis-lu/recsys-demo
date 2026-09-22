@@ -4,11 +4,12 @@
 #   → inference（預期在入口被 A47 擋下）→ evaluation --post-training → digest
 #
 # 這份 conf 宣告了候選層級特徵表（catalog 的 candidate_feature_table ＝ feature_realtime，
-# ADR-0026），所以離線推論不會跑：它的候選是框架自己產生的 entity × item，沒有一筆被展示過，
-# 那張表一列都接不到。這裡確認它真的在入口停下、而且訊息說得出原因。
+# ADR-0026），所以離線推論不會跑：推論只讀 feature_table，模型卻需要那張表的欄，CLI 在入口
+# 以 A47 擋下（不擋的話會在 Spark 起來之後才以 Missing feature columns 失敗）。這裡確認它真的
+# 在入口停下、而且訊息說得出原因。
 #
 # 對應銀行示例的 scripts/local_e2e.sh，多了 source_etl 與 evaluation 兩段：銀行示例直接
-# 寫出來源表、跳過 source_etl，而這個示例要讓後面幾張票的新路徑（event、多張特徵表、
+# 寫出來源表、跳過 source_etl，而這個示例要讓後面幾張票的新路徑（event、候選層級特徵表、
 # item 清單從資料數、預測品質指標）從上游 SQL 一路被走到。
 #
 # 用法（任何目錄皆可）：

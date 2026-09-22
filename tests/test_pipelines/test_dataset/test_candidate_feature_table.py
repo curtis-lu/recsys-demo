@@ -144,9 +144,11 @@ class TestBuildModelInputJoinsTheCandidateTable:
     def test_each_candidate_gets_its_own_row_and_a_miss_is_null(self, spark):
         """Joined on identity: one candidate, one row of the table.
 
-        On the base key every candidate would match all three rows of the
-        month; on the query group each would match both items of its request.
-        Either way the row count grows and the values mix.
+        A key missing a role — the hand-spelled ``[time, *entity, item]`` that
+        forgets ``occasion`` — matches the same item's row in the other request
+        too: the row count grows and the values mix, which is what the two
+        assertions below see (4 rows become 6). A key missing ``item`` fails
+        louder still, as an ambiguous ``prod_name`` inside the build.
         """
         result = self._build(spark)
 

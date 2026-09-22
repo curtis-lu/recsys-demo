@@ -153,11 +153,14 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         ),
         # --- Fit preprocessor on train date-range feature_table, decoupled from sampling ---
         #
-        # `candidate_feature_table` / `candidate_feature_table_months` go last
-        # on every node that takes them: they are optional trailing parameters
-        # and the Runner binds by position (ADR-0026). The CLI registers `None`
-        # for the table when a deployment declares none, so the list is the
-        # same for every deployment — a literal list, as the AST audit needs.
+        # `candidate_feature_table` / `candidate_feature_table_months` (the
+        # optional candidate-level feature table, ADR-0026) go last on every
+        # node that takes them: they are optional trailing parameters and the
+        # Runner binds by position — this repo's convention for a new optional
+        # input (see the note on `log_experiment` in training/pipeline.py). The
+        # CLI registers `None` for the table when a deployment declares none, so
+        # the list is the same for every deployment — a literal list, as the AST
+        # audit needs.
         Node(
             fit_preprocessor_metadata,
             inputs=["feature_table", "parameters", "candidate_feature_table"],

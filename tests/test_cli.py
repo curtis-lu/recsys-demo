@@ -3907,11 +3907,11 @@ class TestDatasetRegistersTheCandidateTable:
 
 
 class TestInferenceRefusesTheCandidateTableA47:
-    """Offline inference scores the framework's own entity x item grid: no
-    candidate there was ever shown, so a candidate-level feature table has no
-    row to give any of them. Scoring anyway would feed the model all-NULL for
-    those features — a run that finishes with wrong scores. Refused at the
-    entry, before Spark (ADR-0022 decision 4, ADR-0026)."""
+    """The inference pipeline reads feature_table alone, while a model trained
+    with a candidate-level feature table needs its columns: let through, the
+    run would start Spark and only then fail on "Missing feature columns".
+    Refused at the entry instead, before Spark, with the reason (ADR-0022
+    decision 4, ADR-0026)."""
 
     def _conf(self, tmp_path, candidate):
         TestInferenceGridA27()._conf_with(

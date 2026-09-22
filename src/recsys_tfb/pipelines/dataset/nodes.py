@@ -66,7 +66,7 @@ from recsys_tfb.pipelines.dataset.steps.categoricals import (
     require_supported_categorical_dtypes,
 )
 from recsys_tfb.pipelines.dataset.steps.feature_columns import (
-    candidate_frame_columns,
+    candidate_feature_source_columns,
     compute_feature_columns,
     encoded_frame_columns,
     prepare_model_input_config,
@@ -178,12 +178,12 @@ def validate_data_consistency(
     # The candidate table's identity columns are its join key and never a
     # feature (the fit reads them the same way), so they are left out of every
     # question below that is about features.
-    cand_dtypes = (
-        {} if candidate_feature_table is None else {
-            c: t for c, t in candidate_feature_table.dtypes
-            if c not in identity_cols
-        }
-    )
+    cand_dtypes = {} if candidate_feature_table is None else {
+        c: t for c, t in candidate_feature_table.dtypes
+        if c in candidate_feature_source_columns(
+            candidate_feature_table.columns, identity_cols,
+        )
+    }
     source_dtypes = {**ft_dtypes, **cand_dtypes}
     feature_cols = compute_feature_columns(
         list(feature_table.columns) + list(cand_dtypes),
@@ -598,9 +598,9 @@ def fit_preprocessor_metadata(
                 candidate_feature_table, time_col, train_months,
                 "train_snap_dates", table="candidate_feature_table",
             )
-        candidate_cols = [
-            c for c in candidate_feature_table.columns if c not in identity_cols
-        ]
+        candidate_cols = candidate_feature_source_columns(
+            candidate_feature_table.columns, identity_cols,
+        )
     source_cols = list(feature_table.columns) + candidate_cols
 
     # A drop_columns name is unused only when neither feature table has it —
@@ -651,9 +651,16 @@ def fit_preprocessor_metadata(
             **collect_vocabularies_from_data(train_features, entity_from_data),
             **read_declared_vocabularies(cat_values, from_schema),
         }
+        # The normalised restriction here, unlike feature_table's above: the
+        # candidate table is read the same way by every node that reads it
+        # (the build and the precision scan filter it with the same form), so a
+        # time column stored as a string cannot fit an empty vocabulary here
+        # while the build reads that very month.
         if candidate_from_data:
             category_mappings.update(collect_vocabularies_from_data(
-                restrict_to_months(candidate_feature_table, time_col, train_months),
+                candidate_feature_table.filter(
+                    months_filter_as_date(time_col, train_months)
+                ),
                 candidate_from_data,
             ))
 
@@ -796,15 +803,26 @@ def validate_numeric_precision(
     statistics: this repo writes that table, while ``feature_table`` is the
     user's own and this framework does not dictate its format.
 
-    **Cost invariant (ADR-0006).** Facts come from parquet footers — a seek per
-    file, no rows read — so this node does not change the pipeline's cost
-    magnitude. An aggregation would have, which is why the shape of this gate is
-    a footer read and not a ``max(abs(...))``.
+    **Cost invariant (ADR-0006).** For ``preprocessed_feature_table`` the facts
+    come from parquet footers — a seek per file, no rows read — so that half of
+    the node does not change the pipeline's cost magnitude. An aggregation
+    would have, which is why that half is a footer read and not a
+    ``max(abs(...))``. The candidate-level table is the recorded exception
+    (ADR-0006's 2026-09-22 revision): it has no footers of this run's own, so
+    its half *is* one aggregation over the months this run reads.
 
-    **Incremental with the node above it** (ADR-0002/ADR-0012): it reads the
-    months the same ``month_plan`` just encoded. A month that landed under an
-    earlier run is not re-read — the same coverage every other incremental
-    artifact has, and the reason adding an evaluation month checks that month.
+    **Incremental with the node above it** (ADR-0002/ADR-0012), for
+    ``preprocessed_feature_table``: it reads the months the same ``month_plan``
+    just encoded. A month that landed under an earlier run is not re-read — the
+    same coverage every other incremental artifact has, and the reason adding an
+    evaluation month checks that month. The candidate-level table is not
+    incremental: every build reads its months afresh, so every run checks every
+    month it reads (``candidate_feature_table_months``).
+
+    Pre-check (input), candidate-level table only: every month this run reads
+    is present in it. A missing month raises ``ValueError`` **whatever the
+    policy** — it is not a precision question, and ``truncate`` exists to accept
+    a narrowed value, not a month of NULL features.
 
     Known limit: under ``block`` the run aborts, so the report never reaches the
     catalog. The full table is logged before the raise for exactly that reason —
@@ -902,8 +920,10 @@ def validate_numeric_precision(
             for c in castable_numeric_feature_columns(
                 candidate_feature_table.schema,
                 [
-                    c for c in feature_columns
-                    if c not in identity_cols and c not in categorical_cols
+                    c for c in candidate_feature_source_columns(
+                        candidate_feature_table.columns, identity_cols,
+                    )
+                    if c in feature_columns and c not in categorical_cols
                 ],
             )
             if spark_dtype_value_step(cand_dtypes[c]) is not None
@@ -1018,8 +1038,8 @@ def build_model_input(
     ``preprocessed_feature_table``) and, when a deployment declares one, the
     candidate-level feature table (ADR-0026) — ``None`` means none is declared,
     which is what the CLI registers in that case. The two trailing inputs go
-    last because the Runner binds by position and every existing caller passes
-    five.
+    last, as optional parameters, because the Runner binds by position; the
+    pipeline passes all seven, a direct caller without the table passes five.
 
     Pre-check (input, ADR-0008 §3): ``keys`` must be at item grain.
     Post-condition: identity, label and every feature column survive the joins.
@@ -1027,7 +1047,7 @@ def build_model_input(
     schema = get_schema(parameters)
     label_col = schema["label"]
     identity_cols = schema["identity_columns"]
-    # Two names, because the two joins below want two different things and one
+    # Separate names, because the joins below want different things and one
     # `base_key` used to serve both (ADR-0025 decision 2). They hold the same
     # columns today and part company the moment an `occasion` is declared:
     # `label_table` is at candidate grain and follows identity, while
@@ -1080,9 +1100,8 @@ def build_model_input(
     if candidate_feature_table is not None:
         candidate = candidate_feature_table.filter(months_filter_as_date(
             schema["time"], candidate_feature_table_months,
-        )).select(*candidate_frame_columns(
+        )).select(*encoded_frame_columns(
             candidate_join_key, feature_columns, candidate_feature_table.columns,
-            identity_cols,
         ))
         encode_cols = encodable_categoricals(
             preprocessor_metadata["categorical_columns"], candidate.columns,
@@ -1096,7 +1115,7 @@ def build_model_input(
 
     # Decision — what a model_input row is made of: identity, the label, every
     # feature, and the columns the keys carried in for downstream weighting.
-    # Everything else the two joins brought along is dropped here.
+    # Everything else the joins brought along is dropped here.
     required = list(set(identity_cols + [label_col] + feature_columns))
     require_columns_present(dataset.columns, required, "build_model_input")
     result = dataset.select(*model_input_columns(

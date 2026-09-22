@@ -524,15 +524,18 @@ Layer 1 — config-static (implemented here; aggregated by
   family. NOT aggregated, for A22's reason: that gate cannot see
   ``--post-training``.
 * A47 — offline inference with a candidate-level feature table declared
-  (catalog entry ``candidate_feature_table``, ADR-0026). Inference scores the
-  framework's own entity x item grid, where no candidate was ever shown, so
-  that table has no row for any of them: every candidate-level feature would be
-  NULL, and the run would finish with scores the model was never trained to
-  give. Wrong rather than missing, so it stops at the entry (ADR-0022 decision
-  4). Predicate: ``candidate_feature_table_inference_errors`` (takes whether the
-  catalog declares the entry, as A40 takes its flag; the inference command
-  raises). NOT aggregated: it needs the catalog, and the harm belongs to
-  inference alone.
+  (catalog entry ``candidate_feature_table``, ADR-0026). The inference pipeline
+  reads ``feature_table`` alone, while a model trained under this
+  configuration has the candidate-level columns among its features. Let
+  through, the run starts Spark, reads the population and only then stops on
+  ``Missing feature columns`` (``build_inference_population_features``),
+  naming neither the table nor the way out. So it stops at the entry
+  (ADR-0022 decision 4): the gate buys an early, explained stop, not
+  protection from a silent wrong answer. Predicate:
+  ``candidate_feature_table_inference_errors`` (takes whether the catalog
+  declares the entry, as A40 takes its flag; the inference command raises).
+  NOT aggregated: it needs the catalog, and the harm belongs to inference
+  alone.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
@@ -4377,25 +4380,30 @@ def candidate_feature_table_inference_errors(declared: bool) -> list[str]:
     Takes the fact rather than reading the catalog, so the predicate stays pure
     the way A40's does.
 
-    Inference builds its candidates itself — each entity times every item — so
-    none of them was shown to anyone, and a table with one row per shown
-    candidate has nothing to join onto any of them. Left to run, every
-    candidate-level feature would be NULL: a model trained on those features
-    would score without them and the run would still finish. ADR-0022 decision 4
-    stops it at the entry; the online scoring for such a deployment lives
-    outside this framework (``docs/notes/2026-09-16-event-support-plan.md``).
+    The inference pipeline reads ``feature_table`` alone — it has no input for
+    the candidate-level table — while a model trained under this configuration
+    has that table's columns among its features. Left to run, it would not
+    score wrongly: it would start Spark, read the population, and stop on
+    ``Missing feature columns`` in ``build_inference_population_features``,
+    naming neither the table nor the way out. This stops it first, and says
+    why.
+
+    Making inference read the table is not attempted (#380's out of scope). On
+    impression data it could not help — the inference grid (each entity times
+    every item) holds no candidate that was ever shown — but on a full-grid
+    deployment whose candidate-level table is keyed ``(time, entity, item)`` it
+    could, and refusing first keeps that option open (ADR-0022 decision 4).
     """
     if not declared:
         return []
     return [
         "(A47) offline inference cannot run while candidate_feature_table is "
-        "declared in the catalog. Inference scores its own entity x item grid, "
-        "where no candidate was ever shown, so that table has no row for any of "
-        "them: every candidate-level feature would be NULL and the scores would "
-        "be ones the model was never trained to give. Score this deployment with "
-        "the system that computes those features online; training and "
-        "evaluation --post-training are unaffected (ADR-0022 decision 4, "
-        "ADR-0026)."
+        "declared in the catalog. The inference pipeline reads feature_table "
+        "only, and a model trained under this configuration needs the "
+        "candidate-level columns too: the run would start Spark and then fail "
+        "on 'Missing feature columns'. Score this deployment with the system "
+        "that computes those features online; training and evaluation "
+        "--post-training are unaffected (ADR-0022 decision 4, ADR-0026)."
     ]
 
 

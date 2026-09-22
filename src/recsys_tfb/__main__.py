@@ -1680,8 +1680,8 @@ def inference(
 
     # (A47) no candidate-level feature table. Wired here for A27's reason, and
     # before Spark for the same one: the catalog entry alone decides it, and a
-    # run allowed through would finish with scores computed on all-NULL
-    # features rather than fail (ADR-0022 decision 4). The version-free catalog
+    # run allowed through would only fail later, after Spark started, on
+    # "Missing feature columns" (ADR-0022 decision 4). The version-free catalog
     # is enough — source entries carry no ${...} placeholder.
     candidate_errors = candidate_feature_table_inference_errors(
         CANDIDATE_FEATURE_TABLE in config.get_catalog_config(runtime_params=params)

@@ -108,8 +108,8 @@ def require_months_in(present, months: list, what: str, table: str) -> None:
     scan already returned the months it saw (the candidate table's B8 scan).
     One definition of the message either way.
     """
-    present = {pd.Timestamp(d).normalize() for d in present if d is not None}
-    missing = sorted({pd.Timestamp(d).normalize() for d in months} - present)
+    present = {pd.Timestamp(d) for d in present if d is not None}
+    missing = sorted({pd.Timestamp(d) for d in months} - present)
     if missing:
         raise ValueError(
             f"{table} missing required {what}: "

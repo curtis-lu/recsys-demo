@@ -103,7 +103,7 @@ python -m recsys_tfb <指令> --env <env>
   - `dataset.test_zero_positive_group_ratio` 大於 0 時，同一個條目的 `columns:` 還必須包含 `zero_positive_group_weight`（`A45`）。少了它，權重在寫入時被默默丟掉，evaluation 會把每個留下的無正例組只算一次、而不是 1／r 次。
 - **inference**
   - `inference.snap_dates`、`inference.products` 不能是空清單；`inference.entity_buckets`（把 entity 分成幾桶、一桶一桶評分）有寫就要大於等於 1，不能寫 `null`（`A27`）。
-  - `catalog.yaml` 不能宣告候選層級特徵表（`A47`）。推論的候選是框架自己產生的每個 entity 配上全部 item，沒有一筆被展示過，這張表一列都接不到；不擋的話，所有候選層級特徵都是 NULL，跑得完但分數是錯的。只宣告 `occasion`、`event` 而沒有候選層級特徵表時照跑。inference 的每一種跑法都查，包含 `--dry-run`、`--list-nodes`。
+  - `catalog.yaml` 不能宣告候選層級特徵表（`A47`）。推論只讀 `feature_table`，而這種設定下訓練的模型需要候選層級表的欄；不擋的話，推論會在啟動 Spark、讀完母體之後才以 `Missing feature columns` 失敗，訊息也不說原因。只宣告 `occasion`、`event` 而沒有候選層級特徵表時照跑。inference 的每一種跑法都查，包含 `--dry-run`、`--list-nodes`。
 - **evaluation**
   - 帶 `--post-training` 時，`evaluation.snap_date` 一定要寫，而且必須在 `dataset.test_snap_dates` 裡（`A22`）。
   - `evaluation.report.sections` 有寫任何開關的話，開關名稱必須剛好是 `dataset_overview`、`primary_map`、`diagnostics`、`baseline`、`diagnosis_links`、`prediction_quality` 這六個，多一個或少一個都擋（`A34`）。

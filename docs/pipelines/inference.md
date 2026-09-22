@@ -184,7 +184,11 @@ inference_population_etl:
 
 catalog（`conf/base` 疊上 `--env` 那一層之後）有 `candidate_feature_table` 條目，也就是宣告了候選層級特徵表（見 [dataset §3.8](dataset.md#38-候選層級特徵表選用)）時，`inference` 指令在 CLI 入口就停下（一致性不變量 A47），還沒啟動 Spark。每一種跑法都查，包含 `--dry-run`、`--list-nodes`。
 
-原因在候選從哪裡來。候選層級特徵表一列是一筆被展示過的候選的特徵，以 identity 接到候選列上。離線推論的候選是框架自己產生的全網格（§3.2）：每個 entity 配上全部 item，沒有一筆被展示過，所以這張表一列都接不到。放行的話，模型訓練時用過的每一個候選層級特徵在推論時都是 NULL，pipeline 照樣跑得完，分數卻是錯的。錯而不是缺，所以擋在入口，而不是讓它發布出去（[ADR-0022](../adr/0022-multiple-feature-tables-as-of-in-user-sql.md) 決定 4、[ADR-0026](../adr/0026-feature-tables-by-join-key.md) 決定 5）。
+原因是推論 pipeline 只讀 `feature_table`，沒有讀候選層級特徵表的那一步；而在這種設定下訓練出來的模型，特徵清單裡有候選層級表的欄。放行的話不會悄悄算錯分數：它會啟動 Spark、讀完評分母體，然後在 `build_inference_population_features` 的後置檢查報 `Missing feature columns` 停下——訊息沒說是哪張表、也沒說出路。A47 讓它在花掉這些時間之前、帶著原因停下（[ADR-0022](../adr/0022-multiple-feature-tables-as-of-in-user-sql.md) 決定 4、[ADR-0026](../adr/0026-feature-tables-by-join-key.md) 決定 5）。
+
+為什麼不讓推論也讀這張表：在曝光資料的部署裡，推論的候選是框架自己產生的全網格（§3.2）——每個 entity 配上全部 item，沒有一筆被展示過，這張表本來就一列都接不到。全網格部署的候選層級表（例如以 `time`、`entity`、`item` 為鍵、每個候選都有一列的表）原則上接得到，但推論端要支援它是另一件事；先擋下，之後要支援也不會打破任何既有設定。
+
+⚠ 這道閘看的是 catalog 有沒有這個條目，不是要評分的那個模型用什麼訓練：加上條目之前訓練的舊模型，推論也會被擋。
 
 這種部署的評分由線上算得出這些特徵的系統負責，不在這個框架裡。training 與 `evaluation --post-training` 不受影響：它們用的是 dataset 從 `sample_pool` 組出來的候選，候選層級特徵接得到。
 
