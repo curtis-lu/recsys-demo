@@ -35,6 +35,9 @@ SPEC_COMPUTED_PATHS = {
     "evaluation.item_categories",
     "evaluation.baseline",
     "evaluation.metric",
+    # #376: the all-positive query group filter, applied in compute_metrics
+    # (fine + category grain) and compute_baseline_metrics.
+    "evaluation.query_filter",
     "evaluation.diagnosis",
     "evaluation.report.diagnostics",
     "evaluation.report.sections.baseline",
@@ -55,6 +58,7 @@ SPEC_COMPUTED_LEAVES = [
     "evaluation.item_categories.enabled",
     "evaluation.baseline.lookback_months",
     "evaluation.metric.min_positives",
+    "evaluation.query_filter.drop_all_positive_groups",
     "evaluation.diagnosis.sample.seed",
     "evaluation.diagnosis.suppression.enabled",
     "evaluation.report.diagnostics.include_distributions",
@@ -104,6 +108,7 @@ def _params() -> dict:
                                    "top_n": 30},
             "metric": {"weight_alpha": 0.0, "k": None,
                        "min_positives": 0, "shrinkage_k": 0.0},
+            "query_filter": {"drop_all_positive_groups": False},
             "diagnosis": {"ci": {"enabled": True},
                           "sample": {"seed": 42},
                           "suppression": {"enabled": True}},

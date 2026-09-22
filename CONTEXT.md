@@ -188,6 +188,9 @@ _Avoid_: `pr_auc`、aucpr；也不要單獨叫 average precision 或 AP（那是
 **無正例的 query group**:
 裡面沒有任何一筆候選的 label 是正例的 query group。排序指標算不了它；把候選當二元預測的指標需要它。每個 split 留多少由 `dataset.*_zero_positive_group_ratio` 決定，整組去留；val／test 留下的組的列帶權重 1／r（ADR-0025）。
 
+**全正的 query group**（#376）:
+裡面每一筆候選的 label 都是正例的 query group。不管怎麼排，它的每個排序指標都一樣，排法分不出好壞。evaluation 預設照樣算進衡量指標，只印出它的佔比；`evaluation.query_filter.drop_all_positive_groups` 打開時才排除。
+
 **`roc_auc`**（ADR-0024）:
 ROC 曲線下的面積，母體是全部候選列；同一個分數箱裡的列視為同分，同分算一半。
 _Avoid_: 跟 `raw_within_item_auc`／`query_centered_auc` 混用（那兩個的母體是「只含有正例的 query」的診斷抽樣，不可與本項相比）

@@ -546,10 +546,21 @@ Layer 1 — config-static (implemented here; aggregated by
   to A44. Predicate: ``hpo_objective_population_errors``. Aggregated by
   ``validate_config_consistency``, unlike A46: the ratio takes effect in the
   dataset pipeline, so the dataset command has to stop too.
+* A49 — ``evaluation.query_filter.drop_all_positive_groups`` (#376, the
+  all-positive query group filter) must be a ``bool`` when present; the block
+  itself, when present, must be a mapping with no other key. The sole reader,
+  ``evaluation/metrics.py::drop_all_positive_groups``, takes the value with
+  plain truthiness and never raises, so a typo'd value or key would silently
+  do nothing instead of failing loudly. Not under ``evaluation.metric``, A42's
+  reason: a different reader (``metric_params``) drops unknown keys there
+  without complaint. Predicate: ``query_filter_param_errors`` (returns
+  errors; the evaluation command raises, collected with
+  A22/A34/A40/A42/A43/A46). NOT aggregated, A42's reason (issue #158): only
+  evaluation reads this key.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
-flags), A22/A46 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43 (config keys whose
+flags), A22/A46 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49 (config keys whose
 harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags).
 
@@ -2084,6 +2095,59 @@ def hpo_objective_population_errors(parameters: dict) -> list[str]:
         f"Set dataset.{key} above 0 (it busts base_dataset_version and "
         f"rebuilds val), or choose mean_ap / macro_per_item_map."
     ]
+
+
+#: ``evaluation.query_filter``'s keys and their off-state (#376). The only key
+#: today is the switch A49 checks; #396's random-traffic switch is expected to
+#: join this subtree later, at which point it gets its own entry here.
+QUERY_FILTER_DEFAULTS: dict[str, bool] = {"drop_all_positive_groups": False}
+
+
+def query_filter_param_errors(parameters: dict) -> list[str]:
+    """A49 — ``evaluation.query_filter`` parameter domain (#376).
+
+    * ``drop_all_positive_groups`` is a ``bool``. It is the only reader's
+      (``evaluation/metrics.py::drop_all_positive_groups``) sole input; a
+      non-bool there (``"yes"``, ``1``) would be read with plain truthiness
+      (``bool(qf.get(...) or False)``) instead of raising, so a typo'd value
+      would silently turn the switch on or stay off with nobody told.
+    * No other key, A42's shape: a subtree that silently ignores anything it
+      does not name is worse than one that has no keys yet, because a typo
+      inside it (e.g. ``drop_all_positiv_groups``) looks like it worked.
+    * Absent block, or an explicit ``null`` (the YAML a fully-commented-out
+      ``query_filter:`` parent line reads as), both mean off — the same
+      reading ``drop_all_positive_groups()`` gives them.
+
+    Not aggregated by ``validate_config_consistency``: only evaluation reads
+    this key (A34's reason, issue #158). The evaluation command raises it,
+    collected with A22/A34/A40/A42/A43/A46.
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    if not isinstance(eval_params, Mapping):
+        return []
+    block = eval_params.get("query_filter")
+    if block is None:
+        return []
+    if not isinstance(block, Mapping):
+        return [
+            f"A49: evaluation.query_filter={block!r} must be a mapping with "
+            f"the keys {sorted(QUERY_FILTER_DEFAULTS)} (or left absent/null)."
+        ]
+    errors = []
+    unknown = sorted(set(block) - set(QUERY_FILTER_DEFAULTS), key=str)
+    if unknown:
+        errors.append(
+            f"A49: evaluation.query_filter declares {unknown}, which nothing "
+            f"reads; its keys are {sorted(QUERY_FILTER_DEFAULTS)}."
+        )
+    if "drop_all_positive_groups" in block:
+        value = block["drop_all_positive_groups"]
+        if not isinstance(value, bool):
+            errors.append(
+                f"A49: evaluation.query_filter.drop_all_positive_groups="
+                f"{value!r} must be a bool."
+            )
+    return errors
 
 
 #: The source tables the dataset pipeline reads — the three inputs of
