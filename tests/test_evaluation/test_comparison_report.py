@@ -382,6 +382,40 @@ def test_coverage_text_names_the_query_unit():
     assert "「一個時間 × 一個 entity × 一個場合（occasion）」的相異組合數" in widened
 
 
+#: The coverage sentence every report carried before #376; with the switch off
+#: it stays, word for word.
+_DENOMINATOR = "本報表所有 per-query 指標都以它為分母，所以母體大小與指標同一個尺度。"
+
+
+@pytest.mark.parametrize("switch", [None, False])
+def test_coverage_text_is_unchanged_with_the_all_positive_switch_off(switch):
+    m_a, m_b = _metrics(), _metrics()
+    p = _params()
+    if switch is not None:
+        p["evaluation"]["query_filter"] = {"drop_all_positive_groups": switch}
+    out = assemble_comparison_report(
+        m_a, m_b, _comparison(m_a, m_b), _coverage(), p)
+    assert _DENOMINATOR in out
+    assert "全正" not in out
+
+
+def test_coverage_text_discloses_the_all_positive_exclusion_when_on():
+    """#376: on, both sides dropped the all-positive query groups, each
+    deciding on its own rows, so a group whose candidate rows differ between
+    the sides can be dropped on one and kept on the other. "Every per-query
+    metric divides by n_query_group" is then false and must go."""
+    m_a, m_b = _metrics(), _metrics()
+    p = _params()
+    p["evaluation"]["query_filter"] = {"drop_all_positive_groups": True}
+    out = assemble_comparison_report(
+        m_a, m_b, _comparison(m_a, m_b), _coverage(), p)
+    assert "兩側都排除了全正的 query group" in out
+    assert "各自依自己的列判定" in out
+    assert "候選列不對稱" in out and "一側排除、一側保留" in out
+    assert "evaluation.query_filter.drop_all_positive_groups" in out
+    assert _DENOMINATOR not in out
+
+
 # ---------------------------------------------------------------------------
 # Each side's "all" is looked up at the K its own bundle recorded (#434)
 # ---------------------------------------------------------------------------

@@ -8,7 +8,10 @@ import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.compare import build_comparison_result
-from recsys_tfb.evaluation.metrics import resolved_all_k
+from recsys_tfb.evaluation.metrics import (
+    drop_all_positive_groups,
+    resolved_all_k,
+)
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
 from recsys_tfb.evaluation.report_builder import (
     build_glossary_section,
@@ -63,6 +66,19 @@ def _build_coverage_section(
         " × 一個場合（occasion）"
         if get_schema(parameters).get("occasion") else ""
     )
+    # #376: with the switch on, both sides dropped their all-positive groups,
+    # each deciding on its own rows (generate_comparison_report), so "every
+    # per-query metric divides by n_query_group" is false, and a group whose
+    # candidate rows differ between the sides can be dropped on one side only.
+    # Off, the sentence every report carried before stays word for word.
+    denominator = (
+        "本報表所有 per-query 指標的分母都是它的一部分："
+        "evaluation.query_filter.drop_all_positive_groups 開著，兩側都排除了"
+        "全正的 query group，而且各自依自己的列判定；同一組在兩側的候選列"
+        "不對稱時，可能一側排除、一側保留。"
+        if drop_all_positive_groups(parameters) else
+        "本報表所有 per-query 指標都以它為分母，所以母體大小與指標同一個尺度。"
+    )
     meta = pd.DataFrame(
         {
             label_a: [
@@ -113,7 +129,7 @@ def _build_coverage_section(
         description=(
             "兩個模型的來源、coverage、被剔除的 item。"
             f"n_query_group ＝「{query_unit}」的相異組合數，也就是排名的單位；"
-            "本報表所有 per-query 指標都以它為分母，所以母體大小與指標同一個尺度。"
+            f"{denominator}"
             "n_item ＝相異 item 數。後續章節皆在 common universe 上重排重算。"
             "common 欄的 n_query_group 是裁切後兩側都還在的 query group 數"
             "（entity 欄為 NULL 的列在裁切時就被丟掉，不計入）。兩側候選對稱時，它就是兩側指標用到的母體；"
