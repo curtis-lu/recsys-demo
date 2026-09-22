@@ -1806,3 +1806,496 @@ def test_prediction_quality_weighted_note_names_the_weight_and_the_ratio():
     # The old claim — only groups with a positive reached the table — would
     # now be false.
     assert "所以這些列只來自" not in text
+
+
+# ---------------------------------------------------------------------------
+# #376：全正的 query group——組數帳、佔比警告、開關開著時的加註與改寫
+# ---------------------------------------------------------------------------
+
+import re  # noqa: E402
+
+from recsys_tfb.diagnosis.metric._common import schema_skip_reason  # noqa: E402
+from recsys_tfb.evaluation.metrics import ALL_POSITIVE_KEY  # noqa: E402
+
+#: 開關開著時，不套用它的段落旁印的那一句（票面原文）。用字面值、不 import
+#: report_builder 的常數：常數的字被改掉時這裡要紅。
+_KEPT = "這段沒有排除全正的 query group"
+_SWITCH = "evaluation.query_filter.drop_all_positive_groups"
+
+
+def _ap_metrics(n_queries=1000, n_excluded=50, n_all_positive=50,
+                category=None):
+    """``_metrics()`` 帶上 #376 的組數；``n_all_positive=None`` ＝ #376 之前
+    算的 bundle（沒有這個鍵）。預設：有正例 950、其中全正 50、無正例 50。"""
+    m = _metrics()
+    m["n_queries"] = n_queries
+    m["n_excluded_queries"] = n_excluded
+    if n_all_positive is not None:
+        m[ALL_POSITIVE_KEY] = n_all_positive
+    if category is not None:
+        m["category"] = category
+    return m
+
+
+def _ap_category(n_queries=1000, n_excluded=100, n_all_positive=300):
+    """大類子 bundle，帶它自己的組數（和細粒度是兩個不同的數）。"""
+    cat = {
+        "overall": {"map@1": 0.4, "map@2": 0.45},
+        "per_item": {"fund": {"hit_rate@1": 0.3, "mean_pos": 2.0}},
+        "macro_avg": {"by_item": {"hit_rate@1": 0.3, "mean_pos": 2.0}},
+        "dataset_overview": {"totals": {"n_items": 2}},
+        "n_queries": n_queries, "n_excluded_queries": n_excluded,
+    }
+    if n_all_positive is not None:
+        cat[ALL_POSITIVE_KEY] = n_all_positive
+    return cat
+
+
+def _ap_params(drop=None, *, occasion=False, event=False, post_training=None,
+               ratio=None, metric_k="unset"):
+    """``drop=None`` ＝ 設定裡沒寫 ``query_filter``（舊設定，等於關）。"""
+    p = _params()
+    if drop is not None:
+        p["evaluation"]["query_filter"] = {"drop_all_positive_groups": drop}
+    if occasion:
+        p["schema"]["columns"]["occasion"] = "request_id"
+    if event:
+        p["schema"]["columns"]["event"] = "impression_id"
+    if post_training is not None:
+        p["post_training"] = post_training
+    if ratio is not None:
+        p["dataset"] = {"test_zero_positive_group_ratio": ratio}
+    if metric_k != "unset":
+        p["evaluation"]["metric"] = {"k": metric_k}
+    return p
+
+
+def _ledger(section, grain):
+    """衡量指標段裡那一粒度的帳（恰好一行）。"""
+    lines = [b for b in section.bullets if b.startswith(f"組數帳（{grain}）")]
+    assert len(lines) == 1, section.bullets
+    return lines[0]
+
+
+def _num(pattern, text):
+    m = re.search(pattern, text)
+    assert m, (pattern, text)
+    return int(m.group(1).replace(",", ""))
+
+
+def _section_text(s):
+    return " ".join([s.description, s.formula, *s.bullets, *s.table_titles,
+                     *(t.to_string() for t in s.tables)])
+
+
+# ---- 1. 組數帳 ------------------------------------------------------------
+
+@pytest.mark.parametrize("drop", [None, False])
+def test_ledger_switch_off_puts_every_group_with_a_positive_into_the_map(drop):
+    """開關關：全正的組照樣算進衡量指標，所以「算進衡量指標」＝「有正例」。"""
+    s = rb.build_metrics_section(_ap_metrics(), _ap_params(drop))
+    line = _ledger(s, "item 粒度")
+    assert "有正例的組 950，其中全正 50（5.3%" in line
+    with_pos = _num(r"有正例的組 ([\d,]+)", line)
+    in_map = _num(r"算進衡量指標的有 ([\d,]+)", line)
+    no_pos = _num(r"無正例的組 ([\d,]+)", line)
+    assert in_map == with_pos
+    assert with_pos + no_pos == 1000   # n_queries
+    assert "已排除" not in line
+
+
+def test_ledger_switch_on_adds_up_to_the_groups_with_a_positive():
+    """開關開：有正例＝全正（已排除）＋算進衡量指標。"""
+    s = rb.build_metrics_section(_ap_metrics(), _ap_params(True))
+    line = _ledger(s, "item 粒度")
+    assert "有正例的組 950，其中全正 50 已排除，算進衡量指標的有 900" in line
+    with_pos = _num(r"有正例的組 ([\d,]+)", line)
+    all_pos = _num(r"其中全正 ([\d,]+)", line)
+    in_map = _num(r"算進衡量指標的有 ([\d,]+)", line)
+    assert with_pos == all_pos + in_map
+    assert with_pos + _num(r"無正例的組 ([\d,]+)", line) == 1000
+
+
+@pytest.mark.parametrize("ratio", [None, 0.0])
+def test_ledger_post_training_says_the_dataset_already_dropped_them(ratio):
+    """--post-training 吃 dataset 過濾後的 test 表；r 預設 0 → 無正例的組在
+    dataset 就全丟了，這裡恆 0，要說明為什麼。"""
+    s = rb.build_metrics_section(
+        _ap_metrics(n_queries=950, n_excluded=0),
+        _ap_params(False, post_training=True, ratio=ratio))
+    line = _ledger(s, "item 粒度")
+    assert "無正例的組 0（" in line
+    assert "dataset 已依 dataset.test_zero_positive_group_ratio" in line
+    assert "丟過" in line
+
+
+def test_ledger_post_training_with_a_kept_ratio_names_the_ratio():
+    s = rb.build_metrics_section(
+        _ap_metrics(n_queries=957, n_excluded=7),
+        _ap_params(False, post_training=True, ratio=0.25))
+    line = _ledger(s, "item 粒度")
+    assert "無正例的組 7（" in line
+    assert "抽過" in line and "r＝0.25" in line
+
+
+def test_ledger_monitoring_prints_the_count_without_the_dataset_sentence():
+    s = rb.build_metrics_section(
+        _ap_metrics(), _ap_params(False, post_training=False, ratio=0.25))
+    line = _ledger(s, "item 粒度")
+    assert "無正例的組 50" in line
+    assert "dataset" not in line
+
+
+def test_ledger_category_gets_its_own_line_with_its_own_counts():
+    s = rb.build_metrics_section(
+        _ap_metrics(category=_ap_category()), _ap_params(False))
+    assert "有正例的組 950，其中全正 50" in _ledger(s, "item 粒度")
+    cat = _ledger(s, "大類粒度")
+    assert "有正例的組 900，其中全正 300（33.3%" in cat
+    assert _num(r"算進衡量指標的有 ([\d,]+)", cat) == 900
+
+
+def test_ledger_has_no_category_line_without_a_category_bundle():
+    s = rb.build_metrics_section(_ap_metrics(), _ap_params(False))
+    assert not any(b.startswith("組數帳（大類粒度）") for b in s.bullets)
+
+
+@pytest.mark.parametrize("drop", [False, True])
+def test_ledger_on_a_bundle_from_before_the_count_says_how_to_get_it(drop):
+    """#376 之前算的 metrics.json 沒有全正組數，開關關時指紋不變，照樣會被
+    新報表畫出來：不得報錯，印得出的照印，並說怎麼補。"""
+    m = _ap_metrics(n_all_positive=None,
+                    category=_ap_category(n_all_positive=None))
+    s = rb.build_metrics_section(m, _ap_params(drop))
+    for grain, with_pos in (("item 粒度", "950"), ("大類粒度", "900")):
+        line = _ledger(s, grain)
+        assert f"有正例的組 {with_pos}" in line
+        assert "無正例的組" in line
+        assert "compute_metrics" in line and "重跑" in line
+        assert "其中全正" not in line
+    html = rb.assemble_report(m, _ap_params(drop), metric_ci=_metric_ci())
+    assert "組數帳（item 粒度）" in html
+    assert "⚠ 全正" not in html
+
+
+def test_ledger_and_warning_carry_no_verdict_or_full_marks_wording():
+    """「每組 AP 都是 1」只對不截斷的 AP 成立（K 小於組的列數時 map@K＝K/n），
+    「滿分」同理；判斷字眼也不得出現。"""
+    m = _ap_metrics(n_all_positive=500, category=_ap_category())
+    html = rb.assemble_report(m, _ap_params(False), metric_ci=_metric_ci())
+    text = " ".join(_ledger(rb.build_metrics_section(m, _ap_params(False)), g)
+                    for g in ("item 粒度", "大類粒度"))
+    text += _metadata_block(html)
+    assert "⚠ 全正" in text
+    for bad in ("AP 都是 1", "AP 恆為 1", "滿分", "偏高", "偏低", "不足", "異常",
+                "嚴重", "建議", "應該"):
+        assert bad not in text, bad
+
+
+def test_ledger_and_warning_name_the_measurement_and_group_level_metrics():
+    """帳上說「算進衡量指標」、不說「算進 mAP」：同一份報表的頭號 macro
+    per-item mAP 取自診斷抽樣，開關開著也沒排除全正組。與排法無關的只有組層級
+    （per-query）指標：per-item 的 map_attr／hit_rate／mean_pos 在 K 小於組的
+    列數時仍看誰排進前 K，所以不說「每組的分數都一樣」。"""
+    m = _ap_metrics(n_all_positive=500, category=_ap_category())
+    for drop in (False, True):
+        s = rb.build_metrics_section(m, _ap_params(drop))
+        for grain in ("item 粒度", "大類粒度"):
+            line = _ledger(s, grain)
+            assert "算進衡量指標的有" in line and "不算進衡量指標" in line
+            assert "mAP 的有" not in line and "不算進 mAP" not in line
+    off_line = _ledger(rb.build_metrics_section(m, _ap_params(False)), "item 粒度")
+    assert "組層級指標" in off_line and "每組的分數都一樣" not in off_line
+    html = rb.assemble_report(m, _ap_params(False), metric_ci=_metric_ci())
+    warn = " ".join(_warn_rows(html).values())
+    assert "組層級指標" in warn and "照樣算進衡量指標" in warn
+    for old in ("每組的分數都一樣", "拿到一樣的分數", "算進 mAP"):
+        assert old not in warn, old
+
+
+# ---- 2. 警告 --------------------------------------------------------------
+
+def _warn_rows(html):
+    """metadata 裡 ⚠ 全正 開頭的列：{標籤: 內容}。"""
+    rows = _metadata_block(html).split("<tr><th>")[1:]
+    out = {}
+    for row in rows:
+        label = row.split("</th>")[0]
+        if label.startswith("⚠ 全正"):
+            out[label] = row.split("<td>")[1].split("</td>")[0]
+    return out
+
+
+def test_warning_when_the_all_positive_share_is_above_ten_percent():
+    m = _ap_metrics(n_queries=1000, n_excluded=0, n_all_positive=101)
+    html = rb.assemble_report(m, _ap_params(False), metric_ci=_metric_ci())
+    rows = _warn_rows(html)
+    assert list(rows) == ["⚠ 全正 query group（item 粒度）"]
+    text = rows["⚠ 全正 query group（item 粒度）"]
+    assert "10.1%" in text and "101" in text and "1,000" in text
+    assert _SWITCH in text
+    assert html.count("⚠ 全正 query group") == 1   # 報表只印一次
+
+
+def test_a_share_just_above_ten_percent_never_prints_as_ten_point_zero():
+    """1004／10000 用一位小數會印成 10.0%，旁邊卻寫「超過 10%」；警告與組數帳
+    印的是同一個數。"""
+    m = _ap_metrics(n_queries=10000, n_excluded=0, n_all_positive=1004)
+    html = rb.assemble_report(m, _ap_params(False), metric_ci=_metric_ci())
+    text = _warn_rows(html)["⚠ 全正 query group（item 粒度）"]
+    assert "10.0%" not in text
+    assert "10.04%" in text
+    line = _ledger(rb.build_metrics_section(m, _ap_params(False)), "item 粒度")
+    assert "10.0%" not in line and "10.04%" in line
+
+
+def test_no_warning_at_exactly_ten_percent():
+    m = _ap_metrics(n_queries=1000, n_excluded=0, n_all_positive=100)
+    html = rb.assemble_report(m, _ap_params(False), metric_ci=_metric_ci())
+    assert _warn_rows(html) == {}
+
+
+def test_no_warning_with_the_switch_on():
+    m = _ap_metrics(n_queries=1000, n_excluded=0, n_all_positive=500,
+                    category=_ap_category(n_all_positive=800))
+    html = rb.assemble_report(m, _ap_params(True), metric_ci=_metric_ci())
+    assert _warn_rows(html) == {}
+
+
+def test_warning_is_judged_per_grain():
+    # 細粒度 50／950＝5.3%、大類 300／900＝33.3% → 只有大類
+    m = _ap_metrics(category=_ap_category(n_all_positive=300))
+    rows = _warn_rows(rb.assemble_report(m, _ap_params(False)))
+    assert list(rows) == ["⚠ 全正 query group（大類粒度）"]
+    assert "33.3%" in rows["⚠ 全正 query group（大類粒度）"]
+    # 細粒度 190／950＝20%、大類 45／900＝5% → 只有細粒度
+    m = _ap_metrics(n_all_positive=190, category=_ap_category(n_all_positive=45))
+    rows = _warn_rows(rb.assemble_report(m, _ap_params(False)))
+    assert list(rows) == ["⚠ 全正 query group（item 粒度）"]
+
+
+# ---- 3. 開關開著時的加註（fixture 宣告 occasion、不宣告 event）------------
+
+def test_overview_headline_says_it_keeps_the_all_positive_groups_when_on():
+    def headline(drop):
+        s = rb.build_overview_section(
+            _ap_metrics(), _ap_params(drop, occasion=True),
+            metric_ci=_metric_ci())
+        return s, next(t for t in s.table_titles if t.startswith("頭號指標"))
+
+    on, on_title = headline(True)
+    assert _KEPT in on_title
+    off, off_title = headline(False)
+    assert _KEPT not in _section_text(off)
+
+
+def test_overview_with_event_declared_has_no_headline_and_no_note():
+    """宣告 event 時 ci 被跳過（#378），頭號表不存在，加註也不能出現。"""
+    p = _ap_params(True, event=True)
+    reason = schema_skip_reason(p, "ci")
+    assert reason   # 前提：這個 fixture 真的讓 ci 跳過
+    stub = {"enabled": False, "skipped_reason": reason}
+    s = rb.build_overview_section(_ap_metrics(), p, metric_ci=stub)
+    assert not any(t.startswith("頭號指標") for t in s.table_titles)
+    assert _KEPT not in _section_text(s)
+    assert "頭號指標沒有排除全正" not in s.description
+    # 衡量指標段同理：沒有頭號表、沒有 CI 欄，就沒有要加註的東西
+    ms = rb.build_metrics_section(_ap_metrics(), p, metric_ci=stub)
+    titles = " ".join(ms.table_titles)
+    assert not any(t.startswith("頭號指標") for t in ms.table_titles)
+    assert _KEPT not in titles and "CI 沒有排除全正" not in titles
+    assert "沒有排除全正" not in ms.description
+    assert "落在 CI 之外" not in ms.description
+
+
+@pytest.mark.parametrize("k", [None, 3, 7])
+@pytest.mark.parametrize("ci", ["skipped", "absent", "disabled"])
+def test_metrics_ci_point_note_says_nothing_about_a_ci_the_section_lacks(k, ci):
+    """本段沒有 CI 欄（宣告 event 時 ci 被跳過、沒有 metric_ci、ci 關著）時，
+    開關開著也不談 CI 沒排除全正組、不叫讀者拿點估去比 CI——比的對象不在表上。"""
+    p = _ap_params(True, event=(ci == "skipped"), metric_k=k)
+    metric_ci = {
+        "skipped": {"enabled": False,
+                    "skipped_reason": schema_skip_reason(p, "ci")},
+        "absent": None,
+        "disabled": {"enabled": False},
+    }[ci]
+    if ci == "skipped":
+        assert metric_ci["skipped_reason"]   # 前提：這個 fixture 真的讓 ci 跳過
+    m = _ap_metrics()
+    m["dataset_overview"]["totals"]["n_items"] = 5   # @3 看得到、@7 看不到
+    ms = rb.build_metrics_section(m, p, metric_ci=metric_ci)
+    assert "沒有排除全正" not in ms.description
+    assert "落在 CI 之外" not in ms.description
+
+
+def test_metrics_section_headline_and_ci_columns_are_marked_when_on():
+    def section(drop):
+        return rb.build_metrics_section(
+            _ap_metrics(), _ap_params(drop, occasion=True),
+            metric_ci=_metric_ci())
+
+    on = section(True)
+    assert _KEPT in next(t for t in on.table_titles if t.startswith("頭號指標"))
+    b_map = next(t for t in on.table_titles
+                 if "per-item 歸因" in t and "map_attr@k" in t)
+    assert "CI 沒有排除全正的 query group" in b_map
+    off = section(False)
+    assert _KEPT not in _section_text(off)
+    assert "CI 沒有排除全正" not in _section_text(off)
+
+
+def test_item_detail_section_says_it_keeps_the_all_positive_groups_when_on():
+    on = rb.build_item_detail_section(
+        _report_aggregates(), _ap_params(True, occasion=True))
+    assert _KEPT in on.description
+    off = rb.build_item_detail_section(
+        _report_aggregates(), _ap_params(False, occasion=True))
+    assert _KEPT not in _section_text(off)
+
+
+# ---- 4. 開關開著時會變成假話的句子 -----------------------------------------
+
+@pytest.mark.parametrize("k", [None, 3])
+def test_overview_trunc_note_is_rewritten_when_on(k):
+    col = "all" if k is None else k
+    same = f"與衡量指標的全量 macro map_attr@{col} 同一定義"
+    m = _ap_metrics()
+    m["dataset_overview"]["totals"]["n_items"] = 5   # @3 在衡量指標段看得到
+
+    def desc(drop):
+        return rb.build_overview_section(
+            m, _ap_params(drop, occasion=True, metric_k=k),
+            metric_ci=_metric_ci()).description
+
+    assert same in desc(False)
+    assert "不是同一批組" not in desc(False)
+    assert same not in desc(True)
+    assert "頭號指標沒有排除全正的 query group" in desc(True)
+    assert f"map_attr@{col}（已排除）不是同一批組" in desc(True)
+
+
+@pytest.mark.parametrize("k", [None, 3])
+def test_metrics_ci_point_note_is_rewritten_when_on(k):
+    """同一張表裡點估排除了全正組、CI 沒有：點估可能落在 CI 外。"""
+    col = "all" if k is None else k
+    same = f"CI 上下界的點估與該列 map_attr@{col} 同一定義"
+    m = _ap_metrics()
+    m["dataset_overview"]["totals"]["n_items"] = 5
+
+    def desc(drop):
+        return rb.build_metrics_section(
+            m, _ap_params(drop, occasion=True, metric_k=k),
+            metric_ci=_metric_ci()).description
+
+    assert same in desc(False)
+    assert "落在 CI 之外" not in desc(False)
+    assert same not in desc(True)
+    assert "沒有排除全正的 query group" in desc(True)
+    assert "點估可能落在 CI 之外" in desc(True)
+
+
+def test_ci_notes_for_a_hidden_column_also_say_the_ci_keeps_the_groups():
+    """metric.k 不在衡量指標段的欄裡時，原句沒宣稱同一定義；開著時仍補上
+    CI 沒有排除全正組這件事。"""
+    m = _ap_metrics()
+    m["dataset_overview"]["totals"]["n_items"] = 5
+    p = _ap_params(True, occasion=True, metric_k=7)
+    ov = rb.build_overview_section(m, p, metric_ci=_metric_ci()).description
+    ms = rb.build_metrics_section(m, p, metric_ci=_metric_ci()).description
+    assert "不顯示 @7 欄" in ov and "頭號指標沒有排除全正的 query group" in ov
+    assert "不顯示 @7 欄" in ms
+    assert "頭號指標與 CI 沒有排除全正的 query group" in ms
+    # @7 不在本段的欄裡：沒有同一列的點估可比，不叫讀者去比。
+    assert "同一列" not in ms and "落在 CI 之外" not in ms
+
+
+def test_prediction_quality_ranking_rule_names_the_all_positive_exclusion_when_on():
+    old = "主指標段（mAP／precision@K／recall@K）只算有正例的 query group"
+    off = _pq_text(rb.build_prediction_quality_section(
+        _pq_payload(), _ap_metrics(), _ap_params(False)))
+    on = _pq_text(rb.build_prediction_quality_section(
+        _pq_payload(), _ap_metrics(), _ap_params(True)))
+    assert old in off
+    assert old not in on
+    assert "不是全正" in on
+    assert "全正的 50 個" in on
+
+
+def test_prediction_quality_same_population_only_when_nothing_else_is_excluded():
+    """--post-training、無正例 0 組：開關關時兩段母體相同；開著時主指標段又排除了
+    全正的組，「母體相同」變成假話。"""
+    m = _ap_metrics(n_queries=950, n_excluded=0, n_all_positive=50)
+    off = _pq_text(rb.build_prediction_quality_section(
+        _pq_payload(), m, _ap_params(False, post_training=True)))
+    on = _pq_text(rb.build_prediction_quality_section(
+        _pq_payload(), m, _ap_params(True, post_training=True)))
+    assert "兩段的母體相同" in off
+    assert "兩段的母體相同" not in on
+    assert "兩段的母體不同" in on
+
+
+def _count_rows(section):
+    tbl = next(t for t in section.tables
+               if any("n_excluded_queries" in str(i) for i in t.index))
+    return dict(zip([str(i) for i in tbl.index], tbl["value"]))
+
+
+@pytest.mark.parametrize("build", ["overview", "completeness"])
+def test_query_count_rows_say_what_was_excluded_when_on(build):
+    """開著時「排除 query 數 n_excluded_queries」只算無正例的組，實際被排除的
+    還有全正的組；「有正例的 query 數」也不再是算進衡量指標的組數。"""
+    fn = {"overview": rb.build_overview_section,
+          "completeness": rb.build_completeness_section}[build]
+    on = _count_rows(fn(_ap_metrics(), _ap_params(True), metric_ci=_metric_ci()))
+    assert "排除 query 數 n_excluded_queries" not in on
+    assert on["無正例而排除的 query 數 n_excluded_queries"] == 50
+    assert on["有正例的 query 數"] == 950
+    assert on["其中全正而排除的 query 數 n_all_positive_queries"] == 50
+    in_metrics = next(v for k, v in on.items()
+                      if k.startswith("其中算進衡量指標的 query 數"))
+    assert in_metrics == 900
+    off = _count_rows(fn(_ap_metrics(), _ap_params(False), metric_ci=_metric_ci()))
+    assert off["排除 query 數 n_excluded_queries"] == 50
+    assert off["有正例的 query 數"] == 950
+    assert not any("全正" in k or "算進衡量指標" in k for k in off)
+
+
+def test_metadata_splits_excluded_queries_by_reason_when_on():
+    def labels_values(drop):
+        rows = _metadata_block(rb.assemble_report(
+            _ap_metrics(), _ap_params(drop), metric_ci=_metric_ci())
+        ).split("<tr><th>")[1:]
+        return {r.split("</th>")[0]: r.split("<td>")[1].split("</td>")[0]
+                for r in rows}
+
+    on = labels_values(True)
+    assert "Excluded Queries" not in on
+    assert on["Excluded Queries (no positive)"] == "50"
+    assert on["Excluded Queries (all positive)"] == "50"
+    off = labels_values(False)
+    assert off["Excluded Queries"] == "50"
+    assert not any("all positive" in k for k in off)
+
+
+def test_full_report_switch_on_prints_the_notes_and_none_of_the_old_sentences():
+    """渲染到 HTML 之後也成立（bullets 走 escape、description 不走）。"""
+    m = _ap_metrics()
+    m["dataset_overview"]["totals"]["n_items"] = 5
+    on = rb.assemble_report(m, _ap_params(True, occasion=True),
+                            metric_ci=_metric_ci(),
+                            report_aggregates=_report_aggregates(),
+                            prediction_quality=_pq_payload())
+    off = rb.assemble_report(m, _ap_params(False, occasion=True),
+                             metric_ci=_metric_ci(),
+                             report_aggregates=_report_aggregates(),
+                             prediction_quality=_pq_payload())
+    old = ("與衡量指標的全量 macro map_attr@all 同一定義",
+           "CI 上下界的點估與該列 map_attr@all 同一定義",
+           "主指標段（mAP／precision@K／recall@K）只算有正例的 query group")
+    for sentence in old:
+        assert sentence in off, sentence
+        assert sentence not in on, sentence
+    assert _KEPT not in off
+    assert on.count(_KEPT) >= 3   # 概覽頭號表、衡量指標頭號表、細部拆解段
+    assert "組數帳（item 粒度）" in on and "組數帳（item 粒度）" in off

@@ -111,6 +111,7 @@ python -m recsys_tfb <指令> --env <env>
   - `evaluation.prediction_quality` 的 `n_bins`、`n_display_bins` 是大於等於 1 的整數，而且後者要整除前者；`top_n` 是大於等於 0 的整數；這個區塊裡不能有別的鍵（`A42`）。不擋的話，分箱表最後一格會比其他格窄，而報表不會提；寫 `enabled: true` 也打不開這一段，開關在 `report.sections.prediction_quality`。
   - `evaluation.report.diagnostics` 底下不能再寫 `include_calibration`、`n_calibration_bins`，不論值是什麼（`A43`）。它們設定的 calibration 分箱表 #381 已經移除，留著不會有任何作用；分數分箱改由預測品質指標家族提供。
   - 帶 `--post-training` 又打開 `evaluation.report.sections.prediction_quality` 時，`dataset.test_zero_positive_group_ratio` 必須大於 0（`A46`）。r 為 0（預設）的 test 表已經丟掉所有沒有正例的 query group，把每一列當二元預測的指標會系統性偏高。監控模式不查。
+  - `evaluation.query_filter.drop_all_positive_groups` 有寫的話必須是 `true`／`false`；這個區塊裡不能有別的鍵（`A49`）。唯一的讀法（`evaluation/metrics.py::drop_all_positive_groups`）只用真假值判斷，寫錯值或鍵名不會報錯，只會悄悄不生效。
   - `--compare` 和 `--compare-only` 只能給一個；給的名稱必須是 `evaluation.compare_sources` 裡的鍵（`A12`、`A13`）。
 - **dataset、training、inference**
   - `--rebuild-dates` 的每個日期要寫成 `YYYY-MM-DD`，而且要在設定的月份清單裡：dataset 和 training 對照 `dataset.test_snap_dates`，inference 對照 `inference.snap_dates`（`A21`）。

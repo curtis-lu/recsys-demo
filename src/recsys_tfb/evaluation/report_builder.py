@@ -21,7 +21,17 @@ from recsys_tfb.core.consistency import (
 from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.baselines import resolve_lookback_months
-from recsys_tfb.evaluation.metrics import metric_params, resolved_all_k
+from recsys_tfb.evaluation.metrics import (
+    ALL_POSITIVE_KEY,
+    ALL_POSITIVE_WARN_SHARE,
+    all_positive_share,
+    all_positive_share_warns,
+    drop_all_positive_groups,
+    format_share,
+    metric_params,
+    n_groups_with_positive,
+    resolved_all_k,
+)
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
@@ -290,6 +300,193 @@ def macro_coverage_suffix_mb(
     return f"（參與 macro 的 item 數 M {n_a}／B {n_b}／全部 {n_items}）"
 
 
+# =====================================================================
+# 全正的 query group（#376）
+# =====================================================================
+#
+# ``evaluation.query_filter.drop_all_positive_groups`` 只套用在衡量指標與熱門度
+# baseline；頭號指標＋CI、per-item 細部拆解、各診斷頁都不跟（使用者 2026-09-18
+# 決定：新開關不延伸進診斷）。所以開關開著時，同一份報表裡有兩批組，這一段的
+# 函式負責讓讀者看得出每個數字是哪一批。開關只經
+# ``metrics.drop_all_positive_groups`` 讀，警告只經
+# ``metrics.all_positive_share_warns`` 判斷——log 與報表不會各說各話。
+
+#: 開關開著時，印在不套用它的段落旁的那一句。
+ALL_POSITIVE_KEPT_NOTE = "這段沒有排除全正的 query group"
+
+#: 開關的設定鍵全名：印進警告與加註，讀者照著就找得到要改哪裡。
+_ALL_POSITIVE_SWITCH = "evaluation.query_filter.drop_all_positive_groups"
+
+#: 全正的組為什麼值得數。不寫「AP 都是 1」或「滿分」：label 只有 0／1 時，K 小於
+#: 組的列數 n 的 ``map@K``＝K/n、K 大於 n 的 ``precision@K``＝n/K，label 分級時
+#: 值又不同；永遠成立的只有「排法不影響它的組層級（per-query）指標」。也不寫「每組
+#: 的分數都一樣」：per-item 的 ``map_attr@K``／``hit_rate@K``／``mean_pos`` 在 K
+#: 小於列數時仍看誰排進前 K。
+_ALL_POSITIVE_WHY = "不管怎麼排，組層級指標 mAP／precision／recall 都一樣"
+
+
+def _all_positive_kept_note(parameters: dict) -> str:
+    """不套用開關的段落要加的那一句；開關關著回 ``""``（報表逐字不變）。"""
+    if not drop_all_positive_groups(parameters):
+        return ""
+    return (
+        f"⚠ {ALL_POSITIVE_KEPT_NOTE}：{_ALL_POSITIVE_SWITCH} 開著，但它只套用在"
+        "衡量指標與熱門度 baseline。"
+    )
+
+
+def _all_positive_kept_title(parameters: dict) -> str:
+    """同一句的表標題版（接在標題後面）；開關關著回 ``""``。"""
+    if not drop_all_positive_groups(parameters):
+        return ""
+    return f"　⚠ {ALL_POSITIVE_KEPT_NOTE}"
+
+
+def _grain_bundles(metrics: dict) -> list[tuple[str, dict]]:
+    """組數帳與警告逐粒度走的清單：item 粒度，有大類時再加大類粒度。
+
+    大類的全正＝每個大類都至少有一個正例子列（大類那一輪 label＝子列最大值），
+    和 item 粒度的全正是兩個不同的數，所以各一行帳、各自判斷警告。
+    """
+    out = [("item 粒度", metrics)]
+    if metrics.get("category"):
+        out.append(("大類粒度", metrics["category"]))
+    return out
+
+
+def _test_zero_positive_draw(parameters: dict) -> float | None:
+    """dataset 對 test 表無正例 query group 的抽樣：監控模式回 ``None``（沒有
+    dataset 抽樣，數到的是資料本身）；``--post-training`` 且 test 表帶權重欄
+    （``test_carries_zero_positive_group_weight``）回保留比例 r（> 0）；不帶
+    權重欄回 ``0.0``（dataset 全丟了）。
+
+    一個判斷、兩段措辭：組數帳的 :func:`_zero_positive_origin` 與資料概況／預測
+    品質段的 :func:`_kept_zero_positive_groups_note` 都從這裡讀，不各寫一版分支。
+    """
+    if not parameters.get("post_training"):
+        return None
+    if not test_carries_zero_positive_group_weight(parameters):
+        return 0.0
+    return resolved_zero_positive_group_ratio(parameters, "test")
+
+
+def _zero_positive_origin(parameters: dict) -> str:
+    """「無正例的組」括號裡接在「不算進衡量指標」後面的那句。
+
+    ``--post-training`` 吃的是 dataset 過濾後的 test 表：r（
+    ``dataset.test_zero_positive_group_ratio``）為 0 時無正例的組在 dataset 就
+    全丟了，帳上恆為 0；r > 0 時留下的是抽過的一部分。不說的話，讀者會把 0 讀成
+    「資料裡沒有這種組」。監控模式沒有 dataset 抽樣，帳上是實際組數，回 ``""``。
+    """
+    ratio = _test_zero_positive_draw(parameters)
+    if ratio is None:
+        return ""
+    if ratio > 0:
+        return (
+            "；dataset 已依 dataset.test_zero_positive_group_ratio 抽過："
+            f"{_kept_ratio_phrase(ratio)}"
+        )
+    return (
+        "；dataset 已依 dataset.test_zero_positive_group_ratio＝0 丟過，test 表"
+        "只剩有正例的組"
+    )
+
+
+def _group_ledger_line(grain: str, bundle: dict, parameters: dict) -> str | None:
+    """一個粒度的組數帳（#376）：有正例的組、其中全正、算進衡量指標、無正例的組。
+
+    開關關：全正的組照樣算進衡量指標，「算進衡量指標」＝「有正例」。開關開：
+    有正例＝全正（已排除）＋算進衡量指標。無正例的組兩種都不算進衡量指標，
+    ``n_excluded_queries`` 也只數它們。帳上不說「算進 mAP」：同一份報表的頭號
+    macro per-item mAP 取自診斷抽樣，開關開著也沒有排除全正的組。
+
+    缺 ``n_queries``／``n_excluded_queries``（更早的 bundle）回 ``None``。只缺
+    全正組數的，是 #376 之前算的 ``metrics.json``：開關關著時指紋沒變，照樣會被
+    畫出來，所以不報錯，印得出的照印，並說怎麼補。
+    """
+    n_pos = n_groups_with_positive(bundle)
+    if n_pos is None:
+        return None
+    n_zero = bundle["n_excluded_queries"]
+    n_all = bundle.get(ALL_POSITIVE_KEY)
+    drop = drop_all_positive_groups(parameters)
+    if n_all is None:
+        head = (
+            f"有正例的組 {n_pos:,}"
+            + ("" if drop else "，全部算進衡量指標")
+            + "（這份結果沒有全正的組數：它在這個計數加入之前算的，從 "
+            "compute_metrics 重跑可得）"
+        )
+    elif drop:
+        head = (
+            f"有正例的組 {n_pos:,}，其中全正 {n_all:,} 已排除，"
+            f"算進衡量指標的有 {n_pos - n_all:,}"
+        )
+    else:
+        share = all_positive_share(bundle)
+        pct = f"{format_share(share)}；" if share is not None else ""
+        head = (
+            f"有正例的組 {n_pos:,}，其中全正 {n_all:,}（{pct}{_ALL_POSITIVE_WHY}）"
+            f"照樣算進，算進衡量指標的有 {n_pos:,}"
+        )
+    return (
+        f"組數帳（{grain}）：{head}；無正例的組 {n_zero:,}"
+        f"（不算進衡量指標{_zero_positive_origin(parameters)}）。"
+    )
+
+
+def _all_positive_warnings(metrics: dict, parameters: dict) -> dict[str, str]:
+    """報表頭 metadata 的警告列：每個 ``all_positive_share_warns`` 為真的粒度一列。
+
+    門檻與開關只經 ``metrics.all_positive_share_warns`` 判斷（log 用同一個），這裡
+    不重算。放在 metadata：每個讀者都會經過，而且算進了這些組的 mAP 就在它下面
+    第一段。只陳述數字與設定鍵，不評這個比例高不高。
+    """
+    out = {}
+    for grain, bundle in _grain_bundles(metrics):
+        if not all_positive_share_warns(bundle, parameters):
+            continue
+        # all_positive_share_warns is true only when the share is known, so
+        # both counts are there.
+        n_pos = n_groups_with_positive(bundle)
+        out[f"⚠ 全正 query group（{grain}）"] = (
+            "有正例的 query group 裡，全正的佔 "
+            f"{format_share(all_positive_share(bundle))}"
+            f"（{bundle[ALL_POSITIVE_KEY]:,}／{n_pos:,} 組），超過 "
+            f"{ALL_POSITIVE_WARN_SHARE:.0%}。這些組{_ALL_POSITIVE_WHY}，照樣算進"
+            "衡量指標，模型與熱門度 baseline 在這些組的組層級指標也相同。要排除"
+            f"它們，設 {_ALL_POSITIVE_SWITCH}: true；組數帳在「衡量指標」段。"
+        )
+    return out
+
+
+def _query_count_rows(metrics: dict, parameters: dict) -> dict:
+    """「規模／分母」與「本次執行事實」共用的 query 組數列。
+
+    開關關時與 #376 之前逐字相同。開關開時 ``n_excluded_queries`` 只數無正例的
+    組、實際被排除的還有全正的組，「有正例的 query 數」也不再是算進衡量指標的
+    組數：標籤改成說清楚是哪一批，並另列全正與算進衡量指標兩列（兩列相加＝有
+    正例的 query 數）。
+    """
+    n_queries = metrics.get("n_queries")
+    n_zero = metrics.get("n_excluded_queries")
+    n_pos = n_groups_with_positive(metrics)
+    if not drop_all_positive_groups(parameters):
+        return {
+            "全部 query 數 n_queries": n_queries,
+            "有正例的 query 數": n_pos,
+            "排除 query 數 n_excluded_queries": n_zero,
+        }
+    n_all = metrics.get(ALL_POSITIVE_KEY)
+    return {
+        "全部 query 數 n_queries": n_queries,
+        "有正例的 query 數": n_pos,
+        f"其中全正而排除的 query 數 {ALL_POSITIVE_KEY}": n_all,
+        "其中算進衡量指標的 query 數（有正例的 − 全正的）": _od(n_pos, n_all),
+        "無正例而排除的 query 數 n_excluded_queries": n_zero,
+    }
+
+
 def build_overview_section(
     metrics: dict, parameters: dict, metric_ci: dict | None = None,
     prediction_quality_shown: bool = False,
@@ -324,7 +521,12 @@ def build_overview_section(
               "CI 用 query 數": sample_meta.get("n_queries_sampled")}],
             index=["macro per-item mAP"],
         ))
-        titles.append("頭號指標：macro per-item mAP（item 等權，含 bootstrap CI）")
+        # #376: the switch does not reach this table (it is computed from the
+        # diagnosis sample). The note sits in this branch, the one that draws
+        # the table — with `event` declared `ci` is skipped, there is no
+        # table, and a note would point at nothing.
+        titles.append("頭號指標：macro per-item mAP（item 等權，含 bootstrap CI）"
+                      + _all_positive_kept_title(parameters))
         n_boot = metric_ci.get("n_boot")
         sd = sample_meta.get("sampling_description", "")
         # Truncation of point estimate and CI follows metric.k (ADR-0020
@@ -332,19 +534,28 @@ def build_overview_section(
         # only when the metrics section actually shows it.
         mk = metric_params(parameters)["k"]
         if mk is None:
-            trunc_note = (
-                "點估 AP 與 CI 都不截斷（metric.k 未設），與衡量指標的全量 macro "
-                "map_attr@all 同一定義。"
-            )
+            trunc, col = "點估 AP 與 CI 都不截斷（metric.k 未設）", "all"
         elif mk in _metrics_section_ks(all_k):
+            trunc, col = f"點估 AP 與 CI 都截斷在 {mk}（metric.k）", mk
+        else:
+            trunc, col = f"點估 AP 與 CI 都截斷在 {mk}（metric.k）", None
+        # With drop_all_positive_groups on, "same definition as the metrics
+        # section's macro" is false: that macro dropped the all-positive
+        # groups, this one did not (#376).
+        drop = drop_all_positive_groups(parameters)
+        if col is None:
+            trunc_note = f"{trunc}；衡量指標各表不顯示 @{mk} 欄。" + (
+                "頭號指標沒有排除全正的 query group，衡量指標各表已排除。"
+                if drop else ""
+            )
+        elif drop:
             trunc_note = (
-                f"點估 AP 與 CI 都截斷在 {mk}（metric.k），與衡量指標的全量 macro "
-                f"map_attr@{mk} 同一定義。"
+                f"{trunc}；但頭號指標沒有排除全正的 query group，與衡量指標的 "
+                f"macro map_attr@{col}（已排除）不是同一批組。"
             )
         else:
             trunc_note = (
-                f"點估 AP 與 CI 都截斷在 {mk}（metric.k）；衡量指標各表不顯示 "
-                f"@{mk} 欄。"
+                f"{trunc}，與衡量指標的全量 macro map_attr@{col} 同一定義。"
             )
         ci_note = (
             f"　CI 為 cluster bootstrap（cluster＝客戶，B＝{n_boot}）在診斷母體上"
@@ -371,13 +582,11 @@ def build_overview_section(
     # positive" — contradicting the excluded-queries row right below (a
     # million queries with a positive cannot coexist with 950k excluded).
     # Fix the label, and add the row the report never gave anywhere:
-    # queries with a positive = n_queries - n_excluded_queries.
+    # queries with a positive = n_queries - n_excluded_queries. With
+    # drop_all_positive_groups on, the rows say which groups each count is
+    # (#376, _query_count_rows).
     scale = {
-        "全部 query 數 n_queries": metrics.get("n_queries"),
-        "有正例的 query 數": _od(
-            metrics.get("n_queries"), metrics.get("n_excluded_queries")
-        ),
-        "排除 query 數 n_excluded_queries": metrics.get("n_excluded_queries"),
+        **_query_count_rows(metrics, parameters),
         "正例列數 n_positives": totals.get("n_positives"),
         "母體正樣本率（÷全體候選列）": totals.get("positive_rate"),
         f"每 {entity_str} 平均正例數 avg_positives_per_entity":
@@ -491,6 +700,12 @@ def build_core_concept_section(parameters: dict) -> ReportSection:
     )
 
 
+def _kept_ratio_phrase(ratio: float) -> str:
+    """「test 表保留了比例 r 的無正例組」的說法，一個來源：資料概況的說明與
+    衡量指標段的組數帳（#376）都印它，兩邊不會各寫一版。"""
+    return f"test 表保留了比例 r＝{ratio:g} 的無正例 query group"
+
+
 def _kept_zero_positive_groups_note(metrics: dict, parameters: dict) -> str:
     """How many test query groups holding no positive this run evaluated, and
     at what ratio they were kept — empty unless ``--post-training`` with
@@ -502,15 +717,13 @@ def _kept_zero_positive_groups_note(metrics: dict, parameters: dict) -> str:
     weight: few kept groups means the weighted numbers are not stable, and the
     reader should see the count next to them.
     """
-    if not parameters.get("post_training"):
+    ratio = _test_zero_positive_draw(parameters)
+    if not ratio:   # monitoring (None), or the dataset dropped them all (0.0)
         return ""
-    if not test_carries_zero_positive_group_weight(parameters):
-        return ""
-    ratio = resolved_zero_positive_group_ratio(parameters, "test")
     n_kept = metrics.get("n_excluded_queries")
     kept = f"本次評估資料裡有 {n_kept:,} 個" if n_kept is not None else "本次評估資料裡有一些"
     return (
-        f"test 表保留了比例 r＝{ratio:g} 的無正例 query group"
+        f"{_kept_ratio_phrase(ratio)}"
         f"（dataset.test_zero_positive_group_ratio）：{kept}，每列帶權重 "
         f"1／r＝{1 / ratio:.4g}（{ZERO_POSITIVE_GROUP_WEIGHT_COL}）。1／r 是設計"
         "權重，不是無偏估計：留下的組少時，加權後的比值型指標不穩。"
@@ -834,7 +1047,8 @@ def build_metrics_section(
                   "CI 用 query 數": sm.get("n_queries_sampled")}],
                 index=["macro per-item mAP"],
             ),
-            "頭號指標：macro per-item mAP（item 等權，含 bootstrap CI）",
+            "頭號指標：macro per-item mAP（item 等權，含 bootstrap CI）"
+            + _all_positive_kept_title(parameters),
             False,
         )
 
@@ -864,7 +1078,12 @@ def build_metrics_section(
     b_map = _per_item_metric_table(
         per_item, ks, all_k, "map_attr", "@{k}", macro_metrics=macro_item,
     )
-    if metric_ci and metric_ci.get("enabled"):
+    # Whether this section shows any CI at all: the condition for the CI
+    # columns below, which #376's CI notes (the column title and the
+    # ci_point_note sentence) follow too — no CI on the page, nothing to
+    # qualify.
+    ci_shown = bool(metric_ci and metric_ci.get("enabled"))
+    if ci_shown:
         ci_items = metric_ci.get("per_item", {}) or {}
         ci_macro = metric_ci.get("macro") or {}
 
@@ -880,7 +1099,14 @@ def build_metrics_section(
     # out of per_item silently. The title discloses N of M, only on a table
     # that has a Macro row.
     item_cov = macro_coverage_suffix(per_item, n_items, parameters, macro_item)
-    _add(b_map, f"B · per-item 歸因｜map_attr@k（列＝item，＋CI 上下界）{item_cov}",
+    # #376: with the switch on, a row's point estimates dropped the
+    # all-positive groups and its CI columns (from the diagnosis sample) did
+    # not — say so on the table, not only in the section text. Same condition
+    # as the CI columns above: no columns, nothing to qualify.
+    drop = drop_all_positive_groups(parameters)
+    ci_cols = "；CI 沒有排除全正的 query group" if drop and ci_shown else ""
+    _add(b_map,
+         f"B · per-item 歸因｜map_attr@k（列＝item，＋CI 上下界{ci_cols}）{item_cov}",
          True)
     _add(_per_item_recall_table(per_item, ks, all_k, macro_metrics=macro_item),
          f"B · per-item 歸因｜recall@k（列＝item）{item_cov}", True)
@@ -902,17 +1128,35 @@ def build_metrics_section(
     # this section's tables (ks) actually show it.
     mk = metric_params(parameters)["k"]
     if mk is None:
-        ci_point_note = (
-            "CI 上下界的點估與該列 map_attr@all 同一定義，不截斷（metric.k 未設）"
-        )
+        trunc, col = "不截斷（metric.k 未設）", "all"
     elif mk in ks:
+        trunc, col = f"截斷在 {mk}（metric.k）", mk
+    else:
+        trunc, col = f"截斷在 {mk}（metric.k）", None
+    # #376: with the switch on, the point estimates in a map_attr row dropped
+    # the all-positive groups and the CI beside them did not, so "same
+    # definition" is false and the point can fall outside its own CI. Said
+    # only when the section shows a CI (ci_shown), and the comparison with a
+    # row's point estimate only when that column is shown (col).
+    if col is None:
         ci_point_note = (
-            f"CI 上下界的點估與該列 map_attr@{mk} 同一定義，截斷在 {mk}（metric.k）"
+            f"CI 上下界的點估{trunc}，本段各表不顯示 @{mk} 欄" + (
+                "；頭號指標與 CI 沒有排除全正的 query group，A、B 塊各表已排除"
+                if drop and ci_shown else ""
+            )
+        )
+    elif drop and ci_shown:
+        ci_point_note = (
+            f"頭號指標與 CI 上下界{trunc}，但沒有排除全正的 query group；B 塊 "
+            f"map_attr 表同一列的 map_attr@{col} 點估已排除，和 CI 不是同一批組，"
+            "點估可能落在 CI 之外"
         )
     else:
-        ci_point_note = (
-            f"CI 上下界的點估截斷在 {mk}（metric.k），本段各表不顯示 @{mk} 欄"
-        )
+        ci_point_note = f"CI 上下界的點估與該列 map_attr@{col} 同一定義，{trunc}"
+    ledger = [
+        line for grain, bundle in _grain_bundles(metrics)
+        if (line := _group_ledger_line(grain, bundle, parameters))
+    ]
     return ReportSection(
         title="衡量指標",
         description=(
@@ -930,6 +1174,9 @@ def build_metrics_section(
             "退化為 base rate、recall 恆為 1。CI 僅算到 item 層（大類 per-item 無 "
             "bootstrap CI）。per-item 列序統一按字母。明細表點標題展開。"
         ),
+        # The query-group ledger (#376), one line per grain, always printed:
+        # the reader decides from it whether to turn the switch on.
+        bullets=ledger,
         tables=tables,
         table_titles=titles,
         collapsed_tables=collapsed,
@@ -1046,9 +1293,26 @@ def build_prediction_quality_section(
     # --post-training the test table arrives already filtered, so with nothing
     # excluded here the two sections read the same rows.
     n_excl = metrics.get("n_excluded_queries")
-    ranking_rule = "主指標段（mAP／precision@K／recall@K）只算有正例的 query group"
-    excluded = (f"，本次排除 {n_excl} 個（n_excluded_queries）"
-                if n_excl is not None else "")
+    # #376: with drop_all_positive_groups on, the ranking section also drops
+    # the all-positive groups; "only groups with a positive" and "the two
+    # populations are the same" would both be false.
+    drop = drop_all_positive_groups(parameters)
+    n_all = metrics.get(ALL_POSITIVE_KEY)
+    if drop:
+        ranking_rule = (
+            "主指標段（mAP／precision@K／recall@K）只算有正例、而且不是全正的 "
+            f"query group（{_ALL_POSITIVE_SWITCH} 開著）"
+        )
+        parts = []
+        if n_excl is not None:
+            parts.append(f"無正例的 {n_excl} 個（n_excluded_queries）")
+        if n_all is not None:
+            parts.append(f"全正的 {n_all} 個（{ALL_POSITIVE_KEY}）")
+        excluded = f"，本次排除{'與'.join(parts)}" if parts else ""
+    else:
+        ranking_rule = "主指標段（mAP／precision@K／recall@K）只算有正例的 query group"
+        excluded = (f"，本次排除 {n_excl} 個（n_excluded_queries）"
+                    if n_excl is not None else "")
     weight_col = prediction_quality["columns"].get("weight")
     if parameters.get("post_training") and weight_col:
         population = (
@@ -1061,7 +1325,9 @@ def build_prediction_quality_section(
             "兩段的母體不同，precision 不可互相比較。"
         )
     elif parameters.get("post_training"):
-        same = n_excl == 0
+        # With the switch on the ranking section also dropped the all-positive
+        # groups; the populations are the same only if there were none.
+        same = n_excl == 0 and (not drop or n_all == 0)
         population = (
             f"母體：本段算在本次評估的全部 {n_rows:,} 列候選上，本身不排除任何 "
             "query group；但這是 --post-training，test 表在 dataset 階段已經丟掉"
@@ -1247,7 +1513,10 @@ def build_item_detail_section(
     return ReportSection(
         title="per-item 細部拆解",
         description=(
-            "同一批排名的分數與名次分布側面。先看圖（群組在前）：score 分布、"
+            # #376: compute_report_aggregates reads every evaluated row; the
+            # switch does not reach it.
+            _all_positive_kept_note(parameters)
+            + "同一批排名的分數與名次分布側面。先看圖（群組在前）：score 分布、"
             "score by label、rank 計數 heatmap、positive rank 計數 heatmap、"
             "positive rate by rank heatmap；再看數字表：item share by rank（欄"
             "正規化，看誰佔據各名次）。item share 刻意用數字表而非 heatmap——它"
@@ -1637,6 +1906,9 @@ def assemble_diagnosis_pages(results: dict, parameters: dict, out_dir) -> list:
     from recsys_tfb.report import Page
     from recsys_tfb.report.pages import write_pages
 
+    # #376：evaluation.query_filter.drop_all_positive_groups 不套用在任何診斷。
+    # 開著時每頁「算在哪批列上」補一句，同樣在這裡統一填、不逐項診斷各加。
+    kept = _all_positive_kept_note(parameters)
     pages = []
     for i, name in enumerate(DIAGNOSES, start=1):
         result = (results or {}).get(name)
@@ -1654,6 +1926,8 @@ def assemble_diagnosis_pages(results: dict, parameters: dict, out_dir) -> list:
             mod.SCOPE,
             sampling=(result.get("sample_meta", {}) or {}).get(
                 "sampling_description", ""),
+            population=(f"{mod.SCOPE.population}　{kept}" if kept
+                        else mod.SCOPE.population),
         )
         pages.append(Page(slug=slug, title=mod.TITLE,
                           scope=scope, sections=tuple(sections)))
@@ -1715,11 +1989,8 @@ def build_completeness_section(
     # build_overview_section.
     facts = {
         "k_values": eval_p.get("k_values"),
-        "全部 query 數 n_queries": metrics.get("n_queries"),
-        "有正例的 query 數": _od(
-            metrics.get("n_queries"), metrics.get("n_excluded_queries")
-        ),
-        "排除 query 數 n_excluded_queries": metrics.get("n_excluded_queries"),
+        # Same rows as the overview's scale table, one derivation (#376).
+        **_query_count_rows(metrics, parameters),
         "正例列數 n_positives": totals.get("n_positives"),
         f"{item_col} 數 n_items": totals.get("n_items"),
         "metric.weight_alpha（item 加權指數 α；0＝item 等權）":
@@ -1870,8 +2141,19 @@ def assemble_report(
     metadata.update({
         "Generated At": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "Total Queries": metrics.get("n_queries"),
-        "Excluded Queries": metrics.get("n_excluded_queries"),
     })
+    # n_excluded_queries counts only the groups without a positive. With
+    # drop_all_positive_groups on, the all-positive groups are excluded too,
+    # and a bare "Excluded Queries" would read as the whole count (#376).
+    if drop_all_positive_groups(parameters):
+        metadata["Excluded Queries (no positive)"] = metrics.get(
+            "n_excluded_queries")
+        metadata["Excluded Queries (all positive)"] = metrics.get(
+            ALL_POSITIVE_KEY)
+    else:
+        metadata["Excluded Queries"] = metrics.get("n_excluded_queries")
+    # The all-positive share warning, right under the counts it is about.
+    metadata.update(_all_positive_warnings(metrics, parameters))
     return generate_html_report(
         sections, title="Model Evaluation Report", metadata=metadata
     )

@@ -70,10 +70,12 @@ import numpy as np
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import Window
 from pyspark.sql import functions as F
+from pyspark.sql.window import WindowSpec
 
 from recsys_tfb.core.schema import declares_optional_role, get_schema
 from recsys_tfb.evaluation.metrics import (
     ALL_K_KEY,
+    ALL_POSITIVE_KEY,
     macro_from_per_item,
     metric_params,
 )
@@ -484,6 +486,115 @@ def add_query_total_rel(
     return df.withColumn("total_rel", F.sum(F.col(label_col)).over(w))
 
 
+def _all_positive_group(label_col: str, window: WindowSpec | None = None):
+    """True for a query group whose every row carries the same positive label:
+    the *all-positive* groups (#376). An aggregate over the group's rows —
+    per group inside ``groupBy().agg``, or on every row over ``window``.
+
+    The one definition both the count (``_count_query_groups``) and the filter
+    (``_keep_scored_query_groups``) use: ``min(label) == max(label) > 0``, a
+    NULL label read as 0 for the minimum.
+
+    * **The same positive label, not just a positive one.** The label comes
+      from the deployment's own ``label_table`` and nothing holds it to 0/1.
+      Rows labelled 2 and 3 are all positive, yet which one ranks first moves
+      ``map@K`` and ``precision@K``; only equal labels leave every order with
+      the same label sequence, hence every per-query metric the same. With 0/1
+      labels this is exactly "every row positive".
+    * **Row by row, not item by item.** With ``event`` declared a query group
+      can hold one item several times; one item shown twice with one response
+      is a group whose AP depends on the order, so it is not all-positive. AP
+      ranks and scores rows (``rank_within_query``).
+    * **Not ``total_rel == row count``**: a graded 2 next to a 0 would pass it.
+    * **A NULL label is not positive** — ``total_rel`` (a sum) skips it, so
+      where the positive rows rank still moves AP. ``min`` alone would skip it
+      too and call the group all-positive; hence the ``coalesce``.
+    """
+    lowest = F.min(F.coalesce(F.col(label_col), F.lit(0)))
+    highest = F.max(F.col(label_col))
+    if window is not None:
+        lowest, highest = lowest.over(window), highest.over(window)
+    return (lowest > 0) & (lowest == highest)
+
+
+def _count_query_groups(
+    frame: SparkDataFrame, group_cols: Sequence[str], label_col: str
+) -> tuple[int, int, int]:
+    """``(all, holding a positive, all-positive)`` query groups, in one action.
+
+    Replaces two ``select(group_cols).distinct().count()`` — one on the frame,
+    one on the frame after the rank and ``total_rel`` windows — with a single
+    ``groupBy`` that also yields the all-positive count (#376), so the count
+    costs no action of its own. The first two numbers are the ones the
+    distinct counts gave: ``groupBy`` groups NULL keys together as
+    ``distinct`` does, and "holding a positive" is ``sum(label) > 0``, the
+    ``total_rel > 0`` the filter keeps.
+
+    An all-positive group holds a positive by construction (every group has a
+    row); the ``AND`` only keeps the subset relation that
+    ``metrics.all_positive_share`` divides by explicit.
+    """
+    has_positive = F.col("_total_rel") > 0
+    row = (
+        frame.groupBy(*group_cols)
+        .agg(
+            F.sum(F.col(label_col)).alias("_total_rel"),
+            _all_positive_group(label_col).alias("_all_positive"),
+        )
+        .agg(
+            F.count(F.lit(1)).alias("n_queries"),
+            F.sum(F.when(has_positive, 1).otherwise(0)).alias("n_with_positive"),
+            F.sum(
+                F.when(has_positive & F.col("_all_positive"), 1).otherwise(0)
+            ).alias("n_all_positive"),
+        )
+        .collect()[0]
+    )
+    return (
+        int(row["n_queries"]),
+        int(row["n_with_positive"] or 0),
+        int(row["n_all_positive"] or 0),
+    )
+
+
+def _keep_scored_query_groups(
+    df: SparkDataFrame,
+    group_cols: Sequence[str],
+    label_col: str,
+    *,
+    drop_all_positive_groups: bool,
+) -> SparkDataFrame:
+    """The rows of the query groups the ranking metrics score. Requires
+    upstream ``total_rel``.
+
+    Always the groups holding a positive: AP is undefined at ``total_rel ==
+    0``. With ``drop_all_positive_groups`` also not the all-positive ones
+    (``_all_positive_group``, #376): every per-query metric of such a group is
+    the same whatever the order, so it cannot tell two rankings apart.
+
+    Switched off this is exactly the filter it replaced — no extra column, the
+    same plan — so the metrics stay value-for-value what they were by
+    construction, not by a test's fixture. Switched on, the extra window has
+    the same spec as ``total_rel``'s, which Spark evaluates in the same pass.
+
+    The measurement metrics (``_compute_core``) and the popularity baseline
+    (``compute_overall_per_item``) both filter here, so the two sides of the
+    report's comparison cannot drop different groups.
+    """
+    has_positive = F.col("total_rel") > 0
+    if not drop_all_positive_groups:
+        return df.filter(has_positive)
+    all_positive = "_all_positive_group"
+    return (
+        df.withColumn(
+            all_positive,
+            _all_positive_group(label_col, Window.partitionBy(*group_cols)),
+        )
+        .filter(has_positive & ~F.col(all_positive))
+        .drop(all_positive)
+    )
+
+
 def add_row_contributions(
     df: SparkDataFrame,
     group_cols: list[str],
@@ -794,12 +905,28 @@ def _compute_core(
     segment_columns: Sequence[str],
     *,
     event_cols: Sequence[str],
+    drop_all_positive_groups: bool,
 ) -> dict:
     """The fine-grained metric bundle (overall/per_item/per_segment/...).
 
     Body identical to the pre-refactor compute_all_metrics — no category,
     no dataset_overview. Used for both fine-grained and (on a collapsed DF)
     category-grain passes.
+
+    ``drop_all_positive_groups`` has no default for the reason given for
+    ``event_cols`` below: both call sites must pass it, and a default would
+    leave the category pass silently unfiltered when the switch is on. Unlike
+    ``event_cols`` the two passes get the same value; what differs is the
+    frame the all-positive groups are decided on (see ``compute_all_metrics``).
+
+    The counts are written whatever the switch: ``n_queries`` (every group),
+    ``n_excluded_queries`` (groups holding no positive — only those, the
+    report reads ``n_queries - n_excluded_queries`` as the groups holding a
+    positive) and ``metrics.ALL_POSITIVE_KEY`` (of those, the all-positive
+    ones). Switched on, the bundle scores ``n_queries - n_excluded_queries -
+    n_all_positive_queries`` groups; when that is 0 the bundle is the empty
+    one, counts included, and the log says the switch left nothing rather
+    than that no group holds a positive.
 
     ``event_cols`` is passed in rather than read from ``parameters``, and has
     no default, because **the two passes need different answers and the frame
@@ -838,7 +965,13 @@ def _compute_core(
     # the one other place metrics.resolved_all_k looks — so a bundle computed
     # without event rows gains no key.
     recorded_k = {ALL_K_KEY: all_k} if event_cols else {}
-    n_queries_total = eval_predictions.select(*group_cols).distinct().count()
+    n_queries_total, n_queries_with_pos, n_all_positive = _count_query_groups(
+        eval_predictions, group_cols, label_col)
+    counts = {
+        "n_queries": n_queries_total,
+        "n_excluded_queries": n_queries_total - n_queries_with_pos,
+        ALL_POSITIVE_KEY: n_all_positive,
+    }
 
     # ---- Layer 1: row-level enrichment ----
     df = rank_within_query(
@@ -846,20 +979,24 @@ def _compute_core(
     )
     df = add_query_total_rel(df, group_cols, label_col)
 
-    df_with_pos = df.filter(F.col("total_rel") > 0)
-    n_queries_with_pos = df_with_pos.select(*group_cols).distinct().count()
-    n_excluded_queries = n_queries_total - n_queries_with_pos
+    scored = _keep_scored_query_groups(
+        df, group_cols, label_col,
+        drop_all_positive_groups=drop_all_positive_groups,
+    )
 
     if n_queries_with_pos == 0:
         logger.warning("No queries with positive labels found")
-        return {
-            **_EMPTY_RESULT,
-            "n_queries": n_queries_total,
-            "n_excluded_queries": n_excluded_queries,
-            **recorded_k,
-        }
+        return {**_EMPTY_RESULT, **counts, **recorded_k}
+    if drop_all_positive_groups and n_all_positive == n_queries_with_pos:
+        logger.warning(
+            "No query group left to score: all %d holding a positive are "
+            "all-positive, and evaluation.query_filter."
+            "drop_all_positive_groups drops them",
+            n_all_positive,
+        )
+        return {**_EMPTY_RESULT, **counts, **recorded_k}
 
-    enriched = add_row_contributions(df_with_pos, group_cols, label_col, item_ks)
+    enriched = add_row_contributions(scored, group_cols, label_col, item_ks)
     enriched = enriched.cache()
     try:
         # ---- Layer 2: per-query metrics (carries seg for per_segment) ----
@@ -922,8 +1059,7 @@ def _compute_core(
                 "per_item_segment": per_item_segment,
                 "macro_avg": macro_avg,
                 "observation_items": observation_items,
-                "n_queries": n_queries_total,
-                "n_excluded_queries": n_excluded_queries,
+                **counts,
                 **recorded_k,
             }
         finally:
@@ -939,12 +1075,23 @@ def compute_overall_per_item(
     segment_columns: Sequence[str] = (),
     with_category: bool = False,
     event_cols: Sequence[str] | None = None,
+    drop_all_positive_groups: bool = False,
 ) -> dict:
     """Slim metric bundle: ``overall`` + ``per_item`` (+ optional slices).
 
     Composes the same Layer-1/2/3 building blocks as ``_compute_core`` but
     skips per-item-segment, macro_avg, and dataset_overview. Used by the
     popularity baseline, whose report section consumes these keys.
+
+    ``drop_all_positive_groups`` drops the all-positive query groups as
+    ``compute_all_metrics`` does, through the same filter
+    (``_keep_scored_query_groups``), so the baseline and the model it is read
+    against score the same groups. The caller reads the switch
+    (``metrics.drop_all_positive_groups``); this function never reads it from
+    ``parameters``. The recursion for the category pass passes it on — left
+    out there, the category grain would silently keep its all-positive
+    groups. Nothing is counted: the report's ledger reads the model's bundle,
+    and the baseline scores the same groups.
 
     ``event_cols`` names the tie-break columns after the item. ``None`` — every
     caller but one — means "read ``schema.columns.event``", which is right for
@@ -978,7 +1125,8 @@ def compute_overall_per_item(
 
     Returns ``{"overall": {...}, "per_item": {...}}`` (plus ``per_segment`` /
     ``category`` when requested and available); overall/per_item empty when no
-    query has a positive label.
+    query group is left to score — none holds a positive label, or, switched
+    on, every one holding a positive is all-positive.
     """
     schema = get_schema(parameters)
     item_col = schema["item"]
@@ -1001,13 +1149,26 @@ def compute_overall_per_item(
         eval_predictions, group_cols, score_col, item_col, list(event_cols),
     )
     df = add_query_total_rel(df, group_cols, label_col)
-    df_with_pos = df.filter(F.col("total_rel") > 0)
-    if df_with_pos.limit(1).count() == 0:
-        logger.warning("No queries with positive labels found")
+    scored = _keep_scored_query_groups(
+        df, group_cols, label_col,
+        drop_all_positive_groups=drop_all_positive_groups,
+    )
+    if scored.limit(1).count() == 0:
+        # Which of the two emptied it takes one more action, paid only here.
+        if drop_all_positive_groups and _keep_scored_query_groups(
+            df, group_cols, label_col, drop_all_positive_groups=False,
+        ).limit(1).count() > 0:
+            logger.warning(
+                "No query group left to score: every one holding a positive "
+                "is all-positive, and evaluation.query_filter."
+                "drop_all_positive_groups drops them"
+            )
+        else:
+            logger.warning("No queries with positive labels found")
         return {"overall": {}, "per_item": {}}
 
     enriched = add_row_contributions(
-        df_with_pos, group_cols, label_col, item_ks
+        scored, group_cols, label_col, item_ks
     ).cache()
     try:
         carry = [active_seg_col] if active_seg_col else []
@@ -1031,9 +1192,11 @@ def compute_overall_per_item(
         collapsed = collapse_to_categories(eval_predictions, parameters)
         # `event_cols=()`: the collapse has aggregated those columns away —
         # see this function's docstring, and the twin call in
-        # `compute_all_metrics`.
+        # `compute_all_metrics`. The switch goes on unchanged; the category
+        # frame decides which of its groups are all-positive.
         result["category"] = compute_overall_per_item(
             collapsed, parameters, event_cols=(),
+            drop_all_positive_groups=drop_all_positive_groups,
         )
     return result
 
@@ -1043,6 +1206,7 @@ def compute_all_metrics(
     parameters: dict,
     *,
     segment_columns: Sequence[str] = (),
+    drop_all_positive_groups: bool = False,
 ) -> dict:
     """Full bundle: fine-grained core + dataset_overview + optional category.
 
@@ -1082,7 +1246,15 @@ def compute_all_metrics(
           },
           "observation_items": [item, ...]（n_pos < evaluation.metric.min_positives 的 item；additive，預設空）
           "n_queries":          int  (total distinct queries before filtering),
-          "n_excluded_queries": int  (queries with zero positives → dropped),
+          "n_excluded_queries": int  (queries with zero positives → dropped;
+                                      only those, switch on or off),
+          "n_all_positive_queries":
+                                int  (metrics.ALL_POSITIVE_KEY; always
+                                      written) of the queries holding a
+                                      positive, those whose every row carries
+                                      the same positive label
+                                      (``_all_positive_group``). Dropped only
+                                      when ``drop_all_positive_groups``.
           "all_k":  int  (metrics.ALL_K_KEY; only when schema declares
                           ``event``, and never inside ``category``) the K
                           ``"all"`` resolved to — the widest query group.
@@ -1099,18 +1271,36 @@ def compute_all_metrics(
           },
           "category":  (only when item_categories.enabled)
               same shape as the top level (overall / per_item / per_segment /
-              per_item_segment / macro_avg / n_queries / n_excluded_queries)
-              PLUS its own "dataset_overview"; never contains "category".
+              per_item_segment / macro_avg / n_queries / n_excluded_queries /
+              n_all_positive_queries) PLUS its own "dataset_overview"; never
+              contains "category".
         }
 
     Queries with zero positives are excluded from the metric computation
     (AP is undefined when total_rel = 0).
+
+    ``drop_all_positive_groups`` (default off) also excludes the
+    *all-positive* queries: the same positive label on every row, so every
+    per-query metric is the same whatever the order (#376). The caller reads
+    the switch — ``metrics.drop_all_positive_groups``, from the evaluation
+    nodes — and this function never reads it from ``parameters``: training
+    scores its test set through here too, and its test mAP must not move with
+    an evaluation setting, so it simply does not pass it. Each grain decides
+    on its own frame: at the category grain a query is all-positive when
+    every category it holds gets the same positive label (the max of its
+    children), which a query mixed row by row can be. Off, every key but the
+    new count is value-for-value what it was. Known effect, not a bug:
+    per-item keys such as ``map_attr@K`` and ``hit_rate@K`` still depend on
+    the order inside an all-positive query when K is below its row count (``ap_contrib@K = prec_at_pos × label ×
+    top_k@K``: which rows reach the top K decides which items get the
+    credit); switched on, those queries leave them too.
     """
     # The fine-grained pass ranks the rows as they were written: one per
     # candidate, so `event` is what tells two rows of one item apart.
     result = _compute_core(
         eval_predictions, parameters, segment_columns,
         event_cols=get_schema(parameters).get("event", []),
+        drop_all_positive_groups=drop_all_positive_groups,
     )
     result["dataset_overview"] = compute_dataset_overview(
         eval_predictions, parameters, segment_columns=segment_columns
@@ -1125,9 +1315,12 @@ def compute_all_metrics(
         # max(score) / max(label), so it emits exactly one row per pair and
         # the `event` columns are aggregated away. The category column already
         # decides every tie, and asking for `event` here is asking for a
-        # column the frame does not have.
+        # column the frame does not have. The switch is the same; which
+        # queries it drops is decided on this frame (label = max of the
+        # children), so a query mixed row by row can be all-positive here.
         cat = _compute_core(
             collapsed, parameters, segment_columns, event_cols=(),
+            drop_all_positive_groups=drop_all_positive_groups,
         )
         cat["dataset_overview"] = compute_dataset_overview(
             collapsed, parameters, segment_columns=segment_columns

@@ -141,3 +141,43 @@ def test_test_map_matches_the_report_when_event_is_declared(spark):
     ).tables[0]
     assert result["overall_map"] == pytest.approx(
         report_card.loc["map@all", "value"])
+
+
+def test_test_map_does_not_follow_the_all_positive_switch(spark):
+    """#376: ``evaluation.query_filter.drop_all_positive_groups`` is an
+    evaluation setting. The test mAP is logged to mlflow to compare models, and
+    a switch that moved it would make models trained before and after it
+    incomparable with nothing in the model version to say so. So training
+    never passes it, whatever ``parameters`` holds.
+
+    c1 is all-positive (AP 1 whatever the order), c2 puts its positive second
+    (AP 1/2): mAP 3/4 with c1, 1/2 without — the fixture can tell.
+    """
+    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+    from recsys_tfb.pipelines.training.nodes import compute_test_mAP_spark
+
+    rows = [
+        {"cust_id": "c1", "snap_date": "2025-01-31", "prod_name": "prod_A",
+         "score": 0.9, "label": 1},
+        {"cust_id": "c1", "snap_date": "2025-01-31", "prod_name": "prod_B",
+         "score": 0.1, "label": 1},
+        {"cust_id": "c2", "snap_date": "2025-01-31", "prod_name": "prod_A",
+         "score": 0.2, "label": 1},
+        {"cust_id": "c2", "snap_date": "2025-01-31", "prod_name": "prod_B",
+         "score": 0.8, "label": 0},
+    ]
+    df = _make_df(spark, rows)
+    manifest = {"snap_dates": ["2025-01-31"], "items": ["prod_A", "prod_B"],
+                "model_version": "v_test", "n_rows_written": len(rows)}
+    switched_on = _make_parameters()
+    switched_on["evaluation"]["query_filter"] = {
+        "drop_all_positive_groups": True}
+
+    with_switch = compute_test_mAP_spark(df, manifest, switched_on)
+    without_switch = compute_test_mAP_spark(df, manifest, _make_parameters())
+
+    assert with_switch == without_switch
+    assert with_switch["overall_map"] == pytest.approx(0.75)
+    dropped = compute_all_metrics(
+        df, _make_parameters(), drop_all_positive_groups=True)
+    assert dropped["overall"]["map@2"] == pytest.approx(0.5)

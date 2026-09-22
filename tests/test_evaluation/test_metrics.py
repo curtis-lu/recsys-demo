@@ -686,6 +686,142 @@ class TestResolvedAllK:
         assert resolved_all_k({}) == 0
 
 
+# ---------------------------------------------------------------------------
+# All-positive query groups (#376): the switch reader, the share, the warning
+# ---------------------------------------------------------------------------
+
+
+class TestDropAllPositiveGroups:
+    def test_missing_block_or_none_means_off(self):
+        from recsys_tfb.evaluation.metrics import drop_all_positive_groups
+
+        assert drop_all_positive_groups({}) is False
+        assert drop_all_positive_groups({"evaluation": None}) is False
+        assert drop_all_positive_groups(
+            {"evaluation": {"query_filter": None}}) is False
+        assert drop_all_positive_groups(
+            {"evaluation": {"query_filter": {
+                "drop_all_positive_groups": None}}}) is False
+
+    def test_true_turns_it_on(self):
+        from recsys_tfb.evaluation.metrics import drop_all_positive_groups
+
+        assert drop_all_positive_groups(
+            {"evaluation": {"query_filter": {
+                "drop_all_positive_groups": True}}}) is True
+
+    def test_not_read_from_evaluation_metric(self):
+        """``metric_params`` silently drops unknown keys of
+        ``evaluation.metric``, so a switch written there would do nothing."""
+        from recsys_tfb.evaluation.metrics import drop_all_positive_groups
+
+        assert drop_all_positive_groups(
+            {"evaluation": {"metric": {
+                "drop_all_positive_groups": True}}}) is False
+
+
+class TestAllPositiveShare:
+    def test_denominator_is_the_groups_with_a_positive(self):
+        """The mAP denominator: ``n_queries - n_excluded_queries``, where
+        ``n_excluded_queries`` counts only the zero-positive groups."""
+        from recsys_tfb.evaluation.metrics import (
+            ALL_POSITIVE_KEY, all_positive_share,
+        )
+
+        bundle = {"n_queries": 1000, "n_excluded_queries": 50,
+                  ALL_POSITIVE_KEY: 95}
+        assert all_positive_share(bundle) == pytest.approx(95 / 950)
+
+    def test_unknown_when_the_count_is_missing_or_no_group_has_a_positive(self):
+        """A bundle written before #376 has no count; a run where no group
+        holds a positive has no denominator."""
+        from recsys_tfb.evaluation.metrics import (
+            ALL_POSITIVE_KEY, all_positive_share,
+        )
+
+        assert all_positive_share(
+            {"n_queries": 10, "n_excluded_queries": 0}) is None
+        assert all_positive_share(
+            {"n_queries": 10, "n_excluded_queries": 10,
+             ALL_POSITIVE_KEY: 0}) is None
+
+
+class TestNGroupsWithPositive:
+    def test_is_n_queries_less_the_zero_positive_groups(self):
+        from recsys_tfb.evaluation.metrics import n_groups_with_positive
+
+        assert n_groups_with_positive(
+            {"n_queries": 1000, "n_excluded_queries": 50}) == 950
+        assert n_groups_with_positive(
+            {"n_queries": 10, "n_excluded_queries": 10}) == 0
+
+    def test_unknown_when_either_count_is_missing(self):
+        """Never a guess at the missing count: 0 in its place would read as
+        "every group holds a positive"."""
+        from recsys_tfb.evaluation.metrics import n_groups_with_positive
+
+        assert n_groups_with_positive({"n_excluded_queries": 5}) is None
+        assert n_groups_with_positive({"n_queries": 10}) is None
+        assert n_groups_with_positive(
+            {"n_queries": None, "n_excluded_queries": 0}) is None
+        assert n_groups_with_positive({}) is None
+
+
+class TestFormatShare:
+    def test_one_decimal_by_default(self):
+        from recsys_tfb.evaluation.metrics import format_share
+
+        assert format_share(0.053) == "5.3%"
+        assert format_share(50 / 950) == "5.3%"
+        assert format_share(0.101) == "10.1%"
+        assert format_share(0.10) == "10.0%"   # at the threshold: not above
+
+    def test_above_the_threshold_never_prints_as_the_threshold(self):
+        """1004 / 10000 is above 10% and would print 10.0% beside "above
+        10%"; more decimals until the printed value is above it too."""
+        from recsys_tfb.evaluation.metrics import format_share
+
+        assert format_share(1004 / 10000) != "10.0%"
+        assert format_share(1004 / 10000) == "10.04%"
+        assert format_share(21 / 209) == "10.05%"
+        assert format_share(100001 / 1000000) == "10.0001%"
+
+
+class TestAllPositiveShareWarns:
+    ON = {"evaluation": {"query_filter": {"drop_all_positive_groups": True}}}
+
+    @staticmethod
+    def _bundle(n_all_positive: int, n_with_positive: int = 100) -> dict:
+        from recsys_tfb.evaluation.metrics import ALL_POSITIVE_KEY
+
+        return {"n_queries": n_with_positive + 7, "n_excluded_queries": 7,
+                ALL_POSITIVE_KEY: n_all_positive}
+
+    def test_warns_above_the_threshold_when_the_switch_is_off(self):
+        from recsys_tfb.evaluation.metrics import all_positive_share_warns
+
+        assert all_positive_share_warns(self._bundle(11), {}) is True
+
+    def test_exactly_the_threshold_does_not_warn(self):
+        from recsys_tfb.evaluation.metrics import (
+            ALL_POSITIVE_WARN_SHARE, all_positive_share_warns,
+        )
+
+        assert ALL_POSITIVE_WARN_SHARE == 0.10
+        assert all_positive_share_warns(self._bundle(10), {}) is False
+
+    def test_no_warning_when_the_switch_already_drops_them(self):
+        from recsys_tfb.evaluation.metrics import all_positive_share_warns
+
+        assert all_positive_share_warns(self._bundle(60), self.ON) is False
+
+    def test_no_warning_when_the_share_is_unknown(self):
+        from recsys_tfb.evaluation.metrics import all_positive_share_warns
+
+        assert all_positive_share_warns(
+            {"n_queries": 10, "n_excluded_queries": 0}, {}) is False
+
+
 class TestPooledAveragePrecision:
     """The HPO objective ``pooled_average_precision`` (#430): every val row one
     binary prediction, all rows in one pool, scored exactly as scikit-learn

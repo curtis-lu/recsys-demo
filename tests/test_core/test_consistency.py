@@ -4687,3 +4687,73 @@ class TestFeatureTableOverlapB14:
             ["snap_date", "cust_id", "etl_ts"], [*_B13_IDENTITY, "etl_ts"],
             drop=("etl_ts",),
         ) == []
+
+
+# --- A49: evaluation.query_filter.drop_all_positive_groups (#376) -----------
+
+from recsys_tfb.core.consistency import (  # noqa: E402
+    QUERY_FILTER_DEFAULTS,
+    query_filter_param_errors,
+)
+
+
+def _qf_params(block):
+    return {"evaluation": {"query_filter": block}}
+
+
+class TestQueryFilterParamsA49:
+    def test_absent_evaluation_passes(self):
+        assert query_filter_param_errors({}) == []
+
+    def test_absent_block_passes(self):
+        assert query_filter_param_errors({"evaluation": {}}) == []
+
+    def test_explicit_null_block_passes(self):
+        # A fully-commented-out `query_filter:` parent line in conf reads as
+        # None in YAML; must mean off, the same as absent.
+        assert query_filter_param_errors(_qf_params(None)) == []
+
+    def test_default_value_passes(self):
+        assert query_filter_param_errors(
+            _qf_params(dict(QUERY_FILTER_DEFAULTS))) == []
+
+    def test_true_passes(self):
+        assert query_filter_param_errors(
+            _qf_params({"drop_all_positive_groups": True})) == []
+
+    def test_false_passes(self):
+        assert query_filter_param_errors(
+            _qf_params({"drop_all_positive_groups": False})) == []
+
+    @pytest.mark.parametrize("value", ["yes", 1, 0, "true", 1.0])
+    def test_a_non_bool_value_is_reported(self, value):
+        errors = query_filter_param_errors(
+            _qf_params({"drop_all_positive_groups": value}))
+        assert len(errors) == 1
+        assert errors[0].startswith("A49:")
+        assert "drop_all_positive_groups" in errors[0]
+
+    def test_a_non_mapping_block_is_reported(self):
+        errors = query_filter_param_errors(_qf_params("on"))
+        assert len(errors) == 1
+        assert errors[0].startswith("A49:")
+
+    def test_an_undeclared_key_is_reported(self):
+        errors = query_filter_param_errors(
+            _qf_params({"drop_all_positive_groups": True, "typo_key": 1}))
+        assert len(errors) == 1
+        assert "'typo_key'" in errors[0]
+
+    def test_not_under_evaluation_metric(self):
+        """A42's reason: a switch written under evaluation.metric would be
+        silently dropped by metric_params, not validated by A49 at all."""
+        assert query_filter_param_errors(
+            {"evaluation": {"metric": {"drop_all_positive_groups": "nonsense"}}}
+        ) == []
+
+    def test_not_aggregated_by_validate_config_consistency(self):
+        """Evaluation-only key, A34's reason (issue #158)."""
+        p = _base({"inference": {"products": ["a", "b"]}})
+        p["evaluation"] = {"query_filter": {"drop_all_positive_groups": "bad"}}
+        assert query_filter_param_errors(p), "premise: this conf is bad"
+        validate_config_consistency(p)
