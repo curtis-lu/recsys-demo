@@ -155,6 +155,16 @@ COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
     ("evaluation.k_values", "compute_metrics"),
     ("evaluation.item_categories", "compute_metrics"),
     ("evaluation.metric", "compute_metrics"),
+    # First read by evaluation/metrics.py::drop_all_positive_groups, called
+    # from compute_metrics (fine grain and category grain) and
+    # compute_baseline_metrics (#376). Listed at compute_metrics, the first
+    # fingerprinted producer, for the same reason as the baseline/report rows
+    # below: flipping it changes which query groups are dropped before any
+    # ranking metric is computed, so both a stale evaluation_metrics.json and
+    # a stale baseline_metrics.json must be caught, and both sort no earlier
+    # than compute_metrics. Not on prepare_eval_data: the filter runs after
+    # the Hive read, on the already-joined rows, not on the join itself.
+    ("evaluation.query_filter", "compute_metrics"),
     # First read by compute_baseline_metrics / compute_report_aggregates;
     # listed at compute_metrics, the first fingerprinted producer, for the
     # reason in the comment above.

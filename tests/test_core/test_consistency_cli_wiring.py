@@ -81,6 +81,21 @@ def test_a42_wired_into_evaluation_command_before_spark():
     ), "A42 must fail before the Spark cold start, like A34"
 
 
+def test_a49_wired_into_evaluation_command_before_spark():
+    # A49 reads an evaluation-only key: A34's/A42's placement, for A34's
+    # reason.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "query_filter_param_errors" not in inspect.getsource(
+        validate_config_consistency
+    ), "A49 must stay off the global aggregator (#158 precedent)"
+    src = inspect.getsource(m.evaluation)
+    assert "query_filter_param_errors(params)" in src
+    assert src.index("query_filter_param_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A49 must fail before the Spark cold start, like A34"
+
+
 def test_a12_a13_wired_into_evaluation_command_before_spark():
     # A12/A13 read only the two CLI flags and evaluation.compare_sources, so a
     # mistyped --compare key must not cost a Spark cold start before it is
