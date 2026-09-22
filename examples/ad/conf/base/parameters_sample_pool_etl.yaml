@@ -27,7 +27,7 @@ sample_pool_etl:
       # ＝ identity（宣告 occasion 之後多了 request_id）。少寫一欄，
       # max_duplicate_key_ratio: 0.0 會把「同一週同一個素材出現在不同
       # 請求裡」判成重複鍵而擋下整條 ETL。
-      primary_key: [snap_date, user_id, slot_id, request_id, ad_creative]
+      primary_key: [snap_date, user_id, slot_id, request_id, campaign_id, creative_format]
       quality_checks:
         min_row_count: 1
         max_duplicate_key_ratio: 0.0

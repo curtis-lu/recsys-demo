@@ -103,6 +103,7 @@ from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
     restrict_to_eval_snap_dates,
     stamp_partition_fingerprint,
 )
+from recsys_tfb.utils.item_columns import combine_item_columns
 from recsys_tfb.utils.spark import get_or_create_spark_session
 
 logger = logging.getLogger(__name__)
@@ -255,7 +256,10 @@ def make_prepare_eval_data_node(population_name: str):
 
         eval_params = parameters.get("evaluation", {})
 
-        labels = label_table
+        # Decision — a multi-column item is combined on read (ADR-0027), so
+        # label_table joins the predictions on the same `item` they carry.
+        # A single declared column comes back untouched.
+        labels = combine_item_columns(label_table, schema, "label_table")
 
         # Decision — which model_version: the one __main__.py resolved via
         # core.versioning.resolve_model_version, never every version the table
@@ -748,8 +752,13 @@ def build_popularity_period_counts(
         ",".join(periods) or "-",
         ",".join(d.strftime("%Y-%m-%d") for d in plan.skipped) or "-",
     )
+    # Decision — a multi-column item is combined on read (ADR-0027): the
+    # counts are per item, and both tables are the user's own.
+    schema = get_schema(parameters)
     return compute_period_candidate_counts(
-        sample_pool, label_table, periods, parameters)
+        combine_item_columns(sample_pool, schema, "sample_pool"),
+        combine_item_columns(label_table, schema, "label_table"),
+        periods, parameters)
 
 
 def _positive_rate_block(period_counts, snap_dates, lookback_months, parameters):
@@ -868,6 +877,9 @@ def compute_baseline_metrics(
     time_col = schema["time"]
     item_col = schema["item"]
     score_col = schema["score"]
+    # Decision — a multi-column item is combined on read (ADR-0027): every
+    # count below is per item.
+    label_table = combine_item_columns(label_table, schema, "label_table")
     # Single source of the default (bug 1, ADR-0020): before this helper
     # existed, this node defaulted to 12 while build_baseline_section
     # defaulted to None (printing nothing), so a run relying on the implicit

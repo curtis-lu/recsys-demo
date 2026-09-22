@@ -23,6 +23,7 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.utils.item_columns import combine_item_columns
 from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
     PARTITION_FINGERPRINT_COLUMN,
 )
@@ -140,6 +141,9 @@ def _load_external_hive(
     raw = spark.table(table)
     # Column rename: alias external names → our canonical schema names
     df = raw.select(*[F.col(ext).alias(internal) for internal, ext in cols.items()])
+    # A multi-column item is combined once the columns carry our names, and
+    # before prod_mapping, whose keys are item values (ADR-0027).
+    df = combine_item_columns(df, schema, f"compare external_hive table={table!r}")
     # The user's table: nothing says it is partitioned by the time column.
     no_rows = _no_rows_for(df, parameters, time_partitioned=False)
     if no_rows:

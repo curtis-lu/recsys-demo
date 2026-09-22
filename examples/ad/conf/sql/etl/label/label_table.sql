@@ -1,11 +1,11 @@
 --partition by: snap_date
 -- 一次曝光一列：這一次曝光有沒有被點。
 --
--- item 在這裡由兩個屬性拼成一欄（CONTEXT.md：item 恆為一欄）。分隔字元要與
--- generate_data.py 的 ITEM_SEPARATOR、conf 的 categorical_values 一致。
+-- item 是兩個屬性欄，這裡不拼：conf 宣告 item: [campaign_id, creative_format]，框架讀入時
+-- 用 - 拼成一欄 item（ADR-0027）。
 --
 -- 這份 conf 宣告 occasion ＝ request_id（#428，形狀二），所以 identity 是
--- (snap_date, user_id, slot_id, request_id, ad_creative)：一次請求（到秒）展示的
+-- (snap_date, user_id, slot_id, request_id, campaign_id, creative_format)：一次請求（到秒）展示的
 -- 好幾個素材，互不重複，各自帶自己的 label。改這裡要連 parameters_label_etl.yaml
 -- 的 primary_key 一起改：少列 request_id，max_duplicate_key_ratio: 0.0 會把「同一週
 -- 同一個素材出現在不同請求裡」判成重複鍵而擋下整條 ETL。
@@ -23,7 +23,8 @@ SELECT
     w.snap_date,
     i.user_id,
     i.slot_id,
-    concat(i.campaign_id, '-', i.creative_format) AS ad_creative,
+    i.campaign_id,
+    i.creative_format,
     i.request_id,
     CAST(i.clicked AS INT) AS label
 FROM ${raw_db}.impression_log i

@@ -25,7 +25,8 @@ SELECT
     l.snap_date,
     l.user_id,
     l.slot_id,
-    l.ad_creative,
+    l.campaign_id,
+    l.creative_format,
     -- schema.columns.occasion。宣告了角色，sample_pool 與 label_table 都必須帶齊
     -- 那些欄（B11 在 dataset 第一個節點擋下），因為 identity 是候選列的鍵，也是
     -- label 接上來的鍵。

@@ -57,7 +57,7 @@ schema:
   columns:
     time: snap_date # ★切 partition / point-in-time join 用的日期欄
     entity: [cust_id] # ★主要 entity key（list 形式）
-    item: prod_name # ★主要 item identifier
+    item: prod_name # ★主要 item identifier；由多欄組成時寫成清單，框架讀入時用 - 拼成一欄 item（docs/pipelines/dataset.md §3.9）
     label: label # ★
     score: score # 模型分數輸出欄（一般不需改）
     rank: rank # 組內名次欄（一般不需改）

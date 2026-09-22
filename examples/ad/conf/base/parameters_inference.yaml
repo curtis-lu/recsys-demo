@@ -6,7 +6,7 @@ inference:
   entity_buckets: 10
   snap_dates:
     - "2026-01-05"   # 資料的最後一週，不在任何訓練／評估 split 裡
-  products:          # 須 == schema.categorical_values.ad_creative（A4）
+  products:          # 須 == schema.categorical_values.item（A4）
     - c01-banner
     - c01-native
     - c01-video

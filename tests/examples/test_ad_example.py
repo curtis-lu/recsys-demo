@@ -5,8 +5,8 @@
 
 1. 框架新增必填鍵或不變量時，這份 conf 在 CLI 入口就過不了。銀行示例的 conf
    有一大堆測試在讀；這份沒有，不在這裡擋，要等有人真的去跑才會發現。
-2. 產生器實際產出的 item 與 conf 逐一列出的清單要一致。item 是 SQL 把兩個屬性
-   拼出來的，兩邊各寫各的，任一邊改了另一邊不會跟著動。
+2. 產生器實際產出的 item 與 conf 逐一列出的清單要一致。item 是框架把兩個屬性欄
+   拼出來的（conf 宣告成多欄，ADR-0027），清單卻是 conf 手寫的，任一邊改了另一邊不會跟著動。
 3. 後面幾張票（event 角色、候選層級特徵表、item 清單從資料數）要用的資料形狀真的在原始資料裡。
    即時特徵與快照的「該算出什麼」照 check_features.py 的定義算——run_e2e.sh 拿同一份
    定義去比 SQL 的輸出，這裡只看原始資料有沒有那個形狀。
@@ -54,7 +54,8 @@ def test_schema_roles_follow_adr_0021(params):
     # source_etl 的輸出檢查把 WHERE snap_date = … 寫死，time 欄換名 source_etl 就壞
     assert cols["time"] == "snap_date"
     assert isinstance(cols["entity"], list) and len(cols["entity"]) == 2
-    assert isinstance(cols["item"], str)
+    # #394：item 宣告成兩欄，框架讀入時拼成一欄 item（ADR-0027），SQL 不拼
+    assert cols["item"] == ["campaign_id", "creative_format"]
     # #428 之後這份 conf 是形狀二：occasion ＝ 一次請求，不再宣告 event（同一次請求
     # 裡素材互不重複，identity 不需要它就唯一）。
     assert cols["occasion"] == "request_id"
@@ -68,7 +69,7 @@ def test_occasion_defines_the_query_group_and_widens_identity(params):
     entity 層級，沒有請求的欄。"""
     schema = get_schema(params)
     assert schema["identity_columns"] == [
-        "snap_date", "user_id", "slot_id", "request_id", "ad_creative",
+        "snap_date", "user_id", "slot_id", "request_id", "item",
     ]
     assert schema["query_group_columns"] == ["snap_date", "user_id", "slot_id", "request_id"]
     assert schema["base_key_columns"] == ["snap_date", "user_id", "slot_id"]
@@ -83,23 +84,31 @@ def test_both_candidate_grain_source_tables_declare_the_occasion_column(params):
 
 
 def test_generated_items_equal_the_declared_list(params, raw):
-    item_col = params["schema"]["columns"]["item"]
+    item_col = get_schema(params)["item"]
     log = raw["impression_log"]
-    # 拼法與 label_table.sql 相同，由下一個測試守
+    # 拼法與框架讀入時相同，由下一個測試守
     in_data = set(log["campaign_id"] + ITEM_SEPARATOR + log["creative_format"])
     assert in_data == set(params["schema"]["categorical_values"][item_col])
 
 
-def test_sql_builds_item_with_the_generator_separator():
-    # item 在不只一支 SQL 裡拼（候選的 label_table、即時特徵的 feature_realtime），掃全部
-    pattern = r"concat\(\s*(?:\w+\.)?campaign_id\s*,\s*'([^']*)'\s*,\s*(?:\w+\.)?creative_format\s*\)"
-    separators = {
-        path.relative_to(CONF / "sql" / "etl").as_posix(): set(re.findall(pattern, path.read_text()))
+def test_the_generator_joins_items_the_way_the_framework_does():
+    """清單是照產生器的拼法寫的，框架照自己的拼法拼；兩者一不同，B1 會在 dataset
+    第一個節點擋下整份清單。"""
+    from recsys_tfb.utils.item_columns import ITEM_SEPARATOR as FRAMEWORK_SEPARATOR
+
+    assert ITEM_SEPARATOR == FRAMEWORK_SEPARATOR
+
+
+def test_no_sql_combines_the_item_any_more():
+    """#394 之後 SQL 帶原欄、框架拼。SQL 若還拼一欄，那張表就同時有原欄與拼好的欄，
+    而拼好的那一欄沒有人讀——兩份拼法各寫各的，正是這個功能要拿掉的東西。"""
+    pattern = r"concat(?:_ws)?\([^)]*campaign_id[^)]*creative_format"
+    combining = [
+        path.relative_to(CONF / "sql" / "etl").as_posix()
         for path in sorted((CONF / "sql" / "etl").rglob("*.sql"))
-    }
-    building = {f: s for f, s in separators.items() if s}
-    assert {"label/label_table.sql", "feature/feature_realtime.sql"} <= set(building)
-    assert building == {f: {ITEM_SEPARATOR} for f in building}
+        if re.search(pattern, path.read_text())
+    ]
+    assert combining == []
 
 
 #: 部署自己選擇要不要宣告的條目：根目錄的銀行示例沒有宣告，這份有（ADR-0026）。
@@ -124,7 +133,13 @@ def test_the_candidate_feature_table_is_keyed_by_identity(params):
     catalog = yaml.safe_load((CONF / "base" / "catalog.yaml").read_text())
     physical = catalog["candidate_feature_table"]["table"]
     (table,) = [t for t in params["feature_etl"]["tables"] if t["name"] == physical]
-    assert table["primary_key"] == get_schema(params)["identity_columns"]
+    # 這張表是使用者的表，帶原欄：identity 的 item 換成組成它的兩欄（ADR-0027）
+    schema = get_schema(params)
+    source_identity = [
+        c for col in schema["identity_columns"]
+        for c in (schema["item_source_columns"] if col == schema["item"] else [col])
+    ]
+    assert table["primary_key"] == source_identity
     assert table["quality_checks"]["max_duplicate_key_ratio"] == 0.0
 
 
@@ -190,7 +205,7 @@ def test_some_query_group_has_more_impressions_than_items(params, raw):
     # 為組，一組的曝光數可以超過 item 種數；k_values 的 "all" 不得在這種組上被截斷
     # （ADR-0021 決定 4）。靠的是 REQUEST_RATE 與每次請求的素材數夠高
     log = raw["impression_log"].assign(week=lambda d: week_of(d["event_date"]))
-    n_items = len(params["schema"]["categorical_values"][params["schema"]["columns"]["item"]])
+    n_items = len(params["schema"]["categorical_values"][get_schema(params)["item"]])
     assert log.groupby(["week", "user_id", "slot_id"]).size().max() > n_items
 
 
@@ -248,7 +263,7 @@ def test_realtime_interest_differs_between_impressions_of_the_same_item(raw):
     # 特徵不同。要有不小的比例才有東西可學，只「存在」不夠
     rt = realtime_features(raw)
     recent = rt["browse_same_category_30m"] > 0
-    keys = [rt["snap_date"], rt["user_id"], rt["slot_id"], rt["ad_creative"]]
+    keys = [rt["snap_date"], rt["user_id"], rt["slot_id"], rt["campaign_id"], rt["creative_format"]]
     shown_more_than_once = recent.groupby(keys).size() > 1
     varies = recent.groupby(keys).nunique() > 1
     assert varies[shown_more_than_once].mean() > 0.2

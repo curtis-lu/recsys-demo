@@ -3726,9 +3726,13 @@ def _required_external_columns(parameters: dict) -> set[str]:
     Every entry is a *role* resolved through :func:`get_schema` — the identity
     columns (time + entity + item) plus score — never a literal column name.
     ``entity`` is a list, so a multi-column entity requires all of its columns.
+    A multi-column item requires its source columns rather than ``item``: the
+    external table is the user's own, so it carries them and the loader
+    combines them, as every other entry does (ADR-0027 decision 3).
     """
     schema = get_schema(parameters)
-    return set(schema["identity_columns"]) | {schema["score"]}
+    identity = [c for c in schema["identity_columns"] if c != schema["item"]]
+    return set(identity) | set(schema["item_source_columns"]) | {schema["score"]}
 
 
 def compare_source_well_formed_errors(parameters: dict) -> list[str]:
