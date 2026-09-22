@@ -70,6 +70,7 @@ import numpy as np
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import Window
 from pyspark.sql import functions as F
+from pyspark.sql.window import WindowSpec
 
 from recsys_tfb.core.schema import declares_optional_role, get_schema
 from recsys_tfb.evaluation.metrics import (
@@ -485,24 +486,35 @@ def add_query_total_rel(
     return df.withColumn("total_rel", F.sum(F.col(label_col)).over(w))
 
 
-def _non_positive_row(label_col: str):
-    """1 for a row whose label is not positive, else 0 — summed per query group,
-    0 means the group is *all-positive* (#376).
+def _all_positive_group(label_col: str, window: WindowSpec | None = None):
+    """True for a query group whose every row carries the same positive label:
+    the *all-positive* groups (#376). An aggregate over the group's rows —
+    per group inside ``groupBy().agg``, or on every row over ``window``.
 
     The one definition both the count (``_count_query_groups``) and the filter
-    (``_keep_scored_query_groups``) use. Decided row by row, on ``label > 0``:
+    (``_keep_scored_query_groups``) use: ``min(label) == max(label) > 0``, a
+    NULL label read as 0 for the minimum.
 
+    * **The same positive label, not just a positive one.** The label comes
+      from the deployment's own ``label_table`` and nothing holds it to 0/1.
+      Rows labelled 2 and 3 are all positive, yet which one ranks first moves
+      ``map@K`` and ``precision@K``; only equal labels leave every order with
+      the same label sequence, hence every per-query metric the same. With 0/1
+      labels this is exactly "every row positive".
     * **Row by row, not item by item.** With ``event`` declared a query group
       can hold one item several times; one item shown twice with one response
       is a group whose AP depends on the order, so it is not all-positive. AP
-      ranks and scores rows (``rank_within_query``), and only a positive on
-      every row makes each per-query metric the same whatever the order.
-    * **``label > 0``, not ``total_rel == row count``.** The label comes from
-      the deployment's own ``label_table`` and nothing holds it to 0/1; a
-      graded label of 2 next to a 0 would pass the count test. A NULL label is
-      not positive — ``total_rel`` (a sum) skips it too.
+      ranks and scores rows (``rank_within_query``).
+    * **Not ``total_rel == row count``**: a graded 2 next to a 0 would pass it.
+    * **A NULL label is not positive** — ``total_rel`` (a sum) skips it, so
+      where the positive rows rank still moves AP. ``min`` alone would skip it
+      too and call the group all-positive; hence the ``coalesce``.
     """
-    return F.when(F.col(label_col) > 0, 0).otherwise(1)
+    lowest = F.min(F.coalesce(F.col(label_col), F.lit(0)))
+    highest = F.max(F.col(label_col))
+    if window is not None:
+        lowest, highest = lowest.over(window), highest.over(window)
+    return (lowest > 0) & (lowest == highest)
 
 
 def _count_query_groups(
@@ -527,14 +539,13 @@ def _count_query_groups(
         frame.groupBy(*group_cols)
         .agg(
             F.sum(F.col(label_col)).alias("_total_rel"),
-            F.sum(_non_positive_row(label_col)).alias("_n_non_positive"),
+            _all_positive_group(label_col).alias("_all_positive"),
         )
         .agg(
             F.count(F.lit(1)).alias("n_queries"),
             F.sum(F.when(has_positive, 1).otherwise(0)).alias("n_with_positive"),
             F.sum(
-                F.when(has_positive & (F.col("_n_non_positive") == 0), 1)
-                .otherwise(0)
+                F.when(has_positive & F.col("_all_positive"), 1).otherwise(0)
             ).alias("n_all_positive"),
         )
         .collect()[0]
@@ -558,7 +569,7 @@ def _keep_scored_query_groups(
 
     Always the groups holding a positive: AP is undefined at ``total_rel ==
     0``. With ``drop_all_positive_groups`` also not the all-positive ones
-    (``_non_positive_row``, #376): every per-query metric of such a group is
+    (``_all_positive_group``, #376): every per-query metric of such a group is
     the same whatever the order, so it cannot tell two rankings apart.
 
     Switched off this is exactly the filter it replaced — no extra column, the
@@ -573,15 +584,14 @@ def _keep_scored_query_groups(
     has_positive = F.col("total_rel") > 0
     if not drop_all_positive_groups:
         return df.filter(has_positive)
-    n_non_positive = "_n_non_positive_rows"
+    all_positive = "_all_positive_group"
     return (
         df.withColumn(
-            n_non_positive,
-            F.sum(_non_positive_row(label_col)).over(
-                Window.partitionBy(*group_cols)),
+            all_positive,
+            _all_positive_group(label_col, Window.partitionBy(*group_cols)),
         )
-        .filter(has_positive & (F.col(n_non_positive) > 0))
-        .drop(n_non_positive)
+        .filter(has_positive & ~F.col(all_positive))
+        .drop(all_positive)
     )
 
 
@@ -1241,9 +1251,10 @@ def compute_all_metrics(
           "n_all_positive_queries":
                                 int  (metrics.ALL_POSITIVE_KEY; always
                                       written) of the queries holding a
-                                      positive, those with a positive label
-                                      on every row. Dropped only when
-                                      ``drop_all_positive_groups``.
+                                      positive, those whose every row carries
+                                      the same positive label
+                                      (``_all_positive_group``). Dropped only
+                                      when ``drop_all_positive_groups``.
           "all_k":  int  (metrics.ALL_K_KEY; only when schema declares
                           ``event``, and never inside ``category``) the K
                           ``"all"`` resolved to — the widest query group.
@@ -1269,18 +1280,18 @@ def compute_all_metrics(
     (AP is undefined when total_rel = 0).
 
     ``drop_all_positive_groups`` (default off) also excludes the
-    *all-positive* queries: a positive label on every row, so every per-query
-    metric is the same whatever the order (#376). The caller reads the switch
-    — ``metrics.drop_all_positive_groups``, from the evaluation nodes — and
-    this function never reads it from ``parameters``: training scores its
-    test set through here too, and its test mAP must not move with an
-    evaluation setting, so it simply does not pass it. Each grain decides on
-    its own frame: at the category grain a query is all-positive when every
-    category it holds has a positive child row, which a query mixed row by
-    row can be. Off, every key but the new count is value-for-value what it
-    was. Known effect, not a bug: per-item keys such as ``map_attr@K`` and
-    ``hit_rate@K`` still depend on the order inside an all-positive query when
-    K is below its row count (``ap_contrib@K = prec_at_pos × label ×
+    *all-positive* queries: the same positive label on every row, so every
+    per-query metric is the same whatever the order (#376). The caller reads
+    the switch — ``metrics.drop_all_positive_groups``, from the evaluation
+    nodes — and this function never reads it from ``parameters``: training
+    scores its test set through here too, and its test mAP must not move with
+    an evaluation setting, so it simply does not pass it. Each grain decides
+    on its own frame: at the category grain a query is all-positive when
+    every category it holds gets the same positive label (the max of its
+    children), which a query mixed row by row can be. Off, every key but the
+    new count is value-for-value what it was. Known effect, not a bug:
+    per-item keys such as ``map_attr@K`` and ``hit_rate@K`` still depend on
+    the order inside an all-positive query when K is below its row count (``ap_contrib@K = prec_at_pos × label ×
     top_k@K``: which rows reach the top K decides which items get the
     credit); switched on, those queries leave them too.
     """

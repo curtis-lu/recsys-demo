@@ -1,9 +1,10 @@
 """All-positive query groups (#376): the switch that drops them from the
 metrics, and the count written whether or not it is on.
 
-An all-positive query group is one whose every row has a positive label.
-Whatever the order, every per-query metric of such a group is the same, so it
-cannot tell two rankings apart. ``evaluation.query_filter.drop_all_positive_groups``
+An all-positive query group is one whose every row carries the same positive
+label (with 0/1 labels: every row positive). Whatever the order, every
+per-query metric of such a group is the same, so it cannot tell two rankings
+apart. ``evaluation.query_filter.drop_all_positive_groups``
 drops them from the measurement metrics and the popularity baseline; the
 count ``n_all_positive_queries`` is written either way.
 
@@ -227,6 +228,77 @@ def test_with_event_a_group_is_all_positive_only_if_every_row_is(spark):
     assert set(on["per_item"]) == {"A"}
     off = ms.compute_all_metrics(df, _event_params())
     assert off["overall"]["map@2"] == pytest.approx((0.5 + 1 + 1) / 3)
+
+
+# ---------------------------------------------------------------------------
+# Graded labels: all-positive means every row carries the same positive label
+# ---------------------------------------------------------------------------
+
+#: Nothing holds the label to 0/1. g1's two rows are positive but differ
+#: (2 and 3), so which one ranks first changes map@K and precision@K: it is
+#: not all-positive. g2's rows are both 2, so every order scores the same: it
+#: is. g3 is an ordinary mixed group.
+_GRADED_ROWS = [
+    ("20240331", "g1", "fund_stock", 0.9, 2),
+    ("20240331", "g1", "exchange_fx", 0.2, 3),
+    ("20240331", "g2", "fund_stock", 0.7, 2),
+    ("20240331", "g2", "fund_bond", 0.1, 2),
+    ("20240331", "g3", "fund_bond", 0.9, 0),
+    ("20240331", "g3", "exchange_fx", 0.1, 1),
+]
+
+
+def _graded_df(spark, without=()):
+    return spark.createDataFrame(
+        [r for r in _GRADED_ROWS if r[1] not in without], schema=_COLS)
+
+
+@pytest.mark.parametrize("switch", [None, False, True])
+def test_graded_labels_count_only_the_group_with_one_positive_label(
+        spark, switch):
+    """g2 (2, 2) is counted; g1 (2, 3) is not, although every row of it is
+    positive."""
+    out = ms.compute_all_metrics(
+        _graded_df(spark), _params(categories=False), **_switch(switch))
+    assert out[ALL_POSITIVE_KEY] == 1
+    assert (out["n_queries"], out["n_excluded_queries"]) == (3, 0)
+
+
+def test_graded_labels_the_switch_keeps_a_group_whose_labels_differ(spark):
+    """On, only g2 goes: the bundle is the switch-off bundle of the frame
+    without g2, which still holds g1. Dropping g1 too would leave g3 alone."""
+    params = _params(categories=False)
+    on = ms.compute_all_metrics(
+        _graded_df(spark), params, drop_all_positive_groups=True)
+    without_g2 = ms.compute_all_metrics(
+        _graded_df(spark, without={"g2"}), params)
+    assert _metrics(on) == _metrics(without_g2)
+    # The fixture can tell the three outcomes apart.
+    assert without_g2["overall"] != ms.compute_all_metrics(
+        _graded_df(spark, without={"g1", "g2"}), params)["overall"]
+    assert on["overall"] != ms.compute_all_metrics(
+        _graded_df(spark), params)["overall"]
+    # The popularity baseline's slim path decides the same way.
+    slim = ms.compute_overall_per_item(
+        _graded_df(spark), params, drop_all_positive_groups=True)
+    assert slim["overall"] == without_g2["overall"]
+    assert slim["per_item"] == without_g2["per_item"]
+
+
+def test_a_null_label_is_not_positive(spark):
+    """A group with one positive row and one NULL label is not all-positive:
+    ``total_rel`` skips the NULL, so where the positive ranks still moves AP."""
+    df = spark.createDataFrame(
+        [
+            ("20240331", "n1", "fund_stock", 0.9, None),
+            ("20240331", "n1", "exchange_fx", 0.2, 1),
+            ("20240331", "n2", "fund_stock", 0.7, 1),
+        ],
+        schema="snap_date string, cust_id string, prod_name string, "
+               "score double, label int",
+    )
+    out = ms.compute_all_metrics(df, _params(categories=False))
+    assert out[ALL_POSITIVE_KEY] == 1
 
 
 # ---------------------------------------------------------------------------
