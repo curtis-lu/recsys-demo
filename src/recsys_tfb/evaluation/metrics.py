@@ -84,8 +84,10 @@ def metric_params(parameters: dict) -> dict:
 
 #: Top-level key of a ``metrics_spark.compute_all_metrics`` bundle and of its
 #: ``category`` sub-bundle (#376): how many of the query groups holding a
-#: positive are *all-positive* — every row's label positive, so every ranking
-#: metric is full marks whatever the order. Always written, whether or not
+#: positive are *all-positive* — every row's label positive, so every
+#: per-query ranking metric comes out the same whatever the order (the
+#: untruncated AP is 1; ``map@K`` below the group's row count is K / rows,
+#: ``precision@K`` above it is rows / K). Always written, whether or not
 #: ``evaluation.query_filter.drop_all_positive_groups`` drops them, because the
 #: report reads only the written bundle. ``n_excluded_queries`` keeps counting
 #: only the zero-positive groups.
@@ -114,8 +116,8 @@ def all_positive_share(bundle: dict) -> Optional[float]:
     """All-positive groups ÷ groups holding a positive, for one metrics bundle.
 
     The denominator is the mAP's (``n_queries - n_excluded_queries``), so the
-    share reads as "this much of the mAP is full marks the order never
-    earned", and the dataset's ``test_zero_positive_group_ratio`` cannot move
+    share reads as "this much of the mAP's groups is scored the same
+    whatever the order", and the dataset's ``test_zero_positive_group_ratio`` cannot move
     it. ``None`` when the bundle predates #376 (no :data:`ALL_POSITIVE_KEY`) or
     no group holds a positive.
     """
