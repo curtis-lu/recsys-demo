@@ -6,7 +6,10 @@ other project import — ``diagnosis.metric.*``, ``evaluation.metrics_spark``,
 ``evaluation.report_builder`` and several ``scripts/`` import from here, so a
 project import risks a cycle. ``utils.ranking`` is the exception because it
 imports nothing from the project, so it cannot close one; it is where the tie
-rule lives, shared with the Spark ranking (#355).
+rule lives, shared with the Spark ranking (#355). scikit-learn is the one
+third-party import besides numpy, and only inside the two functions that
+need it (the binary-prediction average precision below), so importers of
+this module do not pay its load time.
 
 What lives here:
 
@@ -23,6 +26,11 @@ What lives here:
   value domains.
 * :func:`resolved_all_k` — the only reader of the K a metrics bundle's
   ``"all"`` values are stored at, for the reports and for training (#434).
+* :func:`compute_pooled_average_precision` /
+  :func:`compute_macro_per_item_average_precision` — the HPO objectives that
+  score every val row as one binary prediction (#430). Not the report's
+  ``pr_auc`` (``evaluation.prediction_quality``): exact where that one is
+  binned, and never to be reconciled with it.
 
 The dict-shaped per-segment / per-item / overall metrics of the evaluation
 pipeline run on Spark — see ``recsys_tfb.evaluation.metrics_spark``.
