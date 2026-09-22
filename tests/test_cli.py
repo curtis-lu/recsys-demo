@@ -672,8 +672,9 @@ class TestEvaluationCLIFlags:
             captured.clear()
             evaluation(
                 env="local", model_version=None, post_training=flag,
-                compare=None, compare_only=None, from_node=None,
-                only_node=None, dry_run=False, list_nodes=False,
+                compare=None, compare_only=None, rebuild_dates=None,
+                from_node=None, only_node=None, dry_run=False,
+                list_nodes=False,
             )
             assert "post_training" in captured["runtime_params"], captured
             assert captured["runtime_params"]["post_training"] == flag
@@ -1917,7 +1918,9 @@ from recsys_tfb.pipelines.dataset.month_plans import (
     INCREMENTAL_DATASETS,
     SnapDatePlan,
     month_plan_input,
+    plan_incremental_snap_dates,
 )
+from recsys_tfb.core.consistency import ConfigConsistencyError
 
 
 class _FakeCatalog:
@@ -2219,7 +2222,7 @@ _REAL_CATALOG = yaml.safe_load(
 
 def _run_evaluation_command(
     tmp_path, argv, *, landed=(), segment_columns_json=True, extra_patches=(),
-    snap_date="2026-01-31",
+    snap_date="2026-01-31", evaluation_extra=None, catalog_extra=(),
 ):
     """Invoke the evaluation command with its month-plan and --compare-only
     inputs real: ``enriched_eval_predictions`` and ``evaluation_segment_columns``
@@ -2231,21 +2234,28 @@ def _run_evaluation_command(
     ``snap_date`` is written to ``evaluation.snap_date`` as given: a date, a
     list of dates or a ``{start, end, step}`` range.
 
+    ``evaluation_extra`` is merged into the ``evaluation`` block;
+    ``catalog_extra`` names more entries copied from the real catalog the
+    same way (database made literal).
+
     Returns ``(result, captured)``: the CLI result and the slice plan, if one
     was built.
     """
     _setup_conf(tmp_path)
     base = tmp_path / "conf" / "base"
     catalog = yaml.safe_load((base / "catalog.yaml").read_text())
-    for name in ("enriched_eval_predictions", "evaluation_segment_columns"):
+    for name in ("enriched_eval_predictions", "evaluation_segment_columns",
+                 *catalog_extra):
         catalog[name] = dict(_REAL_CATALOG[name])
-    catalog["enriched_eval_predictions"]["database"] = "ml_recsys"
+    for name in ("enriched_eval_predictions", *catalog_extra):
+        catalog[name]["database"] = "ml_recsys"
     (base / "catalog.yaml").write_text(yaml.dump(catalog))
     (base / "parameters_evaluation.yaml").write_text(yaml.dump({"evaluation": {
         "snap_date": snap_date,
         "compare_sources": {"self": {
             "kind": "model_version", "label": "self",
             "model_version": _EVAL_MV, "source": "ranked_predictions"}},
+        **(evaluation_extra or {}),
     }}))
     (tmp_path / "data" / "models" / _EVAL_MV).mkdir(parents=True)
     if segment_columns_json:
@@ -3943,3 +3953,148 @@ class TestInferenceRefusesTheCandidateTableA47:
 
         assert "A47" not in result.output
         mock_spark.assert_called()
+
+
+class TestEvaluationPositiveRateBaseline:
+    """#397: the evaluation command wires the positive-rate baseline only when
+    ``evaluation.baseline.score: rate``, and ``--rebuild-dates`` only then."""
+
+    _RATE = {"baseline": {"lookback_months": 12, "score": "rate"}}
+    _SOURCES = ("sample_pool", "label_table", "popularity_period_counts")
+
+    def test_rebuild_dates_without_the_rate_mode_stops_before_spark(
+        self, tmp_path,
+    ):
+        spark_factory = MagicMock()
+        result, _ = _run_evaluation_command(
+            tmp_path, ["evaluation", "--model-version", _EVAL_MV,
+                       "--rebuild-dates", "2025-06-30"],
+            extra_patches=(patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session",
+                spark_factory),),
+        )
+        assert result.exit_code == 1
+        assert "(A21)" in result.output and "score: rate" in result.output
+        spark_factory.assert_not_called()
+
+    def test_a_typo_in_the_score_stops_the_command(self, tmp_path):
+        result, _ = _run_evaluation_command(
+            tmp_path, ["evaluation", "--model-version", _EVAL_MV],
+            evaluation_extra={"baseline": {"score": "rates"}},
+        )
+        assert result.exit_code == 1
+        assert "A50" in result.output
+
+    def _run_rate(self, tmp_path, *extra_argv):
+        execute = MagicMock(return_value=True)
+        manifest = MagicMock()
+        plan = plan_incremental_snap_dates(
+            ["2025-05-31", "2025-06-30"], ["2025-05-31"])
+        planner = MagicMock(return_value=plan)
+        result, _ = _run_evaluation_command(
+            tmp_path, ["evaluation", "--model-version", _EVAL_MV, *extra_argv],
+            evaluation_extra=self._RATE, catalog_extra=self._SOURCES,
+            extra_patches=(
+                patch("recsys_tfb.__main__._execute_pipeline", execute),
+                patch("recsys_tfb.__main__._write_pipeline_manifest", manifest),
+                patch("recsys_tfb.__main__._popularity_period_plan", planner),
+            ),
+        )
+        assert result.exit_code == 0, result.output
+        return execute, manifest, planner, plan
+
+    def test_rate_mode_hands_the_plan_to_the_node_and_the_slice(self, tmp_path):
+        execute, manifest, planner, plan = self._run_rate(tmp_path)
+        pipeline_kwargs, runtime_params = execute.call_args.args[1:3]
+        kwargs = execute.call_args.kwargs
+        assert pipeline_kwargs["baseline_rate"] is True
+        assert kwargs["extra_datasets"] == {"popularity_period_counts_plan": plan}
+        assert kwargs["month_plans"]["popularity_period_counts"] is plan
+        version = runtime_params["popularity_source_version"]
+        assert version and "$" not in version
+        # The listing catalog is resolved with that version, so it lists this
+        # source's partitions and no other's.
+        catalog = planner.call_args.args[0]
+        assert catalog.get_dataset(
+            "popularity_period_counts")._partition_filter == {
+                "popularity_source_version": version}
+        assert manifest.call_args.kwargs["extra_metadata"][
+            "popularity_period_counts_plan"] == {
+                "popularity_source_version": version,
+                "counted": ["2025-06-30"], "skipped": ["2025-05-31"]}
+
+    def test_count_mode_passes_no_period_plan(self, tmp_path):
+        execute = MagicMock(return_value=True)
+        result, _ = _run_evaluation_command(
+            tmp_path, ["evaluation", "--model-version", _EVAL_MV],
+            extra_patches=(
+                patch("recsys_tfb.__main__._execute_pipeline", execute),
+                patch("recsys_tfb.__main__._write_pipeline_manifest"),
+            ),
+        )
+        assert result.exit_code == 0, result.output
+        pipeline_kwargs, runtime_params = execute.call_args.args[1:3]
+        assert pipeline_kwargs["baseline_rate"] is False
+        assert "popularity_source_version" not in runtime_params
+        assert execute.call_args.kwargs["extra_datasets"] is None
+        assert set(execute.call_args.kwargs["month_plans"]) == {
+            "enriched_eval_predictions"}
+
+    def test_rebuild_dates_reach_the_planner(self, tmp_path):
+        _execute, _manifest, planner, _plan = self._run_rate(
+            tmp_path, "--rebuild-dates", "2025-05-31")
+        assert planner.call_args.kwargs["rebuild"] == ["2025-05-31"]
+
+
+class TestPopularityPeriodPlan:
+    """``_popularity_period_plan``: the periods sample_pool holds in the
+    windows, minus the landed ones, plus --rebuild-dates."""
+
+    @staticmethod
+    def _catalog(spark, landed):
+        from recsys_tfb.core.catalog import MemoryDataset
+
+        pool = spark.createDataFrame(pd.DataFrame({
+            "snap_date": ["2025-05-31", "2025-06-30", "2026-01-31"],
+            "cust_id": ["c0"] * 3, "prod_name": ["A"] * 3}))
+        listing = MagicMock()
+        listing.existing_partition_values.return_value = [
+            {"snap_date": d} for d in landed]
+        catalog = DataCatalog()
+        catalog.add("sample_pool", MemoryDataset(data=pool))
+        catalog.add("popularity_period_counts", listing)
+        return catalog
+
+    _PARAMS = {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "label": "label", "score": "score", "rank": "rank"}},
+        "evaluation": {"baseline": {"lookback_months": 12, "score": "rate"}},
+    }
+
+    def test_landed_periods_are_skipped(self, spark, caplog):
+        from recsys_tfb.__main__ import _popularity_period_plan
+
+        with caplog.at_level(logging.INFO):
+            plan = _popularity_period_plan(
+                self._catalog(spark, ["2025-05-31"]), self._PARAMS,
+                eval_dates=["2026-01-31"], rebuild=[])
+        assert plan.to_process == [pd.Timestamp("2025-06-30")]
+        assert plan.skipped == [pd.Timestamp("2025-05-31")]
+        assert "to_count=2025-06-30 skipped=2025-05-31" in caplog.text
+
+    def test_rebuild_recounts_a_landed_period(self, spark):
+        from recsys_tfb.__main__ import _popularity_period_plan
+
+        plan = _popularity_period_plan(
+            self._catalog(spark, ["2025-05-31", "2025-06-30"]), self._PARAMS,
+            eval_dates=["2026-01-31"], rebuild=["2025-05-31"])
+        assert plan.to_process == [pd.Timestamp("2025-05-31")]
+
+    def test_rebuild_of_a_period_sample_pool_lacks_raises(self, spark):
+        from recsys_tfb.__main__ import _popularity_period_plan
+
+        with pytest.raises(ConfigConsistencyError, match="2025-04-30"):
+            _popularity_period_plan(
+                self._catalog(spark, []), self._PARAMS,
+                eval_dates=["2026-01-31"], rebuild=["2025-04-30"])

@@ -1279,6 +1279,84 @@ def test_baseline_monthly_trend_table():
     assert tbl.loc["A", "合計"] == base["purchase_counts"]["A"]
 
 
+def _rate_baseline():
+    """#397 rate-mode fixture: popularity_rate + count-mode leftovers that the
+    rate-mode report must NOT read (monthly_counts/purchase_counts differ from
+    the rate numbers on purpose, so reading the wrong source fails loudly)."""
+    return {
+        "overall": {"map@1": 0.4},
+        "purchase_counts": {"A": 999, "B": 999, "C": 999},
+        "monthly_counts": {
+            "A": {"2025-11": 999}, "B": {"2025-11": 999}, "C": {"2025-11": 999},
+        },
+        "popularity_rate": {
+            "rate": {"A": 0.5, "B": 0.8, "C": 0.2},
+            "candidates": {"A": 100, "B": 50, "C": 40},
+            "positives": {"A": 50, "B": 40, "C": 8},
+            "monthly_positives": {
+                "A": {"2025-11": 30, "2025-12": 20},
+                "B": {"2025-11": 40},
+                "C": {"2025-11": 8},
+            },
+            "window_months_covered": {"2026-01-31": 2},
+        },
+    }
+
+
+def test_baseline_rate_mode_composition_table_sorted_and_columns():
+    """(a) rate 模式排名組成表：照正例率降序；欄位恰為四個；每列正例率 ≈
+    正例數 ÷ 當候選次數。"""
+    m = _metrics()
+    s = rb.build_baseline_section(m, _rate_baseline(), _params_lookback())
+    pop = s.tables[s.table_titles.index("popularity 排名組成")]
+    assert list(pop.columns) == ["正例率", "當候選次數", "正例數", "rank"]
+    assert list(pop.index) == ["B", "A", "C"]       # 0.8 > 0.5 > 0.2
+    assert list(pop["rank"]) == [1, 2, 3]
+    for item in ("A", "B", "C"):
+        expected = round(
+            _rate_baseline()["popularity_rate"]["positives"][item]
+            / _rate_baseline()["popularity_rate"]["candidates"][item], 4
+        )
+        assert pop.loc[item, "正例率"] == expected
+
+
+def test_baseline_rate_mode_no_count_or_avg_per_month_wording():
+    """(b) rate 模式：description 與表標題都不含「購買計數」「平均每月」；
+    表裡沒有 count 欄。"""
+    m = _metrics()
+    s = rb.build_baseline_section(m, _rate_baseline(), _params_lookback())
+    for banned in ("購買計數", "平均每月"):
+        assert banned not in s.description, banned
+    pop = s.tables[s.table_titles.index("popularity 排名組成")]
+    assert "count" not in pop.columns
+    assert "平均每月" not in pop.columns
+
+
+def test_baseline_rate_mode_monthly_trend_uses_monthly_positives():
+    """(c) rate 模式月度趨勢：每列合計＝表 [1] 的正例數；數字來自
+    monthly_positives，不是 monthly_counts（fixture 讓兩者刻意不同）。"""
+    m = _metrics()
+    base = _rate_baseline()
+    s = rb.build_baseline_section(m, base, _params_lookback())
+    pop = s.tables[s.table_titles.index("popularity 排名組成")]
+    trend = s.tables[s.table_titles.index("popularity 月度趨勢")]
+    assert list(trend.index) == list(pop.index)     # 同序：照正例率排
+    for item in pop.index:
+        assert trend.loc[item, "合計"] == pop.loc[item, "正例數"]
+    # 數字確實來自 monthly_positives（999 是 monthly_counts 的污染值，不該出現）
+    assert 999 not in trend.values
+
+
+def test_baseline_rate_mode_single_date_discloses_covered_months():
+    """(d) rate 模式、單一評估日期、window_months_covered 小於 lookback：
+    文字寫出涵蓋月數，且提到 sample_pool。"""
+    m = _metrics()
+    s = rb.build_baseline_section(m, _rate_baseline(), _params_lookback())
+    assert "實際只涵蓋 2 個月" in s.description
+    assert "sample_pool" in s.description
+    assert "label_table" not in s.description
+
+
 def test_baseline_omits_monthly_trend_when_absent():
     """Backward compat: no monthly_counts -> no 月度趨勢 table."""
     m = _metrics()

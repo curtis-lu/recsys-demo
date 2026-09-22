@@ -557,10 +557,23 @@ Layer 1 — config-static (implemented here; aggregated by
   errors; the evaluation command raises, collected with
   A22/A34/A40/A42/A43/A46). NOT aggregated, A42's reason (issue #158): only
   evaluation reads this key.
+* A50 — ``evaluation.baseline.score`` (#397, the popularity baseline's score)
+  must be one of ``BASELINE_SCORES`` (``count`` / ``rate``) when present;
+  absent or ``null`` means ``count``. The reader
+  (``evaluation/baselines.py::baseline_score``) falls back to ``count`` on any
+  falsy value and compares with ``==``, so a typo (``rates``) would silently
+  keep the count mode. Predicate: ``baseline_score_errors``. NOT aggregated,
+  A42's reason (issue #158): only evaluation reads this key.
+
+The evaluation command's ``--rebuild-dates`` belongs to A21 (predicate
+``resolved_baseline_rebuild_dates``): it only exists for the positive-rate
+baseline's ``popularity_period_counts`` and is refused when that mode is not
+wired, and each date must fall inside a lookback window of
+``evaluation.snap_date``.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
-flags), A22/A46 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49 (config keys whose
+flags), A22/A46 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50 (config keys whose
 harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags).
 
@@ -2148,6 +2161,34 @@ def query_filter_param_errors(parameters: dict) -> list[str]:
                 f"{value!r} must be a bool."
             )
     return errors
+
+
+#: ``evaluation.baseline.score``'s domain (A50). ``count`` ranks by positives
+#: in the lookback window, ``rate`` by positives ÷ times a candidate (#397).
+BASELINE_SCORES: tuple[str, ...] = ("count", "rate")
+
+
+def baseline_score_errors(parameters: dict) -> list[str]:
+    """A50 — ``evaluation.baseline.score`` is one of :data:`BASELINE_SCORES`.
+
+    Absent or ``null`` means ``count``, the reading ``baseline_score()``
+    gives. Not aggregated by ``validate_config_consistency``: only evaluation
+    reads this key (A34's reason, issue #158). The evaluation command raises
+    it, collected with A22/A34/A40/A42/A43/A46/A49.
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    if not isinstance(eval_params, Mapping):
+        return []
+    block = eval_params.get("baseline") or {}
+    if not isinstance(block, Mapping):
+        return []
+    value = block.get("score")
+    if value is None or value in BASELINE_SCORES:
+        return []
+    return [
+        f"A50: evaluation.baseline.score={value!r} must be one of "
+        f"{list(BASELINE_SCORES)} (or left absent, which means 'count')."
+    ]
 
 
 #: The source tables the dataset pipeline reads — the three inputs of
@@ -4109,6 +4150,69 @@ def resolved_inference_rebuild_dates(parameters: dict, rebuild_dates) -> list[st
         rebuild_dates,
         "inference.snap_dates",
     )
+
+
+def resolved_baseline_rebuild_dates(
+    rebuild_dates, *, rate_wired: bool, eval_dates, lookback_months: int,
+) -> list[str]:
+    """(A21) ``--rebuild-dates`` for the evaluation command (#397).
+
+    The flag names time values of ``popularity_period_counts`` to recount even
+    though they landed (after a sample_pool / label_table backfill). Returns
+    the sorted ``YYYY-MM-DD`` list, ``[]`` when not passed.
+
+    * Refused unless the positive-rate baseline is wired (``rate_wired``, the
+      caller's ``baseline_scores_by_rate``): with the count mode, or the
+      baseline section off, nothing reads the table, so the flag would be a
+      silent no-op, A21's failure.
+    * Each date must fall inside ``[S - lookback_months, S)`` of some date S of
+      ``evaluation.snap_date``: the run only counts the periods its windows
+      need. The window rule is written here again rather than imported
+      (``core`` must not import ``evaluation``), and pinned to
+      ``baselines._window_bounds`` by a test. Whether sample_pool actually
+      holds a named date is known only after its listing, so the CLI checks
+      that part once the plan is built.
+
+    ``lookback_months`` comes from the caller's ``resolve_lookback_months`` so
+    this check and the node cannot default differently (ADR-0020 bug 1).
+    """
+    if not rebuild_dates:
+        return []
+    if not rate_wired:
+        raise ConfigConsistencyError(
+            "(A21) evaluation --rebuild-dates recounts popularity_period_counts, "
+            "which only the positive-rate baseline reads "
+            "(evaluation.baseline.score: rate, with "
+            "evaluation.report.sections.baseline on). This run does not wire "
+            "it, so the flag would do nothing. Drop --rebuild-dates, or set "
+            "evaluation.baseline.score: rate."
+        )
+    malformed = [d for d in rebuild_dates if _iso_date(d) is None]
+    if malformed:
+        raise ConfigConsistencyError(
+            f"(A21) --rebuild-dates got non-ISO value(s) {malformed!r}. "
+            "Expected YYYY-MM-DD."
+        )
+    windows = []
+    for s in eval_dates:
+        upper = pd.Timestamp(s)
+        lower = upper - pd.DateOffset(months=lookback_months)
+        windows.append((lower, upper))
+    requested = sorted({_iso_date(d) for d in rebuild_dates})
+    outside = [
+        d for d in requested
+        if not any(lo <= pd.Timestamp(d) < up for lo, up in windows)
+    ]
+    if outside:
+        spans = ", ".join(
+            f"[{lo.date()}, {up.date()})" for lo, up in windows) or "none"
+        raise ConfigConsistencyError(
+            f"(A21) --rebuild-dates names {outside}, outside every lookback "
+            f"window of evaluation.snap_date (lookback_months="
+            f"{lookback_months}: {spans}). This run only counts the periods "
+            "those windows need, so it would have been a silent no-op."
+        )
+    return requested
 
 
 def compare_mutual_exclusive_errors(compare: str | None, compare_only: str | None) -> list[str]:

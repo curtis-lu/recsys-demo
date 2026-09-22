@@ -1585,6 +1585,11 @@ def build_baseline_section(
     # error. monthly_counts holds only months with label rows inside the
     # window, so its distinct months are the coverage; without it (older
     # results) the configured lookback stays both text and divisor.
+    # #397: rate 模式（node 寫了非空 popularity_rate）用正例率重排；count 模式
+    # （沒有這個鍵）維持原本用 purchase_counts／monthly_counts 的邏輯，逐字不變。
+    rate_info = (baseline_metrics or {}).get("popularity_rate") or None
+    rate_mode = bool(rate_info)
+
     monthly = (baseline_metrics or {}).get("monthly_counts") or {}
     months = sorted({mo for per in monthly.values() for mo in per})
     covered = len(months)
@@ -1606,35 +1611,100 @@ def build_baseline_section(
         )
         window_partial = per_month_divisor < full_window_months
 
-    # [1] popularity 排名組成（總計 count + 平均每月）；各月明細/趨勢＝Phase 2。
-    pcounts = (baseline_metrics or {}).get("purchase_counts") or {}
-    if pcounts:
-        sorted_items = sorted(
-            pcounts.items(), key=lambda kv: kv[1], reverse=True
-        )
-        pop_cols = {"count": [v for _, v in sorted_items]}
-        if per_month_divisor:
-            pop_cols["平均每月"] = [
-                round(v / per_month_divisor, 1) for _, v in sorted_items
-            ]
-        pop_cols["rank"] = list(range(1, len(sorted_items) + 1))
-        _add(
-            pd.DataFrame(pop_cols, index=[k for k, _ in sorted_items]),
-            "popularity 排名組成", False,
-        )
+    if rate_mode:
+        # rate 模式的覆蓋月數改看 monthly_positives／window_months_covered，
+        # 不看 purchase_counts／monthly_counts（那兩個鍵在 rate 模式下仍由
+        # label_table 算，但報表不拿它們印排名或趨勢）。
+        rate_monthly = rate_info.get("monthly_positives") or {}
+        rate_months = sorted({mo for per in rate_monthly.values() for mo in per})
+        rate_windows = rate_info.get("window_months_covered") or {}
+        if len(rate_windows) <= 1:
+            covered = (
+                next(iter(rate_windows.values()))
+                if rate_windows else len(rate_months)
+            )
+            window_partial = 0 < covered < lookback
+            several_dates = False
+            windows = rate_windows
+        else:
+            several_dates = True
+            full_window_months = len(rate_windows) * lookback
+            per_month_divisor = sum(
+                c if 0 < c < lookback else lookback
+                for c in rate_windows.values()
+            )
+            window_partial = per_month_divisor < full_window_months
+            windows = rate_windows
 
-    # [1b] 月度趨勢：rows=item（總計降序，與 [1] 同序）、cols=月份升序＋合計。
-    #      各 item 的「合計」＝該列月份和，逐 item 對齊 [1] 的 count。
-    if monthly:
-        item_order = sorted(
-            monthly, key=lambda it: sum(monthly[it].values()), reverse=True
+    # [1] popularity 排名組成：rate 模式印正例率／分母／分子；count 模式維持
+    #     原本的總計 count + 平均每月。
+    if rate_mode:
+        rates = rate_info.get("rate") or {}
+        candidates = rate_info.get("candidates") or {}
+        positives = rate_info.get("positives") or {}
+        sorted_items = sorted(
+            rates.items(), key=lambda kv: (-kv[1], kv[0])
         )
-        mdf = pd.DataFrame(
-            {mo: [monthly[it].get(mo, 0) for it in item_order] for mo in months},
-            index=item_order,
-        )
-        mdf["合計"] = mdf.sum(axis=1)
-        _add(mdf, "popularity 月度趨勢", True)
+        pop_cols = {
+            "正例率": [round(v, 4) for _, v in sorted_items],
+            "當候選次數": [candidates.get(k, 0) for k, _ in sorted_items],
+            "正例數": [positives.get(k, 0) for k, _ in sorted_items],
+            "rank": list(range(1, len(sorted_items) + 1)),
+        }
+        if sorted_items:
+            _add(
+                pd.DataFrame(pop_cols, index=[k for k, _ in sorted_items]),
+                "popularity 排名組成", False,
+            )
+
+        # [1b] 月度趨勢：monthly_positives，列序與 [1] 相同（照正例率排）。
+        rate_monthly = rate_info.get("monthly_positives") or {}
+        if rate_monthly:
+            item_order = [k for k, _ in sorted_items]
+            rmonths = sorted(
+                {mo for per in rate_monthly.values() for mo in per}
+            )
+            mdf = pd.DataFrame(
+                {
+                    mo: [rate_monthly.get(it, {}).get(mo, 0) for it in item_order]
+                    for mo in rmonths
+                },
+                index=item_order,
+            )
+            mdf["合計"] = mdf.sum(axis=1)
+            _add(mdf, "popularity 月度趨勢", True)
+    else:
+        pcounts = (baseline_metrics or {}).get("purchase_counts") or {}
+        if pcounts:
+            sorted_items = sorted(
+                pcounts.items(), key=lambda kv: kv[1], reverse=True
+            )
+            pop_cols = {"count": [v for _, v in sorted_items]}
+            if per_month_divisor:
+                pop_cols["平均每月"] = [
+                    round(v / per_month_divisor, 1) for _, v in sorted_items
+                ]
+            pop_cols["rank"] = list(range(1, len(sorted_items) + 1))
+            _add(
+                pd.DataFrame(pop_cols, index=[k for k, _ in sorted_items]),
+                "popularity 排名組成", False,
+            )
+
+        # [1b] 月度趨勢：rows=item（總計降序，與 [1] 同序）、cols=月份升序＋合計。
+        #      各 item 的「合計」＝該列月份和，逐 item 對齊 [1] 的 count。
+        if monthly:
+            item_order = sorted(
+                monthly, key=lambda it: sum(monthly[it].values()), reverse=True
+            )
+            mdf = pd.DataFrame(
+                {
+                    mo: [monthly[it].get(mo, 0) for it in item_order]
+                    for mo in months
+                },
+                index=item_order,
+            )
+            mdf["合計"] = mdf.sum(axis=1)
+            _add(mdf, "popularity 月度趨勢", True)
 
     # [2] overall：mAP / recall / precision 各一張，rows=[Model,Baseline,Δ]、
     #     cols=@k（superset），明細收合。
@@ -1726,36 +1796,75 @@ def build_baseline_section(
     # Always printed (bug 1): lookback is resolved via the shared helper above
     # and is never unset. A partially covered window also states how many
     # months it actually had (see window_partial above).
-    lookback_note = (
-        f"popularity 以過去 {lookback} 個月的歷史購買計數重排"
-        f"（label_table 在這個視窗內實際只涵蓋 {covered} 個月）。"
-        if window_partial else
-        f"popularity 以過去 {lookback} 個月的歷史購買計數重排。"
-    )
     trend_note = ""
-    if several_dates:
-        n_windows = len(windows)
+    composition_note = (
+        "popularity 排名組成為各 item 跨月合計（總計＋平均每月）；月度趨勢表把"
+        "同一批計數拆到各 item 逐月（列＝item、欄＝月份，合計逐 item 對齊排名"
+        "組成）。"
+    )
+    if rate_mode:
+        # #397: rate 模式以正例率（正例數 ÷ 當過候選的次數）重排，分母從
+        # sample_pool 數；文字裡一律不提「購買計數」「平均每月」。
         lookback_note = (
-            f"popularity 對 {n_windows} 個評估日期各以該日期之前 {lookback} 個月"
-            f"的歷史購買計數重排；排名組成的 count 是這 {n_windows} 個視窗的"
-            f"合計，平均每月＝count ÷ {per_month_divisor}"
-            + (
-                f"（各視窗內 label_table 有資料的月數加總：實際只涵蓋 "
-                f"{per_month_divisor} 個視窗月，滿額 {full_window_months} 個）。"
-                if window_partial else
-                f"（{n_windows} 個視窗 × 每個 {lookback} 個月）。"
+            f"popularity 以過去 {lookback} 個月內的正例率"
+            f"（正例數 ÷ 當過候選的次數）重排"
+            f"（sample_pool 在這個視窗內實際只涵蓋 {covered} 個月）。"
+            if window_partial else
+            f"popularity 以過去 {lookback} 個月內的正例率"
+            "（正例數 ÷ 當過候選的次數）重排。"
+        )
+        if several_dates:
+            n_windows = len(windows)
+            lookback_note = (
+                f"popularity 對 {n_windows} 個評估日期各以該日期之前 {lookback} "
+                f"個月的正例率（正例數 ÷ 當過候選的次數）重排；分子分母皆為這 "
+                f"{n_windows} 個視窗的合計"
+                + (
+                    f"（各視窗內 sample_pool 有候選列的月數加總：實際只涵蓋 "
+                    f"{per_month_divisor} 個視窗月，滿額 {full_window_months} "
+                    "個）。"
+                    if window_partial else
+                    f"（{n_windows} 個視窗 × 每個 {lookback} 個月）。"
+                )
             )
+            trend_note = (
+                "視窗彼此重疊時，同一個月會被每個涵蓋它的視窗各算一次，"
+                "所以月度趨勢表的逐月數字是重複計數後的合計。"
+            )
+        composition_note = (
+            "popularity 排名組成為各 item 的正例率、分母（當過候選的次數）與"
+            "分子（正例數）；月度趨勢表把同一批正例數拆到各 item 逐月（列＝"
+            "item、欄＝月份，合計逐 item 對齊排名組成的正例數）。"
         )
-        trend_note = (
-            "視窗彼此重疊時，同一個月會被每個涵蓋它的視窗各算一次，"
-            "所以月度趨勢表的逐月數字是重複計數後的合計。"
+    else:
+        lookback_note = (
+            f"popularity 以過去 {lookback} 個月的歷史購買計數重排"
+            f"（label_table 在這個視窗內實際只涵蓋 {covered} 個月）。"
+            if window_partial else
+            f"popularity 以過去 {lookback} 個月的歷史購買計數重排。"
         )
+        if several_dates:
+            n_windows = len(windows)
+            lookback_note = (
+                f"popularity 對 {n_windows} 個評估日期各以該日期之前 {lookback} 個月"
+                f"的歷史購買計數重排；排名組成的 count 是這 {n_windows} 個視窗的"
+                f"合計，平均每月＝count ÷ {per_month_divisor}"
+                + (
+                    f"（各視窗內 label_table 有資料的月數加總：實際只涵蓋 "
+                    f"{per_month_divisor} 個視窗月，滿額 {full_window_months} 個）。"
+                    if window_partial else
+                    f"（{n_windows} 個視窗 × 每個 {lookback} 個月）。"
+                )
+            )
+            trend_note = (
+                "視窗彼此重疊時，同一個月會被每個涵蓋它的視窗各算一次，"
+                "所以月度趨勢表的逐月數字是重複計數後的合計。"
+            )
     return ReportSection(
         title="baseline — popularity 對照",
         description=(
-            f"Model 相對 popularity baseline 的位置。{lookback_note}popularity "
-            "排名組成為各 item 跨月合計（總計＋平均每月）；月度趨勢表把同一批計數"
-            "拆到各 item 逐月（列＝item、欄＝月份，合計逐 item 對齊排名組成）。"
+            f"Model 相對 popularity baseline 的位置。{lookback_note}"
+            f"{composition_note}"
             f"{trend_note}"
             "overall 的 mAP／recall／precision 各一張表、"
             "k 放欄位、點標題展開。對照層級：overall（三家族）、per-item"

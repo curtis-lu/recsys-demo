@@ -28,10 +28,12 @@ from recsys_tfb.core.consistency import (
     post_training_snap_date_errors,
     prediction_quality_param_errors,
     prediction_quality_population_errors,
+    baseline_score_errors,
     query_filter_param_errors,
     report_section_key_errors,
     resolved_env_dir,
     retired_calibration_bin_key_errors,
+    resolved_baseline_rebuild_dates,
     resolved_inference_rebuild_dates,
     resolved_rebuild_dates,
     train_snap_dates_errors,
@@ -49,6 +51,7 @@ from recsys_tfb.core.versioning import (
     compute_base_dataset_version,
     compute_feature_table_fingerprint,
     compute_model_version,
+    compute_popularity_source_version,
     compute_search_id,
     compute_train_variant_id,
     find_latest_completed_model_version,
@@ -403,6 +406,54 @@ def _evaluation_month_plans(catalog, *, snap_dates, time_col: str) -> dict:
         existing = landed_months(lister(), time_col=time_col, dataset_name=name)
     return {name: plan_incremental_snap_dates(configured=list(snap_dates),
                                               existing=existing)}
+
+
+def _popularity_period_plan(catalog, params: dict, *, eval_dates, rebuild):
+    """``SnapDatePlan`` for ``popularity_period_counts`` (#397), or raise.
+
+    Configured periods are the time values sample_pool holds inside the
+    evaluated dates' lookback windows — listed from the data, one distinct
+    over the windows' span (``baselines.list_candidate_periods``), because the
+    time grain is the deployment's and sample_pool declares no partitions.
+    Landed ones come from the table's partition listing, scoped by its
+    ``popularity_source_version`` filter, so ``catalog`` must be resolved with
+    that version. ``rebuild`` periods are recounted even though they landed.
+
+    The half of A21 that needs the listing: a ``--rebuild-dates`` value inside
+    a window (checked before Spark) that sample_pool does not hold would be a
+    silent no-op, so it raises ``ConfigConsistencyError`` here.
+    """
+    from recsys_tfb.evaluation.baselines import (
+        list_candidate_periods,
+        resolve_lookback_months,
+    )
+
+    time_col = get_schema(params)["time"]
+    periods = list_candidate_periods(
+        catalog.load("sample_pool"), list(eval_dates),
+        resolve_lookback_months(params), params,
+    )
+    absent = [d for d in rebuild if d not in set(periods)]
+    if absent:
+        raise ConfigConsistencyError(
+            f"(A21) --rebuild-dates names {absent}, which sample_pool holds no "
+            f"rows at inside the lookback windows (its time values there: "
+            f"{_fmt_months(periods)}), so nothing would be recounted."
+        )
+    name = "popularity_period_counts"
+    lister = getattr(catalog.get_dataset(name), "existing_partition_values", None)
+    existing = (
+        landed_months(lister(), time_col=time_col, dataset_name=name)
+        if lister is not None else []
+    )
+    plan = plan_incremental_snap_dates(
+        configured=periods, existing=existing, rebuild=rebuild)
+    logger.info(
+        "[months] %s to_count=%s skipped=%s", name,
+        _fmt_months(d.strftime("%Y-%m-%d") for d in plan.to_process),
+        _fmt_months(d.strftime("%Y-%m-%d") for d in plan.skipped),
+    )
+    return plan
 
 
 def _compare_only_input_errors(plan, catalog, catalog_config) -> list[str]:
@@ -1812,6 +1863,14 @@ def evaluation(
         None, "--compare-only",
         help="Like --compare, but skip prepare/compute/baseline/report and read enriched_eval_predictions from Hive (only produces report_comparison.html)",
     ),
+    rebuild_dates: Optional[str] = typer.Option(
+        None, "--rebuild-dates",
+        help="Comma-separated time values of popularity_period_counts to "
+             "recount even though they landed (after a sample_pool / "
+             "label_table backfill). Only with evaluation.baseline.score: "
+             "rate; each must fall in a lookback window of "
+             "evaluation.snap_date.",
+    ),
     from_node: Optional[str] = typer.Option(
         None, "--from-node",
         help="Start from this node (topological position); missing upstream "
@@ -1863,6 +1922,9 @@ def evaluation(
     # reader takes it with plain truthiness and never raises, so a typo'd
     # value would silently do nothing instead of failing loudly.
     section_errs += query_filter_param_errors(params)
+    # (A50) evaluation.baseline.score's value domain (#397); evaluation-only
+    # key, so wired here for A34's reason.
+    section_errs += baseline_score_errors(params)
     # (A40) monitoring mode cannot evaluate a deployment that declares an
     # optional column role: inference's rows do not carry those columns and
     # label_table's do, so the two sides identify rows differently. Wired here
@@ -1902,6 +1964,34 @@ def evaluation(
         # in another parameters_*.yaml.
         params.setdefault("evaluation", {})["compare"] = compare_source_dict
 
+    eval_config = params_eval.get("evaluation", params_eval)
+    # One date or several (#374). The path segment every catalog entry, the
+    # manifest and the `latest` symlink use: YYYYMMDD for one date, as it always
+    # was, `<earliest>-<latest>` for several.
+    eval_dates = as_date_list(eval_config.get("snap_date"))
+    snap_date = dates_label(eval_dates) if eval_dates else "unknown"
+
+    # The positive-rate baseline (#397) decides the DAG shape, the plan below
+    # and whether --rebuild-dates means anything; one answer for all three.
+    # Never under --compare-only, whose short pipeline has no baseline.
+    from recsys_tfb.evaluation.baselines import (
+        baseline_scores_by_rate,
+        resolve_lookback_months,
+    )
+
+    baseline_rate = baseline_scores_by_rate(params) and not compare_only
+    # (A21) --rebuild-dates needs the rate mode and a date inside a lookback
+    # window. Checked before Spark starts, like the other commands' A21.
+    try:
+        rebuild = resolved_baseline_rebuild_dates(
+            [d.strip() for d in rebuild_dates.split(",")] if rebuild_dates else None,
+            rate_wired=baseline_rate, eval_dates=eval_dates,
+            lookback_months=resolve_lookback_months(params),
+        )
+    except ConfigConsistencyError as exc:
+        logger.error(str(exc))
+        raise typer.Exit(code=1)
+
     get_or_create_spark_session(_load_spark_config(config, "evaluation"))
     data_dir = _find_data_dir()
 
@@ -1914,13 +2004,6 @@ def evaluation(
     base_v, train_v = _dataset_versions_from_model_manifest(
         models_dir / mv, data_dir
     )
-
-    eval_config = params_eval.get("evaluation", params_eval)
-    # One date or several (#374). The path segment every catalog entry, the
-    # manifest and the `latest` symlink use: YYYYMMDD for one date, as it always
-    # was, `<earliest>-<latest>` for several.
-    eval_dates = as_date_list(eval_config.get("snap_date"))
-    snap_date = dates_label(eval_dates) if eval_dates else "unknown"
 
     logger.info(
         "Evaluation — model_version: %s (%s), post_training: %s, compare: %s%s",
@@ -1954,20 +2037,49 @@ def evaluation(
         "post_training": post_training,
         "compare_source": compare_source_dict,
         "compare_only": bool(compare_only),
+        "baseline_rate": baseline_rate,
     }
 
     # Asked of a catalog resolved after runtime_params holds model_version:
     # enriched_eval_predictions' partition_filter scopes the listing to it,
     # and an unresolved template would list nothing (every month missing).
     _, listing_catalog_config = _resolve_catalog(config, params, runtime_params)
+    if baseline_rate:
+        # popularity_period_counts' partition key, from the two source
+        # entries (no placeholder in them, so this first resolution suffices)
+        # and the schema. In runtime_params only in rate mode, so a count-mode
+        # run's parameters are exactly what they were.
+        runtime_params["popularity_source_version"] = (
+            compute_popularity_source_version(
+                get_schema_for_hash(params),
+                listing_catalog_config["sample_pool"],
+                listing_catalog_config["label_table"],
+            )
+        )
+        _, listing_catalog_config = _resolve_catalog(
+            config, params, runtime_params)
     listing_catalog = DataCatalog(listing_catalog_config)
     month_plans = None
+    extra_datasets = None
     if eval_dates:
         # Without a configured month the nodes raise their own message.
         month_plans = _evaluation_month_plans(
             listing_catalog, snap_dates=eval_dates,
             time_col=get_schema(params)["time"],
         )
+        if baseline_rate:
+            try:
+                period_plan = _popularity_period_plan(
+                    listing_catalog, params, eval_dates=eval_dates,
+                    rebuild=rebuild,
+                )
+            except ConfigConsistencyError as exc:
+                logger.error(str(exc))
+                raise typer.Exit(code=1)
+            # The node reads the plan through the catalog (ADR-0007); the
+            # slice asks it whether a period is missing (ADR-0012).
+            extra_datasets = {"popularity_period_counts_plan": period_plan}
+            month_plans["popularity_period_counts"] = period_plan
     if compare_only:
         errors = [] if (dry_run or list_nodes) else _compare_only_input_errors(
             (month_plans or {}).get("enriched_eval_predictions"),
@@ -1991,8 +2103,10 @@ def evaluation(
         from_node=from_node, only_node=only_node,
         dry_run=dry_run, list_nodes=list_nodes,
         # A month question, not an exists() question, for the table every node
-        # after prepare_eval_data reads (ADR-0018 decision 1, ADR-0012).
+        # after prepare_eval_data reads (ADR-0018 decision 1, ADR-0012), and
+        # in rate mode for popularity_period_counts too.
         month_plans=month_plans,
+        extra_datasets=extra_datasets,
     )
     if not executed:
         return
@@ -2000,6 +2114,16 @@ def evaluation(
     # Post run
     version_dir = data_dir / "evaluation" / mv / snap_date
     extra = {"snap_date": snap_date, "post_training": post_training}
+    if extra_datasets:
+        # What this run counted and what it reused (ADR-0002: a pipeline
+        # that decides to do less work records what it decided not to do).
+        period_plan = extra_datasets["popularity_period_counts_plan"]
+        extra["popularity_period_counts_plan"] = {
+            "popularity_source_version":
+                runtime_params["popularity_source_version"],
+            "counted": [d.strftime("%Y-%m-%d") for d in period_plan.to_process],
+            "skipped": [d.strftime("%Y-%m-%d") for d in period_plan.skipped],
+        }
     slice_extra = _slice_extra(from_node, only_node)
     if slice_extra:
         extra.update(slice_extra)
