@@ -518,6 +518,8 @@ def test_compute_all_metrics_returns_expected_keys(spark):
     assert set(result.keys()) == {
         "overall", "per_segment", "per_item", "per_item_segment",
         "macro_avg", "observation_items", "n_queries", "n_excluded_queries",
+        # #376: written whether or not the switch drops those groups.
+        "n_all_positive_queries",
         "dataset_overview",
     }
 

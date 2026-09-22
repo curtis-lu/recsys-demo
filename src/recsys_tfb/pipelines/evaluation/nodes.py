@@ -49,6 +49,12 @@ from recsys_tfb.evaluation.baselines import (
 from recsys_tfb.evaluation.compare import build_comparison_result
 from recsys_tfb.evaluation.comparison.report import assemble_comparison_report
 from recsys_tfb.evaluation.diagnostics_spark import aggregate_report_diagnostics
+from recsys_tfb.evaluation.metrics import (
+    ALL_POSITIVE_KEY,
+    all_positive_share,
+    all_positive_share_warns,
+    drop_all_positive_groups,
+)
 from recsys_tfb.evaluation.metrics_spark import (
     compute_all_metrics,
     compute_overall_per_item,
@@ -609,6 +615,13 @@ def compute_metrics(
     decision 2) and carries ``config_fingerprint``, which ``generate_report``
     checks before drawing from it.
 
+    ``evaluation.query_filter.drop_all_positive_groups`` (#376) decides whether
+    the all-positive query groups leave the metrics; the count
+    ``n_all_positive_queries`` is in the result either way, per grain, and
+    logged with its share of the groups holding a positive — warned about
+    when the switch is off and the share is above
+    ``metrics.ALL_POSITIVE_WARN_SHARE``.
+
     Pre-checks (inputs): the landed segment list was prepared under today's
     settings (``_require_prepared_with_current_config``), and so was each
     evaluated date's partition (``restrict_to_current_eval_partitions``).
@@ -628,9 +641,16 @@ def compute_metrics(
     eval_predictions = restrict_to_current_eval_partitions(
         eval_predictions, parameters, segment_columns).frame
 
+    # Decision — drop the all-positive query groups (a positive label on every
+    # row, so every per-query metric is the same whatever the order) only when
+    # evaluation.query_filter.drop_all_positive_groups says so; counted either
+    # way. Read here and passed down, never inside metrics_spark: training
+    # scores through the same code and must not follow the switch (#376).
+    drop_all_positive = drop_all_positive_groups(parameters)
     result = compute_all_metrics(
         eval_predictions, parameters,
         segment_columns=segment_columns["joined"],
+        drop_all_positive_groups=drop_all_positive,
     )
     n_snap_dates = result["dataset_overview"]["totals"]["n_snap_dates"]
     snap_dates = eval_snap_dates(parameters)
@@ -652,11 +672,40 @@ def compute_metrics(
         k: segment_columns[k] for k in ("joined", "sources", "missing")
     }
     result["config_fingerprint"] = fingerprint(parameters)
-    logger.info(
-        "Spark metrics computed: n_queries=%d, n_excluded=%d",
-        result["n_queries"],
-        result["n_excluded_queries"],
-    )
+    # One line of accounts per grain, and a warning when the all-positive
+    # share is high with the switch off (the rule:
+    # metrics.all_positive_share_warns, which the report calls too). Each
+    # grain decides on its own frame, so the two can disagree.
+    for grain, bundle in (("fine", result),
+                          ("category", result.get("category"))):
+        if bundle is None:
+            continue
+        n_with_positive = bundle["n_queries"] - bundle["n_excluded_queries"]
+        n_all_positive = bundle[ALL_POSITIVE_KEY]
+        share = all_positive_share(bundle)
+        share_text = "n/a" if share is None else f"{share:.1%}"
+        logger.info(
+            "Spark metrics computed (%s grain): n_queries=%d, n_excluded=%d "
+            "(no positive); %d hold a positive, of which %d all-positive "
+            "(%s) — %s",
+            grain, bundle["n_queries"], bundle["n_excluded_queries"],
+            n_with_positive, n_all_positive, share_text,
+            (f"dropped (evaluation.query_filter.drop_all_positive_groups "
+             f"on), {n_with_positive - n_all_positive} scored")
+            if drop_all_positive else
+            ("scored like the others (evaluation.query_filter."
+             "drop_all_positive_groups off)"),
+        )
+        if all_positive_share_warns(bundle, parameters):
+            logger.warning(
+                "All-positive query groups at the %s grain: %d of the %d "
+                "holding a positive (%s). Every row's label is positive, so "
+                "every per-query metric of such a group is the same whatever "
+                "the order, and they count in the mAP as they are. Set "
+                "evaluation.query_filter.drop_all_positive_groups: true to "
+                "drop them from the metrics and the baseline.",
+                grain, n_all_positive, n_with_positive, share_text,
+            )
     return result
 
 
@@ -786,11 +835,14 @@ def compute_baseline_metrics(
     # baseline comparison. Gated by what turns them on for the model (the
     # segment columns prepare_eval_data joined / item_categories maps items),
     # so the baseline pays for a slice only when the model computed its match.
+    # Decision — drop the all-positive query groups exactly when compute_metrics
+    # does (#376): the report reads the baseline against the model.
     metrics = compute_overall_per_item(
         baseline_frame,
         parameters,
         segment_columns=segment_columns["joined"],
         with_category=True,
+        drop_all_positive_groups=drop_all_positive_groups(parameters),
     )
     metrics["purchase_counts"] = purchase_counts
     metrics["monthly_counts"] = monthly_counts
@@ -1618,13 +1670,20 @@ def generate_comparison_report(
     enriched partition). Its frame can hold a column the other run mode joined,
     all NULL, so the frame's columns are not asked (ADR-0020 bug 6). The
     compared side is another prediction table with no segment columns.
+
+    Both sides drop the all-positive query groups, or neither, per
+    ``evaluation.query_filter.drop_all_positive_groups`` (#376): read once, so
+    the Δ never compares two different sets of groups.
     """
+    drop_all_positive = drop_all_positive_groups(parameters)
     metrics_a = compute_all_metrics(
         eval_predictions_common, parameters,
         segment_columns=segment_columns["joined"],
+        drop_all_positive_groups=drop_all_positive,
     )
     metrics_b = compute_all_metrics(
-        compare_predictions_common, parameters, segment_columns=[]
+        compare_predictions_common, parameters, segment_columns=[],
+        drop_all_positive_groups=drop_all_positive,
     )
 
     src = (parameters.get("evaluation", {}) or {}).get("compare", {}) or {}

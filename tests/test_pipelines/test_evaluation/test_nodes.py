@@ -1,5 +1,6 @@
 """Tests for evaluation pipeline Spark nodes."""
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -1432,7 +1433,8 @@ class TestConsumersSegmentByTheLandedList:
 
         asked = []
 
-        def fake_metrics(df, parameters, *, segment_columns=()):
+        def fake_metrics(df, parameters, *, segment_columns=(),
+                         drop_all_positive_groups=False):
             asked.append((df, list(segment_columns)))
             return {}
 
@@ -2341,3 +2343,298 @@ def test_each_diagnosis_node_gets_a_distinct_name():
     names = [make_diagnosis_node(n).__name__ for n in DIAGNOSES]
     assert names == [f"diagnose_{n}" for n in DIAGNOSES]
     assert len(set(names)) == len(names)
+
+
+class TestAllPositiveQueryGroups:
+    """#376: ``evaluation.query_filter.drop_all_positive_groups``.
+
+    An all-positive query group has a positive label on every row, so every
+    per-query metric of it is the same whatever the order. The switch drops
+    those groups from the measurement metrics, the popularity baseline and
+    both sides of the comparison report — at each grain, decided on that
+    grain's own frame. It does not reach the diagnoses. With it off, the
+    evaluation nodes warn when those groups are more than 10% of the groups
+    holding a positive.
+
+    ``ROWS`` makes the two grains disagree (fund_stock and fund_bond fold into
+    the category fund):
+
+        c1  fund_stock .9 1 | exchange_fx .2 1   all-positive at both grains
+        c2  fund_stock .3 1 | fund_bond   .8 0   mixed; all-positive as one fund row
+        c3  fund_bond  .9 0 | exchange_fx .1 1   mixed at both grains
+        c4  fund_stock .5 0 | exchange_fx .4 0   no positive
+
+    Each "drops" test compares the switched-on result on the whole frame with
+    the switched-off result on the frame without that grain's all-positive
+    groups.
+    """
+
+    ROWS = [
+        ("c1", "fund_stock", 0.9, 1), ("c1", "exchange_fx", 0.2, 1),
+        ("c2", "fund_stock", 0.3, 1), ("c2", "fund_bond", 0.8, 0),
+        ("c3", "fund_bond", 0.9, 0), ("c3", "exchange_fx", 0.1, 1),
+        ("c4", "fund_stock", 0.5, 0), ("c4", "exchange_fx", 0.4, 0),
+    ]
+    #: The compared side of the comparison report: another prediction table
+    #: over the same groups, scored differently.
+    COMPARED_ROWS = [
+        ("c1", "fund_stock", 0.4, 1), ("c1", "exchange_fx", 0.6, 1),
+        ("c2", "fund_stock", 0.6, 1), ("c2", "fund_bond", 0.1, 0),
+        ("c3", "fund_bond", 0.8, 0), ("c3", "exchange_fx", 0.7, 1),
+        ("c4", "fund_stock", 0.2, 0), ("c4", "exchange_fx", 0.5, 0),
+    ]
+    FINE = {"c1"}
+    CATEGORY = {"c1", "c2"}
+    KEY = "evaluation.query_filter.drop_all_positive_groups"
+    NODES_LOGGER = "recsys_tfb.pipelines.evaluation.nodes"
+
+    @staticmethod
+    def _parameters(switch=None, *, items=("fund_stock", "fund_bond",
+                                           "exchange_fx"),
+                    mapping=None):
+        params = {
+            "schema": {
+                "columns": {
+                    "time": "snap_date", "entity": ["cust_id"],
+                    "item": "prod_name", "label": "label", "score": "score",
+                    "rank": "rank",
+                },
+                "categorical_values": {"prod_name": list(items)},
+            },
+            "evaluation": {
+                "snap_date": "2025-01-31",
+                "k_values": [1, "all"],
+                "baseline": {"lookback_months": 12},
+                "item_categories": {
+                    "enabled": True, "unmapped": "singleton",
+                    "mapping": (mapping if mapping is not None
+                                else {"fund": ["fund_stock", "fund_bond"]}),
+                },
+                "diagnosis": {
+                    "sample": {"max_queries": 100,
+                               "min_pos_queries_per_item": 1, "seed": 42},
+                    "ci": {"enabled": True, "n_boot": 20},
+                },
+            },
+        }
+        if switch is not None:
+            params["evaluation"]["query_filter"] = {
+                "drop_all_positive_groups": switch}
+        return params
+
+    @classmethod
+    def _frame(cls, spark, parameters, without=(), rows=None):
+        """The partition as ``prepare_eval_data`` under ``parameters`` writes
+        it, less the query groups in ``without``; ``rank`` follows ``score``."""
+        import pandas as pd
+
+        from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+            stamp_partition_fingerprint,
+        )
+
+        kept = [r for r in (rows or cls.ROWS) if r[0] not in without]
+        rank = {}
+        for cust in {r[0] for r in kept}:
+            ordered = sorted((r for r in kept if r[0] == cust),
+                             key=lambda r: -r[2])
+            for i, r in enumerate(ordered, start=1):
+                rank[(r[0], r[1])] = i
+        return stamp_partition_fingerprint(spark.createDataFrame(pd.DataFrame({
+            "snap_date": ["2025-01-31"] * len(kept),
+            "cust_id": [r[0] for r in kept],
+            "prod_name": [r[1] for r in kept],
+            "score": [r[2] for r in kept],
+            "label": [r[3] for r in kept],
+            "rank": [rank[(r[0], r[1])] for r in kept],
+        })), parameters, [])
+
+    @staticmethod
+    def _label_table(spark):
+        """History for the popularity counts: fund_stock 3, fund_bond 2,
+        exchange_fx 1."""
+        import pandas as pd
+
+        rows = [
+            {"snap_date": "2024-06-30", "cust_id": f"h{i}", "prod_name": item,
+             "label": 1}
+            for item, n in (("fund_stock", 3), ("fund_bond", 2),
+                            ("exchange_fx", 1))
+            for i in range(n)
+        ]
+        return spark.createDataFrame(pd.DataFrame(rows))
+
+    def _metrics(self, spark, switch, without=()):
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+
+        params = self._parameters(switch)
+        return compute_metrics(self._frame(spark, params, without),
+                               _no_segments(params), params)
+
+    def _baseline(self, spark, switch, without=()):
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_baseline_metrics,
+        )
+
+        params = self._parameters(switch)
+        return compute_baseline_metrics(
+            self._frame(spark, params, without), self._label_table(spark),
+            _no_segments(params), params)
+
+    # ---- the measurement metrics -------------------------------------------
+
+    def test_compute_metrics_drops_the_fine_grained_ones(self, spark):
+        on = self._metrics(spark, True)
+        without = self._metrics(spark, False, without=self.FINE)
+        for key in ("overall", "per_item", "macro_avg"):
+            assert on[key] == without[key], key
+        assert on["overall"]["map@3"] == pytest.approx(0.5)
+
+    def test_compute_metrics_drops_the_category_grain_ones(self, spark):
+        on = self._metrics(spark, True)
+        without = self._metrics(spark, False, without=self.CATEGORY)
+        for key in ("overall", "per_item", "macro_avg"):
+            assert on["category"][key] == without["category"][key], key
+        assert on["category"]["overall"]["map@2"] == pytest.approx(0.5)
+
+    # ---- the popularity baseline -------------------------------------------
+
+    def test_compute_baseline_metrics_drops_the_fine_grained_ones(self, spark):
+        """Popularity scores c1 1, c2 1, c3 1/2 at map@3: 5/6 off, 3/4 on."""
+        on = self._baseline(spark, True)
+        without = self._baseline(spark, False, without=self.FINE)
+        assert on["overall"] == without["overall"]
+        assert on["per_item"] == without["per_item"]
+        assert on["overall"]["map@3"] == pytest.approx(0.75)
+
+    def test_compute_baseline_metrics_drops_the_category_grain_ones(self, spark):
+        on = self._baseline(spark, True)
+        without = self._baseline(spark, False, without=self.CATEGORY)
+        assert on["category"]["overall"] == without["category"]["overall"]
+        assert on["category"]["per_item"] == without["category"]["per_item"]
+        assert on["category"]["overall"]["map@2"] == pytest.approx(0.5)
+
+    # ---- the comparison report ---------------------------------------------
+
+    def test_generate_comparison_report_drops_them_on_both_sides(
+            self, spark, monkeypatch):
+        """The two sides must be read under the same rule, or the Δ compares
+        different groups. Each side is checked against its own frame with the
+        all-positive groups removed; the sides score differently (fine-grained
+        map@3 without c1: 1/2 on the model side, 3/4 on the compared one)."""
+        from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+        from recsys_tfb.pipelines.evaluation import nodes
+
+        seen = {}
+
+        def capture(metrics_a, metrics_b, *_a, **_k):
+            seen["a"], seen["b"] = metrics_a, metrics_b
+            return {}
+
+        monkeypatch.setattr(nodes, "build_comparison_result", capture)
+        monkeypatch.setattr(nodes, "assemble_comparison_report",
+                            lambda *a, **k: "<html/>")
+        on, off = self._parameters(True), self._parameters(False)
+        nodes.generate_comparison_report(
+            self._frame(spark, on), self._frame(spark, on, rows=self.COMPARED_ROWS),
+            {}, _no_segments(on), on)
+
+        for side, rows in (("a", self.ROWS), ("b", self.COMPARED_ROWS)):
+            fine = compute_all_metrics(
+                self._frame(spark, off, self.FINE, rows=rows), off)
+            cat = compute_all_metrics(
+                self._frame(spark, off, self.CATEGORY, rows=rows), off)
+            assert seen[side]["overall"] == fine["overall"], side
+            assert (seen[side]["category"]["overall"]
+                    == cat["category"]["overall"]), side
+        assert seen["a"]["overall"]["map@3"] == pytest.approx(0.5)
+        assert seen["b"]["overall"]["map@3"] == pytest.approx(0.75)
+
+    # ---- the diagnoses do not follow it ------------------------------------
+
+    @staticmethod
+    def _unfingerprinted(result):
+        """The settings fingerprint names the switch (#376), so it differs
+        between the two runs by design; everything else must not."""
+        return {k: v for k, v in result.items() if k != "config_fingerprint"}
+
+    def test_compute_report_aggregates_does_not_follow_it(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_report_aggregates,
+        )
+
+        def run(switch, without=()):
+            params = self._parameters(switch)
+            return self._unfingerprinted(compute_report_aggregates(
+                self._frame(spark, params, without), _no_segments(params),
+                params))
+
+        assert run(True) == run(False)
+        # The fixture can tell: without c1 the aggregates differ.
+        assert run(False) != run(False, without=self.FINE)
+
+    def test_the_headline_ci_does_not_follow_it(self, spark):
+        """The report's headline per-item mAP and its CI come from the
+        diagnosis sample, not from ``compute_metrics``."""
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_metric_ci,
+            draw_diagnosis_sample_node,
+        )
+
+        def run(switch, without=()):
+            params = self._parameters(switch)
+            sample = draw_diagnosis_sample_node(
+                self._frame(spark, params, without), _no_segments(params),
+                params)
+            return self._unfingerprinted(compute_metric_ci(sample, params))
+
+        assert run(True) == run(False)
+        assert run(False)["macro"] != run(False, without=self.FINE)["macro"]
+
+    # ---- the log -----------------------------------------------------------
+
+    TEN_GROUPS = (
+        [("c0", "A", 0.9, 1), ("c0", "B", 0.1, 1)]
+        + [(f"c{i}", item, score, label)
+           for i in range(1, 10)
+           for item, score, label in (("A", 0.9, 1), ("B", 0.1, 0))]
+    )
+
+    def _warnings(self, caplog, spark, params, rows=None):
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+
+        with caplog.at_level(logging.INFO, logger=self.NODES_LOGGER):
+            compute_metrics(self._frame(spark, params, rows=rows),
+                            _no_segments(params), params)
+        return [r.getMessage() for r in caplog.records
+                if r.name == self.NODES_LOGGER
+                and r.levelno == logging.WARNING]
+
+    def test_switched_off_a_share_above_ten_percent_warns(self, spark, caplog):
+        """One of three groups holding a positive at the fine grain, two of
+        three at the category grain: each grain warns, naming the switch."""
+        warned = self._warnings(caplog, spark, self._parameters())
+        assert len(warned) == 2, warned
+        assert all(self.KEY in m for m in warned), warned
+        assert any("33.3%" in m and "fine grain" in m for m in warned), warned
+        assert any("66.7%" in m and "category grain" in m for m in warned), warned
+        ledger = [r.getMessage() for r in caplog.records
+                  if r.name == self.NODES_LOGGER
+                  and r.levelno == logging.INFO
+                  and "Spark metrics computed" in r.getMessage()]
+        assert len(ledger) == 2, ledger
+
+    def test_exactly_ten_percent_does_not_warn(self, spark, caplog):
+        params = self._parameters(items=("A", "B"), mapping={})
+        params["evaluation"]["item_categories"]["enabled"] = False
+        assert self._warnings(caplog, spark, params, self.TEN_GROUPS) == []
+
+    def test_the_category_grain_warns_on_its_own(self, spark, caplog):
+        """Fine-grained share exactly 10%: no warning. A and B fold into one
+        category, so every group is one positive row there: 100%, warned."""
+        params = self._parameters(items=("A", "B"), mapping={"ab": ["A", "B"]})
+        warned = self._warnings(caplog, spark, params, self.TEN_GROUPS)
+        assert len(warned) == 1, warned
+        assert "category" in warned[0] and self.KEY in warned[0]
+
+    def test_switched_on_does_not_warn(self, spark, caplog):
+        assert self._warnings(caplog, spark, self._parameters(True)) == []
