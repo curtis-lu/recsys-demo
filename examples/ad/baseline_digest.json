@@ -1,8 +1,8 @@
 {
   "measured": {
     "date": "2026-09-22",
-    "code_commit": "33ffc498",
-    "how": "run_e2e.sh 跑 feat/430-ap-hpo-objectives（main d0a23ff8 之後）：這組 conf 的 training.hpo_objective 從 macro_per_item_map 改成 pooled_average_precision（#430）。改之前，以本分支的程式碼、原本的 conf 跑 --compare，六層逐值與上一版基準（#380）相同。改之後與上一版逐層比對：source_etl、dataset 逐值相同；versions 只有 model_version 變（hpo_objective 在 model_version 的雜湊裡），base_dataset_version、train_variant_id 相同；training、evaluation 隨挑中的 trial 改變——5 個 trial 都在 Optuna 的隨機起始階段，兩個目標試的是同一組參數，舊目標挑中 learning_rate≈0.031／num_leaves=31，新目標挑中 learning_rate≈0.121／num_leaves=10。本檔即改之後那次的 data/digest.json。"
+    "code_commit": "54d88665",
+    "how": "run_e2e.sh 跑 feat/376-drop-all-positive-groups（main 1c09f0f8 之後）：evaluation 的 metrics.json 頂層與 category 各多一個鍵 n_all_positive_queries（全正的 query group 組數，#376；本 conf 不開 evaluation.query_filter.drop_all_positive_groups）。與上一版基準逐層比對：versions、source_etl、dataset、training 逐值相同；evaluation 只有 metrics.json 不同（葉數 926 → 928）。另以葉層級比對 metrics.json 等十份 JSON 與上一版基準那次的產物：既有的葉逐值相同（含 config_fingerprint），只多 n_all_positive_queries＝10 與 category.n_all_positive_queries＝24 兩個葉。本檔即這次的 data/digest.json。"
   },
   "noisy": {},
   "versions": {
@@ -253,8 +253,8 @@
       "hash": "6592bb03e1ed688b0e9e52c46f176750fabf4272f1f99bb765474be45398caad"
     },
     "metrics.json": {
-      "leaves": 926,
-      "hash": "71930b04ef148f1378ac5c66e4b0909931828837fffd8cbaab6df569058fe644"
+      "leaves": 928,
+      "hash": "36c2236222aaff706ac7cc86d971c7a6558939f45ba71f14cf9e43f1b2506b0e"
     },
     "prediction_quality.json": {
       "leaves": 12470,
