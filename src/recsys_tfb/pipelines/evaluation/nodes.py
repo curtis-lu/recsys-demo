@@ -54,6 +54,8 @@ from recsys_tfb.evaluation.metrics import (
     all_positive_share,
     all_positive_share_warns,
     drop_all_positive_groups,
+    format_share,
+    n_groups_with_positive,
 )
 from recsys_tfb.evaluation.metrics_spark import (
     compute_all_metrics,
@@ -641,11 +643,12 @@ def compute_metrics(
     eval_predictions = restrict_to_current_eval_partitions(
         eval_predictions, parameters, segment_columns).frame
 
-    # Decision — drop the all-positive query groups (a positive label on every
-    # row, so every per-query metric is the same whatever the order) only when
-    # evaluation.query_filter.drop_all_positive_groups says so; counted either
-    # way. Read here and passed down, never inside metrics_spark: training
-    # scores through the same code and must not follow the switch (#376).
+    # Decision — drop the all-positive query groups (the same positive label on
+    # every row, so every per-query metric is the same whatever the order)
+    # only when evaluation.query_filter.drop_all_positive_groups says so;
+    # counted either way. Read here and passed down, never inside
+    # metrics_spark: training scores through the same code and must not
+    # follow the switch (#376).
     drop_all_positive = drop_all_positive_groups(parameters)
     result = compute_all_metrics(
         eval_predictions, parameters,
@@ -680,10 +683,10 @@ def compute_metrics(
                           ("category", result.get("category"))):
         if bundle is None:
             continue
-        n_with_positive = bundle["n_queries"] - bundle["n_excluded_queries"]
+        n_with_positive = n_groups_with_positive(bundle)
         n_all_positive = bundle[ALL_POSITIVE_KEY]
         share = all_positive_share(bundle)
-        share_text = "n/a" if share is None else f"{share:.1%}"
+        share_text = "n/a" if share is None else format_share(share)
         logger.info(
             "Spark metrics computed (%s grain): n_queries=%d, n_excluded=%d "
             "(no positive); %d hold a positive, of which %d all-positive "
@@ -699,11 +702,11 @@ def compute_metrics(
         if all_positive_share_warns(bundle, parameters):
             logger.warning(
                 "All-positive query groups at the %s grain: %d of the %d "
-                "holding a positive (%s). Every row's label is positive, so "
-                "every per-query metric of such a group is the same whatever "
-                "the order, and they count in the mAP as they are. Set "
-                "evaluation.query_filter.drop_all_positive_groups: true to "
-                "drop them from the metrics and the baseline.",
+                "holding a positive (%s). Every row carries the same positive "
+                "label, so every per-query metric of such a group is the same "
+                "whatever the order, and they count in the metrics as they "
+                "are. Set evaluation.query_filter.drop_all_positive_groups: "
+                "true to drop them from the metrics and the baseline.",
                 grain, n_all_positive, n_with_positive, share_text,
             )
     return result
@@ -1672,8 +1675,13 @@ def generate_comparison_report(
     compared side is another prediction table with no segment columns.
 
     Both sides drop the all-positive query groups, or neither, per
-    ``evaluation.query_filter.drop_all_positive_groups`` (#376): read once, so
-    the Δ never compares two different sets of groups.
+    ``evaluation.query_filter.drop_all_positive_groups`` (#376), read once.
+    Each side decides which of its groups are all-positive on its own rows,
+    so the Δ can still compare different sets of groups: both frames hold only
+    the common (query group × item) universe, but one group's candidate rows
+    can differ between them (``_restrict_to_common``), and such a group can be
+    all-positive on one side — dropped there — and mixed on the other — kept
+    there. The comparison report says so when the switch is on.
     """
     drop_all_positive = drop_all_positive_groups(parameters)
     metrics_a = compute_all_metrics(

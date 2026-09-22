@@ -25,11 +25,13 @@ What lives here:
   value domains.
 * :func:`resolved_all_k` — the only reader of the K a metrics bundle's
   ``"all"`` values are stored at, for the reports and for training (#434).
-* :func:`drop_all_positive_groups` / :func:`all_positive_share` /
-  :func:`all_positive_share_warns` — the only reader of
-  ``evaluation.query_filter.drop_all_positive_groups`` and the one rule for
-  when the all-positive share warns, shared by the evaluation nodes (log) and
-  the report (#376).
+* :func:`drop_all_positive_groups` / :func:`n_groups_with_positive` /
+  :func:`all_positive_share` / :func:`all_positive_share_warns` /
+  :func:`format_share` — the only reader of
+  ``evaluation.query_filter.drop_all_positive_groups``, the one count of the
+  groups holding a positive, and the one rule for when the all-positive share
+  warns and how it prints, shared by the evaluation nodes (log) and the
+  report (#376).
 * :func:`compute_pooled_average_precision` /
   :func:`compute_macro_per_item_average_precision` — the HPO objectives that
   score every val row as one binary prediction (#430). Not the report's
@@ -84,10 +86,15 @@ def metric_params(parameters: dict) -> dict:
 
 #: Top-level key of a ``metrics_spark.compute_all_metrics`` bundle and of its
 #: ``category`` sub-bundle (#376): how many of the query groups holding a
-#: positive are *all-positive* — every row's label positive, so every
-#: per-query ranking metric comes out the same whatever the order (the
-#: untruncated AP is 1; ``map@K`` below the group's row count is K / rows,
-#: ``precision@K`` above it is rows / K). Always written, whether or not
+#: positive are *all-positive* — every row carries the same positive label
+#: (with 0/1 labels: every row positive; the rule is
+#: ``metrics_spark._all_positive_group``), so every per-query ranking metric
+#: (``map@K`` / ``precision@K`` / ``recall@K``) comes out the same whatever
+#: the order (with 0/1 labels the untruncated AP is 1; ``map@K`` below the
+#: group's row count is K / rows, ``precision@K`` above it is rows / K). The
+#: per-item metrics (``map_attr@K`` / ``hit_rate@K`` / ``mean_pos``) are not:
+#: with K below the row count, which rows reach the top K still decides which
+#: items get the credit. Always written, whether or not
 #: ``evaluation.query_filter.drop_all_positive_groups`` drops them, because the
 #: report reads only the written bundle. ``n_excluded_queries`` keeps counting
 #: only the zero-positive groups.
@@ -112,23 +119,58 @@ def drop_all_positive_groups(parameters: dict) -> bool:
     return bool(qf.get("drop_all_positive_groups", False) or False)
 
 
+def n_groups_with_positive(bundle: dict) -> Optional[int]:
+    """Query groups holding a positive in one metrics bundle:
+    ``n_queries - n_excluded_queries``.
+
+    The one place that subtraction is written (#376):
+    :func:`all_positive_share`, the report's ledger, warning and query-count
+    rows, and the evaluation nodes' log all read it here. ``n_excluded_queries`` counts only the groups holding no positive,
+    switch on or off, so this is the groups holding a positive either way.
+    ``None`` when either count is missing or ``None`` — a bundle older than
+    the counts — rather than a guess at the missing one.
+    """
+    n_queries = bundle.get("n_queries")
+    n_zero = bundle.get("n_excluded_queries")
+    if n_queries is None or n_zero is None:
+        return None
+    return n_queries - n_zero
+
+
 def all_positive_share(bundle: dict) -> Optional[float]:
     """All-positive groups ÷ groups holding a positive, for one metrics bundle.
 
-    The denominator is the mAP's (``n_queries - n_excluded_queries``), so the
-    share reads as "this much of the mAP's groups is scored the same
-    whatever the order", and the dataset's ``test_zero_positive_group_ratio`` cannot move
-    it. ``None`` when the bundle predates #376 (no :data:`ALL_POSITIVE_KEY`) or
-    no group holds a positive.
+    The denominator is :func:`n_groups_with_positive`, the groups the
+    measurement metrics score with the switch off, so the share reads as
+    "this much of those groups gets the same per-query metrics whatever the
+    order", and the dataset's ``test_zero_positive_group_ratio`` cannot move
+    it. ``None`` when the bundle predates #376 (no :data:`ALL_POSITIVE_KEY`),
+    lacks either group count, or no group holds a positive.
     """
     n_all_positive = bundle.get(ALL_POSITIVE_KEY)
     if n_all_positive is None:
         return None
-    n_with_positive = (bundle.get("n_queries") or 0) - (
-        bundle.get("n_excluded_queries") or 0)
-    if n_with_positive <= 0:
+    n_with_positive = n_groups_with_positive(bundle)
+    if n_with_positive is None or n_with_positive <= 0:
         return None
     return n_all_positive / n_with_positive
+
+
+def format_share(share: float) -> str:
+    """An all-positive share as the log and the report print it: ``5.3%``.
+
+    One decimal, unless the share is above :data:`ALL_POSITIVE_WARN_SHARE` and
+    one decimal rounds it down to the threshold — 1004 of 10000 printed as
+    ``10.0%`` beside "above 10%". Then more decimals, at most four, until the
+    printed value is above the threshold too (``10.04%``). One function, so
+    the log and the report cannot print the same share two ways (#376).
+    """
+    for digits in range(1, 5):
+        text = f"{share:.{digits}%}"
+        if (not share > ALL_POSITIVE_WARN_SHARE
+                or float(text[:-1]) / 100 > ALL_POSITIVE_WARN_SHARE):
+            break
+    return text
 
 
 def all_positive_share_warns(bundle: dict, parameters: dict) -> bool:

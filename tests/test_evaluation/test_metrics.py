@@ -746,6 +746,47 @@ class TestAllPositiveShare:
              ALL_POSITIVE_KEY: 0}) is None
 
 
+class TestNGroupsWithPositive:
+    def test_is_n_queries_less_the_zero_positive_groups(self):
+        from recsys_tfb.evaluation.metrics import n_groups_with_positive
+
+        assert n_groups_with_positive(
+            {"n_queries": 1000, "n_excluded_queries": 50}) == 950
+        assert n_groups_with_positive(
+            {"n_queries": 10, "n_excluded_queries": 10}) == 0
+
+    def test_unknown_when_either_count_is_missing(self):
+        """Never a guess at the missing count: 0 in its place would read as
+        "every group holds a positive"."""
+        from recsys_tfb.evaluation.metrics import n_groups_with_positive
+
+        assert n_groups_with_positive({"n_excluded_queries": 5}) is None
+        assert n_groups_with_positive({"n_queries": 10}) is None
+        assert n_groups_with_positive(
+            {"n_queries": None, "n_excluded_queries": 0}) is None
+        assert n_groups_with_positive({}) is None
+
+
+class TestFormatShare:
+    def test_one_decimal_by_default(self):
+        from recsys_tfb.evaluation.metrics import format_share
+
+        assert format_share(0.053) == "5.3%"
+        assert format_share(50 / 950) == "5.3%"
+        assert format_share(0.101) == "10.1%"
+        assert format_share(0.10) == "10.0%"   # at the threshold: not above
+
+    def test_above_the_threshold_never_prints_as_the_threshold(self):
+        """1004 / 10000 is above 10% and would print 10.0% beside "above
+        10%"; more decimals until the printed value is above it too."""
+        from recsys_tfb.evaluation.metrics import format_share
+
+        assert format_share(1004 / 10000) != "10.0%"
+        assert format_share(1004 / 10000) == "10.04%"
+        assert format_share(21 / 209) == "10.05%"
+        assert format_share(100001 / 1000000) == "10.0001%"
+
+
 class TestAllPositiveShareWarns:
     ON = {"evaluation": {"query_filter": {"drop_all_positive_groups": True}}}
 

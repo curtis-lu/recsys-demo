@@ -113,12 +113,14 @@ evaluation:
     shrinkage_k: 0
 
   # 全正的 query group 過濾（#376；預設關，連父鍵一起註解——CONTEXT.md
-  # 的「全正的 query group」）。全正＝組內每一筆候選的 label 都是正例，
-  # 不管怎麼排，它的每個排序指標都一樣、排法分不出好壞。開了之後，衡量
-  # 指標（overall／per-item／分群／大類）與熱門度基準線都排除這種組；
-  # 不論開或關都會多印全正組數與佔比，佔比超過 10%（寫死在程式，非設定
-  # 鍵）就警告。**不套用**：頭號 mAP、報表診斷段、各診斷、training 的
-  # test mAP 與 HPO 目標（唯讀入口見
+  # 的「全正的 query group」）。全正＝組內每一筆候選的 label 都是正例
+  # （label 有分級時，每一筆都是同一個正值），不管怎麼排，它的組層級排序
+  # 指標（mAP／precision／recall）都一樣、排法分不出好壞。開了之後，衡量
+  # 指標（overall／per-item／分群／大類）、熱門度基準線，以及
+  # `--compare`／`--compare-only` 比較報表的兩側都排除這種組（兩側各自依
+  # 自己的列判定）；不論開或關都會多印全正組數與佔比，佔比超過 10%（寫死
+  # 在程式，非設定鍵）就警告。**不套用**：頭號 mAP、報表診斷段、各診斷、
+  # training 的 test mAP 與 HPO 目標（唯讀入口見
   # `evaluation/metrics.py::drop_all_positive_groups`；設定檢查見
   # `core/consistency.py` A49）。改這個鍵要從 compute_metrics 重跑
   # （`COMPUTED_KEYS`）。

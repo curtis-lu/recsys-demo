@@ -2348,8 +2348,8 @@ def test_each_diagnosis_node_gets_a_distinct_name():
 class TestAllPositiveQueryGroups:
     """#376: ``evaluation.query_filter.drop_all_positive_groups``.
 
-    An all-positive query group has a positive label on every row, so every
-    per-query metric of it is the same whatever the order. The switch drops
+    An all-positive query group has the same positive label on every row, so
+    every per-query metric of it is the same whatever the order. The switch drops
     those groups from the measurement metrics, the popularity baseline and
     both sides of the comparison report — at each grain, decided on that
     grain's own frame. It does not reach the diagnoses. With it off, the
@@ -2627,6 +2627,23 @@ class TestAllPositiveQueryGroups:
         params = self._parameters(items=("A", "B"), mapping={})
         params["evaluation"]["item_categories"]["enabled"] = False
         assert self._warnings(caplog, spark, params, self.TEN_GROUPS) == []
+
+    def test_a_share_just_above_ten_percent_is_not_logged_as_ten_point_zero(
+            self, spark, caplog):
+        """21 of 209 groups holding a positive (10.048%): one decimal would log
+        10.0% in a warning that says the share is above 10%."""
+        rows = (
+            [(f"a{i}", item, score, 1)
+             for i in range(21) for item, score in (("A", 0.9), ("B", 0.1))]
+            + [(f"m{i}", item, score, label)
+               for i in range(188)
+               for item, score, label in (("A", 0.9, 1), ("B", 0.1, 0))]
+        )
+        params = self._parameters(items=("A", "B"), mapping={})
+        params["evaluation"]["item_categories"]["enabled"] = False
+        warned = self._warnings(caplog, spark, params, rows)
+        assert len(warned) == 1, warned
+        assert "10.05%" in warned[0] and "(10.0%)" not in warned[0], warned
 
     def test_the_category_grain_warns_on_its_own(self, spark, caplog):
         """Fine-grained share exactly 10%: no warning. A and B fold into one

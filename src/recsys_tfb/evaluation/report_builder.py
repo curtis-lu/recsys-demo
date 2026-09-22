@@ -27,7 +27,9 @@ from recsys_tfb.evaluation.metrics import (
     all_positive_share,
     all_positive_share_warns,
     drop_all_positive_groups,
+    format_share,
     metric_params,
+    n_groups_with_positive,
     resolved_all_k,
 )
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
@@ -315,10 +317,12 @@ ALL_POSITIVE_KEPT_NOTE = "這段沒有排除全正的 query group"
 #: 開關的設定鍵全名：印進警告與加註，讀者照著就找得到要改哪裡。
 _ALL_POSITIVE_SWITCH = "evaluation.query_filter.drop_all_positive_groups"
 
-#: 全正的組為什麼值得數。不寫「AP 都是 1」或「滿分」：K 小於組的列數 n 時
-#: ``map@K``＝K/n，K 大於 n 時 ``precision@K``＝n/K；永遠成立的只有「排法不影響
-#: 它的分數」。
-_ALL_POSITIVE_WHY = "不管怎麼排，每組的分數都一樣"
+#: 全正的組為什麼值得數。不寫「AP 都是 1」或「滿分」：label 只有 0／1 時，K 小於
+#: 組的列數 n 的 ``map@K``＝K/n、K 大於 n 的 ``precision@K``＝n/K，label 分級時
+#: 值又不同；永遠成立的只有「排法不影響它的組層級（per-query）指標」。也不寫「每組
+#: 的分數都一樣」：per-item 的 ``map_attr@K``／``hit_rate@K``／``mean_pos`` 在 K
+#: 小於列數時仍看誰排進前 K。
+_ALL_POSITIVE_WHY = "不管怎麼排，組層級指標 mAP／precision／recall 都一樣"
 
 
 def _all_positive_kept_note(parameters: dict) -> str:
@@ -350,18 +354,34 @@ def _grain_bundles(metrics: dict) -> list[tuple[str, dict]]:
     return out
 
 
+def _test_zero_positive_draw(parameters: dict) -> float | None:
+    """dataset 對 test 表無正例 query group 的抽樣：監控模式回 ``None``（沒有
+    dataset 抽樣，數到的是資料本身）；``--post-training`` 且 test 表帶權重欄
+    （``test_carries_zero_positive_group_weight``）回保留比例 r（> 0）；不帶
+    權重欄回 ``0.0``（dataset 全丟了）。
+
+    一個判斷、兩段措辭：組數帳的 :func:`_zero_positive_origin` 與資料概況／預測
+    品質段的 :func:`_kept_zero_positive_groups_note` 都從這裡讀，不各寫一版分支。
+    """
+    if not parameters.get("post_training"):
+        return None
+    if not test_carries_zero_positive_group_weight(parameters):
+        return 0.0
+    return resolved_zero_positive_group_ratio(parameters, "test")
+
+
 def _zero_positive_origin(parameters: dict) -> str:
-    """「無正例的組」括號裡接在「不算進 mAP」後面的那句。
+    """「無正例的組」括號裡接在「不算進衡量指標」後面的那句。
 
     ``--post-training`` 吃的是 dataset 過濾後的 test 表：r（
     ``dataset.test_zero_positive_group_ratio``）為 0 時無正例的組在 dataset 就
     全丟了，帳上恆為 0；r > 0 時留下的是抽過的一部分。不說的話，讀者會把 0 讀成
     「資料裡沒有這種組」。監控模式沒有 dataset 抽樣，帳上是實際組數，回 ``""``。
     """
-    if not parameters.get("post_training"):
+    ratio = _test_zero_positive_draw(parameters)
+    if ratio is None:
         return ""
-    if test_carries_zero_positive_group_weight(parameters):
-        ratio = resolved_zero_positive_group_ratio(parameters, "test")
+    if ratio > 0:
         return (
             "；dataset 已依 dataset.test_zero_positive_group_ratio 抽過："
             f"{_kept_ratio_phrase(ratio)}"
@@ -373,45 +393,45 @@ def _zero_positive_origin(parameters: dict) -> str:
 
 
 def _group_ledger_line(grain: str, bundle: dict, parameters: dict) -> str | None:
-    """一個粒度的組數帳（#376）：有正例的組、其中全正、算進 mAP、無正例的組。
+    """一個粒度的組數帳（#376）：有正例的組、其中全正、算進衡量指標、無正例的組。
 
-    開關關：全正的組照樣算進 mAP，「算進 mAP」＝「有正例」。開關開：有正例＝
-    全正（已排除）＋算進 mAP。無正例的組兩種都不算進 mAP，``n_excluded_queries``
-    也只數它們。
+    開關關：全正的組照樣算進衡量指標，「算進衡量指標」＝「有正例」。開關開：
+    有正例＝全正（已排除）＋算進衡量指標。無正例的組兩種都不算進衡量指標，
+    ``n_excluded_queries`` 也只數它們。帳上不說「算進 mAP」：同一份報表的頭號
+    macro per-item mAP 取自診斷抽樣，開關開著也沒有排除全正的組。
 
     缺 ``n_queries``／``n_excluded_queries``（更早的 bundle）回 ``None``。只缺
     全正組數的，是 #376 之前算的 ``metrics.json``：開關關著時指紋沒變，照樣會被
     畫出來，所以不報錯，印得出的照印，並說怎麼補。
     """
-    n_queries = bundle.get("n_queries")
-    n_zero = bundle.get("n_excluded_queries")
-    if n_queries is None or n_zero is None:
+    n_pos = n_groups_with_positive(bundle)
+    if n_pos is None:
         return None
-    n_pos = n_queries - n_zero
+    n_zero = bundle["n_excluded_queries"]
     n_all = bundle.get(ALL_POSITIVE_KEY)
     drop = drop_all_positive_groups(parameters)
     if n_all is None:
         head = (
             f"有正例的組 {n_pos:,}"
-            + ("" if drop else "，全部算進 mAP")
+            + ("" if drop else "，全部算進衡量指標")
             + "（這份結果沒有全正的組數：它在這個計數加入之前算的，從 "
             "compute_metrics 重跑可得）"
         )
     elif drop:
         head = (
             f"有正例的組 {n_pos:,}，其中全正 {n_all:,} 已排除，"
-            f"算進 mAP 的有 {n_pos - n_all:,}"
+            f"算進衡量指標的有 {n_pos - n_all:,}"
         )
     else:
         share = all_positive_share(bundle)
-        pct = f"{share:.1%}；" if share is not None else ""
+        pct = f"{format_share(share)}；" if share is not None else ""
         head = (
             f"有正例的組 {n_pos:,}，其中全正 {n_all:,}（{pct}{_ALL_POSITIVE_WHY}）"
-            f"照樣算進，算進 mAP 的有 {n_pos:,}"
+            f"照樣算進，算進衡量指標的有 {n_pos:,}"
         )
     return (
         f"組數帳（{grain}）：{head}；無正例的組 {n_zero:,}"
-        f"（不算進 mAP{_zero_positive_origin(parameters)}）。"
+        f"（不算進衡量指標{_zero_positive_origin(parameters)}）。"
     )
 
 
@@ -426,14 +446,16 @@ def _all_positive_warnings(metrics: dict, parameters: dict) -> dict[str, str]:
     for grain, bundle in _grain_bundles(metrics):
         if not all_positive_share_warns(bundle, parameters):
             continue
-        n_pos = (bundle.get("n_queries") or 0) - (
-            bundle.get("n_excluded_queries") or 0)
+        # all_positive_share_warns is true only when the share is known, so
+        # both counts are there.
+        n_pos = n_groups_with_positive(bundle)
         out[f"⚠ 全正 query group（{grain}）"] = (
-            f"有正例的 query group 裡，全正的佔 {all_positive_share(bundle):.1%}"
+            "有正例的 query group 裡，全正的佔 "
+            f"{format_share(all_positive_share(bundle))}"
             f"（{bundle[ALL_POSITIVE_KEY]:,}／{n_pos:,} 組），超過 "
-            f"{ALL_POSITIVE_WARN_SHARE:.0%}。這些組{_ALL_POSITIVE_WHY}，照樣算進 "
-            "mAP，模型與熱門度 baseline 在這些組拿到一樣的分數。要排除它們，設 "
-            f"{_ALL_POSITIVE_SWITCH}: true；組數帳在「衡量指標」段。"
+            f"{ALL_POSITIVE_WARN_SHARE:.0%}。這些組{_ALL_POSITIVE_WHY}，照樣算進"
+            "衡量指標，模型與熱門度 baseline 在這些組的組層級指標也相同。要排除"
+            f"它們，設 {_ALL_POSITIVE_SWITCH}: true；組數帳在「衡量指標」段。"
         )
     return out
 
@@ -448,7 +470,7 @@ def _query_count_rows(metrics: dict, parameters: dict) -> dict:
     """
     n_queries = metrics.get("n_queries")
     n_zero = metrics.get("n_excluded_queries")
-    n_pos = _od(n_queries, n_zero)
+    n_pos = n_groups_with_positive(metrics)
     if not drop_all_positive_groups(parameters):
         return {
             "全部 query 數 n_queries": n_queries,
@@ -695,11 +717,9 @@ def _kept_zero_positive_groups_note(metrics: dict, parameters: dict) -> str:
     weight: few kept groups means the weighted numbers are not stable, and the
     reader should see the count next to them.
     """
-    if not parameters.get("post_training"):
+    ratio = _test_zero_positive_draw(parameters)
+    if not ratio:   # monitoring (None), or the dataset dropped them all (0.0)
         return ""
-    if not test_carries_zero_positive_group_weight(parameters):
-        return ""
-    ratio = resolved_zero_positive_group_ratio(parameters, "test")
     n_kept = metrics.get("n_excluded_queries")
     kept = f"本次評估資料裡有 {n_kept:,} 個" if n_kept is not None else "本次評估資料裡有一些"
     return (
@@ -1058,7 +1078,12 @@ def build_metrics_section(
     b_map = _per_item_metric_table(
         per_item, ks, all_k, "map_attr", "@{k}", macro_metrics=macro_item,
     )
-    if metric_ci and metric_ci.get("enabled"):
+    # Whether this section shows any CI at all: the condition for the CI
+    # columns below, which #376's CI notes (the column title and the
+    # ci_point_note sentence) follow too — no CI on the page, nothing to
+    # qualify.
+    ci_shown = bool(metric_ci and metric_ci.get("enabled"))
+    if ci_shown:
         ci_items = metric_ci.get("per_item", {}) or {}
         ci_macro = metric_ci.get("macro") or {}
 
@@ -1079,8 +1104,7 @@ def build_metrics_section(
     # not — say so on the table, not only in the section text. Same condition
     # as the CI columns above: no columns, nothing to qualify.
     drop = drop_all_positive_groups(parameters)
-    ci_cols = ("；CI 沒有排除全正的 query group"
-               if drop and metric_ci and metric_ci.get("enabled") else "")
+    ci_cols = "；CI 沒有排除全正的 query group" if drop and ci_shown else ""
     _add(b_map,
          f"B · per-item 歸因｜map_attr@k（列＝item，＋CI 上下界{ci_cols}）{item_cov}",
          True)
@@ -1111,15 +1135,17 @@ def build_metrics_section(
         trunc, col = f"截斷在 {mk}（metric.k）", None
     # #376: with the switch on, the point estimates in a map_attr row dropped
     # the all-positive groups and the CI beside them did not, so "same
-    # definition" is false and the point can fall outside its own CI.
+    # definition" is false and the point can fall outside its own CI. Said
+    # only when the section shows a CI (ci_shown), and the comparison with a
+    # row's point estimate only when that column is shown (col).
     if col is None:
         ci_point_note = (
             f"CI 上下界的點估{trunc}，本段各表不顯示 @{mk} 欄" + (
-                "；頭號指標與 CI 沒有排除全正的 query group，B 塊 map_attr 表"
-                "同一列的點估已排除，點估可能落在 CI 之外" if drop else ""
+                "；頭號指標與 CI 沒有排除全正的 query group，A、B 塊各表已排除"
+                if drop and ci_shown else ""
             )
         )
-    elif drop:
+    elif drop and ci_shown:
         ci_point_note = (
             f"頭號指標與 CI 上下界{trunc}，但沒有排除全正的 query group；B 塊 "
             f"map_attr 表同一列的 map_attr@{col} 點估已排除，和 CI 不是同一批組，"
