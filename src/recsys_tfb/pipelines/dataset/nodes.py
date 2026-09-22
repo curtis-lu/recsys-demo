@@ -44,6 +44,7 @@ from recsys_tfb.core.consistency import (
     feature_table_overlap_errors,
     item_coverage_errors,
     item_source_column_errors,
+    item_source_dtype_errors,
     nonnumeric_feature_errors,
     optional_role_source_column_errors,
     ColumnPrecision,
@@ -134,7 +135,7 @@ def validate_data_consistency(
     parameters: dict,
     candidate_feature_table: DataFrame | None = None,
 ) -> None:
-    """Run the Layer-2 invariants (B1, B5, B6, B7, B11–B16) against the source
+    """Run the Layer-2 invariants (B1, B5, B6, B7, B11–B17) against the source
     tables.
 
     ``candidate_feature_table`` is the candidate-level feature table when one is
@@ -149,7 +150,10 @@ def validate_data_consistency(
     adding a predicate there and one term to the sum below; deciding anything
     here would put a second, drifting copy of the rule next to the real one.
 
-    All errors are collected and raised once so a single fix pass clears them.
+    Errors are collected and raised once so a single fix pass clears them —
+    except B16, which is raised on its own first: every item check reads the
+    columns it is about, so with one missing those checks would fail as a
+    Spark error rather than report.
 
     Cost invariant (ADR-0006): the facts gathered here are cheap ones. Column
     types come from the metastore — metadata, no rows. The item values come from
@@ -167,23 +171,30 @@ def validate_data_consistency(
     identity_cols = schema["identity_columns"]
     windows = collect_dataset_snap_dates(parameters)
 
+    def _raise_if_any(errors: list[str]) -> None:
+        if errors:
+            raise DataConsistencyError(
+                "Data consistency check failed ("
+                + str(len(errors))
+                + " issue(s)):\n- "
+                + "\n- ".join(errors)
+            )
+
     # B16 first, and on its own: every item check below reads the columns it
     # is about, so with one missing they would fail as a Spark error rather
     # than report. Column names only. A no-op for a single-column item.
     item_tables = {"sample_pool": sample_pool, "label_table": label_table}
     if candidate_feature_table is not None:
         item_tables["candidate_feature_table"] = candidate_feature_table
-    source_errors = [
+    _raise_if_any([
         e for table, df in item_tables.items()
         for e in item_source_column_errors(schema, table, df.columns)
-    ]
-    if source_errors:
-        raise DataConsistencyError(
-            "Data consistency check failed ("
-            + str(len(source_errors))
-            + " issue(s)):\n- "
-            + "\n- ".join(source_errors)
-        )
+    ])
+    # B17 reads the tables as the user wrote them, before combining turns
+    # the item columns into one text column.
+    item_dtype_errors = item_source_dtype_errors(
+        schema, {table: dict(df.dtypes) for table, df in item_tables.items()},
+    )
 
     def _item_combinations(df: DataFrame) -> list[tuple[tuple, object]]:
         """Distinct ``(source values, item value)`` in the dataset windows.
@@ -261,6 +272,8 @@ def validate_data_consistency(
         + combined_item_collision_errors(
             item_sources, sample_pool_items + label_items,
         )
+        # B17 — one type per item column across the tables (read above).
+        + item_dtype_errors
         # B5 and B7 once per feature table, so each message names the table
         # that holds the column. Empty for a table that is not declared.
         + categorical_dtype_errors(categorical_cols, ft_dtypes)
@@ -311,13 +324,7 @@ def validate_data_consistency(
             feature_table.columns, candidate_feature_table.columns,
             drop_cols, identity_cols, label_col,
         )
-    if errors:
-        raise DataConsistencyError(
-            "Data consistency check failed ("
-            + str(len(errors))
-            + " issue(s)):\n- "
-            + "\n- ".join(errors)
-        )
+    _raise_if_any(errors)
 
 
 def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:

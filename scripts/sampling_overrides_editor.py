@@ -1002,6 +1002,24 @@ app = typer.Typer(
 )
 
 
+def with_combined_item(df, schema_cfg: dict, source: str):
+    """Combine a multi-column item the way the pipelines do (ADR-0027).
+
+    ``sample_group_keys`` and the override keys name ``item`` and its combined
+    values (``c01-banner``); the user's ``sample_pool`` carries the source
+    columns instead, so without this the group-by fails on a missing ``item``.
+    A single-column item is not looked at at all, and a frame that already
+    has the combined column (a framework table such as ``train_model_input``)
+    comes back as it is.
+    """
+    from recsys_tfb.utils.item_columns import combine_item_columns
+
+    schema = get_schema({"schema": schema_cfg})
+    if len(schema["item_source_columns"]) < 2 or schema["item"] in df.columns:
+        return df
+    return combine_item_columns(df, schema, source)
+
+
 def _load_spark_df(source: str):
     """Load a Hive table (db.table) or a parquet path into a Spark DataFrame.
 
@@ -1066,7 +1084,7 @@ def profile(
         "[2/4] starting SparkSession + reading source… "
         "(client-template-local local[*] is far faster for this script)"
     )
-    df = _load_spark_df(source)
+    df = with_combined_item(_load_spark_df(source), schema_cfg, source)
     typer.echo("[3/4] profiling: Spark groupBy + single collect over snap dates…")
     try:
         stats = profile_stats(

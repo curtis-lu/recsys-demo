@@ -671,6 +671,21 @@ class TestMultiColumnItem:
         assert schema["item_source_columns"] == ["prod_name"]
         assert schema["identity_columns"] == ["snap_date", "cust_id", "prod_name"]
 
+    def test_a_single_column_payload_is_the_one_main_hashes(self):
+        """Written out, not derived from the new code: the payload the version
+        hash is taken over, exactly as main (54332710) produced it for this
+        config. Comparing the two spellings with each other would stay green
+        if both moved together — for instance if a single column started
+        hashing as a one-element list, which moves every existing deployment's
+        ``base_dataset_version``."""
+        expected = {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "label": "label", "score": "score", "rank": "rank",
+            "categorical_values": {},
+        }
+        assert get_schema_for_hash(_params()) == expected
+        assert get_schema_for_hash(_params(item=["prod_name"])) == expected
+
     def test_a_one_element_list_hashes_like_the_string(self):
         assert get_schema_for_hash(_params(item=["prod_name"])) == get_schema_for_hash(
             _params()

@@ -236,6 +236,15 @@ class TestTheDataGate:
         with pytest.raises(DataConsistencyError, match=r"B16: label_table is missing item column\(s\) \['creative_format'\]"):
             _gate(spark, _pool_records(n_users=2), labels)
 
+    def test_B17_an_item_column_typed_differently_in_the_candidate_table(self, spark):
+        """``7`` in sample_pool and ``7.0`` in the candidate table would combine
+        to different items, and the candidate's features would silently be
+        NULL."""
+        candidate = _candidate_table(spark).withColumn(
+            "creative_format", F.lit(1.0))
+        with pytest.raises(DataConsistencyError, match="B17: item column 'creative_format'"):
+            _gate(spark, _pool_records(n_users=2), candidate=candidate)
+
     def test_B16_a_candidate_table_that_already_has_item(self, spark):
         candidate = _candidate_table(spark).withColumn("item", F.lit("x"))
         with pytest.raises(DataConsistencyError, match="B16: candidate_feature_table already has a column named 'item'"):

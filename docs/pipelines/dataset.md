@@ -366,6 +366,7 @@ schema:
 - **值裡有 `-` 沒關係**（`cmp-01` ＋ `banner` → `cmp-01-banner`）。會出事的只有兩個不同的組合拼出同一個值：`a-b` ＋ `c` 與 `a` ＋ `b-c` 都是 `a-b-c`，兩個 item 會被當成一個。資料閘在本次日期範圍的 `sample_pool` 與 `label_table` 裡找這種情況（不變量 B15），找到就擋下，訊息列出撞在一起的組合。熱門度基準線往回看到 dataset 日期範圍之前的那一段不查。
 - **有一格是 null，拼出的 item 就是 null**，跟單欄時 item 是 null 一樣；不會略過那一格去拼（略過的話 `a-b` ＋ null 會變成 `a-b`，撞上真的 `a` ＋ `b`）。數字欄照它的字面拼（`7` → `7-banner`）。
 - **你的表裡不能已經有一欄叫 `item`**，也不能缺清單裡的任何一欄（不變量 B16）：資料閘查 `sample_pool`、`label_table`、候選層級特徵表，evaluation 讀這些表時也會再查一次。清單裡的欄也不能同時是別的角色的欄（例如 `item: [user_id, creative_format]`），在 CLI 入口就擋下。
+- **同一個原欄在每張表的型別要一樣**（不變量 B17）。每一格都先轉成文字再拼，整數 `7` 與小數 `7.0` 會拼成兩個不同的 item，那些列就接不上了；資料閘比對 `sample_pool`、`label_table`、候選層級特徵表的欄位型別。
 - **原欄拼完就丟掉**，所以它們不會變成特徵；想讓活動、格式各自當特徵不在這個功能的範圍內。
 - **同分時照拼好的字串比**，不逐欄照數字大小比（`CONTEXT.md` 的 **rank**）。
 - **推論結果表只有拼好的 `item`**，不拆回原欄。
@@ -459,7 +460,7 @@ python -m recsys_tfb dataset \
 
 | 階段 | node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
-| 資料閘 | `validate_data_consistency` | 三張來源表、parameters、`candidate_feature_table`（沒宣告時是 `None`） | 檢查 item coverage 與 categorical feature 型別；宣告了候選層級特徵表時，另查它有齊 identity 欄（B13）、沒有和 `feature_table` 重複的特徵欄（B14）；item 由多欄組成時，另查各表有齊原欄、沒有已叫 `item` 的欄（B16），以及沒有兩個組合拼成同一個值（B15，§3.9）。收集問題後一次中止 | 無 |
+| 資料閘 | `validate_data_consistency` | 三張來源表、parameters、`candidate_feature_table`（沒宣告時是 `None`） | 檢查 item coverage 與 categorical feature 型別；宣告了候選層級特徵表時，另查它有齊 identity 欄（B13）、沒有和 `feature_table` 重複的特徵欄（B14）；item 由多欄組成時，另查各表有齊原欄、沒有已叫 `item` 的欄（B16）、同一個原欄各表型別相同（B17），以及沒有兩個組合拼成同一個值（B15，§3.9）。收集問題後一次中止 | 無 |
 | Train 抽樣 | `select_sample_keys` | `sample_pool` | 依 train 日期、分層比例與 overrides 做決定性抽樣 | `sample_keys` |
 | Train 切分 | `split_train_keys` | `sample_keys` | 依 entity 將資料互斥切成 train 與 train-dev | `train_keys_unfiltered`、`train_dev_keys_unfiltered`（不落地） |
 | Train 整組抽樣 | `filter_train_keys`、`filter_train_dev_keys` | 上一步的 keys、`label_table` | 依 `train_zero_positive_group_ratio` 整組丟掉部分無正例的 query group（label 取自 `label_table`）；預設 r ＝ 1 原樣通過（§3.7） | `train_keys`、`train_dev_keys` |
@@ -710,6 +711,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | `B14: column(s) [...] are in both feature_table and candidate_feature_table` | 同一個特徵欄兩張特徵表都有 | 在其中一張的來源 SQL 改名；兩份都不是特徵就列進 `drop_columns`（§3.8） |
 | `B15: item combinations (...) of [...] all combine to '...'` | item 由多欄組成，兩個不同的組合用 `-` 拼出同一個值 | 在來源 SQL 改其中一個值，讓組合拼出來不同（§3.9） |
 | `B16: <表> is missing item column(s) [...]`／`already has a column named 'item'` | item 由多欄組成，那張表缺某個原欄，或已經有一欄叫 `item` | 補上原欄；已有的 `item` 欄在來源 SQL 改名（§3.9） |
+| `B17: item column '...' has different types across tables {...}` | item 由多欄組成，同一個原欄在兩張表型別不同（例如一張 `int`、一張 `double`） | 在各表的來源 SQL 轉成同一個型別（§3.9） |
 | `(A24) dataset.X_snap_dates [...] and dataset.Y_snap_dates [...] name the same calendar day` | train/val/test 使用相同日期 | 重新切分日期，確保集合互斥。此檢查在 Spark 啟動前執行，**按日比對而非按字面**，所以同一天的不同寫法也抓得到；訊息會分別印出兩邊各自的原始寫法 |
 | `N 個日期區間設定無法展開` | 某個 `{start, end, step}` 區間寫錯：起迄沒落在 step 上、迄日早於起日、`step` 拼錯、少鍵或多鍵 | 訊息逐一點名是哪個檔的哪個鍵、哪一端不對；所有寫錯的區間一次列完。規則見 §3.1 |
 | `feature_table missing required ... snap_dates`／`candidate_feature_table missing required ... snap_dates` | source ETL 未產出某些日期 | 補跑 feature ETL 或修正日期設定。後者點名的是候選層級特徵表：`train_snap_dates` 在 fit 前處理器時查，其餘要讀的月份在精度閘查（§5） |

@@ -11,7 +11,7 @@ date: 2026-09-23
 
 ## 背景：模型本來就只看組合
 
-廣告示例的 item 是「活動 × 素材格式」。今天的做法是在三支來源 SQL 裡各自寫一次 `concat_ws('-', campaign_id, creative_format) AS ad_creative`。使用者要的是直接寫：
+廣告示例的 item 是「活動 × 素材格式」。今天的做法是在來源 SQL 裡自己拼：`label_table.sql` 與 `feature_realtime.sql` 各寫一次 `concat(campaign_id, '-', creative_format) AS ad_creative`，`sample_pool.sql` 從 `label_table` 取拼好的那一欄。使用者要的是直接寫：
 
 ```yaml
 schema:
@@ -52,8 +52,9 @@ schema:
    ```
 
    拼完之後原欄就丟掉。候選層級特徵表的非鍵欄全部會變成特徵，原欄留著的話，`campaign_id`、`creative_format` 會變成兩個新特徵——這跟今天在 SQL 拼的行為不同，也不是本 ADR 要的（屬性各自當特徵見 #394 的 Out of Scope）。
-4. **擋掉會撞名的設定。** 宣告多欄時，使用者的表若已經有一欄叫 `item` 就 raise，否則拼出的欄會蓋掉它。原欄也不能是其他角色的欄（例如 `item: [cust_id, prod]`）：拼完會把原欄丟掉，等於把 entity 的欄丟掉。後者在 `validate_schema_config` 擋，前者在拼欄的地方擋（每張表各擋一次，訊息點名是哪張表）。
-5. **拼欄只有一個函式，每個讀使用者表的入口都呼叫它**（`utils/item_columns.py`）。只用 Spark 內建的 `concat_ws`，不用 UDF。漏掉一個入口時，那張表沒有 `item` 欄，接 identity 的 join 會直接報找不到欄——會失敗，不會悄悄算錯。
+4. **擋掉會撞名的設定。** 宣告多欄時，使用者的表若已經有一欄叫 `item` 就 raise，否則拼出的欄會蓋掉它。原欄也不能是其他角色的欄（例如 `item: [cust_id, prod]`）：拼完會把原欄丟掉，等於把 entity 的欄丟掉。後者在 `validate_schema_config` 擋，前者在拼欄的地方擋（每張表各擋一次，訊息點名是哪張表；B16）。
+   同一個原欄在不同表的型別也要一致（B17，dataset 資料閘查 `sample_pool`、`label_table`、候選層級特徵表）：每一格都先轉成文字再拼，同一個值在一張表是整數 `7`、另一張是小數 `7.0`，會拼成兩個不同的 item。拼之前 Spark 會替 join 轉型、接得上；拼之後就接不上，候選層級特徵整批變成 NULL，而且沒有任何錯誤。
+5. **拼欄只有一個函式，每個讀使用者表的入口都呼叫它**（`utils/item_columns.py`）。只用 Spark 內建函式（`concat`、`cast`），不用 UDF。用 `concat` 而不是 `concat_ws`：`concat_ws` 會跳過 null 那一格，`a-b` ＋ null 會拼成 `a-b`，撞上真的 `a` ＋ `b`；`concat` 遇到 null 整個值就是 null，跟單欄時 item 是 null 一樣。漏掉一個用到 item 的入口時，那張表沒有 `item` 欄，接 identity 的 join 會直接報找不到欄——會失敗，不會悄悄算錯。不用到 item 的讀者（例如 evaluation 從 `sample_pool` 取分群欄）拿到的是沒拼過的表，原欄還在；拿原欄當分群欄是把候選層級的屬性當成 entity 層級，這與單欄時拿任何候選層級的欄當分群欄一樣是錯的用法，不是本 ADR 帶進來的。
 
 ## 考慮過、沒選的做法
 
@@ -71,5 +72,5 @@ schema:
 - **同分時照拼好的字串比**，不逐欄照數字大小比（`CONTEXT.md` 的 **rank**）。同分規則只為名次可重現，照字串比同樣可重現。
 - **conf 仍要列出所有組合**（`categorical_values.item`）。模型的類別編號表、離線推論的全網格（每個 entity × 整份清單）都靠這份清單。改成從資料數是 #379；本 ADR 拼成一欄之後，#379 數的就是 `item` 那一欄，不必知道它是多欄。
 - **撞值檢查只看 dataset 讀到的期間。** 熱門度基準線回看到 dataset 期間之前的那一段不查：撞值要欄值恰好互相吻合，極少見，不為它每次評估多掃一次來源表。
-- **`scripts/` 底下直接讀來源表的診斷腳本不拼欄。** 它們在多欄部署上會報找不到 `item` 欄；要用時在腳本讀表之後呼叫同一個函式。
+- **`scripts/` 底下直接讀來源表的診斷腳本不拼欄。** 它們在多欄部署上會報找不到 `item` 欄；要用時在腳本讀表之後呼叫同一個函式。例外是抽樣設定工具 `scripts/sampling_overrides_editor.py`：它不是診斷腳本，而是推導 `sample_group_keys`／`sample_ratio_overrides` 的工具（這兩個設定寫的正是 `item` 與拼好的值），所以它讀 `sample_pool` 之後會拼。
 - ADR-0025 說「之後任何加寬 identity 的改動（例如 #394 的 item 多欄）都不得調動既有欄位的相對順序」。本 ADR 不加寬 identity，所以這條對 #394 不適用；它對之後真的加寬 identity 的改動仍然成立。

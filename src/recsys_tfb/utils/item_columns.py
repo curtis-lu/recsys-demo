@@ -23,12 +23,7 @@ from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError, item_source_column_errors
-from recsys_tfb.core.schema import COMBINED_ITEM_COLUMN
-
-#: Fixed, not configurable (ADR-0027 decision 2). Values that themselves hold a
-#: ``-`` are normal and fine; only two different combinations producing the
-#: same value break anything, and B15 refuses that.
-ITEM_SEPARATOR = "-"
+from recsys_tfb.core.schema import COMBINED_ITEM_COLUMN, ITEM_SEPARATOR
 
 
 def combined_item_value(source_columns: list[str]) -> Column:

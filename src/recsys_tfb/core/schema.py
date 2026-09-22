@@ -90,6 +90,13 @@ _SCALAR_KEYS = ("time", "label", "score", "rank")
 #: name, so no existing deployment's column — or version ID — moves.
 COMBINED_ITEM_COLUMN = "item"
 
+#: What a multi-column item's values are joined with (ADR-0027 decision 2).
+#: Fixed, not configurable: values that themselves hold a ``-`` are normal and
+#: fine; only two different combinations producing the same value break
+#: anything, and B15 refuses that. Lives here, beside the column name, so the
+#: combining code and the invariant messages read one constant.
+ITEM_SEPARATOR = "-"
+
 
 #: The column lists :func:`get_schema` derives. None of them is settable: under
 #: ``schema`` they miss the ``columns`` lookup, and under ``schema.columns`` the
@@ -292,6 +299,10 @@ def _check_combined_item(schema: dict) -> None:
             "Invalid schema.columns in parameters.yaml: 'item' names a column "
             f"more than once: {', '.join(repeated)}"
         )
+    # Every other role's columns, listed from the roles rather than as
+    # `identity_columns` minus `item`: that subtraction would also remove a
+    # role column that happens to be named `item` — the very clash checked
+    # below.
     other_roles = (
         [schema["time"]]
         + schema["entity"]

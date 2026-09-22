@@ -248,6 +248,9 @@ def make_prepare_eval_data_node(population_name: str):
         * ``label_table`` has no duplicated identity key in those months
           (``ValueError``, with the number of duplicated keys; why it raises
           rather than deduplicating is written at the check).
+        * With a multi-column item, ``label_table`` carries every item
+          column and no column named ``item`` (B16, raised by
+          ``combine_item_columns``).
         """
         schema = get_schema(parameters)
         time_col = schema["time"]

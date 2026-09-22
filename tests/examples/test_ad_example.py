@@ -94,7 +94,7 @@ def test_generated_items_equal_the_declared_list(params, raw):
 def test_the_generator_joins_items_the_way_the_framework_does():
     """清單是照產生器的拼法寫的，框架照自己的拼法拼；兩者一不同，B1 會在 dataset
     第一個節點擋下整份清單。"""
-    from recsys_tfb.utils.item_columns import ITEM_SEPARATOR as FRAMEWORK_SEPARATOR
+    from recsys_tfb.core.schema import ITEM_SEPARATOR as FRAMEWORK_SEPARATOR
 
     assert ITEM_SEPARATOR == FRAMEWORK_SEPARATOR
 
