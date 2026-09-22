@@ -325,7 +325,7 @@ candidate_feature_table:
 **它的欄怎麼變成特徵**：
 
 - identity 欄是 join 鍵，不是特徵，也不從它讀類別詞表。`schema.item` 的值域照舊只來自 `schema.categorical_values`：這張表只有被展示過的 item，從它讀會把詞表縮小。
-- 其餘的欄與 `feature_table` 的欄走同一套規則：列在 `categorical_columns` 的編成整數，列在 `drop_columns` 的丟掉，label 欄不當特徵，剩下的是數值特徵。型別規則（B5、B6）與 carry 撞名（B7）兩張表都查。
+- 其餘的欄與 `feature_table` 的欄走同一套規則：列在 `categorical_columns` 的編成整數，列在 `drop_columns` 的丟掉，label 欄不當特徵，剩下的是數值特徵。型別規則（B5、B6）、carry 撞名（B7）與權重欄撞名（B12，§3.7）兩張表都查。
 - 類別欄的詞表只從這張表的 `train_snap_dates` 月份建立，與 `feature_table` 相同。
 - `preprocessor.json` 的 `feature_columns` 順序固定是：identity 類別欄、`feature_table` 的欄、候選層級特徵表的欄。沒宣告時順序與原本相同。
 - 同一個特徵欄不能兩張表都有（B14）：兩張表接到同一列候選上，同名欄會出現兩次，Spark 報欄名有歧義。在其中一張的來源 SQL 改名；兩份都不是特徵的話，列進 `drop_columns`，它同時作用在兩張表。identity 欄、label 欄與 drop 掉的欄不算重複。

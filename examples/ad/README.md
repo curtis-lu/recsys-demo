@@ -103,20 +103,20 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 
 ## 耗時
 
-整條約 **3 分多鐘**（194 秒）。量測：2026-09-22 跑一次，macOS 8 核、local[*]，跑完當下的 load average 是 2.2（前 5 分鐘平均 3.8：同一台機器上另有背景工作）。比 2026-09-21 的 247 秒少，主要是離線推論被擋下，省掉那一步的 53～57 秒。
+整條約 **3 分多鐘**（199 秒）。量測：2026-09-22 跑一次，macOS 8 核、local[*]；同一台機器上另有背景工作，跑完當下的 load average 是 5.9（前 15 分鐘平均 4.3），比 2026-09-21 那兩次的 1.9～2.8 重。比 2026-09-21 的 247 秒少，主要是離線推論被擋下，省掉那一步的 53～57 秒。
 
 | 步驟 | 秒 |
 |---|---|
-| setup（產生原始表、寫進 Hive） | 10 |
-| feature_etl | 34 |
-| check 特徵不偷看 | 10 |
+| setup（產生原始表、寫進 Hive） | 9 |
+| feature_etl | 35 |
+| check 特徵不偷看 | 9 |
 | label_etl | 14 |
-| sample_pool_etl | 14 |
-| inference_population_etl | 14 |
+| sample_pool_etl | 15 |
+| inference_population_etl | 15 |
 | dataset | 17 |
-| training（HPO 5 次） | 41 |
-| inference（在入口被 A47 擋下） | 2 |
-| evaluation --post-training | 28 |
+| training（HPO 5 次） | 43 |
+| inference（在入口被 A47 擋下） | 1 |
+| evaluation --post-training | 30 |
 | digest | 9 |
 
 每一步都是獨立的 CLI 指令，**秒數都含一次 Spark 啟動**。log 裡從建立 `run_id` 到 `SparkSession ready` 約 1 秒；加上 Python 載入，每一步的固定成本是幾秒等級（沒有單獨量）。資料量：原始曝光 42,555 列、瀏覽 45,725 列、使用者快照 33,600 列；`sample_pool` 38,557 列、`feature_table` 12,000 列、`feature_realtime` 38,557 列、train model_input 19,674 列。這些數字只說明「本機幾分鐘跑得完」，推不出生產成本（見〈沒做的事〉）。
