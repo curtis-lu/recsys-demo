@@ -289,6 +289,26 @@ def test_sampling_description_flows_into_page_scope(tmp_path):
     assert "抽樣設計" in html
 
 
+@pytest.mark.parametrize("drop", [True, False])
+def test_diagnosis_pages_say_they_keep_the_all_positive_groups_when_on(
+    tmp_path, drop
+):
+    """#376：evaluation.query_filter.drop_all_positive_groups 不套用在診斷。
+    開著時每一頁的範圍說明要講「這段沒有排除全正的 query group」，關著時不講
+    （否則「每頁都印」也會綠）。"""
+    from recsys_tfb.evaluation.report_builder import assemble_diagnosis_pages
+
+    params = {"evaluation": {"query_filter": {"drop_all_positive_groups": drop}}}
+    written = assemble_diagnosis_pages(_diag_results(), params, out_dir=tmp_path)
+    page = next(p for p in written if p.name == "01-config-shift.html")
+    html = page.read_text()
+    assert ("這段沒有排除全正的 query group" in html) is drop
+    # 放在範圍說明「算在哪批列上」那一格，不是頁尾
+    scope = html[html.index('<div class="scope-note">'):]
+    scope = scope[:scope.index("</div>")]
+    assert ("這段沒有排除全正的 query group" in scope) is drop
+
+
 def test_main_report_links_out_without_duplicating_numbers(tmp_path):
     """主報表只給入口，數字留在專屬頁——複製一份就會有兩個真實來源。"""
     from recsys_tfb.evaluation.report_builder import (
