@@ -20,7 +20,11 @@ training:
   sample_weight_keys:
     - ad_creative
   sample_weights: {}
-  hpo_objective: macro_per_item_map
+  # 把每一列當成二元預測的 average precision（#430）。選它是為了讓端到端實跑走到這條
+  # 程式路徑，不是因為它在這份資料上選模比較好（在這裡組內排序指標更穩，數字見 README
+  # 〈這組 conf 刻意沒打開的東西〉）。A48 要求 val 的 r > 0：parameters_dataset.yaml 設了
+  # val_zero_positive_group_ratio: 0.5，拿掉它這裡就會被擋。
+  hpo_objective: pooled_average_precision
   n_trials: 5
   num_iterations: 200
   early_stopping_rounds: 30

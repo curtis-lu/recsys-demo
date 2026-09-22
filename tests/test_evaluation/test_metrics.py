@@ -684,3 +684,106 @@ class TestResolvedAllK:
 
         assert resolved_all_k({"overall": {"map@1": 0.5}}) == 0
         assert resolved_all_k({}) == 0
+
+
+class TestPooledAveragePrecision:
+    """The HPO objective ``pooled_average_precision`` (#430): every val row one
+    binary prediction, all rows in one pool, scored exactly as scikit-learn
+    scores them.
+
+    Rows 0-3 are a query group holding a positive (weight 1); rows 4-7 a kept
+    zero-positive group at r = 0.5 (weight 1/r = 2). Its negatives outrank one
+    of the positives, so their weight moves the value: 9/14 weighted against
+    0.7 unweighted.
+    """
+
+    Y = np.array([1, 0, 1, 0, 0, 0, 0, 0])
+    SCORE = np.array([0.9, 0.8, 0.4, 0.3, 0.85, 0.5, 0.2, 0.1])
+    W = np.array([1, 1, 1, 1, 2, 2, 2, 2], dtype=float)
+
+    def test_equals_scikit_learn_under_the_weights(self):
+        from sklearn.metrics import average_precision_score
+
+        from recsys_tfb.evaluation.metrics import compute_pooled_average_precision
+
+        expected = average_precision_score(self.Y, self.SCORE, sample_weight=self.W)
+        assert expected == pytest.approx(9 / 14)
+        assert expected != pytest.approx(
+            average_precision_score(self.Y, self.SCORE)
+        ), "fixture no longer makes the weights matter"
+        assert compute_pooled_average_precision(
+            self.Y, self.SCORE, self.W) == expected
+
+    def test_no_positive_row_raises_instead_of_minus_zero(self):
+        """scikit-learn answers an all-zero ``y_true`` with ``-0.0`` and a
+        ``UserWarning``. In the HPO loop that constant would score every trial
+        alike: the first trial wins and nothing says why. The warning is
+        turned into an error so a check that runs *after* scikit-learn cannot
+        pass this test."""
+        import warnings
+
+        from recsys_tfb.evaluation.metrics import compute_pooled_average_precision
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(ValueError, match="holds no positive row"):
+                compute_pooled_average_precision(
+                    np.zeros(4), np.array([0.4, 0.3, 0.2, 0.1]), np.ones(4))
+
+
+class TestMacroPerItemAveragePrecision:
+    """The HPO objective ``macro_per_item_average_precision`` (#430): one
+    scikit-learn average precision per item, then the plain mean over the
+    items that hold a positive.
+
+    Rows are interleaved across items on purpose, so an implementation that
+    assumed rows arrive grouped by item would slice the wrong rows. Item "c"
+    holds no positive. Weights of 2 sit on negatives that outrank a positive,
+    so they move both per-item values.
+    """
+
+    ITEMS = np.array(["a", "b", "c", "a", "b", "a", "b", "c", "a", "b"])
+    Y = np.array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0])
+    SCORE = np.array([0.9, 0.6, 0.9, 0.8, 0.5, 0.7, 0.4, 0.1, 0.2, 0.3])
+    W = np.array([1, 1, 2, 2, 1, 2, 2, 2, 1, 2], dtype=float)
+
+    def _expected(self, weights):
+        from sklearn.metrics import average_precision_score
+
+        per_item = [
+            average_precision_score(
+                self.Y[self.ITEMS == item], self.SCORE[self.ITEMS == item],
+                sample_weight=None if weights is None
+                else weights[self.ITEMS == item],
+            )
+            for item in ("a", "b")
+        ]
+        return float(np.mean(per_item))
+
+    def test_mean_of_scikit_learn_per_item_over_items_with_a_positive(self):
+        """Warnings are errors here: scoring item "c" at all would make
+        scikit-learn warn, so this also pins that "c" is left out rather than
+        scored as -0.0 and averaged in."""
+        import warnings
+
+        from recsys_tfb.evaluation.metrics import (
+            compute_macro_per_item_average_precision,
+        )
+
+        expected = self._expected(self.W)
+        assert expected != pytest.approx(self._expected(None)), (
+            "fixture no longer makes the weights matter")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            result = compute_macro_per_item_average_precision(
+                self.ITEMS, self.Y, self.SCORE, self.W)
+        assert result == pytest.approx(expected, rel=1e-12)
+
+    def test_no_item_with_a_positive_raises(self):
+        from recsys_tfb.evaluation.metrics import (
+            compute_macro_per_item_average_precision,
+        )
+
+        with pytest.raises(ValueError, match="holds no positive row"):
+            compute_macro_per_item_average_precision(
+                self.ITEMS, np.zeros(len(self.ITEMS)), self.SCORE, self.W)

@@ -181,7 +181,7 @@ _Avoid_: 準確度、準不準（太模糊，會被讀成排序）
 precision-recall 曲線下的面積，母體是全部候選列（分箱近似）：同一個分數箱裡的列視為同分，照箱由高到低，Σ（該箱正例佔全部正例的比例 × 該箱下緣的 precision）。箱內的先後已經丟掉，所以不等於在原始分數上算的值。
 _Avoid_: average precision、AP（排序的 AP 是 `map@K` 與 `ap_contrib@K`，意思不同）；也不要跟 `pooled_average_precision` 混用（那是另一個定義，兩者不可對帳）
 
-**`pooled_average_precision`**、**`macro_per_item_average_precision`**（ADR-0025，尚未實作）:
+**`pooled_average_precision`**、**`macro_per_item_average_precision`**（ADR-0025）:
 把每一筆候選當成一次二元預測算出的 average precision，是 HPO 可以選的目標。前者把全部候選列倒在一起算；後者每個 item 各算一次再平均。精確算法，與 `pr_auc` 的分箱近似定義不同。
 _Avoid_: `pr_auc`、aucpr；也不要單獨叫 average precision 或 AP（那是排序指標 `map@K` 的說法）
 

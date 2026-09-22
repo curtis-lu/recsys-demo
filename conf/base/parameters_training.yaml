@@ -119,9 +119,17 @@ training:
   #   macro_per_item_map — evaluation's macro_avg.by_item.map_attr@all: per-item
   #                        attributed mAP, macro-averaged over products
   #                        (every product equal weight; cold products count).
+  #   pooled_average_precision / macro_per_item_average_precision
+  #                      — every val row one binary prediction, scored by
+  #                        scikit-learn's average_precision_score (all rows in
+  #                        one pool / per item, then the mean). For deployments
+  #                        trained on impression logs. Requires
+  #                        dataset.val_zero_positive_group_ratio > 0 (A48), which
+  #                        makes val larger; not reconcilable with the report's
+  #                        pr_auc. docs/pipelines/training.md §3.2.
   # NOTE: this key is inside the model_version-hashed training: block, so
   # changing it is a deliberate one-time model_version bump.
-  hpo_objective: macro_per_item_map   # ∈ {mean_ap, macro_per_item_map}
+  hpo_objective: macro_per_item_map   # ∈ {mean_ap, macro_per_item_map, pooled_average_precision, macro_per_item_average_precision}
   n_trials: 20
   num_iterations: 500
   early_stopping_rounds: 50

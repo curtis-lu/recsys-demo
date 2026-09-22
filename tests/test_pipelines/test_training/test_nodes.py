@@ -1074,6 +1074,232 @@ class TestTuneHyperparametersObjective:
             )
 
 
+class TestTuneHyperparametersBinaryPredictionObjectives:
+    """The two objectives that score every val row as a binary prediction
+    (#430), end to end: val's ``zero_positive_group_weight`` column is read,
+    reaches scikit-learn, and the population it averages over is logged.
+
+    The fixture's val already holds customers with no positive — the groups a
+    ratio r > 0 keeps. Their rows get weight 2 (r = 0.5), as the dataset
+    pipeline writes them.
+    """
+
+    OBJECTIVES = ["pooled_average_precision", "macro_per_item_average_precision"]
+
+    def _val(self, tmp_path, val_df, labels=None):
+        frame = val_df.copy()
+        if labels is not None:
+            frame["label"] = labels
+        has_pos = frame.groupby("cust_id")["label"].transform("max") > 0
+        frame["zero_positive_group_weight"] = np.where(has_pos, 1.0, 2.0)
+        path = tmp_path / "val_weighted.parquet"
+        frame.to_parquet(path)
+        return ParquetHandle(str(path)), frame
+
+    def _params(self, training_parameters, objective):
+        import copy
+
+        params = copy.deepcopy(training_parameters)
+        params["training"]["hpo_objective"] = objective
+        params["training"]["n_trials"] = 2
+        return params
+
+    @pytest.mark.parametrize("objective", OBJECTIVES)
+    def test_every_trial_score_equals_scikit_learn_under_the_val_weights(
+        self, monkeypatch, tmp_path, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters, objective,
+    ):
+        from sklearn.metrics import average_precision_score
+
+        from recsys_tfb.pipelines.training.steps import hpo_scoring
+
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        *_, val_df = synthetic_model_inputs
+        val_h, frame = self._val(tmp_path, val_df)
+        assert (frame["zero_positive_group_weight"] == 2.0).any(), (
+            "fixture lost its zero-positive groups; the weights would not matter")
+
+        seen = []
+        real = hpo_scoring._hpo_score
+
+        def spy(*args, **kwargs):
+            score = real(*args, **kwargs)
+            seen.append((args[4], score))  # (y_score, the trial's score)
+            return score
+
+        monkeypatch.setattr(hpo_scoring, "_hpo_score", spy)
+        tune_hyperparameters(
+            train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata,
+            self._params(training_parameters, objective),
+        )
+
+        y = frame["label"].to_numpy()
+        w = frame["zero_positive_group_weight"].to_numpy()
+        items = frame["prod_name"].to_numpy()
+        assert len(seen) == 2
+        for y_score, score in seen:
+            if objective == "pooled_average_precision":
+                expected = average_precision_score(y, y_score, sample_weight=w)
+            else:
+                expected = np.mean([
+                    average_precision_score(
+                        y[items == it], y_score[items == it],
+                        sample_weight=w[items == it])
+                    for it in np.unique(items) if y[items == it].any()
+                ])
+            assert score == pytest.approx(expected, rel=1e-12)
+
+    @pytest.mark.parametrize("objective", OBJECTIVES)
+    def test_val_without_a_positive_stops_before_the_first_trial(
+        self, monkeypatch, tmp_path, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters, objective,
+    ):
+        from recsys_tfb.pipelines.training.steps import hpo_scoring
+
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        *_, val_df = synthetic_model_inputs
+        val_h, _ = self._val(tmp_path, val_df, labels=np.zeros(len(val_df)))
+
+        def no_trial(algorithm):
+            raise AssertionError("a trial started")
+
+        monkeypatch.setattr(hpo_scoring, "get_adapter", no_trial)
+        with pytest.raises(ValueError, match="val holds no positive row"):
+            tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata,
+                self._params(training_parameters, objective),
+            )
+
+    @pytest.mark.parametrize("objective", OBJECTIVES)
+    def test_logs_how_val_splits_between_the_two_kinds_of_group(
+        self, caplog, tmp_path, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters, objective,
+    ):
+        """r and the kept group count are what a reader needs to judge how
+        steady a weighted score is (ADR-0025 decision 3); the row counts are
+        what the cost scales with."""
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        *_, val_df = synthetic_model_inputs
+        val_h, frame = self._val(tmp_path, val_df)
+        kept = frame["zero_positive_group_weight"] == 2.0
+        n_kept_groups = frame.loc[kept, "cust_id"].nunique()
+        n_pos_groups = frame.loc[~kept, "cust_id"].nunique()
+        assert n_kept_groups and n_pos_groups
+        params = self._params(training_parameters, objective)
+        params["dataset"] = {"val_zero_positive_group_ratio": 0.5}
+
+        with caplog.at_level(logging.INFO):
+            tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata,
+                params,
+            )
+
+        assert (
+            f"query groups holding a positive={n_pos_groups} "
+            f"(rows={int((~kept).sum())}); kept query groups holding "
+            f"none={n_kept_groups} (rows={int(kept.sum())}); "
+            f"dataset.val_zero_positive_group_ratio=0.5 in the config; "
+            f"zero_positive_group_weight on kept groups=2 in the val read"
+        ) in caplog.text
+
+    def test_the_weight_logged_is_the_one_in_the_data_not_the_config(
+        self, caplog, tmp_path, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters,
+    ):
+        """Training reads the dataset version on disk (latest, or
+        --base-dataset-version), not the one the config would build. A val
+        built at r = 0.5 under a config now saying 0.25 still scores with the
+        weight 2 it carries — and the log has to show that, or a reader
+        judges the score's steadiness by an r it was never computed with."""
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        *_, val_df = synthetic_model_inputs
+        val_h, _ = self._val(tmp_path, val_df)
+        params = self._params(training_parameters, "pooled_average_precision")
+        params["dataset"] = {"val_zero_positive_group_ratio": 0.25}
+
+        with caplog.at_level(logging.INFO):
+            tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata,
+                params,
+            )
+
+        assert (
+            "dataset.val_zero_positive_group_ratio=0.25 in the config; "
+            "zero_positive_group_weight on kept groups=2 in the val read"
+        ) in caplog.text
+
+    @pytest.mark.parametrize("objective", OBJECTIVES)
+    def test_val_without_the_weight_column_stops_before_reading_the_matrix(
+        self, monkeypatch, tmp_path, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters, objective,
+    ):
+        """A val built at r = 0 carries no weight column. A48 checks the
+        config, but training reads whichever dataset version is on disk, so
+        the two can disagree. Without a check up front the read skips the
+        missing column in silence, streams the whole val matrix (tens of GiB
+        in production) and only then fails on a bare KeyError."""
+        from recsys_tfb.io import extract as extract_mod
+
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        _, _, val_h, *_ = synthetic_model_inputs  # the parquet without the column
+
+        def no_stream(*args, **kwargs):
+            raise AssertionError("the val matrix was read")
+
+        monkeypatch.setattr(extract_mod, "_stream_matrix", no_stream)
+        with pytest.raises(ValueError, match="has no zero_positive_group_weight column"):
+            tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata,
+                self._params(training_parameters, objective),
+            )
+
+    @pytest.mark.parametrize("objective", ["mean_ap", "macro_per_item_map"])
+    def test_ranking_objectives_still_run_on_a_val_without_a_positive(
+        self, tmp_path, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters, objective,
+    ):
+        """The early stop is for the two binary-prediction objectives only
+        (#430): the ranking objectives keep scoring such a val as 0.0, as they
+        always have."""
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        *_, val_df = synthetic_model_inputs
+        val_h, _ = self._val(tmp_path, val_df, labels=np.zeros(len(val_df)))
+
+        best_params, _, best_model = tune_hyperparameters(
+            train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata,
+            self._params(training_parameters, objective),
+        )
+        assert isinstance(best_model, ModelAdapter)
+
+    def test_macro_logs_which_items_enter_the_mean(
+        self, caplog, tmp_path, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters,
+    ):
+        """The mean covers only items with a positive in val, and an item
+        with one or two positives weighs as much as a large one — the user
+        has to be able to see both (#430). One item is stripped of its
+        positives so "entering" and "all" differ."""
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        *_, val_df = synthetic_model_inputs
+        labels = val_df["label"].to_numpy().copy()
+        labels[val_df["prod_name"].to_numpy() == "fund_stock"] = 0
+        val_h, frame = self._val(tmp_path, val_df, labels=labels)
+        pos = frame[frame["label"] > 0].groupby("prod_name").size()
+        assert len(pos) == 3, "fixture must leave three items with a positive"
+
+        with caplog.at_level(logging.INFO):
+            tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata,
+                self._params(training_parameters,
+                             "macro_per_item_average_precision"),
+            )
+
+        assert (
+            f"items entering the mean=3 of 4; positives per entering item: "
+            f"min={int(pos.min())} median={float(pos.median()):g}"
+        ) in caplog.text
+
+
 def test_persist_sample_weight_report_flags_a_key_no_row_carries(tmp_path):
     """A configured weight whose key never appears in train is the finding.
 

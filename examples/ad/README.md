@@ -154,6 +154,7 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 | 候選層級特徵表 | **已打開**（#380）：catalog 的 `candidate_feature_table` 指到 `feature_realtime`，它多帶了 `request_id`、`primary_key` 改成 identity；`impression_id`、`event_ts` 列進 `drop_columns`。模型多了 `browse_30m`、`browse_same_category_30m`、`prior_exposures_this_week` 三個特徵。代價是離線推論被擋下（見〈怎麼跑〉） | #380（完成） |
 | 預測品質指標家族 | **已打開**（#381）：`report.sections.prediction_quality: true`，`prediction_quality` 的三個值與框架預設相同。這個示例只跑 `--post-training`；test 表留下一半沒有點擊的請求（下一列），報表這一段的數字用權重加權、代表還原到全部曝光的估計 | #381（完成） |
 | 沒有正例的 query group 留多少 | **已打開**（#429）：`val_zero_positive_group_ratio: 0.5`、`test_zero_positive_group_ratio: 0.5`，沒有點擊的請求整個留一半，列上帶權重 `zero_positive_group_weight`（1 或 2），`training_eval_predictions` 的 catalog 欄位宣告了它。train 不設（objective 是 `binary`，r < 1 會變成負例降採樣）。預測品質打開時 test 的 r 必須大於 0（A46），所以這一列與上一列是一起的。0.5 只是示例值 | #429（完成） |
+| HPO 目標 | **已打開**（#430）：`hpo_objective: pooled_average_precision`，val 的每一列當成一次二元預測，用 `zero_positive_group_weight` 加權算 average precision。換它是為了讓端到端實跑走到這條程式路徑，**不是因為它在這份資料上選模比較好**——正好相反：有正例的請求多半有 3～6 個候選（690 個請求裡 420 個有正例，全部候選都是正例、怎麼排 AP 都是 1 的只有 4 個），組內排序指標在這裡鑑別力不差。拿示例 5 個 trial 的預測、以請求為單位重抽 400 輪，原本的贏家仍然贏的比例：`macro_per_item_map` 0.96、`mean_ap` 0.63、`pooled_average_precision` 0.48（它選中的 trial 只贏第二名 0.0013，配對差的標準差 0.0085，等於擲硬幣）（2026-09-22，#430 審查時量）。它要求 val 的 r 大於 0（A48），所以跟上一列是一起的。示例原本用 `macro_per_item_map` | #430（完成） |
 
 ## 踩到的框架問題
 

@@ -4381,6 +4381,80 @@ class TestZeroPositiveGroupRatioA44:
         assert "A44" in str(exc.value)
 
 
+# The two objectives that score every val row as a binary prediction (#430).
+# Spelled out rather than read from the module under test, so a rename there
+# fails here instead of passing by construction.
+_BINARY_OBJECTIVES = ("pooled_average_precision", "macro_per_item_average_precision")
+
+
+def _objective_params(objective, **dataset) -> dict:
+    return {**_zp_params(**dataset), "training": {"hpo_objective": objective}}
+
+
+class TestBinaryPredictionObjectivesPassA25:
+    @pytest.mark.parametrize("objective", _BINARY_OBJECTIVES)
+    def test_admitted(self, objective):
+        assert training_hpo_finalize_param_errors(
+            _objective_params(objective)) == []
+
+
+class TestHpoObjectivePopulationA48:
+    """A binary-prediction HPO objective needs val to keep query groups that
+    hold no positive (#430): at r = 0 the dataset pipeline dropped them all,
+    and average precision would be computed on the filtered population."""
+
+    @pytest.mark.parametrize("objective", _BINARY_OBJECTIVES)
+    @pytest.mark.parametrize("dataset", [{}, {"val_zero_positive_group_ratio": 0}])
+    def test_absent_or_zero_val_ratio_is_rejected(self, objective, dataset):
+        from recsys_tfb.core.consistency import hpo_objective_population_errors
+
+        errs = hpo_objective_population_errors(
+            _objective_params(objective, **dataset))
+        assert len(errs) == 1
+        assert "A48" in errs[0]
+        assert objective in errs[0]
+        assert "dataset.val_zero_positive_group_ratio" in errs[0]
+
+    @pytest.mark.parametrize("objective", _BINARY_OBJECTIVES)
+    @pytest.mark.parametrize("ratio", [0.01, 0.5, 1])
+    def test_a_ratio_above_zero_is_clean(self, objective, ratio):
+        from recsys_tfb.core.consistency import hpo_objective_population_errors
+
+        assert hpo_objective_population_errors(_objective_params(
+            objective, val_zero_positive_group_ratio=ratio)) == []
+
+    @pytest.mark.parametrize("objective", ["mean_ap", "macro_per_item_map"])
+    def test_ranking_objectives_do_not_need_it(self, objective):
+        """A query group without a positive adds nothing to a ranking score,
+        so r = 0 — the default every existing deployment runs — is fine."""
+        from recsys_tfb.core.consistency import hpo_objective_population_errors
+
+        assert hpo_objective_population_errors(_objective_params(objective)) == []
+
+    def test_no_hpo_objective_is_clean(self):
+        from recsys_tfb.core.consistency import hpo_objective_population_errors
+
+        assert hpo_objective_population_errors({}) == []
+        assert hpo_objective_population_errors(_zp_params()) == []
+
+    @pytest.mark.parametrize("value", [None, "0.5", True, 1.5])
+    def test_a_ratio_a44_rejects_is_left_to_a44(self, value):
+        """One message per mistake, and no crash: the aggregator runs both
+        predicates on the same config, and resolving ``None`` would raise a
+        ``TypeError`` instead of joining the collected errors."""
+        from recsys_tfb.core.consistency import hpo_objective_population_errors
+
+        assert hpo_objective_population_errors(_objective_params(
+            "pooled_average_precision",
+            val_zero_positive_group_ratio=value)) == []
+
+    def test_wired_into_validate_config_consistency(self):
+        with pytest.raises(ConfigConsistencyError) as exc:
+            validate_config_consistency(
+                _objective_params("pooled_average_precision"))
+        assert "A48" in str(exc.value)
+
+
 class TestResolvedZeroPositiveGroupRatio:
     def test_absent_keys_resolve_to_todays_behaviour(self):
         # train keeps every group, val / test keep none — the defaults are

@@ -31,7 +31,7 @@ label 0 ＝「可以選、沒有選」                  label 0 ＝「看到了�
 三件事跟著不同，後面各節會展開：
 
 - **指標算得出來，但讀法不同。** 框架每個指標都是「這一組有哪幾列就排哪幾列」，組大小不一不會算錯。但隨便排的 mAP 隨組的大小變（見〈小的 query group 讓 mAP 偏高〉）：全網格下每組一樣大，那條底線是常數，0.6 好不好一看就知道；這裡不是常數，所以 mAP 只能在**同一批資料上**比（兩個模型互比、模型跟熱門度基準線比），不能拿絕對值判斷，也不能跨期直接比——這一期曝光量變了，數字就會動，跟模型無關。
-- **每個 item 各自的指標會混進「舊系統愛把它擺給誰」。** 很少被展示的 item 只出現在幾個組裡，數字很抖，而以 item 為單位取平均的指標給它跟大 item 一樣的份量。評估報表這邊有旋鈕：`evaluation.metric.min_positives` 把正例太少的 item 排除在平均之外。**HPO 這邊沒有**：預設目標 `macro_per_item_map` 在 HPO 裡不讀那個設定，每個有正例的 item 一律等權；item 很多、多數很少被展示時，改用 `training.hpo_objective: mean_ap` 比較穩。
+- **每個 item 各自的指標會混進「舊系統愛把它擺給誰」。** 很少被展示的 item 只出現在幾個組裡，數字很抖，而以 item 為單位取平均的指標給它跟大 item 一樣的份量。評估報表這邊有旋鈕：`evaluation.metric.min_positives` 把正例太少的 item 排除在平均之外。**HPO 這邊沒有**：預設目標 `macro_per_item_map`，以及另一個以 item 為單位的目標 `macro_per_item_average_precision`，在 HPO 裡都不讀那個設定，每個有正例的 item 一律等權；item 很多、多數很少被展示時，改用 `training.hpo_objective: pooled_average_precision`（或 `mean_ap`）比較穩。兩個把每一列當成二元預測的目標要先把 val 的 `dataset.val_zero_positive_group_ratio` 設成大於 0，見 [training 文件 §3.2](../../pipelines/training.md)。
 - **離線推論只會產生全網格的候選**——每個 entity 配上整份 item 清單。模型是在「被展示過的」配對上學的，離線推論卻要它替從沒見過的配對打分；拿這份結果跑評估的監控模式，沒被展示的 item 會接不到 label、被當成負例。宣告了 `occasion` 或 `event` 時監控模式會在入口被擋下（見〈宣告之後什麼會變〉）。
 
 用 `occasion`、`event` 把資料的形狀說清楚，框架才知道這不是全網格，會跳過不適用的診斷、擋下上面那條路。**資料其實是被展示的子集、卻什麼都沒宣告**（例如先把一週的曝光聚合成「每個 item 一列」再交給框架）時，框架不會報錯，每個數字都照算；上面三件事要你自己記得。

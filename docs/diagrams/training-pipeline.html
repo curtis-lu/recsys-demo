@@ -282,8 +282,9 @@ HPO 以 <code>search_id</code> 為鍵，兩者都是雜湊過的版本 ID，不�
           train／train_dev 吃預建的 binary（跨 trial 不重新分箱），val 在函式內從 parquet 現讀，
           函式回傳時那份 pandas 就被釋放。<br>
           Optuna study 以 <code>search_id</code> 持久化，崩潰可續跑；<code>--fresh-hpo</code> 清掉重來。
-          目標函式由 <code>training.hpo_objective</code> 選（<code>mean_ap</code> 或
-          <code>macro_per_item_map</code>），未知值 <code>raise</code>。<br>
+          目標函式由 <code>training.hpo_objective</code> 選（組內排序的 <code>mean_ap</code>、
+          <code>macro_per_item_map</code>，或把每一列當成二元預測的 <code>pooled_average_precision</code>、
+          <code>macro_per_item_average_precision</code>），未知值 <code>raise</code>。<br>
           <b>三個輸出都落地</b>是為了 <code>training --from-node finalize_model</code>：換個 final 策略重出模型
           不必再搜一次。<code>hpo_best_model</code> 另放 <code>hpo/</code> 子目錄，因為
           <code>ModelAdapterDataset</code> 會在 filepath 旁寫 <code>model_meta.json</code> sidecar，

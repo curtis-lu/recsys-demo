@@ -143,7 +143,7 @@ training 的 HPO 另有 checkpoint 機制，執行中斷後可沿用既有 Optun
 - **Driver-local 訓練快取**：各 split 會由 Hive／HDFS 複製為 driver-local Parquet，再由 adapter 轉換為演算法適用的可重用格式；例如 LightGBM 會建立 `.bin`，避免每次 HPO trial 重複掃描 Hive、轉換資料與分箱。
 - **訓練階段特徵選擇**：可透過 `training.feature_selection.exclude` 排除不使用的特徵，不需重建 dataset；HPO、最終訓練、test 預測與 inference 會共用同一份特徵清單，避免訓練與推論欄位不一致。
 - **可設定的樣本權重**：可依 item、客群或其他帶入 model input 的欄位組合設定權重，且只作用於 train／train_dev；框架會產生套用報告，列出未匹配的設定，避免權重設定錯誤卻無聲失效。
-- **超參數搜尋與資料集職責分離**：Optuna HPO 使用 train 訓練、train_dev 執行 early stopping，並以 val 的排序指標選擇最佳超參數；`hpo_objective` 可選擇整體 query mAP 或各 item 等權重的 macro mAP。
+- **超參數搜尋與資料集職責分離**：Optuna HPO 使用 train 訓練、train_dev 執行 early stopping，並以 val 上的 `hpo_objective` 選擇最佳超參數；`hpo_objective` 可選擇整體 query mAP、各 item 等權重的 macro mAP，或把每一列當成二元預測的 average precision（全部列一起算，或每個 item 各算再平均）。
 - **HPO 崩潰恢復**：啟用 `hpo_checkpointing` 時會保存 Optuna study 與目前最佳模型，訓練中斷後可只補跑剩餘 trials；若要放棄既有搜尋結果，可使用 `--fresh-hpo` 從頭開始。
 - **最終模型**：HPO 完成後可直接沿用最佳 trial 模型，或以最佳參數在 train + train_dev 上重新訓練（框架已不提供機率校準機制，#411）。
 - **測試評估與模型診斷**：最終模型會對 test set 產生 `training_eval_predictions`，計算整體 mAP 與 per-item mAP attribution，並可輸出特徵統計、feature importance 與 SHAP 診斷（含 per-item 帶方向的特徵 profile、採購者對照與跨 item 偏離度 `item_idiosyncrasy`、象限（TP/FP/FN/TN）per-(item×象限) 聚合 profile 與極值案例 SHAP 圖）；模型、參數、指標與診斷也可記錄至 MLflow。
@@ -294,7 +294,7 @@ python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_over
 在 `conf/base/parameters_training.yaml` 先建立一個容易解讀的 baseline，再逐步增加複雜度：
 
 - 初版可使用 pointwise `binary` objective；若要直接優化組內排序，再比較 `lambdarank` 或 `rank_xendcg`。
-- `hpo_objective: mean_ap` 讓每個 query group 等權；`macro_per_item_map` 則讓每個 item 等權，適合避免熱門功能主導調參結果。
+- `hpo_objective: mean_ap` 讓每個 query group 等權；`macro_per_item_map` 則讓每個 item 等權，適合避免熱門功能主導調參結果。`pooled_average_precision`／`macro_per_item_average_precision` 把 val 的每一列當成一次二元預測，給以展示紀錄訓練、query group 很小的部署用，要搭配 `dataset.val_zero_positive_group_ratio` > 0（見 `docs/pipelines/training.md` §3.2）。
 - 框架已不提供機率校準機制（#411 移除）；`dataset.enable_calibration`、`training.calibration` 等退役設定鍵只要出現就會被 CLI 擋下（A37），刪除即可。下游若需要機率語意，責任在下游（見 5. FAQ Q4）。
 - 初次 smoke test 可降低 `n_trials` 與 `num_iterations`，確認資料流正確後再恢復正式搜尋規模。
 
