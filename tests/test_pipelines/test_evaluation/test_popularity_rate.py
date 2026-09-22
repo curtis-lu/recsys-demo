@@ -36,13 +36,21 @@ def _segments(params):
     return _no_segments(params)
 
 
-def _eval_predictions(spark):
-    """2025-01-31: c1 holds positives A and C, c2 holds B."""
+def _eval_predictions(spark, params=None):
+    """2025-01-31: c1 holds positives A and C, c2 holds B. Stamped with the
+    fingerprint of ``params`` (the fixture's own by default), as
+    prepare_eval_data under those settings would write it."""
+    from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+        stamp_partition_fingerprint,
+    )
     from tests.test_pipelines.test_evaluation.test_nodes import (
         TestComputeBaselineMetrics,
     )
 
-    return TestComputeBaselineMetrics._eval_predictions(spark)
+    frame = TestComputeBaselineMetrics._eval_predictions(spark).drop(
+        "eval_partition_fingerprint")
+    return stamp_partition_fingerprint(
+        frame, params or TestComputeBaselineMetrics._parameters(), [])
 
 
 def _history(spark):
@@ -103,11 +111,12 @@ class TestPipelineShape:
         names = [n.name for n in pipe.nodes]
         node = pipe.nodes[names.index(_NODE)]
         assert node.inputs == ["sample_pool", "label_table",
-                               "popularity_period_counts_plan", "parameters"]
+                               "popularity_period_counts_month_plan", "parameters"]
         assert node.outputs == ["popularity_period_counts"]
         assert names.index(_NODE) < names.index("compute_baseline_metrics")
         baseline = pipe.nodes[names.index("compute_baseline_metrics")]
-        assert baseline.inputs[-1] == "popularity_period_counts"
+        assert baseline.inputs[-2:] == [
+            "popularity_period_counts", "popularity_period_counts_month_plan"]
 
     def test_compare_only_wires_no_baseline_either_way(self):
         pipe = create_pipeline(compare_source={"kind": "hive"},
@@ -128,26 +137,32 @@ class TestTheCatalogEntry:
         assert [c["name"] for c in entry["partition_cols"]] == ["snap_date"]
 
 
-@pytest.mark.parametrize("post_training", [False, True])
-def test_rate_mode_scores_by_rate_in_both_modes(spark, post_training):
-    """The two nodes as either mode wires them. Count ranks A > B > C, rate
-    (A 0.3, B 0.5, C 0) ranks B > A > C, so the baseline's mAP moves:
+def _rate_run(spark, params, pool, labels, plan, eval_predictions=None):
+    """The two nodes as --post-training wires them, as the Runner calls them."""
+    counts = _call(
+        _node(_NODE, post_training=True, baseline_rate=True),
+        sample_pool=pool, label_table=labels, parameters=params,
+        popularity_period_counts_month_plan=plan)
+    return _call(
+        _node("compute_baseline_metrics", post_training=True, baseline_rate=True),
+        enriched_eval_predictions=(
+            eval_predictions if eval_predictions is not None
+            else _eval_predictions(spark)),
+        label_table=labels, evaluation_segment_columns=_segments(params),
+        parameters=params, popularity_period_counts=counts,
+        popularity_period_counts_month_plan=plan)
+
+
+def test_post_training_rate_mode_scores_by_rate(spark):
+    """Count ranks A > B > C, rate (A 0.3, B 0.5, C 0) ranks B > A > C, so the
+    baseline's mAP moves:
 
     * count: c1 (A, C positive) A①B②C③ → AP (1 + 2/3) / 2; c2 (B) at ② → 1/2
     * rate:  c1 B①A②C③ → AP (1/2 + 2/3) / 2; c2 B at ① → 1
     """
     params = _rate_params()
     pool, labels = _history(spark)
-    counts = _call(
-        _node(_NODE, post_training=post_training, baseline_rate=True),
-        sample_pool=pool, label_table=labels, parameters=params,
-        popularity_period_counts_plan=_plan(["2024-06-30"]))
-    result = _call(
-        _node("compute_baseline_metrics", post_training=post_training,
-              baseline_rate=True),
-        enriched_eval_predictions=_eval_predictions(spark),
-        label_table=labels, evaluation_segment_columns=_segments(params),
-        parameters=params, popularity_period_counts=counts)
+    result = _rate_run(spark, params, pool, labels, _plan(["2024-06-30"]))
 
     block = result["popularity_rate"]
     assert block["candidates"] == {"A": 10, "B": 2, "C": 5}
@@ -160,6 +175,21 @@ def test_rate_mode_scores_by_rate_in_both_modes(spark, post_training):
     assert result["overall"]["map@3"] == pytest.approx(rate_map)
     # label_table's counts stay as they were: the count mode's numbers.
     assert result["purchase_counts"] == {"A": 3, "B": 1}
+
+
+def test_monitoring_with_score_rate_ranks_by_the_count(spark):
+    """Monitoring scores the full grid, so the CLI wires no counts there even
+    with score: rate; the node then ranks by the count (#397)."""
+    from recsys_tfb.pipelines.evaluation.nodes import compute_baseline_metrics
+
+    params = _rate_params()
+    params["post_training"] = False
+    _pool, labels = _history(spark)
+    result = compute_baseline_metrics(
+        _eval_predictions(spark, params), labels, _segments(params), params)
+    assert "popularity_rate" not in result
+    count_map = ((1 + 2 / 3) / 2 + 1 / 2) / 2
+    assert result["overall"]["map@3"] == pytest.approx(count_map)
 
 
 def test_count_mode_writes_no_rate_keys(spark):
@@ -198,14 +228,15 @@ def test_an_item_never_a_candidate_scores_zero_not_null(spark):
     assert scores["D"] == 0.0
 
 
-def test_the_rate_mode_needs_its_counts(spark):
+def test_post_training_rate_mode_needs_its_counts(spark):
     from recsys_tfb.pipelines.evaluation.nodes import compute_baseline_metrics
 
     params = _rate_params()
+    params["post_training"] = True
     _pool, labels = _history(spark)
     with pytest.raises(RuntimeError, match="popularity_period_counts"):
         compute_baseline_metrics(
-            _eval_predictions(spark), labels, _segments(params), params)
+            _eval_predictions(spark, params), labels, _segments(params), params)
 
 
 def test_partial_coverage_does_not_raise(spark):
@@ -213,17 +244,70 @@ def test_partial_coverage_does_not_raise(spark):
     months are recorded for the report to disclose."""
     params = _rate_params()
     pool, labels = _history(spark)
-    counts = _call(
-        _node(_NODE, baseline_rate=True), sample_pool=pool,
-        label_table=labels, parameters=params,
-        popularity_period_counts_plan=_plan(["2024-06-30"]))
-    result = _call(
-        _node("compute_baseline_metrics", baseline_rate=True),
-        enriched_eval_predictions=_eval_predictions(spark), label_table=labels,
-        evaluation_segment_columns=_segments(params), parameters=params,
-        popularity_period_counts=counts)
+    result = _rate_run(spark, params, pool, labels, _plan(["2024-06-30"]))
     assert result["popularity_rate"]["window_months_covered"] == {
         "2025-01-31": 1}
+
+
+def test_a_landed_period_sample_pool_no_longer_holds_is_not_summed(spark):
+    """2024-05-31 was counted once (it is in the table) but sample_pool no
+    longer holds it, so the plan does not list it: its counts stay out."""
+    params = _rate_params()
+    pool, labels = _history(spark)
+    stale = spark.createDataFrame(pd.DataFrame(
+        [("2024-05-31", "C", 1000, 900)],
+        columns=["snap_date", "prod_name", "n_candidates", "n_positives"]))
+    plan = _plan(["2024-06-30"])
+    counts = _call(
+        _node(_NODE, post_training=True, baseline_rate=True),
+        sample_pool=pool, label_table=labels, parameters=params,
+        popularity_period_counts_month_plan=plan).unionByName(stale)
+    result = _call(
+        _node("compute_baseline_metrics", post_training=True, baseline_rate=True),
+        enriched_eval_predictions=_eval_predictions(spark), label_table=labels,
+        evaluation_segment_columns=_segments(params), parameters=params,
+        popularity_period_counts=counts,
+        popularity_period_counts_month_plan=plan)
+    assert result["popularity_rate"]["candidates"] == {"A": 10, "B": 2, "C": 5}
+    assert result["popularity_rate"]["rate"]["C"] == 0.0
+
+
+def test_several_dates_count_each_period_once_in_the_report_block(spark):
+    """Two evaluated dates whose 12-month windows both cover 2024-06-30: the
+    block's denominator is that period's 10 candidates, not 10 per window."""
+    from tests.test_pipelines.test_evaluation.test_nodes import (
+        TestEnrichedReadersKeepTheEvaluatedMonth,
+    )
+
+    params = _rate_params()
+    params["evaluation"]["snap_date"] = ["2025-01-31", "2025-02-28"]
+    pool, labels = _history(spark)
+    result = _rate_run(
+        spark, params, pool, labels, _plan(["2024-06-30"]),
+        eval_predictions=TestEnrichedReadersKeepTheEvaluatedMonth._two_months(
+            spark))
+    block = result["popularity_rate"]
+    assert block["candidates"] == {"A": 10, "B": 2, "C": 5}
+    assert block["positives"] == {"A": 3, "B": 1, "C": 0}
+    assert block["window_months_covered"] == {
+        "2025-01-31": 1, "2025-02-28": 1}
+
+
+def test_count_mode_trend_counts_a_positive_sample_pool_lacks(spark):
+    """Switch off: the monthly trend is label_table's, so a positive with no
+    sample_pool row is counted (the rate mode's numerator would not see it)."""
+    from recsys_tfb.pipelines.evaluation.nodes import compute_baseline_metrics
+
+    params = _rate_params("count")
+    _pool, labels = _history(spark)
+    orphan = spark.createDataFrame(pd.DataFrame(
+        [("2024-07-31", "nobody", "C", 1)],
+        columns=["snap_date", "cust_id", "prod_name", "label"]))
+    result = compute_baseline_metrics(
+        _eval_predictions(spark), labels.unionByName(orphan),
+        _segments(params), params)
+    assert result["monthly_counts"]["C"] == {"2024-07": 1}
+    assert result["purchase_counts"]["C"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +378,7 @@ def test_landed_periods_are_reused_until_named_by_rebuild(
     def run(label_table, rebuild=()):
         plan = _plan(periods, _landed(period_table), rebuild)
         out = _call(node, sample_pool=pool, label_table=label_table,
-                    parameters=params, popularity_period_counts_plan=plan)
+                    parameters=params, popularity_period_counts_month_plan=plan)
         period_table.save(out)
         return plan
 

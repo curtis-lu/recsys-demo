@@ -419,11 +419,13 @@ enriched_eval_predictions:
     - {name: snap_date, type: STRING}
 
 # --- Evaluation — 正例率基準線的每期彙總表（#397，managed Hive table）---
-# 只在 evaluation.baseline.score: rate 時被讀寫；沒開就沒有 node 碰它，也不會建表。
+# 只在 evaluation.baseline.score: rate 加 --post-training 時被讀寫；其餘情況沒有
+# node 碰它，也不會建表。
 # 每個 time 值 × item 兩個數：當過候選的次數（sample_pool 的列數）、其中的正例數
 # （label_table 用 identity LEFT JOIN 接上）。build_popularity_period_counts 只寫
 # 還沒算過的期（加上 --rebuild-dates 點名的），dynamic overwrite 只換那幾格；
-# compute_baseline_metrics 讀回整張表，把回看窗裡的期加總後相除。
+# compute_baseline_metrics 讀回整張表，只取 sample_pool 現在還有的期（CLI 的期計畫），
+# 把回看窗裡的期加總後相除。
 # 與模型無關，所以不按 model_version 分：換模型、重評同一段日期都不重算。
 # 分區鍵 popularity_source_version（core/versioning.py 的
 # compute_popularity_source_version）是 schema 與 sample_pool／label_table 兩個

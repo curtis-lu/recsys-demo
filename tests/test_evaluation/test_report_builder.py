@@ -1313,11 +1313,11 @@ def test_baseline_rate_mode_composition_table_sorted_and_columns():
     assert list(pop.index) == ["B", "A", "C"]       # 0.8 > 0.5 > 0.2
     assert list(pop["rank"]) == [1, 2, 3]
     for item in ("A", "B", "C"):
-        expected = round(
+        expected = (
             _rate_baseline()["popularity_rate"]["positives"][item]
-            / _rate_baseline()["popularity_rate"]["candidates"][item], 4
+            / _rate_baseline()["popularity_rate"]["candidates"][item]
         )
-        assert pop.loc[item, "正例率"] == expected
+        assert pop.loc[item, "正例率"] == pytest.approx(expected, rel=1e-3)
 
 
 def test_baseline_rate_mode_no_count_or_avg_per_month_wording():
@@ -1355,6 +1355,44 @@ def test_baseline_rate_mode_single_date_discloses_covered_months():
     assert "實際只涵蓋 2 個月" in s.description
     assert "sample_pool" in s.description
     assert "label_table" not in s.description
+
+
+def test_baseline_rate_mode_several_dates_says_each_period_counts_once():
+    """Several evaluated dates: the node counts each period once, so the text
+    says the table is the pooled rate and discloses no double counting."""
+    base = _rate_baseline()
+    base["popularity_rate"]["window_months_covered"] = {
+        "2026-01-31": 12, "2026-02-28": 12}
+    s = rb.build_baseline_section(_metrics(), base, _params_lookback())
+    assert "對 2 個評估日期" in s.description
+    assert "每期只算一次" in s.description
+    assert "重複計數" not in s.description
+    assert "實際只有" not in s.description
+
+
+def test_baseline_rate_mode_shows_small_rates_by_significant_digits():
+    """Click-rate-sized rates would all print 0.0 at four decimals."""
+    base = _rate_baseline()
+    base["popularity_rate"]["rate"] = {"A": 3.21e-5, "B": 8.76e-5, "C": 4.1e-5}
+    s = rb.build_baseline_section(_metrics(), base, _params_lookback())
+    pop = s.tables[s.table_titles.index("popularity 排名組成")]
+    assert list(pop["正例率"]) == [8.76e-5, 4.1e-5, 3.21e-5]
+
+
+def test_baseline_count_mode_under_score_rate_says_why():
+    """Monitoring with score: rate: the node ranked by the count (no
+    popularity_rate); the report says so and why, and stays a count report."""
+    params = _params_lookback()
+    params["evaluation"]["baseline"]["score"] = "rate"
+    base = {"overall": {"map@1": 0.4}, "purchase_counts": {"A": 3},
+            "monthly_counts": {"A": {"2025-06": 3}}}
+    s = rb.build_baseline_section(_metrics(), base, params)
+    assert "監控模式評的是離線推論的全網格" in s.description
+    pop = s.tables[s.table_titles.index("popularity 排名組成")]
+    assert "count" in pop.columns
+    # Without score: rate the sentence is not there (count mode as on main).
+    plain = rb.build_baseline_section(_metrics(), base, _params_lookback())
+    assert "全網格" not in plain.description
 
 
 def test_baseline_omits_monthly_trend_when_absent():

@@ -12,6 +12,7 @@ import pandas as pd
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
 
+from recsys_tfb.core.date_ranges import lookback_window_bounds
 from recsys_tfb.core.schema import get_schema
 
 logger = logging.getLogger(__name__)
@@ -36,10 +37,10 @@ def resolve_lookback_months(parameters: dict) -> int:
 def _window_bounds(snap_date: str, lookback_months: int) -> tuple[str, str]:
     """``(lower, upper)`` of the ``[snap_date - lookback_months, snap_date)``
     window, as ``YYYY-MM-DD``. Shared by every windowing path here so the
-    windows cannot drift apart."""
-    upper = pd.Timestamp(snap_date)
-    lower = upper - pd.DateOffset(months=lookback_months)
-    return str(lower.date()), str(upper.date())
+    windows cannot drift apart; the rule itself is
+    ``core.date_ranges.lookback_window_bounds``, which the evaluation
+    command's ``--rebuild-dates`` check (A21) uses too."""
+    return lookback_window_bounds(snap_date, lookback_months)
 
 
 def _lookback_window(
@@ -292,6 +293,16 @@ def build_baseline_frame(
 # The counts are kept per time value in ``popularity_period_counts`` so a
 # period is joined once: they depend on sample_pool, label_table and the
 # schema only, never on the model.
+#
+# Only under --post-training. A popularity score has to describe the rows it
+# is scored on: the test rows are drawn from sample_pool, so a rate over
+# sample_pool's candidates matches them. Monitoring scores offline
+# inference's full grid (every entity × every item, unshown pairs labelled
+# 0), where whether a row is positive depends on how often the item was
+# shown as much as on its rate once shown — which is what the positive count
+# measures. There a rate would weaken the baseline and inflate the model's
+# lead, so monitoring keeps the count (#397, 2026-09-23 correction of the
+# grilling's decision 5).
 
 #: Column names of ``popularity_period_counts`` next to schema time and item.
 CANDIDATES_COL = "n_candidates"
@@ -309,23 +320,21 @@ def baseline_score(parameters: dict) -> str:
     return (eval_params.get("baseline", {}) or {}).get("score") or "count"
 
 
-def baseline_scores_by_rate(parameters: dict) -> bool:
+def baseline_scores_by_rate(parameters: dict, *, post_training: bool) -> bool:
     """Whether this run wires the positive-rate path.
 
-    Rate mode with the baseline section off computes no baseline at all, so it
-    wires nothing either: the pipeline, the CLI plan and ``--rebuild-dates``
-    all read this one answer, so they cannot disagree about it.
+    Needs ``score: rate``, the baseline section on (off computes no baseline
+    at all) and ``--post-training`` (monitoring keeps the count, see above).
+    The pipeline shape, the CLI plan and ``--rebuild-dates`` all read this one
+    answer, so they cannot disagree about it.
     """
     eval_params = parameters.get("evaluation", {}) or {}
     sections = (eval_params.get("report", {}) or {}).get("sections", {}) or {}
-    return baseline_score(parameters) == "rate" and bool(
-        sections.get("baseline", True))
-
-
-def lookback_span(snap_dates, lookback_months: int) -> tuple[str, str]:
-    """``(lower, upper)`` covering every date's lookback window."""
-    bounds = [_window_bounds(str(s), lookback_months) for s in snap_dates]
-    return min(lo for lo, _ in bounds), max(up for _, up in bounds)
+    return (
+        post_training
+        and baseline_score(parameters) == "rate"
+        and bool(sections.get("baseline", True))
+    )
 
 
 def list_candidate_periods(
@@ -336,11 +345,14 @@ def list_candidate_periods(
 ) -> list[str]:
     """The time values sample_pool holds inside any date's lookback window.
 
-    These are the periods ``popularity_period_counts`` must hold for this run.
-    Listed from the data because the time grain is the deployment's (the ad
-    example's is weekly) and sample_pool declares no partitions to list. One
-    distinct over the time column of the windows' span; with sample_pool
-    partitioned by time that reads file footers of the span only.
+    These are the periods ``popularity_period_counts`` must hold for this run,
+    and the only ones the baseline sums (a landed period sample_pool no longer
+    holds is left out). Listed from the data because the time grain is the
+    deployment's (the ad example's is weekly) and sample_pool declares no
+    partitions to list. One Spark job: a distinct over the time column of the
+    rows inside the windows. With sample_pool partitioned by time it reads
+    those partitions' time column only; unpartitioned, it scans the whole
+    time column.
     """
     time_col = get_schema(parameters)["time"]
     ts = F.to_date(F.col(time_col))
@@ -368,7 +380,9 @@ def compute_period_candidate_counts(
     candidate rows are sample_pool's identity columns; label_table attaches by
     identity with a LEFT JOIN, a missing label counting as 0 — the rule
     ``prepare_eval_data`` uses. With ``event`` declared each row is still one
-    candidate (identity carries the event).
+    candidate (identity carries the event). ``n_positives`` is ``sum(label)``,
+    as the count mode and ``metrics_spark``'s ``n_positives`` are: with graded
+    labels it is a relevance sum and the rate a mean relevance per candidate.
 
     Pre-check (input): label_table holds at most one row per identity in these
     periods. A duplicated key copies its candidate row in the join, inflating
@@ -420,9 +434,26 @@ def compute_period_candidate_counts(
 
 
 def _rate(positives, candidates):
-    """0 when there were no candidates, never null (#397: a 0-score item
-    ties with the other 0s and falls back to item order)."""
+    """0 when there were no candidates, never null. Not reached from the
+    period counts (a row there is at least one candidate); an item with no
+    candidate row at all gets its 0 from ``build_baseline_frame``'s fill."""
     return F.when(candidates > 0, positives / candidates).otherwise(F.lit(0.0))
+
+
+def restrict_to_periods(
+    period_counts: SparkDataFrame, periods, parameters: dict,
+) -> SparkDataFrame:
+    """``popularity_period_counts`` rows of ``periods`` (``YYYY-MM-DD``).
+
+    The table keeps every period it ever counted under this source version;
+    this run sums only the ones sample_pool holds today (the plan's periods).
+    Without it a period dropped from sample_pool, or re-dated, would still be
+    summed into every window covering it, and ``--rebuild-dates`` could not
+    name it (A21 refuses a period sample_pool lacks).
+    """
+    time_col = get_schema(parameters)["time"]
+    return period_counts.filter(
+        F.to_date(F.col(time_col)).cast("string").isin(list(periods)))
 
 
 def compute_positive_rates(
@@ -513,4 +544,41 @@ def compute_monthly_candidate_counts_by_window(
             F.sum(POSITIVES_COL).cast("long").alias(POSITIVES_COL),
         )
         .select("window_date", "month", item_col, CANDIDATES_COL, POSITIVES_COL)
+    )
+
+
+def compute_monthly_candidate_counts_in_windows(
+    period_counts: SparkDataFrame,
+    snap_dates: list[str],
+    lookback_months: int,
+    parameters: dict,
+) -> SparkDataFrame:
+    """Per ``(calendar month, item)`` over the periods any window covers.
+
+    Each period counts once, however many windows cover it. For the report's
+    composition table under several evaluated dates: summing each window's
+    counts instead would count an overlapping period once per window, so the
+    printed denominator — the reader's only cue that a rate rests on few
+    candidates — would grow with the number of dates. Returns
+    ``("month", item_col, n_candidates, n_positives)``.
+    """
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    item_col = schema["item"]
+
+    day = F.to_date(F.col(time_col))
+    in_any = None
+    for s in snap_dates:
+        lower, upper = _window_bounds(str(s), lookback_months)
+        cond = (day >= F.lit(lower)) & (day < F.lit(upper))
+        in_any = cond if in_any is None else (in_any | cond)
+    return (
+        period_counts.filter(in_any)
+        .withColumn("month", F.date_format(day, "yyyy-MM"))
+        .groupBy("month", item_col)
+        .agg(
+            F.sum(CANDIDATES_COL).cast("long").alias(CANDIDATES_COL),
+            F.sum(POSITIVES_COL).cast("long").alias(POSITIVES_COL),
+        )
+        .select("month", item_col, CANDIDATES_COL, POSITIVES_COL)
     )

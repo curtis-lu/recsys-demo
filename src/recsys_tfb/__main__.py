@@ -28,6 +28,7 @@ from recsys_tfb.core.consistency import (
     post_training_snap_date_errors,
     prediction_quality_param_errors,
     prediction_quality_population_errors,
+    baseline_rebuild_dates_absent_errors,
     baseline_score_errors,
     query_filter_param_errors,
     report_section_key_errors,
@@ -421,7 +422,8 @@ def _popularity_period_plan(catalog, params: dict, *, eval_dates, rebuild):
 
     The half of A21 that needs the listing: a ``--rebuild-dates`` value inside
     a window (checked before Spark) that sample_pool does not hold would be a
-    silent no-op, so it raises ``ConfigConsistencyError`` here.
+    silent no-op, so it raises ``ConfigConsistencyError`` here
+    (``baseline_rebuild_dates_absent_errors``).
     """
     from recsys_tfb.evaluation.baselines import (
         list_candidate_periods,
@@ -433,13 +435,9 @@ def _popularity_period_plan(catalog, params: dict, *, eval_dates, rebuild):
         catalog.load("sample_pool"), list(eval_dates),
         resolve_lookback_months(params), params,
     )
-    absent = [d for d in rebuild if d not in set(periods)]
-    if absent:
-        raise ConfigConsistencyError(
-            f"(A21) --rebuild-dates names {absent}, which sample_pool holds no "
-            f"rows at inside the lookback windows (its time values there: "
-            f"{_fmt_months(periods)}), so nothing would be recounted."
-        )
+    errors = baseline_rebuild_dates_absent_errors(rebuild, periods)
+    if errors:
+        raise ConfigConsistencyError("\n".join(errors))
     name = "popularity_period_counts"
     lister = getattr(catalog.get_dataset(name), "existing_partition_values", None)
     existing = (
@@ -490,6 +488,10 @@ def _fmt_months(dates) -> str:
     return ",".join(str(d) for d in dates) or "-"
 
 
+#: The evaluation node ``--rebuild-dates`` acts on (#397): it recounts the
+#: named periods of ``popularity_period_counts``.
+_EVALUATION_REBUILD_NODE = "build_popularity_period_counts"
+
 #: The training nodes ``--rebuild-dates`` acts on: one drops the named month's
 #: local cache, the other re-predicts it. A slice keeping either one still does
 #: part of what the flag asked for, so the warning fires only when both are
@@ -538,6 +540,10 @@ def _maybe_warn_rebuild_sliced_away(pipe, rebuild_advice) -> list[str]:
     is how the dataset command, whose ``--rebuild-dates`` drives the whole test
     chain rather than one node, opts out of this half.
 
+    ``remedy`` (optional) replaces the second line: evaluation's flag
+    recounts popularity periods, not predictions, and the fix is a
+    ``--from-node``, not an ``--only-node`` (#397).
+
     ``targets`` and ``predict_node`` are a **pair**, both caller-supplied. A
     default for either one is the same footgun in a smaller disguise: naming
     targets while inheriting training's ``predict_node`` prints an
@@ -572,8 +578,10 @@ def _maybe_warn_rebuild_sliced_away(pipe, rebuild_advice) -> list[str]:
         )
     return [
         head,
-        "[rebuild] 要重算既有月份的預測，請跑 "
-        f"--only-node {predict_node}（不帶切片旗標的完整 run 也可以）。",
+        rebuild_advice.get("remedy") or (
+            "[rebuild] 要重算既有月份的預測，請跑 "
+            f"--only-node {predict_node}（不帶切片旗標的完整 run 也可以）。"
+        ),
     ]
 
 
@@ -1867,8 +1875,9 @@ def evaluation(
         None, "--rebuild-dates",
         help="Comma-separated time values of popularity_period_counts to "
              "recount even though they landed (after a sample_pool / "
-             "label_table backfill). Only with evaluation.baseline.score: "
-             "rate; each must fall in a lookback window of "
+             "label_table backfill, or a period first counted before its "
+             "labels matured). Only with evaluation.baseline.score: rate "
+             "under --post-training; each must fall in a lookback window of "
              "evaluation.snap_date.",
     ),
     from_node: Optional[str] = typer.Option(
@@ -1973,20 +1982,26 @@ def evaluation(
 
     # The positive-rate baseline (#397) decides the DAG shape, the plan below
     # and whether --rebuild-dates means anything; one answer for all three.
-    # Never under --compare-only, whose short pipeline has no baseline.
+    # Only under --post-training (monitoring scores the full grid and keeps
+    # the count, see evaluation/baselines.py; A22 has already required a
+    # configured date there); never under --compare-only, whose short
+    # pipeline has no baseline.
     from recsys_tfb.evaluation.baselines import (
         baseline_scores_by_rate,
         resolve_lookback_months,
     )
 
-    baseline_rate = baseline_scores_by_rate(params) and not compare_only
-    # (A21) --rebuild-dates needs the rate mode and a date inside a lookback
+    baseline_rate = (
+        baseline_scores_by_rate(params, post_training=post_training)
+        and not compare_only
+    )
+    # (A21) --rebuild-dates needs the rate path and a date inside a lookback
     # window. Checked before Spark starts, like the other commands' A21.
     try:
         rebuild = resolved_baseline_rebuild_dates(
             [d.strip() for d in rebuild_dates.split(",")] if rebuild_dates else None,
             rate_wired=baseline_rate, eval_dates=eval_dates,
-            lookback_months=resolve_lookback_months(params),
+            lookback_months=lambda: resolve_lookback_months(params),
         )
     except ConfigConsistencyError as exc:
         logger.error(str(exc))
@@ -2078,7 +2093,8 @@ def evaluation(
                 raise typer.Exit(code=1)
             # The node reads the plan through the catalog (ADR-0007); the
             # slice asks it whether a period is missing (ADR-0012).
-            extra_datasets = {"popularity_period_counts_plan": period_plan}
+            extra_datasets = {
+                month_plan_input("popularity_period_counts"): period_plan}
             month_plans["popularity_period_counts"] = period_plan
     if compare_only:
         errors = [] if (dry_run or list_nodes) else _compare_only_input_errors(
@@ -2107,6 +2123,18 @@ def evaluation(
         # in rate mode for popularity_period_counts too.
         month_plans=month_plans,
         extra_datasets=extra_datasets,
+        # A slice without build_popularity_period_counts (e.g. --from-node
+        # generate_report) would take --rebuild-dates and recount nothing.
+        rebuild_advice={
+            "rebuild": rebuild,
+            "targets": (_EVALUATION_REBUILD_NODE,),
+            "predict_node": _EVALUATION_REBUILD_NODE,
+            "remedy": (
+                "[rebuild] 要重算這些期並用在基準線上，請跑 "
+                "--from-node build_popularity_period_counts"
+                "（不帶切片旗標的完整 run 也可以）。"
+            ),
+        },
     )
     if not executed:
         return
@@ -2115,13 +2143,16 @@ def evaluation(
     version_dir = data_dir / "evaluation" / mv / snap_date
     extra = {"snap_date": snap_date, "post_training": post_training}
     if extra_datasets:
-        # What this run counted and what it reused (ADR-0002: a pipeline
-        # that decides to do less work records what it decided not to do).
-        period_plan = extra_datasets["popularity_period_counts_plan"]
-        extra["popularity_period_counts_plan"] = {
+        # The plan: what this run set out to count and what it reused
+        # (ADR-0002: a pipeline that decides to do less work records what it
+        # decided not to do). "to_count", not "counted": a slice can leave
+        # the counting node out, which the [rebuild] warning then says.
+        name = month_plan_input("popularity_period_counts")
+        period_plan = extra_datasets[name]
+        extra[name] = {
             "popularity_source_version":
                 runtime_params["popularity_source_version"],
-            "counted": [d.strftime("%Y-%m-%d") for d in period_plan.to_process],
+            "to_count": [d.strftime("%Y-%m-%d") for d in period_plan.to_process],
             "skipped": [d.strftime("%Y-%m-%d") for d in period_plan.skipped],
         }
     slice_extra = _slice_extra(from_node, only_node)

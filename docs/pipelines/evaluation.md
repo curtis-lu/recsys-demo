@@ -206,7 +206,7 @@ baseline 會在與模型相同的 evaluation rows 上重新排名，計算 overa
 
 將 `report.sections.baseline` 設為 `false` 時，pipeline 會直接跳過第二次 baseline metric computation。
 
-#### 正例率模式（`score: rate`，#397）
+#### 正例率模式（`score: rate`，#397，只在 `--post-training`）
 
 ```yaml
 evaluation:
@@ -225,12 +225,19 @@ evaluation:
 
 每個 entity 的候選都是全部 item、回看期間的正例也都落在候選裡時（例如商銀示例），每個 item 當候選的次數都一樣。這時兩種模式排出的名次相同，不需要開。
 
+**只在 `--post-training` 生效，監控模式一律用正例數。** 通用原則是：熱門度分數要描述**被評估的那些列**。
+
+- `--post-training` 評的是 test 列，它們就是從 `sample_pool` 抽出來的。拿 `sample_pool` 算的正例率，描述的正是這些列。
+- 監控模式評的是離線推論的全網格：每個 entity 配上全部 item，沒展示過的配對 label 是 0。在這些列上，一列會不會是正例，要看它被展示過幾次，也要看展示後多常被點——這正是正例數量的東西。這時改用正例率，基準線反而變弱，模型的領先會被灌大。
+
+所以設定是同一份：監控模式遇到 `score: rate` 照舊用正例數、不讀 `sample_pool`，報表 baseline 段會寫出這句原因。將來離線推論若能讀「這期的候選清單」，這條再重新評估。
+
 **分母從 `sample_pool` 數，不看 `label_table` 的列數。** `sample_pool` 的一列就是一次當候選。`label_table` 不行，原因有兩個：
 
 - 它可能只放正例。這時列數＝正例數，每個有正例的 item 正例率都是 1。
 - 它可能篩過。商銀示例只收「同群組至少一次正例」的 entity。
 
-分子是這些候選列用 identity 接上 `label_table`（LEFT JOIN，缺的算 0）後的正例數。宣告了 `event` 時，一列算一次候選。回看期間 `label_table` 有重複 identity 會 raise，道理跟 `prepare_eval_data` 那條一樣。
+分子是這些候選列用 identity 接上 `label_table`（LEFT JOIN，缺的算 0）後的正例數，也就是 label 的加總（跟正例數模式一樣；label 是分級時，它是 label 加總，正例率是每次候選的平均 label）。宣告了 `event` 時，一列算一次候選。回看期間 `label_table` 有重複 identity 會 raise，道理跟 `prepare_eval_data` 那條一樣。
 
 **沒當過候選的 item** 分數是 0，跟其他 0 分的 item 一起照 item 名排。分母很小的 item 照算，不平滑。報表在每個 item 旁印出分母，讓你自己判斷哪些比率不可靠。
 
@@ -239,19 +246,28 @@ evaluation:
 - 回看期間 `sample_pool` 全空 → raise。就算 `label_table` 有資料也一樣。
 - 沒涵蓋滿 → 不 raise。報表寫出「sample_pool 在這個視窗內實際只涵蓋 N 個月」。
 
-**報表。** baseline 段的「popularity 排名組成」改照正例率排，欄位是正例率、當候選次數、正例數。沒有「平均每月」：比率不能按月平均。月度趨勢表印的是同一批正例數的逐月拆分，合計對得上排名組成。`baseline_metrics.json` 多一個 `popularity_rate` 鍵，只在這個模式寫。`purchase_counts`／`monthly_counts` 照舊從 `label_table` 算。
+**報表。** baseline 段的「popularity 排名組成」改照正例率排，欄位是正例率（4 位有效數字）、當候選次數、正例數。沒有「平均每月」：比率不能按月平均。月度趨勢表印的是同一批正例數的逐月拆分，合計對得上排名組成。`baseline_metrics.json` 多一個 `popularity_rate` 鍵，只在這個模式寫。`purchase_counts`／`monthly_counts` 照舊從 `label_table` 算。
+
+評估多個日期時，每個日期各用自己視窗的正例率排名；排名組成表印的是**各視窗涵蓋的期合在一起、每期只算一次**的正例率。所以它不是任何一個日期實際用的那一個，但分母不會因為視窗重疊而變成好幾倍。
 
 **每期彙總表 `popularity_period_counts`。** 回看 12 個月的 `sample_pool` 再接 `label_table`，在廣告規模可能是十幾億列。所以每個 time 值 × item 的兩個數（候選數、正例數）落地成 Hive 表，每期只算一次：
 
 - **不按模型分。** 換 `model_version`、同一段日期重評，都不重算。分區鍵是 `popularity_source_version`：schema 加上 `sample_pool`／`label_table` 兩個 catalog 條目的雜湊（`core/versioning.py::compute_popularity_source_version`）。換了來源表或 schema，就落到新分區，全部重算。
-- **要算哪些期。** 開跑前，CLI 列出 `sample_pool` 在各評估日期回看窗裡實際有的 time 值。這些值不一定是月底，廣告示例是每週一。扣掉已落地的，剩下的交給 `build_popularity_period_counts`。log 會印 `[months] popularity_period_counts to_count=… skipped=…`，`manifest.json` 的 `popularity_period_counts_plan` 也記同一件事。列 time 值要掃一次回看窗的 time 欄：`sample_pool` 按 time 分區時，只讀那些分區的檔頭。
-- **補過來源資料要帶 `--rebuild-dates`。** 已落地的期預設沿用，不偵測來源有沒有變。`sample_pool` 或 `label_table` 某期補過資料，就要帶 `--rebuild-dates <那幾期>` 重算。每個值都必須落在某個評估日期的回看窗裡，而且 `sample_pool` 在那一期有資料，不然會報錯。沒開 `score: rate` 時帶這個旗標也會報錯。
+- **要算哪些期。** 開跑前，CLI 列出 `sample_pool` 在各評估日期回看窗裡實際有的 time 值。這些值不一定是月底，廣告示例是每週一。扣掉已落地的，剩下的交給 `build_popularity_period_counts`。log 會印 `[months] popularity_period_counts to_count=… skipped=…`，`manifest.json` 的 `popularity_period_counts_month_plan` 也記同一件事（`to_count` 是計畫要算的期；切片把那個 node 切掉時，會另外印 `[rebuild] WARNING`）。
+- **列 time 值的成本。** 這一步是一個 Spark job，連 `--dry-run`、`--list-nodes` 也會跑：`sample_pool` 按 time 分區時只讀回看窗那些分區的 time 欄；沒分區時要掃整張表的 time 欄。
+- **只加總 `sample_pool` 現在還有的期。** 表裡留著算過的每一期；`sample_pool` 刪掉或改日期的期，不會再被加進基準線。
+- **已落地的期預設沿用，不偵測來源有沒有變。** 兩種情況要帶 `--rebuild-dates <那幾期>` 重算：
+  - `sample_pool` 或 `label_table` 某期補過資料。
+  - 某期第一次被算進這張表時，它的 label 還沒成熟（例如搶在 label 觀察窗結束前先跑了一次）。之後 label 自然成熟，這張表不會自己更新。
+
+  每個值都必須落在某個評估日期的回看窗裡，而且 `sample_pool` 在那一期有資料，不然會報錯。沒開 `score: rate`、不是 `--post-training`、或用了 `--compare-only` 時帶這個旗標，也會報錯。切片沒包含 `build_popularity_period_counts`（例如 `--from-node generate_report`）時，旗標不會生效，會印 `[rebuild] WARNING`，要重算請 `--from-node build_popularity_period_counts`。
+- **不要同時跑兩個會寫同一期的評估。** 這張表不按模型分，兩個 `model_version` 同時評同一段日期，會同時覆寫同一個分區。寫進去的內容相同，但一邊寫、一邊讀的時候可能讀到換到一半的分區。
 - **開關關著時什麼都不多。** 沒有這個 node、不建這張表，監控模式也不讀 `sample_pool`。
 
-**前提。** 這兩條框架檢查不到，要由你確認：
+**前提。** 框架檢查不到，要由你確認：
 
-- **`sample_pool` 沒有在來源 SQL 裡按 item 用不同比例抽負例。** 所有 item 用同一個比例抽，排序不變。各 item 比例不同，正例率的排序就會被扭曲。框架自己的 `dataset.sample_ratio_overrides` 是在 `sample_pool` 之後才抽，不影響這裡。
-- **各期的 label 觀察窗等長。** 彙總表只算回看窗 `[S - lookback_months, S)` 裡的期。這些期都早於評估日期 S，而 S 的 label 已經成熟是既有前提（2. 節）。所以只要每期的觀察窗一樣長，回看期的 label 也都成熟了，不用另外處理。
+- **每一期第一次被算進彙總表時，它的 label 已經成熟。** 彙總表只算回看窗 `[S - lookback_months, S)` 裡的期，都早於評估日期 S；S 的 label 已成熟是既有前提（2. 節）。各期的 label 觀察窗等長時，S 成熟就代表回看期都成熟了。但這張表會把第一次算的結果留下來，所以搶先跑過的話，之後要對那幾期帶 `--rebuild-dates`（見上）。
+- **`sample_pool` 按 item 用不同比例抽負例，不影響這裡。** 分母描述的是被評估的列，而 `--post-training` 的 test 列就是從同一份抽過的 `sample_pool` 來的，抽過之後的比例正好是它們的比例。框架自己的 `dataset.sample_ratio_overrides` 只抽 train，也不影響。
 
 ### 3.5 報表內容
 
@@ -421,7 +437,7 @@ evaluation:
 | `--post-training` | 關閉 | 改讀 `training_eval_predictions`；預設讀 `ranked_predictions` |
 | `--compare <key>` | 無 | 執行標準評估並額外產生比較報表 |
 | `--compare-only <key>` | 無 | 讀取既有 enriched data，只產生比較報表 |
-| `--rebuild-dates <dates>` | 無 | 逗號分隔的 time 值：`popularity_period_counts` 已落地仍要重算的期（補過 `sample_pool`／`label_table` 之後）。只在 `evaluation.baseline.score: rate` 可用，見 3.4 節 |
+| `--rebuild-dates <dates>` | 無 | 逗號分隔的 time 值：`popularity_period_counts` 已落地仍要重算的期（補過 `sample_pool`／`label_table`，或第一次算時 label 還沒成熟）。只在 `evaluation.baseline.score: rate` 加 `--post-training` 可用，見 3.4 節 |
 | `--from-node <name>` | 無 | 從指定 node 的拓撲位置開始，並執行其後 nodes |
 | `--only-node <name>` | 無 | 只執行指定 node，以及缺少輸入時必要的上游 nodes |
 | `--dry-run` | 關閉 | 顯示切片執行計畫後離開 |
@@ -549,8 +565,8 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 | 整理資料 | `prepare_eval_data` | 預測、`label_table`、該模式的母體表（`sample_pool`／`inference_population`）、parameters | 篩選模型與日期、檢查 `label_table` 在 identity 上沒有重複 key、補 label、必要時重算 rank、從母體表或覆寫表連接 segments（見 3.2 節）。join 只在這裡算一次，結果寫進這個月的 Hive partition | `enriched_eval_predictions`、`evaluation_segment_columns` |
 | 抽取診斷樣本 | `draw_diagnosis_sample_node` | `enriched_eval_predictions`、`evaluation_segment_columns`、parameters | 只抽一次、後續診斷 node 共用同一份樣本（見 `evaluation.diagnosis.sample`）。監控模式裡只有 `compute_metric_ci` 用它，所以關掉 `diagnosis.ci` 就不抽 | `diagnosis_sample` |
 | 模型指標 | `compute_metrics` | `enriched_eval_predictions`、`evaluation_segment_columns` | 計算 overall、per-item、per-segment、macro、overview 與可選 category metrics；照 `joined` 分群，並把 `joined`／`sources`／`missing` 帶給報表；結果帶設定指紋。後置條件：篩完之後的月份數不等於設定的日期數（某個日期的 partition 空的或沒寫過）就 raise，訊息寫出預期數與實際數 | `evaluation_metrics`（落地 `metrics.json`） |
-| Baseline 每期彙總（僅 `baseline.score: rate`） | `build_popularity_period_counts` | `sample_pool`、`label_table`、`popularity_period_counts_plan`（CLI 算的期計畫）、parameters | 只算計畫裡還沒落地的期（加上 `--rebuild-dates` 點名的）：每個 time 值 × item 的候選數與正例數。與模型無關（見 3.4 節） | `popularity_period_counts`（Hive） |
-| Baseline | `compute_baseline_metrics` | `enriched_eval_predictions`、歷史 labels、`evaluation_segment_columns`；`score: rate` 時再加 `popularity_period_counts`（讀回整張表） | 建立 popularity scores（正例數，或 `score: rate` 時的正例率）並計算對照指標；`report.sections.baseline: false` 時不算，只回 `{"enabled": false}` stub（帶設定指紋） | `baseline_metrics`（落地 `baseline_metrics.json`） |
+| Baseline 每期彙總（僅 `baseline.score: rate` 且 `--post-training`） | `build_popularity_period_counts` | `sample_pool`、`label_table`、`popularity_period_counts_month_plan`（CLI 算的期計畫）、parameters | 只算計畫裡還沒落地的期（加上 `--rebuild-dates` 點名的）：每個 time 值 × item 的候選數與正例數。與模型無關（見 3.4 節） | `popularity_period_counts`（Hive） |
+| Baseline | `compute_baseline_metrics` | `enriched_eval_predictions`、歷史 labels、`evaluation_segment_columns`；正例率模式再加 `popularity_period_counts`（讀回整張表）與期計畫（只加總計畫裡的期） | 建立 popularity scores（正例數，或正例率模式的正例率）並計算對照指標；`report.sections.baseline: false` 時不算，只回 `{"enabled": false}` stub（帶設定指紋） | `baseline_metrics`（落地 `baseline_metrics.json`） |
 | 預測品質 | `compute_prediction_quality` | `enriched_eval_predictions`、`evaluation_segment_columns`（只取 `joined` 確認分區指紋，不分群）、parameters | 把每一列候選當二元預測：一次 `groupBy(item, 細箱)` 的分箱表，加上從它推出的 `pr_auc`、`roc_auc`、F1 最佳門檻（見 3.7 節）；不排除沒有正例的 query group。`report.sections.prediction_quality: false`（框架預設）時不算，只回 `{"enabled": false}` stub（帶設定指紋） | `prediction_quality_metrics`（落地 `prediction_quality.json`） |
 | 報表區 Spark 聚合 | `compute_report_aggregates` | `enriched_eval_predictions`、`evaluation_segment_columns`（只取 `joined` 確認分區指紋，不分群）、parameters | 標準報表診斷區要用的 Spark 端聚合（bin 計數／quartile／rank 矩陣），落地後 `generate_report` 才能是純函式 | `evaluation_report_aggregates` |
 | 指標信賴區間 | `compute_metric_ci` | `diagnosis_sample`、parameters | per-item AP 與 macro 的 cluster bootstrap CI（cluster＝`cust_id`） | `evaluation_metric_ci` |
@@ -614,7 +630,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 | `prediction_quality.json` | `data/evaluation/<model_version>/<YYYYMMDD>/prediction_quality.json`（`prediction_quality_metrics`，見 3.7 節；`report.sections.prediction_quality: false` 時是 `{"enabled": false}` stub，一樣帶指紋） | 標準、`--compare` |
 | `segment_columns.json` | `data/evaluation/<model_version>/<YYYYMMDD>/segment_columns.json`（`evaluation_segment_columns`，見 3.2 節） | 標準、`--compare` 寫；`--compare-only` 讀 |
 | `enriched_eval_predictions` | Hive，以 `model_version` 與 `snap_date` partition；每列帶 `eval_partition_fingerprint`（寫這格的執行的分區內容設定與實際 join 的分群欄，見 7.1 節） | 標準、`--compare` |
-| `popularity_period_counts` | Hive，以 `popularity_source_version` 與 `snap_date`（time 值）partition；不含 `model_version`（見 3.4 節） | 只在 `evaluation.baseline.score: rate` |
+| `popularity_period_counts` | Hive，以 `popularity_source_version` 與 `snap_date`（time 值）partition；不含 `model_version`（見 3.4 節） | 只在 `evaluation.baseline.score: rate` 且 `--post-training` |
 | `latest` alias | `data/evaluation/latest` | 指向最近完成的 evaluation 目錄 |
 
 上表路徑裡的 `<YYYYMMDD>` 是評估日期去掉 `-`。評估多個日期時，這一段是 `<最早>-<最晚>`，例如 1 到 3 月月底寫入 `data/evaluation/<model_version>/20260131-20260331/`；`enriched_eval_predictions` 仍是每個日期各一個 partition。目錄名只看起迄兩端，後果見 7.1 節。

@@ -285,14 +285,17 @@ class TestBaselineScore:
 
         assert baseline_score(_rate_parameters()) == "rate"
 
-    def test_rate_needs_the_baseline_section_on_to_wire_anything(self):
+    def test_rate_is_wired_under_post_training_with_the_section_on(self):
         from recsys_tfb.evaluation.baselines import baseline_scores_by_rate
 
         params = _rate_parameters()
-        assert baseline_scores_by_rate(params)
+        assert baseline_scores_by_rate(params, post_training=True)
+        # Monitoring scores the full grid: it keeps the count.
+        assert not baseline_scores_by_rate(params, post_training=False)
         params["evaluation"]["report"] = {"sections": {"baseline": False}}
-        assert not baseline_scores_by_rate(params)
-        assert not baseline_scores_by_rate(_rate_parameters("count"))
+        assert not baseline_scores_by_rate(params, post_training=True)
+        assert not baseline_scores_by_rate(
+            _rate_parameters("count"), post_training=True)
 
 
 class TestPeriodCandidateCounts:

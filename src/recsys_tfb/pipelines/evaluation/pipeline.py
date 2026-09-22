@@ -34,12 +34,12 @@ def create_pipeline(
         ``prepare_eval_data`` here to say which segment columns the
         partition's rows were joined with.
 
-    ``baseline_rate`` (the CLI's ``baseline_scores_by_rate``, #397) adds
-    ``build_popularity_period_counts`` and hands its table to
-    ``compute_baseline_metrics`` as a fifth input, in either mode above but
-    compare-only. Off (the default, ``evaluation.baseline.score`` unset), the
-    pipeline is node for node the one without the feature: no extra node, and
-    monitoring mode reads no ``sample_pool``.
+    ``baseline_rate`` (the CLI's ``baseline_scores_by_rate``, #397: ``score:
+    rate`` under ``--post-training``) adds ``build_popularity_period_counts``
+    and hands its table and month plan to ``compute_baseline_metrics`` as a
+    fifth and sixth input. Off (the default, and always in monitoring mode),
+    the pipeline is node for node the one without the feature: no extra node,
+    and monitoring mode reads no ``sample_pool``.
     """
     from recsys_tfb.pipelines.evaluation.nodes import (
         build_popularity_period_counts,
@@ -150,14 +150,17 @@ def create_pipeline(
             Node(
                 build_popularity_period_counts,
                 inputs=["sample_pool", "label_table",
-                        "popularity_period_counts_plan", "parameters"],
+                        "popularity_period_counts_month_plan", "parameters"],
                 outputs="popularity_period_counts",
             ),
             Node(
                 compute_baseline_metrics,
+                # The plan again: the table keeps every period it ever
+                # counted, the baseline sums the ones sample_pool holds now.
                 inputs=["enriched_eval_predictions", "label_table",
                         "evaluation_segment_columns", "parameters",
-                        "popularity_period_counts"],
+                        "popularity_period_counts",
+                        "popularity_period_counts_month_plan"],
                 outputs="baseline_metrics",
             ),
         ]

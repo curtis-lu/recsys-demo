@@ -20,7 +20,7 @@ from recsys_tfb.core.consistency import (
 )
 from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.baselines import resolve_lookback_months
+from recsys_tfb.evaluation.baselines import baseline_score, resolve_lookback_months
 from recsys_tfb.evaluation.metrics import (
     ALL_POSITIVE_KEY,
     ALL_POSITIVE_WARN_SHARE,
@@ -1585,12 +1585,18 @@ def build_baseline_section(
     # error. monthly_counts holds only months with label rows inside the
     # window, so its distinct months are the coverage; without it (older
     # results) the configured lookback stays both text and divisor.
-    # #397: rate 模式（node 寫了非空 popularity_rate）用正例率重排；count 模式
-    # （沒有這個鍵）維持原本用 purchase_counts／monthly_counts 的邏輯，逐字不變。
+    # #397: rate 模式（node 寫了非空 popularity_rate）的涵蓋月數看 sample_pool
+    # 的候選列：monthly_positives 在每個有候選列的月份都有值（正例數可為 0），
+    # window_months_covered 是各視窗有候選列的月數。count 模式（沒有這個鍵）
+    # 照舊看 label_table 的 monthly_counts。下面的涵蓋算法兩種模式共用。
     rate_info = (baseline_metrics or {}).get("popularity_rate") or None
     rate_mode = bool(rate_info)
+    source = rate_info if rate_mode else (baseline_metrics or {})
 
-    monthly = (baseline_metrics or {}).get("monthly_counts") or {}
+    monthly = (
+        rate_info.get("monthly_positives") if rate_mode
+        else (baseline_metrics or {}).get("monthly_counts")
+    ) or {}
     months = sorted({mo for per in monthly.values() for mo in per})
     covered = len(months)
     window_partial = 0 < covered < lookback
@@ -1602,7 +1608,7 @@ def build_baseline_section(
     # node writes window_months_covered only then; the distinct months of
     # monthly_counts cannot stand in for it, since overlapping windows share
     # months and a boundary month can hold rows for one window and not the other.
-    windows = (baseline_metrics or {}).get("window_months_covered") or {}
+    windows = source.get("window_months_covered") or {}
     several_dates = len(windows) > 1
     if several_dates:
         full_window_months = len(windows) * lookback
@@ -1611,33 +1617,9 @@ def build_baseline_section(
         )
         window_partial = per_month_divisor < full_window_months
 
-    if rate_mode:
-        # rate 模式的覆蓋月數改看 monthly_positives／window_months_covered，
-        # 不看 purchase_counts／monthly_counts（那兩個鍵在 rate 模式下仍由
-        # label_table 算，但報表不拿它們印排名或趨勢）。
-        rate_monthly = rate_info.get("monthly_positives") or {}
-        rate_months = sorted({mo for per in rate_monthly.values() for mo in per})
-        rate_windows = rate_info.get("window_months_covered") or {}
-        if len(rate_windows) <= 1:
-            covered = (
-                next(iter(rate_windows.values()))
-                if rate_windows else len(rate_months)
-            )
-            window_partial = 0 < covered < lookback
-            several_dates = False
-            windows = rate_windows
-        else:
-            several_dates = True
-            full_window_months = len(rate_windows) * lookback
-            per_month_divisor = sum(
-                c if 0 < c < lookback else lookback
-                for c in rate_windows.values()
-            )
-            window_partial = per_month_divisor < full_window_months
-            windows = rate_windows
-
-    # [1] popularity 排名組成：rate 模式印正例率／分母／分子；count 模式維持
-    #     原本的總計 count + 平均每月。
+    # [1] popularity 排名組成：rate 模式印正例率／分母／分子（purchase_counts／
+    #     monthly_counts 在 rate 模式仍由 label_table 算，這裡不拿來印）；
+    #     count 模式維持原本的總計 count + 平均每月。
     if rate_mode:
         rates = rate_info.get("rate") or {}
         candidates = rate_info.get("candidates") or {}
@@ -1645,8 +1627,10 @@ def build_baseline_section(
         sorted_items = sorted(
             rates.items(), key=lambda kv: (-kv[1], kv[0])
         )
+        # 4 位有效數字，不是 4 位小數：點擊率量級的比率（3e-5）四捨五入到
+        # 小數第 4 位會全變成 0，看不出名次為什麼這樣排。
         pop_cols = {
-            "正例率": [round(v, 4) for _, v in sorted_items],
+            "正例率": [float(f"{v:.4g}") for _, v in sorted_items],
             "當候選次數": [candidates.get(k, 0) for k, _ in sorted_items],
             "正例數": [positives.get(k, 0) for k, _ in sorted_items],
             "rank": list(range(1, len(sorted_items) + 1)),
@@ -1658,16 +1642,12 @@ def build_baseline_section(
             )
 
         # [1b] 月度趨勢：monthly_positives，列序與 [1] 相同（照正例率排）。
-        rate_monthly = rate_info.get("monthly_positives") or {}
-        if rate_monthly:
+        if monthly:
             item_order = [k for k, _ in sorted_items]
-            rmonths = sorted(
-                {mo for per in rate_monthly.values() for mo in per}
-            )
             mdf = pd.DataFrame(
                 {
-                    mo: [rate_monthly.get(it, {}).get(mo, 0) for it in item_order]
-                    for mo in rmonths
+                    mo: [monthly.get(it, {}).get(mo, 0) for it in item_order]
+                    for mo in months
                 },
                 index=item_order,
             )
@@ -1814,22 +1794,19 @@ def build_baseline_section(
             "（正例數 ÷ 當過候選的次數）重排。"
         )
         if several_dates:
+            # _positive_rate_block counts each period once however many
+            # windows cover it, so there is no double counting to disclose.
             n_windows = len(windows)
             lookback_note = (
                 f"popularity 對 {n_windows} 個評估日期各以該日期之前 {lookback} "
-                f"個月的正例率（正例數 ÷ 當過候選的次數）重排；分子分母皆為這 "
-                f"{n_windows} 個視窗的合計"
+                "個月的正例率（正例數 ÷ 當過候選的次數）重排。排名組成印的是這 "
+                f"{n_windows} 個視窗涵蓋的期合在一起（每期只算一次）的正例率，"
+                "不是任何一個日期實際用的那一個"
                 + (
-                    f"（各視窗內 sample_pool 有候選列的月數加總：實際只涵蓋 "
-                    f"{per_month_divisor} 個視窗月，滿額 {full_window_months} "
-                    "個）。"
-                    if window_partial else
-                    f"（{n_windows} 個視窗 × 每個 {lookback} 個月）。"
+                    f"；各視窗內 sample_pool 有候選列的月數加總實際只有 "
+                    f"{per_month_divisor} 個視窗月，滿額 {full_window_months} 個。"
+                    if window_partial else "。"
                 )
-            )
-            trend_note = (
-                "視窗彼此重疊時，同一個月會被每個涵蓋它的視窗各算一次，"
-                "所以月度趨勢表的逐月數字是重複計數後的合計。"
             )
         composition_note = (
             "popularity 排名組成為各 item 的正例率、分母（當過候選的次數）與"
@@ -1859,6 +1836,14 @@ def build_baseline_section(
             trend_note = (
                 "視窗彼此重疊時，同一個月會被每個涵蓋它的視窗各算一次，"
                 "所以月度趨勢表的逐月數字是重複計數後的合計。"
+            )
+        if baseline_score(parameters) == "rate":
+            # score: rate 但 node 沒寫 popularity_rate：監控模式（#397）。
+            lookback_note += (
+                "設定是 evaluation.baseline.score: rate，但監控模式評的是離線推論"
+                "的全網格（每個 entity × 全部 item，沒展示過的算負例），一列會不會"
+                "是正例同時取決於被展示幾次，所以這裡照舊用正例數；正例率只在 "
+                "--post-training 用。"
             )
     return ReportSection(
         title="baseline — popularity 對照",
