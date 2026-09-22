@@ -1175,21 +1175,30 @@ class TestTuneHyperparametersBinaryPredictionObjectives:
         self, caplog, tmp_path, lgb_handles, synthetic_model_inputs,
         preprocessor_metadata, training_parameters, objective,
     ):
+        """r and the kept group count are what a reader needs to judge how
+        steady a weighted score is (ADR-0025 decision 3); the row counts are
+        what the cost scales with."""
         train_lgb_h, train_dev_lgb_h = lgb_handles
         *_, val_df = synthetic_model_inputs
         val_h, frame = self._val(tmp_path, val_df)
-        n_kept = int((frame["zero_positive_group_weight"] == 2.0).sum())
-        n_pos_groups = len(frame) - n_kept
+        kept = frame["zero_positive_group_weight"] == 2.0
+        n_kept_groups = frame.loc[kept, "cust_id"].nunique()
+        n_pos_groups = frame.loc[~kept, "cust_id"].nunique()
+        assert n_kept_groups and n_pos_groups
+        params = self._params(training_parameters, objective)
+        params["dataset"] = {"val_zero_positive_group_ratio": 0.5}
 
         with caplog.at_level(logging.INFO):
             tune_hyperparameters(
                 train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata,
-                self._params(training_parameters, objective),
+                params,
             )
 
         assert (
-            f"rows in query groups holding a positive={n_pos_groups} "
-            f"rows in kept query groups holding none={n_kept}"
+            f"dataset.val_zero_positive_group_ratio=0.5; query groups holding "
+            f"a positive={n_pos_groups} (rows={int((~kept).sum())}); kept "
+            f"query groups holding none={n_kept_groups} "
+            f"(rows={int(kept.sum())})"
         ) in caplog.text
 
     def test_macro_logs_which_items_enter_the_mean(

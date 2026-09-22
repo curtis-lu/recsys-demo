@@ -68,6 +68,7 @@ from recsys_tfb.core.logging import log_data_volume, log_step
 from recsys_tfb.core.consistency import (
     ZERO_POSITIVE_GROUP_WEIGHT_COL,
     optional_role_columns,
+    resolved_zero_positive_group_ratio,
     test_carries_zero_positive_group_weight,
 )
 from recsys_tfb.core.schema import get_schema
@@ -94,7 +95,7 @@ from recsys_tfb.pipelines.training.steps import (
 from recsys_tfb.pipelines.training.steps.hpo_scoring import (
     TrialScorer,
     items_entering_the_mean,
-    val_rows_by_group_kind,
+    val_groups_by_kind,
 )
 from recsys_tfb.pipelines.training.steps.local_cache import (
     cache_exists,
@@ -702,16 +703,20 @@ def tune_hyperparameters(
     event_keys_v = [item_sort_codes(k) for k in event_keys_v]
 
     # Decision — say what a binary-prediction objective will average over,
-    # before the search spends hours on it (#430). The val size is the cost
-    # lever: every trial predicts every row, and the kept zero-positive groups
-    # are what the ratio r adds.
+    # before the search spends hours on it (#430). r and the kept group count
+    # are what a reader needs to judge how steady a score weighted by 1/r is
+    # (ADR-0025 decision 3); the row counts are the cost lever — every trial
+    # predicts every row, and the kept zero-positive groups are what r adds.
     if binary_objective:
-        rows_with, rows_without = val_rows_by_group_kind(groups_v, y_v)
+        groups_with, rows_with, groups_without, rows_without = (
+            val_groups_by_kind(groups_v, y_v))
         logger.info(
-            "tune_hyperparameters: %s scores every val row; rows in query "
-            "groups holding a positive=%d rows in kept query groups holding "
-            "none=%d",
-            hpo_objective, rows_with, rows_without,
+            "tune_hyperparameters: %s scores every val row; "
+            "dataset.val_zero_positive_group_ratio=%g; query groups holding a "
+            "positive=%d (rows=%d); kept query groups holding none=%d (rows=%d)",
+            hpo_objective,
+            resolved_zero_positive_group_ratio(parameters, "val"),
+            groups_with, rows_with, groups_without, rows_without,
         )
         if rows_with == 0:
             raise ValueError(

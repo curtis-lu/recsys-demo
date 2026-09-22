@@ -153,6 +153,7 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 | item 清單從資料數 | item 清單（`schema.categorical_values.ad_creative`）逐一列出 12 種，包括 train 沒有的 `c04-video`；離線推論的候選 `inference.products` 另外照抄一份（A4 要求兩者相同） | #379 |
 | 候選層級特徵表 | **已打開**（#380）：catalog 的 `candidate_feature_table` 指到 `feature_realtime`，它多帶了 `request_id`、`primary_key` 改成 identity；`impression_id`、`event_ts` 列進 `drop_columns`。模型多了 `browse_30m`、`browse_same_category_30m`、`prior_exposures_this_week` 三個特徵。代價是離線推論被擋下（見〈怎麼跑〉） | #380（完成） |
 | 預測品質指標家族 | **已打開**（#381）：`report.sections.prediction_quality: true`，`prediction_quality` 的三個值與框架預設相同。這個示例只跑 `--post-training`；test 表留下一半沒有點擊的請求（下一列），報表這一段的數字用權重加權、代表還原到全部曝光的估計 | #381（完成） |
+| HPO 目標 | **已打開**（#430）：`hpo_objective: pooled_average_precision`，val 的每一列當成一次二元預測，用 `zero_positive_group_weight` 加權算 average precision。一次請求只有幾個候選，組內排序指標在這裡鑑別力低。它要求 val 的 r 大於 0（A48），所以跟下一列是一起的。示例原本用 `macro_per_item_map` | #430（完成） |
 | 沒有正例的 query group 留多少 | **已打開**（#429）：`val_zero_positive_group_ratio: 0.5`、`test_zero_positive_group_ratio: 0.5`，沒有點擊的請求整個留一半，列上帶權重 `zero_positive_group_weight`（1 或 2），`training_eval_predictions` 的 catalog 欄位宣告了它。train 不設（objective 是 `binary`，r < 1 會變成負例降採樣）。預測品質打開時 test 的 r 必須大於 0（A46），所以這一列與上一列是一起的。0.5 只是示例值 | #429（完成） |
 
 ## 踩到的框架問題

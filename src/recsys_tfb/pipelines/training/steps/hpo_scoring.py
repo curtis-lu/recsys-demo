@@ -104,18 +104,25 @@ def _hpo_score(
     )
 
 
-def val_rows_by_group_kind(groups: np.ndarray, y_true: np.ndarray) -> tuple[int, int]:
-    """Val rows in query groups holding a positive, and in groups holding none.
+def val_groups_by_kind(
+    groups: np.ndarray, y_true: np.ndarray,
+) -> tuple[int, int, int, int]:
+    """``(groups, rows)`` holding a positive, then ``(groups, rows)`` holding
+    none — four counts over val.
 
     Decided from the label, never from ``zero_positive_group_weight``: at
     r = 1 both kinds of group carry weight 1. ``groups`` are the dense ids
     ``extract_Xy_with_groups`` hands back (0 .. n_groups - 1).
     """
     if len(groups) == 0:
-        return 0, 0
+        return 0, 0, 0, 0
     has_positive = np.bincount(groups, weights=np.asarray(y_true) > 0) > 0
-    n_with = int(has_positive[groups].sum())
-    return n_with, len(groups) - n_with
+    rows_with = int(has_positive[groups].sum())
+    groups_with = int(has_positive.sum())
+    return (
+        groups_with, rows_with,
+        len(has_positive) - groups_with, len(groups) - rows_with,
+    )
 
 
 def items_entering_the_mean(

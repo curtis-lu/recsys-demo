@@ -75,7 +75,8 @@ python -m recsys_tfb <指令> --env <env>
 - **`training.algorithm_params.objective` 與 `metric`**：objective 是排序目標（`lambdarank`、`rank_xendcg`）時，metric 有寫就必須是 `ndcg`、`map` 或 `lambdarank`（沒寫預設 `ndcg`），`schema.columns.entity` 也不能是空的（`A7`）。不擋的話，early stopping 看的指標沒有意義。
 - **`training.search_space`**：每一項要有不重複的 `name`；`type` 是 `int`、`float`、`categorical` 之一；數值型的 `low` 要小於 `high`、`step` 要是正數；`log: true` 時 `low` 要大於 0，而且不能有 `step`；`categorical` 要有非空的 `choices`（`A8`）。
 - **`training.sample_weight_keys` 與 `training.sample_weights`**：`sample_weight_keys` 的每一欄，都要是 train model_input 裡有的欄（identity 欄、label、`dataset.carry_columns`、類別欄）。`sample_weights` 的每個鍵用 `|` 分段，段數要等於 `sample_weight_keys` 的欄數（`A9`）。不擋的話，權重會默默沒套上。
-- **`training.hpo_objective`** 只能是 `mean_ap` 或 `macro_per_item_map`；**`training.final_model_strategy`** 只能是 `hpo_best` 或 `refit_on_full`。可以不寫，但不能寫成 `null`（`A25`）。
+- **`training.hpo_objective`** 只能是 `mean_ap`、`macro_per_item_map`、`pooled_average_precision` 或 `macro_per_item_average_precision`；**`training.final_model_strategy`** 只能是 `hpo_best` 或 `refit_on_full`。可以不寫，但不能寫成 `null`（`A25`）。
+- **`training.hpo_objective` 選了 `pooled_average_precision` 或 `macro_per_item_average_precision`**：`dataset.val_zero_positive_group_ratio` 必須大於 0（`A48`）。這兩個目標把 val 的每一列都當成一次二元預測來算；r 是 0（預設）時，val 裡沒有正例的 query group 在 dataset 階段就全丟了，算出來的是篩過的母體。r 在 dataset 階段生效，所以跑 dataset 時就會擋，不用等到 training。
 - **`diagnostics.*`**（`parameters_training.yaml` 最外層）：`diagnostics.shap.background` 只能是 `global` 或 `per_item`；`diagnostics.gain_ledger.enabled`、`diagnostics.shap.quadrant_enabled` 必須是真正的 true／false；`diagnostics.shap.quadrant_top_k_decision`、`quadrant_sample_per_cell`、`quadrant_min_rows` 必須是大於等於 1 的整數（`A20`）。
 
 **evaluation 設定**
