@@ -377,3 +377,63 @@ class TestUnknownColumnKeysAtTheCliGate:
         root = Path(__file__).resolve().parents[2]
         params = yaml.safe_load((root / "conf/base/parameters.yaml").read_text())
         validate_schema_config(params)
+
+
+class TestMultiColumnItemShape:
+    """``item`` takes a string or a non-empty list of non-empty strings, like
+    ``entity`` (#394). Several columns are combined on read into one column
+    named ``item``, and the source columns are dropped — so a source column
+    may not also be another role's column, and none may be named ``item``.
+    """
+
+    def test_a_list_is_ok(self):
+        validate_schema_config(
+            {"schema": {"columns": _columns(item=["campaign_id", "creative_format"])}}
+        )
+
+    def test_a_one_element_list_is_ok(self):
+        validate_schema_config({"schema": {"columns": _columns(item=["prod_name"])}})
+
+    def test_empty_list_raises(self):
+        with pytest.raises(ValueError, match="'item' list must not be empty"):
+            validate_schema_config({"schema": {"columns": _columns(item=[])}})
+
+    def test_a_non_string_element_raises(self):
+        with pytest.raises(ValueError, match="'item' element at index 1"):
+            validate_schema_config({"schema": {"columns": _columns(item=["a", 3])}})
+
+    def test_wrong_type_raises(self):
+        with pytest.raises(ValueError, match="'item' must be a string or list"):
+            validate_schema_config({"schema": {"columns": _columns(item=5)}})
+
+    def test_a_source_column_that_is_an_entity_column_raises(self):
+        """Combining drops the source columns: this would drop ``cust_id``."""
+        with pytest.raises(ValueError, match="another role also names: cust_id"):
+            validate_schema_config(
+                {"schema": {"columns": _columns(item=["cust_id", "creative_format"])}}
+            )
+
+    def test_a_source_column_named_twice_raises(self):
+        with pytest.raises(ValueError, match="more than once: campaign_id"):
+            validate_schema_config(
+                {"schema": {"columns": _columns(item=["campaign_id", "campaign_id"])}}
+            )
+
+    def test_a_source_column_named_item_raises(self):
+        """The combined column would overwrite it, then be dropped with it."""
+        with pytest.raises(ValueError, match="no column may be named 'item'"):
+            validate_schema_config(
+                {"schema": {"columns": _columns(item=["item", "creative_format"])}}
+            )
+
+    def test_another_role_named_item_raises_when_item_is_combined(self):
+        with pytest.raises(ValueError, match="no column may be named 'item'"):
+            validate_schema_config(
+                {"schema": {"columns": _columns(
+                    item=["campaign_id", "creative_format"], event="item",
+                )}}
+            )
+
+    def test_a_single_column_literally_named_item_is_still_ok(self):
+        """Nothing is combined, so nothing is overwritten."""
+        validate_schema_config({"schema": {"columns": _columns(item="item")}})

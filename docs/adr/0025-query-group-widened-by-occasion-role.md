@@ -30,7 +30,7 @@ ADR-0021 只容得下形狀一：query group 寫死是 `time` ＋ `entity`。
 
 - **`occasion`**：一次排序的場合，一欄或多欄。query group ＝ `time` ＋ `entity` ＋ `occasion`。
 - **`event`**（ADR-0021）：同一個 query group、同一個 item 底下有多列時分辨每一列。**不進 query group。**
-- identity ＝ `time` ＋ `entity` ＋ `occasion` ＋ `item` ＋ `event`，沒宣告的角色不算。**這個順序是規定，不是寫法**：決定性抽樣的分桶把 identity 各欄依序串起來再雜湊，順序一變，同一份資料就抽出不同的列。沒宣告新角色時順序與今天相同（`time`、`entity`、`item`），所以既有部署的抽樣結果不變；之後任何加寬 identity 的改動（例如 #394 的 item 多欄）都不得調動既有欄位的相對順序。
+- identity ＝ `time` ＋ `entity` ＋ `occasion` ＋ `item` ＋ `event`，沒宣告的角色不算。**這個順序是規定，不是寫法**：決定性抽樣的分桶把 identity 各欄依序串起來再雜湊，順序一變，同一份資料就抽出不同的列。沒宣告新角色時順序與今天相同（`time`、`entity`、`item`），所以既有部署的抽樣結果不變；之後任何加寬 identity 的改動都不得調動既有欄位的相對順序。（#394 的 item 多欄最後沒有加寬 identity：多欄在讀入時拼成一欄 `item`，見 ADR-0027。）
 - 形狀一只宣告 `event`；形狀二只宣告 `occasion`；兩個都宣告也合法。
 - 兩個角色都是宣告了才進 identity、才進版本雜湊（ADR-0021 決定 3 的做法，延伸到 `occasion`）。
 - 離線推論忽略兩個角色、監控模式在 CLI 入口擋下（ADR-0021 決定 5，延伸到 `occasion`）。

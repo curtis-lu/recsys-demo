@@ -581,7 +581,7 @@ harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--
 + the filesystem), A35 (the ``--var`` CLI flags).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
-+ B13 + B14 implemented and wired):
++ B13 + B14 + B15 + B16 implemented and wired):
 
 * B1 — sample_pool items ↔ declared items must be equal; label items ⊆
   declared items (unknown item values corrupt training or violate invariants).
@@ -785,6 +785,21 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
   ``feature_table`` and the candidate-level feature table. Both are joined onto
   the same row, so it would arrive twice. Predicate:
   ``feature_table_overlap_errors``. Wired in ``validate_data_consistency``.
+* B15 — two different combinations of a multi-column ``schema.columns.item``
+  combine to the same value (``a-b`` + ``c`` and ``a`` + ``b-c`` are both
+  ``a-b-c``), so two items would be counted, encoded and joined as one
+  (ADR-0027 decision 2). A value that merely holds a ``-`` is fine. Checked on
+  the distinct combinations ``sample_pool`` and ``label_table`` hold in the
+  dataset windows — the same distinct B1 already reads, widened to the source
+  columns, so no extra scan. Predicate: ``combined_item_collision_errors``.
+  Wired in ``validate_data_consistency``.
+* B16 — a table that carries items lacks one of a multi-column item's source
+  columns, or already has a column named ``item`` that combining would
+  overwrite. Column names only. Predicate: ``item_source_column_errors``.
+  Wired in ``validate_data_consistency`` for ``sample_pool``, ``label_table``
+  and the candidate-level feature table; also raised by
+  ``utils.item_columns.combine_item_columns`` at every other entry that reads
+  one of the user's tables, so evaluation refuses it too.
 
 Layer 3 — specified but DEFERRED (NOT implemented in this module yet); see
 the plan doc for the full table:
@@ -843,7 +858,7 @@ from __future__ import annotations
 import datetime as _datetime
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
@@ -852,6 +867,7 @@ import pandas as pd
 from recsys_tfb.core.date_ranges import as_date_list, lookback_window_bounds
 from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
 from recsys_tfb.core.schema import (
+    COMBINED_ITEM_COLUMN,
     OPTIONAL_ROLE_KEYS,
     ENTITY_GROUPING_KEYS,
     get_schema,
@@ -1225,6 +1241,88 @@ def candidate_feature_table_key_errors(
         f"describes an entity in a period rather than a candidate, it belongs "
         f"in feature_table, which joins on (time, entity)."
     ]
+
+
+def item_source_column_errors(
+    schema: dict,
+    table: str,
+    columns: Sequence[str],
+) -> list[str]:
+    """(B16) a table that carries items can have a multi-column item combined.
+
+    Returns error strings (empty list when fine). Pure: the caller hands in
+    ``DataFrame.columns`` (metadata, no rows). ``validate_data_consistency``
+    collects it for the dataset's tables; ``utils.item_columns.
+    combine_item_columns`` raises it at every entry, so a table read only by
+    evaluation is covered too.
+
+    Only a multi-column item is checked — a single column is neither combined
+    nor dropped, so a column named ``item`` there is just the item column.
+    Two ways combining goes wrong (ADR-0027 decision 4): a source column is
+    missing, which would otherwise surface as an unresolved-name
+    ``AnalysisException`` naming neither the table nor the declaration; or the
+    table already has a column called ``item``, which the combined value would
+    silently overwrite.
+    """
+    sources = schema["item_source_columns"]
+    if len(sources) < 2:
+        return []
+    present = set(columns)
+    errors: list[str] = []
+    missing = [c for c in sources if c not in present]
+    if missing:
+        errors.append(
+            f"B16: {table} is missing item column(s) {missing}. "
+            f"schema.columns.item lists {list(sources)}, and every table that "
+            f"carries items must have all of them — they are combined into "
+            f"one column named {COMBINED_ITEM_COLUMN!r} when read (ADR-0027)."
+        )
+    if COMBINED_ITEM_COLUMN in present:
+        errors.append(
+            f"B16: {table} already has a column named "
+            f"{COMBINED_ITEM_COLUMN!r}. schema.columns.item lists "
+            f"{list(sources)}, which are combined into a column of that name "
+            f"when read, so it would overwrite yours. Rename that column in "
+            f"the table's source SQL."
+        )
+    return errors
+
+
+def combined_item_collision_errors(
+    source_columns: Sequence[str],
+    combinations: Iterable[tuple[tuple, str | None]],
+) -> list[str]:
+    """(B15) no two different item combinations combine to the same value.
+
+    ``combinations`` is ``(source values, combined value)`` pairs, as the
+    dataset gate reads them in one distinct from ``sample_pool`` and
+    ``label_table``. Repeats are fine (both tables hold the same item); a
+    null combined value is skipped (a null part, which combines nothing).
+
+    The separator is fixed at ``-`` and values holding ``-`` are allowed
+    (ADR-0027 decision 2), so ``("a-b", "c")`` and ``("a", "b-c")`` both
+    become ``a-b-c``. After that they are one item everywhere — one code for
+    the model, one label join — and nothing downstream can tell them apart.
+    Collect-all: every colliding value in one message.
+    """
+    by_value: dict[str, set[tuple]] = {}
+    for parts, value in combinations:
+        if value is None:
+            continue
+        by_value.setdefault(value, set()).add(tuple(parts))
+    errors: list[str] = []
+    for value in sorted(by_value):
+        combos = sorted(by_value[value])
+        if len(combos) < 2:
+            continue
+        errors.append(
+            f"B15: item combinations {', '.join(repr(c) for c in combos)} of "
+            f"{list(source_columns)} all combine to {value!r}, so they would "
+            f"be treated as one item. The item columns are joined with '-' "
+            f"(ADR-0027); change one of the values in your source SQL so the "
+            f"combinations stay distinct."
+        )
+    return errors
 
 
 def feature_table_overlap_errors(

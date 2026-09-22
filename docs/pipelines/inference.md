@@ -283,7 +283,7 @@ python -m recsys_tfb inference \
 | 階段 | Node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
 | 母體 × 特徵 | `build_inference_population_features` | `inference_population`、`feature_table`、`preprocessor`、parameters | 篩日期取母體 `(time, entity)`、left-join 接回 feature columns、分 entity 桶、套用訓練時的 categorical mappings，並把所有數值特徵欄轉成 `dataset.numeric_feature_storage_type` 宣告的型別（與 training 側同一個鍵、同一個 helper）。**不含 item 展開；identity 類別欄不在此編碼** | `inference_population_features`（Hive） |
-| 逐 chunk 評分 | `predict_and_write_scores` | `model`、`inference_population_features`、`preprocessor`、parameters | 外層迴圈桶、內層迴圈 item；一桶的特徵讀進 driver 一次，內層就地覆寫 item 那一欄重複使用。每個 `(桶, item)` 算完先跑塊層 sanity checks（§6.1），通過才寫成**恰好一個分區**。分區已存在的 chunk 跳過 | `score_manifest`（記憶體）；資料經 `writes=` 落地到 `unranked_predictions` |
+| 逐 chunk 評分 | `predict_and_write_scores` | `model`、`inference_population_features`、`preprocessor`、parameters | 外層迴圈桶、內層迴圈 item；一桶的特徵讀進 driver 一次，內層就地覆寫 item 那一欄重複使用（item 宣告成多欄時，這一欄是拼好的 `item`，值就是 `inference.products` 裡的組合，ADR-0027）。每個 `(桶, item)` 算完先跑塊層 sanity checks（§6.1），通過才寫成**恰好一個分區**。分區已存在的 chunk 跳過 | `score_manifest`（記憶體）；資料經 `writes=` 落地到 `unranked_predictions` |
 | 組內排名 | `rank_predictions` | `unranked_predictions`、`score_manifest` | 先 `restrict_to_snap_dates` 裁掉歷史月份（模型版本由 catalog 的 `partition_filter` 擋掉），丟掉 `entity_bucket`，再依 `(time, entity)` 內 score 降冪、同分按 item 升冪產生 rank（`utils/ranking.py`，evaluation 重排用同一個函式） | `ranked_staging` |
 | 發布驗證 | `validate_predictions` | staging、`score_manifest` | 執行整批層 sanity checks（塊層在評分時已逐 chunk 跑過），任一失敗即拋出 `ValidationError` | `validated_predictions` |
 | 正式發布 | `publish_predictions` | validated rows | 將已驗證結果交由 catalog 寫入 production table | `ranked_predictions` |
@@ -331,7 +331,7 @@ inference 使用模型 manifest 指向的 base dataset preprocessor，不會重�
 
 ```text
 for 每個 (snap_date, entity_bucket):        ← 一次 toPandas()，只讀這一個分區
-    for 每個 item:                          ← 就地覆寫 item 那一欄，重複使用同一份特徵
+    for 每個 item:                          ← 就地覆寫 item 那一欄（多欄 item 是拼好的那一欄），重複使用同一份特徵
         pdf_to_X → model.predict → save()   ← 恰好一個分區
 ```
 

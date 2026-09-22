@@ -17,7 +17,7 @@ date: 2026-09-16
 |---|---|---|
 | 每日批次特徵 | 一個 entity 一天的快照 | 照曝光當下「拿得到的那一份」快照 |
 | 即時特徵 | 一次曝光 | 照 identity（含 `event`，ADR-0021） |
-| item 的屬性 | 一個 item，或拼成 item 的其中一個屬性（item 恆為一欄，多屬性在來源 SQL 拼起來——見 `CONTEXT.md`） | 照它自己的識別欄 |
+| item 的屬性 | 一個 item，或拼成 item 的其中一個屬性（寫這份 ADR 時 item 恆為一欄，多屬性在來源 SQL 拼起來；ADR-0027 之後可以宣告多欄、由框架讀入時拼成一欄 `item`） | 照它自己的識別欄 |
 
 現況只容得下第一種的一個特例：dataset pipeline 只收一張 `feature_table`，一律以 `time + entity` 等值 join（`pipelines/dataset/steps/model_input.py::join_features_missing_as_null`、`docs/pipelines/dataset.md` §5）；前處理在抽樣之前對整張表做（`apply_preprocessor_to_features`）。repo 裡沒有任何 as-of（照時間往回找最近一份）的 join。
 
