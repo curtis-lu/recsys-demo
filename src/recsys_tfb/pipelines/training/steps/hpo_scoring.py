@@ -31,8 +31,10 @@ import optuna
 from recsys_tfb.core.consistency import HPO_OBJECTIVES
 from recsys_tfb.core.logging import log_data_volume, log_step
 from recsys_tfb.evaluation.metrics import (
+    compute_macro_per_item_average_precision,
     compute_macro_per_item_map,
     compute_mean_ap,
+    compute_pooled_average_precision,
 )
 from recsys_tfb.io.extract import stream_batch_rows
 from recsys_tfb.models.base import get_adapter
@@ -57,18 +59,28 @@ def _hpo_score(
     y_true: np.ndarray,
     y_score: np.ndarray,
     event_keys: Sequence[np.ndarray] = (),
+    weights: Optional[np.ndarray] = None,
 ) -> float:
     """Score val predictions for one HPO trial under the chosen objective.
 
-    ``mean_ap``            — per-query mAP.
-    ``macro_per_item_map`` — macro average of per-item attributed mAP.
+    ``mean_ap``                          — per-query mAP.
+    ``macro_per_item_map``               — macro average of per-item attributed mAP.
+    ``pooled_average_precision``         — every val row one binary prediction, one pool.
+    ``macro_per_item_average_precision`` — the same per item, then the mean over items.
 
-    Both break tied scores by ``items`` and then by ``event_keys``, the rule
-    the evaluation metrics use (``utils.ranking``), so both need them: the raw
-    values, or their :func:`~recsys_tfb.utils.ranking.item_sort_codes`.
-    ``event_keys`` is empty unless the deployment declares ``event``; passing
-    it is what keeps a trial's score independent of the order val rows were
-    read in once a query group can hold one item twice.
+    The first two rank inside each query group and break tied scores by
+    ``items`` and then by ``event_keys``, the rule the evaluation metrics use
+    (``utils.ranking``), so both need them: the raw values, or their
+    :func:`~recsys_tfb.utils.ranking.item_sort_codes`. ``event_keys`` is empty
+    unless the deployment declares ``event``; passing it is what keeps a
+    trial's score independent of the order val rows were read in once a query
+    group can hold one item twice.
+
+    The last two ignore ``groups`` and ``event_keys``: scikit-learn ranks all
+    rows at once and treats tied scores as one threshold, which is already
+    independent of row order. They read ``weights`` — val's
+    ``zero_positive_group_weight`` — and the first two never do: a query group
+    without a positive adds nothing to a ranking score, whatever its weight.
 
     Unknown ``objective_name`` raises ``ValueError``: a **pre-check** on the
     value handed in. A25 rejects the same value at CLI entry, so reaching this
@@ -80,10 +92,49 @@ def _hpo_score(
         return compute_macro_per_item_map(
             groups, items, y_true, y_score, event_keys=event_keys,
         )
+    if objective_name == "pooled_average_precision":
+        return compute_pooled_average_precision(y_true, y_score, weights)
+    if objective_name == "macro_per_item_average_precision":
+        return compute_macro_per_item_average_precision(
+            items, y_true, y_score, weights,
+        )
     raise ValueError(
         f"unknown training.hpo_objective {objective_name!r}; "
         f"allowed: {', '.join(HPO_OBJECTIVES)}"
     )
+
+
+def val_rows_by_group_kind(groups: np.ndarray, y_true: np.ndarray) -> tuple[int, int]:
+    """Val rows in query groups holding a positive, and in groups holding none.
+
+    Decided from the label, never from ``zero_positive_group_weight``: at
+    r = 1 both kinds of group carry weight 1. ``groups`` are the dense ids
+    ``extract_Xy_with_groups`` hands back (0 .. n_groups - 1).
+    """
+    if len(groups) == 0:
+        return 0, 0
+    has_positive = np.bincount(groups, weights=np.asarray(y_true) > 0) > 0
+    n_with = int(has_positive[groups].sum())
+    return n_with, len(groups) - n_with
+
+
+def items_entering_the_mean(
+    items: np.ndarray, y_true: np.ndarray,
+) -> tuple[int, int, int, float]:
+    """``(entering, all, min, median)`` for a per-item mean over val.
+
+    ``entering`` is the number of items holding at least one positive row —
+    the only ones a per-item average precision can be computed for — out of
+    ``all`` distinct items in val; ``min`` / ``median`` are the positive-row
+    counts among the entering items, so a reader can see how much of the mean
+    rests on items with one or two positives. ``(0, all, 0, 0.0)`` when no
+    item has a positive.
+    """
+    _, counts = np.unique(np.asarray(items)[np.asarray(y_true) > 0], return_counts=True)
+    n_items = len(np.unique(items))
+    if len(counts) == 0:
+        return 0, n_items, 0, 0.0
+    return len(counts), n_items, int(counts.min()), float(np.median(counts))
 
 
 def _predict_in_row_batches(adapter, X, budget: int | None = None) -> np.ndarray:
@@ -176,6 +227,12 @@ class TrialScorer:
     purpose, so the number a trial is judged by is not the number its
     early stopping optimised against.
 
+    ``weights_val`` is val's ``zero_positive_group_weight``, aligned to the
+    rows of ``X_val`` — present only when the objective scores every row as a
+    binary prediction (#430), ``None`` otherwise. Not to be confused with
+    ``train_weights``: those are the user's training weights and shape the
+    fit; this one only weighs the rows of the score.
+
     ``X_val`` is whatever the caller handed over: anything that indexes and
     slices like a 2-D array. ``tune_hyperparameters`` passes a matrix mapped
     from disk (``io/disk_matrix.py``), which is why every trial walks it
@@ -196,6 +253,7 @@ class TrialScorer:
         groups_val: np.ndarray,
         items_val: np.ndarray,
         event_keys_val: Sequence[np.ndarray] = (),
+        weights_val: Optional[np.ndarray] = None,
         algorithm: str,
         algorithm_params: dict,
         search_space: dict,
@@ -216,6 +274,7 @@ class TrialScorer:
         self.groups_val = groups_val
         self.items_val = items_val
         self.event_keys_val = event_keys_val
+        self.weights_val = weights_val
         self.algorithm = algorithm
         self.algorithm_params = algorithm_params
         self.search_space = search_space
@@ -301,6 +360,7 @@ class TrialScorer:
             score = _hpo_score(
                 self.hpo_objective, self.groups_val, self.items_val,
                 self.y_val, y_pred, self.event_keys_val,
+                weights=self.weights_val,
             )
 
         if score > self.best["score"]:

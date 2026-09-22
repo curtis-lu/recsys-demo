@@ -536,6 +536,16 @@ Layer 1 — config-static (implemented here; aggregated by
   declares the entry, as A40 takes its flag; the inference command raises).
   NOT aggregated: it needs the catalog, and the harm belongs to inference
   alone.
+* A48 — ``training.hpo_objective`` in ``BINARY_PREDICTION_HPO_OBJECTIVES``
+  (``pooled_average_precision`` / ``macro_per_item_average_precision``, #430)
+  while ``dataset.val_zero_positive_group_ratio`` is 0 (its default). Those
+  objectives score every val row as a binary prediction, and at 0 the dataset
+  pipeline dropped every val query group holding no positive, so average
+  precision would be computed on a population filtered by the label it
+  scores — A46's reason, on val instead of test. A ratio A44 rejects is left
+  to A44. Predicate: ``hpo_objective_population_errors``. Aggregated by
+  ``validate_config_consistency``, unlike A46: the ratio takes effect in the
+  dataset pipeline, so the dataset command has to stop too.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
@@ -1736,7 +1746,16 @@ def training_diagnostics_param_errors(parameters: dict) -> list[str]:
 #: on the value must not be able to disagree about what is admissible:
 #: ``pipelines/training/nodes.py`` imports this tuple for its own fail-loud
 #: dispatch, so adding an objective is one edit rather than two.
-HPO_OBJECTIVES = ("mean_ap", "macro_per_item_map")
+#:
+#: Two families. ``mean_ap`` / ``macro_per_item_map`` rank inside each query
+#: group; :data:`BINARY_PREDICTION_HPO_OBJECTIVES` score every val row as one
+#: binary prediction and need val to keep query groups holding no positive
+#: (A48).
+BINARY_PREDICTION_HPO_OBJECTIVES = (
+    "pooled_average_precision",
+    "macro_per_item_average_precision",
+)
+HPO_OBJECTIVES = ("mean_ap", "macro_per_item_map") + BINARY_PREDICTION_HPO_OBJECTIVES
 
 #: Values ``training.final_model_strategy`` may take (A25). ``hpo_best`` passes
 #: the HPO winner through unchanged; ``refit_on_full`` retrains on
@@ -1984,6 +2003,13 @@ def test_carries_zero_positive_group_weight(parameters: dict) -> bool:
     return resolved_zero_positive_group_ratio(parameters, "test") > 0.0
 
 
+def _is_legal_zero_positive_group_ratio(value) -> bool:
+    """A44's domain, shared with A48 so the two cannot disagree on what A44
+    reports and A48 therefore skips."""
+    is_number = isinstance(value, (int, float)) and not isinstance(value, bool)
+    return is_number and 0.0 <= value <= 1.0
+
+
 def zero_positive_group_ratio_errors(parameters: dict) -> list[str]:
     """A44 — each ``dataset.*_zero_positive_group_ratio`` is a number in [0, 1].
 
@@ -2006,8 +2032,7 @@ def zero_positive_group_ratio_errors(parameters: dict) -> list[str]:
         if key not in ds:
             continue
         value = ds[key]
-        is_number = isinstance(value, (int, float)) and not isinstance(value, bool)
-        if is_number and 0.0 <= value <= 1.0:
+        if _is_legal_zero_positive_group_ratio(value):
             continue
         errors.append(
             f"A44: dataset.{key}={value!r} is not a ratio. It is the share of "
@@ -2016,6 +2041,49 @@ def zero_positive_group_ratio_errors(parameters: dict) -> list[str]:
             f"{ZERO_POSITIVE_GROUP_RATIO_DEFAULTS[split]!r}."
         )
     return errors
+
+
+def hpo_objective_population_errors(parameters: dict) -> list[str]:
+    """A48 — a binary-prediction HPO objective needs val to keep query groups
+    holding no positive (#430).
+
+    ``training.hpo_objective`` in :data:`BINARY_PREDICTION_HPO_OBJECTIVES`
+    requires ``dataset.val_zero_positive_group_ratio`` above 0. At 0 — the
+    default — the dataset pipeline drops every val query group without a
+    positive, and average precision is then computed on a population filtered
+    by the label it scores: a number, just not the one the objective names.
+    The ranking objectives are unaffected (such a group adds nothing to a
+    ranking score), so the default every existing deployment runs stays clean.
+
+    A ratio A44 rejects is left to A44: one message per mistake, and resolving
+    a YAML ``null`` here would raise ``TypeError`` instead of joining the
+    collected errors.
+
+    Aggregated by ``validate_config_consistency`` rather than hung off the
+    training command: the ratio takes effect in the dataset pipeline, so
+    stopping only at training would come after val was already built without
+    the groups — and fixing the ratio moves ``base_dataset_version``, so that
+    build is rerun either way.
+    """
+    training = parameters.get("training") or {}
+    objective = training.get("hpo_objective")
+    if objective not in BINARY_PREDICTION_HPO_OBJECTIVES:
+        return []
+    ds = parameters.get("dataset") or {}
+    key = _zero_positive_group_ratio_key("val")
+    if key in ds and not _is_legal_zero_positive_group_ratio(ds[key]):
+        return []
+    if resolved_zero_positive_group_ratio(parameters, "val") > 0.0:
+        return []
+    return [
+        f"A48: training.hpo_objective={objective!r} scores every val row as a "
+        f"binary prediction, but dataset.{key} is "
+        f"{ds.get(key, ZERO_POSITIVE_GROUP_RATIO_DEFAULTS['val'])!r}: the "
+        f"dataset pipeline drops every val query group holding no positive, so "
+        f"average precision would be computed on that filtered population. "
+        f"Set dataset.{key} above 0 (it busts base_dataset_version and "
+        f"rebuilds val), or choose mean_ap / macro_per_item_map."
+    ]
 
 
 #: The source tables the dataset pipeline reads — the three inputs of
@@ -2606,6 +2674,8 @@ def validate_config_consistency(parameters: dict) -> None:
     errors.extend(numeric_storage_param_errors(parameters))
 
     errors.extend(zero_positive_group_ratio_errors(parameters))
+
+    errors.extend(hpo_objective_population_errors(parameters))
 
     errors.extend(dataset_source_quality_check_errors(parameters))
 

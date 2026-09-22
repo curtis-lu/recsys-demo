@@ -60,6 +60,48 @@ class TestHpoScore:
             _hpo_score("not_a_metric", self.GROUPS, self.ITEMS, self.Y, self.SCORE)
 
 
+class TestHpoScoreBinaryPredictionObjectives:
+    """The two objectives that score every val row as a binary prediction
+    (#430) reach scikit-learn with the val weights.
+
+    Group 0 holds the positives, both on item "a" (weight 1); group 1 is a
+    kept zero-positive group at r = 0.5 (weight 2) whose top negative outranks
+    one of them. Item "b" holds no positive, so the macro mean is item "a"
+    alone. Weighted: pooled 9/14, macro 3/4; unweighted: 7/10 and 5/6.
+    """
+
+    GROUPS = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+    ITEMS = np.array(["a", "b", "a", "b", "a", "b", "a", "b"])
+    Y = np.array([1, 0, 1, 0, 0, 0, 0, 0])
+    SCORE = np.array([0.9, 0.8, 0.4, 0.3, 0.85, 0.5, 0.2, 0.1])
+    W = np.array([1, 1, 1, 1, 2, 2, 2, 2], dtype=float)
+
+    def test_pooled_equals_scikit_learn_under_the_weights(self):
+        from sklearn.metrics import average_precision_score
+
+        expected = average_precision_score(self.Y, self.SCORE, sample_weight=self.W)
+        assert expected != pytest.approx(average_precision_score(self.Y, self.SCORE))
+        assert _hpo_score(
+            "pooled_average_precision", self.GROUPS, self.ITEMS, self.Y,
+            self.SCORE, weights=self.W,
+        ) == expected
+
+    def test_macro_per_item_equals_the_primitive_under_the_weights(self):
+        from recsys_tfb.evaluation.metrics import (
+            compute_macro_per_item_average_precision,
+        )
+
+        expected = compute_macro_per_item_average_precision(
+            self.ITEMS, self.Y, self.SCORE, self.W)
+        assert expected != pytest.approx(
+            compute_macro_per_item_average_precision(
+                self.ITEMS, self.Y, self.SCORE))
+        assert _hpo_score(
+            "macro_per_item_average_precision", self.GROUPS, self.ITEMS,
+            self.Y, self.SCORE, weights=self.W,
+        ) == expected
+
+
 class TestTrialScorer:
     """The scorer owns the search state; these pin who wins and who survives.
 

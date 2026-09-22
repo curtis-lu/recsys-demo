@@ -424,3 +424,103 @@ def compute_macro_per_item_map(
         per_item, counts, weight_alpha, min_positives, shrinkage_k
     )
     return 0.0 if macro is None else macro
+
+
+def compute_pooled_average_precision(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    weights: Optional[np.ndarray] = None,
+) -> float:
+    """Average precision with every row one binary prediction, all in one pool.
+
+    The HPO objective ``pooled_average_precision`` (#430). No query group and
+    no item enter it: the rows are ranked by score across the whole of val,
+    which is the reading a deployment trained on impression logs looks at
+    (ADR-0024's background). Ranking across groups also rewards telling apart
+    the entities that tend to have positives at all — no help to the ranking
+    inside a group, and the reason this is an objective one opts into.
+
+    Computed by ``sklearn.metrics.average_precision_score``, so the value can
+    be reconciled with it exactly. That is also its tie rule: tied scores form
+    one threshold, whatever order the rows arrive in — unlike the ranking
+    metrics in this module, which break ties by item. ``weights`` is the val
+    table's ``zero_positive_group_weight`` (1, or ``1 / r`` on a kept group
+    holding no positive): a design weight, not an unbiased estimate (ADR-0025
+    decision 3). Leave it out and each kept zero-positive group counts once
+    instead of ``1 / r`` times — a valid number for a different population,
+    with nothing to say so.
+
+    scikit-learn is imported here rather than at the top: importing
+    ``sklearn.metrics`` takes about 0.6 s, and every importer of this module
+    (the reports, diagnosis, ``scripts/``) would pay it for two functions only
+    the HPO loop calls.
+
+    No positive row raises ``ValueError``: a **pre-check** on the input.
+    scikit-learn would answer ``-0.0`` with a ``UserWarning``, and a constant
+    scores every HPO trial alike. ``tune_hyperparameters`` stops a val set
+    like this before its first trial; this is the backstop for other callers.
+    """
+    from sklearn.metrics import average_precision_score
+
+    _require_a_positive_row(y_true, "pooled_average_precision")
+    return float(average_precision_score(y_true, y_score, sample_weight=weights))
+
+
+def compute_macro_per_item_average_precision(
+    items: np.ndarray,
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    weights: Optional[np.ndarray] = None,
+) -> float:
+    """Mean over items of each item's :func:`compute_pooled_average_precision`.
+
+    The HPO objective ``macro_per_item_average_precision`` (#430): one average
+    precision per item over that item's rows, then the plain mean, so an item
+    shown a lot does not drown out one shown rarely. Tie rule and ``weights``
+    as in :func:`compute_pooled_average_precision`.
+
+    **An item with no positive row in val is left out of the mean**, never
+    handed to scikit-learn — it would come back as ``-0.0`` with a warning and
+    pull the mean towards 0. That is also what ``compute_macro_per_item_map``
+    does: it counts items from their positive rows only. The consequence is
+    the caller's to show: with many items and few positives the mean covers a
+    handful of items, and an item with one or two positives weighs as much as
+    a large one. ``evaluation.metric``'s ``min_positives`` / ``weight_alpha``
+    / ``shrinkage_k`` are not read, matching what the HPO loop passes
+    ``compute_macro_per_item_map`` (#430).
+
+    One stable sort by item, then one contiguous slice per item. Masking
+    ``items == item`` per item instead costs a full pass over val for every
+    item — four times slower at 1000 items and 5 million rows (#430).
+
+    No item with a positive raises ``ValueError``, for the reason given in
+    :func:`compute_pooled_average_precision`.
+    """
+    from sklearn.metrics import average_precision_score
+
+    _require_a_positive_row(y_true, "macro_per_item_average_precision")
+    order = np.argsort(items, kind="stable")
+    items_s = np.asarray(items)[order]
+    y_s = np.asarray(y_true)[order]
+    score_s = np.asarray(y_score)[order]
+    w_s = None if weights is None else np.asarray(weights)[order]
+    starts = np.flatnonzero(np.r_[True, items_s[1:] != items_s[:-1]])
+    ends = np.r_[starts[1:], len(items_s)]
+
+    per_item = [
+        average_precision_score(
+            y_s[a:b], score_s[a:b],
+            sample_weight=None if w_s is None else w_s[a:b],
+        )
+        for a, b in zip(starts, ends)
+        if np.any(y_s[a:b] > 0)
+    ]
+    return float(np.mean(per_item))
+
+
+def _require_a_positive_row(y_true: np.ndarray, objective: str) -> None:
+    if not np.any(np.asarray(y_true) > 0):
+        raise ValueError(
+            f"{objective}: val holds no positive row, so average precision "
+            f"is undefined (scikit-learn would return -0.0 with a warning)."
+        )

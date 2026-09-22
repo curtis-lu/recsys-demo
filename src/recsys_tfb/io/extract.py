@@ -1078,6 +1078,7 @@ def extract_Xy_with_groups(
     with_weight_keys: bool = False,
     with_items: bool = False,
     with_event: bool = False,
+    with_zero_positive_group_weight: bool = False,
     on_disk_label: str | None = None,
 ) -> tuple:
     """Like :func:`extract_Xy` but also returns per-row query-group ids.
@@ -1111,7 +1112,19 @@ def extract_Xy_with_groups(
 
     ``with_weights`` vs ``with_weight_keys``: see :func:`extract_Xy`. Same two
     meanings, same mutual exclusion.
+
+    ``with_zero_positive_group_weight`` returns the ``zero_positive_group_weight``
+    column as stored, last — a different weight from ``with_weights``, and
+    the two must not be confused. ``with_weights`` resolves the user's
+    ``training.sample_weights`` to train rows; this one is what the dataset
+    pipeline wrote on val / test when it kept query groups holding no positive
+    (1, or ``1 / r``; ADR-0025 decision 3). Only the HPO objectives that score
+    every row as a binary prediction read it (#430). The column exists only
+    when the split's ratio is above 0, which A48 guarantees for those
+    objectives; asked for without it, the read fails naming the column.
     """
+    from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+
     _reject_both_weight_flags(with_weights, with_weight_keys)
     feature_cols = preprocessor_metadata["feature_columns"]
     schema = get_schema(parameters)
@@ -1138,6 +1151,8 @@ def extract_Xy_with_groups(
         aux_cols.append(item_col)
     event_cols = schema.get("event", []) if with_event else []
     aux_cols += [c for c in event_cols if c not in aux_cols]
+    if with_zero_positive_group_weight:
+        aux_cols.append(ZERO_POSITIVE_GROUP_WEIGHT_COL)
 
     X, aux = _stream_matrix(
         handle, preprocessor_metadata, parameters, aux_cols,
@@ -1167,4 +1182,8 @@ def extract_Xy_with_groups(
         result.append(items)
     if with_event:
         result.append([aux[c].to_numpy() for c in event_cols])
+    if with_zero_positive_group_weight:
+        zw = aux[ZERO_POSITIVE_GROUP_WEIGHT_COL].to_numpy(dtype=np.float64)
+        log_data_volume(logger, "extract_Xy_with_groups.zero_positive_group_weight", zw)
+        result.append(zw)
     return tuple(result)

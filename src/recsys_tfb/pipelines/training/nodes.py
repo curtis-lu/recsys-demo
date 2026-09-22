@@ -52,7 +52,11 @@ import optuna
 import pandas as pd
 import pyarrow.dataset as pads
 
-from recsys_tfb.core.consistency import HPO_OBJECTIVES, REBUILD_SNAP_DATES_KEY
+from recsys_tfb.core.consistency import (
+    BINARY_PREDICTION_HPO_OBJECTIVES,
+    HPO_OBJECTIVES,
+    REBUILD_SNAP_DATES_KEY,
+)
 from recsys_tfb.core.group_utils import (
     default_metric_for_objective,
     drop_zero_positive_groups,
@@ -87,7 +91,11 @@ from recsys_tfb.pipelines.training.steps import (
     refit,
     sample_weights,
 )
-from recsys_tfb.pipelines.training.steps.hpo_scoring import TrialScorer
+from recsys_tfb.pipelines.training.steps.hpo_scoring import (
+    TrialScorer,
+    items_entering_the_mean,
+    val_rows_by_group_kind,
+)
 from recsys_tfb.pipelines.training.steps.local_cache import (
     cache_exists,
     cache_is_complete,
@@ -588,11 +596,20 @@ def tune_hyperparameters(
     num_iterations). It is consumed by `finalize_model` under the
     `refit_on_full` strategy as the fixed iteration count for the no-val refit.
 
-    The ``raise`` in the body is a **pre-check** on config: ``hpo_objective``
-    has to name a score this pipeline can compute. A25 rejects the same value
-    at CLI entry, so a run that reaches this line built ``parameters`` without
-    passing that gate (tests, direct calls). It is a runtime backstop, and the
-    person to find is whoever wrote the config, not whoever produced the data.
+    The first ``raise`` in the body is a **pre-check** on config:
+    ``hpo_objective`` has to name a score this pipeline can compute. A25
+    rejects the same value at CLI entry, so a run that reaches this line built
+    ``parameters`` without passing that gate (tests, direct calls). It is a
+    runtime backstop, and the person to find is whoever wrote the config, not
+    whoever produced the data.
+
+    The second is a **pre-check** on the val data, before the first trial: an
+    objective in ``BINARY_PREDICTION_HPO_OBJECTIVES`` over a val set holding
+    no positive row. Average precision is undefined there, and any constant
+    stood in for it would score every trial alike — the first trial wins and
+    the search runs to the end without a word (#430). Only the data can tell,
+    so it is checked here rather than at CLI entry; the person to find is
+    whoever chose the val window or the ratio.
     """
     # HPO and everything after it (finalize_model) is driver-local: Spark
     # sits completely idle from here until predict_and_write_test_predictions,
@@ -641,8 +658,10 @@ def tune_hyperparameters(
     # val_model_input holds every query group with a positive plus the share of
     # the ones without that dataset.val_zero_positive_group_ratio keeps (none
     # at the default 0; filter_val_model_input). No in-pandas re-filter here:
-    # both HPO scores skip a group without a positive by construction, so kept
-    # zero-positive groups leave them unchanged (ADR-0025 decision 3).
+    # the two ranking objectives skip a group without a positive by
+    # construction, so kept zero-positive groups leave them unchanged
+    # (ADR-0025 decision 3); the two binary-prediction objectives need exactly
+    # those groups, weighted by zero_positive_group_weight (#430, A48).
     #
     # Decision — the val matrix is mapped from disk, not held
     # on the heap. This is the one caller that keeps a matrix for the whole
@@ -661,16 +680,53 @@ def tune_hyperparameters(
     # The raw values become order-preserving codes once, here: every trial
     # ranks the same items, and sorting a string per row on each trial is work
     # the search would repeat for nothing.
+    #
+    # Decision — only a binary-prediction objective reads val's
+    # zero_positive_group_weight. The ranking objectives never weigh a row, and
+    # the column exists only when the val ratio is above 0, which A48
+    # guarantees for these objectives alone.
+    binary_objective = hpo_objective in BINARY_PREDICTION_HPO_OBJECTIVES
     with log_step(logger, "extract_features"):
-        X_v, y_v, groups_v, items_v, event_keys_v = extract_Xy_with_groups(
+        extracted = extract_Xy_with_groups(
             val_parquet_handle, preprocessor_metadata, parameters,
-            with_items=True, with_event=True, on_disk_label="hpo_val_matrix",
+            with_items=True, with_event=True,
+            with_zero_positive_group_weight=binary_objective,
+            on_disk_label="hpo_val_matrix",
         )
+    X_v, y_v, groups_v, items_v, event_keys_v = extracted[:5]
+    weights_v = extracted[5] if binary_objective else None
     items_v = item_sort_codes(items_v)
     # Same pre-coding, same reason, for each `event` column — the list is
     # empty unless the deployment declares the role, so a deployment without
     # one pays nothing and ranks exactly as it did.
     event_keys_v = [item_sort_codes(k) for k in event_keys_v]
+
+    # Decision — say what a binary-prediction objective will average over,
+    # before the search spends hours on it (#430). The val size is the cost
+    # lever: every trial predicts every row, and the kept zero-positive groups
+    # are what the ratio r adds.
+    if binary_objective:
+        rows_with, rows_without = val_rows_by_group_kind(groups_v, y_v)
+        logger.info(
+            "tune_hyperparameters: %s scores every val row; rows in query "
+            "groups holding a positive=%d rows in kept query groups holding "
+            "none=%d",
+            hpo_objective, rows_with, rows_without,
+        )
+        if rows_with == 0:
+            raise ValueError(
+                f"{hpo_objective}: val holds no positive row, so average "
+                f"precision is undefined and every trial would score alike. "
+                f"Check the val window (dataset.val_snap_dates) and the label "
+                f"source; no trial was run."
+            )
+    if hpo_objective == "macro_per_item_average_precision":
+        entering, n_items, fewest, median = items_entering_the_mean(items_v, y_v)
+        logger.info(
+            "tune_hyperparameters: items entering the mean=%d/%d positives "
+            "per entering item: min=%d median=%g",
+            entering, n_items, fewest, median,
+        )
 
     checkpointing = parameters.get("hpo_checkpointing", True)
     search_id = _resolve_search_id(parameters)
@@ -732,6 +788,7 @@ def tune_hyperparameters(
             parameters, preprocessor_metadata),
         X_val=X_v, y_val=y_v, groups_val=groups_v, items_val=items_v,
         event_keys_val=event_keys_v,
+        weights_val=weights_v,
         algorithm=algorithm,
         algorithm_params=algorithm_params,
         search_space=search_space,

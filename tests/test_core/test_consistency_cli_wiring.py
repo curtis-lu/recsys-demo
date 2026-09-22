@@ -412,6 +412,18 @@ def test_a44_reaches_the_global_aggregator():
     )
 
 
+def test_a48_reaches_the_global_aggregator():
+    # The val ratio takes effect in the dataset pipeline, so the dataset
+    # command must stop too — not only training, after val was built without
+    # the groups the objective needs (#430). Behavioural half:
+    # TestHpoObjectivePopulationA48.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "hpo_objective_population_errors" in inspect.getsource(
+        validate_config_consistency
+    )
+
+
 def test_a45_reads_the_catalog_entry_a28_reads_before_spark():
     # Needs the resolved catalog (A28/A39's placement) and must be handed the
     # same single read, so one `columns:` edit fixes all three.
