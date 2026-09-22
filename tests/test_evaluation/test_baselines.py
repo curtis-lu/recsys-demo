@@ -240,3 +240,233 @@ def test_compute_purchase_counts_rejects_empty_snap_dates(spark):
     )
     with pytest.raises(ValueError, match="non-empty"):
         compute_purchase_counts(empty, [], 12, _parameters())
+
+
+# ---------------------------------------------------------------------------
+# Positive-rate mode (#397): denominator = candidate rows in sample_pool.
+# ---------------------------------------------------------------------------
+
+
+def _rate_parameters(score="rate"):
+    params = _parameters()
+    params["evaluation"] = {"baseline": {"lookback_months": 12, "score": score}}
+    return params
+
+
+def _grid(spark, rows):
+    return spark.createDataFrame(pd.DataFrame(
+        rows, columns=["snap_date", "cust_id", "prod_name"]))
+
+
+def _labels(spark, rows):
+    return spark.createDataFrame(pd.DataFrame(
+        rows, columns=["snap_date", "cust_id", "prod_name", "label"]))
+
+
+def _counts_by_item(frame):
+    return {
+        r["prod_name"]: (r["n_candidates"], r["n_positives"])
+        for r in frame.groupBy("prod_name").agg(
+            {"n_candidates": "sum", "n_positives": "sum"}
+        ).withColumnRenamed("sum(n_candidates)", "n_candidates")
+        .withColumnRenamed("sum(n_positives)", "n_positives").collect()
+    }
+
+
+class TestBaselineScore:
+    def test_absent_means_count(self):
+        from recsys_tfb.evaluation.baselines import baseline_score
+
+        assert baseline_score(_parameters()) == "count"
+        assert baseline_score({"evaluation": {"baseline": None}}) == "count"
+
+    def test_rate_is_read(self):
+        from recsys_tfb.evaluation.baselines import baseline_score
+
+        assert baseline_score(_rate_parameters()) == "rate"
+
+    def test_rate_is_wired_under_post_training_with_the_section_on(self):
+        from recsys_tfb.evaluation.baselines import baseline_scores_by_rate
+
+        params = _rate_parameters()
+        assert baseline_scores_by_rate(params, post_training=True)
+        # Monitoring scores the full grid: it keeps the count.
+        assert not baseline_scores_by_rate(params, post_training=False)
+        params["evaluation"]["report"] = {"sections": {"baseline": False}}
+        assert not baseline_scores_by_rate(params, post_training=True)
+        assert not baseline_scores_by_rate(
+            _rate_parameters("count"), post_training=True)
+
+
+class TestPeriodCandidateCounts:
+    def test_denominator_is_candidate_rows_when_label_table_holds_positives_only(
+        self, spark,
+    ):
+        """label_table with positive rows only: counting its rows as the
+        denominator would give every item a rate of 1."""
+        from recsys_tfb.evaluation.baselines import (
+            compute_period_candidate_counts,
+        )
+
+        grid = _grid(spark, [("2024-06-30", f"c{i}", p)
+                             for i in range(10) for p in ("A", "B")])
+        labels = _labels(spark, [("2024-06-30", "c0", "A", 1),
+                                 ("2024-06-30", "c1", "A", 1),
+                                 ("2024-06-30", "c2", "B", 1)])
+        out = compute_period_candidate_counts(
+            grid, labels, ["2024-06-30"], _rate_parameters())
+        assert _counts_by_item(out) == {"A": (10, 2), "B": (10, 1)}
+
+    def test_a_filtered_label_table_does_not_change_the_denominator(self, spark):
+        """The bank example's label_table keeps only entities with a positive
+        in the group: B's label rows are 4, its candidates are 100."""
+        from recsys_tfb.evaluation.baselines import (
+            compute_period_candidate_counts,
+        )
+
+        grid = _grid(spark, [("2024-06-30", f"c{i}", p)
+                             for i in range(100) for p in ("A", "B")])
+        label_rows = [("2024-06-30", f"c{i}", "A", 1 if i < 5 else 0)
+                      for i in range(20)]
+        label_rows += [("2024-06-30", f"c{i}", "B", 1 if i < 2 else 0)
+                       for i in range(4)]
+        out = compute_period_candidate_counts(
+            grid, _labels(spark, label_rows), ["2024-06-30"], _rate_parameters())
+        assert _counts_by_item(out) == {"A": (100, 5), "B": (100, 2)}
+
+    def test_only_the_requested_periods_are_counted(self, spark):
+        from recsys_tfb.evaluation.baselines import (
+            compute_period_candidate_counts,
+        )
+
+        grid = _grid(spark, [("2024-05-31", "c0", "A"), ("2024-06-30", "c0", "A")])
+        labels = _labels(spark, [("2024-05-31", "c0", "A", 1)])
+        out = compute_period_candidate_counts(
+            grid, labels, ["2024-06-30"], _rate_parameters())
+        assert [(r["snap_date"], r["n_candidates"], r["n_positives"])
+                for r in out.collect()] == [("2024-06-30", 1, 0)]
+
+    def test_duplicated_label_keys_raise(self, spark):
+        import pytest
+
+        from recsys_tfb.evaluation.baselines import (
+            compute_period_candidate_counts,
+        )
+
+        grid = _grid(spark, [("2024-06-30", "c0", "A")])
+        labels = _labels(spark, [("2024-06-30", "c0", "A", 1),
+                                 ("2024-06-30", "c0", "A", 1)])
+        with pytest.raises(ValueError, match="1 duplicated label_table key"):
+            compute_period_candidate_counts(
+                grid, labels, ["2024-06-30"], _rate_parameters())
+
+    def test_each_row_is_one_candidate_under_event(self, spark):
+        """#378: with ``event`` declared one query group can hold the same
+        item several times; each row is one candidate."""
+        from recsys_tfb.evaluation.baselines import (
+            compute_period_candidate_counts,
+        )
+
+        params = _rate_parameters()
+        params["schema"]["columns"]["event"] = "impression_id"
+        grid = spark.createDataFrame(pd.DataFrame({
+            "snap_date": ["2024-06-30"] * 3, "cust_id": ["c0"] * 3,
+            "prod_name": ["A", "A", "B"], "impression_id": ["e1", "e2", "e3"],
+        }))
+        labels = spark.createDataFrame(pd.DataFrame({
+            "snap_date": ["2024-06-30"], "cust_id": ["c0"],
+            "prod_name": ["A"], "impression_id": ["e2"], "label": [1],
+        }))
+        out = compute_period_candidate_counts(grid, labels, ["2024-06-30"], params)
+        assert _counts_by_item(out) == {"A": (2, 1), "B": (1, 0)}
+
+
+def _period_counts(spark, rows):
+    return spark.createDataFrame(pd.DataFrame(
+        rows, columns=["snap_date", "prod_name", "n_candidates", "n_positives"]))
+
+
+class TestPositiveRates:
+    def test_rate_is_positives_over_candidates_in_the_window(self, spark):
+        from recsys_tfb.evaluation.baselines import compute_positive_rates
+
+        counts = _period_counts(spark, [
+            ("2024-06-30", "A", 1000, 50), ("2024-06-30", "B", 100, 20),
+            # Outside [2024-01-31, 2025-01-31): must not count.
+            ("2025-01-31", "A", 1, 1), ("2023-12-31", "B", 1, 1),
+        ])
+        rates = compute_positive_rates(
+            counts, ["2025-01-31"], 12, _rate_parameters())
+        by = {r["prod_name"]: r["score"] for r in rates.collect()}
+        assert by == {"A": 0.05, "B": 0.2}
+        assert {r["snap_date"] for r in rates.collect()} == {"2025-01-31"}
+
+    def test_empty_window_raises_even_when_label_table_is_not_empty(self, spark):
+        """The rate is read off the candidate counts; label_table having rows
+        in the window must not let an empty sample_pool window through."""
+        import pytest
+
+        from recsys_tfb.evaluation.baselines import compute_positive_rates
+
+        counts = _period_counts(spark, [("2023-06-30", "A", 10, 1)])
+        with pytest.raises(ValueError, match="sample_pool"):
+            compute_positive_rates(counts, ["2025-01-31"], 12, _rate_parameters())
+
+    def test_rate_and_count_rank_alike_on_a_full_grid(self, spark):
+        """Every entity is a candidate for every item and every positive is a
+        candidate row: the denominators are equal, so the two orders match."""
+        from recsys_tfb.evaluation.baselines import (
+            compute_period_candidate_counts,
+            compute_positive_rates,
+            compute_purchase_counts,
+        )
+
+        items = ["A", "B", "C", "D"]
+        grid = _grid(spark, [("2024-06-30", f"c{i}", p)
+                             for i in range(20) for p in items])
+        positives = {"A": 7, "B": 2, "C": 11, "D": 0}
+        labels = _labels(spark, [
+            ("2024-06-30", f"c{i}", p, 1 if i < n else 0)
+            for p, n in positives.items() for i in range(20)])
+        params = _rate_parameters()
+        rates = compute_positive_rates(
+            compute_period_candidate_counts(grid, labels, ["2024-06-30"], params),
+            ["2025-01-31"], 12, params)
+        counts = compute_purchase_counts(labels, ["2025-01-31"], 12, params)
+
+        def order(frame):
+            rows = sorted(frame.collect(),
+                          key=lambda r: (-r["score"], r["prod_name"]))
+            return [r["prod_name"] for r in rows]
+
+        assert order(rates) == order(counts) == ["C", "A", "B", "D"]
+
+    def test_monthly_positives_by_window(self, spark):
+        from recsys_tfb.evaluation.baselines import (
+            compute_monthly_candidate_counts_by_window,
+        )
+
+        counts = _period_counts(spark, [
+            ("2024-06-03", "A", 10, 1), ("2024-06-10", "A", 10, 2),
+            ("2025-02-03", "A", 10, 4),  # in the February window only
+        ])
+        rows = compute_monthly_candidate_counts_by_window(
+            counts, ["2025-01-31", "2025-02-28"], 12, _rate_parameters()
+        ).collect()
+        got = sorted((r["window_date"], r["month"], r["prod_name"],
+                      r["n_candidates"], r["n_positives"]) for r in rows)
+        assert got == [
+            ("2025-01-31", "2024-06", "A", 20, 3),
+            ("2025-02-28", "2024-06", "A", 20, 3),
+            ("2025-02-28", "2025-02", "A", 10, 4),
+        ]
+
+
+def test_list_candidate_periods_lists_the_time_values_in_the_windows(spark):
+    from recsys_tfb.evaluation.baselines import list_candidate_periods
+
+    grid = _grid(spark, [("2023-12-31", "c0", "A"), ("2024-06-03", "c0", "A"),
+                         ("2024-06-10", "c1", "B"), ("2025-01-31", "c0", "A")])
+    assert list_candidate_periods(
+        grid, ["2025-01-31"], 12, _rate_parameters()
+    ) == ["2024-06-03", "2024-06-10"]

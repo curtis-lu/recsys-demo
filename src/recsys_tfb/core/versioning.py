@@ -483,3 +483,32 @@ def find_latest_completed_model_version(models_dir: Path) -> tuple[str, str] | N
     if best is None:
         return None
     return (best[1], best[0])
+
+
+def compute_popularity_source_version(
+    schema: dict, sample_pool_entry: dict, label_table_entry: dict,
+) -> str:
+    """ID of the inputs ``popularity_period_counts`` is counted from (#397).
+
+    The table holds, per time value and item, the candidate rows of
+    sample_pool and the positives label_table attaches to them. That depends
+    on which two tables are read and on the schema (the identity columns the
+    join keys on, the item and label roles), never on the model — so neither
+    ``model_version`` nor ``base_dataset_version`` keys it. The latter was
+    ruled out on purpose: it hashes the dataset parameters and schema but not
+    which physical tables the catalog points at, so pointing ``sample_pool``
+    at another table would reuse counts taken from the old one.
+
+    ``schema`` is :func:`recsys_tfb.core.schema.get_schema_for_hash`'s dict;
+    the two entries are the resolved catalog entries (``${hive.db}`` already
+    substituted, so a dev and a prod database never share a partition).
+    Changing either entry, or the schema, lands a new partition and the next
+    run recounts every period; a changed table *content* under the same name
+    is not seen, which is what ``--rebuild-dates`` is for (ADR-0012's reason
+    for not detecting source changes).
+    """
+    return _hash8({
+        "schema": schema,
+        "sample_pool": sample_pool_entry,
+        "label_table": label_table_entry,
+    })

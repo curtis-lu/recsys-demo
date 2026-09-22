@@ -135,6 +135,10 @@ def test_static_coverage_floor():
     """
     total = sum(1 for _ in _node_calls())
     judgeable = sum(1 for _ in _judgeable_nodes())
+    # 62/59: #397 added evaluation's `build_popularity_period_counts` and a
+    # second literal `compute_baseline_metrics` call (rate mode takes one more
+    # input; two literal calls instead of a computed input list, which the
+    # scan could not read). Both judgeable, so total and judgeable each +2.
     # 60/57: #429 added dataset's `filter_train_keys` and
     # `filter_train_dev_keys`, two literal, statically judgeable calls.
     # 63/59: evaluation's monitoring-mode `no_diagnosis_pages` Node (#341)
@@ -153,7 +157,7 @@ def test_static_coverage_floor():
     # of the two `validate_model_input_grain` calls (the branch existed only
     # to append the calibration pair to its input list). All three were
     # literal, so total and judgeable both drop by 3.
-    assert (total, judgeable) == (60, 57), (
+    assert (total, judgeable) == (62, 59), (
         f"Node coverage changed: {judgeable}/{total} statically judgeable. "
         "If this dropped, A5/A6 now have a bigger blind spot -- check why."
     )

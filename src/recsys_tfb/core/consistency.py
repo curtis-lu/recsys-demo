@@ -557,10 +557,26 @@ Layer 1 — config-static (implemented here; aggregated by
   errors; the evaluation command raises, collected with
   A22/A34/A40/A42/A43/A46). NOT aggregated, A42's reason (issue #158): only
   evaluation reads this key.
+* A50 — ``evaluation.baseline.score`` (#397, the popularity baseline's score)
+  must be one of ``BASELINE_SCORES`` (``count`` / ``rate``) when present;
+  absent or ``null`` means ``count``. ``evaluation.baseline`` itself declares
+  no key but ``BASELINE_KEYS``. The reader
+  (``evaluation/baselines.py::baseline_score``) falls back to ``count`` on any
+  falsy value and compares with ``==``, so a typo in the value (``rates``) or
+  the key (``scroe``) would silently keep the count mode. Predicate:
+  ``baseline_score_errors``. NOT aggregated, A42's reason (issue #158): only
+  evaluation reads this key.
+
+The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
+``resolved_baseline_rebuild_dates`` before Spark starts,
+``baseline_rebuild_dates_absent_errors`` once sample_pool is listed): it only
+exists for the positive-rate baseline's ``popularity_period_counts`` and is
+refused when that path is not wired; each date must fall inside a lookback
+window of ``evaluation.snap_date`` and be a time value sample_pool holds there.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
-flags), A22/A46 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49 (config keys whose
+flags), A22/A46 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50 (config keys whose
 harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags).
 
@@ -833,7 +849,7 @@ from typing import NamedTuple
 
 import pandas as pd
 
-from recsys_tfb.core.date_ranges import as_date_list
+from recsys_tfb.core.date_ranges import as_date_list, lookback_window_bounds
 from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
 from recsys_tfb.core.schema import (
     OPTIONAL_ROLE_KEYS,
@@ -2147,6 +2163,48 @@ def query_filter_param_errors(parameters: dict) -> list[str]:
                 f"A49: evaluation.query_filter.drop_all_positive_groups="
                 f"{value!r} must be a bool."
             )
+    return errors
+
+
+#: ``evaluation.baseline.score``'s domain (A50). ``count`` ranks by positives
+#: in the lookback window, ``rate`` by positives ÷ times a candidate (#397).
+BASELINE_SCORES: tuple[str, ...] = ("count", "rate")
+
+#: The keys ``evaluation.baseline`` may declare (A50): what
+#: ``evaluation/baselines.py`` reads (``resolve_lookback_months``,
+#: ``baseline_score``).
+BASELINE_KEYS: tuple[str, ...] = ("lookback_months", "score")
+
+
+def baseline_score_errors(parameters: dict) -> list[str]:
+    """A50 — ``evaluation.baseline.score`` is one of :data:`BASELINE_SCORES`,
+    and ``evaluation.baseline`` declares no key outside :data:`BASELINE_KEYS`.
+
+    Absent or ``null`` means ``count``, the reading ``baseline_score()``
+    gives. The unknown-key half is A49's shape: a typo'd key looks like it
+    worked. Not aggregated by ``validate_config_consistency``: only evaluation
+    reads this key (A34's reason, issue #158). The evaluation command raises
+    it, collected with A22/A34/A40/A42/A43/A46/A49.
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    if not isinstance(eval_params, Mapping):
+        return []
+    block = eval_params.get("baseline") or {}
+    if not isinstance(block, Mapping):
+        return []
+    errors = []
+    unknown = sorted(set(block) - set(BASELINE_KEYS), key=str)
+    if unknown:
+        errors.append(
+            f"A50: evaluation.baseline declares {unknown}, which nothing "
+            f"reads; its keys are {list(BASELINE_KEYS)}."
+        )
+    value = block.get("score")
+    if value is not None and value not in BASELINE_SCORES:
+        errors.append(
+            f"A50: evaluation.baseline.score={value!r} must be one of "
+            f"{list(BASELINE_SCORES)} (or left absent, which means 'count')."
+        )
     return errors
 
 
@@ -4109,6 +4167,90 @@ def resolved_inference_rebuild_dates(parameters: dict, rebuild_dates) -> list[st
         rebuild_dates,
         "inference.snap_dates",
     )
+
+
+def resolved_baseline_rebuild_dates(
+    rebuild_dates, *, rate_wired: bool, eval_dates, lookback_months: int,
+) -> list[str]:
+    """(A21) ``--rebuild-dates`` for the evaluation command (#397).
+
+    The flag names time values of ``popularity_period_counts`` to recount even
+    though they landed (after a sample_pool / label_table backfill). Returns
+    the sorted ``YYYY-MM-DD`` list, ``[]`` when not passed.
+
+    * Refused unless the positive-rate baseline is wired (``rate_wired``, the
+      caller's ``baseline_scores_by_rate`` and not ``--compare-only``):
+      otherwise nothing reads the table, so the flag would be a silent no-op,
+      A21's failure.
+    * Each date must fall inside ``[S - lookback_months, S)`` of some date S of
+      ``evaluation.snap_date``: the run only counts the periods its windows
+      need. The window is ``core.date_ranges.lookback_window_bounds``, the
+      node's own rule. Whether sample_pool actually holds a named date is
+      known only after its listing:
+      :func:`baseline_rebuild_dates_absent_errors`.
+
+    ``lookback_months`` is a callable returning the caller's
+    ``resolve_lookback_months``, so this check and the node cannot default
+    differently (ADR-0020 bug 1), and it is read only when the flag was passed
+    to a run that wires the path: a run without it reads no baseline key main
+    did not read.
+    """
+    if not rebuild_dates:
+        return []
+    if not rate_wired:
+        raise ConfigConsistencyError(
+            "(A21) evaluation --rebuild-dates recounts popularity_period_counts, "
+            "which only the positive-rate baseline reads. It is wired only "
+            "with evaluation.baseline.score: rate, "
+            "evaluation.report.sections.baseline on, --post-training (monitoring "
+            "scores the full grid and keeps the count), and not --compare-only. "
+            "This run is missing one of them, so the flag would do nothing; "
+            "drop --rebuild-dates."
+        )
+    lookback_months = lookback_months()
+    malformed = [d for d in rebuild_dates if _iso_date(d) is None]
+    if malformed:
+        raise ConfigConsistencyError(
+            f"(A21) --rebuild-dates got non-ISO value(s) {malformed!r}. "
+            "Expected YYYY-MM-DD."
+        )
+    windows = []
+    for s in eval_dates:
+        lower, upper = lookback_window_bounds(s, lookback_months)
+        windows.append((pd.Timestamp(lower), pd.Timestamp(upper)))
+    requested = sorted({_iso_date(d) for d in rebuild_dates})
+    outside = [
+        d for d in requested
+        if not any(lo <= pd.Timestamp(d) < up for lo, up in windows)
+    ]
+    if outside:
+        spans = ", ".join(
+            f"[{lo.date()}, {up.date()})" for lo, up in windows) or "none"
+        raise ConfigConsistencyError(
+            f"(A21) --rebuild-dates names {outside}, outside every lookback "
+            f"window of evaluation.snap_date (lookback_months="
+            f"{lookback_months}: {spans}). This run only counts the periods "
+            "those windows need, so it would have been a silent no-op."
+        )
+    return requested
+
+
+def baseline_rebuild_dates_absent_errors(rebuild, periods) -> list[str]:
+    """(A21) ``--rebuild-dates`` values sample_pool holds no rows at.
+
+    The half of the evaluation command's A21 that needs sample_pool's listing
+    (``periods``: its time values inside the lookback windows, the plan's
+    configured periods). A value inside a window that is not one of them
+    would recount nothing — a silent no-op.
+    """
+    absent = [d for d in rebuild if d not in set(periods)]
+    if not absent:
+        return []
+    return [
+        f"(A21) --rebuild-dates names {absent}, which sample_pool holds no "
+        f"rows at inside the lookback windows (its time values there: "
+        f"{','.join(periods) or '-'}), so nothing would be recounted."
+    ]
 
 
 def compare_mutual_exclusive_errors(compare: str | None, compare_only: str | None) -> list[str]:

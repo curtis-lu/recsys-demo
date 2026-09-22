@@ -112,7 +112,9 @@ python -m recsys_tfb <指令> --env <env>
   - `evaluation.report.diagnostics` 底下不能再寫 `include_calibration`、`n_calibration_bins`，不論值是什麼（`A43`）。它們設定的 calibration 分箱表 #381 已經移除，留著不會有任何作用；分數分箱改由預測品質指標家族提供。
   - 帶 `--post-training` 又打開 `evaluation.report.sections.prediction_quality` 時，`dataset.test_zero_positive_group_ratio` 必須大於 0（`A46`）。r 為 0（預設）的 test 表已經丟掉所有沒有正例的 query group，把每一列當二元預測的指標會系統性偏高。監控模式不查。
   - `evaluation.query_filter.drop_all_positive_groups` 有寫的話必須是 `true`／`false`；這個區塊裡不能有別的鍵（`A49`）。唯一的讀法（`evaluation/metrics.py::drop_all_positive_groups`）只用真假值判斷，寫錯值或鍵名不會報錯，只會悄悄不生效。
+  - `evaluation.baseline.score` 有寫的話必須是 `count` 或 `rate`；`evaluation.baseline` 底下只能有 `lookback_months`、`score` 兩個鍵（`A50`）。唯一的讀法（`evaluation/baselines.py::baseline_score`）遇到不認得的值或鍵名不會報錯，只會悄悄維持正例數。
   - `--compare` 和 `--compare-only` 只能給一個；給的名稱必須是 `evaluation.compare_sources` 裡的鍵（`A12`、`A13`）。
+  - `--rebuild-dates` 只在正例率基準線接上時能用：`evaluation.baseline.score: rate`、`report.sections.baseline` 開著、帶 `--post-training`、不是 `--compare-only`。每個日期要寫成 `YYYY-MM-DD`，而且要落在某個評估日期的回看窗 `[S - lookback_months, S)` 裡（`A21`）。
 - **dataset、training、inference**
   - `--rebuild-dates` 的每個日期要寫成 `YYYY-MM-DD`，而且要在設定的月份清單裡：dataset 和 training 對照 `dataset.test_snap_dates`，inference 對照 `inference.snap_dates`（`A21`）。
 
@@ -121,6 +123,7 @@ python -m recsys_tfb <指令> --env <env>
 - `--model-version`、`--base-dataset-version` 指的版本資料夾存在。沒指定版本時，training 要找得到最新一版 dataset 與它底下最新一版 train 抽樣結果，inference 和 evaluation 要找得到 promote 過的模型。
 - `--from-node`／`--only-node` 的步驟名稱存在，而且兩個不能同時給。
 - `catalog.yaml` 每個條目的格式，例如要寫 `type`、可寫入的表要寫 `columns`、`external: true` 要寫 `location`。training 是例外：它在開跑前就讀過一次整份 `catalog.yaml`，所以這些格式錯誤在 training 開跑前就會擋下。
+- evaluation 的 `--rebuild-dates`（正例率基準線）：每個日期都必須是 `sample_pool` 在回看窗裡實際有資料的 time 值（`A21` 的後半）。要列出 `sample_pool` 的 time 值才知道，所以在 Spark 啟動後、任何步驟執行前查。
 
 ---
 

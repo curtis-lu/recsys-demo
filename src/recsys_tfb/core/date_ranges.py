@@ -261,3 +261,30 @@ def expand_date_ranges(config: dict[str, dict]) -> dict[str, dict]:
             f"{len(errors)} 個日期區間設定無法展開：\n" + "\n".join(errors)
         )
     return result
+
+
+def lookback_window_bounds(snap_date, lookback_months: int) -> tuple[str, str]:
+    """``(lower, upper)`` of the popularity baseline's lookback window.
+
+    The window is ``[snap_date - lookback_months, snap_date)``, both ends as
+    ``YYYY-MM-DD``. Month arithmetic keeps the day of month and clamps it to
+    the target month's last day (``2025-03-31`` minus one month is
+    ``2025-02-28``), which is what ``pd.DateOffset(months=n)`` does; a test
+    pins the two to each other.
+
+    The one definition of the window: the baseline node
+    (``evaluation/baselines.py``) and the evaluation command's
+    ``--rebuild-dates`` check (A21, ``core/consistency.py``) both call it, so
+    what the flag accepts and what the node counts cannot drift apart. It
+    lives here, stdlib only, because ``core`` must not import ``evaluation``.
+    """
+    if isinstance(snap_date, _dt.datetime):
+        upper = snap_date.date()
+    elif isinstance(snap_date, _dt.date):
+        upper = snap_date
+    else:
+        upper = _dt.date.fromisoformat(str(snap_date).strip()[:10])
+    year, month0 = divmod(upper.year * 12 + upper.month - 1 - lookback_months, 12)
+    month = month0 + 1
+    day = min(upper.day, calendar.monthrange(year, month)[1])
+    return _dt.date(year, month, day).isoformat(), upper.isoformat()

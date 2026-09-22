@@ -11,6 +11,7 @@ def create_pipeline(
     post_training: bool = False,
     compare_source: dict | None = None,
     compare_only: bool = False,
+    baseline_rate: bool = False,
 ) -> Pipeline:
     """Build the evaluation pipeline.
 
@@ -32,8 +33,16 @@ def create_pipeline(
         landed by the run that wrote that partition, since there is no
         ``prepare_eval_data`` here to say which segment columns the
         partition's rows were joined with.
+
+    ``baseline_rate`` (the CLI's ``baseline_scores_by_rate``, #397: ``score:
+    rate`` under ``--post-training``) adds ``build_popularity_period_counts``
+    and hands its table and month plan to ``compute_baseline_metrics`` as a
+    fifth and sixth input. Off (the default, and always in monitoring mode),
+    the pipeline is node for node the one without the feature: no extra node,
+    and monitoring mode reads no ``sample_pool``.
     """
     from recsys_tfb.pipelines.evaluation.nodes import (
+        build_popularity_period_counts,
         compute_baseline_metrics,
         compute_metric_ci,
         compute_metrics,
@@ -127,12 +136,44 @@ def create_pipeline(
                     "parameters"],
             outputs="evaluation_metrics",
         ),
-        Node(
-            compute_baseline_metrics,
-            inputs=["enriched_eval_predictions", "label_table",
-                    "evaluation_segment_columns", "parameters"],
-            outputs="baseline_metrics",
-        ),
+    ]
+    # Two literal Node calls rather than one with a computed input list, so
+    # the architecture tests' static scan can still read both (A5/A6).
+    if baseline_rate:
+        nodes += [
+            # Model-independent counts per time value (#397). Its output is
+            # the Hive table itself: the node returns the periods its plan
+            # names and the dynamic partition overwrite adds them;
+            # compute_baseline_metrics reads the whole table back (A1). The
+            # plan is also in the CLI's month_plans, so a slice pulls this
+            # node back while a period is missing (ADR-0012).
+            Node(
+                build_popularity_period_counts,
+                inputs=["sample_pool", "label_table",
+                        "popularity_period_counts_month_plan", "parameters"],
+                outputs="popularity_period_counts",
+            ),
+            Node(
+                compute_baseline_metrics,
+                # The plan again: the table keeps every period it ever
+                # counted, the baseline sums the ones sample_pool holds now.
+                inputs=["enriched_eval_predictions", "label_table",
+                        "evaluation_segment_columns", "parameters",
+                        "popularity_period_counts",
+                        "popularity_period_counts_month_plan"],
+                outputs="baseline_metrics",
+            ),
+        ]
+    else:
+        nodes.append(
+            Node(
+                compute_baseline_metrics,
+                inputs=["enriched_eval_predictions", "label_table",
+                        "evaluation_segment_columns", "parameters"],
+                outputs="baseline_metrics",
+            )
+        )
+    nodes += [
         # Every evaluated row as a binary prediction (ADR-0024); a stub unless
         # report.sections.prediction_quality is on. It takes the segment JSON
         # for the partition check only, like compute_report_aggregates.

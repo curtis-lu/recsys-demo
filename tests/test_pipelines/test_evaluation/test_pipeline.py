@@ -77,6 +77,13 @@ class TestRegistryDiagnosesFollowTheMode:
             "post_training": True,
             "compare_source": {"kind": "hive", "model_version": "v1"},
         },
+        # #397: the positive-rate baseline adds a node that sorts before
+        # compute_metrics; every mode-wide rule here must hold with it too.
+        "post-training score: rate": {"post_training": True, "baseline_rate": True},
+        "post-training score: rate --compare": {
+            "post_training": True, "baseline_rate": True,
+            "compare_source": {"kind": "hive", "model_version": "v1"},
+        },
     }
 
     @staticmethod

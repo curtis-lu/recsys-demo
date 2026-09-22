@@ -40,11 +40,19 @@ from recsys_tfb.diagnosis.metric import contract
 from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
 from recsys_tfb.diagnosis.metric.uncertainty import bootstrap_per_item_ci
 from recsys_tfb.evaluation.baselines import (
+    CANDIDATES_COL,
+    POSITIVES_COL,
+    baseline_score,
     build_baseline_frame,
+    compute_monthly_candidate_counts_by_window,
+    compute_monthly_candidate_counts_in_windows,
     compute_monthly_purchase_counts,
     compute_monthly_purchase_counts_by_window,
+    compute_period_candidate_counts,
+    compute_positive_rates,
     compute_purchase_counts,
     resolve_lookback_months,
+    restrict_to_periods,
 )
 from recsys_tfb.evaluation.compare import build_comparison_result
 from recsys_tfb.evaluation.comparison.report import assemble_comparison_report
@@ -712,16 +720,102 @@ def compute_metrics(
     return result
 
 
+def build_popularity_period_counts(
+    sample_pool: SparkDataFrame,
+    label_table: SparkDataFrame,
+    popularity_period_counts_month_plan,
+    parameters: dict,
+) -> SparkDataFrame:
+    """The periods of ``popularity_period_counts`` this run has to count (#397).
+
+    Wired only when the positive-rate baseline is (``baseline_scores_by_rate``:
+    ``score: rate`` under ``--post-training``).
+    ``popularity_period_counts_month_plan`` is the CLI's ``SnapDatePlan`` over the
+    time values sample_pool holds in the lookback windows: ``to_process`` are
+    the ones not landed yet plus those named by ``--rebuild-dates``. Only they
+    are returned, and the catalog entry's dynamic partition overwrite replaces
+    exactly those partitions (A1: the plan is an input, the new periods the
+    output); ``compute_baseline_metrics`` reads the table back whole.
+
+    The counts depend on sample_pool, label_table and the schema only, so the
+    table is not partitioned by ``model_version``: another model, or the same
+    dates evaluated again, recounts nothing.
+    """
+    plan = popularity_period_counts_month_plan
+    periods = [d.strftime("%Y-%m-%d") for d in plan.to_process]
+    logger.info(
+        "[months] popularity_period_counts counted=%s skipped=%s",
+        ",".join(periods) or "-",
+        ",".join(d.strftime("%Y-%m-%d") for d in plan.skipped) or "-",
+    )
+    return compute_period_candidate_counts(
+        sample_pool, label_table, periods, parameters)
+
+
+def _positive_rate_block(period_counts, snap_dates, lookback_months, parameters):
+    """The rate mode's report numbers (#397), from the period counts.
+
+    ``candidates`` / ``positives`` per item are over the periods the evaluated
+    dates' windows cover, **each period once** however many windows cover it,
+    and ``rate`` divides the two (so "rate = positives ÷ candidates" holds on
+    every row of the report). With one date that is the rate the baseline
+    ranked by; with several, each date ranked by its own window's rate and
+    this is their pooled one — summing per window instead would multiply an
+    overlapping period's candidates by the number of dates, and the printed
+    denominator is the reader's cue for an unreliable rate.
+    ``monthly_positives`` is the same numerator by calendar month;
+    ``window_months_covered`` counts each window's months with candidate
+    rows, one date or several. Two small collects: the table is one row per
+    period × item.
+    """
+    item_col = get_schema(parameters)["item"]
+    candidates: dict[str, int] = {}
+    positives: dict[str, int] = {}
+    monthly: dict[str, dict[str, int]] = {}
+    for r in compute_monthly_candidate_counts_in_windows(
+        period_counts, snap_dates, lookback_months, parameters
+    ).collect():
+        item, month = str(r[item_col]), str(r["month"])
+        candidates[item] = candidates.get(item, 0) + int(r[CANDIDATES_COL])
+        positives[item] = positives.get(item, 0) + int(r[POSITIVES_COL])
+        monthly.setdefault(item, {})[month] = int(r[POSITIVES_COL])
+    months_by_window: dict[str, set] = {}
+    for r in compute_monthly_candidate_counts_by_window(
+        period_counts, snap_dates, lookback_months, parameters
+    ).select("window_date", "month").distinct().collect():
+        months_by_window.setdefault(r["window_date"], set()).add(str(r["month"]))
+    return {
+        "rate": {
+            item: (positives[item] / c if c else 0.0)
+            for item, c in candidates.items()
+        },
+        "candidates": candidates,
+        "positives": positives,
+        "monthly_positives": monthly,
+        "window_months_covered": {
+            w: len(m) for w, m in sorted(months_by_window.items())
+        },
+    }
+
+
 def compute_baseline_metrics(
     eval_predictions: SparkDataFrame,
     label_table: SparkDataFrame,
     segment_columns: dict,
     parameters: dict,
+    popularity_period_counts: Optional[SparkDataFrame] = None,
+    popularity_period_counts_month_plan=None,
 ) -> dict:
     """Popularity-baseline metrics, aligned row-for-row with eval_predictions.
 
     Re-scores each eval_predictions row with the product's historical
-    purchase count, then runs the slim metrics path (overall + per_item).
+    purchase count — or, with ``evaluation.baseline.score: rate`` under
+    ``--post-training`` (#397), its positive rate read off
+    ``popularity_period_counts``, restricted to the periods the month plan
+    lists (both wired as the fifth and sixth input only then) — then runs the
+    slim metrics path (overall + per_item). Which one is the wiring's call
+    (ADR-0013): monitoring with ``score: rate`` gets no counts and ranks by
+    the count, see ``evaluation/baselines.py``.
     When the baseline report section is disabled the second metrics pass is
     skipped entirely and a stub ``{"enabled": False, "config_fingerprint":
     ...}`` is returned. Not ``None`` (the old return): a ``null`` has nowhere
@@ -741,6 +835,10 @@ def compute_baseline_metrics(
       - window_months_covered: dict[str, int]  only when several dates are
             evaluated (#374): per evaluated date, the months with label rows
             in its lookback window. Absent means one date.
+      - popularity_rate: only in rate mode (see ``_positive_rate_block``);
+            absent otherwise, so a count-mode result is exactly what it was.
+            ``purchase_counts`` / ``monthly_counts`` stay label_table's in
+            both modes.
       - config_fingerprint: the computed settings it was made with
             (``steps.config_fingerprint``), checked by
             ``generate_report``.
@@ -780,6 +878,29 @@ def compute_baseline_metrics(
         str(r[time_col])
         for r in eval_predictions.select(time_col).distinct().collect()
     ]
+    # Decision — which score ranks the baseline: the positive rate when the
+    # pipeline wired the period counts (score: rate under --post-training),
+    # the count otherwise. Rate first, so an empty sample_pool window raises
+    # with its own message before label_table's window is looked at.
+    rate_mode = popularity_period_counts is not None
+    if (not rate_mode and baseline_score(parameters) == "rate"
+            and parameters.get("post_training") is True):
+        raise RuntimeError(
+            "evaluation.baseline.score is 'rate' under --post-training but "
+            "compute_baseline_metrics got no popularity_period_counts: "
+            "create_pipeline wires it when baseline_rate is set."
+        )
+    rate_scores = None
+    if rate_mode:
+        popularity_period_counts = restrict_to_periods(
+            popularity_period_counts,
+            [d.strftime("%Y-%m-%d") for d in (
+                *popularity_period_counts_month_plan.to_process,
+                *popularity_period_counts_month_plan.skipped)],
+            parameters,
+        )
+        rate_scores = compute_positive_rates(
+            popularity_period_counts, snap_dates, lookback_months, parameters)
     counts = compute_purchase_counts(
         label_table, snap_dates, lookback_months, parameters
     )
@@ -833,7 +954,8 @@ def compute_baseline_metrics(
         window_months_covered = {
             s: len(months_by_window[s]) for s in sorted(snap_dates)
         }
-    baseline_frame = build_baseline_frame(eval_predictions, counts, parameters)
+    baseline_frame = build_baseline_frame(
+        eval_predictions, rate_scores if rate_mode else counts, parameters)
     # per_segment / category slices for the report's by-segment / 大類 vs
     # baseline comparison. Gated by what turns them on for the model (the
     # segment columns prepare_eval_data joined / item_categories maps items),
@@ -851,6 +973,9 @@ def compute_baseline_metrics(
     metrics["monthly_counts"] = monthly_counts
     if window_months_covered is not None:
         metrics["window_months_covered"] = window_months_covered
+    if rate_mode:
+        metrics["popularity_rate"] = _positive_rate_block(
+            popularity_period_counts, snap_dates, lookback_months, parameters)
     metrics["config_fingerprint"] = fingerprint(parameters)
     logger.info(
         "Baseline metrics computed (overall + per_item) for snap_dates=%s; "

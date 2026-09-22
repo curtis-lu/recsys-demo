@@ -52,6 +52,15 @@ evaluation:
   # Baseline 設定 ── popularity baseline 的 lookback 視窗（月數）。
   baseline:
     lookback_months: 12
+    # score：熱門度基準線用哪個分數排名（#397；合法值由 A50 檢查）。
+    #   count（沒寫＝這個）  回看期間的正例數，從 label_table 算。
+    #   rate                 正例率＝正例數 ÷ 當過候選的次數，分母從 sample_pool 數。
+    #                        候選集合是被展示的子集時（例如廣告）才需要：正例數會偏向
+    #                        被展示最多的 item。只在 --post-training 生效；監控模式評的
+    #                        是全網格，照舊用正例數。每期的兩個數落在
+    #                        popularity_period_counts，算過的期不重算；補過來源資料要帶
+    #                        --rebuild-dates。前提見 docs/pipelines/evaluation.md §3.4。
+    # score: rate
 
   # 預測品質指標家族（ADR-0024）：把每一列評估資料當一次二元預測，照分數分箱，
   # 算 precision／recall／F1／pr_auc／roc_auc 與分箱表（每格的平均分數 vs 實際
