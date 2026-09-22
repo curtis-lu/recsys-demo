@@ -25,6 +25,11 @@ What lives here:
   value domains.
 * :func:`resolved_all_k` — the only reader of the K a metrics bundle's
   ``"all"`` values are stored at, for the reports and for training (#434).
+* :func:`drop_all_positive_groups` / :func:`all_positive_share` /
+  :func:`all_positive_share_warns` — the only reader of
+  ``evaluation.query_filter.drop_all_positive_groups`` and the one rule for
+  when the all-positive share warns, shared by the evaluation nodes (log) and
+  the report (#376).
 * :func:`compute_pooled_average_precision` /
   :func:`compute_macro_per_item_average_precision` — the HPO objectives that
   score every val row as one binary prediction (#430). Not the report's
@@ -75,6 +80,66 @@ def metric_params(parameters: dict) -> dict:
         "min_positives": int(m.get("min_positives", 0) or 0),
         "shrinkage_k": float(m.get("shrinkage_k", 0.0) or 0.0),
     }
+
+
+#: Top-level key of a ``metrics_spark.compute_all_metrics`` bundle and of its
+#: ``category`` sub-bundle (#376): how many of the query groups holding a
+#: positive are *all-positive* — every row's label positive, so every ranking
+#: metric is full marks whatever the order. Always written, whether or not
+#: ``evaluation.query_filter.drop_all_positive_groups`` drops them, because the
+#: report reads only the written bundle. ``n_excluded_queries`` keeps counting
+#: only the zero-positive groups.
+ALL_POSITIVE_KEY = "n_all_positive_queries"
+
+#: With the switch off, the log and the report warn when the all-positive
+#: groups are more than this share of the groups holding a positive (#376).
+#: A constant, not a setting.
+ALL_POSITIVE_WARN_SHARE = 0.10
+
+
+def drop_all_positive_groups(parameters: dict) -> bool:
+    """Read ``evaluation.query_filter.drop_all_positive_groups``; off unless ``True``.
+
+    The one reader of the switch (#376). A missing block, a missing key or an
+    explicit ``None`` all mean off. Not under ``evaluation.metric``:
+    :func:`metric_params` returns four fixed keys and drops any other, so a
+    switch written there would silently do nothing. The value domain (a bool)
+    is validated by A49 in ``core/consistency.py``, not here.
+    """
+    qf = ((parameters.get("evaluation", {}) or {}).get("query_filter", {}) or {})
+    return bool(qf.get("drop_all_positive_groups", False) or False)
+
+
+def all_positive_share(bundle: dict) -> Optional[float]:
+    """All-positive groups ÷ groups holding a positive, for one metrics bundle.
+
+    The denominator is the mAP's (``n_queries - n_excluded_queries``), so the
+    share reads as "this much of the mAP is full marks the order never
+    earned", and the dataset's ``test_zero_positive_group_ratio`` cannot move
+    it. ``None`` when the bundle predates #376 (no :data:`ALL_POSITIVE_KEY`) or
+    no group holds a positive.
+    """
+    n_all_positive = bundle.get(ALL_POSITIVE_KEY)
+    if n_all_positive is None:
+        return None
+    n_with_positive = (bundle.get("n_queries") or 0) - (
+        bundle.get("n_excluded_queries") or 0)
+    if n_with_positive <= 0:
+        return None
+    return n_all_positive / n_with_positive
+
+
+def all_positive_share_warns(bundle: dict, parameters: dict) -> bool:
+    """Whether to warn about a bundle's all-positive share (#376).
+
+    Only with the switch off — on, those groups are already dropped — and only
+    strictly above :data:`ALL_POSITIVE_WARN_SHARE`. The log and the report
+    each call this, per grain, so they cannot disagree on when to warn.
+    """
+    if drop_all_positive_groups(parameters):
+        return False
+    share = all_positive_share(bundle)
+    return share is not None and share > ALL_POSITIVE_WARN_SHARE
 
 
 #: Top-level key of a ``metrics_spark.compute_all_metrics`` bundle: the K
