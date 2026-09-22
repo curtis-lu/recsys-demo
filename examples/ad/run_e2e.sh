@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # 廣告情境示例的端到端實跑，全 local[*]：
-#   原始表 → source_etl 四條（feature_etl 後比對特徵不偷看）→ dataset → training → inference
-#   → evaluation --post-training → digest
+#   原始表 → source_etl 四條（feature_etl 後比對特徵不偷看）→ dataset → training
+#   → inference（預期在入口被 A47 擋下）→ evaluation --post-training → digest
+#
+# 這份 conf 宣告了候選層級特徵表（catalog 的 candidate_feature_table ＝ feature_realtime，
+# ADR-0026），所以離線推論不會跑：推論只讀 feature_table，模型卻需要那張表的欄，CLI 在入口
+# 以 A47 擋下（不擋的話會在 Spark 起來之後才以 Missing feature columns 失敗）。這裡確認它真的
+# 在入口停下、而且訊息說得出原因。
 #
 # 對應銀行示例的 scripts/local_e2e.sh，多了 source_etl 與 evaluation 兩段：銀行示例直接
-# 寫出來源表、跳過 source_etl，而這個示例要讓後面幾張票的新路徑（event、多張特徵表、
+# 寫出來源表、跳過 source_etl，而這個示例要讓後面幾張票的新路徑（event、候選層級特徵表、
 # item 清單從資料數、預測品質指標）從上游 SQL 一路被走到。
 #
 # 用法（任何目錄皆可）：
@@ -73,64 +78,21 @@ PY
 )"
 echo "▶ model_version=$MODEL_VERSION"
 
-run "inference"                "$PY" -m recsys_tfb inference --env local --model-version "$MODEL_VERSION"
-
-# 推論三張表的分區結構：與 scripts/local_e2e.sh 末段同一組斷言（理由見那裡的註解，
-# #185／#187／#188、ADR-0010 §5–§6），只是資料庫名、item 欄名、item 清單都從 conf 讀——
-# 那份寫死了 ml_recsys 與 prod_name。這幾件事只有實跑後看目錄名才看得到，digest 的
-# 內容指紋看不到（分區欄錯位時列的內容可以完全一樣）。
-run "assert 推論表分區結構"     "$PY" - "$MODEL_VERSION" <<'PY'
-import sys
-from pathlib import Path
-
-from recsys_tfb.core.config import ConfigLoader
-
-expected_mv = sys.argv[1]
-params = ConfigLoader("conf", env="local").get_parameters()
-item_col = params["schema"]["columns"]["item"]
-products = set(params["inference"]["products"])
-n_buckets = int(params["inference"].get("entity_buckets", 10))
-db = Path("data/local_warehouse") / f"{params['hive']['db']}.db"
-
-failures = []
-for table in ("unranked_predictions", "ranked_staging", "ranked_predictions"):
-    leaves = sorted(db.glob(f"{table}/model_version=*/snap_date=*/{item_col}=*"))
-    if not leaves:
-        failures.append(f"{table}: 找不到 model_version=*/snap_date=*/{item_col}=* 分區目錄")
-        continue
-    items_seen = {p.name.split("=", 1)[1] for p in leaves}
-    versions_seen = {p.parent.parent.name.split("=", 1)[1] for p in leaves}
-    if items_seen != products:
-        failures.append(f"{table}: {item_col} 分區值 {sorted(items_seen)} != inference.products")
-    elif versions_seen != {expected_mv}:
-        failures.append(f"{table}: 最外層 model_version 分區值 {sorted(versions_seen)} != 這次跑的 {expected_mv}")
-    else:
-        print(f"  ✓ {table}: model_version={expected_mv}，{len(items_seen)} 個 {item_col} 分區")
-
-buckets = sorted(db.glob(f"unranked_predictions/model_version=*/snap_date=*/{item_col}=*/entity_bucket=*"))
-if not buckets:
-    failures.append("unranked_predictions: 找不到 entity_bucket=* 分區目錄")
-else:
-    per_bucket = {}
-    for leaf in buckets:
-        per_bucket.setdefault(int(leaf.name.split("=", 1)[1]), set()).add(leaf.parent.name.split("=", 1)[1])
-    out_of_range = sorted(b for b in per_bucket if not 0 <= b < n_buckets)
-    ragged = {b: sorted(items) for b, items in per_bucket.items() if items != products}
-    if out_of_range:
-        failures.append(f"unranked_predictions: entity_bucket 值 {out_of_range} 落在 [0, {n_buckets}) 之外")
-    if ragged:
-        failures.append(f"unranked_predictions: 這些桶的 item 分區不完整 {ragged}")
-    if not out_of_range and not ragged:
-        print(f"  ✓ unranked_predictions: {len(per_bucket)}/{n_buckets} 個桶有資料，每桶 {len(products)} 個 item 分區")
-
-for table in ("ranked_staging", "ranked_predictions"):
-    if sorted(db.glob(f"{table}/**/entity_bucket=*")):
-        failures.append(f"{table}: 出現 entity_bucket 分區（機制欄漏進對外表）")
-
-if failures:
-    print("\n".join("  ✗ " + f for f in failures), file=sys.stderr)
-    sys.exit(1)
-PY
+expect_inference_blocked() {
+  local out
+  if out="$("$PY" -m recsys_tfb inference --env local --model-version "$MODEL_VERSION" 2>&1)"; then
+    echo "$out" | tail -20
+    echo "inference 沒有被擋下：宣告了 candidate_feature_table 時應該在入口停下（A47）" >&2
+    return 1
+  fi
+  if ! grep -q "(A47)" <<<"$out"; then
+    echo "$out" | tail -20
+    echo "inference 失敗了，但不是 A47 擋的" >&2
+    return 1
+  fi
+  echo "  ✓ inference 在入口被 A47 擋下，沒有啟動 Spark 工作"
+}
+run "inference（預期被 A47 擋下）" expect_inference_blocked
 
 run "evaluation --post-training" "$PY" -m recsys_tfb evaluation --env local --post-training --model-version "$MODEL_VERSION"
 
@@ -145,4 +107,4 @@ echo "⏱ 各步耗時（含每一步的 Spark 冷啟動）"
 printf '  %s\n' "${TIMINGS[@]}"
 echo "  總計 $((SECONDS - T_START))s"
 echo
-echo "✅ 廣告情境示例整條跑完：source_etl → dataset → training → inference → evaluation"
+echo "✅ 廣告情境示例整條跑完：source_etl → dataset → training → evaluation（inference 如預期被 A47 擋下）"

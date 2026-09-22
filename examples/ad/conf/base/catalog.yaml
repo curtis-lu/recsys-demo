@@ -13,6 +13,14 @@ feature_table:
   table: feature_table
   read_only: true
 
+# 候選層級特徵表（ADR-0026）：一次曝光一列的即時特徵，dataset 以 identity 接。
+# 宣告了它，離線推論會在入口被擋下（A47）。
+candidate_feature_table:
+  type: HiveTableDataset
+  database: ${hive.db}
+  table: feature_realtime
+  read_only: true
+
 label_table:
   type: HiveTableDataset
   database: ${hive.db}

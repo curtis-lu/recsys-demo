@@ -56,7 +56,7 @@ schema:
 
 `label_table` 照舊可以只放正例——接不到的列一律當負例。
 
-**`feature_table` 不用帶**：特徵表是 entity 層級，以 `time ＋ entity` 接到候選列上，`event` 不加寬那把鑰匙。想讓模型看到「這一次事件當下」的特徵，要等[多張特徵表（#380）](https://github.com/curtis-lu/recsys-demo/issues/380)。
+**`feature_table` 不用帶**：特徵表是 entity 層級，以 `time ＋ entity` 接到候選列上，`event` 不加寬那把鑰匙。想讓模型看到「這一次事件當下」的特徵，另外宣告一張候選層級特徵表（[dataset §3.8](../../pipelines/dataset.md#38-候選層級特徵表選用)）：它以 identity 接，宣告了 `event` 時 identity 就包含它。代價是離線推論不能用。
 
 ### ③ 來源表的 `primary_key` 要跟著加
 
@@ -131,7 +131,7 @@ mAP 就是把每個 query group 的 AP 平均起來。
 
 框架不替你選（考慮過改用雜湊決勝，代價是要在 dataset 多落一欄讓 Spark 與 numpy 算出同一個值，不值得），而是**把數字印出來**：評估報表的〈完整性檢查〉一段有「同分列佔比」，告訴你這件事在你的資料上有多大。
 
-**真正的解法**是接上逐筆的即時特徵，讓分數本來就分得出高下——那要[多張特徵表（#380）](https://github.com/curtis-lu/recsys-demo/issues/380)。`event` 通常是跟它一起用的；只宣告 `event` 而沒有逐筆特徵，你得到的主要是同分。
+**真正的解法**是接上逐筆的即時特徵，讓分數本來就分得出高下——用候選層級特徵表（[dataset §3.8](../../pipelines/dataset.md#38-候選層級特徵表選用)）。本 repo 的廣告示例接上三個逐筆特徵之後，報表的同分列佔比是 0。`event` 通常是跟它一起用的；只宣告 `event` 而沒有逐筆特徵，你得到的主要是同分。
 
 ## 別把沒發生過的候選當負例放進 `sample_pool`
 

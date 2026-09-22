@@ -9,6 +9,7 @@
 - **item 清單**：`schema.categorical_values` 裡 item 欄的值，也就是模型認得的所有 item。
 - **query group**：一次排序的範圍，由 time 和 entity 決定。名次只在同一組裡比。
 - **identity 欄**：認出一筆候選的欄位組合，也就是 time、entity、item 三個角色對到的欄。
+- **候選層級特徵表**：選用的第二張特徵表，一列是一筆候選的特徵，以 identity 欄接到候選上；`catalog.yaml` 有 `candidate_feature_table` 條目才算宣告。`feature_table` 則是一個 entity、一個時段一列，以 time 和 entity 接。
 - **前處理器**：dataset 在 train 月份上建出來的特徵清單與類別編號表（產物 `preprocessor`）。training 和 inference 都用同一份。
 - **promote**：由人工把某個模型版本設成預設版本。inference、evaluation 沒指定 `--model-version` 時就用它。
 - **分區**：Hive 表依某幾欄的值切開存放的一塊，例如一個月一塊。
@@ -68,7 +69,7 @@ python -m recsys_tfb <指令> --env <env>
 - **`dataset.train_split_keys`、`dataset.val_sample_keys`**：有寫的話，必須是 `schema.columns.entity` 裡的欄，不能是空清單（`A29`）。
 - **`dataset.numeric_feature_storage_type`** 只能是 `float32` 或 `float64`；**`dataset.numeric_precision_policy`** 只能是 `block` 或 `truncate`。兩個都可以不寫，但不能寫成 `null`（`A31`）。
 - **`dataset.train_zero_positive_group_ratio`、`val_zero_positive_group_ratio`、`test_zero_positive_group_ratio`**（沒有正例的 query group 留多少）：有寫就必須是 0 到 1 之間的數字，不能是字串、true／false 或 `null`（`A44`）。它們會進版本 ID，寫錯會讓之後每個指令讀到別的版本路徑。
-- **`quality_checks.max_duplicate_key_ratio`**：source ETL 設定裡有 `sample_pool`、`label_table`、`feature_table` 這三張表的話，每一張都要寫，值在 0 到 1 之間、不含 1（`A32`）。拿掉它，那張表的主鍵重複檢查和主鍵空值檢查會一起默默關掉。
+- **`quality_checks.max_duplicate_key_ratio`**：source ETL 設定裡有 `sample_pool`、`label_table`、`feature_table` 這三張表的話，每一張都要寫，值在 0 到 1 之間、不含 1（`A32`）。拿掉它，那張表的主鍵重複檢查和主鍵空值檢查會一起默默關掉。候選層級特徵表不在這條的範圍內：這條只讀設定檔、拿上面三個名字去找表，而候選層級特徵表的實體表叫什麼由部署在 `catalog.yaml` 決定，這條找不到它。所以它的 `max_duplicate_key_ratio` 被刪掉時不會有人報錯。
 
 **training 設定**
 - **`training.algorithm_params.objective` 與 `metric`**：objective 是排序目標（`lambdarank`、`rank_xendcg`）時，metric 有寫就必須是 `ndcg`、`map` 或 `lambdarank`（沒寫預設 `ndcg`），`schema.columns.entity` 也不能是空的（`A7`）。不擋的話，early stopping 看的指標沒有意義。
@@ -102,6 +103,7 @@ python -m recsys_tfb <指令> --env <env>
   - `dataset.test_zero_positive_group_ratio` 大於 0 時，同一個條目的 `columns:` 還必須包含 `zero_positive_group_weight`（`A45`）。少了它，權重在寫入時被默默丟掉，evaluation 會把每個留下的無正例組只算一次、而不是 1／r 次。
 - **inference**
   - `inference.snap_dates`、`inference.products` 不能是空清單；`inference.entity_buckets`（把 entity 分成幾桶、一桶一桶評分）有寫就要大於等於 1，不能寫 `null`（`A27`）。
+  - `catalog.yaml` 不能宣告候選層級特徵表（`A47`）。推論只讀 `feature_table`，而這種設定下訓練的模型需要候選層級表的欄；不擋的話，推論會在啟動 Spark、讀完母體之後才以 `Missing feature columns` 失敗，訊息也不說原因。只宣告 `occasion`、`event` 而沒有候選層級特徵表時照跑。inference 的每一種跑法都查，包含 `--dry-run`、`--list-nodes`。
 - **evaluation**
   - 帶 `--post-training` 時，`evaluation.snap_date` 一定要寫，而且必須在 `dataset.test_snap_dates` 裡（`A22`）。
   - `evaluation.report.sections` 有寫任何開關的話，開關名稱必須剛好是 `dataset_overview`、`primary_map`、`diagnostics`、`baseline`、`diagnosis_links`、`prediction_quality` 這六個，多一個或少一個都擋（`A34`）。
@@ -130,26 +132,30 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
 
 **資料閘 1：開頭**（pipeline 的第一步）
 - **item 值**：`sample_pool` 在 dataset 設定的月份裡出現的 item 值，必須跟 item 清單完全相同；`label_table` 出現的 item 值必須都在清單裡（`B1`）。這一條要實際讀這兩張表。
-- **類別欄的型別**：`dataset.prepare_model_input.categorical_columns` 列的欄，在 `feature_table` 裡不能是 decimal、double、float（`B5`）。decimal 會讓前處理器存檔失敗；double、float 幾乎一定是列錯了。
-- **非數字的特徵欄**：`feature_table` 的特徵欄如果是文字、binary、日期、時間戳或複合型別，就必須列進 `categorical_columns` 或 `drop_columns`（`B6`）。不擋的話，training 讀資料時會失敗。
-- **帶出欄和特徵欄撞名**：`dataset.carry_columns` 列的欄，如果也是 `feature_table` 裡的特徵欄（沒列在 `drop_columns`），就擋（`B7`）。不擋的話，組 model_input 時 Spark 會報欄名有歧義。
-- **特徵欄和權重欄撞名**：`dataset.val_zero_positive_group_ratio` 或 `test_zero_positive_group_ratio` 大於 0 時，`feature_table` 的特徵欄不能叫 `zero_positive_group_weight`（`B12`）。那是 dataset 會加進 val／test 表的權重欄。
+- **類別欄的型別**：`dataset.prepare_model_input.categorical_columns` 列的欄，在 `feature_table` 或候選層級特徵表裡不能是 decimal、double、float（`B5`）。decimal 會讓前處理器存檔失敗；double、float 幾乎一定是列錯了。
+- **非數字的特徵欄**：兩張特徵表的特徵欄如果是文字、binary、日期、時間戳或複合型別，就必須列進 `categorical_columns` 或 `drop_columns`（`B6`）。不擋的話，training 讀資料時會失敗。
+- **帶出欄和特徵欄撞名**：`dataset.carry_columns` 列的欄，如果也是 `feature_table` 或候選層級特徵表裡的特徵欄（沒列在 `drop_columns`），就擋（`B7`）。不擋的話，組 model_input 時 Spark 會報欄名有歧義。
+- **特徵欄和權重欄撞名**：`dataset.val_zero_positive_group_ratio` 或 `test_zero_positive_group_ratio` 大於 0 時，兩張特徵表的特徵欄都不能叫 `zero_positive_group_weight`（`B12`）。那是 dataset 會加進 val／test 表的權重欄。
+- **候選層級特徵表缺 identity 欄**：宣告了候選層級特徵表，它就必須有每一個 identity 欄（`B13`）。它以 identity 接，缺欄的話 join 本身會失敗，而 Spark 的錯誤訊息不會說是哪張表、為什麼要那一欄。最常見的是把一個 entity、一個時段一列的表宣告成候選層級，那張表該併進 `feature_table`。
+- **兩張特徵表有同名的特徵欄**：identity 欄、label 欄與 `drop_columns` 列的欄以外，同一個欄名不能同時出現在 `feature_table` 與候選層級特徵表（`B14`）。兩張表接到同一列上，同名欄會出現兩次，Spark 報欄名有歧義。
 
-後面四條只讀 `feature_table` 的欄位定義，不讀資料。
+後面六條只讀特徵表的欄位定義，不讀資料。
 
 **資料閘 2：精度閘**（特徵編碼完）
 - 會被轉型的特徵欄（整數、decimal、boolean 這類值有固定間距的欄），最大絕對值不能超過 `dataset.numeric_feature_storage_type` 在那個間距下能精確表示的上限（`B8`）。例：整數欄轉 `float32`，上限是 16,777,216；`decimal(18,2)` 轉 `float32`，上限是 131,072。超過的話，兩個不同的值會變成同一個，排序會悄悄改變。
 - 只查這一次處理的月份，只讀 parquet 檔尾的統計。`dataset.numeric_precision_policy: truncate` 時改成只警告。
+- 宣告了候選層級特徵表時，它的這類欄也查（類別欄除外：它們在轉型之前已經編成類別編號）。這張表不由框架寫出、沒有檔尾統計可讀，所以改成掃一次這次要讀的月份。同一次掃描也確認這些月份每個都有資料：缺一整個月就擋，`truncate` 也一樣，因為那不是精度問題，而是那個月的候選層級特徵會悄悄全變成 NULL。
 
 **資料閘 3：粒度閘**（最後一步）
-- `train`、`train_dev` 的 model_input 列數，必須等於組它用的 key 表（每一列是一筆抽到的候選）（`B10`）。列數變多，代表 `label_table` 或編碼後的特徵表在 join 鍵上有重複列。val、test 不查。只讀 parquet 檔尾的列數。`dataset.train_zero_positive_group_ratio` 小於 1 時，丟組發生在 key 表落地之前，所以這條比對照樣是「相等」。
+- `train`、`train_dev` 的 model_input 列數，必須等於組它用的 key 表（每一列是一筆抽到的候選）（`B10`）。列數變多，代表 `label_table`、編碼後的特徵表或候選層級特徵表在 join 鍵上有重複列。val、test 不查。只讀 parquet 檔尾的列數。`dataset.train_zero_positive_group_ratio` 小於 1 時，丟組發生在 key 表落地之前，所以這條比對照樣是「相等」。對候選層級特徵表來說，這是框架裡唯一抓得到重複列的地方（`A32` 不守它，見 ①），所以只在 val、test 月份才有的重複列會讓列數悄悄變多。
 
 **做事途中順便查的**
 - 會擋：
   - `feature_table` 必須有 time 與 entity 欄，而且 time 欄要出現設定要處理的每個月份。
+  - 候選層級特徵表必須有 `dataset.train_snap_dates` 的每個月份（建前處理器時查；其餘要讀的月份在精度閘查）。
   - `dataset.train_dev_ratio` 不是 0，而抽樣切分後 train_dev 變成空的。
 - 只警告：
-  - `drop_columns` 列的欄在 `feature_table` 找不到（多半是打錯字）。
+  - `drop_columns` 列的欄在每一張特徵表都找不到（多半是打錯字）。
   - 抽樣切分時，切分用的欄位是空值的列會被丟掉。
 
 ### training
@@ -249,7 +255,7 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
 dataset 的三個資料閘都在此列；就算切片自動補跑了前面的步驟，後面的資料閘也不會跟著補跑。執行計畫（`[plan]` 開頭的那幾行）會列出被跳過的步驟。上一輪跑完之後來源表如果變過，這一輪不會發現。① 開跑前的檢查不受影響，每次都會跑。
 
 **2. 已經做好的產物會被直接沿用，框架不保證它是用現在的設定、程式、資料做的。**
-框架決定沿用還是重做，看的是產物在不在，以及版本號（evaluation 另外比對設定指紋）。版本號只由一部分設定和 `feature_table` 的欄位結構算出來。所以下面這些情況，舊產物照樣被沿用：
+框架決定沿用還是重做，看的是產物在不在，以及版本號（evaluation 另外比對設定指紋）。版本號只由一部分設定和特徵表的欄位結構（`feature_table`，以及宣告了的候選層級特徵表）算出來。所以下面這些情況，舊產物照樣被沿用：
 
 - 改了程式。
 - 來源表的某個月被回補過。

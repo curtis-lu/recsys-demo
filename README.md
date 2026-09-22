@@ -34,6 +34,8 @@
 | `label_table` | 客戶是否承作某產品的 ground truth（`label` 0/1） | `time, entity, item` |
 | `sample_pool` | 要納入建模與排名的候選範圍，並可帶有供分層抽樣使用的欄位 | `time, entity, item` |
 
+> 另外可以選擇性宣告一張**候選層級特徵表**（catalog 條目 `candidate_feature_table`）：一列是一筆候選的特徵（例如一次展示之前 30 分鐘的瀏覽次數），主鍵是整組 identity。它讓離線推論無法使用，用法與取捨見 [`docs/pipelines/dataset.md`](docs/pipelines/dataset.md) 與 ADR-0026。
+>
 > 上列三張是**建模**用的來源表。inference 另用一張 `inference_population` 母體表（同由 `source ETL` 維護，主鍵 `time, entity`），定義每個快照日「哪些 entity 該被推論」——對應 training 端的 `sample_pool`，把「誰被推論（membership）」與「他有什麼特徵（`feature_table` enrichment）」分開；缺特徵的母體成員仍會被評分，缺特徵成員數只在 log 留下每期一行的紀錄、不寫入任何表。
 
 **訓練輸出** —— training pipeline 會依資料版本與模型設定產生 `model_version`，並在對應版本目錄中保存模型、最佳參數、最佳迭代次數與訓練診斷等產物。框架也會保存 test set 的預測結果 `training_eval_predictions` 與評估指標，供模型比較及上線前審核；訓練完成不會自動將模型發布為 inference 預設版本。
@@ -122,7 +124,7 @@ training 的 HPO 另有 checkpoint 機制，執行中斷後可沿用既有 Optun
 
 將 `sample_pool` 依照各資料集的日期範圍與抽樣設定，產出並持久化 `train_keys`、`train_dev_keys`、`val_keys`、`test_keys`。
 
-前處理器只使用 `train_snap_dates` 範圍內的 `feature_table` 建立，再套用至所有資料區間，產出共用的 `preprocessed_feature_table`。最後，各組 `*_keys` 依 `time + entity` 連接特徵，並依 `time + entity + item` 連接 `label_table`，產出 `train_model_input`、`train_dev_model_input`、`val_model_input`、`test_model_input`，供後續模型訓練與評估使用。
+前處理器只使用 `train_snap_dates` 範圍內的 `feature_table` 建立，再套用至所有資料區間，產出共用的 `preprocessed_feature_table`。最後，各組 `*_keys` 依 `time + entity` 連接特徵（宣告了候選層級特徵表時，另依 identity 連接它），並依 `time + entity + item` 連接 `label_table`，產出 `train_model_input`、`train_dev_model_input`、`val_model_input`、`test_model_input`，供後續模型訓練與評估使用。
 
 - **資料一致性閘門**：在抽樣與前處理前，先檢查 item 集合是否與設定一致，並防止連續數值欄位被誤設為 categorical。
 - **決定性分層抽樣**：可在 `parameters_dataset.yaml` 設定 `sample_group_keys`、預設抽樣比例與各分層 override；抽樣由 identity key、使用場景與 random seed 計算固定 hash，因此相同輸入可重現相同結果。

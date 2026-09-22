@@ -96,7 +96,10 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         # (outputs=None), fail-fast before any sampling / preprocessing ---
         Node(
             validate_data_consistency,
-            inputs=["sample_pool", "label_table", "feature_table", "parameters"],
+            inputs=[
+                "sample_pool", "label_table", "feature_table", "parameters",
+                "candidate_feature_table",
+            ],
             outputs=None,
             name="validate_data_consistency",
         ),
@@ -149,9 +152,20 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
             outputs="test_keys",
         ),
         # --- Fit preprocessor on train date-range feature_table, decoupled from sampling ---
+        #
+        # `candidate_feature_table` and the months of it a node reads (the
+        # optional candidate-level feature table, ADR-0026) go last on every
+        # node that takes them. Each build gets its own split's months —
+        # train_dev reads the train list — and the precision gate all three.
+        # They are optional trailing parameters and the
+        # Runner binds by position — this repo's convention for a new optional
+        # input (see the note on `log_experiment` in training/pipeline.py). The
+        # CLI registers `None` for the table when a deployment declares none, so
+        # the list is the same for every deployment — a literal list, as the AST
+        # audit needs.
         Node(
             fit_preprocessor_metadata,
-            inputs=["feature_table", "parameters"],
+            inputs=["feature_table", "parameters", "candidate_feature_table"],
             outputs=["preprocessor", "category_mappings"],
             name="fit_preprocessor_metadata",
         ),
@@ -184,6 +198,10 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
             inputs=[
                 "preprocessed_feature_table", "preprocessor",
                 "preprocessed_feature_table_month_plan", "parameters",
+                "candidate_feature_table",
+                "candidate_feature_table_train_months",
+                "candidate_feature_table_val_months",
+                "candidate_feature_table_test_months",
             ],
             outputs="numeric_precision_report",
             name="validate_numeric_precision",
@@ -194,6 +212,7 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
             inputs=[
                 "train_keys", "preprocessed_feature_table", "label_table",
                 "preprocessor", "parameters",
+                "candidate_feature_table", "candidate_feature_table_train_months",
             ],
             outputs="train_model_input",
             name="build_train_model_input",
@@ -203,6 +222,7 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
             inputs=[
                 "train_dev_keys", "preprocessed_feature_table", "label_table",
                 "preprocessor", "parameters",
+                "candidate_feature_table", "candidate_feature_table_train_months",
             ],
             outputs="train_dev_model_input",
             name="build_train_dev_model_input",
@@ -212,6 +232,7 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
             inputs=[
                 "val_keys", "preprocessed_feature_table", "label_table",
                 "preprocessor", "parameters",
+                "candidate_feature_table", "candidate_feature_table_val_months",
             ],
             outputs="val_model_input_unfiltered",
             name="build_val_model_input",
@@ -225,6 +246,7 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
             inputs=[
                 "test_keys", "preprocessed_feature_table", "label_table",
                 "preprocessor", "test_model_input_month_plan", "parameters",
+                "candidate_feature_table", "candidate_feature_table_test_months",
             ],
             outputs="test_model_input_unfiltered",
             name="build_test_model_input",

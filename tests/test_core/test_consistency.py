@@ -4546,3 +4546,70 @@ class TestTestCarriesZeroPositiveGroupWeight:
             _zp_params(val_zero_positive_group_ratio=0.5))
         assert test_carries_zero_positive_group_weight(
             _zp_params(test_zero_positive_group_ratio=0.5))
+
+
+# =============================================================================
+# B13 / B14 — the candidate-level feature table (ADR-0026)
+# =============================================================================
+
+from recsys_tfb.core.consistency import (
+    candidate_feature_table_key_errors,
+    feature_table_overlap_errors,
+)
+
+_B13_IDENTITY = ["snap_date", "cust_id", "req_id", "prod_name"]
+
+
+class TestCandidateFeatureTableKeyB13:
+    def test_a_table_carrying_every_identity_column_passes(self):
+        assert candidate_feature_table_key_errors(
+            _B13_IDENTITY, [*_B13_IDENTITY, "browse_30m"],
+        ) == []
+
+    def test_a_missing_identity_column_is_named(self):
+        """The shape it catches: a table at (time, entity) grain declared as the
+        candidate table — it has the base key and nothing below it."""
+        errs = candidate_feature_table_key_errors(
+            _B13_IDENTITY, ["snap_date", "cust_id", "browse_30m"],
+        )
+
+        assert len(errs) == 1
+        assert errs[0].startswith("B13:")
+        assert "['req_id', 'prod_name']" in errs[0]
+
+
+class TestFeatureTableOverlapB14:
+    def _errs(self, entity_cols, candidate_cols, drop=()):
+        return feature_table_overlap_errors(
+            entity_cols, candidate_cols, list(drop), _B13_IDENTITY, "label",
+        )
+
+    def test_disjoint_features_pass(self):
+        assert self._errs(
+            ["snap_date", "cust_id", "total_aum"],
+            [*_B13_IDENTITY, "browse_30m"],
+        ) == []
+
+    def test_a_column_in_both_tables_is_named(self):
+        errs = self._errs(
+            ["snap_date", "cust_id", "total_aum", "device"],
+            [*_B13_IDENTITY, "browse_30m", "device"],
+        )
+
+        assert len(errs) == 1
+        assert errs[0].startswith("B14:")
+        assert "'device'" in errs[0]
+
+    def test_the_shared_key_is_not_an_overlap(self):
+        """Both tables carry time and entity: that is the join key of one and
+        part of the other's, not a feature read twice."""
+        assert self._errs(
+            ["snap_date", "cust_id", "total_aum"], _B13_IDENTITY,
+        ) == []
+
+    def test_a_dropped_column_in_both_is_not_an_overlap(self):
+        """Dropped means selected from neither table, so nothing collides."""
+        assert self._errs(
+            ["snap_date", "cust_id", "etl_ts"], [*_B13_IDENTITY, "etl_ts"],
+            drop=("etl_ts",),
+        ) == []

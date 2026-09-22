@@ -1756,6 +1756,7 @@ _FOREIGN_VERSION = "deadbeef"
 
 def _run_dataset_command(
     tmp_path, argv, existing=("2026-01-31",), foreign=("2026-02-28",),
+    catalog_extra=None,
 ):
     """Invoke the dataset command far enough to build the catalog.
 
@@ -1799,6 +1800,7 @@ def _run_dataset_command(
         "partition_filter": {"base_dataset_version": "${base_dataset_version}"},
         "partition_cols": [{"name": "snap_date", "type": "STRING"}],
     }
+    catalog.update(catalog_extra or {})
     with open(catalog_path, "w") as f:
         yaml.dump(catalog, f)
 
@@ -3841,3 +3843,103 @@ class TestAPreCalibrationModelManifestStillResolves:
         # variable either: no catalog entry spells ${calibration_variant_id}
         # any more, so an unused one would only mislead the next reader.
         assert "calibration_variant_id" not in captured, captured
+
+
+
+# =============================================================================
+# The candidate-level feature table at the CLI (ADR-0026)
+# =============================================================================
+
+_CANDIDATE_ENTRY = {
+    "candidate_feature_table": {
+        "type": "HiveTableDataset",
+        "database": "ml_recsys",
+        "table": "feature_realtime",
+        "read_only": True,
+    },
+}
+
+
+class TestDatasetRegistersTheCandidateTable:
+    """The dataset command is what makes the pipeline's two candidate inputs
+    exist for every deployment: the table (``None`` when the catalog declares
+    none) and the months of it this run reads."""
+
+    def test_undeclared_it_is_registered_as_none(self, tmp_path):
+        loaded, _ = _run_dataset_command(tmp_path, ["dataset"])
+
+        assert "candidate_feature_table" in loaded
+        assert loaded["candidate_feature_table"] is None
+
+    def test_declared_the_catalog_entry_is_what_the_nodes_read(self, tmp_path):
+        """Registering ``None`` over a declared entry would silently drop every
+        candidate-level feature."""
+        loaded, _ = _run_dataset_command(
+            tmp_path, ["dataset"], catalog_extra=_CANDIDATE_ENTRY,
+        )
+
+        assert "candidate_feature_table" not in loaded
+
+    def test_each_split_gets_its_own_months(self, tmp_path):
+        """2026-01-31 already landed in test_model_input, so no build reads it."""
+        loaded, _ = _run_dataset_command(tmp_path, ["dataset"])
+
+        assert loaded["candidate_feature_table_train_months"] == [
+            pd.Timestamp("2025-12-31"),
+        ]
+        assert loaded["candidate_feature_table_val_months"] == []
+        assert loaded["candidate_feature_table_test_months"] == [
+            pd.Timestamp("2026-02-28"),
+        ]
+
+    def test_only_test_months_reads_the_unlanded_test_months_alone(self, tmp_path):
+        loaded, _ = _run_dataset_command(
+            tmp_path, ["dataset", "--only-test-months"],
+        )
+
+        assert loaded["candidate_feature_table_train_months"] == []
+        assert loaded["candidate_feature_table_test_months"] == [
+            pd.Timestamp("2026-02-28"),
+        ]
+
+    def test_declaring_it_moves_base_dataset_version(self, tmp_path):
+        _, without = _run_dataset_command(tmp_path / "a", ["dataset"])
+        _, with_it = _run_dataset_command(
+            tmp_path / "b", ["dataset"], catalog_extra=_CANDIDATE_ENTRY,
+        )
+
+        assert without.base_dataset_version != with_it.base_dataset_version
+
+
+class TestInferenceRefusesTheCandidateTableA47:
+    """The inference pipeline reads feature_table alone, while a model trained
+    with a candidate-level feature table needs its columns: let through, the
+    run would start Spark and only then fail on "Missing feature columns".
+    Refused at the entry instead, before Spark, with the reason (ADR-0022
+    decision 4, ADR-0026)."""
+
+    def _conf(self, tmp_path, candidate):
+        TestInferenceGridA27()._conf_with(
+            tmp_path, snap_dates=["2024-03-31"], products=["p1"], entity_buckets=10,
+        )
+        if candidate:
+            catalog_path = tmp_path / "conf" / "base" / "catalog.yaml"
+            catalog = yaml.safe_load(catalog_path.read_text())
+            catalog.update(_CANDIDATE_ENTRY)
+            catalog_path.write_text(yaml.dump(catalog))
+
+    def test_declared_it_exits_before_spark_starts(self, tmp_path):
+        self._conf(tmp_path, candidate=True)
+        result, mock_spark = TestInferenceGridA27()._invoke(tmp_path)
+
+        assert result.exit_code == 1
+        mock_spark.assert_not_called()
+        assert "A47" in result.output
+        assert "candidate_feature_table" in result.output
+
+    def test_undeclared_inference_is_not_blocked(self, tmp_path):
+        self._conf(tmp_path, candidate=False)
+        result, mock_spark = TestInferenceGridA27()._invoke(tmp_path)
+
+        assert "A47" not in result.output
+        mock_spark.assert_called()

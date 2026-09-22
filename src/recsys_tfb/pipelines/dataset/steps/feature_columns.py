@@ -106,6 +106,24 @@ def encoded_frame_columns(
     return list(dict.fromkeys(list(base_key) + ft_feature_cols))
 
 
+def candidate_feature_source_columns(
+    candidate_columns: list[str],
+    identity_cols: list[str],
+) -> list[str]:
+    """The candidate-level feature table's columns that can become features: all
+    but identity (ADR-0026).
+
+    Identity is that table's join key. An identity categorical among its columns
+    (``schema.item``) is a feature, but its vocabulary is the declared one and its
+    values arrive with ``keys`` — reading either from this table would shrink the
+    declared domain to the values that happened to be shown. One definition for
+    the three nodes that ask (the Layer-2 gate, the fit, the precision gate), so
+    "the gate checked it" and "the fit made it a feature" are the same set.
+    """
+    identity = set(identity_cols)
+    return [c for c in candidate_columns if c not in identity]
+
+
 def require_item_is_a_feature(
     item_col: str | None,
     feature_columns: list[str],

@@ -634,7 +634,7 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 | 鍵 | 它回答的問題 | `occasion` 宣告之後 |
 |---|---|---|
 | `query_group_columns` | **名次在哪個範圍內比** | 變寬（`time` ＋ `entity` ＋ `occasion`） |
-| `base_key_columns` | **哪個 entity、哪個時段**——entity 層級的表（特徵表、分群來源、母體表）拿它接到候選列上 | **永遠不變**：那些表裡沒有場合的欄 |
+| `base_key_columns` | **哪個 entity、哪個時段**——entity 層級的表（`feature_table`、分群來源、母體表）拿它接到候選列上 | **永遠不變**：那些表裡沒有場合的欄 |
 | `identity_columns` | **哪一列候選** | 變寬（順序是規定，見下） |
 
 本條禁止把其中任何一組重新拼出來。

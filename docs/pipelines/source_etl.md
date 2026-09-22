@@ -23,6 +23,8 @@
 | `label_etl` | `label_table` | `time, entity, item` | 目標事件是否發生，通常為 0 或 1 |
 | `sample_pool_etl` | `sample_pool` | `time, entity, item` | 要納入建模與排序的候選範圍，以及供分層抽樣使用的欄位 |
 
+`feature_etl` 還可以多產出一張**候選層級特徵表**（選用，最多一張）：一列是一筆候選的特徵，粒度與 `sample_pool` 相同（identity：`time`、`entity`、`item`，宣告了 `occasion`／`event` 時再加上它們），dataset 以 identity 把它接到候選列上。用法見 [`dataset.md`](dataset.md) §3；它的特徵要怎麼算才不會偷看未來，見 [3.8](#38-特徵的時間正確性不偷看未來是-sql-的責任)。
+
 `feature_etl` 與 `label_etl` 通常可各自完成；`sample_pool_etl` 需要先確認它在 SQL 中引用的 feature、label 或其他上游產物已經就緒。三張來源表的欄位與下游用途見 [`../data-lineage.html`](../data-lineage.html)。
 
 ### Sample pool 需要包含抽樣欄位
@@ -226,6 +228,95 @@ quality_checks:
 - SQL 新增非 partition 欄位時，框架會先執行 `ALTER TABLE ADD COLUMNS`，再寫入資料。
 - SQL 移除既有欄位時會 fail-fast；欄位刪除、重新命名或不相容的型別變更應使用新 table 或版本化重建。
 
+### 3.8 特徵的時間正確性：不偷看未來是 SQL 的責任
+
+dataset 接特徵只做**等值 join**：entity 層級特徵表（`feature_table`）以 `time ＋ entity` 接，候選層級特徵表以 identity 接。「這一列候選當下拿得到哪一份資料」這種往回找的邏輯，框架一律不做，也**不檢查**特徵有沒有算到不該看的時間之後（ADR-0022 決定 2、3）。
+
+為什麼不由框架代勞：什麼時候算「當下拿得到」只有部署知道——每日批次幾點才算好、即時特徵算到哪一刻為止。框架替你猜，猜錯時會**靜默**出錯：pipeline 跑得完、指標好看，模型學到的卻是線上根本拿不到的資訊。
+
+#### 兩種特徵，各一條規則
+
+| 特徵 | 一列是 | 規則 |
+|---|---|---|
+| entity 層級（每日批次、快照） | 某個 entity 在某個時段的狀態 | 取「這個時段開始那一刻**已經算好**」的最後一份，看的是它**完成的時間**，不是它記錄的日期 |
+| 候選層級（即時） | 一筆候選當下的情境 | 只算這筆候選發生**之前**的行為，**不含**它發生的那一刻 |
+
+兩條規則都是在問同一件事：**線上真的在這一刻做排序時，手上會有這筆資料嗎？**
+
+#### 範例一：entity 層級，取「時段開始時已經算好」的快照
+
+假設上游有一張每日快照表 `profile_snapshot`：`snapshot_date` 是它記錄的那一天，`available_at` 是它實際算好的時間（批次通常隔天清晨跑完，偶爾晚一天）。時段的第一天是 `snap_date`。
+
+```sql
+WITH latest AS (
+    SELECT s.entity_id, MAX(s.snapshot_date) AS snapshot_date
+    FROM upstream.profile_snapshot s
+    WHERE s.available_at <= CAST('${target_date}' AS TIMESTAMP)   -- 時段開始那一刻已經算好
+    GROUP BY s.entity_id
+)
+SELECT
+    CAST('${target_date}' AS DATE) AS snap_date,
+    s.entity_id,
+    s.f1,
+    s.f2
+FROM upstream.profile_snapshot s
+JOIN latest l
+  ON s.entity_id     = l.entity_id
+ AND s.snapshot_date = l.snapshot_date
+```
+
+兩種看起來合理、其實會偷看的寫法：
+
+- **`WHERE s.snapshot_date = '${target_date}'`**：時段第一天那份快照記的是那天**結束時**的狀態，隔天才算好。拿它去排那天一早的候選，就是拿之後才知道的事去排。
+- **`WHERE s.snapshot_date = date_sub('${target_date}', 1)`**（固定取前一天）：批次準時的那幾天對，批次晚一天的那天，前一天那份在時段開始時還不存在。只看日期、不看 `available_at` 的寫法，在批次延遲時都會偷看。
+
+`CAST(... AS TIMESTAMP)` 是照 Spark session 時區的午夜解讀；`available_at` 的時區要與它一致，否則邊界會差幾個小時。
+
+上游會重算同一天的快照（同一個 `snapshot_date` 有好幾列、`available_at` 不同）時，上面的 `latest` 只挑了日期，join 回去會拿到那一天的每一列。這時要挑的是「時段開始前已經算好的**最後一版**」：在 `latest` 裡連 `available_at` 一起取（例如先過濾 `available_at <= 時段開始`，再以 `ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY snapshot_date DESC, available_at DESC)` 取第 1 列）。
+
+#### 範例二：候選層級，只算這筆候選之前的行為
+
+假設上游有候選紀錄 `impression_log`（每列一次展示，`event_ts` 是到秒的時間）與行為紀錄 `browse_log`（`entity_id`、`event_ts`）。要算「展示前 30 分鐘瀏覽幾次」：
+
+```sql
+SELECT
+    i.snap_date,
+    i.entity_id,
+    i.request_id,          -- identity 的欄一欄都不能少：dataset 用它們接
+    i.item_id,
+    COUNT(b.event_ts) AS browse_30m
+FROM upstream.impression_log i
+LEFT JOIN upstream.browse_log b
+  ON b.entity_id = i.entity_id
+ AND b.event_ts >= i.event_ts - INTERVAL 30 MINUTES
+ AND b.event_ts <  i.event_ts            -- 嚴格小於：不含展示那一刻
+WHERE i.snap_date = '${target_date}'
+GROUP BY i.snap_date, i.entity_id, i.request_id, i.item_id
+```
+
+下界（要不要含剛好 30 分鐘前那一秒）是這個特徵自己的定義，與偷看無關；上界才是。最常見的偷看是把上界寫成 `<=`。使用者點了之後常常馬上去瀏覽，那筆瀏覽的時間戳往往與點擊落在同一秒；多算到那一秒，這個特徵就變成「有沒有點」的答案。「這一次之前出現過幾次」這類累計，用 window function 時同理：寫 `ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING`，不是 `CURRENT ROW`。
+
+輸出的每一列要在 identity 上唯一——同一筆候選有兩列，dataset 接上去就會讓那筆候選變成兩列。所以在它的 `quality_checks` 設 `primary_key`（identity 各欄）與 `max_duplicate_key_ratio: 0.0`（見 [3.6](#36-輸出-quality-checks)）。框架的 A32 不會替這張表檢查這項設定有沒有被刪掉（ADR-0026〈更正 ADR-0022〉）。
+
+#### 寫完之後的自我檢查
+
+1. **每一個時間比較都寫明比的是哪一刻。** 快照比的是「完成時間 ≤ 時段開始」；行為比的是「行為時間 < 候選發生時間」。看到 `=` 比日期、或 `<=` 比到候選那一刻，停下來想。
+2. **只用日期欄挑快照的寫法，一律當作可疑。** 除非上游保證快照一定在時段開始前算好——而且那個保證寫在某個地方。
+3. **把錯的寫法當變異跑一次。** 把 `<` 改成 `<=`、把 `available_at` 條件拿掉，確認你的檢查（或至少特徵的分布）會變。**錯的寫法算出來跟對的一樣，代表資料根本分不出兩者，你的檢查擋不住它。** 廣告示例的 `examples/ad/check_features.py` 就是這樣做的：照定義用 pandas 重算每一欄，與 SQL 的輸出逐列比對，並列出它擋得住的六種錯寫法（`examples/ad/README.md`〈怎麼跑〉）。
+4. **線上評分用同一份定義嗎？** 候選層級特徵在線上由另一個系統計算。兩邊算得不一樣時模型會悄悄變差，框架看不到這件事（ADR-0022〈後果〉）。
+
+完整的實例：`examples/ad/conf/sql/etl/feature/feature_user.sql`（範例一的規則，含批次延遲）與 `feature_realtime.sql`（範例二的規則）。
+
+#### 「怎麼被擺出來」的特徵會讓離線分數虛高
+
+有一類特徵說的不是使用者的偏好，而是舊系統怎麼擺的：這筆候選排在第幾格、這次請求裡這個 item 第幾次出現。第 1 格本來就比第 3 格容易被點，跟 item 好不好無關。
+
+- 訓練時放進去有好處：模型知道「第 3 格點得少是位置害的」，不會怪到 item 頭上。
+- 但真正要排序時還不知道會擺第幾格——那正是排序要決定的事。業界的做法是評分時把所有候選都當成同一個位置（例如全部當第 1 格）。
+- **框架沒有「評分時固定成一個值」的機制。** evaluation 讀的 test 資料帶著真實的位置，模型可以從它猜出舊系統把誰擺在前面，離線分數會高過線上真正拿得到的。
+
+所以這類欄：不放進特徵表；或者放了，就知道離線分數裡有一部分是在猜位置。同一次請求裡同一個 item 只因版面重複出現兩次時，在來源 SQL 併成一列（label 取「有沒有點過任何一次」），丟掉的只有位置。
+
 ## 4. 使用方式
 
 ### 4.1 CLI 選項
@@ -392,7 +483,7 @@ source ETL 的輸出不會因 SQL 或來源資料內容改變而自動產生新�
 - `depends_on` 只驗證同一份 stage 設定中的排列順序，不會跨 `feature_etl`、`label_etl` 與 `sample_pool_etl` 排程。
 - `max_null_ratio` 是整張 partition 的資料格總體比例，不是逐欄上限；需要欄位級規則時應在 SQL 或額外檢查中明確處理。
 - audit 在 run 結束時批次寫入；audit 寫入失敗只會記錄 error log，不會反向將已成功的 ETL 判定為失敗。
-- source ETL 不理解特徵洩漏、label 觀察窗或候選資格等業務語意，這些仍需在 SQL review 與資料驗收時確認。
+- source ETL 不理解特徵洩漏、label 觀察窗或候選資格等業務語意，這些仍需在 SQL review 與資料驗收時確認。特徵的時間正確性怎麼寫、怎麼自我檢查，見 [3.8](#38-特徵的時間正確性不偷看未來是-sql-的責任)。
 - `--var` 只提供給 source ETL 系列指令（`feature_etl`、`label_etl`、`sample_pool_etl`、`inference_population_etl`）。其他 DAG pipeline（`dataset`、`training`、`inference`、`evaluation`）沒有這個旗標，它們 SQL／設定裡的 `${...}` 是另一套 catalog 代換機制，語法相似但不是同一件事。
 
 ## 10. 相關文件

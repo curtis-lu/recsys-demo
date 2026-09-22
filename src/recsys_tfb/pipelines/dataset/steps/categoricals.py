@@ -77,6 +77,7 @@ def collect_vocabularies_from_data(
 def require_supported_categorical_dtypes(
     columns: list[str],
     dtypes: dict[str, str],
+    table: str = "feature_table",
 ) -> None:
     """Pre-check, runtime backstop of B5: every column to collect has a type a
     categorical may have — string, an integer type, or boolean.
@@ -93,7 +94,7 @@ def require_supported_categorical_dtypes(
 
     ``dtypes`` is ``dict(df.dtypes)``: schema metadata, no Spark job.
     """
-    errors = categorical_dtype_errors(columns, dtypes)
+    errors = categorical_dtype_errors(columns, dtypes, table=table)
     if errors:
         raise DataConsistencyError(
             "Categorical dtype check failed (B5):\n- " + "\n- ".join(errors)

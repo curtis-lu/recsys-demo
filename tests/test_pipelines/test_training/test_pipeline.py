@@ -277,7 +277,9 @@ class TestTrainingPipelineE2E:
         from recsys_tfb.core.runner import Runner
         from recsys_tfb.pipelines.dataset import create_pipeline as create_dataset_pipeline
         from recsys_tfb.pipelines.dataset.month_plans import (
-            build_month_plans, month_plan_input,
+            CANDIDATE_FEATURE_TABLE, build_month_plans,
+            candidate_feature_table_months, candidate_months_input,
+            month_plan_input,
         )
 
         # -- Synthetic source tables --
@@ -388,8 +390,17 @@ class TestTrainingPipelineE2E:
         # Driving the dataset pipeline outside the CLI: nothing has landed, so
         # every configured month is processed. Omitting this does not silently
         # rebuild everything — the runner refuses to start (ADR-0007).
-        for _name, _plan in build_month_plans(parameters).items():
+        _plans = build_month_plans(parameters)
+        for _name, _plan in _plans.items():
             catalog.add(month_plan_input(_name), MemoryDataset(_plan))
+        # The two candidate-level feature table inputs exist for every
+        # deployment (ADR-0026); `None` is how the nodes learn none is declared,
+        # which is what the CLI registers in that case.
+        catalog.add(CANDIDATE_FEATURE_TABLE, MemoryDataset(None))
+        for _split, _months in candidate_feature_table_months(
+            parameters, _plans["test_model_input"], only_test_months=False,
+        ).items():
+            catalog.add(candidate_months_input(_split), MemoryDataset(_months))
         for name in (
             "sample_keys", "train_keys", "train_dev_keys", "val_keys", "test_keys",
             "train_set", "train_dev_set", "val_set", "test_set",

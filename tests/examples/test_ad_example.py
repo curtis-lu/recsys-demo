@@ -7,7 +7,7 @@
    有一大堆測試在讀；這份沒有，不在這裡擋，要等有人真的去跑才會發現。
 2. 產生器實際產出的 item 與 conf 逐一列出的清單要一致。item 是 SQL 把兩個屬性
    拼出來的，兩邊各寫各的，任一邊改了另一邊不會跟著動。
-3. 後面幾張票（event 角色、多張特徵表、item 清單從資料數）要用的資料形狀真的在原始資料裡。
+3. 後面幾張票（event 角色、候選層級特徵表、item 清單從資料數）要用的資料形狀真的在原始資料裡。
    即時特徵與快照的「該算出什麼」照 check_features.py 的定義算——run_e2e.sh 拿同一份
    定義去比 SQL 的輸出，這裡只看原始資料有沒有那個形狀。
 """
@@ -102,13 +102,30 @@ def test_sql_builds_item_with_the_generator_separator():
     assert building == {f: {ITEM_SEPARATOR} for f in building}
 
 
+#: 部署自己選擇要不要宣告的條目：根目錄的銀行示例沒有宣告，這份有（ADR-0026）。
+_OPTIONAL_ENTRIES = {"candidate_feature_table"}
+
+
 def test_catalog_has_the_same_entries_as_the_root_conf():
     # 這份 catalog 是從根目錄 conf/base/catalog.yaml 複製改欄名的；框架新增一個條目時
     # 兩邊要一起加，否則示例要到實跑才壞
     ad = yaml.safe_load((CONF / "base" / "catalog.yaml").read_text())
     root = yaml.safe_load((ROOT_CONF / "base" / "catalog.yaml").read_text())
-    assert set(ad) == set(root)
-    assert {k: v["type"] for k, v in ad.items()} == {k: v["type"] for k, v in root.items()}
+    assert set(ad) - _OPTIONAL_ENTRIES == set(root)
+    assert {k: v["type"] for k, v in ad.items() if k not in _OPTIONAL_ENTRIES} == {
+        k: v["type"] for k, v in root.items()
+    }
+
+
+def test_the_candidate_feature_table_is_keyed_by_identity(params):
+    """dataset 以 identity 接候選層級特徵表（ADR-0026），所以它的 ETL 鍵必須就是 identity，
+    而且要擋重複：同一筆候選有兩列，接上去那筆候選就變成兩列。框架的 A32 看不到這張表
+    （它只認 feature_table 等固定名字），這條由示例自己守。"""
+    catalog = yaml.safe_load((CONF / "base" / "catalog.yaml").read_text())
+    physical = catalog["candidate_feature_table"]["table"]
+    (table,) = [t for t in params["feature_etl"]["tables"] if t["name"] == physical]
+    assert table["primary_key"] == get_schema(params)["identity_columns"]
+    assert table["quality_checks"]["max_duplicate_key_ratio"] == 0.0
 
 
 def test_etl_target_dates_cover_every_split_date(params):

@@ -180,6 +180,20 @@ inference_population_etl:
 
 `inference_population` 在 `conf/base/catalog.yaml` 以 `HiveTableDataset`、`read_only: true` 宣告，比照 `sample_pool`。
 
+### 3.6 宣告了候選層級特徵表的部署不能跑離線推論
+
+catalog（`conf/base` 疊上 `--env` 那一層之後）有 `candidate_feature_table` 條目，也就是宣告了候選層級特徵表（見 [dataset §3.8](dataset.md#38-候選層級特徵表選用)）時，`inference` 指令在 CLI 入口就停下（一致性不變量 A47），還沒啟動 Spark。每一種跑法都查，包含 `--dry-run`、`--list-nodes`。
+
+原因是推論 pipeline 只讀 `feature_table`，沒有讀候選層級特徵表的那一步；而在這種設定下訓練出來的模型，特徵清單裡有候選層級表的欄。放行的話不會悄悄算錯分數：它會啟動 Spark、讀完評分母體，然後在 `build_inference_population_features` 的後置檢查報 `Missing feature columns` 停下——訊息沒說是哪張表、也沒說出路。A47 讓它在花掉這些時間之前、帶著原因停下（[ADR-0022](../adr/0022-multiple-feature-tables-as-of-in-user-sql.md) 決定 4、[ADR-0026](../adr/0026-feature-tables-by-join-key.md) 決定 5）。
+
+為什麼不讓推論也讀這張表：在曝光資料的部署裡，推論的候選是框架自己產生的全網格（§3.2）——每個 entity 配上全部 item，沒有一筆被展示過，這張表本來就一列都接不到。全網格部署的候選層級表（例如以 `time`、`entity`、`item` 為鍵、每個候選都有一列的表）原則上接得到，但推論端要支援它是另一件事；先擋下，之後要支援也不會打破任何既有設定。
+
+⚠ 這道閘看的是 catalog 有沒有這個條目，不是要評分的那個模型用什麼訓練：加上條目之前訓練的舊模型，推論也會被擋（#440 追蹤）。
+
+這種部署的評分由線上算得出這些特徵的系統負責，不在這個框架裡。training 與 `evaluation --post-training` 不受影響：它們用的是 dataset 從 `sample_pool` 組出來的候選，候選層級特徵接得到。
+
+只宣告 `occasion`／`event`、沒有宣告候選層級特徵表時，推論照跑：它忽略這兩個角色，候選一樣是每個 entity 配上全部 item（ADR-0025）。這兩個角色的欄不會成為特徵（一致性不變量 A38），所以少了它們，模型要的每一欄照樣接得到。
+
 ## 4. 使用方式
 
 ### 4.1 CLI 選項
@@ -608,6 +622,7 @@ data/inference/<model_version>/<first_snap_date_without_hyphens>/
 | `partition_completeness` | 缺分區＝連續 save 互相覆蓋；多分區＝`entity_buckets` 改過留下舊桶 | 前者查 `unranked_predictions` 的 `partition_cols` 是否還有 `entity_bucket`；後者 DROP 舊桶的分區或整張表重跑 |
 | `No scoring rows found` | 設定日期沒有 entity，或前處理後資料為空 | 查 feature table row count 與日期條件 |
 | A4 products mismatch | `inference.products` 與 schema item 清單不一致 | 同步兩處完整 item 集合 |
+| 訊息帶 `(A47) offline inference cannot run while candidate_feature_table is declared` | catalog 宣告了候選層級特徵表 | 這種部署不用離線推論評分，見 §3.6。若要改回能跑離線推論，得從 catalog 拿掉這個條目、重建 dataset 並重訓：它的欄原本是模型的特徵，拿掉之後 `base_dataset_version` 也會變 |
 | 訊息帶 `(A27) inference.snap_dates` / `entity_buckets` / `products` | 評分格點 `snap_dates × entity_buckets × products` 有一軸是空的或 0 | 在 `parameters_inference.yaml` 補上該鍵。**訊息會一次列出全部有問題的軸**，所以一輪就能改完；這一關在起 Spark 之前，看到它代表還沒有付任何 cold start |
 | `no_missing` | identity、score 或 rank 出現 NULL | 查 staging 的欄位 NULL count 與上游 feature keys |
 | `completeness` | query group 候選數不是 products 數 | 查 feature key 重複、join fan-out 或候選遺漏 |

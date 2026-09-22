@@ -1,10 +1,10 @@
-# 特徵分三個粒度算，最後併成框架今天唯一收得下的一張 feature_table（time ＋ entity）。
-# 分開算是刻意的：使用者特徵以 user_id 接、版位特徵以 slot_id 接，正是 ADR-0022
-# 「多張特徵表各自宣告 join 欄位」要處理的形狀；那張票落地後可以直接拿
-# feature_user／feature_slot 當獨立的特徵表，不必重寫 SQL。
-#
-# feature_realtime 是第四種粒度（一次曝光一列），今天的框架讀不到，不併進 feature_table；
-# 理由見那支 SQL 的開頭。
+# 框架收兩類特徵表（ADR-0026）：
+# - entity 層級（time ＋ entity，恰好一張）：feature_table。使用者特徵以 user_id、版位特徵以
+#   slot_id 分開算，最後在 feature_table.sql 併到 (snap_date, user_id, slot_id)——比 base key
+#   粗的表框架不收，要在 SQL 展開。
+# - 候選層級（identity，最多一張）：feature_realtime，一次曝光一列，catalog 的
+#   candidate_feature_table 指到它。它不併進 feature_table：一次請求一列的表併進去，
+#   等於把每日特徵抄進每一次曝光。
 feature_etl:
   dry_run: false   # 沒寫時 --env local 只 render SQL 不寫表（__main__._run_etl）
   # 資料的第 2～11 週。第 1 週 2025-10-27 只給後面的週當回看窗。
@@ -68,7 +68,8 @@ feature_etl:
       sql_file: feature/feature_realtime.sql
       partition_by:
         snap_date: DATE
-      primary_key: [snap_date, user_id, slot_id, ad_creative, impression_id]
+      # identity：dataset 以這組鍵接它，重複的鍵會讓候選變成好幾列
+      primary_key: [snap_date, user_id, slot_id, request_id, ad_creative]
       quality_checks:
         min_row_count: 1
         max_duplicate_key_ratio: 0.0

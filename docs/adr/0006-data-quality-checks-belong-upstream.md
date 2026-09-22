@@ -210,3 +210,14 @@ grep 會被那句解釋「為什麼不用 `df.count()`」的 docstring 自己命
 - 補上 `max_duplicate_key_ratio` 之後，`feature_table` 的重複鍵會在 ETL 階段 raise。
   這個檢查在寫下本 ADR 時從未在生產跑過，**首次啟用可能揭露既有的資料問題**，不該在沒有人
   看著的排程裡首跑。設定已經落地（見頂部狀態），所以這個提醒是現行的——首跑的觀察責任還在。
+
+## 修訂（2026-09-22，#380、ADR-0026）：B8 在候選層級特徵表上是一次掃描
+
+上面兩則修訂說「零掃描是硬界線」。**候選層級特徵表是第一個例外，由使用者在設計討論裡拍板。**
+
+- 這張表不落地（ADR-0026 決定 2），所以沒有框架自己寫的 parquet 檔尾可讀；它是使用者自己的表，框架也不規定它的格式——正是上面第 1 點不去讀 `feature_table` 檔尾的理由。
+- 不擋的話，這張表的整數欄與 decimal 欄會在 `build_model_input` 裡被轉成宣告的儲存型別而沒有人檢查，`numeric_precision_policy: block` 的承諾就開了一個洞。
+- 所以 `validate_numeric_precision` 對它做一次聚合：這次要讀的月份、每個要被轉型的欄的絕對值最大值，同一次掃描也回答「哪些月份有資料」。
+
+成本：每次執行多讀一次這張表這次要讀的月份。每個 build 只讀自己 split 的月份，所以這次掃描相對 build 端多出不少：以廣告示例的月份數算約多 57%（ADR-0026〈後果〉）。entity 層級的 `feature_table` 與 `preprocessed_feature_table` 不受影響，照舊零掃描；`validate_data_consistency` 也照舊零掃描（B13、B14 只看欄名）。
+

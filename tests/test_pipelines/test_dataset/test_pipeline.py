@@ -38,6 +38,12 @@ class TestDatasetPipeline:
             "preprocessed_feature_table_month_plan",
             "test_keys_month_plan",
             "test_model_input_month_plan",
+            # Registered by the CLI for every deployment — `None` for the table
+            # when none is declared (ADR-0026).
+            "candidate_feature_table",
+            "candidate_feature_table_train_months",
+            "candidate_feature_table_val_months",
+            "candidate_feature_table_test_months",
         }
 
     def test_pipeline_outputs(self):
@@ -122,7 +128,8 @@ class TestDatasetPipeline:
         assert pipeline.nodes[0].name == "validate_data_consistency"
         first = pipeline.nodes[0]
         assert sorted(first.inputs) == [
-            "feature_table", "label_table", "parameters", "sample_pool"
+            "candidate_feature_table", "feature_table", "label_table",
+            "parameters", "sample_pool",
         ]
         assert first.outputs == []
 
@@ -439,3 +446,66 @@ class TestGrainGateWiring:
         # It gates train / train_dev, neither of which that mode builds. Keeping it would make the mode fail on missing inputs.
         names = [n.name for n in create_pipeline(only_test_months=True).nodes]
         assert "validate_model_input_grain" not in names
+
+
+class TestCandidateFeatureTableWiring:
+    """Where the candidate-level feature table and the months of it each node
+    reads reach (ADR-0026), and that they bind to the right parameters.
+
+    Both go last on every node that takes them, as optional trailing
+    parameters, because the Runner binds ``inputs`` positionally. A node whose
+    list put them anywhere else would hand the table to another parameter —
+    and the ``=None`` defaults would swallow the arity mismatch instead of
+    raising.
+    """
+
+    TABLE = "candidate_feature_table"
+
+    #: build node -> the split whose months it reads. A build handed another
+    #: split's list finds none of its candidates' rows and fills every
+    #: candidate-level feature with NULL, raising nothing — so this mapping is
+    #: the assertion, not a detail.
+    BUILD_MONTHS = {
+        "build_train_model_input": "candidate_feature_table_train_months",
+        "build_train_dev_model_input": "candidate_feature_table_train_months",
+        "build_val_model_input": "candidate_feature_table_val_months",
+        "build_test_model_input": "candidate_feature_table_test_months",
+    }
+
+    def _by_name(self):
+        return {n.name: n for n in create_pipeline().nodes}
+
+    def test_the_table_reaches_the_gate_the_fit_the_precision_check_and_every_build(self):
+        assert {
+            name for name, node in self._by_name().items() if self.TABLE in node.inputs
+        } == {
+            "validate_data_consistency", "fit_preprocessor_metadata",
+            "validate_numeric_precision", *self.BUILD_MONTHS,
+        }
+
+    def test_each_build_reads_its_own_splits_months(self):
+        import inspect
+
+        by_name = self._by_name()
+        for name, months in self.BUILD_MONTHS.items():
+            node = by_name[name]
+            params = list(inspect.signature(node.func).parameters)
+            assert node.inputs[params.index("candidate_feature_table_months")] == months, name
+            assert [i for i in node.inputs if i.endswith("_months")] == [months], name
+
+    def test_the_precision_gate_reads_all_three_in_its_own_parameters(self):
+        import inspect
+
+        node = self._by_name()["validate_numeric_precision"]
+        params = list(inspect.signature(node.func).parameters)
+        for split in ("train", "val", "test"):
+            name = f"candidate_feature_table_{split}_months"
+            assert node.inputs.index(name) == params.index(name)
+
+    def test_the_table_binds_to_the_parameter_of_its_own_name(self):
+        import inspect
+
+        for node in create_pipeline().nodes:
+            if self.TABLE in node.inputs:
+                params = list(inspect.signature(node.func).parameters)
+                assert node.inputs.index(self.TABLE) == params.index(self.TABLE), node.name
