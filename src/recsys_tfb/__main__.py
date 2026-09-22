@@ -61,10 +61,10 @@ from recsys_tfb.core.versioning import (
 from recsys_tfb.pipelines import get_pipeline, list_pipelines
 from recsys_tfb.pipelines.dataset.month_plans import (
     CANDIDATE_FEATURE_TABLE,
-    CANDIDATE_FEATURE_TABLE_MONTHS,
     INCREMENTAL_DATASETS,
     build_month_plans,
     candidate_feature_table_months,
+    candidate_months_input,
     landed_months,
     month_plan_input,
     plan_incremental_snap_dates,
@@ -1291,12 +1291,15 @@ def dataset(
                 month_plan_input(name): plan
                 for name, plan in month_plans.items()
             },
-            # Which months of the candidate-level feature table this run reads —
-            # registered whether or not one is declared, so the node inputs are
-            # the same literal list for every deployment.
-            CANDIDATE_FEATURE_TABLE_MONTHS: candidate_feature_table_months(
-                params, month_plans["test_model_input"], only_test_months,
-            ),
+            # Which months of the candidate-level feature table each build
+            # reads — registered whether or not one is declared, so the node
+            # inputs are the same literal list for every deployment.
+            **{
+                candidate_months_input(split): months
+                for split, months in candidate_feature_table_months(
+                    params, month_plans["test_model_input"], only_test_months,
+                ).items()
+            },
             # `None` is how a node learns none is declared. Only then: a
             # declared entry is already in the catalog, and registering over it
             # would silently drop every candidate-level feature.

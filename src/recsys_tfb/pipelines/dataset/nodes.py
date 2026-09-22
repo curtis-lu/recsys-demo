@@ -770,7 +770,9 @@ def validate_numeric_precision(
     month_plan: SnapDatePlan,
     parameters: dict,
     candidate_feature_table: DataFrame | None = None,
-    candidate_feature_table_months: list | None = None,
+    candidate_feature_table_train_months: list | None = None,
+    candidate_feature_table_val_months: list | None = None,
+    candidate_feature_table_test_months: list | None = None,
 ) -> dict:
     """Measure the precision headroom of the months just encoded, and gate on it.
 
@@ -817,7 +819,7 @@ def validate_numeric_precision(
     same coverage every other incremental artifact has, and the reason adding an
     evaluation month checks that month. The candidate-level table is not
     incremental: every build reads its months afresh, so every run checks every
-    month it reads (``candidate_feature_table_months``).
+    month its builds read — the union of the three ``*_months`` lists.
 
     Pre-check (input), candidate-level table only: every month this run reads
     is present in it. A missing month raises ``ValueError`` **whatever the
@@ -913,7 +915,11 @@ def validate_numeric_precision(
     if candidate_feature_table is not None:
         identity_cols = schema["identity_columns"]
         categorical_cols = preprocessor_metadata["categorical_columns"]
-        cand_months = candidate_feature_table_months
+        cand_months = sorted(
+            set(candidate_feature_table_train_months or ())
+            | set(candidate_feature_table_val_months or ())
+            | set(candidate_feature_table_test_months or ())
+        )
         cand_dtypes = dict(candidate_feature_table.dtypes)
         cand_steps = {
             c: spark_dtype_value_step(cand_dtypes[c])
@@ -1093,8 +1099,8 @@ def build_model_input(
     # Read, encoded and joined here, after sampling, rather than landed
     # beforehand like the entity-level table: it is as large as sample_pool, and
     # landing it would write every row sampling is about to throw away
-    # (ADR-0026). Only the months this run reads are read at all — identity
-    # includes time, so the filter changes the cost, never the answer — and the
+    # (ADR-0026). Only this split's months are read at all — identity includes
+    # time, so the filter changes the cost, never the answer — and the
     # vocabulary is the fitted one, so an unseen value is the unknown sentinel
     # here exactly as it is in apply_preprocessor_to_features.
     if candidate_feature_table is not None:

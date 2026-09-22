@@ -443,9 +443,11 @@ def _candidate_with(spark, browse_by_month: dict):
 
 
 def _check(spark, candidate, months=(_MONTH,), policy="block"):
+    """The months as the three split lists the gate takes; which split holds a
+    month does not matter to it — it checks their union."""
     return validate_numeric_precision(
         _entity_side(spark), _preprocessor(), _plan(), _precision_params(policy),
-        candidate, _months(*months),
+        candidate, _months(*months[:1]), _months(*months[1:2]), _months(*months[2:]),
     )
 
 
@@ -517,7 +519,7 @@ class TestPrecisionGateCoversTheCandidateTable:
 
         report = validate_numeric_precision(
             _entity_side(spark), preprocessor, _plan(), _precision_params(),
-            candidate, _months(_MONTH),
+            candidate, _months(_MONTH), [], [],
         )
 
         assert [c["column"] for c in report["candidate_feature_table"]["columns"]] == [

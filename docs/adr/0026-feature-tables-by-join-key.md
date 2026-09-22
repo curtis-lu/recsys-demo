@@ -30,7 +30,7 @@ candidate_feature_table ─只讀這次要讀的月份、編碼，不另存─�
    - entity 層級：以 base key（`time` ＋ `entity`）接，**恰好一張**，就是 `feature_table`。路徑與今天完全相同。
    - 候選層級：以 identity 接，**選用、最多一張**。宣告方式是在 catalog 加一個固定名字的條目 `candidate_feature_table`，指到部署自己的實體表；跟 `feature_table`／`sample_pool`／`label_table` 同一個模式。
    - 其他形狀框架不收，在來源 SQL 展開成兩類之一：比 base key 粗的表（例如只有 `time` ＋ 使用者）展開到每個 entity；只以 item 接的表展開到每一列候選。
-2. **候選層級表在組 model_input 時才讀、才編碼、才接，不另存。** 在抽樣前另存一份，等於把之後會被抽掉的大量負例也多寫一遍——ADR-0022 否決「一次曝光一列的寬表」用的是同一個理由。只讀這次要讀的月份：一般執行是 train ＋ val ＋ 還沒落地的 test 月，`--only-test-months` 只有還沒落地的 test 月（`month_plans.py::candidate_feature_table_months`）。identity 含 `time`，所以這個篩選只影響成本、不影響答案。類別欄用 fit 出來的詞表編碼，沒見過的值變成未知值代碼，與 entity 層級相同。
+2. **候選層級表在組 model_input 時才讀、才編碼、才接，不另存。** 在抽樣前另存一份，等於把之後會被抽掉的大量負例也多寫一遍——ADR-0022 否決「一次曝光一列的寬表」用的是同一個理由。每個 build 只讀自己 split 的月份：train 與 train_dev 讀 train 月份、val 讀 val 月份、test 讀還沒落地的 test 月；`--only-test-months` 只有 test 那一份（`month_plans.py::candidate_feature_table_months`）。B8 掃三份的聯集。identity 含 `time`，所以這個篩選只影響成本、不影響答案。類別欄用 fit 出來的詞表編碼，沒見過的值變成未知值代碼，與 entity 層級相同。
 3. **找不到的列補 NULL，列留著**，與 entity 層級相同（ADR-0005）：丟列會悄悄改掉候選集合，mAP 的母體跟著變。**整個月都沒有資料則報錯**：一張每次都整段重讀的表少了一個月，會變成一整個月的 NULL 特徵而沒有人發現。
 4. **檢查**：
    - B5／B6／B7 兩張表都查（B5、B7 的錯誤訊息點名是哪張表）；B12（特徵欄不得與無正例組的權重欄同名，ADR-0025 決定 3）也看兩張表的特徵。候選層級表的 identity 欄是 join 鍵，不當特徵，也不從它讀詞表（item 的完整值域在 `schema.categorical_values`，這張表只有被展示過的那些）。
@@ -55,7 +55,7 @@ candidate_feature_table ─只讀這次要讀的月份、編碼，不另存─�
 
 ## 後果
 
-- **候選層級表每次執行被讀好幾次。** 四個 build 都把它篩到「這次要讀的全部月份」（train ＋ val ＋ 還沒落地的 test 月），不是各自 split 的月份：keys 是落地表，Spark 不會照 keys 的月份再修剪。所以一般執行時四個 build 各讀一次全部月份，B8 再讀一次（多 25%），fit 另外讀 train 月份兩次（月份檢查與詞表）。若改成各 build 只讀自己 split 的月份，build 端的讀取量約減半，B8 相對變成多 50% 以上。`numeric_precision_policy: truncate` 只讓超標的值通過，不省這次掃描。
+- **候選層級表每次執行被讀好幾次。** 每個 build 讀自己 split 的月份（train 與 train_dev 各讀一次 train 月份），B8 再把全部月份掃一次，fit 另外讀 train 月份兩次（月份檢查與詞表）。以廣告示例（train 6 週、val 1 週、test 1 週）算：build 共讀 14 個月份次，B8 多 8 個（約多 57%），fit 多 12 個。月份要逐 split 給、不能給一份整次執行的清單，是因為 keys 是落地表，Spark 不會照 keys 的月份再修剪：給整份清單的話 val 的 build 會為了 1 個月讀 8 個月。`numeric_precision_policy: truncate` 只讓超標的值通過，不省 B8 這次掃描。
 - **候選層級表的類別欄出現 train 沒見過的值時，不會有 warning。** entity 層級在 `apply_preprocessor_to_features` 數一次未知值；候選層級在每個 split 組 model_input 時才編碼，數它要多一次 Spark 動作。值照樣編成未知值代碼。
 - **重複的 identity 列只有 train／train_dev 抓得到**（B10 的既有範圍）。val／test 月份才有的重複會讓列數悄悄變多。上游的 `max_duplicate_key_ratio` 是真正擋它的地方。
 - **廣告示例不再實跑離線推論。** 示例 README 寫明。ADR-0025〈後果〉把「形狀二的示例實跑（含離線推論）」當作驗得到 occasion 歸類的地方；那一段實跑從此不再發生，理由見〈考慮過、沒選的做法〉最後一段。

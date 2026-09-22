@@ -238,43 +238,55 @@ def build_month_plans(
 #: table it points at, and declaring the entry is what declares the table.
 CANDIDATE_FEATURE_TABLE = "candidate_feature_table"
 
-#: Catalog name of the months of that table this run reads. Deliberately not a
-#: ``*_month_plan`` name: those scope an incremental artifact, and this table is
-#: not one (see :func:`candidate_feature_table_months`).
-CANDIDATE_FEATURE_TABLE_MONTHS = "candidate_feature_table_months"
+def candidate_months_input(split: str) -> str:
+    """Catalog name of the months of the candidate-level feature table that
+    ``split``'s build reads — ``train`` serves the train_dev build too.
+
+    Deliberately not a ``*_month_plan`` name: those scope an incremental
+    artifact, and this table is not one (see
+    :func:`candidate_feature_table_months`).
+    """
+    return f"{CANDIDATE_FEATURE_TABLE}_{split}_months"
 
 
 def candidate_feature_table_months(
     parameters: dict,
     test_plan: SnapDatePlan,
     only_test_months: bool,
-) -> list[pd.Timestamp]:
-    """The months of the candidate-level feature table this run reads.
+) -> dict[str, list[pd.Timestamp]]:
+    """``{split: months}`` — the months of the candidate-level feature table
+    each build reads (``train``, ``val``, ``test``).
 
     Not an incremental plan — that table is never landed, so nothing is
-    subtracted for having been written before. The train, train_dev and val
-    builds read their months in full on every run that includes them, and the
-    test build reads the test months its own plan still has to process. Under
+    subtracted for having been written before. Each build reads only its own
+    split's months: the train and train_dev builds read the train months, the
+    val build the val months, both in full on every run that includes them, and
+    the test build the test months its own plan still has to process. Under
     ``--only-test-months`` the first three builds are not in the pipeline, so
-    their months are not read.
+    their lists are empty.
 
-    Its consumers — the months filter in ``build_model_input``, and the B8 scan
-    and month-presence check in ``validate_numeric_precision`` — all read this
-    one list, so what is checked and what is read are one set by construction.
+    Per split rather than one list for the run because a build is a join of this
+    run's sampled keys against the table: handed every month the run reads, the
+    val build would shuffle all of them to use one (ADR-0026). The B8 scan and
+    month-presence check in ``validate_numeric_precision`` read the union, so
+    what is checked and what is read are one set by construction.
 
-    Logs the list, and the configured months it leaves out, before any Spark
-    work — the same promise the ``[months]`` lines of :func:`build_month_plans`
-    make about the incremental artifacts.
+    Logs the lists before any Spark work — the same promise the ``[months]``
+    lines of :func:`build_month_plans` make about the incremental artifacts.
     """
     ds = parameters["dataset"]
-    read: set[pd.Timestamp] = set(test_plan.to_process)
-    if not only_test_months:
-        read.update(pd.Timestamp(d) for d in ds["train_snap_dates"])
-        read.update(pd.Timestamp(d) for d in ds.get("val_snap_dates", []))
-    months = sorted(read)
+    months = {
+        "train": [] if only_test_months else sorted(
+            {pd.Timestamp(d) for d in ds["train_snap_dates"]}
+        ),
+        "val": [] if only_test_months else sorted(
+            {pd.Timestamp(d) for d in ds.get("val_snap_dates", [])}
+        ),
+        "test": sorted(test_plan.to_process),
+    }
     logger.info(
-        "[months] dataset=%s read=%s not-read=%s",
-        CANDIDATE_FEATURE_TABLE, _fmt(months),
-        _fmt([d for d in collect_dataset_snap_dates(parameters) if d not in read]),
+        "[months] dataset=%s train=%s val=%s test=%s",
+        CANDIDATE_FEATURE_TABLE,
+        _fmt(months["train"]), _fmt(months["val"]), _fmt(months["test"]),
     )
     return months

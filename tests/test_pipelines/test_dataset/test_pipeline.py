@@ -40,7 +40,10 @@ class TestDatasetPipeline:
             "test_model_input_month_plan",
             # Registered by the CLI for every deployment — `None` for the table
             # when none is declared (ADR-0026).
-            "candidate_feature_table", "candidate_feature_table_months",
+            "candidate_feature_table",
+            "candidate_feature_table_train_months",
+            "candidate_feature_table_val_months",
+            "candidate_feature_table_test_months",
         }
 
     def test_pipeline_outputs(self):
@@ -446,7 +449,7 @@ class TestGrainGateWiring:
 
 
 class TestCandidateFeatureTableWiring:
-    """Where the candidate-level feature table and the months of it this run
+    """Where the candidate-level feature table and the months of it each node
     reads reach (ADR-0026), and that they bind to the right parameters.
 
     Both go last on every node that takes them, as optional trailing
@@ -457,7 +460,17 @@ class TestCandidateFeatureTableWiring:
     """
 
     TABLE = "candidate_feature_table"
-    MONTHS = "candidate_feature_table_months"
+
+    #: build node -> the split whose months it reads. A build handed another
+    #: split's list finds none of its candidates' rows and fills every
+    #: candidate-level feature with NULL, raising nothing — so this mapping is
+    #: the assertion, not a detail.
+    BUILD_MONTHS = {
+        "build_train_model_input": "candidate_feature_table_train_months",
+        "build_train_dev_model_input": "candidate_feature_table_train_months",
+        "build_val_model_input": "candidate_feature_table_val_months",
+        "build_test_model_input": "candidate_feature_table_test_months",
+    }
 
     def _by_name(self):
         return {n.name: n for n in create_pipeline().nodes}
@@ -467,31 +480,32 @@ class TestCandidateFeatureTableWiring:
             name for name, node in self._by_name().items() if self.TABLE in node.inputs
         } == {
             "validate_data_consistency", "fit_preprocessor_metadata",
-            "validate_numeric_precision",
-            "build_train_model_input", "build_train_dev_model_input",
-            "build_val_model_input", "build_test_model_input",
+            "validate_numeric_precision", *self.BUILD_MONTHS,
         }
 
-    def test_the_months_reach_exactly_the_nodes_that_read_rows_of_it(self):
-        """The gate reads its columns only and the fit restricts to the train
-        months itself; the precision check and the builds read rows of the
-        months this run reads."""
-        assert {
-            name for name, node in self._by_name().items() if self.MONTHS in node.inputs
-        } == {
-            "validate_numeric_precision",
-            "build_train_model_input", "build_train_dev_model_input",
-            "build_val_model_input", "build_test_model_input",
-        }
+    def test_each_build_reads_its_own_splits_months(self):
+        import inspect
 
-    def test_each_binds_to_the_parameter_of_its_own_name(self):
+        by_name = self._by_name()
+        for name, months in self.BUILD_MONTHS.items():
+            node = by_name[name]
+            params = list(inspect.signature(node.func).parameters)
+            assert node.inputs[params.index("candidate_feature_table_months")] == months, name
+            assert [i for i in node.inputs if i.endswith("_months")] == [months], name
+
+    def test_the_precision_gate_reads_all_three_in_its_own_parameters(self):
+        import inspect
+
+        node = self._by_name()["validate_numeric_precision"]
+        params = list(inspect.signature(node.func).parameters)
+        for split in ("train", "val", "test"):
+            name = f"candidate_feature_table_{split}_months"
+            assert node.inputs.index(name) == params.index(name)
+
+    def test_the_table_binds_to_the_parameter_of_its_own_name(self):
         import inspect
 
         for node in create_pipeline().nodes:
-            params = list(inspect.signature(node.func).parameters)
-            for name in (self.TABLE, self.MONTHS):
-                if name in node.inputs:
-                    assert node.inputs.index(name) == params.index(name), (
-                        f"{node.name}: {name} is input #{node.inputs.index(name)} "
-                        f"but parameter #{params.index(name)}"
-                    )
+            if self.TABLE in node.inputs:
+                params = list(inspect.signature(node.func).parameters)
+                assert node.inputs.index(self.TABLE) == params.index(self.TABLE), node.name

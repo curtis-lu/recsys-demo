@@ -31,6 +31,7 @@ from recsys_tfb.pipelines.dataset.month_plans import (
     SnapDatePlan,
     build_month_plans,
     candidate_feature_table_months,
+    candidate_months_input,
     collect_dataset_snap_dates,
     landed_months,
     month_plan_input,
@@ -451,14 +452,15 @@ class TestPlanIncrementalSnapDates:
 
 
 class TestCandidateFeatureTableMonths:
-    """Which months of the candidate-level feature table this run reads (ADR-0026).
+    """Which months of the candidate-level feature table each build reads (ADR-0026).
 
-    That table is never landed, so this is not an incremental plan: every run
-    that builds train / train_dev / val reads their months in full, and the test
-    build reads exactly the test months its own plan still has to process. The
-    list is what both the B8 scan and the month-presence check cover, and what
-    ``build_model_input`` filters the table to, so "checked" and "read" are one
-    set by construction.
+    That table is never landed, so this is not an incremental plan. Each build
+    reads its own split's months only: the train and train_dev builds the train
+    months, the val build the val months, the test build the test months its
+    own plan still has to process. B8 scans the union. A build handed another
+    split's list would find none of its candidates' rows — every
+    candidate-level feature NULL, without an error — so the split a list
+    belongs to is part of what is asserted.
     """
 
     def _test_plan(self, *to_process):
@@ -468,21 +470,27 @@ class TestCandidateFeatureTableMonths:
             skipped=[m for m in TEST_MONTHS if m not in processed],
         )
 
-    def test_a_full_run_reads_train_val_and_the_unlanded_test_months(self):
+    def test_each_split_reads_its_own_months(self):
         """The landed test month (2026-04-30) is read by nothing this run
-        builds, so it is not in the list."""
+        builds, so it is in no list."""
         assert candidate_feature_table_months(
             PARAMS, self._test_plan("2026-05-31"), only_test_months=False,
-        ) == _ts("2026-01-31", "2026-03-31", "2026-05-31")
+        ) == {
+            "train": _ts("2026-01-31"),
+            "val": _ts("2026-03-31"),
+            "test": _ts("2026-05-31"),
+        }
 
     def test_only_test_months_reads_the_unlanded_test_months_alone(self):
         """The mode exists to make adding an eval month cheap; scanning the train
         months of the biggest table in the deployment would undo that."""
         assert candidate_feature_table_months(
             PARAMS, self._test_plan("2026-05-31"), only_test_months=True,
-        ) == _ts("2026-05-31")
+        ) == {"train": [], "val": [], "test": _ts("2026-05-31")}
 
-    def test_nothing_left_to_do_reads_nothing_under_only_test_months(self):
-        assert candidate_feature_table_months(
-            PARAMS, self._test_plan(), only_test_months=True,
-        ) == []
+    def test_each_list_has_its_own_catalog_name(self):
+        assert [candidate_months_input(s) for s in ("train", "val", "test")] == [
+            "candidate_feature_table_train_months",
+            "candidate_feature_table_val_months",
+            "candidate_feature_table_test_months",
+        ]

@@ -3880,12 +3880,16 @@ class TestDatasetRegistersTheCandidateTable:
 
         assert "candidate_feature_table" not in loaded
 
-    def test_the_months_are_train_and_the_unlanded_test_months(self, tmp_path):
+    def test_each_split_gets_its_own_months(self, tmp_path):
         """2026-01-31 already landed in test_model_input, so no build reads it."""
         loaded, _ = _run_dataset_command(tmp_path, ["dataset"])
 
-        assert loaded["candidate_feature_table_months"] == [
-            pd.Timestamp("2025-12-31"), pd.Timestamp("2026-02-28"),
+        assert loaded["candidate_feature_table_train_months"] == [
+            pd.Timestamp("2025-12-31"),
+        ]
+        assert loaded["candidate_feature_table_val_months"] == []
+        assert loaded["candidate_feature_table_test_months"] == [
+            pd.Timestamp("2026-02-28"),
         ]
 
     def test_only_test_months_reads_the_unlanded_test_months_alone(self, tmp_path):
@@ -3893,7 +3897,8 @@ class TestDatasetRegistersTheCandidateTable:
             tmp_path, ["dataset", "--only-test-months"],
         )
 
-        assert loaded["candidate_feature_table_months"] == [
+        assert loaded["candidate_feature_table_train_months"] == []
+        assert loaded["candidate_feature_table_test_months"] == [
             pd.Timestamp("2026-02-28"),
         ]
 

@@ -277,8 +277,9 @@ class TestTrainingPipelineE2E:
         from recsys_tfb.core.runner import Runner
         from recsys_tfb.pipelines.dataset import create_pipeline as create_dataset_pipeline
         from recsys_tfb.pipelines.dataset.month_plans import (
-            CANDIDATE_FEATURE_TABLE, CANDIDATE_FEATURE_TABLE_MONTHS,
-            build_month_plans, candidate_feature_table_months, month_plan_input,
+            CANDIDATE_FEATURE_TABLE, build_month_plans,
+            candidate_feature_table_months, candidate_months_input,
+            month_plan_input,
         )
 
         # -- Synthetic source tables --
@@ -396,11 +397,10 @@ class TestTrainingPipelineE2E:
         # deployment (ADR-0026); `None` is how the nodes learn none is declared,
         # which is what the CLI registers in that case.
         catalog.add(CANDIDATE_FEATURE_TABLE, MemoryDataset(None))
-        catalog.add(CANDIDATE_FEATURE_TABLE_MONTHS, MemoryDataset(
-            candidate_feature_table_months(
-                parameters, _plans["test_model_input"], only_test_months=False,
-            )
-        ))
+        for _split, _months in candidate_feature_table_months(
+            parameters, _plans["test_model_input"], only_test_months=False,
+        ).items():
+            catalog.add(candidate_months_input(_split), MemoryDataset(_months))
         for name in (
             "sample_keys", "train_keys", "train_dev_keys", "val_keys", "test_keys",
             "train_set", "train_dev_set", "val_set", "test_set",
