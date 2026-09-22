@@ -1,14 +1,14 @@
 {
   "measured": {
     "date": "2026-09-22",
-    "code_commit": "26fe13a5",
-    "how": "run_e2e.sh 跑 feat/380-multi-feature-tables（已 rebase 到 #429 之後的 main b2013438）：這組 conf 宣告候選層級特徵表（catalog 的 candidate_feature_table ＝ feature_realtime，ADR-0026），feature_realtime 多帶 request_id、primary_key 改成 identity。打開之前，以 main 的 examples/ad 與本分支的程式碼跑 --compare，六層逐值與上一版基準（#429）相同。打開之後與上一版逐層比對：source_etl 的 feature_table、label_table、sample_pool、inference_population 四張逐值相同，只有 feature_realtime（改名 candidate_feature_table 記在這層）因多一欄 request_id 而變；versions 的 train_variant_id 相同、base_dataset_version 因候選層級表的 schema 進版本而變；dataset 的 category_mappings.json 相同（候選層級表沒有類別欄），preprocessor.json 多三個特徵、四個 model_input 因此改變；training、evaluation 隨模型改變（baseline_metrics.json、segment_columns.json、diagnosis/item_ability.json 不變）；inference 層拿掉——離線推論在入口被 A47 擋下。本檔即那次執行的 data/digest.json。"
+    "code_commit": "33ffc498",
+    "how": "run_e2e.sh 跑 feat/430-ap-hpo-objectives（main d0a23ff8 之後）：這組 conf 的 training.hpo_objective 從 macro_per_item_map 改成 pooled_average_precision（#430）。改之前，以本分支的程式碼、原本的 conf 跑 --compare，六層逐值與上一版基準（#380）相同。改之後與上一版逐層比對：source_etl、dataset 逐值相同；versions 只有 model_version 變（hpo_objective 在 model_version 的雜湊裡），base_dataset_version、train_variant_id 相同；training、evaluation 隨挑中的 trial 改變——5 個 trial 都在 Optuna 的隨機起始階段，兩個目標試的是同一組參數，舊目標挑中 learning_rate≈0.031／num_leaves=31，新目標挑中 learning_rate≈0.121／num_leaves=10。本檔即改之後那次的 data/digest.json。"
   },
   "noisy": {},
   "versions": {
     "base_dataset_version": "57a59828",
     "train_variant_id": "f6541cb7",
-    "model_version": "2121332c"
+    "model_version": "993f5908"
   },
   "source_etl": {
     "feature_table": {
@@ -213,7 +213,7 @@
   "training": {
     "training_eval_predictions": {
       "rows": 2925,
-      "hash": "-618630083271022297098",
+      "hash": "-73173124603049425266",
       "columns": [
         "ad_creative",
         "label",
@@ -234,7 +234,7 @@
     },
     "diagnosis/config_shift.json": {
       "leaves": 228,
-      "hash": "5658aa67d2681981a74c102e93b1ff0d013658c1e277bc7c72bd77dc930ee11a"
+      "hash": "1e5cc170fade31b70f8afe2d24a5e2eb68bf96257f3c46f24c8c92b6be08d81c"
     },
     "diagnosis/item_ability.json": {
       "leaves": 3,
@@ -242,27 +242,27 @@
     },
     "diagnosis/metric_ci.json": {
       "leaves": 88,
-      "hash": "a60c4a1e3f7d3e8af23cbed97d0780b426cf1fb56bbadc70b7aac269fc78a2dc"
+      "hash": "8acc122c443110262d4395695973f87db975cb1570746ad747156826a0b0eb05"
     },
     "diagnosis/model_capacity.json": {
       "leaves": 327,
-      "hash": "b789cc5e47bd610e0092b48af636a548aceaebc63ccce64569421f94a6c6f040"
+      "hash": "406f027a1104727c473a596cad0be349141ec3f00262f04b33bae4a9f8dc5a60"
     },
     "diagnosis/suppression.json": {
-      "leaves": 3390,
-      "hash": "6e7d8fee1cc725a75db17a12bf34ac499bd3f0b4bafa0e985d40463ee17a93f7"
+      "leaves": 3364,
+      "hash": "6592bb03e1ed688b0e9e52c46f176750fabf4272f1f99bb765474be45398caad"
     },
     "metrics.json": {
       "leaves": 926,
-      "hash": "bbc6e9d962186b0d74a3c43fe0a9976df9d7fa823ce961c642a9cd665d0a19e0"
+      "hash": "71930b04ef148f1378ac5c66e4b0909931828837fffd8cbaab6df569058fe644"
     },
     "prediction_quality.json": {
-      "leaves": 12790,
-      "hash": "676500cfbb20166a03212cee6cf830256d7841cc08987dc274fe51fecc9b7a25"
+      "leaves": 12470,
+      "hash": "6cc58c26002c0691b62f455a1ce04e9d9110bca33c0d27d1ee16efa20cc8ac97"
     },
     "report_aggregates.json": {
-      "leaves": 2045,
-      "hash": "5c300cacbcd93bda41f77c79f9fe1f012c9fbcce2470694d28fc599793cc49fd"
+      "leaves": 2053,
+      "hash": "1df4752e28733a03cc9a67152755b08854e4b2398c6e2f0faf40b2996dda4adb"
     },
     "segment_columns.json": {
       "leaves": 2,
