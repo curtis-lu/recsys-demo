@@ -2,13 +2,13 @@
 -- 一次曝光一列：曝光那一刻之前的即時特徵。
 --
 -- 這是這個示例的候選層級特徵表（ADR-0026）：catalog 的 candidate_feature_table 指到它，
--- dataset 以 identity (snap_date, user_id, slot_id, request_id, ad_creative) 把它接到每一列
--- 候選上。identity 的每一欄都要在輸出裡；一次請求裡素材不重複，所以這組鍵唯一
+-- dataset 以 identity (snap_date, user_id, slot_id, request_id, item) 把它接到每一列
+-- 候選上（item 由 campaign_id、creative_format 拼成，框架讀入時拼，ADR-0027）。identity 的每一欄都要在輸出裡；一次請求裡素材不重複，所以這組鍵唯一
 -- （parameters_feature_etl.yaml 的 primary_key 守這一條）。impression_id 與 event_ts 不是
 -- 特徵，parameters_dataset.yaml 的 drop_columns 把它們排除。
 --
 -- 想改回形狀一（宣告 event ＝ impression_id、不宣告 occasion）：identity 變成
--- (snap_date, user_id, slot_id, ad_creative, impression_id)，這張表本來就帶 impression_id，
+-- (snap_date, user_id, slot_id, item, impression_id)，這張表本來就帶 impression_id，
 -- 只要把 primary_key 換掉、request_id 從 SELECT 拿掉。
 --
 -- 不偷看的界線：瀏覽只算 [曝光前 30 分鐘, 曝光那一刻)。上界寫成 <= 或往後放寬都會出事——
@@ -30,7 +30,7 @@ imp AS (
         i.user_id,
         i.slot_id,
         i.campaign_id,
-        concat(i.campaign_id, '-', i.creative_format) AS ad_creative
+        i.creative_format
     FROM ${raw_db}.impression_log i
     CROSS JOIN week w
     WHERE i.event_date >= w.snap_date
@@ -58,14 +58,15 @@ SELECT
     i.user_id,
     i.slot_id,
     i.request_id,
-    i.ad_creative,
+    i.campaign_id,
+    i.creative_format,
     i.impression_id,
     i.event_ts,
     r.browse_30m,
     r.browse_same_category_30m,
     -- 與產生器的疲乏效果同一個定義：同一週、同一版位、同一素材，在這次之前曝光過幾次
     COUNT(*) OVER (
-        PARTITION BY i.snap_date, i.user_id, i.slot_id, i.ad_creative
+        PARTITION BY i.snap_date, i.user_id, i.slot_id, i.campaign_id, i.creative_format
         ORDER BY i.event_ts, i.impression_id
         ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
     ) AS prior_exposures_this_week

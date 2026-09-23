@@ -27,7 +27,9 @@ schema:
     # （pipelines/source_etl/checks.py），換名 source_etl 就壞。
     time: snap_date
     entity: [user_id, slot_id]   # 替「某個使用者在某個版位」排一次
-    item: ad_creative            # 活動 × 素材格式，在 label／sample_pool SQL 拼成一欄
+    # 活動 × 素材格式。SQL 不拼：框架讀使用者的表時用 - 拼成一欄，欄名固定叫 item
+    # （ADR-0027、#394）。框架自己寫的表、下面的清單與其他 conf 都用拼好的值與 item 這個欄名。
+    item: [campaign_id, creative_format]
     # 形狀二（ADR-0021、ADR-0025、#428）：一次請求（到秒）展示好幾個素材，query
     # group ＝ snap_date ＋ entity ＋ occasion；identity 多了 request_id，排在 item
     # 之前（occasion 在 entity 與 item 之間，event 才排在 item 之後）。
@@ -49,7 +51,7 @@ schema:
   # item 清單逐一列出；改成「從資料數」是 #379。必須等於 generate_data.py 產出的組合
   # （tests/examples/test_ad_example.py 守這一條）。
   categorical_values:
-    ad_creative:
+    item:
       - c01-banner
       - c01-native
       - c01-video

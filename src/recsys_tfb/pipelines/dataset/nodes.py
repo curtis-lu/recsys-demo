@@ -40,8 +40,11 @@ from recsys_tfb.core.consistency import (
     candidate_feature_table_key_errors,
     carry_column_collision_errors,
     categorical_dtype_errors,
+    combined_item_collision_errors,
     feature_table_overlap_errors,
     item_coverage_errors,
+    item_source_column_errors,
+    item_source_dtype_errors,
     nonnumeric_feature_errors,
     optional_role_source_column_errors,
     ColumnPrecision,
@@ -59,6 +62,7 @@ from recsys_tfb.core.consistency import (
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_entity_grouping, get_schema
 from recsys_tfb.utils.hashing import ratio_to_threshold, spark_bucket
+from recsys_tfb.utils.item_columns import combine_item_columns, combined_item_value
 from recsys_tfb.pipelines.dataset.steps.categoricals import (
     collect_vocabularies_from_data,
     read_declared_vocabularies,
@@ -131,8 +135,8 @@ def validate_data_consistency(
     parameters: dict,
     candidate_feature_table: DataFrame | None = None,
 ) -> None:
-    """Run the Layer-2 invariants (B1, B5, B6, B7, B11, B12, B13, B14) against
-    the source tables.
+    """Run the Layer-2 invariants (B1, B5, B6, B7, B11–B17) against the source
+    tables.
 
     ``candidate_feature_table`` is the candidate-level feature table when one is
     declared, ``None`` otherwise (ADR-0026). Its columns can be features just as
@@ -146,7 +150,10 @@ def validate_data_consistency(
     adding a predicate there and one term to the sum below; deciding anything
     here would put a second, drifting copy of the rule next to the real one.
 
-    All errors are collected and raised once so a single fix pass clears them.
+    Errors are collected and raised once so a single fix pass clears them —
+    except B16, which is raised on its own first: every item check reads the
+    columns it is about, so with one missing those checks would fail as a
+    Spark error rather than report.
 
     Cost invariant (ADR-0006): the facts gathered here are cheap ones. Column
     types come from the metastore — metadata, no rows. The item values come from
@@ -158,19 +165,71 @@ def validate_data_consistency(
     """
     schema = get_schema(parameters)
     item = schema["item"]
+    item_sources = schema["item_source_columns"]
     time_col = schema["time"]
     label_col = schema["label"]
     identity_cols = schema["identity_columns"]
     windows = collect_dataset_snap_dates(parameters)
 
-    def _distinct_items(df: DataFrame) -> set:
+    def _raise_if_any(errors: list[str]) -> None:
+        if errors:
+            raise DataConsistencyError(
+                "Data consistency check failed ("
+                + str(len(errors))
+                + " issue(s)):\n- "
+                + "\n- ".join(errors)
+            )
+
+    # B16 first, and on its own: every item check below reads the columns it
+    # is about, so with one missing they would fail as a Spark error rather
+    # than report. Column names only. A no-op for a single-column item.
+    item_tables = {"sample_pool": sample_pool, "label_table": label_table}
+    if candidate_feature_table is not None:
+        item_tables["candidate_feature_table"] = candidate_feature_table
+    _raise_if_any([
+        e for table, df in item_tables.items()
+        for e in item_source_column_errors(schema, table, df.columns)
+    ])
+    # B17 reads the tables as the user wrote them, before combining turns
+    # the item columns into one text column.
+    item_dtype_errors = item_source_dtype_errors(
+        schema, {table: dict(df.dtypes) for table, df in item_tables.items()},
+    )
+
+    def _item_combinations(df: DataFrame) -> list[tuple[tuple, object]]:
+        """Distinct ``(source values, item value)`` in the dataset windows.
+
+        One distinct serves B1 (the values) and B15 (which combinations share
+        a value). For a single-column item the select is the item column
+        alone, exactly the query B1 always ran; a multi-column item adds its
+        source columns, and the combined value is computed by the same Spark
+        expression every entry combines with, so B15 judges what the
+        pipelines will actually see.
+        """
+        combined = (
+            [] if len(item_sources) == 1
+            else [combined_item_value(item_sources).alias(item)]
+        )
         rows = (
             df.filter(F.col(time_col).isin(windows))
-            .select(item)
+            .select(*item_sources, *combined)
             .distinct()
             .collect()
         )
-        return {r[item] for r in rows if r[item] is not None}
+        return [(tuple(r[c] for c in item_sources), r[item]) for r in rows]
+
+    def _values(combinations) -> set:
+        return {value for _, value in combinations if value is not None}
+
+    sample_pool_items = _item_combinations(sample_pool)
+    label_items = _item_combinations(label_table)
+    # Decision — a multi-column item is combined on read (ADR-0027), so the
+    # candidate table's features and join key below are what the build will
+    # see: `item` present, its source columns gone.
+    if candidate_feature_table is not None:
+        candidate_feature_table = combine_item_columns(
+            candidate_feature_table, schema, "candidate_feature_table",
+        )
 
     drop_cols, categorical_cols = prepare_model_input_config(parameters)
     carry_cols = parameters.get("dataset", {}).get("carry_columns") or []
@@ -204,9 +263,17 @@ def validate_data_consistency(
         item_coverage_errors(
             item,
             resolved_item_values(parameters),
-            _distinct_items(sample_pool),
-            _distinct_items(label_table),
+            _values(sample_pool_items),
+            _values(label_items),
         )
+        # B15 — two combinations of a multi-column item may not combine to one
+        # value. Both tables together: a label whose combination collides with
+        # a candidate's would join that candidate.
+        + combined_item_collision_errors(
+            item_sources, sample_pool_items + label_items,
+        )
+        # B17 — one type per item column across the tables (read above).
+        + item_dtype_errors
         # B5 and B7 once per feature table, so each message names the table
         # that holds the column. Empty for a table that is not declared.
         + categorical_dtype_errors(categorical_cols, ft_dtypes)
@@ -257,13 +324,7 @@ def validate_data_consistency(
             feature_table.columns, candidate_feature_table.columns,
             drop_cols, identity_cols, label_col,
         )
-    if errors:
-        raise DataConsistencyError(
-            "Data consistency check failed ("
-            + str(len(errors))
-            + " issue(s)):\n- "
-            + "\n- ".join(errors)
-        )
+    _raise_if_any(errors)
 
 
 def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
@@ -284,6 +345,9 @@ def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
     schema = get_schema(parameters)
     time_col = schema["time"]
     identity_key = schema["identity_columns"]
+    # Decision — a multi-column item is combined into one column on read
+    # (ADR-0027); a single declared column comes back untouched.
+    sample_pool = combine_item_columns(sample_pool, schema, "sample_pool")
 
     ds = parameters["dataset"]
     seed = parameters.get("random_seed", 42)
@@ -465,6 +529,9 @@ def select_val_keys(
     schema = get_schema(parameters)
     time_col = schema["time"]
     identity_key = schema["identity_columns"]
+    # Decision — a multi-column item is combined into one column on read
+    # (ADR-0027); a single declared column comes back untouched.
+    sample_pool = combine_item_columns(sample_pool, schema, "sample_pool")
 
     ds = parameters["dataset"]
     val_dates = [pd.Timestamp(d) for d in ds.get("val_snap_dates", [])]
@@ -507,6 +574,9 @@ def select_test_keys(
     schema = get_schema(parameters)
     time_col = schema["time"]
     identity_key = schema["identity_columns"]
+    # Decision — a multi-column item is combined into one column on read
+    # (ADR-0027); a single declared column comes back untouched.
+    sample_pool = combine_item_columns(sample_pool, schema, "sample_pool")
 
     test_labels = sample_pool.filter(months_filter_as_date(time_col, month_plan.to_process))
     all_keys = test_labels.select(*identity_key).dropDuplicates()
@@ -578,6 +648,15 @@ def fit_preprocessor_metadata(
 
     ds = parameters.get("dataset", {})
     train_months = [pd.Timestamp(d) for d in ds["train_snap_dates"]]
+
+    # Decision — a multi-column item is combined on read (ADR-0027), and the
+    # source columns go with it: every non-identity column of this table is a
+    # feature, so left in they would become two features the model never had
+    # when the SQL combined them.
+    if candidate_feature_table is not None:
+        candidate_feature_table = combine_item_columns(
+            candidate_feature_table, schema, "candidate_feature_table",
+        )
 
     # Pre-check: a dataset must be reproducible from feature_table, so a train
     # month that is not there is an error rather than a smaller fit. Timed
@@ -1066,6 +1145,14 @@ def build_model_input(
 
     feature_columns = preprocessor_metadata["feature_columns"]
 
+    # Decision — a multi-column item is combined on read (ADR-0027); a single
+    # declared column comes back untouched. Both tables are the user's own.
+    label_table = combine_item_columns(label_table, schema, "label_table")
+    if candidate_feature_table is not None:
+        candidate_feature_table = combine_item_columns(
+            candidate_feature_table, schema, "candidate_feature_table",
+        )
+
     # Pre-check: keys' grain IS model_input's grain (ADR-0005). This used to
     # fall back to a base-key-only label join when item was absent, which
     # silently multiplied every (time, entity) by label_table's item count and
@@ -1378,6 +1465,9 @@ def filter_train_keys(
     if ratio >= 1.0:
         log_zero_positive_group_draw("train", ratio, None)
         return keys
+
+    # Decision — a multi-column item is combined on read (ADR-0027).
+    label_table = combine_item_columns(label_table, schema, "label_table")
 
     # Decision — whether a group holds a positive is read from label_table,
     # never from a label column sample_pool may carry. That copy is the user's

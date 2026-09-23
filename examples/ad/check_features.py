@@ -31,7 +31,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from generate_data import (  # noqa: E402
-    CAMPAIGN_CATEGORY, ITEM_SEPARATOR, RECENT_WINDOW_SECONDS, generate, week_of,
+    CAMPAIGN_CATEGORY, RECENT_WINDOW_SECONDS, generate, week_of,
 )
 
 REALTIME_COLUMNS = ["browse_30m", "browse_same_category_30m", "prior_exposures_this_week"]
@@ -77,16 +77,17 @@ def browse_counts(tables: dict, start: int, end: int) -> pd.DataFrame:
 def realtime_features(tables: dict) -> pd.DataFrame:
     """feature_realtime.sql 該算出的每一列：只看曝光那一秒之前。"""
     imp = tables["impression_log"]
-    out = imp[["impression_id", "request_id", "user_id", "slot_id", "event_ts"]].assign(
+    out = imp[["impression_id", "request_id", "user_id", "slot_id", "event_ts",
+               "campaign_id", "creative_format"]].assign(
         snap_date=week_of(imp["event_date"]),
-        ad_creative=imp["campaign_id"] + ITEM_SEPARATOR + imp["creative_format"],
     )
     recent = browse_counts(tables, -RECENT_WINDOW_SECONDS, 0).rename(columns={
         "any_category": "browse_30m", "same_category": "browse_same_category_30m",
     })
     out = out.merge(recent, on="impression_id")
     ordered = out.sort_values(["event_ts", "impression_id"], kind="mergesort")
-    out["prior_exposures_this_week"] = ordered.groupby(["snap_date", "user_id", "slot_id", "ad_creative"]).cumcount()
+    out["prior_exposures_this_week"] = ordered.groupby(
+        ["snap_date", "user_id", "slot_id", "campaign_id", "creative_format"]).cumcount()
     return out
 
 
@@ -193,7 +194,8 @@ def main() -> None:
     failures = [
         *_mismatches(want_realtime, got_realtime, ["impression_id"],
                      # identity 各欄也比：dataset 以它們接這張表（ADR-0026），接錯鍵比算錯值更難發現
-                     ["snap_date", "user_id", "slot_id", "request_id", "ad_creative", "event_ts",
+                     ["snap_date", "user_id", "slot_id", "request_id", "campaign_id",
+                      "creative_format", "event_ts",
                       *REALTIME_COLUMNS],
                      "feature_realtime"),
         *_mismatches(want_profile, got_profile, ["snap_date", "user_id"], ["profile_snap_date"], "feature_user"),

@@ -6,6 +6,11 @@ no defaults and must be declared; the three this framework produces itself
 (label / score / rank) do. Two roles are optional (occasion, event) — absent
 unless the deployment declares them, and absent is what every existing
 deployment is.
+
+``item`` may name several columns (#394, ADR-0027). They are combined on read
+into one column called :data:`COMBINED_ITEM_COLUMN` — see
+``recsys_tfb.utils.item_columns`` — so the resolved ``item`` is always one
+column name and nothing downstream needs to know.
 """
 
 import copy
@@ -75,7 +80,22 @@ _DEFAULTS = {
 }
 
 
-_SCALAR_KEYS = ("time", "item", "label", "score", "rank")
+_SCALAR_KEYS = ("time", "label", "score", "rank")
+
+
+#: The column a multi-column ``item`` is combined into (ADR-0027 decision 1).
+#: Fixed rather than user-named: ``item`` is a role, and the user has no reason
+#: to invent a name for it. :func:`get_schema` resolves ``item`` to this name
+#: only when two or more columns are declared; a single column keeps its own
+#: name, so no existing deployment's column — or version ID — moves.
+COMBINED_ITEM_COLUMN = "item"
+
+#: What a multi-column item's values are joined with (ADR-0027 decision 2).
+#: Fixed, not configurable: values that themselves hold a ``-`` are normal and
+#: fine; only two different combinations producing the same value break
+#: anything, and B15 refuses that. Lives here, beside the column name, so the
+#: combining code and the invariant messages read one constant.
+ITEM_SEPARATOR = "-"
 
 
 #: The column lists :func:`get_schema` derives. None of them is settable: under
@@ -260,6 +280,52 @@ def _check_multi_column_role(role: str, value) -> None:
     )
 
 
+def _check_combined_item(schema: dict) -> None:
+    """A multi-column ``item`` must be combinable without losing a column.
+
+    Combining writes :data:`COMBINED_ITEM_COLUMN` and then drops the source
+    columns (``recsys_tfb.utils.item_columns``). So: a source column that is
+    also another role's column would be dropped from under that role; a source
+    named twice is a typo; and any role column named ``item`` would be
+    overwritten by the combined value. Nothing to check for a single column —
+    nothing is combined, renamed or dropped.
+    """
+    sources = schema["item_source_columns"]
+    if len(sources) < 2:
+        return
+    repeated = sorted({c for c in sources if sources.count(c) > 1})
+    if repeated:
+        raise ValueError(
+            "Invalid schema.columns in parameters.yaml: 'item' names a column "
+            f"more than once: {', '.join(repeated)}"
+        )
+    # Every other role's columns, listed from the roles rather than as
+    # `identity_columns` minus `item`: that subtraction would also remove a
+    # role column that happens to be named `item` — the very clash checked
+    # below.
+    other_roles = (
+        [schema["time"]]
+        + schema["entity"]
+        + [c for role in OPTIONAL_ROLE_KEYS for c in schema.get(role, [])]
+    )
+    if COMBINED_ITEM_COLUMN in sources + other_roles:
+        raise ValueError(
+            "Invalid schema.columns in parameters.yaml: 'item' lists several "
+            "columns, which are combined into one column named "
+            f"'{COMBINED_ITEM_COLUMN}' — so no column may be named "
+            f"'{COMBINED_ITEM_COLUMN}' in any role. Rename that column in "
+            "your source SQL."
+        )
+    shared = [c for c in sources if c in other_roles]
+    if shared:
+        raise ValueError(
+            "Invalid schema.columns in parameters.yaml: 'item' combines "
+            f"columns that another role also names: {', '.join(shared)}. "
+            "The item columns are dropped once combined, so that role would "
+            "lose its column."
+        )
+
+
 def get_schema(parameters: dict) -> dict:
     """Return column schema from parameters.
 
@@ -267,8 +333,11 @@ def get_schema(parameters: dict) -> dict:
     :data:`_REQUIRED_ROLES` must be declared there; ``label`` / ``score`` /
     ``rank`` fall back to :data:`_DEFAULTS`.
 
-    The ``entity`` field is always normalised to a list. Three derived column
-    lists are appended -- see :data:`_DERIVED_KEYS` for what each one means and
+    The ``entity`` field is always normalised to a list. ``item`` is always one
+    column name: a single declared column keeps its name, several resolve to
+    :data:`COMBINED_ITEM_COLUMN`, and ``item_source_columns`` lists the
+    columns it is made of in the user's own tables (ADR-0027). Three derived
+    column lists are appended -- see :data:`_DERIVED_KEYS` for what each one means and
     why they are separate keys rather than one.
     ``categorical_values`` is sourced from ``parameters["schema"]["categorical_values"]``
     (default ``{}``) and provides explicit category declarations for columns
@@ -280,8 +349,8 @@ def get_schema(parameters: dict) -> dict:
             ``schema`` key).
 
     Returns:
-        A new dict with keys: time, entity, item, label, score, rank,
-        query_group_columns, base_key_columns, identity_columns,
+        A new dict with keys: time, entity, item, item_source_columns, label,
+        score, rank, query_group_columns, base_key_columns, identity_columns,
         categorical_values — plus ``occasion`` / ``event`` (each normalised
         to a list) when the config declares it, and no such key at all when
         it does not.
@@ -312,6 +381,15 @@ def get_schema(parameters: dict) -> dict:
     # Normalise entity to list
     if isinstance(schema["entity"], str):
         schema["entity"] = [schema["entity"]]
+
+    # `item` resolves to one column name whatever was declared (ADR-0027). A
+    # one-element list is the single column it names — not combined, not
+    # renamed — so `item: [prod_name]` and `item: prod_name` are the same
+    # deployment, down to the version ID.
+    declared_item = schema["item"]
+    sources = [declared_item] if isinstance(declared_item, str) else list(declared_item)
+    schema["item_source_columns"] = sources
+    schema["item"] = sources[0] if len(sources) == 1 else COMBINED_ITEM_COLUMN
 
     # Same normalisation for every optional role, but only when declared: an
     # undeclared one must stay absent, not become [] — `"event" in schema` is
@@ -384,16 +462,26 @@ def get_schema_for_hash(parameters: dict) -> dict:
         + [r for r in OPTIONAL_ROLE_KEYS if r in schema]
         + ["categorical_values"]
     )
-    return {k: schema[k] for k in keys}
+    payload = {k: schema[k] for k in keys}
+    # A combined item hashes as the columns it is made of, in order. The
+    # resolved name alone would give a deployment combining two columns the
+    # same version ID as one whose single item column is literally named
+    # `item`. A single column stays a string, so its payload is unmoved.
+    if len(schema["item_source_columns"]) > 1:
+        payload["item"] = list(schema["item_source_columns"])
+    return payload
 
 
 def validate_schema_config(parameters: dict) -> None:
     """Validate the shape of ``parameters["schema"]``.
 
     Enforces:
-    - Scalar keys (time, item, label, score, rank) must be non-empty strings.
-    - ``entity`` — and ``occasion`` / ``event`` when declared — must be a
-      non-empty string or a non-empty list of non-empty strings.
+    - Scalar keys (time, label, score, rank) must be non-empty strings.
+    - ``entity`` and ``item`` — and ``occasion`` / ``event`` when declared —
+      must be a non-empty string or a non-empty list of non-empty strings.
+    - A multi-column ``item`` (ADR-0027): its columns are distinct, none is
+      another role's column (combining drops them), and no role's column is
+      named :data:`COMBINED_ITEM_COLUMN` (combining would overwrite it).
     - No key of ``schema.columns`` outside :data:`_SETTABLE_COLUMN_KEYS`
       (every unknown one reported at once).
     - ``identity_columns`` ([time] + entity + occasion + [item] + event) must
@@ -462,13 +550,17 @@ def validate_schema_config(parameters: dict) -> None:
     # block per role — `event` has exactly `entity`'s shape, and two copies of
     # this would be two messages to keep in step for no gain. The role name is
     # interpolated, so a user still reads about the key they wrote.
-    for role in ("entity", *OPTIONAL_ROLE_KEYS):
+    for role in ("entity", "item", *OPTIONAL_ROLE_KEYS):
         if role not in raw_columns:
             continue
         _check_multi_column_role(role, raw_columns[role])
 
-    # identity_columns uniqueness
     schema = get_schema(parameters)
+    # Before the identity check: with a combined item, a clash shows up there
+    # only as "duplicates" of the name `item`, which says nothing about why.
+    _check_combined_item(schema)
+
+    # identity_columns uniqueness
     identity = schema["identity_columns"]
     if len(identity) != len(set(identity)):
         raise ValueError(

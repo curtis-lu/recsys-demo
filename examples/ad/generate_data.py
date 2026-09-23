@@ -6,7 +6,8 @@
 ``docs/pipelines/source_etl.md`` §2 末段），所以 source_etl 在本機從沒被實跑過。
 
 資料形狀依 ADR-0021：一次曝光一列、帶到秒的時間；``time`` 是週（每週一），
-``entity`` 是使用者 × 版位，``item`` 是活動 × 素材格式在 SQL 裡拼成的一欄。
+``entity`` 是使用者 × 版位，``item`` 是活動 × 素材格式兩欄（conf 宣告成多欄，框架讀入時
+拼成一欄，ADR-0027）。
 
 一次請求可能展示好幾個素材（``request_id``，#428，形狀二）：同一使用者、同一版位、
 同一秒（同一次請求）底下，若干素材同時被排序——``request_id`` 就是這個分組。
@@ -65,7 +66,10 @@ WEEK_SECONDS = 7 * 24 * 3600
 # 所有時間欄都是這個時區的當地時間（與 conf/spark-local 的 session 時區相同）
 LOCAL_TZ = "Asia/Taipei"
 
-# item ＝ campaign_id + ITEM_SEPARATOR + creative_format（在 label_table／feature_realtime SQL 拼）。
+# item ＝ campaign_id + ITEM_SEPARATOR + creative_format。SQL 不拼：conf 宣告
+# item: [campaign_id, creative_format]，框架讀入時拼（ADR-0027），分隔字元是框架固定的
+# recsys_tfb.utils.item_columns.ITEM_SEPARATOR；這裡的常數只給產生器與 conf 的組合清單對照用，
+# 兩者相等由 tests/examples/test_ad_example.py 守。
 # 用 "-" 而不是 "|"：item 值會成為 Hive 分區目錄名、MLflow 指標名與檔名的一部分，
 # 那幾處對特殊字元的處理還沒驗過（規劃檔 P7a、P8 的範圍）。
 ITEM_SEPARATOR = "-"

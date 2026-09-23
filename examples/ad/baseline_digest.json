@@ -1,14 +1,14 @@
 {
   "measured": {
-    "date": "2026-09-22",
-    "code_commit": "54d88665",
-    "how": "run_e2e.sh 跑 feat/376-drop-all-positive-groups（main 1c09f0f8 之後）：evaluation 的 metrics.json 頂層與 category 各多一個鍵 n_all_positive_queries（全正的 query group 組數，#376；本 conf 不開 evaluation.query_filter.drop_all_positive_groups）。與上一版基準逐層比對：versions、source_etl、dataset、training 逐值相同；evaluation 只有 metrics.json 不同（葉數 926 → 928）。另以葉層級比對 metrics.json 等十份 JSON 與上一版基準那次的產物：既有的葉逐值相同（含 config_fingerprint），只多 n_all_positive_queries＝10 與 category.n_all_positive_queries＝24 兩個葉。本檔即這次的 data/digest.json。"
+    "date": "2026-09-23",
+    "code_commit": "e5179837",
+    "how": "run_e2e.sh 跑 feat/394-multi-column-item（main 54332710 之後）：conf 改成 item: [campaign_id, creative_format]，SQL 不再拼欄（#394、ADR-0027）。改 conf 之前先用同一份程式、舊 conf 跑一次 --compare，與上一版基準逐項相同。改 conf 之後與那一次的產物逐項比對（item 欄改名回 ad_creative、來源表的兩欄照 SQL 原本的拼法拼回去之後）：十張表的列數與內容指紋、十二份 JSON 的每一個葉都相同；不同的只有三類——版本號（三個都變）、欄名 ad_creative → item（框架寫的表、preprocessor.json／category_mappings.json 的鍵、prediction_quality.json 與 report_aggregates.json 記欄名的 6 個葉）、來源表 label_table／sample_pool／feature_realtime 從一欄 ad_creative 變成 campaign_id、creative_format 兩欄。本檔即這次的 data/digest.json。"
   },
   "noisy": {},
   "versions": {
-    "base_dataset_version": "57a59828",
-    "train_variant_id": "f6541cb7",
-    "model_version": "993f5908"
+    "base_dataset_version": "8504fb5e",
+    "train_variant_id": "d004c3c8",
+    "model_version": "5d22c8fa"
   },
   "source_etl": {
     "feature_table": {
@@ -35,11 +35,12 @@
     },
     "candidate_feature_table": {
       "rows": 38557,
-      "hash": "-2518555066127940306113",
+      "hash": "-715160499075507570285",
       "columns": [
-        "ad_creative",
         "browse_30m",
         "browse_same_category_30m",
+        "campaign_id",
+        "creative_format",
         "event_ts",
         "impression_id",
         "prior_exposures_this_week",
@@ -51,9 +52,10 @@
     },
     "label_table": {
       "rows": 38557,
-      "hash": "1425200945672896711904",
+      "hash": "893340567414605840107",
       "columns": [
-        "ad_creative",
+        "campaign_id",
+        "creative_format",
         "label",
         "request_id",
         "slot_id",
@@ -63,9 +65,10 @@
     },
     "sample_pool": {
       "rows": 38557,
-      "hash": "-586584585303264252891",
+      "hash": "95531265302109264128",
       "columns": [
-        "ad_creative",
+        "campaign_id",
+        "creative_format",
         "label",
         "request_id",
         "slot_id",
@@ -87,13 +90,13 @@
   "dataset": {
     "train_model_input": {
       "rows": 19674,
-      "hash": "-367066205161219122118",
+      "hash": "284176276504022446643",
       "columns": [
-        "ad_creative",
         "age_band",
         "browse_30m",
         "browse_same_category_30m",
         "device_type",
+        "item",
         "label",
         "page_type",
         "prior_exposures_this_week",
@@ -116,13 +119,13 @@
     },
     "train_dev_model_input": {
       "rows": 1982,
-      "hash": "183673932282069306634",
+      "hash": "-260873720878071339851",
       "columns": [
-        "ad_creative",
         "age_band",
         "browse_30m",
         "browse_same_category_30m",
         "device_type",
+        "item",
         "label",
         "page_type",
         "prior_exposures_this_week",
@@ -145,13 +148,13 @@
     },
     "val_model_input": {
       "rows": 2815,
-      "hash": "177897523210756211731",
+      "hash": "-422352597971009656283",
       "columns": [
-        "ad_creative",
         "age_band",
         "browse_30m",
         "browse_same_category_30m",
         "device_type",
+        "item",
         "label",
         "page_type",
         "prior_exposures_this_week",
@@ -174,13 +177,13 @@
     },
     "test_model_input": {
       "rows": 2925,
-      "hash": "316254049919087643977",
+      "hash": "19217265477447570792",
       "columns": [
-        "ad_creative",
         "age_band",
         "browse_30m",
         "browse_same_category_30m",
         "device_type",
+        "item",
         "label",
         "page_type",
         "prior_exposures_this_week",
@@ -203,11 +206,11 @@
     },
     "preprocessor.json": {
       "leaves": 57,
-      "hash": "3291cc71c7e2cd739e30c865e61675b091999050c7da360dd1440235a6c36f23"
+      "hash": "33d47066629354db72d39ef745d213ff4463054ccee86e8ffa769e1382058127"
     },
     "category_mappings.json": {
       "leaves": 29,
-      "hash": "1b329e0b09b839612efb67dfb9cf8053a060b70754c800a324ef795695b7a153"
+      "hash": "7e2acec44a93df9ea5eb516152b761011e47ca161f03f28a724aa857af408fe9"
     }
   },
   "training": {
@@ -215,7 +218,7 @@
       "rows": 2925,
       "hash": "-73173124603049425266",
       "columns": [
-        "ad_creative",
+        "item",
         "label",
         "request_id",
         "score",
@@ -258,11 +261,11 @@
     },
     "prediction_quality.json": {
       "leaves": 12470,
-      "hash": "6cc58c26002c0691b62f455a1ce04e9d9110bca33c0d27d1ee16efa20cc8ac97"
+      "hash": "cd539ab33d0d86c954964d14120f5b729b8b1e3a88568c50b826650822429852"
     },
     "report_aggregates.json": {
       "leaves": 2053,
-      "hash": "1df4752e28733a03cc9a67152755b08854e4b2398c6e2f0faf40b2996dda4adb"
+      "hash": "312a95de523f62d2dcbef5be8084e2e5b12bd1c8deb1837fd4c4f51dc07f195f"
     },
     "segment_columns.json": {
       "leaves": 2,

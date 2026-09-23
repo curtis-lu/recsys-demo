@@ -13,7 +13,7 @@ dataset:
   # ——所以不必像銀行示例的 cust_segment_typ 那樣同時列進 drop_columns（B7）。
   sample_group_keys:
     - "user_segment"
-    - "ad_creative"
+    - "item"
     - "label"
   # 熱門素材的負例抽一半：讓抽樣這條路真的被走到，不是為了模型好
   sample_ratio_overrides:
@@ -61,7 +61,7 @@ dataset:
       - "impression_id"   # candidate_feature_table 的曝光 ID：認得出列，不是特徵
       - "event_ts"        # 同上，曝光那一秒；即時特徵已經照它算好了
     categorical_columns:
-      - "ad_creative"
+      - "item"
       - "age_band"
       - "device_type"
       - "region"

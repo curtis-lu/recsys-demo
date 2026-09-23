@@ -581,7 +581,7 @@ harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--
 + the filesystem), A35 (the ``--var`` CLI flags).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
-+ B13 + B14 implemented and wired):
++ B13 + B14 + B15 + B16 + B17 implemented and wired):
 
 * B1 — sample_pool items ↔ declared items must be equal; label items ⊆
   declared items (unknown item values corrupt training or violate invariants).
@@ -785,6 +785,27 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
   ``feature_table`` and the candidate-level feature table. Both are joined onto
   the same row, so it would arrive twice. Predicate:
   ``feature_table_overlap_errors``. Wired in ``validate_data_consistency``.
+* B15 — two different combinations of a multi-column ``schema.columns.item``
+  combine to the same value (``a-b`` + ``c`` and ``a`` + ``b-c`` are both
+  ``a-b-c``), so two items would be counted, encoded and joined as one
+  (ADR-0027 decision 2). A value that merely holds a ``-`` is fine. Checked on
+  the distinct combinations ``sample_pool`` and ``label_table`` hold in the
+  dataset windows — the same distinct B1 already reads, widened to the source
+  columns, so no extra scan. Predicate: ``combined_item_collision_errors``.
+  Wired in ``validate_data_consistency``.
+* B16 — a table that carries items lacks one of a multi-column item's source
+  columns, or already has a column named ``item`` that combining would
+  overwrite. Column names only. Predicate: ``item_source_column_errors``.
+  Wired in ``validate_data_consistency`` for ``sample_pool``, ``label_table``
+  and the candidate-level feature table. Runtime backstop:
+  ``utils.item_columns.combine_item_columns`` raises it at every entry that
+  reads one of the user's tables, so evaluation refuses it too.
+* B17 — one of a multi-column item's source columns has different types in
+  ``sample_pool``, ``label_table`` and the candidate-level feature table.
+  Each part is turned into text before combining, so ``7`` and ``7.0`` become
+  different items and those rows stop joining, silently. Column types only
+  (metastore metadata). Predicate: ``item_source_dtype_errors``. Wired in
+  ``validate_data_consistency``.
 
 Layer 3 — specified but DEFERRED (NOT implemented in this module yet); see
 the plan doc for the full table:
@@ -843,7 +864,7 @@ from __future__ import annotations
 import datetime as _datetime
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
@@ -852,6 +873,8 @@ import pandas as pd
 from recsys_tfb.core.date_ranges import as_date_list, lookback_window_bounds
 from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
 from recsys_tfb.core.schema import (
+    COMBINED_ITEM_COLUMN,
+    ITEM_SEPARATOR,
     OPTIONAL_ROLE_KEYS,
     ENTITY_GROUPING_KEYS,
     get_schema,
@@ -1225,6 +1248,129 @@ def candidate_feature_table_key_errors(
         f"describes an entity in a period rather than a candidate, it belongs "
         f"in feature_table, which joins on (time, entity)."
     ]
+
+
+def item_source_column_errors(
+    schema: dict,
+    table: str,
+    columns: Sequence[str],
+) -> list[str]:
+    """(B16) a table that carries items can have a multi-column item combined.
+
+    Returns error strings (empty list when fine). Pure: the caller hands in
+    ``DataFrame.columns`` (metadata, no rows). ``validate_data_consistency``
+    collects it for the dataset's tables; ``utils.item_columns.
+    combine_item_columns`` raises it at every entry, so a table read only by
+    evaluation is covered too.
+
+    Only a multi-column item is checked — a single column is neither combined
+    nor dropped, so a column named ``item`` there is just the item column.
+    Two ways combining goes wrong (ADR-0027 decision 4): a source column is
+    missing, which would otherwise surface as an unresolved-name
+    ``AnalysisException`` naming neither the table nor the declaration; or the
+    table already has a column called ``item``, which the combined value would
+    silently overwrite.
+    """
+    sources = schema["item_source_columns"]
+    if len(sources) < 2:
+        return []
+    present = set(columns)
+    errors: list[str] = []
+    missing = [c for c in sources if c not in present]
+    if missing:
+        errors.append(
+            f"B16: {table} is missing item column(s) {missing}. "
+            f"schema.columns.item lists {list(sources)}, and every table that "
+            f"carries items must have all of them — they are combined into "
+            f"one column named {COMBINED_ITEM_COLUMN!r} when read (ADR-0027)."
+        )
+    if COMBINED_ITEM_COLUMN in present:
+        errors.append(
+            f"B16: {table} already has a column named "
+            f"{COMBINED_ITEM_COLUMN!r}. schema.columns.item lists "
+            f"{list(sources)}, which are combined into a column of that name "
+            f"when read, so it would overwrite yours. Rename that column in "
+            f"the table's source SQL."
+        )
+    return errors
+
+
+def combined_item_collision_errors(
+    source_columns: Sequence[str],
+    combinations: Iterable[tuple[tuple, str | None]],
+) -> list[str]:
+    """(B15) no two different item combinations combine to the same value.
+
+    ``combinations`` is ``(source values, combined value)`` pairs, as the
+    dataset gate reads them in one distinct from ``sample_pool`` and
+    ``label_table``. Repeats are fine (both tables hold the same item); a
+    null combined value is skipped (a null part, which combines nothing).
+
+    The separator is fixed at ``-`` and values holding ``-`` are allowed
+    (ADR-0027 decision 2), so ``("a-b", "c")`` and ``("a", "b-c")`` both
+    become ``a-b-c``. After that they are one item everywhere — one code for
+    the model, one label join — and nothing downstream can tell them apart.
+    Collect-all: every colliding value in one message.
+    """
+    by_value: dict[str, set[tuple]] = {}
+    for parts, value in combinations:
+        if value is None:
+            continue
+        by_value.setdefault(value, set()).add(tuple(parts))
+    errors: list[str] = []
+    for value in sorted(by_value):
+        # Sorted by repr: the two tables may hold one column as different
+        # types (an int 7 and a string "7" combine to the same text), and
+        # comparing those raw would raise instead of reporting. B17 reports
+        # the type mismatch itself.
+        combos = sorted(by_value[value], key=repr)
+        if len(combos) < 2:
+            continue
+        errors.append(
+            f"B15: item combinations {', '.join(repr(c) for c in combos)} of "
+            f"{list(source_columns)} all combine to {value!r}, so they would "
+            f"be treated as one item. The item columns are joined with "
+            f"{ITEM_SEPARATOR!r} (ADR-0027); change one of the values in your "
+            f"source SQL so the combinations stay distinct."
+        )
+    return errors
+
+
+def item_source_dtype_errors(
+    schema: dict,
+    dtypes_by_table: Mapping[str, Mapping[str, str]],
+) -> list[str]:
+    """(B17) each of a multi-column item's source columns has one type across
+    the tables that carry it.
+
+    Returns error strings (empty list when fine). Pure: the caller hands in
+    ``dict(DataFrame.dtypes)`` per table (metastore metadata, no rows).
+
+    Combining turns every part into text first (``utils.item_columns``), so a
+    column that is an ``int`` in ``sample_pool`` and a ``double`` in the
+    candidate-level feature table combines to ``7-banner`` in one and
+    ``7.0-banner`` in the other. Before combining, Spark would have cast the
+    two for the join and matched them; after it, the rows simply do not
+    join — the candidate's features become NULL and nothing raises (the
+    candidate table has no item check of its own). Only a multi-column item
+    is checked: a single column is joined as itself.
+    """
+    sources = schema["item_source_columns"]
+    if len(sources) < 2:
+        return []
+    errors: list[str] = []
+    for col in sources:
+        types = {t: d[col] for t, d in dtypes_by_table.items() if col in d}
+        if len(set(types.values())) > 1:
+            errors.append(
+                f"B17: item column {col!r} has different types across tables "
+                f"{types}. The item columns are turned into text before they "
+                f"are combined (ADR-0027), so the same value written as two "
+                f"types (7 and 7.0) becomes two different items and those "
+                f"rows no longer join, silently. Cast it to one type in the "
+                f"source SQL of every table."
+            )
+    return errors
 
 
 def feature_table_overlap_errors(
@@ -3622,15 +3768,58 @@ _VALID_MODEL_VERSION_SOURCES = {
 }
 
 
-def _required_external_columns(parameters: dict) -> set[str]:
+def _required_external_columns(parameters: dict, declared=()) -> set[str]:
     """Columns an ``external_hive`` compare source must declare, as schema roles.
 
     Every entry is a *role* resolved through :func:`get_schema` — the identity
     columns (time + entity + item) plus score — never a literal column name.
     ``entity`` is a list, so a multi-column entity requires all of its columns.
+
+    A multi-column item can be declared two ways (ADR-0027 decision 3), and
+    ``declared`` — the source's ``columns`` keys — says which one this source
+    uses. Its source columns, when the external table holds them: the loader
+    combines them as every other entry does, and ``prod_mapping``'s keys are
+    the combined values. Or ``item`` alone, when the external table names an
+    item with one id of its own (another system's ad code): there is nothing
+    to combine, and ``prod_mapping`` translates those ids. With neither
+    declared, the source columns are what is asked for.
     """
     schema = get_schema(parameters)
-    return set(schema["identity_columns"]) | {schema["score"]}
+    item = schema["item"]
+    sources = schema["item_source_columns"]
+    required = {c for c in schema["identity_columns"] if c != item} | {schema["score"]}
+    if len(sources) > 1 and item not in declared:
+        return required | set(sources)
+    return required | {item}
+
+
+def _external_item_declared_twice(parameters: dict, declared) -> list[str]:
+    """Item source columns declared alongside ``item`` itself, sorted.
+
+    Only a multi-column item has the two spellings. Both at once leaves the
+    loader two different item values for one row — the table's own id and
+    the combined one — so neither is taken on trust.
+    """
+    schema = get_schema(parameters)
+    sources = schema["item_source_columns"]
+    if len(sources) < 2 or schema["item"] not in declared:
+        return []
+    return sorted(set(sources) & set(declared))
+
+
+def _external_item_alternative_hint(parameters: dict, missing) -> str:
+    """For a multi-column item whose source columns are missing: say that
+    ``item`` alone is the other way to declare it. Empty otherwise, so a
+    single-column deployment reads the message it always read."""
+    schema = get_schema(parameters)
+    sources = schema["item_source_columns"]
+    if len(sources) < 2 or not set(sources) & set(missing):
+        return ""
+    return (
+        f" — or, if the external table names items with one id of its own, "
+        f"map {schema['item']!r} to that column instead of {sources} "
+        f"(prod_mapping then translates those ids)"
+    )
 
 
 def compare_source_well_formed_errors(parameters: dict) -> list[str]:
@@ -3679,10 +3868,20 @@ def compare_source_well_formed_errors(parameters: dict) -> list[str]:
             if "table" not in src:
                 errs.append(f"(A11) compare_sources[{key!r}] kind=external_hive missing 'table'")
             cols = src.get("columns", {}) or {}
-            missing = _required_external_columns(parameters) - set(cols.keys())
+            missing = _required_external_columns(parameters, cols) - set(cols.keys())
             if missing:
                 errs.append(
                     f"(A11) compare_sources[{key!r}].columns missing required keys: {sorted(missing)}"
+                    + _external_item_alternative_hint(parameters, missing)
+                )
+            twice = _external_item_declared_twice(parameters, cols)
+            if twice:
+                errs.append(
+                    f"(A11) compare_sources[{key!r}].columns declares both 'item' "
+                    f"and item source column(s) {twice}. Declare the source "
+                    f"columns when the external table holds them (they are "
+                    f"combined, ADR-0027), or 'item' alone when it names items "
+                    f"with one id of its own — not both."
                 )
             if not src.get("prod_mapping"):
                 errs.append(f"(A11) compare_sources[{key!r}] kind=external_hive missing 'prod_mapping'")

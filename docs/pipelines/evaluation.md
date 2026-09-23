@@ -351,7 +351,12 @@ evaluation:
       unmapped_policy: fail
 ```
 
-`columns` 將外部欄位轉成框架使用的 entity、time、item 與 score 欄位。`prod_mapping` 將外部 item 值映射至本框架 item；多個外部 items 可映射到同一個內部 item，此時以最大 score 合併。
+`columns` 將外部欄位轉成框架使用的 entity、time、item 與 score 欄位。item 由多欄組成時（[`dataset.md` §3.9](dataset.md#39-item-由多欄組成選用)），有兩種寫法，看外部表長什麼樣：
+
+- **外部表也把 item 分成那幾欄存**：寫各原欄的對應（例如 `campaign_id: ext_campaign`、`creative_format: ext_format`）。框架改名之後照同一條規則拼成 `item`，再套 `prod_mapping`，所以 `prod_mapping` 的鍵是拼好的外部值（例如 `ea-banner`）。
+- **外部表只有它自己的一欄 item 編號**（例如另一套系統的廣告代碼）：直接寫 `item: <那一欄>`。框架不拼，`prod_mapping` 把那些編號翻成我們拼好的值（例如 `AD-00017: c01-banner`）。
+
+兩種都寫會被 A11 擋下。`prod_mapping` 將外部 item 值映射至本框架 item；多個外部 items 可映射到同一個內部 item，此時以最大 score 合併。
 `columns` 的 key 是**框架的 schema 角色欄名**，不是固定字面值：`schema.columns` 裡 `time`、`entity`（是 list，每一欄都要給）、`item`、`score` 解析出來的實際欄名。上例用的 `cust_id`／`snap_date`／`prod_name`／`score` 是預設 schema 的結果；若專案改過 `schema.columns`，這裡就要跟著改成新欄名，否則 A11 會在 CLI 進入點擋下。
 
 外部資料出現 mapping 未涵蓋的 item 時：

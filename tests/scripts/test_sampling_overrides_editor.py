@@ -661,6 +661,41 @@ class TestProfileStats:
         # mass|a|lo: rows (1,label1),(2,label0) -> n_pos1 n_neg1
         assert d[("mass", "a", "lo")] == (1, 1)
 
+    def test_a_multi_column_item_is_combined_before_profiling(self, spark):
+        """#394: sample_pool carries the item's source columns; the group
+        keys name the combined ``item``."""
+        from scripts.sampling_overrides_editor import with_combined_item
+
+        schema_cfg = {"columns": {
+            "time": "snap_date", "entity": ["cust_id"],
+            "item": ["campaign", "fmt"],
+        }}
+        raw = spark.createDataFrame(pd.DataFrame({
+            "snap_date": pd.to_datetime(["2025-01-31"] * 3),
+            "cust_id": [1, 2, 3],
+            "campaign": ["c01", "c01", "c02"],
+            "fmt": ["banner", "banner", "video"],
+            "label": [1, 0, 1],
+        }))
+        stats = profile_stats(
+            with_combined_item(raw, schema_cfg, "sample_pool"),
+            [pd.Timestamp("2025-01-31")],
+            union_dims=["item"], label_col="label", time_col="snap_date")
+        assert {r["item"]: (r["n_pos"], r["n_neg"]) for r in stats} == {
+            "c01-banner": (1, 1), "c02-video": (1, 0),
+        }
+
+    def test_a_framework_table_already_combined_is_left_alone(self, spark):
+        """``train_model_input`` carries ``item`` and not the source columns."""
+        from scripts.sampling_overrides_editor import with_combined_item
+
+        df = self._df(spark).withColumnRenamed("prod_name", "item")
+        schema_cfg = {"columns": {
+            "time": "snap_date", "entity": ["cust_id"],
+            "item": ["campaign", "fmt"],
+        }}
+        assert with_combined_item(df, schema_cfg, "train_model_input") is df
+
     def test_missing_union_column_raises(self, spark):
         with pytest.raises(ValueError, match="not in"):
             profile_stats(

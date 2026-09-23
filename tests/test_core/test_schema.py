@@ -648,3 +648,80 @@ class TestRoleWrittenOneLevelTooHigh:
         root = Path(__file__).resolve().parents[2]
         params = yaml.safe_load((root / "conf/base/parameters.yaml").read_text())
         get_schema(params)
+
+
+class TestMultiColumnItem:
+    """``item`` may name several columns; they are combined into one column
+    called ``item`` on read, so everything downstream sees one column (#394,
+    ADR-0027 decision 1).
+
+    The single-column spellings must stay byte-for-byte what they were: that is
+    what keeps every existing deployment's ``base_dataset_version`` (and so its
+    ``model_version``) where it is.
+    """
+
+    def test_a_single_column_is_unchanged(self):
+        schema = get_schema(_params())
+        assert schema["item"] == "prod_name"
+        assert schema["item_source_columns"] == ["prod_name"]
+
+    def test_a_one_element_list_is_the_single_column(self):
+        schema = get_schema(_params(item=["prod_name"]))
+        assert schema["item"] == "prod_name"
+        assert schema["item_source_columns"] == ["prod_name"]
+        assert schema["identity_columns"] == ["snap_date", "cust_id", "prod_name"]
+
+    def test_a_single_column_payload_is_the_one_main_hashes(self):
+        """Written out, not derived from the new code: the payload the version
+        hash is taken over, exactly as main (54332710) produced it for this
+        config. Comparing the two spellings with each other would stay green
+        if both moved together — for instance if a single column started
+        hashing as a one-element list, which moves every existing deployment's
+        ``base_dataset_version``."""
+        expected = {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "label": "label", "score": "score", "rank": "rank",
+            "categorical_values": {},
+        }
+        assert get_schema_for_hash(_params()) == expected
+        assert get_schema_for_hash(_params(item=["prod_name"])) == expected
+
+    def test_a_one_element_list_hashes_like_the_string(self):
+        assert get_schema_for_hash(_params(item=["prod_name"])) == get_schema_for_hash(
+            _params()
+        )
+
+    def test_several_columns_resolve_to_the_combined_column(self):
+        schema = get_schema(_params(item=["campaign_id", "creative_format"]))
+        assert schema["item"] == "item"
+        assert schema["item_source_columns"] == ["campaign_id", "creative_format"]
+
+    def test_identity_holds_the_combined_column_not_the_sources(self):
+        schema = get_schema(
+            _params(item=["campaign_id", "creative_format"], occasion="request_id")
+        )
+        assert schema["identity_columns"] == [
+            "snap_date", "cust_id", "request_id", "item",
+        ]
+
+    def test_the_hash_carries_the_declared_columns(self):
+        """``item`` alone would collide with a deployment whose single item
+        column is literally named ``item`` — two different datasets, one
+        version ID."""
+        combined = get_schema_for_hash(_params(item=["campaign_id", "creative_format"]))
+        literal = get_schema_for_hash(_params(item="item"))
+        assert combined["item"] == ["campaign_id", "creative_format"]
+        assert combined != literal
+
+    def test_column_order_is_part_of_the_hash(self):
+        """``[a, b]`` and ``[b, a]`` combine to different values."""
+        assert get_schema_for_hash(
+            _params(item=["campaign_id", "creative_format"])
+        ) != get_schema_for_hash(_params(item=["creative_format", "campaign_id"]))
+
+    def test_the_source_list_is_a_copy(self):
+        params = _params(item=["campaign_id", "creative_format"])
+        get_schema(params)["item_source_columns"].append("x")
+        assert get_schema(params)["item_source_columns"] == [
+            "campaign_id", "creative_format",
+        ]
