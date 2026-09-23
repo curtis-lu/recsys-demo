@@ -32,7 +32,9 @@ def create_pipeline(
         report_comparison.html. It also loads ``evaluation_segment_columns``,
         landed by the run that wrote that partition, since there is no
         ``prepare_eval_data`` here to say which segment columns the
-        partition's rows were joined with.
+        partition's rows were joined with, and ``evaluation_item_categories``
+        (#379) for the category table it read — optional, see its catalog
+        entry.
 
     ``baseline_rate`` (the CLI's ``baseline_scores_by_rate``, #397: ``score:
     rate`` under ``--post-training``) adds ``build_popularity_period_counts``
@@ -93,7 +95,7 @@ def create_pipeline(
                 generate_comparison_report,
                 inputs=["eval_predictions_common", "compare_predictions_common",
                         "compare_coverage_partial", "evaluation_segment_columns",
-                        "parameters"],
+                        "parameters", "evaluation_item_categories"],
                 outputs="evaluation_comparison_report",
             ),
         ])
@@ -110,12 +112,18 @@ def create_pipeline(
     # the evaluated month first; test_pipeline.py fails one that does not.
     nodes = [
         # The join is computed here once and lands as this month's partition;
-        # dynamic partition overwrite replaces that partition only.
+        # dynamic partition overwrite replaces that partition only. The
+        # category table (#379) is a third output rather than a node of its
+        # own: a node between this one and compute_metrics would move
+        # compute_metrics after compute_prediction_quality /
+        # compute_report_aggregates, and `--from-node compute_metrics` would
+        # then leave those stale.
         Node(
             make_prepare_eval_data_node(population_input),
             inputs=[predictions_input, "label_table", population_input,
                     "parameters"],
-            outputs=["enriched_eval_predictions", "evaluation_segment_columns"],
+            outputs=["enriched_eval_predictions", "evaluation_segment_columns",
+                     "evaluation_item_categories"],
         ),
         # Draw the driver-side diagnosis sample ONCE; compute_metric_ci and,
         # in --post-training, the registry diagnoses read this shared
@@ -133,7 +141,7 @@ def create_pipeline(
         Node(
             compute_metrics,
             inputs=["enriched_eval_predictions", "evaluation_segment_columns",
-                    "parameters"],
+                    "parameters", "evaluation_item_categories"],
             outputs="evaluation_metrics",
         ),
     ]
@@ -157,8 +165,11 @@ def create_pipeline(
                 compute_baseline_metrics,
                 # The plan again: the table keeps every period it ever
                 # counted, the baseline sums the ones sample_pool holds now.
+                # The category table is fifth in both wirings (positional
+                # binding; see compute_baseline_metrics).
                 inputs=["enriched_eval_predictions", "label_table",
                         "evaluation_segment_columns", "parameters",
+                        "evaluation_item_categories",
                         "popularity_period_counts",
                         "popularity_period_counts_month_plan"],
                 outputs="baseline_metrics",
@@ -169,7 +180,8 @@ def create_pipeline(
             Node(
                 compute_baseline_metrics,
                 inputs=["enriched_eval_predictions", "label_table",
-                        "evaluation_segment_columns", "parameters"],
+                        "evaluation_segment_columns", "parameters",
+                        "evaluation_item_categories"],
                 outputs="baseline_metrics",
             )
         )
@@ -285,7 +297,7 @@ def create_pipeline(
                 generate_comparison_report,
                 inputs=["eval_predictions_common", "compare_predictions_common",
                         "compare_coverage_partial", "evaluation_segment_columns",
-                        "parameters"],
+                        "parameters", "evaluation_item_categories"],
                 outputs="evaluation_comparison_report",
             ),
         ]

@@ -99,7 +99,8 @@ class TestPipelineShape:
                         if n.name == "compute_baseline_metrics")
         assert baseline.inputs == [
             "enriched_eval_predictions", "label_table",
-            "evaluation_segment_columns", "parameters"]
+            "evaluation_segment_columns", "parameters",
+            "evaluation_item_categories"]
 
     def test_monitoring_off_reads_no_sample_pool(self):
         inputs = {i for n in create_pipeline().nodes for i in n.inputs}
@@ -149,7 +150,8 @@ def _rate_run(spark, params, pool, labels, plan, eval_predictions=None):
             eval_predictions if eval_predictions is not None
             else _eval_predictions(spark)),
         label_table=labels, evaluation_segment_columns=_segments(params),
-        parameters=params, popularity_period_counts=counts,
+        parameters=params, evaluation_item_categories=None,
+        popularity_period_counts=counts,
         popularity_period_counts_month_plan=plan)
 
 
@@ -266,7 +268,7 @@ def test_a_landed_period_sample_pool_no_longer_holds_is_not_summed(spark):
         _node("compute_baseline_metrics", post_training=True, baseline_rate=True),
         enriched_eval_predictions=_eval_predictions(spark), label_table=labels,
         evaluation_segment_columns=_segments(params), parameters=params,
-        popularity_period_counts=counts,
+        evaluation_item_categories=None, popularity_period_counts=counts,
         popularity_period_counts_month_plan=plan)
     assert result["popularity_rate"]["candidates"] == {"A": 10, "B": 2, "C": 5}
     assert result["popularity_rate"]["rate"]["C"] == 0.0

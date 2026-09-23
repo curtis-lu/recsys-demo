@@ -64,7 +64,7 @@ collected to the driver.
 from __future__ import annotations
 
 import logging
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 from pyspark.sql import DataFrame as SparkDataFrame
@@ -72,6 +72,7 @@ from pyspark.sql import Window
 from pyspark.sql import functions as F
 from pyspark.sql.window import WindowSpec
 
+from recsys_tfb.core.consistency import item_category_column
 from recsys_tfb.core.schema import declares_optional_role, get_schema
 from recsys_tfb.evaluation.metrics import (
     ALL_K_KEY,
@@ -195,17 +196,32 @@ def _resolve_k_grids(
 
 
 def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
-    """Resolve {item value: category}. None when categories disabled.
+    """Resolve {item value: category} from the hand-written
+    ``item_categories.mapping``. None when categories disabled.
 
     Fail-loud (ValueError) if a mapped product is not in
     ``schema.categorical_values[item_col]``. Products absent from every
     mapping list become their own singleton category when
     ``unmapped == 'singleton'`` (the only supported mode).
+
+    Also fail-loud in column mode (``item_categories.column``, #379): there
+    the table is read off the data by ``prepare_eval_data`` and has to be
+    passed in (``category_mapping``, see :func:`_resolve_category_mapping`).
+    Falling through would give every item its own category — a report that
+    looks fine and ranks the wrong thing.
     """
     eval_params = parameters.get("evaluation", {}) or {}
     cat_cfg = eval_params.get("item_categories", {}) or {}
     if not cat_cfg.get("enabled"):
         return None
+    if item_category_column(parameters) is not None:
+        raise ValueError(
+            f"item_categories.column={cat_cfg['column']!r}: each item's "
+            f"category is read off the data by prepare_eval_data "
+            f"(evaluation_item_categories) and has to be passed as "
+            f"category_mapping; there is no mapping in the conf to fall "
+            f"back to."
+        )
 
     schema = get_schema(parameters)
     item_col = schema["item"]
@@ -231,6 +247,23 @@ def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
     for item in known:
         mapping.setdefault(item, item)
     return mapping
+
+
+def _resolve_category_mapping(
+    parameters: dict, category_mapping: Mapping[str, str] | None
+) -> dict[str, str] | None:
+    """The {item: category} table a category pass collapses by, or None when
+    there is none to compute.
+
+    ``category_mapping`` is what a column-mode run's ``prepare_eval_data``
+    read off the data (``evaluation_item_categories``, #379); the evaluation
+    nodes pass it and it wins. ``None`` means "read the hand-written mapping
+    from ``parameters``", which is every other caller, and which refuses
+    column mode (:func:`_build_category_mapping`).
+    """
+    if category_mapping is not None:
+        return dict(category_mapping)
+    return _build_category_mapping(parameters)
 
 
 def _require_segment_columns_in_frame(
@@ -262,6 +295,7 @@ def collapse_to_categories(
     parameters: dict,
     *,
     segment_columns: Sequence[str] = (),
+    category_mapping: Mapping[str, str] | None = None,
 ) -> SparkDataFrame:
     """Collapse fine-grained predictions to category grain (no UDF).
 
@@ -270,8 +304,10 @@ def collapse_to_categories(
     column is emitted under the schema item_col name so the collapsed DF
     is shape-compatible with compute_all_metrics. ``max(score)`` re-ranking
     is equivalent to taking the best child rank (pos is score-desc derived).
+
+    ``category_mapping``: see :func:`_resolve_category_mapping`.
     """
-    mapping = _build_category_mapping(parameters)
+    mapping = _resolve_category_mapping(parameters, category_mapping)
     if mapping is None:
         raise ValueError("collapse_to_categories called with categories disabled")
 
@@ -1076,6 +1112,7 @@ def compute_overall_per_item(
     with_category: bool = False,
     event_cols: Sequence[str] | None = None,
     drop_all_positive_groups: bool = False,
+    category_mapping: Mapping[str, str] | None = None,
 ) -> dict:
     """Slim metric bundle: ``overall`` + ``per_item`` (+ optional slices).
 
@@ -1121,7 +1158,9 @@ def compute_overall_per_item(
         extra groupBy.
       - ``with_category``: also emit ``category`` (a nested slim bundle on the
         category-collapsed frame — one extra collapse pass), only when
-        ``item_categories`` maps the items. Nested bundle never re-nests.
+        ``item_categories`` maps the items — by hand, or through
+        ``category_mapping`` (:func:`_resolve_category_mapping`). Nested
+        bundle never re-nests.
 
     Returns ``{"overall": {...}, "per_item": {...}}`` (plus ``per_segment`` /
     ``category`` when requested and available); overall/per_item empty when no
@@ -1188,8 +1227,11 @@ def compute_overall_per_item(
     finally:
         enriched.unpersist()
 
-    if with_category and _build_category_mapping(parameters) is not None:
-        collapsed = collapse_to_categories(eval_predictions, parameters)
+    mapping = (_resolve_category_mapping(parameters, category_mapping)
+               if with_category else None)
+    if mapping is not None:
+        collapsed = collapse_to_categories(
+            eval_predictions, parameters, category_mapping=mapping)
         # `event_cols=()`: the collapse has aggregated those columns away —
         # see this function's docstring, and the twin call in
         # `compute_all_metrics`. The switch goes on unchanged; the category
@@ -1207,6 +1249,8 @@ def compute_all_metrics(
     *,
     segment_columns: Sequence[str] = (),
     drop_all_positive_groups: bool = False,
+    with_category: bool = True,
+    category_mapping: Mapping[str, str] | None = None,
 ) -> dict:
     """Full bundle: fine-grained core + dataset_overview + optional category.
 
@@ -1223,7 +1267,14 @@ def compute_all_metrics(
     Every pre-existing top-level key is unchanged; ``dataset_overview`` is
     always added; ``category`` (same shape as the top level, plus its own
     ``dataset_overview``, never re-nested) is added only when
-    ``item_categories.enabled``.
+    ``item_categories.enabled`` and ``with_category``.
+
+    ``category_mapping`` is the table a column-mode evaluation run read off
+    the data (#379); ``None`` reads the hand-written mapping from
+    ``parameters`` (:func:`_resolve_category_mapping`). ``with_category=False``
+    skips the category pass without reading ``item_categories`` at all:
+    training scores its test set through here, reads only the fine-grained
+    keys, and has no column-mode table to pass (#379).
 
     ⚠ **Not backward compatible below ``dataset_overview``** since #327: the
     three ``n_items`` / ``n_customers`` / ``avg_positives_per_customer``
@@ -1306,9 +1357,12 @@ def compute_all_metrics(
         eval_predictions, parameters, segment_columns=segment_columns
     )
 
-    if _build_category_mapping(parameters) is not None:
+    mapping = (_resolve_category_mapping(parameters, category_mapping)
+               if with_category else None)
+    if mapping is not None:
         collapsed = collapse_to_categories(
-            eval_predictions, parameters, segment_columns=segment_columns
+            eval_predictions, parameters, segment_columns=segment_columns,
+            category_mapping=mapping,
         )
         # The category pass ranks a DIFFERENT frame:
         # `collapse_to_categories` groups by (query group, category) and takes

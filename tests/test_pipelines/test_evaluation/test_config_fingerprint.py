@@ -32,6 +32,9 @@ SPEC_COMPUTED_PATHS = {
     "evaluation.k_values",
     "evaluation.segment_columns",
     "evaluation.segment_sources",
+    # #379: the sample_pool column prepare_eval_data reads the category
+    # table off — a row of its own, at prepare_eval_data, under the block's.
+    "evaluation.item_categories.column",
     "evaluation.item_categories",
     "evaluation.baseline",
     "evaluation.metric",
@@ -56,6 +59,7 @@ SPEC_COMPUTED_LEAVES = [
     "evaluation.segment_columns",
     "evaluation.segment_sources",
     "evaluation.item_categories.enabled",
+    "evaluation.item_categories.column",
     "evaluation.baseline.lookback_months",
     "evaluation.metric.min_positives",
     "evaluation.query_filter.drop_all_positive_groups",
@@ -138,7 +142,7 @@ def _delete(params: dict, path: str) -> dict:
     *parents, leaf = path.split(".")
     for seg in parents:
         node = node[seg]
-    del node[leaf]
+    node.pop(leaf, None)  # already absent in _params (e.g. ...item_categories.column)
     return params
 
 
@@ -402,6 +406,9 @@ SPEC_PARTITION_CONTENT_KEYS = {
     "evaluation.snap_date",
     "evaluation.segment_columns",
     "evaluation.segment_sources",
+    # #379: prepare_eval_data reads the category table off it and lands it
+    # in the same directory as the segment JSON.
+    "evaluation.item_categories.column",
 }
 
 
@@ -436,6 +443,42 @@ def test_no_other_computed_setting_makes_the_partition_stale(path):
     old = _params()
     require_computed_with_current_config(
         [_partition_artifact(old)], _changed(old, path))
+
+
+def test_changing_the_category_column_advises_the_join_from_any_artifact():
+    """#379: the column sits under a block listed at
+    compute_metrics too, so both rows move; the earlier one — where the table
+    is read — must win, from the segment JSON and from metrics.json alike.
+    Advised at compute_metrics, the re-run would reuse the old table."""
+    old = _set(_params(), "evaluation.item_categories",
+               {"enabled": True, "column": "family"})
+    new = _set(copy.deepcopy(old), "evaluation.item_categories.column", "tier")
+    for artifact in (
+        _partition_artifact(old),
+        LoadedArtifact(catalog_name="evaluation_metrics", payload=_payload(old),
+                       produced_by="compute_metrics"),
+    ):
+        with pytest.raises(ValueError) as exc:
+            require_computed_with_current_config([artifact], new)
+        msg = str(exc.value)
+        # Once: the block's row and the column's own row reach the same leaf.
+        assert msg.count(
+            "evaluation.item_categories.column: 'family' -> 'tier'") == 1, msg
+        assert "--from-node prepare_eval_data" in msg, artifact.catalog_name
+
+
+def test_the_partition_rows_do_not_depend_on_the_category_column():
+    """Excluded from PARTITION_FINGERPRINT_KEYS, as evaluation.snap_date is:
+    the rows are the same whichever column the table is read off, so a
+    partition another run wrote under another column is still this run's."""
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+        partition_fingerprint,
+    )
+
+    one = _set(_params(), "evaluation.item_categories",
+               {"enabled": True, "column": "family"})
+    other = _set(copy.deepcopy(one), "evaluation.item_categories.column", "tier")
+    assert partition_fingerprint(one, []) == partition_fingerprint(other, [])
 
 
 def test_narrowed_comparison_still_refuses_an_unfingerprinted_json():

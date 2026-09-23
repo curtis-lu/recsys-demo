@@ -131,6 +131,7 @@ date: 2026-09-13
   （2026-09-14 實作更正，#352：上一段說物化之後「要回頭決定由誰比對這份指紋」，定案如下，使用者 2026-09-14 在兩案中選定。）
   - **誰比**：讀 `enriched_eval_predictions` 而且分群的三個 node——`compute_metrics`、`compute_baseline_metrics`、`draw_diagnosis_sample_node`——讀表之前各比一次（`pipelines/evaluation/nodes_spark.py::_require_prepared_with_current_config`）。這份 JSON 跟 partition 同一次寫，它的指紋代表兩者。不比的話，改了 `segment_columns` 再 `--from-node compute_metrics`，讀到的是舊 partition，`metrics.json` 卻蓋上新指紋，`generate_report` 放行，退出碼 0。
   - **比什麼**：只比 `COMPUTED_KEYS` 裡重跑起點本來就是 `prepare_eval_data` 的四列：`post_training`、`evaluation.snap_date`、`evaluation.segment_columns`、`evaluation.segment_sources`（`evaluation/config_fingerprint.py::PARTITION_CONTENT_KEYS`）。不合就 raise，指示 `--from-node prepare_eval_data`。
+    （2026-09-23 補充，#379：現在是五列，多了 `evaluation.item_categories.column`——大類取自 `sample_pool` 的一欄時，`prepare_eval_data` 在那裡讀對照表、落地成 `item_categories.json`（`evaluation_item_categories`），讀表的 node 也照這五列比那份檔。）
   - **為什麼不是全部都比**：改 `k_values` 會讓它不合，訊息叫你從 `compute_metrics` 重跑，那不會重寫這份 JSON，下一次一樣被擋，出不去。
   - **為什麼不是把 `COMPUTED_KEYS` 全部改指 `prepare_eval_data`**（被否決的另一案）：迴圈解了，但任何設定變動都要重做 join，物化換來的便宜接續就沒了。
   - **不比的地方**：`--compare-only` 照舊不比（理由同上一段：`--post-training` 在那條路上是啞的）；`generate_comparison_report` 不比。
@@ -327,6 +328,7 @@ date: 2026-09-13
 
 - `prepare_eval_data` 寫出的每一列多一個框架自有的欄 `eval_partition_fingerprint`，值是 `PARTITION_CONTENT_KEYS` **扣掉 `evaluation.snap_date`**、**加上這次實際 join 進去的分群欄（`joined`）** 的 sha256（`pipelines/evaluation/steps/config_fingerprint.py::partition_fingerprint`）。
   - 扣掉 `snap_date` 的理由：一個日期分區的內容只取決於模式與分群設定，不取決於同一次還評估了哪些別的日期；不扣的話，設定相同的單月執行與區間執行會互相擋。
+  - （2026-09-23 補充，#379）同一個理由也扣掉 `evaluation.item_categories.column`：它決定的是落在執行目錄裡的大類對照表，不是列上的任何一個值。
   - 加上 `joined` 的理由（2026-09-17 審查補上）：母體表缺某個分群欄時 `prepare_eval_data` 跳過、不 raise，所以設定相同的兩次執行可能寫出不同的列。1–2 月區間（母體有 `tier`，`joined=[tier]`）→ 母體表拿掉 `tier` → 單跑 2 月（分區的 `tier` 變 NULL，那次 JSON `joined=[]`）→ 接續區間：區間目錄 JSON `joined=[tier]`、設定全相同，只看設定會放行，2 月整月落進對不到的那一段，退出碼 0。設定與母體都相同時，單月與區間的指紋照樣相同。
 - 每個讀 `enriched_eval_predictions` 的 node 改經 `steps/snap_date_scope.py::restrict_to_current_eval_partitions`：篩日期、確認每個日期的分區指紋、把這欄丟掉再往下用。期望值＝設定（見下一條）＋這個目錄 `segment_columns.json` 的 `joined`，所以每個讀表 node 都收 `evaluation_segment_columns`（`compute_report_aggregates` 因此多一個輸入）。指紋不同或是 NULL（#374 之前寫的分區，表的 schema 演化補 NULL）就 raise，一次列出所有有問題的日期，建議 `--from-node prepare_eval_data`。`tests/test_pipelines/test_evaluation/test_pipeline.py` 的 AST 測試改成要求讀者呼叫它。
 - 設定取自哪裡：**只有 `--compare-only`**（`validate_enriched_eval_predictions_present` 與那個模式的 `restrict_to_common`）取「這個目錄的 `segment_columns.json` 記錄的設定」（`recorded_partition_fingerprint`），因為那條路上 `--post-training` 是啞的，拿今天的值去比會擋掉每一個 post-training 寫的分區——正是上面〈不比的地方〉不比的理由。其餘一律取今天的設定，**一般 `--compare` 模式的 `restrict_to_common` 也是**（`nodes.py::make_restrict_to_common_node` 依模式建 node）：`--compare X --only-node generate_comparison_report` 這種切片只跑 `load_compare_predictions`、`restrict_to_common`、比較報表，讀的是先前執行寫的分區，那個目錄的 JSON 跟分區一樣記著舊設定，改了分群設定或換了模式後比 JSON 會放行（本補充第一版寫「`--compare` 模式下那份 JSON 是同一次執行剛寫的，兩種基準一致」，是錯的，2026-09-17 審查抓到）。

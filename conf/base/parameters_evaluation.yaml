@@ -48,6 +48,11 @@ evaluation:
       fund: [fund_stock, fund_bond, fund_mix]
       exchange: [exchange_fx, exchange_usd]
       ccard: [ccard_bill, ccard_cash, ccard_ins]
+    # 不想手寫 mapping 時改寫 column（與 mapping 二選一，兩個都寫會被 A51 擋）：
+    # 每個 item 的大類取自 sample_pool 的這一欄，只看這次評估的月份；只支援
+    # --post-training（A51）。同一個 item 對到兩個不同的非 NULL 值會被 B18 擋；
+    # 全是 NULL 的 item 自成一類。細節：docs/pipelines/evaluation.md §3.3。
+    # column: <sample_pool 的欄名>
 
   # Baseline 設定 ── popularity baseline 的 lookback 視窗（月數）。
   baseline:

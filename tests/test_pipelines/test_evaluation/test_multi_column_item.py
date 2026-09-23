@@ -132,7 +132,8 @@ class TestPopularityBaseline:
             enriched_eval_predictions=_eval_predictions(spark, params),
             label_table=_split_item(labels),
             evaluation_segment_columns=_no_segments(params),
-            parameters=params, popularity_period_counts=counts,
+            parameters=params, evaluation_item_categories=None,
+            popularity_period_counts=counts,
             popularity_period_counts_month_plan=plan)
         block = result["popularity_rate"]
         assert block["candidates"] == {"A-x": 10, "B-x": 2, "C-x": 5}

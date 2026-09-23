@@ -140,7 +140,7 @@ def test_inference_and_evaluation_rank_the_same_tied_data_identically(spark):
         {"schema": schema_block, "inference": {"snap_dates": [SNAP]}},
     ).toPandas()
 
-    evaluation_frame, _segments = make_prepare_eval_data_node(
+    evaluation_frame, _segments, _categories = make_prepare_eval_data_node(
         "inference_population"
     )(
         spark.createDataFrame(rows),

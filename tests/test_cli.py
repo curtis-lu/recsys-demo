@@ -2250,7 +2250,8 @@ def _run_evaluation_command(
                  *catalog_extra):
         catalog[name] = dict(_REAL_CATALOG[name])
     for name in ("enriched_eval_predictions", *catalog_extra):
-        catalog[name]["database"] = "ml_recsys"
+        if "database" in catalog[name]:  # a Hive table, not a JSON file
+            catalog[name]["database"] = "ml_recsys"
     (base / "catalog.yaml").write_text(yaml.dump(catalog))
     (base / "parameters_evaluation.yaml").write_text(yaml.dump({"evaluation": {
         "snap_date": snap_date,
@@ -2263,7 +2264,7 @@ def _run_evaluation_command(
     if segment_columns_json:
         landed_json = (tmp_path / "data" / "evaluation" / _EVAL_MV / "20260131"
                        / "segment_columns.json")
-        landed_json.parent.mkdir(parents=True)
+        landed_json.parent.mkdir(parents=True, exist_ok=True)
         landed_json.write_text("{}")
 
     spark = MagicMock()
@@ -2517,6 +2518,98 @@ class TestCompareOnlyNamesWhatIsMissing:
         execute.assert_called_once()
         # compare-only has no prepare_eval_data to pull back: no plan.
         assert execute.call_args.kwargs["month_plans"] is None
+
+
+class TestItemCategoryColumnAtTheEntry:
+    """#379: ``evaluation.item_categories.column`` needs ``--post-training``
+    (A51, before Spark starts), and ``--compare-only`` then needs the
+    ``item_categories.json`` the standard run landed — only in column mode:
+    the hand-written mapping is read from ``parameters``, and an evaluation
+    directory written before #379 has no such file."""
+
+    _COLUMN = {"item_categories": {"enabled": True, "unmapped": "singleton",
+                                   "column": "campaign_id"}}
+    _MAPPING = {"item_categories": {"enabled": True, "unmapped": "singleton",
+                                    "mapping": {"c01": ["c01-banner"]}}}
+    _DATASET = {"dataset": {"test_snap_dates": ["2026-01-31"]}}
+    _JSON = f"data/evaluation/{_EVAL_MV}/20260131/item_categories.json"
+
+    def _invoke(self, tmp_path, argv, evaluation_extra, *, landed_json=False,
+                watch_spark=False):
+        """``watch_spark`` replaces the harness's Spark stub with a bare mock,
+        to see whether a session was asked for — only for runs expected to
+        stop first: the bare mock lists no partition."""
+        emitted = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                emitted.append(record.getMessage())
+
+        recorder = logging.getLogger("test_item_category_column_entry")
+        recorder.handlers = [_Capture()]
+        recorder.setLevel(logging.DEBUG)
+        recorder.propagate = False
+        execute = MagicMock(return_value=False)
+        spark_factory = MagicMock()
+        if landed_json:
+            path = tmp_path / self._JSON
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}")
+        result, _ = _run_evaluation_command(
+            tmp_path, ["evaluation", "--model-version", _EVAL_MV, *argv],
+            landed=("2026-01-31",), evaluation_extra=evaluation_extra,
+            catalog_extra=("evaluation_item_categories",),
+            params_dataset=self._DATASET,
+            extra_patches=(
+                patch("recsys_tfb.__main__.logger", recorder),
+                patch("recsys_tfb.__main__._execute_pipeline", execute),
+                *([patch("recsys_tfb.utils.spark.get_or_create_spark_session",
+                         spark_factory)] if watch_spark else []),
+            ),
+        )
+        return result, execute, spark_factory, "\n".join(emitted)
+
+    @pytest.mark.parametrize("argv", [
+        (), ("--compare-only", "self")], ids=["monitoring", "compare-only"])
+    def test_column_without_post_training_stops_before_spark(self, tmp_path, argv):
+        result, execute, spark_factory, log = self._invoke(
+            tmp_path, argv, self._COLUMN, watch_spark=True)
+        assert result.exit_code == 1
+        assert "A51:" in log, log
+        spark_factory.assert_not_called()
+        execute.assert_not_called()
+
+    def test_column_under_post_training_passes_the_gate(self, tmp_path):
+        result, execute, _spark, log = self._invoke(
+            tmp_path, ("--post-training",), self._COLUMN)
+        assert result.exit_code == 0, (result.output, log)
+        execute.assert_called_once()
+
+    def test_compare_only_in_column_mode_needs_the_landed_json(self, tmp_path):
+        result, execute, _spark, log = self._invoke(
+            tmp_path, ("--post-training", "--compare-only", "self"),
+            self._COLUMN)
+        assert result.exit_code == 1
+        execute.assert_not_called()
+        assert self._JSON in log, log
+
+    def test_compare_only_in_column_mode_with_the_json_reaches_the_pipeline(
+        self, tmp_path,
+    ):
+        result, execute, _spark, log = self._invoke(
+            tmp_path, ("--post-training", "--compare-only", "self"),
+            self._COLUMN, landed_json=True)
+        assert result.exit_code == 0, (result.output, log)
+        execute.assert_called_once()
+
+    def test_compare_only_with_a_hand_mapping_does_not_need_the_json(
+        self, tmp_path,
+    ):
+        result, execute, _spark, log = self._invoke(
+            tmp_path, ("--compare-only", "self"), self._MAPPING)
+        assert result.exit_code == 0, (result.output, log)
+        execute.assert_called_once()
+        assert "item_categories.json" not in log, log
 
 
 class TestThePartitionListingIsVersionScoped:

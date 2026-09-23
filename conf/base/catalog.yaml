@@ -296,12 +296,24 @@ gain_ledger:
 # 不看 frame 欄位——enriched_eval_predictions 兩種模式共用，另一模式 join 過的欄
 # 在這次的列上是全 NULL（ADR-0020 bug 6）。--compare-only 沒有 prepare_eval_data，
 # 靠這份檔知道 enriched 分區當時 join 了哪些欄，所以它必須落地。它的
-# config_fingerprint 也代表同一次寫的 partition：讀表的 node 比對其中決定 partition
-# 內容的四個鍵（config_fingerprint.PARTITION_CONTENT_KEYS）；--compare-only 缺這份
+# config_fingerprint 也代表同一次寫的 partition：讀表的 node 比對其中決定
+# prepare_eval_data 產出的鍵（config_fingerprint.PARTITION_CONTENT_KEYS）；--compare-only 缺這份
 # 檔時 CLI 在任何 node 之前就擋下。
 evaluation_segment_columns:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/segment_columns.json
+
+# prepare_eval_data 的第三個 output（#379）：evaluation.item_categories.column 設定時，
+# 每個 item 的大類——從這次評估月份的 sample_pool 那一欄讀出來的對照表（column、mapping）。
+# 沒設 column 時也落地，mapping 是空的，讀者照舊從 parameters 讀手寫的 mapping。
+# compute_metrics／compute_baseline_metrics／generate_comparison_report 讀它；
+# config_fingerprint 同 segment_columns.json 那樣比。optional：#379 之前寫的評估目錄沒有
+# 這份檔，沒設 column 的讀者也不需要它，缺檔時 load() 回 None 而不是 raise——欄模式下缺檔
+# 由 CLI 在 --compare-only 的任何 node 之前擋下（__main__.py::_compare_only_input_errors）。
+evaluation_item_categories:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/item_categories.json
+  optional: true
 
 # --- Evaluation pipeline — 指標（ADR-0018 決定 2）---
 # compute_metrics／compute_baseline_metrics 的輸出落地：重繪主報表不必重算指標，也留下

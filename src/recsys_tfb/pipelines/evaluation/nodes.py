@@ -29,6 +29,8 @@ from recsys_tfb.core.consistency import (
     PREDICTION_QUALITY_DEFAULTS,
     ZERO_POSITIVE_GROUP_WEIGHT_COL,
     DataConsistencyError,
+    item_category_column,
+    item_category_conflict_errors,
     prediction_quality_on,
     test_carries_zero_positive_group_weight,
 )
@@ -91,6 +93,10 @@ from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
     fingerprint,
     require_computed_with_current_config,
 )
+from recsys_tfb.pipelines.evaluation.steps.item_categories import (
+    category_of_each_item,
+    read_item_category_rows,
+)
 from recsys_tfb.pipelines.evaluation.steps.segments import (
     join_segment_columns,
     join_segment_sources,
@@ -110,10 +116,12 @@ logger = logging.getLogger(__name__)
 
 
 def _require_prepared_with_current_config(
-    segment_columns: dict, parameters: dict
+    segment_columns: dict, parameters: dict,
+    item_categories: Optional[dict] = None,
 ) -> None:
     """Pre-check (inputs): the ``evaluation_segment_columns`` this run's
-    directory holds was landed under today's
+    directory holds — and ``evaluation_item_categories``, when the reader was
+    given one — was landed under today's
     :data:`~recsys_tfb.pipelines.evaluation.steps.config_fingerprint.PARTITION_CONTENT_KEYS`.
 
     ``prepare_eval_data`` lands that JSON together with the partitions, and the
@@ -127,16 +135,56 @@ def _require_prepared_with_current_config(
     partition is also written by runs over other dates, whose JSON lands in
     another directory. Each partition carries its own fingerprint, checked by
     ``restrict_to_current_eval_partitions``.
+
+    ``item_categories`` (#379) is ``None`` for a directory written before it
+    existed (its catalog entry is optional); that is only a problem in column
+    mode, where :func:`_landed_category_mapping` refuses it.
     """
-    require_computed_with_current_config(
-        [LoadedArtifact(
-            catalog_name="evaluation_segment_columns (landed with the "
-                         "enriched_eval_predictions partition)",
-            payload=segment_columns,
+    artifacts = [LoadedArtifact(
+        catalog_name="evaluation_segment_columns (landed with the "
+                     "enriched_eval_predictions partition)",
+        payload=segment_columns,
+        produced_by="prepare_eval_data",
+        compared_keys=PARTITION_CONTENT_KEYS,
+    )]
+    if item_categories is not None:
+        artifacts.append(LoadedArtifact(
+            catalog_name="evaluation_item_categories",
+            payload=item_categories,
             produced_by="prepare_eval_data",
             compared_keys=PARTITION_CONTENT_KEYS,
-        )],
-        parameters,
+        ))
+    require_computed_with_current_config(artifacts, parameters)
+
+
+def _landed_category_mapping(
+    item_categories: Optional[dict], parameters: dict
+) -> Optional[dict]:
+    """The ``{item: category}`` table the category pass ranks by: the one
+    ``prepare_eval_data`` read off ``evaluation.item_categories.column`` in
+    column mode (#379), else ``None`` — "take the hand-written mapping from
+    ``parameters``", as before.
+
+    Pre-check (inputs), column mode only: the table was read off today's
+    column. It catches what the fingerprint cannot — a table missing
+    altogether — and the ``--compare-only`` path, which compares nothing
+    with today's settings. Otherwise a table from another column, or none,
+    would be ranked or silently replaced by every item its own category.
+    """
+    column = item_category_column(parameters)
+    if column is None:
+        return None
+    if isinstance(item_categories, dict) and item_categories.get("column") == column:
+        return item_categories["mapping"]
+    landed = (
+        "none was landed for this run" if not isinstance(item_categories, dict)
+        else f"the landed one was read off {item_categories.get('column')!r}"
+    )
+    raise ValueError(
+        f"evaluation.item_categories.column={column!r}, but {landed} "
+        f"(evaluation_item_categories). prepare_eval_data reads the table off "
+        f"sample_pool: re-run with --from-node prepare_eval_data (for "
+        f"--compare-only, the standard --post-training run first)."
     )
 
 
@@ -216,25 +264,31 @@ def make_prepare_eval_data_node(population_name: str):
     node's third input: ``sample_pool`` for ``--post-training`` (the test set
     is drawn from it), ``inference_population`` for monitoring (it is what was
     scored). The node receives only a DataFrame, so the name comes in here for
-    the warning, the report and ``evaluation_segment_columns``. The mode
-    decides it (ADR-0013), as with ``make_draw_diagnosis_sample_node``.
+    the warning, the report, ``evaluation_segment_columns`` and the category
+    column's table. The mode decides it (ADR-0013), as with
+    ``make_draw_diagnosis_sample_node``.
     """
     def prepare_eval_data(
         ranked_predictions: SparkDataFrame,
         label_table: SparkDataFrame,
         population: SparkDataFrame,
         parameters: dict,
-    ) -> tuple[SparkDataFrame, dict]:
+    ) -> tuple[SparkDataFrame, dict, dict]:
         """Join ranked predictions with labels and segment columns using Spark.
 
-        Returns ``(eval_predictions, segments)``. The frame lands as this
-        month's ``enriched_eval_predictions`` partition, where the join is
-        computed once and every reader reads it back (ADR-0018 decision 1).
-        ``segments`` lands as
+        Returns ``(eval_predictions, segments, item_categories)``. The frame
+        lands as this month's ``enriched_eval_predictions`` partition, where
+        the join is computed once and every reader reads it back (ADR-0018
+        decision 1). ``segments`` lands as
         ``evaluation_segment_columns``: ``joined`` (the segment columns
         actually joined, in ``evaluation.segment_columns`` order), ``sources``
         (joined column -> table it came from), ``missing`` (column -> the
         population table that lacks it) and ``config_fingerprint``.
+        ``item_categories`` lands as ``evaluation_item_categories`` (#379):
+        ``column`` (``evaluation.item_categories.column``, or ``None``),
+        ``mapping`` (item -> category read off that column; empty without
+        one, when readers take the hand-written mapping from ``parameters``)
+        and ``config_fingerprint``.
 
         Pre-checks. Each fails because something before this node did not
         supply what it needs:
@@ -251,6 +305,10 @@ def make_prepare_eval_data_node(population_name: str):
         * With a multi-column item, ``label_table`` carries every item
           column and no column named ``item`` (B16, raised by
           ``combine_item_columns``).
+        * In column mode: the population is ``sample_pool`` (``RuntimeError``;
+          A51 refuses anything else at the CLI entry), it has the column
+          (``ValueError``), and no item has two categories over the evaluated
+          months (B18, ``DataConsistencyError``).
         """
         schema = get_schema(parameters)
         time_col = schema["time"]
@@ -523,8 +581,64 @@ def make_prepare_eval_data_node(population_name: str):
         eval_predictions = stamp_partition_fingerprint(
             eval_predictions, parameters, joined)
 
+        # Decision — where each item's category comes from (#379): in column
+        # mode, the sample_pool column evaluation.item_categories.column
+        # names; otherwise the readers take the hand-written mapping from
+        # parameters, so the table is landed empty. Read here rather than by
+        # a node of its own: a node added between this one and
+        # compute_metrics moves compute_metrics after
+        # compute_prediction_quality / compute_report_aggregates in the
+        # topological order, and `--from-node compute_metrics` would then
+        # leave those two stale. The price: changing the column re-runs from
+        # here (config_fingerprint.COMPUTED_KEYS).
+        category_column = item_category_column(parameters)
+        item_categories = {"column": category_column, "mapping": {}}
+        if category_column is not None:
+            # Pre-check (runtime backstop of A51, which refuses column mode
+            # outside --post-training at the CLI entry).
+            if population_name != "sample_pool":
+                raise RuntimeError(
+                    f"evaluation.item_categories.column={category_column!r} "
+                    f"is read off sample_pool, but this run's population is "
+                    f"{population_name!r}; the CLI refuses that (A51)."
+                )
+            # Pre-check (input): a column the table lacks is a raise, not a
+            # skip like a segment column — without it there is no category
+            # to compute at all.
+            if category_column not in population.columns:
+                raise ValueError(
+                    f"evaluation.item_categories.column={category_column!r}: "
+                    f"{population_name} has no such column (it has "
+                    f"{sorted(population.columns)})."
+                )
+            # Decision — which rows say an item's category: the evaluated
+            # months' only, never the train months', whose rows can say
+            # something the evaluated rows no longer do.
+            evaluated_pool = restrict_to_eval_snap_dates(population, parameters)
+            category_rows = read_item_category_rows(
+                evaluated_pool, schema, category_column, population_name)
+            # Pre-check (input): an item's category does not change with
+            # time, within a month or across the evaluated ones (B18): the
+            # category pass joins the table on the item alone, so an item in
+            # two categories would be counted in both.
+            conflicts = item_category_conflict_errors(
+                category_column, category_rows)
+            if conflicts:
+                raise DataConsistencyError("\n".join(conflicts))
+            # Decision — a NULL category is ignored where another row names
+            # the item's category; an item with only NULLs is its own
+            # category, as unmapped: singleton makes it.
+            item_categories["mapping"] = category_of_each_item(category_rows)
+            logger.info(
+                "item categories read off %s.%s: %d items in %d categories",
+                population_name, category_column,
+                len(item_categories["mapping"]),
+                len(set(item_categories["mapping"].values())),
+            )
+        item_categories["config_fingerprint"] = fingerprint(parameters)
+
         logger.info("Eval data prepared via Spark join")
-        return eval_predictions, segments
+        return eval_predictions, segments, item_categories
 
     return prepare_eval_data
 
@@ -617,6 +731,7 @@ def compute_metrics(
     eval_predictions: SparkDataFrame,
     segment_columns: dict,
     parameters: dict,
+    item_categories: Optional[dict] = None,
 ) -> dict:
     """Compute ranking metrics using the Spark-native pipeline.
 
@@ -639,9 +754,14 @@ def compute_metrics(
     when the switch is off and the share is above
     ``metrics.ALL_POSITIVE_WARN_SHARE``.
 
-    Pre-checks (inputs): the landed segment list was prepared under today's
-    settings (``_require_prepared_with_current_config``), and so was each
-    evaluated date's partition (``restrict_to_current_eval_partitions``).
+    The category pass ranks by ``item_categories`` (the landed
+    ``evaluation_item_categories``) in column mode, by the hand-written
+    mapping in ``parameters`` otherwise (``_landed_category_mapping``, #379).
+
+    Pre-checks (inputs): the landed segment list and category table were
+    prepared under today's settings (``_require_prepared_with_current_config``,
+    ``_landed_category_mapping``), and so was each evaluated date's partition
+    (``restrict_to_current_eval_partitions``).
 
     Postcondition: every configured date was evaluated, i.e. the number of
     months in the result equals the number of configured dates. The
@@ -651,7 +771,9 @@ def compute_metrics(
     query groups (#374). It does not catch a reader that forgot to restrict
     (that reader is another node); the AST test in ``test_pipeline.py`` does.
     """
-    _require_prepared_with_current_config(segment_columns, parameters)
+    _require_prepared_with_current_config(
+        segment_columns, parameters, item_categories)
+    category_mapping = _landed_category_mapping(item_categories, parameters)
     # Decision — evaluate the configured dates only, from partitions written
     # under today's settings: the table holds every month this model_version
     # was evaluated on.
@@ -669,6 +791,7 @@ def compute_metrics(
         eval_predictions, parameters,
         segment_columns=segment_columns["joined"],
         drop_all_positive_groups=drop_all_positive,
+        category_mapping=category_mapping,
     )
     n_snap_dates = result["dataset_overview"]["totals"]["n_snap_dates"]
     snap_dates = eval_snap_dates(parameters)
@@ -815,6 +938,7 @@ def compute_baseline_metrics(
     label_table: SparkDataFrame,
     segment_columns: dict,
     parameters: dict,
+    item_categories: Optional[dict] = None,
     popularity_period_counts: Optional[SparkDataFrame] = None,
     popularity_period_counts_month_plan=None,
 ) -> dict:
@@ -824,8 +948,12 @@ def compute_baseline_metrics(
     purchase count — or, with ``evaluation.baseline.score: rate`` under
     ``--post-training`` (#397), its positive rate read off
     ``popularity_period_counts``, restricted to the periods the month plan
-    lists (both wired as the fifth and sixth input only then) — then runs the
-    slim metrics path (overall + per_item). Which one is the wiring's call
+    lists (both wired as the sixth and seventh input only then) — then runs the
+    slim metrics path (overall + per_item). ``item_categories`` is the fifth
+    input in both wirings, not appended after those two: inputs bind by
+    position, and appended it would take ``popularity_period_counts``' slot
+    in the wiring without them (``known-pitfalls.md`` §12). Its category
+    slice ranks by it as ``compute_metrics`` does. Which one is the wiring's call
     (ADR-0013): monitoring with ``score: rate`` gets no counts and ranks by
     the count, see ``evaluation/baselines.py``.
     When the baseline report section is disabled the second metrics pass is
@@ -855,10 +983,10 @@ def compute_baseline_metrics(
             (``steps.config_fingerprint``), checked by
             ``generate_report``.
 
-    Pre-checks (inputs), past the stub: the landed segment list and each
-    evaluated date's partition were prepared under today's settings
-    (``_require_prepared_with_current_config``,
-    ``restrict_to_current_eval_partitions``).
+    Pre-checks (inputs), past the stub: the landed segment list, category
+    table and each evaluated date's partition were prepared under today's
+    settings (``_require_prepared_with_current_config``,
+    ``_landed_category_mapping``, ``restrict_to_current_eval_partitions``).
     """
     eval_params = parameters.get("evaluation", {}) or {}
     sections = (eval_params.get("report", {}) or {}).get("sections", {}) or {}
@@ -868,7 +996,9 @@ def compute_baseline_metrics(
         )
         return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
 
-    _require_prepared_with_current_config(segment_columns, parameters)
+    _require_prepared_with_current_config(
+        segment_columns, parameters, item_categories)
+    category_mapping = _landed_category_mapping(item_categories, parameters)
     # Decision — score the evaluated dates only, from partitions written under
     # today's settings: the table holds every month this model_version was
     # evaluated on, and the lookback windows below are anchored on the months
@@ -983,6 +1113,7 @@ def compute_baseline_metrics(
         segment_columns=segment_columns["joined"],
         with_category=True,
         drop_all_positive_groups=drop_all_positive_groups(parameters),
+        category_mapping=category_mapping,
     )
     metrics["purchase_counts"] = purchase_counts
     metrics["monthly_counts"] = monthly_counts
@@ -1805,6 +1936,7 @@ def generate_comparison_report(
     coverage_partial: dict,
     segment_columns: dict,
     parameters: dict,
+    item_categories: Optional[dict] = None,
 ) -> str:
     """Run compute_all_metrics on both sides + assemble HTML.
 
@@ -1822,16 +1954,30 @@ def generate_comparison_report(
     can differ between them (``_restrict_to_common``), and such a group can be
     all-positive on one side — dropped there — and mixed on the other — kept
     there. The comparison report says so when the switch is on.
+
+    Both sides' category passes rank by one table: in column mode the one
+    this run's side landed (``item_categories``, #379; the compared side
+    holds only the common items, so it covers them), otherwise the
+    hand-written mapping in ``parameters``. Under ``--compare-only`` that
+    file may be missing from a directory written before #379: ``None`` then,
+    which only column mode refuses (``_landed_category_mapping``; the CLI
+    refuses it earlier, ``_compare_only_input_errors``).
+
+    Pre-check (inputs): in column mode, the category table was landed and
+    read off today's column (``_landed_category_mapping``).
     """
     drop_all_positive = drop_all_positive_groups(parameters)
+    category_mapping = _landed_category_mapping(item_categories, parameters)
     metrics_a = compute_all_metrics(
         eval_predictions_common, parameters,
         segment_columns=segment_columns["joined"],
         drop_all_positive_groups=drop_all_positive,
+        category_mapping=category_mapping,
     )
     metrics_b = compute_all_metrics(
         compare_predictions_common, parameters, segment_columns=[],
         drop_all_positive_groups=drop_all_positive,
+        category_mapping=category_mapping,
     )
 
     src = (parameters.get("evaluation", {}) or {}).get("compare", {}) or {}
