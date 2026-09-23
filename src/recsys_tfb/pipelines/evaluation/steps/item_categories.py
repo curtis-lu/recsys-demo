@@ -59,7 +59,9 @@ def category_of_each_item(rows: Iterable[tuple]) -> dict:
     A NULL category is ignored where another row of the item names one; an
     item whose every row is NULL is its own category — what
     ``unmapped: singleton`` does for an item a hand-written mapping leaves
-    out. A NULL item is skipped: it joins nothing.
+    out — spelled as text, like every category read off the column, so the
+    table holds one value type whatever the item column's type. A NULL item
+    is skipped: it joins nothing.
     """
     named: dict = {}
     seen: set = set()
@@ -69,4 +71,4 @@ def category_of_each_item(rows: Iterable[tuple]) -> dict:
         seen.add(item)
         if category is not None:
             named[item] = category
-    return {item: named.get(item, item) for item in sorted(seen, key=str)}
+    return {item: named.get(item, str(item)) for item in sorted(seen, key=str)}

@@ -72,6 +72,7 @@ from pyspark.sql import Window
 from pyspark.sql import functions as F
 from pyspark.sql.window import WindowSpec
 
+from recsys_tfb.core.consistency import item_category_column
 from recsys_tfb.core.schema import declares_optional_role, get_schema
 from recsys_tfb.evaluation.metrics import (
     ALL_K_KEY,
@@ -213,7 +214,7 @@ def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
     cat_cfg = eval_params.get("item_categories", {}) or {}
     if not cat_cfg.get("enabled"):
         return None
-    if "column" in cat_cfg:
+    if item_category_column(parameters) is not None:
         raise ValueError(
             f"item_categories.column={cat_cfg['column']!r}: each item's "
             f"category is read off the data by prepare_eval_data "
@@ -1273,7 +1274,7 @@ def compute_all_metrics(
     ``parameters`` (:func:`_resolve_category_mapping`). ``with_category=False``
     skips the category pass without reading ``item_categories`` at all:
     training scores its test set through here, reads only the fine-grained
-    keys, and has no column-mode table to pass (#379 decision 12).
+    keys, and has no column-mode table to pass (#379).
 
     ⚠ **Not backward compatible below ``dataset_overview``** since #327: the
     three ``n_items`` / ``n_customers`` / ``avg_positives_per_customer``

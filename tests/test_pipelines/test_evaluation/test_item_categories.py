@@ -75,7 +75,7 @@ def _prepare(spark, params, pool, months=(JAN,)):
 
 class TestPrepareEvalDataLandsTheTable:
     def test_the_table_is_read_off_the_column_in_the_evaluated_months(self, spark):
-        """A train-month row saying A is ``z`` is not read (#379 decision 9):
+        """A train-month row saying A is ``z`` is not read (#379):
         only the months this run evaluates."""
         from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
             fingerprint,
@@ -113,7 +113,7 @@ class TestPrepareEvalDataLandsTheTable:
 
     def test_one_item_two_categories_across_months_is_refused(self, spark):
         """The table is joined on the item alone over every evaluated month
-        (#379 decision 5), so A in two categories would have its rows counted
+        (#379), so A in two categories would have its rows counted
         in both."""
         rows = {**_grid([JAN], {"A": "x", "B": "y", "C": "x"}),
                 **_grid([FEB], {"A": "w", "B": "y", "C": "x"})}
@@ -144,7 +144,7 @@ class TestPrepareEvalDataLandsTheTable:
             _prepare(spark, _params(column="familly"), _sample_pool(spark, rows))
 
     def test_the_category_can_be_one_of_the_item_columns(self, spark):
-        """#379 decision 11: combining drops the source columns, so the
+        """#379: combining drops the source columns, so the
         category is read next to the combined value, not after it."""
         from pyspark.sql import functions as F
 
@@ -232,7 +232,7 @@ class TestAStaleOrMissingTableIsRefused:
     def test_changing_the_column_then_resuming_from_compute_metrics(self, spark):
         """The table was read off ``family``; the conf now says ``family2``.
         A slice starting at compute_metrics reads the old table, so it must
-        name prepare_eval_data, where the table is read (#379 decision 4)."""
+        name prepare_eval_data, where the table is read (#379)."""
         from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
 
         frame, segments, categories = _landed(spark, _params())

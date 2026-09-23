@@ -583,16 +583,14 @@ def make_prepare_eval_data_node(population_name: str):
 
         # Decision — where each item's category comes from (#379): in column
         # mode, the sample_pool column evaluation.item_categories.column
-        # names, read in the months this run evaluates and no others
-        # (decision 9) — the train months' rows can say something the
-        # evaluated rows no longer do. Otherwise the readers take the
-        # hand-written mapping from parameters, so the table is landed empty.
-        # Read here rather than by a node of its own: a node added between
-        # this one and compute_metrics moves compute_metrics after
+        # names; otherwise the readers take the hand-written mapping from
+        # parameters, so the table is landed empty. Read here rather than by
+        # a node of its own: a node added between this one and
+        # compute_metrics moves compute_metrics after
         # compute_prediction_quality / compute_report_aggregates in the
         # topological order, and `--from-node compute_metrics` would then
-        # leave those two stale (decision 4). The price: changing the column
-        # re-runs from here (config_fingerprint.COMPUTED_KEYS).
+        # leave those two stale. The price: changing the column re-runs from
+        # here (config_fingerprint.COMPUTED_KEYS).
         category_column = item_category_column(parameters)
         item_categories = {"column": category_column, "mapping": {}}
         if category_column is not None:
@@ -613,11 +611,14 @@ def make_prepare_eval_data_node(population_name: str):
                     f"{population_name} has no such column (it has "
                     f"{sorted(population.columns)})."
                 )
+            # Decision — which rows say an item's category: the evaluated
+            # months' only, never the train months', whose rows can say
+            # something the evaluated rows no longer do.
+            evaluated_pool = restrict_to_eval_snap_dates(population, parameters)
             category_rows = read_item_category_rows(
-                restrict_to_eval_snap_dates(population, parameters), schema,
-                category_column, population_name)
-            # Decision — an item's category does not change with time, within
-            # a month or across the evaluated ones (B18, decision 5): the
+                evaluated_pool, schema, category_column, population_name)
+            # Pre-check (input): an item's category does not change with
+            # time, within a month or across the evaluated ones (B18): the
             # category pass joins the table on the item alone, so an item in
             # two categories would be counted in both.
             conflicts = item_category_conflict_errors(
@@ -626,7 +627,7 @@ def make_prepare_eval_data_node(population_name: str):
                 raise DataConsistencyError("\n".join(conflicts))
             # Decision — a NULL category is ignored where another row names
             # the item's category; an item with only NULLs is its own
-            # category, as unmapped: singleton makes it (decision 10).
+            # category, as unmapped: singleton makes it.
             item_categories["mapping"] = category_of_each_item(category_rows)
             logger.info(
                 "item categories read off %s.%s: %d items in %d categories",
@@ -1961,6 +1962,9 @@ def generate_comparison_report(
     file may be missing from a directory written before #379: ``None`` then,
     which only column mode refuses (``_landed_category_mapping``; the CLI
     refuses it earlier, ``_compare_only_input_errors``).
+
+    Pre-check (inputs): in column mode, the category table was landed and
+    read off today's column (``_landed_category_mapping``).
     """
     drop_all_positive = drop_all_positive_groups(parameters)
     category_mapping = _landed_category_mapping(item_categories, parameters)

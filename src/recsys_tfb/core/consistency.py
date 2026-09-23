@@ -567,15 +567,19 @@ Layer 1 — config-static (implemented here; aggregated by
   ``baseline_score_errors``. NOT aggregated, A42's reason (issue #158): only
   evaluation reads this key.
 * A51 — ``evaluation.item_categories.column`` (#379, each item's category read
-  off a sample_pool column): not together with ``mapping``, a non-empty
-  string, and — while ``enabled`` — only under ``--post-training``, the one
-  mode whose population is sample_pool (``--compare-only`` without the flag is
+  off a sample_pool column): not together with a non-null ``mapping``, a
+  non-empty string, and — while ``enabled`` — ``unmapped`` (if written) is
+  ``singleton`` and the run is ``--post-training``, the one mode whose
+  population is sample_pool (``--compare-only`` without the flag is
   monitoring, A22/A40's precedent). Column mode is read by
   ``item_category_column``, shared with the nodes that build and read the
   table. Predicate: ``item_category_column_errors`` (takes the flag, as A40
   does; the evaluation command raises, collected with A22/A34/A40/A42/A43/
   A46/A49/A50). NOT aggregated, for A22's reason: that gate cannot see
-  ``--post-training``.
+  ``--post-training``. Runtime backstops: ``prepare_eval_data`` raises
+  ``RuntimeError`` when column mode meets a population other than
+  sample_pool, and ``metrics_spark._build_category_mapping`` refuses column
+  mode (the table has to be passed in, never read from the conf).
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -818,7 +822,7 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
   ``validate_data_consistency``.
 * B18 — in column mode (``evaluation.item_categories.column``, A51), one item
   has two or more non-NULL values of that sample_pool column over the
-  evaluated months, in one month or across them (#379 decision 5). The
+  evaluated months, in one month or across them (#379). The
   category pass joins the table on the item alone, so the item's predictions
   would be copied into each category. Checked on the distinct (time, item,
   category) triples the table is built from, so no extra scan. Predicate:
@@ -1361,7 +1365,7 @@ def item_category_conflict_errors(
     rows: Iterable[tuple[Any, str | None, str | None]],
 ) -> list[str]:
     """(B18) each item has at most one non-NULL category over the evaluated
-    months (#379 decision 5).
+    months (#379).
 
     ``rows`` is ``(time value, item, category)``, the distinct triples
     ``prepare_eval_data`` reads off ``sample_pool``'s ``category_column`` for
@@ -2424,6 +2428,16 @@ def baseline_score_errors(parameters: dict) -> list[str]:
     return errors
 
 
+def _item_categories_block(parameters: dict) -> Mapping:
+    """``evaluation.item_categories`` as a mapping; ``{}`` when absent, null
+    or not a mapping (its readers treat all three as "no categories")."""
+    eval_params = parameters.get("evaluation", {}) or {}
+    if not isinstance(eval_params, Mapping):
+        return {}
+    block = eval_params.get("item_categories") or {}
+    return block if isinstance(block, Mapping) else {}
+
+
 def item_category_column(parameters: dict) -> str | None:
     """The sample_pool column each item's category is read from (#379), or
     ``None`` when categories come from ``evaluation.item_categories.mapping``
@@ -2431,17 +2445,14 @@ def item_category_column(parameters: dict) -> str | None:
 
     Column mode needs ``enabled`` too: ``enabled: false`` switches every
     category pass off, and a column left under it is inert. The one reading of
-    "is this column mode" that ``prepare_eval_data`` (which builds the table),
-    its readers and the CLI checks share. A value A51 refuses (not a non-empty
-    string) comes back as is; A51 stops the run before anything reads it.
+    "is this column mode" shared by A51 (below), ``prepare_eval_data`` (which
+    builds the table), its readers, the ``--compare-only`` input check and
+    ``metrics_spark._build_category_mapping``. A value A51 refuses (not a
+    non-empty string) comes back as is; A51 stops the run before anything
+    reads it.
     """
-    eval_params = parameters.get("evaluation", {}) or {}
-    if not isinstance(eval_params, Mapping):
-        return None
-    block = eval_params.get("item_categories") or {}
-    if not isinstance(block, Mapping) or not block.get("enabled"):
-        return None
-    if "column" not in block:
+    block = _item_categories_block(parameters)
+    if not block.get("enabled") or "column" not in block:
         return None
     return block["column"]
 
@@ -2450,31 +2461,35 @@ def item_category_column_errors(parameters: dict, post_training: bool) -> list[s
     """A51 — ``evaluation.item_categories.column`` (#379).
 
     * ``column`` and ``mapping`` are two sources for one table; with both
-      declared nothing says which wins, so neither is picked.
+      declared nothing says which wins, so neither is picked. A ``mapping:
+      null`` is no mapping — the reader takes it as empty, and it is how an
+      env overlay switches off a mapping the base conf declares (a deep merge
+      cannot delete a key).
     * ``column`` is a non-empty string (a column name). An empty ``column:``
       would otherwise read as "no column" and fall back to every item its own
       category, a report that looks fine.
-    * Column mode (``enabled`` and ``column``, :func:`item_category_column`)
-      needs ``--post-training``. The column is read off ``sample_pool``, the
-      table the post-training test set is drawn from; monitoring evaluates
-      ``inference_population``, which has no candidate column to read. Only
-      ``--compare-only`` without ``--post-training`` is monitoring too, for
-      A22/A40's reason: no carve-out.
+    * In column mode (:func:`item_category_column`) ``unmapped``, when
+      written, is ``singleton``: the rule for an item whose column is NULL in
+      every row. The hand-mapping reader refuses anything else at run time,
+      but column mode never reaches that check, so ``unmapped: drop`` would be
+      silently read as singleton.
+    * Column mode needs ``--post-training``. The column is read off
+      ``sample_pool``, the table the post-training test set is drawn from;
+      monitoring evaluates ``inference_population``, which has no candidate
+      column to read. Only ``--compare-only`` without ``--post-training`` is
+      monitoring too, for A22/A40's reason: no carve-out.
 
     Not aggregated by ``validate_config_consistency``: it needs
     ``--post-training``, and only evaluation reads the key (A34's reason,
     issue #158). The evaluation command raises it, collected with
     A22/A34/A40/A42/A43/A46/A49/A50.
     """
-    eval_params = parameters.get("evaluation", {}) or {}
-    if not isinstance(eval_params, Mapping):
-        return []
-    block = eval_params.get("item_categories") or {}
-    if not isinstance(block, Mapping) or "column" not in block:
+    block = _item_categories_block(parameters)
+    if "column" not in block:
         return []
     column = block["column"]
     errors = []
-    if "mapping" in block:
+    if block.get("mapping") is not None:
         errors.append(
             "A51: evaluation.item_categories declares both column and "
             "mapping. Keep one: column reads each item's category off that "
@@ -2485,15 +2500,23 @@ def item_category_column_errors(parameters: dict, post_training: bool) -> list[s
             f"A51: evaluation.item_categories.column={column!r} must be a "
             f"sample_pool column name (a non-empty string)."
         )
-    elif block.get("enabled") and not post_training:
-        errors.append(
-            f"A51: evaluation.item_categories.column={column!r} needs "
-            f"--post-training: categories are read off sample_pool, and "
-            f"monitoring evaluates inference_population, which has no "
-            f"candidate column to read them from. --compare-only without "
-            f"--post-training is monitoring too. Use item_categories.mapping "
-            f"for monitoring, or add --post-training."
-        )
+    elif item_category_column(parameters) is not None:
+        if "unmapped" in block and block["unmapped"] != "singleton":
+            errors.append(
+                f"A51: evaluation.item_categories.unmapped="
+                f"{block['unmapped']!r} with column: only 'singleton' is "
+                f"implemented (an item whose column is NULL in every row is "
+                f"its own category)."
+            )
+        if not post_training:
+            errors.append(
+                f"A51: evaluation.item_categories.column={column!r} needs "
+                f"--post-training: categories are read off sample_pool, and "
+                f"monitoring evaluates inference_population, which has no "
+                f"candidate column to read them from. --compare-only without "
+                f"--post-training is monitoring too. Use item_categories.mapping "
+                f"for monitoring, or add --post-training."
+            )
     return errors
 
 

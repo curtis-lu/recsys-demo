@@ -52,6 +52,23 @@ class TestItemCategoryColumnErrors:
         assert errors[0].startswith("A51:")
         assert "column" in errors[0] and "mapping" in errors[0]
 
+    def test_a_null_mapping_is_no_mapping(self):
+        """``mapping: null`` is how an env overlay switches off a mapping the
+        base conf declares (a deep merge cannot delete a key); the reader
+        treats it as no mapping, so A51 does too."""
+        assert item_category_column_errors(
+            _params(column="campaign_id", mapping=None), post_training=True) == []
+
+    @pytest.mark.parametrize("unmapped", ["drop", None])
+    def test_column_mode_takes_only_the_singleton_rule(self, unmapped):
+        """The hand-mapping path refuses anything but ``singleton`` at run
+        time; column mode never reaches that check, so A51 is where a
+        ``unmapped: drop`` would otherwise be silently read as singleton."""
+        errors = item_category_column_errors(
+            _params(column="campaign_id", unmapped=unmapped), post_training=True)
+        assert len(errors) == 1
+        assert errors[0].startswith("A51:") and "unmapped" in errors[0]
+
     def test_column_without_post_training_is_refused(self):
         """Monitoring — and ``--compare-only`` without ``--post-training``,
         which is monitoring too — evaluates inference_population, which has no
@@ -108,3 +125,13 @@ class TestItemCategoryConflictsB18:
     def test_a_null_item_is_skipped(self):
         rows = [("m", None, "x"), ("m", None, "w")]
         assert item_category_conflict_errors("family", rows) == []
+
+
+def test_an_all_null_integer_item_is_its_own_category_as_text():
+    """Categories are read as text, so the singleton is too: one value type
+    in the table whatever the item column's type."""
+    from recsys_tfb.pipelines.evaluation.steps.item_categories import (
+        category_of_each_item,
+    )
+
+    assert category_of_each_item([("m", 7, None), ("m", 8, "x")]) == {7: "7", 8: "x"}

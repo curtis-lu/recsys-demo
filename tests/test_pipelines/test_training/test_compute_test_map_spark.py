@@ -193,7 +193,7 @@ def test_test_map_does_not_follow_the_all_positive_switch(spark):
      "mapping": {"x": ["not_an_item"]}},
 ], ids=["column", "mapping"])
 def test_test_map_never_computes_categories(spark, categories):
-    """#379 decision 12: the test mAP reads the fine-grained keys only, so its
+    """#379: the test mAP reads the fine-grained keys only, so its
     call switches the category pass off instead of inheriting
     ``evaluation.item_categories``. Either conf above raises the moment the
     category pass is attempted; the result equals the categories-off one."""

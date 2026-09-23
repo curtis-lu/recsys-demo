@@ -1422,7 +1422,7 @@ def compute_test_mAP_spark(
     # The action is not on this line: compute_all_metrics counts and collects
     # several times inside evaluation/metrics_spark.py. Rule 10's "follow one
     # level" applies — this is the expensive block, not a lazy plan.
-    # Decision — no category pass (#379 decision 12). Nothing below reads it,
+    # Decision — no category pass (#379). Nothing below reads it,
     # so inheriting evaluation.item_categories only cost a collapse pass, and
     # in column mode it would raise: that table is read off sample_pool by
     # evaluation's prepare_eval_data, which training does not run.

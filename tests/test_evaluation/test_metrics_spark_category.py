@@ -198,7 +198,7 @@ def test_slim_path_ranks_the_passed_categories(spark):
 @pytest.mark.parametrize("params", [_params, _column_params],
                          ids=["mapping", "column"])
 def test_with_category_false_skips_the_category_pass(spark, params):
-    """Training's switch (#379 decision 12): no category pass, and nothing of
+    """Training's switch (#379): no category pass, and nothing of
     item_categories is read — so neither a column-mode conf (no table there)
     nor a hand mapping naming an item the item list lacks can raise."""
     p = params()

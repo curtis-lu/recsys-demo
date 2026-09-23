@@ -152,11 +152,14 @@ COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
     ("evaluation.segment_columns", "prepare_eval_data"),
     ("evaluation.segment_sources", "prepare_eval_data"),
     # prepare_eval_data reads the category table off this sample_pool column
-    # and lands it (#379 decision 4). Its own row although the whole block
-    # has one at compute_metrics below: changing the column moves both, and
-    # the earlier row decides the advice. At compute_metrics alone, the
-    # re-run would rank by the old table. A change to the rest of the block
-    # (enabled, mapping) still re-runs from compute_metrics only.
+    # and lands it (#379). Its own row although the whole block has one at
+    # compute_metrics below: changing the column moves both, and the earlier
+    # row decides the advice. At compute_metrics alone, the re-run would rank
+    # by the old table. A change to the rest of the block (enabled, mapping)
+    # still advises compute_metrics. One transition takes a second step:
+    # switching `enabled` on while `column` is already written. The table was
+    # landed empty (column mode was off), so compute_metrics then refuses it
+    # and names prepare_eval_data — loud, never a wrong report.
     ("evaluation.item_categories.column", "prepare_eval_data"),
     ("evaluation.diagnosis", "draw_diagnosis_sample_node"),
     ("evaluation.k_values", "compute_metrics"),
@@ -450,6 +453,10 @@ def require_computed_with_current_config(
         # `order.index(p)` (O(n) per comparison inside the sort).
         paths = sorted(paths, key=lambda p: _KEY_ORDER.get(p, len(_KEY_ORDER)))
         lines = []
+        # A row nested under another row's block (evaluation.item_categories
+        # .column under evaluation.item_categories) reaches the same leaf
+        # twice; it is printed once.
+        shown: set[str] = set()
         for path in paths:
             leaves = _changed_leaves(path, old_values.get(path, _ABSENT),
                                      new_values.get(path, _ABSENT))
@@ -457,10 +464,10 @@ def require_computed_with_current_config(
                 idx = _KEY_ORDER[path]
                 first_computed = idx if first_computed is None \
                     else min(first_computed, idx)
-            lines.extend(
-                f"      {leaf}: {_short(old)} -> {_short(new)}"
-                for leaf, old, new in leaves
-            )
+            for leaf, old, new in leaves:
+                if leaf not in shown:
+                    shown.add(leaf)
+                    lines.append(f"      {leaf}: {_short(old)} -> {_short(new)}")
         if not lines:
             lines.append("      (hash differs but no value does: the "
                          "fingerprint was written by another hashing version)")

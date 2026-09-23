@@ -446,7 +446,7 @@ def test_no_other_computed_setting_makes_the_partition_stale(path):
 
 
 def test_changing_the_category_column_advises_the_join_from_any_artifact():
-    """#379 decision 4: the column sits under a block listed at
+    """#379: the column sits under a block listed at
     compute_metrics too, so both rows move; the earlier one — where the table
     is read — must win, from the segment JSON and from metrics.json alike.
     Advised at compute_metrics, the re-run would reuse the old table."""
@@ -461,7 +461,9 @@ def test_changing_the_category_column_advises_the_join_from_any_artifact():
         with pytest.raises(ValueError) as exc:
             require_computed_with_current_config([artifact], new)
         msg = str(exc.value)
-        assert "evaluation.item_categories.column: 'family' -> 'tier'" in msg
+        # Once: the block's row and the column's own row reach the same leaf.
+        assert msg.count(
+            "evaluation.item_categories.column: 'family' -> 'tier'") == 1, msg
         assert "--from-node prepare_eval_data" in msg, artifact.catalog_name
 
 

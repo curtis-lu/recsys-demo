@@ -204,6 +204,28 @@ def test_category_section_present_when_enabled_and_present():
     assert "大類" in out
 
 
+def test_category_section_present_in_column_mode():
+    """#379: with the categories read off a sample_pool column the report
+    reader sees the same ``enabled`` switch and the same ``category``
+    bundles, so the section renders as in the hand-mapping case."""
+    m_a = _metrics(); m_b = _metrics()
+    cat_metrics = {
+        "overall": {"map@1": 0.5, "map@3": 0.55},
+        "per_item": {"c01": {"hit_rate@1": 0.6, "hit_rate@3": 0.7,
+                             "map_attr@1": 0.4, "map_attr@3": 0.5}},
+        "macro_avg": {"by_item": {"hit_rate@1": 0.6}},
+        "dataset_overview": {"totals": {"n_items": 1}},
+    }
+    m_a["category"] = cat_metrics
+    m_b["category"] = cat_metrics
+    p = _params()
+    p["evaluation"]["item_categories"] = {
+        "enabled": True, "unmapped": "singleton", "column": "campaign_id"}
+    out = assemble_comparison_report(m_a, m_b, _comparison(m_a, m_b),
+                                     _coverage(), p)
+    assert "大類" in out and "c01" in out
+
+
 def test_category_section_columns_clamp_to_category_count():
     """bug 8 (ADR-0020): 3 categories, primary_map_k=[1,3,5,"all"] -> the
     大類 per-item map_attr@k table must not show @5 (5 > n_cat=3)."""

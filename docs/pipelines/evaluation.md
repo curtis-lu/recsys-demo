@@ -202,7 +202,7 @@ evaluation:
 - **這一欄可以是組成 item 的其中一欄**（例：item 宣告成 `[campaign_id, creative_format]` 時的 `campaign_id`）。框架先把這一欄抄出來再拼 item，所以拼完丟掉原欄不影響它。
 - **NULL**：同一個 item 在別列有非 NULL 的值，就忽略 NULL；全部都是 NULL，這個 item 自成一類。
 - **大類不隨時間變**：同一個 item 在這次評估的列裡（同一個月或跨月）對到兩個以上不同的非 NULL 值，`prepare_eval_data` 就擋下（B18），訊息列出 item、各個值與各自出現的月份。理由：多個評估月份是一起算的，對照表只用 item 連接，一個 item 有兩列的話，它的預測會被複製進兩個大類、重複計數。
-- **不支援監控模式**：監控模式的母體是 `inference_population`，沒有 `sample_pool` 的候選欄可讀。沒加 `--post-training` 就設了 `column`（只下 `--compare-only` 也算監控模式），CLI 在 Spark 啟動前就擋下（A51）；`column` 與 `mapping` 同時寫、或 `column` 不是欄名字串，也一樣擋下。
+- **不支援監控模式**：監控模式的母體是 `inference_population`，沒有 `sample_pool` 的候選欄可讀。沒加 `--post-training` 就設了 `column`（只下 `--compare-only` 也算監控模式），CLI 在 Spark 啟動前就擋下（A51）；`column` 與 `mapping` 同時寫（`mapping: null` 算沒寫）、`column` 不是欄名字串、或 `unmapped` 寫了 `singleton` 以外的值，也一樣擋下。同一份設定因此不能同時給監控模式用手寫 mapping、給 post-training 用 `column`：要兩種都跑，就在不同的 env 覆蓋層各寫一種。
 - **改了 `column` 要從 `prepare_eval_data` 重跑**：對照表在那裡讀。從後面的 node 接續時，讀表的 node 會擋下並指示 `--from-node prepare_eval_data`（見 4.6 節）。
 - **`--compare-only`**：欄模式下要先有一般的 `--post-training` 評估留下的 `item_categories.json`，沒有就在任何 node 之前擋下。手寫 mapping 不需要這份檔（#379 之前留下的評估目錄沒有它，照常能跑）。
 - training 的 test mAP 不算大類（兩種寫法都一樣）：它只讀細 item 的指標。
@@ -628,7 +628,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 | 對齊母體 | `restrict_to_common` | 讀 `enriched_eval_predictions`、先篩到評估日期並確認分區指紋（同上，比 `segment_columns.json` 記錄的設定與 `joined`），再取共同範圍並重新排名 |
 | 比較報表 | `generate_comparison_report` | 產生 `report_comparison.html` |
 
-這條路沒有 `prepare_eval_data`，它讀的兩樣東西都是寫 enriched partition 的那次標準 run 一起寫的：評估日期的 partition，以及 `evaluation_segment_columns`（`segment_columns.json`，`generate_comparison_report` 用它決定分群）。兩者會被分開刪掉（清掉 `data/`、DROP 表），缺哪個都會被擋下、說出缺的是哪個：
+這條路沒有 `prepare_eval_data`，它讀的東西都是寫 enriched partition 的那次標準 run 一起寫的：評估日期的 partition、`evaluation_segment_columns`（`segment_columns.json`，`generate_comparison_report` 用它決定分群），以及欄模式下的 `evaluation_item_categories`（`item_categories.json`，大類對照表，見 3.3 節）。兩者會被分開刪掉（清掉 `data/`、DROP 表），缺哪個都會被擋下、說出缺的是哪個：
 
 - **partition 不在、或 `segment_columns.json` 不在**（欄模式下再加上 `item_categories.json`，見 3.3 節）：CLI 在任何 node 執行前就停下，每缺一樣列一行（表名與缺 partition 的所有日期、檔案路徑），最後寫出該先跑的 `python -m recsys_tfb evaluation --model-version …`。這一步只看 partition 清單與檔案在不在，不讀資料。放在 CLI、不只靠下面的閘門，是因為切片會跳過沒有輸出的 node：`--compare-only` 加上 `--from-node` 時閘門不會跑。
 - **partition 列得出來但某個日期沒有列**：`validate_enriched_eval_predictions_present` 擋下，訊息寫出表名、沒有列的日期與 model_version。

@@ -113,7 +113,7 @@ python -m recsys_tfb <指令> --env <env>
   - 帶 `--post-training` 又打開 `evaluation.report.sections.prediction_quality` 時，`dataset.test_zero_positive_group_ratio` 必須大於 0（`A46`）。r 為 0（預設）的 test 表已經丟掉所有沒有正例的 query group，把每一列當二元預測的指標會系統性偏高。監控模式不查。
   - `evaluation.query_filter.drop_all_positive_groups` 有寫的話必須是 `true`／`false`；這個區塊裡不能有別的鍵（`A49`）。唯一的讀法（`evaluation/metrics.py::drop_all_positive_groups`）只用真假值判斷，寫錯值或鍵名不會報錯，只會悄悄不生效。
   - `evaluation.baseline.score` 有寫的話必須是 `count` 或 `rate`；`evaluation.baseline` 底下只能有 `lookback_months`、`score` 兩個鍵（`A50`）。唯一的讀法（`evaluation/baselines.py::baseline_score`）遇到不認得的值或鍵名不會報錯，只會悄悄維持正例數。
-  - `evaluation.item_categories.column` 有寫的話：不能和 `evaluation.item_categories.mapping` 同時寫、必須是欄名字串；`enabled` 打開時只能配 `--post-training`（`A51`）。大類從 `sample_pool` 那一欄讀，監控模式的母體是 `inference_population`，沒有這一欄；只下 `--compare-only`、沒加 `--post-training` 也算監控模式。
+  - `evaluation.item_categories.column` 有寫的話：不能和 `evaluation.item_categories.mapping` 同時寫（`mapping: null` 算沒寫，env 覆蓋層可以用它關掉 base 的 mapping）、必須是欄名字串；`enabled` 打開時，`evaluation.item_categories.unmapped` 有寫的話只能是 `singleton`，而且只能配 `--post-training`（`A51`）。大類從 `sample_pool` 那一欄讀，監控模式的母體是 `inference_population`，沒有這一欄；只下 `--compare-only`、沒加 `--post-training` 也算監控模式。
   - `--compare` 和 `--compare-only` 只能給一個；給的名稱必須是 `evaluation.compare_sources` 裡的鍵（`A12`、`A13`）。
   - `--rebuild-dates` 只在正例率基準線接上時能用：`evaluation.baseline.score: rate`、`report.sections.baseline` 開著、帶 `--post-training`、不是 `--compare-only`。每個日期要寫成 `YYYY-MM-DD`，而且要落在某個評估日期的回看窗 `[S - lookback_months, S)` 裡（`A21`）。
 - **dataset、training、inference**

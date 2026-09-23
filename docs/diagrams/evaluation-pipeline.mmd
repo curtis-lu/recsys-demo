@@ -94,12 +94,13 @@ flowchart TB
   end
 
   art_gain[["gain_ledger<br/><small>training 落地 ・ optional，可缺席</small>"]]
-  cfg_cat[/"evaluation.item_categories.mapping<br/><small>啟用時整套指標對大類粒度再跑第二輪</small>"/]
+  cfg_cat[/"evaluation.item_categories<br/><small>mapping（手寫）或 column（取自 sample_pool 的一欄，只在 --post-training，#379）<br/>啟用時整套指標對大類粒度再跑第二輪</small>"/]
 
   %% ---------------------- 主鏈：整理 ----------------------
   n_prep["prepare_eval_data<br/><small>篩 model_version 與 snap_date ・ label_table 重複 key 就擋 ・ left join 補 label<br/>post-training 依 score（同分按 item）重算 rank、轉 BIGINT ・ join segment 欄（母體表缺欄只 WARN）</small>"]
   o_enriched(["enriched_eval_predictions　★Hive<br/><small>join 在此算一次、以本月 partition 落地（dynamic overwrite）・ 一列 ＝ 一個 (time, entity, item) 候選<br/>存有這個 model_version 評估過的所有月份 ・ 每個讀者各自 restrict_to_current_eval_partitions 篩回本次評估日期並驗分區指紋</small>"])
   d_segcols(["evaluation_segment_columns<br/><small>JSON ・ joined ／ sources ／ missing<br/>分群的 node 照 joined 分群、不看 frame 欄位</small>"])
+  d_catmap(["evaluation_item_categories<br/><small>JSON ・ column ／ mapping（只有欄模式有內容）<br/>optional：#379 之前的評估目錄沒有它</small>"])
 
   %% ---------------------- 指標流 ----------------------
   n_metrics["compute_metrics<br/><small>overall / per_item / per_segment / per_item_segment<br/>＋ macro_avg ＋ dataset_overview ＋（可選）category</small>"]
@@ -162,6 +163,11 @@ flowchart TB
   d_segcols -- "只取 joined" --> n_pq
   d_segcols --> n_restrict
   d_segcols --> n_validate
+  cfg_cat -- "column：只讀評估月份的 sample_pool<br/>一個 item 兩個大類就擋（B18）" --> n_prep
+  n_prep --> d_catmap
+  d_catmap --> n_metrics
+  d_catmap --> n_baseline
+  d_catmap -- "--compare-only：欄模式才需要" --> n_creport
 
   o_enriched --> n_metrics
   cfg_cat --> n_metrics
