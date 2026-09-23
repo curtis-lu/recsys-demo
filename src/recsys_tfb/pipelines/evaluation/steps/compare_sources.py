@@ -142,8 +142,12 @@ def _load_external_hive(
     # Column rename: alias external names → our canonical schema names
     df = raw.select(*[F.col(ext).alias(internal) for internal, ext in cols.items()])
     # A multi-column item is combined once the columns carry our names, and
-    # before prod_mapping, whose keys are item values (ADR-0027).
-    df = combine_item_columns(df, schema, f"compare external_hive table={table!r}")
+    # before prod_mapping, whose keys are item values (ADR-0027). Unless the
+    # source maps `item` itself: then the external table names items with an
+    # id of its own, there is nothing to combine, and prod_mapping translates
+    # those ids (A11 refuses a source that declares both).
+    if item_col not in cols:
+        df = combine_item_columns(df, schema, f"compare external_hive table={table!r}")
     # The user's table: nothing says it is partitioned by the time column.
     no_rows = _no_rows_for(df, parameters, time_partitioned=False)
     if no_rows:

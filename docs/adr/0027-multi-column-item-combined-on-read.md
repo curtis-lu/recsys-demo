@@ -42,7 +42,8 @@ schema:
 
    ```
    使用者給的表 → 帶原欄，框架拼
-     sample_pool、label_table、候選層級特徵表、評估的外部比較表（compare kind: external_hive）
+     sample_pool、label_table、候選層級特徵表
+     評估的外部比較表（compare kind: external_hive）：原欄，或它自己的一欄編號（見下）
 
    框架自己寫的表 → 只帶拼好的 item
      model_input、評估預測表、推論結果表……
@@ -50,6 +51,8 @@ schema:
    conf 裡的值 → 寫拼好的值（c01-banner）
      categorical_values.item、inference.products、抽樣設定鍵、sample_weight_keys 的鍵、大類 mapping
    ```
+
+   **外部比較表是例外，兩種都收。** 它是別的系統的輸出，常常只有那個系統自己的一欄 item 編號（例如廣告代碼 `AD-00017`），沒有原欄可拼。所以它的 `columns` 可以寫原欄（框架拼好再套 `prod_mapping`），也可以直接寫 `item` 對到那一欄（不拼，`prod_mapping` 把那些編號翻成拼好的值）。兩種都寫會被 A11 擋下：同一列會有兩個不同的 item 值。
 
    拼完之後原欄就丟掉。候選層級特徵表的非鍵欄全部會變成特徵，原欄留著的話，`campaign_id`、`creative_format` 會變成兩個新特徵——這跟今天在 SQL 拼的行為不同，也不是本 ADR 要的（屬性各自當特徵見 #394 的 Out of Scope）。
 4. **擋掉會撞名的設定。** 宣告多欄時，使用者的表若已經有一欄叫 `item` 就 raise，否則拼出的欄會蓋掉它。原欄也不能是其他角色的欄（例如 `item: [cust_id, prod]`）：拼完會把原欄丟掉，等於把 entity 的欄丟掉。後者在 `validate_schema_config` 擋，前者在拼欄的地方擋（每張表各擋一次，訊息點名是哪張表；B16）。
@@ -71,7 +74,7 @@ schema:
 - **推論結果表只有拼好的 `item`。** 之後若要拆回原欄，**不能靠 split 字串**：決定 2 允許值本身含 `-`，`cmp-01-banner` 拆不回唯一的原值；得把原欄一路帶到輸出。
 - **同分時照拼好的字串比**，不逐欄照數字大小比（`CONTEXT.md` 的 **rank**）。同分規則只為名次可重現，照字串比同樣可重現。
 - **conf 仍要列出所有組合**（`categorical_values.item`）。模型的類別編號表、離線推論的全網格（每個 entity × 整份清單）都靠這份清單。改成從資料數是 #379；本 ADR 拼成一欄之後，#379 數的就是 `item` 那一欄，不必知道它是多欄。
-- **外部比較表也要帶原欄。** item 宣告成多欄時，`compare kind: external_hive` 的 `columns` 要對應每一個原欄，框架接好之後才套 `prod_mapping`（決定 3）。外部表若只有它自己的一欄 item id，這個部署目前沒辦法設定它。2026-09-23 考慮過「寫原欄就接、直接寫 `item` 就不接」兩種都收，使用者決定照決定 3 只收原欄。
+- **外部比較表兩種寫法都收**（決定 3 的例外）。#394 票面原本只收原欄；2026-09-23 使用者改成兩種都收，理由是別的系統的輸出通常只有自己的一欄編號，只收原欄的話這種表設定不了。
 - **撞值檢查只看 dataset 讀到的期間。** 熱門度基準線回看到 dataset 期間之前的那一段不查：撞值要欄值恰好互相吻合，極少見，不為它每次評估多掃一次來源表。
 - **`scripts/` 底下直接讀來源表的診斷腳本不拼欄。** 它們在多欄部署上會報找不到 `item` 欄；要用時在腳本讀表之後呼叫同一個函式。例外是抽樣設定工具 `scripts/sampling_overrides_editor.py`：它不是診斷腳本，而是推導 `sample_group_keys`／`sample_ratio_overrides` 的工具（這兩個設定寫的正是 `item` 與拼好的值），所以它讀 `sample_pool` 之後會拼。
 - ADR-0025 說「之後任何加寬 identity 的改動（例如 #394 的 item 多欄）都不得調動既有欄位的相對順序」。本 ADR 不加寬 identity，所以這條對 #394 不適用；它對之後真的加寬 identity 的改動仍然成立。

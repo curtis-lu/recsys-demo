@@ -357,7 +357,8 @@ schema:
 
 | 東西 | 寫什麼 | 例子 |
 |---|---|---|
-| 你給的表：`sample_pool`、`label_table`、候選層級特徵表、評估的外部比較表 | **原欄**，框架負責拼 | `campaign_id`、`creative_format` 兩欄 |
+| 你給的表：`sample_pool`、`label_table`、候選層級特徵表 | **原欄**，框架負責拼 | `campaign_id`、`creative_format` 兩欄 |
+| 評估的外部比較表 | 原欄，**或**它自己的一欄編號（寫成 `item`） | 見下面最後一點 |
 | 框架自己寫的表：model_input、預測表、推論結果表 | 只有拼好的 `item` | `item = c01-banner` |
 | conf 裡寫到 item 的地方 | **拼好的值**；寫欄名的地方寫 `item` | `categorical_values.item`、`inference.products`、`sample_group_keys` 裡的 `item`、`sample_ratio_overrides` 的鍵、`sample_weight_keys` |
 
@@ -371,7 +372,7 @@ schema:
 - **同分時照拼好的字串比**，不逐欄照數字大小比（`CONTEXT.md` 的 **rank**）。
 - **推論結果表只有拼好的 `item`**，不拆回原欄。
 - conf 仍要逐一列出所有組合（`categorical_values.item`）：模型的類別編號與離線推論的候選都靠這份清單。
-- 評估的外部比較表（`compare kind: external_hive`）的 `columns` 對應寫原欄（`campaign_id: <外部欄名>`、`creative_format: <外部欄名>`），不寫 `item`；`prod_mapping` 的鍵是外部表拼好之後的值（見 [`evaluation.md`](evaluation.md) 的比較報表設定）。
+- 評估的外部比較表（`compare kind: external_hive`）是例外，兩種寫法都收：外部表也分欄存時，`columns` 寫原欄，框架拼好再套 `prod_mapping`；外部表只有自己的一欄編號時，直接寫 `item: <那一欄>`，由 `prod_mapping` 把編號翻成拼好的值。兩種都寫會被擋下（見 [`evaluation.md`](evaluation.md) 的比較報表設定）。
 
 ## 4. 使用方式
 

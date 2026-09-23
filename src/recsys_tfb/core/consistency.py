@@ -3768,19 +3768,58 @@ _VALID_MODEL_VERSION_SOURCES = {
 }
 
 
-def _required_external_columns(parameters: dict) -> set[str]:
+def _required_external_columns(parameters: dict, declared=()) -> set[str]:
     """Columns an ``external_hive`` compare source must declare, as schema roles.
 
     Every entry is a *role* resolved through :func:`get_schema` — the identity
     columns (time + entity + item) plus score — never a literal column name.
     ``entity`` is a list, so a multi-column entity requires all of its columns.
-    A multi-column item requires its source columns rather than ``item``: the
-    external table is the user's own, so it carries them and the loader
-    combines them, as every other entry does (ADR-0027 decision 3).
+
+    A multi-column item can be declared two ways (ADR-0027 decision 3), and
+    ``declared`` — the source's ``columns`` keys — says which one this source
+    uses. Its source columns, when the external table holds them: the loader
+    combines them as every other entry does, and ``prod_mapping``'s keys are
+    the combined values. Or ``item`` alone, when the external table names an
+    item with one id of its own (another system's ad code): there is nothing
+    to combine, and ``prod_mapping`` translates those ids. With neither
+    declared, the source columns are what is asked for.
     """
     schema = get_schema(parameters)
-    identity = [c for c in schema["identity_columns"] if c != schema["item"]]
-    return set(identity) | set(schema["item_source_columns"]) | {schema["score"]}
+    item = schema["item"]
+    sources = schema["item_source_columns"]
+    required = {c for c in schema["identity_columns"] if c != item} | {schema["score"]}
+    if len(sources) > 1 and item not in declared:
+        return required | set(sources)
+    return required | {item}
+
+
+def _external_item_declared_twice(parameters: dict, declared) -> list[str]:
+    """Item source columns declared alongside ``item`` itself, sorted.
+
+    Only a multi-column item has the two spellings. Both at once leaves the
+    loader two different item values for one row — the table's own id and
+    the combined one — so neither is taken on trust.
+    """
+    schema = get_schema(parameters)
+    sources = schema["item_source_columns"]
+    if len(sources) < 2 or schema["item"] not in declared:
+        return []
+    return sorted(set(sources) & set(declared))
+
+
+def _external_item_alternative_hint(parameters: dict, missing) -> str:
+    """For a multi-column item whose source columns are missing: say that
+    ``item`` alone is the other way to declare it. Empty otherwise, so a
+    single-column deployment reads the message it always read."""
+    schema = get_schema(parameters)
+    sources = schema["item_source_columns"]
+    if len(sources) < 2 or not set(sources) & set(missing):
+        return ""
+    return (
+        f" — or, if the external table names items with one id of its own, "
+        f"map {schema['item']!r} to that column instead of {sources} "
+        f"(prod_mapping then translates those ids)"
+    )
 
 
 def compare_source_well_formed_errors(parameters: dict) -> list[str]:
@@ -3829,10 +3868,20 @@ def compare_source_well_formed_errors(parameters: dict) -> list[str]:
             if "table" not in src:
                 errs.append(f"(A11) compare_sources[{key!r}] kind=external_hive missing 'table'")
             cols = src.get("columns", {}) or {}
-            missing = _required_external_columns(parameters) - set(cols.keys())
+            missing = _required_external_columns(parameters, cols) - set(cols.keys())
             if missing:
                 errs.append(
                     f"(A11) compare_sources[{key!r}].columns missing required keys: {sorted(missing)}"
+                    + _external_item_alternative_hint(parameters, missing)
+                )
+            twice = _external_item_declared_twice(parameters, cols)
+            if twice:
+                errs.append(
+                    f"(A11) compare_sources[{key!r}].columns declares both 'item' "
+                    f"and item source column(s) {twice}. Declare the source "
+                    f"columns when the external table holds them (they are "
+                    f"combined, ADR-0027), or 'item' alone when it names items "
+                    f"with one id of its own — not both."
                 )
             if not src.get("prod_mapping"):
                 errs.append(f"(A11) compare_sources[{key!r}] kind=external_hive missing 'prod_mapping'")

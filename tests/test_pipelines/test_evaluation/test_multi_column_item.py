@@ -186,14 +186,64 @@ class TestExternalComparisonTable:
             ("A-x", 0.9), ("B-x", 0.4),
         ]
 
-    def test_a11_asks_for_the_source_columns_not_item(self):
-        from recsys_tfb.core.consistency import compare_source_well_formed_errors
+    def test_its_own_single_item_id_is_mapped_without_combining(self, spark, monkeypatch):
+        """Another system names the ad with one code of its own: ``columns``
+        maps ``item`` to it, nothing is combined, and ``prod_mapping``
+        translates the codes."""
+        from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
+            load_compare_predictions,
+        )
 
         params = _ext_params()
-        params["evaluation"]["compare_sources"] = {
-            "x": params["evaluation"].pop("compare"),
+        params["evaluation"]["compare"]["columns"] = {
+            "cust_id": "customer_id", "snap_date": "as_of_date",
+            "item": "ad_code", "score": "pred_score",
         }
-        assert compare_source_well_formed_errors(params) == []
-        del params["evaluation"]["compare_sources"]["x"]["columns"]["fmt"]
-        errors = compare_source_well_formed_errors(params)
-        assert any("['fmt']" in e for e in errors), errors
+        params["evaluation"]["compare"]["prod_mapping"] = {
+            "AD-00017": "A-x", "AD-00042": "B-x",
+        }
+        ext = spark.createDataFrame(
+            [("c1", "2026-01-31", "AD-00017", 0.9),
+             ("c1", "2026-01-31", "AD-00042", 0.4)],
+            ["customer_id", "as_of_date", "ad_code", "pred_score"],
+        )
+        monkeypatch.setattr(spark, "table", lambda t: ext)
+        out = load_compare_predictions(params, spark)
+        assert sorted((r["item"], r["score"]) for r in out.collect()) == [
+            ("A-x", 0.9), ("B-x", 0.4),
+        ]
+
+
+def _a11(columns):
+    from recsys_tfb.core.consistency import compare_source_well_formed_errors
+
+    params = _ext_params()
+    source = params["evaluation"].pop("compare")
+    source["columns"] = columns
+    params["evaluation"]["compare_sources"] = {"x": source}
+    return compare_source_well_formed_errors(params)
+
+
+_KEYS = {"cust_id": "customer_id", "snap_date": "as_of_date", "score": "pred_score"}
+
+
+class TestA11ForAnExternalTable:
+    """Two ways to declare a multi-column item for an external table
+    (ADR-0027 decision 3): its source columns, or ``item`` alone."""
+
+    def test_the_source_columns_pass(self):
+        assert _a11({**_KEYS, "campaign": "c", "fmt": "f"}) == []
+
+    def test_item_alone_passes(self):
+        assert _a11({**_KEYS, "item": "ad_code"}) == []
+
+    def test_a_missing_source_column_is_named_with_the_other_way(self):
+        errors = _a11({**_KEYS, "campaign": "c"})
+        assert len(errors) == 1
+        assert "missing required keys: ['fmt']" in errors[0]
+        assert "map 'item' to that column" in errors[0]
+
+    def test_both_ways_at_once_is_refused(self):
+        errors = _a11({**_KEYS, "item": "ad_code", "campaign": "c", "fmt": "f"})
+        assert len(errors) == 1
+        assert "declares both 'item' and item source column(s) ['campaign', 'fmt']" in errors[0]
