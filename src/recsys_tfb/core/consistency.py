@@ -22,14 +22,26 @@ Layer 1 — config-static (implemented here; aggregated by
   ``item_missing_from_categorical`` (runtime backstop: ``_spark.py`` item
   guard).
 * A3 — an identity categorical (``schema.item``) is declared in
-  ``categorical_columns`` but absent from ``schema.categorical_values``.
-  Predicate: ``resolved_item_values`` (also delegated to by
-  ``schema.validate_schema_config``; runtime backstop: ``_spark.py``
-  identity-cat guard, which raises ``DataConsistencyError``).
-* A4 — ``inference.products`` ≠ ``schema.categorical_values[item]``.
-  Predicate: ``inference_products_mismatch``.
+  ``categorical_columns`` but absent from ``schema.categorical_values``. The
+  cell may be the list or ``from_train_data`` (#379, the item list counted
+  from the train months); absent is refused either way, so forgetting it
+  never switches modes silently. Predicate: ``require_item_list_declared``
+  (run by ``schema.validate_schema_config`` and ``resolved_item_values``;
+  runtime backstop: ``require_declared_categoricals`` in
+  ``pipelines/dataset/steps/categoricals.py``, run by
+  ``fit_preprocessor_metadata``, which raises ``DataConsistencyError``).
+  With a counted list ``resolved_item_values`` refuses instead of returning
+  the string's letters; every reader asks ``item_list_counted_from_data``
+  first.
+* A4 — ``inference.products`` ≠ ``schema.categorical_values[item]``. Only for
+  a listed item list; a counted one is A52's. Predicate:
+  ``inference_products_mismatch``.
 * A5 — a ``sample_ratio_overrides`` key references an item value absent from
-  ``schema.categorical_values[item]``. Predicate: ``override_unknown_items``.
+  the item list. Predicate: ``override_unknown_items``; the message both
+  sites raise: ``override_unknown_item_errors``. With a counted list (#379)
+  there is none at the CLI entry: the predicate takes the list as an
+  argument, and ``fit_preprocessor_metadata`` runs it once it has counted
+  the list (a slice that skips the fit skips it too).
 * A6 — the hardcoded item lists across YAML/SQL/synthetic-data disagree.
   Enforced by the ``tests/test_pipelines/test_source_etl/
   test_product_consistency.py`` lint (consumes ``resolved_item_values``),
@@ -54,8 +66,11 @@ Layer 1 — config-static (implemented here; aggregated by
       ``len(sample_weight_keys)`` (silently never matches). Predicate:
       ``weight_key_arity_mismatch``.
     - A9c — a ``sample_weights`` key whose product component (when
-      ``schema.item`` is a weight key) ∉ ``resolved_item_values`` (mirrors A5).
-      Predicate: ``weight_unknown_items``.
+      ``schema.item`` is a weight key) ∉ the item list (mirrors A5).
+      Predicate: ``weight_unknown_items``; the message both sites raise:
+      ``weight_unknown_item_errors``. With a counted list (#379) it runs
+      in training's ``select_features`` against the preprocessor's list; that
+      node's output is memory-only, so every training slice runs it.
 * A10 — an ``evaluation.segment_sources.<key>`` override has a key that is not
   in ``evaluation.segment_columns``, is incomplete (``table``,
   ``key_columns``, ``segment_column`` all required), or delivers a
@@ -199,7 +214,10 @@ Layer 1 — config-static (implemented here; aggregated by
 * A27 — the inference scoring grid ``inference.snap_dates`` x
   ``inference.entity_buckets`` x ``inference.products`` must not be
   degenerate: the two lists non-empty, and ``entity_buckets`` — when the key
-  is present at all — a number >= 1. One code for three keys because they are
+  is present at all — a number >= 1. With the item list counted from the data
+  (#379) the item axis is the preprocessor's list, and its emptiness is
+  checked where it exists (``predict_and_write_scores``, through
+  ``inference.steps.chunk_plans.plan_scoring_chunks``). One code for three keys because they are
   one parameter family (A25's precedent) and because a config that empties two
   of them should cost one run to fix. Absent ``entity_buckets`` takes
   ``scoping.DEFAULT_ENTITY_BUCKETS`` and is clean; an explicit YAML ``null``
@@ -299,7 +317,7 @@ Layer 1 — config-static (implemented here; aggregated by
   was renamed to ``evaluation.item_categories`` (#327): the framework does not
   speak the example deployment's business vocabulary. The rename is hard — no
   dual keys — so a conf that still spells the old name loses the whole category
-  evaluation in silence: ``metrics_spark._build_category_mapping`` reads the new
+  evaluation in silence: ``metrics_spark.hand_category_mapping`` reads the new
   name, gets ``{}``, returns ``None``, and every category section vanishes from
   the report while the run succeeds. This predicate turns that into a message
   naming the new key. Predicate: ``legacy_evaluation_key_errors``. Aggregated by
@@ -578,8 +596,15 @@ Layer 1 — config-static (implemented here; aggregated by
   A46/A49/A50). NOT aggregated, for A22's reason: that gate cannot see
   ``--post-training``. Runtime backstops: ``prepare_eval_data`` raises
   ``RuntimeError`` when column mode meets a population other than
-  sample_pool, and ``metrics_spark._build_category_mapping`` refuses column
+  sample_pool, and ``metrics_spark.hand_category_mapping`` refuses column
   mode (the table has to be passed in, never read from the conf).
+* A52 — ``inference.products`` written while the item list is counted from
+  the data (#379, ``schema.categorical_values[<item>]: from_train_data``).
+  Offline inference scores every entity against the preprocessor's list then;
+  a hand-written product list beside it is a second, stale-able source of the
+  same list. Predicate: ``inference_products_with_counted_items_errors``.
+  Aggregated by ``validate_config_consistency``, beside A4 (the same key's
+  check for a listed item list).
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -595,10 +620,15 @@ harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--
 + the filesystem), A35 (the ``--var`` CLI flags).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
-+ B13 + B14 + B15 + B16 + B17 + B18 implemented and wired):
++ B13 + B14 + B15 + B16 + B17 + B18 + B19 implemented and wired):
 
 * B1 — sample_pool items ↔ declared items must be equal; label items ⊆
   declared items (unknown item values corrupt training or violate invariants).
+  With the item list counted from the data (#379) there is no declared list:
+  sample_pool is not compared (a val/test item the train months lack is a new
+  item, warned about in ``build_val_model_input`` /
+  ``build_test_model_input``, off the landed keys table), and label items ⊆
+  sample_pool items instead.
   Predicate: ``item_coverage_errors`` (pure, no Spark); wired via
   ``validate_data_consistency`` (``pipelines/dataset/nodes.py``) as the
   first node of the dataset pipeline. B3 — a declared item has zero positives over
@@ -830,6 +860,16 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
   ``prepare_eval_data`` (it reads sample_pool there, and only in column mode),
   not in ``validate_data_consistency``: the dataset gate does not know which
   months a later evaluation run will read.
+* B19 — with the item list counted from the data (#379), the list counted
+  now differs from the one in the preprocessor already on disk for the same
+  ``base_dataset_version``. A listed list is in the version ID; a counted one
+  is not, so the version does not move when the train-month data change, and
+  overwriting would shift every item's code under the models trained on the
+  old list. Predicate: ``item_list_drift_errors``. Wired in
+  ``fit_preprocessor_metadata`` (which reads the file on disk through the
+  optional catalog entry ``preprocessor_on_disk``, A6's other entry name),
+  not in ``validate_data_consistency``: a slice starting at the fit skips the
+  gate, and the fit is what would overwrite the file.
 
 Layer 3 — specified but DEFERRED (NOT implemented in this module yet); see
 the plan doc for the full table:
@@ -898,6 +938,7 @@ from recsys_tfb.core.date_ranges import as_date_list, lookback_window_bounds
 from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
 from recsys_tfb.core.schema import (
     COMBINED_ITEM_COLUMN,
+    ITEM_LIST_FROM_TRAIN_DATA,
     ITEM_SEPARATOR,
     OPTIONAL_ROLE_KEYS,
     ENTITY_GROUPING_KEYS,
@@ -928,19 +969,16 @@ def _prepare_model_input(parameters: dict) -> dict:
     return (parameters.get("dataset", {}) or {}).get("prepare_model_input", {}) or {}
 
 
-def resolved_item_values(parameters: dict) -> list[str]:
-    """Canonical sorted list of valid item values (the single source).
+def require_item_list_declared(parameters: dict) -> None:
+    """A3 — the item column, when it is a declared categorical (in
+    ``prepare_model_input.categorical_columns``), has a
+    ``schema.categorical_values`` cell: a list, or
+    :data:`~recsys_tfb.core.schema.ITEM_LIST_FROM_TRAIN_DATA` (#379).
 
-    Reads ``schema.categorical_values[schema.item]``. Raises
-    ``ConfigConsistencyError`` when the item column is a declared categorical
-    (in prepare_model_input.categorical_columns) but has no category list —
-    this is invariant A3, defined here once.
-
-    Returns ``[]`` when the item column is not a declared categorical (or
-    ``categorical_columns`` is absent). Callers relying on this as the single
-    source of valid item values must ensure ``item_missing_from_categorical``
-    (invariant A2) is validated upstream — ``validate_config_consistency``
-    does this.
+    Raises ``ConfigConsistencyError``. The one definition, run by
+    ``schema.validate_schema_config`` at every CLI entry and by
+    :func:`resolved_item_values`. A missing cell is refused rather than read
+    as "count it from the data": forgetting it must not quietly switch modes.
     """
     schema = get_schema(parameters)
     item = schema["item"]
@@ -951,9 +989,60 @@ def resolved_item_values(parameters: dict) -> list[str]:
             f"schema.item={item!r} is in dataset.prepare_model_input."
             f"categorical_columns but has no schema.categorical_values[{item!r}] "
             f"declaration. Add the full value list under "
-            f"schema.categorical_values.{item} in parameters.yaml."
+            f"schema.categorical_values.{item} in parameters.yaml, or "
+            f"{ITEM_LIST_FROM_TRAIN_DATA!r} to count it from the train months' "
+            f"sample_pool."
         )
-    return sorted(cat_values.get(item, []))
+
+
+def item_list_counted_from_data(parameters: dict) -> bool:
+    """Whether the item list is counted from the train months' sample_pool
+    (``schema.categorical_values[<item>]:``
+    :data:`~recsys_tfb.core.schema.ITEM_LIST_FROM_TRAIN_DATA`, #379) rather
+    than listed. The one question every reader of the item list asks before
+    reading it; in this mode the list exists only in the preprocessor
+    (``category_mappings[<item>]``) once the dataset pipeline has fit it.
+    """
+    # Fast path, without resolving the schema: no cell holds the value at all.
+    # Checks that read only one section (A27 reads `inference` alone) are
+    # called with parameters that carry no schema.
+    raw = ((parameters.get("schema") or {}).get("categorical_values") or {})
+    if ITEM_LIST_FROM_TRAIN_DATA not in raw.values():
+        return False
+    schema = get_schema(parameters)
+    cat_values = schema.get("categorical_values", {}) or {}
+    return cat_values.get(schema["item"]) == ITEM_LIST_FROM_TRAIN_DATA
+
+
+def resolved_item_values(parameters: dict) -> list[str]:
+    """Canonical sorted list of the declared item values (the single source).
+
+    Reads ``schema.categorical_values[schema.item]``. Raises
+    ``ConfigConsistencyError`` for A3 (:func:`require_item_list_declared`),
+    and when the item list is counted from the data
+    (:func:`item_list_counted_from_data`): there is no declared list then, and
+    sorting the cell's string would hand the caller its letters. A caller
+    reads the list only after asking which mode it is in.
+
+    Returns ``[]`` when the item column is not a declared categorical (or
+    ``categorical_columns`` is absent). Callers relying on this as the single
+    source of valid item values must ensure ``item_missing_from_categorical``
+    (invariant A2) is validated upstream — ``validate_config_consistency``
+    does this.
+    """
+    require_item_list_declared(parameters)
+    if item_list_counted_from_data(parameters):
+        item = get_schema(parameters)["item"]
+        raise ConfigConsistencyError(
+            f"schema.categorical_values[{item!r}] is {ITEM_LIST_FROM_TRAIN_DATA!r}: "
+            f"the item list is counted from the train months' sample_pool and "
+            f"lives in the preprocessor, not in the conf. This caller read it "
+            f"as a declared list; it has to ask item_list_counted_from_data "
+            f"first."
+        )
+    schema = get_schema(parameters)
+    cat_values = schema.get("categorical_values", {}) or {}
+    return sorted(cat_values.get(schema["item"], []))
 
 
 def config_role_conflicts(parameters: dict) -> list[str]:
@@ -986,11 +1075,13 @@ def inference_products_mismatch(parameters: dict) -> dict:
     """Symmetric diff between inference.products and resolved_item_values (A4).
 
     Empty 'inference' section → no mismatch (inference not configured here).
+    An item list counted from the data has no declared list to compare with;
+    ``inference.products`` may not be written then at all (A52).
     """
-    declared = set(resolved_item_values(parameters))
     inf = parameters.get("inference") or {}
-    if "products" not in inf:
+    if "products" not in inf or item_list_counted_from_data(parameters):
         return {"only_in_inference": [], "only_in_categorical": []}
+    declared = set(resolved_item_values(parameters))
     products = set(inf.get("products") or [])
     return {
         "only_in_inference": sorted(products - declared),
@@ -998,11 +1089,44 @@ def inference_products_mismatch(parameters: dict) -> dict:
     }
 
 
-def override_unknown_items(parameters: dict) -> list[str]:
-    """sample_ratio_overrides keys whose item component ∉ resolved_item_values (A5).
+def inference_products_with_counted_items_errors(parameters: dict) -> list[str]:
+    """A52 — ``inference.products`` written while the item list is counted
+    from the data (#379).
+
+    Offline inference scores every entity against the preprocessor's item
+    list in that mode; a hand-written product list next to it would be a
+    second source of the same list, and keeping it in step by hand is the
+    very thing the mode removes. Refused rather than ignored, so a stale list
+    cannot sit in the conf looking authoritative. Aggregated by
+    ``validate_config_consistency``, beside A4 (the same key's check when the
+    list is declared).
+    """
+    inf = parameters.get("inference") or {}
+    if "products" not in inf or not item_list_counted_from_data(parameters):
+        return []
+    item = get_schema(parameters)["item"]
+    return [
+        f"A52: inference.products is written while "
+        f"schema.categorical_values.{item} is {ITEM_LIST_FROM_TRAIN_DATA!r}. "
+        f"Offline inference then scores every entity against the item list "
+        f"the preprocessor counted from the train months; remove "
+        f"inference.products."
+    ]
+
+
+def override_unknown_items(
+    parameters: dict, items: Iterable[str] | None = None
+) -> list[str]:
+    """sample_ratio_overrides keys whose item component ∉ the item list (A5).
 
     Override keys are '|'-joined sample_group_keys values. If schema.item is not
     a sample_group_key there is no item component → nothing to check.
+
+    ``items`` is the item list to check against; ``None`` means the declared
+    one (:func:`resolved_item_values`). When the list is counted from the data
+    (#379) there is none before the run, so the config-time call returns
+    ``[]`` and the check runs again where the list is counted
+    (``fit_preprocessor_metadata``), passing it in.
     """
     schema = get_schema(parameters)
     item = schema["item"]
@@ -1011,13 +1135,50 @@ def override_unknown_items(parameters: dict) -> list[str]:
     if item not in group_keys:
         return []
     idx = group_keys.index(item)
-    declared = set(resolved_item_values(parameters))
+    if items is None:
+        if item_list_counted_from_data(parameters):
+            return []
+        items = resolved_item_values(parameters)
+    declared = set(items)
     bad: set[str] = set()
     for key in (ds.get("sample_ratio_overrides") or {}):
         parts = str(key).split("|")
         if idx < len(parts) and parts[idx] not in declared:
             bad.add(parts[idx])
     return sorted(bad)
+
+
+def _item_list_named(parameters: dict) -> tuple[str, str]:
+    """``(where the item list lives, how to fix a key missing from it)`` for
+    A5 / A9c's messages: the declaration when listed, the train months'
+    count when counted (#379) — where the fix "declare the value" does not
+    exist."""
+    if item_list_counted_from_data(parameters):
+        return ("the item list counted from the train months' sample_pool",
+                "Fix the key(s).")
+    return ("schema.categorical_values[item]",
+            "Fix the key(s) or declare the value(s).")
+
+
+def override_unknown_item_errors(
+    parameters: dict, items: Iterable[str] | None = None
+) -> list[str]:
+    """A5 as the message both of its sites raise.
+
+    ``items`` as in :func:`override_unknown_items`: ``None`` at the CLI entry
+    (``validate_config_consistency``), the counted list in
+    ``fit_preprocessor_metadata``. One text for both, so the code and the
+    wording cannot drift between the listed and the counted mode.
+    """
+    unknown = override_unknown_items(parameters, items=items)
+    if not unknown:
+        return []
+    where, fix = _item_list_named(parameters)
+    return [
+        f"A5: dataset.sample_ratio_overrides references item value(s) "
+        f"{unknown} absent from {where} — the override silently never "
+        f"matches. {fix}"
+    ]
 
 
 def optional_role_column_map(parameters: dict) -> dict[str, list[str]]:
@@ -1410,6 +1571,59 @@ def item_category_conflict_errors(
     return errors
 
 
+def item_list_drift_errors(
+    item: str,
+    counted: Sequence,
+    existing: Sequence | None,
+    base_dataset_version: str,
+) -> list[str]:
+    """(B19) a counted item list may not change under one
+    ``base_dataset_version`` (#379).
+
+    ``counted`` is the list this run counted from the train months'
+    sample_pool, ``existing`` the one in the preprocessor already on disk for
+    the version (``None`` when there is none). With a listed item list the
+    list is in the version ID, so adding an item moves the version and a new
+    directory is written; a counted list is not in the conf, so the version
+    stays put when the train-month data change under it. Overwriting the
+    preprocessor then would move every item's code while a model trained on
+    the old one still decodes by the old positions — every score shifted, no
+    error. Refused instead, naming what moved and how to go on.
+
+    The way on the message recommends first moves the version, so the new
+    list gets a new directory and every existing model keeps its own:
+    inference and evaluation read the preprocessor from
+    ``data/dataset/<base_dataset_version>/`` — the model directory holds no
+    copy — so deleting that directory and rebuilding is exactly the silent
+    re-coding this check exists to stop, for every model on the version that
+    is not retrained, a promoted one included. It stays in the message as
+    the last resort, with that consequence spelled out.
+    """
+    if existing is None or list(existing) == list(counted):
+        return []
+    added = sorted(set(counted) - set(existing), key=str)
+    removed = sorted(set(existing) - set(counted), key=str)
+    moved = "" if added or removed else " (same items, different order)"
+    return [
+        f"B19: base_dataset_version {base_dataset_version!r} already has a "
+        f"preprocessor whose item list (counted from the train months' "
+        f"sample_pool) differs from the one counted now{moved}: added "
+        f"{added}, removed {removed}. The train-month data changed under the "
+        f"same version; overwriting would shift every item's code under the "
+        f"models trained on the old list. To build with the new data, make "
+        f"the version move, so a new directory is built and existing models "
+        f"keep theirs: change dataset.train_snap_dates, or write the item "
+        f"list out under schema.categorical_values.{item} (the version then "
+        f"holds the list) — every item sample_pool holds in the train, val "
+        f"and test months (B1), with inference.products equal to it (A4). "
+        f"Last resort: delete "
+        f"data/dataset/{base_dataset_version}/ (and that version's dataset "
+        f"partitions) and rebuild — every model on this version that is not "
+        f"retrained, a promoted one included, then scores by shifted item "
+        f"codes: silently wrong, no error."
+    ]
+
+
 def item_source_dtype_errors(
     schema: dict,
     dtypes_by_table: Mapping[str, Mapping[str, str]],
@@ -1734,14 +1948,21 @@ def weight_key_arity_mismatch(parameters: dict) -> list[str]:
     return sorted(str(k) for k in weights if len(str(k).split("|")) != n)
 
 
-def weight_unknown_items(parameters: dict) -> list[str]:
-    """training.sample_weights keys whose product component ∉ resolved_item_values (A9c).
+def weight_unknown_items(
+    parameters: dict, items: Iterable[str] | None = None
+) -> list[str]:
+    """training.sample_weights keys whose product component ∉ the item list (A9c).
 
     Weight-table keys are '|'-joined sample_weight_keys values. If schema.item
     is not a weight key there is no product component → nothing to check
     (mirrors A5's item-only check in override_unknown_items). Only keys whose
     segment count matches the key arity are inspected; arity errors are
     reported separately by weight_key_arity_mismatch.
+
+    ``items``: as in :func:`override_unknown_items`. With a counted list the
+    check runs where training first holds the preprocessor
+    (``select_features``, whose memory-only output every training slice
+    re-runs it for).
     """
     training = parameters.get("training", {}) or {}
     keys = training.get("sample_weight_keys") or []
@@ -1750,13 +1971,34 @@ def weight_unknown_items(parameters: dict) -> list[str]:
         return []
     idx = keys.index(item)
     weights = training.get("sample_weights") or {}
-    declared = set(resolved_item_values(parameters))
+    if items is None:
+        if item_list_counted_from_data(parameters):
+            return []
+        items = resolved_item_values(parameters)
+    declared = set(items)
     bad: set[str] = set()
     for key in weights:
         parts = str(key).split("|")
         if len(parts) == len(keys) and parts[idx] not in declared:
             bad.add(parts[idx])
     return sorted(bad)
+
+
+def weight_unknown_item_errors(
+    parameters: dict, items: Iterable[str] | None = None
+) -> list[str]:
+    """A9c as the message both of its sites raise: the CLI entry
+    (``items=None``) and training's ``select_features`` (the preprocessor's
+    counted list). See :func:`override_unknown_item_errors`, its A5 twin.
+    """
+    unknown = weight_unknown_items(parameters, items=items)
+    if not unknown:
+        return []
+    where, fix = _item_list_named(parameters)
+    return [
+        f"A9c: training.sample_weights references item value(s) {unknown} "
+        f"absent from {where} — the weight silently never matches. {fix}"
+    ]
 
 
 _SEGMENT_OVERRIDE_FIELDS = ("table", "key_columns", "segment_column")
@@ -2447,7 +2689,7 @@ def item_category_column(parameters: dict) -> str | None:
     category pass off, and a column left under it is inert. The one reading of
     "is this column mode" shared by A51 (below), ``prepare_eval_data`` (which
     builds the table), its readers, the ``--compare-only`` input check and
-    ``metrics_spark._build_category_mapping``. A value A51 refuses (not a
+    ``metrics_spark.hand_category_mapping``. A value A51 refuses (not a
     non-empty string) comes back as is; A51 stops the run before anything
     reads it.
     """
@@ -2455,6 +2697,26 @@ def item_category_column(parameters: dict) -> str | None:
     if not block.get("enabled") or "column" not in block:
         return None
     return block["column"]
+
+
+def item_categories_enabled(parameters: dict) -> bool:
+    """Whether ``evaluation.item_categories.enabled`` switches the category
+    pass on."""
+    return bool(_item_categories_block(parameters).get("enabled"))
+
+
+def category_table_needed(parameters: dict) -> bool:
+    """Whether the category pass reads ``evaluation_item_categories`` rather
+    than the conf alone: in column mode it holds the table itself, and with
+    the item list counted from the data (#379) the evaluated model's item list
+    a hand mapping is checked against (``known_items``). What ``--compare-only``
+    asks the file for; any other deployment does not need it, and an
+    evaluation directory written before #379 does not have it.
+    """
+    return item_category_column(parameters) is not None or (
+        item_categories_enabled(parameters)
+        and item_list_counted_from_data(parameters)
+    )
 
 
 def item_category_column_errors(parameters: dict, post_training: bool) -> list[str]:
@@ -2653,7 +2915,7 @@ def legacy_evaluation_key_errors(parameters: dict) -> list[str]:
     to a permanent compatibility layer, and do not accept both spellings.
 
     The failure it replaces is silent all the way down.
-    ``metrics_spark._build_category_mapping`` reads
+    ``metrics_spark.hand_category_mapping`` reads
     ``evaluation.item_categories``; against an old conf that lookup returns
     ``{}``, ``enabled`` is falsy, the function returns ``None``, and
     ``compute_all_metrics`` simply never adds the ``category`` bundle. The run
@@ -3038,14 +3300,9 @@ def validate_config_consistency(parameters: dict) -> None:
             f"only_in_categorical={mm['only_in_categorical']}. They must be "
             f"identical sets."
         )
+    errors.extend(inference_products_with_counted_items_errors(parameters))
 
-    unknown = override_unknown_items(parameters)
-    if unknown:
-        errors.append(
-            f"sample_ratio_overrides references item value(s) {unknown} "
-            f"absent from schema.categorical_values[item] — the override "
-            f"silently never matches. Fix the key(s) or declare the value(s)."
-        )
+    errors.extend(override_unknown_item_errors(parameters))
 
     for msg in ranking_objective_conflicts(parameters):
         errors.append(msg)
@@ -3070,13 +3327,7 @@ def validate_config_consistency(parameters: dict) -> None:
             f"Fix the key(s) or sample_weight_keys."
         )
 
-    unknown_w = weight_unknown_items(parameters)
-    if unknown_w:
-        errors.append(
-            f"training.sample_weights references product value(s) {unknown_w} "
-            f"absent from schema.categorical_values[item] — the weight "
-            f"silently never matches. Fix the key(s) or declare the value(s)."
-        )
+    errors.extend(weight_unknown_item_errors(parameters))
 
     for msg in search_space_errors(parameters):
         errors.append(msg)
@@ -3128,11 +3379,20 @@ def validate_config_consistency(parameters: dict) -> None:
 
 def item_coverage_errors(
     item: str,
-    declared: list[str],
+    declared: list[str] | None,
     sample_pool_items: set[str],
     label_items: set[str],
 ) -> list[str]:
     """B1 invariant — the single definition.
+
+    ``declared`` is ``None`` when the item list is counted from the data
+    (#379). Then there is no list to hold sample_pool to: the train months'
+    items *are* the list, and a val/test item they lack is a new item, warned
+    about where it is encoded (``build_val_model_input`` /
+    ``build_test_model_input``, off the landed keys table), not refused.
+    Only label_table is checked: an item it holds that sample_pool never
+    offers as a candidate is a label for nothing, the same business-logic
+    error as below.
 
     sample_pool ↔ declared must be EQUAL (both directions are hard errors):
     a value the data has but config does not encodes to -1 (same code as
@@ -3146,6 +3406,16 @@ def item_coverage_errors(
     Keys off the passed ``item`` only; never hardcodes 'prod_name'. Returns
     collect-all error strings; empty list means OK.
     """
+    if declared is None:
+        orphan = sorted(label_items - sample_pool_items)
+        if not orphan:
+            return []
+        return [
+            f"label_table has item value(s) {orphan} that sample_pool never "
+            f"holds in the dataset windows — label business logic "
+            f"(label_*.sql) produced an item that is no one's candidate. "
+            f"Reconcile label_*.sql with sample_pool.sql."
+        ]
     declared_set = set(declared)
     errors: list[str] = []
 
@@ -5089,7 +5359,11 @@ def inference_grid_errors(parameters: dict) -> list[str]:
                     f"would look like a successful run that scored nobody."
                 )
 
-    if not (inf.get("products") or []):
+    # A counted item list is the preprocessor's (#379; A52 refuses products
+    # next to it), so its emptiness is a runtime question
+    # (predict_and_write_scores, through plan_scoring_chunks), not a config
+    # one.
+    if not item_list_counted_from_data(parameters) and not (inf.get("products") or []):
         errors.append(
             "(A27) inference.products is empty; there is nothing to rank."
         )

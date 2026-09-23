@@ -39,7 +39,7 @@ campaign_dim   ┘
 | `time` | `snap_date` | 一週（每週一）。ADR-0021：`time` 是時段，不是曝光那一秒 |
 | `entity` | `[user_id, slot_id]` | 替「某個使用者在某個版位」排一次；400 人 × 3 個版位 |
 | `occasion` | `request_id` | 到秒的一次請求（ADR-0025、#428）：同一秒、同一 entity 底下同時展示的若干素材是同一個 query group。平均每次請求 3.96（約 4）個素材 |
-| `item` | `[campaign_id, creative_format]` | 兩欄，SQL 不拼；框架讀入時用 `-` 拼成一欄 `item`（ADR-0027、#394），4 × 3 ＝ 12 種。框架寫的表、conf 的清單與抽樣設定都用拼好的值（`c01-banner`）與 `item` 這個欄名 |
+| `item` | `[campaign_id, creative_format]` | 兩欄，SQL 不拼；框架讀入時用 `-` 拼成一欄 `item`（ADR-0027、#394），4 × 3 ＝ 12 種。框架寫的表、數出來的 item 清單與抽樣設定都用拼好的值（`c01-banner`）與 `item` 這個欄名 |
 | `label` | `label` | 這一次請求裡，這個素材有沒有被點——同一素材在同一週可能出現在好幾次不同的請求裡，各自帶自己的 label |
 
 - **候選數不固定。** 候選＝這一次請求真的展示過的素材，一個 query group（一次請求）平均約 4 個（3.96），不是 12 個全配（商銀示例是每位客戶配滿全部產品）；有些請求只有 1 個候選（佔 4.9%），組內排序沒有意義，mAP 恆為 1。
@@ -69,7 +69,7 @@ campaign_dim   ┘
 | 沒見過的 item 屬性組合 | 有：`c04`、`video` 從第一週就有，`c04-video` 從 val 週 2025-12-22 才第一次曝光，train 沒有它。上線後給 4 倍流量（`LATE_ITEM_LAUNCH_BOOST`），test 週有 42 個正例；代價是從 val 週起其他 11 個 item 的曝光占比各降約 10.3%，item 分布在 train 與 val／test 之間本來就不同 | #379 item 清單從資料數；#394 item 宣告成多欄 |
 | 低點擊率（分數擠在低端） | **沒有**：點擊率約 15% | #381 預測品質 |
 
-**`c04-video` 對模型來說是一個沒見過的 item 值。** 框架要求 item 那一欄一定是模型特徵（`pipelines/dataset/steps/feature_columns.py::require_item_is_a_feature`），模型看到的是 `item` 這一個類別值，不是活動、格式兩個屬性，所以 train 沒出現過就不認得。item 宣告成多欄（#394）之後也一樣：它省掉的是在 SQL 拼欄，模型看的仍是組合。實跑時框架對這件事沒有任何警告（類別編號從 conf 的清單讀，train 有沒有出現不影響；#379 要加的就是這個警告）。test 週這個 item 的 42 個正例上，模型的平均名次 3.6、`map_attr@12` 0.435，熱門度基準是 4.6、0.333。
+**`c04-video` 對模型來說是一個沒見過的 item 值。** 框架要求 item 那一欄一定是模型特徵（`pipelines/dataset/steps/feature_columns.py::require_item_is_a_feature`），模型看到的是 `item` 這一個類別值，不是活動、格式兩個屬性，所以 train 沒出現過就不認得。item 宣告成多欄（#394）之後也一樣：它省掉的是在 SQL 拼欄，模型看的仍是組合。item 清單從 train 週數（#379）之後，`c04-video` 不在清單裡、類別編號是 -1，dataset 在 val 與 test 各警告一次；模型的預測與清單照列 12 種時逐值相同（兩種寫法下它都是 train 沒出現過的值）。test 週這個 item 的 42 個正例上，模型的平均名次 3.6、`map_attr@12` 0.435，熱門度基準是 4.6、0.333。
 
 低點擊率沒做：母體幾百人，1% 一週只剩個位數正例，其他票反而驗不了。#381 也沒有改資料：預測品質指標「分數範圍取本次資料的最小～最大、不寫死 `[0, 1]`」這條路，不論分數擠不擠都會走到，擠在低端時的分箱由單元測試（分數落在 0.001～0.011 的資料，`tests/test_evaluation/test_prediction_quality.py`）證明。
 
@@ -150,7 +150,7 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 |---|---|---|
 | `event` 角色 | 曾經打開過（#378）：`event: impression_id`，以這份資料跑綠過形狀一（同一 entity × 時段一個 query group，event 只進 identity）。#428 換成 `occasion` 之後不再宣告——想改回去，見 `conf/base/parameters.yaml` 的 schema 註解列出要改哪幾個檔 | #378（已改用 occasion 示範） |
 | `occasion` 角色 | **已打開**（#428）：`occasion: request_id`，`label_table.sql` 與 `sample_pool.sql` 都以一次請求為一個 query group，兩張表的 `primary_key` 與 `training_eval_predictions` 的 catalog 欄位都含 `request_id`。#380 接上逐筆的即時特徵之前，同一次請求裡的素材分數只靠週級特徵、容易同分；接上之後同分列是 0（報表〈完整性檢查〉的同分列佔比） | #428（完成） |
-| item 清單從資料數 | item 清單（`schema.categorical_values.item`）逐一列出 12 種，包括 train 沒有的 `c04-video`；離線推論的候選 `inference.products` 另外照抄一份（A4 要求兩者相同） | #379 |
+| item 清單從資料數 | **已打開**（#379）：`schema.categorical_values.item: from_train_data`，dataset 從 train 週的 `sample_pool` 數出 11 種——`c04-video` 到 val 週才第一次出現，不在清單裡，dataset 在 val／test 遇到它只警告。不寫 `inference.products`（A52 禁止另寫），離線推論的候選就是模型 preprocessor 裡那份清單 | #379（完成） |
 | 候選層級特徵表 | **已打開**（#380）：catalog 的 `candidate_feature_table` 指到 `feature_realtime`，它多帶了 `request_id`、`primary_key` 改成 identity；`impression_id`、`event_ts` 列進 `drop_columns`。模型多了 `browse_30m`、`browse_same_category_30m`、`prior_exposures_this_week` 三個特徵。代價是離線推論被擋下（見〈怎麼跑〉） | #380（完成） |
 | 預測品質指標家族 | **已打開**（#381）：`report.sections.prediction_quality: true`，`prediction_quality` 的三個值與框架預設相同。這個示例只跑 `--post-training`；test 表留下一半沒有點擊的請求（下一列），報表這一段的數字用權重加權、代表還原到全部曝光的估計 | #381（完成） |
 | 沒有正例的 query group 留多少 | **已打開**（#429）：`val_zero_positive_group_ratio: 0.5`、`test_zero_positive_group_ratio: 0.5`，沒有點擊的請求整個留一半，列上帶權重 `zero_positive_group_weight`（1 或 2），`training_eval_predictions` 的 catalog 欄位宣告了它。train 不設（objective 是 `binary`，r < 1 會變成負例降採樣）。預測品質打開時 test 的 r 必須大於 0（A46），所以這一列與上一列是一起的。0.5 只是示例值 | #429（完成） |
@@ -184,5 +184,4 @@ Cannot write nullable values to non-null column 'snap_date'
 - **生產規模的資料量估算。** 因為部署層的每日曝光量未知，本機合成資料量推不出生產成本；硬估會變成日後被引用的假數字。
 - **監控模式的 evaluation。** 理由見〈怎麼跑〉。
 - **修 #390。** 因為它改的是所有部署第一次建表的方式，而且要先查清楚 2026-04 為什麼改成現在的做法，應該單獨審；#373 只避開。
-- **不必逐一列出所有 item 組合。** item 已經宣告成多欄（#394），但 `categorical_values.item` 仍要列出 12 種組合：模型的類別編號與離線推論的候選都靠這份清單。改成從資料數是 #379。
 - **修 #390 的第二件（輸出檢查寫死 `snap_date`）。** 理由同上：改的是框架，#373 只沿用 `snap_date` 這個欄名避開。

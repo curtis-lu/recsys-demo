@@ -18,12 +18,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import logging
+
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError, categorical_dtype_errors
+from recsys_tfb.pipelines.dataset.steps.scoping import restrict_to_months
+from recsys_tfb.utils.item_columns import combine_item_columns
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame
+
+logger = logging.getLogger(__name__)
 
 
 def collect_vocabularies_from_data(
@@ -131,3 +137,61 @@ def read_declared_vocabularies(
     the step that says so, and the caller runs it first.
     """
     return {col: list(categorical_values[col]) for col in columns}
+
+
+def count_items_in_months(
+    sample_pool: DataFrame,
+    schema: dict,
+    months: list,
+) -> list:
+    """The sorted distinct non-NULL items ``sample_pool`` offers as candidates
+    in ``months`` — the item list when it is counted from the data (#379).
+
+    A multi-column item is combined first (``combine_item_columns``, B16
+    included), so the list holds the values every stage sees. The month
+    filter is the source-table form the key selection uses
+    (``restrict_to_months``), and the collection is
+    :func:`collect_vocabularies_from_data`'s: sorted, NULL excluded, one scan.
+    What reaches the driver is bounded by the item count.
+    """
+    item = schema["item"]
+    pool = combine_item_columns(sample_pool, schema, "sample_pool")
+    pool = restrict_to_months(pool, schema["time"], months)
+    return collect_vocabularies_from_data(pool, [item])[item]
+
+
+def warn_items_outside_the_list(
+    keys: DataFrame,
+    item_col: str,
+    items: list,
+    split: str,
+) -> list:
+    """Log, as a warning, the items the split's ``keys`` hold that ``items``
+    lacks, and return them sorted.
+
+    What it scans is the keys table, not the model_input built from it. The
+    callers hand in the landed ``val_keys`` / ``test_keys`` (test's already
+    scoped to this run's months, a partition filter), so this is one Spark
+    job reading one column of a partitioned parquet table, and no join. The
+    model_input holds the same items — the build's joins are left joins from
+    the keys — but it is unlanded, and a distinct over it would run the whole
+    build join a second time. What reaches the driver is bounded by the item
+    count.
+
+    The items only — no row counts: counting them per item is one more
+    aggregation over the split for a number that decides nothing (whether to
+    retrain turns on which items are new, not on how many rows they have).
+    """
+    present = {
+        r[0] for r in keys.select(item_col).distinct().collect()
+        if r[0] is not None
+    }
+    new = sorted(present - set(items), key=str)
+    if new:
+        logger.warning(
+            "%s holds %d new item(s) the item list (counted from the train "
+            "months) lacks: %s. Their rows are kept and encode to the unknown "
+            "code; the model has not seen them, so it ranks them as it ranks "
+            "a missing value.", split, len(new), new,
+        )
+    return new

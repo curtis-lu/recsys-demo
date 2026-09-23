@@ -97,6 +97,15 @@ COMBINED_ITEM_COLUMN = "item"
 #: combining code and the invariant messages read one constant.
 ITEM_SEPARATOR = "-"
 
+#: What ``schema.categorical_values[<item>]`` holds when the item list is not
+#: listed but counted from the train months' ``sample_pool`` (#379): the
+#: distinct items there, sorted, fixed in the preprocessor. It goes in the
+#: same cell a list would, so "two sources declared at once" cannot be
+#: written, and a forgotten cell still fails A3 rather than silently becoming
+#: this mode. Only the item cell may hold it: every other categorical either
+#: has its vocabulary counted from feature_table already or needs a list.
+ITEM_LIST_FROM_TRAIN_DATA = "from_train_data"
+
 
 #: The column lists :func:`get_schema` derives. None of them is settable: under
 #: ``schema`` they miss the ``columns`` lookup, and under ``schema.columns`` the
@@ -445,9 +454,15 @@ def get_schema_for_hash(parameters: dict) -> dict:
     Same resolution logic as :func:`get_schema` but excludes every field in
     :data:`_DERIVED_KEYS` -- they are functions of the roles already hashed, so
     hashing them would change nothing but the digest.
-    ``categorical_values`` IS included so
-    changes to declared category lists (e.g. adding a new product) bust
-    the base dataset version.
+    ``categorical_values`` IS included, so adding a new product busts the
+    base dataset version in both item-list modes, by different routes. A
+    listed item list is hashed itself: the new value is a changed list. A
+    counted one (:data:`ITEM_LIST_FROM_TRAIN_DATA`, #379) is hashed as that
+    string, not as the list; the new product enters the list only through
+    new train months, and ``dataset.train_snap_dates`` is hashed beside this
+    payload (``versioning.compute_base_dataset_version``). The same train
+    months counting a different list under an unchanged version is refused
+    by B19 (``consistency.item_list_drift_errors``) rather than written.
 
     An optional role (:data:`OPTIONAL_ROLE_KEYS`) enters the payload **only
     when declared**, and is emitted after the six fixed roles. Both halves
@@ -488,14 +503,17 @@ def validate_schema_config(parameters: dict) -> None:
       not contain duplicates. This is also what stops two roles overlapping — a column
       declared as both ``item`` and ``event`` shows up twice in that list —
       so there is no second overlap rule to keep in step with this one.
-    - ``categorical_values`` must be a mapping of non-empty str -> list.
+    - ``categorical_values`` must be a mapping of non-empty str -> list; the
+      item column's cell may instead be :data:`ITEM_LIST_FROM_TRAIN_DATA`,
+      and no other cell may.
     - ``time``, ``entity`` and ``item`` must be declared (:data:`_REQUIRED_ROLES`).
     - The item column (``schema.item``) — when declared in
       ``dataset.prepare_model_input.categorical_columns`` — must have a
       non-empty entry in ``schema.categorical_values``. This invariant (A3)
-      is delegated to :func:`recsys_tfb.core.consistency.resolved_item_values`
-      so config-time and runtime guards share one definition; see that
-      function for the precise rule.
+      is delegated to
+      :func:`recsys_tfb.core.consistency.require_item_list_declared` so
+      config-time and runtime guards share one definition; see that function
+      for the precise rule.
     - The other keys (``label``, ``score``, ``rank``) may be omitted; they
       fall back to :data:`_DEFAULTS` in :func:`get_schema`.
 
@@ -575,12 +593,24 @@ def validate_schema_config(parameters: dict) -> None:
             "Invalid schema.categorical_values in parameters.yaml: expected "
             f"mapping, got {type(raw_cat_values).__name__}"
         )
+    item_col = schema["item"]
     for col, values in raw_cat_values.items():
         if not isinstance(col, str) or not col.strip():
             raise ValueError(
                 "Invalid schema.categorical_values in parameters.yaml: keys "
                 f"must be non-empty strings, got {col!r}"
             )
+        if values == ITEM_LIST_FROM_TRAIN_DATA:
+            if col != item_col:
+                raise ValueError(
+                    "Invalid schema.categorical_values in parameters.yaml: "
+                    f"'{col}' is {ITEM_LIST_FROM_TRAIN_DATA!r}, but only "
+                    f"schema.categorical_values.{item_col} (the item column) "
+                    f"can be counted from the train data. List the values of "
+                    f"'{col}', or remove it if it is a feature_table column "
+                    f"(those are counted from the data already)."
+                )
+            continue
         if not isinstance(values, list) or not values:
             raise ValueError(
                 "Invalid schema.categorical_values in parameters.yaml: values "
@@ -591,13 +621,14 @@ def validate_schema_config(parameters: dict) -> None:
     # Single definition lives in core.consistency; call it so config-time and
     # runtime guards never drift. Import locally to avoid an import cycle
     # (consistency imports get_schema from this module).
-    from recsys_tfb.core.consistency import resolved_item_values
+    from recsys_tfb.core.consistency import require_item_list_declared
 
     # NOTE: this checks only schema.item (the single identity categorical in
     # the current schema). If entity/time columns are ever declared categorical,
-    # extend resolved_item_values to cover them; until then the broader
-    # post-feature_table case is caught by the _spark.py identity-cat guard.
-    resolved_item_values(parameters)
+    # extend require_item_list_declared to cover them; until then the broader
+    # post-feature_table case is caught by the dataset fit's runtime guard
+    # (pipelines/dataset/steps/categoricals.require_declared_categoricals).
+    require_item_list_declared(parameters)
 
 
 #: ``dataset`` keys that declare the unit a per-entity operation groups on.

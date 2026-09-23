@@ -41,7 +41,7 @@ inference 預設不使用最新訓練完成的模型，而是解析 `data/models
 3. **Manifest 能回溯 dataset**：模型 manifest 應包含 `base_dataset_version` 與 `train_variant_id`，讓 inference 載入正確的 preprocessor。舊 manifest 多帶的 `calibration_variant_id` 會被忽略，不影響載入。
 4. **評分母體已就緒**：`inference_population` 必須包含每個 `inference.snap_dates` 的母體列。任一日期完全缺少母體時，`build_inference_population_features` 會立即中止。
 5. **母體 grain 唯一**：`inference_population` 對 `time + entity` 唯一，由其 ETL 的 `primary_key` + `quality_checks` 在產出階段保證。`feature_table` 同樣應對 `time + entity` 唯一，否則 enrichment 的 left join 會 fan-out 放大評分母體，最後通常被 completeness 或 duplicate check 阻擋。
-6. **候選 item 集合一致**：`inference.products` 必須與 `schema.categorical_values[item]` 為相同集合；CLI 會在啟動時執行雙向一致性檢查。
+6. **候選 item 集合一致**：item 清單逐一列出時，`inference.products` 必須與 `schema.categorical_values[item]` 為相同集合；CLI 會在啟動時執行雙向一致性檢查（A4）。item 清單從 train 時段的資料數出來時（`schema.categorical_values` 的 item 那一格寫 `from_train_data`，#379），`inference.products` 不准寫（A52），候選取自模型的前處理器（見 3.2 節）。
 7. **前處理欄位完整**：評分日期的 `feature_table` 必須提供模型所需欄位。缺欄會在套用 preprocessor 或比對模型 feature names 時中止。
 8. **Score 的尺度由模型決定**：發布閘不檢查 `score` 的範圍（§6.1）。`binary` objective 的輸出是 sigmoid，落在 `[0, 1]`；ranking objective 的原始輸出是無界實數，照樣會發布。框架不再提供把 score 轉成機率的機制（#411），下游若要把 score 當機率讀，責任在下游。
 9. **Driver 資源足夠**：模型評分把母體按 entity 分成 `inference.entity_buckets` 個桶，一次只有**一個桶**的特徵在 driver 上（約 `母體列數 / entity_buckets × 特徵數 × 4 B`），算完就落地、不累積。所以記憶體是設定值的函數而不是母體大小的函數——母體長大時調高桶數即可，不必改程式碼。桶數的健康窗口見 §3.3。
@@ -84,7 +84,14 @@ inference:
     - fund_bond
 ```
 
-框架會先從 `inference_population` 取得每個日期的母體 `(time, entity)`，再與 `products` 做 cross join。因此每個 query group 預設具有完全相同的候選集合：
+item 清單從 train 時段的資料數出來時（#379），**不寫** `products`（寫了就在 CLI 入口擋下，A52）：候選就是模型前處理器裡的 item 清單（`preprocessor.json` 的 `category_mappings[item]`，dataset pipeline 從 train 時段的 `sample_pool` 數出來的），也就是模型有編號的那些 item。兩件事因此成立：
+
+- **上線後才出現的新 item 不評分、不在結果表裡**，要等 train 時段往後移、重跑 dataset ＋ training 才會進候選。
+- **train 時段有、現在已經下架的 item 照樣評分**——與逐一列出時相同（清單就是候選）。
+
+> ⚠ **已知風險**：部署若半年才重訓，這段期間上線的新 item 離線推論都不評分，而且監控模式的評估也看不出這個損失（它的預測就來自離線推論，見 `evaluation.md` 的監控模式段）。建議每月加一個評估月份跑 post-training 評估（`docs/operations/user-guides/adding-an-eval-month.md`），那裡新 item 照樣被排名、算進指標。
+
+以下說明逐一列出的情況。框架會先從 `inference_population` 取得每個日期的母體 `(time, entity)`，再與 `products`（或上面的清單）做 cross join。因此每個 query group 預設具有完全相同的候選集合：
 
 ```text
 評分列數 = entity 數 × 日期數 × products 數
@@ -319,7 +326,7 @@ inference 使用模型 manifest 指向的 base dataset preprocessor，不會重�
 | identity 欄 | 原始字串（`exchange_usd`） | 三張推論表的 `prod_name` 分區欄 |
 | 特徵欄 | 整數 code（`category_mappings[item]` 的位置） | 餵進模型 |
 
-所以 Spark 側的 `build_inference_population_features` **只編碼非 identity 的類別欄**（item 在那張表上根本不存在），identity 類別欄延後到 driver，由 `pdf_to_X` 對一份 copy 編碼。編碼值取自前處理產物的 `category_mappings`，**不是** `inference.products`：兩者內容由 A4 保證相同，順序不保證，取錯清單會讓所有 item 的分數整組錯位而每一項 sanity check 都照樣通過。論證見 ADR-0010 §4／§6。
+所以 Spark 側的 `build_inference_population_features` **只編碼非 identity 的類別欄**（item 在那張表上根本不存在），identity 類別欄延後到 driver，由 `pdf_to_X` 對一份 copy 編碼。編碼值取自前處理產物的 `category_mappings`，**不是** `inference.products`：逐一列出時兩者內容由 A4 保證相同，順序不保證，取錯清單會讓所有 item 的分數整組錯位而每一項 sanity check 都照樣通過。（item 清單從資料數出來時根本沒有 `inference.products`，候選與編碼讀的是同一份 `category_mappings`。）論證見 ADR-0010 §4／§6。
 
 **特徵順序與子集的權威是模型，編碼語意的權威是前處理產物。** 模型評分時使用模型本身保存的 ordered feature names（`model.feature_names()`），這讓 training-stage `feature_selection.exclude` 不需重建 dataset。`preprocessor.json` 存的是全集，它不知道有沒有做過特徵選擇，所以兩者的關係是：**模型宣告的欄位必須是產物 `feature_columns` 的保序子序列**，否則直接失敗、不做自動對齊。這一條同時抓到 stale 的產物（模型有的欄產物沒有）與不匹配的模型（順序被打亂）。論證見 ADR-0011 §5。
 
@@ -376,7 +383,7 @@ item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始�
 | `chunk_row_count` | 算出來的列數等於讀進來的 entity 數 | **設定造不出來**——長度不符時 pandas 在建構 `out_pdf` 就先 raise。這是對「建構保持列數不變」的迴歸防護，不是資料檢查 |
 | `no_missing` | entity identity、item、time、score 不可為 NULL | 上游 key／feature 異常或模型輸出缺值 |
 | `no_duplicates` | `time + entity + item` 不可重複 | 中間表的顆粒度不是 `(time, entity)` |
-| `item_values_are_known` | 寫出去的 identity item 值必須落在 `inference.products` 裡 | identity 欄被寫成整數 code（ADR-0010 §6 實跑重現過） |
+| `item_values_are_known` | 寫出去的 identity item 值必須落在這次的候選清單裡（`inference.products`，或從資料數出來時前處理器的 item 清單） | identity 欄被寫成整數 code（ADR-0010 §6 實跑重現過） |
 
 **整批層**（`validate_predictions`，對 `ranked_staging` 全表跑一次）：
 
@@ -622,6 +629,7 @@ data/inference/<model_version>/<first_snap_date_without_hyphens>/
 | `partition_completeness` | 缺分區＝連續 save 互相覆蓋；多分區＝`entity_buckets` 改過留下舊桶 | 前者查 `unranked_predictions` 的 `partition_cols` 是否還有 `entity_bucket`；後者 DROP 舊桶的分區或整張表重跑 |
 | `No scoring rows found` | 設定日期沒有 entity，或前處理後資料為空 | 查 feature table row count 與日期條件 |
 | A4 products mismatch | `inference.products` 與 schema item 清單不一致 | 同步兩處完整 item 集合 |
+| 訊息帶 `A52:` | item 清單從 train 時段數出來（`from_train_data`），`inference.products` 卻還寫著 | 拿掉 `inference.products`：候選取自模型前處理器的清單 |
 | 訊息帶 `(A47) offline inference cannot run while candidate_feature_table is declared` | catalog 宣告了候選層級特徵表 | 這種部署不用離線推論評分，見 §3.6。若要改回能跑離線推論，得從 catalog 拿掉這個條目、重建 dataset 並重訓：它的欄原本是模型的特徵，拿掉之後 `base_dataset_version` 也會變 |
 | 訊息帶 `(A27) inference.snap_dates` / `entity_buckets` / `products` | 評分格點 `snap_dates × entity_buckets × products` 有一軸是空的或 0 | 在 `parameters_inference.yaml` 補上該鍵。**訊息會一次列出全部有問題的軸**，所以一輪就能改完；這一關在起 Spark 之前，看到它代表還沒有付任何 cold start |
 | `no_missing` | identity、score 或 rank 出現 NULL | 查 staging 的欄位 NULL count 與上游 feature keys |
@@ -640,7 +648,8 @@ validation 失敗時，先從 exception 的 checks 清單判斷是模型輸出�
 ## 9. 限制與注意事項
 
 - 母體成員資格由 `inference_population` 定義；`feature_table` 只提供特徵。缺特徵的母體成員仍會被評分（特徵欄為 NULL），只在 log 留下每月的缺特徵成員數，不會被自動排除——是否排除由下游決定。
-- 目前每個 entity 共用同一份 products 清單，不支援 per-entity eligibility。
+- 目前每個 entity 共用同一份候選清單（`products`，或從資料數出來時前處理器的 item 清單），不支援 per-entity eligibility。
+- item 清單從 train 時段數出來時，上線後才出現的新 item 要等重跑 dataset ＋ training 才會被評分（見 3.2 節的已知風險）。
 - 模型評分必須在 driver（生產禁 UDF），所以每個 `(entity 桶, item)` chunk 的特徵會被收集到 pandas，不是完全 distributed inference。與 #188 之前的差別是**不再累積**：算完就落地，driver 上同時只有一個桶。
 - **driver 峰值只有下界推算，沒有實測。** `pdf_to_X` 的 `X_df.values` 會把 frame 攤成單一 numpy 陣列，共同 dtype 由所有欄決定。**#283 之後特徵側已經同質**——`cast_numeric_features_to_storage_type` 把所有數值特徵欄（decimal／double／float／整數族／boolean）轉成 `dataset.numeric_feature_storage_type` 宣告的型別，所以共同 dtype 就是宣告值（預設 float32），不再有「一欄 int64 讓整個矩陣翻倍」那條路。仍是下界的理由有兩個：**延後編碼的 identity 類別欄**在 `pdf_to_X` 才成為 `Categorical.codes`，不經過 Spark 側的 cast（實測 float32 ＋ int8／int16 codes 還是 float32，但類別數 >32767 讓 codes 變 int32 時共同型別會回到 float64）；以及實際值取決於生產 `feature_table` 的欄數與 chunk 大小。
 - **這道發布閘買到的是「順序」，不是「原子性」。** production 只在整批驗證通過後才被觸碰，但 `publish_predictions` 的寫入同樣是 `insertInto` ＋ dynamic overwrite，跨分區的 commit 不是全有全無。逐 chunk 化把失敗視窗從「整條 run」縮到「最後那一次寫」，那是真實的收益，但它不等於原子發布。

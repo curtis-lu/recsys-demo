@@ -21,7 +21,7 @@ from recsys_tfb.core.consistency import (
     optional_role_monitoring_errors,
     etl_cli_var_errors,
     inference_grid_errors,
-    item_category_column,
+    category_table_needed,
     item_category_column_errors,
     candidate_feature_table_inference_errors,
     merged_etl_variables,
@@ -467,11 +467,13 @@ def _compare_only_input_errors(plan, catalog, catalog_config, params) -> list[st
     (:func:`_evaluation_month_plans`), or None when no month is configured;
     every configured date without a partition is named (#374).
 
-    ``item_categories.json`` (#379) is asked for only in column mode
-    (``evaluation.item_categories.column``, :func:`item_category_column`):
-    there the categories exist nowhere else. A hand-written mapping is read
-    from ``params``, and an evaluation directory written before #379 has no
-    such file, so asking for it then would stop users who changed nothing.
+    ``item_categories.json`` (#379) is asked for only when the category pass
+    reads it (:func:`category_table_needed`): in column mode the categories
+    exist nowhere else, and with the item list counted from the data it holds
+    the evaluated model's list a hand mapping is checked against. Otherwise a
+    hand-written mapping is read from ``params``, and an evaluation directory
+    written before #379 has no such file, so asking for it then would stop
+    users who changed nothing.
     Its catalog entry is ``optional`` for the same reason — without that, a
     run let through here would still raise ``FileNotFoundError`` when the
     Runner loads it.
@@ -490,7 +492,7 @@ def _compare_only_input_errors(plan, catalog, catalog_config, params) -> list[st
         months = ",".join(d.strftime("%Y-%m-%d") for d in plan.to_process)
         errors.append(f"enriched_eval_predictions has no partition for {months}")
     names = ["evaluation_segment_columns"]
-    if item_category_column(params) is not None:
+    if category_table_needed(params):
         names.append("evaluation_item_categories")
     for name in names:
         if not catalog.exists(name):

@@ -67,11 +67,15 @@ from recsys_tfb.core.group_utils import (
 from recsys_tfb.core.logging import log_data_volume, log_step
 from recsys_tfb.core.consistency import (
     ZERO_POSITIVE_GROUP_WEIGHT_COL,
+    DataConsistencyError,
+    item_list_counted_from_data,
     optional_role_columns,
     resolved_zero_positive_group_ratio,
     test_carries_zero_positive_group_weight,
+    weight_unknown_item_errors,
 )
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.preprocessing import preprocessor_item_values
 from recsys_tfb.core.versioning import compute_search_id
 from recsys_tfb.diagnosis.hpo import write_hpo_diagnostics
 from recsys_tfb.diagnosis.model import diagnostics_dir
@@ -525,7 +529,21 @@ def select_features(preprocessor_metadata: dict, parameters: dict) -> dict:
     exactly once and stays consistent across bin-build, HPO, finalize,
     test scoring, and diagnostics. Empty/absent selection returns
     the input unchanged, so non-selection runs are byte-identical.
+
+    Pre-check (runtime A9c, #379): with the item list counted from the data,
+    no ``training.sample_weights`` key names an item the preprocessor's list
+    lacks. The CLI entry had no list to check against. Here, because this is
+    the first node holding the preprocessor and its output is memory-only, so
+    every training slice runs it again.
     """
+    if item_list_counted_from_data(parameters):
+        unknown = weight_unknown_item_errors(
+            parameters,
+            items=preprocessor_item_values(
+                preprocessor_metadata, get_schema(parameters)["item"]),
+        )
+        if unknown:
+            raise DataConsistencyError("\n".join(unknown))
     return apply_feature_selection(preprocessor_metadata, parameters)
 
 

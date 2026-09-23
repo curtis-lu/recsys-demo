@@ -2602,6 +2602,20 @@ class TestItemCategoryColumnAtTheEntry:
         assert result.exit_code == 0, (result.output, log)
         execute.assert_called_once()
 
+    def test_compare_only_with_a_counted_item_list_needs_the_json(
+        self, tmp_path, monkeypatch,
+    ):
+        """#379: with the item list counted from the data, the file holds the
+        evaluated model's list a hand mapping is checked against."""
+        import recsys_tfb.__main__ as cli
+
+        monkeypatch.setattr(cli, "category_table_needed", lambda params: True)
+        result, execute, _spark, log = self._invoke(
+            tmp_path, ("--compare-only", "self"), self._MAPPING)
+        assert result.exit_code == 1
+        execute.assert_not_called()
+        assert self._JSON in log, log
+
     def test_compare_only_with_a_hand_mapping_does_not_need_the_json(
         self, tmp_path,
     ):

@@ -52,3 +52,25 @@ def test_resolve_snap_date_missing_raises():
 
     with pytest.raises(ValueError, match="evaluation.snap_date is missing"):
         resolve_snap_date(_args(), parameters)
+
+
+def test_the_offset_universe_of_a_counted_item_list_is_what_was_observed():
+    """#379: the cell holds a string, not a list; the observed items are the
+    universe, as when no list is declared."""
+    import pandas as pd
+
+    from recsys_tfb.core.schema import get_schema
+    from scripts.config_sorting_shift_diagnosis import build_offset_frame
+
+    params = {
+        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
+                               "item": "prod_name"},
+                   "categorical_values": {"prod_name": "from_train_data"}},
+        "dataset": {"sample_group_keys": [], "sample_ratio": 1.0},
+        "training": {"sample_weight_keys": []},
+    }
+    pdf = pd.DataFrame({"snap_date": ["2025-01-31"] * 2, "cust_id": ["c1", "c1"],
+                        "prod_name": ["a", "b"], "label": [1, 0],
+                        "score": [0.9, 0.1]})
+    _frame, meta = build_offset_frame(pdf, params, get_schema(params))
+    assert meta["items"] == ["a", "b"]

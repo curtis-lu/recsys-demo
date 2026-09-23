@@ -118,10 +118,14 @@ def create_pipeline(
         # compute_metrics after compute_prediction_quality /
         # compute_report_aggregates, and `--from-node compute_metrics` would
         # then leave those stale.
+        # `preprocessor_on_disk` last (#379): with the item list counted from
+        # the data, the evaluated model's list is read off it and landed for a
+        # hand mapping to be checked against. Optional, so an evaluation that
+        # needs no list never starts needing the file.
         Node(
             make_prepare_eval_data_node(population_input),
             inputs=[predictions_input, "label_table", population_input,
-                    "parameters"],
+                    "parameters", "preprocessor_on_disk"],
             outputs=["enriched_eval_predictions", "evaluation_segment_columns",
                      "evaluation_item_categories"],
         ),

@@ -397,6 +397,9 @@ class TestTrainingPipelineE2E:
         # deployment (ADR-0026); `None` is how the nodes learn none is declared,
         # which is what the CLI registers in that case.
         catalog.add(CANDIDATE_FEATURE_TABLE, MemoryDataset(None))
+        # The optional preprocessor_on_disk entry (#379) loads as None on a
+        # first run; this hand-built catalog registers that directly.
+        catalog.add("preprocessor_on_disk", MemoryDataset(None))
         for _split, _months in candidate_feature_table_months(
             parameters, _plans["test_model_input"], only_test_months=False,
         ).items():

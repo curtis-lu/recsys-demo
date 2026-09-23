@@ -101,8 +101,11 @@ _Avoid_: 時間窗、lookback（那是 baseline 往回看的月數）
 _Avoid_: 把 0／1 旗標叫「binary 欄」（在本 repo，binary 指 bytes 型別；0／1 旗標是布林或整數欄）
 
 **item 清單**:
-模型認得的 item 值的集合，是 item 類別編號的來源。
-_Avoid_: 產品清單；也不要和 `inference.products`（離線推論的候選清單）混用
+模型認得的 item 值的集合，是 item 類別編號的來源。有兩種來源：在設定裡逐一列出，或從 train 時段的候選數出來。
+_Avoid_: 產品清單；也不要和 `inference.products`（逐一列出時，離線推論的候選清單）混用
+
+**新 item**:
+不在 item 清單裡的 item。只有 item 清單從 train 時段數出來時才會出現：val／test 期間或上線後才有的 item。模型不認得它：評估照樣替它排名，離線推論不替它評分。
 
 **month plan**:
 一次執行中，某個增量產物要處理、要跳過哪些 time 值的清單；名字沿用月份字樣，實際單位是 time。

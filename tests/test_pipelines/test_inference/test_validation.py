@@ -60,6 +60,9 @@ def _manifest(expected=None, written=None, n_buckets=1):
         for product in PRODUCTS
     ]
     return {
+        # What the scoring node scored (`predict_and_write_scores` always
+        # writes it); the grid's item count comes from here (#379).
+        "items": sorted(PRODUCTS),
         "expected_partitions": grid if expected is None else expected,
         "written_partitions": grid if written is None else written,
     }
@@ -354,6 +357,7 @@ class TestScoreVariesWithinGroup:
             ["snap_date", "cust_id", "prod_name", "score", "rank"],
         )
         manifest = {
+            "items": ["exchange_fx"],
             "expected_partitions": [["2024-03-31", 0, "exchange_fx"]],
             "written_partitions": [["2024-03-31", 0, "exchange_fx"]],
         }
@@ -542,3 +546,30 @@ class TestBatchLayerActionBudget:
             )
 
         assert counting.counter["actions"] == 2
+
+
+class TestACountedItemList:
+    """#379: with the item list counted from the data there is no
+    ``inference.products``; the batch checks count the items the scoring node
+    scored (``score_manifest["items"]``), the one list both sides saw."""
+
+    @staticmethod
+    def _counted(parameters):
+        import copy
+
+        params = copy.deepcopy(parameters)
+        params["inference"].pop("products")
+        params["schema"]["categorical_values"] = {"prod_name": "from_train_data"}
+        return params
+
+    def test_a_complete_table_passes(self, spark, parameters):
+        ranked, manifest = _make_valid_data(spark)
+        validate_predictions(ranked, manifest, self._counted(parameters))
+
+    def test_a_group_missing_an_item_fails_completeness(self, spark, parameters):
+        ranked, manifest = _make_valid_data(spark)
+        short = ranked.filter(
+            ~((F.col("cust_id") == F.lit(ranked.first()["cust_id"]))
+              & (F.col("prod_name") == "fund_bond")))
+        assert "completeness" in _failed_checks(
+            short, manifest, self._counted(parameters))

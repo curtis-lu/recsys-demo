@@ -32,7 +32,7 @@
 
 1. **來源表已就緒**：`feature_table` 與 `sample_pool` 必須涵蓋所有設定日期；宣告了候選層級特徵表時，它必須涵蓋本次執行要讀的每個月份（§3.8）；`label_table` 可以是只保存正例的 sparse table，但 label 觀察窗必須成熟。
 2. **schema 角色正確**：`conf/base/parameters.yaml` 的 `time`、`entity`、`item` 與 `label` 必須對應實際欄位。
-3. **item 集合一致**：`sample_pool` 在本次日期範圍內的 item 集合必須與 `schema.categorical_values.<item>` 完全一致；`label_table` 不可產生未宣告 item。
+3. **item 集合一致**：item 清單逐一列出時，`sample_pool` 在本次日期範圍內的 item 集合必須與 `schema.categorical_values.<item>` 完全一致；`label_table` 不可產生未宣告 item。item 清單從資料數時（§3.10），`label_table` 的 item 必須在 `sample_pool` 出現過。
 4. **日期切分互斥**：train、val 與 test 日期不可重疊，並應由使用者依時間先後安排，避免資料洩漏。
 5. **類別欄位已人工確認**：可先使用 `scripts/suggest_categorical_cols.py` 依型別與 cardinality 產生候選清單——低 cardinality 的字串／布林／整數欄建議進 `categorical_columns`、高 cardinality 字串欄進 `drop_columns`，其餘型別欄（date／timestamp／binary／複合型）另列一個待人工判斷的 review 區塊（它們不能當類別欄，只能 drop 或回 source ETL 轉換）；再由你決定各欄歸屬（工具只建議、不改設定。輸出格式與大表加速選項見 §3.5）。
 6. **抽樣設定已檢視**：可使用 `scripts/sampling_overrides_editor.py` 檢視各分層樣本量並產生 override。
@@ -198,7 +198,7 @@ dataset:
   - binary（bytes，不是 0／1 旗標；0／1 旗標是布林或整數欄，可以當類別）：是代碼就用 `hex()` 轉成字串，一個值對一個字串，不丟資訊。
   - 複合型（array／struct／map）：攤平成多個字串／整數／布林欄。
 - 一般 categorical feature 不需設定 `schema.categorical_values`；其 category mapping 會從 `train_snap_dates` 範圍內、該欄所在的特徵表（`feature_table` 或候選層級特徵表）自動建立。
-- identity categorical 若不在 `feature_table`，必須在 `parameters.yaml` 的 `schema.categorical_values` 明確提供完整值域。
+- identity categorical 若不在 `feature_table`，必須在 `parameters.yaml` 的 `schema.categorical_values` 明確提供完整值域；item 那一格也可以寫 `from_train_data`，改成從 train 時段的 `sample_pool` 數出來（§3.10）。
 
 #### 用 `suggest_categorical_cols.py` 產生候選
 
@@ -371,8 +371,32 @@ schema:
 - **原欄拼完就丟掉**，所以它們不會變成特徵；想讓活動、格式各自當特徵不在這個功能的範圍內。
 - **同分時照拼好的字串比**，不逐欄照數字大小比（`CONTEXT.md` 的 **rank**）。
 - **推論結果表只有拼好的 `item`**，不拆回原欄。
-- conf 仍要逐一列出所有組合（`categorical_values.item`）：模型的類別編號與離線推論的候選都靠這份清單。
+- 不想逐一列出所有組合時，`categorical_values.item` 寫 `from_train_data`（§3.10）：框架從 train 時段的 `sample_pool` 數出拼好的組合。
 - 評估的外部比較表（`compare kind: external_hive`）是例外，兩種寫法都收：外部表也分欄存時，`columns` 寫原欄，框架拼好再套 `prod_mapping`；外部表只有自己的一欄編號時，直接寫 `item: <那一欄>`，由 `prod_mapping` 把編號翻成拼好的值。兩種都寫會被擋下（見 [`evaluation.md`](evaluation.md) 的比較報表設定）。
+
+### 3.10 item 清單從 train 時段的資料數（選用，#379）
+
+不想在 conf 逐一列出 item 時，item 那一格寫 `from_train_data`：
+
+```yaml
+schema:
+  categorical_values:
+    item: from_train_data      # 取代逐一列出；只有 item 那一格能這樣寫
+```
+
+框架在 `fit_preprocessor_metadata` 從 **train 時段、抽樣之前**的 `sample_pool` 數出 distinct 非 NULL 的 item（多欄 item 是拼好之後的值），排序後存進前處理器（`preprocessor.json` 的 `category_mappings`）。不從抽樣後的 model_input 數：抽樣沒有「每個 item 至少留一列」的保底，冷門 item 會隨抽樣設定時有時無；而前處理器是同一個 `base_dataset_version` 底下所有抽樣設定共用的。
+
+**新 item**：val／test 期間才出現、train 時段沒有的 item。
+
+- 列照樣留著、照樣評分，編碼成「未知」（模型沒見過它，當缺值處理）。
+- `build_val_model_input`／`build_test_model_input` 印一行警告，列出有哪些新 item（不列列數）。它從已落地的 `val_keys`／`test_keys` 讀 item 那一欄（test 只讀本次要組裝的月份），不從還沒落地的 model input 數——那樣會把整段 join 再跑一次；keys 裡的 item 就是 model input 裡的 item（組裝全是從 keys 出發的 left join）。比對的是編碼用的同一份前處理器；`--only-test-months` 不重跑 fit，讀的就是磁碟上那份，不會拿今天的 train 時段資料重數。
+- 資料閘不再拿 `sample_pool` 跟清單比（沒有宣告的清單可比）；`label_table` 的 item 必須在 `sample_pool` 出現過，不然照擋（B1）。
+
+**同一版本下清單不能變（不變量 B19）**：清單不在 conf 裡，所以不會進 `base_dataset_version`。同一個版本重跑、而 train 時段的 `sample_pool` 變了（例如回補），數出的清單就可能跟磁碟上那份不同；照樣覆寫的話，用舊清單訓練的模型推論時編號全部錯位，而且不報錯。所以 `fit_preprocessor_metadata` 在覆寫前先讀磁碟上的舊檔（catalog 條目 `preprocessor_on_disk`，同一個檔、換個條目名讓 node 讀得到自己要覆寫的東西），不同就擋下，訊息列出多了、少了哪些 item。要照新資料建，**先讓版本號變動**：改 `dataset.train_snap_dates`，或把清單逐一寫進 `schema.categorical_values.<item>`（版本號從此含著這份清單）。逐一列出時要列 `sample_pool` 在 train、val、test 時段出現過的**每一個** item（B1），連 val／test 才出現的新 item 也要列；離線推論要照寫一份相同的 `inference.products`（A4、A27）。只貼上 train 時段數出的那份，遇到新 item 會被 B1 擋下。版本號一變就建一個新目錄，舊模型照樣讀自己那份前處理器。刪掉 `data/dataset/<base_dataset_version>/`（與該版本的 dataset 分區）再重建是最後手段：推論與評估讀的前處理器就是那個目錄裡的檔，模型目錄裡沒有副本，所以這個版本上**沒有重訓的每個模型（包含已 promote 的）都會拿錯位的 item 編號評分，結果是錯的，而且不報錯**——正是 B19 要擋的事。這道檢查在 fit 裡，所以 `--from-node fit_preprocessor_metadata` 也擋得到。
+
+**開跑前查不了的，挪到清單數出來之後查**：`sample_ratio_overrides` 的鍵裡的 item（A5）在 fit 數完清單後查；`training.sample_weights` 的鍵裡的 item（A9c）在 training 讀到前處理器時查（`select_features`）。打錯字一樣擋。
+
+**其他地方怎麼跟著變**：離線推論不寫 `inference.products`（寫了就擋，A52），候選取自前處理器的清單，上線後才出現的新 item 不評分（見 [`inference.md`](inference.md) 3.2 節的已知風險）；evaluation 的手寫大類 mapping 只能寫這個模型認得的 item（見 [`evaluation.md`](evaluation.md) 3.3 節）。
 
 ## 4. 使用方式
 
@@ -466,10 +490,10 @@ python -m recsys_tfb dataset \
 | Train 切分 | `split_train_keys` | `sample_keys` | 依 entity 將資料互斥切成 train 與 train-dev | `train_keys_unfiltered`、`train_dev_keys_unfiltered`（不落地） |
 | Train 整組抽樣 | `filter_train_keys`、`filter_train_dev_keys` | 上一步的 keys、`label_table` | 依 `train_zero_positive_group_ratio` 整組丟掉部分無正例的 query group（label 取自 `label_table`）；預設 r ＝ 1 原樣通過（§3.7） | `train_keys`、`train_dev_keys` |
 | Val/Test keys | `select_val_keys`、`select_test_keys` | `sample_pool`（test 另收 `test_keys_month_plan`） | 建立 val 與 test identity keys；val 可依 entity 縮減。test 只處理計畫中的月份 | `val_keys`、`test_keys` |
-| Fit 前處理器 | `fit_preprocessor_metadata` | `feature_table`、`candidate_feature_table` | 只使用 train 日期建立 feature 清單與 category mappings（兩張特徵表都看，§3.8）；`drop_columns` 裡任何一張特徵表都沒有的欄在這裡記 warning | `preprocessor`、`category_mappings` |
+| Fit 前處理器 | `fit_preprocessor_metadata` | `feature_table`、`candidate_feature_table`、`sample_pool`、`preprocessor_on_disk` | 只使用 train 日期建立 feature 清單與 category mappings（兩張特徵表都看，§3.8）；`drop_columns` 裡任何一張特徵表都沒有的欄在這裡記 warning。item 清單寫 `from_train_data` 時，從 train 時段的 `sample_pool` 數清單，並與磁碟上同版本的舊檔比對（B19，§3.10）；清單逐一列出時不使用這兩個輸入 | `preprocessor`、`category_mappings` |
 | 套用前處理 | `apply_preprocessor_to_features` | `feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 編碼 feature categoricals；只處理計畫中的月份 | `preprocessed_feature_table` |
 | 精度閘 | `validate_numeric_precision` | `preprocessed_feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan`、`candidate_feature_table`、`candidate_feature_table_{train,val,test}_months` | 不變量 B8：讀剛落地那幾個月份的 parquet footer 統計值（零掃描），確認會被 cast 的欄（decimal、整數族與 boolean——有格點的那些）在該欄自己的解析度下撐得過 `numeric_feature_storage_type`；同時產出每欄的 headroom 報告。宣告了候選層級特徵表時，它不落地、沒有 footer 可讀，改成掃一次三份月份清單的聯集（類別欄不在內：它們在 cast 之前已編成詞表索引），同一次掃描也確認這些月份每個都有資料；報告多一段 `candidate_feature_table` | `numeric_precision_report` |
-| 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor（test 另收 `test_model_input_month_plan`）、`candidate_feature_table`、自己 split 的 `candidate_feature_table_*_months`（train-dev 用 train 的） | left join label 與 feature（宣告了候選層級特徵表時，在這裡才讀它、編碼、接上），補齊缺失 label，選取欄位並把所有數值特徵欄轉成 `numeric_feature_storage_type` 宣告的型別（預設 float32） | 各 split 的 model input |
+| 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor（test 另收 `test_model_input_month_plan`）、`candidate_feature_table`、自己 split 的 `candidate_feature_table_*_months`（train-dev 用 train 的） | left join label 與 feature（宣告了候選層級特徵表時，在這裡才讀它、編碼、接上），補齊缺失 label，選取欄位並把所有數值特徵欄轉成 `numeric_feature_storage_type` 宣告的型別（預設 float32）；val／test 在 item 清單從資料數時警告前處理器清單裡沒有的新 item（§3.10） | 各 split 的 model input |
 | 評估母體過濾 | `filter_val_model_input`、`filter_test_model_input` | 未過濾的 val/test input | 有正例的 query group 全留；無正例的依 `val_`／`test_zero_positive_group_ratio` 整組留下比例 r（預設 0：全丟），r > 0 時加上權重欄（§3.7） | `val_model_input`、`test_model_input` |
 | 粒度閘 | `validate_model_input_grain` | train／train_dev 的 keys 與 model_input | 不變量 B10：讀 parquet footer 的列數（零掃描），確認每張 model_input 的列數等於它的 keys 表。擋的是右表（`label_table`／`preprocessed_feature_table`／宣告了的候選層級特徵表）有重複 join 鍵造成的靜默放大；同時產出每個 split 的列數報告。**val／test 不在範圍內**——它們列數相符的那一版是 `*_unfiltered`，那是不落地的記憶體中間結果，沒有 footer 可讀；test 還多一層，`build_test_model_input` 會先把 `test_keys` 縮到本次月份，所以它對得上的本來就不是整張 `test_keys`（見 [ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md) 2026-09-07 修訂） | `model_input_grain_report` |
 
@@ -645,7 +669,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | 因素 | 是否翻新 Base | 說明 |
 |---|:---:|---|
 | `parameters.yaml` 的 `schema.columns` | ✓ | `time`、`entity`、`item`、`label`、`score`、`rank` 都納入 |
-| `schema.categorical_values` | ✓ | 值與 list 順序都納入；改變 item 值域或 encoding 順序會翻新 |
+| `schema.categorical_values` | ✓ | 值與 list 順序都納入；改變 item 值域或 encoding 順序會翻新。item 那一格寫 `from_train_data` 時納入的是這個字串，數出來的清單**不**納入——所以同一版本下清單變了由 B19 擋（§3.10） |
 | `feature_table` 欄位名稱 | ✓ | 新增或移除欄位都會改變 fingerprint |
 | `feature_table` 欄位型別 | ✓ | 例如 `double` 改為 `float` |
 | `feature_table` 欄位順序 | ✓ | feature 順序會傳入 preprocessor，因此 fingerprint 對順序敏感 |
@@ -704,6 +728,9 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | `Config consistency check failed`，item 不在 categorical columns | item 被 drop 或漏設為類別 feature | 將 item 加回 `categorical_columns`，並從 `drop_columns`／feature exclusion 移除 |
 | categorical 與 drop 衝突 | 同一欄位同時出現在兩份清單 | 明確決定該欄要作為 feature 或排除 |
 | override references unknown item | override key 中的 item 未宣告或拼錯 | 用 sampling editor 重建 key，並對齊 `schema.categorical_values` |
+| 訊息帶 `B19:` | item 清單從 train 時段數出來，同一個 `base_dataset_version` 重跑、清單跟磁碟上的前處理器不同 | 要照新資料建：先讓版本號變動——改 `dataset.train_snap_dates`，或把清單逐一寫進 `schema.categorical_values.<item>`（要列 train、val、test 時段出現過的每一個 item，B1），舊模型照樣讀自己那份前處理器。刪 `data/dataset/<base_dataset_version>/` 重建是最後手段：這個版本上沒重訓的模型（含已 promote 的）會拿錯位的編號評分、不報錯；見 §3.10 |
+| `Node 'fit_preprocessor_metadata' requires input 'preprocessor_on_disk' which is not in the catalog and not produced by any prior node`（evaluation 是 `Node 'prepare_eval_data' …`） | 部署自己的 catalog 是 #379 之前寫的，少了 `preprocessor_on_disk` 條目。這兩個 node 不論 item 清單怎麼寫都把它列為輸入，Runner 開跑前就擋下 | 在該部署的 catalog 加上 `preprocessor_on_disk`，照抄 `conf/base/catalog.yaml` 的同名條目（`type: JSONDataset`、`filepath: data/dataset/${base_dataset_version}/preprocessor.json`、`optional: true`——與 `preprocessor` 是同一個檔） |
+| `A5: dataset.sample_ratio_overrides references item value(s) … counted from the train months` | item 清單從資料數時，override 鍵裡的 item 不在數出來的清單裡 | 修正鍵，或確認那個 item 在 train 時段的 `sample_pool` 有出現 |
 | weight column unavailable | training 權重維度未進入 model input | 將非 identity 欄位加入 `carry_columns` 後重跑 dataset |
 | `Data consistency check failed`，sample_pool item 不一致 | `sample_pool` 缺少宣告 item，或含有未知 item | 檢查本次日期範圍的 distinct item，修正 source ETL 或 schema |
 | `DataConsistencyError: ... un-encoded non-numeric type(s)`，讀 parquet 前秒級失敗 | 字串／非數值欄進了 `feature_columns`，既沒宣告 categorical 也沒 drop（不變量 B6） | 錯誤訊息逐欄點名兇手；每欄依型別決定怎麼處理，見下方 §8.1。改完會 bump `base_dataset_version`、需重建 dataset |

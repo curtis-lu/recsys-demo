@@ -27,11 +27,11 @@ def _params(enabled=True, unmapped="singleton"):
 
 def test_disabled_returns_none():
     p = _params(enabled=False)
-    assert ms._build_category_mapping(p) is None
+    assert ms.hand_category_mapping(p) is None
 
 
 def test_mapping_with_singleton_unmapped():
-    m = ms._build_category_mapping(_params())
+    m = ms.hand_category_mapping(_params())
     assert m["fund_stock"] == "fund"
     assert m["fund_bond"] == "fund"
     assert m["exchange_fx"] == "exchange_fx"   # unmapped -> singleton
@@ -42,7 +42,7 @@ def test_unknown_product_in_mapping_fails_loud():
     p = _params()
     p["evaluation"]["item_categories"]["mapping"]["x"] = ["not_a_product"]
     with pytest.raises(ValueError, match="not_a_product"):
-        ms._build_category_mapping(p)
+        ms.hand_category_mapping(p)
 
 
 def _raw(spark):
@@ -171,11 +171,27 @@ def test_collapse_uses_the_passed_table(spark):
     assert rows["safe"]["label"] == 1
 
 
+def test_an_empty_table_makes_every_item_its_own_category(spark):
+    """An empty mapping — nothing the model knows is mapped, e.g. a counted
+    item list with an empty known list — is a legal table, not "categories
+    off": each item is its own category, as for any item the table lacks.
+    Its own branch, because Spark cannot build the join side from zero rows
+    without a schema."""
+    collapsed = ms.collapse_to_categories(
+        _raw(spark), _column_params(), segment_columns=["cust_segment_typ"],
+        category_mapping={},
+    )
+    rows = {r["prod_name"]: r for r in collapsed.collect()}
+    assert set(rows) == {"fund_stock", "fund_bond", "exchange_fx"}
+    assert rows["fund_bond"]["label"] == 1
+    assert rows["fund_stock"]["score"] == pytest.approx(0.9)
+
+
 def test_column_mode_without_the_table_fails_loud():
     """A reader that forgets to pass the landed table must not fall back to
     every item its own category — a report that looks fine."""
     with pytest.raises(ValueError, match="evaluation_item_categories"):
-        ms._build_category_mapping(_column_params())
+        ms.hand_category_mapping(_column_params())
 
 
 def test_compute_all_metrics_ranks_the_passed_categories(spark):

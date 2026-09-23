@@ -407,6 +407,10 @@ def grid_to_yaml(
             f"{len(cfg_weight)} '|'-segment(s) to match sample_weight_keys "
             f"{cfg_weight}; fix before paste."
         )
+    # With the item list counted from the data (#379) there is no list to
+    # check against before the dataset pipeline counts it; both predicates
+    # then return nothing here, and the same checks run where the list exists
+    # (A5 in the dataset's fit, A9c in training's select_features).
     bad = sorted(
         set(override_unknown_items(probe))
         | set(weight_unknown_items(probe))

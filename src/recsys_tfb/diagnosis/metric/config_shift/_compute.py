@@ -86,6 +86,7 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 
+from recsys_tfb.core.consistency import item_list_counted_from_data
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric._common import (
@@ -536,8 +537,9 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     # 一次都沒出現」的 item 會整列消失。而報表上「少一列」與「該 item 沒有
     # 偏移」長得一模一樣——沉默會被讀成沒問題，跟零命中的 override key 是同一
     # 種病。差集非空時明說。categorical_values 沒宣告 item 清單時差集恆為空，
-    # 那是正常情形，不發 note。
-    declared_items = [
+    # 那是正常情形，不發 note。item 清單從 train 時段的資料數出來時（#379）也沒有
+    # 宣告的清單——那一格是字串，不能當清單迭代——同樣不發 note。
+    declared_items = [] if item_list_counted_from_data(parameters) else [
         str(i)
         for i in ((schema.get("categorical_values", {}) or {}).get(item_col, []) or [])
     ]

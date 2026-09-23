@@ -16,6 +16,7 @@ inference:
   # 也可寫成區間 {start, end, step}，規則同 parameters_dataset.yaml 開頭的說明
   snap_dates:             # ★要評分的時間切點清單（你的資料）
     - "2025-12-31"
+  # item 清單寫 from_train_data 時整段不寫（A52），評分的 item 取自模型的 preprocessor
   products:               # ★評分母體 item；須 == schema.categorical_values[item]（A4 驗）
     - "exchange_usd"
     - "exchange_fx"

@@ -93,6 +93,14 @@ category_mappings:
   type: JSONDataset
   filepath: data/dataset/${base_dataset_version}/category_mappings.json
 
+# 同一個檔，讓 fit 在覆寫前讀到磁碟上的舊版本（#379，B19）；evaluation 的
+# prepare_eval_data 也讀它（手寫大類 mapping 要拿模型的 item 清單核對）。每份部署的
+# catalog 都要有這個條目，清單逐一列出時也一樣；見根目錄 conf 的同名條目
+preprocessor_on_disk:
+  type: JSONDataset
+  filepath: data/dataset/${base_dataset_version}/preprocessor.json
+  optional: true
+
 numeric_precision_report:
   type: JSONDataset
   filepath: data/dataset/${base_dataset_version}/numeric_precision_report.json

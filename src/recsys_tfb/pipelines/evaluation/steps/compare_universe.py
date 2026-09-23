@@ -28,11 +28,14 @@ the coercion casts the text to a date), so the DATE test in
 **Why the two sides are handled differently.** The asymmetry is structural,
 not a tuning choice, and it holds for any instantiation of this framework:
 
-- The **item** universe has a declared upper bound. Consistency invariant A3
-  requires ``schema.item`` to carry a non-empty ``schema.categorical_values``
-  entry (see ``core/consistency.py::resolved_item_values``), so its
-  cardinality is whatever config says — knowable before the job runs, and
-  sized to fit the driver. Collecting items and broadcasting them is correct.
+- The **item** universe is bounded by the item list. Consistency invariant
+  A3 requires ``schema.item`` to carry a ``schema.categorical_values`` entry
+  (``core/consistency.py::require_item_list_declared``): either the list
+  itself, whose cardinality config states before the job runs, or — counted
+  from the train months (#379) — a list the preprocessor fixed from a finite
+  distinct, plus whatever new items the evaluated months add. Not a constant
+  known before the run any more, but still the size of a product catalogue,
+  not of a population. Collecting items and broadcasting them is correct.
 - The **entity** universe has no such bound. It is discovered from the data,
   and grows with the population being scored. So its intersection is computed
   inside Spark and never returned to the driver.

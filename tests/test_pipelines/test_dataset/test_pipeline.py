@@ -44,6 +44,9 @@ class TestDatasetPipeline:
             "candidate_feature_table_train_months",
             "candidate_feature_table_val_months",
             "candidate_feature_table_test_months",
+            # The preprocessor file already on disk, read by the fit before it
+            # overwrites it (#379, B19) — an optional catalog entry.
+            "preprocessor_on_disk",
         }
 
     def test_pipeline_outputs(self):
@@ -155,8 +158,12 @@ class TestNodeNameToFunctionBinding:
 
     - ``select_sample_keys`` runs ``select_train_keys``;
     - ``build_test_model_input`` runs the *test* wrapper, not the shared
-      ``build_model_input`` the other splits use, because it has to re-scope
+      ``build_model_input`` the train splits use, because it has to re-scope
       the keys it reads back from a persistent Hive table (ADR-0002);
+    - ``build_val_model_input`` runs the *val* wrapper: with the item list
+      counted from the data it warns about val's new items off the landed
+      keys (#379), which the shared ``build_model_input`` must not do for the
+      train splits — their items are the list;
     - ``filter_test_model_input`` runs its *own* function rather than val's,
       although the decisions are the same: the key each reads
       (``dataset.{val,test}_zero_positive_group_ratio``) is the one answer that
@@ -179,7 +186,7 @@ class TestNodeNameToFunctionBinding:
         "validate_numeric_precision": nodes.validate_numeric_precision,
         "build_train_model_input": nodes.build_model_input,
         "build_train_dev_model_input": nodes.build_model_input,
-        "build_val_model_input": nodes.build_model_input,
+        "build_val_model_input": nodes.build_val_model_input,
         "build_test_model_input": nodes.build_test_model_input,
         "filter_val_model_input": nodes.filter_val_model_input,
         "filter_test_model_input": nodes.filter_test_model_input,
@@ -197,12 +204,13 @@ class TestNodeNameToFunctionBinding:
         # renamed one all fail, where `in` checks only ever catch removal.
         assert self._bindings(create_pipeline()) == self.BASE_BINDINGS
 
-    def test_the_three_build_nodes_share_one_function(self):
+    def test_the_two_train_build_nodes_share_one_function(self):
         """Not a restatement of the table: it is *why* names carry the meaning.
 
-        train / train_dev / val all run the same ``build_model_input``, so the
-        node name is the only thing distinguishing them — which is what makes a
-        typo in one a silent topology change rather than an import error.
+        train / train_dev run the same ``build_model_input``, so the node name
+        is the only thing distinguishing them — which is what makes a typo in
+        one a silent topology change rather than an import error. val ran it
+        too until #379 gave val its own wrapper (the new-item warning).
         """
         bindings = self._bindings(create_pipeline())
         shared = {
@@ -211,7 +219,6 @@ class TestNodeNameToFunctionBinding:
         }
         assert shared == {
             "build_train_model_input", "build_train_dev_model_input",
-            "build_val_model_input",
         }
 
 

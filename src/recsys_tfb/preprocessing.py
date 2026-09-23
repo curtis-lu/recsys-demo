@@ -80,6 +80,29 @@ class PreprocessorMetadata(TypedDict):
     drop_columns: list[str]
 
 
+def preprocessor_item_values(
+    preprocessor_metadata: PreprocessorMetadata, item_col: str
+) -> list:
+    """The item list the preprocessor encodes by: ``category_mappings[item_col]``.
+
+    With ``schema.categorical_values[<item>]: from_train_data`` (#379) this is
+    the only place the list exists — counted once from the train months'
+    sample_pool by ``fit_preprocessor_metadata`` — so the inference grid, the
+    evaluation's known items, the dataset's new-item warning and B19
+    comparison, and training's A9c check all read it here rather than each
+    indexing the dict. A preprocessor without it cannot have been fit with
+    the item as a categorical: ``KeyError`` naming the key.
+    """
+    mappings = preprocessor_metadata["category_mappings"]
+    if item_col not in mappings:
+        raise KeyError(
+            f"the preprocessor has no category_mappings[{item_col!r}] (it has "
+            f"{sorted(mappings)}): it was not fit with the item column as a "
+            f"categorical, so it holds no item list."
+        )
+    return list(mappings[item_col])
+
+
 UNKNOWN_CATEGORY_CODE = -1
 """The encoded value of a category the fit never saw.
 

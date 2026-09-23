@@ -72,7 +72,10 @@ from pyspark.sql import Window
 from pyspark.sql import functions as F
 from pyspark.sql.window import WindowSpec
 
-from recsys_tfb.core.consistency import item_category_column
+from recsys_tfb.core.consistency import (
+    item_category_column,
+    item_list_counted_from_data,
+)
 from recsys_tfb.core.schema import declares_optional_role, get_schema
 from recsys_tfb.evaluation.metrics import (
     ALL_K_KEY,
@@ -195,14 +198,21 @@ def _resolve_k_grids(
     return query_ks, sorted(set(query_ks) | {metric_k})
 
 
-def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
+def hand_category_mapping(
+    parameters: dict, known_items: Sequence | None = None
+) -> dict[str, str] | None:
     """Resolve {item value: category} from the hand-written
     ``item_categories.mapping``. None when categories disabled.
 
-    Fail-loud (ValueError) if a mapped product is not in
-    ``schema.categorical_values[item_col]``. Products absent from every
-    mapping list become their own singleton category when
-    ``unmapped == 'singleton'`` (the only supported mode).
+    Fail-loud (ValueError) if a mapped product is not a known item: one of
+    ``schema.categorical_values[item_col]``, or — when the item list is
+    counted from the data (#379) — of ``known_items``, the evaluated model's
+    list, which ``prepare_eval_data`` read off its preprocessor. Counted
+    without ``known_items`` is refused too: the conf holds no list then.
+    Products absent from every mapping list become their own singleton
+    category when ``unmapped == 'singleton'`` (the only supported mode); an
+    item no known list holds (a new item) becomes one in the collapse
+    (``collapse_to_categories``).
 
     Also fail-loud in column mode (``item_categories.column``, #379): there
     the table is read off the data by ``prepare_eval_data`` and has to be
@@ -225,7 +235,19 @@ def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
 
     schema = get_schema(parameters)
     item_col = schema["item"]
-    known = list((schema.get("categorical_values", {}) or {}).get(item_col, []))
+    if item_list_counted_from_data(parameters):
+        if known_items is None:
+            raise ValueError(
+                f"schema.categorical_values[{item_col!r}] is counted from the "
+                f"train months, so the known items are the evaluated model's "
+                f"(its preprocessor's list, landed by prepare_eval_data as "
+                f"evaluation_item_categories.known_items); none was passed."
+            )
+        known = list(known_items)
+        known_from = "the evaluated model's item list (counted from its train months)"
+    else:
+        known = list((schema.get("categorical_values", {}) or {}).get(item_col, []))
+        known_from = f"schema.categorical_values['{item_col}']"
     known_set = set(known)
 
     mapping: dict[str, str] = {}
@@ -234,7 +256,7 @@ def _build_category_mapping(parameters: dict) -> dict[str, str] | None:
             if item not in known_set:
                 raise ValueError(
                     f"item_categories.mapping references unknown item "
-                    f"'{item}' (not in schema.categorical_values['{item_col}'])"
+                    f"'{item}' (not in {known_from})"
                 )
             mapping[item] = category
 
@@ -259,11 +281,11 @@ def _resolve_category_mapping(
     read off the data (``evaluation_item_categories``, #379); the evaluation
     nodes pass it and it wins. ``None`` means "read the hand-written mapping
     from ``parameters``", which is every other caller, and which refuses
-    column mode (:func:`_build_category_mapping`).
+    column mode (:func:`hand_category_mapping`).
     """
     if category_mapping is not None:
         return dict(category_mapping)
-    return _build_category_mapping(parameters)
+    return hand_category_mapping(parameters)
 
 
 def _require_segment_columns_in_frame(
@@ -319,11 +341,26 @@ def collapse_to_categories(
 
     _require_segment_columns_in_frame(eval_predictions, segment_columns)
 
-    spark = eval_predictions.sparkSession
-    map_rows = [(p, c) for p, c in mapping.items()]
-    map_df = spark.createDataFrame(map_rows, [item_col, "_category"])
-
-    joined = eval_predictions.join(F.broadcast(map_df), on=item_col, how="inner")
+    # Decision — an item the table does not cover is its own category (#379
+    # decision 7), as unmapped: singleton makes it: a left join and a
+    # coalesce, not an inner join. Dropped, a new item's rows would leave the
+    # category pass alone — a query group whose only positive it is would
+    # leave the ranking metrics there and stay in the item pass, so the two
+    # would count different groups. Where the table covers every item (a
+    # listed item list, or a column-mode table read off these rows) the two
+    # joins keep the same rows.
+    if mapping:
+        spark = eval_predictions.sparkSession
+        map_rows = [(p, c) for p, c in mapping.items()]
+        map_df = spark.createDataFrame(map_rows, [item_col, "_category"])
+        joined = eval_predictions.join(
+            F.broadcast(map_df), on=item_col, how="left"
+        ).withColumn("_category", F.coalesce(F.col("_category"), F.col(item_col)))
+    else:
+        # An empty table maps nothing, so every item is its own category —
+        # the join's answer, taken directly: createDataFrame on zero rows
+        # raises "can not infer schema from empty dataset".
+        joined = eval_predictions.withColumn("_category", F.col(item_col))
 
     aggs = [
         F.max(F.col(score_col)).alias(score_col),

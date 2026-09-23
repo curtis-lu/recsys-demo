@@ -85,7 +85,8 @@ def plan_scoring_chunks(
             on which months exist; there is deliberately no "fall back to
             whatever the table holds", which would resurrect a month dropped
             from the config.
-        items: the candidate set (``inference.products``).
+        items: the candidate set (``inference.products``, or the
+            preprocessor's item list when it is counted from the data, #379).
         n_buckets: how many entity buckets the population is split into.
         written: partitions already present for this ``model_version``, as
             ``(snap_date, entity_bucket, item)`` triples.
@@ -106,6 +107,12 @@ def plan_scoring_chunks(
             deleted because this is a pure function with callers that do not
             go through the gate, and an empty plan is the one output shape
             nothing downstream can tell from a finished run.
+
+            One exception: with the item list counted from the data (#379)
+            the items are the preprocessor's, which the CLI entry cannot
+            see, so an empty one is first caught here — the runtime A27 that
+            ``predict_and_write_scores`` relies on, before any chunk is
+            scored.
     """
     if n_buckets < 1:
         raise ValueError(
@@ -119,7 +126,8 @@ def plan_scoring_chunks(
         )
     if not items:
         raise ValueError(
-            "inference.products is empty; there is nothing to rank"
+            "the item list is empty (inference.products, or the "
+            "preprocessor's counted list); there is nothing to rank"
         )
     low, high = HEALTHY_BUCKET_RANGE
     if not low <= n_buckets <= high:
