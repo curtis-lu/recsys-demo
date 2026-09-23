@@ -1,8 +1,8 @@
 {
   "measured": {
     "date": "2026-09-23",
-    "code_commit": "e5179837",
-    "how": "run_e2e.sh 跑 feat/394-multi-column-item（main 54332710 之後）：conf 改成 item: [campaign_id, creative_format]，SQL 不再拼欄（#394、ADR-0027）。改 conf 之前先用同一份程式、舊 conf 跑一次 --compare，與上一版基準逐項相同。改 conf 之後與那一次的產物逐項比對（item 欄改名回 ad_creative、來源表的兩欄照 SQL 原本的拼法拼回去之後）：十張表的列數與內容指紋、十二份 JSON 的每一個葉都相同；不同的只有三類——版本號（三個都變）、欄名 ad_creative → item（框架寫的表、preprocessor.json／category_mappings.json 的鍵、prediction_quality.json 與 report_aggregates.json 記欄名的 6 個葉）、來源表 label_table／sample_pool／feature_realtime 從一欄 ad_creative 變成 campaign_id、creative_format 兩欄。本檔即這次的 data/digest.json。"
+    "code_commit": "dd12c559",
+    "how": "run_e2e.sh --compare 跑 feat/379-category-column（main 4e3df4e3 之後）：conf 的 evaluation.item_categories 從手寫 mapping 改成 column: campaign_id（#379 PR 1）。跑之前先寫下預期：只多出 evaluation 的 item_categories.json，其餘逐值相同。與上一版基準比對的結果正是如此——只有 evaluation.item_categories.json 的 leaves／hash 是新的（13 個葉：column ＋ 12 個 item 的大類），版本號、五層其餘每一項都相同。本檔即這次的 data/digest.json。"
   },
   "noisy": {},
   "versions": {
@@ -254,6 +254,10 @@
     "diagnosis/suppression.json": {
       "leaves": 3364,
       "hash": "6592bb03e1ed688b0e9e52c46f176750fabf4272f1f99bb765474be45398caad"
+    },
+    "item_categories.json": {
+      "leaves": 13,
+      "hash": "3756731d02490f120ecd8595c0f0b60dd1bb070d0201034a3c344e0782b2b9f0"
     },
     "metrics.json": {
       "leaves": 928,
