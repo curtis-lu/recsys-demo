@@ -146,7 +146,9 @@ def validate_scored_chunk(
     written as the integer code, so the published partitions are named ``0``…``7``
     while the scores vary perfectly normally and every shape check stays green.
     **No configuration can make it fire today**: the caller writes the loop's
-    item variable, which comes from ``inference.products`` by construction. It
+    item variable, which comes from the item list it checks against by
+    construction (``inference.products``, or the preprocessor's list when it
+    is counted from the data, #379). It
     is a guard on that one assignment, at a seam this repo has already got
     wrong once, and the mutation audit — not a config-level test — is what
     demonstrates it. That is a different thing from the ``score_range`` check
@@ -209,8 +211,9 @@ def validate_scored_chunk(
         })
 
     # ``str`` on both sides. The item column comes back from pandas with
-    # whatever dtype the frame carries, while ``inference.products`` is
-    # whatever YAML parsed — and the schema is configurable, so an integer item
+    # whatever dtype the frame carries, while the item list is whatever YAML
+    # parsed (``inference.products``) or JSON loaded (the preprocessor's
+    # counted list, #379) — and the schema is configurable, so an integer item
     # is a legal instantiation of this framework. Comparing 3 against "3" would
     # fail every correct run of one.
     unknown = sorted(

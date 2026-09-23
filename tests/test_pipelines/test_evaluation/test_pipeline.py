@@ -378,7 +378,8 @@ class TestSegmentColumnsWiring:
             pipeline = create_pipeline(**kwargs)
             node = self._node(pipeline, "prepare_eval_data")
             assert node.inputs == [
-                predictions, "label_table", population, "parameters"], kwargs
+                predictions, "label_table", population, "parameters",
+                "preprocessor_on_disk"], kwargs
             assert node.outputs == [
                 "enriched_eval_predictions", "evaluation_segment_columns",
                 "evaluation_item_categories"], kwargs

@@ -49,6 +49,8 @@ evaluation 另有三種執行模式：
 8. **比較來源已準備**：使用 `--compare`／`--compare-only` 前，先確認 `compare_sources` key、來源表、model version、item mapping 與日期 coverage。
 
 監控模式會以預測 rows 為母體，依 `time + entity + item` left join `label_table`；沒有 label row 的候選會補成 `label = 0`。
+
+> ⚠ **已知風險（item 清單從資料數時，#379）**：監控模式的預測來自離線推論，而離線推論只替 item 清單裡的 item 評分——上線後才出現的新 item 沒有預測列。`label_table` 裡新 item 的正例接不上任何預測，在上面那個 left join 裡被丟掉；若它是某組唯一的正例，那一組會變成沒有正例、不進排序指標。所以**監控模式看不出漏掉新 item 的損失**。要看，就每月加一個評估月份跑 `--post-training` 評估（`docs/operations/user-guides/adding-an-eval-month.md`）：那裡的候選來自 `sample_pool`，新 item 照樣被排名、算進整體與 per-item 指標。
 `label_table` 在這三欄上必須唯一（兩種模式都檢查，只看評估的那個月）：有重複 key 時 `prepare_eval_data` 直接失敗並印出重複的 key 數，不會替你挑一列。
 這適用於「label table 只保存正例」的 sparse table，但前提是缺 row 的業務語意確實代表負例，而不是 ground truth 尚未成熟。
 
@@ -182,7 +184,9 @@ evaluation:
 - segment 欄位沿用 query group 中的值。
 - 同一套 overall、per-item、per-segment 與 macro metrics 會在 category 粒度再計算一次。
 
-mapping 右側的 item 必須存在於 `schema.categorical_values[item]`，未知 item 會 fail-fast。未出現在 mapping 的 item 目前只支援 `unmapped: singleton`，也就是各自成為單獨 category。
+mapping 右側的 item 必須是已知的 item，未知 item 會 fail-fast：逐一列出時是 `schema.categorical_values[item]`；item 清單從 train 時段的資料數出來時（#379）是**被評估模型的清單**——`prepare_eval_data` 從這個模型的前處理器讀出、落地在 `item_categories.json` 的 `known_items`（前處理器檔不在時要先補回，否則讀大類的 node 會擋下並說明）。未出現在 mapping 的 item 目前只支援 `unmapped: singleton`，也就是各自成為單獨 category。
+
+**對照表裡找不到大類的 item 自己成一類**（#379）：大類那一輪對 item 是 left join，找不到的取 item 本身當大類，不會被丟掉。這在 item 清單從資料數、val／test 冒出新 item 時才會發生（新 item 不在任何已知清單裡）；不這樣做的話，新 item 的列會悄悄從大類指標消失，一組若只有它是正例，大類那一輪會少算這一組，兩輪數的 query group 就不一樣了。逐一列出時每個 item 都有大類（mapping 或 singleton），結果與以前的 inner join 逐列相同。
 
 同一 item 不應重複出現在多個 categories；目前實作會以後讀到的 mapping 覆蓋先前結果，沒有額外衝突檢查。
 

@@ -63,7 +63,10 @@ schema:
     rank: rank # 組內名次欄（一般不需改）
   # ★Identity categorical 欄位的顯式值列舉（如 prod_name）：這些欄的 distinct 值
   # 無法從 feature_table 推得、必須在此宣告（為什麼見 design-principles §1）。
-  # ⚠改動此 list 會使 base_dataset_version 失效（重新版本化、整批重算）。
+  # item 那一格也可以寫 from_train_data：清單改由 dataset 從 train 時段的 sample_pool 數，
+  # 不必逐一列出；此時不得再寫 inference.products（A52），推論的候選取自模型的 preprocessor
+  # （docs/pipelines/dataset.md §3.10）。
+  # ⚠改動此 list（含改成、改回 from_train_data）會使 base_dataset_version 失效（重新版本化、整批重算）。
   categorical_values:
     prod_name:
       - ccard_bill

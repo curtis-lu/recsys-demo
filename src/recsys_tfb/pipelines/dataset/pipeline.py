@@ -76,6 +76,7 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         apply_preprocessor_to_features,
         build_model_input,
         build_test_model_input,
+        build_val_model_input,
         filter_test_model_input,
         filter_train_keys,
         filter_val_model_input,
@@ -163,9 +164,17 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         # CLI registers `None` for the table when a deployment declares none, so
         # the list is the same for every deployment — a literal list, as the AST
         # audit needs.
+        # `sample_pool` and `preprocessor_on_disk` (#379) come after the
+        # candidate table, for the same reason: new optional inputs go last.
+        # The fit counts the item list from sample_pool's train months when
+        # schema.categorical_values[<item>] is from_train_data, and compares
+        # it with the file it is about to overwrite, read under this second
+        # entry name (A6) — here, not in the data gate above, which a slice
+        # starting at the fit skips (B19).
         Node(
             fit_preprocessor_metadata,
-            inputs=["feature_table", "parameters", "candidate_feature_table"],
+            inputs=["feature_table", "parameters", "candidate_feature_table",
+                    "sample_pool", "preprocessor_on_disk"],
             outputs=["preprocessor", "category_mappings"],
             name="fit_preprocessor_metadata",
         ),
@@ -227,8 +236,12 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
             outputs="train_dev_model_input",
             name="build_train_dev_model_input",
         ),
+        # val and test use their own wrappers. With a counted item list
+        # (#379) both warn about the split's items the preprocessor's list
+        # lacks, asked of the landed keys table (one column, no join) rather
+        # than of the unlanded model_input, which would run the join twice.
         Node(
-            build_model_input,
+            build_val_model_input,
             inputs=[
                 "val_keys", "preprocessed_feature_table", "label_table",
                 "preprocessor", "parameters",
@@ -237,10 +250,10 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
             outputs="val_model_input_unfiltered",
             name="build_val_model_input",
         ),
-        # test uses its own wrapper: `test_keys` is a persistent Hive table
+        # test's wrapper also re-scopes: `test_keys` is a persistent Hive table
         # holding every month, so reading it back has to be re-scoped to this
         # run's months. train/val read keys written by this run and need no
-        # such wrapper.
+        # such scope.
         Node(
             build_test_model_input,
             inputs=[

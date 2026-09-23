@@ -31,6 +31,7 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import (
     REBUILD_SNAP_DATES_KEY,
+    item_list_counted_from_data,
     resolved_numeric_storage,
 )
 from recsys_tfb.core.logging import log_step
@@ -85,6 +86,7 @@ from recsys_tfb.preprocessing import (
     cast_numeric_features_to_storage_type,
     encodable_categoricals,
     encode_categoricals,
+    preprocessor_item_values,
     warn_unknown_encodings,
 )
 from recsys_tfb.utils.ranking import rank_by_score_then_item
@@ -260,8 +262,14 @@ def predict_and_write_scores(
     not to do, or a silently stale chunk is indistinguishable from a correctly
     skipped one.
 
-    Pre-check (input): the landed population table holds every column the model
-    declares.
+    Pre-checks (input):
+
+    * the landed population table holds every column the model declares;
+    * the item list is not empty — the runtime A27, raised by
+      ``plan_scoring_chunks`` before any chunk is scored. With the item list
+      counted from the data (#379) the list is the preprocessor's, so the CLI
+      entry could not check it; with a listed one A27 already did, and this is
+      the backstop.
 
     Post-conditions, all four on what this node itself computed — a failure
     points at this node's filter or at a stale
@@ -302,7 +310,17 @@ def predict_and_write_scores(
     identity_cols = scored_row_columns(schema)
     score_col = schema["score"]
 
-    items = list(parameters["inference"]["products"])
+    # Decision — the candidates: every entity × the item list. Listed in the
+    # conf, the list is inference.products (A4 holds it equal to the
+    # declared one). Counted from the train months (#379), it is the
+    # preprocessor's — the items the model has codes for; an item that
+    # appeared after the train months is not scored until the train months
+    # move and dataset + training are re-run.
+    # An empty list is refused by plan_scoring_chunks below (runtime A27).
+    if item_list_counted_from_data(parameters):
+        items = preprocessor_item_values(preprocessor, item_col)
+    else:
+        items = list(parameters["inference"]["products"])
     snap_dates = iso_snap_dates(parameters)
     n_buckets = entity_buckets(parameters)
     partition_cols = [time_col, item_col, ENTITY_BUCKET_COL]
@@ -475,12 +493,19 @@ def predict_and_write_scores(
             processed.append(ScoringChunk(snap_date, bucket, item))
 
     if not processed and not plan.skipped:
+        # The item axis is named by where it came from: a counted list (#379)
+        # is the preprocessor's, and inference.products is not written then.
+        item_source = (
+            f"the preprocessor's item list (category_mappings[{item_col!r}])"
+            if item_list_counted_from_data(parameters)
+            else "inference.products"
+        )
         raise ValueError(
-            "No scoring rows found for inference.snap_dates and "
-            "inference.products: every entity bucket came back empty. The "
-            "population exists (read_population would have raised otherwise), "
-            "so this points at the join to the feature table or at "
-            "inference_population_features being stale."
+            f"No scoring rows found for inference.snap_dates and "
+            f"{item_source}: every entity bucket came back empty. The "
+            f"population exists (read_population would have raised otherwise), "
+            f"so this points at the join to the feature table or at "
+            f"inference_population_features being stale."
         )
 
     # What should exist afterwards: what this run wrote, plus what it skipped
@@ -634,8 +659,10 @@ def validate_predictions(
     schema = get_schema(parameters)
     score_col = schema["score"]
     rank_col = schema["rank"]
-    products = parameters["inference"]["products"]
-    n_products = len(products)
+    # The items the scoring node scored — inference.products, or the
+    # preprocessor's counted list (#379) — so the checks and the grid read one
+    # list whichever mode produced it.
+    n_products = len(score_manifest["items"])
     # The groups ``rank_predictions`` ranked, so these checks are asked of the
     # same partitions the ranks were produced in — the base key (ADR-0025).
     group_cols = schema["base_key_columns"]

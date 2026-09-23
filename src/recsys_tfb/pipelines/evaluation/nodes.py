@@ -31,6 +31,8 @@ from recsys_tfb.core.consistency import (
     DataConsistencyError,
     item_category_column,
     item_category_conflict_errors,
+    item_categories_enabled,
+    item_list_counted_from_data,
     prediction_quality_on,
     test_carries_zero_positive_group_weight,
 )
@@ -70,6 +72,7 @@ from recsys_tfb.evaluation.metrics import (
 from recsys_tfb.evaluation.metrics_spark import (
     compute_all_metrics,
     compute_overall_per_item,
+    hand_category_mapping,
     rank_within_query,
 )
 from recsys_tfb.evaluation.prediction_quality import (
@@ -109,6 +112,7 @@ from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
     restrict_to_eval_snap_dates,
     stamp_partition_fingerprint,
 )
+from recsys_tfb.preprocessing import preprocessor_item_values
 from recsys_tfb.utils.item_columns import combine_item_columns
 from recsys_tfb.utils.spark import get_or_create_spark_session
 
@@ -162,18 +166,41 @@ def _landed_category_mapping(
 ) -> Optional[dict]:
     """The ``{item: category}`` table the category pass ranks by: the one
     ``prepare_eval_data`` read off ``evaluation.item_categories.column`` in
-    column mode (#379), else ``None`` — "take the hand-written mapping from
-    ``parameters``", as before.
+    column mode (#379); with the item list counted from the data, the
+    hand-written mapping resolved against the evaluated model's item list
+    that ``prepare_eval_data`` landed beside it (``known_items``); else
+    ``None`` — "take the hand-written mapping from ``parameters``", as before.
 
-    Pre-check (inputs), column mode only: the table was read off today's
-    column. It catches what the fingerprint cannot — a table missing
-    altogether — and the ``--compare-only`` path, which compares nothing
-    with today's settings. Otherwise a table from another column, or none,
-    would be ranked or silently replaced by every item its own category.
+    Pre-checks (inputs), one per mode that reads the landed file:
+
+    * column mode: the table was read off today's column. It catches what
+      the fingerprint cannot — a table missing altogether — and the
+      ``--compare-only`` path, which compares nothing with today's settings.
+      Otherwise a table from another column, or none, would be ranked or
+      silently replaced by every item its own category.
+    * item list counted from the data, categories enabled: the landed file
+      carries ``known_items``. Without it the hand mapping has no list to be
+      checked against — the conf holds none in this mode — so the run stops
+      and names the node to re-run, rather than skipping the check.
     """
     column = item_category_column(parameters)
     if column is None:
-        return None
+        if not item_list_counted_from_data(parameters):
+            return None
+        known = (item_categories.get("known_items")
+                 if isinstance(item_categories, dict) else None)
+        if known is None and item_categories_enabled(parameters):
+            raise ValueError(
+                "The item list is counted from the train months, so a "
+                "hand-written evaluation.item_categories.mapping is checked "
+                "against the evaluated model's list — which prepare_eval_data "
+                "reads off its preprocessor (preprocessor_on_disk) and lands "
+                "as evaluation_item_categories.known_items, and this run has "
+                "none. Re-run with --from-node prepare_eval_data, with the "
+                "model's data/dataset/<base_dataset_version>/preprocessor.json "
+                "in place."
+            )
+        return hand_category_mapping(parameters, known_items=known)
     if isinstance(item_categories, dict) and item_categories.get("column") == column:
         return item_categories["mapping"]
     landed = (
@@ -273,6 +300,7 @@ def make_prepare_eval_data_node(population_name: str):
         label_table: SparkDataFrame,
         population: SparkDataFrame,
         parameters: dict,
+        preprocessor_on_disk: Optional[dict] = None,
     ) -> tuple[SparkDataFrame, dict, dict]:
         """Join ranked predictions with labels and segment columns using Spark.
 
@@ -287,8 +315,11 @@ def make_prepare_eval_data_node(population_name: str):
         ``item_categories`` lands as ``evaluation_item_categories`` (#379):
         ``column`` (``evaluation.item_categories.column``, or ``None``),
         ``mapping`` (item -> category read off that column; empty without
-        one, when readers take the hand-written mapping from ``parameters``)
-        and ``config_fingerprint``.
+        one, when readers take the hand-written mapping from ``parameters``),
+        ``config_fingerprint``, and — only with the item list counted from the
+        data — ``known_items``: the evaluated model's list, read off
+        ``preprocessor_on_disk`` (``None`` when that file is absent), which a
+        hand-written mapping is checked against.
 
         Pre-checks. Each fails because something before this node did not
         supply what it needs:
@@ -634,6 +665,17 @@ def make_prepare_eval_data_node(population_name: str):
                 population_name, category_column,
                 len(item_categories["mapping"]),
                 len(set(item_categories["mapping"].values())),
+            )
+        # Decision — with the item list counted from the data, the known items
+        # a hand mapping is checked against are the evaluated model's: its
+        # preprocessor's list (#379 decision 6), not a recount — the model has
+        # codes for exactly those. Landed only in that mode, so a listed
+        # deployment's file is what it was. Read from the optional entry: an
+        # evaluation that needs no list must not start needing the file.
+        if item_list_counted_from_data(parameters):
+            item_categories["known_items"] = (
+                None if preprocessor_on_disk is None
+                else preprocessor_item_values(preprocessor_on_disk, schema["item"])
             )
         item_categories["config_fingerprint"] = fingerprint(parameters)
 

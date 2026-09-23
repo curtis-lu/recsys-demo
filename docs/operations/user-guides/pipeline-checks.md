@@ -6,7 +6,7 @@
 
 這頁用到的幾個詞（除了「分區」，完整定義都在 repo 根目錄的 `CONTEXT.md`）：
 
-- **item 清單**：`schema.categorical_values` 裡 item 欄的值，也就是模型認得的所有 item。
+- **item 清單**：模型認得的所有 item。有兩種來源：`schema.categorical_values` 裡 item 欄逐一列出的值，或那一格寫 `from_train_data`、從 train 時段的 `sample_pool` 數出來、存在前處理器裡的清單（#379）。
 - **query group**：一次排序的範圍，由 time 和 entity 決定。名次只在同一組裡比。
 - **identity 欄**：認出一筆候選的欄位組合，也就是 time、entity、item 三個角色對到的欄。
 - **候選層級特徵表**：選用的第二張特徵表，一列是一筆候選的特徵，以 identity 欄接到候選上；`catalog.yaml` 有 `candidate_feature_table` 條目才算宣告。`feature_table` 則是一個 entity、一個時段一列，以 time 和 entity 接。
@@ -56,13 +56,13 @@ python -m recsys_tfb <指令> --env <env>
 
 **schema**
 - **`schema.columns`**：一定要寫 `time`、`entity`、`item`。`time`、`item`、`label`、`score`、`rank` 有寫就必須是非空字串（後三個沒寫會用預設值）。`entity` 是一個欄名，或非空的欄名清單。這三個角色合起來不能有重複的欄名。
-- **`schema.categorical_values`**：格式是「欄名 → 值清單」，清單不能是空的。
+- **`schema.categorical_values`**：格式是「欄名 → 值清單」，清單不能是空的。只有 item 欄那一格可以改寫成 `from_train_data`（別的欄這樣寫就擋）。
 
 **item 清單在各處要一致**
-- **`dataset.prepare_model_input.categorical_columns`**：有寫這個鍵，就一定要包含 item 欄（`A2`）；item 欄也一定要在 `schema.categorical_values` 有值清單（`A3`）。
+- **`dataset.prepare_model_input.categorical_columns`**：有寫這個鍵，就一定要包含 item 欄（`A2`）；item 欄也一定要在 `schema.categorical_values` 有一格：值清單或 `from_train_data`（`A3`）。沒寫不會被當成「從資料數」。
 - **`training.feature_selection.exclude`**：不能列 item 欄（`A14`）。item 必須是模型的特徵。
-- **`inference.products`**：必須跟 item 清單完全相同，不能多也不能少（`A4`）。
-- **`dataset.sample_ratio_overrides`**：鍵是 `dataset.sample_group_keys` 各欄的值用 `|` 串起來的。item 欄在 `sample_group_keys` 裡時，鍵裡 item 那一段必須是清單裡的值（`A5`）。`training.sample_weights` 的鍵也一樣（`A9`）。
+- **`inference.products`**：item 清單逐一列出時，必須跟它完全相同，不能多也不能少（`A4`）；item 清單從資料數時不准寫（`A52`），離線推論的候選取自前處理器的清單。
+- **`dataset.sample_ratio_overrides`**：鍵是 `dataset.sample_group_keys` 各欄的值用 `|` 串起來的。item 欄在 `sample_group_keys` 裡時，鍵裡 item 那一段必須是清單裡的值（`A5`）。`training.sample_weights` 的鍵也一樣（`A9`）。item 清單從資料數時，開跑前沒有清單可比，這兩條改在清單數出來之後查：`A5` 在 dataset 建前處理器時、`A9` 在 training 讀到前處理器時，打錯字一樣擋。
 
 **dataset 設定**
 - **`dataset.prepare_model_input.drop_columns` 與 `categorical_columns`**：同一個欄名不能兩邊都寫（`A1`）。一個說「這欄不要」，一個說「這欄當類別特徵」；不擋的話會默默以「不要」為準。
@@ -103,7 +103,7 @@ python -m recsys_tfb <指令> --env <env>
   - `catalog.yaml` 的 `training_eval_predictions` 條目，`columns:` 必須包含 `schema.columns.entity` 的每一欄（`A28`）。少寫的欄在寫入時會被默默丟掉。
   - `dataset.test_zero_positive_group_ratio` 大於 0 時，同一個條目的 `columns:` 還必須包含 `zero_positive_group_weight`（`A45`）。少了它，權重在寫入時被默默丟掉，evaluation 會把每個留下的無正例組只算一次、而不是 1／r 次。
 - **inference**
-  - `inference.snap_dates`、`inference.products` 不能是空清單；`inference.entity_buckets`（把 entity 分成幾桶、一桶一桶評分）有寫就要大於等於 1，不能寫 `null`（`A27`）。
+  - `inference.snap_dates`、`inference.products` 不能是空清單（item 清單從資料數時沒有 `inference.products`，改在評分時查前處理器的清單不是空的）；`inference.entity_buckets`（把 entity 分成幾桶、一桶一桶評分）有寫就要大於等於 1，不能寫 `null`（`A27`）。
   - `catalog.yaml` 不能宣告候選層級特徵表（`A47`）。推論只讀 `feature_table`，而這種設定下訓練的模型需要候選層級表的欄；不擋的話，推論會在啟動 Spark、讀完母體之後才以 `Missing feature columns` 失敗，訊息也不說原因。只宣告 `occasion`、`event` 而沒有候選層級特徵表時照跑。inference 的每一種跑法都查，包含 `--dry-run`、`--list-nodes`。
 - **evaluation**
   - 帶 `--post-training` 時，`evaluation.snap_date` 一定要寫，而且必須在 `dataset.test_snap_dates` 裡（`A22`）。
@@ -137,7 +137,7 @@ python -m recsys_tfb <指令> --env <env>
 dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，分別在最開頭、特徵編碼完、最後一步。除此之外，做事的步驟途中也會順便查幾件事。
 
 **資料閘 1：開頭**（pipeline 的第一步）
-- **item 值**：`sample_pool` 在 dataset 設定的月份裡出現的 item 值，必須跟 item 清單完全相同；`label_table` 出現的 item 值必須都在清單裡（`B1`）。這一條要實際讀這兩張表。
+- **item 值**：`sample_pool` 在 dataset 設定的月份裡出現的 item 值，必須跟 item 清單完全相同；`label_table` 出現的 item 值必須都在清單裡（`B1`）。這一條要實際讀這兩張表。item 清單從資料數時，`sample_pool` 不拿來比（它的 train 月份就是清單），`label_table` 出現的 item 值改成必須在 `sample_pool` 出現過。
 - **類別欄的型別**：`dataset.prepare_model_input.categorical_columns` 列的欄，在 `feature_table` 或候選層級特徵表裡不能是 decimal、double、float（`B5`）。decimal 會讓前處理器存檔失敗；double、float 幾乎一定是列錯了。
 - **非數字的特徵欄**：兩張特徵表的特徵欄如果是文字、binary、日期、時間戳或複合型別，就必須列進 `categorical_columns` 或 `drop_columns`（`B6`）。不擋的話，training 讀資料時會失敗。
 - **帶出欄和特徵欄撞名**：`dataset.carry_columns` 列的欄，如果也是 `feature_table` 或候選層級特徵表裡的特徵欄（沒列在 `drop_columns`），就擋（`B7`）。不擋的話，組 model_input 時 Spark 會報欄名有歧義。
@@ -160,8 +160,10 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
   - `feature_table` 必須有 time 與 entity 欄，而且 time 欄要出現設定要處理的每個月份。
   - 候選層級特徵表必須有 `dataset.train_snap_dates` 的每個月份（建前處理器時查；其餘要讀的月份在精度閘查）。
   - `dataset.train_dev_ratio` 不是 0，而抽樣切分後 train_dev 變成空的。
+  - item 清單從資料數時，同一個 `base_dataset_version` 重跑、數出的清單跟磁碟上前處理器的不同（`B19`）。清單不在設定裡、版本號不會跟著變，照樣覆寫的話，用舊清單訓練的模型推論時編號全錯位。訊息列出多了、少了哪些 item，並建議先讓版本號變動再建（刪掉該版本目錄重建是最後手段：沒重訓的模型會靜默拿錯位的編號評分，見 `docs/pipelines/dataset.md` §3.10）。建前處理器時查，所以從那一步接續也擋得到。
 - 只警告：
   - `drop_columns` 列的欄在每一張特徵表都找不到（多半是打錯字）。
+  - item 清單從資料數時，val 或 test 有清單裡沒有的 item（新 item）：列出有哪些，列照樣留著、編碼成「未知」。只加評估月份（`--only-test-months`）時照磁碟上的前處理器判斷。
   - 抽樣切分時，切分用的欄位是空值的列會被丟掉。
 
 ### training
@@ -200,7 +202,7 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
   - **沿用上一輪的結果**：`enriched_eval_predictions`、指標、診斷結果這些已經落地的東西，必須是用現在「會影響計算」的那組設定算的。不是就擋，訊息會告訴你從哪一步重跑。
   - **分群**：`evaluation.segment_sources.<名稱>` 的表必須讀得到，而且有宣告的欄。
   - **baseline**：報表有開 baseline 時，`label_table` 在 `evaluation.baseline.lookback_months` 那段期間必須有資料。
-  - **item 大類**：`evaluation.item_categories.enabled` 打開時，`evaluation.item_categories.mapping` 用到的 item 必須在 item 清單裡，`evaluation.item_categories.unmapped` 只能是 `singleton`。寫 `evaluation.item_categories.column`（取自候選的某一欄）時：`sample_pool` 必須有這一欄；同一個 item 在評估月份裡（同月或跨月）不能對到兩個不同的非 NULL 值（`B18`）——對照表只用 item 連接，不擋的話它的預測會被算進兩個大類。改了這一欄之後，從 `prepare_eval_data` 之後接續會被擋，訊息指示 `--from-node prepare_eval_data`。
+  - **item 大類**：`evaluation.item_categories.enabled` 打開時，`evaluation.item_categories.mapping` 用到的 item 必須在 item 清單裡（清單從資料數時，是被評估模型前處理器的清單；前處理器檔不在就擋，訊息說要先補回再從 `prepare_eval_data` 重跑），`evaluation.item_categories.unmapped` 只能是 `singleton`。寫 `evaluation.item_categories.column`（取自候選的某一欄）時：`sample_pool` 必須有這一欄；同一個 item 在評估月份裡（同月或跨月）不能對到兩個不同的非 NULL 值（`B18`）——對照表只用 item 連接，不擋的話它的預測會被算進兩個大類。改了這一欄之後，從 `prepare_eval_data` 之後接續會被擋，訊息指示 `--from-node prepare_eval_data`。
   - **舊格式**：讀到舊格式的 `evaluation_results.json`，訊息會說要跑哪個遷移腳本。
   - **比較（`--compare`、`--compare-only`）**：
     - 帶 `--compare-only` 時，`enriched_eval_predictions` 在這個模型版本、這個月必須有資料，`segment_columns.json` 也必須在；寫了 `evaluation.item_categories.column` 時，`item_categories.json` 也必須在（手寫 mapping 不需要）。這幾樣都要先跑過一次一般的 evaluation。
@@ -224,8 +226,8 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
 
 - **inference**（發布排名之前）
   - 會擋：
-    - `inference.snap_dates` × `inference.entity_buckets` × `inference.products` 的每一格都要有分區（沒有任何 entity 的桶除外），也不能多出格點以外的分區。
-    - 每個 query group 都要排滿 `inference.products` 的每個 item；名次在 1 到 item 數之間，而且名次越後面，分數不會更高。
+    - `inference.snap_dates` × `inference.entity_buckets` × 候選 item（`inference.products`，或從資料數時前處理器的清單）的每一格都要有分區（沒有任何 entity 的桶除外），也不能多出格點以外的分區。
+    - 每個 query group 都要排滿候選清單的每個 item；名次在 1 到 item 數之間，而且名次越後面，分數不會更高。
     - 每一桶評分結果寫入之前，也會查空值、重複列、列數與 item 值。
     - 同一個 query group 裡所有 item 分數都一樣的 group，超過一半就擋。多半代表 item 餵進模型時變成了常數。
     - 這次一列都沒有評分，而且也沒有沿用任何既有分區。

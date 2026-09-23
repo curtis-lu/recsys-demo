@@ -611,6 +611,16 @@ def test_declared_items_missing_from_sample_are_reported():
     assert not any("categorical_values" in n for n in plain["notes"])
 
 
+def test_a_counted_item_list_declares_nothing_to_miss():
+    """#379: with the item list counted from the data the cell is a string;
+    iterating it would report its letters as declared items never sampled."""
+    params = {**PARAMS, "schema": {**PARAMS["schema"], "categorical_values": {
+        "prod_name": "from_train_data"}}}
+    out = compute((_sample(), {}), params)
+    assert out["items_declared_not_observed"] == []
+    assert not any("categorical_values" in n for n in out["notes"])
+
+
 def test_per_item_reports_both_raw_and_effective_positive_counts():
     """n_pos_effective 必須是 HT 加權計數，不能退化成原始列數。
 

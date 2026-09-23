@@ -62,7 +62,7 @@ LEFT JOIN ${target_db}.label_table l
 2. **確認來源資料成熟**：目標日期的上游 partition 必須完成載入；若 label 需要觀察窗，應確認該日期的 ground truth 已成熟。
 3. **準備 SQL 與執行順序**：每張中介表各自使用一支 SQL，並依實際相依順序列在 YAML 的 `tables` 中。
 4. **宣告輸出契約**：每張表都應設定 `partition_by` 與 `primary_key`，最終三張來源表應符合上表所列粒度。
-5. **對齊 item 集合**：`label_table` 與 `sample_pool` 產生的 item，應與 `parameters.yaml` 的 `schema.categorical_values.<item>` 及 `parameters_inference.yaml` 的候選集合一致。
+5. **對齊 item 集合**：`label_table` 與 `sample_pool` 產生的 item，應與 `parameters.yaml` 的 `schema.categorical_values.<item>` 及 `parameters_inference.yaml` 的候選集合一致。item 那一格寫 `from_train_data` 時（#379），清單就從 `sample_pool` 的 train 時段數，只剩 `label_table` 的 item 必須在 `sample_pool` 出現過。
 6. **準備抽樣欄位**：所有 `sample_group_keys` 都必須由 `sample_pool_etl` 寫入 `sample_pool`；需要使用 feature 欄位時，先在 SQL 中連接 `feature_table`。
 7. **決定執行環境**：確認該環境的 `dry_run` 設定，避免以為已寫表，實際上只 render SQL。
 

@@ -109,7 +109,7 @@ flowchart TB
     src_pop[("inference_population<br/><small>read_only ・ grain (time, entity) 唯一</small>")]
     src_ft[("feature_table<br/><small>read_only ・ 只作 enrichment</small>")]
     cfg_bucket[/"inference.entity_buckets<br/><small>切幾塊 → driver 峰值＋分區數</small>"/]
-    cfg_prod[/"inference.products<br/><small>內層迴圈跑幾圈 → 造成資料列</small>"/]
+    cfg_prod[/"inference.products（或 item 清單從資料數時：前處理器的清單，#379）<br/><small>內層迴圈跑幾圈 → 造成資料列</small>"/]
   end
 
   %% --------------- 上游 pipeline 落地的版本化 artifact ----------------

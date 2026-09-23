@@ -43,10 +43,13 @@ from recsys_tfb.core.consistency import (
     combined_item_collision_errors,
     feature_table_overlap_errors,
     item_coverage_errors,
+    item_list_counted_from_data,
+    item_list_drift_errors,
     item_source_column_errors,
     item_source_dtype_errors,
     nonnumeric_feature_errors,
     optional_role_source_column_errors,
+    override_unknown_item_errors,
     ColumnPrecision,
     SplitRowCounts,
     model_input_grain_errors,
@@ -65,9 +68,11 @@ from recsys_tfb.utils.hashing import ratio_to_threshold, spark_bucket
 from recsys_tfb.utils.item_columns import combine_item_columns, combined_item_value
 from recsys_tfb.pipelines.dataset.steps.categoricals import (
     collect_vocabularies_from_data,
+    count_items_in_months,
     read_declared_vocabularies,
     require_declared_categoricals,
     require_supported_categorical_dtypes,
+    warn_items_outside_the_list,
 )
 from recsys_tfb.pipelines.dataset.steps.feature_columns import (
     candidate_feature_source_columns,
@@ -118,6 +123,7 @@ from recsys_tfb.utils.parquet_stats import (
     read_row_count,
 )
 from recsys_tfb.preprocessing import (
+    preprocessor_item_values,
     cast_numeric_features_to_storage_type,
     castable_numeric_feature_columns,
     encodable_categoricals,
@@ -260,9 +266,12 @@ def validate_data_consistency(
         if c in source_dtypes
     }
     errors = (
+        # B1. A counted item list (#379) has nothing to hold sample_pool to
+        # before the fit counts it: None, and only label_table is checked.
         item_coverage_errors(
             item,
-            resolved_item_values(parameters),
+            None if item_list_counted_from_data(parameters)
+            else resolved_item_values(parameters),
             _values(sample_pool_items),
             _values(label_items),
         )
@@ -585,6 +594,49 @@ def select_test_keys(
     return all_keys
 
 
+def build_val_model_input(
+    keys: DataFrame,
+    preprocessed_feature_table: DataFrame,
+    label_table: DataFrame,
+    preprocessor_metadata: dict,
+    parameters: dict,
+    candidate_feature_table: DataFrame | None = None,
+    candidate_feature_table_months: list | None = None,
+) -> DataFrame:
+    """build_model_input for the val split, plus the new-item warning (#379).
+
+    With ``schema.categorical_values[<item>]: from_train_data`` the val items
+    the preprocessor's list lacks are named here, off ``keys`` — the landed
+    ``val_keys`` table — rather than off the model_input: that one is the
+    unlanded join below, and asking it for its items would run the whole join
+    a second time. No month scope, unlike test's: ``val_snap_dates`` is in
+    ``base_dataset_version``, so ``val_keys`` holds exactly the months this
+    node builds.
+    """
+    schema = get_schema(parameters)
+    # Decision — a val item the counted item list lacks (#379) is kept and
+    # warned about, not refused: its rows are scored like the others (the
+    # model sees the unknown code), which is how it will look in production
+    # until the train months move. The items only, no counts. A listed item
+    # list has none (B1 refuses them upstream), so nothing is counted then.
+    # Asked of the keys, which hold exactly the model_input's items (every
+    # join in the build is a left join from them): one column of a landed
+    # table instead of a second run of the join (ADR-0006's cost rule, the
+    # one B10 follows). The list is the preprocessor's, the one the encoding
+    # reads.
+    if item_list_counted_from_data(parameters):
+        item = schema["item"]
+        with log_step(logger, "warn_items_outside_the_list(val)"):
+            warn_items_outside_the_list(
+                keys, item, preprocessor_item_values(preprocessor_metadata, item),
+                "val",
+            )
+    return build_model_input(
+        keys, preprocessed_feature_table, label_table, preprocessor_metadata,
+        parameters, candidate_feature_table, candidate_feature_table_months,
+    )
+
+
 def build_test_model_input(
     keys: DataFrame,
     preprocessed_feature_table: DataFrame,
@@ -602,12 +654,28 @@ def build_test_model_input(
     reading it back gives the full history even when ``select_test_keys`` only
     wrote the new month. Without this filter the downstream join would rebuild
     every month — the ∝N cost ADR-0002 exists to remove.
+
+    With a counted item list (#379) the new-item warning is val's, asked of
+    the scoped keys: the months this run builds, no others. Under
+    ``--only-test-months`` there is no fit, and ``preprocessor_metadata`` is
+    the one on disk — the list these months are encoded by, not a recount of
+    today's train-month data.
     """
     schema = get_schema(parameters)
     # Decision — scope: this run's months only. Everything after it is the same
     # assembly every other split gets, which is why it is the sibling node
     # rather than a copy.
     keys = keys.filter(months_filter_as_date(schema["time"], month_plan.to_process))
+    # Decision — a test item the counted item list lacks is kept and warned
+    # about, for val's reason and off the keys for val's reason; the scope
+    # above is what keeps a month already landed out of the warning.
+    if item_list_counted_from_data(parameters):
+        item = schema["item"]
+        with log_step(logger, "warn_items_outside_the_list(test)"):
+            warn_items_outside_the_list(
+                keys, item, preprocessor_item_values(preprocessor_metadata, item),
+                "test",
+            )
     return build_model_input(
         keys, preprocessed_feature_table, label_table, preprocessor_metadata, parameters,
         candidate_feature_table, candidate_feature_table_months,
@@ -618,6 +686,8 @@ def fit_preprocessor_metadata(
     feature_table: DataFrame,
     parameters: dict,
     candidate_feature_table: DataFrame | None = None,
+    sample_pool: DataFrame | None = None,
+    preprocessor_on_disk: dict | None = None,
 ) -> tuple[dict, dict]:
     """Fit the preprocessor: each categorical's vocabulary, and what a feature is.
 
@@ -627,11 +697,20 @@ def fit_preprocessor_metadata(
     identity columns are its join key, never a source of features or of a
     vocabulary.
 
+    With ``schema.categorical_values[<item>]: from_train_data`` (#379) the item
+    list is counted here from ``sample_pool``'s train months, and
+    ``preprocessor_on_disk`` — the file this node is about to overwrite,
+    loaded under another catalog entry name (A6), ``None`` when absent — is
+    what B19 compares it with. Neither is read for a listed item list.
+
     Pre-checks (inputs, ADR-0008 §3): each feature table must carry every
     ``train_snap_dates`` month, every identity categorical must be declared
     in ``schema.categorical_values``, and every categorical read from the data
     must be string, an integer type or boolean (B5 again — a sliced run skips
-    the gate). Registered backstop: ``schema.item`` must survive into
+    the gate). With a counted item list: no ``sample_ratio_overrides`` key
+    names an item the list lacks (A5, deferred to here from the CLI entry,
+    which has no list yet), and the list matches the one on disk (B19).
+    Registered backstop: ``schema.item`` must survive into
     ``feature_columns``.
 
     Only small metadata (distinct category values) reaches the driver.
@@ -723,13 +802,48 @@ def fit_preprocessor_metadata(
             candidate_from_data, dict(candidate_feature_table.dtypes),
             table="candidate_feature_table",
         )
+    # Decision — where the item list comes from: the declaration, or (#379)
+    # the train months' sample_pool, before any sampling. Not the sampled
+    # model_input: no sampling rate keeps one row per item, so a rare item
+    # would come and go with the sampling settings, and so would the offline
+    # inference candidates — while this file is shared by every sampling
+    # variant of the version. The train months only, for the reason above:
+    # an item first offered in val/test is a new item, encoded unknown.
+    item = schema["item"]
+    counted_items = None
+    if item_list_counted_from_data(parameters) and item in from_schema:
+        with log_step(logger, "count_items_in_months(train_snap_dates)"):
+            counted_items = count_items_in_months(
+                sample_pool, schema, train_months)
+        logger.info(
+            "Item list counted from sample_pool's train months: %d items",
+            len(counted_items),
+        )
+        # Pre-check (runtime A5): an override keyed on an item the list lacks
+        # never matches; the CLI entry could not check it without the list.
+        unknown = override_unknown_item_errors(parameters, items=counted_items)
+        if unknown:
+            raise DataConsistencyError("\n".join(unknown))
+        # Pre-check (input, B19): the version's preprocessor on disk holds
+        # the same list; otherwise this save would re-code its models' items.
+        drift = item_list_drift_errors(
+            item, counted_items,
+            None if preprocessor_on_disk is None
+            else preprocessor_item_values(preprocessor_on_disk, item),
+            parameters.get("base_dataset_version", "<unresolved>"),
+        )
+        if drift:
+            raise DataConsistencyError("\n".join(drift))
+    declared_cols = [c for c in from_schema if c != item or counted_items is None]
     # Each table's vocabularies are read from its own train months — one scan
     # per table, and no scan of a table that has none to give.
     with log_step(logger, "collect_category_mappings"):
         category_mappings = {
             **collect_vocabularies_from_data(train_features, entity_from_data),
-            **read_declared_vocabularies(cat_values, from_schema),
+            **read_declared_vocabularies(cat_values, declared_cols),
         }
+        if counted_items is not None:
+            category_mappings[item] = counted_items
         # The normalised restriction here, unlike feature_table's above: the
         # candidate table is read the same way by every node that reads it
         # (the build and the precision scan filter it with the same form), so a

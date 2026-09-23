@@ -606,6 +606,74 @@ class TestEntityBuckets:
         assert four != five
 
 
+class TestPredictAndWriteScoresWithACountedItemList:
+    """#379 decision 3: with the item list counted from the data, the grid is
+    every entity × the preprocessor's list. ``inference.products`` is not
+    read (A52 refuses it at the CLI entry)."""
+
+    @staticmethod
+    def _counted(parameters):
+        import copy
+
+        params = copy.deepcopy(parameters)
+        params["inference"].pop("products")
+        params["schema"]["categorical_values"] = {"prod_name": "from_train_data"}
+        return params
+
+    def test_the_grid_is_the_preprocessors_list(
+        self, population_features, preprocessor, parameters
+    ):
+        import copy
+
+        narrowed = copy.deepcopy(preprocessor)
+        narrowed["category_mappings"]["prod_name"] = ["fund_bond", "exchange_fx"]
+        table = FakeScoreTable()
+        manifest, _ = predict_and_write_scores(
+            ConstantModel(), population_features, narrowed,
+            self._counted(parameters), unranked_predictions=table,
+        )
+        assert manifest["items"] == ["exchange_fx", "fund_bond"]
+        assert {v for pdf in table.saved for v in pdf["prod_name"].unique()} \
+            == {"fund_bond", "exchange_fx"}
+
+    def test_an_empty_counted_list_is_refused(
+        self, population_features, preprocessor, parameters
+    ):
+        """A27's emptiness check, at runtime where the list exists: the
+        node's call to ``plan_scoring_chunks`` refuses it before any chunk is
+        scored."""
+        import copy
+
+        empty = copy.deepcopy(preprocessor)
+        empty["category_mappings"]["prod_name"] = []
+        with pytest.raises(ValueError, match="item list"):
+            predict_and_write_scores(
+                ConstantModel(), population_features, empty,
+                self._counted(parameters), unranked_predictions=FakeScoreTable(),
+            )
+
+    @pytest.mark.parametrize("counted", [True, False], ids=["counted", "listed"])
+    def test_a_run_that_scored_nothing_names_the_list_it_scored(
+        self, population_features, preprocessor, parameters, counted
+    ):
+        """``inference.products`` is not written in the counted mode (A52),
+        so the message may not send the operator looking for it there."""
+        params = self._counted(parameters) if counted else parameters
+        # A month the population has no rows for: every bucket reads empty.
+        params["inference"]["snap_dates"] = ["2024-02-29"]
+        with pytest.raises(ValueError, match="No scoring rows") as excinfo:
+            predict_and_write_scores(
+                ConstantModel(), population_features, preprocessor, params,
+                unranked_predictions=FakeScoreTable(),
+            )
+        message = str(excinfo.value)
+        if counted:
+            assert "inference.products" not in message, message
+            assert "the preprocessor's item list" in message, message
+        else:
+            assert "inference.products" in message, message
+
+
 class TestPredictAndWriteScores:
     def test_returns_the_manifest_and_the_report_that_lands(
         self, population_features, preprocessor, parameters

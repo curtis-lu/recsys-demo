@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from recsys_tfb.core.consistency import item_list_counted_from_data
 from recsys_tfb.core.date_ranges import the_only_date
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric._common import to_logit
@@ -296,10 +297,12 @@ def build_offset_frame(
     label_col = schema["label"]
     a_cols = offset_context_columns(parameters, schema)
 
-    items = (
-        list((schema.get("categorical_values", {}) or {}).get(item_col, []) or [])
-        or sorted(pdf[item_col].astype(str).unique().tolist())
-    )
+    # The item universe of the offset matrix: the declared list, or the items
+    # observed when there is none — including when it is counted from the
+    # data (#379), where the cell holds a string, not a list.
+    declared = ([] if item_list_counted_from_data(parameters) else
+                list((schema.get("categorical_values", {}) or {}).get(item_col, []) or []))
+    items = declared or sorted(pdf[item_col].astype(str).unique().tolist())
     if a_cols:
         groups_pdf = pdf[a_cols].drop_duplicates().sort_values(a_cols)
         contexts = [tuple(row) for row in groups_pdf.to_numpy()]

@@ -271,6 +271,17 @@ class TestGridToYaml:
         with pytest.raises(ValueError, match="unknown product"):
             grid_to_yaml(export, _params(), default_ratio=1.0)
 
+    def test_a_counted_item_list_leaves_the_item_check_to_the_pipeline(self):
+        """#379: no list exists before the dataset pipeline counts it, so the
+        export is not refused here; A5 runs in the fit, A9c in training."""
+        params = _params()
+        params["schema"]["categorical_values"] = {"prod_name": "from_train_data"}
+        export = _export(
+            ratio_rows=[{"keys": ["mass", "zzz"], "ratio": 1.0, "ratio_pos": 0.5}],
+            weight_rows=[])
+        out = grid_to_yaml(export, params, default_ratio=1.0)
+        assert "zzz" in out["sample_ratio_overrides_yaml"]
+
     def test_both_label_components_placed_at_label_position(self):
         export = _export(
             ratio_rows=[{"keys": ["mass", "a"], "ratio": 0.25, "ratio_pos": 0.5}],

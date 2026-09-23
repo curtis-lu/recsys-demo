@@ -316,3 +316,102 @@ def test_compare_only_with_a_hand_mapping_and_no_json_runs_the_reader(
         frame, frame.drop("eval_partition_fingerprint"), {}, segments, params,
         loaded)
     assert set(seen["a"]["category"]["per_item"]) == {"xy"}
+
+
+# ---------------------------------------------------------------------------
+# The item list counted from the data (#379 PR 2): a hand mapping is checked
+# against the evaluated model's list, and an item with no category is its own
+# ---------------------------------------------------------------------------
+
+
+def _counted(params):
+    params["schema"]["categorical_values"] = {"prod_name": "from_train_data"}
+    return params
+
+
+#: The evaluated model's preprocessor: C was first offered after the train
+#: months, so the list lacks it.
+_MODEL_PREPROCESSOR = {"feature_columns": ["prod_name"],
+                       "categorical_columns": ["prod_name"],
+                       "category_mappings": {"prod_name": ["A", "B"]},
+                       "drop_columns": []}
+
+
+def _prepare_counted(spark, params, preprocessor=_MODEL_PREPROCESSOR):
+    from recsys_tfb.pipelines.evaluation.nodes import make_prepare_eval_data_node
+
+    return make_prepare_eval_data_node("sample_pool")(
+        _predictions(spark), _labels(spark),
+        _sample_pool(spark, _grid([JAN], _FAMILY)), params, preprocessor)
+
+
+class TestAHandMappingAgainstACountedList:
+    def test_prepare_lands_the_models_item_list(self, spark):
+        params = _counted(_params(column=None, mapping={"ab": ["A", "B"]}))
+        _frame, _segments, categories = _prepare_counted(spark, params)
+        assert categories["known_items"] == ["A", "B"]
+
+    def test_a_listed_item_list_lands_no_known_items(self, spark):
+        """The file a listed deployment lands is exactly PR 1's."""
+        _frame, _segments, categories = _prepare_counted(
+            spark, _params(column=None, mapping={"ab": ["A", "B"]}))
+        assert "known_items" not in categories
+
+    def test_a_mapping_of_known_items_ranks_them_and_the_new_item_alone(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+
+        params = _counted(_params(column=None, mapping={"ab": ["A", "B"]}))
+        frame, segments, categories = _prepare_counted(spark, params)
+        result = compute_metrics(frame, segments, params, categories)
+        assert set(result["category"]["dataset_overview"]["by_item"]) == {"ab", "C"}
+
+    def test_a_mapping_naming_an_item_the_list_lacks_is_refused(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+
+        params = _counted(_params(column=None, mapping={"bc": ["B", "C"]}))
+        frame, segments, categories = _prepare_counted(spark, params)
+        with pytest.raises(ValueError, match="'C'"):
+            compute_metrics(frame, segments, params, categories)
+
+    def test_without_the_models_list_it_names_the_way_out(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+
+        params = _counted(_params(column=None, mapping={"ab": ["A", "B"]}))
+        frame, segments, categories = _prepare_counted(spark, params, None)
+        with pytest.raises(ValueError, match="preprocessor"):
+            compute_metrics(frame, segments, params, categories)
+
+
+class TestAnItemWithNoCategoryIsItsOwn:
+    """#379 decision 7: left join + coalesce, so an item the table does not
+    cover stays in the category pass as its own category."""
+
+    def test_the_only_positive_of_its_group_keeps_the_group(self, spark):
+        """c2's only positive is A, which the table lacks. Dropped by an
+        inner join, c2 would have no positive left at the category grain and
+        leave the ranking metrics: the two passes would count different
+        query groups."""
+        from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+
+        params = _params()
+        frame, _segments, _categories = _landed(spark, params)
+        result = compute_all_metrics(
+            frame, params, category_mapping={"B": "y", "C": "x"})
+        assert result["category"]["n_queries"] == result["n_queries"]
+        assert result["category"]["n_excluded_queries"] == \
+            result["n_excluded_queries"] == 0
+        assert "A" in result["category"]["dataset_overview"]["by_item"]
+
+    def test_a_table_covering_every_item_collapses_as_before(self, spark):
+        """Worked by hand: with every item mapped the left join keeps what
+        the inner join kept. c1: x = max(.9, .1) label 0, y = .5 label 1;
+        c2: x = max(.2, .3) label 1, y = .8 label 0."""
+        from recsys_tfb.evaluation.metrics_spark import collapse_to_categories
+
+        params = _params()
+        frame, _segments, _categories = _landed(spark, params)
+        rows = {(r["cust_id"], r["prod_name"]): (round(r["score"], 6), r["label"])
+                for r in collapse_to_categories(
+                    frame, params, category_mapping=_FAMILY).collect()}
+        assert rows == {("c1", "x"): (0.9, 0), ("c1", "y"): (0.5, 1),
+                        ("c2", "x"): (0.3, 1), ("c2", "y"): (0.8, 0)}

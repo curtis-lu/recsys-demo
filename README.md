@@ -236,6 +236,8 @@ schema:
 
 同一份候選清單也要填入 `conf/base/parameters_inference.yaml` 的 `inference.products`。框架會檢查兩處是否一致，避免訓練與推論使用不同的 item 集合。
 
+不想逐一列出時，item 那一格改寫 `from_train_data`（例：`function_code: from_train_data`）：框架從 train 時段的 `sample_pool` 數出清單、存進前處理器，`inference.products` 就不寫（寫了會被擋）。val／test 才出現的新 item 只警告、照樣評估；離線推論只替清單裡的 item 評分，上線後才出現的新 item 要等重跑 dataset＋training（見 `docs/pipelines/dataset.md` §3.10）。
+
 ### 建立三張來源表
 
 修改 `conf/sql/etl/` 下的 SQL，將原始資料整理成框架規範的三張 Hive 表。資料欄位可以依題目擴充，但 identity key 與資料顆粒度必須符合下列契約：
@@ -357,7 +359,7 @@ python -m recsys_tfb evaluation --env production
 1. `entity` 是擁有一組候選項目的對象，`item` 才是 query group 內真正被排序的項目。
 2. `feature_table` 的主鍵是 `time + entity`；`label_table` 與 `sample_pool` 的主鍵是 `time + entity + item`，三張表都不應有重複鍵。
 3. `sample_pool` 包含所有要比較的候選項目，而不是只保留 `label = 1` 的正例。
-4. `schema.categorical_values.<item>`、`inference.products` 與 `sample_pool` 使用相同的 item 集合；`label_table` 可以只包含其中一部分，但不可出現未宣告的 item。
+4. `schema.categorical_values.<item>`、`inference.products` 與 `sample_pool` 使用相同的 item 集合；`label_table` 可以只包含其中一部分，但不可出現未宣告的 item。（item 清單寫 `from_train_data` 時沒有這兩處可對：清單就是 train 時段 `sample_pool` 的 item，`label_table` 的 item 必須在 `sample_pool` 出現過。）
 5. 特徵只使用 `time` 當下已知的資訊；label 觀察窗尚未結束的日期不能放進 train、val 或 test。
 6. train、val、test 日期彼此不重疊，並依時間先後排列。
 7. item 必須列在 `categorical_columns`，且不可同時出現在 `drop_columns` 或 `training.feature_selection.exclude`。
@@ -370,7 +372,7 @@ python -m recsys_tfb evaluation --env production
 | `sample_pool` 只放曾經點擊、申辦或發生事件的 item | 訓練資料幾乎沒有負例，模型學不到同一 query group 內哪些候選應排後面 | `sample_pool` 應表示當時有資格被排序的候選集合，再由 `label_table` 標記哪些候選成為正例 |
 | 把「label 資料尚未到齊」當成 `label = 0` | 大量正例被誤標為負例，離線指標與模型方向失真 | 先確認觀察窗已結束、來源 partition 已到齊；只有「確定沒有發生事件」才能視為 0 |
 | 特徵使用快照日之後才產生的欄位 | test 指標異常漂亮，但推論時無法取得相同資訊 | feature SQL 必須採 point-in-time join，排除申請結果、觀察窗行為及事後彙總欄位 |
-| item 清單只改了一處 | CLI 被一致性檢查擋下，或某些 item 無法訓練、推論 | 同步修改 `schema.categorical_values`、sample pool SQL 與 `inference.products`；label SQL 不可產出未宣告的 item |
+| item 清單只改了一處 | CLI 被一致性檢查擋下，或某些 item 無法訓練、推論 | 同步修改 `schema.categorical_values`、sample pool SQL 與 `inference.products`；label SQL 不可產出未宣告的 item。不想同步三處，就把 item 那一格改成 `from_train_data` |
 | 日期雖未重疊，但 val／test 早於 train，或 label 尚未成熟 | 產生時間穿越或不完整 ground truth | 明確採用 `train → val → test` 的時間順序，並為每個日期保留完整 label 觀察窗 |
 | 連續數值欄誤放入 `categorical_columns`，或同一欄同時 categorical 與 drop | 編碼語意錯誤、前處理失敗，或該欄實際未進入模型 | 類別代碼先轉成 string／int；真正的連續數值欄不需列入 `categorical_columns` |
 | 手動填寫 `sample_ratio_overrides` 或 `sample_weights`，但 key 與資料不一致 | 抽樣或權重規則沒有套用，冷門 item／重要客群可能消失 | 使用 `sampling_overrides_editor.py` 產生 key，並檢查 training manifest 中的 unmatched keys |

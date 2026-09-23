@@ -65,7 +65,10 @@ run "$VENV" -m recsys_tfb inference --env local --model-version "$MODEL_VERSION"
 #      斷言寫成「桶數 ≤ 設定值、且每個有資料的桶都有全部 item」，不是寫死乘積。
 #
 # 期望值從 conf 與這次的 MODEL_VERSION 讀、不是 hard-code：hard-code 的清單會跟著
-# conf 一起漂，而這條 assert 要在「編碼值取錯清單」時仍然會紅。走 ConfigLoader 而
+# conf 一起漂，而這條 assert 要在「編碼值取錯清單」時仍然會紅。item 清單從 train 時段的
+# 資料數出來時（schema.categorical_values 的 item 那一格是 from_train_data，#379），conf
+# 沒有 inference.products，期望值改讀這個模型的前處理器（data/dataset/<base_dataset_version>/
+# preprocessor.json 的 category_mappings）——離線推論的候選就是那份清單。走 ConfigLoader 而
 # 不是直接讀 conf/base/*.yaml——pipeline 跑的是 --env local，要比對的就是它實際看到
 # 的那份值（今天 conf/local/ 不存在，兩者相同；哪天存在了，直接讀 base 會靜默比錯對象）。
 echo
@@ -74,11 +77,22 @@ echo "▶ assert：三張推論表的分區結構（item 是產品名、model_ve
 import sys
 from pathlib import Path
 
+import json
+
 from recsys_tfb.core.config import ConfigLoader
+from recsys_tfb.core.consistency import item_list_counted_from_data
+from recsys_tfb.core.schema import get_schema
 
 expected_mv = sys.argv[1]
 params = ConfigLoader("conf", env="local").get_parameters()
-products = set(params["inference"]["products"])
+if item_list_counted_from_data(params):
+    manifest = json.loads(Path(f"data/models/{expected_mv}/manifest.json").read_text())
+    preprocessor = json.loads(Path(
+        f"data/dataset/{manifest['base_dataset_version']}/preprocessor.json").read_text())
+    products = set(preprocessor["category_mappings"][get_schema(params)["item"]])
+    print(f"  item 清單從 train 時段數出來：期望值取自前處理器（{len(products)} 個）")
+else:
+    products = set(params["inference"]["products"])
 n_buckets = int(params["inference"].get("entity_buckets", 10))
 db = Path("data/local_warehouse/ml_recsys.db")
 
@@ -97,7 +111,7 @@ for table in ("unranked_predictions", "ranked_staging", "ranked_predictions"):
     versions_seen = {p.parent.parent.name.split("=", 1)[1] for p in leaves}
     if products_seen != products:
         failures.append(
-            f"{table}: prod_name 分區值 {sorted(products_seen)} != inference.products"
+            f"{table}: prod_name 分區值 {sorted(products_seen)} != 期望的 item 清單 {sorted(products)}"
         )
     elif versions_seen != {expected_mv}:
         failures.append(

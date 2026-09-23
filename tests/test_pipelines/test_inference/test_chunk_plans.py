@@ -180,7 +180,7 @@ class TestEmptyGridRaises:
             _plan(snap_dates=[])
 
     def test_no_items_raises(self):
-        with pytest.raises(ValueError, match="products is empty"):
+        with pytest.raises(ValueError, match="item list is empty"):
             _plan(items=[])
 
 
