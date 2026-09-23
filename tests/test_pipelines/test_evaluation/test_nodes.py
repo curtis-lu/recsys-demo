@@ -41,7 +41,7 @@ def _prepare_eval_data(predictions, labels, parameters):
     )
 
     population = MagicMock(name="population_sdf", columns=[])
-    frame, _segments = make_prepare_eval_data_node("inference_population")(
+    frame, _segments, _categories = make_prepare_eval_data_node("inference_population")(
         predictions, labels, population, parameters)
     return frame
 
@@ -492,7 +492,7 @@ class TestSegmentsFollowThePopulation:
             "cust_segment_typ": ["from_population"],
         }))
         params = self._parameters()
-        frame, segments = make_prepare_eval_data_node("inference_population")(
+        frame, segments, _categories = make_prepare_eval_data_node("inference_population")(
             predictions, labels, population, params)
 
         assert frame.count() == 4
@@ -519,7 +519,7 @@ class TestSegmentsFollowThePopulation:
             "prod_name": ["A", "B", "A", "B"],
             "cust_segment_typ": ["mass", "mass", "hnw", "hnw"],
         }))
-        frame, segments = make_prepare_eval_data_node("sample_pool")(
+        frame, segments, _categories = make_prepare_eval_data_node("sample_pool")(
             predictions, labels, population, self._parameters())
 
         assert frame.count() == 4
@@ -546,7 +546,7 @@ class TestSegmentsFollowThePopulation:
             "key_columns": ["cust_id", "snap_date"],
             "segment_column": "cust_segment_typ"}})
 
-        frame, segments = make_prepare_eval_data_node("inference_population")(
+        frame, segments, _categories = make_prepare_eval_data_node("inference_population")(
             predictions, labels, population, params)
 
         assert self._segments_by_customer(frame) == {
@@ -572,7 +572,7 @@ class TestSegmentsFollowThePopulation:
             "snap_date": ["2025-01-31"] * 2, "cust_id": ["c1", "c2"],
         }))
         with caplog.at_level(logging.WARNING):
-            frame, segments = make_prepare_eval_data_node(
+            frame, segments, _categories = make_prepare_eval_data_node(
                 "inference_population"
             )(predictions, labels, population, self._parameters())
 
@@ -765,9 +765,11 @@ class TestAPartitionCarriesTheSegmentColumnsActuallyJoined:
         )
 
         predictions, labels = _months_frames(spark, months)
-        return make_prepare_eval_data_node("inference_population")(
+        rows, segments, _categories = make_prepare_eval_data_node(
+            "inference_population")(
             predictions, labels, cls._population(spark, months, with_tier),
             cls._params(snap_date))
+        return rows, segments
 
     def test_a_month_rewritten_without_a_joined_column_is_refused(self, spark):
         """January–February joined ``tier``; the population then lost it and
@@ -1434,7 +1436,8 @@ class TestConsumersSegmentByTheLandedList:
         asked = []
 
         def fake_metrics(df, parameters, *, segment_columns=(),
-                         drop_all_positive_groups=False):
+                         drop_all_positive_groups=False,
+                         category_mapping=None):
             asked.append((df, list(segment_columns)))
             return {}
 

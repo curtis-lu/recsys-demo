@@ -450,6 +450,24 @@ def test_a45_reads_the_catalog_entry_a28_reads_before_spark():
     ), "A45 must fail before the Spark cold start, like A28"
 
 
+def test_a51_wired_into_evaluation_command_before_spark():
+    # Needs --post-training (A22/A40's reason); the flag must be forwarded, not
+    # hardcoded — `True` would let monitoring read a column its population
+    # does not have, `False` would refuse every column-mode run. Behavioural
+    # half: tests/test_core/test_consistency_item_categories.py and
+    # tests/test_cli.py::TestItemCategoryColumnAtTheEntry.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "item_category_column_errors" not in inspect.getsource(
+        validate_config_consistency
+    )
+    src = inspect.getsource(m.evaluation)
+    assert "item_category_column_errors(params, post_training)" in src
+    assert src.index("item_category_column_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A51 must fail before the Spark cold start, like A22"
+
+
 def test_a46_wired_into_evaluation_command_before_spark():
     # Needs --post-training (A22/A40's reason); the flag must be forwarded, not
     # hardcoded — `False` would disable the gate and `True` would block

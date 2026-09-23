@@ -140,3 +140,69 @@ def test_tied_rows_are_counted_on_the_row_face(spark):
     )
     out = ms.compute_all_metrics(df, _event_category_params())
     assert out["dataset_overview"]["totals"]["n_tied_rows"] == 2
+
+
+# ---------------------------------------------------------------------------
+# 大類取自候選的某一欄（#379）：對照表由 prepare_eval_data 從資料讀出、以關鍵字參數傳進來
+# ---------------------------------------------------------------------------
+
+
+def _column_params():
+    p = _params()
+    p["evaluation"]["item_categories"] = {
+        "enabled": True, "unmapped": "singleton", "column": "family"}
+    return p
+
+
+#: What prepare_eval_data would land for ``_raw``: a grouping no hand mapping
+#: in ``_params`` spells, so a pass that fell back to the conf could not match.
+_FROM_COLUMN = {"fund_stock": "risky", "fund_bond": "safe",
+                "exchange_fx": "risky"}
+
+
+def test_collapse_uses_the_passed_table(spark):
+    collapsed = ms.collapse_to_categories(
+        _raw(spark), _column_params(), segment_columns=["cust_segment_typ"],
+        category_mapping=_FROM_COLUMN,
+    )
+    rows = {r["prod_name"]: r for r in collapsed.collect()}
+    assert set(rows) == {"risky", "safe"}
+    assert rows["risky"]["score"] == pytest.approx(0.9)   # max(0.9, 0.7)
+    assert rows["safe"]["label"] == 1
+
+
+def test_column_mode_without_the_table_fails_loud():
+    """A reader that forgets to pass the landed table must not fall back to
+    every item its own category — a report that looks fine."""
+    with pytest.raises(ValueError, match="evaluation_item_categories"):
+        ms._build_category_mapping(_column_params())
+
+
+def test_compute_all_metrics_ranks_the_passed_categories(spark):
+    out = ms.compute_all_metrics(
+        _raw(spark), _column_params(), segment_columns=["cust_segment_typ"],
+        category_mapping=_FROM_COLUMN,
+    )
+    assert set(out["category"]["per_item"]) == {"safe"}   # the one positive
+    assert out["category"]["dataset_overview"]["totals"]["n_items"] == 2
+
+
+def test_slim_path_ranks_the_passed_categories(spark):
+    out = ms.compute_overall_per_item(
+        _raw(spark), _column_params(), with_category=True,
+        category_mapping=_FROM_COLUMN,
+    )
+    assert set(out["category"]["per_item"]) == {"safe"}
+
+
+@pytest.mark.parametrize("params", [_params, _column_params],
+                         ids=["mapping", "column"])
+def test_with_category_false_skips_the_category_pass(spark, params):
+    """Training's switch (#379 decision 12): no category pass, and nothing of
+    item_categories is read — so neither a column-mode conf (no table there)
+    nor a hand mapping naming an item the item list lacks can raise."""
+    p = params()
+    if "mapping" in p["evaluation"]["item_categories"]:
+        p["evaluation"]["item_categories"]["mapping"]["x"] = ["not_a_product"]
+    out = ms.compute_all_metrics(_raw(spark), p, with_category=False)
+    assert "category" not in out

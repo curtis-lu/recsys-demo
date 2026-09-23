@@ -149,7 +149,7 @@ evaluation 以 `inference_population` 當母體的評估模式。
 把 query group 層級的指標拆成各 item 的貢獻，只在該 item 為正例的列上彙整；指標名帶 `_attr`（例如 `map_attr@K`），不是單一 item 自己的 mAP。
 
 **大類**:
-item 的分組，一個 item 只屬於一個大類（例如三種基金併成「基金」）；evaluation 會在大類粒度上把指標再算一次。
+item 的分組，一個 item 只屬於一個大類，而且不隨時間變（例如三種基金併成「基金」）；evaluation 會在大類粒度上把指標再算一次。可以在設定裡逐一對應，也可以取自候選的某一欄（只在 post-training 模式）。
 _Avoid_: segment、分群（那是 entity 的切片）
 
 **分群**:

@@ -566,6 +566,16 @@ Layer 1 — config-static (implemented here; aggregated by
   the key (``scroe``) would silently keep the count mode. Predicate:
   ``baseline_score_errors``. NOT aggregated, A42's reason (issue #158): only
   evaluation reads this key.
+* A51 — ``evaluation.item_categories.column`` (#379, each item's category read
+  off a sample_pool column): not together with ``mapping``, a non-empty
+  string, and — while ``enabled`` — only under ``--post-training``, the one
+  mode whose population is sample_pool (``--compare-only`` without the flag is
+  monitoring, A22/A40's precedent). Column mode is read by
+  ``item_category_column``, shared with the nodes that build and read the
+  table. Predicate: ``item_category_column_errors`` (takes the flag, as A40
+  does; the evaluation command raises, collected with A22/A34/A40/A42/A43/
+  A46/A49/A50). NOT aggregated, for A22's reason: that gate cannot see
+  ``--post-training``.
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -576,12 +586,12 @@ window of ``evaluation.snap_date`` and be a time value sample_pool holds there.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
-flags), A22/A46 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50 (config keys whose
+flags), A22/A46/A51 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50 (config keys whose
 harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
-+ B13 + B14 + B15 + B16 + B17 implemented and wired):
++ B13 + B14 + B15 + B16 + B17 + B18 implemented and wired):
 
 * B1 — sample_pool items ↔ declared items must be equal; label items ⊆
   declared items (unknown item values corrupt training or violate invariants).
@@ -806,6 +816,16 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
   different items and those rows stop joining, silently. Column types only
   (metastore metadata). Predicate: ``item_source_dtype_errors``. Wired in
   ``validate_data_consistency``.
+* B18 — in column mode (``evaluation.item_categories.column``, A51), one item
+  has two or more non-NULL values of that sample_pool column over the
+  evaluated months, in one month or across them (#379 decision 5). The
+  category pass joins the table on the item alone, so the item's predictions
+  would be copied into each category. Checked on the distinct (time, item,
+  category) triples the table is built from, so no extra scan. Predicate:
+  ``item_category_conflict_errors``. Wired in evaluation's
+  ``prepare_eval_data`` (it reads sample_pool there, and only in column mode),
+  not in ``validate_data_consistency``: the dataset gate does not know which
+  months a later evaluation run will read.
 
 Layer 3 — specified but DEFERRED (NOT implemented in this module yet); see
 the plan doc for the full table:
@@ -866,7 +886,7 @@ import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import pandas as pd
 
@@ -1332,6 +1352,56 @@ def combined_item_collision_errors(
             f"be treated as one item. The item columns are joined with "
             f"{ITEM_SEPARATOR!r} (ADR-0027); change one of the values in your "
             f"source SQL so the combinations stay distinct."
+        )
+    return errors
+
+
+def item_category_conflict_errors(
+    category_column: str,
+    rows: Iterable[tuple[Any, str | None, str | None]],
+) -> list[str]:
+    """(B18) each item has at most one non-NULL category over the evaluated
+    months (#379 decision 5).
+
+    ``rows`` is ``(time value, item, category)``, the distinct triples
+    ``prepare_eval_data`` reads off ``sample_pool``'s ``category_column`` for
+    the months it evaluates. A NULL category is no second category (the
+    NULL rule itself is ``prepare_eval_data``'s decision); a NULL item is
+    skipped, since it joins nothing.
+
+    Why a category may not change with time, not even from one month to the
+    next: several evaluated dates are ranked together as one set of query
+    groups, and the category pass joins the table on the item alone
+    (``metrics_spark.collapse_to_categories``). An item with two rows in the
+    table would have every one of its predictions copied into both
+    categories and counted twice, with nothing raising. Keying the table by
+    (time, item) instead would change the join keys of the aggregation — a
+    different design, not a fix of this one. Collect-all: every such item,
+    each category with the months it appears in.
+    """
+    months: dict[str, dict[str, set[str]]] = {}
+    for time_value, item, category in rows:
+        if item is None or category is None:
+            continue
+        months.setdefault(item, {}).setdefault(category, set()).add(
+            str(time_value))
+    errors: list[str] = []
+    for item in sorted(months):
+        by_category = months[item]
+        if len(by_category) < 2:
+            continue
+        spelled = ", ".join(
+            f"{category!r} ({', '.join(sorted(by_category[category]))})"
+            for category in sorted(by_category)
+        )
+        errors.append(
+            f"B18: item {item!r} has {len(by_category)} categories in "
+            f"sample_pool column evaluation.item_categories.column="
+            f"{category_column!r} over the evaluated months: {spelled}. A "
+            f"category must not change with time — the category pass joins "
+            f"on the item alone, so the item's rows would be counted in "
+            f"each. Fix the column upstream, or pick a column that does not "
+            f"change."
         )
     return errors
 
@@ -2350,6 +2420,79 @@ def baseline_score_errors(parameters: dict) -> list[str]:
         errors.append(
             f"A50: evaluation.baseline.score={value!r} must be one of "
             f"{list(BASELINE_SCORES)} (or left absent, which means 'count')."
+        )
+    return errors
+
+
+def item_category_column(parameters: dict) -> str | None:
+    """The sample_pool column each item's category is read from (#379), or
+    ``None`` when categories come from ``evaluation.item_categories.mapping``
+    or are switched off.
+
+    Column mode needs ``enabled`` too: ``enabled: false`` switches every
+    category pass off, and a column left under it is inert. The one reading of
+    "is this column mode" that ``prepare_eval_data`` (which builds the table),
+    its readers and the CLI checks share. A value A51 refuses (not a non-empty
+    string) comes back as is; A51 stops the run before anything reads it.
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    if not isinstance(eval_params, Mapping):
+        return None
+    block = eval_params.get("item_categories") or {}
+    if not isinstance(block, Mapping) or not block.get("enabled"):
+        return None
+    if "column" not in block:
+        return None
+    return block["column"]
+
+
+def item_category_column_errors(parameters: dict, post_training: bool) -> list[str]:
+    """A51 — ``evaluation.item_categories.column`` (#379).
+
+    * ``column`` and ``mapping`` are two sources for one table; with both
+      declared nothing says which wins, so neither is picked.
+    * ``column`` is a non-empty string (a column name). An empty ``column:``
+      would otherwise read as "no column" and fall back to every item its own
+      category, a report that looks fine.
+    * Column mode (``enabled`` and ``column``, :func:`item_category_column`)
+      needs ``--post-training``. The column is read off ``sample_pool``, the
+      table the post-training test set is drawn from; monitoring evaluates
+      ``inference_population``, which has no candidate column to read. Only
+      ``--compare-only`` without ``--post-training`` is monitoring too, for
+      A22/A40's reason: no carve-out.
+
+    Not aggregated by ``validate_config_consistency``: it needs
+    ``--post-training``, and only evaluation reads the key (A34's reason,
+    issue #158). The evaluation command raises it, collected with
+    A22/A34/A40/A42/A43/A46/A49/A50.
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    if not isinstance(eval_params, Mapping):
+        return []
+    block = eval_params.get("item_categories") or {}
+    if not isinstance(block, Mapping) or "column" not in block:
+        return []
+    column = block["column"]
+    errors = []
+    if "mapping" in block:
+        errors.append(
+            "A51: evaluation.item_categories declares both column and "
+            "mapping. Keep one: column reads each item's category off that "
+            "sample_pool column, mapping lists them by hand."
+        )
+    if not (isinstance(column, str) and column):
+        errors.append(
+            f"A51: evaluation.item_categories.column={column!r} must be a "
+            f"sample_pool column name (a non-empty string)."
+        )
+    elif block.get("enabled") and not post_training:
+        errors.append(
+            f"A51: evaluation.item_categories.column={column!r} needs "
+            f"--post-training: categories are read off sample_pool, and "
+            f"monitoring evaluates inference_population, which has no "
+            f"candidate column to read them from. --compare-only without "
+            f"--post-training is monitoring too. Use item_categories.mapping "
+            f"for monitoring, or add --post-training."
         )
     return errors
 

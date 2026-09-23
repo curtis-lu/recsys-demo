@@ -24,7 +24,7 @@ class TestEvaluationPipelineDefault:
     def test_pipeline_outputs(self):
         pipeline = create_pipeline()
         expected = {
-            "evaluation_segment_columns",
+            "evaluation_segment_columns", "evaluation_item_categories",
             "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
@@ -280,7 +280,7 @@ class TestEvaluationPipelinePostTraining:
     def test_pipeline_outputs_add_the_registry_diagnoses(self):
         pipeline = create_pipeline(post_training=True)
         expected = {
-            "evaluation_segment_columns",
+            "evaluation_segment_columns", "evaluation_item_categories",
             "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions", "evaluation_metric_ci",
@@ -380,7 +380,8 @@ class TestSegmentColumnsWiring:
             assert node.inputs == [
                 predictions, "label_table", population, "parameters"], kwargs
             assert node.outputs == [
-                "enriched_eval_predictions", "evaluation_segment_columns"], kwargs
+                "enriched_eval_predictions", "evaluation_segment_columns",
+                "evaluation_item_categories"], kwargs
             assert other not in pipeline.inputs, kwargs
 
     def test_every_segmenting_node_reads_the_list_at_the_right_position(self):
@@ -400,6 +401,44 @@ class TestSegmentColumnsWiring:
             assert "evaluation_segment_columns" in node.inputs, (kwargs, name)
             assert node.inputs.index("evaluation_segment_columns") == \
                 params.index("segment_columns"), (kwargs, name, node.inputs)
+
+    def test_every_category_reader_reads_the_table_at_the_right_position(self):
+        """#379: the category table lands next to the segment list and is read
+        by every node that ranks categories. Positional binding, so its
+        position is checked against the parameter named ``item_categories``;
+        in rate mode compute_baseline_metrics takes two more inputs after it."""
+        cases = [
+            (kwargs, name)
+            for kwargs in ({}, {"post_training": True},
+                           {"post_training": True, "baseline_rate": True})
+            for name in ("compute_metrics", "compute_baseline_metrics")
+        ] + [
+            ({"compare_source": self._COMPARE}, "generate_comparison_report"),
+            ({"compare_source": self._COMPARE, "compare_only": True},
+             "generate_comparison_report"),
+        ]
+        for kwargs, name in cases:
+            node = self._node(create_pipeline(**kwargs), name)
+            params = list(inspect.signature(node.func).parameters)
+            assert "evaluation_item_categories" in node.inputs, (kwargs, name)
+            assert node.inputs.index("evaluation_item_categories") == \
+                params.index("item_categories"), (kwargs, name, node.inputs)
+
+    def test_the_category_table_is_an_optional_catalog_entry(self):
+        """Optional: an evaluation directory written before #379 has no such
+        file, and only column mode needs it (the CLI asks for it there)."""
+        from pathlib import Path
+
+        import yaml
+
+        catalog = yaml.safe_load(
+            (Path(__file__).parents[3] / "conf/base/catalog.yaml").read_text())
+        assert catalog["evaluation_item_categories"] == {
+            "type": "JSONDataset",
+            "filepath": "data/evaluation/${model_version}/${snap_date}/"
+                        "item_categories.json",
+            "optional": True,
+        }
 
     def test_the_list_has_a_catalog_entry_next_to_the_run_outputs(self):
         """Without an entry the catalog makes it a MemoryDataset: nothing

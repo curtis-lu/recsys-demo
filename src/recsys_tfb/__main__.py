@@ -21,6 +21,8 @@ from recsys_tfb.core.consistency import (
     optional_role_monitoring_errors,
     etl_cli_var_errors,
     inference_grid_errors,
+    item_category_column,
+    item_category_column_errors,
     candidate_feature_table_inference_errors,
     merged_etl_variables,
     missing_test_month_errors,
@@ -454,7 +456,7 @@ def _popularity_period_plan(catalog, params: dict, *, eval_dates, rebuild):
     return plan
 
 
-def _compare_only_input_errors(plan, catalog, catalog_config) -> list[str]:
+def _compare_only_input_errors(plan, catalog, catalog_config, params) -> list[str]:
     """What ``--compare-only`` reads from an earlier standard run and cannot find.
 
     That mode has no ``prepare_eval_data``: it reads the evaluated dates'
@@ -464,6 +466,15 @@ def _compare_only_input_errors(plan, catalog, catalog_config) -> list[str]:
     missing one gets its own line. ``plan`` is the month plan for the table
     (:func:`_evaluation_month_plans`), or None when no month is configured;
     every configured date without a partition is named (#374).
+
+    ``item_categories.json`` (#379) is asked for only in column mode
+    (``evaluation.item_categories.column``, :func:`item_category_column`):
+    there the categories exist nowhere else. A hand-written mapping is read
+    from ``params``, and an evaluation directory written before #379 has no
+    such file, so asking for it then would stop users who changed nothing.
+    Its catalog entry is ``optional`` for the same reason — without that, a
+    run let through here would still raise ``FileNotFoundError`` when the
+    Runner loads it.
 
     Checked before any node runs, not left to the
     ``validate_enriched_eval_predictions_present`` gate node alone: slicing
@@ -478,9 +489,12 @@ def _compare_only_input_errors(plan, catalog, catalog_config) -> list[str]:
     if plan is not None and plan.to_process:
         months = ",".join(d.strftime("%Y-%m-%d") for d in plan.to_process)
         errors.append(f"enriched_eval_predictions has no partition for {months}")
-    name = "evaluation_segment_columns"
-    if not catalog.exists(name):
-        errors.append(f"{name} is missing: {catalog_config[name]['filepath']}")
+    names = ["evaluation_segment_columns"]
+    if item_category_column(params) is not None:
+        names.append("evaluation_item_categories")
+    for name in names:
+        if not catalog.exists(name):
+            errors.append(f"{name} is missing: {catalog_config[name]['filepath']}")
     return errors
 
 
@@ -1946,6 +1960,11 @@ def evaluation(
     # them all and every binary metric comes out biased high. Needs the flag,
     # so wired here with A22/A40.
     section_errs += prediction_quality_population_errors(params, post_training)
+    # (A51) evaluation.item_categories.column (#379): not with mapping, and
+    # only under --post-training — the column is read off sample_pool, which
+    # monitoring (and --compare-only without the flag) does not evaluate.
+    # Needs the flag, so wired here with A22/A40/A46.
+    section_errs += item_category_column_errors(params, post_training)
     if snap_date_errs or section_errs or role_errs:
         logger.error("\n".join([*snap_date_errs, *section_errs, *role_errs]))
         raise typer.Exit(code=1)
@@ -2099,7 +2118,7 @@ def evaluation(
     if compare_only:
         errors = [] if (dry_run or list_nodes) else _compare_only_input_errors(
             (month_plans or {}).get("enriched_eval_predictions"),
-            listing_catalog, listing_catalog_config,
+            listing_catalog, listing_catalog_config, params,
         )
         if errors:
             logger.error(

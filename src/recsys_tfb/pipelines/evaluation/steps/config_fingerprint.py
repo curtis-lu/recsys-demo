@@ -151,6 +151,13 @@ COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
     # (ADR-0020 bug 6), and the joined columns are stored in the partition.
     ("evaluation.segment_columns", "prepare_eval_data"),
     ("evaluation.segment_sources", "prepare_eval_data"),
+    # prepare_eval_data reads the category table off this sample_pool column
+    # and lands it (#379 decision 4). Its own row although the whole block
+    # has one at compute_metrics below: changing the column moves both, and
+    # the earlier row decides the advice. At compute_metrics alone, the
+    # re-run would rank by the old table. A change to the rest of the block
+    # (enabled, mapping) still re-runs from compute_metrics only.
+    ("evaluation.item_categories.column", "prepare_eval_data"),
     ("evaluation.diagnosis", "draw_diagnosis_sample_node"),
     ("evaluation.k_values", "compute_metrics"),
     ("evaluation.item_categories", "compute_metrics"),
@@ -180,8 +187,8 @@ COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
 
 #: The computed settings that decide what ``prepare_eval_data`` writes: the
 #: ``enriched_eval_predictions`` partition and the ``evaluation_segment_columns``
-#: JSON landed with it. They are the :data:`COMPUTED_KEYS` rows re-run from
-#: ``prepare_eval_data``.
+#: and ``evaluation_item_categories`` JSONs landed with it. They are the
+#: :data:`COMPUTED_KEYS` rows re-run from ``prepare_eval_data``.
 #:
 #: Why that artifact is compared on these rows only (ADR-0020 bug 6, the #352
 #: correction): the partition is read back from Hive, so a slice starting after
@@ -200,15 +207,22 @@ PARTITION_CONTENT_KEYS: tuple[str, ...] = tuple(
 )
 
 #: What one date's ``enriched_eval_predictions`` partition holds depends on:
-#: :data:`PARTITION_CONTENT_KEYS` without ``evaluation.snap_date``.
+#: :data:`PARTITION_CONTENT_KEYS` without ``evaluation.snap_date`` and
+#: ``evaluation.item_categories.column``.
 #:
 #: Why ``evaluation.snap_date`` is left out: a partition holds one date, and
 #: its rows depend on the run mode and the segment settings, not on which other
 #: dates the same run evaluated. Kept in, a single-date run of March and a
 #: January–March run with identical settings would refuse each other's March,
 #: though the rows are the same.
+#:
+#: Why the category column is left out, for the same reason (#379): the
+#: column decides the category table, which lands in the run's directory,
+#: not a single value in the rows. Kept in, changing it would refuse every
+#: month's partition, including the months this run does not rewrite.
+_NOT_IN_THE_ROWS = ("evaluation.snap_date", "evaluation.item_categories.column")
 PARTITION_FINGERPRINT_KEYS: tuple[str, ...] = tuple(
-    path for path in PARTITION_CONTENT_KEYS if path != "evaluation.snap_date"
+    path for path in PARTITION_CONTENT_KEYS if path not in _NOT_IN_THE_ROWS
 )
 
 #: The framework's own column on every ``enriched_eval_predictions`` row:

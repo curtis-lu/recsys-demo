@@ -11,15 +11,13 @@ evaluation:
     - user_segment
   segment_sources: {}
 
-  # 大類＝活動：同一個活動的三種素材格式歸一類
+  # 大類＝活動：同一個活動的三種素材格式歸一類。不逐一列出，直接取 sample_pool 的
+  # campaign_id（item 的其中一欄，#379）——活動以後加素材格式，這裡不必跟著改。
+  # 只支援 --post-training（A51），run_e2e.sh 本來就只跑這個模式。
   item_categories:
     enabled: true
     unmapped: singleton
-    mapping:
-      c01: [c01-banner, c01-native, c01-video]
-      c02: [c02-banner, c02-native, c02-video]
-      c03: [c03-banner, c03-native, c03-video]
-      c04: [c04-banner, c04-native, c04-video]
+    column: campaign_id
 
   # 以「月」為單位的回看窗；週資料一樣能用，只是語意是月（evaluation/baselines.py）
   baseline:

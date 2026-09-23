@@ -181,3 +181,37 @@ def test_test_map_does_not_follow_the_all_positive_switch(spark):
     dropped = compute_all_metrics(
         df, _make_parameters(), drop_all_positive_groups=True)
     assert dropped["overall"]["map@2"] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("categories", [
+    # Column mode: the table is read off sample_pool by evaluation's
+    # prepare_eval_data; training has none to pass.
+    {"enabled": True, "unmapped": "singleton", "column": "family"},
+    # A hand mapping naming an item the item list lacks: raises the moment
+    # the category pass reads it.
+    {"enabled": True, "unmapped": "singleton",
+     "mapping": {"x": ["not_an_item"]}},
+], ids=["column", "mapping"])
+def test_test_map_never_computes_categories(spark, categories):
+    """#379 decision 12: the test mAP reads the fine-grained keys only, so its
+    call switches the category pass off instead of inheriting
+    ``evaluation.item_categories``. Either conf above raises the moment the
+    category pass is attempted; the result equals the categories-off one."""
+    from recsys_tfb.pipelines.training.nodes import compute_test_mAP_spark
+
+    rows = [
+        {"cust_id": "c1", "snap_date": "2025-01-31", "prod_name": "prod_A",
+         "score": 0.9, "label": 0},
+        {"cust_id": "c1", "snap_date": "2025-01-31", "prod_name": "prod_B",
+         "score": 0.1, "label": 1},
+    ]
+    manifest = {"snap_dates": ["2025-01-31"], "items": ["prod_A", "prod_B"],
+                "model_version": "v_test", "n_rows_written": 2}
+    params = _make_parameters()
+    params["schema"]["categorical_values"] = {"prod_name": ["prod_A", "prod_B"]}
+    off = compute_test_mAP_spark(_make_df(spark, rows), manifest, params)
+
+    params["evaluation"]["item_categories"] = categories
+    on = compute_test_mAP_spark(_make_df(spark, rows), manifest, params)
+    assert on == off
+    assert on["overall_map"] == pytest.approx(0.5)

@@ -261,6 +261,12 @@ evaluation_segment_columns:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/segment_columns.json
 
+# 大類對照表（#379）：這份 conf 的大類取自 sample_pool 的 campaign_id（item_categories.column）
+evaluation_item_categories:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/item_categories.json
+  optional: true
+
 evaluation_metrics:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/metrics.json
