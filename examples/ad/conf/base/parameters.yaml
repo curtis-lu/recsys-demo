@@ -48,22 +48,11 @@ schema:
     label: label                 # 這一次曝光有沒有被點
     score: score
     rank: rank
-  # item 清單逐一列出；改成「從資料數」是 #379。必須等於 generate_data.py 產出的組合
-  # （tests/examples/test_ad_example.py 守這一條）。
+  # item 清單從 train 週的 sample_pool 數（#379），不逐一列出。generate_data.py 產出 12 種
+  # 組合，其中 c04-video 到驗證期間才第一次出現，所以清單是另外 11 種；dataset 在 val／test
+  # 遇到 c04-video 只警告（tests/examples/test_ad_example.py 守這個資料形狀）。
   categorical_values:
-    item:
-      - c01-banner
-      - c01-native
-      - c01-video
-      - c02-banner
-      - c02-native
-      - c02-video
-      - c03-banner
-      - c03-native
-      - c03-video
-      - c04-banner
-      - c04-native
-      - c04-video
+    item: from_train_data
 
 logging:
   level: INFO

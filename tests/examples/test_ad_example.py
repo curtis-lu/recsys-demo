@@ -5,8 +5,8 @@
 
 1. 框架新增必填鍵或不變量時，這份 conf 在 CLI 入口就過不了。銀行示例的 conf
    有一大堆測試在讀；這份沒有，不在這裡擋，要等有人真的去跑才會發現。
-2. 產生器實際產出的 item 與 conf 逐一列出的清單要一致。item 是框架把兩個屬性欄
-   拼出來的（conf 宣告成多欄，ADR-0027），清單卻是 conf 手寫的，任一邊改了另一邊不會跟著動。
+2. conf 的 item 清單從 train 週的資料數（#379），不再手寫。這裡守產生器的 train 週剛好有
+   晚出現那一種以外的每個組合：少了哪一種，清單就跟著短一截，模型也沒見過它，實跑卻不會報錯。
 3. 後面幾張票（event 角色、候選層級特徵表、item 清單從資料數）要用的資料形狀真的在原始資料裡。
    即時特徵與快照的「該算出什麼」照 check_features.py 的定義算——run_e2e.sh 拿同一份
    定義去比 SQL 的輸出，這裡只看原始資料有沒有那個形狀。
@@ -24,7 +24,9 @@ from examples.ad.generate_data import (
 )
 from recsys_tfb.core.config import ConfigLoader
 from recsys_tfb.core.consistency import resolved_env_dir, validate_config_consistency
-from recsys_tfb.core.schema import get_schema, validate_schema_config
+from recsys_tfb.core.schema import (
+    ITEM_LIST_FROM_TRAIN_DATA, get_schema, validate_schema_config,
+)
 
 REPO = Path(__file__).resolve().parents[2]
 CONF = REPO / "examples" / "ad" / "conf"
@@ -83,12 +85,15 @@ def test_both_candidate_grain_source_tables_declare_the_occasion_column(params):
             assert "request_id" in table["primary_key"], table["name"]
 
 
-def test_generated_items_equal_the_declared_list(params, raw):
+def test_the_train_weeks_hold_every_item_but_the_late_one(params, raw):
     item_col = get_schema(params)["item"]
-    log = raw["impression_log"]
+    assert params["schema"]["categorical_values"][item_col] == ITEM_LIST_FROM_TRAIN_DATA
+    log = raw["impression_log"].assign(week=lambda d: week_of(d["event_date"]))
     # 拼法與框架讀入時相同，由下一個測試守
-    in_data = set(log["campaign_id"] + ITEM_SEPARATOR + log["creative_format"])
-    assert in_data == set(params["schema"]["categorical_values"][item_col])
+    items = log["campaign_id"] + ITEM_SEPARATOR + log["creative_format"]
+    in_train = set(items[log["week"].isin(params["dataset"]["train_snap_dates"])])
+    assert len(set(items)) == 12
+    assert set(items) - in_train == {ITEM_SEPARATOR.join(LATE_ITEM)}
 
 
 def test_the_generator_joins_items_the_way_the_framework_does():
@@ -200,12 +205,12 @@ def test_same_item_is_shown_more_than_once_in_a_query_group(raw):
     assert log["impression_id"].is_unique
 
 
-def test_some_query_group_has_more_impressions_than_items(params, raw):
+def test_some_query_group_has_more_impressions_than_items(raw):
     # 資料仍撐得住形狀一（event 角色，#378）：以 (週, 使用者, 版位)（base key 層級）
     # 為組，一組的曝光數可以超過 item 種數；k_values 的 "all" 不得在這種組上被截斷
     # （ADR-0021 決定 4）。靠的是 REQUEST_RATE 與每次請求的素材數夠高
     log = raw["impression_log"].assign(week=lambda d: week_of(d["event_date"]))
-    n_items = len(params["schema"]["categorical_values"][get_schema(params)["item"]])
+    n_items = (log["campaign_id"] + ITEM_SEPARATOR + log["creative_format"]).nunique()
     assert log.groupby(["week", "user_id", "slot_id"]).size().max() > n_items
 
 

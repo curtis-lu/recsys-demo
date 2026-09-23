@@ -6,16 +6,4 @@ inference:
   entity_buckets: 10
   snap_dates:
     - "2026-01-05"   # 資料的最後一週，不在任何訓練／評估 split 裡
-  products:          # 須 == schema.categorical_values.item（A4）
-    - c01-banner
-    - c01-native
-    - c01-video
-    - c02-banner
-    - c02-native
-    - c02-video
-    - c03-banner
-    - c03-native
-    - c03-video
-    - c04-banner
-    - c04-native
-    - c04-video
+  # 不寫 products：item 清單從資料數時，評分的 item 就是模型 preprocessor 裡那份（A52 禁止另寫）
