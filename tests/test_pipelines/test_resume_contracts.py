@@ -83,7 +83,7 @@ RESUME_CONTRACTS = {
         # recomputing the test metric now re-runs nothing at all. Both inputs
         # are loadable -- the Hive prediction table and the manifest -- so this
         # line is where removing the catalog entry turns red.
-        "compute_test_mAP_spark": set(),
+        "compute_test_metrics": set(),
         # Same unlock, and the one ADR-0014 decision 7 names: a failed
         # diagnosis is recovered with `--from-node select_shap_population`,
         # and that recovery is only worth recommending while it re-runs
@@ -104,7 +104,7 @@ RESUME_CONTRACTS = {
         # scoring node. That is cheap *because* scoring resumes: every chunk's
         # partition already exists, so it lists the metastore once and writes
         # nothing. Training's twin of this, predict_manifest feeding
-        # compute_test_mAP_spark, was landed in issue #233 because its predict
+        # compute_test_metrics, was landed in issue #233 because its predict
         # node is *not* cheap to resume; the two stay deliberately different.
         # Issue #195 asked the adjacent question — where the skip list goes
         # after the process exits — and was answered WITHOUT landing this
@@ -196,7 +196,7 @@ class TestResumeContracts:
             assert name in defined, f"{name} must stay defined in catalog.yaml"
 
     def test_predict_manifest_lands_in_the_version_directory(self):
-        # The catalog half of the compute_test_mAP_spark contract above, plus
+        # The catalog half of the compute_test_metrics contract above, plus
         # where it lands. First level of the model version directory, not a
         # subdirectory: __main__._dir_artifacts lists that level only, so a
         # manifest under diagnostics/ would be missing from the `artifacts`

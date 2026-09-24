@@ -102,6 +102,70 @@ class TestHpoScoreBinaryPredictionObjectives:
         ) == expected
 
 
+class TestMetricRegistry:
+    """The registry is the one list of metrics (ADR-0028 decision 2): HPO's
+    choices, A25's domain and the val scorer all read it, so each row is
+    checked against the numpy primitive it stands for — the expected values
+    are the primitives called directly, not the registry read back.
+
+    Positives on both items and in both groups, group 1 weighted 2: mean_ap
+    2/3, macro_per_item_map 17/24, pooled 0.494 (0.556 unweighted), per item
+    0.583 (0.625 unweighted). All four differ, and each binary one differs
+    from its unweighted self, so a row wired to another row's scorer, or one
+    that drops ``weights``, fails.
+    """
+
+    GROUPS = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+    ITEMS = np.array(["a", "b", "a", "b", "a", "b", "a", "b"])
+    Y = np.array([1, 0, 0, 1, 1, 0, 0, 0])
+    SCORE = np.array([0.9, 0.8, 0.4, 0.5, 0.85, 0.5, 0.2, 0.95])
+    W = np.array([1, 1, 1, 1, 2, 2, 2, 2], dtype=float)
+
+    def _primitives(self):
+        from recsys_tfb.evaluation import metrics as m
+
+        return {
+            "mean_ap": m.compute_mean_ap(
+                self.GROUPS, self.ITEMS, self.Y, self.SCORE),
+            "macro_per_item_map": m.compute_macro_per_item_map(
+                self.GROUPS, self.ITEMS, self.Y, self.SCORE),
+            "pooled_average_precision": m.compute_pooled_average_precision(
+                self.Y, self.SCORE, self.W),
+            "macro_per_item_average_precision":
+                m.compute_macro_per_item_average_precision(
+                    self.ITEMS, self.Y, self.SCORE, self.W),
+        }
+
+    def test_every_row_scores_val_with_its_own_primitive(self):
+        from recsys_tfb.evaluation.metric_registry import METRICS, score_val
+
+        expected = self._primitives()
+        # The four values differ, so a row wired to another row's scorer fails.
+        assert len({round(v, 12) for v in expected.values()}) == 4
+        assert set(METRICS) == set(expected)
+        for name in METRICS:
+            assert score_val(
+                name, self.GROUPS, self.ITEMS, self.Y, self.SCORE,
+                weights=self.W,
+            ) == expected[name], name
+
+    def test_families_and_test_algorithms(self):
+        """Ranking metrics are scored on test; the binary-prediction ones have
+        no test-side algorithm yet (#452) and say so rather than pretend."""
+        from recsys_tfb.evaluation.metric_registry import (
+            BINARY_PREDICTION, METRICS, RANKING,
+        )
+
+        assert {n: m.family for n, m in METRICS.items()} == {
+            "mean_ap": RANKING,
+            "macro_per_item_map": RANKING,
+            "pooled_average_precision": BINARY_PREDICTION,
+            "macro_per_item_average_precision": BINARY_PREDICTION,
+        }
+        assert {n for n, m in METRICS.items() if m.test_pass} == {
+            "mean_ap", "macro_per_item_map"}
+
+
 class TestTrialScorer:
     """The scorer owns the search state; these pin who wins and who survives.
 

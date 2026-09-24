@@ -1544,6 +1544,11 @@ LITERAL_COLUMN_EXCEPTIONS = frozenset({
     # their own entries were deleted.
     ("src/recsys_tfb/pipelines/evaluation/steps/snap_date_scope.py",
      "eval_snap_dates"),
+    # `test_metrics.snap_date`, the scored months (ADR-0028, #452): the one
+    # read every reader goes through, and A53, which lists the block's keys.
+    # Signed off in #452.
+    ("src/recsys_tfb/core/consistency.py", "scoring_snap_dates"),
+    ("src/recsys_tfb/core/consistency.py", "scoring_param_errors"),
     # Observability field whitelist -- a log field named after the time role,
     # not a DataFrame column.
     ("src/recsys_tfb/core/logging.py", "<module>"),

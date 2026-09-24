@@ -42,7 +42,7 @@ LightGBM 的 train/train-dev 會轉成可重用的 `.bin`，但這是目前 adap
 5. **Driver-local 空間足夠**：各 split 會從 Hive／HDFS 複製到 `cache.root`，模型、HPO study、診斷與 checkpoint 也會寫入 driver 本機檔案系統。**HPO 另外要 `data/_scratch` 放得下整份 val 矩陣**（`val 列數 × 特徵欄數 × itemsize`，生產規模 37～89 GiB）；不足時 `tune_hyperparameters` 會在建立前 raise，訊息含需求量、可用量與落點。檔案在映射完成當下就 unlink，跑完不留（見 §9.2）。
 6. **Driver 記憶體足夠**：模型訓練、部分指標計算及診斷會將資料讀入 driver；應依資料量控制 feature 數、HPO 規模與 SHAP／feature statistics 抽樣上限。
 
-CLI 啟動時會先執行設定一致性檢查，包括 ranking objective 與 metric 是否相容、HPO search space 格式、sample weight key 的欄位與段數、未知 item、feature selection 是否錯誤排除 item，以及 `hpo_objective` 與 `final_model_strategy` 是否為合法值（A25——打錯的話原本要等整輪 HPO 跑完才會炸），和選了 `pooled_average_precision`／`macro_per_item_average_precision` 時 val 有沒有留下沒有正例的 query group（A48，見 §3.2）。另外三項也在起 Spark 前由 training 指令擋下：`dataset.test_snap_dates` 沒寫或是空清單（A36——原本要等整輪 HPO 跑完、到預測那一步才炸，訊息也沒提到這個設定）、`dataset.test_snap_dates` 用兩種拼法指到同一個月（A26），以及 `training_eval_predictions` 這筆 catalog 條目沒有把 `schema.entity` 的每一欄都寫進 `columns:`（A28——Hive 寫入只留宣告過的欄，少宣告的那一欄會被靜默丟掉，寫出來的每一列都變成在指別的東西）。檢查分幾層、各在什麼時候擋下、哪些擋不住：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
+CLI 啟動時會先執行設定一致性檢查，包括 ranking objective 與 metric 是否相容、HPO search space 格式、sample weight key 的欄位與段數、未知 item、feature selection 是否錯誤排除 item，以及 `hpo_objective` 與 `final_model_strategy` 是否為合法值（A25——打錯的話原本要等整輪 HPO 跑完才會炸），和選了 `pooled_average_precision`／`macro_per_item_average_precision` 時 val 有沒有留下沒有正例的 query group（A48，見 §3.2）。另外四項也在起 Spark 前由 training 指令擋下：`dataset.test_snap_dates` 沒寫或是空清單（A36——原本要等整輪 HPO 跑完、到預測那一步才炸，訊息也沒提到這個設定）、`dataset.test_snap_dates` 用兩種拼法指到同一個月（A26）、`test_metrics` 區塊寫錯（A53，見 §3.7），以及 `training_eval_predictions` 這筆 catalog 條目沒有把 `schema.entity` 的每一欄都寫進 `columns:`（A28——Hive 寫入只留宣告過的欄，少宣告的那一欄會被靜默丟掉，寫出來的每一列都變成在指別的東西）。檢查分幾層、各在什麼時候擋下、哪些擋不住：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
 這些檢查可避免明顯設定錯誤進入長時間訓練，但不能判斷資料是否有 target leakage、日期切分是否符合業務觀察窗，或某個設定是否在統計上合理。
 
 ## 3. 設定方式
@@ -107,7 +107,7 @@ training:
 | `early_stopping_rounds` | train-dev 指標連續未改善時的停止容忍輪數 |
 | `search_space` | Optuna 搜尋參數的有序 ParamSpec 清單 |
 
-`hpo_objective` 目前支援兩類，一個 trial 只算選中的那一個。
+`hpo_objective` 目前支援兩類，一個 trial 只算選中的那一個。可選的值就是指標登記表（`evaluation/metric_registry.py`）裡的名字：CLI 入口的檢查（A25）、HPO 的評分、test 上的計分（§3.7）都讀這一張表。
 
 **在 query group 內排序的指標**（預設是這一類）：
 
@@ -325,6 +325,53 @@ local Parquet cache 以 dataset IDs 分層，若目錄存在 `_SUCCESS` 便直�
 
 `mlflow.strict: false` 時，MLflow 無法連線或 logging 失敗只會記 warning，不會讓已完成的 training 失敗；設為 `true` 時則會直接中止，適合要求 experiment tracking 必須成功的環境。
 
+MLflow 記下的 test 指標：原本的 `overall_map`、每個 item 一個 `map_attr_<item>`、`n_queries`、`n_excluded_queries` 名字不變；§3.7 在 test 上算到的每個指標另外記成 `test_<指標名>`（例如 `test_mean_ap`、`test_macro_per_item_map`）。沒有值的指標不記——記成 0 會被當成分數。
+
+### 3.7 test 上算哪些指標：`test_metrics`
+
+`model_version` 在 test 上的分數寫進 `evaluation_results.json` 與 MLflow，挑版本的人拿它來比（[ADR-0028](../adr/0028-test-metrics-set-by-config.md)）。算哪些指標、在哪幾個 time 值上算，由頂層區塊 `test_metrics` 決定。它不在 `training:` 底下，所以改它**不會**換 `model_version`，也不會換 `search_id`。
+
+```yaml
+test_metrics:
+  snap_date: "2026-01-31"          # 計分月份；不寫＝dataset.test_snap_dates 全部
+  metrics: []                      # 排序類之外另外要算的指標
+  selection_metric: macro_per_item_map   # 選版指標；不寫＝實際生效的 HPO 目標
+```
+
+三個鍵都可以不寫，出貨的 `conf/base/parameters_training.yaml` 就是全部註解掉。
+
+| 鍵 | 不寫時 | 說明 |
+|---|---|---|
+| `snap_date` | `dataset.test_snap_dates` 全部 | **計分月份**：只在這些 time 值上算。寫法跟 `evaluation.snap_date` 一樣：一個日期、清單、或 `{start, end, step}` 區間 |
+| `metrics` | 空 | 排序類之外另外要算的指標，名字要在指標登記表裡 |
+| `selection_metric` | 實際生效的 HPO 目標 | **選版指標**：promote 挑版本時要比的那一個（promote 改讀它是下一張票的事）。「實際生效的 HPO 目標」＝有寫 `training.hpo_objective` 就是它，沒寫就是程式的預設 `mean_ap`（不是 conf 裡寫的 `macro_per_item_map`） |
+
+**每次實際會算的指標**＝兩個排序類指標（`mean_ap`、`macro_per_item_map`，一律算）＋ 選版指標 ＋ HPO 目標 ＋ `metrics`，重複的只算一次。開始算之前 log 會印出這份清單：
+
+```text
+compute_test_metrics: scoring ['mean_ap', 'macro_per_item_map'] on ['2026-01-31'] (selection metric macro_per_item_map, HPO objective macro_per_item_map)
+```
+
+**二元預測類（`pooled_average_precision`、`macro_per_item_average_precision`）在 test 上還算不出來。** 它們在 test 上的算法還沒實作。被要到時（當 HPO 目標、選版指標、或列在 `metrics`），`evaluation_results.json` 不給值，在 `metrics_not_computed` 寫明原因，log 印一行 warning，pipeline 照樣跑完，也不擋任何設定。HPO 目標是二元預測類時（例如廣告示例），選版指標沒寫就跟著它，所以在算法補上之前訓練的版本，都沒有選版指標的值；算法補上之後，對現在設定算出的版本跑一次 `--only-node compute_test_metrics` 就能補上，不必重訓；設定已經改過的舊版本要先還原設定，步驟與坑見 [ADR-0028](../adr/0028-test-metrics-set-by-config.md)〈後果〉。
+
+**排序類的兩個指標怎麼算。** 跟報表 `map@all` 同一套排名與同分規則（同分照 item 升冪），每個 query group 的 AP 不截斷，所以不需要 K：`mean_ap` 就是 `overall_map`，`macro_per_item_map` 是 `per_item_map_attr` 對 item 的簡單平均。全部只要 3 次 Spark action（數 query group、算每組的 AP、算每個 item 的歸因）。不讀任何 `evaluation.*` 設定：以前 `evaluation.k_values` 沒寫 `"all"` 時，`overall_map` 與 per-item 歸因會靜默記成 0.0；`evaluation.metric.k`、`evaluation.item_categories`、`evaluation.query_filter` 也都不再影響這些數字。全正的 query group 照舊不排除（#376）。
+
+**計分月份的規則。** 以下在 training 指令一開始、起 Spark 之前就擋下（A53），不會等 HPO 跑完：
+
+- 寫成空清單。
+- 有月份不在 `dataset.test_snap_dates` 裡。**寫法也要跟那裡一樣**：預測表是用這段文字篩分區的，`20260131` 對不到 `2026-01-31` 的分區。
+- 同一個月寫成兩種寫法（跟 A26 對 `test_snap_dates` 的規則相同）。
+- `metrics`、`selection_metric` 的名字不在指標登記表；`test_metrics` 底下有這三個以外的鍵（打錯字會被靜默忽略，所以直接擋）。
+
+跑到計分那一步時：
+
+- **表裡有、但不在計分月份的月份不算**，而且不讀。log 會列出略過了哪些，例如 `compute_test_metrics: ['2025-12-31'] in the prediction table, not scored`。月份是從表的檔案清單讀的，不跑 Spark job。
+- **計分月份裡有某個月沒有預測**：報錯停下，要求先跑 predict（`--from-node predict_and_write_test_predictions`，或從該月份拿掉）。錯誤訊息會列出表裡有哪些月份。月份是用文字比對的（跟 evaluation 的 `--post-training` 一樣），所以表裡的月份若寫法不同（例如資料是 `2026-01-31`、設定寫 `2026-1-31`），也會落在這一條：照表裡的寫法改設定即可。
+
+**「預測 6 個月、分數只算最近 1 個月」**：`dataset.test_snap_dates` 列 6 個月，`test_metrics.snap_date` 只寫最近那個月。evaluation 仍可評另外 5 個月。
+
+**只重跑計分那一步**（`--only-node compute_test_metrics`）：`evaluation_results.json` 會被覆寫，MLflow 不會更新（MLflow 是 `log_experiment` 寫的）。要連 MLflow 一起更新就用 `--from-node compute_test_metrics`，代價是排在它後面的診斷 node（含 SHAP）也會一起重跑（§5）。
+
 ## 4. 使用方式
 
 ### 4.1 CLI 選項
@@ -444,7 +491,7 @@ python -m recsys_tfb training \
 | HPO | `tune_hyperparameters` | train/train-dev model handles、val handle | train 訓練、train-dev early stop、val 上以 `hpo_objective` 選模 | `best_params`、`best_iteration`、`hpo_best_model` |
 | 最終模型 | `finalize_model` | HPO 產物、train/train-dev handles | 沿用 HPO best 或在 train + train-dev refit | `model` |
 | Test 預測 | `predict_and_write_test_predictions` | model、test handles | 逐月判斷是否需要預測，需要的月份再逐 `(time, item)` partition 預測並寫入 Hive | `training_eval_predictions`、`predict_manifest` |
-| Test 指標 | `compute_test_mAP_spark` | test 預測 | 使用 Spark 計算整體 mAP 與 per-item attribution | `evaluation_results` |
+| Test 指標 | `compute_test_metrics` | test 預測 | 只讀計分月份，用 Spark 算 mAP、per-item attribution 與 §3.7 要的指標 | `evaluation_results` |
 | 特徵統計 | `compute_feature_statistics` | train handle、model、`preprocessor` | 抽樣計算 null、distinct 與數值分布 | `feature_statistics` |
 | 模型重要性 | `compute_feature_importance` | model | 計算 split、gain 與 dead features | `feature_importance` |
 | Gain 帳本 | `compute_gain_ledger` | model、`preprocessor` | 跨樹按 item 記帳（id 切點 vs context 切點的 Gain）；`preprocessor` 只用到 `category_mappings`，把整數切點還原成 item 值 | `gain_ledger` |
@@ -458,11 +505,11 @@ python -m recsys_tfb training \
 
 **實際省下的是 HPO。** `compute_feature_statistics` 從前沒有 model 依賴，拓撲序把一個寫進 `data/models/<model_version>/` 的診斷排到「產出模型的 node」之前；`--from-node` 是「跑指定 node 與其後全部」，於是為了重算一份 null rate 的 JSON，`prepare_lgb_train_inputs`、`tune_hyperparameters`、`finalize_model` 全被掃回來。實測 `--from-node compute_feature_statistics` **從 18 個 node 降到 13 個**，不再重跑 HPO。（issue #233 之後再降到 **11 個**——2026-08-31 於本機 `--env local` 量的，當時 calibration 啟用、pipeline 有 21 個 node（#411 之後是 20 個），`--from-node compute_feature_statistics --dry-run` 的輸出原文是 `[plan] running 11 of 21 nodes`。`--list-nodes` 不能與 `--from-node` 併用，它印的是每個 node 的 auto-included 清單，不是總數。）
 
-**再省下的是預測那一步。** `predict_manifest` 也落地之後（issue #233），`--from-node compute_feature_statistics` 不再把 `predict_and_write_test_predictions` 拉回來，也就不再連帶拉回 `select_features`（predict node 是**套用**模型，吃 `preprocessor_view` 對它是正確的，所以只要它在切片裡，`select_features` 就跟著在）。省下的不是零：那個 node 就算判定全部月份都跳過、一列都不寫，開頭仍要把整張 test cache 的兩個字串欄拉進 driver 算 distinct（生產規模約 2.2 億列）。`compute_test_mAP_spark` 與 `select_shap_population` 因此變成**零補跑**的接續點。
+**再省下的是預測那一步。** `predict_manifest` 也落地之後（issue #233），`--from-node compute_feature_statistics` 不再把 `predict_and_write_test_predictions` 拉回來，也就不再連帶拉回 `select_features`（predict node 是**套用**模型，吃 `preprocessor_view` 對它是正確的，所以只要它在切片裡，`select_features` 就跟著在）。省下的不是零：那個 node 就算判定全部月份都跳過、一列都不寫，開頭仍要把整張 test cache 的兩個字串欄拉進 driver 算 distinct（生產規模約 2.2 億列）。`compute_test_metrics` 與 `select_shap_population` 因此變成**零補跑**的接續點。
 
 **還沒省下的**：兩個 `*_parquet_handle` 仍是 memory-only，所以切片仍會補跑兩個 cache node。要再往下砍，卡在 `cache.root` 是相對路徑：診斷若從別的目錄啟動會指到不同地方而且不報錯。確切的接續集合釘在 `tests/test_pipelines/test_resume_contracts.py`。
 
-**落地也有代價，寫在這裡免得被當成純賺**：切片跳過 predict node，就表示 `predict_manifest` 是從磁碟載回**上一次** run 的那一份。今天安全，因為吃它的兩個 node 都只拿它當排序依賴——`compute_test_mAP_spark` 把它寫進 log，`select_shap_population` 連讀都沒讀；`--rebuild-dates` 被切片切掉時另有 `[rebuild] WARNING` 擋著。真正沒有防護的是「加了新的 test 月份卻用 `--from-node` 從診斷那一帶起跑」：新月份不會被預測，指標也不會包含它。加月份的正規動線是 `--only-node predict_and_write_test_predictions`（見 [adding-an-eval-month.md](../operations/user-guides/adding-an-eval-month.md)），照著走就不會遇到。
+**落地也有代價，寫在這裡免得被當成純賺**：切片跳過 predict node，就表示 `predict_manifest` 是從磁碟載回**上一次** run 的那一份。今天安全，因為吃它的兩個 node 都只拿它當排序依賴——`compute_test_metrics` 把它寫進 log，`select_shap_population` 連讀都沒讀；`--rebuild-dates` 被切片切掉時另有 `[rebuild] WARNING` 擋著。真正沒有防護的是「加了新的 test 月份卻用 `--from-node` 從診斷那一帶起跑」：新月份不會被預測，指標也不會包含它。加月份的正規動線是 `--only-node predict_and_write_test_predictions`（見 [adding-an-eval-month.md](../operations/user-guides/adding-an-eval-month.md)），照著走就不會遇到。
 
 **還有一件事要知道**：`predict_manifest.json` 裡沒有 run_id，所以切片跳過 predict 的那種 run 跑完之後，版本目錄裡會有一份**上一次** run 寫的 `predict_manifest.json`，而同一層的 `manifest.json` 記的是這一次的 run_id。這不是這個條目特有的——`feature_statistics.json`、`shap_diagnostics.json` 等等只要被切片跳過就都是這樣，`[plan] WARNING: resume assumes the skipped artifacts are still valid` 就是為此而印。要靠 `predict_manifest.json` 回答「**這一次**跑了哪些月」而不是「**最後一次預測**跑了哪些月」的話，得先給它一個 run_id，那是另一張票。
 
@@ -486,9 +533,9 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 
 **逐月增量**：predict 會跳過已經預測完整的月份，所以多評估一個月的成本正比於新月份，而不是累積的總月份數。權威的月份清單是 `dataset.test_snap_dates`（cache 只是資料來源）；某月的完成判準是「該月已寫出的 item partition 集合 ＝ 該月 cache 中出現的 distinct item」——寫到一半中斷、或事後新增一個 item，都會讓該月不再完整而被重做。可以跳過是因為 `(model_version, snap_date)` 的預測是不可變產物：`model_version` 已把定義模型的一切雜湊進去，重算必然得到相同結果。「已存在哪些 partition」由 `training_eval_predictions` 這個 catalog dataset 物件回答（`HiveTableDataset.existing_partition_values()`，metastore-only 查詢，套用該表的 `partition_filter` 因此天然限縮在目前 `model_version`）——predict 拿不到 SparkSession，這是唯一的路。
 
-`predict_manifest` 因此帶三份清單：`months_processed`／`months_skipped`／`months_rebuilt`（後者是被 `--rebuild-dates` 強制重做的子集），落地在 `data/models/<model_version>/predict_manifest.json`——log 留下的是計數，而一個靜默過期的月份跟一個正確跳過的月份在計數上長得一模一樣，所以清單要事後查得到（issue #233）。同一份 manifest 的 `snap_dates`／`items`／`n_rows_written` 講的是**這一次寫了什麼**，不是這個 test set 有哪些月——全部月份都被跳過時它們是空的、`0`，這是正確的。指標不受影響：`compute_test_mAP_spark` 是從 Hive 讀回整個 `model_version` 的預測，被跳過的月份的 partition 本來就還在表裡。跳過的判準是「存在」不是「新鮮」，所以上游對舊月份回補之後要用 `--rebuild-dates` 指名重算——它同時丟掉該月的本機 parquet cache 並重新預測；動線見 [adding-an-eval-month.md](../operations/user-guides/adding-an-eval-month.md)。
+`predict_manifest` 因此帶三份清單：`months_processed`／`months_skipped`／`months_rebuilt`（後者是被 `--rebuild-dates` 強制重做的子集），落地在 `data/models/<model_version>/predict_manifest.json`——log 留下的是計數，而一個靜默過期的月份跟一個正確跳過的月份在計數上長得一模一樣，所以清單要事後查得到（issue #233）。同一份 manifest 的 `snap_dates`／`items`／`n_rows_written` 講的是**這一次寫了什麼**，不是這個 test set 有哪些月——全部月份都被跳過時它們是空的、`0`，這是正確的。指標不受影響：`compute_test_metrics` 是從 Hive 讀回計分月份的預測，被跳過的月份的 partition 本來就還在表裡。跳過的判準是「存在」不是「新鮮」，所以上游對舊月份回補之後要用 `--rebuild-dates` 指名重算——它同時丟掉該月的本機 parquet cache 並重新預測；動線見 [adding-an-eval-month.md](../operations/user-guides/adding-an-eval-month.md)。
 
-`compute_test_mAP_spark` 會從 Hive 讀回目前 `model_version` 的預測並計算排序指標。指標只有一套（#411 之前另有一段「校準前」指標）。
+`compute_test_metrics` 會從 Hive 讀回目前 `model_version`、計分月份內的預測並計算 §3.7 的指標；表裡其他月份不讀。指標只有一套（#411 之前另有一段「校準前」指標）。
 
 ## 6. 產物與驗收
 
@@ -499,7 +546,7 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 | 最終模型 | `model.txt`、`model_meta.json` | `data/models/<model_version>/` |
 | HPO 結果 | `best_params.json`、`best_iteration.json` | `data/models/<model_version>/` |
 | HPO best model | `hpo/model.txt`、`hpo/model_meta.json` | `data/models/<model_version>/hpo/` |
-| Test 指標 | `evaluation_results.json` | `data/models/<model_version>/` |
+| Test 指標 | `evaluation_results.json`（原本 4 個鍵，加上 `snap_dates`、`metrics`、`metrics_not_computed`、`selection_metric`、`hpo_objective`，見下方） | `data/models/<model_version>/` |
 | 權重診斷 | `sample_weight_report.json` | `data/models/<model_version>/` |
 | Test 預測的月份決定 | `predict_manifest.json`（`months_processed`／`months_skipped`／`months_rebuilt` 三份清單） | `data/models/<model_version>/` |
 | 模型診斷 | feature statistics、importance、`shap_diagnostics.json`、`per_quadrant.json`、`cases/` PNG 與 `cases_manifest.json` | `data/models/<model_version>/diagnostics/` |
@@ -508,6 +555,20 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 | HPO 恢復狀態 | Optuna journal 與最佳 checkpoint | `data/models/_hpo/<search_id>/` |
 | Driver cache | 各 split Parquet 與 LightGBM `.bin` | `cache.root/<base_dataset_version>/...`；test split **一個月一個目錄**（`test_months/<YYYYMMDD>/`，各自 `_SUCCESS`）。test 日期已退出 `base_dataset_version`（ADR-0001），因此**加一個月只複製那一個月**，既有月份 `cache_hit` 原封不動（見 ADR-0003；操作見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)）。代價是同一個 base version 底下**重算**既有月份時 cache 不會失效（只看 `_SUCCESS`、不看新鮮度），須手動刪該月目錄——見 known-pitfalls §15。設定列了某月但來源表沒有 → 該月的複製 glob 零命中即 `FileNotFoundError`（機制自帶的 fail-loud） |
 | Experiment tracking | 參數、指標、模型與診斷 | MLflow tracking URI |
+
+`evaluation_results.json` 的鍵：
+
+| 鍵 | 內容 |
+|---|---|
+| `overall_map` | 每個 query group 的 AP（不截斷）對 query group 平均；等於 `metrics.mean_ap` |
+| `per_item_map_attr` | 每個 item：它的正例列的 AP 貢獻平均 |
+| `n_queries`／`n_excluded_queries` | 計分月份內的 query group 數／其中沒有正例而被略過的數 |
+| `snap_dates` | 實際算到的 time 值（計分月份，照設定的順序與寫法） |
+| `metrics` | 在 test 上算到的每個指標的值 |
+| `metrics_not_computed` | 被要到但沒有值的指標與原因 |
+| `selection_metric`／`hpo_objective` | 這次計分時的選版指標與實際生效的 HPO 目標 |
+
+前 4 個鍵一定存在，計分月份等於表裡的月份時，值跟改版前逐值相同。ADR-0028 之前寫的檔案只有前 4 個鍵。
 
 SHAP PNG 落於 `diagnostics/summary/` 子目錄：全域 beeswarm 為 `summary/shap_summary_global.png`；`per_item_beeswarm: true` 時每個 item 另有 `summary/per_item/shap_summary__<item>.png`（item 名稱以正規表達式安全化，特殊字元轉底線）。beeswarm 同時呈現 SHAP 幅度與方向。象限案例圖見下方象限診斷小節。
 
@@ -528,7 +589,7 @@ training 不會建立或更新 `best` model alias。模型必須通過人工審�
 3. `model.txt`、`model_meta.json`、`best_params.json`、`best_iteration.json` 與 `evaluation_results.json` 均存在。
 4. `sample_weight_report.json` 沒有未預期的 `unmatched_keys`。
 5. `training_eval_predictions` 的本次 `model_version` partition 有資料，entity、time、item 與 label 範圍合理。
-6. `evaluation_results.json` 的 `n_queries` 大於零，`overall_map` 與 per-item attribution 可合理解讀。
+6. `evaluation_results.json` 的 `n_queries` 大於零，`snap_dates` 是你要的計分月份，`overall_map` 與 per-item attribution 可合理解讀；`metrics_not_computed` 裡的指標是預期中的（目前只有二元預測類）。
 7. diagnostics 開啟時，檢查 dead features、高 null／single-value features，以及 SHAP 抽樣覆蓋是否足夠；`item_idiosyncrasy` 中偏離度高的 item 表示共用模型依賴不同特徵組合，是評估 per-item 或兩階段模型的起點；`top_features_positive` 可對照申辦客戶與整體候選的驅動特徵差異。
 
 範例查詢：
@@ -558,7 +619,7 @@ model-defining training 設定
 model-defining training 設定只取 `parameters_training.yaml` 的 `training:` 區塊，並排除 `training.algorithm_params` 下的 `verbosity`、`log_period` 與 `num_threads`。因此：
 
 - `training:` 下既有或未來新增的其他設定，預設都會更新 `model_version`。
-- 頂層 `spark`、`mlflow`、`cache`、`diagnostics` 與 `hpo_checkpointing` 不會更新 `model_version`。
+- 頂層 `spark`、`mlflow`、`cache`、`diagnostics`、`hpo_checkpointing` 與 `test_metrics` 不會更新 `model_version`。
 - mapping 的 key 排列順序不影響 hash，但 list 的內容與順序會影響，例如 `search_space` 或 feature exclusion 清單重新排序也會翻版。
 
 ### 7.2 `model_version` 與 `search_id` 對照
@@ -580,6 +641,7 @@ model-defining training 設定只取 `parameters_training.yaml` 的 `training:` 
 | `feature_selection.exclude` | ✓ | ✓ | 改變模型 feature subset |
 | `search_space` | ✓ | ✓ | 改變可搜尋參數或範圍 |
 | 頂層 `cache`、`diagnostics`、`mlflow`、`spark`、`hpo_checkpointing` |  |  | 只影響執行、觀測或恢復方式 |
+| 頂層 `test_metrics` |  |  | 只影響 test 上算哪些指標、在哪些月份算（§3.7）；改了只要重跑 `compute_test_metrics` |
 | CLI `--fresh-hpo` |  |  | runtime 動作，只清除目前 search state |
 
 `parameters.yaml` 的 `random_seed` 目前不在 `parameters_training.yaml` 的 hashed payload，因此不會更新 `model_version` 或 `search_id`，但它會影響 Optuna sampler、LightGBM seed 與 final refit。

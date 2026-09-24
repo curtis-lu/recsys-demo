@@ -23,9 +23,19 @@ Layered structure (each layer has a single responsibility):
     Layer 4: orchestrator
         compute_all_metrics            wires everything; reads parameters
 
+    Training's test scoring (ADR-0028), apart from the four layers
+        count_query_groups_by_time     query group counts + time values present
+        compute_untruncated_ap         mAP and per-item attribution, no K
+
+The evaluation report and the popularity baseline are the callers of
+``compute_all_metrics`` / ``compute_overall_per_item``. Training scored its test
+set through ``compute_all_metrics`` too until ADR-0028, keeping four values of
+the bundle; it now calls the last two functions of this module, which compute
+only those, with the same Layer-1 building blocks.
+
 NDCG is not computed (ADR-0018 decision 4): no report or artifact read it, and
-training scores its test set through ``compute_all_metrics`` too, so every
-``ndcg@K`` was paid for and then dropped. LightGBM's own ``ndcg`` early-stopping
+while training still scored through ``compute_all_metrics`` every ``ndcg@K``
+was paid for and then dropped. LightGBM's own ``ndcg`` early-stopping
 metric (``training.algorithm_params.metric``) is a different thing and is not
 affected.
 
@@ -64,7 +74,7 @@ collected to the driver.
 from __future__ import annotations
 
 import logging
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, NamedTuple, Sequence
 
 import numpy as np
 from pyspark.sql import DataFrame as SparkDataFrame
@@ -1309,9 +1319,11 @@ def compute_all_metrics(
     ``category_mapping`` is the table a column-mode evaluation run read off
     the data (#379); ``None`` reads the hand-written mapping from
     ``parameters`` (:func:`_resolve_category_mapping`). ``with_category=False``
-    skips the category pass without reading ``item_categories`` at all:
-    training scores its test set through here, reads only the fine-grained
-    keys, and has no column-mode table to pass (#379).
+    skips the category pass without reading ``item_categories`` at all, for a
+    caller that reads only the fine-grained keys and has no column-mode table
+    to pass. #379 added it for training's test scoring, which ADR-0028 then
+    moved to ``compute_untruncated_ap`` (never a category pass); no pipeline
+    node passes it today.
 
     ⚠ **Not backward compatible below ``dataset_overview``** since #327: the
     three ``n_items`` / ``n_customers`` / ``avg_positives_per_customer``
@@ -1371,9 +1383,11 @@ def compute_all_metrics(
     *all-positive* queries: the same positive label on every row, so every
     per-query metric is the same whatever the order (#376). The caller reads
     the switch — ``metrics.drop_all_positive_groups``, from the evaluation
-    nodes — and this function never reads it from ``parameters``: training
-    scores its test set through here too, and its test mAP must not move with
-    an evaluation setting, so it simply does not pass it. Each grain decides
+    nodes — and this function never reads it from ``parameters``: the switch
+    is the evaluation report's. (Training's test mAP must not move with it
+    either; it scored through here without passing it until ADR-0028, and now
+    scores through ``compute_untruncated_ap``, which never drops those
+    groups.) Each grain decides
     on its own frame: at the category grain a query is all-positive when
     every category it holds gets the same positive label (the max of its
     children), which a query mixed row by row can be. Off, every key but the
@@ -1419,3 +1433,134 @@ def compute_all_metrics(
         result["category"] = cat
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Training's test scoring (ADR-0028 decision 2)
+# ---------------------------------------------------------------------------
+#
+# What training scores on test used to come out of ``compute_all_metrics``: the
+# whole bundle, of which it kept four values. These two functions are what
+# those four values — and the two ranking metrics derived from them — actually
+# need: three Spark actions in all, no K, and no ``evaluation.*`` setting read.
+
+
+class QueryGroupCounts(NamedTuple):
+    """What :func:`count_query_groups_by_time` counts, in one action.
+
+    ``times`` is the set of time values present, as text: the scored months a
+    caller asked for and did not get are the ones missing from it.
+    """
+
+    n_queries: int
+    n_with_positive: int
+    times: frozenset
+
+
+def count_query_groups_by_time(
+    frame: SparkDataFrame, parameters: dict,
+) -> QueryGroupCounts:
+    """Every query group, those holding a positive, and the time values
+    present — one ``groupBy`` over the query groups, one action.
+
+    The first two are the counts ``_count_query_groups`` gives
+    ``compute_all_metrics``: ``groupBy`` groups NULL keys together as
+    ``distinct`` does, and "holding a positive" is ``sum(label) > 0``. The
+    time column is one of the query group's columns, so collecting its values
+    after the first ``groupBy`` costs no extra pass; the set is at most one
+    entry per scored month. Not counted: the all-positive groups — training
+    never drops them (#376).
+    """
+    schema = get_schema(parameters)
+    label_col = schema["label"]
+    time_col = schema["time"]
+    row = (
+        frame.groupBy(*schema["query_group_columns"])
+        .agg(F.sum(F.col(label_col)).alias("_total_rel"))
+        .agg(
+            F.count(F.lit(1)).alias("n_queries"),
+            F.sum(F.when(F.col("_total_rel") > 0, 1).otherwise(0))
+            .alias("n_with_positive"),
+            F.collect_set(F.col(time_col).cast("string")).alias("times"),
+        )
+        .collect()[0]
+    )
+    return QueryGroupCounts(
+        n_queries=int(row["n_queries"]),
+        n_with_positive=int(row["n_with_positive"] or 0),
+        times=frozenset(row["times"] or ()),
+    )
+
+
+class UntruncatedAp(NamedTuple):
+    """What :func:`compute_untruncated_ap` returns.
+
+    ``overall_map`` is the mean over query groups holding a positive of each
+    group's AP (``mean_ap``); ``per_item_map_attr`` is, per item, the mean of
+    its positive rows' AP contributions (the per-item attribution
+    ``macro_per_item_map`` averages).
+    """
+
+    overall_map: float
+    per_item_map_attr: dict
+
+
+def compute_untruncated_ap(
+    frame: SparkDataFrame, parameters: dict,
+) -> UntruncatedAp:
+    """Per-query AP with no truncation, averaged over query groups, and each
+    item's attribution — two actions over one cached frame.
+
+    The same building blocks and the same arithmetic ``compute_all_metrics``
+    produces ``map@{"all"}`` and ``map_attr@{"all"}`` with (``rank_within_query``
+    for the order and the tie rule, ``add_query_total_rel``,
+    ``_keep_scored_query_groups``, ``add_row_contributions``), minus the K: at
+    the K ``"all"`` resolves to, no row ranks past it, so ``top_k`` is 1.0 on
+    every row and ``ap_contrib = prec_at_pos * label`` exactly. Nothing reads
+    K, so nothing reads ``evaluation.k_values`` / ``evaluation.metric.k``, and
+    the category pass and the dataset overview are not computed.
+
+    Groups holding no positive are skipped (AP is undefined there); the
+    all-positive groups are kept whatever
+    ``evaluation.query_filter.drop_all_positive_groups`` says (#376). With no
+    group holding a positive: ``0.0`` and ``{}``, what the bundle's
+    ``.get(key, 0.0)`` gave.
+    """
+    schema = get_schema(parameters)
+    item_col = schema["item"]
+    label_col = schema["label"]
+    group_cols = schema["query_group_columns"]
+
+    df = rank_within_query(
+        frame, group_cols, schema["score"], item_col, schema.get("event", []),
+    )
+    df = add_query_total_rel(df, group_cols, label_col)
+    scored = _keep_scored_query_groups(
+        df, group_cols, label_col, drop_all_positive_groups=False,
+    )
+    enriched = (
+        add_row_contributions(scored, group_cols, label_col, [])
+        .withColumn("_ap_contrib", F.col("prec_at_pos") * F.col(label_col))
+        .cache()
+    )
+    try:
+        overall = (
+            enriched.groupBy(*group_cols)
+            .agg(F.sum("_ap_contrib").alias("_ap_sum"),
+                 F.first("total_rel").alias("_total_rel"))
+            .withColumn("_ap", F.col("_ap_sum") / F.col("_total_rel"))
+            .agg(F.mean("_ap").alias("_map"))
+            .collect()[0]["_map"]
+        )
+        per_item = (
+            enriched.filter(F.col(label_col) == 1)
+            .groupBy(item_col)
+            .agg(F.mean("_ap_contrib").alias("_attr"))
+            .collect()
+        )
+    finally:
+        enriched.unpersist()
+    return UntruncatedAp(
+        overall_map=float(overall) if overall is not None else 0.0,
+        per_item_map_attr={str(r[item_col]): float(r["_attr"]) for r in per_item},
+    )

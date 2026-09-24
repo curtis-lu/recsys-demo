@@ -76,7 +76,7 @@ B side: takes A's label, joined on the identity columns, so both sides are
 
 Re-ranks both sides within the query group —
 ``schema["query_group_columns"]``, every column of it — because the candidate
-set just shrank. That is the same grouping ``compute_test_mAP_spark`` ranks
+set just shrank. That is the same grouping ``compute_test_metrics`` ranks
 by, so the metrics the comparison report shows are the metrics the main line
 computes.
 

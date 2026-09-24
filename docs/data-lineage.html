@@ -193,7 +193,7 @@ label、score、rank 框架自帶預設欄名），其餘特徵 / 分群 / carry
     <text x="500" y="543">診斷 JSON（diagnostics/）：feature_statistics · feature_importance · shap_diagnostics</text>
     <text x="500" y="557">quadrant_profiles · cases_manifest · gain_ledger（--post-training 時 evaluation 的 model_capacity 診斷讀它）</text>
   </g>
-  <text x="132" y="582" font-size="10" fill="#495057">evaluation_results 由 compute_test_mAP_spark 在 training 內產生（讀 training_eval_predictions），非 evaluation pipeline</text>
+  <text x="132" y="582" font-size="10" fill="#495057">evaluation_results 由 compute_test_metrics 在 training 內產生（讀 training_eval_predictions 的計分月份），非 evaluation pipeline</text>
 
   <!-- training -> inference：只有 model 是 training 產的；其餘輸入的來源列在 inference 框內 -->
   <line x1="240" y1="592" x2="240" y2="640" stroke="#495057" stroke-width="1.5" marker-end="url(#ar)"/>
@@ -649,7 +649,7 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
 <div class="card" id="training_eval_predictions">
   <h4>training_eval_predictions <span class="badge b-hive">Hive</span><span class="vl vl-mv">model_version</span></h4>
   <div class="meta"><b>產生</b>：training · predict_and_write_test_predictions（對 test set 評分後 chunked 寫 Hive；節點宣告產出是 predict_manifest，落地在 <code>data/models/&lt;model_version&gt;/predict_manifest.json</code>）　|
-  <b>下游</b>：training（compute_test_mAP_spark 讀回算 test mAP、select_shap_population）、evaluation 情境 1（prepare_eval_data，<code>--post-training</code>）　|
+  <b>下游</b>：training（compute_test_metrics 讀回計分月份算 test 指標、select_shap_population）、evaluation 情境 1（prepare_eval_data，<code>--post-training</code>）　|
   <b>partition</b>：snap_date, prod_name（外加 model_version）</div>
   <div class="grain"><span class="gtag g-none">框架不檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>；只保留至少有一個正例的 query group，沿用 <code>test_model_input</code> 的過濾）　|　<b>實體主鍵</b>：邏輯主鍵是上述三個角色；實體上另含 <code>model_version</code>（partition_filter 注入的版本欄）　|　唯一性<b>框架不檢查、由上游負責</b>：<code>predict_and_write_test_predictions</code> 逐 (time, item) 分區寫出，沒有重複檢查，唯一性沿用 <code>test_model_input</code>（dataset 的 <code>validate_model_input_grain</code> 列數閘不涵蓋 test）。重跑不會疊出重複列，靠的是分區整個覆寫，不是去重。<code>duplicate_test_month_errors</code>（A26）是設定層的閘、不看資料：<code>test_snap_dates</code> 把同一個月拼成兩種寫法，會讓 training cache 把同一個目錄交給 pyarrow 兩次、該月每一列在預測裡被算兩遍，A26 擋的就是這一種成因（強制點在 training 指令）；其他成因造成的重複它不管。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
   <p class="sub">test 集在 dataset 階段（<code>filter_test_model_input</code>）預設已丟掉整個 query group（<code>time × entity</code>，示例 <code>snap_date × cust_id</code>）都沒有正例的列，只有留下來的 query group 會被 scoring；<code>test_zero_positive_group_ratio</code> &gt; 0 時留下的無正例組也會被 scoring，列上帶權重欄 <code>zero_positive_group_weight</code>（catalog 必須宣告它，A45）。不存 rank——Spark mAP 端用 rank_within_query 重算。</p>
@@ -667,11 +667,11 @@ C000010   0.83    0.83                1      （示意）</div>
 
 <div class="card" id="evaluation_results">
   <h4>evaluation_results <span class="badge b-json">JSON</span><span class="vl vl-mv">model_version</span></h4>
-  <div class="meta"><b>產生</b>：training · compute_test_mAP_spark（讀 training_eval_predictions 算 test 排序指標）　|
+  <div class="meta"><b>產生</b>：training · compute_test_metrics（讀 training_eval_predictions 的計分月份算 test 指標，ADR-0028）　|
   <b>下游</b>：training（log_experiment → MLflow）　|
   <b>path</b>：<code>data/models/&lt;model_version&gt;/evaluation_results.json</code></div>
   <p class="note">這是 <b>training</b> pipeline 的產物（test mAP），<b>不是</b> evaluation pipeline。evaluation pipeline 產的是 report.html、metrics.json（evaluation_metrics）與 enriched_eval_predictions。</p>
-  <p class="sub"><code>per_item_map_attr</code> 不是每個 item 自己的 mAP，而是該 item 的正例列 <code>ap_contrib</code> 的平均。<code>compute_test_mAP_spark</code> 只產出這一份指標，沒有第二份。</p>
+  <p class="sub"><code>per_item_map_attr</code> 不是每個 item 自己的 mAP，而是該 item 的正例列 <code>ap_contrib</code> 的平均。<code>compute_test_metrics</code> 的 AP 不截斷；另記 <code>snap_dates</code>（計分月份）、<code>metrics</code>、<code>metrics_not_computed</code>、<code>selection_metric</code>、<code>hpo_objective</code>，見 <code>docs/pipelines/training.md</code> §6.1。</p>
   <div class="ex">{ "overall_map": 0.65, "per_item_map_attr": { "prod_A": 0.93, ... },
   "n_queries": 654, "n_excluded_queries": 0 }  （示意）</div>
 </div>

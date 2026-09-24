@@ -826,8 +826,8 @@ def compute_metrics(
     # every row, so every per-query metric is the same whatever the order)
     # only when evaluation.query_filter.drop_all_positive_groups says so;
     # counted either way. Read here and passed down, never inside
-    # metrics_spark: training scores through the same code and must not
-    # follow the switch (#376).
+    # metrics_spark: that module also holds training's test scoring
+    # (compute_untruncated_ap), which must not follow the switch (#376).
     drop_all_positive = drop_all_positive_groups(parameters)
     result = compute_all_metrics(
         eval_predictions, parameters,

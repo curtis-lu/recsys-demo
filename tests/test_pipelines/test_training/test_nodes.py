@@ -697,6 +697,43 @@ class TestLogExperiment:
         # parameter is gone from the run, not logged as False.
         assert "params.calibrated" not in runs.columns
 
+    def test_test_metrics_are_logged_beside_the_old_names(
+        self, lgb_handles, training_parameters, tmp_path
+    ):
+        """ADR-0028: each metric scored on test goes in as ``test_<name>``;
+        the names logged before it keep their values, and a metric with no
+        value on test logs nothing (a 0 would read as a score)."""
+        model = _quick_train_adapter(lgb_handles, training_parameters)
+        evaluation_results = {
+            "overall_map": 0.75,
+            "per_item_map_attr": {"exchange_fx": 0.8},
+            "n_queries": 10,
+            "n_excluded_queries": 2,
+            "snap_dates": ["2025-01-31"],
+            "metrics": {"mean_ap": 0.75, "macro_per_item_map": 0.6},
+            "metrics_not_computed": {"pooled_average_precision": "why"},
+            "selection_metric": "macro_per_item_map",
+            "hpo_objective": "pooled_average_precision",
+        }
+        params = {**training_parameters, "mlflow": {
+            "experiment_name": "test_metrics_names",
+            "tracking_uri": str(tmp_path / "mlruns"),
+        }}
+
+        log_experiment(model, {}, 123, evaluation_results, {}, {}, {}, params)
+
+        import mlflow
+        mlflow.set_tracking_uri(str(tmp_path / "mlruns"))
+        experiment = mlflow.get_experiment_by_name("test_metrics_names")
+        run = mlflow.search_runs(experiment_ids=[experiment.experiment_id]).iloc[0]
+        assert run["metrics.test_mean_ap"] == 0.75
+        assert run["metrics.test_macro_per_item_map"] == 0.6
+        assert "metrics.test_pooled_average_precision" not in run.index
+        assert run["metrics.overall_map"] == 0.75
+        assert run["metrics.map_attr_exchange_fx"] == 0.8
+        assert run["metrics.n_queries"] == 10
+        assert run["metrics.n_excluded_queries"] == 2
+
     def test_mlflow_failure_does_not_raise(
         self, lgb_handles, training_parameters, tmp_path, monkeypatch, caplog
     ):
@@ -815,9 +852,7 @@ def test_tune_defaults_ranking_metric(monkeypatch):
     # patched there; nodes.get_adapter still exists but the HPO path no
     # longer reads it.
     monkeypatch.setattr(hpo_scoring, "get_adapter", lambda algo: FakeAdapter())
-    monkeypatch.setattr(
-        hpo_scoring, "compute_mean_ap", lambda g, i, y, p, ev=(): 0.5,
-    )
+    monkeypatch.setattr(hpo_scoring, "_hpo_score", lambda *a, **kw: 0.5)
 
     def fake_extract(handle, meta, params, **kw):
         X = np.zeros((4, 2)); y = np.array([1, 0, 1, 0])

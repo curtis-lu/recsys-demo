@@ -404,6 +404,19 @@ class TestComputeModelVersion:
         v_diag = compute_model_version(with_diag, "ds123456", "tr123456")
         assert v_base == v_diag
 
+    def test_model_version_and_search_id_invariant_to_test_metrics(self):
+        """ADR-0028: the scored months and the selection metric sit in a
+        top-level block so that choosing them never mints a new version or
+        restarts an HPO search."""
+        base = {"training": {"algorithm": "lightgbm", "hpo_objective": "mean_ap"}}
+        scored = {**base, "test_metrics": {
+            "snap_date": ["2026-01-31"], "selection_metric": "macro_per_item_map",
+            "metrics": ["pooled_average_precision"]}}
+        assert compute_model_version(base, "ds123456", "tr123456") == \
+            compute_model_version(scored, "ds123456", "tr123456")
+        assert compute_search_id(base, "ds123456", "tr123456") == \
+            compute_search_id(scored, "ds123456", "tr123456")
+
 
 class TestWriteManifest:
     def test_writes_json_file(self, tmp_path):

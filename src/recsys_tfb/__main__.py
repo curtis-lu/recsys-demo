@@ -26,6 +26,7 @@ from recsys_tfb.core.consistency import (
     candidate_feature_table_inference_errors,
     merged_etl_variables,
     missing_test_month_errors,
+    scoring_param_errors,
     parse_etl_var_flags,
     post_training_snap_date_errors,
     prediction_quality_param_errors,
@@ -1506,8 +1507,15 @@ def training(
     # the whole HPO search. Off the aggregator for the same reason: the dataset
     # command runs without one. Collected with A26 because both judge this one
     # key (they cannot both fire — an empty list has no second spelling).
+    #
+    # (A53) the test_metrics block (ADR-0028): the scored months (a non-empty
+    # subset of test_snap_dates, no month spelled two ways) and the metric
+    # names. Collected here because the scored months are judged against this
+    # same key, and off the aggregator for the same reason: only training
+    # reads the block.
     test_month_errors = (
         missing_test_month_errors(params) + duplicate_test_month_errors(params)
+        + scoring_param_errors(params)
     )
     if test_month_errors:
         for line in test_month_errors:
