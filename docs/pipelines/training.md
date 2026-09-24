@@ -352,7 +352,26 @@ test_metrics:
 compute_test_metrics: scoring ['mean_ap', 'macro_per_item_map'] on ['2026-01-31'] (selection metric macro_per_item_map, HPO objective macro_per_item_map)
 ```
 
-**二元預測類（`pooled_average_precision`、`macro_per_item_average_precision`）在 test 上還算不出來。** 它們在 test 上的算法還沒實作。被要到時（當 HPO 目標、選版指標、或列在 `metrics`），`evaluation_results.json` 不給值，在 `metrics_not_computed` 寫明原因，log 印一行 warning，pipeline 照樣跑完，也不擋任何設定。HPO 目標是二元預測類時（例如廣告示例），選版指標沒寫就跟著它，所以在算法補上之前訓練的版本，都沒有選版指標的值；算法補上之後，對現在設定算出的版本跑一次 `--only-node compute_test_metrics` 就能補上，不必重訓；設定已經改過的舊版本要先還原設定，步驟與坑見 [ADR-0028](../adr/0028-test-metrics-set-by-config.md)〈後果〉。
+**二元預測類（`pooled_average_precision`、`macro_per_item_average_precision`）在 test 上怎麼算。** 定義跟 HPO 在 val 上用的完全相同（scikit-learn 的 average precision）：每一筆候選是一題「會不會是正例」，不分 query group；同一個分數是同一個門檻；每一列用 `zero_positive_group_weight` 當權重，所以留下來的無正例 query group 跟 val 上一樣算 `1 / r` 次。差別只在 test 的預測已經在 Hive，所以用 Spark 精確算（只用內建函式），不搬回 driver。兩份程式靠對帳測試綁在一起（`tests/test_pipelines/test_training/test_compute_test_metrics.py`）。
+
+- `pooled_average_precision`：全部候選一起按分數排。為了不把所有資料擠進同一個 partition，先按分數切成 `spark.sql.shuffle.partitions` 段（同一個分數一定在同一段），每段的正例權重和與權重和交給 driver 算出各段開頭的累計，再回各段內累加。3 次 Spark action。
+- `macro_per_item_average_precision`：每個 item 的候選各自按分數排、各算一個值，再對 item 平均；沒有正例的 item 不進平均。1 次 Spark action。
+- 沒有人要的那一趟不跑。
+
+**前提：test 要留下沒有正例的 query group。** 也就是 `dataset.test_zero_positive_group_ratio` > 0；沒留的話，test 的母體跟 val 不同，算出來的數字跟 HPO 在 val 上挑參數的那個數字比不了。這個比例在兩個地方看：
+
+- **每個指令的入口**看現在的設定（A54，跟 A48 同一個位置）。比例在 dataset pipeline 生效，所以連 dataset 指令都會擋，免得用錯的比例建資料。
+- **training 入口**在決定好要讀哪個 dataset 版本之後、pipeline 開跑之前，讀那個版本 `manifest.json` 記下的比例（沒寫這個鍵、或沒有 manifest，都當 0）。擋的是「設定已經調高，讀到的卻是比例 0 時建的舊資料」：改了比例沒重跑 dataset、`data/dataset/latest` 還指著舊版本，或用 `--base-dataset-version` 指了舊版本。在 HPO 之前就擋下。
+
+兩處的處理一樣：
+
+| 設定 | test 沒留無正例的 query group 時 |
+|---|---|
+| 選版指標是二元預測類（明寫的，或沒寫、跟著二元預測類的 HPO 目標） | 報錯停下。訊息給兩個解法：把 `dataset.test_zero_positive_group_ratio` 調到 > 0（會換 dataset 版本，要重建資料、重新訓練；是舊資料的情況就是重跑 dataset），或把 `test_metrics.selection_metric` 明寫成排序類 |
+| `metrics` 裡列了二元預測類 | 報錯停下：明確要了，就必須算得出來。解法是調高比例，或從 `metrics` 拿掉 |
+| 只有 HPO 目標是二元預測類（選版指標明寫成排序類） | 不擋。`evaluation_results.json` 不給這個值，在 `metrics_not_computed` 寫明原因，log 印一行 warning |
+
+conf 預設的比例是 0，HPO 目標是二元預測類的設定升級後會被擋（選版指標跟著變成二元預測類）；照上表任一解法處理。廣告示例的 test 有留（比例 0.5），選版指標跟著 HPO 目標是 `pooled_average_precision`，從這一版起有值。這一版之前訓練的版本沒有這個值；對現在設定算出的版本跑一次 `--only-node compute_test_metrics` 就能補上，不必重訓。設定已經改過的舊版本要先還原設定，步驟與坑見 [ADR-0028](../adr/0028-test-metrics-set-by-config.md)〈後果〉。
 
 **排序類的兩個指標怎麼算。** 跟報表 `map@all` 同一套排名與同分規則（同分照 item 升冪），每個 query group 的 AP 不截斷，所以不需要 K：`mean_ap` 就是 `overall_map`，`macro_per_item_map` 是 `per_item_map_attr` 對 item 的簡單平均。全部只要 3 次 Spark action（數 query group、算每組的 AP、算每個 item 的歸因）。不讀任何 `evaluation.*` 設定：以前 `evaluation.k_values` 沒寫 `"all"` 時，`overall_map` 與 per-item 歸因會靜默記成 0.0；`evaluation.metric.k`、`evaluation.item_categories`、`evaluation.query_filter` 也都不再影響這些數字。全正的 query group 照舊不排除（#376）。
 
@@ -589,7 +608,7 @@ training 不會建立或更新 `best` model alias。模型必須通過人工審�
 3. `model.txt`、`model_meta.json`、`best_params.json`、`best_iteration.json` 與 `evaluation_results.json` 均存在。
 4. `sample_weight_report.json` 沒有未預期的 `unmatched_keys`。
 5. `training_eval_predictions` 的本次 `model_version` partition 有資料，entity、time、item 與 label 範圍合理。
-6. `evaluation_results.json` 的 `n_queries` 大於零，`snap_dates` 是你要的計分月份，`overall_map` 與 per-item attribution 可合理解讀；`metrics_not_computed` 裡的指標是預期中的（目前只有二元預測類）。
+6. `evaluation_results.json` 的 `n_queries` 大於零，`snap_dates` 是你要的計分月份，`overall_map` 與 per-item attribution 可合理解讀；`metrics_not_computed` 通常是空的，只有「選版指標明寫成排序類、HPO 目標是二元預測類、test 沒留無正例的 query group」時會有那個 HPO 目標（§3.7）。
 7. diagnostics 開啟時，檢查 dead features、高 null／single-value features，以及 SHAP 抽樣覆蓋是否足夠；`item_idiosyncrasy` 中偏離度高的 item 表示共用模型依賴不同特徵組合，是評估 per-item 或兩階段模型的起點；`top_features_positive` 可對照申辦客戶與整體候選的驅動特徵差異。
 
 範例查詢：

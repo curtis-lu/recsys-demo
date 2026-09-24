@@ -26,6 +26,9 @@ Layered structure (each layer has a single responsibility):
     Training's test scoring (ADR-0028), apart from the four layers
         count_query_groups_by_time     query group counts + time values present
         compute_untruncated_ap         mAP and per-item attribution, no K
+        compute_pooled_average_precision / compute_macro_per_item_average_precision
+                                       the binary-prediction metrics, exact,
+                                       as HPO scores them on val
 
 The evaluation report and the popularity baseline are the callers of
 ``compute_all_metrics`` / ``compute_overall_per_item``. Training scored its test
@@ -83,6 +86,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.window import WindowSpec
 
 from recsys_tfb.core.consistency import (
+    ZERO_POSITIVE_GROUP_WEIGHT_COL,
     item_category_column,
     item_list_counted_from_data,
 )
@@ -1564,3 +1568,223 @@ def compute_untruncated_ap(
         overall_map=float(overall) if overall is not None else 0.0,
         per_item_map_attr={str(r[item_col]): float(r["_attr"]) for r in per_item},
     )
+
+
+# ---------------------------------------------------------------------------
+# The binary-prediction metrics on test (ADR-0028 decision 4)
+# ---------------------------------------------------------------------------
+#
+# HPO scores these on val with scikit-learn's ``average_precision_score``
+# (``evaluation/metrics.py``); test's predictions are already in Hive, so the
+# same definition is computed here, exactly, with Spark's built-in functions.
+# Every candidate row is one yes/no prediction, query groups ignored. Per
+# distinct score s, from the highest down:
+#
+#     precision(s) = (positive weight scored >= s) / (weight scored >= s)
+#     AP           = sum over s of  positive weight at s * precision(s)
+#                    / total positive weight
+#
+# which is scikit-learn's ``sum((R_n - R_{n-1}) * P_n)``: a tied score is one
+# threshold, whatever order its rows arrive in, and each row weighs its
+# ``zero_positive_group_weight`` (1, or 1 / r on a kept group holding no
+# positive). A row's share of its threshold's term is ``positive weight of the
+# row * precision(s)``, so summing that over the rows gives AP's numerator: a
+# RANGE window frame (every row scored >= this one, ties included) is what
+# gives each row its threshold's precision, where a ROWS frame would split a
+# tie into as many thresholds as it has rows.
+
+
+def _binary_prediction_rows(
+    frame: SparkDataFrame, parameters: dict, *keep: str,
+) -> SparkDataFrame:
+    """Score, weight and positive weight per row, plus the columns ``keep``.
+
+    The weight is ``ZERO_POSITIVE_GROUP_WEIGHT_COL``, never 1: these metrics
+    are only computed when test kept query groups holding no positive (A54),
+    and the column is how those groups count ``1 / r`` times, as they do on
+    val. Its absence means the table was not written under a positive test
+    ratio (A45 makes the catalog declare it), so it raises rather than count
+    each row once — a number for a different population, with nothing to say
+    so.
+    """
+    if ZERO_POSITIVE_GROUP_WEIGHT_COL not in frame.columns:
+        raise ValueError(
+            f"the binary-prediction metrics weight every row by "
+            f"{ZERO_POSITIVE_GROUP_WEIGHT_COL!r}, and the test predictions have "
+            f"no such column: they were not written under a positive "
+            f"dataset.test_zero_positive_group_ratio (A45 makes the catalog "
+            f"entry declare it)."
+        )
+    schema = get_schema(parameters)
+    weight = F.col(ZERO_POSITIVE_GROUP_WEIGHT_COL).cast("double")
+    return frame.select(
+        *keep,
+        F.col(schema["label"]).alias("_label"),
+        F.col(schema["score"]).cast("double").alias("_score"),
+        weight.alias("_w"),
+        (F.col(schema["label"]).cast("double") * weight).alias("_pos_w"),
+    )
+
+
+def _null_weight_count() -> "F.Column":
+    """Rows whose weight is NULL — counted inside an aggregation the metric
+    runs anyway, so the check costs no action of its own."""
+    return F.sum(F.when(F.col("_w").isNull(), 1).otherwise(0)).alias("_n_null_w")
+
+
+def _require_weights_and_a_positive(n_null_w, total_pos, metric: str) -> None:
+    """Pre-check on the rows: every one weighted, and some positive.
+
+    A NULL weight is what training writes when test kept no zero-positive
+    group while the catalog declares the column; summing it would drop that
+    row in silence. No positive row leaves average precision undefined, and
+    the val side raises there too (``metrics._require_a_positive_row``).
+    """
+    if n_null_w:
+        raise ValueError(
+            f"{metric}: {int(n_null_w)} test prediction row(s) hold a NULL "
+            f"{ZERO_POSITIVE_GROUP_WEIGHT_COL}: they were written while test "
+            f"kept no query group holding no positive, so they carry no design "
+            f"weight to score by."
+        )
+    if not total_pos:
+        raise ValueError(
+            f"{metric}: test holds no positive row, so average precision is "
+            f"undefined."
+        )
+
+
+def compute_pooled_average_precision(
+    frame: SparkDataFrame, parameters: dict,
+) -> float:
+    """``pooled_average_precision`` on test: every row ranked by score in one
+    pool — the definition ``metrics.compute_pooled_average_precision`` gives
+    val. Three actions, and no partition holding every row.
+
+    Each threshold's precision needs the weight scored above it across the
+    whole table. One window over the table would give it, but a window with
+    no ``partitionBy`` moves every row into one partition. So:
+
+    1. Cut the scores, highest first, into as many segments as
+       ``spark.sql.shuffle.partitions``, at approximate quantiles (action 1).
+       A row's segment is a function of its score alone, so a tied score is
+       never split across two; only balance depends on the approximation.
+    2. Each segment's positive weight and weight, to the driver (action 2).
+    3. On the driver, each segment's head start: the sums over every segment
+       above it.
+    4. Inside each segment, the window's running sums plus the head start give
+       every threshold's precision; each row's term is summed (action 3).
+
+    The driver handles the cut points, two sums per segment and one number.
+    Pre-check: a NULL weight or no positive row raises (in action 2).
+    """
+    rows = _binary_prediction_rows(frame, parameters).cache()
+    try:
+        n_segments = int(
+            frame.sparkSession.conf.get("spark.sql.shuffle.partitions"))
+        cuts = _descending_score_cuts(rows, n_segments)
+        segment = F.lit(len(cuts))
+        if cuts:
+            branches = F.when(F.col("_score") >= F.lit(cuts[0]), F.lit(0))
+            for i, cut in enumerate(cuts[1:], start=1):
+                branches = branches.when(F.col("_score") >= F.lit(cut), F.lit(i))
+            segment = branches.otherwise(F.lit(len(cuts)))
+        segmented = rows.withColumn("_seg", segment)
+
+        totals = sorted(
+            segmented.groupBy("_seg")
+            .agg(F.sum("_pos_w").alias("_pos"), F.sum("_w").alias("_all"),
+                 _null_weight_count())
+            .collect(),
+            key=lambda r: r["_seg"],
+        )
+        _require_weights_and_a_positive(
+            sum(r["_n_null_w"] for r in totals),
+            sum(r["_pos"] or 0.0 for r in totals),
+            "pooled_average_precision",
+        )
+
+        pos_before: list = []
+        all_before: list = []
+        pos_run = all_run = 0.0
+        for r in totals:
+            pos_before += [F.lit(r["_seg"]), F.lit(pos_run)]
+            all_before += [F.lit(r["_seg"]), F.lit(all_run)]
+            pos_run += r["_pos"]
+            all_run += r["_all"]
+
+        above = (
+            Window.partitionBy("_seg").orderBy(F.col("_score").desc())
+            .rangeBetween(Window.unboundedPreceding, Window.currentRow)
+        )
+        seg_key = F.col("_seg")
+        precision = (
+            (F.sum("_pos_w").over(above) + F.create_map(*pos_before)[seg_key])
+            / (F.sum("_w").over(above) + F.create_map(*all_before)[seg_key])
+        )
+        numerator = (
+            segmented.select((F.col("_pos_w") * precision).alias("_term"))
+            .agg(F.sum("_term").alias("_sum"))
+            .collect()[0]["_sum"]
+        )
+    finally:
+        rows.unpersist()
+    return float(numerator) / pos_run
+
+
+def _descending_score_cuts(rows: SparkDataFrame, n_segments: int) -> list:
+    """The ``n_segments - 1`` score quantiles, distinct and highest first —
+    one action, none for a single segment.
+
+    The relative error only moves how evenly rows spread over the segments,
+    never the metric; a quarter of a segment's share keeps them within about
+    a quarter of their size.
+    """
+    if n_segments <= 1:
+        return []
+    quantiles = rows.approxQuantile(
+        "_score", [i / n_segments for i in range(1, n_segments)],
+        0.25 / n_segments,
+    )
+    return sorted(set(quantiles or []), reverse=True)
+
+
+def compute_macro_per_item_average_precision(
+    frame: SparkDataFrame, parameters: dict,
+) -> float:
+    """``macro_per_item_average_precision`` on test: each item's rows ranked
+    by score on their own, one average precision per item, then the plain
+    mean — the definition ``metrics.compute_macro_per_item_average_precision``
+    gives val. One action.
+
+    The window is partitioned by item, so each item's running sums stay inside
+    its own partition and nothing carries across them. An item with no
+    positive row is left out of the mean, as on val. Only each item's two
+    sums leave the executors, and only the mean reaches the driver.
+    Pre-check: a NULL weight or no item with a positive raises.
+    """
+    item_col = get_schema(parameters)["item"]
+    rows = _binary_prediction_rows(frame, parameters, item_col)
+    above = (
+        Window.partitionBy(item_col).orderBy(F.col("_score").desc())
+        .rangeBetween(Window.unboundedPreceding, Window.currentRow)
+    )
+    precision = F.sum("_pos_w").over(above) / F.sum("_w").over(above)
+    per_item = (
+        rows.withColumn("_term", F.col("_pos_w") * precision)
+        .groupBy(item_col)
+        .agg(F.sum("_term").alias("_numerator"),
+             F.sum("_pos_w").alias("_pos"),
+             F.max("_label").alias("_max_label"),
+             _null_weight_count())
+    )
+    has_positive = F.col("_max_label") > 0
+    row = per_item.agg(
+        F.avg(F.when(has_positive, F.col("_numerator") / F.col("_pos")))
+        .alias("_macro"),
+        F.sum(F.when(has_positive, 1).otherwise(0)).alias("_n_items"),
+        F.sum("_n_null_w").alias("_n_null_w"),
+    ).collect()[0]
+    _require_weights_and_a_positive(
+        row["_n_null_w"], row["_n_items"], "macro_per_item_average_precision")
+    return float(row["_macro"])

@@ -52,7 +52,12 @@ import optuna
 import pandas as pd
 import pyarrow.dataset as pads
 
-from recsys_tfb.core.consistency import REBUILD_SNAP_DATES_KEY, scoring_snap_dates
+from recsys_tfb.core.consistency import (
+    DATASET_TEST_RATIO_KEY,
+    REBUILD_SNAP_DATES_KEY,
+    binary_test_metrics_verdict,
+    scoring_snap_dates,
+)
 from recsys_tfb.core.group_utils import (
     default_metric_for_objective,
     drop_zero_positive_groups,
@@ -1426,8 +1431,8 @@ def compute_test_metrics(
         metrics            {metric: value} for every metric computed on test
         metrics_not_computed
                            {metric: reason} for the ones asked for with no
-                           value (a binary-prediction metric, until its Spark
-                           algorithm lands)
+                           value: the binary-prediction HPO objective when
+                           test cannot score it (A54)
         selection_metric / hpo_objective
                            the names this run scored under
 
@@ -1437,6 +1442,8 @@ def compute_test_metrics(
     K ``"all"`` never truncated at. So nothing under ``evaluation.*`` is read —
     ``k_values`` without ``"all"`` used to log 0.0 for two of them — and the
     three Spark actions are all the four values and both ranking metrics cost.
+    Each binary-prediction metric asked for costs a pass of its own, exact and
+    weighted as HPO's val score is (``metrics_spark``; ADR-0028 decision 4).
 
     predict_manifest is an in-DAG dependency only — its content is logged
     for observability but the actual data is read back from
@@ -1447,9 +1454,11 @@ def compute_test_metrics(
     *previous* run's copy rather than re-running predict. The trade is argued
     once, at that entry in ``conf/base/catalog.yaml``.
 
-    The first ``raise`` is a **runtime backstop** for A36 / A53, which stop
-    the command before it when no month would be scored. The second is a
-    **pre-check** on the table: a scored month with no prediction.
+    The first two ``raise`` are **runtime backstops**: for A36 / A53, which
+    stop the command before it when no month would be scored, and for A54,
+    which stops it when a binary-prediction metric the run must record cannot
+    be scored on this test. The third is a **pre-check** on the table: a
+    scored month with no prediction.
     """
     logger.info("compute_test_metrics: starting — manifest=%s", predict_manifest)
     time_col = get_schema(parameters)["time"]
@@ -1499,6 +1508,25 @@ def compute_test_metrics(
         "objective %s)", wanted, months, selected_by, hpo_objective,
     )
 
+    # Decision — a binary-prediction metric is scored only when test kept the
+    # query groups holding no positive, in the config and in the dataset
+    # version this run read (the CLI passes that version's ratio): otherwise
+    # its value would be another population's than the val score HPO chose by.
+    # The HPO objective alone is then withheld with the reason; the selection
+    # metric or a name in test_metrics.metrics stops the run — A54 already
+    # stopped it at the command's entry, so this is the backstop.
+    verdict = binary_test_metrics_verdict(
+        parameters,
+        dataset_version=parameters.get("base_dataset_version"),
+        dataset_test_ratio=parameters.get(DATASET_TEST_RATIO_KEY),
+    )
+    if verdict.errors:
+        raise ValueError("compute_test_metrics: " + " ".join(verdict.errors))
+    for name, reason in verdict.withheld.items():
+        logger.warning(
+            "compute_test_metrics: %s has no value on test: %s", name, reason)
+    scored = [name for name in wanted if name not in verdict.withheld]
+
     with log_step(logger, "count_query_groups"):
         counts = count_query_groups_by_time(frame, parameters)
 
@@ -1523,17 +1551,14 @@ def compute_test_metrics(
             f"spelling is matched by text only: spell it as the table does."
         )
 
-    # The expensive block: each pass the wanted metrics need, once. The
-    # actions are inside metrics_spark (rule 10's "follow one level").
-    with log_step(logger, "compute_metrics"):
-        pass_results = {
-            name: run_test_pass(name, frame, parameters)
-            for name in passes_for(wanted)
-        }
-    values, not_computed = read_test_values(wanted, pass_results)
-    for name, reason in not_computed.items():
-        logger.warning(
-            "compute_test_metrics: %s has no value on test: %s", name, reason)
+    # The expensive blocks: each pass the scored metrics need, once, and none
+    # nobody asked for. The actions are inside metrics_spark (rule 10's
+    # "follow one level"); one step per pass, so each pass's time is its own.
+    pass_results = {}
+    for name in passes_for(scored):
+        with log_step(logger, "compute_metrics", test_pass=name):
+            pass_results[name] = run_test_pass(name, frame, parameters)
+    values = read_test_values(scored, pass_results)
 
     # Always there: requested_test_metrics puts both ranking metrics first,
     # which is also what keeps the four keys below present in every file.
@@ -1545,7 +1570,7 @@ def compute_test_metrics(
         "n_excluded_queries": counts.n_queries - counts.n_with_positive,
         "snap_dates": months,
         "metrics": values,
-        "metrics_not_computed": not_computed,
+        "metrics_not_computed": verdict.withheld,
         "selection_metric": selected_by,
         "hpo_objective": hpo_objective,
     }

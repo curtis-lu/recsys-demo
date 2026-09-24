@@ -42,7 +42,10 @@ from recsys_tfb.core.consistency import (
     resolved_rebuild_dates,
     train_snap_dates_errors,
     zero_positive_group_weight_declared_errors,
+    binary_test_metrics_verdict,
+    resolved_zero_positive_group_ratio,
     ConfigConsistencyError,
+    DATASET_TEST_RATIO_KEY,
     REBUILD_SNAP_DATES_KEY,
 )
 from recsys_tfb.core.schema import (
@@ -1598,6 +1601,28 @@ def training(
 
     train_v = resolve_train_variant_id(base_dir, train_variant)
 
+    # (A54) the dataset version this run reads, against what test is asked to
+    # score (ADR-0028 decision 4). validate_config_consistency already held
+    # the config to it; this catches the config raised after the data was
+    # built — a raised test ratio with no dataset rerun, `latest` pointing at
+    # an older version, or --base-dataset-version naming one. Here, not in
+    # the scoring node, so it stops before the HPO search rather than after.
+    # The node reads the same ratio (DATASET_TEST_RATIO_KEY below) for the
+    # objectives it withholds.
+    dataset_test_ratio = _dataset_version_test_ratio(base_dir)
+    logger.info(
+        "dataset version %s was built with test_zero_positive_group_ratio %s",
+        base_v, dataset_test_ratio,
+    )
+    verdict = binary_test_metrics_verdict(
+        params, dataset_version=base_v, dataset_test_ratio=dataset_test_ratio)
+    if verdict.errors:
+        for line in verdict.errors:
+            logger.error(line)
+        raise typer.Exit(code=1)
+    for name, reason in verdict.withheld.items():
+        logger.warning("%s will have no value on test: %s", name, reason)
+
     try:
         params_training = config.get_parameters_by_name("parameters_training")
     except KeyError:
@@ -1620,6 +1645,8 @@ def training(
         # Read by cache_test_model_input (drop the stale month) and by
         # predict_and_write_test_predictions (re-predict it).
         REBUILD_SNAP_DATES_KEY: rebuild,
+        # Read by compute_test_metrics (A54, above).
+        DATASET_TEST_RATIO_KEY: dataset_test_ratio,
     }
 
     pipeline_kwargs: dict = {}
@@ -1681,6 +1708,25 @@ def training(
         params_dict=params_training,
     )
     logger.info("Pipeline 'training' completed successfully")
+
+
+def _dataset_version_test_ratio(base_dir: Path) -> float:
+    """The ``dataset.test_zero_positive_group_ratio`` a dataset version was
+    built with, as its manifest records it (the dataset command writes the
+    ``parameters_dataset`` it ran with there).
+
+    An absent key reads as the default 0, through the same resolver the
+    dataset nodes drew with: a version built before the key existed kept no
+    zero-positive test group. So does an absent manifest — every dataset run
+    writes one before it starts, so a directory without one was not built by
+    it, and nothing says its test kept those groups.
+    """
+    try:
+        manifest = read_manifest(base_dir)
+    except FileNotFoundError:
+        manifest = {}
+    return resolved_zero_positive_group_ratio(
+        manifest.get("parameters") or {}, "test")
 
 
 def _dataset_versions_from_model_manifest(
