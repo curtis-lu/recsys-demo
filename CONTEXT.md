@@ -140,6 +140,24 @@ _Avoid_: 線上推論、即時評分（那是另一種推論）
 **交接包**（規劃中，尚未實作）:
 training 產出、讓框架以外的評分系統重現特徵順序與類別編號的一份檔案。
 
+### 挑參數與挑版本
+
+**HPO 目標**:
+超參數搜尋在 val 上比較每一組參數時看的指標，只在同一次訓練裡挑參數。設定鍵是 `training.hpo_objective`。
+_Avoid_: objective、訓練目標（那是 LightGBM 的學習目標 `algorithm_params.objective`）
+
+**選版指標**（ADR-0028，尚未實作）:
+在多個 model_version 之間挑出建議 promote 的那一個時所比的指標，算在 test 上；只有計分月份跟現在設定相同的版本才參加比較。沒設定時與 HPO 目標相同。
+_Avoid_: 頭號 mAP（evaluation 報表開頭的數字，不參與挑版本）
+
+**計分月份**（ADR-0028）:
+training 在 test 上算指標時納入的 time 值（設定鍵 `test_metrics.snap_date`），必須是 `dataset.test_snap_dates` 的一部分，沒設定時就是整份。名字沿用月份字樣，實際單位是 time。
+_Avoid_: test 月份（`test_snap_dates` 決定的是要預測哪些 time 值）、評估月份（那是 `evaluation.snap_date`）
+
+**test mAP**:
+training 在 test 上算的 mAP：每個 query group 的 AP 不截斷、算完再對 query group 平均，產物鍵是 `overall_map`；當 HPO 目標或選版指標時叫 `mean_ap`。
+_Avoid_: 頭號 mAP（evaluation 報表開頭的數字：每個 item 先算再平均，截斷深度看 `evaluation.metric.k`；兩者不可對帳）
+
 ### 評估
 
 **post-training 模式**:
