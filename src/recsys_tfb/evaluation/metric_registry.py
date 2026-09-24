@@ -23,17 +23,24 @@ is now adding a row.
 **What a test pass is.** Metrics that come out of the same Spark computation
 share it: asking for a second one costs nearly nothing, so the cost is
 counted per pass, not per metric. Both ranking metrics share
-:data:`RANKING_PASS` (``metrics_spark.compute_untruncated_ap``). The
-binary-prediction metrics have no test-side pass yet (#452 lands the ranking
-side first): a row with ``test_pass=None`` is reported as not computed, with
-:data:`NO_TEST_ALGORITHM` as the reason, never as a number.
+:data:`RANKING_PASS` (``metrics_spark.compute_untruncated_ap``); each
+binary-prediction metric has a pass of its own (:data:`POOLED_AP_PASS`,
+:data:`PER_ITEM_AP_PASS`), since one ranks every row in one pool and the other
+each item's rows apart. A pass no requested metric needs is not run. Every
+row has a test pass: ``tests/test_pipelines/test_training/test_hpo_scoring.py``
+checks each one, so a metric added with only its val half fails there, not at
+run time.
 
 **The same definition twice.** val scores through numpy on the driver (the
 predictions are born there), test through Spark (they are already in Hive).
-Each ranking row's two halves agree by construction of the formulas — AP with
-no truncation, ties by item — and ``tests/test_pipelines/test_training/
-test_compute_test_metrics.py`` checks the test side against the val side's
-function.
+Nothing but the tests ties the two halves: ``tests/test_pipelines/
+test_training/test_compute_test_metrics.py`` checks every row's test value
+against its val function on the same rows — ties included, and unequal
+weights for the binary-prediction ones.
+
+**Whether test can score a binary-prediction metric** is not this table's
+call: it depends on the dataset (``core/consistency.py``'s A54,
+``binary_test_metrics_verdict``).
 """
 
 from __future__ import annotations
@@ -59,8 +66,13 @@ BINARY_PREDICTION = "binary_prediction"
 #: The one Spark pass both ranking metrics come out of.
 RANKING_PASS = "ranking"
 
-#: Why a requested metric has no value on test, for a row with no test pass.
-NO_TEST_ALGORITHM = "no test-side algorithm implemented yet"
+#: The Spark pass ``pooled_average_precision`` comes out of: every row in one
+#: pool, ranked by score.
+POOLED_AP_PASS = "pooled_average_precision"
+
+#: The Spark pass ``macro_per_item_average_precision`` comes out of: each
+#: item's rows ranked on their own.
+PER_ITEM_AP_PASS = "macro_per_item_average_precision"
 
 #: ``training.hpo_objective`` when the key is absent: ``tune_hyperparameters``'
 #: own default. The conf ships ``macro_per_item_map``; the two differ on
@@ -79,15 +91,14 @@ class Metric(NamedTuple):
     ``event_keys`` (ties by item, then event) and never ``weights``; the
     binary-prediction rows read ``items`` / ``weights`` and never ``groups``.
     ``test_pass`` names the Spark pass (:func:`run_test_pass`) that scores it
-    on test, ``None`` when there is none yet; ``test_value`` reads the metric
-    off that pass's result.
+    on test; ``test_value`` reads the metric off that pass's result.
     """
 
     name: str
     family: str
     val_score: ValScorer
-    test_pass: Optional[str]
-    test_value: Optional[Callable[[Any], float]]
+    test_pass: str
+    test_value: Callable[[Any], float]
 
 
 def _macro_over_items(result: UntruncatedAp) -> float:
@@ -116,13 +127,13 @@ def _rows() -> dict[str, Metric]:
         Metric(
             "pooled_average_precision", BINARY_PREDICTION,
             lambda g, i, y, s, e, w: compute_pooled_average_precision(y, s, w),
-            None, None,
+            POOLED_AP_PASS, float,
         ),
         Metric(
             "macro_per_item_average_precision", BINARY_PREDICTION,
             lambda g, i, y, s, e, w: compute_macro_per_item_average_precision(
                 i, y, s, w),
-            None, None,
+            PER_ITEM_AP_PASS, float,
         ),
     ]
     return {row.name: row for row in rows}
@@ -142,18 +153,27 @@ RANKING_METRICS: tuple[str, ...] = tuple(
 BINARY_PREDICTION_METRICS: tuple[str, ...] = tuple(
     n for n, m in METRICS.items() if m.family == BINARY_PREDICTION)
 
-def run_test_pass(name: str, frame, parameters: Mapping):
-    """Run the Spark pass ``name`` (a ``Metric.test_pass``) on the scored
-    months' rows and return its result.
+def passes_by_name() -> dict[str, Callable]:
+    """Every Spark pass by name: what :func:`run_test_pass` dispatches to.
 
     ``metrics_spark`` is imported here, not at the top: this table is read at
-    CLI entry (A25 / A48 / A53 in ``core/consistency.py``), where neither
-    pyspark nor the Spark metrics are otherwise needed, and ``metrics_spark``
-    imports ``core/consistency`` itself.
+    CLI entry (A25 / A48 / A53 / A54 in ``core/consistency.py``), where
+    neither pyspark nor the Spark metrics are otherwise needed, and
+    ``metrics_spark`` imports ``core/consistency`` itself.
     """
-    from recsys_tfb.evaluation.metrics_spark import compute_untruncated_ap
+    from recsys_tfb.evaluation import metrics_spark
 
-    passes = {RANKING_PASS: compute_untruncated_ap}
+    return {
+        RANKING_PASS: metrics_spark.compute_untruncated_ap,
+        POOLED_AP_PASS: metrics_spark.compute_pooled_average_precision,
+        PER_ITEM_AP_PASS: metrics_spark.compute_macro_per_item_average_precision,
+    }
+
+
+def run_test_pass(name: str, frame, parameters: Mapping):
+    """Run the Spark pass ``name`` (a ``Metric.test_pass``) on the scored
+    months' rows and return its result."""
+    passes = passes_by_name()
     if name not in passes:
         raise ValueError(f"no test pass named {name!r}; known: {sorted(passes)}")
     return passes[name](frame, parameters)
@@ -214,32 +234,22 @@ def requested_test_metrics(parameters: Mapping) -> list[str]:
 
 
 def passes_for(names: Sequence[str]) -> list[str]:
-    """The test passes ``names`` need, each once, in first-needed order;
-    names with no test pass need none."""
+    """The test passes ``names`` need, each once, in first-needed order."""
     needed: list[str] = []
     for name in names:
         if name not in METRICS:
             raise _unknown(name, "test metric")
-        test_pass = METRICS[name].test_pass
-        if test_pass is not None and test_pass not in needed:
-            needed.append(test_pass)
+        if METRICS[name].test_pass not in needed:
+            needed.append(METRICS[name].test_pass)
     return needed
 
 
 def read_test_values(
     names: Sequence[str], pass_results: Mapping[str, Any],
-) -> tuple[dict[str, float], dict[str, str]]:
-    """``(values, not_computed)`` for ``names``: each metric read off its
-    pass's result, or the reason it has no value (``NO_TEST_ALGORITHM``).
-
-    ``pass_results`` holds one result per name in :func:`passes_for`
-    ``(names)``."""
-    values: dict[str, float] = {}
-    not_computed: dict[str, str] = {}
-    for name in names:
-        row = METRICS[name]
-        if row.test_pass is None:
-            not_computed[name] = NO_TEST_ALGORITHM
-            continue
-        values[name] = float(row.test_value(pass_results[row.test_pass]))
-    return values, not_computed
+) -> dict[str, float]:
+    """Each of ``names`` read off its pass's result; ``pass_results`` holds
+    one result per name in :func:`passes_for` ``(names)``."""
+    return {
+        name: float(METRICS[name].test_value(pass_results[METRICS[name].test_pass]))
+        for name in names
+    }

@@ -193,10 +193,13 @@ test_metrics:
   # 不寫＝dataset.test_snap_dates 全部。
   # snap_date: "2026-01-31"
   # 在排序類（mean_ap、macro_per_item_map，一律會算）之外另外要算的指標。
-  # 二元預測類在 test 上的算法還沒實作：列了只會記下「沒有值」與原因。
+  # 列二元預測類（pooled_average_precision、macro_per_item_average_precision）
+  # 時，dataset.test_zero_positive_group_ratio 必須 > 0，否則每個指令的入口
+  # 都會擋（A54）。
   # metrics: []
   # 選版指標：promote 挑版本時比的那個指標。不寫＝實際生效的 HPO 目標
-  # （training.hpo_objective；沒寫時是 mean_ap）。
+  # （training.hpo_objective；沒寫時是 mean_ap）。它是二元預測類時（明寫的或
+  # 跟著 HPO 目標來的），同樣要 dataset.test_zero_positive_group_ratio > 0（A54）。
   # selection_metric: macro_per_item_map
 
 mlflow:

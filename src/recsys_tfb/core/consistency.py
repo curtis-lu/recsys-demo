@@ -529,7 +529,10 @@ Layer 1 — config-static (implemented here; aggregated by
   kept zero-positive group once instead of ``1 / r`` times. Only the test ratio
   counts — the table holds test predictions alone. Predicate:
   ``zero_positive_group_weight_declared_errors``. NOT aggregated, for A28's
-  reason — it needs the resolved catalog — and wired beside A28/A39.
+  reason — it needs the resolved catalog — and wired beside A28/A39. Runtime
+  backstop on training's test scoring: the binary-prediction passes in
+  ``evaluation/metrics_spark.py`` raise on a missing column or a NULL weight
+  rather than count each row once.
 * A46 — ``evaluation.report.sections.prediction_quality`` on under
   ``--post-training`` while ``dataset.test_zero_positive_group_ratio`` is 0 (its
   default). That table is the test table scored, and the dataset pipeline
@@ -619,6 +622,20 @@ Layer 1 — config-static (implemented here; aggregated by
   ``scoring_param_errors`` (returns errors; the training command raises,
   collected with A26/A36 before Spark starts). NOT aggregated, A24's reason
   (issue #158): only training reads the block, which is in no version ID.
+* A54 — a binary-prediction metric the run must record on test (the
+  selection metric, written or following the HPO objective, or a name in
+  ``test_metrics.metrics``) while test keeps no query group holding no
+  positive: ``dataset.test_zero_positive_group_ratio`` is 0 in the config, or
+  in the dataset version training reads (ADR-0028 decision 4). The number
+  would be another population's than the val score HPO chose by. The HPO
+  objective alone is withheld with a reason instead of stopping anything.
+  Predicate: ``binary_test_metrics_verdict`` (errors and withheld reasons
+  from one decision). Aggregated by ``validate_config_consistency``, for
+  A48's reason — the ratio takes effect in the dataset pipeline; wired again
+  at the training entry once the dataset version is resolved, against that
+  version's manifest (the only place that knows it), and read by
+  ``compute_test_metrics`` for the withheld reasons and as the runtime
+  backstop.
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -965,6 +982,13 @@ from recsys_tfb.core.schema import (
 #: the value because two pipelines read it — dataset's test-branch nodes and
 #: training's cache/predict nodes — and pipelines never import each other.
 REBUILD_SNAP_DATES_KEY = "_rebuild_snap_dates"
+
+#: ``parameters`` key the training command hands ``compute_test_metrics`` the
+#: test ratio the dataset version it reads was built with (read off that
+#: version's manifest), for A54's second place (:func:`
+#: binary_test_metrics_verdict`). Absent — a direct call — the version is the
+#: one the config builds.
+DATASET_TEST_RATIO_KEY = "_dataset_test_zero_positive_group_ratio"
 
 
 class ConsistencyError(ValueError):
@@ -2591,6 +2615,163 @@ def hpo_objective_population_errors(parameters: dict) -> list[str]:
     ]
 
 
+class BinaryTestMetricsVerdict(NamedTuple):
+    """What :func:`binary_test_metrics_verdict` decides: ``errors`` stop the
+    command (A54); ``withheld`` maps a metric scored with no value on test to
+    the reason."""
+
+    errors: list
+    withheld: dict
+
+
+def binary_test_metrics_verdict(
+    parameters: Mapping,
+    dataset_version: str | None = None,
+    dataset_test_ratio: float | None = None,
+) -> BinaryTestMetricsVerdict:
+    """A54 — a binary-prediction metric scored on test needs test to keep the
+    query groups holding no positive, weighted as val's are (ADR-0028
+    decision 4).
+
+    Those metrics score every test row as one yes/no prediction, and HPO chose
+    by the same number on val, where A48 makes the population keep those
+    groups. Test keeps them only with ``dataset.test_zero_positive_group_ratio``
+    above 0 twice over: in the config, which decides whether the predictions
+    are written with ``ZERO_POSITIVE_GROUP_WEIGHT_COL``; and in the dataset
+    version the run reads, which decides whether the rows are there. Without
+    them the number is a different population's, not comparable with val's.
+
+    What is asked for decides what happens, the same at both places this runs:
+
+    * the selection metric (``test_metrics.selection_metric``, or the
+      effective HPO objective it follows when unset) or a name in
+      ``test_metrics.metrics`` → an error naming both ways out. Promote ranks
+      by the first and the second was asked for by name; a value that never
+      comes would let promote fail quietly later.
+    * only the HPO objective (the selection metric written as a ranking
+      metric) → withheld with the reason: it joins the scored set on its own,
+      and is not worth a test rebuild the user never asked for.
+
+    ``dataset_version`` / ``dataset_test_ratio`` are the dataset version a
+    training run reads and the test ratio its manifest records; left out, the
+    version is the one the config builds. Where this runs: aggregated by
+    ``validate_config_consistency`` (A48's reason — the ratio takes effect in
+    the dataset pipeline, so the dataset command stops too); at the training
+    entry once the dataset version is resolved, before the pipeline runs
+    (the config raised, the data built before it); and in
+    ``compute_test_metrics`` for the withheld reasons and as the runtime
+    backstop. A ratio A44 rejects is left to A44; a malformed
+    ``test_metrics`` block or unknown names, to A53 / A25.
+    """
+    # Imported here, not at the top: core/ has no import-time dependency on
+    # the layers above it, and evaluation/metrics_spark imports this module
+    # (the A15 precedent for diagnosis/).
+    from recsys_tfb.evaluation.metric_registry import (
+        BINARY_PREDICTION_METRICS,
+        effective_hpo_objective,
+        selection_metric,
+    )
+
+    clean = BinaryTestMetricsVerdict([], {})
+    block = parameters.get("test_metrics")
+    if block is not None and not isinstance(block, Mapping):
+        return clean
+    ds = parameters.get("dataset") or {}
+    key = _zero_positive_group_ratio_key("test")
+    if key in ds and not _is_legal_zero_positive_group_ratio(ds[key]):
+        return clean
+    configured = resolved_zero_positive_group_ratio(parameters, "test")
+    if dataset_test_ratio is None:
+        dataset_test_ratio = configured
+    if configured > 0.0 and dataset_test_ratio > 0.0:
+        return clean
+
+    selected = selection_metric(parameters)
+    written = (block or {}).get("selection_metric") is not None
+    listed = (block or {}).get("metrics")
+    if not isinstance(listed, list) or not all(isinstance(m, str) for m in listed):
+        listed = []
+    blocked_by = []
+    if selected in BINARY_PREDICTION_METRICS:
+        blocked_by.append(
+            f"test_metrics.selection_metric={selected!r}" if written else
+            f"the selection metric {selected!r} (test_metrics.selection_metric "
+            f"is unset, so it follows training.hpo_objective)"
+        )
+    asked = [m for m in listed if m in BINARY_PREDICTION_METRICS]
+    if asked:
+        blocked_by.append(f"test_metrics.metrics lists {asked}")
+
+    # Why test cannot score them, and how to make it: three situations, each
+    # told as it is — the config's ratio decides whether the predictions carry
+    # the weight column, the dataset version's whether the rows are there.
+    written_ratio = ds.get(key, ZERO_POSITIVE_GROUP_RATIO_DEFAULTS["test"])
+    if configured > 0.0:
+        cause = (
+            f"dataset version {dataset_version!r}, which this training run "
+            f"reads, was built with dataset.{key} 0 (as its manifest records "
+            f"it; a manifest or a key that is missing reads as 0) while the "
+            f"config says {configured!r}: its test kept no query group holding "
+            f"no positive"
+        )
+        rebuild = (
+            f"rerun the dataset command so a version built with dataset.{key} "
+            f"{configured!r} exists (training reads data/dataset/latest), or "
+            f"pass one as --base-dataset-version"
+        )
+    elif dataset_test_ratio > 0.0:
+        cause = (
+            f"dataset.{key} is {written_ratio!r} in the config, so the test "
+            f"predictions are written without {ZERO_POSITIVE_GROUP_WEIGHT_COL}, "
+            f"whatever dataset version {dataset_version!r} kept"
+        )
+        rebuild = (
+            f"set dataset.{key} back to {dataset_test_ratio!r}, the ratio that "
+            f"version was built with"
+        )
+    else:
+        cause = (
+            f"dataset.{key} is {written_ratio!r}: the dataset pipeline drops "
+            f"every test query group holding no positive"
+        )
+        rebuild = (
+            f"set dataset.{key} above 0 (it busts base_dataset_version: rerun "
+            f"dataset, then training)"
+        )
+
+    errors = []
+    if blocked_by:
+        # Either the data changes, or everything that asked for a binary
+        # metric stops asking — all of it, so the second way is one remedy.
+        stop_asking = []
+        if selected in BINARY_PREDICTION_METRICS:
+            stop_asking.append(
+                "set test_metrics.selection_metric to a ranking metric "
+                "(mean_ap / macro_per_item_map)")
+        if asked:
+            stop_asking.append(
+                f"take {'it' if len(asked) == 1 else 'them'} out of "
+                f"test_metrics.metrics")
+        errors.append(
+            f"A54: {' and '.join(blocked_by)} asks test for a binary-prediction "
+            f"metric, which scores every test row weighted as val's are, but "
+            f"{cause} — so the number would be another population's, not "
+            f"comparable with the one HPO chose by on val. Either {rebuild}; "
+            f"or {' and '.join(stop_asking)}."
+        )
+
+    withheld = {}
+    objective = effective_hpo_objective(parameters)
+    if objective in BINARY_PREDICTION_METRICS and objective != selected \
+            and objective not in asked:
+        withheld[objective] = (
+            f"not scored on test: {cause}, so the value would not be "
+            f"comparable with val's. It is here only as the HPO objective; the "
+            f"selection metric is {selected!r}. To score it, {rebuild}."
+        )
+    return BinaryTestMetricsVerdict(errors, withheld)
+
+
 #: ``evaluation.query_filter``'s keys and their off-state (#376). The only key
 #: today is the switch A49 checks; #396's random-traffic switch is expected to
 #: join this subtree later, at which point it gets its own entry here.
@@ -3377,6 +3558,8 @@ def validate_config_consistency(parameters: dict) -> None:
     errors.extend(zero_positive_group_ratio_errors(parameters))
 
     errors.extend(hpo_objective_population_errors(parameters))
+
+    errors.extend(binary_test_metrics_verdict(parameters).errors)
 
     errors.extend(dataset_source_quality_check_errors(parameters))
 

@@ -100,6 +100,9 @@ JSON_EXTRA_FIELDS = (
     # used to sit inside it stays visible (log_step appends every field to the
     # console message) and becomes summable.
     "n_boot", "n_items", "n_rows", "n_pairs",
+    # Which Spark pass of training's test scoring a ``compute_metrics`` step
+    # timed (``metric_registry``: one per pass, so each pass's time is its own).
+    "test_pass",
     # SparkSession lifecycle
     "application_id", "app_name", "last_application_id",
     "seconds_since_last_use", "catalog_implementation",

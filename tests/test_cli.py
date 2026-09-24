@@ -4300,3 +4300,102 @@ class TestPopularityPeriodPlan:
             _popularity_period_plan(
                 self._catalog(spark, []), self._PARAMS,
                 eval_dates=["2026-01-31"], rebuild=["2025-04-30"])
+
+
+class TestTrainingReadsTheDatasetVersionsTestRatioA54:
+    """A54's second place (ADR-0028 decision 4): the config's test ratio was
+    raised, but the dataset version training reads was built before that. The
+    training command reads that version's manifest once the version is
+    resolved, and stops before the Spark cold start and the pipeline — before
+    the HPO search — rather than let the selection metric come out with no
+    value."""
+
+    def _run(self, tmp_path, manifest, training, test_metrics=None):
+        _setup_conf(
+            tmp_path,
+            params_dataset={"dataset": {
+                **_trainable_dataset(),
+                # A48 wants val to keep them for a binary HPO objective.
+                "val_zero_positive_group_ratio": 0.5,
+                "test_zero_positive_group_ratio": 0.5,
+            }},
+            # test_metrics sits in this file in conf/base too.
+            params_training={
+                "training": training,
+                **({"test_metrics": test_metrics} if test_metrics else {}),
+            },
+        )
+        base_dir, _ = _make_base_and_train_variant(tmp_path, base_v="abc12345")
+        if manifest is not None:
+            (base_dir / "manifest.json").write_text(json.dumps(manifest))
+
+        added = {}
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls, \
+                    patch("recsys_tfb.utils.spark.get_or_create_spark_session") \
+                    as mock_spark, \
+                    patch("recsys_tfb.__main__.Runner") as mock_runner:
+                mock_catalog_cls.return_value = mock_catalog_cls
+                mock_catalog_cls.add = added.__setitem__
+                # No training_eval_predictions declared: A28/A39/A45 pass on
+                # None, as in TestCLI.
+                mock_catalog_cls.get_dataset = lambda *a, **kw: None
+                result = runner.invoke(app, ["training"])
+        finally:
+            os.chdir(old_cwd)
+        self.spark = mock_spark
+        return result, mock_runner, added
+
+    @pytest.mark.parametrize("manifest", [
+        {"parameters": {"dataset": {"test_zero_positive_group_ratio": 0}}},
+        {"parameters": {"dataset": {"sample_ratio": 0.1}}},
+        None,
+    ], ids=["recorded-0", "key-absent", "no-manifest"])
+    def test_a_version_built_at_ratio_0_stops_before_the_pipeline(
+            self, tmp_path, manifest):
+        result, mock_runner, _ = self._run(
+            tmp_path, manifest, {"hpo_objective": "pooled_average_precision"})
+
+        assert result.exit_code == 1
+        # Read back from result.output, not caplog: setup_logging clears the
+        # root handlers, caplog's included. The version is named: the config
+        # passed validate_config_consistency, so this is the manifest half.
+        assert re.search(r"A54: .*dataset version 'abc12345'", result.output), (
+            result.output)
+        self.spark.assert_not_called()
+        mock_runner.return_value.run.assert_not_called()
+
+    def test_a_version_built_above_0_runs_and_hands_its_ratio_on(self, tmp_path):
+        from recsys_tfb.core.consistency import DATASET_TEST_RATIO_KEY
+
+        result, mock_runner, added = self._run(
+            tmp_path,
+            {"parameters": {"dataset": {"test_zero_positive_group_ratio": 0.25}}},
+            {"hpo_objective": "pooled_average_precision"},
+        )
+
+        assert result.exit_code == 0, result.output
+        mock_runner.return_value.run.assert_called_once()
+        assert added["parameters"].load()[DATASET_TEST_RATIO_KEY] == 0.25
+
+    def test_a_ranking_selection_metric_is_not_stopped(self, tmp_path):
+        """Only the HPO objective is binary: the run goes on, and the node is
+        handed the ratio it withholds that objective by."""
+        from recsys_tfb.core.consistency import DATASET_TEST_RATIO_KEY
+
+        result, mock_runner, added = self._run(
+            tmp_path,
+            {"parameters": {"dataset": {"test_zero_positive_group_ratio": 0}}},
+            {"hpo_objective": "pooled_average_precision"},
+            test_metrics={"selection_metric": "mean_ap"},
+        )
+
+        assert result.exit_code == 0, result.output
+        mock_runner.return_value.run.assert_called_once()
+        assert added["parameters"].load()[DATASET_TEST_RATIO_KEY] == 0.0
+        # Said at the entry, hours before the node records it.
+        assert re.search(
+            r"pooled_average_precision will have no value on test: .*"
+            r"'abc12345'", result.output), result.output

@@ -149,9 +149,7 @@ class TestMetricRegistry:
                 weights=self.W,
             ) == expected[name], name
 
-    def test_families_and_test_algorithms(self):
-        """Ranking metrics are scored on test; the binary-prediction ones have
-        no test-side algorithm yet (#452) and say so rather than pretend."""
+    def test_families(self):
         from recsys_tfb.evaluation.metric_registry import (
             BINARY_PREDICTION, METRICS, RANKING,
         )
@@ -162,8 +160,20 @@ class TestMetricRegistry:
             "pooled_average_precision": BINARY_PREDICTION,
             "macro_per_item_average_precision": BINARY_PREDICTION,
         }
-        assert {n for n, m in METRICS.items() if m.test_pass} == {
-            "mean_ap", "macro_per_item_map"}
+
+    def test_every_row_has_a_val_and_a_test_algorithm(self):
+        """ADR-0028 decision 2: a metric added with only its val half would
+        otherwise be found when training asks test for it, after the whole
+        search. Whether the two halves agree is
+        ``test_compute_test_metrics.py``'s question."""
+        from recsys_tfb.evaluation.metric_registry import METRICS, passes_by_name
+
+        passes = passes_by_name()
+        for name, row in METRICS.items():
+            assert callable(row.val_score), name
+            assert row.test_pass in passes, name
+            assert callable(passes[row.test_pass]), name
+            assert callable(row.test_value), name
 
 
 class TestTrialScorer:

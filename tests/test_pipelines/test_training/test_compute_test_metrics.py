@@ -381,28 +381,161 @@ def test_the_record_names_its_months_its_metrics_and_their_names(spark):
     assert chosen["hpo_objective"] == "macro_per_item_map"
 
 
-def test_a_binary_prediction_metric_has_no_value_on_test_yet(spark, caplog):
-    """Asked for as the HPO objective, the selection metric or in
-    ``test_metrics.metrics``, a binary-prediction metric comes back without a
-    value and with the reason, and the node still returns (#452: the test-side
-    algorithm and the rule that blocks it land together, next)."""
-    from recsys_tfb.evaluation.metric_registry import NO_TEST_ALGORITHM
+# ---------------------------------------------------------------------------
+# ADR-0028 decision 4: the binary-prediction metrics, exact, on Spark
+# ---------------------------------------------------------------------------
+
+#: The test ratio the fixture below was drawn at: a kept query group holding
+#: no positive weighs 1 / RATIO, every other row 1.
+RATIO = 0.3
+WEIGHT_COL = "zero_positive_group_weight"
+BINARY_COLUMNS = COLUMNS + [WEIGHT_COL]
+
+
+def _binary_rows(seed=7):
+    """40 query groups x 4 items, scores rounded to one decimal.
+
+    * Ties everywhere: 160 rows share 11 score values. The pooled pass cuts
+      the scores into segments at quantiles, which are score values the data
+      holds, so every cut point is a tie that a row-count split would break.
+    * Unequal weights: every third group holds no positive and weighs 1 / 0.3.
+    * Item D is never positive: the per-item mean leaves it out.
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+    for g in range(40):
+        zero_positive = g % 3 == 0
+        weight = 1 / RATIO if zero_positive else 1.0
+        n_pos = 0 if zero_positive else 1 + g % 2
+        positives = set(rng.choice(["A", "B", "C"], size=n_pos, replace=False))
+        for item in ("A", "B", "C", "D"):
+            rows.append((
+                f"c{g:02d}", JAN, item, round(float(rng.uniform()), 1),
+                int(item in positives), weight,
+            ))
+    return rows
+
+
+def _binary_params(**blocks):
+    params = _with(
+        _make_parameters(),
+        dataset={"test_zero_positive_group_ratio": RATIO},
+        training={"hpo_objective": "pooled_average_precision"},
+        test_metrics={"metrics": ["macro_per_item_average_precision"]},
+    )
+    return _with(params, **blocks)
+
+
+@pytest.fixture
+def four_shuffle_partitions(spark):
+    """The pooled pass cuts its scores into as many segments as
+    ``spark.sql.shuffle.partitions``; the suite's session runs at 1, which
+    would leave one segment and nothing carried across a boundary."""
+    before = spark.conf.get("spark.sql.shuffle.partitions")
+    spark.conf.set("spark.sql.shuffle.partitions", "4")
+    yield
+    spark.conf.set("spark.sql.shuffle.partitions", before)
+
+
+def _arrays(rows):
+    return (
+        np.array([r[2] for r in rows]),
+        np.array([r[4] for r in rows]),
+        np.array([r[3] for r in rows], dtype=np.float64),
+        np.array([r[5] for r in rows], dtype=np.float64),
+    )
+
+
+def test_binary_prediction_metrics_equal_the_val_functions(
+        spark, four_shuffle_partitions):
+    """The same definition as HPO's on val (scikit-learn's average precision:
+    a tied score is one threshold, rows weighted by the zero-positive group
+    weight), computed on Spark. Tolerance as in
+    ``test_macro_per_item_map_numpy_matches_spark``."""
+    from recsys_tfb.evaluation.metrics import (
+        compute_macro_per_item_average_precision,
+        compute_pooled_average_precision,
+    )
+    from recsys_tfb.pipelines.training.nodes import compute_test_metrics
+
+    rows = _binary_rows()
+    items, y, score, weights = _arrays(rows)
+    pooled = compute_pooled_average_precision(y, score, weights)
+    per_item = compute_macro_per_item_average_precision(items, y, score, weights)
+    # The fixture can tell: ignoring the weights, or breaking the ties by row
+    # order, gives other numbers.
+    assert pooled != pytest.approx(compute_pooled_average_precision(y, score))
+    assert per_item != pytest.approx(
+        compute_macro_per_item_average_precision(items, y, score))
+    jittered = score - np.arange(len(score)) * 1e-9
+    assert pooled != pytest.approx(
+        compute_pooled_average_precision(y, jittered, weights))
+    assert per_item != pytest.approx(
+        compute_macro_per_item_average_precision(items, y, jittered, weights))
+
+    result = compute_test_metrics(
+        spark.createDataFrame(rows, schema=BINARY_COLUMNS), MANIFEST,
+        _binary_params())
+
+    assert result["metrics"]["pooled_average_precision"] == pytest.approx(
+        pooled, rel=1e-12)
+    assert result["metrics"]["macro_per_item_average_precision"] == (
+        pytest.approx(per_item, rel=1e-12))
+    assert result["metrics_not_computed"] == {}
+
+
+def test_the_hpo_objective_is_withheld_when_test_cannot_score_it(spark, caplog):
+    """Test kept no query group holding no positive (ratio 0, the default)
+    and the selection metric is written as a ranking one: the binary HPO
+    objective comes back without a value and with the reason, the node still
+    returns, and no binary pass runs — the rows carry no weight column."""
     from recsys_tfb.pipelines.training.nodes import compute_test_metrics
 
     params = _with(
         _make_parameters(),
         training={"hpo_objective": "pooled_average_precision"},
-        test_metrics={"metrics": ["macro_per_item_average_precision"]},
+        test_metrics={"selection_metric": "mean_ap"},
     )
     with caplog.at_level(logging.WARNING):
         result = compute_test_metrics(_frame(spark), MANIFEST, params)
 
-    assert result["selection_metric"] == "pooled_average_precision"
     assert set(result["metrics"]) == {"mean_ap", "macro_per_item_map"}
-    assert result["metrics_not_computed"] == {
-        "pooled_average_precision": NO_TEST_ALGORITHM,
-        "macro_per_item_average_precision": NO_TEST_ALGORITHM,
-    }
+    assert list(result["metrics_not_computed"]) == ["pooled_average_precision"]
+    reason = result["metrics_not_computed"]["pooled_average_precision"]
+    assert "dataset.test_zero_positive_group_ratio is 0" in reason
     assert result["overall_map"] == pytest.approx(2 / 3)
     assert any("pooled_average_precision" in r.getMessage()
-               and NO_TEST_ALGORITHM in r.getMessage() for r in caplog.records)
+               and reason in r.getMessage() for r in caplog.records)
+
+
+def test_the_dataset_version_training_read_decides_too(spark):
+    """The config says 0.3, but the CLI found the dataset version in use was
+    built at 0: the rows are there with their weights column, yet their test
+    kept none of those groups, so the objective is withheld all the same."""
+    from recsys_tfb.core.consistency import DATASET_TEST_RATIO_KEY
+    from recsys_tfb.pipelines.training.nodes import compute_test_metrics
+
+    params = _binary_params(
+        test_metrics={"selection_metric": "mean_ap", "metrics": []})
+    params.update({"base_dataset_version": "abc12345",
+                   DATASET_TEST_RATIO_KEY: 0.0})
+
+    result = compute_test_metrics(
+        spark.createDataFrame(_binary_rows(), schema=BINARY_COLUMNS), MANIFEST,
+        params)
+
+    assert "pooled_average_precision" not in result["metrics"]
+    assert "'abc12345'" in result["metrics_not_computed"][
+        "pooled_average_precision"]
+
+
+def test_a_binary_selection_metric_test_cannot_score_stops_the_node(spark):
+    """A54 stops this at every command's entry; reaching the node anyway (a
+    parameters dict that skipped the gate) raises rather than record a
+    selection metric with no value."""
+    from recsys_tfb.pipelines.training.nodes import compute_test_metrics
+
+    params = _with(_make_parameters(),
+                   training={"hpo_objective": "pooled_average_precision"})
+    with pytest.raises(ValueError, match=r"A54: the selection metric"):
+        compute_test_metrics(_frame(spark), MANIFEST, params)

@@ -576,6 +576,11 @@ def compute_pooled_average_precision(
     scikit-learn would answer ``-0.0`` with a ``UserWarning``, and a constant
     scores every HPO trial alike. ``tune_hyperparameters`` stops a val set
     like this before its first trial; this is the backstop for other callers.
+
+    Test scores the same definition on Spark
+    (``metrics_spark.compute_pooled_average_precision``, ADR-0028 decision 4).
+    Nothing but ``tests/test_pipelines/test_training/test_compute_test_metrics.py``
+    holds the two together: change one, change both.
     """
     from sklearn.metrics import average_precision_score
 
@@ -624,7 +629,9 @@ def compute_macro_per_item_average_precision(
     item — four times slower at 1000 items and 5 million rows (#430).
 
     No item with a positive raises ``ValueError``, for the reason given in
-    :func:`compute_pooled_average_precision`.
+    :func:`compute_pooled_average_precision`. Its Spark twin on test is
+    ``metrics_spark.compute_macro_per_item_average_precision``, held to this
+    one the same way.
     """
     from sklearn.metrics import average_precision_score
 

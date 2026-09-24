@@ -4897,3 +4897,171 @@ class TestTestMetricsA53:
         errs = scoring_param_errors(_scoring(
             snap_date=["2026-03-31"], metrics=["ndcg"], selection_metric="x"))
         assert len(errs) == 3
+
+
+# =============================================================================
+# A54 — a binary-prediction metric on test needs test to keep the query groups
+#       holding no positive (ADR-0028 decision 4; aggregated, and again at the
+#       training entry against the dataset version's manifest)
+# =============================================================================
+
+from recsys_tfb.core.consistency import binary_test_metrics_verdict
+
+
+def _test_side(hpo_objective=None, test_ratio=None, **test_metrics) -> dict:
+    """A config whose val keeps its zero-positive groups, so A48 stays quiet
+    and only the test side is in question."""
+    dataset = {"val_zero_positive_group_ratio": 0.5}
+    if test_ratio is not None:
+        dataset["test_zero_positive_group_ratio"] = test_ratio
+    params = _zp_params(**dataset)
+    if hpo_objective is not None:
+        params["training"] = {"hpo_objective": hpo_objective}
+    if test_metrics:
+        params["test_metrics"] = test_metrics
+    return params
+
+
+class TestBinaryTestMetricsA54:
+    """What ADR-0028's table of inconsistencies asks of the config: blocked
+    when the selection metric (written, or following the HPO objective) or
+    ``test_metrics.metrics`` asks for a binary-prediction metric test cannot
+    score; the HPO objective alone is withheld with a reason."""
+
+    @pytest.mark.parametrize("objective", _BINARY_OBJECTIVES)
+    @pytest.mark.parametrize("test_ratio", [None, 0])
+    def test_the_default_path_is_blocked(self, objective, test_ratio):
+        """No selection metric written: it follows a binary HPO objective, and
+        test at its default ratio 0 keeps none of those groups."""
+        verdict = binary_test_metrics_verdict(
+            _test_side(objective, test_ratio))
+        assert len(verdict.errors) == 1
+        err = verdict.errors[0]
+        assert "A54" in err and f"{objective!r}" in err
+        assert "follows training.hpo_objective" in err
+        # Both ways out.
+        assert "dataset.test_zero_positive_group_ratio above 0" in err
+        assert "test_metrics.selection_metric to a ranking metric" in err
+
+    @pytest.mark.parametrize("metric", _BINARY_OBJECTIVES)
+    def test_a_written_binary_selection_metric_is_blocked(self, metric):
+        verdict = binary_test_metrics_verdict(
+            _test_side("mean_ap", selection_metric=metric))
+        assert len(verdict.errors) == 1
+        assert "A54" in verdict.errors[0]
+        assert f"test_metrics.selection_metric={metric!r}" in verdict.errors[0]
+
+    def test_a_binary_metric_in_metrics_is_blocked(self):
+        """Asked for by name, so it must be computable."""
+        verdict = binary_test_metrics_verdict(_test_side(
+            "mean_ap", metrics=["mean_ap", "macro_per_item_average_precision"]))
+        assert len(verdict.errors) == 1
+        err = verdict.errors[0]
+        assert "A54" in err
+        assert "test_metrics.metrics lists ['macro_per_item_average_precision']" in err
+        assert "take it out of test_metrics.metrics" in err
+
+    def test_both_asked_are_undone_together(self):
+        """Stopping only one of them from asking leaves the other: the second
+        way out is one remedy naming both."""
+        verdict = binary_test_metrics_verdict(_test_side(
+            "pooled_average_precision",
+            metrics=["macro_per_item_average_precision"]))
+        assert len(verdict.errors) == 1
+        assert (
+            "; or set test_metrics.selection_metric to a ranking metric "
+            "(mean_ap / macro_per_item_map) and take it out of "
+            "test_metrics.metrics."
+        ) in verdict.errors[0]
+
+    def test_the_hpo_objective_alone_is_withheld_not_blocked(self):
+        """The selection metric is written as a ranking metric: the HPO
+        objective was added automatically, so it is not worth forcing a test
+        rebuild for — no value, and the reason."""
+        verdict = binary_test_metrics_verdict(_test_side(
+            "pooled_average_precision", selection_metric="macro_per_item_map"))
+        assert verdict.errors == []
+        assert list(verdict.withheld) == ["pooled_average_precision"]
+        reason = verdict.withheld["pooled_average_precision"]
+        assert "dataset.test_zero_positive_group_ratio is 0" in reason
+        # And how to have it.
+        assert "To score it, set dataset.test_zero_positive_group_ratio above 0" in reason
+
+    @pytest.mark.parametrize("params", [
+        _test_side("pooled_average_precision", test_ratio=0.5),
+        _test_side("mean_ap", test_ratio=0.5, selection_metric=(
+            "macro_per_item_average_precision"), metrics=[
+            "pooled_average_precision"]),
+        _test_side("macro_per_item_map"),
+        _test_side(),
+        {},
+    ], ids=["binary-hpo-ratio-above-0", "binary-asked-ratio-above-0",
+            "ranking-only", "hpo-default", "empty"])
+    def test_what_must_pass(self, params):
+        assert binary_test_metrics_verdict(params) == ([], {})
+
+    @pytest.mark.parametrize("value", [None, "0.5", True, 1.5])
+    def test_a_ratio_a44_rejects_is_left_to_a44(self, value):
+        params = _test_side("pooled_average_precision")
+        params["dataset"]["test_zero_positive_group_ratio"] = value
+        assert binary_test_metrics_verdict(params) == ([], {})
+
+    @pytest.mark.parametrize("block", [
+        ["pooled_average_precision"],
+        {"metrics": {"pooled_average_precision": True}},
+        {"metrics": [1]},
+    ], ids=["not-a-mapping", "metrics-a-mapping", "metrics-not-names"])
+    def test_a_malformed_block_is_left_to_a53(self, block):
+        """A53 reports it at the training entry; every other command must not
+        crash on it here, nor read a mapping's keys as the list it should
+        have been."""
+        params = _test_side("mean_ap")
+        params["test_metrics"] = block
+        assert binary_test_metrics_verdict(params) == ([], {})
+
+    def test_wired_into_validate_config_consistency(self):
+        with pytest.raises(ConfigConsistencyError, match=r"A54: "):
+            validate_config_consistency(_test_side("pooled_average_precision"))
+
+    # --- The dataset version training reads (its manifest's test ratio) ---
+
+    def test_a_dataset_built_at_ratio_0_blocks_a_configured_ratio(self):
+        """The config was raised to 0.5, but the dataset version in use was
+        built before that: its test kept none of those groups."""
+        verdict = binary_test_metrics_verdict(
+            _test_side("pooled_average_precision", test_ratio=0.5),
+            dataset_version="abc12345", dataset_test_ratio=0.0)
+        assert len(verdict.errors) == 1
+        err = verdict.errors[0]
+        assert "A54" in err and "'abc12345'" in err
+        assert "built with dataset.test_zero_positive_group_ratio 0" in err
+        assert "a manifest or a key that is missing reads as 0" in err
+        assert "rerun the dataset command" in err
+        assert "test_metrics.selection_metric to a ranking metric" in err
+
+    def test_a_dataset_built_at_ratio_0_withholds_the_hpo_objective(self):
+        verdict = binary_test_metrics_verdict(
+            _test_side("pooled_average_precision", test_ratio=0.5,
+                       selection_metric="mean_ap"),
+            dataset_version="abc12345", dataset_test_ratio=0.0)
+        assert verdict.errors == []
+        assert "'abc12345'" in verdict.withheld["pooled_average_precision"]
+
+    def test_a_dataset_built_above_0_passes(self):
+        assert binary_test_metrics_verdict(
+            _test_side("pooled_average_precision", test_ratio=0.5),
+            dataset_version="abc12345", dataset_test_ratio=0.25) == ([], {})
+
+    def test_the_config_ratio_still_counts_with_a_dataset_above_0(self):
+        """At ratio 0 in the config the predictions are written without the
+        weight column, whatever the dataset version kept."""
+        verdict = binary_test_metrics_verdict(
+            _test_side("pooled_average_precision", test_ratio=0),
+            dataset_version="abc12345", dataset_test_ratio=0.5)
+        assert len(verdict.errors) == 1
+        err = verdict.errors[0]
+        # Told as it is: that version kept the groups; the config writes the
+        # predictions without their weight.
+        assert "dataset.test_zero_positive_group_ratio is 0 in the config" in err
+        assert "written without zero_positive_group_weight" in err
+        assert "set dataset.test_zero_positive_group_ratio back to 0.5" in err
