@@ -234,11 +234,11 @@ python -m recsys_tfb inference --env production
 training 完成後不會自動更新 `best`。人工核准候選版本後，先執行：
 
 ```bash
-python scripts/promote_model.py <model_version> --dry-run
+python scripts/promote_model.py --env production --dry-run   # 列出版本與建議，不動 best
 python scripts/promote_model.py <model_version>
 ```
 
-promotion 只更新 `best` symlink，不會自動執行 inference，也不會刪除舊模型的 prediction partitions。
+`--dry-run` 照現在的設定（`--env` 同 pipeline）排名版本，怎麼讀見 [promote 一個版本](../operations/user-guides/promoting-a-model.md)。promotion 只更新 `best` symlink，不會自動執行 inference，也不會刪除舊模型的 prediction partitions。
 
 ### 4.3 指定模型版本
 

@@ -319,7 +319,7 @@ python -m recsys_tfb training --env production
 python -m recsys_tfb evaluation --env production --post-training
 
 # 4. 人工審核通過後，將指定模型設為 best
-python scripts/promote_model.py <model_version> --dry-run
+python scripts/promote_model.py --env production --dry-run
 python scripts/promote_model.py <model_version>
 
 # 5. 設定 parameters_inference.yaml 的 snap_dates 後執行批次排序
@@ -444,7 +444,7 @@ pointwise、pairwise、listwise 的差異見 [`gbdt_learning_to_rank.md`](docs/h
 
 **Q5. 模型訓練好後怎麼上線？**
 
-用 `scripts/promote_model.py` 將通過人工審核的 `model_version` 設為 `best`；training 不會自動發布模型，inference 預設只使用 `best`。可先加 `--dry-run` 查看候選版本而不實際升版。
+用 `scripts/promote_model.py` 將通過人工審核的 `model_version` 設為 `best`；training 不會自動發布模型，inference 預設只使用 `best`。可先用 `--env <環境> --dry-run` 查看候選版本而不實際升版：它照現在設定的選版指標與計分月份排名，只比計分月份相同的版本，見 [`promoting-a-model.md`](docs/operations/user-guides/promoting-a-model.md)。
 
 **Q6. evaluation 的兩個情境怎麼選？**
 

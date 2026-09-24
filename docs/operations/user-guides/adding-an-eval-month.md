@@ -4,6 +4,8 @@
 
 模型不會被重訓，也不會產生新版本。新月份的報表會跟既有月份並排存在同一個模型底下，可以直接互相比較。
 
+promote 挑版本的比較範圍也不會動：步驟 1 先把 training 計分用的月份固定下來，加進來的月份只拿去出報表。要讓 promote 改用新月份比，是另一件事，見〈[要讓 promote 用新月份比](#要讓-promote-用新月份比)〉。
+
 **先確認你屬於哪一種：**
 
 - 這個月份**沒跑過**，你要第一次評估它 → 往下讀。
@@ -19,9 +21,9 @@
                 （造資料）        （舊模型預測）      （出報表）
    │               │                  │                  │
    ▼               ▼                  ▼                  ▼
- test_snap_      新月份的           新月份的            report.html
- dates           model_input        預測值
- 加一行
+ 固定計分月份、   新月份的           新月份的            report.html
+ test_snap_      model_input        預測值
+ dates 加一行
 
  ┌───────────────────────────────────────────────────────────┐
  │  模型全程沒有被重訓 —— model_version 從頭到尾都是同一個   │
@@ -48,7 +50,19 @@ ls -1 data/models/          # 目錄名就是 model_version
 
 ## 步驟 1：把新月份加進設定
 
-編輯 `conf/base/parameters_dataset.yaml`：
+**先固定計分月份。** 打開 `conf/base/parameters_training.yaml`，看 `test_metrics.snap_date`：
+
+- **有寫**：不用動，跳到下面加新月份。
+- **沒寫**（出貨的設定是註解掉的）：把**現在的** `dataset.test_snap_dates` 原樣抄進去，寫法要一模一樣：
+
+```yaml
+test_metrics:
+  snap_date: "2026-01-31"   # 現在的 dataset.test_snap_dates，一個字都不改
+```
+
+為什麼：training 在 test 上算分數時，只算「計分月份」（`test_metrics.snap_date`）；沒寫就是整份 `dataset.test_snap_dates`。promote 挑版本時，只拿「當初算分數的月份跟現在的計分月份完全一樣」的版本互相比。所以沒寫這一行就加月份，計分月份跟著變成兩個月，**每一個**版本記下的都只有舊月份，全部退出 promote 的排名。寫下這一行，計分月份就停在舊月份，加進來的月份只給 evaluation 用。
+
+**再把新月份加進去。** 編輯 `conf/base/parameters_dataset.yaml`：
 
 ```yaml
 dataset:
@@ -58,6 +72,8 @@ dataset:
 ```
 
 **舊月份要留著**，這是累積清單不是替換清單。把某個月份刪掉只是讓它以後不再被處理，已經產出的資料跟報表不會消失。
+
+`test_metrics.snap_date` 裡的月份也都要留在 `dataset.test_snap_dates` 裡，否則 training 一開始就會擋下（訊息帶 `(A53)`）。
 
 ## 步驟 2：產出新月份的資料
 
@@ -137,6 +153,28 @@ data/evaluation/<model_version>/20260228/report.html
 
 省略它時 evaluation 會去找 `best` 這個標記，那指向的是已經正式核准上線的模型——不見得是你這次要評估的那一個。你會拿到一份看起來正常、但評的是別的模型的報表。
 
+## 要讓 promote 用新月份比
+
+上面四步做完，新月份只進了報表。想讓 promote 改拿新月份（或新舊一起）來比版本，要兩步：
+
+1. 把 `test_metrics.snap_date` 改成你要的月份，例如兩個月都算就寫成清單；或刪掉這一行，回到「整份 `dataset.test_snap_dates`」。
+2. 替現在設定的模型重算分數：
+
+```bash
+python -m recsys_tfb training \
+  --env <你的環境> --only-node compute_test_metrics
+```
+
+**成功的話**，log 裡會有：
+
+```
+compute_test_metrics: scoring ['mean_ap', 'macro_per_item_map'] on ['2026-01-31', '2026-02-28'] (selection metric macro_per_item_map, HPO objective macro_per_item_map)
+```
+
+`on` 後面是你在第 1 步寫的月份。`data/models/<model_version>/evaluation_results.json` 的 `snap_dates` 也會變成這幾個月。
+
+**要知道的代價**：第 2 步只重算**現在設定**對應的那一個 `model_version`。其他版本記下的還是舊月份，從這一刻起全部退出 promote 的排名，直到各自重算；設定已經改過的舊版本怎麼重算，見 [替舊版本補分數](rescoring-an-old-version.md)。MLflow 裡的數字不會更新（那是 `log_experiment` 寫的），promote 讀的是 `evaluation_results.json`，不受影響。
+
 ## 上游回補了，要重算某個月份
 
 上游對一個**已經跑過**的月份補了或修了資料之後，重跑上面的四個步驟沒有用：那個月在 dataset 跟 predict 兩層都已經是「做完」狀態，兩層都會跳過它。
@@ -159,7 +197,7 @@ bash scripts/rebuild_eval_month.sh 2026-01-31 --env <你的環境>
 
 ## 跑完了，怎麼確認真的成功
 
-三件事都對才算完成：
+四件事都對才算完成：
 
 ```bash
 # 1. 沒多出新模型 —— 這是「沒有重訓」的證據
@@ -174,6 +212,14 @@ ls -d data/evaluation/<model_version>/*/
 
 3. 步驟 2 印出的 `base_dataset_version` 跟你動手前抄下來的一樣。
 
+4. promote 的比較範圍沒變：
+
+```bash
+python scripts/promote_model.py --env <你的環境> --dry-run
+```
+
+`Scored months:` 還是舊月份，`Ranked` 底下的版本跟動手前一樣。畫面每一行的意思見 [promote 一個版本](promoting-a-model.md)。
+
 舊月份的 `report.html` 修改時間應該停在它自己那次執行。被更新了代表你不小心對舊月份也跑了一次 evaluation——內容一樣，無害，但時間戳被蓋掉了。
 
 ## 出錯了怎麼辦
@@ -185,6 +231,8 @@ ls -d data/evaluation/<model_version>/*/
 | `No predictions found for evaluation.snap_date` | 步驟 3 沒跑。回去重跑步驟 3 |
 | `test month '<月份>' ... has no rows in the test cache` | 這個月在設定裡但 dataset 還沒產出它。先跑步驟 2 |
 | 訊息帶 `(A24) ... name the same calendar day` | 這個月份已經在 train／val 其中一組裡了。從不該擁有它的那一組移除 |
+| promote `--dry-run` 把每個版本都列在 `Not ranked`，原因是 `scored on [...], not on the current scored months [...]` | 加月份之前沒固定計分月份。把 `test_metrics.snap_date` 寫成原本的月份（步驟 1 開頭） |
+| 訊息帶 `(A53) test_metrics.snap_date month(s) ... are not in dataset.test_snap_dates` | 計分月份裡有月份不在 `dataset.test_snap_dates` 裡，或寫法不同。照 `dataset.test_snap_dates` 的寫法抄 |
 | 訊息帶 `(A26) ... spells one month more than one way` | 同一個月在 `dataset.test_snap_dates` 裡出現了兩種寫法（例如 `2026-01-31` 與 `20260131`）。只留 `YYYY-MM-DD` 那一種，刪掉其餘 |
 | 訊息帶 `(A22) evaluation.snap_date=... is not a test month` | 步驟 4 的日期不在 `dataset.test_snap_dates` 裡。漏做了步驟 1，補做步驟 1–3 |
 | 訊息帶 `--rebuild-dates`，還沒起 Spark 就退出 | 你要重算的月份不在 `dataset.test_snap_dates` 裡。先把它加進去 |
@@ -196,4 +244,5 @@ ls -d data/evaluation/<model_version>/*/
 - [dataset pipeline](../../pipelines/dataset.md) —— 版本號怎麼算出來的、哪些設定會讓它翻號
 - [evaluation pipeline](../../pipelines/evaluation.md) —— 報表內容、指標定義、比較模式
 - [pipeline 切片](pipeline-slicing.md) —— `--only-node`／`--from-node`／`--dry-run` 的完整用法
+- [promote 一個版本](promoting-a-model.md) —— promote 怎麼挑版本、為什麼只比計分月份相同的版本
 - [known-pitfalls](../known-pitfalls.md) —— 重算時的資料新鮮度陷阱

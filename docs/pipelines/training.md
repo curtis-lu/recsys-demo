@@ -344,7 +344,7 @@ test_metrics:
 |---|---|---|
 | `snap_date` | `dataset.test_snap_dates` 全部 | **計分月份**：只在這些 time 值上算。寫法跟 `evaluation.snap_date` 一樣：一個日期、清單、或 `{start, end, step}` 區間 |
 | `metrics` | 空 | 排序類之外另外要算的指標，名字要在指標登記表裡 |
-| `selection_metric` | 實際生效的 HPO 目標 | **選版指標**：promote 挑版本時要比的那一個（promote 改讀它是下一張票的事）。「實際生效的 HPO 目標」＝有寫 `training.hpo_objective` 就是它，沒寫就是程式的預設 `mean_ap`（不是 conf 裡寫的 `macro_per_item_map`） |
+| `selection_metric` | 實際生效的 HPO 目標 | **選版指標**：promote 挑版本時要比的那一個（[promote 一個版本](../operations/user-guides/promoting-a-model.md)）。「實際生效的 HPO 目標」＝有寫 `training.hpo_objective` 就是它，沒寫就是程式的預設 `mean_ap`（不是 conf 裡寫的 `macro_per_item_map`） |
 
 **每次實際會算的指標**＝兩個排序類指標（`mean_ap`、`macro_per_item_map`，一律算）＋ 選版指標 ＋ HPO 目標 ＋ `metrics`，重複的只算一次。開始算之前 log 會印出這份清單：
 
@@ -371,7 +371,7 @@ compute_test_metrics: scoring ['mean_ap', 'macro_per_item_map'] on ['2026-01-31'
 | `metrics` 裡列了二元預測類 | 報錯停下：明確要了，就必須算得出來。解法是調高比例，或從 `metrics` 拿掉 |
 | 只有 HPO 目標是二元預測類（選版指標明寫成排序類） | 不擋。`evaluation_results.json` 不給這個值，在 `metrics_not_computed` 寫明原因，log 印一行 warning |
 
-conf 預設的比例是 0，HPO 目標是二元預測類的設定升級後會被擋（選版指標跟著變成二元預測類）；照上表任一解法處理。廣告示例的 test 有留（比例 0.5），選版指標跟著 HPO 目標是 `pooled_average_precision`，從這一版起有值。這一版之前訓練的版本沒有這個值；對現在設定算出的版本跑一次 `--only-node compute_test_metrics` 就能補上，不必重訓。設定已經改過的舊版本要先還原設定，步驟與坑見 [ADR-0028](../adr/0028-test-metrics-set-by-config.md)〈後果〉。
+conf 預設的比例是 0，HPO 目標是二元預測類的設定升級後會被擋（選版指標跟著變成二元預測類）；照上表任一解法處理。廣告示例的 test 有留（比例 0.5），選版指標跟著 HPO 目標是 `pooled_average_precision`，從這一版起有值。這一版之前訓練的版本沒有這個值；對現在設定算出的版本跑一次 `--only-node compute_test_metrics` 就能補上，不必重訓。設定已經改過的舊版本要先還原設定，步驟見 [替舊版本補分數](../operations/user-guides/rescoring-an-old-version.md)。
 
 **排序類的兩個指標怎麼算。** 跟報表 `map@all` 同一套排名與同分規則（同分照 item 升冪），每個 query group 的 AP 不截斷，所以不需要 K：`mean_ap` 就是 `overall_map`，`macro_per_item_map` 是 `per_item_map_attr` 對 item 的簡單平均。全部只要 3 次 Spark action（數 query group、算每組的 AP、算每個 item 的歸因）。不讀任何 `evaluation.*` 設定：以前 `evaluation.k_values` 沒寫 `"all"` 時，`overall_map` 與 per-item 歸因會靜默記成 0.0；`evaluation.metric.k`、`evaluation.item_categories`、`evaluation.query_filter` 也都不再影響這些數字。全正的 query group 照舊不排除（#376）。
 
@@ -597,7 +597,7 @@ SHAP PNG 落於 `diagnostics/summary/` 子目錄：全域 beeswarm 為 `summary/
 
 舊版產出的模型若帶著 `"calibrated": true`，新版載入時會直接 raise（訊息說明校準器已隨 #411 移除，請用新版重訓）；`false` 或沒有這個鍵的模型照常載入。
 
-training 不會建立或更新 `best` model alias。模型必須通過人工審核後，才由 `scripts/promote_model.py` 將指定 `model_version` 設為 inference 預設版本。
+training 不會建立或更新 `best` model alias。模型必須通過人工審核後，才由 `scripts/promote_model.py` 將指定 `model_version` 設為 inference 預設版本。promote 不帶版本號時照現在的選版指標與計分月份挑，只比 `evaluation_results.json` 的 `snap_dates` 跟現在計分月份相同的版本，見 [promote 一個版本](../operations/user-guides/promoting-a-model.md)。
 
 ### 6.2 驗收重點
 
