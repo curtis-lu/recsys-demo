@@ -620,8 +620,10 @@ Layer 1 — config-static (implemented here; aggregated by
   must name metrics in the registry (``evaluation/metric_registry.py``); no key
   outside the three, A50's reason. Predicate:
   ``scoring_param_errors`` (returns errors; the training command raises,
-  collected with A26/A36 before Spark starts). NOT aggregated, A24's reason
-  (issue #158): only training reads the block, which is in no version ID.
+  collected with A26/A36 before Spark starts; ``scripts/promote_model.py``
+  runs the same three, since the block gives it the metric and the months it
+  ranks versions by). NOT aggregated, A24's reason (issue #158): no pipeline
+  but training reads the block, which is in no version ID.
 * A54 — a binary-prediction metric the run must record on test (the
   selection metric, written or following the HPO objective, or a name in
   ``test_metrics.metrics``) while test keeps no query group holding no
@@ -5507,7 +5509,8 @@ def scoring_param_errors(parameters: dict) -> list[str]:
     """(A53) the ``test_metrics`` block: scored months and metric names.
 
     Returns error strings (empty list when fine); the training command raises,
-    collected with A26/A36. Checked:
+    collected with A26/A36, and ``scripts/promote_model.py`` runs the same
+    three before ranking versions. Checked:
 
     * ``snap_date`` (the scored months): not an empty list — it would score
       nothing; each month in ``dataset.test_snap_dates``, spelled as it is
@@ -5523,8 +5526,9 @@ def scoring_param_errors(parameters: dict) -> list[str]:
       here, in the function S6 registers for it (R6), not as a module constant.
 
     A null value is "not set", for every key. NOT aggregated by
-    ``validate_config_consistency``, for A24's reason (issue #158): only
-    training reads the block, and ``test_metrics`` is in no version ID.
+    ``validate_config_consistency``, for A24's reason (issue #158): no
+    pipeline but training reads the block, and ``test_metrics`` is in no
+    version ID.
     Nothing about whether a metric can be computed on test is decided here.
     """
     # Imported here, not at the top: core/ has no import-time dependency on

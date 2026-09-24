@@ -191,13 +191,6 @@ def rank_versions(models_dir: Path, parameters: Mapping) -> Ranking:
     return Ranking(metric, months, ranked, not_ranked)
 
 
-def find_best_version(models_dir: Path, parameters: Mapping) -> Optional[str]:
-    """The recommended version: the best of the ranked ones, or None when no
-    version takes part."""
-    ranking = rank_versions(models_dir, parameters)
-    return ranking.ranked[0].version if ranking.ranked else None
-
-
 def get_current_best_version(models_dir: Path) -> Optional[str]:
     """Detect the currently promoted best version."""
     best_dir = models_dir / "best"

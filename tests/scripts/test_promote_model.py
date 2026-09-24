@@ -10,7 +10,6 @@ from scripts.promote_model import (
     NO_VALUE,
     OTHER_SCORED_MONTHS,
     REQUIRED_ARTIFACTS,
-    find_best_version,
     main,
     promote,
     rank_versions,
@@ -196,41 +195,40 @@ def _scored(models_dir, version, value):
                            metrics={"mean_ap": value})
 
 
-class TestFindBestVersion:
-    def test_selects_highest_value_timestamp(self, tmp_path):
+def _ranked(models_dir):
+    """The ranked versions, best first, under :func:`_params`' default."""
+    return [r.version for r in rank_versions(models_dir, _params()).ranked]
+
+
+class TestRankOrder:
+    def test_highest_value_first_timestamp(self, tmp_path):
         models_dir = tmp_path / "models"
         _scored(models_dir, "20260315_100000", 0.65)
         _scored(models_dir, "20260316_100000", 0.80)
         _scored(models_dir, "20260317_100000", 0.72)
 
-        assert find_best_version(models_dir, _params()) == "20260316_100000"
+        assert _ranked(models_dir) == [
+            "20260316_100000", "20260317_100000", "20260315_100000"]
 
-    def test_selects_highest_value_hash(self, tmp_path):
+    def test_highest_value_first_hash(self, tmp_path):
         models_dir = tmp_path / "models"
         _scored(models_dir, "a1b2c3d4", 0.65)
         _scored(models_dir, "e5f6a7b8", 0.80)
 
-        assert find_best_version(models_dir, _params()) == "e5f6a7b8"
+        assert _ranked(models_dir) == ["e5f6a7b8", "a1b2c3d4"]
 
-    def test_selects_across_mixed_formats(self, tmp_path):
+    def test_across_mixed_formats(self, tmp_path):
         models_dir = tmp_path / "models"
         _scored(models_dir, "20260315_100000", 0.65)
         _scored(models_dir, "a1b2c3d4", 0.80)
 
-        assert find_best_version(models_dir, _params()) == "a1b2c3d4"
+        assert _ranked(models_dir) == ["a1b2c3d4", "20260315_100000"]
 
-    def test_returns_none_when_empty(self, tmp_path):
+    def test_empty_models_dir(self, tmp_path):
         models_dir = tmp_path / "models"
         models_dir.mkdir()
-        assert find_best_version(models_dir, _params()) is None
-
-    def test_returns_none_when_no_version_is_ranked(self, tmp_path):
-        """Right after the upgrade every file is an old one: nothing is
-        picked, however high its overall_map."""
-        models_dir = tmp_path / "models"
-        _create_full_version(models_dir, "a1b2c3d4", 0.99)
-
-        assert find_best_version(models_dir, _params()) is None
+        ranking = rank_versions(models_dir, _params())
+        assert ranking.ranked == [] and ranking.not_ranked == []
 
     def test_ignores_best_symlink(self, tmp_path):
         models_dir = tmp_path / "models"
@@ -238,7 +236,9 @@ class TestFindBestVersion:
         # Create a best symlink - should be ignored
         (models_dir / "best").symlink_to((models_dir / "a1b2c3d4").resolve())
 
-        assert find_best_version(models_dir, _params()) == "a1b2c3d4"
+        ranking = rank_versions(models_dir, _params())
+        assert [r.version for r in ranking.ranked] == ["a1b2c3d4"]
+        assert ranking.not_ranked == []
 
 
 class TestValidateVersion:

@@ -82,7 +82,19 @@ Recommended: 4810d84d (macro_per_item_map=0.5451)
 
 ## 設定不合法時
 
-讀設定時跑的檢查跟 pipeline 一樣：每個指令入口都跑的那一組，再加上 training 入口對月份與 `test_metrics` 的檢查（訊息帶 `(A26)`、`(A36)`、`(A53)`）。任何一條不過，就印出錯誤、結束，不挑任何版本。直接指定版本號的用法不讀設定，所以不受影響。
+讀設定時跑的檢查跟 pipeline 一樣：每個指令入口都跑的那一組，再加上 training 入口對月份與 `test_metrics` 的檢查。任何一條不過，就印出錯誤、結束，不挑任何版本。直接指定版本號的用法不讀設定，所以不受影響。
+
+錯誤訊息開頭的代號是檢查的編號，跟挑版本最相關的幾個：
+
+| 代號 | 擋下的是 |
+|---|---|
+| `A30` | `--env` 指的 `conf/<環境>/` 目錄不存在 |
+| `A36` | `dataset.test_snap_dates` 沒寫或是空的：沒有計分月份 |
+| `A26` | `dataset.test_snap_dates` 把同一個月寫成兩種寫法 |
+| `A53` | `test_metrics` 區塊寫錯：計分月份是空清單、不在 `dataset.test_snap_dates` 裡、或同一個月兩種寫法；指標名不在登記表；打錯的鍵 |
+| `A54` | 選版指標是二元預測類，但設定讓 test 不留沒有正例的 query group，這個指標在 test 上算不出來 |
+
+每個代號的完整定義在 `src/recsys_tfb/core/consistency.py` 開頭的說明。
 
 ## 它看不出來的事
 

@@ -164,6 +164,7 @@ diff -ru recsys_tfb-v0.2.0/conf recsys_tfb-v0.3.0/conf              # 或兩版�
 - 版本 ID 的計算方式若有變動（`src/recsys_tfb/core/versioning.py`），既有的資料集與模型版本不會被判定成命中，下一次執行會整批重算。
   **移除機率校準的那一版就是這種情況**（#411）：校準相關的設定鍵整包從 `dataset:` 子樹拿掉，而 `base_dataset_version` 是對那整個子樹取 hash，所以每個 `base_dataset_version` 都會換一個值——既有資料集要重建、模型要重訓，並重新用 `scripts/promote_model.py` 人工 promote。`train_variant_id` 的算法沒動，值不受影響。這是刻意的版本決策，不是 bug；留在設定檔裡的校準鍵會被上一節那個例外擋下。
 - 來源表 schema 的變動由上游決定，跟版本無關，但同樣會讓結果變化。
+- **promote 挑版本的規則若有變動，既有的模型版本可能一起退出排名。** training 開始在 `evaluation_results.json` 記下計分月份的那一版（ADR-0028）就是這種情況：升級之前算的檔案都沒記月份，升級當下 `scripts/promote_model.py --dry-run` 把每個版本列在 `Not ranked`，不帶版本號的自動挑選不會挑任何版本。直接指定版本號照樣 promote 得了。要讓某個舊版本重新參加排名，照 [替舊版本補分數](rescoring-an-old-version.md) 做。同一版起 promote 要從 repo 根目錄執行並帶 `--env`，因為它改讀設定（[promote 一個版本](promoting-a-model.md)）。
 
 換版本之後先重跑 §6 確認環境仍然完整，再接自己的資料。
 
