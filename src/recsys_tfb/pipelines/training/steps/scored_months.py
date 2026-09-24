@@ -25,15 +25,26 @@ if TYPE_CHECKING:
     from pyspark.sql import DataFrame
 
 
-def restrict_to_months(frame: DataFrame, time_col: str, months: list[str]) -> DataFrame:
+def restrict_to_scored_months(
+    frame: DataFrame, time_col: str, months: list[str],
+) -> DataFrame:
     """``frame`` kept to the rows whose time value is one of ``months``.
 
-    Compared as text: the time partition is a STRING written from the test
-    month texts, and A53 holds each scored month to ``test_snap_dates``'
-    spelling. ``cast("string")`` on a STRING partition column is a no-op, and
-    one date compares with ``=``, several with ``IN``: the forms
-    ``pipelines/evaluation/steps/snap_date_scope.py`` checked Spark 3.3.2
-    prunes partitions with (that module cannot be imported from here, S3).
+    **Compared as text**, the comparison evaluation's ``--post-training``
+    makes on the same table (``pipelines/evaluation/steps/snap_date_scope.py``,
+    which cannot be imported from here, S3). The partition value is the test
+    data's own time text (predict writes ``str()`` of the cached rows'
+    column), so a month matches only when spelled as the data spells it. A53
+    holds each scored month to ``test_snap_dates``' spelling, which the
+    shipped data follows; a month the data spells otherwise matches no row,
+    and ``compute_test_metrics`` then stops, naming the months the table
+    holds. Not ``dataset/steps/scoping.restrict_to_months``, which compares
+    calendar days (``to_date`` on both sides): a different rule under a
+    similar name, and picking the wrong one raises nothing.
+
+    ``cast("string")`` on a STRING partition column is a no-op, and one date
+    compares with ``=``, several with ``IN``: the forms ``snap_date_scope``
+    checked Spark 3.3.2 prunes partitions with.
     """
     column = F.col(time_col).cast("string")
     if len(months) == 1:

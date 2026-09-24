@@ -352,7 +352,7 @@ test_metrics:
 compute_test_metrics: scoring ['mean_ap', 'macro_per_item_map'] on ['2026-01-31'] (selection metric macro_per_item_map, HPO objective macro_per_item_map)
 ```
 
-**二元預測類（`pooled_average_precision`、`macro_per_item_average_precision`）在 test 上還算不出來。** 它們在 test 上的算法還沒實作。被要到時（當 HPO 目標、選版指標、或列在 `metrics`），`evaluation_results.json` 不給值，在 `metrics_not_computed` 寫明原因，log 印一行 warning，pipeline 照樣跑完，也不擋任何設定。
+**二元預測類（`pooled_average_precision`、`macro_per_item_average_precision`）在 test 上還算不出來。** 它們在 test 上的算法還沒實作。被要到時（當 HPO 目標、選版指標、或列在 `metrics`），`evaluation_results.json` 不給值，在 `metrics_not_computed` 寫明原因，log 印一行 warning，pipeline 照樣跑完，也不擋任何設定。HPO 目標是二元預測類時（例如廣告示例），選版指標沒寫就跟著它，所以在算法補上之前訓練的版本，都沒有選版指標的值；算法補上之後，對現在設定算出的版本跑一次 `--only-node compute_test_metrics` 就能補上，不必重訓；設定已經改過的舊版本要先還原設定，步驟與坑見 [ADR-0028](../adr/0028-test-metrics-set-by-config.md)〈後果〉。
 
 **排序類的兩個指標怎麼算。** 跟報表 `map@all` 同一套排名與同分規則（同分照 item 升冪），每個 query group 的 AP 不截斷，所以不需要 K：`mean_ap` 就是 `overall_map`，`macro_per_item_map` 是 `per_item_map_attr` 對 item 的簡單平均。全部只要 3 次 Spark action（數 query group、算每組的 AP、算每個 item 的歸因）。不讀任何 `evaluation.*` 設定：以前 `evaluation.k_values` 沒寫 `"all"` 時，`overall_map` 與 per-item 歸因會靜默記成 0.0；`evaluation.metric.k`、`evaluation.item_categories`、`evaluation.query_filter` 也都不再影響這些數字。全正的 query group 照舊不排除（#376）。
 
@@ -366,7 +366,7 @@ compute_test_metrics: scoring ['mean_ap', 'macro_per_item_map'] on ['2026-01-31'
 跑到計分那一步時：
 
 - **表裡有、但不在計分月份的月份不算**，而且不讀。log 會列出略過了哪些，例如 `compute_test_metrics: ['2025-12-31'] in the prediction table, not scored`。月份是從表的檔案清單讀的，不跑 Spark job。
-- **計分月份裡有某個月沒有預測**：報錯停下，要求先跑 predict（`--from-node predict_and_write_test_predictions`，或從該月份拿掉）。
+- **計分月份裡有某個月沒有預測**：報錯停下，要求先跑 predict（`--from-node predict_and_write_test_predictions`，或從該月份拿掉）。錯誤訊息會列出表裡有哪些月份。月份是用文字比對的（跟 evaluation 的 `--post-training` 一樣），所以表裡的月份若寫法不同（例如資料是 `2026-01-31`、設定寫 `2026-1-31`），也會落在這一條：照表裡的寫法改設定即可。
 
 **「預測 6 個月、分數只算最近 1 個月」**：`dataset.test_snap_dates` 列 6 個月，`test_metrics.snap_date` 只寫最近那個月。evaluation 仍可評另外 5 個月。
 

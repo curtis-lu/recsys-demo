@@ -1447,9 +1447,9 @@ def compute_test_metrics(
     *previous* run's copy rather than re-running predict. The trade is argued
     once, at that entry in ``conf/base/catalog.yaml``.
 
-    The first ``raise`` is a **pre-check** on config (no scored month; A36 /
-    A53 stop the command before it). The second is a **pre-check** on the
-    table: a scored month with no prediction.
+    The first ``raise`` is a **runtime backstop** for A36 / A53, which stop
+    the command before it when no month would be scored. The second is a
+    **pre-check** on the table: a scored month with no prediction.
     """
     logger.info("compute_test_metrics: starting — manifest=%s", predict_manifest)
     time_col = get_schema(parameters)["time"]
@@ -1465,6 +1465,8 @@ def compute_test_metrics(
             "compute_test_metrics: no scored month — test_metrics.snap_date "
             "and dataset.test_snap_dates are both unset or empty."
         )
+    frame = scored_months.restrict_to_scored_months(
+        training_eval_predictions, time_col, months)
 
     # Decision — say which months the table holds but this run does not
     # score, off the partition listing: no Spark job, and those rows are
@@ -1484,18 +1486,17 @@ def compute_test_metrics(
                 "compute_test_metrics: %s in the prediction table, not scored "
                 "(scored months: %s)", unscored, months,
             )
-    frame = scored_months.restrict_to_months(
-        training_eval_predictions, time_col, months)
 
     # Decision — what to score: both ranking metrics always, plus the
     # selection metric, the HPO objective and test_metrics.metrics (ADR-0028
     # decision 1). Printed before the work, so a reader sees what was asked
     # for even when some of it has no value at the end.
     wanted = requested_test_metrics(parameters)
+    selected_by = selection_metric(parameters)
+    hpo_objective = effective_hpo_objective(parameters)
     logger.info(
         "compute_test_metrics: scoring %s on %s (selection metric %s, HPO "
-        "objective %s)", wanted, months, selection_metric(parameters),
-        effective_hpo_objective(parameters),
+        "objective %s)", wanted, months, selected_by, hpo_objective,
     )
 
     with log_step(logger, "count_query_groups"):
@@ -1504,16 +1505,22 @@ def compute_test_metrics(
     # Decision — a scored month with no prediction stops the run: a score over
     # the months that happen to be there would be recorded as the score over
     # the months asked for, and promote compares the recorded months. Checked
-    # off the count above, not by an action of its own.
+    # off the count above, not by an action of its own. The table's own
+    # months go into the message: a month the data spells otherwise than the
+    # config (the filter compares text) shows up there, not as "not predicted".
     missing = [m for m in months if m not in counts.times]
     if missing:
+        held = (
+            f"the table holds {in_table}" if in_table is not None
+            else f"of the scored months it holds {sorted(counts.times)}"
+        )
         raise ValueError(
             f"compute_test_metrics: scored month(s) {missing} have no rows in "
-            f"training_eval_predictions for this model_version (months "
-            f"present among the scored ones: {sorted(counts.times)}). Run "
+            f"training_eval_predictions for this model_version ({held}). Run "
             f"predict for them first — training, or --from-node "
             f"predict_and_write_test_predictions — or leave them out of "
-            f"test_metrics.snap_date."
+            f"test_metrics.snap_date. A month the table holds under another "
+            f"spelling is matched by text only: spell it as the table does."
         )
 
     # The expensive block: each pass the wanted metrics need, once. The
@@ -1528,6 +1535,8 @@ def compute_test_metrics(
         logger.warning(
             "compute_test_metrics: %s has no value on test: %s", name, reason)
 
+    # Always there: requested_test_metrics puts both ranking metrics first,
+    # which is also what keeps the four keys below present in every file.
     ranking = pass_results[RANKING_PASS]
     result = {
         "overall_map": ranking.overall_map,
@@ -1537,8 +1546,8 @@ def compute_test_metrics(
         "snap_dates": months,
         "metrics": values,
         "metrics_not_computed": not_computed,
-        "selection_metric": selection_metric(parameters),
-        "hpo_objective": effective_hpo_objective(parameters),
+        "selection_metric": selected_by,
+        "hpo_objective": hpo_objective,
     }
 
     logger.info(
