@@ -146,7 +146,7 @@ training 產出、讓框架以外的評分系統重現特徵順序與類別編�
 超參數搜尋在 val 上比較每一組參數時看的指標，只在同一次訓練裡挑參數。設定鍵是 `training.hpo_objective`。
 _Avoid_: objective、訓練目標（那是 LightGBM 的學習目標 `algorithm_params.objective`）
 
-**選版指標**（ADR-0028，尚未實作）:
+**選版指標**（ADR-0028）:
 在多個 model_version 之間挑出建議 promote 的那一個時所比的指標，算在 test 上；只有計分月份跟現在設定相同的版本才參加比較。沒設定時與 HPO 目標相同。
 _Avoid_: 頭號 mAP（evaluation 報表開頭的數字，不參與挑版本）
 
