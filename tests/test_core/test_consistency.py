@@ -4961,6 +4961,19 @@ class TestBinaryTestMetricsA54:
         assert "test_metrics.metrics lists ['macro_per_item_average_precision']" in err
         assert "take it out of test_metrics.metrics" in err
 
+    def test_both_asked_are_undone_together(self):
+        """Stopping only one of them from asking leaves the other: the second
+        way out is one remedy naming both."""
+        verdict = binary_test_metrics_verdict(_test_side(
+            "pooled_average_precision",
+            metrics=["macro_per_item_average_precision"]))
+        assert len(verdict.errors) == 1
+        assert (
+            "; or set test_metrics.selection_metric to a ranking metric "
+            "(mean_ap / macro_per_item_map) and take it out of "
+            "test_metrics.metrics."
+        ) in verdict.errors[0]
+
     def test_the_hpo_objective_alone_is_withheld_not_blocked(self):
         """The selection metric is written as a ranking metric: the HPO
         objective was added automatically, so it is not worth forcing a test
@@ -4969,8 +4982,10 @@ class TestBinaryTestMetricsA54:
             "pooled_average_precision", selection_metric="macro_per_item_map"))
         assert verdict.errors == []
         assert list(verdict.withheld) == ["pooled_average_precision"]
-        assert "dataset.test_zero_positive_group_ratio is 0" in (
-            verdict.withheld["pooled_average_precision"])
+        reason = verdict.withheld["pooled_average_precision"]
+        assert "dataset.test_zero_positive_group_ratio is 0" in reason
+        # And how to have it.
+        assert "To score it, set dataset.test_zero_positive_group_ratio above 0" in reason
 
     @pytest.mark.parametrize("params", [
         _test_side("pooled_average_precision", test_ratio=0.5),
@@ -5020,6 +5035,8 @@ class TestBinaryTestMetricsA54:
         err = verdict.errors[0]
         assert "A54" in err and "'abc12345'" in err
         assert "built with dataset.test_zero_positive_group_ratio 0" in err
+        assert "a manifest or a key that is missing reads as 0" in err
+        assert "rerun the dataset command" in err
         assert "test_metrics.selection_metric to a ranking metric" in err
 
     def test_a_dataset_built_at_ratio_0_withholds_the_hpo_objective(self):
@@ -5042,4 +5059,9 @@ class TestBinaryTestMetricsA54:
             _test_side("pooled_average_precision", test_ratio=0),
             dataset_version="abc12345", dataset_test_ratio=0.5)
         assert len(verdict.errors) == 1
-        assert "dataset.test_zero_positive_group_ratio is 0" in verdict.errors[0]
+        err = verdict.errors[0]
+        # Told as it is: that version kept the groups; the config writes the
+        # predictions without their weight.
+        assert "dataset.test_zero_positive_group_ratio is 0 in the config" in err
+        assert "written without zero_positive_group_weight" in err
+        assert "set dataset.test_zero_positive_group_ratio back to 0.5" in err

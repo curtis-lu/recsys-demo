@@ -4306,8 +4306,9 @@ class TestTrainingReadsTheDatasetVersionsTestRatioA54:
     """A54's second place (ADR-0028 decision 4): the config's test ratio was
     raised, but the dataset version training reads was built before that. The
     training command reads that version's manifest once the version is
-    resolved, and stops before the pipeline — before the HPO search — rather
-    than let the selection metric come out with no value."""
+    resolved, and stops before the Spark cold start and the pipeline — before
+    the HPO search — rather than let the selection metric come out with no
+    value."""
 
     def _run(self, tmp_path, manifest, training, test_metrics=None):
         _setup_conf(
@@ -4333,7 +4334,8 @@ class TestTrainingReadsTheDatasetVersionsTestRatioA54:
         os.chdir(tmp_path)
         try:
             with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls, \
-                    patch("recsys_tfb.utils.spark.get_or_create_spark_session"), \
+                    patch("recsys_tfb.utils.spark.get_or_create_spark_session") \
+                    as mock_spark, \
                     patch("recsys_tfb.__main__.Runner") as mock_runner:
                 mock_catalog_cls.return_value = mock_catalog_cls
                 mock_catalog_cls.add = added.__setitem__
@@ -4343,6 +4345,7 @@ class TestTrainingReadsTheDatasetVersionsTestRatioA54:
                 result = runner.invoke(app, ["training"])
         finally:
             os.chdir(old_cwd)
+        self.spark = mock_spark
         return result, mock_runner, added
 
     @pytest.mark.parametrize("manifest", [
@@ -4361,6 +4364,7 @@ class TestTrainingReadsTheDatasetVersionsTestRatioA54:
         # passed validate_config_consistency, so this is the manifest half.
         assert re.search(r"A54: .*dataset version 'abc12345'", result.output), (
             result.output)
+        self.spark.assert_not_called()
         mock_runner.return_value.run.assert_not_called()
 
     def test_a_version_built_above_0_runs_and_hands_its_ratio_on(self, tmp_path):
@@ -4391,3 +4395,7 @@ class TestTrainingReadsTheDatasetVersionsTestRatioA54:
         assert result.exit_code == 0, result.output
         mock_runner.return_value.run.assert_called_once()
         assert added["parameters"].load()[DATASET_TEST_RATIO_KEY] == 0.0
+        # Said at the entry, hours before the node records it.
+        assert re.search(
+            r"pooled_average_precision will have no value on test: .*"
+            r"'abc12345'", result.output), result.output

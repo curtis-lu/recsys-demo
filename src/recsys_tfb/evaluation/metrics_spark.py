@@ -1588,10 +1588,9 @@ def compute_untruncated_ap(
 # threshold, whatever order its rows arrive in, and each row weighs its
 # ``zero_positive_group_weight`` (1, or 1 / r on a kept group holding no
 # positive). A row's share of its threshold's term is ``positive weight of the
-# row * precision(s)``, so summing that over the rows gives AP's numerator: a
-# RANGE window frame (every row scored >= this one, ties included) is what
-# gives each row its threshold's precision, where a ROWS frame would split a
-# tie into as many thresholds as it has rows.
+# row * precision(s)``, so summing that over the rows gives AP's numerator; a
+# RANGE window frame gives each row its threshold's precision
+# (``_scored_at_or_above``).
 
 
 def _binary_prediction_rows(
@@ -1626,6 +1625,17 @@ def _binary_prediction_rows(
     )
 
 
+def _scored_at_or_above(*partition_cols: str) -> WindowSpec:
+    """Each row's frame: the rows of its partition scored at or above it, ties
+    included — what one threshold's precision is summed over. RANGE, not ROWS:
+    a ROWS frame would split a tie into as many thresholds as it has rows, and
+    the two agree on any data without ties."""
+    return (
+        Window.partitionBy(*partition_cols).orderBy(F.col("_score").desc())
+        .rangeBetween(Window.unboundedPreceding, Window.currentRow)
+    )
+
+
 def _null_weight_count() -> "F.Column":
     """Rows whose weight is NULL — counted inside an aggregation the metric
     runs anyway, so the check costs no action of its own."""
@@ -1654,6 +1664,16 @@ def _require_weights_and_a_positive(n_null_w, total_pos, metric: str) -> None:
         )
 
 
+#: The most segments ``compute_pooled_average_precision`` cuts the scores into.
+#: A row's segment is one CASE WHEN branch per cut point; at 2000 branches the
+#: generated code outgrew Spark's 64 KB method limit and fell back to
+#: interpreted evaluation with an ERROR in the log, at 1000 it did not
+#: (measured 2026-09-24, PySpark 3.3.2, 20,000 rows; the metric came out exact
+#: either way). Half of that leaves room, and the per-row cost of finding a
+#: segment grows with the count.
+MAX_SCORE_SEGMENTS = 512
+
+
 def compute_pooled_average_precision(
     frame: SparkDataFrame, parameters: dict,
 ) -> float:
@@ -1666,7 +1686,8 @@ def compute_pooled_average_precision(
     no ``partitionBy`` moves every row into one partition. So:
 
     1. Cut the scores, highest first, into as many segments as
-       ``spark.sql.shuffle.partitions``, at approximate quantiles (action 1).
+       ``spark.sql.shuffle.partitions`` (at most :data:`MAX_SCORE_SEGMENTS`),
+       at approximate quantiles (action 1).
        A row's segment is a function of its score alone, so a tied score is
        never split across two; only balance depends on the approximation.
     2. Each segment's positive weight and weight, to the driver (action 2).
@@ -1680,8 +1701,10 @@ def compute_pooled_average_precision(
     """
     rows = _binary_prediction_rows(frame, parameters).cache()
     try:
-        n_segments = int(
-            frame.sparkSession.conf.get("spark.sql.shuffle.partitions"))
+        n_segments = min(
+            int(frame.sparkSession.conf.get("spark.sql.shuffle.partitions")),
+            MAX_SCORE_SEGMENTS,
+        )
         cuts = _descending_score_cuts(rows, n_segments)
         segment = F.lit(len(cuts))
         if cuts:
@@ -1713,10 +1736,7 @@ def compute_pooled_average_precision(
             pos_run += r["_pos"]
             all_run += r["_all"]
 
-        above = (
-            Window.partitionBy("_seg").orderBy(F.col("_score").desc())
-            .rangeBetween(Window.unboundedPreceding, Window.currentRow)
-        )
+        above = _scored_at_or_above("_seg")
         seg_key = F.col("_seg")
         precision = (
             (F.sum("_pos_w").over(above) + F.create_map(*pos_before)[seg_key])
@@ -1765,10 +1785,7 @@ def compute_macro_per_item_average_precision(
     """
     item_col = get_schema(parameters)["item"]
     rows = _binary_prediction_rows(frame, parameters, item_col)
-    above = (
-        Window.partitionBy(item_col).orderBy(F.col("_score").desc())
-        .rangeBetween(Window.unboundedPreceding, Window.currentRow)
-    )
+    above = _scored_at_or_above(item_col)
     precision = F.sum("_pos_w").over(above) / F.sum("_w").over(above)
     per_item = (
         rows.withColumn("_term", F.col("_pos_w") * precision)

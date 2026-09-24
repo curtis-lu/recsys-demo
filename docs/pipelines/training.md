@@ -354,14 +354,14 @@ compute_test_metrics: scoring ['mean_ap', 'macro_per_item_map'] on ['2026-01-31'
 
 **二元預測類（`pooled_average_precision`、`macro_per_item_average_precision`）在 test 上怎麼算。** 定義跟 HPO 在 val 上用的完全相同（scikit-learn 的 average precision）：每一筆候選是一題「會不會是正例」，不分 query group；同一個分數是同一個門檻；每一列用 `zero_positive_group_weight` 當權重，所以留下來的無正例 query group 跟 val 上一樣算 `1 / r` 次。差別只在 test 的預測已經在 Hive，所以用 Spark 精確算（只用內建函式），不搬回 driver。兩份程式靠對帳測試綁在一起（`tests/test_pipelines/test_training/test_compute_test_metrics.py`）。
 
-- `pooled_average_precision`：全部候選一起按分數排。為了不把所有資料擠進同一個 partition，先按分數切成 `spark.sql.shuffle.partitions` 段（同一個分數一定在同一段），每段的正例權重和與權重和交給 driver 算出各段開頭的累計，再回各段內累加。3 次 Spark action。
+- `pooled_average_precision`：全部候選一起按分數排。為了不把所有資料擠進同一個 partition，先按分數切成 `spark.sql.shuffle.partitions` 段（最多 512 段；同一個分數一定在同一段，所以大量列同分時，那一段會特別大），每段的正例權重和與權重和交給 driver 算出各段開頭的累計，再回各段內累加。3 次 Spark action。
 - `macro_per_item_average_precision`：每個 item 的候選各自按分數排、各算一個值，再對 item 平均；沒有正例的 item 不進平均。1 次 Spark action。
 - 沒有人要的那一趟不跑。
 
 **前提：test 要留下沒有正例的 query group。** 也就是 `dataset.test_zero_positive_group_ratio` > 0；沒留的話，test 的母體跟 val 不同，算出來的數字跟 HPO 在 val 上挑參數的那個數字比不了。這個比例在兩個地方看：
 
 - **每個指令的入口**看現在的設定（A54，跟 A48 同一個位置）。比例在 dataset pipeline 生效，所以連 dataset 指令都會擋，免得用錯的比例建資料。
-- **training 入口**在決定好要讀哪個 dataset 版本之後、pipeline 開跑之前，讀那個版本 `manifest.json` 記下的比例（沒寫這個鍵、或沒有 manifest，都當 0）。擋的是「設定已經調高，讀到的卻是比例 0 時建的舊資料」：改了比例沒重跑 dataset、`data/dataset/latest` 還指著舊版本，或用 `--base-dataset-version` 指了舊版本。在 HPO 之前就擋下。
+- **training 入口**在決定好要讀哪個 dataset 版本之後、pipeline 開跑之前，讀那個版本 `manifest.json` 記下的比例（沒寫這個鍵、或沒有 manifest，都當 0）。擋的是「設定已經調高，讀到的卻是比例 0 時建的舊資料」：改了比例沒重跑 dataset、`data/dataset/latest` 還指著舊版本，或用 `--base-dataset-version` 指了舊版本。在起 Spark 之前就擋下，不會等 HPO 跑完。
 
 兩處的處理一樣：
 

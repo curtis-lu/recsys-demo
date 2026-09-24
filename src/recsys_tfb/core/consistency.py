@@ -529,7 +529,10 @@ Layer 1 — config-static (implemented here; aggregated by
   kept zero-positive group once instead of ``1 / r`` times. Only the test ratio
   counts — the table holds test predictions alone. Predicate:
   ``zero_positive_group_weight_declared_errors``. NOT aggregated, for A28's
-  reason — it needs the resolved catalog — and wired beside A28/A39.
+  reason — it needs the resolved catalog — and wired beside A28/A39. Runtime
+  backstop on training's test scoring: the binary-prediction passes in
+  ``evaluation/metrics_spark.py`` raise on a missing column or a NULL weight
+  rather than count each row once.
 * A46 — ``evaluation.report.sections.prediction_quality`` on under
   ``--post-training`` while ``dataset.test_zero_positive_group_ratio`` is 0 (its
   default). That table is the test table scored, and the dataset pipeline
@@ -2699,46 +2702,62 @@ def binary_test_metrics_verdict(
     if asked:
         blocked_by.append(f"test_metrics.metrics lists {asked}")
 
-    if configured <= 0.0:
+    # Why test cannot score them, and how to make it: three situations, each
+    # told as it is — the config's ratio decides whether the predictions carry
+    # the weight column, the dataset version's whether the rows are there.
+    written_ratio = ds.get(key, ZERO_POSITIVE_GROUP_RATIO_DEFAULTS["test"])
+    if configured > 0.0:
         cause = (
-            f"dataset.{key} is {ds.get(key, ZERO_POSITIVE_GROUP_RATIO_DEFAULTS['test'])!r}"
-            f": the dataset pipeline drops every test query group holding no "
-            f"positive"
+            f"dataset version {dataset_version!r}, which this training run "
+            f"reads, was built with dataset.{key} 0 (as its manifest records "
+            f"it; a manifest or a key that is missing reads as 0) while the "
+            f"config says {configured!r}: its test kept no query group holding "
+            f"no positive"
+        )
+        rebuild = (
+            f"rerun the dataset command so a version built with dataset.{key} "
+            f"{configured!r} exists (training reads data/dataset/latest), or "
+            f"pass one as --base-dataset-version"
+        )
+    elif dataset_test_ratio > 0.0:
+        cause = (
+            f"dataset.{key} is {written_ratio!r} in the config, so the test "
+            f"predictions are written without {ZERO_POSITIVE_GROUP_WEIGHT_COL}, "
+            f"whatever dataset version {dataset_version!r} kept"
+        )
+        rebuild = (
+            f"set dataset.{key} back to {dataset_test_ratio!r}, the ratio that "
+            f"version was built with"
+        )
+    else:
+        cause = (
+            f"dataset.{key} is {written_ratio!r}: the dataset pipeline drops "
+            f"every test query group holding no positive"
         )
         rebuild = (
             f"set dataset.{key} above 0 (it busts base_dataset_version: rerun "
             f"dataset, then training)"
         )
-    else:
-        cause = (
-            f"dataset version {dataset_version!r}, which this training run "
-            f"reads, was built with dataset.{key} 0 (its manifest; an absent "
-            f"key is the default 0) while the config says {configured!r}: its "
-            f"test kept no query group holding no positive"
-        )
-        rebuild = (
-            f"rerun the dataset command so a version built with dataset.{key} "
-            f"{configured!r} exists (training reads data/dataset/latest), or "
-            f"pass it as --base-dataset-version"
-        )
 
     errors = []
     if blocked_by:
-        remedies = [rebuild]
+        # Either the data changes, or everything that asked for a binary
+        # metric stops asking — all of it, so the second way is one remedy.
+        stop_asking = []
         if selected in BINARY_PREDICTION_METRICS:
-            remedies.append(
+            stop_asking.append(
                 "set test_metrics.selection_metric to a ranking metric "
                 "(mean_ap / macro_per_item_map)")
         if asked:
-            remedies.append(
+            stop_asking.append(
                 f"take {'it' if len(asked) == 1 else 'them'} out of "
                 f"test_metrics.metrics")
         errors.append(
             f"A54: {' and '.join(blocked_by)} asks test for a binary-prediction "
             f"metric, which scores every test row weighted as val's are, but "
             f"{cause} — so the number would be another population's, not "
-            f"comparable with the one HPO chose by on val. Either "
-            f"{'; or '.join(remedies)}."
+            f"comparable with the one HPO chose by on val. Either {rebuild}; "
+            f"or {' and '.join(stop_asking)}."
         )
 
     withheld = {}
@@ -2748,7 +2767,7 @@ def binary_test_metrics_verdict(
         withheld[objective] = (
             f"not scored on test: {cause}, so the value would not be "
             f"comparable with val's. It is here only as the HPO objective; the "
-            f"selection metric is {selected!r}."
+            f"selection metric is {selected!r}. To score it, {rebuild}."
         )
     return BinaryTestMetricsVerdict(errors, withheld)
 

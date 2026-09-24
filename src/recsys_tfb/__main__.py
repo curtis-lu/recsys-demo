@@ -1589,7 +1589,6 @@ def training(
             logger.error(line)
         raise typer.Exit(code=1)
 
-    get_or_create_spark_session(_load_spark_config(config, "training"))
     data_dir = _find_data_dir()
 
     dataset_dir = data_dir / "dataset"
@@ -1606,9 +1605,11 @@ def training(
     # the config to it; this catches the config raised after the data was
     # built — a raised test ratio with no dataset rerun, `latest` pointing at
     # an older version, or --base-dataset-version naming one. Here, not in
-    # the scoring node, so it stops before the HPO search rather than after.
-    # The node reads the same ratio (DATASET_TEST_RATIO_KEY below) for the
-    # objectives it withholds.
+    # the scoring node, so it stops before the HPO search rather than after;
+    # and before the cold start below, like A21 / A28 — resolving the version
+    # and reading its manifest touch the filesystem only. The node reads the
+    # same ratio (DATASET_TEST_RATIO_KEY below) for the objectives it
+    # withholds; the warning here says so hours earlier than the node does.
     dataset_test_ratio = _dataset_version_test_ratio(base_dir)
     logger.info(
         "dataset version %s was built with test_zero_positive_group_ratio %s",
@@ -1622,6 +1623,8 @@ def training(
         raise typer.Exit(code=1)
     for name, reason in verdict.withheld.items():
         logger.warning("%s will have no value on test: %s", name, reason)
+
+    get_or_create_spark_session(_load_spark_config(config, "training"))
 
     try:
         params_training = config.get_parameters_by_name("parameters_training")
