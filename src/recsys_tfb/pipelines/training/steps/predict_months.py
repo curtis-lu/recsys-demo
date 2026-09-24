@@ -145,9 +145,10 @@ def warn_about_surplus_partitions(
     both a surplus partition and a missing one, and a superset test sees
     neither. The surplus is only reported, never repaired — re-predicting writes
     the items that are in the cache and cannot delete one that is not, so it
-    survives every run, and ``compute_test_mAP_spark`` reads the whole
-    ``model_version``, which means a stale item keeps contributing rows to the
-    metric until someone drops the partition by hand.
+    survives every run, and ``compute_test_metrics`` reads every item
+    partition of the scored months, which means a stale item keeps
+    contributing rows to the metric until someone drops the partition by
+    hand.
 
     ``exclude`` takes the months already being redone for another reason: the
     message's "will be re-predicted on every run" clause is not true of a month

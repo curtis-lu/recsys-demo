@@ -24,7 +24,7 @@ What lives here:
   ``core/consistency.py`` reads the same block separately, only to validate
   value domains.
 * :func:`resolved_all_k` — the only reader of the K a metrics bundle's
-  ``"all"`` values are stored at, for the reports and for training (#434).
+  ``"all"`` values are stored at, for the reports (#434).
 * :func:`drop_all_positive_groups` / :func:`n_groups_with_positive` /
   :func:`all_positive_share` / :func:`all_positive_share_warns` /
   :func:`format_share` — the only reader of
@@ -198,7 +198,8 @@ def resolved_all_k(bundle: dict) -> int:
 
     The one reader of that number (#434). ``"all"`` has one producer
     (``metrics_spark._resolve_all_k``) and several readers — the main report,
-    the comparison report, training's test mAP. Each used to count the items
+    the comparison report, and training's test mAP until ADR-0028 took K out
+    of it. Each used to count the items
     itself; with ``event`` declared the producer's K is the widest query
     group, not the item count, so every lookup missed and nothing raised (a
     blank ``map@all`` cell, a test mAP logged as 0.0).

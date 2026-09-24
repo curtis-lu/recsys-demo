@@ -244,11 +244,11 @@ hpo_best_model:
 # 兩個理由：
 #   1. 一個決定「少做一些工」的 node 必須說出它決定不做什麼。log 留下的是計數，
 #      而一個靜默過期的月份跟一個正確跳過的月份在計數上長得一模一樣。
-#   2. 它是 `--from-node compute_test_mAP_spark`／診斷那一帶的必要輸入。不落地時
+#   2. 它是 `--from-node compute_test_metrics`／診斷那一帶的必要輸入。不落地時
 #      切片會把 predict node 拉回來，那個 node 就算全部月份都 skip，開頭仍要把約
 #      2.2 億列 × 2 個字串欄拉進 driver 算 distinct（issue #233）。
 # ⚠ 落地的代價：切片會從磁碟載回**上一次** run 的 manifest 而不再補跑 predict。
-# 今天是安全的，因為兩個消費者都只拿它當 DAG 排序依賴——compute_test_mAP_spark
+# 今天是安全的，因為兩個消費者都只拿它當 DAG 排序依賴——compute_test_metrics
 # 把它寫進 log（數字讀回來的是上一次的），select_shap_population 連讀都沒讀。
 # 哪天有人真的從裡面取值來算東西，這個條目就變成正確性風險，要一起重審。
 # 位置與 sample_weight_report 同理：版本目錄第一層，放進 diagnostics/ 就會從
@@ -400,7 +400,7 @@ evaluation_comparison_report:
 
 # --- Training pipeline — test-set 預測結果（供下游 evaluation 重複使用）---
 # 由 training/nodes.py::predict_and_write_test_predictions 寫入；同 pipeline
-# 內由 compute_test_mAP_spark 與 evaluation/nodes.py::prepare_eval_data
+# 內由 compute_test_metrics（只讀計分月份，ADR-0028）與 evaluation/nodes.py::prepare_eval_data
 # (--post-training mode) 讀回。只有 test window 內至少 1 個 positive label 的
 # 客戶會被 scoring 並寫入；不存 rank ──Spark mAP 端會用 rank_within_query
 # 重算。

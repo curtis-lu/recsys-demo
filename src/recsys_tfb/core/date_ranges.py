@@ -43,12 +43,15 @@ import datetime as _dt
 #: config key, the same kind as the other registered reads.
 #: ``inference.snap_dates`` is here because monitoring evaluation reads what
 #: inference scored, so the two are naturally written as the same range.
+#: ``test_metrics.snap_date`` (the scored months, ADR-0028) takes the same
+#: forms as ``evaluation.snap_date`` by design, so it is read the same way.
 DATE_LIST_KEYS: tuple[tuple[str, str], ...] = (
     ("dataset", "train_snap_dates"),
     ("dataset", "val_snap_dates"),
     ("dataset", "test_snap_dates"),
     ("evaluation", "snap_date"),
     ("inference", "snap_dates"),
+    ("test_metrics", "snap_date"),
 )
 
 STEPS: tuple[str, ...] = ("day", "week", "month_start", "month_end")

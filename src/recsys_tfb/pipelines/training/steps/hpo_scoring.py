@@ -33,14 +33,8 @@ from typing import NamedTuple, Optional
 import numpy as np
 import optuna
 
-from recsys_tfb.core.consistency import HPO_OBJECTIVES
 from recsys_tfb.core.logging import log_data_volume, log_step
-from recsys_tfb.evaluation.metrics import (
-    compute_macro_per_item_average_precision,
-    compute_macro_per_item_map,
-    compute_mean_ap,
-    compute_pooled_average_precision,
-)
+from recsys_tfb.evaluation.metric_registry import score_val
 from recsys_tfb.io.extract import stream_batch_rows
 from recsys_tfb.models.base import get_adapter
 from recsys_tfb.pipelines.training.steps.hpo_resume import write_checkpoint
@@ -87,25 +81,16 @@ def _hpo_score(
     ``zero_positive_group_weight`` — and the first two never do: a query group
     without a positive adds nothing to a ranking score, whatever its weight.
 
+    Which function scores which name is the metric registry's
+    (``evaluation/metric_registry.py``), the one table A25 checks the value
+    against too, so a name the gate admits always has a scorer here.
+
     Unknown ``objective_name`` raises ``ValueError``: a **pre-check** on the
     value handed in. A25 rejects the same value at CLI entry, so reaching this
     line means the caller assembled ``parameters`` without passing that gate.
     """
-    if objective_name == "mean_ap":
-        return compute_mean_ap(groups, items, y_true, y_score, event_keys)
-    if objective_name == "macro_per_item_map":
-        return compute_macro_per_item_map(
-            groups, items, y_true, y_score, event_keys=event_keys,
-        )
-    if objective_name == "pooled_average_precision":
-        return compute_pooled_average_precision(y_true, y_score, weights)
-    if objective_name == "macro_per_item_average_precision":
-        return compute_macro_per_item_average_precision(
-            items, y_true, y_score, weights,
-        )
-    raise ValueError(
-        f"unknown training.hpo_objective {objective_name!r}; "
-        f"allowed: {', '.join(HPO_OBJECTIVES)}"
+    return score_val(
+        objective_name, groups, items, y_true, y_score, event_keys, weights,
     )
 
 

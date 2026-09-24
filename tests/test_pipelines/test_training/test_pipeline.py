@@ -14,7 +14,7 @@ class TestTrainingPipeline:
         pipeline = create_pipeline()
         # select_features + 4 cache nodes (train, train_dev, val, test) + prepare_lgb
         # + persist_group_filter_report + persist_sample_weight_report + tune
-        # + finalize + predict_and_write_test_predictions + compute_test_mAP_spark
+        # + finalize + predict_and_write_test_predictions + compute_test_metrics
         # + compute_feature_statistics + compute_feature_importance + compute_gain_ledger
         # + compute_shap_diagnostics
         # + select_shap_population + compute_quadrant_profiles + compute_quadrant_cases
@@ -25,11 +25,11 @@ class TestTrainingPipeline:
         pipeline = create_pipeline()
         names = [n.name for n in pipeline.nodes]
         assert "predict_and_write_test_predictions" in names
-        assert "compute_test_mAP_spark" in names
+        assert "compute_test_metrics" in names
 
     def test_pipeline_inputs(self):
         pipeline = create_pipeline()
-        # training_eval_predictions: Spark-loaded by compute_test_mAP_spark.
+        # training_eval_predictions: Spark-loaded by compute_test_metrics.
         # The same table is also written by predict_and_write_test_predictions,
         # but that is a `writes` declaration, not an input -- see
         # test_predict_node_declares_its_write_target.
@@ -106,11 +106,11 @@ class TestTrainingPipeline:
         assert names.index("cache_test_model_input") < names.index("predict_and_write_test_predictions")
         # prepare must come before tune
         assert names.index("prepare_lgb_train_inputs") < names.index("tune_hyperparameters")
-        # tune -> finalize -> predict_and_write -> compute_test_mAP_spark -> log
+        # tune -> finalize -> predict_and_write -> compute_test_metrics -> log
         assert names.index("tune_hyperparameters") < names.index("finalize_model")
         assert names.index("finalize_model") < names.index("predict_and_write_test_predictions")
-        assert names.index("predict_and_write_test_predictions") < names.index("compute_test_mAP_spark")
-        assert names.index("compute_test_mAP_spark") < names.index("log_experiment")
+        assert names.index("predict_and_write_test_predictions") < names.index("compute_test_metrics")
+        assert names.index("compute_test_metrics") < names.index("log_experiment")
 
     # The six nodes that build or apply a model during training. They run before
     # (or as) the model exists, so the config-derived view is the only answer
@@ -451,7 +451,7 @@ class TestTrainingPipelineE2E:
         # Drop cache nodes — their outputs are already populated in catalog.
         # Drop predict_and_write_test_predictions: it writes to a Hive table via a
         # real metastore + catalog handle which the local Spark fixture doesn't provide.
-        # Inject a stub predict_manifest so compute_test_mAP_spark also skips.
+        # Inject a stub predict_manifest so compute_test_metrics also skips.
         # select_shap_population reads `training_eval_predictions` (Spark-loaded from
         # the Hive-backed predict node, skipped here) so it and its downstream
         # compute_quadrant_profiles are skipped too — same reason as the predict /
@@ -462,7 +462,7 @@ class TestTrainingPipelineE2E:
             "cache_val_model_input",
             "cache_test_model_input",
             "predict_and_write_test_predictions",
-            "compute_test_mAP_spark",
+            "compute_test_metrics",
             "select_shap_population",
             "compute_quadrant_profiles",
             "compute_quadrant_cases",

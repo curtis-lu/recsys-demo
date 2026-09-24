@@ -185,7 +185,8 @@ Layer 1 — config-static (implemented here; aggregated by
   call it replaced is exactly what ADR-0008 section 3 set out to remove.
 
 * A25 — training-side HPO / finalize parameter domains:
-  ``training.hpo_objective`` ∈ ``HPO_OBJECTIVES`` and
+  ``training.hpo_objective`` ∈ the metric registry's names
+  (``evaluation/metric_registry.py::METRIC_NAMES``) and
   ``training.final_model_strategy`` ∈ ``FINAL_MODEL_STRATEGIES``; an absent key
   keeps the node's own default and is clean, but an explicit YAML ``null`` is
   rejected (``dict.get`` hands the node ``None``, not the default). Predicate:
@@ -193,9 +194,10 @@ Layer 1 — config-static (implemented here; aggregated by
   parameter family): both keys are optional, so the check costs a config that
   never names them nothing, while a typo in either is otherwise only found by
   the node that reads it — and ``final_model_strategy`` is read *after* the
-  whole HPO search has run, so a typo there costs the entire search. The two
-  value tuples are defined in this module rather than in the training pipeline
-  so the gate and the node that dispatches on the value cannot drift apart.
+  whole HPO search has run, so a typo there costs the entire search. Neither
+  value domain is defined in the training pipeline, so the gate and the node
+  that dispatches on the value cannot drift apart: the strategies are a tuple
+  in this module, the objectives are the registry's rows (ADR-0028).
 * A26 — ``dataset.test_snap_dates`` must not spell one month two ways.
   ``"2026-01-31"`` and ``"20260131"`` are one month to the training cache
   (which keys on the ``YYYYMMDD`` directory name) but two different Hive
@@ -554,8 +556,9 @@ Layer 1 — config-static (implemented here; aggregated by
   declares the entry, as A40 takes its flag; the inference command raises).
   NOT aggregated: it needs the catalog, and the harm belongs to inference
   alone.
-* A48 — ``training.hpo_objective`` in ``BINARY_PREDICTION_HPO_OBJECTIVES``
-  (``pooled_average_precision`` / ``macro_per_item_average_precision``, #430)
+* A48 — ``training.hpo_objective`` in the registry's binary-prediction family
+  (``metric_registry.BINARY_PREDICTION_METRICS``: ``pooled_average_precision``
+  / ``macro_per_item_average_precision``, #430)
   while ``dataset.val_zero_positive_group_ratio`` is 0 (its default). Those
   objectives score every val row as a binary prediction, and at 0 the dataset
   pipeline dropped every val query group holding no positive, so average
@@ -605,6 +608,17 @@ Layer 1 — config-static (implemented here; aggregated by
   same list. Predicate: ``inference_products_with_counted_items_errors``.
   Aggregated by ``validate_config_consistency``, beside A4 (the same key's
   check for a listed item list).
+* A53 — the top-level ``test_metrics`` block (ADR-0028): what training scores
+  on test and over which time values. ``snap_date`` (the scored months; unset
+  means every ``dataset.test_snap_dates`` month, :func:`scoring_snap_dates`)
+  must not be an empty list, must be a subset of ``dataset.test_snap_dates``
+  spelled as there (the prediction table is filtered by that text), and must
+  not spell one month two ways (A26's rule). ``metrics`` / ``selection_metric``
+  must name metrics in the registry (``evaluation/metric_registry.py``); no key
+  outside the three, A50's reason. Predicate:
+  ``scoring_param_errors`` (returns errors; the training command raises,
+  collected with A26/A36 before Spark starts). NOT aggregated, A24's reason
+  (issue #158): only training reads the block, which is in no version ID.
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -615,7 +629,7 @@ window of ``evaluation.snap_date`` and be a time value sample_pool holds there.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
-flags), A22/A46/A51 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50 (config keys whose
+flags), A22/A46/A51 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53 (config keys whose
 harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags).
 
@@ -2230,21 +2244,12 @@ def training_diagnostics_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
-#: Values ``training.hpo_objective`` may take (A25). Defined here rather than
-#: in the training pipeline because the entry gate and the node that dispatches
-#: on the value must not be able to disagree about what is admissible:
-#: ``pipelines/training/nodes.py`` imports this tuple for its own fail-loud
-#: dispatch, so adding an objective is one edit rather than two.
-#:
-#: Two families. ``mean_ap`` / ``macro_per_item_map`` rank inside each query
-#: group; :data:`BINARY_PREDICTION_HPO_OBJECTIVES` score every val row as one
-#: binary prediction and need val to keep query groups holding no positive
-#: (A48).
-BINARY_PREDICTION_HPO_OBJECTIVES = (
-    "pooled_average_precision",
-    "macro_per_item_average_precision",
-)
-HPO_OBJECTIVES = ("mean_ap", "macro_per_item_map") + BINARY_PREDICTION_HPO_OBJECTIVES
+#: Values ``training.hpo_objective`` may take (A25) are the metric registry's
+#: names (``evaluation/metric_registry.py``, ADR-0028 decision 2), imported
+#: rather than copied so the entry gate and the scorer the value dispatches to
+#: cannot disagree about what is admissible: adding an objective is one row.
+#: Its binary-prediction family needs val to keep query groups holding no
+#: positive (A48).
 
 #: Values ``training.final_model_strategy`` may take (A25). ``hpo_best`` passes
 #: the HPO winner through unchanged; ``refit_on_full`` retrains on
@@ -2278,10 +2283,15 @@ def training_hpo_finalize_param_errors(parameters: dict) -> list[str]:
     collision this gate exists to prevent. Returns collect-all error strings;
     empty means OK.
     """
+    # Imported here, not at the top: core/ has no import-time dependency on
+    # the layers above it, and evaluation/metrics_spark imports this module
+    # (the A15 precedent for diagnosis/).
+    from recsys_tfb.evaluation.metric_registry import METRIC_NAMES
+
     errors: list[str] = []
     training = parameters.get("training", {}) or {}
     for key, admitted in (
-        ("hpo_objective", HPO_OBJECTIVES),
+        ("hpo_objective", METRIC_NAMES),
         ("final_model_strategy", FINAL_MODEL_STRATEGIES),
     ):
         if key not in training:
@@ -2364,7 +2374,7 @@ def entity_grouping_key_errors(parameters: dict) -> list[str]:
 #: Legal ``dataset.numeric_feature_storage_type`` values, and the default an
 #: absent key resolves to. Defined here rather than in the dataset pipeline so
 #: the gate (A31) and the node that dispatches on the value cannot drift apart
-#: — the reason A25 keeps ``HPO_OBJECTIVES`` in this module.
+#: — the reason A25 keeps ``FINAL_MODEL_STRATEGIES`` in this module.
 NUMERIC_STORAGE_TYPES: tuple[str, ...] = ("float32", "float64")
 DEFAULT_NUMERIC_STORAGE_TYPE = "float32"
 
@@ -2536,11 +2546,12 @@ def hpo_objective_population_errors(parameters: dict) -> list[str]:
     """A48 — a binary-prediction HPO objective needs val to keep query groups
     holding no positive (#430).
 
-    ``training.hpo_objective`` in :data:`BINARY_PREDICTION_HPO_OBJECTIVES`
-    requires ``dataset.val_zero_positive_group_ratio`` above 0. At 0 — the
-    default — the dataset pipeline drops every val query group without a
-    positive, and average precision is then computed on a population filtered
-    by the label it scores: a number, just not the one the objective names.
+    ``training.hpo_objective`` in the registry's binary-prediction family
+    (``metric_registry.BINARY_PREDICTION_METRICS``) requires
+    ``dataset.val_zero_positive_group_ratio`` above 0. At 0 — the default —
+    the dataset pipeline drops every val query group without a positive, and
+    average precision is then computed on a population filtered by the label
+    it scores: a number, just not the one the objective names.
     The ranking objectives are unaffected (such a group adds nothing to a
     ranking score), so the default every existing deployment runs stays clean.
 
@@ -2554,9 +2565,14 @@ def hpo_objective_population_errors(parameters: dict) -> list[str]:
     the groups — and fixing the ratio moves ``base_dataset_version``, so that
     build is rerun either way.
     """
+    # Imported here, not at the top: core/ has no import-time dependency on
+    # the layers above it, and evaluation/metrics_spark imports this module
+    # (the A15 precedent for diagnosis/).
+    from recsys_tfb.evaluation.metric_registry import BINARY_PREDICTION_METRICS
+
     training = parameters.get("training") or {}
     objective = training.get("hpo_objective")
-    if objective not in BINARY_PREDICTION_HPO_OBJECTIVES:
+    if objective not in BINARY_PREDICTION_METRICS:
         return []
     ds = parameters.get("dataset") or {}
     key = _zero_positive_group_ratio_key("val")
@@ -5174,8 +5190,9 @@ def _test_month_key(value) -> str:
     imports this one), and moving the original *here* would put a cache-path
     helper in the invariants module — the directory layout is the training
     pipeline's concern, and this module only has to agree with it. (Contrast
-    ``HPO_OBJECTIVES`` just above, which is imported rather than copied: a
-    value domain *is* an invariant, so it belongs here.) The agreement is
+    the value domains A25 checks, which are read, not copied: the strategies
+    live here, the objectives in the metric registry, so the gate and the
+    dispatcher read one table.) The agreement is
     pinned by a test that runs both over the same literals, so a change to the
     cache's notion of "same month" fails loudly instead of leaving A26 quietly
     checking the wrong thing.
@@ -5282,6 +5299,138 @@ def missing_test_month_errors(parameters: dict) -> list[str]:
         f"needs it.)"
     ]
 
+
+
+def scoring_snap_dates(parameters: Mapping) -> list[str]:
+    """The scored months: the time values training scores the model on test
+    over, as date texts in configured order (ADR-0028 decision 1).
+
+    ``test_metrics.snap_date`` — one date, a list, or a ``{start, end, step}``
+    range, read the way ``evaluation.snap_date`` is (``as_date_list``; the
+    loader expands a range, ``core/date_ranges.DATE_LIST_KEYS``) — or, when
+    that key is absent or null, the whole ``dataset.test_snap_dates``. The
+    texts are compared with the prediction table's STRING time partition as
+    they are, which is why A53 wants each one spelled as ``test_snap_dates``
+    spells it. Nothing configured gives ``[]``; A36 and A53 stop the training
+    command before that.
+    """
+    configured = (parameters.get("test_metrics") or {}).get("snap_date")
+    if configured is None:
+        configured = (parameters.get("dataset") or {}).get("test_snap_dates")
+    return as_date_list(configured if configured is not None else [])
+
+
+def scoring_param_errors(parameters: dict) -> list[str]:
+    """(A53) the ``test_metrics`` block: scored months and metric names.
+
+    Returns error strings (empty list when fine); the training command raises,
+    collected with A26/A36. Checked:
+
+    * ``snap_date`` (the scored months): not an empty list — it would score
+      nothing; each month in ``dataset.test_snap_dates``, spelled as it is
+      there, since the prediction table only holds test months and is
+      filtered by that text; and no month spelled two ways, A26's rule and
+      key (``_test_month_key``), because at most one spelling can match the
+      partition. The subset check is left to A36 when ``test_snap_dates`` is
+      empty.
+    * ``metrics`` a list of names and ``selection_metric`` a name, each in the
+      metric registry (``evaluation/metric_registry.py``).
+    * No key but the three above: a misspelled key would be ignored in
+      silence, which A49 / A50 refuse for their blocks too. The list is spelled
+      here, in the function S6 registers for it (R6), not as a module constant.
+
+    A null value is "not set", for every key. NOT aggregated by
+    ``validate_config_consistency``, for A24's reason (issue #158): only
+    training reads the block, and ``test_metrics`` is in no version ID.
+    Nothing about whether a metric can be computed on test is decided here.
+    """
+    # Imported here, not at the top: core/ has no import-time dependency on
+    # the layers above it, and evaluation/metrics_spark imports this module
+    # (the A15 precedent for diagnosis/).
+    from recsys_tfb.evaluation.metric_registry import METRIC_NAMES
+
+    known_keys = ("snap_date", "metrics", "selection_metric")
+    block = parameters.get("test_metrics")
+    if block is None:
+        return []
+    if not isinstance(block, Mapping):
+        return [
+            f"(A53) test_metrics={block!r} must be a mapping with the keys "
+            f"{list(known_keys)}."
+        ]
+    errors: list[str] = []
+    unknown_keys = sorted(str(k) for k in block if k not in known_keys)
+    if unknown_keys:
+        errors.append(
+            f"(A53) test_metrics declares {unknown_keys}, which nothing reads; "
+            f"the keys are {list(known_keys)}. A misspelled key would "
+            f"otherwise be ignored without a word."
+        )
+
+    if block.get("snap_date") is not None:
+        errors.extend(_scored_month_errors(parameters))
+
+    metrics = block.get("metrics")
+    if metrics is not None:
+        if not isinstance(metrics, list) or not all(
+                isinstance(m, str) for m in metrics):
+            errors.append(
+                f"(A53) test_metrics.metrics={metrics!r} must be a list of "
+                f"metric names; allowed: {', '.join(METRIC_NAMES)}."
+            )
+        else:
+            unknown = [m for m in metrics if m not in METRIC_NAMES]
+            if unknown:
+                errors.append(
+                    f"(A53) test_metrics.metrics names {unknown}, not in the "
+                    f"metric registry; allowed: {', '.join(METRIC_NAMES)}."
+                )
+
+    selection = block.get("selection_metric")
+    if selection is not None and selection not in METRIC_NAMES:
+        errors.append(
+            f"(A53) test_metrics.selection_metric={selection!r} is not in the "
+            f"metric registry; allowed: {', '.join(METRIC_NAMES)}. Unset, it "
+            f"follows training.hpo_objective."
+        )
+    return errors
+
+
+def _scored_month_errors(parameters: Mapping) -> list[str]:
+    """A53's half on ``test_metrics.snap_date``, when it is set."""
+    months = scoring_snap_dates(parameters)
+    if not months:
+        return [
+            "(A53) test_metrics.snap_date is empty, so training would score "
+            "the model on no month. Name the months to score, or delete the "
+            "key to score every dataset.test_snap_dates month."
+        ]
+    errors: list[str] = []
+    spellings_by_month: dict[str, list[str]] = {}
+    for month in months:
+        spellings_by_month.setdefault(_test_month_key(month), []).append(month)
+    for key in sorted(spellings_by_month):
+        spellings = spellings_by_month[key]
+        if len(spellings) > 1:
+            errors.append(
+                f"(A53) test_metrics.snap_date spells one month two ways: "
+                f"{spellings} all resolve to {key!r}. The prediction table is "
+                f"filtered by the text, so at most one of them can match. "
+                f"Keep the one dataset.test_snap_dates uses."
+            )
+    test_months = as_date_list(
+        (parameters.get("dataset") or {}).get("test_snap_dates") or [])
+    if test_months:
+        outside = [m for m in months if m not in test_months]
+        if outside:
+            errors.append(
+                f"(A53) test_metrics.snap_date month(s) {outside} are not in "
+                f"dataset.test_snap_dates {test_months}, spelled as there. "
+                f"Only test months are predicted, and the prediction table is "
+                f"filtered by that text: add them to dataset.test_snap_dates "
+                f"(and run dataset for them), or score a subset of it."
+            )
+    return errors
 
 def candidate_feature_table_inference_errors(declared: bool) -> list[str]:
     """(A47) offline inference is refused when a candidate-level feature table

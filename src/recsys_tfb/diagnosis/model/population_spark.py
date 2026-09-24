@@ -20,7 +20,7 @@ def select_shap_population(
     畫單列案例圖。rank/象限/選樣/join 全在 Spark(executor);driver 只 toPandas 小族群。
 
     ``quadrant_enabled=false`` → ``(None, None)``。best-effort:選樣失敗亦回 ``(None, None)``
-    (不中斷訓練)。``predict_manifest`` 僅作 in-DAG 排序依賴(與 ``compute_test_mAP_spark``
+    (不中斷訓練)。``predict_manifest`` 僅作 in-DAG 排序依賴(與 ``compute_test_metrics``
     同慣例;三個資料輸入皆無 node producer,不掛此依賴會被 topo-sort 排到 predict 前讀到
     未寫入的預測)。
     """

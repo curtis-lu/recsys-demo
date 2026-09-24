@@ -111,8 +111,9 @@ training:
   #     "mass|ccard_ins": 2.0
   #     "affluent|fund_mix": 0.7
   sample_weights: {}
-  # HPO scoring objective (switchable). Routed by tune_hyperparameters via
-  # _hpo_score; independent of algorithm_params.objective (the LightGBM
+  # HPO scoring objective (switchable). The allowed values are the metric
+  # registry's names (evaluation/metric_registry.py), which also scores each
+  # trial; independent of algorithm_params.objective (the LightGBM
   # learning objective).
   #   mean_ap            — per-(snap_date,cust_id) query mAP, query-equal-weight
   #                        (frequent products dominate via positive frequency).
@@ -179,6 +180,24 @@ training:
       type: float
       low: 0.6
       high: 1.0
+
+# training 在 test 上算哪些指標、在哪幾個 time 值上算（ADR-0028）。
+# 刻意放頂層（不在 training: 底下）：改這裡不會換 model_version、也不會換
+# search_id。三個鍵都可以不寫，下面註解掉的是不寫時的行為。
+# 設定檢查 A53 在 training 指令入口擋：計分月份空清單、不在 test_snap_dates 裡、
+# 同一月兩種寫法、指標名不在登記表（evaluation/metric_registry.py）、打錯的鍵。
+# 結果寫進 evaluation_results.json；說明見 docs/pipelines/training.md。
+test_metrics:
+  # 計分月份：寫法同 evaluation.snap_date（一個日期、清單、{start, end, step}
+  # 區間）。必須是 dataset.test_snap_dates 的子集，而且寫法要跟那裡一樣。
+  # 不寫＝dataset.test_snap_dates 全部。
+  # snap_date: "2026-01-31"
+  # 在排序類（mean_ap、macro_per_item_map，一律會算）之外另外要算的指標。
+  # 二元預測類在 test 上的算法還沒實作：列了只會記下「沒有值」與原因。
+  # metrics: []
+  # 選版指標：promote 挑版本時比的那個指標。不寫＝實際生效的 HPO 目標
+  # （training.hpo_objective；沒寫時是 mean_ap）。
+  # selection_metric: macro_per_item_map
 
 mlflow:
   experiment_name: recsys_tfb

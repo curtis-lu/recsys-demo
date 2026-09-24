@@ -16,7 +16,7 @@ from recsys_tfb.pipelines.training.nodes import (
     cache_train_dev_model_input,
     cache_train_model_input,
     cache_val_model_input,
-    compute_test_mAP_spark,
+    compute_test_metrics,
     finalize_model,
     log_experiment,
     persist_group_filter_report,
@@ -137,7 +137,7 @@ def create_pipeline() -> Pipeline:
             outputs="predict_manifest",
         ),
         Node(
-            compute_test_mAP_spark,
+            compute_test_metrics,
             inputs=["training_eval_predictions", "predict_manifest", "parameters"],
             outputs="evaluation_results",
         ),
@@ -182,7 +182,7 @@ def create_pipeline() -> Pipeline:
         Node(
             select_shap_population,
             # predict_manifest is an ordering-only dependency (same convention as
-            # compute_test_mAP_spark): it forces this node to run AFTER
+            # compute_test_metrics): it forces this node to run AFTER
             # predict_and_write_test_predictions has written training_eval_predictions.
             # Without it, all three data inputs lack a node producer and Kahn's sort
             # would float this node ahead of the predict node (stale predictions).

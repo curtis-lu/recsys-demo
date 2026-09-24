@@ -28,6 +28,7 @@
 %%                  **V 與 P 是兩份不同的東西，不是同一份的兩個名字**——見下方
 %%                  「為什麼有 V 也有 P」。
 %%   「全月讀回」    這條邊讀回來的是這個 model_version 底下**所有**月份（見下）。
+%%   「只讀計分月份」 這條邊只讀 test_metrics 的計分月份（ADR-0028，見下）。
 
 %% 為什麼有 V 也有 P——這是本圖第二違反直覺的一件事
 %%   preprocessor_view [V] 與 preprocessor [P] 是**兩份不同的東西**：
@@ -66,15 +67,16 @@
 %%   實際上就是 predict 節點查「哪些分區已經寫過」的那一刻。
 %%   所以圖上三個 subgraph 的分界不是美觀分組，是 Spark 活著／死著的分界。
 
-%% 為什麼要標「全月讀回」——而且跟 inference 圖的結論相反
+%% 為什麼 select_shap_population 標「全月讀回」、compute_test_metrics 標「只讀計分月份」
 %%   training_eval_predictions 的 catalog 條目 partition_filter 只鎖 model_version，
-%%   月份沒有任何東西擋，所以 compute_test_mAP_spark 與 select_shap_population 讀回來
-%%   的是這個 model_version 累積過的**所有** test 月份。
-%%   inference 圖上同樣標記的邊，兩個消費者都會自己呼叫 restrict_to_snap_dates 裁掉
-%%   歷史月份；這裡**刻意不裁**——那個 mAP 本來就是要涵蓋這個模型評估過的全部月份。
+%%   月份沒有任何東西擋，所以這張表裡是這個 model_version 累積過的**所有** test 月份。
+%%   select_shap_population 照單全收（診斷選樣，不裁）。compute_test_metrics 自己裁到
+%%   計分月份（test_metrics.snap_date，沒寫＝dataset.test_snap_dates；ADR-0028）：
+%%   分數是 promote 挑版本的依據，跟著表裡累積了哪些月份變，兩個版本就可能考不同的
+%%   考卷。表裡其他月份不讀，log 列出略過了哪些（從檔案清單讀，不跑 Spark job）。
 %%   代價由 steps/predict_months.py::warn_about_surplus_partitions 說出來：item 改名
-%%   留下的 surplus 分區重跑也刪不掉，會一直混進這個 model_version 的 metric，所以
-%%   那裡發 warning 而不是靜靜跳過。
+%%   留下的 surplus 分區重跑也刪不掉，會一直混進計分月份的 metric，所以那裡發
+%%   warning 而不是靜靜跳過。
 
 %% 增量在這條 pipeline 出現三次，三種機制
 %%   1. parquet 快取（cache_* 四個 node）：命中與否只看 _SUCCESS 在不在，**不看新舊**。
@@ -103,7 +105,7 @@
 %%   這個參數在函式裡從頭到尾沒被讀過（population_spark.py 全檔只出現在簽名與
 %%   docstring）。掛它的理由是排序：那個 node 的三個資料輸入都沒有 node producer，
 %%   Kahn 拓樸排序會把它浮到 predict 之前，讀到還沒寫入的預測。
-%%   compute_test_mAP_spark 的同名輸入不是虛線——它真的被讀了，但只進 logger
+%%   compute_test_metrics 的同名輸入不是虛線——它真的被讀了，但只進 logger
 %%   （該函式開頭的 logger.info(... manifest=%s)），資料一樣是從 Hive 讀回來的。
 
 %% 為什麼這張圖沒有六角形
@@ -238,7 +240,7 @@ flowchart TB
     n_predict["predict_and_write_test_predictions<br/><small>增量 ・ ＋ M · V ・ 逐 (snap_date, item) 分區評分並寫出<br/>已完整的月份跳過；完整＝已寫 item 分區恰等於快取的 item 集合</small>"]
     d_manifest(["predict_manifest<br/><small>processed／skipped／rebuilt：決定少做的事要說出來</small>"])
     o_pred(["training_eval_predictions<br/><small>model_version / snap_date, prod_name</small>"])
-    n_map["compute_test_mAP_spark<br/><small>Spark-native mAP ・ 指標固定只有一套</small>"]
+    n_map["compute_test_metrics<br/><small>只讀計分月份 ・ 3 次 Spark action</small>"]
     o_evalres(["evaluation_results　<b>[L]</b>"])
     n_selpop["select_shap_population<br/><small>Spark 選樣：top@1 定象限 × 每格 crc32 抽樣 ＋ 全格極值<br/>quadrant_enabled=false → (None, None)</small>"]
     d_pop(["shap_population"])
@@ -249,7 +251,7 @@ flowchart TB
   o_model --> n_predict
   n_predict --> d_manifest
   n_predict == "writes=：節點自己逐分區 save()<br/><b>不是</b>拓樸相依邊" ==> o_pred
-  o_pred -- "全月讀回<br/>刻意不裁月份" --> n_map
+  o_pred -- "只讀計分月份" --> n_map
   d_manifest -- "拓樸邊：內容只進 log" --> n_map
   n_map --> o_evalres
   o_pred -- "全月讀回" --> n_selpop

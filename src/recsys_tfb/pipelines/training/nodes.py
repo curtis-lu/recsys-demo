@@ -52,11 +52,7 @@ import optuna
 import pandas as pd
 import pyarrow.dataset as pads
 
-from recsys_tfb.core.consistency import (
-    BINARY_PREDICTION_HPO_OBJECTIVES,
-    HPO_OBJECTIVES,
-    REBUILD_SNAP_DATES_KEY,
-)
+from recsys_tfb.core.consistency import REBUILD_SNAP_DATES_KEY, scoring_snap_dates
 from recsys_tfb.core.group_utils import (
     default_metric_for_objective,
     drop_zero_positive_groups,
@@ -79,8 +75,18 @@ from recsys_tfb.preprocessing import preprocessor_item_values
 from recsys_tfb.core.versioning import compute_search_id
 from recsys_tfb.diagnosis.hpo import write_hpo_diagnostics
 from recsys_tfb.diagnosis.model import diagnostics_dir
-from recsys_tfb.evaluation.metrics import resolved_all_k
-from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+from recsys_tfb.evaluation.metric_registry import (
+    BINARY_PREDICTION_METRICS,
+    METRIC_NAMES,
+    RANKING_PASS,
+    effective_hpo_objective,
+    passes_for,
+    read_test_values,
+    requested_test_metrics,
+    run_test_pass,
+    selection_metric,
+)
+from recsys_tfb.evaluation.metrics_spark import count_query_groups_by_time
 from recsys_tfb.io.extract import (
     extract_Xy,
     extract_Xy_with_groups,
@@ -95,6 +101,7 @@ from recsys_tfb.pipelines.training.steps import (
     hpo_resume,
     refit,
     sample_weights,
+    scored_months,
 )
 from recsys_tfb.pipelines.training.steps.hpo_scoring import (
     TrialScorer,
@@ -623,8 +630,8 @@ def tune_hyperparameters(
     whoever produced the data.
 
     The second is a **pre-check** on the val data, before the first trial: an
-    objective in ``BINARY_PREDICTION_HPO_OBJECTIVES`` over a val set holding
-    no positive row. Average precision is undefined there, and any constant
+    objective in ``metric_registry.BINARY_PREDICTION_METRICS`` over a val set
+    holding no positive row. Average precision is undefined there, and any constant
     stood in for it would score every trial alike — the first trial wins and
     the search runs to the end without a word (#430). Only the data can tell,
     so it is checked here rather than at CLI entry; the person to find is
@@ -658,11 +665,11 @@ def tune_hyperparameters(
     early_stopping_rounds = training_params.get("early_stopping_rounds", 50)
     algorithm = training_params.get("algorithm", "lightgbm")
 
-    hpo_objective = training_params.get("hpo_objective", "mean_ap")
-    if hpo_objective not in HPO_OBJECTIVES:
+    hpo_objective = effective_hpo_objective(parameters)
+    if hpo_objective not in METRIC_NAMES:
         raise ValueError(
             f"unknown training.hpo_objective {hpo_objective!r}; "
-            f"allowed: {', '.join(HPO_OBJECTIVES)}"
+            f"allowed: {', '.join(METRIC_NAMES)}"
         )
 
     # Local copy: defaulting the ranking metric must not mutate the shared
@@ -704,7 +711,7 @@ def tune_hyperparameters(
     # zero_positive_group_weight. The ranking objectives never weigh a row, and
     # the column exists only when the val ratio is above 0, which A48
     # guarantees for these objectives alone.
-    binary_objective = hpo_objective in BINARY_PREDICTION_HPO_OBJECTIVES
+    binary_objective = hpo_objective in BINARY_PREDICTION_METRICS
     with log_step(logger, "extract_features"):
         extracted = extract_Xy_with_groups(
             val_parquet_handle, preprocessor_metadata, parameters,
@@ -1184,8 +1191,9 @@ def predict_and_write_test_predictions(
     # Decision — a month holding prediction partitions for items the cache no
     # longer has is re-predicted and warned about, never repaired. Re-predicting
     # writes the items that are in the cache and cannot delete one that is not,
-    # so the surplus survives every run — and compute_test_mAP_spark reads the
-    # whole model_version, so a stale item keeps contributing rows to the metric.
+    # so the surplus survives every run — and compute_test_metrics reads every
+    # item partition of the scored months, so a stale item keeps contributing
+    # rows to the metric.
     warn_about_surplus_partitions(
         months, cache_items, written_items, exclude=rebuild
     )
@@ -1400,28 +1408,35 @@ def log_experiment(
         )
 
 
-def compute_test_mAP_spark(
+def compute_test_metrics(
     training_eval_predictions,  # Spark DataFrame, loaded by catalog (filtered to current model_version)
     predict_manifest: dict,
     parameters: dict,
 ) -> dict:
-    """Spark-native mAP over training_eval_predictions; emits the dict
-    shape consumed by log_experiment.
+    """Score the model on test: the metrics promote and MLflow read, over the
+    scored months (ADR-0028).
 
-    Keys (post metrics-spark redesign):
-        overall_map        per-query mAP@all averaged across queries
-                           (mean of per-query AP@all)
-        per_item_map_attr  {item: mean(ap_contrib@all) over item-positive rows}
-                           — replaces the old per_product_ap.
+    Keys:
+        overall_map        mean over query groups of each group's AP, no
+                           truncation (``mean_ap``)
+        per_item_map_attr  {item: mean AP contribution of its positive rows}
         n_queries / n_excluded_queries
+                           query groups scored / of those, holding no positive
+        snap_dates         the time values scored, as configured
+        metrics            {metric: value} for every metric computed on test
+        metrics_not_computed
+                           {metric: reason} for the ones asked for with no
+                           value (a binary-prediction metric, until its Spark
+                           algorithm lands)
+        selection_metric / hpo_objective
+                           the names this run scored under
 
-    "all" is the K ``compute_all_metrics`` resolved it to, read back through
-    ``metrics.resolved_all_k``: the item count, or the widest query group
-    once ``event`` is declared.
-
-    One set of metrics, always. There used to be a second, "before
-    calibration" set, emitted when ``score`` and ``score_uncalibrated``
-    disagreed; #411 removed the only thing that could make them disagree.
+    The first four are the ones this node always wrote, value for value when
+    the scored months are the table's months: the same building blocks as the
+    report's ``map@all`` (``metrics_spark.compute_untruncated_ap``), minus the
+    K ``"all"`` never truncated at. So nothing under ``evaluation.*`` is read —
+    ``k_values`` without ``"all"`` used to log 0.0 for two of them — and the
+    three Spark actions are all the four values and both ranking metrics cost.
 
     predict_manifest is an in-DAG dependency only — its content is logged
     for observability but the actual data is read back from
@@ -1431,50 +1446,108 @@ def compute_test_mAP_spark(
     has a catalog entry, so a ``--from-node`` resume starting here loads the
     *previous* run's copy rather than re-running predict. The trade is argued
     once, at that entry in ``conf/base/catalog.yaml``.
+
+    The first ``raise`` is a **pre-check** on config (no scored month; A36 /
+    A53 stop the command before it). The second is a **pre-check** on the
+    table: a scored month with no prediction.
     """
-    logger.info("compute_test_mAP_spark: starting — manifest=%s", predict_manifest)
+    logger.info("compute_test_metrics: starting — manifest=%s", predict_manifest)
+    time_col = get_schema(parameters)["time"]
 
-    # The block below reads the *whole* test prediction table — all months,
-    # all items — which makes this node one of the likelier places for the
-    # tail of the pipeline to get slow. Without it it has no timing at all.
-    # The action is not on this line: compute_all_metrics counts and collects
-    # several times inside evaluation/metrics_spark.py. Rule 10's "follow one
-    # level" applies — this is the expensive block, not a lazy plan.
-    # Decision — no category pass (#379). Nothing below reads it,
-    # so inheriting evaluation.item_categories only cost a collapse pass, and
-    # in column mode it would raise: that table is read off sample_pool by
-    # evaluation's prepare_eval_data, which training does not run.
-    with log_step(logger, "compute_metrics"):
-        cal = compute_all_metrics(
-            training_eval_predictions, parameters, with_category=False)
+    # Decision — which months: the scored months (test_metrics.snap_date, or
+    # every test_snap_dates month), never whatever the table holds. The table
+    # keeps every month this model_version was ever predicted on, so scoring
+    # all of it let the score move with the table and let promote rank
+    # versions scored on different months (ADR-0028 background three).
+    months = scoring_snap_dates(parameters)
+    if not months:
+        raise ValueError(
+            "compute_test_metrics: no scored month — test_metrics.snap_date "
+            "and dataset.test_snap_dates are both unset or empty."
+        )
 
-    # Decision — "all" is read at the K the metrics were stored at, not at a
-    # count of our own. They differ once `event` is declared (the widest query
-    # group against the item count), and a count of our own then asked for a
-    # key that was never written and logged 0.0 for both numbers (#434).
-    all_k = resolved_all_k(cal)
-    overall_map_key = f"map@{all_k}"
-    item_map_attr_key = f"map_attr@{all_k}"
+    # Decision — say which months the table holds but this run does not
+    # score, off the partition listing: no Spark job, and those rows are
+    # never read. A month left out of test_snap_dates, or out of the scored
+    # months on purpose, is named rather than silently dropped.
+    in_table = scored_months.partition_months(training_eval_predictions, time_col)
+    if in_table is None:
+        logger.info(
+            "compute_test_metrics: %s is not read from files partitioned by "
+            "%s, so the months it holds beyond %s cannot be listed",
+            type(training_eval_predictions).__name__, time_col, months,
+        )
+    else:
+        unscored = [m for m in in_table if m not in months]
+        if unscored:
+            logger.info(
+                "compute_test_metrics: %s in the prediction table, not scored "
+                "(scored months: %s)", unscored, months,
+            )
+    frame = scored_months.restrict_to_months(
+        training_eval_predictions, time_col, months)
+
+    # Decision — what to score: both ranking metrics always, plus the
+    # selection metric, the HPO objective and test_metrics.metrics (ADR-0028
+    # decision 1). Printed before the work, so a reader sees what was asked
+    # for even when some of it has no value at the end.
+    wanted = requested_test_metrics(parameters)
     logger.info(
-        "compute_test_mAP_spark: overall_key=%s item_key=%s",
-        overall_map_key, item_map_attr_key,
+        "compute_test_metrics: scoring %s on %s (selection metric %s, HPO "
+        "objective %s)", wanted, months, selection_metric(parameters),
+        effective_hpo_objective(parameters),
     )
 
+    with log_step(logger, "count_query_groups"):
+        counts = count_query_groups_by_time(frame, parameters)
+
+    # Decision — a scored month with no prediction stops the run: a score over
+    # the months that happen to be there would be recorded as the score over
+    # the months asked for, and promote compares the recorded months. Checked
+    # off the count above, not by an action of its own.
+    missing = [m for m in months if m not in counts.times]
+    if missing:
+        raise ValueError(
+            f"compute_test_metrics: scored month(s) {missing} have no rows in "
+            f"training_eval_predictions for this model_version (months "
+            f"present among the scored ones: {sorted(counts.times)}). Run "
+            f"predict for them first — training, or --from-node "
+            f"predict_and_write_test_predictions — or leave them out of "
+            f"test_metrics.snap_date."
+        )
+
+    # The expensive block: each pass the wanted metrics need, once. The
+    # actions are inside metrics_spark (rule 10's "follow one level").
+    with log_step(logger, "compute_metrics"):
+        pass_results = {
+            name: run_test_pass(name, frame, parameters)
+            for name in passes_for(wanted)
+        }
+    values, not_computed = read_test_values(wanted, pass_results)
+    for name, reason in not_computed.items():
+        logger.warning(
+            "compute_test_metrics: %s has no value on test: %s", name, reason)
+
+    ranking = pass_results[RANKING_PASS]
     result = {
-        "overall_map": float(cal["overall"].get(overall_map_key, 0.0)),
-        "per_item_map_attr": {
-            p: float(v.get(item_map_attr_key, 0.0))
-            for p, v in cal["per_item"].items()
-        },
-        "n_queries": cal["n_queries"],
-        "n_excluded_queries": cal["n_excluded_queries"],
+        "overall_map": ranking.overall_map,
+        "per_item_map_attr": ranking.per_item_map_attr,
+        "n_queries": counts.n_queries,
+        "n_excluded_queries": counts.n_queries - counts.n_with_positive,
+        "snap_dates": months,
+        "metrics": values,
+        "metrics_not_computed": not_computed,
+        "selection_metric": selection_metric(parameters),
+        "hpo_objective": effective_hpo_objective(parameters),
     }
 
     logger.info(
-        "compute_test_mAP_spark: mAP=%.4f items=%d excluded_queries=%d",
+        "compute_test_metrics: mAP=%.4f items=%d excluded_queries=%d "
+        "metrics=%s",
         result["overall_map"],
         len(result["per_item_map_attr"]),
         result["n_excluded_queries"],
+        values,
     )
 
     return result

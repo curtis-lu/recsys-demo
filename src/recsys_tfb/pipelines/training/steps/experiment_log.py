@@ -6,11 +6,12 @@ the field names. The split follows how the two fail. A server being unreachable
 is loud and already handled. A renamed field is silent: the run still succeeds,
 and whoever was plotting the old name simply stops getting a line.
 
-So every string here is wire format for readers outside this repo. Seven of
-them happen to be pinned by ``tests/test_pipelines/test_training/test_nodes.py``;
-``map_attr_*``, ``n_queries``, ``n_excluded_queries``, ``n_quadrant_cells`` and
-``n_cases_rendered`` are pinned by nothing at all. Treat them all as published
-— the test suite is not what makes them stable.
+So every string here is wire format for readers outside this repo. Most of
+them happen to be pinned by ``tests/test_pipelines/test_training/test_nodes.py``
+(``map_attr_*``, ``n_queries``, ``n_excluded_queries`` and the ``test_*``
+metrics since ADR-0028); ``n_quadrant_cells`` and ``n_cases_rendered`` are
+pinned by nothing at all. Treat them all as published — the test suite is not
+what makes them stable.
 
 Nothing here decides *whether* to log; the node does. These functions assume
 they are inside an active MLflow run.
@@ -48,13 +49,20 @@ def log_run_params(
 
 
 def log_evaluation_metrics(evaluation_results: dict) -> None:
-    """The ranking scores, with per-item mAP fanned out one metric per item.
+    """The test scores: the four names logged since before ADR-0028, then one
+    ``test_<metric>`` per metric scored on test.
 
     The three headline keys are indexed, not ``.get``: they are required output
-    of the evaluation node, so a missing one means a broken upstream rather
+    of the scoring node, so a missing one means a broken upstream rather
     than a metric to quietly skip. The resulting ``KeyError`` is caught by the
     node's best-effort wrapper like any other MLflow failure, which is why
     indexing here does not risk the pipeline.
+
+    ``metrics`` is read with ``.get``: a file written before ADR-0028 has none,
+    and a ``--only-node log_experiment`` over it still logs the old four. The
+    ``test_`` prefix keeps the new names off the old ones (``overall_map`` is
+    ``mean_ap``'s value under its old name, and stays). A metric with no value
+    on test (``metrics_not_computed``) logs nothing: a 0 would read as a score.
     """
     mlflow.log_metric("overall_map", evaluation_results["overall_map"])
 
@@ -63,6 +71,9 @@ def log_evaluation_metrics(evaluation_results: dict) -> None:
 
     mlflow.log_metric("n_queries", evaluation_results["n_queries"])
     mlflow.log_metric("n_excluded_queries", evaluation_results["n_excluded_queries"])
+
+    for name, value in (evaluation_results.get("metrics") or {}).items():
+        mlflow.log_metric(f"test_{name}", value)
 
 
 def log_diagnostics_summary(

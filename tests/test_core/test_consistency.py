@@ -1941,9 +1941,28 @@ class TestTrainSnapDatesA23:
 
 from recsys_tfb.core.consistency import (
     FINAL_MODEL_STRATEGIES,
-    HPO_OBJECTIVES,
     training_hpo_finalize_param_errors,
 )
+from recsys_tfb.evaluation.metric_registry import METRIC_NAMES
+
+
+def test_importing_the_gate_loads_no_evaluation_module():
+    """``core/`` has no import-time dependency on the layers above it; A25,
+    A48 and A53 read the metric registry lazily. Run in a fresh interpreter:
+    this test process has long imported everything. Imported eagerly, the
+    registry would pull ``evaluation.metrics_spark``, which imports this
+    module back — an import cycle."""
+    import subprocess
+    import sys
+
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import sys, recsys_tfb.core.consistency; "
+         "print(sorted(m for m in sys.modules "
+         "if m.startswith('recsys_tfb.evaluation')))"],
+        capture_output=True, text=True, check=True,
+    )
+    assert out.stdout.strip() == "[]"
 
 
 class TestTrainingHpoFinalizeParamsA25:
@@ -1958,7 +1977,7 @@ class TestTrainingHpoFinalizeParamsA25:
         assert training_hpo_finalize_param_errors(self._params()) == []
 
     def test_every_admitted_value_is_accepted(self):
-        for objective in HPO_OBJECTIVES:
+        for objective in METRIC_NAMES:
             assert training_hpo_finalize_param_errors(
                 self._params(hpo_objective=objective)) == [], objective
         for strategy in FINAL_MODEL_STRATEGIES:
@@ -4757,3 +4776,124 @@ class TestQueryFilterParamsA49:
         p["evaluation"] = {"query_filter": {"drop_all_positive_groups": "bad"}}
         assert query_filter_param_errors(p), "premise: this conf is bad"
         validate_config_consistency(p)
+
+
+# =============================================================================
+# A53 — test_metrics (ADR-0028): the scored months and the metric names
+#       (wired on the training command)
+# =============================================================================
+
+from recsys_tfb.core.consistency import scoring_snap_dates, scoring_param_errors
+
+
+def _scoring(test_snap_dates=("2026-01-31", "2026-02-28"), **test_metrics):
+    params = {"dataset": {"test_snap_dates": list(test_snap_dates)}}
+    if test_metrics:
+        params["test_metrics"] = test_metrics
+    return params
+
+
+class TestScoringSnapDates:
+    def test_unset_is_the_whole_test_snap_dates(self):
+        assert scoring_snap_dates(_scoring()) == ["2026-01-31", "2026-02-28"]
+        assert scoring_snap_dates(_scoring(snap_date=None)) == [
+            "2026-01-31", "2026-02-28"]
+
+    def test_one_date_or_a_list_as_evaluation_snap_date_takes_them(self):
+        assert scoring_snap_dates(_scoring(snap_date="2026-02-28")) == [
+            "2026-02-28"]
+        assert scoring_snap_dates(_scoring(
+            snap_date=["2026-02-28", "2026-01-31"])) == [
+            "2026-02-28", "2026-01-31"]
+
+    def test_a_range_expands_like_evaluation_snap_date(self, tmp_path):
+        """Written as ``{start, end, step}``, the loader expands it before any
+        reader sees it — the same registration ``evaluation.snap_date`` has."""
+        from recsys_tfb.core.config import ConfigLoader
+
+        base = tmp_path / "base"
+        base.mkdir()
+        (base / "parameters.yaml").write_text(
+            "test_metrics:\n"
+            "  snap_date: {start: '2026-01-31', end: '2026-03-31',"
+            " step: month_end}\n"
+        )
+        params = ConfigLoader(str(tmp_path), env="base").get_parameters()
+        assert scoring_snap_dates(params) == [
+            "2026-01-31", "2026-02-28", "2026-03-31"]
+
+
+class TestTestMetricsA53:
+    def test_absent_block_and_valid_settings_are_clean(self):
+        assert scoring_param_errors(_scoring()) == []
+        assert scoring_param_errors(_scoring(
+            snap_date=["2026-02-28"],
+            metrics=["pooled_average_precision"],
+            selection_metric="mean_ap",
+        )) == []
+        # null is "not set", for each key.
+        assert scoring_param_errors(_scoring(
+            snap_date=None, metrics=None, selection_metric=None)) == []
+
+    def test_an_empty_list_of_scored_months_is_refused(self):
+        errs = scoring_param_errors(_scoring(snap_date=[]))
+        assert len(errs) == 1
+        assert "A53" in errs[0] and "empty" in errs[0]
+
+    def test_a_scored_month_outside_test_snap_dates_is_refused(self):
+        errs = scoring_param_errors(_scoring(snap_date=["2026-02-28", "2026-03-31"]))
+        assert len(errs) == 1
+        assert "A53" in errs[0] and "['2026-03-31'] are not in" in errs[0]
+
+    def test_another_spelling_of_a_test_month_is_not_that_month(self):
+        """The months filter the prediction table by text, so a spelling the
+        table was not written under would match no row."""
+        errs = scoring_param_errors(_scoring(snap_date=["20260131"]))
+        assert len(errs) == 1 and "'20260131'" in errs[0]
+
+    def test_no_test_months_leaves_the_subset_check_to_a36(self):
+        assert scoring_param_errors(_scoring(
+            test_snap_dates=(), snap_date=["2026-01-31"])) == []
+
+    def test_one_month_spelled_two_ways_is_refused(self):
+        errs = scoring_param_errors(_scoring(
+            test_snap_dates=("2026-01-31", "20260131"),
+            snap_date=["2026-01-31", "20260131"]))
+        assert len(errs) == 1
+        assert "A53" in errs[0] and "two ways" in errs[0]
+        assert "2026-01-31" in errs[0] and "20260131" in errs[0]
+
+    def test_the_same_literal_twice_is_one_month(self):
+        assert scoring_param_errors(_scoring(
+            snap_date=["2026-01-31", " 2026-01-31"])) == []
+
+    def test_an_unregistered_metric_name_is_refused(self):
+        errs = scoring_param_errors(_scoring(metrics=["mean_ap", "ndcg"]))
+        assert len(errs) == 1
+        assert "A53" in errs[0] and "test_metrics.metrics" in errs[0]
+        assert "'ndcg'" in errs[0] and "'mean_ap'" not in errs[0]
+
+    def test_metrics_must_be_a_list_of_names(self):
+        errs = scoring_param_errors(_scoring(metrics="mean_ap"))
+        assert len(errs) == 1 and "test_metrics.metrics" in errs[0]
+
+    def test_an_unregistered_selection_metric_is_refused(self):
+        errs = scoring_param_errors(_scoring(selection_metric="overall_map"))
+        assert len(errs) == 1
+        assert "A53" in errs[0] and "test_metrics.selection_metric" in errs[0]
+
+    def test_an_unknown_key_is_refused(self):
+        """A misspelled key would otherwise be silently ignored, the failure
+        A49 / A50 guard their blocks against."""
+        errs = scoring_param_errors(_scoring(selection_metrics="mean_ap"))
+        assert len(errs) == 1
+        assert "A53" in errs[0] and "selection_metrics" in errs[0]
+
+    def test_the_block_must_be_a_mapping(self):
+        errs = scoring_param_errors({"test_metrics": ["mean_ap"]})
+        assert len(errs) == 1 and "A53" in errs[0]
+
+    def test_every_problem_is_reported_at_once(self):
+        errs = scoring_param_errors(_scoring(
+            snap_date=["2026-03-31"], metrics=["ndcg"], selection_metric="x"))
+        assert len(errs) == 3

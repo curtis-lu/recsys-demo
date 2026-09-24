@@ -215,6 +215,24 @@ def test_a36_wired_into_training_command_before_spark():
     ), "A36 must fail before the Spark cold start, like A21/A23/A24/A26"
 
 
+
+def test_a53_wired_into_training_command_before_spark():
+    # ADR-0028: the scored months and the metric names only matter to
+    # training, so A53 hangs off the training command like A26/A36 rather than
+    # the aggregator every command runs (#158 precedent) — and before the
+    # Spark cold start, so a typo costs no HPO search.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "scoring_param_errors" not in inspect.getsource(
+        validate_config_consistency
+    ), "A53 must stay off the global aggregator (#158 precedent)"
+
+    src = inspect.getsource(m.training)
+    assert "scoring_param_errors(params)" in src
+    assert src.index("scoring_param_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A53 must fail before the Spark cold start, like A26/A36"
+
 def test_a26_is_checked_before_a21():
     # A21 resolves --rebuild-dates against dataset.test_snap_dates. If the
     # month is spelled two ways, "is this flag value a configured month" has
