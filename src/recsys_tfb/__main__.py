@@ -74,8 +74,6 @@ from recsys_tfb.pipelines.dataset.month_plans import (
     CANDIDATE_FEATURE_TABLE,
     INCREMENTAL_DATASETS,
     build_month_plans,
-    candidate_feature_table_months,
-    candidate_months_input,
     landed_months,
     month_plan_input,
     plan_incremental_snap_dates,
@@ -1371,15 +1369,12 @@ def dataset(
                 month_plan_input(name): plan
                 for name, plan in month_plans.items()
             },
-            # Which months of the candidate-level feature table each build
-            # reads — registered whether or not one is declared, so the node
-            # inputs are the same literal list for every deployment.
-            **{
-                candidate_months_input(split): months
-                for split, months in candidate_feature_table_months(
-                    params, month_plans["test_model_input"], only_test_months,
-                ).items()
-            },
+            # The run mode, for the one node that cannot see it: the precision
+            # gate checks the candidate-level feature table over the months
+            # this run's builds read, and under --only-test-months only the
+            # test build runs. Each build works out its own months (ADR-0029
+            # decision 2), so no month list is injected.
+            "only_test_months": only_test_months,
             # `None` is how a node learns none is declared. Only then: a
             # declared entry is already in the catalog, and registering over it
             # would silently drop every candidate-level feature.

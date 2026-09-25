@@ -74,8 +74,8 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
     """
     from recsys_tfb.pipelines.dataset.nodes import (
         apply_preprocessor_to_features,
-        build_model_input,
         build_test_model_input,
+        build_train_model_input,
         build_val_model_input,
         filter_test_model_input,
         filter_train_keys,
@@ -154,16 +154,17 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         ),
         # --- Fit preprocessor on train date-range feature_table, decoupled from sampling ---
         #
-        # `candidate_feature_table` and the months of it a node reads (the
-        # optional candidate-level feature table, ADR-0026) go last on every
-        # node that takes them. Each build gets its own split's months —
-        # train_dev reads the train list — and the precision gate all three.
-        # They are optional trailing parameters and the
+        # `candidate_feature_table` (the optional candidate-level feature
+        # table, ADR-0026) goes after every required input on each node that
+        # takes it — only the precision gate has inputs after it, two more
+        # optional ones. It is an optional trailing parameter and the
         # Runner binds by position — this repo's convention for a new optional
         # input (see the note on `log_experiment` in training/pipeline.py). The
         # CLI registers `None` for the table when a deployment declares none, so
         # the list is the same for every deployment — a literal list, as the AST
-        # audit needs.
+        # audit needs. Which months of it a node reads is the node's own
+        # business, worked out from config or from a month plan it already
+        # takes (ADR-0029 decision 2); nothing injects a month list.
         # `sample_pool` and `preprocessor_on_disk` (#379) come after the
         # candidate table, for the same reason: new optional inputs go last.
         # The fit counts the item list from sample_pool's train months when
@@ -191,7 +192,7 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         # --- B8 precision gate: the months just encoded must survive the
         #     declared numeric storage type. Declared HERE rather than anywhere
         #     later in this list because list position is what orders it: it and
-        #     the build_model_input nodes below become runnable at the same
+        #     the build nodes below become runnable at the same
         #     moment (they share `preprocessed_feature_table` as their last unmet
         #     input), and Kahn queues them in declaration order
         #     (`core/pipeline.py`). Moving this entry below them would let a
@@ -204,34 +205,38 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         #     out and looked at, which a pass/fail gate cannot answer ---
         Node(
             validate_numeric_precision,
+            # The candidate table is checked over the months this run's
+            # builds read, so the gate also takes the test build's plan and
+            # the run mode — under --only-test-months only the test build
+            # runs, which is the one fact the gate cannot work out for itself
+            # (ADR-0029 decision 2).
             inputs=[
                 "preprocessed_feature_table", "preprocessor",
                 "preprocessed_feature_table_month_plan", "parameters",
                 "candidate_feature_table",
-                "candidate_feature_table_train_months",
-                "candidate_feature_table_val_months",
-                "candidate_feature_table_test_months",
+                "test_model_input_month_plan", "only_test_months",
             ],
             outputs="numeric_precision_report",
             name="validate_numeric_precision",
         ),
-        # --- Build model_input per split (join keys + labels + encoded features) ---
+        # --- Build model_input per split (join keys + labels + encoded
+        #     features). Each build reads its own split's months of the three
+        #     tables it joins: train and train_dev the train months, val the
+        #     val months, test its plan's to_process. ---
         Node(
-            build_model_input,
+            build_train_model_input,
             inputs=[
                 "train_keys", "preprocessed_feature_table", "label_table",
-                "preprocessor", "parameters",
-                "candidate_feature_table", "candidate_feature_table_train_months",
+                "preprocessor", "parameters", "candidate_feature_table",
             ],
             outputs="train_model_input",
             name="build_train_model_input",
         ),
         Node(
-            build_model_input,
+            build_train_model_input,
             inputs=[
                 "train_dev_keys", "preprocessed_feature_table", "label_table",
-                "preprocessor", "parameters",
-                "candidate_feature_table", "candidate_feature_table_train_months",
+                "preprocessor", "parameters", "candidate_feature_table",
             ],
             outputs="train_dev_model_input",
             name="build_train_dev_model_input",
@@ -244,8 +249,7 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
             build_val_model_input,
             inputs=[
                 "val_keys", "preprocessed_feature_table", "label_table",
-                "preprocessor", "parameters",
-                "candidate_feature_table", "candidate_feature_table_val_months",
+                "preprocessor", "parameters", "candidate_feature_table",
             ],
             outputs="val_model_input_unfiltered",
             name="build_val_model_input",
@@ -259,7 +263,7 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
             inputs=[
                 "test_keys", "preprocessed_feature_table", "label_table",
                 "preprocessor", "test_model_input_month_plan", "parameters",
-                "candidate_feature_table", "candidate_feature_table_test_months",
+                "candidate_feature_table",
             ],
             outputs="test_model_input_unfiltered",
             name="build_test_model_input",

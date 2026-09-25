@@ -277,9 +277,7 @@ class TestTrainingPipelineE2E:
         from recsys_tfb.core.runner import Runner
         from recsys_tfb.pipelines.dataset import create_pipeline as create_dataset_pipeline
         from recsys_tfb.pipelines.dataset.month_plans import (
-            CANDIDATE_FEATURE_TABLE, build_month_plans,
-            candidate_feature_table_months, candidate_months_input,
-            month_plan_input,
+            CANDIDATE_FEATURE_TABLE, build_month_plans, month_plan_input,
         )
 
         # -- Synthetic source tables --
@@ -393,17 +391,15 @@ class TestTrainingPipelineE2E:
         _plans = build_month_plans(parameters)
         for _name, _plan in _plans.items():
             catalog.add(month_plan_input(_name), MemoryDataset(_plan))
-        # The two candidate-level feature table inputs exist for every
-        # deployment (ADR-0026); `None` is how the nodes learn none is declared,
-        # which is what the CLI registers in that case.
+        # The candidate-level feature table exists for every deployment
+        # (ADR-0026); `None` is how the nodes learn none is declared, which is
+        # what the CLI registers in that case.
         catalog.add(CANDIDATE_FEATURE_TABLE, MemoryDataset(None))
         # The optional preprocessor_on_disk entry (#379) loads as None on a
         # first run; this hand-built catalog registers that directly.
         catalog.add("preprocessor_on_disk", MemoryDataset(None))
-        for _split, _months in candidate_feature_table_months(
-            parameters, _plans["test_model_input"], only_test_months=False,
-        ).items():
-            catalog.add(candidate_months_input(_split), MemoryDataset(_months))
+        # The run mode the CLI registers for the precision gate.
+        catalog.add("only_test_months", MemoryDataset(False))
         for name in (
             "sample_keys", "train_keys", "train_dev_keys", "val_keys", "test_keys",
             "train_set", "train_dev_set", "val_set", "test_set",

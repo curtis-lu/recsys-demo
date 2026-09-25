@@ -134,7 +134,7 @@ ADR-0008 明確拒絕過這個放寬，理由很直接：**放寬之後 `select_
 # Decision — eligibility: only rows in the configured train months can be
 # drawn. A month belongs to exactly one split (A24), so this is also what
 # keeps train disjoint from val / test.
-pool = restrict_to_months_or_all(sample_pool, time_col, train_months)
+pool = sample_pool.filter(months_filter_as_date(time_col, train_months))
 ```
 
 把它換成機械名試試——`pool = _filter_isin_dates(sample_pool, time_col, train_months)`。上面那段註解還在，所以 node body 仍然講得完「train 只能從設定的月份抽」這件事。**過。**
@@ -164,14 +164,19 @@ pool = prepare_train_pool(sample_pool, parameters)
 誰」，而 train 還多一個「輸出哪些欄」（它帶 carry 欄，val 不帶）。重疊的那幾題，**兩邊
 的答案沒有一題相同**。
 
+（2026-09-25 更新，#460：「哪些月份有資格」原本兩邊各走一個機制——train 的
+`restrict_to_months_or_all` 在月份清單為空時退回整池，val 的 `restrict_to_months` 不退——
+所以舊版這裡還列了「要不要退回整池」這個旗標。ADR-0029 決定 3 刪掉這兩個函式，兩邊都改走
+`months_filter_as_date`，差別只剩月份清單本身。）
+
 每一個決策都寫在它自己的 node body 裡，前面掛一行 `# Decision —`（英文原文，可以直接
 grep）。以下是逐字節錄，各留第一行：
 
 ```python
 # select_train_keys（nodes.py:202-）
 # Decision — eligibility: only rows in the configured train months can be
-#   drawn. ...（"_or_all"：空月份清單保留整池，不是清空）
-pool = restrict_to_months_or_all(sample_pool, time_col, train_months)
+#   drawn. ...
+pool = sample_pool.filter(months_filter_as_date(time_col, train_months))
 if draw_can_drop_rows(sample_ratio, overrides):        # 比例滿且無 override 就整段跳過
     # Decision — how much of each stratum to keep: a per-group override
     #   outranks the split's default ratio; ...
@@ -183,7 +188,7 @@ if draw_can_drop_rows(sample_ratio, overrides):        # 比例滿且無 overrid
 
 # select_val_keys（nodes.py:383-）
 # Decision — eligibility: only the configured val months.
-val_labels = restrict_to_months(sample_pool, time_col, val_dates)     # 沒有 "_or_all" 的退路
+val_labels = sample_pool.filter(months_filter_as_date(time_col, val_dates))
 # Decision — the val population is every distinct key, not a draw over rows:
 #   unlike the train side this does not lean on sample_pool's primary key.
 all_keys = val_labels.select(*identity_key).dropDuplicates()
@@ -199,14 +204,14 @@ sampled = keep_entities_drawn_under_ratio(
 )
 ```
 
-被共用的是**機制**：`restrict_to_months_or_all` / `restrict_to_months`
+被共用的是**機制**：`months_filter_as_date`
 （`dataset/steps/scoping.py`）、`keep_rows_drawn_under_ratio` /
 `keep_entities_drawn_under_ratio` / `with_effective_sample_ratio`
 （`dataset/steps/sampling.py`）、`get_entity_grouping`（`core/schema.py`），
 各自只裝一件事。**沒有**一個 `_select_keys(split_name, parameters)` 把決策包起來。
 
-正是因為重疊那幾題的答案都不同，包起來才會壞：那個 helper 會長出「要不要退回整池」
-「抽列還是抽 entity」「要不要帶 carry 欄」三個旗標，而每個旗標都是一個從 node 本體被
+正是因為重疊那幾題的答案都不同，包起來才會壞：那個 helper 會長出「抽列還是抽 entity」
+「要不要帶 carry 欄」兩個旗標，而每個旗標都是一個從 node 本體被
 搬走的決策。讀 `select_val_keys` 的人會看到 `_select_keys("val", …)`，然後得去讀 helper
 才知道 val 是抽 entity 的——**而抽錯單位不會報錯**，只會讓 mAP 回答另一個問題
 （`select_val_keys` 的 docstring 與 ADR-0016 記的就是這件事）。
@@ -285,7 +290,7 @@ pipelines/<name>/
 # Decision — eligibility: only rows in the configured train months can be
 # drawn. A month belongs to exactly one split (A24), so this is also what
 # keeps train disjoint from val / test.
-pool = restrict_to_months_or_all(sample_pool, time_col, train_months)
+pool = sample_pool.filter(months_filter_as_date(time_col, train_months))
 ```
 
 一行具名呼叫，上面一段說出決策**與選錯的後果**。

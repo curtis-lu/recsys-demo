@@ -23,7 +23,7 @@ import logging
 from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError, categorical_dtype_errors
-from recsys_tfb.pipelines.dataset.steps.scoping import restrict_to_months
+from recsys_tfb.pipelines.dataset.steps.scoping import months_filter_as_date
 from recsys_tfb.utils.item_columns import combine_item_columns
 
 if TYPE_CHECKING:
@@ -149,14 +149,14 @@ def count_items_in_months(
 
     A multi-column item is combined first (``combine_item_columns``, B16
     included), so the list holds the values every stage sees. The month
-    filter is the source-table form the key selection uses
-    (``restrict_to_months``), and the collection is
+    filter is the one every read in the dataset pipeline uses
+    (``months_filter_as_date``, ADR-0029 decision 3), and the collection is
     :func:`collect_vocabularies_from_data`'s: sorted, NULL excluded, one scan.
     What reaches the driver is bounded by the item count.
     """
     item = schema["item"]
     pool = combine_item_columns(sample_pool, schema, "sample_pool")
-    pool = restrict_to_months(pool, schema["time"], months)
+    pool = pool.filter(months_filter_as_date(schema["time"], months))
     return collect_vocabularies_from_data(pool, [item])[item]
 
 

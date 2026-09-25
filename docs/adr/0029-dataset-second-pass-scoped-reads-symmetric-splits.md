@@ -25,6 +25,7 @@ ADR-0008 那一輪的結構搬移在 2026-08-08（PR #176）合併時，`pipelin
    - `label_table`：四個 build 都讀全部 14 個月，沒有任何月份條件。
    - `preprocessed_feature_table`：有修剪，但靠的是 Spark 的 dynamic partition pruning（DPP，執行時依 join 對面的值自動跳過分區），程式碼裡沒寫。DPP 要 join 對面小到能整份廣播（broadcast）才會插入。生產的 entity 是百萬級，keys 超過 `spark.sql.autoBroadcastJoinThreshold`（預設 10MB，repo 沒有覆寫）時，這個修剪很可能靜默消失。
    - test 月份在同一個 `base_dataset_version` 下會累積（ADR-0001），所以沒修剪的讀取量逐月變大。
+   - ⚠ 2026-09-25 更正：`preprocessed_feature_table` 那一列「有修剪，但靠 DPP」不成立，見決定 3 之後的〈實作後的更正〉第 1 條。實際上 train、val 的 build 讀它的全部分區。
 2. **train 與 val／test 做同一件事，做法不同。**
    - 丟無正例的 query group：train 在 keys 上丟，val／test 在建好的 model_input 上丟。
    - 「整個單位一起留或一起丟」的抽樣有三份實作。
@@ -97,6 +98,10 @@ ADR-0008 那一輪的結構搬移在 2026-08-08（PR #176）合併時，`pipelin
 
 **唯一需要注入的**：精度閘（B8）檢查候選層級表時，讀的是「這次各 build 要讀的月份」的聯集；用 `--only-test-months` 時，這個聯集只有 test 月份。精度閘自己看不出這次是不是 `--only-test-months`，所以**只注入執行模式**（是或不是 `--only-test-months`），聯集由精度閘用同一套規則自己算。不注入任何月份清單。執行模式是 node 看不到、開跑前就決定的事實，照新規則 15（見決定 14）可以注入。
 
+> **實作註記（2026-09-25，#460）**：
+> - 精度閘要照 test build 的規則算 test 那一份，所以它除了執行模式（catalog 名 `only_test_months`），還多收 `test_model_input_month_plan`。那份計畫本來就由 CLI 注入給 `build_test_model_input`，不是新注入的東西。
+> - train 與 train_dev 的 build 改跑新的 node 函式 `build_train_model_input`（node 名不變）；`build_model_input` 不再直接註冊成 node，而是三個 build 共用的組裝，`months` 是沒有預設值的 keyword 參數。沒有預設值，是因為忘了傳的 build 會讀到別的 split 的月份，每個 key 都接不到 label 與特徵，而且不報錯。
+
 **沒宣告候選表時的 `None` 維持現狀**：沒宣告時，CLI 注入 `None`，node 內部分支處理。
 - 框架沒有一等的「選用輸入」：`core/runner.py` 按位置綁定輸入。
 - 另一條路是依設定改變 DAG 的長相（先例如 evaluation `pipeline.py` 的 `if compare_source is not None:`）。那樣做，node 內的分支還是在，而且不同部署的 `--list-nodes` 會長得不一樣，什麼也沒省到。
@@ -112,6 +117,31 @@ ADR-0008 那一輪的結構搬移在 2026-08-08（PR #176）合併時，`pipelin
 - 今天 `fit_preprocessor_metadata` 對 `feature_table` 用這一種，`apply_preprocessor_to_features` 對同一張表用另一種。ADR-0008 登記過「哪一邊才對，還沒有人判定」。**本決定的判定是：先轉日期那一邊。**
 - 2026-09-25 的 explain 顯示，兩種寫法的 `PartitionFilters` 一樣能修剪，改寫法沒有效能代價。
 - `restrict_to_months_or_all` 的「空清單＝整池」分支，早就被 A23（`train_snap_dates` 必填）封死了（#406 第 1 項）。
+
+## 決定 1–3 實作後的更正（2026-09-25，#460）
+
+#460 的審查（一個視角專找「本份寫錯在哪」）用 local[*] 實跑查出下面幾件。決定本身都不變，要改的是理由與範圍的說法。實驗腳本與輸出沒進 repo；做法寫在各條裡，照著在 local[*] 上重做即可。
+
+1. **「有修剪，但靠 DPP」不成立：train、val 的 build 今天就讀整張 `preprocessed_feature_table`。**
+   - 量法：先 `collect()` 真的執行，再讀執行後計畫裡每個 scan 的 `numPartitions`。
+   - 結果：`keys LEFT JOIN 右表`（build 的形狀）讀了 12 個分區中的 12 個，AQE 開或關都一樣。兩個正對照：把右表放左邊的 inner join、或設 `spark.sql.optimizer.dynamicPartitionPruning.reuseBroadcastOnly=false`，都只讀 2 個——所以這個量法抓得到真的修剪。
+   - 原因是結構，不是規模：這個設定預設是 `true`，DPP 只能重用 keys 那一側的 broadcast；而 LEFT join 只能 broadcast 右表。所以 keys 再小都不會修剪。
+   - 盤點 note §1 當證據的 `dynamicpruningexpression(... IN dynamicpruning)`，是執行**前**的 `explain()` 印的占位字串。有沒有真的修剪，那一行長得一模一樣。
+   - 對決定 1 的影響：理由更強，不是更弱——原本以為「規模大了才會消失」的修剪，其實從來沒有。唯一的例外是 test build：它的 keys 本來就篩過月份，optimizer 能從 join 條件推出右表的月份條件（約束推導，不是 DPP）。
+   - 對決定 14 規則 14 的驗證方法：「看 `explain()` 的 `PartitionFilters`」要補一句——執行前計畫裡的 `dynamicpruning` 不算修剪的證據，要看執行後讀了幾個分區。
+2. **明寫篩選，只有依 time 分區的表才省掉掃描。**
+   - 依 time 分區的表（本框架寫的 `preprocessed_feature_table`，以及 time 是分區欄的來源表）：`PartitionFilters` 帶月份條件，只讀那幾個月的分區。
+   - 沒依 time 分區的來源表：照樣整張掃。time 欄是 DATE 時，月份條件會下推成 parquet 的 row group 篩選，能跳多少看檔案怎麼排；time 欄是 STRING 或 TIMESTAMP 時連這個都沒有。省下的是進 join、進 shuffle 的列。
+   - 所以決定 1「月份修剪也要是同一個等級」的準確說法是：**進 join 的只剩這次的月份，寫在程式裡、不靠 optimizer**；讀取本身省多少，看來源表怎麼分區，那是部署的事。本機合成資料的 `label_table` 沒分區，e2e 看到的會是 Filter，不是 PartitionFilter。
+3. **決定 3 會改變落地內容的情況，比總表列的多。** 舊寫法拿 `pd.Timestamp` 直接比，下面這些情況一個月份都對不到，新寫法對得到：
+   - time 欄是 STRING（總表已列）。原因是 `STRING IN (TIMESTAMP)` 被轉成字串比對 `"2025-01-31 00:00:00"`。
+   - time 欄是 TIMESTAMP 且帶時分（例如 08:00）。
+   - 字串沒補零（`2025-1-31`）。
+   - 執行 Python 的行程時區與 Spark session 時區不同時，連 DATE 欄都對不到（本機 Asia/Seoul 對 Asia/Taipei 的那個坑）。新寫法之後，dataset 的月份篩選不再依賴 `TZ`。
+   這些情況在舊寫法下都是讀到 0 列，生產上不會有人在這種狀態下交付；但〈版本與順序的約束〉第 2 條要照這份清單讀，不只 STRING。
+4. **`require_months_present` 也照日期比。** 決定 1 點名精度閘的做法是範本，範本是先轉日期再問有哪些月份；#460 讓它照做（收回來的是 `to_date` 之後的值）。結果：TIMESTAMP 帶時分的月份不再被誤報為缺月；寫成 `2025/01/31`、`20250131` 這種格式的字串，以前存在檢查放行、篩選卻讀到 0 列（靜默編出空月份），現在改成在存在檢查就報錯，訊息會提醒字串要寫成 `YYYY-MM-DD`。
+
+---
 
 ## 決定 4　val／test 的丟組搬到 keys 上；B10 涵蓋四個 split
 

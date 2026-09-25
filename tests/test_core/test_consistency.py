@@ -1894,11 +1894,9 @@ class TestTrainSnapDatesA23:
         assert "absent" in train_snap_dates_errors({})[0]
 
     def test_empty_list_is_reported(self):
-        # The branch that matters most: an empty list raises nothing today.
-        # `restrict_to_months_or_all` leaves the pool WHOLE rather than empty,
-        # so train silently draws from every month in sample_pool — including
-        # the test months, which makes their metrics in-sample. A24 cannot see
-        # it (an empty set overlaps nothing).
+        # The branch that matters most: nothing downstream raises on it. An
+        # empty month list matches no row, so train silently draws nothing.
+        # A24 cannot see it (an empty set overlaps nothing).
         errs = train_snap_dates_errors(_split_params(train=[]))
         assert len(errs) == 1
         assert "empty" in errs[0]

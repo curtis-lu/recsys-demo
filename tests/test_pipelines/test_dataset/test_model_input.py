@@ -1,8 +1,9 @@
 """Tests for the assembly of a split's ``model_input``: the two joins, the
 output column rule, and the column-existence guard behind both.
 
-The assembly itself is the ``build_model_input`` *node* (#170 lifted it out of
-``model_input.py``, which now holds only the mechanisms each step is made of);
+The assembly itself is ``build_model_input`` in ``nodes.py`` (#170 lifted it out
+of ``model_input.py``, which now holds only the mechanisms each step is made of;
+since ADR-0029 it is the assembly every build node calls, not a node itself);
 the guard is still a mechanism, so the two imports point at different modules.
 Only the imports moved — every assertion below is the one that was written
 against the helper.
@@ -14,6 +15,9 @@ import pytest
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.pipelines.dataset.steps.model_input import require_columns_present
 from recsys_tfb.pipelines.dataset.nodes import build_model_input
+
+#: The one month every frame below holds: the months the builds read.
+_MONTHS = [pd.Timestamp("2025-01-31")]
 
 
 class TestValidateColumns:
@@ -120,14 +124,16 @@ class TestBuildModelInputCarry:
 
     def test_carry_in_output_when_present_in_keys(self, spark):
         keys, feats, labels = self._frames(spark, with_carry=True)
-        out = build_model_input(keys, feats, labels, self._prep(), self._params())
+        out = build_model_input(
+            keys, feats, labels, self._prep(), self._params(), months=_MONTHS)
         assert "cust_segment_typ" in out.columns
         assert set(out.columns) == self._expected_columns(keys)
         assert out.count() == keys.count()
 
     def test_no_carry_when_absent_from_keys(self, spark):
         keys, feats, labels = self._frames(spark, with_carry=False)
-        out = build_model_input(keys, feats, labels, self._prep(), self._params())
+        out = build_model_input(
+            keys, feats, labels, self._prep(), self._params(), months=_MONTHS)
         assert "cust_segment_typ" not in out.columns
         assert set(out.columns) == self._expected_columns(keys)
         assert out.count() == keys.count()
@@ -187,7 +193,8 @@ class TestBuildModelInputJoinContract:
             "snap_date": pd.to_datetime(["2025-01-31"]),
             "cust_id": [1], "f1": [0.5],
         }))
-        out = build_model_input(keys, feats, labels, self.PREP, self.PARAMS)
+        out = build_model_input(
+            keys, feats, labels, self.PREP, self.PARAMS, months=_MONTHS)
         return keys, out.orderBy("cust_id", "prod_name").toPandas()
 
     def test_row_count_equals_keys_regardless_of_either_miss(self, built):

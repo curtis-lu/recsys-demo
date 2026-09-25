@@ -76,7 +76,7 @@ def _plan(*months) -> SnapDatePlan:
 
 
 def _months(*months) -> list:
-    """The months of the candidate table this run reads."""
+    """The months a build reads."""
     return [pd.Timestamp(m) for m in months]
 
 
@@ -138,7 +138,7 @@ class TestBuildModelInputJoinsTheCandidateTable:
         return build_model_input(
             _keys(spark), _preprocessed_feature_table(spark), _labels(spark),
             _preprocessor(), _params(),
-            _candidate_feature_table(spark), _months(*months),
+            _candidate_feature_table(spark), months=_months(*months),
         )
 
     def test_each_candidate_gets_its_own_row_and_a_miss_is_null(self, spark):
@@ -215,7 +215,7 @@ class TestWithoutACandidateTable:
         }
         result = build_model_input(
             _keys(spark), _preprocessed_feature_table(spark), _labels(spark),
-            preprocessor, _params(),
+            preprocessor, _params(), months=_months(_MONTH),
         )
 
         assert set(result.columns) == {
@@ -414,11 +414,16 @@ class TestTheDataGateChecksTheCandidateTable:
 
 #: The first integer float32 cannot hold exactly: 2**24 + 1 lands on 2**24.
 _BEYOND_FLOAT32 = 2**24 + 1
+#: A test month this run builds, and one an earlier run already landed.
+_TEST_MONTH = "2024-03-31"
+_LANDED_TEST_MONTH = "2023-12-31"
 
 
-def _precision_params(policy="block") -> dict:
+def _precision_params(policy="block", train=(_MONTH,), val=()) -> dict:
     params = _fit_params()
     params["dataset"]["numeric_precision_policy"] = policy
+    params["dataset"]["train_snap_dates"] = list(train)
+    params["dataset"]["val_snap_dates"] = list(val)
     return params
 
 
@@ -442,12 +447,18 @@ def _candidate_with(spark, browse_by_month: dict):
     }))
 
 
-def _check(spark, candidate, months=(_MONTH,), policy="block"):
-    """The months as the three split lists the gate takes; which split holds a
-    month does not matter to it — it checks their union."""
+def _check(
+    spark, candidate, train=(_MONTH,), val=(), test=(), skipped=(),
+    only_test_months=False, policy="block",
+):
+    """The gate with each build's months where the builds read them from: the
+    train and val months in the config, the test months in the test build's
+    plan (``skipped`` are test months an earlier run landed)."""
+    test_plan = SnapDatePlan(to_process=_months(*test), skipped=_months(*skipped))
     return validate_numeric_precision(
-        _entity_side(spark), _preprocessor(), _plan(), _precision_params(policy),
-        candidate, _months(*months[:1]), _months(*months[1:2]), _months(*months[2:]),
+        _entity_side(spark), _preprocessor(), _plan(),
+        _precision_params(policy, train=train, val=val),
+        candidate, test_plan, only_test_months,
     )
 
 
@@ -475,10 +486,47 @@ class TestPrecisionGateCoversTheCandidateTable:
         report = _check(
             spark,
             _candidate_with(spark, {_MONTH: 3, _OTHER_MONTH: _BEYOND_FLOAT32}),
-            months=(_MONTH,),
         )
 
         assert report["candidate_feature_table"]["columns"][0]["max_abs"] == 3.0
+
+    def test_the_months_are_what_each_build_reads(self, spark):
+        """Each build's own rule, the union checked: the train months, the val
+        months, and the test plan's ``to_process`` — not the test month an
+        earlier run landed, which no build reads this run (ADR-0029
+        decision 2)."""
+        report = _check(
+            spark,
+            _candidate_with(spark, {
+                _MONTH: 3, _OTHER_MONTH: 3, _TEST_MONTH: 3,
+                _LANDED_TEST_MONTH: _BEYOND_FLOAT32,
+            }),
+            train=(_MONTH,), val=(_OTHER_MONTH,), test=(_TEST_MONTH,),
+            skipped=(_LANDED_TEST_MONTH,),
+        )
+
+        assert report["candidate_feature_table"]["months"] == [
+            _MONTH, _OTHER_MONTH, _TEST_MONTH,
+        ]
+
+    def test_only_test_months_checks_the_test_build_alone(self, spark):
+        """Under ``--only-test-months`` the test build is the only one in the
+        run, so the train and val months — configured, and holding a breach —
+        are not this run's to scan. The mode exists to make adding an eval
+        month cheap; scanning the train months of the biggest table in the
+        deployment would undo that."""
+        report = _check(
+            spark,
+            _candidate_with(spark, {
+                _MONTH: _BEYOND_FLOAT32, _OTHER_MONTH: _BEYOND_FLOAT32,
+                _TEST_MONTH: 3,
+            }),
+            train=(_MONTH,), val=(_OTHER_MONTH,), test=(_TEST_MONTH,),
+            only_test_months=True,
+        )
+
+        assert report["candidate_feature_table"]["months"] == [_TEST_MONTH]
+        assert report["candidate_feature_table"]["breaches"] == 0
 
     def test_truncate_lets_a_breach_through(self, spark):
         report = _check(
@@ -494,7 +542,16 @@ class TestPrecisionGateCoversTheCandidateTable:
         with pytest.raises(ValueError, match=r"candidate_feature_table missing required snap_dates: \['2024-02-29'\]"):
             _check(
                 spark, _candidate_with(spark, {_MONTH: 3}),
-                months=(_MONTH, _OTHER_MONTH), policy="truncate",
+                val=(_OTHER_MONTH,), policy="truncate",
+            )
+
+    def test_a_candidate_table_without_the_test_plan_is_refused(self, spark):
+        """Without the test build's plan the test months would go unchecked
+        and nothing would say so — so a direct caller is stopped instead."""
+        with pytest.raises(TypeError, match="needs test_month_plan"):
+            validate_numeric_precision(
+                _entity_side(spark), _preprocessor(), _plan(), _precision_params(),
+                _candidate_with(spark, {_MONTH: 3}),
             )
 
     def test_without_one_the_report_has_no_such_section(self, spark):
@@ -519,7 +576,7 @@ class TestPrecisionGateCoversTheCandidateTable:
 
         report = validate_numeric_precision(
             _entity_side(spark), preprocessor, _plan(), _precision_params(),
-            candidate, _months(_MONTH), [], [],
+            candidate, SnapDatePlan(to_process=[], skipped=[]),
         )
 
         assert [c["column"] for c in report["candidate_feature_table"]["columns"]] == [

@@ -126,6 +126,20 @@ def _expected_key_count(parameters, split: str) -> int:
     return len(_ENTITIES) * _n_items(parameters) * n_dates
 
 
+def _months_in(keys, parameters) -> list[pd.Timestamp]:
+    """The months ``keys`` holds, as the months a build over them reads.
+
+    The builds in this module are about the joins, not about which months a
+    build reads — ``test_month_scoped_reads.py`` pins that — so each one here
+    reads exactly its keys' months, which is also what the pipeline's builds
+    read for keys they were given.
+    """
+    time_col = get_schema(parameters)["time"]
+    return [
+        pd.Timestamp(r[0]) for r in keys.select(time_col).distinct().collect()
+    ]
+
+
 def _identity_columns(parameters) -> list[str]:
     return sorted(get_schema(parameters)["identity_columns"])
 
@@ -602,7 +616,10 @@ class TestBuildModelInput:
                 "prod_name": [_PRODUCTS[0]] * 2,
             })
         )
-        result = build_model_input(keys, pft, label_table, preprocessor, parameters)
+        result = build_model_input(
+            keys, pft, label_table, preprocessor, parameters,
+            months=_months_in(keys, parameters),
+        )
         # keys' grain is model_input's grain. Note this catches fan-out only:
         # label_table covers every key in these fixtures, so it cannot tell a
         # LEFT join from an INNER one. Pinning the join side needs a key with no
@@ -637,7 +654,10 @@ class TestBuildModelInput:
         with pytest.raises(
             ValueError, match=rf"build_model_input keys: \['{item_col}'\]"
         ):
-            build_model_input(keys, pft, label_table, preprocessor, parameters)
+            build_model_input(
+                keys, pft, label_table, preprocessor, parameters,
+                months=_months_in(keys, parameters),
+            )
 
 
 class TestBuildModelInputAtEventGrain:
@@ -704,7 +724,10 @@ class TestBuildModelInputAtEventGrain:
         keys = self._keys(spark, 3)
         labels = self._event_labels(spark, ["i0"])
 
-        result = build_model_input(keys, pft, labels, preprocessor, params)
+        result = build_model_input(
+            keys, pft, labels, preprocessor, params,
+            months=_months_in(keys, params),
+        )
 
         assert result.count() == keys.count() == 3
         assert "imp_id" in result.columns
@@ -727,7 +750,10 @@ class TestBuildModelInputAtEventGrain:
         preprocessor, pft = self._pft(feature_table, params)
         keys = self._keys(spark, 3)
         labels = self._event_labels(spark, ["i0"])
-        result = build_model_input(keys, pft, labels, preprocessor, params)
+        result = build_model_input(
+            keys, pft, labels, preprocessor, params,
+            months=_months_in(keys, params),
+        )
 
         assert model_input_grain_errors(
             {"train": SplitRowCounts(keys.count(), result.count())},
@@ -809,7 +835,8 @@ class TestBuildModelInputAtOccasionGrain:
         keys = self._keys(spark)
 
         result = build_model_input(
-            keys, pft, self._labels(spark), preprocessor, params
+            keys, pft, self._labels(spark), preprocessor, params,
+            months=_months_in(keys, params),
         )
 
         # No fan-out and no loss: the entity-level feature row reached all
@@ -849,7 +876,10 @@ class TestFitAndBuild:
             "test": select_test_keys(sample_pool, _test_keys_plan(parameters), parameters),
         }
         for split, keys in splits.items():
-            mi = build_model_input(keys, pft, label_table, preprocessor, parameters)
+            mi = build_model_input(
+                keys, pft, label_table, preprocessor, parameters,
+                months=_months_in(keys, parameters),
+            )
             n_keys = keys.count()
             assert n_keys == _expected_key_count(parameters, split), split
             assert mi.count() == n_keys, split
@@ -865,7 +895,10 @@ class TestFitAndBuild:
         pft = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(parameters), parameters,
         )
-        train_mi = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
+        train_mi = build_model_input(
+            train_keys, pft, label_table, preprocessor, parameters,
+            months=_months_in(train_keys, parameters),
+        )
 
         forbidden = {"apply_start_date", "apply_end_date", "cust_segment_typ"}
         assert forbidden.isdisjoint(set(train_mi.columns))
@@ -885,7 +918,10 @@ class TestFitAndBuild:
         pft = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(parameters), parameters,
         )
-        train_mi = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
+        train_mi = build_model_input(
+            train_keys, pft, label_table, preprocessor, parameters,
+            months=_months_in(train_keys, parameters),
+        )
         train_pdf = train_mi.toPandas()
 
         assert train_mi.count() == train_keys.count()
@@ -1081,7 +1117,10 @@ def test_build_model_input_casts_numeric_features_to_the_declared_type(
         })
     )
 
-    result = build_model_input(train_keys, pft, label_table, preprocessor, parameters)
+    result = build_model_input(
+        train_keys, pft, label_table, preprocessor, parameters,
+        months=_months_in(train_keys, parameters),
+    )
     assert result.count() == train_keys.count()
 
     feature_cols = preprocessor["feature_columns"]
@@ -1128,7 +1167,8 @@ def test_build_model_input_casts_numeric_features_to_the_declared_type(
         },
     }
     wide = build_model_input(
-        train_keys, pft, label_table, preprocessor, float64_params)
+        train_keys, pft, label_table, preprocessor, float64_params,
+        months=_months_in(train_keys, float64_params))
     wide_dtypes = dict(wide.dtypes)
     numeric_features = [
         "total_aum", "in_amt_sum_l1m", "fund_aum",
@@ -1882,7 +1922,10 @@ class TestModelInputSchemaPerSplit:
             "test": select_test_keys(sample_pool, _test_keys_plan(params), params),
         }
         built = {
-            split: build_model_input(keys, pft, label_table, preprocessor, params)
+            split: build_model_input(
+                keys, pft, label_table, preprocessor, params,
+                months=_months_in(keys, params),
+            )
             for split, keys in keys_by_split.items()
         }
         return params, preprocessor, keys_by_split, built
@@ -1961,7 +2004,10 @@ class TestQueryGroupCompleteness:
             "val": select_val_keys(sample_pool, params),
             "test": select_test_keys(sample_pool, _test_keys_plan(params), params),
         }.items():
-            mi = build_model_input(keys, pft, label_table, preprocessor, params)
+            mi = build_model_input(
+                keys, pft, label_table, preprocessor, params,
+                months=_months_in(keys, params),
+            )
             sizes = self._group_sizes(mi, params)
             assert sizes, split
             # Every group is the same size *and* that size is the declared item
@@ -2050,9 +2096,10 @@ class TestZeroPositiveGroupsAreJudgedByLabelTable:
         pft = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(params), params,
         )
+        val_keys = select_val_keys(pool_without_positives, params)
         built = build_model_input(
-            select_val_keys(pool_without_positives, params),
-            pft, label_table, preprocessor, params,
+            val_keys, pft, label_table, preprocessor, params,
+            months=_months_in(val_keys, params),
         )
         kept = filter_val_model_input(built, params)
 
@@ -3414,6 +3461,7 @@ class TestValidateModelInputGrain:
             labels if labels is not None else label_table,
             preprocessor,
             parameters,
+            months=_months_in(keys, parameters),
         )
         return keys, model_input
 

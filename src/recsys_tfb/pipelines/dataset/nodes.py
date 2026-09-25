@@ -114,8 +114,6 @@ from recsys_tfb.pipelines.dataset.steps.scoping import (
     months_present_and_max_abs,
     require_months_in,
     require_months_present,
-    restrict_to_months,
-    restrict_to_months_or_all,
 )
 from recsys_tfb.utils.parquet_stats import (
     filter_by_partitions,
@@ -217,7 +215,7 @@ def validate_data_consistency(
             else [combined_item_value(item_sources).alias(item)]
         )
         rows = (
-            df.filter(F.col(time_col).isin(windows))
+            df.filter(months_filter_as_date(time_col, windows))
             .select(*item_sources, *combined)
             .distinct()
             .collect()
@@ -368,12 +366,8 @@ def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
 
     # Decision — eligibility: only rows in the configured train months can be
     # drawn. A month belongs to exactly one split (A24), so this is also what
-    # keeps train disjoint from val / test. The "_or_all" is not
-    # a shorthand: an empty month list leaves the pool *whole* rather than
-    # empty. Unreachable today (``train_snap_dates`` is a required key), and
-    # preserved rather than tightened because tightening it would change
-    # behaviour — which is why it is spelled out here and not read off the name.
-    pool = restrict_to_months_or_all(sample_pool, time_col, train_months)
+    # keeps train disjoint from val / test.
+    pool = sample_pool.filter(months_filter_as_date(time_col, train_months))
     # sample_pool's primary key IS the identity key, enforced upstream by
     # source_etl's max_duplicate_key_ratio check, so nothing dedups here.
     keys = pool.select(*sampling_columns(group_keys, identity_key, carry_columns))
@@ -548,7 +542,7 @@ def select_val_keys(
     seed = parameters.get("random_seed", 42)
 
     # Decision — eligibility: only the configured val months.
-    val_labels = restrict_to_months(sample_pool, time_col, val_dates)
+    val_labels = sample_pool.filter(months_filter_as_date(time_col, val_dates))
     # Decision — the val population is every distinct key, not a draw over rows:
     # unlike the train side this does not lean on sample_pool's primary key.
     all_keys = val_labels.select(*identity_key).dropDuplicates()
@@ -594,6 +588,32 @@ def select_test_keys(
     return all_keys
 
 
+def build_train_model_input(
+    keys: DataFrame,
+    preprocessed_feature_table: DataFrame,
+    label_table: DataFrame,
+    preprocessor_metadata: dict,
+    parameters: dict,
+    candidate_feature_table: DataFrame | None = None,
+) -> DataFrame:
+    """build_model_input for the train and the train_dev split.
+
+    Registered under both node names: train_dev is split off the train keys by
+    entity, so the two builds read the same months, and nothing else about
+    them differs.
+    """
+    # Decision — the months this build reads: the train months, the ones its
+    # keys were drawn from. train_dev is split off that draw, so its build
+    # reads the same list (ADR-0029 decision 2).
+    train_months = [
+        pd.Timestamp(d) for d in parameters["dataset"]["train_snap_dates"]
+    ]
+    return build_model_input(
+        keys, preprocessed_feature_table, label_table, preprocessor_metadata,
+        parameters, candidate_feature_table, months=train_months,
+    )
+
+
 def build_val_model_input(
     keys: DataFrame,
     preprocessed_feature_table: DataFrame,
@@ -601,7 +621,6 @@ def build_val_model_input(
     preprocessor_metadata: dict,
     parameters: dict,
     candidate_feature_table: DataFrame | None = None,
-    candidate_feature_table_months: list | None = None,
 ) -> DataFrame:
     """build_model_input for the val split, plus the new-item warning (#379).
 
@@ -609,11 +628,17 @@ def build_val_model_input(
     the preprocessor's list lacks are named here, off ``keys`` — the landed
     ``val_keys`` table — rather than off the model_input: that one is the
     unlanded join below, and asking it for its items would run the whole join
-    a second time. No month scope, unlike test's: ``val_snap_dates`` is in
-    ``base_dataset_version``, so ``val_keys`` holds exactly the months this
-    node builds.
+    a second time. The keys need no month scope, unlike test's:
+    ``val_snap_dates`` is in ``base_dataset_version``, so ``val_keys`` holds
+    exactly the months this node builds. The tables they are joined against
+    hold every month, and are read for the val months only.
     """
     schema = get_schema(parameters)
+    # Decision — the months this build reads: the val months (ADR-0029
+    # decision 2).
+    val_months = [
+        pd.Timestamp(d) for d in parameters["dataset"].get("val_snap_dates", [])
+    ]
     # Decision — a val item the counted item list lacks (#379) is kept and
     # warned about, not refused: its rows are scored like the others (the
     # model sees the unknown code), which is how it will look in production
@@ -633,7 +658,7 @@ def build_val_model_input(
             )
     return build_model_input(
         keys, preprocessed_feature_table, label_table, preprocessor_metadata,
-        parameters, candidate_feature_table, candidate_feature_table_months,
+        parameters, candidate_feature_table, months=val_months,
     )
 
 
@@ -645,7 +670,6 @@ def build_test_model_input(
     month_plan: SnapDatePlan,
     parameters: dict,
     candidate_feature_table: DataFrame | None = None,
-    candidate_feature_table_months: list | None = None,
 ) -> DataFrame:
     """build_model_input for the test split, scoped to ``month_plan``.
 
@@ -662,10 +686,13 @@ def build_test_model_input(
     today's train-month data.
     """
     schema = get_schema(parameters)
-    # Decision — scope: this run's months only. Everything after it is the same
-    # assembly every other split gets, which is why it is the sibling node
-    # rather than a copy.
-    keys = keys.filter(months_filter_as_date(schema["time"], month_plan.to_process))
+    # Decision — scope: this run's months only, the plan's ``to_process``.
+    # The same list scopes the keys here and the tables build_model_input
+    # joins them against (ADR-0029 decision 2). Everything after it is the
+    # same assembly every other split gets, which is why it is the sibling
+    # node rather than a copy.
+    test_months = month_plan.to_process
+    keys = keys.filter(months_filter_as_date(schema["time"], test_months))
     # Decision — a test item the counted item list lacks is kept and warned
     # about, for val's reason and off the keys for val's reason; the scope
     # above is what keeps a month already landed out of the warning.
@@ -677,8 +704,8 @@ def build_test_model_input(
                 "test",
             )
     return build_model_input(
-        keys, preprocessed_feature_table, label_table, preprocessor_metadata, parameters,
-        candidate_feature_table, candidate_feature_table_months,
+        keys, preprocessed_feature_table, label_table, preprocessor_metadata,
+        parameters, candidate_feature_table, months=test_months,
     )
 
 
@@ -770,12 +797,9 @@ def fit_preprocessor_metadata(
     # category that only ever appears in val/test therefore has no index of its
     # own and encodes to the unknown sentinel, exactly as it would in production
     # on a value the model never trained on.
-    #
-    # The un-normalised restriction, not ``months_filter_as_date``: this node reads
-    # feature_table straight from the source table, where the time column is a
-    # real DATE. The normalised form is for the frames read back from Hive with
-    # a string partition column — see ``scoping``.
-    train_features = restrict_to_months(feature_table, time_col, train_months)
+    train_features = feature_table.filter(
+        months_filter_as_date(time_col, train_months)
+    )
 
     # Decision — where a vocabulary comes from: a categorical that is a
     # feature_table column has its domain in the data; an identity categorical
@@ -844,11 +868,6 @@ def fit_preprocessor_metadata(
         }
         if counted_items is not None:
             category_mappings[item] = counted_items
-        # The normalised restriction here, unlike feature_table's above: the
-        # candidate table is read the same way by every node that reads it
-        # (the build and the precision scan filter it with the same form), so a
-        # time column stored as a string cannot fit an empty vocabulary here
-        # while the build reads that very month.
         if candidate_from_data:
             category_mappings.update(collect_vocabularies_from_data(
                 candidate_feature_table.filter(
@@ -963,9 +982,8 @@ def validate_numeric_precision(
     month_plan: SnapDatePlan,
     parameters: dict,
     candidate_feature_table: DataFrame | None = None,
-    candidate_feature_table_train_months: list | None = None,
-    candidate_feature_table_val_months: list | None = None,
-    candidate_feature_table_test_months: list | None = None,
+    test_month_plan: SnapDatePlan | None = None,
+    only_test_months: bool = False,
 ) -> dict:
     """Measure the precision headroom of the months just encoded, and gate on it.
 
@@ -1012,7 +1030,11 @@ def validate_numeric_precision(
     same coverage every other incremental artifact has, and the reason adding an
     evaluation month checks that month. The candidate-level table is not
     incremental: every build reads its months afresh, so every run checks every
-    month its builds read — the union of the three ``*_months`` lists.
+    month its builds read — the union of what each build reads, worked out
+    here by the builds' own rules (ADR-0029 decision 2): ``train_snap_dates``,
+    ``val_snap_dates``, and ``test_month_plan``'s ``to_process``. Which builds
+    run is the one fact this node cannot see, so it is the one injected:
+    ``only_test_months`` (the run mode), under which only the test build runs.
 
     Pre-check (input), candidate-level table only: every month this run reads
     is present in it. A missing month raises ``ValueError`` **whatever the
@@ -1108,10 +1130,25 @@ def validate_numeric_precision(
     if candidate_feature_table is not None:
         identity_cols = schema["identity_columns"]
         categorical_cols = preprocessor_metadata["categorical_columns"]
+        # Decision — the months checked are the months this run's builds read,
+        # by each build's own rule: the train months (train and train_dev),
+        # the val months, and the test plan's to_process. Under
+        # --only-test-months the test build is the only one in the run.
+        if test_month_plan is None:
+            # Pre-check (input): without the test build's plan its months
+            # would go unchecked, and nothing would say so — the reason
+            # build_model_input's ``months`` has no default either.
+            raise TypeError(
+                "validate_numeric_precision needs test_month_plan when a "
+                "candidate_feature_table is given: it checks the months the "
+                "test build reads."
+            )
+        ds = parameters["dataset"]
+        build_months = [test_month_plan.to_process]
+        if not only_test_months:
+            build_months += [ds["train_snap_dates"], ds.get("val_snap_dates", [])]
         cand_months = sorted(
-            set(candidate_feature_table_train_months or ())
-            | set(candidate_feature_table_val_months or ())
-            | set(candidate_feature_table_test_months or ())
+            {pd.Timestamp(m) for months in build_months for m in months}
         )
         cand_dtypes = dict(candidate_feature_table.dtypes)
         cand_steps = {
@@ -1229,16 +1266,21 @@ def build_model_input(
     preprocessor_metadata: dict,
     parameters: dict,
     candidate_feature_table: DataFrame | None = None,
-    candidate_feature_table_months: list | None = None,
+    *,
+    months: list,
 ) -> DataFrame:
     """Assemble a split's model_input from its keys, the labels and the features.
+
+    Not a node itself: the build node functions call it, each after deciding
+    ``months`` — the months its split reads (ADR-0029 decision 2). Keyword-only
+    and without a default, because a build that forgot it would otherwise read
+    another split's months, and every key would find no label and no feature
+    without a word.
 
     Features come from the entity-level feature table (already encoded, as
     ``preprocessed_feature_table``) and, when a deployment declares one, the
     candidate-level feature table (ADR-0026) — ``None`` means none is declared,
-    which is what the CLI registers in that case. The two trailing inputs go
-    last, as optional parameters, because the Runner binds by position; the
-    pipeline passes all seven, a direct caller without the table passes five.
+    which is what the CLI registers in that case.
 
     Pre-check (input, ADR-0008 §3): ``keys`` must be at item grain.
     Post-condition: identity, label and every feature column survive the joins.
@@ -1276,6 +1318,21 @@ def build_model_input(
     # N-times-too-large dataset, so a missing column is an error, not a mode.
     require_columns_present(keys.columns, label_join_key, "build_model_input keys")
 
+    # Decision — every table the keys are joined against is read for this
+    # split's months only, and the filter is written here rather than left to
+    # the optimizer (ADR-0029 decision 1). Every join key holds time, so
+    # another month's rows could never match: the filter changes the cost,
+    # never the answer. Nothing else prunes these reads: the joins are LEFT
+    # from the keys, so only the table on the right can be broadcast, and
+    # dynamic partition pruning under Spark's defaults needs the keys' side
+    # broadcast — measured 2026-09-25, every partition read, while the plan
+    # printed before execution looks as if it prunes. A table partitioned by
+    # time skips the other months' partitions; an unpartitioned one is still
+    # scanned, but only this split's rows reach the join.
+    in_months = months_filter_as_date(schema["time"], months)
+    label_table = label_table.filter(in_months)
+    preprocessed_feature_table = preprocessed_feature_table.filter(in_months)
+
     # Decision — a key with no label row is a negative, not a gap. sample_pool
     # is dense (entity x item fully expanded) while label_table is sparse (only
     # entities with a transaction), so the misses are most of the frame.
@@ -1300,16 +1357,15 @@ def build_model_input(
     # Read, encoded and joined here, after sampling, rather than landed
     # beforehand like the entity-level table: it is as large as sample_pool, and
     # landing it would write every row sampling is about to throw away
-    # (ADR-0026). Only this split's months are read at all — identity includes
-    # time, so the filter changes the cost, never the answer — and the
+    # (ADR-0026). Its months are the split's, as the other two tables'; the
     # vocabulary is the fitted one, so an unseen value is the unknown sentinel
     # here exactly as it is in apply_preprocessor_to_features.
     if candidate_feature_table is not None:
-        candidate = candidate_feature_table.filter(months_filter_as_date(
-            schema["time"], candidate_feature_table_months,
-        )).select(*encoded_frame_columns(
-            candidate_join_key, feature_columns, candidate_feature_table.columns,
-        ))
+        candidate = candidate_feature_table.filter(in_months).select(
+            *encoded_frame_columns(
+                candidate_join_key, feature_columns, candidate_feature_table.columns,
+            )
+        )
         encode_cols = encodable_categoricals(
             preprocessor_metadata["categorical_columns"], candidate.columns,
             identity_cols,
@@ -1582,6 +1638,16 @@ def filter_train_keys(
 
     # Decision — a multi-column item is combined on read (ADR-0027).
     label_table = combine_item_columns(label_table, schema, "label_table")
+    # Decision — label_table is read for the train months only: the keys of
+    # both train and train_dev were drawn from them. Written here for the
+    # build's reason (build_model_input, ADR-0029 decision 1): the join would
+    # never match another month, and nothing else prunes this read.
+    train_months = [
+        pd.Timestamp(d) for d in parameters["dataset"]["train_snap_dates"]
+    ]
+    label_table = label_table.filter(
+        months_filter_as_date(schema["time"], train_months)
+    )
 
     # Decision — whether a group holds a positive is read from label_table,
     # never from a label column sample_pool may carry. That copy is the user's

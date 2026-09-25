@@ -5276,13 +5276,15 @@ def train_snap_dates_errors(parameters: dict) -> list[str]:
     * **not a list** — a bare string is iterable, so none of those three sites
       raise. They walk it character by character and try to read ``"2"`` as a
       date.
-    * **empty** — the branch with no downstream guard at all. ``select_train_keys``
-      calls ``restrict_to_months_or_all``, which leaves the pool **whole**
-      rather than empty, so training silently draws from every month in
-      ``sample_pool`` — the test months included, which turns their metrics
-      into in-sample numbers. A24 cannot see it: an empty set overlaps nothing.
+    * **empty** — the branch with no downstream guard at all. An empty month
+      list matches no row (``months_filter_as_date``), so ``select_train_keys``
+      draws nothing and the fit reads no vocabulary, and nothing at those two
+      steps raises. A24 cannot see it: an empty set overlaps nothing.
       ``split_train_keys``' degenerate guard (ADR-0005) only fires when
-      ``train_dev_ratio != 0``, and ``0`` is a legal setting.
+      ``train_dev_ratio != 0``, and ``0`` is a legal setting. Before ADR-0029
+      decision 3 the same list left the pool **whole** instead — every month
+      of ``sample_pool``, the test months included — which is what this branch
+      was first written against.
     * **unparseable entry** — fix that one entry, so the message names the
       offending literals and not the good ones.
     """
@@ -5305,10 +5307,9 @@ def train_snap_dates_errors(parameters: dict) -> list[str]:
 
     if not configured:
         return [
-            "(A23) dataset.train_snap_dates is empty. That is not 'train on "
-            "nothing': the month filter is skipped entirely and training draws "
-            "from every month in sample_pool, test months included, which "
-            "makes their metrics in-sample. Name the months to train on."
+            "(A23) dataset.train_snap_dates is empty. Every read of the train "
+            "months would match no row, so there would be nothing to train "
+            "on. Name the months to train on."
         ]
 
     # Named `unparseable_entries`, not `unreadable`: A21 already binds that

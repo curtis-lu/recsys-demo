@@ -30,6 +30,8 @@ PartitionFilters: [isnotnull(base_dataset_version#83), (base_dataset_version#83 
   isnotnull(snap_date#84), dynamicpruningexpression(snap_date#84 IN dynamicpruning#693)]
 ```
 
+> ⚠ **2026-09-25 更正（#460 審查）**：上表與下段「有修剪，但靠 DPP」「keys 很小，所以觸發了」讀錯了證據。`dynamicpruningexpression(... IN dynamicpruning)` 是執行前 `explain()` 印的占位字串；真的執行後，build 形狀（keys LEFT JOIN 右表）讀了全部分區，DPP 在這個 join 方向永遠不會修剪。細節與量法見 ADR-0029〈決定 1–3 實作後的更正〉第 1 條。這份快照其餘內容不動。
+
 **DPP（dynamic partition pruning）是什麼、為什麼不能靠它**：Spark 在執行時，拿 join 對面實際出現的 time 值去跳過這一邊的分區。程式碼裡沒寫，是 optimizer 自己加的。它要 join 對面能整份廣播（broadcast）才會插入（`spark.sql.optimizer.dynamicPartitionPruning.reuseBroadcastOnly` 預設 true）。合成資料的 keys 很小，所以觸發了；生產的 entity 是百萬級，keys 超過 `spark.sql.autoBroadcastJoinThreshold`（預設 10MB，repo 沒有覆寫）時，這個修剪很可能不會出現，而且消失時沒有任何訊號。這一點在合成資料上驗不出來。
 
 **其他發現**：

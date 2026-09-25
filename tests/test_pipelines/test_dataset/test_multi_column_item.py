@@ -161,7 +161,7 @@ class TestModelInputReadsTheSourceColumns:
         result = build_model_input(
             _keys(spark), _feature_table(spark),
             _labels(spark), preprocessor, _params(),
-            _candidate_table(spark), [pd.Timestamp(_TRAIN)],
+            _candidate_table(spark), months=[pd.Timestamp(_TRAIN)],
         )
         rows = {r["item"]: r for r in result.collect()}
         assert {i: rows[i]["label"] for i in _ITEMS} == {
