@@ -1,8 +1,8 @@
 {
   "measured": {
-    "date": "2026-09-23",
-    "code_commit": "0bd91411",
-    "how": "run_e2e.sh --compare 跑 feat/379-item-list-from-data（#379 PR 2）：conf 的 schema.categorical_values.item 從逐一列出 12 種改成 from_train_data、拿掉 inference.products。跑之前先寫下預期：兩個版本號（base_dataset_version、model_version）變、train_variant_id 不變；dataset 的 preprocessor.json 與 category_mappings.json 少一個 item（c04-video，train 週沒有它）；evaluation 的 item_categories.json 多出 known_items（11 個葉）；source_etl、model_input、預測可能相同也可能只動 c04-video 那幾列。結果：預測與 training 層逐值相同（c04-video 在兩種寫法下都是 train 沒出現過的值）；預期之外只有 evaluation.diagnosis/model_capacity.json 少 19 個葉＝per_item 少了 c04-video 那一筆（每筆 19 個值），清單變 11 個 item 的直接結果。本檔即這次的 data/digest.json；收完審查後在最終程式碼（0bd91411）上重跑一次，與本檔逐項一致。"
+    "date": "2026-09-25",
+    "code_commit": "a15d3d47",
+    "how": "run_e2e.sh --compare 跑 feat/461-val-test-keys-filter（#461，ADR-0029 決定 4）：val／test 的丟組從建表之後搬到 keys 上；這份 conf 的 val／test r ＝ 0.5。跑之前先寫下預期：三個版本號不變；source_etl、train／train_dev 的 model_input、preprocessor.json、category_mappings.json 不變；val／test 的 model_input 變（留下的無正例組換一批：桶號原本從 Hive 讀回的 STRING time 算，現在從 sample_pool 的 DATE time 算；無正例組總數與有正例的組不變）；HPO 若選到同一組參數，training 的預測只差在列；evaluation 的組內排序指標值不變，列數與逐列算的量會變。結果與預期相同：同一時間在 main（e4cffe32）上跑一次，與舊基準逐項一致，所以差異全來自本票。val 留 276／541 個無正例組（main 270）、test 255／534（main 272）；val 2815→2810 列、test 2925→2835 列；best_params 與 best_iteration 與 main 相同；metrics.json 只有 dataset_overview 與 n_queries（717→700）、n_excluded_queries（272→255）這些計數變，排序指標值一個都沒動；prediction_quality.json 與 report_aggregates.json 逐列算，跟著變；baseline_metrics.json 不變。本檔即在最終程式碼（a15d3d47）上跑出的 data/digest.json，與收審查前（167aa8ca）那次逐項相同。"
   },
   "noisy": {},
   "versions": {
@@ -147,8 +147,8 @@
       ]
     },
     "val_model_input": {
-      "rows": 2815,
-      "hash": "-422352597971009656283",
+      "rows": 2810,
+      "hash": "-259195189133011349869",
       "columns": [
         "age_band",
         "browse_30m",
@@ -176,8 +176,8 @@
       ]
     },
     "test_model_input": {
-      "rows": 2925,
-      "hash": "19217265477447570792",
+      "rows": 2835,
+      "hash": "-30413309734694220927",
       "columns": [
         "age_band",
         "browse_30m",
@@ -215,8 +215,8 @@
   },
   "training": {
     "training_eval_predictions": {
-      "rows": 2925,
-      "hash": "-73173124603049425266",
+      "rows": 2835,
+      "hash": "-173446849981315242683",
       "columns": [
         "item",
         "label",
@@ -261,15 +261,15 @@
     },
     "metrics.json": {
       "leaves": 928,
-      "hash": "36c2236222aaff706ac7cc86d971c7a6558939f45ba71f14cf9e43f1b2506b0e"
+      "hash": "e9b067f7b4b0c54242ca42098cdd840a4dd72c9721b310957ab4058d5dec88d0"
     },
     "prediction_quality.json": {
-      "leaves": 12470,
-      "hash": "cd539ab33d0d86c954964d14120f5b729b8b1e3a88568c50b826650822429852"
+      "leaves": 12206,
+      "hash": "a76f3a4da70977bc6e09f6661c34225163e0ad3574b9f87dc2babafe69d207b0"
     },
     "report_aggregates.json": {
-      "leaves": 2053,
-      "hash": "312a95de523f62d2dcbef5be8084e2e5b12bd1c8deb1837fd4c4f51dc07f195f"
+      "leaves": 2045,
+      "hash": "6f70fb59a7f266c6304a1b31987b0d5c08da32ffa83034ab6934535d4cb8689e"
     },
     "segment_columns.json": {
       "leaves": 2,
