@@ -287,8 +287,9 @@ class TestWiring:
     @pytest.mark.parametrize("only_test_months", [False, True])
     def test_the_builds_warn_off_the_keys_and_the_preprocessor(self, only_test_months):
         """The warning's inputs are the build's own: the landed keys table and
-        the preprocessor. The filters read neither — they are what they were
-        before #379."""
+        the preprocessor. The group drops before the build do not read the
+        preprocessor — they are what they were before #379, moved onto the
+        keys (ADR-0029 decision 4)."""
         from recsys_tfb.pipelines.dataset.pipeline import create_pipeline
 
         pipeline = create_pipeline(only_test_months=only_test_months)
@@ -298,8 +299,8 @@ class TestWiring:
             build = nodes[f"build_{split}_model_input"]
             assert build.inputs[0] == f"{split}_keys"
             assert "preprocessor" in build.inputs
-            assert nodes[f"filter_{split}_model_input"].inputs == [
-                f"{split}_model_input_unfiltered", "parameters"]
+            assert "preprocessor" not in nodes[f"filter_{split}_keys"].inputs
+            assert nodes[f"filter_{split}_keys"].outputs == [f"{split}_keys"]
         if only_test_months:
             # No fit in this mode, and no node produces the preprocessor: the
             # build loads the one on disk, the list its months are encoded by.

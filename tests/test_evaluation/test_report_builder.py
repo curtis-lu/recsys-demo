@@ -1806,10 +1806,10 @@ def test_prediction_quality_under_post_training_says_the_test_table_was_filtered
     false there."""
     text = _pq_text(rb.build_prediction_quality_section(
         _pq_payload(), _metrics(), _pq_params(post_training=True)))
-    assert "filter_test_model_input" in text
+    assert "filter_test_keys" in text
     monitoring = _pq_text(rb.build_prediction_quality_section(
         _pq_payload(), _metrics(), _pq_params(post_training=False)))
-    assert "filter_test_model_input" not in monitoring
+    assert "filter_test_keys" not in monitoring
 
 
 def test_prediction_quality_post_training_does_not_call_equal_populations_different():

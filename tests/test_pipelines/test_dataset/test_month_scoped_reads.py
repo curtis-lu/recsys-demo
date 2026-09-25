@@ -130,13 +130,19 @@ def _catalog(spark, params, only_test_months=False) -> dict:
         "train_keys_unfiltered": train_keys,
         "train_dev_keys_unfiltered": train_keys,
         "val_keys": _keys(spark, _VAL),
+        "val_keys_unfiltered": _keys(spark, _VAL),
         "test_keys": _keys(spark, _TEST + _OTHER[:1]),
+        "test_keys_unfiltered": _keys(spark, _TEST),
         "label_table": _label_table(spark),
         "preprocessed_feature_table": _preprocessed_feature_table(spark),
         "candidate_feature_table": _candidate_feature_table(spark),
         "preprocessor": _PREPROCESSOR,
         "parameters": params,
         "test_model_input_month_plan": SnapDatePlan(
+            to_process=[pd.Timestamp(m) for m in _TEST],
+            skipped=[pd.Timestamp(_OTHER[0])],
+        ),
+        "test_keys_month_plan": SnapDatePlan(
             to_process=[pd.Timestamp(m) for m in _TEST],
             skipped=[pd.Timestamp(_OTHER[0])],
         ),
@@ -235,17 +241,28 @@ class TestEachBuildReadsOnlyItsSplitsMonths:
         }
 
 
-class TestTheGroupDropReadsOnlyTheTrainMonths:
-    """Decision 1: the narrow ``label_table`` the train-side group drop joins is
-    filtered to the train months too; train_dev is carved out of them."""
+class TestEachGroupDropReadsOnlyItsSplitsMonths:
+    """Decision 1: the narrow ``label_table`` each split's group drop joins is
+    filtered to that split's months — train_dev is carved out of the train
+    months, test reads its keys' plan (decision 4 put val / test's drop on
+    the keys too)."""
 
-    @pytest.mark.parametrize("node", ["filter_train_keys", "filter_train_dev_keys"])
-    def test_its_label_table_is_filtered_before_the_join(self, spark, node):
-        params = _params(train_zero_positive_group_ratio=0.5)
+    @pytest.mark.parametrize("node, split, months", [
+        ("filter_train_keys", "train", _TRAIN),
+        ("filter_train_dev_keys", "train", _TRAIN),
+        ("filter_val_keys", "val", _VAL),
+        ("filter_test_keys", "test", _TEST),
+    ])
+    def test_its_label_table_is_filtered_before_the_join(
+        self, spark, node, split, months,
+    ):
+        # A partial ratio, so the label join runs on every split (train's
+        # default 1 skips it, as val / test's 1 does).
+        params = _params(**{f"{split}_zero_positive_group_ratio": 0.5})
 
         kept = _run(node, _catalog(spark, params))
 
-        assert _months_read(kept, "label") == [set(_TRAIN)]
+        assert _months_read(kept, "label") == [set(months)]
 
 
 class TestThePrecisionGateChecksWhatTheBuildsRead:

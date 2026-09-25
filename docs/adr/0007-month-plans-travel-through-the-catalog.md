@@ -61,4 +61,4 @@ catalog 本來就是那個通道：`parameters` 自己就是用 `catalog.add(nam
 
 ### 修訂（2026-09-25，ADR-0029）
 
-本份說 `filter_test_model_input` 這個函式已經刪除；#429 又把它加了回來（test 的無正例組篩選）。[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 4 會把這一步搬到 keys 上，`filter_test_model_input` 會再次拿掉，而且這次連 node 名一起拿掉——本份「節點名字保留」的承諾也跟著推翻。實作完成前，程式碼仍有這個函式。
+本份說 `filter_test_model_input` 這個函式已經刪除；#429 又把它加了回來（test 的無正例組篩選）。[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 4 會把這一步搬到 keys 上，`filter_test_model_input` 會再次拿掉，而且這次連 node 名一起拿掉——本份「節點名字保留」的承諾也跟著推翻。#461（2026-09-25）已實作：取代它的是 `filter_test_keys`。

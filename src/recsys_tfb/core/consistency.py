@@ -801,29 +801,22 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
   holds. ``block.getRowCount()`` is the quantity B8's reader was already
   reading to interpret its min/max statistics; B10 only sums it.
 
-  **Two of the four splits are covered, and that is a limit, not an
-  oversight.** train / train_dev land straight out of ``build_model_input``.
-  Their zero-positive group draw (ADR-0025 decision 3) runs on the keys,
-  before ``train_keys`` / ``train_dev_keys`` land, precisely so this pairing
-  survives it: a drop after the build would make the counts differ on purpose,
-  and a deliberate drop can hide a fan-out of any smaller size.
-  val and test do not. For val the frame whose row count
-  equals ``val_keys``' is ``val_model_input_unfiltered``; for test it is
-  ``test_model_input_unfiltered``, which matches **not** ``test_keys`` but only
-  this run's months of it — ``build_test_model_input`` re-scopes those keys to
-  its ``month_plan`` before delegating, because ``test_keys`` is a persistent
-  table holding every month. Either way neither frame has a catalog entry in any
-  environment, so both are ``MemoryDataset``s — lazy Spark frames that never
-  reach disk and have no footer. Stating test's pair as ``test_keys`` would
-  record a comparison that is always-false, which this ticket's own issue warns
-  is worse than no gate at all. The tables that do land are the
-  ``filter_val_model_input`` / ``filter_test_model_input`` outputs, whose row
-  count is *supposed* to be smaller. A one-sided ``<=`` against those was considered and rejected: this
-  repo's ``sample_pool`` is a dense entity x item expansion while
-  ``label_table`` is sparse, so most groups carry no positive and the filter
-  drops a large fraction — the bound would hold through a 2x fan-out and read
-  as a passing gate. Residual risk, stated so it is not re-discovered as a bug:
-  a duplicate key confined to a month that only val/test cover goes unseen.
+  **All four splits are covered** (ADR-0029 decision 4). Every model_input
+  lands straight out of ``build_model_input``, and every split's
+  zero-positive group draw (ADR-0025 decision 3) runs on its keys, before
+  the keys table lands — precisely so this pairing survives it: a drop after
+  the build would make the counts differ on purpose, and a deliberate drop
+  can hide a fan-out of any smaller size. Until decision 4 val / test drew
+  on the built table instead, which is why this gate could not speak for
+  them, and why a duplicate key confined to a month only val or test cover
+  used to go unseen. train, train_dev and val are compared whole (every file
+  under this version, and variant for the two train tables). test is
+  compared over the months ``test_model_input_month_plan.to_process`` names
+  — both tables accumulate months under one version, and
+  ``build_test_model_input`` reads only those months of its keys. An empty
+  ``to_process`` means this run wrote no test month: the pair is reported as
+  not written, not failed. A planned month neither table has a file for is
+  0 = 0 (the draw emptied it), not a measurement failure.
 * B11 — ``sample_pool`` or ``label_table`` is missing a column a declared
   optional role names (``schema.columns.occasion`` / ``schema.columns.event``).
   Declaring the role widens ``identity_columns``, which is
@@ -842,16 +835,21 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
   (``pipelines/dataset/nodes.py``) with the rest of Layer 2.
 * B12 — a model feature named ``ZERO_POSITIVE_GROUP_WEIGHT_COL`` while
   ``dataset.val_zero_positive_group_ratio`` or ``test_zero_positive_group_ratio``
-  is above 0: the val / test filter nodes add a column by that name to the same
-  frame (ADR-0025 decision 3). Checked against the feature columns derived from
-  the feature tables' metadata (both, when a candidate-level one is declared)
-  — no rows. Only features count (val / test keys
-  carry nothing; a dropped column is no feature), and the train ratio adds no
-  weight. Predicate: ``zero_positive_group_weight_collision_errors``. Wired in
-  ``validate_data_consistency``. Runtime backstop:
-  ``keep_zero_positive_groups_drawn_under_ratio``
-  (``pipelines/dataset/steps/model_input.py``) refuses a frame that already
-  holds the column — a sliced run skips the gate.
+  is above 0: the val / test group drops put a column by that name on the
+  keys, and the build carries it into the same frame as the features
+  (ADR-0025 decision 3, ADR-0029 decision 4). Checked against the feature
+  columns derived from the feature tables' metadata (both, when a
+  candidate-level one is declared) — no rows. Only features count (val / test
+  keys carry nothing else; a dropped column is no feature), and the train
+  ratio adds no weight. Predicate:
+  ``zero_positive_group_weight_collision_errors``. Wired in
+  ``validate_data_consistency``. Runtime backstop, for a sliced run that
+  skips the gate: ``build_model_input``, where the weight on the keys meets
+  the feature — its output select cannot tell the two apart and Spark raises
+  ``Reference ... is ambiguous``, the same backstop B7 has. Loud rather than
+  named, and never an overwrite. (Until decision 4 the draw itself refused a
+  frame that already held the column; it now draws over keys that hold
+  identity and the label only, where no feature can be.)
 * B13 — the candidate-level feature table (ADR-0026) is missing a column of
   ``identity_columns``. It joins on identity, so the join itself would fail —
   as an unresolved-name ``AnalysisException`` naming neither the table nor the
@@ -4364,14 +4362,13 @@ def zero_positive_group_weight_collision_errors(
     tables' features count: a candidate-level one reaches the same frame
     (ADR-0026).
 
-    Above 0 the ``filter_{val,test}_model_input`` nodes add that column, and a
-    feature by the same name would reach the same frame: the draw refuses to
-    overwrite it (the runtime backstop in
-    ``steps/model_input.keep_zero_positive_groups_drawn_under_ratio``), but
-    only after the whole build has run. Only features count: val / test keys
-    carry nothing, so a carry column cannot reach those tables, and a column
-    listed in ``drop_columns`` never becomes a feature. The train ratio adds no
-    weight, so it cannot collide.
+    Above 0 the ``filter_{val,test}_keys`` nodes put that column on the keys,
+    and the build carries it into the frame the features join: a feature by
+    the same name makes the build's output select ambiguous (the runtime
+    backstop, loud but unnamed), and only once the joins are planned. Only
+    features count: val / test keys carry nothing else, so a carry column
+    cannot reach those tables, and a column listed in ``drop_columns`` never
+    becomes a feature. The train ratio adds no weight, so it cannot collide.
     """
     keeps = [
         split for split in ("val", "test")

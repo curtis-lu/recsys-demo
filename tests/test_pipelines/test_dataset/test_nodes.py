@@ -1848,7 +1848,15 @@ class TestScopedNodesHandleHiveStringDates:
 # survives.
 # =============================================================================
 
-from recsys_tfb.pipelines.dataset.nodes import filter_train_keys, filter_val_model_input
+from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+from recsys_tfb.pipelines.dataset.nodes import (
+    filter_test_keys,
+    filter_train_keys,
+    filter_val_keys,
+)
+from recsys_tfb.pipelines.dataset.steps.model_input import (
+    keep_zero_positive_groups_drawn_under_ratio,
+)
 
 
 def _all_split_params(parameters, **overrides):
@@ -2031,14 +2039,17 @@ class TestQueryGroupCompleteness:
         the all-zero group is dropped entirely. Without the second half a filter
         that does nothing at all would also pass.
         """
-        mi = spark.createDataFrame(pd.DataFrame({
-            "snap_date": pd.to_datetime([_SNAP_DATES[0]] * 6),
+        val_month = parameters["dataset"]["val_snap_dates"][0]
+        identity = pd.DataFrame({
+            "snap_date": pd.to_datetime([val_month] * 6),
             "cust_id": ["C001"] * 3 + ["C002"] * 3,
             "prod_name": _PRODUCTS * 2,
-            # C001 has one positive; C002 has none.
-            "label": [1, 0, 0, 0, 0, 0],
-        }))
-        out = filter_val_model_input(mi, parameters).toPandas()
+        })
+        keys = spark.createDataFrame(identity)
+        # C001 has one positive; C002 has none.
+        labels = spark.createDataFrame(
+            identity.assign(label=[1, 0, 0, 0, 0, 0]))
+        out = filter_val_keys(keys, labels, parameters).toPandas()
 
         assert sorted(out["cust_id"].unique()) == ["C001"]
         # All three of C001's candidates survive — negatives included.
@@ -2055,8 +2066,8 @@ class TestZeroPositiveGroupsAreJudgedByLabelTable:
     ``label_table`` still holds the positives. Judged by the wrong column,
     every group would look empty and ratio 0 would delete all of them — the
     real positives included — and B10 would pass, because keys and
-    model_input lose the same rows. Both paths are run end to end from
-    ``sample_pool``: train through its keys, val through its model_input.
+    model_input lose the same rows. Every split is run end to end from
+    ``sample_pool`` through its keys (ADR-0029 decision 4).
     """
 
     @pytest.fixture
@@ -2089,24 +2100,91 @@ class TestZeroPositiveGroupsAreJudgedByLabelTable:
         assert self._groups(kept, params) == expected
 
     def test_val_keeps_the_groups_label_table_says_hold_a_positive(
-        self, pool_without_positives, label_table, feature_table, parameters
+        self, pool_without_positives, label_table, parameters
     ):
         params = _all_split_params(parameters, val_zero_positive_group_ratio=0.0)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
-        pft = apply_preprocessor_to_features(
-            feature_table, preprocessor, _encode_plan(params), params,
-        )
-        val_keys = select_val_keys(pool_without_positives, params)
-        built = build_model_input(
-            val_keys, pft, label_table, preprocessor, params,
-            months=_months_in(val_keys, params),
-        )
-        kept = filter_val_model_input(built, params)
+        kept = filter_val_keys(
+            select_val_keys(pool_without_positives, params), label_table, params)
 
         expected = self._groups_with_a_positive(
             label_table, params, params["dataset"]["val_snap_dates"])
         assert expected, "label_table holds no positive — the test is vacuous"
         assert self._groups(kept, params) == expected
+
+    def test_test_keeps_the_groups_label_table_says_hold_a_positive(
+        self, pool_without_positives, label_table, parameters
+    ):
+        params = _all_split_params(parameters, test_zero_positive_group_ratio=0.0)
+        plan = _test_keys_plan(params)
+        kept = filter_test_keys(
+            select_test_keys(pool_without_positives, plan, params),
+            label_table, plan, params,
+        )
+
+        expected = self._groups_with_a_positive(
+            label_table, params, params["dataset"]["test_snap_dates"])
+        assert expected, "label_table holds no positive — the test is vacuous"
+        assert self._groups(kept, params) == expected
+
+
+class TestValTestModelInputIsUnchangedAtTheEnds:
+    """ADR-0029 decision 4: at r = 0 and r = 1 moving val / test's group drop
+    from model_input onto the keys changes no row.
+
+    The reference is the drop as it ran before the move — the same draw over
+    the built model_input, which is what ``filter_{val,test}_model_input``
+    did — so the two sides share only the rule, not the mechanism: one runs a
+    window over the full-width table, the other a narrow label join on the
+    keys. Between the ends the kept zero-positive groups change on purpose
+    (``test_zero_positive_groups.py`` pins the properties that must hold).
+    """
+
+    @pytest.fixture
+    def built(self, feature_table, parameters):
+        params = _all_split_params(parameters)
+        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        pft = apply_preprocessor_to_features(
+            feature_table, preprocessor, _encode_plan(params), params,
+        )
+        return params, preprocessor, pft
+
+    @pytest.mark.parametrize("ratio", [0.0, 1.0])
+    @pytest.mark.parametrize("split", ["val", "test"])
+    def test_model_input_matches_the_drop_after_the_build(
+        self, built, sample_pool, label_table, split, ratio,
+    ):
+        params, preprocessor, pft = built
+        params = _all_split_params(
+            params, **{f"{split}_zero_positive_group_ratio": ratio})
+        if split == "val":
+            keys = select_val_keys(sample_pool, params)
+            dropped = filter_val_keys(keys, label_table, params)
+        else:
+            plan = _test_keys_plan(params)
+            keys = select_test_keys(sample_pool, plan, params)
+            dropped = filter_test_keys(keys, label_table, plan, params)
+
+        def build(k):
+            return build_model_input(
+                k, pft, label_table, preprocessor, params,
+                months=_months_in(keys, params),
+            )
+
+        schema = get_schema(params)
+        weight = ZERO_POSITIVE_GROUP_WEIGHT_COL if ratio > 0.0 else None
+        before = keep_zero_positive_groups_drawn_under_ratio(
+            build(keys), schema["query_group_columns"], schema["label"],
+            ratio, params["random_seed"], weight_col=weight,
+        )
+        after = build(dropped)
+
+        assert after.columns == before.columns
+        assert sorted(after.collect()) == sorted(before.collect())
+        # Not vacuous: the fixture holds a zero-positive group per month, so
+        # r = 0 drops rows and r = 1 keeps them — the two ends differ.
+        expected_rows = keys.count() - (
+            len(_PRODUCTS) * len(_months_in(keys, params)) if ratio == 0.0 else 0)
+        assert after.count() == expected_rows
 
 
 class TestFitUsesTrainMonthsOnly:
@@ -3415,6 +3493,8 @@ class TestValidateNumericPrecisionCoversTheWidenedCast:
 from recsys_tfb.pipelines.dataset.nodes import validate_model_input_grain
 
 _TRAIN_VARIANT = "tv000001"
+#: A run that wrote no test month: the test pair is not compared.
+_NO_TEST_MONTH = SnapDatePlan(to_process=[], skipped=[])
 
 
 def _grain_params(parameters) -> dict:
@@ -3429,10 +3509,11 @@ def _land(spark, tmp_path, df, name, *, variant_col="train_variant_id",
           variant=_TRAIN_VARIANT, base=_BASE_VERSION):
     """Write ``df`` the way the catalog does and read it back.
 
-    Partitioned by the two columns the gate's path filter reads and no more:
-    ``snap_date`` is a partition column in the real catalog too, but the gate
-    never looks at it (train / train_dev carry no month plan — they rebuild in
-    full), so adding it here would only make the fixture longer.
+    Partitioned by the two columns the gate's path filter reads for the
+    tables it counts whole (train / train_dev by version and variant, val by
+    version alone — the extra variant level does not stop val's filter from
+    matching). ``snap_date`` is a partition column in the real catalog too,
+    but the gate never looks at it for these tables, which rebuild in full.
     The partition_filter columns are dropped on read because
     ``HiveTableDataset.load`` drops them; the gate reads paths, not columns, so
     this is fidelity rather than a dependency.
@@ -3444,10 +3525,27 @@ def _land(spark, tmp_path, df, name, *, variant_col="train_variant_id",
     return spark.read.parquet(root).drop("base_dataset_version", variant_col)
 
 
+def _land_by_month(spark, tmp_path, df, name, *, base=_BASE_VERSION):
+    """Write ``df`` the way the catalog writes the incremental test tables:
+    under the version, one partition per month, the month spelled as the
+    STRING partition value the catalog declares."""
+    root = str(tmp_path / name)
+    (df.withColumn("snap_date", F.date_format("snap_date", "yyyy-MM-dd"))
+       .withColumn("base_dataset_version", F.lit(base))
+       .write.partitionBy("base_dataset_version", "snap_date").parquet(root))
+    return spark.read.parquet(root).drop("base_dataset_version")
+
+
+def _in_month(df, month):
+    return df.filter(F.col("snap_date") == F.lit(pd.Timestamp(month)))
+
+
 class TestValidateModelInputGrain:
     def _built(self, spark, feature_table, label_table, sample_pool, parameters,
                *, labels=None, features=None):
-        """(keys, model_input) through the real assembly."""
+        """(keys, model_input) through the real assembly, over the train
+        months. Which split's keys they are makes no difference to the gate —
+        it compares row counts — so the same pair stands in for any split."""
         params = {**parameters,
                   "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
         keys = select_train_keys(sample_pool, params)
@@ -3465,26 +3563,55 @@ class TestValidateModelInputGrain:
         )
         return keys, model_input
 
-    def test_the_clean_path_does_not_raise(
-        self, spark, tmp_path, feature_table, label_table, sample_pool, parameters,
-    ):
+    @pytest.fixture
+    def clean(self, spark, tmp_path, feature_table, label_table, sample_pool,
+              parameters):
+        """The clean pair landed both ways: whole (train / train_dev / val) and
+        by month (test)."""
         keys, model_input = self._built(
             spark, feature_table, label_table, sample_pool, parameters)
-        landed_keys = _land(spark, tmp_path, keys, "k")
-        landed_mi = _land(spark, tmp_path, model_input, "mi")
+        return {
+            "keys": _land(spark, tmp_path, keys, "k"),
+            "model_input": _land(spark, tmp_path, model_input, "mi"),
+            "test_keys": _land_by_month(spark, tmp_path, keys, "tk"),
+            "test_model_input": _land_by_month(spark, tmp_path, model_input, "tmi"),
+            "built": (keys, model_input),
+        }
 
-        report = validate_model_input_grain(
-            landed_keys, landed_mi, landed_keys, landed_mi,
-            _grain_params(parameters),
+    def _gate(self, parameters, clean, *, plan=_NO_TEST_MONTH, **pairs):
+        """The node over the clean pair, with any split's pair replaced by
+        ``<split>=(keys, model_input)``."""
+        whole = (clean["keys"], clean["model_input"])
+        train = pairs.get("train", whole)
+        train_dev = pairs.get("train_dev", whole)
+        val = pairs.get("val", whole)
+        test = pairs.get("test", (clean["test_keys"], clean["test_model_input"]))
+        return validate_model_input_grain(
+            *train, *train_dev, *val, *test, plan, _grain_params(parameters),
         )
-        # ...and it counted something. A gate that found no files would also
-        # "not raise", which is the shape this assertion exists to exclude.
-        assert report["splits"]["train"]["keys_rows"] > 0
-        assert (report["splits"]["train"]["keys_rows"]
-                == report["splits"]["train"]["model_input_rows"])
+
+    def test_the_clean_path_does_not_raise(self, parameters, clean):
+        report = self._gate(
+            parameters, clean, plan=_plan(*_SNAP_DATES[:3]))
+        # ...and it counted something, on every split. A gate that found no
+        # files would also "not raise", which is the shape this assertion
+        # exists to exclude.
+        for split in ("train", "train_dev", "val", "test"):
+            counts = report["splits"][split]
+            assert counts["keys_rows"] > 0, split
+            assert counts["keys_rows"] == counts["model_input_rows"], split
+
+    def test_every_split_is_paired(self, parameters, clean):
+        """The gate's whole scope, named rather than left to the reader: all
+        four splits, and nothing listed as left out (ADR-0029 decision 4)."""
+        report = self._gate(parameters, clean, plan=_plan(_SNAP_DATES[0]))
+        assert sorted(report["splits"]) == ["test", "train", "train_dev", "val"]
+        assert report["not_checked"] == {}
+        assert "calibration_variant_id" not in report
 
     def test_a_duplicated_label_row_makes_the_gate_raise(
         self, spark, tmp_path, feature_table, label_table, sample_pool, parameters,
+        clean,
     ):
         # Cause B of the failure the node comment names: the label join's right
         # table holds the same key twice, so every matching key comes back
@@ -3494,28 +3621,22 @@ class TestValidateModelInputGrain:
             spark, feature_table, label_table, sample_pool, parameters,
             labels=label_table.union(label_table),
         )
-        landed_keys = _land(spark, tmp_path, keys, "k")
-        landed_mi = _land(spark, tmp_path, model_input, "mi")
-        clean_keys, clean_mi = self._built(
-            spark, feature_table, label_table, sample_pool, parameters)
-
         with pytest.raises(DataConsistencyError) as exc:
-            validate_model_input_grain(
-                landed_keys, landed_mi,
-                _land(spark, tmp_path, clean_keys, "dk"),
-                _land(spark, tmp_path, clean_mi, "dmi"),
-                _grain_params(parameters),
-            )
+            self._gate(parameters, clean, train=(
+                _land(spark, tmp_path, keys, "dk"),
+                _land(spark, tmp_path, model_input, "dmi"),
+            ))
         message = str(exc.value)
-        assert "B10" in message
-        assert "train" in message
-        # Per split: train_dev was assembled from the clean label table, so it
-        # must not be named. A gate that reported every split whenever one was
-        # wrong would send the operator to the wrong table.
-        assert "train_dev" not in message
+        assert "B10: train_model_input" in message
+        # Per split: the others were assembled from the clean label table, so
+        # they must not be named. A gate that reported every split whenever one
+        # was wrong would send the operator to the wrong table.
+        for other in ("train_dev", "val", "test"):
+            assert f"B10: {other}_model_input" not in message
 
     def test_a_duplicated_feature_row_makes_the_gate_raise(
         self, spark, tmp_path, feature_table, label_table, sample_pool, parameters,
+        clean,
     ):
         # The same cause on the other right table. Both joins are LEFT joins on
         # a key the gate cannot verify is unique, so both need to be covered.
@@ -3527,81 +3648,148 @@ class TestValidateModelInputGrain:
             spark, feature_table, label_table, sample_pool, parameters,
             features=pft.union(pft),
         )
-        landed_keys = _land(spark, tmp_path, keys, "k")
-        landed_mi = _land(spark, tmp_path, model_input, "mi")
-
         with pytest.raises(DataConsistencyError) as exc:
-            validate_model_input_grain(
-                landed_keys, landed_mi, landed_keys, landed_mi,
-                _grain_params(parameters),
-            )
-        assert "B10" in str(exc.value)
+            self._gate(parameters, clean, train_dev=(
+                _land(spark, tmp_path, keys, "dk"),
+                _land(spark, tmp_path, model_input, "dmi"),
+            ))
+        assert "B10: train_dev_model_input" in str(exc.value)
+
+    def test_val_is_paired_and_a_fan_out_there_raises(
+        self, spark, tmp_path, feature_table, label_table, sample_pool, parameters,
+        clean,
+    ):
+        """The case ADR-0029 decision 4 exists for: before it, val's group drop
+        ran after the build, the counts differed on purpose, and a doubled
+        label row multiplied the evaluation data with nothing to stop it."""
+        keys, model_input = self._built(
+            spark, feature_table, label_table, sample_pool, parameters,
+            labels=label_table.union(label_table),
+        )
+        with pytest.raises(DataConsistencyError) as exc:
+            self._gate(parameters, clean, val=(
+                _land(spark, tmp_path, keys, "dk"),
+                _land(spark, tmp_path, model_input, "dmi"),
+            ))
+        message = str(exc.value)
+        assert "B10: val_model_input" in message
+        assert "B10: train_model_input" not in message
+
+    def test_test_is_paired_and_a_fan_out_there_raises(
+        self, spark, tmp_path, feature_table, label_table, sample_pool, parameters,
+        clean,
+    ):
+        keys, model_input = self._built(
+            spark, feature_table, label_table, sample_pool, parameters,
+            labels=label_table.union(label_table),
+        )
+        with pytest.raises(DataConsistencyError) as exc:
+            self._gate(
+                parameters, clean, plan=_plan(_SNAP_DATES[0]), test=(
+                    _land_by_month(spark, tmp_path, keys, "dk"),
+                    _land_by_month(spark, tmp_path, model_input, "dmi"),
+                ))
+        message = str(exc.value)
+        assert "B10: test_model_input" in message
+        assert "B10: val_model_input" not in message
+
+    def test_test_is_compared_over_this_runs_months_only(
+        self, spark, tmp_path, parameters, clean,
+    ):
+        """test is incremental: a month an earlier run landed is not this
+        run's to re-check. The model_input below holds one month twice; the
+        gate raises when that month is in the plan and not when it is not —
+        the same tables both times, so only the month scope differs."""
+        keys, model_input = clean["built"]
+        doubled = _SNAP_DATES[2]
+        fanned = model_input.unionByName(_in_month(model_input, doubled))
+        test = (
+            clean["test_keys"],
+            _land_by_month(spark, tmp_path, fanned, "fanned"),
+        )
+
+        report = self._gate(
+            parameters, clean, plan=_plan(*_SNAP_DATES[:2]), test=test)
+        expected = _in_month(keys, _SNAP_DATES[0]).count() + _in_month(
+            keys, _SNAP_DATES[1]).count()
+        assert report["splits"]["test"]["keys_rows"] == expected
+        assert report["splits"]["test"]["model_input_rows"] == expected
+
+        with pytest.raises(DataConsistencyError, match="B10: test_model_input"):
+            self._gate(
+                parameters, clean, plan=_plan(_SNAP_DATES[0], doubled), test=test)
+
+    def test_an_empty_plan_is_reported_as_not_written_and_not_a_failure(
+        self, parameters, clean, caplog,
+    ):
+        with caplog.at_level(logging.INFO):
+            report = self._gate(parameters, clean, plan=_NO_TEST_MONTH)
+        assert "test" not in report["splits"]
+        assert "not written this run" in report["not_checked"]["test"]
+        assert any(
+            "test" in r.getMessage() and "not written this run" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_a_month_with_no_file_on_either_side_counts_as_zero_equals_zero(
+        self, parameters, clean,
+    ):
+        """A planned month the group drop emptied (r = 0 and its labels not in
+        yet, say): neither table wrote a file for it. That is 0 = 0, reported,
+        not the "files but none in scope" measurement failure the tables
+        counted whole are held to."""
+        empty = "2023-12-31"
+        report = self._gate(
+            parameters, clean, plan=_plan(_SNAP_DATES[0], empty))
+        by_month = report["splits"]["test"]["months"]
+        assert by_month[empty] == {"keys_rows": 0, "model_input_rows": 0}
+        assert by_month[_SNAP_DATES[0]]["keys_rows"] > 0
+
+    def test_a_planned_month_the_model_input_lacks_raises(
+        self, spark, tmp_path, parameters, clean,
+    ):
+        # The other side of 0 = 0: keys landed for the month and the build
+        # wrote nothing. That is a real divergence, not an empty month.
+        keys, model_input = clean["built"]
+        missing = _SNAP_DATES[1]
+        partial = model_input.filter(
+            F.col("snap_date") != F.lit(pd.Timestamp(missing)))
+        with pytest.raises(DataConsistencyError, match="B10: test_model_input"):
+            self._gate(
+                parameters, clean, plan=_plan(_SNAP_DATES[0], missing), test=(
+                    clean["test_keys"],
+                    _land_by_month(spark, tmp_path, partial, "partial"),
+                ))
 
     def test_a_partition_filter_matching_no_file_raises_rather_than_passing(
         self, spark, tmp_path, feature_table, label_table, sample_pool, parameters,
+        clean,
     ):
         # The vacuous-pass shape: if the version/variant filter selects nothing
         # out of a table that does have files, both counts are 0 and every
         # comparison is trivially true. That must be an error, not a green gate.
-        keys, model_input = self._built(
-            spark, feature_table, label_table, sample_pool, parameters)
-        landed_keys = _land(spark, tmp_path, keys, "k", variant="OTHER")
-        landed_mi = _land(spark, tmp_path, model_input, "mi", variant="OTHER")
-
+        keys, model_input = clean["built"]
         with pytest.raises(DataConsistencyError) as exc:
-            validate_model_input_grain(
-                landed_keys, landed_mi, landed_keys, landed_mi,
-                _grain_params(parameters),
-            )
+            self._gate(parameters, clean, train=(
+                _land(spark, tmp_path, keys, "ok", variant="OTHER"),
+                _land(spark, tmp_path, model_input, "omi", variant="OTHER"),
+            ))
         assert "train_variant_id" in str(exc.value)
 
-    def test_only_train_and_train_dev_are_checked(
-        self, spark, tmp_path, feature_table, label_table, sample_pool, parameters,
-    ):
-        """The gate's whole scope, named rather than left to the reader.
+    def test_the_pairing_takes_test_months_from_the_builds_plan(self):
+        """B10 reads the plan ``build_test_model_input`` ran under, not
+        ``test_keys``' own: after a run that failed half-way the two
+        ``to_process`` lists can differ, and the months to compare are the
+        ones the build wrote."""
+        from recsys_tfb.pipelines.dataset.pipeline import create_pipeline
 
-        Until #414 the node took two trailing optional arguments for the
-        calibration pair; the report's split list is what said whether they had
-        been wired. With the branch gone the list is fixed, and asserting it is
-        what would catch a split being dropped from the gate by accident.
-        """
-        keys, model_input = self._built(
-            spark, feature_table, label_table, sample_pool, parameters)
-        landed_keys = _land(spark, tmp_path, keys, "k")
-        landed_mi = _land(spark, tmp_path, model_input, "mi")
-
-        report = validate_model_input_grain(
-            landed_keys, landed_mi, landed_keys, landed_mi,
-            _grain_params(parameters),
-        )
-        assert sorted(report["splits"]) == ["train", "train_dev"]
-        assert "calibration_variant_id" not in report
-
-    def test_the_report_says_which_splits_are_out_of_scope_and_why(
-        self, spark, tmp_path, feature_table, label_table, sample_pool, parameters,
-    ):
-        # val / test are not gateable: their unfiltered frames are the only ones
-        # whose row count equals their keys', and those are MemoryDatasets that
-        # never land, so there is no footer to read. The report says so rather
-        # than leaving a reader to infer that two splits were forgotten.
-        keys, model_input = self._built(
-            spark, feature_table, label_table, sample_pool, parameters)
-        landed_keys = _land(spark, tmp_path, keys, "k")
-        landed_mi = _land(spark, tmp_path, model_input, "mi")
-
-        report = validate_model_input_grain(
-            landed_keys, landed_mi, landed_keys, landed_mi,
-            _grain_params(parameters),
-        )
-        assert sorted(report["not_checked"]) == ["test", "val"]
-        assert "unfiltered" in report["not_checked"]["val"]
-        # test carries a second reason val does not: build_test_model_input
-        # re-scopes test_keys to this run's months before building, so even a
-        # landed unfiltered frame would match that subset rather than the whole
-        # persistent test_keys table. Recording the pairing as if it were
-        # test_keys is what would make a future gate always-false.
-        assert "months" in report["not_checked"]["test"]
-        assert "months" not in report["not_checked"]["val"]
+        by_name = {n.name: n for n in create_pipeline().nodes}
+        assert "test_model_input_month_plan" in by_name[
+            "validate_model_input_grain"].inputs
+        assert "test_model_input_month_plan" in by_name[
+            "build_test_model_input"].inputs
+        assert "test_keys_month_plan" not in by_name[
+            "validate_model_input_grain"].inputs
 
 
 class TestB10CostInvariant:
@@ -3648,7 +3836,8 @@ class TestB10CostInvariant:
 
         for module, names in (
             (_nodes.__file__,
-             ["validate_model_input_grain", "_footer_rows"]),
+             ["validate_model_input_grain", "_footer_rows",
+              "_footer_rows_by_month"]),
             (_stats.__file__, ["read_row_count", "filter_by_partitions"]),
         ):
             for name, calls in self._calls_in(module, names).items():

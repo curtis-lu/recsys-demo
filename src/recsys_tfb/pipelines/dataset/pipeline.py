@@ -3,10 +3,11 @@
 from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
 
-#: The nodes ``--only-test-months`` keeps: the Layer-2 data gate plus the four
-#: nodes on the test chain. Adding a ``test_snap_dates`` month cannot change
-#: what any other node writes, so the other ten recompute bit-identical content
-#: over the same partitions (ADR-0012's opening paragraph).
+#: The nodes ``--only-test-months`` keeps: the Layer-2 data gate, the nodes on
+#: the test chain, and the two gates that check what the chain writes. Adding a
+#: ``test_snap_dates`` month cannot change what any other node writes, so the
+#: other ten recompute bit-identical content over the same partitions
+#: (ADR-0012's opening paragraph).
 #:
 #: Listed rather than derived from the DAG — ADR-0013 overturned the derived
 #: design. The cost of listing is one drift test
@@ -18,13 +19,22 @@ from recsys_tfb.core.pipeline import Pipeline
 #: landed JSON, so the two nodes that read it load it from the catalog. If it is
 #: not there, they raise — which is the right answer, because at that point this
 #: run is not "just adding an eval month" (ADR-0013 consequences).
+#:
+#: ``validate_model_input_grain`` (B10) is here because it pairs test too: left
+#: out, the main path for adding a test month would never be checked. It reads
+#: train / train_dev / val's footers as well, which this mode does not rebuild
+#: — a seek per file, no data (ADR-0029 decision 4).
+#:
+#: Listed in the order the pipeline runs them: ``create_pipeline`` re-sorts
+#: whatever it keeps, and ``tests/test_cli.py`` compares the two.
 ONLY_TEST_MONTHS_NODES = (
     "validate_data_consistency",
     "select_test_keys",
     "apply_preprocessor_to_features",
+    "filter_test_keys",
     "validate_numeric_precision",
     "build_test_model_input",
-    "filter_test_model_input",
+    "validate_model_input_grain",
 )
 
 
@@ -64,9 +74,9 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
 
     Modes:
       * default — the full DAG (17 nodes).
-      * ``--only-test-months`` — the data gate plus the test chain, for a run
-        that only adds ``test_snap_dates`` months. See
-        :data:`ONLY_TEST_MONTHS_NODES`.
+      * ``--only-test-months`` — the data gate, the test chain and the gates
+        that check it, for a run that only adds ``test_snap_dates`` months.
+        See :data:`ONLY_TEST_MONTHS_NODES`.
 
     A mode decides *which line of work* this run does; ``--from-node`` /
     ``--only-node`` decide *where it resumes*. They are orthogonal and compose:
@@ -77,9 +87,9 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         build_test_model_input,
         build_train_model_input,
         build_val_model_input,
-        filter_test_model_input,
+        filter_test_keys,
         filter_train_keys,
-        filter_val_model_input,
+        filter_val_keys,
         fit_preprocessor_metadata,
         select_test_keys,
         select_train_keys,
@@ -116,15 +126,25 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
             inputs=["sample_keys", "parameters"],
             outputs=["train_keys_unfiltered", "train_dev_keys_unfiltered"],
         ),
-        # --- Drop part of the train-side query groups holding no positive
-        #     (dataset.train_zero_positive_group_ratio, ADR-0025 decision 3).
-        #     On the keys, before the builds, rather than on model_input like
-        #     val / test: B10 below pins each train-side model_input's row
-        #     count to the keys it was built from, and a drop after the build
-        #     would break that pairing on purpose. The default ratio 1 passes
+        # --- Drop part of each split's query groups holding no positive
+        #     (dataset.{train,val,test}_zero_positive_group_ratio, ADR-0025
+        #     decision 3). On the keys, before the builds, for every split:
+        #     B10 below pins each model_input's row count to the keys it was
+        #     built from, and a drop after the build would break that pairing
+        #     on purpose (ADR-0029 decision 4). train's default ratio 1 passes
         #     the keys through untouched, so train_keys lands what the split
-        #     produced. The two `*_unfiltered` frames have no catalog entry;
-        #     resuming here re-runs the split (it is cheap: no shuffle). ---
+        #     produced; val / test's default 0 is the filter those tables
+        #     always had — a ranking metric cannot be computed over a group
+        #     with no positive — and above 0 their keys carry a design weight
+        #     (1 or 1/r) the build takes into model_input. The `*_unfiltered`
+        #     frames have no catalog entry; resuming at a drop re-runs the key
+        #     selection before it (cheap next to a build).
+        #
+        #     None of the four is bound to a training objective any more:
+        #     lambdarank still drops zero-positive groups at training time
+        #     (`core.group_utils.objective_drops_zero_positive_groups`), and
+        #     train ratio 0 merely moves that drop here — the table gets
+        #     smaller, the rows lambdarank trains on stay the same. ---
         Node(
             filter_train_keys,
             inputs=["train_keys_unfiltered", "label_table", "parameters"],
@@ -140,17 +160,34 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         Node(
             select_val_keys,
             inputs=["sample_pool", "parameters"],
+            outputs="val_keys_unfiltered",
+        ),
+        Node(
+            filter_val_keys,
+            inputs=["val_keys_unfiltered", "label_table", "parameters"],
             outputs="val_keys",
+            name="filter_val_keys",
         ),
         # A `*_month_plan` input marks an incremental node: it processes only
         # the months in that plan (ADR-0002/0007). The plans are built once by
         # the caller and injected into the catalog, so nodes that share an
         # artifact cannot disagree about which months this run covers — and the
         # nodes that have no plan are exactly the ones that rebuild in full.
+        # test's drop follows the same plan as its key selection: its label
+        # read is scoped to the months those keys were selected for.
         Node(
             select_test_keys,
             inputs=["sample_pool", "test_keys_month_plan", "parameters"],
+            outputs="test_keys_unfiltered",
+        ),
+        Node(
+            filter_test_keys,
+            inputs=[
+                "test_keys_unfiltered", "label_table", "test_keys_month_plan",
+                "parameters",
+            ],
             outputs="test_keys",
+            name="filter_test_keys",
         ),
         # --- Fit preprocessor on train date-range feature_table, decoupled from sampling ---
         #
@@ -251,7 +288,7 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
                 "val_keys", "preprocessed_feature_table", "label_table",
                 "preprocessor", "parameters", "candidate_feature_table",
             ],
-            outputs="val_model_input_unfiltered",
+            outputs="val_model_input",
             name="build_val_model_input",
         ),
         # test's wrapper also re-scopes: `test_keys` is a persistent Hive table
@@ -265,37 +302,8 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
                 "preprocessor", "test_model_input_month_plan", "parameters",
                 "candidate_feature_table",
             ],
-            outputs="test_model_input_unfiltered",
-            name="build_test_model_input",
-        ),
-        # --- Keep val / test's query groups holding a positive, and the share
-        #     of the ones holding none that dataset.{val,test}_zero_positive_
-        #     group_ratio asks for (ADR-0025 decision 3). At the default 0 this
-        #     is the filter these tables always had: a ranking metric cannot be
-        #     computed over a group with no positive. Above 0 the kept groups
-        #     serve the metrics that score every row as a binary prediction,
-        #     and the rows carry a design weight (1 or 1/r).
-        #
-        #     train / train_dev are drawn on their keys instead (above), for
-        #     B10's sake. None of the four is bound to a training objective any
-        #     more: lambdarank still drops zero-positive groups at training
-        #     time (`core.group_utils.objective_drops_zero_positive_groups`),
-        #     and train ratio 0 merely moves that drop here — the table gets
-        #     smaller, the rows lambdarank trains on stay the same. ---
-        Node(
-            filter_val_model_input,
-            inputs=["val_model_input_unfiltered", "parameters"],
-            outputs="val_model_input",
-            name="filter_val_model_input",
-        ),
-        # No month plan here: its input is produced by build_test_model_input,
-        # which is already scoped. Re-filtering would only re-state the line
-        # above. See ADR-0007 for the slicing scenario that was considered.
-        Node(
-            filter_test_model_input,
-            inputs=["test_model_input_unfiltered", "parameters"],
             outputs="test_model_input",
-            name="filter_test_model_input",
+            name="build_test_model_input",
         ),
     ]
 
@@ -314,8 +322,9 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
     #     skipped by slicing (F5) — the same choice #281 made for B8, and for
     #     the same two reasons.
     #
-    #     val / test are absent by necessity, not oversight: see the node's
-    #     docstring.
+    #     All four splits are paired; test over the months its build wrote,
+    #     so the gate takes that build's month plan (see the node's
+    #     docstring).
     #
     #     The input list is a list of literals on purpose:
     #     `test_static_coverage_floor` skips any node whose `inputs=` is not
@@ -328,6 +337,9 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
             inputs=[
                 "train_keys", "train_model_input",
                 "train_dev_keys", "train_dev_model_input",
+                "val_keys", "val_model_input",
+                "test_keys", "test_model_input",
+                "test_model_input_month_plan",
                 "parameters",
             ],
             outputs="model_input_grain_report",

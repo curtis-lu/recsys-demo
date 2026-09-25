@@ -30,28 +30,32 @@ def _catalog_defined() -> set[str]:
 # (pipeline, frozen kwargs) -> {resume node -> exact allowed auto-included set}
 RESUME_CONTRACTS = {
     ("dataset", ()): {
-        # all upstream artifacts (keys tables, feature/label tables) persisted
-        "fit_preprocessor_metadata": set(),
-        # The val / test builds re-run from here and always did: they used to
-        # sort *after* build_train_model_input and ride in as "every node after
-        # it". Since #429 the train keys come out of filter_train_keys, which
-        # becomes ready only after apply_preprocessor_to_features has already
-        # queued the val / test builds, so they now sort *before* it and are
-        # pulled back by their memory-only outputs instead. Same seven nodes
-        # re-run either way; only the column they are reported in moved.
-        "build_train_model_input": {
-            "build_val_model_input",
-            "build_test_model_input",
-        },
+        # Every node from the fit on re-runs, the key drops included: all four
+        # sort after the fit, which is ready from the start. Their inputs are
+        # memory-only key selections, so the two selections that sort before
+        # the fit are pulled back — each reads only its own months of
+        # sample_pool, a fraction of what one build reads. Accepted when val /
+        # test's drops moved onto the keys (ADR-0029 decision 4); the
+        # alternative, landing `{val,test}_keys_unfiltered`, would write two
+        # Hive tables to save two key selections. train's selection is landed (`sample_keys`), so
+        # its split is simply among the nodes after the fit.
+        "fit_preprocessor_metadata": {"select_val_keys", "select_test_keys"},
+        # Until ADR-0029 decision 4 this set held the val / test builds: they
+        # sort before build_train_model_input, and their memory-only
+        # `*_unfiltered` outputs pulled them back for the filters after it.
+        # The builds now write the landed model_input directly, so resuming
+        # at the train build re-runs no other split's build.
+        "build_train_model_input": set(),
     },
     # --only-test-months builds a different pipeline, so it gets its own
     # contract: a mode is not a slice, and the resume costs inside it are not
-    # the ones above. The pairing that matters is the second line — the
-    # unfiltered frame is memory-only, so resuming at the filter re-runs the
-    # expensive build. Pinned so that stays a deliberate cost.
+    # the ones above. Resuming at the drop re-runs the key selection before
+    # it (its output is memory-only), not the build: the build is after it.
+    # The gate re-runs nothing — every input it reads is landed.
     ("dataset", (("only_test_months", True),)): {
         "build_test_model_input": set(),
-        "filter_test_model_input": {"build_test_model_input"},
+        "filter_test_keys": {"select_test_keys"},
+        "validate_model_input_grain": set(),
     },
     ("training", ()): {
         # The diagnosis entry point (ADR-0014 decision 7). Before

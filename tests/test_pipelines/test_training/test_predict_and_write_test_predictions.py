@@ -14,7 +14,7 @@ def _make_test_parquet(tmp_path: Path) -> Path:
     dataset pipeline produces after this PR's catalog change).
 
     test_model_input is pre-filtered upstream by the dataset pipeline's
-    filter_test_model_input node — every (snap_date, cust_id) group present
+    filter_test_keys node — every (snap_date, cust_id) group present
     here has at least one positive label across some prod_name.
     """
     import pyarrow as pa
@@ -97,7 +97,7 @@ def _saved_partitions(write_ds) -> set:
 def test_predict_and_write_emits_one_save_per_partition(tmp_path):
     """One save() call per (snap_date, prod_name) partition; every row in
     the input parquet appears in some save (no row-level filtering at this
-    layer — upstream filter_test_model_input already dropped negative-only
+    layer — upstream filter_test_keys already dropped negative-only
     groups before this function runs).
     """
     from recsys_tfb.io.handles import ParquetHandle
