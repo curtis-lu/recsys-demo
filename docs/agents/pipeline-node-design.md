@@ -177,7 +177,7 @@ pool = prepare_train_pool(sample_pool, parameters)
 grep）。以下是逐字節錄，各留第一行：
 
 ```python
-# select_train_keys（nodes.py:202-）
+# select_train_keys（nodes.py）
 # Decision — eligibility: only rows in the configured train months can be
 #   drawn. ...
 pool = sample_pool.filter(months_filter_as_date(time_col, train_months))
@@ -190,7 +190,7 @@ if draw_can_drop_rows(sample_ratio, overrides):        # 比例滿且無 overrid
     keys = keep_rows_drawn_under_ratio(keys, identity_key, seed, site="sample_keys")
 # Decision — what a split's keys are: the identity key, plus the carry ...
 
-# select_val_keys（nodes.py:383-）
+# select_val_keys（nodes.py）
 # Decision — eligibility: only the configured val months.
 val_pool = sample_pool.filter(months_filter_as_date(time_col, val_dates))
 # Decision — the val population is every key in those months, trusting

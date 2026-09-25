@@ -92,7 +92,7 @@ train、val、test 日期集合必須互斥（一致性不變量 A24，在 `data
 - val、test 在各自選 key 時查，只看自己的月份（test 只看這次處理的月份）；val 在抽樣之前查。
 - 只警告、不中止：這項資料品質歸上游 source ETL 的 `primary_key_not_null`（[ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md)）。
 
-2026-09 之前只有 train 會丟並警告，而且只看切分單位：切分單位以外的 entity 欄是 NULL 的列會留在 train。val 抽樣時默默丟；val 不抽樣時與 test 則留到丟無正例組那一步，`*_zero_positive_group_ratio` 是 0 時在那裡被默默丟掉（它接不到 label，算無正例組），大於 0 時可能留進 model_input（[ADR-0029](../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 5）。
+2026-09 之前只有 train 會丟並警告，而且只看切分單位：切分單位以外的 entity 欄是 NULL 的列會留在 train。val 抽樣時，抽樣單位（`val_sample_keys`）的欄是 NULL 的列會被默默丟掉，其他 entity 欄是 NULL 的列則留著；留著的這些、val 不抽樣時的、以及 test 的，都留到丟無正例組那一步，`*_zero_positive_group_ratio` 是 0 時在那裡被默默丟掉（它接不到 label，算無正例組），大於 0 時可能留進 model_input（[ADR-0029](../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 5）。
 
 ### 3.2 Train 分層抽樣
 

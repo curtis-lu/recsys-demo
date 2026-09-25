@@ -76,7 +76,7 @@ def drop_rows_with_null_entity(
     split: str,
 ) -> tuple[DataFrame, bool]:
     """``keys`` without the rows whose entity is NULL in any column, and
-    whether there were any -- reported by :func:`warn_dropped_null_entity`
+    whether there were any -- reported by :func:`_warn_dropped_null_entity`
     when there were.
 
     The flag is handed back because a caller may have to tell "nothing
@@ -94,11 +94,11 @@ def drop_rows_with_null_entity(
     dropped = keys.filter(is_null)
     dropped_any = not dropped.isEmpty()
     if dropped_any:
-        warn_dropped_null_entity(dropped, entity_cols, split=split)
+        _warn_dropped_null_entity(dropped, entity_cols, split=split)
     return keys.filter(~is_null), dropped_any
 
 
-def warn_dropped_null_entity(
+def _warn_dropped_null_entity(
     dropped: DataFrame, cols: list[str], *, split: str,
 ) -> None:
     """Report rows dropped for a NULL entity: whose keys, how many, and in
@@ -128,8 +128,8 @@ def warn_dropped_null_entity(
     logger.warning(
         "%s keys: dropped %d row(s) whose entity is NULL (NULL by column: "
         "%s). Such a row belongs to no entity: it joins to neither features "
-        "nor labels. Every split drops these when it selects its keys; this "
-        "reports them. "
+        "nor labels. Every split drops these before its keys land (train and "
+        "train_dev when they are split off sample_keys); this reports them. "
         "The check that owns them is upstream -- source_etl's "
         "primary_key_not_null (ADR-0006).",
         split, counts["_dropped"], per_column,
@@ -276,7 +276,7 @@ def unit_drawn_under_ratio(
 
 def keep_entities_drawn_under_ratio(
     keys: DataFrame,
-    entity_cols: list[str],
+    unit_cols: list[str],
     ratio: float,
     seed: int,
     *,
@@ -289,9 +289,12 @@ def keep_entities_drawn_under_ratio(
     It is :func:`unit_drawn_under_ratio` applied as a filter, so it neither
     shuffles nor de-duplicates: a key that appears twice in ``keys`` comes out
     twice or not at all.
+
+    ``unit_cols`` is whatever the caller draws on — the whole entity, or the
+    coarser unit it declared (``dataset.val_sample_keys``).
     """
     return keys.filter(
-        unit_drawn_under_ratio(keys, entity_cols, ratio, seed, site=site)
+        unit_drawn_under_ratio(keys, unit_cols, ratio, seed, site=site)
     )
 
 

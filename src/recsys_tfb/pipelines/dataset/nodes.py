@@ -403,14 +403,11 @@ def split_train_keys(
     """Split sampled keys into train and train-dev by entity ratio.
 
     All rows of a given entity are assigned to the same split, so no entity
-    straddles the boundary. That holds by construction here: the side a row
-    lands on is a pure function of its own split columns, so two rows of one
-    entity cannot disagree. It used to be assembled instead — distinct the
-    entities, bucket them, join each side back — which produced the same answer
-    through three shuffles and made "no straddle" a property of the join keys
-    rather than of the expression. See
-    docs/notes/2026-09-06-dataset-pipeline-profiling.md §6.1 for the measurement
-    (6.7s → 3.6s on 16M keys, four Exchanges → none).
+    straddles the boundary. That holds by construction: the side a row lands on
+    is a pure function of its own split columns (``unit_drawn_under_ratio``,
+    which records the distinct-and-join shape it replaced). This node was the
+    first to drop that shape; docs/notes/2026-09-06-dataset-pipeline-profiling.md
+    §6.1 has the measurement (6.7s → 3.6s on 16M keys, four Exchanges → none).
 
     Which columns constitute "a given entity" here is the user's to declare
     (``dataset.train_split_keys``, defaulting to the whole ``schema.entity``): a
@@ -470,10 +467,10 @@ def split_train_keys(
     # silently runs its full round budget with early stopping never firing —
     # no error, no warning, just worse models and a longer search. Costs one
     # Spark action; see ADR-0005 for the fallback if that ever matters at scale.
-    # `!= 0`, not `> 0`: a negative ratio makes ratio_to_threshold return a
-    # negative threshold, so `bucket < threshold` is empty and
-    # `bucket >= threshold` takes everything — the same silent state, reached
-    # by one stray minus sign. Only an exact 0 means "no dev split wanted".
+    # `!= 0`, not `> 0`: under a negative ratio no bucket draws under it, so
+    # `to_dev` holds for no row and train takes everything — the same silent
+    # state, reached by one stray minus sign. Only an exact 0 means "no dev
+    # split wanted".
     if train_dev_ratio != 0 and train_dev_keys.isEmpty():
         n_entities = keys.select(*split_cols).distinct().count()
         split_unit = ", ".join(split_cols)
@@ -536,6 +533,12 @@ def select_val_keys(
     it, and a duplicated identity then comes out as duplicated keys and
     duplicated model_input rows. B10 cannot see that: keys and model_input are
     duplicated alike, so their row counts still match.
+
+    One guard runs on data, so it stays in the node: the NULL-entity drop is a
+    **pre-check** (rule 11 of docs/agents/pipeline-node-design.md — the input
+    arrived broken, the fix is upstream), and it warns rather than raises. It
+    costs one ``isEmpty`` over the val months' entity columns, plus one
+    aggregate only when there is something to report.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -594,6 +597,11 @@ def select_test_keys(
     Nothing here de-duplicates (ADR-0029 decision 6); what that leans on, and
     what is unguarded when ``sample_pool`` does not come from ``source_etl``,
     is in ``select_val_keys``.
+
+    The NULL-entity drop is a **pre-check** that warns rather than raises, as
+    in ``select_val_keys``. It costs one ``isEmpty`` over the entity columns
+    of the months this run processes, plus one aggregate only when there is
+    something to report.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]

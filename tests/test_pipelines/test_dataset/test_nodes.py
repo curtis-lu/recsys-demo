@@ -574,7 +574,7 @@ class TestSplitTrainKeysNullEntity:
                 "reported NULL entities on an input that has none")
 
         monkeypatch.setattr(
-            "recsys_tfb.pipelines.dataset.steps.sampling.warn_dropped_null_entity",
+            "recsys_tfb.pipelines.dataset.steps.sampling._warn_dropped_null_entity",
             _boom)
         params = {**parameters,
                   "dataset": {**parameters["dataset"], "train_dev_ratio": 0.5}}
@@ -702,7 +702,7 @@ class TestSelectValTestKeysNullEntity:
                 "reported NULL entities on an input that has none")
 
         monkeypatch.setattr(
-            "recsys_tfb.pipelines.dataset.steps.sampling.warn_dropped_null_entity",
+            "recsys_tfb.pipelines.dataset.steps.sampling._warn_dropped_null_entity",
             _boom)
         if split == "val":
             keys = select_val_keys(sample_pool, parameters)
