@@ -19,11 +19,10 @@ tables. The evidence for both is the same: does the metastore hold partitions
 under this run's versions. Not the variant's ``manifest.json``: a slice that
 never touched train used to mark it ``completed`` all the same.
 
-**Facts only.** Whether ``--only-test-months`` may start on these facts is
-A55's call (``core/consistency.py``'s ``train_version_landed_errors``;
-node-design rule 11). Whether ``latest`` moves after a run is the one rule
-decided here, because it is not an error — a run that leaves it alone still
-succeeds.
+**Facts, not verdicts.** Whether ``--only-test-months`` may start on these
+facts is A55's call (``core/consistency.py``'s ``train_version_landed_errors``;
+node-design rule 11), and moving ``latest`` is the command's. What this module
+does decide is what the facts are about: which tables a built variant has.
 """
 
 import logging
@@ -34,7 +33,8 @@ from recsys_tfb.core.catalog import DataCatalog
 logger = logging.getLogger(__name__)
 
 #: The tables training reads under a train version. ``latest`` moves to a
-#: variant only when every one of them has partitions under it.
+#: variant only when each of them this config fills has partitions under it —
+#: see :func:`unlanded_train_tables` for the one it may leave empty.
 TRAIN_VERSION_TABLES = ("train_model_input", "train_dev_model_input")
 
 #: The ``partition_filter`` key that scopes a train table to one variant. A
@@ -73,17 +73,32 @@ def train_version_landing(catalog_config: dict) -> TrainVersionLanding:
     )
 
 
-def unlanded_train_tables(catalog_config: dict) -> list[str]:
-    """The :data:`TRAIN_VERSION_TABLES` with no partition under this variant.
+def unlanded_train_tables(catalog_config: dict, parameters: dict) -> list[str]:
+    """The :data:`TRAIN_VERSION_TABLES` a built variant would have partitions
+    in, and this one has none.
 
     Empty means the variant is built and ``latest`` may point at it. Asked
     after the run, of the metastore, rather than of the nodes the run
     executed: ``--only-test-months`` runs no train build yet must still move
     ``latest`` back to a variant built earlier, and a slice that runs one of
     the two builds must not move it.
+
+    Decision — ``train_dev_model_input`` is not asked for when
+    ``dataset.train_dev_ratio`` is exactly 0. That setting leaves train_dev
+    empty on purpose (``split_train_keys`` only refuses an empty dev split
+    under a non-zero ratio, and B10 passes a split with no files), and an
+    empty frame writes no partition. Asking for it anyway would make a
+    correctly built variant unpublishable for every such config. Any other
+    value, or none, asks for it: an empty dev split there is a failure, and
+    this is the direction that says so.
     """
-    return [
+    dev_split = ((parameters.get("dataset") or {}).get("train_dev_ratio")) != 0
+    expected = [
         name for name in TRAIN_VERSION_TABLES
+        if dev_split or name != "train_dev_model_input"
+    ]
+    return [
+        name for name in expected
         if not _has_partitions(name, catalog_config.get(name))
     ]
 

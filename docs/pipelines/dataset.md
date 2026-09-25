@@ -486,7 +486,7 @@ python -m recsys_tfb dataset \
 
 `--only-node` 適合除錯或重新產生單一產物。若必要輸入缺少，框架仍會自動補入最小上游集合；它不會執行指定 node 的下游 consumers。
 
-只要 pipeline 實際執行，CLI 仍會把 base 的 manifest 寫成 `completed` 並更新 `data/dataset/latest`。train variant 那一層不同：只有 train 的兩張 model input 在目前 variant 底下都有表，才寫 `completed`、更新 `train_variants/latest`（§7.5）。因此 `--only-node` 應視為進階維運工具：執行後必須確認該版本的其他必要產物原本已存在且仍然有效，不應用它建立一個從未完整成功過的新版本。
+只要 pipeline 實際執行，CLI 仍會把 base 的 manifest 寫成 `completed` 並更新 `data/dataset/latest`。train variant 那一層不同：只有 train 的 model input（`train_model_input`，以及 `train_dev_ratio` 不是 0 時的 `train_dev_model_input`）在目前 variant 底下都有表，才寫 `completed`、更新 `train_variants/latest`（§7.5）。因此 `--only-node` 應視為進階維運工具：執行後必須確認該版本的其他必要產物原本已存在且仍然有效，不應用它建立一個從未完整成功過的新版本。
 
 ## 5. 執行流程
 
@@ -569,7 +569,7 @@ miss 率只有在生產跑過一次才知道，本機量不到，所以「先量
 | Base | `preprocessed_feature_table`、`val_keys`、`test_keys`、`val_model_input`、`test_model_input` | Hive，以 `base_dataset_version` partition |
 | Train variant | `sample_keys`、`train_keys`、`train_dev_keys`、`train_model_input`、`train_dev_model_input` | Hive，以 base + `train_variant_id` partition |
 | Metadata | base、train variant 的 `manifest.json` | 對應版本目錄 |
-| Alias | 各層的 `latest` symlink | base 層指向最近一次成功執行的版本目錄；train variant 層指向最近一次「執行成功、而且 train 的兩張 model input 在它底下都有表」的 variant（§7.5） |
+| Alias | 各層的 `latest` symlink | base 層指向最近一次成功執行的版本目錄；train variant 層指向最近一次「執行成功、而且 train 的 model input 在它底下都有表」的 variant（§7.5） |
 
 Hive 的實際 table 名稱與 partition 欄位以 `conf/base/catalog.yaml` 為準。
 
@@ -731,8 +731,8 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 - `train_keys_unfiltered` 與 `train_dev_keys_unfiltered` 同樣不落地；從 `filter_train_keys`／`filter_train_dev_keys` 接續會補跑 `split_train_keys`（它不 shuffle，代價低）。落地的 `train_keys`／`train_dev_keys` 是整組抽樣之後的 keys，正是 build node 的輸入，所以 B10 的配對不受影響。
 - 切片執行會在 manifest 記錄 `resumed_from` 或 `only_node`，供後續追溯。
 - 開跑前 CLI 會對 base、train variant 各先寫一份 `status: running` 的 `manifest.json` stub（崩潰溯源用，**不**更新 `latest` symlink，也不覆寫既有 manifest）。成功完成後，base 的 stub 覆寫為 `status: completed` 並更新 `data/dataset/latest`；train variant 的要看下一條。`--dry-run` / `--list-nodes` 不寫 stub。
-- train variant 那一層的 `completed` 與 `train_variants/latest` 看**表在不在**，不看這一輪跑了哪些 node（[ADR-0029](../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 12）。跑完之後 CLI 向 metastore 確認：目前設定的 variant 在 `train_model_input` 與 `train_dev_model_input` 底下都有分區，才寫 `completed`、把 `latest` 指過去；否則兩樣都不動，stub 留在 `running`，並印兩行 `[train_variant]` 警告，寫明 training 會繼續讀 `latest` 指的哪一個。為什麼要這樣：training 讀哪個 variant 只看 `latest`，不會拿自己的設定重算，所以 `latest` 錯了不會報錯。它有兩種錯法，「這輪跑了哪些 node」都判斷錯：
-  - 改了抽樣設定之後跑一段不碰 train（或只碰一部分 train）的切片：新 variant 底下沒有 train 的表。以前 `latest` 照樣指過去，training 讀到 0 列。現在 `latest` 留在舊的那個。
+- train variant 那一層的 `completed` 與 `train_variants/latest` 看**表在不在**，不看這一輪跑了哪些 node（[ADR-0029](../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 12）。跑完之後 CLI 向 metastore 確認：目前設定的 variant 在 `train_model_input`，以及 `train_dev_ratio` 不是 0 時的 `train_dev_model_input` 底下都有分區，才寫 `completed`、把 `latest` 指過去（`train_dev_ratio: 0` 會故意讓 train_dev 是空的，空表沒有分區，所以這時不查它）；否則兩樣都不動，stub 留在 `running`，並印兩行 `[train_variant]` 警告，寫明 training 會繼續讀 `latest` 指的哪一個。為什麼要這樣：training 讀哪個 variant 只看 `latest`，不會拿自己的設定重算，所以 `latest` 錯了不會報錯。它有兩種錯法，「這輪跑了哪些 node」都判斷錯：
+  - 改了抽樣設定之後跑一段不碰 train（或只碰一部分 train）的切片：新 variant 底下沒有 train 的表。`latest` 若照「跑完了」指過去，training 會讀到 0 列；所以它留在舊的那個。
   - 先後用抽樣設定 A、B 各建過一次，再把設定改回 A 跑 `--only-test-months`：這一輪沒跑任何 train build，但 A 的表在。`latest` 會指回 A。
 - `--only-test-months` 開跑前另有一道檢查（不變量 A55）：這個模式不建 train 的表，所以目前設定的 variant 在 `train_model_input` 底下沒有分區時，在任何 node 執行、任何 stub 寫入之前就停下來。`--dry-run`、`--list-nodes` 也照樣檢查。訊息分兩種，見 §8。只查 metastore 的 partition 清單，不跑 Spark job。
 
@@ -769,7 +769,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | `Reference 'zero_positive_group_weight' is ambiguous`（在 `build_val_model_input`／`build_test_model_input`） | 同上，但 B12 被跳過（切片執行時資料閘不會跑） | 同上 |
 | `(A55) --only-test-months: train_model_input has partitions under base_dataset_version=... but none under train_variant_id=...` | train 的抽樣設定（`core/versioning.py` 的 `TRAIN_SAMPLING_KEYS`）改了，這個 train 版本還沒建；這個模式不建 train 的表 | 不帶 `--only-test-months` 跑完整的 dataset，或把抽樣改動還原（§7.5） |
 | `(A55) --only-test-months: train_model_input has no partition under base_dataset_version=...` | 這個 base 版本從沒建過：第一次跑、base 層的設定或特徵表的 schema 改了，或框架升級時把 dataset 產物格式版本加了 1 | 不帶 `--only-test-months` 跑完整的 dataset。base 換了代表要重訓，已經不是「只加評估月份」（[新增一個評估月份](../operations/user-guides/adding-an-eval-month.md) 步驟 2） |
-| `[train_variant] 目前設定的 train 版本（train_variant_id=...）還沒建` | 這一輪沒把 train 的兩張 model input 都建在目前 variant 底下（切片跳過了 train build，或只建了其中一張），所以 `completed` 與 `train_variants/latest` 都沒動 | 要讓 training 用目前設定，跑完整的 dataset；否則 training 會讀警告裡寫的那一個 variant（§7.5） |
+| `[train_variant] 目前設定的 train 版本（train_variant_id=...）還沒建` | 這一輪沒把 train 的 model input 都建在目前 variant 底下（切片跳過了 train build，或只建了 `train_model_input` 與 `train_dev_model_input` 其中一張），所以 `completed` 與 `train_variants/latest` 都沒動 | 要讓 training 用目前設定，跑完整的 dataset；否則 training 會讀警告裡寫的那一個 variant（§7.5） |
 | `Unknown node ...` | node 名稱拼錯或 pipeline 已變更 | 先執行 `dataset --list-nodes` 取得目前名稱 |
 | 切片計畫出現昂貴的 `auto-included` | 必要 artifact 不存在或 catalog 無法載入 | 先確認版本 partition 與檔案；不接受補跑成本時先停止修復 |
 | 部分重跑後結果與設定不一致 | skipped artifacts 已過期，或資料閘被跳過 | 使用 full run，並比較 manifest、版本與 source data 更新時間 |

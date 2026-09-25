@@ -56,7 +56,7 @@ training 與 inference 沒有增量產物，判準仍是 `exists()` 一個。
 
 沒有版本 filter 的只有 4 張（`feature_table`、`label_table`、`sample_pool`、`inference_population`），
 那是 source_etl 維護的唯讀來源表——切片不會跳過產生它們的 node，所以它們不是切片的風險來源。
-（它們**內容被改**時的風險是另一回事，見下面「擋不住的兩件事」第 2 點。）
+（它們**內容被改**時的風險是另一回事，見下面「版本化本身還有兩件事擋不住」第 2 點。）
 
 **但切片的判準看不到版本。** `HiveTableDataset.exists()` 問的是 `SHOW TABLES`
 （`io/hive_table_dataset.py` 的 `_table_exists`），**只看表在不在、不看 `partition_filter`**。
@@ -70,7 +70,7 @@ training 讀哪個 train 版本，只看 `data/dataset/<base_dataset_version>/tr
 指到哪裡，不會拿自己的設定重算。所以：
 
 1. **跑完之後**：目前設定的 `train_variant_id` 在 `train_model_input` 與 `train_dev_model_input`
-   底下**都有分區**，CLI 才把這個 variant 的 `manifest.json` 寫成 `completed`、把 `latest` 指過去。
+   底下**都有分區**（`train_dev_ratio: 0` 故意讓 train_dev 是空的，這時只看前一張），CLI 才把這個 variant 的 `manifest.json` 寫成 `completed`、把 `latest` 指過去。
    否則兩樣都不動，並印兩行 `[train_variant]` 警告，寫明 training 會繼續讀 `latest` 指的哪一個。
    看的是 metastore 裡有沒有表，不是這一輪跑了哪些 node。例如改了抽樣設定之後跑
    `--only-node build_test_model_input`，新 variant 底下沒有 train 的表，`latest` 就留在舊的那個，

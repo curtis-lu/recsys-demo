@@ -654,8 +654,9 @@ Layer 1 — config-static (implemented here; aggregated by
   catalog (A28's reason). NOT aggregated: it reads a CLI flag and the
   metastore, neither of which the aggregator sees. After the run, the same
   evidence decides whether ``train_variants/latest`` moves
-  (``run_contract.unlanded_train_tables``) — a rule, not an invariant, so it
-  has no code.
+  (``run_contract.unlanded_train_tables``, which also asks for
+  ``train_dev_model_input`` unless ``train_dev_ratio`` is 0) — a rule, not an
+  invariant, so it carries no A-code.
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -5426,7 +5427,7 @@ def train_version_landed_errors(
 
     NOT aggregated by :func:`validate_config_consistency`: it needs the
     ``--only-test-months`` flag and the metastore, neither of which that gate
-    sees. Wired like A21.
+    sees. Wired like A23/A24: the command logs each error and exits.
     """
     if variant_landed:
         return []

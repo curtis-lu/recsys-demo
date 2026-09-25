@@ -41,6 +41,11 @@ CONFIG = {
     "train_dev_model_input": _entry("recsys_prod_train_dev_model_input"),
 }
 
+#: A config with a dev split, and one without: ``train_dev_ratio: 0`` is a
+#: supported setting that leaves train_dev empty on purpose.
+WITH_DEV = {"dataset": {"train_dev_ratio": 0.2}}
+NO_DEV = {"dataset": {"train_dev_ratio": 0}}
+
 
 def _spec(base=BASE, variant=VARIANT):
     return f"base_dataset_version={base}/train_variant_id={variant}/snap_date=2025-12-31"
@@ -113,11 +118,11 @@ class TestUnlandedTrainTables:
             recsys_prod_train_model_input=[_spec()],
             recsys_prod_train_dev_model_input=[_spec()],
         ):
-            assert unlanded_train_tables(CONFIG) == []
+            assert unlanded_train_tables(CONFIG, WITH_DEV) == []
 
     def test_names_the_table_that_is_missing(self):
         with _metastore(recsys_prod_train_model_input=[_spec()]):
-            assert unlanded_train_tables(CONFIG) == ["train_dev_model_input"]
+            assert unlanded_train_tables(CONFIG, WITH_DEV) == ["train_dev_model_input"]
 
     def test_another_variant_does_not_count(self):
         other = [_spec(variant="v2222222")]
@@ -125,6 +130,17 @@ class TestUnlandedTrainTables:
             recsys_prod_train_model_input=other,
             recsys_prod_train_dev_model_input=other,
         ):
-            assert unlanded_train_tables(CONFIG) == [
+            assert unlanded_train_tables(CONFIG, WITH_DEV) == [
                 "train_model_input", "train_dev_model_input",
             ]
+
+    def test_without_a_dev_split_train_dev_is_not_required(self):
+        # An empty frame writes no partition, so a correctly built variant
+        # with train_dev_ratio 0 has none in train_dev_model_input — requiring
+        # one would leave `latest` unpublishable for that config.
+        with _metastore(recsys_prod_train_model_input=[_spec()]):
+            assert unlanded_train_tables(CONFIG, NO_DEV) == []
+
+    def test_without_a_dev_split_train_model_input_is_still_required(self):
+        with _metastore(recsys_prod_train_dev_model_input=[_spec()]):
+            assert unlanded_train_tables(CONFIG, NO_DEV) == ["train_model_input"]

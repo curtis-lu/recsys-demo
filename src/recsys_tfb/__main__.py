@@ -641,12 +641,17 @@ def _format_train_version_not_built(
     Names what training will read instead, because that is what the operator
     has to decide about: the run exits 0, and training keeps going on a train
     version other than the one the config now names — or, with no ``latest``
-    yet, stops at "no latest symlink".
+    yet, stops at "no latest symlink". ``latest`` can also already name this
+    very variant, left there by a run from before ``latest`` followed the
+    tables; "training keeps reading it" would then read as reassurance about
+    a variant with no tables.
     """
-    current = (
-        f"目前是 {latest.resolve().name}" if latest.exists()
-        else "目前沒有，training 會找不到 train 版本而報錯"
-    )
+    if not latest.exists():
+        current = "目前沒有，training 會找不到 train 版本而報錯"
+    elif latest.resolve().name == train_v:
+        current = "目前就是這個還沒建好的版本，是之前的執行留下的；training 會讀到空的 train 表"
+    else:
+        current = f"目前是 {latest.resolve().name}"
     return [
         f"[train_variant] 目前設定的 train 版本（train_variant_id={train_v}）"
         f"還沒建：{', '.join(unlanded)} 在它底下沒有分區，所以沒有把它標成 "
@@ -1484,7 +1489,7 @@ def dataset(
     # empty variant (training reads 0 rows, #334), and --only-test-months on
     # a config switched back to a variant built earlier would leave `latest`
     # on another one.
-    unlanded = unlanded_train_tables(listing_catalog_config)
+    unlanded = unlanded_train_tables(listing_catalog_config, params)
     if unlanded:
         for line in _format_train_version_not_built(train_v, unlanded, train_latest):
             logger.warning(line)

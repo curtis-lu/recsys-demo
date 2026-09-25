@@ -4491,7 +4491,8 @@ class _WritingRunner:
 
     Which tables land is decided by which nodes ran, the way it is for real —
     and that is the thing the command must not take on trust when it decides
-    what ``latest`` names.
+    what ``latest`` names. Under ``train_dev_ratio: 0`` the dev build writes
+    an empty frame, and an empty frame writes no partition.
     """
 
     def __init__(self, metastore):
@@ -4506,6 +4507,10 @@ class _WritingRunner:
         params = catalog.load("parameters")
         for node in pipe.nodes:
             for out in node.outputs:
+                if out == "train_dev_model_input" and (
+                    params["dataset"]["train_dev_ratio"] == 0
+                ):
+                    continue
                 if out in _TRAIN_TABLES:
                     self._metastore.write(
                         out,
@@ -4526,21 +4531,24 @@ class TestTrainVersionMustHaveLandedA55:
     """
 
     @staticmethod
-    def _dataset_params(sample_ratio):
+    def _dataset_params(sample_ratio, train_dev_ratio):
         return {"dataset": {
             "sample_ratio": sample_ratio,
-            "train_dev_ratio": 0.2,
+            "train_dev_ratio": train_dev_ratio,
             "train_snap_dates": ["2025-12-31"],
             "test_snap_dates": ["2026-01-31"],
         }}
 
-    def _run(self, tmp_path, metastore, argv, *, sample_ratio):
+    def _run(self, tmp_path, metastore, argv, *, sample_ratio, train_dev_ratio=0.2):
         base = tmp_path / "conf" / "base"
         if base.exists():
             with open(base / "parameters_dataset.yaml", "w") as f:
-                yaml.dump(self._dataset_params(sample_ratio), f)
+                yaml.dump(self._dataset_params(sample_ratio, train_dev_ratio), f)
         else:
-            _setup_conf(tmp_path, params_dataset=self._dataset_params(sample_ratio))
+            _setup_conf(
+                tmp_path,
+                params_dataset=self._dataset_params(sample_ratio, train_dev_ratio),
+            )
             with open(base / "catalog.yaml") as f:
                 catalog = yaml.safe_load(f)
             catalog.update(_hive_train_entries())
@@ -4621,16 +4629,20 @@ class TestTrainVersionMustHaveLandedA55:
         assert runs == 0
         assert not list(tmp_path.rglob("manifest.json"))
 
-    def test_a_dry_run_is_refused_too(self, tmp_path):
+    @pytest.mark.parametrize("flag, would_print", [
+        ("--dry-run", "[plan] dry-run"),
+        ("--list-nodes", "[nodes] "),
+    ])
+    def test_a_preview_is_refused_too(self, tmp_path, flag, would_print):
         """The preview must not promise a run that would be refused."""
         result, _ = self._run(
-            tmp_path, _FakeMetastore(), ["--only-test-months", "--dry-run"],
+            tmp_path, _FakeMetastore(), ["--only-test-months", flag],
             sample_ratio=0.1,
         )
 
         assert result.exit_code == 1
         assert "(A55)" in result.output
-        assert "[plan] dry-run" not in result.output
+        assert would_print not in result.output
 
     def test_a_slice_that_skips_the_train_builds_publishes_nothing(self, tmp_path):
         from recsys_tfb.core.versioning import read_manifest
@@ -4700,3 +4712,40 @@ class TestTrainVersionMustHaveLandedA55:
         assert result.exit_code == 0, result.output
         assert self._train_variants(tmp_path)[1] == latest_a
         assert read_manifest(root / latest_a)["status"] == "completed"
+
+    def test_a_config_with_no_dev_split_still_publishes(self, tmp_path):
+        """``train_dev_ratio: 0`` is a supported setting that leaves train_dev
+        empty on purpose. Asking for its partitions anyway would leave such a
+        deployment with no ``latest`` at all, however often it reran."""
+        from recsys_tfb.core.versioning import read_manifest
+
+        metastore = _FakeMetastore()
+        result, _ = self._run(
+            tmp_path, metastore, [], sample_ratio=0.1, train_dev_ratio=0,
+        )
+
+        assert result.exit_code == 0, result.output
+        # The premise: nothing landed in train_dev_model_input.
+        assert _TRAIN_TABLES["train_dev_model_input"] not in metastore.partitions
+        root, latest = self._train_variants(tmp_path)
+        assert latest is not None, result.output
+        assert read_manifest(root / latest)["status"] == "completed"
+
+
+def test_the_not_built_warning_does_not_reassure_about_the_same_variant(tmp_path):
+    """``latest`` can already name the unbuilt variant — left by a run from
+    before it followed the tables. "Training keeps reading it" would then read
+    as reassurance about a variant with no tables."""
+    from recsys_tfb.__main__ import _format_train_version_not_built
+
+    root = tmp_path / "train_variants"
+    (root / "v1111111").mkdir(parents=True)
+    (root / "latest").symlink_to(root / "v1111111")
+
+    lines = "\n".join(_format_train_version_not_built(
+        "v1111111", ["train_model_input"], root / "latest",
+    ))
+
+    assert "還沒建好的版本" in lines
+    assert "空的 train 表" in lines
+    assert "目前是 v1111111" not in lines
