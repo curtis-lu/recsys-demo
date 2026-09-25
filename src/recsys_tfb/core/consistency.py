@@ -642,11 +642,12 @@ Layer 1 — config-static (implemented here; aggregated by
   have landed: ``train_model_input`` must hold partitions under this run's
   ``base_dataset_version`` and ``train_variant_id`` (ADR-0029 decision 12).
   The mode runs no train build, so it can only reuse a train version built
-  earlier; changing a train sampling key moves ``train_variant_id`` alone,
-  and before this check the run went ahead and training then read the empty
-  variant as 0 rows, with no error anywhere (#334). Two messages, because
+  earlier; changing a train-only key (the train sampling settings, and
+  ``carry_columns``) moves ``train_variant_id`` alone, and before this check
+  the run went ahead and training then read the empty variant as 0 rows,
+  with no error anywhere (#334). Two messages, because
   they are two situations: nothing under the base at all (never built), or
-  the base without this variant (the train sampling settings changed).
+  the base without this variant (a train-only setting changed).
   Predicate: ``train_version_landed_errors`` (returns errors; the dataset
   command raises before any node runs or any manifest is written). The facts
   are metastore partition listings the command collects through
@@ -657,6 +658,21 @@ Layer 1 — config-static (implemented here; aggregated by
   (``run_contract.unlanded_train_tables``, which also asks for
   ``train_dev_model_input`` unless ``train_dev_ratio`` is 0) — a rule, not an
   invariant, so it carries no A-code.
+* A56 — a catalog entry ``preprocessor_on_disk`` written by the deployment
+  must name the ``preprocessor`` entry's file (ADR-0029 decision 13). It is
+  the second name ``fit_preprocessor_metadata`` reads that file under before
+  overwriting it (a node may not read and write one name), and evaluation's
+  ``prepare_eval_data`` reads the evaluated model's list through it. The entry
+  is optional because the file does not exist before a version's first run,
+  so a path to anywhere else loads as ``None``, B19 takes it for a first run
+  and checks nothing. The CLI derives the entry from ``preprocessor`` when the
+  catalog leaves it out, which is the normal case; this catches the one left
+  over. Predicate: ``preprocessor_on_disk_path_errors`` (returns errors). The
+  CLI hands in the two filepaths when it builds the catalog for a pipeline
+  whose nodes read the entry — before any node runs, and before
+  ``--dry-run`` / ``--list-nodes`` return; this module never reads the
+  catalog (A28's reason). NOT aggregated, for A28's reason too: it needs the
+  resolved catalog.
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -668,7 +684,7 @@ window of ``evaluation.snap_date`` and be a time value sample_pool holds there.
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
 flags), A22/A46/A51 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53 (config keys whose
-harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--env``
+harm belongs to one pipeline), A28/A39/A45/A47/A56 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags), A55 (``--only-test-months`` + the
 metastore).
 
@@ -5398,8 +5414,9 @@ def train_version_landed_errors(
     before it writes a manifest stub or runs a node.
 
     The mode leaves out every train build, so it can only reuse a train
-    version built earlier. A train sampling key (``core/versioning.py``'s
-    ``TRAIN_SAMPLING_KEYS``) moves ``train_variant_id`` and not
+    version built earlier. A train-only key (``core/versioning.py``'s
+    ``TRAIN_SAMPLING_KEYS``: the train sampling settings and
+    ``carry_columns``) moves ``train_variant_id`` and not
     ``base_dataset_version``; before this check the run went ahead, wrote
     nothing under the new variant, and training read it as 0 rows without an
     error at any layer (#334).
@@ -5417,8 +5434,8 @@ def train_version_landed_errors(
     * **nothing under the base** — this base version was never built. Why the
       base moved is the question, so the likely causes are listed; one of
       them may be an edit the operator did not mean to make.
-    * **the base without this variant** — the train sampling settings changed
-      since that base was built.
+    * **the base without this variant** — a train-only setting changed since
+      that base was built.
 
     Both end in a full dataset run. The mode deliberately does not build the
     missing variant itself: it stays "add a test month", and
@@ -5445,11 +5462,44 @@ def train_version_landed_errors(
     return [
         f"(A55) --only-test-months: train_model_input has partitions under "
         f"base_dataset_version={base_dataset_version} but none under "
-        f"train_variant_id={train_variant_id}: the train sampling settings "
-        f"changed (the keys in core/versioning.py's TRAIN_SAMPLING_KEYS, e.g. "
-        f"dataset.sample_ratio) and this train version has not been built. "
+        f"train_variant_id={train_variant_id}: a train-only setting changed "
+        f"(the keys in core/versioning.py's TRAIN_SAMPLING_KEYS — the train "
+        f"sampling settings such as dataset.sample_ratio, and "
+        f"dataset.carry_columns) and this train version has not been built. "
         f"Run the full dataset pipeline (without --only-test-months), or "
-        f"revert the sampling change."
+        f"revert that change."
+    ]
+
+
+def preprocessor_on_disk_path_errors(
+    preprocessor_filepath: str, on_disk_filepath: str,
+) -> list[str]:
+    """(A56) ``preprocessor_on_disk`` must name ``preprocessor``'s file.
+
+    Returns error strings (empty list when fine); the CLI stops the run.
+
+    Only reached when a deployment's catalog writes the entry itself: left
+    out, the CLI derives it from ``preprocessor`` and there is nothing to
+    compare. Written, it has to be the same file, because the entry is
+    optional (the file does not exist before a version's first run): a path to
+    anywhere else loads as ``None``, and ``fit_preprocessor_metadata`` takes
+    that for a first run and skips the item-list comparison (B19) without a
+    word.
+
+    Paths are compared as paths, so ``./`` or a doubled slash is the same
+    file. The strings are the resolved ones, ``${...}`` already substituted.
+    """
+    if Path(preprocessor_filepath) == Path(on_disk_filepath):
+        return []
+    return [
+        f"(A56) catalog entry 'preprocessor_on_disk' reads "
+        f"{on_disk_filepath!r}, but 'preprocessor' writes "
+        f"{preprocessor_filepath!r}. The two names are one file: the fit reads "
+        f"it under the second name before overwriting it, to compare the item "
+        f"list (B19). The entry is optional, so from another path it loads as "
+        f"nothing and that comparison is skipped in silence. Remove the "
+        f"'preprocessor_on_disk' entry — the CLI derives it from "
+        f"'preprocessor' — or give it the same filepath."
     ]
 
 

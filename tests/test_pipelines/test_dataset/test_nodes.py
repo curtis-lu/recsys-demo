@@ -734,7 +734,7 @@ class TestBuildModelInput:
 
     def _pft(self, feature_table, sample_pool, parameters):
         train_keys = self._train_keys(sample_pool, parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        preprocessor = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(parameters), parameters,
         )
@@ -814,7 +814,7 @@ class TestBuildModelInputAtEventGrain:
         return params
 
     def _pft(self, feature_table, parameters):
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        preprocessor = fit_preprocessor_metadata(feature_table, parameters)
         return preprocessor, apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(parameters), parameters,
         )
@@ -965,7 +965,7 @@ class TestBuildModelInputAtOccasionGrain:
         self, spark, feature_table, parameters
     ):
         params = self._occasion_params(parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        preprocessor = fit_preprocessor_metadata(feature_table, params)
         pft = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(params), params,
         )
@@ -1002,7 +1002,7 @@ class TestFitAndBuild:
         production node produces, and the only shape that exercised the
         base-key-join branch that ADR-0005 removed.
         """
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        preprocessor = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(parameters), parameters,
         )
@@ -1028,7 +1028,7 @@ class TestFitAndBuild:
         self, spark, feature_table, label_table, sample_pool, parameters
     ):
         train_keys = self._train_keys(sample_pool, parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        preprocessor = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(parameters), parameters,
         )
@@ -1051,7 +1051,7 @@ class TestFitAndBuild:
     ):
         """prod_name is an identity column — encoding is deferred to training."""
         train_keys = self._train_keys(sample_pool, parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        preprocessor = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(parameters), parameters,
         )
@@ -1124,7 +1124,7 @@ class TestFitPreprocessorItemMissingFromFeatures:
         # When prepare_model_input is not supplied, prepare_model_input_config
         # defaults categorical_columns=[schema.item], so prod_name lands in
         # feature_columns automatically.
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        preprocessor = fit_preprocessor_metadata(feature_table, parameters)
         assert "prod_name" in preprocessor["feature_columns"]
 
 
@@ -1147,7 +1147,7 @@ class TestApplyPreprocessorFilter:
         })
         ft_with_midweek = feature_table.unionByName(spark.createDataFrame(midweek_pdf))
 
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        preprocessor = fit_preprocessor_metadata(feature_table, parameters)
         result = apply_preprocessor_to_features(
             ft_with_midweek, preprocessor, _encode_plan(parameters), parameters,
         )
@@ -1163,7 +1163,7 @@ class TestApplyPreprocessorFilter:
         # parameters val_snap_dates is 2024-04-30; remove 04-30 rows from feature_table
         ft_short = feature_table.filter(F.col("snap_date") != F.lit(pd.Timestamp("2024-04-30")))
 
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        preprocessor = fit_preprocessor_metadata(feature_table, parameters)
         with pytest.raises(ValueError, match="missing required snap_dates"):
             apply_preprocessor_to_features(
                 ft_short, preprocessor, _encode_plan(parameters), parameters,
@@ -1175,7 +1175,7 @@ class TestFitApplyFilterScopes:
         self, spark, feature_table, parameters
     ):
         """Test B: fit sees train; apply sees train ∪ cal ∪ val ∪ test."""
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        preprocessor = fit_preprocessor_metadata(feature_table, parameters)
         result = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(parameters), parameters,
         )
@@ -1236,7 +1236,7 @@ def test_build_model_input_casts_numeric_features_to_the_declared_type(
             ))
     feature_table_decimal = spark.createDataFrame(rows, schema=schema)
 
-    preprocessor, _ = fit_preprocessor_metadata(feature_table_decimal, parameters)
+    preprocessor = fit_preprocessor_metadata(feature_table_decimal, parameters)
     pft = apply_preprocessor_to_features(
         feature_table_decimal, preprocessor, _encode_plan(parameters), parameters,
     )
@@ -1331,10 +1331,11 @@ def _gate_params(parameters, *, drop_extra=(), categorical_extra=(), carry=None)
     the defaults in ``pipelines/dataset/steps/feature_columns.py``. Those are read from
     that module rather than restated here: a hand-written copy would be equal to
     the real list only as long as feature_table happens to lack the columns
-    where the two differ (``apply_start_date`` / ``apply_end_date`` /
-    ``cust_segment_typ``), and would then silently stop dropping them the day a
-    fixture grows one — turning every count assertion below into a different
-    question without turning anything red.
+    where the two differ, and would then silently stop (or start) dropping them
+    the day a fixture grows one — turning every count assertion below into a
+    different question without turning anything red. It has happened once:
+    until ADR-0029 decision 10 the default also named three bank-example
+    columns.
 
     Callers add to the defaults rather than replacing them, so a test says which
     columns *it* cares about and inherits the rest.
@@ -1674,10 +1675,10 @@ class TestValidateDataConsistencyB7:
         """The ordinary case: carry columns usually live only in sample_pool.
 
         ``channel_preference`` is a sample_pool column and not a feature_table
-        one, so there is nothing to be ambiguous with. It is deliberately not
-        ``cust_segment_typ`` — that one is in the default drop_columns, so an
-        unflagged result there would be explained by the drop just as well as by
-        the absence, and removing the feature_table check would not turn it red.
+        one, so there is nothing to be ambiguous with. It is deliberately a
+        column no drop list names: dropped, an unflagged result would be
+        explained by the drop just as well as by the absence, and removing the
+        feature_table check would not turn it red.
         """
         assert "channel_preference" not in feature_table.columns
         params = _gate_params(parameters, carry=["channel_preference"])
@@ -1863,7 +1864,7 @@ class TestBuildTestModelInputScoping:
         # month, including ones select_test_keys did not rewrite. This node must
         # apply the plan itself rather than trust its input.
         params = _incremental_params(parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        preprocessor = fit_preprocessor_metadata(feature_table, params)
         encoded = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(params), params,
         )
@@ -1882,7 +1883,7 @@ class TestBuildTestModelInputScoping:
 class TestApplyPreprocessorScoping:
     def test_encodes_only_the_months_in_the_plan(self, feature_table, parameters):
         params = _incremental_params(parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        preprocessor = fit_preprocessor_metadata(feature_table, params)
         result = apply_preprocessor_to_features(
             feature_table, preprocessor,
             _plan("2024-02-29", "2024-03-31", "2024-05-31"), params,
@@ -1893,7 +1894,7 @@ class TestApplyPreprocessorScoping:
         self, feature_table, parameters
     ):
         params = _incremental_params(parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        preprocessor = fit_preprocessor_metadata(feature_table, params)
         full = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(params), params,
         )
@@ -1913,7 +1914,7 @@ class TestApplyPreprocessorScoping:
         # feature_table does not have" check, and it can only fire on months
         # this run actually intends to read.
         params = _incremental_params(parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        preprocessor = fit_preprocessor_metadata(feature_table, params)
 
         with pytest.raises(ValueError, match="2024-12-31"):
             apply_preprocessor_to_features(
@@ -1952,7 +1953,7 @@ class TestScopedNodesHandleHiveStringDates:
     ):
         assert dict(string_dated_keys.dtypes)["snap_date"] == "string"
         params = _incremental_params(parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        preprocessor = fit_preprocessor_metadata(feature_table, params)
         encoded = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(params), params,
         )
@@ -2053,7 +2054,7 @@ class TestModelInputSchemaPerSplit:
     @pytest.fixture
     def built(self, feature_table, label_table, sample_pool, parameters):
         params = _all_split_params(parameters, carry_columns=["channel_preference"])
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        preprocessor = fit_preprocessor_metadata(feature_table, params)
         pft = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(params), params,
         )
@@ -2138,7 +2139,7 @@ class TestQueryGroupCompleteness:
         self, feature_table, label_table, sample_pool, parameters
     ):
         params = _all_split_params(parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        preprocessor = fit_preprocessor_metadata(feature_table, params)
         pft = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(params), params,
         )
@@ -2279,7 +2280,7 @@ class TestValTestModelInputIsUnchangedAtTheEnds:
     @pytest.fixture
     def built(self, feature_table, parameters):
         params = _all_split_params(parameters)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, params)
+        preprocessor = fit_preprocessor_metadata(feature_table, params)
         pft = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(params), params,
         )
@@ -2351,9 +2352,10 @@ class TestFitUsesTrainMonthsOnly:
         self, ft_with_val_only_category, parameters
     ):
         params = self._params(parameters)
-        preprocessor, mappings = fit_preprocessor_metadata(
+        preprocessor = fit_preprocessor_metadata(
             ft_with_val_only_category, params
         )
+        mappings = preprocessor["category_mappings"]
         assert mappings["risk_attr"] == ["standard"]
         assert "digital_v2" not in mappings["risk_attr"]
 
@@ -2380,7 +2382,7 @@ class TestFitUsesTrainMonthsOnly:
         "the model never saw it" looks like in the data.
         """
         params = self._params(parameters)
-        preprocessor, _ = fit_preprocessor_metadata(ft_with_val_only_category, params)
+        preprocessor = fit_preprocessor_metadata(ft_with_val_only_category, params)
         out = apply_preprocessor_to_features(
             ft_with_val_only_category, preprocessor, _encode_plan(params), params,
         )
@@ -2465,7 +2467,7 @@ class TestIdentityCategoricalNotEncoded:
         """
         from pyspark.sql import types as T
 
-        preprocessor, _ = fit_preprocessor_metadata(ft_with_item_column, parameters)
+        preprocessor = fit_preprocessor_metadata(ft_with_item_column, parameters)
         out = apply_preprocessor_to_features(
             ft_with_item_column, preprocessor, _encode_plan(parameters), parameters,
         )
@@ -2484,7 +2486,7 @@ class TestIdentityCategoricalNotEncoded:
         If prod_name were simply missing from categorical_columns the type would
         also survive, and this test would be evidence for the wrong rule.
         """
-        preprocessor, _ = fit_preprocessor_metadata(ft_with_item_column, parameters)
+        preprocessor = fit_preprocessor_metadata(ft_with_item_column, parameters)
         assert "prod_name" in preprocessor["categorical_columns"]
 
 
@@ -2964,7 +2966,7 @@ class TestFitPreprocessorMetadataKeyContract:
     ):
         from recsys_tfb.preprocessing import PreprocessorMetadata
 
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        preprocessor = fit_preprocessor_metadata(feature_table, parameters)
         assert set(preprocessor) == set(PreprocessorMetadata.__annotations__)
 
 
@@ -3099,7 +3101,7 @@ class TestDatasetStepTiming:
     ):
         import logging
 
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        preprocessor = fit_preprocessor_metadata(feature_table, parameters)
         caplog.clear()
         with caplog.at_level(logging.INFO):
             apply_preprocessor_to_features(
@@ -3803,7 +3805,7 @@ class TestValidateModelInputGrain:
         params = {**parameters,
                   "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
         keys = select_train_keys(sample_pool, params)
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        preprocessor = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(parameters), parameters,
         )
@@ -3894,7 +3896,7 @@ class TestValidateModelInputGrain:
     ):
         # The same cause on the other right table. Both joins are LEFT joins on
         # a key the gate cannot verify is unique, so both need to be covered.
-        preprocessor, _ = fit_preprocessor_metadata(feature_table, parameters)
+        preprocessor = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(parameters), parameters,
         )

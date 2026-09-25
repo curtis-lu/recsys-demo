@@ -48,6 +48,8 @@ ls -1 data/models/          # 目錄名就是 model_version
 
 **`train_variant_id` 一定要一起抄。** 只比對 `base_dataset_version` 會漏掉一整類錯誤——原因寫在步驟 2。
 
+**③ 框架升級之後、重訓之前，這套流程用不了。** 升級的框架若把「dataset 產物格式版本」加了 1（`core/versioning.py` 的 `DATASET_ARTIFACT_FORMAT_VERSION`，release note 會寫），每個部署的 `base_dataset_version` 都會換掉。新版本還沒建，步驟 2 的 `--only-test-months` 會在開跑前被擋下（A55），training 算出的 `model_version` 也不再是現役模型的。先照 [dataset 手冊 §7.4](../../pipelines/dataset.md#74-修改設定時要重跑什麼) 重建 dataset、重訓，之後才能對新模型用這套流程。已經部署的推論與評估讀的是模型 manifest 記的版本，不受影響。
+
 ## 步驟 1：把新月份加進設定
 
 **先固定計分月份。** 打開 `conf/base/parameters_training.yaml`，看 `test_metrics.snap_date`：

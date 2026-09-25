@@ -63,9 +63,11 @@ class TestLoaderExpandsRanges:
         what used to make them testify that nothing had moved. #414 re-recorded
         ``base_dataset_version`` deliberately (see the docstring on
         ``test_a_config_declaring_neither_key_still_hashes_to_the_old_answer``),
-        so for that half the value now only says "same as the literal fixture".
-        ``train_variant_id`` still carries its original be2d95a value and still
-        testifies. Do not re-record that one to make a test pass.
+        and so did #464 (the dataset artifact format version entering the
+        payload, same docstring), so for that half the value now only says
+        "same as the literal fixture". ``train_variant_id`` still carries its
+        original be2d95a value and still testifies. Do not re-record that one
+        to make a test pass.
         """
         # Must stay key-for-key identical to ``_base_params()`` in
         # test_versioning.py, apart from train_snap_dates being a range here
@@ -94,7 +96,7 @@ class TestLoaderExpandsRanges:
             "parameters_dataset"
         )
 
-        assert compute_base_dataset_version(params, schema) == "d108b398"
+        assert compute_base_dataset_version(params, schema) == "a27de967"
         assert compute_train_variant_id(params) == "913be727"
 
     def test_the_same_days_listed_out_of_order_are_a_different_version(

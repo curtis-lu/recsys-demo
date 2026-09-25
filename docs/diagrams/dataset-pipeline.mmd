@@ -116,7 +116,6 @@ flowchart LR
   subgraph PREP[" 前處理：只用 train 月份 fit，編碼一次供所有 split 共用 "]
     direction TB
     n_fit["fit_preprocessor_metadata"] --> d_preprocessor(["preprocessor　<b>[C]</b><br/><small>training / inference 也吃</small>"])
-    n_fit --> d_catmap(["category_mappings<br/><small>無 pipeline 消費者</small>"])
     n_apply["apply_preprocessor_to_features<br/><small>增量 ・ ＋ P ・ 只編碼本次月份</small>"] --> d_pft(["preprocessed_feature_table　<b>[A]</b>"])
   end
 
@@ -150,7 +149,7 @@ flowchart LR
   class sample_pool,feature_table,label_table src
   class plan cfg
   class n_sel_sample,n_split,n_f_train,n_f_traindev,n_sel_val,n_sel_test,n_fit,n_apply,n_b_train,n_b_traindev,n_b_val,n_b_test,n_f_val,n_f_test nd
-  class d_sample_keys,d_train_keys,d_train_dev_keys,d_val_keys,d_test_keys,d_catmap,d_pft data
+  class d_sample_keys,d_train_keys,d_train_dev_keys,d_val_keys,d_test_keys,d_pft data
   class d_train_unf,d_train_dev_unf,d_val_unf,d_test_unf mem
   class o_train,o_traindev,o_val,o_test,d_preprocessor out
   class gate gt

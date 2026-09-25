@@ -45,7 +45,7 @@ DATASET_TABLES = (
     "train_model_input", "train_dev_model_input",
     "val_model_input", "test_model_input",
 )
-DATASET_JSON = ("preprocessor.json", "category_mappings.json")
+DATASET_JSON = ("preprocessor.json",)
 
 
 class Tables:

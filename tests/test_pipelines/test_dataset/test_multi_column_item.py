@@ -176,7 +176,7 @@ class TestModelInputReadsTheSourceColumns:
         """Every non-identity column of the candidate table is a feature;
         combining drops the source columns before the fit sees them."""
         params = _params()
-        preprocessor, _ = fit_preprocessor_metadata(
+        preprocessor = fit_preprocessor_metadata(
             _feature_table(spark), params, _candidate_table(spark),
         )
         assert preprocessor["feature_columns"] == [

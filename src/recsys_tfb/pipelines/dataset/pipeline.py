@@ -213,7 +213,7 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
             fit_preprocessor_metadata,
             inputs=["feature_table", "parameters", "candidate_feature_table",
                     "sample_pool", "preprocessor_on_disk"],
-            outputs=["preprocessor", "category_mappings"],
+            outputs="preprocessor",
             name="fit_preprocessor_metadata",
         ),
         # --- Encode non-identity categoricals once; all splits reuse this ---

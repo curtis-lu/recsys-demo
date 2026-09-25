@@ -1,14 +1,14 @@
 {
   "measured": {
-    "date": "2026-09-25",
-    "code_commit": "a15d3d47",
-    "how": "run_e2e.sh --compare 跑 feat/461-val-test-keys-filter（#461，ADR-0029 決定 4）：val／test 的丟組從建表之後搬到 keys 上；這份 conf 的 val／test r ＝ 0.5。跑之前先寫下預期：三個版本號不變；source_etl、train／train_dev 的 model_input、preprocessor.json、category_mappings.json 不變；val／test 的 model_input 變（留下的無正例組換一批：桶號原本從 Hive 讀回的 STRING time 算，現在從 sample_pool 的 DATE time 算；無正例組總數與有正例的組不變）；HPO 若選到同一組參數，training 的預測只差在列；evaluation 的組內排序指標值不變，列數與逐列算的量會變。結果與預期相同：同一時間在 main（e4cffe32）上跑一次，與舊基準逐項一致，所以差異全來自本票。val 留 276／541 個無正例組（main 270）、test 255／534（main 272）；val 2815→2810 列、test 2925→2835 列；best_params 與 best_iteration 與 main 相同；metrics.json 只有 dataset_overview 與 n_queries（717→700）、n_excluded_queries（272→255）這些計數變，排序指標值一個都沒動；prediction_quality.json 與 report_aggregates.json 逐列算，跟著變；baseline_metrics.json 不變。本檔即在最終程式碼（a15d3d47）上跑出的 data/digest.json，與收審查前（167aa8ca）那次逐項相同。"
+    "date": "2026-09-26",
+    "code_commit": "feat/464-version-config 主 commit 之前的工作樹（收尾時在最終 commit 上以 --compare 重驗）",
+    "how": "run_e2e.sh 跑 feat/464-version-config（#464，ADR-0029 決定 9、10、13、15）：carry_columns 改進 train_variant_id、base_dataset_version 的雜湊多一個 dataset 產物格式版本常數（值 1）、刪 category_mappings.json、preprocessor_on_disk 由 CLI 推出、drop_columns 的預設值只留 schema 角色（這份 conf 明寫了 drop_columns，走不到）。跑之前先寫下預期：三個版本號都變（這份 conf 寫了 carry_columns，所以 train_variant_id 也變；model_version 含 base）；dataset 層少 category_mappings.json；其餘各層內容指紋全部不變。結果與預期相同：同一天先在改動前的程式（main 1562de9c）上跑 --compare，與舊基準逐項一致；改動後與那次比，59 項裡只有三個版本號與 category_mappings.json 的兩項不同，source_etl、四個 model_input、preprocessor.json、training_eval_predictions、evaluation 的 JSON 全部相同。"
   },
   "noisy": {},
   "versions": {
-    "base_dataset_version": "8e598aa2",
-    "train_variant_id": "d004c3c8",
-    "model_version": "93008ce1"
+    "base_dataset_version": "969fe8f3",
+    "train_variant_id": "844ca7eb",
+    "model_version": "1e9d3c52"
   },
   "source_etl": {
     "feature_table": {
@@ -207,10 +207,6 @@
     "preprocessor.json": {
       "leaves": 56,
       "hash": "abbe17df350494aabaf0fc716950a5b5f849dbdc6f67c709bd132a78ef318629"
-    },
-    "category_mappings.json": {
-      "leaves": 28,
-      "hash": "b1df25fd7dbbe997f5b880afa826b8bc1beac0d10f6d78f98f99b8df46df3298"
     }
   },
   "training": {

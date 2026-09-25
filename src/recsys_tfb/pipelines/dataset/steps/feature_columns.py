@@ -24,16 +24,19 @@ logger = logging.getLogger(__name__)
 def prepare_model_input_config(parameters: dict) -> tuple[list[str], list[str]]:
     """Extract drop_columns and categorical_columns from parameters.
 
+    Undeclared, ``drop_columns`` is the time, entity and label roles, and
+    ``categorical_columns`` is the item: schema roles only, never a column
+    name one example happens to have (ADR-0017's framework vocabulary).
+
     Returns:
         (drop_columns, categorical_columns)
     """
     schema = get_schema(parameters)
     pmi_config = parameters.get("dataset", {}).get("prepare_model_input", {})
 
-    drop_cols = pmi_config.get("drop_columns", [
-        schema["time"], *schema["entity"], schema["label"],
-        "apply_start_date", "apply_end_date", "cust_segment_typ",
-    ])
+    drop_cols = pmi_config.get(
+        "drop_columns", [schema["time"], *schema["entity"], schema["label"]],
+    )
     categorical_cols = pmi_config.get("categorical_columns", [schema["item"]])
 
     return drop_cols, categorical_cols

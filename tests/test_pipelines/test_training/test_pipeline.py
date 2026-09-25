@@ -405,7 +405,7 @@ class TestTrainingPipelineE2E:
             "train_set", "train_dev_set", "val_set", "test_set",
             "train_model_input", "train_dev_model_input",
             "val_model_input", "test_model_input",
-            "preprocessor", "preprocessor_view", "category_mappings",
+            "preprocessor", "preprocessor_view",
             "best_params", "best_iteration", "hpo_best_model",
             "model", "evaluation_results",
             "predict_manifest",

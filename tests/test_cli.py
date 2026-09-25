@@ -4606,7 +4606,7 @@ class TestTrainVersionMustHaveLandedA55:
         assert result.exit_code == 1
         assert "(A55)" in result.output
         # The second message: the base is there, this variant is not.
-        assert "train sampling settings changed" in result.output
+        assert "a train-only setting changed" in result.output
         assert "never been built" not in result.output
         assert runs == 0
         # Refused before the stubs too: no directory names a variant nobody
@@ -4625,7 +4625,7 @@ class TestTrainVersionMustHaveLandedA55:
         assert "(A55)" in result.output
         # The first message: nothing under this base at all.
         assert "never been built" in result.output
-        assert "train sampling settings changed" not in result.output
+        assert "a train-only setting changed" not in result.output
         assert runs == 0
         assert not list(tmp_path.rglob("manifest.json"))
 
@@ -4749,3 +4749,133 @@ def test_the_not_built_warning_does_not_reassure_about_the_same_variant(tmp_path
     assert "還沒建好的版本" in lines
     assert "空的 train 表" in lines
     assert "目前是 v1111111" not in lines
+
+
+# =============================================================================
+# preprocessor_on_disk is derived from preprocessor (ADR-0029 decision 13, A56)
+# =============================================================================
+
+_PREP_PATH = "data/dataset/b1111111/preprocessor.json"
+
+
+def _prep_catalog(**on_disk) -> dict:
+    catalog = {"preprocessor": {"type": "JSONDataset", "filepath": _PREP_PATH}}
+    if on_disk:
+        catalog["preprocessor_on_disk"] = dict(on_disk)
+    return catalog
+
+
+class TestDerivePreprocessorOnDisk:
+    """The three cases a deployment's catalog can be in, and the one where
+    there is nothing to derive from."""
+
+    @staticmethod
+    def _derive(catalog):
+        from recsys_tfb.__main__ import _derive_preprocessor_on_disk
+
+        return _derive_preprocessor_on_disk(catalog)
+
+    def test_left_out_it_is_added_as_an_optional_entry_on_the_same_file(self):
+        catalog = _prep_catalog()
+
+        assert self._derive(catalog) == []
+        assert catalog["preprocessor_on_disk"] == {
+            "type": "JSONDataset", "filepath": _PREP_PATH, "optional": True,
+        }
+        # A copy: marking the derived entry optional must not make the entry
+        # the fit writes optional too.
+        assert catalog["preprocessor"] == {
+            "type": "JSONDataset", "filepath": _PREP_PATH,
+        }
+
+    def test_written_on_the_same_file_it_is_used_as_written(self):
+        written = {"type": "JSONDataset", "filepath": _PREP_PATH, "optional": True}
+        catalog = _prep_catalog(**written)
+
+        assert self._derive(catalog) == []
+        assert catalog["preprocessor_on_disk"] == written
+
+    def test_written_on_another_file_it_is_an_a56_error(self):
+        elsewhere = "data/dataset/b1111111/preprocessor_backup.json"
+        catalog = _prep_catalog(
+            type="JSONDataset", filepath=elsewhere, optional=True,
+        )
+
+        [err] = self._derive(catalog)
+
+        assert err.startswith("(A56)")
+        assert elsewhere in err
+        # Reported, not repaired: the operator wrote that path for a reason
+        # the CLI cannot know.
+        assert catalog["preprocessor_on_disk"]["filepath"] == elsewhere
+
+    def test_without_a_preprocessor_entry_nothing_is_derived(self):
+        catalog = {}
+
+        assert self._derive(catalog) == []
+        assert catalog == {}
+
+    def test_a_preprocessor_stored_as_another_type_is_not_derived_from(self):
+        """``optional`` is a JSONDataset argument; no other dataset type loads
+        a missing file as ``None``. A derived entry of another type would fail
+        every first run, so none is made — the Runner then reports the missing
+        input, as it did before the entry was derived."""
+        catalog = {"preprocessor": {"type": "PickleDataset", "filepath": "p.pkl"}}
+
+        assert self._derive(catalog) == []
+        assert "preprocessor_on_disk" not in catalog
+
+
+class TestPreprocessorOnDiskWiring:
+    """Derived where the CLI builds the catalog, for the pipelines whose nodes
+    read the entry, before any node runs."""
+
+    @staticmethod
+    def _execute(pipeline, catalog_config, **kwargs):
+        from recsys_tfb.__main__ import _execute_pipeline
+
+        config = MagicMock()
+        config.get_catalog_config.return_value = catalog_config
+        with patch("recsys_tfb.__main__.DataCatalog", wraps=DataCatalog) as built, \
+                patch("recsys_tfb.__main__.Runner") as runner:
+            _execute_pipeline(pipeline, {}, {}, config, {}, "local", **kwargs)
+        return built, runner
+
+    @pytest.mark.parametrize("pipeline", ["dataset", "evaluation"])
+    def test_the_pipelines_that_read_it_get_it_derived(self, pipeline):
+        built, _ = self._execute(pipeline, _prep_catalog(), dry_run=True)
+
+        assert built.call_args.args[0]["preprocessor_on_disk"] == {
+            "type": "JSONDataset", "filepath": _PREP_PATH, "optional": True,
+        }
+
+    def test_a_pipeline_that_does_not_read_it_is_left_alone(self):
+        built, _ = self._execute("training", _prep_catalog(), dry_run=True)
+
+        assert "preprocessor_on_disk" not in built.call_args.args[0]
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    @pytest.mark.parametrize("pipeline", ["dataset", "evaluation"])
+    def test_another_file_stops_the_run_before_the_catalog_is_built(
+        self, pipeline, dry_run, caplog,
+    ):
+        """--dry-run too: a preview must not promise a run that would stop."""
+        import typer
+
+        from recsys_tfb.__main__ import _execute_pipeline
+
+        config = MagicMock()
+        config.get_catalog_config.return_value = _prep_catalog(
+            type="JSONDataset", filepath="data/elsewhere.json",
+        )
+        with patch("recsys_tfb.__main__.DataCatalog") as built, \
+                patch("recsys_tfb.__main__.Runner") as runner, \
+                caplog.at_level(logging.ERROR), pytest.raises(typer.Exit):
+            _execute_pipeline(
+                pipeline, {}, {}, config, {}, "local", dry_run=dry_run,
+            )
+
+        built.assert_not_called()
+        runner.assert_not_called()
+        assert "(A56)" in caplog.text
+        assert "data/elsewhere.json" in caplog.text

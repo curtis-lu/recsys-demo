@@ -268,7 +268,7 @@ class TestFitPreprocessorMetadataReadsTheCandidateTable:
         categoricals, the entity-level table's features, then the candidate
         table's. Its identity columns (the join key) and dropped columns are
         not features."""
-        preprocessor, _ = fit_preprocessor_metadata(
+        preprocessor = fit_preprocessor_metadata(
             _raw_feature_table(spark), _fit_params(), _raw_candidate_table(spark),
         )
 
@@ -277,21 +277,21 @@ class TestFitPreprocessorMetadataReadsTheCandidateTable:
         ]
 
     def test_its_vocabulary_comes_from_the_train_months_only(self, spark):
-        _, mappings = fit_preprocessor_metadata(
+        preprocessor = fit_preprocessor_metadata(
             _raw_feature_table(spark), _fit_params(), _raw_candidate_table(spark),
         )
 
-        assert mappings["page_type"] == ["home", "search"]
+        assert preprocessor["category_mappings"]["page_type"] == ["home", "search"]
 
     def test_the_item_vocabulary_still_comes_from_the_schema(self, spark):
         """The candidate table carries ``prod_name`` as part of its key. That
         must not make it a column whose vocabulary is read from the data — the
         declaration is the full domain; this table only holds what was shown."""
-        _, mappings = fit_preprocessor_metadata(
+        preprocessor = fit_preprocessor_metadata(
             _raw_feature_table(spark), _fit_params(), _raw_candidate_table(spark),
         )
 
-        assert mappings["prod_name"] == list(_ITEMS)
+        assert preprocessor["category_mappings"]["prod_name"] == list(_ITEMS)
 
     def test_a_train_month_missing_from_it_is_an_error(self, spark):
         """Same rule as the entity-level table: a month that went missing
@@ -306,12 +306,12 @@ class TestFitPreprocessorMetadataReadsTheCandidateTable:
     def test_without_one_the_fit_is_what_it_was(self, spark):
         params = _fit_params()
         params["dataset"]["prepare_model_input"]["categorical_columns"] = ["prod_name"]
-        preprocessor, mappings = fit_preprocessor_metadata(
+        preprocessor = fit_preprocessor_metadata(
             _raw_feature_table(spark), params,
         )
 
         assert preprocessor["feature_columns"] == ["prod_name", "total_aum"]
-        assert set(mappings) == {"prod_name"}
+        assert set(preprocessor["category_mappings"]) == {"prod_name"}
 
 
 class TestUnusedDropColumnsAreReportedAcrossBothTables:

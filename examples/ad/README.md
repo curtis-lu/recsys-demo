@@ -129,7 +129,7 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 |---|---|
 | `versions` | `base_dataset_version`、`train_variant_id`、`model_version` |
 | `source_etl` | 五張來源表的列數與內容指紋：`feature_table`、`candidate_feature_table`（＝`feature_realtime`）、`label_table`、`sample_pool`、`inference_population` |
-| `dataset` | 四個 split 的 model_input 列數與內容指紋；`preprocessor.json`、`category_mappings.json` 的內容指紋 |
+| `dataset` | 四個 split 的 model_input 列數與內容指紋；`preprocessor.json` 的內容指紋 |
 | `training` | `training_eval_predictions`（分數四捨五入到小數第 6 位） |
 | `evaluation` | 評估目錄下每份 JSON 攤平後的指紋（`metrics.json`、`baseline_metrics.json`、`prediction_quality.json`、`report_aggregates.json`、`segment_columns.json`、`diagnosis/` 五份診斷；數字四捨五入到小數第 6 位） |
 
