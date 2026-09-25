@@ -5092,3 +5092,50 @@ class TestBinaryTestMetricsA54:
         assert "dataset.test_zero_positive_group_ratio is 0 in the config" in err
         assert "written without zero_positive_group_weight" in err
         assert "set dataset.test_zero_positive_group_ratio back to 0.5" in err
+
+
+# =============================================================================
+# A55 — --only-test-months needs the configured train version to have landed
+#       (wired on the dataset command; ADR-0029 decision 12, #334)
+# =============================================================================
+
+from recsys_tfb.core.consistency import train_version_landed_errors
+
+
+def _a55(*, base_landed, variant_landed):
+    return train_version_landed_errors(
+        base_landed=base_landed,
+        variant_landed=variant_landed,
+        base_dataset_version="b1111111",
+        train_variant_id="v1111111",
+    )
+
+
+class TestTrainVersionLandedA55:
+    def test_the_variant_has_landed(self):
+        assert _a55(base_landed=True, variant_landed=True) == []
+
+    def test_nothing_under_the_base_means_it_was_never_built(self):
+        [err] = _a55(base_landed=False, variant_landed=False)
+        assert "A55" in err
+        assert "b1111111" in err
+        assert "never been built" in err
+        # Why the base moved, so the operator can tell a first run from an
+        # edit they did not mean to make.
+        assert "first run" in err
+        assert "feature table" in err
+        assert "format version" in err
+        assert "sampling settings changed" not in err
+
+    def test_the_base_without_this_variant_means_the_sampling_changed(self):
+        [err] = _a55(base_landed=True, variant_landed=False)
+        assert "A55" in err
+        assert "v1111111" in err
+        assert "train sampling settings changed" in err
+        assert "TRAIN_SAMPLING_KEYS" in err
+        assert "never been built" not in err
+
+    def test_both_ask_for_the_full_pipeline(self):
+        for base_landed in (False, True):
+            [err] = _a55(base_landed=base_landed, variant_landed=False)
+            assert "without --only-test-months" in err

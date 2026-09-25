@@ -638,6 +638,25 @@ Layer 1 — config-static (implemented here; aggregated by
   version's manifest (the only place that knows it), and read by
   ``compute_test_metrics`` for the withheld reasons and as the runtime
   backstop.
+* A55 — ``--only-test-months`` needs the train version the config names to
+  have landed: ``train_model_input`` must hold partitions under this run's
+  ``base_dataset_version`` and ``train_variant_id`` (ADR-0029 decision 12).
+  The mode runs no train build, so it can only reuse a train version built
+  earlier; changing a train sampling key moves ``train_variant_id`` alone,
+  and before this check the run went ahead and training then read the empty
+  variant as 0 rows, with no error anywhere (#334). Two messages, because
+  they are two situations: nothing under the base at all (never built), or
+  the base without this variant (the train sampling settings changed).
+  Predicate: ``train_version_landed_errors`` (returns errors; the dataset
+  command raises before any node runs or any manifest is written). The facts
+  are metastore partition listings the command collects through
+  ``pipelines/dataset/run_contract.py``; this module still never reads the
+  catalog (A28's reason). NOT aggregated: it reads a CLI flag and the
+  metastore, neither of which the aggregator sees. After the run, the same
+  evidence decides whether ``train_variants/latest`` moves
+  (``run_contract.unlanded_train_tables``, which also asks for
+  ``train_dev_model_input`` unless ``train_dev_ratio`` is 0) — a rule, not an
+  invariant, so it carries no A-code.
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -650,7 +669,8 @@ Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
 flags), A22/A46/A51 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53 (config keys whose
 harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--env``
-+ the filesystem), A35 (the ``--var`` CLI flags).
++ the filesystem), A35 (the ``--var`` CLI flags), A55 (``--only-test-months`` + the
+metastore).
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
 + B13 + B14 + B15 + B16 + B17 + B18 + B19 implemented and wired):
@@ -5363,6 +5383,74 @@ def train_snap_dates_errors(parameters: dict) -> list[str]:
             f"Write each as YYYY-MM-DD."
         ]
     return []
+
+
+def train_version_landed_errors(
+    *,
+    base_landed: bool,
+    variant_landed: bool,
+    base_dataset_version: str,
+    train_variant_id: str,
+) -> list[str]:
+    """(A55) ``--only-test-months`` needs this config's train version to have landed.
+
+    Returns error strings (empty list when fine); the dataset command raises
+    before it writes a manifest stub or runs a node.
+
+    The mode leaves out every train build, so it can only reuse a train
+    version built earlier. A train sampling key (``core/versioning.py``'s
+    ``TRAIN_SAMPLING_KEYS``) moves ``train_variant_id`` and not
+    ``base_dataset_version``; before this check the run went ahead, wrote
+    nothing under the new variant, and training read it as 0 rows without an
+    error at any layer (#334).
+
+    The two facts are metastore partition listings of ``train_model_input``,
+    taken by the command (``pipelines/dataset/run_contract.py``) and passed
+    in — this module never reads the catalog (A28's reason). ``base_landed``
+    is "some variant of this base has partitions", ``variant_landed`` "this
+    variant has". A manifest's ``status: completed`` is not the evidence: a
+    slice that never touched train used to write it too (ADR-0029
+    decision 12).
+
+    Two messages, because the operator has two different things to find out:
+
+    * **nothing under the base** — this base version was never built. Why the
+      base moved is the question, so the likely causes are listed; one of
+      them may be an edit the operator did not mean to make.
+    * **the base without this variant** — the train sampling settings changed
+      since that base was built.
+
+    Both end in a full dataset run. The mode deliberately does not build the
+    missing variant itself: it stays "add a test month", and
+    ``scripts/rebuild_eval_month.sh`` does not grow back the train rebuild
+    ADR-0012 took out of it.
+
+    NOT aggregated by :func:`validate_config_consistency`: it needs the
+    ``--only-test-months`` flag and the metastore, neither of which that gate
+    sees. Wired like A23/A24: the command logs each error and exits.
+    """
+    if variant_landed:
+        return []
+    if not base_landed:
+        return [
+            f"(A55) --only-test-months: train_model_input has no partition "
+            f"under base_dataset_version={base_dataset_version}, so this base "
+            f"version has never been built and there is no train data for the "
+            f"mode to reuse. Run the full dataset pipeline (without "
+            f"--only-test-months). Likely causes: this is the first run; a "
+            f"base-level setting or the feature table's schema changed; a "
+            f"framework upgrade raised the dataset artifact format version "
+            f"(ADR-0029 decision 15)."
+        ]
+    return [
+        f"(A55) --only-test-months: train_model_input has partitions under "
+        f"base_dataset_version={base_dataset_version} but none under "
+        f"train_variant_id={train_variant_id}: the train sampling settings "
+        f"changed (the keys in core/versioning.py's TRAIN_SAMPLING_KEYS, e.g. "
+        f"dataset.sample_ratio) and this train version has not been built. "
+        f"Run the full dataset pipeline (without --only-test-months), or "
+        f"revert the sampling change."
+    ]
 
 
 def date_split_overlap_errors(parameters: dict) -> list[str]:

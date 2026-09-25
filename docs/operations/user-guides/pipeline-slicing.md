@@ -52,13 +52,37 @@ training 與 inference 沒有增量產物，判準仍是 `exists()` 一個。
 **版本化是靠 partition column，不是靠表名。** `catalog.yaml` 的 22 個 `HiveTableDataset` 裡，
 **18 個 pipeline 產物全部帶版本 `partition_filter`**（`base_dataset_version`／`train_variant_id`／
 `model_version`）——包括表名看起來完全沒有版本的 `recsys_prod_train_keys`。config 變了 → 版本變了 →
-filter 指向一個不存在的 partition → `exists()` 自然為假。**這一層防呆是有效的。**
+`load()` 只讀新版本的 partition，舊版本的資料不會被讀進來。
 
 沒有版本 filter 的只有 4 張（`feature_table`、`label_table`、`sample_pool`、`inference_population`），
 那是 source_etl 維護的唯讀來源表——切片不會跳過產生它們的 node，所以它們不是切片的風險來源。
-（它們**內容被改**時的風險是另一回事，見下面第 2 點。）
+（它們**內容被改**時的風險是另一回事，見下面「版本化本身還有兩件事擋不住」第 2 點。）
 
-**真正擋不住的是另外兩件事**：
+**但切片的判準看不到版本。** `HiveTableDataset.exists()` 問的是 `SHOW TABLES`
+（`io/hive_table_dataset.py` 的 `_table_exists`），**只看表在不在、不看 `partition_filter`**。
+表只要被任何一個版本寫過，之後對每個版本都回答「在」。所以 config 變了之後切片，被跳過的
+node 在新版本底下其實什麼都沒寫，切片卻不會把它拉回來，讀它的 node 讀到 0 列、不報錯
+（[ADR-0012](../../adr/0012-month-aware-slicing-not-per-artifact-skip.md)〈這個論證的已知反例〉）。
+上一節 dataset 的三個增量產物改問月份，躲開了這一點；其他產物沒有。
+
+**dataset 在 training 讀的那一層補了兩道**（[ADR-0029](../../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 12）。
+training 讀哪個 train 版本，只看 `data/dataset/<base_dataset_version>/train_variants/latest`
+指到哪裡，不會拿自己的設定重算。所以：
+
+1. **跑完之後**：目前設定的 `train_variant_id` 在 `train_model_input` 與 `train_dev_model_input`
+   底下**都有分區**（`train_dev_ratio: 0` 故意讓 train_dev 是空的，這時只看前一張），CLI 才把這個 variant 的 `manifest.json` 寫成 `completed`、把 `latest` 指過去。
+   否則兩樣都不動，並印兩行 `[train_variant]` 警告，寫明 training 會繼續讀 `latest` 指的哪一個。
+   看的是 metastore 裡有沒有表，不是這一輪跑了哪些 node。例如改了抽樣設定之後跑
+   `--only-node build_test_model_input`，新 variant 底下沒有 train 的表，`latest` 就留在舊的那個，
+   training 不會讀到一個空的 train 版本。反過來，把抽樣設定改回一個以前建過的值再跑，
+   `latest` 會指回那個 variant。base 那一層的 manifest 與 `data/dataset/latest` 不受這條規則管，
+   照舊每次成功執行都更新。
+2. **`--only-test-months` 開跑前**：這個模式不建 train 的表，只能沿用以前建好的。所以它先確認
+   目前設定的 `train_variant_id` 在 `train_model_input` 底下已經有分區；沒有就在任何 node 執行、
+   任何 manifest 寫入之前停下來（訊息帶 `(A55)`）。訊息怎麼讀，見
+   [新增一個評估月份](adding-an-eval-month.md) 步驟 2。
+
+**除此之外，版本化本身還有兩件事擋不住**：
 
 1. **版本 hash 涵蓋 config，不涵蓋 code。** 改了 Python 但沒改 config → 版本不變 → `exists()` 為真 →
    讀到的是舊 code 產出的東西。

@@ -96,13 +96,16 @@ train_variant_id:     <跟你抄下來的一模一樣>
 
 `processed` 是新月份、`skipped` 是舊月份，就對了。另外還有一行 `dataset=preprocessed_feature_table`，它涵蓋的月份範圍更廣、訓練月份也算在內，月份清單跟前兩行不一樣是正常的。
 
-**最常壞的一種**：`base_dataset_version` 跟你抄下來的不一樣。
+**開跑前它會先確認一件事**：這個模式不建訓練資料，只能沿用以前建好的那一份。所以它會先向 metastore 問：目前設定算出的 `base_dataset_version`、`train_variant_id` 底下，`train_model_input` 有沒有分區。沒有的話，這一輪如果照樣跑完，步驟 3 讀到的訓練資料會是 0 列，而且不會報錯；所以它在任何 node 執行之前就停下來，訊息帶 `(A55)`，不寫任何資料或 manifest（run log 照常寫）。訊息有兩種：
 
-代表你這次不只加月份，還改到了別的設定。**停下來**，不要跑步驟 3——模型會對不上新的資料版本。把其他改動還原，只留新增的月份。
+- **`... has partitions under base_dataset_version=... but none under train_variant_id=...: the train sampling settings changed ...`**：你這次還改到了抽樣設定（`sample_ratio` 那一類）。改抽樣只會讓 `train_variant_id` 變，`base_dataset_version` 不變，所以只看 `base_dataset_version` 會以為沒改東西。二選一：把抽樣改動還原、只留新增的月份，或是不帶旗標跑完整的一輪。
+- **`... has no partition under base_dataset_version=..., so this base version has never been built ...`**：這個 `base_dataset_version` 底下從來沒建過訓練資料。原因有三種：第一次跑；你這次不只加月份，還改到了 base 層的設定，或特徵表的 schema 變了；框架升級時把「dataset 產物格式版本」加了 1。後兩種都代表資料版本換了，現有模型對不上它。是你沒打算做的改動，就還原它；確實要換版本，就不帶旗標跑完整的一輪、再重訓——那已經不是「只加一個評估月份」了。
 
-**第二常壞、而且完全不會報錯的一種**：`base_dataset_version` 一樣，但 `train_variant_id` 跟你抄下來的不一樣。
+**沒被擋下、但還是要停的一種**：`base_dataset_version` 或 `train_variant_id` 跟你抄下來的不一樣。
 
-代表你這次還改到了抽樣設定（`sample_ratio` 那一類）。**`base_dataset_version` 對抽樣改動是盲的**，所以它沒變不代表你沒改東西。而帶了 `--only-test-months` 的這一輪不會產出新 `train_variant_id` 底下的訓練資料，步驟 3 之後會讀到 0 列——**而且不會拋錯**。**停下來**，二選一：把抽樣改動還原、只留新增的月份，或是不帶旗標跑完整的一輪。
+代表你改到的設定剛好對到一個以前建過的版本（例如把抽樣設定改回以前用過的值），所以檢查放行了。但現在的模型不是用那個版本訓練的。**停下來**，不要跑步驟 3。把其他改動還原，只留新增的月份。
+
+**跑完之後**，`data/dataset/<base_dataset_version>/train_variants/latest` 通常會指向目前設定的那個 `train_variant_id`，步驟 3 讀的就是它。條件是 train 的 model input 在這個 variant 底下都有表：`train_model_input`，以及 `train_dev_ratio` 不是 0 時的 `train_dev_model_input`。開跑前只查了前一張，所以少了後一張時（例如之前某次切片只建了 `train_model_input`），這一輪照樣跑完，但 log 最後會有兩行 `[train_variant]` 警告，`latest` 不動。看到它就不要跑步驟 3，先不帶旗標跑完整的一輪。
 
 ## 步驟 3：用現有模型對新月份產生預測
 
@@ -210,7 +213,7 @@ ls -d data/evaluation/<model_version>/*/
 #   data/evaluation/<model_version>/20260228/    ← 新的
 ```
 
-3. 步驟 2 印出的 `base_dataset_version` 跟你動手前抄下來的一樣。
+3. 步驟 2 印出的 `base_dataset_version` 與 `train_variant_id` 都跟你動手前抄下來的一樣。
 
 4. promote 的比較範圍沒變：
 
@@ -226,7 +229,10 @@ python scripts/promote_model.py --env <你的環境> --dry-run
 
 | 你看到什麼 | 怎麼辦 |
 |---|---|
-| `base_dataset_version` 跟你抄下來的不一樣 | 這次還改到了別的設定。把那些改動還原，只留新增的月份 |
+| 步驟 2 開跑前就退出，訊息帶 `(A55)` 與 `train sampling settings changed` | 這次還改到了抽樣設定。還原它，或不帶 `--only-test-months` 跑完整的一輪（步驟 2） |
+| 步驟 2 開跑前就退出，訊息帶 `(A55)` 與 `never been built` | 這個 `base_dataset_version` 沒建過訓練資料：第一次跑、改到了 base 層設定或特徵表 schema，或框架升級。見步驟 2 |
+| 步驟 2 跑完了，但 log 最後有兩行 `[train_variant] 目前設定的 train 版本...還沒建` | 目前的 variant 少了一張 train 表，`latest` 沒動。不要跑步驟 3，先不帶旗標跑完整的一輪（步驟 2 最後一段） |
+| `base_dataset_version` 或 `train_variant_id` 跟你抄下來的不一樣，但沒被擋下 | 這次還改到了別的設定，而且剛好對到一個以前建過的版本。把那些改動還原，只留新增的月份 |
 | `FileNotFoundError`，路徑帶著新月份 | 步驟 2 沒跑成功。回去重跑步驟 2 |
 | `No predictions found for evaluation.snap_date` | 步驟 3 沒跑。回去重跑步驟 3 |
 | `test month '<月份>' ... has no rows in the test cache` | 這個月在設定裡但 dataset 還沒產出它。先跑步驟 2 |

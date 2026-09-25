@@ -54,9 +54,10 @@ run() { echo; echo "▶ $*"; "$@"; }
 #    這裡有一層自癒因此消失了，記在這裡而不是留給人發現：本腳本原本跑完整
 #    dataset，順帶把 train/val 在當前 variant 底下重建一次，於是會
 #    意外修好「同一次編輯既加了 test 月、又改了 sample_ratio」造成的 variant
-#    漂移（ADR-0012「這個論證的已知反例」）。**沒有東西補上它。** 仍然接受：
-#    那層自癒從來不是這個腳本的職責、沒有任何文件宣稱過，而移除之後的曝險與
-#    --only-test-months 主動線完全相同。
+#    漂移（ADR-0012「這個論證的已知反例」）。這裡不補它：那層自癒從來不是這個
+#    腳本的職責、沒有任何文件宣稱過。那種漂移現在由 --only-test-months 自己在
+#    開跑前擋下（不變量 A55，ADR-0029 決定 12）：目前設定的 train 版本還沒建，
+#    這一步就報錯退出，第 2 步不會跑。擋下，不是自動補建。
 run "$PYTHON" -m recsys_tfb dataset --env "$ENV_NAME" \
   --only-test-months --rebuild-dates "$MONTHS"
 
