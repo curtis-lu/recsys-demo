@@ -39,7 +39,9 @@ def _params(**dataset) -> dict:
             "columns": {"time": "snap_date", "entity": ["cust_id"], "item": "prod_name"},
             "categorical_values": {"prod_name": list(_ITEMS)},
         },
-        "dataset": dataset,
+        # Every frame here is one month; the train side reads label_table
+        # for the train months only (ADR-0029 decision 1).
+        "dataset": {"train_snap_dates": [_DATE], **dataset},
     }
 
 

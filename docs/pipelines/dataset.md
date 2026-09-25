@@ -81,7 +81,9 @@ dataset:
 - 區間沒有「最近 N 天」這種相對寫法：迄日若跟著執行日期走，同一份設定明天重跑會得到不同的版本 ID。
 - `conf/<env>/` 的覆蓋層可以只蓋區間裡的一個鍵（例如只改 `end`），因為展開發生在覆蓋之後。
 
-train、val、test 日期集合必須互斥（一致性不變量 A24，在 `dataset` 指令啟動 Spark 前檢查；按日比對而非按字面，同一天的不同寫法也算重疊）。日期本身仍須寫成 `YYYY-MM-DD`。`train_dev_ratio` 不會切日期，而是把一個 entity 的所有日期與 items 一起分配至 train 或 train-dev，避免同一 entity 同時出現在兩側。
+train、val、test 日期集合必須互斥（一致性不變量 A24，在 `dataset` 指令啟動 Spark 前檢查；按日比對而非按字面，同一天的不同寫法也算重疊）。日期本身仍須寫成 `YYYY-MM-DD`。
+
+來源表的 time 欄可以是 DATE、TIMESTAMP，或寫成 `YYYY-MM-DD` 的字串（Hive 的分區欄讀回來就是字串）。dataset 每一處按月份篩選，都先把 time 欄轉成日期、再和設定的日期比，所以三種型別讀到的月份相同（[ADR-0029](../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 3）。2026-09 之前不是這樣：time 欄是字串時，抽樣、fit 詞表、從資料數 item 清單、資料閘的 item 檢查一個月份都對不到，而且不報錯。`train_dev_ratio` 不會切日期，而是把一個 entity 的所有日期與 items 一起分配至 train 或 train-dev，避免同一 entity 同時出現在兩側。
 
 「一個 entity」指哪些欄由 `train_split_keys` 宣告，**預設是完整的 `schema.entity`**。單欄 entity 下沒有第二種讀法；多欄時若你的洩漏單位比 query group 粗（例如 entity 是 `[cust_id, acct_id]`，而同一客戶的多個帳戶不得跨邊），就填上較粗的那個子集。填了不在 `entity` 裡的欄名會被不變量 A29 在 CLI 進入點擋下。為什麼這個鍵與 `val_sample_keys` 是兩個而不是一個，見 [ADR-0016](../adr/0016-split-unit-declared-by-two-keys.md)。
 
@@ -333,7 +335,7 @@ candidate_feature_table:
 
 **什麼時候讀、讀哪些月份**：候選層級特徵表不先編碼、不落地。`build_*_model_input` 在抽樣之後才讀它，用前處理器 fit 出來的詞表編碼（train 沒見過的值編成 `-1`），再以 identity left join 接上。理由是大小：它跟 `sample_pool` 一樣大，而 keys 是抽樣後的子集；若像 `feature_table` 那樣在抽樣前先編碼、存成 Hive 表，等於把之後會被抽掉的大量負例也多寫一遍（[ADR-0026](../adr/0026-feature-tables-by-join-key.md) 決定 2）。
 
-每個 build 只讀自己 split 的月份：train 與 train-dev 讀 `train_snap_dates`、val 讀 `val_snap_dates`、test 讀還沒落地的月份（`--rebuild-dates` 指名的月份也算）；帶 `--only-test-months` 時只有 test 那一份。開跑前 log 會印一行 `[months] dataset=candidate_feature_table train=… val=… test=…`。identity 含 `time`，所以這個篩選只影響成本，不影響結果。找不到的列、整個月沒資料各會怎樣，見 §5〈三個 left join 各自的契約〉。
+每個 build 只讀自己 split 的月份：train 與 train-dev 讀 `train_snap_dates`、val 讀 `val_snap_dates`、test 讀還沒落地的月份（`--rebuild-dates` 指名的月份也算；log 的 `[months] dataset=test_model_input processed=…` 那一行）；帶 `--only-test-months` 時只有 test 那一份。`label_table` 與 `preprocessed_feature_table` 也照同一個規則（§5）。identity 含 `time`，所以這個篩選只影響成本，不影響結果。找不到的列、整個月沒資料各會怎樣，見 §5〈三個 left join 各自的契約〉。
 
 **宣告之後，離線推論在 CLI 入口被擋下**（不變量 A47）。推論 pipeline 只讀 `feature_table`，而模型需要這張表的欄，放行的話它會在啟動 Spark 之後才以 `Missing feature columns` 失敗；原因與範圍見 [`inference.md` §3.6](inference.md#36-宣告了候選層級特徵表的部署不能跑離線推論)。training 與 `evaluation --post-training` 不受影響。版本號怎麼跟著變見 §7.3；有哪些事沒有檢查守著見 §9。
 
@@ -488,22 +490,24 @@ python -m recsys_tfb dataset \
 | 資料閘 | `validate_data_consistency` | 三張來源表、parameters、`candidate_feature_table`（沒宣告時是 `None`） | 檢查 item coverage 與 categorical feature 型別；宣告了候選層級特徵表時，另查它有齊 identity 欄（B13）、沒有和 `feature_table` 重複的特徵欄（B14）；item 由多欄組成時，另查各表有齊原欄、沒有已叫 `item` 的欄（B16）、同一個原欄各表型別相同（B17），以及沒有兩個組合拼成同一個值（B15，§3.9）。收集問題後一次中止 | 無 |
 | Train 抽樣 | `select_sample_keys` | `sample_pool` | 依 train 日期、分層比例與 overrides 做決定性抽樣 | `sample_keys` |
 | Train 切分 | `split_train_keys` | `sample_keys` | 依 entity 將資料互斥切成 train 與 train-dev | `train_keys_unfiltered`、`train_dev_keys_unfiltered`（不落地） |
-| Train 整組抽樣 | `filter_train_keys`、`filter_train_dev_keys` | 上一步的 keys、`label_table` | 依 `train_zero_positive_group_ratio` 整組丟掉部分無正例的 query group（label 取自 `label_table`）；預設 r ＝ 1 原樣通過（§3.7） | `train_keys`、`train_dev_keys` |
+| Train 整組抽樣 | `filter_train_keys`、`filter_train_dev_keys` | 上一步的 keys、`label_table` | 依 `train_zero_positive_group_ratio` 整組丟掉部分無正例的 query group（label 取自 `label_table`，只讀 train 月份）；預設 r ＝ 1 原樣通過（§3.7） | `train_keys`、`train_dev_keys` |
 | Val/Test keys | `select_val_keys`、`select_test_keys` | `sample_pool`（test 另收 `test_keys_month_plan`） | 建立 val 與 test identity keys；val 可依 entity 縮減。test 只處理計畫中的月份 | `val_keys`、`test_keys` |
 | Fit 前處理器 | `fit_preprocessor_metadata` | `feature_table`、`candidate_feature_table`、`sample_pool`、`preprocessor_on_disk` | 只使用 train 日期建立 feature 清單與 category mappings（兩張特徵表都看，§3.8）；`drop_columns` 裡任何一張特徵表都沒有的欄在這裡記 warning。item 清單寫 `from_train_data` 時，從 train 時段的 `sample_pool` 數清單，並與磁碟上同版本的舊檔比對（B19，§3.10）；清單逐一列出時不使用這兩個輸入 | `preprocessor`、`category_mappings` |
 | 套用前處理 | `apply_preprocessor_to_features` | `feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 編碼 feature categoricals；只處理計畫中的月份 | `preprocessed_feature_table` |
-| 精度閘 | `validate_numeric_precision` | `preprocessed_feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan`、`candidate_feature_table`、`candidate_feature_table_{train,val,test}_months` | 不變量 B8：讀剛落地那幾個月份的 parquet footer 統計值（零掃描），確認會被 cast 的欄（decimal、整數族與 boolean——有格點的那些）在該欄自己的解析度下撐得過 `numeric_feature_storage_type`；同時產出每欄的 headroom 報告。宣告了候選層級特徵表時，它不落地、沒有 footer 可讀，改成掃一次三份月份清單的聯集（類別欄不在內：它們在 cast 之前已編成詞表索引），同一次掃描也確認這些月份每個都有資料；報告多一段 `candidate_feature_table` | `numeric_precision_report` |
-| 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor（test 另收 `test_model_input_month_plan`）、`candidate_feature_table`、自己 split 的 `candidate_feature_table_*_months`（train-dev 用 train 的） | left join label 與 feature（宣告了候選層級特徵表時，在這裡才讀它、編碼、接上），補齊缺失 label，選取欄位並把所有數值特徵欄轉成 `numeric_feature_storage_type` 宣告的型別（預設 float32）；val／test 在 item 清單從資料數時警告前處理器清單裡沒有的新 item（§3.10） | 各 split 的 model input |
+| 精度閘 | `validate_numeric_precision` | `preprocessed_feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan`、`candidate_feature_table`、`test_model_input_month_plan`、`only_test_months`（執行模式，CLI 注入） | 不變量 B8：讀剛落地那幾個月份的 parquet footer 統計值（零掃描），確認會被 cast 的欄（decimal、整數族與 boolean——有格點的那些）在該欄自己的解析度下撐得過 `numeric_feature_storage_type`；同時產出每欄的 headroom 報告。宣告了候選層級特徵表時，它不落地、沒有 footer 可讀，改成掃一次本次各 build 要讀的月份聯集：`train_snap_dates`、`val_snap_dates`、test 那份計畫要處理的月份；`--only-test-months` 時只有最後一份（類別欄不在內：它們在 cast 之前已編成詞表索引），同一次掃描也確認這些月份每個都有資料；報告多一段 `candidate_feature_table` | `numeric_precision_report` |
+| 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor（test 另收 `test_model_input_month_plan`）、`candidate_feature_table` | 先把 `label_table`、`preprocessed_feature_table`、候選層級特徵表篩到自己 split 的月份（train／train-dev 讀 `train_snap_dates`、val 讀 `val_snap_dates`、test 讀計畫要處理的月份），再 left join label 與 feature（宣告了候選層級特徵表時，在這裡才讀它、編碼、接上），補齊缺失 label，選取欄位並把所有數值特徵欄轉成 `numeric_feature_storage_type` 宣告的型別（預設 float32）；val／test 在 item 清單從資料數時警告前處理器清單裡沒有的新 item（§3.10） | 各 split 的 model input |
 | 評估母體過濾 | `filter_val_model_input`、`filter_test_model_input` | 未過濾的 val/test input | 有正例的 query group 全留；無正例的依 `val_`／`test_zero_positive_group_ratio` 整組留下比例 r（預設 0：全丟），r > 0 時加上權重欄（§3.7） | `val_model_input`、`test_model_input` |
 | 粒度閘 | `validate_model_input_grain` | train／train_dev 的 keys 與 model_input | 不變量 B10：讀 parquet footer 的列數（零掃描），確認每張 model_input 的列數等於它的 keys 表。擋的是右表（`label_table`／`preprocessed_feature_table`／宣告了的候選層級特徵表）有重複 join 鍵造成的靜默放大；同時產出每個 split 的列數報告。**val／test 不在範圍內**——它們列數相符的那一版是 `*_unfiltered`，那是不落地的記憶體中間結果，沒有 footer 可讀；test 還多一層，`build_test_model_input` 會先把 `test_keys` 縮到本次月份，所以它對得上的本來就不是整張 `test_keys`（見 [ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md) 2026-09-07 修訂） | `model_input_grain_report` |
 
-model input 的組裝規則：
+model input 的組裝規則（讀取範圍見列表後）：
 
 1. keys 與 `label_table` 依 identity（`time + entity + item`，宣告了 `occasion`／`event` 時再加上它們）left join；沒有 label row 時補為 `0`。
 2. 再與 `preprocessed_feature_table` 依 base key（`time + entity`）left join。
 3. 宣告了候選層級特徵表時，再與它依 identity left join：只取本次執行要讀的月份，用前處理器的詞表編碼類別欄（§3.8）。
 4. 輸出 identity、label、feature columns，以及 keys 帶入的 carry columns。
 5. 沒有正例的 query group 留多少由三個 `*_zero_positive_group_ratio` 決定（§3.7）：預設 val/test 全丟、train 與 train-dev 全留。
+
+**讀取範圍**：keys 要接的三張表（`label_table`、`preprocessed_feature_table`、宣告了的候選層級特徵表）在 join 之前都先篩到該 split 的月份。每個 join 鍵都含 `time`，別的月份本來就接不上，所以這一步只影響成本、不影響結果；寫在程式裡而不交給 Spark 從 keys 那一邊推導，是因為那種推導（dynamic partition pruning）要 keys 小到能整份廣播才會出現，生產規模很可能不成立，而且消失時沒有任何訊號（[ADR-0029](../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 1）。
 
 #### 三個 left join 各自的契約
 

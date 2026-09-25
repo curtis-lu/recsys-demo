@@ -97,6 +97,10 @@ ADR-0008 那一輪的結構搬移在 2026-08-08（PR #176）合併時，`pipelin
 
 **唯一需要注入的**：精度閘（B8）檢查候選層級表時，讀的是「這次各 build 要讀的月份」的聯集；用 `--only-test-months` 時，這個聯集只有 test 月份。精度閘自己看不出這次是不是 `--only-test-months`，所以**只注入執行模式**（是或不是 `--only-test-months`），聯集由精度閘用同一套規則自己算。不注入任何月份清單。執行模式是 node 看不到、開跑前就決定的事實，照新規則 15（見決定 14）可以注入。
 
+> **實作註記（2026-09-25，#460）**：
+> - 精度閘要照 test build 的規則算 test 那一份，所以它除了執行模式（catalog 名 `only_test_months`），還多收 `test_model_input_month_plan`。那份計畫本來就由 CLI 注入給 `build_test_model_input`，不是新注入的東西。
+> - train 與 train_dev 的 build 改跑新的 node 函式 `build_train_model_input`（node 名不變）；`build_model_input` 不再直接註冊成 node，而是三個 build 共用的組裝，`months` 是沒有預設值的 keyword 參數。沒有預設值，是因為忘了傳的 build 會讀到別的 split 的月份，每個 key 都接不到 label 與特徵，而且不報錯。
+
 **沒宣告候選表時的 `None` 維持現狀**：沒宣告時，CLI 注入 `None`，node 內部分支處理。
 - 框架沒有一等的「選用輸入」：`core/runner.py` 按位置綁定輸入。
 - 另一條路是依設定改變 DAG 的長相（先例如 evaluation `pipeline.py` 的 `if compare_source is not None:`）。那樣做，node 內的分支還是在，而且不同部署的 `--list-nodes` 會長得不一樣，什麼也沒省到。

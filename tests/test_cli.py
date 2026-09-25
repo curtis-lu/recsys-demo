@@ -3980,9 +3980,10 @@ _CANDIDATE_ENTRY = {
 
 
 class TestDatasetRegistersTheCandidateTable:
-    """The dataset command is what makes the pipeline's two candidate inputs
-    exist for every deployment: the table (``None`` when the catalog declares
-    none) and the months of it this run reads."""
+    """The dataset command is what makes the candidate table exist for every
+    deployment (``None`` when the catalog declares none), and registers the
+    run mode the precision gate reads — but no month list: each build works
+    out its own months (ADR-0029 decision 2)."""
 
     def test_undeclared_it_is_registered_as_none(self, tmp_path):
         loaded, _ = _run_dataset_command(tmp_path, ["dataset"])
@@ -3999,27 +4000,18 @@ class TestDatasetRegistersTheCandidateTable:
 
         assert "candidate_feature_table" not in loaded
 
-    def test_each_split_gets_its_own_months(self, tmp_path):
-        """2026-01-31 already landed in test_model_input, so no build reads it."""
+    def test_a_full_run_registers_its_mode_and_no_month_list(self, tmp_path):
         loaded, _ = _run_dataset_command(tmp_path, ["dataset"])
 
-        assert loaded["candidate_feature_table_train_months"] == [
-            pd.Timestamp("2025-12-31"),
-        ]
-        assert loaded["candidate_feature_table_val_months"] == []
-        assert loaded["candidate_feature_table_test_months"] == [
-            pd.Timestamp("2026-02-28"),
-        ]
+        assert loaded["only_test_months"] is False
+        assert not [k for k in loaded if k.startswith("candidate_feature_table_")]
 
-    def test_only_test_months_reads_the_unlanded_test_months_alone(self, tmp_path):
+    def test_only_test_months_registers_its_mode(self, tmp_path):
         loaded, _ = _run_dataset_command(
             tmp_path, ["dataset", "--only-test-months"],
         )
 
-        assert loaded["candidate_feature_table_train_months"] == []
-        assert loaded["candidate_feature_table_test_months"] == [
-            pd.Timestamp("2026-02-28"),
-        ]
+        assert loaded["only_test_months"] is True
 
     def test_declaring_it_moves_base_dataset_version(self, tmp_path):
         _, without = _run_dataset_command(tmp_path / "a", ["dataset"])

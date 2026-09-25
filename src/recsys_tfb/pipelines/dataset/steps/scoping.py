@@ -6,17 +6,10 @@ here touches Spark, and ``month_plans.py`` is pinned to zero pyspark imports
 (S2) so its test module stays off the 2-4 minute Spark cold start. Deriving
 *which* months a run touches is pure; asking a frame about them is not.
 
-Two restriction forms live here, and the difference is what an empty list means:
-
-* :func:`restrict_to_months` — an empty list selects **no rows**.
-* :func:`restrict_to_months_or_all` — an empty list leaves the frame **whole**.
-
-They sit adjacent so the choice cannot be made by accident. The second is
-sampling's historical shape (``select_keys`` returned the unfiltered pool when a
-split had no configured months); #170 preserved it rather than tightening it,
-because tightening would be a behaviour change. It is unreachable today — both
-callers read a required config key — but "unreachable" is not "safe to change
-while refactoring".
+One restriction form, :func:`months_filter_as_date`, for every read in the
+dataset pipeline (ADR-0029 decision 3). There used to be a second one that
+compared the column as it came, and which of the two a node used decided
+whether a time column stored as STRING matched its months or matched nothing.
 """
 
 from __future__ import annotations
@@ -51,28 +44,6 @@ def months_filter_as_date(time_col: str, dates: list):
     return F.to_date(F.col(time_col)).isin([pd.Timestamp(d).date() for d in dates])
 
 
-def restrict_to_months(df: DataFrame, time_col: str, months: list) -> DataFrame:
-    """``df`` restricted to ``months``, compared in the source-table form.
-
-    Deliberately *not* :func:`months_filter_as_date`: the callers are the nodes reading
-    ``sample_pool`` / ``feature_table``, source tables whose time column is a
-    real DATE. Normalising here would silently widen what matches, which is not
-    a change a behaviour-preserving refactor may make; the normalised form stays
-    where it is needed, on the frames read back from Hive.
-
-    An empty ``months`` list selects no rows — see the module docstring for the
-    other form.
-    """
-    return df.filter(F.col(time_col).isin([pd.Timestamp(d) for d in months]))
-
-
-def restrict_to_months_or_all(df: DataFrame, time_col: str, months: list) -> DataFrame:
-    """``df`` restricted to ``months``, or left whole when ``months`` is empty."""
-    if not months:
-        return df
-    return restrict_to_months(df, time_col, months)
-
-
 def require_months_present(
     df: DataFrame, time_col: str, months: list, what: str,
     table: str = "feature_table",
@@ -90,12 +61,15 @@ def require_months_present(
     "feature_table is missing a month" about the other one would send the
     operator to the wrong table.
 
-    Cost: one ``distinct().collect()`` over the time column. What lands on the
-    driver is bounded by the month count (typically 12-52), not by row count.
+    Cost: one ``distinct().collect()`` over the time column **of those months
+    only** — the filter comes first, so the question is not asked of a table's
+    whole history, which only grows (ADR-0029 decision 1). What lands on the
+    driver is bounded by ``months``, not by row count.
     """
     present = {
         row[time_col]
-        for row in df.select(time_col).distinct().collect()
+        for row in df.filter(months_filter_as_date(time_col, months))
+        .select(time_col).distinct().collect()
     }
     require_months_in(present, months, what, table)
 

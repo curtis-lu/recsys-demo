@@ -80,7 +80,7 @@ label_table ────────┼─► prepare_eval_data ──► Hive: 
 這是本份改過一次立場的地方，理由要寫清楚。第一版設計多了一個 `keep_snap_date` node：讀表、篩月、輸出記憶體裡的 `eval_predictions`，五個消費者不動。它被否決，理由是 repo 自己的規則，不是偏好：
 
 - **node 規則 1**：node 邊界要落在「撈得出來看」的產物上。那個 node 的輸出沒有 catalog 條目、沒有 log、沒有測試單獨讀它——正是該合併掉的邊界。
-- **node 規則 5**：決策重複寫兩份，機制才共用。dataset pipeline 就是這樣做的：`select_train_keys`、`select_calibration_keys`、`build_test_model_input` 各自呼叫一次 `restrict_to_months`（`pipelines/dataset/steps/scoping.py`），catalog 對來源表什麼都不設。「要哪幾個月」是每個 node 的一個決定，不是 catalog 或某個中介 node 的事。（2026-09-20 更正：`select_calibration_keys` 已隨 #414 刪除，上面這串名字不要照抄。現行呼叫端是 `select_train_keys`（走同族的 `restrict_to_months_or_all`）、`select_val_keys` 與 `fit_preprocessor_metadata`，`build_test_model_input` 走的是同族的 `months_filter_as_date`。**這一條援引的型態不受影響**——每個 node 自己決定要哪幾個月，機制共用。）
+- **node 規則 5**：決策重複寫兩份，機制才共用。dataset pipeline 就是這樣做的：`select_train_keys`、`select_calibration_keys`、`build_test_model_input` 各自呼叫一次 `restrict_to_months`（`pipelines/dataset/steps/scoping.py`），catalog 對來源表什麼都不設。「要哪幾個月」是每個 node 的一個決定，不是 catalog 或某個中介 node 的事。（2026-09-20 更正：`select_calibration_keys` 已隨 #414 刪除，上面這串名字不要照抄。現行呼叫端是 `select_train_keys`（走同族的 `restrict_to_months_or_all`）、`select_val_keys` 與 `fit_preprocessor_metadata`，`build_test_model_input` 走的是同族的 `months_filter_as_date`。**這一條援引的型態不受影響**——每個 node 自己決定要哪幾個月，機制共用。）（2026-09-25 再更正：[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 3 刪掉 `restrict_to_months` 與 `restrict_to_months_or_all`，dataset 每一處按月份篩選都改走 `months_filter_as_date`。援引的型態照樣不受影響。）
 
 **代價一：五個 node 各多一行，而且忘了篩不會有錯誤訊息。** 以後有人加第六個消費者忘了篩，會**安靜地把所有月份算進去**（`enriched_eval_predictions` 累積這個 model_version 評估過的每個月）。兩層護欄：
 

@@ -41,9 +41,10 @@ class TestDatasetPipeline:
             # Registered by the CLI for every deployment — `None` for the table
             # when none is declared (ADR-0026).
             "candidate_feature_table",
-            "candidate_feature_table_train_months",
-            "candidate_feature_table_val_months",
-            "candidate_feature_table_test_months",
+            # The run mode, the one fact the precision gate cannot work out:
+            # no month list is injected, each node works out its own months
+            # (ADR-0029 decision 2).
+            "only_test_months",
             # The preprocessor file already on disk, read by the fit before it
             # overwrites it (#379, B19) — an optional catalog entry.
             "preprocessor_on_disk",
@@ -157,13 +158,13 @@ class TestNodeNameToFunctionBinding:
     likely to be "corrected" by mistake:
 
     - ``select_sample_keys`` runs ``select_train_keys``;
-    - ``build_test_model_input`` runs the *test* wrapper, not the shared
-      ``build_model_input`` the train splits use, because it has to re-scope
-      the keys it reads back from a persistent Hive table (ADR-0002);
-    - ``build_val_model_input`` runs the *val* wrapper: with the item list
-      counted from the data it warns about val's new items off the landed
-      keys (#379), which the shared ``build_model_input`` must not do for the
-      train splits — their items are the list;
+    - ``build_test_model_input`` runs the *test* wrapper, not the train one,
+      because it reads its plan's months and has to re-scope the keys it
+      reads back from a persistent Hive table (ADR-0002);
+    - ``build_val_model_input`` runs the *val* wrapper: it reads the val
+      months, and with the item list counted from the data it warns about
+      val's new items off the landed keys (#379), which the train wrapper
+      must not do — the train items are the list;
     - ``filter_test_model_input`` runs its *own* function rather than val's,
       although the decisions are the same: the key each reads
       (``dataset.{val,test}_zero_positive_group_ratio``) is the one answer that
@@ -184,8 +185,8 @@ class TestNodeNameToFunctionBinding:
         "fit_preprocessor_metadata": nodes.fit_preprocessor_metadata,
         "apply_preprocessor_to_features": nodes.apply_preprocessor_to_features,
         "validate_numeric_precision": nodes.validate_numeric_precision,
-        "build_train_model_input": nodes.build_model_input,
-        "build_train_dev_model_input": nodes.build_model_input,
+        "build_train_model_input": nodes.build_train_model_input,
+        "build_train_dev_model_input": nodes.build_train_model_input,
         "build_val_model_input": nodes.build_val_model_input,
         "build_test_model_input": nodes.build_test_model_input,
         "filter_val_model_input": nodes.filter_val_model_input,
@@ -207,15 +208,16 @@ class TestNodeNameToFunctionBinding:
     def test_the_two_train_build_nodes_share_one_function(self):
         """Not a restatement of the table: it is *why* names carry the meaning.
 
-        train / train_dev run the same ``build_model_input``, so the node name
-        is the only thing distinguishing them — which is what makes a typo in
-        one a silent topology change rather than an import error. val ran it
-        too until #379 gave val its own wrapper (the new-item warning).
+        train / train_dev run the same ``build_train_model_input``, so the
+        node name is the only thing distinguishing them — which is what makes
+        a typo in one a silent topology change rather than an import error.
+        val ran it too until #379 gave val its own wrapper (the new-item
+        warning); it would now also read the train months.
         """
         bindings = self._bindings(create_pipeline())
         shared = {
             name for name, func in bindings.items()
-            if func is nodes.build_model_input
+            if func is nodes.build_train_model_input
         }
         assert shared == {
             "build_train_model_input", "build_train_dev_model_input",
@@ -238,13 +240,18 @@ class TestMonthPlanWiring:
     #: ``test_model_input_unfiltered`` but is gated on ``test_model_input``,
     #: the persistent table the pair of nodes ultimately produces.
     EXPECTED_PLAN = {
-        "apply_preprocessor_to_features": "preprocessed_feature_table",
+        "apply_preprocessor_to_features": {"preprocessed_feature_table"},
         # The B8 gate reads the same plan as the node that writes the table it
         # checks — that shared plan is what makes "the months this run added get
         # checked, and only those" true by construction rather than by comment.
-        "validate_numeric_precision": "preprocessed_feature_table",
-        "select_test_keys": "test_keys",
-        "build_test_model_input": "test_model_input",
+        # It also reads the test build's plan: the candidate-level feature
+        # table is checked over the months the builds read, and the test
+        # build reads that plan's (ADR-0029 decision 2).
+        "validate_numeric_precision": {
+            "preprocessed_feature_table", "test_model_input",
+        },
+        "select_test_keys": {"test_keys"},
+        "build_test_model_input": {"test_model_input"},
     }
 
     @staticmethod
@@ -253,9 +260,9 @@ class TestMonthPlanWiring:
 
     def test_each_incremental_node_follows_its_own_artifacts_plan(self):
         by_name = {n.name: n for n in create_pipeline().nodes}
-        for node_name, artifact in self.EXPECTED_PLAN.items():
+        for node_name, artifacts in self.EXPECTED_PLAN.items():
             assert self._plan_inputs(by_name[node_name]) == {
-                month_plan_input(artifact)
+                month_plan_input(a) for a in artifacts
             }, f"{node_name} follows the wrong month plan"
 
     def test_no_other_node_takes_a_month_plan(self):
@@ -456,27 +463,22 @@ class TestGrainGateWiring:
 
 
 class TestCandidateFeatureTableWiring:
-    """Where the candidate-level feature table and the months of it each node
-    reads reach (ADR-0026), and that they bind to the right parameters.
+    """Where the candidate-level feature table reaches (ADR-0026), and that it
+    and the precision gate's two trailing inputs bind to the right parameters.
 
-    Both go last on every node that takes them, as optional trailing
+    They go last on every node that takes them, as optional trailing
     parameters, because the Runner binds ``inputs`` positionally. A node whose
     list put them anywhere else would hand the table to another parameter —
     and the ``=None`` defaults would swallow the arity mismatch instead of
-    raising.
+    raising. Which months each build reads of it is not wiring any more: each
+    build works it out (``test_month_scoped_reads.py``).
     """
 
     TABLE = "candidate_feature_table"
 
-    #: build node -> the split whose months it reads. A build handed another
-    #: split's list finds none of its candidates' rows and fills every
-    #: candidate-level feature with NULL, raising nothing — so this mapping is
-    #: the assertion, not a detail.
-    BUILD_MONTHS = {
-        "build_train_model_input": "candidate_feature_table_train_months",
-        "build_train_dev_model_input": "candidate_feature_table_train_months",
-        "build_val_model_input": "candidate_feature_table_val_months",
-        "build_test_model_input": "candidate_feature_table_test_months",
+    BUILDS = {
+        "build_train_model_input", "build_train_dev_model_input",
+        "build_val_model_input", "build_test_model_input",
     }
 
     def _by_name(self):
@@ -487,27 +489,21 @@ class TestCandidateFeatureTableWiring:
             name for name, node in self._by_name().items() if self.TABLE in node.inputs
         } == {
             "validate_data_consistency", "fit_preprocessor_metadata",
-            "validate_numeric_precision", *self.BUILD_MONTHS,
+            "validate_numeric_precision", *self.BUILDS,
         }
 
-    def test_each_build_reads_its_own_splits_months(self):
-        import inspect
-
-        by_name = self._by_name()
-        for name, months in self.BUILD_MONTHS.items():
-            node = by_name[name]
-            params = list(inspect.signature(node.func).parameters)
-            assert node.inputs[params.index("candidate_feature_table_months")] == months, name
-            assert [i for i in node.inputs if i.endswith("_months")] == [months], name
-
-    def test_the_precision_gate_reads_all_three_in_its_own_parameters(self):
+    def test_the_precision_gate_binds_the_test_plan_and_the_run_mode_to_their_own_parameters(self):
+        """Swapped, the plan would land in ``only_test_months`` — a non-empty
+        tuple, so truthy — and every full run would check the test months
+        alone, raising nothing."""
         import inspect
 
         node = self._by_name()["validate_numeric_precision"]
         params = list(inspect.signature(node.func).parameters)
-        for split in ("train", "val", "test"):
-            name = f"candidate_feature_table_{split}_months"
-            assert node.inputs.index(name) == params.index(name)
+        assert node.inputs.index("test_model_input_month_plan") == params.index(
+            "test_month_plan")
+        assert node.inputs.index("only_test_months") == params.index(
+            "only_test_months")
 
     def test_the_table_binds_to_the_parameter_of_its_own_name(self):
         import inspect

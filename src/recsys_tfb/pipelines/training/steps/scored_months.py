@@ -38,9 +38,9 @@ def restrict_to_scored_months(
     holds each scored month to ``test_snap_dates``' spelling, which the
     shipped data follows; a month the data spells otherwise matches no row,
     and ``compute_test_metrics`` then stops, naming the months the table
-    holds. Not ``dataset/steps/scoping.restrict_to_months``, which compares
-    calendar days (``to_date`` on both sides): a different rule under a
-    similar name, and picking the wrong one raises nothing.
+    holds. Not ``dataset/steps/scoping.months_filter_as_date``, which compares
+    calendar days (``to_date`` on both sides): a different rule, and picking
+    the wrong one raises nothing.
 
     ``cast("string")`` on a STRING partition column is a no-op, and one date
     compares with ``=``, several with ``IN``: the forms ``snap_date_scope``
