@@ -58,3 +58,7 @@ catalog 本來就是那個通道：`parameters` 自己就是用 `catalog.add(nam
 
 - **節點簽名是樸素的** `(frame, month_plan, ..., parameters)`，沒有 typed parameter object。後續「config 解析下移到單一接縫」的重構會再碰這些簽名，先蓋的架子會被換掉——這是知情的取捨，不是疏漏。
 - `build_test_model_input` 仍是 `build_model_input` 的 scoped 變體而不是同一個函式。過濾避不掉：`test_keys` 是持久化 Hive 表、存著所有月份，下游讀回來會拿到全部歷史。讓五個 split 統一吃計畫、非增量的給一份「全部處理」，會讓 pipeline 定義失去「誰是增量」的訊號，並生出四份假計畫。
+
+### 修訂（2026-09-25，ADR-0029）
+
+本份說 `filter_test_model_input` 這個函式已經刪除；#429 又把它加了回來（test 的無正例組篩選）。[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 4 會把這一步搬到 keys 上，`filter_test_model_input` 會再次拿掉，而且這次連 node 名一起拿掉——本份「節點名字保留」的承諾也跟著推翻。實作完成前，程式碼仍有這個函式。

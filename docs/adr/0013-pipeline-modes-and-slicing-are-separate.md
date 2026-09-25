@@ -80,3 +80,7 @@ preset 只寫兩個節點名這件事，需要一整段關於 producer map 的�
 推翻的成本不高（實作兩天、丟掉一天），但**它本來可以是零**：`compare_only` 一直都在，`grep -rn "def create_pipeline" src/` 三秒就會看到那些模式參數。ADR-0012 花了大量篇幅論證「為什麼是執行層不是產物層」「為什麼是 `_can_load` 不是 `exists()`」——兩個都是精緻且正確的分層論證——卻沒有先問**「這個需求在這個 repo 裡有沒有既有的做法」**。
 
 判準：設計一個新機制之前，先找同一個 repo 裡**形狀相同的既有需求**是怎麼解的。找到了就沿用，沒找到才設計。這比任何分層論證都先發生，而且便宜得多。
+
+### 修訂（2026-09-25，ADR-0029）
+
+[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 4 會拿掉 `filter_test_model_input` 這個 node（test 的丟組搬到 keys 上），並把新的 test keys 篩選 node 與 `validate_model_input_grain` 加進 `ONLY_TEST_MONTHS_NODES`。本份以 `filter_test_model_input` 當終點與防漂移測試錨點的敘述，屆時要換成新的 test 鏈終點。另外決定 12：這個模式開跑前會向 metastore 確認目前的 train 版本已經有分區，而且跑完之後只在該 variant 有分區時才更新 `train_variants/latest`。

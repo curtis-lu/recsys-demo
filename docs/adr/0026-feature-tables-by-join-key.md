@@ -72,3 +72,8 @@ candidate_feature_table ─只讀這次要讀的月份、編碼，不另存─�
 - **決定 4 的觸發條件**改成「宣告了候選層級特徵表」。
 - 決定 2（往回算在使用者 SQL 做）、決定 3（框架不檢查偷看）沿用。但 ADR-0022 否決「一次曝光一列的寬表」的第二個理由（前處理在抽樣之前做，連要丟的負例也處理）對候選層級表不成立——它在抽樣後才讀。所以要「每一次曝光用它當下拿得到的那份快照」時，把快照欄算進候選層級表就是做法，代價只剩列寬。
 - 〈後果〉列的「dataset 收多張特徵表要動的地方」大半仍然成立，但「前處理的 apply」與「feature_table fingerprint」的改法不同：apply 完全不動，候選層級表的 fingerprint 是另一個 payload 鍵。`core/consistency.py` 的 `DATASET_SOURCE_TABLES`（A32：這幾張表的 ETL 設定必須留著重複鍵檢查）沒有加入候選層級表。A32 只看 parameters，拿這份清單裡的名字去 ETL 設定找表；`candidate_feature_table` 是 catalog 的邏輯名，實體表叫什麼由部署決定（示例是 `feature_realtime`），用這個名字在 ETL 設定裡找不到東西，A32 對找不到的表是跳過。**所以沒有東西守候選層級表的重複鍵設定**：它 ETL 設定裡的 `max_duplicate_key_ratio` 被刪掉時不會有人報錯，之後的重複列只剩 B10（train／train_dev）抓得到。要補的話，A32 得改成讀 catalog 解析出實體表名，不在本 ADR 範圍。
+
+### 修訂（2026-09-25，ADR-0029）
+
+- 候選層級表各 split 要讀的月份，不再由 CLI 算好注入（`candidate_feature_table_months` 與它的 3 個 DAG 輸入刪除）；每個 build 自己算，而且同一個答案也用在 `label_table` 與 `preprocessed_feature_table`（[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 1、2）。
+- 〈後果〉說 fit 對候選層級表「讀 train 月份兩次（月份檢查與詞表）」，與程式不符：月份檢查（`require_months_present`）今天掃的是整張表的 time 欄。ADR-0029 決定 1 改成先篩月份再檢查，之後才與這段描述一致。
