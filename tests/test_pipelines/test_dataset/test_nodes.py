@@ -3719,6 +3719,30 @@ class TestValidateModelInputGrain:
             self._gate(
                 parameters, clean, plan=_plan(_SNAP_DATES[0], doubled), test=test)
 
+    def test_test_months_are_compared_one_by_one(
+        self, spark, tmp_path, parameters, clean,
+    ):
+        """One month written twice and the next not at all: the sums agree,
+        the months do not. Compared as one sum, the gate would pass."""
+        keys, model_input = clean["built"]
+        m0, m1 = _SNAP_DATES[0], _SNAP_DATES[1]
+        once = _in_month(model_input, m0)
+        skewed = once.unionByName(once)
+        # The premise: the two months hold as many keys each, so the sum of
+        # the skewed pair is equal and only the months tell them apart.
+        assert skewed.count() == (
+            _in_month(keys, m0).count() + _in_month(keys, m1).count())
+
+        with pytest.raises(DataConsistencyError) as exc:
+            self._gate(parameters, clean, plan=_plan(m0, m1), test=(
+                clean["test_keys"],
+                _land_by_month(spark, tmp_path, skewed, "skewed"),
+            ))
+        message = str(exc.value)
+        assert f"for {m0}" in message and f"for {m1}" in message
+        # The month has landed: a plain re-run would skip it.
+        assert f"--rebuild-dates {m0}" in message
+
     def test_an_empty_plan_is_reported_as_not_written_and_not_a_failure(
         self, parameters, clean, caplog,
     ):
@@ -3775,6 +3799,9 @@ class TestValidateModelInputGrain:
                 _land(spark, tmp_path, model_input, "omi", variant="OTHER"),
             ))
         assert "train_variant_id" in str(exc.value)
+        # The check cannot tell a scope mismatch from a split this version
+        # left empty beside other versions' files, so it names both.
+        assert "came out empty under this version" in str(exc.value)
 
     def test_the_pairing_takes_test_months_from_the_builds_plan(self):
         """B10 reads the plan ``build_test_model_input`` ran under, not

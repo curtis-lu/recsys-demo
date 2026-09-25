@@ -191,6 +191,15 @@ def _fmt(dates) -> str:
     return ",".join(d.strftime("%Y-%m-%d") for d in dates) or "-"
 
 
+def _plus_months(plan: SnapDatePlan, months) -> SnapDatePlan:
+    """``plan`` with ``months`` moved from skipped to to_process."""
+    extra = set(months)
+    return SnapDatePlan(
+        to_process=sorted(set(plan.to_process) | extra),
+        skipped=[m for m in plan.skipped if m not in extra],
+    )
+
+
 def build_month_plans(
     parameters: dict,
     existing: dict[str, list] | None = None,
@@ -218,18 +227,30 @@ def build_month_plans(
     if rebuild:
         logger.info("[months] rebuild requested: %s", ",".join(str(d) for d in rebuild))
 
-    plans = {}
-    for name in INCREMENTAL_DATASETS:
-        plan = plan_incremental_snap_dates(
+    plans = {
+        name: plan_incremental_snap_dates(
             _CONFIGURED_SNAP_DATES[name](parameters),
             existing.get(name, []),
             rebuild,
         )
+        for name in INCREMENTAL_DATASETS
+    }
+    # Decision — test_keys is redone for every month test_model_input is about
+    # to build, not only for the months test_keys itself lacks. Since
+    # ADR-0029 decision 4 the keys carry the zero-positive group drop, judged
+    # by label_table's labels at the time they were written. Keys that
+    # landed in a run that failed before its test build, read back after a
+    # label backfill, would meet labels the drop never saw — and with every
+    # row count agreeing, B10 could not tell. Redoing them costs a key
+    # selection and a narrow label join for those months.
+    plans["test_keys"] = _plus_months(
+        plans["test_keys"], plans["test_model_input"].to_process,
+    )
+    for name, plan in plans.items():
         logger.info(
             "[months] dataset=%s processed=%s skipped=%s",
             name, _fmt(plan.to_process), _fmt(plan.skipped),
         )
-        plans[name] = plan
     return plans
 
 

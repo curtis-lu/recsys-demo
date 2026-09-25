@@ -15,23 +15,23 @@
 %%   {{ 六角 }}     閘：不轉換資料，只決定放不放行（本圖這個閘 outputs=None；
 %%                  inference-pipeline.mmd 的閘有回傳值，但回傳的就是輸入本身）
 %%   [A][B][C][P]   接點記號：node 框內的「+ A · B · C」代表它同時吃這幾個輸入。
-%%                  A/B/C 各連四個 build node ＝ 12 條橫貫線，P 再連三個跨 subgraph
-%%                  的 node；改用接點記號，lineage 一條不少但圖不打結。
+%%                  A/B/C 各連四個 build node ＝ 12 條橫貫線，B 再連四個整組抽樣 node，
+%%                  P 再連四個跨 subgraph 的 node；改用接點記號，lineage 一條不少但圖不打結。
 %%   「跨月讀回」    這條邊讀回來的不只是這次寫的月份（見下）。inference 圖用同一種
 %%                  邊標記，但那邊連 model_version 都會讀回來，成因不同。
 
 %% 「增量」是怎麼來的：月份計畫
-%%   三個標「增量」的 node 之所以只處理部分月份，是因為它們各吃一個
+%%   四個標「增量」的 node 之所以只處理部分月份，是因為它們各吃一個
 %%   *_month_plan 輸入。這些 plan 由 pipelines/dataset/month_plans.py::build_month_plans
 %%   在 run 開始前一次算好（比對設定的月份 vs Hive 裡已落地的月份），再注入 catalog；
 %%   呼叫點是 __main__.py 的 dataset() 指令。一次算好是為了讓共用同一份 artifact 的 node 不可能對
 %%   「這次涵蓋哪些月份」有不同看法。
-%%   它們是 pipeline.py 宣告的真實 inputs，不是設定值——舊版這張圖漏畫了這三條邊。
+%%   它們是 pipeline.py 宣告的真實 inputs，不是設定值——舊版這張圖漏畫了這幾條邊。
 
 %% 為什麼 test_keys → build_test_model_input 要標「跨月讀回」
 %%   test_keys 的 catalog 條目只有 partition_filter: base_dataset_version，
 %%   沒有鎖月份，所以讀回來是**同一個 base version 底下的所有月份**——即使
-%%   select_test_keys 這次只寫了新的那個月（dynamic partition overwrite）。
+%%   filter_test_keys 這次只寫了新的那個月（dynamic partition overwrite）。
 %%   build_test_model_input 因此必須自己再過濾一次 month_plan.to_process，
 %%   否則下游 join 會把每個月都重建一遍，正好是 ADR-0002 要消掉的 ∝N 成本。
 %%   train / val 讀的 keys 是這次 run 自己寫的，沒有這個問題，
@@ -39,10 +39,10 @@
 
 %% 落地與否為什麼要分開畫
 %%   圖上十六個產出裡有四個不落地：train_keys_unfiltered、train_dev_keys_unfiltered、
-%%   val_model_input_unfiltered、test_model_input_unfiltered。落地的都是整組抽樣
-%%   （*_zero_positive_group_ratio，ADR-0025 決定 3）之後的版本。train 那兩個在
-%%   keys 上抽、在建表之前，好讓粒度閘 B10 的「model_input 列數＝keys 列數」照樣成立。
-%%   圖上實線／虛線膠囊就是這件事。
+%%   val_keys_unfiltered、test_keys_unfiltered。落地的 keys 都是整組抽樣
+%%   （*_zero_positive_group_ratio，ADR-0025 決定 3）之後的版本。四個 split 都在
+%%   keys 上抽、在建表之前（ADR-0029 決定 4），好讓粒度閘 B10 的「model_input 列數＝
+%%   keys 列數」四個 split 都成立。圖上實線／虛線膠囊就是這件事。
 
 %% 刻意不畫
 %%   - parameters：每個 node 都吃，畫出來只會蓋掉真正的資料流。
@@ -92,8 +92,12 @@ flowchart LR
   %% ------------------------- Key 選取 ---------------------------
   subgraph KEYS[" Key 選取：決定每個 split 收哪些 (time, entity, item) "]
     direction TB
-    n_sel_test["select_test_keys<br/><small>增量 ・ ＋ P</small>"] --> d_test_keys(["test_keys"])
-    n_sel_val["select_val_keys"] --> d_val_keys(["val_keys"])
+    n_sel_test["select_test_keys<br/><small>增量 ・ ＋ P</small>"] --> d_test_unf(["test_keys_unfiltered"])
+    d_test_unf --> n_f_test["filter_test_keys<br/><small>增量 ・ ＋ B · P ・ 無正例的組留 r</small>"]
+    n_f_test --> d_test_keys(["test_keys"])
+    n_sel_val["select_val_keys"] --> d_val_unf(["val_keys_unfiltered"])
+    d_val_unf --> n_f_val["filter_val_keys<br/><small>＋ B ・ 無正例的組留 r</small>"]
+    n_f_val --> d_val_keys(["val_keys"])
     n_sel_sample["select_sample_keys"] --> d_sample_keys(["sample_keys"])
     d_sample_keys --> n_split["split_train_keys"]
     n_split --> d_train_dev_unf(["train_dev_keys_unfiltered"])
@@ -123,12 +127,8 @@ flowchart LR
   %% ---------------------- 組裝 model input -----------------------
   subgraph BUILD[" 組裝 model input：keys ⨝ label ⨝ 編碼後 features "]
     direction TB
-    n_b_test["build_test_model_input<br/><small>增量 ・ ＋ A · B · C · P<br/>test_keys 含全部月份，先過濾本次 to_process</small>"] --> d_test_unf(["test_model_input_unfiltered"])
-    d_test_unf --> n_f_test["filter_test_model_input<br/><small>增量 ・ 無正例的組留 r</small>"]
-    n_f_test --> o_test(["test_model_input"])
-    n_b_val["build_val_model_input<br/><small>＋ A · B · C</small>"] --> d_val_unf(["val_model_input_unfiltered"])
-    d_val_unf --> n_f_val["filter_val_model_input<br/><small>無正例的組留 r</small>"]
-    n_f_val --> o_val(["val_model_input"])
+    n_b_test["build_test_model_input<br/><small>增量 ・ ＋ A · B · C · P<br/>test_keys 含全部月份，先過濾本次 to_process</small>"] --> o_test(["test_model_input"])
+    n_b_val["build_val_model_input<br/><small>＋ A · B · C</small>"] --> o_val(["val_model_input"])
     n_b_traindev["build_train_dev_model_input<br/><small>＋ A · B · C</small>"] --> o_traindev(["train_dev_model_input"])
     n_b_train["build_train_model_input<br/><small>＋ A · B · C</small>"] --> o_train(["train_model_input"])
   end

@@ -92,6 +92,7 @@ from recsys_tfb.pipelines.dataset.steps.model_input import (
     log_zero_positive_group_draw,
     model_input_columns,
     require_columns_present,
+    with_unit_weight,
 )
 from recsys_tfb.pipelines.dataset.month_plans import (
     SnapDatePlan,
@@ -1456,6 +1457,24 @@ def _footer_rows_by_month(
     return counted
 
 
+def _grain_report_entry(
+    label: str,
+    keys: tuple[int, int],
+    model_input: tuple[int, int],
+) -> dict:
+    """One split's entry in the B10 report, ``(rows, files)`` for each side,
+    logged as it is made — one line and one set of fields for every split."""
+    logger.info(
+        "Model input grain gate: %s keys=%d row(s) in %d file(s), "
+        "model_input=%d row(s) in %d file(s)",
+        label, *keys, *model_input,
+    )
+    return {
+        "keys_rows": keys[0], "keys_files": keys[1],
+        "model_input_rows": model_input[0], "model_input_files": model_input[1],
+    }
+
+
 def validate_model_input_grain(
     train_keys: DataFrame,
     train_model_input: DataFrame,
@@ -1554,7 +1573,7 @@ def validate_model_input_grain(
         ("val", val_keys, val_model_input, base_scope),
     ]
 
-    by_split: dict[str, SplitRowCounts] = {}
+    by_split: dict[str, SplitRowCounts | dict[str, SplitRowCounts]] = {}
     splits: dict[str, dict] = {}
     errors: list[str] = []
     for split, keys, model_input, scope in pairs:
@@ -1567,7 +1586,10 @@ def validate_model_input_grain(
             # success having looked at nothing. So it is reported rather than
             # counted as zero rows. A table with no files AT ALL is a
             # different fact and passes: that is a genuinely empty split,
-            # which `dataset.train_dev_ratio: 0` produces on purpose.
+            # which `dataset.train_dev_ratio: 0` produces on purpose. The
+            # check cannot tell a scope mismatch from a split this version
+            # left empty while other versions' files sit in the same table,
+            # so the message names both.
             if present and not matched:
                 spec = ", ".join(f"{k}={v}" for k, v in scope.items())
                 errors.append(
@@ -1575,25 +1597,18 @@ def validate_model_input_grain(
                     f"none under {spec}, so this run's row count could not be "
                     f"established and the comparison for {split} would have "
                     f"passed on two zeroes. Either the version/variant in "
-                    f"parameters no longer matches what is on disk, or the "
+                    f"parameters no longer matches what is on disk, the "
                     f"table was written by a different catalog entry than the "
-                    f"one this node reads."
+                    f"one this node reads, or {split} came out empty under "
+                    f"this version while other versions' files remain (for "
+                    f"val: every query group dropped — r = 0 and the val "
+                    f"month's labels not in yet, say)."
                 )
-            counted[side] = rows
-            counted[f"{side}_files"] = matched
-        by_split[split] = SplitRowCounts(counted["keys"], counted["model_input"])
-        splits[split] = {
-            "keys_rows": counted["keys"],
-            "keys_files": counted["keys_files"],
-            "model_input_rows": counted["model_input"],
-            "model_input_files": counted["model_input_files"],
-        }
-        logger.info(
-            "Model input grain gate: %s keys=%d row(s) in %d file(s), "
-            "model_input=%d row(s) in %d file(s)",
-            split, counted["keys"], counted["keys_files"],
-            counted["model_input"], counted["model_input_files"],
-        )
+            counted[side] = (rows, matched)
+        by_split[split] = SplitRowCounts(
+            counted["keys"][0], counted["model_input"][0])
+        splits[split] = _grain_report_entry(
+            split, counted["keys"], counted["model_input"])
 
     # Decision — test is compared over the months this run's test build wrote,
     # and only those: the plan it ran under, not test_keys' own (see the
@@ -1612,35 +1627,39 @@ def validate_model_input_grain(
             )
             for side, df in (("keys", test_keys), ("model_input", test_model_input))
         }
+        # Decision — each month is its own pair, not one sum over the months:
+        # a month the build fanned out and another it left short would cancel
+        # in a sum.
+        #
         # Decision — a planned month with no file on either side is 0 = 0 and
         # is reported as such: the group drop emptied it (r = 0 and its labels
         # not in yet, say), and the two tables agree they hold nothing. So the
         # "files, but none in scope" pre-check above does not apply here — for
         # a table written a month at a time, that is what an emptied month
-        # looks like. One side without files and the other with rows is still
-        # a mismatch, and the predicate says so.
-        keys_rows = sum(rows for rows, _ in by_side["keys"].values())
-        model_input_rows = sum(rows for rows, _ in by_side["model_input"].values())
-        by_split["test"] = SplitRowCounts(keys_rows, model_input_rows)
-        splits["test"] = {
-            "keys_rows": keys_rows,
-            "keys_files": sum(f for _, f in by_side["keys"].values()),
-            "model_input_rows": model_input_rows,
-            "model_input_files": sum(f for _, f in by_side["model_input"].values()),
-            "months": {
-                month.strftime("%Y-%m-%d"): {
-                    "keys_rows": by_side["keys"][month][0],
-                    "model_input_rows": by_side["model_input"][month][0],
-                }
-                for month in sorted(by_side["keys"])
-            },
+        # looks like. That leaves no silent hole: a version in parameters that
+        # no longer matches the disk shows on the three pairs above, which
+        # share it, and the month partition is named by the time column the
+        # build wrote with (saving refuses a frame without it). One side
+        # without files and the other with rows is still a mismatch, and the
+        # predicate says so.
+        months = sorted(by_side["keys"])
+        by_split["test"] = {
+            month.strftime("%Y-%m-%d"): SplitRowCounts(
+                by_side["keys"][month][0], by_side["model_input"][month][0])
+            for month in months
         }
-        logger.info(
-            "Model input grain gate: test (%d month(s) this run) keys=%d row(s) "
-            "in %d file(s), model_input=%d row(s) in %d file(s)",
-            len(test_months), keys_rows, splits["test"]["keys_files"],
-            model_input_rows, splits["test"]["model_input_files"],
+        splits["test"] = _grain_report_entry(
+            f"test ({len(months)} month(s) this run)",
+            tuple(map(sum, zip(*by_side["keys"].values()))),
+            tuple(map(sum, zip(*by_side["model_input"].values()))),
         )
+        splits["test"]["months"] = {
+            month: {
+                "keys_rows": counts.keys_rows,
+                "model_input_rows": counts.model_input_rows,
+            }
+            for month, counts in by_split["test"].items()
+        }
 
     report = {
         # The version and variant this report describes. The catalog keys its
@@ -1809,9 +1828,7 @@ def filter_val_keys(
     # stays, weighted 1.
     if ratio >= 1.0:
         log_zero_positive_group_draw("val", ratio, None)
-        return keep_zero_positive_groups_drawn_under_ratio(
-            keys, group_cols, label_col, ratio, seed, weight_col=weight_col,
-        )
+        return with_unit_weight(keys, weight_col)
 
     # Decision — a multi-column item is combined on read (ADR-0027).
     label_table = combine_item_columns(label_table, schema, "label_table")
@@ -1828,7 +1845,7 @@ def filter_val_keys(
     # never from a label column sample_pool may carry (#429): judged by that
     # copy, a disagreement would delete real positives together with their
     # group, and B10 would pass because keys and model_input lose the same
-    # rows. The label the build joins is this same one.
+    # rows. The build joins its label from the same table.
     labels = join_labels_missing_as_negative(
         keys.select(*identity_cols),
         label_table.select(*identity_cols, label_col),
@@ -1899,9 +1916,7 @@ def filter_test_keys(
     # stays, weighted 1.
     if ratio >= 1.0:
         log_zero_positive_group_draw("test", ratio, None)
-        return keep_zero_positive_groups_drawn_under_ratio(
-            keys, group_cols, label_col, ratio, seed, weight_col=weight_col,
-        )
+        return with_unit_weight(keys, weight_col)
 
     # Decision — a multi-column item is combined on read (ADR-0027).
     label_table = combine_item_columns(label_table, schema, "label_table")

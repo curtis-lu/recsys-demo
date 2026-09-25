@@ -157,7 +157,7 @@ label、score、rank 框架自帶預設欄名），其餘特徵 / 分群 / carry
     <rect x="782" y="196" width="156" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
     <text x="860" y="213">val · test_model_input</text>
   </g>
-  <text x="62" y="244" font-size="10" fill="#495057">val/test_model_input 經 filter_val/test_model_input（無正例的查詢群組整組留比例 r，預設全丟）</text>
+  <text x="62" y="244" font-size="10" fill="#495057">val/test_keys 經 filter_val/test_keys（無正例的查詢群組整組留比例 r，預設全丟）</text>
 
   <!-- train-variant lane -->
   <rect x="52" y="266" width="896" height="74" rx="9" fill="var(--train)" stroke="#ffc078"/>
@@ -332,7 +332,7 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
   <tr><td><a href="#preprocessed_feature_table"><code>preprocessed_feature_table</code></a><br><span class="vl vl-base" style="margin-left:0">base_dataset_version</span></td>
     <td><code>time × entity</code></td><td><code>(base_dataset_version, time, entity)</code></td>
     <td><span class="gtag g-none">框架不檢查</span></td>
-    <td><code>apply_preprocessor_to_features</code> 只做逐列過濾與編碼，唯一性等於落地當下的 <code>feature_table</code>（上游的檢查不繼承，來源有重複就原樣傳下來），這一步零檢查；放大要到下游才可能被看見，而且只有 train／train_dev 側有 B10 這道列數閘，val／test 沒有。</td></tr>
+    <td><code>apply_preprocessor_to_features</code> 只做逐列過濾與編碼，唯一性等於落地當下的 <code>feature_table</code>（上游的檢查不繼承，來源有重複就原樣傳下來），這一步零檢查；放大要到下游才可能被看見：四個 split 的 model_input 都有 B10 這道列數閘（test 只比這次組裝的月份）。</td></tr>
   <tr><td><a href="#val_keys"><code>val_keys</code></a><br><span class="vl vl-base" style="margin-left:0">base_dataset_version</span></td>
     <td><code>time × entity × item</code></td><td><code>(base_dataset_version, time, entity, item)</code></td>
     <td><span class="gtag g-build">由寫法保證</span></td>
@@ -344,11 +344,11 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
   <tr><td><a href="#val_model_input"><code>val_model_input</code></a><br><span class="vl vl-base" style="margin-left:0">base_dataset_version</span></td>
     <td><code>time × entity × item</code>（只留有正例的 query group）</td><td><code>(base_dataset_version, time, entity, item)</code></td>
     <td><span class="gtag g-none">框架不檢查</span></td>
-    <td>沒有直接檢查主鍵唯一的檢查，dataset 階段也沒有間接的閘：列數閘（<code>consistency.py</code> 的 B10）不涵蓋 val，兩個 LEFT JOIN 的右表若有重複 join 鍵會放大列數；<code>validate_data_consistency</code>、<code>validate_numeric_precision</code> 查的是 item 覆蓋、欄位宣告與型別、數值範圍，不查主鍵重複。dataset 之後，<code>label_table</code> 的重複只有 evaluation 的 <code>prepare_eval_data</code> 會對它實際評估的月份（<code>evaluation.snap_date</code>）中止；沒被評到的月份（含 val 月份）沒有任何一步會抓。<code>preprocessed_feature_table</code> 側的重複在 dataset 階段沒有檢查（source_etl 的檢查在更上游，讀取時不重驗）。</td></tr>
+    <td>沒有直接檢查主鍵唯一的檢查，dataset 階段的間接閘只有列數閘（<code>consistency.py</code> 的 B10）：右表若有重複 join 鍵，本表列數會大於 <code>val_keys</code>，B10 中止；<code>validate_data_consistency</code>、<code>validate_numeric_precision</code> 查的是 item 覆蓋、欄位宣告與型別、數值範圍，不查主鍵重複。dataset 之後，<code>label_table</code> 的重複只有 evaluation 的 <code>prepare_eval_data</code> 會對它實際評估的月份（<code>evaluation.snap_date</code>）中止；沒被評到的月份（含 val 月份）沒有任何一步會抓。<code>preprocessed_feature_table</code> 側的重複在 dataset 階段沒有檢查（source_etl 的檢查在更上游，讀取時不重驗）。</td></tr>
   <tr><td><a href="#val_model_input"><code>test_model_input</code></a><br><span class="vl vl-base" style="margin-left:0">base_dataset_version</span></td>
     <td><code>time × entity × item</code>（只留有正例的 query group）</td><td><code>(base_dataset_version, time, entity, item)</code></td>
     <td><span class="gtag g-none">框架不檢查</span></td>
-    <td>沒有直接檢查主鍵唯一的檢查，dataset 階段也沒有間接的閘：B10 同樣不涵蓋 test，右表重複會放大列數，不看主鍵重複的 <code>validate_data_consistency</code>／<code>validate_numeric_precision</code> 也不會紅。dataset 之後，test 月份的 <code>label_table</code> 重複要等該月被列進 <code>evaluation.snap_date</code>，才會被 evaluation 的 <code>prepare_eval_data</code> 中止（<code>--post-training</code> 下 A22 只要求評估月份是 test 月份的子集，不要求評完所有 test 月份）；<code>preprocessed_feature_table</code> 側的重複在 dataset 階段沒有檢查（source_etl 的檢查在更上游，讀取時不重驗）。</td></tr>
+    <td>沒有直接檢查主鍵唯一的檢查，dataset 階段的間接閘只有 B10：這次組裝的月份若因右表重複而放大，B10 中止（已落地的月份不重查）；不看主鍵重複的 <code>validate_data_consistency</code>／<code>validate_numeric_precision</code> 也不會紅。dataset 之後，test 月份的 <code>label_table</code> 重複要等該月被列進 <code>evaluation.snap_date</code>，才會被 evaluation 的 <code>prepare_eval_data</code> 中止（<code>--post-training</code> 下 A22 只要求評估月份是 test 月份的子集，不要求評完所有 test 月份）；<code>preprocessed_feature_table</code> 側的重複在 dataset 階段沒有檢查（source_etl 的檢查在更上游，讀取時不重驗）。</td></tr>
   <tr><td><a href="#sample_keys"><code>sample_keys</code></a><br><span class="vl vl-train" style="margin-left:0">train_variant_id</span></td>
     <td><code>time × entity × item</code>（sample_pool 的列子集）</td><td><code>(base_dataset_version, train_variant_id, time, entity, item)</code></td>
     <td><span class="gtag g-none">框架不檢查</span></td>
@@ -364,7 +364,7 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
   <tr><td><a href="#train_model_input"><code>train_model_input</code></a><br><span class="vl vl-train" style="margin-left:0">train_variant_id</span></td>
     <td><code>time × entity × item</code></td><td><code>(base_dataset_version, train_variant_id, time, entity, item)</code></td>
     <td><span class="gtag g-none">框架不檢查</span></td>
-    <td>沒有直接檢查主鍵唯一的檢查；間接的閘：<code>validate_model_input_grain</code>（B10）比對本表與 train_keys 的列數，不等即中止。B10 擋的是右表 join 鍵重複造成的放大；它是列數等式，不是主鍵檢查——keys 自己重複時兩邊等量增加，等式照樣成立。範圍只有 train／train_dev，不含 val／test。</td></tr>
+    <td>沒有直接檢查主鍵唯一的檢查；間接的閘：<code>validate_model_input_grain</code>（B10）比對本表與 train_keys 的列數，不等即中止。B10 擋的是右表 join 鍵重複造成的放大；它是列數等式，不是主鍵檢查——keys 自己重複時兩邊等量增加，等式照樣成立。四個 split 都查（test 只比這次組裝的月份）。</td></tr>
   <tr><td><a href="#train_model_input"><code>train_dev_model_input</code></a><br><span class="vl vl-train" style="margin-left:0">train_variant_id</span></td>
     <td><code>time × entity × item</code></td><td><code>(base_dataset_version, train_variant_id, time, entity, item)</code></td>
     <td><span class="gtag g-none">框架不檢查</span></td>
@@ -396,7 +396,7 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
 </table>
 </div>
 <p class="note">來源表的「有檢查」只在 source_etl 產出時成立，而且是寫完之後才查（壞 partition 不回滾），查的是使用者在 config 宣告的 <code>primary_key</code>：dataset／inference 讀取時不重驗，使用者自備、沒經過 source_etl 的表就沒有這一層（例外：<code>label_table</code> 的評估月份仍會被 evaluation 的 <code>prepare_eval_data</code> 重驗）。<code>consistency.py</code> 的 A32 只確認 dataset pipeline 讀的<b>三張</b>表（<code>DATASET_SOURCE_TABLES</code> ＝ <code>sample_pool</code>／<code>label_table</code>／<code>feature_table</code>，<code>inference_population</code> 不在內）在 <code>*_etl</code> 設定裡宣告了 <code>quality_checks.max_duplicate_key_ratio</code>，且值在 [0, 1)；它不看資料，也守不住整個檢查：source_etl 要 <code>primary_key</code> 與這個鍵<b>同時在</b>才會跑，<code>primary_key</code> 被刪時 A32 不會紅；自備表把 <code>*_etl</code> 裡那筆表宣告刪掉時，A32 也直接略過、不報錯。
-全表最弱的三處：① 自備來源表——<code>feature_table</code>／<code>label_table</code>／<code>sample_pool</code>／<code>inference_population</code> 這四列的檢查只在「由 source_etl 產出」時成立，而框架明文允許使用者自備來源表（<code>consistency.py</code> 的 B10 段把這件事列為「上游的 <code>max_duplicate_key_ratio</code> 合約關不掉這個洞」的理由之一）。下游有幾道檢查不依賴「來源表由 source_etl 產出」這個前提（自備表也會跑），但各自範圍有限，都不等於全表保證：B10 只涵蓋 train／train_dev 的 model_input（不含 val／test），而且只比列數；<code>unranked_predictions</code> 的 chunk <code>no_duplicates</code> 只驗本次執行實際寫的 chunk、只看單一 chunk 內；<code>validate_predictions</code> 的 <code>completeness</code>／<code>rank_consistency</code> 只在 inference 發布前看每個 query group 的列數與 rank 範圍；<code>prepare_eval_data</code> 的 label 重驗只驗 <code>label_table</code> 的評估月份。所以自備 <code>feature_table</code> 有重複時，val／test 的 model_input 不會被這幾道擋下。② model_input 自己的主鍵唯一性沒有直接檢查：train／train_dev 只有 B10 列數閘（只擋右表放大），val／test 連這道間接的閘都沒有；而且 B10 會不會紅取決於重複落在<b>哪個月</b>、以及那個鍵在不在 keys 表裡：落在 train／train_dev 月份、而且那個鍵確實出現在對應的 keys 表裡時，join 會放大列數讓 B10 紅；鍵不在 keys 表裡就不會放大，B10 照樣綠。只落在 val／test 月份時 B10 不會動；這時唯一還會紅的是 <code>prepare_eval_data</code> 的 label 重驗，而且只在該月被列進 <code>evaluation.snap_date</code> 時才發生。B10 也是所有 build 節點落地<b>之後</b>才跑的獨立節點，它紅的時候被放大的表已經寫進 Hive，後續單獨執行或用 <code>--from-node</code> 續跑的節點仍讀得到。③ keys 表（<code>sample_keys</code>／<code>train_keys</code>／<code>train_dev_keys</code>）：只沿用 <code>sample_pool</code> 在 source_etl 產出時的檢查，keys 表本身沒有任何檢查；B10 的列數等式對「keys 自己重複」是盲的（兩邊等量增加），所以這種重複會一路帶到 model_input 都沒有人紅。附註：<code>ranked_staging</code> 寫入時同樣沒有閘，但它的內容在發布前會被 <code>validate_predictions</code> 讀到。</p>
+全表最弱的三處：① 自備來源表——<code>feature_table</code>／<code>label_table</code>／<code>sample_pool</code>／<code>inference_population</code> 這四列的檢查只在「由 source_etl 產出」時成立，而框架明文允許使用者自備來源表（<code>consistency.py</code> 的 B10 段把這件事列為「上游的 <code>max_duplicate_key_ratio</code> 合約關不掉這個洞」的理由之一）。下游有幾道檢查不依賴「來源表由 source_etl 產出」這個前提（自備表也會跑），但各自範圍有限，都不等於全表保證：B10 涵蓋四個 split 的 model_input（test 只比這次組裝的月份），而且只比列數；<code>unranked_predictions</code> 的 chunk <code>no_duplicates</code> 只驗本次執行實際寫的 chunk、只看單一 chunk 內；<code>validate_predictions</code> 的 <code>completeness</code>／<code>rank_consistency</code> 只在 inference 發布前看每個 query group 的列數與 rank 範圍；<code>prepare_eval_data</code> 的 label 重驗只驗 <code>label_table</code> 的評估月份。所以自備 <code>feature_table</code> 有重複時，val／test 的 model_input 不會被這幾道擋下。② model_input 自己的主鍵唯一性沒有直接檢查：train／train_dev 只有 B10 列數閘（只擋右表放大），val／test 連這道間接的閘都沒有；而且 B10 會不會紅取決於重複落在<b>哪個月</b>、以及那個鍵在不在 keys 表裡：落在 train／train_dev 月份、而且那個鍵確實出現在對應的 keys 表裡時，join 會放大列數讓 B10 紅；鍵不在 keys 表裡就不會放大，B10 照樣綠。只落在 val／test 月份時 B10 不會動；這時唯一還會紅的是 <code>prepare_eval_data</code> 的 label 重驗，而且只在該月被列進 <code>evaluation.snap_date</code> 時才發生。B10 也是所有 build 節點落地<b>之後</b>才跑的獨立節點，它紅的時候被放大的表已經寫進 Hive，後續單獨執行或用 <code>--from-node</code> 續跑的節點仍讀得到。③ keys 表（<code>sample_keys</code>／<code>train_keys</code>／<code>train_dev_keys</code>）：只沿用 <code>sample_pool</code> 在 source_etl 產出時的檢查，keys 表本身沒有任何檢查；B10 的列數等式對「keys 自己重複」是盲的（兩邊等量增加），所以這種重複會一路帶到 model_input 都沒有人紅。附註：<code>ranked_staging</code> 寫入時同樣沒有閘，但它的內容在發布前會被 <code>validate_predictions</code> 讀到。</p>
 
 <h2>各表表卡</h2>
 <div class="anchornav">
@@ -567,7 +567,7 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
 
 <div class="card" id="val_model_input">
   <h4>val_model_input · test_model_input <span class="badge b-hive">Hive</span><span class="vl vl-base">base</span></h4>
-  <div class="meta"><b>產生</b>：dataset · build_*_model_input → filter_val_model_input／filter_test_model_input（無正例的 query group 整組留下比例 r＝<code>*_zero_positive_group_ratio</code>，預設 0 全丟；r &gt; 0 時多一欄權重 <code>zero_positive_group_weight</code>）　|
+  <div class="meta"><b>產生</b>：dataset · filter_val_keys／filter_test_keys（組裝之前在 keys 上丟：無正例的 query group 整組留下比例 r＝<code>*_zero_positive_group_ratio</code>，預設 0 全丟；r &gt; 0 時 keys 多一欄權重 <code>zero_positive_group_weight</code>）→ build_*_model_input（權重欄照 carry 欄帶進來）　|
   <b>下游</b>：training（cache_val_model_input / cache_test_model_input；test_model_input 另被 select_shap_population 讀）　|
   <b>partition</b>：val＝base_dataset_version / snap_date；test＝base_dataset_version / snap_date / prod_name</div>
   <div class="grain"><span class="gtag g-none">框架不檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>；預設只保留至少有一個正例的 query group）　|　<b>實體主鍵</b>：<code>(time, entity, item)</code>，另含版本欄 <code>base_dataset_version</code>　|　沒有直接檢查主鍵唯一的檢查，dataset 階段也沒有間接的閘、由上游負責：列數閘 B10 <b>不涵蓋 val／test</b>（落地的是濾掉零正例群組之後的表，列數本來就少於 keys，不能拿來跟 keys 比對相等；test_keys 又是跨月累積的表，本來就對不上）。右表（<code>label_table</code>、<code>preprocessed_feature_table</code>）若有重複 join 鍵，會放大列數；<code>validate_data_consistency</code>（item 覆蓋、欄位宣告與型別）與 <code>validate_numeric_precision</code>（數值範圍）都不查主鍵重複，所以 dataset 階段不會紅。dataset 之後，<code>label_table</code> 的重複只有 evaluation 的 <code>prepare_eval_data</code> 會對它實際評估的月份（<code>evaluation.snap_date</code>）中止：<code>--post-training</code> 下 A22 只要求評估月份是 test 月份的子集，不要求評完所有 test 月份，所以沒被列進 <code>evaluation.snap_date</code> 的 test 月份，以及沒被評到的 val 月份（<code>--post-training</code> 下 val 月份不可能被評到，因為 A22 限定 test 月份），沒有任何一步會抓它們的 label 重複；<code>preprocessed_feature_table</code> 側的重複在 dataset 階段沒有檢查（source_etl 的檢查在更上游，讀取時不重驗）。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
@@ -652,7 +652,7 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
   <b>下游</b>：training（compute_test_metrics 讀回計分月份算 test 指標、select_shap_population）、evaluation 情境 1（prepare_eval_data，<code>--post-training</code>）　|
   <b>partition</b>：snap_date, prod_name（外加 model_version）</div>
   <div class="grain"><span class="gtag g-none">框架不檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>；只保留至少有一個正例的 query group，沿用 <code>test_model_input</code> 的過濾）　|　<b>實體主鍵</b>：邏輯主鍵是上述三個角色；實體上另含 <code>model_version</code>（partition_filter 注入的版本欄）　|　唯一性<b>框架不檢查、由上游負責</b>：<code>predict_and_write_test_predictions</code> 逐 (time, item) 分區寫出，沒有重複檢查，唯一性沿用 <code>test_model_input</code>（dataset 的 <code>validate_model_input_grain</code> 列數閘不涵蓋 test）。重跑不會疊出重複列，靠的是分區整個覆寫，不是去重。<code>duplicate_test_month_errors</code>（A26）是設定層的閘、不看資料：<code>test_snap_dates</code> 把同一個月拼成兩種寫法，會讓 training cache 把同一個目錄交給 pyarrow 兩次、該月每一列在預測裡被算兩遍，A26 擋的就是這一種成因（強制點在 training 指令）；其他成因造成的重複它不管。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
-  <p class="sub">test 集在 dataset 階段（<code>filter_test_model_input</code>）預設已丟掉整個 query group（<code>time × entity</code>，示例 <code>snap_date × cust_id</code>）都沒有正例的列，只有留下來的 query group 會被 scoring；<code>test_zero_positive_group_ratio</code> &gt; 0 時留下的無正例組也會被 scoring，列上帶權重欄 <code>zero_positive_group_weight</code>（catalog 必須宣告它，A45）。不存 rank——Spark mAP 端用 rank_within_query 重算。</p>
+  <p class="sub">test 集在 dataset 階段（<code>filter_test_keys</code>，組裝之前）預設已丟掉整個 query group（<code>time × entity</code>，示例 <code>snap_date × cust_id</code>）都沒有正例的列，只有留下來的 query group 會被 scoring；<code>test_zero_positive_group_ratio</code> &gt; 0 時留下的無正例組也會被 scoring，列上帶權重欄 <code>zero_positive_group_weight</code>（catalog 必須宣告它，A45）。不存 rank——Spark mAP 端用 rank_within_query 重算。</p>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>說明</th></tr>
     <tr><td>cust_id</td><td>string</td><td><span class="role">entity</span></td></tr>
@@ -776,7 +776,7 @@ C000010   0.83    0.83                 1      （示意）</div>
 <p class="sub" style="margin-top:30px;color:#9198a1">
 未列為 catalog 產物的中間物（MemoryDataset / driver-local handle），例如：score_manifest · validated_predictions ·
 preprocessor_view · shap_population · case_rows · diagnosis_sample · evaluation_diagnosis_pages ·
-*_parquet_handle · *_lgb_handle · *_model_input_unfiltered ·
+*_parquet_handle · *_lgb_handle · *_keys_unfiltered ·
 compare_predictions_raw · compare_predictions_common · eval_predictions_common · compare_coverage_partial。
 這些只在單次 DAG 內銜接，不持久化；此清單只是舉例、不窮盡（以各 <code>pipeline.py</code> 的節點接線為準）。
 </p>

@@ -135,6 +135,28 @@ def drop_groups_without_positives(
     )
 
 
+def _require_no_weight_column(columns: list[str], weight_col: str) -> None:
+    """Pre-check shared by every step that adds the weight: the frame must not
+    hold a column by that name already. Adding it anyway would either replace
+    that column with weights or put a second column by the same name beside
+    it, and neither raises by itself."""
+    if weight_col in columns:
+        raise ValueError(
+            f"{weight_col!r} is already a column of this frame, and the "
+            f"zero-positive group weight must neither replace it nor sit "
+            f"beside it under the same name. The name is the framework's own; "
+            f"rename the source column."
+        )
+
+
+def with_unit_weight(df: DataFrame, weight_col: str) -> DataFrame:
+    """``df`` with ``weight_col`` set to 1 on every row: the design weight of a
+    split whose every group survived (ratio 1). Reads nothing but ``df``'s
+    column names, so it needs no label."""
+    _require_no_weight_column(df.columns, weight_col)
+    return df.withColumn(weight_col, F.lit(1.0))
+
+
 def _kept_under_ratio(
     has_positive: Column,
     df: DataFrame,
@@ -185,14 +207,10 @@ def keep_zero_positive_groups_drawn_under_ratio(
     the weight in ``build_model_input``, which the keys carry it into; see
     B12 in ``core/consistency.py`` for what stops it there.
     """
-    if weight_col is not None and weight_col in df.columns:
-        raise ValueError(
-            f"{weight_col!r} is already a column of this frame, so the "
-            f"zero-positive group weight would overwrite it. The name is the "
-            f"framework's own; rename the source column."
-        )
+    if weight_col is not None:
+        _require_no_weight_column(df.columns, weight_col)
     if ratio >= 1.0:
-        return df if weight_col is None else df.withColumn(weight_col, F.lit(1.0))
+        return df if weight_col is None else with_unit_weight(df, weight_col)
     if ratio <= 0.0:
         kept = drop_groups_without_positives(df, group_cols, label_col)
         return kept if weight_col is None else kept.withColumn(weight_col, F.lit(1.0))
@@ -236,12 +254,8 @@ def keep_keys_of_drawn_groups(
     Refuses keys that already hold ``weight_col`` rather than returning two
     columns by that name.
     """
-    if weight_col is not None and weight_col in keys.columns:
-        raise ValueError(
-            f"{weight_col!r} is already a column of the keys, so the "
-            f"zero-positive group weight would overwrite it. The name is the "
-            f"framework's own; rename the source column."
-        )
+    if weight_col is not None:
+        _require_no_weight_column(keys.columns, weight_col)
     renamed = {c: f"__drawn_{c}" for c in group_cols}
     carried = [weight_col] if weight_col is not None else []
     kept = drawn.select(

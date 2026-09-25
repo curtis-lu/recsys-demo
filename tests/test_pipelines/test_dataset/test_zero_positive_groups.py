@@ -270,7 +270,7 @@ def test_a_weight_column_already_on_the_keys_is_refused_not_overwritten(
 
     clashing = eval_keys.withColumn(WEIGHT, F.lit(9.0))
     for ratio in (0.5, 1.0):
-        with pytest.raises(ValueError, match="would overwrite"):
+        with pytest.raises(ValueError, match="already a column"):
             filter_val_keys(
                 clashing, label_table, _params(val_zero_positive_group_ratio=ratio))
 

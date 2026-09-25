@@ -811,9 +811,12 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
   them, and why a duplicate key confined to a month only val or test cover
   used to go unseen. train, train_dev and val are compared whole (every file
   under this version, and variant for the two train tables). test is
-  compared over the months ``test_model_input_month_plan.to_process`` names
-  — both tables accumulate months under one version, and
-  ``build_test_model_input`` reads only those months of its keys. An empty
+  compared over the months ``test_model_input_month_plan.to_process`` names,
+  each month its own pair — both tables accumulate months under one version,
+  ``build_test_model_input`` reads only those months of its keys, and a sum
+  would let one month's fan-out cancel another's shortfall. A test month
+  that fails has landed already, so its message says to rebuild it by name
+  (``--rebuild-dates``); a plain re-run would skip it. An empty
   ``to_process`` means this run wrote no test month: the pair is reported as
   not written, not failed. A planned month neither table has a file for is
   0 = 0 (the draw emptied it), not a measurement failure.
@@ -4176,7 +4179,7 @@ class SplitRowCounts(NamedTuple):
 
 
 def model_input_grain_errors(
-    by_split: Mapping[str, SplitRowCounts],
+    by_split: Mapping[str, SplitRowCounts | Mapping[str, SplitRowCounts]],
     identity_columns: Sequence[str] | None = None,
 ) -> list[str]:
     """B10 invariant — the single definition.
@@ -4216,38 +4219,76 @@ def model_input_grain_errors(
     Optional rather than required: the predicate stays callable from a test
     that only cares about the counts, and an omitted list simply drops that
     clause.
+
+    **A split written a month at a time comes as ``{month: SplitRowCounts}``**
+    — test, whose table accumulates months (ADR-0029 decision 4). Each month
+    is its own pair: a fan-out in one month and a shortfall in another would
+    cancel in a sum. Its message adds what only such a split needs: the month
+    has landed, so a plain re-run skips it and leaves the bad rows in place —
+    it has to be rebuilt by name — and, for a month rebuilt that way, a
+    partition the rebuild did not rewrite survives from the earlier write
+    and is counted too.
     """
     errors: list[str] = []
     for split in sorted(by_split):
-        keys_rows, model_input_rows = by_split[split]
-        if keys_rows == model_input_rows:
-            continue
-        # Fixed decimals rather than significant figures: ``:.4g`` renders
-        # a 1.0002x fan-out as "1x", which reads as agreement.
-        ratio = (
-            f" ({model_input_rows / keys_rows:,.4f}x)" if keys_rows else ""
+        counts = by_split[split]
+        per_month = (
+            sorted(counts.items()) if isinstance(counts, Mapping)
+            else [(None, counts)]
         )
-        key_clause = (
-            f" One key here is {list(identity_columns)}."
-            if identity_columns else ""
-        )
-        errors.append(
-            f"B10: {split}_model_input holds {model_input_rows:,} row(s) but "
-            f"{split}_keys holds {keys_rows:,}{ratio}. build_model_input LEFT "
-            f"joins the keys to label_table, to preprocessed_feature_table and, "
-            f"when one is declared, to candidate_feature_table, each on the "
-            f"keys' own grain, so the two counts can only differ if a right "
-            f"table holds one of those join keys more than once — the "
-            f"silently N-times-too-large dataset that node's comment names."
-            f"{key_clause} "
-            f"Check the duplicate-key contract on label_table, on "
-            f"feature_table and on candidate_feature_table's source table "
-            f"(source_etl quality_checks: "
-            f"max_duplicate_key_ratio, plus primary_key — A32 passes when both "
-            f"are absent), and do not de-duplicate downstream: which of the "
-            f"duplicate rows is the right one is not knowable here."
-        )
+        errors += [
+            _grain_error(split, month, keys_rows, model_input_rows, identity_columns)
+            for month, (keys_rows, model_input_rows) in per_month
+            if keys_rows != model_input_rows
+        ]
     return errors
+
+
+def _grain_error(
+    split: str,
+    month: str | None,
+    keys_rows: int,
+    model_input_rows: int,
+    identity_columns: Sequence[str] | None,
+) -> str:
+    """One B10 message: one split, or one month of a split written by month."""
+    # Fixed decimals rather than significant figures: ``:.4g`` renders
+    # a 1.0002x fan-out as "1x", which reads as agreement.
+    ratio = (
+        f" ({model_input_rows / keys_rows:,.4f}x)" if keys_rows else ""
+    )
+    key_clause = (
+        f" One key here is {list(identity_columns)}."
+        if identity_columns else ""
+    )
+    in_month = f" for {month}" if month is not None else ""
+    rebuild_clause = (
+        f" {month} has landed, so a plain re-run skips it and keeps these "
+        f"rows: once the source is fixed, rebuild it with --rebuild-dates "
+        f"{month}. If it was just rebuilt that way, the extra rows can "
+        f"also be an item partition (or the whole month) the rebuild did "
+        f"not rewrite because it came out empty this time — dynamic "
+        f"partition overwrite leaves such partitions as they were."
+        if month is not None else ""
+    )
+    return (
+        f"B10: {split}_model_input holds {model_input_rows:,} row(s)"
+        f"{in_month} but {split}_keys holds {keys_rows:,}{ratio}. "
+        f"build_model_input LEFT "
+        f"joins the keys to label_table, to preprocessed_feature_table and, "
+        f"when one is declared, to candidate_feature_table, each on the "
+        f"keys' own grain, so the two counts can only differ if a right "
+        f"table holds one of those join keys more than once — the "
+        f"silently N-times-too-large dataset that node's comment names."
+        f"{key_clause} "
+        f"Check the duplicate-key contract on label_table, on "
+        f"feature_table and on candidate_feature_table's source table "
+        f"(source_etl quality_checks: "
+        f"max_duplicate_key_ratio, plus primary_key — A32 passes when both "
+        f"are absent), and do not de-duplicate downstream: which of the "
+        f"duplicate rows is the right one is not knowable here."
+        f"{rebuild_clause}"
+    )
 
 
 # ---------------------------------------------------------------------------

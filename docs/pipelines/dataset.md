@@ -497,7 +497,7 @@ python -m recsys_tfb dataset \
 | 套用前處理 | `apply_preprocessor_to_features` | `feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 編碼 feature categoricals；只處理計畫中的月份 | `preprocessed_feature_table` |
 | 精度閘 | `validate_numeric_precision` | `preprocessed_feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan`、`candidate_feature_table`、`test_model_input_month_plan`、`only_test_months`（執行模式，CLI 注入） | 不變量 B8：讀剛落地那幾個月份的 parquet footer 統計值（零掃描），確認會被 cast 的欄（decimal、整數族與 boolean——有格點的那些）在該欄自己的解析度下撐得過 `numeric_feature_storage_type`；同時產出每欄的 headroom 報告。宣告了候選層級特徵表時，它不落地、沒有 footer 可讀，改成掃一次本次各 build 要讀的月份聯集（類別欄不在內：它們在 cast 之前已編成詞表索引）。聯集是 `train_snap_dates`、`val_snap_dates`、test 那份計畫要處理的月份；`--only-test-months` 時只有最後一份，同一次掃描也確認這些月份每個都有資料；報告多一段 `candidate_feature_table` | `numeric_precision_report` |
 | 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor（test 另收 `test_model_input_month_plan`）、`candidate_feature_table` | 先把 `label_table`、`preprocessed_feature_table`、候選層級特徵表篩到自己 split 的月份（train／train-dev 讀 `train_snap_dates`、val 讀 `val_snap_dates`、test 讀計畫要處理的月份），再 left join label 與 feature（宣告了候選層級特徵表時，在這裡才讀它、編碼、接上），補齊缺失 label，選取欄位並把所有數值特徵欄轉成 `numeric_feature_storage_type` 宣告的型別（預設 float32）；val／test 在 item 清單從資料數時警告前處理器清單裡沒有的新 item（§3.10） | `train_model_input`、`train_dev_model_input`、`val_model_input`、`test_model_input` |
-| 粒度閘 | `validate_model_input_grain` | 四個 split 的 keys 與 model_input、`test_model_input_month_plan` | 不變量 B10：讀 parquet footer 的列數（零掃描），確認每張 model_input 的列數等於它的 keys 表。train、train_dev、val 比這個版本底下的全部檔案；test 是增量的，只比 test 組裝這次處理的月份（`test_model_input_month_plan` 的 `to_process`）：沒有要處理的月份時，報告寫 `not written this run`、不算失敗；某個月兩邊都沒有檔（整月的組都被丟了）算 0 ＝ 0。擋的是右表（`label_table`／`preprocessed_feature_table`／宣告了的候選層級特徵表）有重複 join 鍵造成的靜默放大；同時產出每個 split 的列數報告（test 另列每個月）。`--only-test-months` 也跑它：train／train_dev／val 沒有重建，只重讀檔尾 | `model_input_grain_report` |
+| 粒度閘 | `validate_model_input_grain` | 四個 split 的 keys 與 model_input、`test_model_input_month_plan` | 不變量 B10：讀 parquet footer 的列數（零掃描），確認每張 model_input 的列數等於它的 keys 表。train、train_dev、val 比這個版本底下的全部檔案；test 是增量的，只比 test 組裝這次處理的月份（`test_model_input_month_plan` 的 `to_process`），而且逐月比（加總的話，一個月多、一個月少會互相抵銷）：沒有要處理的月份時，報告寫 `not written this run`、不算失敗；某個月兩邊都沒有檔（整月的組都被丟了）算 0 ＝ 0。test 某個月沒過時，那個月已經落地了，直接重跑會跳過它：修好上游之後要用 `--rebuild-dates` 指名重算。擋的是右表（`label_table`／`preprocessed_feature_table`／宣告了的候選層級特徵表）有重複 join 鍵造成的靜默放大；同時產出每個 split 的列數報告（test 另列每個月）。`--only-test-months` 也跑它：train／train_dev／val 沒有重建，只重讀檔尾 | `model_input_grain_report` |
 
 model input 的組裝規則（讀取範圍見列表後）：
 
@@ -544,7 +544,7 @@ miss 率只有在生產跑過一次才知道，本機量不到，所以「先量
 
 - 「這次處理／跳過哪些月」在 pipeline 開跑前就以三行 `[months]` log 印出來，範圍設錯可以在花掉時間之前發現；
 - 忘記提供計畫不會靜默全量重建——runner 在第一個節點執行前就 raise；
-- 每張表吃自己那份計畫（`test_keys` 已寫、`test_model_input` 還沒，是正常狀態）。
+- 每張表吃自己那份計畫，只有一個例外：`test_keys` 的計畫另外包含 `test_model_input` 這次要組的月份。`test_keys` 帶著丟組的判斷（看 `label_table`），上次跑到一半留下的 keys 若是在 label 回補之前判斷的，拿來接新的 label 會對不上，而且列數照樣相等、B10 看不出來，所以跟著組裝一起重做。
 
 `test_keys` 的整組抽樣節點（`filter_test_keys`）吃 `test_keys` 那份計畫：它讀 `label_table` 的月份，就是這次選 key 的月份。它和 val 的決策相同，但各用自己的節點函式，因為兩者讀的 ratio 鍵與月份不同（讀錯不會報錯）。粒度閘吃的則是 `test_model_input` 那份：它比的是 test 組裝這次寫了哪些月份。
 
