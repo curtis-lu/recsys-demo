@@ -228,6 +228,24 @@ ADR-0008 那一輪的結構搬移在 2026-08-08（PR #176）合併時，`pipelin
 
 **為什麼不是全部都去重**：train 是最大的一份（全部 train 月份乘上全部候選）。全部去重，等於在最大的表上多洗一次；而資料品質歸上游，是 ADR-0006 的既有決定。B10 擋不到這種重複，因為 keys 與 model_input 會一樣重複，列數還是相等。
 
+> **實作註記（2026-09-25，#462，決定 5、6）**：
+> - 共用的機制叫 `unit_drawn_under_ratio`（`steps/sampling.py`），回傳一個 Column：「這一列的單位抽到門檻以下」。三個呼叫端：
+>   - `keep_entities_drawn_under_ratio`（val 抽樣）只拿它做一次 filter，不 join、不去重。
+>   - `split_train_keys` 用它本身取 train_dev，用它的否定取 train。bucket 不會是 NULL（`concat_ws` 不回 NULL），所以否定是精確的補集。
+>   - `steps/model_input.py` 的 `_kept_under_ratio`（無正例組抽樣）。
+> - 丟 NULL entity 也是一個共用步驟 `drop_rows_with_null_entity`，回傳「丟完的 keys」與「有沒有丟」。第二個值只有 `split_train_keys` 用：切完 train_dev 是空的時候，靠它分辨「根本沒有列進來」與「列都因 NULL 被丟了」。警告那一行以 `<split> keys:` 開頭（`train/train_dev`、`val`、`test`）。
+> - 上文「和今天的差別」少寫兩件：
+>   - 「val 抽樣時默默丟」只對抽樣單位（`val_sample_keys`）的欄成立：抽樣是對那幾欄 inner join，其他 entity 欄是 NULL 的列會留下。只有多欄 entity 又宣告了較粗的 `val_sample_keys` 時才碰得到。
+>   - 在選 key 那一步留下的 NULL entity 列（val 不抽樣時、val 抽樣但 NULL 在抽樣單位以外、test），到了丟無正例組那一步（`filter_val_keys`／`filter_test_keys`）接不到 label，算無正例組。所以：
+>     - r ＝ 0（預設）時，它們本來就在那一步被默默丟掉，落地內容不含這些列。本票對 r ＝ 0 的改變只是「改在選 key 時丟，而且警告」，落地內容不變。
+>     - r > 0 時，今天它們可能被抽中、帶著權重 1／r 留進 model_input；本票之後一律丟掉。〈版本與順序的約束〉第 2 條說的「有 NULL entity 時落地內容會變」，指的是這種情況與 train 的切分單位以外欄為 NULL 的情況。
+> - 決定 6 的「B10 擋不到」也寫進了 `select_val_keys` 的 docstring；使用者文件在 `docs/pipelines/dataset.md` §3.1 與 §9。
+> - 審查補的一件，決定 6 照原樣實作、沒有改：「三個 split 承擔同一個風險」的後果其實不一樣。
+>   - train 有重複列，效果大約等於那些列權重加倍。
+>   - test 有重複列，壞的是對外報告的指標：重複列原樣進預測表，evaluation 只查 `label_table` 有沒有重複鍵（`prepare_eval_data`），不查預測表。組內排名用 `row_number`，同一個正例的兩份拷貝各佔一個名次，average precision 會偏高，而且不報錯。
+>   - 以前擋住這件事的，是 `select_test_keys` 的 `dropDuplicates`。
+>   - 不改的理由：決定 6 否決「全部去重」的第二個理由（資料品質歸上游，ADR-0006）對 val／test 一樣成立，而且本份原本就接受「自備 `sample_pool` 沒人檢查」。要在下游擋，比較一致的做法是 evaluation 對預測表的重複鍵報錯（它對 `label_table` 就是這樣做），不是 dataset 靜默去重。這件事沒有開票。
+
 ## 決定 7　資料閘的 node 只寫「查什麼、什麼算失敗」，機制進 `steps/`
 
 **規則**：

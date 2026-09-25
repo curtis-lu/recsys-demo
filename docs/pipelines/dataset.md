@@ -87,6 +87,13 @@ train、val、test 日期集合必須互斥（一致性不變量 A24，在 `data
 
 「一個 entity」指哪些欄由 `train_split_keys` 宣告，**預設是完整的 `schema.entity`**。單欄 entity 下沒有第二種讀法；多欄時若你的洩漏單位比 query group 粗（例如 entity 是 `[cust_id, acct_id]`，而同一客戶的多個帳戶不得跨邊），就填上較粗的那個子集。填了不在 `entity` 裡的欄名會被不變量 A29 在 CLI 進入點擋下。為什麼這個鍵與 `val_sample_keys` 是兩個而不是一個，見 [ADR-0016](../adr/0016-split-unit-declared-by-two-keys.md)。
 
+**entity 任一欄是 NULL 的列，三個 split 選 key 時都會丟掉，並印一行警告**，寫明是哪個 split 的 keys、每一欄各有幾列 NULL（例如 `val keys: dropped 2 row(s) whose entity is NULL (NULL by column: cust_id=2)`）。這種列不屬於任何 entity，接不到特徵，也接不到 label。
+- train 在 `split_train_keys` 查，看的是已抽樣、落地的 `sample_keys`，而且看完整的 `schema.entity`，不只切分單位。
+- val、test 在各自選 key 時查，只看自己的月份（test 只看這次處理的月份）；val 在抽樣之前查。
+- 只警告、不中止：這項資料品質歸上游 source ETL 的 `primary_key_not_null`（[ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md)）。
+
+2026-09 之前只有 train 會丟並警告，而且只看切分單位：切分單位以外的 entity 欄是 NULL 的列會留在 train。val 抽樣時，抽樣單位（`val_sample_keys`）的欄是 NULL 的列會被默默丟掉，其他 entity 欄是 NULL 的列則留著；留著的這些、val 不抽樣時的、以及 test 的，都留到丟無正例組那一步，`*_zero_positive_group_ratio` 是 0 時在那裡被默默丟掉（它接不到 label，算無正例組），大於 0 時可能留進 model_input（[ADR-0029](../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 5）。
+
 ### 3.2 Train 分層抽樣
 
 | 設定 | 預設 | 說明 | 版本影響 |
@@ -781,7 +788,7 @@ B6 擋下來時，錯誤訊息會**逐欄點名**（`feature column 'cust_segmen
 - 日期只檢查集合互斥，不檢查時間順序與 label 觀察窗。
 - `random_seed` 會改變抽樣結果，但目前未納入 dataset 版本 hash。
 - 版本 hash 包含 `feature_table` schema fingerprint（宣告了候選層級特徵表時也包含它的），不包含 source rows 的資料值或 source ETL SQL。
-- `sample_pool` identity 唯一性由 source ETL 品質檢查負責；dataset 不會在抽樣前再次 deduplicate。
+- `sample_pool` 的 identity 唯一性由 source ETL 的 `max_duplicate_key_ratio` 檢查負責；dataset 的三個 split 選 key 時都不去重（val、test 在 2026-09 之前各自 `dropDuplicates`，[ADR-0029](../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 6）。自己準備 `sample_pool`、不經過 source ETL 時，沒有任何東西檢查：重複的 identity 會變成重複的 keys 與 model_input 列，粒度閘 B10 也看不出來（兩邊一樣重複，列數仍相等）。
 - label left join 不到時會視為負例 `0`；必須確定 sparse label table 的語意確實如此。
 - feature left join 不到時會留下全 NULL feature 的列，dataset 不會將其視為缺少 entity 的硬錯誤。這是明文契約而非容忍，代價是「特徵缺失」與「特徵值真的是 NULL」在 model input 裡無法區分；契約與量測點見 §5。
 - val/test 預設排除零正例 query groups，因此產物不代表完整上線母體；設 `val_`／`test_zero_positive_group_ratio` > 0 會留下一部分並帶上設計權重（§3.7），權重不是無偏估計。

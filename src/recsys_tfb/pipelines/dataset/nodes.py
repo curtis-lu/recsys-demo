@@ -30,7 +30,6 @@ import logging
 
 import pandas as pd
 from pyspark.sql import DataFrame
-from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import (
     ZERO_POSITIVE_GROUP_WEIGHT_COL,
@@ -62,7 +61,6 @@ from recsys_tfb.core.consistency import (
 )
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_entity_grouping, get_schema
-from recsys_tfb.utils.hashing import ratio_to_threshold, spark_bucket
 from recsys_tfb.utils.item_columns import combine_item_columns, combined_item_value
 from recsys_tfb.pipelines.dataset.steps.categoricals import (
     collect_vocabularies_from_data,
@@ -99,14 +97,14 @@ from recsys_tfb.pipelines.dataset.month_plans import (
     collect_dataset_snap_dates,
 )
 from recsys_tfb.pipelines.dataset.steps.sampling import (
-    any_column_is_null,
     draw_can_drop_rows,
+    drop_rows_with_null_entity,
     keep_entities_drawn_under_ratio,
     keep_rows_drawn_under_ratio,
     key_output_columns,
     log_sampled_keys,
     sampling_columns,
-    warn_dropped_null_split_unit,
+    unit_drawn_under_ratio,
     with_effective_sample_ratio,
 )
 from recsys_tfb.pipelines.dataset.steps.scoping import (
@@ -345,9 +343,12 @@ def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
     shared through a helper: a helper holding four decisions is what ADR-0008
     §2 forbids, and spelling them out is what makes the node readable on its
     own. No other node gives the same four *answers* since #414 removed
-    ``select_calibration_keys``: ``select_val_keys`` draws per *entity* over a
-    de-duplicated population and carries nothing, and ``select_test_keys``
-    makes no draw at all.
+    ``select_calibration_keys``: ``select_val_keys`` draws per *entity* and
+    carries nothing, and ``select_test_keys`` makes no draw at all.
+
+    A row whose entity is NULL is not dropped here but in ``split_train_keys``,
+    over the landed ``sample_keys`` -- the smallest frame train has, so the
+    check scans the least.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -402,14 +403,11 @@ def split_train_keys(
     """Split sampled keys into train and train-dev by entity ratio.
 
     All rows of a given entity are assigned to the same split, so no entity
-    straddles the boundary. That holds by construction here: the side a row
-    lands on is a pure function of its own split columns, so two rows of one
-    entity cannot disagree. It used to be assembled instead — distinct the
-    entities, bucket them, join each side back — which produced the same answer
-    through three shuffles and made "no straddle" a property of the join keys
-    rather than of the expression. See
-    docs/notes/2026-09-06-dataset-pipeline-profiling.md §6.1 for the measurement
-    (6.7s → 3.6s on 16M keys, four Exchanges → none).
+    straddles the boundary. That holds by construction: the side a row lands on
+    is a pure function of its own split columns (``unit_drawn_under_ratio``,
+    which records the distinct-and-join shape it replaced). This node was the
+    first to drop that shape; docs/notes/2026-09-06-dataset-pipeline-profiling.md
+    §6.1 has the measurement (6.7s → 3.6s on 16M keys, four Exchanges → none).
 
     Which columns constitute "a given entity" here is the user's to declare
     (``dataset.train_split_keys``, defaulting to the whole ``schema.entity``): a
@@ -419,49 +417,49 @@ def split_train_keys(
 
     Two guards stay in the node, because both read data that only exists at run
     time. Rule 11 of docs/agents/pipeline-node-design.md asks which kind each
-    one is, since they send the reader to different people: the NULL split unit
+    one is, since they send the reader to different people: the NULL entity
     is a **pre-check** (the input arrived broken; the fix is upstream), the
     empty train-dev split is a **post-condition** (this node's own ratio and
     sample produced a useless result).
 
     Logging still triggers no action. Each guard costs one ``isEmpty``, plus one
-    aggregate on its own failing path only — and note which way ``isEmpty``
-    short-circuits: it stops at the first matching row, so a *dirty* input
-    answers immediately while a clean one has to read ``split_cols`` across the
-    whole frame to prove there is nothing there. That is a narrow scan with no
-    shuffle, and it is cheaper than the unconditional second pass a plain
-    ``count`` would cost on every run.
+    aggregate on its own failing path only. On clean input the NULL check's
+    ``isEmpty`` reads the entity columns across the whole frame (see
+    ``drop_rows_with_null_entity``) — a narrow scan with no shuffle, cheaper
+    than the unconditional second pass a plain ``count`` would cost on every
+    run.
     """
     # Decision — the split unit: what the user declared, else the whole entity.
     split_cols = get_entity_grouping(parameters, "train_split_keys")
+    entity_cols = get_schema(parameters)["entity"]
 
     train_dev_ratio = parameters["dataset"]["train_dev_ratio"]
     seed = parameters.get("random_seed", 42)
 
-    # Decision — a row whose split unit is NULL is dropped, out loud.
-    # It belongs to no entity, so it joins to neither features nor labels and
-    # would reach training as an all-NULL row. Dropping is what the old
-    # distinct-and-join did for free (NULL never equals NULL); a row-wise bucket
-    # would happily keep it, since concat_ws skips NULLs. Warn rather than
-    # raise: ADR-0006 puts data-quality checks upstream in source_etl, whose
-    # primary_key_not_null owns exactly this, and raising here would stop a
-    # user's slightly dirty source table from running at all.
-    missing_split_unit = any_column_is_null(split_cols)
-    dropped = sample_keys.filter(missing_split_unit)
-    dropped_any = not dropped.isEmpty()
-    if dropped_any:
-        warn_dropped_null_split_unit(dropped, split_cols)
-    keys = sample_keys.filter(~missing_split_unit)
+    # Decision — a row whose entity is NULL in any column is dropped, out loud,
+    # the same as val and test do when they select their keys (ADR-0029
+    # decision 5). The whole entity, not just the split unit: a row with a
+    # NULL outside the split unit still has a bucket, but it belongs to no
+    # entity, joins to neither features nor labels, and would reach training
+    # as a row of NULL features. Checked here rather than in
+    # select_train_keys because sample_keys is already drawn, so the scan is
+    # the smallest train has. Warn rather than raise: ADR-0006 puts
+    # data-quality checks upstream in source_etl, whose primary_key_not_null
+    # owns exactly this, and raising here would stop a user's slightly dirty
+    # source table from running at all.
+    keys, dropped_any = drop_rows_with_null_entity(
+        sample_keys, entity_cols, split="train/train_dev",
+    )
 
-    # Decision — which side a row lands on: the bucket of its own split unit.
-    # The threshold is computed once and the two filters negate each other on
-    # it, so they are a complete and disjoint partition regardless of how many
-    # actions Spark runs against this plan.
-    threshold = ratio_to_threshold(train_dev_ratio)
-    bucket = spark_bucket(keys, split_cols, seed, site="split_train_dev")
-
-    train_keys = keys.filter(bucket >= F.lit(threshold))
-    train_dev_keys = keys.filter(bucket < F.lit(threshold))
+    # Decision — which side a row lands on: the draw of its own split unit, so
+    # every row of one unit lands on the same side. The two filters are one
+    # predicate and its negation, so they are a complete and disjoint
+    # partition regardless of how many actions Spark runs against this plan.
+    to_dev = unit_drawn_under_ratio(
+        keys, split_cols, train_dev_ratio, seed, site="split_train_dev",
+    )
+    train_keys = keys.filter(~to_dev)
+    train_dev_keys = keys.filter(to_dev)
 
     # An empty train_dev is invisible downstream: it is the early-stopping
     # validation set for every HPO trial (training/nodes.py passes
@@ -469,10 +467,10 @@ def split_train_keys(
     # silently runs its full round budget with early stopping never firing —
     # no error, no warning, just worse models and a longer search. Costs one
     # Spark action; see ADR-0005 for the fallback if that ever matters at scale.
-    # `!= 0`, not `> 0`: a negative ratio makes ratio_to_threshold return a
-    # negative threshold, so `bucket < threshold` is empty and
-    # `bucket >= threshold` takes everything — the same silent state, reached
-    # by one stray minus sign. Only an exact 0 means "no dev split wanted".
+    # `!= 0`, not `> 0`: under a negative ratio no bucket draws under it, so
+    # `to_dev` holds for no row and train takes everything — the same silent
+    # state, reached by one stray minus sign. Only an exact 0 means "no dev
+    # split wanted".
     if train_dev_ratio != 0 and train_dev_keys.isEmpty():
         n_entities = keys.select(*split_cols).distinct().count()
         split_unit = ", ".join(split_cols)
@@ -480,10 +478,10 @@ def split_train_keys(
             # Two ways to get here, and they are fixed in different places, so
             # the message must not name the wrong one. Rows can never have
             # arrived (a sampling or partition-filter problem), or they can
-            # have arrived and all been dropped for a NULL split unit (a source
+            # have arrived and all been dropped for a NULL entity (a source
             # table problem). The old wording only knew the first.
             cause = (
-                "Every row was dropped for a NULL split unit — see the warning "
+                "Every row was dropped for a NULL entity — see the warning "
                 "above — so the split itself received nothing. Fix the source "
                 "table's key columns."
                 if dropped_any else
@@ -528,6 +526,19 @@ def select_val_keys(
     artifacts are keyed by. Register it there and a new draw unit would read
     back the val parquet drawn under the old one, silently. See
     docs/adr/0016-split-unit-declared-by-two-keys.md.
+
+    Nothing here de-duplicates (ADR-0029 decision 6). Identity uniqueness in
+    ``sample_pool`` is ``source_etl``'s ``max_duplicate_key_ratio`` check; a
+    ``sample_pool`` the user builds without ``source_etl`` has nobody checking
+    it, and a duplicated identity then comes out as duplicated keys and
+    duplicated model_input rows. B10 cannot see that: keys and model_input are
+    duplicated alike, so their row counts still match.
+
+    One guard runs on data, so it stays in the node: the NULL-entity drop is a
+    **pre-check** (rule 11 of docs/agents/pipeline-node-design.md — the input
+    arrived broken, the fix is upstream), and it warns rather than raises. It
+    costs one ``isEmpty`` over the val months' entity columns, plus one
+    aggregate only when there is something to report.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -542,10 +553,19 @@ def select_val_keys(
     seed = parameters.get("random_seed", 42)
 
     # Decision — eligibility: only the configured val months.
-    val_labels = sample_pool.filter(months_filter_as_date(time_col, val_dates))
-    # Decision — the val population is every distinct key, not a draw over rows:
-    # unlike the train side this does not lean on sample_pool's primary key.
-    all_keys = val_labels.select(*identity_key).dropDuplicates()
+    val_pool = sample_pool.filter(months_filter_as_date(time_col, val_dates))
+    # Decision — the val population is every key in those months, trusting
+    # sample_pool's primary key as train does rather than de-duplicating it.
+    all_keys = val_pool.select(*identity_key)
+    # Decision — a row whose entity is NULL in any column is dropped, out loud,
+    # before the draw (ADR-0029 decision 5). It belongs to no entity, so it
+    # joins to neither features nor labels. Before the draw, because the draw
+    # would otherwise decide it -- a NULL still hashes to a bucket -- and the
+    # full population would keep it. Checked after the month filter, so it
+    # scans the val months only.
+    all_keys, _ = drop_rows_with_null_entity(
+        all_keys, schema["entity"], split="val",
+    )
 
     if val_sample_ratio >= 1.0:
         logger.info("Val keys (full population)")
@@ -573,6 +593,15 @@ def select_test_keys(
     Restricted to ``month_plan.to_process`` (ADR-0002). Months that already
     landed are left alone: the write is a dynamic partition overwrite, so an
     absent month means "untouched", not "deleted".
+
+    Nothing here de-duplicates (ADR-0029 decision 6); what that leans on, and
+    what is unguarded when ``sample_pool`` does not come from ``source_etl``,
+    is in ``select_val_keys``.
+
+    The NULL-entity drop is a **pre-check** that warns rather than raises, as
+    in ``select_val_keys``. It costs one ``isEmpty`` over the entity columns
+    of the months this run processes, plus one aggregate only when there is
+    something to report.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -581,8 +610,20 @@ def select_test_keys(
     # (ADR-0027); a single declared column comes back untouched.
     sample_pool = combine_item_columns(sample_pool, schema, "sample_pool")
 
-    test_labels = sample_pool.filter(months_filter_as_date(time_col, month_plan.to_process))
-    all_keys = test_labels.select(*identity_key).dropDuplicates()
+    # Decision — eligibility: only the months this run processes.
+    test_pool = sample_pool.filter(
+        months_filter_as_date(time_col, month_plan.to_process)
+    )
+    # Decision — the test population is every key in those months, trusting
+    # sample_pool's primary key rather than de-duplicating it.
+    all_keys = test_pool.select(*identity_key)
+    # Decision — a row whose entity is NULL in any column is dropped, out loud
+    # (ADR-0029 decision 5): it belongs to no entity, so it joins to neither
+    # features nor labels. Checked after the month filter, so it scans only
+    # the months this run processes.
+    all_keys, _ = drop_rows_with_null_entity(
+        all_keys, schema["entity"], split="test",
+    )
 
     logger.info("Test keys (full population)")
     return all_keys

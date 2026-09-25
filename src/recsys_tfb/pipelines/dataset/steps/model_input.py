@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
-from recsys_tfb.utils.hashing import ratio_to_threshold, spark_bucket
+from recsys_tfb.pipelines.dataset.steps.sampling import unit_drawn_under_ratio
 
 if TYPE_CHECKING:
     from pyspark.sql import Column, DataFrame
@@ -168,12 +168,14 @@ def _kept_under_ratio(
     own draw lands under ``ratio``.
 
     Private and shared by the draw and its count, so the two can never keep
-    different groups. The bucket hashes ``group_cols`` alone, so every row of
-    one group gets the same bucket — that, not a join, is what keeps or drops
-    a group whole.
+    different groups. The draw is the pipeline's one whole-unit mechanism,
+    with the query group as the unit: it hashes ``group_cols`` alone, so every
+    row of one group gets the same answer — that, not a join, is what keeps or
+    drops a group whole.
     """
-    bucket = spark_bucket(df, group_cols, seed, site=ZERO_POSITIVE_GROUP_SITE)
-    return has_positive | (bucket < F.lit(ratio_to_threshold(ratio)))
+    return has_positive | unit_drawn_under_ratio(
+        df, group_cols, ratio, seed, site=ZERO_POSITIVE_GROUP_SITE,
+    )
 
 
 def keep_zero_positive_groups_drawn_under_ratio(
