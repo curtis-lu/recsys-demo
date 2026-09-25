@@ -51,7 +51,7 @@ class TestLoaderExpandsRanges:
     ):
         """The acceptance test of #374: a range hashes to what its list hashes.
 
-        ``tests/test_core/test_versioning.py`` pins ``d108b398``／``913be727``
+        ``tests/test_core/test_versioning.py`` pins ``a27de967``／``913be727``
         for a literal fixture whose ``train_snap_dates`` lists the twelve month
         ends of 2023. The same fixture is written here with that list as a
         range and read the way the dataset command reads it (``__main__.py``

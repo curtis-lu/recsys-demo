@@ -1,8 +1,8 @@
 {
   "measured": {
     "date": "2026-09-26",
-    "code_commit": "feat/464-version-config 主 commit 之前的工作樹（收尾時在最終 commit 上以 --compare 重驗）",
-    "how": "run_e2e.sh 跑 feat/464-version-config（#464，ADR-0029 決定 9、10、13、15）：carry_columns 改進 train_variant_id、base_dataset_version 的雜湊多一個 dataset 產物格式版本常數（值 1）、刪 category_mappings.json、preprocessor_on_disk 由 CLI 推出、drop_columns 的預設值只留 schema 角色（這份 conf 明寫了 drop_columns，走不到）。跑之前先寫下預期：三個版本號都變（這份 conf 寫了 carry_columns，所以 train_variant_id 也變；model_version 含 base）；dataset 層少 category_mappings.json；其餘各層內容指紋全部不變。結果與預期相同：同一天先在改動前的程式（main 1562de9c）上跑 --compare，與舊基準逐項一致；改動後與那次比，59 項裡只有三個版本號與 category_mappings.json 的兩項不同，source_etl、四個 model_input、preprocessor.json、training_eval_predictions、evaluation 的 JSON 全部相同。"
+    "code_commit": "f1a612f8",
+    "how": "run_e2e.sh 跑 feat/464-version-config（#464，ADR-0029 決定 9、10、13、15）：carry_columns 改進 train_variant_id、base_dataset_version 的雜湊多一個 dataset 產物格式版本常數（值 1）、刪 category_mappings.json、preprocessor_on_disk 由 CLI 推出、drop_columns 的預設值只留 schema 角色（這份 conf 明寫了 drop_columns，走不到）。跑之前先寫下預期：三個版本號都變（這份 conf 寫了 carry_columns，所以 train_variant_id 也變；model_version 含 base）；dataset 層少 category_mappings.json；其餘各層內容指紋全部不變。結果與預期相同：同一天先在改動前的程式（main 1562de9c）上跑 --compare，與舊基準逐項一致；改動後與那次比，59 項裡只有三個版本號與 category_mappings.json 的兩項不同，source_etl、四個 model_input、preprocessor.json、training_eval_predictions、evaluation 的 JSON 全部相同。本檔即在 f1a612f8 的程式碼上跑出的 data/digest.json（跑的時候還沒 commit，src 與 f1a612f8 相同）；收審查的 commit 只改 docstring 與一個私有常數名，並以 run_e2e.sh --compare 對本檔重驗。"
   },
   "noisy": {},
   "versions": {

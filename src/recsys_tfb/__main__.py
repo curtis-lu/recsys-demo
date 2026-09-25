@@ -339,7 +339,7 @@ def _resolve_catalog(config: ConfigLoader, params: dict, runtime_params: dict):
 #: The second catalog name for ``preprocessor``'s file. A node may not read and
 #: write one name (architecture constraint A6), so the fit reads the file it is
 #: about to overwrite under this one.
-PREPROCESSOR_ON_DISK = "preprocessor_on_disk"
+_PREPROCESSOR_ON_DISK = "preprocessor_on_disk"
 
 
 def _derive_preprocessor_on_disk(catalog_config: dict) -> list[str]:
@@ -368,10 +368,10 @@ def _derive_preprocessor_on_disk(catalog_config: dict) -> list[str]:
     preprocessor = catalog_config.get("preprocessor")
     if preprocessor is None:
         return []
-    written = catalog_config.get(PREPROCESSOR_ON_DISK)
+    written = catalog_config.get(_PREPROCESSOR_ON_DISK)
     if written is None:
         if preprocessor.get("type") == "JSONDataset":
-            catalog_config[PREPROCESSOR_ON_DISK] = {**preprocessor, "optional": True}
+            catalog_config[_PREPROCESSOR_ON_DISK] = {**preprocessor, "optional": True}
         return []
     return preprocessor_on_disk_path_errors(
         preprocessor["filepath"], written.get("filepath", ""),
@@ -813,7 +813,7 @@ def _execute_pipeline(
     # derived exactly when a node reads it (dataset's fit, evaluation's
     # prepare_eval_data). Before the catalog is built and before --dry-run /
     # --list-nodes return, so a path to another file stops every kind of run.
-    if any(PREPROCESSOR_ON_DISK in node.inputs for node in pipe.nodes):
+    if any(_PREPROCESSOR_ON_DISK in node.inputs for node in pipe.nodes):
         on_disk_errors = _derive_preprocessor_on_disk(catalog_config)
         if on_disk_errors:
             for line in on_disk_errors:

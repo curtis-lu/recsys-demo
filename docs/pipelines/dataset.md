@@ -401,7 +401,7 @@ schema:
 - `build_val_model_input`／`build_test_model_input` 印一行警告，列出有哪些新 item（不列列數）。它從已落地的 `val_keys`／`test_keys` 讀 item 那一欄（test 只讀本次要組裝的月份），不從還沒落地的 model input 數——那樣會把整段 join 再跑一次；keys 裡的 item 就是 model input 裡的 item（組裝全是從 keys 出發的 left join）。比對的是編碼用的同一份前處理器；`--only-test-months` 不重跑 fit，讀的就是磁碟上那份，不會拿今天的 train 時段資料重數。
 - 資料閘不再拿 `sample_pool` 跟清單比（沒有宣告的清單可比）；`label_table` 的 item 必須在 `sample_pool` 出現過，不然照擋（B1）。
 
-**同一版本下清單不能變（不變量 B19）**：清單不在 conf 裡，所以不會進 `base_dataset_version`。同一個版本重跑、而 train 時段的 `sample_pool` 變了（例如回補），數出的清單就可能跟磁碟上那份不同；照樣覆寫的話，用舊清單訓練的模型推論時編號全部錯位，而且不報錯。所以 `fit_preprocessor_metadata` 在覆寫前先讀磁碟上的舊檔（catalog 條目 `preprocessor_on_disk`，同一個檔、換個條目名讓 node 讀得到自己要覆寫的東西；這個條目由 CLI 從 `preprocessor` 推出，部署的 catalog 不用寫，寫了而路徑不同會在開跑前擋下，A56），不同就擋下，訊息列出多了、少了哪些 item。要照新資料建，**先讓版本號變動**：改 `dataset.train_snap_dates`，或把清單逐一寫進 `schema.categorical_values.<item>`（版本號從此含著這份清單）。逐一列出時要列 `sample_pool` 在 train、val、test 時段出現過的**每一個** item（B1），連 val／test 才出現的新 item 也要列；離線推論要照寫一份相同的 `inference.products`（A4、A27）。只貼上 train 時段數出的那份，遇到新 item 會被 B1 擋下。版本號一變就建一個新目錄，舊模型照樣讀自己那份前處理器。刪掉 `data/dataset/<base_dataset_version>/`（與該版本的 dataset 分區）再重建是最後手段：推論與評估讀的前處理器就是那個目錄裡的檔，模型目錄裡沒有副本，所以這個版本上**沒有重訓的每個模型（包含已 promote 的）都會拿錯位的 item 編號評分，結果是錯的，而且不報錯**——正是 B19 要擋的事。這道檢查在 fit 裡，所以 `--from-node fit_preprocessor_metadata` 也擋得到。
+**同一版本下清單不能變（不變量 B19）**：清單不在 conf 裡，所以不會進 `base_dataset_version`。同一個版本重跑、而 train 時段的 `sample_pool` 變了（例如回補），數出的清單就可能跟磁碟上那份不同；照樣覆寫的話，用舊清單訓練的模型推論時編號全部錯位，而且不報錯。所以 `fit_preprocessor_metadata` 在覆寫前先讀磁碟上的舊檔（catalog 條目 `preprocessor_on_disk`，同一個檔、換個條目名讓 node 讀得到自己要覆寫的東西；CLI 從 `preprocessor` 推出，不用寫），不同就擋下，訊息列出多了、少了哪些 item。要照新資料建，**先讓版本號變動**：改 `dataset.train_snap_dates`，或把清單逐一寫進 `schema.categorical_values.<item>`（版本號從此含著這份清單）。逐一列出時要列 `sample_pool` 在 train、val、test 時段出現過的**每一個** item（B1），連 val／test 才出現的新 item 也要列；離線推論要照寫一份相同的 `inference.products`（A4、A27）。只貼上 train 時段數出的那份，遇到新 item 會被 B1 擋下。版本號一變就建一個新目錄，舊模型照樣讀自己那份前處理器。刪掉 `data/dataset/<base_dataset_version>/`（與該版本的 dataset 分區）再重建是最後手段：推論與評估讀的前處理器就是那個目錄裡的檔，模型目錄裡沒有副本，所以這個版本上**沒有重訓的每個模型（包含已 promote 的）都會拿錯位的 item 編號評分，結果是錯的，而且不報錯**——正是 B19 要擋的事。這道檢查在 fit 裡，所以 `--from-node fit_preprocessor_metadata` 也擋得到。
 
 **開跑前查不了的，挪到清單數出來之後查**：`sample_ratio_overrides` 的鍵裡的 item（A5）在 fit 數完清單後查；`training.sample_weights` 的鍵裡的 item（A9c）在 training 讀到前處理器時查（`select_features`）。打錯字一樣擋。
 
@@ -687,7 +687,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | `feature_table` 欄位順序 | ✓ | feature 順序會傳入 preprocessor，因此 fingerprint 對順序敏感 |
 | 宣告或拿掉 `candidate_feature_table` 條目 | ✓ | 宣告時，它的 schema fingerprint 以自己的 payload 鍵 `candidate_feature_table_fingerprint` 進 hash，也寫進 base 的 `manifest.json`；沒宣告時 payload 裡沒有這個鍵，所以不用這張表的部署，版本號完全不受它影響 |
 | 候選層級特徵表的欄位名稱、型別、順序 | 只在宣告時 ✓ | 與 `feature_table` 同一套 fingerprint 規則。用另一個 payload 鍵而不是併進 `feature_table` 那一個：兩張表接的鍵不同，同一組欄放在哪一張，是不同的 dataset |
-| dataset 產物格式版本（`core/versioning.py` 的 `DATASET_ARTIFACT_FORMAT_VERSION`） | ✓ | 框架自己的整數，不是設定。程式改了 dataset 落地的內容、設定卻沒動時，框架把它加 1，讓每個部署的 base 都翻一次、在新版本下重建（[ADR-0029](../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 15）。升級到加了 1 的框架之後要重建 dataset、重訓；重訓之前，「只加評估月份」的流程對現役模型用不了（[新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)） |
+| dataset 產物格式版本（`core/versioning.py` 的 `DATASET_ARTIFACT_FORMAT_VERSION`） | ✓ | 框架自己的整數，不是設定。程式改了 dataset 落地的內容、設定卻沒動時，框架把它加 1，讓每個部署的 base 都翻一次、在新版本下重建（[ADR-0029](../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 15）。升級後要做什麼見 §7.4 |
 
 以下內容目前**不會**改變任何 dataset version：
 

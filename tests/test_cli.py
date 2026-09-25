@@ -4818,8 +4818,8 @@ class TestDerivePreprocessorOnDisk:
     def test_a_preprocessor_stored_as_another_type_is_not_derived_from(self):
         """``optional`` is a JSONDataset argument; no other dataset type loads
         a missing file as ``None``. A derived entry of another type would fail
-        every first run, so none is made — the Runner then reports the missing
-        input, as it did before the entry was derived."""
+        every first run, so none is made and the Runner reports the missing
+        input."""
         catalog = {"preprocessor": {"type": "PickleDataset", "filepath": "p.pkl"}}
 
         assert self._derive(catalog) == []
@@ -4854,12 +4854,15 @@ class TestPreprocessorOnDiskWiring:
 
         assert "preprocessor_on_disk" not in built.call_args.args[0]
 
-    @pytest.mark.parametrize("dry_run", [False, True])
+    @pytest.mark.parametrize("mode", [
+        {}, {"dry_run": True}, {"list_nodes": True},
+    ], ids=["run", "dry_run", "list_nodes"])
     @pytest.mark.parametrize("pipeline", ["dataset", "evaluation"])
     def test_another_file_stops_the_run_before_the_catalog_is_built(
-        self, pipeline, dry_run, caplog,
+        self, pipeline, mode, caplog,
     ):
-        """--dry-run too: a preview must not promise a run that would stop."""
+        """--dry-run and --list-nodes too: a preview must not promise a run
+        that would stop."""
         import typer
 
         from recsys_tfb.__main__ import _execute_pipeline
@@ -4871,9 +4874,7 @@ class TestPreprocessorOnDiskWiring:
         with patch("recsys_tfb.__main__.DataCatalog") as built, \
                 patch("recsys_tfb.__main__.Runner") as runner, \
                 caplog.at_level(logging.ERROR), pytest.raises(typer.Exit):
-            _execute_pipeline(
-                pipeline, {}, {}, config, {}, "local", dry_run=dry_run,
-            )
+            _execute_pipeline(pipeline, {}, {}, config, {}, "local", **mode)
 
         built.assert_not_called()
         runner.assert_not_called()

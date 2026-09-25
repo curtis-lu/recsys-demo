@@ -645,9 +645,9 @@ Layer 1 — config-static (implemented here; aggregated by
   earlier; changing a train-only key (the train sampling settings, and
   ``carry_columns``) moves ``train_variant_id`` alone, and before this check
   the run went ahead and training then read the empty variant as 0 rows,
-  with no error anywhere (#334). Two messages, because
-  they are two situations: nothing under the base at all (never built), or
-  the base without this variant (a train-only setting changed).
+  with no error anywhere (#334). Two messages, because they are two
+  situations: nothing under the base at all (never built), or the base
+  without this variant (a train-only setting changed).
   Predicate: ``train_version_landed_errors`` (returns errors; the dataset
   command raises before any node runs or any manifest is written). The facts
   are metastore partition listings the command collects through
@@ -684,9 +684,11 @@ window of ``evaluation.snap_date`` and be a time value sample_pool holds there.
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
 flags), A22/A46/A51 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53 (config keys whose
-harm belongs to one pipeline), A28/A39/A45/A47/A56 (the resolved catalog), A30 (``--env``
+harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags), A55 (``--only-test-months`` + the
-metastore).
+metastore). A56 needs the resolved catalog too, but hangs off no single command:
+the CLI checks it where it builds the catalog, for every pipeline whose nodes
+read ``preprocessor_on_disk``.
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
 + B13 + B14 + B15 + B16 + B17 + B18 + B19 implemented and wired):

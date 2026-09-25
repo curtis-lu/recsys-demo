@@ -425,11 +425,17 @@ CLI 只留通用的部分：寫 manifest、執行 pipeline。
 
 > **實作註記（2026-09-26，#464）**：
 > - 常數叫 `DATASET_ARTIFACT_FORMAT_VERSION`，值是 1，放進雜湊時的鍵名是 `dataset_artifact_format_version`。上文的「加 1」就是從「沒有這個鍵」到 1。以後什麼時候要加 1，寫在 `core/versioning.py` 的模組 docstring。
-> - 寫死雜湊值的測試有三個跟著重新記錄，理由寫在各自的 docstring：
->   - `test_versioning.py::TestSplitUnitKeysVersionRouting::test_a_config_declaring_neither_key_still_hashes_to_the_old_answer`
->   - `test_versioning.py::TestCandidateFeatureTableFingerprint::test_without_one_the_id_is_the_one_main_computed`
->   - `test_date_ranges.py::TestLoaderExpandsRanges::test_a_range_hashes_to_the_version_its_list_had_before_ranges_existed`
-> - 三個測試裡 `train_variant_id` 的寫死值都沒變：它們的設定沒有 `carry_columns`。
+> - **更正上文「程式改了 dataset 的落地內容、設定卻沒動時」的範圍**（審查的「本份哪裡寫錯」視角查出）：
+>   - 要逐個部署問，不是逐個改動問。新增一個設定鍵、預設值又跟舊行為不同時，改動本身「動了設定」，但沒寫那個鍵的部署，雜湊輸入一個字都沒變，內容卻變了。這跟上文說決定 9 蓋不住的是同一種洞。
+>   - 「dataset 的程式」不只 `pipelines/dataset/`，還包括它 import 的模組。例如多欄 item 的分隔字元 `ITEM_SEPARATOR` 在 `core/schema.py`，改它會改掉 keys、model_input 與 `preprocessor.json`。
+>   - 兩件都寫進了 `core/versioning.py` 的模組 docstring。
+> - 寫死雜湊值的測試有四個：
+>   - 三個照預期重新記錄，理由寫在各自的 docstring：
+>     - `test_versioning.py::TestSplitUnitKeysVersionRouting::test_a_config_declaring_neither_key_still_hashes_to_the_old_answer`
+>     - `test_versioning.py::TestCandidateFeatureTableFingerprint::test_without_one_the_id_is_the_one_main_computed`
+>     - `test_date_ranges.py::TestLoaderExpandsRanges::test_a_range_hashes_to_the_version_its_list_had_before_ranges_existed`
+>   - 第四個 `test_versioning.py::TestCandidateFeatureTableFingerprint::test_declaring_one_moves_the_id` 用 `!=` 比一個寫死的舊值。舊值重新記錄之後，這條斷言不論候選表的 fingerprint 有沒有進雜湊都會過。改成跟「沒宣告候選表」當場算出的 ID 比，不再寫死。
+>   - 沒變的寫死值：`test_a_config_declaring_neither_key_still_hashes_to_the_old_answer` 與 `test_date_ranges.py` 那一個另外寫死了 `train_variant_id`（`913be727`），它們的設定沒有 `carry_columns`；`test_without_one_the_id_is_the_one_main_computed` 寫死的 feature table fingerprint（`88252218`）只看特徵表的欄，常數不進它的雜湊。
 
 ---
 

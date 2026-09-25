@@ -89,9 +89,10 @@ test_model_input:
     - {name: prod_name, type: STRING}
 
 # fit_preprocessor_metadata 在覆寫這個檔之前，要先讀磁碟上既有的版本（#379，B19）；evaluation
-# 的 prepare_eval_data 也讀它。一個 node 不能讀寫同一個條目名（A6），所以它們用第二個名字
-# preprocessor_on_disk 讀同一個檔。那個條目由 CLI 從這一條推出（同一個 filepath、optional），
-# 不用寫（ADR-0029 決定 13）。寫了的話 filepath 必須跟這一條相同，否則開跑前擋下（A56）。
+# 的 prepare_eval_data 也讀它。一個 node 不能讀寫同一個條目名（architecture-constraints.md
+# 的 A6），所以它們用第二個名字 preprocessor_on_disk 讀同一個檔。那個條目由 CLI 從這一條
+# 推出（同一個 filepath、optional），不用寫（ADR-0029 決定 13）。寫了的話 filepath 必須跟
+# 這一條相同，否則開跑前擋下（core/consistency.py 的 A56）。
 preprocessor:
   type: JSONDataset
   filepath: data/dataset/${base_dataset_version}/preprocessor.json

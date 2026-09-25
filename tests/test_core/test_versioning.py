@@ -1083,6 +1083,10 @@ class TestCandidateFeatureTableFingerprint:
         ) == "b1024427"
 
     def test_declaring_one_moves_the_id(self):
+        """Compared with the undeclared ID computed now, not with a literal:
+        this test used to spell the pinned value above, and when #464 re-pinned
+        that one, the literal here went stale and the ``!=`` held whatever the
+        candidate fingerprint did."""
         fp = compute_feature_table_fingerprint(self._FEATURE_TABLE)
         candidate_fp = compute_feature_table_fingerprint(self._CANDIDATE_TABLE)
 
@@ -1090,7 +1094,9 @@ class TestCandidateFeatureTableFingerprint:
             _base_params(), _sample_schema(),
             feature_table_fingerprint=fp,
             candidate_feature_table_fingerprint=candidate_fp,
-        ) != "1f8b6d8f"
+        ) != compute_base_dataset_version(
+            _base_params(), _sample_schema(), feature_table_fingerprint=fp,
+        )
 
     def test_its_schema_moves_the_id(self):
         """Two candidate tables that differ by one column's type are two datasets."""
