@@ -446,8 +446,8 @@ def _warning_messages(caplog) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
 
 
-class TestSplitTrainKeysNullSplitUnit:
-    """A row whose split unit is NULL is dropped -- and said out loud.
+class TestSplitTrainKeysNullEntity:
+    """A row whose entity is NULL is dropped -- and said out loud.
 
     Dropping is the behaviour that was already there. The split used to be an
     ``inner join`` back onto a distinct entity list, and NULL never equals
@@ -466,10 +466,13 @@ class TestSplitTrainKeysNullSplitUnit:
     check), so raising here would audit the same thing twice, and would turn a
     user-supplied source table with a handful of NULL keys from "runs" into
     "will not run".
+
+    Here the entity is one column, so it is also the split unit; the case
+    where the two differ is in ``TestSplitTrainKeysTwoColumnEntity``.
     """
 
     def _keys(self, spark, entity_values):
-        """Keys with one row per entity value; ``None`` means a NULL split unit."""
+        """Keys with one row per entity value; ``None`` means a NULL entity."""
         rows = [
             (
                 pd.Timestamp(_SNAP_DATES[0]).to_pydatetime(),
@@ -517,7 +520,12 @@ class TestSplitTrainKeysNullSplitUnit:
         with caplog.at_level(logging.WARNING):
             split_train_keys(keys, params)
 
-        assert any("2 row" in m for m in _warning_messages(caplog))
+        warnings = _warning_messages(caplog)
+        assert len(warnings) == 1
+        assert "2 row" in warnings[0]
+        # Three splits drop these now (ADR-0029 decision 5), so the report has
+        # to say whose keys lost them.
+        assert warnings[0].startswith("train/train_dev keys:")
 
     def test_clean_input_warns_about_nothing(self, spark, parameters, caplog):
         params = {**parameters,
@@ -535,8 +543,8 @@ class TestSplitTrainKeysNullSplitUnit:
         """"No keys at all" has two causes, and they are fixed in two places.
 
         Rows that never arrived is a sampling / partition-filter problem. Rows
-        that arrived and were all dropped for a NULL split unit is a source
-        table problem. Under the old ``inner join`` the NULLs survived as one
+        that arrived and were all dropped for a NULL entity is a source table
+        problem. Under the old ``inner join`` the NULLs survived as one
         distinct entity, so this state was unreachable; row-wise it is one
         broken upstream column away, and the message that was written for the
         first cause names three settings that are all fine in the second.
@@ -546,7 +554,7 @@ class TestSplitTrainKeysNullSplitUnit:
                 split_train_keys(self._keys(spark, [None, None, None]), parameters)
 
         msg = str(ei.value)
-        assert "NULL split unit" in msg
+        assert "NULL entity" in msg
         assert "sample_ratio" not in msg
 
     def test_clean_input_pays_no_counting_action(
@@ -563,10 +571,11 @@ class TestSplitTrainKeysNullSplitUnit:
         """
         def _boom(*args, **kwargs):
             raise AssertionError(
-                "reported NULL split units on an input that has none")
+                "reported NULL entities on an input that has none")
 
         monkeypatch.setattr(
-            "recsys_tfb.pipelines.dataset.nodes.warn_dropped_null_split_unit", _boom)
+            "recsys_tfb.pipelines.dataset.steps.sampling.warn_dropped_null_entity",
+            _boom)
         params = {**parameters,
                   "dataset": {**parameters["dataset"], "train_dev_ratio": 0.5}}
         keys = self._keys(spark, list(_ENTITIES))
@@ -574,6 +583,134 @@ class TestSplitTrainKeysNullSplitUnit:
         train, train_dev = split_train_keys(keys, params)
 
         assert train.count() + train_dev.count() == len(_ENTITIES)
+
+
+def _with_null_entity_rows(spark, pool, month, n):
+    """``pool`` plus ``n`` rows in ``month`` whose ``cust_id`` is NULL.
+
+    Built on ``pool``'s own schema, so the union is by name and type, and the
+    NULL rows differ from the clean ones in the entity only.
+    """
+    rows = [
+        {
+            "snap_date": pd.Timestamp(month).to_pydatetime(),
+            "cust_id": None,
+            "cust_segment_typ": _SEGMENTS[0],
+            "prod_name": _PRODUCTS[i % len(_PRODUCTS)],
+            "label": 0,
+            "tenure_months": 12,
+            "channel_preference": _CHANNELS[0],
+        }
+        for i in range(n)
+    ]
+    null_rows = spark.createDataFrame(
+        [tuple(r[f.name] for f in pool.schema.fields) for r in rows], pool.schema,
+    )
+    return pool.unionByName(null_rows)
+
+
+class TestSelectValTestKeysNullEntity:
+    """ADR-0029 decision 5: val and test drop a NULL-entity row, out loud.
+
+    Before, val dropped it silently when it drew (the draw's inner join; NULL
+    never equals NULL) and kept it when it did not, and test always kept it --
+    a row that joins to neither features nor labels. Now every split drops it
+    where it selects its keys, and says so, as train always has.
+
+    Each split looks at its own months only. A NULL entity in some other month
+    is not this split's to report, and finding it would mean the check scanned
+    months the split never reads.
+    """
+
+    @pytest.mark.parametrize("ratio", [1.0, 0.5], ids=["full", "drawn"])
+    def test_val_drops_them_and_says_so(
+        self, spark, sample_pool, parameters, caplog, ratio,
+    ):
+        """Both val paths: the full population used to keep these rows, and
+        the draw used to drop them without a word."""
+        params = {**parameters,
+                  "dataset": {**parameters["dataset"], "val_sample_ratio": ratio}}
+        pool = _with_null_entity_rows(
+            spark, sample_pool, params["dataset"]["val_snap_dates"][0], 2)
+        if ratio < 1.0:
+            # What makes "before the draw" observable: the NULL unit draws
+            # over the threshold (``concat_ws`` skips the NULL, so it hashes
+            # the site and seed alone), so a draw run first would remove these
+            # rows silently and the warning below would never fire.
+            nulls = pool.filter(F.col("cust_id").isNull())
+            bucket = spark_bucket(nulls, ["cust_id"], params["random_seed"],
+                                  site="val_keys")
+            assert nulls.filter(bucket < F.lit(ratio_to_threshold(ratio))).count() == 0
+
+        with caplog.at_level(logging.WARNING):
+            keys = select_val_keys(pool, params)
+
+        assert keys.filter(F.col("cust_id").isNull()).count() == 0
+        warnings = _warning_messages(caplog)
+        assert len(warnings) == 1
+        assert warnings[0].startswith("val keys:")
+        assert "cust_id=2" in warnings[0]
+
+    def test_test_drops_them_and_says_so(self, spark, sample_pool, parameters, caplog):
+        pool = _with_null_entity_rows(
+            spark, sample_pool, parameters["dataset"]["test_snap_dates"][0], 2)
+
+        with caplog.at_level(logging.WARNING):
+            keys = select_test_keys(pool, _test_keys_plan(parameters), parameters)
+
+        assert keys.filter(F.col("cust_id").isNull()).count() == 0
+        assert keys.count() == _expected_key_count(parameters, "test")
+        warnings = _warning_messages(caplog)
+        assert len(warnings) == 1
+        assert warnings[0].startswith("test keys:")
+        assert "cust_id=2" in warnings[0]
+
+    def test_val_ignores_a_null_entity_outside_its_months(
+        self, spark, sample_pool, parameters, caplog,
+    ):
+        pool = _with_null_entity_rows(
+            spark, sample_pool, parameters["dataset"]["train_snap_dates"][0], 2)
+
+        with caplog.at_level(logging.WARNING):
+            keys = select_val_keys(pool, parameters)
+
+        assert keys.count() == _expected_key_count(parameters, "val")
+        assert _warning_messages(caplog) == []
+
+    def test_test_ignores_a_null_entity_in_a_month_it_does_not_process(
+        self, spark, sample_pool, parameters, caplog,
+    ):
+        """The months test looks at are the plan's ``to_process``, not every
+        configured test month: a month that already landed is not re-read."""
+        params = _incremental_params(parameters)
+        landed, to_process = _TEST_MONTHS
+        pool = _with_null_entity_rows(spark, sample_pool, landed, 2)
+
+        with caplog.at_level(logging.WARNING):
+            keys = select_test_keys(pool, _plan(to_process), params)
+
+        assert _months(keys) == [to_process]
+        assert _warning_messages(caplog) == []
+
+    @pytest.mark.parametrize("split", ["val", "test"])
+    def test_clean_input_pays_no_counting_action(
+        self, sample_pool, parameters, monkeypatch, split,
+    ):
+        """Same budget as train: on clean input the report never runs."""
+        def _boom(*args, **kwargs):
+            raise AssertionError(
+                "reported NULL entities on an input that has none")
+
+        monkeypatch.setattr(
+            "recsys_tfb.pipelines.dataset.steps.sampling.warn_dropped_null_entity",
+            _boom)
+        if split == "val":
+            keys = select_val_keys(sample_pool, parameters)
+        else:
+            keys = select_test_keys(
+                sample_pool, _test_keys_plan(parameters), parameters)
+
+        assert keys.count() == _expected_key_count(parameters, split)
 
 
 class TestSelectValKeys:
@@ -2410,37 +2547,49 @@ class TestUnknownEncodingRateIsAssertable:
         assert by_cust["C002"] == 1
 
 
-class TestSelectKeysDeduplication:
-    """D7 — val/test key selection deduplicates its input.
+class TestSelectKeysTrustTheUpstreamPrimaryKey:
+    """ADR-0029 decision 6 — no split de-duplicates its keys.
 
-    The sampled splits lean on sample_pool's primary key being
-    enforced upstream and does not dedup; val/test call ``dropDuplicates``
-    explicitly. That difference is invisible until sample_pool actually contains
-    a duplicate, which the clean fixture never does.
+    Until then train leaned on ``sample_pool``'s primary key and val / test
+    each ran a ``dropDuplicates``. Now all three lean on it: identity
+    uniqueness is ``source_etl``'s ``max_duplicate_key_ratio`` check, and a
+    ``sample_pool`` the user builds without ``source_etl`` has nobody checking
+    it. These tests pin the consequence rather than hide it -- a duplicated
+    identity comes out as duplicated keys -- so a ``dropDuplicates`` quietly
+    put back fails here instead of costing a shuffle nobody decided on.
     """
 
     @pytest.fixture
     def duplicated_pool(self, sample_pool):
-        # Every row twice: a duplicate key ratio of 1.0, not a single stray row,
-        # so a partially-working dedup fails too.
+        # Every row twice, so a dedup of any part of the pool shows up.
         return sample_pool.unionByName(sample_pool)
 
-    def test_val_keys_are_unique_despite_duplicate_input(
+    def test_val_keys_keep_a_duplicated_identity(
         self, duplicated_pool, sample_pool, parameters
     ):
         assert duplicated_pool.count() == 2 * sample_pool.count()
         result = select_val_keys(duplicated_pool, parameters)
-        assert result.count() == _expected_key_count(parameters, "val")
-        identity = get_schema(parameters)["identity_columns"]
-        assert result.count() == result.dropDuplicates(identity).count()
+        assert result.count() == 2 * _expected_key_count(parameters, "val")
 
-    def test_test_keys_are_unique_despite_duplicate_input(
+    def test_drawn_val_keys_keep_a_duplicated_identity(
+        self, duplicated_pool, parameters
+    ):
+        """The draw is row-wise now, so it does not de-duplicate either: each
+        kept identity comes out exactly as often as it went in."""
+        params = {**parameters,
+                  "dataset": {**parameters["dataset"], "val_sample_ratio": 0.5}}
+        identity = get_schema(params)["identity_columns"]
+        result = select_val_keys(duplicated_pool, params)
+
+        per_key = result.groupBy(*identity).count()
+        assert per_key.count() > 0
+        assert {r["count"] for r in per_key.collect()} == {2}
+
+    def test_test_keys_keep_a_duplicated_identity(
         self, duplicated_pool, parameters
     ):
         result = select_test_keys(duplicated_pool, _test_keys_plan(parameters), parameters)
-        assert result.count() == _expected_key_count(parameters, "test")
-        identity = get_schema(parameters)["identity_columns"]
-        assert result.count() == result.dropDuplicates(identity).count()
+        assert result.count() == 2 * _expected_key_count(parameters, "test")
 
 
 class TestSelectKeysOverridePath:
@@ -2513,6 +2662,8 @@ from recsys_tfb.pipelines.dataset.steps.sampling import (
     keep_rows_drawn_under_ratio,
     with_effective_sample_ratio,
 )
+from recsys_tfb.pipelines.dataset.steps.scoping import months_filter_as_date
+from recsys_tfb.utils.hashing import ratio_to_threshold, spark_bucket
 
 
 class TestSamplingSiteNamespacing:
@@ -2604,6 +2755,76 @@ class TestSelectValKeysSampling:
         assert select_val_keys(sample_pool, params).count() == _expected_key_count(
             parameters, "val"
         )
+
+
+def _entities_drawn_the_old_way(pool, params) -> set:
+    """Which val draw units the pre-ADR-0029 draw kept, as tuples.
+
+    That draw de-duplicated the val keys, took the distinct draw units,
+    bucketed each one, and inner-joined the kept ones back. It is written out
+    here as the oracle for "the row-wise draw keeps the same entities on data
+    with no NULL entity", so the node under test is not also the source of
+    its own expected answer.
+    """
+    schema = get_schema(params)
+    unit = get_entity_grouping(params, "val_sample_keys")
+    months = [pd.Timestamp(d) for d in params["dataset"]["val_snap_dates"]]
+    keys = pool.filter(
+        months_filter_as_date(schema["time"], months)
+    ).select(*schema["identity_columns"]).dropDuplicates()
+    units = keys.select(*unit).distinct()
+    kept = units.withColumn(
+        "_b", spark_bucket(units, unit, params["random_seed"], site="val_keys"),
+    ).filter(
+        F.col("_b") < F.lit(ratio_to_threshold(params["dataset"]["val_sample_ratio"]))
+    ).select(*unit)
+    joined = keys.join(kept, on=unit, how="inner")
+    return {tuple(r) for r in joined.select(*unit).distinct().collect()}
+
+
+class TestValDrawIsRowWise:
+    """ADR-0029 decision 5 — the val draw is one row-wise filter.
+
+    It used to be distinct units, bucket, inner join back: three shuffles to
+    reach an answer the bucket already gives row by row, because the bucket
+    reads nothing but the unit's own values. Same answer on data with no NULL
+    entity (the one place the two differ is NULL, handled before the draw).
+    """
+
+    def test_keeps_the_entities_the_old_draw_kept(self, sample_pool, parameters):
+        params = {**parameters,
+                  "dataset": {**parameters["dataset"], "val_sample_ratio": 0.5}}
+        expected = _entities_drawn_the_old_way(sample_pool, params)
+        got = {
+            tuple(r) for r in select_val_keys(sample_pool, params)
+            .select("cust_id").distinct().collect()
+        }
+        assert expected and len(expected) < len(_ENTITIES)
+        assert got == expected
+
+    def test_keeps_the_entities_the_old_draw_kept_on_a_two_column_entity(
+        self, spark, two_column_entity_params
+    ):
+        params = _two_column_params(two_column_entity_params)
+        pool = _two_column_pool(spark, _SNAP_DATES[3:4])
+        expected = _entities_drawn_the_old_way(pool, params)
+        got = _entity_pairs(select_val_keys(pool, params))
+        assert expected and expected < _entity_pairs(pool)
+        assert got == expected
+
+    def test_the_drawn_keys_plan_holds_no_join_and_no_aggregate(
+        self, sample_pool, parameters
+    ):
+        """The structural half: equal answers above cannot tell a row-wise
+        filter from the distinct-and-join it replaced (or from a dedup that
+        crept back in), because on clean data they agree by construction."""
+        params = {**parameters,
+                  "dataset": {**parameters["dataset"], "val_sample_ratio": 0.5}}
+        plan = select_val_keys(
+            sample_pool, params,
+        )._jdf.queryExecution().optimizedPlan().toString()
+        assert "Join" not in plan
+        assert "Aggregate" not in plan
 
 
 # =============================================================================
@@ -3038,6 +3259,39 @@ class TestSplitTrainKeysTwoColumnEntity:
         assert "cust_id=2" in warnings[0]
         assert "branch_id=0" in warnings[0]
         assert _entity_pairs(train) | _entity_pairs(train_dev) == _entity_pairs(pool)
+
+    def test_a_null_entity_column_outside_the_split_unit_is_dropped_too(
+        self, spark, two_column_entity_params, caplog
+    ):
+        """What is checked is the whole entity, not the split unit.
+
+        With ``train_split_keys: [branch_id]`` the split never looks at
+        ``cust_id``, so a row whose ``cust_id`` is NULL still has a bucket and
+        used to be kept. It is no less broken for that: it belongs to no
+        entity, joins to neither features nor labels, and would reach
+        training as a row of NULL features (ADR-0029 decision 5).
+        """
+        params = _two_column_params(
+            two_column_entity_params, train_split_keys=["branch_id"])
+        pool = _two_column_pool(spark, _SNAP_DATES[:1])
+        null_cust = spark.createDataFrame(
+            [
+                (pd.Timestamp(_SNAP_DATES[0]).to_pydatetime(),
+                 branch, None, _PRODUCTS[0], 0)
+                for branch in _BRANCHES
+            ],
+            pool.schema,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            train, train_dev = split_train_keys(pool.unionByName(null_cust), params)
+
+        assert train.filter(F.col("cust_id").isNull()).count() == 0
+        assert train_dev.filter(F.col("cust_id").isNull()).count() == 0
+        assert train.count() + train_dev.count() == pool.count()
+        warnings = _warning_messages(caplog)
+        assert len(warnings) == 1
+        assert f"cust_id={len(_BRANCHES)}" in warnings[0]
 
 
 class TestSelectValKeysTwoColumnEntity:

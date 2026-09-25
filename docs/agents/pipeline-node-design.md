@@ -169,6 +169,10 @@ pool = prepare_train_pool(sample_pool, parameters)
 所以舊版這裡還列了「要不要退回整池」這個旗標。ADR-0029 決定 3 刪掉這兩個函式，兩邊都改走
 `months_filter_as_date`，差別只剩月份清單本身。）
 
+（2026-09-25 更新，#462：val 原本「不靠主鍵、自己 `dropDuplicates`」，train 靠主鍵——這一題
+兩邊答案曾經不同。ADR-0029 決定 6 讓三個 split 都靠主鍵，下面的節錄已照改；決定 5 另在 val
+抽樣之前加了「entity 有 NULL 就丟並警告」一步。上面列的重疊題目兩邊答案仍然不同。）
+
 每一個決策都寫在它自己的 node body 裡，前面掛一行 `# Decision —`（英文原文，可以直接
 grep）。以下是逐字節錄，各留第一行：
 
@@ -188,10 +192,13 @@ if draw_can_drop_rows(sample_ratio, overrides):        # 比例滿且無 overrid
 
 # select_val_keys（nodes.py:383-）
 # Decision — eligibility: only the configured val months.
-val_labels = sample_pool.filter(months_filter_as_date(time_col, val_dates))
-# Decision — the val population is every distinct key, not a draw over rows:
-#   unlike the train side this does not lean on sample_pool's primary key.
-all_keys = val_labels.select(*identity_key).dropDuplicates()
+val_pool = sample_pool.filter(months_filter_as_date(time_col, val_dates))
+# Decision — the val population is every key in those months, trusting
+#   sample_pool's primary key as train does rather than de-duplicating it.
+all_keys = val_pool.select(*identity_key)
+# Decision — a row whose entity is NULL in any column is dropped, out loud,
+#   before the draw (ADR-0029 decision 5). ...
+all_keys, _ = drop_rows_with_null_entity(all_keys, schema["entity"], split="val")
 if val_sample_ratio >= 1.0:
     return all_keys                                    # 預設路徑：整個母體，不抽
 # Decision — when val is sampled, it is sampled per *entity*, never per row:
@@ -206,7 +213,8 @@ sampled = keep_entities_drawn_under_ratio(
 
 被共用的是**機制**：`months_filter_as_date`
 （`dataset/steps/scoping.py`）、`keep_rows_drawn_under_ratio` /
-`keep_entities_drawn_under_ratio` / `with_effective_sample_ratio`
+`keep_entities_drawn_under_ratio` / `with_effective_sample_ratio` /
+`drop_rows_with_null_entity`
 （`dataset/steps/sampling.py`）、`get_entity_grouping`（`core/schema.py`），
 各自只裝一件事。**沒有**一個 `_select_keys(split_name, parameters)` 把決策包起來。
 

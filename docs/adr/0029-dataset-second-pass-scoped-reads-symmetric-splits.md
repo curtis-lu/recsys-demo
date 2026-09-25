@@ -228,6 +228,17 @@ ADR-0008 那一輪的結構搬移在 2026-08-08（PR #176）合併時，`pipelin
 
 **為什麼不是全部都去重**：train 是最大的一份（全部 train 月份乘上全部候選）。全部去重，等於在最大的表上多洗一次；而資料品質歸上游，是 ADR-0006 的既有決定。B10 擋不到這種重複，因為 keys 與 model_input 會一樣重複，列數還是相等。
 
+> **實作註記（2026-09-25，#462，決定 5、6）**：
+> - 共用的機制叫 `unit_drawn_under_ratio`（`steps/sampling.py`），回傳一個 Column：「這一列的單位抽到門檻以下」。三個呼叫端：
+>   - `keep_entities_drawn_under_ratio`（val 抽樣）只拿它做一次 filter，不 join、不去重。
+>   - `split_train_keys` 用它本身取 train_dev，用它的否定取 train。bucket 不會是 NULL（`concat_ws` 不回 NULL），所以否定是精確的補集。
+>   - `steps/model_input.py` 的 `_kept_under_ratio`（無正例組抽樣）。
+> - 丟 NULL entity 也是一個共用步驟 `drop_rows_with_null_entity`，回傳「丟完的 keys」與「有沒有丟」。第二個值只有 `split_train_keys` 用：切完 train_dev 是空的時候，靠它分辨「根本沒有列進來」與「列都因 NULL 被丟了」。警告那一行以 `<split> keys:` 開頭（`train/train_dev`、`val`、`test`）。
+> - 上文「和今天的差別」少寫一件：val 不抽樣時與 test 的 NULL entity 列，在選 key 那一步留著，但到了丟無正例組那一步（`filter_val_keys`／`filter_test_keys`），它接不到 label，算無正例組。所以：
+>   - r ＝ 0（預設）時，它們本來就在那一步被默默丟掉，落地內容不含這些列。本票對 r ＝ 0 的改變只是「改在選 key 時丟，而且警告」，落地內容不變。
+>   - r > 0 時，今天它們可能被抽中、帶著權重 1／r 留進 model_input；本票之後一律丟掉。〈版本與順序的約束〉第 2 條說的「有 NULL entity 時落地內容會變」，指的是這種情況與 train 的切分單位以外欄為 NULL 的情況。
+> - 決定 6 的「B10 擋不到」也寫進了 `select_val_keys` 的 docstring；使用者文件在 `docs/pipelines/dataset.md` §3.1 與 §9。
+
 ## 決定 7　資料閘的 node 只寫「查什麼、什麼算失敗」，機制進 `steps/`
 
 **規則**：

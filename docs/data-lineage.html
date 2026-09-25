@@ -324,7 +324,7 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
   <tr><td><a href="#sample_pool"><code>sample_pool</code></a><br><span class="vl vl-src" style="margin-left:0">source</span></td>
     <td><code>time × entity × item</code></td><td><code>(time, entity, item)</code></td>
     <td><span class="gtag g-check">有檢查</span></td>
-    <td>只在 source_etl 產出時檢查（每個 partition 寫完之後才查 config 宣告的 <code>primary_key</code>，重複率 ≤ <code>max_duplicate_key_ratio</code> 即過、現行 config 為 0.0；壞 partition 不回滾）；dataset 端明寫不再 dedup、也不重驗（<code>val_keys</code>／<code>test_keys</code> 例外，那兩個節點自己 <code>dropDuplicates</code>）。自備表另計：沒經過 source_etl 的表完全不經過這層檢查。</td></tr>
+    <td>只在 source_etl 產出時檢查（每個 partition 寫完之後才查 config 宣告的 <code>primary_key</code>，重複率 ≤ <code>max_duplicate_key_ratio</code> 即過、現行 config 為 0.0；壞 partition 不回滾）；dataset 端明寫不再 dedup、也不重驗，三個 split 的 keys 都一樣（<code>val_keys</code>／<code>test_keys</code> 在 2026-09 之前例外，ADR-0029 決定 6 拿掉了）。自備表另計：沒經過 source_etl 的表完全不經過這層檢查。</td></tr>
   <tr><td><a href="#inference_population"><code>inference_population</code></a><br><span class="vl vl-src" style="margin-left:0">source</span></td>
     <td><code>time × entity</code></td><td><code>(time, entity)</code></td>
     <td><span class="gtag g-check">有檢查</span></td>
@@ -335,12 +335,12 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
     <td><code>apply_preprocessor_to_features</code> 只做逐列過濾與編碼，唯一性等於落地當下的 <code>feature_table</code>（上游的檢查不繼承，來源有重複就原樣傳下來），這一步零檢查；放大要到下游才可能被看見：四個 split 的 model_input 都有 B10 這道列數閘（test 只比這次組裝的月份）。</td></tr>
   <tr><td><a href="#val_keys"><code>val_keys</code></a><br><span class="vl vl-base" style="margin-left:0">base_dataset_version</span></td>
     <td><code>time × entity × item</code></td><td><code>(base_dataset_version, time, entity, item)</code></td>
-    <td><span class="gtag g-build">由寫法保證</span></td>
-    <td><code>select_val_keys</code> 先對整組 identity 做 <code>dropDuplicates</code>，之後的抽樣是對去重後的 entity 做 semi-join 式的 inner join（右表對 join 鍵唯一，不放大）。只保證本表不重複，不保證下游 model_input 不被放大。</td></tr>
+    <td><span class="gtag g-none">框架不檢查</span></td>
+    <td><code>select_val_keys</code> 只對 <code>sample_pool</code> 做過濾與抽樣，不去重（ADR-0029 決定 6）：唯一性等於 <code>sample_pool</code> 的，它的重複會原樣帶進來。抽樣是逐列按 entity 的 bucket 過濾，列數只會少不會多；entity 有 NULL 的列會被丟掉並警告。</td></tr>
   <tr><td><a href="#val_keys"><code>test_keys</code></a><br><span class="vl vl-base" style="margin-left:0">base_dataset_version</span></td>
     <td><code>time × entity × item</code></td><td><code>(base_dataset_version, time, entity, item)</code></td>
-    <td><span class="gtag g-build">由寫法保證</span></td>
-    <td><code>select_test_keys</code> 同樣以 <code>dropDuplicates</code> 收尾；表內累積所有月份。</td></tr>
+    <td><span class="gtag g-none">框架不檢查</span></td>
+    <td><code>select_test_keys</code> 同樣不去重、丟掉 entity 有 NULL 的列；表內累積所有月份。</td></tr>
   <tr><td><a href="#val_model_input"><code>val_model_input</code></a><br><span class="vl vl-base" style="margin-left:0">base_dataset_version</span></td>
     <td><code>time × entity × item</code>（只留有正例的 query group）</td><td><code>(base_dataset_version, time, entity, item)</code></td>
     <td><span class="gtag g-none">框架不檢查</span></td>
@@ -551,9 +551,9 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
 
 <div class="card" id="val_keys">
   <h4>val_keys · test_keys <span class="badge b-hive">Hive</span><span class="vl vl-base">base</span></h4>
-  <div class="meta"><b>產生</b>：dataset · select_val_keys / select_test_keys（取 val / test 期 <code>sample_pool</code> 的 identity 並去重）　|
+  <div class="meta"><b>產生</b>：dataset · select_val_keys / select_test_keys（取 val / test 期 <code>sample_pool</code> 的 identity，不去重；entity 有 NULL 的列丟掉並警告）　|
   <b>下游</b>：dataset（build_val_model_input / build_test_model_input）　|　<b>partition</b>：base_dataset_version / snap_date</div>
-  <div class="grain"><span class="gtag g-build">由寫法保證</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>）　|　<b>實體主鍵</b>：<code>(time, entity, item)</code>，另含版本欄 <code>base_dataset_version</code>　|　由節點自己的寫法保證不重複、不靠上游（<code>sample_pool</code> 有重複也一樣）：兩個節點都對 identity 做 <code>dropDuplicates</code>；val 若再抽樣，是對去重後的 keys 按 entity 保留（<code>keep_entities_drawn_under_ratio</code>，semi-join 式，不放大列數）。test_keys 是累積所有月份的表，每次只寫尚未落地的月份（<code>--rebuild-dates</code> 指名的月份除外；重建也是整個分區覆寫，不會疊出重複）。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
+  <div class="grain"><span class="gtag g-none">框架不檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>）　|　<b>實體主鍵</b>：<code>(time, entity, item)</code>，另含版本欄 <code>base_dataset_version</code>　|　不去重，唯一性靠上游 <code>sample_pool</code>（ADR-0029 決定 6；2026-09 之前兩個節點各自 <code>dropDuplicates</code>）：<code>sample_pool</code> 有重複就原樣帶進來，而且 B10 看不出來（keys 與 model_input 一樣重複）。val 若再抽樣，是逐列按 entity 的 bucket 過濾（<code>keep_entities_drawn_under_ratio</code>，不 join、不放大列數）。test_keys 是累積所有月份的表，每次只寫尚未落地的月份（<code>--rebuild-dates</code> 指名的月份除外；重建也是整個分區覆寫，不會疊出重複）。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
   <p class="sub">只含 identity 三欄（<b>不</b> carry 任何 carry 欄，與 train keys 不同）。版本層為 base（不依 train 抽樣變體）。<b>val</b>：預設取全部 identity；<code>val_sample_ratio</code> &lt; 1 時按 entity（<code>val_sample_keys</code>，預設完整 entity）整批抽樣（現行 conf 為 0.5）。<b>test</b>：full population、不抽樣，只處理尚未落地的月份。</p>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>角色</th></tr>

@@ -1,6 +1,7 @@
 """Sampling mechanics for key selection: the columns a draw needs, the effective
-per-row ratio, the draw itself (per row or per entity), the columns a split's
-keys come out with, and how a draw reports itself.
+per-row ratio, the draw itself (per row or per whole unit), the columns a
+split's keys come out with, how a draw reports itself, and the drop of rows
+whose entity is NULL.
 
 Named for the concern it implements, not for its backend — the ``_spark`` suffix
 this module used to carry pointed at a pandas/Spark dual track that no longer
@@ -51,7 +52,7 @@ def log_sampled_keys(
     )
 
 
-def any_column_is_null(cols: list[str]) -> Column:
+def _any_column_is_null(cols: list[str]) -> Column:
     """Row-wise predicate: at least one of ``cols`` is NULL on this row.
 
     Handed back as a Column instead of being applied to a frame so one caller
@@ -68,21 +69,53 @@ def any_column_is_null(cols: list[str]) -> Column:
     return predicate
 
 
-def warn_dropped_null_split_unit(dropped: DataFrame, cols: list[str]) -> None:
-    """Report rows dropped for a NULL split unit: how many, and in which column.
+def drop_rows_with_null_entity(
+    keys: DataFrame,
+    entity_cols: list[str],
+    *,
+    split: str,
+) -> tuple[DataFrame, bool]:
+    """``keys`` without the rows whose entity is NULL in any column, and
+    whether there were any -- reported by :func:`warn_dropped_null_entity`
+    when there were.
+
+    The flag is handed back because a caller may have to tell "nothing
+    arrived" from "everything arrived broken" later on, and those are fixed in
+    different places (``split_train_keys``' empty-split message).
+
+    Costs one ``isEmpty`` -- and note which way it short-circuits: it stops at
+    the first NULL row, so a *dirty* input answers at once while a clean one
+    has to read ``entity_cols`` across the whole frame to prove there is
+    nothing there. A narrow scan with no shuffle, over whatever months the
+    caller already filtered ``keys`` to -- which is why callers filter first.
+    The report's own pass is paid only when there is something to say.
+    """
+    is_null = _any_column_is_null(entity_cols)
+    dropped = keys.filter(is_null)
+    dropped_any = not dropped.isEmpty()
+    if dropped_any:
+        warn_dropped_null_entity(dropped, entity_cols, split=split)
+    return keys.filter(~is_null), dropped_any
+
+
+def warn_dropped_null_entity(
+    dropped: DataFrame, cols: list[str], *, split: str,
+) -> None:
+    """Report rows dropped for a NULL entity: whose keys, how many, and in
+    which column.
 
     ``warn_``, not ``require_``: this reports, it does not raise (rule 12 of
     docs/agents/pipeline-node-design.md). Whose job it is to raise is settled
     in ADR-0006 — upstream, in ``source_etl``.
 
     One Spark action for the whole report: the row total and every per-column
-    NULL count come out of a single ``agg``. The caller is expected to guard
-    this behind an ``isEmpty``, so this second pass over the frame is paid only
-    when there is something to say.
+    NULL count come out of a single ``agg``.
 
-    Per-column counts rather than a bare total, because a split unit can be
+    Per-column counts rather than a bare total, because an entity can be
     several columns: a total leaves the reader auditing all of them, and the
-    zeros are what say the rest are clean.
+    zeros are what say the rest are clean. The split leads the line because
+    every split drops these (ADR-0029 decision 5), and "which table is dirty"
+    starts with "whose months".
     """
     counts = dropped.agg(
         F.count(F.lit(1)).alias("_dropped"),
@@ -93,13 +126,13 @@ def warn_dropped_null_split_unit(dropped: DataFrame, cols: list[str]) -> None:
     ).first()
     per_column = ", ".join(f"{c}={counts[f'_null_{c}']}" for c in cols)
     logger.warning(
-        "Dropped %d row(s) whose split unit is NULL (NULL by column: %s). "
-        "Such a row belongs to no entity: it joins to neither features nor "
-        "labels, so it would reach training as an all-NULL row. The train / "
-        "train-dev split has always dropped these; this reports them. The "
-        "check that owns them is upstream -- source_etl's "
+        "%s keys: dropped %d row(s) whose entity is NULL (NULL by column: "
+        "%s). Such a row belongs to no entity: it joins to neither features "
+        "nor labels. Every split drops these when it selects its keys; this "
+        "reports them. "
+        "The check that owns them is upstream -- source_etl's "
         "primary_key_not_null (ADR-0006).",
-        counts["_dropped"], per_column,
+        split, counts["_dropped"], per_column,
     )
 
 
@@ -200,6 +233,47 @@ def keep_rows_drawn_under_ratio(
     return keys.filter(F.col("_bucket") < threshold_expr)
 
 
+def unit_drawn_under_ratio(
+    df: DataFrame,
+    unit_cols: list[str],
+    ratio: float,
+    seed: int,
+    *,
+    site: str,
+) -> Column:
+    """Row-wise predicate: this row's unit -- its ``unit_cols`` values --
+    draws a bucket under ``ratio``.
+
+    The one mechanism behind every "a whole unit lands on one side" in this
+    pipeline: the val draw, the train / train_dev split, and the zero-positive
+    group draw (ADR-0029 decision 5). The bucket reads nothing but the unit's
+    own values, so every row of one unit gets the same answer -- the unit
+    stays whole by construction, not because a join put it back together. The
+    old shape (distinct the units, bucket them, join back) gave the same
+    answer through three shuffles, and made "whole" a property of the join
+    keys instead.
+
+    Except on NULL, and silently: ``concat_ws`` skips a NULL, so a row with a
+    NULL unit column still gets a bucket, where the join dropped it (NULL
+    never equals NULL). So callers drop NULL-entity rows first
+    (:func:`drop_rows_with_null_entity`).
+
+    ``~`` on this is an exact complement: the bucket is never NULL (``crc32``
+    of a ``concat_ws``, which is never NULL), so the comparison never is
+    either. That is what lets the split take one side with it and the other
+    side with its negation.
+
+    ``unit_cols`` is a list, not a single column, because an entity is a
+    *tuple* of columns in this framework. Hashing one of them would draw at a
+    coarser unit than the caller asked for and keep or drop whole groups of
+    units together — silently, since the result is still a valid sample of
+    something. The caller decides which columns those are; this only performs
+    the draw.
+    """
+    bucket = spark_bucket(df, unit_cols, seed, site=site)
+    return bucket < F.lit(ratio_to_threshold(ratio))
+
+
 def keep_entities_drawn_under_ratio(
     keys: DataFrame,
     entity_cols: list[str],
@@ -212,21 +286,13 @@ def keep_entities_drawn_under_ratio(
 
     The draw is on the entity, not the row, so an entity is kept whole or not at
     all — which is what :func:`keep_rows_drawn_under_ratio` does *not* promise.
-
-    ``entity_cols`` is a list, not a single column, because an entity is a
-    *tuple* of columns in this framework. Hashing one of them would draw at a
-    coarser unit than the caller asked for and keep or drop whole groups of
-    entities together — silently, since the result is still a valid sample of
-    something. The caller decides which columns those are (the whole entity, or
-    the coarser unit it declared); this only performs the draw.
+    It is :func:`unit_drawn_under_ratio` applied as a filter, so it neither
+    shuffles nor de-duplicates: a key that appears twice in ``keys`` comes out
+    twice or not at all.
     """
-    entities = keys.select(*entity_cols).distinct()
-    sampled_entities = entities.withColumn(
-        "_bucket", spark_bucket(entities, entity_cols, seed, site=site),
-    ).filter(
-        F.col("_bucket") < F.lit(ratio_to_threshold(ratio))
-    ).select(*entity_cols)
-    return keys.join(sampled_entities, on=entity_cols, how="inner")
+    return keys.filter(
+        unit_drawn_under_ratio(keys, entity_cols, ratio, seed, site=site)
+    )
 
 
 def _ratio_lookup_df(spark, sample_ratio_overrides: dict) -> DataFrame:
