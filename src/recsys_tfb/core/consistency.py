@@ -5278,8 +5278,8 @@ def train_snap_dates_errors(parameters: dict) -> list[str]:
       date.
     * **empty** — the branch with no downstream guard at all. An empty month
       list matches no row (``months_filter_as_date``), so ``select_train_keys``
-      draws nothing and the fit reads no vocabulary — an empty training table
-      rather than an error. A24 cannot see it: an empty set overlaps nothing.
+      draws nothing and the fit reads no vocabulary, and nothing at those two
+      steps raises. A24 cannot see it: an empty set overlaps nothing.
       ``split_train_keys``' degenerate guard (ADR-0005) only fires when
       ``train_dev_ratio != 0``, and ``0`` is a legal setting. Before ADR-0029
       decision 3 the same list left the pool **whole** instead — every month
@@ -5308,8 +5308,8 @@ def train_snap_dates_errors(parameters: dict) -> list[str]:
     if not configured:
         return [
             "(A23) dataset.train_snap_dates is empty. Every read of the train "
-            "months would match no row, so the model would be trained on an "
-            "empty table. Name the months to train on."
+            "months would match no row, so there would be nothing to train "
+            "on. Name the months to train on."
         ]
 
     # Named `unparseable_entries`, not `unreadable`: A21 already binds that

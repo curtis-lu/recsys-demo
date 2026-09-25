@@ -1,8 +1,9 @@
 """Tests for the assembly of a split's ``model_input``: the two joins, the
 output column rule, and the column-existence guard behind both.
 
-The assembly itself is the ``build_model_input`` *node* (#170 lifted it out of
-``model_input.py``, which now holds only the mechanisms each step is made of);
+The assembly itself is ``build_model_input`` in ``nodes.py`` (#170 lifted it out
+of ``model_input.py``, which now holds only the mechanisms each step is made of;
+since ADR-0029 it is the assembly every build node calls, not a node itself);
 the guard is still a mechanism, so the two imports point at different modules.
 Only the imports moved — every assertion below is the one that was written
 against the helper.

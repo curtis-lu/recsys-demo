@@ -545,6 +545,15 @@ class TestPrecisionGateCoversTheCandidateTable:
                 val=(_OTHER_MONTH,), policy="truncate",
             )
 
+    def test_a_candidate_table_without_the_test_plan_is_refused(self, spark):
+        """Without the test build's plan the test months would go unchecked
+        and nothing would say so — so a direct caller is stopped instead."""
+        with pytest.raises(TypeError, match="needs test_month_plan"):
+            validate_numeric_precision(
+                _entity_side(spark), _preprocessor(), _plan(), _precision_params(),
+                _candidate_with(spark, {_MONTH: 3}),
+            )
+
     def test_without_one_the_report_has_no_such_section(self, spark):
         report = validate_numeric_precision(
             _entity_side(spark), _preprocessor(), _plan(), _precision_params(),
@@ -567,7 +576,7 @@ class TestPrecisionGateCoversTheCandidateTable:
 
         report = validate_numeric_precision(
             _entity_side(spark), preprocessor, _plan(), _precision_params(),
-            candidate,
+            candidate, SnapDatePlan(to_process=[], skipped=[]),
         )
 
         assert [c["column"] for c in report["candidate_feature_table"]["columns"]] == [

@@ -140,6 +140,11 @@ def _catalog(spark, params, only_test_months=False) -> dict:
             to_process=[pd.Timestamp(m) for m in _TEST],
             skipped=[pd.Timestamp(_OTHER[0])],
         ),
+        # Every month already encoded: the precision gate's footer half has
+        # nothing to read, and its candidate-table half is what is tested.
+        "preprocessed_feature_table_month_plan": SnapDatePlan(
+            to_process=[], skipped=[pd.Timestamp(m) for m in _ALL],
+        ),
         "only_test_months": only_test_months,
     }
 
@@ -153,13 +158,16 @@ def _run(name: str, catalog: dict):
     return node.func(*[catalog[i] for i in node.inputs])
 
 
-def _months_read(frame: DataFrame, marker: str) -> list[set[str]]:
+def _months_read(
+    frame: DataFrame, marker: str, time_col: str = "snap_date",
+) -> list[set[str]]:
     """For each read of the table holding column ``marker``: the months named by
-    the filters between that read and the first join above it.
+    the filters on ``time_col`` between that read and the first join above it.
 
     From the analyzed plan: what the code wrote, before the optimizer infers or
     pushes anything. A filter the code puts *after* the join is above it here,
-    so it does not count — the read would still be the whole table.
+    so it does not count — the read would still be the whole table. Nor does a
+    filter on another column that happens to spell a date.
     """
     found: list[set[str]] = []
 
@@ -168,9 +176,11 @@ def _months_read(frame: DataFrame, marker: str) -> list[set[str]]:
         if name == "Join":
             months = set()
         elif name == "Filter":
-            months = months | set(
-                re.findall(r"\d{4}-\d{2}-\d{2}", node.condition().sql())
-            )
+            condition = node.condition().sql()
+            if time_col in condition:
+                months = months | set(
+                    re.findall(r"\d{4}-\d{2}-\d{2}", condition)
+                )
         children = node.children()
         if children.size() == 0:
             output = node.output()
@@ -238,6 +248,32 @@ class TestTheGroupDropReadsOnlyTheTrainMonths:
         assert _months_read(kept, "label") == [set(_TRAIN)]
 
 
+class TestThePrecisionGateChecksWhatTheBuildsRead:
+    """Decision 2: the gate works out the candidate table's months by the
+    builds' own rules instead of receiving a list. Asserted against what the
+    builds of the same run actually read, so a build that changes its rule
+    and a gate that does not follow disagree here."""
+
+    @pytest.mark.parametrize("only_test_months", [False, True])
+    def test_its_months_are_the_union_of_the_builds_reads(
+        self, spark, only_test_months,
+    ):
+        from recsys_tfb.pipelines.dataset.pipeline import create_pipeline
+
+        catalog = _catalog(spark, _params(), only_test_months=only_test_months)
+        read: set[str] = set()
+        for node in create_pipeline(only_test_months=only_test_months).nodes:
+            if node.name.startswith("build_"):
+                built = node.func(*[catalog[i] for i in node.inputs])
+                for months in _months_read(built, "f_candidate"):
+                    read |= months
+
+        report = _run("validate_numeric_precision", catalog)
+
+        assert read, "no build read the candidate table"
+        assert report["candidate_feature_table"]["months"] == sorted(read)
+
+
 class TestMonthPresenceAsksOnlyTheMonthsItChecks:
     """Decision 1: ``require_months_present`` filters to the months it checks
     before asking which months exist, instead of reading the whole time
@@ -259,6 +295,19 @@ class TestMonthPresenceAsksOnlyTheMonthsItChecks:
         )
 
         assert [_months_read(f, "f_entity") for f in collected] == [[set(_TRAIN)]]
+
+    def test_a_timestamp_with_a_time_of_day_counts_for_its_day(self, spark):
+        """Presence is asked the way the reads it guards filter: by the date.
+        Compared as it came, 08:00 on a train month would be reported
+        missing while every build read that month's rows."""
+        frame = _preprocessed_feature_table(spark).withColumn(
+            "snap_date", F.col("snap_date") + F.expr("INTERVAL 8 HOURS"),
+        )
+
+        require_months_present(
+            frame, "snap_date", [pd.Timestamp(m) for m in _TRAIN],
+            "train_snap_dates",
+        )
 
     def test_a_missing_month_is_still_named(self, spark):
         with pytest.raises(ValueError, match=r"missing required train_snap_dates: \['2026-01-31'\]"):

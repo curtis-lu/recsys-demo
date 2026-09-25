@@ -211,8 +211,9 @@ class TestNodeNameToFunctionBinding:
         train / train_dev run the same ``build_train_model_input``, so the
         node name is the only thing distinguishing them — which is what makes
         a typo in one a silent topology change rather than an import error.
-        val ran it too until #379 gave val its own wrapper (the new-item
-        warning); it would now also read the train months.
+        Before ADR-0029 all three ran the shared ``build_model_input``
+        directly; val left first, when #379 gave it its own wrapper (the
+        new-item warning).
         """
         bindings = self._bindings(create_pipeline())
         shared = {
@@ -293,7 +294,7 @@ class TestMonthPlanWiring:
     def test_the_precision_gate_runs_before_every_model_input_build(self):
         """Declaration order is what orders it, so a test has to hold the order.
 
-        The gate and the ``build_model_input`` nodes share
+        The gate and the build nodes share
         ``preprocessed_feature_table`` as their last unmet input, so Kahn queues
         them together and breaks the tie by list position
         (``core/pipeline.py``). Nothing in the DAG forces the gate first — it

@@ -1134,8 +1134,17 @@ def validate_numeric_precision(
         # by each build's own rule: the train months (train and train_dev),
         # the val months, and the test plan's to_process. Under
         # --only-test-months the test build is the only one in the run.
+        if test_month_plan is None:
+            # Pre-check (input): without the test build's plan its months
+            # would go unchecked, and nothing would say so — the reason
+            # build_model_input's ``months`` has no default either.
+            raise TypeError(
+                "validate_numeric_precision needs test_month_plan when a "
+                "candidate_feature_table is given: it checks the months the "
+                "test build reads."
+            )
         ds = parameters["dataset"]
-        build_months = [test_month_plan.to_process if test_month_plan else []]
+        build_months = [test_month_plan.to_process]
         if not only_test_months:
             build_months += [ds["train_snap_dates"], ds.get("val_snap_dates", [])]
         cand_months = sorted(
@@ -1262,7 +1271,7 @@ def build_model_input(
 ) -> DataFrame:
     """Assemble a split's model_input from its keys, the labels and the features.
 
-    Not a node itself: the three build nodes call it, each after deciding
+    Not a node itself: the build node functions call it, each after deciding
     ``months`` — the months its split reads (ADR-0029 decision 2). Keyword-only
     and without a default, because a build that forgot it would otherwise read
     another split's months, and every key would find no label and no feature
@@ -1313,9 +1322,13 @@ def build_model_input(
     # split's months only, and the filter is written here rather than left to
     # the optimizer (ADR-0029 decision 1). Every join key holds time, so
     # another month's rows could never match: the filter changes the cost,
-    # never the answer. The pruning Spark would otherwise infer from the keys
-    # (dynamic partition pruning) needs them small enough to broadcast, which
-    # a production-size split is not — and it disappears without a word.
+    # never the answer. Nothing else prunes these reads: the joins are LEFT
+    # from the keys, so only the table on the right can be broadcast, and
+    # dynamic partition pruning under Spark's defaults needs the keys' side
+    # broadcast — measured 2026-09-25, every partition read, while the plan
+    # printed before execution looks as if it prunes. A table partitioned by
+    # time skips the other months' partitions; an unpartitioned one is still
+    # scanned, but only this split's rows reach the join.
     in_months = months_filter_as_date(schema["time"], months)
     label_table = label_table.filter(in_months)
     preprocessed_feature_table = preprocessed_feature_table.filter(in_months)
@@ -1627,8 +1640,8 @@ def filter_train_keys(
     label_table = combine_item_columns(label_table, schema, "label_table")
     # Decision — label_table is read for the train months only: the keys of
     # both train and train_dev were drawn from them. Written here for the
-    # build's reason (ADR-0029 decision 1): the join would never match another
-    # month, and leaving the pruning to the optimizer reads the whole table.
+    # build's reason (build_model_input, ADR-0029 decision 1): the join would
+    # never match another month, and nothing else prunes this read.
     train_months = [
         pd.Timestamp(d) for d in parameters["dataset"]["train_snap_dates"]
     ]

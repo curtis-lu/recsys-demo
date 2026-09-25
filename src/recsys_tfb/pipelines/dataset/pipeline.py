@@ -155,8 +155,9 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         # --- Fit preprocessor on train date-range feature_table, decoupled from sampling ---
         #
         # `candidate_feature_table` (the optional candidate-level feature
-        # table, ADR-0026) goes last on every node that takes it. It is an
-        # optional trailing parameter and the
+        # table, ADR-0026) goes after every required input on each node that
+        # takes it — only the precision gate has inputs after it, two more
+        # optional ones. It is an optional trailing parameter and the
         # Runner binds by position — this repo's convention for a new optional
         # input (see the note on `log_experiment` in training/pipeline.py). The
         # CLI registers `None` for the table when a deployment declares none, so

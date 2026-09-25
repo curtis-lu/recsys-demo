@@ -61,15 +61,19 @@ def require_months_present(
     "feature_table is missing a month" about the other one would send the
     operator to the wrong table.
 
+    A month is present when a row's time value falls on it, compared as a
+    date the way :func:`months_filter_as_date` reads it — so a TIMESTAMP with
+    a time of day counts for its day, as the reads it guards would count it.
+
     Cost: one ``distinct().collect()`` over the time column **of those months
     only** — the filter comes first, so the question is not asked of a table's
     whole history, which only grows (ADR-0029 decision 1). What lands on the
     driver is bounded by ``months``, not by row count.
     """
     present = {
-        row[time_col]
+        row[0]
         for row in df.filter(months_filter_as_date(time_col, months))
-        .select(time_col).distinct().collect()
+        .select(F.to_date(F.col(time_col))).distinct().collect()
     }
     require_months_in(present, months, what, table)
 
@@ -87,7 +91,8 @@ def require_months_in(present, months: list, what: str, table: str) -> None:
     if missing:
         raise ValueError(
             f"{table} missing required {what}: "
-            f"{[d.strftime('%Y-%m-%d') for d in missing]}"
+            f"{[d.strftime('%Y-%m-%d') for d in missing]}. A time column "
+            f"stored as text counts only when written YYYY-MM-DD."
         )
 
 
