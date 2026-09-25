@@ -688,7 +688,7 @@ def tune_hyperparameters(
 
     # val_model_input holds every query group with a positive plus the share of
     # the ones without that dataset.val_zero_positive_group_ratio keeps (none
-    # at the default 0; filter_val_model_input). No in-pandas re-filter here:
+    # at the default 0; filter_val_keys). No in-pandas re-filter here:
     # the two ranking objectives skip a group without a positive by
     # construction, so kept zero-positive groups leave them unchanged
     # (ADR-0025 decision 3); the two binary-prediction objectives need exactly
@@ -1074,7 +1074,7 @@ def predict_and_write_test_predictions(
           rows per save, so dynamic-partition overwrite cleanly overwrites
           a single partition and successive saves don't collide
 
-    test_model_input is filtered upstream (filter_test_model_input in the
+    test_model_input is filtered upstream (filter_test_keys in the
     dataset pipeline): every query group holding a positive, plus the share
     ``dataset.test_zero_positive_group_ratio`` keeps of the ones holding none
     — none at the default 0. Above 0 the rows carry the zero-positive group

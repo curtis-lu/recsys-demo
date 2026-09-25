@@ -33,10 +33,10 @@
 會缺的是**這次要的月份**。它們的判準因此是「這次的月份計畫還有沒有要處理的月」——
 `[months]` 那幾行印的就是這個計畫（[ADR-0012](../../adr/0012-month-aware-slicing-not-per-artifact-skip.md)）。
 
-具體長相：加了一個 `test_snap_dates` 月份之後 `--only-node filter_test_model_input`，
-auto-included 會列出三個——`build_test_model_input`（一般判準：中間產物
-`test_model_input_unfiltered` 是 memory-only），以及月份判準拉回來的
-`select_test_keys` 與 `apply_preprocessor_to_features`。
+具體長相：加了一個 `test_snap_dates` 月份之後 `--only-node build_test_model_input`，
+auto-included 會列出三個——月份判準拉回來的 `filter_test_keys`（`test_keys` 缺這個月）與
+`apply_preprocessor_to_features`（`preprocessed_feature_table` 缺這個月），以及
+`select_test_keys`（一般判準：`filter_test_keys` 的輸入 `test_keys_unfiltered` 是 memory-only）。
 `fit_preprocessor_metadata` 不在其中（`preprocessor` 是落地的 JSON，沒有月份）。
 
 **evaluation 有一個同類的產物**：`enriched_eval_predictions`（[ADR-0018](../../adr/0018-evaluation-materialize-at-producer.md) 決定 1）。`prepare_eval_data` 把評估月份寫成這張表的一個 partition，之後的 node 讀表；表從第一次評估之後就一直在，所以 CLI 一樣改問「`evaluation.snap_date` 這個月的 partition 在不在」。不在，`--from-node compute_metrics` 會把 `prepare_eval_data` 拉回來；在，就直接讀表、不重做 join。它沒有 `--rebuild-dates`：`label_table` 回補或預測重發布之後，要 `--from-node prepare_eval_data` 或 full run（見 [`evaluation.md` §7.4](../../pipelines/evaluation.md)）。`--compare-only` 不帶這份計畫，那條路沒有 `prepare_eval_data` 可以拉回來。

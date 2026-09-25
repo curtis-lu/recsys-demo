@@ -4,12 +4,14 @@ them.
 
 Each function here carries at most one mechanism. Which of them a split runs,
 and why each is the right answer for this task, is the story
-``nodes.build_model_input`` and the ``filter_*`` nodes tell (ADR-0008 §2).
+``nodes.build_model_input`` and the ``filter_*_keys`` nodes tell (ADR-0008 §2).
 """
 
 from __future__ import annotations
 
 import logging
+import operator
+from functools import reduce
 from typing import TYPE_CHECKING, NamedTuple
 
 from pyspark.sql import Window
@@ -25,8 +27,8 @@ logger = logging.getLogger(__name__)
 #: The hash site of the zero-positive group draw. One site for every split, on
 #: purpose: a query group lives in exactly one split (the months are disjoint,
 #: and train / train_dev are cut by entity), so no two splits ever hash the
-#: same group, and one site is what makes the keys path and the model_input
-#: path provably the same draw.
+#: same group, and one site is what makes every split's draw provably the same
+#: rule.
 ZERO_POSITIVE_GROUP_SITE = "zero_positive_groups"
 
 #: Working column of the draw: whether the row's group holds a positive. Not
@@ -133,6 +135,28 @@ def drop_groups_without_positives(
     )
 
 
+def _require_no_weight_column(columns: list[str], weight_col: str) -> None:
+    """Pre-check shared by every step that adds the weight: the frame must not
+    hold a column by that name already. Adding it anyway would either replace
+    that column with weights or put a second column by the same name beside
+    it, and neither raises by itself."""
+    if weight_col in columns:
+        raise ValueError(
+            f"{weight_col!r} is already a column of this frame, and the "
+            f"zero-positive group weight must neither replace it nor sit "
+            f"beside it under the same name. The name is the framework's own; "
+            f"rename the source column."
+        )
+
+
+def with_unit_weight(df: DataFrame, weight_col: str) -> DataFrame:
+    """``df`` with ``weight_col`` set to 1 on every row: the design weight of a
+    split whose every group survived (ratio 1). Reads nothing but ``df``'s
+    column names, so it needs no label."""
+    _require_no_weight_column(df.columns, weight_col)
+    return df.withColumn(weight_col, F.lit(1.0))
+
+
 def _kept_under_ratio(
     has_positive: Column,
     df: DataFrame,
@@ -175,18 +199,18 @@ def keep_zero_positive_groups_drawn_under_ratio(
     window at all.
 
     Refuses a frame that already holds ``weight_col`` rather than overwriting
-    it: a feature column by that name would otherwise be replaced by weights
-    with nothing raised. This is B12's runtime backstop (``core/consistency.py``
-    checks the same thing on metadata at the start of the dataset pipeline).
+    it: replacing a column with weights, silently, is never this helper's to
+    do. It is no longer B12's runtime backstop, though. Every caller now draws
+    over keys and their labels (ADR-0029 decision 4), which hold identity and
+    the label only, so this fires only on an identity column named like the
+    weight. The collision B12 is about — a feature by that name — now meets
+    the weight in ``build_model_input``, which the keys carry it into; see
+    B12 in ``core/consistency.py`` for what stops it there.
     """
-    if weight_col is not None and weight_col in df.columns:
-        raise ValueError(
-            f"{weight_col!r} is already a column of this frame, so the "
-            f"zero-positive group weight would overwrite it. The name is the "
-            f"framework's own; rename the source column."
-        )
+    if weight_col is not None:
+        _require_no_weight_column(df.columns, weight_col)
     if ratio >= 1.0:
-        return df if weight_col is None else df.withColumn(weight_col, F.lit(1.0))
+        return df if weight_col is None else with_unit_weight(df, weight_col)
     if ratio <= 0.0:
         kept = drop_groups_without_positives(df, group_cols, label_col)
         return kept if weight_col is None else kept.withColumn(weight_col, F.lit(1.0))
@@ -202,6 +226,47 @@ def keep_zero_positive_groups_drawn_under_ratio(
             F.when(F.col(_HAS_POSITIVE), F.lit(1.0)).otherwise(F.lit(1.0 / ratio)),
         )
     return kept.drop(_HAS_POSITIVE)
+
+
+def keep_keys_of_drawn_groups(
+    keys: DataFrame,
+    drawn: DataFrame,
+    group_cols: list[str],
+    *,
+    weight_col: str | None = None,
+) -> DataFrame:
+    """``keys`` narrowed to the query groups ``drawn`` kept — each key once,
+    in its own columns — plus ``weight_col`` copied over from ``drawn`` when
+    given.
+
+    ``drawn`` is :func:`keep_zero_positive_groups_drawn_under_ratio` run over
+    the keys' labels: several rows per group, all agreeing on the weight. It is
+    reduced to one row per group before the join, so the join can drop a key
+    and never repeat one — a label table holding a key twice fans ``drawn``
+    out, never the keys, and still reaches B10 through the build.
+
+    NULL-safe on every group column: a group whose key holds a NULL is one
+    group to the draw (its window partitions it like any other), and a plain
+    equi-join would drop it whatever the draw decided. The group columns are
+    renamed on ``drawn``'s side first, so after the join the keys' own columns
+    are the only ones by those names.
+
+    Refuses keys that already hold ``weight_col`` rather than returning two
+    columns by that name.
+    """
+    if weight_col is not None:
+        _require_no_weight_column(keys.columns, weight_col)
+    renamed = {c: f"__drawn_{c}" for c in group_cols}
+    carried = [weight_col] if weight_col is not None else []
+    kept = drawn.select(
+        *[F.col(c).alias(renamed[c]) for c in group_cols], *carried,
+    ).distinct()
+    on = reduce(operator.and_, [
+        F.col(c).eqNullSafe(F.col(renamed[c])) for c in group_cols
+    ])
+    if weight_col is None:
+        return keys.join(kept, on=on, how="left_semi")
+    return keys.join(kept, on=on, how="inner").select(*keys.columns, weight_col)
 
 
 def count_zero_positive_groups_kept(

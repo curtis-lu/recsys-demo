@@ -1318,7 +1318,7 @@ def build_prediction_quality_section(
         population = (
             f"母體：本段算在本次評估的全部候選列上，本身不排除任何 query group；"
             "但這是 --post-training，test 表在 dataset 階段只留下有正例的 query "
-            "group 與一部分沒有正例的（filter_test_model_input）。"
+            "group 與一部分沒有正例的（filter_test_keys）。"
             + _kept_zero_positive_groups_note(metrics, parameters)
             + f"本段的列數與正例數都是乘上 {weight_col} 之後的加權數（共 "
             f"{n_rows:,}），代表還原到全部曝光的估計。{ranking_rule}{excluded}。"
@@ -1331,7 +1331,7 @@ def build_prediction_quality_section(
         population = (
             f"母體：本段算在本次評估的全部 {n_rows:,} 列候選上，本身不排除任何 "
             "query group；但這是 --post-training，test 表在 dataset 階段已經丟掉"
-            "沒有正例的 query group（filter_test_model_input），所以這些列只來自"
+            "沒有正例的 query group（filter_test_keys），所以這些列只來自"
             "「有正例的 query group」，不是全部曝光。正例佔比因此比全部曝光高，"
             "precision 與 pr_auc 會比在全部曝光上算的大；要留下這類 query group，"
             f"設 dataset.test_zero_positive_group_ratio。{ranking_rule}{excluded}。"

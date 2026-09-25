@@ -89,7 +89,7 @@ python -m recsys_tfb dataset \
 ```
 base_dataset_version: <跟你抄下來的一模一樣>
 train_variant_id:     <跟你抄下來的一模一樣>
-[plan] only-test-months: 6 of the dataset pipeline's 17 nodes; ...
+[plan] only-test-months: 7 of the dataset pipeline's 17 nodes; ...
 [months] dataset=test_keys         processed=2026-02-28 skipped=2026-01-31
 [months] dataset=test_model_input  processed=2026-02-28 skipped=2026-01-31
 ```

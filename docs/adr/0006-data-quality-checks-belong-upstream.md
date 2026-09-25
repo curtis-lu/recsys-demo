@@ -224,4 +224,4 @@ grep 會被那句解釋「為什麼不用 `df.count()`」的 docstring 自己命
 
 ## 修訂（2026-09-25，ADR-0029）：B10 涵蓋四個 split
 
-上文說 B10「四個 split 只擋得住兩個」，理由是 val／test 在建表之後才丟無正例組。[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 4 把 val／test 的丟組也搬到 keys 上，B10 改為涵蓋四個 split：train／train_dev／val 比目前版本底下的全部檔案；test 比這次 `to_process` 的月份。實作完成前，程式碼仍只涵蓋 train／train_dev。
+上文說 B10「四個 split 只擋得住兩個」，理由是 val／test 在建表之後才丟無正例組。[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 4 把 val／test 的丟組也搬到 keys 上，B10 改為涵蓋四個 split：train／train_dev／val 比目前版本底下的全部檔案；test 比這次 `to_process` 的月份。#461（2026-09-25）已實作。

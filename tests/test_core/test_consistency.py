@@ -3494,6 +3494,35 @@ class TestModelInputGrainErrorsB10:
             {"train": SplitRowCounts(1_000_000, 1_000_200)})
         assert "1.0002x" in errors[0]
 
+    def test_a_split_written_by_month_is_compared_month_by_month(self):
+        # test accumulates months (ADR-0029 decision 4). Summed, a month the
+        # build fanned out and a month it left short would cancel: 20 + 0 is
+        # 10 + 10.
+        errors = model_input_grain_errors({"test": {
+            "2026-02-28": SplitRowCounts(10, 0),
+            "2026-01-31": SplitRowCounts(10, 20),
+        }})
+        assert len(errors) == 2
+        assert "test_model_input holds 20 row(s) for 2026-01-31" in errors[0]
+        assert "test_model_input holds 0 row(s) for 2026-02-28" in errors[1]
+
+    def test_months_that_match_raise_nothing(self):
+        # An emptied month is 0 = 0, not an error.
+        assert model_input_grain_errors({"test": {
+            "2026-01-31": SplitRowCounts(0, 0),
+            "2026-02-28": SplitRowCounts(5, 5),
+        }}) == []
+
+    def test_a_landed_month_is_to_be_rebuilt_by_name(self):
+        # The month has landed by the time the gate reads it, and a plain
+        # re-run skips landed months — the bad rows would stay.
+        errors = model_input_grain_errors(
+            {"test": {"2026-01-31": SplitRowCounts(10, 20)}})
+        assert "--rebuild-dates 2026-01-31" in errors[0]
+        # A split rebuilt in full every run needs no such advice.
+        whole = model_input_grain_errors({"val": SplitRowCounts(10, 20)})
+        assert "--rebuild-dates" not in whole[0]
+
 
 class TestA35EtlCliVars:
     """A35 — the four source ETL commands' repeatable ``--var key=value``

@@ -88,21 +88,43 @@ class TestExistingListing:
     """Each artifact is gated on its own partitions, not on a shared answer."""
 
     def test_landed_months_are_skipped(self):
+        # Both test tables hold the month: the keys are redone for every month
+        # the model input redoes (test_test_keys_are_redone_...).
         plans = build_month_plans(
-            PARAMS, existing={"test_keys": ["2026-04-30"]},
+            PARAMS, existing={"test_keys": ["2026-04-30"],
+                              "test_model_input": ["2026-04-30"]},
         )
         assert plans["test_keys"].to_process == _ts("2026-05-31")
         assert plans["test_keys"].skipped == _ts("2026-04-30")
 
     def test_one_artifacts_listing_does_not_silence_another(self):
         # test_keys and test_model_input are configured from the same key but
-        # land independently: keys can be written and the model input not.
+        # land independently: the model input can be written and the keys'
+        # listing still lack a month, and the keys' plan answers for its own.
         plans = build_month_plans(
-            PARAMS, existing={"test_keys": ["2026-04-30", "2026-05-31"]},
+            PARAMS,
+            existing={"test_model_input": ["2026-04-30", "2026-05-31"],
+                      "test_keys": ["2026-04-30"]},
         )
-        assert plans["test_keys"].to_process == []
-        assert plans["test_model_input"].to_process == TEST_MONTHS
+        assert plans["test_model_input"].to_process == []
+        assert plans["test_keys"].to_process == _ts("2026-05-31")
         assert plans["preprocessed_feature_table"].to_process == ALL_MONTHS
+
+    def test_test_keys_are_redone_for_every_month_the_build_redoes(self):
+        """ADR-0029 decision 4 made the keys depend on label_table (they carry
+        the zero-positive group drop). Keys that landed in a run that failed
+        before its test build would otherwise be read back by the next run's
+        build, joined to labels the drop never saw — every row count agreeing,
+        so B10 cannot tell. So a month the model input still lacks is redone
+        for the keys as well, even though the keys have it."""
+        plans = build_month_plans(
+            PARAMS,
+            existing={"test_keys": ["2026-04-30", "2026-05-31"],
+                      "test_model_input": ["2026-04-30"]},
+        )
+        assert plans["test_model_input"].to_process == _ts("2026-05-31")
+        assert plans["test_keys"].to_process == _ts("2026-05-31")
+        assert plans["test_keys"].skipped == _ts("2026-04-30")
 
     def test_existing_defaults_to_nothing_has_landed(self):
         # The non-CLI entry point (tests, notebooks): one call, three plans,
@@ -134,6 +156,7 @@ class TestRebuild:
             existing={
                 "preprocessed_feature_table": [str(d.date()) for d in ALL_MONTHS],
                 "test_keys": ["2026-04-30", "2026-05-31"],
+                "test_model_input": ["2026-04-30", "2026-05-31"],
             },
             rebuild=["2026-05-31"],
         )
@@ -141,8 +164,9 @@ class TestRebuild:
         assert plans["test_keys"].to_process == _ts("2026-05-31")
 
     def test_rebuild_defaults_to_empty(self):
+        landed = ["2026-04-30", "2026-05-31"]
         plans = build_month_plans(
-            PARAMS, existing={"test_keys": ["2026-04-30", "2026-05-31"]},
+            PARAMS, existing={"test_keys": landed, "test_model_input": landed},
         )
         assert plans["test_keys"].to_process == []
 
@@ -202,7 +226,10 @@ class TestLandedMonths:
             ],
             time_col="snap_date", dataset_name="test_keys",
         )
-        plans = build_month_plans(PARAMS, existing={"test_keys": existing})
+        plans = build_month_plans(
+            PARAMS,
+            existing={"test_keys": existing, "test_model_input": ["2026-04-30"]},
+        )
         assert plans["test_keys"].to_process == _ts("2026-05-31")
         assert plans["test_keys"].skipped == _ts("2026-04-30")
 

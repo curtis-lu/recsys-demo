@@ -1255,7 +1255,7 @@ def compute_prediction_quality(
     # metric computed only where someone responded is systematically larger
     # (ADR-0024 decision 3). Under --post-training the test table holds only
     # the share of those groups dataset.test_zero_positive_group_ratio kept
-    # (filter_test_model_input); A46 refuses the run when it kept none.
+    # (filter_test_keys); A46 refuses the run when it kept none.
     #
     # Decision — under --post-training with that ratio above 0, every row
     # weighs its zero-positive group weight: a kept zero-positive group stands

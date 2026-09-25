@@ -180,6 +180,18 @@ ADR-0008 那一輪的結構搬移在 2026-08-08（PR #176）合併時，`pipelin
 - `keep_zero_positive_groups_drawn_under_ratio` 裡有一道執行期的後備檢查：輸入如果已經帶著權重欄就報錯（B12 的後備）。搬到 keys 上之後，輸入是剛從 `sample_pool` 選出的 keys，這道檢查永遠不會觸發，要重新想它該守在哪。真的撞名時，build 會因為欄名重複而大聲失敗，不會靜默。
 - node 名 `filter_val_model_input`、`filter_test_model_input` 消失，`--only-node`／`--from-node` 指到它們會報錯；`pipeline.py` 的 `ONLY_TEST_MONTHS_NODES`（見上一段）、防漂移測試 `tests/test_pipelines/test_dataset/test_pipeline.py`、`tests/test_pipelines/test_resume_contracts.py` 的接續契約都要跟著改。文件與腳本裡引用這兩個 node 名的地方，實作時全 repo grep 一次（flow 規則 10）。ADR-0007 當初刻意保留 `filter_test_model_input` 這個 node 名；這次是有意拿掉。
 
+> **實作註記（2026-09-25，#461）**：
+> - 新 node 叫 `filter_val_keys`、`filter_test_keys`。三個整組抽樣 node 共用同一個「把抽中的組接回 keys」的機制（`steps/model_input.py` 的 `keep_keys_of_drawn_groups`）：先把抽樣結果縮成一組一列，再接回 keys，所以 keys 只會變少、不會變多。train 不帶權重，接法是 semi join；val／test 帶權重，用 inner join 把那一欄接回來。
+> - `filter_test_keys` 吃 `test_keys_month_plan`（選 key 用的那一份），`label_table` 篩到它的 `to_process`；B10 吃 `test_model_input_month_plan`（組裝用的那一份），理由見上文。
+> - B12 的執行期後備檢查改由組裝負責。權重在 keys 上，特徵表若有同名的欄，組裝最後那一步選欄時會因為兩欄同名而由 Spark 報錯（`Reference ... is ambiguous`），跟 B7 的後備是同一種：訊息裡沒有 B12 代號，但不會靜默覆寫。抽樣 helper 原本那道「已經有這一欄就報錯」的檢查留著，當成 helper 自己「不覆寫」的保證；它現在只看得到 identity 與 label，擋不到特徵。決定寫在 `core/consistency.py` 的 B12 說明與該 helper 的 docstring。
+> - 接續成本有一項上文沒寫：從 `fit_preprocessor_metadata` 接續，會多補跑 `select_val_keys`、`select_test_keys`。四個整組抽樣 node 都排在 fit 之後，它們的輸入又不落地。反過來，從 `build_train_model_input` 接續不再補跑 val／test 的 build。接續契約已照改。
+> - `--only-test-months` 的 node 從 6 個變 7 個：少 `filter_test_model_input`，多 `filter_test_keys` 與 `validate_model_input_grain`。
+> - B10 報告的 test 那一段多一個 `months`，逐月列出 keys 與 model_input 的列數，「整個月的組都被丟了」的 0 ＝ 0 看得到。
+> - 審查後補的三件，上文沒想到（本份原本只把 test 當成「這次的月份」一整批）：
+>   - **test 逐月比，不比加總。** 一個月放大、一個月短少，加總會互相抵銷。
+>   - **B10 擋下的 test 月份已經落地。** 直接重跑，月份計畫會把它當成已落地而跳過，壞資料留著。所以 test 的錯誤訊息寫出月份，要求用 `--rebuild-dates` 重算；用 `--rebuild-dates` 重算過的月份，若某個 item 分區（或整個月）這次變成空的，舊分區會留著（dynamic partition overwrite），訊息也把這個可能寫出來。
+>   - **`test_keys` 要重做的月份，包含 `test_model_input` 這次要組的月份**（`month_plans.py` 的 `build_month_plans`）。上文說兩份計畫的 `to_process` 可能不同；搬到 keys 上之後，keys 帶著丟組的判斷、而判斷看 label，上次跑到一半留下的 keys 若是在 label 回補之前判斷的，接上新的 label 會對不上，而且列數相等、B10 看不出來。現在 keys 的計畫一定涵蓋組裝的計畫。
+
 ## 決定 5　整單位抽樣只留一個逐列機制；entity 有 NULL 一律丟並警告
 
 **規則**：

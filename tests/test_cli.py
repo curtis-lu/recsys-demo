@@ -2013,19 +2013,21 @@ _LANDED = (
     | {month_plan_input(name) for name in INCREMENTAL_DATASETS}
 )
 
-#: The node set issue #202 names: the test chain's four nodes. Spelled out
-#: rather than derived, because a derivation would be the same walk the code
-#: under test performs.
+#: The node set issue #202 names: the test chain. Spelled out rather than
+#: derived, because a derivation would be the same walk the code under test
+#: performs. Its last node is the build since the group drop moved onto the
+#: keys (ADR-0029 decision 4), and the drop sits between the key selection and
+#: the build.
 _TEST_CHAIN = {
-    "filter_test_model_input",
     "build_test_model_input",
+    "filter_test_keys",
     "select_test_keys",
     "apply_preprocessor_to_features",
 }
 
 
 class TestANewMonthPullsBackTheProducersThatOwnIt:
-    """The node set ``--only-node filter_test_model_input`` derives (#202).
+    """The node set ``--only-node build_test_model_input`` derives (#202).
 
     Same pipeline definition and same slicing code the real run uses, with a
     catalog stubbed to the truth of ``catalog.yaml`` — a fast proxy for the
@@ -2037,7 +2039,7 @@ class TestANewMonthPullsBackTheProducersThatOwnIt:
         pipe = get_pipeline("dataset")
         plans = {name: _plan(pending) for name in INCREMENTAL_DATASETS}
         _, plan = pipe.slice_only(
-            "filter_test_model_input", _make_can_load(_FakeCatalog(_LANDED), plans)
+            "build_test_model_input", _make_can_load(_FakeCatalog(_LANDED), plans)
         )
         return plan
 
@@ -2050,24 +2052,25 @@ class TestANewMonthPullsBackTheProducersThatOwnIt:
         # collapsed entirely.
         assert set(plan.requested) | set(plan.auto_included) == _TEST_CHAIN
         # Named per producer: the artifact that pulled it back is what the
-        # [plan] line shows the operator.
-        assert plan.auto_included["select_test_keys"] == ("test_keys",)
+        # [plan] line shows the operator. The key selection rides in behind
+        # the drop, whose input it produces and which is memory-only.
+        assert plan.auto_included["filter_test_keys"] == ("test_keys",)
+        assert plan.auto_included["select_test_keys"] == ("test_keys_unfiltered",)
         assert plan.auto_included["apply_preprocessor_to_features"] == (
             "preprocessed_feature_table",
         )
 
-    def test_with_no_pending_month_the_chain_stops_one_hop_up(self):
-        """The pre-#202 behaviour, kept as the negative control.
+    def test_with_no_pending_month_nothing_upstream_is_pulled_back(self):
+        """The negative control: the months decide it, nothing else.
 
-        ``test_model_input_unfiltered`` is not in ``catalog.yaml`` (the runner
-        makes it a MemoryDataset), so its producer is always pulled back; the
-        chain then stopped at ``test_keys``, a persistent Hive table that
-        ``exists()`` reports as present whatever months it holds.
+        Every input of the build is landed and holds every planned month, so
+        the build runs alone. (Before ADR-0029 decision 4 the slice started at
+        a filter after the build, whose memory-only input always pulled the
+        build back; the chain then stopped at ``test_keys``.)
         """
         plan = self._sliced([])
 
         assert set(plan.requested) | set(plan.auto_included) == {
-            "filter_test_model_input",
             "build_test_model_input",
         }
 
@@ -2081,7 +2084,7 @@ class TestTheDatasetCommandWiresThePlansIntoTheSlice:
     green and the silent defect intact.
     """
 
-    def test_only_node_filter_test_model_input_pulls_back_both_producers(
+    def test_only_node_build_test_model_input_pulls_back_both_producers(
         self, tmp_path
     ):
         captured = {}
@@ -2099,7 +2102,7 @@ class TestTheDatasetCommandWiresThePlansIntoTheSlice:
         ), patch("recsys_tfb.__main__._format_slice_plan", spy):
             _run_dataset_command(
                 tmp_path,
-                ["dataset", "--only-node", "filter_test_model_input", "--dry-run"],
+                ["dataset", "--only-node", "build_test_model_input", "--dry-run"],
                 # Only `test_model_input` is a Hive table in that fixture's
                 # catalog, so only its plan reflects `existing` — the other two
                 # have every configured month pending regardless. So this is the
@@ -2125,7 +2128,7 @@ class TestTheDatasetCommandWiresThePlansIntoTheSlice:
         module logger rather than reading ``caplog``: ``setup_logging`` clears
         the root handlers this command's logs would otherwise land in.
 
-        ``--only-node filter_test_model_input`` skips
+        ``--only-node build_test_model_input`` skips
         ``validate_data_consistency``, the Layer-2 data gate, which is the
         whole reason the line exists.
         """
@@ -2149,7 +2152,7 @@ class TestTheDatasetCommandWiresThePlansIntoTheSlice:
         ), patch("recsys_tfb.__main__.logger", recorder):
             _run_dataset_command(
                 tmp_path,
-                ["dataset", "--only-node", "filter_test_model_input", "--dry-run"],
+                ["dataset", "--only-node", "build_test_model_input", "--dry-run"],
                 existing=("2026-01-31",),
                 foreign=(),
             )
@@ -3055,7 +3058,7 @@ class TestRebuildSlicedAwayWarning:
         from recsys_tfb.__main__ import _maybe_warn_rebuild_sliced_away
 
         assert _maybe_warn_rebuild_sliced_away(
-            self._pipe("filter_test_model_input"),
+            self._pipe("build_test_model_input"),
             {"rebuild": ["2026-01-31"], "chain": "test 鏈"},
         ) == []
 
@@ -3277,8 +3280,8 @@ class TestOnlyTestMonthsFlag:
         from recsys_tfb.pipelines import get_pipeline
 
         lines = _format_only_test_months_plan()
-        assert "6 of the dataset pipeline's 17 nodes" in lines[0]
-        assert "11 left out" in lines[0]
+        assert "7 of the dataset pipeline's 17 nodes" in lines[0]
+        assert "10 left out" in lines[0]
 
         # The names, compared against the pipelines themselves: a message that
         # carried its own copy of the list could disagree with what ran.
@@ -3302,13 +3305,13 @@ class TestOnlyTestMonthsFlag:
         listed = [
             line for line in result.output.splitlines() if "[nodes] " in line
         ]
-        assert len(listed) == 1 + len(ONLY_TEST_MONTHS_NODES)  # header + 6
+        assert len(listed) == 1 + len(ONLY_TEST_MONTHS_NODES)  # header + 7
 
     def test_only_node_composes_and_counts_against_the_short_pipeline(self, tmp_path):
         self._conf(tmp_path)
         result, _ = self._run_dataset(tmp_path, [
             "--only-test-months",
-            "--only-node", "filter_test_model_input",
+            "--only-node", "build_test_model_input",
             "--dry-run",
         ])
         assert result.exit_code == 0, result.output
@@ -3319,7 +3322,7 @@ class TestOnlyTestMonthsFlag:
     def test_from_node_composes_and_counts_against_the_short_pipeline(self, tmp_path):
         # The third composition the issue names. --from-node keeps its start
         # node and everything topologically after it *within the mode*, so the
-        # count is against 5 — the same M as --only-node.
+        # count is against the mode's node count — the same M as --only-node.
         self._conf(tmp_path)
         result, _ = self._run_dataset(tmp_path, [
             "--only-test-months",
@@ -3329,16 +3332,17 @@ class TestOnlyTestMonthsFlag:
         assert result.exit_code == 0, result.output
         assert f"of {len(ONLY_TEST_MONTHS_NODES)} nodes" in result.output
         # "and everything after it" is scoped to the mode: the requested set is
-        # the two test-chain nodes, not the full pipeline's downstream. Read the
-        # requested line rather than the whole output — the mode's own
-        # "[plan] left out:" line legitimately names every node it dropped.
+        # the build and the grain gate after it, not the full pipeline's
+        # downstream. Read the requested line rather than the whole output —
+        # the mode's own "[plan] left out:" line legitimately names every node
+        # it dropped.
         requested = [
             line for line in result.output.splitlines()
             if "[plan] mode=from; requested:" in line
         ]
         assert len(requested) == 1, result.output
         assert requested[0].split("requested:")[1].strip() == (
-            "build_test_model_input, filter_test_model_input"
+            "build_test_model_input, validate_model_input_grain"
         )
 
     def test_a_node_name_outside_the_mode_is_rejected_by_name(self, tmp_path):

@@ -27,8 +27,6 @@ pre-checks. Where a node's *time* actually goes is a question for the Runner's
 """
 
 import logging
-import operator
-from functools import reduce
 
 import pandas as pd
 from pyspark.sql import DataFrame
@@ -89,10 +87,12 @@ from recsys_tfb.pipelines.dataset.steps.model_input import (
     count_zero_positive_groups_kept,
     join_features_missing_as_null,
     join_labels_missing_as_negative,
+    keep_keys_of_drawn_groups,
     keep_zero_positive_groups_drawn_under_ratio,
     log_zero_positive_group_draw,
     model_input_columns,
     require_columns_present,
+    with_unit_weight,
 )
 from recsys_tfb.pipelines.dataset.month_plans import (
     SnapDatePlan,
@@ -1404,14 +1404,12 @@ def build_model_input(
     return result
 
 
-#: Why val / test carry no row-count gate. One template because the first half
-#: is the same sentence for both; ``extra`` carries what is true of only one of
-#: them, so the shared half still has a single source.
-_NOT_CHECKED_REASON = (
-    "{split}_model_input is the filter_{split}_model_input output, so its "
-    "row count is deliberately below its keys'; the frame that would match, "
-    "{split}_model_input_unfiltered, has no catalog entry and so never lands "
-    "as parquet — there is no footer to read.{extra}"
+#: Why a run with no test month has no test pair. Written into the report and
+#: the log, so "was test checked" has an answer in the artifact itself.
+_TEST_NOT_WRITTEN = (
+    "not written this run: test_model_input_month_plan.to_process is empty, "
+    "so this run built no test month and there is no test pair to compare. "
+    "Not a failure — the months already on disk were written by earlier runs."
 )
 
 
@@ -1432,11 +1430,61 @@ def _footer_rows(
     return read_row_count(df.sparkSession, files), len(files), len(all_paths)
 
 
+def _footer_rows_by_month(
+    df: DataFrame,
+    *,
+    base_version: str,
+    time_col: str,
+    months: list,
+) -> dict[pd.Timestamp, tuple[int, int]]:
+    """``{month: (rows, files)}`` under ``base_version`` — footer arithmetic
+    only, for a table written one month partition at a time.
+
+    Months are matched as calendar days (``landed_partition_files``, the file
+    list B8 reads), so a partition value spelled differently from the plan's
+    month is still found. A month with no file is ``(0, 0)``: whether that is
+    fine is the caller's decision.
+    """
+    paths = df.inputFiles()
+    counted = {}
+    for month in months:
+        files = landed_partition_files(
+            paths, base_version=base_version, time_col=time_col, months=[month],
+        )
+        counted[pd.Timestamp(month)] = (
+            read_row_count(df.sparkSession, files), len(files),
+        )
+    return counted
+
+
+def _grain_report_entry(
+    label: str,
+    keys: tuple[int, int],
+    model_input: tuple[int, int],
+) -> dict:
+    """One split's entry in the B10 report, ``(rows, files)`` for each side,
+    logged as it is made — one line and one set of fields for every split."""
+    logger.info(
+        "Model input grain gate: %s keys=%d row(s) in %d file(s), "
+        "model_input=%d row(s) in %d file(s)",
+        label, *keys, *model_input,
+    )
+    return {
+        "keys_rows": keys[0], "keys_files": keys[1],
+        "model_input_rows": model_input[0], "model_input_files": model_input[1],
+    }
+
+
 def validate_model_input_grain(
     train_keys: DataFrame,
     train_model_input: DataFrame,
     train_dev_keys: DataFrame,
     train_dev_model_input: DataFrame,
+    val_keys: DataFrame,
+    val_model_input: DataFrame,
+    test_keys: DataFrame,
+    test_model_input: DataFrame,
+    test_model_input_month_plan: SnapDatePlan,
     parameters: dict,
 ) -> dict:
     """Pin each model_input's row count to its keys table's (B10).
@@ -1451,37 +1499,43 @@ def validate_model_input_grain(
     **What it catches.** ``build_model_input``'s own comment names the failure
     it fears — "a silently N-times-too-large dataset" — and guards only one of
     its two causes: ``require_columns_present`` stops a join key that lost the
-    item column. The other cause, a right table (``label_table`` or
-    ``preprocessed_feature_table``) holding a join key twice, had nothing
-    watching it. The upstream ``max_duplicate_key_ratio`` contract does not
-    close it either: A32 passes when ``primary_key`` and ``quality_checks`` are
-    both absent, ``0.5`` is a legal ratio, and this framework lets a user supply
-    source tables its own ``source_etl`` never wrote (ADR-0006's own "not
-    solved" list opens with exactly that deployment).
+    item column. The other cause, a right table (``label_table``,
+    ``preprocessed_feature_table`` or the candidate-level feature table)
+    holding a join key twice, had nothing watching it. The upstream
+    ``max_duplicate_key_ratio`` contract does not close it either: A32 passes
+    when ``primary_key`` and ``quality_checks`` are both absent, ``0.5`` is a
+    legal ratio, and this framework lets a user supply source tables its own
+    ``source_etl`` never wrote (ADR-0006's own "not solved" list opens with
+    exactly that deployment).
 
     **The pairing.**
 
     ::
 
-        train_keys        -> build_train_model_input        -> train_model_input
-        train_dev_keys    -> build_train_dev_model_input    -> train_dev_model_input
+        train_keys      -> build_train_model_input      -> train_model_input
+        train_dev_keys  -> build_train_dev_model_input  -> train_dev_model_input
+        val_keys        -> build_val_model_input        -> val_model_input
+        test_keys       -> build_test_model_input       -> test_model_input
+                           (this run's test months only)
 
     Each row is a build node with nothing between its two ends, which is what
-    makes equality the right comparison. The one thing worth checking rather
-    than assuming: everything that narrows the train-side keys — the split,
-    and the zero-positive group draw after it (``filter_train_keys``,
-    ADR-0025) — runs *before* the builds, not after, so ``train_keys`` and
-    ``train_dev_keys`` are each already the exact input of their own build
-    node. That is why the draw is on the keys at all. Crossing a pair (``train_keys`` against
+    makes equality the right comparison. Everything that narrows a split's
+    keys — the train / train_dev split, and every split's zero-positive group
+    draw (``filter_*_keys``, ADR-0025 decision 3) — runs *before* its build,
+    so each keys table is already the exact input of its own build node. That
+    is why every split draws on its keys (ADR-0029 decision 4): until then val
+    and test drew on the built table, their counts differed on purpose, and
+    this gate could not speak for them. Crossing a pair (``train_keys`` against
     ``train_dev_model_input``) would make the gate always-false rather than
     merely absent, so ``test_the_pairing_is_keys_then_its_own_model_input``
     pins the argument order against the pipeline's input list.
 
-    **val and test are absent by necessity.** Neither has a landed frame at its
-    keys' grain to compare against, and for test the missing frame would not be
-    ``test_keys``-shaped anyway. The full argument, including the one-sided
-    bound that was considered and rejected and the residual risk this leaves,
-    is in the B10 section of ``core/consistency.py``'s module docstring.
+    **test is compared over this run's months.** ``test_keys`` and
+    ``test_model_input`` accumulate months under one version (ADR-0001), and
+    ``build_test_model_input`` reads only its plan's ``to_process`` of the
+    keys — so those are the months compared, taken from the plan that build
+    ran under. ``test_keys``' own plan is not the same thing: after a run that
+    failed half-way, it can list months the build then skipped.
 
     **Why it is a node after the builds rather than a post-condition inside
     one.** Getting a row count inside ``build_model_input`` means ``count()`` on
@@ -1490,6 +1544,8 @@ def validate_model_input_grain(
     is the Runner's doing (it saves a node's output before the next node loads
     it), so the gate has to be its own node; B8 sits where it does for the same
     reason. It still stops the run before anything trains on the bad table.
+    Under ``--only-test-months`` train, train_dev and val are not rebuilt; the
+    gate re-reads their footers, which reads no data.
 
     **Why it reports rather than only gating.** A pass/fail answer cannot say
     how many rows each split actually holds, which is the number an operator
@@ -1497,23 +1553,27 @@ def validate_model_input_grain(
     B8: on a raise the report never reaches the catalog, because the node does
     not return. The counts are logged before the raise for that reason.
     """
+    schema = get_schema(parameters)
     base_version = parameters["base_dataset_version"]
     train_scope = {
         "base_dataset_version": base_version,
         "train_variant_id": parameters["train_variant_id"],
     }
+    base_scope = {"base_dataset_version": base_version}
 
-    # Decision — which pairs this gate can speak for, and under which partition
-    # scope each side's files are counted. The scope is not decoration: these
-    # tables accumulate versions and variants side by side under one Hive table,
-    # and `inputFiles()` answers for the whole relation rather than for the
-    # partition_filter the catalog loaded them with.
+    # Decision — the tables rebuilt in full are compared whole, each side's
+    # files counted under the partition scope it was written to. The scope is
+    # not decoration: these tables accumulate versions (and train variants)
+    # side by side under one Hive table, and `inputFiles()` answers for the
+    # whole relation rather than for the partition_filter the catalog loaded
+    # them with.
     pairs = [
         ("train", train_keys, train_model_input, train_scope),
         ("train_dev", train_dev_keys, train_dev_model_input, train_scope),
+        ("val", val_keys, val_model_input, base_scope),
     ]
 
-    by_split: dict[str, SplitRowCounts] = {}
+    by_split: dict[str, SplitRowCounts | dict[str, SplitRowCounts]] = {}
     splits: dict[str, dict] = {}
     errors: list[str] = []
     for split, keys, model_input, scope in pairs:
@@ -1526,7 +1586,10 @@ def validate_model_input_grain(
             # success having looked at nothing. So it is reported rather than
             # counted as zero rows. A table with no files AT ALL is a
             # different fact and passes: that is a genuinely empty split,
-            # which `dataset.train_dev_ratio: 0` produces on purpose.
+            # which `dataset.train_dev_ratio: 0` produces on purpose. The
+            # check cannot tell a scope mismatch from a split this version
+            # left empty while other versions' files sit in the same table,
+            # so the message names both.
             if present and not matched:
                 spec = ", ".join(f"{k}={v}" for k, v in scope.items())
                 errors.append(
@@ -1534,25 +1597,69 @@ def validate_model_input_grain(
                     f"none under {spec}, so this run's row count could not be "
                     f"established and the comparison for {split} would have "
                     f"passed on two zeroes. Either the version/variant in "
-                    f"parameters no longer matches what is on disk, or the "
+                    f"parameters no longer matches what is on disk, the "
                     f"table was written by a different catalog entry than the "
-                    f"one this node reads."
+                    f"one this node reads, or {split} came out empty under "
+                    f"this version while other versions' files remain (for "
+                    f"val: every query group dropped — r = 0 and the val "
+                    f"month's labels not in yet, say)."
                 )
-            counted[side] = rows
-            counted[f"{side}_files"] = matched
-        by_split[split] = SplitRowCounts(counted["keys"], counted["model_input"])
-        splits[split] = {
-            "keys_rows": counted["keys"],
-            "keys_files": counted["keys_files"],
-            "model_input_rows": counted["model_input"],
-            "model_input_files": counted["model_input_files"],
+            counted[side] = (rows, matched)
+        by_split[split] = SplitRowCounts(
+            counted["keys"][0], counted["model_input"][0])
+        splits[split] = _grain_report_entry(
+            split, counted["keys"], counted["model_input"])
+
+    # Decision — test is compared over the months this run's test build wrote,
+    # and only those: the plan it ran under, not test_keys' own (see the
+    # docstring). A run that wrote no test month has no test pair; that is
+    # said in the report and the log, not failed.
+    not_checked: dict[str, str] = {}
+    test_months = test_model_input_month_plan.to_process
+    if not test_months:
+        not_checked["test"] = _TEST_NOT_WRITTEN
+        logger.info("Model input grain gate: test %s", _TEST_NOT_WRITTEN)
+    else:
+        by_side = {
+            side: _footer_rows_by_month(
+                df, base_version=base_version, time_col=schema["time"],
+                months=test_months,
+            )
+            for side, df in (("keys", test_keys), ("model_input", test_model_input))
         }
-        logger.info(
-            "Model input grain gate: %s keys=%d row(s) in %d file(s), "
-            "model_input=%d row(s) in %d file(s)",
-            split, counted["keys"], counted["keys_files"],
-            counted["model_input"], counted["model_input_files"],
+        # Decision — each month is its own pair, not one sum over the months:
+        # a month the build fanned out and another it left short would cancel
+        # in a sum.
+        #
+        # Decision — a planned month with no file on either side is 0 = 0 and
+        # is reported as such: the group drop emptied it (r = 0 and its labels
+        # not in yet, say), and the two tables agree they hold nothing. So the
+        # "files, but none in scope" pre-check above does not apply here — for
+        # a table written a month at a time, that is what an emptied month
+        # looks like. That leaves no silent hole: a version in parameters that
+        # no longer matches the disk shows on the three pairs above, which
+        # share it, and the month partition is named by the time column the
+        # build wrote with (saving refuses a frame without it). One side
+        # without files and the other with rows is still a mismatch, and the
+        # predicate says so.
+        months = sorted(by_side["keys"])
+        by_split["test"] = {
+            month.strftime("%Y-%m-%d"): SplitRowCounts(
+                by_side["keys"][month][0], by_side["model_input"][month][0])
+            for month in months
+        }
+        splits["test"] = _grain_report_entry(
+            f"test ({len(months)} month(s) this run)",
+            tuple(map(sum, zip(*by_side["keys"].values()))),
+            tuple(map(sum, zip(*by_side["model_input"].values()))),
         )
+        splits["test"]["months"] = {
+            month: {
+                "keys_rows": counts.keys_rows,
+                "model_input_rows": counts.model_input_rows,
+            }
+            for month, counts in by_split["test"].items()
+        }
 
     report = {
         # The version and variant this report describes. The catalog keys its
@@ -1563,31 +1670,17 @@ def validate_model_input_grain(
         "base_dataset_version": base_version,
         "train_variant_id": parameters["train_variant_id"],
         "splits": splits,
-        # Named in the artifact, not only in this docstring: a reader who pulls
-        # the report to ask "was my dataset checked" must not have to infer from
-        # two absent keys that two splits were deliberately left out.
-        "not_checked": {
-            "val": _NOT_CHECKED_REASON.format(
-                split="val", extra=""),
-            "test": _NOT_CHECKED_REASON.format(
-                split="test",
-                extra=(
-                    " test is doubly out of reach: build_test_model_input "
-                    "re-scopes test_keys to this run's months first, so even a "
-                    "landed unfiltered frame would match only that subset, not "
-                    "the whole persistent test_keys table."
-                ),
-            ),
-        },
+        # Named in the artifact, not only in the log: a reader who pulls the
+        # report to ask "was my dataset checked" must not have to infer from
+        # an absent key that a split was left out, or why.
+        "not_checked": not_checked,
     }
 
     # Collect-all, one raise: the measurement failures above and the grain
     # mismatches below are both "this gate has something to say about a split",
     # and an operator fixing one wants to see the other in the same pass. Same
     # shape B8 uses.
-    errors += model_input_grain_errors(
-        by_split, get_schema(parameters)["identity_columns"],
-    )
+    errors += model_input_grain_errors(by_split, schema["identity_columns"])
     if errors:
         raise DataConsistencyError(
             f"Model input grain check failed ({len(errors)} issue(s)):\n- "
@@ -1609,13 +1702,14 @@ def filter_train_keys(
     only its own groups — the split is by entity, so no query group straddles
     the two.
 
-    **Why on the keys and not on model_input**, unlike val / test: B10 pins
-    ``train_model_input``'s row count to ``train_keys``' to catch a right table
-    that holds a join key twice. Dropping groups after the build would make the
-    two counts differ on purpose, and B10 could no longer tell a deliberate drop
-    from a fan-out — a drop of 1,000 rows hides a 500-row fan-out. Dropping them
-    here, before ``train_keys`` lands, keeps the pair equal. The price is one
-    extra label join, paid only when the ratio is below 1.
+    **Why on the keys and not on model_input**, as every split does it (val
+    and test since ADR-0029 decision 4): B10 pins ``train_model_input``'s row
+    count to ``train_keys``' to catch a right table that holds a join key
+    twice. Dropping groups after the build would make the two counts differ on
+    purpose, and B10 could no longer tell a deliberate drop from a fan-out — a
+    drop of 1,000 rows hides a 500-row fan-out. Dropping them here, before
+    ``train_keys`` lands, keeps the pair equal. The price is one extra label
+    join, paid only when the ratio is below 1.
 
     What this step sees is what the row-level draw and the train / train_dev
     split left: "a group holding a positive is kept whole" means this step drops
@@ -1664,23 +1758,14 @@ def filter_train_keys(
     # Decision — a group holding a positive is kept whole; a group holding none
     # is kept whole or dropped whole, `ratio` of them kept. No weight column:
     # training ranks, and a ranking needs no proportions restored.
-    kept_groups = keep_zero_positive_groups_drawn_under_ratio(
+    drawn = keep_zero_positive_groups_drawn_under_ratio(
         labels, group_cols, label_col, ratio, seed,
-    ).select(*group_cols).distinct()
-
-    # Decision — the keys keep their own rows and columns. A semi join on the
-    # query group can only drop a key, never repeat one, so a label_table
-    # holding a key twice cannot fan out here and still reaches B10 through the
-    # build. NULL-safe on every group column: a group whose key holds a NULL is
-    # one group to the draw (the val / test window partitions it like any
-    # other), and a plain equi-join would drop it whatever the draw decided.
-    kept = keys.join(
-        kept_groups,
-        on=reduce(operator.and_, [
-            keys[c].eqNullSafe(kept_groups[c]) for c in group_cols
-        ]),
-        how="left_semi",
     )
+
+    # Decision — the keys keep their own rows and columns: a label_table
+    # holding a key twice cannot repeat a key here, and still reaches B10
+    # through the build.
+    kept = keep_keys_of_drawn_groups(keys, drawn, group_cols)
 
     # Decision — a partial draw reports how many zero-positive groups it kept.
     # One narrow Spark action (keys and labels only), paid only when 0 < r < 1.
@@ -1694,8 +1779,9 @@ def filter_train_keys(
     return kept
 
 
-def filter_val_model_input(
-    model_input: DataFrame,
+def filter_val_keys(
+    keys: DataFrame,
+    label_table: DataFrame,
     parameters: dict,
 ) -> DataFrame:
     """Keep val's query groups holding a positive, and a share of the ones
@@ -1708,92 +1794,165 @@ def filter_val_model_input(
     row as a binary prediction, which a table holding only groups with a
     positive biases high.
 
-    Applied to the built model_input rather than to the keys (the train side's
-    choice): nothing pins val's row count to its keys (B10 covers train and
-    train_dev only), so there is nothing a later drop could break, and the
-    label is already joined.
+    **On the keys, before the build, as train does it** (ADR-0029 decision 4).
+    The drop used to run on the built model_input, which made that table's row
+    count differ from ``val_keys``' on purpose, so B10 could not pair them: a
+    right table holding a join key twice multiplied the evaluation data with
+    nothing to stop it. Here ``val_keys`` lands exactly the keys the build
+    reads, and B10 compares the two. The label join this costs is narrow
+    (identity and the label); the old filter ran a window over the full-width
+    model_input instead.
 
-    Pre-check (input), inside the draw: a model_input that already holds a
-    column named like the weight is refused rather than overwritten — the
-    runtime backstop of B12, for a sliced run that skipped the gate.
+    For 0 < r < 1 the move changed which zero-positive groups are kept, not
+    how many: the draw hashes the query group, time included, and the time
+    column here is ``sample_pool``'s type (DATE from the framework's
+    ``source_etl``), where the old filter saw the STRING a Hive partition
+    column reads back as. ``spark_bucket`` formats the two differently. Both
+    draws are deterministic; ADR-0029 decision 4 records why a new set is
+    fine.
     """
     schema = get_schema(parameters)
+    identity_cols = schema["identity_columns"]
     group_cols = schema["query_group_columns"]
     label_col = schema["label"]
     ratio = resolved_zero_positive_group_ratio(parameters, "val")
     seed = parameters.get("random_seed", 42)
 
-    # Decision — above 0 the rows carry their design weight: 1 in a group
-    # holding a positive, 1/r in a kept zero-positive group. At 0 there is
-    # nothing to weight, and the table keeps the columns it always had.
+    # Decision — above 0 the keys carry their design weight: 1 in a group
+    # holding a positive, 1/r in a kept zero-positive group. The build takes
+    # it into val_model_input as it takes any column the keys carry. At 0
+    # there is nothing to weight, and the keys keep the columns they had.
     weight_col = ZERO_POSITIVE_GROUP_WEIGHT_COL if ratio > 0.0 else None
 
+    # Decision — ratio 1 keeps every group, so no label is read: every key
+    # stays, weighted 1.
+    if ratio >= 1.0:
+        log_zero_positive_group_draw("val", ratio, None)
+        return with_unit_weight(keys, weight_col)
+
+    # Decision — a multi-column item is combined on read (ADR-0027).
+    label_table = combine_item_columns(label_table, schema, "label_table")
+    # Decision — label_table is read for the val months only, the months the
+    # keys were drawn from (ADR-0029 decision 1).
+    val_months = [
+        pd.Timestamp(d) for d in parameters["dataset"].get("val_snap_dates", [])
+    ]
+    label_table = label_table.filter(
+        months_filter_as_date(schema["time"], val_months)
+    )
+
+    # Decision — whether a group holds a positive is read from label_table,
+    # never from a label column sample_pool may carry (#429): judged by that
+    # copy, a disagreement would delete real positives together with their
+    # group, and B10 would pass because keys and model_input lose the same
+    # rows. The build joins its label from the same table.
+    labels = join_labels_missing_as_negative(
+        keys.select(*identity_cols),
+        label_table.select(*identity_cols, label_col),
+        identity_cols, label_col,
+    )
+
     # Decision — a group holding a positive is kept whole; a group holding none
-    # is kept whole or dropped whole, `ratio` of them kept. The label is the
-    # one build_model_input joined from label_table.
-    kept = keep_zero_positive_groups_drawn_under_ratio(
-        model_input, group_cols, label_col, ratio, seed, weight_col=weight_col,
+    # is kept whole or dropped whole, `ratio` of them kept.
+    drawn = keep_zero_positive_groups_drawn_under_ratio(
+        labels, group_cols, label_col, ratio, seed, weight_col=weight_col,
+    )
+
+    # Decision — the keys keep their own rows and gain only the weight: a
+    # label_table holding a key twice cannot repeat a key here, and still
+    # reaches B10 through the build.
+    kept = keep_keys_of_drawn_groups(
+        keys, drawn, group_cols, weight_col=weight_col,
     )
 
     # Decision — a partial draw reports how many zero-positive groups it kept:
     # 1/r is a design weight, and the count is what tells an operator whether
-    # the weighted metrics are stable. One Spark action over the group and
-    # label columns, paid only when 0 < r < 1.
+    # the weighted metrics are stable. One narrow Spark action (keys and
+    # labels only), paid only when 0 < r < 1.
     counts = None
-    if 0.0 < ratio < 1.0:
+    if ratio > 0.0:
         with log_step(logger, "count_zero_positive_groups"):
             counts = count_zero_positive_groups_kept(
-                model_input, group_cols, label_col, ratio, seed,
+                labels, group_cols, label_col, ratio, seed,
             )
     log_zero_positive_group_draw("val", ratio, counts)
     return kept
 
 
-def filter_test_model_input(
-    model_input: DataFrame,
+def filter_test_keys(
+    keys: DataFrame,
+    label_table: DataFrame,
+    month_plan: SnapDatePlan,
     parameters: dict,
 ) -> DataFrame:
     """Keep test's query groups holding a positive, and a share of the ones
     holding none (``dataset.test_zero_positive_group_ratio``, ADR-0025
-    decision 3).
+    decision 3), on the keys before the build (ADR-0029 decision 4).
 
-    val's decisions with test's key: a separate node function because the key
-    is the one answer that differs, and reading the wrong one would raise
-    nothing. No month scoping: its input comes from build_test_model_input,
-    which is already scoped (ADR-0007).
+    val's decisions with test's key and test's months: a separate node
+    function because those are the two answers that differ, and reading the
+    other split's would raise nothing. The keys arrive scoped to
+    ``month_plan.to_process`` by ``select_test_keys``; the label table is read
+    for the same months here.
 
-    The weight column this adds above 0 travels on: training writes it into
+    The weight column this adds above 0 travels on: the build takes it into
+    ``test_model_input``, training writes it into
     ``training_eval_predictions`` (A45 makes the catalog declare it) and the
     prediction-quality family sums it instead of counting rows.
-
-    Pre-check (input), inside the draw: B12's runtime backstop, as in
-    ``filter_val_model_input``.
     """
     schema = get_schema(parameters)
+    identity_cols = schema["identity_columns"]
     group_cols = schema["query_group_columns"]
     label_col = schema["label"]
     ratio = resolved_zero_positive_group_ratio(parameters, "test")
     seed = parameters.get("random_seed", 42)
 
-    # Decision — above 0 the rows carry their design weight: 1 in a group
+    # Decision — above 0 the keys carry their design weight: 1 in a group
     # holding a positive, 1/r in a kept zero-positive group. At 0 there is
-    # nothing to weight, and the table keeps the columns it always had.
+    # nothing to weight, and the keys keep the columns they had.
     weight_col = ZERO_POSITIVE_GROUP_WEIGHT_COL if ratio > 0.0 else None
 
+    # Decision — ratio 1 keeps every group, so no label is read: every key
+    # stays, weighted 1.
+    if ratio >= 1.0:
+        log_zero_positive_group_draw("test", ratio, None)
+        return with_unit_weight(keys, weight_col)
+
+    # Decision — a multi-column item is combined on read (ADR-0027).
+    label_table = combine_item_columns(label_table, schema, "label_table")
+    # Decision — label_table is read for this run's test months only, the
+    # plan's to_process the keys were selected under (ADR-0029 decision 1).
+    label_table = label_table.filter(
+        months_filter_as_date(schema["time"], month_plan.to_process)
+    )
+
+    # Decision — whether a group holds a positive is read from label_table,
+    # never from a label column sample_pool may carry, for val's reason.
+    labels = join_labels_missing_as_negative(
+        keys.select(*identity_cols),
+        label_table.select(*identity_cols, label_col),
+        identity_cols, label_col,
+    )
+
     # Decision — a group holding a positive is kept whole; a group holding none
-    # is kept whole or dropped whole, `ratio` of them kept. The label is the
-    # one build_model_input joined from label_table.
-    kept = keep_zero_positive_groups_drawn_under_ratio(
-        model_input, group_cols, label_col, ratio, seed, weight_col=weight_col,
+    # is kept whole or dropped whole, `ratio` of them kept.
+    drawn = keep_zero_positive_groups_drawn_under_ratio(
+        labels, group_cols, label_col, ratio, seed, weight_col=weight_col,
+    )
+
+    # Decision — the keys keep their own rows and gain only the weight, for
+    # val's reason.
+    kept = keep_keys_of_drawn_groups(
+        keys, drawn, group_cols, weight_col=weight_col,
     )
 
     # Decision — a partial draw reports how many zero-positive groups it kept,
-    # for val's reason. One Spark action, paid only when 0 < r < 1.
+    # for val's reason. One narrow Spark action, paid only when 0 < r < 1.
     counts = None
-    if 0.0 < ratio < 1.0:
+    if ratio > 0.0:
         with log_step(logger, "count_zero_positive_groups"):
             counts = count_zero_positive_groups_kept(
-                model_input, group_cols, label_col, ratio, seed,
+                labels, group_cols, label_col, ratio, seed,
             )
     log_zero_positive_group_draw("test", ratio, counts)
     return kept
