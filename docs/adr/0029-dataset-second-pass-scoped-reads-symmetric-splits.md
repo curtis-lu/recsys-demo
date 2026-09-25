@@ -343,6 +343,19 @@ CLI 只留通用的部分：寫 manifest、執行 pipeline。
 
 **和 ADR-0012 的關係**：ADR-0012 當初不補攔截的理由是「要使用者主動縮小範圍才會踩到」；#334 開票時（2026-09-12）決定要補。ADR-0012〈後果〉第一條不變：`scripts/rebuild_eval_month.sh` 不會順手重建 train／val。本決定是擋下來，不是自動補建。
 
+> **實作註記（2026-09-25，#463）**：
+> - 不變量代號 A55，predicate 是 `core/consistency.py` 的 `train_version_landed_errors`。
+> - 決定 11 的根層模組叫 `pipelines/dataset/run_contract.py`。目前只放本決定的兩個事實：
+>   - `train_version_landing`（開跑前）：`train_model_input` 在這個 base 底下、在這個 variant 底下，各有沒有分區。
+>   - `unlanded_train_tables`（跑完之後）：兩張 train 表裡，哪幾張在這個 variant 底下沒有分區。
+> - base 那一層的問法：把 catalog 條目 `partition_filter` 裡的 `train_variant_id` 拿掉，另建一個 dataset 物件，問它有哪些分區。開跑前、跑完之後各兩次 `SHOW PARTITIONS`，都只讀 metastore。
+> - 上文沒寫、實作時定的三件：
+>   - **列不出分區的條目算「沒落地」**，並警告（不是 Hive 表，或 catalog 沒有這一條）。開跑前會擋下，跑完不動 `latest`。反方向是發布一個沒人看過表的 variant。兩份示例 catalog 都是 Hive 表，只有測試用的 catalog 走得到這裡。
+>   - **`--dry-run`、`--list-nodes` 也檢查**：預覽不該承諾一個會被擋下的執行。
+>   - **不發布時印兩行 `[train_variant]` 警告**，寫出 `latest` 目前指的 variant；還沒有 `latest` 時，寫明 training 會找不到 train 版本而報錯。
+> - base 那一層的 manifest 與 `data/dataset/latest` 照舊每次成功執行都更新。本決定只管 train variant 那一層。
+> - 順帶更正：`docs/operations/user-guides/pipeline-slicing.md` 原本寫「config 變了 → filter 指向不存在的 partition → `exists()` 自然為假，這一層防呆是有效的」。這與 `_table_exists` 的表級判定相反（ADR-0012 已記），而那正是切片會把沒建好的 variant 標成 `completed` 的原因。已改寫，並在同一段補上本決定的兩道規則。
+
 ## 決定 13　`preprocessor_on_disk` 由程式從 `preprocessor` 推出
 
 **背景**：

@@ -41,6 +41,7 @@ from recsys_tfb.core.consistency import (
     resolved_inference_rebuild_dates,
     resolved_rebuild_dates,
     train_snap_dates_errors,
+    train_version_landed_errors,
     zero_positive_group_weight_declared_errors,
     binary_test_metrics_verdict,
     resolved_zero_positive_group_ratio,
@@ -79,6 +80,10 @@ from recsys_tfb.pipelines.dataset.month_plans import (
     plan_incremental_snap_dates,
 )
 from recsys_tfb.pipelines.dataset.pipeline import ONLY_TEST_MONTHS_NODES
+from recsys_tfb.pipelines.dataset.run_contract import (
+    train_version_landing,
+    unlanded_train_tables,
+)
 from recsys_tfb.pipelines.training.cache_sources import inject_cache_source_tables
 
 app = typer.Typer(help="recsys_tfb: Product recommendation ranking model CLI")
@@ -624,6 +629,30 @@ def _format_only_test_months_plan() -> list[str]:
         f"pipeline's {len(full)} nodes; the {len(left_out)} left out rebuild "
         f"artifacts a new test month cannot change.",
         f"[plan] left out: {', '.join(left_out)}",
+    ]
+
+
+def _format_train_version_not_built(
+    train_v: str, unlanded: list[str], latest: Path,
+) -> list[str]:
+    """WARN lines for a dataset run that left the configured train version
+    unbuilt, so neither its ``completed`` nor ``train_variants/latest`` moved.
+
+    Names what training will read instead, because that is what the operator
+    has to decide about: the run exits 0, and training keeps going on a train
+    version other than the one the config now names — or, with no ``latest``
+    yet, stops at "no latest symlink".
+    """
+    current = (
+        f"目前是 {latest.resolve().name}" if latest.exists()
+        else "目前沒有，training 會找不到 train 版本而報錯"
+    )
+    return [
+        f"[train_variant] 目前設定的 train 版本（train_variant_id={train_v}）"
+        f"還沒建：{', '.join(unlanded)} 在它底下沒有分區，所以沒有把它標成 "
+        f"completed，train_variants/latest 也沒動。",
+        f"[train_variant] training 會繼續讀 latest 指的那一個（{current}）。"
+        f"要讓 training 用目前的設定，請跑完整的 dataset。",
     ]
 
 
@@ -1193,7 +1222,8 @@ def dataset(
         False, "--only-test-months",
         help="宣告「這次只加評估月份」：只跑資料閘與 test 鏈。train／val "
              "的產物不重算——多一個 test 月不會改變它們的內容。"
-             "與 --from-node／--only-node 正交，可併用。上游缺料時當場報錯。",
+             "與 --from-node／--only-node 正交，可併用。上游缺料時當場報錯。"
+             "目前設定的 train 版本還沒建時，開跑前就擋下（A55）。",
     ),
     from_node: Optional[str] = typer.Option(
         None, "--from-node",
@@ -1335,6 +1365,22 @@ def dataset(
 
     pipeline_kwargs = {"only_test_months": only_test_months}
     if only_test_months:
+        # (A55) The mode runs no train build, so it can only reuse a train
+        # version built earlier (ADR-0029 decision 12). Checked before the
+        # stubs below, so a refused run leaves no manifest for a variant
+        # nobody built — and before --dry-run returns, so the preview does
+        # not promise a run that would be refused.
+        landing = train_version_landing(listing_catalog_config)
+        landing_errors = train_version_landed_errors(
+            base_landed=landing.base,
+            variant_landed=landing.variant,
+            base_dataset_version=base_v,
+            train_variant_id=train_v,
+        )
+        if landing_errors:
+            for line in landing_errors:
+                logger.error(line)
+            raise typer.Exit(code=1)
         for line in _format_only_test_months_plan():
             logger.info(line)
 
@@ -1429,19 +1475,33 @@ def dataset(
     )
 
     train_variant_dir = base_dir / "train_variants" / train_v
-    _write_pipeline_manifest(
-        version_dir=train_variant_dir,
-        metadata_kwargs={
-            "version": train_v,
-            "pipeline": "dataset",
-            "parameters": params_dataset,
-            "parent_version": base_v,
-            "variant_kind": "train",
-            "artifacts": _dir_artifacts(train_variant_dir),
-        },
-        run_id=run_context.run_id,
-        symlink_target=base_dir / "train_variants" / "latest",
-    )
+    train_latest = base_dir / "train_variants" / "latest"
+    # Decision (ADR-0029 decision 12) — the variant is marked completed and
+    # `latest` moves to it only when its tables are in the metastore, not
+    # because this run finished. Training follows `latest` and never
+    # recomputes the variant, so asking "which nodes ran" gets both wrong
+    # cases wrong: a slice that skipped the train builds would publish an
+    # empty variant (training reads 0 rows, #334), and --only-test-months on
+    # a config switched back to a variant built earlier would leave `latest`
+    # on another one.
+    unlanded = unlanded_train_tables(listing_catalog_config)
+    if unlanded:
+        for line in _format_train_version_not_built(train_v, unlanded, train_latest):
+            logger.warning(line)
+    else:
+        _write_pipeline_manifest(
+            version_dir=train_variant_dir,
+            metadata_kwargs={
+                "version": train_v,
+                "pipeline": "dataset",
+                "parameters": params_dataset,
+                "parent_version": base_v,
+                "variant_kind": "train",
+                "artifacts": _dir_artifacts(train_variant_dir),
+            },
+            run_id=run_context.run_id,
+            symlink_target=train_latest,
+        )
 
     logger.info("Pipeline 'dataset' completed successfully")
 

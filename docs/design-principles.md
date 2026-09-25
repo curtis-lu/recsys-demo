@@ -158,7 +158,7 @@ SHAP 特徵歸因透過 `attribution.feature_attributions(model, X, feature_name
 
 ### manifest 記錄版本關聯
 
-為了讓中途崩潰也不丟失溯源，dataset 與 training 的 `manifest.json` 採兩階段寫入：pipeline 開跑前先落一份 `status: running` 的 stub（已含完整參數與版本身分，但不建 `latest` symlink、不覆寫既有 manifest），成功完成後再覆寫為 `status: completed` 並補上產物清單。崩潰時版本目錄會留下 `status: running` 的 manifest，仍可據以還原「是哪一組參數產生了這個版本」。manifest 記錄：
+為了讓中途崩潰也不丟失溯源，dataset 與 training 的 `manifest.json` 採兩階段寫入：pipeline 開跑前先落一份 `status: running` 的 stub（已含完整參數與版本身分，但不建 `latest` symlink、不覆寫既有 manifest），成功完成後再覆寫為 `status: completed` 並補上產物清單（dataset 的 train variant 另有條件：它的 train 表要已經在 metastore 裡，見 [dataset.md §7.5](pipelines/dataset.md)）。崩潰時版本目錄會留下 `status: running` 的 manifest，仍可據以還原「是哪一組參數產生了這個版本」。manifest 記錄：
 
 - 本次版本與 pipeline
 - 寫入狀態 `status`（`running` 進行中或崩潰；`completed` 已完成；缺此欄位的舊 manifest 視為已完成）
@@ -171,7 +171,7 @@ training 的 manifest 讓 inference 與 evaluation 可以從 `model_version` 反
 
 `latest` 與 `best` 的語意刻意不同：
 
-- `latest`：最近成功產生的 dataset 或 variant
+- `latest`：最近成功產生的 dataset 或 variant（train variant 以它的 train 表真的有分區為準，不以「這一輪跑完了」為準）
 - `best`：經人工核准、供 inference 預設使用的模型
 
 「最近完成」不等於「適合上線」，因此 training 不會自動更新 `best`。

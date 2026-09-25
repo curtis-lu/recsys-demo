@@ -1755,6 +1755,22 @@ class TestRebuildDatesFlag:
 _FOREIGN_VERSION = "deadbeef"
 
 
+def _train_version_built():
+    """Stub A55's facts as "the configured train version is built".
+
+    For tests about something else that run ``--only-test-months``: their
+    catalogs hold no Hive train tables to list, so the real facts would read
+    "never built" and A55 would stop the run before the thing under test.
+    ``TestTrainVersionMustHaveLandedA55`` covers the facts themselves.
+    """
+    from recsys_tfb.pipelines.dataset.run_contract import TrainVersionLanding
+
+    return patch(
+        "recsys_tfb.__main__.train_version_landing",
+        return_value=TrainVersionLanding(base=True, variant=True),
+    )
+
+
 def _run_dataset_command(
     tmp_path, argv, existing=("2026-01-31",), foreign=("2026-02-28",),
     catalog_extra=None,
@@ -1845,6 +1861,7 @@ def _run_dataset_command(
                     "recsys_tfb.utils.spark.get_or_create_spark_session",
                     return_value=spark,
                 ), \
+                _train_version_built(), \
                 patch("recsys_tfb.__main__.Runner"):
             result = runner.invoke(app, argv)
     finally:
@@ -3233,6 +3250,7 @@ class TestOnlyTestMonthsFlag:
                         "recsys_tfb.utils.spark.get_or_create_spark_session",
                         return_value=_mock_spark_with_feature_table_schema(),
                     ), \
+                    _train_version_built(), \
                     patch("recsys_tfb.__main__.Runner") as mock_runner_cls:
                 mock_catalog_cls.return_value = mock_catalog_cls
                 mock_catalog_cls.add = lambda *a, **kw: None
@@ -3356,6 +3374,9 @@ class TestOnlyTestMonthsFlag:
         ])
         assert result.exit_code == 1
         assert pipe is None
+        # Exit 1 alone is also what A55 gives a mode whose train version is
+        # missing; name the reason this test is about.
+        assert "Unknown node 'build_train_model_input'" in result.output
 
 
 class TestRebuildPartialChainWarning:
@@ -4395,3 +4416,287 @@ class TestTrainingReadsTheDatasetVersionsTestRatioA54:
         assert re.search(
             r"pooled_average_precision will have no value on test: .*"
             r"'abc12345'", result.output), result.output
+
+
+# --- #463: a train version is built when its tables are in the metastore ---
+#     (ADR-0029 decision 12, A55)
+
+#: The two train tables' physical names, as in conf/base/catalog.yaml.
+_TRAIN_TABLES = {
+    "train_model_input": "recsys_prod_train_model_input",
+    "train_dev_model_input": "recsys_prod_train_dev_model_input",
+}
+
+
+def _hive_train_entries() -> dict:
+    """The two train tables as Hive entries, shaped like conf/base/catalog.yaml.
+
+    ``partition_filter`` is the part these tests lean on: the command resolves
+    both versions into it, and the listing is scoped by what it resolved.
+    """
+    return {
+        name: {
+            "type": "HiveTableDataset",
+            "database": "ml_recsys",
+            "table": table,
+            "external": False,
+            "columns": "auto",
+            "partition_filter": {
+                "base_dataset_version": "${base_dataset_version}",
+                "train_variant_id": "${train_variant_id}",
+            },
+            "partition_cols": [{"name": "snap_date", "type": "STRING"}],
+        }
+        for name, table in _TRAIN_TABLES.items()
+    }
+
+
+class _FakeMetastore:
+    """``SHOW TABLES`` and ``SHOW PARTITIONS`` answered from what was written.
+
+    Both answers come from one record, as in a real metastore — which is the
+    gap #334 lived in: once any variant has written a table, the table exists
+    for every variant.
+    """
+
+    def __init__(self):
+        self.partitions: dict[str, list[str]] = {}
+
+    def write(self, dataset_name, base_v, train_v):
+        self.partitions.setdefault(_TRAIN_TABLES[dataset_name], []).append(
+            f"base_dataset_version={base_v}/train_variant_id={train_v}"
+            f"/snap_date=2025-12-31"
+        )
+
+    def sql(self, query):
+        words = query.split()
+        verb = " ".join(words[:2]).upper()
+        if verb == "SHOW PARTITIONS":
+            return _partition_rows(
+                self.partitions.get(words[2].split(".")[-1], [])
+            )
+        result = MagicMock()
+        if verb == "SHOW TABLES":
+            table = query.rsplit("LIKE", 1)[1].strip().strip("'")
+            result.collect.return_value = (
+                [SimpleNamespace(tableName=table, isTemporary=False)]
+                if table in self.partitions else []
+            )
+        return result
+
+
+class _WritingRunner:
+    """Stands in for ``Runner``: "writes" the train tables whose build node it
+    was handed, under the versions the command computed.
+
+    Which tables land is decided by which nodes ran, the way it is for real —
+    and that is the thing the command must not take on trust when it decides
+    what ``latest`` names.
+    """
+
+    def __init__(self, metastore):
+        self._metastore = metastore
+        self.runs = 0
+
+    def __call__(self):  # the command constructs ``Runner()``
+        return self
+
+    def run(self, pipe, catalog):
+        self.runs += 1
+        params = catalog.load("parameters")
+        for node in pipe.nodes:
+            for out in node.outputs:
+                if out in _TRAIN_TABLES:
+                    self._metastore.write(
+                        out,
+                        params["base_dataset_version"],
+                        params["train_variant_id"],
+                    )
+
+
+class TestTrainVersionMustHaveLandedA55:
+    """ADR-0029 decision 12: ``--only-test-months`` needs the train version the
+    config names to have tables, and after any run ``completed`` and
+    ``train_variants/latest`` follow those tables, not the nodes that ran.
+
+    Only the metastore and the runner are faked. The listing goes through the
+    real catalog and ``HiveTableDataset``, so it is scoped by the versions the
+    command actually substituted. Changing ``sample_ratio`` is the #334 edit:
+    it moves ``train_variant_id`` and leaves ``base_dataset_version`` alone.
+    """
+
+    @staticmethod
+    def _dataset_params(sample_ratio):
+        return {"dataset": {
+            "sample_ratio": sample_ratio,
+            "train_dev_ratio": 0.2,
+            "train_snap_dates": ["2025-12-31"],
+            "test_snap_dates": ["2026-01-31"],
+        }}
+
+    def _run(self, tmp_path, metastore, argv, *, sample_ratio):
+        base = tmp_path / "conf" / "base"
+        if base.exists():
+            with open(base / "parameters_dataset.yaml", "w") as f:
+                yaml.dump(self._dataset_params(sample_ratio), f)
+        else:
+            _setup_conf(tmp_path, params_dataset=self._dataset_params(sample_ratio))
+            with open(base / "catalog.yaml") as f:
+                catalog = yaml.safe_load(f)
+            catalog.update(_hive_train_entries())
+            with open(base / "catalog.yaml", "w") as f:
+                yaml.dump(catalog, f)
+
+        spark = _mock_spark_with_feature_table_schema()
+        spark.sql.side_effect = metastore.sql
+        fake_runner = _WritingRunner(metastore)
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session",
+                return_value=spark,
+            ), patch("recsys_tfb.__main__.Runner", fake_runner):
+                result = runner.invoke(app, ["dataset", *argv])
+        finally:
+            os.chdir(old_cwd)
+        return result, fake_runner.runs
+
+    @staticmethod
+    def _train_variants(tmp_path):
+        """``(train_variants dir, the variant latest names or None)``."""
+        [base_dir] = [
+            p for p in (tmp_path / "data" / "dataset").iterdir()
+            if p.name != "latest"
+        ]
+        root = base_dir / "train_variants"
+        latest = root / "latest"
+        return root, (latest.resolve().name if latest.exists() else None)
+
+    def test_a_full_run_publishes_the_variant_it_built(self, tmp_path):
+        from recsys_tfb.core.versioning import read_manifest
+
+        result, _ = self._run(tmp_path, _FakeMetastore(), [], sample_ratio=0.1)
+
+        assert result.exit_code == 0, result.output
+        root, latest = self._train_variants(tmp_path)
+        assert latest is not None
+        assert read_manifest(root / latest)["status"] == "completed"
+
+    def test_334_a_changed_sampling_key_is_refused_before_anything_runs(
+        self, tmp_path,
+    ):
+        metastore = _FakeMetastore()
+        first, _ = self._run(tmp_path, metastore, [], sample_ratio=0.1)
+        assert first.exit_code == 0, first.output
+        root, latest_a = self._train_variants(tmp_path)
+
+        result, runs = self._run(
+            tmp_path, metastore, ["--only-test-months"], sample_ratio=0.2,
+        )
+
+        assert result.exit_code == 1
+        assert "(A55)" in result.output
+        # The second message: the base is there, this variant is not.
+        assert "train sampling settings changed" in result.output
+        assert "never been built" not in result.output
+        assert runs == 0
+        # Refused before the stubs too: no directory names a variant nobody
+        # built, and latest still names the one that was.
+        assert {p.name for p in root.iterdir()} == {"latest", latest_a}
+        assert self._train_variants(tmp_path)[1] == latest_a
+
+    def test_a_first_run_with_only_test_months_is_told_the_base_was_never_built(
+        self, tmp_path,
+    ):
+        result, runs = self._run(
+            tmp_path, _FakeMetastore(), ["--only-test-months"], sample_ratio=0.1,
+        )
+
+        assert result.exit_code == 1
+        assert "(A55)" in result.output
+        # The first message: nothing under this base at all.
+        assert "never been built" in result.output
+        assert "train sampling settings changed" not in result.output
+        assert runs == 0
+        assert not list(tmp_path.rglob("manifest.json"))
+
+    def test_a_dry_run_is_refused_too(self, tmp_path):
+        """The preview must not promise a run that would be refused."""
+        result, _ = self._run(
+            tmp_path, _FakeMetastore(), ["--only-test-months", "--dry-run"],
+            sample_ratio=0.1,
+        )
+
+        assert result.exit_code == 1
+        assert "(A55)" in result.output
+        assert "[plan] dry-run" not in result.output
+
+    def test_a_slice_that_skips_the_train_builds_publishes_nothing(self, tmp_path):
+        from recsys_tfb.core.versioning import read_manifest
+
+        metastore = _FakeMetastore()
+        first, _ = self._run(tmp_path, metastore, [], sample_ratio=0.1)
+        assert first.exit_code == 0, first.output
+        root, latest_a = self._train_variants(tmp_path)
+
+        result, runs = self._run(
+            tmp_path, metastore, ["--only-node", "build_test_model_input"],
+            sample_ratio=0.2,
+        )
+
+        assert result.exit_code == 0, result.output
+        assert runs == 1
+        assert self._train_variants(tmp_path)[1] == latest_a
+        [variant_b] = [
+            p for p in root.iterdir() if p.name not in ("latest", latest_a)
+        ]
+        # Still the pre-run stub: nothing upgraded it to completed.
+        assert read_manifest(variant_b)["status"] == "running"
+        # Said out loud, naming what training will read instead.
+        warning = [
+            line for line in result.output.splitlines()
+            if "[train_variant]" in line and variant_b.name in line
+        ]
+        assert warning, result.output
+        assert latest_a in result.output
+
+    def test_a_slice_that_builds_one_train_table_publishes_nothing(self, tmp_path):
+        """Both tables, not either: training reads train_dev too, and a slice
+        can build train_model_input alone."""
+        metastore = _FakeMetastore()
+        first, _ = self._run(tmp_path, metastore, [], sample_ratio=0.1)
+        assert first.exit_code == 0, first.output
+        _, latest_a = self._train_variants(tmp_path)
+
+        result, _ = self._run(
+            tmp_path, metastore, ["--only-node", "build_train_model_input"],
+            sample_ratio=0.2,
+        )
+
+        assert result.exit_code == 0, result.output
+        # The slice did write the new variant's train_model_input...
+        assert len(metastore.partitions[_TRAIN_TABLES["train_model_input"]]) == 2
+        # ...and latest stayed, because train_dev_model_input has nothing.
+        assert self._train_variants(tmp_path)[1] == latest_a
+        assert "train_dev_model_input" in result.output
+
+    def test_switching_back_to_a_built_variant_moves_latest_back(self, tmp_path):
+        """The wrong ``latest`` that "which nodes ran" cannot catch: the
+        mode runs no train build, yet the configured variant is built."""
+        from recsys_tfb.core.versioning import read_manifest
+
+        metastore = _FakeMetastore()
+        assert self._run(tmp_path, metastore, [], sample_ratio=0.1)[0].exit_code == 0
+        _, latest_a = self._train_variants(tmp_path)
+        assert self._run(tmp_path, metastore, [], sample_ratio=0.2)[0].exit_code == 0
+        root, latest_b = self._train_variants(tmp_path)
+        assert latest_b != latest_a
+
+        result, _ = self._run(
+            tmp_path, metastore, ["--only-test-months"], sample_ratio=0.1,
+        )
+
+        assert result.exit_code == 0, result.output
+        assert self._train_variants(tmp_path)[1] == latest_a
+        assert read_manifest(root / latest_a)["status"] == "completed"
