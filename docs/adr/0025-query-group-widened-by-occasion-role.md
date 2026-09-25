@@ -110,3 +110,7 @@ ADR-0021 只容得下形狀一：query group 寫死是 `time` ＋ `entity`。
 - `CLAUDE.md`〈這個專案是什麼〉寫著「對每個 query group（`time` × `entity`）」。在 `occasion` 落地之前這句仍然是真的，所以本 ADR 不改它；`occasion` 落地的那張 PR 要一起改（改 `CLAUDE.md` 前照該檔的規矩載入 `maintain-agent-rules`）。`CONTEXT.md` 在這段期間以「尚未實作」的標記與它並存。
 - 新角色的欄位不得成為特徵，連 `categorical_columns` 那個出口也不開（`item` 是靠它成為特徵的）。
 - r 該設多少、HPO 把 val 拉到 driver 撐不撐得住，都沒量過；repo 裡的合成資料推不出生產的數字。
+
+### 修訂（2026-09-25，ADR-0029）
+
+決定 3 補記寫「val／test 沒有這個問題（B10 本來就不涵蓋它們），維持在建表之後過濾」。這個理由指向它自己造成的結果：B10 不涵蓋 val／test，正是因為過濾放在建表之後。[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 4 把 val／test 也改成在 keys 上過濾（自己接一次窄的 `label_table`，判斷仍用 `label_table` 的 label），B10 改為涵蓋四個 split。r ＝ 0 或 1 時留下的組與列逐列相同；0 < r < 1 時留下的無正例組會換一批（丟組改在落地前做，time 的型別不同，桶號跟著不同；理由與影響見 ADR-0029 決定 4）。

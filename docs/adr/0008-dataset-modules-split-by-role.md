@@ -477,3 +477,8 @@ processed／skipped 月份清單，與重構前的 baseline 逐字相同**。
 | `docs/adr/0001`、`0002`、`0008`、`0010` | ADR 原文記錄的是當時的事實，一律只加標日期的修訂。0008 命中兩處：本節原文，以及這段修訂裡「舊名 → 新名」的箭頭左側——那是改名紀錄本身，不是待修的假引用 |
 | `docs/notes/2026-07-11-training-oom-investigation.md`、`2026-08-03-day1-doc-triage.md` | 當天的現場調查紀錄；後者引用的 `preprocessing/_spark.py` 早已不存在，本來就是歷史座標 |
 | `docs/superpowers/plans/`、`docs/superpowers/specs/` | 已封存的計畫與規格，不隨程式碼演進 |
+
+### 修訂（2026-09-25，ADR-0029）
+
+- 上文記的「`feature_table` 同時被正規化與不正規化的月份過濾」，以及「哪一邊才對還沒有人判定」：[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 3 判定為先轉日期的那一邊（`months_filter_as_date`），`restrict_to_months` 與 `restrict_to_months_or_all` 刪除。
+- 本份之後 `nodes.py` 從 671 行長到 1733 行。第二輪整理見 ADR-0029；本份的兩條判準與目錄形狀不變，`nodes.py` 維持單一檔案（ADR-0029 決定 8）。

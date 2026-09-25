@@ -83,3 +83,7 @@ be2d95a 當時的三層版本 ID 實測記錄，不代表現況——現況版�
 
 - 使用者要理解「兩個鍵不是重複」。這份 ADR 就是那個解釋的家。
 - `train_split_keys` 進了 `TRAIN_SAMPLING_KEYS`，所以未來若有人把它搬出去，train 產物會靜默共用不同單位切出來的資料。`tests/test_core/test_versioning.py::TestSplitUnitKeysVersionRouting` 把兩個鍵的路由方向都釘住了。
+
+### 修訂（2026-09-25，ADR-0029）
+
+`dataset.carry_columns` 原本沒有登記進 `TRAIN_SAMPLING_KEYS`，改它會翻 `base_dataset_version`。[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 9 照本份的推理（看每個鍵實際影響哪些產物）把它登記進去：carry 欄只進 train／train_dev 的表，改它只該翻 `train_variant_id`。

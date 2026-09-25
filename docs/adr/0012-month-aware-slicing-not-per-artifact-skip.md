@@ -141,3 +141,7 @@ Out of Scope 那一行的問題**不是「沒附理由」**（該清單有數項
 制度上的修補（Out of Scope 每項附理由、關票時未解決項搬進地雷圖）已寫進 `docs/agents/issue-tracker.md`（PR #201，2026-08-10 合併）。
 
 > **2026-09-20 更正：兩條只剩第一條。** 「關票時未解決項搬進地雷圖」與地雷圖檔案本身都已刪除，經過見 `docs/agents/issue-tracker.md`〈票的範圍宣告〉。與本節直接相關的一點：那條規則的前提是「票一關，它的 Out of Scope 就不會再被任何人讀到」，而**本 ADR 本身就是反例**——上面那段落差是半年後讀那張關掉的票查出來的。真正讓它沉沒的是理由寫得太薄，第一條在管這件事。
+
+### 修訂（2026-09-25，ADR-0029）
+
+〈這個論證的已知反例〉那一段（`--only-test-months` 撞上抽樣設定改動時，training 靜默讀到 0 列，#334）改為要攔：[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 12 要求這個模式開跑前，向 metastore 確認目前的 train variant 在 `train_model_input` 底下已經有分區（不看 manifest：切片執行也會把它寫成 `completed`），跑完之後也只在該 variant 有分區時，才把 manifest 寫成 `completed`、把 `train_variants/latest` 指過去。〈後果〉第一條不變：這是擋下，不是自動補建 train／val。
