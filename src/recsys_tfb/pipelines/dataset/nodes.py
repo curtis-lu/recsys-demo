@@ -4,7 +4,10 @@ This module is the one home of the pipeline's ML story: a reader who opens it
 sees each decision this pipeline makes about the data, without jumping files.
 The mechanisms those decisions are expressed in live in ``steps/``, one module per
 concern (``sampling``, ``scoping``, ``feature_columns``, ``categoricals``,
-``model_input``). ``month_plans`` stays beside this file instead, because
+``model_input``, and for the data gates ``footer_facts``, ``precision``,
+``model_input_grain``). A data gate's node says what it checks; the predicate
+in ``core/consistency.py`` says what fails (ADR-0029 decision 7).
+``month_plans`` stays beside this file instead, because
 ``__main__.py`` reads it too — see ADR-0008 §2 for the criteria that draw both
 lines, and ``docs/agents/architecture-constraints.md`` S1, which pins "every node
 registered in ``pipeline.py`` is ``def``-defined here".
@@ -47,24 +50,26 @@ from recsys_tfb.core.consistency import (
     nonnumeric_feature_errors,
     optional_role_source_column_errors,
     override_unknown_item_errors,
-    ColumnPrecision,
     SplitRowCounts,
+    collect_all_message,
     model_input_grain_errors,
+    model_input_grain_scope_errors,
     numeric_precision_errors,
-    numeric_precision_rows,
+    numeric_precision_file_errors,
     resolved_item_values,
     resolved_numeric_storage,
     resolved_zero_positive_group_ratio,
     spark_dtype_is_numeric,
-    spark_dtype_value_step,
     zero_positive_group_weight_collision_errors,
 )
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_entity_grouping, get_schema
-from recsys_tfb.utils.item_columns import combine_item_columns, combined_item_value
+from recsys_tfb.utils.item_columns import combine_item_columns
 from recsys_tfb.pipelines.dataset.steps.categoricals import (
     collect_vocabularies_from_data,
     count_items_in_months,
+    item_combinations_in_months,
+    non_null_item_values,
     read_declared_vocabularies,
     require_declared_categoricals,
     require_supported_categorical_dtypes,
@@ -80,7 +85,24 @@ from recsys_tfb.pipelines.dataset.steps.feature_columns import (
     split_categorical_sources,
     warn_missing_drop_columns,
 )
-from recsys_tfb.pipelines.dataset.steps.precision import landed_partition_files
+from recsys_tfb.pipelines.dataset.steps.footer_facts import (
+    footer_max_abs,
+    footer_rows,
+    footer_rows_by_month,
+)
+from recsys_tfb.pipelines.dataset.steps.model_input_grain import (
+    TEST_NOT_WRITTEN,
+    grain_report,
+    grain_report_entry,
+    monthly_grain_report_entry,
+    split_row_counts_by_month,
+)
+from recsys_tfb.pipelines.dataset.steps.precision import (
+    column_precisions,
+    log_precision_report,
+    precision_report,
+    value_steps,
+)
 from recsys_tfb.pipelines.dataset.steps.model_input import (
     count_zero_positive_groups_kept,
     join_features_missing_as_null,
@@ -112,11 +134,6 @@ from recsys_tfb.pipelines.dataset.steps.scoping import (
     months_present_and_max_abs,
     require_months_in,
     require_months_present,
-)
-from recsys_tfb.utils.parquet_stats import (
-    filter_by_partitions,
-    read_max_abs_stats,
-    read_row_count,
 )
 from recsys_tfb.preprocessing import (
     preprocessor_item_values,
@@ -168,19 +185,10 @@ def validate_data_consistency(
     schema = get_schema(parameters)
     item = schema["item"]
     item_sources = schema["item_source_columns"]
-    time_col = schema["time"]
     label_col = schema["label"]
     identity_cols = schema["identity_columns"]
     windows = collect_dataset_snap_dates(parameters)
-
-    def _raise_if_any(errors: list[str]) -> None:
-        if errors:
-            raise DataConsistencyError(
-                "Data consistency check failed ("
-                + str(len(errors))
-                + " issue(s)):\n- "
-                + "\n- ".join(errors)
-            )
+    headline = "Data consistency check failed"
 
     # B16 first, and on its own: every item check below reads the columns it
     # is about, so with one missing they would fail as a Spark error rather
@@ -188,43 +196,23 @@ def validate_data_consistency(
     item_tables = {"sample_pool": sample_pool, "label_table": label_table}
     if candidate_feature_table is not None:
         item_tables["candidate_feature_table"] = candidate_feature_table
-    _raise_if_any([
+    column_errors = [
         e for table, df in item_tables.items()
         for e in item_source_column_errors(schema, table, df.columns)
-    ])
+    ]
+    if column_errors:
+        raise DataConsistencyError(collect_all_message(headline, column_errors))
     # B17 reads the tables as the user wrote them, before combining turns
     # the item columns into one text column.
     item_dtype_errors = item_source_dtype_errors(
         schema, {table: dict(df.dtypes) for table, df in item_tables.items()},
     )
 
-    def _item_combinations(df: DataFrame) -> list[tuple[tuple, object]]:
-        """Distinct ``(source values, item value)`` in the dataset windows.
-
-        One distinct serves B1 (the values) and B15 (which combinations share
-        a value). For a single-column item the select is the item column
-        alone, exactly the query B1 always ran; a multi-column item adds its
-        source columns, and the combined value is computed by the same Spark
-        expression every entry combines with, so B15 judges what the
-        pipelines will actually see.
-        """
-        combined = (
-            [] if len(item_sources) == 1
-            else [combined_item_value(item_sources).alias(item)]
-        )
-        rows = (
-            df.filter(months_filter_as_date(time_col, windows))
-            .select(*item_sources, *combined)
-            .distinct()
-            .collect()
-        )
-        return [(tuple(r[c] for c in item_sources), r[item]) for r in rows]
-
-    def _values(combinations) -> set:
-        return {value for _, value in combinations if value is not None}
-
-    sample_pool_items = _item_combinations(sample_pool)
-    label_items = _item_combinations(label_table)
+    # Decision — the item values judged are the ones in the dataset windows,
+    # the months some split will read; one distinct per table serves both B1
+    # and B15.
+    sample_pool_items = item_combinations_in_months(sample_pool, schema, windows)
+    label_items = item_combinations_in_months(label_table, schema, windows)
     # Decision — a multi-column item is combined on read (ADR-0027), so the
     # candidate table's features and join key below are what the build will
     # see: `item` present, its source columns gone.
@@ -268,8 +256,8 @@ def validate_data_consistency(
             item,
             None if item_list_counted_from_data(parameters)
             else resolved_item_values(parameters),
-            _values(sample_pool_items),
-            _values(label_items),
+            non_null_item_values(sample_pool_items),
+            non_null_item_values(label_items),
         )
         # B15 — two combinations of a multi-column item may not combine to one
         # value. Both tables together: a label whose combination collides with
@@ -329,7 +317,8 @@ def validate_data_consistency(
             feature_table.columns, candidate_feature_table.columns,
             drop_cols, identity_cols, label_col,
         )
-    _raise_if_any(errors)
+    if errors:
+        raise DataConsistencyError(collect_all_message(headline, errors))
 
 
 def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
@@ -1102,62 +1091,45 @@ def validate_numeric_precision(
         preprocessed_feature_table.schema, feature_columns,
     )
     dtypes = dict(preprocessed_feature_table.dtypes)
-    steps = {
-        c: spark_dtype_value_step(dtypes[c])
-        for c in castable
-        if spark_dtype_value_step(dtypes[c]) is not None
-    }
-    checked = sorted(steps)
-    report = _precision_report(storage_type, policy, months, {}, dtypes)
+    steps = value_steps(dtypes, castable)
+    report = precision_report(storage_type, policy, months, {}, dtypes)
 
     errors: list[str] = []
-    if not checked or not months:
+    if not steps or not months:
         logger.info(
             "Numeric precision gate (%s): nothing to check "
             "(castable=%d, with a value grid=%d, months=%d)",
-            storage_type, len(castable), len(checked), len(months),
+            storage_type, len(castable), len(steps), len(months),
         )
     else:
         # Decision — the facts are read from the partitions this run just
-        # wrote, not from the whole table: inputFiles() answers for the
-        # relation, so the run's own version and months are selected back out
-        # of the paths.
-        files = landed_partition_files(
-            preprocessed_feature_table.inputFiles(),
-            base_version=parameters["base_dataset_version"],
+        # wrote, not from the whole table: its own version and months,
+        # selected out of the file paths.
+        base_version = parameters["base_dataset_version"]
+        max_abs, files = footer_max_abs(
+            preprocessed_feature_table,
+            base_version=base_version,
             time_col=time_col,
             months=months,
+            columns=sorted(steps),
         )
-        if not files:
-            # Not folded into the per-column "no statistics" message: the fix
-            # is different (the gate could not find the data at all, rather
-            # than found it and learned nothing), and reporting it once beats
-            # reporting it once per column.
-            errors.append(
-                f"B8: found no parquet files for the {len(months)} month(s) this "
-                f"run wrote under base_dataset_version="
-                f"{parameters['base_dataset_version']}, so the precision of "
-                f"{len(checked)} feature column(s) could not be established. The "
-                f"gate reads footer statistics from the landed partitions; set "
-                f"dataset.numeric_precision_policy: truncate to proceed without "
-                f"that check."
-            )
-        else:
-            max_abs = read_max_abs_stats(
-                preprocessed_feature_table.sparkSession, files, checked,
-            )
-            by_column = {
-                c: ColumnPrecision(max_abs[c], steps[c]) for c in checked
-            }
-            report = _precision_report(
+        # Pre-check (this node's own input) — no file for the months this run
+        # wrote leaves nothing to measure; that is reported once rather than
+        # as one unmeasured column each (numeric_precision_file_errors).
+        errors = numeric_precision_file_errors(
+            files, months=len(months), base_dataset_version=base_version,
+            columns=len(steps),
+        )
+        if not errors:
+            by_column = column_precisions(max_abs, steps)
+            report = precision_report(
                 storage_type, policy, months, by_column, dtypes,
             )
             logger.info(
                 "Numeric precision gate (%s): %d column(s) over %d file(s) in "
-                "%d month(s)", storage_type, len(checked), len(files), len(months),
+                "%d month(s)", storage_type, len(by_column), files, len(months),
             )
-            for line in _precision_report_lines(report):
-                logger.info("%s", line)
+            log_precision_report(report)
             errors = numeric_precision_errors(by_column, storage_type)
 
     # Decision — the candidate-level feature table is cast by
@@ -1192,9 +1164,9 @@ def validate_numeric_precision(
             {pd.Timestamp(m) for months in build_months for m in months}
         )
         cand_dtypes = dict(candidate_feature_table.dtypes)
-        cand_steps = {
-            c: spark_dtype_value_step(cand_dtypes[c])
-            for c in castable_numeric_feature_columns(
+        cand_steps = value_steps(
+            cand_dtypes,
+            castable_numeric_feature_columns(
                 candidate_feature_table.schema,
                 [
                     c for c in candidate_feature_source_columns(
@@ -1202,13 +1174,11 @@ def validate_numeric_precision(
                     )
                     if c in feature_columns and c not in categorical_cols
                 ],
-            )
-            if spark_dtype_value_step(cand_dtypes[c]) is not None
-        }
-        cand_checked = sorted(cand_steps)
+            ),
+        )
         with log_step(logger, "scan candidate_feature_table (months, max |x|)"):
             present, cand_max_abs = months_present_and_max_abs(
-                candidate_feature_table, time_col, cand_months, cand_checked,
+                candidate_feature_table, time_col, cand_months, sorted(cand_steps),
             )
         # Pre-check: every month this run reads is there. A missing one would
         # become a month of NULL candidate features without a word — not a
@@ -1216,30 +1186,27 @@ def validate_numeric_precision(
         require_months_in(
             present, cand_months, "snap_dates", "candidate_feature_table",
         )
-        cand_by_column = {
-            c: ColumnPrecision(cand_max_abs[c], cand_steps[c]) for c in cand_checked
-        }
-        report["candidate_feature_table"] = _precision_report(
+        cand_by_column = column_precisions(cand_max_abs, cand_steps)
+        report["candidate_feature_table"] = precision_report(
             storage_type, policy, cand_months, cand_by_column, cand_dtypes,
         )
         logger.info(
             "Numeric precision gate (%s): %d candidate_feature_table column(s) "
-            "over %d month(s)", storage_type, len(cand_checked), len(cand_months),
+            "over %d month(s)", storage_type, len(cand_by_column),
+            len(cand_months),
         )
-        for line in _precision_report_lines(report["candidate_feature_table"]):
-            logger.info("%s", line)
-        errors += [
-            f"candidate_feature_table: {e}"
-            for e in numeric_precision_errors(cand_by_column, storage_type)
-        ]
+        log_precision_report(report["candidate_feature_table"])
+        errors += numeric_precision_errors(
+            cand_by_column, storage_type, table="candidate_feature_table",
+        )
 
     if not errors:
         return report
 
-    message = (
+    message = collect_all_message(
         f"Numeric precision check failed for "
-        f"dataset.numeric_feature_storage_type={storage_type} "
-        f"({len(errors)} issue(s)):\n- " + "\n- ".join(errors)
+        f"dataset.numeric_feature_storage_type={storage_type}",
+        errors,
     )
     # Decision — the policy key is what turns a finding into a stop. `block`
     # is the default because the failure it describes is silent everywhere
@@ -1249,55 +1216,6 @@ def validate_numeric_precision(
         raise DataConsistencyError(message)
     logger.warning("%s", message)
     return report
-
-
-def _precision_report(
-    storage_type: str,
-    policy: str,
-    months: list,
-    by_column: dict,
-    dtypes: dict,
-) -> dict:
-    """Assemble the persisted shape of the precision measurement.
-
-    Module-private: the shape is this node's output contract, not something a
-    second caller reuses. ``dtypes`` is carried into each row because a reader
-    asking "why is this column's limit so low" needs the scale, and looking it
-    up means finding the table this report is about.
-    """
-    rows = numeric_precision_rows(by_column, storage_type)
-    for row in rows:
-        row["dtype"] = dtypes.get(row["column"])
-    return {
-        "storage_type": storage_type,
-        "policy": policy,
-        "months": [pd.Timestamp(m).strftime("%Y-%m-%d") for m in months],
-        "checked_columns": len(rows),
-        "breaches": sum(1 for r in rows if r["verdict"] == "breach"),
-        "unmeasured": sum(1 for r in rows if r["verdict"] == "unmeasured"),
-        "columns": rows,
-    }
-
-
-def _precision_report_lines(report: dict) -> list[str]:
-    """The report as fixed-width log lines, closest-to-breaching first.
-
-    Logged as well as returned because ``block`` aborts the run before the
-    catalog can write the artifact — the one case where an operator most needs
-    the numbers is the one where the file does not exist.
-    """
-    lines = [
-        f"  {'column':<28} {'dtype':<16} {'max(|x|)':>18} "
-        f"{'limit':>18} {'headroom':>12}  verdict"
-    ]
-    for row in report["columns"]:
-        headroom = "-" if row["headroom"] is None else f"{row['headroom']:.3g}x"
-        max_abs = "-" if row["max_abs"] is None else f"{row['max_abs']:,.10g}"
-        lines.append(
-            f"  {row['column']:<28} {str(row['dtype']):<16} {max_abs:>18} "
-            f"{row['limit']:>18,.10g} {headroom:>12}  {row['verdict']}"
-        )
-    return lines
 
 
 def build_model_input(
@@ -1445,77 +1363,6 @@ def build_model_input(
     return result
 
 
-#: Why a run with no test month has no test pair. Written into the report and
-#: the log, so "was test checked" has an answer in the artifact itself.
-_TEST_NOT_WRITTEN = (
-    "not written this run: test_model_input_month_plan.to_process is empty, "
-    "so this run built no test month and there is no test pair to compare. "
-    "Not a failure — the months already on disk were written by earlier runs."
-)
-
-
-def _footer_rows(
-    df: DataFrame,
-    partition_filter: dict,
-) -> tuple[int, int, int]:
-    """``(rows, matched files, files the table has)`` — footer arithmetic only.
-
-    Pure mechanism: it counts, it does not judge. Whether a table that has files
-    but matched none of them is an error or a zero is a decision, and it lives in
-    the node body where a reader of the node can see it (rule 4 of
-    ``docs/agents/pipeline-node-design.md``); returning the two file counts
-    separately is what leaves that decision available to make.
-    """
-    all_paths = df.inputFiles()
-    files = filter_by_partitions(all_paths, partition_filter)
-    return read_row_count(df.sparkSession, files), len(files), len(all_paths)
-
-
-def _footer_rows_by_month(
-    df: DataFrame,
-    *,
-    base_version: str,
-    time_col: str,
-    months: list,
-) -> dict[pd.Timestamp, tuple[int, int]]:
-    """``{month: (rows, files)}`` under ``base_version`` — footer arithmetic
-    only, for a table written one month partition at a time.
-
-    Months are matched as calendar days (``landed_partition_files``, the file
-    list B8 reads), so a partition value spelled differently from the plan's
-    month is still found. A month with no file is ``(0, 0)``: whether that is
-    fine is the caller's decision.
-    """
-    paths = df.inputFiles()
-    counted = {}
-    for month in months:
-        files = landed_partition_files(
-            paths, base_version=base_version, time_col=time_col, months=[month],
-        )
-        counted[pd.Timestamp(month)] = (
-            read_row_count(df.sparkSession, files), len(files),
-        )
-    return counted
-
-
-def _grain_report_entry(
-    label: str,
-    keys: tuple[int, int],
-    model_input: tuple[int, int],
-) -> dict:
-    """One split's entry in the B10 report, ``(rows, files)`` for each side,
-    logged as it is made — one line and one set of fields for every split."""
-    logger.info(
-        "Model input grain gate: %s keys=%d row(s) in %d file(s), "
-        "model_input=%d row(s) in %d file(s)",
-        label, *keys, *model_input,
-    )
-    return {
-        "keys_rows": keys[0], "keys_files": keys[1],
-        "model_input_rows": model_input[0], "model_input_files": model_input[1],
-    }
-
-
 def validate_model_input_grain(
     train_keys: DataFrame,
     train_model_input: DataFrame,
@@ -1605,9 +1452,8 @@ def validate_model_input_grain(
     # Decision — the tables rebuilt in full are compared whole, each side's
     # files counted under the partition scope it was written to. The scope is
     # not decoration: these tables accumulate versions (and train variants)
-    # side by side under one Hive table, and `inputFiles()` answers for the
-    # whole relation rather than for the partition_filter the catalog loaded
-    # them with.
+    # side by side under one Hive table, and under some Spark settings
+    # `inputFiles()` lists all of them (steps/footer_facts.py says which).
     pairs = [
         ("train", train_keys, train_model_input, train_scope),
         ("train_dev", train_dev_keys, train_dev_model_input, train_scope),
@@ -1618,38 +1464,22 @@ def validate_model_input_grain(
     splits: dict[str, dict] = {}
     errors: list[str] = []
     for split, keys, model_input, scope in pairs:
-        counted: dict[str, int] = {}
-        for side, df in (("keys", keys), ("model_input", model_input)):
-            rows, matched, present = _footer_rows(df, scope)
-            # Pre-check (this node's own inputs) — a scope that matches none of
-            # a table's files makes both sides of the comparison read 0, every
-            # comparison below trivially true, and the gate would report
-            # success having looked at nothing. So it is reported rather than
-            # counted as zero rows. A table with no files AT ALL is a
-            # different fact and passes: that is a genuinely empty split,
-            # which `dataset.train_dev_ratio: 0` produces on purpose. The
-            # check cannot tell a scope mismatch from a split this version
-            # left empty while other versions' files sit in the same table,
-            # so the message names both.
-            if present and not matched:
-                spec = ", ".join(f"{k}={v}" for k, v in scope.items())
-                errors.append(
-                    f"B10: {split}_{side} has {present} parquet file(s) but "
-                    f"none under {spec}, so this run's row count could not be "
-                    f"established and the comparison for {split} would have "
-                    f"passed on two zeroes. Either the version/variant in "
-                    f"parameters no longer matches what is on disk, the "
-                    f"table was written by a different catalog entry than the "
-                    f"one this node reads, or {split} came out empty under "
-                    f"this version while other versions' files remain (for "
-                    f"val: every query group dropped — r = 0 and the val "
-                    f"month's labels not in yet, say)."
-                )
-            counted[side] = (rows, matched)
-        by_split[split] = SplitRowCounts(
-            counted["keys"][0], counted["model_input"][0])
-        splits[split] = _grain_report_entry(
-            split, counted["keys"], counted["model_input"])
+        keys_rows, keys_files, keys_all_files = footer_rows(keys, scope)
+        mi_rows, mi_files, mi_all_files = footer_rows(model_input, scope)
+        # Pre-check (this node's own inputs) — a scope that matches none of a
+        # table's files would make the comparison below pass on two zeroes,
+        # having looked at nothing; a table with no files at all is an empty
+        # split and passes (model_input_grain_scope_errors says why).
+        errors += model_input_grain_scope_errors(
+            split, "keys", files_in_table=keys_all_files,
+            files_in_scope=keys_files, scope=scope,
+        ) + model_input_grain_scope_errors(
+            split, "model_input", files_in_table=mi_all_files,
+            files_in_scope=mi_files, scope=scope,
+        )
+        by_split[split] = SplitRowCounts(keys_rows, mi_rows)
+        splits[split] = grain_report_entry(
+            split, (keys_rows, keys_files), (mi_rows, mi_files))
 
     # Decision — test is compared over the months this run's test build wrote,
     # and only those: the plan it ran under, not test_keys' own (see the
@@ -1658,16 +1488,17 @@ def validate_model_input_grain(
     not_checked: dict[str, str] = {}
     test_months = test_model_input_month_plan.to_process
     if not test_months:
-        not_checked["test"] = _TEST_NOT_WRITTEN
-        logger.info("Model input grain gate: test %s", _TEST_NOT_WRITTEN)
+        not_checked["test"] = TEST_NOT_WRITTEN
+        logger.info("Model input grain gate: test %s", TEST_NOT_WRITTEN)
     else:
-        by_side = {
-            side: _footer_rows_by_month(
-                df, base_version=base_version, time_col=schema["time"],
-                months=test_months,
-            )
-            for side, df in (("keys", test_keys), ("model_input", test_model_input))
-        }
+        test_keys_rows = footer_rows_by_month(
+            test_keys, base_version=base_version, time_col=schema["time"],
+            months=test_months,
+        )
+        test_mi_rows = footer_rows_by_month(
+            test_model_input, base_version=base_version,
+            time_col=schema["time"], months=test_months,
+        )
         # Decision — each month is its own pair, not one sum over the months:
         # a month the build fanned out and another it left short would cancel
         # in a sum.
@@ -1677,45 +1508,24 @@ def validate_model_input_grain(
         # not in yet, say), and the two tables agree they hold nothing. So the
         # "files, but none in scope" pre-check above does not apply here — for
         # a table written a month at a time, that is what an emptied month
-        # looks like. That leaves no silent hole: a version in parameters that
-        # no longer matches the disk shows on the three pairs above, which
-        # share it, and the month partition is named by the time column the
-        # build wrote with (saving refuses a frame without it). One side
-        # without files and the other with rows is still a mismatch, and the
-        # predicate says so.
-        months = sorted(by_side["keys"])
-        by_split["test"] = {
-            month.strftime("%Y-%m-%d"): SplitRowCounts(
-                by_side["keys"][month][0], by_side["model_input"][month][0])
-            for month in months
-        }
-        splits["test"] = _grain_report_entry(
-            f"test ({len(months)} month(s) this run)",
-            tuple(map(sum, zip(*by_side["keys"].values()))),
-            tuple(map(sum, zip(*by_side["model_input"].values()))),
-        )
-        splits["test"]["months"] = {
-            month: {
-                "keys_rows": counts.keys_rows,
-                "model_input_rows": counts.model_input_rows,
-            }
-            for month, counts in by_split["test"].items()
-        }
+        # looks like. A version in parameters that no longer matches the disk
+        # is left to the three pairs above, which share it — and they see it
+        # only where `inputFiles()` lists other versions; under Spark's
+        # defaults such a version reads as empty on every pair
+        # (steps/footer_facts.py). The month partition is named by the time
+        # column the build wrote with (saving refuses a frame without it). One
+        # side without files and the other with rows is still a mismatch, and
+        # the predicate says so.
+        by_split["test"] = split_row_counts_by_month(test_keys_rows, test_mi_rows)
+        splits["test"] = monthly_grain_report_entry(
+            "test", test_keys_rows, test_mi_rows)
 
-    report = {
-        # The version and variant this report describes. The catalog keys its
-        # file on base_dataset_version alone (as numeric_precision_report does),
-        # so two runs of different train variants overwrite one file; carrying
-        # the variant inside is what stops a reader attributing one variant's
-        # counts to another.
-        "base_dataset_version": base_version,
-        "train_variant_id": parameters["train_variant_id"],
-        "splits": splits,
-        # Named in the artifact, not only in the log: a reader who pulls the
-        # report to ask "was my dataset checked" must not have to infer from
-        # an absent key that a split was left out, or why.
-        "not_checked": not_checked,
-    }
+    report = grain_report(
+        base_version=base_version,
+        train_variant_id=parameters["train_variant_id"],
+        splits=splits,
+        not_checked=not_checked,
+    )
 
     # Collect-all, one raise: the measurement failures above and the grain
     # mismatches below are both "this gate has something to say about a split",
@@ -1724,9 +1534,7 @@ def validate_model_input_grain(
     errors += model_input_grain_errors(by_split, schema["identity_columns"])
     if errors:
         raise DataConsistencyError(
-            f"Model input grain check failed ({len(errors)} issue(s)):\n- "
-            + "\n- ".join(errors)
-        )
+            collect_all_message("Model input grain check failed", errors))
     return report
 
 

@@ -9,6 +9,10 @@ pipeline and lives in ``recsys_tfb.preprocessing``: the encoding itself
 frame may encode, and the count of how many fell outside. The last of those
 lived here until #185, when inference acquired the same warning.
 
+Which item values a source table holds in a set of months is read here too:
+to count the item list from the data (#379), and for the data gate's item
+checks (B1, B15).
+
 Named per ADR-0008 §2 for the concern it implements. Each function is one
 mechanism; the decisions they serve — leakage-free fit, vocabulary source —
 are named at the call sites in ``nodes.py``.
@@ -24,7 +28,7 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import DataConsistencyError, categorical_dtype_errors
 from recsys_tfb.pipelines.dataset.steps.scoping import months_filter_as_date
-from recsys_tfb.utils.item_columns import combine_item_columns
+from recsys_tfb.utils.item_columns import combine_item_columns, combined_item_value
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame
@@ -158,6 +162,41 @@ def count_items_in_months(
     pool = combine_item_columns(sample_pool, schema, "sample_pool")
     pool = pool.filter(months_filter_as_date(schema["time"], months))
     return collect_vocabularies_from_data(pool, [item])[item]
+
+
+def item_combinations_in_months(
+    df: DataFrame,
+    schema: dict,
+    months: list,
+) -> list[tuple[tuple, object]]:
+    """Distinct ``(source values, item value)`` pairs ``df`` holds in ``months``.
+
+    One distinct serves two data-gate checks: B1 (which item values appear)
+    and B15 (which source combinations share a value). For a single-column
+    item the select is the item column alone, no wider than B1 needs; a
+    multi-column item adds its source columns, and the combined value
+    is computed by the same Spark expression every entry combines with, so
+    B15 judges what the pipelines will actually see. What reaches the driver
+    is bounded by the number of combinations, not by the row count.
+    """
+    item = schema["item"]
+    item_sources = schema["item_source_columns"]
+    combined = (
+        [] if len(item_sources) == 1
+        else [combined_item_value(item_sources).alias(item)]
+    )
+    rows = (
+        df.filter(months_filter_as_date(schema["time"], months))
+        .select(*item_sources, *combined)
+        .distinct()
+        .collect()
+    )
+    return [(tuple(r[c] for c in item_sources), r[item]) for r in rows]
+
+
+def non_null_item_values(combinations: list[tuple[tuple, object]]) -> set:
+    """The non-NULL item values of :func:`item_combinations_in_months`."""
+    return {value for _, value in combinations if value is not None}
 
 
 def warn_items_outside_the_list(

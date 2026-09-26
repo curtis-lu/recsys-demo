@@ -1,17 +1,49 @@
-"""Per-column statistics read out of parquet footers, without scanning data.
+"""Which files this run landed, and what their parquet footers record.
 
-Why this exists at all: the dataset pipeline's Layer-2 gates hold a cost
-invariant — they establish facts about the data from metadata only, never from
-an aggregation over it (ADR-0006). B8 needs one fact the metastore does not
-hold, ``max(|value|)`` per column, and parquet already carries it: every row
-group's footer records a min and a max per column, written by the writer as it
-went. Reading them is a seek to the end of each file.
+The facts the B8 and B10 gates stand on. Both gates hold the dataset
+pipeline's cost invariant — facts from metadata, never from an aggregation over
+the data (ADR-0006) — and parquet carries what they need in every file's
+footer: a row count per row group, and a min and a max per column chunk,
+written by the writer as it went. Reading them is a seek to the end of each
+file. One module for both gates, so the two cannot answer "which files did this
+run write" two different ways (ADR-0029 decision 7):
+
+* **Which files.** :func:`filter_by_partitions` narrows a file listing to the
+  partition scope the table was written under — the dataset version, and for
+  the train tables the train variant. It is the one version filter here;
+  :func:`landed_partition_files` narrows its result further to the months a
+  plan wrote.
+* **What the footers say.** :func:`read_row_count` and
+  :func:`read_max_abs_stats` read them; :func:`footer_rows` and
+  :func:`footer_rows_by_month` put both questions together for a landed frame.
+
+**Why select by version at all.** What ``DataFrame.inputFiles()`` lists for a
+frame the catalog loaded (``HiveTableDataset.load()``, a ``WHERE`` on the
+partition filter) depends on two Spark settings. Measured on one table holding
+two versions, local ``[*]``, 2026-09-26:
+
+* both at Spark's default (``spark.sql.hive.manageFilesourcePartitions`` and
+  ``spark.sql.hive.convertMetastoreParquet`` true) — only the loaded version's
+  files. The version filter here changes nothing.
+* ``manageFilesourcePartitions`` false — every version's files. The filter is
+  what keeps a gate on the rows this run wrote; without it the gate reports on
+  another version's parquet, and nothing says so.
+* ``convertMetastoreParquet`` false — the table's root directory alone, with
+  no partition in the path. Nothing here can select a file from that: B8
+  finds no file and B10 none in scope, so both report a failure to measure
+  (B8's stops the run under ``block``, B10's always does).
+
+This repo sets neither key; a deployment's cluster may. So the filter stays —
+a string comparison per path — and
+``tests/test_pipelines/test_dataset/test_footer_facts.py`` pins it on a frame
+that lists two versions, the second case.
 
 The read goes through the Spark JVM's Hadoop ``FileSystem`` — the door this repo
 already uses for a Hive table's files (``utils/hdfs.copy_hdfs_to_local``), and
 not pyarrow, whose own HDFS client needs a second JVM loaded into the Python
 process. Why that choice and not the alternatives: ADR-0006's 2026-09-03
-amendment.
+amendment. Paths are matched as text rather than through Spark filters, which is
+also why the only pyspark import here is for type hints.
 """
 
 from __future__ import annotations
@@ -19,6 +51,12 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING
+
+import pandas as pd
+
+if TYPE_CHECKING:
+    from pyspark.sql import DataFrame
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +99,11 @@ def filter_by_partitions(
 ) -> list[str]:
     """``paths`` narrowed to those whose Hive partition values match every pair.
 
-    Why a caller needs this at all: ``DataFrame.inputFiles()`` answers for the
-    whole relation, not for the ``partition_filter`` the catalog put in the
-    ``WHERE`` when it loaded the table. A gate that skipped this step would read
-    every dataset version's and every variant's files and report on rows this
-    run never wrote.
+    The version (and variant) filter every footer fact here is read under; the
+    module docstring says under which Spark settings it is what keeps a gate on
+    this run's version. Values compare as the partition directory's text: a
+    version ID is a hash the pipeline itself wrote, so there is one spelling of
+    it.
 
     A path that does not carry one of the keys is dropped rather than kept:
     ``partition_value`` returns ``None`` for it, which is not the declared
@@ -77,6 +115,49 @@ def filter_by_partitions(
         p for p in paths
         if all(partition_value(p, k) == v for k, v in partition_filter.items())
     )
+
+
+def landed_partition_files(
+    paths: Iterable[str],
+    *,
+    base_version: str,
+    time_col: str,
+    months: Iterable,
+) -> list[str]:
+    """The files under ``base_version`` whose partition month is in ``months``.
+
+    Two narrowings, for two different reasons:
+
+    * ``base_version`` — :func:`filter_by_partitions`, the one version filter
+      in this module (the module docstring says why it is kept).
+    * ``months`` — the gates are incremental with the node that wrote them
+      (ADR-0002): a month that already landed is not re-read.
+
+    Months are compared as calendar days rather than as strings. The partition
+    value is whatever the source column held (``20260131`` and ``2026-01-31``
+    are both legal spellings of one month — A26 exists because the two can
+    disagree), and a string comparison would answer "no files" for a spelling
+    mismatch, which reads exactly like "nothing to check".
+
+    A partition value that is not a date at all — Hive's
+    ``__HIVE_DEFAULT_PARTITION__`` for null, most obviously — is skipped rather
+    than raised on: it is not one of the months the plan asked for, so it is not
+    this function's problem to report. Returns sorted paths so two runs over the
+    same partitions read the same way.
+    """
+    wanted = {pd.Timestamp(m).normalize() for m in months}
+    if not wanted:
+        return []
+    scoped = filter_by_partitions(paths, {"base_dataset_version": base_version})
+    selected: list[str] = []
+    for value, files in group_by_partition(scoped, time_col).items():
+        try:
+            landed = pd.Timestamp(value).normalize()
+        except ValueError:
+            continue
+        if landed in wanted:
+            selected.extend(files)
+    return sorted(selected)
 
 
 def read_row_count(spark, paths: Sequence[str]) -> int:
@@ -201,3 +282,70 @@ def read_max_abs_stats(
         if not seen[col]:
             result[col] = None
     return result
+
+
+def footer_rows(
+    df: DataFrame,
+    scope: Mapping[str, str],
+) -> tuple[int, int, int]:
+    """``(rows, files in scope, files the table has)`` — footer arithmetic only.
+
+    For a table compared whole. It counts, it does not judge: whether a table
+    that has files but none in ``scope`` is an error is B10's to say
+    (``model_input_grain_scope_errors`` in ``core/consistency.py``), and
+    returning the two file counts separately is what leaves that to it.
+    """
+    all_paths = df.inputFiles()
+    files = filter_by_partitions(all_paths, scope)
+    return read_row_count(df.sparkSession, files), len(files), len(all_paths)
+
+
+def footer_rows_by_month(
+    df: DataFrame,
+    *,
+    base_version: str,
+    time_col: str,
+    months: list,
+) -> dict[pd.Timestamp, tuple[int, int]]:
+    """``{month: (rows, files)}`` under ``base_version`` — footer arithmetic
+    only, for a table written one month partition at a time.
+
+    Each month's files are :func:`landed_partition_files`' — the selection B8
+    reads too — so a partition value spelled differently from the plan's month
+    is still found. A month with no file is ``(0, 0)``: whether that is fine is
+    the caller's decision.
+    """
+    paths = df.inputFiles()
+    counted = {}
+    for month in months:
+        files = landed_partition_files(
+            paths, base_version=base_version, time_col=time_col, months=[month],
+        )
+        counted[pd.Timestamp(month)] = (
+            read_row_count(df.sparkSession, files), len(files),
+        )
+    return counted
+
+
+def footer_max_abs(
+    df: DataFrame,
+    *,
+    base_version: str,
+    time_col: str,
+    months: list,
+    columns: Sequence[str],
+) -> tuple[dict[str, float | None], int]:
+    """``({column: max(|x|)}, files read)`` over the ``months`` ``df`` landed
+    under ``base_version`` — footer arithmetic only.
+
+    The same selection :func:`footer_rows_by_month` reads. The file count is
+    returned beside the values because no file at all is its own finding
+    (``numeric_precision_file_errors``): with none, every column reads
+    ``None``, which would otherwise look like a column the writer left without
+    statistics.
+    """
+    files = landed_partition_files(
+        df.inputFiles(), base_version=base_version, time_col=time_col,
+        months=months,
+    )
+    return read_max_abs_stats(df.sparkSession, files, columns), len(files)
