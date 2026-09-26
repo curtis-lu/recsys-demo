@@ -36,8 +36,10 @@ def collect_dataset_snap_dates(parameters: dict) -> list[pd.Timestamp]:
     """Return sorted union of train/val/test snap_dates as pd.Timestamps.
 
     Single source of truth for "which snap_dates does the dataset pipeline use".
-    Used by validate_data_consistency, the Layer-2 data gate: the item values
-    it judges are the ones in these months. fit_preprocessor_metadata
+    Used twice: as the ``preprocessed_feature_table`` month plan's configured
+    months (below), which are the months apply_preprocessor_to_features
+    encodes; and by validate_data_consistency, the Layer-2 data gate, whose
+    item values are judged over these months. fit_preprocessor_metadata
     deliberately uses only train_snap_dates to prevent val/test leakage into the
     category-mapping fit.
     """

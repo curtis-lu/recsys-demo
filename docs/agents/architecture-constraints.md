@@ -160,16 +160,16 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 | 模組 | 行數 | 解決什麼 |
 |---|---|---|
 | `core/consistency.py` | 6044 | 不變量 predicate 的**唯一真實來源**（A 系列 config-static／B 系列資料閘） |
-| `core/versioning.py` | 557 | 三層 hash 版本 ID |
+| `core/versioning.py` | 557 | 兩層 dataset 版本 ID 與 `model_version` 的雜湊 |
 | `core/logging.py` | 376 | `RunContext` 與結構化日誌 |
 | `core/schema.py` | 674 | 欄位角色集中定義 |
 | `core/safe_eval.py` | 141 | HPO 宣告式搜尋空間的受限求值（stdlib `ast`，無額外套件） |
 
-其中 `consistency.py` 值得單獨講：**本框架的正確性重心不在 node 契約，而在集中式 predicate**。量體對比很直白——`consistency.py` 2036 行，`node.py` 69 行。Kedro 把正確性押在「node 是純函式且輸入輸出宣告清楚」，我們押在「所有不變量集中成可測試的 predicate」。
+其中 `consistency.py` 值得單獨講：**本框架的正確性重心不在 node 契約，而在集中式 predicate**。量體對比很直白——`consistency.py` 6044 行，`node.py` 69 行（2026-09-26）。Kedro 把正確性押在「node 是純函式且輸入輸出宣告清楚」，我們押在「所有不變量集中成可測試的 predicate」。
 
 新增一致性不變量**必須**在 `core/consistency.py` 加 predicate，不得在各 pipeline 散落。細節見該模組 docstring。
 
-版本化也不是同一件事：Kedro 的 dataset versioning 管的是「檔案的哪一版」，我們的三層 hash 管的是「哪一組設定產生的產物」。
+版本化也不是同一件事：Kedro 的 dataset versioning 管的是「檔案的哪一版」，我們的版本 hash 管的是「哪一組設定產生的產物」。程式改了 dataset 落地的內容、設定卻沒動時，要把 `versioning.py` 的 `DATASET_ARTIFACT_FORMAT_VERSION` 加 1，這也管到 dataset import 的 `core/`、`utils/` 模組，見 [`pipeline-node-design.md`](pipeline-node-design.md) 規則 18。
 
 ## F8. Node 函式大小的現況分佈
 
@@ -529,7 +529,7 @@ pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity
 | 1 | 一個 `schema` 設定 dict 底下不得直接出現角色名（`time`／`entity`／`item`／`label`／`score`／`rank`） | 它們必須在 `columns` 底下才讀得到 |
 | 2 | 任何深度都不得宣告 `identity_columns`／`query_group_columns`／`base_key_columns` | 三個都是 `get_schema` **推導**出來的（`core/schema.py::_DERIVED_KEYS`），不是設定鍵。宣告了一律安靜被丟掉，而想宣告 `query_group_columns` 的人問的正是 [ADR-0025](../adr/0025-query-group-widened-by-occasion-role.md) 用角色回答的那一題 |
 
-**第 2 條擋的是第 1 條的半吊子修法。** 只有第 1 條的話，把 `identity_columns` 一起包進 `columns` 就通過稽核了——但 `get_schema` 的 `if k in _ROLE_KEYS` 過濾照樣把它丟掉，護欄等於祝福了一個假修法。這不是假想：`tests/test_pipelines/test_evaluation/test_nodes_spark.py`（今天改名為 `test_nodes.py`）在本條上線前就已經**有 8 處**落在這個形狀（`columns` 寫對、裡面照樣宣告 `identity_columns`），而票上原本的掃描腳本看不到它們——那支腳本要求角色名直接出現在 `schema` 底下，寫對 `columns` 的站點就再也不會被列出來。
+**第 2 條擋的是第 1 條的半吊子修法。** 只有第 1 條的話，把 `identity_columns` 一起包進 `columns` 就通過稽核了——但 `get_schema` 的 `if k in _ROLE_KEYS` 過濾照樣把它丟掉，護欄等於祝福了一個假修法。這不是假想：`tests/test_pipelines/test_evaluation/test_nodes_spark.py`（#365 起改名為 `test_nodes.py`）在本條上線前就已經**有 8 處**落在這個形狀（`columns` 寫對、裡面照樣宣告 `identity_columns`），而票上原本的掃描腳本看不到它們——那支腳本要求角色名直接出現在 `schema` 底下，寫對 `columns` 的站點就再也不會被列出來。
 
 **`categorical_values` 是 `columns` 的合法兄弟**，`get_schema` 從 `schema.categorical_values` 讀它，所以它留在 `schema` 這一層是對的，不要一起包進 `columns`。
 

@@ -31,10 +31,10 @@
 | [11](#11-驗證放哪由它需要看到什麼決定) | 驗證放哪，由「它需要看到什麼」決定 | 只看 config → 進 `core/consistency.py`；留在 node 的要標「前置檢查」或「後置條件」 | 沒人，只能人看 |
 | [12](#12-命名底線模組私有守衛叫-require_不得有-backend-後綴) | 命名：底線＝模組私有、守衛叫 `require_*`、不得有 backend 後綴 | 跨模組呼叫得到的函式有沒有底線；有沒有 `_spark`／`_pandas` 後綴 | 沒人，只能人看 |
 | [13](#13-docstring-講為什麼是這個答案不講簽章已經說過的事) | docstring 講「為什麼是這個答案」，不講簽章已經說過的事 | 有沒有寫「為什麼不是另一種做法」「選錯會不會報錯」 | 沒人，只能人看 |
-| [14](#14-讀來源表或落地的中間表時在程式碼裡寫明讀哪些-time-值) | 讀來源表或落地的中間表時，在程式碼裡寫明讀哪些 time 值 | 讀來源表或增量產物的地方，join 之前有沒有月份篩選；新的讀取點在 `test_month_scoped_reads.py` 加一個案例 | **部分**：`test_month_scoped_reads.py` 釘住今天的讀取點，新加的沒人擋 |
+| [14](#14-讀來源表或增量產物時在程式碼裡寫明讀哪些-time-值) | 讀來源表或增量產物時，在程式碼裡寫明讀哪些 time 值 | 讀來源表或增量產物的地方，join 之前有沒有月份篩選；新的讀取點在 `test_month_scoped_reads.py` 加一個案例 | **部分**：`test_month_scoped_reads.py` 釘住今天的讀取點，新加的沒人擋 |
 | [15](#15-node-自己算得出來的值不從-cli-注入) | node 自己算得出來的值，不從 CLI 注入 | 注入的每一項，node 真的算不出來嗎？一行設定值或 node 已經收到的輸入算得出來，就不注入 | 沒人，只能人看 |
 | [16](#16-同一件事各-split-用同一個機制不對稱要寫理由而且理由不能是這個不對稱自己造成的) | 同一件事，各 split 用同一個機制；不對稱要寫理由，而且理由不能是這個不對稱自己造成的 | 假設這個不對稱不存在，docstring 寫的理由還成立嗎 | 沒人，只能人看 |
-| [17](#17-資料閘的-node-只寫查什麼與交給誰判斷收集事實與組報告進-steps) | 資料閘的 node 只寫「查什麼」與「交給誰判斷」；收集事實與組報告進 `steps/` | node body 裡有沒有巢狀函式、讀檔尾、組報告，或自己判斷什麼算失敗；政策與前置檢查要留在 node | 沒人，只能人看 |
+| [17](#17-資料閘的-node-只寫查什麼與交給誰判斷收集事實與組報告進-steps) | 資料閘的 node 只寫「查什麼」與「交給誰判斷」；收集事實與組報告進 `steps/` | node body 裡有沒有巢狀函式、讀檔尾、組報告，或自己判斷有沒有違反不變量；決策（查什麼、政策、前置檢查）要留在 node | 沒人，只能人看 |
 | [18](#18-程式改了-dataset-落地的內容某個部署的設定卻沒動時把-dataset_artifact_format_version-加-1) | 程式改了 dataset 落地的內容、某個部署的設定卻沒動時，把 `DATASET_ARTIFACT_FORMAT_VERSION` 加 1 | 有沒有哪一份合法的設定與資料，改動前後寫出來的內容不一樣？包括 dataset import 的模組 | 沒人，只能人看 |
 
 外加一條體例：**程式碼註解與 docstring 一律英文**（對齊既有全部模組），**`docs/` 一律繁體中文**。
@@ -352,7 +352,7 @@ result = feature_table.filter(months_filter_as_date(time_col, months)).select(
 | 需要看到 | 家 |
 |---|---|
 | 只有 config | Layer-1 A 系列 predicate（`core/consistency.py`，CLI entry 執行） |
-| 來源表的 metadata 或廉價 distinct | Layer-2 B 系列（資料閘，零掃描，[ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md)） |
+| 來源表的 metadata 或廉價 distinct；本 pipeline 剛落地的產物的 parquet 檔尾 | Layer-2 B 系列（資料閘，零掃描，[ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md) 與它的修訂） |
 | node 執行期才存在的中間資料 | 留在 node，**且必須在 docstring 標明是前置檢查或後置條件** |
 
 **兩個詞不可混用**：
@@ -401,7 +401,7 @@ result = feature_table.filter(months_filter_as_date(time_col, months)).select(
 
 **誰擋得住**：沒有機械檢查。
 
-## 14. 讀來源表或落地的中間表時，在程式碼裡寫明讀哪些 time 值
+## 14. 讀來源表或增量產物時，在程式碼裡寫明讀哪些 time 值
 
 node 讀一張**可能裝著這一步用不到的月份**的表時，就在那一步寫一個月份篩選，說出「這一步只讀這幾個 time 值」。不要指望 Spark 從 join 的另一邊自己推出來。哪些表算：
 
@@ -457,7 +457,7 @@ DPP 是 optimizer 盡力而為的最佳化：執行時拿 join 另一邊實際�
 
 **要量省了多少**：先 `collect()` 真的執行，再看執行後計畫裡每個 scan 的 `numPartitions`。分區表看 `PartitionFilters`，沒分區的表看 `Filter`。
 
-**誰擋得住**：**部分擋得住。** `tests/test_pipelines/test_dataset/test_month_scoped_reads.py` 在 analyzed plan 上斷言今天這些讀取點：四個 build 的每張右表、各丟組 node 的 `label_table`，join 之前都有月份篩選；月份存在檢查只問要檢查的月份。新加一個讀取點，沒人會提醒你；要自己在那個檔加一個案例。這很要緊，因為違反這條不會有任何症狀：結果逐列相同，只有成本不同。
+**誰擋得住**：**部分擋得住。** `tests/test_pipelines/test_dataset/test_month_scoped_reads.py` 在 analyzed plan 上斷言今天這些讀取點：四個 build 的每張右表、各個丟無正例組的 node 讀的 `label_table`，join 之前都有月份篩選；月份存在檢查只問要檢查的月份。新加一個讀取點，沒人會提醒你；要自己在那個檔加一個案例。這很要緊，因為違反這條不會有任何症狀：結果逐列相同，只有成本不同。
 
 ## 15. node 自己算得出來的值，不從 CLI 注入
 
@@ -469,7 +469,7 @@ CLI（`__main__.py`）開跑前可以往 DAG 裡塞東西：catalog 沒有的輸
 
 一行設定值算得出來的，或是 node 本來就收到的輸入算得出來的，都不注入，node 自己算。
 
-CLI 併進 `parameters` 的執行期值也算注入，判準相同。今天有兩種：版本 ID（任何 node 跑之前就要拿它解析 catalog 路徑）與 `--rebuild-dates`（使用者在命令列給的）。
+CLI 併進 `parameters` 的執行期值也算注入，判準相同。今天有兩種真的值：版本 ID（任何 node 跑之前就要拿它解析 catalog 路徑）與 `--rebuild-dates`（使用者在命令列給的）。另外兩個（`model_version`、`snap_date`）只是讓 catalog 樣板解析得了的佔位值。
 
 ### 不照做會長成這樣
 
@@ -514,7 +514,7 @@ return {
 }
 ```
 
-執行模式只注入給數值精度閘（B8，檢查數值特徵存成較窄的型別時會不會失真）。它要檢查這次各 build 讀的月份，而 `--only-test-months` 時只有 test 的 build 在跑，這件事它自己看不出來。所以只注入「是不是這個模式」，月份由它照各 build 的同一套規則自己算，不注入月份清單。
+執行模式只注入給數值精度閘（B8，檢查數值特徵存成較窄的型別時會不會失真）。它要檢查這次各 build 讀的月份，而 `--only-test-months` 時只有 test 的 build 在跑，這件事它自己看不出來。所以只注入「是不是這個模式」，月份由它照各 build 的同一套規則自己算，不注入月份清單。兩邊算的一不一致，由 `test_month_scoped_reads.py` 的 `TestThePrecisionGateChecksWhatTheBuildsRead` 釘著。
 
 ### 為什麼不是另一種做法
 
@@ -592,16 +592,16 @@ kept = keep_keys_of_drawn_groups(
 
 ## 17. 資料閘的 node 只寫「查什麼」與「交給誰判斷」；收集事實與組報告進 `steps/`
 
-資料閘是只做檢查、不產出資料的 node。這條管的是規則 11 那張表第二列的閘：判斷寫在 `core/consistency.py` 的 B 系列不變量。dataset 今天有三個：`validate_data_consistency`（設定與來源表的矛盾）、`validate_numeric_precision`（數值精度閘，B8）、`validate_model_input_grain`（粒度閘，B10）。node 在執行期檢查自己算出來的東西（例如 inference 的 `validate_predictions` 檢查預測表），是規則 11 第三列，不歸這條管。
+資料閘是只做檢查、不產出資料的 node。這條管的是**判斷寫在 `core/consistency.py` 的 B 系列不變量**的那些（有代號、有 predicate）。dataset 今天有三個：`validate_data_consistency`（設定與來源表的矛盾）、`validate_numeric_precision`（數值精度閘，B8）、`validate_model_input_grain`（粒度閘，B10）。判斷不在 `core/consistency.py` 的檢查（例如 inference 的 `validate_predictions`）不歸這條管。要新增一個有代號的檢查，照規則 11 先在 `core/consistency.py` 加 predicate，這條就跟著適用。
 
 這條是規則 4（決策留在 node body）與規則 11（驗證放哪）套在資料閘上的結果。node body 寫這幾件事：
 
-1. **這次要查哪些表、哪些月份。** 這是決策。
-2. **把收集到的事實交給 `core/consistency.py` 的 predicate。** 什麼算失敗、每一條失敗的訊息（包括帶不變量代號的那些），由 predicate 產出。node 只給這一批訊息一行總標題，交給 `collect_all_message` 排成一則。
+1. **查什麼。** 哪些表、哪些月份、哪些欄、用什麼單位比（例如粒度閘逐月配對，不比加總）。這些都是決策。
+2. **把收集到的事實交給 `core/consistency.py` 的 predicate。** 由它判斷有沒有違反不變量，並產出每一條失敗的訊息（包括帶代號的那些）。node 只給這一批訊息一行總標題，交給 `collect_all_message` 排成一則。
 3. **這個閘自己的政策。** 例如數值精度閘：設定是 `block` 就中止，是 `truncate` 就只警告。政策決定「找到問題之後停不停」，是決策，留在 node。
 4. **前置檢查。** 例如 `require_months_in`：這次要讀的月份在不在。照規則 11 標明種類。
 
-進 `steps/` 的是機制：讀 parquet 檔尾、找出這次寫了哪些檔、Spark 聚合、組報告、把報告排成 log 行。每個函式具名、只做一件事。
+這四件以外的決策也一樣留在 node，例如粒度閘的「兩邊都沒有檔的月份算 0＝0，不算失敗」。進 `steps/` 的只有機制：讀 parquet 檔尾、找出這次寫了哪些檔、Spark 聚合、組報告、把報告排成 log 行。每個函式具名、只做一件事。
 
 ### 不照做會長成這樣
 
@@ -668,8 +668,8 @@ dataset 的版本 ID（`base_dataset_version`）是拿設定算出來的雜湊�
 
 先定兩個詞：
 
-- **部署**：一份設定（`conf/`）在生產上跑的一個實例。銀行示例與廣告示例各是一個部署。
-- **落地內容**：版本 ID 底下、下游（training、evaluation、inference）會讀的表與檔，例如各 split 的 keys 與 model_input、`preprocessor.json`、`preprocessed_feature_table`。
+- **部署**：一份設定（`conf/`）跑起來的一個實例。repo 裡的銀行示例、廣告示例各是一個；生產上的每一份設定也各是一個。
+- **落地內容**：版本 ID 底下、下游（training、evaluation、inference）會讀的表與檔，例如各 split 的 keys 與 model_input、`preprocessor.json`、`preprocessed_feature_table`。指的是資料本身（有哪些列、每一列的值），不含列的順序或檔案怎麼切。
 
 **規則**：程式改了 dataset pipeline 的落地內容，而某個部署的設定沒動時，把 `core/versioning.py` 的 `DATASET_ARTIFACT_FORMAT_VERSION` 加 1。它是雜湊的輸入之一，加 1 就讓每個部署的版本 ID 都換一個。**要跟那個改動同一次發布上線。**
 
@@ -692,15 +692,17 @@ dataset 的版本 ID（`base_dataset_version`）是拿設定算出來的雜湊�
 DATASET_ARTIFACT_FORMAT_VERSION: int = 1
 ```
 
-它和設定一起進 `base_dataset_version` 的雜湊（鍵名 `dataset_artifact_format_version`）。什麼時候要加 1，那個模組的 docstring 用英文寫了同一條規則。
+它和設定一起進 `base_dataset_version` 的雜湊（鍵名 `dataset_artifact_format_version`）。什麼時候要加 1，那個模組的 docstring 用英文寫了同一條規則；兩邊有出入時，以 docstring 為準（`docs/agents/domain.md` 對版本 ID 的慣例）。
 
-**代價要先講清楚**：加 1 之後，每個部署的版本 ID 都變，dataset 全部重建。模型版本（`model_version`）與 HPO 的搜尋 ID 都含這個 ID，所以每個部署都要重訓。重訓之前，「不重訓、只加評估月份」的流程（[`adding-an-eval-month.md`](../operations/user-guides/adding-an-eval-month.md)）對正在用的模型失效。所以加 1 的時機要跟重訓排在一起，一批改動只加一次。
+**代價要先講清楚**：加 1 之後，每個部署的版本 ID 都變，dataset 全部重建。模型版本（`model_version`）與 HPO 的搜尋 ID 都含這個 ID，所以每個部署都要重訓。重訓之前，「不重訓、只加評估月份」的流程（[`adding-an-eval-month.md`](../operations/user-guides/adding-an-eval-month.md)）對正在用的模型失效。
+
+**同一次發布只要加一次**：生產只在發布時重建。所以動手前，先比對最新的發布 tag（`git tag -l 'v*'`）裡這個常數的值（沒有這個常數算 0）：main 上的值已經比它大，表示這次發布本來就會重建，不必再加；一樣大，就加 1。維護分支（`release/*`）上的修正若改了落地內容，要取一個 main 從沒用過的值；否則兩邊各自加到同一個數，內容不同、ID 卻相同。
 
 ### 為什麼不是「接受同一個 ID 下內容改變」
 
 版本 ID 的用處是「同一個 ID 就是同一份資料」。讓它在部分部署失效，比多重建一次更難察覺：新舊月份混在一起時，沒有任何東西會報錯。
 
-**誰擋得住**：沒人，只能人看。「這個改動會不會改變落地內容」是判斷題，實作規格與 PR 審查要逐張問。有人提過一個部分擋法（PR #472 的審查）：廣告示例的端到端腳本（`examples/ad/run_e2e.sh`）會把各產物的指紋（digest）和存好的基準（`baseline_digest.json`）比對；可以再加一條，dataset 那一層的指紋變了、base 版本號卻沒變，就擋下。沒有做。
+**誰擋得住**：沒有機械檢查。「這個改動會不會改變落地內容」是判斷題，實作規格與 PR 審查要逐張問。有人提過一個部分擋法（PR #472 的審查）：廣告示例的端到端腳本（`examples/ad/run_e2e.sh`）會把各產物的指紋（digest）和存好的基準（`baseline_digest.json`）比對；可以再加一條，dataset 那一層的指紋變了、base 版本號卻沒變，就擋下。沒有做。
 
 ---
 
@@ -741,7 +743,7 @@ DATASET_ARTIFACT_FORMAT_VERSION: int = 1
 |---|---|---|
 | `pipelines/training/` 的部分 node `def` 在 `recsys_tfb.diagnosis.model` 底下 | 8 | #222 重整 training 時**刻意不搬**（ADR-0014 決定 6）：搬進來會生出 7 個違反規則 3 的薄殼，而且這 7 個 node 未來要搬去 evaluation，現在搬等於白做。這也是 S1 無法一般化到所有 pipeline 的原因 |
 | dataset 的 `split_train_keys` 一個 node 產出兩樣東西，分別給兩個下游 | 1（反方向） | 兩樣東西是同一個式子的正反兩面，拆開就只剩「兩處程式碼碰巧一致」。見下方 |
-| dataset 的三個 build node 把組裝交給共用的 `build_model_input`，它裝了好幾個決策 | 3、5 | 四個 split 組 model_input 的決策完全相同，只差讀哪幾個月；拆成四份，一份先改了，四個 split 就不對稱了（規則 16）。見下方 |
+| dataset 的三個 build node 把組裝交給共用的 `build_model_input`，它裝了好幾個決策 | 3、4、5 | 四個 split 組 model_input 的決策完全相同，只差讀哪幾個月；拆成四份，一份先改了，四個 split 就不對稱了（規則 16）。見下方 |
 
 要新增一筆到這張表，**必須先問使用者**（同 `architecture-constraints.md` 節三的例外登記規則）。後兩筆使用者 2026-09-25 同意登記：`split_train_keys` 見 ADR-0029 決定 14，`build_model_input` 見 #467 的留言。
 
@@ -765,15 +767,15 @@ train_dev 取「抽到門檻以下」，train 取它的否定。同一個式子�
 
 三個 build node 都很短：`build_train_model_input`（註冊成 train 與 train_dev 兩個 node）、`build_val_model_input`、`build_test_model_input`。各自只決定「這個 split 讀哪幾個月」（val／test 另有新 item 的警告），然後交給共用的 `build_model_input`。
 
-`build_model_input` 不是 node，裡面有好幾個決策：兩個 LEFT join（沒有 label 的 key 算負例、沒有特徵的 key 留 NULL）、候選層級表的編碼、數值欄的 cast。照規則 3 的字面，這是「一個 helper 裝多個決策」；照規則 5 的字面，這幾個決策應該在每個 build 裡各寫一份。
+`build_model_input` 不是 node，裡面有好幾個決策：兩個 LEFT join（沒有 label 的 key 算負例、沒有特徵的 key 留 NULL）、候選層級表的編碼、數值欄的 cast。照規則 3 的字面，這是「一個 helper 裝多個決策」；照規則 4 的判定程序，把它換成機械名之後，build 的 node body 只剩月份；照規則 5 的字面，這幾個決策應該在每個 build 裡各寫一份。
 
 **為什麼留**：
 
 - 四個 split 組 model_input 的決策完全相同，只差讀哪幾個月。規則 5 要擋的是「題目重疊、答案各異」被包成一個帶旗標的 helper；這裡的答案一題都沒有不同，也沒有旗標。
 - 拆成四份，就是四份一模一樣的決策各自維護。哪一份先改了，四個 split 就不對稱了，那正是規則 16 要擋的結果。
-- 規則 3 擔心的是讀者得打開另一個檔、逐行反推。`build_model_input` 跟它的呼叫者在同一個檔（`nodes.py`），每個決策都掛著 `# Decision —`，讀的人不必反推。這是它跟規則 3 那個反例（在別的檔裡、名字沒說出任何一個決策的 `select_keys`）真正的差別。
+- 規則 3、4 擔心的是讀者得打開另一個檔、逐行反推。`build_model_input` 跟它的呼叫者在同一個檔（`nodes.py`），每個決策都掛著 `# Decision —`，讀的人不必反推。這是它跟規則 3 那個反例（在別的檔裡、名字沒說出任何一個決策的 `select_keys`）真正的差別。
 
-這三點都成立，才是這筆例外。下一組 node 只要其中一點不成立（例如各 split 的答案有一題不同，像三個丟組 node 函式：train 不帶權重、val／test 帶），就照規則 5 各寫各的。
+這筆例外只登記這一組 node。下一組長得像的，照上面那張表的規則，先問使用者。
 
 test 從 dataset 的增量化（`1d3f740c`）起就是這個形狀，val 從 #379 起，#460 讓 train／train_dev 也照做。
 

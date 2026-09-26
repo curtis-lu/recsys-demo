@@ -101,8 +101,8 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
     )
 
     nodes = [
-        # --- Layer-2 data gate (B1, B5, B6, B7, B11–B17 — what each checks
-        #     is in validate_data_consistency's docstring):
+        # --- Layer-2 data gate (which invariants it runs: the docstring of
+        #     validate_data_consistency):
         # runs first (insertion-order Kahn seed), side-effect only
         # (outputs=None), fail-fast before any sampling / preprocessing ---
         Node(
