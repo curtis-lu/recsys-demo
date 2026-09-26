@@ -16,7 +16,7 @@ from recsys_tfb.pipelines.dataset.nodes import (
     build_model_input,
     fit_preprocessor_metadata,
     select_test_keys,
-    select_train_keys,
+    select_sample_keys,
     select_val_keys,
     split_train_keys,
     validate_data_consistency,
@@ -261,13 +261,13 @@ def parameters():
     }
 
 
-class TestSelectTrainKeys:
+class TestSelectSampleKeys:
     def test_returns_correct_columns(self, sample_pool, parameters):
-        result = select_train_keys(sample_pool, parameters)
+        result = select_sample_keys(sample_pool, parameters)
         assert sorted(result.columns) == _identity_columns(parameters)
 
     def test_filters_to_train_dates(self, sample_pool, parameters):
-        result = select_train_keys(sample_pool, parameters)
+        result = select_sample_keys(sample_pool, parameters)
         pdf = result.toPandas()
         train_dates = set(pd.to_datetime(parameters["dataset"]["train_snap_dates"]))
         val_dates = set(pd.to_datetime(parameters["dataset"]["val_snap_dates"]))
@@ -279,11 +279,11 @@ class TestSelectTrainKeys:
 
     def test_full_ratio_returns_all(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        result = select_train_keys(sample_pool, params)
+        result = select_sample_keys(sample_pool, params)
         assert result.count() == _expected_key_count(params, "train")
 
     def test_no_duplicates(self, sample_pool, parameters):
-        result = select_train_keys(sample_pool, parameters)
+        result = select_sample_keys(sample_pool, parameters)
         identity = get_schema(parameters)["identity_columns"]
         assert result.count() == result.dropDuplicates(identity).count()
 
@@ -309,7 +309,7 @@ class TestSplitTrainKeys:
         """
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
         entity_cols = get_schema(params)["entity"]
-        sample_keys = select_train_keys(sample_pool, params)
+        sample_keys = select_sample_keys(sample_pool, params)
         train, train_dev = split_train_keys(sample_keys, params)
 
         n_total = sample_keys.select(*entity_cols).distinct().count()
@@ -322,7 +322,7 @@ class TestSplitTrainKeys:
 
     def test_no_cust_overlap(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        sample_keys = select_train_keys(sample_pool, params)
+        sample_keys = select_sample_keys(sample_pool, params)
         train, train_dev = split_train_keys(sample_keys, params)
 
         train_custs = set(train.select("cust_id").distinct().toPandas()["cust_id"])
@@ -333,7 +333,7 @@ class TestSplitTrainKeys:
         """train_keys ∪ train_dev_keys must be exactly sample_keys, even after
         repartition (which is the production scenario that broke F.rand-based splitting)."""
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        sample_keys = select_train_keys(sample_pool, params).repartition(8)
+        sample_keys = select_sample_keys(sample_pool, params).repartition(8)
         train, train_dev = split_train_keys(sample_keys, params)
 
         identity = ["snap_date", "cust_id", "prod_name"]
@@ -347,7 +347,7 @@ class TestSplitTrainKeys:
     def test_deterministic_across_runs(self, sample_pool, parameters):
         """Two independent invocations with the same seed must yield identical splits."""
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        sample_keys = select_train_keys(sample_pool, params)
+        sample_keys = select_sample_keys(sample_pool, params)
 
         t1, d1 = split_train_keys(sample_keys, params)
         t2, d2 = split_train_keys(sample_keys, params)
@@ -730,7 +730,7 @@ class TestSelectTestKeys:
 class TestBuildModelInput:
     def _train_keys(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        return select_train_keys(sample_pool, params)
+        return select_sample_keys(sample_pool, params)
 
     def _pft(self, feature_table, sample_pool, parameters):
         train_keys = self._train_keys(sample_pool, parameters)
@@ -993,7 +993,7 @@ class TestBuildModelInputAtOccasionGrain:
 class TestFitAndBuild:
     def _train_keys(self, sample_pool, parameters):
         params = {**parameters, "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        return select_train_keys(sample_pool, params)
+        return select_sample_keys(sample_pool, params)
 
     def test_output_format(self, spark, feature_table, label_table, sample_pool, parameters):
         """Every split's model_input, built from the real key-selection nodes.
@@ -2059,7 +2059,7 @@ class TestModelInputSchemaPerSplit:
             feature_table, preprocessor, _encode_plan(params), params,
         )
 
-        sample_keys = select_train_keys(sample_pool, params)
+        sample_keys = select_sample_keys(sample_pool, params)
         train_keys, train_dev_keys = split_train_keys(sample_keys, params)
         keys_by_split = {
             "train": train_keys,
@@ -2229,7 +2229,7 @@ class TestZeroPositiveGroupsAreJudgedByLabelTable:
         params = _all_split_params(
             parameters, train_zero_positive_group_ratio=0.0, train_dev_ratio=0.0)
         keys, _ = split_train_keys(
-            select_train_keys(pool_without_positives, params), params)
+            select_sample_keys(pool_without_positives, params), params)
         kept = filter_train_keys(keys, label_table, params)
 
         expected = self._groups_with_a_positive(
@@ -2626,7 +2626,7 @@ class TestSelectKeysOverridePath:
         join dropped unmatched groups or the coalesce stopped defaulting.
         """
         params = self._params(parameters, {"mass": 1.0})
-        result = select_train_keys(sample_pool, params)
+        result = select_sample_keys(sample_pool, params)
         assert result.count() == _expected_key_count(params, "train")
 
     def test_full_overrides_keep_every_row(self, sample_pool, parameters):
@@ -2639,7 +2639,7 @@ class TestSelectKeysOverridePath:
         params = self._params(
             parameters, {seg: 1.0 for seg in _SEGMENTS},
         )
-        result = select_train_keys(sample_pool, params)
+        result = select_sample_keys(sample_pool, params)
         assert result.count() == _expected_key_count(params, "train")
 
     def test_override_actually_reduces_the_targeted_group(
@@ -2651,7 +2651,7 @@ class TestSelectKeysOverridePath:
         mechanism that was never wired up at all.
         """
         params = self._params(parameters, {"mass": 0.0})
-        result = select_train_keys(sample_pool, params)
+        result = select_sample_keys(sample_pool, params)
         segments = {
             r.cust_segment_typ for r in
             sample_pool.select("cust_id", "cust_segment_typ").distinct().collect()
@@ -2972,7 +2972,7 @@ class TestFitPreprocessorMetadataKeyContract:
 
 # =============================================================================
 # Moved up from ``test_helpers_spark.py`` (#169), then rewritten by #170 to go
-# through ``select_train_keys``: the four decisions these tests pin are now
+# through ``select_sample_keys``: the four decisions these tests pin are now
 # steps in the node, and ``select_keys`` — the helper that used to hold all four
 # — no longer exists. Every assertion is the one that was written against the
 # helper; only the call moved. Local fixtures are prefixed ``_sampling_`` to
@@ -3007,19 +3007,19 @@ def _sampling_pool(spark):
 
 class TestSelectKeysCarry:
     def test_carry_present_no_sampling_path(self, spark):
-        df = select_train_keys(
+        df = select_sample_keys(
             _sampling_pool(spark), _sampling_params(carry=["cust_segment_typ"]))
         assert set(df.columns) == {"snap_date", "cust_id", "prod_name",
                                    "cust_segment_typ"}
 
     def test_carry_present_overrides_path(self, spark):
-        df = select_train_keys(
+        df = select_sample_keys(
             _sampling_pool(spark),
             _sampling_params(carry=["cust_segment_typ"], overrides={"mass|a|1": 1.0}))
         assert "cust_segment_typ" in df.columns
 
     def test_no_carry_returns_identity_only(self, spark):
-        df = select_train_keys(_sampling_pool(spark), _sampling_params())
+        df = select_sample_keys(_sampling_pool(spark), _sampling_params())
         assert set(df.columns) == {"snap_date", "cust_id", "prod_name"}
 
 
@@ -3037,21 +3037,21 @@ class TestSelectKeysOverrideLookup:
 
     def test_override_zero_drops_only_that_group(self, spark):
         # default 1.0 keeps all; the single override drops just its group.
-        df = select_train_keys(
+        df = select_sample_keys(
             _sampling_pool(spark), _sampling_params(overrides={"mass|a|1": 0.0}))
         assert self._survivors(df) == {2, 4}
 
     def test_unmatched_falls_back_to_default(self, spark):
         # default 0.0 drops all; only the overridden group survives (coalesce
         # fallback path for the unmatched rows).
-        df = select_train_keys(
+        df = select_sample_keys(
             _sampling_pool(spark),
             _sampling_params(ratio=0.0, overrides={"mass|a|1": 1.0}))
         assert self._survivors(df) == {1, 3}
 
     def test_multiple_overrides(self, spark):
         # two groups overridden in one lookup table; default 1.0 keeps the rest.
-        df = select_train_keys(
+        df = select_sample_keys(
             _sampling_pool(spark),
             _sampling_params(overrides={"mass|a|1": 0.0, "aff|b|0": 0.0}))
         assert self._survivors(df) == {2}
@@ -3059,7 +3059,7 @@ class TestSelectKeysOverrideLookup:
     def test_single_group_key_no_concat(self, spark):
         # group_keys == [label] exercises the len==1 (no concat_ws) path; the
         # override key is the string-cast label value.
-        df = select_train_keys(
+        df = select_sample_keys(
             _sampling_pool(spark),
             _sampling_params(group_keys=["label"], overrides={"0": 0.0}))
         assert self._survivors(df) == {1, 3}
@@ -3825,7 +3825,7 @@ class TestValidateModelInputGrain:
         it compares row counts — so the same pair stands in for any split."""
         params = {**parameters,
                   "dataset": {**parameters["dataset"], "sample_ratio": 1.0}}
-        keys = select_train_keys(sample_pool, params)
+        keys = select_sample_keys(sample_pool, params)
         preprocessor = fit_preprocessor_metadata(feature_table, parameters)
         pft = apply_preprocessor_to_features(
             feature_table, preprocessor, _encode_plan(parameters), parameters,

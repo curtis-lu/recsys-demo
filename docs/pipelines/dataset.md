@@ -240,7 +240,7 @@ model input 寫出前，**所有數值 feature 欄**（decimal／double／float�
 | 設定鍵 | 作用對象 | 生效處 | 語意 |
 |---|---|---|---|
 | `prepare_model_input.drop_columns` | **兩張特徵表**的欄：`feature_table`，以及宣告了的候選層級特徵表（§3.8） | `compute_feature_columns` | 黑名單：不得成為模型特徵 |
-| `carry_columns` | **`sample_pool`** 的欄 | `select_train_keys` | 白名單：keys 除 identity 外還要多帶這些欄 |
+| `carry_columns` | **`sample_pool`** 的欄 | `select_sample_keys` | 白名單：keys 除 identity 外還要多帶這些欄 |
 | `feature_columns` | 推導結果，存進 `preprocessor.json` | `compute_feature_columns` | identity categoricals ＋（`feature_table` 欄 ＋ 候選層級特徵表的非 identity 欄 − drop − 非 categorical 的 identity 欄 − label） |
 
 `feature_columns` **不是設定鍵**，沒有地方可以直接寫它；它是前兩者與 schema 推導出來

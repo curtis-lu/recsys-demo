@@ -167,10 +167,9 @@ class TestNodeNameToFunctionBinding:
     attached to the *wrong function* passes them — as does a rename that silently
     moves a slicing entry point. This pins the pairing instead.
 
-    Two pairings here are deliberately not identities and are the ones most
+    These pairings are deliberately not identities and are the ones most
     likely to be "corrected" by mistake:
 
-    - ``select_sample_keys`` runs ``select_train_keys``;
     - ``build_test_model_input`` runs the *test* wrapper, not the train one,
       because it reads its plan's months and has to re-scope the keys it
       reads back from a persistent Hive table (ADR-0002);
@@ -189,7 +188,7 @@ class TestNodeNameToFunctionBinding:
 
     BASE_BINDINGS = {
         "validate_data_consistency": nodes.validate_data_consistency,
-        "select_sample_keys": nodes.select_train_keys,
+        "select_sample_keys": nodes.select_sample_keys,
         "split_train_keys": nodes.split_train_keys,
         "filter_train_keys": nodes.filter_train_keys,
         "filter_train_dev_keys": nodes.filter_train_keys,

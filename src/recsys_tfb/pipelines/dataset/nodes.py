@@ -321,7 +321,7 @@ def validate_data_consistency(
         raise DataConsistencyError(collect_all_message(headline, errors))
 
 
-def select_train_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
+def select_sample_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:
     """Select train identity keys: which rows are eligible, and which are drawn.
 
     ``sample_pool`` is at (time, entity, item) granularity and is the widest
@@ -431,7 +431,7 @@ def split_train_keys(
     # NULL outside the split unit still has a bucket, but it belongs to no
     # entity, joins to neither features nor labels, and would reach training
     # as a row of NULL features. Checked here rather than in
-    # select_train_keys because sample_keys is already drawn, so the scan is
+    # select_sample_keys because sample_keys is already drawn, so the scan is
     # the smallest train has. Warn rather than raise: ADR-0006 puts
     # data-quality checks upstream in source_etl, whose primary_key_not_null
     # owns exactly this, and raising here would stop a user's slightly dirty

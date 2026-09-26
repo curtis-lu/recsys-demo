@@ -248,6 +248,9 @@ class TestCLI:
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
+            # Only the catalog the pipeline runs on is mocked: the month-plan
+            # listing builds its own in run_contract, over the mocked Spark,
+            # and finds no month landed.
             with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls, \
                     patch(
                         "recsys_tfb.utils.spark.get_or_create_spark_session",
@@ -2695,56 +2698,6 @@ class TestThePartitionListingIsVersionScoped:
         ]
 
 
-class TestCollectExistingSnapDates:
-    def _catalog(self, listings):
-        catalog = DataCatalog()
-        for name, specs in listings.items():
-            dataset = MagicMock()
-            dataset.existing_partition_values.return_value = specs
-            catalog.add(name, dataset)
-        return catalog
-
-    def test_asks_each_dataset_object_for_its_own_partitions(self):
-        from recsys_tfb.__main__ import _collect_existing_snap_dates
-
-        out = _collect_existing_snap_dates(
-            self._catalog({
-                "test_keys": [{"as_of": "2026-01-31"}],
-                "test_model_input": [
-                    {"as_of": "2026-02-28", "prod_name": "fund_stock"},
-                ],
-            }),
-            time_col="as_of",
-        )
-
-        # time_col is threaded through, not hardcoded: the framework's time
-        # column is configurable via schema.time.
-        assert out == {
-            "test_keys": ["2026-01-31"],
-            "test_model_input": ["2026-02-28"],
-        }
-
-    def test_a_dataset_that_cannot_list_partitions_is_rebuilt_in_full(self, caplog):
-        from recsys_tfb.__main__ import _collect_existing_snap_dates
-
-        catalog = self._catalog({"test_keys": [{"snap_date": "2026-01-31"}]})
-        # A ParquetDataset has no existing_partition_values; absent from the
-        # result means build_month_plans reads it as "nothing has landed".
-        catalog.add("preprocessed_feature_table", SimpleNamespace())
-
-        with caplog.at_level(logging.WARNING):
-            out = _collect_existing_snap_dates(catalog, time_col="snap_date")
-
-        # Exact, not "not in": an absent key and a `[]` value are the same
-        # answer to build_month_plans but not the same behaviour here, and
-        # `test_model_input` (registered nowhere at all) must take the same
-        # route rather than raising.
-        assert out == {"test_keys": ["2026-01-31"]}
-        # Asserted because a silent skip is what makes this dangerous: the run
-        # rebuilds a whole artifact and only this line says why.
-        assert "preprocessed_feature_table" in caplog.text
-
-
 class TestRebuildSliceWarning:
     def test_names_both_flags_and_the_months(self):
         from recsys_tfb.__main__ import _format_rebuild_slice_warning
@@ -3239,8 +3192,14 @@ class TestOnlyTestMonthsFlag:
 
     @staticmethod
     def _run_dataset(tmp_path, argv):
-        """Invoke the dataset command with Spark, the catalog and the runner
-        mocked; returns (result, the Pipeline the Runner was handed or None).
+        """Invoke the dataset command with Spark, the run's catalog and the
+        runner mocked; returns (result, the Pipeline the Runner was handed or
+        None).
+
+        The patched ``DataCatalog`` is ``__main__``'s, so only the catalog the
+        pipeline runs on is a mock. The month-plan listing and the train
+        version's checks build their own in ``run_contract`` over the mocked
+        Spark, and find no month landed: every month is still to be processed.
         """
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
@@ -4045,6 +4004,22 @@ class TestDatasetRegistersTheCandidateTable:
         )
 
         assert without.base_dataset_version != with_it.base_dataset_version
+
+    @pytest.mark.parametrize("declared", [True, False])
+    def test_the_base_manifest_records_its_fingerprint(self, tmp_path, declared):
+        """The base manifest is where a reader finds which candidate table
+        schema a version was built from. Undeclared, the key is left out
+        rather than written as null."""
+        _, seen = _run_dataset_command(
+            tmp_path, ["dataset"],
+            catalog_extra=_CANDIDATE_ENTRY if declared else None,
+        )
+
+        manifest = json.loads((
+            tmp_path / "data" / "dataset" / seen.base_dataset_version
+            / "manifest.json"
+        ).read_text())
+        assert ("candidate_feature_table_fingerprint" in manifest) is declared
 
 
 class TestInferenceRefusesTheCandidateTableA47:
