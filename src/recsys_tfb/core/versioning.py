@@ -3,14 +3,16 @@
 Provides two-layer hash-based version IDs for the dataset pipeline, plus the
 model version the training pipeline derives from them:
 
-- ``base_dataset_version``: derived from non-sampling dataset params + full
-  schema, minus the coverage-only keys (``test_snap_dates``) and the gate-policy
-  keys (``numeric_precision_policy``). Keys outputs that are invariant under
-  sampling changes (preprocessor, category_mappings, preprocessed_feature_table,
-  val/test model_input). Test months accumulate *under* one version rather than
-  minting a new one.
-- ``train_variant_id``: derived from train-sampling params only. Keys
-  train/train_dev model_input under the base dataset directory. It is the
+- ``base_dataset_version``: derived from the dataset params minus the
+  train-only keys (``TRAIN_SAMPLING_KEYS``), the coverage-only keys
+  (``test_snap_dates``) and the gate-policy keys (``numeric_precision_policy``);
+  plus the full schema and ``DATASET_ARTIFACT_FORMAT_VERSION``. Keys the
+  outputs no train-only key can change (preprocessor,
+  preprocessed_feature_table, val/test model_input). Test months accumulate
+  *under* one version rather than minting a new one.
+- ``train_variant_id``: derived from the train-only params
+  (``TRAIN_SAMPLING_KEYS``: the train draw and split, and the carry columns).
+  Keys train/train_dev model_input under the base dataset directory. It is the
   only variant layer — #411 removed the calibration one.
 - ``model_version``: derived from the *model-defining* subset of training
   params only — the ``training:`` block minus the pure logging/threading
@@ -47,6 +49,27 @@ produced":
   that at the cost of rebuilding everything whenever an operator flips it to
   inspect one column, which is the trade issue #281 decided against.
 
+One input to ``base_dataset_version`` is not configuration:
+``DATASET_ARTIFACT_FORMAT_VERSION``, an integer the framework owns (ADR-0029
+decision 15). The ID hashes config, so code that changes what the dataset
+lands for a config that did not change would write the new content under the
+old ID — and test months accumulate under one ID (ADR-0001), so months written
+by the old code and by the new would sit side by side under it, with nothing
+anywhere to tell them apart. **Add 1 to that constant, in the same deployment
+as the change, whenever a code change alters what the dataset pipeline lands
+for some deployment whose config it leaves as it was.** Ask it per
+deployment, not per change: a new config key whose default differs from the
+old behaviour moves no ID for a deployment that does not write the key, and
+that deployment's content still changes. Ask it of every change to code the
+dataset pipeline runs — ``pipelines/dataset/`` and what it imports
+(``preprocessing.py``, ``core/schema.py``, ``utils/``, …), not that directory
+alone. Every deployment's ``base_dataset_version`` then moves once and the
+dataset rebuilds under the new ID; ``model_version`` and HPO's ``search_id``
+contain base, so every deployment retrains, and until it has, adding an
+evaluation month to the model in service does not work
+(``docs/operations/user-guides/adding-an-eval-month.md``). Nothing checks
+this mechanically.
+
 Also provides manifest generation, symlink management, and version resolution
 for dataset, training, and inference pipelines.
 """
@@ -81,6 +104,15 @@ logger = logging.getLogger(__name__)
 # the val table drawn under the old one. ADR-0025 decision 3 is why they are
 # three top-level keys rather than one — a single key can only be registered or
 # not as a whole.
+#
+# ``carry_columns`` is registered although it draws nothing, so the set's name
+# is narrower than its rule: a key belongs here when everything it changes lands
+# in train / train_dev alone. The carry columns are copied into the train and
+# train_dev keys and model_input only — val / test keys select the identity
+# (ADR-0004) — so a change to them leaves nothing under base to rebuild
+# (ADR-0029 decision 9). The one way a carry column reaches a base artifact is
+# as a feature_table column too, and B7 then requires it in ``drop_columns``,
+# which stays hashed: that edit moves base on its own.
 TRAIN_SAMPLING_KEYS: frozenset[str] = frozenset({
     "sample_ratio",
     "sample_ratio_overrides",
@@ -88,6 +120,7 @@ TRAIN_SAMPLING_KEYS: frozenset[str] = frozenset({
     "train_dev_ratio",
     "train_split_keys",
     "train_zero_positive_group_ratio",
+    "carry_columns",
 })
 #: The sampling keys stripped from ``base_dataset_version``. Named for the
 #: stripping rule rather than for its members, because "every key that drives a
@@ -117,6 +150,10 @@ COVERAGE_ONLY_KEYS: frozenset[str] = frozenset({"test_snap_dates"})
 # gate flag under a name that says "coverage" learns the wrong rule for the next
 # key. Why this one qualifies: module docstring.
 GATE_POLICY_KEYS: frozenset[str] = frozenset({"numeric_precision_policy"})
+
+#: Add 1 when a code change alters what the dataset pipeline lands for a config
+#: that did not change (module docstring; ADR-0029 decision 15).
+DATASET_ARTIFACT_FORMAT_VERSION: int = 1
 
 
 # Keys under training.algorithm_params that do NOT affect the trained model
@@ -155,17 +192,18 @@ def compute_base_dataset_version(
     feature_table_fingerprint: str | None = None,
     candidate_feature_table_fingerprint: str | None = None,
 ) -> str:
-    """Hash non-sampling dataset params, canonical schema, and feature_table fingerprint.
+    """Hash the non-train-only dataset params, canonical schema, and feature_table fingerprint.
 
-    The resulting ID keys pipeline outputs that are invariant under sampling
-    changes. ``params`` is the ``parameters_dataset`` dict; any keys in
+    The resulting ID keys pipeline outputs no train-only key can change.
+    ``params`` is the ``parameters_dataset`` dict; any keys in
     ``BASE_VERSION_STRIPPED_SAMPLING_KEYS`` under ``params["dataset"]`` are
-    stripped before
-    hashing so train sampling experiments do not invalidate
-    val/test/preprocessor artifacts. ``COVERAGE_ONLY_KEYS`` is stripped the
+    stripped before hashing so train sampling experiments (and the carry
+    columns) do not invalidate val/test/preprocessor artifacts. ``COVERAGE_ONLY_KEYS`` is stripped the
     same way so adding an evaluation month is O(1): coverage grows, identity
     (and therefore ``model_version``) does not change. ``GATE_POLICY_KEYS`` is
     stripped for the third reason in the module docstring.
+    ``DATASET_ARTIFACT_FORMAT_VERSION`` is always in the payload, also for the
+    reason given there.
 
     ``feature_table_fingerprint`` (optional) reflects the actual
     ``feature_table`` schema (column name + dtype, ordered). When provided it
@@ -176,7 +214,7 @@ def compute_base_dataset_version(
     ``candidate_feature_table_fingerprint`` is the same fingerprint of the
     optional candidate-level feature table (ADR-0026). Its own payload key
     rather than a second entry folded into the first: absent, the payload is
-    byte-for-byte the one a deployment without that table has always hashed;
+    byte-for-byte the one a deployment without that table hashes;
     and the same schema under the other key is a different dataset, because the
     two tables join on different keys.
     """
@@ -189,7 +227,11 @@ def compute_base_dataset_version(
             | GATE_POLICY_KEYS
         ):
             ds.pop(key, None)
-    payload: dict = {"dataset": stripped, "schema": schema}
+    payload: dict = {
+        "dataset": stripped,
+        "schema": schema,
+        "dataset_artifact_format_version": DATASET_ARTIFACT_FORMAT_VERSION,
+    }
     if feature_table_fingerprint is not None:
         payload["feature_table_fingerprint"] = feature_table_fingerprint
     if candidate_feature_table_fingerprint is not None:
@@ -200,7 +242,7 @@ def compute_base_dataset_version(
 
 
 def compute_train_variant_id(params: dict) -> str:
-    """Hash only the train-sampling subset of dataset params."""
+    """Hash only the train-only subset of dataset params (``TRAIN_SAMPLING_KEYS``)."""
     ds = params.get("dataset", {}) if isinstance(params, dict) else {}
     subset = {k: ds[k] for k in TRAIN_SAMPLING_KEYS if k in ds}
     return _hash8({"train_sampling": subset})

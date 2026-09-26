@@ -71,11 +71,10 @@ def _pool_with_a_rare_and_a_late_item(spark):
 
 class TestTheListIsCountedFromTheTrainMonths:
     def test_sorted_distinct_train_items_before_sampling(self, spark):
-        preprocessor, mappings = fit_preprocessor_metadata(
+        preprocessor = fit_preprocessor_metadata(
             _feature_table(spark), _params(), None,
             _pool_with_a_rare_and_a_late_item(spark), None)
         assert preprocessor["category_mappings"]["prod_name"] == ["a", "b", "rare"]
-        assert mappings["prod_name"] == ["a", "b", "rare"]
 
     def test_a_multi_column_item_is_counted_combined(self, spark):
         params = _params()
@@ -87,13 +86,13 @@ class TestTheListIsCountedFromTheTrainMonths:
              (pd.Timestamp(TRAIN[1]), "C01", "c02", "video", 1),
              (pd.Timestamp(VAL), "C00", "c04", "video", 0)],
             columns=["snap_date", "cust_id", "campaign", "fmt", "label"]))
-        preprocessor, _ = fit_preprocessor_metadata(
+        preprocessor = fit_preprocessor_metadata(
             _feature_table(spark), params, None, pool, None)
         assert preprocessor["category_mappings"]["item"] == ["c01-banner", "c02-video"]
 
     def test_a_listed_item_list_is_the_declared_one(self, spark):
         """Unchanged: the declared order, sample_pool not asked."""
-        preprocessor, _ = fit_preprocessor_metadata(
+        preprocessor = fit_preprocessor_metadata(
             _feature_table(spark), _params(["b", "a"]), None,
             _pool_with_a_rare_and_a_late_item(spark), None)
         assert preprocessor["category_mappings"]["prod_name"] == ["b", "a"]
@@ -126,7 +125,7 @@ class TestTheSameVersionCannotChangeItsList:
             < message.index("data/dataset/")
 
     def test_the_same_list_passes(self, spark):
-        preprocessor, _ = fit_preprocessor_metadata(
+        preprocessor = fit_preprocessor_metadata(
             _feature_table(spark), _params(), None,
             _pool_with_a_rare_and_a_late_item(spark),
             self._existing(["a", "b", "rare"]))
@@ -269,15 +268,25 @@ class TestWiring:
                               "candidate_feature_table", "sample_pool",
                               "preprocessor_on_disk"]
 
-    def test_the_preprocessor_on_disk_is_an_optional_entry_on_the_same_file(self):
+    @pytest.mark.parametrize("conf", [
+        "conf/base/catalog.yaml", "examples/ad/conf/base/catalog.yaml",
+    ])
+    def test_the_preprocessor_on_disk_is_an_optional_entry_on_the_same_file(self, conf):
         """A6: a node may not read and write one name. Overwriting is done
-        under another entry name — the same file, loaded before the save."""
+        under another entry name — the same file, loaded before the save.
+        The shipped catalogs leave that entry out; the CLI derives it
+        (ADR-0029 decision 13)."""
         from pathlib import Path
 
         import yaml
 
+        from recsys_tfb.__main__ import _derive_preprocessor_on_disk
+
         catalog = yaml.safe_load(
-            (Path(__file__).parents[3] / "conf/base/catalog.yaml").read_text())
+            (Path(__file__).parents[3] / conf).read_text())
+        assert "preprocessor_on_disk" not in catalog
+
+        assert _derive_preprocessor_on_disk(catalog) == []
         assert catalog["preprocessor_on_disk"] == {
             "type": "JSONDataset",
             "filepath": catalog["preprocessor"]["filepath"],

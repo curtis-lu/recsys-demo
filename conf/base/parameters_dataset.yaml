@@ -36,7 +36,8 @@ dataset:
   # ★非 identity、要從 sample_pool 帶進 train/train_dev model_input
   # parquet 的欄位清單（供 training.sample_weights 分群；權重實際只套 train/train_dev）。
   # 寬鬆超集策略：一次列足想用的維度，weight 表只取需要的子集 → 改 weight 不需
-  # 重產 dataset。⚠改此清單會 bust base_dataset_version（parquet schema 變、整批重算）。
+  # 重產 dataset。改此清單只翻 train_variant_id：只有 train/train_dev 的表帶 carry 欄，
+  # 前處理器與 val/test 不動（ADR-0029 決定 9）；train 那兩張表照樣整批重建。
   #
   # ★配對規則：此處的欄若**也存在於 feature_table**，必須同時列進下面的
   #   prepare_model_input.drop_columns（cust_segment_typ 正是這個情況——兩處都有它是

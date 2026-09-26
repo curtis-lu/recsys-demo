@@ -146,10 +146,8 @@ label、score、rank 框架自帶預設欄名），其餘特徵 / 分群 / carry
   <rect x="52" y="172" width="896" height="86" rx="9" fill="var(--base)" stroke="#74c0fc"/>
   <text x="62" y="188" font-size="11" font-weight="bold" fill="#1864ab">base_dataset_version</text>
   <g font-size="10.5" text-anchor="middle">
-    <rect x="62" y="196" width="150" height="26" rx="6" fill="var(--json)" stroke="var(--json-b)"/>
-    <text x="137" y="213">preprocessor (JSON)</text>
-    <rect x="222" y="196" width="160" height="26" rx="6" fill="var(--json)" stroke="var(--json-b)"/>
-    <text x="302" y="213">category_mappings (JSON)</text>
+    <rect x="62" y="196" width="320" height="26" rx="6" fill="var(--json)" stroke="var(--json-b)"/>
+    <text x="222" y="213">preprocessor (JSON)</text>
     <rect x="392" y="196" width="220" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
     <text x="502" y="213">preprocessed_feature_table</text>
     <rect x="622" y="196" width="150" height="26" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
@@ -407,7 +405,6 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
   <a href="#inference_population">inference_population</a>
   <b>dataset（base）：</b>
   <a href="#preprocessor">preprocessor</a>
-  <a href="#category_mappings">category_mappings</a>
   <a href="#preprocessed_feature_table">preprocessed_feature_table</a>
   <a href="#val_keys">val_keys / test_keys</a>
   <a href="#val_model_input">val_model_input / test_model_input</a>
@@ -515,22 +512,13 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
 <div class="card" id="preprocessor">
   <h4>preprocessor <span class="badge b-json">JSON</span><span class="vl vl-base">base</span></h4>
   <div class="meta"><b>產生</b>：dataset · fit_preprocessor_metadata（在 train 期 feature_table 上 fit，與抽樣解耦）　|
-  <b>下游</b>：dataset（apply_preprocessor_to_features、validate_numeric_precision、build_model_input 各 split）、training（select_features → <code>preprocessor_view</code> → prepare_lgb_train_inputs / tune_hyperparameters / finalize_model / predict_and_write_test_predictions；診斷節點 compute_feature_statistics、compute_gain_ledger、compute_shap_diagnostics、compute_quadrant_profiles、compute_quadrant_cases 直接讀 preprocessor）、inference（build_inference_population_features、predict_and_write_scores）　|
+  <b>下游</b>：dataset（apply_preprocessor_to_features、validate_numeric_precision、build_model_input 各 split）、training（select_features → <code>preprocessor_view</code> → prepare_lgb_train_inputs / tune_hyperparameters / finalize_model / predict_and_write_test_predictions；診斷節點 compute_feature_statistics、compute_gain_ledger、compute_shap_diagnostics、compute_quadrant_profiles、compute_quadrant_cases 直接讀 preprocessor）、inference（build_inference_population_features、predict_and_write_scores）；同一個檔另以 catalog 名 <code>preprocessor_on_disk</code>（CLI 從本條目推出，部署不用寫）被 dataset 的 fit_preprocessor_metadata（覆寫前比對 item 清單，B19）與 evaluation 的 prepare_eval_data 讀　|
   <b>path</b>：<code>data/dataset/&lt;base_dataset_version&gt;/preprocessor.json</code></div>
   <p class="sub">類別欄編碼字典與前處理 metadata（transform 時用）。是跨 dataset / training / inference <b>共用</b>的前處理合約。內含四個鍵（見下）；其中 <code>category_mappings</code> 每欄的值是 list，<b>索引即編碼</b>（資料來源的類別欄為排序後的相異值，identity 類別欄如 item 依 <code>schema.categorical_values</code> 宣告的順序），不在 list 內的值（含 NULL）編成 <code>-1</code>。</p>
   <div class="ex">{ "categorical_columns": [&lt;item&gt;, &lt;cat_col&gt;, ...],
   "category_mappings": { "&lt;cat_col&gt;": ["&lt;v1&gt;", "&lt;v2&gt;", ...], ... },
   "feature_columns": [...],
   "drop_columns": [...] }</div>
-</div>
-
-<div class="card" id="category_mappings">
-  <h4>category_mappings <span class="badge b-json">JSON</span><span class="vl vl-base">base</span></h4>
-  <div class="meta"><b>產生</b>：dataset · fit_preprocessor_metadata（與 preprocessor 同節點同時產出）　|
-  <b>下游</b>：—（人類可讀的對照 / 檢視用；DAG 下游節點只吃 preprocessor）　|
-  <b>path</b>：<code>data/dataset/&lt;base_dataset_version&gt;/category_mappings.json</code></div>
-  <div class="ex">{ "&lt;cat_col&gt;": ["&lt;v1&gt;", "&lt;v2&gt;", ...],
-  "prod_name": ["prod_A", "prod_B", ...] }   ← 每欄是 list，索引即編碼；item 值由 schema.categorical_values 宣告</div>
 </div>
 
 <div class="card" id="preprocessed_feature_table">

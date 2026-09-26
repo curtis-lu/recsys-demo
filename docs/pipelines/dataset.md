@@ -10,7 +10,7 @@
 | 主要用途 | 建立版本化的資料切分、前處理器與模型輸入 |
 | 執行指令 | `python -m recsys_tfb dataset` |
 | 上游輸入 | `feature_table`、`label_table`、`sample_pool`；選用的 `candidate_feature_table`（§3.8） |
-| 主要輸出 | `preprocessor`、`category_mappings`、`*_keys`、`*_model_input` |
+| 主要輸出 | `preprocessor`、`*_keys`、`*_model_input` |
 | 設定檔 | `conf/base/parameters_dataset.yaml` |
 | I/O 設定 | `conf/base/catalog.yaml` |
 | 下游 pipeline | `training` |
@@ -168,7 +168,7 @@ dataset:
   dataset 的第一個 node 擋下並同時給出兩種修法（見
   [ADR-0004](../adr/0004-carry-drop-columns-intersection.md)）。identity 欄與 label
   不適用此規則——它們不會被複製第二份。
-- 修改 `carry_columns` 會改變 model input schema，因此會更新 `base_dataset_version`。
+- 修改 `carry_columns` 只更新 `train_variant_id`：只有 train 與 train-dev 的 keys 與 model input 帶 carry 欄，base 底下的產物（前處理器、val／test）一欄都不變（[ADR-0029](../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 9）。同一欄若也在 `feature_table`，上一條要求它列進 `drop_columns`，那一個改動會更新 `base_dataset_version`。
 
 若 training 新增權重維度卻未將該欄位放入 identity、categorical features 或 `carry_columns`，CLI 設定閘會在 pipeline 啟動前阻擋。
 
@@ -191,8 +191,8 @@ dataset:
 
 | 設定 | 說明 | 版本影響 |
 |---|---|---|
-| `categorical_columns` | 需要建立 category mapping 並轉為 integer encoding 的欄位 | `base_dataset_version` |
-| `drop_columns` | 不應進入模型特徵的欄位 | `base_dataset_version` |
+| `categorical_columns` | 需要建立 category mapping 並轉為 integer encoding 的欄位。沒寫時只有 `schema.item` | `base_dataset_version` |
+| `drop_columns` | 不應進入模型特徵的欄位。沒寫時只有 time、entity、label 三個 schema 角色的欄；其他不是特徵的欄（例如上面的 `apply_start_date`）要自己列 | `base_dataset_version` |
 
 設定原則：
 
@@ -401,7 +401,7 @@ schema:
 - `build_val_model_input`／`build_test_model_input` 印一行警告，列出有哪些新 item（不列列數）。它從已落地的 `val_keys`／`test_keys` 讀 item 那一欄（test 只讀本次要組裝的月份），不從還沒落地的 model input 數——那樣會把整段 join 再跑一次；keys 裡的 item 就是 model input 裡的 item（組裝全是從 keys 出發的 left join）。比對的是編碼用的同一份前處理器；`--only-test-months` 不重跑 fit，讀的就是磁碟上那份，不會拿今天的 train 時段資料重數。
 - 資料閘不再拿 `sample_pool` 跟清單比（沒有宣告的清單可比）；`label_table` 的 item 必須在 `sample_pool` 出現過，不然照擋（B1）。
 
-**同一版本下清單不能變（不變量 B19）**：清單不在 conf 裡，所以不會進 `base_dataset_version`。同一個版本重跑、而 train 時段的 `sample_pool` 變了（例如回補），數出的清單就可能跟磁碟上那份不同；照樣覆寫的話，用舊清單訓練的模型推論時編號全部錯位，而且不報錯。所以 `fit_preprocessor_metadata` 在覆寫前先讀磁碟上的舊檔（catalog 條目 `preprocessor_on_disk`，同一個檔、換個條目名讓 node 讀得到自己要覆寫的東西），不同就擋下，訊息列出多了、少了哪些 item。要照新資料建，**先讓版本號變動**：改 `dataset.train_snap_dates`，或把清單逐一寫進 `schema.categorical_values.<item>`（版本號從此含著這份清單）。逐一列出時要列 `sample_pool` 在 train、val、test 時段出現過的**每一個** item（B1），連 val／test 才出現的新 item 也要列；離線推論要照寫一份相同的 `inference.products`（A4、A27）。只貼上 train 時段數出的那份，遇到新 item 會被 B1 擋下。版本號一變就建一個新目錄，舊模型照樣讀自己那份前處理器。刪掉 `data/dataset/<base_dataset_version>/`（與該版本的 dataset 分區）再重建是最後手段：推論與評估讀的前處理器就是那個目錄裡的檔，模型目錄裡沒有副本，所以這個版本上**沒有重訓的每個模型（包含已 promote 的）都會拿錯位的 item 編號評分，結果是錯的，而且不報錯**——正是 B19 要擋的事。這道檢查在 fit 裡，所以 `--from-node fit_preprocessor_metadata` 也擋得到。
+**同一版本下清單不能變（不變量 B19）**：清單不在 conf 裡，所以不會進 `base_dataset_version`。同一個版本重跑、而 train 時段的 `sample_pool` 變了（例如回補），數出的清單就可能跟磁碟上那份不同；照樣覆寫的話，用舊清單訓練的模型推論時編號全部錯位，而且不報錯。所以 `fit_preprocessor_metadata` 在覆寫前先讀磁碟上的舊檔（catalog 條目 `preprocessor_on_disk`，同一個檔、換個條目名讓 node 讀得到自己要覆寫的東西；CLI 從 `preprocessor` 推出，不用寫），不同就擋下，訊息列出多了、少了哪些 item。要照新資料建，**先讓版本號變動**：改 `dataset.train_snap_dates`，或把清單逐一寫進 `schema.categorical_values.<item>`（版本號從此含著這份清單）。逐一列出時要列 `sample_pool` 在 train、val、test 時段出現過的**每一個** item（B1），連 val／test 才出現的新 item 也要列；離線推論要照寫一份相同的 `inference.products`（A4、A27）。只貼上 train 時段數出的那份，遇到新 item 會被 B1 擋下。版本號一變就建一個新目錄，舊模型照樣讀自己那份前處理器。刪掉 `data/dataset/<base_dataset_version>/`（與該版本的 dataset 分區）再重建是最後手段：推論與評估讀的前處理器就是那個目錄裡的檔，模型目錄裡沒有副本，所以這個版本上**沒有重訓的每個模型（包含已 promote 的）都會拿錯位的 item 編號評分，結果是錯的，而且不報錯**——正是 B19 要擋的事。這道檢查在 fit 裡，所以 `--from-node fit_preprocessor_metadata` 也擋得到。
 
 **開跑前查不了的，挪到清單數出來之後查**：`sample_ratio_overrides` 的鍵裡的 item（A5）在 fit 數完清單後查；`training.sample_weights` 的鍵裡的 item（A9c）在 training 讀到前處理器時查（`select_features`）。打錯字一樣擋。
 
@@ -500,7 +500,7 @@ python -m recsys_tfb dataset \
 | Train 整組抽樣 | `filter_train_keys`、`filter_train_dev_keys` | 上一步的 keys、`label_table` | 依 `train_zero_positive_group_ratio` 整組丟掉部分無正例的 query group（label 取自 `label_table`，只讀 train 月份）；預設 r ＝ 1 原樣通過（§3.7） | `train_keys`、`train_dev_keys` |
 | Val/Test keys | `select_val_keys`、`select_test_keys` | `sample_pool`（test 另收 `test_keys_month_plan`） | 建立 val 與 test identity keys；val 可依 entity 縮減。test 只處理計畫中的月份 | `val_keys_unfiltered`、`test_keys_unfiltered`（不落地） |
 | Val/Test 整組抽樣 | `filter_val_keys`、`filter_test_keys` | 上一步的 keys、`label_table`（test 另收 `test_keys_month_plan`） | 有正例的 query group 全留；無正例的依 `val_`／`test_zero_positive_group_ratio` 整組留下比例 r（預設 0：全丟；label 取自 `label_table`，只讀該 split 的月份），r > 0 時在 keys 上加權重欄，組裝時帶進 model input（§3.7） | `val_keys`、`test_keys` |
-| Fit 前處理器 | `fit_preprocessor_metadata` | `feature_table`、`candidate_feature_table`、`sample_pool`、`preprocessor_on_disk` | 只使用 train 日期建立 feature 清單與 category mappings（兩張特徵表都看，§3.8）；`drop_columns` 裡任何一張特徵表都沒有的欄在這裡記 warning。item 清單寫 `from_train_data` 時，從 train 時段的 `sample_pool` 數清單，並與磁碟上同版本的舊檔比對（B19，§3.10）；清單逐一列出時不使用這兩個輸入 | `preprocessor`、`category_mappings` |
+| Fit 前處理器 | `fit_preprocessor_metadata` | `feature_table`、`candidate_feature_table`、`sample_pool`、`preprocessor_on_disk` | 只使用 train 日期建立 feature 清單與 category mappings（兩張特徵表都看，§3.8）；`drop_columns` 裡任何一張特徵表都沒有的欄在這裡記 warning。item 清單寫 `from_train_data` 時，從 train 時段的 `sample_pool` 數清單，並與磁碟上同版本的舊檔比對（B19，§3.10）；清單逐一列出時不使用這兩個輸入 | `preprocessor` |
 | 套用前處理 | `apply_preprocessor_to_features` | `feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 編碼 feature categoricals；只處理計畫中的月份 | `preprocessed_feature_table` |
 | 精度閘 | `validate_numeric_precision` | `preprocessed_feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan`、`candidate_feature_table`、`test_model_input_month_plan`、`only_test_months`（執行模式，CLI 注入） | 不變量 B8：讀剛落地那幾個月份的 parquet footer 統計值（零掃描），確認會被 cast 的欄（decimal、整數族與 boolean——有格點的那些）在該欄自己的解析度下撐得過 `numeric_feature_storage_type`；同時產出每欄的 headroom 報告。宣告了候選層級特徵表時，它不落地、沒有 footer 可讀，改成掃一次本次各 build 要讀的月份聯集（類別欄不在內：它們在 cast 之前已編成詞表索引）。聯集是 `train_snap_dates`、`val_snap_dates`、test 那份計畫要處理的月份；`--only-test-months` 時只有最後一份，同一次掃描也確認這些月份每個都有資料；報告多一段 `candidate_feature_table` | `numeric_precision_report` |
 | 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor（test 另收 `test_model_input_month_plan`）、`candidate_feature_table` | 先把 `label_table`、`preprocessed_feature_table`、候選層級特徵表篩到自己 split 的月份（train／train-dev 讀 `train_snap_dates`、val 讀 `val_snap_dates`、test 讀計畫要處理的月份），再 left join label 與 feature（宣告了候選層級特徵表時，在這裡才讀它、編碼、接上），補齊缺失 label，選取欄位並把所有數值特徵欄轉成 `numeric_feature_storage_type` 宣告的型別（預設 float32）；val／test 在 item 清單從資料數時警告前處理器清單裡沒有的新 item（§3.10） | `train_model_input`、`train_dev_model_input`、`val_model_input`、`test_model_input` |
@@ -565,7 +565,7 @@ miss 率只有在生產跑過一次才知道，本機量不到，所以「先量
 
 | 層級 | 產物 | 儲存方式 |
 |---|---|---|
-| Base | `preprocessor`、`category_mappings` | `data/dataset/<base_dataset_version>/` |
+| Base | `preprocessor`（`preprocessor.json`） | `data/dataset/<base_dataset_version>/` |
 | Base | `preprocessed_feature_table`、`val_keys`、`test_keys`、`val_model_input`、`test_model_input` | Hive，以 `base_dataset_version` partition |
 | Train variant | `sample_keys`、`train_keys`、`train_dev_keys`、`train_model_input`、`train_dev_model_input` | Hive，以 base + `train_variant_id` partition |
 | Metadata | base、train variant 的 `manifest.json` | 對應版本目錄 |
@@ -579,7 +579,7 @@ Hive 的實際 table 名稱與 partition 欄位以 `conf/base/catalog.yaml` 為�
 
 1. log 中顯示的三層 version ID 符合預期。
 2. `preprocessor.json` 的 `feature_columns` 包含 item，且欄位順序合理。
-3. `category_mappings.json` 包含所有 categorical columns。
+3. `preprocessor.json` 的 `category_mappings` 包含所有 categorical columns。
 4. train 與 train-dev 都有資料，且同一 entity 不會同時出現在兩者。
 5. model input 的 identity key 沒有重複，label 僅包含合法值。
 6. `*_zero_positive_group_ratio` 維持預設 0 時，val/test 每個保留的 query group 至少有一個正例；設了 r > 0 時，無正例的組的列都帶權重 1／r。
@@ -610,10 +610,10 @@ dataset 每次啟動都會計算以下版本：
 
 | 版本 | 精確計算依據 | 主要產物 |
 |---|---|---|
-| `base_dataset_version` | `parameters_dataset.yaml` 中除了六個 train 抽樣 keys 與 `test_snap_dates` 以外的所有內容，加上完整 schema 與 `feature_table` schema fingerprint；宣告了候選層級特徵表時，再加上它的 schema fingerprint（§7.3） | preprocessor、共用 feature、val/test |
-| `train_variant_id` | 只包含 `sample_ratio`、`sample_ratio_overrides`、`sample_group_keys`、`train_dev_ratio`、`train_split_keys`、`train_zero_positive_group_ratio` | train/train-dev keys 與 inputs |
+| `base_dataset_version` | `parameters_dataset.yaml` 中除了七個只影響 train 的 keys 與 `test_snap_dates` 以外的所有內容，加上完整 schema、`feature_table` schema fingerprint 與 dataset 產物格式版本；宣告了候選層級特徵表時，再加上它的 schema fingerprint（§7.3） | preprocessor、共用 feature、val/test |
+| `train_variant_id` | 只包含 `sample_ratio`、`sample_ratio_overrides`、`sample_group_keys`、`train_dev_ratio`、`train_split_keys`、`train_zero_positive_group_ratio`、`carry_columns` | train/train-dev keys 與 inputs |
 
-會從 base payload 排除的 train 抽樣 keys 有六個：
+會從 base payload 排除、改進 `train_variant_id` 的 keys 有七個（`core/versioning.py` 的 `TRAIN_SAMPLING_KEYS`）。前六個是 train 的抽樣與切分；`carry_columns` 不抽樣，但它的欄只進 train／train-dev 的表：
 
 ```text
 sample_ratio
@@ -622,11 +622,12 @@ sample_group_keys
 train_dev_ratio
 train_split_keys
 train_zero_positive_group_ratio
+carry_columns
 ```
 
 `val_sample_keys`、`val_zero_positive_group_ratio`、`test_zero_positive_group_ratio` **刻意不在這份清單裡**：val／test 產物只由 `base_dataset_version` 分割，把它們排除掉就等於讓 val／test 的抽樣改了卻靜默沿用舊 parquet。推導見 [ADR-0016](../adr/0016-split-unit-declared-by-two-keys.md) 與 [ADR-0025](../adr/0025-query-group-widened-by-occasion-role.md) 決定 3。
 
-除了這六個 keys，還有一個被排除的 key —— `test_snap_dates`：
+除了這七個 keys，還有一個被排除的 key —— `test_snap_dates`：
 
 ```text
 test_snap_dates
@@ -656,7 +657,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | `sample_ratio` |  | ✓ | 只改變 train 抽樣 |
 | `sample_ratio_overrides` |  | ✓ | 只改變 train 各分層抽樣 |
 | `sample_group_keys` |  | ✓ | train 的分層 key |
-| `carry_columns` | ✓ |  | 改變 model input schema |
+| `carry_columns` |  | ✓ | 只改變 train/train-dev 的 keys 與 model input 帶哪些欄 |
 | `train_dev_ratio` |  | ✓ | 只改變 train/train-dev entity 切分 |
 | `train_split_keys` |  | ✓ | 只改變 train/train-dev 的切分單位；val/test 產物完全不動 |
 | `train_zero_positive_group_ratio` |  | ✓ | 只改變 train/train-dev 留下多少無正例的 query group（§3.7） |
@@ -686,6 +687,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | `feature_table` 欄位順序 | ✓ | feature 順序會傳入 preprocessor，因此 fingerprint 對順序敏感 |
 | 宣告或拿掉 `candidate_feature_table` 條目 | ✓ | 宣告時，它的 schema fingerprint 以自己的 payload 鍵 `candidate_feature_table_fingerprint` 進 hash，也寫進 base 的 `manifest.json`；沒宣告時 payload 裡沒有這個鍵，所以不用這張表的部署，版本號完全不受它影響 |
 | 候選層級特徵表的欄位名稱、型別、順序 | 只在宣告時 ✓ | 與 `feature_table` 同一套 fingerprint 規則。用另一個 payload 鍵而不是併進 `feature_table` 那一個：兩張表接的鍵不同，同一組欄放在哪一張，是不同的 dataset |
+| dataset 產物格式版本（`core/versioning.py` 的 `DATASET_ARTIFACT_FORMAT_VERSION`） | ✓ | 框架自己的整數，不是設定。程式改了 dataset 落地的內容、設定卻沒動時，框架把它加 1，讓每個部署的 base 都翻一次、在新版本下重建（[ADR-0029](../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 15）。升級後要做什麼見 §7.4 |
 
 以下內容目前**不會**改變任何 dataset version：
 
@@ -696,7 +698,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | `conf/base/catalog.yaml` | catalog 設定不進 hash（唯一的例外是上表的 `candidate_feature_table` 條目有沒有宣告） | 修改 table/path/partition 時需自行確認是否誤讀或覆寫既有版本；把 `feature_table` 或 `candidate_feature_table` 換成指到另一張 schema 相同的實體表，版本號也不變 |
 | `feature_table`、候選層級特徵表的資料值 | fingerprint 只看欄名、型別與順序 | 同 schema 的資料回補不會翻版，必須重跑相同版本 partitions（候選層級特徵表的情形見 §7.5） |
 | `label_table`、`sample_pool` 的資料值或 schema | 目前沒有對兩表計算 fingerprint | 上游回補、候選或 label 改變時需人工完整重跑 |
-| source ETL SQL、dataset Python 程式碼 | 程式碼內容不進 hash | 程式修正後可能覆寫同一版本；manifest 的 git commit 只供追溯 |
+| source ETL SQL、dataset Python 程式碼 | 程式碼內容不進 hash | 框架改了 dataset 落地內容時會把 dataset 產物格式版本加 1（上表），這要靠改程式的人記得加；自己改 source ETL SQL 不會翻版，可能覆寫同一版本。manifest 的 git commit 只供追溯 |
 | `parameters_training.yaml` | training 設定不參與 dataset IDs | 可能改變 `model_version`，但不重建 dataset |
 
 `parameters_dataset.yaml` 以外的任意設定，除上述 schema payload 外，都不會自動影響 dataset version。
@@ -705,9 +707,10 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 
 | 修改內容 | 版本結果 | 建議 |
 |---|---|---|
-| train ratio、override、分層 keys、train-dev ratio、`train_zero_positive_group_ratio` | 新 train variant，base version 不變 | 完整執行最安全；熟悉切片者可依執行計畫只重建 train 路徑 |
+| train ratio、override、分層 keys、train-dev ratio、`train_zero_positive_group_ratio`、carry columns | 新 train variant，base version 不變 | 完整執行最安全；熟悉切片者可依執行計畫只重建 train 路徑 |
 | `val_`／`test_zero_positive_group_ratio` | 新 base version | 完整執行 dataset；test 的 r 從 0 改成 > 0 時，先讓 `training_eval_predictions` 宣告權重欄（§3.7） |
-| train／val 日期、categorical/drop、carry columns | 新 base version | 完整執行 dataset |
+| train／val 日期、categorical/drop | 新 base version | 完整執行 dataset |
+| 升級到 dataset 產物格式版本加了 1 的框架 | 每個部署都是新 base version | 完整執行 dataset，再重訓（`model_version` 與 HPO 的 `search_id` 都會變）（§7.3） |
 | 只在 `test_snap_dates` 加一個月份 | 版本全部不變 | 執行 dataset 補上新月份，再跑 predict 與該月份的 evaluation；不重訓。步驟見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md) |
 | schema roles 或 item values | 新 base version | 先確認 source tables，再完整執行 dataset |
 | `feature_table` 欄名、型別或順序 | 新 base version | 完整執行 dataset |
@@ -744,7 +747,8 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | categorical 與 drop 衝突 | 同一欄位同時出現在兩份清單 | 明確決定該欄要作為 feature 或排除 |
 | override references unknown item | override key 中的 item 未宣告或拼錯 | 用 sampling editor 重建 key，並對齊 `schema.categorical_values` |
 | 訊息帶 `B19:` | item 清單從 train 時段數出來，同一個 `base_dataset_version` 重跑、清單跟磁碟上的前處理器不同 | 要照新資料建：先讓版本號變動——改 `dataset.train_snap_dates`，或把清單逐一寫進 `schema.categorical_values.<item>`（要列 train、val、test 時段出現過的每一個 item，B1），舊模型照樣讀自己那份前處理器。刪 `data/dataset/<base_dataset_version>/` 重建是最後手段：這個版本上沒重訓的模型（含已 promote 的）會拿錯位的編號評分、不報錯；見 §3.10 |
-| `Node 'fit_preprocessor_metadata' requires input 'preprocessor_on_disk' which is not in the catalog and not produced by any prior node`（evaluation 是 `Node 'prepare_eval_data' …`） | 部署自己的 catalog 是 #379 之前寫的，少了 `preprocessor_on_disk` 條目。這兩個 node 不論 item 清單怎麼寫都把它列為輸入，Runner 開跑前就擋下 | 在該部署的 catalog 加上 `preprocessor_on_disk`，照抄 `conf/base/catalog.yaml` 的同名條目（`type: JSONDataset`、`filepath: data/dataset/${base_dataset_version}/preprocessor.json`、`optional: true`——與 `preprocessor` 是同一個檔） |
+| `(A56) catalog entry 'preprocessor_on_disk' reads '...', but 'preprocessor' writes '...'` | 部署的 catalog 自己寫了 `preprocessor_on_disk`，路徑卻跟 `preprocessor` 不同。這個條目是選用的（第一次跑時檔案還不存在），路徑不對就讀到「沒有」，B19 會以為是第一次跑而不檢查 | 刪掉 `preprocessor_on_disk` 條目：CLI 會從 `preprocessor` 推出它（同一個 filepath、`optional`）。或把它的 `filepath` 改成跟 `preprocessor` 一樣 |
+| `Node 'fit_preprocessor_metadata' requires input 'preprocessor_on_disk' which is not in the catalog and not produced by any prior node`（evaluation 是 `Node 'prepare_eval_data' …`） | 部署的 `preprocessor` 條目不是 `JSONDataset`。只有 `JSONDataset` 能在檔案不存在時回傳「沒有」，所以 CLI 只從它推出 `preprocessor_on_disk` | 把 `preprocessor` 改成 `JSONDataset`（框架寫出的就是 JSON） |
 | `A5: dataset.sample_ratio_overrides references item value(s) … counted from the train months` | item 清單從資料數時，override 鍵裡的 item 不在數出來的清單裡 | 修正鍵，或確認那個 item 在 train 時段的 `sample_pool` 有出現 |
 | weight column unavailable | training 權重維度未進入 model input | 將非 identity 欄位加入 `carry_columns` 後重跑 dataset |
 | `Data consistency check failed`，sample_pool item 不一致 | `sample_pool` 缺少宣告 item，或含有未知 item | 檢查本次日期範圍的 distinct item，修正 source ETL 或 schema |
@@ -767,7 +771,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | `(A45) catalog entry 'training_eval_predictions' does not declare 'zero_positive_group_weight'` | test 的 r > 0，但預測表沒宣告權重欄 | 在該 catalog 條目的 `columns:` 加 `{name: zero_positive_group_weight, type: DOUBLE}`；既有表要先加欄（§3.7） |
 | `B12: feature column 'zero_positive_group_weight' is a model feature` | 特徵表有一欄與框架的權重欄同名，而 val 或 test 的 r > 0 | 在來源 SQL 改名；不是特徵的話列進 `drop_columns` |
 | `Reference 'zero_positive_group_weight' is ambiguous`（在 `build_val_model_input`／`build_test_model_input`） | 同上，但 B12 被跳過（切片執行時資料閘不會跑） | 同上 |
-| `(A55) --only-test-months: train_model_input has partitions under base_dataset_version=... but none under train_variant_id=...` | train 的抽樣設定（`core/versioning.py` 的 `TRAIN_SAMPLING_KEYS`）改了，這個 train 版本還沒建；這個模式不建 train 的表 | 不帶 `--only-test-months` 跑完整的 dataset，或把抽樣改動還原（§7.5） |
+| `(A55) --only-test-months: train_model_input has partitions under base_dataset_version=... but none under train_variant_id=...` | 只影響 train 的設定（`core/versioning.py` 的 `TRAIN_SAMPLING_KEYS`：train 的抽樣設定與 `carry_columns`）改了，這個 train 版本還沒建；這個模式不建 train 的表 | 不帶 `--only-test-months` 跑完整的 dataset，或把那個改動還原（§7.5） |
 | `(A55) --only-test-months: train_model_input has no partition under base_dataset_version=...` | 這個 base 版本從沒建過：第一次跑、base 層的設定或特徵表的 schema 改了，或框架升級時把 dataset 產物格式版本加了 1 | 不帶 `--only-test-months` 跑完整的 dataset。base 換了代表要重訓，已經不是「只加評估月份」（[新增一個評估月份](../operations/user-guides/adding-an-eval-month.md) 步驟 2） |
 | `[train_variant] 目前設定的 train 版本（train_variant_id=...）還沒建` | 這一輪沒把 train 的 model input 都建在目前 variant 底下（切片跳過了 train build，或只建了 `train_model_input` 與 `train_dev_model_input` 其中一張），所以 `completed` 與 `train_variants/latest` 都沒動 | 要讓 training 用目前設定，跑完整的 dataset；否則 training 會讀警告裡寫的那一個 variant（§7.5） |
 | `Unknown node ...` | node 名稱拼錯或 pipeline 已變更 | 先執行 `dataset --list-nodes` 取得目前名稱 |

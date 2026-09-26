@@ -4,7 +4,53 @@ No Spark anywhere in this file, by construction: the module it covers is the
 dataset pipeline's pure half.
 """
 
-from recsys_tfb.pipelines.dataset.steps.feature_columns import compute_feature_columns
+from recsys_tfb.pipelines.dataset.steps.feature_columns import (
+    compute_feature_columns,
+    prepare_model_input_config,
+)
+
+
+class TestPrepareModelInputConfigDefaults:
+    """What a deployment gets when it leaves ``prepare_model_input`` unset.
+
+    Pinned here because no shipped config reaches it: both example configs
+    write ``drop_columns`` out, so an end-to-end run cannot tell a changed
+    default from an unchanged one (ADR-0029 decision 10).
+    """
+
+    # Role names no example uses, and a two-column entity: a default spelled
+    # in example column names would still pass with the bank example's
+    # ``snap_date`` / ``cust_id``.
+    PARAMS = {
+        "schema": {
+            "columns": {
+                "time": "period", "entity": ["account", "branch"],
+                "item": "offer", "label": "converted",
+            },
+        },
+    }
+
+    def test_drop_columns_default_to_the_time_entity_and_label_roles(self):
+        drop, _ = prepare_model_input_config(self.PARAMS)
+
+        # Equality: a column name added beside the roles (the bank example's
+        # apply_start_date / apply_end_date / cust_segment_typ used to be)
+        # fails here as surely as a missing role does.
+        assert drop == ["period", "account", "branch", "converted"]
+
+    def test_categorical_columns_default_to_the_item(self):
+        _, categorical = prepare_model_input_config(self.PARAMS)
+
+        assert categorical == ["offer"]
+
+    def test_a_declared_drop_list_is_used_as_written(self):
+        params = {
+            **self.PARAMS,
+            "dataset": {"prepare_model_input": {"drop_columns": ["period"]}},
+        }
+        drop, _ = prepare_model_input_config(params)
+
+        assert drop == ["period"]
 
 
 class TestComputeFeatureColumnsDrops:

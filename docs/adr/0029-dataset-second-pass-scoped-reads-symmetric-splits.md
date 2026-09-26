@@ -280,6 +280,11 @@ ADR-0008 那一輪的結構搬移在 2026-08-08（PR #176）合併時，`pipelin
 
 **後果**：`carry_columns` 離開 base 的雜湊。設定檔裡寫了 `carry_columns` 的部署（`conf/base` 與 `examples/ad` 都有寫），`base_dataset_version` 會因此變一次；沒寫的部署不會因為這個決定而變。那些部署的 `train_variant_id` 也會變：`carry_columns` 進了 variant 的雜湊。讓每個部署的 base 都翻一次的是決定 15。
 
+> **實作註記（2026-09-26，#464）**：
+> - `TRAIN_SAMPLING_KEYS` 沒改名。它的規則從「train 的抽樣鍵」變成「改了只影響 train／train_dev 的鍵」，這寫在 `core/versioning.py` 的註解裡。改名要動到 ADR-0016、0025 與其他引用它的地方，而且名字不影響行為。
+> - 上文「carry 欄只進 train」還差一種情況：carry 欄同時是 `feature_table` 的欄時，它會影響前處理器。這時 B7 要求它也列進 `drop_columns`，而 `drop_columns` 仍在 base 的雜湊裡，所以 base 照樣會翻。決定成立，只是理由要加這一條。
+> - A55 的第二種訊息原本寫「train 的抽樣設定變了」。現在改 `carry_columns` 也會走到那裡，所以改成「只影響 train 的設定變了」，並點名 `dataset.carry_columns`。
+
 ## 決定 10　刪 `category_mappings` 產物；框架不寫死示例欄名
 
 - **刪 `category_mappings`**（catalog 條目，以及 `fit_preprocessor_metadata` 的第二個輸出）：
@@ -293,6 +298,10 @@ ADR-0008 那一輪的結構搬移在 2026-08-08（PR #176）合併時，`pipelin
   - 今天的預設還寫死了 `apply_start_date`、`apply_end_date`、`cust_segment_typ`，違反 ADR-0017 的框架字彙界線。
   - `conf/base/parameters_dataset.yaml` 已經明寫 `drop_columns`，所以參考設定的行為與版本 ID 都不變。
 - `CONTEXT.md`「前處理器」詞條裡的產物名，在刪檔的同一個 PR 更新。
+
+> **實作註記（2026-09-26，#464）**：
+> - `fit_preprocessor_metadata` 改成只回傳一個 dict。全 repo 的非 node 讀者除了上文列的三個，還有 `notebooks/inspect_artifacts.ipynb`：它原本讀 `category_mappings` 這個 catalog 條目，改成讀 `preprocessor` 的同名鍵。
+> - 銀行示例實跑（main 與本票同一份資料各跑一次 dataset）：`preprocessor.json` 內容雜湊相同，base 目錄只少了 `category_mappings.json`。
 
 ## 決定 11　CLI 裡只有 dataset 懂的邏輯，搬進 dataset 根層的契約模組
 
@@ -373,6 +382,13 @@ CLI 只留通用的部分：寫 manifest、執行 pipeline。
 - 部署的 catalog 寫了，而且路徑相同：照常。
 - 部署的 catalog 寫了，但路徑不同：開跑前報錯，不再默默跳過。
 
+> **實作註記（2026-09-26，#464）**：
+> - 路徑不同的錯誤是新的不變量 A56，判斷寫在 `core/consistency.py` 的 `preprocessor_on_disk_path_errors`。比的是路徑，所以多一個 `./` 或雙斜線算同一個檔。
+> - 推導寫在 `__main__.py` 的 `_derive_preprocessor_on_disk`，由 `_execute_pipeline` 在建 catalog 之前呼叫。**哪條 pipeline 要推導，看它的 DAG 有沒有 node 讀這個條目**，不寫死 dataset 與 evaluation 兩個名字。今天兩者等價，以後多一個讀者也不用改這裡。
+> - **上文沒寫、實作時定的兩件**：
+>   - **只從 `JSONDataset` 推導**。`optional` 是 `JSONDataset` 的參數，別的 dataset 型別不接受它，也不會把「檔案不存在」讀成「沒有」。所以 `preprocessor` 是別的型別時不推導，Runner 會照舊報「缺輸入」。兩份示例都是 `JSONDataset`，會走到這條的只有測試用的 catalog。
+>   - **檢查的時機比 A55 晚**：Spark 已經啟動，dataset 的 manifest 草稿也已經寫了（`status: running`）。「開跑前」在這裡的意思是「任何 node 跑之前」，`--dry-run`、`--list-nodes` 也會擋。草稿沒有程式拿來做決定（決定 12 的理由），留著無害。換成更早的檢查點，要在 dataset 與 evaluation 兩個指令各加一次，推導本身還是得在 `_execute_pipeline` 做，所以沒有換。
+
 ## 決定 14　`pipeline-node-design.md` 加四條規則，登記一筆例外
 
 每一條規則都要照該文件的體例寫四件事：規則、不照做會怎樣、為什麼不是另一種做法、誰擋得住。實際的 code 對照組在實作完成之後再從 repo 撈。
@@ -406,6 +422,20 @@ CLI 只留通用的部分：寫 manifest、執行 pipeline。
 - 寫死版本雜湊值的測試與 `examples/ad` 的 baseline 版本號會跟著變，這是預期中的變化。
 
 **為什麼不是「接受同一個 ID 下內容改變」**：版本 ID 的用處是「同一個 ID 就是同一份資料」。讓它在部分部署失效，比多重建一次更難察覺——test 月份新舊混在一起時，沒有任何東西會報錯。
+
+> **實作註記（2026-09-26，#464）**：
+> - 常數叫 `DATASET_ARTIFACT_FORMAT_VERSION`，值是 1，放進雜湊時的鍵名是 `dataset_artifact_format_version`。上文的「加 1」就是從「沒有這個鍵」到 1。以後什麼時候要加 1，寫在 `core/versioning.py` 的模組 docstring。
+> - **更正上文「程式改了 dataset 的落地內容、設定卻沒動時」的範圍**（審查的「本份哪裡寫錯」視角查出）：
+>   - 要逐個部署問，不是逐個改動問。新增一個設定鍵、預設值又跟舊行為不同時，改動本身「動了設定」，但沒寫那個鍵的部署，雜湊輸入一個字都沒變，內容卻變了。這跟上文說決定 9 蓋不住的是同一種洞。
+>   - 「dataset 的程式」不只 `pipelines/dataset/`，還包括它 import 的模組。例如多欄 item 的分隔字元 `ITEM_SEPARATOR` 在 `core/schema.py`，改它會改掉 keys、model_input 與 `preprocessor.json`。
+>   - 兩件都寫進了 `core/versioning.py` 的模組 docstring。
+> - 寫死雜湊值的測試有四個：
+>   - 三個照預期重新記錄，理由寫在各自的 docstring：
+>     - `test_versioning.py::TestSplitUnitKeysVersionRouting::test_a_config_declaring_neither_key_still_hashes_to_the_old_answer`
+>     - `test_versioning.py::TestCandidateFeatureTableFingerprint::test_without_one_the_id_is_the_one_main_computed`
+>     - `test_date_ranges.py::TestLoaderExpandsRanges::test_a_range_hashes_to_the_version_its_list_had_before_ranges_existed`
+>   - 第四個 `test_versioning.py::TestCandidateFeatureTableFingerprint::test_declaring_one_moves_the_id` 用 `!=` 比一個寫死的舊值。舊值重新記錄之後，這條斷言不論候選表的 fingerprint 有沒有進雜湊都會過。改成跟「沒宣告候選表」當場算出的 ID 比，不再寫死。
+>   - 沒變的寫死值：`test_a_config_declaring_neither_key_still_hashes_to_the_old_answer` 與 `test_date_ranges.py` 那一個另外寫死了 `train_variant_id`（`913be727`），它們的設定沒有 `carry_columns`；`test_without_one_the_id_is_the_one_main_computed` 寫死的 feature table fingerprint（`88252218`）只看特徵表的欄，常數不進它的雜湊。
 
 ---
 

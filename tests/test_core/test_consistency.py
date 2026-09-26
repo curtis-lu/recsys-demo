@@ -5125,17 +5125,53 @@ class TestTrainVersionLandedA55:
         assert "first run" in err
         assert "feature table" in err
         assert "format version" in err
-        assert "sampling settings changed" not in err
+        assert "a train-only setting changed" not in err
 
     def test_the_base_without_this_variant_means_the_sampling_changed(self):
         [err] = _a55(base_landed=True, variant_landed=False)
         assert "A55" in err
         assert "v1111111" in err
-        assert "train sampling settings changed" in err
+        assert "a train-only setting changed" in err
         assert "TRAIN_SAMPLING_KEYS" in err
+        # ADR-0029 decision 9 registered it; the message names both kinds.
+        assert "dataset.carry_columns" in err
         assert "never been built" not in err
 
     def test_both_ask_for_the_full_pipeline(self):
         for base_landed in (False, True):
             [err] = _a55(base_landed=base_landed, variant_landed=False)
             assert "without --only-test-months" in err
+
+
+# =============================================================================
+# A56 — preprocessor_on_disk must name preprocessor's file
+#       (wired where the CLI builds the catalog; ADR-0029 decision 13)
+# =============================================================================
+
+from recsys_tfb.core.consistency import preprocessor_on_disk_path_errors
+
+_PREPROCESSOR = "data/dataset/${base_dataset_version}/preprocessor.json"
+
+
+class TestPreprocessorOnDiskPathA56:
+    def test_the_same_file_passes(self):
+        assert preprocessor_on_disk_path_errors(_PREPROCESSOR, _PREPROCESSOR) == []
+
+    def test_the_same_file_spelled_differently_passes(self):
+        """A redundant ``./`` or doubled slash names the same file; refusing it
+        would stop a run over nothing."""
+        assert preprocessor_on_disk_path_errors(
+            _PREPROCESSOR, "data/./dataset//${base_dataset_version}/preprocessor.json",
+        ) == []
+
+    def test_another_file_is_an_error_naming_both_paths(self):
+        other = "data/dataset/${base_dataset_version}/preprocessor_old.json"
+
+        [err] = preprocessor_on_disk_path_errors(_PREPROCESSOR, other)
+
+        assert err.startswith("(A56)")
+        assert _PREPROCESSOR in err
+        assert other in err
+        # What the wrong path costs, and the fix that cannot go wrong again.
+        assert "B19" in err
+        assert "remove" in err.lower()

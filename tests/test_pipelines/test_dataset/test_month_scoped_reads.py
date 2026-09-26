@@ -373,7 +373,7 @@ def _feature_table(spark, time_type):
 class TestAStringTimeColumnReadsLikeADateOne:
 
     def test_the_fit_reads_the_train_months(self, spark, time_type):
-        preprocessor, _ = fit_preprocessor_metadata(
+        preprocessor = fit_preprocessor_metadata(
             _feature_table(spark, time_type), _params(),
         )
 

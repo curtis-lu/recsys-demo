@@ -31,6 +31,7 @@ from recsys_tfb.core.consistency import (
     post_training_snap_date_errors,
     prediction_quality_param_errors,
     prediction_quality_population_errors,
+    preprocessor_on_disk_path_errors,
     baseline_rebuild_dates_absent_errors,
     baseline_score_errors,
     query_filter_param_errors,
@@ -332,6 +333,48 @@ def _resolve_catalog(config: ConfigLoader, params: dict, runtime_params: dict):
     substitution_params = {**params, **runtime_params}
     return substitution_params, config.get_catalog_config(
         runtime_params=substitution_params
+    )
+
+
+#: The second catalog name for ``preprocessor``'s file. A node may not read and
+#: write one name (architecture constraint A6), so the fit reads the file it is
+#: about to overwrite under this one.
+_PREPROCESSOR_ON_DISK = "preprocessor_on_disk"
+
+
+def _derive_preprocessor_on_disk(catalog_config: dict) -> list[str]:
+    """Give ``preprocessor_on_disk`` the ``preprocessor`` entry's file (ADR-0029 decision 13).
+
+    ``fit_preprocessor_metadata`` reads the preprocessor it is about to
+    overwrite under this name (B19), and evaluation's ``prepare_eval_data``
+    reads the evaluated model's item list through it. The entry has to be
+    optional — the file does not exist before a version's first run — so a
+    hand-written path to anywhere else would load as ``None`` and B19 would
+    check nothing. Derived, the path cannot be wrong.
+
+    - left out (the shipped catalogs): added in place, a copy of
+      ``preprocessor`` marked ``optional``;
+    - written, on the same file: used as written;
+    - written, on another file: A56's errors are returned and the entry is
+      left alone — the caller stops the run;
+    - left out, and nothing to derive it from — no ``preprocessor`` entry, or
+      one that is not a ``JSONDataset`` (the only type that takes
+      ``optional``; any other would fail every first run): nothing is added
+      and no error returned; the Runner reports the missing input as it would
+      any other.
+
+    Mutates ``catalog_config``, like :func:`inject_cache_source_tables`.
+    """
+    preprocessor = catalog_config.get("preprocessor")
+    if preprocessor is None:
+        return []
+    written = catalog_config.get(_PREPROCESSOR_ON_DISK)
+    if written is None:
+        if preprocessor.get("type") == "JSONDataset":
+            catalog_config[_PREPROCESSOR_ON_DISK] = {**preprocessor, "optional": True}
+        return []
+    return preprocessor_on_disk_path_errors(
+        preprocessor["filepath"], written.get("filepath", ""),
     )
 
 
@@ -765,6 +808,17 @@ def _execute_pipeline(
     # need a parallel parameters yaml mapping. Catalog.yaml's HiveTableDataset
     # `table` field is the single source of truth for cache table resolution.
     inject_cache_source_tables(substitution_params, catalog_config)
+
+    # (A56) Asked of the DAG rather than of the pipeline's name: the entry is
+    # derived exactly when a node reads it (dataset's fit, evaluation's
+    # prepare_eval_data). Before the catalog is built and before --dry-run /
+    # --list-nodes return, so a path to another file stops every kind of run.
+    if any(_PREPROCESSOR_ON_DISK in node.inputs for node in pipe.nodes):
+        on_disk_errors = _derive_preprocessor_on_disk(catalog_config)
+        if on_disk_errors:
+            for line in on_disk_errors:
+                logger.error(line)
+            raise typer.Exit(code=1)
 
     # For inference: when no explicit --model-version is given, the model
     # artifact should be read via the "best" symlink; swap the model filepath.

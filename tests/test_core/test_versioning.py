@@ -256,6 +256,39 @@ class TestComputeBaseDatasetVersion:
         assert legacy != with_fp
 
 
+class TestDatasetArtifactFormatVersion:
+    """ADR-0029 decision 15: code that changes what the dataset lands, with no
+    config change, raises this constant — and that must move base alone."""
+
+    def test_raising_it_moves_the_base_version(self, monkeypatch):
+        import recsys_tfb.core.versioning as versioning
+
+        before = compute_base_dataset_version(_base_params(), _sample_schema())
+        monkeypatch.setattr(
+            versioning, "DATASET_ARTIFACT_FORMAT_VERSION",
+            versioning.DATASET_ARTIFACT_FORMAT_VERSION + 1,
+        )
+        assert compute_base_dataset_version(_base_params(), _sample_schema()) != before
+
+    def test_raising_it_leaves_the_train_variant_alone(self, monkeypatch):
+        """The variant's directory is under base, so it moves with base on disk;
+        its own hash does not need to (decision 15 changes no variant key)."""
+        import recsys_tfb.core.versioning as versioning
+
+        before = compute_train_variant_id(_base_params())
+        monkeypatch.setattr(
+            versioning, "DATASET_ARTIFACT_FORMAT_VERSION",
+            versioning.DATASET_ARTIFACT_FORMAT_VERSION + 1,
+        )
+        assert compute_train_variant_id(_base_params()) == before
+
+    def test_it_is_a_positive_int(self):
+        from recsys_tfb.core.versioning import DATASET_ARTIFACT_FORMAT_VERSION
+
+        assert type(DATASET_ARTIFACT_FORMAT_VERSION) is int
+        assert DATASET_ARTIFACT_FORMAT_VERSION >= 1
+
+
 class TestComputeTrainVariantId:
     def test_returns_8_char_hex(self):
         assert _HEX8_RE.match(compute_train_variant_id(_base_params()))
@@ -717,15 +750,27 @@ class TestWeightingVersioning:
             d["dataset"]["carry_columns"] = carry
         return d
 
-    def test_carry_columns_busts_base_dataset_version(self):
-        v1 = compute_base_dataset_version(self._ds(carry=["cust_segment_typ"]), {})
-        v2 = compute_base_dataset_version(
-            self._ds(carry=["cust_segment_typ", "channel_preference"]), {})
-        assert v1 != v2
+    def test_changing_only_carry_columns_moves_only_the_train_variant(self):
+        """ADR-0029 decision 9: the carry columns land in train / train_dev only.
 
-    def test_carry_columns_does_not_bust_train_variant(self):
-        assert compute_train_variant_id(self._ds(carry=["cust_segment_typ"])) == \
-               compute_train_variant_id(self._ds(carry=["x", "y"]))
+        val / test keys select the identity alone (ADR-0004), so nothing under
+        base — preprocessor, val / test model_input — has a carry column to
+        change. Both halves in one test: moving the key to the variant without
+        taking it out of base would pass a variant-only assertion.
+        """
+        before = self._ds(carry=["cust_segment_typ"])
+        after = self._ds(carry=["cust_segment_typ", "channel_preference"])
+
+        assert compute_base_dataset_version(before, {}) == \
+            compute_base_dataset_version(after, {})
+        assert compute_train_variant_id(before) != compute_train_variant_id(after)
+
+    def test_declaring_carry_columns_moves_only_the_train_variant(self):
+        """The same for a deployment that writes the key for the first time."""
+        assert compute_base_dataset_version(self._ds(), {}) == \
+            compute_base_dataset_version(self._ds(carry=["x"]), {})
+        assert compute_train_variant_id(self._ds()) != \
+            compute_train_variant_id(self._ds(carry=["x"]))
 
     def test_sample_weights_busts_model_version_not_train_variant(self):
         p1 = {"training": {"algorithm": "lightgbm", "sample_weights": {}},
@@ -897,27 +942,34 @@ class TestSplitUnitKeysVersionRouting:
         is a decision to take deliberately (and to write into the release
         note), never a number to re-record until the test passes again.
 
-        ``base_dataset_version`` was re-recorded exactly once, by #414, and
-        that is the deliberate case the paragraph above describes. Which of
-        the four deleted keys actually moved it is worth stating, because
-        "four keys went, so of course it moved" is not the reason:
-        ``calibration_sample_ratio`` / ``_overrides`` were sampling keys and
-        were stripped before hashing, so deleting them moves nothing. It is
-        ``enable_calibration`` and ``calibration_snap_dates`` that were in the
-        payload — and this fixture only ever spelled the latter, so
-        ``0675afb8`` -> ``d108b398`` is that one key leaving. A real conf
-        spells both. Either way the ID moves for everyone, which is what the
-        upgrade note covers (rebuild the dataset, retrain, re-promote by
-        hand).
+        ``base_dataset_version`` has been re-recorded twice, each time the
+        deliberate case the paragraph above describes:
 
-        ``train_variant_id`` is NOT re-recorded and must not be: the
-        train-sampling subset is untouched by #414, so ADR-0016's zero-
-        migration claim still has its original evidence. If that line ever
-        goes red, the two keys this class is about really did move.
+        - #414: ``0675afb8`` -> ``d108b398``. Which of the four deleted keys
+          moved it is worth stating, because "four keys went, so of course it
+          moved" is not the reason: ``calibration_sample_ratio`` /
+          ``_overrides`` were sampling keys and were stripped before hashing,
+          so deleting them moves nothing. It is ``enable_calibration`` and
+          ``calibration_snap_dates`` that were in the payload — and this
+          fixture only ever spelled the latter, so the move is that one key
+          leaving. A real conf spells both.
+        - #464: ``d108b398`` -> ``a27de967``, the payload gaining
+          ``DATASET_ARTIFACT_FORMAT_VERSION`` (ADR-0029 decision 15). No key
+          of this fixture moved; the constant is there precisely to move every
+          deployment's ID once.
+
+        Either way the ID moves for everyone, which is what the upgrade note
+        covers (rebuild the dataset, retrain, re-promote by hand).
+
+        ``train_variant_id`` is NOT re-recorded and must not be: neither
+        change touched the train-sampling subset this fixture spells (#464
+        registered ``carry_columns``, which it does not spell), so ADR-0016's
+        zero-migration claim still has its original evidence. If that line
+        ever goes red, the two keys this class is about really did move.
         """
         params = _base_params()
 
-        assert compute_base_dataset_version(params, _sample_schema()) == "d108b398"
+        assert compute_base_dataset_version(params, _sample_schema()) == "a27de967"
         assert compute_train_variant_id(params) == "913be727"
 
     def test_neither_key_reaches_the_schema_hash_payload(self):
@@ -1017,15 +1069,24 @@ class TestCandidateFeatureTableFingerprint:
         would hold however the payload is built, because leaving the keyword out
         is the very path under test. Only a value carried over from before the
         change says nothing moved for an existing deployment.
+
+        Re-recorded once, by #464 (``1f8b6d8f`` -> ``b1024427``): the payload
+        gained ``DATASET_ARTIFACT_FORMAT_VERSION``, which moves every
+        deployment's ID on purpose (ADR-0029 decision 15). The feature-table
+        fingerprint is not in that payload change and stays pinned as it was.
         """
         fp = compute_feature_table_fingerprint(self._FEATURE_TABLE)
 
         assert fp == "88252218"
         assert compute_base_dataset_version(
             _base_params(), _sample_schema(), feature_table_fingerprint=fp,
-        ) == "1f8b6d8f"
+        ) == "b1024427"
 
     def test_declaring_one_moves_the_id(self):
+        """Compared with the undeclared ID computed now, not with a literal:
+        this test used to spell the pinned value above, and when #464 re-pinned
+        that one, the literal here went stale and the ``!=`` held whatever the
+        candidate fingerprint did."""
         fp = compute_feature_table_fingerprint(self._FEATURE_TABLE)
         candidate_fp = compute_feature_table_fingerprint(self._CANDIDATE_TABLE)
 
@@ -1033,7 +1094,9 @@ class TestCandidateFeatureTableFingerprint:
             _base_params(), _sample_schema(),
             feature_table_fingerprint=fp,
             candidate_feature_table_fingerprint=candidate_fp,
-        ) != "1f8b6d8f"
+        ) != compute_base_dataset_version(
+            _base_params(), _sample_schema(), feature_table_fingerprint=fp,
+        )
 
     def test_its_schema_moves_the_id(self):
         """Two candidate tables that differ by one column's type are two datasets."""

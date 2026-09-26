@@ -94,7 +94,7 @@ _Avoid_: 時間窗、lookback（那是 baseline 往回看的月數）
 某個 split 組好、可以直接餵給模型的資料列。
 
 **前處理器**:
-在 train 時段上 fit 出來的特徵清單與類別編號表（產物 `preprocessor`、`category_mappings`）；training 與推論都重用同一份。
+在 train 時段上 fit 出來的特徵清單與類別編號表（產物 `preprocessor`，一個檔 `preprocessor.json`）；training 與推論都重用同一份。
 
 **類別欄**:
 值是一組離散標籤的特徵欄；前處理器把每個標籤換成它在類別編號表裡的位置。能用的型別見不變量 B5（`src/recsys_tfb/core/consistency.py`）。
@@ -116,10 +116,13 @@ _Avoid_: 產品清單；也不要和 `inference.products`（逐一列出時，�
 dataset 產物的版本身分。精確定義：`src/recsys_tfb/core/versioning.py` 模組 docstring。
 
 **train_variant_id**:
-train 與 train_dev 抽樣設定的版本身分，位在 base_dataset_version 底下，是唯一的 variant 層（#411 移除了 calibration 那一層，`calibration_variant_id` 已不存在）。精確定義同上。
+只影響 train 與 train_dev 的設定（抽樣、切分、`carry_columns`）的版本身分，位在 base_dataset_version 底下，是唯一的 variant 層（#411 移除了 calibration 那一層，`calibration_variant_id` 已不存在）。精確定義同上。
 
 **model_version**:
 模型的版本身分。精確定義同上。
+
+**dataset 產物格式版本**:
+框架自己的一個整數，進 base_dataset_version 的雜湊。程式改了 dataset 落地的內容、設定卻沒動時加 1，讓每個部署的版本身分都換一次。精確定義：`src/recsys_tfb/core/versioning.py` 的 `DATASET_ARTIFACT_FORMAT_VERSION` 與模組 docstring。
 
 **不變量代號**:
 一致性規則的編號：A 系列檢查設定，B 系列檢查資料。精確定義與完整清單：`src/recsys_tfb/core/consistency.py` 模組 docstring 的 Invariant legend。

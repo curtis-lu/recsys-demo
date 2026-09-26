@@ -45,7 +45,8 @@ class TestDatasetPipeline:
             # (ADR-0029 decision 2).
             "only_test_months",
             # The preprocessor file already on disk, read by the fit before it
-            # overwrites it (#379, B19) — an optional catalog entry.
+            # overwrites it (#379, B19) — an optional entry the CLI derives
+            # from `preprocessor` (ADR-0029 decision 13).
             "preprocessor_on_disk",
         }
 
@@ -54,7 +55,7 @@ class TestDatasetPipeline:
         expected = {
             "train_model_input", "train_dev_model_input",
             "val_model_input", "test_model_input",
-            "preprocessor", "category_mappings",
+            "preprocessor",
             "preprocessed_feature_table", "numeric_precision_report",
             "model_input_grain_report",
             "sample_keys", "train_keys", "train_dev_keys", "val_keys", "test_keys",

@@ -756,7 +756,7 @@ def fit_preprocessor_metadata(
     candidate_feature_table: DataFrame | None = None,
     sample_pool: DataFrame | None = None,
     preprocessor_on_disk: dict | None = None,
-) -> tuple[dict, dict]:
+) -> dict:
     """Fit the preprocessor: each categorical's vocabulary, and what a feature is.
 
     Two feature tables can supply features: the entity-level ``feature_table``
@@ -784,8 +784,8 @@ def fit_preprocessor_metadata(
     Only small metadata (distinct category values) reaches the driver.
 
     Returns:
-        (preprocessor_metadata, category_mappings) — the first matching
-        ``PreprocessorMetadata``'s four keys.
+        The preprocessor metadata — ``PreprocessorMetadata``'s four keys,
+        landed as ``preprocessor.json``.
     """
     schema = get_schema(parameters)
     drop_cols, categorical_cols = prepare_model_input_config(parameters)
@@ -944,7 +944,7 @@ def fit_preprocessor_metadata(
         "Fit preprocessor (Spark): %d features, %d categorical, %d drop",
         len(feature_columns), len(categorical_cols), len(drop_cols),
     )
-    return preprocessor_metadata, category_mappings
+    return preprocessor_metadata
 
 
 def apply_preprocessor_to_features(
