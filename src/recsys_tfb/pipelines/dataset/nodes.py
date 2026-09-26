@@ -23,9 +23,9 @@ float32 cast all return a plan in microseconds, and the computation they
 describe runs later, inside ``catalog.save()``. Timing such a block reports a
 guaranteed ~0.00s that reads exactly like "this step was fast", and mixing the
 two kinds under one event name leaves nobody able to tell which zero means
-which. The blocks that remain wrapped are the ones that collect to the driver:
-the vocabulary fit, the unknown-encoding count, and the two month-presence
-pre-checks. Where a node's *time* actually goes is a question for the Runner's
+which. The blocks that remain wrapped are the ones that collect to the driver
+— the vocabulary fit, the unknown-encoding count, the month-presence
+pre-checks and the zero-positive-group counts among them. Where a node's *time* actually goes is a question for the Runner's
 ``load``/``func``/``save`` split (``core/runner.py``), not for this module.
 """
 

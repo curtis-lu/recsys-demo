@@ -84,3 +84,7 @@ preset 只寫兩個節點名這件事，需要一整段關於 producer map 的�
 ### 修訂（2026-09-25，ADR-0029）
 
 [ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 4 會拿掉 `filter_test_model_input` 這個 node（test 的丟組搬到 keys 上），並把新的 test keys 篩選 node 與 `validate_model_input_grain` 加進 `ONLY_TEST_MONTHS_NODES`。本份以 `filter_test_model_input` 當終點與防漂移測試錨點的敘述，屆時要換成新的 test 鏈終點。#461（2026-09-25）已實作：新 node 叫 `filter_test_keys`，test 鏈的終點與防漂移測試的錨點改成 `build_test_model_input`。另外決定 12：這個模式開跑前會向 metastore 確認目前的 train 版本已經有分區，而且跑完之後只在該 variant 有分區時才更新 `train_variants/latest`。#463（2026-09-25）已實作：開跑前的檢查是不變量 A55；跑完之後的規則對所有執行都成立（不只這個模式），要 train 的 model input 都在該 variant 底下有分區（`train_dev_ratio: 0` 時只看 `train_model_input`）。
+
+### 修訂（2026-09-26，#467）
+
+上文的 `ONLY_TEST_MONTHS_NODES` 是 5 個，今天是 7 個。上一段修訂記了 ADR-0029 的兩個改動（`filter_test_model_input` 換成 `filter_test_keys`、加進 `validate_model_input_grain`），漏了更早的一個：數值精度閘 `validate_numeric_precision` 在 #281（`66618bf8`）加進這份清單，當時沒有回頭修訂本份。清單的唯一真實來源是 `pipelines/dataset/pipeline.py` 的 `ONLY_TEST_MONTHS_NODES`。

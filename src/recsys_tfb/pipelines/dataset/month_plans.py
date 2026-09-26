@@ -36,7 +36,10 @@ def collect_dataset_snap_dates(parameters: dict) -> list[pd.Timestamp]:
     """Return sorted union of train/val/test snap_dates as pd.Timestamps.
 
     Single source of truth for "which snap_dates does the dataset pipeline use".
-    Used by apply_preprocessor_to_features (all splits) — fit_preprocessor_metadata
+    Used twice: as the ``preprocessed_feature_table`` month plan's configured
+    months (below), which are the months apply_preprocessor_to_features
+    encodes; and by validate_data_consistency, the Layer-2 data gate, whose
+    item values are judged over these months. fit_preprocessor_metadata
     deliberately uses only train_snap_dates to prevent val/test leakage into the
     category-mapping fit.
     """
@@ -167,7 +170,7 @@ def _test_snap_dates(parameters: dict) -> list:
 #: The per-artifact answer to "which months does the config ask for", and the
 #: only place a new incremental artifact has to be registered. The two test
 #: artifacts cover the test months only; ``preprocessed_feature_table`` feeds
-#: every split, so it covers the union (train ∪ cal ∪ val ∪ test) — and unlike
+#: every split, so it covers the union (train ∪ val ∪ test) — and unlike
 #: the other two it is fail-loud about ``train_snap_dates`` being absent.
 #:
 #: Element type is deliberately loose: config gives ``str``,

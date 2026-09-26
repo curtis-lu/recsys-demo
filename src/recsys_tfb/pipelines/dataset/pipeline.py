@@ -101,8 +101,8 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
     )
 
     nodes = [
-        # --- Layer-2 data gate (B1 item coverage + B5 categorical dtype
-        #     + B6 non-numeric feature column + B7 carry/feature collision):
+        # --- Layer-2 data gate (which invariants it runs: the docstring of
+        #     validate_data_consistency):
         # runs first (insertion-order Kahn seed), side-effect only
         # (outputs=None), fail-fast before any sampling / preprocessing ---
         Node(
@@ -228,10 +228,12 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         ),
         # --- B8 precision gate: the months just encoded must survive the
         #     declared numeric storage type. Declared HERE rather than anywhere
-        #     later in this list because list position is what orders it: it and
-        #     the build nodes below become runnable at the same
-        #     moment (they share `preprocessed_feature_table` as their last unmet
-        #     input), and Kahn queues them in declaration order
+        #     later in this list because list position is what orders it: every
+        #     build node below also reads `preprocessed_feature_table`, the
+        #     gate's last unmet input, so none becomes runnable before the gate.
+        #     The builds that become runnable at the same moment (the ones for
+        #     which it is the last unmet input too; the others still wait on
+        #     their own keys) are queued in declaration order
         #     (`core/pipeline.py`). Moving this entry below them would let a
         #     narrowed value land before the gate that exists to stop it.
         #

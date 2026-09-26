@@ -313,11 +313,12 @@ class TestMonthPlanWiring:
     def test_the_precision_gate_runs_before_every_model_input_build(self):
         """Declaration order is what orders it, so a test has to hold the order.
 
-        The gate and the build nodes share
-        ``preprocessed_feature_table`` as their last unmet input, so Kahn queues
-        them together and breaks the tie by list position
-        (``core/pipeline.py``). Nothing in the DAG forces the gate first — it
-        produces no artifact anyone consumes — so moving its entry down the list
+        Every build also reads ``preprocessed_feature_table``, the gate's last
+        unmet input, so no build becomes runnable before the gate; the builds
+        that become runnable at the same moment are queued with it, and Kahn
+        breaks the tie by list position (``core/pipeline.py``). Nothing in the
+        DAG forces the gate first — it produces no artifact anyone consumes — so
+        moving its entry down the list
         in ``pipeline.py`` would silently let a narrowed value land before the
         check that exists to stop it. That edit passes every other test here.
         """

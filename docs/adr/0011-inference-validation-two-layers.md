@@ -61,7 +61,7 @@ Pipeline completed in 11.09s
 
 ### repo 已經認得這個故障模式，但只守了一半
 
-`require_item_is_a_feature` 的 docstring（`pipelines/dataset/steps/feature_columns.py:109`）逐字
+`require_item_is_a_feature` 的 docstring（`pipelines/dataset/steps/feature_columns.py`）逐字
 寫著：漏掉 item 會「silently makes X miss the item dimension, **collapses predictions to a
 constant within each query group**, and produces a flat mAP across every HPO trial」。那條
 backstop 守在 **config 層**——它擋得住「設定漏了 item」，擋不住「設定對，但 pipeline 沒把正確的

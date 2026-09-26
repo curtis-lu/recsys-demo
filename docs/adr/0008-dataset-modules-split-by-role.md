@@ -482,3 +482,9 @@ processed／skipped 月份清單，與重構前的 baseline 逐字相同**。
 
 - 上文記的「`feature_table` 同時被正規化與不正規化的月份過濾」，以及「哪一邊才對還沒有人判定」：[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 3 判定為先轉日期的那一邊（`months_filter_as_date`），`restrict_to_months` 與 `restrict_to_months_or_all` 刪除。
 - 本份之後 `nodes.py` 從 671 行長到 1733 行。第二輪整理見 ADR-0029；本份的兩條判準與目錄形狀不變，`nodes.py` 維持單一檔案（ADR-0029 決定 8）。
+
+### 修訂（2026-09-26，#467）
+
+- 上文的目錄形狀寫「`nodes.py` 11 個 node 函式」，`steps/` 列五個模組。[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 做完之後：`nodes.py` 有 15 個 node 函式，在 `pipeline.py` 註冊成 17 個 node（`build_train_model_input`、`filter_train_keys` 各註冊兩次，給 train 與 train_dev）；另有三個 build 共用的 `build_model_input`，它不是 node，登記在 `docs/agents/pipeline-node-design.md` 的〈已登記的例外〉。`steps/` 多了三個模組：`precision.py`（數值精度閘的報告，#281 起），`footer_facts.py` 與 `model_input_grain.py`（ADR-0029 決定 7）。本份的判準與目錄形狀不變。
+- 上一段修訂寫的 1733 行，是 ADR-0029 動工前的數字；做完是 1807 行（見 ADR-0029 決定 7 的實作註記）。
+- 上文兩處寫「今日只剩 `evaluation/nodes_spark.py`」：evaluation 已照同一套判準重整成 `nodes.py` ＋ `steps/`（[ADR-0019](0019-evaluation-modules-split-by-role.md)），`nodes_spark.py` 已不存在。「dataset 暫時與其他 pipeline 不對稱」的狀態已經結束。

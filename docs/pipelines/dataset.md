@@ -251,7 +251,7 @@ model input 寫出前，**所有數值 feature 欄**（decimal／double／float�
 `feature_columns` 之外的欄根本不會寫進 `preprocessed_feature_table`。這正是同時
 `carry` 又 `drop` 一個欄能運作的原因：`feature_table` 那一份被刪掉，只剩 keys 帶進來
 的那一份，join 時就不會撞名。候選層級特徵表不落地，但結果相同：`build_model_input`
-從它只選 identity 欄與落在 `feature_columns` 裡的欄（`candidate_frame_columns`），被
+從它只選 identity 欄與落在 `feature_columns` 裡的欄（`encoded_frame_columns`），被
 drop 的欄同樣不會被帶進 join。
 
 各 split 最後拿到哪些欄，是一條推導規則而不是逐 split 的清單：
@@ -577,7 +577,7 @@ Hive 的實際 table 名稱與 partition 欄位以 `conf/base/catalog.yaml` 為�
 
 執行完成後至少確認：
 
-1. log 中顯示的三層 version ID 符合預期。
+1. log 中顯示的兩層 version ID（`base_dataset_version`、`train_variant_id`）符合預期。
 2. `preprocessor.json` 的 `feature_columns` 包含 item，且欄位順序合理。
 3. `preprocessor.json` 的 `category_mappings` 包含所有 categorical columns。
 4. train 與 train-dev 都有資料，且同一 entity 不會同時出現在兩者。
@@ -718,7 +718,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | source table 資料值回補，但 schema 不變 | version ID 可能不變 | 完整重跑受影響版本，避免沿用舊 partition |
 | 全域 `random_seed` | 目前 version ID 不會自動改變 | 視為抽樣版本變更，清楚記錄並完整重建相關產物 |
 
-三層版本描述的是產物身分與失效範圍，不是自動增量執行器。未帶任何**模式**或**切片**旗標時（模式＝`--only-test-months`，切片＝`--from-node`／`--only-node`），dataset 仍會執行完整 DAG，並覆寫相同版本 partitions。
+這些版本 ID（dataset 的兩層，加上 training 的 `model_version`）描述的是產物身分與失效範圍，不是自動增量執行器。未帶任何**模式**或**切片**旗標時（模式＝`--only-test-months`，切片＝`--from-node`／`--only-node`），dataset 仍會執行完整 DAG，並覆寫相同版本 partitions。
 
 任何 dataset ID 改變後，training 使用該組新版本時，`model_version` 也會隨之改變。`base_dataset_version` 翻新時，即使 `train_variant_id` 的 8 碼字串相同，它也會位於新的 base 目錄／partition 之下，兩者仍是不同的有效資料組合。
 
@@ -795,7 +795,7 @@ B6 擋下來時，錯誤訊息會**逐欄點名**（`feature column 'cust_segmen
 
 ## 9. 限制與注意事項
 
-- train/train-dev 切分與 val entity sampling 目前只使用 `schema.entity` 的第一個欄位；使用複合 entity 時需確認這符合業務語意。
+- train/train-dev 切分與 val 抽樣的單位，預設是完整的 `schema.entity`（所有欄一起），不是第一個欄位。多欄 entity 下，洩漏單位若比 query group 粗，要自己在 `train_split_keys`／`val_sample_keys` 宣告較粗的子集（§3.1、§3.3）；框架從資料看不出來。
 - 日期只檢查集合互斥，不檢查時間順序與 label 觀察窗。
 - `random_seed` 會改變抽樣結果，但目前未納入 dataset 版本 hash。
 - 版本 hash 包含 `feature_table` schema fingerprint（宣告了候選層級特徵表時也包含它的），不包含 source rows 的資料值或 source ETL SQL。

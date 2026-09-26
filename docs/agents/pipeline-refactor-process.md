@@ -4,7 +4,7 @@
 
 **與 [`pipeline-node-design.md`](pipeline-node-design.md) 的分工**：那份回答「重整成什麼形狀」，是形狀判準；本檔回答「怎麼把它跑完」，是流程判準。照著形狀判準改、卻用錯流程，代價是同一件事做兩遍——dataset 就是這樣把結構搬移做了兩遍。
 
-**證據來源**：dataset（PR #162–#180）與 inference（PR #184–#198）兩輪重構的實際軌跡，每條規則都附得出證據的 PR 或 commit。**還沒依形狀判準重整過的只剩 evaluation**（training 已於 #222／#235／#199 那一輪重整），所以這份下一輪還會再用。
+**證據來源**：dataset（PR #162–#180）與 inference（PR #184–#198）兩輪重構的實際軌跡，每條規則都附得出證據的 PR 或 commit；規則 8 另有兩段補自 dataset 的第二輪（[ADR-0029](../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md)，PR #468–#475）。四條 pipeline 現在都依形狀判準重整過了（training 在 #222／#235／#199 那一輪，evaluation 見 [ADR-0019](../adr/0019-evaluation-modules-split-by-role.md)），下一次重整任何一條時照樣適用。
 
 > **軌跡在哪**：GitHub 上幾乎沒有 review comment。審查全部是本機 `/code-review` 雙軸 fresh-context subagent，證據在 **PR body** 與 **`fix:`／`review:` 收尾 commit** 的訊息裡（形如「收兩軸審查抓到的 N 件事——最重的是 X」）。
 
@@ -156,6 +156,10 @@ inference 的順序是行為全部先（#191–#196）→ 純結構最後（#198
 | **成本驗收量次數不量秒數** | 讀 log | 合成資料的 wall clock 外推不到生產 |
 
 **什麼時候可以不實跑**（#176 立下的明文條件）：零行為改動，而且 `conf/` 與 `pipeline.py` 對 main byte-identical。
+
+**`conf/` 的 diff 是空的，證明的是版本 ID 不會動，不是落地內容不會變。** 程式改了 dataset 落地的內容、設定卻沒動時，版本 ID 不動正是問題：新舊內容會掛在同一個 ID 下。這時要把 `DATASET_ARTIFACT_FORMAT_VERSION` 加 1，見 [`pipeline-node-design.md`](pipeline-node-design.md) 規則 18。零行為改動的搬移不需要。
+
+**AST 相同、斷言一字未改，看不出測試攔的位置換了。** 程式搬到別的模組之後，測試裡 patch 舊模組的那一行，攔的可能已經不是搬走的程式在用的東西。實例（#466 審查查出，`18f4c6ad`）：month plan 的組裝從 `__main__.py` 搬進 `pipelines/dataset/run_contract.py`，列分區改用 `run_contract` 自己建的 `DataCatalog`。`tests/test_cli.py` 有兩個 dataset 測試 patch 的是 `recsys_tfb.__main__.DataCatalog`：斷言還在、測試還綠，測的路徑已經換了。**檢查**：列出測試裡所有 patch 舊模組的地方（例如 `patch("recsys_tfb.__main__.X")`）；只要 X 被搬走的程式用到，就逐一確認攔截點還在不在。
 
 **baseline 怎麼建、弄壞驗證怎麼還原**：見 [`known-pitfalls.md`](../operations/known-pitfalls.md) §5 與 §5b。**不要用 `git archive` 拉一份到別的目錄跑**——那份沒有本機 warehouse 狀態，組合跑互擾的那幾項不會出現，會讓人誤以為是自己改出來的。
 
