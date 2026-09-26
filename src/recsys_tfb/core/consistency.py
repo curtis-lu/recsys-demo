@@ -778,7 +778,9 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
   onto one value and silently change the ranking. Predicate:
   ``numeric_precision_errors`` (pure, no Spark — it takes a column →
   ``ColumnPrecision`` mapping); classifier: ``spark_dtype_value_step``; bound:
-  ``exact_value_limit`` over ``SIGNIFICAND_BITS``. Wired in
+  ``exact_value_limit`` over ``SIGNIFICAND_BITS``. Asked first,
+  ``numeric_precision_file_errors``: the gate found the files this run wrote,
+  without which there is nothing to measure. Wired in
   ``validate_numeric_precision`` (``pipelines/dataset/nodes.py``), which runs
   after ``preprocessed_feature_table`` lands and before any ``build_model_input``
   reads it back — the cast is downstream, so gating after that write still gates
@@ -829,7 +831,9 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
   not close it (A32 passes when ``primary_key`` and ``quality_checks`` are both
   absent, and the framework lets a user supply source tables this repo's
   ``source_etl`` never wrote). Predicate: ``model_input_grain_errors`` (pure —
-  it takes a split → ``SplitRowCounts`` mapping). Wired in
+  it takes a split → ``SplitRowCounts`` mapping). Asked first, for each table
+  compared whole, ``model_input_grain_scope_errors``: its version / variant
+  scope holds any of its files, or both counts would be a vacuous 0. Wired in
   ``validate_model_input_grain`` (``pipelines/dataset/nodes.py``), which runs
   after the ``build_*_model_input`` nodes have landed their tables.
 
@@ -1042,6 +1046,17 @@ class ConfigConsistencyError(ConsistencyError):
 
 class DataConsistencyError(ConsistencyError):
     """Config disagrees with the actual data (Layer 2)."""
+
+
+def collect_all_message(headline: str, errors: Sequence[str]) -> str:
+    """Every finding of one gate under one headline, one finding per line.
+
+    The shape the dataset pipeline's Layer-2 gates raise (or, under B8's
+    ``truncate``, log) in. Collect-all rather than first-failure, so one fix
+    pass clears every finding; one function so the three gates cannot drift
+    apart in how they say it.
+    """
+    return f"{headline} ({len(errors)} issue(s)):\n- " + "\n- ".join(errors)
 
 
 def _prepare_model_input(parameters: dict) -> dict:
@@ -4008,9 +4023,40 @@ def numeric_precision_rows(
     )
 
 
+def numeric_precision_file_errors(
+    files_found: int,
+    *,
+    months: int,
+    base_dataset_version: str,
+    columns: int,
+) -> list[str]:
+    """B8, asked before the rule: the gate found the files it reads.
+
+    Pure — the caller counts the files (``landed_partition_files`` in the
+    dataset pipeline's ``steps/footer_facts.py``). No file for the months this
+    run wrote leaves every checked column's precision unknown. That is one
+    error, not one "no statistics" per column from
+    :func:`numeric_precision_errors`: the fix is different (the gate could not
+    find the data at all, rather than found it and learned nothing), and
+    reporting it once beats reporting it once per column. The way out it names
+    is the policy key, for the reason that function gives.
+    """
+    if files_found:
+        return []
+    return [
+        f"B8: found no parquet files for the {months} month(s) this "
+        f"run wrote under base_dataset_version={base_dataset_version}, so the "
+        f"precision of {columns} feature column(s) could not be established. "
+        f"The gate reads footer statistics from the landed partitions; set "
+        f"dataset.numeric_precision_policy: truncate to proceed without "
+        f"that check."
+    ]
+
+
 def numeric_precision_errors(
     by_column: Mapping[str, ColumnPrecision],
     storage_type: str,
+    table: str | None = None,
 ) -> list[str]:
     """B8 invariant — the single definition.
 
@@ -4039,6 +4085,10 @@ def numeric_precision_errors(
 
     Collect-all and sorted by column: two runs of the same config read the same
     way, and one fix pass clears every offender.
+
+    ``table`` leads every message when given — the candidate-level feature
+    table's findings name it; the entity-level table's are the gate's default
+    and carry no name.
     """
     if storage_type not in SIGNIFICAND_BITS:
         raise ConfigConsistencyError(
@@ -4075,6 +4125,8 @@ def numeric_precision_errors(
                 f"dataset.numeric_precision_policy: truncate to accept the "
                 f"loss deliberately."
             )
+    if table is not None:
+        errors = [f"{table}: {e}" for e in errors]
     return errors
 
 
@@ -4223,9 +4275,9 @@ def model_input_grain_errors(
     """B10 invariant — the single definition.
 
     Pure — no Spark, no parquet, no filesystem. How the two numbers are
-    obtained without scanning the data is the caller's problem
-    (``utils.parquet_stats.read_row_count``), and keeping it out of here is what
-    lets the rule be tested by handing it a dict.
+    obtained without scanning the data is the caller's problem (``footer_rows``
+    in the dataset pipeline's ``steps/footer_facts.py``), and keeping it out of
+    here is what lets the rule be tested by handing it a dict.
 
     **Equality, not a bound.** ``build_model_input`` joins keys to labels and to
     features with LEFT joins on the keys' own grain, so a key that matches
@@ -4327,6 +4379,52 @@ def _grain_error(
         f"duplicate rows is the right one is not knowable here."
         f"{rebuild_clause}"
     )
+
+
+def model_input_grain_scope_errors(
+    split: str,
+    side: str,
+    *,
+    files_in_table: int,
+    files_in_scope: int,
+    scope: Mapping[str, str],
+) -> list[str]:
+    """B10, asked before the rule: a table compared whole has files in scope.
+
+    Pure — the caller counts both numbers (``footer_rows`` in the dataset
+    pipeline's ``steps/footer_facts.py``). ``side`` is ``"keys"`` or
+    ``"model_input"``; ``scope`` is the partition values the table was written
+    under (the dataset version, and for the train tables the train variant).
+
+    A scope that matches none of a table's files makes both sides of
+    :func:`model_input_grain_errors` read 0, every comparison trivially true,
+    and the gate would report success having looked at nothing — so it is an
+    error, not zero rows. A table with no files **at all** is a different fact
+    and passes: that is a genuinely empty split, which
+    ``dataset.train_dev_ratio: 0`` produces on purpose. From two file counts
+    this cannot tell a scope mismatch from a split this version left empty
+    while other versions' files sit in the same table, so the message names
+    both readings.
+
+    Only for tables compared whole. For a table written a month at a time a
+    month with no file is what a month the group drop emptied looks like, and
+    ``validate_model_input_grain`` counts it as 0 = 0.
+    """
+    if not files_in_table or files_in_scope:
+        return []
+    spec = ", ".join(f"{k}={v}" for k, v in scope.items())
+    return [
+        f"B10: {split}_{side} has {files_in_table} parquet file(s) but "
+        f"none under {spec}, so this run's row count could not be "
+        f"established and the comparison for {split} would have "
+        f"passed on two zeroes. Either the version/variant in "
+        f"parameters no longer matches what is on disk, the "
+        f"table was written by a different catalog entry than the "
+        f"one this node reads, or {split} came out empty under "
+        f"this version while other versions' files remain (for "
+        f"val: every query group dropped — r = 0 and the val "
+        f"month's labels not in yet, say)."
+    ]
 
 
 # ---------------------------------------------------------------------------

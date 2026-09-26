@@ -3515,10 +3515,10 @@ class TestValidateNumericPrecisionGate:
     def test_another_dataset_version_is_not_read(
         self, spark, tmp_path, parameters,
     ):
-        # inputFiles() answers for the whole relation, so the run's own version
-        # is selected back out of the paths. Asked for a version the table does
-        # not hold, the gate finds no files — and says so once, rather than
-        # reporting every column as unmeasurable.
+        # The run's own version is selected out of the paths (why, although
+        # what inputFiles() lists is unsettled: steps/footer_facts.py). Asked
+        # for a version the table does not hold, the gate finds no files — and
+        # says so once, rather than reporting every column as unmeasurable.
         landed = _landed_features(spark, tmp_path, {"2024-01-31": 2 ** 40})
         with pytest.raises(DataConsistencyError) as exc:
             self._run(landed, {**_precision_params(parameters),
@@ -3526,6 +3526,27 @@ class TestValidateNumericPrecisionGate:
         message = str(exc.value)
         assert "found no parquet files" in message
         assert message.count("B8:") == 1
+
+    def test_a_version_beside_it_in_the_same_table_is_not_read(
+        self, spark, tmp_path, parameters,
+    ):
+        # The frame lists both versions' files, whatever a catalog-loaded frame
+        # would list (unsettled — steps/footer_facts.py). The other version
+        # breaches; this one sits exactly at the bound.
+        root = str(tmp_path / "two_versions")
+        for version, value in ((_BASE_VERSION, 2 ** 24), ("ffffffff", 2 ** 40)):
+            spark.createDataFrame(
+                [("C001", value, 0.5, version, "2024-01-31")],
+                "cust_id string, big_int bigint, dbl double, "
+                "base_dataset_version string, snap_date string",
+            ).write.mode("append").partitionBy(
+                "base_dataset_version", "snap_date").parquet(root)
+        report = validate_numeric_precision(
+            spark.read.parquet(root), _METADATA, _plan("2024-01-31"),
+            _precision_params(parameters),
+        )
+        row, = report["columns"]
+        assert row["max_abs"] == 2 ** 24
 
 
 class TestValidateNumericPrecisionOnDecimal:
@@ -4059,6 +4080,29 @@ class TestValidateModelInputGrain:
         # left empty beside other versions' files, so it names both.
         assert "came out empty under this version" in str(exc.value)
 
+    def test_a_version_beside_it_in_the_same_table_is_not_counted(
+        self, spark, tmp_path, parameters, clean,
+    ):
+        """train_keys' files include another version's, holding the keys
+        twice over; train_model_input has no such version. Counted across the
+        table the two would disagree; counted under this version they agree
+        (why the filter stays although what ``inputFiles()`` lists for a
+        catalog-loaded frame is unsettled: steps/footer_facts.py)."""
+        keys, _ = clean["built"]
+        root = str(tmp_path / "two_versions")
+        for base, df in ((_BASE_VERSION, keys),
+                         ("ffffffff", keys.unionByName(keys))):
+            (df.withColumn("base_dataset_version", F.lit(base))
+               .withColumn("train_variant_id", F.lit(_TRAIN_VARIANT))
+               .write.mode("append")
+               .partitionBy("base_dataset_version", "train_variant_id")
+               .parquet(root))
+        two_versions = spark.read.parquet(root).drop(
+            "base_dataset_version", "train_variant_id")
+        report = self._gate(parameters, clean, train=(
+            two_versions, clean["model_input"]))
+        assert report["splits"]["train"]["keys_rows"] == keys.count()
+
     def test_the_pairing_takes_test_months_from_the_builds_plan(self):
         """B10 reads the plan ``build_test_model_input`` ran under, not
         ``test_keys``' own: after a run that failed half-way the two
@@ -4115,13 +4159,13 @@ class TestB10CostInvariant:
 
     def test_the_gate_calls_nothing_that_reads_rows(self):
         from recsys_tfb.pipelines.dataset import nodes as _nodes
-        from recsys_tfb.utils import parquet_stats as _stats
+        from recsys_tfb.pipelines.dataset.steps import footer_facts as _facts
 
         for module, names in (
-            (_nodes.__file__,
-             ["validate_model_input_grain", "_footer_rows",
-              "_footer_rows_by_month"]),
-            (_stats.__file__, ["read_row_count", "filter_by_partitions"]),
+            (_nodes.__file__, ["validate_model_input_grain"]),
+            (_facts.__file__,
+             ["footer_rows", "footer_rows_by_month", "landed_partition_files",
+              "read_row_count", "filter_by_partitions"]),
         ):
             for name, calls in self._calls_in(module, names).items():
                 assert not (calls & self._SCANNING), (
@@ -4133,8 +4177,8 @@ class TestB10CostInvariant:
     def test_the_only_frame_method_the_gate_uses_is_inputFiles(self):
         # The positive half: a guard that only forbids things passes just as
         # well when the function stops touching the frame at all.
-        from recsys_tfb.pipelines.dataset import nodes as _nodes
+        from recsys_tfb.pipelines.dataset.steps import footer_facts as _facts
 
         calls = self._calls_in(
-            _nodes.__file__, ["_footer_rows"])["_footer_rows"]
+            _facts.__file__, ["footer_rows"])["footer_rows"]
         assert "inputFiles" in calls

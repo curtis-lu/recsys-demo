@@ -20,6 +20,18 @@ class TestExceptionHierarchy:
         assert issubclass(DataConsistencyError, ConsistencyError)
 
 
+from recsys_tfb.core.consistency import collect_all_message
+
+
+class TestCollectAllMessage:
+    """The one shape a Layer-2 gate raises in: every finding, one pass."""
+
+    def test_headline_then_the_count_then_one_finding_per_line(self):
+        assert collect_all_message(
+            "Model input grain check failed", ["B10: a", "B10: b"],
+        ) == "Model input grain check failed (2 issue(s)):\n- B10: a\n- B10: b"
+
+
 from recsys_tfb.core.consistency import resolved_item_values
 
 
@@ -2872,6 +2884,46 @@ class TestNumericPrecisionErrorsB8:
         with pytest.raises(ConfigConsistencyError):
             numeric_precision_errors(self._ints(a=1.0), "float16")
 
+    def test_a_table_name_leads_every_message_it_is_given(self):
+        # The candidate-level table's findings name their table; the
+        # entity-level table's never did, and keep not doing so.
+        by_column = {
+            "a": ColumnPrecision(2.0 ** 40, 1.0),
+            "b": ColumnPrecision(None, 1.0),
+        }
+        named = numeric_precision_errors(
+            by_column, "float32", table="candidate_feature_table")
+        plain = numeric_precision_errors(by_column, "float32")
+        assert named == [f"candidate_feature_table: {e}" for e in plain]
+        assert all(e.startswith("B8: ") for e in plain)
+
+
+from recsys_tfb.core.consistency import numeric_precision_file_errors
+
+
+class TestNumericPrecisionFileErrorsB8:
+    """Before the rule is asked: did the gate find the files this run wrote.
+
+    Found none, the precision of every checked column is unknown — one error,
+    not one "no statistics" per column, because the fix is different.
+    """
+
+    def test_files_found_is_clean(self):
+        assert numeric_precision_file_errors(
+            3, months=1, base_dataset_version="ab12cd34", columns=2) == []
+
+    def test_no_files_is_one_error_naming_the_scope_and_the_way_out(self):
+        errs = numeric_precision_file_errors(
+            0, months=2, base_dataset_version="ab12cd34", columns=5)
+        assert errs == [
+            "B8: found no parquet files for the 2 month(s) this run wrote "
+            "under base_dataset_version=ab12cd34, so the precision of 5 "
+            "feature column(s) could not be established. The gate reads "
+            "footer statistics from the landed partitions; set "
+            "dataset.numeric_precision_policy: truncate to proceed without "
+            "that check."
+        ]
+
 
 class TestNumericPrecisionRows:
     """The report shape: every checked column, not only the failing ones."""
@@ -3411,7 +3463,7 @@ class TestModelInputGrainErrorsB10:
     Pure — the caller gathers the two numbers. Handing it a dict is what lets
     "what the rule is" be tested apart from "how a row count is obtained
     without scanning", which is ``read_row_count``'s problem and has its own
-    tests in ``test_utils/test_parquet_stats.py``.
+    tests in ``test_pipelines/test_dataset/test_footer_facts.py``.
     """
 
     def test_equal_counts_pass(self):
@@ -3463,8 +3515,8 @@ class TestModelInputGrainErrorsB10:
     def test_needs_no_spark(self):
         """Counts and column names only — no frame, no handle, no path. What
         this pins is that obtaining the two row counts stays the caller's
-        problem (``utils.parquet_stats``), which is what lets the rule be
-        tested by handing it a dict."""
+        problem (the dataset pipeline's ``steps/footer_facts.py``), which is
+        what lets the rule be tested by handing it a dict."""
         import inspect
         sig = inspect.signature(model_input_grain_errors)
         assert list(sig.parameters) == ["by_split", "identity_columns"]
@@ -3522,6 +3574,46 @@ class TestModelInputGrainErrorsB10:
         # A split rebuilt in full every run needs no such advice.
         whole = model_input_grain_errors({"val": SplitRowCounts(10, 20)})
         assert "--rebuild-dates" not in whole[0]
+
+
+from recsys_tfb.core.consistency import model_input_grain_scope_errors
+
+
+class TestModelInputGrainScopeErrorsB10:
+    """Before the rule is asked, for a table compared whole: does its scope
+    hold any of its files. None would make both counts 0 and the comparison
+    pass having looked at nothing."""
+
+    _SCOPE = {"base_dataset_version": "ab12cd34", "train_variant_id": "tv000001"}
+
+    def test_files_in_scope_is_clean(self):
+        assert model_input_grain_scope_errors(
+            "train", "keys", files_in_table=4, files_in_scope=2,
+            scope=self._SCOPE) == []
+
+    def test_a_table_with_no_files_at_all_is_an_empty_split_not_an_error(self):
+        # dataset.train_dev_ratio: 0 leaves train_dev empty on purpose.
+        assert model_input_grain_scope_errors(
+            "train_dev", "keys", files_in_table=0, files_in_scope=0,
+            scope=self._SCOPE) == []
+
+    def test_files_but_none_in_scope_names_the_table_the_scope_and_both_readings(
+        self,
+    ):
+        errs = model_input_grain_scope_errors(
+            "val", "model_input", files_in_table=3, files_in_scope=0,
+            scope=self._SCOPE)
+        assert errs == [
+            "B10: val_model_input has 3 parquet file(s) but none under "
+            "base_dataset_version=ab12cd34, train_variant_id=tv000001, so this "
+            "run's row count could not be established and the comparison for "
+            "val would have passed on two zeroes. Either the version/variant "
+            "in parameters no longer matches what is on disk, the table was "
+            "written by a different catalog entry than the one this node "
+            "reads, or val came out empty under this version while other "
+            "versions' files remain (for val: every query group dropped — "
+            "r = 0 and the val month's labels not in yet, say)."
+        ]
 
 
 class TestA35EtlCliVars:

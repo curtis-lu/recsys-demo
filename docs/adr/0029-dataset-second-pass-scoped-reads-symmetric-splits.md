@@ -261,6 +261,20 @@ ADR-0008 那一輪的結構搬移在 2026-08-08（PR #176）合併時，`pipelin
 
 **#406 第 5 項提的兩個選項都不選**：那兩個選項是「新開 `steps/model_input_grain.py`」和「併入 `steps/precision.py`」。本決定改成依 concern 切：共用的「檔尾事實」一個模組，各個閘自己的報告組裝各自一個模組。檔名由實作規格決定。
 
+> **實作註記（2026-09-26，#465）**：
+> - 模組怎麼切：
+>   - 共用的「檔尾事實」是 `steps/footer_facts.py`。`utils/parquet_stats.py` 整個搬進來（它在 `src/` 裡只有 dataset 在呼叫，node 規則 8），再加上原本 `steps/precision.py` 的 `landed_partition_files`，以及 `nodes.py` 的 `_footer_rows`、`_footer_rows_by_month`（改名 `footer_rows`、`footer_rows_by_month`）。
+>   - B8 的報告組裝是 `steps/precision.py`：`value_steps`、`column_precisions`、`precision_report`、`log_precision_report`。
+>   - B10 的報告組裝是新開的 `steps/model_input_grain.py`。檔名跟 #406 第 5 項的選項 A 一樣，內容不一樣：它只放組報告，讀檔尾在 `footer_facts.py`。
+>   - `validate_data_consistency` 的三個巢狀函式：`_item_combinations`、`_values` 搬進 `steps/categoricals.py`，改名 `item_combinations_in_months`、`item_values`，跟 `count_items_in_months` 放一起（都在回答「來源表在這些月份有哪些 item 值」）。`_raise_if_any` 換成 `core/consistency.py` 的 `collect_all_message`，三個資料閘用同一個「一次列出全部問題」的訊息格式。
+> - 「這次寫了哪些檔」只剩一套：版本（和 variant）只在 `filter_by_partitions` 篩一次，`landed_partition_files` 在它的結果上再按月份篩（用日期比）。原本 `landed_partition_files` 自己另寫了一份版本篩選。
+> - 兩處說「`inputFiles()` 回傳整個 relation」的 docstring 改成「沒有定論，所以篩選留著」，理由寫在 `footer_facts.py` 的模組 docstring。釘住篩選的測試，用的是從表的根目錄讀出來的 frame：它的檔案清單一定列出兩個版本，所以不管 catalog 載入的 frame 列不列出別的版本，測試都成立。這些測試是：
+>   - `test_footer_facts.py::TestAFrameListingTwoVersions`
+>   - `test_nodes.py` 裡 B8、B10 各一個 `test_a_version_beside_it_in_the_same_table_is_not_*`
+> - 新的 predicate：`numeric_precision_file_errors`（B8 找不到檔）、`model_input_grain_scope_errors`（B10 範圍內零個檔）。`numeric_precision_errors` 多了 `table` 參數，候選層級表訊息的前綴改由它加。訊息內容逐字不變。
+> - 跟 #406 第 2 項的驗收字面不同的一處：把報告排成 log 行的函式（原 `_precision_report_lines`）仍然帶底線，改名 `_report_lines`。現在只有同一模組的 `log_precision_report` 呼叫它，照 node 規則 12，帶底線才對。
+> - **更正決定 8 的行數估計**：`nodes.py` 在本份寫成時（`2e99c573`）是 1733 行，本票開工時（`6d1d8ca5`）是 1999 行，本票做完是 1806 行，不是 1200–1300 行。
+
 ## 決定 8　`nodes.py` 不拆檔
 
 - 照決定 4、7 做完，`nodes.py` 估計會從 1733 行降到 1200–1300 行，其中約四成是 docstring 與註解。
