@@ -3515,8 +3515,8 @@ class TestValidateNumericPrecisionGate:
     def test_another_dataset_version_is_not_read(
         self, spark, tmp_path, parameters,
     ):
-        # The run's own version is selected out of the paths (why, although
-        # what inputFiles() lists is unsettled: steps/footer_facts.py). Asked
+        # The run's own version is selected out of the paths (under which
+        # Spark settings that matters: steps/footer_facts.py). Asked
         # for a version the table does not hold, the gate finds no files — and
         # says so once, rather than reporting every column as unmeasurable.
         landed = _landed_features(spark, tmp_path, {"2024-01-31": 2 ** 40})
@@ -3530,8 +3530,8 @@ class TestValidateNumericPrecisionGate:
     def test_a_version_beside_it_in_the_same_table_is_not_read(
         self, spark, tmp_path, parameters,
     ):
-        # The frame lists both versions' files, whatever a catalog-loaded frame
-        # would list (unsettled — steps/footer_facts.py). The other version
+        # The frame lists both versions' files, as a catalog-loaded one does
+        # under some Spark settings (steps/footer_facts.py). The other version
         # breaches; this one sits exactly at the bound.
         root = str(tmp_path / "two_versions")
         for version, value in ((_BASE_VERSION, 2 ** 24), ("ffffffff", 2 ** 40)):
@@ -4086,8 +4086,8 @@ class TestValidateModelInputGrain:
         """train_keys' files include another version's, holding the keys
         twice over; train_model_input has no such version. Counted across the
         table the two would disagree; counted under this version they agree
-        (why the filter stays although what ``inputFiles()`` lists for a
-        catalog-loaded frame is unsettled: steps/footer_facts.py)."""
+        (a catalog-loaded frame lists other versions under some Spark
+        settings: steps/footer_facts.py)."""
         keys, _ = clean["built"]
         root = str(tmp_path / "two_versions")
         for base, df in ((_BASE_VERSION, keys),

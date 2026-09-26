@@ -173,8 +173,8 @@ def item_combinations_in_months(
 
     One distinct serves two data-gate checks: B1 (which item values appear)
     and B15 (which source combinations share a value). For a single-column
-    item the select is the item column alone, exactly the query B1 always
-    ran; a multi-column item adds its source columns, and the combined value
+    item the select is the item column alone, no wider than B1 needs; a
+    multi-column item adds its source columns, and the combined value
     is computed by the same Spark expression every entry combines with, so
     B15 judges what the pipelines will actually see. What reaches the driver
     is bounded by the number of combinations, not by the row count.
@@ -194,7 +194,7 @@ def item_combinations_in_months(
     return [(tuple(r[c] for c in item_sources), r[item]) for r in rows]
 
 
-def item_values(combinations: list[tuple[tuple, object]]) -> set:
+def non_null_item_values(combinations: list[tuple[tuple, object]]) -> set:
     """The non-NULL item values of :func:`item_combinations_in_months`."""
     return {value for _, value in combinations if value is not None}
 

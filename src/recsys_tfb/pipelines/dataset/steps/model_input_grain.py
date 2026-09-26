@@ -86,6 +86,7 @@ def monthly_grain_report_entry(
 
 
 def grain_report(
+    *,
     base_version: str,
     train_variant_id: str,
     splits: dict[str, dict],

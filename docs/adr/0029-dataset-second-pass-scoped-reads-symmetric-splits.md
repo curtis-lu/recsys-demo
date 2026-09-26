@@ -263,17 +263,25 @@ ADR-0008 那一輪的結構搬移在 2026-08-08（PR #176）合併時，`pipelin
 
 > **實作註記（2026-09-26，#465）**：
 > - 模組怎麼切：
->   - 共用的「檔尾事實」是 `steps/footer_facts.py`。`utils/parquet_stats.py` 整個搬進來（它在 `src/` 裡只有 dataset 在呼叫，node 規則 8），再加上原本 `steps/precision.py` 的 `landed_partition_files`，以及 `nodes.py` 的 `_footer_rows`、`_footer_rows_by_month`（改名 `footer_rows`、`footer_rows_by_month`）。
+>   - 共用的「檔尾事實」是 `steps/footer_facts.py`。`utils/parquet_stats.py` 整個搬進來（它在 `src/` 裡只有 dataset 在呼叫，node 規則 8），再加上原本 `steps/precision.py` 的 `landed_partition_files`，以及 `nodes.py` 的 `_footer_rows`、`_footer_rows_by_month`（改名 `footer_rows`、`footer_rows_by_month`）。B8 讀欄位最大值也改走這裡的 `footer_max_abs`，兩個閘都不在 node 裡自己呼叫 `inputFiles()`。
 >   - B8 的報告組裝是 `steps/precision.py`：`value_steps`、`column_precisions`、`precision_report`、`log_precision_report`。
 >   - B10 的報告組裝是新開的 `steps/model_input_grain.py`。檔名跟 #406 第 5 項的選項 A 一樣，內容不一樣：它只放組報告，讀檔尾在 `footer_facts.py`。
->   - `validate_data_consistency` 的三個巢狀函式：`_item_combinations`、`_values` 搬進 `steps/categoricals.py`，改名 `item_combinations_in_months`、`item_values`，跟 `count_items_in_months` 放一起（都在回答「來源表在這些月份有哪些 item 值」）。`_raise_if_any` 換成 `core/consistency.py` 的 `collect_all_message`，三個資料閘用同一個「一次列出全部問題」的訊息格式。
+>   - `validate_data_consistency` 的三個巢狀函式：`_item_combinations`、`_values` 搬進 `steps/categoricals.py`，改名 `item_combinations_in_months`、`non_null_item_values`，跟 `count_items_in_months` 放一起（都在回答「來源表在這些月份有哪些 item 值」）。`_raise_if_any` 換成 `core/consistency.py` 的 `collect_all_message`，三個資料閘用同一個「一次列出全部問題」的訊息格式。
 > - 「這次寫了哪些檔」只剩一套：版本（和 variant）只在 `filter_by_partitions` 篩一次，`landed_partition_files` 在它的結果上再按月份篩（用日期比）。原本 `landed_partition_files` 自己另寫了一份版本篩選。
-> - 兩處說「`inputFiles()` 回傳整個 relation」的 docstring 改成「沒有定論，所以篩選留著」，理由寫在 `footer_facts.py` 的模組 docstring。釘住篩選的測試，用的是從表的根目錄讀出來的 frame：它的檔案清單一定列出兩個版本，所以不管 catalog 載入的 frame 列不列出別的版本，測試都成立。這些測試是：
+> - **更正上文「哪一邊對沒有定論」**（審查的「本份哪裡寫錯」視角查出）：這件事查得出來，答案看兩個 Spark 設定。2026-09-26 在 local[*] 用 `HiveTableDataset` 對「一張表放兩個版本」實測，對 `load()` 的結果呼叫 `inputFiles()`：
+>   - 兩個設定都是 Spark 預設值：只列出載入的版本。篩選不改變任何事，也就是 2026-09-25 量到的那一種。
+>   - `spark.sql.hive.manageFilesourcePartitions` 為 false：列出所有版本。篩選是讓閘只看這次版本的唯一一步。
+>   - `spark.sql.hive.convertMetastoreParquet` 為 false：只回傳表的根目錄。路徑裡沒有分區，B8 找不到檔、B10 範圍內零個檔，兩個閘都報「量不到」。
+>   - repo 沒有設這兩個鍵，生產叢集設成什麼查不到，所以篩選留著。兩處 docstring 改寫成上面這三種情況，寫在 `footer_facts.py` 的模組 docstring。
+>   - 釘住篩選的測試讀的是表的根目錄：不論設定，它的檔案清單都列出兩個版本，等於第二種情況。這些測試是：
 >   - `test_footer_facts.py::TestAFrameListingTwoVersions`
 >   - `test_nodes.py` 裡 B8、B10 各一個 `test_a_version_beside_it_in_the_same_table_is_not_*`
 > - 新的 predicate：`numeric_precision_file_errors`（B8 找不到檔）、`model_input_grain_scope_errors`（B10 範圍內零個檔）。`numeric_precision_errors` 多了 `table` 參數，候選層級表訊息的前綴改由它加。訊息內容逐字不變。
 > - 跟 #406 第 2 項的驗收字面不同的一處：把報告排成 log 行的函式（原 `_precision_report_lines`）仍然帶底線，改名 `_report_lines`。現在只有同一模組的 `log_precision_report` 呼叫它，照 node 規則 12，帶底線才對。
-> - **更正決定 8 的行數估計**：`nodes.py` 在本份寫成時（`2e99c573`）是 1733 行，本票開工時（`6d1d8ca5`）是 1999 行，本票做完是 1806 行，不是 1200–1300 行。
+> - 預設設定下，B10 的「範圍內零個檔」永遠不會觸發：載入的 frame 只列出範圍內的檔，範圍裡沒有檔就讀成「整張表沒有檔」，當成空的 split 放行。`nodes.py` 原本寫「沒有靜默的洞」，這句在預設設定下不成立，已改寫。行為沒改，本票是純搬移。
+> - 被搬走的 log 行換了 logger 名：B10 逐 split 那一行從 `recsys_tfb.pipelines.dataset.nodes` 變成 `...steps.model_input_grain`，B8 的逐欄表格變成 `...steps.precision`。文字不變；以 logger 名過濾的監控要跟著改。
+> - 給寫規則 17（決定 14）的人：B8 的 node 除了「查什麼」與「交給 predicate」，還負責套用政策（`block` 就 raise、`truncate` 就警告）與前置檢查（`require_months_in`）。規則的字面要給這兩件事留位置，否則照字面做會把政策搬進 helper。
+> - **更正決定 8 的行數估計**：`nodes.py` 在本份寫成時（`2e99c573`）是 1733 行，本票開工時（`6d1d8ca5`）是 1999 行，本票做完是 1806 行，不是 1200–1300 行。估計錯在方向：決定 4 沒有刪掉 node，是把 val、test 在 model_input 上丟組的兩個 node 換成在 keys 上丟組的兩個，同時讓 B10 多比 val、test 兩對，所以 #461 讓它多了 159 行（#460 多 66 行、#462 多 41 行）。決定 8 不拆檔的理由不靠行數，結論不變。
 
 ## 決定 8　`nodes.py` 不拆檔
 

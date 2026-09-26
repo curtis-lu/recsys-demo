@@ -69,7 +69,7 @@ from recsys_tfb.pipelines.dataset.steps.categoricals import (
     collect_vocabularies_from_data,
     count_items_in_months,
     item_combinations_in_months,
-    item_values,
+    non_null_item_values,
     read_declared_vocabularies,
     require_declared_categoricals,
     require_supported_categorical_dtypes,
@@ -86,10 +86,9 @@ from recsys_tfb.pipelines.dataset.steps.feature_columns import (
     warn_missing_drop_columns,
 )
 from recsys_tfb.pipelines.dataset.steps.footer_facts import (
+    footer_max_abs,
     footer_rows,
     footer_rows_by_month,
-    landed_partition_files,
-    read_max_abs_stats,
 )
 from recsys_tfb.pipelines.dataset.steps.model_input_grain import (
     TEST_NOT_WRITTEN,
@@ -257,8 +256,8 @@ def validate_data_consistency(
             item,
             None if item_list_counted_from_data(parameters)
             else resolved_item_values(parameters),
-            item_values(sample_pool_items),
-            item_values(label_items),
+            non_null_item_values(sample_pool_items),
+            non_null_item_values(label_items),
         )
         # B15 — two combinations of a multi-column item may not combine to one
         # value. Both tables together: a label whose combination collides with
@@ -1107,30 +1106,28 @@ def validate_numeric_precision(
         # wrote, not from the whole table: its own version and months,
         # selected out of the file paths.
         base_version = parameters["base_dataset_version"]
-        files = landed_partition_files(
-            preprocessed_feature_table.inputFiles(),
+        max_abs, files = footer_max_abs(
+            preprocessed_feature_table,
             base_version=base_version,
             time_col=time_col,
             months=months,
+            columns=sorted(steps),
         )
+        # Pre-check (this node's own input) — no file for the months this run
+        # wrote leaves nothing to measure; that is reported once rather than
+        # as one unmeasured column each (numeric_precision_file_errors).
         errors = numeric_precision_file_errors(
-            len(files), months=len(months), base_dataset_version=base_version,
+            files, months=len(months), base_dataset_version=base_version,
             columns=len(steps),
         )
         if not errors:
-            by_column = column_precisions(
-                read_max_abs_stats(
-                    preprocessed_feature_table.sparkSession, files, sorted(steps),
-                ),
-                steps,
-            )
+            by_column = column_precisions(max_abs, steps)
             report = precision_report(
                 storage_type, policy, months, by_column, dtypes,
             )
             logger.info(
                 "Numeric precision gate (%s): %d column(s) over %d file(s) in "
-                "%d month(s)", storage_type, len(by_column), len(files),
-                len(months),
+                "%d month(s)", storage_type, len(by_column), files, len(months),
             )
             log_precision_report(report)
             errors = numeric_precision_errors(by_column, storage_type)
@@ -1455,9 +1452,8 @@ def validate_model_input_grain(
     # Decision — the tables rebuilt in full are compared whole, each side's
     # files counted under the partition scope it was written to. The scope is
     # not decoration: these tables accumulate versions (and train variants)
-    # side by side under one Hive table, and whether `inputFiles()` answers
-    # for all of them or only for the partition_filter the catalog loaded is
-    # unsettled (steps/footer_facts.py says why the filter stays).
+    # side by side under one Hive table, and under some Spark settings
+    # `inputFiles()` lists all of them (steps/footer_facts.py says which).
     pairs = [
         ("train", train_keys, train_model_input, train_scope),
         ("train_dev", train_dev_keys, train_dev_model_input, train_scope),
@@ -1512,18 +1508,23 @@ def validate_model_input_grain(
         # not in yet, say), and the two tables agree they hold nothing. So the
         # "files, but none in scope" pre-check above does not apply here — for
         # a table written a month at a time, that is what an emptied month
-        # looks like. That leaves no silent hole: a version in parameters that
-        # no longer matches the disk shows on the three pairs above, which
-        # share it, and the month partition is named by the time column the
-        # build wrote with (saving refuses a frame without it). One side
-        # without files and the other with rows is still a mismatch, and the
-        # predicate says so.
+        # looks like. A version in parameters that no longer matches the disk
+        # is left to the three pairs above, which share it — and they see it
+        # only where `inputFiles()` lists other versions; under Spark's
+        # defaults such a version reads as empty on every pair
+        # (steps/footer_facts.py). The month partition is named by the time
+        # column the build wrote with (saving refuses a frame without it). One
+        # side without files and the other with rows is still a mismatch, and
+        # the predicate says so.
         by_split["test"] = split_row_counts_by_month(test_keys_rows, test_mi_rows)
         splits["test"] = monthly_grain_report_entry(
             "test", test_keys_rows, test_mi_rows)
 
     report = grain_report(
-        base_version, parameters["train_variant_id"], splits, not_checked,
+        base_version=base_version,
+        train_variant_id=parameters["train_variant_id"],
+        splits=splits,
+        not_checked=not_checked,
     )
 
     # Collect-all, one raise: the measurement failures above and the grain

@@ -17,16 +17,26 @@ run write" two different ways (ADR-0029 decision 7):
   :func:`read_max_abs_stats` read them; :func:`footer_rows` and
   :func:`footer_rows_by_month` put both questions together for a landed frame.
 
-**Why select by version at all.** Whether ``DataFrame.inputFiles()`` answers
-for the whole relation or only for the ``partition_filter`` the catalog loaded
-the table with is unsettled: this pipeline's docstrings used to say the former,
-and a 2026-09-25 measurement (two versions in one table, ``inputFiles()`` on the
-catalog's ``load()`` result) returned the loaded version's files only. That
-measured one case. If the former holds anywhere, a gate without the filter reads
-another version's parquet and reports on rows this run never wrote, and nothing
-says so. The filter costs a string comparison per path, so it stays, and
+**Why select by version at all.** What ``DataFrame.inputFiles()`` lists for a
+frame the catalog loaded (``HiveTableDataset.load()``, a ``WHERE`` on the
+partition filter) depends on two Spark settings. Measured on one table holding
+two versions, local ``[*]``, 2026-09-26:
+
+* both at Spark's default (``spark.sql.hive.manageFilesourcePartitions`` and
+  ``spark.sql.hive.convertMetastoreParquet`` true) — only the loaded version's
+  files. The version filter here changes nothing.
+* ``manageFilesourcePartitions`` false — every version's files. The filter is
+  what keeps a gate on the rows this run wrote; without it the gate reports on
+  another version's parquet, and nothing says so.
+* ``convertMetastoreParquet`` false — the table's root directory alone, with
+  no partition in the path. Nothing here can select a file from that: B8
+  finds no file and B10 none in scope, so both report a failure to measure
+  (B8's stops the run under ``block``, B10's always does).
+
+This repo sets neither key; a deployment's cluster may. So the filter stays —
+a string comparison per path — and
 ``tests/test_pipelines/test_dataset/test_footer_facts.py`` pins it on a frame
-that does list two versions.
+that lists two versions, the second case.
 
 The read goes through the Spark JVM's Hadoop ``FileSystem`` — the door this repo
 already uses for a Hive table's files (``utils/hdfs.copy_hdfs_to_local``), and
@@ -90,9 +100,10 @@ def filter_by_partitions(
     """``paths`` narrowed to those whose Hive partition values match every pair.
 
     The version (and variant) filter every footer fact here is read under; the
-    module docstring says why it is kept although what ``inputFiles()`` returns
-    is unsettled. Values compare as the partition directory's text: a version
-    ID is a hash the pipeline itself wrote, so there is one spelling of it.
+    module docstring says under which Spark settings it is what keeps a gate on
+    this run's version. Values compare as the partition directory's text: a
+    version ID is a hash the pipeline itself wrote, so there is one spelling of
+    it.
 
     A path that does not carry one of the keys is dropped rather than kept:
     ``partition_value`` returns ``None`` for it, which is not the declared
@@ -314,3 +325,27 @@ def footer_rows_by_month(
             read_row_count(df.sparkSession, files), len(files),
         )
     return counted
+
+
+def footer_max_abs(
+    df: DataFrame,
+    *,
+    base_version: str,
+    time_col: str,
+    months: list,
+    columns: Sequence[str],
+) -> tuple[dict[str, float | None], int]:
+    """``({column: max(|x|)}, files read)`` over the ``months`` ``df`` landed
+    under ``base_version`` — footer arithmetic only.
+
+    The same selection :func:`footer_rows_by_month` reads. The file count is
+    returned beside the values because no file at all is its own finding
+    (``numeric_precision_file_errors``): with none, every column reads
+    ``None``, which would otherwise look like a column the writer left without
+    statistics.
+    """
+    files = landed_partition_files(
+        df.inputFiles(), base_version=base_version, time_col=time_col,
+        months=months,
+    )
+    return read_max_abs_stats(df.sparkSession, files, columns), len(files)

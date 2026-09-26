@@ -4409,6 +4409,11 @@ def model_input_grain_scope_errors(
     Only for tables compared whole. For a table written a month at a time a
     month with no file is what a month the group drop emptied looks like, and
     ``validate_model_input_grain`` counts it as 0 = 0.
+
+    It can fire only where the table's file listing reaches past the scope.
+    Under Spark's default settings a catalog-loaded frame lists the scope's
+    files alone, so a scope with no files reads as a table with none and
+    passes; which settings list more is in ``steps/footer_facts.py``.
     """
     if not files_in_table or files_in_scope:
         return []

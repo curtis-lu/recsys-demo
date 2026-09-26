@@ -14,6 +14,7 @@ import pytest
 
 from recsys_tfb.pipelines.dataset.steps.footer_facts import (
     filter_by_partitions,
+    footer_max_abs,
     footer_rows,
     footer_rows_by_month,
     group_by_partition,
@@ -206,10 +207,10 @@ class TestLandedPartitionFiles:
         assert got == [_path(VERSION, "2026-01-31")]
 
     def test_other_base_dataset_versions_are_excluded(self):
-        # Whether inputFiles() lists other versions of a catalog-loaded table is
-        # unsettled (the module docstring). If it does, without this the gate
-        # would read another version's parquet and report a column that this
-        # run never wrote.
+        # With spark.sql.hive.manageFilesourcePartitions false, inputFiles()
+        # of a catalog-loaded table lists other versions too (the module
+        # docstring). Without this the gate would then read another version's
+        # parquet and report a column that this run never wrote.
         paths = [_path(VERSION, "2026-01-31"), _path("ffffffff", "2026-01-31")]
         got = landed_partition_files(
             paths, base_version=VERSION, time_col="snap_date",
@@ -270,10 +271,11 @@ class TestAFrameListingTwoVersions:
     """The version filter, pinned on a frame whose ``inputFiles()`` does list
     two versions side by side.
 
-    Whether a frame the catalog loaded lists other versions is unsettled (the
-    module docstring). A frame read from the table's root lists them for
-    certain, so these hold whichever way that question comes out: each count
-    is the version it was asked for, never the table's.
+    A catalog-loaded frame lists other versions when
+    ``spark.sql.hive.manageFilesourcePartitions`` is false (the module
+    docstring); a frame read from the table's root lists them under any
+    setting, so it stands in for that case here. Each count is the version it
+    was asked for, never the table's.
     """
 
     @pytest.fixture
@@ -311,3 +313,12 @@ class TestAFrameListingTwoVersions:
             months=["2026-01-31"],
         )
         assert counted[pd.Timestamp("2026-01-31")][0] == 7
+
+    def test_a_column_maximum_is_its_own_versions(self, two_versions):
+        # v1 holds ids 0..6, v2 holds 0..99.
+        max_abs, files = footer_max_abs(
+            two_versions, base_version="v1", time_col="snap_date",
+            months=["2026-01-31"], columns=["id"],
+        )
+        assert max_abs == {"id": 6.0}
+        assert 0 < files < len(two_versions.inputFiles())
