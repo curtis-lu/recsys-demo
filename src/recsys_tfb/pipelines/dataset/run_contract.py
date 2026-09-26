@@ -5,8 +5,9 @@ the dataset pipeline understands live here, where they can be tested without
 the CLI. The command keeps what every command does — start Spark, resolve the
 catalog, write the manifests, run the pipeline — and asks this module the rest:
 
-- before the run: the two version IDs and the source-table fingerprints they
-  hash (:func:`run_versions`); which months each incremental artifact
+- before the run: the source tables' fingerprints
+  (:func:`source_fingerprints`) and the two version IDs they feed
+  (:func:`versions_for_run`); which months each incremental artifact
   processes (:func:`month_plans_for_run`); what the DAG reads that no catalog
   entry supplies (:func:`pipeline_inputs`); and, under ``--only-test-months``,
   whether the train version has landed (:func:`train_version_landing`);
@@ -59,19 +60,18 @@ class SourceFingerprints(NamedTuple):
     """The source tables' schemas, as ``base_dataset_version`` hashes them."""
 
     feature_table: str
-    #: ``(name, dtype)`` per column, in table order: what :attr:`feature_table`
-    #: was computed from.
-    feature_table_columns: list
     #: ``None`` when no candidate-level feature table is declared (ADR-0026).
     candidate: str | None
-    candidate_columns: list | None
 
     @property
     def candidate_declared(self) -> bool:
         """Is a candidate-level feature table declared.
 
-        The one answer both the fingerprint and :func:`pipeline_inputs`'
-        ``None`` follow, so the version and the DAG cannot disagree about it.
+        For the dataset command, the one answer both the version and the DAG
+        follow: :func:`versions_for_run` hashes :attr:`candidate`, and
+        :func:`pipeline_inputs` takes these same fingerprints to decide the
+        ``None``. (Inference's A47 asks the catalog itself; it runs no
+        dataset build.)
         """
         return self.candidate is not None
 
@@ -82,6 +82,11 @@ def source_fingerprints(spark, source_catalog_config: dict) -> SourceFingerprint
     ``source_catalog_config`` is resolved without any version: source entries
     carry no ``${...}`` placeholder, so they are readable before the versions
     this feeds exist. Only schemas are read — no data is scanned.
+
+    Known, and kept as the command always had it: the table name is spelled
+    from the entry's ``database`` and ``table``, where the listings below ask
+    the dataset object instead. So only a Hive entry works here; anything else
+    stops with a ``KeyError`` before any version exists.
     """
     feature_table_cfg = source_catalog_config["feature_table"]
     feature_table_fqn = f"{feature_table_cfg['database']}.{feature_table_cfg['table']}"
@@ -96,7 +101,6 @@ def source_fingerprints(spark, source_catalog_config: dict) -> SourceFingerprint
     # declared, so a deployment without one keeps every ID it has.
     candidate_declared = CANDIDATE_FEATURE_TABLE in source_catalog_config
     candidate_fp = None
-    candidate_columns = None
     if candidate_declared:
         candidate_cfg = source_catalog_config[CANDIDATE_FEATURE_TABLE]
         candidate_columns = [
@@ -106,12 +110,11 @@ def source_fingerprints(spark, source_catalog_config: dict) -> SourceFingerprint
             ).schema.fields
         ]
         candidate_fp = compute_feature_table_fingerprint(candidate_columns)
-    return SourceFingerprints(
-        feature_table=feature_table_fp,
-        feature_table_columns=feature_table_columns,
-        candidate=candidate_fp,
-        candidate_columns=candidate_columns,
-    )
+        logger.info("candidate_feature_table_fingerprint: %s (%d cols)",
+                    candidate_fp, len(candidate_columns))
+    logger.info("feature_table_fingerprint: %s (%d cols)",
+                feature_table_fp, len(feature_table_columns))
+    return SourceFingerprints(feature_table=feature_table_fp, candidate=candidate_fp)
 
 
 class RunVersions(NamedTuple):
@@ -135,6 +138,8 @@ def versions_for_run(
         candidate_feature_table_fingerprint=sources.candidate,
     )
     train_v = compute_train_variant_id(params_dataset)
+    logger.info("base_dataset_version: %s", base_v)
+    logger.info("train_variant_id:     %s", train_v)
     return RunVersions(base_dataset_version=base_v, train_variant_id=train_v)
 
 
@@ -166,14 +171,15 @@ def month_plans_for_run(
 
 
 def pipeline_inputs(
-    month_plans: dict[str, SnapDatePlan], *,
-    only_test_months: bool, candidate_declared: bool,
+    month_plans: dict[str, SnapDatePlan], sources: SourceFingerprints, *,
+    only_test_months: bool,
 ) -> dict:
     """What the dataset DAG reads that no catalog entry supplies.
 
-    Registered by the command beside the catalog; only facts known before the
-    run that no node can see for itself (node rule 15).
+    Registered by the command beside the catalog. Only facts known before the
+    run that no node can work out for itself (ADR-0029 decision 2).
     """
+    candidate_declared = sources.candidate_declared
     return {
         # A loop over the plans, not three hand-written lines: registering a
         # fourth incremental artifact in month_plans.py is enough, and the

@@ -344,13 +344,25 @@ CLI 只留通用的部分：寫 manifest、執行 pipeline。
 
 > **實作註記（2026-09-26，#466）**：
 > - 上文四項搬進 `run_contract.py` 的四個函式：
->   - `source_fingerprints`：特徵表與候選層級表的指紋，只讀 schema。回傳值的 `candidate_declared` 是「候選層級表有沒有宣告」的唯一答案，指紋與 `None` 注入都看它。
+>   - `source_fingerprints`：特徵表與候選層級表的指紋，只讀 schema。回傳值的 `candidate_declared` 是 dataset 指令裡「候選層級表有沒有宣告」的唯一答案：版本雜湊它的指紋，`pipeline_inputs` 收同一份回傳值決定要不要注入 `None`。inference 的 A47 仍自己問 catalog（上文「不搬」）。
 >   - `versions_for_run`：兩層版本 ID。
 >   - `month_plans_for_run`：列出已落地的月份、組 month plan。列分區的 `_collect_existing_snap_dates` 從 `__main__.py` 原樣搬來。
 >   - `pipeline_inputs`：注入 DAG 的東西。
-> - **上文沒列、一併搬的**：`only_test_months` 這個執行模式的注入。它和 month plan、候選層級表的 `None` 同在一個注入的 dict 裡，都是沒有 catalog 條目提供、開跑前才知道的輸入。留它在 CLI，CLI 就還得知道 dataset 的 DAG 讀哪些名字。
-> - **留在 CLI 的**：起 Spark、解析 catalog（`_resolve_catalog` 各指令共用）、A55 的判斷與退出、寫 manifest、移 `latest`。版本與指紋那四行 log 也留在 CLI，好讓它們的 logger 名維持 `recsys_tfb.__main__`（JSONL 的 `logger` 欄，監控可能拿它過濾）。
-> - **唯一看得到的差別**：`[months] … cannot list its partitions` 那條警告跟著函式搬家，logger 名從 `recsys_tfb.__main__` 變成 `recsys_tfb.pipelines.dataset.run_contract`，訊息一字不變。只有增量產物不是 Hive 表時才會印，兩份示例的三個增量產物都是 Hive 表。
+>
+>   前三個在 `tests/test_pipelines/test_dataset/test_run_contract.py` 有直接測試；注入的 dict 由 `tests/test_cli.py` 經指令釘住，因為要緊的是 node 用哪個名字讀回它。
+> - **上文沒列、一併搬的**：`only_test_months` 這個執行模式的注入。它和 month plan、候選層級表的 `None` 同在一個注入的 dict 裡；留它在 CLI，那個 dict 就得拆成兩半。
+> - **版本與指紋那四行 log 跟著函式搬家**，訊息與順序不變。console 印的標籤是 pipeline 名（`[dataset]`），看不出差別。JSONL 的 `logger` 欄會變：原本是 `__main__`（用 `python -m recsys_tfb` 跑時，CLI 模組就叫這個名字），現在是 `recsys_tfb.pipelines.dataset.run_contract`。`[months] … cannot list its partitions` 那條警告也一樣。repo 裡沒有程式讀這個欄。
+> - **留在 CLI 的**：起 Spark、解析 catalog（`_resolve_catalog` 各指令共用）、A55 的判斷與退出、寫 manifest、移 `latest`。
+> - **更正上文「CLI 只留通用的部分：寫 manifest」**（審查的「本份哪裡寫錯」視角查出）：
+>   - 通用的只有寫檔的機制（`_write_manifest_stub`、`_write_pipeline_manifest`）。
+>   - 寫進去的內容是 dataset 專屬的：兩個指紋欄、variant 的目錄與 `variant_kind`，以及讀 `month_plans["test_model_input"]` 組出來的 `test_snap_dates_plan`。
+>   - 本票照上文把它們留在 CLI，所以 CLI 仍寫著 `test_model_input` 這個產物名。要搬是另一個決定。
+> - **本決定只管 dataset**：evaluation 指令的同類三件（版本 ID、month plan、注入）還在 `__main__.py`。這一份沒評估它們要不要搬。
+> - **既有、照原樣搬來的一件**：`source_fingerprints` 用條目的 `database`、`table` 自己拼表名，不像同一個模組裡的列分區那樣去問 dataset 物件（ADR-0008 §5 的做法）。所以兩張來源表都只能是 Hive 條目，否則開跑前就 `KeyError`。純搬移不改它。
+> - **模組名維持 `run_contract`**（品味決定，信心低）：
+>   - 考慮過 `run_scope`：同一個模組裡「scope」已經指 `partition_filter` 的範圍，一詞兩義。
+>   - 考慮過拆出 `run_versions`：month plan 與注入放不進這個名字。
+>   - 這個模組是照「CLI 在開跑前後向 dataset 問什麼」湊起來的。用角色名，比硬套一個只蓋得住一半內容的 concern 名更不誤導。找 month plan 的人，由 `month_plans.py` 的模組 docstring 指過來。
 > - `select_train_keys` 改名為 `select_sample_keys`，與 node 名一致。ADR 正文照慣例不改，所以 ADR-0004、0006、0008、0018 與本份決定 6 的正文仍寫舊名。
 
 ## 決定 12　`--only-test-months` 要求 train 版本的表已經落地

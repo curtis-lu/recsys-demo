@@ -12,7 +12,9 @@ The resulting plans reach the nodes through the **catalog**, as named datasets
 (``<artifact>_month_plan``), not through ``parameters``: a plan is runtime data
 read off the metastore, and declaring it as an ordinary node input is what puts
 "this node is incremental, and this is the plan it follows" on the pipeline
-definition where a reviewer can see it. See ADR-0007.
+definition where a reviewer can see it. See ADR-0007. The dataset command
+gets them through ``run_contract.month_plans_for_run``, which lists what has
+landed and calls :func:`build_month_plans` (ADR-0029 decision 11).
 
 **This module must not import pyspark** — pinned by S2 in
 ``docs/agents/architecture-constraints.md``. Every question here is answered from
@@ -179,8 +181,9 @@ _CONFIGURED_SNAP_DATES = {
 
 
 #: Dataset names whose ``snap_date`` partitions gate incremental processing.
-#: Authoritative: the CLI lists partitions for exactly these, builds one plan
-#: per entry, and injects them under :func:`month_plan_input` names.
+#: Authoritative: the dataset command lists partitions for exactly these,
+#: builds one plan per entry, and injects them under :func:`month_plan_input`
+#: names (``run_contract.month_plans_for_run`` and ``pipeline_inputs``).
 #:
 #: Derived, not written out a second time — a name here without a rule above
 #: would raise ``KeyError`` mid-build, so the two cannot drift apart.

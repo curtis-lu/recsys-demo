@@ -248,6 +248,9 @@ class TestCLI:
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
+            # Only the catalog the pipeline runs on is mocked: the month-plan
+            # listing builds its own in run_contract, over the mocked Spark,
+            # and finds no month landed.
             with patch("recsys_tfb.__main__.DataCatalog") as mock_catalog_cls, \
                     patch(
                         "recsys_tfb.utils.spark.get_or_create_spark_session",
@@ -3189,8 +3192,14 @@ class TestOnlyTestMonthsFlag:
 
     @staticmethod
     def _run_dataset(tmp_path, argv):
-        """Invoke the dataset command with Spark, the catalog and the runner
-        mocked; returns (result, the Pipeline the Runner was handed or None).
+        """Invoke the dataset command with Spark, the run's catalog and the
+        runner mocked; returns (result, the Pipeline the Runner was handed or
+        None).
+
+        The patched ``DataCatalog`` is ``__main__``'s, so only the catalog the
+        pipeline runs on is a mock. The month-plan listing and the train
+        version's checks build their own in ``run_contract`` over the mocked
+        Spark, and find no month landed: every month is still to be processed.
         """
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
@@ -3995,6 +4004,22 @@ class TestDatasetRegistersTheCandidateTable:
         )
 
         assert without.base_dataset_version != with_it.base_dataset_version
+
+    @pytest.mark.parametrize("declared", [True, False])
+    def test_the_base_manifest_records_its_fingerprint(self, tmp_path, declared):
+        """The base manifest is where a reader finds which candidate table
+        schema a version was built from. Undeclared, the key is left out
+        rather than written as null."""
+        _, seen = _run_dataset_command(
+            tmp_path, ["dataset"],
+            catalog_extra=_CANDIDATE_ENTRY if declared else None,
+        )
+
+        manifest = json.loads((
+            tmp_path / "data" / "dataset" / seen.base_dataset_version
+            / "manifest.json"
+        ).read_text())
+        assert ("candidate_feature_table_fingerprint" in manifest) is declared
 
 
 class TestInferenceRefusesTheCandidateTableA47:

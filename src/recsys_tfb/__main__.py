@@ -1316,16 +1316,6 @@ def dataset(
     feature_table_fp, candidate_fp = sources.feature_table, sources.candidate
     base_v, train_v = versions_for_run(params, params_dataset, sources)
 
-    # Logged here rather than in run_contract: these lines keep the logger
-    # they have always had, which a log filter may be keyed on.
-    if sources.candidate_declared:
-        logger.info("candidate_feature_table_fingerprint: %s (%d cols)",
-                    candidate_fp, len(sources.candidate_columns))
-    logger.info("feature_table_fingerprint: %s (%d cols)",
-                feature_table_fp, len(sources.feature_table_columns))
-    logger.info("base_dataset_version: %s", base_v)
-    logger.info("train_variant_id:     %s", train_v)
-
     runtime_params = {
         "base_dataset_version": base_v,
         "train_variant_id": train_v,
@@ -1390,8 +1380,7 @@ def dataset(
         from_node=from_node, only_node=only_node,
         dry_run=dry_run, list_nodes=list_nodes,
         extra_datasets=pipeline_inputs(
-            month_plans, only_test_months=only_test_months,
-            candidate_declared=sources.candidate_declared,
+            month_plans, sources, only_test_months=only_test_months,
         ),
         # The same plans again, keyed by artifact: a slice has to stop at
         # "complete for this run", and for these three that is a month

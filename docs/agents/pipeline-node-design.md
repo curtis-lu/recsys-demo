@@ -280,7 +280,7 @@ pipelines/<name>/
 兩個容易誤用的推論：
 
 - **「純模組（零 pyspark）」不是根層的判準。** `pipelines/dataset/steps/feature_columns.py` 是零 pyspark 的純模組，而它在 `steps/` 裡。純度是**模組層級**的性質、跟位置無關，要釘就用 AST 測試釘那一個模組。現況兩個純模組用了兩種掛法：`month_plans.py` 由 `architecture-constraints.md` S2 釘在 `tests/test_core/test_architecture_constraints.py`（直接掃描 ＋ 可達性，兩個測試缺一不可），`chunk_plans.py` 由自己的測試檔 `tests/test_pipelines/test_inference/test_chunk_plans.py` 釘（`test_no_pyspark_import` ＋ `test_no_project_import`）。
-- **一條 pipeline 根層可以沒有任何契約模組。** 那代表它沒有 pipeline 開跑前的對外契約，是資訊不是缺陷。dataset 有 `month_plans.py` 在根層，是因為 `__main__.py` 在 pipeline 開跑前就要算好月份計畫再注進 catalog（[ADR-0007](../adr/0007-month-plans-travel-through-the-catalog.md)）；training 有 `cache_sources.py`，同一個理由、同一個呼叫端（[ADR-0014](../adr/0014-training-modules-split-by-role.md)）；inference 的分塊計畫發生在 node 內，所以它根層只有 `pipeline.py` 與 `nodes.py`。
+- **一條 pipeline 根層可以沒有任何契約模組。** 那代表它沒有 pipeline 開跑前的對外契約，是資訊不是缺陷。dataset 根層有兩個：`run_contract.py`，`__main__.py` 在 pipeline 開跑前向它要版本、月份計畫與要注進 catalog 的東西，跑完再問它 train 版本落地了沒（[ADR-0029](../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 11）；`month_plans.py`，evaluation 指令也直接用它的月份計畫工具，inference 指令用它定義的候選層級表名稱（[ADR-0007](../adr/0007-month-plans-travel-through-the-catalog.md)）。training 有 `cache_sources.py`，理由同 `run_contract.py`、同一個呼叫端（[ADR-0014](../adr/0014-training-modules-split-by-role.md)）；inference 的分塊計畫發生在 node 內，所以它根層只有 `pipeline.py` 與 `nodes.py`。
 
 `steps/__init__.py` **不 re-export 任何東西**：`nodes.py` 逐模組 import，import 那一行就說出這個步驟來自哪個 concern。這條自 #234 起由 S3 的 `test_steps_packages_re_export_nothing` 擋著——四個 `steps/__init__.py` 只能有 docstring。
 

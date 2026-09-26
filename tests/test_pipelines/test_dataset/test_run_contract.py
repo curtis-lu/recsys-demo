@@ -1,27 +1,35 @@
-"""What the dataset command reads off the metastore about a run: the train
-version's tables (ADR-0029 decision 12), and the months each incremental
-artifact already has.
+"""What the dataset command asks this package about a run (ADR-0029
+decisions 11 and 12), tested without the command.
 
-For the train version, the listing goes through a real ``HiveTableDataset``;
-only the SparkSession under it is faked, answering ``SHOW PARTITIONS`` per
-physical table. So what is pinned is the scoping — which partitions count for
-this base, and which for this variant — not how the module happens to call
-the dataset.
+Where a listing is involved it goes through a real ``HiveTableDataset``; only
+the SparkSession under it is faked, answering ``SHOW PARTITIONS`` per physical
+table. So what is pinned is the scoping — which partitions count for this
+base, this variant, this time column — not how the module happens to call the
+dataset.
 
-The rest of the module — fingerprints, versions, the month plans, the DAG's
-injected inputs — is covered through the command, in ``tests/test_cli.py``.
+Pinned through the command instead, in ``tests/test_cli.py``: the dict
+:func:`pipeline_inputs` injects (``TestDatasetRegistersTheCandidateTable``,
+``TestMonthPlansReachTheCatalog``), because what matters there is the names the
+nodes read it back under.
 """
 
 import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
+
 from recsys_tfb.core.catalog import DataCatalog
+from recsys_tfb.core.versioning import compute_feature_table_fingerprint
 from recsys_tfb.pipelines.dataset.run_contract import (
+    SourceFingerprints,
     TrainVersionLanding,
     _collect_existing_snap_dates,
+    month_plans_for_run,
+    source_fingerprints,
     train_version_landing,
     unlanded_train_tables,
+    versions_for_run,
 )
 
 BASE, VARIANT = "b1111111", "v1111111"
@@ -198,3 +206,114 @@ class TestCollectExistingSnapDates:
         # Asserted because a silent skip is what makes this dangerous: the run
         # rebuilds a whole artifact and only this line says why.
         assert "preprocessed_feature_table" in caplog.text
+
+
+# --- Before the run: fingerprints, versions, month plans --------------------
+
+_FEATURES = [("entity_key", "string"), ("t", "date"), ("f1", "double")]
+_CANDIDATE_FEATURES = [
+    ("entity_key", "string"), ("t", "date"), ("item_key", "string"), ("c1", "int"),
+]
+_SOURCES = {
+    "feature_table": {
+        "type": "HiveTableDataset", "database": "src", "table": "features",
+    },
+}
+_WITH_CANDIDATE = {
+    **_SOURCES,
+    "candidate_feature_table": {
+        "type": "HiveTableDataset", "database": "src", "table": "candidate_features",
+    },
+}
+
+
+def _source_spark():
+    """A session whose ``spark.table`` answers each source table's schema."""
+    schemas = {
+        "src.features": _FEATURES, "src.candidate_features": _CANDIDATE_FEATURES,
+    }
+
+    def table(fqn):
+        fields = [
+            SimpleNamespace(name=n, dataType=SimpleNamespace(simpleString=lambda t=t: t))
+            for n, t in schemas[fqn]
+        ]
+        return SimpleNamespace(schema=SimpleNamespace(fields=fields))
+
+    spark = MagicMock()
+    spark.table.side_effect = table
+    return spark
+
+
+def _schema_params(time="t"):
+    return {"schema": {"columns": {
+        "time": time, "entity": ["entity_key"], "item": "item_key",
+    }}}
+
+
+class TestSourceFingerprints:
+    def test_the_feature_table_fingerprint_covers_every_column_in_order(self):
+        """Every column, in the table's order, under Spark's type name: the
+        column order becomes the model's feature order, so it is identity."""
+        sources = source_fingerprints(_source_spark(), _SOURCES)
+
+        assert sources.feature_table == compute_feature_table_fingerprint(_FEATURES)
+
+    def test_a_declared_candidate_table_is_fingerprinted_from_its_own_schema(self):
+        sources = source_fingerprints(_source_spark(), _WITH_CANDIDATE)
+
+        assert sources.candidate_declared
+        assert sources.candidate == compute_feature_table_fingerprint(
+            _CANDIDATE_FEATURES,
+        )
+
+    def test_undeclared_there_is_no_candidate_fingerprint(self):
+        sources = source_fingerprints(_source_spark(), _SOURCES)
+
+        assert sources.candidate is None
+        assert not sources.candidate_declared
+
+
+class TestVersionsForRun:
+    PARAMS_DATASET = {"dataset": {"sample_ratio": 0.1}}
+    SOURCES = SourceFingerprints(feature_table="f0000000", candidate=None)
+
+    def test_the_schema_moves_the_base_version_and_not_the_variant(self):
+        a = versions_for_run(_schema_params("t"), self.PARAMS_DATASET, self.SOURCES)
+        b = versions_for_run(_schema_params("t2"), self.PARAMS_DATASET, self.SOURCES)
+
+        assert a.base_dataset_version != b.base_dataset_version
+        assert a.train_variant_id == b.train_variant_id
+
+
+class TestMonthPlansForRun:
+    def test_the_listing_reads_the_configured_time_column(self):
+        """``schema.time`` names the partition column. A deployment whose time
+        column is not ``snap_date`` must still see its landed months, or every
+        run rebuilds the whole test chain."""
+        entry = {
+            "type": "HiveTableDataset",
+            "database": "ml_recsys",
+            "table": "recsys_prod_test_model_input",
+            "external": False,
+            "columns": "auto",
+            "partition_filter": {"base_dataset_version": BASE},
+            "partition_cols": [{"name": "as_of", "type": "STRING"}],
+        }
+        params = {
+            **_schema_params("as_of"),
+            "dataset": {
+                "train_snap_dates": ["2025-12-31"],
+                "test_snap_dates": ["2026-01-31", "2026-02-28"],
+            },
+        }
+
+        with _metastore(recsys_prod_test_model_input=[
+            f"base_dataset_version={BASE}/as_of=2026-01-31",
+        ]):
+            plans = month_plans_for_run(
+                {"test_model_input": entry}, params, rebuild=(),
+            )
+
+        assert plans["test_model_input"].skipped == [pd.Timestamp("2026-01-31")]
+        assert plans["test_model_input"].to_process == [pd.Timestamp("2026-02-28")]
