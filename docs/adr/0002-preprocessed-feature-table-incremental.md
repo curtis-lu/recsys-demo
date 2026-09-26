@@ -6,10 +6,10 @@ date: 2026-07-31
 # `preprocessed_feature_table` 改為增量可擴充
 
 > **實作狀態（2026-08-19 核對）**：已落地，但**套用方式後來改過**——差集邏輯
-> （`plan_incremental_snap_dates`）現住 `pipelines/dataset/month_plans.py:62`，計畫由 CLI 算一次、
+> （`plan_incremental_snap_dates`）現住 `pipelines/dataset/month_plans.py`，計畫由 CLI 算一次、
 > 走 catalog 交給節點（[ADR-0007](0007-month-plans-travel-through-the-catalog.md)）。下方「差集
 > 邏輯集中在單一 helper」那段講的實作位置已過時，該處另有標記。後果第二條要求的 predicate 也已
-> 落地為 **A21**（`core/consistency.py:116`）。
+> 落地為 **A21**（`core/consistency.py` 的 `resolved_rebuild_dates`）。
 
 dataset pipeline 原本把「config 列出的全部 snap_date」整批重算一次。[ADR-0001](0001-test-dates-out-of-dataset-version-identity.md) 讓新增 test 月份不再翻號之後，這個行為就變成純粹的浪費 ── 既有月份的 partition 會被重算成逐位元相同的內容。
 

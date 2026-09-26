@@ -35,7 +35,7 @@ date: 2026-07-31
 
 - `val_snap_dates` 的資料經 `val_parquet_handle` 進入 LightGBM 的 `valid_sets` 並驅動 `early_stopping`（`models/lightgbm_adapter.py:81-102`），直接決定 `num_iterations` ── 決定模型本身。
 - `calibration_snap_dates` 曾決定校準後的模型輸出；calibration 已隨 #411 移除，這個鍵與它所屬的第三層版本身分（`calibration_variant_id`）已不存在。論證因此只剩 train／val 兩層仍是模型輸入，不影響 test 剝除的結論。
-- `test_snap_dates` 不進任何模型擬合。而且這個原則在本 repo **早已被明文承認、只是沒有貫徹到版本層**：`fit_preprocessor_metadata` 刻意只吃 `train_snap_dates`，`collect_dataset_snap_dates`（`pipelines/dataset/month_plans.py`）的 docstring 寫著 "deliberately uses only train_snap_dates to prevent val/test leakage into the category-mapping fit"。（#170 之後，`fit_preprocessor_metadata` 自己也把這件事寫成具名決策——`pipelines/dataset/nodes.py:471` 的 `Decision — no leakage` 註解。）
+- `test_snap_dates` 不進任何模型擬合。而且這個原則在本 repo **早已被明文承認、只是沒有貫徹到版本層**：`fit_preprocessor_metadata` 刻意只吃 `train_snap_dates`，`collect_dataset_snap_dates`（`pipelines/dataset/month_plans.py`）的 docstring 寫著 "deliberately uses only train_snap_dates to prevent val/test leakage into the category-mapping fit"。（#170 之後，`fit_preprocessor_metadata` 自己也把這件事寫成具名決策——`pipelines/dataset/nodes.py` 裡 `fit_preprocessor_metadata` 的 `Decision — no leakage` 註解。）
 
 驗證過的支撐事實：
 

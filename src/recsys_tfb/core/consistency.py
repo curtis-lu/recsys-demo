@@ -1024,8 +1024,9 @@ from recsys_tfb.core.schema import (
 #: ``parameters`` key the CLI hands the A21-validated ``--rebuild-dates`` value
 #: to nodes under (values normalised to ``YYYY-MM-DD`` by
 #: :func:`resolved_rebuild_dates`). It lives beside the predicate that produces
-#: the value because two pipelines read it — dataset's test-branch nodes and
-#: training's cache/predict nodes — and pipelines never import each other.
+#: the value because two pipelines read it — training's cache/predict nodes
+#: and inference's scoring node — and pipelines never import each other.
+#: Dataset does not: its month plans take ``--rebuild-dates`` from the CLI.
 REBUILD_SNAP_DATES_KEY = "_rebuild_snap_dates"
 
 #: ``parameters`` key the training command hands ``compute_test_metrics`` the

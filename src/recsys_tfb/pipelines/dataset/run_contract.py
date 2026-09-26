@@ -177,7 +177,8 @@ def pipeline_inputs(
     """What the dataset DAG reads that no catalog entry supplies.
 
     Registered by the command beside the catalog. Only facts known before the
-    run that no node can work out for itself (ADR-0029 decision 2).
+    run that no node can work out for itself: rule 15 of
+    ``docs/agents/pipeline-node-design.md`` (ADR-0029 decision 2).
     """
     candidate_declared = sources.candidate_declared
     return {

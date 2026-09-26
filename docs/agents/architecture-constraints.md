@@ -155,12 +155,14 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 ## F7. 我們有、Kedro 沒有的抽象
 
+行數是 2026-09-26 用 `wc -l` 量的，會隨改動變，要用就重量。
+
 | 模組 | 行數 | 解決什麼 |
 |---|---|---|
-| `core/consistency.py` | 2036 | 不變量 predicate 的**唯一真實來源**（A 系列 config-static／B 系列資料閘） |
-| `core/versioning.py` | 425 | 三層 hash 版本 ID |
-| `core/logging.py` | 373 | `RunContext` 與結構化日誌 |
-| `core/schema.py` | 232 | 欄位角色集中定義 |
+| `core/consistency.py` | 6044 | 不變量 predicate 的**唯一真實來源**（A 系列 config-static／B 系列資料閘） |
+| `core/versioning.py` | 557 | 三層 hash 版本 ID |
+| `core/logging.py` | 376 | `RunContext` 與結構化日誌 |
+| `core/schema.py` | 674 | 欄位角色集中定義 |
 | `core/safe_eval.py` | 141 | HPO 宣告式搜尋空間的受限求值（stdlib `ast`，無額外套件） |
 
 其中 `consistency.py` 值得單獨講：**本框架的正確性重心不在 node 契約，而在集中式 predicate**。量體對比很直白——`consistency.py` 2036 行，`node.py` 69 行。Kedro 把正確性押在「node 是純函式且輸入輸出宣告清楚」，我們押在「所有不變量集中成可測試的 predicate」。
@@ -196,7 +198,7 @@ print(n, dict(b))"
 | 121–160 | 4 |
 | > 160 | 3 |
 
-最長的五個：`predict_and_write_scores` 263 行（`inference/nodes.py`）、`tune_hyperparameters` 185 行（`training/nodes.py`）、`predict_and_write_test_predictions` 179 行（`training/nodes.py`）、`validate_predictions` 146 行（`inference/nodes.py`）、`prepare_eval_data` 143 行（`evaluation/nodes_spark.py`）。
+最長的五個：`predict_and_write_scores` 263 行（`inference/nodes.py`）、`tune_hyperparameters` 185 行（`training/nodes.py`）、`predict_and_write_test_predictions` 179 行（`training/nodes.py`）、`validate_predictions` 146 行（`inference/nodes.py`）、`prepare_eval_data` 143 行（當時在 `evaluation/nodes_spark.py`，evaluation 重整後在 `evaluation/nodes.py`）。
 
 > **⚠ 上面那組數字是三張票合併後重量的結果，不是任何一張單獨的結果。** #229、#232、#230 三次改動都從 57／56 那個基準分支出去，各自在自己的 PR 裡量過一次；**下面三段引言記的是各自的 delta，把它們相加會得到錯的數字**。合併後的真值只有一個來源：重跑上面那段指令。這正是「別引用它，重量一次」在同一天內就被驗證了一次的實例。
 >
@@ -230,7 +232,7 @@ print(n, dict(b))"
 
 ## F10. 中介產物命名
 
-`conf/base/catalog.yaml` 目前 46 個條目（2026-08-31 量：`yaml.safe_load` 後的 top-level key 數），命名全部帶業務語意，零 `tmp`／`_v2`／`_final`／`_new` 這類殘留。
+`conf/base/catalog.yaml` 目前 52 個條目（2026-09-26 量：`yaml.safe_load` 後的 top-level key 數），命名全部帶業務語意，零 `tmp`／`_v2`／`_final`／`_new` 這類殘留。
 
 新增 catalog 條目時對齊既有命名感覺即可——**這是事實不是約束**，因為禁用字清單只抓得到最粗糙的一類命名問題，真正的「有業務語意」是判斷題，機械檢查給不了。
 
@@ -376,9 +378,9 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py:127-1
 
 **內容。** S1 只擋位置。一個 12 行的轉手 node 加一個裝著四個決策的 helper **完全滿足 S1**。
 
-內容那一半由 [`pipeline-node-design.md`](pipeline-node-design.md) 定義：node 邊界、node body 的形狀、決策與機制的分界、`log_step` 的範圍、`steps/` 與根層的判準、命名與 docstring。那份十三條裡只有兩條有部分機械檢查，其餘靠該檔開頭那張規則總表 ＋ code review。這是 ADR-0008 已知的最大殘留風險，不是疏漏。
+內容那一半由 [`pipeline-node-design.md`](pipeline-node-design.md) 定義：node 邊界、node body 的形狀、決策與機制的分界、`log_step` 的範圍、`steps/` 與根層的判準、命名與 docstring、讀取寫明月份、什麼可以從 CLI 注入、各 split 用同一個機制、資料閘的形狀、何時翻 dataset 的格式版本。那份十八條裡只有三條有部分機械檢查，其餘靠該檔開頭那張規則總表 ＋ code review。這是 ADR-0008 已知的最大殘留風險，不是疏漏。
 
-那份是判準的唯一真實來源，適用於**每一條** pipeline（S1 只管 dataset）；ADR-0008 保留為 dataset 那次裁決的記錄與完整論證。**已知的界外違例登記在該檔的〈已登記的例外〉**（evaluation 尚未依判準重整、training 的 7 個 diagnosis node 刻意不搬），看到它們不必以為判準是裝飾。
+那份是判準的唯一真實來源，適用於**每一條** pipeline（S1 只管 dataset）；ADR-0008 保留為 dataset 那次裁決的記錄與完整論證。**已知的界外違例登記在該檔的〈已登記的例外〉**（training 的 7 個 diagnosis node 刻意不搬；dataset 的 `split_train_keys` 一個 node 兩個輸出、三個 build 共用 `build_model_input`），看到它們不必以為判準是裝飾。
 
 ## S2. `pipelines/dataset/month_plans.py` 不得 import pyspark
 
@@ -527,7 +529,7 @@ pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity
 | 1 | 一個 `schema` 設定 dict 底下不得直接出現角色名（`time`／`entity`／`item`／`label`／`score`／`rank`） | 它們必須在 `columns` 底下才讀得到 |
 | 2 | 任何深度都不得宣告 `identity_columns`／`query_group_columns`／`base_key_columns` | 三個都是 `get_schema` **推導**出來的（`core/schema.py::_DERIVED_KEYS`），不是設定鍵。宣告了一律安靜被丟掉，而想宣告 `query_group_columns` 的人問的正是 [ADR-0025](../adr/0025-query-group-widened-by-occasion-role.md) 用角色回答的那一題 |
 
-**第 2 條擋的是第 1 條的半吊子修法。** 只有第 1 條的話，把 `identity_columns` 一起包進 `columns` 就通過稽核了——但 `get_schema` 的 `if k in _ROLE_KEYS` 過濾照樣把它丟掉，護欄等於祝福了一個假修法。這不是假想：`tests/test_pipelines/test_evaluation/test_nodes_spark.py` 在本條上線前就已經**有 8 處**落在這個形狀（`columns` 寫對、裡面照樣宣告 `identity_columns`），而票上原本的掃描腳本看不到它們——那支腳本要求角色名直接出現在 `schema` 底下，寫對 `columns` 的站點就再也不會被列出來。
+**第 2 條擋的是第 1 條的半吊子修法。** 只有第 1 條的話，把 `identity_columns` 一起包進 `columns` 就通過稽核了——但 `get_schema` 的 `if k in _ROLE_KEYS` 過濾照樣把它丟掉，護欄等於祝福了一個假修法。這不是假想：`tests/test_pipelines/test_evaluation/test_nodes_spark.py`（今天改名為 `test_nodes.py`）在本條上線前就已經**有 8 處**落在這個形狀（`columns` 寫對、裡面照樣宣告 `identity_columns`），而票上原本的掃描腳本看不到它們——那支腳本要求角色名直接出現在 `schema` 底下，寫對 `columns` 的站點就再也不會被列出來。
 
 **`categorical_values` 是 `columns` 的合法兄弟**，`get_schema` 從 `schema.categorical_values` 讀它，所以它留在 `schema` 這一層是對的，不要一起包進 `columns`。
 

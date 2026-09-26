@@ -68,7 +68,8 @@ dataset rebuilds under the new ID; ``model_version`` and HPO's ``search_id``
 contain base, so every deployment retrains, and until it has, adding an
 evaluation month to the model in service does not work
 (``docs/operations/user-guides/adding-an-eval-month.md``). Nothing checks
-this mechanically.
+this mechanically; rule 18 of ``docs/agents/pipeline-node-design.md`` states
+it where whoever changes a dataset node reads first.
 
 Also provides manifest generation, symlink management, and version resolution
 for dataset, training, and inference pipelines.

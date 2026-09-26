@@ -449,6 +449,25 @@ CLI 只留通用的部分：寫 manifest、執行 pipeline。
 
 另外，把該文件裡 6 處過期的行號改成寫函式名。
 
+> **實作註記（2026-09-26，#467）**：
+> - **多寫了一條規則 18**：程式改了 dataset 落地的內容、某個部署的設定卻沒動時，把 `DATASET_ARTIFACT_FORMAT_VERSION` 加 1。它來自決定 15 與它的實作註記，原本只寫在 `core/versioning.py` 的模組 docstring；改 dataset node 的人照 `CLAUDE.md` 的路由先讀的是 `pipeline-node-design.md`，所以也寫進那裡。`pipeline-refactor-process.md` 規則 8 講「`conf/` 的 diff 是空的＝版本中性」的地方，補了一句指過去。使用者 2026-09-26 同意（#467 的留言）。
+> - **多登記了一筆例外**：三個 build node 把組裝交給共用的 `build_model_input`，它裝了好幾個決策（違反規則 3、5）。理由是四個 split 的決策完全相同、只差月份，拆成四份會違反規則 16。使用者 2026-09-25 同意（#467 的留言）。上文登記的 `split_train_keys` 照原樣登記，式子改寫成 #462 之後的樣子（`unit_drawn_under_ratio` 與它的否定）。
+> - **規則 17 的字面給政策與前置檢查留了位置**（照決定 7 實作註記最後一條的提醒）：node body 寫四件事，查什麼、交給 predicate、這個閘的政策、前置檢查。
+> - **規則 14 的「怎麼確認」照〈決定 1–3 實作後的更正〉第 1 條寫**：執行前 `explain()` 的 `dynamicpruning` 不算證據，要看執行後讀了幾個分區。
+> - **過期行號只剩 4 處**，不是 6 處：規則 5 那兩處（`:202-`、`:383-`）在 #460、#462 改寫那一節時已經改成函式名。
+> - #406 在 #465 收尾時已經關票，留言逐項對應了決定 3、7 與 ADR-0025，本票不必再關。
+> - **更正上表「規則 14 誰擋得住：沒人」**（沒看過這一輪的讀者查出）：#460 加的 `tests/test_pipelines/test_dataset/test_month_scoped_reads.py` 在 analyzed plan 上斷言各 build 的右表、各丟組 node 的 `label_table` 在 join 前有月份篩選。它釘住的是當時的讀取點，新的讀取點沒人擋，所以寫成「部分擋得住」。驗證方法也照它改：看 analyzed plan（程式寫了什麼），不看 optimized plan。`pipeline-node-design.md` 裡「有部分機械檢查」的規則因此是 3 條，`CLAUDE.md` 與 `architecture-constraints.md` 的條數照改。
+> - **規則 14 的範圍比上表窄**：上表寫「讀來源表或落地中間表時」。但 `sample_keys`、`train_keys`、`val_keys` 的月份已經由版本 ID 釘住，程式刻意不篩，而且寫了理由（`build_val_model_input` 的 docstring）。所以規則寫成「可能裝著這一步用不到的月份的表」：來源表，加上 `INCREMENTAL_DATASETS` 裡的增量產物。
+> - **規則 17 的範圍**：只管判斷寫在 `core/consistency.py` B 系列的閘（node 規則 11 那張表的第二列）。inference 的 `validate_predictions` 檢查的是 node 自己的輸出，屬於規則 11 第三列，不歸規則 17 管。
+> - **決定 2 有一句沒有照做**：「每個 node 裡的候選表分支縮成一行具名步驟的呼叫」。實際上 `build_model_input` 的候選表分支有 15 行（讀、編碼、join，各有 `# Decision —`），精度閘的約 60 行。規則 15 照現況寫，不重申這句。
+> - **盤點 note 第三節 23 處的處理**：
+>   - 已經被 #460～#466 順手修掉、不用再動：第 4、6、8、11、17 列。第 8 列（`pipeline.py` 的「the other ten」）今天剛好又對了：17 個 node 減掉 `ONLY_TEST_MONTHS_NODES` 的 7 個。
+>   - 活文件與 docstring 直接改：第 1、2、3 列（`docs/pipelines/dataset.md`）、第 9、10 列（`pipeline.py` 的兩段註解，第 10 列連同 `test_pipeline.py` 裡同一句話）、第 12 列（`nodes.py` 模組 docstring）、第 13 列（`month_plans.py`）、第 14 列（`core/consistency.py` 的 `REBUILD_SNAP_DATES_KEY` 註解）、第 20、21 列（`architecture-constraints.md` 的 F7、F10，重量並標日期）、第 22 列（`pipeline-refactor-process.md` 開頭、`architecture-constraints.md` 三處）。
+>   - ADR 裡的行號改成函式名：第 7 列（ADR-0001、0002、0011）。只換定位，不改內容。
+>   - ADR 加修訂：第 15 列（ADR-0012）、第 16 列（ADR-0013，補記 #281 加進清單的精度閘）、第 18 列（ADR-0006、ADR-0021）、第 19、22 列（ADR-0008）。
+>   - 第 5 列見上文；第 23 列（#406）見上文。
+>   - 查的時候多找到同一件事的兩處：`architecture-constraints.md` 的 F8 與 S5 的說明還寫著 `evaluation/nodes_spark.py`、`test_nodes_spark.py`，一起改了。
+
 ## 決定 15　`base_dataset_version` 加一個「dataset 產物格式版本」常數
 
 **問題**：`base_dataset_version` 是拿設定算出來的雜湊，程式碼改了它不會變。所以程式改了落地內容、設定卻沒動時，新舊兩版程式寫出的表會掛在同一個版本 ID 下。test 是增量的，這時同一張 `test_keys`、同一個版本 ID 底下，舊月份是舊程式寫的（沒丟過組），新月份是新程式寫的（丟過組）。決定 9 只會翻「設定檔裡寫了 `carry_columns`」的部署，蓋不住這件事。

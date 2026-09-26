@@ -230,3 +230,8 @@ grep 會被那句解釋「為什麼不用 `df.count()`」的 docstring 自己命
 ## 修訂（2026-09-26，ADR-0029）：檔尾讀取器換了位置
 
 上文提到的 `utils/parquet_stats.py` 搬到 `pipelines/dataset/steps/footer_facts.py`，讀法沒變。[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 7 讓 B8 與 B10 共用一個「這次寫了哪些檔、檔尾記了什麼」的模組，而它在 `src/` 裡只有 dataset 在用。#465 實作。
+
+
+## 修訂（2026-09-26，#467）：`filter_groups_with_positives` 已不存在
+
+上文三處引用的 `filter_groups_with_positives` 已經拆掉。現在丟無正例 query group 的是三個 node：`filter_train_keys`、`filter_val_keys`、`filter_test_keys`（`pipelines/dataset/nodes.py`），三者都在 keys 上、建表之前丟（[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 4）。「整組留或整組丟」的抽樣在 `pipelines/dataset/steps/model_input.py` 的 `keep_zero_positive_groups_drawn_under_ratio`。上文說的性質「只丟整組、不丟組內 item」不變。

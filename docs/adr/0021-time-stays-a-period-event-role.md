@@ -56,3 +56,8 @@ date: 2026-09-16
 
 - 程式裡已有數十處以 `"event"` 當結構化 log 的欄位名（例：`core/runner.py` 的 `extra={"event": "node_started"}`）。兩者不互相干擾，但搜尋時會混在一起——程式裡取這個角色時，變數名用 `event_col`。
 - 「事件紀錄」原本容易被拿來指往回算特徵的原始紀錄——那個一律改稱「行為紀錄」（見 `CONTEXT.md`）。
+
+
+## 修訂（2026-09-26，#467）
+
+〈背景〉那張表「分組」一列引用的 `pipelines/dataset/nodes.py::filter_groups_with_positives` 已經拆掉。query group 的定義在 `core/schema.py` 的 `get_schema`（`query_group_columns`）；按 query group 丟無正例組的是 `filter_train_keys`、`filter_val_keys`、`filter_test_keys`（[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 4）。

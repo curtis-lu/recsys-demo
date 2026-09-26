@@ -145,3 +145,7 @@ Out of Scope 那一行的問題**不是「沒附理由」**（該清單有數項
 ### 修訂（2026-09-25，ADR-0029）
 
 〈這個論證的已知反例〉那一段（`--only-test-months` 撞上抽樣設定改動時，training 靜默讀到 0 列，#334）改為要攔：[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 12 要求這個模式開跑前，向 metastore 確認目前的 train variant 在 `train_model_input` 底下已經有分區（不看 manifest：切片執行也會把它寫成 `completed`），跑完之後也只在該 variant 有分區時，才把 manifest 寫成 `completed`、把 `train_variants/latest` 指過去。〈後果〉第一條不變：這是擋下，不是自動補建 train／val。
+
+### 修訂（2026-09-26，#467）
+
+上文的 calibration 註記寫「pipeline 現在固定 15 個節點，加一個 `test_snap_dates` 月份全量重算的是八個」。[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 之後是 17 個節點，全量重算的是 10 個：全部節點扣掉 `ONLY_TEST_MONTHS_NODES` 的 7 個。多出來的是 `filter_train_keys` 註冊的兩個 node（#429 起）；`filter_val_model_input` 換成了 `filter_val_keys`。結論不變：這些重算是浪費，增量要掛在執行層。這個數字跟著 `ONLY_TEST_MONTHS_NODES` 變，要知道現況，數 `pipelines/dataset/pipeline.py`。
