@@ -18,7 +18,7 @@ from recsys_tfb.pipelines.dataset.nodes import (
     filter_train_keys,
     fit_preprocessor_metadata,
     select_test_keys,
-    select_train_keys,
+    select_sample_keys,
     select_val_keys,
     validate_data_consistency,
 )
@@ -91,8 +91,8 @@ class TestKeysAreTheSqlCombinedKeys:
         """The draw hashes identity; a combined value equal to the SQL's is
         the same hash, so the same rows survive."""
         raw, combined = _split(spark, _pool_records())
-        got = select_train_keys(raw, _params())
-        want = select_train_keys(combined, _COMBINED_PARAMS)
+        got = select_sample_keys(raw, _params())
+        want = select_sample_keys(combined, _COMBINED_PARAMS)
         assert "campaign_id" not in got.columns
         assert _rows(got) == _rows(want)
         # The draw really dropped rows, so equality is not "both kept all".

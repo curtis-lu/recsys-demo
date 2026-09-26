@@ -301,7 +301,7 @@ Layer 1 — config-static (implemented here; aggregated by
   deleting one config line silently turns off both verdicts the check produces:
   duplicate keys and the NULL key columns whose diagnosis issue #289 added.
   ADR-0006 records the accident already happening once: ``feature_table`` had a
-  primary key and no ``quality_checks``, so ``select_train_keys``'s comment
+  primary key and no ``quality_checks``, so ``select_sample_keys``'s comment
   ("PK enforced upstream by source_etl's max_duplicate_key_ratio") was true for
   ``sample_pool`` and false for ``feature_table``, unnoticed for half a year.
   Scope is those three tables and not "every table with a ``primary_key``":
@@ -3076,7 +3076,7 @@ def dataset_source_quality_check_errors(parameters: dict) -> list[str]:
     both the duplicate check and the NULL diagnosis (issue #289) with nothing to
     show for it. ADR-0006 records this exact accident already happening once:
     ``feature_table`` declared a primary key and no ``quality_checks``, so
-    ``select_train_keys``'s comment ("PK enforced upstream by source_etl's
+    ``select_sample_keys``'s comment ("PK enforced upstream by source_etl's
     max_duplicate_key_ratio", ``pipelines/dataset/nodes.py``) was true of
     ``sample_pool`` — the table it is written about — and false of
     ``feature_table``, for half a year.
@@ -5448,7 +5448,7 @@ def train_snap_dates_errors(parameters: dict) -> list[str]:
     wording the others do not:
 
     * **absent** — three sites index this key bare
-      (``select_train_keys``, ``collect_dataset_snap_dates``,
+      (``select_sample_keys``, ``collect_dataset_snap_dates``,
       ``fit_preprocessor_metadata``), so today it is a raw ``KeyError`` raised
       inside a Spark node: 2-4 minutes of cold start before a message that
       names neither the config key nor the fix.
@@ -5456,7 +5456,7 @@ def train_snap_dates_errors(parameters: dict) -> list[str]:
       raise. They walk it character by character and try to read ``"2"`` as a
       date.
     * **empty** — the branch with no downstream guard at all. An empty month
-      list matches no row (``months_filter_as_date``), so ``select_train_keys``
+      list matches no row (``months_filter_as_date``), so ``select_sample_keys``
       draws nothing and the fit reads no vocabulary, and nothing at those two
       steps raises. A24 cannot see it: an empty set overlaps nothing.
       ``split_train_keys``' degenerate guard (ADR-0005) only fires when

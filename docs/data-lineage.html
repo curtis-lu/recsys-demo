@@ -473,7 +473,7 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
   <div class="meta"><b>產生</b>：source_etl · sample_pool_etl（sample_pool.sql）　|
   <b>下游</b>：dataset（validate_data_consistency、select_train/val/test_keys）、evaluation（prepare_eval_data，<code>--post-training</code> 時取分群欄）　|
   <b>partition</b>：snap_date</div>
-  <div class="grain"><span class="gtag g-check">有檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>）　|　<b>實體主鍵</b>：<code>(time, entity, item)</code>（來源表，無版本欄）　|　唯一性只在 source_etl 產出時檢查：sample_pool_etl 寫完每個 <code>snap_date</code> 的 partition <b>之後</b>，才比對 config 宣告的 <code>primary_key</code>（現行宣告與上面的實體主鍵相同，框架不驗這件事）的重複率（<code>max_duplicate_key_ratio</code>，現行 config 為 0.0；是「≤ 閾值即過」，不是保證零重複），超過即中止這次 ETL——但<b>那個 partition 已經寫進表裡，不會被回滾</b>，所以後續單獨執行的 dataset 仍讀得到它。重複率的分母只算主鍵無 NULL 的列（NULL 由 <code>primary_key_not_null</code> 另外報）。dataset 讀取時不重驗、也不去重：<code>select_train_keys</code>、<code>select_val_keys</code>、<code>select_test_keys</code> 都直接沿用，重複會原樣帶進各 split 的 keys（val_keys／test_keys 在 2026-09 之前自己去重，ADR-0029 決定 6 拿掉了）；自備表不經過 source_etl 的檢查，由上游負責。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
+  <div class="grain"><span class="gtag g-check">有檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>）　|　<b>實體主鍵</b>：<code>(time, entity, item)</code>（來源表，無版本欄）　|　唯一性只在 source_etl 產出時檢查：sample_pool_etl 寫完每個 <code>snap_date</code> 的 partition <b>之後</b>，才比對 config 宣告的 <code>primary_key</code>（現行宣告與上面的實體主鍵相同，框架不驗這件事）的重複率（<code>max_duplicate_key_ratio</code>，現行 config 為 0.0；是「≤ 閾值即過」，不是保證零重複），超過即中止這次 ETL——但<b>那個 partition 已經寫進表裡，不會被回滾</b>，所以後續單獨執行的 dataset 仍讀得到它。重複率的分母只算主鍵無 NULL 的列（NULL 由 <code>primary_key_not_null</code> 另外報）。dataset 讀取時不重驗、也不去重：<code>select_sample_keys</code>、<code>select_val_keys</code>、<code>select_test_keys</code> 都直接沿用，重複會原樣帶進各 split 的 keys（val_keys／test_keys 在 2026-09 之前自己去重，ADR-0029 決定 6 拿掉了）；自備表不經過 source_etl 的檢查，由上游負責。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
   <table class="sc">
     <tr><th>欄位</th><th>型別</th><th>角色 / 說明</th></tr>
     <tr><td>snap_date</td><td>date</td><td><span class="role">time</span></td></tr>
@@ -575,7 +575,7 @@ training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 ev
 
 <div class="card" id="sample_keys">
   <h4>sample_keys <span class="badge b-hive">Hive</span><span class="vl vl-train">train-variant</span></h4>
-  <div class="meta"><b>產生</b>：dataset · select_train_keys（節點名 <code>select_sample_keys</code>；對 train 期 sample_pool 做分層抽樣，sample_ratio + overrides）　|
+  <div class="meta"><b>產生</b>：dataset · select_sample_keys（對 train 期 sample_pool 做分層抽樣，sample_ratio + overrides）　|
   <b>下游</b>：dataset（split_train_keys）　|　<b>partition</b>：base_dataset_version / train_variant_id / snap_date</div>
   <div class="grain"><span class="gtag g-none">框架不檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>；<code>sample_pool</code> 的列子集）　|　<b>實體主鍵</b>：<code>(time, entity, item)</code>，另含版本欄 <code>base_dataset_version</code>、<code>train_variant_id</code>（不同抽樣變體落在不同 partition，不互相覆寫）　|　框架不檢查、由上游負責：本節點不去重，唯一性直接沿用 <code>sample_pool</code>；抽樣只會減少列、不會新增，所以 sample_pool 的重複會原樣帶進來。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
   <p class="sub">identity + carry 欄（<code>carry_columns</code> 指定）。抽樣決定性：<code>crc32(identity | site | seed) % BUCKETS &lt; ratio·BUCKETS</code>。</p>

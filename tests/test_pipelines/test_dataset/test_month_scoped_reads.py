@@ -29,7 +29,7 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.pipelines.dataset.month_plans import SnapDatePlan
 from recsys_tfb.pipelines.dataset.nodes import (
     fit_preprocessor_metadata,
-    select_train_keys,
+    select_sample_keys,
     select_val_keys,
     validate_data_consistency,
 )
@@ -388,7 +388,7 @@ class TestAStringTimeColumnReadsLikeADateOne:
         assert items == _ITEMS
 
     @pytest.mark.parametrize("select, months", [
-        (select_train_keys, _TRAIN), (select_val_keys, _VAL),
+        (select_sample_keys, _TRAIN), (select_val_keys, _VAL),
     ])
     def test_key_selection_reads_its_months(self, spark, time_type, select, months):
         keys = select(_sample_pool(spark, time_type), _params())

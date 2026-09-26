@@ -2695,56 +2695,6 @@ class TestThePartitionListingIsVersionScoped:
         ]
 
 
-class TestCollectExistingSnapDates:
-    def _catalog(self, listings):
-        catalog = DataCatalog()
-        for name, specs in listings.items():
-            dataset = MagicMock()
-            dataset.existing_partition_values.return_value = specs
-            catalog.add(name, dataset)
-        return catalog
-
-    def test_asks_each_dataset_object_for_its_own_partitions(self):
-        from recsys_tfb.__main__ import _collect_existing_snap_dates
-
-        out = _collect_existing_snap_dates(
-            self._catalog({
-                "test_keys": [{"as_of": "2026-01-31"}],
-                "test_model_input": [
-                    {"as_of": "2026-02-28", "prod_name": "fund_stock"},
-                ],
-            }),
-            time_col="as_of",
-        )
-
-        # time_col is threaded through, not hardcoded: the framework's time
-        # column is configurable via schema.time.
-        assert out == {
-            "test_keys": ["2026-01-31"],
-            "test_model_input": ["2026-02-28"],
-        }
-
-    def test_a_dataset_that_cannot_list_partitions_is_rebuilt_in_full(self, caplog):
-        from recsys_tfb.__main__ import _collect_existing_snap_dates
-
-        catalog = self._catalog({"test_keys": [{"snap_date": "2026-01-31"}]})
-        # A ParquetDataset has no existing_partition_values; absent from the
-        # result means build_month_plans reads it as "nothing has landed".
-        catalog.add("preprocessed_feature_table", SimpleNamespace())
-
-        with caplog.at_level(logging.WARNING):
-            out = _collect_existing_snap_dates(catalog, time_col="snap_date")
-
-        # Exact, not "not in": an absent key and a `[]` value are the same
-        # answer to build_month_plans but not the same behaviour here, and
-        # `test_model_input` (registered nowhere at all) must take the same
-        # route rather than raising.
-        assert out == {"test_keys": ["2026-01-31"]}
-        # Asserted because a silent skip is what makes this dangerous: the run
-        # rebuilds a whole artifact and only this line says why.
-        assert "preprocessed_feature_table" in caplog.text
-
-
 class TestRebuildSliceWarning:
     def test_names_both_flags_and_the_months(self):
         from recsys_tfb.__main__ import _format_rebuild_slice_warning

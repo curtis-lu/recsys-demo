@@ -136,7 +136,7 @@ AST 掃過，本 pipeline 沒有「宣告了但函式沒讀」的參數——inf
   <li><b>增量是從哪來的：月份計畫。</b>這四個 node 之所以只處理部分月份，是因為它們各吃一個
     <code>*_month_plan</code> 輸入（圖上的 <code>[P]</code>）。這些 plan 由
     <code>pipelines/dataset/month_plans.py::build_month_plans</code> 在 run 開始前<b>一次</b>算好、
-    注入 catalog（呼叫點是 <code>__main__.py</code> 的 <code>dataset()</code> 指令）——一次算好，是為了讓共用同一份 artifact 的 node
+    注入 catalog（呼叫點是 <code>pipelines/dataset/run_contract.py::month_plans_for_run</code>，由 <code>__main__.py</code> 的 <code>dataset()</code> 指令在開跑前呼叫）——一次算好，是為了讓共用同一份 artifact 的 node
     不可能對「這次涵蓋哪些月份」有不同看法。<code>filter_test_keys</code> 吃的是
     <code>test_keys_month_plan</code>（跟選 key 同一份），它讀 <code>label_table</code> 的月份就是這次選 key 的月份。</li>
   <li><b>只有一條邊標「跨月讀回」。</b><code>test_keys</code> 的 catalog 條目只有
@@ -167,7 +167,7 @@ AST 掃過，本 pipeline 沒有「宣告了但函式沒讀」的參數——inf
       <td>—（side effect）</td>
     </tr>
     <tr class="stage"><td colspan="4">Key 選取</td></tr>
-    <tr><td>select_sample_keys</td><td>select_train_keys</td><td>sample_pool</td><td>sample_keys</td></tr>
+    <tr><td>select_sample_keys</td><td>同名</td><td>sample_pool</td><td>sample_keys</td></tr>
     <tr><td>split_train_keys</td><td>同名</td><td>sample_keys</td><td>train_keys_unfiltered, train_dev_keys_unfiltered <i>（MemoryDataset）</i></td></tr>
     <tr><td>filter_train_keys</td><td>同名</td><td>train_keys_unfiltered, label_table</td><td>train_keys</td></tr>
     <tr><td>filter_train_dev_keys</td><td>filter_train_keys</td><td>train_dev_keys_unfiltered, label_table</td><td>train_dev_keys</td></tr>

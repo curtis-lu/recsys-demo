@@ -342,6 +342,17 @@ CLI 只留通用的部分：寫 manifest、執行 pipeline。
 
 **不搬的**：`plan_incremental_snap_dates` 也被 evaluation 用，所以留在 `month_plans.py`（ADR-0018 決定 1 已登記理由）。
 
+> **實作註記（2026-09-26，#466）**：
+> - 上文四項搬進 `run_contract.py` 的四個函式：
+>   - `source_fingerprints`：特徵表與候選層級表的指紋，只讀 schema。回傳值的 `candidate_declared` 是「候選層級表有沒有宣告」的唯一答案，指紋與 `None` 注入都看它。
+>   - `versions_for_run`：兩層版本 ID。
+>   - `month_plans_for_run`：列出已落地的月份、組 month plan。列分區的 `_collect_existing_snap_dates` 從 `__main__.py` 原樣搬來。
+>   - `pipeline_inputs`：注入 DAG 的東西。
+> - **上文沒列、一併搬的**：`only_test_months` 這個執行模式的注入。它和 month plan、候選層級表的 `None` 同在一個注入的 dict 裡，都是沒有 catalog 條目提供、開跑前才知道的輸入。留它在 CLI，CLI 就還得知道 dataset 的 DAG 讀哪些名字。
+> - **留在 CLI 的**：起 Spark、解析 catalog（`_resolve_catalog` 各指令共用）、A55 的判斷與退出、寫 manifest、移 `latest`。版本與指紋那四行 log 也留在 CLI，好讓它們的 logger 名維持 `recsys_tfb.__main__`（JSONL 的 `logger` 欄，監控可能拿它過濾）。
+> - **唯一看得到的差別**：`[months] … cannot list its partitions` 那條警告跟著函式搬家，logger 名從 `recsys_tfb.__main__` 變成 `recsys_tfb.pipelines.dataset.run_contract`，訊息一字不變。只有增量產物不是 Hive 表時才會印，兩份示例的三個增量產物都是 Hive 表。
+> - `select_train_keys` 改名為 `select_sample_keys`，與 node 名一致。ADR 正文照慣例不改，所以 ADR-0004、0006、0008、0018 與本份決定 6 的正文仍寫舊名。
+
 ## 決定 12　`--only-test-months` 要求 train 版本的表已經落地
 
 **問題（#334）**：

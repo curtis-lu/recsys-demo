@@ -92,7 +92,7 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         filter_val_keys,
         fit_preprocessor_metadata,
         select_test_keys,
-        select_train_keys,
+        select_sample_keys,
         select_val_keys,
         split_train_keys,
         validate_data_consistency,
@@ -116,7 +116,7 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         ),
         # --- Key selection ---
         Node(
-            select_train_keys,
+            select_sample_keys,
             inputs=["sample_pool", "parameters"],
             outputs="sample_keys",
             name="select_sample_keys",

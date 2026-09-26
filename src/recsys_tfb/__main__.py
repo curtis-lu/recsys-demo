@@ -57,12 +57,9 @@ from recsys_tfb.core.schema import (
 )
 from recsys_tfb.core.versioning import (
     build_manifest_metadata,
-    compute_base_dataset_version,
-    compute_feature_table_fingerprint,
     compute_model_version,
     compute_popularity_source_version,
     compute_search_id,
-    compute_train_variant_id,
     find_latest_completed_model_version,
     read_manifest,
     resolve_base_dataset_version,
@@ -74,16 +71,18 @@ from recsys_tfb.core.versioning import (
 from recsys_tfb.pipelines import get_pipeline, list_pipelines
 from recsys_tfb.pipelines.dataset.month_plans import (
     CANDIDATE_FEATURE_TABLE,
-    INCREMENTAL_DATASETS,
-    build_month_plans,
     landed_months,
     month_plan_input,
     plan_incremental_snap_dates,
 )
 from recsys_tfb.pipelines.dataset.pipeline import ONLY_TEST_MONTHS_NODES
 from recsys_tfb.pipelines.dataset.run_contract import (
+    month_plans_for_run,
+    pipeline_inputs,
+    source_fingerprints,
     train_version_landing,
     unlanded_train_tables,
+    versions_for_run,
 )
 from recsys_tfb.pipelines.training.cache_sources import inject_cache_source_tables
 
@@ -385,48 +384,6 @@ def _slice_extra(from_node, only_node):
     if only_node:
         return {"only_node": only_node}
     return None
-
-
-def _collect_existing_snap_dates(
-    catalog: DataCatalog, time_col: str
-) -> dict[str, list[str]]:
-    """Ask the catalog which months each incrementally-built dataset already has.
-
-    Taken once, before any node runs, so every incremental node and the
-    manifest agree on what had already landed when this run started (ADR-0002).
-    Metadata-only: no data is scanned.
-
-    The question goes to the *dataset object*, not to its config entry: where an
-    artifact is stored and how its partitions are listed is the catalog's
-    knowledge. The CLI knowing that a ``HiveTableDataset`` has ``database`` and
-    ``table`` fields, and how to turn those into a metastore query, is exactly
-    the leak ADR-0008 §5 closes. The entry's ``partition_filter`` already scopes
-    the answer to this run's ``base_dataset_version``, so the version is not a
-    parameter here — see the caller for why that is load-bearing.
-
-    A dataset that cannot list partitions makes every month look not-yet-landed:
-    that rebuilds (wasteful) rather than skips (silently stale), which is the
-    direction this decision must fail in.
-
-    ``time_col`` comes from ``schema.time`` and has no default: the partition
-    column is whatever the pipeline writes as its time column, and this repo is
-    a configurable ranking framework. A default here would be a spelling that
-    is right for the example deployment and silently wrong for any other, and
-    every caller already passes the resolved value (#326).
-    """
-    existing: dict[str, list[str]] = {}
-    for name in INCREMENTAL_DATASETS:
-        lister = getattr(catalog.get_dataset(name), "existing_partition_values", None)
-        if lister is None:
-            logger.warning(
-                "[months] %s cannot list its partitions, so its months cannot "
-                "be listed and it will be rebuilt in full.", name,
-            )
-            continue
-        existing[name] = landed_months(
-            lister(), time_col=time_col, dataset_name=name,
-        )
-    return existing
 
 
 def _evaluation_month_plans(catalog, *, snap_dates, time_col: str) -> dict:
@@ -1353,41 +1310,19 @@ def dataset(
     # Version-free on purpose: the source tables are the only entries readable
     # before the versions below exist, because they carry no ${...} placeholder.
     # Nothing version-scoped may be built from this config — see below.
-    source_catalog_config = config.get_catalog_config(runtime_params=params)
-    feature_table_cfg = source_catalog_config["feature_table"]
-    feature_table_fqn = f"{feature_table_cfg['database']}.{feature_table_cfg['table']}"
-    feature_table_columns = [
-        (f.name, f.dataType.simpleString())
-        for f in spark.table(feature_table_fqn).schema.fields
-    ]
-    feature_table_fp = compute_feature_table_fingerprint(feature_table_columns)
-    # The candidate-level feature table (ADR-0026) is declared by its catalog
-    # entry. Its columns become features, so its schema is part of the
-    # dataset's identity exactly as feature_table's is — and only when it is
-    # declared, so a deployment without one keeps every ID it has.
-    candidate_declared = CANDIDATE_FEATURE_TABLE in source_catalog_config
-    candidate_fp = None
-    if candidate_declared:
-        candidate_cfg = source_catalog_config[CANDIDATE_FEATURE_TABLE]
-        candidate_columns = [
-            (f.name, f.dataType.simpleString())
-            for f in spark.table(
-                f"{candidate_cfg['database']}.{candidate_cfg['table']}"
-            ).schema.fields
-        ]
-        candidate_fp = compute_feature_table_fingerprint(candidate_columns)
-        logger.info("candidate_feature_table_fingerprint: %s (%d cols)",
-                    candidate_fp, len(candidate_columns))
-
-    schema_hash = get_schema_for_hash(params)
-    base_v = compute_base_dataset_version(
-        params_dataset, schema_hash, feature_table_fingerprint=feature_table_fp,
-        candidate_feature_table_fingerprint=candidate_fp,
+    sources = source_fingerprints(
+        spark, config.get_catalog_config(runtime_params=params),
     )
-    train_v = compute_train_variant_id(params_dataset)
+    feature_table_fp, candidate_fp = sources.feature_table, sources.candidate
+    base_v, train_v = versions_for_run(params, params_dataset, sources)
 
+    # Logged here rather than in run_contract: these lines keep the logger
+    # they have always had, which a log filter may be keyed on.
+    if sources.candidate_declared:
+        logger.info("candidate_feature_table_fingerprint: %s (%d cols)",
+                    candidate_fp, len(sources.candidate_columns))
     logger.info("feature_table_fingerprint: %s (%d cols)",
-                feature_table_fp, len(feature_table_columns))
+                feature_table_fp, len(sources.feature_table_columns))
     logger.info("base_dataset_version: %s", base_v)
     logger.info("train_variant_id:     %s", train_v)
 
@@ -1401,26 +1336,14 @@ def dataset(
         REBUILD_SNAP_DATES_KEY: rebuild,
     }
 
-    # Incremental plans (ADR-0002 / ADR-0007): one metastore listing, one plan
-    # per incremental artifact, decided here — before any Spark work — so the
-    # nodes, this log and the manifest cannot disagree about which months this
-    # run covered. The nodes receive them through the catalog (below), not
-    # through `parameters`.
+    # Incremental plans: decided here, before any Spark work. The nodes receive
+    # them through the catalog (below), not through `parameters`.
     #
     # Built here rather than earlier because _resolve_catalog needs base_v to
-    # already be in runtime_params, and that ordering is load-bearing rather
-    # than tidy: a catalog resolved without it would compare every partition
-    # against the literal `${base_dataset_version}`, keep none, and answer
-    # "nothing has landed" for every month — a full rebuild, silently, with no
-    # failing test and no config diff.
+    # already be in runtime_params — month_plans_for_run says what a catalog
+    # resolved without it would answer.
     _, listing_catalog_config = _resolve_catalog(config, params, runtime_params)
-    existing_snap_dates = _collect_existing_snap_dates(
-        DataCatalog(listing_catalog_config),
-        time_col=get_schema(params)["time"],
-    )
-    month_plans = build_month_plans(
-        params, existing=existing_snap_dates, rebuild=rebuild,
-    )
+    month_plans = month_plans_for_run(listing_catalog_config, params, rebuild)
 
     pipeline_kwargs = {"only_test_months": only_test_months}
     if only_test_months:
@@ -1466,25 +1389,10 @@ def dataset(
         "dataset", pipeline_kwargs, runtime_params, config, params, env,
         from_node=from_node, only_node=only_node,
         dry_run=dry_run, list_nodes=list_nodes,
-        # A loop over the plans, not three hand-written lines: registering a
-        # fourth incremental artifact in month_plans.py is enough, and the
-        # injection follows.
-        extra_datasets={
-            **{
-                month_plan_input(name): plan
-                for name, plan in month_plans.items()
-            },
-            # The run mode, for the one node that cannot see it: the precision
-            # gate checks the candidate-level feature table over the months
-            # this run's builds read, and under --only-test-months only the
-            # test build runs. Each build works out its own months (ADR-0029
-            # decision 2), so no month list is injected.
-            "only_test_months": only_test_months,
-            # `None` is how a node learns none is declared. Only then: a
-            # declared entry is already in the catalog, and registering over it
-            # would silently drop every candidate-level feature.
-            **({} if candidate_declared else {CANDIDATE_FEATURE_TABLE: None}),
-        },
+        extra_datasets=pipeline_inputs(
+            month_plans, only_test_months=only_test_months,
+            candidate_declared=sources.candidate_declared,
+        ),
         # The same plans again, keyed by artifact: a slice has to stop at
         # "complete for this run", and for these three that is a month
         # question, not an exists() question (ADR-0012).
@@ -1654,8 +1562,9 @@ def training(
 
     # (A28) training_eval_predictions must declare every schema.entity column.
     # Asked of the dataset object, not of its config entry, for the reason
-    # _collect_existing_snap_dates gives: which columns an artifact keeps is
-    # the catalog's knowledge, not the CLI's.
+    # dataset's month-plan listing gives (pipelines/dataset/run_contract.py,
+    # _collect_existing_snap_dates): which columns an artifact keeps is the
+    # catalog's knowledge, not the CLI's.
     #
     # Before the cold start below, and long before the node that writes those
     # columns — that node runs after HPO and finalize_model, so the same check

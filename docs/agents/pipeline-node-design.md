@@ -128,7 +128,7 @@ ADR-0008 明確拒絕過這個放寬，理由很直接：**放寬之後 `select_
 
 ### 實際長什麼樣
 
-照做的（`pipelines/dataset/nodes.py` 的 `select_train_keys`）：
+照做的（`pipelines/dataset/nodes.py` 的 `select_sample_keys`）：
 
 ```python
 # Decision — eligibility: only rows in the configured train months can be
@@ -159,7 +159,7 @@ pool = prepare_train_pool(sample_pool, parameters)
 
 ### 實際長什麼樣
 
-`select_train_keys` 與 `select_val_keys`（`src/recsys_tfb/pipelines/dataset/nodes.py`）
+`select_sample_keys` 與 `select_val_keys`（`src/recsys_tfb/pipelines/dataset/nodes.py`）
 是活的一對。兩個 node 的決策**部分重疊**：都要回答「哪些月份有資格」「要不要抽、抽掉
 誰」，而 train 還多一個「輸出哪些欄」（它帶 carry 欄，val 不帶）。重疊的那幾題，**兩邊
 的答案沒有一題相同**。
@@ -177,7 +177,7 @@ pool = prepare_train_pool(sample_pool, parameters)
 grep）。以下是逐字節錄，各留第一行：
 
 ```python
-# select_train_keys（nodes.py）
+# select_sample_keys（nodes.py）
 # Decision — eligibility: only rows in the configured train months can be
 #   drawn. ...
 pool = sample_pool.filter(months_filter_as_date(time_col, train_months))
@@ -227,7 +227,7 @@ sampled = keep_entities_drawn_under_ratio(
 第三個同族的 `select_test_keys` 也在同一支檔案裡，它連抽樣都沒有——三個 node 攤開來，
 差別一眼看得到；包成一個 helper 就看不到了。
 
-（`select_train_keys` 的 docstring 記著「#414 移除 `select_calibration_keys` 之後沒有第
+（`select_sample_keys` 的 docstring 記著「#414 移除 `select_calibration_keys` 之後沒有第
 二個 node 給出**同樣的四個答案**」。那說的是孿生 node，今天確實沒有了；這條規則要擋的
 是上面這種**題目重疊、答案各異**的形狀，兩者不衝突。）
 
