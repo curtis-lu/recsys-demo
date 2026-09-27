@@ -45,7 +45,7 @@ evaluation:
   item_categories:
     enabled: true                # bool
     unmapped: singleton          # ∈ {singleton}（目前唯一支援）；沒列入任何 list 的 product 自成一類
-    mapping:                      # ★選用：要用大類報表才需要改；大類 → 子 product 清單（值由你定義；右側須 A6 已知 item）
+    mapping:                      # ★範例資料的大類；不用大類報表就把上面的 enabled 設 false（可在 conf/<env>/ 設），要用就直接改這裡（conf/<env>/ 刪不掉這裡的鍵，issue #477）。大類 → 子 product 清單（右側須 A6 已知 item）
       fund: [fund_stock, fund_bond, fund_mix]
       exchange: [exchange_fx, exchange_usd]
       ccard: [ccard_bill, ccard_cash, ccard_ins]

@@ -10,14 +10,14 @@
 # ★下面各條目的 partition_cols／columns 裡出現的 snap_date／prod_name／cust_id／label，
 # 對應 schema.columns 的 time／item／entity／label 角色，值是示例資料的欄名。換部署把
 # schema.columns 對應欄名改掉時，這些字面值要跟著手動同步，而且既有 Hive 表要先 DROP
-# 再重建——insertInto 是位置對應、CREATE TABLE IF NOT EXISTS 不會改既有表 schema，沒有
-# 任何機械檢查會擋這件事（詳見 docs/agents/architecture-constraints.md R7、
+# 再重建——insertInto 是位置對應、CREATE TABLE IF NOT EXISTS 不會改既有表 schema。除了
+# 預測表缺 entity 欄時 training 入口會擋（A28），沒有機械檢查會擋這件事（詳見 docs/agents/architecture-constraints.md R7、
 # docs/adr/0017-framework-vocabulary-boundary.md 決定二）。適用條目：val_keys／
 # test_keys／val_model_input／test_model_input／sample_keys／train_keys／
 # train_dev_keys／preprocessed_feature_table／train_model_input／
 # train_dev_model_input／training_eval_predictions／popularity_period_counts／
 # inference_population_features／unranked_predictions／ranked_staging／
-# ranked_predictions（entity_bucket 不算，它是雜湊分桶欄，與 schema 無關；score／
+# ranked_predictions／enriched_eval_predictions（entity_bucket 不算，它是雜湊分桶欄，與 schema 無關；score／
 # score_uncalibrated／rank 也不算，schema.columns 一般不需要改這三個角色）。
 
 # --- Source tables（唯讀，由 source_etl 維護）---

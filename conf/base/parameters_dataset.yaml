@@ -25,7 +25,7 @@ dataset:
     - "cust_segment_typ"
     - "prod_name"
     - "label"
-  sample_ratio_overrides:  # ★選用：想對特定分層覆寫抽樣比例才需要改；下列鍵值皆為範例資料的示例
+  sample_ratio_overrides:  # ★下列鍵值是範例資料的分層與 item；換了 item 會被 A5 擋下，要直接改這裡或清空（conf/<env>/ 刪不掉這裡的鍵，issue #477）
   # 多欄位 sample_group_keys 時，用 "|" 組合序列化為 key
   # 範例（sample_group_keys: [cust_segment_typ, prod_name, label]）：
     "mass|ccard_ins|0": 0.5
