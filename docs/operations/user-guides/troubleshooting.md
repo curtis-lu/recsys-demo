@@ -42,7 +42,7 @@
 | 連續數值欄被列進 `categorical_columns` | 每個數值被當成一個獨立類別，編碼意思錯了 | 類別代碼先轉成字串或整數；真正的連續數值欄不要列進去 |
 | 手寫 `sample_weights`，key 跟資料對不上 | 那條權重規則沒套用（權重維持 1.0），冷門 item 或重要客群的權重沒有被調到 | 用 `scripts/sampling_overrides_editor.py` 產生 key；training 的 `manifest.json` 會列出沒對上的 key（`sample_weight.unmatched_keys`），要看 |
 | 用 ranking objective（`lambdarank`／`rank_xendcg`），卻把 `score` 當機率讀 | ranking objective 的分數是沒有上下界的實數，不在機率的尺度上 | 下游需要機率語意，改用 `binary` objective，並由下游自己驗證校準；框架不提供機率校準 |
-| evaluation 用錯模式或日期 | 報表是空的、評錯資料，或用了還不完整的 ground truth | 訓練後評估 test 用 `--post-training`；上線後監控用預設模式，而且要等那一期的 label 觀察窗結束 |
+| evaluation 用錯模式或日期 | 報表是空的、評錯資料，或用了還不完整的 ground truth | 訓練後評估 test 用 `--post-training --model-version <剛訓練的版本>`（不帶版本會評到 `best`）；上線後監控用預設模式，而且要等那一期的 label 觀察窗結束 |
 | training 完直接跑 inference | 從來沒 promote 過：inference 會停下並提示先 promote。**以前 promote 過：它會安靜地繼續用舊模型** | 看完評估報表，用 `scripts/promote_model.py <model_version>` 把新版本設為 `best`（見 [`promoting-a-model.md`](promoting-a-model.md)） |
 
 ---
@@ -54,12 +54,12 @@
 框架替每一層產物算一個版本 ID，ID 由「會影響這層產物的設定」決定。設定沒變，ID 就不變，已經產出的東西直接沿用；設定變了，只有受影響的那幾層會重算。
 
 ```
-base_dataset_version   前處理器、val、test          ← schema、特徵欄、類別欄／丟掉的欄、
-   │                                                  train／val 的日期、val 的抽樣
-   ├─ train_variant_id  train、train_dev             ← train 的抽樣與切分、carry_columns
-   │
-   └─ model_version     模型、test 的預測            ← 上面兩個版本 ＋ objective、HPO、
-                                                        特徵選擇、樣本權重
+base_dataset_version        前處理器、val、test   ← schema、特徵欄、類別欄／丟掉的欄、
+   │                                               train／val 的日期、val 的抽樣
+   └─ train_variant_id      train、train_dev      ← train 的抽樣與切分、carry_columns
+         │
+         └─ model_version   模型、test 的預測     ← 上面兩個版本 ＋ objective、HPO、
+                                                    特徵選擇、樣本權重
 ```
 
 - **`test_snap_dates` 不在任何一層裡。** 它只決定要評估哪些月份，所以多評估一個月份不用重建資料、不用重訓（見 [`adding-an-eval-month.md`](adding-an-eval-month.md)）。
@@ -71,12 +71,13 @@ base_dataset_version   前處理器、val、test          ← schema、特徵欄
 
 | 改了什麼 | 翻哪一層 | 要重跑 |
 |---|---|---|
-| 來源 SQL、同一日期的資料回補 | 不翻 | 受影響日期的 source ETL →（test 的日期）`scripts/rebuild_eval_month.sh` → evaluation。train 或 val 的日期目前沒有指令能只重算，見上一節 |
+| 來源 SQL 改了 `feature_table` 的欄位（名稱、型別、順序） | `base_dataset_version` | source ETL → dataset → training → evaluation，核准後再 inference |
+| 同一日期的資料回補（欄位沒變） | 不翻 | 受影響日期的 source ETL →（test 的日期）`scripts/rebuild_eval_month.sh` → evaluation。train 或 val 的日期目前沒有指令能只重算，見上一節 |
 | schema、特徵欄、`categorical_columns`、`drop_columns`、train／val 日期、`val_sample_ratio` | `base_dataset_version` | dataset → training → evaluation，核准後再 inference |
 | `sample_ratio`、`sample_ratio_overrides`、`sample_group_keys`、`train_dev_ratio`、`carry_columns` | `train_variant_id` | dataset（只重建 train／train_dev）→ training → evaluation |
 | `test_snap_dates`（加一個評估月份） | 不翻 | 照 [`adding-an-eval-month.md`](adding-an-eval-month.md) 的四個步驟 |
 | objective、HPO、`feature_selection`、`sample_weights` | `model_version` | training → evaluation，不用重建 dataset |
-| inference 的日期 | 不翻 | 只重跑 inference；上線後的 evaluation 要等 label 成熟 |
+| inference 的日期 | 不翻 | 先替新日期跑 `feature_etl` 與 `inference_population_etl`，再跑 inference；上線後的 evaluation 要等 label 成熟 |
 | evaluation 的指標、分群或報表設定 | 不翻 | 只重跑 evaluation；已經有 `enriched_eval_predictions`、只想產比較報表時，用 `--compare-only <比較對象>` |
 
 一個例外：`carry_columns` 裡的欄如果**也是** `feature_table` 的欄，它必須同時列進 `drop_columns`，而 `drop_columns` 會翻 `base_dataset_version`——這時就是第二列的重跑範圍。

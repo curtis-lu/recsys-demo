@@ -144,10 +144,10 @@ item 自己的屬性（例如產品類型）不會另外變成特徵；模型學
 - **每一層產物都有版本。** 版本 ID 由「會影響這層產物的設定」算出來，分三層：
 
   ```
-  base_dataset_version   前處理器、val、test
-     ├─ train_variant_id  train、train_dev（只改 train 的抽樣，只重建這層；
-     │                     train_dev 是從 train 同一段時間切出的一小份，見 §8 Q5）
-     └─ model_version     模型（再加上模型設定）
+  base_dataset_version        前處理器、val、test
+     └─ train_variant_id      train、train_dev（只改 train 的抽樣，只重建這層以下；
+           │                  train_dev 是從 train 同一段時間切出的一小份，見 §8 Q5）
+           └─ model_version   模型（上面兩個版本 ＋ 模型設定）
   ```
 
   設定沒變就沿用已經產出的東西；只有受影響的那幾層會重算。不同實驗的版本可以並存。`latest` 指最近一次產出的資料版本，`best` 指你 promote 過、inference 預設使用的模型版本。改了哪個設定要重跑什麼，見 [`troubleshooting.md`](docs/operations/user-guides/troubleshooting.md) §3。
@@ -173,7 +173,7 @@ mkdir -p conf/<你的環境>
 - **不要直接改 `conf/base/`**。那是框架附的示例設定，升級時會被新版蓋掉。
 - **pipeline 指令都要帶 `--env <你的環境>`**。不帶的話預設是 `local`，你的設定一條都不會生效，而且不會有任何錯誤。
 - 兩個例外沒有環境分層：來源 SQL（`conf/sql/etl/`）與 Spark 連線設定（看 `SPARK_CONF_DIR`）。怎麼處理見 [`using-a-release.md`](docs/operations/user-guides/using-a-release.md) §5。
-- **已知缺口**：底下還有一層 key 的值（例如 `inference:` 底下的 `products`）是合併、不是取代——你可以改或加 key，但刪不掉 `conf/base/` 裡已有的 key。目前有三個鍵因此要直接改 `conf/base/`，後面用到時會提醒（issue #477）。
+- **已知缺口**：底下還有一層 key 的值（例如 `inference:` 底下的 `products`）是合併、不是取代——你可以改或加 key，但刪不掉 `conf/base/` 裡已有的 key。目前有三個鍵因此要直接改 `conf/base/`，後面用到時會提醒；代價是升級時這幾處要自己合併（issue #477）。
 
 `conf/base/` 裡的值是銀行示例專屬的（欄名、item 名、日期、表名），換成你的資料一定要改。每一步會講要改哪些；步驟 5 有一張總表，讓你跑之前對一次。
 
@@ -264,7 +264,7 @@ python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_over
 ```
 
 - `suggest_categorical_cols.py` 遇到大表，可以加 `--where` 只讀部分分區、或 `--sample-fraction` 抽樣加速（見 [`dataset.md`](docs/pipelines/dataset.md)）。
-- `sampling_overrides_editor.py` 預設讀 `conf/base/` 的示例設定，用 `--params`、`--train-params`、`--base-params` 改指到你的設定檔；`to-yaml` 印的提示寫 `conf/base/`，產出請貼到 `conf/<你的環境>/`（已知缺口）。用法見 [`sampling-overrides-editor.md`](docs/operations/user-guides/sampling-overrides-editor.md)。
+- `sampling_overrides_editor.py` 預設讀 `conf/base/` 的示例設定，用 `--params`、`--train-params`、`--base-params` 改指到你的設定檔；`to-yaml` 產出兩段：`sample_weights` 貼到 `conf/<你的環境>/parameters_training.yaml`；`sample_ratio_overrides` 要取代 `conf/base/parameters_dataset.yaml` 裡示例的那一段（貼到 `conf/<你的環境>/` 會跟示例的 key 合併而被擋，見上面）。用法見 [`sampling-overrides-editor.md`](docs/operations/user-guides/sampling-overrides-editor.md)。
 
 > **廣告情境**：`schema.columns` 加 `occasion: request_id`；`request_id` 不能列進 `categorical_columns`；`catalog.yaml` 裡 `training_eval_predictions` 的欄位要加上 `request_id`（預測表只寫宣告過的欄，沒加會被設定檢查擋下）。完整清單見 [`impression-data-shapes.md`](docs/operations/user-guides/impression-data-shapes.md)。
 
@@ -274,7 +274,7 @@ python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_over
 
 - `training.algorithm_params.objective`（模型學什麼）：第一版用 `binary`，流程最好驗證。想讓模型直接學組內順序，再試 `lambdarank` 或 `rank_xendcg`，並把 `training.algorithm_params.metric` 改成 `ndcg` 或 `map`。
 - `training.hpo_objective`（調參時在 val 上看什麼）：`conf/base/` 預設 `macro_per_item_map`，讓每個 item 一樣重，避免熱門 item 主導調參；想讓每個 query group 一樣重，改 `mean_ap`。它跟 objective 的差別見 §8 Q6。
-- `training.sample_weight_keys`：`conf/base/` 是銀行的 item 欄 `prod_name`，改成你的 item 欄，沒改會被設定檢查擋下。
+- `training.sample_weight_keys`：`conf/base/` 是銀行的 item 欄 `prod_name`，改成你的 item 欄，沒改會被設定檢查擋下。要用 `sampling_overrides_editor.py` 產生權重的話，還要加上 label 欄（例如 `[prod_name, label]`），不然它會報錯。
 - 第一次試跑可以先調低 `training.n_trials` 與 `training.num_iterations`，確認資料流沒問題再調回來。
 
 在 `parameters_evaluation.yaml`：
@@ -300,7 +300,7 @@ python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_over
 | | `dataset.prepare_model_input.categorical_columns`、`dataset.prepare_model_input.drop_columns` | 你的類別欄、不進模型的欄 |
 | | `dataset.sample_group_keys`、`dataset.carry_columns` | 你的分層欄、權重要用的欄 |
 | | `dataset.sample_ratio_overrides` | 你的分層比例，或整段清空（**直接改 `conf/base/`**） |
-| `parameters_training.yaml` | `training.sample_weight_keys` | 通常就是你的 item 欄 |
+| `parameters_training.yaml` | `training.sample_weight_keys` | 你的 item 欄；用 `sampling_overrides_editor.py` 產生權重時再加上 label 欄 |
 | `parameters_inference.yaml` | `inference.snap_dates` | 要評分的日期 |
 | | `inference.products` | 你全部的 item；用 `from_train_data` 時要刪掉（**直接改 `conf/base/`**） |
 | `parameters_evaluation.yaml` | `evaluation.snap_date` | 要評估的日期 |
@@ -340,7 +340,7 @@ python -m recsys_tfb evaluation --env <你的環境>
 
 pipeline 顯示成功不代表結果對。至少再確認：
 
-- 三張來源表在各自的鍵上沒有重複，各日期、各 item 的資料量合理。
+- 來源表在各自的鍵上沒有重複，各日期、各 item 的資料量合理。
 - `feature_table` 沒有用到觀察窗內或之後才產生的欄位。
 - train、val、test 的日期互不重疊、照時間先後；test 留到最後才看。
 - 抽樣與樣本權重沒有讓冷門 item 或重要客群消失；training 的套用報告裡沒對上的 key 已經看過。
