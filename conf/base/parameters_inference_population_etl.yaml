@@ -1,3 +1,4 @@
+# ★＝換成你自己的資料時一定要改的鍵（值是示例資料專屬的）；README「一定要設的鍵」列的就是這些。
 # Inference 推論母體 ETL pipeline 配置
 # 上游依賴 feature_etl 產出的 feature_concat。對應 training 端的 sample_pool，
 # 但 grain 為 (snap_date, cust_id) 且時間切點為 inference 當期 snap_date。
@@ -5,10 +6,11 @@
 inference_population_etl:
   dry_run: false   # 與 sample_pool 一致：local 也實寫表
   variables:
-    target_db: "ml_recsys"
+    target_db: "ml_recsys"  # ★換成你的 Hive database 名稱
 
   source_checks: {}
 
+  # ★Output tables — sql_file／primary_key／partition_by 皆為範例資料專屬，整段換成你自己的來源表定義
   tables:
     - name: inference_population
       sql_file: inference_population/inference_population.sql

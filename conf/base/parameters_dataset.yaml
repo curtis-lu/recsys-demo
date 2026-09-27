@@ -1,5 +1,6 @@
+# ★＝換成你自己的資料時一定要改的鍵（值是示例資料專屬的）；README「一定要設的鍵」列的就是這些。
 dataset:
-  # --- Train 月底 snap_date list ---
+  # ★--- Train 月底 snap_date list（示例日期，換成你的訓練月份）---
   # 由設定決定、不由資料決定（避免上游 cadence 變動時 silently 吞下，符合 ML lineage 慣例）。
   # 四個 *_snap_dates 都有兩種寫法，版本 ID 相同（載入時區間先展開成清單，core/date_ranges.py）：
   #   逐一列出（如下），或寫成區間——
@@ -19,12 +20,12 @@ dataset:
     - "2025-10-31"
 
   # --- 抽樣 ---
-  sample_ratio: 1.0      # float [0,1]；★ 預設抽樣比例（決定性 hash，同 seed→同結果）
+  sample_ratio: 1.0      # float [0,1]；注意：預設抽樣比例（決定性 hash，同 seed→同結果）
   sample_group_keys:     # ★分層維度（你的欄；多欄用 "|" 串成 override / weight key）
     - "cust_segment_typ"
     - "prod_name"
     - "label"
-  sample_ratio_overrides:
+  sample_ratio_overrides:  # ★選用：想對特定分層覆寫抽樣比例才需要改；下列鍵值皆為範例資料的示例
   # 多欄位 sample_group_keys 時，用 "|" 組合序列化為 key
   # 範例（sample_group_keys: [cust_segment_typ, prod_name, label]）：
     "mass|ccard_ins|0": 0.5
@@ -39,7 +40,7 @@ dataset:
   # 重產 dataset。改此清單只翻 train_variant_id：只有 train/train_dev 的表帶 carry 欄，
   # 前處理器與 val/test 不動（ADR-0029 決定 9）；train 那兩張表照樣整批重建。
   #
-  # ★配對規則：此處的欄若**也存在於 feature_table**，必須同時列進下面的
+  # 注意：配對規則：此處的欄若**也存在於 feature_table**，必須同時列進下面的
   #   prepare_model_input.drop_columns（cust_segment_typ 正是這個情況——兩處都有它是
   #   刻意的，不是矛盾，別「順手修掉」）。否則 build_model_input 的 join 兩側各帶一份
   #   同名欄，Spark 會報 `Reference 'x' is ambiguous`。反向修法（從 carry_columns 拿掉）
@@ -62,7 +63,7 @@ dataset:
   # 保持註解狀態＝維持預設；一旦寫成實鍵就會翻 train_variant_id，即使值等同預設。
   # train_split_keys: ["cust_id"]
 
-  # --- Validation（驗證集）---
+  # ★--- Validation（驗證集，示例日期需換成你的驗證月份）---
   val_snap_dates:
     - "2025-12-31"
   # 0.5（2026-09-04，#283）。原本是 1.0——val 完全不抽樣、吃下整個母體，而 train 有抽樣，
@@ -80,7 +81,7 @@ dataset:
   #   docs/adr/0016-split-unit-declared-by-two-keys.md
   # val_sample_keys: ["cust_id"]
 
-  # --- Test（測試集）---
+  # ★--- Test（測試集，示例日期需換成你的測試月份）---
   test_snap_dates:
     - "2026-01-31"
 
@@ -129,14 +130,14 @@ dataset:
   numeric_precision_policy: block
 
   prepare_model_input:
-    drop_columns:
+    drop_columns:  # ★換成你的資料要從模型輸入丟掉的欄（示例值為本檔範例資料的欄名）
       - "snap_date"
       - "cust_id"
       - "label"
       - "apply_start_date"
       - "apply_end_date"
       - "cust_segment_typ"
-    categorical_columns:
+    categorical_columns:  # ★換成你的資料裡要當類別特徵的欄（示例值為本檔範例資料的欄名）
       - "prod_name"
       - "gender"
       - "risk_attr"

@@ -1,3 +1,4 @@
+# ★＝換成你自己的資料時一定要改的鍵（值是示例資料專屬的）；README「一定要設的鍵」列的就是這些。
 spark:
   app_name: recsys_tfb-inference
   # spark.executor.memory: 24g

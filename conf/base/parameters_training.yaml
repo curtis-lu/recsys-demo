@@ -1,3 +1,4 @@
+# ★＝換成你自己的資料時一定要改的鍵（值是示例資料專屬的）；README「一定要設的鍵」列的就是這些。
 # model_version scope：只有「定義模型」的子集會被 hash 進 model_version——亦即
 # `training:` 區塊扣掉純 logging / threading 的 `verbosity`、`log_period`、
 # `num_threads`。下方的 `spark:`、`mlflow:`、`cache:` 區塊「不」影響
@@ -91,8 +92,8 @@ training:
     # --------------------------------------------------------------------
   # --- Composite-key sample weights（模型層調權，如冷門產品 boost）---
   # sample_weight_keys: weight key 由哪些欄位組成（順序＝ "|" 串接順序），與
-  #   dataset.sample_group_keys 對稱（可不同）。預設 [prod_name]＝直接對產品調權。
-  #   ★每欄必須 ∈ identity(snap_date,cust_id,prod_name) ∪ {label} ∪
+  #   dataset.sample_group_keys 對稱（可不同）。★預設 [prod_name]＝直接對產品調權（換資料要對應你的 item 欄）。
+  #   注意：每欄必須 ∈ identity(snap_date,cust_id,prod_name) ∪ {label} ∪
   #   dataset.carry_columns ∪ dataset.prepare_model_input.categorical_columns（A9a 驗）。
   #   類別欄填人類可讀字串即可（runtime 把 model_input 裡的 code 解回類別值再比對）；
   #   機制與 edge case 見
@@ -101,7 +102,7 @@ training:
   #   docs/operations/user-guides/sampling-overrides-editor.md。
   sample_weight_keys:
     - prod_name
-  # sample_weights: ★key ＝ sample_weight_keys 值用 "|" 串接、value ＝ 任意正數
+  # sample_weights（選用：想調權重才要改）：key ＝ sample_weight_keys 值用 "|" 串接、value ＝ 任意正數
   #   （>1 boost、<1 down-weight）。稀疏：只列 != 1.0 的組，其餘 = 1.0。
   #   只作用於 train/train_dev（val/evaluation 不加權）。打錯/不存在的值
   #   → 不中（weight 1.0），記入 manifest.json 的 sample_weight.unmatched_keys。
@@ -140,7 +141,7 @@ training:
   #                    num_iterations = best_iteration、不做 early stopping。
   final_model_strategy: hpo_best   # ∈ {hpo_best, refit_on_full}
   # --- Training-stage feature selection（不重建 dataset、retrain 時排除多餘特徵）---
-  #   ★exclude — 要丟掉的 feature 名稱 list（須 ∈ 該 dataset 的 feature_columns；
+  #   注意：exclude — 要丟掉的 feature 名稱 list（須 ∈ 該 dataset 的 feature_columns；
   #              不可含 schema.item，A14 fail-loud 擋下）。空/省略＝完全不啟用。
   #   啟用只 bump model_version（不動 base/train_variant），完整清單寫進 manifest.json；
   #   機制（select_features / preprocessor_view / inference 對齊 / .bin 快取）見
