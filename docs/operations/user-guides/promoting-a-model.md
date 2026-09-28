@@ -15,11 +15,11 @@ python scripts/promote_model.py <model_version>
 **讓它照規則挑**：先看，再挑。
 
 ```bash
-python scripts/promote_model.py --env <你的環境> --dry-run   # 只列出來，不動 best
-python scripts/promote_model.py --env <你的環境>             # promote 列表上的 Recommended
+python scripts/promote_model.py --env production --dry-run   # 只列出來，不動 best
+python scripts/promote_model.py --env production             # promote 列表上的 Recommended
 ```
 
-`--env` 跟 pipeline 的一樣，指的是 `conf/<你的環境>/`，要從 repo 根目錄執行。不帶時是 `local`。不帶版本號時也會先印出同一張表，再 promote 表上的 `Recommended`。
+`--env` 跟 pipeline 的一樣，指的是 `conf/production/`（`production` 是環境名稱的例子，換成你自己取的名字），要從 repo 根目錄執行。不帶時是 `local`。不帶版本號時也會先印出同一張表，再 promote 表上的 `Recommended`。
 
 ## 它怎麼挑
 

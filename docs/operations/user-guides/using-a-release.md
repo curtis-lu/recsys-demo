@@ -62,8 +62,10 @@ python3.10 -m venv .venv
 ## 4. 執行指令的兩個前提
 
 ```bash
-.venv/bin/python -m recsys_tfb <pipeline> --env <你的環境>
+.venv/bin/python -m recsys_tfb <pipeline> --env production
 ```
+
+`production` 是環境名稱的例子（§5 用它示範 `conf/production/`），換成你自己取的名字。
 
 `<pipeline>` 是這八個之一：`feature_etl`、`label_etl`、`sample_pool_etl`、`inference_population_etl`、`dataset`、`training`、`evaluation`、`inference`。沒有 `run` 子指令，也沒有 `--pipeline` 旗標。
 
