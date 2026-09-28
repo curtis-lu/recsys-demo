@@ -6,7 +6,7 @@
 2. **跑成功了，但結果不對**：最常見的資料與設定錯誤。
 3. **改了設定**：要重跑哪幾條 pipeline。
 
-每一層檢查的完整清單（擋什麼、什麼時候擋、哪些擋不住）在 [`pipeline-checks.md`](pipeline-checks.md)；本文件只講「看到這個症狀，先往哪裡找」。
+每一層檢查的完整清單（擋什麼、什麼時候擋、哪些擋不住）在 [`pipeline-checks.md`](pipeline-checks.md)；本文件只講「看到這個症狀，先往哪裡找」。指令裡的 `production` 是環境名稱的例子（見 [README](../../../README.md) §5 步驟 0），換成你自己取的名字。
 
 ---
 
@@ -33,11 +33,11 @@
 
 | 常見錯誤 | 會造成什麼 | 怎麼避免或修正 |
 |---|---|---|
-| 忘了帶 `--env` | `--env` 的預設是 `local`，而 repo 附的 `conf/local/` 是空的。整場只用 `conf/base/` 的示例設定跑完，你的設定一條都沒生效，也沒有任何錯誤 | 正式環境的每一條指令都明寫 `--env <你的環境>` |
+| 忘了帶 `--env` | `--env` 的預設是 `local`，而 repo 附的 `conf/local/` 是空的。整場只用 `conf/base/` 的示例設定跑完，你的設定一條都沒生效，也沒有任何錯誤 | 正式環境的每一條指令都明寫 `--env production` |
 | `sample_pool` 只放發生過事件的 item | 同一個 query group 裡幾乎沒有負例，模型學不到「哪些候選該排後面」 | `sample_pool` 放的是「當時有資格被排序的全部候選」；哪些成為正例由 `label_table` 標記 |
 | 把「label 還沒到齊」當成 0 | 大量正例被標成負例，指標和模型方向都失真 | 先確認觀察窗已經結束、來源 partition 已經到齊；只有「確定沒發生」才能當 0 |
 | 特徵用到了 `time` 之後才產生的資訊 | test 指標異常漂亮，上線後拿不到同樣的資訊 | 特徵 SQL 要做 point-in-time join（只取 `time` 當下已知的值）。框架不檢查這件事，是來源 SQL 的責任 |
-| 同一個日期的來源資料回補後重跑，結果沒變 | 版本只看設定、不看資料內容；那個日期已經做過的東西會被直接沿用 | test 的日期：`bash scripts/rebuild_eval_month.sh <日期> --env <你的環境>`，它讓 dataset 與 training 都重算那個日期（見 [`adding-an-eval-month.md`](adding-an-eval-month.md)）。train 或 val 的日期：目前沒有指令能只重算它們（`--rebuild-dates` 只收 test 的日期） |
+| 同一個日期的來源資料回補後重跑，結果沒變 | 版本只看設定、不看資料內容；那個日期已經做過的東西會被直接沿用 | test 的日期：`bash scripts/rebuild_eval_month.sh <日期> --env production`，它讓 dataset 與 training 都重算那個日期（見 [`adding-an-eval-month.md`](adding-an-eval-month.md)）。train 或 val 的日期：目前沒有指令能只重算它們（`--rebuild-dates` 只收 test 的日期） |
 | 日期沒有重疊，但 val／test 早於 train，或 label 還沒成熟 | 拿未來的資料評估過去，或 ground truth 不完整 | 照 `train → val → test` 的時間順序切，每個日期都留足 label 觀察窗 |
 | 連續數值欄被列進 `categorical_columns` | 每個數值被當成一個獨立類別，編碼意思錯了 | 類別代碼先轉成字串或整數；真正的連續數值欄不要列進去 |
 | 手寫 `sample_weights`，key 跟資料對不上 | 那條權重規則沒套用（權重維持 1.0），冷門 item 或重要客群的權重沒有被調到 | 用 `scripts/sampling_overrides_editor.py` 產生 key；training 的 `manifest.json` 會列出沒對上的 key（`sample_weight.unmatched_keys`），要看 |
