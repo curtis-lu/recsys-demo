@@ -1,3 +1,4 @@
+# ★＝換成你自己的資料時一定要改的鍵（值是示例資料專屬的）；README「一定要設的鍵」列的就是這些。
 spark:
   app_name: recsys_tfb-inference
   # spark.executor.memory: 24g
@@ -17,7 +18,7 @@ inference:
   snap_dates:             # ★要評分的時間切點清單（你的資料）
     - "2025-12-31"
   # item 清單寫 from_train_data 時整段不寫（A52），評分的 item 取自模型的 preprocessor
-  products:               # ★評分母體 item；須 == schema.categorical_values[item]（A4 驗）
+  products:               # ★評分母體 item；須 == schema.categorical_values[item]（A4 驗）。item 清單改成 from_train_data 時要直接刪掉這個鍵（A52；conf/<env>/ 刪不掉它，issue #477）
     - "exchange_usd"
     - "exchange_fx"
     - "fund_stock"

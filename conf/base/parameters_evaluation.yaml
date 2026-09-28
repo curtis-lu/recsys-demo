@@ -1,3 +1,4 @@
+# ★＝換成你自己的資料時一定要改的鍵（值是示例資料專屬的）；README「一定要設的鍵」列的就是這些。
 evaluation:
   # Evaluation 的 snap_date：一個日期，或多個日期合起來評估（所有日期的
   # query group 進同一份指標與報表）。三種寫法：
@@ -10,7 +11,7 @@ evaluation:
   # pipeline 會把它和 DATE-typed snap_date column cast 成字串後比較
   # （cast 結果就是 YYYY-MM-DD）。輸出路徑的子目錄：一個日期是 YYYYMMDD/，
   # 多個日期是 <最早>-<最晚>/（只看起迄）。詳見 docs/pipelines/evaluation.md §3.1。
-  snap_date: "2026-01-31"
+  snap_date: "2026-01-31"  # ★這次評估的時間切點（示例日期，換成你的資料的評估月份）
 
   # 單一 k superset。此處列出的每個 k 都會被算進所有 @K metric、所有粒度
   #（fine product overall/per-item/per-segment 與 category）。Report 各段
@@ -18,7 +19,7 @@ evaluation:
   # 解析成該粒度的 distinct item 數。
   k_values: [1, 2, 3, 4, 5, "all"]
 
-  # Per-segment metrics 切片用的 segment column。欄從該執行模式的母體表取：
+  # ★Per-segment metrics 切片用的 segment column（選用：只有想要分群報表才要改，母體表沒有這欄不會中止）。欄從該執行模式的母體表取：
   # --post-training＝sample_pool、監控＝inference_population，以 (time, entity)
   # join。母體表沒有這欄時不中止，只在 log 與報表註明（ADR-0020 bug 6）；
   # 示例的 inference_population 沒有 cust_segment_typ，監控模式會走這條路。
@@ -44,7 +45,7 @@ evaluation:
   item_categories:
     enabled: true                # bool
     unmapped: singleton          # ∈ {singleton}（目前唯一支援）；沒列入任何 list 的 product 自成一類
-    mapping:                      # ★大類 → 子 product 清單（值由你定義；右側須 A6 已知 item）
+    mapping:                      # ★範例資料的大類；不用大類報表就把上面的 enabled 設 false（可在 conf/<env>/ 設），要用就直接改這裡（conf/<env>/ 刪不掉這裡的鍵，issue #477）。大類 → 子 product 清單（右側須 A6 已知 item）
       fund: [fund_stock, fund_bond, fund_mix]
       exchange: [exchange_fx, exchange_usd]
       ccard: [ccard_bill, ccard_cash, ccard_ins]
@@ -206,7 +207,7 @@ evaluation:
 
   # Compare sources（多模型比較）。有填內容的 entry 才 unlock
   # `evaluation --compare <key>` / `--compare-only <key>`；<key>（v_prev/ext_proj_x…）
-  # 即 CLI flag 傳的值。★整段（含 key 名與各值）由你定義；預設空。
+  # 即 CLI flag 傳的值。選用：要比較模型版本才需要改；整段（含 key 名與各值）由你定義；預設空。
   # 完整 schema 由 core/consistency.py 的 A11 驗證（正典）；各 source 的用法、
   # kind 對照見 docs/pipelines/evaluation.md。
   # 可填欄位（值的合法集合）：
@@ -220,7 +221,7 @@ evaluation:
   #   prod_mapping    外部 prod_name → 我們的 prod_name（N:1，右側須 A6 已知值）（同上必填）
   #   unmapped_policy ∈ {fail, drop}                       （kind=external_hive，預設 fail）
   compare_sources: {}
-  # 範本（拿掉 # 即啟用；★ 所有值由你填）：
+  # 範本（拿掉 # 即啟用；所有值由你填）：
   #compare_sources:
   #  v_prev:                                  # kind=model_version：另一個同框架版本
   #    kind: model_version

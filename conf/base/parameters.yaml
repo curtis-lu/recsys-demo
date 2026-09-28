@@ -1,8 +1,9 @@
+# ★＝換成你自己的資料時一定要改的鍵（值是示例資料專屬的）；README「一定要設的鍵」列的就是這些。
 project_name: recsys_tfb
 random_seed: 42
 
 hive:
-  db: ml_recsys
+  db: ml_recsys  # ★換成你的 Hive database 名稱（示例值 ml_recsys 是這個 demo 環境專屬的）
 
 # 下方註解掉的 keys 是生產 CDP/YARN profile 範本。${vdclient.*} placeholder
 # 由 resolve_vdclient_placeholders 解析（找不到對應 cluster 時自動 drop），

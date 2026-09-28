@@ -11,7 +11,7 @@ promote 挑版本的比較範圍也不會動：步驟 1 先把 training 計分�
 - 這個月份**沒跑過**，你要第一次評估它 → 往下讀。
 - 這個月份**跑過了**，但上游補了資料，你要重算 → 跳到〈[上游回補了，要重算某個月份](#上游回補了要重算某個月份)〉。本文的四個步驟幫不了你，因為每一步都會判定這個月「已經做完」而直接跳過。
 
-下面的指令都用 `--env <你的環境>`。本機執行請先照 [local-spark-setup.md](../dev-setup/local-spark-setup.md) 設好環境，並把 `--env` 換成 `local`。
+下面的指令都用 `--env production`（`production` 是環境名稱的例子，見 [README](../../../README.md) §5 步驟 0；換成你自己取的名字）。本機執行請先照 [local-spark-setup.md](../dev-setup/local-spark-setup.md) 設好環境，並把 `--env` 換成 `local`。
 
 ## 整件事長什麼樣
 
@@ -81,7 +81,7 @@ dataset:
 
 ```bash
 python -m recsys_tfb dataset \
-  --env <你的環境> --only-test-months
+  --env production --only-test-months
 ```
 
 `--only-test-months` 告訴 pipeline「這次只是加評估月份」，於是它跳過訓練資料那一整段的重算。**只有當你這次除了加月份還改了別的設定時才不要帶它**（改了抽樣、特徵、訓練月份……那些改動需要被跳過的部分重算才會生效）。不確定就不要帶，跑完整的一輪永遠是安全的那一邊。
@@ -113,7 +113,7 @@ train_variant_id:     <跟你抄下來的一模一樣>
 
 ```bash
 python -m recsys_tfb training \
-  --env <你的環境> --only-node predict_and_write_test_predictions
+  --env production --only-node predict_and_write_test_predictions
 ```
 
 **一定要用 `--only-node`。** 換成 `--from-node` 會把下游全部拉進來，包含超參數搜尋——那是重訓，不是預測，會產生一個新的 `model_version`，這份文件的前提就不成立了。
@@ -141,7 +141,7 @@ evaluation:
 
 ```bash
 python -m recsys_tfb evaluation \
-  --env <你的環境> --post-training --model-version <你的 model_version>
+  --env production --post-training --model-version <你的 model_version>
 ```
 
 `--post-training` 讓它讀步驟 3 產生的預測。
@@ -167,7 +167,7 @@ data/evaluation/<model_version>/20260228/report.html
 
 ```bash
 python -m recsys_tfb training \
-  --env <你的環境> --only-node compute_test_metrics
+  --env production --only-node compute_test_metrics
 ```
 
 **成功的話**，log 裡會有：
@@ -187,7 +187,7 @@ compute_test_metrics: scoring ['mean_ap', 'macro_per_item_map'] on ['2026-01-31'
 **兩層都要指名重算，只做一層數字不會動。** 一行指令做完兩層：
 
 ```bash
-bash scripts/rebuild_eval_month.sh 2026-01-31 --env <你的環境>
+bash scripts/rebuild_eval_month.sh 2026-01-31 --env production
 # 多個月份用逗號分隔：2026-01-31,2026-02-28
 ```
 
@@ -220,7 +220,7 @@ ls -d data/evaluation/<model_version>/*/
 4. promote 的比較範圍沒變：
 
 ```bash
-python scripts/promote_model.py --env <你的環境> --dry-run
+python scripts/promote_model.py --env production --dry-run
 ```
 
 `Scored months:` 還是舊月份，`Ranked` 底下的版本跟動手前一樣。畫面每一行的意思見 [promote 一個版本](promoting-a-model.md)。

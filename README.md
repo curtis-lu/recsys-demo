@@ -1,477 +1,489 @@
-# recsys_tfb — 排序問題批次建模框架，以銀行產品推薦為示例
+# recsys_tfb — 批次排序建模框架
 
-## 0. 這是什麼
+`recsys_tfb` 替每個 **query group**（例如「某個月的某位客戶」）把一組候選 **item** 依模型分數排出名次，一次處理一整批。下游拿名次決定每個對象先推什麼：資源不夠對每個人推所有東西時，每個人只推排在前面的幾個。
 
-`recsys_tfb` 是一套處理**批次排序問題**的建模框架。框架會針對每個查詢群組（query group），預測各候選 `item` 的分數，並依分數由高到低產生排序結果，供下游在有限資源下決定優先處理順序。
+本文件用兩個示例講解，兩個都只是示例，框架不限定這兩種應用：
 
-本文件以**銀行產品推薦**為例，但框架不限定於此應用。當行銷資源不足以對每位客戶推廣所有產品時，可將問題轉換為排序問題：對每位客戶的候選產品評分與排序，讓 PM 依名次決定優先聯繫哪些客戶、推薦哪些產品。相同設計也可應用於商品、內容、商機或其他候選項目的批次排序。
+- **銀行產品推薦**：每個月替每位客戶排一次所有產品。這是主線，`conf/base/` 的設定就是它。
+- **廣告曝光**：替一次請求裡展示的幾個素材排先後。它多用了幾個選用設定，放在 [`examples/ad/`](examples/ad/README.md)。
 
-排序是框架預設的情境，前提是每個 query group 的候選集合是**全網格**——這個對象有資格的每一個 item 各一列。框架也支援另一種情境：拿**展示紀錄**（一列是一次展示，label 是那次有沒有得到回應，例如廣告曝光與點擊）來訓練與評估。那種資料的候選集合是「被展示的子集」，指標的讀法、離線推論的適用範圍都不同，見 [`docs/operations/user-guides/impression-data-shapes.md`](docs/operations/user-guides/impression-data-shapes.md)。
+本文件由淺到深分三段：
 
-### 資料模型
-
-框架的基本資料顆粒度為 `time` × `entity` × `item`。其中，一個 query group 由 `time` 與 `entity` 組成（宣告了選用角色 `occasion` 時再加上它，例如一次請求），框架會比較該群組內所有候選 `item` 的 `score`，再產生 `rank`。
-
-> `time`、`entity`、`item`、`label`、`score` 與 `rank` 在實際資料表中的欄位名稱，可於 `conf/base/parameters.yaml` 的 `schema` 區塊設定。
-
-| schema 角色 | 意義 | 銀行產品推薦示例 |
+| 段 | 讀完你會知道 | 章節 |
 |---|---|---|
-| `time` | 時間切點 | `snap_date`，快照日 |
-| `entity` | 擁有一組候選項目的對象 | `cust_id`，客戶 |
-| `item` | query group 內要被排序的候選項目 | `prod_name`，金融產品 |
-| `label` | 目標事件是否發生，通常為 0 或 1 | 客戶是否承作該產品 |
-| `score` | 模型對候選項目產生的分數 | 產品推薦分數 |
-| `rank` | `item` 在 query group 內的名次 | 產品推薦順位 |
-| query group | 一次排名與評估的範圍 | 同一快照日的同一位客戶 |
-
-### 輸入與輸出
-
-**輸入** —— 三張由 `source ETL` 維護的 Hive 來源表。下表以 schema 角色表示主鍵；完整欄位與範例資料見 [`docs/data-lineage.html`](docs/data-lineage.html)。
-
-| 來源表 | 內容 | 主鍵（角色） |
-|---|---|---|
-| `feature_table` | 每位客戶在每個快照日的特徵寬表 | `time, entity` |
-| `label_table` | 客戶是否承作某產品的 ground truth（`label` 0/1） | `time, entity, item` |
-| `sample_pool` | 要納入建模與排名的候選範圍，並可帶有供分層抽樣使用的欄位 | `time, entity, item` |
-
-> 另外可以選擇性宣告一張**候選層級特徵表**（catalog 條目 `candidate_feature_table`）：一列是一筆候選的特徵（例如一次展示之前 30 分鐘的瀏覽次數），主鍵是整組 identity。它讓離線推論無法使用，用法與取捨見 [`docs/pipelines/dataset.md`](docs/pipelines/dataset.md) 與 ADR-0026。
->
-> 上列三張是**建模**用的來源表。inference 另用一張 `inference_population` 母體表（同由 `source ETL` 維護，主鍵 `time, entity`），定義每個快照日「哪些 entity 該被推論」——對應 training 端的 `sample_pool`，把「誰被推論（membership）」與「他有什麼特徵（`feature_table` enrichment）」分開；缺特徵的母體成員仍會被評分，缺特徵成員數只在 log 留下每期一行的紀錄、不寫入任何表。
-
-**訓練輸出** —— training pipeline 會依資料版本與模型設定產生 `model_version`，並在對應版本目錄中保存模型、最佳參數、最佳迭代次數與訓練診斷等產物。框架也會保存 test set 的預測結果 `training_eval_predictions` 與評估指標，供模型比較及上線前審核；訓練完成不會自動將模型發布為 inference 預設版本。
-
-**推論輸出** —— inference pipeline 會使用指定或已核准的 `model_version` 產生版本化排序結果，最終發布至 Hive 表 `ranked_predictions`。每筆資料包含 `time`、`entity`、`item`、`score`、`rank` 與 `model_version`；排序結果必須先通過 `validate_predictions` 的完整性與排名一致性檢查，才會由 `publish_predictions` 發布。
-
-> `score` 表示模型輸出的排序分數，不保證可解讀為事件發生機率——框架不提供機率校準機制（見 5. FAQ Q4）。
-
-### 限制條件
-
-- **引擎**：PySpark 3.3.2，執行於 Hadoop / HDFS / Hive 環境。
-- **三條硬限制**：不可用 Spark UDF、無對外網路、不可安裝額外套件。
-- **硬體**：純 CPU，4 核心 / 128GB 記憶體。
+| 它是什麼 | 框架在做什麼、你的問題適不適用 | §1–§3 |
+| 怎麼用 | 框架怎麼運作、第一次怎麼跑完一輪 | §4–§6 |
+| 用到再查 | 出事或改設定時看哪裡、常見的觀念誤會、還有哪些文件 | §7–§9 |
 
 ---
 
-## 1.主要設計理念
+## 1. 這是什麼
 
-### Kedro 風格：pipeline 與 node 設計
+你準備好資料，框架負責組訓練資料、訓練、評估、產出排序結果；中間「哪個模型可以上線」由你拍板。
 
-框架將推薦系統建模流程拆分為 `source ETL`、`dataset`、`training`、`evaluation` 與 `inference` 五個 pipeline。
-其中 `source ETL` 由 SQL 流程驅動，其餘 pipeline 採用 Kedro-inspired（受 Kedro 啟發）的 DAG 設計。
+```
+你寫 SQL                  框架                                         你決定
+────────                  ────                                         ──────
+上游原始資料
+  │ source ETL
+  ▼
+feature_table ─┐
+label_table   ─┼─▶ dataset ─▶ training ─▶ evaluation --post-training ─▶ promote
+sample_pool   ─┘   組訓練資料   訓練＋調參    上線前的評估報表               （人工）
+                                                                          │
+inference_population ─────────────────────────────▶ inference ◀──────────┘
+  （這次要替誰排）                                     │
+                                                      ▼
+                                              ranked_predictions（排序結果表）
+                                                      │ 等答案出來之後
+                                                      ▼
+                                              evaluation（上線後監控）
+```
 
-每個 DAG pipeline 由多個職責單一的 node 組成。node 的輸入與輸出在各 pipeline 的 `pipeline.py` 中明確宣告，框架會根據資料依賴關係決定執行順序；資料的讀寫方式、儲存位置與格式則統一設定於 `catalog.yaml`，使**資料處理邏輯與 I/O 解耦**。
-
-未在 `catalog.yaml` 設定的中間結果會以 `MemoryDataset` 暫存，並在最後一個下游 node 使用完畢後釋放；需要跨次執行重用或支援部分重跑的產物，則透過 catalog 持久化。
-
-### Spark 優先的資料處理
-
-資料清理、特徵處理與資料集建置優先使用 Spark 執行，以支援大規模資料處理。進入模型訓練階段後，框架會將 Hive／HDFS 上的資料快取為 driver-local Parquet，再由對應的 `ModelAdapter` 轉換為演算法適用的可重用格式；例如目前的 LightGBM adapter 會產生 `.bin`。這可減少重複掃描 HDFS、資料轉換及演算法前處理的成本，同時保留擴充其他模型演算法的空間。
-
-### 版本化設計
-
-框架依據 `parameters.yaml`、`parameters_*.yaml` 中會影響產物的設定內容，以及各層上游版本的關聯，計算 8 碼 hash，讓資料集、前處理器、模型與預測結果能互相對齊，也讓不同抽樣或模型實驗可以並存。純執行環境、logging 或監控類設定不會改變產物版本。
-
-- `base_dataset_version`：由 train／val 日期、前處理設定、schema，以及 `feature_table` 的欄位名稱、型別與順序決定；對應前處理器、共用特徵表與 val/test 資料。**`test_snap_dates` 不在其中**——它只定義評估的覆蓋範圍，加一個評估月份不翻版本、不需要重訓（見 [`adding-an-eval-month.md`](docs/operations/user-guides/adding-an-eval-month.md)）。
-- `train_variant_id`：由 train 的抽樣比例、分層 override 與 `train_dev_ratio` 決定；對應 train/train_dev 資料，是唯一的 variant 層（#411 移除了 calibration 那一層）。
-- `model_version`：由上述資料版本及會影響模型的 training 設定決定，包含演算法參數、HPO、特徵選擇與樣本權重等。
-
-相同輸入設定會得到相同版本；只調整 train 抽樣時，不必重建不受抽樣影響的前處理器與 val/test 資料。`latest` 代表最近成功產生的資料版本，`best` 則代表經人工核准、供 inference 預設使用的模型版本。
-
-**升級注意**：#411 把校準相關設定鍵從 `dataset:` 子樹整包移除，而 `base_dataset_version` 是對整個 `dataset:` 子樹（扣除上述例外）取 hash，所以這次升級會讓 `base_dataset_version` **一次性全部翻新**——既有資料集需要重建、模型需要重訓並重新人工 promote；`train_variant_id` 不受影響。這是刻意的版本決策，不是 regression（見 [`using-a-release.md`](docs/operations/user-guides/using-a-release.md) §7）。
-
-### 保留人工決策關卡
-
-框架提供 profiling、建議值與一致性檢查，但下列會影響模型語意或上線結果的決策仍由使用者審核：
-
-- **類別欄位判定**：`scripts/suggest_categorical_cols.py` 依資料型別與 cardinality 提出候選欄位，再由使用者確認哪些欄位應採 categorical encoding。
-- **下採樣與樣本權重**：`scripts/sampling_overrides_editor.py` 根據各分群的正負樣本分布產生建議與 YAML；使用者再依運算成本、資料不平衡與業務目標決定抽樣比例和權重。
-- **模型上線**：training 只產生版本化模型，不會自動發布。使用者檢視評估指標與診斷結果後，透過 `scripts/promote_model.py` 將核准版本設為 `best`，inference 才會預設使用該版本。
-
-人工決策寫入設定後，pipeline 仍會執行 schema、資料一致性與預測結果檢查，避免設定和實際資料不一致，或未通過驗證的結果直接發布。
-
-### Fail-fast
-
-框架將檢查設在高成本處理與資料發布之前，發現不一致時立即中止，避免錯誤產物流入下游：
-
-- **設定一致性**：CLI 啟動時由 `consistency.py` 集中檢查跨 YAML 設定，包含欄位角色衝突、item／產品集合、ranking objective 與 metric、HPO search space、抽樣權重及 evaluation source 等關聯；一次列出所有問題後停止執行。
-- **設定與資料一致性**：`dataset` 的第一個 node 會比對設定宣告的 item 集合與 `sample_pool`／`label_table` 實際資料，並檢查 categorical 欄位的實際型別，再進入抽樣與前處理。
-- **pipeline 產物品質**：`source ETL` 可先以 preflight 檢查上游 partition、schema 與資料量，寫入後再驗證必要欄位、重複鍵比例、NULL 比例與列數；inference 也必須通過筆數、完整性、分數與排名檢查後才能發布結果。
-
-### 可恢復執行
-
-`source ETL` 支援稽核紀錄及 `--restart-from`；其他 DAG pipeline 可搭配持久化產物，透過 `--from-node` 從指定 node 續跑，或以 `--only-node` 執行單一 node。
-training 的 HPO 另有 checkpoint 機制，執行中斷後可沿用既有 Optuna study 與最佳模型，只補跑尚未完成的 trials，降低長流程失敗後的重算成本。
+每一段都是一條獨立的 pipeline，用同一種指令執行：`python -m recsys_tfb <pipeline> --env production`（`production` 是你的設定目錄名稱，見 §5 步驟 0）。
 
 ---
 
-## 2.主要功能
+## 2. 核心概念
 
-### source ETL pipeline
+### 一筆候選、一個 query group
 
-透過 SQL 將上游資料整理成建模用的三張來源表：`feature_table`、`label_table`、`sample_pool`，以及 inference 的評分母體 `inference_population`。
+框架不管你的欄位叫什麼，只認幾個**角色**。你在 `parameters.yaml` 的 `schema.columns` 告訴它哪一欄扮演哪個角色（你自己的設定放在 `conf/production/`，見 §5 步驟 0）。
 
-- 建模三張表分別提供 `feature_etl`、`label_etl`、`sample_pool_etl`；inference 母體由 `inference_population_etl` 產出（主鍵 `time, entity`，對應 training 的 `sample_pool`）。
-- 使用者可自行定義 SQL 與中介表，框架依 YAML 中的 `tables` 順序逐一執行；`depends_on` 會驗證相依表是否已排在上游。
-- SQL 支援 `${target_date}` 等變數，可透過 `--target-dates` 一次處理多個日期；其他自訂變數可用 `--var key=value` 在執行時覆寫。
-- 支援 `--source-check` 唯讀 preflight，在寫入前檢查上游 partition 是否存在、資料筆數及 schema 是否符合預期。
-- 每張輸出表可設定 primary key 與品質檢查，目前支援最少筆數、重複鍵比例、NULL 比例及必要欄位檢查。
-- 支援多欄位 partition，並以 `INSERT OVERWRITE` 覆寫指定日期的 partition，方便安全重跑。
-- 流程失敗後可透過 `--restart-from` 從指定中介表繼續執行，略過已完成步驟。
-- 支援 dry-run 與 rendered SQL 輸出，可在正式寫入前檢查實際執行的 SQL。
-- 首次執行會自動建立 Hive table；新增輸出欄位時可自動執行 schema evolution，移除既有欄位則會阻擋並提示版本化重建。
+| 角色 | 意思 | 銀行產品推薦 | 廣告曝光 |
+|---|---|---|---|
+| `time` | 一次排序所屬的時段 | `snap_date`，每月月底 | `snap_date`，每週一 |
+| `entity` | 替誰排 | `cust_id`，一位客戶 | `[user_id, slot_id]`，某個使用者在某個版位 |
+| `occasion`（選用） | 同一時段裡的哪一次排序 | 不用 | `request_id`，一次請求 |
+| `item` | 被排的東西 | `prod_name`，一個產品 | `[campaign_id, creative_format]`，活動 × 素材格式 |
+| `event`（選用） | 同一組裡同一個 item 有好幾列時，分辨每一列 | 不用 | 不用 |
+| `label` | 答案 | 客戶後來有沒有申辦這個產品 | 這次展示有沒有被點 |
+| `score`、`rank` | 模型給的分數、組內名次 | 框架產生 | 框架產生 |
 
-### dataset pipeline
+**query group** ＝ `time` ＋ `entity`（宣告了 `occasion` 就再加上它）。名次只在同一個 query group 裡比。一個銀行示例的 query group 長這樣：
 
-將 `sample_pool` 依照各資料集的日期範圍與抽樣設定，產出並持久化 `train_keys`、`train_dev_keys`、`val_keys`、`test_keys`。
+```
+query group：2025-12-31 × 客戶 A
+  item          score   rank   label
+  fund_stock     0.62      1       1    ← 排第一，而且真的申辦了
+  ccard_cash     0.31      2       0
+  exchange_usd   0.08      3       0
+```
 
-前處理器只使用 `train_snap_dates` 範圍內的 `feature_table` 建立，再套用至所有資料區間，產出共用的 `preprocessed_feature_table`。最後，各組 `*_keys` 依 `time + entity` 連接特徵（宣告了候選層級特徵表時，另依 identity 連接它），並依 `time + entity + item` 連接 `label_table`，產出 `train_model_input`、`train_dev_model_input`、`val_model_input`、`test_model_input`，供後續模型訓練與評估使用。
+**一欄該放哪個角色**：問一句「它是這次排序替誰做的，還是這次排序裡互相競爭的選項？」前者放 `entity`，後者放 `item`。以廣告的 `slot_id`（版位）為例：
 
-- **資料一致性閘門**：在抽樣與前處理前，先檢查 item 集合是否與設定一致，並防止連續數值欄位被誤設為 categorical。
-- **決定性分層抽樣**：可在 `parameters_dataset.yaml` 設定 `sample_group_keys`、預設抽樣比例與各分層 override；抽樣由 identity key、使用場景與 random seed 計算固定 hash，因此相同輸入可重現相同結果。
-- **互斥的 train/train_dev 切分**：抽樣後以 entity 為單位進行決定性切分，同一 entity 的所有 item 只會出現在其中一側，避免 train 與 early stopping 資料彼此重疊。
-- **互動式抽樣設定**：`scripts/sampling_overrides_editor.py` 會分析各分層的正負樣本分布，產出 `data/profiling/sampling_overrides_editor.html`，供使用者互動式調整下採樣比例，並匯出可寫入設定檔的 YAML。
-- **類別欄位建議**：`scripts/suggest_categorical_cols.py` 依欄位型別與 cardinality 產出 categorical 候選清單，再由使用者確認是否納入 encoding。
-- **避免前處理資料洩漏**：preprocessor 僅從訓練期間 fit，內容包含 `feature_columns`、`categorical_columns`、category encoding 對照與 `drop_columns`；訓練與推論共用相同 metadata，確保欄位順序與編碼一致。
-- **建立完整模型輸入**：`label_table` 未匹配到的候選項目視為負例 (`label = 0`)；所有數值特徵欄（含整數與 boolean）統一轉為 `dataset.numeric_feature_storage_type` 宣告的型別（預設 float32），以降低後續 driver 端訓練的記憶體用量。
-- **移除無法評估的 query group**：僅針對 `val_model_input` 與 `test_model_input`，移除同一個 `(time, entity)` 下所有 item 的 label 皆為 0 的群組。這類群組沒有正例，無法衡量正例是否被排到前面，對 evaluation 的 mAP 沒有貢獻；train 與 train_dev 則保留全部樣本。
+- 一個版位要放哪個素材時，互相競爭的是素材；版位不會跟別的版位搶同一個位置，所以 `slot_id` 放 `entity`。
+- 放在 `entity` 還有一個好處：`feature_table` 以 `time` ＋ `entity` 接到候選上，版位的特徵（位置、頁面類型）才放得進去。
+- 硬放進 `item` 的話，同一個活動在三個版位會變成三個互不相干的 item；版位的特徵只能改放候選層級特徵表，inference 就不能用了。
+- 代價：同一個人變成三個 entity。示例因此設了 `dataset.train_split_keys: [user_id]`，同一個人不會被切到 train 與 train_dev 兩邊。
 
-### training pipeline
+一個 `entity` 或 `item` 可以由好幾欄組成，寫成清單即可（item 會被拼成一欄，欄名固定叫 `item`，值例如 `c01-banner`）。
 
-讀取 dataset pipeline 產出的 `train_model_input`、`train_dev_model_input`、`val_model_input`、`test_model_input`，依指定的資料版本訓練一個供所有 item 共用的模型。流程會先將各 split 快取至 driver，再進行模型格式轉換、超參數搜尋、最終模型產生，最後對 test set 產生預測、計算排序指標並輸出模型診斷。
+**模型看到什麼**：對每一筆候選，模型拿到的是
 
-- **可擴充的模型介面**：訓練流程透過 `ModelAdapter` 封裝演算法差異，目前提供 LightGBM adapter，支援 pointwise `binary` 與 learning-to-rank `lambdarank`／`rank_xendcg` objective；不論使用哪種訓練目標，模型仍以 query group 內的排序表現進行評估。
-- **Driver-local 訓練快取**：各 split 會由 Hive／HDFS 複製為 driver-local Parquet，再由 adapter 轉換為演算法適用的可重用格式；例如 LightGBM 會建立 `.bin`，避免每次 HPO trial 重複掃描 Hive、轉換資料與分箱。
-- **訓練階段特徵選擇**：可透過 `training.feature_selection.exclude` 排除不使用的特徵，不需重建 dataset；HPO、最終訓練、test 預測與 inference 會共用同一份特徵清單，避免訓練與推論欄位不一致。
-- **可設定的樣本權重**：可依 item、客群或其他帶入 model input 的欄位組合設定權重，且只作用於 train／train_dev；框架會產生套用報告，列出未匹配的設定，避免權重設定錯誤卻無聲失效。
-- **超參數搜尋與資料集職責分離**：Optuna HPO 使用 train 訓練、train_dev 執行 early stopping，並以 val 上的 `hpo_objective` 選擇最佳超參數；`hpo_objective` 可選擇整體 query mAP、各 item 等權重的 macro mAP，或把每一列當成二元預測的 average precision（全部列一起算，或每個 item 各算再平均）。
-- **HPO 崩潰恢復**：啟用 `hpo_checkpointing` 時會保存 Optuna study 與目前最佳模型，訓練中斷後可只補跑剩餘 trials；若要放棄既有搜尋結果，可使用 `--fresh-hpo` 從頭開始。
-- **最終模型**：HPO 完成後可直接沿用最佳 trial 模型，或以最佳參數在 train + train_dev 上重新訓練（框架已不提供機率校準機制，#411）。
-- **測試評估與模型診斷**：最終模型會對 test set 產生 `training_eval_predictions`，計算整體 mAP 與 per-item mAP attribution，並可輸出特徵統計、feature importance 與 SHAP 診斷（含 per-item 帶方向的特徵 profile、採購者對照與跨 item 偏離度 `item_idiosyncrasy`、象限（TP/FP/FN/TN）per-(item×象限) 聚合 profile 與極值案例 SHAP 圖）；模型、參數、指標與診斷也可記錄至 MLflow。
-- **版本化但不自動上線**：模型與其上游 `base_dataset_version`、`train_variant_id` 及有效 training 設定共同決定 `model_version`。training 完成後不會自動供 inference 使用，仍須人工檢視評估結果並透過 `scripts/promote_model.py` 將核准版本設為 `best`。
+- 這個 entity 在這個時段的特徵（來自 `feature_table`）；
+- 這是哪一個 item（item 本身是一個類別特徵）；
+- 選用：這筆候選自己的特徵（來自候選層級特徵表，見下）。
 
-### evaluation pipeline
+item 自己的屬性（例如產品類型）不會另外變成特徵；模型學的是每個 item 跟 entity 特徵之間的關係。
 
-將指定 `snap_date` 的模型預測與 ground truth 連接後寫入 `enriched_eval_predictions`，以 `(time, entity)` 為 query group 計算排序指標，並產出可互動檢視的 HTML 報表。
-evaluation 可用於訓練完成後的 test set 評估，也可在模型上線、label 觀察窗結束後，定期監控 inference 已發布的排序結果。
+### 候選集合：兩種情境
 
-| 資料角色 | 來源 | 用途 |
+一個 query group 裡有哪些候選，由你的 `sample_pool` 決定。框架不檢查它屬於哪一種，但兩種的指標意思不一樣：
+
+- **全網格**（預設的前提）：這個 entity 有資格的每一個 item 各一列。label 是 0 的意思是「可以選、沒有選」。銀行示例是這種。
+- **被展示的子集**：只有過去被某個系統挑出來展示過的 item 才有一列，通常一列就是一次展示。label 是 0 的意思是「看到了、沒反應」；沒被展示的 item 沒有答案，不是負例。廣告示例是這種，要用 `occasion` 或 `event` 把資料形狀講清楚（見下一節）。
+
+### 兩個選用角色：`occasion` 與 `event`
+
+預設的粒度（一組 ＝ entity × 時段，組裡每個 item 一列）裝不下某些資料，例如展示紀錄。這兩個角色各回答一個問題：
+
+1. **名次要在什麼範圍裡比？** 只讓同一次請求裡一起被排的候選互相比，就宣告 `occasion`（例如 `request_id`）。
+2. **在那個範圍裡，同一個 item 會有好幾列嗎？** 會，就宣告 `event` 分辨每一列（例如曝光 ID）。
+
+兩題的答案合起來是四種設定：
+
+| | 組裡同一個 item 只有一列 | 組裡同一個 item 有好幾列 |
 |---|---|---|
-| 模型預測 | `training_eval_predictions`（`--post-training`）或 `ranked_predictions`（預設） | 分別用於上線前 test set 評估與上線後監控 |
-| Ground truth | `label_table`；post-training 模式沿用 `training_eval_predictions` 已保存的 test label | 判定每個 `(time, entity, item)` 是否為正例 |
-| 分群欄位 | 該模式的母體表（`--post-training`＝`sample_pool`、預設＝`inference_population`），或 `segment_sources` 覆寫指定的 Hive table | 補入客群等欄位，計算 per-segment 指標 |
-| Popularity baseline | `label_table` 的歷史觀察窗 | 依 item 歷史正例數建立熱門度基準排序 |
-| 比較來源 | 其他 `model_version` 的預測或 `compare_sources` 指定的外部 Hive table | 產生模型間或跨系統比較報表 |
+| **一組 ＝ entity × 時段** | 什麼都不宣告。銀行示例 | 只宣告 `event`。把廣告資料改成「使用者 × 版位 × 週」一組，同一個素材一週會被曝光好幾次，用 `impression_id` 分辨 |
+| **一組 ＝ 一次請求** | 只宣告 `occasion`。廣告示例現在的設定：一次請求裡的素材不會重複 | 兩個都宣告。例如資訊流一次載入 6 格，同一個素材出現在第 1 格和第 5 格 |
 
-- **兩種評估情境**：`--post-training` 讀取 training pipeline 產生的 `training_eval_predictions`，用於模型上線前的 test set 評估；預設模式讀取 inference 發布的 `ranked_predictions`，用於模型上線後的定期監控。
-  監控情境須等該期 label 觀察窗結束並補齊 ground truth 後執行。
-- **以排序指標為核心**：不論模型使用 pointwise 或 learning-to-rank objective，評估都以 query group 內的相對排序為準，依 `k_values` 計算 mAP、precision 與 recall 等 @K 指標，而非逐筆分類準確率。
-  沒有任何正例的 query group 會從指標計算中排除，並在報表中記錄排除數量。
-- **多層次指標拆解**：除整體指標外，也會計算 per-item attribution、macro average 及資料集概況，協助辨識整體表現是否由少數熱門 item 主導，而非只看單一平均值。
-- **分群評估**：`segment_columns` 列出的欄從該模式的母體表 join 進評估資料（segment 在外部表時可用 `segment_sources` 覆寫），觀察不同族群的排序品質。母體表沒有某欄時不中止，只在 log 與報表註明；覆寫表不存在或缺欄時 fail-fast；母體表對不到值的 query 自成 `(unmatched)` 群，列出但不進 macro 平均。
-- **item 大類評估**：可設定 `item_categories`，將細項 item 彙整為大類後平行計算同一套指標，同時保留細項與大類兩種視角。大類可以在設定裡逐一對應，也可以取自候選的某一欄（`column`，post-training 評估）。
-- **Popularity baseline**：依 `baseline.lookback_months` 統計歷史 item 熱門度，建立不使用個人特徵的基準排序，並在報表中呈現模型、baseline 與差異，判斷模型是否真正優於單純推薦熱門項目。
-- **模型與外部結果比較**：可透過 `compare_sources` 比較另一個 `model_version` 或外部 Hive 預測表。
-  框架會先限制在雙方共同的客戶與 item 範圍後重新排名與評估，並產出 `report_comparison.html`，避免因評估母體不同造成不公平比較。
-- **可重用的評估結果**：標準流程會將已連接 label、rank 與 segment 的資料持久化為 `enriched_eval_predictions`；後續可用 `--compare-only` 直接產生比較報表，不需重新執行完整指標與 baseline 計算。
-- **Spark 原生計算與診斷報表**：逐筆 join、排名與指標聚合皆在 Spark 執行，只將聚合後的小型結果交給報表層。
-  報表可包含分數分布、排名分布、正例位置與 calibration curve 等診斷，避免將完整預測資料收集到 driver。
+宣告之後，它們會成為認出一筆候選的欄位（identity）的一部分；`occasion` 還會讓 query group 變小。各自的代價與宣告時要改哪些地方，見 [`impression-data-shapes.md`](docs/operations/user-guides/impression-data-shapes.md)。
 
+### 你準備的表、框架產出的東西
+
+**你準備的來源表**（Hive；通常用框架的 source ETL 跑你的 SQL 產生）：
+
+| 表 | 一列是什麼 | 用途 |
+|---|---|---|
+| `feature_table` | 一個 entity 在一個時段的特徵 | 模型的輸入 |
+| `label_table` | 一筆候選的答案 | 訓練與評估的標準答案；沒有出現的候選當成負例 |
+| `sample_pool` | 一筆候選 | 決定每個 query group 裡要排哪些候選 |
+| `inference_population` | 這次要被排序的一個 entity | 只給 inference 用：決定這次替誰排 |
+
+另外可以選擇性加一張**候選層級特徵表**（在 `catalog.yaml`——登記每張表在哪、什麼格式的設定檔——加一個 `candidate_feature_table` 條目）：一列是一筆候選的特徵，例如「這次展示之前 30 分鐘的瀏覽次數」。代價是 inference 不能用（見 §3）。各表的欄位與範例資料見 [`data-lineage.html`](docs/data-lineage.html)。
+
+**框架產出的東西**：
+
+- **模型版本**：training 產生一個 `model_version`，目錄裡有模型、最佳參數與訓練診斷，還有 test 的預測 `training_eval_predictions`。
+- **評估報表**：evaluation 產生 HTML 報表，看排序指標、各 item 與各客群的表現、跟熱門度基準線比。主要指標是 **mAP**：每個 query group 看正例排得多前面，算一個分數（AP；正例全排在最前面時是 1），再對所有 query group 平均。
+- **排序結果表** `ranked_predictions`：inference 的產出，每列是 `time`、`entity`、`item`、`score`、`rank`、`model_version`。通過完整性與名次檢查才會寫進去。
+
+`score` 是模型的原始分數，只用來排先後，不保證能當機率讀（見 §8 Q3）。
 
 ---
 
-## 3. 快速上手
+## 3. 適不適合你的問題
 
-本節的目標不是解釋每個 node，而是協助第一次使用框架的資料科學家，將一個新的業務問題轉換成可執行、可評估、可發布的排序流程。以下以「銀行 App 理財專區功能排序」為例：針對每位客戶，排序首頁要呈現的理財功能。
+先看你的資料和需求落在哪一列：
 
-### 先確認問題是否適合
+| 你的情況 | 框架怎麼接 | 代價 |
+|---|---|---|
+| 每個對象有一組候選，定期批次排一次 | 預設，不用多宣告 | — |
+| 資料是展示紀錄（一列一次展示） | 用 `occasion` 或 `event` 宣告資料形狀 | 離線指標只重排被展示過的候選，會受當初誰被展示、擺在哪個位置影響。不宣告框架也不會報錯，只是數字的意思變了 |
+| 同一時段、同一對象有好幾次請求，每次各自排 | 宣告 `occasion` | query group 變小，隨便排的 mAP 也會偏高，只能在同一批資料裡互比；上線後監控模式的 evaluation 不能用 |
+| 同一個 query group 裡同一個 item 有好幾列 | 宣告 `event` | 上線後監控模式的 evaluation 不能用 |
+| 有「候選當下」才有的特徵 | 加一張候選層級特徵表 | inference 不能用：評分要交給線上算得出這些特徵的系統 |
+| 不同對象可選的 item 不同 | 訓練端：`sample_pool` 只放有資格的候選。推論端：「替誰排」由 `inference_population` 決定 | 推論端每個 entity 都配上整份 item 清單，沒有設定可以逐人限制；要限制，在下游過濾 `ranked_predictions`，或改 inference 的程式碼 |
+| entity 或 item 由好幾欄組成 | 在 `schema.columns` 寫成清單 | item 會被拼成一欄，原本的欄不會各自變成特徵 |
+| item 很多，或常常有新 item | item 清單事先列出，或從 train 期間的資料數出來 | 模型只認得清單裡的 item。上線後才出現的新 item，要等它出現在 train 期間、重跑 dataset 與 training 才會被評分。item 很多時的效能沒量過 |
+| `time` 是日或週，不是月 | 直接用 | 設計上以週為下限；日可以跑，但沒量過 time 值很多時的效能 |
+| 資料量很大 | Spark 處理 | training 在 driver 單機上跑，train 資料要放得進 driver 的記憶體；用 train 抽樣控制大小 |
 
-開始修改設定前，先確認問題符合以下條件：
+**目前不支援**：
 
-- **批次排序**：在固定時間切點產生排序結果，而不是要求即時逐次互動更新。
-- **明確的 query group**：每個 `time + entity` 下有多個候選 `item`，且分數只需要在同一組內比較。
-- **可觀察的 label**：能定義快照日之後一段固定觀察窗內的正負結果，例如「未來 7 天是否點擊該功能」。
-- **時間正確的特徵**：所有特徵在 `time` 當下已經存在，不能使用觀察窗內或更晚才產生的資訊。
-- **固定候選集合**：目前 inference 會讓每個 `entity` 配上 `inference.products` 的完整 item 清單（在 driver 的內層迴圈展開，不是落地一張展開後的表），預設每個對象共享同一組候選 item。
+- **線上、即時評分。** 框架只做批次的離線推論。
+- **每個 item 各一個模型。** 所有 item 共用一個模型，item 是其中一個特徵。
+- **LightGBM 以外的模型。** 介面允許擴充，但目前只有 LightGBM。
+- **來源表的 `time` 欄不叫 `snap_date`。** source ETL 的輸出檢查目前把這個欄名寫死（issue #390，未修）。修好之前，`time` 欄請取名 `snap_date`。
 
-> 若不同客戶可見或可使用的功能不同，例如只有完成風險屬性評估的客戶才能看到基金申購，需先在 inference 的 `build_inference_population_features` 加入 eligibility filter，不能只靠模型把不適用的功能排到後面。
+**執行環境的限制**：PySpark 3.3.2，跑在 Hadoop／HDFS／Hive 上；純 CPU。Spark 裡不能用 UDF、執行時不能連外網、不能安裝額外套件——所以特徵只能用 Spark SQL 的內建函式算，不能在執行時呼叫外部服務。
 
-### 定義排序契約
+---
 
-先用一張表把業務問題映射到框架角色；這份契約應在撰寫 SQL 或調整模型前與需求方確認。
+## 4. 框架怎麼運作
 
-| 決策 | App 理財專區功能排序示例 |
+- **pipeline 由 node 組成，讀寫集中在 catalog。** 每個 node 只寫資料處理邏輯；讀哪張表、寫到哪、什麼格式，都寫在 `conf/base/catalog.yaml`。換 Hive database 或表名不用改程式。
+- **Spark 處理大量資料，driver 做訓練與評分。** 抽樣、前處理、組訓練資料都在 Spark 做。進 training 才把資料複製到 driver 本機，轉成 LightGBM 的 `.bin` 快取，調參的每一次試驗都不用重讀 Hive。inference 也在 driver 上分批評分。
+- **每一層產物都有版本。** 版本 ID 由「會影響這層產物的設定」算出來，分三層：
+
+  ```
+  base_dataset_version        前處理器、val、test
+     └─ train_variant_id      train、train_dev（只改 train 的抽樣，只重建這層以下；
+           │                  train_dev 是從 train 同一段時間切出的一小份，見 §8 Q5）
+           └─ model_version   模型（上面兩個版本 ＋ 模型設定）
+  ```
+
+  設定沒變就沿用已經產出的東西；只有受影響的那幾層會重算。不同實驗的版本可以並存。`latest` 指最近一次產出的資料版本，`best` 指你 promote 過、inference 預設使用的模型版本。改了哪個設定要重跑什麼，見 [`troubleshooting.md`](docs/operations/user-guides/troubleshooting.md) §3。
+- **框架給建議，你拍板。** 三件會改變模型意思或上線結果的事由你決定：哪些欄是類別欄（`scripts/suggest_categorical_cols.py` 給候選）、抽樣比例與樣本權重（`scripts/sampling_overrides_editor.py` 給建議）、哪個模型上線（`scripts/promote_model.py`）。
+- **越早擋錯越好。** 只看設定就判斷得出的錯，在啟動 Spark 之前就擋；要看資料的，在讀到資料的第一步擋；排序結果在發布之前檢查。細節見 [`pipeline-checks.md`](docs/operations/user-guides/pipeline-checks.md)。
+- **中斷了可以接著跑。** 已經產出的版本會直接沿用；可以只跑某一段（`--from-node`、`--only-node`，見 [`pipeline-slicing.md`](docs/operations/user-guides/pipeline-slicing.md)）；`hpo_checkpointing` 開著時（預設就開），調參中斷後可以只補跑沒做完的試驗；source ETL 可以從失敗的那張表接著跑（`--restart-from`）。
+
+---
+
+## 5. 快速上手
+
+這一節帶你把自己的題目跑完一輪。主線用銀行產品推薦；廣告情境不一樣的地方，放在每一步最後的「**廣告情境**」框裡。
+
+開始前：照 [`using-a-release.md`](docs/operations/user-guides/using-a-release.md) 取得框架的一個發行版（git tag）並裝好，而且執行環境已經連得上 Spark 與 Hive。**想先看框架跑一次**：在本機建好環境（[`local-spark-setup.md`](docs/operations/dev-setup/local-spark-setup.md)）後，`bash scripts/local_e2e.sh` 用合成資料跑完銀行示例，`bash examples/ad/run_e2e.sh` 跑完廣告示例。
+
+### 步驟 0：建自己的設定目錄
+
+```bash
+mkdir -p conf/production
+```
+
+- 本文件用 `production` 當你的環境名稱。名字可以自己取，換了就把後面每條指令的 `--env production` 一起換；但不要用 `local`，那是不帶 `--env` 時的預設，給本機測試用。
+- `conf/production/` 疊在 `conf/base/` 上面。檔名跟 `conf/base/` 裡的一樣，裡面只寫你要改的鍵，同名的鍵以你的為準。
+- **不要直接改 `conf/base/`**。那是框架附的示例設定，升級時會被新版蓋掉。
+- **pipeline 指令都要帶 `--env production`**。不帶的話預設是 `local`，你的設定一條都不會生效，而且不會有任何錯誤。
+- 兩個例外沒有環境分層：來源 SQL（`conf/sql/etl/`）與 Spark 連線設定（看 `SPARK_CONF_DIR`）。怎麼處理見 [`using-a-release.md`](docs/operations/user-guides/using-a-release.md) §5。
+- **已知缺口**：底下還有一層 key 的值（例如 `inference:` 底下的 `products`）是合併、不是取代——你可以改或加 key，但刪不掉 `conf/base/` 裡已有的 key。目前有三個鍵因此要直接改 `conf/base/`，後面用到時會提醒；代價是升級時這幾處要自己合併（issue #477）。
+
+`conf/base/` 裡的值是銀行示例專屬的（欄名、item 名、日期、表名），換成你的資料一定要改。每一步會講要改哪些；步驟 5 有一張總表，讓你跑之前對一次。
+
+### 步驟 1：定義排序契約
+
+寫 SQL 或調模型之前，先把題目對應到框架的角色，跟需求方確認：
+
+| 要決定的事 | 銀行產品推薦 |
 |---|---|
-| 排序目的 | 決定每位客戶在理財專區首頁看到的功能順序 |
-| `time` | `snap_date`，每日或每週產生排序的快照日 |
-| `entity` | `cust_id`，被服務的客戶 |
-| `item` | `function_code`，例如 `portfolio_overview`、`fund_search`、`market_news`、`recurring_investment` |
-| query group | 同一個 `snap_date + cust_id` 下的所有候選功能 |
-| `label` | 快照日後 7 天內是否點擊或進入該功能，0 或 1 |
-| 模型輸出 | 每位客戶對各功能的 `score`，以及組內的 `rank` |
-| 下游動作 | 取 Top N 決定首頁模組順序 |
-| 主要指標 | mAP 或 Recall@K，依頁面實際可展示的名額選擇 K |
+| 排序拿來做什麼 | 每個月決定每位客戶優先推哪幾個產品 |
+| `time` | `snap_date`，每月月底 |
+| `entity` | `cust_id` |
+| `item` | `prod_name` |
+| 候選 | 這位客戶當時有資格申辦的每一個產品 |
+| `label` | 月底之後一段固定期間內，有沒有申辦這個產品 |
+| 下游怎麼用 | 每位客戶取前 K 名 |
+| 主要看的指標 | mAP 或 recall@K，K 等於下游實際推得出去的名額 |
 
-`label` 代表模型真正會優化的行為。若使用「點擊」作為 label，模型學到的是互動傾向，不等同於申購意願、客戶適合度或預期收益；這些目標需要不同的 label、樣本權重或額外業務規則。
+`label` 就是模型真正會學的行為。拿「點擊」當 label，模型學到的是點擊傾向，不等於申辦意願或收益。為什麼指標以 query group 為單位、為什麼不用門檻，見 §8 Q2、Q3。
 
-### 設定 schema 與候選 item
+不同客戶可選的產品不同時（例如沒做過風險評估的客戶不能買基金），訓練端要在 `sample_pool` 的 SQL 裡就只放有資格的候選；推論端的做法見 §3。
 
-在 `conf/base/parameters.yaml` 將固定的 schema 角色對應到新題目的實際欄名，並列出合法的 item 集合：
+> **廣告情境**：`entity` 是 `[user_id, slot_id]`，`occasion` 是 `request_id`，候選是這次請求真的展示過的素材，`label` 是這次展示有沒有被點。
+
+### 步驟 2：建來源表
+
+在 `conf/sql/etl/` 寫 SQL，產出 `feature_table`、`label_table`、`sample_pool`、`inference_population`。每張表的 SQL 檔、partition、`primary_key` 與品質檢查，設在 `parameters_{feature,label,sample_pool,inference_population}_etl.yaml` 的 `tables`；寫進哪個 database 設在同一檔的 `variables.target_db`。pipeline 讀表用的 database 是 `parameters.yaml` 的 `hive.db`，通常設成同一個。要換表名就改 `catalog.yaml`。
+
+三件最容易錯的事：
+
+- `feature_table` 只能用 `time` 當下已經知道的資訊。框架不檢查這件事。
+- `label_table` 的日期要等觀察窗結束、資料到齊才能用。
+- `sample_pool` 放的是「全部有資格的候選」，不是只放發生過事件的。
+
+先用一個日期試：
+
+```bash
+# 只讀不寫：檢查上游 partition、欄位與資料量
+python -m recsys_tfb feature_etl --env production --source-check --target-dates 2026-01-31
+python -m recsys_tfb label_etl   --env production --source-check --target-dates 2026-01-31
+
+# 檢查通過再寫表
+python -m recsys_tfb feature_etl     --env production --target-dates 2026-01-31
+python -m recsys_tfb label_etl       --env production --target-dates 2026-01-31
+python -m recsys_tfb sample_pool_etl --env production --target-dates 2026-01-31
+```
+
+`--source-check` 查什麼，要先寫在 ETL 設定的 `source_checks`（例如 `feature_etl.source_checks`）；`conf/base/` 的是空的，不寫的話它只印一行警告就結束，什麼都沒查。
+
+單日沒問題，再把 `--target-dates` 擴大到 train、val、test 需要的所有日期；inference 要的日期在步驟 6 再產。完整設定見 [`source_etl.md`](docs/pipelines/source_etl.md)。
+
+> **廣告情境**：`sample_pool` 與 `label_table` 都要帶 `request_id`，兩張表的 `primary_key` 也要加上它。候選層級特徵表在 `catalog.yaml` 加一個 `candidate_feature_table` 條目指過去。SQL 範例在 `examples/ad/conf/sql/etl/`。
+
+### 步驟 3：設定 schema 與資料切分
+
+在 `conf/production/parameters.yaml` 寫角色對應與 item 清單：
 
 ```yaml
 schema:
   columns:
     time: snap_date
     entity: [cust_id]
-    item: function_code
+    item: prod_name
     label: label
-    score: score
-    rank: rank
   categorical_values:
-    function_code:
-      - portfolio_overview
-      - fund_search
-      - market_news
-      - recurring_investment
+    prod_name: [ccard_bill, ccard_cash, fund_stock]   # 你全部的 item
 ```
 
-同一份候選清單也要填入 `conf/base/parameters_inference.yaml` 的 `inference.products`。框架會檢查兩處是否一致，避免訓練與推論使用不同的 item 集合。
+欄名換了，`catalog.yaml` 裡各表 `columns`、`partition_cols` 寫的欄名也要跟著換（item 由多欄組成時，框架寫的表裡欄名固定叫 `item`）。只有預測表缺 entity 欄時，training 一開始會擋；其他表不檢查，沒換會在寫表時失敗。
 
-不想逐一列出時，item 那一格改寫 `from_train_data`（例：`function_code: from_train_data`）：框架從 train 時段的 `sample_pool` 數出清單、存進前處理器，`inference.products` 就不寫（寫了會被擋）。val／test 才出現的新 item 只警告、照樣評估；離線推論只替清單裡的 item 評分，上線後才出現的新 item 要等重跑 dataset＋training（見 `docs/pipelines/dataset.md` §3.10）。
+同一份 item 清單也要寫進 `inference.products`（`parameters_inference.yaml`），框架會檢查兩處一致。不想逐一列出的話，item 那格寫 `from_train_data`（例：`prod_name: from_train_data`），框架從 train 期間的 `sample_pool` 數出清單。這時 `inference.products` 必須拿掉，留著會被擋；而它在 `conf/base/` 裡已經有一份，從 `conf/production/` 刪不掉，**要直接刪掉 `conf/base/parameters_inference.yaml` 裡的 `products`**（已知缺口）。代價是上線後才出現的新 item，要等它出現在 train 期間、重跑 dataset 與 training 才會被評分（見 [`dataset.md`](docs/pipelines/dataset.md) §3.10）。
 
-### 建立三張來源表
+在 `parameters_dataset.yaml` 設定：
 
-修改 `conf/sql/etl/` 下的 SQL，將原始資料整理成框架規範的三張 Hive 表。資料欄位可以依題目擴充，但 identity key 與資料顆粒度必須符合下列契約：
+- `dataset.train_snap_dates`、`dataset.val_snap_dates`、`dataset.test_snap_dates`：照時間先後、互不重疊（為什麼照時間切、train_dev 是什麼，見 §8 Q5）。
+- `dataset.prepare_model_input.categorical_columns`：類別欄，一定要包含 item 欄（為什麼，見 §8 Q1）。
+- `dataset.prepare_model_input.drop_columns`：不該進模型的欄，例如 identity 欄、label、觀察窗日期。
+- `dataset.sample_group_keys`：train 分層抽樣的分層欄。
+- `dataset.sample_ratio_overrides`：各分層的抽樣比例（哪些資料可以抽、哪些不行，見 §8 Q4）。`conf/base/` 裡示例的 key 用的是銀行的 item，換了 item 會被擋；從 `conf/production/` 刪不掉，**要直接改 `conf/base/parameters_dataset.yaml` 的這一段**（已知缺口）。
+- `dataset.carry_columns`：之後設樣本權重要用、但不是特徵的欄。
 
-| 來源表 | App 功能排序內容 | 必要顆粒度 |
-|---|---|---|
-| `feature_table` | 客戶屬性、資產概況、近期 App 行為、各功能歷史使用次數等；只能使用 `snap_date` 當下已知的資訊 | `time, entity` |
-| `label_table` | 每位客戶對每個功能在 label 觀察窗內是否發生目標行為 | `time, entity, item` |
-| `sample_pool` | 要納入建模的客戶與候選功能，可附帶客群、活躍度等分層抽樣欄位 | `time, entity, item` |
-
-同時調整 `conf/base/parameters_{feature,label,sample_pool}_etl.yaml` 的 SQL 執行順序、partition、primary key 與品質檢查；inference 另需 `parameters_inference_population_etl.yaml` 產出評分母體（主鍵 `time, entity`，對應 `sample_pool`）。如果更換 Hive database、來源表名或下游產物名稱，再修改 `conf/base/catalog.yaml`。
-
-開始大量回補前，建議先選一個日期驗證：
-
-```bash
-# 唯讀檢查上游 partition、欄位與資料量
-python -m recsys_tfb feature_etl --env production --source-check --target-dates 2026-01-31
-python -m recsys_tfb label_etl --env production --source-check --target-dates 2026-01-31
-
-# 檢查通過後再產出三張來源表
-python -m recsys_tfb feature_etl --env production --target-dates 2026-01-31
-python -m recsys_tfb label_etl --env production --target-dates 2026-01-31
-python -m recsys_tfb sample_pool_etl --env production --target-dates 2026-01-31
-```
-
-確認單日資料正確後，再將 `--target-dates` 擴充為 train、val 與 test 所需的所有日期。source ETL 的完整設定與重跑方式見 [`docs/pipelines/source_etl.md`](docs/pipelines/source_etl.md)。
-
-### 設定資料切分與前處理
-
-在 `conf/base/parameters_dataset.yaml` 完成以下設定：
-
-- `train_snap_dates`、`val_snap_dates`、`test_snap_dates` 必須互斥，並依時間先後切分，避免用未來資料評估過去模型（`calibration_snap_dates` 等校準相關設定鍵已隨 #411 移除，留在設定檔裡會被 CLI 的 A37 檢查擋下）。
-- `sample_group_keys` 定義分層抽樣維度，例如 `customer_segment + function_code + label`。
-- `carry_columns` 列出後續 sample weight 需要使用、但不屬於 identity 的欄位。
-- `prepare_model_input.categorical_columns` 列出類別欄，且必須包含 item 欄位 `function_code`。
-- `prepare_model_input.drop_columns` 排除 identity、label、觀察窗日期及不應進入模型的欄位。
-
-類別欄與抽樣比例可先由資料產生建議，再由使用者審核：
+類別欄與抽樣比例可以先讓工具給建議，你再審：
 
 ```bash
 python scripts/suggest_categorical_cols.py <database>.feature_table --max-cardinality 30
-# 大表可用 --where 裁分區（Spark 下推省 I/O）或 --sample-fraction 抽樣加速；
-# 子集會低估 cardinality（低卡判定僅為下界），詳見 docs/pipelines/dataset.md：
-python scripts/suggest_categorical_cols.py <database>.feature_table --where "snap_date >= '2026-06-01'" --sample-fraction 0.1
 python scripts/sampling_overrides_editor.py profile <database>.sample_pool
-```
-
-互動式抽樣工具匯出設定後，可轉成 `parameters_dataset.yaml` 的 `sample_ratio_overrides` 與 `parameters_training.yaml` 的 `sample_weights`：
-
-```bash
 python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_overrides_export.json
 ```
 
-### 設定模型與評估方式
+- `suggest_categorical_cols.py` 遇到大表，可以加 `--where` 只讀部分分區、或 `--sample-fraction` 抽樣加速（見 [`dataset.md`](docs/pipelines/dataset.md)）。
+- `sampling_overrides_editor.py` 預設讀 `conf/base/` 的示例設定，用 `--params`、`--train-params`、`--base-params` 改指到你的設定檔；`to-yaml` 產出兩段：`sample_weights` 貼到 `conf/production/parameters_training.yaml`；`sample_ratio_overrides` 要取代 `conf/base/parameters_dataset.yaml` 裡示例的那一段（貼到 `conf/production/` 會跟示例的 key 合併而被擋，見上面）。用法見 [`sampling-overrides-editor.md`](docs/operations/user-guides/sampling-overrides-editor.md)。
 
-在 `conf/base/parameters_training.yaml` 先建立一個容易解讀的 baseline，再逐步增加複雜度：
+> **廣告情境**：`schema.columns` 加 `occasion: request_id`；`request_id` 不能列進 `categorical_columns`；`catalog.yaml` 裡 `training_eval_predictions` 的欄位要加上 `request_id`（預測表只寫宣告過的欄，沒加會被設定檢查擋下）。完整清單見 [`impression-data-shapes.md`](docs/operations/user-guides/impression-data-shapes.md)。
 
-- 初版可使用 pointwise `binary` objective；若要直接優化組內排序，再比較 `lambdarank` 或 `rank_xendcg`。
-- `hpo_objective: mean_ap` 讓每個 query group 等權；`macro_per_item_map` 則讓每個 item 等權，適合避免熱門功能主導調參結果。`pooled_average_precision`／`macro_per_item_average_precision` 把 val 的每一列當成一次二元預測，給以展示紀錄訓練、query group 很小的部署用，要搭配 `dataset.val_zero_positive_group_ratio` > 0（見 `docs/pipelines/training.md` §3.2）。
-- 框架已不提供機率校準機制（#411 移除）；`dataset.enable_calibration`、`training.calibration` 等退役設定鍵只要出現就會被 CLI 擋下（A37），刪除即可。下游若需要機率語意，責任在下游（見 5. FAQ Q4）。
-- 初次 smoke test 可降低 `n_trials` 與 `num_iterations`，確認資料流正確後再恢復正式搜尋規模。
+### 步驟 4：設定模型與評估
 
-> inference 的 `validate_predictions` **不檢查** `score` 是否介於 0 與 1——`score_range` 刻意不在 `BATCH_CHECKS` 裡（`src/recsys_tfb/pipelines/inference/steps/validation.py`）。理由：`binary` objective 的輸出是 sigmoid，`[0, 1]` 由建構方式保證、這個檢查永遠不會紅；ranking objective 的原始輸出無界，同一個檢查會變成誤報。兩種都沒有資訊量（[ADR-0011](docs/adr/0011-inference-validation-two-layers.md) §2）。下游若需要 `score` 落在某個範圍，那是下游自己要驗的事。
+在 `parameters_training.yaml`：
 
-在 `conf/base/parameters_evaluation.yaml` 設定符合頁面展示空間的 `k_values`。例如首頁只顯示 3 個功能，就應特別關注 mAP@3 與 Recall@3，並設定重要客群的 `segment_columns`，避免整體指標掩蓋特定客群的退化。
+- `training.algorithm_params.objective`（模型學什麼）：第一版用 `binary`，流程最好驗證。想讓模型直接學組內順序，再試 `lambdarank` 或 `rank_xendcg`，並把 `training.algorithm_params.metric` 改成 `ndcg` 或 `map`。
+- `training.hpo_objective`（調參時在 val 上看什麼）：`conf/base/` 預設 `macro_per_item_map`，讓每個 item 一樣重，避免熱門 item 主導調參；想讓每個 query group 一樣重，改 `mean_ap`。它跟 objective 的差別見 §8 Q6。
+- `training.sample_weight_keys`：`conf/base/` 是銀行的 item 欄 `prod_name`，改成你的 item 欄，沒改會被設定檢查擋下。要用 `sampling_overrides_editor.py` 產生權重的話，還要加上 label 欄（例如 `[prod_name, label]`），不然它會報錯。
+- 第一次試跑可以先調低 `training.n_trials` 與 `training.num_iterations`，確認資料流沒問題再調回來。
 
-### 執行第一個端到端版本
+在 `parameters_evaluation.yaml`：
 
-指令格式為 `python -m recsys_tfb <pipeline> [選項]`。以下假設執行環境已能連線 Spark／Hive；本機環境建置見 [`docs/operations/dev-setup/local-spark-setup.md`](docs/operations/dev-setup/local-spark-setup.md)。
+- `evaluation.k_values` 設成下游實際的名額（例如只推 3 個產品，就特別看 @3）。
+- `evaluation.segment_columns` 列出要分開看的客群，避免整體數字蓋掉某個客群變差。
+- `evaluation.item_categories` 是 item 大類報表。不用的話，把 `evaluation.item_categories.enabled` 設成 `false`；要用的話，`conf/base/` 裡銀行的大類刪不掉，**要直接改 `conf/base/parameters_evaluation.yaml` 的 `mapping`**（已知缺口）。
+
+> **廣告情境**：一次請求平均只有約 4 個候選，組太小時 mAP 分不太出好壞。示例改用 `training.hpo_objective: pooled_average_precision`（把每一列當一次二元預測）。這個目標要留下一部分沒有正例的組：`dataset.val_zero_positive_group_ratio` 與 `dataset.test_zero_positive_group_ratio` 都要大於 0，`catalog.yaml` 的 `training_eval_predictions` 也要加上 `zero_positive_group_weight` 欄。示例的設定在 `examples/ad/conf/base/`，說明見 [`training.md`](docs/pipelines/training.md) §3.2。
+
+### 步驟 5：跑之前，對一次一定要設的鍵
+
+下面這些鍵在 `conf/base/` 裡是銀行示例的值，換成你的資料一定要改。`conf/base/` 裡標 ★ 的就是這些。
+
+| 檔案 | 鍵 | 設成什麼 |
+|---|---|---|
+| `parameters.yaml` | `hive.db` | 你的 Hive database |
+| | `schema.columns` 的 `time`、`entity`、`item`、`label` | 你的欄名 |
+| | `schema.categorical_values.<item 欄>` | 你全部的 item，或 `from_train_data` |
+| `catalog.yaml` | 各表 `partition_cols`、`columns` 裡的 `snap_date`、`cust_id`、`prod_name`、`label` | 你的欄名 |
+| `parameters_<名稱>_etl.yaml`（四個） | `<名稱>_etl.variables.target_db`、`<名稱>_etl.tables` | 你的 database、你的來源表定義 |
+| `parameters_dataset.yaml` | `dataset.train_snap_dates`、`dataset.val_snap_dates`、`dataset.test_snap_dates` | 你的日期 |
+| | `dataset.prepare_model_input.categorical_columns`、`dataset.prepare_model_input.drop_columns` | 你的類別欄、不進模型的欄 |
+| | `dataset.sample_group_keys`、`dataset.carry_columns` | 你的分層欄、權重要用的欄 |
+| | `dataset.sample_ratio_overrides` | 你的分層比例，或整段清空（**直接改 `conf/base/`**） |
+| `parameters_training.yaml` | `training.sample_weight_keys` | 你的 item 欄；用 `sampling_overrides_editor.py` 產生權重時再加上 label 欄 |
+| `parameters_inference.yaml` | `inference.snap_dates` | 要評分的日期 |
+| | `inference.products` | 你全部的 item；用 `from_train_data` 時要刪掉（**直接改 `conf/base/`**） |
+| `parameters_evaluation.yaml` | `evaluation.snap_date` | 要評估的日期 |
+| | `evaluation.item_categories` | 不用就 `enabled: false`；要用就改 `mapping`（**直接改 `conf/base/`**） |
+
+`evaluation.segment_columns` 也標了 ★：沒改不會出錯，只是分群報表會註明找不到那一欄。其他鍵都有通用的預設值，跑通之後再調。
+
+### 步驟 6：依序執行
 
 ```bash
-# 1. 建立版本化資料集
-python -m recsys_tfb dataset --env production
+python -m recsys_tfb dataset    --env production            # 1. 組出四份資料
+python -m recsys_tfb training   --env production            # 2. 訓練；log 會印出這次的 model_version
+python -m recsys_tfb evaluation --env production --post-training --model-version <model_version>
+                                                            # 3. 上線前評估報表
+python scripts/promote_model.py --env production --dry-run  # 4. 列出候選版本
+python scripts/promote_model.py <model_version>             # 5. 看完報表，人工 promote
 
-# 2. 訓練模型並產生 test set 預測
-python -m recsys_tfb training --env production
+# 6. 替推論日期產出 inference 要讀的兩張表，再評分、發布
+python -m recsys_tfb feature_etl              --env production --target-dates <推論日期>
+python -m recsys_tfb inference_population_etl --env production --target-dates <推論日期>
+python -m recsys_tfb inference                --env production
 
-# 3. 產生上線前 test set 評估報表
-python -m recsys_tfb evaluation --env production --post-training
-
-# 4. 人工審核通過後，將指定模型設為 best
-python scripts/promote_model.py --env production --dry-run
-python scripts/promote_model.py <model_version>
-
-# 5. 設定 parameters_inference.yaml 的 snap_dates 後執行批次排序
-python -m recsys_tfb inference --env production
-
-# 6. label 觀察窗結束後，評估已發布的推論結果
+# 7. 那一期的答案出來後：補上 label，評估已發布的結果
+python -m recsys_tfb label_etl  --env production --target-dates <推論日期>
 python -m recsys_tfb evaluation --env production
 ```
 
-`dataset` 會產生資料版本，`training` 再將資料版本與模型設定組合成 `model_version`。訓練完成不會自動上線；只有人工核准並設為 `best` 的版本，才會成為 inference 的預設模型。
+- **產出在哪**：模型在 `data/models/<model_version>/`（目錄名就是 model_version）；評估報表在 `data/evaluation/<model_version>/<日期>/report.html`。
+- **第 3 步**的報表是決定要不要上線的依據：先確認模型贏過熱門度基準線，各 item、各客群沒有明顯變差。一定要帶 `--model-version`：不帶的話，evaluation 評的是 `best`（上一個 promote 過的版本），不是剛訓練好的這個。
+- **第 5 步**：training 不會自己上線。從沒 promote 過，inference 會停下並提示你先 promote；以前 promote 過，inference 會安靜地繼續用舊模型。指定版本號時 promote 不讀設定，所以不用帶 `--env`。怎麼挑版本見 [`promoting-a-model.md`](docs/operations/user-guides/promoting-a-model.md)。
+- **日期都寫在設定裡**：第 3 步評 `evaluation.snap_date`，它要在 `dataset.test_snap_dates` 裡；第 6 步替 `inference.snap_dates` 排；第 7 步要先把 `evaluation.snap_date` 改成推論日期。
+- **第 7 步**要等那一期的 label 觀察窗結束、答案補齊才跑。
 
-### 驗收第一版
+> **廣告情境**：只跑到第 3 步。宣告了候選層級特徵表，inference 在入口就會停下（評分要交給線上系統）；宣告了 `occasion`，上線後監控模式的 evaluation 也不能用。
 
-第一次跑完不應只確認 pipeline 顯示成功，至少還要檢查：
+### 步驟 7：驗收第一版
 
-- 三張來源表在 identity key 上沒有重複，且各日期、各 item 的資料量符合預期。
-- `feature_table` 沒有使用 label 觀察窗內或未來才會產生的欄位。
-- 每個 query group 有足夠的候選 item；val／test 中有正例的 query group 數量足以代表真實使用情境。
-- train、val、test 的日期互斥，且 test 保持為最終 held-out 資料。
-- 抽樣與 sample weight 沒有讓冷門功能或重要客群消失，未匹配的 weight key 已被檢視。
-- test 報表中的模型指標優於 popularity baseline，且 per-item、per-segment 指標沒有明顯退化。
-- `ranked_predictions` 每個 query group 都包含完整候選集合，`rank` 從 1 開始且與 `score` 由高到低一致。
-- 隨機抽查實際排序，確認結果符合產品資格、法遵限制與基本業務常識。
+pipeline 顯示成功不代表結果對。至少再確認：
 
-需要深入調整時，可依序查閱 [`docs/pipelines/source_etl.md`](docs/pipelines/source_etl.md)、[`dataset.md`](docs/pipelines/dataset.md)、[`training.md`](docs/pipelines/training.md)、[`inference.md`](docs/pipelines/inference.md) 與 [`evaluation.md`](docs/pipelines/evaluation.md)。
+- 來源表在各自的鍵上沒有重複，各日期、各 item 的資料量合理。
+- `feature_table` 沒有用到觀察窗內或之後才產生的欄位。
+- train、val、test 的日期互不重疊、照時間先後；test 留到最後才看。
+- 抽樣與樣本權重沒有讓冷門 item 或重要客群消失；training 的套用報告裡沒對上的 key 已經看過。
+- 評估報表：模型贏過熱門度基準線，各 item、各客群沒有明顯變差。
+- `ranked_predictions` 每個 query group 的候選都完整。
+- 隨機抽幾個人看實際排序，符合產品資格、法遵與常識。
 
 ---
 
-## 4. 設定檢查與常見錯誤
+## 6. 各 pipeline 做什麼
 
-本節用來回答兩個問題：**執行前如何避免設定錯誤，以及指令失敗後應該先檢查哪裡**。模型與排序概念的選擇則放在下一節 FAQ。
+**source ETL**（`feature_etl`、`label_etl`、`sample_pool_etl`、`inference_population_etl`）：照設定檔的順序跑你的 SQL，寫出來源表。寫之前可以先檢查上游（`--source-check`），寫完檢查列數、重複鍵、NULL 比例；可以一次跑多個日期、失敗後從中間接著跑、只印出 SQL 不執行。→ [`source_etl.md`](docs/pipelines/source_etl.md)
 
-### 執行前檢查
+**dataset**：先檢查設定跟資料對不對得上；依日期切出 train、train_dev、val、test，train 依你的設定分層抽樣；只用 train 期間的資料建前處理器（類別編號、要用的特徵欄），再套到所有資料；最後接上特徵與 label，產出四份模型輸入。沒有任何正例的 query group 每個 split 各自決定留多少：預設 train 全留、val 與 test 全丟（排序指標算不了它）。→ [`dataset.md`](docs/pipelines/dataset.md)
 
-第一次接入新題目，或修改 schema、item、特徵、抽樣設定後，建議依序確認：
+**training**：把四份資料複製到 driver 本機；用 train 訓練、train_dev 決定樹長到第幾棵停、val 挑超參數（Optuna）；產出最終模型，對 test 預測並算指標；可以另外輸出特徵重要度與 SHAP 診斷，並記錄到 MLflow。可以排除特徵、設樣本權重，都不用重建 dataset。→ [`training.md`](docs/pipelines/training.md)
 
-1. `entity` 是擁有一組候選項目的對象，`item` 才是 query group 內真正被排序的項目。
-2. `feature_table` 的主鍵是 `time + entity`；`label_table` 與 `sample_pool` 的主鍵是 `time + entity + item`，三張表都不應有重複鍵。
-3. `sample_pool` 包含所有要比較的候選項目，而不是只保留 `label = 1` 的正例。
-4. `schema.categorical_values.<item>`、`inference.products` 與 `sample_pool` 使用相同的 item 集合；`label_table` 可以只包含其中一部分，但不可出現未宣告的 item。（item 清單寫 `from_train_data` 時沒有這兩處可對：清單就是 train 時段 `sample_pool` 的 item，`label_table` 的 item 必須在 `sample_pool` 出現過。）
-5. 特徵只使用 `time` 當下已知的資訊；label 觀察窗尚未結束的日期不能放進 train、val 或 test。
-6. train、val、test 日期彼此不重疊，並依時間先後排列。
-7. item 必須列在 `categorical_columns`，且不可同時出現在 `drop_columns` 或 `training.feature_selection.exclude`。
-8. 不同 entity 若有不同候選資格，必須在建立 scoring dataset 時過濾，不可只期待模型將不適用的 item 排到最後。
+**evaluation**：有兩種模式。`--post-training` 評 training 對 test 的預測（上線前）；預設模式評 inference 發布的結果（上線後，等答案出來）。以 query group 為單位算 mAP、precision、recall 等 @K 指標，再拆到各 item、各客群、各 item 大類，並跟熱門度基準線比；也可以跟另一個模型版本或外部預測表比。報表附一組自動診斷，判讀方式見 [`evaluation-diagnosis.md`](docs/pipelines/evaluation-diagnosis.md)。→ [`evaluation.md`](docs/pipelines/evaluation.md)
 
-### 最常見的錯誤
+**inference**：讀 `inference_population`，每個 entity 配上整份 item 清單，用 `best`（或 `--model-version` 指定的版本）評分、排名；檢查通過才發布到 `ranked_predictions`。→ [`inference.md`](docs/pipelines/inference.md)
 
-| 常見錯誤 | 可能造成的結果 | 避免與修正方式 |
-|---|---|---|
-| `sample_pool` 只放曾經點擊、申辦或發生事件的 item | 訓練資料幾乎沒有負例，模型學不到同一 query group 內哪些候選應排後面 | `sample_pool` 應表示當時有資格被排序的候選集合，再由 `label_table` 標記哪些候選成為正例 |
-| 把「label 資料尚未到齊」當成 `label = 0` | 大量正例被誤標為負例，離線指標與模型方向失真 | 先確認觀察窗已結束、來源 partition 已到齊；只有「確定沒有發生事件」才能視為 0 |
-| 特徵使用快照日之後才產生的欄位 | test 指標異常漂亮，但推論時無法取得相同資訊 | feature SQL 必須採 point-in-time join，排除申請結果、觀察窗行為及事後彙總欄位 |
-| item 清單只改了一處 | CLI 被一致性檢查擋下，或某些 item 無法訓練、推論 | 同步修改 `schema.categorical_values`、sample pool SQL 與 `inference.products`；label SQL 不可產出未宣告的 item。不想同步三處，就把 item 那一格改成 `from_train_data` |
-| 日期雖未重疊，但 val／test 早於 train，或 label 尚未成熟 | 產生時間穿越或不完整 ground truth | 明確採用 `train → val → test` 的時間順序，並為每個日期保留完整 label 觀察窗 |
-| 連續數值欄誤放入 `categorical_columns`，或同一欄同時 categorical 與 drop | 編碼語意錯誤、前處理失敗，或該欄實際未進入模型 | 類別代碼先轉成 string／int；真正的連續數值欄不需列入 `categorical_columns` |
-| 手動填寫 `sample_ratio_overrides` 或 `sample_weights`，但 key 與資料不一致 | 抽樣或權重規則沒有套用，冷門 item／重要客群可能消失 | 使用 `sampling_overrides_editor.py` 產生 key，並檢查 training manifest 中的 unmatched keys |
-| 新的 weight 維度沒有放入 `carry_columns` | training 讀不到原始分群欄，weight 靜默落回 1.0 或被設定閘擋下 | 將欄位加入 `parameters_dataset.yaml` 的 `carry_columns`，重跑 dataset |
-| 使用 ranking objective，卻沿用 `binary_logloss` 或直接把 score 當機率 | early stopping 指標語意錯誤，或 inference 的 score range 檢查失敗 | ranking objective 搭配 `ndcg`／`map`；下游若需要機率語意，改用 `binary` objective 或自行在下游校準（框架已不提供機率校準機制），並確認 inference 的 score 契約 |
-| evaluation 用錯模式或日期 | 報表為空、讀到錯誤資料集，或使用尚未完成的 ground truth | 訓練後 test 評估使用 `--post-training`；上線後監控使用預設模式，並等待該期 label 觀察窗結束 |
-| training 完成後直接執行 inference | inference 找不到 `best`，或仍使用上一版模型 | 先審核評估結果，再以 `promote_model.py <model_version>` 人工發布 |
+---
 
-### 指令失敗時先看哪一層
+## 7. 出事了、改了設定
 
-| 發生時間／錯誤類型 | 代表什麼 | 優先檢查 |
-|---|---|---|
-| CLI 啟動即出現 `Config consistency check failed` | YAML 之間互相矛盾，尚未讀取實際資料 | item 清單、categorical/drop、objective/metric、sample weight、evaluation source |
-| `dataset` 第一個 node 出現 `DataConsistencyError` | 設定與 Hive 實際資料不一致 | `sample_pool`／`label_table` 的 item distinct 值，以及 `feature_table` 欄位型別 |
-| source ETL 出現 `Source check FAILED` 或 output check 失敗 | 上游 partition／schema 未就緒，或輸出品質不合格 | 失敗日期、必要欄位、row count、重複鍵與 NULL 比例；`source_checks` 只有帶 `--source-check` 時才會執行 |
-| inference 出現 `ValidationError` | 排序結果未通過發布條件，因此不會寫入 production table | 筆數、NULL、重複 identity、候選完整性、score 範圍與 rank 順序 |
-| 一般 `Node '<name>' failed` | 單一 pipeline node 的執行期錯誤 | 從 log 找第一個失敗 node，再查該 pipeline 文件的輸入、產物與重跑方式 |
+- **指令失敗**：它停在哪個階段，就代表問題在哪一類東西上（設定、資料、還是結果）。
+- **跑成功但結果不對**：多半是資料或設定的常見錯誤，框架不會報錯。
+- **改了設定**：看改的是哪一層版本的輸入，決定要重跑哪幾條 pipeline。
 
-錯誤訊息會列出具體設定路徑與不一致的值，應先修正訊息列出的所有問題，再重新執行。加 item、加特徵、改抽樣或訓練目標時，先參考下方重跑矩陣，再查對應 pipeline 文件的「設定方式」與「版本、重跑與恢復」章節。
+三件事都在 [`troubleshooting.md`](docs/operations/user-guides/troubleshooting.md)。
 
-### 修改後要重跑哪些流程
+---
 
-| 修改內容 | 建議重跑範圍 |
+## 8. 常見的觀念誤會
+
+做過二元分類的人，照舊習慣做，在這裡最容易想歪的六件事。
+
+**Q1. 每個產品各訓一個模型？**
+
+- 你原本會：每個產品一個二元分類模型，各自調參。
+- 這裡不一樣：所有 item 共用一個模型，item 是其中一個特徵。同一個 query group 裡的分數出自同一個模型，才能直接比大小排名次。
+- 所以：`sample_pool` 不要拆成每個 item 一份；item 欄一定要列在 `categorical_columns`。
+
+**Q2. 用 AUC 或 logloss 評估？**
+
+- 你原本會：把所有列攤平，算一個 AUC。
+- 這裡不一樣：下游看的是**每位客戶自己的**名次。一個模型可以 AUC 很好、組內卻排錯：例如它只學會「資產多的客戶什麼產品都比較會買」，所有列攤平排得很好，但同一位客戶的產品順序是錯的。所以評估以 query group 為單位：每組算一個分數，再平均（mAP）。
+- 所以：看報表的 mAP@K、recall@K，K 依下游的名額選。mAP 怎麼算見 [`metrics.html`](docs/metrics/metrics.html)。
+
+**Q3. 設一個門檻決定推薦誰？score 是機率嗎？**
+
+- 你原本會：分數大於 0.5 就推。
+- 這裡不一樣：每組取前 K 名，不需要門檻，`score` 只用來排先後。`binary` objective 的分數落在 0 到 1 之間，但框架不保證它準；`lambdarank`／`rank_xendcg` 的分數沒有上下界，根本不在機率的尺度上。框架不提供機率校準。
+- 所以：下游用 `rank`。真的需要機率，由下游自己校準、自己驗證。
+
+**Q4. 負例太多，抽掉一大半沒關係？**
+
+- 你原本會：負例太多就隨機丟掉一些，讓正負比較平衡。
+- 這裡不一樣：train 可以抽，它只改變模型看到的正負比例（用 `sample_ratio_overrides` 依 label 分層抽）。但評估比的是「組內完整候選的名次」，抽掉組裡的一部分候選，mAP 就在比另一件事了。所以 val 只能整個 entity 一起抽（`val_sample_ratio`），test 不抽。
+- 所以：抽樣只在設定檔裡做；不要在 `sample_pool` 的 SQL 裡先把負例刪掉——那等於把候選從組裡拿走。
+
+**Q5. 隨機切 train 和 test？**
+
+- 你原本會：隨機切 80／20。
+- 這裡不一樣：上線時永遠是拿過去預測未來，所以照時間切：train → val → test，依時間先後、互不重疊。train 同一段時間裡再切一小份 train_dev（`train_dev_ratio`），同一個 entity 只會在其中一邊。
+
+  | 資料 | 用途 |
+  |---|---|
+  | train | 訓練 |
+  | train_dev | 單次訓練裡決定樹長到第幾棵就停 |
+  | val | 比較多組超參數，挑最好的 |
+  | test | 最後才看，給上線前評估 |
+
+- 所以：設好 `train_snap_dates`、`val_snap_dates`、`test_snap_dates`，例如 train 2025-01～10 → val 2025-11 → test 2025-12。
+
+**Q6. 訓練看 logloss，挑參數也看 logloss？**
+
+- 你原本會：模型最佳化什麼，調參就看什麼。
+- 這裡不一樣：這是三個設定，各管一件事。
+
+  | 設定 | 管什麼 | 算在哪份資料上 |
+  |---|---|---|
+  | `training.algorithm_params.objective` | 模型學什麼（例如 `binary`） | train |
+  | `training.algorithm_params.metric` | 單次訓練裡樹長到第幾棵停（`binary` 時是 `binary_logloss`） | train_dev |
+  | `training.hpo_objective` | 多組超參數裡挑哪一組；選項裡沒有 logloss | val |
+
+  所以就算用 `binary` objective、用 logloss 決定何時停，挑參數看的仍然是排序排得好不好。
+- 所以：第一版用 `binary` ＋ `conf/base/` 預設的 `macro_per_item_map`（每個 item 一樣重）；想讓每個 query group 一樣重，改 `mean_ap`；資料是展示紀錄、組很小，改 `pooled_average_precision`（見 §5 步驟 4 的廣告情境）。
+
+---
+
+## 9. 建議閱讀順序
+
+**① 第一次接觸：照順序讀完**
+
+1. 本文件。
+2. [`data-lineage.html`](docs/data-lineage.html)：資料怎麼流、每張表長什麼樣。
+3. [`using-a-release.md`](docs/operations/user-guides/using-a-release.md)：取得發行版、安裝、設定放哪、怎麼升級。
+4. 看你的情境：全網格就跳過這步；展示紀錄就讀 [`impression-data-shapes.md`](docs/operations/user-guides/impression-data-shapes.md)，再讀 [`examples/ad/README.md`](examples/ad/README.md)。
+5. [`metrics.html`](docs/metrics/metrics.html)：mAP 怎麼算、報表怎麼讀。
+
+**② 做自己的題目：照 pipeline 順序，做到哪讀到哪**
+
+[`source_etl.md`](docs/pipelines/source_etl.md) → [`dataset.md`](docs/pipelines/dataset.md) → [`training.md`](docs/pipelines/training.md) → [`evaluation.md`](docs/pipelines/evaluation.md) → [`promoting-a-model.md`](docs/operations/user-guides/promoting-a-model.md) → [`inference.md`](docs/pipelines/inference.md)
+
+每條 pipeline 的 node 流程圖：[`dataset`](docs/diagrams/dataset-pipeline.html)、[`training`](docs/diagrams/training-pipeline.html)、[`inference`](docs/diagrams/inference-pipeline.html)。
+
+**③ 遇到事情：查就好，不用讀完**
+
+| 你遇到 | 看這份 |
 |---|---|
-| source SQL、來源 partition 或同日期資料回補 | 重跑受影響日期的 source ETL，再重跑 dataset 與下游；同 schema 的資料回補不一定會改變版本 hash |
-| schema、feature 欄位、categorical/drop、`carry_columns` | `dataset → training → evaluation`，核准後再 inference |
-| train 抽樣比例 | `dataset → training → evaluation` |
-| objective、HPO、feature selection、sample weight | `training → evaluation`，不需重建 dataset |
-| inference 日期 | 只重跑 inference；上線後 evaluation 要等 label 成熟 |
-| evaluation 指標、分群或報表設定 | 只重跑 evaluation；已有 `enriched_eval_predictions` 且只做比較時可使用 `--compare-only` |
+| 指令失敗、結果怪、改了設定不知道重跑什麼 | [`troubleshooting.md`](docs/operations/user-guides/troubleshooting.md) |
+| 想知道每一層檢查擋什麼、哪些擋不住 | [`pipeline-checks.md`](docs/operations/user-guides/pipeline-checks.md) |
+| 只重跑一段、中斷後接著跑 | [`pipeline-slicing.md`](docs/operations/user-guides/pipeline-slicing.md)、調參中斷見 [`training.md`](docs/pipelines/training.md) §4.7 |
+| 多評估一個月份，不重訓 | [`adding-an-eval-month.md`](docs/operations/user-guides/adding-an-eval-month.md) |
+| 看不懂某個詞 | [`CONTEXT.md`](CONTEXT.md)（詞彙表） |
 
----
+**④ 想懂背後的原理：選讀**
 
-## 5. FAQ
-
-FAQ 只回答框架概念與選項如何取捨；若是設定無法執行、資料不一致或不知道該重跑哪裡，先看上一節。
-
-**Q1. 這跟我做過的「逐產品二元分類」差在哪？我不也是訓一個輸出機率的模型？**
-
-模型可以還是同一種（預設就是 `binary`），差別在**評估**與**你優化的目標**：
-
-- 二元分類問「這位客戶會不會買產品 A」，逐筆看絕對機率、逐筆算 AUC / logloss。
-- 這裡問「對這位客戶，所有候選產品該怎麼**排先後**」，評估一律是 per query group 的排序指標 mAP（mAP 怎麼算見 [`docs/metrics/metrics.html`](docs/metrics/metrics.html)）。
-- 你還可以把訓練目標從 `binary` 換成 learning-to-rank（`lambdarank` / `rank_xendcg`），讓模型直接優化排序。
-
-排序與分類的數學差異，見手冊 [`gbdt_learning_to_rank.md`](docs/handbooks/gbdt/gbdt_learning_to_rank.md)。
-
-**Q2. 為什麼資料要切成 train / train_dev / val / test 四份？各做什麼？**
-
-| split | 設定（`parameters_dataset.yaml`） | 角色 |
-|---|---|---|
-| `train` | `train_snap_dates` | 建樹的主訓練資料 |
-| `train_dev` | 從 `train` 同期按 `train_dev_ratio` 切出 | early-stopping 監控集：單次訓練內決定樹長到第幾棵就停 |
-| `val` | `val_snap_dates` | HPO 目標集：跨多次試驗，使用排序指標選擇最佳超參數 |
-| `test` | `test_snap_dates` | 最終 held-out，產生 `training_eval_predictions` 供上線前評估 |
-
-各 split 應使用不同且時間向前的快照日，例如 train 2025-01～10 → val 2025-11 → test 2025-12，避免拿未來資料回頭評估。（原本另有 `calibration` split 供機率校準 fit 資料使用，#411 隨校準器一起移除。）
-
-**Q3. objective 要選 `binary` 還是 `lambdarank`？**
-
-- `binary` 是建議的第一版 baseline：逐筆預測後再排序，流程較容易驗證，而且仍以排序指標評估。
-- `lambdarank`／`rank_xendcg` 適合希望訓練目標直接考慮 query group 內相對順序的情境，但需搭配 `ndcg`／`map` metric，並注意它的原始 score 無界、不能當機率讀（見 Q4）。
-
-pointwise、pairwise、listwise 的差異見 [`gbdt_learning_to_rank.md`](docs/handbooks/gbdt/gbdt_learning_to_rank.md)。
-
-**Q4. 可以把 `score` 當成機率讀嗎？**
-
-不建議。這個框架的目標是**排序**，`score` 就是模型的原始輸出：`binary` objective 下它是 sigmoid、落在 `[0, 1]` 但不保證校準得準；ranking objective 下它是無界實數。框架**不提供**機率校準機制（原本的校準器已於 #411 移除，config 還留著 `training.calibration` 或 `inference.use_calibration` 會在 CLI 入口被擋下）。下游若要機率語意，責任在下游。
-
-**Q5. 模型訓練好後怎麼上線？**
-
-用 `scripts/promote_model.py` 將通過人工審核的 `model_version` 設為 `best`；training 不會自動發布模型，inference 預設只使用 `best`。可先用 `--env <環境> --dry-run` 查看候選版本而不實際升版：它照現在設定的選版指標與計分月份排名，只比計分月份相同的版本，見 [`promoting-a-model.md`](docs/operations/user-guides/promoting-a-model.md)。
-
-**Q6. evaluation 的兩個情境怎麼選？**
-
-| 情境 | 指令 | 資料來源 | 使用時機 |
-|---|---|---|---|
-| 訓練後評估 | `evaluation --post-training` | test set 的 `training_eval_predictions` | 模型剛訓練完成，進行上線前審核 |
-| 上線後監控 | `evaluation` | inference 發布的 `ranked_predictions` | label 觀察窗結束後，追蹤正式排序結果 |
-
----
-
-## 6. 文件與建議閱讀順序
-
-第一次使用建議先閱讀本文件 §0～§3，完成問題定義與第一版流程；遇到設定問題看 §4，需要選擇模型或評估方式看 §5。其餘文件可依任務查閱：
-
-| 需求 | 建議文件 |
-|---|---|
-| 查看資料流、各表 schema 與範例 | [`data-lineage.html`](docs/data-lineage.html) |
-| 查看某條 pipeline 的 node 流程圖 | [`dataset-pipeline.html`](docs/diagrams/dataset-pipeline.html)、[`training-pipeline.html`](docs/diagrams/training-pipeline.html)、[`inference-pipeline.html`](docs/diagrams/inference-pipeline.html) |
-| 深入某一條 pipeline | [`source_etl.md`](docs/pipelines/source_etl.md)、[`dataset.md`](docs/pipelines/dataset.md)、[`training.md`](docs/pipelines/training.md)、[`inference.md`](docs/pipelines/inference.md)、[`evaluation.md`](docs/pipelines/evaluation.md) |
-| 加 item、加特徵或判斷重跑範圍 | 本文件 §4「修改後要重跑哪些流程」，以及對應的 pipeline 文件 |
-| 理解 mAP、per-item 與報表 | [`metrics.html`](docs/metrics/metrics.html) |
-| 理解版本化、一致性檢查與其他設計取捨 | [`design-principles.md`](docs/design-principles.md) |
-| 檢查分幾層、各在什麼時候擋下、哪些擋不住 | [`pipeline-checks.md`](docs/operations/user-guides/pipeline-checks.md) |
-| 從分類基礎學到 learning-to-rank | 依序閱讀 [`binary classification`](docs/handbooks/gbdt/gbdt_binary_classification.md) → [`class imbalance`](docs/handbooks/gbdt/gbdt_class_imbalance.md) → [`multi-item imbalance`](docs/handbooks/gbdt/gbdt_multiitem_imbalance.md) → [`learning-to-rank`](docs/handbooks/gbdt/gbdt_learning_to_rank.md) |
-| 本機執行與 pipeline 接續 | [`local-spark-setup.md`](docs/operations/dev-setup/local-spark-setup.md)、[`pipeline-slicing.md`](docs/operations/user-guides/pipeline-slicing.md)、[`training.md` §4.7／§7.3（HPO 中斷接續）](docs/pipelines/training.md) |
-| 多評估一個月份（不重訓） | [`adding-an-eval-month.md`](docs/operations/user-guides/adding-an-eval-month.md) |
-| 取用發布版本、設定放哪、怎麼升級 | [`using-a-release.md`](docs/operations/user-guides/using-a-release.md) |
-| 排查訓練 OOM（非數值特徵欄 → object 矩陣） | [`known-pitfalls.md` §8](docs/operations/known-pitfalls.md)（怎麼認出）、[`dataset.md` §8.1](docs/pipelines/dataset.md)（怎麼修）、[`training.md` §9.1](docs/pipelines/training.md)（修完仍不夠時） |
-
-> 公司生產環境的 Spark／Hive 連線已配置好；只有本機開發或排查連線問題時，才需要閱讀 [`spark-connection-architecture.md`](docs/operations/dev-setup/spark-connection-architecture.md) 與 [`worktree-venv-setup.md`](docs/operations/dev-setup/worktree-venv-setup.md)。概念手冊另提供 `*_offline.html`，可在無網路環境直接開啟。
+- [`design-principles.md`](docs/design-principles.md)：版本、檢查與其他設計取捨的理由。
+- GBDT 手冊，依序讀：[二元分類](docs/handbooks/gbdt/gbdt_binary_classification.md) → [類別不平衡](docs/handbooks/gbdt/gbdt_class_imbalance.md) → [多 item 不平衡](docs/handbooks/gbdt/gbdt_multiitem_imbalance.md) → [learning-to-rank](docs/handbooks/gbdt/gbdt_learning_to_rank.md)。沒有網路時，開 `docs/handbooks/gbdt/export/` 裡的 `*_offline.html`。
