@@ -56,6 +56,7 @@ inference_population ───────────────────�
 | `entity` | 替誰排 | `cust_id`，一位客戶 | `[user_id, slot_id]`，某個使用者在某個版位 |
 | `occasion`（選用） | 同一時段裡的哪一次排序 | 不用 | `request_id`，一次請求 |
 | `item` | 被排的東西 | `prod_name`，一個產品 | `[campaign_id, creative_format]`，活動 × 素材格式 |
+| `event`（選用） | 同一組裡同一個 item 有好幾列時，分辨每一列 | 不用 | 不用 |
 | `label` | 答案 | 客戶後來有沒有申辦這個產品 | 這次展示有沒有被點 |
 | `score`、`rank` | 模型給的分數、組內名次 | 框架產生 | 框架產生 |
 
@@ -69,7 +70,14 @@ query group：2025-12-31 × 客戶 A
   exchange_usd   0.08      3       0
 ```
 
-一個 `entity` 或 `item` 可以由好幾欄組成，寫成清單即可（item 會被拼成一欄，欄名固定叫 `item`，值例如 `c01-banner`）。另外還有一個選用角色 `event`：同一個 query group 裡同一個 item 有好幾列時（例如同一次請求裡同一個素材出現兩次），用它分辨每一列。兩個示例都沒用到它。
+**一欄該放哪個角色**：問一句「它是這次排序替誰做的，還是這次排序裡互相競爭的選項？」前者放 `entity`，後者放 `item`。以廣告的 `slot_id`（版位）為例：
+
+- 一個版位要放哪個素材時，互相競爭的是素材；版位不會跟別的版位搶同一個位置，所以 `slot_id` 放 `entity`。
+- 放在 `entity` 還有一個好處：`feature_table` 以 `time` ＋ `entity` 接到候選上，版位的特徵（位置、頁面類型）才放得進去。
+- 硬放進 `item` 的話，同一個活動在三個版位會變成三個互不相干的 item；版位的特徵只能改放候選層級特徵表，inference 就不能用了。
+- 代價：同一個人變成三個 entity。示例因此設了 `dataset.train_split_keys: [user_id]`，同一個人不會被切到 train 與 train_dev 兩邊。
+
+一個 `entity` 或 `item` 可以由好幾欄組成，寫成清單即可（item 會被拼成一欄，欄名固定叫 `item`，值例如 `c01-banner`）。
 
 **模型看到什麼**：對每一筆候選，模型拿到的是
 
@@ -84,7 +92,23 @@ item 自己的屬性（例如產品類型）不會另外變成特徵；模型學
 一個 query group 裡有哪些候選，由你的 `sample_pool` 決定。框架不檢查它屬於哪一種，但兩種的指標意思不一樣：
 
 - **全網格**（預設的前提）：這個 entity 有資格的每一個 item 各一列。label 是 0 的意思是「可以選、沒有選」。銀行示例是這種。
-- **被展示的子集**：只有過去被某個系統挑出來展示過的 item 才有一列，通常一列就是一次展示。label 是 0 的意思是「看到了、沒反應」；沒被展示的 item 沒有答案，不是負例。廣告示例是這種，要用 `occasion` 或 `event` 把資料形狀講清楚（見 [`impression-data-shapes.md`](docs/operations/user-guides/impression-data-shapes.md)）。
+- **被展示的子集**：只有過去被某個系統挑出來展示過的 item 才有一列，通常一列就是一次展示。label 是 0 的意思是「看到了、沒反應」；沒被展示的 item 沒有答案，不是負例。廣告示例是這種，要用 `occasion` 或 `event` 把資料形狀講清楚（見下一節）。
+
+### 兩個選用角色：`occasion` 與 `event`
+
+預設的粒度（一組 ＝ entity × 時段，組裡每個 item 一列）裝不下某些資料，例如展示紀錄。這兩個角色各回答一個問題：
+
+1. **名次要在什麼範圍裡比？** 只讓同一次請求裡一起被排的候選互相比，就宣告 `occasion`（例如 `request_id`）。
+2. **在那個範圍裡，同一個 item 會有好幾列嗎？** 會，就宣告 `event` 分辨每一列（例如曝光 ID）。
+
+兩題的答案合起來是四種設定：
+
+| | 組裡同一個 item 只有一列 | 組裡同一個 item 有好幾列 |
+|---|---|---|
+| **一組 ＝ entity × 時段** | 什麼都不宣告。銀行示例 | 只宣告 `event`。把廣告資料改成「使用者 × 版位 × 週」一組，同一個素材一週會被曝光好幾次，用 `impression_id` 分辨 |
+| **一組 ＝ 一次請求** | 只宣告 `occasion`。廣告示例現在的設定：一次請求裡的素材不會重複 | 兩個都宣告。例如資訊流一次載入 6 格，同一個素材出現在第 1 格和第 5 格 |
+
+宣告之後，它們會成為認出一筆候選的欄位（identity）的一部分；`occasion` 還會讓 query group 變小。各自的代價與宣告時要改哪些地方，見 [`impression-data-shapes.md`](docs/operations/user-guides/impression-data-shapes.md)。
 
 ### 你準備的表、框架產出的東西
 
