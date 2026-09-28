@@ -96,6 +96,15 @@ LightGBM 專屬的解析（TreeExplainer、`trees_to_dataframe`、類別切點�
 
 **為什麼**：一個 adapter 的接縫只是假設，兩個 adapter 才是真的接縫。第二個會是兩階段的**組合模型**：把各組的第一階段模型與第二階段模型包成一個 adapter；在它來之前先讓介面說出 training 真正在用的操作，組合模型來時才是「加一個 adapter」，而不是「加一個 adapter，再改 13 個模組」。
 
+> **實作註記（2026-09-29，#482）**：
+> - 介面的名字：`build_train_data`（陣列變成原生訓練資料，還沒分箱）、`save_train_data`、`load_train_data`（讀回時帶上這次的權重；權重筆數跟資料列數對不上就丟 `ValueError`）、`train(train_data, params, *, num_iterations, early_stopping_rounds, valid_data)`、`best_iteration`。都在 `models/base.py` 的 `ModelAdapter`。
+> - `best_iteration` 在沒有早停的訓練（沒給 `valid_data`，或 `early_stopping_rounds` 是 0）時是 0。這是 LightGBM 自己的慣例，ABC 的 docstring 寫明了。
+> - `build_train_data` 回傳**還沒分箱**的原生資料。`refit_on_full` 的最佳參數若會影響分箱（例如 `max_bin`），今天是 `lgb.train` 連同訓練參數一起分箱；先分好會改變輸出。
+> - `feature_pre_filter: False` 收成 LightGBM adapter 裡一個常數，建資料、讀資料、訓練三處都用它。訓練參數裡它改由 adapter 最後蓋上去，不再排在 trial 參數前面。兩種寫法只在「搜尋空間或 `algorithm_params` 自己寫了 `feature_pre_filter`」時結果不同，而那種設定今天在 trial 裡就會被 LightGBM 拒絕（已分箱的 `.bin` 不接受別的值）。
+> - 疊參數的順序收成 `pipelines/training/steps/fit_params.py` 的 `fit_params`，trial 與 refit 共用。`num_iterations`、`early_stopping_rounds` 改成 `train()` 的參數，不再放進參數 dict；`params` 裡若還留著這兩個鍵，LightGBM adapter 會拿掉，照樣以 `training.num_iterations`／`early_stopping_rounds` 為準，跟以前一樣。
+> - `LgbDatasetHandle.load()` 拿掉，讀回 `.bin` 改由 adapter 做；handle 只剩路徑與旁邊的 sidecar。
+> - `.bin` 快取的判斷（快取能不能用、丟哪些組、權重為什麼不進 `.bin`）照票的範圍**沒有動**，仍在 `LightGBMAdapter.prepare_train_inputs` 裡，只是它內部改用 `build_train_data`／`save_train_data` 建檔；搬到 node 是 #483。診斷還在讀的 `.booster` 也還在，是 #485。
+
 ## 決定 2　評分入口在 adapter：吃一張表、回分數
 
 **規則**：「拿一張表，用這個模型打分數」是 adapter 的事：挑模型自己要的特徵（以模型為準，`models/feature_view.py` 的 `model_feature_view`）、把類別換成編號、建矩陣、預測。training 的 test 預測、inference 的評分、SHAP 類診斷要「模型眼中的矩陣」時，都走這個入口。預設實作共用 `io/extract.py` 的編碼路徑（決定 12 第 4 件）；組合模型覆寫它。
@@ -117,6 +126,13 @@ adapter 也說出「評分要讀哪些欄」：模型的特徵，加上組合模
 **為什麼可以讓 `core/` 在函式內問 `models/`**：這是 repo 已經在用的形狀。`core/consistency.py` 檢查 `training.hpo_objective` 時，就在函式內 import `evaluation/metric_registry.py` 的 `METRIC_NAMES`，理由相同：檢查與分派要用同一份清單，清單屬於上層。函式內 import 不會在載入 `core` 時把上層拉進來。
 
 **為什麼這一輪就搬**：搬的是**已經存在**的 LightGBM 規則，不是替還不存在的演算法蓋東西；而且會碰到的地方（`nodes.py` 改成經過 adapter）決定 1 本來就要改。留到下一次，repo 會同時有兩種寫法。測試裡的假 adapter 宣告自己的規則，順便驗證「檢查真的有去問 adapter」。
+
+> **實作註記（2026-09-29，#482）**：
+> - 規則是 `models/base.py` 的 `AlgorithmRules`，四項：排序目標、排序 metric、預設排序 metric、哪些目標丟掉整組沒有正例的 query group。每個 adapter 用類別屬性 `rules` 宣告；LightGBM 的是 `models/lightgbm_adapter.py` 的 `LIGHTGBM_RULES`。建的時候會自己檢查：預設 metric 必須是排序 metric，會丟組的目標必須是排序目標。
+> - 「支援哪些 objective」落地成「支援哪些**排序** objective」，**沒有**另加一份所有 objective 的白名單。框架從來沒擋過非排序的 objective（例如 `regression`、`cross_entropy` 今天都能跑），加白名單會擋下今天能跑的設定；而決定總表寫本決定只改「`training.algorithm` 打錯什麼時候被擋」。
+> - `training.algorithm` 的檢查代號是 **A57**（`core/consistency.py` 的 `training_algorithm_errors`），接在 training 指令上、Spark 啟動前，不進每個指令都跑的聚合檢查，理由同 A24：只有 training 讀這個鍵。A7 在聚合檢查裡，遇到沒註冊的名字就不出聲，交給 A57 報，免得同一個錯報兩次、也免得 dataset 指令被 training 的鍵擋下。
+> - `training.algorithm` 的預設值收成 `models/base.py` 的 `DEFAULT_ALGORITHM` 與 `configured_algorithm()`，training 的 node 與 A57 都讀它。`io/model_adapter_dataset.py` 在沒有 `model_meta.json` 時退回 LightGBM 的那一處沒動：那是讀舊模型檔的相容處理，不是設定的預設值。
+> - `conf/base/parameters_training.yaml` 有一段註解還指向 `core/group_utils.py` 的 `objective_drops_zero_positive_groups`（函式已搬走）。本票要求 `conf/` 對 main 的 diff 為空，所以沒改；留給下一張會改那個檔的票（決定 11 的 #487 要在同一個檔加新鍵）。
 
 ## 決定 4　模型做不到的診斷跳過並警告，其他錯誤整條停下
 
@@ -302,6 +318,10 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 **事實**：`io/__init__.py` 轉出口 `ModelAdapterDataset`（它 import `models.base`），`models/__init__.py` import `lightgbm_adapter`（它 import `io.handles`），兩個套件在載入時互相依賴。今天四個入口各自冷啟動都載得起來，但能不能載入取決於初始化順序；`lightgbm_adapter.py` 有 4 處為了避開它而寫在函式內的 `io.extract` import。
 
 **規則**：拿掉 `io/__init__.py` 對 `ModelAdapterDataset` 的轉出口（它沒有消費者）。**不要**動 `models/__init__.py` 對 `lightgbm_adapter` 的 import：LightGBM 的註冊靠它觸發，拿掉之後 CLI 的登記表是空的；而有 10 個測試檔直接 import `lightgbm_adapter`，全量測試會照樣綠，看不出來。決定 2 的評分入口要用 `io/extract.py` 的編碼路徑，adapter 對 `io/` 的依賴會留著，所以循環要在同一輪處理。那 4 處函式內 import 拆完之後能不能搬到模組頂層，實作時實測再定。
+
+> **實作註記（2026-09-29，#482）**：
+> - 拿掉轉出口之後，`import recsys_tfb.io` 不再順帶載入 `models`（之前會）。`tests/test_models/test_cold_imports.py` 守住這件事，也守四個入口各自在新行程裡載得起來。
+> - `models/lightgbm_adapter.py` 裡那幾處函式內 import **不能**搬到模組頂層，實測過：`io.extract`、`core.logging` 搬上去之後，單獨 `import recsys_tfb.io.model_adapter_dataset` 會失敗（ImportError），另外三個入口照樣載得起來。原因是 `core` 套件一載入就 import `core.catalog`，而它 import 的正是 `io.model_adapter_dataset`。理由寫在該檔開頭。
 
 ## 決定 16　收尾清理
 

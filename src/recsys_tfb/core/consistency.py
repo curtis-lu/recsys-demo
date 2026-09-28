@@ -46,9 +46,11 @@ Layer 1 — config-static (implemented here; aggregated by
   Enforced by the ``tests/test_pipelines/test_source_etl/
   test_product_consistency.py`` lint (consumes ``resolved_item_values``),
   not a predicate here.
-* A7 — a ranking ``training.algorithm_params.objective``
-  (``lambdarank``/``rank_xendcg``) paired with a non-ranking ``metric`` or an
-  undefined query group (empty ``schema.entity``). Predicate:
+* A7 — a ranking ``training.algorithm_params.objective`` paired with a
+  non-ranking ``metric`` or an undefined query group (empty
+  ``schema.entity``). Which objectives rank and which metrics fit them are
+  the configured algorithm's rules, read from its registered adapter
+  (``ModelAdapter.rules``, ADR-0030 decision 3). Predicate:
   ``ranking_objective_conflicts``.
 * A8 — ``training.search_space`` declarative schema validity: must be an
   ordered list of ParamSpec maps; each needs ``name`` (unique) + ``type`` ∈
@@ -673,6 +675,15 @@ Layer 1 — config-static (implemented here; aggregated by
   ``--dry-run`` / ``--list-nodes`` return; this module never reads the
   catalog (A28's reason). NOT aggregated, for A28's reason too: it needs the
   resolved catalog.
+* A57 — ``training.algorithm`` names no registered adapter (#387's training
+  row, ADR-0030 decision 3). The check reads the registry the training nodes
+  dispatch on, so an algorithm cannot pass here and be missing there, and
+  it rejects before the Spark cold start what used to surface in the first
+  node that asked for the adapter. Predicate: ``training_algorithm_errors``.
+  NOT aggregated, for A24's reason: only training reads the key, and a typo
+  in it must not stop dataset, inference or evaluation. It is also why A7
+  (aggregated, and asking the same adapter for its rules) stays silent on an
+  unregistered name instead of reporting it a second time.
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -683,7 +694,7 @@ window of ``evaluation.snap_date`` and be a time value sample_pool holds there.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
-flags), A22/A46/A51 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53 (config keys whose
+flags), A22/A46/A51 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53/A57 (config keys whose
 harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags), A55 (``--only-test-months`` + the
 metastore). A56 needs the resolved catalog too, but hangs off no single command:
@@ -1011,7 +1022,6 @@ from typing import Any, NamedTuple
 import pandas as pd
 
 from recsys_tfb.core.date_ranges import as_date_list, lookback_window_bounds
-from recsys_tfb.core.group_utils import RANKING_OBJECTIVES
 from recsys_tfb.core.schema import (
     COMBINED_ITEM_COLUMN,
     ITEM_LIST_FROM_TRAIN_DATA,
@@ -1844,39 +1854,75 @@ def item_missing_from_categorical(parameters: dict) -> bool:
     return item not in declared
 
 
-# Eval metrics LightGBM accepts for a learning-to-rank objective. Anything
-# else (e.g. binary_logloss) makes ranking early-stopping silently
-# meaningless. Kept here (not in group_utils) because it is a config-policy
-# fact owned by the consistency layer.
-RANKING_METRICS: frozenset[str] = frozenset({"ndcg", "map", "lambdarank"})
+def _registered_adapter_class(parameters: dict):
+    """The adapter class ``training.algorithm`` selects, or ``None``.
+
+    Imported from the ``models`` *package*, inside the function: ``core``
+    loads no upper layer at import time (the METRIC_NAMES precedent in A25),
+    and only the package guarantees the registry is filled — LightGBM
+    registers itself when ``models/__init__`` imports its module, and
+    ``models.base`` alone may be read before that ran.
+    """
+    from recsys_tfb.models import ADAPTER_REGISTRY, configured_algorithm
+
+    return ADAPTER_REGISTRY.get(configured_algorithm(parameters))
+
+
+def training_algorithm_errors(parameters: dict) -> list[str]:
+    """A57 — ``training.algorithm`` must name a registered adapter.
+
+    The same registry the training nodes dispatch on (``models.get_adapter``),
+    so the check and the dispatch cannot disagree about what exists. Before
+    this, a typo surfaced in the first node that asked for the adapter —
+    after the Spark cold start and the cache copies. Returns collect-all
+    error strings; empty means OK.
+    """
+    from recsys_tfb.models import ADAPTER_REGISTRY, configured_algorithm
+
+    if _registered_adapter_class(parameters) is not None:
+        return []
+    available = ", ".join(sorted(ADAPTER_REGISTRY)) or "(none)"
+    return [
+        f"A57: training.algorithm={configured_algorithm(parameters)!r} is not "
+        f"a registered algorithm. Available: {available}."
+    ]
 
 
 def ranking_objective_conflicts(parameters: dict) -> list[str]:
     """A7 — a ranking objective requires a ranking metric and a query group.
 
-    ``lambdarank``/``rank_xendcg`` cannot early-stop on a binary metric
-    (silently meaningless) and need a per-query group. The query group is
-    ``schema['time'] + schema['entity']``; ``entity`` must be non-empty. An
-    *unset* metric is allowed — it is defaulted to ``ndcg`` at train time by
-    ``group_utils.default_metric_for_objective``. Returns collect-all error
-    strings; empty list means OK.
+    Which objectives rank and which metrics can early-stop them are the
+    configured algorithm's rules (``ModelAdapter.rules``), asked of its
+    registered adapter rather than listed here, so this check reads the table
+    training dispatches on. A ranking objective cannot early-stop on a
+    non-ranking metric (silently meaningless) and needs a per-query group:
+    ``schema['time'] + schema['entity']``, so ``entity`` must be non-empty.
+    An *unset* metric is allowed — the adapter's default ranking metric fills
+    it at train time. An unregistered ``training.algorithm`` has no rules to
+    ask; A57 reports it, and this check stays silent. Returns collect-all
+    error strings; empty list means OK.
     """
+    adapter_cls = _registered_adapter_class(parameters)
+    if adapter_cls is None:
+        return []
+    rules = adapter_cls.rules
     training = parameters.get("training", {}) or {}
     ap = training.get("algorithm_params", {}) or {}
     objective = ap.get("objective")
-    if objective not in RANKING_OBJECTIVES:
+    if not rules.is_ranking_objective(objective):
         return []
 
     errors: list[str] = []
 
     metric = ap.get("metric")
-    if metric is not None and str(metric) not in RANKING_METRICS:
+    if metric is not None and str(metric) not in rules.ranking_metrics:
         errors.append(
             f"training.algorithm_params.objective={objective!r} is a ranking "
             f"objective but metric={metric!r} is not a ranking metric. Set "
             f"training.algorithm_params.metric to one of "
-            f"{sorted(RANKING_METRICS)} (e.g. 'ndcg'), or remove it to default "
-            f"to 'ndcg'."
+            f"{sorted(rules.ranking_metrics)} (e.g. "
+            f"{rules.default_ranking_metric!r}), or remove it to default to "
+            f"{rules.default_ranking_metric!r}."
         )
 
     schema = get_schema(parameters)

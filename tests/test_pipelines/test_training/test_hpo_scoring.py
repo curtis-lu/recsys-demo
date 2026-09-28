@@ -187,36 +187,33 @@ class TestTrialScorer:
     def _scorer(self, monkeypatch, scores):
         adapters = []
 
+        weighted: list = []
+
         class FakeAdapter:
             def __init__(self, tag):
-                self.booster = type("B", (), {"best_iteration": 10 + tag})()
+                self.best_iteration = 10 + tag
                 self.predict_calls: list = []
 
-            def train(self, **kw):
+            def load_train_data(self, path, *, weight, reference=None):
+                weighted.append(weight)
+                # Two rows, matching the weight vectors handed to the scorer
+                # below, so the length guard passes by default and a test
+                # that wants it to fire changes the weights, not this.
+                if len(weight) != 2:
+                    raise ValueError(
+                        f"sample weights for {path} have {len(weight)} "
+                        "entries but the binary holds 2 rows")
+                return object()
+
+            def train(self, train_data, params, **kw):
                 pass
 
             def predict(self, X):
                 self.predict_calls.append(len(X))
                 return np.zeros(len(X))
 
-        weighted: list = []
-
-        class FakeDataset:
-            def construct(self):
-                return self
-
-            def set_weight(self, w):
-                weighted.append(w)
-
-            def num_data(self):
-                # Matches the length of the weight vectors handed to the
-                # scorer below, so the length guard passes by default and a
-                # test that wants it to fire changes the weights, not this.
-                return 2
-
         class FakeHandle:
-            def load(self, reference=None, params=None):
-                return FakeDataset()
+            bin_path = "fake.bin"
 
         def fake_get_adapter(algorithm):
             adapters.append(FakeAdapter(len(adapters)))
@@ -243,8 +240,8 @@ class TestTrialScorer:
             X_val=np.zeros((4, 2)), y_val=np.array([1, 0, 1, 0]),
             groups_val=np.array([0, 0, 1, 1], dtype=np.int64),
             items_val=np.array([0, 1, 0, 1], dtype=np.int64),
-            algorithm="lightgbm", algorithm_params={}, search_space=[],
-            hpo_objective="mean_ap", seed=42, num_iterations=5,
+            algorithm="lightgbm", fit_params=dict, search_space=[],
+            hpo_objective="mean_ap", num_iterations=5,
             early_stopping_rounds=2, n_trials=len(scores),
             search_id="unit", study_dir=None,  # None = do not checkpoint
         )
@@ -284,14 +281,10 @@ class TestTrialScorer:
         ]
 
     def test_a_wrong_length_weight_vector_stops_the_trial(self, monkeypatch):
-        """The guard LightGBM does not provide.
-
-        ``set_weight`` maps any all-ones array to ``None`` before its length is
-        ever checked, and a length-zero array is vacuously all-ones — so the
-        one shape a broken sidecar produces is exactly the one LightGBM
-        accepts in silence. Without this the search would run to completion
-        unweighted and publish under a model_version keyed by the weights it
-        dropped.
+        """The adapter refuses a weight vector that does not match the binary
+        (the guard LightGBM does not provide — see
+        ``LightGBMAdapter.load_train_data`` and its test); the trial must let
+        that stop the search rather than train on without the weights.
         """
         scorer, _ = self._scorer(monkeypatch, [0.1])
         scorer.train_weights = np.array([])  # what a column-less sidecar gave
@@ -421,9 +414,9 @@ class TestWeightsReachTheTrainedModel:
     named weights it had never seen.
 
     Real LightGBM and the real ``TrialScorer`` on purpose. The fakes above
-    pin that ``set_weight`` is *called*; nothing but a fit can say the call
-    changes the model, and "the call happens but does nothing" is exactly the
-    shape a mock cannot rule out.
+    pin that the weights are *handed over*; nothing but a fit can say they
+    change the model, and "handed over but ignored" is exactly the shape a
+    mock cannot rule out.
     """
 
     OBJECTIVES = ["binary", "lambdarank", "rank_xendcg"]
@@ -478,8 +471,11 @@ class TestWeightsReachTheTrainedModel:
 
     def _predictions(self, monkeypatch, tmp_path, objective, sample_weights):
         """One trial's model, trained the way the pipeline trains it."""
+        from functools import partial
+
         from recsys_tfb.io.extract import extract_Xy_with_groups
         from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+        from recsys_tfb.pipelines.training.steps.fit_params import fit_params
 
         prep = {
             "feature_columns": ["feat_a", "prod_name"],
@@ -506,8 +502,8 @@ class TestWeightsReachTheTrainedModel:
             train_dev_weights=lgb_dev.sample_weights(params, prep),
             X_val=X_v, y_val=y_v, groups_val=g_v, items_val=i_v,
             algorithm="lightgbm",
-            algorithm_params=dict(params["training"]["algorithm_params"]),
-            search_space=[], hpo_objective="mean_ap", seed=42,
+            fit_params=partial(fit_params, params, LightGBMAdapter.rules),
+            search_space=[], hpo_objective="mean_ap",
             num_iterations=30, early_stopping_rounds=0, n_trials=1,
             search_id="weights", study_dir=None,
         )

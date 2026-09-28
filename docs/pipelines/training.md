@@ -740,12 +740,12 @@ training 版本描述的是模型設定與上游資料身分，不是完整的�
 | `n_queries = 0` 或 test 預測為空 | test input 沒資料、版本 partition 錯誤，或沒有可評估正例 query | 查 dataset test model input 與 `training_eval_predictions` partitions |
 | SHAP 過慢或記憶體不足 | `sample_rows × n_trees` 太大，或 feature 太多 | 降低 `sample_rows`、`top_k`、`max_budget`，或暫時關閉 SHAP |
 | MLflow 失敗但 training 顯示完成 | `mlflow.strict: false` 為 best-effort 模式 | 檢查 warning 與 tracking URI；需要硬性追蹤時設 `strict: true` |
-| Unknown algorithm | `training.algorithm` 未在 adapter registry 註冊 | 使用目前支援的 `lightgbm`，或先實作並註冊新的 ModelAdapter |
+| `A57: training.algorithm=... is not a registered algorithm` | `training.algorithm` 未在 adapter registry 註冊；Spark 啟動前就擋下，訊息列出可用的名字 | 使用目前支援的 `lightgbm`，或先實作並註冊新的 ModelAdapter |
 | 部分重跑後模型、預測與診斷不一致 | `--only-node` 未重跑下游，或 skipped artifact 已過期 | 由較前方 node 接續或執行 full run，重新完成驗收 |
 
 ## 9. 限制與注意事項
 
-- 目前實際註冊的演算法 adapter 為 LightGBM；其他演算法需要另外實作 train、predict、save/load、feature importance、MLflow 與 native input preparation。
+- 目前實際註冊的演算法 adapter 為 LightGBM；其他演算法需要另外實作 `ModelAdapter` 的每個方法（建原生訓練資料與存讀、帶早停訓練與回報最佳迭代數、predict、save/load、feature importance、MLflow、native input preparation），並在 `rules` 宣告自己的排序目標、排序 metric、預設 metric 與丟不丟無正例的 query group。
 - 模型訓練是 driver 上的單機 CPU 工作，不是 Spark distributed training；Spark 主要負責上游資料處理、Hive I/O 與 test 指標聚合。
 - train、train-dev、val 與 test 的 local Parquet 會占用 driver disk；cache 不會自動依版本數量清理。
 - feature statistics、SHAP 與部分模型資料抽取使用 pandas／NumPy，記憶體尖峰取決於 rows、features 與 tree 數。

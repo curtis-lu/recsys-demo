@@ -1,20 +1,17 @@
-"""train + train_dev, stacked into the single Dataset a refit trains on.
+"""train + train_dev, stacked into the single matrix a refit trains on.
 
 ``final_model_strategy: refit_on_full`` gives up the HPO validation split and
 retrains on everything, so both of ``finalize_model``'s branches have to do the
-same two mechanical things: stack the two splits' arrays, and hand LightGBM a
-Dataset built the way HPO's cached binaries were.
+same mechanical thing: stack the two splits' arrays, train first. Turning the
+stacked arrays into training data is the adapter's (``build_train_data``),
+which builds it the way the search's cached binaries were built.
 
 The branches keep their own decisions written out — a ranking refit carries
-query groups, a non-ranking one does not — and share only these, because a
-drift between the two constructions would be invisible: LightGBM accepts either
-Dataset, trains happily, and the only symptom is a model that split on a
-different feature set than the search that chose its hyperparameters.
+query groups, a non-ranking one does not — and share only these.
 """
 
 import logging
 
-import lightgbm as lgb
 import numpy as np
 
 from recsys_tfb.core.logging import log_data_volume
@@ -57,36 +54,3 @@ def offset_dev_group_ids(gid_train: np.ndarray, gid_dev: np.ndarray) -> np.ndarr
     """
     offset = (int(gid_train.max()) + 1) if len(gid_train) else 0
     return np.concatenate([gid_train, gid_dev + offset])
-
-
-def build_dataset(
-    X: np.ndarray,
-    y: np.ndarray,
-    weight: np.ndarray,
-    feature_columns: list,
-    categorical_index,
-    group=None,
-) -> "lgb.Dataset":
-    """The ``lgb.Dataset`` a refit trains on.
-
-    ``feature_pre_filter=False`` is the one construct param that must not
-    drift. HPO's cached ``.bin`` binaries are binned with it
-    (``steps/hpo_scoring.py``, ``models/lightgbm_adapter.py``), so a refit built
-    with LightGBM's default would drop features the winning trial was allowed to
-    split on — a different model from the one the search chose, reported under
-    the search's hyperparameters, with nothing raised.
-
-    ``group=None`` is what a non-ranking refit passes and is also LightGBM's own
-    default, so the two branches differ in the argument they supply, not in the
-    Dataset this builds.
-    """
-    return lgb.Dataset(
-        X,
-        label=y,
-        weight=weight,
-        group=group,
-        feature_name=feature_columns,
-        categorical_feature=categorical_index,
-        params={"feature_pre_filter": False},
-        free_raw_data=True,
-    )

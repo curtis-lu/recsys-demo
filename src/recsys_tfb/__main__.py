@@ -43,6 +43,7 @@ from recsys_tfb.core.consistency import (
     resolved_rebuild_dates,
     train_snap_dates_errors,
     train_version_landed_errors,
+    training_algorithm_errors,
     zero_positive_group_weight_declared_errors,
     binary_test_metrics_verdict,
     resolved_zero_positive_group_ratio,
@@ -1506,6 +1507,17 @@ def training(
     from recsys_tfb.utils.spark import get_or_create_spark_session
 
     config, params, run_context = _load_config_and_setup("training", env)
+
+    # (A57) training.algorithm must name a registered adapter — asked of the
+    # registry the nodes dispatch on. Off the aggregator for A24's reason:
+    # only training reads the key. Before the cold start below: a typo used to
+    # surface in the first node that asked for the adapter, after Spark had
+    # started and the cache nodes had copied their splits.
+    algorithm_errors = training_algorithm_errors(params)
+    if algorithm_errors:
+        for line in algorithm_errors:
+            logger.error(line)
+        raise typer.Exit(code=1)
 
     # (A26) dataset.test_snap_dates must not spell one month two ways. Wired
     # here rather than aggregated by validate_config_consistency for A24's

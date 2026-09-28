@@ -142,7 +142,7 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         #
         #     None of the four is bound to a training objective any more:
         #     lambdarank still drops zero-positive groups at training time
-        #     (`core.group_utils.objective_drops_zero_positive_groups`), and
+        #     (LightGBM's rule: `models/lightgbm_adapter.LIGHTGBM_RULES`), and
         #     train ratio 0 merely moves that drop here — the table gets
         #     smaller, the rows lambdarank trains on stay the same. ---
         Node(

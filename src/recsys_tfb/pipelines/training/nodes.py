@@ -4,7 +4,8 @@ This module is the home of the pipeline's ML story: a reader who opens it sees
 each decision this pipeline makes about the data, without jumping files. The
 mechanisms those decisions are expressed in live in ``steps/``, one module per
 concern (``local_cache``, ``predict_months``, ``search_space``, ``hpo_resume``,
-``hpo_scoring``, ``refit``, ``sample_weights``, ``experiment_log``).
+``hpo_scoring``, ``fit_params``, ``refit``, ``sample_weights``,
+``experiment_log``).
 ``cache_sources`` sits beside this file instead, because ``__main__.py`` reads
 it before the pipeline starts. ADR-0014 draws both lines and
 ``docs/agents/pipeline-node-design.md`` is where the placement criterion and
@@ -45,6 +46,7 @@ meant to pay off, not to add to.
 
 import logging
 import shutil
+from functools import partial
 from pathlib import Path
 
 import mlflow
@@ -59,10 +61,7 @@ from recsys_tfb.core.consistency import (
     scoring_snap_dates,
 )
 from recsys_tfb.core.group_utils import (
-    default_metric_for_objective,
     drop_zero_positive_groups,
-    is_ranking_objective,
-    objective_drops_zero_positive_groups,
     to_contiguous_groups,
 )
 from recsys_tfb.core.logging import log_data_volume, log_step
@@ -99,7 +98,7 @@ from recsys_tfb.io.extract import (
     weight_key_decode_map,
 )
 from recsys_tfb.io.handles import ParquetHandle, handle_paths, open_parquet_dataset
-from recsys_tfb.models.base import ModelAdapter, get_adapter
+from recsys_tfb.models.base import ModelAdapter, configured_algorithm, get_adapter
 from recsys_tfb.models.feature_selection import apply_feature_selection
 from recsys_tfb.pipelines.training.steps import (
     experiment_log,
@@ -108,6 +107,7 @@ from recsys_tfb.pipelines.training.steps import (
     sample_weights,
     scored_months,
 )
+from recsys_tfb.pipelines.training.steps.fit_params import fit_params
 from recsys_tfb.pipelines.training.steps.hpo_scoring import (
     TrialScorer,
     item_support,
@@ -161,8 +161,9 @@ def persist_group_filter_report(train_lgb_handle, parameters: dict) -> dict:
 
     Under ``objective: lambdarank`` the training matrix is not the train /
     train_dev tables: groups with no positive are left out, because their
-    lambdarank gradient contribution is exactly zero (see
-    ``core.group_utils.objective_drops_zero_positive_groups``). Row counts
+    lambdarank gradient contribution is exactly zero (which objectives drop
+    them is the algorithm's rule, ``ModelAdapter.rules``; LightGBM's reasons
+    are at ``models/lightgbm_adapter.LIGHTGBM_RULES``). Row counts
     stop matching the tables, and this is what says why -- comparing two MLflow
     runs on training-set size otherwise gives no way to tell a filter from a
     dataset change.
@@ -565,14 +566,15 @@ def prepare_lgb_train_inputs(
     preprocessor_metadata: dict,
     parameters: dict,
 ):
-    """Materialize lgb.Dataset binaries for train + train_dev.
+    """Materialize train + train_dev as the configured algorithm's native
+    training data on disk.
 
     Delegates to the configured ModelAdapter's prepare_train_inputs. The
-    cache_dir uses the same train_variant directory as the parquet cache,
-    placing 'lgb/' as a sibling of the parquets.
+    cache_dir uses the same train_variant directory as the parquet cache, so
+    the adapter's own sub-directory (LightGBM's 'lgb/') sits beside the
+    parquets.
     """
-    algorithm = parameters["training"].get("algorithm", "lightgbm")
-    adapter = get_adapter(algorithm)
+    adapter = get_adapter(configured_algorithm(parameters))
 
     cache_root = parameters["cache"]["root"]
     base_v = parameters["base_dataset_version"]
@@ -617,14 +619,13 @@ def tune_hyperparameters(
 ) -> tuple[dict, int, ModelAdapter]:
     """Search for optimal hyperparameters using Optuna and return best trial's model.
 
-    train + train_dev consumed as pre-built lgb.Dataset binaries (no rebinning
-    across trials). val read fresh from parquet inside this scope so its pandas
-    DataFrame is freed when the function returns.
+    train + train_dev consumed as the adapter's cached native training data (no
+    rebinning across trials). val read fresh from parquet inside this scope so
+    its pandas DataFrame is freed when the function returns.
 
     Returns (best_params, best_iteration, best_model). best_iteration is the
-    booster's best_iteration on the winning trial (the early-stopping pick when
-    triggered, otherwise the iteration with the lowest val loss within
-    num_iterations). It is consumed by `finalize_model` under the
+    winning trial's ``ModelAdapter.best_iteration``: the round its train_dev
+    early stopping picked. It is consumed by `finalize_model` under the
     `refit_on_full` strategy as the fixed iteration count for the no-val refit.
 
     The first ``raise`` in the body is a **pre-check** on config:
@@ -668,7 +669,7 @@ def tune_hyperparameters(
     seed = parameters.get("random_seed", 42)
     num_iterations = training_params.get("num_iterations", 500)
     early_stopping_rounds = training_params.get("early_stopping_rounds", 50)
-    algorithm = training_params.get("algorithm", "lightgbm")
+    algorithm = configured_algorithm(parameters)
 
     hpo_objective = effective_hpo_objective(parameters)
     if hpo_objective not in METRIC_NAMES:
@@ -676,15 +677,6 @@ def tune_hyperparameters(
             f"unknown training.hpo_objective {hpo_objective!r}; "
             f"allowed: {', '.join(METRIC_NAMES)}"
         )
-
-    # Local copy: defaulting the ranking metric must not mutate the shared
-    # `parameters` dict (it is still written verbatim to manifest.json).
-    algorithm_params = dict(training_params.get("algorithm_params", {}))
-    _metric = default_metric_for_objective(
-        algorithm_params.get("objective"), algorithm_params.get("metric")
-    )
-    if _metric:
-        algorithm_params["metric"] = _metric
 
     # val_model_input holds every query group with a positive plus the share of
     # the ones without that dataset.val_zero_positive_group_ratio keeps (none
@@ -833,10 +825,14 @@ def tune_hyperparameters(
         event_keys_val=event_keys_v,
         zero_positive_group_weight_val=weights_v,
         algorithm=algorithm,
-        algorithm_params=algorithm_params,
+        # Decision — a trial trains under the stacking the refit uses:
+        # algorithm_params (ranking metric defaulted by the algorithm's rules),
+        # then the seed, then the trial's own sample. One function for both,
+        # so the hyperparameters reported for the winner are the ones the
+        # final model is trained with.
+        fit_params=partial(fit_params, parameters, get_adapter(algorithm).rules),
         search_space=search_space,
         hpo_objective=hpo_objective,
-        seed=seed,
         num_iterations=num_iterations,
         early_stopping_rounds=early_stopping_rounds,
         n_trials=n_trials,
@@ -936,27 +932,18 @@ def finalize_model(
     # matters here: .get would hand this line None, not "hpo_best", and None
     # would fall through to a silent full refit.
 
-    training_params = parameters["training"]
-    seed = parameters.get("random_seed", 42)
-    algorithm = training_params.get("algorithm", "lightgbm")
-    algorithm_params = dict(training_params.get("algorithm_params", {}))
-    objective = algorithm_params.get("objective")
-    _metric = default_metric_for_objective(
-        objective, algorithm_params.get("metric")
-    )
-    if _metric:
-        algorithm_params["metric"] = _metric
+    adapter = get_adapter(configured_algorithm(parameters))
+    objective = parameters["training"].get("algorithm_params", {}).get("objective")
 
     logger.info(
         "final_model_strategy=refit_on_full (num_iterations=%d, no early stopping)",
         best_iteration,
     )
 
-    feat_cols = preprocessor_metadata["feature_columns"]
-    cat_cols = preprocessor_metadata.get("categorical_columns", [])
-    cat_idx = [feat_cols.index(c) for c in cat_cols if c in feat_cols] or None
+    feat_cols = list(preprocessor_metadata["feature_columns"])
+    cat_cols = list(preprocessor_metadata.get("categorical_columns", []))
 
-    if is_ranking_objective(objective):
+    if adapter.rules.is_ranking_objective(objective):
         with log_step(logger, "extract_features"):
             X_tr, y_tr, gid_tr, w_tr = extract_Xy_with_groups(
                 train_parquet_handle, preprocessor_metadata, parameters,
@@ -966,7 +953,7 @@ def finalize_model(
                 train_dev_parquet_handle, preprocessor_metadata, parameters,
                 with_weights=True,
             )
-        if objective_drops_zero_positive_groups(objective):
+        if adapter.rules.objective_drops_zero_positive_groups(objective):
             # Decision — the refit trains on the rows the search trained on.
             # HPO reads the cached .bin, which prepare_train_inputs already
             # stripped of zero-positive query groups; this branch re-reads the
@@ -998,9 +985,9 @@ def finalize_model(
         # to_contiguous_groups returns has to be applied to X / y / weight too,
         # or the labels no longer belong to the rows they came from.
         perm, grp = to_contiguous_groups(gid_full)
-        ds_full = refit.build_dataset(
-            X_full[perm], y_full[perm], w_full[perm],
-            feat_cols, cat_idx, group=grp,
+        ds_full = adapter.build_train_data(
+            X_full[perm], y_full[perm], weight=w_full[perm], group=grp,
+            feature_names=feat_cols, categorical_features=cat_cols,
         )
     else:
         with log_step(logger, "extract_features"):
@@ -1018,24 +1005,18 @@ def finalize_model(
 
         # Decision — no group=: a non-ranking objective scores each row on its
         # own, so there is no query grouping to carry and no reordering to do.
-        ds_full = refit.build_dataset(
-            X_full, y_full, w_full, feat_cols, cat_idx)
+        ds_full = adapter.build_train_data(
+            X_full, y_full, weight=w_full,
+            feature_names=feat_cols, categorical_features=cat_cols,
+        )
 
-    params = {
-        **algorithm_params,
-        "seed": seed,
-        "feature_pre_filter": False,
-        **best_params,
-        "num_iterations": best_iteration,
-        "early_stopping_rounds": 0,
-    }
-
+    # Decision — the refit trains under the search's stacking with the winning
+    # trial's hyperparameters on top, for exactly best_iteration rounds: there
+    # is no validation split left to stop early on.
     with log_step(logger, "model_refit"):
-        adapter = get_adapter(algorithm)
         adapter.train(
-            X_train=None, y_train=None, X_val=None, y_val=None,
-            params=params,
-            train_dataset=ds_full,
+            ds_full, fit_params(parameters, adapter.rules, best_params),
+            num_iterations=best_iteration, early_stopping_rounds=0,
         )
 
     logger.info(
@@ -1356,7 +1337,7 @@ def log_experiment(
     # training down with it. Set strict: true to fail hard instead.
     strict = mlflow_params.get("strict", False)
     training_cfg = parameters.get("training", {})
-    algorithm = training_cfg.get("algorithm", "lightgbm")
+    algorithm = configured_algorithm(parameters)
     final_model_strategy = training_cfg.get("final_model_strategy", "hpo_best")
 
     try:

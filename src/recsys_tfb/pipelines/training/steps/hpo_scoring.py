@@ -8,8 +8,8 @@ what changes is that the search state is an attribute of the object named for
 owning it, so a reader can see from the signature what the search carries.
 
 **Nothing here unlocks parallel HPO, and the closure was never what blocked
-it.** ``best["model"]`` is the trained ``ModelAdapter`` itself (the LightGBM
-booster hangs off its ``.booster``), sitting in the driver's Python heap: under
+it.** ``best["model"]`` is the trained ``ModelAdapter`` itself, fitted model
+and all, sitting in the driver's Python heap: under
 multiprocessing each worker would refresh its own copy while the parent's stays
 ``None``, and ``tune_hyperparameters``'s last-resort branch would then quietly
 refit ``study.best_params`` once — a whole extra training run, every run, in
@@ -27,7 +27,7 @@ prediction (#430): what the score will be averaged over, printed by
 import logging
 import time
 from pathlib import Path
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import NamedTuple, Optional
 
 import numpy as np
@@ -199,32 +199,6 @@ def _predict_in_row_batches(adapter, X, budget: int | None = None) -> np.ndarray
     return out
 
 
-def _check_weight_length(dataset, weights: np.ndarray, split: str) -> None:
-    """Raise unless ``weights`` has one entry per row of the built ``dataset``.
-
-    LightGBM will not do this for us in the one case that matters. Its own
-    length check lives in ``set_field``, and ``set_weight`` never gets there
-    for an all-ones vector — it maps any array satisfying ``np.all(weight ==
-    1)`` to ``None``, which a **length-zero** array satisfies vacuously. So a
-    weight vector that came out empty is discarded in silence and the search
-    trains unweighted, under a ``model_version`` keyed by the very
-    ``sample_weights`` it ignored. A non-uniform vector of the wrong length
-    does raise inside LightGBM; this covers the half that does not.
-
-    Checked against ``dataset.num_data()`` rather than against anything the
-    sidecar records, because the sidecar is where a wrong length would come
-    from — a self-consistent count cannot catch it.
-    """
-    n_rows = dataset.num_data()
-    if len(weights) != n_rows:
-        raise ValueError(
-            f"sample weights for {split} have {len(weights)} entries but the "
-            f"binary holds {n_rows} rows; the weight-key sidecar does not "
-            "describe this .bin. Clear the lgb cache directory so it is "
-            "rebuilt."
-        )
-
-
 class TrialScorer:
     """Train one candidate, score it on val, and keep the search's winner.
 
@@ -241,7 +215,7 @@ class TrialScorer:
 
     ``train_weights`` / ``train_dev_weights`` are this run's resolved
     ``training.sample_weights``, aligned to the rows of the corresponding
-    ``.bin`` and applied to every trial's Dataset. They are handed in already
+    ``.bin`` and applied to every trial's training data. They are handed in already
     resolved — once per search rather than once per trial — because they do
     not vary with the hyperparameters, and because the caller is the one
     holding the ``parameters`` they come from.
@@ -256,6 +230,10 @@ class TrialScorer:
     row as a binary prediction (#430), ``None`` otherwise. It is not a val
     counterpart of ``train_weights``: those are the user's training weights
     and shape the fit; this one only weighs the rows of the score.
+
+    ``fit_params`` turns a trial's sampled hyperparameters into the params the
+    fit trains with — ``steps/fit_params.fit_params`` bound to this run's
+    ``parameters`` and the algorithm's rules, the same stacking the refit uses.
 
     ``X_val`` is whatever the caller handed over: anything that indexes and
     slices like a 2-D array. ``tune_hyperparameters`` passes a matrix mapped
@@ -279,10 +257,9 @@ class TrialScorer:
         event_keys_val: Sequence[np.ndarray] = (),
         zero_positive_group_weight_val: Optional[np.ndarray] = None,
         algorithm: str,
-        algorithm_params: dict,
+        fit_params: Callable[[dict], dict],
         search_space: dict,
         hpo_objective: str,
-        seed: int,
         num_iterations: int,
         early_stopping_rounds: int,
         n_trials: int,
@@ -300,10 +277,9 @@ class TrialScorer:
         self.event_keys_val = event_keys_val
         self.zero_positive_group_weight_val = zero_positive_group_weight_val
         self.algorithm = algorithm
-        self.algorithm_params = algorithm_params
+        self.fit_params = fit_params
         self.search_space = search_space
         self.hpo_objective = hpo_objective
-        self.seed = seed
         self.num_iterations = num_iterations
         self.early_stopping_rounds = early_stopping_rounds
         self.n_trials = n_trials
@@ -332,14 +308,7 @@ class TrialScorer:
         trial_idx = trial.number
         trial_params = build_trial_params(trial, self.search_space)
 
-        params = {
-            **self.algorithm_params,
-            "seed": self.seed,
-            "feature_pre_filter": False,
-            **trial_params,
-            "num_iterations": self.num_iterations,
-            "early_stopping_rounds": self.early_stopping_rounds,
-        }
+        params = self.fit_params(trial_params)
 
         logger.info(
             "tune_hyperparameters: trial=%d/%d start params=%s",
@@ -348,33 +317,29 @@ class TrialScorer:
         t0 = time.monotonic()
 
         adapter = get_adapter(self.algorithm)
-        construct_params = {"feature_pre_filter": False}
         with log_step(logger, "prepare_datasets"):
-            # Weights are set here rather than read back out of the .bin: the
-            # binary is cached under a path that says nothing about
+            # Weights go on at read time rather than coming back out of the
+            # .bin: the binary is cached under a path that says nothing about
             # `training.sample_weights`, so it deliberately carries none and
             # this run's own vector is applied on top (#318). Both splits get
             # it — train_dev is the early-stopping valid set, and an unweighted
             # stopping signal would pick a different iteration for a weighted
             # fit.
-            ds_train = self.train_lgb_handle.load(params=construct_params)
-            ds_train.set_weight(self.train_weights)
-            ds_train = ds_train.construct()
-            _check_weight_length(ds_train, self.train_weights, "train")
-            ds_dev = self.train_dev_lgb_handle.load(
-                reference=ds_train, params=construct_params
+            ds_train = adapter.load_train_data(
+                self.train_lgb_handle.bin_path, weight=self.train_weights)
+            ds_dev = adapter.load_train_data(
+                self.train_dev_lgb_handle.bin_path,
+                weight=self.train_dev_weights, reference=ds_train,
             )
-            ds_dev.set_weight(self.train_dev_weights)
-            ds_dev = ds_dev.construct()
-            _check_weight_length(ds_dev, self.train_dev_weights, "train_dev")
         log_data_volume(logger, "tune.ds_train", ds_train)
         log_data_volume(logger, "tune.ds_dev", ds_dev)
 
         with log_step(logger, "train"):
             adapter.train(
-                X_train=None, y_train=None, X_val=None, y_val=None,
-                params=params,
-                train_dataset=ds_train, val_dataset=ds_dev,
+                ds_train, params,
+                num_iterations=self.num_iterations,
+                early_stopping_rounds=self.early_stopping_rounds,
+                valid_data=ds_dev,
             )
 
         with log_step(logger, "predict"):
@@ -390,12 +355,12 @@ class TrialScorer:
         if score > self.best["score"]:
             self.best["score"] = score
             self.best["model"] = adapter
-            self.best["iteration"] = adapter.booster.best_iteration
+            self.best["iteration"] = adapter.best_iteration
             self.best["params"] = trial_params
             if self.study_dir is not None:
                 write_checkpoint(
                     self.study_dir, adapter,
-                    score=score, best_iteration=adapter.booster.best_iteration,
+                    score=score, best_iteration=adapter.best_iteration,
                     best_params=trial_params, trial_number=trial_idx,
                     search_id=self.search_id,
                 )
@@ -405,7 +370,7 @@ class TrialScorer:
             "tune_hyperparameters: trial=%d/%d completed score=%.4f "
             "best_iteration=%d duration=%.1fs best_so_far=%.4f",
             trial_idx, self.n_trials, score,
-            adapter.booster.best_iteration, duration, self.best["score"],
+            adapter.best_iteration, duration, self.best["score"],
         )
 
         return score
