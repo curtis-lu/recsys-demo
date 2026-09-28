@@ -830,7 +830,8 @@ def tune_hyperparameters(
         # then the seed, then the trial's own sample. One function for both,
         # so the hyperparameters reported for the winner are the ones the
         # final model is trained with.
-        fit_params=partial(fit_params, parameters, get_adapter(algorithm).rules),
+        params_for_trial=partial(
+            fit_params, parameters, get_adapter(algorithm).rules),
         search_space=search_space,
         hpo_objective=hpo_objective,
         num_iterations=num_iterations,

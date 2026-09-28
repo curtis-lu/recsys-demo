@@ -12,8 +12,16 @@ names and which objective drops zero-positive groups deliberately differ from
 LightGBM's, so a check that reads LightGBM's table instead of asking the
 configured adapter gets a different answer.
 
-Register it with the ``fake_adapter_registered`` fixture pattern:
+Register it for one test with
 ``monkeypatch.setitem(ADAPTER_REGISTRY, FAKE_ALGORITHM, FakeAdapter)``.
+
+What it does not prove yet. Its ``prepare_train_inputs`` writes the same
+weight-key sidecar the LightGBM adapter writes, through the same
+``io.handles`` names, because the HPO node reads weights off that sidecar
+whatever the algorithm; that contract still lives inside the adapters until
+the ``.bin`` decisions move up to the node (ADR-0030 decision 10, #483). For
+the same reason it prepares row-wise objectives only, so the HPO node has run
+a ranking objective through LightGBM alone; ``finalize_model`` runs one here.
 """
 
 from __future__ import annotations
@@ -82,6 +90,9 @@ class FakeAdapter(ModelAdapter):
         )
 
     def save_train_data(self, data, path):
+        if data.weight is not None:
+            raise ValueError(
+                f"refusing to save training data with per-row weights to {path}")
         # A file handle, not a path: np.savez appends ".npz" to a bare path.
         with open(path, "wb") as f:
             np.savez(f, X=data.X, y=data.y,

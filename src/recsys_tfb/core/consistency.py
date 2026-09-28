@@ -682,8 +682,10 @@ Layer 1 — config-static (implemented here; aggregated by
   node that asked for the adapter. Predicate: ``training_algorithm_errors``.
   NOT aggregated, for A24's reason: only training reads the key, and a typo
   in it must not stop dataset, inference or evaluation. It is also why A7
-  (aggregated, and asking the same adapter for its rules) stays silent on an
-  unregistered name instead of reporting it a second time.
+  (aggregated, and asking the same adapter for its rules) does not report an
+  unregistered name a second time: it skips its metric half, and keeps its
+  query-group half by asking every registered adapter whether the objective
+  ranks.
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -1854,18 +1856,19 @@ def item_missing_from_categorical(parameters: dict) -> bool:
     return item not in declared
 
 
-def _registered_adapter_class(parameters: dict):
-    """The adapter class ``training.algorithm`` selects, or ``None``.
+def _adapter_registry() -> dict:
+    """``models.ADAPTER_REGISTRY``, imported inside the function: ``core``
+    loads no upper layer at import time (the METRIC_NAMES precedent in A25).
 
-    Imported from the ``models`` *package*, inside the function: ``core``
-    loads no upper layer at import time (the METRIC_NAMES precedent in A25),
-    and only the package guarantees the registry is filled — LightGBM
-    registers itself when ``models/__init__`` imports its module, and
-    ``models.base`` alone may be read before that ran.
+    The registry is full by the time anything asks: LightGBM registers when
+    ``models/__init__`` imports its adapter module, and Python runs that
+    ``__init__`` before any ``models`` submodule. What would empty it is that
+    import being dropped; ``tests/test_models/test_cold_imports.py`` guards it
+    in a fresh process.
     """
-    from recsys_tfb.models import ADAPTER_REGISTRY, configured_algorithm
+    from recsys_tfb.models import ADAPTER_REGISTRY
 
-    return ADAPTER_REGISTRY.get(configured_algorithm(parameters))
+    return ADAPTER_REGISTRY
 
 
 def training_algorithm_errors(parameters: dict) -> list[str]:
@@ -1877,14 +1880,16 @@ def training_algorithm_errors(parameters: dict) -> list[str]:
     after the Spark cold start and the cache copies. Returns collect-all
     error strings; empty means OK.
     """
-    from recsys_tfb.models import ADAPTER_REGISTRY, configured_algorithm
+    from recsys_tfb.models import configured_algorithm
 
-    if _registered_adapter_class(parameters) is not None:
+    registry = _adapter_registry()
+    algorithm = configured_algorithm(parameters)
+    if algorithm in registry:
         return []
-    available = ", ".join(sorted(ADAPTER_REGISTRY)) or "(none)"
+    available = ", ".join(sorted(registry)) or "(none)"
     return [
-        f"A57: training.algorithm={configured_algorithm(parameters)!r} is not "
-        f"a registered algorithm. Available: {available}."
+        f"A57: training.algorithm={algorithm!r} is not a registered "
+        f"algorithm. Available: {available}."
     ]
 
 
@@ -1898,24 +1903,32 @@ def ranking_objective_conflicts(parameters: dict) -> list[str]:
     non-ranking metric (silently meaningless) and needs a per-query group:
     ``schema['time'] + schema['entity']``, so ``entity`` must be non-empty.
     An *unset* metric is allowed — the adapter's default ranking metric fills
-    it at train time. An unregistered ``training.algorithm`` has no rules to
-    ask; A57 reports it, and this check stays silent. Returns collect-all
+    it at train time.
+
+    An unregistered ``training.algorithm`` has no rules to ask, and A57
+    names it on the training command. The metric half is skipped then — which
+    metrics fit is the missing adapter's to say — but the query-group half is
+    not: an objective any registered adapter calls ranking still needs a
+    group, and this check runs on every command, so a typo in the algorithm
+    must not let dataset build a whole version first. Returns collect-all
     error strings; empty list means OK.
     """
-    adapter_cls = _registered_adapter_class(parameters)
-    if adapter_cls is None:
-        return []
-    rules = adapter_cls.rules
+    from recsys_tfb.models import configured_algorithm
+
+    registry = _adapter_registry()
+    adapter_cls = registry.get(configured_algorithm(parameters))
     training = parameters.get("training", {}) or {}
     ap = training.get("algorithm_params", {}) or {}
     objective = ap.get("objective")
-    if not rules.is_ranking_objective(objective):
+    candidates = [adapter_cls] if adapter_cls is not None else list(registry.values())
+    if not any(cls.rules.is_ranking_objective(objective) for cls in candidates):
         return []
 
     errors: list[str] = []
 
     metric = ap.get("metric")
-    if metric is not None and str(metric) not in rules.ranking_metrics:
+    rules = adapter_cls.rules if adapter_cls is not None else None
+    if rules is not None and metric is not None and str(metric) not in rules.ranking_metrics:
         errors.append(
             f"training.algorithm_params.objective={objective!r} is a ranking "
             f"objective but metric={metric!r} is not a ranking metric. Set "

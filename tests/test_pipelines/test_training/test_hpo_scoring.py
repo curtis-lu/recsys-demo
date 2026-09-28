@@ -240,7 +240,7 @@ class TestTrialScorer:
             X_val=np.zeros((4, 2)), y_val=np.array([1, 0, 1, 0]),
             groups_val=np.array([0, 0, 1, 1], dtype=np.int64),
             items_val=np.array([0, 1, 0, 1], dtype=np.int64),
-            algorithm="lightgbm", fit_params=dict, search_space=[],
+            algorithm="lightgbm", params_for_trial=dict, search_space=[],
             hpo_objective="mean_ap", num_iterations=5,
             early_stopping_rounds=2, n_trials=len(scores),
             search_id="unit", study_dir=None,  # None = do not checkpoint
@@ -502,7 +502,7 @@ class TestWeightsReachTheTrainedModel:
             train_dev_weights=lgb_dev.sample_weights(params, prep),
             X_val=X_v, y_val=y_v, groups_val=g_v, items_val=i_v,
             algorithm="lightgbm",
-            fit_params=partial(fit_params, params, LightGBMAdapter.rules),
+            params_for_trial=partial(fit_params, params, LightGBMAdapter.rules),
             search_space=[], hpo_objective="mean_ap",
             num_iterations=30, early_stopping_rounds=0, n_trials=1,
             search_id="weights", study_dir=None,

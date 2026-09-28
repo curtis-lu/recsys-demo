@@ -141,7 +141,15 @@ class ModelAdapter(ABC):
 
     @abstractmethod
     def save_train_data(self, data: Any, path: str) -> None:
-        """Write native training data from :meth:`build_train_data` to ``path``."""
+        """Write native training data from :meth:`build_train_data` to ``path``.
+
+        Raises ``ValueError`` when ``data`` carries per-row weights. Weights are
+        applied on read (:meth:`load_train_data`) and never stored, because
+        the file is cached under a path that says nothing about
+        ``training.sample_weights`` (#318) — and a stored weight is not always
+        replaced on read: LightGBM leaves the file's weights in place when
+        handed an all-ones vector.
+        """
         ...
 
     @abstractmethod
@@ -255,7 +263,7 @@ ADAPTER_REGISTRY: dict[str, type[ModelAdapter]] = {}
 DEFAULT_ALGORITHM = "lightgbm"
 
 
-def configured_algorithm(parameters: dict) -> str:
+def configured_algorithm(parameters: dict) -> str | None:
     """The registry name ``training.algorithm`` selects.
 
     An explicit ``algorithm: null`` comes back as ``None`` rather than the

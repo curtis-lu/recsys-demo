@@ -347,12 +347,22 @@ class TestRankingObjectiveConflicts:
         assert len(errs) == 2
 
     def test_an_unregistered_algorithm_is_left_to_a57(self):
-        """No adapter, no rules to ask. A57 names the typo on the training
-        command; this check runs on every command and must not report the
-        same config a second time, or stop dataset over a training key."""
+        """No adapter, no metric list to ask. A57 names the typo on the
+        training command; this check runs on every command and must not
+        report the same config a second time."""
         params = self._params("lambdarank", "binary_logloss")
         params["training"]["algorithm"] = "lightgbmm"
         assert ranking_objective_conflicts(params) == []
+
+    def test_an_unregistered_algorithm_still_needs_a_query_group(self):
+        """The query-group half does not wait for the typo to be fixed:
+        lambdarank ranks for a registered adapter, so an empty entity is
+        reported on every command, as before the rules moved."""
+        params = self._params("lambdarank", "ndcg", entity=())
+        params["training"]["algorithm"] = "lightgbmm"
+        errs = ranking_objective_conflicts(params)
+        assert len(errs) == 1
+        assert "query group" in errs[0]
 
 
 from recsys_tfb.core.consistency import training_algorithm_errors

@@ -99,10 +99,12 @@ LightGBM 專屬的解析（TreeExplainer、`trees_to_dataframe`、類別切點�
 > **實作註記（2026-09-29，#482）**：
 > - 介面的名字：`build_train_data`（陣列變成原生訓練資料，還沒分箱）、`save_train_data`、`load_train_data`（讀回時帶上這次的權重；權重筆數跟資料列數對不上就丟 `ValueError`）、`train(train_data, params, *, num_iterations, early_stopping_rounds, valid_data)`、`best_iteration`。都在 `models/base.py` 的 `ModelAdapter`。
 > - `best_iteration` 在沒有早停的訓練（沒給 `valid_data`，或 `early_stopping_rounds` 是 0）時是 0。這是 LightGBM 自己的慣例，ABC 的 docstring 寫明了。
-> - `build_train_data` 回傳**還沒分箱**的原生資料。`refit_on_full` 的最佳參數若會影響分箱（例如 `max_bin`），今天是 `lgb.train` 連同訓練參數一起分箱；先分好會改變輸出。
+> - `build_train_data` 回傳**還沒分箱**的原生資料，跟 refit 以前自己建的 Dataset 一樣：由 `lgb.train` 連同訓練參數一起分箱，refit 的建法不因為多了這個方法而改變。（會影響分箱的參數，例如 `max_bin`，今天其實到不了 refit：trial 讀的是已經分好箱的 `.bin`，LightGBM 在第一個 trial 就會拒絕它。這是改動前就有的限制，本票沒動。）
+> - `save_train_data` 拒絕帶權重的資料（丟 `ValueError`），把「權重只在讀取時套上、不存進檔案」從說明變成擋得住的規定。理由：LightGBM 讀回時若給全 1 的權重，不會蓋掉檔案裡存的權重，之後一次不加權的執行會拿舊權重訓練（#318 的形狀）。#483 把建 `.bin` 搬進 node 時，照抄 refit 那段 `weight=` 的寫法就會撞上。
 > - `feature_pre_filter: False` 收成 LightGBM adapter 裡一個常數，建資料、讀資料、訓練三處都用它。訓練參數裡它改由 adapter 最後蓋上去，不再排在 trial 參數前面。兩種寫法只在「搜尋空間或 `algorithm_params` 自己寫了 `feature_pre_filter`」時結果不同，而那種設定今天在 trial 裡就會被 LightGBM 拒絕（已分箱的 `.bin` 不接受別的值）。
 > - 疊參數的順序收成 `pipelines/training/steps/fit_params.py` 的 `fit_params`，trial 與 refit 共用。`num_iterations`、`early_stopping_rounds` 改成 `train()` 的參數，不再放進參數 dict；`params` 裡若還留著這兩個鍵，LightGBM adapter 會拿掉，照樣以 `training.num_iterations`／`early_stopping_rounds` 為準，跟以前一樣。
 > - `LgbDatasetHandle.load()` 拿掉，讀回 `.bin` 改由 adapter 做；handle 只剩路徑與旁邊的 sidecar。
+> - **更正〈為什麼〉**：上文說第二個真的 adapter 會是兩階段的組合模型。照兩階段設計檔現在的寫法（§7），組合模型只實作 predict／save／load，訓練照舊逐組用單一模型的 adapter。所以本決定的**訓練那一半**，第二個實作是測試裡的假 adapter（`tests/fake_adapter.py`）；組合模型驗到的是評分那一半（決定 2）。要不要把介面拆成「只能評分」與「可以訓練」兩層，留給兩階段 spec 決定。拆之前的已知後果：一個只能評分的 adapter 註冊進登記表，會通過 A57，並在 A7 因為沒有 `rules` 而出錯。
 > - `.bin` 快取的判斷（快取能不能用、丟哪些組、權重為什麼不進 `.bin`）照票的範圍**沒有動**，仍在 `LightGBMAdapter.prepare_train_inputs` 裡，只是它內部改用 `build_train_data`／`save_train_data` 建檔；搬到 node 是 #483。診斷還在讀的 `.booster` 也還在，是 #485。
 
 ## 決定 2　評分入口在 adapter：吃一張表、回分數
@@ -130,7 +132,8 @@ adapter 也說出「評分要讀哪些欄」：模型的特徵，加上組合模
 > **實作註記（2026-09-29，#482）**：
 > - 規則是 `models/base.py` 的 `AlgorithmRules`，四項：排序目標、排序 metric、預設排序 metric、哪些目標丟掉整組沒有正例的 query group。每個 adapter 用類別屬性 `rules` 宣告；LightGBM 的是 `models/lightgbm_adapter.py` 的 `LIGHTGBM_RULES`。建的時候會自己檢查：預設 metric 必須是排序 metric，會丟組的目標必須是排序目標。
 > - 「支援哪些 objective」落地成「支援哪些**排序** objective」，**沒有**另加一份所有 objective 的白名單。框架從來沒擋過非排序的 objective（例如 `regression`、`cross_entropy` 今天都能跑），加白名單會擋下今天能跑的設定；而決定總表寫本決定只改「`training.algorithm` 打錯什麼時候被擋」。
-> - `training.algorithm` 的檢查代號是 **A57**（`core/consistency.py` 的 `training_algorithm_errors`），接在 training 指令上、Spark 啟動前，不進每個指令都跑的聚合檢查，理由同 A24：只有 training 讀這個鍵。A7 在聚合檢查裡，遇到沒註冊的名字就不出聲，交給 A57 報，免得同一個錯報兩次、也免得 dataset 指令被 training 的鍵擋下。
+> - `training.algorithm` 的檢查代號是 **A57**（`core/consistency.py` 的 `training_algorithm_errors`），接在 training 指令上、Spark 啟動前，不進每個指令都跑的聚合檢查，理由同 A24：只有 training 讀這個鍵。A7 在聚合檢查裡，遇到沒註冊的名字時：metric 那一半跳過（哪些 metric 合用要問那個不存在的 adapter），交給 A57 報；query group 那一半照查，只要任何一個已註冊的 adapter 把這個 objective 當排序目標，`schema.entity` 就不能是空的。後者是為了不讓 algorithm 打錯字時，dataset 先白建一整個版本。
+> - **更正上文「登記表要先填好」一段**：「檢查若只 import `models.base`，登記表可能是空的」不成立。Python 載入任何 `models` 的子模組之前，一定先跑完 `models/__init__`；而且載入 `core` 本身就會經 `core.catalog` → `io.model_adapter_dataset` 把 `models` 帶進來。真正會讓登記表變空的，是 `models/__init__` 拿掉對 LightGBM adapter 的 import；`tests/test_models/test_cold_imports.py` 在獨立行程裡守這件事（拿掉那行 import，測試會轉紅，已實測）。
 > - `training.algorithm` 的預設值收成 `models/base.py` 的 `DEFAULT_ALGORITHM` 與 `configured_algorithm()`，training 的 node 與 A57 都讀它。`io/model_adapter_dataset.py` 在沒有 `model_meta.json` 時退回 LightGBM 的那一處沒動：那是讀舊模型檔的相容處理，不是設定的預設值。
 > - `conf/base/parameters_training.yaml` 有一段註解還指向 `core/group_utils.py` 的 `objective_drops_zero_positive_groups`（函式已搬走）。本票要求 `conf/` 對 main 的 diff 為空，所以沒改；留給下一張會改那個檔的票（決定 11 的 #487 要在同一個檔加新鍵）。
 
@@ -258,6 +261,8 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 - `training.fixed_params`：跳過 HPO 時用的超參數。空的表示「除了 `algorithm_params` 不另外指定」，不是「全部用 LightGBM 預設值」：框架自己設定的鍵照樣生效（見下）。
 
 **參數怎麼疊**：跟 HPO 的一個 trial 完全相同（`steps/hpo_scoring.py` 的 `TrialScorer.__call__`），`fixed_params` 站在 trial 參數的位置：`algorithm_params` → 框架設定的 `seed`、`feature_pre_filter` → `fixed_params` → `training.num_iterations`、`training.early_stopping_rounds`。所以迭代數上限與早停一樣由 `training.*` 決定，用 train_dev 早停，`final_model_strategy` 的兩種策略照常可用。
+
+> **實作註記（2026-09-29，#482）**：上一段寫的「疊參數在 `TrialScorer.__call__`」已過時。#482 把疊法收成 `pipelines/training/steps/fit_params.py` 的 `fit_params(parameters, rules, chosen)`：`algorithm_params`（排序目標沒寫 metric 時補上 adapter 規則的預設 metric）→ `seed` → `chosen`；trial 與 refit 都用它，`fixed_params` 就是 `chosen`。另外兩層不在這個 dict 裡了：`feature_pre_filter` 由 LightGBM adapter 在訓練時最後蓋上，`num_iterations`、`early_stopping_rounds` 是 `ModelAdapter.train()` 的參數。效果跟上一段寫的順序相同，只差在 `feature_pre_filter` 由 adapter 最後蓋、不能被蓋掉（見決定 1 的實作註記）。
 
 `fixed_params` 裡不得寫由別的設定鍵或框架決定的鍵（`objective`、`metric`、`seed`、`feature_pre_filter`、`num_iterations`、`early_stopping_rounds`），開跑前在 `core/consistency.py` 擋下。理由：寫了不是被後面的層靜默蓋掉，就是反過來靜默蓋掉框架的設定（`feature_pre_filter` 被改成 `true`，重訓會丟掉搜尋時可切的特徵）；`objective` 寫在這裡更糟，`.bin` 快取與丟組政策都照 `algorithm_params.objective` 決定，兩邊會對不上。
 

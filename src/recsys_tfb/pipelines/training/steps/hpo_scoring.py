@@ -231,9 +231,10 @@ class TrialScorer:
     counterpart of ``train_weights``: those are the user's training weights
     and shape the fit; this one only weighs the rows of the score.
 
-    ``fit_params`` turns a trial's sampled hyperparameters into the params the
-    fit trains with — ``steps/fit_params.fit_params`` bound to this run's
-    ``parameters`` and the algorithm's rules, the same stacking the refit uses.
+    ``params_for_trial`` turns a trial's sampled hyperparameters into the
+    params the fit trains with — ``steps/fit_params.fit_params`` bound to this
+    run's ``parameters`` and the algorithm's rules, the same stacking the refit
+    uses.
 
     ``X_val`` is whatever the caller handed over: anything that indexes and
     slices like a 2-D array. ``tune_hyperparameters`` passes a matrix mapped
@@ -257,7 +258,7 @@ class TrialScorer:
         event_keys_val: Sequence[np.ndarray] = (),
         zero_positive_group_weight_val: Optional[np.ndarray] = None,
         algorithm: str,
-        fit_params: Callable[[dict], dict],
+        params_for_trial: Callable[[dict], dict],
         search_space: dict,
         hpo_objective: str,
         num_iterations: int,
@@ -277,7 +278,7 @@ class TrialScorer:
         self.event_keys_val = event_keys_val
         self.zero_positive_group_weight_val = zero_positive_group_weight_val
         self.algorithm = algorithm
-        self.fit_params = fit_params
+        self.params_for_trial = params_for_trial
         self.search_space = search_space
         self.hpo_objective = hpo_objective
         self.num_iterations = num_iterations
@@ -308,7 +309,7 @@ class TrialScorer:
         trial_idx = trial.number
         trial_params = build_trial_params(trial, self.search_space)
 
-        params = self.fit_params(trial_params)
+        params = self.params_for_trial(trial_params)
 
         logger.info(
             "tune_hyperparameters: trial=%d/%d start params=%s",

@@ -258,10 +258,10 @@ class LightGBMAdapter(ModelAdapter):
     ) -> "lgb.Dataset":
         """An unconstructed ``lgb.Dataset`` over the arrays.
 
-        Left unconstructed so ``lgb.train`` bins it together with the training
-        params: a refit whose best params touch binning (``max_bin``, say)
-        bins under them, as it always has. A caller that saves it constructs
-        it first.
+        Left unconstructed, as the refit's Dataset always was: ``lgb.train``
+        then bins it with the training params merged in, so the refit's
+        construction is unchanged by this method existing. A caller that
+        saves it constructs it first.
 
         The feature names are baked in so the booster reports real names in
         ``feature_importance()`` instead of LightGBM's positional
@@ -286,6 +286,18 @@ class LightGBMAdapter(ModelAdapter):
         )
 
     def save_train_data(self, data: "lgb.Dataset", path: str) -> None:
+        # A weight in the file would outlive the config that set it: reading
+        # back with an all-ones vector does not replace it (set_weight maps
+        # all-ones to None and leaves the stored field alone), so a later
+        # unweighted run would train on the old weights under a model_version
+        # that says unweighted (#318). get_weight() needs a constructed
+        # Dataset; save_binary would construct it anyway.
+        if data.construct().get_weight() is not None:
+            raise ValueError(
+                f"refusing to save training data with per-row weights to "
+                f"{path}: weights are applied when the file is read "
+                "(load_train_data), never stored in it."
+            )
         data.save_binary(path)
 
     def load_train_data(
@@ -433,9 +445,9 @@ class LightGBMAdapter(ModelAdapter):
         vector inside the binary would be served unchanged to a run configured
         with different weights (#318). Written beside each .bin instead is a
         ``*.weight_keys.parquet`` sidecar holding that binary's rows' weight-key
-        columns, in the binary's own row order; the trial loop resolves today's
-        table against it and ``set_weight``s the result
-        (:meth:`LgbDatasetHandle.sample_weights`). A cached directory whose
+        columns, in the binary's own row order; the HPO node resolves today's
+        table against it (:meth:`LgbDatasetHandle.sample_weights`) and every
+        trial hands the result to :meth:`load_train_data`. A cached directory whose
         sidecar is missing, or was built for different
         ``training.sample_weight_keys``, is rebuilt rather than served.
         """
@@ -555,8 +567,8 @@ class LightGBMAdapter(ModelAdapter):
         # path does not mention training.sample_weights, so a baked vector
         # would be served to a later run configured with different weights and
         # nothing would say so (#318). What goes beside the binary is the key
-        # columns the weights are resolved *from*; the trial loop resolves its
-        # own table against them (steps/hpo_scoring.py).
+        # columns the weights are resolved *from*; each run resolves its own
+        # table against them and applies it on read (load_train_data).
         weight_keys = weight_key_columns(parameters)
 
         if ranking:

@@ -87,6 +87,18 @@ def test_data_read_back_from_disk_trains_the_same_model(adapter, algorithm, tmp_
     np.testing.assert_allclose(adapter.predict(X), in_memory.predict(X))
 
 
+def test_refuses_to_store_weights(adapter, tmp_path):
+    """Weights are applied on read, never stored. LightGBM would otherwise
+    keep a stored weight when read back with all-ones (it maps all-ones to
+    "no weights" and leaves the file's field alone), so a later unweighted
+    run would train on an earlier run's weights (#318)."""
+    X, y = _arrays()
+    with pytest.raises(ValueError, match="per-row weights"):
+        adapter.save_train_data(
+            _build(adapter, X, y, weight=np.full(len(y), 2.0)),
+            str(tmp_path / "train.bin"))
+
+
 @pytest.mark.parametrize("n_weights", [0, 299, 301])
 def test_refuses_weights_that_do_not_match_the_rows(adapter, tmp_path, n_weights):
     X, y = _arrays()
@@ -186,18 +198,20 @@ def test_a7_accepts_the_adapters_own_ranking_metric(algorithm):
 
 
 def test_a7_answer_changes_with_the_configured_adapter():
-    """The same config, two algorithms, two verdicts — the check cannot be
-    reading one fixed table. ``fake_rank`` ranks only for the fake, and
-    ``ndcg`` is a ranking metric only for LightGBM."""
+    """The same config, two algorithms, two verdicts, in both directions —
+    the check cannot be reading one fixed table. ``fake_rank`` ranks only for
+    the fake, ``lambdarank`` only for LightGBM."""
     fake_rank_on_logloss = ("fake_rank", "binary_logloss")
     assert ranking_objective_conflicts(
         _params(FAKE_ALGORITHM, *fake_rank_on_logloss)) != []
     assert ranking_objective_conflicts(
         _params("lightgbm", *fake_rank_on_logloss)) == []
 
-    lambdarank_on_ndcg = ("lambdarank", "ndcg")
-    assert ranking_objective_conflicts(_params("lightgbm", *lambdarank_on_ndcg)) == []
-    assert ranking_objective_conflicts(_params(FAKE_ALGORITHM, *lambdarank_on_ndcg)) == []
+    lambdarank_on_logloss = ("lambdarank", "binary_logloss")
+    assert ranking_objective_conflicts(
+        _params("lightgbm", *lambdarank_on_logloss)) != []
+    assert ranking_objective_conflicts(
+        _params(FAKE_ALGORITHM, *lambdarank_on_logloss)) == []
 
 
 def test_a57_admits_every_registered_adapter(algorithm):

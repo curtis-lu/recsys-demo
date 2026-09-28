@@ -51,11 +51,14 @@ def test_io_no_longer_loads_models():
 
 
 def test_the_pre_run_check_sees_lightgbm_registered():
-    """Only the check's own module is imported, never ``models``: the check
-    has to fill the registry itself. LightGBM registers when
-    ``models/__init__`` imports its adapter module; were that import dropped,
-    ten test files that import the adapter directly would stay green while
-    every real run rejected ``algorithm: lightgbm``."""
+    """The test imports only the check's own module, never ``models``.
+
+    Loading ``core`` brings ``models`` in anyway (``core/__init__`` ->
+    ``core.catalog`` -> ``io.model_adapter_dataset`` -> ``models``); what
+    this guards is that loading ``models`` registers LightGBM, which happens
+    only because ``models/__init__`` imports the adapter module. Were that
+    import dropped, ten test files that import the adapter directly would stay
+    green in-process while every real run rejected ``algorithm: lightgbm``."""
     result = _run("""
         from recsys_tfb.core.consistency import training_algorithm_errors
         print(training_algorithm_errors({"training": {"algorithm": "lightgbm"}}))
