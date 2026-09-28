@@ -133,7 +133,7 @@ export SPARK_CONF_DIR=$PWD/conf/spark-local
 
 要一次跑完整條鏈（含 inference，並在結尾斷言三張推論表的分區結構），用 `bash scripts/local_e2e.sh`。**v0.1.1 起**這支腳本預設使用 repo 根目錄的 `.venv/bin/python`，要指定別的直譯器就設 `RECSYS_PYTHON=<python 路徑>`，找不到可執行的直譯器時會直接中止；`v0.1.0` 的版本把直譯器路徑寫死成開發者機器上的絕對路徑，在別的機器上跑不起來。腳本開頭會 `--reset`，本機 warehouse 與 metastore 會被清掉重建。
 
-本機環境的完整說明見 [local-spark-setup.md](../dev-setup/local-spark-setup.md)。接自己的資料從 [README §3 快速上手](../../../README.md#3-快速上手) 開始。
+本機環境的完整說明見 [local-spark-setup.md](../dev-setup/local-spark-setup.md)。接自己的資料從 [README §5 快速上手](../../../README.md#5-快速上手) 開始。
 
 ## 7. 升級到下一個版本
 

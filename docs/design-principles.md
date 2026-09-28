@@ -1,7 +1,7 @@
 # 主要設計理念
 
-> 本文件是 README §1「主要設計理念」的詳細版，說明各項理念如何落實到 pipeline、設定、資料產物與執行流程。
-> 想直接接入新排序問題請先看 README §3；設定檢查與重跑範圍見 README §4 及各 pipeline 文件；完整資料流見 [`data-lineage.html`](data-lineage.html)。
+> 本文件是 README §4「框架怎麼運作」的詳細版，說明各項理念如何落實到 pipeline、設定、資料產物與執行流程。
+> 想直接接入新排序問題請先看 README §5「快速上手」；設定檢查與重跑範圍見 [`troubleshooting.md`](operations/user-guides/troubleshooting.md) 及各 pipeline 文件；完整資料流見 [`data-lineage.html`](data-lineage.html)。
 
 ## 1. Kedro 風格：pipeline 與 node 設計
 
@@ -282,7 +282,7 @@ inference 不會直接將排名結果寫入 production `ranked_predictions`。�
 
 框架無法自動判斷所有業務與時間語意。例如特徵是否包含未來資訊、label 觀察窗是否真正成熟、候選資格是否符合法規，仍需由 source SQL 設計、資料驗收與人工發布流程負責。
 
-README §4 的執行前檢查列出這些目前不能完全由程式驗證的重要事項。
+README §5 步驟 7「驗收第一版」與 [`troubleshooting.md`](operations/user-guides/troubleshooting.md) §2 列出這些目前不能完全由程式驗證的重要事項。
 
 ## 6. 可恢復執行
 
@@ -360,7 +360,7 @@ MemoryDataset 無法跨次執行重用；只有 catalog artifact、training cach
 ## 延伸閱讀
 
 - 各 pipeline 的節點、設定與指令：[`pipelines/`](pipelines/)
-- 設定修改與重跑範圍：README §4，以及各 pipeline 文件的「版本、重跑與恢復」章節
+- 設定修改與重跑範圍：[`troubleshooting.md`](operations/user-guides/troubleshooting.md) §3，以及各 pipeline 文件的「版本、重跑與恢復」章節
 - 資料表與 artifact lineage：[`data-lineage.html`](data-lineage.html)
-- 常見設定錯誤與排查：README §4
+- 常見設定錯誤與排查：[`troubleshooting.md`](operations/user-guides/troubleshooting.md)
 - 排序指標與評估報表：[`metrics.html`](metrics/metrics.html)
