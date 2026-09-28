@@ -300,6 +300,8 @@ cust_id_col = entity_cols[0]
 
 ## 決定 6：7 個 diagnosis node 留在原地，加一段導航 docstring
 
+> **被 [ADR-0030](0030-training-second-pass-honest-adapter-shared-scoring.md) 決定 6 取代（2026-09-28）。** 7 個 node 搬回 `pipelines/training/nodes.py`，判斷寫在 node、機制進 `pipelines/training/steps/`。下面三個理由的現況：第 2 條（未來要搬就白做）失效，因為診斷不獨立成 pipeline（使用者 2026-09-20），也不搬去 evaluation（2026-09-27）；第 1 條（轉手殼）由決策上浮解決；第 3 條（多跳一次檔）在 `def` 回到 `nodes.py` 之後不存在。ADR-0030 落地前，程式仍是本節描述的形狀。原文保留，不改寫。
+
 **做什麼。** 這 7 個 node 的 `def` 在 `src/recsys_tfb/diagnosis/model/` 底下，**不搬**。改為在 `pipelines/training/nodes.py` 的模組 docstring 列出完整清單與理由：
 
 | node | `def` 在哪 |
@@ -531,6 +533,8 @@ cust_id_col = entity_cols[0]
 
 ## 1. diagnosis 獨立成一條 pipeline
 
+> **關閉（2026-09-28，[ADR-0030](0030-training-second-pass-honest-adapter-shared-scoring.md)）。** 診斷不獨立成 pipeline（使用者 2026-09-20），也不搬去 evaluation（2026-09-27）；7 個 node 搬回 training（ADR-0030 決定 6）。
+
 **方向**（使用者 2026-08-29 提出）：
 
 ```
@@ -675,6 +679,8 @@ ID、#415 讓文件與 ADR 對齊。上面預告的三處全部命中，逐條�
 
 ## 7. 「診斷失敗該不該停 pipeline」
 
+> **已裁決（2026-09-28，[ADR-0030](0030-training-second-pass-honest-adapter-shared-scoring.md) 決定 4）。** 模型做不到的診斷跳過並警告；某一張圖畫不出來只警告；其他錯誤整條停下。
+
 今天 `select_shap_population` 整段包在 `try/except` 裡，失敗只 warn、訓練繼續（spec §12 的刻意設計）。
 
 **但那個 warning 出現在一個跑了好幾小時的 log 尾端，實務上沒人會看到。** 硬失敗反而顯眼——而且 `model` 有 catalog 條目，`--from-node select_shap_population` 就救得回來，HPO 與 refit 都不用重跑。
@@ -686,6 +692,8 @@ ID、#415 讓文件與 ADR 對齊。上面預告的三處全部命中，逐條�
 見決定 7 漏點 2。`conf/base/parameters_training.yaml` 的 `cache.root: data/recsys_cache` 是 CWD-relative，`_resolve_cache_path` 不 `resolve()`。同一次執行內沒事，跨執行會靜默指到不同地方。
 
 **什麼時候做**：diagnosis 要獨立成 pipeline 之前，這是必須先解決的前提之一。
+
+> **觸發條件失效（2026-09-28，[ADR-0030](0030-training-second-pass-honest-adapter-shared-scoring.md)）。** 第 1 條已關閉，診斷不會獨立成 pipeline，所以上面這個時間點不會到。相對路徑本身的風險（跨執行靜默指到不同地方）仍在，目前沒有排。
 
 ---
 

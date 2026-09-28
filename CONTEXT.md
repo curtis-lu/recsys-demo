@@ -124,6 +124,12 @@ dataset 產物的版本身分。精確定義：`src/recsys_tfb/core/versioning.p
 **dataset 產物格式版本**:
 框架自己的一個整數，進 base_dataset_version 的雜湊。程式改了 dataset 落地的內容、設定卻沒動時加 1，讓每個部署的版本身分都換一次。精確定義：`src/recsys_tfb/core/versioning.py` 的 `DATASET_ARTIFACT_FORMAT_VERSION` 與模組 docstring。
 
+**training 模型格式版本**（ADR-0030，尚未實作）:
+框架自己的一個整數，進 model_version 的雜湊，也進 HPO 用來判斷能不能接著上次搜尋的那個身分。程式改了、設定沒動，而 HPO 的 trial 分數或訓練出的模型會因此不同時加 1。是 dataset 產物格式版本在 training 的對應物。
+
+**training 預測格式版本**（ADR-0030，尚未實作）:
+框架自己的一個整數，記在 training 的 test 預測旁邊，不進任何版本身分。程式改了會讓寫出的 test 預測不同、但模型不變時加 1；記錄的值跟程式不同時，所有月份的預測重寫，不重訓。
+
 **不變量代號**:
 一致性規則的編號：A 系列檢查設定，B 系列檢查資料。精確定義與完整清單：`src/recsys_tfb/core/consistency.py` 模組 docstring 的 Invariant legend。
 
@@ -148,6 +154,10 @@ training 產出、讓框架以外的評分系統重現特徵順序與類別編�
 **HPO 目標**:
 超參數搜尋在 val 上比較每一組參數時看的指標，只在同一次訓練裡挑參數。設定鍵是 `training.hpo_objective`。
 _Avoid_: objective、訓練目標（那是 LightGBM 的學習目標 `algorithm_params.objective`）
+
+**固定參數訓練**（ADR-0030，尚未實作）:
+不跑 HPO，直接用設定裡給的超參數訓練模型；樹的棵數仍由 train_dev 早停決定，不讀 val。
+_Avoid_: 跳過訓練（模型照樣訓練，跳過的只有挑參數）
 
 **選版指標**（ADR-0028）:
 在多個 model_version 之間挑出建議 promote 的那一個時所比的指標，算在 test 上；只有計分月份跟現在設定相同的版本才參加比較。沒設定時與 HPO 目標相同。
