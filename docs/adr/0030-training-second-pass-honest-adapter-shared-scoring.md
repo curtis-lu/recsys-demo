@@ -266,6 +266,18 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 
 **連帶**：`architecture-constraints.md` 的 F4（Node 極薄）與 A1 例外一（「`inputs` 位置對應」）要跟著改寫。動 `core/` 之前照路由表先讀那一份。
 
+> **實作註記（2026-09-30，#486）**：
+> - `Node` 多一個屬性 `keyword_inputs`：dict 寫法時是那份 `{參數名: dataset 名}`，清單寫法時是 `None`。`Node.inputs` 照舊是 dataset 名清單，Runner 看 `keyword_inputs` 決定照位置或照名字傳。`outputs`、`writes` 收到 dict 改成建構期 raise `TypeError`：它們跟 `inputs` 用同一個 `_normalize`，以前一樣會把 dict 讀成它的鍵，放行等於把同一個陷阱留在那兩處。認的是任何 `Mapping`，不只 `dict`。
+> - **「Kedro 的 dict inputs 同一個語意」補齊的一半**（審查抓到）：Kedro 建構 node 時就拿函式簽章檢查 inputs，第一版沒有。沒有的話，鍵拼錯或漏接要等 Runner 呼叫才 `TypeError`；對 `log_experiment` 是整個 training 跑完之後，而且這個錯發生在它「MLflow 失敗不拖垮訓練」的 try 之外。現在 `Node._check_keyword_inputs` 在建構期把 dict 的鍵加上 `writes` 對簽章 `bind` 一次，鍵跟寫入目標同名也在這裡擋。清單寫法不檢查，照舊。跟 Kedro 仍不同的一處：Kedro 的 `node.inputs` 照簽章排序，這裡照 dict 的順序（照名字傳，順序不影響綁定）。
+> - `log_experiment` 多一個參數 `gain_ledger`（不讀，只為了那條邊），而且**所有參數都拿掉了預設值**。照名字傳之後，`=None` 吞得掉的錯從「位置錯」換成「漏接」：字典少一個鍵，有預設值的參數會安靜收到 `None`。沒有預設值，漏接就在呼叫時報錯；另有測試檢查字典的鍵與簽章的參數一一對上（`tests/test_pipelines/test_training/test_pipeline.py` 的 `TestLogExperimentWiring`）。
+> - **跟票不同的一處：兩個圖條目（`shap_summary_figures`、`case_figures`）沒有接成輸入。** #486 寫「含診斷那張票新增的圖」，但決定 7 的實作註記（#485）已經說明不接的理由：圖 dataset 沒有 `load`，而產圖的 node 的另一個輸出（`shap_diagnostics`、`cases_manifest`）已經是輸入——Runner 存完一個 node 的全部輸出才跑下一個。每個在 `diagnostics/` 落檔的診斷 node 都直接接到 `log_experiment`；`select_shap_population` 不落檔，經由兩個象限 node 排在它前面。
+> - **這條邊保證不了的兩件事**（審查抓到，都不是本票造成的，記下來）：
+>   - **中斷後接續**。Runner 照 `outputs` 的順序存，JSON 在圖前面。畫圖途中程序被殺掉，JSON 在、圖只有一部分；之後用 `--from-node`／`--only-node` 接續，切片看到 JSON 在，就不重跑那個 node，上傳的是殘缺的圖。一次沒被中斷的執行不會這樣。畫不出來的圖本來就是「一行 warning 加少一個檔」（決定 7），這裡是同一個訊號。
+>   - **只上傳這次的檔**。上傳的是整個 `diagnostics/`，而同一個 `model_version` 的目錄會被重複使用（改 `diagnostics.*` 不換版本號）。圖 dataset 只刪這次要畫的路徑，所以這次少畫的 item 或格子，上次的圖會留著、一起上傳，旁邊的 manifest 沒有列它們。決定 8 保證的是「這次的檔在上傳前落地」。
+> - **跟票不同的第二處：驗收測試的形狀。** 票寫「把 node 宣告順序打亂，診斷照樣在 `log_experiment` 之前」。實查打亂擋不住漏接：拓撲排序是先進先出，只吃 `model` 的 node 在 `log_experiment` 能排進佇列之前就排進去了。在決定 8 之前的接線上試了 2,001 種宣告順序，`compute_gain_ledger` 每一種都排在前面——上文說的「運氣」，而且是穩定的運氣，打亂看不出來。改成兩個不依賴排序演算法的測試：(1) 每個在 `diagnostics/` 落檔的 node（從 catalog 推，之後加的診斷自動涵蓋）都有一個輸出直接是 `log_experiment` 的輸入；(2) 七個診斷 node 加 `tune_hyperparameters` 都是 `log_experiment` 在圖上的祖先，也就是在任何合法順序下都排在它前面。
+> - 跳過 HPO 時沒有 `diagnostics/hpo/`：`log_experiment` 不以它為輸入、上傳整個目錄，所以本來就不等它；補了一個測試釘住（`test_log_experiment_records_a_run_without_hpo_search_diagnostics`）。
+> - 加一個新診斷要改的地方：node 本身、`pipeline.py`（新的 `Node(...)` 與 `log_experiment` 字典的一個鍵）、catalog 條目、`log_experiment` 一個具名參數（放在簽章哪裡都行）。測試這邊：`test_nodes.py` 呼叫 `log_experiment` 的 helper 從簽章讀參數名，不用改；`test_diagnosis_error_policy.py` 用真的 Runner 跑診斷 node 與 `log_experiment`，它的 `DIAGNOSIS_NODES` 與 catalog 要加一筆，不然 `log_experiment` 少一個輸入。
+
 ## 決定 9　兩個格式版本號：模型的、預測的
 
 「同一個 `model_version` 的預測不會變」是 test 預測跳過已寫月份的前提（`steps/predict_months.py`）；「同一個 `search_id` 的 trial 可以接著用」是 HPO 續跑的前提。程式改了、設定沒動時，這兩個前提都會靜默破掉。但兩種改動的代價差很多：重跑 HPO 在生產是小時級，重寫預測只是評分。所以分成兩個整數常數：

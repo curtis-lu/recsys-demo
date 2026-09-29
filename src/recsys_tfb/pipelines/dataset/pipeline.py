@@ -195,8 +195,9 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         # table, ADR-0026) goes after every required input on each node that
         # takes it — only the precision gate has inputs after it, two more
         # optional ones. It is an optional trailing parameter and the
-        # Runner binds by position — this repo's convention for a new optional
-        # input (see the note on `log_experiment` in training/pipeline.py). The
+        # Runner binds a list of inputs by position — this repo's convention
+        # for a new optional input on a list-input node (a dict of inputs binds
+        # by name instead; see core/node.py). The
         # CLI registers `None` for the table when a deployment declares none, so
         # the list is the same for every deployment — a literal list, as the AST
         # audit needs. Which months of it a node reads is the node's own

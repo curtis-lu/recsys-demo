@@ -36,6 +36,72 @@ class TestNode:
         assert "b" in r
 
 
+def two_params(x, y):
+    return x, y
+
+
+def writer(x, sink):
+    return x
+
+
+class TestNodeDictInputs:
+    """``inputs={parameter: dataset}`` (ADR-0030 decision 8)."""
+
+    def test_inputs_stays_the_dataset_names_in_dict_order(self):
+        """Sort, slicing and the catalog check read ``inputs``; they need the
+        dataset names, not the parameter names."""
+        node = Node(func=two_params, inputs={"x": "ds_b", "y": "ds_a"}, outputs="c")
+        assert node.inputs == ["ds_b", "ds_a"]
+        assert node.keyword_inputs == {"x": "ds_b", "y": "ds_a"}
+
+    def test_any_mapping_binds_by_name(self):
+        """Not only ``dict``: a read-only mapping read as a list would be the
+        keys again, bound by position."""
+        from types import MappingProxyType
+
+        node = Node(func=two_params,
+                    inputs=MappingProxyType({"x": "dx", "y": "ds"}), outputs="c")
+        assert node.inputs == ["dx", "ds"]
+        assert node.keyword_inputs == {"x": "dx", "y": "ds"}
+
+    @pytest.mark.parametrize("inputs", [
+        {"x": "a", "z": "b"},  # a misspelt parameter
+        {"x": "a"},            # a parameter left unwired
+    ])
+    def test_a_dict_that_does_not_fit_the_signature_fails_at_construction(self, inputs):
+        """Kedro checks this when the node is built. Bound by name, a slip
+        would otherwise surface only when the Runner calls the node — for the
+        last node of a training run, hours later."""
+        with pytest.raises(TypeError, match="do not fit the signature of two_params"):
+            Node(func=two_params, inputs=inputs, outputs="c")
+
+    def test_a_key_that_is_also_a_write_target_fails_at_construction(self):
+        """The Runner passes write targets by keyword under their own names,
+        so a key naming the same parameter would be passed twice."""
+        with pytest.raises(TypeError, match=r"\['sink'\] .* write target"):
+            Node(func=writer, inputs={"x": "a", "sink": "b"}, writes=["sink"],
+                 outputs="c")
+
+    def test_a_list_is_not_held_to_the_signature(self):
+        """Unchanged for lists: arity is still the Runner's call to find."""
+        assert Node(func=dummy_func, inputs=["a", "b"], outputs="c").inputs == ["a", "b"]
+
+    def test_a_list_keeps_binding_by_position(self):
+        assert Node(func=dummy_func, inputs=["a"], outputs="c").keyword_inputs is None
+
+    def test_a6_sees_the_dataset_name_not_the_parameter_name(self):
+        with pytest.raises(ValueError, match=r"\['ds'\]"):
+            Node(func=dummy_func, inputs={"x": "ds"}, outputs="ds")
+
+    @pytest.mark.parametrize("argument", ["outputs", "writes"])
+    def test_a_dict_anywhere_else_is_refused(self, argument):
+        """Before dict inputs meant anything, a dict was read as its keys,
+        silently. Only ``inputs`` gives a dict a meaning; elsewhere that old
+        reading would still be silent, so it raises instead."""
+        with pytest.raises(TypeError, match=f"`{argument}` takes a name"):
+            Node(func=dummy_func, inputs="a", **{argument: {"k": "v"}})
+
+
 class TestNodeWrites:
     """``writes`` declares the datasets a node saves to itself (A1 / R1)."""
 

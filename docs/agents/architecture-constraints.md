@@ -45,7 +45,7 @@
 
 ## 15 條約束一覽
 
-`tests/test_core/test_architecture_constraints.py` 執行，**61 個測試，9.18–9.64 秒**（2026-09-29 共 3 次量測，`load average 5.55–5.75`（`uptime` 的 1 分鐘值；那台機器當時有別的 session 在跑，數字偏高）；S8 加進來之後——它又多一次各自完整解析 `src/` 的所有檔案）。前一版：52 個測試 6.17–6.20 秒（2026-09-20，3 次量測，`load average 1.95`）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔前幾版分別量到 39 個測試 2.86–3.23 秒、26 個測試 1.06–1.10 秒、20 個測試 1.4–1.7 秒、17 個測試 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
+`tests/test_core/test_architecture_constraints.py` 執行，**62 個測試，7.72–8.36 秒**（2026-09-30 共 3 次量測，`load average 2.26–2.41`（`uptime` 的 1 分鐘值）；多的一個是 ADR-0030 決定 8 的 dict 寫法讀取測試）。前一版：61 個測試 9.18–9.64 秒（2026-09-29，3 次量測，`load average 5.55–5.75`，那台機器當時有別的 session 在跑，數字偏高；S8 加進來之後——它又多一次各自完整解析 `src/` 的所有檔案）。再前一版：52 個測試 6.17–6.20 秒（2026-09-20，3 次量測，`load average 1.95`）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔前幾版分別量到 39 個測試 2.86–3.23 秒、26 個測試 1.06–1.10 秒、20 個測試 1.4–1.7 秒、17 個測試 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
 
 | # | 規則 | 管到哪 | 這個檢查看不到 |
 |---|---|---|---|
@@ -98,7 +98,7 @@
 
 ## F2. Observability 是強制的，不是可選的
 
-Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以不裝。本框架把它做進 Runner：每個 node 執行時必定記錄 `node_started`／`node_completed`／`node_failed` 結構化事件（`core/runner.py:95-238`），失敗時帶 `exc_info=True`。
+Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以不裝。本框架把它做進 Runner：每個 node 執行時必定記錄 `node_started`／`node_completed`／`node_failed` 結構化事件（`core/runner.py` 的 `Runner.run`），失敗時帶 `exc_info=True`。
 
 所以：**新增 node 時不需要自己寫「開始了／完成了」的 log**，Runner 已經記了。你該記的是 node 內部的業務判斷——跳過了什麼、選了哪條分支、處理了幾列。
 
@@ -123,7 +123,20 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 
 ## F4. Node 極薄：沒有 namespace、沒有 tags
 
-`core/node.py` 全長 69 行，`Node` 只有 `func`／`inputs`／`outputs`／`writes`／`name` 五個屬性，**驗證只有 A5／A6 兩條**（`_validate`，建構期 raise）——沒有型別檢查、沒有 catalog 查詢、沒有 namespace／tag 機制。
+`core/node.py` 全長 121 行，`Node` 只有 `func`／`inputs`／`keyword_inputs`／`outputs`／`writes`／`name` 六個屬性，**驗證只有 A5／A6 兩條**（`_validate`，建構期 raise），外加兩個只管 dict 寫法的檢查：只有 `inputs` 收 dict（任何 `Mapping`）；dict 的鍵加上 `writes` 要對得上函式簽章（`_check_keyword_inputs`）——沒有其他型別檢查、沒有 catalog 查詢、沒有 namespace／tag 機制。
+
+`inputs` 有兩種寫法（[ADR-0030](../adr/0030-training-second-pass-honest-adapter-shared-scoring.md) 決定 8）：
+
+| 寫法 | Runner 怎麼傳給函式 |
+|---|---|
+| 清單 `["a", "b"]` | **照位置**：第 i 個 dataset 給第 i 個參數 |
+| dict `{"參數名": "dataset 名"}` | **照名字**：語意同 Kedro 的 dict inputs，順序沒有意義 |
+
+不論哪種，`Node.inputs` 都是 **dataset 名的清單**——拓撲排序、切片、Runner 的 catalog 檢查與記憶體釋放都只讀它；dict 另存在 `keyword_inputs`（清單寫法時是 `None`）。照位置時，新的選用輸入只能加在最後，而放錯位置會被尾端的 `=None` 吞掉（A1 例外一說的陷阱）；照名字就沒有位置可錯。目前只有 `log_experiment` 用 dict：每加一個診斷它就多一個輸入。
+
+`outputs`、`writes` 不收 dict，建構期 raise `TypeError`。理由：決定 8 之前 `inputs` 收到 dict 不報錯，而是讀成它的鍵、照位置綁——在 `outputs`／`writes` 放行 dict 就是把同一個陷阱留在那兩處。
+
+dict 寫法在建構期就拿函式簽章檢查（Kedro 也這樣做）：鍵拼錯、有參數沒接、鍵跟寫入目標同名，都 raise `TypeError`。照名字傳時這些錯本來要等 Runner 呼叫 node 才爆——對 `log_experiment` 這種排在最後的 node，是整個 training 跑完之後。清單寫法不檢查，照舊。
 
 `writes` 宣告「這個 node 自己會寫哪些 dataset」，語意對應 Kedro 的 `confirms`；機制與已核准清單見 A1 與 R1。
 
@@ -167,7 +180,7 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 | `core/schema.py` | 674 | 欄位角色集中定義 |
 | `core/safe_eval.py` | 141 | HPO 宣告式搜尋空間的受限求值（stdlib `ast`，無額外套件） |
 
-其中 `consistency.py` 值得單獨講：**本框架的正確性重心不在 node 契約，而在集中式 predicate**。量體對比很直白——`consistency.py` 6044 行，`node.py` 69 行（2026-09-26）。Kedro 把正確性押在「node 是純函式且輸入輸出宣告清楚」，我們押在「所有不變量集中成可測試的 predicate」。
+其中 `consistency.py` 值得單獨講：**本框架的正確性重心不在 node 契約，而在集中式 predicate**。量體對比很直白——`consistency.py` 6105 行，`node.py` 121 行（2026-09-30；`node.py` 從 69 行長上來，是 ADR-0030 決定 8 的 dict 寫法與它的建構期檢查）。Kedro 把正確性押在「node 是純函式且輸入輸出宣告清楚」，我們押在「所有不變量集中成可測試的 predicate」。
 
 新增一致性不變量**必須**在 `core/consistency.py` 加 predicate，不得在各 pipeline 散落。細節見該模組 docstring。
 
@@ -250,11 +263,14 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
 
 ### 例外一：`Node(writes=[...])`（資料流產物）
 
-`writes` 列出的名稱，Runner 交給 node 的是 catalog **dataset 物件本身**而非載入後的資料（`core/runner.py:121-128`）。拿到它的 node 可以自行管理**這個 dataset 的分區寫入生命週期**——包含 `.save()` 寫入，以及查詢哪些分區已存在（`existing_partition_values()`）。**不含**把它當一般資料來源整批讀取（那該用普通 input）。
+`writes` 列出的名稱，Runner 交給 node 的是 catalog **dataset 物件本身**而非載入後的資料（`core/runner.py` 的 `write_handles`）。拿到它的 node 可以自行管理**這個 dataset 的分區寫入生命週期**——包含 `.save()` 寫入，以及查詢哪些分區已存在（`existing_partition_values()`）。**不含**把它當一般資料來源整批讀取（那該用普通 input）。
 
 - 交出去的是**完整的 dataset 物件，不是 write-only proxy**：續跑要能反問「已經有哪些分區」，包裝成只能寫的東西就答不出來。
 - **寫入目標必須是已註冊的 catalog 條目**（Runner 在啟動時檢查），光是「某個 node 的 output」不算。理由：`writes` 不建立拓撲相依邊，而啟動驗證是順序盲的——放行「由某個 node 生產」會讓生產者還沒跑時 `get_dataset()` 回 `None`，node 靜默拿到 `None`。擋在啟動階段，這條路就不存在。
-- **`inputs` 位置對應、`writes` 以 keyword 綁定**：node 函式的參數名必須**逐字等於** dataset 名。這不是風格選擇——本 repo 的慣例是「新的可選 input 加在最後」（見 `pipelines/training/pipeline.py:203-206` 的 `log_experiment` 註解），位置綁定下照著做會把 dataset 物件擠到可選參數的槽位，而尾端的 `=None` 正好把 arity 錯誤吃掉，**不報錯**。keyword 綁定讓同一個錯誤在 node 執行前就 raise。（寫入目標的參數仍須排在所有 input 參數之後，因為 input 是位置填進去的。）
+- **`writes` 以 keyword 綁定**：node 函式的參數名必須**逐字等於** dataset 名。這不是風格選擇——`inputs` 寫成清單時照位置傳，而清單寫法的慣例是「新的可選 input 加在最後」（見 `pipelines/dataset/pipeline.py` 裡 `candidate_feature_table` 那段註解），位置綁定下照著做會把 dataset 物件擠到可選參數的槽位，而尾端的 `=None` 正好把 arity 錯誤吃掉，**不報錯**。keyword 綁定讓同一個錯誤在 node 執行前就 raise。
+  - `inputs` 是清單時，寫入目標的參數仍須排在所有 input 參數之後，因為 input 是位置填進去的。
+  - `inputs` 是 dict 時照名字傳（F4），沒有這個排序限制；但 dict 的鍵不能跟寫入目標同名（同一個參數會被傳兩次），`Node` 建構時就 raise `TypeError`。目前沒有 node 同時用 dict 與 `writes`。
+  - 同一個「尾端 `=None` 吞掉錯位」的陷阱對選用 input 一樣成立，這正是 `inputs` 可以寫成 dict 的理由（ADR-0030 決定 8）。
 - 這個例外**必須寫在 pipeline 定義的 `writes` 參數裡**，不得在函式體內自己取得 catalog。理由與 Kedro 的 `confirms` 一致：**side effect 要用宣告的，不能藏在函式體裡**。`writes` 是獨立參數而非 `inputs` 裡的前綴字串，就是為了讓這件事在讀 pipeline 定義時一眼可見（issue #186）。
 
 已核准清單：**R1（2 筆）**。
@@ -272,7 +288,7 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
 | # | 做什麼 |
 |---|---|
 | (a) | `Node(...)` 的 `writes` 內容必須與 R1 登記相符 |
-| (b) | `Node(...)` 的 `inputs` 中不得再出現 `"@…"` 字串。舊 sigil 已移除，殘留的話 Runner 會把它當成一個不存在的 dataset 名而在驗證階段報錯；這條讓它在測試期就指出檔案與行號 |
+| (b) | `Node(...)` 的 `inputs` 中（dict 寫法看值）不得再出現 `"@…"` 字串。舊 sigil 已移除，殘留的話 Runner 會把它當成一個不存在的 dataset 名而在驗證階段報錯；這條讓它在測試期就指出檔案與行號 |
 | (c) | node 模組不得出現 `DataCatalog` 或 `catalog.load()`／`catalog.save()`。**AST 比對，不是文字比對**——這些字眼在註解裡合法出現 |
 | (d) | node 模組裡有直接寫檔呼叫的函式必須與 R4 登記相符 |
 
@@ -344,7 +360,7 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
 兩道檢查的盲區不同，**殘餘盲區是兩者的交集**：
 
 - **建構期檢查**要那一行真的被執行到，所以看不到「從沒被建構起來的 `Node(...)`」。
-- **AST 掃描**只讀得出字面值，且只掃 `pipelines/`：動態組出來的 `inputs`／`outputs`／`writes` 讀不出來就跳過（60 個 `Node` 中有 3 個是這種），`pipelines/` 以外的 `Node(...)` 也不掃（現況為零）。
+- **AST 掃描**只讀得出字面值，且只掃 `pipelines/`：動態組出來的 `inputs`／`outputs`／`writes` 讀不出來就跳過（62 個 `Node` 中有 3 個是這種；`test_static_coverage_floor` 釘住總數 62 與讀得出來的 59），`pipelines/` 以外的 `Node(...)` 也不掃（現況為零）。dict 寫法的 `inputs`（F4）讀它的值，也就是 dataset 名；鍵或值有一個不是字面字串（含 `**` 展開）就算動態。
 
 **兩道相加仍看不到的**，是同時滿足「參數動態組出來（或位在 `pipelines/` 之外）」**且**「沒有任何測試或執行路徑會建構到」的 `Node(...)`。具體形狀：`pipelines/` 底下、掛在條件分支上（例如 `evaluation/pipeline.py` 的 `if compare_source is not None:`；`dataset/pipeline.py` 原本的 `if enable_calibration:` 已隨 #411 一起移除）、參數又是動態組的 node。現況那 3 個動態 node 全在無條件路徑上，所以**現在為零，但這是現況為零，不是結構上不可能**。
 
@@ -352,7 +368,7 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
 
 ## A6. 同一 node 的 `input`／`writes` 名不得與 `output` 名相同
 
-Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py:127-142`）。名稱相同代表你打算原地覆寫一個 dataset，而執行順序讓這件事的語意不明確。
+Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py` 的 `Runner.run`）。名稱相同代表你打算原地覆寫一個 dataset，而執行順序讓這件事的語意不明確。
 
 要覆寫就用不同的 catalog 條目名，或明確走 `writes`（見 A1）。
 

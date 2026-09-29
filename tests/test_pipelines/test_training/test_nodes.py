@@ -776,6 +776,24 @@ class TestTrainingRunsOnAnotherAdapter:
         assert seen["metric"] == "fake_ndcg"
 
 
+def _call_log_experiment(model, best_params, best_iteration, evaluation_results,
+                         parameters, **diagnoses):
+    """``log_experiment`` with every diagnosis empty unless given: none of
+    them has a default (ADR-0030 decision 8). The diagnoses are read off the
+    signature, so a new one needs no edit here."""
+    import inspect
+
+    given = dict(
+        model=model, best_params=best_params, best_iteration=best_iteration,
+        evaluation_results=evaluation_results, parameters=parameters,
+    )
+    empty = {
+        name: {} for name in inspect.signature(log_experiment).parameters
+        if name not in given
+    }
+    log_experiment(**given, **{**empty, **diagnoses})
+
+
 class TestLogExperiment:
     def test_logs_to_mlflow(
         self, lgb_handles, preprocessor_metadata, training_parameters, tmp_path
@@ -796,7 +814,7 @@ class TestLogExperiment:
             "tracking_uri": str(tmp_path / "mlruns"),
         }}
 
-        log_experiment(model, best_params, 123, evaluation_results, {}, {}, {}, params)
+        _call_log_experiment(model, best_params, 123, evaluation_results, params)
 
         # Verify run was created
         import mlflow
@@ -837,7 +855,7 @@ class TestLogExperiment:
             "tracking_uri": str(tmp_path / "mlruns"),
         }}
 
-        log_experiment(model, {}, 123, evaluation_results, {}, {}, {}, params)
+        _call_log_experiment(model, {}, 123, evaluation_results, params)
 
         import mlflow
         mlflow.set_tracking_uri(str(tmp_path / "mlruns"))
@@ -879,7 +897,7 @@ class TestLogExperiment:
 
         with caplog.at_level("WARNING"):
             # 不應 raise
-            log_experiment(model, {"learning_rate": 0.1}, 123, evaluation_results, {}, {}, {}, params)
+            _call_log_experiment(model, {"learning_rate": 0.1}, 123, evaluation_results, params)
 
         assert any("mlflow" in r.message.lower() for r in caplog.records)
 
@@ -906,10 +924,12 @@ class TestLogExperiment:
         monkeypatch.setattr(nodes_mod.mlflow, "start_run", _boom)
 
         with pytest.raises(RuntimeError):
-            log_experiment(model, {"learning_rate": 0.1}, 123, evaluation_results, {}, {}, {}, params)
+            _call_log_experiment(model, {"learning_rate": 0.1}, 123, evaluation_results, params)
 
 
-def test_log_experiment_logs_diagnostics(monkeypatch, tmp_path):
+@pytest.fixture
+def fake_mlflow(monkeypatch):
+    """MLflow as ``log_experiment`` sees it; returns what it was handed."""
     import recsys_tfb.pipelines.training.nodes as nodes
 
     logged_metrics, logged_artifacts = {}, []
@@ -924,7 +944,42 @@ def test_log_experiment_logs_diagnostics(monkeypatch, tmp_path):
     monkeypatch.setattr(nodes.mlflow, "log_param", lambda *a, **k: None)
     monkeypatch.setattr(nodes.mlflow, "log_metric", lambda k, v: logged_metrics.__setitem__(k, v))
     monkeypatch.setattr(nodes.mlflow, "log_artifacts", lambda d, *a, **k: logged_artifacts.append(d))
+    return logged_metrics, logged_artifacts
 
+
+def test_log_experiment_records_a_run_without_hpo_search_diagnostics(
+    fake_mlflow, monkeypatch, tmp_path,
+):
+    """A run that skipped HPO has no diagnostics/hpo/ (ADR-0030 decision 8).
+    The search diagnostics are not an input, so nothing waits on them: the
+    rest is logged and the directory goes up as it is."""
+    from recsys_tfb.diagnosis.model import diagnostics_dir
+
+    logged_metrics, logged_artifacts = fake_mlflow
+    monkeypatch.chdir(tmp_path)
+    parameters = {"model_version": "mv1", "mlflow": {"strict": True}, "training": {}}
+    diag = diagnostics_dir(parameters)
+    (diag / "gain_ledger.json").write_text("{}")
+
+    class _Model:
+        def log_to_mlflow(self): pass
+
+    _call_log_experiment(
+        _Model(), {}, 10,
+        {"overall_map": 0.5, "per_item_map_attr": {}, "n_queries": 10,
+         "n_excluded_queries": 0},
+        parameters,
+        feature_importance={"ranked": [], "dead_features": ["f3"]},
+    )
+
+    assert not (diag / "hpo").exists()
+    assert logged_metrics["overall_map"] == 0.5
+    assert logged_metrics["n_dead_features"] == 1
+    assert logged_artifacts == [str(diag)]
+
+
+def test_log_experiment_logs_diagnostics(fake_mlflow, monkeypatch, tmp_path):
+    logged_metrics, logged_artifacts = fake_mlflow
     monkeypatch.chdir(tmp_path)
     parameters = {"model_version": "mv1", "mlflow": {}, "training": {}}
     from recsys_tfb.diagnosis.model import diagnostics_dir
@@ -938,8 +993,10 @@ def test_log_experiment_logs_diagnostics(monkeypatch, tmp_path):
     feature_importance = {"ranked": [], "dead_features": ["f3", "f4"]}
     shap_diagnostics = {"global": {"top_features": []}, "per_item": {}, "item_idiosyncrasy": []}
 
-    nodes.log_experiment(_Model(), {}, 10, eval_results, feature_statistics,
-                         feature_importance, shap_diagnostics, parameters)
+    _call_log_experiment(_Model(), {}, 10, eval_results, parameters,
+                         feature_statistics=feature_statistics,
+                         feature_importance=feature_importance,
+                         shap_diagnostics=shap_diagnostics)
 
     assert logged_metrics["n_dead_features"] == 2
     assert logged_metrics["n_single_value_features"] == 1
@@ -951,9 +1008,12 @@ def test_log_experiment_logs_diagnostics(monkeypatch, tmp_path):
     # summary must not walk the marker as if it were items x quadrants.
     logged_metrics.clear()
     cannot = {"enabled": True, "supported": False, "reason": "no trees"}
-    nodes.log_experiment(_Model(), {}, 10, eval_results, feature_statistics,
-                         dict(cannot), shap_diagnostics, parameters,
-                         dict(cannot), dict(cannot))
+    _call_log_experiment(_Model(), {}, 10, eval_results, parameters,
+                         feature_statistics=feature_statistics,
+                         feature_importance=dict(cannot),
+                         shap_diagnostics=shap_diagnostics,
+                         quadrant_profiles=dict(cannot),
+                         cases_manifest=dict(cannot))
     assert not {"n_dead_features", "n_quadrant_cells", "n_cases_rendered"} & set(logged_metrics)
     assert logged_metrics["n_single_value_features"] == 1
 

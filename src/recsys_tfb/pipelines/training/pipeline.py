@@ -131,8 +131,8 @@ def create_pipeline() -> Pipeline:
             # one partition per .save(). Registered in R1 of
             # docs/agents/architecture-constraints.md. The Runner binds write
             # targets BY KEYWORD, so the signature's parameter name must stay
-            # `training_eval_predictions` -- and unlike the `quadrant_profiles`
-            # case below, a new optional input must NOT be appended after it.
+            # `training_eval_predictions` -- and while inputs stay a list,
+            # a new optional input must NOT be appended after it.
             writes=["training_eval_predictions"],
             outputs="predict_manifest",
         ),
@@ -211,21 +211,27 @@ def create_pipeline() -> Pipeline:
         ),
         Node(
             log_experiment,
-            # quadrant_profiles goes last: the parameters log_experiment gained
-            # default to None and sit after `parameters` in the signature, and
-            # the Runner passes arguments by position from node.inputs — so the
-            # order here has to match the signature. That dependency is also
-            # what guarantees the catalog has written per_quadrant.json before
-            # log_artifacts runs. cases_manifest goes last for the same reason
-            # (default None). The PNGs are written with it: case_figures and
-            # shap_summary_figures are saved by the Runner with the other
-            # output of the same node, so both are on disk before
-            # log_artifacts.
-            inputs=[
-                "model", "best_params", "best_iteration", "evaluation_results",
-                "feature_statistics", "feature_importance", "shap_diagnostics",
-                "parameters", "quadrant_profiles", "cases_manifest",
-            ],
+            # By name (ADR-0030 decision 8), so order here means nothing. Each
+            # diagnosis node that lands a file in diagnostics/ feeds one of
+            # its outputs in, and that edge is what has the file on disk
+            # before log_artifacts uploads the directory. The figure datasets
+            # are not inputs (they have no load): in a run that is not cut
+            # short, the Runner saves them with the JSON beside them, which
+            # is an input. The HPO search diagnostics are
+            # written by tune_hyperparameters, upstream through best_params.
+            inputs={
+                "model": "model",
+                "best_params": "best_params",
+                "best_iteration": "best_iteration",
+                "evaluation_results": "evaluation_results",
+                "feature_statistics": "feature_statistics",
+                "feature_importance": "feature_importance",
+                "gain_ledger": "gain_ledger",
+                "shap_diagnostics": "shap_diagnostics",
+                "quadrant_profiles": "quadrant_profiles",
+                "cases_manifest": "cases_manifest",
+                "parameters": "parameters",
+            },
             outputs=None,
         ),
     ])

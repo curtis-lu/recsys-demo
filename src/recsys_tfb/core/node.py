@@ -1,5 +1,19 @@
+import inspect
+from collections.abc import Mapping
+
+
 class Node:
     """Wraps a function with named inputs and outputs for pipeline execution.
+
+    ``inputs`` is a list, bound to the function **by position**, or a
+    ``{parameter name: dataset name}`` dict, bound **by name** — Kedro's dict
+    inputs, same meaning (ADR-0030 decision 8). By name is what lets a node
+    take a new input anywhere in its signature: by position a new optional
+    input can only go last, and a slip there is swallowed by its trailing
+    ``=None``. Either way ``self.inputs`` is the list of dataset names —
+    topological sort, slicing and the Runner's catalog check all read that —
+    and the dict is kept beside it in ``self.keyword_inputs`` (``None`` for a
+    list).
 
     ``writes`` names the datasets this node saves to **itself**, rather than
     returning data for the Runner to save. Those datasets are handed to the
@@ -17,22 +31,38 @@ class Node:
     line — it also checks the ``pipeline.py``-level registries (A7), which no
     constructor can see. Kedro raises both at construction too
     (``kedro/pipeline/node.py``).
+
+    A dict of inputs is also checked against the function's signature, as
+    Kedro does: bound by name, a misspelt or unwired parameter would
+    otherwise surface only when the Runner calls the node — for a sink at
+    the end of a training run, hours in. A list is not held to it.
     """
 
     def __init__(self, func, inputs=None, outputs=None, name=None, writes=None):
         self.func = func
-        self.inputs = self._normalize(inputs)
-        self.outputs = self._normalize(outputs)
-        self.writes = self._normalize(writes)
         self.name = name or func.__name__
+        if isinstance(inputs, Mapping):
+            self.keyword_inputs = dict(inputs)
+            self.inputs = list(inputs.values())
+        else:
+            self.keyword_inputs = None
+            self.inputs = self._normalize(inputs, "inputs")
+        self.outputs = self._normalize(outputs, "outputs")
+        self.writes = self._normalize(writes, "writes")
         self._validate()
 
-    @staticmethod
-    def _normalize(value):
+    def _normalize(self, value, argument):
         if value is None:
             return []
         if isinstance(value, str):
             return [value]
+        if isinstance(value, Mapping):
+            # ``list(dict)`` would quietly keep the keys — the way a dict
+            # passed as ``inputs`` used to be read before it meant anything.
+            raise TypeError(
+                f"Node '{self.name}': only `inputs` takes a {{parameter: "
+                f"dataset}} dict; `{argument}` takes a name or a list of names."
+            )
         return list(value)
 
     def _validate(self):
@@ -61,6 +91,28 @@ class Node:
                 f"the same dataset on both sides has no defined meaning — "
                 f"use a separate catalog entry, or declare only the write."
             )
+        if self.keyword_inputs is not None:
+            self._check_keyword_inputs()
+
+    def _check_keyword_inputs(self):
+        """Raise unless the dict of inputs plus the write targets bind to
+        ``func`` by name — the same call the Runner will make."""
+        twice = sorted(set(self.keyword_inputs) & set(self.writes))
+        if twice:
+            raise TypeError(
+                f"Node '{self.name}': {twice} is both a key of `inputs` and a "
+                f"write target; the Runner passes a write target under its own "
+                f"name, so that parameter would be passed twice."
+            )
+        try:
+            inspect.signature(self.func).bind(
+                **dict.fromkeys([*self.keyword_inputs, *self.writes]))
+        except TypeError as exc:
+            raise TypeError(
+                f"Node '{self.name}': inputs {list(self.keyword_inputs)} (by "
+                f"name) and writes {self.writes} do not fit the signature of "
+                f"{getattr(self.func, '__name__', self.func)!s}: {exc}"
+            ) from None
 
     def __repr__(self):
         base = f"Node({self.name}, {self.inputs} -> {self.outputs}"

@@ -77,6 +77,10 @@ def _literal_names(arg):
     this repo spells a zero-output node) -- both mean "no names here", which is
     exactly what A5/A6 need to judge. Returns None only when the argument is
     built dynamically and genuinely cannot be read statically.
+
+    A dict is ``inputs={parameter: dataset}`` (ADR-0030 decision 8): the
+    names are its values, the same list ``Node.inputs`` holds. Its keys only
+    have to be readable -- a ``**spread`` has a None key.
     """
     if arg is None:
         return []
@@ -84,15 +88,38 @@ def _literal_names(arg):
         if arg.value is None:
             return []
         return [arg.value] if isinstance(arg.value, str) else None
-    if isinstance(arg, (ast.List, ast.Tuple)):
-        names = []
-        for elt in arg.elts:
-            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                names.append(elt.value)
-            else:
-                return None
-        return names
-    return None
+    if isinstance(arg, ast.Dict):
+        if not all(isinstance(k, ast.Constant) and isinstance(k.value, str)
+                   for k in arg.keys):
+            return None
+        elements = arg.values
+    elif isinstance(arg, (ast.List, ast.Tuple)):
+        elements = arg.elts
+    else:
+        return None
+    names = []
+    for elt in elements:
+        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+            names.append(elt.value)
+        else:
+            return None
+    return names
+
+
+def test_the_name_reader_takes_the_dataset_side_of_a_dict():
+    """``inputs={parameter: dataset}`` (ADR-0030 decision 8). The values are
+    the dataset names A5/A6 and A1 (b) judge; the keys are parameter names.
+    A reader that did not know dicts would skip the node without a word,
+    which is the blind spot ``test_static_coverage_floor`` counts."""
+
+    def read(source):
+        return _literal_names(ast.parse(source, mode="eval").body)
+
+    assert read('{"param": "dataset", "other": "second"}') == ["dataset", "second"]
+    # Not readable statically: a computed value, a computed key, a ** spread.
+    assert read('{"param": name}') is None
+    assert read('{key: "dataset"}') is None
+    assert read('{"param": "dataset", **more}') is None
 
 
 def _kwargs(call):

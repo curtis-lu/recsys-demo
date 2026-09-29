@@ -1530,10 +1530,11 @@ def log_experiment(
     evaluation_results: dict,
     feature_statistics: dict,
     feature_importance: dict,
+    gain_ledger: dict,
     shap_diagnostics: dict,
+    quadrant_profiles: dict,
+    cases_manifest: dict,
     parameters: dict,
-    quadrant_profiles: dict = None,
-    cases_manifest: dict = None,
 ) -> None:
     """Record this run in MLflow. The DAG's terminal sink.
 
@@ -1544,6 +1545,17 @@ def log_experiment(
     What each field is *called* lives in ``steps/experiment_log.py``. Those
     names are read by people and dashboards outside this repo, and renaming one
     fails silently: the run still succeeds and a chart just stops having a line.
+
+    Every diagnosis comes in as an input, wired by name (ADR-0030 decision 8),
+    including ``gain_ledger``, which nothing here reads: taking it is what puts
+    ``gain_ledger.json`` on disk before the upload below, by an edge rather
+    than by where the sort happened to place its producer. A new diagnosis
+    that lands a file in ``diagnostics/`` joins the same way — one parameter
+    here, one line in ``pipeline.py``. None has a default, so a parameter left
+    unwired fails when the node is called instead of arriving as ``None``.
+    The HPO search diagnostics are not an input: ``tune_hyperparameters``
+    writes them itself, already upstream through ``best_params``, and without
+    a search there are none — the upload takes whatever the directory holds.
     """
     mlflow_params = parameters.get("mlflow", {})
     tracking_uri = mlflow_params.get("tracking_uri", "mlruns")

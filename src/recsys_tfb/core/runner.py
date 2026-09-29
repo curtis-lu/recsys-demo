@@ -126,18 +126,27 @@ class Runner:
             _ctx = get_current_context()
 
             try:
-                # Inputs bind positionally; write targets bind BY KEYWORD, so
-                # the parameter name must equal the dataset name. Positional
-                # would pin writes to the tail of the signature, which
-                # collides with this repo's "append a new optional input last"
-                # convention (see pipelines/training/pipeline.py): adding one
-                # input would shift the dataset object into the wrong slot
-                # and a trailing `param=None` would swallow the arity error.
+                # A list of inputs binds by position; a dict binds each
+                # dataset to the parameter its key names (ADR-0030 decision
+                # 8). Write targets bind BY KEYWORD, the parameter name equal
+                # to the dataset name. Positional would pin writes to the tail
+                # of the signature, where a list-input node's new optional
+                # input also has to go: adding one would shift the dataset
+                # object into the wrong slot and a trailing `param=None`
+                # would swallow the arity error.
                 # Each write target is the catalog dataset OBJECT — not loaded
                 # data, and not a write-only proxy: the node manages that
                 # dataset's partition write lifecycle, which includes asking
                 # it which partitions already exist.
-                inputs = [catalog.load(name) for name in node.inputs]
+                if node.keyword_inputs is None:
+                    args = [catalog.load(name) for name in node.inputs]
+                    kwargs = {}
+                else:
+                    args = []
+                    kwargs = {
+                        param: catalog.load(name)
+                        for param, name in node.keyword_inputs.items()
+                    }
                 write_handles = {
                     name: catalog.get_dataset(name) for name in node.writes
                 }
@@ -146,7 +155,7 @@ class Runner:
                 # Execute
                 if _ctx is not None:
                     _ctx.current_node = node.name
-                result = node.func(*inputs, **write_handles)
+                result = node.func(*args, **kwargs, **write_handles)
                 func_end = time.time()
 
                 # Save outputs
