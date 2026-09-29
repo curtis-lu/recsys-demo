@@ -16,12 +16,9 @@ out of the pipeline.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 import numpy as np
-
-if TYPE_CHECKING:
-    from recsys_tfb.io.handles import LgbDatasetHandle, ParquetHandle
 
 
 @dataclass(frozen=True)
@@ -235,23 +232,6 @@ class ModelAdapter(ABC):
     @abstractmethod
     def log_to_mlflow(self) -> None:
         """Log the model artifact using the algorithm's MLflow integration."""
-        ...
-
-    @abstractmethod
-    def prepare_train_inputs(
-        self,
-        train_handle: "ParquetHandle",
-        train_dev_handle: "ParquetHandle",
-        preprocessor_metadata: dict,
-        parameters: dict,
-        cache_dir: str,
-    ) -> "tuple[LgbDatasetHandle, LgbDatasetHandle]":
-        """Materialize algorithm-native train/dev datasets to disk; return handles.
-
-        Skip-if-exists: if cache_dir already has a valid `_SUCCESS` marker, just
-        return handles without rebuilding. Implementations are responsible for
-        atomic-ish builds (write artefacts, then touch `_SUCCESS` last).
-        """
         ...
 
 

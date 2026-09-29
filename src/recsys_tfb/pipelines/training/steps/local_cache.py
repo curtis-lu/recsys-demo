@@ -2,12 +2,15 @@
 
 Mechanism only. Every decision this cache makes — what counts as a hit, what a
 directory without ``_SUCCESS`` means, when a cached copy is dropped and taken
-again — is written out in each of the five cache nodes in ``nodes.py``, one node
+again — is written out in each of the four cache nodes in ``nodes.py``, one node
 at a time (``docs/agents/pipeline-node-design.md`` rules 4, 5 and 9). Read a
 cache node to find out what it decided; read here to find out where the bytes go.
+``prepare_train_inputs`` keeps its native training data under the same marker
+protocol and uses the same helpers; where that directory is, is
+``steps/train_data_cache.py``.
 
 The log lines live here too, for the reason rule 5 gives: the nodes repeat their
-decisions on purpose, but a format string repeated five times drifts.
+decisions on purpose, but a format string repeated in every node drifts.
 
 ``shutil.rmtree`` is deliberately **not** in this module, although the paths it
 deletes are composed here. The architecture audit
@@ -37,6 +40,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+from recsys_tfb.io.handles import SUCCESS_MARKER
 from recsys_tfb.pipelines.training.steps.predict_months import month_dir
 from recsys_tfb.utils.hdfs import copy_hdfs_to_local, get_hive_table_location
 
@@ -111,8 +115,14 @@ def resolve_cache_path(
 
     The path is composed, never resolved: ``cache.root`` is relative in
     ``conf/base/parameters_training.yaml``, so every path out of here is
-    CWD-relative. Fine while one run holds one CWD; it is the recorded blocker
-    for splitting diagnosis into a second pipeline (ADR-0014 decision 7).
+    CWD-relative. Fine while one run holds one CWD (ADR-0030, "what was not
+    done").
+
+    The one place ``cache.root`` is read. The native training data cache is
+    composed from this function's train path (``steps/train_data_cache.py``),
+    so a config without the key gets the same default everywhere — it used to
+    get this default for the parquet copies and a ``KeyError`` for the
+    ``.bin``, after the copies had already run.
 
     Both ``raise``s are **pre-checks** on the arguments — an unknown dataset
     name, and a test month that was not supplied. Neither is reachable from a
@@ -147,15 +157,10 @@ def resolve_cache_path(
 def _success_marker(local_path: str) -> Path:
     """The completion marker file for a cache directory.
 
-    ⚠ **Not the only place this name is written.** ``io.handles`` hardcodes the
-    same ``"_SUCCESS"`` for the consumer-side check, and
-    ``models/lightgbm_adapter.py`` has a third copy for the LightGBM ``.bin``
-    cache — neither can import this module (``io/`` sits below ``pipelines/``,
-    and a shared constant is a change none of these three tickets asked for). So
-    the three literals are a real drift risk that nothing prevents: rename the
-    marker on one side and that side simply stops finding hits, with no error.
+    The name is ``io.handles.SUCCESS_MARKER``, shared with the consumer-side
+    check (``require_complete_cache``), which cannot import this module.
     """
-    return Path(local_path) / "_SUCCESS"
+    return Path(local_path) / SUCCESS_MARKER
 
 
 def cache_exists(local_path: str) -> bool:
@@ -205,7 +210,7 @@ def mark_cache_complete(local_path: str) -> None:
 #
 # Written once and called from each cache node. The nodes duplicate their
 # *decisions* on purpose (``docs/agents/pipeline-node-design.md`` rule 5), but a
-# log line is mechanism, and five copies of a format string drift. Same shape as
+# log line is mechanism, and a format string copied into every node drifts. Same shape as
 # ``pipelines/dataset/steps/sampling.py::log_sampled_keys``.
 #
 # These emit under this module's logger, not the calling node's — the event

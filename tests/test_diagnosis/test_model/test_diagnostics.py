@@ -17,7 +17,7 @@ from recsys_tfb.diagnosis import model as diag
 def _adapter_declaring(X, y, feature_name, **params):
     """A fitted booster that declares its feature names, the way production does.
 
-    ``LightGBMAdapter.prepare_train_inputs`` always builds the ``lgb.Dataset``
+    ``LightGBMAdapter.build_train_data`` always builds the ``lgb.Dataset``
     with ``feature_name`` set, so a real model's ``feature_names()`` returns the
     preprocessor's own column names. Training straight from a bare ndarray leaves
     LightGBM's default ``Column_0``… names instead, which the diagnosis nodes now

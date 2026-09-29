@@ -62,7 +62,7 @@ RESUME_CONTRACTS = {
         # compute_feature_statistics took `model` it had no model dependency at
         # all, so the topological sort placed a diagnosis of
         # data/models/${model_version}/ *ahead* of the node producing the model —
-        # and "every node after it" then swept prepare_lgb_train_inputs,
+        # and "every node after it" then swept prepare_train_inputs,
         # tune_hyperparameters and finalize_model back in. 18 nodes re-ran to
         # regenerate a JSON of null rates. The edge moved it after finalize_model
         # and the slice fell to 13.

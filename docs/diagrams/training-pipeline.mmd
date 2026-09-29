@@ -34,7 +34,7 @@
 %%   preprocessor_view [V] 與 preprocessor [P] 是**兩份不同的東西**：
 %%   [P] 是 dataset pipeline 落地的 JSON；[V] 是 select_features 對它套一次
 %%   training.feature_selection.exclude 之後的產物，memory-only、不在 catalog 裡。
-%%   吃 [V] 的是**訓練鏈**（prepare_lgb_train_inputs、persist_sample_weight_report、
+%%   吃 [V] 的是**訓練鏈**（prepare_train_inputs、compute_sample_weight_report、
 %%   tune_hyperparameters、finalize_model、predict_and_write_test_predictions，共 5 個）。
 %%   吃 [P] 的是 select_features 自己，加上**五個 diagnosis node**
 %%   （feature_statistics、gain_ledger、shap_diagnostics、quadrant_profiles、
@@ -134,7 +134,7 @@
 %%   撿走，是 architecture-constraints.md R4 登記裡唯一「間接寫入、AST 掃不到」的一筆。
 
 %% 已知落差（不是刻意不畫，是還沒補）
-%%   pipeline 實際有 20 個 node，本圖畫了 19 個：漏的是 persist_group_filter_report
+%%   pipeline 實際有 20 個 node，本圖畫了 19 個：漏的是 compute_group_filter_report
 %%   （吃 train_lgb_handle、產出 group_filter_report，不在任何下游鏈上）。
 %%   與 #411 移除 calibration 無關，也沒有在那一輪一併補上。
 
@@ -199,7 +199,7 @@ flowchart TB
   %% ------------------------ 訓練主鏈 ------------------------------
   subgraph LOCAL[" 訓練主鏈：全程 driver-local；Spark 從這裡開始是關著的 "]
     direction TB
-    n_preplgb["prepare_lgb_train_inputs<br/><small>＋ T · V ・ 建 lgb.Dataset binary，跨 trial 不重新分箱</small>"]
+    n_preplgb["prepare_train_inputs<br/><small>＋ T · V ・ 建 lgb.Dataset binary，跨 trial 不重新分箱</small>"]
     d_lgb_train(["train_lgb_handle"])
     d_lgb_traindev(["train_dev_lgb_handle"])
     n_tune["tune_hyperparameters<br/><small>＋ V ・ <b>函式第一行 release_spark_session()</b><br/>Optuna study 依 search_id 續跑；--fresh-hpo 清掉重來</small>"]
@@ -228,7 +228,7 @@ flowchart TB
   n_final --> o_model
 
   %% ------------- 樣本權重診斷：自己寫檔，沒有 pipeline 消費者 -------------
-  n_sw["persist_sample_weight_report<br/><small>＋ T · V ・ 每次都跑（不受 lgb bin 快取影響）<br/>node 只 return dict，落地交給 catalog</small>"]
+  n_sw["compute_sample_weight_report<br/><small>＋ T · V ・ 每次都跑（不受 lgb bin 快取影響）<br/>node 只 return dict，落地交給 catalog</small>"]
   d_sw(["sample_weight_report<br/><small>catalog 條目（JSONDataset）・ 無 pipeline 消費者<br/>CLI 於 run 後讀檔併進 manifest</small>"])
 
   d_h_train --> n_sw

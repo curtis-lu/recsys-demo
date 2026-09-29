@@ -19,10 +19,10 @@ from recsys_tfb.pipelines.training.nodes import (
     compute_test_metrics,
     finalize_model,
     log_experiment,
-    persist_group_filter_report,
-    persist_sample_weight_report,
+    compute_group_filter_report,
+    compute_sample_weight_report,
     predict_and_write_test_predictions,
-    prepare_lgb_train_inputs,
+    prepare_train_inputs,
     select_features,
     tune_hyperparameters,
 )
@@ -72,7 +72,7 @@ def create_pipeline() -> Pipeline:
 
     nodes.append(
         Node(
-            prepare_lgb_train_inputs,
+            prepare_train_inputs,
             inputs=[
                 "train_parquet_handle", "train_dev_parquet_handle",
                 "preprocessor_view", "parameters",
@@ -83,7 +83,7 @@ def create_pipeline() -> Pipeline:
 
     nodes.append(
         Node(
-            persist_group_filter_report,
+            compute_group_filter_report,
             inputs=["train_lgb_handle", "parameters"],
             outputs="group_filter_report",
         ),
@@ -91,7 +91,7 @@ def create_pipeline() -> Pipeline:
 
     nodes.append(
         Node(
-            persist_sample_weight_report,
+            compute_sample_weight_report,
             inputs=["train_parquet_handle", "preprocessor_view", "parameters"],
             outputs="sample_weight_report",
         ),

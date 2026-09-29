@@ -8,11 +8,7 @@ What every adapter's rules must satisfy is in ``test_adapter_contract.py``.
 import pytest
 
 from recsys_tfb.models.base import AlgorithmRules
-from recsys_tfb.models.lightgbm_adapter import (
-    LIGHTGBM_RULES,
-    LightGBMAdapter,
-    _objective_cache_key,
-)
+from recsys_tfb.models.lightgbm_adapter import LIGHTGBM_RULES, LightGBMAdapter
 
 
 def test_the_adapter_declares_these_rules():
@@ -35,29 +31,6 @@ class TestObjectiveClassification:
     def test_ranking_metrics_set(self):
         assert LIGHTGBM_RULES.ranking_metrics == frozenset(
             {"ndcg", "map", "lambdarank"})
-
-
-class TestObjectiveCacheKey:
-    def test_separates_the_two_ranking_objectives(self):
-        """lambdarank and rank_xendcg must NOT share a cache key.
-
-        They build different rows (lambdarank drops zero-positive groups), and
-        the cache is blind to model_version, so a shared key would serve one
-        objective the other's .bin. Full rationale in ``_objective_cache_key``.
-        """
-        assert _objective_cache_key("lambdarank") == "lambdarank"
-        assert _objective_cache_key("rank_xendcg") == "rank_xendcg"
-
-    def test_non_ranking_share_one_key(self):
-        """Non-ranking objectives deliberately collide onto "binary".
-
-        They build a byte-identical .bin (same X/y/weight, no group vector)
-        with no divergence planned, so sharing is safe — and it keeps every
-        existing ``lgb/binary/`` cache dir valid with no migration.
-        """
-        assert _objective_cache_key("binary") == "binary"
-        assert _objective_cache_key(None) == "binary"
-        assert _objective_cache_key("regression") == "binary"
 
 
 class TestDefaultMetricForObjective:

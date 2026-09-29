@@ -1,7 +1,7 @@
 """Configured ``sample_weights`` entries against the rows training actually read.
 
 Nothing here changes a weight — weighting itself happens in ``io/extract.py``.
-What lives here is the comparison behind ``persist_sample_weight_report``: did
+What lives here is the comparison behind ``compute_sample_weight_report``: did
 a configured entry ever find a row?
 
 The comparison runs in the *config's* vocabulary. A categorical feature is

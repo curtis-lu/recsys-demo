@@ -46,7 +46,7 @@ class ParquetDataset(AbstractDataset):
         if self._backend == "pandas":
             # pandas-mode ignore short-circuits on directory existence only;
             # the training cache layer enforces _SUCCESS-based correctness via
-            # the five cache_*_model_input nodes in training/nodes.py.
+            # the four cache_*_model_input nodes in training/nodes.py.
             if self._write_mode == "ignore" and self.exists():
                 return
             if hasattr(data, "toPandas"):

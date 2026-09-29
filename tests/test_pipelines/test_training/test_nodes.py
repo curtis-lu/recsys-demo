@@ -164,7 +164,7 @@ def synthetic_model_inputs(tmp_path):
 @pytest.fixture
 def lgb_handles(synthetic_model_inputs, preprocessor_metadata, training_parameters, tmp_path):
     """Build LgbDatasetHandle pair from train/train_dev parquet handles."""
-    from recsys_tfb.pipelines.training.nodes import prepare_lgb_train_inputs
+    from recsys_tfb.pipelines.training.nodes import prepare_train_inputs
 
     train_h, train_dev_h, val_h, *_ = synthetic_model_inputs
     params = {
@@ -177,7 +177,7 @@ def lgb_handles(synthetic_model_inputs, preprocessor_metadata, training_paramete
             "label": "label",
         }},
     }
-    train_lgb_h, train_dev_lgb_h = prepare_lgb_train_inputs(
+    train_lgb_h, train_dev_lgb_h = prepare_train_inputs(
         train_h, train_dev_h, preprocessor_metadata, params
     )
     return train_lgb_h, train_dev_lgb_h
@@ -706,14 +706,14 @@ class TestTrainingRunsOnAnotherAdapter:
         self, synthetic_model_inputs, preprocessor_metadata,
         training_parameters, tmp_path, strategy,
     ):
-        from recsys_tfb.pipelines.training.nodes import prepare_lgb_train_inputs
+        from recsys_tfb.pipelines.training.nodes import prepare_train_inputs
         from tests.fake_adapter import FakeAdapter
 
         train_h, dev_h, val_h, *_ = synthetic_model_inputs
         params = self._params(
             training_parameters, tmp_path, "fake_binary", strategy)
 
-        train_bin, dev_bin = prepare_lgb_train_inputs(
+        train_bin, dev_bin = prepare_train_inputs(
             train_h, dev_h, preprocessor_metadata, params)
         best_params, best_iteration, hpo_model = tune_hyperparameters(
             train_bin, dev_bin, val_h, preprocessor_metadata, params)
@@ -1027,6 +1027,35 @@ def test_tune_defaults_ranking_metric(monkeypatch):
     assert captured.get("metric") == "ndcg"
 
 
+def _fake_two_pass_reads(monkeypatch, splits: dict) -> None:
+    """Stand-ins for the refit's two reads, keeping their contract.
+
+    ``splits`` maps a handle's ``tag`` to ``(X, y, group_ids, weights)``. The
+    first read returns a split's labels, groups and weights; the second stacks
+    the requested handles' matrices, checks ``labels`` against the stacked
+    labels of ``rows`` (the real reader's post-condition) and returns those
+    rows — so a node that numbers or orders rows wrong gets the wrong matrix,
+    or an error, exactly as it would from the parquet.
+    """
+    import numpy as np
+    from recsys_tfb.pipelines.training import nodes
+    from recsys_tfb.pipelines.training.steps import refit
+
+    def first_read(handle, meta, params, **kw):
+        _, y, g, w = splits[handle.tag]
+        return (y, g, w) if kw.get("with_weights") else (y, g)
+
+    def second_read(handles, meta, params, *, rows, labels):
+        X = np.vstack([splits[h.tag][0] for h in handles])
+        y = np.concatenate([splits[h.tag][1] for h in handles])
+        rows = np.arange(len(y)) if rows is None else np.asarray(rows)
+        np.testing.assert_array_equal(labels, y[rows])
+        return X[rows]
+
+    monkeypatch.setattr(nodes, "extract_y_with_groups", first_read)
+    monkeypatch.setattr(refit, "extract_X_rows", second_read)
+
+
 def test_finalize_refit_ranking_sets_group(monkeypatch):
     import numpy as np
     import lightgbm as lgb
@@ -1034,21 +1063,13 @@ def test_finalize_refit_ranking_sets_group(monkeypatch):
 
     captured = {}
 
-    def fake_extract_groups(handle, meta, params, **kw):
-        # train: 2 groups of 2 ; dev: 1 group of 2
-        if getattr(handle, "tag", "") == "dev":
-            X = np.ones((2, 2)); y = np.array([1, 0])
-            g = np.array([0, 0], dtype=np.int64)
-        else:
-            X = np.zeros((4, 2)); y = np.array([1, 0, 0, 1])
-            g = np.array([0, 0, 1, 1], dtype=np.int64)
-        if kw.get("with_weights"):
-            return X, y, g, np.ones(len(y), dtype=np.float64)
-        return X, y, g
-
-    monkeypatch.setattr(
-        nodes, "extract_Xy_with_groups", fake_extract_groups
-    )
+    # train: 2 groups of 2 ; dev: 1 group of 2
+    _fake_two_pass_reads(monkeypatch, {
+        "train": (np.zeros((4, 2)), np.array([1, 0, 0, 1]),
+                  np.array([0, 0, 1, 1], dtype=np.int64), np.ones(4)),
+        "dev": (np.ones((2, 2)), np.array([1, 0]),
+                np.array([0, 0], dtype=np.int64), np.ones(2)),
+    })
 
     real_dataset = lgb.Dataset
 
@@ -1096,7 +1117,7 @@ def test_finalize_refit_ranking_sets_group(monkeypatch):
     assert int(captured["group"].sum()) == 6
     assert captured["metric"] == "ndcg"
 
-    # Rows and group ids are stacked by two separate calls now
+    # Row numbers and group ids are stacked by two separate calls
     # (steps/refit.py), so they can disagree without anything raising: dev rows
     # would carry train's group ids and the refit would optimise a ranking over
     # groups that never existed. Train rows are all zeros, dev rows all ones.
@@ -1138,18 +1159,12 @@ def test_finalize_refit_carries_sample_weights_for_both_splits(monkeypatch):
 
     captured = {}
 
-    def fake_extract_groups(handle, meta, params, **kw):
-        if getattr(handle, "tag", "") == "dev":
-            X = np.ones((2, 2)); y = np.array([1, 0])
-            g = np.array([0, 0], dtype=np.int64); w = np.full(2, 5.0)
-        else:
-            X = np.zeros((4, 2)); y = np.array([1, 0, 0, 1])
-            g = np.array([0, 0, 1, 1], dtype=np.int64); w = np.full(4, 2.0)
-        if kw.get("with_weights"):
-            return X, y, g, w
-        return X, y, g
-
-    monkeypatch.setattr(nodes, "extract_Xy_with_groups", fake_extract_groups)
+    _fake_two_pass_reads(monkeypatch, {
+        "train": (np.zeros((4, 2)), np.array([1, 0, 0, 1]),
+                  np.array([0, 0, 1, 1], dtype=np.int64), np.full(4, 2.0)),
+        "dev": (np.ones((2, 2)), np.array([1, 0]),
+                np.array([0, 0], dtype=np.int64), np.full(2, 5.0)),
+    })
 
     real_dataset = lgb.Dataset
 
@@ -1190,6 +1205,69 @@ def test_finalize_refit_carries_sample_weights_for_both_splits(monkeypatch):
     np.testing.assert_array_equal(
         captured["weight"], np.array([2.0, 2.0, 2.0, 2.0, 5.0, 5.0]),
     )
+
+
+def test_finalize_refit_drops_zero_positive_groups_and_keeps_rows_with_labels(
+    monkeypatch,
+):
+    """lambdarank's refit keeps the search's rows, and each keeps its own label.
+
+    The rows are chosen before the matrix is read and numbered across both
+    splits (train first). A dev row numbered from zero would be read out of
+    train; a filter applied to the labels but not the row numbers would hand
+    every surviving label another row's features. Each fixture row's features
+    are its own id, so the matrix that arrives says which source row each
+    position holds.
+    """
+    import numpy as np
+    import lightgbm as lgb
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+    from recsys_tfb.pipelines.training import nodes
+
+    ids = np.arange(9, dtype=np.float64)
+    _fake_two_pass_reads(monkeypatch, {
+        # train: groups 0 and 1 interleave and are kept; group 2 (no
+        # positive) is dropped.
+        "train": (np.c_[ids[:6], ids[:6]], np.array([1, 0, 0, 1, 0, 0]),
+                  np.array([0, 1, 0, 1, 2, 2], dtype=np.int64), np.ones(6)),
+        # dev: group 1 (no positive) is dropped, group 0 is kept.
+        "dev": (np.c_[ids[6:], ids[6:]], np.array([0, 0, 1]),
+                np.array([1, 0, 0], dtype=np.int64), np.ones(3)),
+    })
+    captured = {}
+    real_dataset = lgb.Dataset
+
+    def spy_dataset(*a, **kw):
+        captured["X"], captured["y"] = np.asarray(a[0]), np.asarray(kw["label"])
+        captured["group"] = np.asarray(kw["group"])
+        return real_dataset(*a, **kw)
+
+    monkeypatch.setattr(lgb, "Dataset", spy_dataset)
+
+    class RecordingAdapter(LightGBMAdapter):
+        def train(self, train_data, params, **kw):
+            pass
+
+    monkeypatch.setattr(nodes, "get_adapter", lambda algo: RecordingAdapter())
+
+    class H:
+        def __init__(self, tag):
+            self.tag = tag
+
+    parameters = {"training": {
+        "final_model_strategy": "refit_on_full", "algorithm": "lightgbm",
+        "algorithm_params": {"objective": "lambdarank"},
+    }}
+    nodes.finalize_model(
+        H("train"), H("dev"), object(), {}, 3,
+        {"feature_columns": ["a", "b"], "categorical_columns": []}, parameters,
+    )
+
+    # Kept, in group order: train's group 0 (rows 0, 2), its group 1 (rows 1,
+    # 3), then dev's group 0 (its rows 1, 2 = stacked rows 6 + 1, 6 + 2).
+    np.testing.assert_array_equal(captured["X"][:, 0], [0, 2, 1, 3, 7, 8])
+    np.testing.assert_array_equal(captured["y"], [1, 0, 0, 1, 0, 1])
+    np.testing.assert_array_equal(captured["group"], [2, 2, 2])
 
 
 class TestTuneHyperparametersObjective:
@@ -1454,7 +1532,7 @@ class TestTuneHyperparametersBinaryPredictionObjectives:
         ) in caplog.text
 
 
-def test_persist_sample_weight_report_flags_a_key_no_row_carries(tmp_path):
+def test_compute_sample_weight_report_flags_a_key_no_row_carries(tmp_path):
     """A configured weight whose key never appears in train is the finding.
 
     Nothing else in the pipeline notices: `aff` is a real category in the
@@ -1464,7 +1542,7 @@ def test_persist_sample_weight_report_flags_a_key_no_row_carries(tmp_path):
     import numpy as np
     import pandas as pd
     from recsys_tfb.io.handles import ParquetHandle
-    from recsys_tfb.pipelines.training.nodes import persist_sample_weight_report
+    from recsys_tfb.pipelines.training.nodes import compute_sample_weight_report
 
     # train parquet in the shape build_model_input actually writes since #283:
     # the feature categorical's code is a float (0.0=mass, 1.0=hnw), prod raw.
@@ -1486,14 +1564,14 @@ def test_persist_sample_weight_report_flags_a_key_no_row_carries(tmp_path):
     }
     prep = {"category_mappings": {"cust_segment_typ_2a": ["mass", "hnw", "aff"]}}
 
-    diag = persist_sample_weight_report(handle, prep, params)
+    diag = compute_sample_weight_report(handle, prep, params)
     assert diag["enabled"] is True
     assert diag["weight_keys"] == ["cust_segment_typ_2a"]
     assert diag["n_weight_entries"] == 2
     assert diag["unmatched_keys"] == ["aff"]  # no row has segment 'aff'
 
 
-def test_persist_sample_weight_report_does_not_credit_an_undecodable_row(tmp_path):
+def test_compute_sample_weight_report_does_not_credit_an_undecodable_row(tmp_path):
     """A row whose code names no category must not make a key look present.
 
     The vocabulary here literally contains ``"None"`` — which is what an
@@ -1505,7 +1583,7 @@ def test_persist_sample_weight_report_does_not_credit_an_undecodable_row(tmp_pat
     import numpy as np
     import pandas as pd
     from recsys_tfb.io.handles import ParquetHandle
-    from recsys_tfb.pipelines.training.nodes import persist_sample_weight_report
+    from recsys_tfb.pipelines.training.nodes import compute_sample_weight_report
 
     p = tmp_path / "train.parquet"
     # code 0 -> "mass"; code -1 -> UNKNOWN_CATEGORY_CODE, no category at all.
@@ -1517,15 +1595,15 @@ def test_persist_sample_weight_report_does_not_credit_an_undecodable_row(tmp_pat
                            "sample_weights": {"mass": 2.0, "None": 3.0}}}
     prep = {"category_mappings": {"cust_segment_typ_2a": ["mass", "None"]}}
 
-    diag = persist_sample_weight_report(ParquetHandle(path=str(p)), prep, params)
+    diag = compute_sample_weight_report(ParquetHandle(path=str(p)), prep, params)
     assert diag["unmatched_keys"] == ["None"]
 
 
-def test_persist_sample_weight_report_returns_the_diagnostic(tmp_path):
+def test_compute_sample_weight_report_returns_the_diagnostic(tmp_path):
     import numpy as np
     import pandas as pd
     from recsys_tfb.io.handles import ParquetHandle
-    from recsys_tfb.pipelines.training.nodes import persist_sample_weight_report
+    from recsys_tfb.pipelines.training.nodes import compute_sample_weight_report
 
     p = tmp_path / "train.parquet"
     pd.DataFrame({"cust_segment_typ_2a": np.array([0, 1], dtype=np.float32),
@@ -1536,11 +1614,11 @@ def test_persist_sample_weight_report_returns_the_diagnostic(tmp_path):
                            "sample_weights": {"mass": 2.0}}}
     prep = {"category_mappings": {"cust_segment_typ_2a": ["mass", "hnw"]}}
 
-    diag = persist_sample_weight_report(ParquetHandle(path=str(p)), prep, params)
+    diag = compute_sample_weight_report(ParquetHandle(path=str(p)), prep, params)
     assert diag["enabled"] is True and diag["unmatched_keys"] == []
 
 
-def test_persist_sample_weight_report_reports_but_writes_nothing_when_disabled(
+def test_compute_sample_weight_report_reports_but_writes_nothing_when_disabled(
     tmp_path, monkeypatch,
 ):
     """Empty sample_weights -> still a report, enabled=False (so the manifest
@@ -1561,7 +1639,7 @@ def test_persist_sample_weight_report_reports_but_writes_nothing_when_disabled(
     import pandas as pd
     from recsys_tfb.io.handles import ParquetHandle
     from recsys_tfb.pipelines.training import nodes as nodes_mod
-    from recsys_tfb.pipelines.training.nodes import persist_sample_weight_report
+    from recsys_tfb.pipelines.training.nodes import compute_sample_weight_report
 
     p = tmp_path / "train.parquet"
     pd.DataFrame({"prod_name": ["a"], "label": [1]}).to_parquet(p)
@@ -1573,7 +1651,7 @@ def test_persist_sample_weight_report_reports_but_writes_nothing_when_disabled(
     params = {"schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
               "item": "prod_name", "label": "label"}}, "training": {}}
 
-    diag = persist_sample_weight_report(ParquetHandle(path=str(p)), {}, params)
+    diag = compute_sample_weight_report(ParquetHandle(path=str(p)), {}, params)
 
     # weight_keys still reports the default (the item column) so the manifest
     # records which key the run would have weighted by.
@@ -1609,14 +1687,14 @@ def _split_counts(groups_kept, groups_total, rows_kept, rows_total):
     }
 
 
-def test_persist_group_filter_report_passes_the_counts_through(tmp_path):
+def test_compute_group_filter_report_passes_the_counts_through(tmp_path):
     """The counts reach the manifest even on a run that rebuilt nothing.
 
     The node reads them off the cache dir rather than recomputing, so a
     cache-hit run — which reads no parquet at all — still describes the
     matrix it trains on.
     """
-    from recsys_tfb.pipelines.training.nodes import persist_group_filter_report
+    from recsys_tfb.pipelines.training.nodes import compute_group_filter_report
 
     handle = _lgb_handle_with_report(tmp_path, {
         "objective": "lambdarank",
@@ -1625,7 +1703,7 @@ def test_persist_group_filter_report_passes_the_counts_through(tmp_path):
     })
     params = {"training": {"algorithm_params": {"objective": "lambdarank"}}}
 
-    diag = persist_group_filter_report(handle, params)
+    diag = compute_group_filter_report(handle, params)
     assert diag["enabled"] is True
     assert diag["objective"] == "lambdarank"
     assert diag["train"]["groups_dropped"] == 4200
@@ -1634,7 +1712,7 @@ def test_persist_group_filter_report_passes_the_counts_through(tmp_path):
 
 
 @pytest.mark.parametrize("objective", ["rank_xendcg", "binary"])
-def test_persist_group_filter_report_says_so_when_nothing_is_filtered(
+def test_compute_group_filter_report_says_so_when_nothing_is_filtered(
     tmp_path, objective
 ):
     """An unfiltered objective still gets a report, saying it filtered nothing.
@@ -1642,16 +1720,16 @@ def test_persist_group_filter_report_says_so_when_nothing_is_filtered(
     Silence would read the same as "the report failed to run"; the manifest
     has to distinguish "kept every row on purpose" from "no idea".
     """
-    from recsys_tfb.pipelines.training.nodes import persist_group_filter_report
+    from recsys_tfb.pipelines.training.nodes import compute_group_filter_report
 
     handle = _lgb_handle_with_report(tmp_path, None)
     params = {"training": {"algorithm_params": {"objective": objective}}}
 
-    diag = persist_group_filter_report(handle, params)
+    diag = compute_group_filter_report(handle, params)
     assert diag == {"enabled": False, "objective": objective}
 
 
-def test_persist_group_filter_report_warns_when_too_few_groups_remain(
+def test_compute_group_filter_report_warns_when_too_few_groups_remain(
     tmp_path, caplog
 ):
     """A train_dev thinned to a few hundred groups is visible, not silent.
@@ -1662,7 +1740,7 @@ def test_persist_group_filter_report_warns_when_too_few_groups_remain(
     """
     import logging
 
-    from recsys_tfb.pipelines.training.nodes import persist_group_filter_report
+    from recsys_tfb.pipelines.training.nodes import compute_group_filter_report
 
     handle = _lgb_handle_with_report(tmp_path, {
         "objective": "lambdarank",
@@ -1673,7 +1751,7 @@ def test_persist_group_filter_report_warns_when_too_few_groups_remain(
 
     with caplog.at_level(logging.WARNING,
                          logger="recsys_tfb.pipelines.training.nodes"):
-        diag = persist_group_filter_report(handle, params)
+        diag = compute_group_filter_report(handle, params)
     assert diag["thin_splits"] == ["train_dev"]
     assert "492" in caplog.text
     assert "train_dev" in caplog.text
@@ -1681,12 +1759,12 @@ def test_persist_group_filter_report_warns_when_too_few_groups_remain(
     assert diag["train"]["groups_kept"] == 58000
 
 
-def test_persist_group_filter_report_stays_quiet_when_both_splits_are_thick(
+def test_compute_group_filter_report_stays_quiet_when_both_splits_are_thick(
     tmp_path, caplog
 ):
     import logging
 
-    from recsys_tfb.pipelines.training.nodes import persist_group_filter_report
+    from recsys_tfb.pipelines.training.nodes import compute_group_filter_report
 
     handle = _lgb_handle_with_report(tmp_path, {
         "objective": "lambdarank",
@@ -1697,7 +1775,7 @@ def test_persist_group_filter_report_stays_quiet_when_both_splits_are_thick(
 
     with caplog.at_level(logging.WARNING,
                          logger="recsys_tfb.pipelines.training.nodes"):
-        diag = persist_group_filter_report(handle, params)
+        diag = compute_group_filter_report(handle, params)
     assert diag["thin_splits"] == []
     assert caplog.text == ""
 

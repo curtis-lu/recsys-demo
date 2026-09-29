@@ -252,7 +252,7 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 
 ## 8. 字串特徵欄靜默 → object 矩陣 OOM（已加 B6 閘，2026-07-11；型別同質性另由 B9 擋，2026-09-04）
 
-- **症狀（第一分鐘認出它）**：training `prepare_lgb_train_inputs` 在 `pdf_to_X` 的 `to_numpy` 步被 `Killed`（OOM）；或（B6 上線後）在讀 parquet 前秒級 `DataConsistencyError: ... un-encoded non-numeric type(s)`。本機合成資料永不重現（合成 feature_table 無此欄）。
+- **症狀（第一分鐘認出它）**：training `prepare_lgb_train_inputs`（#483 起叫 `prepare_train_inputs`）在 `pdf_to_X` 的 `to_numpy` 步被 `Killed`（OOM）；或（B6 上線後）在讀 parquet 前秒級 `DataConsistencyError: ... un-encoded non-numeric type(s)`。本機合成資料永不重現（合成 feature_table 無此欄）。
 - **根因**：生產 `feature_table` 有字串欄，未宣告 `categorical_columns`、也未 `drop_columns` → `compute_feature_columns` 收它為特徵 → `encode_categoricals` 不編它 → `X_df.values` 塌縮成 object 矩陣（每格 ~34 B vs float64 8 B，公司規模 22→96 GiB）。錯誤在 training（下游），根因在 dataset schema 設定（上游）——R 系列同款形態。
 - **規則**：字串特徵欄必須 declare categorical 或 drop。此不變量的唯一真實來源＝`core/consistency.py::nonnumeric_feature_errors`（B6，含 `spark_dtype_is_numeric` 分類器），掛在兩處：dataset 閘 `validate_data_consistency`（防復發）＋ `io/extract.py` 讀取 backstop（救舊 cache）。改 config 會 bump `base_dataset_version`、需重建 dataset。修法見 `docs/pipelines/dataset.md` §8.1；修完仍 OOM 的後續選項見 `docs/pipelines/training.md` §9.1。
 - **驗證方式**：`python -c "import pyarrow.parquet as pq, pyarrow as pa; s=pq.read_schema('<train_model_input.parquet>'); print([f.name for f in s if pa.types.is_string(f.type)])"` 對照 `preprocessor.json` 的 `feature_columns`／`categorical_columns`；差集非空即中招。
@@ -352,7 +352,7 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 - **原本的症狀**：調整 `training.sample_weights` / `sample_weight_keys` 後重跑 training，evaluation 指標**幾乎不變**；log 有 `lgb binary cache hit`，卻沒有 `sample_weight ACTIVE/INACTIVE` 那行。
 - **原本的根因**：`.bin` cache 的 key 是 `base_dataset_version / train_variant_id / objective`（2026-09-07 前這一段是較粗的 objective family），**不含 `model_version`**；而 `sample_weights` 只 bust `model_version`。權重是在建 `.bin` 時傳給 `lgb.Dataset(weight=...)` 並被 `save_binary` 一起烤進去的，所以 cache hit 就等於沿用舊權重。
 - **現在怎麼運作**：`.bin` **不再帶權重**（`lgb.Dataset(bin).get_weight()` 是 `None`）。`prepare_train_inputs` 改為在每個 `.bin` 旁寫一份 `train.weight_keys.parquet` sidecar，內容是那份 binary 的列的**權重 key 欄位**、順序與 binary 相同；HPO 每個 trial 載入 `.bin` 之後用當下的 config 現算權重再 `set_weight`。改權重因此**不必重建 `.bin`**——分箱照樣重用，只有查表重算。
-- **還會強制重建的兩種情況**（都會在 log 印出理由）：sidecar 不存在（＝pre-#318 的舊 cache，裡面的權重是烤死的、無法重新加權），或 sidecar 當初建立時的 `sample_weight_keys` 與現在的 config 不同。
+- **還會重建的兩種情況**（#483 起不再檢查目錄內容，改由路徑擋）：pre-#318 的舊 cache（權重烤死、無法重新加權）放在沒有格式版本那一段的舊路徑（`train_variants/<id>/lgb/…`），新程式不去讀；`sample_weight_keys` 改了，路徑裡的 `weight_keys_<hash8>` 那一段就不同，會建到新目錄。路徑的每一段見 [`training.md` §3.4](../pipelines/training.md)。
 - **仍然有效的那一半**：`sample_weight ACTIVE` 有出現卻仍無效，那是別的原因（config 沒讀到、或 key 值對不上，例如整數編碼的欄位配字串 key）；`unmatched_keys` 會列在 `sample_weight_report.json`。這條路徑沒有改變。
 
 ## 18. 報表的 AP@k 分母是 R，不是 min(k, R)——所以 `map@1` 恆等於 `recall@1`

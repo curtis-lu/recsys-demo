@@ -254,6 +254,20 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 
 **代價**：第一次跑會重建一次 `.bin`（比 HPO 便宜得多）；舊格式的快取留在磁碟上，要手動刪。
 
+> **實作註記（2026-09-29，#483）**：
+> - 路徑長這樣：`<cache.root>/<base_dataset_version>/train_variants/<train_variant_id>/train_data_v<N>/<algorithm>/<objective>/features_<hash8>/weight_keys_<hash8>/`。組法在 `pipelines/training/steps/train_data_cache.py` 的 `cache_dir`。快取格式版本號是同檔的 `TRAIN_DATA_CACHE_FORMAT_VERSION`，從 1 起；它不進任何版本 ID、只進路徑，所以放在用它的地方，不放 `core/versioning.py`。
+> - **跟上文不同的兩處**。(1) 特徵分段改成**永遠存在**的 `features_<hash8>`（雜湊 node 拿到的特徵欄清單），不再是「特徵選擇打開時才有」的 `fs_<hash8>`。理由：只在某些設定才出現的分段，會讓一個快取目錄巢在另一個裡面；清掉外層建到一半的目錄時，內層建好的會一起被刪。格式版本那一段已經讓所有舊路徑失效，也就沒有「保留舊路徑不變」的理由。(2) 多了演算法名（`training.algorithm`）一段，取代原本寫死在 adapter 裡的 `lgb/`：組路徑的人從 adapter 變成 node，node 替每個 adapter 組，而兩個 adapter 的檔案格式不同。
+> - 「路徑存在而且有 `_SUCCESS`」跟 parquet 快取共用 `steps/local_cache.py` 的 `is_partial_cache`／`cache_is_complete`／`mark_cache_complete`；`_SUCCESS` 這個名字收成 `io/handles.py` 的 `SUCCESS_MARKER`（決定 16 列的 3 處）。`cache.root` 只在 `resolve_cache_path` 讀一次，`.bin` 的目錄從它的 train 路徑往上一層組出；兩處預設值不同的問題因此消失，剩下的預設是原本 parquet 那邊的 `/tmp/recsys_cache`。
+> - 三個條件連同 `io/handles.py` 的 `WEIGHT_KEYS_META`（sidecar 記「建的時候要的權重鍵」，只有被刪的檢查在讀）一起刪掉。grep 證據在 PR 說明。
+> - 建到一半的目錄刪掉重建（`shutil.rmtree`）與建目錄（`mkdir`）跟著決策進了 node，架構稽核 (d) 的集合多一筆 `prepare_train_inputs`，使用者 2026-09-29 批准。這兩個寫入以前就有，只是在 `models/` 裡、掃描看不到。
+> - node 改名 `prepare_train_inputs`（決定 1 說的「不再帶 `lgb`」）。LightGBM adapter 不再 import `io/` 的任何東西，決定 15 實作註記說的那幾處函式內 import 已經不存在。
+> - 寫 sidecar 的兩個函式（`write_weight_keys_sidecar`、`write_group_filter_counts`）放在 `io/handles.py`，跟讀它們的 `LgbDatasetHandle` 同一個檔，沒有照「機制進 steps」放：檔案格式的寫與讀在同一處，改一邊時看得到另一邊。
+> - **更正：上文「路徑存在、而且裡面有 `_SUCCESS`，就一定能用」說太滿。** 它管得到設定與程式（兩者都在路徑裡），管不到三件事，都不是本票造成的，本票只寫進文件：
+>   - 上游回補。`train_variant_id` 從抽樣設定算，不看資料列，同一份設定下回補了資料，路徑不變。旁邊的 parquet 副本本來就是同一個缺口；只刪 parquet 不刪 `.bin` 時，HPO 用舊的列、`refit_on_full` 用新的列。`docs/pipelines/training.md` §3.4 與 `pipeline-slicing.md` 寫明要刪整個 `train_variants/<id>/`。
+>   - 設定跟磁碟上的 dataset 版本不一致。training 讀的是 `latest` 指到的 dataset 版本，schema 取自當下設定；改了 schema 卻沒重跑 dataset 時，路徑不變、內容會變。改動前就是這樣。
+>   - LightGBM 版本。生產環境釘死 4.6.0、不能自己加套件，所以沒放進路徑。哪天升級，快取格式版本加 1。
+> - **給決定 9（#488）的建議，還沒做**：審查時實測，只把 query group 裡的列換個順序，lambdarank 的預測就差到 1.5（LightGBM 4.6.0，3,000 組 × 22 列）。所以改到 `.bin` 內容的程式改動，多半也改變模型，兩個版本號都要加；只加快取格式版本時，`search_id` 不變，接續的搜尋會把新舊檔案上跑出來的 trial 混在一起。`TRAIN_DATA_CACHE_FORMAT_VERSION` 的 docstring 已經寫明。可以再補一道：把決定 9 的模型格式版本也放進快取路徑，模型版本一加，`.bin` 就重建一次（代價遠小於 HPO），「加了模型版本、忘了加快取版本」這條路就不會靜默。這個常數在 #488 才出現，本票做不了；上文「快取格式版本號與決定 9 的兩個常數分開」的理由（快取改了不一定要重訓）不受影響，因為方向相反。要不要做，由 #488 決定。
+
 ## 決定 11　可以跳過 HPO
 
 **設定**：
@@ -291,6 +305,8 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 1. **HPO 確定用不到 val，才不讀。** 先開 study、讀 checkpoint：study 已經完成、而且 checkpoint 讀得回最佳模型，才跳過讀 val。其他路徑照舊讀，包括「study 有 trial、但 checkpoint 讀不回來，拿最佳參數重跑一次」的最後手段（`tune_hyperparameters` 裡的 last-resort）。binary objective 對 val 的前置檢查跟著讀取一起走。
 2. **預測不再把全部 test 列拉進 driver。** 「有哪些（月份, item）要寫」從 parquet 的分區資訊取，不讀任何一列資料。每個分區只讀需要的欄：由輸出組裝（決定 5）與 adapter 的評分入口（決定 2）說出要哪些欄，不是在 node 裡寫一份固定清單。今天的組裝會讀零正例組權重欄，組合模型還要分組鍵；固定清單會漏。驗證要用宣告了 `dataset.test_zero_positive_group_ratio > 0` 的設定跑（base 設定是 0，驗不出來；`examples/ad` 的設定不是 0）。
 3. **不再多配一份矩陣。** 建 `.bin`（排序目標的丟組與依 group 排序）與 `refit_on_full`，在串流時就依 group 順序寫入。常見的「就地」寫法（`X[:] = X[perm]`、`np.take(..., out=X)`）仍會另配一整份，所以驗收量實際的峰值配置，不是讀程式數複本。
+
+   > **實作註記（2026-09-29，#483）**：做法是讀兩次。先只讀 label、group 欄與權重（或權重鍵）（`io/extract.py` 的 `extract_y`／`extract_y_with_groups`），node 在這些一維陣列上決定留哪些列、什麼順序；再讀特徵，每個 batch 直接寫進它最後的位置（`extract_X_rows`，refit 的兩個 split 用同一套列號疊起來）。**新增的假設只有一個**：兩次讀同一份 parquet，pyarrow 給的列順序相同。所以第二次會把 label 一起讀回來跟第一次比，對不上就停下；它看不到「只互換 label 相同的列」的重排。refit 的非排序分支也一樣處理：以前是兩份矩陣 `np.concatenate`，同樣多一整份。峰值量測見 PR 說明與 `docs/pipelines/training.md` §9.1。row-wise objective 建 `.bin` 沒有列要選，照舊一次讀完（`extract_Xy`），只有 refit 的非排序分支改成兩次讀，因為它要把兩份矩陣疊起來。
 4. **`pdf_to_X` 與訓練共用同一條編碼路徑**（#418 第 2 項）。「一批列 → 矩陣列」只寫一份，挑欄改用 `_narrow_frame`。
 
 另外兩件會改變診斷輸出，刻意列出來：
@@ -335,6 +351,14 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 - `persist_sample_weight_report` 改名：它只回傳報告，存檔是 catalog 的事（node 規則 6）；`persist_group_filter_report` 一併檢查。
 - `pipeline-node-design.md`〈已登記的例外〉的第一筆（「`pipelines/training/` 的部分 node `def` 在 `recsys_tfb.diagnosis.model` 底下」）在決定 6 落地時刪除。使用者 2026-09-28 同意。
 - `architecture-constraints.md` A1〈這個檢查看不到〉裡「training 的 7 個診斷 node」那一段，在決定 6、7 落地時改寫：`def` 回到 `nodes.py`、圖交給 catalog 之後，那個盲區不存在了。
+
+> **實作註記（2026-09-29，#483）**：本票收掉第一項裡跟 `.bin` 同一段程式的四處重複，與兩處過期註解、兩個改名：
+> - 類別欄索引兩份：#482 讓 refit 與 `.bin` 都走 `ModelAdapter.build_train_data` 之後已經只剩一份，本票沒有再動。
+> - 權重鍵與 decode map：樣本權重報告 node 改用 `io/extract.py` 的 `weight_key_columns` 與新的 `weight_key_decode_map_from_config`，後者也是訓練加權（`_row_weights_from_pdf`）用的那一份。
+> - 快取路徑兩份、`_SUCCESS` 3 處：見決定 10 的實作註記。
+> - `nodes.py` 開頭的 node 數（20 個裡 13 個）、「五個 cache node」（四個，另有 `io/parquet_dataset.py` 一處）。
+> - `persist_sample_weight_report` → `compute_sample_weight_report`；`persist_group_filter_report` 檢查過，同樣只回傳報告、存檔由 catalog 負責，一併改成 `compute_group_filter_report`。
+> - `conf/` 有兩行註解跟著改，使用者同意：`catalog.yaml` 寫著舊 node 名的那一行、`parameters_training.yaml` 的「5 個 cache node」。所以本票 `conf/` 的 diff 只有這兩行註解；改動前後 `yaml.safe_load` 的結果相同。
 
 ---
 

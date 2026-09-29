@@ -14,6 +14,16 @@ dataset.
 from dataclasses import dataclass
 from typing import Literal, Mapping, Union
 
+#: The file a cache writer puts down last, so its presence says the directory
+#: was finished. One name for every writer and reader of it — the training
+#: parquet copies (``pipelines/training/steps/local_cache.py``), the native
+#: training data cache beside them, and :func:`require_complete_cache` below.
+#: A writer and a reader spelling it differently would find no hits and rebuild
+#: forever, or find none on the consumer side and refuse a finished copy, and
+#: neither says why. Here rather than in the training steps because ``io/``
+#: sits below ``pipelines/`` and this module needs it too.
+SUCCESS_MARKER = "_SUCCESS"
+
 
 @dataclass(frozen=True)
 class ParquetHandle:
@@ -80,7 +90,7 @@ def require_complete_cache(
 
     incomplete = [
         (key, root) for key, root in labelled
-        if Path(root).is_dir() and not (Path(root) / "_SUCCESS").exists()
+        if Path(root).is_dir() and not (Path(root) / SUCCESS_MARKER).exists()
     ]
     if incomplete:
         detail = ", ".join(
@@ -125,41 +135,29 @@ def open_parquet_dataset(paths: Union[str, list[str]]):
     return children[0] if len(children) == 1 else pads.dataset(children)
 
 
-#: Sidecar written next to the .bin by
-#: ``LightGBMAdapter.prepare_train_inputs`` when the objective drops
-#: zero-positive query groups. The filename is the contract between that
-#: writer and :meth:`LgbDatasetHandle.group_filter_counts`, and it is also
-#: what marks a .bin as built *under* that rule — a cached directory without
-#: it predates the rule and its rows were never filtered.
+#: Sidecar written next to the ``.bin`` files by the training node that builds
+#: them (``prepare_train_inputs``) when the objective drops zero-positive query
+#: groups: how many groups and rows each split lost. The filename is the
+#: contract between :func:`write_group_filter_counts` and
+#: :meth:`LgbDatasetHandle.group_filter_counts`.
 #:
 #: Deliberately not named ``group_filter_report.json``: that is the separate
 #: catalog artifact in the model version dir. Two JSON files one word apart,
 #: both plain dicts, would swap silently.
 GROUP_FILTER_COUNTS_NAME = "group_filter_counts.json"
 
-#: Sidecar written beside each ``.bin`` by
-#: ``LightGBMAdapter.prepare_train_inputs``, holding that binary's rows'
+#: Sidecar written beside each ``.bin``, holding that binary's rows'
 #: **sample-weight key columns** in the binary's own row order —
 #: ``train.bin`` -> ``train.weight_keys.parquet``.
 #:
 #: Why the keys and not the weights: ``training.sample_weights`` feeds
-#: ``model_version`` and nothing in the lgb cache path, so a weight vector
-#: written in here would be served unchanged to a later run configured with
-#: different weights, and no layer would say so (#318). The keys are what the
-#: weights are *resolved from*, so they are the same for every weight table
-#: and a run always resolves its own.
-#:
-#: Its absence is what marks a ``.bin`` as predating this split — those
-#: binaries carry weights baked in and cannot be re-weighted, so
-#: ``prepare_train_inputs`` rebuilds rather than serves them.
+#: ``model_version`` and nothing in the cache path, so a weight vector written
+#: in here would be served unchanged to a later run configured with different
+#: weights, and no layer would say so (#318). The keys are what the weights are
+#: *resolved from*, so they are the same for every weight table and a run
+#: always resolves its own. Which key columns they are *is* in the cache path,
+#: so a sidecar never holds columns other than the ones the run asks for.
 WEIGHT_KEYS_SUFFIX = ".weight_keys.parquet"
-
-#: Parquet schema-metadata key under which a sidecar records the
-#: ``training.sample_weight_keys`` its build was *asked* for. Not inferable
-#: from the sidecar's columns: a configured key column the model_input does
-#: not carry is absent from both, and comparing columns alone would then read
-#: as a config change and rebuild the .bin on every single run.
-WEIGHT_KEYS_META = b"recsys_tfb.weight_keys"
 
 #: Parquet schema-metadata key under which a sidecar records how many rows it
 #: describes. Redundant with the frame's own length **except in the one case
@@ -176,15 +174,58 @@ WEIGHT_ROWS_META = b"recsys_tfb.weight_key_rows"
 def weight_keys_sidecar(bin_path: str) -> str:
     """The weight-key sidecar belonging to ``bin_path``.
 
-    One definition shared by the writer (``LightGBMAdapter.prepare_train_inputs``)
+    One definition shared by the writer (:func:`write_weight_keys_sidecar`)
     and the reader (:meth:`LgbDatasetHandle.sample_weights`): a sidecar written
-    under one spelling and looked up under another is missing, and "missing"
-    means "rebuild the cache" — an expensive silence rather than an error.
+    under one spelling and looked up under another is missing, and a missing
+    sidecar stops the HPO search before its first trial.
     """
     from pathlib import Path
 
     p = Path(bin_path)
     return str(p.with_name(p.stem + WEIGHT_KEYS_SUFFIX))
+
+
+def write_weight_keys_sidecar(frame, bin_path: str) -> None:
+    """Persist one split's sample-weight key columns beside its ``.bin``.
+
+    ``frame`` must already be in the binary's own row order — the zero-positive
+    filter and the group permutation applied — because the reader
+    (:meth:`LgbDatasetHandle.sample_weights`) aligns by position and re-derives
+    nothing.
+
+    Written even when no weight table is configured and even when the frame has
+    no columns at all: the reader raises on a missing sidecar rather than guess
+    all-ones, so a build that skipped it whenever weights happened to be
+    inactive would break the first run that configures some.
+
+    The row count goes into the schema metadata as well as the data, for the
+    column-less case :data:`WEIGHT_ROWS_META` describes.
+    """
+    import json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    table = pa.Table.from_pandas(frame, preserve_index=False)
+    table = table.replace_schema_metadata({
+        **(table.schema.metadata or {}),
+        WEIGHT_ROWS_META: json.dumps(len(frame)).encode(),
+    })
+    pq.write_table(table, weight_keys_sidecar(str(bin_path)))
+
+
+def write_group_filter_counts(cache_dir: str, counts: dict) -> None:
+    """Write what the zero-positive filter dropped beside the ``.bin`` files.
+
+    Read back by :meth:`LgbDatasetHandle.group_filter_counts`, so a run that
+    hits the cache — and reads no parquet — can still report what the matrix
+    it trains on is made of.
+    """
+    import json
+    from pathlib import Path
+
+    with open(Path(cache_dir) / GROUP_FILTER_COUNTS_NAME, "w") as f:
+        json.dump(counts, f, indent=2)
 
 
 @dataclass(frozen=True)
@@ -207,11 +248,9 @@ class LgbDatasetHandle:
         """How many query groups this binary's build dropped, or ``None``.
 
         ``None`` means this .bin was **not** built under the zero-positive
-        filter. Two different situations, and the caller has to tell them
-        apart: the objective does not filter (everything but lambdarank), or
-        the directory was written before the rule existed and holds every row.
-        ``prepare_train_inputs`` resolves the second by rebuilding, so by the
-        time a handle reaches a consumer ``None`` means the first.
+        filter: the objective does not drop groups. A directory written before
+        the filter existed cannot reach a handle — it sits at a path without
+        the cache format version, which no current build looks at.
 
         Read back from disk rather than recomputed: a run that hits the .bin
         cache reads no parquet at all, and still has to be able to say what
@@ -245,9 +284,9 @@ class LgbDatasetHandle:
 
         Aligned 1:1 with the rows of the ``.bin``, so the caller can hand it
         to ``ModelAdapter.load_train_data`` with the binary. Weights live here rather
-        than inside the binary because the lgb cache path does not mention
-        them: baked in, a stale binary would silently train under the previous
-        run's weights (#318).
+        than inside the binary because the cache path does not mention them:
+        baked in, a stale binary would silently train under the previous run's
+        weights (#318).
 
         Alignment is by construction, not by re-derivation: the sidecar holds
         the surviving rows in the order they were written, so the same
@@ -258,11 +297,12 @@ class LgbDatasetHandle:
         one way this can go wrong produces a vector LightGBM discards without
         a word.
 
-        Raises if the sidecar is missing. ``prepare_train_inputs`` rebuilds a
-        cache directory without one, so a handle that reaches a consumer has
-        it; reaching this line without one means a binary was moved or handed
-        over outside that path, and all-ones would be a wrong answer that
-        trains a whole search before anyone notices.
+        Raises if the sidecar is missing. ``prepare_train_inputs`` writes one
+        beside every binary before it marks the directory complete, so a
+        handle that reaches a consumer has it; reaching this line without one
+        means a binary was moved or handed over outside that path, and
+        all-ones would be a wrong answer that trains a whole search before
+        anyone notices.
         """
         import json
         from pathlib import Path

@@ -4,11 +4,10 @@ Encapsulates deferred categorical encoding (e.g. prod_name) that the dataset
 pipeline keeps as raw string values; downstream training code expects fully
 numeric numpy arrays.
 
-Lives in ``io/`` rather than beside the training nodes because a ModelAdapter
-reads parquet through it too (``LightGBMAdapter.prepare_train_inputs``), and a
-library module does not import a pipeline (ADR-0008). The adapter still
-imports it inside its functions; the load-order reason is at the top of
-``models/lightgbm_adapter.py``.
+Lives in ``io/`` rather than beside the training nodes because training,
+inference and the model diagnostics all read parquet through it, and one
+pipeline does not import another (ADR-0008); ``io.handles`` resolves sample
+weights through it too.
 """
 
 from __future__ import annotations
@@ -121,6 +120,24 @@ def weight_key_decode_map(
         for col in weight_keys
         if col in category_mappings and col not in identity
     }
+
+
+def weight_key_decode_map_from_config(
+    parameters: dict, preprocessor_metadata: dict,
+) -> dict[str, list]:
+    """:func:`weight_key_decode_map` for the configured weight keys.
+
+    The one derivation the weights training applies
+    (:func:`_row_weights_from_pdf`) and the report of which weights matched
+    nothing (``compute_sample_weight_report``) both use: a report built from a
+    different key tuple, or a different decode map, would vouch for lookups
+    the trainer never made.
+    """
+    category_mappings = (preprocessor_metadata or {}).get("category_mappings", {}) or {}
+    return weight_key_decode_map(
+        weight_key_columns(parameters), category_mappings,
+        get_schema(parameters)["identity_columns"],
+    )
 
 
 def decode_weight_keys(
@@ -481,9 +498,7 @@ def _row_weights_from_pdf(
         )
         return np.ones(n_rows, dtype=np.float64)
 
-    category_mappings = (preprocessor_metadata or {}).get("category_mappings", {}) or {}
-    identity_cols = get_schema(parameters)["identity_columns"]
-    decode_map = weight_key_decode_map(weight_keys, category_mappings, identity_cols)
+    decode_map = weight_key_decode_map_from_config(parameters, preprocessor_metadata)
     nameable, unknown = nameable_weight_entries(sw, weight_keys, decode_map)
     if unknown:
         logger.warning(
@@ -815,6 +830,33 @@ def resolve_sample_weights(
     return _row_weights_from_pdf(pdf, parameters, preprocessor_metadata)
 
 
+def _write_batch_features(
+    target: np.ndarray,
+    batch,
+    feature_cols: list,
+    position: dict,
+    deferred: set,
+    category_mappings: dict,
+) -> None:
+    """Encode one record batch's feature columns into ``target``, column by column.
+
+    ``target`` is a ``(batch rows, features)`` array — a row slice of the
+    matrix being filled, or a batch-sized buffer when the rows are going
+    somewhere other than the next slice. One encoding for both, so a matrix
+    read in file order and one read in a caller's row order cannot differ in
+    anything but the order.
+    """
+    for j, col in enumerate(feature_cols):
+        column = batch.column(position[col])
+        if col in deferred:
+            target[:, j] = pd.Categorical(
+                column.to_pandas(),
+                categories=category_mappings[col],
+            ).codes
+        else:
+            target[:, j] = column.to_numpy(zero_copy_only=False)
+
+
 def _stream_matrix(
     handle: ParquetHandle,
     preprocessor_metadata: dict,
@@ -932,15 +974,10 @@ def _stream_matrix(
             if not n:
                 continue
             stop = filled + n
-            for j, col in enumerate(feature_cols):
-                column = batch.column(position[col])
-                if col in deferred:
-                    X[filled:stop, j] = pd.Categorical(
-                        column.to_pandas(),
-                        categories=category_mappings[col],
-                    ).codes
-                else:
-                    X[filled:stop, j] = column.to_numpy(zero_copy_only=False)
+            _write_batch_features(
+                X[filled:stop], batch, feature_cols, position, deferred,
+                category_mappings,
+            )
             if aux_cols:
                 aux_batches.append(batch.select(aux_cols))
             filled = stop
@@ -1206,3 +1243,260 @@ def extract_Xy_with_groups(
         log_data_volume(logger, "extract_Xy_with_groups.zero_positive_group_weight", zw)
         result.append(zw)
     return tuple(result)
+
+
+def _read_row_columns(
+    handle: ParquetHandle, columns: list, log_prefix: str,
+) -> pd.DataFrame:
+    """``columns`` of every row, in file order, without the feature matrix.
+
+    Absent and repeated names are dropped for the reasons :func:`_stream_matrix`
+    gives, and the frame is reassembled from batches under the dataset's own
+    schema the way that function assembles its aux frame, so a column read here
+    has the dtype it would have had there.
+    """
+    import pyarrow as pa
+
+    ds = open_parquet_dataset(handle.path)
+    available = set(ds.schema.names)
+    cols: list = []
+    for col in columns:
+        if col in available and col not in cols:
+            cols.append(col)
+    schema = pa.schema([ds.schema.field(c) for c in cols])
+    batches = [b for b in ds.to_batches(columns=cols) if b.num_rows]
+    frame = pa.Table.from_batches(batches, schema=schema).to_pandas()
+    log_data_volume(logger, f"{log_prefix}.aux", frame, deep=True)
+    return frame
+
+
+def extract_y(
+    handle: ParquetHandle,
+    preprocessor_metadata: dict,
+    parameters: dict,
+    *,
+    with_weights: bool = False,
+    with_weight_keys: bool = False,
+) -> tuple:
+    """``(y[, weights | weight_keys])`` for every row, in file order — no features.
+
+    The first of two reads. A caller that decides from the labels which rows
+    to keep, or in what order, reads these, decides, and hands its row order
+    to :func:`extract_X_rows`, which writes each feature row straight into its
+    final position. Reading the matrix first and reordering it afterwards
+    costs a second matrix (see that function).
+
+    ``with_weights`` / ``with_weight_keys``: the same two meanings and the same
+    mutual exclusion as :func:`extract_Xy`. Both come back in file order, like
+    ``y``; the caller applies its row order to them itself.
+    """
+    _reject_both_weight_flags(with_weights, with_weight_keys)
+    label_col = get_schema(parameters)["label"]
+    cols = [label_col]
+    if with_weights or with_weight_keys:
+        cols += weight_key_columns(parameters)
+    aux = _read_row_columns(handle, cols, "extract_y")
+    y = aux[label_col].values
+    log_data_volume(logger, "extract_y.y", y)
+    result: list = [y]
+    if with_weights:
+        result.append(_row_weights_from_pdf(aux, parameters, preprocessor_metadata))
+    if with_weight_keys:
+        result.append(weight_keys_for_cache(aux, parameters))
+    return tuple(result)
+
+
+def extract_y_with_groups(
+    handle: ParquetHandle,
+    preprocessor_metadata: dict,
+    parameters: dict,
+    *,
+    with_weights: bool = False,
+    with_weight_keys: bool = False,
+) -> tuple:
+    """``(y, groups[, weights | weight_keys])`` for every row, in file order.
+
+    :func:`extract_y` plus the per-row query-group ids — the same ids
+    :func:`extract_Xy_with_groups` returns for the same file, numbered by
+    first appearance. A ranking objective needs them to decide its rows before
+    the matrix is read: which groups hold no positive, and the order that makes
+    each group one block.
+    """
+    _reject_both_weight_flags(with_weights, with_weight_keys)
+    schema = get_schema(parameters)
+    label_col = schema["label"]
+    group_cols = schema["query_group_columns"]
+    cols = [label_col] + group_cols
+    if with_weights or with_weight_keys:
+        cols += weight_key_columns(parameters)
+    aux = _read_row_columns(handle, cols, "extract_y_with_groups")
+    y = aux[label_col].values
+    groups = _group_ids(aux, group_cols)
+    log_data_volume(logger, "extract_y_with_groups.y", y)
+    log_data_volume(logger, "extract_y_with_groups.groups", groups)
+    logger.info(
+        "extract_y_with_groups: n_groups=%d",
+        int(groups.max()) + 1 if len(groups) else 0,
+    )
+    result: list = [y, groups]
+    if with_weights:
+        result.append(_row_weights_from_pdf(aux, parameters, preprocessor_metadata))
+    if with_weight_keys:
+        result.append(weight_keys_for_cache(aux, parameters))
+    return tuple(result)
+
+
+def extract_X_rows(
+    handles,
+    preprocessor_metadata: dict,
+    parameters: dict,
+    *,
+    rows: np.ndarray | None,
+    labels: np.ndarray,
+) -> np.ndarray:
+    """The feature matrix with row ``i`` holding source row ``rows[i]``.
+
+    ``handles`` is one handle or a list of them. Their rows are numbered one
+    after another in list order — a refit passes train then train_dev — and
+    ``rows`` indexes into that numbering; ``rows=None`` means every row, in
+    that order. A source row not named in ``rows`` is read and never written.
+
+    **Why the rows are placed during the read and not after.** Taking a
+    subset or a permutation of a finished matrix allocates a second matrix
+    before the first can be released, so the peak is twice the matrix — and
+    that includes the spellings that look in-place, ``X[:] = X[perm]`` and
+    ``np.take(X, perm, out=X)`` (ADR-0030 decision 12, item 3). Here each
+    batch is encoded into a batch-sized buffer and its rows are copied to
+    their final positions, so the peak is the matrix plus one batch. A batch
+    whose rows land as one ascending run is written into its slice directly,
+    as :func:`_stream_matrix` does.
+
+    **``labels`` is how this read is checked against the first one.** The
+    caller chose ``rows`` from an earlier read of the same parquet
+    (:func:`extract_y`, :func:`extract_y_with_groups`); that choice only means
+    anything if both reads see the rows in the same order. Two things promise
+    it: ``Dataset.to_batches`` goes through arrow's ``ScanBatches``, whose
+    contract is "the batches will arrive in order" (pyarrow 14.0.1,
+    ``arrow/dataset/scanner.h``), and :func:`~recsys_tfb.io.handles.open_parquet_dataset`
+    orders fragments by path, the determinism other positional readers here
+    already rely on. Nothing else would tell if either broke: a mismatch
+    would put every feature row under another row's label and raise nothing.
+    So the label column is read again beside the features and has to equal
+    ``labels`` — the caller's labels for exactly these rows, in the output
+    order. A **post-condition**, raising ``ValueError``. It is blind to a
+    reordering that only swaps rows of equal label, which real data read in
+    batches does not produce.
+
+    ``rows`` naming a row twice, or a row outside the numbering, raises
+    ``ValueError`` before the matrix is allocated: a repeated row would leave
+    another position never written, holding whatever the allocation held.
+    """
+    handles = [handles] if isinstance(handles, ParquetHandle) else list(handles)
+    feature_cols = list(preprocessor_metadata["feature_columns"])
+    category_mappings = preprocessor_metadata["category_mappings"]
+    deferred = _deferred_categoricals(preprocessor_metadata, parameters)
+    label_col = get_schema(parameters)["label"]
+
+    datasets, sizes = [], []
+    dtype = None
+    for handle in handles:
+        _log_parquet_metadata(handle)
+        _assert_feature_dtypes_numeric(handle, preprocessor_metadata, parameters)
+        dtype = matrix_dtype_checked_against_parquet(
+            handle, preprocessor_metadata, parameters)
+        ds = open_parquet_dataset(handle.path)
+        datasets.append(ds)
+        sizes.append(ds.count_rows())
+    n_source = sum(sizes)
+
+    rows = (
+        np.arange(n_source, dtype=np.int64) if rows is None
+        else np.asarray(rows, dtype=np.int64)
+    )
+    labels = np.asarray(labels)
+    if rows.ndim != 1 or len(labels) != len(rows):
+        raise ValueError(
+            f"extract_X_rows: rows must be 1-D with one label each; got rows "
+            f"shape {rows.shape} and {len(labels)} labels"
+        )
+    if len(rows) and (int(rows.min()) < 0 or int(rows.max()) >= n_source):
+        raise ValueError(
+            f"extract_X_rows: rows must lie in [0, {n_source}) — the rows of "
+            f"{len(handles)} parquet(s) numbered in order — got "
+            f"[{int(rows.min())}, {int(rows.max())}]"
+        )
+    # Where each source row goes, -1 for "not wanted".
+    dest = np.full(n_source, -1, dtype=np.int64)
+    dest[rows] = np.arange(len(rows), dtype=np.int64)
+    if int((dest >= 0).sum()) != len(rows):
+        raise ValueError(
+            "extract_X_rows: rows names a source row more than once; every "
+            "output position has to receive exactly one row"
+        )
+
+    X = np.empty((len(rows), len(feature_cols)), dtype=dtype)
+    read_labels = np.empty(len(rows), dtype=labels.dtype)
+    feature_set = set(feature_cols)
+    read_cols = feature_cols + ([] if label_col in feature_set else [label_col])
+    position = {c: i for i, c in enumerate(read_cols)}
+    batch_rows = stream_batch_rows(len(read_cols), X.dtype.itemsize)
+    # Sized to the largest batch that can arrive, not to the budget: a small
+    # parquet would otherwise pay the whole batch budget for a few rows.
+    buffer = np.empty(
+        (min(batch_rows, max(sizes, default=0)), len(feature_cols)), dtype=X.dtype)
+    logger.info(
+        "extract_X_rows: streaming read n_source_rows=%d n_rows=%d "
+        "n_parquets=%d n_read_columns=%d dtype=%s batch_rows=%d matrix_mib=%.1f",
+        n_source, len(rows), len(handles), len(read_cols), X.dtype.name,
+        batch_rows, X.nbytes / 1024**2,
+    )
+
+    offset = 0
+    with log_step(logger, "read_parquet"):
+        for handle, ds, n_rows in zip(handles, datasets, sizes):
+            filled = 0
+            for batch in ds.to_batches(columns=read_cols, batch_size=batch_rows):
+                n = batch.num_rows
+                if not n:
+                    continue
+                if filled + n > n_rows:
+                    raise ValueError(
+                        f"extract_X_rows: {handle.path} holds more rows than "
+                        f"the {n_rows} it counted — it changed under the read."
+                    )
+                d = dest[offset + filled: offset + filled + n]
+                keep = d >= 0
+                if keep.all() and (n == 1 or bool(np.all(np.diff(d) == 1))):
+                    _write_batch_features(
+                        X[d[0]:d[0] + n], batch, feature_cols, position,
+                        deferred, category_mappings,
+                    )
+                elif keep.any():
+                    _write_batch_features(
+                        buffer[:n], batch, feature_cols, position, deferred,
+                        category_mappings,
+                    )
+                    # A whole batch landing out of order needs no row
+                    # selection, and selecting would copy the batch again.
+                    X[d[keep]] = buffer[:n] if keep.all() else buffer[:n][keep]
+                read_labels[d[keep]] = batch.column(
+                    position[label_col]).to_numpy(zero_copy_only=False)[keep]
+                filled += n
+            if filled != n_rows:
+                raise ValueError(
+                    f"extract_X_rows: streamed {filled} rows from a parquet "
+                    f"that counted {n_rows} — {handle.path} changed under the "
+                    "read."
+                )
+            offset += n_rows
+
+    equal_nan = labels.dtype.kind == "f"
+    if not np.array_equal(read_labels, labels, equal_nan=equal_nan):
+        raise ValueError(
+            "extract_X_rows: the labels read beside the features do not match "
+            "the labels the rows were chosen from — the two reads of the same "
+            "parquet saw its rows in different orders, so no feature row can be "
+            "trusted to sit under its own label. Nothing was built."
+        )
+    log_data_volume(logger, "extract_X_rows.X", X)
+    return X

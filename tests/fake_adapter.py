@@ -15,13 +15,12 @@ configured adapter gets a different answer.
 Register it for one test with
 ``monkeypatch.setitem(ADAPTER_REGISTRY, FAKE_ALGORITHM, FakeAdapter)``.
 
-What it does not prove yet. Its ``prepare_train_inputs`` writes the same
-weight-key sidecar the LightGBM adapter writes, through the same
-``io.handles`` names, because the HPO node reads weights off that sidecar
-whatever the algorithm; that contract still lives inside the adapters until
-the ``.bin`` decisions move up to the node (ADR-0030 decision 10, #483). For
-the same reason it prepares row-wise objectives only, so the HPO node has run
-a ranking objective through LightGBM alone; ``finalize_model`` runs one here.
+It has no cache logic of its own: ``prepare_train_inputs`` decides which rows
+go into the cached files, in what order, and writes the weight-key sidecar for
+every adapter; the adapter only builds and saves (ADR-0030 decisions 1 and
+10). What it keeps from a ranking build is the row order — it has no use for
+the per-group counts, which is allowed: ``build_train_data`` is handed them,
+not required to store them.
 """
 
 from __future__ import annotations
@@ -170,51 +169,3 @@ class FakeAdapter(ModelAdapter):
 
     def log_to_mlflow(self):
         """No MLflow flavour for a test double; nothing to log."""
-
-    def prepare_train_inputs(self, train_handle, train_dev_handle,
-                             preprocessor_metadata, parameters, cache_dir):
-        """Row-wise objectives only: enough for the HPO node to read handles.
-
-        Writes each split's arrays and the weight-key sidecar the handle's
-        ``sample_weights`` reads, the same on-disk contract the LightGBM
-        adapter keeps.
-        """
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        from recsys_tfb.io.extract import extract_Xy, weight_key_columns
-        from recsys_tfb.io.handles import (
-            WEIGHT_KEYS_META,
-            WEIGHT_ROWS_META,
-            LgbDatasetHandle,
-            weight_keys_sidecar,
-        )
-
-        objective = parameters["training"].get("algorithm_params", {}).get("objective")
-        if self.rules.is_ranking_objective(objective):
-            raise NotImplementedError("the fake prepares row-wise objectives only")
-
-        out = Path(cache_dir) / "fake"
-        out.mkdir(parents=True, exist_ok=True)
-        names = list(preprocessor_metadata["feature_columns"])
-        keys = list(weight_key_columns(parameters))
-        handles = []
-        for handle, name, role in ((train_handle, "train.bin", "train"),
-                                   (train_dev_handle, "train_dev.bin", "train_dev")):
-            X, y, wk = extract_Xy(handle, preprocessor_metadata, parameters,
-                                  with_weight_keys=True)
-            self.save_train_data(
-                self.build_train_data(X, y, feature_names=names,
-                                      categorical_features=[]),
-                str(out / name),
-            )
-            table = pa.Table.from_pandas(wk, preserve_index=False)
-            table = table.replace_schema_metadata({
-                **(table.schema.metadata or {}),
-                WEIGHT_KEYS_META: json.dumps(keys).encode(),
-                WEIGHT_ROWS_META: json.dumps(len(wk)).encode(),
-            })
-            pq.write_table(table, weight_keys_sidecar(str(out / name)))
-            handles.append(LgbDatasetHandle(bin_path=str(out / name), role=role))
-        (out / "_SUCCESS").touch()
-        return tuple(handles)

@@ -1858,3 +1858,198 @@ class TestOnDiskMatrix:
 
         assert list(scratch.rglob("*")) == []
         assert X.shape == (9, 7)
+
+
+# ---------------------------------------------------------------------------
+# The two-pass read: row columns first, then the matrix in the caller's order
+#
+# ``extract_y`` / ``extract_y_with_groups`` read what a caller decides rows
+# from; ``extract_X_rows`` writes each feature row straight into the position
+# the caller chose, so taking a subset or a permutation never costs a second
+# matrix (ADR-0030 decision 12, item 3). Every test below runs over a
+# hive-partitioned root read in many small batches — the shape the training
+# cache has — because a single batch of a single file is in the right order
+# trivially.
+# ---------------------------------------------------------------------------
+
+
+def _two_pass_df(n_cust: int = 40, seed: int = 0) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    n = n_cust * 3
+    df = pd.DataFrame({
+        "snap_date": ["2025-01-31"] * n,
+        "prod_name": np.tile(["fund", "ccard", "savings"], n_cust),
+        "cust_id": np.repeat([f"c{i:03d}" for i in range(n_cust)], 3),
+        "f0": rng.standard_normal(n).astype(np.float32),
+        "f1": rng.standard_normal(n).astype(np.float32),
+        "label": (rng.random(n) < 0.3).astype(np.int64),
+    })
+    # Rows of one customer scattered through the file, as a sampled split is.
+    return df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+
+def _two_pass_meta() -> dict:
+    return {
+        "feature_columns": ["f0", "f1", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard", "savings"]},
+    }
+
+
+def _two_pass_params(weight_keys=None) -> dict:
+    params = {"schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+        "label": "label"}}}
+    if weight_keys:
+        params["training"] = {"sample_weight_keys": list(weight_keys)}
+    return params
+
+
+class TestTwoPassRead:
+    @pytest.fixture(autouse=True)
+    def _small_batches(self, monkeypatch):
+        import recsys_tfb.io.extract as extract_mod
+
+        # 4 read columns x 4 B -> 6 rows per batch: dozens of batches, and
+        # every batch boundary is a chance to place rows at the wrong offset.
+        monkeypatch.setattr(extract_mod, "STREAM_BATCH_BYTES", 100)
+
+    def _handle(self, tmp_path, name="root", seed=0, n_cust=40):
+        from recsys_tfb.io.handles import ParquetHandle
+
+        root = tmp_path / name
+        _two_pass_df(n_cust, seed).to_parquet(
+            root, partition_cols=["snap_date", "prod_name"])
+        return ParquetHandle(path=str(root))
+
+    def test_first_pass_matches_the_one_pass_read(self, tmp_path):
+        """Same labels, same group ids, same weight keys, same order."""
+        from recsys_tfb.io.extract import extract_Xy_with_groups, extract_y_with_groups
+
+        handle = self._handle(tmp_path)
+        params = _two_pass_params(weight_keys=["prod_name", "label"])
+        _, y1, g1, wk1 = extract_Xy_with_groups(
+            handle, _two_pass_meta(), params, with_weight_keys=True)
+        y2, g2, wk2 = extract_y_with_groups(
+            handle, _two_pass_meta(), params, with_weight_keys=True)
+
+        np.testing.assert_array_equal(y2, y1)
+        np.testing.assert_array_equal(g2, g1)
+        pd.testing.assert_frame_equal(wk2, wk1)
+
+    def test_every_row_in_file_order_is_the_one_pass_matrix(self, tmp_path):
+        from recsys_tfb.io.extract import extract_X_rows, extract_Xy, extract_y
+
+        handle = self._handle(tmp_path)
+        X1, _ = extract_Xy(handle, _two_pass_meta(), _two_pass_params())
+        (y,) = extract_y(handle, _two_pass_meta(), _two_pass_params())
+        X2 = extract_X_rows(
+            handle, _two_pass_meta(), _two_pass_params(), rows=None, labels=y)
+
+        assert X2.dtype == X1.dtype
+        assert X2.tobytes() == X1.tobytes()
+
+    def test_rows_choose_and_order_the_matrix_rows(self, tmp_path):
+        """A subset in a scrambled order: row i is source row rows[i]."""
+        from recsys_tfb.io.extract import extract_X_rows, extract_Xy
+
+        handle = self._handle(tmp_path)
+        X_all, y_all = extract_Xy(handle, _two_pass_meta(), _two_pass_params())
+        rows = np.random.default_rng(1).permutation(len(y_all))[: len(y_all) // 2]
+
+        X = extract_X_rows(
+            handle, _two_pass_meta(), _two_pass_params(),
+            rows=rows, labels=y_all[rows])
+
+        np.testing.assert_array_equal(X, X_all[rows])
+
+    def test_several_parquets_are_numbered_one_after_another(self, tmp_path):
+        """The refit's shape: train rows first, then train_dev's."""
+        from recsys_tfb.io.extract import extract_X_rows, extract_Xy
+
+        tr = self._handle(tmp_path, "tr", seed=0, n_cust=30)
+        dv = self._handle(tmp_path, "dv", seed=1, n_cust=10)
+        X_tr, y_tr = extract_Xy(tr, _two_pass_meta(), _two_pass_params())
+        X_dv, y_dv = extract_Xy(dv, _two_pass_meta(), _two_pass_params())
+        X_all, y_all = np.concatenate([X_tr, X_dv]), np.concatenate([y_tr, y_dv])
+        rows = np.random.default_rng(2).permutation(len(y_all))
+
+        X = extract_X_rows(
+            [tr, dv], _two_pass_meta(), _two_pass_params(),
+            rows=rows, labels=y_all[rows])
+
+        np.testing.assert_array_equal(X, X_all[rows])
+
+    def test_labels_that_are_not_these_rows_are_refused(self, tmp_path):
+        """The post-condition: a second read that disagreed with the first
+        would put features under other rows' labels, silently."""
+        from recsys_tfb.io.extract import extract_X_rows, extract_y
+
+        handle = self._handle(tmp_path)
+        (y,) = extract_y(handle, _two_pass_meta(), _two_pass_params())
+        rows = np.arange(len(y))
+        shifted = np.roll(y, 1)
+        assert not np.array_equal(shifted, y)  # the fixture can tell them apart
+
+        with pytest.raises(ValueError, match="different orders"):
+            extract_X_rows(
+                handle, _two_pass_meta(), _two_pass_params(),
+                rows=rows, labels=shifted)
+
+    @pytest.mark.parametrize("rows, match", [
+        ([0, 0, 1], "more than once"),
+        ([0, 1, 10_000], r"must lie in"),
+        ([-1, 0], r"must lie in"),
+    ])
+    def test_rows_that_cannot_fill_the_matrix_are_refused(
+        self, tmp_path, rows, match,
+    ):
+        from recsys_tfb.io.extract import extract_X_rows
+
+        handle = self._handle(tmp_path)
+        with pytest.raises(ValueError, match=match):
+            extract_X_rows(
+                handle, _two_pass_meta(), _two_pass_params(),
+                rows=np.asarray(rows), labels=np.zeros(len(rows), dtype=np.int64))
+
+    def test_a_permuted_read_allocates_one_matrix_not_two(self, tmp_path, monkeypatch):
+        """The reason this function exists, measured rather than argued.
+
+        ``X[perm]`` after a file-order read holds two matrices at once. The
+        bound below sits between one matrix plus the read's own small arrays
+        (the row numbering and one batch) and two matrices.
+        """
+        import tracemalloc
+
+        import recsys_tfb.io.extract as extract_mod
+        from recsys_tfb.io.handles import ParquetHandle
+
+        monkeypatch.setattr(extract_mod, "STREAM_BATCH_BYTES", 64 * 1024)
+        n, n_feat = 20_000, 50
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame(
+            rng.standard_normal((n, n_feat)).astype(np.float32),
+            columns=[f"f{j:02d}" for j in range(n_feat)])
+        df["label"] = rng.integers(0, 2, n)
+        root = tmp_path / "wide.parquet"
+        df.to_parquet(root)
+        meta = {"feature_columns": [f"f{j:02d}" for j in range(n_feat)],
+                "categorical_columns": [], "category_mappings": {}}
+        params = {"schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+            "label": "label"}}}
+        rows = rng.permutation(n)
+        labels = df["label"].to_numpy()[rows]
+        matrix_bytes = n * n_feat * 4
+
+        tracemalloc.start()
+        try:
+            X = extract_mod.extract_X_rows(
+                ParquetHandle(str(root)), meta, params, rows=rows, labels=labels)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        assert X.nbytes == matrix_bytes
+        assert peak < 1.5 * matrix_bytes, (
+            f"peak {peak / 2**20:.1f} MiB for a {matrix_bytes / 2**20:.1f} MiB matrix")
