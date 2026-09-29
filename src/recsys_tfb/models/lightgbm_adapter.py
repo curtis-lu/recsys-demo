@@ -7,15 +7,30 @@ of it are the training pipeline's decisions and live in its
 ``prepare_train_inputs`` node (ADR-0030 decisions 1 and 10); the two rules
 that node asks this library about — which objectives rank, which drop
 zero-positive groups — are declared in :data:`LIGHTGBM_RULES`.
+
+The training diagnostics' questions are answered here too (ADR-0030 decision
+4): SHAP values through ``shap.TreeExplainer``, the tree table with
+LightGBM's categorical split format decoded, split / gain importance. They
+get plain arrays and a plain table back, never the booster.
 """
 
 import logging
+from typing import TYPE_CHECKING
 
 import lightgbm as lgb
 import mlflow
 import numpy as np
 
-from recsys_tfb.models.base import ADAPTER_REGISTRY, AlgorithmRules, ModelAdapter
+if TYPE_CHECKING:
+    import pandas as pd
+
+from recsys_tfb.models.base import (
+    ADAPTER_REGISTRY,
+    TREE_STRUCTURE_COLUMNS,
+    AlgorithmRules,
+    ModelAdapter,
+    UnsupportedCapability,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -236,31 +251,92 @@ class LightGBMAdapter(ModelAdapter):
     def load(self, filepath: str) -> None:
         self._booster = lgb.Booster(model_file=filepath)
 
-    def feature_importance(self, kind: str = "split") -> dict[str, float]:
-        if self._booster is None:
-            raise RuntimeError("No model loaded.")
-        if kind not in ("split", "gain"):
-            raise ValueError(f"kind must be 'split' or 'gain', got {kind!r}")
-        names = self._booster.feature_name()
-        importances = self._booster.feature_importance(importance_type=kind).astype(float)
-        return dict(zip(names, importances))
-
     def log_to_mlflow(self) -> None:
         if self._booster is None:
             raise RuntimeError("No model to log.")
         mlflow.lightgbm.log_model(self._booster, name="model")
 
-    @property
-    def booster(self) -> "lgb.Booster":
-        """Access the underlying LightGBM Booster.
+    # -- what the diagnostics ask of the model ----------------------------------
 
-        For the diagnostics under ``diagnosis/model/`` only, until they reach
-        the model through the adapter too (ADR-0030 decision 1, the
-        diagnostics' share). The training pipeline itself never reads it.
-        """
+    def _fitted_booster(self) -> "lgb.Booster":
         if self._booster is None:
             raise RuntimeError("No model loaded.")
         return self._booster
+
+    def feature_attributions(
+        self, X: np.ndarray, *, background: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """SHAP values from ``shap.TreeExplainer``: tree-path-dependent with no
+        ``background``, interventional against it otherwise.
+
+        Anything shap raises becomes :class:`UnsupportedCapability`, because
+        what it raises on a model it cannot read is not one type. The case
+        that motivated this: shap 0.42.1's ``SingleTree`` stores thresholds as
+        floats, so an interventional explainer cannot represent a categorical
+        split (``"2||3||4"``) and fails on every model that splits on the
+        item — 129 of 161 trees on a real one (2026-07-08). The price is that
+        a shap bug reads as "cannot" too; it is caught here and nowhere else,
+        so the training node stays free of shap's exception types.
+        """
+        import shap
+
+        booster = self._fitted_booster()
+        try:
+            if background is None:
+                explainer = shap.TreeExplainer(booster)
+            else:
+                explainer = shap.TreeExplainer(
+                    booster, data=background,
+                    feature_perturbation="interventional")
+            values = np.asarray(explainer.shap_values(X))
+        except Exception as exc:
+            raise UnsupportedCapability(
+                f"shap could not attribute this LightGBM model "
+                f"({'interventional' if background is not None else 'tree path dependent'}): "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        if values.ndim == 3:  # some shap versions return [classes, n, feat]
+            values = values[-1]
+        # A trailing bias column, when the version appends one, is not a feature.
+        return values[:, : np.shape(X)[1]]
+
+    def attribution_cost(self) -> int:
+        """The number of trees: TreeSHAP's time per row grows with it."""
+        return int(self._fitted_booster().num_trees())
+
+    def tree_structure(self) -> "pd.DataFrame":
+        """``Booster.trees_to_dataframe()``, with LightGBM's categorical split
+        format decoded.
+
+        LightGBM writes a categorical split as ``decision_type == "=="`` and a
+        ``threshold`` string of the codes sent left, joined by ``||``
+        (``"2||3||4"``; one code is ``"1"``). A numeric split is ``"<="`` with
+        a float threshold. The codes are the ones training encoded the
+        categories with, which is what the gain ledger maps back to items.
+        """
+        trees = self._fitted_booster().trees_to_dataframe()
+        categorical = (trees["decision_type"] == "==").to_numpy()
+        out = trees[[c for c in TREE_STRUCTURE_COLUMNS if c != "categories_left"]].copy()
+        out["categories_left"] = [
+            _category_codes(threshold) if is_categorical else None
+            for threshold, is_categorical in zip(trees["threshold"], categorical)
+        ]
+        return out
+
+    def feature_importance(self, kind: str = "split") -> dict[str, float]:
+        if kind not in ("split", "gain"):
+            raise ValueError(f"kind must be 'split' or 'gain', got {kind!r}")
+        booster = self._fitted_booster()
+        names = booster.feature_name()
+        importances = booster.feature_importance(importance_type=kind).astype(float)
+        return dict(zip(names, importances))
+
+
+def _category_codes(threshold) -> tuple[int, ...]:
+    """``"2||3||4"`` -> ``(2, 3, 4)``. Raises ``ValueError`` on a token that is
+    not a number: that would be a LightGBM format this adapter does not know,
+    and guessing would put rows on the wrong side of the split."""
+    return tuple(int(float(token)) for token in str(threshold).split("||"))
 
 
 ADAPTER_REGISTRY["lightgbm"] = LightGBMAdapter

@@ -725,6 +725,11 @@ def build_report(args: argparse.Namespace) -> dict:
     gain_ledger = load_json(gain_path, required=True)
     if not gain_ledger.get("enabled", False):
         raise ValueError(f"gain_ledger is disabled in {gain_path}")
+    if gain_ledger.get("supported") is False:
+        raise ValueError(
+            f"the model has no tree structure to keep a gain ledger of ({gain_path}): "
+            f"{gain_ledger.get('reason')}"
+        )
     if gain_ledger.get("fallback"):
         raise ValueError(
             "gain_ledger is in fallback mode; per-item capacity ledger is unavailable."

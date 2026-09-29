@@ -282,3 +282,124 @@ def test_a7_answer_changes_with_the_configured_adapter():
 
 def test_a57_admits_every_registered_adapter(algorithm):
     assert training_algorithm_errors(_params(algorithm, "binary")) == []
+
+
+# -- what the diagnostics ask of a model (decision 4) --------------------------
+#
+# Optional: an adapter answers in algorithm-neutral terms or raises
+# UnsupportedCapability, never anything else — that one exception is what a
+# diagnosis catches to skip itself. LightGBM answers all four; the fake, a
+# logistic regression with no trees, answers none.
+
+CAPABILITIES = {
+    "feature_attributions": lambda a, X: a.feature_attributions(X),
+    "attribution_cost": lambda a, X: a.attribution_cost(),
+    "tree_structure": lambda a, X: a.tree_structure(),
+    "feature_importance": lambda a, X: a.feature_importance(kind="gain"),
+}
+
+
+@pytest.mark.parametrize("capability", sorted(CAPABILITIES))
+def test_a_capability_is_answered_or_declined_with_the_one_exception(
+        adapter, algorithm, capability):
+    from recsys_tfb.models.base import UnsupportedCapability
+
+    _fitted(adapter)
+    X, _ = _arrays(seed=5, n=20)
+    ask = CAPABILITIES[capability]
+    if algorithm == FAKE_ALGORITHM:
+        with pytest.raises(UnsupportedCapability):
+            ask(adapter, X)
+    else:
+        assert ask(adapter, X) is not None
+
+
+def test_lightgbm_attributions_are_one_value_per_row_and_column():
+    adapter = _fitted(LightGBMAdapter())
+    X, _ = _arrays(seed=5, n=40)
+    assert adapter.feature_attributions(X).shape == (40, 3)
+    assert adapter.feature_attributions(X, background=X[:10]).shape == (40, 3)
+
+
+def test_lightgbm_attributions_add_up_to_the_score():
+    """What makes them attributions of *this* model's score: SHAP values of
+    a row sum to its raw score minus the expected value, so two rows'
+    attribution sums differ exactly as their raw scores do."""
+    adapter = _fitted(LightGBMAdapter())
+    X, _ = _arrays(seed=5, n=40)
+    sums = adapter.feature_attributions(X).sum(axis=1)
+    raw = adapter._booster.predict(X, raw_score=True)
+    np.testing.assert_allclose(sums - sums[0], raw - raw[0], atol=1e-6)
+
+
+def test_lightgbm_attribution_cost_is_the_number_of_trees():
+    assert _fitted(LightGBMAdapter(), num_iterations=20).attribution_cost() == 20
+
+
+def test_whatever_shap_raises_comes_back_as_unsupported(monkeypatch):
+    """shap raises no one type on a model it cannot read (a categorical split
+    it cannot parse is a ValueError), so the adapter converts; the node then
+    has one exception to catch and never names shap's."""
+    import shap
+
+    from recsys_tfb.models.base import UnsupportedCapability
+
+    adapter = _fitted(LightGBMAdapter())
+    X, _ = _arrays(seed=5, n=10)
+
+    def cannot_parse(*args, **kwargs):
+        raise ValueError("could not convert string to float: '2||3||4'")
+
+    monkeypatch.setattr(shap, "TreeExplainer", cannot_parse)
+    with pytest.raises(UnsupportedCapability, match="2\\|\\|3\\|\\|4"):
+        adapter.feature_attributions(X, background=X)
+
+
+def _categorical_stump():
+    """One tree, one split, on a categorical column whose codes 1 and 3 are
+    the positives: LightGBM has to send {1, 3} one way and {0, 2} the other."""
+    rng = np.random.default_rng(0)
+    code = rng.integers(0, 4, size=400).astype(float)
+    X = np.column_stack([code, rng.normal(size=400)])
+    y = np.isin(code, [1, 3]).astype(float)
+    adapter = LightGBMAdapter()
+    data = adapter.build_train_data(
+        X, y, feature_names=["item_code", "f1"],
+        categorical_features=["item_code"])
+    adapter.train(data, {"objective": "binary", "verbose": -1, "num_leaves": 2,
+                         "min_data_in_leaf": 1, "min_data_per_group": 1,
+                         "cat_smooth": 0, "seed": 0}, num_iterations=1)
+    return adapter
+
+
+def test_lightgbm_tree_structure_has_the_neutral_columns():
+    from recsys_tfb.models.base import TREE_STRUCTURE_COLUMNS
+
+    trees = _categorical_stump().tree_structure()
+    assert tuple(trees.columns) == TREE_STRUCTURE_COLUMNS
+    leaves = trees[trees["split_feature"].isna()]
+    assert leaves["categories_left"].isna().all()
+
+
+def test_lightgbm_categorical_split_decodes_to_the_codes_that_go_left():
+    """The direction, not only the parse: a row whose code is in
+    ``categories_left`` scores as the left leaf does. Reading the leaves off
+    the booster is LightGBM-specific on purpose — it is the ground truth the
+    decoded table is checked against."""
+    adapter = _categorical_stump()
+    trees = adapter.tree_structure()
+    root = trees[trees["parent_index"].isna()].iloc[0]
+    assert root["split_feature"] == "item_code"
+    assert set(root["categories_left"]) == {1, 3}
+
+    leaf_value = adapter._booster.trees_to_dataframe().set_index("node_index")["value"]
+    raw = adapter._booster.predict(np.array([[1.0, 0.0], [0.0, 0.0]]), raw_score=True)
+    assert raw[0] == pytest.approx(leaf_value[root["left_child"]])
+    assert raw[1] == pytest.approx(leaf_value[root["right_child"]])
+
+
+def test_lightgbm_numeric_split_has_no_categories():
+    adapter = _fitted(LightGBMAdapter())
+    splits = adapter.tree_structure().dropna(subset=["split_feature"])
+    assert len(splits) > 0
+    assert splits["categories_left"].isna().all()

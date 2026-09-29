@@ -1,4 +1,4 @@
-"""gain_ledger 結構層帳本單元測試（手算錨 fixture + 真 booster 契約）。"""
+"""gain_ledger 結構層帳本單元測試（手算錨 fixture + 真 LightGBM 模型契約 + 模型做不到）。"""
 import numpy as np
 import pandas as pd
 import pytest
@@ -9,40 +9,40 @@ ITEM_COL = "prod_code"
 CATEGORIES = ["A", "B", "C", "D"]  # 碼 = list 索引
 
 
-# node_depth 是 trees_to_dataframe() 一定有的欄（root=1）；手算 fixture 補上它，
-# 預設 1，只有測 item 切點深度的 fixture 才給真實深度。
+# 手算 fixture 寫的是 ModelAdapter.tree_structure() 的中立格式（TREE_STRUCTURE_COLUMNS）：
+# 類別切點給「送往左子的類別碼」tuple，數值切點與葉給 None。node_depth 預設 1，
+# 只有測 item 切點深度的 fixture 才給真實深度。
 def _leaf(tree_index, node_index, parent_index, node_depth=1):
     return {
         "tree_index": tree_index, "node_index": node_index, "node_depth": node_depth,
         "left_child": np.nan, "right_child": np.nan, "parent_index": parent_index,
-        "split_feature": np.nan, "split_gain": np.nan, "threshold": np.nan,
-        "decision_type": np.nan,
+        "split_feature": None, "split_gain": np.nan, "categories_left": None,
     }
 
 
 def _split(tree_index, node_index, parent_index, left, right, feature, gain,
-           threshold, decision_type, node_depth=1):
+           categories_left=None, node_depth=1):
     return {
         "tree_index": tree_index, "node_index": node_index, "node_depth": node_depth,
         "left_child": left, "right_child": right, "parent_index": parent_index,
-        "split_feature": feature, "split_gain": gain, "threshold": threshold,
-        "decision_type": decision_type,
+        "split_feature": feature, "split_gain": gain,
+        "categories_left": categories_left,
     }
 
 
-def _tree0_rows(s0_threshold="0||2"):
+def _tree0_rows(s0_codes=(0, 2)):
     """單棵樹手算錨：
     S0(item,S={A,C},gain10) -- 左 S1(context f_age,gain6)/右 S2(item,S={B},gain4)
                                                      右 S2 -- 左 leaf / 右 S3(context f_inc,gain2, reachable={D})
     """
     return [
-        _split(0, "0-S0", np.nan, "0-S1", "0-S2", ITEM_COL, 10.0, s0_threshold, "=="),
-        _split(0, "0-S1", "0-S0", "0-L0", "0-L1", "f_age", 6.0, 0.5, "<="),
+        _split(0, "0-S0", np.nan, "0-S1", "0-S2", ITEM_COL, 10.0, s0_codes),
+        _split(0, "0-S1", "0-S0", "0-L0", "0-L1", "f_age", 6.0),
         _leaf(0, "0-L0", "0-S1"),
         _leaf(0, "0-L1", "0-S1"),
-        _split(0, "0-S2", "0-S0", "0-L2", "0-S3", ITEM_COL, 4.0, "1", "=="),
+        _split(0, "0-S2", "0-S0", "0-L2", "0-S3", ITEM_COL, 4.0, (1,)),
         _leaf(0, "0-L2", "0-S2"),
-        _split(0, "0-S3", "0-S2", "0-L3", "0-L4", "f_inc", 2.0, 1000.0, "<="),
+        _split(0, "0-S3", "0-S2", "0-L3", "0-L4", "f_inc", 2.0),
         _leaf(0, "0-L3", "0-S3"),
         _leaf(0, "0-L4", "0-S3"),
     ]
@@ -51,7 +51,7 @@ def _tree0_rows(s0_threshold="0||2"):
 def _tree1_unconditioned_context_root():
     """第二棵樹：root 是未 conditioned 的全域 context 切點（gain=9），不應進任何帳。"""
     return [
-        _split(1, "1-S0", np.nan, "1-L0", "1-L1", "f_region", 9.0, 2.5, "<="),
+        _split(1, "1-S0", np.nan, "1-L0", "1-L1", "f_region", 9.0),
         _leaf(1, "1-L0", "1-S0"),
         _leaf(1, "1-L1", "1-S0"),
     ]
@@ -188,9 +188,9 @@ def test_pre_item_by_feature_sorted_by_gain_desc():
     """兩個 pre-item 特徵時，by_feature 要 gain 遞減排序（讀者先看吃最多的）。"""
     rows = [
         # 兩棵各一個 pre-item root context 切點，gain 3 與 9
-        _split(0, "0-S0", np.nan, "0-L0", "0-L1", "f_small", 3.0, 0.5, "<="),
+        _split(0, "0-S0", np.nan, "0-L0", "0-L1", "f_small", 3.0),
         _leaf(0, "0-L0", "0-S0"), _leaf(0, "0-L1", "0-S0"),
-        _split(1, "1-S0", np.nan, "1-L0", "1-L1", "f_big", 9.0, 0.5, "<="),
+        _split(1, "1-S0", np.nan, "1-L0", "1-L1", "f_big", 9.0),
         _leaf(1, "1-L0", "1-S0"), _leaf(1, "1-L1", "1-S0"),
     ]
     result = gain_ledger._ledger_from_trees(_df(rows), ITEM_COL, CATEGORIES)
@@ -206,11 +206,11 @@ def test_first_item_split_depth_summary():
     切點在 depth2。→ 兩棵的最淺 item 深度 [1, 2]，且只算「有 item 切點」的樹。"""
     rows = [
         # treeA: 根就是 item 切點（depth1）
-        _split(0, "0-S0", np.nan, "0-L0", "0-L1", ITEM_COL, 5.0, "0", "==", node_depth=1),
+        _split(0, "0-S0", np.nan, "0-L0", "0-L1", ITEM_COL, 5.0, (0,), node_depth=1),
         _leaf(0, "0-L0", "0-S0", node_depth=2), _leaf(0, "0-L1", "0-S0", node_depth=2),
         # treeB: root 是 context(depth1)，其下才有 item 切點(depth2)
-        _split(1, "1-S0", np.nan, "1-S1", "1-L2", "f_age", 4.0, 0.5, "<=", node_depth=1),
-        _split(1, "1-S1", "1-S0", "1-L0", "1-L1", ITEM_COL, 3.0, "1", "==", node_depth=2),
+        _split(1, "1-S0", np.nan, "1-S1", "1-L2", "f_age", 4.0, node_depth=1),
+        _split(1, "1-S1", "1-S0", "1-L0", "1-L1", ITEM_COL, 3.0, (1,), node_depth=2),
         _leaf(1, "1-L0", "1-S1", node_depth=3), _leaf(1, "1-L1", "1-S1", node_depth=3),
         _leaf(1, "1-L2", "1-S0", node_depth=2),
     ]
@@ -224,7 +224,7 @@ def test_first_item_split_depth_summary():
 # ---- 追加測試 2：未知碼忽略但不炸 ----
 
 def test_unknown_code_ignored_with_note():
-    trees = _df(_tree0_rows(s0_threshold="0||2||9"))
+    trees = _df(_tree0_rows(s0_codes=(0, 2, 9)))
     result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
     assert result["per_item"]["A"]["context_gain"] == pytest.approx(6.0)
     assert any("9" in n for n in result["notes"])
@@ -233,7 +233,7 @@ def test_unknown_code_ignored_with_note():
 # ---- 追加測試 3：空側跳過不炸 ----
 
 def test_empty_side_skipped_without_crash():
-    trees = _df(_tree0_rows(s0_threshold="0||1||2||3"))  # S=全 item → 右側 reachable 為空
+    trees = _df(_tree0_rows(s0_codes=(0, 1, 2, 3)))  # S=全 item → 右側 reachable 為空
     result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
     assert result["item_id"]["split_count"] == 2
 
@@ -246,7 +246,7 @@ def test_compute_gain_ledger_disabled():
     assert result == {"enabled": False}
 
 
-def _tiny_real_booster():
+def _tiny_real_model():
     from tests.adapter_fits import fit_lightgbm
 
     rng = np.random.RandomState(0)
@@ -266,8 +266,8 @@ def _tiny_real_booster():
     )
 
 
-def test_compute_gain_ledger_real_booster_contract():
-    adapter = _tiny_real_booster()
+def test_compute_gain_ledger_real_model_contract():
+    adapter = _tiny_real_model()
     preprocessor = {"category_mappings": {"prod_code": ["A", "B", "C", "D"]}}
     parameters = {"schema": {"columns": {
         "time": "snap_date", "entity": ["cust_id"],
@@ -275,14 +275,14 @@ def test_compute_gain_ledger_real_booster_contract():
     result = gain_ledger.compute_gain_ledger(adapter, preprocessor, parameters)
     assert result["enabled"] is True
     assert result["fallback"] is False
-    assert result["n_trees"] == adapter.booster.num_trees()
+    assert result["n_trees"] == 3          # num_iterations, no early stopping
     assert set(result["per_item"].keys()) == {"A", "B", "C", "D"}
     for key in ("item_id", "context", "total_gain", "notes"):
         assert key in result
 
 
 def test_compute_gain_ledger_missing_category_mappings_falls_back():
-    adapter = _tiny_real_booster()
+    adapter = _tiny_real_model()
     preprocessor = {"category_mappings": {}}
     parameters = {"schema": {"columns": {
         "time": "snap_date", "entity": ["cust_id"],
@@ -297,14 +297,14 @@ def test_compute_gain_ledger_missing_category_mappings_falls_back():
 # ---- 審查修復（2026-07-08）：item 欄非類別切點防呆 ----
 
 def test_numeric_item_split_not_booked_but_noted():
-    """item 欄出現 decision_type != "==" 的數值切點：不解類別碼、不動 reachable、
-    不記 per-item 帳；notes 記異常。（審查發現 1：spec 明文 decision_type == "=="）"""
+    """item 欄出現數值切點（沒有 categories_left）：不解類別碼、不動 reachable、
+    不記 per-item 帳；notes 記異常。（審查發現 1）"""
     rows = _tree0_rows() + [
-        # 第二棵樹：root 是 item 欄的「數值」切點（threshold 1.5，不可解類別碼），
+        # 第二棵樹：root 是 item 欄的「數值」切點（沒有類別碼可解），
         # 其下掛一個 context 切點——因 root 未 conditioned 且不是合法 item 切點，
         # 該 context 切點不得進任何帳。
-        _split(2, "2-S0", np.nan, "2-S1", "2-L0", ITEM_COL, 5.0, 1.5, "<="),
-        _split(2, "2-S1", "2-S0", "2-L1", "2-L2", "f_age", 3.0, 0.7, "<="),
+        _split(2, "2-S0", np.nan, "2-S1", "2-L0", ITEM_COL, 5.0),
+        _split(2, "2-S1", "2-S0", "2-L1", "2-L2", "f_age", 3.0),
         _leaf(2, "2-L0", "2-S0"),
         _leaf(2, "2-L1", "2-S1"),
         _leaf(2, "2-L2", "2-S1"),
@@ -321,3 +321,60 @@ def test_numeric_item_split_not_booked_but_noted():
     assert out["item_id"]["split_count"] == 3
     assert out["item_id"]["gain_sum"] == pytest.approx(19.0)
     assert any("非類別切點" in n for n in out["notes"])
+
+
+# ---- a model without trees (ADR-0030 decision 4) ----
+
+_PARAMS = {"schema": {"columns": {
+    "time": "snap_date", "entity": ["cust_id"], "item": "prod_code"}}}
+
+
+def test_a_model_without_trees_lands_the_fourth_shape():
+    """Not ``{"enabled": False}`` (evaluation would say "switched off") and not
+    ``None`` (it would say "never ran"): its own shape, with the adapter's
+    reason, and no exception."""
+    from tests.fake_adapter import FakeAdapter
+
+    result = gain_ledger.compute_gain_ledger(
+        FakeAdapter(), {"category_mappings": {"prod_code": CATEGORIES}}, _PARAMS)
+    assert result["enabled"] is True
+    assert result["supported"] is False
+    assert "tree" in result["reason"]
+
+
+def test_any_other_failure_of_the_tree_read_stops_the_run():
+    """Only UnsupportedCapability means "cannot"; a bug surfaces."""
+    class Broken:
+        def tree_structure(self):
+            raise KeyError("split_gain")
+
+    with pytest.raises(KeyError, match="split_gain"):
+        gain_ledger.compute_gain_ledger(Broken(), {}, _PARAMS)
+
+
+def test_real_model_ledger_matches_a_hand_decoded_walk():
+    """The adapter's decoded table and LightGBM's own string format give the
+    same ledger — nothing was lost moving the format parse into the adapter."""
+    from tests.adapter_fits import fit_lightgbm
+
+    # A model that has to split on the item: its codes 1 and 3 are the
+    # positives. The small fixture above never splits on it.
+    rng = np.random.RandomState(0)
+    code = rng.randint(0, 4, size=400).astype(float)
+    X = np.column_stack([code, rng.randn(400), rng.randn(400)])
+    adapter = fit_lightgbm(
+        X, np.isin(code, [1, 3]).astype(float),
+        {"objective": "binary", "verbosity": -1, "num_leaves": 7, "seed": 0,
+         "min_data_in_leaf": 1, "min_data_per_group": 1, "cat_smooth": 0,
+         "num_iterations": 3, "early_stopping_rounds": 0},
+        feature_names=["prod_code", "f_age", "f_inc"], categorical_features=["prod_code"])
+    raw = adapter._booster.trees_to_dataframe()
+    by_hand = raw[["tree_index", "node_index", "parent_index", "left_child",
+                   "right_child", "node_depth", "split_feature", "split_gain"]].copy()
+    by_hand["categories_left"] = [
+        tuple(int(t) for t in str(th).split("||")) if dt == "==" else None
+        for th, dt in zip(raw["threshold"], raw["decision_type"])
+    ]
+    decoded = gain_ledger._ledger_from_trees(adapter.tree_structure(), "prod_code", CATEGORIES)
+    assert decoded["item_id"]["split_count"] > 0     # the item splits exist to decode
+    assert decoded == gain_ledger._ledger_from_trees(by_hand, "prod_code", CATEGORIES)

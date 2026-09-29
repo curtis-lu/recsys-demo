@@ -1,4 +1,4 @@
-"""結構層 Gain 帳本：LightGBM booster 跨樹按 item 記帳（完整集合遍歷變體）。
+"""結構層 Gain 帳本：模型的樹跨樹按 item 記帳（完整集合遍歷變體）。
 
 從每棵樹的 root 走訪，把切點 gain 分成兩帳：item-id 切點的 gain（isolate-by-item 的
 成本）與已經過 item-id 切點「conditioned」之後的 context 切點 gain（item 隔出來之後
@@ -15,9 +15,18 @@ context）、``pre_item``（item 切點**之前**的未 conditioned 切點按特
 ``pre_item``／``first_item_split_depth`` 為 ``None``（需 reachable 走訪才算得出）。
 
 雙層結構（可測性）：``_ledger_from_trees`` 是純 pandas/dict 核心（只吃
-``booster.trees_to_dataframe()`` 的 DataFrame，不碰 model/preprocessor，單元測試直接
-餵手工 DataFrame）；``compute_gain_ledger`` 是 thin wrapper——讀 config/schema、解析
-booster 與 preprocessor 的 item 值映射後轉呼叫核心；映射缺席時降級為粗帳本。
+``ModelAdapter.tree_structure()`` 的表，不碰 model/preprocessor，單元測試直接
+餵手工 DataFrame）；``compute_gain_ledger`` 是 thin wrapper——讀 config/schema、向
+adapter 要樹的切點結構、取 preprocessor 的 item 值映射後轉呼叫核心；映射缺席時降級為
+粗帳本。
+
+The tree table is algorithm-neutral (``models/base.py``'s
+``TREE_STRUCTURE_COLUMNS``): a categorical split arrives as the tuple of
+category codes sent left, already decoded from LightGBM's ``"2||3||4"`` by the
+adapter (ADR-0030 decision 1). A model with no trees raises
+``UnsupportedCapability``; the ledger is then skipped and lands as the
+"model cannot" shape (``_util.unsupported_artifact``), which evaluation's
+``model_capacity`` reports as its own reason (decision 4).
 """
 
 import logging
@@ -26,7 +35,9 @@ import numpy as np
 import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.diagnosis.model.attribution import _resolve_booster
+from recsys_tfb.models.base import UnsupportedCapability
+
+from ._util import unsupported_artifact
 
 logger = logging.getLogger(__name__)
 
@@ -94,39 +105,42 @@ def _item_id_block(trees: pd.DataFrame, item_feature: str, total_gain: float) ->
     }
 
 
-def _decode_threshold(threshold, categories: list) -> tuple:
-    """類別碼集合字串（如 ``"2||3||4"``，單碼如 ``"1"``）→ (item 值集合, 超出範圍的原始碼字串集合)。
+def _decode_codes(codes, categories: list) -> tuple:
+    """Category codes sent left -> (their item values, the codes outside
+    ``categories`` as strings).
 
-    碼＝categories 的 list 索引。
+    A code is an index into ``categories``. The out-of-range ones are kept as
+    strings because that is how the note has always printed them.
     """
     values: set = set()
     unknown: set = set()
-    for token in str(threshold).split("||"):
-        token = token.strip()
-        try:
-            code = int(float(token))
-        except ValueError:
-            unknown.add(token)
-            continue
+    for code in codes:
         if 0 <= code < len(categories):
             values.add(categories[code])
         else:
-            unknown.add(token)
+            unknown.add(str(code))
     return values, unknown
 
 
+def _is_categorical_split(codes) -> bool:
+    """``categories_left`` holds the codes for a categorical split and
+    ``None`` otherwise; a frame round-trip may turn that ``None`` into NaN."""
+    return isinstance(codes, (tuple, list))
+
+
 def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list) -> dict:
-    """純 pandas/dict 核心：從 ``booster.trees_to_dataframe()`` 的 DataFrame 記帳。
+    """純 pandas/dict 核心：從 ``ModelAdapter.tree_structure()`` 的表記帳。
 
     對每棵樹從 root 走訪（iterative stack），攜帶 ``reachable``（該節點可達的 item 值
     集合，root＝全 item）與 ``conditioned``（路徑上是否已經過 ≥1 個 item 切點）：
 
-    - **item 切點**（``split_feature == item_feature``）：碼經 ``categories[code]`` 映成
-      item 值 S；左子 ``reachable ∩ S``、右子 ``reachable - S``，兩側 ``conditioned=True``。
+    - **item 切點**（``split_feature == item_feature``）：``categories_left`` 的碼經
+      ``categories[code]`` 映成 item 值 S；左子 ``reachable ∩ S``、右子
+      ``reachable - S``，兩側 ``conditioned=True``。
       gain 記入 item-id 帳（見 ``_item_id_block``，與遍歷無關）；對「當時 reachable」
       （進入此節點時攜帶的集合）內每個 item 記 ``isolating_split_count``/
-      ``trees_touched``/``first_tree_index``。threshold 出現超出 categories 範圍的碼
-      → 忽略該碼並彙總記一筆 note，不炸。
+      ``trees_touched``/``first_tree_index``。``categories_left`` 出現超出 categories
+      範圍的碼 → 忽略該碼並彙總記一筆 note，不炸。
     - **context 切點**（其他特徵）：若 ``conditioned``，對 reachable 內每個 item 記
       ``context_split_count``/``context_gain``（``len(reachable)==1`` 時另記
       ``context_gain_isolated``），同時全域 context 帳的 ``split_count``/``gain_sum``
@@ -188,10 +202,11 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
             t_idx = int(row["tree_index"])
 
             if feat == item_feature:
-                if row["decision_type"] != "==":
+                if not _is_categorical_split(row["categories_left"]):
                     # item 欄出現非類別切點（欄位可能未宣告 categorical）——不解
                     # 類別碼、不動 reachable、不記 per-item 帳，只計異常（防呆，
-                    # 審查修復 2026-07-08；spec 定案明文 decision_type == "=="）。
+                    # 審查修復 2026-07-08）。A numeric split has no
+                    # categories_left, so there is no set of items to send left.
                     numeric_item_splits += 1
                     stack.append((row["left_child"], reachable, conditioned))
                     stack.append((row["right_child"], reachable, conditioned))
@@ -204,7 +219,7 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
                         first_tree_index[it] = t_idx
                 if not reachable:
                     continue
-                values, unknown = _decode_threshold(row["threshold"], categories)
+                values, unknown = _decode_codes(row["categories_left"], categories)
                 unknown_codes |= unknown
                 stack.append((row["left_child"], reachable & values, True))
                 stack.append((row["right_child"], reachable - values, True))
@@ -239,12 +254,12 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
     notes = []
     if unknown_codes:
         notes.append(
-            "item 切點 threshold 出現超出 categories 範圍的碼(已忽略): "
+            "item 切點的類別碼超出 categories 範圍(已忽略): "
             f"{sorted(unknown_codes)}"
         )
     if numeric_item_splits:
         notes.append(
-            f"item 欄出現 {numeric_item_splits} 筆非類別切點（decision_type != '=='）"
+            f"item 欄出現 {numeric_item_splits} 筆非類別切點（沒有 categories_left）"
             "——該欄可能未宣告 categorical；這些切點不參與 per-item 帳"
             "（item_id 帳按特徵名仍納入）"
         )
@@ -341,15 +356,19 @@ def _coarse_ledger(trees: pd.DataFrame, item_feature: str, n_trees: int) -> dict
 
 
 def compute_gain_ledger(model, preprocessor: dict, parameters: dict) -> dict:
-    """Thin wrapper：讀 config/schema，解析 booster 與 item 值映射後轉呼叫 ``_ledger_from_trees``。
+    """Thin wrapper：讀 config/schema，向 adapter 要樹的切點結構、取 item 值映射後轉呼叫 ``_ledger_from_trees``。
 
     ``diagnostics.gain_ledger.enabled``（預設 True）關閉時直接回 ``{"enabled": False}``，
     不觸碰 model。preprocessor 缺 ``category_mappings[item_col]`` 時降級為粗帳本。
 
+    A model with no tree structure (``UnsupportedCapability``) lands
+    ``{"enabled": True, "supported": False, "reason": ...}`` and the run goes
+    on. Any other exception is a bug and stops it (ADR-0030 decision 4).
+
     ``preprocessor`` is the dataset-built artifact, not the training-stage view.
     Unlike the other diagnosis nodes this one never slices X, so it needs only
     the *encoding* half of the artifact: ``category_mappings`` is the code-to-item
-    lookup the booster's integer split thresholds have to be read through, and
+    lookup the tree table's integer category codes have to be read through, and
     feature selection passes it through untouched either way (ADR-0014
     decision 7).
     """
@@ -358,9 +377,15 @@ def compute_gain_ledger(model, preprocessor: dict, parameters: dict) -> dict:
         return {"enabled": False}
 
     item_col = get_schema(parameters)["item"]
-    booster = _resolve_booster(model)
-    trees = booster.trees_to_dataframe()
-    n_trees = int(booster.num_trees())
+    # Decision — a model without trees skips the ledger, warns and says so in
+    # the artifact; evaluation reads that as its own reason, not as "turned
+    # off" or "never ran".
+    try:
+        trees = model.tree_structure()
+    except UnsupportedCapability as exc:
+        logger.warning("gain_ledger: skipped, the model cannot provide it: %s", exc)
+        return unsupported_artifact(exc)
+    n_trees = int(trees["tree_index"].nunique())
 
     categories = (preprocessor or {}).get("category_mappings", {}).get(item_col)
     if not categories:

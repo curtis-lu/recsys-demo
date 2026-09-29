@@ -341,6 +341,8 @@ SHAP 診斷主要回答三個問題：
 案例圖用來看「某位客戶在某象限被排高／排低，具體靠哪些特徵」，與 `per_quadrant.json` 的
 「平均驅動特徵」互補。SHAP 值在 log-odds（margin）尺上；正值把分數推高、負值拉低。
 
+**讀哪些月份、怎麼排名。** 只讀 `dataset.test_snap_dates` 的月份，預測表與 `test_model_input` 都是，跟上面的 SHAP 診斷描述同一批月份；表裡之前設定過、這次沒設定的月份不讀，所以成本不會跟著預測表的歷史變大。排名用跟 evaluation 同一條同分規則（分數，再比 item，宣告了 `event` 時再比 event 欄，見 `utils/ranking.py`），所以象限的第一名就是報表的第一名。分數欄照 `schema.columns.score`。這兩件是 #485 之後才成立：之前讀預測表的全部月份，同分只比 item。
+
 local Parquet cache 以 dataset IDs 分層，若目錄存在 `_SUCCESS` 便直接重用；若目錄存在但缺少 `_SUCCESS`，框架會視為不完整 cache 並重建。LightGBM `.bin` 的路徑另外帶上演算法、objective、特徵欄、權重鍵欄與快取格式版本，同樣是「有 `_SUCCESS` 就用」（見 §3.4）。
 
 `mlflow.strict: false` 時，MLflow 無法連線或 logging 失敗只會記 warning，不會讓已完成的 training 失敗；設為 `true` 時則會直接中止，適合要求 experiment tracking 必須成功的環境。
@@ -614,7 +616,13 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 
 前 4 個鍵一定存在，計分月份等於表裡的月份時，值跟改版前逐值相同。ADR-0028 之前寫的檔案只有前 4 個鍵。
 
-SHAP PNG 落於 `diagnostics/summary/` 子目錄：全域 beeswarm 為 `summary/shap_summary_global.png`；`per_item_beeswarm: true` 時每個 item 另有 `summary/per_item/shap_summary__<item>.png`（item 名稱以正規表達式安全化，特殊字元轉底線）。beeswarm 同時呈現 SHAP 幅度與方向。象限案例圖見下方象限診斷小節。
+SHAP PNG 落於 `diagnostics/summary/` 子目錄：全域 beeswarm 為 `summary/shap_summary_global.png`；`per_item_beeswarm: true` 時每個 item 另有 `summary/per_item/shap_summary__<item>.png`（item 名稱以正規表達式安全化，特殊字元轉底線）。beeswarm 同時呈現 SHAP 幅度與方向。象限案例圖見下方象限診斷小節。這些圖由 catalog 的 `shap_summary_figures`、`case_figures` 兩個條目寫（型別 `DiagnosticFiguresDataset`）：node 只交出每張圖的畫法，存檔時才一張一張畫、存、關。
+
+**診斷出錯時**（ADR-0030 決定 4）：
+
+- **模型做不到**：模型的 adapter 不提供那項能力（例如沒有樹的模型沒有切點結構，就沒有 gain 帳本）。那個診斷跳過、印一行 warning，產物寫成 `{"enabled": true, "supported": false, "reason": "..."}`；evaluation 的 model_capacity 會把原因報成「模型做不到」，跟「evaluation 單獨跑」「訓練側關掉」分得開。只有某個選項做不到時（`background: per_item`）降級成 `global`，寫進 `notes`。
+- **某一張圖畫不出來**：印 warning、跳過那一張，其他圖照存，training 不停。`cases_manifest.json` 仍記著那張圖的 `png`：圖是存檔時才畫的，manifest 早一步就寫好了。看到 manifest 指的檔案不存在時，對照 log 的 warning。
+- **其他錯誤**：training 停下。`model` 在診斷之前就落地了，修好之後用 `--from-node <出錯的診斷>` 接著跑，HPO 與重訓都不用重來。以前 `select_shap_population`、`compute_quadrant_profiles`、`compute_quadrant_cases` 會吞掉錯誤只印 warning，#485 之後不會。
 
 `manifest.json` 的 `artifacts` 清單只列版本目錄**第一層**檔案，**不含 `hpo/` 子目錄**（`hpo/model.txt`、`hpo/model_meta.json`）——稽核 manifest 時請知悉。`sample_weight_report.json` 與 `predict_manifest.json` 在第一層，所以它們在清單裡。
 
@@ -764,13 +772,15 @@ training 版本描述的是模型設定與上游資料身分，不是完整的�
 | `--from-node finalize_model` 仍補跑 HPO | 三個 HPO catalog outputs 有缺漏 | 先用 `--dry-run` 查看 auto-included，修復或重建缺少的產物 |
 | `n_queries = 0` 或 test 預測為空 | test input 沒資料、版本 partition 錯誤，或沒有可評估正例 query | 查 dataset test model input 與 `training_eval_predictions` partitions |
 | SHAP 過慢或記憶體不足 | `sample_rows × n_trees` 太大，或 feature 太多 | 降低 `sample_rows`、`top_k`、`max_budget`，或暫時關閉 SHAP |
+| `select_shap_population` 讓 training 停下 | 生產資料量下，排名結果的 persist 撐不住（#238 追蹤）；#485 之前這裡只會印 warning | 先把 `diagnostics.shap.quadrant_enabled` 設成 `false` 跑完，再照 #238 量 |
+| 診斷產物是 `{"enabled": true, "supported": false, ...}` | 模型的 adapter 不提供那項能力（`reason` 寫明是哪一項） | 不是設定能修的：換一個提供該能力的 adapter，或接受這項診斷沒有結果 |
 | MLflow 失敗但 training 顯示完成 | `mlflow.strict: false` 為 best-effort 模式 | 檢查 warning 與 tracking URI；需要硬性追蹤時設 `strict: true` |
 | `A57: training.algorithm=... is not a registered algorithm` | `training.algorithm` 未在 adapter registry 註冊；Spark 啟動前就擋下，訊息列出可用的名字 | 使用目前支援的 `lightgbm`，或先實作並註冊新的 ModelAdapter |
 | 部分重跑後模型、預測與診斷不一致 | `--only-node` 未重跑下游，或 skipped artifact 已過期 | 由較前方 node 接續或執行 full run，重新完成驗收 |
 
 ## 9. 限制與注意事項
 
-- 目前實際註冊的演算法 adapter 為 LightGBM；其他演算法需要另外實作 `ModelAdapter` 的每個方法（建原生訓練資料與存讀、帶早停訓練與回報最佳迭代數、predict、save/load、feature importance、MLflow），並在 `rules` 宣告自己的排序目標、排序 metric、預設 metric 與丟不丟無正例的 query group。
+- 目前實際註冊的演算法 adapter 為 LightGBM；其他演算法需要另外實作 `ModelAdapter` 的每個抽象方法（建原生訓練資料與存讀、帶早停訓練與回報最佳迭代數、predict、save/load、MLflow），並在 `rules` 宣告自己的排序目標、排序 metric、預設 metric 與丟不丟無正例的 query group。診斷用的三項能力是選用的：特徵歸因（SHAP）、樹的切點結構（gain 帳本）、內建重要度（split／gain）。做不到的不實作，ABC 的預設會丟 `UnsupportedCapability`，對應的診斷跳過並寫明「模型做不到」。
 - 模型訓練是 driver 上的單機 CPU 工作，不是 Spark distributed training；Spark 主要負責上游資料處理、Hive I/O 與 test 指標聚合。
 - train、train-dev、val 與 test 的 local Parquet 會占用 driver disk；cache 不會自動依版本數量清理。
 - feature statistics、SHAP 與部分模型資料抽取使用 pandas／NumPy，記憶體尖峰取決於 rows、features 與 tree 數。

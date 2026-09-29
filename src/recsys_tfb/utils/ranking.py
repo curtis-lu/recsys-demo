@@ -7,7 +7,9 @@ One rule, written twice — once per engine — and nowhere else:
   ``rank_predictions`` (the published ``rank``) and evaluation's
   ``metrics_spark.rank_within_query`` rank with it; the latter serves every
   metric pass in both modes, and ``prepare_eval_data`` and the comparison mode
-  use it to fill in or redo ``rank``.
+  use it to fill in or redo ``rank``. Training's quadrant diagnosis
+  (``diagnosis/model/population_spark.py``) ranks with it too, so its top-1 is
+  evaluation's top-1 when ``event`` is declared (ADR-0030 decision 12).
 * :func:`order_by_score_then_item` is the numpy twin for the driver: the metric
   primitives in ``evaluation/metrics.py`` (which HPO scores trials with), the
   metric diagnoses and their bootstrap.
@@ -18,14 +20,11 @@ Every one of those places used to spell the sort out itself — Spark as
 reached the window or the array, so the same rows could be ranked differently
 on every run and by each place, and nothing raises (ADR-0020 bug 11, #355).
 
-**What it does not cover.** Training's quadrant assignment
-(``diagnosis/model/population_spark.py``) already spells the same order inline;
-it ranks for a training diagnosis, not a published or evaluated rank. The
-manual spike scripts ``scripts/item_ability_diagnosis.py``,
-``scripts/suppression_ledger_diagnosis.py`` and
-``scripts/per_item_score_shift_optuna_diagnosis.py`` still sort with their own
-``np.lexsort`` and hand string items to the metric primitives; they predate
-``diagnosis/metric/`` and were left out of #355.
+**What it does not cover.** The manual spike scripts
+``scripts/item_ability_diagnosis.py``, ``scripts/suppression_ledger_diagnosis.py``
+and ``scripts/per_item_score_shift_optuna_diagnosis.py`` still sort with their
+own ``np.lexsort`` and hand string items to the metric primitives; they
+predate ``diagnosis/metric/`` and were left out of #355.
 
 **Why the item, and why ``event`` after it.** The query group is the window's
 partition, so what is left to tell two tied rows apart is the rest of the

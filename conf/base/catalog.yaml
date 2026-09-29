@@ -289,6 +289,20 @@ shap_diagnostics:
   type: JSONDataset
   filepath: data/models/${model_version}/diagnostics/shap_diagnostics.json
 
+# compute_shap_diagnostics／compute_quadrant_cases 回傳的是「每張圖的畫法」，這兩個
+# 條目在存的時候才逐張畫、存、關；某一張畫不出來只印警告、跳過那一張，其他照存
+# （ADR-0030 決定 4、7）。沒有 load：圖是給人看、給 log_experiment 上傳的，不是
+# 任何 node 的輸入。位置要在 diagnostics/ 底下，log_experiment 才會一起上傳；
+# case_figures 必須在 diagnostics/cases/，因為 cases_manifest 的 png 路徑寫的是
+# cases/<item>/<象限>_<角色>.png（diagnosis/model/shap_cases.py 的 _CASES_SUBDIR）。
+shap_summary_figures:
+  type: DiagnosticFiguresDataset
+  filepath: data/models/${model_version}/diagnostics/summary
+
+case_figures:
+  type: DiagnosticFiguresDataset
+  filepath: data/models/${model_version}/diagnostics/cases
+
 quadrant_profiles:
   type: JSONDataset
   filepath: data/models/${model_version}/diagnostics/per_quadrant.json

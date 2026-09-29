@@ -1,6 +1,7 @@
 """Tests for compute_quadrant_profiles (per-item×quadrant signed profile,純 python)."""
 import numpy as np
 import pandas as pd
+import pytest
 
 from tests.adapter_fits import fit_lightgbm
 from recsys_tfb.diagnosis.model.shap_cases import compute_quadrant_profiles
@@ -131,7 +132,7 @@ def test_quadrant_cases_manifest_complete_grid(tmp_path, monkeypatch):
     rows = _case_rows([
         ("A", "TP", "high", "c1", 0.9, 1, 1), ("A", "TP", "low", "c2", 0.5, 1, 1),
         ("A", "TN", "high", "c3", 0.4, 2, 0), ("A", "TN", "low", "c4", 0.1, 2, 0)])
-    out = compute_quadrant_cases(adapter, rows, _PREP, _cases_params())
+    out, figures = compute_quadrant_cases(adapter, rows, _PREP, _cases_params())
     assert set(out) == {"A"}
     assert set(out["A"]) == {"TP", "FP", "FN", "TN"}          # 完整 4 象限
     assert out["A"]["TP"]["high"]["rendered"] is True
@@ -141,11 +142,13 @@ def test_quadrant_cases_manifest_complete_grid(tmp_path, monkeypatch):
     assert out["A"]["TP"]["high"]["cust_id"] == "c1"
     assert out["A"]["TP"]["high"]["png"] == "cases/A/TP_high.png"
     assert out["A"]["TP"]["high"]["score"] == 0.9
-    # PNG 實際落地
-    base = tmp_path / "data/models/testmv_cases/diagnostics/cases/A"
-    assert (base / "TP_high.png").exists()
-    assert (base / "TP_low.png").exists()
-    assert not (base / "FP_high.png").exists()
+    # One chart per rendered case, at the path the manifest names under
+    # diagnostics/ (the case_figures entry is rooted at diagnostics/cases).
+    assert set(figures) == {"A/TP_high.png", "A/TP_low.png",
+                            "A/TN_high.png", "A/TN_low.png"}
+    assert all(f"cases/{path}" in {e.get("png") for c in out["A"].values()
+                                  for e in c.values()} for path in figures)
+    assert not list(tmp_path.rglob("*.png"))      # the node itself writes nothing
 
 
 def test_quadrant_cases_single_row_cell(tmp_path, monkeypatch):
@@ -154,25 +157,23 @@ def test_quadrant_cases_single_row_cell(tmp_path, monkeypatch):
     # A/TP 單行格:high 與 low 同一 cust(c1)。
     rows = _case_rows([
         ("A", "TP", "high", "c1", 0.9, 1, 1), ("A", "TP", "low", "c1", 0.9, 1, 1)])
-    out = compute_quadrant_cases(adapter, rows, _PREP, _cases_params())
+    out, figures = compute_quadrant_cases(adapter, rows, _PREP, _cases_params())
     assert out["A"]["TP"]["high"]["rendered"] is True
     assert out["A"]["TP"]["low"]["rendered"] is False
     assert out["A"]["TP"]["low"]["reason"] == "single_row_same_as_high"
-    base = tmp_path / "data/models/testmv_cases/diagnostics/cases/A"
-    assert (base / "TP_high.png").exists()
-    assert not (base / "TP_low.png").exists()               # 不產重複檔
+    assert set(figures) == {"A/TP_high.png"}                # 不產重複檔
 
 
 def test_quadrant_cases_empty_or_disabled(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     adapter = _trained_adapter()
-    assert compute_quadrant_cases(adapter, None, _PREP, _cases_params()) == {}
+    assert compute_quadrant_cases(adapter, None, _PREP, _cases_params()) == ({}, {})
     empty = _case_rows([])
-    assert compute_quadrant_cases(adapter, empty, _PREP, _cases_params()) == {}
+    assert compute_quadrant_cases(adapter, empty, _PREP, _cases_params()) == ({}, {})
     rows = _case_rows([("A", "TP", "high", "c1", 0.9, 1, 1),
                        ("A", "TP", "low", "c2", 0.5, 1, 1)])
     p = _cases_params(); p["diagnostics"]["shap"]["quadrant_enabled"] = False
-    assert compute_quadrant_cases(adapter, rows, _PREP, p) == {}
+    assert compute_quadrant_cases(adapter, rows, _PREP, p) == ({}, {})
 
 
 # ---- Task 3: wiring (pipeline + catalog) ----
@@ -191,6 +192,8 @@ def test_pipeline_wires_quadrant_nodes():
     assert "cases_manifest" in log_node.inputs
     sp = next(n for n in pipe.nodes if n.func.__name__ == "select_shap_population")
     assert sp.outputs == ["shap_population", "case_rows"]
+    cases = next(n for n in pipe.nodes if n.func.__name__ == "compute_quadrant_cases")
+    assert cases.outputs == ["cases_manifest", "case_figures"]
 
 
 def test_catalog_has_quadrant_profiles():
@@ -224,3 +227,93 @@ def test_config_has_case_top_k():
     p = Path(__file__).resolve().parents[3] / "conf" / "base" / "parameters_training.yaml"
     cfg = yaml.safe_load(p.read_text())["diagnostics"]["shap"]
     assert cfg["case_top_k"] == 15
+
+
+
+def test_catalog_writes_the_figures_where_the_pngs_always_were():
+    """ADR-0030 decision 7: same file names, same place. The case charts sit
+    under diagnostics/cases/ (the manifest's png paths start with ``cases/``),
+    the beeswarms under diagnostics/summary/."""
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(__file__).resolve().parents[3]
+    for catalog in (root / "conf/base/catalog.yaml",
+                    root / "examples/ad/conf/base/catalog.yaml"):
+        cat = yaml.safe_load(catalog.read_text())
+        assert cat["case_figures"] == {
+            "type": "DiagnosticFiguresDataset",
+            "filepath": "data/models/${model_version}/diagnostics/cases"}, catalog
+        assert cat["shap_summary_figures"] == {
+            "type": "DiagnosticFiguresDataset",
+            "filepath": "data/models/${model_version}/diagnostics/summary"}, catalog
+
+
+def test_case_chart_draws_the_rows_attributions():
+    """A drawing function is inspectable without a disk: its bars are the
+    case row's attributions, largest magnitude on top."""
+    import matplotlib.pyplot as plt
+
+    adapter = _trained_adapter()
+    rows = _case_rows([("A", "TP", "high", "c1", 0.9, 1, 1)])
+    _out, figures = compute_quadrant_cases(adapter, rows, _PREP, _cases_params())
+    fig = figures["A/TP_high.png"]()
+    try:
+        ax = fig.axes[0]
+        widths = [bar.get_width() for bar in ax.patches]
+        from recsys_tfb.io.extract import pdf_to_X
+        from recsys_tfb.models.feature_view import model_feature_view
+        X = pdf_to_X(rows, model_feature_view(adapter, _PREP), _cases_params())
+        expected = adapter.feature_attributions(X)[0]
+        assert sorted(widths, key=abs) == pytest.approx(sorted(expected, key=abs))
+        assert abs(widths[-1]) == pytest.approx(max(abs(expected)))
+        assert "A · TP · high · score=0.900 · rank=1 · label=1" in ax.get_title()
+    finally:
+        plt.close(fig)
+
+
+# ---- error policy (ADR-0030 decision 4) ----
+
+def _fake_model():
+    from tests.fake_adapter import FakeAdapter
+
+    rng = np.random.RandomState(0)
+    X = rng.randn(60, 2)
+    fake = FakeAdapter()
+    fake.train(fake.build_train_data(X, (X[:, 0] > 0).astype(float),
+                                     feature_names=["f0", "f1"], categorical_features=[]),
+               {}, num_iterations=5)
+    return fake
+
+
+def test_quadrant_diagnostics_skipped_when_the_model_cannot_attribute(caplog):
+    pop = _pop_from_counts({("A", "TP"): 12})
+    rows = _case_rows([("A", "TP", "high", "c1", 0.9, 1, 1)])
+    with caplog.at_level("WARNING"):
+        profiles = compute_quadrant_profiles(_fake_model(), pop, _PREP, _params())
+        cases, figures = compute_quadrant_cases(_fake_model(), rows, _PREP, _cases_params())
+    for out in (profiles, cases):
+        assert out["enabled"] is True and out["supported"] is False
+    assert figures == {}
+    assert sum("cannot attribute" in r.getMessage() for r in caplog.records) == 2
+
+
+@pytest.mark.parametrize("node", ["profiles", "cases"])
+def test_quadrant_failure_that_is_not_the_model_stops_the_run(node, monkeypatch):
+    """Today's broad ``except Exception`` is gone: mutation target — put it
+    back and this goes green-by-swallowing, i.e. red."""
+    adapter = _trained_adapter()
+
+    def bug(self, X, *, background=None):
+        raise KeyError("a bug, not a missing capability")
+
+    monkeypatch.setattr(type(adapter), "feature_attributions", bug)
+    with pytest.raises(KeyError, match="a bug"):
+        if node == "profiles":
+            compute_quadrant_profiles(
+                adapter, _pop_from_counts({("A", "TP"): 12}), _PREP, _params())
+        else:
+            compute_quadrant_cases(
+                adapter, _case_rows([("A", "TP", "high", "c1", 0.9, 1, 1)]),
+                _PREP, _cases_params())

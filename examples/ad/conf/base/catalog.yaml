@@ -215,6 +215,14 @@ shap_diagnostics:
   type: JSONDataset
   filepath: data/models/${model_version}/diagnostics/shap_diagnostics.json
 
+shap_summary_figures:
+  type: DiagnosticFiguresDataset
+  filepath: data/models/${model_version}/diagnostics/summary
+
+case_figures:
+  type: DiagnosticFiguresDataset
+  filepath: data/models/${model_version}/diagnostics/cases
+
 quadrant_profiles:
   type: JSONDataset
   filepath: data/models/${model_version}/diagnostics/per_quadrant.json

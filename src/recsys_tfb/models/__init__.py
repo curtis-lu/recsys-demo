@@ -3,6 +3,7 @@ from recsys_tfb.models.base import (
     DEFAULT_ALGORITHM,
     AlgorithmRules,
     ModelAdapter,
+    UnsupportedCapability,
     configured_algorithm,
     get_adapter,
 )

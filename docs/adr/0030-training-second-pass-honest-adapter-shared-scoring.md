@@ -107,6 +107,13 @@ LightGBM 專屬的解析（TreeExplainer、`trees_to_dataframe`、類別切點�
 > - **更正〈為什麼〉**：上文說第二個真的 adapter 會是兩階段的組合模型。照兩階段設計檔現在的寫法（§7），組合模型只實作 predict／save／load，訓練照舊逐組用單一模型的 adapter。所以本決定的**訓練那一半**，第二個實作是測試裡的假 adapter（`tests/fake_adapter.py`）；組合模型驗到的是評分那一半（決定 2）。要不要把介面拆成「只能評分」與「可以訓練」兩層，留給兩階段 spec 決定。拆之前的已知後果：一個只能評分的 adapter 註冊進登記表，會通過 A57，並在 A7 因為沒有 `rules` 而出錯。
 > - `.bin` 快取的判斷（快取能不能用、丟哪些組、權重為什麼不進 `.bin`）照票的範圍**沒有動**，仍在 `LightGBMAdapter.prepare_train_inputs` 裡，只是它內部改用 `build_train_data`／`save_train_data` 建檔；搬到 node 是 #483。診斷還在讀的 `.booster` 也還在，是 #485。
 
+> **實作註記（2026-09-29，#485，診斷的那一份）**：
+> - 選用能力都在 `models/base.py` 的 `ModelAdapter`，有預設實作、預設就丟 `UnsupportedCapability`（同檔）：`feature_attributions(X, *, background=None)`、`attribution_cost()`、`tree_structure()`、`feature_importance(kind)`。`feature_importance` 原本是抽象方法，改成選用。
+> - **比上文多一項：`attribution_cost()`。** SHAP 的預算閘要一個「每列歸因的成本」（今天是樹數），上文三件能力都沒涵蓋，它屬於歸因能力：實作 `feature_attributions` 的 adapter 也實作它。
+> - `background` 給了就是 interventional，沒給就是模型自己的參考（樹＝tree path dependent）。`feature_perturbation` 是 shap 的字彙，不進介面。
+> - 樹的切點結構是一張表，欄位是同檔的 `TREE_STRUCTURE_COLUMNS`：`trees_to_dataframe()` 的樹、節點、父子、深度、切點特徵與 gain，加上 `categories_left`（類別切點送往左子的類別碼 tuple，數值切點與葉是 `None`）。LightGBM 的 `"2||3||4"` 格式由 LightGBM adapter 解析；gain 帳本只看 `categories_left`。
+> - `LightGBMAdapter.booster` 拿掉了：它的 docstring 寫明只為診斷存在，#485 之後 `src/` 沒有讀它的地方。測試裡要看 LightGBM 自己的東西（迭代數、參數）的地方改讀 `_booster`。
+
 ## 決定 2　評分入口在 adapter：吃一張表、回分數
 
 **規則**：「拿一張表，用這個模型打分數」是 adapter 的事：挑模型自己要的特徵（以模型為準，`models/feature_view.py` 的 `model_feature_view`）、把類別換成編號、建矩陣、預測。training 的 test 預測、inference 的評分、SHAP 類診斷要「模型眼中的矩陣」時，都走這個入口。預設實作共用 `io/extract.py` 的編碼路徑（決定 12 第 4 件）；組合模型覆寫它。
@@ -166,6 +173,13 @@ adapter 也說出「評分要讀哪些欄」：模型的特徵，加上組合模
 
 **已知的後果**：`select_shap_population` 對排名結果 `persist` 的峰值，在生產資料量下有多大由 #238 追蹤。撐不住時，今天只會警告，本份之後會停下；遇到時先把 `diagnostics.shap.quadrant_enabled` 設成 `false` 跑完，再照 #238 量。
 
+> **實作註記（2026-09-29，#485）**：
+> - 第四種形狀是 `{"enabled": True, "supported": False, "reason": <adapter 的訊息>}`，由 `diagnosis/model/_util.py` 的 `unsupported_artifact` 產生。`enabled` 留 `True`：沒有人關掉它。
+> - 用到這個形狀的是五個會問模型的診斷：`feature_importance`、`gain_ledger`、`shap_diagnostics`、`per_quadrant`（`quadrant_profiles`）、`cases_manifest`。上文說「其他會被別的 pipeline 讀的診斷產物照同一個做法」：實查被別的 pipeline 讀的只有 `gain_ledger.json`；另外四個照樣用這個形狀，因為 `log_experiment` 讀它們記 MLflow 的純量，不認得的話會記一個 0（「看了、沒有」），跟「沒看」相反。讀的一方各自認 `supported is False`：evaluation 的 `model_capacity` 多一種原因（`diagnosis/metric/model_capacity/_compute.py`）、`log_experiment` 不記那個純量（`steps/experiment_log.py` 的 `_has_result`）、`scripts/model_capacity_diagnosis.py` 停下並印出原因。
+> - `compute_feature_statistics` 沒有動：它不問模型的選用能力。`select_shap_population` 也不問模型，所以它沒有「模型做不到」，拿掉吞錯之後出錯就停。它 `finally` 裡釋放 persist 失敗時照舊只記 log：在 `finally` 裡 raise 會蓋掉 body 正在往上拋、說明出錯原因的那個例外。
+> - `per_item` 探針只接 `UnsupportedCapability`。降級的 note 照舊寫出底層函式庫的例外型別（`exc.__cause__`），不寫 `UnsupportedCapability`，讀者看到的字跟以前一樣。
+> - shap 丟的任意例外都由 LightGBM adapter 轉成 `UnsupportedCapability`（上文的規則），代價是 shap 自己的 bug 也會被讀成「做不到」、只警告不停下。只在 adapter 這一處接，node 不認得 shap 的例外型別；寫在 `LightGBMAdapter.feature_attributions` 的 docstring。
+
 ## 決定 5　寫出評分結果前的守衛與組表，放一個頂層模組；只共用機制
 
 **規則**：新開頂層模組 `recsys_tfb/score_output.py`（名字是品味題，實作時可換，但要用領域命名，不叫 shared／common，node 規則 12）。它只放跟模型無關、兩條 pipeline 都成立的機制：
@@ -224,6 +238,13 @@ node 回傳的是**每張圖的畫法**（一張圖一個函式），不是畫�
 某一張畫不出來時，這個 dataset 印警告、跳過那一張、繼續存其他的（決定 4 的畫圖例外），跟今天的行為相同。這是這個 dataset 型別明文的行為，只適用於診斷圖。
 
 **為什麼**：node 不碰磁碟，測試可以直接呼叫畫法檢查圖；新診斷照同一個做法。另一條路是讓 node 自己存、兩個 node 登記進 R4（`architecture-constraints.md` A1 例外二），那要使用者簽核，而且把「自己寫檔」這個例外擴大。
+
+> **實作註記（2026-09-29，#485）**：
+> - 型別是 `io/diagnostic_figures_dataset.py` 的 `DiagnosticFiguresDataset`：`save({相對路徑: 畫法})`，每個畫法回傳一張 matplotlib figure，存完就關，畫的途中開出來的 figure 不論成敗都關；某一張出任何錯都只警告、跳過。沒有 `load`（圖不是任何 node 的輸入）。畫法在 `diagnosis/model/figures.py`（`beeswarm`、`signed_bars`）。
+> - catalog 兩個新條目：`shap_summary_figures`（`diagnostics/summary`）、`case_figures`（`diagnostics/cases`），`conf/base/catalog.yaml` 與 `examples/ad/conf/base/catalog.yaml` 都加了。所以 `compute_shap_diagnostics` 的輸出是 `["shap_diagnostics", "shap_summary_figures"]`，`compute_quadrant_cases` 是 `["cases_manifest", "case_figures"]`。檔名與位置不變。這兩個圖條目沒有接到 `log_experiment`：Runner 存一個 node 的輸出時一起存，`cases_manifest`、`shap_diagnostics` 已經是 `log_experiment` 的輸入，圖就一定在上傳前落地。
+> - **跟上文不同的一處：`cases_manifest.json` 不再寫得出 `reason: render_failed`。** manifest 是 node 的輸出，在任何一張圖被畫之前就寫好了，node 不知道哪一張會失敗。`rendered: True` 的意思變成「這個案例的圖交給了 catalog」；交出去之後畫不出來，是一行 warning 加一個不存在的檔案（決定 4 說的「在 MLflow 上看得出來」）。MLflow 的 `n_cases_rendered` 跟著變成數「交出去的圖」。正常路徑的 manifest 內容不變。
+> - `diagnosis/model/paths.py` 的 `summary_dir`、`per_item_summary_dir`、`cases_dir` 刪掉，子目錄由 dataset 寫檔時建；沒有圖要畫時，不再先建一個空的 `cases/` 或 `summary/per_item/`。
+> - 決定 6 要的「`conf/` diff 為空」從這張之後拿得到：catalog 為圖改的兩個條目在這張。
 
 ## 決定 8　`Node` 可以照名字傳參數；每個診斷 node 都接成 `log_experiment` 的輸入
 
@@ -333,6 +354,11 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 另外兩件會改變診斷輸出，刻意列出來：
 - **`select_shap_population` 只讀這次設定的 test 月份**（`dataset.test_snap_dates`），跟 `compute_shap_diagnostics` 一致（node 規則 14）。今天它讀預測表與 `test_model_input` 的全部月份。
 - **它的排名改用 `utils/ranking.py` 的 `rank_by_score_then_item`。** 今天它自己寫排名，同分時只比 item、不比 `event`；宣告了 `event` 時，象限的第一名可能跟 evaluation 的排名不同。
+
+> **實作註記（2026-09-29，#485，象限那兩件）**：
+> - 月份篩選照 `compute_test_metrics` 的比法（當文字比，`steps/scored_months.py` 的 `restrict_to_scored_months`），但**寫在 `diagnosis/model/population_spark.py` 裡，沒有 import 它**：函式庫模組不得 import pipeline 的 `steps/`（S3），而決定 6 之前這個 node 的 `def` 還在函式庫裡。決定 6 把 node 搬回 training 時改呼叫那個函式，這份就消失。
+> - `dataset.test_snap_dates` 空的時候停下，不再退回讀整張表。A36 在 Spark 啟動前就擋這個設定，這裡只是執行期的保險。
+> - 排名、取極值的 window 用 `schema` 的分數欄；交給 `compute_quadrant_cases` 的欄仍叫 `score`（決定 5）。
 
 **不收的效率項**（影響可能很小，或要先量）：診斷抽樣要整份從頭掃、`compute_test_metrics` 的中間表沒 persist、`extract_Xy` 開同一份 parquet 四五次、`persist_sample_weight_report` 每次整欄讀權重鍵。
 

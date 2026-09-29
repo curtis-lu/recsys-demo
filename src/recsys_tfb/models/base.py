@@ -21,6 +21,16 @@ The native training data is opaque to callers on purpose. They hand back what
 :meth:`ModelAdapter.build_train_data` / :meth:`ModelAdapter.load_train_data`
 returned and never look inside it; that is what keeps a LightGBM ``Dataset``
 out of the pipeline.
+
+The training diagnostics ask three more things of a model — per-row feature
+attributions, the split structure of its trees, and its built-in feature
+importance — and those are optional (ADR-0030 decision 4). A model that
+cannot answer raises :class:`UnsupportedCapability`, and the diagnosis that
+asked is skipped with a warning instead of stopping the run. Every other
+exception is a bug and stops it. So an adapter answers in algorithm-neutral
+terms or raises that one exception; the library's own objects and its own
+errors (a SHAP explainer that cannot parse a split, say) stay on the adapter's
+side.
 """
 
 from abc import ABC, abstractmethod
@@ -31,6 +41,23 @@ import numpy as np
 
 if TYPE_CHECKING:
     import pandas as pd
+
+
+class UnsupportedCapability(Exception):
+    """This model cannot do an optional operation a diagnosis asked for.
+
+    Normal, not a bug: a model without trees has no split structure. The one
+    exception a diagnosis catches (ADR-0030 decision 4) — which is why it is
+    its own class rather than ``NotImplementedError``, which half-written code
+    raises too, or whatever the underlying library happened to throw.
+    """
+
+
+#: The columns of :meth:`ModelAdapter.tree_structure`, one row per node.
+TREE_STRUCTURE_COLUMNS = (
+    "tree_index", "node_index", "parent_index", "left_child", "right_child",
+    "node_depth", "split_feature", "split_gain", "categories_left",
+)
 
 
 @dataclass(frozen=True)
@@ -294,14 +321,76 @@ class ModelAdapter(ABC):
         ...
 
     @abstractmethod
-    def feature_importance(self, kind: str = "split") -> dict[str, float]:
-        """Return {feature_name: importance_score}. kind in {"split","gain"}."""
-        ...
-
-    @abstractmethod
     def log_to_mlflow(self) -> None:
         """Log the model artifact using the algorithm's MLflow integration."""
         ...
+
+    # -- optional: what the diagnostics ask of the model ------------------------
+    #
+    # Each raises UnsupportedCapability unless the adapter overrides it, so an
+    # algorithm without trees trains, predicts and logs like any other and
+    # only loses the diagnoses that need them.
+
+    def feature_attributions(
+        self, X: np.ndarray, *, background: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """How much each column of ``X`` moved each row's score:
+        ``(n_rows, n_columns)``, in the units :meth:`predict` scores in,
+        columns in ``X``'s order.
+
+        ``background=None`` attributes against the model's own reference —
+        for trees, the training rows each split saw. A ``background`` matrix
+        attributes against those rows instead ("interventional"); a model
+        that can attribute only the first way raises
+        :class:`UnsupportedCapability` for the second, and the diagnosis
+        falls back to the first.
+        """
+        raise UnsupportedCapability(
+            f"{type(self).__name__} does not attribute scores to features")
+
+    def attribution_cost(self) -> int:
+        """What attributing one row costs, relative to other models: the SHAP
+        diagnosis caps ``rows x cost`` at ``diagnostics.shap.max_budget``.
+
+        Part of the attribution capability — an adapter that implements
+        :meth:`feature_attributions` implements this too. For a tree ensemble
+        it is the number of trees.
+        """
+        raise UnsupportedCapability(
+            f"{type(self).__name__} does not attribute scores to features")
+
+    def tree_structure(self) -> "pd.DataFrame":
+        """Every node of every tree, one row each, with the columns in
+        :data:`TREE_STRUCTURE_COLUMNS`.
+
+        - ``tree_index``: which tree. ``node_index``: the node's id, unique
+          across the model. ``parent_index``: the parent's id, missing at a
+          root. ``left_child`` / ``right_child``: the children's ids, missing
+          at a leaf. ``node_depth``: 1 at the root.
+        - ``split_feature``: the feature name the node splits on; missing at a
+          leaf. ``split_gain``: what the split gained; missing at a leaf.
+        - ``categories_left``: for a split on a categorical feature, the
+          category codes (the preprocessor's integer codes) sent to the left
+          child, as a tuple of ints; every other code goes right. ``None``
+          for a numeric split and for a leaf.
+
+        A walk from the root is what the gain ledger needs — which items can
+        still reach a node — so a flat list of "feature, gain" pairs would not
+        do.
+        """
+        raise UnsupportedCapability(
+            f"{type(self).__name__} has no tree structure")
+
+    def feature_importance(self, kind: str = "split") -> dict[str, float]:
+        """``{feature_name: importance}`` from the model's own bookkeeping.
+
+        ``kind="split"``: how many splits use the feature. ``kind="gain"``:
+        what those splits gained in total. That is a tree ensemble's
+        vocabulary; a model that keeps no such count raises
+        :class:`UnsupportedCapability` rather than inventing one.
+        """
+        raise UnsupportedCapability(
+            f"{type(self).__name__} keeps no split or gain importance")
 
 
 ADAPTER_REGISTRY: dict[str, type[ModelAdapter]] = {}

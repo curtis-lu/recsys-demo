@@ -60,7 +60,7 @@ python -m recsys_tfb training --env local --only-node compute_gain_ledger
 - `context`：**已條件化**（conditioned，路徑上已經過至少一個產品 id 切點）的 context 切點全帳，`split_count`／`gain_sum`／`gain_share`。這是「模型花在個人化上的總容量」。
 - `per_item`：每個產品一列，七欄。最重要的是 **`context_gain_share`**——這個產品分到的 context Gain 占「所有產品 context Gain 總和」的比例，是這張帳最該先看的一欄；份額低代表個人化 Gain 少，但分不出是餓死型還是特徵缺失型（§2.3）。其餘：`context_split_count`（該產品的個人化切點數）、`context_gain`（累積 Gain）、`context_gain_isolated`（只在「可達集合只剩這一個產品」時累積的 Gain，見 §2.4 陷阱）、`isolating_split_count`（把這個產品隔出來的產品 id 切點數）、`first_tree_index`（第一次出現在第幾棵樹）、`trees_touched`（這個產品出現過的**所有**樹序號的排序清單——是一個 list，不是計數；要「總共幾棵樹」自己取長度）。
 
-停用（`diagnostics.gain_ledger.enabled: false`）時只寫 `{"enabled": false}`。
+停用（`diagnostics.gain_ledger.enabled: false`）時只寫 `{"enabled": false}`。模型沒有樹的切點結構時（它的 adapter 不提供這項能力，ADR-0030 決定 4），寫 `{"enabled": true, "supported": false, "reason": "..."}`，training 照樣跑完。`model_capacity` 診斷頁會把這三種缺席分開寫：evaluation 單獨跑（沒有檔案）、訓練側關掉、模型做不到。
 
 ### 2.3 示例走讀：冷門基金的個人化 Gain 偏低
 
