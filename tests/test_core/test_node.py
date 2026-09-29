@@ -36,6 +36,32 @@ class TestNode:
         assert "b" in r
 
 
+class TestNodeDictInputs:
+    """``inputs={parameter: dataset}`` (ADR-0030 decision 8)."""
+
+    def test_inputs_stays_the_dataset_names_in_dict_order(self):
+        """Sort, slicing and the catalog check read ``inputs``; they need the
+        dataset names, not the parameter names."""
+        node = Node(func=dummy_func, inputs={"x": "ds_b", "y": "ds_a"}, outputs="c")
+        assert node.inputs == ["ds_b", "ds_a"]
+        assert node.keyword_inputs == {"x": "ds_b", "y": "ds_a"}
+
+    def test_a_list_keeps_binding_by_position(self):
+        assert Node(func=dummy_func, inputs=["a"], outputs="c").keyword_inputs is None
+
+    def test_a6_sees_the_dataset_name_not_the_parameter_name(self):
+        with pytest.raises(ValueError, match=r"\['ds'\]"):
+            Node(func=dummy_func, inputs={"x": "ds"}, outputs="ds")
+
+    @pytest.mark.parametrize("argument", ["outputs", "writes"])
+    def test_a_dict_anywhere_else_is_refused(self, argument):
+        """Before dict inputs meant anything, a dict was read as its keys,
+        silently. Only ``inputs`` gives a dict a meaning; elsewhere that old
+        reading would still be silent, so it raises instead."""
+        with pytest.raises(TypeError, match=f"`{argument}` takes a name"):
+            Node(func=dummy_func, inputs="a", **{argument: {"k": "v"}})
+
+
 class TestNodeWrites:
     """``writes`` declares the datasets a node saves to itself (A1 / R1)."""
 

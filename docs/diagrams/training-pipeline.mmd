@@ -21,8 +21,8 @@
 %%   虛線邊          宣告了但函式根本沒讀的參數：純排序用（本圖只有一條，見下）
 %%   [V][P][M][T][L] 接點記號，兩種方向：
 %%                  V/P/M/T 標在**產物**上，node 框內的「＋ P · M」代表它同時吃這幾個；
-%%                  L 反過來標在產物上，代表「log_experiment 吃它」——它一個人吃九個
-%%                  輸入，九條線畫出來會蓋掉整張圖。
+%%                  L 反過來標在產物上，代表「log_experiment 吃它」——它一個人吃十個
+%%                  輸入，十條線畫出來會蓋掉整張圖。
 %%                  V=preprocessor_view（5 個消費者）、P=preprocessor（6 個）、
 %%                  M=model（8 個）、T=train_parquet_handle（4 個）。
 %%                  **V 與 P 是兩份不同的東西，不是同一份的兩個名字**——見下方
@@ -265,7 +265,7 @@ flowchart TB
     direction TB
     n_fstat["compute_feature_statistics<br/><small>＋ T · <b>M</b> · P ・ 只讀抽中的列<br/><b>吃 model 是刻意耦合</b>：它把這個 node 推到 finalize_model<br/>之後，接續執行要多付一段（見 test_resume_contracts.py）</small>"] --> o_fstat(["feature_statistics　<b>[L]</b>"])
     n_fimp["compute_feature_importance<br/><small>＋ M</small>"] --> o_fimp(["feature_importance　<b>[L]</b>"])
-    n_gain["compute_gain_ledger<br/><small>＋ M · P ・ 逐樹逐切點記帳</small>"] --> o_gain(["gain_ledger<br/><small>evaluation 的 model_capacity 吃 ・ catalog optional<br/>唯一不是 log_experiment 輸入的診斷（沒有 scalar 進 MLflow）<br/>檔案本身仍隨 log_artifacts 整個 diagnostics/ 上傳</small>"])
+    n_gain["compute_gain_ledger<br/><small>＋ M · P ・ 逐樹逐切點記帳</small>"] --> o_gain(["gain_ledger　<b>[L]</b><br/><small>evaluation 的 model_capacity 吃 ・ catalog optional<br/>log_experiment 吃它，但不讀（沒有 scalar 進 MLflow）<br/>這條邊保證檔案在 log_artifacts 上傳前寫好</small>"])
     n_shap["compute_shap_diagnostics<br/><small>＋ M · P ・ 單次 shap_values 兩用</small>"] --> o_shap(["shap_diagnostics　<b>[L]</b>"])
     n_qprof["compute_quadrant_profiles<br/><small>＋ M · P ・ per-(item×象限) 平均 signed profile</small>"] --> o_qprof(["quadrant_profiles　<b>[L]</b>"])
     n_qcase["compute_quadrant_cases<br/><small>＋ M · P ・ 每格極值案例單列圖</small>"] --> o_qcase(["cases_manifest　<b>[L]</b>"])
@@ -280,7 +280,7 @@ flowchart TB
   n_log[/"log_experiment<br/><small>＋ M · 全部標 <b>[L]</b> 的產物 ・ outputs=None<br/>切片執行時整個 node 會被跳過（F5）</small>"\]
 
   o_evalres --> n_log
-  o_qcase -- "簽名置末：保證 cases 圖與 manifest<br/>在 log_artifacts 之前寫好" --> n_log
+  o_qcase -- "這條邊保證 cases 圖與 manifest<br/>在 log_artifacts 之前寫好" --> n_log
 
   %% ---------------------------- 樣式 -----------------------------
   classDef src fill:#a5d8ff,stroke:#1971c2,stroke-width:1.5px,color:#0b3d6b

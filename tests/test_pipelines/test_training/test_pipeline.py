@@ -208,6 +208,90 @@ class TestTrainingPipeline:
         assert names.index("select_features") < names.index("prepare_train_inputs")
 
 
+class TestLogExperimentWiring:
+    """ADR-0030 decision 8: ``log_experiment`` takes every diagnosis by name,
+    and every diagnosis file is on disk before it uploads ``diagnostics/``."""
+
+    # The seven diagnosis nodes (ADR-0030 decision 7), plus the HPO node,
+    # which writes the search diagnostics under diagnostics/hpo/ itself.
+    UPSTREAM_OF_THE_UPLOAD = (
+        "compute_feature_statistics", "compute_feature_importance",
+        "compute_gain_ledger", "compute_shap_diagnostics",
+        "select_shap_population", "compute_quadrant_profiles",
+        "compute_quadrant_cases", "tune_hyperparameters",
+    )
+
+    @staticmethod
+    def _log_node(pipeline):
+        return next(n for n in pipeline.nodes if n.name == "log_experiment")
+
+    def test_every_parameter_is_wired_by_name(self):
+        """By name, so no parameter depends on its position; and every one
+        wired, so none can fall back on a default without anyone noticing."""
+        import inspect
+
+        from recsys_tfb.pipelines.training.nodes import log_experiment
+
+        node = self._log_node(create_pipeline())
+        assert node.keyword_inputs is not None
+        assert set(node.keyword_inputs) == set(
+            inspect.signature(log_experiment).parameters)
+
+    def test_every_node_landing_a_diagnosis_file_feeds_it_directly(self):
+        """Which files land in diagnostics/ comes from the catalog, so a new
+        diagnosis is covered without editing this test.
+
+        Direct, not merely upstream: one of the node's own outputs is an
+        input, so the Runner has saved every output of that node — the
+        figures beside the JSON included — before ``log_experiment`` loads it.
+        """
+        import yaml
+
+        root = Path(__file__).resolve().parents[3]
+        catalog = yaml.safe_load((root / "conf" / "base" / "catalog.yaml").read_text())
+        in_diagnostics = {
+            name for name, entry in catalog.items()
+            if "/diagnostics/" in str((entry or {}).get("filepath", ""))
+        }
+        pipeline = create_pipeline()
+        wired = set(self._log_node(pipeline).inputs)
+        producers = {
+            n.name: set(n.outputs) for n in pipeline.nodes
+            if set(n.outputs) & in_diagnostics
+        }
+
+        assert producers.keys() >= {
+            "compute_feature_statistics", "compute_feature_importance",
+            "compute_gain_ledger", "compute_shap_diagnostics",
+            "compute_quadrant_profiles", "compute_quadrant_cases",
+        }, "the catalog read found fewer diagnosis nodes than exist"
+        assert sorted(
+            name for name, outputs in producers.items() if not outputs & wired
+        ) == []
+
+    def test_everything_it_uploads_is_upstream_in_any_valid_order(self):
+        """Ancestors in the graph, not just earlier in today's sort.
+
+        Shuffling the declaration order cannot show a missing edge here: the
+        sort is first-in-first-out, and a node that only needs ``model`` is
+        queued long before ``log_experiment`` can be. Checked on the wiring
+        before decision 8: 2,001 orders, ``compute_gain_ledger`` ahead in
+        every one — the luck the ADR describes, not proof of an edge.
+        """
+        pipeline = create_pipeline()
+        producer = {out: n for n in pipeline.nodes for out in n.outputs}
+        ancestors, frontier = set(), [self._log_node(pipeline)]
+        while frontier:
+            for name in frontier.pop().inputs:
+                node = producer.get(name)
+                if node is not None and node.name not in ancestors:
+                    ancestors.add(node.name)
+                    frontier.append(node)
+
+        missing = sorted(set(self.UPSTREAM_OF_THE_UPLOAD) - ancestors)
+        assert missing == []
+
+
 class TestSampleWeightReportIsACatalogArtifact:
     """`sample_weight_report` stopped being a fake output (ADR-0014 決定 2).
 

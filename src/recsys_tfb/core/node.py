@@ -1,6 +1,16 @@
 class Node:
     """Wraps a function with named inputs and outputs for pipeline execution.
 
+    ``inputs`` is a list, bound to the function **by position**, or a
+    ``{parameter name: dataset name}`` dict, bound **by name** — Kedro's dict
+    inputs, same meaning (ADR-0030 decision 8). By name is what lets a node
+    take a new input anywhere in its signature: by position a new optional
+    input can only go last, and a slip there is swallowed by its trailing
+    ``=None``. Either way ``self.inputs`` is the list of dataset names —
+    topological sort, slicing and the Runner's catalog check all read that —
+    and the dict is kept beside it in ``self.keyword_inputs`` (``None`` for a
+    list).
+
     ``writes`` names the datasets this node saves to **itself**, rather than
     returning data for the Runner to save. Those datasets are handed to the
     function as catalog dataset objects (see ``core/runner.py``), bound **by
@@ -21,18 +31,29 @@ class Node:
 
     def __init__(self, func, inputs=None, outputs=None, name=None, writes=None):
         self.func = func
-        self.inputs = self._normalize(inputs)
-        self.outputs = self._normalize(outputs)
-        self.writes = self._normalize(writes)
         self.name = name or func.__name__
+        if isinstance(inputs, dict):
+            self.keyword_inputs = dict(inputs)
+            self.inputs = list(inputs.values())
+        else:
+            self.keyword_inputs = None
+            self.inputs = self._normalize(inputs, "inputs")
+        self.outputs = self._normalize(outputs, "outputs")
+        self.writes = self._normalize(writes, "writes")
         self._validate()
 
-    @staticmethod
-    def _normalize(value):
+    def _normalize(self, value, argument):
         if value is None:
             return []
         if isinstance(value, str):
             return [value]
+        if isinstance(value, dict):
+            # ``list(dict)`` would quietly keep the keys — the way a dict
+            # passed as ``inputs`` used to be read before it meant anything.
+            raise TypeError(
+                f"Node '{self.name}': only `inputs` takes a {{parameter: "
+                f"dataset}} dict; `{argument}` takes a name or a list of names."
+            )
         return list(value)
 
     def _validate(self):

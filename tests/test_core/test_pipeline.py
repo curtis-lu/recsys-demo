@@ -24,6 +24,14 @@ class TestPipeline:
         names = [n.name for n in pipe.nodes]
         assert names == ["A", "B"]
 
+    def test_dict_inputs_order_by_the_dataset_name(self):
+        """The edge runs through the dataset name ``x``, not the parameter
+        name ``value``; declared consumer-first, so only the edge sorts it."""
+        node_a = Node(func=source, outputs=["x"], name="A")
+        node_b = Node(func=identity, inputs={"value": "x"}, outputs=["y"], name="B")
+        pipe = Pipeline([node_b, node_a])
+        assert [n.name for n in pipe.nodes] == ["A", "B"]
+
     def test_independent_nodes(self):
         node_a = Node(func=source, outputs=["x"], name="A")
         node_b = Node(func=source, outputs=["y"], name="B")

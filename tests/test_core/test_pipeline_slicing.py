@@ -144,6 +144,32 @@ class TestSliceFrom:
         assert plan.auto_included == {}
 
 
+class TestDictInputs:
+    """A node with ``inputs={parameter: dataset}`` slices by its dataset
+    names (ADR-0030 decision 8). Parameter names are chosen to collide with
+    nothing, so a slice that read them would find no producer at all."""
+
+    @staticmethod
+    def _chain():
+        return Pipeline([
+            _n("A", outputs="a"),
+            _n("B", inputs={"upstream": "a"}, outputs="b"),
+            _n("C", inputs={"first": "b", "second": "a"}, outputs="c"),
+        ])
+
+    def test_from_node_pulls_back_the_producer_of_a_missing_dataset(self):
+        can_load = lambda name: name != "b"
+        pipe, plan = self._chain().slice_from("C", can_load)
+        assert [n.name for n in pipe.nodes] == ["B", "C"]
+        assert plan.auto_included == {"B": ("b",)}
+
+    def test_only_node_pulls_back_the_producer_of_a_missing_dataset(self):
+        can_load = lambda name: name != "a"
+        pipe, plan = self._chain().slice_only("B", can_load)
+        assert [n.name for n in pipe.nodes] == ["A", "B"]
+        assert plan.auto_included == {"A": ("a",)}
+
+
 class TestSliceOnly:
     def test_single_node_when_inputs_loadable(self):
         pipe, plan = _chain().slice_only("C", ALL_LOADABLE)

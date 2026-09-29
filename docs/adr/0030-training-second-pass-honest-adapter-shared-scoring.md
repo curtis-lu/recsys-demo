@@ -266,6 +266,14 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 
 **連帶**：`architecture-constraints.md` 的 F4（Node 極薄）與 A1 例外一（「`inputs` 位置對應」）要跟著改寫。動 `core/` 之前照路由表先讀那一份。
 
+> **實作註記（2026-09-30，#486）**：
+> - `Node` 多一個屬性 `keyword_inputs`：dict 寫法時是那份 `{參數名: dataset 名}`，清單寫法時是 `None`。`Node.inputs` 照舊是 dataset 名清單，Runner 看 `keyword_inputs` 決定照位置或照名字傳。`outputs`、`writes` 收到 dict 改成建構期 raise `TypeError`：它們跟 `inputs` 用同一個 `_normalize`，以前一樣會把 dict 讀成它的鍵，放行等於把同一個陷阱留在那兩處。
+> - `log_experiment` 多一個參數 `gain_ledger`（不讀，只為了那條邊），而且**所有參數都拿掉了預設值**。照名字傳之後，`=None` 吞得掉的錯從「位置錯」換成「漏接」：字典少一個鍵，有預設值的參數會安靜收到 `None`。沒有預設值，漏接就在呼叫時報錯；另有測試檢查字典的鍵與簽章的參數一一對上（`tests/test_pipelines/test_training/test_pipeline.py` 的 `TestLogExperimentWiring`）。
+> - **跟票不同的一處：兩個圖條目（`shap_summary_figures`、`case_figures`）沒有接成輸入。** #486 寫「含診斷那張票新增的圖」，但決定 7 的實作註記（#485）已經說明不接的理由：圖 dataset 沒有 `load`，而產圖的 node 的另一個輸出（`shap_diagnostics`、`cases_manifest`）已經是輸入——Runner 存完一個 node 的全部輸出才跑下一個，圖一定在上傳前落地。「每個診斷 node 都有邊」照樣成立。
+> - **跟票不同的第二處：驗收測試的形狀。** 票寫「把 node 宣告順序打亂，診斷照樣在 `log_experiment` 之前」。實查打亂擋不住漏接：拓撲排序是先進先出，只吃 `model` 的 node 在 `log_experiment` 能排進佇列之前就排進去了。在決定 8 之前的接線上試了 2,001 種宣告順序，`compute_gain_ledger` 每一種都排在前面——上文說的「運氣」，而且是穩定的運氣，打亂看不出來。改成兩個不依賴排序演算法的測試：(1) 每個在 `diagnostics/` 落檔的 node（從 catalog 推，之後加的診斷自動涵蓋）都有一個輸出直接是 `log_experiment` 的輸入；(2) 七個診斷 node 加 `tune_hyperparameters` 都是 `log_experiment` 在圖上的祖先，也就是在任何合法順序下都排在它前面。
+> - 跳過 HPO 時沒有 `diagnostics/hpo/`：`log_experiment` 不以它為輸入、上傳整個目錄，所以本來就不等它；補了一個測試釘住（`test_log_experiment_records_a_run_without_hpo_search_diagnostics`）。
+> - 加一個新診斷要改的地方：node 本身、`pipeline.py`（新的 `Node(...)` 與 `log_experiment` 字典的一個鍵）、catalog 條目、`log_experiment` 一個具名參數（放在簽章哪裡都行）。
+
 ## 決定 9　兩個格式版本號：模型的、預測的
 
 「同一個 `model_version` 的預測不會變」是 test 預測跳過已寫月份的前提（`steps/predict_months.py`）；「同一個 `search_id` 的 trial 可以接著用」是 HPO 續跑的前提。程式改了、設定沒動時，這兩個前提都會靜默破掉。但兩種改動的代價差很多：重跑 HPO 在生產是小時級，重寫預測只是評分。所以分成兩個整數常數：

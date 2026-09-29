@@ -439,6 +439,73 @@ class TestNodePhaseTiming:
         assert phases >= rec.duration_seconds - 0.05
 
 
+class TestDictInputs:
+    """``Node(inputs={parameter: dataset})`` binds by name (ADR-0030 decision 8)."""
+
+    def test_each_dataset_reaches_the_parameter_its_key_names(self):
+        """Parameter names differ from the dataset names and the dict lists
+        them in a different order from the signature. Every value is a
+        string, so binding by position would raise nothing and hand each
+        parameter the wrong one; only binding by name passes."""
+        captured: dict = {}
+
+        def node_fn(alpha, beta, gamma):
+            captured.update(alpha=alpha, beta=beta, gamma=gamma)
+            return "done"
+
+        catalog = DataCatalog()
+        catalog.add("ds_a", MemoryDataset(data="A"))
+        catalog.add("ds_b", MemoryDataset(data="B"))
+        catalog.add("ds_c", MemoryDataset(data="C"))
+
+        Runner().run(
+            Pipeline([
+                Node(
+                    node_fn,
+                    inputs={"gamma": "ds_a", "alpha": "ds_c", "beta": "ds_b"},
+                    outputs="out",
+                ),
+            ]),
+            catalog,
+        )
+
+        assert captured == {"alpha": "C", "beta": "B", "gamma": "A"}
+
+    def test_the_catalog_check_looks_up_the_dataset_name(self):
+        """The parameter ``present`` is a registered name and the dataset
+        ``absent`` is not, so a check that read parameter names would pass."""
+        catalog = DataCatalog()
+        catalog.add("present", MemoryDataset(data=1))
+        pipeline = Pipeline([
+            Node(identity, inputs={"present": "absent"}, outputs="out"),
+        ])
+
+        with pytest.raises(ValueError, match="requires input 'absent'"):
+            Runner().run(pipeline, catalog)
+
+    def test_a_dict_input_intermediate_is_released_after_its_last_reader(self):
+        """Release follows dataset names too: ``mid`` is read under the
+        parameter name ``src``. That parameter name is also a registered
+        dataset, so release keyed on parameter names would still get past
+        the catalog check and fail only here, at the release."""
+
+        def twice(src):
+            return src * 2
+
+        catalog = DataCatalog()
+        catalog.add("src", MemoryDataset(data=1))
+        Runner().run(
+            Pipeline([
+                Node(twice, inputs={"src": "src"}, outputs="mid", name="first"),
+                Node(twice, inputs={"src": "mid"}, outputs="end", name="second"),
+            ]),
+            catalog,
+        )
+
+        assert catalog.load("end") == 4
+        assert catalog.get_dataset("mid")._data is None
+
+
 class TestNodeWrites:
     """``Node(writes=[...])`` — declared write targets (A1 / R1).
 
@@ -523,8 +590,9 @@ class TestNodeWrites:
     def test_displacing_a_write_target_fails_loudly(self):
         """The regression this repo's own convention would otherwise cause.
 
-        `log_experiment` documents "new optional inputs go last, because the
-        Runner binds inputs positionally". Follow that on a writing node
+        A list-input node takes "new optional inputs go last, because the
+        Runner binds a list of inputs positionally" (the `candidate_feature_table`
+        note in pipelines/dataset/pipeline.py). Follow that on a writing node
         without moving the write parameter and the extra input lands in the
         write slot. Under POSITIONAL write binding that is silent -- the
         trailing `=None` absorbs the arity error and the node gets a dict

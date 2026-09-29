@@ -581,9 +581,9 @@ class TestEveryEnrichedReaderKeepsTheEvaluatedMonth:
 
 
 class TestGenerateReportNodeWiring:
-    """core/runner.py binds Node inputs to the wrapped function purely by
-    position (``node.func(*inputs)`` — no keyword matching, see
-    src/recsys_tfb/core/runner.py). generate_report's parameters are all
+    """core/runner.py binds a list of Node inputs to the wrapped function
+    purely by position — no keyword matching (only a dict of inputs binds by
+    name, and generate_report's is a list). generate_report's parameters are all
     dict-typed, so if the Node's ``inputs=[...]`` list in pipeline.py drifts
     out of sync with the signature's parameter order, one dict silently lands
     in the wrong parameter — Python raises no TypeError and the corresponding
