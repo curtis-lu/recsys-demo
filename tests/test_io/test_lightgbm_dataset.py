@@ -8,6 +8,7 @@ import pytest
 
 from recsys_tfb.io.model_adapter_dataset import ModelAdapterDataset
 from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+from tests.adapter_fits import fit_lightgbm
 
 
 @pytest.fixture
@@ -17,14 +18,13 @@ def trained_adapter():
     X = rng.randn(20, 2)
     y = rng.binomial(1, 0.5, 20).astype(float)
 
-    adapter = LightGBMAdapter()
-    adapter.train(X, y, X, y, {
+    adapter = fit_lightgbm(X, y, {
         "objective": "binary",
         "verbosity": -1,
         "num_leaves": 4,
         "num_iterations": 5,
         "early_stopping_rounds": 5,
-    })
+    }, X_val=X, y_val=y)
     return adapter, X
 
 

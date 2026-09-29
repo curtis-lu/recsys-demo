@@ -1,9 +1,8 @@
 """Tests for compute_quadrant_profiles (per-item×quadrant signed profile,純 python)."""
-import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
-from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+from tests.adapter_fits import fit_lightgbm
 from recsys_tfb.diagnosis.model.shap_cases import compute_quadrant_profiles
 
 
@@ -19,15 +18,13 @@ def _trained_adapter(seed=1, feature_name=("f0", "f1")):
     rng = np.random.RandomState(seed)
     Xtr = rng.randn(400, len(feature_name))
     ytr = (Xtr[:, 0] > 0).astype(float)
-    ds = lgb.Dataset(Xtr, label=ytr, feature_name=list(feature_name),
-                     free_raw_data=False)
-    adapter = LightGBMAdapter()
-    adapter.train(Xtr, ytr, None, None,
-                  {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
-                   "num_leaves": 4, "seed": 1, "num_iterations": 15,
-                   "early_stopping_rounds": 0},
-                  train_dataset=ds)
-    return adapter
+    return fit_lightgbm(
+        Xtr, ytr,
+        {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
+         "num_leaves": 4, "seed": 1, "num_iterations": 15,
+         "early_stopping_rounds": 0},
+        feature_names=feature_name,
+    )
 
 
 def _pop_from_counts(counts, seed=0):

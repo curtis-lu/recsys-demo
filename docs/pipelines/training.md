@@ -42,7 +42,7 @@ LightGBM 的 train/train-dev 會轉成可重用的 `.bin`，但這是目前 adap
 5. **Driver-local 空間足夠**：各 split 會從 Hive／HDFS 複製到 `cache.root`，模型、HPO study、診斷與 checkpoint 也會寫入 driver 本機檔案系統。**HPO 另外要 `data/_scratch` 放得下整份 val 矩陣**（`val 列數 × 特徵欄數 × itemsize`，生產規模 37～89 GiB）；不足時 `tune_hyperparameters` 會在建立前 raise，訊息含需求量、可用量與落點。檔案在映射完成當下就 unlink，跑完不留（見 §9.2）。
 6. **Driver 記憶體足夠**：模型訓練、部分指標計算及診斷會將資料讀入 driver；應依資料量控制 feature 數、HPO 規模與 SHAP／feature statistics 抽樣上限。
 
-CLI 啟動時會先執行設定一致性檢查，包括 ranking objective 與 metric 是否相容、HPO search space 格式、sample weight key 的欄位與段數、未知 item、feature selection 是否錯誤排除 item，以及 `hpo_objective` 與 `final_model_strategy` 是否為合法值（A25——打錯的話原本要等整輪 HPO 跑完才會炸），和選了 `pooled_average_precision`／`macro_per_item_average_precision` 時 val 有沒有留下沒有正例的 query group（A48，見 §3.2）。另外四項也在起 Spark 前由 training 指令擋下：`dataset.test_snap_dates` 沒寫或是空清單（A36——原本要等整輪 HPO 跑完、到預測那一步才炸，訊息也沒提到這個設定）、`dataset.test_snap_dates` 用兩種拼法指到同一個月（A26）、`test_metrics` 區塊寫錯（A53，見 §3.7），以及 `training_eval_predictions` 這筆 catalog 條目沒有把 `schema.entity` 的每一欄都寫進 `columns:`（A28——Hive 寫入只留宣告過的欄，少宣告的那一欄會被靜默丟掉，寫出來的每一列都變成在指別的東西）。檢查分幾層、各在什麼時候擋下、哪些擋不住：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
+CLI 啟動時會先執行設定一致性檢查，包括 ranking objective 與 metric 是否相容、HPO search space 格式、sample weight key 的欄位與段數、未知 item、feature selection 是否錯誤排除 item，以及 `hpo_objective` 與 `final_model_strategy` 是否為合法值（A25——打錯的話原本要等整輪 HPO 跑完才會炸），和選了 `pooled_average_precision`／`macro_per_item_average_precision` 時 val 有沒有留下沒有正例的 query group（A48，見 §3.2）。另外五項也在起 Spark 前由 training 指令擋下：`training.algorithm` 不是已註冊的演算法（A57，訊息列出可用的名字）、`dataset.test_snap_dates` 沒寫或是空清單（A36——原本要等整輪 HPO 跑完、到預測那一步才炸，訊息也沒提到這個設定）、`dataset.test_snap_dates` 用兩種拼法指到同一個月（A26）、`test_metrics` 區塊寫錯（A53，見 §3.7），以及 `training_eval_predictions` 這筆 catalog 條目沒有把 `schema.entity` 的每一欄都寫進 `columns:`（A28——Hive 寫入只留宣告過的欄，少宣告的那一欄會被靜默丟掉，寫出來的每一列都變成在指別的東西）。檢查分幾層、各在什麼時候擋下、哪些擋不住：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
 這些檢查可避免明顯設定錯誤進入長時間訓練，但不能判斷資料是否有 target leakage、日期切分是否符合業務觀察窗，或某個設定是否在統計上合理。
 
 ## 3. 設定方式
@@ -740,12 +740,12 @@ training 版本描述的是模型設定與上游資料身分，不是完整的�
 | `n_queries = 0` 或 test 預測為空 | test input 沒資料、版本 partition 錯誤，或沒有可評估正例 query | 查 dataset test model input 與 `training_eval_predictions` partitions |
 | SHAP 過慢或記憶體不足 | `sample_rows × n_trees` 太大，或 feature 太多 | 降低 `sample_rows`、`top_k`、`max_budget`，或暫時關閉 SHAP |
 | MLflow 失敗但 training 顯示完成 | `mlflow.strict: false` 為 best-effort 模式 | 檢查 warning 與 tracking URI；需要硬性追蹤時設 `strict: true` |
-| Unknown algorithm | `training.algorithm` 未在 adapter registry 註冊 | 使用目前支援的 `lightgbm`，或先實作並註冊新的 ModelAdapter |
+| `A57: training.algorithm=... is not a registered algorithm` | `training.algorithm` 未在 adapter registry 註冊；Spark 啟動前就擋下，訊息列出可用的名字 | 使用目前支援的 `lightgbm`，或先實作並註冊新的 ModelAdapter |
 | 部分重跑後模型、預測與診斷不一致 | `--only-node` 未重跑下游，或 skipped artifact 已過期 | 由較前方 node 接續或執行 full run，重新完成驗收 |
 
 ## 9. 限制與注意事項
 
-- 目前實際註冊的演算法 adapter 為 LightGBM；其他演算法需要另外實作 train、predict、save/load、feature importance、MLflow 與 native input preparation。
+- 目前實際註冊的演算法 adapter 為 LightGBM；其他演算法需要另外實作 `ModelAdapter` 的每個方法（建原生訓練資料與存讀、帶早停訓練與回報最佳迭代數、predict、save/load、feature importance、MLflow、native input preparation），並在 `rules` 宣告自己的排序目標、排序 metric、預設 metric 與丟不丟無正例的 query group。
 - 模型訓練是 driver 上的單機 CPU 工作，不是 Spark distributed training；Spark 主要負責上游資料處理、Hive I/O 與 test 指標聚合。
 - train、train-dev、val 與 test 的 local Parquet 會占用 driver disk；cache 不會自動依版本數量清理。
 - feature statistics、SHAP 與部分模型資料抽取使用 pandas／NumPy，記憶體尖峰取決於 rows、features 與 tree 數。

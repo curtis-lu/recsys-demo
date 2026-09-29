@@ -72,7 +72,7 @@ python -m recsys_tfb <指令> --env production
 - **`quality_checks.max_duplicate_key_ratio`**：source ETL 設定裡有 `sample_pool`、`label_table`、`feature_table` 這三張表的話，每一張都要寫，值在 0 到 1 之間、不含 1（`A32`）。拿掉它，那張表的主鍵重複檢查和主鍵空值檢查會一起默默關掉。候選層級特徵表不在這條的範圍內：這條只讀設定檔、拿上面三個名字去找表，而候選層級特徵表的實體表叫什麼由部署在 `catalog.yaml` 決定，這條找不到它。所以它的 `max_duplicate_key_ratio` 被刪掉時不會有人報錯。
 
 **training 設定**
-- **`training.algorithm_params.objective` 與 `metric`**：objective 是排序目標（`lambdarank`、`rank_xendcg`）時，metric 有寫就必須是 `ndcg`、`map` 或 `lambdarank`（沒寫預設 `ndcg`），`schema.columns.entity` 也不能是空的（`A7`）。不擋的話，early stopping 看的指標沒有意義。
+- **`training.algorithm_params.objective` 與 `metric`**：objective 是排序目標時，metric 有寫就必須是排序 metric，`schema.columns.entity` 也不能是空的（`A7`）。哪些算排序目標、哪些算排序 metric、沒寫時預設哪一個，由演算法的 adapter 宣告；LightGBM 是排序目標 `lambdarank`、`rank_xendcg`，metric 要是 `ndcg`、`map` 或 `lambdarank`（沒寫預設 `ndcg`）。不擋的話，early stopping 看的指標沒有意義。
 - **`training.search_space`**：每一項要有不重複的 `name`；`type` 是 `int`、`float`、`categorical` 之一；數值型的 `low` 要小於 `high`、`step` 要是正數；`log: true` 時 `low` 要大於 0，而且不能有 `step`；`categorical` 要有非空的 `choices`（`A8`）。
 - **`training.sample_weight_keys` 與 `training.sample_weights`**：`sample_weight_keys` 的每一欄，都要是 train model_input 裡有的欄（identity 欄、label、`dataset.carry_columns`、類別欄）。`sample_weights` 的每個鍵用 `|` 分段，段數要等於 `sample_weight_keys` 的欄數（`A9`）。不擋的話，權重會默默沒套上。
 - **`training.hpo_objective`** 只能是 `mean_ap`、`macro_per_item_map`、`pooled_average_precision` 或 `macro_per_item_average_precision`；**`training.final_model_strategy`** 只能是 `hpo_best` 或 `refit_on_full`。可以不寫，但不能寫成 `null`（`A25`）。
@@ -98,6 +98,7 @@ python -m recsys_tfb <指令> --env production
   - `dataset.train_snap_dates` 一定要寫，而且不能是空清單（`A23`）。
   - `dataset.train_snap_dates`、`val_snap_dates`、`test_snap_dates` 三個清單不能有同一天（`A24`）。日期按日曆比，`2026-1-31` 和 `2026-01-31` 算同一天。拿同一個月訓練又拿它評估，評估數字會好看得不真實。
 - **training**
+  - `training.algorithm` 必須是有註冊的演算法，目前只有 `lightgbm`（`A57`）。錯誤訊息會列出可用的名字。不擋的話，要等 Spark 啟動、各 split 複製到本機之後，第一個用到模型的步驟才會失敗。只有 training 讀這個鍵，所以這條只在 training 查。
   - `dataset.test_snap_dates` 一定要寫，而且不能是空清單（`A36`）。training 要在這些月份上預測、算指標、做 SHAP 診斷；不擋的話，要等超參數搜尋整輪跑完才會失敗，錯誤訊息也沒提到這個設定。dataset 指令沒寫或空清單都照樣跑，所以這條只在 training 查。training 的每一種跑法都查，包含 `--from-node`、`--only-node`、`--list-nodes`、`--dry-run`。
   - `dataset.test_snap_dates` 裡，同一天不能寫成只差在有沒有 `-` 的兩種格式，例如 `2026-01-31` 和 `20260131`（`A26`）。不擋的話，那個月的每一列會被算兩次。
   - `catalog.yaml` 的 `training_eval_predictions` 條目，`columns:` 必須包含 `schema.columns.entity` 的每一欄（`A28`）。少寫的欄在寫入時會被默默丟掉。
@@ -172,7 +173,6 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
   - **讀訓練資料之前**：特徵欄必須是數字（`B6`），而且儲存型別必須全部等於 `dataset.numeric_feature_storage_type`（`B9`）。例：1,000 個 `float32` 欄裡混了一個 `int64`，整個矩陣會變成 `float64`，2,400 萬列需要的記憶體從 89 GiB 變成 179 GiB。舊版 dataset 建出來的資料不會重過 dataset 的資料閘，這一步是補救。
   - **要預測的月份**：`dataset.test_snap_dates` 的每個月，都必須已經由 dataset 建好。
   - **本機 cache**：樣本權重的長度跟 LightGBM `.bin` cache 的列數對不上，要清掉 cache 目錄重建；磁碟空間不夠。
-  - **`training.algorithm`**：必須是有註冊的演算法，目前只有 `lightgbm`。
 - 只警告：
   - 上次中途掛掉留下的不完整 cache，自動清掉重抓；LightGBM 的 `.bin` cache 跟目前設定對不上，自動重建。
   - 過濾掉沒有正例的 query group 之後，train 或 train_dev 剩下的太少。

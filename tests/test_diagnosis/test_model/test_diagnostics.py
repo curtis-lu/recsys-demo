@@ -2,7 +2,6 @@
 
 import pathlib
 
-import lightgbm as lgb
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -11,7 +10,7 @@ import pytest
 import shap as _shap_mod  # noqa: F401  (ensure dependency present)
 
 from recsys_tfb.io.handles import ParquetHandle
-from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+from tests.adapter_fits import fit_lightgbm
 from recsys_tfb.diagnosis import model as diag
 
 
@@ -26,10 +25,7 @@ def _adapter_declaring(X, y, feature_name, **params):
     fixture that skips this is not a smaller version of production, it is a
     different one.
     """
-    ds = lgb.Dataset(X, label=y, feature_name=list(feature_name), free_raw_data=False)
-    adapter = LightGBMAdapter()
-    adapter.train(X, y, None, None, params, train_dataset=ds)
-    return adapter
+    return fit_lightgbm(X, y, params, feature_names=feature_name)
 
 
 class DeclaredFeatures:
@@ -53,11 +49,9 @@ def fitted_adapter():
     X = rng.randn(120, 4)
     # feature 3 is pure noise → expected dead / low importance
     y = (X[:, 0] + X[:, 1] > 0).astype(float)
-    adapter = LightGBMAdapter()
     params = {"objective": "binary", "metric": "binary_logloss", "verbosity": -1,
               "num_leaves": 4, "seed": 0, "num_iterations": 20, "early_stopping_rounds": 0}
-    adapter.train(X, y, None, None, params)
-    return adapter
+    return fit_lightgbm(X, y, params)
 
 
 def test_compute_feature_importance_shape_and_dead(fitted_adapter):
@@ -503,7 +497,6 @@ def test_shap_plot_failure_does_not_abort(shap_setup, monkeypatch):
 def test_divergence_integration_multifeature(tmp_path, monkeypatch):
     import numpy as np, pandas as pd, pyarrow as pa, pyarrow.parquet as pq
     from recsys_tfb.io.handles import ParquetHandle
-    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
     monkeypatch.chdir(tmp_path)
     rng = np.random.RandomState(7)
     n = 240
@@ -594,7 +587,6 @@ def test_shap_on_hive_partitioned_cache(tmp_path):
     import pandas as pd
     import pyarrow.dataset as pads
     from recsys_tfb.io.handles import ParquetHandle
-    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
 
     rng = np.random.RandomState(7)
     n = 240

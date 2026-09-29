@@ -302,7 +302,7 @@ split 展開出不同的欄位集合（見 §3.4 與
 - 欄名是框架自己的，**不得**與使用者提供的逐列訓練權重（#425）共用。特徵表裡有同名的特徵欄時，資料閘在 dataset 開頭就擋下（不變量 B12）；切片執行跳過資料閘時，組裝 val／test model input 那一步會因為兩欄同名而報錯（Spark 的 `Reference ... is ambiguous`），不會覆寫。
 - 與 `val_sample_ratio` 並用時權重仍然對：那是對 entity 均勻抽，有正例與無正例的組一視同仁，不改變 1 與 1／r 的相對比例。
 
-**train 的 r 與訓練目標。** train 的 r ＝ 0 只適合 `lambdarank`：它在沒有正例的組上梯度恆為零，training 本來就在建訓練資料時替它丟掉這些組（`core/group_utils.py` 的 `objective_drops_zero_positive_groups`），所以 r ＝ 0 只是把同一件事提前到 dataset，訓練表小很多，模型吃到的列與早停的母體都不變。`binary` 與 `rank_xendcg` 會從無正例的組學到東西（後者 repo 有實測，在全是負例的組上照樣長樹），對它們而言 r < 1 是**整組的負例降採樣**：訓練母體的正例佔比會上升，train_dev（early stopping 的驗證集）的母體也跟著變——性質與既有的逐列抽樣（`sample_ratio_overrides` 壓低負例）相同，框架刻意不擋。建議：`lambdarank` ＋ 小的 query group 時設 `train_zero_positive_group_ratio: 0` 且 `sample_ratio: 1`。training 用 ranking 類目標時，建訓練資料會 log 出「只剩單一種 label 的 query group 佔多少」（這種組沒有可比的配對），讓你判斷逐列抽樣有沒有把小組抽壞。
+**train 的 r 與訓練目標。** train 的 r ＝ 0 只適合 `lambdarank`：它在沒有正例的組上梯度恆為零，training 本來就在建訓練資料時替它丟掉這些組（哪些目標會丟是演算法的規則，LightGBM 的在 `models/lightgbm_adapter.py` 的 `LIGHTGBM_RULES`），所以 r ＝ 0 只是把同一件事提前到 dataset，訓練表小很多，模型吃到的列與早停的母體都不變。`binary` 與 `rank_xendcg` 會從無正例的組學到東西（後者 repo 有實測，在全是負例的組上照樣長樹），對它們而言 r < 1 是**整組的負例降採樣**：訓練母體的正例佔比會上升，train_dev（early stopping 的驗證集）的母體也跟著變——性質與既有的逐列抽樣（`sample_ratio_overrides` 壓低負例）相同，框架刻意不擋。建議：`lambdarank` ＋ 小的 query group 時設 `train_zero_positive_group_ratio: 0` 且 `sample_ratio: 1`。training 用 ranking 類目標時，建訓練資料會 log 出「只剩單一種 label 的 query group 佔多少」（這種組沒有可比的配對），讓你判斷逐列抽樣有沒有把小組抽壞。
 
 **r > 0 時什麼不變、什麼會變。**
 

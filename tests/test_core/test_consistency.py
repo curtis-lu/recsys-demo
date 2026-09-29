@@ -346,6 +346,50 @@ class TestRankingObjectiveConflicts:
             self._params("lambdarank", "binary_logloss", entity=()))
         assert len(errs) == 2
 
+    def test_an_unregistered_algorithm_is_left_to_a57(self):
+        """No adapter, no metric list to ask. A57 names the typo on the
+        training command; this check runs on every command and must not
+        report the same config a second time."""
+        params = self._params("lambdarank", "binary_logloss")
+        params["training"]["algorithm"] = "lightgbmm"
+        assert ranking_objective_conflicts(params) == []
+
+    def test_an_unregistered_algorithm_still_needs_a_query_group(self):
+        """The query-group half does not wait for the typo to be fixed:
+        lambdarank ranks for a registered adapter, so an empty entity is
+        reported on every command, as before the rules moved."""
+        params = self._params("lambdarank", "ndcg", entity=())
+        params["training"]["algorithm"] = "lightgbmm"
+        errs = ranking_objective_conflicts(params)
+        assert len(errs) == 1
+        assert "query group" in errs[0]
+
+
+from recsys_tfb.core.consistency import training_algorithm_errors
+
+
+class TestTrainingAlgorithmA57:
+    def test_registered_algorithm_passes(self):
+        assert training_algorithm_errors(
+            {"training": {"algorithm": "lightgbm"}}) == []
+
+    def test_unset_algorithm_is_the_default_and_passes(self):
+        assert training_algorithm_errors({"training": {}}) == []
+        assert training_algorithm_errors({}) == []
+
+    def test_unregistered_algorithm_names_the_typo_and_the_choices(self):
+        errs = training_algorithm_errors({"training": {"algorithm": "lightgbmm"}})
+        assert len(errs) == 1
+        assert "A57" in errs[0]
+        assert "'lightgbmm'" in errs[0]
+        assert "Available: lightgbm" in errs[0]
+
+    def test_explicit_null_is_rejected_not_defaulted(self):
+        """``algorithm:`` with no value is yaml null, not "unset"."""
+        errs = training_algorithm_errors({"training": {"algorithm": None}})
+        assert len(errs) == 1
+        assert "None" in errs[0]
+
 
 from recsys_tfb.core.consistency import (
     weight_unknown_items,

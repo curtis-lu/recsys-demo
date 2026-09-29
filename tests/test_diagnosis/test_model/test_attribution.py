@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+from tests.adapter_fits import fit_lightgbm
 from recsys_tfb.diagnosis.model import attribution
 
 
@@ -10,9 +10,9 @@ def _fitted():
     rng = np.random.RandomState(0)
     X = rng.randn(80, 3)
     y = (X[:, 0] > 0).astype(float)
-    a = LightGBMAdapter()
-    a.train(X, y, None, None, {"objective": "binary", "verbosity": -1,
-            "num_leaves": 4, "seed": 0, "num_iterations": 10, "early_stopping_rounds": 0})
+    a = fit_lightgbm(X, y, {"objective": "binary", "verbosity": -1,
+                     "num_leaves": 4, "seed": 0, "num_iterations": 10,
+                     "early_stopping_rounds": 0})
     return a, X
 
 

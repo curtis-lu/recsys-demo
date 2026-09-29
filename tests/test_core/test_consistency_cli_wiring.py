@@ -216,6 +216,24 @@ def test_a36_wired_into_training_command_before_spark():
 
 
 
+def test_a57_wired_into_training_command_before_spark():
+    # #387's training row: an unregistered training.algorithm used to surface
+    # in the first node that asked for the adapter, after the Spark cold start
+    # and the cache copies. Off the aggregator for A24's reason — only training
+    # reads the key (#158 precedent).
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "training_algorithm_errors" not in inspect.getsource(
+        validate_config_consistency
+    ), "A57 must stay off the global aggregator (#158 precedent)"
+
+    src = inspect.getsource(m.training)
+    assert "training_algorithm_errors(params)" in src
+    assert src.index("training_algorithm_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A57 must fail before the Spark cold start, like A26/A36/A53"
+
+
 def test_a53_wired_into_training_command_before_spark():
     # ADR-0028: the scored months and the metric names only matter to
     # training, so A53 hangs off the training command like A26/A36 rather than

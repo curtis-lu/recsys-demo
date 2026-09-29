@@ -22,33 +22,34 @@ from recsys_tfb.pipelines.training.nodes import (
 def _quick_train_adapter(lgb_handles, training_parameters):
     """Build a quick-trained LightGBMAdapter for downstream-node tests.
 
-    Replaces the legacy `train_model` node helper; mirrors its lgb.Dataset
-    wiring (train + train_dev as val) so tests get the same model artefact.
+    Replaces the legacy `train_model` node helper; trains the way one HPO
+    trial does (train + train_dev as the early-stopping set, through the
+    adapter) so tests get the same model artefact.
     """
     from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+    from recsys_tfb.pipelines.training.steps.fit_params import fit_params
 
     train_lgb_h, train_dev_lgb_h = lgb_handles
     best_params = {
         "learning_rate": 0.1, "num_leaves": 31, "max_depth": 5,
         "min_child_samples": 10, "subsample": 0.8, "colsample_bytree": 0.8,
     }
-    seed = training_parameters.get("random_seed", 42)
     tp = training_parameters["training"]
-    params = {
-        **tp.get("algorithm_params", {}),
-        "seed": seed,
-        **best_params,
-        "num_iterations": tp.get("num_iterations", 50),
-        "early_stopping_rounds": tp.get("early_stopping_rounds", 10),
-    }
 
     adapter = LightGBMAdapter()
-    ds_train = train_lgb_h.load()
-    ds_dev = train_dev_lgb_h.load(reference=ds_train)
+    ds_train = adapter.load_train_data(
+        train_lgb_h.bin_path,
+        weight=train_lgb_h.sample_weights(training_parameters, {}))
+    ds_dev = adapter.load_train_data(
+        train_dev_lgb_h.bin_path,
+        weight=train_dev_lgb_h.sample_weights(training_parameters, {}),
+        reference=ds_train,
+    )
     adapter.train(
-        X_train=None, y_train=None, X_val=None, y_val=None,
-        params=params,
-        train_dataset=ds_train, val_dataset=ds_dev,
+        ds_train, fit_params(training_parameters, adapter.rules, best_params),
+        num_iterations=tp.get("num_iterations", 50),
+        early_stopping_rounds=tp.get("early_stopping_rounds", 10),
+        valid_data=ds_dev,
     )
     return adapter
 
@@ -659,6 +660,122 @@ class TestFinalizeModel:
 # ---- Tests: log_experiment ----
 
 
+class TestTrainingRunsOnAnotherAdapter:
+    """The HPO node and ``finalize_model`` on an adapter that is not LightGBM.
+
+    #481's test seam 3: if training still reached past ``ModelAdapter`` into
+    LightGBM anywhere on these paths, the fake (``tests/fake_adapter.py``)
+    would fail there — it has no booster, no ``lgb.Dataset``, and objective
+    and metric names LightGBM has never heard of.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fake_registered(self, monkeypatch):
+        from recsys_tfb.models.base import ADAPTER_REGISTRY
+        from tests.fake_adapter import FAKE_ALGORITHM, FakeAdapter
+
+        monkeypatch.setitem(ADAPTER_REGISTRY, FAKE_ALGORITHM, FakeAdapter)
+
+    def _params(self, training_parameters, tmp_path, objective, strategy):
+        from tests.fake_adapter import FAKE_ALGORITHM
+
+        return {
+            **training_parameters,
+            "cache": {"root": str(tmp_path / "cache")},
+            "base_dataset_version": "v1",
+            "train_variant_id": "tv1",
+            "schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+                "label": "label",
+            }},
+            "training": {
+                **training_parameters["training"],
+                "algorithm": FAKE_ALGORITHM,
+                "algorithm_params": {"objective": objective},
+                "search_space": [{"name": "learning_rate", "type": "float",
+                                  "low": 0.05, "high": 0.5}],
+                "n_trials": 2,
+                "num_iterations": 30,
+                "early_stopping_rounds": 3,
+                "final_model_strategy": strategy,
+            },
+        }
+
+    @pytest.mark.parametrize("strategy", ["hpo_best", "refit_on_full"])
+    def test_hpo_and_finalize_run_to_the_end(
+        self, synthetic_model_inputs, preprocessor_metadata,
+        training_parameters, tmp_path, strategy,
+    ):
+        from recsys_tfb.pipelines.training.nodes import prepare_lgb_train_inputs
+        from tests.fake_adapter import FakeAdapter
+
+        train_h, dev_h, val_h, *_ = synthetic_model_inputs
+        params = self._params(
+            training_parameters, tmp_path, "fake_binary", strategy)
+
+        train_bin, dev_bin = prepare_lgb_train_inputs(
+            train_h, dev_h, preprocessor_metadata, params)
+        best_params, best_iteration, hpo_model = tune_hyperparameters(
+            train_bin, dev_bin, val_h, preprocessor_metadata, params)
+
+        assert isinstance(hpo_model, FakeAdapter)
+        assert set(best_params) == {"learning_rate"}
+        assert 1 <= best_iteration <= 30
+
+        final = finalize_model(
+            train_h, dev_h, hpo_model, best_params, best_iteration,
+            preprocessor_metadata, params,
+        )
+        assert isinstance(final, FakeAdapter)
+        if strategy == "hpo_best":
+            assert final is hpo_model
+        else:
+            assert final is not hpo_model
+        X, _ = extract_Xy(val_h, preprocessor_metadata, params)
+        assert np.isfinite(final.predict(X)).all()
+
+    def test_refit_follows_the_fake_adapters_ranking_rules(
+        self, monkeypatch, synthetic_model_inputs, preprocessor_metadata,
+        training_parameters, tmp_path,
+    ):
+        """``fake_rank`` is a ranking objective that drops zero-positive query
+        groups — by the fake's rules, not LightGBM's, which have never heard
+        of it. So the refit must train on the groups holding a positive only:
+        the row count is where reading the wrong rules would show."""
+        from recsys_tfb.models.base import ADAPTER_REGISTRY
+        from tests.fake_adapter import FAKE_ALGORITHM, FakeAdapter
+
+        seen = {}
+
+        class RecordingFake(FakeAdapter):
+            def train(self, train_data, params, **kw):
+                seen["rows"] = len(train_data.y)
+                seen["metric"] = params.get("metric")
+                super().train(train_data, params, **kw)
+
+        monkeypatch.setitem(ADAPTER_REGISTRY, FAKE_ALGORITHM, RecordingFake)
+        train_h, dev_h, _, train_df, dev_df, _ = synthetic_model_inputs
+        params = self._params(
+            training_parameters, tmp_path, "fake_rank", "refit_on_full")
+
+        finalize_model(
+            train_h, dev_h, None, {"learning_rate": 0.1}, 5,
+            preprocessor_metadata, params,
+        )
+
+        def rows_in_groups_with_a_positive(df):
+            has_pos = df.groupby(["snap_date", "cust_id"])["label"].transform("max") > 0
+            return int(has_pos.sum())
+
+        expected = (rows_in_groups_with_a_positive(train_df)
+                    + rows_in_groups_with_a_positive(dev_df))
+        assert expected < len(train_df) + len(dev_df), (
+            "fixture has no zero-positive group; the assertion would not bite")
+        assert seen["rows"] == expected
+        # And the ranking metric was defaulted from the fake's rules too.
+        assert seen["metric"] == "fake_ndcg"
+
+
 class TestLogExperiment:
     def test_logs_to_mlflow(
         self, lgb_handles, preprocessor_metadata, training_parameters, tmp_path
@@ -840,10 +957,13 @@ def test_tune_defaults_ranking_metric(monkeypatch):
     captured = {}
 
     class FakeAdapter:
-        booster = type("B", (), {"best_iteration": 3})()
+        best_iteration = 3
 
-        def train(self, **kw):
-            captured.update(kw["params"])
+        def load_train_data(self, path, *, weight, reference=None):
+            return object()
+
+        def train(self, train_data, params, **kw):
+            captured.update(params)
 
         def predict(self, X):
             return np.zeros(len(X))
@@ -873,19 +993,7 @@ def test_tune_defaults_ranking_metric(monkeypatch):
     )
 
     class FakeLgbHandle:
-        def load(self, reference=None, params=None):
-            class D:
-                def construct(self_inner):
-                    return self_inner
-
-                def set_weight(self_inner, w):
-                    pass
-
-                def num_data(self_inner):
-                    # Length of the vector sample_weights() below returns:
-                    # the scorer checks the two against each other.
-                    return 2
-            return D()
+        bin_path = "fake.bin"
 
         def sample_weights(self, parameters, preprocessor_metadata):
             # Since #318 the .bin carries no weights and the node resolves
@@ -953,11 +1061,16 @@ def test_finalize_refit_ranking_sets_group(monkeypatch):
 
     monkeypatch.setattr(lgb, "Dataset", spy_dataset)
 
-    class FakeAdapter:
-        def train(self, **kw):
-            captured["metric"] = kw["params"].get("metric")
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
 
-    monkeypatch.setattr(nodes, "get_adapter", lambda algo: FakeAdapter())
+    class RecordingAdapter(LightGBMAdapter):
+        """Real training data, no fit: what reaches train() is the question."""
+
+        def train(self, train_data, params, **kw):
+            captured["metric"] = params.get("metric")
+            captured["train_kw"] = kw
+
+    monkeypatch.setattr(nodes, "get_adapter", lambda algo: RecordingAdapter())
 
     class H:
         def __init__(self, tag=""):
@@ -994,10 +1107,14 @@ def test_finalize_refit_ranking_sets_group(monkeypatch):
     # feature_pre_filter=False is an agreement with HPO's cached .bin binaries,
     # which are binned with the same construct param. Letting it default drops
     # features the winning trial could split on -- a different model reported
-    # under the search's hyperparameters, and nothing raises. Three sites have
-    # to agree: steps/refit.py, steps/hpo_scoring.py and
-    # models/lightgbm_adapter.py (the one that bins the .bin).
+    # under the search's hyperparameters, and nothing raises. One definition
+    # now (models/lightgbm_adapter.py, _CONSTRUCT_PARAMS); this pins that the
+    # refit's data goes through it.
     assert captured["construct_params"] == {"feature_pre_filter": False}
+
+    # A refit has no validation split left: exactly best_iteration rounds.
+    assert captured["train_kw"] == {
+        "num_iterations": 3, "early_stopping_rounds": 0}
 
 
 def test_finalize_refit_carries_sample_weights_for_both_splits(monkeypatch):
@@ -1042,11 +1159,13 @@ def test_finalize_refit_carries_sample_weights_for_both_splits(monkeypatch):
 
     monkeypatch.setattr(lgb, "Dataset", spy_dataset)
 
-    class FakeAdapter:
-        def train(self, **kw):
+    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+    class RecordingAdapter(LightGBMAdapter):
+        def train(self, train_data, params, **kw):
             pass
 
-    monkeypatch.setattr(nodes, "get_adapter", lambda algo: FakeAdapter())
+    monkeypatch.setattr(nodes, "get_adapter", lambda algo: RecordingAdapter())
 
     class H:
         def __init__(self, tag=""):

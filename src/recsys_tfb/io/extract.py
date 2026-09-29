@@ -4,9 +4,11 @@ Encapsulates deferred categorical encoding (e.g. prod_name) that the dataset
 pipeline keeps as raw string values; downstream training code expects fully
 numeric numpy arrays.
 
-Moved out of pipelines/training/nodes.py so that ModelAdapter implementations
-(e.g. LightGBMAdapter.prepare_train_inputs) can reuse it without circular
-imports.
+Lives in ``io/`` rather than beside the training nodes because a ModelAdapter
+reads parquet through it too (``LightGBMAdapter.prepare_train_inputs``), and a
+library module does not import a pipeline (ADR-0008). The adapter still
+imports it inside its functions; the load-order reason is at the top of
+``models/lightgbm_adapter.py``.
 """
 
 from __future__ import annotations

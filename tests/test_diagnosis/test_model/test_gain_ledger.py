@@ -247,9 +247,7 @@ def test_compute_gain_ledger_disabled():
 
 
 def _tiny_real_booster():
-    import lightgbm as lgb
-
-    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+    from tests.adapter_fits import fit_lightgbm
 
     rng = np.random.RandomState(0)
     n = 40
@@ -258,17 +256,14 @@ def _tiny_real_booster():
     f_inc = rng.randn(n)
     X = np.column_stack([prod_code, f_age, f_inc])
     y = (prod_code >= 2).astype(float)
-    ds = lgb.Dataset(
-        X, label=y, feature_name=["prod_code", "f_age", "f_inc"],
-        categorical_feature=["prod_code"], free_raw_data=False,
-    )
     params = {
         "objective": "binary", "verbosity": -1, "num_leaves": 7, "seed": 0,
         "min_data_in_leaf": 1, "num_iterations": 3, "early_stopping_rounds": 0,
     }
-    adapter = LightGBMAdapter()
-    adapter.train(X, y, None, None, params, train_dataset=ds)
-    return adapter
+    return fit_lightgbm(
+        X, y, params, feature_names=["prod_code", "f_age", "f_inc"],
+        categorical_features=["prod_code"],
+    )
 
 
 def test_compute_gain_ledger_real_booster_contract():

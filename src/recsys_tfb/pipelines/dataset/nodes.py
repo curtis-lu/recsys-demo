@@ -451,8 +451,8 @@ def split_train_keys(
     train_dev_keys = keys.filter(to_dev)
 
     # An empty train_dev is invisible downstream: it is the early-stopping
-    # validation set for every HPO trial (training/nodes.py passes
-    # train_dev_lgb_handle as val_dataset), so an empty one means each trial
+    # validation set for every HPO trial (training's steps/hpo_scoring.py
+    # passes it to the adapter as valid_data), so an empty one means each trial
     # silently runs its full round budget with early stopping never firing —
     # no error, no warning, just worse models and a longer search. Costs one
     # Spark action; see ADR-0005 for the fallback if that ever matters at scale.

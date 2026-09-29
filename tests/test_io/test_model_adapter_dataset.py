@@ -12,18 +12,18 @@ import numpy as np
 import pytest
 
 from recsys_tfb.io.model_adapter_dataset import ModelAdapterDataset
-from recsys_tfb.models.base import get_adapter
+from tests.adapter_fits import fit_lightgbm
 
 
 def _tiny_adapter():
     rng = np.random.default_rng(42)
     X = rng.normal(size=(80, 3))
     y = (X[:, 0] > 0).astype(int)
-    adapter = get_adapter("lightgbm")
-    adapter.train(
-        X, y, X, y,
+    adapter = fit_lightgbm(
+        X, y,
         {"objective": "binary", "num_iterations": 5,
          "min_child_samples": 5, "verbose": -1},
+        X_val=X, y_val=y,
     )
     return adapter, X
 

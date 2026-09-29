@@ -40,16 +40,14 @@ class TestStudyLifecycle:
 
 def _tiny_adapter():
     import numpy as np
-    from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+    from tests.adapter_fits import fit_lightgbm
     rng = np.random.RandomState(0)
     X = rng.rand(40, 3)
     y = (rng.rand(40) < 0.3).astype(float)
-    a = LightGBMAdapter()
-    a.train(
-        X_train=X, y_train=y, X_val=X, y_val=y,
-        params={"objective": "binary", "verbosity": -1, "num_iterations": 5},
+    return fit_lightgbm(
+        X, y, {"objective": "binary", "verbosity": -1, "num_iterations": 5},
+        X_val=X, y_val=y,
     )
-    return a
 
 
 class TestCheckpoint:

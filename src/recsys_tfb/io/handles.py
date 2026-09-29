@@ -193,6 +193,11 @@ class LgbDatasetHandle:
 
     ``role`` distinguishes "train" from "train_dev" so callers can build the
     correct reference linkage when reloading.
+
+    Reading the binary back is the adapter's job
+    (``ModelAdapter.load_train_data``), not this handle's: the handle is a
+    path and its sidecars, and the library that can open the file stays behind
+    the adapter (ADR-0030 decision 1).
     """
 
     bin_path: str
@@ -238,8 +243,8 @@ class LgbDatasetHandle:
     ) -> "np.ndarray":  # type: ignore[name-defined]
         """Today's ``training.sample_weights``, resolved against this binary's rows.
 
-        Aligned 1:1 with the rows of the ``.bin``, so the caller can
-        ``set_weight`` it onto the loaded Dataset. Weights live here rather
+        Aligned 1:1 with the rows of the ``.bin``, so the caller can hand it
+        to ``ModelAdapter.load_train_data`` with the binary. Weights live here rather
         than inside the binary because the lgb cache path does not mention
         them: baked in, a stale binary would silently train under the previous
         run's weights (#318).
@@ -249,8 +254,9 @@ class LgbDatasetHandle:
         zero-positive filter and the same group permutation are already
         applied. Nothing here re-reads the model_input parquet. The *length*
         is still checked independently against the binary itself before the
-        vector is used — see ``steps/hpo_scoring.py`` — because the one way
-        this can go wrong produces a vector LightGBM discards without a word.
+        vector is used — see ``LightGBMAdapter.load_train_data`` — because the
+        one way this can go wrong produces a vector LightGBM discards without
+        a word.
 
         Raises if the sidecar is missing. ``prepare_train_inputs`` rebuilds a
         cache directory without one, so a handle that reaches a consumer has
@@ -291,12 +297,3 @@ class LgbDatasetHandle:
                 )
             pdf = pd.DataFrame(index=pd.RangeIndex(int(json.loads(meta))))
         return resolve_sample_weights(pdf, parameters, preprocessor_metadata)
-
-    def load(
-        self,
-        reference: "lgb.Dataset | None" = None,  # type: ignore[name-defined]
-        params: dict | None = None,
-    ) -> "lgb.Dataset":  # type: ignore[name-defined]
-        import lightgbm as lgb
-
-        return lgb.Dataset(self.bin_path, reference=reference, params=params)
