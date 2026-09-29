@@ -113,6 +113,7 @@ LightGBM 專屬的解析（TreeExplainer、`trees_to_dataframe`、類別切點�
 > - `background` 給了就是 interventional，沒給就是模型自己的參考（樹＝tree path dependent）。`feature_perturbation` 是 shap 的字彙，不進介面。
 > - 樹的切點結構是一張表，欄位是同檔的 `TREE_STRUCTURE_COLUMNS`：`trees_to_dataframe()` 的樹、節點、父子、深度、切點特徵與 gain，加上 `categories_left`（類別切點送往左子的類別碼 tuple，數值切點與葉是 `None`）。LightGBM 的 `"2||3||4"` 格式由 LightGBM adapter 解析；gain 帳本只看 `categories_left`。
 > - `LightGBMAdapter.booster` 拿掉了：它的 docstring 寫明只為診斷存在，#485 之後 `src/` 沒有讀它的地方。測試裡要看 LightGBM 自己的東西（迭代數、參數）的地方改讀 `_booster`。
+> - 決定 2 的 #484 註記留下的題目（介面缺「表 → 矩陣」，SHAP 走不了評分入口）：**#485 不加。** 診斷照舊用 `io/extract.py` 的 `pdf_to_X` 配 `model_feature_view` 建矩陣（跟 `score()` 的預設實作同一條編碼路徑），再交給 `feature_attributions`。今天只有一個 adapter，矩陣就是「模型的特徵、照模型的順序」，加一個方法只是把這兩行包起來。會讓它不夠的是兩階段的組合模型：它的歸因要先依分組鍵把列分給各個子模型，跟評分一樣只有 adapter 答得出來，那時 `feature_attributions` 該改成吃表（跟 `score()` 同一個形狀），而不是多一個「表 → 矩陣」。留給兩階段 spec。
 
 ## 決定 2　評分入口在 adapter：吃一張表、回分數
 
