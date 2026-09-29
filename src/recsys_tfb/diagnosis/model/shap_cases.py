@@ -33,8 +33,10 @@ def compute_quadrant_profiles(model, shap_population, preprocessor: dict, parame
     回傳 ``{"<item>": {"<quadrant>": {"top_features":[…], "n_sampled":int,
     "low_coverage":bool}}}``。``shap_population`` 為 ``select_shap_population`` 的小
     pandas(特徵 + item + quadrant)。None / 空 / ``quadrant_enabled=false`` → ``{}``。
-    單次 SHAP。A model that cannot attribute → the "model cannot" shape; any
-    other failure stops the run.
+    單次 SHAP。
+
+    A model that cannot attribute lands the "model cannot" shape; any other
+    failure stops the run (ADR-0030 decision 4).
     """
     cfg = parameters.get("diagnostics", {}).get("shap", {})
     if not cfg.get("quadrant_enabled", True):
@@ -117,12 +119,14 @@ def compute_quadrant_cases(
     """per-(item×象限) 全格極值案例的單列 signed SHAP 橫條圖 + 完整稽核 manifest。
 
     ``case_rows`` 為 ``select_shap_population`` 的第二輸出(每 item×象限 role=high/low
-    各一列)。Returns ``(cases_manifest, case_figures)``: the manifest
+    各一列)。單次 SHAP over 那幾十列極值。空格記 ``reason=empty``;單行格 low 記
+    ``reason=single_row_same_as_high``(不產重複檔)。
+
+    Returns ``(cases_manifest, case_figures)``: the manifest
     ``{"<item>": {"<quadrant>": {"high"/"low": {rendered, png|reason, <identity
     columns but the item>, rank, score, label}}}}``, and ``{path under
-    diagnostics/cases/: draw}`` for the charts. None / 空 / ``quadrant_enabled=false``
-    → ``({}, {})``。單次 SHAP over 那幾十列極值。空格記 ``reason=empty``;單行格 low 記
-    ``reason=single_row_same_as_high``(不產重複檔)。
+    diagnostics/cases/: draw}`` for the charts. ``({}, {})`` for no case rows
+    or ``quadrant_enabled: false``.
 
     ``rendered: True`` with a ``png`` says a chart for that case was handed to
     the catalog. The catalog draws it when it saves, so a chart that then

@@ -14,6 +14,10 @@ reason it exists (ADR-0030 decision 7):
   ADR-0030 decision 4). That is this type's written behaviour and the reason
   to use it for diagnostic figures only: any failure while drawing or writing
   one figure is logged and the rest are still saved.
+- **A figure that fails leaves no file.** The previous run's PNG at that path
+  is removed before drawing: the directory is reused across runs of one
+  ``model_version``, and a stale chart there would be read as this run's
+  (the manifest beside it names this run's rows).
 
 There is nothing to load: a saved stack is PNG files for people and for
 ``log_experiment``'s upload, not an input to any node.
@@ -51,9 +55,10 @@ class DiagnosticFiguresDataset(AbstractDataset):
             # whether or not it was written: a draw that raised half way has
             # opened a figure nobody else will close.
             open_before = set(plt.get_fignums())
+            target = root / relative
             try:
+                target.unlink(missing_ok=True)
                 figure = draw()
-                target = root / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 figure.savefig(target, dpi=_DPI)
                 written += 1

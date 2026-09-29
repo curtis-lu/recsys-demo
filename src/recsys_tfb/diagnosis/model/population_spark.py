@@ -19,11 +19,9 @@ def select_shap_population(
     ``quadrant/role/rank/score/label`` + group 欄 + 特徵,供 ``compute_quadrant_cases``
     畫單列案例圖。rank/象限/選樣/join 全在 Spark(executor);driver 只 toPandas 小族群。
 
-    ``quadrant_enabled=false`` → ``(None, None)``。A failure stops the run: this
-    node touches no model capability, so nothing here is "the model cannot"
-    (ADR-0030 decision 4). ``predict_manifest`` 僅作 in-DAG 排序依賴(與 ``compute_test_metrics``
-    同慣例;三個資料輸入皆無 node producer,不掛此依賴會被 topo-sort 排到 predict 前讀到
-    未寫入的預測)。
+    ``quadrant_enabled=false`` → ``(None, None)``。``predict_manifest`` 僅作 in-DAG
+    排序依賴(與 ``compute_test_metrics`` 同慣例;三個資料輸入皆無 node producer,不掛此
+    依賴會被 topo-sort 排到 predict 前讀到未寫入的預測)。
 
     Reads ``dataset.test_snap_dates``' months only, from both tables, and ranks
     with ``utils.ranking.rank_by_score_then_item`` on ``schema``'s score column
@@ -31,11 +29,20 @@ def select_shap_population(
     ``compute_quadrant_cases`` is a name the two modules agree on, not the
     prediction table's column, so it stays ``score`` whatever ``schema`` calls
     that one.
+
+    A failure stops the run: this node asks nothing of the model, so nothing
+    here is "the model cannot" (ADR-0030 decision 4). The two ``raise`` in the
+    body are a **runtime backstop** (no configured test month: A36 stops the
+    training command before Spark starts) and a **post-condition** (the
+    configured months matched no row: a population read as empty would land
+    as ``{}``, the shape "switched off" lands, and the quadrants would go
+    missing without a word).
     """
     from pyspark.sql import Window
     from pyspark.sql import functions as F
     from pyspark.storagelevel import StorageLevel
 
+    from recsys_tfb.core.date_ranges import as_date_list
     from recsys_tfb.core.schema import get_schema
     from recsys_tfb.utils.ranking import rank_by_score_then_item
 
@@ -60,17 +67,19 @@ def select_shap_population(
     # predicted and compute_shap_diagnostics describes (node rule 14). Both
     # tables keep every month ever written under their version, so an
     # unfiltered read grows with that history, not with this run.
-    months = [str(m) for m in (parameters.get("dataset") or {}).get("test_snap_dates") or []]
-    # A runtime backstop: A36 rejects this config before Spark starts.
+    months = as_date_list((parameters.get("dataset") or {}).get("test_snap_dates") or [])
+    # Runtime backstop — A36 rejects this config before Spark starts.
     if not months:
         raise ValueError(
             "select_shap_population: dataset.test_snap_dates is unset or empty, "
             "so there is no month to pick the quadrant population from.")
     # Compared as text, the rule compute_test_metrics reads the same table
     # with (pipelines/training/steps/scored_months.restrict_to_scored_months,
-    # whose docstring says why). Written out here because a library module
-    # may not import a pipeline's steps/ (S3); once ADR-0030 decision 6 moves
-    # this node into the training pipeline, it calls that function instead.
+    # whose docstring says why), on months normalised the way it normalises
+    # them (core.date_ranges.as_date_list). Written out here because a
+    # library module may not import a pipeline's steps/ (S3); once ADR-0030
+    # decision 6 moves this node into the training pipeline, it calls that
+    # function instead.
     time_text = F.col(schema["time"]).cast("string")
     in_months = time_text == months[0] if len(months) == 1 else time_text.isin(months)
     training_eval_predictions = training_eval_predictions.filter(in_months)
@@ -135,8 +144,9 @@ def select_shap_population(
     finally:
         # Runner 只釋放 MemoryDataset,不碰 Spark DataFrame 的 storage(core/runner.py
         # 與 core/catalog.py 都沒有 unpersist)。少了這裡,這份 cache 會佔著
-        # executor 直到 SparkSession 結束。finally 而非成功路徑:a failure above
-        # leaves this function too, on its way to stopping the run.
+        # executor 直到 SparkSession 結束。
+        # In a finally, not on the success path: a failure above leaves this
+        # function too, on its way to stopping the run.
         if labeled is not None:
             try:
                 labeled.unpersist()
@@ -148,9 +158,18 @@ def select_shap_population(
                 logger.warning(
                     "select_shap_population: unpersist failed: %s", release_error)
 
+    # Post-condition — every configured month was predicted
+    # (compute_test_metrics checks that first), so an empty population means
+    # the month filter or the join back to test_model_input matched nothing:
+    # a spelling that differs between the config and a table, say. Landed as
+    # {} it would read as "switched off".
+    if len(pop_pdf) == 0:
+        raise ValueError(
+            f"select_shap_population: no prediction for months {months} joined "
+            f"back to test_model_input. Check that {schema['time']} is spelled "
+            "in both tables as dataset.test_snap_dates spells it.")
     logger.info(
         "select_shap_population: pop_rows=%d case_rows=%d items=%d per_cell=%d",
-        len(pop_pdf), len(case_pdf),
-        pop_pdf[item_col].nunique() if len(pop_pdf) else 0, per_cell,
+        len(pop_pdf), len(case_pdf), pop_pdf[item_col].nunique(), per_cell,
     )
     return pop_pdf, case_pdf

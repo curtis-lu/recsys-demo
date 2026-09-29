@@ -177,8 +177,9 @@ adapter 也說出「評分要讀哪些欄」：模型的特徵，加上組合模
 > - 第四種形狀是 `{"enabled": True, "supported": False, "reason": <adapter 的訊息>}`，由 `diagnosis/model/_util.py` 的 `unsupported_artifact` 產生。`enabled` 留 `True`：沒有人關掉它。
 > - 用到這個形狀的是五個會問模型的診斷：`feature_importance`、`gain_ledger`、`shap_diagnostics`、`per_quadrant`（`quadrant_profiles`）、`cases_manifest`。上文說「其他會被別的 pipeline 讀的診斷產物照同一個做法」：實查被別的 pipeline 讀的只有 `gain_ledger.json`；另外四個照樣用這個形狀，因為 `log_experiment` 讀它們記 MLflow 的純量，不認得的話會記一個 0（「看了、沒有」），跟「沒看」相反。讀的一方各自認 `supported is False`：evaluation 的 `model_capacity` 多一種原因（`diagnosis/metric/model_capacity/_compute.py`）、`log_experiment` 不記那個純量（`steps/experiment_log.py` 的 `_has_result`）、`scripts/model_capacity_diagnosis.py` 停下並印出原因。
 > - `compute_feature_statistics` 沒有動：它不問模型的選用能力。`select_shap_population` 也不問模型，所以它沒有「模型做不到」，拿掉吞錯之後出錯就停。它 `finally` 裡釋放 persist 失敗時照舊只記 log：在 `finally` 裡 raise 會蓋掉 body 正在往上拋、說明出錯原因的那個例外。
-> - `per_item` 探針只接 `UnsupportedCapability`。降級的 note 照舊寫出底層函式庫的例外型別（`exc.__cause__`），不寫 `UnsupportedCapability`，讀者看到的字跟以前一樣。
-> - shap 丟的任意例外都由 LightGBM adapter 轉成 `UnsupportedCapability`（上文的規則），代價是 shap 自己的 bug 也會被讀成「做不到」、只警告不停下。只在 adapter 這一處接，node 不認得 shap 的例外型別；寫在 `LightGBMAdapter.feature_attributions` 的 docstring。
+> - `per_item`：原本先用 4 列探一次，改成在建任何結果之前，把每個 item 帶背景的歸因都算完；**任何一個 item** 丟 `UnsupportedCapability` 就整個選項降級成 `global`，已經算好的全域歸因照用。只探 4 列的話，探針過了、後面某個 item 才做不到，會把整個 SHAP 診斷連同算好的全域結果一起丟掉，寫成「模型做不到」，跟決定 4 的「選項做不到→降級」相反（審查抓到）。只接 `UnsupportedCapability`，其他例外往上拋。降級的 note 照舊寫出底層函式庫的例外型別（`exc.__cause__`），讀者看到的字跟以前一樣。
+> - `compute_shap_diagnostics` 在兩處問「模型能不能歸因」：`attribution_cost()` 與第一次歸因。之後正例 profile 那一次若丟 `UnsupportedCapability` 不接：同一個模型剛剛才用同樣的方式歸因過，那是 adapter 的 bug，照「其他錯誤」停下。
+> - **更正上文「shap 在某些模型上會丟任意型別的例外……由 adapter 的歸因能力接住、轉成這種專用例外」：只轉換「建 explainer」時丟的例外。** 照上文把 `shap_values(X)` 丟的也轉掉，我們自己的 bug 會被讀成「模型做不到」：沒給背景時 shap 0.42.1 直接把 X 交給 `Booster.predict(pred_contrib=True)`，這條路上會出的錯只剩 X 的錯（欄寬不對、欄沒編碼），也就是上游的 bug；兩個象限診斷在歸因之前沒有先 predict，沒有別處擋得住，training 會照樣跑完、MLflow 少一個純量，正是本決定要消除的「bug 被吞成警告」。上文舉的例子（解析不了類別切點）發生在建 explainer 的時候（`AttributeError`，2026-09-29 實測），縮窄之後照樣轉換。`models/lightgbm_adapter.py` 的 `feature_attributions` docstring 與 `tests/test_models/test_adapter_contract.py` 的三個測試守這條線。
 
 ## 決定 5　寫出評分結果前的守衛與組表，放一個頂層模組；只共用機制
 
@@ -244,6 +245,7 @@ node 回傳的是**每張圖的畫法**（一張圖一個函式），不是畫�
 > - catalog 兩個新條目：`shap_summary_figures`（`diagnostics/summary`）、`case_figures`（`diagnostics/cases`），`conf/base/catalog.yaml` 與 `examples/ad/conf/base/catalog.yaml` 都加了。所以 `compute_shap_diagnostics` 的輸出是 `["shap_diagnostics", "shap_summary_figures"]`，`compute_quadrant_cases` 是 `["cases_manifest", "case_figures"]`。檔名與位置不變。這兩個圖條目沒有接到 `log_experiment`：Runner 存一個 node 的輸出時一起存，`cases_manifest`、`shap_diagnostics` 已經是 `log_experiment` 的輸入，圖就一定在上傳前落地。
 > - **跟上文不同的一處：`cases_manifest.json` 不再寫得出 `reason: render_failed`。** manifest 是 node 的輸出，在任何一張圖被畫之前就寫好了，node 不知道哪一張會失敗。`rendered: True` 的意思變成「這個案例的圖交給了 catalog」；交出去之後畫不出來，是一行 warning 加一個不存在的檔案（決定 4 說的「在 MLflow 上看得出來」）。MLflow 的 `n_cases_rendered` 跟著變成數「交出去的圖」。正常路徑的 manifest 內容不變。
 > - `diagnosis/model/paths.py` 的 `summary_dir`、`per_item_summary_dir`、`cases_dir` 刪掉，子目錄由 dataset 寫檔時建；沒有圖要畫時，不再先建一個空的 `cases/` 或 `summary/per_item/`。
+> - dataset 畫每一張之前先刪掉那個路徑上的舊檔。同一個 `model_version` 的每一次執行共用這個目錄（改 `diagnostics.*` 不換版本號），不刪的話，這次畫失敗的那一張會留著上一次的圖，而旁邊的 manifest 寫的是這次的列（審查抓到）。「少一個檔案」這個訊號要靠這一步才成立。
 > - 決定 6 要的「`conf/` diff 為空」從這張之後拿得到：catalog 為圖改的兩個條目在這張。
 
 ## 決定 8　`Node` 可以照名字傳參數；每個診斷 node 都接成 `log_experiment` 的輸入
@@ -357,7 +359,9 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 
 > **實作註記（2026-09-29，#485，象限那兩件）**：
 > - 月份篩選照 `compute_test_metrics` 的比法（當文字比，`steps/scored_months.py` 的 `restrict_to_scored_months`），但**寫在 `diagnosis/model/population_spark.py` 裡，沒有 import 它**：函式庫模組不得 import pipeline 的 `steps/`（S3），而決定 6 之前這個 node 的 `def` 還在函式庫裡。決定 6 把 node 搬回 training 時改呼叫那個函式，這份就消失。
-> - `dataset.test_snap_dates` 空的時候停下，不再退回讀整張表。A36 在 Spark 啟動前就擋這個設定，這裡只是執行期的保險。
+> - 月份用 `core/date_ranges.py` 的 `as_date_list` 正規化，跟計分月份（`scoring_snap_dates`）同一套：YAML 解析成日期的值寫回 `YYYY-MM-DD`、去空白、去重。
+> - `dataset.test_snap_dates` 空的時候停下，不再退回讀整張表。A36 在 Spark 啟動前就擋這個設定，這裡只是執行期的保險（A36 的說明跟著改：它原本寫「node 裡沒有執行期保險」，`compute_test_metrics` 早就有一個）。
+> - 設定的月份一列都沒對到時停下。空的母體往下游會落地成 `{}`，跟 `quadrant_enabled: false` 同一個形狀，象限診斷會無聲地消失。
 > - 排名、取極值的 window 用 `schema` 的分數欄；交給 `compute_quadrant_cases` 的欄仍叫 `score`（決定 5）。
 
 **不收的效率項**（影響可能很小，或要先量）：診斷抽樣要整份從頭掃、`compute_test_metrics` 的中間表沒 persist、`extract_Xy` 開同一份 parquet 四五次、`persist_sample_weight_report` 每次整欄讀權重鍵。

@@ -125,18 +125,7 @@ def compute_shap_diagnostics(
     cfg = parameters.get("diagnostics", {}).get("shap", {})
     if not cfg.get("enabled", True):
         return {}, {}
-    # Decision — a model that cannot attribute (whichever attribution call
-    # finds out first) skips the whole diagnosis with a warning and says so in
-    # the artifact. A model that cannot attribute against a per-item
-    # background only degrades that option; that is decided inside.
-    try:
-        return _shap_diagnostics(model, test_parquet_handle, preprocessor, parameters, cfg)
-    except UnsupportedCapability as exc:
-        logger.warning("shap diagnostics: skipped, the model cannot attribute: %s", exc)
-        return unsupported_artifact(exc), {}
 
-
-def _shap_diagnostics(model, test_parquet_handle, preprocessor, parameters, cfg):
     from recsys_tfb.core.schema import get_schema
 
     top_k = int(cfg.get("top_k", 30))
@@ -175,7 +164,14 @@ def _shap_diagnostics(model, test_parquet_handle, preprocessor, parameters, cfg)
 
     path = handle_paths(test_parquet_handle)
 
-    n_trees = model.attribution_cost()
+    # Decision — a model that cannot attribute at all skips this diagnosis with
+    # a warning and says so in the artifact. Asked twice, here and at the
+    # first attribution below: cost is the cheap question, the first real
+    # attribution the one that settles it.
+    try:
+        n_trees = model.attribution_cost()
+    except UnsupportedCapability as exc:
+        return _model_cannot_attribute(exc)
     eff_sample = sample_rows
     if eff_sample * max(1, n_trees) > max_budget:
         eff_sample = max(min_per_item, max_budget // max(1, n_trees))
@@ -207,24 +203,38 @@ def _shap_diagnostics(model, test_parquet_handle, preprocessor, parameters, cfg)
     X = pdf_to_X(sample_pdf, model_view, parameters)
     scores = model.predict(X)
 
-    with log_step(logger, "shap_values"):
-        shap_values = model.feature_attributions(X)
+    try:
+        with log_step(logger, "shap_values"):
+            shap_values = model.feature_attributions(X)
+    except UnsupportedCapability as exc:
+        return _model_cannot_attribute(exc)
+    items = sample_pdf[item_col].values
 
-    # ---- per_item 能力探針（審查修復 2026-07-08）----
-    # Decision — per_item needs attributions against a background; a model
-    # that cannot give them degrades this option to global with a note, and
-    # only that exception does. Today every LightGBM model lands here: shap
-    # 0.42.1 cannot read an interventional explainer's categorical splits
-    # ("2||3||4"), and every model here splits on the item (the adapter's
-    # feature_attributions docstring has the evidence).
+    # ---- per_item 背景（審查修復 2026-07-08）----
+    # Decision — per_item attributes each item's rows against that item's own
+    # rows as background. A model that cannot attribute against a background
+    # — for any item — degrades the whole option to global with a note, and
+    # only that exception does; the global attributions above stay. Every
+    # item is attributed here, before anything is built from them, so an item
+    # that fails half way cannot leave a half per_item result. Today every
+    # LightGBM model degrades: shap 0.42.1 cannot build an interventional
+    # explainer over the categorical splits every model here has on the item
+    # (the adapter's feature_attributions docstring has the evidence).
     requested_background = background_mode
     degrade_note = None
+    per_item_values = {}
     if background_mode == "per_item":
         try:
-            probe = X[: min(len(X), 4)]
-            model.feature_attributions(probe, background=probe)
+            for item in pd.unique(items):
+                # 背景＝該 item 子母體（自己的前景列，上限 _BACKGROUND_CAP）。
+                X_item = X[items == item]
+                bg = _per_item_background(X_item, seed=42)
+                with log_step(logger, "shap_values_per_item"):
+                    per_item_values[item] = model.feature_attributions(
+                        X_item, background=bg)
         except UnsupportedCapability as exc:
             background_mode = "global"
+            per_item_values = {}
             # The library's own error type is the informative one, as before
             # the adapter wrapped it.
             cause = exc.__cause__ or exc
@@ -241,6 +251,9 @@ def _shap_diagnostics(model, test_parquet_handle, preprocessor, parameters, cfg)
     # ---- 正例 profile（解耦的正樣本目標 sample B；獨立第二次 SHAP）----
     # per_item 背景模式下不跑這第二次全域 pass：正例 profile 改在下面迴圈內,
     # 直接從該 item 自己的 per-item SHAP 輸出切 label==1 列(見迴圈內註解)。
+    # An UnsupportedCapability out of this pass is not caught: the model has
+    # just attributed the main sample the same way, so it would mean an
+    # adapter that can and cannot at once — a bug, which stops the run.
     if background_mode == "per_item":
         positive_profiles = {}
     else:
@@ -250,20 +263,15 @@ def _shap_diagnostics(model, test_parquet_handle, preprocessor, parameters, cfg)
             per_item=positive_sample_per_item, min_rows=positive_min_rows, top_k=top_k)
 
     # ---- per-item（族群代表 + 覆蓋率 metadata）----
-    items = sample_pdf[item_col].values
     label_present = background_mode == "per_item" and label_col in sample_pdf.columns
     labels = sample_pdf[label_col].values if label_present else None
     per_item = {}
     for item in pd.unique(items):
         mask = items == item
         if background_mode == "per_item":
-            # 背景＝該 item 子母體（自己的前景列，上限 _BACKGROUND_CAP）；
             # interventional TreeSHAP。全域 top_features/divergence 的全域向量
             # 仍用 shap_values（global 背景）算，見下方 mean_abs 用法不變。
-            X_item = X[mask]
-            bg = _per_item_background(X_item, seed=42)
-            with log_step(logger, "shap_values_per_item"):
-                sv_item = model.feature_attributions(X_item, background=bg)
+            sv_item = per_item_values[item]
             prof_all, ai = _signed_profile(sv_item, feature_cols, top_k)
         else:
             sv_item = None
@@ -329,3 +337,8 @@ def _shap_diagnostics(model, test_parquet_handle, preprocessor, parameters, cfg)
             "divergence 的全域向量仍為 global 背景——占比混入背景效應，判讀見手冊 §12"
         ]
     return out, figures
+
+
+def _model_cannot_attribute(exc):
+    logger.warning("shap diagnostics: skipped, the model cannot attribute: %s", exc)
+    return unsupported_artifact(exc), {}

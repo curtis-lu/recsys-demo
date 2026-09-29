@@ -365,3 +365,58 @@ def test_the_score_column_follows_schema(spark):
     high = cases[(cases.prod_name == "A") & (cases.quadrant == "TP")
                  & (cases.role == "high")]
     assert float(high["score"].iloc[0]) == 0.9
+
+
+def test_stray_month_rows_are_never_read(spark):
+    """Node rule 14 is about cost: the answer above would be right even
+    without the filter, because the join back to test_model_input drops a
+    stray month anyway. So this checks the read itself — a stray-month row
+    raises the moment anything computes it. Filtered first, Spark pushes the
+    filter below the column that raises and never computes it; filtered only
+    by the later join, the rank window does."""
+    from pyspark.sql import functions as F
+
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+
+    preds, feats = _preds_and_feats(spark)
+    stray = (F.col("snap_date") == "2023-12-31")
+    preds = preds.unionByName(spark.createDataFrame(
+        [("2023-12-31", "c9", "A", 0.5, 1)], _PRED_COLS)).withColumn(
+        "score", F.when(stray, F.raise_error("stray prediction month read"))
+        .otherwise(F.col("score")))
+    feats = feats.unionByName(spark.createDataFrame(
+        [("2023-12-31", "c9", "A", 9.0, 9.0)], _FEAT_COLS)).withColumn(
+        "f0", F.when(stray, F.raise_error("stray feature month read"))
+        .otherwise(F.col("f0")))
+
+    pop, cases = select_shap_population(preds, feats, _params())
+    assert set(pop["snap_date"]) == set(cases["snap_date"]) == {"2024-01-31"}
+
+
+def test_months_that_match_no_row_stop_rather_than_land_empty(spark):
+    """An empty population would land as ``{}`` downstream — the shape of
+    ``quadrant_enabled: false`` — and the quadrants would vanish silently."""
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+
+    preds, feats = _preds_and_feats(spark)
+    with pytest.raises(ValueError, match="no prediction for months"):
+        select_shap_population(preds, feats, _params(months=("2024-02-29",)))
+
+
+@pytest.mark.parametrize("spelled", [
+    pytest.param("datetime", id="yaml-timestamp"),
+    pytest.param(" 2024-01-31 ", id="padded-text"),
+])
+def test_months_are_normalised_like_the_scored_months(spark, spelled):
+    """The scored months (core.date_ranges.as_date_list) read a timestamp YAML
+    produced, or padded text, as the date text the table holds; ``str()``
+    alone would give "2024-01-31 00:00:00" or keep the spaces and match
+    nothing."""
+    import datetime
+
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+
+    month = datetime.datetime(2024, 1, 31) if spelled == "datetime" else spelled
+    preds, feats = _preds_and_feats(spark)
+    pop, _cases = select_shap_population(preds, feats, _params(months=(month,)))
+    assert set(pop["snap_date"]) == {"2024-01-31"}

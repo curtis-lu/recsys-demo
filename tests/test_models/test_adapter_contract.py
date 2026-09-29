@@ -336,10 +336,10 @@ def test_lightgbm_attribution_cost_is_the_number_of_trees():
     assert _fitted(LightGBMAdapter(), num_iterations=20).attribution_cost() == 20
 
 
-def test_whatever_shap_raises_comes_back_as_unsupported(monkeypatch):
+def test_an_explainer_shap_cannot_build_comes_back_as_unsupported(monkeypatch):
     """shap raises no one type on a model it cannot read (a categorical split
-    it cannot parse is a ValueError), so the adapter converts; the node then
-    has one exception to catch and never names shap's."""
+    it cannot parse), so the adapter converts; the node then has one
+    exception to catch and never names shap's."""
     import shap
 
     from recsys_tfb.models.base import UnsupportedCapability
@@ -353,6 +353,30 @@ def test_whatever_shap_raises_comes_back_as_unsupported(monkeypatch):
     monkeypatch.setattr(shap, "TreeExplainer", cannot_parse)
     with pytest.raises(UnsupportedCapability, match="2\\|\\|3\\|\\|4"):
         adapter.feature_attributions(X, background=X)
+
+
+def test_the_real_categorical_case_is_unsupported_not_a_crash():
+    """What the conversion is for, on a real model: shap 0.42.1 cannot build
+    an interventional explainer over a categorical split."""
+    from recsys_tfb.models.base import UnsupportedCapability
+
+    adapter = _categorical_stump()
+    X = np.column_stack([np.tile([0.0, 1.0, 2.0, 3.0], 5), np.zeros(20)])
+    with pytest.raises(UnsupportedCapability, match="interventional"):
+        adapter.feature_attributions(X, background=X)
+
+
+def test_a_wrong_matrix_is_a_bug_not_an_unsupported_model():
+    """A matrix of the wrong width is the caller's bug (a feature view gone
+    wrong upstream). It must stop the run, so it must not come back as
+    "the model cannot" — the diagnostics would skip it with a warning."""
+    from recsys_tfb.models.base import UnsupportedCapability
+
+    adapter = _fitted(LightGBMAdapter())
+    X, _ = _arrays(seed=5, n=10)
+    with pytest.raises(Exception) as caught:
+        adapter.feature_attributions(X[:, :2])
+    assert not isinstance(caught.value, UnsupportedCapability)
 
 
 def _categorical_stump():

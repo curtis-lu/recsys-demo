@@ -48,6 +48,20 @@ def test_a_figure_that_fails_is_skipped_with_a_warning_and_the_rest_are_saved(
     assert plt.get_fignums() == open_before   # the broken draw's figure is closed too
 
 
+def test_a_figure_that_fails_does_not_leave_the_last_runs_file(tmp_path):
+    """The directory is reused by every run of one model_version. A stale
+    PNG where this run's figure failed would be read as this run's."""
+    (tmp_path / "b.png").write_bytes(b"last run's chart")
+
+    def broken():
+        raise RuntimeError("plot exploded")
+
+    DiagnosticFiguresDataset(filepath=str(tmp_path)).save(
+        {"a.png": _line(1), "b.png": broken})
+    assert (tmp_path / "a.png").exists()
+    assert not (tmp_path / "b.png").exists()
+
+
 def test_figures_are_drawn_one_at_a_time_and_closed(tmp_path):
     """Drawing at save time is only worth it if a figure is closed before the
     next is drawn: otherwise a hundred-odd figures accumulate as before."""

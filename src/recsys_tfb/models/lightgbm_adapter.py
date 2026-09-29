@@ -269,14 +269,22 @@ class LightGBMAdapter(ModelAdapter):
         """SHAP values from ``shap.TreeExplainer``: tree-path-dependent with no
         ``background``, interventional against it otherwise.
 
-        Anything shap raises becomes :class:`UnsupportedCapability`, because
-        what it raises on a model it cannot read is not one type. The case
-        that motivated this: shap 0.42.1's ``SingleTree`` stores thresholds as
+        Whatever shap raises while **building the explainer** becomes
+        :class:`UnsupportedCapability`: that is shap failing to read this
+        model, and what it raises then is not one type. The case that
+        motivated this: shap 0.42.1's ``SingleTree`` stores thresholds as
         floats, so an interventional explainer cannot represent a categorical
-        split (``"2||3||4"``) and fails on every model that splits on the
-        item — 129 of 161 trees on a real one (2026-07-08). The price is that
-        a shap bug reads as "cannot" too; it is caught here and nowhere else,
-        so the training node stays free of shap's exception types.
+        split (``"2||3||4"``) and fails on every model that splits on the item
+        — 129 of 161 trees on a real one (2026-07-08); it fails in the
+        constructor (``AttributeError``, checked 2026-09-29).
+
+        What ``shap_values(X)`` raises is left alone. Once the explainer
+        exists, the model is readable and a failure is about ``X`` — a matrix
+        of the wrong width, an unencoded column — which is a bug upstream, and
+        a bug has to stop the run rather than be reported as "the model
+        cannot" (ADR-0030 decision 4). On the path-dependent route shap hands
+        ``X`` straight to ``Booster.predict(pred_contrib=True)``, so those
+        errors are LightGBM's own.
         """
         import shap
 
@@ -288,13 +296,13 @@ class LightGBMAdapter(ModelAdapter):
                 explainer = shap.TreeExplainer(
                     booster, data=background,
                     feature_perturbation="interventional")
-            values = np.asarray(explainer.shap_values(X))
         except Exception as exc:
             raise UnsupportedCapability(
-                f"shap could not attribute this LightGBM model "
+                f"shap could not read this LightGBM model "
                 f"({'interventional' if background is not None else 'tree path dependent'}): "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
+        values = np.asarray(explainer.shap_values(X))
         if values.ndim == 3:  # some shap versions return [classes, n, feat]
             values = values[-1]
         # A trailing bias column, when the version appends one, is not a feature.

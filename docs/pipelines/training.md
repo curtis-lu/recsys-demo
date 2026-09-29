@@ -621,8 +621,8 @@ SHAP PNG 落於 `diagnostics/summary/` 子目錄：全域 beeswarm 為 `summary/
 **診斷出錯時**（ADR-0030 決定 4）：
 
 - **模型做不到**：模型的 adapter 不提供那項能力（例如沒有樹的模型沒有切點結構，就沒有 gain 帳本）。那個診斷跳過、印一行 warning，產物寫成 `{"enabled": true, "supported": false, "reason": "..."}`；evaluation 的 model_capacity 會把原因報成「模型做不到」，跟「evaluation 單獨跑」「訓練側關掉」分得開。只有某個選項做不到時（`background: per_item`）降級成 `global`，寫進 `notes`。
-- **某一張圖畫不出來**：印 warning、跳過那一張，其他圖照存，training 不停。`cases_manifest.json` 仍記著那張圖的 `png`：圖是存檔時才畫的，manifest 早一步就寫好了。看到 manifest 指的檔案不存在時，對照 log 的 warning。
-- **其他錯誤**：training 停下。`model` 在診斷之前就落地了，修好之後用 `--from-node <出錯的診斷>` 接著跑，HPO 與重訓都不用重來。以前 `select_shap_population`、`compute_quadrant_profiles`、`compute_quadrant_cases` 會吞掉錯誤只印 warning，#485 之後不會。
+- **某一張圖畫不出來**：印 warning、跳過那一張，其他圖照存，training 不停。那個路徑上次留下的圖會先被刪掉，所以不會拿到舊圖。`cases_manifest.json` 仍記著那張圖的 `png`：圖是存檔時才畫的，manifest 早一步就寫好了。看到 manifest 指的檔案不存在時，對照 log 的 warning。
+- **其他錯誤**：training 停下。`model` 在診斷之前就落地了，修好之後用 `--from-node <出錯的診斷>` 接著跑，HPO 與重訓都不用重來。象限的兩個診斷（`compute_quadrant_profiles`、`compute_quadrant_cases`）的輸入只在記憶體裡，從它們接續會連 `select_shap_population` 那段 Spark 一起重跑，等於從 `select_shap_population` 接續。以前 `select_shap_population`、`compute_quadrant_profiles`、`compute_quadrant_cases` 會吞掉錯誤只印 warning，#485 之後不會；設定的 test 月份在預測表或 `test_model_input` 裡一列都對不到時，`select_shap_population` 也會停下（以前會落地一份空的象限診斷）。
 
 `manifest.json` 的 `artifacts` 清單只列版本目錄**第一層**檔案，**不含 `hpo/` 子目錄**（`hpo/model.txt`、`hpo/model_meta.json`）——稽核 manifest 時請知悉。`sample_weight_report.json` 與 `predict_manifest.json` 在第一層，所以它們在清單裡。
 

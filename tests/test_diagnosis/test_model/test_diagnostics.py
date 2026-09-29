@@ -847,3 +847,53 @@ def test_feature_importance_failure_that_is_not_the_model_stops_the_run(
     monkeypatch.setattr(type(fitted_adapter), "feature_importance", bug)
     with pytest.raises(KeyError, match="a bug"):
         diag.compute_feature_importance(fitted_adapter, {"diagnostics": {}})
+
+
+def test_per_item_that_fails_for_a_later_item_degrades_and_keeps_the_global_result(
+        shap_setup, monkeypatch):
+    """An option the model cannot do degrades; it does not throw away what was
+    computed (ADR-0030 decision 4). Here the background attribution works
+    for the first item and not the second — the result must be the global
+    one plus the degrade note, not the "model cannot" shape."""
+    from recsys_tfb.models.base import UnsupportedCapability
+
+    adapter, handle, preprocessor, parameters = shap_setup
+    out_global, _ = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+
+    real = type(adapter).feature_attributions
+    with_background = {"n": 0}
+
+    def fails_on_the_second_item(self, X, *, background=None):
+        if background is not None:
+            with_background["n"] += 1
+            if with_background["n"] == 2:
+                raise UnsupportedCapability("cannot for this one") from ValueError("x")
+        return real(self, X, background=background)
+
+    monkeypatch.setattr(type(adapter), "feature_attributions", fails_on_the_second_item)
+    parameters["diagnostics"]["shap"]["background"] = "per_item"
+    out, figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+
+    assert with_background["n"] == 2
+    notes = out.pop("notes")
+    assert any("降級" in n for n in notes)
+    assert out == out_global
+    assert "shap_summary_global.png" in figures
+
+
+def test_per_item_background_bug_is_not_a_degrade(shap_setup, monkeypatch):
+    """Only UnsupportedCapability degrades the option; a bug in the
+    background attribution stops the run. Mutation target: widening the
+    per_item ``except`` back to ``Exception``."""
+    adapter, handle, preprocessor, parameters = shap_setup
+    real = type(adapter).feature_attributions
+
+    def bug_with_background(self, X, *, background=None):
+        if background is not None:
+            raise KeyError("a bug in the background path")
+        return real(self, X, background=background)
+
+    monkeypatch.setattr(type(adapter), "feature_attributions", bug_with_background)
+    parameters["diagnostics"]["shap"]["background"] = "per_item"
+    with pytest.raises(KeyError, match="background path"):
+        diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
