@@ -474,10 +474,13 @@ class TestDictInputs:
     def test_the_catalog_check_looks_up_the_dataset_name(self):
         """The parameter ``present`` is a registered name and the dataset
         ``absent`` is not, so a check that read parameter names would pass."""
+        def reads(present):
+            return present
+
         catalog = DataCatalog()
         catalog.add("present", MemoryDataset(data=1))
         pipeline = Pipeline([
-            Node(identity, inputs={"present": "absent"}, outputs="out"),
+            Node(reads, inputs={"present": "absent"}, outputs="out"),
         ])
 
         with pytest.raises(ValueError, match="requires input 'absent'"):

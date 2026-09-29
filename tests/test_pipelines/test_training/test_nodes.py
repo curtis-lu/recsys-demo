@@ -779,16 +779,19 @@ class TestTrainingRunsOnAnotherAdapter:
 def _call_log_experiment(model, best_params, best_iteration, evaluation_results,
                          parameters, **diagnoses):
     """``log_experiment`` with every diagnosis empty unless given: none of
-    them has a default (ADR-0030 decision 8)."""
-    empty = {name: {} for name in (
-        "feature_statistics", "feature_importance", "gain_ledger",
-        "shap_diagnostics", "quadrant_profiles", "cases_manifest",
-    )}
-    log_experiment(
+    them has a default (ADR-0030 decision 8). The diagnoses are read off the
+    signature, so a new one needs no edit here."""
+    import inspect
+
+    given = dict(
         model=model, best_params=best_params, best_iteration=best_iteration,
         evaluation_results=evaluation_results, parameters=parameters,
-        **{**empty, **diagnoses},
     )
+    empty = {
+        name: {} for name in inspect.signature(log_experiment).parameters
+        if name not in given
+    }
+    log_experiment(**given, **{**empty, **diagnoses})
 
 
 class TestLogExperiment:

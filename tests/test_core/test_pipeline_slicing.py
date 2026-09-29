@@ -12,7 +12,7 @@ from recsys_tfb.core.pipeline import Pipeline
 
 def _n(name, inputs=None, outputs=None, writes=None):
     return Node(
-        func=lambda *a: None,
+        func=lambda *a, **kw: None,
         inputs=inputs, outputs=outputs, writes=writes, name=name,
     )
 

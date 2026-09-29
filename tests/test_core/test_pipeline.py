@@ -16,6 +16,10 @@ def source():
     return 1
 
 
+def take_value(value):
+    return value
+
+
 class TestPipeline:
     def test_linear_chain(self):
         node_a = Node(func=source, outputs=["x"], name="A")
@@ -28,7 +32,7 @@ class TestPipeline:
         """The edge runs through the dataset name ``x``, not the parameter
         name ``value``; declared consumer-first, so only the edge sorts it."""
         node_a = Node(func=source, outputs=["x"], name="A")
-        node_b = Node(func=identity, inputs={"value": "x"}, outputs=["y"], name="B")
+        node_b = Node(func=take_value, inputs={"value": "x"}, outputs=["y"], name="B")
         pipe = Pipeline([node_b, node_a])
         assert [n.name for n in pipe.nodes] == ["A", "B"]
 

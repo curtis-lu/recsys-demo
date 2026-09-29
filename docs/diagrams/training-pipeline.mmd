@@ -18,7 +18,8 @@
 %%   ([ 虛線膠囊 ])  MemoryDataset：catalog.yaml 沒有這個名字，只活在這次 run 的記憶體
 %%   ([ 綠膠囊 ])    別的 pipeline 會吃的產物
 %%   粗虛線邊        node 自己寫的表（Node(writes=…)），**不是**拓樸相依邊
-%%   虛線邊          宣告了但函式根本沒讀的參數：純排序用（本圖只有一條，見下）
+%%   虛線邊          宣告了但函式根本沒讀的參數：純排序用（本圖畫出來的只有一條，見下；
+%%                  另一條是 gain_ledger → log_experiment，藏在 [L] 記號裡沒畫）
 %%   [V][P][M][T][L] 接點記號，兩種方向：
 %%                  V/P/M/T 標在**產物**上，node 框內的「＋ P · M」代表它同時吃這幾個；
 %%                  L 反過來標在產物上，代表「log_experiment 吃它」——它一個人吃十個
@@ -101,7 +102,7 @@
 %%   ModelAdapterDataset 會在 filepath 旁寫 model_meta.json sidecar，跟 `model`
 %%   共用目錄會互相覆蓋 sidecar（algorithm 名稱與 adapter 類別串味）。
 
-%% 唯一一條虛線邊：select_shap_population 的 predict_manifest
+%% 唯一畫出來的虛線邊：select_shap_population 的 predict_manifest
 %%   這個參數在函式裡從頭到尾沒被讀過（population_spark.py 全檔只出現在簽名與
 %%   docstring）。掛它的理由是排序：那個 node 的三個資料輸入都沒有 node producer，
 %%   Kahn 拓樸排序會把它浮到 predict 之前，讀到還沒寫入的預測。

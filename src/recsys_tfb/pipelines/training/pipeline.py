@@ -215,8 +215,9 @@ def create_pipeline() -> Pipeline:
             # diagnosis node that lands a file in diagnostics/ feeds one of
             # its outputs in, and that edge is what has the file on disk
             # before log_artifacts uploads the directory. The figure datasets
-            # are not inputs (they have no load): the Runner saves them with
-            # the JSON beside them, which is. The HPO search diagnostics are
+            # are not inputs (they have no load): in a run that is not cut
+            # short, the Runner saves them with the JSON beside them, which
+            # is an input. The HPO search diagnostics are
             # written by tune_hyperparameters, upstream through best_params.
             inputs={
                 "model": "model",

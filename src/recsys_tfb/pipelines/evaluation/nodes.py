@@ -1569,7 +1569,8 @@ def render_diagnosis_pages(parameters: dict, *diagnosis_results) -> list[str]:
     fingerprint pre-check below.
 
     **Why varargs stay.** The registry's length is dynamic and the Runner
-    binds inputs by position (``core/runner.py``), so a fixed signature would
+    binds a list of inputs by position (``core/runner.py``; only a dict of
+    inputs binds by name, ADR-0030 decision 8), so a fixed signature would
     change with every diagnosis added.
 
     **Why the pre-check reads content, not only the count.** ``parameters``
@@ -1691,9 +1692,9 @@ def no_diagnosis_pages(parameters: dict) -> list[str]:
     ``generate_report`` still takes a diagnosis-pages input. Of the three ways to supply
     it, this is the one that cannot go wrong:
 
-    * **Not wiring it**: ``core/runner.py`` binds inputs by position, so the
-      Runner raises "requires input … not produced by any prior node" before
-      anything runs.
+    * **Not wiring it**: ``generate_report`` takes a list of inputs, bound
+      by position (``core/runner.py``), so the Runner raises "requires input
+      … not produced by any prior node" before anything runs.
     * **A default for ``generate_report``'s ``diagnosis_pages``**: a default
       swallows arity errors, and its all-required parameters are what
       ``known-pitfalls.md`` §12 fixed.
