@@ -27,11 +27,15 @@ drifts into the wrong one turns something red:
 ``tests/test_pipelines/test_inference/test_chunk_validation.py`` covers the
 chunk half, ``…/test_validation.py`` the batch half.
 
-**Both registers resolve to code in this module.** The chunk register's four
-checks are the four blocks of :func:`validate_scored_chunk`; the batch
-register's four are one ``<name>_failure`` function each, so a reader who finds
-a name in :data:`BATCH_CHECKS` finds its implementation by that name without
-leaving the file. What stays in ``nodes.py`` is the Spark that produces the
+**Both registers resolve to code reached from this module.** The chunk
+register's four checks all run in :func:`validate_scored_chunk`: three of them
+— ``chunk_row_count``, ``no_missing``, ``no_duplicates`` — are
+``recsys_tfb.score_output.scored_chunk_failures``, which training's
+test-prediction write runs too (#484), called with this pipeline's identity;
+the fourth, ``item_values_are_known``, is written out in the function. The
+batch register's four are one ``<name>_failure`` function each, so a reader
+who finds a name in :data:`BATCH_CHECKS` finds its implementation by that name
+without leaving the file. What stays in ``nodes.py`` is the Spark that produces the
 facts — the grouped aggregation and the windowed scan — because that is
 mechanism, and because the two-action budget is a property of the node, not of
 any single check.
@@ -47,6 +51,7 @@ from collections.abc import Collection
 import pandas as pd
 
 from recsys_tfb.pipelines.inference.steps.identity import scored_row_columns
+from recsys_tfb.score_output import scored_chunk_failures
 
 logger = logging.getLogger(__name__)
 
@@ -136,10 +141,15 @@ def validate_scored_chunk(
     pandas over data already in the driver — no Spark action, so the cost is
     invisible next to the ``predict`` that produced ``out_pdf``.
 
-    ``source_pdf`` is not a convenience: the entity identity reaches ``out_pdf``
-    through ``astype(str)``, which turns a null into the string ``"None"``. Read
-    the null check off the output and it can never go red, which is the exact
-    shape of decorative check ADR-0011 exists to remove.
+    ``chunk_row_count``, ``no_missing`` and ``no_duplicates`` are the
+    mechanism both scoring pipelines share
+    (``recsys_tfb.score_output.scored_chunk_failures``, where the reasons for
+    each are written — among them why the entity's nulls are read off
+    ``source_pdf``). What this function decides is what to hand it: the
+    identity is :func:`scored_row_columns`, **not** ``identity_columns`` —
+    this pipeline's rows never carry an optional role's columns — and the
+    columns that must be filled are that identity's non-entity columns plus
+    the score.
 
     ``item_values_are_known`` is the only check in either layer that would catch
     the failure ADR-0011 §1 reproduced on a real run — identity ``prod_name``
@@ -156,11 +166,11 @@ def validate_scored_chunk(
 
     ``chunk_row_count`` is in the same category, and more weakly so. The caller
     builds ``out_pdf`` by handing pandas the entity arrays and the score array
-    together, so a length disagreement raises ``All arrays must be of the same
-    length`` at construction, before this ever runs — and ``entity`` cannot be
-    empty (A7). It is a guard on that construction staying row-preserving, not
-    a check on the data. Do not read it as protection against a short chunk;
-    nothing in either layer sees one.
+    together (``ScoredFrameLayout.build``), so a length disagreement raises
+    ``All arrays must be of the same length`` at construction, before this ever
+    runs — and ``entity`` cannot be empty (A7). It is a guard on that
+    construction staying row-preserving, not a check on the data. Do not read
+    it as protection against a short chunk; nothing in either layer sees one.
 
     Args:
         out_pdf: the frame about to be handed to ``save()``.
@@ -179,36 +189,14 @@ def validate_scored_chunk(
     item_col = schema["item"]
     score_col = schema["score"]
 
-    failures: list[dict] = []
-
-    n_in, n_out = len(source_pdf), len(out_pdf)
-    if n_out != n_in:
-        failures.append({
-            "check": "chunk_row_count",
-            "detail": f"scored {n_out} rows from {n_in} entities",
-        })
-
-    null_counts: dict[str, int] = {}
-    for col in entity_cols:
-        n_null = int(source_pdf[col].isna().sum())
-        if n_null:
-            null_counts[col] = n_null
-    for col in [c for c in identity_cols if c not in entity_cols] + [score_col]:
-        n_null = int(pd.isna(out_pdf[col]).sum())
-        if n_null:
-            null_counts[col] = n_null
-    if null_counts:
-        failures.append({
-            "check": "no_missing",
-            "detail": f"NaN values found: {null_counts}",
-        })
-
-    n_dupes = int(out_pdf.duplicated(subset=identity_cols).sum())
-    if n_dupes:
-        failures.append({
-            "check": "no_duplicates",
-            "detail": f"{n_dupes} duplicate rows on {identity_cols}",
-        })
+    failures = scored_chunk_failures(
+        out_pdf, source_pdf,
+        entity_cols=entity_cols,
+        identity_cols=identity_cols,
+        not_null_cols=(
+            [c for c in identity_cols if c not in entity_cols] + [score_col]
+        ),
+    )
 
     # ``str`` on both sides. The item column comes back from pandas with
     # whatever dtype the frame carries, while the item list is whatever YAML

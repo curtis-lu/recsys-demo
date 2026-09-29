@@ -15,6 +15,7 @@
 | 寫下一份「名次在哪個範圍內比」或「拿什麼去接 entity 層級的表」的欄位清單 | S7 ＋ [ADR-0025](../adr/0025-query-group-widened-by-occasion-role.md) |
 | 在測試或 `src/` 裡寫一份 `parameters` 的 `schema` 區塊 | S5 |
 | 在 `src/` 裡寫下任何具體欄名（字串、預設參數、log 欄位） | S6 ＋ [ADR-0017](../adr/0017-framework-vocabulary-boundary.md) |
+| 新增跨目錄的 import；想讓兩條 pipeline 共用一段程式 | S8（共用的東西往下搬，不橫向 import）＋ S3 ＋ [ADR-0030](../adr/0030-training-second-pass-honest-adapter-shared-scoring.md) 決定 14 |
 | 新增 catalog 條目 | A1 ＋ F10 |
 | 想破例（寫檔、零輸出 node、`writes=`） | 節三——**要加一筆必須先問使用者** |
 | 覺得「測試綠了應該就沒問題」 | 每條約束底下的「**這個檢查看不到**」 |
@@ -42,9 +43,9 @@
 
 ---
 
-## 14 條約束一覽
+## 15 條約束一覽
 
-`tests/test_core/test_architecture_constraints.py` 執行，**52 個測試，6.17–6.20 秒**（2026-09-20 共 3 次量測，`load average 1.95`；S7 加進來之後——它是本檔第四次各自完整解析同一批檔案，而且多掃了 `scripts/`）。前一版：39 個測試 2.86–3.23 秒（2026-09-09，9 次量測，`load average 2.5–4.1`）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔前幾版分別量到 26 個測試 1.06–1.10 秒、20 個測試 1.4–1.7 秒、17 個測試 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
+`tests/test_core/test_architecture_constraints.py` 執行，**61 個測試，9.18–9.64 秒**（2026-09-29 共 3 次量測，`load average 5.55–5.75`（`uptime` 的 1 分鐘值；那台機器當時有別的 session 在跑，數字偏高）；S8 加進來之後——它又多一次各自完整解析 `src/` 的所有檔案）。前一版：52 個測試 6.17–6.20 秒（2026-09-20，3 次量測，`load average 1.95`）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔前幾版分別量到 39 個測試 2.86–3.23 秒、26 個測試 1.06–1.10 秒、20 個測試 1.4–1.7 秒、17 個測試 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
 
 | # | 規則 | 管到哪 | 這個檢查看不到 |
 |---|---|---|---|
@@ -62,6 +63,7 @@
 | [S5](#s5-schema-設定的角色名必須在-columns-底下且不得宣告推導欄) | `schema` 設定的角色名必須在 `columns` 底下，且不得宣告推導欄（`identity_columns`／`query_group_columns`／`base_key_columns`） | `src/recsys_tfb/` ＋ `tests/` 裡的 `{"schema": {...}}` 字面值 | `conf/` 的 YAML；`schema` 區塊先綁到變數再組進 parameters；`scripts/` 不在範圍內（**是假陽性，不是缺陷**） |
 | [S6](#s6-src-不得出現示例部署的字面欄名) | `src/` 不得出現示例部署的字面欄名（`snap_date`／`cust_id`／`prod_name`） | `src/recsys_tfb/`（**只有這一棵**；`tests/`／`scripts/` 刻意在外） | 註解；f-string 片段與任何子字串；字串拼接出來的欄名；不在那三個名字裡的其他示例欄名；`conf/` 的 YAML |
 | [S7](#s7-query-groupbase-keyidentity-只能從-get_schema-取不得手拼) | query group／base key／identity 只能從 `get_schema` 取，不得手拼 | `src/recsys_tfb/` ＋ `tests/` ＋ `scripts/`（比 S4／S5／S6 多一棵，見該條） | 欄名不是從 schema 讀出來的（模組常數、字面字串）；清單多出任何一欄就放行（刻意）；`conf/` 的 YAML |
+| [S8](#s8-pipeline-之間不互相-importpipeline-以外的-src-模組不-import-pipeline) | pipeline 之間不互相 import；pipeline 以外的 `src/` 模組不 import pipeline（CLI `__main__.py` 除外） | 整個 `src/recsys_tfb/`（測試刻意不掃） | `importlib.import_module` 字串 import；先 import 套件再走屬性；經 `get_pipeline` 登記表拿另一條；CLI 例外本身；現況零命中 |
 
 **CLI 層（`__main__.py`）、`core/`、`io/` 不在 A1／A2 管轄內**——那幾層本來就負責 I/O 與程序級資源。
 
@@ -694,6 +696,54 @@ src/recsys_tfb/evaluation/metrics_spark.py:221 in collapse_to_categories(): time
 - **流不敏感**：一個名字在模組內只判一次。中途改綁別的東西之後仍讀作原角色。
 - **`conf/` 的 YAML 不在範圍內**（同 S5、S6）。掃的是 Python。
 - **它證明不了歸類是對的。** 本條擋的是「又手拼了一處」，不是「這一處歸對了組」。歸類判錯的後果只在宣告 `occasion` 時出現，而今天沒有任何設定走得到——第一個驗得到的地方是 ADR-0025 形狀二的示例實跑（含離線推論）。**測試全綠不等於二十多處都歸對了。**
+
+---
+
+## S8. pipeline 之間不互相 import；pipeline 以外的 `src/` 模組不 import pipeline
+
+兩條規矩，一起守：
+
+1. `src/recsys_tfb/pipelines/<a>/` 底下的模組，不得 import `recsys_tfb.pipelines.<b>`（`<b>` ≠ `<a>`，含 `<b>` 底下任何子模組）。
+2. `pipelines/` 以外的 `src/recsys_tfb/` 模組，不得 import `recsys_tfb.pipelines` 或其下任何東西。**唯一例外：CLI `src/recsys_tfb/__main__.py`。**
+
+直接放在 `pipelines/` 根層的檔（例：`pipelines/__init__.py` 的 `_REGISTRY`）屬於 pipelines 套件本身，不算 `<a>`，也不算「pipeline 以外」。
+
+守的是 [ADR-0030](../adr/0030-training-second-pass-honest-adapter-shared-scoring.md) 決定 14 說的那件事：**兩條 pipeline 是平輩，共用的東西一律往下搬到兩者之下**（`preprocessing.py`、`models/feature_selection.py`、`models/feature_view.py`、`score_output.py`），不橫向 import。為什麼不讓 training 直接 import inference：一旦 training 依賴 inference 的內部，inference 的一次重構就可能打壞 training，而且是在 training 的測試裡才爆——inference 的人改自己的內部，沒有任何理由去看 training。同理，`models/`、`evaluation/` 這類函式庫模組若 import pipeline，就變成「底層依賴上層」，pipeline 內部一改、庫就跟著壞。這兩條過去只寫在 ADR-0008、一份設計檔與 `src/recsys_tfb/diagnosis/__init__.py` 的 docstring，沒有測試守；訓練與推論共用評分那一輪會新增不少跨目錄呼叫，正是最容易不小心打破的時候。
+
+**跟 S3 的關係**：S3 擋「pipeline 外的模組伸進 `steps/`」，而且**連 CLI 也擋**（CLI 不該 import `steps/`）；S8 擋的是更粗的一層——pipeline 之間、庫對 pipeline——**不擋 CLI**。兩者互補，不是包含：CLI import `recsys_tfb.pipelines.training.nodes` 合 S8、也合 S3。
+
+**測試不在掃描範圍內，這是刻意的**，理由同 S3：測試 import 不移動任何模組的位置，判準管的是生產端呼叫圖。
+
+**檢查**：`TestS8PipelinesDoNotImportEachOther`，七個測試。掃描重用 S3 的解析（相對 import 依所在套件還原、`from X import Y` 兩半都算、`ast.Import`），並多回傳行號（`_module_imports_at`）。
+
+1. **現有程式全綠**——`test_the_real_tree_is_clean`，掃真的 `src/recsys_tfb`。失敗訊息逐行印出 `檔案:行號: imports 模組`。
+2. **CLI 例外是真的**——`test_the_cli_exception_is_real`：`__main__.py` 確實 import pipelines，所以這個例外是讓上一個測試維持綠的承重件，不是空話；哪天 CLI 不 import 了，這個測試會要求把例外拿掉。
+3. **抓得到 pipeline 互 import 的每種寫法**——`test_catches_every_spelling_of_pipeline_importing_pipeline`，在 `tmp_path` 造一棵迷你樹，逐一斷言七種都被抓到、且行號正確：`from recsys_tfb.pipelines.inference.steps.validation import x`、`from recsys_tfb.pipelines.inference import nodes`、`import recsys_tfb.pipelines.inference.nodes`、`from recsys_tfb.pipelines import inference`（**只有第二半**指到 `<b>`）、相對 `from ..inference import nodes`、`steps/` 裡的 `from ...inference import nodes`、函式內的 import。
+4. **抓得到庫 import pipeline 的每種寫法**——`test_catches_every_spelling_of_a_library_importing_a_pipeline`，六種：`from recsys_tfb.pipelines.training.nodes import x`、`import recsys_tfb.pipelines`、`from recsys_tfb.pipelines import get_pipeline`、相對 `from ..pipelines.training import nodes`、函式內的 `import recsys_tfb.pipelines.training`、頂層模組的 `from recsys_tfb.pipelines import get_pipeline`。
+5. **合法的不被抓**——`test_legal_imports_are_left_alone`：pipeline import 自己的 `steps/`（絕對與相對）、pipeline import `recsys_tfb.models`／`recsys_tfb.score_output`、`pipelines/__init__.py` 與 `pipelines/` 根層檔 import 任何 pipeline、`__main__.py` import 任何 pipeline、pipeline 內的 `from recsys_tfb.pipelines import get_pipeline`。
+6. **`<b>` 必須真的存在**——`test_a_name_that_is_not_a_pipeline_is_not_reported`：`from recsys_tfb.pipelines import get_pipeline` 的第二半是 `recsys_tfb.pipelines.get_pipeline`，長得像一條叫 `get_pipeline` 的 pipeline；掃描把 `<b>` 對照 `pipelines/` 底下真的有的目錄與 `.py`，所以同一個檔裡 `from recsys_tfb.pipelines import inference` 被報、`import get_pipeline` 不被報。另有 `test_the_message_names_file_line_and_module` 釘住訊息格式。
+
+**四個變異各自實測**（改掃描函式的一行、跑 S3＋S8 共十個測試、還原）：
+
+| 弄壞的那一行 | 轉紅的 S8 測試 |
+|---|---|
+| 拿掉 `from X import Y` 的第二半（`X.Y` 那個 `yield`） | 第 3 項（`from recsys_tfb.pipelines import inference` 漏掉）、第 6 項、訊息格式測試；S3 的 `test_the_scan_sees_every_spelling_of_the_import` 也紅 |
+| 拿掉相對 import 還原（`if node.level:` 改成 `if False:`） | 第 3 項（兩種相對寫法漏掉）、第 4 項（相對 `from ..pipelines.training import nodes` 漏掉）、訊息格式測試；S3 那個也紅 |
+| 拿掉 CLI 例外（`__main__.py` 的 `continue`） | 第 1 項（`__main__.py` 真的 import pipelines）、第 5 項 |
+| 拿掉「`<b>` 必須真的存在」（`parts[2] in known`） | 第 5 項、第 6 項（pipeline 內的 `from recsys_tfb.pipelines import get_pipeline` 被誤判） |
+
+**沒有例外登記表。** 現況全樹零違例。
+
+### 這個檢查看不到
+
+- **字串組出來的 import。** `importlib.import_module(...)` 靜態掃不到，不是這條的特例。`pipelines/__init__.py` 的 `_REGISTRY` 就是用它查 pipeline 模組——它屬於 pipelines 根層，本來就合法；但同樣的手法從某條 pipeline 裡指向另一條，這個檢查不會報。
+- **先 import 套件、再走屬性。** pipeline 內的 `import recsys_tfb.pipelines` 本身合法（指向的是 pipelines 套件本身），之後若讀 `recsys_tfb.pipelines.inference.nodes.x`（別處已載入該子模組），import 那一行看不出來。
+- **經登記表拿另一條 pipeline。** pipeline 內的 `from recsys_tfb.pipelines import get_pipeline` 合法（import 的是 pipelines 根層，上面第 5 項還釘住它不被報），之後呼叫 `get_pipeline("<b>")` 就拿得到另一條 pipeline 的 node 與它們 import 的一切。import 那一行看不出要的是哪一條，名字是執行期才給的字串。
+- **CLI 例外本身。** `__main__.py` 想 import 什麼都放行，包含 `steps/`（那半歸 S3 管）。
+- **`pipelines/` 根層的檔不受任何一條管。** `pipelines/__init__.py` 之外若哪天放了別的根層模組並 import 某條 pipeline，本檢查不報。
+- **`<b>` 只認掃描那棵樹裡真的存在的目錄或 `.py`。** 一個 import 指向已經不存在的 pipeline，不是這條的事（那會在 import 時就爆）。
+- **只掃 `src/recsys_tfb/`。** `scripts/`、`tests/`、`notebooks/` 不在範圍內。
+- **它證明不了共用的東西放對了地方**，只證明沒有橫向或向上的 import；往下搬的目標是否合理（放 `models/` 還是放頂層）是判斷題。
 
 ---
 

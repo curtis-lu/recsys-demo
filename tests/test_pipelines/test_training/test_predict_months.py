@@ -20,6 +20,7 @@ from recsys_tfb.pipelines.training.steps.predict_months import (
     month_dir,
     months_already_written,
     plan_predict_months,
+    rebuild_month_keys,
     require_months_are_cached,
     warn_about_surplus_partitions,
     written_prediction_partitions,
@@ -109,6 +110,17 @@ class TestConfiguredMonths:
 
     def test_an_empty_config_plans_nothing(self):
         assert configured_months([]) == {}
+
+
+class TestRebuildMonthKeys:
+    """What ``--rebuild-dates`` names, in the form both of its readers compare
+    in — the cache node and predict call this one function."""
+
+    def test_keys_are_directory_forms_once_each(self):
+        assert rebuild_month_keys([JAN, "20250131", FEB]) == {JAN_KEY, FEB_KEY}
+
+    def test_nothing_named_is_the_empty_set(self):
+        assert rebuild_month_keys([]) == set()
 
 
 class TestRequireMonthsAreCached:

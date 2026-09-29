@@ -9,9 +9,10 @@ because each of those produces an X the booster silently mis-reads rather than
 an error.
 
 Lives in ``models/`` rather than under a pipeline for the same reason as
-``feature_selection.py``: both the inference scoring node and the training
-diagnosis nodes read it (ADR-0014 decision 7), so it is not one pipeline's
-internal step. It is the *other half* of ``feature_selection.py``: that module
+``feature_selection.py``: the adapter's scoring entry
+(``ModelAdapter.scoring_columns`` / ``score``, which training's test
+predictions and inference's scores both call) and the training diagnosis nodes
+read it (ADR-0014 decision 7), so it is not one pipeline's internal step. It is the *other half* of ``feature_selection.py``: that module
 derives the view from config at training time, this one recovers it from the
 trained model afterwards, and only the second answer survives a config edit.
 """
@@ -93,8 +94,8 @@ def model_feature_view(model: ModelAdapter, preprocessor: dict) -> dict:
     artifact keeps answering *how* they are encoded.
 
     ``categorical_columns`` is deliberately left at the artifact's full set
-    rather than narrowed to match. ``pdf_to_X`` intersects it with the sliced
-    frame's own columns, so extra names there cannot reach the output; copying
+    rather than narrowed to match. ``pdf_to_X`` only ever encodes the columns
+    in ``feature_columns``, so extra names there cannot reach the output; copying
     the narrowing here would add a second place to keep in step with no
     observable difference.
 

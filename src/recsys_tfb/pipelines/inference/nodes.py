@@ -25,7 +25,6 @@ which. Where a node's *time* actually goes is a question for the Runner's
 import itertools
 import logging
 
-import pandas as pd
 from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
@@ -36,9 +35,7 @@ from recsys_tfb.core.consistency import (
 )
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.io.extract import pdf_to_X
 from recsys_tfb.models.base import ModelAdapter
-from recsys_tfb.models.feature_view import model_feature_view
 from recsys_tfb.pipelines.inference.steps.chunk_plans import (
     ScoringChunk,
     as_rows,
@@ -53,7 +50,6 @@ from recsys_tfb.pipelines.inference.steps.feature_view import (
 from recsys_tfb.pipelines.inference.steps.partitions import (
     ENTITY_BUCKET_COL,
     populated_buckets,
-    require_single_partition,
     written_score_partitions,
 )
 from recsys_tfb.pipelines.inference.steps.population import (
@@ -89,6 +85,7 @@ from recsys_tfb.preprocessing import (
     preprocessor_item_values,
     warn_unknown_encodings,
 )
+from recsys_tfb.score_output import ScoredFrameLayout, require_single_partition
 from recsys_tfb.utils.ranking import rank_by_score_then_item
 
 logger = logging.getLogger(__name__)
@@ -326,24 +323,35 @@ def predict_and_write_scores(
     partition_cols = [time_col, item_col, ENTITY_BUCKET_COL]
 
     # Decision — which features, and in what order: the model decides, never the
-    # current config. Building the view from
-    # apply_feature_selection(preprocessor, parameters) would read *this* run's
-    # training.feature_selection.exclude, and model_version can point at a model
-    # trained under a different one; same-length excludes over different columns
-    # would then misalign X silently (ADR-0011 §5).
-    model_view = model_feature_view(model, preprocessor)
-    feature_columns = model_view["feature_columns"]
+    # current config. ModelAdapter.scoring_columns answers from the model's own
+    # feature list, and ModelAdapter.score slices by the same answer. Building
+    # the view from apply_feature_selection(preprocessor, parameters) would read
+    # *this* run's training.feature_selection.exclude, and model_version can
+    # point at a model trained under a different one; same-length excludes over
+    # different columns would then misalign X silently (ADR-0011 §5).
+    scoring_columns = model.scoring_columns(preprocessor)
 
     # Decision — what crosses into the driver per bucket: the model's columns,
     # not the table's. The item is excluded from both sides — it is assigned per
     # inner iteration rather than read.
     keep_identity = [c for c in identity_cols if c != item_col]
     collection_columns = model_columns_to_collect(
-        keep_identity, feature_columns, identity_cols,
+        keep_identity, scoring_columns, identity_cols,
     )
     require_population_has_model_columns(
         inference_population_features.columns, collection_columns,
     )
+
+    # Decision — what each chunk's frame holds: every entity column, written
+    # as `str` because that is what the ranking side compares on; the score
+    # under `schema.score`; the deprecated `score_uncalibrated` (#412; kept
+    # only so the four managed prediction tables keep their column count — the
+    # writes bind by position, so dropping it would break a write against a
+    # table that still declares it); and the three partition values, the
+    # entity bucket among them (`partition_cols` above), so one save touches
+    # one bucket's partition. No optional-role column: this pipeline's rows
+    # never carry one (scored_row_columns).
+    layout = ScoredFrameLayout(entity_cols=entity_cols, score_col=score_col)
 
     # Decision — what work this run does: the configured grid minus the chunks
     # whose partition already exists, plus whatever --rebuild-dates forces back
@@ -448,28 +456,18 @@ def predict_and_write_scores(
             ):
                 # In place, on the frame already in the driver: this is the
                 # reuse the loop order buys. The value written is the raw item
-                # name — pdf_to_X applies the integer code to its own copy, so
-                # the name is what reaches the partition column.
+                # name — the adapter's scoring entry encodes it into its own
+                # matrix, so the name is what reaches the partition column.
                 bucket_pdf[item_col] = item
-                X = pdf_to_X(bucket_pdf, model_view, parameters)
                 # Decision — what gets published is the model's own output,
-                # with nothing between the booster and the table. Calibration
+                # with nothing between the model and the table. Calibration
                 # was the only thing that ever sat there, and #411 removed it,
                 # so this node no longer asks what the model is wrapped in or
-                # what the config would like applied to the raw array.
-                scores = model.predict(X)
-                out_pdf = pd.DataFrame({
-                    **{
-                        col: bucket_pdf[col].astype(str).values
-                        for col in entity_cols
-                    },
-                    score_col: scores,
-                    # Deprecated (#412), and equal to `score` by construction.
-                    # Kept only so the four managed prediction tables keep
-                    # their column count: the writes bind by position, so
-                    # dropping it here would break a write against a table
-                    # that still declares it.
-                    "score_uncalibrated": scores,
+                # what the config would like applied to the raw array. Asked
+                # through ModelAdapter.score, the entry training's test
+                # predictions go through too (ADR-0030 decision 2).
+                scores = model.score(bucket_pdf, preprocessor, parameters)
+                out_pdf = layout.build(bucket_pdf, scores, {
                     time_col: snap_date,
                     item_col: item,
                     ENTITY_BUCKET_COL: str(bucket),

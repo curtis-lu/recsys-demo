@@ -8,6 +8,15 @@ fitted model. Nothing under ``pipelines/training/`` reaches past these methods
 into the library behind them, so a second algorithm is one more adapter rather
 than an edit in every caller.
 
+It is also how a table gets scored (decision 2): :meth:`ModelAdapter.score`
+takes the rows and returns one score each, and
+:meth:`ModelAdapter.scoring_columns` says which columns it needs, so a caller
+reads those and nothing else. Training's test predictions and inference's
+scores both go through it. The two have default implementations — select the
+model's own features, encode, predict — because a single model needs nothing
+more; a model whose matrix is not just "its features, in its order" (a
+composite that routes rows by a group key) overrides them.
+
 The native training data is opaque to callers on purpose. They hand back what
 :meth:`ModelAdapter.build_train_data` / :meth:`ModelAdapter.load_train_data`
 returned and never look inside it; that is what keeps a LightGBM ``Dataset``
@@ -16,9 +25,12 @@ out of the pipeline.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 
 @dataclass(frozen=True)
@@ -211,6 +223,63 @@ class ModelAdapter(ABC):
     def feature_names(self) -> list[str] | None:
         """Return the ordered feature names expected by the fitted model."""
         return None
+
+    # -- scoring a table ------------------------------------------------------
+    #
+    # `models.feature_view` and `io.extract` are imported inside these two
+    # methods, not at the top: `models.feature_view` imports this module, and
+    # `io.extract` at the top would break a cold
+    # `import recsys_tfb.io.model_adapter_dataset` — the reason is written at
+    # the top of `models/lightgbm_adapter.py`.
+
+    def scoring_columns(self, preprocessor: dict) -> list[str]:
+        """The table columns :meth:`score` reads — the caller reads these.
+
+        The default is the model's own feature list
+        (``models.feature_view.model_feature_columns``): the model, not the
+        current config, knows which view of the preprocessor it was trained
+        on (ADR-0011 section 5), and asking it also raises when the artifact
+        cannot supply that view.
+
+        A composite model routes each row to a sub-model by a group key that
+        need not be a feature (ADR-0030 decision 2), so it overrides this to
+        add that key. A caller that reads only these columns — training's
+        per-partition read does — would otherwise hand :meth:`score` a table
+        without it.
+        """
+        from recsys_tfb.models.feature_view import model_feature_columns
+
+        return model_feature_columns(self, preprocessor)
+
+    def score(
+        self, table: "pd.DataFrame", preprocessor: dict, parameters: dict,
+    ) -> np.ndarray:
+        """One score per row of ``table``, in row order.
+
+        The default selects the model's features (:meth:`scoring_columns`),
+        encodes the deferred categoricals with ``preprocessor``'s mappings into
+        a matrix (``io.extract.pdf_to_X``, the encoding training's own reads
+        use) and calls :meth:`predict`. ``table`` may carry any other columns,
+        in any order; they are not read.
+
+        ``preprocessor`` is not the same thing from both callers: training
+        passes the view ``select_features`` narrowed under *this* run's
+        config, inference the full preprocessing artifact. The default does
+        not care — it aligns on the model's own feature list either way — but
+        an override cannot assume which one it got, and must take its columns
+        from what the model recorded (ADR-0011 section 5), not from
+        ``preprocessor["feature_columns"]``.
+
+        Why the table and not a matrix: "what matrix does this model see" is
+        the one question a single model and a composite answer differently,
+        so it belongs behind the adapter rather than in each caller.
+        """
+        from recsys_tfb.io.extract import pdf_to_X
+        from recsys_tfb.models.feature_view import model_feature_view
+
+        return self.predict(
+            pdf_to_X(table, model_feature_view(self, preprocessor), parameters)
+        )
 
     # -- the fitted model on disk ---------------------------------------------
 
