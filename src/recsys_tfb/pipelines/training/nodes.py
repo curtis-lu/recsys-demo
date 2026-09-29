@@ -52,7 +52,6 @@ from pathlib import Path
 import mlflow
 import numpy as np
 import optuna
-import pandas as pd
 import pyarrow.dataset as pads
 
 from recsys_tfb.core.consistency import (
@@ -98,7 +97,6 @@ from recsys_tfb.io.extract import (
     extract_Xy_with_groups,
     extract_y,
     extract_y_with_groups,
-    pdf_to_X,
     weight_key_columns,
     weight_key_decode_map_from_config,
 )
@@ -143,9 +141,18 @@ from recsys_tfb.pipelines.training.steps.predict_months import (
     month_dir,
     months_already_written,
     plan_predict_months,
+    rebuild_month_keys,
     require_months_are_cached,
     warn_about_surplus_partitions,
     written_prediction_partitions,
+)
+from recsys_tfb.pipelines.training.steps.predict_partitions import (
+    partitions_from_directory_names,
+)
+from recsys_tfb.score_output import (
+    ScoredFrameLayout,
+    require_scored_chunk,
+    require_single_partition,
 )
 from recsys_tfb.utils.ranking import item_sort_codes
 from recsys_tfb.utils.spark import release_spark_session
@@ -480,10 +487,7 @@ def cache_test_model_input(
     # problem. Say so before a path is composed for it.
     require_spark_input(test_model_input, "test_model_input")
 
-    configured = (parameters.get("dataset") or {}).get("test_snap_dates") or []
-    rebuild = {
-        month_dir(d) for d in (parameters.get(REBUILD_SNAP_DATES_KEY) or [])
-    }
+    rebuild = rebuild_month_keys(parameters.get(REBUILD_SNAP_DATES_KEY) or [])
 
     # Decision — what counts as one month. Dedupe on the *directory* form, not
     # the raw string: the same month is the same cache entry however it was
@@ -491,13 +495,14 @@ def cache_test_model_input(
     # at one directory (handle_paths would hand the same root to pyarrow twice
     # and silently double every row) — that config is rejected at CLI entry by
     # A26, so by the time this runs a key can only be carrying repeats of one
-    # literal.
-    by_dir: dict[str, str] = {}
-    for raw in configured:
-        by_dir.setdefault(month_dir(str(raw)), str(raw))
+    # literal. The same function predict counts months with, so the two nodes
+    # cannot disagree about which months exist.
+    months = configured_months(
+        (parameters.get("dataset") or {}).get("test_snap_dates") or []
+    )
 
     handles: dict[str, ParquetHandle] = {}
-    for month in sorted(by_dir.values()):
+    for month in sorted(months.values()):
         month_key = month_dir(month)
         local_path = resolve_cache_path("test_model_input", parameters, month)
 
@@ -1202,16 +1207,24 @@ def predict_and_write_test_predictions(
     is indistinguishable from a correctly skipped one.
 
     For each (snap_date, prod_name) partition of the months being processed:
-        - load only that partition's rows via pyarrow filter
-        - slice X via pdf_to_X; predict
-        - build a pandas DataFrame with (every schema.entity column, score,
-          score_uncalibrated, label) + partition cols snap_date, prod_name.
-          ``score_uncalibrated`` is written equal to ``score``: the column is
-          deprecated and kept only so the landed table's shape does not change
-          (#412 removes it).
-        - training_eval_predictions.save(df) — exactly one partition's
-          rows per save, so dynamic-partition overwrite cleanly overwrites
-          a single partition and successive saves don't collide
+        - read that partition's rows, and of its columns only the ones the
+          output frame carries and the ones the model scores from
+        - score them through the adapter (``ModelAdapter.score``) — the entry
+          inference scores through too
+        - lay out the frame (``score_output.ScoredFrameLayout``): every
+          schema.entity column, the score under ``schema.score``,
+          ``score_uncalibrated`` (deprecated, equal to the score, kept only so
+          the landed table's shape does not change; #412 removes it), the
+          optional-role columns, the label, the zero-positive group weight
+          when there is one, and the partition columns
+        - check it before the write — one partition, a row per row read, no
+          missing score, no duplicate row — then
+          training_eval_predictions.save(df): exactly one partition's rows per
+          save, so dynamic-partition overwrite cleanly overwrites a single
+          partition and successive saves don't collide
+
+    Which (snap_date, prod_name) pairs exist is read off the cache's partition
+    directory names, not its rows (``steps/predict_partitions.py``).
 
     test_model_input is filtered upstream (filter_test_keys in the
     dataset pipeline): every query group holding a positive, plus the share
@@ -1232,6 +1245,7 @@ def predict_and_write_test_predictions(
     entity_cols = schema_cfg["entity"]
     item_col = schema_cfg["item"]
     label_col = schema_cfg["label"]
+    score_col = schema_cfg["score"]
     # Empty unless the deployment declares an optional role; resolved through
     # the shared predicate so the write and the A39 gate that checks it can
     # never disagree about which columns those are.
@@ -1257,31 +1271,86 @@ def predict_and_write_test_predictions(
     )
     model_version = parameters["model_version"]
 
+    # Decision — what the written frame holds.
+    # - Every entity column, not just the first: the identity of a scored row
+    #   is the whole tuple, written as `str` because that is what the ranking
+    #   side compares on. That the write target declares all of them is A28,
+    #   checked at CLI entry — a column it never declared is dropped by `save`
+    #   in silence.
+    # - Every declared optional-role column, for the entity columns' reason:
+    #   with `event` declared the identity of a scored row includes it, and
+    #   without it the published table holds several rows per item that
+    #   nothing can tell apart — evaluation's duplicate check then raises on a
+    #   table that was correct when written. Empty for every deployment that
+    #   declares no optional role, so the frame is unchanged there. That the
+    #   write target declares them is A39, checked at CLI entry beside A28.
+    #   Carried, NOT stringified: `event` may be a timestamp, and the tie-break
+    #   compares it by its own type (`utils/ranking.py`), so `"10" < "2"` would
+    #   reorder ranks.
+    # - The label, which evaluation scores the predictions against.
+    # - The zero-positive group weight: 1 on a group holding a positive, 1/r
+    #   on a kept zero-positive group, NULL when test kept none; absent unless
+    #   test kept any or the write target declares it (the two decisions
+    #   above).
+    # - The score under `schema.score`: a deployment that renames it declares
+    #   the new name in the catalog, and a hardcoded name would land the
+    #   scores in an undeclared column.
+    layout = ScoredFrameLayout(
+        entity_cols=entity_cols,
+        score_col=score_col,
+        carried_cols=[
+            *optional_role_cols,
+            label_col,
+            *([ZERO_POSITIVE_GROUP_WEIGHT_COL] if carries_weight else []),
+        ],
+        null_cols=(
+            [ZERO_POSITIVE_GROUP_WEIGHT_COL]
+            if write_weight and not carries_weight else []
+        ),
+    )
+
+    # Decision — each partition reads the columns the frame carries and the
+    # columns the model scores from, and nothing else. Both are asked of their
+    # owners rather than listed here: the frame reads the weight only under a
+    # positive ratio, and a composite model reads a group key that need not be
+    # a feature, so a fixed list would miss whichever came last (ADR-0030
+    # decision 12.2). The replaced read took every column of the partition.
+    read_cols = list(dict.fromkeys(
+        layout.source_columns() + model.scoring_columns(preprocessor_metadata)
+    ))
+
+    # Decision — what counts as a duplicate row, checked before each write:
+    # this pipeline's own `identity_columns`, optional roles included. Under
+    # `occasion` or `event` one (time, entity, item) legitimately holds several
+    # rows — distinct candidates with their own labels — so the narrower key
+    # inference checks (it ignores the optional roles, ADR-0025 decision 1)
+    # would report every one of them (ADR-0030 decision 5).
+    identity_cols = schema_cfg["identity_columns"]
+
+    # Decision — which columns must not be NULL in what is written: the ones
+    # this node computes or assigns — the score and the two partition values
+    # (the entity columns are checked on the rows they were read from, since
+    # `str` turns a NULL into "None"). The carried columns are not listed:
+    # they arrive from dataset unchanged, and whether a label or an event may
+    # be NULL is dataset's contract, not something this node vouches for.
+    not_null_cols = [time_col, item_col, score_col]
+
     # partitioning="hive" tells pyarrow to reconstruct (snap_date, prod_name)
     # columns from the snap_date=*/prod_name=* directory tree produced by
     # HiveTableDataset.save() (and by the test fixture's pq.write_to_dataset).
     ds = open_parquet_dataset(handle_paths(test_parquet_handle))
 
-    # Enumerate distinct (snap_date, prod_name) values by projecting just the
-    # two partition columns and de-duplicating. Note: select-on-partition-cols
-    # in pyarrow still materializes one row per data row (the values are filled
-    # from directory names per fragment), so this is two-string-columns-wide,
-    # not zero I/O. At production scale (~220M rows × 2 short strings) the
-    # transient DataFrame fits comfortably on the 128GB driver — much cheaper
-    # than reading any feature columns — and drop_duplicates collapses it to
-    # n_snap_dates * n_prods rows immediately.
-    partition_table = ds.to_table(columns=[time_col, item_col])
-    log_data_volume(logger, "predict.partition_table", partition_table)
-    partition_pdf = partition_table.to_pandas()
-    log_data_volume(logger, "predict.partition_pdf", partition_pdf, deep=False)
-    partition_pdf = partition_pdf.drop_duplicates().sort_values([time_col, item_col])
-    log_data_volume(logger, "predict.partition_pdf_unique", partition_pdf, deep=False)
-
+    # The (snap_date, prod_name) pairs the cache holds, from its directory
+    # names alone — a row read of the two partition columns materialises one
+    # row per data row, every month, before any month is known to need work.
+    cache_partitions = [
+        (str(snap_date), str(prod_name))
+        for snap_date, prod_name in partitions_from_directory_names(
+            ds, time_col, item_col)
+    ]
     cache_items: dict[str, set[str]] = {}
-    for _, row in partition_pdf.iterrows():
-        cache_items.setdefault(month_dir(row[time_col]), set()).add(
-            str(row[item_col])
-        )
+    for snap_date, prod_name in cache_partitions:
+        cache_items.setdefault(month_dir(snap_date), set()).add(prod_name)
 
     # ---- Which months this run writes -------------------------------------
     # One `# Decision —` per call below. Everything they call is in
@@ -1328,9 +1397,7 @@ def predict_and_write_test_predictions(
     # model over the same month's rows predicts bit-identically. An upstream
     # backfill changes those rows without changing either version, and this flag
     # is the operator's only way to say so.
-    rebuild = {
-        month_dir(d) for d in (parameters.get(REBUILD_SNAP_DATES_KEY) or [])
-    }
+    rebuild = rebuild_month_keys(parameters.get(REBUILD_SNAP_DATES_KEY) or [])
 
     # Decision — a month holding prediction partitions for items the cache no
     # longer has is re-predicted and warned about, never repaired. Re-predicting
@@ -1351,20 +1418,14 @@ def predict_and_write_test_predictions(
     )
 
     process_keys = {month_dir(m) for m in plan.to_process}
-    # .map keeps this a row mask even when the frame is empty; a list
-    # comprehension would degrade into `pdf[[]]`, which pandas reads as
-    # "select these zero *columns*".
-    partition_pdf = partition_pdf[
-        partition_pdf[time_col].map(lambda v: month_dir(v) in process_keys)
-    ]
 
     snap_dates_seen: set[str] = set()
     items_seen: set[str] = set()
     n_rows_written = 0
 
-    for _, row in partition_pdf.iterrows():
-        snap_date = str(row[time_col])
-        prod_name = str(row[item_col])
+    for snap_date, prod_name in cache_partitions:
+        if month_dir(snap_date) not in process_keys:
+            continue
 
         # A step name built from the data gives the log aggregator one name
         # per (month, item) pair; the values travel as structured fields
@@ -1377,7 +1438,8 @@ def predict_and_write_test_predictions(
         ):
             part_table = ds.to_table(
                 filter=(pads.field(time_col) == snap_date)
-                & (pads.field(item_col) == prod_name)
+                & (pads.field(item_col) == prod_name),
+                columns=read_cols,
             )
             # Same reasoning as the step name above, one key over: a
             # `volume.name` built from the data is `n_months * n_items`
@@ -1396,45 +1458,27 @@ def predict_and_write_test_predictions(
             snap_dates_seen.add(snap_date)
             items_seen.add(prod_name)
 
-            X = pdf_to_X(part_pdf, preprocessor_metadata, parameters)
-            y_score = model.predict(X)
+            # Decision — the score is the model's own answer for these rows,
+            # asked through the adapter's scoring entry (ADR-0030 decision 2):
+            # the one inference scores through, so a row cannot be encoded one
+            # way for the test metric and another way for publication.
+            y_score = model.score(part_pdf, preprocessor_metadata, parameters)
+            out_pdf = layout.build(
+                part_pdf, y_score, {time_col: snap_date, item_col: prod_name},
+            )
 
-            out_pdf = pd.DataFrame({
-                # Every entity column, not just the first: the identity of a
-                # scored row is the whole tuple. `str` for all of them matches
-                # what the ranking side compares on. That the write target
-                # declares all of them is A28, checked at CLI entry — a column
-                # it never declared is dropped by `save` in silence.
-                **{c: part_pdf[c].astype(str).values for c in entity_cols},
-                # Every declared optional-role column, for the entity columns'
-                # reason one line up: with `event` declared the identity of a
-                # scored row includes it, and without it the published table
-                # holds several rows per item that nothing can tell apart —
-                # evaluation's duplicate check then raises on a table that was
-                # correct when written. Empty for every deployment that
-                # declares no optional role, so the frame is unchanged there.
-                # That the write target declares them is A39, checked at CLI
-                # entry beside A28. Values are NOT stringified: `event` may be
-                # a timestamp, and the tie-break compares it by its own type
-                # (`utils/ranking.py`), so `"10" < "2"` would reorder ranks.
-                **{c: part_pdf[c].values for c in optional_role_cols},
-                "score": y_score,
-                # Deprecated, and equal to `score` by construction: nothing
-                # rescales a model's output any more (#411). It stays declared
-                # so the managed table keeps its column count, which is what a
-                # position-based write depends on; #412 takes both away.
-                "score_uncalibrated": y_score,
-                label_col: part_pdf[label_col].values,
-                # 1 on a group holding a positive, 1/r on a kept zero-positive
-                # group, NULL when test kept none; absent unless test kept any
-                # or the write target declares it (the two decisions above).
-                **({ZERO_POSITIVE_GROUP_WEIGHT_COL: (
-                    part_pdf[ZERO_POSITIVE_GROUP_WEIGHT_COL].values
-                    if carries_weight else [None] * len(part_pdf)
-                )} if write_weight else {}),
-                time_col: snap_date,
-                item_col: prod_name,
-            })
+            # Post-conditions on the frame this node just built, before the
+            # write: one partition per save (a frame spanning two would have
+            # the second save delete the first one's rows), and the per-chunk
+            # checks inference also runs — each with this node's own answers
+            # from above.
+            require_single_partition(out_pdf, [time_col, item_col])
+            require_scored_chunk(
+                out_pdf, part_pdf,
+                entity_cols=entity_cols,
+                identity_cols=identity_cols,
+                not_null_cols=not_null_cols,
+            )
 
             training_eval_predictions.save(out_pdf)
             n_rows_written += len(out_pdf)

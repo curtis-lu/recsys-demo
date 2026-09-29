@@ -544,7 +544,7 @@ python -m recsys_tfb training \
 
 **實際省下的是 HPO。** `compute_feature_statistics` 從前沒有 model 依賴，拓撲序把一個寫進 `data/models/<model_version>/` 的診斷排到「產出模型的 node」之前；`--from-node` 是「跑指定 node 與其後全部」，於是為了重算一份 null rate 的 JSON，`prepare_train_inputs`（當時叫 `prepare_lgb_train_inputs`）、`tune_hyperparameters`、`finalize_model` 全被掃回來。實測 `--from-node compute_feature_statistics` **從 18 個 node 降到 13 個**，不再重跑 HPO。（issue #233 之後再降到 **11 個**——2026-08-31 於本機 `--env local` 量的，當時 calibration 啟用、pipeline 有 21 個 node（#411 之後是 20 個），`--from-node compute_feature_statistics --dry-run` 的輸出原文是 `[plan] running 11 of 21 nodes`。`--list-nodes` 不能與 `--from-node` 併用，它印的是每個 node 的 auto-included 清單，不是總數。）
 
-**再省下的是預測那一步。** `predict_manifest` 也落地之後（issue #233），`--from-node compute_feature_statistics` 不再把 `predict_and_write_test_predictions` 拉回來，也就不再連帶拉回 `select_features`（predict node 是**套用**模型，吃 `preprocessor_view` 對它是正確的，所以只要它在切片裡，`select_features` 就跟著在）。省下的不是零：那個 node 就算判定全部月份都跳過、一列都不寫，開頭仍要把整張 test cache 的兩個字串欄拉進 driver 算 distinct（生產規模約 2.2 億列）。`compute_test_metrics` 與 `select_shap_population` 因此變成**零補跑**的接續點。
+**再省下的是預測那一步。** `predict_manifest` 也落地之後（issue #233），`--from-node compute_feature_statistics` 不再把 `predict_and_write_test_predictions` 拉回來，也就不再連帶拉回 `select_features`（predict node 是**套用**模型，吃 `preprocessor_view` 對它是正確的，所以只要它在切片裡，`select_features` 就跟著在）。省下的不是零：那個 node 就算判定全部月份都跳過、一列都不寫，開頭仍要列出 test cache 的分區目錄（#484 以前是把整張 test cache 的兩個字串欄拉進 driver 算 distinct，生產規模約 2.2 億列）。`compute_test_metrics` 與 `select_shap_population` 因此變成**零補跑**的接續點。
 
 **還沒省下的**：兩個 `*_parquet_handle` 仍是 memory-only，所以切片仍會補跑兩個 cache node。要再往下砍，卡在 `cache.root` 是相對路徑：診斷若從別的目錄啟動會指到不同地方而且不報錯。確切的接續集合釘在 `tests/test_pipelines/test_resume_contracts.py`。
 
@@ -567,8 +567,9 @@ python -m recsys_tfb training \
 
 實務差別有兩處，方向相反：`--only-node compute_feature_statistics` 現在需要一個 `model_version` 範圍的輸入（變貴）；`--from-node compute_feature_statistics` 不再掃回 HPO（變便宜，見上）。
 
-test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 test features 收進記憶體。
-寫入 `training_eval_predictions` 的資料包含 entity、`score`、`score_uncalibrated`、label，以及作為 Hive partitions 的 time、item、`model_version`。`score_uncalibrated` 恆等於 `score`：已 deprecated，欄位保留只為維持表的欄數，#412 會拿掉它。`dataset.test_zero_positive_group_ratio` 大於 0 時另寫一欄 `zero_positive_group_weight`（有正例的 query group ＝ 1，留下來的無正例組 ＝ 1／r），evaluation 的預測品質指標家族用它加權；這張表在 catalog 是明確列出欄位的，所以此時 catalog 必須宣告這一欄，training 在起 Spark 前檢查（A45）。是否寫這一欄看設定，不看 test 表有沒有這一欄：test 表是 `columns: "auto"`，一旦有別的 run 加過這欄，r ＝ 0 寫出的 partition 也會帶著全 NULL 的這一欄。catalog 宣告了這一欄而 r ＝ 0 時照樣寫，值是 NULL（Hive 寫入會選每一個宣告過的欄，少了會失敗）。詳見 [dataset.md §3.7](dataset.md#37-沒有正例的-query-group-留多少)。
+test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 test features 收進記憶體。有哪些 `(time, item)` partition 是從 cache 的分區目錄名稱取的，不讀任何一列資料；每個 partition 只讀兩種欄：寫出的表要帶的欄（entity、label、選用角色欄、有的話零正例組權重），以及模型評分要讀的欄（由模型 adapter 的 `scoring_columns` 回答，單一模型就是它自己的特徵）。分數經 `ModelAdapter.score` 取得，跟 inference 走同一個入口。
+每個 partition 寫出**前**都會檢查（#484 起；之前 training 不檢查）：一次 save 只含一個 partition、寫出列數等於讀進列數、entity 在讀進來的列上不可為 NULL、分數與兩個 partition 值不可為 NULL、以 `schema` 的 `identity_columns`（含選用角色欄）判斷沒有重複列。任何一條不過就丟 `ScoredChunkError` 停下，該 partition 不會寫出。這組檢查跟 inference 塊層的前三條是同一段機制（`src/recsys_tfb/score_output.py`），差別只在 identity：inference 不看選用角色欄，training 宣告了 `occasion`／`event` 時同一個 `(time, entity, item)` 本來就可以有多列。
+寫入 `training_eval_predictions` 的資料包含 entity、分數（欄名照 `schema.score`，預設 `score`；#484 以前寫死成 `score`）、`score_uncalibrated`、label，以及作為 Hive partitions 的 time、item、`model_version`。`score_uncalibrated` 恆等於分數：已 deprecated，欄位保留只為維持表的欄數，#412 會拿掉它。`dataset.test_zero_positive_group_ratio` 大於 0 時另寫一欄 `zero_positive_group_weight`（有正例的 query group ＝ 1，留下來的無正例組 ＝ 1／r），evaluation 的預測品質指標家族用它加權；這張表在 catalog 是明確列出欄位的，所以此時 catalog 必須宣告這一欄，training 在起 Spark 前檢查（A45）。是否寫這一欄看設定，不看 test 表有沒有這一欄：test 表是 `columns: "auto"`，一旦有別的 run 加過這欄，r ＝ 0 寫出的 partition 也會帶著全 NULL 的這一欄。catalog 宣告了這一欄而 r ＝ 0 時照樣寫，值是 NULL（Hive 寫入會選每一個宣告過的欄，少了會失敗）。詳見 [dataset.md §3.7](dataset.md#37-沒有正例的-query-group-留多少)。
 
 **逐月增量**：predict 會跳過已經預測完整的月份，所以多評估一個月的成本正比於新月份，而不是累積的總月份數。權威的月份清單是 `dataset.test_snap_dates`（cache 只是資料來源）；某月的完成判準是「該月已寫出的 item partition 集合 ＝ 該月 cache 中出現的 distinct item」——寫到一半中斷、或事後新增一個 item，都會讓該月不再完整而被重做。可以跳過是因為 `(model_version, snap_date)` 的預測是不可變產物：`model_version` 已把定義模型的一切雜湊進去，重算必然得到相同結果。「已存在哪些 partition」由 `training_eval_predictions` 這個 catalog dataset 物件回答（`HiveTableDataset.existing_partition_values()`，metastore-only 查詢，套用該表的 `partition_filter` 因此天然限縮在目前 `model_version`）——predict 拿不到 SparkSession，這是唯一的路。
 
@@ -837,7 +838,10 @@ lambdarank，預設 64 MiB batch，改前改後交替、各 4 次、每次一個
 不能拿來省這一份。
 
 下面兩個陷阱仍然要知道，因為 **`pdf_to_X`**（inference 逐 chunk、training 逐 partition
-的 test 評估走它）走的仍是「切 frame 再 `.values`」那條路。
+的 test 評估經 `ModelAdapter.score` 走它）沒有這層保護。它跟這裡共用逐批編碼
+（`_write_batch_features`），挑欄也改用 `_narrow_frame`，但矩陣的 dtype 刻意照舊
+`.values` 會選的那個（#484：保住既有預測），不看宣告、也不做 B9——特徵裡混進非數值欄，
+它照樣會配出 `object` 矩陣。
 
 **陷阱一：`nbytes` 會低報，觀測性在這裡是瞎的。** `log_data_volume(logger, "extract_Xy.X", X)`
 問的是 numpy「這張矩陣多大」，而 numpy 對 `object` 矩陣**只算指標、不算指向的物件**。

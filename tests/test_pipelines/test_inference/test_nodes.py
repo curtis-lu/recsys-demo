@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from recsys_tfb.models.base import ModelAdapter
 from recsys_tfb.pipelines.inference.steps.chunk_plans import ScoringChunk
 from recsys_tfb.pipelines.inference.nodes import (
     build_inference_population_features,
@@ -192,12 +193,27 @@ class ReadCountingFrame:
         return self._df.toPandas()
 
 
-class ConstantModel:
+class _ScoresLikeAnAdapter:
+    """Gives a duck-typed test model the adapter's own scoring entry.
+
+    The node asks ``model.scoring_columns`` which columns to collect and
+    ``model.score`` for the scores. Borrowing the ABC's default
+    implementations — rather than scripting either one — means a test model
+    that only writes ``predict`` (and perhaps ``feature_names``) is sliced,
+    encoded and scored exactly as a real adapter is, so what these tests say
+    about the matrix the model sees still holds.
+    """
+
+    scoring_columns = ModelAdapter.scoring_columns
+    score = ModelAdapter.score
+
+
+class ConstantModel(_ScoresLikeAnAdapter):
     def predict(self, X):
         return np.full(len(X), 0.5)
 
 
-class ItemSensitiveModel:
+class ItemSensitiveModel(_ScoresLikeAnAdapter):
     """Scores by the item code, so an entity's items get different scores.
 
     ``ConstantModel`` cannot be used where a *valid* run is the premise: every
@@ -745,9 +761,7 @@ class TestPredictAndWriteScores:
         assert table.partitions_per_save() == [1, 1, 1]
 
     def test_a_frame_spanning_two_partitions_is_refused(self):
-        from recsys_tfb.pipelines.inference.steps.partitions import (
-            require_single_partition,
-        )
+        from recsys_tfb.score_output import require_single_partition
 
         pdf = pd.DataFrame({
             "cust_id": ["c1", "c2"],
@@ -908,7 +922,7 @@ class TestPredictAndWriteScores:
             "source encodes to the same codes and this test cannot fail"
         )
 
-        class CodeReportingModel:
+        class CodeReportingModel(_ScoresLikeAnAdapter):
             """Reports the item code it was fed as the score.
 
             Which puts the code next to the identity value it came from. The set
@@ -1106,7 +1120,7 @@ class TestPredictAndWriteScores:
             "fixture must be a strict superset"
         )
 
-        class SubsetModel:
+        class SubsetModel(_ScoresLikeAnAdapter):
             def __init__(self):
                 self.widths = []
 
@@ -1136,7 +1150,7 @@ class TestPredictAndWriteScores:
         would be guessing; the node fails instead (ADR-0011 section 5).
         """
 
-        class PermutedModel:
+        class PermutedModel(_ScoresLikeAnAdapter):
             def feature_names(self):
                 return ["total_aum", "prod_name"]
 
@@ -1154,7 +1168,7 @@ class TestPredictAndWriteScores:
     ):
         """A stale ``preprocessor.json``: the model knows a feature it does not."""
 
-        class StaleArtifactModel:
+        class StaleArtifactModel(_ScoresLikeAnAdapter):
             def feature_names(self):
                 return ["prod_name", "total_aum", "since_removed_feature"]
 
@@ -1176,7 +1190,7 @@ class TestPredictAndWriteScores:
         declared = preprocessor["feature_columns"] + ["never_landed"]
         preprocessor["feature_columns"] = declared
 
-        class ModelWantingMore:
+        class ModelWantingMore(_ScoresLikeAnAdapter):
             def feature_names(self):
                 return list(declared)
 
@@ -1270,7 +1284,7 @@ class TestScoredChunksThroughToValidation:
         assignment line, and the mutation audit is what demonstrates it.
         """
 
-        class NaNScoringModel:
+        class NaNScoringModel(_ScoresLikeAnAdapter):
             def predict(self, X):
                 return np.full(len(X), np.nan)
 

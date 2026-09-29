@@ -47,6 +47,28 @@ def _make_prep_meta() -> dict:
     }
 
 
+def _mock_model(predict, feature_names=("feat_a",)) -> MagicMock:
+    """A mock adapter whose scoring entry is the real default.
+
+    The node scores through ``ModelAdapter.score`` and reads the columns
+    ``ModelAdapter.scoring_columns`` names. A bare ``MagicMock`` would answer
+    both with a ``MagicMock``, so the node would never slice a feature: both
+    are wired to the ABC's own implementations, which call this mock's
+    ``predict`` and ``feature_names`` — the two things each test scripts.
+    """
+    from functools import partial
+
+    from recsys_tfb.models.base import ModelAdapter
+
+    model = MagicMock()
+    model.predict.side_effect = predict
+    model.feature_names.return_value = (
+        None if feature_names is None else list(feature_names))
+    model.score.side_effect = partial(ModelAdapter.score, model)
+    model.scoring_columns.side_effect = partial(ModelAdapter.scoring_columns, model)
+    return model
+
+
 def _make_parameters() -> dict:
     return {
         "model_version": "v_test_001",
@@ -109,8 +131,7 @@ def test_predict_and_write_emits_one_save_per_partition(tmp_path):
     handle = ParquetHandle(path=str(parquet_path))
 
     # Mock model: predict returns increasing scores
-    model = MagicMock()
-    model.predict.side_effect = lambda X: np.arange(len(X)).astype(float) + 0.5
+    model = _mock_model(lambda X: np.arange(len(X)).astype(float) + 0.5)
     model.__class__.__name__ = "LightGBMAdapter"
 
     # Mock HiveTableDataset handle — capture every save() call
@@ -176,8 +197,7 @@ def test_predict_and_write_score_uncalibrated_equals_score(tmp_path):
     parquet_path = _make_test_parquet(tmp_path)
     handle = ParquetHandle(path=str(parquet_path))
 
-    model = MagicMock()
-    model.predict.side_effect = lambda X: np.array([0.42] * len(X))
+    model = _mock_model(lambda X: np.array([0.42] * len(X)))
     model.__class__.__name__ = "LightGBMAdapter"
 
     saves: list[pd.DataFrame] = []
@@ -237,8 +257,7 @@ def test_predict_covers_every_month_when_given_a_per_month_mapping(tmp_path):
         "2025-02-28": ParquetHandle(_month_root("2025-02-28")),
     }
 
-    model = MagicMock()
-    model.predict.side_effect = lambda X: np.full(len(X), 0.5)
+    model = _mock_model(lambda X: np.full(len(X), 0.5))
 
     saves: list = []
     write_ds = MagicMock()
@@ -299,8 +318,7 @@ def _month_handle(tmp_path, snap_date: str, items=("prod_A", "prod_B")):
 
 
 def _model() -> MagicMock:
-    model = MagicMock()
-    model.predict.side_effect = lambda X: np.full(len(X), 0.5)
+    model = _mock_model(lambda X: np.full(len(X), 0.5))
     return model
 
 
@@ -621,8 +639,7 @@ def test_data_volume_names_are_fixed_and_identity_travels_as_fields(tmp_path, ca
     parquet_path = _make_test_parquet(tmp_path)
     handle = ParquetHandle(path=str(parquet_path))
 
-    model = MagicMock()
-    model.predict.side_effect = lambda X: np.arange(len(X)).astype(float) + 0.5
+    model = _mock_model(lambda X: np.arange(len(X)).astype(float) + 0.5)
     model.__class__.__name__ = "LightGBMAdapter"
 
     with caplog.at_level(logging.INFO, logger="recsys_tfb.pipelines.training.nodes"):
@@ -725,8 +742,7 @@ def test_the_written_frame_carries_the_event_column(tmp_path):
     )
 
     handle = ParquetHandle(path=str(_make_event_test_parquet(tmp_path)))
-    model = MagicMock()
-    model.predict.side_effect = lambda X: np.arange(len(X)).astype(float) + 0.5
+    model = _mock_model(lambda X: np.arange(len(X)).astype(float) + 0.5)
     model.__class__.__name__ = "LightGBMAdapter"
     write_ds = _write_ds()
 
@@ -755,8 +771,7 @@ def test_no_event_column_is_added_when_the_role_is_undeclared(tmp_path):
     )
 
     handle = ParquetHandle(path=str(_make_test_parquet(tmp_path)))
-    model = MagicMock()
-    model.predict.side_effect = lambda X: np.arange(len(X)).astype(float) + 0.5
+    model = _mock_model(lambda X: np.arange(len(X)).astype(float) + 0.5)
     model.__class__.__name__ = "LightGBMAdapter"
     write_ds = _write_ds()
 
@@ -812,8 +827,7 @@ def _predict_weighted(tmp_path, dataset, weights=4.0, declared=None):
 
     params = _make_parameters()
     params["dataset"] = {"test_snap_dates": ["2025-01-31"], **dataset}
-    model = MagicMock()
-    model.predict.side_effect = lambda X: np.arange(len(X)).astype(float) + 0.5
+    model = _mock_model(lambda X: np.arange(len(X)).astype(float) + 0.5)
     model.__class__.__name__ = "LightGBMAdapter"
     write_ds = _write_ds()
     write_ds.declared_columns = declared
@@ -869,3 +883,177 @@ def test_a_declared_weight_column_is_written_null_at_the_default_ratio(tmp_path)
                   ZERO_POSITIVE_GROUP_WEIGHT_COL])
     assert ZERO_POSITIVE_GROUP_WEIGHT_COL in written.columns
     assert written[ZERO_POSITIVE_GROUP_WEIGHT_COL].isna().all()
+
+
+def test_the_weighted_path_reads_the_weight_column_and_nothing_unused(tmp_path):
+    """The per-partition read is narrowed to what the frame and the model need;
+    under a positive ratio the weight column is one of them (ADR-0030 decision
+    12.2 — a fixed list in the node would have missed it)."""
+    from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.pipelines.training.nodes import (
+        predict_and_write_test_predictions,
+    )
+
+    params = _make_parameters()
+    params["dataset"] = {
+        "test_snap_dates": ["2025-01-31"], "test_zero_positive_group_ratio": 0.25,
+    }
+    model, seen = _column_recording_model()
+    write_ds = _write_ds()
+    predict_and_write_test_predictions(
+        model=model,
+        test_parquet_handle=ParquetHandle(
+            path=str(_make_weighted_test_parquet(tmp_path, 4.0))),
+        preprocessor_metadata=_make_prep_meta(),
+        parameters=params,
+        training_eval_predictions=write_ds,
+    )
+
+    assert seen and all(
+        set(cols) == {"cust_id", "label", ZERO_POSITIVE_GROUP_WEIGHT_COL, "feat_a"}
+        for cols in seen
+    ), seen
+    written = pd.concat(write_ds.saved, ignore_index=True)
+    assert written.groupby("cust_id")[ZERO_POSITIVE_GROUP_WEIGHT_COL].agg(set).to_dict() == {
+        "c1": {1.0}, "c2": {4.0},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Scored through the adapter, laid out and checked like inference (#484)
+# ---------------------------------------------------------------------------
+
+
+def _column_recording_model():
+    """A mock adapter that records the columns of every table it scores."""
+    model = _mock_model(lambda X: np.arange(len(X)).astype(float) + 0.5)
+    real_score = model.score.side_effect
+    seen: list = []
+
+    def score(table, *args):
+        seen.append(list(table.columns))
+        return real_score(table, *args)
+
+    model.score.side_effect = score
+    return model, seen
+
+
+def _run(tmp_path, parquet, params, model=None, write_ds=None):
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.pipelines.training.nodes import (
+        predict_and_write_test_predictions,
+    )
+
+    write_ds = _write_ds() if write_ds is None else write_ds
+    manifest = predict_and_write_test_predictions(
+        model=model or _mock_model(lambda X: np.arange(len(X)).astype(float) + 0.5),
+        test_parquet_handle=ParquetHandle(path=str(parquet)),
+        preprocessor_metadata=_make_prep_meta(),
+        parameters=params,
+        training_eval_predictions=write_ds,
+    )
+    return manifest, write_ds
+
+
+def test_the_score_column_is_named_by_the_schema(tmp_path):
+    """Written under ``schema.score``, not a literal ``"score"``: a deployment
+    that renames it declares the new name in the catalog, and a frame still
+    spelling the old one would put the scores in an undeclared column."""
+    params = _make_parameters()
+    params["schema"]["columns"]["score"] = "pred"
+
+    _, write_ds = _run(tmp_path, _make_test_parquet(tmp_path), params)
+
+    saved = pd.concat(write_ds.saved, ignore_index=True)
+    assert "pred" in saved.columns
+    assert "score" not in saved.columns
+    assert (saved["pred"] == saved["score_uncalibrated"]).all()
+
+
+def test_only_the_columns_the_frame_and_the_model_need_are_read(tmp_path):
+    """A test table carries columns neither the output frame nor the model
+    reads; they are not read (the replaced read took every column)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    df = pd.DataFrame({
+        "cust_id": ["c1", "c1"], "snap_date": ["2025-01-31"] * 2,
+        "prod_name": ["prod_A", "prod_B"], "feat_a": [1.0, 2.0],
+        "not_a_feature": [9.0, 9.0], "label": [1, 0],
+    })
+    root = tmp_path / "wide.parquet"
+    pq.write_to_dataset(pa.Table.from_pandas(df, preserve_index=False),
+                        root_path=str(root), partition_cols=["snap_date", "prod_name"])
+    params = _make_parameters()
+    params["dataset"] = {"test_snap_dates": ["2025-01-31"]}
+    model, seen = _column_recording_model()
+
+    _run(tmp_path, root, params, model=model)
+
+    assert len(seen) == 2
+    assert all(set(cols) == {"cust_id", "label", "feat_a"} for cols in seen), seen
+
+
+def test_rows_repeating_the_identity_stop_the_write(tmp_path):
+    """The same ``(time, entity, item)`` twice with no optional role declared
+    is a duplicate, caught before the partition is saved. With ``event``
+    declared the same rows are legitimate
+    (``test_the_written_frame_carries_the_event_column``)."""
+    import pytest
+
+    from recsys_tfb.score_output import ScoredChunkError
+
+    params = _make_parameters()
+    params["dataset"] = {"test_snap_dates": ["2025-01-31"]}
+    write_ds = _write_ds()
+
+    with pytest.raises(ScoredChunkError, match="no_duplicates"):
+        _run(tmp_path, _make_event_test_parquet(tmp_path), params, write_ds=write_ds)
+    assert write_ds.save.call_count == 0
+
+
+def test_a_null_score_stops_the_write(tmp_path):
+    import pytest
+
+    from recsys_tfb.score_output import ScoredChunkError
+
+    params = _make_parameters()
+    write_ds = _write_ds()
+    with pytest.raises(ScoredChunkError, match="no_missing") as exc_info:
+        _run(tmp_path, _make_test_parquet(tmp_path), params,
+             model=_mock_model(lambda X: np.full(len(X), np.nan)), write_ds=write_ds)
+    assert "'score': " in exc_info.value.failures[0]["detail"]
+    assert write_ds.save.call_count == 0
+
+
+def test_the_partition_listing_reads_no_data_file(tmp_path):
+    """A skipped month is never read, and listing what the cache holds does
+    not read it either: one of January's data files is garbage here, and the
+    run still plans both months and writes February.
+
+    January's first file is left intact because opening a dataset reads one
+    footer to learn the schema; that is the whole cost of opening it, and not
+    the per-row read this test is about.
+    """
+    handles = {
+        "2025-01-31": _month_handle(tmp_path, "2025-01-31"),
+        "2025-02-28": _month_handle(tmp_path, "2025-02-28"),
+    }
+    garbled = list(
+        (Path(handles["2025-01-31"].path) / "snap_date=2025-01-31"
+         / "prod_name=prod_B").rglob("*.parquet"))
+    assert len(garbled) == 1
+    for f in garbled:
+        f.write_bytes(b"not a parquet file")
+    write_ds = _write_ds(
+        existing=[("2025-01-31", "prod_A"), ("2025-01-31", "prod_B")]
+    )
+
+    manifest = _predict(handles, _params_with_test_dates(handles), write_ds)
+
+    assert manifest["months_skipped"] == ["2025-01-31"]
+    assert manifest["months_processed"] == ["2025-02-28"]
+    assert _saved_partitions(write_ds) == {
+        ("2025-02-28", "prod_A"), ("2025-02-28", "prod_B"),
+    }

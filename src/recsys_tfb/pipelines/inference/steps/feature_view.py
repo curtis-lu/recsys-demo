@@ -41,8 +41,9 @@ def require_population_has_model_columns(
 ) -> None:
     """Pre-check: the landed population table holds every column the model wants.
 
-    Fails before the first bucket is read rather than inside ``pdf_to_X``,
-    where the same mismatch surfaces as a KeyError halfway through a long run.
+    Fails before the first bucket is read rather than inside the model's
+    scoring (``ModelAdapter.score`` slicing its features), where the same
+    mismatch surfaces as a KeyError halfway through a long run.
     The realistic cause is a stale ``inference_population_features`` — built
     under a preprocessor that predates this model — reachable via
     ``--from-node predict_and_write_scores``, which skips the node that would

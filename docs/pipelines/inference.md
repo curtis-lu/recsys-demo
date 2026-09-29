@@ -339,14 +339,14 @@ inference 使用模型 manifest 指向的 base dataset preprocessor，不會重�
 ```text
 for 每個 (snap_date, entity_bucket):        ← 一次 toPandas()，只讀這一個分區
     for 每個 item:                          ← 就地覆寫 item 那一欄（多欄 item 是拼好的那一欄），重複使用同一份特徵
-        pdf_to_X → model.predict → save()   ← 恰好一個分區
+        model.score → save()                ← 恰好一個分區
 ```
 
 **迴圈順序這一項單獨值 `len(products)` 倍。** 反過來寫（外層 item、內層桶）功能完全正確、分數一模一樣，只是把整個母體讀 `len(products)` 遍——它省的不只是磁碟讀，還有 executor→driver 的 Arrow 序列化搬運。因為輸出無法分辨兩者，這件事由測試的**讀取次數**斷言守著，而不是靠 review 記得。
 
 **每個 `(桶, item)` 算完立刻寫，一次 `save()` 恰好碰一個分區。** 這是硬約束而不是偏好：`HiveTableDataset.save()` 是 `insertInto` ＋ `partitionOverwriteMode=dynamic`，語意是「只動這次 frame 裡出現的分區，但對出現的那些是整個刪掉重建」。所以送進去的 frame 若跨兩個 chunk 的分區，第二次 save 會刪掉第一個 chunk 的列，**零錯誤訊息**。節點在交出 frame 前就地斷言它只含一種分區欄組合（在 pandas 上做，免費），而 `entity_bucket` 進 `unranked_predictions` 的分區欄就是為了讓不同桶的 save 不會互相覆蓋。
 
-item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始字串、特徵欄放整數 code。切 X 的是 `io/extract.py` 的 `pdf_to_X`——training 的逐分區預測用的是同一支函式，所以「identity 類別欄延後到 driver 編碼」在兩條 pipeline 上是同一個實作而不是兩份。它切的 view 由模型的宣告當場建出（`{**preprocessor, "feature_columns": model.feature_names()}`），**不是**呼叫 training 那個依當前 config 推導 view 的 `apply_feature_selection`：`model_version` 指向舊模型時，當前 config 的 `feature_selection.exclude` 未必是那個模型訓練時的值。
+item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始字串、特徵欄放整數 code。打分數的是模型 adapter 的評分入口 `ModelAdapter.score`（`models/base.py`）：吃一整張表、回每列一個分數；要從表讀哪些欄由 `ModelAdapter.scoring_columns` 回答。預設實作挑模型自己的特徵、用 `io/extract.py` 的 `pdf_to_X` 建矩陣、再預測——training 的逐分區預測走的是同一個入口，`pdf_to_X` 又跟 training 讀 parquet 建矩陣共用同一段逐批編碼（`_write_batch_features`），所以「identity 類別欄延後到 driver 編碼」在兩條 pipeline 上是同一個實作而不是兩份。挑哪些特徵由模型的宣告當場決定（`models/feature_view.py` 的 `model_feature_columns`，即 `model.feature_names()`），**不是**呼叫 training 那個依當前 config 推導 view 的 `apply_feature_selection`：`model_version` 指向舊模型時，當前 config 的 `feature_selection.exclude` 未必是那個模型訓練時的值。
 
 **續跑。** 節點先問 `unranked_predictions` 哪些分區已經存在（`existing_partition_values()`，純 metastore、零掃描，且由 `partition_filter: model_version` 保證只答本次模型），再算出這次要做哪些 chunk。分區已存在即跳過，`--rebuild-dates` 可以推翻這個判斷。**一個決定少做事的節點必須說出它決定不做什麼**，否則「靜默地漏做」和「正確地跳過」長得一模一樣。規劃邏輯是不依賴 Spark 的純函式（`pipelines/inference/steps/chunk_plans.py`），所以它的測試在毫秒級。
 
@@ -376,7 +376,7 @@ item 在 chunk 內佔兩個位置（§5.2 那張表）：identity 欄放原始�
 
 驗證跑在兩個地方。分界只有一條規則：**一個 chunk 只有一個 item，所以要把同一組的 item 互相比較的檢查在 chunk 內根本問不出來，其餘的都問得出來。** 哪一條在哪一層的唯一真實來源是 `src/recsys_tfb/pipelines/inference/steps/validation.py` 的 `CHUNK_CHECKS` 與 `BATCH_CHECKS`；下面兩張表是它的白話版。兩層都是 collect-all——收集該層所有失敗，再以單一 `ValidationError` 中止，`failures` 帶著每個 check 的名稱與細節。
 
-**塊層**（`validate_scored_chunk`，每個 `(time, 桶, item)` chunk 寫出**前**跑一次；純 pandas、零 Spark action）：
+**塊層**（`validate_scored_chunk`，每個 `(time, 桶, item)` chunk 寫出**前**跑一次；純 pandas、零 Spark action）。前三條是 training 寫 test 預測時也跑的同一段機制（`src/recsys_tfb/score_output.py` 的 `scored_chunk_failures`），哪些欄算 identity、哪些欄不可為 NULL 由各自的 pipeline 傳入——這裡是下表寫的 `time + entity + item`，training 則連選用角色欄一起算：
 
 | Check | 驗證內容 | 常見失敗原因 |
 |---|---|---|
@@ -651,7 +651,7 @@ validation 失敗時，先從 exception 的 checks 清單判斷是模型輸出�
 - 目前每個 entity 共用同一份候選清單（`products`，或從資料數出來時前處理器的 item 清單），不支援 per-entity eligibility。
 - item 清單從 train 時段數出來時，上線後才出現的新 item 要等重跑 dataset ＋ training 才會被評分（見 3.2 節的已知風險）。
 - 模型評分必須在 driver（生產禁 UDF），所以每個 `(entity 桶, item)` chunk 的特徵會被收集到 pandas，不是完全 distributed inference。與 #188 之前的差別是**不再累積**：算完就落地，driver 上同時只有一個桶。
-- **driver 峰值只有下界推算，沒有實測。** `pdf_to_X` 的 `X_df.values` 會把 frame 攤成單一 numpy 陣列，共同 dtype 由所有欄決定。**#283 之後特徵側已經同質**——`cast_numeric_features_to_storage_type` 把所有數值特徵欄（decimal／double／float／整數族／boolean）轉成 `dataset.numeric_feature_storage_type` 宣告的型別，所以共同 dtype 就是宣告值（預設 float32），不再有「一欄 int64 讓整個矩陣翻倍」那條路。仍是下界的理由有兩個：**延後編碼的 identity 類別欄**在 `pdf_to_X` 才成為 `Categorical.codes`，不經過 Spark 側的 cast（實測 float32 ＋ int8／int16 codes 還是 float32，但類別數 >32767 讓 codes 變 int32 時共同型別會回到 float64）；以及實際值取決於生產 `feature_table` 的欄數與 chunk 大小。
+- **driver 峰值只有下界推算，沒有實測。** `pdf_to_X` 把特徵欄寫進一個 numpy 矩陣，dtype 照 `DataFrame.values` 的規則由所有欄共同決定（#484 起不再先複製一份 frame 再攤平，但 dtype 規則刻意不變）。**#283 之後特徵側已經同質**——`cast_numeric_features_to_storage_type` 把所有數值特徵欄（decimal／double／float／整數族／boolean）轉成 `dataset.numeric_feature_storage_type` 宣告的型別，所以共同 dtype 就是宣告值（預設 float32），不再有「一欄 int64 讓整個矩陣翻倍」那條路。仍是下界的理由有兩個：**延後編碼的 identity 類別欄**在 `pdf_to_X` 才成為 `Categorical.codes`，不經過 Spark 側的 cast（實測 float32 ＋ int8／int16 codes 還是 float32，但類別數 >32767 讓 codes 變 int32 時共同型別會回到 float64）；以及實際值取決於生產 `feature_table` 的欄數與 chunk 大小。
 - **這道發布閘買到的是「順序」，不是「原子性」。** production 只在整批驗證通過後才被觸碰，但 `publish_predictions` 的寫入同樣是 `insertInto` ＋ dynamic overwrite，跨分區的 commit 不是全有全無。逐 chunk 化把失敗視窗從「整條 run」縮到「最後那一次寫」，那是真實的收益，但它不等於原子發布。
 - **跨 chunk 的一致性沒有機制保證。** 一次 run 裡不同 chunk 用的是同一個模型與同一張中間表，但如果中間表在 run 進行中被另一個 process 改寫，前後 chunk 會基於不同的特徵。這個情況今天沒有任何檢查會紅。
 - score 相同時按 item 升冪決定名次（`utils/ranking.py`）。這只讓名次可重現、讓 inference 與 evaluation 對同一批列給出相同名次；同分本身仍代表模型分不出高下，item 名的先後不是模型的判斷。

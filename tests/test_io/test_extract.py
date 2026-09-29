@@ -1433,6 +1433,111 @@ class TestStreamedMatrixParity:
         )
 
 
+# ---------------------------------------------------------------------------
+# pdf_to_X shares training's encoding path (#484, ADR-0030 decision 12.4)
+#
+# The scoring side (training's test predictions, inference) builds its matrix
+# from a frame already in memory; since #484 it writes it through the same
+# per-batch encoder the streamed read uses. The output has to stay what the
+# replaced ``pdf[cols].copy()`` + codes + ``.values`` produced — the reference
+# is ``_pre284_X`` above, which is that implementation — because a changed
+# matrix is a changed prediction, and nothing versions predictions yet.
+# ---------------------------------------------------------------------------
+
+
+def _scoring_frame(case: str) -> tuple:
+    """A (frame, preprocessor) pair for one dtype shape the parity must hold on."""
+    rng = np.random.default_rng(3)
+    n = 0 if case == "empty" else 9
+    items = ["fund", "ccard", "loan"] if case == "unknown_category" else ["fund", "ccard"]
+    pdf = pd.DataFrame({
+        "cust_id": [f"c{i}" for i in range(n)],
+        "prod_name": [items[i % len(items)] for i in range(n)],
+    })
+    features = {
+        "float32": {"a": np.float32, "b": np.float32},
+        "float64": {"a": np.float64, "b": np.float64},
+        "mixed": {"a": np.float32, "b": np.float64, "c": np.int64},
+        "nan": {"a": np.float32, "b": np.float32},
+        "unknown_category": {"a": np.float32},
+        "empty": {"a": np.float32, "b": np.float32},
+        "bool": {"a": np.float32, "b": np.bool_},
+    }[case]
+    for col, dtype in features.items():
+        values = rng.random(n) * 10
+        pdf[col] = (values > 5 if dtype is np.bool_ else values).astype(dtype)
+    if case == "nan":
+        pdf.loc[[1, 4], "a"] = np.nan
+    meta = {
+        "feature_columns": list(features) + ["prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+    return pdf, meta
+
+
+class TestPdfToXParity:
+    @pytest.mark.parametrize("case", [
+        "float32", "float64", "mixed", "nan", "unknown_category", "empty",
+    ])
+    def test_byte_identical_to_the_replaced_build(self, case) -> None:
+        from recsys_tfb.io.extract import pdf_to_X
+
+        pdf, meta = _scoring_frame(case)
+        expected = _pre284_X(pdf, meta, _WIDE_PARAMS)
+        X = pdf_to_X(pdf, meta, _WIDE_PARAMS)
+
+        assert X.dtype == expected.dtype
+        assert X.shape == expected.shape
+        assert X.tobytes() == expected.tobytes()
+
+    def test_a_boolean_feature_flattens_to_object_as_before(self) -> None:
+        """pandas refuses to mix bool with a number (``object``) where numpy
+        would pick the number — ``preprocessing.py``'s cast documents it. The
+        dtype is pandas' answer, so this shape is unchanged too. Object arrays
+        hold pointers, so the comparison is by value and by element type."""
+        from recsys_tfb.io.extract import pdf_to_X
+
+        pdf, meta = _scoring_frame("bool")
+        expected = _pre284_X(pdf, meta, _WIDE_PARAMS)
+        X = pdf_to_X(pdf, meta, _WIDE_PARAMS)
+
+        assert expected.dtype == object
+        assert X.dtype == expected.dtype
+        assert X.tolist() == expected.tolist()
+        assert [type(v) for v in X.ravel()] == [type(v) for v in expected.ravel()]
+
+    def test_the_identity_value_is_left_alone(self) -> None:
+        """The code goes into the matrix; the frame keeps the name, which is
+        what inference writes into its partition column."""
+        from recsys_tfb.io.extract import pdf_to_X
+
+        pdf, meta = _scoring_frame("float32")
+        before = pdf["prod_name"].tolist()
+        pdf_to_X(pdf, meta, _WIDE_PARAMS)
+        assert pdf["prod_name"].tolist() == before
+
+    def test_source_frame_is_not_consolidated(self) -> None:
+        from recsys_tfb.io.extract import pdf_to_X
+
+        pdf = _fragmented_pdf()
+        meta = {
+            "feature_columns": [f"f{i}" for i in range(3)],
+            "categorical_columns": [],
+            "category_mappings": {},
+        }
+        before = pdf._mgr.nblocks
+        pdf_to_X(pdf, meta, _WIDE_PARAMS)
+        assert pdf._mgr.nblocks == before
+
+    def test_the_replaced_selection_would_consolidate(self) -> None:
+        """Keeps the assertion above honest."""
+        pdf = _fragmented_pdf()
+        before = pdf._mgr.nblocks
+        pdf[[f"f{i}" for i in range(3)]].copy()
+        assert pdf._mgr.nblocks < before
+
+
 class TestStreamBatchRows:
     def test_rows_come_from_the_byte_budget_and_the_width(self) -> None:
         from recsys_tfb.io.extract import stream_batch_rows

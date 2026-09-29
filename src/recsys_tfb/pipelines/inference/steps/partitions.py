@@ -1,5 +1,4 @@
-"""The metastore boundary: which partitions exist, which buckets hold rows, and
-the one-partition-per-save guard.
+"""The metastore boundary: which partitions exist and which buckets hold rows.
 
 Everything here is about the seam where a Python-side answer meets a Hive
 partition directory, and every function in it exists because that seam has a
@@ -8,13 +7,17 @@ silent failure mode:
 * a partition value read back as a string that no Python value equals, so a
   finished chunk looks unwritten (:data:`_HIVE_NULL_PARTITION`);
 * a bucket with no partition, which is either a legitimately small population
-  or silent data loss (:func:`populated_buckets`);
-* a frame spanning two partitions handed to a dynamic-overwrite ``insertInto``,
-  where the second save deletes the first chunk's rows
-  (:func:`require_single_partition`).
+  or silent data loss (:func:`populated_buckets`).
 
 None of these announce themselves, which is why the answers are computed here
 rather than inferred from row counts downstream.
+
+The seam's third silent failure — a frame spanning two partitions handed to a
+dynamic-overwrite ``insertInto``, where the second save deletes the first
+chunk's rows — is guarded by ``require_single_partition``, which lived here
+until #484 and is now in ``recsys_tfb.score_output``: training's
+test-prediction write needs the same guard, and no pipeline imports another's
+steps.
 """
 
 from __future__ import annotations
@@ -22,7 +25,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-import pandas as pd
 from pyspark.sql import functions as F
 
 from recsys_tfb.pipelines.inference.steps.chunk_plans import ScoringChunk
@@ -140,37 +142,3 @@ def populated_buckets(
         )
         populated[snap_date] = {int(row[ENTITY_BUCKET_COL]) for row in rows}
     return populated
-
-
-def require_single_partition(pdf: pd.DataFrame, partition_cols: list[str]) -> None:
-    """One ``save()``, one partition — constraint C in its testable form.
-
-    Post-condition on the frame the scoring loop just built.
-
-    ``HiveTableDataset.save()`` is ``insertInto`` under
-    ``partitionOverwriteMode=dynamic``, whose semantics are "touch only the
-    partitions present in this frame, but *replace* those wholesale". Hand it a
-    frame spanning two chunks' partitions and the second save deletes the first
-    chunk's rows — 90% of the data gone with no error message
-    (ADR-0010 section 3, constraint C).
-
-    Free to check here and nowhere else: the frame is a pandas frame that was
-    just built in the driver, so counting its distinct partition values touches
-    memory rather than launching a Spark job. The same assertion inside
-    ``save()`` would have to act on a lazy plan, which is the second full
-    lineage execution ADR-0009 removed.
-
-    Deliberately **not** a before/after diff of
-    ``existing_partition_values()``: re-publishing an existing partition makes
-    that diff empty by construction, so it is blind to exactly the successive
-    overwrite this guards (``io/hive_table_dataset.py`` records the same trap).
-    """
-    combos = pdf[partition_cols].drop_duplicates()
-    if len(combos) != 1:
-        raise ValueError(
-            f"a single save must cover exactly one partition, got "
-            f"{len(combos)} distinct {partition_cols} combination(s): "
-            f"{combos.to_dict('records')}. Dynamic-partition overwrite "
-            "replaces whole partitions, so successive saves would delete each "
-            "other's rows without an error."
-        )

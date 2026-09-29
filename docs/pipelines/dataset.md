@@ -228,7 +228,7 @@ terminal 摘要與 YAML 列出同一組欄位，並附一行對帳（例如 `8 c
 
 preprocessor 只使用 `train_snap_dates` 範圍內的 feature rows fit category mapping，再將同一份 metadata 套用至 train、val、test 與 inference。未在 train 出現的新類別會編碼為 `-1` 並記錄 warning（候選層級特徵表的類別欄一樣編成 `-1`，但不記 warning，見 §9）。
 
-model input 寫出前，**所有數值 feature 欄**（decimal／double／float／整數族／boolean）都會轉成 `dataset.numeric_feature_storage_type` 宣告的型別（預設 float32），降低後續 driver 讀取與模型訓練的記憶體成本。收斂範圍涵蓋整數與 boolean 的理由：`pdf_to_X` 用 `DataFrame.values` 攤平，pandas 只挑一個共同 dtype，所以一欄沒轉就決定了整個矩陣的型別。
+model input 寫出前，**所有數值 feature 欄**（decimal／double／float／整數族／boolean）都會轉成 `dataset.numeric_feature_storage_type` 宣告的型別（預設 float32），降低後續 driver 讀取與模型訓練的記憶體成本。收斂範圍涵蓋整數與 boolean 的理由：`pdf_to_X` 的矩陣 dtype 照 `DataFrame.values` 的規則取，pandas 只挑一個共同 dtype，所以一欄沒轉就決定了整個矩陣的型別。
 
 ### 3.6 三個欄位清單各自作用在哪張表
 

@@ -12,6 +12,7 @@ change what the checks say.
 """
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from recsys_tfb.core.consistency import (
@@ -164,6 +165,67 @@ def test_a_saved_model_scores_like_the_fitted_one(adapter, algorithm, tmp_path):
 def test_predict_before_training_raises(adapter):
     with pytest.raises(RuntimeError):
         adapter.predict(np.zeros((2, 3)))
+
+
+# -- scoring a table (decision 2) ----------------------------------------------
+#
+# The entry both scoring pipelines call: a table in, one score per row out.
+# The default is shared by every adapter that does not override it, so the
+# promise checked here is the one a composite model's override has to keep.
+
+#: The artifact's full feature list holds a column the fitted model never saw,
+#: in between two it did: the model, not the artifact, decides what is read.
+SCORING_PREPROCESSOR = {
+    "feature_columns": ["f0", "f_unused", "f1", "f2"],
+    "categorical_columns": [],
+    "category_mappings": {},
+}
+SCORING_PARAMS = {"schema": {"columns": {
+    "time": "t", "entity": ["e"], "item": "i", "label": "label"}}}
+
+
+def _table(seed=5, n=40):
+    """A table holding the feature columns plus others, and the array behind it."""
+    X, _ = _arrays(seed=seed, n=n)
+    table = pd.DataFrame({
+        "e": [f"e{k}" for k in range(n)],
+        "f0": X[:, 0], "f_unused": np.zeros(n), "f1": X[:, 1], "f2": X[:, 2],
+    })
+    return table, X
+
+
+def test_scoring_columns_are_the_models_own_features(adapter):
+    _fitted(adapter)
+    assert adapter.scoring_columns(SCORING_PREPROCESSOR) == adapter.feature_names()
+    assert adapter.scoring_columns(SCORING_PREPROCESSOR) == NAMES
+
+
+def test_score_is_predict_on_the_models_matrix(adapter):
+    """Equal to predicting on the array the table was built from, and to
+    predicting on the matrix ``pdf_to_X`` builds for the model's view."""
+    from recsys_tfb.io.extract import pdf_to_X
+    from recsys_tfb.models.feature_view import model_feature_view
+
+    _fitted(adapter)
+    table, X = _table()
+    scores = adapter.score(table, SCORING_PREPROCESSOR, SCORING_PARAMS)
+
+    assert scores.shape == (len(table),)
+    np.testing.assert_array_equal(scores, adapter.predict(X))
+    np.testing.assert_array_equal(scores, adapter.predict(pdf_to_X(
+        table, model_feature_view(adapter, SCORING_PREPROCESSOR), SCORING_PARAMS)))
+
+
+def test_extra_columns_and_column_order_do_not_change_the_score(adapter):
+    _fitted(adapter)
+    table, _ = _table()
+    reordered = table[["f2", "e", "f1", "f_unused", "f0"]].assign(
+        noise=np.arange(len(table)), label=1)
+
+    np.testing.assert_array_equal(
+        adapter.score(reordered, SCORING_PREPROCESSOR, SCORING_PARAMS),
+        adapter.score(table, SCORING_PREPROCESSOR, SCORING_PARAMS),
+    )
 
 
 # -- the pre-run checks ask the configured adapter (decision 3) ----------------

@@ -281,9 +281,9 @@ def cast_numeric_features_to_storage_type(
 
     **Why integers and boolean are in scope, not just the float-like types.**
     Convergence is a property of the *frame*, not of each column on its own —
-    ``pdf_to_X`` flattens it with ``DataFrame.values``, and pandas picks one
-    common dtype for the whole matrix. A single un-cast column decides that
-    dtype for every other column:
+    ``pdf_to_X`` allocates its matrix at the dtype ``DataFrame.values`` would
+    pick, and pandas picks one common dtype for the whole matrix. A single
+    un-cast column decides that dtype for every other column:
 
     - one int64 feature among float32 ones -> the common type is float64, so
       **the entire matrix doubles** for that one column's sake.

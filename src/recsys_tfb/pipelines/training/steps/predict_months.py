@@ -85,6 +85,19 @@ def configured_months(configured: Iterable) -> dict[str, str]:
     return by_key
 
 
+def rebuild_month_keys(requested: Iterable) -> set[str]:
+    """The month keys ``--rebuild-dates`` named, compared the way every month is.
+
+    Two readers: ``cache_test_model_input`` drops these months' cached copies,
+    and ``predict_and_write_test_predictions`` re-writes their predictions.
+    One definition, because a month the two spelled differently would either
+    be re-predicted from the stale copy it was named to replace, or re-cached
+    and then skipped as complete — a green run either way. The caller passes
+    the flag's value in, so this module still reads no parameters.
+    """
+    return {month_dir(d) for d in requested}
+
+
 def require_months_are_cached(
     months: Mapping[str, str], cache_items: Mapping[str, set[str]]
 ) -> None:

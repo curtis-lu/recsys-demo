@@ -695,12 +695,13 @@ def _raise_if(errors: list, headline: str) -> None:
     Both backstops report every offending column at once rather than the first,
     so an operator fixing a stale parquet learns the whole story in one run.
     """
-    from recsys_tfb.core.consistency import DataConsistencyError
+    from recsys_tfb.core.consistency import (
+        DataConsistencyError,
+        collect_all_message,
+    )
 
     if errors:
-        raise DataConsistencyError(
-            f"{headline} ({len(errors)} issue(s)):\n- " + "\n- ".join(errors)
-        )
+        raise DataConsistencyError(collect_all_message(headline, errors))
 
 
 def _arrow_storage_name(arrow_type) -> str:
@@ -1000,44 +1001,88 @@ def _stream_matrix(
     return X, aux
 
 
+def _flattened_dtype(dtypes: list) -> np.dtype:
+    """The dtype ``DataFrame.values`` gives a frame whose columns have ``dtypes``.
+
+    Asked of pandas on an empty frame rather than computed with
+    ``np.result_type``, because the two disagree: pandas refuses to mix a
+    boolean column with a numeric one and answers ``object``, where numpy
+    answers the number (``preprocessing.py``'s numeric cast records the
+    measurement). :func:`pdf_to_X` has to keep the matrix it always built, so
+    it takes pandas' answer, including that one.
+    """
+    return pd.DataFrame(
+        {i: pd.Series([], dtype=d) for i, d in enumerate(dtypes)}
+    ).values.dtype
+
+
 def pdf_to_X(
     pdf: pd.DataFrame,
     preprocessor_metadata: dict,
     parameters: dict,
 ) -> np.ndarray:
-    """Already-loaded pdf -> X numpy.
+    """The feature matrix of a frame already in memory.
 
-    Encapsulates slice_features + encode_categoricals (deferred identity cats)
-    + to_numpy. Used by extract_Xy after its parquet read and by
-    predict_and_write_test_predictions after a per-partition pyarrow read +
-    positive-set filter, so the latter doesn't have to re-read the parquet
-    just to reuse the feature-slicing logic.
+    What a scorer calls on the rows it is about to score: the default
+    ``ModelAdapter.score`` (training's test predictions, inference) and the
+    SHAP diagnostics. Columns are ``preprocessor_metadata["feature_columns"]``
+    in that order; the deferred identity categoricals are replaced by their
+    codes in ``category_mappings`` (``-1`` for a value it does not list), and
+    ``pdf`` itself is left alone — inference writes the item *name* into its
+    partition column from the same frame.
+
+    **The same encoder as training's streamed read.** The frame is turned into
+    one arrow record batch and written through :func:`_write_batch_features`,
+    which :func:`_stream_matrix` calls on every batch it reads, with the same
+    deferred set (:func:`_deferred_categoricals`). "One batch of rows -> matrix
+    rows" is written once, so the matrix a model was trained on and the one it
+    is scored on cannot be encoded two ways (ADR-0030 decision 12.4). The
+    columns are picked with :func:`_narrow_frame`: ``pdf[feature_cols]``
+    consolidates the whole source frame to answer a question about some of its
+    columns (``known-pitfalls.md`` section 19).
+
+    **The dtype is the one the replaced ``pdf[cols].copy().values`` produced**
+    (:func:`_flattened_dtype` over each column's dtype after encoding), not the
+    declared ``dataset.numeric_feature_storage_type`` and not numpy's promotion
+    rule. A different dtype is a different matrix and can be a different
+    prediction, and nothing versions predictions yet (ADR-0030 decision 9), so
+    this keeps every existing output byte for byte. For the same reason there
+    is no storage-type check here, unlike the training read (B6/B9): adding one
+    would stop inference runs that work today.
     """
-    feature_cols = preprocessor_metadata["feature_columns"]
-    schema = get_schema(parameters)
-    identity_cols = schema["identity_columns"]
-    categorical_cols = preprocessor_metadata["categorical_columns"]
+    import pyarrow as pa
+
+    feature_cols = list(preprocessor_metadata["feature_columns"])
     category_mappings = preprocessor_metadata["category_mappings"]
+    deferred = _deferred_categoricals(preprocessor_metadata, parameters)
+    feature_set = set(feature_cols)
 
     with log_step(logger, "slice_features"):
-        X_df = pdf[feature_cols].copy()
-    log_data_volume(logger, "pdf_to_X.X_df", X_df, deep=True)
+        narrow = _narrow_frame(pdf, feature_cols)
+        batch = pa.RecordBatch.from_pandas(narrow, preserve_index=False)
+
+    dtype = _flattened_dtype([
+        pd.Categorical([], categories=category_mappings[c]).codes.dtype
+        if c in deferred else narrow[c].dtype
+        for c in feature_cols
+    ])
+    with log_step(logger, "to_numpy"):
+        X = np.empty((len(pdf), len(feature_cols)), dtype=dtype)
+        _write_batch_features(
+            X, batch, feature_cols, {c: i for i, c in enumerate(feature_cols)},
+            deferred, category_mappings,
+        )
+    log_data_volume(logger, "pdf_to_X.X", X)
 
     deferred_cats = [
-        c for c in categorical_cols if c in identity_cols and c in X_df.columns
+        c for c in preprocessor_metadata["categorical_columns"]
+        if c in deferred and c in feature_set
     ]
     if deferred_cats:
-        with log_step(logger, "encode_categoricals"):
-            for col in deferred_cats:
-                known = category_mappings[col]
-                X_df[col] = pd.Categorical(X_df[col], categories=known).codes
         logger.info(
             "pdf_to_X: encoded deferred_cats=%s count=%d",
             deferred_cats, len(deferred_cats),
         )
-
-    with log_step(logger, "to_numpy"):
-        X = X_df.values
     return X
 
 

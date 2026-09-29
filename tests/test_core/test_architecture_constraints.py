@@ -1,6 +1,6 @@
 """Machine checks for docs/agents/architecture-constraints.md.
 
-Each test corresponds to one numbered constraint (A1-A7, S1-S6) or exception
+Each test corresponds to one numbered constraint (A1-A7, S1-S8) or exception
 registry (R1-R6) in that document. When a test fails, the fix is either to
 change the code back, or to update the document AND get the exception
 registered -- never to loosen the test quietly.
@@ -592,8 +592,9 @@ class TestS2MonthPlansStaysPure:
             ) == [name, "scoping.py"], f"{name}: the hop did not enter steps/"
 
 
-def _module_paths_imported(path, root):
-    """Every module path a file imports, spelled absolutely.
+def _module_imports_at(path, root):
+    """``(lineno, module)`` for every module path a file imports, spelled
+    absolutely.
 
     Two things this does that a plain read of ``node.module`` does not:
 
@@ -609,7 +610,7 @@ def _module_paths_imported(path, root):
     for node in ast.walk(ast.parse(path.read_text())):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                yield alias.name
+                yield node.lineno, alias.name
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 base = list(package[: len(package) - node.level + 1])
@@ -618,9 +619,15 @@ def _module_paths_imported(path, root):
             prefix = base + (node.module.split(".") if node.module else [])
             if not prefix:
                 continue
-            yield ".".join(prefix)
+            yield node.lineno, ".".join(prefix)
             for alias in node.names:
-                yield ".".join(prefix + [alias.name])
+                yield node.lineno, ".".join(prefix + [alias.name])
+
+
+def _module_paths_imported(path, root):
+    """Every module path a file imports (S3); see ``_module_imports_at``."""
+    for _, module in _module_imports_at(path, root):
+        yield module
 
 
 def _steps_imports_from_outside(root):
@@ -2116,6 +2123,205 @@ class TestS7DerivedKeysAreReadNotRespelled:
         found = _respelled_key_offenders(tmp_path)
         assert len(found) == 1
         assert found[0].startswith("copy_of_schema.py:2 in get_schema(): time + entity*")
+
+
+def _pipeline_import_offenders(root):
+    """``file:line: imports module`` for every import that crosses a pipeline
+    boundary the wrong way. Empty means the boundaries hold.
+
+    ``root`` is the ``recsys_tfb`` package directory (``SRC`` for the real tree).
+    Two kinds of offender:
+
+    * a module inside ``pipelines/<a>/`` importing ``recsys_tfb.pipelines.<b>``
+      with ``<b>`` another pipeline -- ``<b>`` must really be a directory or
+      ``.py`` under ``pipelines/``, so ``from recsys_tfb.pipelines import
+      get_pipeline`` (whose second half is ``recsys_tfb.pipelines.get_pipeline``)
+      is not mistaken for a pipeline called ``get_pipeline``;
+    * a module outside ``pipelines/`` importing ``recsys_tfb.pipelines`` or
+      anything under it. ``__main__.py`` (the CLI) is the one exception.
+
+    Files directly at the ``pipelines/`` root (``__init__.py`` and its
+    ``_REGISTRY``) belong to the package itself and are neither.
+    """
+    known = {
+        p.stem if p.is_file() else p.name
+        for p in (root / "pipelines").iterdir()
+        if p.name != "__pycache__"
+    }
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root)
+        if rel.parts == ("__main__.py",):
+            continue
+        if rel.parts[0] == "pipelines":
+            if len(rel.parts) < 3:
+                continue
+            own = rel.parts[1]
+        else:
+            own = None
+        hits = {}
+        for lineno, module in _module_imports_at(path, root):
+            parts = module.split(".")
+            if parts[:2] != ["recsys_tfb", "pipelines"]:
+                continue
+            if own is None:
+                hits[lineno] = module
+            elif len(parts) >= 3 and parts[2] in known and parts[2] != own:
+                hits[lineno] = module
+        offenders += [
+            f"{rel}:{lineno}: imports {module}"
+            for lineno, module in sorted(hits.items())
+        ]
+    return offenders
+
+
+class TestS8PipelinesDoNotImportEachOther:
+    """S8: pipelines are peers; nothing else reaches into them.
+
+    ``pipelines/<a>/`` must not import ``recsys_tfb.pipelines.<b>``, and
+    nothing outside ``pipelines/`` may import ``recsys_tfb.pipelines`` (the CLI,
+    ``__main__.py``, excepted). ADR-0030 decision 14: until now this lived only
+    in ADR-0008, a design file and ``diagnosis/__init__.py``'s docstring.
+
+    Tests are not scanned, for the reason S3 gives: a test import moves no
+    production caller edge. Imports only -- ``importlib.import_module`` strings
+    and attribute walks after importing the package are not seen.
+    """
+
+    def test_the_real_tree_is_clean(self):
+        offenders = _pipeline_import_offenders(SRC)
+        assert offenders == [], (
+            "a pipeline imported another pipeline, or a module outside "
+            "pipelines/ imported a pipeline (S8):\n" + "\n".join(offenders) +
+            "\nMove what is shared down to a module both can import "
+            "(preprocessing.py, models/, score_output.py); see "
+            "docs/agents/architecture-constraints.md."
+        )
+
+    def test_the_cli_exception_is_real(self):
+        """``__main__.py`` does import pipelines, so the exemption is what
+        keeps the test above green -- not a no-op."""
+        imported = [m for m in _module_paths_imported(SRC / "__main__.py", SRC)
+                    if m.startswith("recsys_tfb.pipelines")]
+        assert imported, "__main__.py no longer imports pipelines; drop the exemption"
+
+    def _tree(self, tmp_path, files):
+        root = tmp_path / "recsys_tfb"
+        for name in ("training", "inference"):
+            (root / "pipelines" / name).mkdir(parents=True)
+            (root / "pipelines" / name / "__init__.py").write_text("")
+        (root / "models").mkdir()
+        (root / "pipelines" / "__init__.py").write_text("")
+        for name, source in files.items():
+            target = root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(source)
+        return root
+
+    def test_catches_every_spelling_of_pipeline_importing_pipeline(self, tmp_path):
+        files = {
+            "pipelines/training/abs_module.py":
+                "from recsys_tfb.pipelines.inference.steps.validation import x\n",
+            "pipelines/training/abs_package.py":
+                "from recsys_tfb.pipelines.inference import nodes\n",
+            "pipelines/training/plain_import.py":
+                "import recsys_tfb.pipelines.inference.nodes\n",
+            "pipelines/training/second_half.py":
+                "from recsys_tfb.pipelines import inference\n",
+            "pipelines/training/nodes.py":
+                "from ..inference import nodes\n",
+            "pipelines/training/steps/deep_rel.py":
+                "from ...inference import nodes\n",
+            "pipelines/training/in_function.py":
+                "def f():\n"
+                "    from recsys_tfb.pipelines.inference import nodes\n",
+        }
+        root = self._tree(tmp_path, files)
+        found = _pipeline_import_offenders(root)
+        lines = {"pipelines/training/in_function.py": 2}
+        for name in files:
+            line = lines.get(name, 1)
+            assert any(
+                f.startswith(f"{name}:{line}: imports recsys_tfb.pipelines.inference")
+                for f in found
+            ), f"{name}: this spelling escaped the scan; found {found}"
+        assert len(found) == len(files), found
+
+    def test_catches_every_spelling_of_a_library_importing_a_pipeline(self, tmp_path):
+        files = {
+            "models/abs_module.py":
+                "from recsys_tfb.pipelines.training.nodes import x\n",
+            "models/plain_import.py": "import recsys_tfb.pipelines\n",
+            "models/registry_fn.py":
+                "from recsys_tfb.pipelines import get_pipeline\n",
+            "models/rel_package.py":
+                "from ..pipelines.training import nodes\n",
+            "models/in_function.py":
+                "def f():\n    import recsys_tfb.pipelines.training\n",
+            "top_level.py": "from recsys_tfb.pipelines import get_pipeline\n",
+        }
+        root = self._tree(tmp_path, files)
+        found = _pipeline_import_offenders(root)
+        for name in files:
+            assert any(f.startswith(f"{name}:") for f in found), (
+                f"{name}: this spelling escaped the scan; found {found}"
+            )
+        assert len(found) == len(files), found
+
+    def test_the_message_names_file_line_and_module(self, tmp_path):
+        root = self._tree(tmp_path, {
+            "models/foo.py": "import os\n\nfrom ..pipelines.training import nodes\n",
+        })
+        assert _pipeline_import_offenders(root) == [
+            "models/foo.py:3: imports recsys_tfb.pipelines.training.nodes"
+        ]
+
+    def test_legal_imports_are_left_alone(self, tmp_path):
+        files = {
+            "pipelines/training/own_abs.py":
+                "from recsys_tfb.pipelines.training.steps import hpo_resume\n"
+                "import recsys_tfb.pipelines.training.nodes\n",
+            "pipelines/training/own_rel.py": "from .steps import x\n",
+            "pipelines/training/steps/own_up.py":
+                "from ..nodes import x\nfrom .. import nodes\n",
+            "pipelines/training/shared.py":
+                "from recsys_tfb.models import feature_view\n"
+                "from recsys_tfb import score_output\n"
+                "from ...models import feature_view as fv\n",
+            # not a pipeline: the second half is a function of the registry
+            "pipelines/training/registry.py":
+                "from recsys_tfb.pipelines import get_pipeline\n",
+            "pipelines/__init__.py":
+                "from recsys_tfb.pipelines.training import nodes\n"
+                "from .inference import nodes as n2\n",
+            "pipelines/helper.py":
+                "from recsys_tfb.pipelines.inference import nodes\n",
+            "__main__.py":
+                "from recsys_tfb.pipelines import get_pipeline\n"
+                "from recsys_tfb.pipelines.training import nodes\n"
+                "from .pipelines.inference import nodes as n2\n",
+            "models/ok.py": "import recsys_tfb.core\nfrom recsys_tfb import pipelinesish\n",
+        }
+        root = self._tree(tmp_path, files)
+        assert _pipeline_import_offenders(root) == []
+
+    def test_a_name_that_is_not_a_pipeline_is_not_reported(self, tmp_path):
+        """Proof the ``<b>`` must-exist check is load-bearing.
+
+        Inside a pipeline, ``from recsys_tfb.pipelines import get_pipeline``
+        yields ``recsys_tfb.pipelines.get_pipeline``, which looks like pipeline
+        ``get_pipeline`` until it is checked against ``pipelines/``. The same
+        file importing a name that *is* a sibling directory is reported.
+        """
+        root = self._tree(tmp_path, {
+            "pipelines/training/a.py":
+                "from recsys_tfb.pipelines import get_pipeline\n",
+            "pipelines/training/b.py":
+                "from recsys_tfb.pipelines import inference\n",
+        })
+        assert _pipeline_import_offenders(root) == [
+            "pipelines/training/b.py:1: imports recsys_tfb.pipelines.inference"
+        ]
 
 
 class TestR2FrameworkGlobalsRegistry:

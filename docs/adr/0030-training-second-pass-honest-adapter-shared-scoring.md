@@ -117,6 +117,13 @@ adapter 也說出「評分要讀哪些欄」：模型的特徵，加上組合模
 
 **翻盤條件**：如果兩階段 spec 決定分組鍵只能是本來就在特徵裡的欄（例如 item），而且 adapter 維持只收矩陣，分組資訊就已經在矩陣裡，「改兩處」的問題消失。那時開一個頂層評分模組、adapter 只收矩陣，是比較簡單的答案。
 
+> **實作註記（2026-09-29，#484）**：
+> - 名字：`ModelAdapter.score(table, preprocessor, parameters)` 吃一張表、回每列一個分數；`ModelAdapter.scoring_columns(preprocessor)` 回「評分要從表讀哪些欄」。兩個都在 `models/base.py`，**有預設實作、不是 abstract**：`scoring_columns` 就是 `models/feature_view.py` 的 `model_feature_columns`（模型自己的特徵清單，對不上前處理產物時照舊丟錯）；`score` 是 `predict(pdf_to_X(table, model_feature_view(self, preprocessor), parameters))`。組合模型覆寫這兩個。
+> - 兩個方法裡的 `io.extract`、`models.feature_view` 都在函式內 import：後者本來就 import `models.base`；前者放模組頂層會讓單獨 `import recsys_tfb.io.model_adapter_dataset` 失敗，理由同 `models/lightgbm_adapter.py` 開頭那段（決定 15 的註記）。`tests/test_models/test_cold_imports.py` 照樣綠。
+> - training 的 test 預測、inference 的評分都改走這個入口；`tests/test_models/test_adapter_contract.py` 在 LightGBM 與測試用的假 adapter 上各跑一遍評分合約（分數等於對原陣列 `predict`、欄順序打亂與多餘的欄不影響分數、`scoring_columns` 等於模型的 `feature_names()`）。
+> - **跟上文字面不同**：SHAP 類診斷（`diagnosis/model/shap_per_item.py`、`shap_cases.py`）**沒有**改走這個入口，仍直接呼叫 `pdf_to_X`——不在 #484 的範圍。
+> - inference 以前在迴圈外建一次模型的特徵 view，現在每個 `(桶, item)` 呼叫 `score` 時都重建一次（清單運算，跟預測比可以忽略）。「模型沒宣告 `feature_names()`」的 INFO log 因此每個 chunk 印一次；只有測試替身會走到那條路。
+
 ## 決定 3　演算法專屬的設定規則由 adapter 宣告
 
 **規則**：每個 adapter 宣告自己的規則：支援哪些 objective、哪些算排序目標、排序目標能配哪些 metric、沒寫 metric 時用哪個、排序目標要不要丟整組沒有正例的 query group。今天這些是 LightGBM 的知識，住在 `core/group_utils.py`（`RANKING_OBJECTIVES` 與幾個 `objective_*` 函式）和 `core/consistency.py`（A7 的 `RANKING_METRICS`），本份把它們搬進 LightGBM 的 adapter。
@@ -181,6 +188,14 @@ catalog 條目宣告的欄名由部署跟著 `schema` 寫。本份不加「catal
 **為什麼不讓 training 直接 import inference 的模組**：repo 今天沒有任何一條 pipeline import 另一條。兩條 pipeline 是平輩，各自演進；training 依賴 inference 的內部，inference 一次重構就可能打壞 training。共用的東西一律往下搬到兩者之下，這是 ADR-0008 以來每一次的做法（`preprocessing.py`、`models/feature_selection.py`、`models/feature_view.py`），它的理由本身站得住，不只是慣例。
 
 **共用之後多了一個觸發來源**：為了 inference 改評分程式，會改變 training 的預測。怎麼讓已寫過的月份重寫，見決定 9 的預測格式版本號。
+
+> **實作註記（2026-09-29，#484）**：
+> - 模組照上文叫 `src/recsys_tfb/score_output.py`，只 import pandas、numpy 與標準庫（`tests/test_score_output.py` 釘住 import 清單）。內容：`require_single_partition`（從 `pipelines/inference/steps/partitions.py` 原樣搬來，原檔的已刪）；`scored_chunk_failures(out_pdf, source_pdf, *, entity_cols, identity_cols, not_null_cols)` 回 0～3 個失敗，檢查名稱與訊息逐字沿用 inference 的 `chunk_row_count`／`no_missing`／`no_duplicates`；`require_scored_chunk` 是「有失敗就丟 `ScoredChunkError`」的版本；輸出表組裝是 `ScoredFrameLayout`（`entity_cols` 寫出時轉字串、`score_col`、`carried_cols` 照原型別帶、`null_cols` 整欄 NULL；`source_columns()` 說要從來源讀哪些欄，`build()` 組表）。
+> - `null_cols` 是上文沒列的一項：寫出目標宣告了、這次卻沒有值的欄。今天只有一種——catalog 宣告了零正例組權重欄而 `test_zero_positive_group_ratio` 是 0。
+> - inference 的 `validate_scored_chunk` 改成組合：前三條呼叫 `scored_chunk_failures`（identity 傳 `scored_row_columns`，不可為 NULL 的欄傳 identity 的非 entity 欄加分數），`item_values_are_known` 留在原處；丟的仍是 inference 自己的 `ValidationError`，`CHUNK_CHECKS` 不變。
+> - training 寫出前的兩個選擇：重複列以 training 自己的 `identity_columns` 判斷（含選用角色欄，理由即上表第一列）；不可為 NULL 的只列這個 node 自己算出或賦值的欄——分數與兩個分區值（entity 在讀進來的列上查，因為轉字串會把 NULL 變成 `"None"`）。label、選用角色欄、權重是從 dataset 原樣帶來的，能不能是 NULL 是 dataset 的契約，這個 node 不替它擔保。失敗時丟 `ScoredChunkError`、該分區不寫出。**這是行為變更**：#484 以前 training 寫出前什麼都不查。
+> - 分數欄名照 `schema.score`：training 寫出 test 預測那一處已改（#484 以前寫死 `"score"`）。**跟上文字面不同**：上文說的第二處——`select_shap_population`（`diagnosis/model/population_spark.py`）讀預測表時寫死的 `"score"`——#484 沒有改，不在這張票的範圍，仍待處理。
+> - 兩邊都用 `ScoredFrameLayout` 組表，欄順序是 entity、分數、`score_uncalibrated`、帶的欄、NULL 欄、分區欄。宣告了選用角色時 training 的欄順序跟以前不同（以前選用角色欄排在分數前面）；`HiveTableDataset.save` 照表宣告的欄序寫，落地的表不受影響。
 
 ## 決定 6　7 個診斷 node 搬回 `nodes.py`；機制進 `pipelines/training/steps/`
 
@@ -314,6 +329,15 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 - **它的排名改用 `utils/ranking.py` 的 `rank_by_score_then_item`。** 今天它自己寫排名，同分時只比 item、不比 `event`；宣告了 `event` 時，象限的第一名可能跟 evaluation 的排名不同。
 
 **不收的效率項**（影響可能很小，或要先量）：診斷抽樣要整份從頭掃、`compute_test_metrics` 的中間表沒 persist、`extract_Xy` 開同一份 parquet 四五次、`persist_sample_weight_report` 每次整欄讀權重鍵。
+
+> **實作註記（2026-09-29，#484，第 2 件與第 4 件）**：
+> - 第 2 件，分區清單：`pipelines/training/steps/predict_partitions.py` 的 `partitions_from_directory_names` 走 `dataset.get_fragments()`，用 `pyarrow.dataset.get_partition_keys(fragment.partition_expression)` 取每個檔的 `(time, item)`，一列資料都不讀；`open_parquet_dataset` 回的多根 UnionDataset 也適用。測試把資料檔內容換成垃圾，清單照樣列得出來（`tests/test_pipelines/test_training/test_predict_partitions.py`；node 層另有一個：已寫完而跳過的月份有垃圾檔，run 照樣完成）。打開 dataset 本身仍會讀一個檔的 footer 來推 schema，這是 #484 以前就有的成本。它放在 `steps/` 的獨立模組，不放 `predict_months.py`：後者不 import 任何本專案或 pyarrow 的東西，有 AST 測試釘住。
+> - 分區清單的兩個已知差異：只有空檔的分區目錄會被列出（讀列的寫法看不到它）——cache 由 Spark 的 `partitionBy` 寫，值沒有列就不會有目錄，所以這個 pipeline 寫出的 cache 上兩者一致；不是依 `(time, item)` 兩層分區的版面會丟 `ValueError`，而不是像以前那樣把它當資料欄照讀。
+> - 每個分區只讀 `ScoredFrameLayout.source_columns()` 與 `ModelAdapter.scoring_columns()` 的聯集（node 裡沒有固定清單）。宣告了 `test_zero_positive_group_ratio > 0` 的路徑有兩層證據：單元測試（權重欄在讀取清單裡、值照寫），以及 `examples/ad` 的端到端（它的 ratio 是 0.5、宣告了 `occasion`）：`run_e2e.sh --compare` 與 `baseline_digest.json` 一致，而且 `training_eval_predictions` 跟 main 跑出來的逐欄相同（2,835 列、10 欄，分數逐位元相同，2026-09-29）。
+> - 第 4 件：「一批列 → 矩陣列」收成 `io/extract.py` 的 `_write_batch_features`，`_stream_matrix` 逐批呼叫它，`pdf_to_X` 把整張表當一批（`_narrow_frame` 挑欄 → 一個 arrow `RecordBatch` → 同一個函式），延後編碼的類別欄集合同用 `_deferred_categoricals`。
+> - `pdf_to_X` 的矩陣 dtype **刻意等於以前 `pdf[cols].copy().values` 的 dtype**：每欄編碼後的 dtype 交給 pandas 決定共同型別（`_flattened_dtype`）。不用宣告的 `numeric_feature_storage_type`，也不用 numpy 的 `np.result_type`——後者在「boolean 欄混數值欄」時答數值型別，pandas 答 `object`（`preprocessing.py` 的 cast 記過這個實測）。理由：dtype 不同就是矩陣不同、預測可能不同，而決定 9 的預測格式版本號還沒落地，已寫過的月份沒有辦法觸發重寫，所以這一輪不能改輸出。`tests/test_io/test_extract.py` 把舊實作當參考比對 float32、float64、混合型別、含 NaN、含未知類別、空表（dtype、shape、位元組全同）與 boolean（`object`，逐值與逐元素型別相同）。B6／B9 型別檢查照〈刻意不做〉沒有加。
+> - `pdf_to_X` 的 log：`slice_features`、`to_numpy` 兩個子步驟名保留，`encode_categoricals` 子步驟沒了（編碼併進 `to_numpy`），資料量那一行從 `pdf_to_X.X_df` 改成 `pdf_to_X.X`（矩陣本身）。
+> - 同一段程式順手收掉決定 16 的兩項重複：`cache_test_model_input` 的月份去重改用 `steps/predict_months.py` 的 `configured_months`；`--rebuild-dates` 的月份集合收成同檔的 `rebuild_month_keys`，快取 node 與預測 node 都呼叫它。
 
 ## 決定 13　training 根層一個開跑契約模組
 
