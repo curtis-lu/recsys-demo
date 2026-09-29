@@ -132,6 +132,21 @@ training:
   # NOTE: this key is inside the model_version-hashed training: block, so
   # changing it is a deliberate one-time model_version bump.
   hpo_objective: macro_per_item_map   # ∈ {mean_ap, macro_per_item_map, pooled_average_precision, macro_per_item_average_precision}
+  # 要不要跑 HPO（ADR-0030 決定 11）。false＝不搜尋：val 不複製也不讀，改用下面的
+  # fixed_params 訓練一次。那一次的參數疊法跟 HPO 的一個 trial 相同：
+  # algorithm_params → random_seed → fixed_params；迭代上限與早停照樣由
+  # num_iterations、early_stopping_rounds 決定（早停看 train_dev），
+  # final_model_strategy 兩種都能用。false 時 search_space、n_trials 不用（仍進
+  # model_version）；hpo_objective 照用（選版指標的預設、決定 test 算哪些指標）。
+  # 只接受 true／false（A58，training 開跑前擋）。
+  hpo_enabled: true
+  # hpo_enabled: false 時用的超參數。空＝除了 algorithm_params 不另外指定，不是
+  # 「全用 LightGBM 預設值」：seed、排序目標的預設 metric、迭代上限與早停照樣生效。
+  # 不得寫 objective、metric、seed、feature_pre_filter、num_iterations、
+  # early_stopping_rounds（由別的鍵或框架決定；A58 開跑前擋）。HPO 模式下不讀：
+  # 改它不換 search_id（跑到一半的搜尋接得回去），但會換 model_version。
+  #   範例：{learning_rate: 0.05, num_leaves: 31}
+  fixed_params: {}
   n_trials: 20
   num_iterations: 500
   early_stopping_rounds: 50

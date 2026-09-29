@@ -208,36 +208,98 @@ class TestTrainingPipeline:
         assert names.index("select_features") < names.index("prepare_train_inputs")
 
 
+class TestSkippingHpo:
+    """ADR-0030 decision 11: ``hpo_enabled=False`` builds a different DAG —
+    no val copy, no search, one fit on fixed parameters handing on the same
+    three outputs."""
+
+    def test_no_val_copy_and_no_search_but_a_fixed_params_fit(self):
+        names = [n.name for n in create_pipeline(hpo_enabled=False).nodes]
+        assert "cache_val_model_input" not in names
+        assert "tune_hyperparameters" not in names
+        assert "train_with_fixed_params" in names
+        assert len(names) == 19
+
+    def test_default_is_the_search(self):
+        names = [n.name for n in create_pipeline().nodes]
+        assert "tune_hyperparameters" in names
+        assert "train_with_fixed_params" not in names
+        assert names == [n.name for n in create_pipeline(hpo_enabled=True).nodes]
+
+    def test_val_is_no_input_of_the_run(self):
+        """What makes "val is neither copied nor read" hold by construction."""
+        pipeline = create_pipeline(hpo_enabled=False)
+        assert "val_model_input" not in pipeline.inputs
+        assert "val_parquet_handle" not in pipeline.outputs
+
+    def test_the_fit_hands_on_what_the_search_does(self):
+        by_name = {n.name: n for n in create_pipeline().nodes}
+        skip = {n.name: n for n in create_pipeline(hpo_enabled=False).nodes}
+        fit = skip["train_with_fixed_params"]
+        assert fit.outputs == by_name["tune_hyperparameters"].outputs
+        assert fit.inputs == [
+            name for name in by_name["tune_hyperparameters"].inputs
+            if name != "val_parquet_handle"
+        ]
+
+    def test_everything_after_the_choice_is_wired_the_same(self):
+        """Downstream of the three outputs nothing changes (decision 11)."""
+        def after_choice(pipeline):
+            names = [n.name for n in pipeline.nodes]
+            return {
+                n.name: (n.inputs, n.outputs, n.writes)
+                for n in pipeline.nodes
+                if n.name not in {
+                    "cache_val_model_input", "tune_hyperparameters",
+                    "train_with_fixed_params",
+                }
+            }, names
+
+        search, _ = after_choice(create_pipeline())
+        skip, names = after_choice(create_pipeline(hpo_enabled=False))
+        assert skip == search
+        assert names.index("train_with_fixed_params") < names.index("finalize_model")
+
+
 class TestLogExperimentWiring:
     """ADR-0030 decision 8: ``log_experiment`` takes every diagnosis by name,
-    and every diagnosis file is on disk before it uploads ``diagnostics/``."""
+    and every diagnosis file is on disk before it uploads ``diagnostics/``.
+    Held in both modes: skipping HPO swaps the node that feeds
+    ``best_params``, nothing else upstream of the upload."""
 
-    # The seven diagnosis nodes (ADR-0030 decision 7), plus the HPO node,
-    # which writes the search diagnostics under diagnostics/hpo/ itself.
-    UPSTREAM_OF_THE_UPLOAD = (
+    # The seven diagnosis nodes (ADR-0030 decision 7).
+    DIAGNOSES = (
         "compute_feature_statistics", "compute_feature_importance",
         "compute_gain_ledger", "compute_shap_diagnostics",
         "select_shap_population", "compute_quadrant_profiles",
-        "compute_quadrant_cases", "tune_hyperparameters",
+        "compute_quadrant_cases",
     )
+    # Plus, with a search, the HPO node, which writes the search diagnostics
+    # under diagnostics/hpo/ itself. Without one there are none to upload.
+    UPSTREAM_OF_THE_UPLOAD = {
+        True: DIAGNOSES + ("tune_hyperparameters",),
+        False: DIAGNOSES,
+    }
 
     @staticmethod
     def _log_node(pipeline):
         return next(n for n in pipeline.nodes if n.name == "log_experiment")
 
-    def test_every_parameter_is_wired_by_name(self):
+    @pytest.mark.parametrize("hpo_enabled", [True, False])
+    def test_every_parameter_is_wired_by_name(self, hpo_enabled):
         """By name, so no parameter depends on its position; and every one
         wired, so none can fall back on a default without anyone noticing."""
         import inspect
 
         from recsys_tfb.pipelines.training.nodes import log_experiment
 
-        node = self._log_node(create_pipeline())
+        node = self._log_node(create_pipeline(hpo_enabled=hpo_enabled))
         assert node.keyword_inputs is not None
         assert set(node.keyword_inputs) == set(
             inspect.signature(log_experiment).parameters)
 
-    def test_every_node_landing_a_diagnosis_file_feeds_it_directly(self):
+    @pytest.mark.parametrize("hpo_enabled", [True, False])
+    def test_every_node_landing_a_diagnosis_file_feeds_it_directly(self, hpo_enabled):
         """Which files land in diagnostics/ comes from the catalog, so a new
         diagnosis is covered without editing this test.
 
@@ -253,7 +315,7 @@ class TestLogExperimentWiring:
             name for name, entry in catalog.items()
             if "/diagnostics/" in str((entry or {}).get("filepath", ""))
         }
-        pipeline = create_pipeline()
+        pipeline = create_pipeline(hpo_enabled=hpo_enabled)
         wired = set(self._log_node(pipeline).inputs)
         producers = {
             n.name: set(n.outputs) for n in pipeline.nodes
@@ -269,7 +331,8 @@ class TestLogExperimentWiring:
             name for name, outputs in producers.items() if not outputs & wired
         ) == []
 
-    def test_everything_it_uploads_is_upstream_in_any_valid_order(self):
+    @pytest.mark.parametrize("hpo_enabled", [True, False])
+    def test_everything_it_uploads_is_upstream_in_any_valid_order(self, hpo_enabled):
         """Ancestors in the graph, not just earlier in today's sort.
 
         Shuffling the declaration order cannot show a missing edge here: the
@@ -278,7 +341,7 @@ class TestLogExperimentWiring:
         before decision 8: 2,001 orders, ``compute_gain_ledger`` ahead in
         every one — the luck the ADR describes, not proof of an edge.
         """
-        pipeline = create_pipeline()
+        pipeline = create_pipeline(hpo_enabled=hpo_enabled)
         producer = {out: n for n in pipeline.nodes for out in n.outputs}
         ancestors, frontier = set(), [self._log_node(pipeline)]
         while frontier:
@@ -288,7 +351,7 @@ class TestLogExperimentWiring:
                     ancestors.add(node.name)
                     frontier.append(node)
 
-        missing = sorted(set(self.UPSTREAM_OF_THE_UPLOAD) - ancestors)
+        missing = sorted(set(self.UPSTREAM_OF_THE_UPLOAD[hpo_enabled]) - ancestors)
         assert missing == []
 
 
@@ -296,7 +359,7 @@ class TestSampleWeightReportIsACatalogArtifact:
     """`sample_weight_report` stopped being a fake output (ADR-0014 決定 2).
 
     The node returns the dict and the catalog writes the file, which makes the
-    *filepath* the load-bearing part: the manifest reader in ``__main__`` looks
+    *filepath* the load-bearing part: the manifest reader (``run_contract``) looks
     for one exact name in one exact directory, and the artifacts listing only
     walks the version dir's first level.
     """
@@ -332,7 +395,8 @@ class TestSampleWeightReportIsACatalogArtifact:
         manifest's ``extra_metadata.sample_weight`` silently disappears. This
         turns that into a red test instead.
         """
-        from recsys_tfb.__main__ import _dir_artifacts, _sample_weight_extra
+        from recsys_tfb.__main__ import _dir_artifacts
+        from recsys_tfb.pipelines.training.run_contract import manifest_extra
 
         rel = Path(self._catalog()["sample_weight_report"]["filepath"])
         assert rel.parts[:3] == ("data", "models", "${model_version}"), rel
@@ -342,7 +406,7 @@ class TestSampleWeightReportIsACatalogArtifact:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text('{"enabled": true, "unmatched_keys": []}')
 
-        assert _sample_weight_extra(version_dir) == {
+        assert manifest_extra(version_dir) == {
             "sample_weight": {"enabled": True, "unmatched_keys": []}
         }
         # `artifacts` lists first-level files only, so a nested filepath would

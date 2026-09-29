@@ -269,7 +269,7 @@ HPO 以 <code>search_id</code> 為鍵，兩者都是雜湊過的版本 ID，不�
           與未知類別的打字錯誤。只讀 weight-key 那幾欄做 distinct，很便宜。<br>
           <b>不受 lgb binary 快取影響，每次都跑</b>：報表要反映這次的設定，不是建 binary 那次的。<br>
           <b>沒有 pipeline 消費者</b>——<code>sample_weight_report.json</code> 由 CLI 在 run 之後讀回、
-          併進 <code>manifest.json</code> 的 <code>extra_metadata</code>（<code>__main__.py</code> 的 <code>_sample_weight_extra</code>；這個檔常被改動，所以這裡引函式名不引行號）。<br>
+          併進 <code>manifest.json</code> 的 <code>extra_metadata</code>（<code>pipelines/training/run_contract.py</code> 的 <code>manifest_extra</code>；引函式名不引行號）。<br>
           <b>node 本身不寫檔</b>，只 <code>return dict</code>，落地交給 catalog——所以它已於 2026-08-30
           <b>離開</b> architecture-constraints.md 的 R4（ADR-0014 決定 2）。</td>
     </tr>
@@ -279,8 +279,8 @@ HPO 以 <code>search_id</code> 為鍵，兩者都是雜湊過的版本 ID，不�
       <td>best_params, best_iteration, hpo_best_model<br><i>（三者皆落地）</i></td>
       <td><span class="warn">函式第一行關掉 Spark</span> <code>release_spark_session()</code>，理由見上方第 1 點；
           可用 <code>spark_lifecycle.release_during_hpo: false</code> 關掉這個行為。<br>
-          train／train_dev 吃預建的 binary（跨 trial 不重新分箱），val 在函式內從 parquet 現讀，
-          函式回傳時那份 pandas 就被釋放。<br>
+          train／train_dev 吃預建的 binary（跨 trial 不重新分箱）。val 在函式內從 parquet 讀進一份映射到磁碟的矩陣
+          （<code>io/disk_matrix.py</code>），而且只在有 trial 要評分時才讀：搜尋已跑滿、checkpoint 讀得回來時一次都不讀。<br>
           Optuna study 以 <code>search_id</code> 持久化，崩潰可續跑；<code>--fresh-hpo</code> 清掉重來。
           目標函式由 <code>training.hpo_objective</code> 選（組內排序的 <code>mean_ap</code>、
           <code>macro_per_item_map</code>，或把每一列當成二元預測的 <code>pooled_average_precision</code>、
@@ -292,6 +292,14 @@ HPO 以 <code>search_id</code> 為鍵，兩者都是雜湊過的版本 ID，不�
           <code>adapter_class</code> 串味）。<br>
           側輸出：HPO 搜尋診斷寫進 <code>diagnostics_dir/hpo/</code>（經 <code>diagnosis.hpo::write_hpo_diagnostics</code>），best-effort，
           失敗只 warning。它是 R4 登記裡唯一「間接寫入、AST 掃不到」的一筆。</td>
+    </tr>
+    <tr>
+      <td>train_with_fixed_params<br><i>（<code>training.hpo_enabled: false</code> 時取代上一列）</i></td>
+      <td>train_lgb_handle, train_dev_lgb_handle, preprocessor_view</td>
+      <td>best_params, best_iteration, hpo_best_model<br><i>（同上一列，三者皆落地）</i></td>
+      <td>不搜尋，用 <code>training.fixed_params</code> 照一個 trial 的做法訓練一次（ADR-0030 決定 11）。
+          這個模式的圖沒有 <code>cache_val_model_input</code>：val 不複製、不讀。函式第一行同樣關掉 Spark。
+          不寫任何檔：沒有 study、checkpoint 與搜尋診斷。</td>
     </tr>
     <tr>
       <td>finalize_model</td>

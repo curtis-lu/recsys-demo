@@ -355,11 +355,21 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 
 **為什麼跟重構同一輪**：它改的正好是這一輪要重整的兩步（HPO、定模型）與決定 1 的「用給定參數訓練」。先把形狀做好，它只是多一條路；分開做，那兩步要改兩次。
 
+> **實作註記（2026-09-30，#487）**：
+> - 新 node 叫 `train_with_fixed_params`（`pipelines/training/nodes.py`）。訓練那一段跟 trial 共用 `steps/hpo_scoring.py` 的 `fit_stopping_on_train_dev`：trial 以前自己寫的「讀兩份 `.bin`、兩邊都套這次的權重、用 train_dev 早停」搬進這個函式，trial 與新 node 都呼叫它，參數都由 `fit_params` 疊。所以「疊法跟一個 trial 相同」由建構保證；`test_nodes.py` 的 `TestTrainWithFixedParams` 另外拿假 adapter 比對兩邊交給 `train()` 的參數、迭代上限、早停與權重，逐項相同。
+> - `best_params` 交出的是 `fixed_params` 本身（空的就是 `{}`），站在 trial 交出抽樣值的位置，`refit_on_full` 照樣用 `fit_params` 疊它。上文說的「印一行 log」在新 node 裡：`search_space`、`n_trials` 不用，val 不讀。
+> - **跟上文不同的一處：`search_id` 也拿掉 `hpo_enabled`**（`core/versioning.py` 的 `SEARCH_ID_IRRELEVANT_KEYS`，連同 `n_trials`、`fixed_params`）。搜尋裡它只可能是 `true`（寫了或沒寫），進雜湊分不出任何東西，只會讓這個鍵出現之前跑完的搜尋全部接不回去。所以這次升級 `model_version` 變一次、`search_id` 不變：已經跑完的搜尋，下次跑直接用它的 checkpoint，也不讀 val（決定 12 第 1 件）。
+> - 設定檢查是新的 A58（`core/consistency.py` 的 `skip_hpo_param_errors`）：`hpo_enabled` 寫了就要是 true 或 false（只有 false 會跳過，寫成字串 `"false"` 會照跑 HPO，所以擋）；`fixed_params` 要是 mapping，`null`（鍵底下只剩註解時 YAML 讀成 null）當成空的；六個保留鍵兩種模式都擋。不進 `validate_config_consistency`，理由同 A57：只有 training 讀這兩個鍵。「這次跑不跑 HPO」只有一個讀法，`hpo_enabled(parameters)`，A48 與 CLI 都呼叫它。
+> - 模式怎麼到 `create_pipeline`：CLI 呼叫 `run_contract.pipeline_kwargs`，得到 `{"hpo_enabled": ...}`。HPO 模式的 node 與宣告順序跟以前完全相同（val 的複製仍排在 test 的複製之前）。
+> - `--fresh-hpo` 在這個模式下沒有東西可清：CLI 印一行警告，照跑。
+
 ## 決定 12　四件讀程式看得到的浪費；象限診斷只讀這次的 test 月份
 
 驗收看「讀了幾次、拉了多少列進 driver、峰值多配了多少記憶體」，不看秒數（flow 規則 8）：本機合成資料的秒數外推不到生產。這四件都不改變輸出，但改變做法，在〈版本與順序的約束〉裡自成一類。
 
 1. **HPO 確定用不到 val，才不讀。** 先開 study、讀 checkpoint：study 已經完成、而且 checkpoint 讀得回最佳模型，才跳過讀 val。其他路徑照舊讀，包括「study 有 trial、但 checkpoint 讀不回來，拿最佳參數重跑一次」的最後手段（`tune_hyperparameters` 裡的 last-resort）。binary objective 對 val 的前置檢查跟著讀取一起走。
+
+   > **實作註記（2026-09-30，#487）**：`tune_hyperparameters` 先開 study、讀 checkpoint，再決定要不要讀 val：checkpoint 讀得回、而且沒有 trial 要跑（`remaining == 0`）時，直接交出 checkpoint 的分數、模型、iteration 與參數，不建 `TrialScorer`。`hpo_checkpointing: false` 時沒有 checkpoint，永遠讀。順序因此變了一處：以前先讀 val 再開 study，現在 `--fresh-hpo` 清掉 study 發生在 val 的前置檢查之前，檢查失敗時 study 已經清了；那本來就是使用者要它做的事。測試用計數（`test_nodes.py`）：搜尋跑完、checkpoint 讀得回，第二次呼叫讀 val 0 次；把 checkpoint 的模型檔寫壞，讀 1 次、last-resort 多跑一個 trial；還有 trial 要跑時照讀。
 2. **預測不再把全部 test 列拉進 driver。** 「有哪些（月份, item）要寫」從 parquet 的分區資訊取，不讀任何一列資料。每個分區只讀需要的欄：由輸出組裝（決定 5）與 adapter 的評分入口（決定 2）說出要哪些欄，不是在 node 裡寫一份固定清單。今天的組裝會讀零正例組權重欄，組合模型還要分組鍵；固定清單會漏。驗證要用宣告了 `dataset.test_zero_positive_group_ratio > 0` 的設定跑（base 設定是 0，驗不出來；`examples/ad` 的設定不是 0）。
 3. **不再多配一份矩陣。** 建 `.bin`（排序目標的丟組與依 group 排序）與 `refit_on_full`，在串流時就依 group 順序寫入。常見的「就地」寫法（`X[:] = X[perm]`、`np.take(..., out=X)`）仍會另配一整份，所以驗收量實際的峰值配置，不是讀程式數複本。
 
@@ -415,6 +425,12 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 
 **為什麼**：training 開跑前要什麼、跑完寫什麼，可以不經 CLI 直接測。
 
+> **實作註記（2026-09-30，#487）**：
+> - `pipelines/training/run_contract.py` 有五個函式：`config_errors`（A57、A58、A26、A36、A53，以及對 `training_eval_predictions` 宣告欄的 A28、A39、A45，一次收齊）、`versions_for_run`（兩層 dataset 版本、`model_version`、那版 dataset 建 test 時的 ratio）、`dataset_version_verdict`（A54 對那版 dataset）、`pipeline_kwargs`（模式）、`manifest_extra`（兩份報告併進 `manifest.json`）。CLI 原本的 `_dataset_version_test_ratio`、`_sample_weight_extra`、`_group_filter_extra` 搬進來。測試在 `tests/test_pipelines/test_training/test_run_contract.py`，直接呼叫、不經 CLI。
+> - 以前 A57、A26／A36／A53、A28／A39／A45 分三次擋，現在一次列完再停。A21（`--rebuild-dates`）留在 CLI：它是 dataset 與 training 共用的旗標檢查；排在 `config_errors` 之後，所以「同一月兩種寫法」（A26）仍先報。`model_version` 改在 Spark 啟動前算：只讀設定檔，沒有理由等。
+> - 注入重審的結果：`search_id` 不再注入，node 用 `_search_id(parameters)` 自己算，log 照樣印出來。算出的值跟以前 CLI 算的相同：CLI 雜湊 `parameters_training.yaml` 的 `training:`，node 雜湊全部參數檔合併後的 `training:`，而 `conf/` 與 `examples/ad/conf/` 只有 `parameters_training.yaml` 寫 `training:`（grep 確認）。部署若在別的參數檔也寫 `training:` 鍵，node 算的會多含那些鍵，是比較保守的一邊（多開一個新搜尋，不會混到別人的 trial）。其餘注入都留著，node 自己看不到：命令列的 `--fresh-hpo`、`--rebuild-dates`，兩個版本 ID、`model_version`、`snap_date` 佔位（catalog 解析路徑要用），dataset 那版的 test ratio（A54）。快取來源表只在 training 的指令裡算：CLI 用這次的版本 ID 解析 catalog，再呼叫 `cache_sources.inject_cache_source_tables`；`_execute_pipeline` 不再呼叫它，別的 pipeline 的 `parameters` 裡不再有 `_cache_source_tables`（`tests/test_cli.py` 的 `TestCacheSourceTablesAreTrainingsAlone`）。
+> - 沒搬的：runtime 參數的組法留在 CLI，dataset 的指令也是自己組；`_REBUILD_TARGET_NODES` 是切片警告用的，跟 inference 的同類常數放在一起。
+
 ## 決定 14　新增機械檢查：pipeline 之間不互相 import，函式庫不 import pipeline
 
 **規則**：`tests/test_core/test_architecture_constraints.py` 加一條掃 import 的檢查：
@@ -461,7 +477,9 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 - 決定 11 在 base 設定加了 `training.hpo_enabled`、`training.fixed_params` 兩個鍵。`training:` 區塊整個進雜湊，新鍵預設也算，所以它也會讓 `model_version` 變一次。兩者若在同一批落地，只變一次。
 - 決定 10 只改快取路徑，不動 `model_version`。
 - 其他決定不改變模型，也不改變 test 預測，不動版本號。實作時若發現某一步其實會改變輸出（例如編碼路徑合併之後 dtype 不同），照決定 9 加 1，並回頭更正本份。
-- `model_version` 變的那一次，`examples/ad/baseline_digest.json` 要重取（它釘住 `model_version`，`run_e2e.sh --compare` 會轉紅）。`docs/operations/user-guides/adding-an-eval-month.md` 的步驟 ③（框架升級之後、重訓之前，這套流程用不了）今天只提 dataset 產物格式版本，要把 training 模型格式版本也加進去。
+- `model_version` 變的那一次，`examples/ad/baseline_digest.json` 要重取（它釘住 `model_version`，`run_e2e.sh --compare` 會轉紅）。
+
+  > **實作註記（2026-09-30，#487）**：決定 11 先落地（決定 9 的 #488 還沒做），所以 `model_version` 這次先變一次，#488 落地時會再變一次。`examples/ad` 的 `run_e2e.sh --compare` 與舊基準只差 `versions.model_version` 一項（`1e9d3c52` → `951b1936`），其餘五層相同；已重取基準。`search_id` 沒變（兩個新鍵不進它，見決定 11 的實作註記）。`docs/operations/user-guides/adding-an-eval-month.md` 的步驟 ③（框架升級之後、重訓之前，這套流程用不了）今天只提 dataset 產物格式版本，要把 training 模型格式版本也加進去。
 
 **相依**：
 - 決定 2、3、4、10、11 都用到決定 1 的介面（評分入口、登記表、「做不到」的例外、原生資料、用給定參數訓練），要排在它之後。

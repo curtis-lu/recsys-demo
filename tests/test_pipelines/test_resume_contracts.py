@@ -103,6 +103,36 @@ RESUME_CONTRACTS = {
             "cache_test_model_input",
         },
     },
+    # hpo_enabled: false builds a different pipeline (ADR-0030 decision 11),
+    # so it gets its own contract, as --only-test-months does for dataset.
+    # The fit on fixed parameters hands on the three landed outputs the search
+    # does, so every resume point after it costs what it costs above.
+    ("training", (("hpo_enabled", False),)): {
+        "compute_feature_statistics": {
+            "cache_train_model_input",
+            "cache_test_model_input",
+        },
+        "compute_test_metrics": set(),
+        "select_shap_population": set(),
+        # Retraining the final model does not fit again: best_params,
+        # best_iteration and hpo_best_model are landed. Un-land one and
+        # train_with_fixed_params shows up here.
+        "finalize_model": {
+            "select_features",
+            "cache_train_model_input",
+            "cache_train_dev_model_input",
+            "cache_test_model_input",
+        },
+        # Re-fitting pulls back what builds the .bin inputs, and never a val
+        # copy: this DAG has none.
+        "train_with_fixed_params": {
+            "select_features",
+            "cache_train_model_input",
+            "cache_train_dev_model_input",
+            "cache_test_model_input",
+            "prepare_train_inputs",
+        },
+    },
     ("inference", ()): {
         # score_manifest is memory-only, so resuming at rank re-runs the
         # scoring node. That is cheap *because* scoring resumes: every chunk's

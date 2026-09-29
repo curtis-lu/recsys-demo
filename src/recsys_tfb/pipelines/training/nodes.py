@@ -1,4 +1,4 @@
-"""Thirteen of the training pipeline's twenty nodes; the other seven below.
+"""Fourteen of the training pipeline's node functions; the other seven below.
 
 This module is the home of the pipeline's ML story: a reader who opens it sees
 each decision this pipeline makes about the data, without jumping files. The
@@ -6,10 +6,10 @@ mechanisms those decisions are expressed in live in ``steps/``, one module per
 concern (``local_cache``, ``train_data_cache``, ``predict_months``,
 ``scored_months``, ``search_space``, ``hpo_resume``, ``hpo_scoring``,
 ``fit_params``, ``refit``, ``sample_weights``, ``experiment_log``).
-``cache_sources`` sits beside this file instead, because ``__main__.py`` reads
-it before the pipeline starts. ADR-0014 draws both lines and
-``docs/agents/pipeline-node-design.md`` is where the placement criterion and
-the node-body shape are written down.
+``cache_sources`` and ``run_contract`` sit beside this file instead, because
+``__main__.py`` asks them before the pipeline starts. ADR-0014 draws both
+lines and ``docs/agents/pipeline-node-design.md`` is where the placement
+criterion and the node-body shape are written down.
 
 **Nothing in here is a pure function**, and the import list is the tell: these
 nodes delete cache directories (``shutil.rmtree``), copy Hive partitions onto
@@ -21,8 +21,11 @@ helper.
 
 Where the other seven nodes are
 -------------------------------
-``pipeline.py`` registers 20 nodes. Thirteen are ``def``-ed in this file. The
-seven diagnosis nodes are ``def``-ed under ``recsys_tfb.diagnosis.model``:
+``pipeline.py`` wires 20 nodes, or 19 when ``training.hpo_enabled`` is false:
+that mode drops the val copy and puts ``train_with_fixed_params`` where
+``tune_hyperparameters`` was (ADR-0030 decision 11). Fourteen functions are
+``def``-ed in this file, the two that choose the hyperparameters among them.
+The seven diagnosis nodes are ``def``-ed under ``recsys_tfb.diagnosis.model``:
 
 - ``compute_feature_statistics``  -> ``diagnosis/model/feature_stats.py``
 - ``compute_feature_importance``  -> ``diagnosis/model/importance.py``
@@ -120,6 +123,7 @@ from recsys_tfb.pipelines.training.steps import (
 from recsys_tfb.pipelines.training.steps.fit_params import fit_params
 from recsys_tfb.pipelines.training.steps.hpo_scoring import (
     TrialScorer,
+    fit_stopping_on_train_dev,
     item_support,
     val_composition,
 )
@@ -742,15 +746,14 @@ def prepare_train_inputs(
 # Pipeline nodes
 # ---------------------------------------------------------------------------
 
-def _resolve_search_id(parameters: dict) -> str:
-    """The HPO ``search_id``: injected by ``__main__`` in production.
+def _search_id(parameters: dict) -> str:
+    """The HPO ``search_id``, computed here rather than handed in by the CLI.
 
-    Computed here only for unit tests and direct calls, which have no
-    ``__main__`` to inject it.
+    Everything it hashes is already in ``parameters`` — the ``training:``
+    block and the two dataset version IDs the CLI puts there to resolve the
+    catalog — so an injected copy would only be a second answer that could
+    disagree with this one (node-design rule 15, ADR-0030 decision 13).
     """
-    sid = parameters.get("search_id")
-    if sid:
-        return str(sid)
     return compute_search_id(
         parameters,
         str(parameters.get("base_dataset_version", "")),
@@ -768,8 +771,9 @@ def tune_hyperparameters(
     """Search for optimal hyperparameters using Optuna and return best trial's model.
 
     train + train_dev consumed as the adapter's cached native training data (no
-    rebinning across trials). val read fresh from parquet inside this scope so
-    its pandas DataFrame is freed when the function returns.
+    rebinning across trials). val is read from parquet into a matrix mapped
+    from disk (``io/disk_matrix.py``) — and only when some trial will score on
+    it: a search already finished whose checkpoint loads back reads none.
 
     Returns (best_params, best_iteration, best_model). best_iteration is the
     winning trial's ``ModelAdapter.best_iteration``: the round its train_dev
@@ -789,7 +793,8 @@ def tune_hyperparameters(
     stood in for it would score every trial alike — the first trial wins and
     the search runs to the end without a word (#430). Only the data can tell,
     so it is checked here rather than at CLI entry; the person to find is
-    whoever chose the val window or the ratio.
+    whoever chose the val window or the ratio. It runs with the val read, so a
+    finished search that reads no val does not check it: nothing is scored.
     """
     # HPO and everything after it (finalize_model) is driver-local: Spark
     # sits completely idle from here until predict_and_write_test_predictions,
@@ -826,93 +831,9 @@ def tune_hyperparameters(
             f"allowed: {', '.join(METRIC_NAMES)}"
         )
 
-    # val_model_input holds every query group with a positive plus the share of
-    # the ones without that dataset.val_zero_positive_group_ratio keeps (none
-    # at the default 0; filter_val_keys). No in-pandas re-filter here:
-    # the two ranking objectives skip a group without a positive by
-    # construction, so kept zero-positive groups leave them unchanged
-    # (ADR-0025 decision 3); the two binary-prediction objectives need exactly
-    # those groups, weighted by zero_positive_group_weight (#430, A48).
-    #
-    # Decision — the val matrix is mapped from disk, not held
-    # on the heap. This is the one caller that keeps a matrix for the whole
-    # search rather than for one fit, and in production it is 37-89 GiB on a
-    # 128 GiB driver; mapped, the search's resident memory stops tracking the
-    # val row count and the pages the current predict batch is not touching
-    # are the OS's to reclaim. Unconditional on purpose — a "small enough for
-    # RAM" branch would only ever run at the sizes nobody tests. The file is
-    # unlinked as soon as it is mapped, so cleanup needs nothing from this
-    # node; see `io/disk_matrix.py`, including why a full disk here would
-    # otherwise corrupt the matrix in silence.
-    #
-    # Decision — both objectives read the item column. Tied scores rank by
-    # item, the rule the evaluation metrics use (`utils/ranking.py`, #355), so
-    # a trial's score does not depend on the order the val rows were read in.
-    # The raw values become order-preserving codes once, here: every trial
-    # ranks the same items, and sorting a string per row on each trial is work
-    # the search would repeat for nothing.
-    #
-    # Decision — only a binary-prediction objective reads val's
-    # zero_positive_group_weight. The ranking objectives never weigh a row, and
-    # the column exists only when the val ratio is above 0, which A48
-    # guarantees for these objectives alone.
-    binary_objective = hpo_objective in BINARY_PREDICTION_METRICS
-    with log_step(logger, "extract_features"):
-        extracted = extract_Xy_with_groups(
-            val_parquet_handle, preprocessor_metadata, parameters,
-            with_items=True, with_event=True,
-            with_zero_positive_group_weight=binary_objective,
-            on_disk_label="hpo_val_matrix",
-        )
-    X_v, y_v, groups_v, items_v, event_keys_v = extracted[:5]
-    weights_v = extracted[5] if binary_objective else None
-    items_v = item_sort_codes(items_v)
-    # Same pre-coding, same reason, for each `event` column — the list is
-    # empty unless the deployment declares the role, so a deployment without
-    # one pays nothing and ranks exactly as it did.
-    event_keys_v = [item_sort_codes(k) for k in event_keys_v]
-
-    # Decision — say what a binary-prediction objective will average over,
-    # before the search spends hours on it (#430). The kept group count and
-    # the weight they carry are what a reader needs to judge how steady a
-    # score weighted by 1/r is (ADR-0025 decision 3); the row counts are the
-    # cost lever — every trial predicts every row, and the kept groups are
-    # what r adds. The weight is read off the data, beside the config's r:
-    # training reads the dataset version on disk, which can predate the config.
-    if binary_objective:
-        val = val_composition(groups_v, y_v, weights_v)
-        logger.info(
-            "tune_hyperparameters: %s scores every val row; query groups "
-            "holding a positive=%d (rows=%d); kept query groups holding "
-            "none=%d (rows=%d); dataset.val_zero_positive_group_ratio=%g in "
-            "the config; zero_positive_group_weight on kept groups=%s in the "
-            "val read",
-            hpo_objective, val.groups_with_positive, val.rows_with_positive,
-            val.groups_without, val.rows_without,
-            resolved_zero_positive_group_ratio(parameters, "val"),
-            "/".join(f"{w:g}" for w in val.kept_group_weights) or "none",
-        )
-        if val.rows_with_positive == 0:
-            raise ValueError(
-                f"{hpo_objective}: val holds no positive row, so average "
-                f"precision is undefined and every trial would score alike. "
-                f"Check the val window (dataset.val_snap_dates) and the label "
-                f"source; no trial was run."
-            )
-    # Decision — for the per-item mean, also say which items it covers: only
-    # items with a positive in val enter it, and each weighs the same however
-    # few positives it has (#430). Many items on one or two positives means
-    # the mean is noisy; the docs point such a deployment at the pooled one.
-    if hpo_objective == "macro_per_item_average_precision":
-        support = item_support(items_v, y_v)
-        logger.info(
-            "tune_hyperparameters: items entering the mean=%d of %d; "
-            "positives per entering item: min=%d median=%g",
-            support.entering, support.all, support.fewest, support.median,
-        )
-
     checkpointing = parameters.get("hpo_checkpointing", True)
-    search_id = _resolve_search_id(parameters)
+    search_id = _search_id(parameters)
+    logger.info("search_id: %s", search_id)
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -952,72 +873,184 @@ def tune_hyperparameters(
         )
         remaining = n_trials
 
-    # Optuna only ever sees the float a trial returns, so the winning model has
-    # to be kept on the callable itself — that is what `scorer.best` is for.
-    # Built here rather than above the branch because `study_dir` is one of its
-    # arguments: `None` means "do not checkpoint", and the checkpointing branch
-    # is the only one that sets it.
-    scorer = TrialScorer(
-        train_lgb_handle=train_lgb_handle,
-        train_dev_lgb_handle=train_dev_lgb_handle,
-        # Resolved here, once, against the rows each .bin actually holds. The
-        # binaries carry no weights — their cache path says nothing about
-        # `training.sample_weights`, so a baked vector would outlive the config
-        # that produced it (#318) — and the resolution is the same for every
-        # trial, so it does not belong inside the search loop.
-        train_weights=train_lgb_handle.sample_weights(
-            parameters, preprocessor_metadata),
-        train_dev_weights=train_dev_lgb_handle.sample_weights(
-            parameters, preprocessor_metadata),
-        X_val=X_v, y_val=y_v, groups_val=groups_v, items_val=items_v,
-        event_keys_val=event_keys_v,
-        zero_positive_group_weight_val=weights_v,
-        algorithm=algorithm,
-        # Decision — a trial trains under the stacking the refit uses:
-        # algorithm_params (ranking metric defaulted by the algorithm's rules),
-        # then the seed, then the trial's own sample. One function for both,
-        # so the hyperparameters reported for the winner are the ones the
-        # final model is trained with.
-        params_for_trial=partial(
-            fit_params, parameters, get_adapter(algorithm).rules),
-        search_space=search_space,
-        hpo_objective=hpo_objective,
-        num_iterations=num_iterations,
-        early_stopping_rounds=early_stopping_rounds,
-        n_trials=n_trials,
-        search_id=search_id,
-        study_dir=study_dir,
-    )
-
-    # Decision — a resumed search inherits the previous run's winner before it
-    # scores anything. Skip this and the first new trial wins by default
-    # (best-so-far starts at -1.0), silently shipping a worse model and
-    # checkpointing over the better one.
-    if ckpt is not None:
-        scorer.adopt_checkpoint(ckpt)
-
-    if remaining > 0:
-        with log_step(logger, "optuna_optimize"):
-            study.optimize(scorer, n_trials=remaining)
-    else:
-        logger.info("HPO target already met (done>=%d); skipping optimize", n_trials)
-
-    # last-resort: study has trials but no usable checkpoint model — refit best_params once.
-    if scorer.best["model"] is None:
-        logger.warning(
-            "No usable best model from memory/checkpoint; "
-            "refitting study.best_params once (last-resort recovery)"
+    # Decision — val is read only when some trial will score on it (ADR-0030
+    # decision 12, item 1). A search that already ran every trial and whose
+    # best model loads back from the checkpoint scores nothing: its winner is
+    # the checkpoint's. Every other path reads val, the last resort below
+    # included — it re-runs the best trial, and that trial is scored like any
+    # other. This is the node's largest read (a 37-89 GiB mapped matrix in
+    # production), and the run that skips it is an ordinary one: a finished
+    # search run again because a later node failed.
+    if ckpt is not None and remaining == 0:
+        logger.info(
+            "HPO target already met (done>=%d) and the checkpoint loads; "
+            "val is not read", n_trials,
         )
-        study.enqueue_trial(study.best_params)
-        with log_step(logger, "last_resort_refit"):
-            study.optimize(scorer, n_trials=1)
+        best = {
+            key: ckpt[key] for key in ("score", "model", "iteration", "params")
+        }
+    else:
+        # val_model_input holds every query group with a positive plus the
+        # share of the ones without that dataset.val_zero_positive_group_ratio
+        # keeps (none at the default 0; filter_val_keys). No in-pandas
+        # re-filter here: the two ranking objectives skip a group without a
+        # positive by construction, so kept zero-positive groups leave them
+        # unchanged (ADR-0025 decision 3); the two binary-prediction objectives
+        # need exactly those groups, weighted by zero_positive_group_weight
+        # (#430, A48).
+        #
+        # Decision — the val matrix is mapped from disk, not held on the heap.
+        # This is the one caller that keeps a matrix for the whole search
+        # rather than for one fit, and in production it is 37-89 GiB on a 128
+        # GiB driver; mapped, the search's resident memory stops tracking the
+        # val row count and the pages the current predict batch is not touching
+        # are the OS's to reclaim. Unconditional on purpose — a "small enough
+        # for RAM" branch would only ever run at the sizes nobody tests. The
+        # file is unlinked as soon as it is mapped, so cleanup needs nothing
+        # from this node; see `io/disk_matrix.py`, including why a full disk
+        # here would otherwise corrupt the matrix in silence.
+        #
+        # Decision — both objectives read the item column. Tied scores rank by
+        # item, the rule the evaluation metrics use (`utils/ranking.py`, #355),
+        # so a trial's score does not depend on the order the val rows were
+        # read in. The raw values become order-preserving codes once, here:
+        # every trial ranks the same items, and sorting a string per row on
+        # each trial is work the search would repeat for nothing.
+        #
+        # Decision — only a binary-prediction objective reads val's
+        # zero_positive_group_weight. The ranking objectives never weigh a row,
+        # and the column exists only when the val ratio is above 0, which A48
+        # guarantees for these objectives alone.
+        binary_objective = hpo_objective in BINARY_PREDICTION_METRICS
+        with log_step(logger, "extract_features"):
+            extracted = extract_Xy_with_groups(
+                val_parquet_handle, preprocessor_metadata, parameters,
+                with_items=True, with_event=True,
+                with_zero_positive_group_weight=binary_objective,
+                on_disk_label="hpo_val_matrix",
+            )
+        X_v, y_v, groups_v, items_v, event_keys_v = extracted[:5]
+        weights_v = extracted[5] if binary_objective else None
+        items_v = item_sort_codes(items_v)
+        # Same pre-coding, same reason, for each `event` column — the list is
+        # empty unless the deployment declares the role, so a deployment
+        # without one pays nothing and ranks exactly as it did.
+        event_keys_v = [item_sort_codes(k) for k in event_keys_v]
 
-    best_params = scorer.best["params"] or study.best_params
-    best_model = scorer.best["model"]
-    best_iteration = scorer.best["iteration"]
+        # Decision — say what a binary-prediction objective will average over,
+        # before the search spends hours on it (#430). The kept group count and
+        # the weight they carry are what a reader needs to judge how steady a
+        # score weighted by 1/r is (ADR-0025 decision 3); the row counts are
+        # the cost lever — every trial predicts every row, and the kept groups
+        # are what r adds. The weight is read off the data, beside the config's
+        # r: training reads the dataset version on disk, which can predate the
+        # config.
+        if binary_objective:
+            val = val_composition(groups_v, y_v, weights_v)
+            logger.info(
+                "tune_hyperparameters: %s scores every val row; query groups "
+                "holding a positive=%d (rows=%d); kept query groups holding "
+                "none=%d (rows=%d); dataset.val_zero_positive_group_ratio=%g in "
+                "the config; zero_positive_group_weight on kept groups=%s in the "
+                "val read",
+                hpo_objective, val.groups_with_positive, val.rows_with_positive,
+                val.groups_without, val.rows_without,
+                resolved_zero_positive_group_ratio(parameters, "val"),
+                "/".join(f"{w:g}" for w in val.kept_group_weights) or "none",
+            )
+            if val.rows_with_positive == 0:
+                raise ValueError(
+                    f"{hpo_objective}: val holds no positive row, so average "
+                    f"precision is undefined and every trial would score alike. "
+                    f"Check the val window (dataset.val_snap_dates) and the label "
+                    f"source; no trial was run."
+                )
+        # Decision — for the per-item mean, also say which items it covers:
+        # only items with a positive in val enter it, and each weighs the same
+        # however few positives it has (#430). Many items on one or two
+        # positives means the mean is noisy; the docs point such a deployment
+        # at the pooled one.
+        if hpo_objective == "macro_per_item_average_precision":
+            support = item_support(items_v, y_v)
+            logger.info(
+                "tune_hyperparameters: items entering the mean=%d of %d; "
+                "positives per entering item: min=%d median=%g",
+                support.entering, support.all, support.fewest, support.median,
+            )
+
+        # Optuna only ever sees the float a trial returns, so the winning model
+        # has to be kept on the callable itself — that is what `scorer.best` is
+        # for. Built after the checkpointing branch because `study_dir` is one
+        # of its arguments: `None` means "do not checkpoint", and that branch
+        # is the only one that sets it.
+        scorer = TrialScorer(
+            train_lgb_handle=train_lgb_handle,
+            train_dev_lgb_handle=train_dev_lgb_handle,
+            # Resolved here, once, against the rows each .bin actually holds.
+            # The binaries carry no weights — their cache path says nothing
+            # about `training.sample_weights`, so a baked vector would outlive
+            # the config that produced it (#318) — and the resolution is the
+            # same for every trial, so it does not belong inside the search
+            # loop.
+            train_weights=train_lgb_handle.sample_weights(
+                parameters, preprocessor_metadata),
+            train_dev_weights=train_dev_lgb_handle.sample_weights(
+                parameters, preprocessor_metadata),
+            X_val=X_v, y_val=y_v, groups_val=groups_v, items_val=items_v,
+            event_keys_val=event_keys_v,
+            zero_positive_group_weight_val=weights_v,
+            algorithm=algorithm,
+            # Decision — a trial trains under the stacking the refit uses:
+            # algorithm_params (ranking metric defaulted by the algorithm's
+            # rules), then the seed, then the trial's own sample. One function
+            # for both, so the hyperparameters reported for the winner are the
+            # ones the final model is trained with.
+            params_for_trial=partial(
+                fit_params, parameters, get_adapter(algorithm).rules),
+            search_space=search_space,
+            hpo_objective=hpo_objective,
+            num_iterations=num_iterations,
+            early_stopping_rounds=early_stopping_rounds,
+            n_trials=n_trials,
+            search_id=search_id,
+            study_dir=study_dir,
+        )
+
+        # Decision — a resumed search inherits the previous run's winner before
+        # it scores anything. Skip this and the first new trial wins by default
+        # (best-so-far starts at -1.0), silently shipping a worse model and
+        # checkpointing over the better one.
+        if ckpt is not None:
+            scorer.adopt_checkpoint(ckpt)
+
+        if remaining > 0:
+            with log_step(logger, "optuna_optimize"):
+                study.optimize(scorer, n_trials=remaining)
+        else:
+            logger.info(
+                "HPO target already met (done>=%d); skipping optimize",
+                n_trials,
+            )
+
+        # last-resort: study has trials but no usable checkpoint model — refit
+        # best_params once.
+        if scorer.best["model"] is None:
+            logger.warning(
+                "No usable best model from memory/checkpoint; "
+                "refitting study.best_params once (last-resort recovery)"
+            )
+            study.enqueue_trial(study.best_params)
+            with log_step(logger, "last_resort_refit"):
+                study.optimize(scorer, n_trials=1)
+
+        best = scorer.best
+
+    best_params = best["params"] or study.best_params
+    best_model = best["model"]
+    best_iteration = best["iteration"]
     logger.info(
         "Best trial score (%s): %.4f, best_iteration: %d, params: %s",
-        hpo_objective, scorer.best["score"], best_iteration, best_params,
+        hpo_objective, best["score"], best_iteration, best_params,
     )
 
     # HPO search diagnostics: a best-effort side output derived from the local
@@ -1044,6 +1077,74 @@ def tune_hyperparameters(
         logger.warning("HPO diagnostics failed; training continues", exc_info=True)
 
     return best_params, best_iteration, best_model
+
+
+def train_with_fixed_params(
+    train_lgb_handle,
+    train_dev_lgb_handle,
+    preprocessor_metadata: dict,
+    parameters: dict,
+) -> tuple[dict, int, ModelAdapter]:
+    """Train one model on ``training.fixed_params``: what the DAG runs in
+    place of ``tune_hyperparameters`` when ``training.hpo_enabled`` is false
+    (ADR-0030 decision 11).
+
+    Hands on the same three things the search does — ``best_params`` (the
+    fixed params, where the search hands on the winning trial's sample),
+    ``best_iteration`` and the fitted model — so ``finalize_model`` and
+    everything after it run unchanged, both ``final_model_strategy`` values
+    included: the refit stacks ``best_params`` exactly as it stacks a trial's.
+
+    The fit is one trial's in everything but the choosing, so empty
+    ``fixed_params`` means "nothing beyond ``algorithm_params``", not
+    "LightGBM's defaults": the seed, the ranking metric the algorithm's rules
+    fill in, the round cap, early stopping on train_dev and this run's sample
+    weights all still apply. A reserved key in ``fixed_params`` (``seed``,
+    ``objective``, ...) is refused before Spark starts (A58); written here it
+    would be overwritten by, or overwrite, the framework's value in silence.
+
+    Reads no val — the DAG of this mode copies none — and writes nothing: no
+    study, no checkpoint, no search diagnostics. Its three outputs have
+    catalog entries, so ``--from-node finalize_model`` does not train again.
+    """
+    # Same reason, same place as in tune_hyperparameters: from here to
+    # predict_and_write_test_predictions everything is driver-local, and an
+    # idle application gets reclaimed by the cluster.
+    release_spark_session(parameters)
+
+    training_params = parameters["training"]
+    # Decision — say which settings this mode leaves unread. Both still sit in
+    # the config and still move model_version (hashing them is the safe side:
+    # a version rule with conditions is where keys get missed), so a reader
+    # comparing two runs needs to know they did nothing here.
+    logger.info(
+        "train_with_fixed_params: training.hpo_enabled is false, so "
+        "training.search_space and training.n_trials are not used and val is "
+        "not read",
+    )
+    fixed_params = dict(training_params.get("fixed_params") or {})
+    logger.info("train_with_fixed_params: fixed_params=%s", fixed_params)
+
+    adapter = get_adapter(configured_algorithm(parameters))
+    # Decision — one fit, trained the way one trial is: algorithm_params
+    # (ranking metric defaulted by the algorithm's rules), then the seed, then
+    # fixed_params where the trial's sample would be; training.num_iterations
+    # caps the rounds and early stopping reads train_dev. One function for the
+    # trial and for this, so a config switched between the two modes differs
+    # only in how the hyperparameters were chosen.
+    adapter = fit_stopping_on_train_dev(
+        adapter, train_lgb_handle, train_dev_lgb_handle,
+        train_weights=train_lgb_handle.sample_weights(
+            parameters, preprocessor_metadata),
+        train_dev_weights=train_dev_lgb_handle.sample_weights(
+            parameters, preprocessor_metadata),
+        params=fit_params(parameters, adapter.rules, fixed_params),
+        num_iterations=training_params.get("num_iterations", 500),
+        early_stopping_rounds=training_params.get("early_stopping_rounds", 50),
+    )
+    logger.info(
+        "train_with_fixed_params: best_iteration=%d", adapter.best_iteration)
+    return fixed_params, adapter.best_iteration, adapter
 
 
 def finalize_model(

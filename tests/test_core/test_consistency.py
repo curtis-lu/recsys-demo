@@ -4636,6 +4636,111 @@ class TestHpoObjectivePopulationA48:
                 _objective_params("pooled_average_precision"))
         assert "A48" in str(exc.value)
 
+    @pytest.mark.parametrize("objective", _BINARY_OBJECTIVES)
+    def test_skipping_hpo_reads_no_val_so_nothing_to_guard(self, objective):
+        """ADR-0030 decision 11: with HPO skipped the objective scores no val
+        row, so the population it would have scored cannot be wrong."""
+        from recsys_tfb.core.consistency import hpo_objective_population_errors
+
+        params = _objective_params(objective)
+        params["training"]["hpo_enabled"] = False
+        assert hpo_objective_population_errors(params) == []
+
+    @pytest.mark.parametrize("value", [True, "false", 0, None])
+    def test_only_a_literal_false_skips_the_guard(self, value):
+        """Anything else is a search, or a typo A58 names at the training
+        entry; guessing it meant "skip" would silence A48 for a run that
+        still searches."""
+        from recsys_tfb.core.consistency import hpo_objective_population_errors
+
+        params = _objective_params("pooled_average_precision")
+        params["training"]["hpo_enabled"] = value
+        assert len(hpo_objective_population_errors(params)) == 1
+
+
+from recsys_tfb.core.consistency import (
+    FIXED_PARAMS_RESERVED_KEYS,
+    hpo_enabled,
+    skip_hpo_param_errors,
+)
+
+
+class TestHpoEnabled:
+    def test_absent_means_search(self):
+        assert hpo_enabled({}) is True
+        assert hpo_enabled({"training": {}}) is True
+
+    def test_only_a_literal_false_skips(self):
+        assert hpo_enabled({"training": {"hpo_enabled": False}}) is False
+        for value in (True, "false", 0, None):
+            assert hpo_enabled({"training": {"hpo_enabled": value}}) is True
+
+
+class TestSkipHpoParamsA58:
+    """ADR-0030 decision 11: the two keys of the skip-HPO mode."""
+
+    def test_base_shape_is_clean(self):
+        assert skip_hpo_param_errors({"training": {
+            "hpo_enabled": False, "fixed_params": {"learning_rate": 0.05},
+        }}) == []
+        assert skip_hpo_param_errors({"training": {
+            "hpo_enabled": True, "fixed_params": {},
+        }}) == []
+
+    def test_absent_keys_are_clean(self):
+        assert skip_hpo_param_errors({}) == []
+        assert skip_hpo_param_errors({"training": {}}) == []
+
+    def test_fixed_params_left_blank_is_empty(self):
+        """``fixed_params:`` over commented-out lines loads as null; it means
+        what an empty mapping means, so it is not a mistake to report."""
+        assert skip_hpo_param_errors({"training": {"fixed_params": None}}) == []
+
+    @pytest.mark.parametrize("value", ["false", 0, 1, None, "no"])
+    def test_hpo_enabled_must_be_a_bool(self, value):
+        """``"false"`` would read as a search: only a literal false skips."""
+        errs = skip_hpo_param_errors({"training": {"hpo_enabled": value}})
+        assert len(errs) == 1
+        assert "A58" in errs[0] and "training.hpo_enabled" in errs[0]
+
+    @pytest.mark.parametrize("value", [["learning_rate"], "learning_rate=0.1", 3])
+    def test_fixed_params_must_be_a_mapping(self, value):
+        errs = skip_hpo_param_errors({"training": {"fixed_params": value}})
+        assert len(errs) == 1
+        assert "A58" in errs[0] and "training.fixed_params" in errs[0]
+
+    def test_fixed_params_keys_must_be_names(self):
+        errs = skip_hpo_param_errors({"training": {"fixed_params": {1: 0.1}}})
+        assert len(errs) == 1
+        assert "A58" in errs[0]
+
+    @pytest.mark.parametrize("key", sorted(FIXED_PARAMS_RESERVED_KEYS))
+    def test_every_reserved_key_is_rejected_by_name(self, key):
+        errs = skip_hpo_param_errors(
+            {"training": {"fixed_params": {key: 1, "learning_rate": 0.1}}})
+        assert len(errs) == 1
+        assert "A58" in errs[0] and repr(key) in errs[0]
+
+    def test_the_reserved_set_is_the_one_the_adr_names(self):
+        assert FIXED_PARAMS_RESERVED_KEYS == {
+            "objective", "metric", "seed", "feature_pre_filter",
+            "num_iterations", "early_stopping_rounds",
+        }
+
+    def test_reserved_keys_are_rejected_in_either_mode(self):
+        """A reserved key is wrong the day it is written, not the day HPO is
+        switched off; waiting would let the mistake sit in the config."""
+        errs = skip_hpo_param_errors({"training": {
+            "hpo_enabled": True, "fixed_params": {"seed": 7},
+        }})
+        assert len(errs) == 1
+
+    def test_collects_every_mistake_in_one_pass(self):
+        errs = skip_hpo_param_errors({"training": {
+            "hpo_enabled": "no", "fixed_params": {"objective": "binary"},
+        }})
+        assert len(errs) == 2
+
 
 class TestResolvedZeroPositiveGroupRatio:
     def test_absent_keys_resolve_to_todays_behaviour(self):

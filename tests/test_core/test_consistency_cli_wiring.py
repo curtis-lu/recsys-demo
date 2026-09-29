@@ -3,6 +3,18 @@
 import inspect
 
 from recsys_tfb import __main__ as m
+from recsys_tfb.pipelines.training import run_contract as training_contract
+
+
+def _asked_by_training_before_spark(call: str) -> None:
+    """A training-only check (ADR-0030 decision 13): collected by
+    ``run_contract.config_errors``, which the training command asks before
+    the Spark cold start. Source inspection, for A22's reason below."""
+    assert call in inspect.getsource(training_contract.config_errors)
+    src = inspect.getsource(m.training)
+    assert src.index("training_contract.config_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "training's config checks must fail before the Spark cold start"
 
 
 def test_load_config_calls_validate_config_consistency():
@@ -191,11 +203,7 @@ def test_a26_wired_into_training_command_before_spark():
         validate_config_consistency
     ), "A26 must stay off the global aggregator (#158 precedent)"
 
-    src = inspect.getsource(m.training)
-    assert "duplicate_test_month_errors(params)" in src
-    assert src.index("duplicate_test_month_errors(") < src.index(
-        "get_or_create_spark_session("
-    ), "A26 must fail before the Spark cold start, like A21/A23/A24"
+    _asked_by_training_before_spark("duplicate_test_month_errors(parameters)")
 
 
 def test_a36_wired_into_training_command_before_spark():
@@ -208,11 +216,7 @@ def test_a36_wired_into_training_command_before_spark():
         validate_config_consistency
     ), "A36 must stay off the global aggregator (#158 precedent)"
 
-    src = inspect.getsource(m.training)
-    assert "missing_test_month_errors(params)" in src
-    assert src.index("missing_test_month_errors(") < src.index(
-        "get_or_create_spark_session("
-    ), "A36 must fail before the Spark cold start, like A21/A23/A24/A26"
+    _asked_by_training_before_spark("missing_test_month_errors(parameters)")
 
 
 
@@ -227,11 +231,21 @@ def test_a57_wired_into_training_command_before_spark():
         validate_config_consistency
     ), "A57 must stay off the global aggregator (#158 precedent)"
 
-    src = inspect.getsource(m.training)
-    assert "training_algorithm_errors(params)" in src
-    assert src.index("training_algorithm_errors(") < src.index(
-        "get_or_create_spark_session("
-    ), "A57 must fail before the Spark cold start, like A26/A36/A53"
+    _asked_by_training_before_spark("training_algorithm_errors(parameters)")
+
+
+def test_a58_wired_into_training_command_before_spark():
+    # ADR-0030 decision 11: a reserved key in fixed_params, or a non-bool
+    # hpo_enabled, stops the run before the cold start — a "false" string
+    # would otherwise search for hours. Off the aggregator for A57's reason.
+    # Behavioural half: TestSkipHpoParamsA58 in test_consistency.py, and
+    # test_a58_stops_training_before_spark in test_cli.py.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "skip_hpo_param_errors" not in inspect.getsource(
+        validate_config_consistency
+    ), "A58 must stay off the global aggregator (#158 precedent)"
+    _asked_by_training_before_spark("skip_hpo_param_errors(parameters)")
 
 
 def test_a53_wired_into_training_command_before_spark():
@@ -245,18 +259,16 @@ def test_a53_wired_into_training_command_before_spark():
         validate_config_consistency
     ), "A53 must stay off the global aggregator (#158 precedent)"
 
-    src = inspect.getsource(m.training)
-    assert "scoring_param_errors(params)" in src
-    assert src.index("scoring_param_errors(") < src.index(
-        "get_or_create_spark_session("
-    ), "A53 must fail before the Spark cold start, like A26/A36"
+    _asked_by_training_before_spark("scoring_param_errors(parameters)")
 
 def test_a26_is_checked_before_a21():
     # A21 resolves --rebuild-dates against dataset.test_snap_dates. If the
     # month is spelled two ways, "is this flag value a configured month" has
     # two different answers, so the ambiguity should be reported first.
     src = inspect.getsource(m.training)
-    assert src.index("duplicate_test_month_errors(") < src.index(
+    assert "duplicate_test_month_errors(" in inspect.getsource(
+        training_contract.config_errors)
+    assert src.index("training_contract.config_errors(") < src.index(
         "resolved_rebuild_dates("
     )
 
@@ -394,23 +406,19 @@ def test_a39_wired_into_training_command_before_spark():
     # A39 needs the resolved catalog, which the aggregator never sees, so like
     # A28 it lives on the training command. Source inspection for A22's
     # reason; the behavioural half is TestOptionalRoleColumnsDeclaredA39.
-    src = inspect.getsource(m.training)
-    assert "optional_role_columns_declared_errors(" in src
-    assert src.index("optional_role_columns_declared_errors(") < src.index(
-        "get_or_create_spark_session("
-    ), "A39 must fail before the Spark cold start, like A28"
+    _asked_by_training_before_spark("optional_role_columns_declared_errors(")
 
 
 def test_a39_reads_the_same_catalog_entry_as_a28():
     # One read, both predicates: an operator missing an entity column and an
     # event column should fix one `columns:` list once, not learn about the
     # second only after fixing the first.
-    src = inspect.getsource(m.training)
+    src = inspect.getsource(training_contract.config_errors)
     # The catalog is read once into a variable both predicates are handed.
     # Asserting the shared name rather than two `get_dataset` calls is what
     # makes a second, independently-read copy fail here.
     assert src.count("getattr(") == 1, "the catalog entry is read once"
-    assert src.count("gate_declared") >= 3, (
+    assert src.count("declared, TEST_PREDICTIONS") >= 2, (
         "both A28 and A39 must be handed that one read"
     )
 
@@ -478,12 +486,8 @@ def test_a48_reaches_the_global_aggregator():
 def test_a45_reads_the_catalog_entry_a28_reads_before_spark():
     # Needs the resolved catalog (A28/A39's placement) and must be handed the
     # same single read, so one `columns:` edit fixes all three.
-    src = inspect.getsource(m.training)
-    call = "zero_positive_group_weight_declared_errors(\n            params, gate_declared,"
-    assert call in src
-    assert src.index("zero_positive_group_weight_declared_errors(") < src.index(
-        "get_or_create_spark_session("
-    ), "A45 must fail before the Spark cold start, like A28"
+    _asked_by_training_before_spark(
+        "zero_positive_group_weight_declared_errors(\n            parameters, declared,")
 
 
 def test_a51_wired_into_evaluation_command_before_spark():

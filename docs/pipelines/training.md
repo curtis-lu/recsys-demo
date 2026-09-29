@@ -42,7 +42,7 @@ LightGBM 的 train/train-dev 會轉成可重用的 `.bin`，但這是目前 adap
 5. **Driver-local 空間足夠**：各 split 會從 Hive／HDFS 複製到 `cache.root`，模型、HPO study、診斷與 checkpoint 也會寫入 driver 本機檔案系統。**HPO 另外要 `data/_scratch` 放得下整份 val 矩陣**（`val 列數 × 特徵欄數 × itemsize`，生產規模 37～89 GiB）；不足時 `tune_hyperparameters` 會在建立前 raise，訊息含需求量、可用量與落點。檔案在映射完成當下就 unlink，跑完不留（見 §9.2）。
 6. **Driver 記憶體足夠**：模型訓練、部分指標計算及診斷會將資料讀入 driver；應依資料量控制 feature 數、HPO 規模與 SHAP／feature statistics 抽樣上限。
 
-CLI 啟動時會先執行設定一致性檢查，包括 ranking objective 與 metric 是否相容、HPO search space 格式、sample weight key 的欄位與段數、未知 item、feature selection 是否錯誤排除 item，以及 `hpo_objective` 與 `final_model_strategy` 是否為合法值（A25——打錯的話原本要等整輪 HPO 跑完才會炸），和選了 `pooled_average_precision`／`macro_per_item_average_precision` 時 val 有沒有留下沒有正例的 query group（A48，見 §3.2）。另外五項也在起 Spark 前由 training 指令擋下：`training.algorithm` 不是已註冊的演算法（A57，訊息列出可用的名字）、`dataset.test_snap_dates` 沒寫或是空清單（A36——原本要等整輪 HPO 跑完、到預測那一步才炸，訊息也沒提到這個設定）、`dataset.test_snap_dates` 用兩種拼法指到同一個月（A26）、`test_metrics` 區塊寫錯（A53，見 §3.7），以及 `training_eval_predictions` 這筆 catalog 條目沒有把 `schema.entity` 的每一欄都寫進 `columns:`（A28——Hive 寫入只留宣告過的欄，少宣告的那一欄會被靜默丟掉，寫出來的每一列都變成在指別的東西）。檢查分幾層、各在什麼時候擋下、哪些擋不住：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
+CLI 啟動時會先執行設定一致性檢查，包括 ranking objective 與 metric 是否相容、HPO search space 格式、sample weight key 的欄位與段數、未知 item、feature selection 是否錯誤排除 item，以及 `hpo_objective` 與 `final_model_strategy` 是否為合法值（A25——打錯的話原本要等整輪 HPO 跑完才會炸），和選了 `pooled_average_precision`／`macro_per_item_average_precision` 時 val 有沒有留下沒有正例的 query group（A48，見 §3.2）。另外六項也在起 Spark 前由 training 指令擋下，一次列完：`training.algorithm` 不是已註冊的演算法（A57，訊息列出可用的名字）、跳過 HPO 的兩個鍵寫錯（A58，見 §3.2）、`dataset.test_snap_dates` 沒寫或是空清單（A36——原本要等整輪 HPO 跑完、到預測那一步才炸，訊息也沒提到這個設定）、`dataset.test_snap_dates` 用兩種拼法指到同一個月（A26）、`test_metrics` 區塊寫錯（A53，見 §3.7），以及 `training_eval_predictions` 這筆 catalog 條目沒有把 `schema.entity` 的每一欄都寫進 `columns:`（A28——Hive 寫入只留宣告過的欄，少宣告的那一欄會被靜默丟掉，寫出來的每一列都變成在指別的東西）。檢查分幾層、各在什麼時候擋下、哪些擋不住：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
 這些檢查可避免明顯設定錯誤進入長時間訓練，但不能判斷資料是否有 target leakage、日期切分是否符合業務觀察窗，或某個設定是否在統計上合理。
 
 ## 3. 設定方式
@@ -150,6 +150,38 @@ training:
 目前不支援 `when` 條件式空間或字串 expression bounds，傳入時會在 CLI 入口 fail-fast。
 
 `algorithm_params.metric` 與 `hpo_objective` 是不同層次的設定：前者在單一 trial 內搭配 train-dev 做 early stopping，後者使用 val 比較所有 trials。
+
+#### 不跑 HPO：`hpo_enabled: false`
+
+已經知道要用哪組超參數時，可以跳過搜尋，直接訓練一次：
+
+```yaml
+training:
+  hpo_enabled: false
+  fixed_params:
+    learning_rate: 0.05
+    num_leaves: 31
+```
+
+這時 pipeline 少兩個 node、換一個 node（`--list-nodes` 看得到）：
+
+| HPO 模式（預設） | 不跑 HPO |
+|---|---|
+| `cache_val_model_input` 把 val 複製到本機 | 沒有這一步：val 不複製、不讀 |
+| `tune_hyperparameters` 跑 `n_trials` 個 trial，用 val 挑最好的 | `train_with_fixed_params` 用 `fixed_params` 訓練一次 |
+
+之後的 node 全部一樣：兩者交出同樣的 `best_params`、`best_iteration`、`hpo_best_model`，`final_model_strategy` 兩種都能用。
+
+**那一次訓練跟 HPO 的一個 trial 做法完全相同**，只是超參數不是抽出來的，是 `fixed_params`：參數依序疊 `algorithm_params` → `random_seed` → `fixed_params`；迭代上限是 `num_iterations`；用 train-dev 早停，容忍 `early_stopping_rounds` 輪；`sample_weights` 照樣套在 train 與 train-dev 上。所以 `fixed_params` 空著（`{}`）不等於「全用 LightGBM 預設值」：上面這些照樣生效，排序目標沒寫 metric 時也照樣補 `ndcg`。
+
+| 設定 | 在這個模式下 |
+|---|---|
+| `fixed_params` | 用它。不得寫 `objective`、`metric`、`seed`、`feature_pre_filter`、`num_iterations`、`early_stopping_rounds`：這些由別的鍵或框架決定，寫在這裡不是被蓋掉，就是反過來蓋掉框架的值。開跑前擋（A58） |
+| `search_space`、`n_trials` | 不用（log 會說）。仍在 `model_version` 的雜湊裡，`search_space` 的格式檢查（A8）照擋 |
+| `hpo_objective` | 照用：它仍是選版指標的預設，也決定 test 要算哪些指標（§3.7）。只為搜尋存在的 A48（二元預測類目標要 val 留下無正例的組）不擋，因為 val 不讀 |
+| `--fresh-hpo` | 沒有搜尋可清，印一行警告後照跑 |
+
+`hpo_enabled` 只接受 `true`、`false`（A58）。兩個鍵都在 `training:` 裡，所以切換模式或改 `fixed_params` 都會換 `model_version`；HPO 模式下改 `fixed_params` 不會換 `search_id`（§7.2），跑到一半的搜尋接得回去。
 
 ### 3.3 最終模型策略
 
@@ -431,7 +463,7 @@ conf 預設的比例是 0，HPO 目標是二元預測類的設定升級後會被
 
 `--from-node` 與 `--only-node` 互斥；`--list-nodes` 也不能與兩者併用。`--rebuild-dates` 與切片旗標可以併用——重算某個月的預測本來就走 `--only-node predict_and_write_test_predictions`；只有當切片把該 node 排除時才會印 `[rebuild] WARNING`——兩種措辭：一步都沒選到是 `had no effect`，選到了「丟舊 cache」那一步卻沒選到預測那一步是 `is only half applied`。
 
-`--dry-run` 與 `--list-nodes` 不會執行 nodes、寫模型或建立 manifest，但 CLI 仍會載入設定、初始化 Spark、解析 dataset versions、計算 `model_version`／`search_id`，並查詢 catalog 產物是否存在。
+`--dry-run` 與 `--list-nodes` 不會執行 nodes、寫模型或建立 manifest，但 CLI 仍會載入設定、初始化 Spark、解析 dataset versions、計算 `model_version`，並查詢 catalog 產物是否存在。`search_id` 由 `tune_hyperparameters` 開跑時自己算、印在 log 裡，所以這兩個旗標看不到它。
 
 ### 4.2 完整執行
 
@@ -530,6 +562,7 @@ python -m recsys_tfb training \
 | 模型格式 | `prepare_train_inputs` | train/train-dev handles、preprocessor view | 決定哪些列、什麼順序進快取（排序目標丟無正例組、依組排序；權重不存進去），由 adapter 存成自己的格式；LightGBM 為 `.bin` | train/train-dev model handles |
 | 權重報告 | `compute_sample_weight_report` | train handle、preprocessor | 比對 weight 設定與實際 train 值（node 只回傳診斷，`sample_weight_report.json` 由 catalog 寫出） | `sample_weight_report` |
 | HPO | `tune_hyperparameters` | train/train-dev model handles、val handle | train 訓練、train-dev early stop、val 上以 `hpo_objective` 選模 | `best_params`、`best_iteration`、`hpo_best_model` |
+| 固定參數訓練（`hpo_enabled: false` 時取代上一列，也沒有 `cache_val_model_input`，§3.2） | `train_with_fixed_params` | train/train-dev model handles | 用 `fixed_params` 照一個 trial 的做法訓練一次 | 同上一列 |
 | 最終模型 | `finalize_model` | HPO 產物、train/train-dev handles | 沿用 HPO best 或在 train + train-dev refit | `model` |
 | Test 預測 | `predict_and_write_test_predictions` | model、test handles | 逐月判斷是否需要預測，需要的月份再逐 `(time, item)` partition 預測並寫入 Hive | `training_eval_predictions`、`predict_manifest` |
 | Test 指標 | `compute_test_metrics` | test 預測 | 只讀計分月份，用 Spark 算 mAP、per-item attribution 與 §3.7 要的指標 | `evaluation_results` |
@@ -676,7 +709,7 @@ model-defining training 設定只取 `parameters_training.yaml` 的 `training:` 
 
 ### 7.2 `model_version` 與 `search_id` 對照
 
-`search_id` 用來識別可恢復的 HPO study。它的計算範圍與 `model_version` 幾乎相同，但刻意排除 `training.n_trials`，讓增加 trials 時可延續同一個搜尋。
+`search_id` 用來識別可恢復的 HPO study。它的計算範圍與 `model_version` 幾乎相同，但刻意排除 trial 不會讀的三個鍵：`training.n_trials`（讓增加 trials 時可延續同一個搜尋）、`training.fixed_params` 與 `training.hpo_enabled`（§3.2；搜尋不讀前者，後者在搜尋裡只可能是 `true`）。清單在 `core/versioning.py` 的 `SEARCH_ID_IRRELEVANT_KEYS`。
 
 | 設定或因素 | `model_version` | `search_id` | 說明 |
 |---|:---:|:---:|---|
@@ -688,6 +721,7 @@ model-defining training 設定只取 `parameters_training.yaml` 的 `training:` 
 | `sample_weight_keys`、`sample_weights` | ✓ | ✓ | 改變 train/train-dev 權重 |
 | `hpo_objective` | ✓ | ✓ | 改變 val 上的 trial 選擇方式 |
 | `n_trials` | ✓ |  | 新 model version 可延用相同 HPO study 並補 trials |
+| `hpo_enabled`、`fixed_params` | ✓ |  | 跳過 HPO 時的模型不同；搜尋不讀這兩個鍵（§3.2） |
 | `num_iterations`、`early_stopping_rounds` | ✓ | ✓ | 改變單一 trial 的訓練與停止行為 |
 | `final_model_strategy` | ✓ | ✓ | 目前位於 model-defining block，因此兩者都翻新 |
 | `feature_selection.exclude` | ✓ | ✓ | 改變模型 feature subset |
@@ -717,6 +751,7 @@ model-defining training 設定只取 `parameters_training.yaml` 的 `training:` 
 4. 修改 search space、objective、資料版本、權重等因素時，`search_id` 改變並自動建立新 study。
 5. `--fresh-hpo` 會清除目前 search 的 journal 與 checkpoint，再從 trial 0 開始。
 6. `hpo_checkpointing: false` 時 study 只存在記憶體，程序中斷後無法續跑。
+7. 已完成的 trial 數到了 `n_trials`、而且 checkpoint 的模型讀得回來時，這次不讀 val（生產上是最大的一次讀取），直接交出 checkpoint 的最佳模型。checkpoint 讀不回來時照樣讀 val，拿最佳參數重跑一個 trial（log 印 `last-resort`）。
 
 HPO 恢復要求 `data/models/_hpo` 位於可持久保存的 driver disk。若每次排程取得全新的暫存主機，或該路徑會被清除，checkpoint 機制便無法跨程序生效。
 
@@ -742,6 +777,7 @@ HPO 恢復要求 `data/models/_hpo` 位於可持久保存的 driver disk。若�
 | objective、metric、固定 algorithm params | 新 `model_version` 與 `search_id` | 完整重跑 training |
 | HPO search space、選模指標、iteration 或 early stopping | 新 `model_version` 與 `search_id` | 完整重跑 training |
 | 只增加 `n_trials` | 新 `model_version`，相同 `search_id` | 完整啟動 training，沿用 study 補足 trials |
+| 切換 `hpo_enabled`，或改 `fixed_params` | 新 `model_version`，相同 `search_id` | 完整重跑 training；切回 HPO 模式時，之前跑完的搜尋直接用它的 checkpoint，不再讀 val |
 | feature selection 或 sample weights | 新 `model_version` 與 `search_id` | 不需重建 dataset；完整重跑 training |
 | weight key 新增非既有 model input 欄位 | dataset version 也需更新 | 先加入 `carry_columns` 並重跑 dataset，再 training |
 | final model strategy | 新 `model_version` 與 `search_id` | 完整重跑；目前此設定也會建立新的 HPO search |
@@ -775,6 +811,7 @@ training 版本描述的是模型設定與上游資料身分，不是完整的�
 | `select_shap_population` 讓 training 停下 | 生產資料量下，排名結果的 persist 撐不住（#238 追蹤）；#485 之前這裡只會印 warning | 先把 `diagnostics.shap.quadrant_enabled` 設成 `false` 跑完，再照 #238 量 |
 | 診斷產物是 `{"enabled": true, "supported": false, ...}` | 模型的 adapter 不提供那項能力（`reason` 寫明是哪一項） | 不是設定能修的：換一個提供該能力的 adapter，或接受這項診斷沒有結果 |
 | MLflow 失敗但 training 顯示完成 | `mlflow.strict: false` 為 best-effort 模式 | 檢查 warning 與 tracking URI；需要硬性追蹤時設 `strict: true` |
+| `A58: training.fixed_params sets ...` 或 `A58: training.hpo_enabled=... must be true or false` | `fixed_params` 寫了別的鍵或框架決定的參數，或 `hpo_enabled` 不是布林值（§3.2） | 把那些鍵移回它們的位置（`algorithm_params`、`random_seed`、`training.*`），`hpo_enabled` 寫 `true`／`false` |
 | `A57: training.algorithm=... is not a registered algorithm` | `training.algorithm` 未在 adapter registry 註冊；Spark 啟動前就擋下，訊息列出可用的名字 | 使用目前支援的 `lightgbm`，或先實作並註冊新的 ModelAdapter |
 | 部分重跑後模型、預測與診斷不一致 | `--only-node` 未重跑下游，或 skipped artifact 已過期 | 由較前方 node 接續或執行 full run，重新完成驗收 |
 

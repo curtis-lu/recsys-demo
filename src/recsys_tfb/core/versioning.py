@@ -295,12 +295,29 @@ def compute_model_version(
     return hashlib.sha256(combined.encode()).hexdigest()[:8]
 
 
+#: ``training:`` keys that stay in ``model_version`` but not in ``search_id``,
+#: because no trial reads them — a search whose study is half written must
+#: stay resumable when one changes. ``n_trials`` says how many trials to run,
+#: not what one scores. ``fixed_params`` is what the model trains with when
+#: HPO is skipped, and a search never reads it (ADR-0030 decision 11).
+#: ``hpo_enabled`` can only be ``true`` (written or not) inside a search, so
+#: hashing it would buy nothing and would orphan every search that finished
+#: before the key existed. ``model_version`` still hashes all three: a model
+#: trained without a search is a different model.
+SEARCH_ID_IRRELEVANT_KEYS: frozenset[str] = frozenset({
+    "n_trials",
+    "fixed_params",
+    "hpo_enabled",
+})
+
+
 def compute_search_id(
     params: dict,
     base_dataset_version: str = "",
     train_variant_id: str = "",
 ) -> str:
-    """HPO 搜尋身分：與 model_version 相同的 model-defining 輸入，唯一拿掉 n_trials。
+    """HPO 搜尋身分：與 model_version 相同的 model-defining 輸入，拿掉
+    ``SEARCH_ID_IRRELEVANT_KEYS``。
 
     Keys the resumable Optuna study + best-model checkpoint. 只改 trial 數量
     (n_trials) → search_id 不變 → 可接續/延長；改任何會改變一個 trial 的
@@ -311,7 +328,8 @@ def compute_search_id(
     payload = _model_version_payload(params)  # deep-copies; safe to mutate
     training = payload.get("training")
     if isinstance(training, dict):
-        training.pop("n_trials", None)
+        for key in SEARCH_ID_IRRELEVANT_KEYS:
+            training.pop(key, None)
     canonical = yaml.dump(payload, sort_keys=True, default_flow_style=False)
     parts = ["search_id|", canonical, base_dataset_version, train_variant_id]
     return hashlib.sha256("".join(parts).encode()).hexdigest()[:8]

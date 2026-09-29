@@ -2,9 +2,9 @@
 that table's partitions are laid out on disk.
 
 This module sits at the package root rather than in ``steps/`` because its one
-caller is **outside** this pipeline: ``__main__.py`` calls
-:func:`inject_cache_source_tables` before the ``DataCatalog`` is constructed, so
-the cache nodes see the derived mapping by the time they run. That is the root
+caller is **outside** this pipeline: the training command in ``__main__.py``
+calls :func:`inject_cache_source_tables` before the ``DataCatalog`` is
+constructed, so the cache nodes see the derived mapping by the time they run. That is the root
 vs ``steps/`` criterion in ``docs/agents/pipeline-node-design.md`` rule 8 — a
 module is an outward contract when a src-side caller lives elsewhere — and it
 makes this the training twin of ``pipelines/dataset/month_plans.py``, which is
@@ -50,8 +50,11 @@ def inject_cache_source_tables(parameters: dict, catalog_config: dict) -> None:
 
     No-op (does not write either key) when no cache entries match.
 
-    Called by __main__.py:_execute_pipeline before DataCatalog construction so the
-    cache nodes see the auto-derived mapping at runtime.
+    Called by the training command (``__main__.training``) on its runtime
+    parameters, after it resolves the catalog with this run's version IDs and
+    before the ``DataCatalog`` is built — training's alone, since no other
+    pipeline has a cache node (ADR-0030 decision 13; until then
+    ``_execute_pipeline`` derived the mapping for every pipeline).
     """
     auto: dict[str, str] = {}
     partitions: dict[str, dict[str, list[str]]] = {}

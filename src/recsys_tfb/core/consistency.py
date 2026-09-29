@@ -571,7 +571,9 @@ Layer 1 — config-static (implemented here; aggregated by
   pipeline dropped every val query group holding no positive, so average
   precision would be computed on a population filtered by the label it
   scores — A46's reason, on val instead of test. A ratio A44 rejects is left
-  to A44. Predicate: ``hpo_objective_population_errors``. Aggregated by
+  to A44. Not raised while ``training.hpo_enabled`` is ``false``: the search
+  is skipped and val is neither copied nor read (ADR-0030 decision 11).
+  Predicate: ``hpo_objective_population_errors``. Aggregated by
   ``validate_config_consistency``, unlike A46: the ratio takes effect in the
   dataset pipeline, so the dataset command has to stop too.
 * A49 — ``evaluation.query_filter.drop_all_positive_groups`` (#376, the
@@ -688,6 +690,15 @@ Layer 1 — config-static (implemented here; aggregated by
   unregistered name a second time: it skips its metric half, and keeps its
   query-group half by asking every registered adapter whether the objective
   ranks.
+* A58 — the skip-HPO mode's two keys (ADR-0030 decision 11):
+  ``training.hpo_enabled`` must be a bool when written (only a literal
+  ``false`` skips the search, so ``"false"`` would search for hours), and
+  ``training.fixed_params`` a mapping from parameter names (``null`` means
+  empty) holding none of ``FIXED_PARAMS_RESERVED_KEYS`` — keys another
+  setting or the framework decides, which the fit's stacking would
+  otherwise overwrite in silence or let overwrite the framework's value.
+  Checked in either mode. Predicate: ``skip_hpo_param_errors``. NOT
+  aggregated, for A57's reason: only training reads the keys.
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -698,7 +709,7 @@ window of ``evaluation.snap_date`` and be a time value sample_pool holds there.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
-flags), A22/A46/A51 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53/A57 (config keys whose
+flags), A22/A46/A51 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53/A57/A58 (config keys whose
 harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags), A55 (``--only-test-months`` + the
 metastore). A56 needs the resolved catalog too, but hangs off no single command:
@@ -1895,6 +1906,85 @@ def training_algorithm_errors(parameters: dict) -> list[str]:
     ]
 
 
+def hpo_enabled(parameters: dict) -> bool:
+    """Does this run search hyperparameters (``training.hpo_enabled``,
+    ADR-0030 decision 11).
+
+    Only a literal ``false`` skips the search; absent means search, the
+    behaviour before the key existed. Anything else a search as well — A58
+    names a non-bool at the training entry, and until it does, reading
+    ``"false"`` as "skip" would silence A48 for a run that still searches.
+    """
+    return (parameters.get("training") or {}).get("hpo_enabled", True) is not False
+
+
+#: ``training.fixed_params`` keys another setting or the framework decides
+#: (A58, ADR-0030 decision 11). Written there, each would be overwritten in
+#: silence by a later layer of the stacking (``steps/fit_params.py``,
+#: ``ModelAdapter.train``) or would itself overwrite the framework's value in
+#: silence: ``objective`` and ``metric`` belong to
+#: ``training.algorithm_params`` (the ``.bin`` cache and the group-dropping
+#: policy follow the objective written there, so a second one here would
+#: disagree with them), ``seed`` to ``random_seed``, ``num_iterations`` and
+#: ``early_stopping_rounds`` to the ``training.*`` keys of those names, and
+#: ``feature_pre_filter`` to the LightGBM adapter, which pins it off so a
+#: refit keeps the features the search could split on.
+FIXED_PARAMS_RESERVED_KEYS: frozenset[str] = frozenset({
+    "objective", "metric", "seed", "feature_pre_filter",
+    "num_iterations", "early_stopping_rounds",
+})
+
+
+def skip_hpo_param_errors(parameters: dict) -> list[str]:
+    """A58 — the two keys of the skip-HPO mode (ADR-0030 decision 11).
+
+    ``training.hpo_enabled`` must be a bool when written: the mode is decided
+    by :func:`hpo_enabled`, which reads only a literal ``false`` as "skip",
+    so ``"false"`` or ``0`` would search for hours when the author meant not
+    to, with no error. ``training.fixed_params`` must be a mapping from
+    parameter names; ``null`` (the key over commented-out lines) means empty
+    and is clean. Its keys must not be in :data:`FIXED_PARAMS_RESERVED_KEYS`.
+
+    Checked in either mode: a reserved key is wrong the day it is written,
+    and holding the check back until HPO is switched off would let it sit in
+    the config until then. Returns collect-all error strings; empty means OK.
+    """
+    training = parameters.get("training") or {}
+    errors: list[str] = []
+    if "hpo_enabled" in training and not isinstance(training["hpo_enabled"], bool):
+        errors.append(
+            f"A58: training.hpo_enabled={training['hpo_enabled']!r} must be "
+            f"true or false. Only false skips the search, so any other value "
+            f"runs HPO."
+        )
+    fixed = training.get("fixed_params")
+    if fixed is None:
+        return errors
+    if not isinstance(fixed, dict):
+        errors.append(
+            f"A58: training.fixed_params={fixed!r} must be a mapping from "
+            f"parameter name to value (empty means only "
+            f"training.algorithm_params apply)."
+        )
+        return errors
+    not_names = [k for k in fixed if not isinstance(k, str)]
+    if not_names:
+        errors.append(
+            f"A58: training.fixed_params keys {not_names!r} are not parameter "
+            f"names."
+        )
+    reserved = sorted(k for k in fixed if k in FIXED_PARAMS_RESERVED_KEYS)
+    if reserved:
+        errors.append(
+            f"A58: training.fixed_params sets {', '.join(map(repr, reserved))}, "
+            f"which another setting decides: objective and metric go in "
+            f"training.algorithm_params, seed in random_seed, num_iterations "
+            f"and early_stopping_rounds in training.*, and feature_pre_filter "
+            f"is the framework's. Remove them from fixed_params."
+        )
+    return errors
+
+
 def ranking_objective_conflicts(parameters: dict) -> list[str]:
     """A7 — a ranking objective requires a ranking metric and a query group.
 
@@ -2715,6 +2805,10 @@ def hpo_objective_population_errors(parameters: dict) -> list[str]:
     training = parameters.get("training") or {}
     objective = training.get("hpo_objective")
     if objective not in BINARY_PREDICTION_METRICS:
+        return []
+    # With HPO skipped the objective scores no val row: val is neither copied
+    # nor read (ADR-0030 decision 11), so its population cannot be wrong.
+    if not hpo_enabled(parameters):
         return []
     ds = parameters.get("dataset") or {}
     key = _zero_positive_group_ratio_key("val")

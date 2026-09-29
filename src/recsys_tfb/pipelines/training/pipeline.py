@@ -24,11 +24,22 @@ from recsys_tfb.pipelines.training.nodes import (
     predict_and_write_test_predictions,
     prepare_train_inputs,
     select_features,
+    train_with_fixed_params,
     tune_hyperparameters,
 )
 
 
-def create_pipeline() -> Pipeline:
+def create_pipeline(hpo_enabled: bool = True) -> Pipeline:
+    """The training DAG; ``hpo_enabled`` is the run's mode (ADR-0030
+    decision 11), which the CLI derives from ``training.hpo_enabled``.
+
+    Without a search the DAG has neither the val copy nor the search: one fit
+    on ``training.fixed_params`` stands where ``tune_hyperparameters`` was
+    and hands on the same three outputs, so nothing after it changes. A mode
+    and not a flag each node reads, because otherwise the two would run and
+    do nothing, and ``--list-nodes`` would show steps the run never takes
+    (ADR-0013: a mode chooses the path, a slice chooses where to resume).
+    """
     # finalize_model produces `model` directly. Strategy (hpo_best /
     # refit_on_full) is read from parameters at runtime — not a DAG-shape
     # concern. There is no second model-producing node and no conditional
@@ -58,11 +69,12 @@ def create_pipeline() -> Pipeline:
             inputs=["train_dev_model_input", "parameters"],
             outputs="train_dev_parquet_handle",
         ),
-        Node(
+        # Only the search scores on val, so only its DAG copies it.
+        *([Node(
             cache_val_model_input,
             inputs=["val_model_input", "parameters"],
             outputs="val_parquet_handle",
-        ),
+        )] if hpo_enabled else []),
         Node(
             cache_test_model_input,
             inputs=["test_model_input", "parameters"],
@@ -97,16 +109,28 @@ def create_pipeline() -> Pipeline:
         ),
     )
 
-    nodes.append(
-        Node(
+    # The hyperparameters, chosen by a search or read from the config. Both
+    # nodes hand on the same three names, all landed in the catalog, so
+    # finalize_model and everything after it neither know nor care which ran.
+    if hpo_enabled:
+        choose_hyperparameters = Node(
             tune_hyperparameters,
             inputs=[
                 "train_lgb_handle", "train_dev_lgb_handle",
                 "val_parquet_handle", "preprocessor_view", "parameters",
             ],
             outputs=["best_params", "best_iteration", "hpo_best_model"],
-        ),
-    )
+        )
+    else:
+        choose_hyperparameters = Node(
+            train_with_fixed_params,
+            inputs=[
+                "train_lgb_handle", "train_dev_lgb_handle",
+                "preprocessor_view", "parameters",
+            ],
+            outputs=["best_params", "best_iteration", "hpo_best_model"],
+        )
+    nodes.append(choose_hyperparameters)
 
     nodes.append(
         Node(
@@ -217,8 +241,9 @@ def create_pipeline() -> Pipeline:
             # before log_artifacts uploads the directory. The figure datasets
             # are not inputs (they have no load): in a run that is not cut
             # short, the Runner saves them with the JSON beside them, which
-            # is an input. The HPO search diagnostics are
-            # written by tune_hyperparameters, upstream through best_params.
+            # is an input. The HPO search diagnostics are written by
+            # tune_hyperparameters, upstream through best_params; a run that
+            # skips HPO has none, and uploads whatever the directory holds.
             inputs={
                 "model": "model",
                 "best_params": "best_params",
