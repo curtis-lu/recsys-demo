@@ -61,7 +61,9 @@ def stack_splits(train: tuple, dev: tuple) -> tuple:
     module, the same shift ``steps/hpo_scoring.py`` made in #229. A filter on
     the logger name, rather than on the record name, needs updating.
     """
-    stacked = tuple(np.concatenate([a, b]) for a, b in zip(train, dev))
+    # strict: a tuple one array short would silently drop that array.
+    stacked = tuple(
+        np.concatenate([a, b]) for a, b in zip(train, dev, strict=True))
     log_data_volume(logger, "finalize.y_full", stacked[0])
     return stacked
 

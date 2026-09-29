@@ -1374,8 +1374,12 @@ def extract_X_rows(
     **``labels`` is how this read is checked against the first one.** The
     caller chose ``rows`` from an earlier read of the same parquet
     (:func:`extract_y`, :func:`extract_y_with_groups`); that choice only means
-    anything if both reads see the rows in the same order. pyarrow's ordered
-    scan promises that and nothing here could otherwise tell: a mismatch
+    anything if both reads see the rows in the same order. Two things promise
+    it: ``Dataset.to_batches`` goes through arrow's ``ScanBatches``, whose
+    contract is "the batches will arrive in order" (pyarrow 14.0.1,
+    ``arrow/dataset/scanner.h``), and :func:`~recsys_tfb.io.handles.open_parquet_dataset`
+    orders fragments by path, the determinism other positional readers here
+    already rely on. Nothing else would tell if either broke: a mismatch
     would put every feature row under another row's label and raise nothing.
     So the label column is read again beside the features and has to equal
     ``labels`` — the caller's labels for exactly these rows, in the output

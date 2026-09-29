@@ -201,7 +201,9 @@ ranking 類目標（`lambdarank`、`rank_xendcg`）建 `.bin` 時，每個 split
 | `features_<hash8>` | 特徵欄與順序（含 `training.feature_selection` 的結果） |
 | `weight_keys_<hash8>` | `training.sample_weight_keys`：sidecar 裡存的是這幾欄 |
 
-所以改其中任何一樣，這次跑就會去一個還不存在的目錄，重建一次；舊目錄原封不動留著，**不會自動清**，要手動刪。
+所以改其中任何一樣，這次跑就會去一個還不存在的目錄，重建一次；舊目錄原封不動留著，**不會自動清**，要手動刪。在生產規模上一份約是 LightGBM 分箱後的資料量（§9.1 的 2026-07 外推是 train 約 2.8 GiB），例如試過幾組 `sample_weight_keys`，就會留下幾份。
+
+**「有 `_SUCCESS` 就能用」管得到設定與程式，管不到上游回補。** `train_variant_id` 是從抽樣設定算的，不看資料列；同一份設定下重跑上游、回補了某個月，路徑不會變，舊的 `.bin` 照樣命中——跟旁邊的 parquet 副本是同一個缺口（見 [`pipeline-slicing.md`](../operations/user-guides/pipeline-slicing.md) 的「版本 hash 涵蓋 config，不涵蓋 code」）。回補之後要刪整個 `train_variants/<train_variant_id>/`；只刪 parquet 副本的話，HPO 用的是舊的列，`refit_on_full` 重讀 parquet 用的是新的列。
 
 **從舊版升上來**：#483 之前的快取放在 `train_variants/<train_variant_id>/lgb/<objective>/`（更早還有 `lgb/ranking/`），路徑裡沒有格式版本那一段，新程式不會去讀。第一次跑會重建一次 `.bin`（比 HPO 便宜得多），模型不變；舊的 `lgb/` 目錄可以直接刪。
 
@@ -806,15 +808,14 @@ batch 會被量成像是第二張矩陣。
 
 | | 一份完整矩陣 | 改前 | 改後 |
 |---|---|---|---|
-| lambdarank 建 `.bin`（量 train，丟組後剩約 70%） | 92.5 MiB | 162.6 MiB | 71.5 MiB |
-| rank_xendcg 建 `.bin`（不丟組） | 92.5 MiB | 198.7 MiB | 108.3 MiB |
-| binary 建 `.bin`（本來就沒有重排） | 92.5 MiB | 96.5 MiB | 100.4 MiB |
+| lambdarank 建 `.bin`（量 train，丟組後剩約 70%） | 92.5 MiB | 162.6 MiB | 71.6 MiB |
+| rank_xendcg 建 `.bin`（不丟組） | 92.5 MiB | 198.7 MiB | 109.8 MiB |
+| binary 建 `.bin`（沒有重排，照舊一次讀完） | 92.5 MiB | 96.5 MiB | 96.5 MiB |
 | lambdarank `refit_on_full` | 115.6 MiB | 181.7 MiB | 85.6 MiB |
 | binary `refit_on_full` | 115.6 MiB | 237.1 MiB | 126.3 MiB |
 
-改後每一列都是「一份矩陣加上一維陣列」；binary 建 `.bin` 多出的約 4 MiB 是第二次讀要的列號與
-label。預設的 64 MiB batch 下，改後的額外開銷最多約兩個 batch（batch 暫存，加上有列被丟時選出
-留下的列那一份）。
+改後每一列都是「一份矩陣加上一維陣列」。預設的 64 MiB batch 下，讀兩次的那幾條路額外開銷最多
+約兩個 batch（batch 暫存，加上有列被丟時選出留下的列那一份）。
 
 ⚠ 常見的「就地」寫法（`X[:] = X[perm]`、`np.take(X, perm, out=X)`）一樣會先配一整份暫存，
 不能拿來省這一份。

@@ -285,7 +285,7 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
 
   **這不是豁免**：`steps/` 裡出現 `catalog.load`／`catalog.save` 一樣違反 A1，只是**沒有測試會發現**，靠 code review。2026-09-19 對整個 `pipelines/**/*.py` 實查，catalog 存取零命中。
 
-  **不放寬 glob 是使用者的裁決**（2026-09-19，#163）。理由：看不到的地方裡真的有寫檔的只有 `diagnosis/model/`，而使用者傾向大幅簡化診斷，現在補可能白做；而檢查本身要留著——跑不到一秒，而且真的影響過設計（`pipelines/training/nodes.py` 的 5 個 cache node 刻意把刪檔留在 node 裡，就是為了讓它看得到，見 R4 表下的注記）。**什麼時候重開**：`diagnosis/model/` 的診斷簡化有了定案（那些 node 拿掉，或決定保留），或使用者重開這件事。放寬也不是換個 glob 就好：當天實測，寫檔檢查 (d) 會多出兩個**不是違例**的命中——`training/steps/hpo_resume.py`（HPO 中斷接續的 study 與 checkpoint）和 `source_etl/sql_runner.py`（這個套件沒有任何 `Node(...)`，本來就不歸 A1 管）。
+  **不放寬 glob 是使用者的裁決**（2026-09-19，#163）。理由：看不到的地方裡真的有寫檔的只有 `diagnosis/model/`，而使用者傾向大幅簡化診斷，現在補可能白做；而檢查本身要留著——跑不到一秒，而且真的影響過設計（`pipelines/training/nodes.py` 的 cache node——當時 5 個，#413 之後 4 個，#483 再加上 `prepare_train_inputs`——刻意把刪檔留在 node 裡，就是為了讓它看得到，見 R4 表下的注記）。**什麼時候重開**：`diagnosis/model/` 的診斷簡化有了定案（那些 node 拿掉，或決定保留），或使用者重開這件事。放寬也不是換個 glob 就好：當天實測，寫檔檢查 (d) 會多出兩個**不是違例**的命中——`training/steps/hpo_resume.py`（HPO 中斷接續的 study 與 checkpoint）和 `source_etl/sql_runner.py`（這個套件沒有任何 `Node(...)`，本來就不歸 A1 管）。
 - **`def` 不在 `nodes*.py` 裡的 node。** (c) 與 (d) 用**檔名**挑要掃的檔，不是看「檔案裡有沒有被註冊成 node 的函式」。所以 `pipeline.py` 註冊了、但 `def` 寫在別的檔的 node，整個看不到。2026-09-19 盤點有兩處：
   - training 的 7 個診斷 node，`def` 在 `src/recsys_tfb/diagnosis/model/`（對照表在 `pipelines/training/nodes.py` 的模組 docstring）。**這裡有實際後果**：`compute_shap_diagnostics`（`shap_per_item.py`）自己存圖，`compute_quadrant_cases` 經同檔的 `_render_case`（`shap_cases.py`）自己存圖，兩處都搜 `savefig`；目錄由 `diagnosis/model/paths.py` 的 helper `mkdir`。照 R4 的定義，它們就是「自己寫診斷副產物的 node」，但**不在 R4 表上**，測試也看不到。
   - evaluation 的 `load_compare_predictions`，`def` 在 `pipelines/evaluation/steps/compare_sources.py`（#365 搬進去）。當天實查零命中。

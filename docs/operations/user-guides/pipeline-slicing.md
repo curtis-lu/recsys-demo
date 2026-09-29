@@ -89,8 +89,11 @@ training 讀哪個 train 版本，只看 `data/dataset/<base_dataset_version>/tr
    **所以改了 code 之後不要用 `--from-node` 接續**——切片會把上游的舊產物直接讀進來。
    跑 full run 也不一定夠：dataset 的既有月份要 `--rebuild-dates` 才會重算；driver-local parquet 與
    LightGBM `.bin` cache 的判準同樣只有「`_SUCCESS` 在不在」
-   （`pipelines/training/nodes.py` 的 5 個 `cache_*_model_input` node），其中 test 月份可由 `--rebuild-dates`
+   （`pipelines/training/nodes.py` 的 4 個 `cache_*_model_input` node 與 `prepare_train_inputs`），其中 test 月份可由 `--rebuild-dates`
    帶到，**train／val 那幾份只能手動 `rm -rf <cache.root>/<base_dataset_version>/...`**。
+   刪 train 時要刪整個 `train_variants/<train_variant_id>/`：`.bin` 放在 parquet 副本旁邊的
+   `train_data_v<N>/` 裡（[`training.md` §3.4](../../pipelines/training.md)），只刪 parquet 的話，`.bin`
+   照樣命中，HPO 用舊的列、`refit_on_full` 重讀 parquet 用新的列，而且不報錯。
    `data/models/<model_version>/` 反而不用刪——full run 會覆寫它。
    相關：[`training.md` §7.5](../../pipelines/training.md) 最後一列、[`known-pitfalls.md` §17](../known-pitfalls.md)。
 2. **同一個 snap_date 的來源資料被回補。** `base_dataset_version` 含 `feature_table` 的欄位名稱、型別與

@@ -12,7 +12,7 @@ from recsys_tfb.pipelines.training import create_pipeline
 class TestTrainingPipeline:
     def test_pipeline_node_count(self):
         pipeline = create_pipeline()
-        # select_features + 4 cache nodes (train, train_dev, val, test) + prepare_lgb
+        # select_features + 4 cache nodes (train, train_dev, val, test) + prepare_train_inputs
         # + compute_group_filter_report + compute_sample_weight_report + tune
         # + finalize + predict_and_write_test_predictions + compute_test_metrics
         # + compute_feature_statistics + compute_feature_importance + compute_gain_ledger

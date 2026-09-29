@@ -97,8 +97,8 @@ class LightGBMAdapter(ModelAdapter):
 
         Left unconstructed, as the refit's Dataset always was: ``lgb.train``
         then bins it with the training params merged in, so the refit's
-        construction is unchanged by this method existing. A caller that
-        saves it constructs it first.
+        construction is unchanged by this method existing. Saving it
+        (:meth:`save_train_data`) constructs it.
 
         The feature names are baked in so the booster reports real names in
         ``feature_importance()`` instead of LightGBM's positional

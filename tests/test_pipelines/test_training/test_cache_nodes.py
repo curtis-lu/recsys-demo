@@ -559,12 +559,15 @@ class TestTrainDataCachePath:
         # The old build is left where it was, still complete.
         assert (Path(old.bin_path).parent / "_SUCCESS").exists()
 
-    def test_a_cache_from_before_the_format_version_is_not_served(
+    def test_a_cache_in_the_layout_before_483_is_not_served(
         self, tmp_path, monkeypatch,
     ):
-        """Directories written before #483 have no version segment
-        (``train_variants/<id>/lgb/<objective>/``); finished or not, a current
-        build never looks there."""
+        """Directories written before #483 sit at
+        ``train_variants/<id>/lgb/<objective>/``; finished or not, a current
+        build never looks there. What keeps them off is the whole new layout
+        (a version segment *and* ``lightgbm`` where they say ``lgb``), so this
+        stays green with either one removed; the version segment on its own is
+        what ``test_a_format_version_bump_moves_the_cache`` pins."""
         variant = tmp_path / "cache" / "v1" / "train_variants" / "tv1"
         legacy = variant / "lgb" / "lambdarank"
         legacy.mkdir(parents=True)

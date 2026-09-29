@@ -36,7 +36,14 @@ logger = logging.getLogger(__name__)
 #: Separate from the training format versions ADR-0030 decision 9 adds to
 #: ``model_version``: the cache's format can change without the model changing
 #: (a sidecar gains a field), and one shared number would make every such
-#: change retrain every deployment.
+#: change retrain every deployment. **Most changes to what a directory holds
+#: change the model too, and then both numbers move.** Even reordering rows
+#: inside a query group changes a lambdarank model (measured 2026-09-29 on
+#: LightGBM 4.6.0, 3,000 synthetic groups of 22 rows, 50 rounds, deterministic
+#: single-thread: predictions moved by up to 1.5).
+#: Bumping this one alone rebuilds the files but leaves ``model_version`` and
+#: the HPO ``search_id`` as they were, so a resumed search would mix trials
+#: scored on the old files with trials scored on the new ones.
 #:
 #: Before this number existed (#483), the path had no version segment and
 #: three checks inside the directory caught the formats it replaced: a ``.bin``
@@ -46,8 +53,9 @@ logger = logging.getLogger(__name__)
 TRAIN_DATA_CACHE_FORMAT_VERSION: int = 1
 
 #: The file each split's native training data is saved to, in the cache
-#: directory. Not LightGBM's name for anything — any adapter's
-#: ``save_train_data`` writes its own format under it.
+#: directory. The ``.bin`` names date from when LightGBM was the only writer
+#: (as does ``LgbDatasetHandle``); any adapter's ``save_train_data`` writes its
+#: own format under them.
 _BIN_NAMES = {"train": "train.bin", "train_dev": "train_dev.bin"}
 
 
@@ -110,9 +118,13 @@ def handles(directory: str) -> tuple[LgbDatasetHandle, LgbDatasetHandle]:
 
 
 def log_group_filter(split: str, counts: dict) -> None:
-    """One line per split saying what the zero-positive filter removed."""
+    """One line per split saying what the zero-positive filter removed.
+
+    Worded apart from ``compute_group_filter_report``'s line on purpose: that
+    one runs every time, this one only when the binary is built.
+    """
     logger.info(
-        "zero-positive group filter [%s]: dropped %d/%d groups "
+        "train data build [%s]: dropped %d/%d zero-positive query groups "
         "(%d/%d rows); %d groups / %d rows remain",
         split, counts["groups_dropped"], counts["groups_total"],
         counts["rows_dropped"], counts["rows_total"],

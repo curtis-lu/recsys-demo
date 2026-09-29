@@ -544,13 +544,13 @@ class TestZeroPositiveGroupFilter:
         with caplog.at_level(logging.INFO, logger=CACHE_LOGGER):
             _prepare_zero_positive(tmp_path, "lambdarank")
         text = caplog.text
-        assert "zero-positive group filter" in text
         # train: 2 of 4 groups and 4 of 8 rows dropped, 2 groups left.
-        assert "[train]" in text
-        assert "2/4 groups" in text and "4/8 rows" in text
+        assert "train data build [train]: dropped" in text
+        assert "2/4 zero-positive query groups" in text and "4/8 rows" in text
         # train_dev: 1 of 3 groups and 2 of 6 rows dropped, 2 groups left.
         assert "[train_dev]" in text
-        assert "1/3 groups" in text and "2/6 rows" in text
+        assert "train data build [train_dev]: dropped 1/3 zero-positive query groups" in text
+        assert "2/6 rows" in text
 
     @pytest.mark.parametrize("objective, train, dev", [
         # lambdarank sees only groups holding a positive: none single-label.
@@ -698,7 +698,7 @@ def test_feature_selection_isolates_bin_from_full_feature_cache(
     assert (_dir(subset_h) / "_SUCCESS").exists()
 
 
-def test_feature_selection_subpath_nests_under_each_objective(tmp_path):
+def test_one_feature_subset_under_two_objectives_gets_two_dirs(tmp_path):
     """The two cache dimensions compose: the same feature subset under two
     ranking objectives gets two distinct dirs, neither overwriting the other."""
     df_tr, df_dev = _ranking_frames()

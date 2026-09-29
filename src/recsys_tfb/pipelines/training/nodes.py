@@ -3,9 +3,9 @@
 This module is the home of the pipeline's ML story: a reader who opens it sees
 each decision this pipeline makes about the data, without jumping files. The
 mechanisms those decisions are expressed in live in ``steps/``, one module per
-concern (``local_cache``, ``predict_months``, ``search_space``, ``hpo_resume``,
-``hpo_scoring``, ``fit_params``, ``refit``, ``sample_weights``,
-``experiment_log``).
+concern (``local_cache``, ``train_data_cache``, ``predict_months``,
+``scored_months``, ``search_space``, ``hpo_resume``, ``hpo_scoring``,
+``fit_params``, ``refit``, ``sample_weights``, ``experiment_log``).
 ``cache_sources`` sits beside this file instead, because ``__main__.py`` reads
 it before the pipeline starts. ADR-0014 draws both lines and
 ``docs/agents/pipeline-node-design.md`` is where the placement criterion and
@@ -94,6 +94,7 @@ from recsys_tfb.evaluation.metric_registry import (
 from recsys_tfb.evaluation.metrics_spark import count_query_groups_by_time
 from recsys_tfb.io.extract import (
     extract_X_rows,
+    extract_Xy,
     extract_Xy_with_groups,
     extract_y,
     extract_y_with_groups,
@@ -678,17 +679,21 @@ def prepare_train_inputs(
             # with nothing raised.
             perm, group = to_contiguous_groups(group_ids)
             rows, y = rows[perm], y[perm]
+            X = extract_X_rows(
+                parquet_handle, preprocessor_metadata, parameters,
+                rows=rows, labels=y,
+            )
+            weight_key_rows = weight_key_rows.take(rows)
         else:
             # Decision — a row-wise objective keeps every row in file order:
-            # no groups to drop, none to keep together.
-            y, weight_key_rows = extract_y(
+            # no groups to drop, none to keep together, so there are no rows
+            # to choose before the matrix is read and one read does it.
+            X, y, weight_key_rows = extract_Xy(
                 parquet_handle, preprocessor_metadata, parameters,
                 with_weight_keys=True,
             )
-            rows, group = None, None
+            group = None
 
-        X = extract_X_rows(
-            parquet_handle, preprocessor_metadata, parameters, rows=rows, labels=y)
         data = adapter.build_train_data(
             X, y, group=group, reference=reference,
             feature_names=feature_columns, categorical_features=categorical_columns,
@@ -703,13 +708,19 @@ def prepare_train_inputs(
         # its own weight table against them when it reads the file
         # (LgbDatasetHandle.sample_weights). The adapter refuses a weighted save.
         adapter.save_train_data(data, path)
-        write_weight_keys_sidecar(
-            weight_key_rows if rows is None else weight_key_rows.take(rows), path)
+        write_weight_keys_sidecar(weight_key_rows, path)
+        # The four prepare.* volume record names are kept from the adapter this
+        # build moved out of: they are a monitoring interface. Their logger
+        # field is now this module's (it was models.lightgbm_adapter's) — a
+        # filter on the logger name, rather than the record name, needs updating.
         log_data_volume(
             logger, "prepare.ds_train" if split == "train" else "prepare.ds_dev", data)
         log_data_volume(logger, f"prepare.{split}.bin", path)
         if split == "train":
-            # train_dev is binned the way train was, so its scores mean the same.
+            # Decision — train_dev is binned against train's bin edges
+            # (`reference`), so an early-stopping score on it is computed on
+            # the features the trial's trees split on; binned on its own, its
+            # bins would not line up with the model's thresholds.
             reference = data
 
     if filter_counts:
@@ -1090,46 +1101,45 @@ def finalize_model(
                 train_dev_parquet_handle, preprocessor_metadata, parameters,
                 with_weights=True,
             )
-            rows_tr, rows_dv = refit.stacked_row_numbers(len(y_tr), len(y_dv))
-            if adapter.rules.objective_drops_zero_positive_groups(objective):
-                # Decision — the refit trains on the rows the search trained on.
-                # HPO reads the cached .bin, which prepare_train_inputs already
-                # stripped of zero-positive query groups; this branch re-reads
-                # the parquet, so without the same rule the final model would be
-                # fit on a matrix the search never saw and still be reported
-                # under the search's hyperparameters. Applied per split, before
-                # stacking, for the same reason it is applied per split there:
-                # the two are one rule, and a reader comparing them should not
-                # have to check.
-                (y_tr, gid_tr, w_tr, rows_tr), counts_tr = drop_zero_positive_groups(
-                    y_tr, gid_tr, w_tr, rows_tr)
-                (y_dv, gid_dv, w_dv, rows_dv), counts_dv = drop_zero_positive_groups(
-                    y_dv, gid_dv, w_dv, rows_dv)
-                logger.info(
-                    "refit zero-positive filter: train %d -> %d rows, "
-                    "train_dev %d -> %d rows",
-                    counts_tr["rows_total"], counts_tr["rows_kept"],
-                    counts_dv["rows_total"], counts_dv["rows_kept"],
-                )
-            y_full, w_full, rows_full = refit.stack_splits(
-                (y_tr, w_tr, rows_tr), (y_dv, w_dv, rows_dv))
-            # Decision — train / train_dev are customer-disjoint by sampling
-            # design, so a query group never spans both splits: dev ids are
-            # offset past train's max to keep them distinct after stacking.
-            gid_full = refit.offset_dev_group_ids(gid_tr, gid_dv)
-            del y_tr, y_dv, gid_tr, gid_dv, w_tr, w_dv, rows_tr, rows_dv
-
-            # Decision — group= makes this a ranking refit consistent with the
-            # objective, and the row order follows the groups: the permutation
-            # to_contiguous_groups returns has to reach the matrix rows, the
-            # labels and the weights alike, or the labels no longer belong to
-            # the rows they came from.
-            perm, grp = to_contiguous_groups(gid_full)
-            y_full, w_full = y_full[perm], w_full[perm]
-            X_full = refit.stacked_matrix(
-                splits, preprocessor_metadata, parameters,
-                rows=rows_full[perm], labels=y_full,
+        rows_tr, rows_dv = refit.stacked_row_numbers(len(y_tr), len(y_dv))
+        if adapter.rules.objective_drops_zero_positive_groups(objective):
+            # Decision — the refit trains on the rows the search trained on.
+            # HPO reads the cached .bin, which prepare_train_inputs already
+            # stripped of zero-positive query groups; this branch re-reads the
+            # parquet, so without the same rule the final model would be fit on
+            # a matrix the search never saw and still be reported under the
+            # search's hyperparameters. Applied per split, before stacking, for
+            # the same reason it is applied per split there: the two are one
+            # rule, and a reader comparing them should not have to check.
+            (y_tr, gid_tr, w_tr, rows_tr), counts_tr = drop_zero_positive_groups(
+                y_tr, gid_tr, w_tr, rows_tr)
+            (y_dv, gid_dv, w_dv, rows_dv), counts_dv = drop_zero_positive_groups(
+                y_dv, gid_dv, w_dv, rows_dv)
+            logger.info(
+                "refit zero-positive filter: train %d -> %d rows, "
+                "train_dev %d -> %d rows",
+                counts_tr["rows_total"], counts_tr["rows_kept"],
+                counts_dv["rows_total"], counts_dv["rows_kept"],
             )
+        y_full, w_full, rows_full = refit.stack_splits(
+            (y_tr, w_tr, rows_tr), (y_dv, w_dv, rows_dv))
+        # Decision — train / train_dev are customer-disjoint by sampling
+        # design, so a query group never spans both splits: dev ids are offset
+        # past train's max to keep them distinct after stacking.
+        gid_full = refit.offset_dev_group_ids(gid_tr, gid_dv)
+        del y_tr, y_dv, gid_tr, gid_dv, w_tr, w_dv, rows_tr, rows_dv
+
+        # Decision — group= makes this a ranking refit consistent with the
+        # objective, and the row order follows the groups: the permutation
+        # to_contiguous_groups returns has to reach the matrix rows, the labels
+        # and the weights alike, or the labels no longer belong to the rows
+        # they came from.
+        perm, grp = to_contiguous_groups(gid_full)
+        y_full, w_full = y_full[perm], w_full[perm]
+        X_full = refit.stacked_matrix(
+            splits, preprocessor_metadata, parameters,
+            rows=rows_full[perm], labels=y_full,
+        )
         ds_full = adapter.build_train_data(
             X_full, y_full, weight=w_full, group=grp,
             feature_names=feat_cols, categorical_features=cat_cols,
@@ -1144,12 +1154,11 @@ def finalize_model(
                 train_dev_parquet_handle, preprocessor_metadata, parameters,
                 with_weights=True,
             )
-            y_full, w_full = refit.stack_splits((y_tr, w_tr), (y_dv, w_dv))
-            del y_tr, y_dv, w_tr, w_dv
-            X_full = refit.stacked_matrix(
-                splits, preprocessor_metadata, parameters,
-                rows=None, labels=y_full,
-            )
+        y_full, w_full = refit.stack_splits((y_tr, w_tr), (y_dv, w_dv))
+        del y_tr, y_dv, w_tr, w_dv
+        X_full = refit.stacked_matrix(
+            splits, preprocessor_metadata, parameters, rows=None, labels=y_full,
+        )
 
         # Decision — no group=: a non-ranking objective scores each row on its
         # own, so there is no query grouping to carry and no reordering to do.
