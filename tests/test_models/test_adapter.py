@@ -98,13 +98,6 @@ class TestLightGBMAdapter:
         # default kind is "split" (backward compatible)
         assert adapter.feature_importance() == split
 
-    def test_booster_property(self, tiny_data, train_params):
-        import lightgbm as lgb
-        X_train, y_train, X_val, y_val = tiny_data
-        adapter = fit_lightgbm(
-            X_train, y_train, train_params, X_val=X_val, y_val=y_val)
-        assert isinstance(adapter.booster, lgb.Booster)
-
     def test_log_to_mlflow(self, tmp_path, tiny_data, train_params):
         import mlflow
 
@@ -165,7 +158,7 @@ def test_lightgbm_train_uses_log_period_from_params(monkeypatch, tiny_data):
     )
     # log_period must be popped — LightGBM rejects unknown params silently but
     # the booster's saved params would otherwise carry it.
-    assert "log_period" not in adapter.booster.params
+    assert "log_period" not in adapter._booster.params
 
 
 def test_lightgbm_train_default_log_period_silent(monkeypatch, tiny_data, train_params):
@@ -222,7 +215,7 @@ def test_lightgbm_trains_on_binaries_read_back_from_disk(tmp_path):
         ds_tr, {"objective": "binary", "verbose": -1},
         num_iterations=5, early_stopping_rounds=3, valid_data=ds_dev,
     )
-    assert adapter.booster.num_trees() > 0
+    assert adapter.attribution_cost() > 0   # number of trees
     assert 1 <= adapter.best_iteration <= 5
 
 
@@ -273,4 +266,4 @@ def test_lightgbm_round_cap_is_the_argument_not_a_params_copy(tiny_data):
          "num_iterations": 50},
         num_iterations=3,
     )
-    assert adapter.booster.current_iteration() == 3
+    assert adapter._booster.current_iteration() == 3

@@ -121,7 +121,7 @@ cache 以 `_SUCCESS` marker 判斷是否完整。若路徑存在但 marker 不�
 
 新增演算法時，應新增並註冊 adapter，而不是在 training pipeline 中加入大量演算法分支。pipeline 保持演算法無關，演算法特有的資料準備與 artifact 格式則留在 adapter。
 
-SHAP 特徵歸因透過 `attribution.feature_attributions(model, X, feature_names)` 這個模型結構無關的接縫存取，診斷層不直接依賴 `model.booster`；日後擴充至 composite（兩階段）模型時，只需在此接縫修改，上層診斷邏輯不需調整。
+訓練診斷要的模型操作也在 adapter 上，而且是選用的：特徵歸因（`ModelAdapter.feature_attributions`，LightGBM 用 SHAP 的 TreeExplainer）、樹的切點結構（`tree_structure`，gain 帳本用）、內建重要度（`feature_importance`）。診斷只拿到演算法無關的陣列與表，不碰 booster；模型做不到的就丟 `UnsupportedCapability`，對應的診斷跳過並寫明「模型做不到」，其他錯誤讓 training 停下（ADR-0030 決定 4）。日後擴充至 composite（兩階段）模型時，在它的 adapter 實作這幾項，上層診斷邏輯不需調整。
 
 ### 生產限制反映在架構中
 

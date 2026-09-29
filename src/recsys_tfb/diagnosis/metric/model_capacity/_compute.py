@@ -5,8 +5,8 @@
 分配）、以及兩者之外的殘餘（未分配，item 切點之前的切點）——各占多少**。
 用來分辨「學到互動訊號」與「只記住 item prior」。
 
-**這一項不碰評測資料。** 它只讀訓練側產出的 ``gain_ledger``（LightGBM booster
-逐樹逐切點記帳，見 ``diagnosis.model.gain_ledger``），外加同一次執行裡
+**這一項不碰評測資料。** 它只讀訓練側產出的 ``gain_ledger``（模型的樹逐樹逐切點
+記帳，見 ``diagnosis.model.gain_ledger``），外加同一次執行裡
 ``item_ability`` 的結果畫一張對照散點。與其餘四項診斷不同，它不吃共用的
 ``diagnosis_sample``——``contract.INPUTS`` 因此宣告成
 ``("gain_ledger", "evaluation_item_ability", "parameters")``，``compute`` 的
@@ -16,17 +16,21 @@
 ------------------------
 ``gain_ledger`` 是跨 pipeline 的 optional 產物（訓練側寫
 ``data/models/${model_version}/diagnostics/gain_ledger.json``，catalog
-``optional: true``）。呼叫端可能拿到三種東西：
+``optional: true``）。呼叫端可能拿到四種東西：
 
 1. **檔案不存在** → ``None``（catalog 的 ``load()`` 行為，不 raise）。evaluation
    單獨跑、或訓練側是舊版沒跑過這個 node 時會遇到。
 2. **訓練側關掉了** → ``{"enabled": False}``（``diagnostics.gain_ledger.enabled:
    false``，見 ``gain_ledger.py`` 的 ``compute_gain_ledger``）。
-3. **正常** → 完整 dict。
+3. **模型做不到** → ``{"enabled": True, "supported": False, "reason": ...}``：
+   訓練的模型沒有樹的切點結構（它的 adapter 丟 ``UnsupportedCapability``，
+   ADR-0030 決定 4），``reason`` 是 adapter 說的原因。
+4. **正常** → 完整 dict。
 
-前兩種都不是錯誤，都回 ``{"enabled": ..., "available": False, "reason": ...}``，
+前三種都不是錯誤，都回 ``{"enabled": ..., "available": False, "reason": ...}``，
 ``reason`` 分辨得出是哪一種——不得 raise，也不得讓兩種路徑共用同一句 reason
-（讀者要能分辨「evaluation 單獨跑」與「訓練側刻意關掉」，處置方式不同）。
+（讀者要能分辨「evaluation 單獨跑」「訓練側刻意關掉」與「換了一個沒有樹的
+模型」，處置方式不同：第三種不是設定能修的）。
 
 同理，``item_ability`` 也有三態（``None``／``{"enabled": False}`` stub／完整
 dict）。**前兩種必須等價處理成「這次沒有 ability 資料可 join」**：只判斷
@@ -376,6 +380,15 @@ def compute(
         out["reason"] = (
             "訓練側關閉了 diagnostics.gain_ledger.enabled——gain_ledger 落地"
             "的是 stub（{'enabled': False}），不是完整帳本。"
+        )
+        out["notes"].append(out["reason"])
+        return out
+
+    if gain_ledger.get("supported") is False:
+        out["reason"] = (
+            "訓練的模型做不到——它沒有樹的切點結構可以記帳，gain_ledger 落地的"
+            "是「模型做不到」的標記，不是完整帳本；改設定不會讓它出現。"
+            f"模型說的原因：{gain_ledger.get('reason') or '（未提供）'}"
         )
         out["notes"].append(out["reason"])
         return out

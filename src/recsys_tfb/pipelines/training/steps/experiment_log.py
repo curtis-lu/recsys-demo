@@ -84,12 +84,13 @@ def log_diagnostics_summary(
 ) -> None:
     """One scalar per diagnostic, so runs are comparable without opening files.
 
-    Each block is guarded because every diagnostic upstream is best-effort: a
-    disabled or failed one arrives empty. An unguarded version would log a zero,
-    and a zero reads as "we looked and found none" — the opposite of "we never
-    looked".
+    Each block is guarded because a diagnostic can arrive without a result: a
+    disabled one arrives empty, and one the model cannot answer arrives as
+    ``{"enabled": True, "supported": False, ...}`` (ADR-0030 decision 4). An
+    unguarded version would log a zero, and a zero reads as "we looked and
+    found none" — the opposite of "we never looked".
     """
-    if feature_importance:
+    if _has_result(feature_importance):
         mlflow.log_metric("n_dead_features", len(feature_importance.get("dead_features", [])))
     if feature_statistics:
         mlflow.log_metric(
@@ -100,12 +101,22 @@ def log_diagnostics_summary(
             "n_high_null_features",
             sum(1 for s in feature_statistics.values() if s.get("high_null")),
         )
-    if quadrant_profiles:
+    if _has_result(quadrant_profiles):
         n_cells = sum(len(v) for v in quadrant_profiles.values())
         mlflow.log_metric("n_quadrant_cells", n_cells)
-    if cases_manifest:
+    if _has_result(cases_manifest):
+        # Charts handed to the catalog. One that then fails to draw is a
+        # warning and a missing file, not a manifest entry (ADR-0030
+        # decision 7), so it still counts here.
         n_cases = sum(
             1 for it in cases_manifest.values() for cell in it.values()
             for r in cell.values() if r.get("rendered")
         )
         mlflow.log_metric("n_cases_rendered", n_cases)
+
+
+def _has_result(artifact) -> bool:
+    """Not empty (disabled, or nothing to describe), and not skipped because
+    the model cannot answer it — the shape
+    ``diagnosis/model/_util.unsupported_artifact`` lands."""
+    return bool(artifact) and artifact.get("supported") is not False

@@ -426,8 +426,10 @@ Layer 1 — config-static (implemented here; aggregated by
   ``test_snap_dates`` is in no version ID (``versioning.COVERAGE_ONLY_KEYS``).
   Blocks every training invocation, sliced or not, ``--list-nodes`` and
   ``--dry-run`` included — the predicate's docstring says why that is
-  intended. No runtime backstop in the node, like A24/A28. Issue #133 calls
-  this A29; that code was taken by the time it was built.
+  intended. Two nodes still raise if it gets through anyway (runtime
+  backstops): ``compute_test_metrics`` with no scored month and
+  ``select_shap_population`` with no test month. Issue #133 calls this A29;
+  that code was taken by the time it was built.
 * A37 — a conf still spelling a config key that named the calibration
   mechanism removed in #411. Nothing reads these keys any more, so left in
   place they produce an uncalibrated model, a successful run, and no signal

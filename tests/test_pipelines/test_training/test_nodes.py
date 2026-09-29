@@ -625,7 +625,7 @@ class TestFinalizeModel:
             preprocessor_metadata, params,
         )
         assert isinstance(final, LightGBMAdapter)
-        assert final.booster.current_iteration() == best_iteration
+        assert final._booster.current_iteration() == best_iteration
 
     def test_hpo_best_booster_has_real_feature_names(
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
@@ -635,7 +635,7 @@ class TestFinalizeModel:
         _, _, hpo_best_model = self._hpo_outputs(
             lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters,
         )
-        assert hpo_best_model.booster.feature_name() == preprocessor_metadata["feature_columns"]
+        assert hpo_best_model.feature_names() == preprocessor_metadata["feature_columns"]
 
     def test_refit_on_full_booster_has_real_feature_names(
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
@@ -655,7 +655,7 @@ class TestFinalizeModel:
             train_h, train_dev_h, hpo_best_model, best_params, best_iteration,
             preprocessor_metadata, params,
         )
-        assert final.booster.feature_name() == preprocessor_metadata["feature_columns"]
+        assert final.feature_names() == preprocessor_metadata["feature_columns"]
 
 # ---- Tests: log_experiment ----
 
@@ -945,6 +945,17 @@ def test_log_experiment_logs_diagnostics(monkeypatch, tmp_path):
     assert logged_metrics["n_single_value_features"] == 1
     assert logged_metrics["n_high_null_features"] == 0
     assert len(logged_artifacts) == 1  # whole diagnostics dir uploaded once
+
+    # A diagnosis the model could not answer (ADR-0030 decision 4) logs no
+    # scalar: a 0 would read as "looked and found none". And the cases
+    # summary must not walk the marker as if it were items x quadrants.
+    logged_metrics.clear()
+    cannot = {"enabled": True, "supported": False, "reason": "no trees"}
+    nodes.log_experiment(_Model(), {}, 10, eval_results, feature_statistics,
+                         dict(cannot), shap_diagnostics, parameters,
+                         dict(cannot), dict(cannot))
+    assert not {"n_dead_features", "n_quadrant_cells", "n_cases_rendered"} & set(logged_metrics)
+    assert logged_metrics["n_single_value_features"] == 1
 
 
 def test_tune_defaults_ranking_metric(monkeypatch):

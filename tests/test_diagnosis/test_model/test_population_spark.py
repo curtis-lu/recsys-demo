@@ -1,9 +1,12 @@
 """Tests for select_shap_population (Spark 選樣:rank/象限/每格抽樣/join)."""
 
+import pytest
 
-def _params(per_cell=30, top_k=1, enabled=True):
+
+def _params(per_cell=30, top_k=1, enabled=True, months=("2024-01-31",)):
     return {"schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
                                    "item": "prod_name", "label": "label"}},
+            "dataset": {"test_snap_dates": list(months)},
             "diagnostics": {"shap": {"quadrant_enabled": enabled,
                                      "quadrant_top_k_decision": top_k,
                                      "quadrant_sample_per_cell": per_cell}}}
@@ -161,11 +164,11 @@ def test_case_rows_feed_into_compute_quadrant_cases(spark, tmp_path, monkeypatch
          ("2024-01-31", "c2", "A", 1.2, 2.2), ("2024-01-31", "c2", "B", 1.3, 2.3)],
         _FEAT_COLS)
     _pop, case_rows = select_shap_population(preds, feats, params)
-    manifest = compute_quadrant_cases(adapter, case_rows, prep, params)
+    manifest, figures = compute_quadrant_cases(adapter, case_rows, prep, params)
     assert set(manifest) == {"A", "B"}
     tp = manifest["A"]["TP"]["high"]     # metadata 須經 seam 完整帶到
     assert tp["rendered"] and tp["cust_id"] == "c1" and tp["label"] == 1 and tp["rank"] == 1
-    assert (tmp_path / "data/models/mv_integ/diagnostics/cases/A/TP_high.png").exists()
+    assert tp["png"] == "cases/A/TP_high.png" and "A/TP_high.png" in figures
 
 
 # ---- persist / unpersist(T5):cache 不得留在 executor 上 ----------------------
@@ -205,8 +208,9 @@ def test_success_path_leaves_no_spark_cache(spark):
     assert _persistent_rdd_ids(spark) - before == set()
 
 
-def test_failure_path_leaves_no_spark_cache_and_stays_best_effort(spark, monkeypatch):
-    """第一條分支跑完、第二條炸掉:cache 仍要釋放,且契約不變(只 warn)。
+def test_failure_path_leaves_no_spark_cache_and_stops_the_run(spark, monkeypatch):
+    """第一條分支跑完、第二條炸掉:cache 仍要釋放,而錯誤往上拋、training 停下
+    (ADR-0030 decision 4:這個 node 不碰模型能力,沒有「模型做不到」可言)。
 
     這是 try/finally 而非「只在成功路徑釋放」的理由;失敗路徑同樣會離開這個函式。
     """
@@ -220,8 +224,8 @@ def test_failure_path_leaves_no_spark_cache_and_stays_best_effort(spark, monkeyp
     monkeypatch.setattr(DataFrame, "unionByName", _boom)
     preds, feats = _preds_and_feats(spark)
     before = _persistent_rdd_ids(spark)
-    out = select_shap_population(preds, feats, _params())
-    assert out == (None, None)                        # best-effort:不中斷訓練
+    with pytest.raises(RuntimeError, match="injected failure"):
+        select_shap_population(preds, feats, _params())
     assert _persistent_rdd_ids(spark) - before == set()
 
 
@@ -252,11 +256,10 @@ def test_ranked_frame_is_persisted_with_explicit_memory_and_disk(spark, monkeypa
     assert (level.useMemory, level.useDisk) == (True, True)   # MEMORY_AND_DISK
 
 
-def test_unpersist_failure_does_not_break_best_effort(spark, monkeypatch):
-    """釋放失敗(例如 SparkSession 已死)不得把 best-effort 變成硬失敗。
-
-    persist 之前,``except`` 之後沒有任何會 raise 的東西;persist 帶進了一個新的
-    失敗來源,而 ``finally`` 裡的 raise 會蓋掉上面的 return。
+def test_unpersist_failure_is_logged_not_raised(spark, monkeypatch):
+    """釋放失敗(例如 SparkSession 已死)只記 log:raise 在 ``finally`` 裡會蓋掉
+    body 正在往上拋的那個說明出錯原因的例外;成功路徑上結果已經在 driver,漏掉
+    的只是那份 cache。
     """
     from pyspark.sql import DataFrame
 
@@ -269,3 +272,151 @@ def test_unpersist_failure_does_not_break_best_effort(spark, monkeypatch):
     preds, feats = _preds_and_feats(spark)
     pop, cases = select_shap_population(preds, feats, _params())
     assert pop is not None and cases is not None      # 成功路徑仍回得了結果
+
+
+
+# ---- ADR-0030 decisions 5 and 12: months, tie rule, score column -------------
+
+def test_reads_only_the_configured_test_months(spark):
+    """The prediction table and test_model_input keep every month written
+    under their version; a month outside dataset.test_snap_dates must not
+    reach the population or the cases (node rule 14). The stray month's
+    customer would be the extreme of its cell if it were read."""
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+
+    preds, feats = _preds_and_feats(spark)
+    stray_p = spark.createDataFrame(
+        [("2023-12-31", "c9", "A", 0.99, 1), ("2023-12-31", "c9", "B", 0.01, 0)],
+        _PRED_COLS)
+    stray_f = spark.createDataFrame(
+        [("2023-12-31", "c9", "A", 9.0, 9.0), ("2023-12-31", "c9", "B", 9.0, 9.0)],
+        _FEAT_COLS)
+    pop, cases = select_shap_population(
+        preds.unionByName(stray_p), feats.unionByName(stray_f), _params())
+    assert set(pop["snap_date"]) == {"2024-01-31"}
+    assert set(cases["snap_date"]) == {"2024-01-31"}
+    assert "c9" not in set(pop["cust_id"]) | set(cases["cust_id"])
+
+
+def test_no_configured_test_month_stops_rather_than_reading_everything(spark):
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+
+    preds, feats = _preds_and_feats(spark)
+    with pytest.raises(ValueError, match="test_snap_dates"):
+        select_shap_population(preds, feats, _params(months=()))
+
+
+_EVENT_PRED_COLS = ["snap_date", "cust_id", "prod_name", "ts", "score", "label"]
+_EVENT_FEAT_COLS = ["snap_date", "cust_id", "prod_name", "ts", "f0", "f1"]
+
+
+def _event_params():
+    p = _params()
+    p["schema"]["columns"]["event"] = "ts"
+    return p
+
+
+def test_with_event_declared_top1_is_evaluations_top1(spark):
+    """Two rows of one item in one query group, tied on score: evaluation
+    ranks the earlier event first (utils/ranking.py), so the quadrants must
+    too. The later event comes first in the input so that the old window —
+    score, then item, nothing after — has no reason to agree."""
+    from recsys_tfb.core.schema import get_schema
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.evaluation.metrics_spark import rank_within_query
+
+    preds = spark.createDataFrame(
+        [("2024-01-31", "c1", "A", 2, 0.9, 0),
+         ("2024-01-31", "c1", "A", 1, 0.9, 1),
+         ("2024-01-31", "c1", "B", 1, 0.1, 0)],
+        _EVENT_PRED_COLS)
+    feats = spark.createDataFrame(
+        [("2024-01-31", "c1", "A", 2, 1.0, 2.0),
+         ("2024-01-31", "c1", "A", 1, 1.1, 2.1),
+         ("2024-01-31", "c1", "B", 1, 1.2, 2.2)],
+        _EVENT_FEAT_COLS)
+    params = _event_params()
+    schema = get_schema(params)
+
+    pop, _cases = select_shap_population(preds, feats, params)
+    evaluation = rank_within_query(
+        preds, schema["query_group_columns"], "score", "prod_name", ["ts"]).toPandas()
+    top_ts = int(evaluation.loc[evaluation["pos"] == 1, "ts"].iloc[0])
+    assert top_ts == 1
+    quadrant = {int(r.ts): r.quadrant for r in pop[pop.prod_name == "A"].itertuples()}
+    assert quadrant == {1: "TP", 2: "TN"}
+
+
+def test_the_score_column_follows_schema(spark):
+    """A deployment that calls the score column something else. What goes to
+    compute_quadrant_cases is still called ``score`` — the two modules'
+    agreement, not the prediction table's column."""
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+
+    preds, feats = _preds_and_feats(spark)
+    renamed = preds.withColumnRenamed("score", "pred")
+    params = _params()
+    params["schema"]["columns"]["score"] = "pred"
+
+    pop, cases = select_shap_population(renamed, feats, params)
+    q = {(r.cust_id, r.prod_name): r.quadrant for r in pop.itertuples()}
+    assert q == {("c1", "A"): "TP", ("c1", "B"): "TN",
+                 ("c2", "A"): "FP", ("c2", "B"): "FN"}
+    high = cases[(cases.prod_name == "A") & (cases.quadrant == "TP")
+                 & (cases.role == "high")]
+    assert float(high["score"].iloc[0]) == 0.9
+
+
+def test_stray_month_rows_are_never_read(spark):
+    """Node rule 14 is about cost: the answer above would be right even
+    without the filter, because the join back to test_model_input drops a
+    stray month anyway. So this checks the read itself — a stray-month row
+    raises the moment anything computes it. Filtered first, Spark pushes the
+    filter below the column that raises and never computes it; filtered only
+    by the later join, the rank window does."""
+    from pyspark.sql import functions as F
+
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+
+    preds, feats = _preds_and_feats(spark)
+    stray = (F.col("snap_date") == "2023-12-31")
+    preds = preds.unionByName(spark.createDataFrame(
+        [("2023-12-31", "c9", "A", 0.5, 1)], _PRED_COLS)).withColumn(
+        "score", F.when(stray, F.raise_error("stray prediction month read"))
+        .otherwise(F.col("score")))
+    feats = feats.unionByName(spark.createDataFrame(
+        [("2023-12-31", "c9", "A", 9.0, 9.0)], _FEAT_COLS)).withColumn(
+        "f0", F.when(stray, F.raise_error("stray feature month read"))
+        .otherwise(F.col("f0")))
+
+    pop, cases = select_shap_population(preds, feats, _params())
+    assert set(pop["snap_date"]) == set(cases["snap_date"]) == {"2024-01-31"}
+
+
+def test_months_that_match_no_row_stop_rather_than_land_empty(spark):
+    """An empty population would land as ``{}`` downstream — the shape of
+    ``quadrant_enabled: false`` — and the quadrants would vanish silently."""
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+
+    preds, feats = _preds_and_feats(spark)
+    with pytest.raises(ValueError, match="no prediction for months"):
+        select_shap_population(preds, feats, _params(months=("2024-02-29",)))
+
+
+@pytest.mark.parametrize("spelled", [
+    pytest.param("datetime", id="yaml-timestamp"),
+    pytest.param(" 2024-01-31 ", id="padded-text"),
+])
+def test_months_are_normalised_like_the_scored_months(spark, spelled):
+    """The scored months (core.date_ranges.as_date_list) read a timestamp YAML
+    produced, or padded text, as the date text the table holds; ``str()``
+    alone would give "2024-01-31 00:00:00" or keep the spaces and match
+    nothing."""
+    import datetime
+
+    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+
+    month = datetime.datetime(2024, 1, 31) if spelled == "datetime" else spelled
+    preds, feats = _preds_and_feats(spark)
+    pop, _cases = select_shap_population(preds, feats, _params(months=(month,)))
+    assert set(pop["snap_date"]) == {"2024-01-31"}

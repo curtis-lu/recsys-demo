@@ -170,10 +170,13 @@ def create_pipeline() -> Pipeline:
             inputs=["model", "preprocessor", "parameters"],
             outputs="gain_ledger",
         ),
+        # The figures go out as drawing functions; the catalog draws, writes
+        # and closes them one at a time, and skips one that fails with a
+        # warning (ADR-0030 decision 7).
         Node(
             compute_shap_diagnostics,
             inputs=["model", "test_parquet_handle", "preprocessor", "parameters"],
-            outputs="shap_diagnostics",
+            outputs=["shap_diagnostics", "shap_summary_figures"],
         ),
         # P2b quadrant diagnostics: Spark picks the population (top@1 quadrant
         # plus a draw from every cell), then pandas builds a per-(item x
@@ -204,7 +207,7 @@ def create_pipeline() -> Pipeline:
         Node(
             compute_quadrant_cases,
             inputs=["model", "case_rows", "preprocessor", "parameters"],
-            outputs="cases_manifest",
+            outputs=["cases_manifest", "case_figures"],
         ),
         Node(
             log_experiment,
@@ -214,8 +217,10 @@ def create_pipeline() -> Pipeline:
             # order here has to match the signature. That dependency is also
             # what guarantees the catalog has written per_quadrant.json before
             # log_artifacts runs. cases_manifest goes last for the same reason
-            # (default None), which is what gets the cases PNGs and manifest
-            # written before log_artifacts.
+            # (default None). The PNGs are written with it: case_figures and
+            # shap_summary_figures are saved by the Runner with the other
+            # output of the same node, so both are on disk before
+            # log_artifacts.
             inputs=[
                 "model", "best_params", "best_iteration", "evaluation_results",
                 "feature_statistics", "feature_importance", "shap_diagnostics",

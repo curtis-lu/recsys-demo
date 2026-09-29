@@ -215,6 +215,16 @@ shap_diagnostics:
   type: JSONDataset
   filepath: data/models/${model_version}/diagnostics/shap_diagnostics.json
 
+# 圖由 catalog 逐張畫、存、關；case_figures 必須在 diagnostics/cases/（見
+# conf/base/catalog.yaml 同名條目的說明）。
+shap_summary_figures:
+  type: DiagnosticFiguresDataset
+  filepath: data/models/${model_version}/diagnostics/summary
+
+case_figures:
+  type: DiagnosticFiguresDataset
+  filepath: data/models/${model_version}/diagnostics/cases
+
 quadrant_profiles:
   type: JSONDataset
   filepath: data/models/${model_version}/diagnostics/per_quadrant.json

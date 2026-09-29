@@ -1,4 +1,13 @@
-"""per-item SHAP 診斷 orchestrator。"""
+"""per-item SHAP 診斷 orchestrator。
+
+The model is reached only through the adapter (ADR-0030 decisions 1 and 4):
+``attribution_cost`` for the budget guard, ``feature_attributions`` for the
+SHAP values. A model that cannot attribute raises ``UnsupportedCapability``
+and the whole diagnosis is skipped; one that cannot attribute against a
+per-item background degrades that option to ``global``. The figures are
+returned as drawing functions for the ``shap_summary_figures`` catalog entry
+(decision 7).
+"""
 
 import logging
 
@@ -8,12 +17,13 @@ import pandas as pd
 from recsys_tfb.core.logging import log_data_volume, log_step
 from recsys_tfb.io.extract import pdf_to_X
 from recsys_tfb.io.handles import require_complete_cache
+from recsys_tfb.models.base import UnsupportedCapability
 from recsys_tfb.models.feature_view import model_feature_view
 
 from . import data_access
-from ._util import _to_native
-from .attribution import attribution_budget_units, feature_attributions
-from .paths import per_item_summary_dir, safe_name, summary_dir
+from ._util import _to_native, unsupported_artifact
+from .figures import beeswarm
+from .paths import safe_name
 from .sampling import _positive_item_sample, _stratified_item_sample
 
 logger = logging.getLogger(__name__)
@@ -87,7 +97,7 @@ def _positive_profiles(model, path, item_values, item_col, label_col, feature_co
     log_data_volume(logger, "shap.positive_sample_pdf", pos_pdf, deep=True)
     X_pos = pdf_to_X(pos_pdf, model_view, parameters)
     with log_step(logger, "shap_values_positive"):
-        shap_pos = feature_attributions(model, X_pos, feature_cols)
+        shap_pos = model.feature_attributions(X_pos)
     pos_items = pos_pdf[item_col].values
     out = {}
     for item in pd.unique(pos_items):
@@ -101,16 +111,20 @@ def _positive_profiles(model, path, item_values, item_col, label_col, feature_co
     return out
 
 
-def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, parameters: dict) -> dict:
-    """SHAP 全域 / per-item（族群代表）。單次 shap_values 兩用。"""
+def compute_shap_diagnostics(
+    model, test_parquet_handle, preprocessor: dict, parameters: dict,
+) -> tuple[dict, dict]:
+    """SHAP 全域 / per-item（族群代表）。單次 shap_values 兩用。
+
+    Returns ``(shap_diagnostics, shap_summary_figures)``: the JSON result, and
+    ``{path under diagnostics/summary/: draw}`` for the beeswarm plots. Both
+    empty when disabled. A model that cannot attribute lands the "model
+    cannot" shape and no figures; every other exception stops the run
+    (ADR-0030 decision 4).
+    """
     cfg = parameters.get("diagnostics", {}).get("shap", {})
     if not cfg.get("enabled", True):
-        return {}
-
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import shap
+        return {}, {}
 
     from recsys_tfb.core.schema import get_schema
 
@@ -150,7 +164,14 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
 
     path = handle_paths(test_parquet_handle)
 
-    n_trees = attribution_budget_units(model)
+    # Decision — a model that cannot attribute at all skips this diagnosis with
+    # a warning and says so in the artifact. Asked twice, here and at the
+    # first attribution below: cost is the cheap question, the first real
+    # attribution the one that settles it.
+    try:
+        n_trees = model.attribution_cost()
+    except UnsupportedCapability as exc:
+        return _model_cannot_attribute(exc)
     eff_sample = sample_rows
     if eff_sample * max(1, n_trees) > max_budget:
         eff_sample = max(min_per_item, max_budget // max(1, n_trees))
@@ -164,7 +185,7 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     idx = _stratified_item_sample(item_values, eff_sample, min_per_item, seed=42)
     if len(idx) == 0:
         logger.warning("shap diagnostics: empty sample after stratification; skipping")
-        return {}
+        return {}, {}
 
     # 只取抽中的列 × (feature 欄 + item 欄 + label 欄)。生產上 item_col 通常即
     # categorical feature（已在 feature_cols 內），但診斷 fixture / cache 佈局未必；
@@ -182,27 +203,44 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     X = pdf_to_X(sample_pdf, model_view, parameters)
     scores = model.predict(X)
 
-    with log_step(logger, "shap_values"):
-        shap_values = feature_attributions(model, X, feature_cols)
+    try:
+        with log_step(logger, "shap_values"):
+            shap_values = model.feature_attributions(X)
+    except UnsupportedCapability as exc:
+        return _model_cannot_attribute(exc)
+    items = sample_pdf[item_col].values
 
-    # ---- per_item 能力探針（審查修復 2026-07-08）----
-    # interventional TreeSHAP 需 shap 自行解析樹結構；shap 0.42.1 的 SingleTree
-    # 以 float 陣列表示 threshold，無法表示 LightGBM 類別切分（"2||3||4"），而本
-    # 框架模型必含 item 類別切點 → 真模型上必炸（實證：6059dcef 129/161 棵樹
-    # SingleTree 解析失敗）。探針失敗＝整段降級回 global 行為＋notes 記錄
-    # （best-effort，不炸訓練）。
+    # ---- per_item 背景（審查修復 2026-07-08）----
+    # Decision — per_item attributes each item's rows against that item's own
+    # rows as background. A model that cannot attribute against a background
+    # — for any item — degrades the whole option to global with a note, and
+    # only that exception does; the global attributions above stay. Every
+    # item is attributed here, before anything is built from them, so an item
+    # that fails half way cannot leave a half per_item result. Today every
+    # LightGBM model degrades: shap 0.42.1 cannot build an interventional
+    # explainer over the categorical splits every model here has on the item
+    # (the adapter's feature_attributions docstring has the evidence).
     requested_background = background_mode
     degrade_note = None
+    per_item_values = {}
     if background_mode == "per_item":
         try:
-            probe = X[: min(len(X), 4)]
-            feature_attributions(model, probe, feature_cols, background=probe,
-                                 feature_perturbation="interventional")
-        except Exception as exc:
+            for item in pd.unique(items):
+                # 背景＝該 item 子母體（自己的前景列，上限 _BACKGROUND_CAP）。
+                X_item = X[items == item]
+                bg = _per_item_background(X_item, seed=42)
+                with log_step(logger, "shap_values_per_item"):
+                    per_item_values[item] = model.feature_attributions(
+                        X_item, background=bg)
+        except UnsupportedCapability as exc:
             background_mode = "global"
+            per_item_values = {}
+            # The library's own error type is the informative one, as before
+            # the adapter wrapped it.
+            cause = exc.__cause__ or exc
             degrade_note = (
                 "per_item 背景已降級為 global：interventional TreeSHAP 在目前"
-                f"版本組合下無法解析類別切分（{type(exc).__name__}）。"
+                f"版本組合下無法解析類別切分（{type(cause).__name__}）。"
                 "條件化背景不可行，見手冊已知限制。"
             )
             logger.warning("shap background=per_item 不可行，降級 global：%s", exc)
@@ -213,6 +251,9 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
     # ---- 正例 profile（解耦的正樣本目標 sample B；獨立第二次 SHAP）----
     # per_item 背景模式下不跑這第二次全域 pass：正例 profile 改在下面迴圈內,
     # 直接從該 item 自己的 per-item SHAP 輸出切 label==1 列(見迴圈內註解)。
+    # An UnsupportedCapability out of this pass is not caught: the model has
+    # just attributed the main sample the same way, so it would mean an
+    # adapter that can and cannot at once — a bug, which stops the run.
     if background_mode == "per_item":
         positive_profiles = {}
     else:
@@ -222,22 +263,15 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
             per_item=positive_sample_per_item, min_rows=positive_min_rows, top_k=top_k)
 
     # ---- per-item（族群代表 + 覆蓋率 metadata）----
-    items = sample_pdf[item_col].values
     label_present = background_mode == "per_item" and label_col in sample_pdf.columns
     labels = sample_pdf[label_col].values if label_present else None
     per_item = {}
     for item in pd.unique(items):
         mask = items == item
         if background_mode == "per_item":
-            # 背景＝該 item 子母體（自己的前景列，上限 _BACKGROUND_CAP）；
             # interventional TreeSHAP。全域 top_features/divergence 的全域向量
             # 仍用 shap_values（global 背景）算，見下方 mean_abs 用法不變。
-            X_item = X[mask]
-            bg = _per_item_background(X_item, seed=42)
-            with log_step(logger, "shap_values_per_item"):
-                sv_item = feature_attributions(
-                    model, X_item, feature_cols, background=bg,
-                    feature_perturbation="interventional")
+            sv_item = per_item_values[item]
             prof_all, ai = _signed_profile(sv_item, feature_cols, top_k)
         else:
             sv_item = None
@@ -282,34 +316,13 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
         reverse=True,
     )
 
-    # ---- PNG（best-effort：繪圖失敗不應中斷診斷/訓練，spec §4）----
-    sdir = summary_dir(parameters)
-    try:
-        plt.figure()
-        try:
-            shap.summary_plot(shap_values, features=X, feature_names=feature_cols, show=False)
-            plt.tight_layout()
-            plt.savefig(sdir / "shap_summary_global.png", dpi=100)
-        finally:
-            plt.close()
-    except Exception as e:
-        logger.warning("global shap summary plot failed: %s", e)
-
+    # ---- PNG：drawn by the shap_summary_figures catalog entry when it saves,
+    # one at a time; a figure that fails is its warning, not this node's.
+    figures = {"shap_summary_global.png": beeswarm(shap_values, X, feature_cols)}
     if cfg.get("per_item_beeswarm", True):
-        pdir = per_item_summary_dir(parameters)
         for item in pd.unique(items):
-            m = items == item
-            try:
-                plt.figure()
-                try:
-                    shap.summary_plot(shap_values[m], features=X[m],
-                                      feature_names=feature_cols, show=False)
-                    plt.tight_layout()
-                    plt.savefig(pdir / f"shap_summary__{safe_name(item)}.png", dpi=100)
-                finally:
-                    plt.close()
-            except Exception as e:
-                logger.warning("per-item beeswarm failed for item %s: %s", item, e)
+            figures[f"per_item/shap_summary__{safe_name(item)}.png"] = beeswarm(
+                shap_values, X, feature_cols, rows=items == item)
 
     logger.info("shap diagnostics: n_sample=%d n_trees=%d items=%d",
                 len(idx), n_trees, len(per_item))
@@ -323,4 +336,9 @@ def compute_shap_diagnostics(model, test_parquet_handle, preprocessor: dict, par
             "shap background=per_item（interventional，背景=各 item 子母體，上限 128 列）；"
             "divergence 的全域向量仍為 global 背景——占比混入背景效應，判讀見手冊 §12"
         ]
-    return out
+    return out, figures
+
+
+def _model_cannot_attribute(exc):
+    logger.warning("shap diagnostics: skipped, the model cannot attribute: %s", exc)
+    return unsupported_artifact(exc), {}

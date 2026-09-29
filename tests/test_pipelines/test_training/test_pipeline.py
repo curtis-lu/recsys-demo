@@ -61,6 +61,7 @@ class TestTrainingPipeline:
             "train_lgb_handle", "train_dev_lgb_handle",
             "feature_statistics", "feature_importance", "gain_ledger", "shap_diagnostics",
             "shap_population", "case_rows", "quadrant_profiles", "cases_manifest",
+            "shap_summary_figures", "case_figures",
             "sample_weight_report", "group_filter_report",
         }
         assert pipeline.outputs == expected

@@ -19,16 +19,32 @@ def select_shap_population(
     ``quadrant/role/rank/score/label`` + group 欄 + 特徵,供 ``compute_quadrant_cases``
     畫單列案例圖。rank/象限/選樣/join 全在 Spark(executor);driver 只 toPandas 小族群。
 
-    ``quadrant_enabled=false`` → ``(None, None)``。best-effort:選樣失敗亦回 ``(None, None)``
-    (不中斷訓練)。``predict_manifest`` 僅作 in-DAG 排序依賴(與 ``compute_test_metrics``
-    同慣例;三個資料輸入皆無 node producer,不掛此依賴會被 topo-sort 排到 predict 前讀到
-    未寫入的預測)。
+    ``quadrant_enabled=false`` → ``(None, None)``。``predict_manifest`` 僅作 in-DAG
+    排序依賴(與 ``compute_test_metrics`` 同慣例;三個資料輸入皆無 node producer,不掛此
+    依賴會被 topo-sort 排到 predict 前讀到未寫入的預測)。
+
+    Reads ``dataset.test_snap_dates``' months only, from both tables, and ranks
+    with ``utils.ranking.rank_by_score_then_item`` on ``schema``'s score column
+    (ADR-0030 decisions 5 and 12). The ``score`` column this hands
+    ``compute_quadrant_cases`` is a name the two modules agree on, not the
+    prediction table's column, so it stays ``score`` whatever ``schema`` calls
+    that one.
+
+    A failure stops the run: this node asks nothing of the model, so nothing
+    here is "the model cannot" (ADR-0030 decision 4). The two ``raise`` in the
+    body are a **runtime backstop** (no configured test month: A36 stops the
+    training command before Spark starts) and a **post-condition** (the
+    configured months matched no row: a population read as empty would land
+    as ``{}``, the shape "switched off" lands, and the quadrants would go
+    missing without a word).
     """
     from pyspark.sql import Window
     from pyspark.sql import functions as F
     from pyspark.storagelevel import StorageLevel
 
+    from recsys_tfb.core.date_ranges import as_date_list
     from recsys_tfb.core.schema import get_schema
+    from recsys_tfb.utils.ranking import rank_by_score_then_item
 
     cfg = parameters.get("diagnostics", {}).get("shap", {})
     if not cfg.get("quadrant_enabled", True):
@@ -41,17 +57,44 @@ def select_shap_population(
     schema = get_schema(parameters)
     item_col = schema["item"]
     label_col = schema["label"]
+    score_col = schema["score"]
     # The rank window is a query group; the two joins back to ``test_model_input``
     # are at candidate grain, so they take identity (ADR-0025 decision 2).
     group_cols = schema["query_group_columns"]
     identity_cols = schema["identity_columns"]
 
+    # Decision — which months: dataset.test_snap_dates, the ones this run
+    # predicted and compute_shap_diagnostics describes (node rule 14). Both
+    # tables keep every month ever written under their version, so an
+    # unfiltered read grows with that history, not with this run.
+    months = as_date_list((parameters.get("dataset") or {}).get("test_snap_dates") or [])
+    # Runtime backstop — A36 rejects this config before Spark starts.
+    if not months:
+        raise ValueError(
+            "select_shap_population: dataset.test_snap_dates is unset or empty, "
+            "so there is no month to pick the quadrant population from.")
+    # Compared as text, the rule compute_test_metrics reads the same table
+    # with (pipelines/training/steps/scored_months.restrict_to_scored_months,
+    # whose docstring says why), on months normalised the way it normalises
+    # them (core.date_ranges.as_date_list). Written out here because a
+    # library module may not import a pipeline's steps/ (S3); once ADR-0030
+    # decision 6 moves this node into the training pipeline, it calls that
+    # function instead.
+    time_text = F.col(schema["time"]).cast("string")
+    in_months = time_text == months[0] if len(months) == 1 else time_text.isin(months)
+    training_eval_predictions = training_eval_predictions.filter(in_months)
+    test_model_input = test_model_input.filter(in_months)
+
     labeled = None
     try:
-        # rank:item_col 作 tie-break,讓象限指派在同分時可重現。
-        w_rank = Window.partitionBy(*group_cols).orderBy(
-            F.col("score").desc(), F.col(item_col))
-        ranked = training_eval_predictions.withColumn("_rank", F.row_number().over(w_rank))
+        # Decision — rank with the rule evaluation ranks with (score, then
+        # item, then each event column), so a declared event cannot make the
+        # quadrants' top-1 differ from evaluation's.
+        ranked = training_eval_predictions.withColumn(
+            "_rank",
+            rank_by_score_then_item(
+                group_cols, score_col, item_col, schema.get("event", [])),
+        )
 
         is_top = F.col("_rank") <= F.lit(top_k_decision)
         is_pos = F.col(label_col) == F.lit(1)
@@ -82,42 +125,51 @@ def select_shap_population(
         # ---- 輸出 2:全格極值案例(role=high/low)----
         # 不對稱 tiebreak:同分格 high/low 落不同列;真正單行格才落同一列。
         w_high = Window.partitionBy(item_col, "quadrant").orderBy(
-            F.col("score").desc(), F.col("_ck").asc())
+            F.col(score_col).desc(), F.col("_ck").asc())
         w_low = Window.partitionBy(item_col, "quadrant").orderBy(
-            F.col("score").asc(), F.col("_ck").desc())
+            F.col(score_col).asc(), F.col("_ck").desc())
         highs = (labeled.withColumn("_rn", F.row_number().over(w_high))
                  .where(F.col("_rn") == F.lit(1)).withColumn("role", F.lit("high")))
         lows = (labeled.withColumn("_rn", F.row_number().over(w_low))
                 .where(F.col("_rn") == F.lit(1)).withColumn("role", F.lit("low")))
         extremes = highs.unionByName(lows).select(
             *identity_cols, "quadrant", "role",
-            F.col("_rank").alias("rank"), F.col("score").alias("score"),
+            F.col("_rank").alias("rank"), F.col(score_col).alias("score"),
             F.col(label_col).alias("label"))
         # test_model_input 也有 label 欄 → drop 以免 join 後 ambiguous(label 非特徵)。
         feats_only = (test_model_input.drop(label_col)
                       if label_col in test_model_input.columns else test_model_input)
         case_pdf = extremes.join(
             feats_only, on=identity_cols, how="inner").toPandas()
-    except Exception as e:  # best-effort:選樣失敗不中斷訓練(spec §12)
-        logger.warning("select_shap_population failed: %s", e)
-        return None, None
     finally:
         # Runner 只釋放 MemoryDataset,不碰 Spark DataFrame 的 storage(core/runner.py
         # 與 core/catalog.py 都沒有 unpersist)。少了這裡,這份 cache 會佔著
-        # executor 直到 SparkSession 結束。finally 而非成功路徑:這個 node 是
-        # best-effort,上面的 except 同樣會離開這個函式。
+        # executor 直到 SparkSession 結束。
+        # In a finally, not on the success path: a failure above leaves this
+        # function too, on its way to stopping the run.
         if labeled is not None:
             try:
                 labeled.unpersist()
             except Exception as release_error:
-                # 這一行是 persist 帶進來的新失敗來源:在 finally 裡 raise 會蓋掉
-                # 上面的 return,把 best-effort 變成硬失敗。釋放不掉只能記下來。
+                # Logged, not raised. Raised from here it would replace the
+                # exception the body is propagating (the one that says what
+                # went wrong); on the success path the results are already in
+                # the driver, and the leaked cache is the whole cost.
                 logger.warning(
                     "select_shap_population: unpersist failed: %s", release_error)
 
+    # Post-condition — every configured month was predicted
+    # (compute_test_metrics checks that first), so an empty population means
+    # the month filter or the join back to test_model_input matched nothing:
+    # a spelling that differs between the config and a table, say. Landed as
+    # {} it would read as "switched off".
+    if len(pop_pdf) == 0:
+        raise ValueError(
+            f"select_shap_population: no prediction for months {months} joined "
+            f"back to test_model_input. Check that {schema['time']} is spelled "
+            "in both tables as dataset.test_snap_dates spells it.")
     logger.info(
         "select_shap_population: pop_rows=%d case_rows=%d items=%d per_cell=%d",
-        len(pop_pdf), len(case_pdf),
-        pop_pdf[item_col].nunique() if len(pop_pdf) else 0, per_cell,
+        len(pop_pdf), len(case_pdf), pop_pdf[item_col].nunique(), per_cell,
     )
     return pop_pdf, case_pdf

@@ -267,7 +267,7 @@ def test_shap_single_call_and_outputs(shap_setup, monkeypatch):
 
     monkeypatch.setattr(shap.TreeExplainer, "shap_values", counting_sv)
 
-    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
 
     assert calls["n"] == 1                          # 單次計算
     assert set(out) >= {"global", "per_item", "item_idiosyncrasy"}
@@ -280,28 +280,27 @@ def test_shap_single_call_and_outputs(shap_setup, monkeypatch):
     assert out["per_item"]["rare"]["n_sampled"] <= 2
     assert {"n_sampled", "n_positive", "score_min", "score_max", "score_mean", "low_coverage"} \
         <= set(out["per_item"]["rare"])
-    from recsys_tfb.diagnosis.model.paths import summary_dir
-    assert (summary_dir(parameters) / "shap_summary_global.png").exists()
+    assert "shap_summary_global.png" in _figures
 
 
 def test_shap_disabled(shap_setup):
     adapter, handle, preprocessor, parameters = shap_setup
     parameters["diagnostics"]["shap"]["enabled"] = False
-    assert diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters) == {}
+    assert diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters) == ({}, {})
 
 
 def test_shap_budget_guard_reduces_sample(shap_setup, caplog):
     adapter, handle, preprocessor, parameters = shap_setup
     parameters["diagnostics"]["shap"]["max_budget"] = 1  # 強制觸發降抽樣
     with caplog.at_level("WARNING"):
-        out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+        out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     assert out != {}
     assert any("budget" in r.getMessage().lower() for r in caplog.records)
 
 
 def test_per_item_top_features_signed(shap_setup):
     adapter, handle, preprocessor, parameters = shap_setup
-    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     for blk in out["per_item"].values():
         assert all({"feature", "mean_abs_shap", "mean_signed_shap"} <= set(r)
                    for r in blk["top_features"])
@@ -310,7 +309,7 @@ def test_per_item_top_features_signed(shap_setup):
 def test_per_item_profile_positive_and_coverage(shap_setup):
     adapter, handle, preprocessor, parameters = shap_setup
     parameters["diagnostics"]["shap"]["positive_min_rows"] = 5
-    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     for blk in out["per_item"].values():
         assert "top_features_positive" in blk
         assert "positive_low_coverage" in blk
@@ -361,7 +360,7 @@ def test_divergence_reversed_spearman_is_one():
 
 def test_per_item_divergence_and_idiosyncrasy(shap_setup):
     adapter, handle, preprocessor, parameters = shap_setup
-    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     for blk in out["per_item"].values():
         assert 0.0 <= blk["divergence_from_global"] <= 1.0
         assert isinstance(blk["idiosyncratic_features"], list)
@@ -374,7 +373,7 @@ def test_per_item_divergence_and_idiosyncrasy(shap_setup):
 def test_per_item_signed_can_be_negative(shap_setup):
     # carry-over guard: mean_signed_shap must be the SIGNED mean, not abs.
     adapter, handle, preprocessor, parameters = shap_setup
-    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     found = any(
         r["mean_signed_shap"] is not None and r["mean_signed_shap"] < r["mean_abs_shap"]
         for blk in out["per_item"].values() for r in blk["top_features"]
@@ -382,35 +381,46 @@ def test_per_item_signed_can_be_negative(shap_setup):
     assert found
 
 
-def test_summary_pngs_global_and_per_item(shap_setup):
-    from recsys_tfb.diagnosis.model.paths import (
-        per_item_summary_dir, safe_name, summary_dir)
+def test_summary_figures_global_and_per_item(shap_setup):
+    """One figure per item plus the global one, under the names and
+    sub-paths the PNGs have always had (ADR-0030 decision 7: same files, same
+    place — the catalog entry roots them at diagnostics/summary/)."""
+    from recsys_tfb.diagnosis.model.paths import safe_name
     adapter, handle, preprocessor, parameters = shap_setup
-    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
-    assert (summary_dir(parameters) / "shap_summary_global.png").exists()
-    pidir = per_item_summary_dir(parameters)
-    for item in out["per_item"]:
-        assert (pidir / f"shap_summary__{safe_name(item)}.png").exists()
-    # 舊命名不應再產出
-    assert not (diag.diagnostics_dir(parameters) / "waterfall_high_0.png").exists()
+    out, figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert set(figures) == {"shap_summary_global.png"} | {
+        f"per_item/shap_summary__{safe_name(item)}.png" for item in out["per_item"]}
+
+
+def test_summary_figures_are_drawn_on_call_not_by_the_node(shap_setup):
+    """The node draws nothing and writes nothing; calling a drawing function
+    gives the figure (what lets a test look at a chart without a disk)."""
+    import matplotlib.pyplot as plt
+
+    adapter, handle, preprocessor, parameters = shap_setup
+    open_before = set(plt.get_fignums())
+    _out, figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert set(plt.get_fignums()) == open_before
+    assert not list(pathlib.Path(".").rglob("*.png"))    # cwd is this test's tmp_path
+
+    fig = figures["shap_summary_global.png"]()
+    try:
+        assert fig.axes, "the beeswarm drew no axes"
+    finally:
+        plt.close(fig)
 
 
 def test_per_item_beeswarm_can_be_disabled(shap_setup):
-    import os
-    from recsys_tfb.diagnosis.model.paths import (
-        per_item_summary_dir, summary_dir)
     adapter, handle, preprocessor, parameters = shap_setup
     parameters["diagnostics"]["shap"]["per_item_beeswarm"] = False
-    diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
-    assert (summary_dir(parameters) / "shap_summary_global.png").exists()
-    pidir = per_item_summary_dir(parameters)
-    assert len(os.listdir(pidir)) == 0
+    _out, figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    assert set(figures) == {"shap_summary_global.png"}
 
 
 def test_profile_positive_can_be_disabled(shap_setup):
     adapter, handle, preprocessor, parameters = shap_setup
     parameters["diagnostics"]["shap"]["profile_positive"] = False
-    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     for blk in out["per_item"].values():
         assert blk["top_features_positive"] is None
         assert blk["positive_low_coverage"] is False
@@ -420,9 +430,9 @@ def test_shap_background_absent_equals_explicit_global(shap_setup):
     # 回歸鎖：background 鍵缺席（預設 "global"）與顯式寫 "global" 的輸出 dict
     # 必須全等——這是「global 模式行為完全不變」宣稱的驗收依據。
     adapter, handle, preprocessor, parameters = shap_setup
-    out_absent = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    out_absent, _ = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     parameters["diagnostics"]["shap"]["background"] = "global"
-    out_explicit = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    out_explicit, _ = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     assert out_absent == out_explicit
     assert "notes" not in out_absent and "notes" not in out_explicit
 
@@ -430,7 +440,7 @@ def test_shap_background_absent_equals_explicit_global(shap_setup):
 def test_shap_per_item_background_contract(shap_setup):
     adapter, handle, preprocessor, parameters = shap_setup
     parameters["diagnostics"]["shap"]["background"] = "per_item"
-    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     assert set(out) >= {"global", "per_item", "item_idiosyncrasy", "notes"}
     assert any("per_item" in n for n in out["notes"])
     contract_keys = {"top_features", "n_sampled", "n_positive", "score_min", "score_max",
@@ -446,7 +456,7 @@ def test_shap_per_item_profile_positive_disabled(shap_setup):
     adapter, handle, preprocessor, parameters = shap_setup
     parameters["diagnostics"]["shap"]["background"] = "per_item"
     parameters["diagnostics"]["shap"]["profile_positive"] = False
-    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     for blk in out["per_item"].values():
         assert blk["top_features_positive"] is None
         assert blk["positive_low_coverage"] is False
@@ -477,21 +487,24 @@ def test_per_item_background_uses_item_subset_not_full_sample(shap_setup, monkey
         return real_bg(X_item, seed)
 
     monkeypatch.setattr(spi, "_per_item_background", spy_bg)
-    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     n_sampled = sorted(blk["n_sampled"] for blk in out["per_item"].values())
     assert sorted(seen_shapes) == n_sampled
 
 
-def test_shap_plot_failure_does_not_abort(shap_setup, monkeypatch):
+def test_shap_plot_failure_does_not_reach_the_node(shap_setup, monkeypatch):
+    """Plotting is the catalog's, at save time: a summary_plot that raises
+    cannot fail the node. What happens to the figure is the dataset's
+    (tests/test_io/test_diagnostic_figures_dataset.py)."""
     import shap
     adapter, handle, preprocessor, parameters = shap_setup
-    # force EVERY summary_plot to raise; diagnostics must still return a dict.
     def boom(*a, **k):
         raise RuntimeError("plot exploded")
     monkeypatch.setattr(shap, "summary_plot", boom)
-    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
-    assert isinstance(out, dict)
+    out, figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     assert "per_item" in out and len(out["per_item"]) >= 1
+    with pytest.raises(RuntimeError, match="plot exploded"):
+        figures["shap_summary_global.png"]()
 
 
 def test_divergence_integration_multifeature(tmp_path, monkeypatch):
@@ -525,7 +538,7 @@ def test_divergence_integration_multifeature(tmp_path, monkeypatch):
                                                "min_rows_per_item": 10, "sample_rows": 240,
                                                "max_budget": 4000000,
                                                "divergence_metric": metric, "divergence_top_k": 2}}}
-        out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+        out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
         for blk in out["per_item"].values():
             assert 0.0 <= blk["divergence_from_global"] <= 1.0
             assert set(blk["idiosyncratic_features"]) <= {"f0", "f1", "f2", "f3"}
@@ -577,7 +590,7 @@ def test_shap_does_not_full_load_to_pandas(shap_setup, monkeypatch):
 
     monkeypatch.setattr(ParquetHandle, "to_pandas", boom)
     adapter, handle, preprocessor, parameters = shap_setup
-    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     assert set(out) >= {"global", "per_item"}
 
 
@@ -623,7 +636,7 @@ def test_shap_on_hive_partitioned_cache(tmp_path):
                   "diagnostics": {"shap": {"enabled": True, "top_k": 3,
                                            "min_rows_per_item": 10, "sample_rows": 120,
                                            "max_budget": 4000000}}}
-    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     assert set(out["per_item"]) == {"A", "B"}     # prod_name 從分區重建成功
     assert len(out["global"]["top_features"]) == 3
 
@@ -661,7 +674,7 @@ def test_positive_profile_covered_by_targeted_sampling(tmp_path, monkeypatch):
                                            "profile_positive": True,
                                            "positive_min_rows": 20,
                                            "positive_sample_per_item": 40}}}
-    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     # 至少一個 item 的正例 profile 因針對抽樣而有值
     assert any(out["per_item"][it]["top_features_positive"] is not None
                for it in out["per_item"])
@@ -672,16 +685,15 @@ def test_positive_profile_skipped_when_disabled(shap_setup, monkeypatch):
     adapter, handle, preprocessor, parameters = shap_setup
     parameters["diagnostics"]["shap"]["profile_positive"] = False
 
-    import recsys_tfb.diagnosis.model.shap_per_item as spi
     calls = {"n": 0}
-    real = spi.feature_attributions
+    real = type(adapter).feature_attributions
 
-    def counting(*a, **k):
+    def counting(self, *a, **k):
         calls["n"] += 1
-        return real(*a, **k)
+        return real(self, *a, **k)
 
-    monkeypatch.setattr(spi, "feature_attributions", counting)
-    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    monkeypatch.setattr(type(adapter), "feature_attributions", counting)
+    out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     assert calls["n"] == 1                     # 只有 sample A 那一次
     for it in out["per_item"]:
         assert out["per_item"][it]["top_features_positive"] is None
@@ -694,7 +706,6 @@ def test_positive_profile_extra_pass_and_bounded(tmp_path, monkeypatch):
     import numpy as np
     import pandas as pd
     from recsys_tfb.diagnosis.model import data_access
-    import recsys_tfb.diagnosis.model.shap_per_item as spi
 
     rng = np.random.RandomState(0)
     n = 2000
@@ -723,11 +734,11 @@ def test_positive_profile_extra_pass_and_bounded(tmp_path, monkeypatch):
                                            "positive_sample_per_item": per_item}}}
 
     shap_calls = {"n": 0}
-    real_attr = spi.feature_attributions
+    real_attr = type(adapter).feature_attributions
 
-    def counting_attr(*a, **k):
+    def counting_attr(self, *a, **k):
         shap_calls["n"] += 1
-        return real_attr(*a, **k)
+        return real_attr(self, *a, **k)
 
     take_lens = []
     real_take = data_access.take_rows
@@ -736,7 +747,7 @@ def test_positive_profile_extra_pass_and_bounded(tmp_path, monkeypatch):
         take_lens.append(len(indices))
         return real_take(p, indices, columns)
 
-    monkeypatch.setattr(spi, "feature_attributions", counting_attr)
+    monkeypatch.setattr(type(adapter), "feature_attributions", counting_attr)
     monkeypatch.setattr(data_access, "take_rows", spy_take)
 
     diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
@@ -751,23 +762,138 @@ def test_shap_per_item_degrades_to_global_when_interventional_unavailable(
     """審查後真跑 smoke 的實證：shap 0.42.1 的 SingleTree 無法表示 LightGBM
     類別切分（"2||3||4" 轉 float 炸），interventional 在真模型上必炸。
     per_item 模式必須降級回 global 行為＋notes 說明，不炸訓練。
-    這裡以 monkeypatch 模擬「帶 background 就炸」的版本組合。"""
-    from recsys_tfb.diagnosis.model import shap_per_item as spi
+    這裡以 monkeypatch 模擬 shap「帶 background 就炸」的版本組合：the adapter
+    turns shap's ValueError into UnsupportedCapability, which is what the node
+    degrades on."""
+    import shap
+
     adapter, handle, preprocessor, parameters = shap_setup
 
     parameters["diagnostics"]["shap"]["background"] = "global"
-    out_global = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    out_global, _ = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
 
-    real = spi.feature_attributions
-    def flaky(model, X, feature_names, **kwargs):
-        if kwargs.get("background") is not None:
+    real = shap.TreeExplainer
+    def flaky(model, *args, **kwargs):
+        if kwargs.get("data") is not None:
             raise ValueError("could not convert string to float: '2||3||4'")
-        return real(model, X, feature_names, **kwargs)
-    monkeypatch.setattr(spi, "feature_attributions", flaky)
+        return real(model, *args, **kwargs)
+    monkeypatch.setattr(shap, "TreeExplainer", flaky)
 
     parameters["diagnostics"]["shap"]["background"] = "per_item"
-    out = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+    out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     notes = out.pop("notes")
     assert any("降級" in n for n in notes)
+    assert any("ValueError" in n for n in notes)   # the library's type, as before
     # 除 notes 外，輸出與 global 模式完全一致（降級＝global 行為）
     assert out == out_global
+
+
+# ---- error policy (ADR-0030 decision 4) ----
+#
+# "The model cannot" (UnsupportedCapability) skips the diagnosis, warns and
+# lands its own shape; anything else stops the run. The fake adapter from
+# "training through the ModelAdapter" (#482) is the model that cannot.
+
+def _fake_model(feature_names=("f0", "f1")):
+    from tests.fake_adapter import FakeAdapter
+
+    rng = np.random.RandomState(0)
+    X = rng.randn(60, len(feature_names))
+    y = (X[:, 0] > 0).astype(float)
+    fake = FakeAdapter()
+    fake.train(fake.build_train_data(X, y, feature_names=list(feature_names),
+                                     categorical_features=[]),
+               {}, num_iterations=5)
+    return fake
+
+
+def _unsupported(result):
+    return result.get("enabled") is True and result.get("supported") is False
+
+
+def test_shap_skipped_with_a_warning_when_the_model_cannot_attribute(shap_setup, caplog):
+    _adapter, handle, preprocessor, parameters = shap_setup
+    with caplog.at_level("WARNING"):
+        out, figures = diag.compute_shap_diagnostics(
+            _fake_model(), handle, preprocessor, parameters)
+    assert _unsupported(out)
+    assert figures == {}
+    assert any("cannot attribute" in r.getMessage() for r in caplog.records)
+
+
+def test_shap_failure_that_is_not_the_model_stops_the_run(shap_setup, monkeypatch):
+    """Mutation target: catching Exception instead of UnsupportedCapability
+    in compute_shap_diagnostics turns this green-by-swallowing into red."""
+    adapter, handle, preprocessor, parameters = shap_setup
+
+    def bug(self, X, *, background=None):
+        raise KeyError("a bug, not a missing capability")
+
+    monkeypatch.setattr(type(adapter), "feature_attributions", bug)
+    with pytest.raises(KeyError, match="a bug"):
+        diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+
+
+def test_feature_importance_skipped_when_the_model_keeps_none():
+    out = diag.compute_feature_importance(_fake_model(), {"diagnostics": {}})
+    assert _unsupported(out)
+
+
+def test_feature_importance_failure_that_is_not_the_model_stops_the_run(
+        fitted_adapter, monkeypatch):
+    def bug(self, kind="split"):
+        raise KeyError("a bug")
+
+    monkeypatch.setattr(type(fitted_adapter), "feature_importance", bug)
+    with pytest.raises(KeyError, match="a bug"):
+        diag.compute_feature_importance(fitted_adapter, {"diagnostics": {}})
+
+
+def test_per_item_that_fails_for_a_later_item_degrades_and_keeps_the_global_result(
+        shap_setup, monkeypatch):
+    """An option the model cannot do degrades; it does not throw away what was
+    computed (ADR-0030 decision 4). Here the background attribution works
+    for the first item and not the second — the result must be the global
+    one plus the degrade note, not the "model cannot" shape."""
+    from recsys_tfb.models.base import UnsupportedCapability
+
+    adapter, handle, preprocessor, parameters = shap_setup
+    out_global, _ = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+
+    real = type(adapter).feature_attributions
+    with_background = {"n": 0}
+
+    def fails_on_the_second_item(self, X, *, background=None):
+        if background is not None:
+            with_background["n"] += 1
+            if with_background["n"] == 2:
+                raise UnsupportedCapability("cannot for this one") from ValueError("x")
+        return real(self, X, background=background)
+
+    monkeypatch.setattr(type(adapter), "feature_attributions", fails_on_the_second_item)
+    parameters["diagnostics"]["shap"]["background"] = "per_item"
+    out, figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
+
+    assert with_background["n"] == 2
+    notes = out.pop("notes")
+    assert any("降級" in n for n in notes)
+    assert out == out_global
+    assert "shap_summary_global.png" in figures
+
+
+def test_per_item_background_bug_is_not_a_degrade(shap_setup, monkeypatch):
+    """Only UnsupportedCapability degrades the option; a bug in the
+    background attribution stops the run. Mutation target: widening the
+    per_item ``except`` back to ``Exception``."""
+    adapter, handle, preprocessor, parameters = shap_setup
+    real = type(adapter).feature_attributions
+
+    def bug_with_background(self, X, *, background=None):
+        if background is not None:
+            raise KeyError("a bug in the background path")
+        return real(self, X, background=background)
+
+    monkeypatch.setattr(type(adapter), "feature_attributions", bug_with_background)
+    parameters["diagnostics"]["shap"]["background"] = "per_item"
+    with pytest.raises(KeyError, match="background path"):
+        diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)

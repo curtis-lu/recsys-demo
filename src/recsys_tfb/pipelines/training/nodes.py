@@ -1589,8 +1589,8 @@ def log_experiment(
                     quadrant_profiles, cases_manifest,
                 )
 
-                # --- diagnostics artifacts (JSON written by catalog, PNG by shap node;
-                #     upload the whole dir) ---
+                # --- diagnostics artifacts (JSON and PNG both written by the
+                #     catalog; upload the whole dir) ---
                 # This one write stays in nodes.py rather than moving to
                 # steps/experiment_log.py: the architecture audit only scans
                 # nodes*.py, so a write that moves out of this file stops being

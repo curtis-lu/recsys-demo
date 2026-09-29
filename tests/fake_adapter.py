@@ -21,6 +21,10 @@ every adapter; the adapter only builds and saves (ADR-0030 decisions 1 and
 10). What it keeps from a ranking build is the row order — it has no use for
 the per-group counts, which is allowed: ``build_train_data`` is handed them,
 not required to store them.
+
+None of the diagnostics' optional capabilities are implemented, so every one
+raises ``UnsupportedCapability``: the double for "a model the diagnostics
+cannot read".
 """
 
 from __future__ import annotations
@@ -164,8 +168,11 @@ class FakeAdapter(ModelAdapter):
         self._coef = np.asarray(payload["coef"])
         self._feature_names = payload["feature_names"]
 
-    def feature_importance(self, kind="split"):
-        return dict(zip(self._feature_names, np.abs(self._coef[:-1]).tolist()))
+    # No feature_attributions, attribution_cost, tree_structure or
+    # feature_importance: a logistic regression has no trees and keeps no
+    # split / gain counts, so it takes the ABC's defaults, which raise
+    # UnsupportedCapability. That is what lets the diagnostics' "the model
+    # cannot" path run end to end (ADR-0030 decision 4).
 
     def log_to_mlflow(self):
         """No MLflow flavour for a test double; nothing to log."""

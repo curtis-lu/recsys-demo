@@ -89,6 +89,22 @@ def test_degrades_when_gain_ledger_disabled_upstream():
     assert out["reason"] != compute(None, None, PARAMS)["reason"]
 
 
+def test_degrades_when_the_trained_model_cannot_keep_a_ledger():
+    """The fourth shape (ADR-0030 decision 4): the model has no trees. Its
+    reason is its own — not "evaluation ran alone", not "switched off" — and
+    carries the adapter's words, because the fix is not a config key."""
+    landed = {"enabled": True, "supported": False,
+              "reason": "FakeAdapter has no tree structure"}
+    out = compute(landed, None, PARAMS)
+    assert out["enabled"] is True and out["available"] is False
+    assert "模型做不到" in out["reason"]
+    assert "FakeAdapter has no tree structure" in out["reason"]
+    others = {compute(None, None, PARAMS)["reason"],
+              compute({"enabled": False}, None, PARAMS)["reason"]}
+    assert out["reason"] not in others
+    assert set(out) == set(compute(LEDGER, None, PARAMS))   # the key-set contract
+
+
 def test_joins_item_ability_when_present():
     ability = {"per_item": [{"item": "ccard_ins", "query_centered_auc": 0.62}]}
     out = compute(LEDGER, ability, PARAMS)
