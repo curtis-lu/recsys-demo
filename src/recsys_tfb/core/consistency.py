@@ -697,8 +697,12 @@ Layer 1 — config-static (implemented here; aggregated by
   empty) holding none of ``FIXED_PARAMS_RESERVED_KEYS`` — keys another
   setting or the framework decides, which the fit's stacking would
   otherwise overwrite in silence or let overwrite the framework's value.
-  Checked in either mode. Predicate: ``skip_hpo_param_errors``. NOT
-  aggregated, for A57's reason: only training reads the keys.
+  Checked in either mode. Only the six names: LightGBM's aliases for them
+  (``n_estimators``, ...) and the parameters a built ``.bin`` cannot change
+  (``max_bin``, ...) get through, as they do through ``algorithm_params`` and
+  ``search_space`` (#493, #492). Predicate: ``skip_hpo_param_errors``;
+  resolver: ``hpo_enabled``. NOT aggregated, for A57's reason: only training
+  reads the keys.
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,

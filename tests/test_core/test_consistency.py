@@ -5211,6 +5211,18 @@ class TestBinaryTestMetricsA54:
         assert "dataset.test_zero_positive_group_ratio above 0" in err
         assert "test_metrics.selection_metric to a ranking metric" in err
 
+    def test_skipping_hpo_changes_nothing_here(self):
+        """ADR-0030 decision 11: without a search the HPO objective still
+        defaults the selection metric and still decides what test scores, so
+        A54 blocks exactly as it does with one — unlike A48, which the mode
+        switches off."""
+        for hpo_enabled in (True, False):
+            params = _test_side("pooled_average_precision")
+            params["training"]["hpo_enabled"] = hpo_enabled
+            verdict = binary_test_metrics_verdict(params)
+            assert len(verdict.errors) == 1, hpo_enabled
+            assert "follows training.hpo_objective" in verdict.errors[0]
+
     @pytest.mark.parametrize("metric", _BINARY_OBJECTIVES)
     def test_a_written_binary_selection_metric_is_blocked(self, metric):
         verdict = binary_test_metrics_verdict(

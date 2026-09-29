@@ -4,7 +4,8 @@ ADR-0030 decision 13: the parts of ``__main__.py``'s ``training()`` that only
 the training pipeline understands live here, where they can be tested without
 the CLI — the shape of ``pipelines/dataset/run_contract.py`` (ADR-0029
 decision 11). The command keeps what every command does — load the config,
-start Spark, resolve the catalog, write the manifests, run the pipeline — and
+start Spark, resolve the catalog, write the manifests, run the pipeline, and
+log what it decided (including the one-line notices about the mode) — and
 asks this module the rest:
 
 - before the run: the config checks only training runs

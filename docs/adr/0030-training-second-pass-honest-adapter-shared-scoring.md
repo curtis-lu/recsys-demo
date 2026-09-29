@@ -361,7 +361,10 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 > - **跟上文不同的一處：`search_id` 也拿掉 `hpo_enabled`**（`core/versioning.py` 的 `SEARCH_ID_IRRELEVANT_KEYS`，連同 `n_trials`、`fixed_params`）。搜尋裡它只可能是 `true`（寫了或沒寫），進雜湊分不出任何東西，只會讓這個鍵出現之前跑完的搜尋全部接不回去。所以這次升級 `model_version` 變一次、`search_id` 不變：已經跑完的搜尋，下次跑直接用它的 checkpoint，也不讀 val（決定 12 第 1 件）。
 > - 設定檢查是新的 A58（`core/consistency.py` 的 `skip_hpo_param_errors`）：`hpo_enabled` 寫了就要是 true 或 false（只有 false 會跳過，寫成字串 `"false"` 會照跑 HPO，所以擋）；`fixed_params` 要是 mapping，`null`（鍵底下只剩註解時 YAML 讀成 null）當成空的；六個保留鍵兩種模式都擋。不進 `validate_config_consistency`，理由同 A57：只有 training 讀這兩個鍵。「這次跑不跑 HPO」只有一個讀法，`hpo_enabled(parameters)`，A48 與 CLI 都呼叫它。
 > - 模式怎麼到 `create_pipeline`：CLI 呼叫 `run_contract.pipeline_kwargs`，得到 `{"hpo_enabled": ...}`。HPO 模式的 node 與宣告順序跟以前完全相同（val 的複製仍排在 test 的複製之前）。
-> - `--fresh-hpo` 在這個模式下沒有東西可清：CLI 印一行警告，照跑。
+> - `--fresh-hpo` 在這個模式下沒有東西可清：CLI 印一行警告，照跑。反過來，HPO 模式下寫了 `fixed_params`，`tune_hyperparameters` 印一行警告說它沒被用：沒有 trial 讀它，名字卻像「搜尋時固定這些」，而且它照樣換 `model_version`，看起來像有作用。
+> - 這個模式沒有 checkpoint：後面某個 node 失敗後整條重跑，會再訓練一次。設定不變時結果相同（審查時跨行程跑 3 次、換 `num_threads`，預測雜湊相同）；改了不進 `model_version` 的 `random_seed` 再重跑，會在同一個 `model_version` 下蓋掉模型，已寫過的 test 預測月份卻不重寫。這跟 HPO 模式配 `refit_on_full` 是同一件事，不是本票造成的；`docs/pipelines/training.md` §3.2 寫明了。
+> - A58 只擋六個名字，審查找到三件擋不到的事，都已有自己的票、本票沒做：LightGBM 的別名（`n_estimators`、`early_stopping_round`……，#493）；`.bin` 建好之後就不能改的參數（`max_bin`，#492），要到建完 `.bin`、第一次訓練才報錯；`early_stopping_rounds: 0` 配 `refit_on_full`（#491），`best_iteration` 是 0，finalize 時崩。第三件在這個模式更容易走進去：「不搜尋、固定輪數、train 加 train_dev 全量訓練」正是這組設定。三者在 `algorithm_params`、`search_space` 也一樣擋不到。
+> - 順手：決定 3 實作註記留給本票的那段 `conf/base/parameters_training.yaml` 註解（指向已搬走的 `core/group_utils.py` 函式）改指 `models/lightgbm_adapter.py` 的 `LIGHTGBM_RULES`；`conf/base/catalog.yaml` 兩段註解改指 `run_contract.manifest_extra`。只改註解，`yaml.safe_load` 前後相同。
 
 ## 決定 12　四件讀程式看得到的浪費；象限診斷只讀這次的 test 月份
 
@@ -477,9 +480,9 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 - 決定 11 在 base 設定加了 `training.hpo_enabled`、`training.fixed_params` 兩個鍵。`training:` 區塊整個進雜湊，新鍵預設也算，所以它也會讓 `model_version` 變一次。兩者若在同一批落地，只變一次。
 - 決定 10 只改快取路徑，不動 `model_version`。
 - 其他決定不改變模型，也不改變 test 預測，不動版本號。實作時若發現某一步其實會改變輸出（例如編碼路徑合併之後 dtype 不同），照決定 9 加 1，並回頭更正本份。
-- `model_version` 變的那一次，`examples/ad/baseline_digest.json` 要重取（它釘住 `model_version`，`run_e2e.sh --compare` 會轉紅）。
+- `model_version` 變的那一次，`examples/ad/baseline_digest.json` 要重取（它釘住 `model_version`，`run_e2e.sh --compare` 會轉紅）。`docs/operations/user-guides/adding-an-eval-month.md` 的步驟 ③（框架升級之後、重訓之前，這套流程用不了）今天只提 dataset 產物格式版本，要把 training 模型格式版本也加進去。
 
-  > **實作註記（2026-09-30，#487）**：決定 11 先落地（決定 9 的 #488 還沒做），所以 `model_version` 這次先變一次，#488 落地時會再變一次。`examples/ad` 的 `run_e2e.sh --compare` 與舊基準只差 `versions.model_version` 一項（`1e9d3c52` → `951b1936`），其餘五層相同；已重取基準。`search_id` 沒變（兩個新鍵不進它，見決定 11 的實作註記）。`docs/operations/user-guides/adding-an-eval-month.md` 的步驟 ③（框架升級之後、重訓之前，這套流程用不了）今天只提 dataset 產物格式版本，要把 training 模型格式版本也加進去。
+  > **實作註記（2026-09-30，#487）**：決定 11 先落地（決定 9 的 #488 還沒做），所以 `model_version` 這次先變一次，#488 落地時會再變一次。`examples/ad` 的 `run_e2e.sh --compare` 與舊基準只差 `versions.model_version` 一項（`1e9d3c52` → `951b1936`），其餘五層相同；已重取基準。`search_id` 沒變：同一份 `examples/ad` 設定、同樣兩個 dataset 版本，main 的程式對舊設定、這一版對新設定都算出 `b6657291`（兩個新鍵不進它，見決定 11 的實作註記）。上一句 `adding-an-eval-month.md` 的事屬於 #488，本票沒做。
 
 **相依**：
 - 決定 2、3、4、10、11 都用到決定 1 的介面（評分入口、登記表、「做不到」的例外、原生資料、用給定參數訓練），要排在它之後。

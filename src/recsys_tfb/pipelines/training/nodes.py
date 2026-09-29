@@ -824,6 +824,17 @@ def tune_hyperparameters(
     early_stopping_rounds = training_params.get("early_stopping_rounds", 50)
     algorithm = configured_algorithm(parameters)
 
+    # Decision — say so when training.fixed_params is written but a search
+    # runs. No trial reads it, yet its name reads as "pin these while
+    # searching", and it still moves model_version, which looks like it did
+    # something.
+    if training_params.get("fixed_params"):
+        logger.warning(
+            "tune_hyperparameters: training.fixed_params is set but not used: "
+            "HPO is on, so every trial samples search_space. fixed_params "
+            "applies only with training.hpo_enabled: false",
+        )
+
     hpo_objective = effective_hpo_objective(parameters)
     if hpo_objective not in METRIC_NAMES:
         raise ValueError(
@@ -886,9 +897,7 @@ def tune_hyperparameters(
             "HPO target already met (done>=%d) and the checkpoint loads; "
             "val is not read", n_trials,
         )
-        best = {
-            key: ckpt[key] for key in ("score", "model", "iteration", "params")
-        }
+        best = ckpt  # the keys TrialScorer.best keeps: score/model/iteration/params
     else:
         # val_model_input holds every query group with a positive plus the
         # share of the ones without that dataset.val_zero_positive_group_ratio

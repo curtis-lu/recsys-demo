@@ -1,8 +1,8 @@
 {
   "measured": {
     "date": "2026-09-30",
-    "code_commit": "bc5ddc3c + #487 的工作樹（尚未 commit）",
-    "how": "run_e2e.sh --compare 跑 feat/skip-hpo（#487，ADR-0030 決定 11、13、12 第 1 件）：parameters_training.yaml 的 training: 區塊多了 hpo_enabled: true、fixed_params: {}，所以 model_version 預期變一次；其餘各層預期全部不變（HPO 模式的 DAG、參數疊法、search_id 都沒動）。結果與預期相同：與舊基準比，只有 versions.model_version 不同（1e9d3c52 → 951b1936），source_etl、dataset、training、inference、evaluation 五層全部相同。search_id 也沒變：同一份 ad conf，main 的程式對舊 conf 與這支程式對新 conf 算出的都是 4da60d16（新鍵不進 search_id）。"
+    "code_commit": "e9dd3442",
+    "how": "run_e2e.sh --compare 跑 feat/skip-hpo（#487，ADR-0030 決定 11、13、12 第 1 件）：parameters_training.yaml 的 training: 區塊多了 hpo_enabled: true、fixed_params: {}，所以 model_version 預期變一次；其餘各層預期全部不變（HPO 模式的 DAG、參數疊法、search_id 都沒動）。結果與預期相同：與舊基準比，只有 versions.model_version 不同（1e9d3c52 → 951b1936），source_etl、dataset、training、inference、evaluation 五層全部相同。search_id 也沒變：同一份 ad conf、同樣兩個 dataset 版本（969fe8f3、844ca7eb），main 的程式對舊 conf 與這支程式對新 conf 算出的都是 b6657291，跟這次 training log 印的相同（新鍵不進 search_id）。本檔即在 e9dd3442 的程式碼上跑出的 data/digest.json（跑的時候還沒 commit，src 與 e9dd3442 只差 cache_sources.py 的一段 docstring）；收審查的 commit 改了 docstring、HPO 模式下寫了 fixed_params 時的一行警告、tune_hyperparameters 從 checkpoint 取最佳結果的寫法（同一份 dict），並以 run_e2e.sh --compare 對本檔重驗。"
   },
   "noisy": {},
   "versions": {

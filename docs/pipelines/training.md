@@ -181,7 +181,9 @@ training:
 | `hpo_objective` | 照用：它仍是選版指標的預設，也決定 test 要算哪些指標（§3.7）。只為搜尋存在的 A48（二元預測類目標要 val 留下無正例的組）不擋，因為 val 不讀 |
 | `--fresh-hpo` | 沒有搜尋可清，印一行警告後照跑 |
 
-`hpo_enabled` 只接受 `true`、`false`（A58）。兩個鍵都在 `training:` 裡，所以切換模式或改 `fixed_params` 都會換 `model_version`；HPO 模式下改 `fixed_params` 不會換 `search_id`（§7.2），跑到一半的搜尋接得回去。
+`hpo_enabled` 只接受 `true`、`false`（A58）。兩個鍵都在 `training:` 裡，所以切換模式或改 `fixed_params` 都會換 `model_version`；HPO 模式下改 `fixed_params` 不會換 `search_id`（§7.2），跑到一半的搜尋接得回去。HPO 模式下寫了 `fixed_params`，log 會警告它沒被用：搜尋只抽 `search_space` 裡的參數。
+
+這個模式沒有 HPO 的 checkpoint，所以某個後面的 node 失敗後整條重跑，會再訓練一次。設定沒變時訓練結果相同；但改了不進 `model_version` 的 `random_seed`（§7.2）再重跑，新模型會蓋掉同一個 `model_version` 下的舊模型，已經寫過的 test 預測月份卻不會重寫——跟 `refit_on_full` 重跑時一樣。要換 seed 又沿用同一個版本，重跑時用 `--rebuild-dates` 列出已寫過的月份，讓預測跟著重寫（§4.1）。只想重出最終模型時用 `--from-node finalize_model`：三個輸出都已落地，不會再訓練。
 
 ### 3.3 最終模型策略
 

@@ -56,7 +56,8 @@ training:
     #     binary 時會把它們丟掉；rank_xendcg 會學（目標分布在 label 全 0 時是
     #     隨機榜單，實測 50 棵樹全都有 split），所以一列不丟；binary 也一列不
     #     丟。這由 objective 推導，**沒有對應的 config 鍵**——真實來源是
-    #     core/group_utils.py 的 objective_drops_zero_positive_groups。
+    #     演算法的規則表：models/lightgbm_adapter.py 的 LIGHTGBM_RULES
+    #    （zero_positive_group_dropping_objectives；ADR-0030 決定 3）。
     #     濾了幾個 group、幾列，寫進 log 與 group_filter_report.json
     #     （manifest 的 extra_metadata.group_filter）。
     #

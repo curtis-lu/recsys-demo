@@ -316,14 +316,16 @@ def compute_search_id(
     base_dataset_version: str = "",
     train_variant_id: str = "",
 ) -> str:
-    """HPO 搜尋身分：與 model_version 相同的 model-defining 輸入，拿掉
-    ``SEARCH_ID_IRRELEVANT_KEYS``。
+    """The HPO search's identity: ``model_version``'s model-defining inputs
+    minus :data:`SEARCH_ID_IRRELEVANT_KEYS`.
 
-    Keys the resumable Optuna study + best-model checkpoint. 只改 trial 數量
-    (n_trials) → search_id 不變 → 可接續/延長；改任何會改變一個 trial 的
-    (params -> score) 意義者（search_space / hpo_objective / num_iterations /
-    early_stopping_rounds / algorithm_params / 資料 / variant 身分）→ search_id
-    變 → 自動開新 study。
+    Keys the resumable Optuna study and its best-model checkpoint. A change
+    only to a key no trial reads (``n_trials``, ``fixed_params``,
+    ``hpo_enabled``) keeps the ID, so a search resumes or extends; a change to
+    anything that alters what one trial scores (``search_space``,
+    ``hpo_objective``, ``num_iterations``, ``early_stopping_rounds``,
+    ``algorithm_params``, the data or the variant) moves it, and a new study
+    starts.
     """
     payload = _model_version_payload(params)  # deep-copies; safe to mutate
     training = payload.get("training")

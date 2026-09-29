@@ -557,6 +557,28 @@ class TestTuneHyperparameters:
             r for r in caplog.records if "No usable best model" in r.getMessage()
         ]
 
+    def test_fixed_params_written_beside_a_search_is_called_out(
+        self, caplog, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters,
+    ):
+        """No trial reads it; the log says so rather than let the name imply
+        the search pins those hyperparameters."""
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        val_h = synthetic_model_inputs[2]
+        base = {**training_parameters["training"], "n_trials": 1}
+        for fixed, warned in (({"num_leaves": 7}, True), ({}, False)):
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                tune_hyperparameters(
+                    train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata,
+                    {**training_parameters,
+                     "training": {**base, "fixed_params": fixed}},
+                )
+            assert any(
+                "fixed_params is set but not used" in r.getMessage()
+                for r in caplog.records
+            ) is warned
+
     @staticmethod
     def _count_val_reads(monkeypatch):
         """Wrap the one call that reads val, and count it."""
@@ -828,6 +850,47 @@ class TestTrainWithFixedParams:
                 _skip_hpo_parameters({}))
         text = "\n".join(r.getMessage() for r in caplog.records)
         assert "search_space" in text and "n_trials" in text
+
+    def test_refit_on_full_stacks_the_fixed_params(
+        self, monkeypatch, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters,
+    ):
+        """Both strategies work in this mode (decision 11): the refit trains
+        on train + train_dev under fixed_params, stacked as a trial's sample
+        is, for the fit's best_iteration rounds and no early stopping."""
+        from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+        from recsys_tfb.pipelines.training.steps.fit_params import fit_params
+
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        train_h, train_dev_h, *_ = synthetic_model_inputs
+        chosen = {"learning_rate": 0.1, "num_leaves": 15}
+        p = {
+            **training_parameters,
+            "training": {
+                **training_parameters["training"], "hpo_enabled": False,
+                "fixed_params": chosen, "final_model_strategy": "refit_on_full",
+            },
+        }
+        best_params, best_iteration, fitted = train_with_fixed_params(
+            train_lgb_h, train_dev_lgb_h, preprocessor_metadata, p)
+
+        calls = []
+        real_train = LightGBMAdapter.train
+
+        def spy(self, data, params, **kwargs):
+            calls.append((dict(params), kwargs))
+            return real_train(self, data, params, **kwargs)
+
+        monkeypatch.setattr(LightGBMAdapter, "train", spy)
+        final = finalize_model(
+            train_h, train_dev_h, fitted, best_params, best_iteration,
+            preprocessor_metadata, p,
+        )
+        assert final is not fitted
+        (params, kwargs), = calls
+        assert params == fit_params(p, LightGBMAdapter.rules, chosen)
+        assert kwargs["num_iterations"] == best_iteration > 0
+        assert kwargs["early_stopping_rounds"] == 0
 
     def test_trains_a_real_model(
         self, lgb_handles, preprocessor_metadata, training_parameters,
