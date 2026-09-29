@@ -1,4 +1,4 @@
-"""Fourteen of the training pipeline's twenty-one nodes; the other seven below.
+"""Thirteen of the training pipeline's twenty nodes; the other seven below.
 
 This module is the home of the pipeline's ML story: a reader who opens it sees
 each decision this pipeline makes about the data, without jumping files. The
@@ -21,7 +21,7 @@ helper.
 
 Where the other seven nodes are
 -------------------------------
-``pipeline.py`` registers 21 nodes. Fourteen are ``def``-ed in this file. The
+``pipeline.py`` registers 20 nodes. Thirteen are ``def``-ed in this file. The
 seven diagnosis nodes are ``def``-ed under ``recsys_tfb.diagnosis.model``:
 
 - ``compute_feature_statistics``  -> ``diagnosis/model/feature_stats.py``
@@ -50,6 +50,7 @@ from functools import partial
 from pathlib import Path
 
 import mlflow
+import numpy as np
 import optuna
 import pandas as pd
 import pyarrow.dataset as pads
@@ -92,12 +93,21 @@ from recsys_tfb.evaluation.metric_registry import (
 )
 from recsys_tfb.evaluation.metrics_spark import count_query_groups_by_time
 from recsys_tfb.io.extract import (
-    extract_Xy,
+    extract_X_rows,
     extract_Xy_with_groups,
+    extract_y,
+    extract_y_with_groups,
     pdf_to_X,
-    weight_key_decode_map,
+    weight_key_columns,
+    weight_key_decode_map_from_config,
 )
-from recsys_tfb.io.handles import ParquetHandle, handle_paths, open_parquet_dataset
+from recsys_tfb.io.handles import (
+    ParquetHandle,
+    handle_paths,
+    open_parquet_dataset,
+    write_group_filter_counts,
+    write_weight_keys_sidecar,
+)
 from recsys_tfb.models.base import ModelAdapter, configured_algorithm, get_adapter
 from recsys_tfb.models.feature_selection import apply_feature_selection
 from recsys_tfb.pipelines.training.steps import (
@@ -106,6 +116,7 @@ from recsys_tfb.pipelines.training.steps import (
     refit,
     sample_weights,
     scored_months,
+    train_data_cache,
 )
 from recsys_tfb.pipelines.training.steps.fit_params import fit_params
 from recsys_tfb.pipelines.training.steps.hpo_scoring import (
@@ -156,7 +167,17 @@ logger = logging.getLogger(__name__)
 THIN_QUERY_GROUPS = 1000
 
 
-def persist_group_filter_report(train_lgb_handle, parameters: dict) -> dict:
+# ---------------------------------------------------------------------------
+# Report nodes
+# ---------------------------------------------------------------------------
+#
+# Both return a dict and write nothing: the catalog entry of the same name is
+# what lands it in the model version directory (pipeline-node-design.md
+# rule 6 — before #483 both were called ``persist_*``, which they had stopped
+# doing).
+
+
+def compute_group_filter_report(train_lgb_handle, parameters: dict) -> dict:
     """Report how many zero-positive query groups training dropped.
 
     Under ``objective: lambdarank`` the training matrix is not the train /
@@ -169,9 +190,9 @@ def persist_group_filter_report(train_lgb_handle, parameters: dict) -> dict:
     dataset change.
 
     Reads the counts through the handle rather than recomputing them: the
-    filter runs while the .bin is built, and a run that hits that cache never
-    reads a parquet row. Always runs, so the report reflects every run
-    including the cache-hit ones.
+    filter runs while the .bin is built (``prepare_train_inputs``), and a run
+    that hits that cache never reads a parquet row. Always runs, so the report
+    reflects every run including the cache-hit ones.
 
     ``enabled: False`` for every other objective. That is a finding too --
     an absent report reads the same as a report that failed to run, and
@@ -223,7 +244,7 @@ def persist_group_filter_report(train_lgb_handle, parameters: dict) -> dict:
     return diag
 
 
-def persist_sample_weight_report(
+def compute_sample_weight_report(
     train_parquet_handle, preprocessor_metadata: dict, parameters: dict,
 ) -> dict:
     """Report which configured sample_weights entries matched zero train rows.
@@ -247,20 +268,17 @@ def persist_sample_weight_report(
     sw = training.get("sample_weights") or {}
 
     # Decision — what a weight key is made of: the configured
-    # `training.sample_weight_keys`, or the item column alone when unset. It has
-    # to be the same tuple io/extract.py looks weights up by; a report built on
-    # a different tuple vouches for lookups the trainer never made.
-    weight_keys = training.get("sample_weight_keys") or [get_schema(parameters)["item"]]
+    # `training.sample_weight_keys`, or the item column alone when unset. Read
+    # through the same functions the trainer resolves weights with, so this
+    # report describes the lookups training actually makes.
+    weight_keys = weight_key_columns(parameters)
 
     diag = {"enabled": bool(sw), "weight_keys": list(weight_keys),
             "n_weight_entries": len(sw), "unmatched_keys": []}
     if not sw:
         return diag
 
-    category_mappings = (preprocessor_metadata or {}).get("category_mappings", {}) or {}
-    identity_cols = get_schema(parameters)["identity_columns"]
-    decode_map = weight_key_decode_map(
-        weight_keys, category_mappings, identity_cols)
+    decode_map = weight_key_decode_map_from_config(parameters, preprocessor_metadata)
 
     present = sample_weights.distinct_weight_keys(
         train_parquet_handle, weight_keys, decode_map)
@@ -292,11 +310,11 @@ def persist_sample_weight_report(
 # Cache nodes
 # ---------------------------------------------------------------------------
 #
-# Five nodes, each writing out its own cache decisions rather than calling one
+# Four nodes, each writing out its own cache decisions rather than calling one
 # shared ``_cache(split_name, parameters)``. That helper is the shape ADR-0008
 # §2 forbids and ADR-0014 decision 1 re-affirms: it held four decisions, so
-# reading any of the five nodes above it told you nothing about what the cache
-# had decided. The duplication below is the point; what is shared is the
+# reading any of the nodes above it told you nothing about what the cache had
+# decided. The duplication below is the point; what is shared is the
 # mechanism, in ``steps/local_cache.py``.
 #
 # The ``shutil.rmtree`` calls stay in this module on purpose — see that module's
@@ -412,7 +430,7 @@ def cache_val_model_input(val_model_input, parameters: dict) -> ParquetHandle:
         shutil.rmtree(local_path, ignore_errors=True)
 
     # Decision — a hit is "the marker is present", never freshness. This split's
-    # copy is the longest-lived of the five (nothing but a new
+    # copy is the longest-lived of the four (nothing but a new
     # ``base_dataset_version`` retires it), which is exactly what makes a stale
     # copy after an upstream backfill worth knowing about: nothing warns.
     if cache_is_complete(local_path):
@@ -439,10 +457,10 @@ def cache_test_model_input(
     cached and invalidated on its own: adding a month copies only that month, and
     a month whose copy was interrupted is rebuilt without disturbing its siblings.
 
-    This is the only one of the five that can be told to drop a *complete* copy.
-    Not because the other four never go stale — a backfill under an unchanged
+    This is the only one of the four that can be told to drop a *complete* copy.
+    Not because the other three never go stale — a backfill under an unchanged
     config leaves any of them stale-but-complete — but because ``--rebuild-dates``
-    is constrained to ``dataset.test_snap_dates`` (A21). Clearing the other four
+    is constrained to ``dataset.test_snap_dates`` (A21). Clearing the other three
     is a manual ``rm -rf``.
 
     The input type check runs once here rather than once per month, so a
@@ -560,34 +578,147 @@ def select_features(preprocessor_metadata: dict, parameters: dict) -> dict:
     return apply_feature_selection(preprocessor_metadata, parameters)
 
 
-def prepare_lgb_train_inputs(
+def prepare_train_inputs(
     train_parquet_handle: ParquetHandle,
     train_dev_parquet_handle: ParquetHandle,
     preprocessor_metadata: dict,
     parameters: dict,
 ):
-    """Materialize train + train_dev as the configured algorithm's native
-    training data on disk.
+    """train + train_dev as the configured algorithm's native training data on disk.
 
-    Delegates to the configured ModelAdapter's prepare_train_inputs. The
-    cache_dir uses the same train_variant directory as the parquet cache, so
-    the adapter's own sub-directory (LightGBM's 'lgb/') sits beside the
-    parquets.
+    Every HPO trial reads these files (``train.bin`` / ``train_dev.bin``)
+    instead of the parquet, so they are built once per content and cached
+    beside the parquet copies. The adapter only turns arrays into its own
+    format and saves it (ADR-0030 decision 1); what goes into the arrays is
+    decided here.
+
+    The matrix is streamed straight into the order the binary holds — groups
+    dropped, groups contiguous — so the build holds one matrix, not the matrix
+    and a reordered copy of it (ADR-0030 decision 12, item 3).
     """
-    adapter = get_adapter(configured_algorithm(parameters))
-
-    cache_root = parameters["cache"]["root"]
-    base_v = parameters["base_dataset_version"]
-    train_v = parameters["train_variant_id"]
-    cache_dir = Path(cache_root) / base_v / "train_variants" / train_v
-
-    return adapter.prepare_train_inputs(
-        train_parquet_handle,
-        train_dev_parquet_handle,
-        preprocessor_metadata,
-        parameters,
-        str(cache_dir),
+    algorithm = configured_algorithm(parameters)
+    adapter = get_adapter(algorithm)
+    objective = (
+        (parameters.get("training") or {}).get("algorithm_params", {}).get("objective")
     )
+    ranking = adapter.rules.is_ranking_objective(objective)
+    feature_columns = list(preprocessor_metadata["feature_columns"])
+    categorical_columns = list(preprocessor_metadata.get("categorical_columns", []))
+    weight_keys = weight_key_columns(parameters)
+
+    # Decision — the cache is usable exactly when its directory holds
+    # _SUCCESS, and nothing inside a directory is checked. That is only safe
+    # because everything that decides what the binaries hold is a segment of
+    # the path: dataset version and train variant (the rows), algorithm (the
+    # file format), objective (grouping and dropped groups), the feature
+    # columns, the weight-key columns the sidecar carries, and the cache
+    # format version for the code itself (ADR-0030 decision 10). Change any
+    # of them and the run looks in a directory that does not exist yet. A
+    # change to what this node writes that none of them names is a bump of
+    # TRAIN_DATA_CACHE_FORMAT_VERSION; without it the old files are served.
+    # Row-wise objectives all build the same rows, no groups, so they share
+    # one segment; each ranking objective gets its own, because lambdarank
+    # drops groups that rank_xendcg keeps.
+    cache_dir = train_data_cache.cache_dir(
+        parameters,
+        algorithm=algorithm,
+        objective_segment=objective if ranking else "binary",
+        feature_columns=feature_columns,
+        weight_keys=weight_keys,
+    )
+
+    # Decision — a directory with no marker is an interrupted build: drop it
+    # and build again. Its files are whatever landed before the build died,
+    # and a trial reading them would train on part of a split.
+    if is_partial_cache(cache_dir):
+        log_partial_cache_cleared(cache_dir)
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+    if cache_is_complete(cache_dir):
+        log_cache_hit("train_data", cache_dir)
+        train_handle, dev_handle = train_data_cache.handles(cache_dir)
+        log_data_volume(logger, "prepare.train.bin", train_handle.bin_path)
+        log_data_volume(logger, "prepare.train_dev.bin", dev_handle.bin_path)
+        return train_handle, dev_handle
+
+    log_cache_miss("train_data", cache_dir)
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    # Decision — train and train_dev take the same rules. train_dev is the
+    # early-stopping set in the search, but `final_model_strategy:
+    # refit_on_full` trains on it too, so a rule applied to one split only
+    # would be wrong under one of the two strategies.
+    drops_zero_positive = adapter.rules.objective_drops_zero_positive_groups(objective)
+    filter_counts: dict = {"objective": objective} if drops_zero_positive else {}
+    reference = None
+    for split, parquet_handle in (
+        ("train", train_parquet_handle), ("train_dev", train_dev_parquet_handle),
+    ):
+        if ranking:
+            y, group_ids, weight_key_rows = extract_y_with_groups(
+                parquet_handle, preprocessor_metadata, parameters,
+                with_weight_keys=True,
+            )
+            rows = np.arange(len(y))
+            # Decision — under an objective whose rules drop zero-positive
+            # query groups (LightGBM: lambdarank), those groups are left out
+            # of the binary: their gradient is exactly zero, so they cost
+            # time and teach nothing. The algorithm says which objectives,
+            # with its reasons (ModelAdapter.rules); the counts are kept
+            # beside the binary so a cache hit can still report them.
+            if drops_zero_positive:
+                (y, group_ids, rows), counts = drop_zero_positive_groups(
+                    y, group_ids, rows)
+                filter_counts[split] = counts
+                train_data_cache.log_group_filter(split, counts)
+            train_data_cache.log_single_label_groups(split, objective, y, group_ids)
+            # Decision — a ranking objective reads each query group as one
+            # consecutive block with a per-group row count, so the rows are
+            # put in group order. The same order has to reach the labels, the
+            # matrix and the weight keys, or a label ends up on another row
+            # with nothing raised.
+            perm, group = to_contiguous_groups(group_ids)
+            rows, y = rows[perm], y[perm]
+        else:
+            # Decision — a row-wise objective keeps every row in file order:
+            # no groups to drop, none to keep together.
+            y, weight_key_rows = extract_y(
+                parquet_handle, preprocessor_metadata, parameters,
+                with_weight_keys=True,
+            )
+            rows, group = None, None
+
+        X = extract_X_rows(
+            parquet_handle, preprocessor_metadata, parameters, rows=rows, labels=y)
+        data = adapter.build_train_data(
+            X, y, group=group, reference=reference,
+            feature_names=feature_columns, categorical_features=categorical_columns,
+        )
+        del X
+        path = train_data_cache.bin_path(cache_dir, split)
+        # Decision — sample weights are not saved into the binary: the cache
+        # path does not name `training.sample_weights`, so a saved vector would
+        # be served to a later run configured with other weights, and nothing
+        # would say so (#318). What goes beside the binary is the rows'
+        # weight-key columns, in the binary's own row order; each run resolves
+        # its own weight table against them when it reads the file
+        # (LgbDatasetHandle.sample_weights). The adapter refuses a weighted save.
+        adapter.save_train_data(data, path)
+        write_weight_keys_sidecar(
+            weight_key_rows if rows is None else weight_key_rows.take(rows), path)
+        log_data_volume(
+            logger, "prepare.ds_train" if split == "train" else "prepare.ds_dev", data)
+        log_data_volume(logger, f"prepare.{split}.bin", path)
+        if split == "train":
+            # train_dev is binned the way train was, so its scores mean the same.
+            reference = data
+
+    if filter_counts:
+        write_group_filter_counts(cache_dir, filter_counts)
+    # Last, after every file above: a build that died partway leaves no
+    # marker, and the next run clears it instead of serving it.
+    mark_cache_complete(cache_dir)
+    logger.info("train data cache written: %s", cache_dir)
+    return train_data_cache.handles(cache_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -943,66 +1074,82 @@ def finalize_model(
 
     feat_cols = list(preprocessor_metadata["feature_columns"])
     cat_cols = list(preprocessor_metadata.get("categorical_columns", []))
+    splits = (train_parquet_handle, train_dev_parquet_handle)
 
+    # The rows are chosen from the labels and group ids first, and the matrix
+    # is then streamed straight into that order across both splits
+    # (extract_X_rows): stacking two finished matrices and reordering the
+    # result held two full copies at the peak (ADR-0030 decision 12, item 3).
     if adapter.rules.is_ranking_objective(objective):
         with log_step(logger, "extract_features"):
-            X_tr, y_tr, gid_tr, w_tr = extract_Xy_with_groups(
+            y_tr, gid_tr, w_tr = extract_y_with_groups(
                 train_parquet_handle, preprocessor_metadata, parameters,
                 with_weights=True,
             )
-            X_dv, y_dv, gid_dv, w_dv = extract_Xy_with_groups(
+            y_dv, gid_dv, w_dv = extract_y_with_groups(
                 train_dev_parquet_handle, preprocessor_metadata, parameters,
                 with_weights=True,
             )
-        if adapter.rules.objective_drops_zero_positive_groups(objective):
-            # Decision — the refit trains on the rows the search trained on.
-            # HPO reads the cached .bin, which prepare_train_inputs already
-            # stripped of zero-positive query groups; this branch re-reads the
-            # parquet, so without the same rule the final model would be fit on
-            # a matrix the search never saw and still be reported under the
-            # search's hyperparameters. Applied per split, before stacking, for
-            # the same reason it is applied per split there: the two are one
-            # rule, and a reader comparing them should not have to check.
-            (y_tr, gid_tr, X_tr, w_tr), counts_tr = drop_zero_positive_groups(
-                y_tr, gid_tr, X_tr, w_tr)
-            (y_dv, gid_dv, X_dv, w_dv), counts_dv = drop_zero_positive_groups(
-                y_dv, gid_dv, X_dv, w_dv)
-            logger.info(
-                "refit zero-positive filter: train %d -> %d rows, "
-                "train_dev %d -> %d rows",
-                counts_tr["rows_total"], counts_tr["rows_kept"],
-                counts_dv["rows_total"], counts_dv["rows_kept"],
-            )
-        X_full, y_full, w_full = refit.stack_splits(
-            (X_tr, y_tr, w_tr), (X_dv, y_dv, w_dv))
-        # Decision — train / train_dev are customer-disjoint by sampling
-        # design, so a query group never spans both splits: dev ids are offset
-        # past train's max to keep them distinct after concatenation.
-        gid_full = refit.offset_dev_group_ids(gid_tr, gid_dv)
-        del X_tr, y_tr, X_dv, y_dv, gid_tr, gid_dv, w_tr, w_dv
+            rows_tr, rows_dv = refit.stacked_row_numbers(len(y_tr), len(y_dv))
+            if adapter.rules.objective_drops_zero_positive_groups(objective):
+                # Decision — the refit trains on the rows the search trained on.
+                # HPO reads the cached .bin, which prepare_train_inputs already
+                # stripped of zero-positive query groups; this branch re-reads
+                # the parquet, so without the same rule the final model would be
+                # fit on a matrix the search never saw and still be reported
+                # under the search's hyperparameters. Applied per split, before
+                # stacking, for the same reason it is applied per split there:
+                # the two are one rule, and a reader comparing them should not
+                # have to check.
+                (y_tr, gid_tr, w_tr, rows_tr), counts_tr = drop_zero_positive_groups(
+                    y_tr, gid_tr, w_tr, rows_tr)
+                (y_dv, gid_dv, w_dv, rows_dv), counts_dv = drop_zero_positive_groups(
+                    y_dv, gid_dv, w_dv, rows_dv)
+                logger.info(
+                    "refit zero-positive filter: train %d -> %d rows, "
+                    "train_dev %d -> %d rows",
+                    counts_tr["rows_total"], counts_tr["rows_kept"],
+                    counts_dv["rows_total"], counts_dv["rows_kept"],
+                )
+            y_full, w_full, rows_full = refit.stack_splits(
+                (y_tr, w_tr, rows_tr), (y_dv, w_dv, rows_dv))
+            # Decision — train / train_dev are customer-disjoint by sampling
+            # design, so a query group never spans both splits: dev ids are
+            # offset past train's max to keep them distinct after stacking.
+            gid_full = refit.offset_dev_group_ids(gid_tr, gid_dv)
+            del y_tr, y_dv, gid_tr, gid_dv, w_tr, w_dv, rows_tr, rows_dv
 
-        # Decision — group= makes this a ranking refit consistent with the
-        # objective, and the row order follows the groups: the permutation
-        # to_contiguous_groups returns has to be applied to X / y / weight too,
-        # or the labels no longer belong to the rows they came from.
-        perm, grp = to_contiguous_groups(gid_full)
+            # Decision — group= makes this a ranking refit consistent with the
+            # objective, and the row order follows the groups: the permutation
+            # to_contiguous_groups returns has to reach the matrix rows, the
+            # labels and the weights alike, or the labels no longer belong to
+            # the rows they came from.
+            perm, grp = to_contiguous_groups(gid_full)
+            y_full, w_full = y_full[perm], w_full[perm]
+            X_full = refit.stacked_matrix(
+                splits, preprocessor_metadata, parameters,
+                rows=rows_full[perm], labels=y_full,
+            )
         ds_full = adapter.build_train_data(
-            X_full[perm], y_full[perm], weight=w_full[perm], group=grp,
+            X_full, y_full, weight=w_full, group=grp,
             feature_names=feat_cols, categorical_features=cat_cols,
         )
     else:
         with log_step(logger, "extract_features"):
-            X_tr, y_tr, w_tr = extract_Xy(
+            y_tr, w_tr = extract_y(
                 train_parquet_handle, preprocessor_metadata, parameters,
                 with_weights=True,
             )
-            X_dv, y_dv, w_dv = extract_Xy(
+            y_dv, w_dv = extract_y(
                 train_dev_parquet_handle, preprocessor_metadata, parameters,
                 with_weights=True,
             )
-        X_full, y_full, w_full = refit.stack_splits(
-            (X_tr, y_tr, w_tr), (X_dv, y_dv, w_dv))
-        del X_tr, y_tr, X_dv, y_dv, w_tr, w_dv
+            y_full, w_full = refit.stack_splits((y_tr, w_tr), (y_dv, w_dv))
+            del y_tr, y_dv, w_tr, w_dv
+            X_full = refit.stacked_matrix(
+                splits, preprocessor_metadata, parameters,
+                rows=None, labels=y_full,
+            )
 
         # Decision — no group=: a non-ranking objective scores each row on its
         # own, so there is no query grouping to carry and no reordering to do.
@@ -1010,6 +1157,7 @@ def finalize_model(
             X_full, y_full, weight=w_full,
             feature_names=feat_cols, categorical_features=cat_cols,
         )
+    del X_full
 
     # Decision — the refit trains under the search's stacking with the winning
     # trial's hyperparameters on top, for exactly best_iteration rounds: there

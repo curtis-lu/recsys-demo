@@ -234,8 +234,9 @@ class TestA1NodeIO:
                 if name in WRITE_CALLS or name in WRITE_ATTRS:
                     found[(path.parent.name, owner.get(call.lineno, "<module>"))] += 1
 
-        # persist_sample_weight_report left this set when the catalog took
-        # over its write (conf/base/catalog.yaml::sample_weight_report) --
+        # compute_sample_weight_report (then persist_sample_weight_report)
+        # left this set when the catalog took over its write
+        # (conf/base/catalog.yaml::sample_weight_report) --
         # shrinking a registry, which is the direction that needs no new
         # exception. Putting the write back in the node puts it back here.
         #
@@ -247,8 +248,16 @@ class TestA1NodeIO:
         # cache_calibration_model_input with the calibrator. The deletes stayed in nodes.py rather
         # than moving to steps/local_cache.py precisely so this scan -- which
         # reads pipelines/**/nodes*.py and nothing else -- keeps seeing them.
+        #
+        # prepare_train_inputs joined for the same reason (#483, approved by
+        # the user 2026-09-29): its decisions moved up from the LightGBM
+        # adapter, and with them the rmtree of an interrupted .bin build and
+        # the mkdir of a new one. Those writes existed before, inside
+        # models/, where this scan never looked; the entry makes them visible,
+        # it does not add them.
         assert set(found) == {
             ("training", "log_experiment"),
+            ("training", "prepare_train_inputs"),
             ("training", "cache_train_model_input"),
             ("training", "cache_train_dev_model_input"),
             ("training", "cache_val_model_input"),

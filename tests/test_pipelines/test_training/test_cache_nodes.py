@@ -433,55 +433,183 @@ class TestRejectsNonSparkInput:
             cache_train_model_input(df, params)
 
 
-class TestPrepareLgbTrainInputs:
+def _train_parquets(tmp_path: Path):
+    """A train / train_dev parquet pair a ranking objective can build from."""
+    import numpy as np
+    import pandas as pd
+    from recsys_tfb.io.handles import ParquetHandle
+
+    df = pd.DataFrame({
+        "cust_id": ["c1", "c1", "c2", "c2", "c3", "c3"],
+        "snap_date": pd.to_datetime(["2025-01-31"] * 6),
+        "prod_name": ["fund", "ccard"] * 3,
+        # float32 like build_model_input writes it (#283 / B9)
+        "feat_a": np.arange(6, dtype=np.float32),
+        # c3's group holds no positive: lambdarank drops it.
+        "label": [1, 0, 0, 1, 0, 0],
+    })
+    train_dir, dev_dir = tmp_path / "tr.parquet", tmp_path / "dev.parquet"
+    df.to_parquet(train_dir)
+    df.to_parquet(dev_dir)
+    return ParquetHandle(str(train_dir)), ParquetHandle(str(dev_dir))
+
+
+_TRAIN_PREP = {
+    "feature_columns": ["feat_a", "prod_name"],
+    "categorical_columns": ["prod_name"],
+    "category_mappings": {"prod_name": ["fund", "ccard"]},
+}
+
+
+def _train_params(cache_root: Path, objective="lambdarank", **training) -> dict:
+    return {
+        "cache": {"root": str(cache_root)},
+        "base_dataset_version": "v1",
+        "train_variant_id": "tv1",
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"],
+            "item": "prod_name", "label": "label",
+        }},
+        "training": {
+            "algorithm": "lightgbm",
+            "algorithm_params": {"objective": objective},
+            **training,
+        },
+    }
+
+
+class TestPrepareTrainInputs:
     def test_prepare_node_returns_two_lgb_handles(self, tmp_path):
-        import numpy as np
-        import pandas as pd
-        from recsys_tfb.io.handles import LgbDatasetHandle, ParquetHandle
-        from recsys_tfb.pipelines.training.nodes import prepare_lgb_train_inputs
+        from recsys_tfb.io.handles import LgbDatasetHandle
+        from recsys_tfb.pipelines.training.nodes import prepare_train_inputs
 
-        df = pd.DataFrame(
-            {
-                "cust_id": ["c1", "c2", "c3", "c4"],
-                "snap_date": pd.to_datetime(["2025-01-31"] * 4),
-                "prod_name": ["fund", "ccard", "fund", "ccard"],
-                # float32 like build_model_input writes it (#283 / B9)
-                "feat_a": np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
-                "label": [0, 1, 0, 1],
-            }
-        )
-        train_dir = tmp_path / "tr.parquet"
-        dev_dir = tmp_path / "dev.parquet"
-        df.to_parquet(train_dir)
-        df.to_parquet(dev_dir)
-
-        prep_meta = {
-            "feature_columns": ["feat_a", "prod_name"],
-            "categorical_columns": ["prod_name"],
-            "category_mappings": {"prod_name": ["fund", "ccard"]},
-        }
-        parameters = {
-            "cache": {"root": str(tmp_path / "cache")},
-            "base_dataset_version": "v1",
-            "train_variant_id": "tv1",
-            "schema": {"columns": {
-                "time": "snap_date", "entity": ["cust_id"],
-                "item": "prod_name", "label": "label",
-            }},
-            "training": {"algorithm": "lightgbm"},
-        }
-
-        train_h, dev_h = prepare_lgb_train_inputs(
-            ParquetHandle(str(train_dir)),
-            ParquetHandle(str(dev_dir)),
-            prep_meta,
-            parameters,
+        train_h, dev_h = prepare_train_inputs(
+            *_train_parquets(tmp_path), _TRAIN_PREP,
+            _train_params(tmp_path / "cache", objective="binary"),
         )
 
         assert isinstance(train_h, LgbDatasetHandle)
         assert isinstance(dev_h, LgbDatasetHandle)
         assert train_h.role == "train"
         assert dev_h.role == "train_dev"
+
+
+class TestTrainDataCachePath:
+    """The ``.bin`` cache is used exactly when its path holds ``_SUCCESS``.
+
+    ADR-0030 decision 10: everything that decides what the binaries hold is a
+    segment of the path, and nothing inside a directory is inspected. So the
+    cases that used to need a check inside the directory — a changed
+    ``training.sample_weight_keys``, a directory written by older code — have
+    to land on a different path, and a directory the build never finished has
+    to be rebuilt. Whether a build ran is read off the matrix reads: a hit
+    reads no parquet at all.
+    """
+
+    @staticmethod
+    def _count_matrix_reads(monkeypatch) -> list:
+        from recsys_tfb.pipelines.training import nodes
+
+        reads: list = []
+        real = nodes.extract_X_rows
+
+        def counting(handle, *a, **kw):
+            reads.append(handle.path)
+            return real(handle, *a, **kw)
+
+        monkeypatch.setattr(nodes, "extract_X_rows", counting)
+        return reads
+
+    def _build(self, tmp_path, params):
+        from recsys_tfb.pipelines.training.nodes import prepare_train_inputs
+
+        return prepare_train_inputs(*_train_parquets(tmp_path), _TRAIN_PREP, params)
+
+    def test_same_path_with_the_marker_is_served_without_a_read(
+        self, tmp_path, monkeypatch,
+    ):
+        params = _train_params(tmp_path / "cache")
+        first, _ = self._build(tmp_path, params)
+        reads = self._count_matrix_reads(monkeypatch)
+
+        again, _ = self._build(tmp_path, params)
+
+        assert reads == []
+        assert again.bin_path == first.bin_path
+        assert again.group_filter_counts() == first.group_filter_counts()
+
+    def test_changed_weight_keys_land_on_another_path_and_rebuild(
+        self, tmp_path, monkeypatch,
+    ):
+        """The sidecar holds the weight-key columns, so another key list is
+        another cache. Served the old one, the resolver would find the new
+        key column missing and weight every row 1.0 — a whole search trained
+        unweighted under a model_version keyed by the weights (#318)."""
+        import pyarrow.parquet as pq
+
+        old, _ = self._build(tmp_path, _train_params(tmp_path / "cache"))
+        reads = self._count_matrix_reads(monkeypatch)
+
+        new, _ = self._build(tmp_path, _train_params(
+            tmp_path / "cache", sample_weight_keys=["prod_name", "cust_id"]))
+
+        assert Path(new.bin_path).parent != Path(old.bin_path).parent
+        assert len(reads) == 2  # train and train_dev, built again
+        assert pq.read_schema(new.weight_keys_path).names == ["prod_name", "cust_id"]
+        # The old build is left where it was, still complete.
+        assert (Path(old.bin_path).parent / "_SUCCESS").exists()
+
+    def test_a_cache_from_before_the_format_version_is_not_served(
+        self, tmp_path, monkeypatch,
+    ):
+        """Directories written before #483 have no version segment
+        (``train_variants/<id>/lgb/<objective>/``); finished or not, a current
+        build never looks there."""
+        variant = tmp_path / "cache" / "v1" / "train_variants" / "tv1"
+        legacy = variant / "lgb" / "lambdarank"
+        legacy.mkdir(parents=True)
+        for name in ("train.bin", "train_dev.bin", "_SUCCESS"):
+            (legacy / name).write_text("written by older code")
+        reads = self._count_matrix_reads(monkeypatch)
+
+        train_h, _ = self._build(tmp_path, _train_params(tmp_path / "cache"))
+
+        assert len(reads) == 2
+        assert legacy not in Path(train_h.bin_path).parents
+        assert (legacy / "train.bin").read_text() == "written by older code"
+
+    def test_a_format_version_bump_moves_the_cache(self, tmp_path, monkeypatch):
+        """What the version number is for: code that changes what a directory
+        holds bumps it, and every deployment rebuilds once."""
+        from recsys_tfb.pipelines.training.steps import train_data_cache
+
+        before, _ = self._build(tmp_path, _train_params(tmp_path / "cache"))
+        monkeypatch.setattr(
+            train_data_cache, "TRAIN_DATA_CACHE_FORMAT_VERSION",
+            train_data_cache.TRAIN_DATA_CACHE_FORMAT_VERSION + 1)
+        reads = self._count_matrix_reads(monkeypatch)
+
+        after, _ = self._build(tmp_path, _train_params(tmp_path / "cache"))
+
+        assert Path(after.bin_path).parent != Path(before.bin_path).parent
+        assert len(reads) == 2
+
+    def test_a_directory_without_the_marker_is_rebuilt(self, tmp_path, monkeypatch):
+        """An interrupted build leaves files and no marker. Its files are
+        whatever landed before it died; they are dropped, not read."""
+        params = _train_params(tmp_path / "cache")
+        train_h, _ = self._build(tmp_path, params)
+        directory = Path(train_h.bin_path).parent
+        (directory / "_SUCCESS").unlink()
+        (directory / "debris.tmp").write_text("half a build")
+        reads = self._count_matrix_reads(monkeypatch)
+
+        again, _ = self._build(tmp_path, params)
+
+        assert again.bin_path == train_h.bin_path
+        assert len(reads) == 2
+        assert not (directory / "debris.tmp").exists()
+        assert (directory / "_SUCCESS").exists()
 
 
 class TestPartitionNamesComeFromTheCatalog:

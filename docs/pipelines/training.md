@@ -183,9 +183,27 @@ HPO、最終訓練與 test scoring 都使用同一份 feature view。**診斷與
 
 ranking 類目標（`lambdarank`、`rank_xendcg`）建 `.bin` 時，每個 split 會 log 一行「只剩單一種 label 的 query group 佔多少」（`single-label query groups [train]: …`）：這種組沒有兩列 label 不同，ranking 目標從它學不到任何配對。數的是 `.bin` 實際收下的列（`lambdarank` 在丟掉無正例的組之後），只是一行 log，不改變任何產物。佔比高通常是逐列抽樣把小的 query group 抽成只剩一種 label；對策見 [dataset.md §3.7](dataset.md#37-沒有正例的-query-group-留多少)。`.bin` cache 命中時不會重建，也就不會再印這一行——要看就找建 `.bin` 那次的 log。
 
-LightGBM binary cache 會依 `objective` 與保留後的 feature list 隔離，避免同一個 train variant 誤用其他 objective 或其他特徵子集建立的 `.bin`。三個 objective（`lambdarank` / `rank_xendcg` / `binary`）各自一個子目錄；其餘非 ranking objective 共用 `binary`（它們建出的 `.bin` 內容相同）。
+`.bin` 快取的規則只有一條：**路徑存在、而且裡面有 `_SUCCESS`，就直接用；目錄裡的東西一律不檢查。** 這條規則成立，是因為所有會決定 `.bin` 內容的東西都是路徑的一段（ADR-0030 決定 10）：
 
-此隔離在 2026-09-07 之前是較粗的 objective family（兩個 ranking objective 共用 `lgb/ranking/`）。若你在那之前跑過 ranking objective，舊的 `<cache.root>/<base_dataset_version>/train_variants/<train_variant_id>/lgb/ranking/` 會變成沒有人再讀的孤兒目錄，可直接刪除；`binary` 的路徑未變，不需處理。
+```
+<cache.root>/<base_dataset_version>/train_variants/<train_variant_id>/
+  train_data_v<N>/<algorithm>/<objective>/features_<hash8>/weight_keys_<hash8>/
+    train.bin  train_dev.bin  train.weight_keys.parquet  train_dev.weight_keys.parquet
+    group_filter_counts.json（只有 lambdarank）  _SUCCESS
+```
+
+| 路徑的一段 | 決定了什麼 |
+|---|---|
+| `base_dataset_version`、`train_variant_id` | 讀哪些列（跟 parquet 快取同一層，一起退場） |
+| `train_data_v<N>` | 快取格式版本（`steps/train_data_cache.py` 的 `TRAIN_DATA_CACHE_FORMAT_VERSION`）：程式改了寫進去的內容時加 1 |
+| `<algorithm>` | 檔案格式（`training.algorithm`） |
+| `<objective>` | 列怎麼排、丟不丟組：`lambdarank`、`rank_xendcg` 各一段；其餘非 ranking objective 共用 `binary`（它們建出的內容相同） |
+| `features_<hash8>` | 特徵欄與順序（含 `training.feature_selection` 的結果） |
+| `weight_keys_<hash8>` | `training.sample_weight_keys`：sidecar 裡存的是這幾欄 |
+
+所以改其中任何一樣，這次跑就會去一個還不存在的目錄，重建一次；舊目錄原封不動留著，**不會自動清**，要手動刪。
+
+**從舊版升上來**：#483 之前的快取放在 `train_variants/<train_variant_id>/lgb/<objective>/`（更早還有 `lgb/ranking/`），路徑裡沒有格式版本那一段，新程式不會去讀。第一次跑會重建一次 `.bin`（比 HPO 便宜得多），模型不變；舊的 `lgb/` 目錄可以直接刪。
 
 ### 3.5 Sample weights
 
@@ -214,7 +232,7 @@ CLI 會檢查：
 
 training 另會產生 `sample_weight_report.json`，列出實際 train 資料中完全沒有命中的 `unmatched_keys`。即使設定通過靜態檢查，拼錯客群值、資料期間沒有該組合或 encoding 不一致仍可能出現在此報告。
 
-**改權重不需要清任何快取。** 權重不存在 LightGBM 的 `.bin` 裡——`.bin` 只裝分箱後的特徵，權重與分箱無關。`prepare_train_inputs` 會在每個 `.bin` 旁寫一份 `train.weight_keys.parquet`（那份 binary 的列的 weight key 欄位，順序與 binary 相同），HPO 每個 trial 載入 `.bin` 之後用**當下的設定**現算權重再套上去。所以改 `sample_weights` 的值只花一次查表，分箱照樣重用；改 `sample_weight_keys`（＝換 key 欄位）則會讓 `.bin` 重建，log 會印出理由。2026-09-09 之前不是這樣，舊行為與症狀見 [`known-pitfalls.md` §17](../operations/known-pitfalls.md)。
+**改權重不需要清任何快取。** 權重不存在 LightGBM 的 `.bin` 裡——`.bin` 只裝分箱後的特徵，權重與分箱無關。`prepare_train_inputs` 會在每個 `.bin` 旁寫一份 `train.weight_keys.parquet`（那份 binary 的列的 weight key 欄位，順序與 binary 相同），HPO 每個 trial 載入 `.bin` 之後用**當下的設定**現算權重再套上去。所以改 `sample_weights` 的值只花一次查表，分箱照樣重用；改 `sample_weight_keys`（＝換 key 欄位）則會換一個快取目錄、重建一次 `.bin`（見 §3.4 的路徑表）。2026-09-09 之前不是這樣，舊行為與症狀見 [`known-pitfalls.md` §17](../operations/known-pitfalls.md)。
 
 ### 3.6 Cache、診斷與 MLflow
 
@@ -321,7 +339,7 @@ SHAP 診斷主要回答三個問題：
 案例圖用來看「某位客戶在某象限被排高／排低，具體靠哪些特徵」，與 `per_quadrant.json` 的
 「平均驅動特徵」互補。SHAP 值在 log-odds（margin）尺上；正值把分數推高、負值拉低。
 
-local Parquet cache 以 dataset IDs 分層，若目錄存在 `_SUCCESS` 便直接重用；若目錄存在但缺少 `_SUCCESS`，框架會視為不完整 cache 並重建。LightGBM `.bin` 會再依 `objective` 與 feature selection 子集隔離。
+local Parquet cache 以 dataset IDs 分層，若目錄存在 `_SUCCESS` 便直接重用；若目錄存在但缺少 `_SUCCESS`，框架會視為不完整 cache 並重建。LightGBM `.bin` 的路徑另外帶上演算法、objective、特徵欄、權重鍵欄與快取格式版本，同樣是「有 `_SUCCESS` 就用」（見 §3.4）。
 
 `mlflow.strict: false` 時，MLflow 無法連線或 logging 失敗只會記 warning，不會讓已完成的 training 失敗；設為 `true` 時則會直接中止，適合要求 experiment tracking 必須成功的環境。
 
@@ -463,7 +481,7 @@ python -m recsys_tfb training \
 在前一次完整 run 成功且 catalog 產物仍存在時，框架預期直接讀取 `best_params`、`best_iteration` 與 `hpo_best_model`，不重跑 `tune_hyperparameters`。
 它仍會自動執行較便宜的 `select_features`、train/train-dev/test cache handle nodes。這組允許集合釘在 `tests/test_pipelines/test_resume_contracts.py`。
 
-若 HPO 的三個必要產物有任何一個不存在，slice planner 會自動補跑其 producer，可能一路回到 `prepare_lgb_train_inputs` 與 `tune_hyperparameters`。是否真的跳過 HPO，應以 `--dry-run` 當次顯示的計畫為準。
+若 HPO 的三個必要產物有任何一個不存在，slice planner 會自動補跑其 producer，可能一路回到 `prepare_train_inputs` 與 `tune_hyperparameters`。是否真的跳過 HPO，應以 `--dry-run` 當次顯示的計畫為準。
 
 ### 4.6 只執行單一 node
 
@@ -505,8 +523,8 @@ python -m recsys_tfb training \
 |---|---|---|---|---|
 | 特徵選擇 | `select_features` | `preprocessor`、parameters | 套用 training-stage feature exclusion；只餵給下方**訓練**模型的 node，診斷 node 不吃（見表後說明） | `preprocessor_view` |
 | Local cache | `cache_train_model_input`、`cache_train_dev_model_input`、`cache_val_model_input`、`cache_test_model_input` | 各 split Hive table | 將指定 dataset partitions 複製為 driver-local Parquet | 各 split `ParquetHandle`；`cache_test_model_input` 例外，回傳 `{snap_date: ParquetHandle}` 對應（一月一目錄） |
-| 模型格式 | `prepare_lgb_train_inputs` | train/train-dev handles、preprocessor view | 由 adapter 建立可重用訓練格式；LightGBM 為 `.bin` | train/train-dev model handles |
-| 權重報告 | `persist_sample_weight_report` | train handle、preprocessor | 比對 weight 設定與實際 train 值（node 只回傳診斷，`sample_weight_report.json` 由 catalog 寫出） | `sample_weight_report` |
+| 模型格式 | `prepare_train_inputs` | train/train-dev handles、preprocessor view | 決定哪些列、什麼順序進快取（排序目標丟無正例組、依組排序；權重不存進去），由 adapter 存成自己的格式；LightGBM 為 `.bin` | train/train-dev model handles |
+| 權重報告 | `compute_sample_weight_report` | train handle、preprocessor | 比對 weight 設定與實際 train 值（node 只回傳診斷，`sample_weight_report.json` 由 catalog 寫出） | `sample_weight_report` |
 | HPO | `tune_hyperparameters` | train/train-dev model handles、val handle | train 訓練、train-dev early stop、val 上以 `hpo_objective` 選模 | `best_params`、`best_iteration`、`hpo_best_model` |
 | 最終模型 | `finalize_model` | HPO 產物、train/train-dev handles | 沿用 HPO best 或在 train + train-dev refit | `model` |
 | Test 預測 | `predict_and_write_test_predictions` | model、test handles | 逐月判斷是否需要預測，需要的月份再逐 `(time, item)` partition 預測並寫入 Hive | `training_eval_predictions`、`predict_manifest` |
@@ -522,7 +540,7 @@ python -m recsys_tfb training \
 
 **診斷 node 為什麼吃 `preprocessor` 而不是 `preprocessor_view`。** `preprocessor_view` 只活在記憶體裡，沒有 catalog 條目；吃它的 node 一定要連 `select_features` 一起重跑才叫得動。診斷 node 都在模型產出**之後**才跑，所以改問兩個已落地的產物：**用哪些特徵、什麼順序問模型**（`model.feature_names()`），**怎麼編碼問 `preprocessor`**。這五條邊因此消失了（[ADR-0014](../adr/0014-training-modules-split-by-role.md) 決定 7）。
 
-**實際省下的是 HPO。** `compute_feature_statistics` 從前沒有 model 依賴，拓撲序把一個寫進 `data/models/<model_version>/` 的診斷排到「產出模型的 node」之前；`--from-node` 是「跑指定 node 與其後全部」，於是為了重算一份 null rate 的 JSON，`prepare_lgb_train_inputs`、`tune_hyperparameters`、`finalize_model` 全被掃回來。實測 `--from-node compute_feature_statistics` **從 18 個 node 降到 13 個**，不再重跑 HPO。（issue #233 之後再降到 **11 個**——2026-08-31 於本機 `--env local` 量的，當時 calibration 啟用、pipeline 有 21 個 node（#411 之後是 20 個），`--from-node compute_feature_statistics --dry-run` 的輸出原文是 `[plan] running 11 of 21 nodes`。`--list-nodes` 不能與 `--from-node` 併用，它印的是每個 node 的 auto-included 清單，不是總數。）
+**實際省下的是 HPO。** `compute_feature_statistics` 從前沒有 model 依賴，拓撲序把一個寫進 `data/models/<model_version>/` 的診斷排到「產出模型的 node」之前；`--from-node` 是「跑指定 node 與其後全部」，於是為了重算一份 null rate 的 JSON，`prepare_train_inputs`（當時叫 `prepare_lgb_train_inputs`）、`tune_hyperparameters`、`finalize_model` 全被掃回來。實測 `--from-node compute_feature_statistics` **從 18 個 node 降到 13 個**，不再重跑 HPO。（issue #233 之後再降到 **11 個**——2026-08-31 於本機 `--env local` 量的，當時 calibration 啟用、pipeline 有 21 個 node（#411 之後是 20 個），`--from-node compute_feature_statistics --dry-run` 的輸出原文是 `[plan] running 11 of 21 nodes`。`--list-nodes` 不能與 `--from-node` 併用，它印的是每個 node 的 auto-included 清單，不是總數。）
 
 **再省下的是預測那一步。** `predict_manifest` 也落地之後（issue #233），`--from-node compute_feature_statistics` 不再把 `predict_and_write_test_predictions` 拉回來，也就不再連帶拉回 `select_features`（predict node 是**套用**模型，吃 `preprocessor_view` 對它是正確的，所以只要它在切片裡，`select_features` 就跟著在）。省下的不是零：那個 node 就算判定全部月份都跳過、一列都不寫，開頭仍要把整張 test cache 的兩個字串欄拉進 driver 算 distinct（生產規模約 2.2 億列）。`compute_test_metrics` 與 `select_shap_population` 因此變成**零補跑**的接續點。
 
@@ -745,11 +763,11 @@ training 版本描述的是模型設定與上游資料身分，不是完整的�
 
 ## 9. 限制與注意事項
 
-- 目前實際註冊的演算法 adapter 為 LightGBM；其他演算法需要另外實作 `ModelAdapter` 的每個方法（建原生訓練資料與存讀、帶早停訓練與回報最佳迭代數、predict、save/load、feature importance、MLflow、native input preparation），並在 `rules` 宣告自己的排序目標、排序 metric、預設 metric 與丟不丟無正例的 query group。
+- 目前實際註冊的演算法 adapter 為 LightGBM；其他演算法需要另外實作 `ModelAdapter` 的每個方法（建原生訓練資料與存讀、帶早停訓練與回報最佳迭代數、predict、save/load、feature importance、MLflow），並在 `rules` 宣告自己的排序目標、排序 metric、預設 metric 與丟不丟無正例的 query group。
 - 模型訓練是 driver 上的單機 CPU 工作，不是 Spark distributed training；Spark 主要負責上游資料處理、Hive I/O 與 test 指標聚合。
 - train、train-dev、val 與 test 的 local Parquet 會占用 driver disk；cache 不會自動依版本數量清理。
 - feature statistics、SHAP 與部分模型資料抽取使用 pandas／NumPy，記憶體尖峰取決於 rows、features 與 tree 數。
-- **`prepare_lgb_train_inputs` 的建矩陣步驟是全流程的 driver 記憶體峰值**，且它的觀測數字會低報——見 §9.1。
+- **`prepare_train_inputs` 與 `refit_on_full` 的建矩陣步驟是全流程的 driver 記憶體峰值**，且它的觀測數字會低報——見 §9.1。
 - **HPO 期間的 val 矩陣不佔 driver 記憶體，改佔 driver disk**（#285）：`data/_scratch` 底下要有 `val 列數 × 特徵欄數 × itemsize` 的空間，空間不足會在建立前 raise。見 §9.2。
 - HPO study 不支援同一 `search_id` 由多個 training processes 同時寫入；應避免並行啟動相同搜尋。
 - HPO resume 可延續 completed trials，但重新建立的 TPE sampler 狀態不保證與完全不中斷的單次執行 bitwise identical。
@@ -772,6 +790,34 @@ batch 由 `STREAM_BATCH_BYTES`（64 MiB）除以欄寬決定列數，不是寫�
 
 **這一步已經沒有 `slice_features` 與 `to_numpy` 兩個子步驟**——沒有 frame 要切，
 也沒有矩陣要攤；log 裡剩下的 `read_parquet` 就是整個建矩陣過程。
+
+**排序目標的 `.bin` 與 `refit_on_full` 也不再多配一份矩陣（#483，ADR-0030 決定 12 第 3 件）。**
+它們要的列不是檔案裡的順序：lambdarank 丟掉無正例的組，排序目標把同一組排在一起，refit 還要把
+train 與 train_dev 疊起來。以前是先照檔案順序讀完整張矩陣，再 `X[mask]`、`X[perm]`、
+`np.concatenate`——每一步都在舊矩陣還活著時配一張新的，峰值約兩倍。現在分兩次讀：先只讀 label、
+group 欄與權重鍵（`extract_y` / `extract_y_with_groups`），在這些一維陣列上決定留哪些列、什麼順序；
+再讀特徵，每個 batch 直接寫進它最後的位置（`extract_X_rows`）。第二次讀會把 label 一起讀回來，
+跟第一次對不上就停下——兩次讀的列順序不同時，特徵會掛到別列的 label 下，而且不報錯。
+本機實測（2026-09-29，Apple M2 8 CPU / 16 GB）：train 240,000 列、train_dev 60,000 列，
+101 個特徵欄 float32，約 30% 的 query group 沒有正例；量的是 `tracemalloc` 的配置峰值（numpy
+的配置算在裡面，LightGBM 自己的 C++ 配置不算）。兩邊都把 `STREAM_BATCH_BYTES` 設成 1 MiB：
+生產上一個 batch（64 MiB）對上幾十 GiB 的矩陣可以忽略，這份資料的矩陣卻只有 92.5 MiB，不縮的話
+batch 會被量成像是第二張矩陣。
+
+| | 一份完整矩陣 | 改前 | 改後 |
+|---|---|---|---|
+| lambdarank 建 `.bin`（量 train，丟組後剩約 70%） | 92.5 MiB | 162.6 MiB | 71.5 MiB |
+| rank_xendcg 建 `.bin`（不丟組） | 92.5 MiB | 198.7 MiB | 108.3 MiB |
+| binary 建 `.bin`（本來就沒有重排） | 92.5 MiB | 96.5 MiB | 100.4 MiB |
+| lambdarank `refit_on_full` | 115.6 MiB | 181.7 MiB | 85.6 MiB |
+| binary `refit_on_full` | 115.6 MiB | 237.1 MiB | 126.3 MiB |
+
+改後每一列都是「一份矩陣加上一維陣列」；binary 建 `.bin` 多出的約 4 MiB 是第二次讀要的列號與
+label。預設的 64 MiB batch 下，改後的額外開銷最多約兩個 batch（batch 暫存，加上有列被丟時選出
+留下的列那一份）。
+
+⚠ 常見的「就地」寫法（`X[:] = X[perm]`、`np.take(X, perm, out=X)`）一樣會先配一整份暫存，
+不能拿來省這一份。
 
 下面兩個陷阱仍然要知道，因為 **`pdf_to_X`**（inference 逐 chunk、training 逐 partition
 的 test 評估走它）走的仍是「切 frame 再 `.values`」那條路。

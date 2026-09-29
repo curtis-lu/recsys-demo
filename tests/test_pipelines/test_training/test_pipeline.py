@@ -13,7 +13,7 @@ class TestTrainingPipeline:
     def test_pipeline_node_count(self):
         pipeline = create_pipeline()
         # select_features + 4 cache nodes (train, train_dev, val, test) + prepare_lgb
-        # + persist_group_filter_report + persist_sample_weight_report + tune
+        # + compute_group_filter_report + compute_sample_weight_report + tune
         # + finalize + predict_and_write_test_predictions + compute_test_metrics
         # + compute_feature_statistics + compute_feature_importance + compute_gain_ledger
         # + compute_shap_diagnostics
@@ -72,7 +72,7 @@ class TestTrainingPipeline:
         assert "cache_train_dev_model_input" in names
         assert "cache_val_model_input" in names
         assert "cache_test_model_input" in names
-        assert "prepare_lgb_train_inputs" in names
+        assert "prepare_train_inputs" in names
         assert "tune_hyperparameters" in names
         assert "finalize_model" in names
         assert "train_model" not in names
@@ -94,18 +94,18 @@ class TestTrainingPipeline:
     def test_topological_order(self):
         pipeline = create_pipeline()
         names = [n.name for n in pipeline.nodes]
-        # cache nodes must come before prepare_lgb_train_inputs
+        # cache nodes must come before prepare_train_inputs
         for cache_name in (
             "cache_train_model_input",
             "cache_train_dev_model_input",
         ):
-            assert names.index(cache_name) < names.index("prepare_lgb_train_inputs")
+            assert names.index(cache_name) < names.index("prepare_train_inputs")
         # val cache must come before tune (val_parquet_handle flows into tune)
         assert names.index("cache_val_model_input") < names.index("tune_hyperparameters")
         # test cache must come before predict_and_write
         assert names.index("cache_test_model_input") < names.index("predict_and_write_test_predictions")
         # prepare must come before tune
-        assert names.index("prepare_lgb_train_inputs") < names.index("tune_hyperparameters")
+        assert names.index("prepare_train_inputs") < names.index("tune_hyperparameters")
         # tune -> finalize -> predict_and_write -> compute_test_metrics -> log
         assert names.index("tune_hyperparameters") < names.index("finalize_model")
         assert names.index("finalize_model") < names.index("predict_and_write_test_predictions")
@@ -116,7 +116,7 @@ class TestTrainingPipeline:
     # (or as) the model exists, so the config-derived view is the only answer
     # available to them.
     TRAINING_VIEW_CONSUMERS = (
-        "prepare_lgb_train_inputs", "persist_sample_weight_report",
+        "prepare_train_inputs", "compute_sample_weight_report",
         "tune_hyperparameters", "finalize_model",
         "predict_and_write_test_predictions",
     )
@@ -204,7 +204,7 @@ class TestTrainingPipeline:
     def test_select_features_runs_before_prepare(self):
         pipeline = create_pipeline()
         names = [n.name for n in pipeline.nodes]
-        assert names.index("select_features") < names.index("prepare_lgb_train_inputs")
+        assert names.index("select_features") < names.index("prepare_train_inputs")
 
 
 class TestSampleWeightReportIsACatalogArtifact:
@@ -228,7 +228,7 @@ class TestSampleWeightReportIsACatalogArtifact:
         # registry instead of shrinking the direct-write one.
         pipeline = create_pipeline()
         by_name = {n.name: n for n in pipeline.nodes}
-        assert by_name["persist_sample_weight_report"].outputs == [
+        assert by_name["compute_sample_weight_report"].outputs == [
             "sample_weight_report"
         ]
 
@@ -421,7 +421,7 @@ class TestTrainingPipelineE2E:
         # -- Write model_inputs to parquet and inject ParquetHandles into catalog.
         # The training pipeline's cache nodes require Spark DataFrames; in the
         # test environment we bypass them by pre-populating the *_parquet_handle
-        # slots directly so the training pipeline can start at prepare_lgb_train_inputs.
+        # slots directly so the training pipeline can start at prepare_train_inputs.
         for mi_name, handle_name in (
             ("train_model_input", "train_parquet_handle"),
             ("train_dev_model_input", "train_dev_parquet_handle"),

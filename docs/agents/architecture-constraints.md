@@ -752,7 +752,7 @@ src/recsys_tfb/evaluation/metrics_spark.py:221 in collapse_to_categories(): time
 > 讓它產出 `numeric_precision_report`（每個受檢欄的 headroom），於是它**不再是零輸出
 > node**，登記跟著撤掉——A7 只管 `outputs=None` 的 node。記在這裡是因為「登記縮小不
 > 需要新例外」這件事本身容易被讀成「有人偷偷拿掉一筆」（前例：R4 的
-> `persist_sample_weight_report`）。附帶收穫是它不再被切片靜默跳過（F5）。
+> `persist_sample_weight_report`，#483 起改名 `compute_sample_weight_report`）。附帶收穫是它不再被切片靜默跳過（F5）。
 
 ## R4. 自己寫診斷副產物的 node（A1 的例外二）── 2 筆
 
@@ -765,11 +765,13 @@ src/recsys_tfb/evaluation/metrics_spark.py:221 in collapse_to_categories(): time
 
 **位置只給檔案與要搜的字串、不給行號**，理由同 R3：本表原本寫 `nodes.py:1256`／`:1339`／`:520`／`:739`，光是 #226 從同檔刪掉 4 行就讓四個數字同時失準；而 (d) 只比對函式名的 Counter、抓不到行號腐爛。
 
-**離開這張表的**：`persist_sample_weight_report`（2026-08-30，ADR-0014 決定 2；G1 簽核記錄在 issue #222 的切票留言與 #226 票面）。`sample_weight_report` 拿到 catalog 條目之後，node 只 `return diag`，寫檔由 catalog 負責——它不再是「自己寫診斷副產物的 node」，也同步離開下面那組測試釘的集合。登記**縮小**不需要新例外。
+**離開這張表的**：`persist_sample_weight_report`（#483 起改名 `compute_sample_weight_report`：名字裡的 persist 已經名不符實）（2026-08-30，ADR-0014 決定 2；G1 簽核記錄在 issue #222 的切票留言與 #226 票面）。`sample_weight_report` 拿到 catalog 條目之後，node 只 `return diag`，寫檔由 catalog 負責——它不再是「自己寫診斷副產物的 node」，也同步離開下面那組測試釘的集合。登記**縮小**不需要新例外。
 
 > ⚠ **這張表的 2 筆，跟測試釘的 6 筆不是同一組。**
-> 這張表列的是「**會寫診斷副產物的 node**」。測試 (d) 釘的是「**掃描看得到直接寫檔的函式**」＝ `log_experiment` ＋ 4 個 cache node（`cache_train_model_input`、`cache_train_dev_model_input`、`cache_val_model_input`、`cache_test_model_input`，都在 `pipelines/training/nodes.py`，搜 `shutil.rmtree` 可見）。
-> 差別在兩端：`tune_hyperparameters` 在表上、不在測試裡（間接寫入，掃不到）；4 個 cache node 在測試裡、不在表上（它們刪的是本機 parquet cache，不是診斷副產物）。
+> 這張表列的是「**會寫診斷副產物的 node**」。測試 (d) 釘的是「**掃描看得到直接寫檔的函式**」＝ `log_experiment` ＋ 4 個 cache node（`cache_train_model_input`、`cache_train_dev_model_input`、`cache_val_model_input`、`cache_test_model_input`）＋ `prepare_train_inputs`，都在 `pipelines/training/nodes.py`，搜 `shutil.rmtree` 可見。
+> 差別在兩端：`tune_hyperparameters` 在表上、不在測試裡（間接寫入，掃不到）；4 個 cache node 與 `prepare_train_inputs` 在測試裡、不在表上（它們刪的是本機快取，不是診斷副產物）。
+>
+> **2026-09-29 的 #483 讓測試那一組由 5 筆變回 6 筆**（使用者當天批准）：建 `.bin` 的判斷從 LightGBM adapter 搬回 `prepare_train_inputs`（ADR-0030 決定 10），「建到一半的目錄刪掉重建」的 `shutil.rmtree` 與建目錄的 `mkdir` 跟著進了 node。這兩個寫入以前就有，只是在 `models/` 裡，這個掃描從來看不到；登記變大是讓它們被看見，不是多了寫入。
 >
 > **2026-08-30 起測試那一組由 2 筆變 6 筆**（ADR-0014 決定 1，使用者已批准），**2026-09-20 的 #413 又降回 5 筆**：`cache_calibration_model_input` 隨校準器一起刪掉，登記縮小不需要新例外。原本的第 2 筆是 `_materialize_parquet_handle`——一個 helper 裝著 5 個 cache node 的全部四個決策，所以讀任何一個 cache node 都讀不出這個 cache 決定了什麼。決策上浮到各 node 之後，`shutil.rmtree` 也跟著回到各 node 的 body：每個 node 真的各自會刪檔，登記變大是誠實的。
 > 機制（路徑計算、複製、HDFS 拉取）進了 `pipelines/training/steps/local_cache.py`，**但刪檔沒有跟著搬**——(d) 只掃 `pipelines/**/nodes*.py`，搬進 `steps/` 就沒有任何測試看得到它。這是稽核範圍的後果，不是一條關於刪檔的規則。使用者 2026-09-19 裁決不放寬 glob（#163），所以這個安排維持；哪天放寬了，這個決定該重新檢討。

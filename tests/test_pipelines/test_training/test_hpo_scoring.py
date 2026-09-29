@@ -475,6 +475,7 @@ class TestWeightsReachTheTrainedModel:
 
         from recsys_tfb.io.extract import extract_Xy_with_groups
         from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+        from recsys_tfb.pipelines.training.nodes import prepare_train_inputs
         from recsys_tfb.pipelines.training.steps.fit_params import fit_params
 
         prep = {
@@ -484,11 +485,15 @@ class TestWeightsReachTheTrainedModel:
         }
         train_h, dev_h = self._model_input(tmp_path)
         params = self._parameters(objective, sample_weights)
-        # Same cache directory across both calls: that is the condition the
-        # bug needed, and reusing it here is what makes this a regression
-        # test rather than two unrelated fits.
-        lgb_train, lgb_dev = LightGBMAdapter().prepare_train_inputs(
-            train_h, dev_h, prep, params, str(tmp_path / "variant"))
+        # Same cache directory across both calls — the weight table is not in
+        # the cache path, so the second call is a cache hit: that is the
+        # condition the bug needed, and reusing it here is what makes this a
+        # regression test rather than two unrelated fits.
+        params.update({
+            "cache": {"root": str(tmp_path / "cache")},
+            "base_dataset_version": "b1", "train_variant_id": "t1",
+        })
+        lgb_train, lgb_dev = prepare_train_inputs(train_h, dev_h, prep, params)
 
         X_v, y_v, g_v, i_v = extract_Xy_with_groups(
             dev_h, prep, params, with_items=True)
