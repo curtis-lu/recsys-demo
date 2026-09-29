@@ -459,8 +459,9 @@ def cache_test_model_input(
 ) -> dict[str, ParquetHandle]:
     """Driver-local parquet copy of the test split, one directory per month.
 
-    Returns ``{snap_date: handle}`` keyed by the **verbatim**
-    ``dataset.test_snap_dates`` values (no format conversion), sorted so the
+    Returns ``{snap_date: handle}`` keyed by the ``dataset.test_snap_dates``
+    values as configured — ``str()`` of each with surrounding whitespace
+    stripped (``configured_months``), otherwise not reformatted — sorted so the
     mapping is deterministic. One month per directory is what lets each month be
     cached and invalidated on its own: adding a month copies only that month, and
     a month whose copy was interrupted is rebuilt without disturbing its siblings.
@@ -1217,9 +1218,16 @@ def predict_and_write_test_predictions(
           the landed table's shape does not change; #412 removes it), the
           optional-role columns, the label, the zero-positive group weight
           when there is one, and the partition columns
-        - check it before the write — one partition, a row per row read, no
-          missing score, no duplicate row — then
-          training_eval_predictions.save(df): exactly one partition's rows per
+        - check before the write, two kinds (``pipeline-node-design.md``
+          rule 11). **Post-conditions** on the frame this node built: one
+          partition (``ValueError``), one row out per row read and no NULL
+          score (``ScoredChunkError``). **Pre-checks** on the rows it read:
+          no NULL entity and no row repeating ``identity_columns``
+          (``ScoredChunkError``) — nothing this node does can null an entity
+          or repeat a row, so these fail only on a wrong test_model_input,
+          and the place to look is dataset. Any failure stops the run before
+          that partition is saved.
+        - training_eval_predictions.save(df): exactly one partition's rows per
           save, so dynamic-partition overwrite cleanly overwrites a single
           partition and successive saves don't collide
 
@@ -1327,13 +1335,16 @@ def predict_and_write_test_predictions(
     # would report every one of them (ADR-0030 decision 5).
     identity_cols = schema_cfg["identity_columns"]
 
-    # Decision — which columns must not be NULL in what is written: the ones
-    # this node computes or assigns — the score and the two partition values
-    # (the entity columns are checked on the rows they were read from, since
-    # `str` turns a NULL into "None"). The carried columns are not listed:
-    # they arrive from dataset unchanged, and whether a label or an event may
-    # be NULL is dataset's contract, not something this node vouches for.
-    not_null_cols = [time_col, item_col, score_col]
+    # Decision — which output columns must not be NULL: the score, the one
+    # column this node computes. The two partition values are not listed:
+    # each is `str(...)` of a directory name, which is never NULL (a Hive
+    # NULL partition is refused when the partitions are listed), so a check
+    # on them could never fire — the decorative shape ADR-0011 removes. The
+    # entity columns are checked on the rows they were read from, since `str`
+    # turns a NULL into "None". The carried columns are not listed: they
+    # arrive from dataset unchanged, and whether a label or an event may be
+    # NULL is dataset's contract, not something this node vouches for.
+    not_null_cols = [score_col]
 
     # partitioning="hive" tells pyarrow to reconstruct (snap_date, prod_name)
     # columns from the snap_date=*/prod_name=* directory tree produced by
@@ -1467,11 +1478,17 @@ def predict_and_write_test_predictions(
                 part_pdf, y_score, {time_col: snap_date, item_col: prod_name},
             )
 
-            # Post-conditions on the frame this node just built, before the
-            # write: one partition per save (a frame spanning two would have
-            # the second save delete the first one's rows), and the per-chunk
-            # checks inference also runs — each with this node's own answers
-            # from above.
+            # Before the write, two kinds of check (pipeline-node-design.md
+            # rule 11), each with this node's own answers from above:
+            # - post-conditions on the frame just built: one partition per
+            #   save (a frame spanning two would have the second save delete
+            #   the first one's rows), one row out per row read, no NULL score;
+            # - pre-checks on the rows read: no NULL entity, no row repeating
+            #   the identity. Nothing above can null an entity or repeat a
+            #   row, so these fail only on a wrong test_model_input — dataset
+            #   is where to look.
+            # The last four are the per-chunk checks inference also runs, in
+            # one call.
             require_single_partition(out_pdf, [time_col, item_col])
             require_scored_chunk(
                 out_pdf, part_pdf,

@@ -1325,8 +1325,14 @@ class TestZeroMatchDiagnosticKeys:
 # ---------------------------------------------------------------------------
 
 
-def _pre284_X(pdf: pd.DataFrame, prep_meta: dict, parameters: dict) -> np.ndarray:
-    """The pre-#284 matrix build, inlined: slice, encode, flatten."""
+def _pre484_pdf_to_X(
+    pdf: pd.DataFrame, prep_meta: dict, parameters: dict,
+) -> np.ndarray:
+    """``pdf_to_X`` as it was before #484, inlined: slice, encode, ``.values``.
+
+    Also the build ``extract_Xy`` ran before #284 (it called this after its
+    parquet read), so it is the reference for both replacements.
+    """
     from recsys_tfb.core.schema import get_schema
 
     feature_cols = prep_meta["feature_columns"]
@@ -1378,7 +1384,7 @@ class TestStreamedMatrixParity:
 
         df = _wide_df()
         X, y = extract_Xy(_make_handle(tmp_path, df), _wide_meta(), _WIDE_PARAMS)
-        expected = _pre284_X(df, _wide_meta(), _WIDE_PARAMS)
+        expected = _pre484_pdf_to_X(df, _wide_meta(), _WIDE_PARAMS)
 
         assert X.dtype == expected.dtype
         assert X.tobytes() == expected.tobytes()
@@ -1440,8 +1446,8 @@ class TestStreamedMatrixParity:
 # from a frame already in memory; since #484 it writes it through the same
 # per-batch encoder the streamed read uses. The output has to stay what the
 # replaced ``pdf[cols].copy()`` + codes + ``.values`` produced — the reference
-# is ``_pre284_X`` above, which is that implementation — because a changed
-# matrix is a changed prediction, and nothing versions predictions yet.
+# is ``_pre484_pdf_to_X`` above, which is that implementation — because a
+# changed matrix is a changed prediction, and nothing versions predictions yet.
 # ---------------------------------------------------------------------------
 
 
@@ -1484,7 +1490,7 @@ class TestPdfToXParity:
         from recsys_tfb.io.extract import pdf_to_X
 
         pdf, meta = _scoring_frame(case)
-        expected = _pre284_X(pdf, meta, _WIDE_PARAMS)
+        expected = _pre484_pdf_to_X(pdf, meta, _WIDE_PARAMS)
         X = pdf_to_X(pdf, meta, _WIDE_PARAMS)
 
         assert X.dtype == expected.dtype
@@ -1499,7 +1505,7 @@ class TestPdfToXParity:
         from recsys_tfb.io.extract import pdf_to_X
 
         pdf, meta = _scoring_frame("bool")
-        expected = _pre284_X(pdf, meta, _WIDE_PARAMS)
+        expected = _pre484_pdf_to_X(pdf, meta, _WIDE_PARAMS)
         X = pdf_to_X(pdf, meta, _WIDE_PARAMS)
 
         assert expected.dtype == object
@@ -1536,6 +1542,70 @@ class TestPdfToXParity:
         before = pdf._mgr.nblocks
         pdf[[f"f{i}" for i in range(3)]].copy()
         assert pdf._mgr.nblocks < before
+
+    def test_the_matrix_is_fortran_ordered_like_the_replaced_values(self) -> None:
+        """The encoder fills one column at a time. Into a C-ordered matrix each
+        column write strides across every row — on 200,000 x 500 float32 a
+        call took 0.53s that way against 0.034s Fortran-ordered (ADR-0030,
+        note on decision 12.4). Nothing but the time shows the difference;
+        this is what keeps the order from drifting back."""
+        from recsys_tfb.io.extract import pdf_to_X
+
+        pdf, meta = _scoring_frame("float32")
+        assert _pre484_pdf_to_X(pdf, meta, _WIDE_PARAMS).flags.f_contiguous
+        assert pdf_to_X(pdf, meta, _WIDE_PARAMS).flags.f_contiguous
+
+
+def _one_feature_frame(values) -> tuple:
+    """A frame whose only non-deferred feature is ``values``, plus prod_name."""
+    pdf = pd.DataFrame({"odd": values, "prod_name": ["fund", "ccard", "fund"]})
+    meta = {
+        "feature_columns": ["odd", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["fund", "ccard"]},
+    }
+    return pdf, meta
+
+
+class TestPdfToXRefusesDtypesItCannotEncode:
+    """Arrow would turn each of these into *some* number without a word: a
+    ``category`` column's NaN becomes an integer code, a datetime its
+    nanosecond epoch. The pipeline never hands one over, so the function
+    names the caller instead of guessing."""
+
+    @pytest.mark.parametrize("values, dtype_text", [
+        (pd.Categorical([1.0, None, 2.0]), "category"),
+        (pd.array([1, None, 3], dtype="Int64"), "Int64"),
+        (pd.array([1.5, None, 3.5], dtype="Float32"), "Float32"),
+        (pd.array([True, None, False], dtype="boolean"), "boolean"),
+        (pd.array(["x", None, "y"], dtype="string"), "string"),
+        (pd.to_datetime(["2025-01-01", None, "2025-01-03"]), "datetime64[ns]"),
+        (pd.to_datetime(["2025-01-01", None, "2025-01-03"]).tz_localize("UTC"),
+         "datetime64[ns, UTC]"),
+        (pd.to_timedelta([1, None, 3], unit="D"), "timedelta64[ns]"),
+    ])
+    def test_raises_type_error_naming_the_column_and_dtype(
+        self, values, dtype_text,
+    ) -> None:
+        from recsys_tfb.io.extract import pdf_to_X
+
+        pdf, meta = _one_feature_frame(values)
+        with pytest.raises(TypeError) as exc:
+            pdf_to_X(pdf, meta, _WIDE_PARAMS)
+        assert f"'odd' ({dtype_text})" in str(exc.value)
+
+    def test_a_deferred_identity_column_may_be_category_dtype(self) -> None:
+        """The deferred identity categoricals are strings or ``category`` by
+        contract; the refusal is for the other feature columns only."""
+        from recsys_tfb.io.extract import pdf_to_X
+
+        pdf, meta = _one_feature_frame(np.array([1.0, 2.0, 3.0], dtype=np.float32))
+        pdf["prod_name"] = pd.Categorical(["ccard", "fund", "loan"])
+
+        X = pdf_to_X(pdf, meta, _WIDE_PARAMS)
+
+        np.testing.assert_array_equal(X[:, 1], np.array([1, 0, -1], dtype=X.dtype))
+        assert X.tobytes() == _pre484_pdf_to_X(pdf, meta, _WIDE_PARAMS).tobytes()
 
 
 class TestStreamBatchRows:

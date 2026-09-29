@@ -63,7 +63,7 @@
 | [S5](#s5-schema-設定的角色名必須在-columns-底下且不得宣告推導欄) | `schema` 設定的角色名必須在 `columns` 底下，且不得宣告推導欄（`identity_columns`／`query_group_columns`／`base_key_columns`） | `src/recsys_tfb/` ＋ `tests/` 裡的 `{"schema": {...}}` 字面值 | `conf/` 的 YAML；`schema` 區塊先綁到變數再組進 parameters；`scripts/` 不在範圍內（**是假陽性，不是缺陷**） |
 | [S6](#s6-src-不得出現示例部署的字面欄名) | `src/` 不得出現示例部署的字面欄名（`snap_date`／`cust_id`／`prod_name`） | `src/recsys_tfb/`（**只有這一棵**；`tests/`／`scripts/` 刻意在外） | 註解；f-string 片段與任何子字串；字串拼接出來的欄名；不在那三個名字裡的其他示例欄名；`conf/` 的 YAML |
 | [S7](#s7-query-groupbase-keyidentity-只能從-get_schema-取不得手拼) | query group／base key／identity 只能從 `get_schema` 取，不得手拼 | `src/recsys_tfb/` ＋ `tests/` ＋ `scripts/`（比 S4／S5／S6 多一棵，見該條） | 欄名不是從 schema 讀出來的（模組常數、字面字串）；清單多出任何一欄就放行（刻意）；`conf/` 的 YAML |
-| [S8](#s8-pipeline-之間不互相-importpipeline-以外的-src-模組不-import-pipeline) | pipeline 之間不互相 import；pipeline 以外的 `src/` 模組不 import pipeline（CLI `__main__.py` 除外） | 整個 `src/recsys_tfb/`（測試刻意不掃） | `importlib.import_module` 字串 import；先 import 套件再走屬性；CLI 例外本身；現況零命中 |
+| [S8](#s8-pipeline-之間不互相-importpipeline-以外的-src-模組不-import-pipeline) | pipeline 之間不互相 import；pipeline 以外的 `src/` 模組不 import pipeline（CLI `__main__.py` 除外） | 整個 `src/recsys_tfb/`（測試刻意不掃） | `importlib.import_module` 字串 import；先 import 套件再走屬性；經 `get_pipeline` 登記表拿另一條；CLI 例外本身；現況零命中 |
 
 **CLI 層（`__main__.py`）、`core/`、`io/` 不在 A1／A2 管轄內**——那幾層本來就負責 I/O 與程序級資源。
 
@@ -738,6 +738,7 @@ src/recsys_tfb/evaluation/metrics_spark.py:221 in collapse_to_categories(): time
 
 - **字串組出來的 import。** `importlib.import_module(...)` 靜態掃不到，不是這條的特例。`pipelines/__init__.py` 的 `_REGISTRY` 就是用它查 pipeline 模組——它屬於 pipelines 根層，本來就合法；但同樣的手法從某條 pipeline 裡指向另一條，這個檢查不會報。
 - **先 import 套件、再走屬性。** pipeline 內的 `import recsys_tfb.pipelines` 本身合法（指向的是 pipelines 套件本身），之後若讀 `recsys_tfb.pipelines.inference.nodes.x`（別處已載入該子模組），import 那一行看不出來。
+- **經登記表拿另一條 pipeline。** pipeline 內的 `from recsys_tfb.pipelines import get_pipeline` 合法（import 的是 pipelines 根層，上面第 5 項還釘住它不被報），之後呼叫 `get_pipeline("<b>")` 就拿得到另一條 pipeline 的 node 與它們 import 的一切。import 那一行看不出要的是哪一條，名字是執行期才給的字串。
 - **CLI 例外本身。** `__main__.py` 想 import 什麼都放行，包含 `steps/`（那半歸 S3 管）。
 - **`pipelines/` 根層的檔不受任何一條管。** `pipelines/__init__.py` 之外若哪天放了別的根層模組並 import 某條 pipeline，本檢查不報。
 - **`<b>` 只認掃描那棵樹裡真的存在的目錄或 `.py`。** 一個 import 指向已經不存在的 pipeline，不是這條的事（那會在 import 時就爆）。

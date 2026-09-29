@@ -338,18 +338,20 @@ def predict_and_write_scores(
     collection_columns = model_columns_to_collect(
         keep_identity, scoring_columns, identity_cols,
     )
-
-    # What each chunk's frame holds: every entity column (as `str`, which is
-    # what the ranking side compares on), the score under `schema.score`, the
-    # deprecated `score_uncalibrated` (#412; kept only so the four managed
-    # prediction tables keep their column count — the writes bind by position,
-    # so dropping it would break a write against a table that still declares
-    # it), and the three partition values. No optional-role column: this
-    # pipeline's rows never carry one (scored_row_columns).
-    layout = ScoredFrameLayout(entity_cols=entity_cols, score_col=score_col)
     require_population_has_model_columns(
         inference_population_features.columns, collection_columns,
     )
+
+    # Decision — what each chunk's frame holds: every entity column, written
+    # as `str` because that is what the ranking side compares on; the score
+    # under `schema.score`; the deprecated `score_uncalibrated` (#412; kept
+    # only so the four managed prediction tables keep their column count — the
+    # writes bind by position, so dropping it would break a write against a
+    # table that still declares it); and the three partition values, the
+    # entity bucket among them (`partition_cols` above), so one save touches
+    # one bucket's partition. No optional-role column: this pipeline's rows
+    # never carry one (scored_row_columns).
+    layout = ScoredFrameLayout(entity_cols=entity_cols, score_col=score_col)
 
     # Decision — what work this run does: the configured grid minus the chunks
     # whose partition already exists, plus whatever --rebuild-dates forces back

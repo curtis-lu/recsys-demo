@@ -1,16 +1,24 @@
-"""Writing a scored frame: the guards and the assembly both scoring pipelines use.
+"""Writing a scored frame: guards and assembly for the scoring pipelines.
 
 Training writes test predictions (``predict_and_write_test_predictions``) and
 inference writes scores (``predict_and_write_scores``), and until #484 each
 built its output frame its own way: inference checked every chunk before the
-write and training checked nothing. This module holds the part of that work
-that is the same on both sides and knows nothing about the model (ADR-0030
-decision 5):
+write and training checked nothing. This module holds the mechanisms of that
+work (ADR-0030 decision 5). None of them knows anything about the model, and
+either pipeline may use any of them; which ones each uses is its node's
+decision. Today:
 
-* one ``save()``, one partition (:func:`require_single_partition`);
-* the per-chunk post-conditions — the row count, the nulls, the duplicates
-  (:func:`scored_chunk_failures`, :func:`require_scored_chunk`);
-* laying the output frame out (:class:`ScoredFrameLayout`).
+* one ``save()``, one partition (:func:`require_single_partition`) — both;
+* the per-chunk checks — the row count, the nulls, the duplicates. Both call
+  :func:`scored_chunk_failures`; only training raises through
+  :func:`require_scored_chunk` and :class:`ScoredChunkError`, because
+  inference adds a check of its own and raises its own ``ValidationError``.
+  Whether a check is a pre-check on the rows read or a post-condition on the
+  frame built depends on the caller (``pipeline-node-design.md`` rule 11), so
+  the caller's docstring says which;
+* laying the output frame out (:class:`ScoredFrameLayout`) — both, though only
+  training carries columns through (``carried_cols``) or writes declared
+  columns it has no value for (``null_cols``).
 
 **The decisions stay in each node.** The two pipelines ask the same questions
 and answer several of them differently, so this module takes the answer as an
@@ -109,7 +117,7 @@ def scored_chunk_failures(
     identity_cols: Sequence[str],
     not_null_cols: Sequence[str],
 ) -> list[dict]:
-    """The per-chunk post-conditions that hold for any scored frame.
+    """The per-chunk checks that hold for any scored frame.
 
     Returns zero to three ``{"check", "detail"}`` dicts, in the order
     ``chunk_row_count``, ``no_missing``, ``no_duplicates``; the caller adds its
@@ -126,9 +134,10 @@ def scored_chunk_failures(
     entity reaches the output through ``astype(str)``, which turns a null into
     the *string* ``"None"``, so a null check on the output's entity can never
     fire — the decorative-check shape ADR-0011 exists to remove.
-    ``not_null_cols`` are the output columns the caller itself fills (the
-    score, the partition values); a column it only carries from the source is
-    the source's contract, not this check's.
+    ``not_null_cols`` are output columns the caller itself fills (training
+    lists the score; inference the score and its time and item values); a
+    column it only carries from the source is the source's contract, not this
+    check's.
 
     ``no_duplicates`` looks for repeated ``identity_cols`` in the output. The
     identity is the caller's decision (see the module docstring): the same rows
@@ -170,7 +179,7 @@ def scored_chunk_failures(
 
 
 class ScoredChunkError(Exception):
-    """A scored chunk failed its post-conditions; ``failures`` names each one."""
+    """A scored chunk failed its checks; ``failures`` names each one."""
 
     def __init__(self, failures: list[dict]):
         self.failures = failures
@@ -191,9 +200,9 @@ def require_scored_chunk(
 ) -> None:
     """Raise :class:`ScoredChunkError` unless :func:`scored_chunk_failures` is empty.
 
-    Post-condition, for a caller with no checks of its own to add. One that has
-    some (inference's item value domain) calls :func:`scored_chunk_failures`
-    and raises its own error with every failure in it.
+    For a caller with no checks of its own to add. One that has some
+    (inference's item value domain) calls :func:`scored_chunk_failures` and
+    raises its own error with every failure in it.
     """
     failures = scored_chunk_failures(
         out_pdf, source_pdf, entity_cols=entity_cols,

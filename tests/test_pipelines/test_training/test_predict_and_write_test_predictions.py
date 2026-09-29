@@ -885,7 +885,9 @@ def test_a_declared_weight_column_is_written_null_at_the_default_ratio(tmp_path)
     assert written[ZERO_POSITIVE_GROUP_WEIGHT_COL].isna().all()
 
 
-def test_the_weighted_path_reads_the_weight_column_and_nothing_unused(tmp_path):
+def test_the_weighted_path_reads_the_weight_column_and_nothing_unused(
+    tmp_path, monkeypatch,
+):
     """The per-partition read is narrowed to what the frame and the model need;
     under a positive ratio the weight column is one of them (ADR-0030 decision
     12.2 — a fixed list in the node would have missed it)."""
@@ -899,10 +901,10 @@ def test_the_weighted_path_reads_the_weight_column_and_nothing_unused(tmp_path):
     params["dataset"] = {
         "test_snap_dates": ["2025-01-31"], "test_zero_positive_group_ratio": 0.25,
     }
-    model, seen = _column_recording_model()
+    reads = _record_partition_reads(monkeypatch)
     write_ds = _write_ds()
     predict_and_write_test_predictions(
-        model=model,
+        model=_model_that_reads_no_column(),
         test_parquet_handle=ParquetHandle(
             path=str(_make_weighted_test_parquet(tmp_path, 4.0))),
         preprocessor_metadata=_make_prep_meta(),
@@ -910,10 +912,15 @@ def test_the_weighted_path_reads_the_weight_column_and_nothing_unused(tmp_path):
         training_eval_predictions=write_ds,
     )
 
-    assert seen and all(
-        set(cols) == {"cust_id", "label", ZERO_POSITIVE_GROUP_WEIGHT_COL, "feat_a"}
-        for cols in seen
-    ), seen
+    # One read per partition, each asking for exactly these columns: fewer
+    # would lose one the frame or the model needs, more would read what
+    # nothing uses.
+    assert len(reads) == 2, reads
+    assert all(
+        cols is not None and sorted(cols) == sorted(
+            ["cust_id", "label", ZERO_POSITIVE_GROUP_WEIGHT_COL, "feat_a"])
+        for cols in reads
+    ), reads
     written = pd.concat(write_ds.saved, ignore_index=True)
     assert written.groupby("cust_id")[ZERO_POSITIVE_GROUP_WEIGHT_COL].agg(set).to_dict() == {
         "c1": {1.0}, "c2": {4.0},
@@ -925,18 +932,46 @@ def test_the_weighted_path_reads_the_weight_column_and_nothing_unused(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _column_recording_model():
-    """A mock adapter that records the columns of every table it scores."""
+def _record_partition_reads(monkeypatch) -> list:
+    """Record the ``columns=`` of every per-partition read the node makes.
+
+    The node opens the cache through ``open_parquet_dataset``; this wraps what
+    it returns so ``to_table`` reports the columns it was asked for, and
+    everything else (the partition listing's ``get_fragments``) passes through.
+    It observes the read itself, not the table handed to the model: a node
+    that read every column and then sliced before scoring would pass a check
+    on the model's input. A read through any other method is not recorded, so
+    a test asserting one record per partition fails on it rather than passing.
+    """
+    import recsys_tfb.pipelines.training.nodes as nodes_mod
+
+    real_open = nodes_mod.open_parquet_dataset
+    reads: list = []
+
+    class _RecordingDataset:
+        def __init__(self, ds):
+            self._ds = ds
+
+        def __getattr__(self, name):
+            return getattr(self._ds, name)
+
+        def to_table(self, *args, **kwargs):
+            reads.append(kwargs.get("columns"))
+            return self._ds.to_table(*args, **kwargs)
+
+    monkeypatch.setattr(
+        nodes_mod, "open_parquet_dataset",
+        lambda paths: _RecordingDataset(real_open(paths)))
+    return reads
+
+
+def _model_that_reads_no_column() -> MagicMock:
+    """An adapter that names ``feat_a`` as its scoring column but scores
+    without looking at the table — so a read that missed ``feat_a`` reaches
+    the assertion on the read instead of failing inside the model."""
     model = _mock_model(lambda X: np.arange(len(X)).astype(float) + 0.5)
-    real_score = model.score.side_effect
-    seen: list = []
-
-    def score(table, *args):
-        seen.append(list(table.columns))
-        return real_score(table, *args)
-
-    model.score.side_effect = score
-    return model, seen
+    model.score.side_effect = lambda table, *args: np.full(len(table), 0.5)
+    return model
 
 
 def _run(tmp_path, parquet, params, model=None, write_ds=None):
@@ -971,9 +1006,12 @@ def test_the_score_column_is_named_by_the_schema(tmp_path):
     assert (saved["pred"] == saved["score_uncalibrated"]).all()
 
 
-def test_only_the_columns_the_frame_and_the_model_need_are_read(tmp_path):
-    """A test table carries columns neither the output frame nor the model
-    reads; they are not read (the replaced read took every column)."""
+def test_only_the_columns_the_frame_and_the_model_need_are_read(
+    tmp_path, monkeypatch,
+):
+    """A test table carries a column neither the output frame nor the model
+    reads; it is not read (the replaced read took every column), and every
+    column they do read is."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -987,12 +1025,15 @@ def test_only_the_columns_the_frame_and_the_model_need_are_read(tmp_path):
                         root_path=str(root), partition_cols=["snap_date", "prod_name"])
     params = _make_parameters()
     params["dataset"] = {"test_snap_dates": ["2025-01-31"]}
-    model, seen = _column_recording_model()
+    reads = _record_partition_reads(monkeypatch)
 
-    _run(tmp_path, root, params, model=model)
+    _run(tmp_path, root, params, model=_model_that_reads_no_column())
 
-    assert len(seen) == 2
-    assert all(set(cols) == {"cust_id", "label", "feat_a"} for cols in seen), seen
+    assert len(reads) == 2, reads
+    assert all(
+        cols is not None and sorted(cols) == ["cust_id", "feat_a", "label"]
+        for cols in reads
+    ), reads
 
 
 def test_rows_repeating_the_identity_stop_the_write(tmp_path):
@@ -1057,3 +1098,83 @@ def test_the_partition_listing_reads_no_data_file(tmp_path):
     assert _saved_partitions(write_ds) == {
         ("2025-02-28", "prod_A"), ("2025-02-28", "prod_B"),
     }
+
+
+def test_an_item_that_is_a_feature_is_read_from_the_directory_name(tmp_path):
+    """The item is a deferred categorical feature, and in the cache it exists
+    only as a directory name — ``prod_name=.../`` — never as a column in a data
+    file. The per-partition read still has to ask for it: pyarrow fills a
+    partition column in only when the read names it, and the model scores
+    from its code."""
+    import pyarrow.parquet as pq
+
+    root = _make_test_parquet(tmp_path)
+    files = list(Path(root).rglob("*.parquet"))
+    assert files and all(
+        "prod_name" not in pq.read_schema(f).names for f in files)
+
+    seen_X: list = []
+
+    def predict(X):
+        seen_X.append(np.asarray(X))
+        return np.arange(len(X)).astype(float) + 0.5
+
+    params = _make_parameters()
+    params["dataset"] = {"test_snap_dates": ["2025-01-31"]}
+    prep = {
+        "feature_columns": ["feat_a", "prod_name"],
+        "categorical_columns": ["prod_name"],
+        "category_mappings": {"prod_name": ["prod_A", "prod_B"]},
+    }
+    write_ds = _write_ds()
+    from recsys_tfb.io.handles import ParquetHandle
+    from recsys_tfb.pipelines.training.nodes import (
+        predict_and_write_test_predictions,
+    )
+
+    predict_and_write_test_predictions(
+        model=_mock_model(predict, feature_names=("feat_a", "prod_name")),
+        test_parquet_handle=ParquetHandle(path=str(root)),
+        preprocessor_metadata=prep,
+        parameters=params,
+        training_eval_predictions=write_ds,
+    )
+
+    # Partitions are scored in (time, item) order: prod_A then prod_B, each
+    # item's rows carrying its own code in the item column of the matrix.
+    assert [X[:, 1].tolist() for X in seen_X] == [[0.0, 0.0], [1.0, 1.0]]
+    assert _saved_partitions(write_ds) == {
+        ("2025-01-31", "prod_A"), ("2025-01-31", "prod_B"),
+    }
+
+
+def test_a_null_entity_stops_the_write(tmp_path):
+    """A NULL entity cannot be seen in what is written — ``str`` makes it the
+    string ``"None"`` — so it is checked on the rows read, and only a wrong
+    test_model_input puts one there."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import pytest
+
+    from recsys_tfb.score_output import ScoredChunkError
+
+    df = pd.DataFrame({
+        "cust_id": ["c1", None, "c1", "c2"],
+        "snap_date": ["2025-01-31"] * 4,
+        "prod_name": ["prod_A", "prod_A", "prod_B", "prod_B"],
+        "feat_a": [1.0, 2.0, 3.0, 4.0],
+        "label": [1, 0, 0, 1],
+    })
+    root = tmp_path / "null_entity.parquet"
+    pq.write_to_dataset(pa.Table.from_pandas(df, preserve_index=False),
+                        root_path=str(root), partition_cols=["snap_date", "prod_name"])
+    params = _make_parameters()
+    params["dataset"] = {"test_snap_dates": ["2025-01-31"]}
+    write_ds = _write_ds()
+
+    with pytest.raises(ScoredChunkError, match="no_missing") as exc_info:
+        _run(tmp_path, root, params, write_ds=write_ds)
+
+    assert "'cust_id': 1" in exc_info.value.failures[0]["detail"]
+    # prod_A is the first partition scored, so nothing was written.
+    assert write_ds.save.call_count == 0

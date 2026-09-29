@@ -170,8 +170,12 @@ def test_predict_before_training_raises(adapter):
 # -- scoring a table (decision 2) ----------------------------------------------
 #
 # The entry both scoring pipelines call: a table in, one score per row out.
-# The default is shared by every adapter that does not override it, so the
-# promise checked here is the one a composite model's override has to keep.
+# The first two tests pin the *default* implementation, which both adapters
+# here inherit: its columns are the model's own feature names, its score is
+# ``predict`` on ``pdf_to_X``. A composite model that overrides ``score`` and
+# ``scoring_columns`` owes neither. What any adapter owes, overridden or not,
+# is the third: columns it does not read, and the order of the columns, do not
+# change a score.
 
 #: The artifact's full feature list holds a column the fitted model never saw,
 #: in between two it did: the model, not the artifact, decides what is read.

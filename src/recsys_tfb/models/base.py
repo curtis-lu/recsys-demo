@@ -262,6 +262,14 @@ class ModelAdapter(ABC):
         use) and calls :meth:`predict`. ``table`` may carry any other columns,
         in any order; they are not read.
 
+        ``preprocessor`` is not the same thing from both callers: training
+        passes the view ``select_features`` narrowed under *this* run's
+        config, inference the full preprocessing artifact. The default does
+        not care — it aligns on the model's own feature list either way — but
+        an override cannot assume which one it got, and must take its columns
+        from what the model recorded (ADR-0011 section 5), not from
+        ``preprocessor["feature_columns"]``.
+
         Why the table and not a matrix: "what matrix does this model see" is
         the one question a single model and a composite answer differently,
         so it belongs behind the adapter rather than in each caller.

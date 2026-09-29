@@ -92,3 +92,38 @@ def test_a_layout_not_partitioned_by_both_columns_is_refused(tmp_path):
     )
     with pytest.raises(ValueError, match="not partitioned by"):
         partitions_from_directory_names(open_parquet_dataset(str(flat)), TIME, ITEM)
+
+
+def _hive_null_partition(root: Path, time_value: str, item_value: str) -> None:
+    """A partition directory the way Hive spells a NULL value in it."""
+    d = root / f"{TIME}={time_value}" / f"{ITEM}={item_value}"
+    d.mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pandas(
+            pd.DataFrame({"cust_id": ["c9"], "feat_a": [1.0]}), preserve_index=False),
+        str(d / "part.parquet"),
+    )
+
+
+@pytest.mark.parametrize("time_value, item_value, null_col", [
+    ("2025-01-31", "__HIVE_DEFAULT_PARTITION__", ITEM),
+    ("__HIVE_DEFAULT_PARTITION__", "a", TIME),
+])
+def test_a_hive_null_partition_is_refused_by_name(
+    tmp_path, time_value, item_value, null_col,
+):
+    """Rows with a NULL time or item sit under ``__HIVE_DEFAULT_PARTITION__``,
+    which pyarrow reads back as ``None``. The replaced row read listed it as
+    ``'None'`` and then filtered those rows away without a word; this says
+    which directory it is and where the rows came from."""
+    root = _write(tmp_path / "m", [("c1", "2025-01-31", "a", 1.0)])
+    _hive_null_partition(Path(root), time_value, item_value)
+
+    with pytest.raises(ValueError) as exc:
+        partitions_from_directory_names(open_parquet_dataset(root), TIME, ITEM)
+
+    message = str(exc.value)
+    assert f"{TIME}={time_value}/{ITEM}={item_value}" in message
+    assert "Hive NULL partition" in message
+    assert f"__HIVE_DEFAULT_PARTITION__ for {null_col}." in message
+    assert "test_model_input" in message

@@ -122,6 +122,10 @@ adapter 也說出「評分要讀哪些欄」：模型的特徵，加上組合模
 > - 兩個方法裡的 `io.extract`、`models.feature_view` 都在函式內 import：後者本來就 import `models.base`；前者放模組頂層會讓單獨 `import recsys_tfb.io.model_adapter_dataset` 失敗，理由同 `models/lightgbm_adapter.py` 開頭那段（決定 15 的註記）。`tests/test_models/test_cold_imports.py` 照樣綠。
 > - training 的 test 預測、inference 的評分都改走這個入口；`tests/test_models/test_adapter_contract.py` 在 LightGBM 與測試用的假 adapter 上各跑一遍評分合約（分數等於對原陣列 `predict`、欄順序打亂與多餘的欄不影響分數、`scoring_columns` 等於模型的 `feature_names()`）。
 > - **跟上文字面不同**：SHAP 類診斷（`diagnosis/model/shap_per_item.py`、`shap_cases.py`）**沒有**改走這個入口，仍直接呼叫 `pdf_to_X`——不在 #484 的範圍。
+> - **更正（審查後補記）**：
+>   - 上文說 SHAP 類診斷要「模型眼中的矩陣」時走這個入口。照現在的介面走不了：`score()` 回的是分數，不是矩陣，而 SHAP 要的是矩陣。介面缺一個「表 → 矩陣」的方法；要不要加、加在哪，留給 #485（診斷的模型操作）決定。
+>   - `score()` 的合約是「每列一個分數」。兩階段設計的 D11 要的是：inference 跳過沒有子模型可評的列、把缺的群記進 manifest；evaluation（training 的 test 預測）直接失敗。這個合約承接不了——沒有辦法說「這些列沒評分」，也沒有引數告訴 adapter 該跳過還是該失敗。要改成什麼樣，留給組合模型的 spec 決定；它也牽動決定 5 的逐塊檢查（列數對得上、分數沒有 NULL 都假設一列進、一列出）。
+>   - `preprocessor` 引數在兩個呼叫端不是同一種東西：training 傳 `select_features` 依**當次設定**縮過的 view（`preprocessor_view`），inference 傳完整的前處理產物。預設實作只靠模型自己的特徵清單對齊，所以今天沒事；覆寫的 adapter 不能假設拿到的是哪一種，要照模型自己記錄的特徵取欄（ADR-0011 §5）。這句也寫進了 `ModelAdapter.score` 的 docstring。
 > - inference 以前在迴圈外建一次模型的特徵 view，現在每個 `(桶, item)` 呼叫 `score` 時都重建一次（清單運算，跟預測比可以忽略）。「模型沒宣告 `feature_names()`」的 INFO log 因此每個 chunk 印一次；只有測試替身會走到那條路。
 
 ## 決定 3　演算法專屬的設定規則由 adapter 宣告
@@ -193,9 +197,11 @@ catalog 條目宣告的欄名由部署跟著 `schema` 寫。本份不加「catal
 > - 模組照上文叫 `src/recsys_tfb/score_output.py`，只 import pandas、numpy 與標準庫（`tests/test_score_output.py` 釘住 import 清單）。內容：`require_single_partition`（從 `pipelines/inference/steps/partitions.py` 原樣搬來，原檔的已刪）；`scored_chunk_failures(out_pdf, source_pdf, *, entity_cols, identity_cols, not_null_cols)` 回 0～3 個失敗，檢查名稱與訊息逐字沿用 inference 的 `chunk_row_count`／`no_missing`／`no_duplicates`；`require_scored_chunk` 是「有失敗就丟 `ScoredChunkError`」的版本；輸出表組裝是 `ScoredFrameLayout`（`entity_cols` 寫出時轉字串、`score_col`、`carried_cols` 照原型別帶、`null_cols` 整欄 NULL；`source_columns()` 說要從來源讀哪些欄，`build()` 組表）。
 > - `null_cols` 是上文沒列的一項：寫出目標宣告了、這次卻沒有值的欄。今天只有一種——catalog 宣告了零正例組權重欄而 `test_zero_positive_group_ratio` 是 0。
 > - inference 的 `validate_scored_chunk` 改成組合：前三條呼叫 `scored_chunk_failures`（identity 傳 `scored_row_columns`，不可為 NULL 的欄傳 identity 的非 entity 欄加分數），`item_values_are_known` 留在原處；丟的仍是 inference 自己的 `ValidationError`，`CHUNK_CHECKS` 不變。
-> - training 寫出前的兩個選擇：重複列以 training 自己的 `identity_columns` 判斷（含選用角色欄，理由即上表第一列）；不可為 NULL 的只列這個 node 自己算出或賦值的欄——分數與兩個分區值（entity 在讀進來的列上查，因為轉字串會把 NULL 變成 `"None"`）。label、選用角色欄、權重是從 dataset 原樣帶來的，能不能是 NULL 是 dataset 的契約，這個 node 不替它擔保。失敗時丟 `ScoredChunkError`、該分區不寫出。**這是行為變更**：#484 以前 training 寫出前什麼都不查。
+> - training 寫出前的兩個選擇：重複列以 training 自己的 `identity_columns` 判斷（含選用角色欄，理由即上表第一列）；輸出欄裡不可為 NULL 的只有分數，這個 node 自己算出的那一欄（entity 在讀進來的列上查，因為轉字串會把 NULL 變成 `"None"`）。兩個分區值不列：它們是分區目錄名轉成的字串，不可能是 NULL（Hive 的 NULL 分區在列分區時就被擋下，見決定 12 的註記），列進去就是 ADR-0011 要移除的裝飾性檢查——審查抓到，第一版列了。label、選用角色欄、權重是從 dataset 原樣帶來的，能不能是 NULL 是 dataset 的契約，這個 node 不替它擔保。失敗時該分區不寫出。**這是行為變更**：#484 以前 training 寫出前什麼都不查。
+> - 這幾條檢查的種類（node 規則 11）：一次一個分區、列數對得上、分數沒有 NULL 是這個 node 自己產物的**後置條件**；entity 沒有 NULL、沒有重複列是對輸入的**前置檢查**——node 裡沒有任何一步會造成它們，失敗只可能是 dataset 的 test_model_input 出錯。一次一個分區的守衛丟 `ValueError`，其餘丟 `ScoredChunkError`。
 > - 分數欄名照 `schema.score`：training 寫出 test 預測那一處已改（#484 以前寫死 `"score"`）。**跟上文字面不同**：上文說的第二處——`select_shap_population`（`diagnosis/model/population_spark.py`）讀預測表時寫死的 `"score"`——#484 沒有改，不在這張票的範圍，仍待處理。
 > - 兩邊都用 `ScoredFrameLayout` 組表，欄順序是 entity、分數、`score_uncalibrated`、帶的欄、NULL 欄、分區欄。宣告了選用角色時 training 的欄順序跟以前不同（以前選用角色欄排在分數前面）；`HiveTableDataset.save` 照表宣告的欄序寫，落地的表不受影響。
+> - 上表漏了一題：**模型沒辦法評分的列怎麼處理**。兩階段設計的 D11 對兩條 pipeline 給的答案可能不同（inference 跳過並統計、evaluation 直接失敗），而今天的共用機制假設一列進、一列出（見決定 2 註記的更正）。上表是設計本文，不在這裡改；這一題留給兩階段 spec。
 
 ## 決定 6　7 個診斷 node 搬回 `nodes.py`；機制進 `pipelines/training/steps/`
 
@@ -332,10 +338,29 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 
 > **實作註記（2026-09-29，#484，第 2 件與第 4 件）**：
 > - 第 2 件，分區清單：`pipelines/training/steps/predict_partitions.py` 的 `partitions_from_directory_names` 走 `dataset.get_fragments()`，用 `pyarrow.dataset.get_partition_keys(fragment.partition_expression)` 取每個檔的 `(time, item)`，一列資料都不讀；`open_parquet_dataset` 回的多根 UnionDataset 也適用。測試把資料檔內容換成垃圾，清單照樣列得出來（`tests/test_pipelines/test_training/test_predict_partitions.py`；node 層另有一個：已寫完而跳過的月份有垃圾檔，run 照樣完成）。打開 dataset 本身仍會讀一個檔的 footer 來推 schema，這是 #484 以前就有的成本。它放在 `steps/` 的獨立模組，不放 `predict_months.py`：後者不 import 任何本專案或 pyarrow 的東西，有 AST 測試釘住。
-> - 分區清單的兩個已知差異：只有空檔的分區目錄會被列出（讀列的寫法看不到它）——cache 由 Spark 的 `partitionBy` 寫，值沒有列就不會有目錄，所以這個 pipeline 寫出的 cache 上兩者一致；不是依 `(time, item)` 兩層分區的版面會丟 `ValueError`，而不是像以前那樣把它當資料欄照讀。
+> - 分區清單跟讀列的寫法有三個已知差異：
+>   - 只有空檔的分區目錄會被列出（讀列的寫法看不到它）。cache 不決定有哪些目錄：`populate_cache_from_hive` 把 Hive 表的分區目錄逐位元組複製下來（`utils/hdfs.py` 的 `copy_hdfs_to_local`，即 Hadoop 的 `copyToLocalFile`），目錄是寫那張表的人留下的。寫的人是 dataset 的 `HiveTableDataset.save`（dynamic partition 的 `insertInto`），它只替有列的值建分區目錄，所以這個 pipeline 寫出的表上兩者一致。用別的方式放進去、沒有列的分區目錄會被列出、讀回 0 列，node 在寫出那個分區之前停下（`require_single_partition` 在空表上找不到分區值，實測）：大聲失敗，不是跳過。
+>   - 不是依 `(time, item)` 兩層分區的版面會丟 `ValueError`，而不是像以前那樣把它當資料欄照讀。
+>   - Hive 的 NULL 分區（`__HIVE_DEFAULT_PARTITION__`，pyarrow 讀成 `None`）：讀列的寫法把它列成字串 `'None'`，過濾讀回 0 列，那些列被**靜默丟掉**，而且那個月永遠不算寫完。現在丟 `ValueError`，訊息說出是哪個 `(time, item)` 目錄、那是 Hive 的 NULL 分區、該去查 dataset 的 test_model_input。
 > - 每個分區只讀 `ScoredFrameLayout.source_columns()` 與 `ModelAdapter.scoring_columns()` 的聯集（node 裡沒有固定清單）。宣告了 `test_zero_positive_group_ratio > 0` 的路徑有兩層證據：單元測試（權重欄在讀取清單裡、值照寫），以及 `examples/ad` 的端到端（它的 ratio 是 0.5、宣告了 `occasion`）：`run_e2e.sh --compare` 與 `baseline_digest.json` 一致，而且 `training_eval_predictions` 跟 main 跑出來的逐欄相同（2,835 列、10 欄，分數逐位元相同，2026-09-29）。
 > - 第 4 件：「一批列 → 矩陣列」收成 `io/extract.py` 的 `_write_batch_features`，`_stream_matrix` 逐批呼叫它，`pdf_to_X` 把整張表當一批（`_narrow_frame` 挑欄 → 一個 arrow `RecordBatch` → 同一個函式），延後編碼的類別欄集合同用 `_deferred_categoricals`。
 > - `pdf_to_X` 的矩陣 dtype **刻意等於以前 `pdf[cols].copy().values` 的 dtype**：每欄編碼後的 dtype 交給 pandas 決定共同型別（`_flattened_dtype`）。不用宣告的 `numeric_feature_storage_type`，也不用 numpy 的 `np.result_type`——後者在「boolean 欄混數值欄」時答數值型別，pandas 答 `object`（`preprocessing.py` 的 cast 記過這個實測）。理由：dtype 不同就是矩陣不同、預測可能不同，而決定 9 的預測格式版本號還沒落地，已寫過的月份沒有辦法觸發重寫，所以這一輪不能改輸出。`tests/test_io/test_extract.py` 把舊實作當參考比對 float32、float64、混合型別、含 NaN、含未知類別、空表（dtype、shape、位元組全同）與 boolean（`object`，逐值與逐元素型別相同）。B6／B9 型別檢查照〈刻意不做〉沒有加。
+> - `pdf_to_X` 只編碼 numpy 的數值、bool、object 特徵欄（延後編碼的類別欄照舊可以是字串或 `category`）。其他 dtype——pandas extension dtype（`category`、`Int64`、`Float32`、`boolean`、`string`、帶時區的時間）與 numpy 的 `datetime64`／`timedelta64`——丟 `TypeError`，列出欄名與 dtype。審查時實測，這些欄經過 arrow 會不出聲地變成某個數字：非延後編碼的 `category` 欄的 NaN 變成錯的整數碼、datetime 變成奈秒 epoch；舊的寫法把其中多數留成 object、再由 LightGBM 丟錯（`Int64`、`Float32`、`boolean`、時間類），數字構成的 `category` 則攤成 float。pipeline 交進來的欄都不是這幾種，所以拒收不會擋下今天跑得動的執行：dataset 把數值特徵存成宣告的 `numeric_feature_storage_type`，Spark 與 pyarrow 的 `toPandas` 都不產生 extension dtype。上一段「位元組全同」成立的範圍因此是 numpy 整數、浮點、bool 欄（任何 NaN 位元，因為數值欄是複製、不是轉換）；object 欄經 arrow 轉換，可能變成值相同的另一個物件（`None` 變 NaN、`Decimal` 帶上整欄的小數位數），LightGBM 讀成同一個數或同一個缺值。
+> - **`pdf_to_X` 的時間與記憶體（審查後改）**：第一版把整張表經 `RecordBatch.from_pandas` 寫進 C-order 矩陣，每次呼叫比舊的慢十幾倍。原因有三：編碼器一欄一欄寫，寫進 C-order 矩陣時每一欄都隔列跳著寫；`from_pandas` 把每個 NaN 轉成 null；`to_numpy` 再把 null 轉回 NaN、另複製一份。現在：
+>   - 矩陣配 **F-order**。舊的 `.values` 回的本來就是 F-order：pandas 的 block 以「欄 × 列」存，`.values` 回它的轉置。其他條件相同時，200k×500 float32 整次呼叫 C-order 0.53s、F-order 0.034s。
+>   - 非延後編碼、numpy 整數或浮點 dtype 的欄以 `pa.array(..., from_pandas=False)` 交給 arrow：零複製，NaN 留原值、**不經 null**。null 在這裡沒有意義——`_write_batch_features` 讀回時又把它轉回 NaN——只多兩趟轉換與一份複製。延後編碼的類別欄與 object 欄照舊走 `from_pandas`，它們靠「`None` 就是 null」的讀法。`_write_batch_features` 一字未改（它跟訓練的串流讀取共用）。
+>   - `_flattened_dtype` 每種 dtype 只問 pandas 一次（pandas 的 `find_common_type` 本來就先去重，答案不變）：1,000 欄時每次呼叫從 34 ms 變 0.5 ms。
+>   - 實測（2026-09-29，macOS arm64 8 核，load 2.9–4.9，同時有別的 session；200k×500 與 100k×1000 float32、20% NaN、一個延後編碼的 item 欄，frame 由 arrow 建出；同一個行程交替跑舊、新、第一版，每輪換順序也換 item，12 輪丟掉第一輪取中位數；三者的矩陣與預測每輪都相同）：
+>
+>     | | 舊（`.values`） | 現在 | 第一版 | 現在／舊（逐輪比的中位數） |
+>     |---|---|---|---|---|
+>     | 200k×500，`pdf_to_X` | 0.063s | 0.034s | 0.936s | 0.55 |
+>     | 100k×1000，`pdf_to_X` | 0.060s | 0.047s | 1.019s | 0.78 |
+>     | 200k×500，連同 predict（300 棵樹） | 0.909s | 0.877s | 1.762s | 0.97 |
+>     | 100k×1000，連同 predict | 0.494s | 0.499s | 1.422s | 0.98 |
+>
+>     暫時峰值（200k×500，tracemalloc 加上每次呼叫各開一個 arrow proxy pool；矩陣本身 382 MiB）：舊 +766 MiB（`.copy()` 一份、`.values` 再一份），現在 +397 MiB，arrow 另 +1 MiB。量測腳本沒進 repo；秒數只說相對大小，外推不到生產（上文：驗收看峰值不看秒數）。
+>   - **#418 前提的更正**：#418 第 2 項說 `pdf[cols]`「慢上千倍」，那只發生在**未整併**（每欄一個 block）的 frame：list 取欄會先把整個來源 frame 整併。兩個呼叫端交進來的都是 arrow 建出、已整併的 frame（training 是 `part_table.to_pandas()`，inference 是 Spark 的 `toPandas`），對它們舊的寫法本來就不慢。所以第 4 件換到的是「一批列 → 矩陣列」只寫一份、暫時峰值減半，不是時間。`_narrow_frame` 留著，替未整併的 frame 擋那個成本。
 > - `pdf_to_X` 的 log：`slice_features`、`to_numpy` 兩個子步驟名保留，`encode_categoricals` 子步驟沒了（編碼併進 `to_numpy`），資料量那一行從 `pdf_to_X.X_df` 改成 `pdf_to_X.X`（矩陣本身）。
 > - 同一段程式順手收掉決定 16 的兩項重複：`cache_test_model_input` 的月份去重改用 `steps/predict_months.py` 的 `configured_months`；`--rebuild-dates` 的月份集合收成同檔的 `rebuild_month_keys`，快取 node 與預測 node 都呼叫它。
 
