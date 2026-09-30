@@ -5397,34 +5397,54 @@ class TestTrainVersionLandedA55:
 
 
 # =============================================================================
-# A56 — preprocessor_on_disk must name preprocessor's file
-#       (wired where the CLI builds the catalog; ADR-0029 decision 13)
+# A56 — a *_on_disk entry must name the file of the entry it reads
+#       (wired where the CLI builds the catalog; ADR-0029 decision 13,
+#       ADR-0030 decision 9)
 # =============================================================================
 
-from recsys_tfb.core.consistency import preprocessor_on_disk_path_errors
+from recsys_tfb.core.consistency import on_disk_entry_path_errors
 
 _PREPROCESSOR = "data/dataset/${base_dataset_version}/preprocessor.json"
 
 
-class TestPreprocessorOnDiskPathA56:
+def _a56(source_filepath, on_disk_filepath):
+    return on_disk_entry_path_errors(
+        "preprocessor_on_disk", "preprocessor", source_filepath, on_disk_filepath,
+    )
+
+
+class TestOnDiskEntryPathA56:
     def test_the_same_file_passes(self):
-        assert preprocessor_on_disk_path_errors(_PREPROCESSOR, _PREPROCESSOR) == []
+        assert _a56(_PREPROCESSOR, _PREPROCESSOR) == []
 
     def test_the_same_file_spelled_differently_passes(self):
         """A redundant ``./`` or doubled slash names the same file; refusing it
         would stop a run over nothing."""
-        assert preprocessor_on_disk_path_errors(
+        assert _a56(
             _PREPROCESSOR, "data/./dataset//${base_dataset_version}/preprocessor.json",
         ) == []
 
-    def test_another_file_is_an_error_naming_both_paths(self):
+    def test_another_file_is_an_error_naming_both_entries_and_paths(self):
         other = "data/dataset/${base_dataset_version}/preprocessor_old.json"
 
-        [err] = preprocessor_on_disk_path_errors(_PREPROCESSOR, other)
+        [err] = _a56(_PREPROCESSOR, other)
 
         assert err.startswith("(A56)")
+        assert "'preprocessor_on_disk'" in err and "'preprocessor'" in err
         assert _PREPROCESSOR in err
         assert other in err
         # What the wrong path costs, and the fix that cannot go wrong again.
-        assert "B19" in err
+        assert "every run for the first one" in err
         assert "remove" in err.lower()
+
+    def test_the_entry_names_come_from_the_caller(self):
+        """One predicate for every pair, so a message naming the preprocessor
+        for the predict manifest would send the operator to the wrong entry."""
+        [err] = on_disk_entry_path_errors(
+            "predict_manifest_on_disk", "predict_manifest",
+            "data/models/m1/predict_manifest.json", "data/elsewhere.json",
+        )
+
+        assert "'predict_manifest_on_disk'" in err
+        assert "'predict_manifest'" in err
+        assert "preprocessor" not in err

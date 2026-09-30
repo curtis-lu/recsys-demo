@@ -289,6 +289,63 @@ class TestDatasetArtifactFormatVersion:
         assert DATASET_ARTIFACT_FORMAT_VERSION >= 1
 
 
+class TestTrainingFormatVersions:
+    """ADR-0030 decision 9: two integers the framework owns, for code that
+    changes training's output while the config stays as it was. The model one
+    moves ``model_version`` and ``search_id``; the prediction one moves
+    neither, so a scoring change for inference retrains nobody."""
+
+    def test_raising_the_model_one_moves_model_version_and_search_id(
+        self, monkeypatch,
+    ):
+        import recsys_tfb.core.versioning as versioning
+
+        mv_before = compute_model_version(_tp(), "b", "t")
+        sid_before = compute_search_id(_tp(), "b", "t")
+        monkeypatch.setattr(
+            versioning, "TRAINING_MODEL_FORMAT_VERSION",
+            versioning.TRAINING_MODEL_FORMAT_VERSION + 1,
+        )
+        assert compute_model_version(_tp(), "b", "t") != mv_before
+        assert compute_search_id(_tp(), "b", "t") != sid_before
+
+    def test_it_moves_them_without_a_training_block_too(self, monkeypatch):
+        """The constant is not a ``training:`` key, so a params dict without
+        that block (only tests write one) must not drop it from the hash."""
+        import recsys_tfb.core.versioning as versioning
+
+        before = compute_model_version({}, "b", "t")
+        monkeypatch.setattr(
+            versioning, "TRAINING_MODEL_FORMAT_VERSION",
+            versioning.TRAINING_MODEL_FORMAT_VERSION + 1,
+        )
+        assert compute_model_version({}, "b", "t") != before
+
+    def test_raising_the_prediction_one_moves_neither(self, monkeypatch):
+        import recsys_tfb.core.versioning as versioning
+
+        mv_before = compute_model_version(_tp(), "b", "t")
+        sid_before = compute_search_id(_tp(), "b", "t")
+        monkeypatch.setattr(
+            versioning, "TRAINING_PREDICTION_FORMAT_VERSION",
+            versioning.TRAINING_PREDICTION_FORMAT_VERSION + 1,
+        )
+        assert compute_model_version(_tp(), "b", "t") == mv_before
+        assert compute_search_id(_tp(), "b", "t") == sid_before
+
+    def test_both_are_positive_ints(self):
+        from recsys_tfb.core.versioning import (
+            TRAINING_MODEL_FORMAT_VERSION,
+            TRAINING_PREDICTION_FORMAT_VERSION,
+        )
+
+        for value in (
+            TRAINING_MODEL_FORMAT_VERSION, TRAINING_PREDICTION_FORMAT_VERSION,
+        ):
+            assert type(value) is int
+            assert value >= 1
+
+
 class TestComputeTrainVariantId:
     def test_returns_8_char_hex(self):
         assert _HEX8_RE.match(compute_train_variant_id(_base_params()))

@@ -4686,7 +4686,9 @@ def test_the_not_built_warning_does_not_reassure_about_the_same_variant(tmp_path
 
 
 # =============================================================================
-# preprocessor_on_disk is derived from preprocessor (ADR-0029 decision 13, A56)
+# The `*_on_disk` entries are derived from the entries they read (A56):
+# preprocessor_on_disk (ADR-0029 decision 13), predict_manifest_on_disk
+# (ADR-0030 decision 9)
 # =============================================================================
 
 _PREP_PATH = "data/dataset/b1111111/preprocessor.json"
@@ -4701,13 +4703,17 @@ def _prep_catalog(**on_disk) -> dict:
 
 class TestDerivePreprocessorOnDisk:
     """The three cases a deployment's catalog can be in, and the one where
-    there is nothing to derive from."""
+    there is nothing to derive from. Spelled on the preprocessor pair; the
+    function takes the pair as arguments, and the wiring tests below cover
+    the other one."""
 
     @staticmethod
     def _derive(catalog):
-        from recsys_tfb.__main__ import _derive_preprocessor_on_disk
+        from recsys_tfb.__main__ import _derive_on_disk_entry
 
-        return _derive_preprocessor_on_disk(catalog)
+        return _derive_on_disk_entry(
+            catalog, "preprocessor_on_disk", "preprocessor",
+        )
 
     def test_left_out_it_is_added_as_an_optional_entry_on_the_same_file(self):
         catalog = _prep_catalog()
@@ -4813,6 +4819,103 @@ class TestPreprocessorOnDiskWiring:
         built.assert_not_called()
         runner.assert_not_called()
         assert "(A56)" in caplog.text
+        assert "data/elsewhere.json" in caplog.text
+
+
+_PREDICT_MANIFEST_PATH = "data/models/m1111111/predict_manifest.json"
+
+
+def _predict_manifest_catalog(**on_disk) -> dict:
+    catalog = {
+        "predict_manifest": {
+            "type": "JSONDataset", "filepath": _PREDICT_MANIFEST_PATH,
+        },
+    }
+    if on_disk:
+        catalog["predict_manifest_on_disk"] = dict(on_disk)
+    return catalog
+
+
+class TestPredictManifestOnDiskWiring:
+    """Training's predict node reads the manifest its last completed run
+    landed, for the prediction format each month was written in (ADR-0030
+    decision 9). It cannot read ``predict_manifest`` — its own output (A6) —
+    so it reads the same file under a derived second name, as dataset reads
+    ``preprocessor``."""
+
+    @staticmethod
+    def _execute(pipeline, catalog_config, pipeline_kwargs=None):
+        from recsys_tfb.__main__ import _execute_pipeline
+
+        config = MagicMock()
+        config.get_catalog_config.return_value = catalog_config
+        with patch("recsys_tfb.__main__.DataCatalog", wraps=DataCatalog) as built, \
+                patch("recsys_tfb.__main__.Runner"):
+            _execute_pipeline(
+                pipeline, pipeline_kwargs or {}, {}, config, {}, "local",
+                dry_run=True,
+            )
+        return built
+
+    @pytest.mark.parametrize("hpo", [True, False], ids=["hpo", "skip_hpo"])
+    def test_training_gets_it_derived_in_either_mode(self, hpo):
+        built = self._execute(
+            "training", _predict_manifest_catalog(),
+            pipeline_kwargs={"hpo_enabled": hpo},
+        )
+
+        assert built.call_args.args[0]["predict_manifest_on_disk"] == {
+            "type": "JSONDataset", "filepath": _PREDICT_MANIFEST_PATH,
+            "optional": True,
+        }
+
+    @pytest.mark.parametrize("conf", [
+        "conf/base/catalog.yaml", "examples/ad/conf/base/catalog.yaml",
+    ])
+    def test_the_shipped_catalogs_leave_it_out_and_get_it_derived(self, conf):
+        """Deployments copy these, so an upgrade needs no catalog edit — as
+        long as the catalog has the ``predict_manifest`` entry (#233) to
+        derive from."""
+        from recsys_tfb.__main__ import _derive_on_disk_entry
+
+        catalog = yaml.safe_load((Path(__file__).parents[1] / conf).read_text())
+        assert "predict_manifest_on_disk" not in catalog
+
+        assert _derive_on_disk_entry(
+            catalog, "predict_manifest_on_disk", "predict_manifest") == []
+        assert catalog["predict_manifest_on_disk"] == {
+            **catalog["predict_manifest"], "optional": True,
+        }
+        assert catalog["predict_manifest"]["type"] == "JSONDataset"
+
+    @pytest.mark.parametrize("pipeline", ["dataset", "evaluation"])
+    def test_a_pipeline_that_does_not_read_it_is_left_alone(self, pipeline):
+        built = self._execute(pipeline, _predict_manifest_catalog())
+
+        assert "predict_manifest_on_disk" not in built.call_args.args[0]
+
+    def test_another_file_stops_training_before_the_catalog_is_built(
+        self, caplog,
+    ):
+        import typer
+
+        from recsys_tfb.__main__ import _execute_pipeline
+
+        config = MagicMock()
+        config.get_catalog_config.return_value = _predict_manifest_catalog(
+            type="JSONDataset", filepath="data/elsewhere.json",
+        )
+        with patch("recsys_tfb.__main__.DataCatalog") as built, \
+                patch("recsys_tfb.__main__.Runner") as runner, \
+                caplog.at_level(logging.ERROR), pytest.raises(typer.Exit):
+            _execute_pipeline(
+                "training", {}, {}, config, {}, "local", dry_run=True,
+            )
+
+        built.assert_not_called()
+        runner.assert_not_called()
+        assert "(A56)" in caplog.text
+        assert "'predict_manifest_on_disk'" in caplog.text
         assert "data/elsewhere.json" in caplog.text
 
 

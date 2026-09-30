@@ -16,19 +16,24 @@ from pathlib import Path
 
 from recsys_tfb.pipelines.training.steps import predict_months
 from recsys_tfb.pipelines.training.steps.predict_months import (
+    PREDICTION_FORMATS_FIELD,
     configured_months,
     month_dir,
     months_already_written,
+    months_in_another_format,
     plan_predict_months,
     rebuild_month_keys,
+    recorded_prediction_formats,
     require_months_are_cached,
     warn_about_surplus_partitions,
+    warn_about_months_in_another_format,
     written_prediction_partitions,
 )
 
 import pytest
 
 JAN, FEB = "2025-01-31", "2025-02-28"
+_MV = "v_test_001"
 JAN_KEY, FEB_KEY = "20250131", "20250228"
 ITEMS = {"prod_A", "prod_B"}
 
@@ -182,6 +187,95 @@ class TestMonthsAlreadyWritten:
         one wrong answer that produces no error anywhere downstream."""
         with pytest.raises(KeyError):
             months_already_written({JAN_KEY: JAN}, {}, {})
+
+
+class TestRecordedPredictionFormats:
+    """What the last completed run recorded, read back. Every way of having
+    no record has to come out as "no record" — never as a value, because a
+    value that matches would skip a month nobody vouched for."""
+
+    def test_no_manifest_yet_is_no_record(self):
+        """The catalog entry is optional: ``None`` until a predict run for
+        this model_version has completed."""
+        assert recorded_prediction_formats(None, _MV) == {}
+
+    def test_a_manifest_from_before_the_field_is_no_record(self):
+        """The first run after the upgrade that added the field."""
+        manifest = {"model_version": _MV, "months_processed": [JAN]}
+        assert recorded_prediction_formats(manifest, _MV) == {}
+
+    def test_months_are_keyed_the_way_every_month_is_compared(self):
+        """Written as configured, read back as month keys: a month recorded
+        under one spelling is the same month under another."""
+        manifest = {
+            "model_version": _MV,
+            PREDICTION_FORMATS_FIELD: {JAN: 1, "20250228": 2},
+        }
+        assert recorded_prediction_formats(manifest, _MV) == {
+            JAN_KEY: 1, FEB_KEY: 2}
+
+    def test_a_field_that_is_not_a_mapping_is_no_record(self):
+        manifest = {"model_version": _MV, PREDICTION_FORMATS_FIELD: 1}
+        assert recorded_prediction_formats(manifest, _MV) == {}
+
+    def test_another_model_versions_manifest_is_no_record(self):
+        """A catalog whose ``predict_manifest`` path leaves out the version
+        hands one model_version another's record. Its months may say this
+        format while this version's partitions were written in an older
+        one; read as no record, they are re-predicted instead."""
+        manifest = {"model_version": "other001", PREDICTION_FORMATS_FIELD: {JAN: 1}}
+        assert recorded_prediction_formats(manifest, _MV) == {}
+
+
+class TestMonthsInAnotherFormat:
+    def test_a_month_recorded_in_this_format_is_not_listed(self):
+        assert months_in_another_format(
+            {JAN_KEY: JAN}, {JAN_KEY: 3}, current=3
+        ) == set()
+
+    def test_a_month_recorded_in_another_format_is_listed(self):
+        """The mutation target: the whole point of the version."""
+        assert months_in_another_format(
+            {JAN_KEY: JAN}, {JAN_KEY: 2}, current=3
+        ) == {JAN_KEY}
+
+    def test_a_month_with_no_record_is_listed(self):
+        """No record is an unknown format, and an unknown format re-predicts:
+        wasteful rather than silently stale. Covers a month dropped from the
+        config and configured again — the last run did not record it."""
+        assert months_in_another_format(
+            {JAN_KEY: JAN, FEB_KEY: FEB}, {JAN_KEY: 3}, current=3
+        ) == {FEB_KEY}
+
+    def test_a_newer_recorded_format_is_listed_too(self):
+        """``!=``, not ``<``: after a rollback the older code cannot vouch for
+        what the newer one wrote."""
+        assert months_in_another_format(
+            {JAN_KEY: JAN}, {JAN_KEY: 4}, current=3
+        ) == {JAN_KEY}
+
+
+class TestAnotherFormatWarning:
+    def test_a_complete_month_in_another_format_is_named(self, caplog):
+        with caplog.at_level(logging.WARNING, logger=predict_months.__name__):
+            warn_about_months_in_another_format(
+                {JAN_KEY: JAN}, complete={JAN_KEY}, stale={JAN_KEY},
+                recorded={JAN_KEY: 1}, current=2,
+            )
+        assert JAN in caplog.text
+        # Both numbers, in the one phrase that carries them: the month label
+        # alone already holds a "1" and a "2".
+        assert "prediction format 1, not 2" in caplog.text
+
+    def test_a_month_with_nothing_written_says_nothing(self, caplog):
+        """A brand-new month has no record either, and re-predicting it is
+        the plan anyway: warning there would fire on every first run."""
+        with caplog.at_level(logging.WARNING, logger=predict_months.__name__):
+            warn_about_months_in_another_format(
+                {JAN_KEY: JAN}, complete=set(), stale={JAN_KEY},
+                recorded={}, current=2,
+            )
+        assert caplog.text == ""
 
 
 class TestPlanPredictMonths:

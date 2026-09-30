@@ -147,9 +147,14 @@ def create_pipeline(hpo_enabled: bool = True) -> Pipeline:
     nodes.extend([
         Node(
             predict_and_write_test_predictions,
+            # predict_manifest_on_disk is this node's own last manifest, for the
+            # prediction format each month was written in (ADR-0030 decision
+            # 9). Its own output cannot be its input (A6), so the CLI derives
+            # this second name for the same file (A56); no node produces it,
+            # so a manifest not landed yet pulls nothing into a slice.
             inputs=[
                 "model", "test_parquet_handle",
-                "preprocessor_view", "parameters",
+                "preprocessor_view", "parameters", "predict_manifest_on_disk",
             ],
             # Chunked save: this node writes training_eval_predictions itself,
             # one partition per .save(). Registered in R1 of

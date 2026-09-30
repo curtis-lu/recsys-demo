@@ -280,13 +280,14 @@ class TestWiring:
 
         import yaml
 
-        from recsys_tfb.__main__ import _derive_preprocessor_on_disk
+        from recsys_tfb.__main__ import _derive_on_disk_entry
 
         catalog = yaml.safe_load(
             (Path(__file__).parents[3] / conf).read_text())
         assert "preprocessor_on_disk" not in catalog
 
-        assert _derive_preprocessor_on_disk(catalog) == []
+        assert _derive_on_disk_entry(
+            catalog, "preprocessor_on_disk", "preprocessor") == []
         assert catalog["preprocessor_on_disk"] == {
             "type": "JSONDataset",
             "filepath": catalog["preprocessor"]["filepath"],

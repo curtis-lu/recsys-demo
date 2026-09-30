@@ -157,7 +157,7 @@ inference 的順序是行為全部先（#191–#196）→ 純結構最後（#198
 
 **什麼時候可以不實跑**（#176 立下的明文條件）：零行為改動，而且 `conf/` 與 `pipeline.py` 對 main byte-identical。
 
-**`conf/` 的 diff 是空的，證明的是版本 ID 不會動，不是落地內容不會變。** 程式改了 dataset 落地的內容、設定卻沒動時，版本 ID 不動正是問題：新舊內容會掛在同一個 ID 下。這時要把 `DATASET_ARTIFACT_FORMAT_VERSION` 加 1，見 [`pipeline-node-design.md`](pipeline-node-design.md) 規則 18。零行為改動的搬移不需要。
+**`conf/` 的 diff 是空的，證明的是版本 ID 不會動，不是落地內容不會變。** 程式改了落地的內容、設定卻沒動時，版本 ID 不動正是問題：新舊內容會掛在同一個 ID 下。這時要把對應的格式版本加 1（dataset 產物、training 模型、training 預測、`.bin` 快取四個常數），見 [`pipeline-node-design.md`](pipeline-node-design.md) 規則 18。零行為改動的搬移不需要。
 
 **AST 相同、斷言一字未改，看不出測試攔的位置換了。** 程式搬到別的模組之後，測試裡 patch 舊模組的那一行，攔的可能已經不是搬走的程式在用的東西。實例（#466 審查查出，`18f4c6ad`）：month plan 的組裝從 `__main__.py` 搬進 `pipelines/dataset/run_contract.py`，列分區改用 `run_contract` 自己建的 `DataCatalog`。`tests/test_cli.py` 有兩個 dataset 測試 patch 的是 `recsys_tfb.__main__.DataCatalog`：斷言還在、測試還綠，測的路徑已經換了。**檢查**：列出測試裡所有 patch 舊模組的地方（例如 `patch("recsys_tfb.__main__.X")`）；只要 X 被搬走的程式用到，就逐一確認攔截點還在不在。
 

@@ -79,7 +79,10 @@ from recsys_tfb.core.consistency import (
 )
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.preprocessing import preprocessor_item_values
-from recsys_tfb.core.versioning import compute_search_id
+from recsys_tfb.core.versioning import (
+    TRAINING_PREDICTION_FORMAT_VERSION,
+    compute_search_id,
+)
 from recsys_tfb.diagnosis.hpo import write_hpo_diagnostics
 from recsys_tfb.diagnosis.model import diagnostics_dir
 from recsys_tfb.evaluation.metric_registry import (
@@ -141,12 +144,16 @@ from recsys_tfb.pipelines.training.steps.local_cache import (
     resolve_cache_path,
 )
 from recsys_tfb.pipelines.training.steps.predict_months import (
+    PREDICTION_FORMATS_FIELD,
     configured_months,
     month_dir,
     months_already_written,
+    months_in_another_format,
     plan_predict_months,
     rebuild_month_keys,
+    recorded_prediction_formats,
     require_months_are_cached,
+    warn_about_months_in_another_format,
     warn_about_surplus_partitions,
     written_prediction_partitions,
 )
@@ -622,10 +629,13 @@ def prepare_train_inputs(
     # because everything that decides what the binaries hold is a segment of
     # the path: dataset version and train variant (the rows), algorithm (the
     # file format), objective (grouping and dropped groups), the feature
-    # columns, the weight-key columns the sidecar carries, and the cache
-    # format version for the code itself (ADR-0030 decision 10). Change any
-    # of them and the run looks in a directory that does not exist yet. A
-    # change to what this node writes that none of them names is a bump of
+    # columns, the weight-key columns the sidecar carries, the cache format
+    # version for the code itself (ADR-0030 decision 10), and the training
+    # model format version (decision 9) — not a version of these files, but a
+    # bump of it for a change to how they are built then rebuilds them even
+    # if the cache's own number was forgotten. Change any of them and the run
+    # looks in a directory that does not exist yet. A change to what this
+    # node writes that none of them names is a bump of
     # TRAIN_DATA_CACHE_FORMAT_VERSION; without it the old files are served.
     # Row-wise objectives all build the same rows, no groups, so they share
     # one segment; each ranking objective gets its own, because lambdarank
@@ -1305,14 +1315,21 @@ def predict_and_write_test_predictions(
     test_parquet_handle: dict[str, ParquetHandle],
     preprocessor_metadata: dict,
     parameters: dict,
+    predict_manifest_on_disk: dict | None,
     training_eval_predictions,  # HiveTableDataset, supplied via Node(writes=...)
 ) -> dict:
     """Per-partition test prediction + Hive write, one month at a time.
 
-    Months whose predictions are already complete are skipped (the five month
-    decisions are written out in the body, under "Which months this run
-    writes"), so adding a test month costs one month of prediction rather than
-    re-predicting every accumulated month. The manifest
+    Months whose predictions are already complete, in this code's prediction
+    format, are skipped (the nine month decisions are written out in the body,
+    under "Which months this run writes"), so adding a test month costs one
+    month of prediction rather than re-predicting every accumulated month.
+    ``predict_manifest_on_disk`` is the manifest the last completed run landed
+    (``None`` before one has), read for the format each month is in: this
+    node's own output cannot also be its input (A6), so the CLI derives a
+    second name for the same file (A56). Its one blind spot is a rollback: a
+    newer code that died partway leaves the older record, so after rolling
+    back, name every configured month in ``--rebuild-dates``. The manifest
     names what was processed, skipped and rebuilt: a node that decides to do
     less work has to say what it decided not to do, or a silently stale month
     is indistinguishable from a correctly skipped one.
@@ -1357,6 +1374,8 @@ def predict_and_write_test_predictions(
         DAG-ordering dependency only — the predictions themselves are read
         back from Hive — and landing it is also what lets a diagnosis-only
         resume skip this node rather than pay its partition listing again.
+        Its one reader that takes a value from it is this node's next run,
+        through ``predict_manifest_on_disk``.
     """
     schema_cfg = get_schema(parameters)
     time_col = schema_cfg["time"]
@@ -1511,7 +1530,45 @@ def predict_and_write_test_predictions(
     # The weaker "some partition exists" test would call a run that died halfway
     # complete, leaving its missing items absent forever, and would not notice a
     # month that gained an item after it was first predicted.
-    done = months_already_written(months, cache_items, written_items)
+    complete = months_already_written(months, cache_items, written_items)
+
+    # Decision — which record of the prediction format counts: the manifest
+    # the last completed run of this model_version landed, and nothing else.
+    # Read from the manifest rather than the table, which holds no such
+    # column. A manifest another model_version wrote (a catalog path without
+    # the version in it) is no record: its months could name this format
+    # while these partitions were written in an older one.
+    recorded_formats = recorded_prediction_formats(
+        predict_manifest_on_disk, model_version
+    )
+
+    # Decision — a complete month counts as done only when that record has it
+    # in this code's prediction format (ADR-0030 decision 9): skipping rests
+    # on "same model_version, same predictions", which a code change to
+    # scoring breaks without moving model_version. No record counts as
+    # another format — no manifest yet, one from before the field, a month the
+    # last run did not configure (dropped, then configured again) — which
+    # re-predicts rather than skips, the direction every decision here fails
+    # in. One record per month rather than one number for the manifest, so a
+    # month the last run did not configure is not taken to be in its format.
+    # Two prices, both of the record being written only when this node
+    # finishes: the first run of a model_version that dies partway leaves no
+    # record, so its rerun re-predicts the months it had finished too; and a
+    # newer code that dies partway leaves the older record, so rolling back to
+    # the older code skips months the newer one re-wrote — the rollback must
+    # name every month in --rebuild-dates.
+    stale_format = months_in_another_format(
+        months, recorded_formats, TRAINING_PREDICTION_FORMAT_VERSION
+    )
+    done = complete - stale_format
+
+    # Decision — the months re-predicted for their format are named, but only
+    # the complete ones: a month with nothing written has no record either,
+    # and naming it would warn on every first run of a model_version.
+    warn_about_months_in_another_format(
+        months, complete, stale_format, recorded_formats,
+        TRAINING_PREDICTION_FORMAT_VERSION,
+    )
 
     # Decision — --rebuild-dates overrides completeness. Skipping is safe only
     # because a (model_version, snap_date) prediction set is immutable: the same
@@ -1621,6 +1678,14 @@ def predict_and_write_test_predictions(
         "months_processed": plan.to_process,
         "months_skipped": plan.skipped,
         "months_rebuilt": plan.rebuilt,
+        # Every configured month, as configured: processed ones were written
+        # just now and skipped ones were recorded in this format already. A
+        # month not configured is left out, so configuring it again finds no
+        # record and re-predicts it (the decision above).
+        PREDICTION_FORMATS_FIELD: {
+            months[key]: TRAINING_PREDICTION_FORMAT_VERSION
+            for key in sorted(months)
+        },
     }
     logger.info(
         "predict_and_write_test_predictions: done — "

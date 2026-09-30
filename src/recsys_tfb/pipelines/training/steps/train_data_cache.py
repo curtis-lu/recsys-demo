@@ -16,6 +16,7 @@ import logging
 from pathlib import Path
 
 from recsys_tfb.core.group_utils import single_label_group_counts
+from recsys_tfb.core.versioning import TRAINING_MODEL_FORMAT_VERSION
 from recsys_tfb.io.handles import LgbDatasetHandle
 from recsys_tfb.pipelines.training.steps.local_cache import resolve_cache_path
 
@@ -33,8 +34,8 @@ logger = logging.getLogger(__name__)
 #: code before and after the change writes different files into the same
 #: path? A change that alters the path already misses and needs no bump.
 #:
-#: Separate from the training format versions ADR-0030 decision 9 adds to
-#: ``model_version``: the cache's format can change without the model changing
+#: Separate from the training model format version ADR-0030 decision 9 adds
+#: to ``model_version``: the cache's format can change without the model changing
 #: (a sidecar gains a field), and one shared number would make every such
 #: change retrain every deployment. **Most changes to what a directory holds
 #: change the model too, and then both numbers move.** Even reordering rows
@@ -43,7 +44,10 @@ logger = logging.getLogger(__name__)
 #: single-thread: predictions moved by up to 1.5).
 #: Bumping this one alone rebuilds the files but leaves ``model_version`` and
 #: the HPO ``search_id`` as they were, so a resumed search would mix trials
-#: scored on the old files with trials scored on the new ones.
+#: scored on the old files with trials scored on the new ones. The other way
+#: round is covered: ``TRAINING_MODEL_FORMAT_VERSION`` is a segment of the
+#: path too (:func:`cache_dir`), so bumping that one alone rebuilds the files
+#: as well, and a new search never trains on files the old code built.
 #:
 #: Before this number existed (#483), the path had no version segment and
 #: three checks inside the directory caught the formats it replaced: a ``.bin``
@@ -79,11 +83,17 @@ def cache_dir(
 ) -> str:
     """The directory one build of the native training data is cached in.
 
-    ``<train variant dir>/train_data_v<N>/<algorithm>/<objective>/
-    features_<hash8>/weight_keys_<hash8>`` — beside the train split's parquet
-    copy (``<cache.root>/<base_dataset_version>/train_variants/
-    <train_variant_id>/``), because the two are built from the same draw and
-    retire together.
+    ``<train variant dir>/train_data_v<N>/model_format_v<M>/<algorithm>/
+    <objective>/features_<hash8>/weight_keys_<hash8>`` — beside the train
+    split's parquet copy (``<cache.root>/<base_dataset_version>/
+    train_variants/<train_variant_id>/``), because the two are built from the
+    same draw and retire together.
+
+    ``<M>`` is ``core/versioning.py``'s ``TRAINING_MODEL_FORMAT_VERSION``, not
+    a version of these files: a bump for a change to how they are built
+    rebuilds them even when ``<N>`` was forgotten, at the price of one rebuild
+    when the change was elsewhere — and then the search restarts anyway
+    (ADR-0030 decision 9, implementation note of #488).
 
     Every segment is always present. A segment that appeared only when a
     feature was on (the old ``fs_<hash8>`` did) nests one cache inside
@@ -97,6 +107,7 @@ def cache_dir(
     return str(
         variant_dir
         / f"train_data_v{TRAIN_DATA_CACHE_FORMAT_VERSION}"
+        / f"model_format_v{TRAINING_MODEL_FORMAT_VERSION}"
         / algorithm
         / objective_segment
         / f"features_{_digest8(feature_columns)}"

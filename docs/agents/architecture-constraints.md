@@ -105,7 +105,7 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 另有兩層執行中繼資料：
 
 - `core/logging.py` 的 `RunContext`（run_id／pipeline／env／dataset_version／model_version）掛在每筆結構化 log 上。
-- `core/versioning.py:330-377` 的 `build_manifest_metadata` 把 version／pipeline／created_at／git_commit／parameters 落成 `manifest.json`。
+- `core/versioning.py` 的 `build_manifest_metadata` 把 version／pipeline／created_at／git_commit／parameters 落成 `manifest.json`。
 
 ## F3. 只有 sequential runner
 
@@ -184,7 +184,7 @@ dict 寫法在建構期就拿函式簽章檢查（Kedro 也這樣做）：鍵拼
 
 新增一致性不變量**必須**在 `core/consistency.py` 加 predicate，不得在各 pipeline 散落。細節見該模組 docstring。
 
-版本化也不是同一件事：Kedro 的 dataset versioning 管的是「檔案的哪一版」，我們的版本 hash 管的是「哪一組設定產生的產物」。程式改了 dataset 落地的內容、設定卻沒動時，要把 `versioning.py` 的 `DATASET_ARTIFACT_FORMAT_VERSION` 加 1，這也管到 dataset import 的 `core/`、`utils/` 模組，見 [`pipeline-node-design.md`](pipeline-node-design.md) 規則 18。
+版本化也不是同一件事：Kedro 的 dataset versioning 管的是「檔案的哪一版」，我們的版本 hash 管的是「哪一組設定產生的產物」。程式改了落地的內容、設定卻沒動時，要把對應的格式版本加 1：dataset 的是 `versioning.py` 的 `DATASET_ARTIFACT_FORMAT_VERSION`，training 的模型與預測是同檔的 `TRAINING_MODEL_FORMAT_VERSION`、`TRAINING_PREDICTION_FORMAT_VERSION`。這也管到 pipeline import 的 `core/`、`utils/` 等模組，見 [`pipeline-node-design.md`](pipeline-node-design.md) 規則 18。
 
 ## F8. Node 函式大小的現況分佈
 
@@ -396,7 +396,7 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py` 的 
 
 **內容。** S1 只擋位置。一個 12 行的轉手 node 加一個裝著四個決策的 helper **完全滿足 S1**。
 
-內容那一半由 [`pipeline-node-design.md`](pipeline-node-design.md) 定義：node 邊界、node body 的形狀、決策與機制的分界、`log_step` 的範圍、`steps/` 與根層的判準、命名與 docstring、讀取寫明月份、什麼可以從 CLI 注入、各 split 用同一個機制、資料閘的形狀、何時翻 dataset 的格式版本。那份十八條裡只有三條有部分機械檢查，其餘靠該檔開頭那張規則總表 ＋ code review。這是 ADR-0008 已知的最大殘留風險，不是疏漏。
+內容那一半由 [`pipeline-node-design.md`](pipeline-node-design.md) 定義：node 邊界、node body 的形狀、決策與機制的分界、`log_step` 的範圍、`steps/` 與根層的判準、命名與 docstring、讀取寫明月份、什麼可以從 CLI 注入、各 split 用同一個機制、資料閘的形狀、何時翻格式版本。那份十八條裡只有三條有部分機械檢查，其餘靠該檔開頭那張規則總表 ＋ code review。這是 ADR-0008 已知的最大殘留風險，不是疏漏。
 
 那份是判準的唯一真實來源，適用於**每一條** pipeline（S1 只管 dataset）；ADR-0008 保留為 dataset 那次裁決的記錄與完整論證。**已知的界外違例登記在該檔的〈已登記的例外〉**（training 的 7 個 diagnosis node 刻意不搬；dataset 的 `split_train_keys` 一個 node 兩個輸出、三個 build 共用 `build_model_input`），看到它們不必以為判準是裝飾。
 
