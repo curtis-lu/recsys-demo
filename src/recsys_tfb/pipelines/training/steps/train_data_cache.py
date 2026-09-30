@@ -34,8 +34,8 @@ logger = logging.getLogger(__name__)
 #: code before and after the change writes different files into the same
 #: path? A change that alters the path already misses and needs no bump.
 #:
-#: Separate from the training format versions ADR-0030 decision 9 adds to
-#: ``model_version``: the cache's format can change without the model changing
+#: Separate from the training model format version ADR-0030 decision 9 adds
+#: to ``model_version``: the cache's format can change without the model changing
 #: (a sidecar gains a field), and one shared number would make every such
 #: change retrain every deployment. **Most changes to what a directory holds
 #: change the model too, and then both numbers move.** Even reordering rows
@@ -93,7 +93,7 @@ def cache_dir(
     a version of these files: a bump for a change to how they are built
     rebuilds them even when ``<N>`` was forgotten, at the price of one rebuild
     when the change was elsewhere — and then the search restarts anyway
-    (ADR-0030 decision 10, implementation note of #488).
+    (ADR-0030 decision 9, implementation note of #488).
 
     Every segment is always present. A segment that appeared only when a
     feature was on (the old ``fs_<hash8>`` did) nests one cache inside

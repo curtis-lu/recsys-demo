@@ -191,21 +191,27 @@ def warn_about_surplus_partitions(
         )
 
 
-def recorded_prediction_formats(previous_manifest) -> dict[str, object]:
+def recorded_prediction_formats(
+    previous_manifest, model_version: str
+) -> dict[str, object]:
     """``month key → prediction format version``, as the last completed predict
-    recorded it in its manifest.
+    of ``model_version`` recorded it in its manifest.
 
     Every way of having no record comes out empty: ``None`` (no predict run
     has completed for this ``model_version`` — the catalog entry is optional),
-    a manifest written before the field existed, or a field that is not a
-    mapping. Empty reads as "every month in an unknown format", which
-    re-predicts; nothing here may produce a value nobody recorded, because a
-    value that happens to match would skip a month.
+    a manifest another ``model_version`` wrote (a catalog path without the
+    version in it), a manifest written before the field existed, or a field
+    that is not a mapping. Empty reads as "every month in an unknown format",
+    which re-predicts; nothing here may produce a value nobody recorded for
+    these partitions, because a value that happens to match would skip a
+    month.
 
     Keys are written as configured and normalised on the way back, so a month
     recorded under one spelling is found under another.
     """
     if not isinstance(previous_manifest, Mapping):
+        return {}
+    if previous_manifest.get("model_version") != model_version:
         return {}
     recorded = previous_manifest.get(PREDICTION_FORMATS_FIELD)
     if not isinstance(recorded, Mapping):
@@ -222,7 +228,13 @@ def months_in_another_format(
     completed, or the last one did not configure it — which is how a month
     dropped from the config and configured again after a format change is
     caught. ``!=`` rather than ``<``: after a rollback, the older code cannot
-    vouch for what the newer one wrote either.
+    vouch for what a completed run of the newer one wrote either.
+
+    Not caught: the record is only as fresh as the last *completed* run. A
+    newer code that re-predicts some months and dies leaves the older record
+    in place, so rolling back to the code that record names skips those
+    months although the newer code wrote them. The remedy is in the node's
+    docstring (``--rebuild-dates`` naming every month).
     """
     return {key for key in months if recorded.get(key) != current}
 

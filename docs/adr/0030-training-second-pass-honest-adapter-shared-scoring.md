@@ -298,10 +298,15 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 > **實作註記（2026-09-30，#488）**：
 > - 兩個常數是 `core/versioning.py` 的 `TRAINING_MODEL_FORMAT_VERSION` 與 `TRAINING_PREDICTION_FORMAT_VERSION`，都從 1 起。模型那個放在 `_model_version_payload` 回傳的 payload 裡、`training:` 區塊旁邊（不在區塊裡面），所以 `model_version` 與 `search_id` 都含它，`SEARCH_ID_IRRELEVANT_KEYS` 碰不到它。
 > - **跟上文不同的一處：預測格式版本記成「每個月一個值」，不是整份 manifest 一個值。** 欄位是 `predict_manifest.json` 的 `prediction_format_versions`（`{設定裡寫的月份: 版本號}`），只記這一次設定的月份。理由：只記一個值時，一個月份被拿出 `dataset.test_snap_dates`、期間版本號加了 1、之後又加回來，它在表裡的預測是舊格式，卻會被當成新格式跳過。每個月一個值、不設定的月份不記，加回來時沒有記錄，就會重寫。上文「所有月份的預測重寫」照樣成立：版本號加 1 之後，每個設定的月份記的都是舊值。
-> - **沒有記錄＝格式不明＝重寫。** 包括還沒有 manifest（這個 `model_version` 的 predict 從沒跑完過）、升級前寫的 manifest（沒有這個欄位）、這次設定了但上次沒設定的月份。方向跟 predict 其他月份決定一致：寧可多算，不可靜默過期。**代價**：第一次跑 predict 跑到一半中斷，manifest 不會落地，接續時連已經寫完的月份也會重寫。本機驗不出生產上多花多少時間，要在公司環境才看得到。
-> - 讀回上一次的值用 `predict_manifest_on_disk`，**由 CLI 從 `predict_manifest` 推出**，跟 `preprocessor_on_disk` 同一套：`__main__.py` 的 `_ON_DISK_ENTRIES` 一張表列出兩組，`_derive_on_disk_entry` 一個函式推。部署的 catalog 不用加任何條目。A56 從「`preprocessor_on_disk` 的路徑」一般化成「每個 `*_on_disk` 條目的路徑」，predicate 改名 `on_disk_entry_path_errors`；錯誤訊息的開頭格式不變。
-> - 決定 10 實作註記最後一條留給本票決定的事：**做了**。`.bin` 快取路徑多一段 `model_format_v<M>`（`TRAINING_MODEL_FORMAT_VERSION`），放在 `train_data_v<N>` 後面。模型格式版本加 1 時 HPO 本來就要從頭搜，多重建一次 `.bin` 的代價遠小於它；換到的是「加了模型版本、忘了加快取版本」時，新的搜尋不會拿舊程式建的檔案訓練。這次加上這一段，每個部署第一次跑會重建一次 `.bin`。
-> - 規則 18 擴充成涵蓋四個常數（沒有另加一條）；`adding-an-eval-month.md` 步驟 ③ 加上 training 模型格式版本，步驟 3 的「成功的話」補上預測格式版本加 1 時的樣子。
+> - **沒有記錄＝格式不明＝重寫。** 包括還沒有 manifest（這個 `model_version` 的 predict 從沒跑完過）、升級前寫的 manifest（沒有這個欄位）、另一個 `model_version` 寫的 manifest（部署的 catalog 路徑裡沒有版本號時會讀到；manifest 本來就記著 `model_version`，對不上就不算）、這次設定了但上次沒設定的月份。方向跟 predict 其他月份決定一致：寧可多算，不可靜默過期。
+> - **記錄只在 node 跑完時落地，代價有兩個**（審查時實測，寫進 node 的決定註解與 `docs/pipelines/training.md` §5）：
+>   - 每個新 `model_version` 第一次跑 predict，跑到一半中斷，接續時連已經寫完的月份也會重寫。生產上多花多少時間本機量不到。排程有時間上限、一次跑不完所有月份時，可以先縮小 `dataset.test_snap_dates` 跑完一次、再把月份加回來。
+>   - **擋不住的一種：新版程式跑到一半中斷、接著把程式退回舊版。** 磁碟上的記錄是舊版跑完時寫的，舊版會把新版已經重寫的月份當成自己的格式而跳過，不報錯。本票不加機制（要在寫入途中留下進度，node 只能透過 catalog 輸出寫檔），寫明補救：退回之後第一次跑，用 `--rebuild-dates` 列出所有設定的月份。
+> - **更正：上表「例如決定 5 的共用評分程式」只對一部分評分程式成立。** 決定 5 的 `score_output.py`（組表與寫出前的檢查）只有 test 預測與 inference 會跑，改它確實只改預測。但 `ModelAdapter.score` 用 `io/extract.py` 的 `pdf_to_X` 編碼，它跟建 `.bin`、HPO 的 val 矩陣共用同一個批次編碼（`_write_batch_features`，決定 12 第 4 件的結果），改那段就改了模型，要加的是模型格式版本。判準寫進規則 18 與 `core/versioning.py` 的模組 docstring：改到的程式在 HPO 評分、建 `.bin`、訓練時會不會也跑到。
+> - 讀回上一次的值用 `predict_manifest_on_disk`，**由 CLI 從 `predict_manifest` 推出**，跟 `preprocessor_on_disk` 同一套：`__main__.py` 的 `_ON_DISK_ENTRIES` 一張表列出兩組，`_derive_on_disk_entry` 一個函式推。A56 從「`preprocessor_on_disk` 的路徑」一般化成「這張表裡每個條目的路徑」，predicate 改名 `on_disk_entry_path_errors`（ADR-0029 決定 13 註記裡的舊名 `preprocessor_on_disk_path_errors`、`_derive_preprocessor_on_disk` 都已不存在）；錯誤訊息的開頭格式不變。部署的 catalog 不用加條目，前提是它有 `predict_manifest` 條目（#233 起出貨的 catalog 都有）；沒有的話 Runner 報 `requires input 'predict_manifest_on_disk'`，`training.md` §8 寫了怎麼補。
+> - 決定 10 實作註記最後一條留給本票決定的事：**做了**。`.bin` 快取路徑多一段 `model_format_v<M>`（`TRAINING_MODEL_FORMAT_VERSION`），放在 `train_data_v<N>` 後面。模型格式版本加 1 時 HPO 本來就要從頭搜，多重建一次 `.bin` 的代價遠小於它；換到的是「加了模型版本、忘了加快取版本」時，新的搜尋不會拿舊程式建的檔案訓練。這次加上這一段，每個部署第一次跑會重建一次 `.bin`，#483 到本票之間建的 `train_data_v1/<algorithm>/` 不會再被讀，要手動刪。
+> - **沒做的一件**：預測格式版本加 1、預測重寫之後，用舊預測算出來的 `evaluation_results.json`（promote 讀它）與 evaluation 的逐月報表不會自動重算。沒有加機制；`adding-an-eval-month.md` 步驟 3 與 `training.md` §7.5 寫了要重跑哪些。
+> - 規則 18 擴充成涵蓋四個常數（沒有另加一條），並加上「評分的程式不等於只改預測」那一條判準；`adding-an-eval-month.md` 步驟 ③ 加上 training 模型格式版本（舊版沒有這個常數算 0），步驟 3 的「成功的話」補上預測格式版本加 1 時的樣子；`rescoring-an-old-version.md` 的〈補不回來的情況〉多一種：本票之前訓練的每個版本，用現在的程式都算不回同一個 `model_version`。
 
 ## 決定 10　`.bin` 快取：決定內容的東西全進路徑
 
@@ -491,6 +496,8 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 - `model_version` 變的那一次，`examples/ad/baseline_digest.json` 要重取（它釘住 `model_version`，`run_e2e.sh --compare` 會轉紅）。`docs/operations/user-guides/adding-an-eval-month.md` 的步驟 ③（框架升級之後、重訓之前，這套流程用不了）今天只提 dataset 產物格式版本，要把 training 模型格式版本也加進去。
 
   > **實作註記（2026-09-30，#487）**：決定 11 先落地（決定 9 的 #488 還沒做），所以 `model_version` 這次先變一次，#488 落地時會再變一次。`examples/ad` 的 `run_e2e.sh --compare` 與舊基準只差 `versions.model_version` 一項（`1e9d3c52` → `951b1936`），其餘五層相同；已重取基準。`search_id` 沒變：同一份 `examples/ad` 設定、同樣兩個 dataset 版本，main 的程式對舊設定、這一版對新設定都算出 `b6657291`（兩個新鍵不進它，見決定 11 的實作註記）。上一句 `adding-an-eval-month.md` 的事屬於 #488，本票沒做。
+
+  > **實作註記（2026-09-30，#488）**：`model_version` 第二次變，這次是模型格式版本第一次進雜湊。`examples/ad` 的 `run_e2e.sh --compare` 與舊基準只差 `versions.model_version` 一項（`951b1936` → `b9861487`），其餘五層相同；已重取基準。`search_id` 也變了（`b6657291` → `af9584fb`），這是預期的：模型格式版本也進它。`.bin` 路徑多了 `model_format_v1` 那一段，所以 `.bin` 重建一次，內容不變。另外實跑了「只加預測格式版本」：在同一份產物上用 `--only-node predict_and_write_test_predictions`，版本號不變時月份照常跳過；把常數當成加 1 再跑（沒改原始碼，執行前在 node 模組上換值），那個月被重寫、log 印出格式不同的警告，只跑 20 個 node 裡的 3 個，`data/models/` 沒有多出版本。`adding-an-eval-month.md` 步驟 ③ 已補上 training 模型格式版本。
 
 **相依**：
 - 決定 2、3、4、10、11 都用到決定 1 的介面（評分入口、登記表、「做不到」的例外、原生資料、用給定參數訓練），要排在它之後。

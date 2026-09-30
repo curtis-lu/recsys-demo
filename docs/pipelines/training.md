@@ -240,7 +240,7 @@ ranking 類目標（`lambdarank`、`rank_xendcg`）建 `.bin` 時，每個 split
 
 **「有 `_SUCCESS` 就能用」管得到設定與程式，管不到上游回補。** `train_variant_id` 是從抽樣設定算的，不看資料列；同一份設定下重跑上游、回補了某個月，路徑不會變，舊的 `.bin` 照樣命中——跟旁邊的 parquet 副本是同一個缺口（見 [`pipeline-slicing.md`](../operations/user-guides/pipeline-slicing.md) 的「版本 hash 涵蓋 config，不涵蓋 code」）。回補之後要刪整個 `train_variants/<train_variant_id>/`；只刪 parquet 副本的話，HPO 用的是舊的列，`refit_on_full` 重讀 parquet 用的是新的列。
 
-**從舊版升上來**：#483 之前的快取放在 `train_variants/<train_variant_id>/lgb/<objective>/`（更早還有 `lgb/ranking/`），路徑裡沒有格式版本那一段，新程式不會去讀。第一次跑會重建一次 `.bin`（比 HPO 便宜得多），模型不變；舊的 `lgb/` 目錄可以直接刪。
+**從舊版升上來**：#483 之前的快取放在 `train_variants/<train_variant_id>/lgb/<objective>/`（更早還有 `lgb/ranking/`），路徑裡沒有格式版本那一段，新程式不會去讀。第一次跑會重建一次 `.bin`（比 HPO 便宜得多），模型不變；舊的 `lgb/` 目錄可以直接刪。#488 在路徑裡加了 `model_format_v<M>` 那一段，所以 #483 到 #488 之間建的 `train_data_v1/<algorithm>/` 也不會再被讀，一樣可以直接刪。
 
 ### 3.5 Sample weights
 
@@ -567,7 +567,7 @@ python -m recsys_tfb training \
 | HPO | `tune_hyperparameters` | train/train-dev model handles、val handle | train 訓練、train-dev early stop、val 上以 `hpo_objective` 選模 | `best_params`、`best_iteration`、`hpo_best_model` |
 | 固定參數訓練（`hpo_enabled: false` 時取代上一列，也沒有 `cache_val_model_input`，§3.2） | `train_with_fixed_params` | train/train-dev model handles | 用 `fixed_params` 照一個 trial 的做法訓練一次 | 同上一列 |
 | 最終模型 | `finalize_model` | HPO 產物、train/train-dev handles | 沿用 HPO best 或在 train + train-dev refit | `model` |
-| Test 預測 | `predict_and_write_test_predictions` | model、test handles | 逐月判斷是否需要預測，需要的月份再逐 `(time, item)` partition 預測並寫入 Hive | `training_eval_predictions`、`predict_manifest` |
+| Test 預測 | `predict_and_write_test_predictions` | model、test handles、上一次跑完時的 `predict_manifest`（`predict_manifest_on_disk`） | 逐月判斷是否需要預測，需要的月份再逐 `(time, item)` partition 預測並寫入 Hive | `training_eval_predictions`、`predict_manifest` |
 | Test 指標 | `compute_test_metrics` | test 預測 | 只讀計分月份，用 Spark 算 mAP、per-item attribution 與 §3.7 要的指標 | `evaluation_results` |
 | 特徵統計 | `compute_feature_statistics` | train handle、model、`preprocessor` | 抽樣計算 null、distinct 與數值分布 | `feature_statistics` |
 | 模型重要性 | `compute_feature_importance` | model | 計算 split、gain 與 dead features | `feature_importance` |
@@ -586,7 +586,7 @@ python -m recsys_tfb training \
 
 **還沒省下的**：兩個 `*_parquet_handle` 仍是 memory-only，所以切片仍會補跑兩個 cache node。要再往下砍，卡在 `cache.root` 是相對路徑：診斷若從別的目錄啟動會指到不同地方而且不報錯。確切的接續集合釘在 `tests/test_pipelines/test_resume_contracts.py`。
 
-**落地也有代價，寫在這裡免得被當成純賺**：切片跳過 predict node，就表示 `predict_manifest` 是從磁碟載回**上一次** run 的那一份。今天安全，因為吃它的兩個 node 都只拿它當排序依賴——`compute_test_metrics` 把它寫進 log，`select_shap_population` 連讀都沒讀；`--rebuild-dates` 被切片切掉時另有 `[rebuild] WARNING` 擋著。唯一從裡面取值的是 predict node 自己的下一次執行（讀每個月的預測格式版本，下面〈逐月增量〉），它要的正是上一次跑完時留下的那一份；中斷的 run 不會落地 manifest，讀到的就是更早那一次，方向是多重寫、不是少重寫。真正沒有防護的是「加了新的 test 月份卻用 `--from-node` 從診斷那一帶起跑」：新月份不會被預測，指標也不會包含它。加月份的正規動線是 `--only-node predict_and_write_test_predictions`（見 [adding-an-eval-month.md](../operations/user-guides/adding-an-eval-month.md)），照著走就不會遇到。
+**落地也有代價，寫在這裡免得被當成純賺**：切片跳過 predict node，就表示 `predict_manifest` 是從磁碟載回**上一次** run 的那一份。今天安全，因為吃它的兩個 node 都只拿它當排序依賴——`compute_test_metrics` 把它寫進 log，`select_shap_population` 連讀都沒讀；`--rebuild-dates` 被切片切掉時另有 `[rebuild] WARNING` 擋著。唯一從裡面取值的是 predict node 自己的下一次執行（讀每個月的預測格式版本，下面〈逐月增量〉），它要的正是上一次跑完時留下的那一份。中斷的 run 不會落地 manifest，讀到的就是更早那一次；只要程式沒有往回退，結果是多重寫、不是少重寫。往回退的那一種見〈逐月增量〉。真正沒有防護的是「加了新的 test 月份卻用 `--from-node` 從診斷那一帶起跑」：新月份不會被預測，指標也不會包含它。加月份的正規動線是 `--only-node predict_and_write_test_predictions`（見 [adding-an-eval-month.md](../operations/user-guides/adding-an-eval-month.md)），照著走就不會遇到。
 
 **還有一件事要知道**：`predict_manifest.json` 裡沒有 run_id，所以切片跳過 predict 的那種 run 跑完之後，版本目錄裡會有一份**上一次** run 寫的 `predict_manifest.json`，而同一層的 `manifest.json` 記的是這一次的 run_id。這不是這個條目特有的——`feature_statistics.json`、`shap_diagnostics.json` 等等只要被切片跳過就都是這樣，`[plan] WARNING: resume assumes the skipped artifacts are still valid` 就是為此而印。要靠 `predict_manifest.json` 回答「**這一次**跑了哪些月」而不是「**最後一次預測**跑了哪些月」的話，得先給它一個 run_id，那是另一張票。
 
@@ -615,7 +615,12 @@ test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 
 
 **逐月增量**：predict 會跳過已經預測完整的月份，所以多評估一個月的成本正比於新月份，而不是累積的總月份數。權威的月份清單是 `dataset.test_snap_dates`（cache 只是資料來源）；某月的完成判準是「該月已寫出的 item partition 集合 ＝ 該月 cache 中出現的 distinct item」——寫到一半中斷、或事後新增一個 item，都會讓該月不再完整而被重做。可以跳過是因為 `(model_version, snap_date)` 的預測是不可變產物：`model_version` 已把定義模型的一切雜湊進去，重算必然得到相同結果——前提是評分的程式也沒變，下一段講它。「已存在哪些 partition」由 `training_eval_predictions` 這個 catalog dataset 物件回答（`HiveTableDataset.existing_partition_values()`，metastore-only 查詢，套用該表的 `partition_filter` 因此天然限縮在目前 `model_version`）——predict 拿不到 SparkSession，這是唯一的路。
 
-**評分的程式改了、模型沒變時**（例如為了 inference 改了兩邊共用的評分程式），框架會把 training 預測格式版本加 1（`core/versioning.py` 的 `TRAINING_PREDICTION_FORMAT_VERSION`，§7.1）。predict 在 `predict_manifest.json` 的 `prediction_format_versions` 替每個設定的月份記下寫它時的值，下次跑時讀回來（catalog 名字是 `predict_manifest_on_disk`，CLI 從 `predict_manifest` 推出，部署不用寫）。某個月記的值跟程式的不同、或沒有記錄，就算它的 partition 齊全也重寫，log 會對已經齊全的月份各印一行 `... recorded in prediction format <舊>, not <新> ...; re-predicting it.`。沒有記錄包括三種：這個 `model_version` 的 predict 從沒跑完過、manifest 是升級前寫的、這個月上一次沒被設定（拿掉又加回來）。所以**第一次跑 predict 跑到一半中斷，接續時已經寫完的月份也會重寫**：manifest 只在 node 跑完時落地，中斷的那次沒有留下記錄。寧可多算一次，也不讓不知道格式的預測被跳過。
+**評分的程式改了、模型沒變時**（例如為了 inference 改了只有評分會跑的程式；改到的程式如果 HPO 評分、建 `.bin` 或訓練也會跑，模型就變了，加的是模型格式版本，見 §7.1），框架會把 training 預測格式版本加 1（`core/versioning.py` 的 `TRAINING_PREDICTION_FORMAT_VERSION`，§7.1）。predict 在 `predict_manifest.json` 的 `prediction_format_versions` 替每個設定的月份記下寫它時的值，下次跑時讀回來（catalog 名字是 `predict_manifest_on_disk`，CLI 從 `predict_manifest` 推出，部署不用寫）。某個月記的值跟程式的不同、或沒有記錄，就算它的 partition 齊全也重寫，log 會對已經齊全的月份各印一行 `... recorded in prediction format <舊>, not <新> ...; re-predicting it.`。沒有記錄包括四種：這個 `model_version` 的 predict 從沒跑完過、manifest 是升級前寫的、manifest 記的是另一個 `model_version`（catalog 路徑裡沒有版本號時會發生）、這個月上一次沒被設定（拿掉又加回來）。寧可多算一次，也不讓不知道格式的預測被跳過。
+
+manifest 只在 node 跑完時落地，所以記錄永遠是**上一次跑完**的那一份。這有兩個後果：
+
+- **每個新 `model_version` 第一次跑 predict，跑到一半中斷，接續時已經寫完的月份也會重寫**：中斷的那次沒有留下記錄。月份很多、排程又有時間上限時，可以先在 `dataset.test_snap_dates` 只留一部分月份跑完一次，再把其餘月份加回來：跑完的那次記下了它的月份，下一次只補新加的。
+- **新版程式跑到一半中斷、接著把程式退回舊版，舊版會跳過新版已經重寫的月份**：磁碟上的記錄還是舊版跑完時寫的，跟舊版的值相同。表裡那些月份其實是新版寫的，不報錯。退回舊版之後第一次跑，用 `--rebuild-dates` 列出所有設定的月份（§4.1），全部重寫一次。
 
 `predict_manifest` 因此帶三份清單：`months_processed`／`months_skipped`／`months_rebuilt`（後者是被 `--rebuild-dates` 強制重做的子集），落地在 `data/models/<model_version>/predict_manifest.json`——log 留下的是計數，而一個靜默過期的月份跟一個正確跳過的月份在計數上長得一模一樣，所以清單要事後查得到（issue #233）。同一份 manifest 的 `snap_dates`／`items`／`n_rows_written` 講的是**這一次寫了什麼**，不是這個 test set 有哪些月——全部月份都被跳過時它們是空的、`0`，這是正確的。指標不受影響：`compute_test_metrics` 是從 Hive 讀回計分月份的預測，被跳過的月份的 partition 本來就還在表裡。跳過的判準是「存在」不是「新鮮」，所以上游對舊月份回補之後要用 `--rebuild-dates` 指名重算——它同時丟掉該月的本機 parquet cache 並重新預測；動線見 [adding-an-eval-month.md](../operations/user-guides/adding-an-eval-month.md)。
 
@@ -794,8 +799,8 @@ HPO 恢復要求 `data/models/_hpo` 位於可持久保存的 driver disk。若�
 | diagnostics、MLflow、cache 或 Spark 設定 | 版本不變 | 依變更目的 full run 或從適當 node 接續，避免覆寫同版但語意不同的診斷 |
 | 上游 base/train variant | 新 `model_version` 與 `search_id` | 使用新 IDs 完整重跑 training |
 | 全域 `random_seed` | 目前版本與 search ID 不變 | 人工視為新實驗；避免直接延用既有 HPO study |
-| 升級到 training 模型格式版本加了 1 的框架 | 新 `model_version` 與 `search_id` | 完整重跑 training；第一次跑也會重建一次 `.bin` |
-| 升級到 training 預測格式版本加了 1 的框架 | 版本不變 | 不用重訓：`--only-node predict_and_write_test_predictions` 或下次完整執行時，所有月份的 test 預測重寫一次 |
+| 升級到 training 模型格式版本加了 1 的框架（升級前後比對 `core/versioning.py` 的值，舊版沒有這個常數算 0） | 新 `model_version` 與 `search_id` | 完整重跑 training；第一次跑也會重建一次 `.bin` |
+| 升級到 training 預測格式版本加了 1 的框架 | 版本不變 | `--only-node predict_and_write_test_predictions` 不重訓，只把所有月份的 test 預測重寫一次。完整執行也會重寫，但訓練照這個模式平常的樣子跑（例如 `refit_on_full` 或跳過 HPO 時會重訓）。之後要更新分數就再跑 `--only-node compute_test_metrics`，舊月份的 evaluation 報表要各自重跑 |
 | 自己改 training Python 程式碼 | 版本不一定改變 | 框架的兩個格式版本要靠改程式的人記得加（[`pipeline-node-design.md`](../agents/pipeline-node-design.md) 規則 18）；沒加的話程式修正可能覆寫相同 model version，應記錄 git commit 並重新驗收 |
 
 training 版本描述的是模型設定、上游資料身分與框架的模型格式版本，不是完整的程式碼或資料內容雜湊。相同 version ID 下重新執行可能覆寫既有模型與 Hive partitions，因此對未納入 hash 的變更必須由使用者管理實驗邊界。
@@ -825,6 +830,7 @@ training 版本描述的是模型設定、上游資料身分與框架的模型�
 | MLflow 失敗但 training 顯示完成 | `mlflow.strict: false` 為 best-effort 模式 | 檢查 warning 與 tracking URI；需要硬性追蹤時設 `strict: true` |
 | `A58: training.fixed_params sets ...` 或 `A58: training.hpo_enabled=... must be true or false` | `fixed_params` 寫了別的鍵或框架決定的參數，或 `hpo_enabled` 不是布林值（§3.2） | 把那些鍵移回它們的位置（`algorithm_params`、`random_seed`、`training.*`），`hpo_enabled` 寫 `true`／`false` |
 | `(A56) catalog entry 'predict_manifest_on_disk' reads '...', but 'predict_manifest' writes '...'` | 部署的 catalog 自己寫了 `predict_manifest_on_disk`，路徑卻跟 `predict_manifest` 不同。這個條目是選用的（第一次跑時檔案還不存在），路徑不對就讀到「沒有」，每個月份每次都會重寫 | 刪掉 `predict_manifest_on_disk` 條目：CLI 會從 `predict_manifest` 推出它（同一個 filepath、`optional`）。或把它的 `filepath` 改成跟 `predict_manifest` 一樣 |
+| `Node 'predict_and_write_test_predictions' requires input 'predict_manifest_on_disk' which is not in the catalog` | 部署的 catalog 沒有 `predict_manifest` 條目（#233 之前的 catalog），CLI 沒有東西可以推出 `predict_manifest_on_disk` | 照 `conf/base/catalog.yaml` 補上 `predict_manifest` 條目（`JSONDataset`，路徑帶 `${model_version}`） |
 | `A57: training.algorithm=... is not a registered algorithm` | `training.algorithm` 未在 adapter registry 註冊；Spark 啟動前就擋下，訊息列出可用的名字 | 使用目前支援的 `lightgbm`，或先實作並註冊新的 ModelAdapter |
 | 部分重跑後模型、預測與診斷不一致 | `--only-node` 未重跑下游，或 skipped artifact 已過期 | 由較前方 node 接續或執行 full run，重新完成驗收 |
 

@@ -105,7 +105,7 @@ Kedro 把 observability 當成 hook 的一種**使用場景**，也就是可以�
 另有兩層執行中繼資料：
 
 - `core/logging.py` 的 `RunContext`（run_id／pipeline／env／dataset_version／model_version）掛在每筆結構化 log 上。
-- `core/versioning.py:330-377` 的 `build_manifest_metadata` 把 version／pipeline／created_at／git_commit／parameters 落成 `manifest.json`。
+- `core/versioning.py` 的 `build_manifest_metadata` 把 version／pipeline／created_at／git_commit／parameters 落成 `manifest.json`。
 
 ## F3. 只有 sequential runner
 

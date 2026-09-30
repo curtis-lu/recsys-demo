@@ -348,10 +348,13 @@ def _manifest_in_this_format(params) -> dict:
         PREDICTION_FORMATS_FIELD,
     )
 
-    return {PREDICTION_FORMATS_FIELD: {
-        month: TRAINING_PREDICTION_FORMAT_VERSION
-        for month in params["dataset"]["test_snap_dates"]
-    }}
+    return {
+        "model_version": params["model_version"],
+        PREDICTION_FORMATS_FIELD: {
+            month: TRAINING_PREDICTION_FORMAT_VERSION
+            for month in params["dataset"]["test_snap_dates"]
+        },
+    }
 
 
 _IN_THIS_FORMAT = object()
@@ -593,7 +596,10 @@ def test_the_same_recorded_format_still_skips(tmp_path, monkeypatch):
 
     handles, write_ds = _both_months_complete(tmp_path)
     bumped = _bump_prediction_format(monkeypatch)
-    on_disk = {PREDICTION_FORMATS_FIELD: {m: bumped for m in _BOTH_MONTHS}}
+    on_disk = {
+        "model_version": "v_test_001",
+        PREDICTION_FORMATS_FIELD: {m: bumped for m in _BOTH_MONTHS},
+    }
 
     manifest = _predict(
         handles, _params_with_test_dates(handles), write_ds, on_disk=on_disk,
@@ -651,9 +657,10 @@ def test_a_month_the_last_run_did_not_configure_is_rewritten(tmp_path):
     )
 
     handles, write_ds = _both_months_complete(tmp_path)
-    on_disk = {PREDICTION_FORMATS_FIELD: {
-        "2025-01-31": TRAINING_PREDICTION_FORMAT_VERSION,
-    }}
+    on_disk = {
+        "model_version": "v_test_001",
+        PREDICTION_FORMATS_FIELD: {"2025-01-31": TRAINING_PREDICTION_FORMAT_VERSION},
+    }
 
     manifest = _predict(
         handles, _params_with_test_dates(handles), write_ds, on_disk=on_disk,
@@ -661,6 +668,20 @@ def test_a_month_the_last_run_did_not_configure_is_rewritten(tmp_path):
 
     assert manifest["months_processed"] == ["2025-02-28"]
     assert manifest["months_skipped"] == ["2025-01-31"]
+
+
+def test_another_model_versions_manifest_is_no_record(tmp_path):
+    """A catalog path without the version shares one manifest between model
+    versions. Its record says this format, but it is another version's: these
+    partitions could be in an older one, so they are re-predicted."""
+    handles, write_ds = _both_months_complete(tmp_path)
+    params = _params_with_test_dates(handles)
+    foreign = {**_manifest_in_this_format(params), "model_version": "other001"}
+
+    manifest = _predict(handles, params, write_ds, on_disk=foreign)
+
+    assert manifest["months_processed"] == list(_BOTH_MONTHS)
+    assert manifest["months_skipped"] == []
 
 
 def test_what_one_run_records_the_next_one_reads(tmp_path):

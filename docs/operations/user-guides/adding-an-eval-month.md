@@ -48,7 +48,7 @@ ls -1 data/models/          # 目錄名就是 model_version
 
 **`train_variant_id` 一定要一起抄。** 只比對 `base_dataset_version` 會漏掉一整類錯誤——原因寫在步驟 2。
 
-**③ 框架升級之後、重訓之前，這套流程用不了。** 升級前後比對 `core/versioning.py` 的兩個值。任一個加了 1，training 算出的 `model_version` 就不再是現役模型的：
+**③ 框架升級之後、重訓之前，這套流程用不了。** 升級前後比對 `core/versioning.py` 的兩個值（舊版沒有這個常數的，算 0：第一次出現就等於加了 1）。任一個加了 1，training 算出的 `model_version` 就不再是現役模型的：
 
 - **dataset 產物格式版本**（`DATASET_ARTIFACT_FORMAT_VERSION`）：每個部署的 `base_dataset_version` 都會換掉。新版本還沒建，步驟 2 的 `--only-test-months` 會在開跑前被擋下（A55）。先照 [dataset 手冊 §7.4](../../pipelines/dataset.md#74-修改設定時要重跑什麼) 重建 dataset，再重訓。
 - **training 模型格式版本**（`TRAINING_MODEL_FORMAT_VERSION`）：dataset 不受影響，步驟 2 照常，但步驟 3 算出的 `model_version` 底下沒有模型，`--only-node` 會把超參數搜尋與訓練一起拉回來——那是重訓。先重訓。
@@ -140,6 +140,8 @@ python -m recsys_tfb training \
 ```
 
 這是預期的，只會發生這一次：評分程式改了、模型沒變，舊月份的預測要用新程式重寫。模型沒有重訓——「跑完了，怎麼確認真的成功」第 1 件照樣成立。
+
+舊月份的預測換了，用它們算出來的東西不會自己跟著換：training 在 test 上的分數（`evaluation_results.json`，promote 讀它）與舊月份的 evaluation 報表，都還是舊預測算的。要更新分數就跑〈[要讓 promote 用新月份比](#要讓-promote-用新月份比)〉第 2 步那一行（`--only-node compute_test_metrics`）；舊月份的報表要更新，就對那些月份各跑一次步驟 4。
 
 **最常壞的一種**：拋 `FileNotFoundError`，路徑裡帶著新月份。
 
@@ -240,7 +242,7 @@ python scripts/promote_model.py --env production --dry-run
 
 `Scored months:` 還是舊月份，`Ranked` 底下的版本跟動手前一樣。畫面每一行的意思見 [promote 一個版本](promoting-a-model.md)。
 
-舊月份的 `report.html` 修改時間應該停在它自己那次執行。被更新了代表你不小心對舊月份也跑了一次 evaluation——內容一樣，無害，但時間戳被蓋掉了。
+舊月份的 `report.html` 修改時間應該停在它自己那次執行。被更新了代表你不小心對舊月份也跑了一次 evaluation——內容一樣，無害，但時間戳被蓋掉了。例外是步驟 3 因為預測格式版本重寫了舊月份：那時舊月份的報表本來就該重跑，內容會不同。
 
 ## 出錯了怎麼辦
 

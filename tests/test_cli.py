@@ -4869,6 +4869,25 @@ class TestPredictManifestOnDiskWiring:
             "optional": True,
         }
 
+    @pytest.mark.parametrize("conf", [
+        "conf/base/catalog.yaml", "examples/ad/conf/base/catalog.yaml",
+    ])
+    def test_the_shipped_catalogs_leave_it_out_and_get_it_derived(self, conf):
+        """Deployments copy these, so an upgrade needs no catalog edit — as
+        long as the catalog has the ``predict_manifest`` entry (#233) to
+        derive from."""
+        from recsys_tfb.__main__ import _derive_on_disk_entry
+
+        catalog = yaml.safe_load((Path(__file__).parents[1] / conf).read_text())
+        assert "predict_manifest_on_disk" not in catalog
+
+        assert _derive_on_disk_entry(
+            catalog, "predict_manifest_on_disk", "predict_manifest") == []
+        assert catalog["predict_manifest_on_disk"] == {
+            **catalog["predict_manifest"], "optional": True,
+        }
+        assert catalog["predict_manifest"]["type"] == "JSONDataset"
+
     @pytest.mark.parametrize("pipeline", ["dataset", "evaluation"])
     def test_a_pipeline_that_does_not_read_it_is_left_alone(self, pipeline):
         built = self._execute(pipeline, _predict_manifest_catalog())

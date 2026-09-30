@@ -267,11 +267,12 @@ ls -1 data/models/
 
 ## 補不回來的情況
 
-有三種情況，用現在的程式讓這個版本重新參加排名是做不到的：
+有四種情況，用現在的程式讓這個版本重新參加排名是做不到的：
 
 - **選版指標是二元預測類，而那個版本的 dataset 在 test 沒留沒有正例的 query group**（動手前 ④ 印出 `None` 或 `0`）。二元預測類的指標把 test 每一列都當成一題，沒留那些 query group，算出來的是另一個母體的數字，training 會拒絕算：寫死了這個選版指標，步驟 1 的 `--dry-run` 就會報錯（訊息帶 `A54:`）。promote 畫面上 `no value for <指標>: ...` 冒號後面的原因，就是 training 記下的這件事。
 - **現在的設定造不出那個 dataset 版本**：步驟 2 的 `base_dataset_version` 在 `dataset:` 還原一模一樣之後仍然不同，代表 `schema` 或 `feature_table` 的欄位變過。那個版本缺的月份造不出來。
 - **現在的程式不接受那個版本的 `training:`**：步驟 1 的 `--dry-run` 在印出版本號之前就報設定錯誤（例如裡面有已經被移除的鍵）。
+- **那個版本是更舊的框架訓練的，而框架之後把格式版本加了 1**：`core/versioning.py` 的 `TRAINING_MODEL_FORMAT_VERSION` 或 `DATASET_ARTIFACT_FORMAT_VERSION` 不一樣（舊框架沒有這個常數的算 0，#488 之前訓練的每個版本都屬於這一種）。它們跟設定一起進版本號，設定還原得再像，現在的程式算出的 `model_version` 也不是它。步驟 1 印出的 `Model version` 怎麼改都對不上，就是這一種。
 
 這時候的選擇：讓所有版本改用一個這個版本有值的選版指標（把 `test_metrics.selection_metric` 明寫成排序類指標），或把計分月份縮回這個版本算過的月份（`test_metrics.snap_date`）；兩者都會改變**所有**版本的比較方式。要不然就是用現在的設定重新訓練。
 
@@ -279,7 +280,7 @@ ls -1 data/models/
 
 | 你看到什麼 | 怎麼辦 |
 |---|---|
-| 任何一步的 `Model version` 不是 `<舊版本>` | `training:` 沒還原對，或忘了帶 `--base-dataset-version`／`--train-variant`。回步驟 1 |
+| 任何一步的 `Model version` 不是 `<舊版本>` | `training:` 沒還原對，或忘了帶 `--base-dataset-version`／`--train-variant`。回步驟 1；還原到一模一樣還是對不上，看〈補不回來的情況〉最後一種 |
 | 步驟 2 的 `base_dataset_version` 不是 `<它的 dataset 版本>` | 見步驟 2 的〈最常壞的一種〉。先做步驟 5 把 `latest` 指回來 |
 | 步驟 4 報錯 `scored month(s) [...] have no rows in training_eval_predictions` | 那幾個月沒預測。回步驟 3；步驟 3 也說找不到資料，就是步驟 2 沒做 |
 | 步驟 3 拋 `FileNotFoundError`（路徑帶著月份），或訊息帶 `has no rows in the test cache` | 那個 dataset 版本沒有這個月。做步驟 2 |

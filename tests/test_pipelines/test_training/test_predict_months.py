@@ -33,6 +33,7 @@ from recsys_tfb.pipelines.training.steps.predict_months import (
 import pytest
 
 JAN, FEB = "2025-01-31", "2025-02-28"
+_MV = "v_test_001"
 JAN_KEY, FEB_KEY = "20250131", "20250228"
 ITEMS = {"prod_A", "prod_B"}
 
@@ -196,22 +197,34 @@ class TestRecordedPredictionFormats:
     def test_no_manifest_yet_is_no_record(self):
         """The catalog entry is optional: ``None`` until a predict run for
         this model_version has completed."""
-        assert recorded_prediction_formats(None) == {}
+        assert recorded_prediction_formats(None, _MV) == {}
 
     def test_a_manifest_from_before_the_field_is_no_record(self):
         """The first run after the upgrade that added the field."""
-        manifest = {"months_processed": [JAN], "months_skipped": []}
-        assert recorded_prediction_formats(manifest) == {}
+        manifest = {"model_version": _MV, "months_processed": [JAN]}
+        assert recorded_prediction_formats(manifest, _MV) == {}
 
     def test_months_are_keyed_the_way_every_month_is_compared(self):
         """Written as configured, read back as month keys: a month recorded
         under one spelling is the same month under another."""
-        manifest = {PREDICTION_FORMATS_FIELD: {JAN: 1, "20250228": 2}}
-        assert recorded_prediction_formats(manifest) == {JAN_KEY: 1, FEB_KEY: 2}
+        manifest = {
+            "model_version": _MV,
+            PREDICTION_FORMATS_FIELD: {JAN: 1, "20250228": 2},
+        }
+        assert recorded_prediction_formats(manifest, _MV) == {
+            JAN_KEY: 1, FEB_KEY: 2}
 
     def test_a_field_that_is_not_a_mapping_is_no_record(self):
-        manifest = {PREDICTION_FORMATS_FIELD: 1}
-        assert recorded_prediction_formats(manifest) == {}
+        manifest = {"model_version": _MV, PREDICTION_FORMATS_FIELD: 1}
+        assert recorded_prediction_formats(manifest, _MV) == {}
+
+    def test_another_model_versions_manifest_is_no_record(self):
+        """A catalog whose ``predict_manifest`` path leaves out the version
+        hands one model_version another's record. Its months may say this
+        format while this version's partitions were written in an older
+        one; read as no record, they are re-predicted instead."""
+        manifest = {"model_version": "other001", PREDICTION_FORMATS_FIELD: {JAN: 1}}
+        assert recorded_prediction_formats(manifest, _MV) == {}
 
 
 class TestMonthsInAnotherFormat:
@@ -250,7 +263,9 @@ class TestAnotherFormatWarning:
                 recorded={JAN_KEY: 1}, current=2,
             )
         assert JAN in caplog.text
-        assert "1" in caplog.text and "2" in caplog.text
+        # Both numbers, in the one phrase that carries them: the month label
+        # alone already holds a "1" and a "2".
+        assert "prediction format 1, not 2" in caplog.text
 
     def test_a_month_with_nothing_written_says_nothing(self, caplog):
         """A brand-new month has no record either, and re-predicting it is

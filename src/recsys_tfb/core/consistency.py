@@ -664,7 +664,8 @@ Layer 1 — config-static (implemented here; aggregated by
   (``run_contract.unlanded_train_tables``, which also asks for
   ``train_dev_model_input`` unless ``train_dev_ratio`` is 0) — a rule, not an
   invariant, so it carries no A-code.
-* A56 — a ``*_on_disk`` catalog entry written by the deployment must name the
+* A56 — each second-name catalog entry the CLI derives (``__main__``'s
+  ``_ON_DISK_ENTRIES``), when the deployment writes it itself, must name the
   file of the entry it reads: ``preprocessor_on_disk`` that of
   ``preprocessor`` (ADR-0029 decision 13), ``predict_manifest_on_disk`` that
   of ``predict_manifest`` (ADR-0030 decision 9). Each is the second name a

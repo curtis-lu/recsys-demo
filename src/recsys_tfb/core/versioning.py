@@ -15,10 +15,11 @@ model version the training pipeline derives from them:
   Keys train/train_dev model_input under the base dataset directory. It is the
   only variant layer — #411 removed the calibration one.
 - ``model_version``: derived from the *model-defining* subset of training
-  params only — the ``training:`` block minus the pure logging/threading
-  knobs in ``MODEL_VERSION_IRRELEVANT_PARAMS``. Ops-only config
-  (``spark`` / ``mlflow`` / ``cache``) is excluded structurally so changing
-  it does not orphan an otherwise-identical model.
+  params — the ``training:`` block minus the pure logging/threading knobs in
+  ``MODEL_VERSION_IRRELEVANT_PARAMS`` — plus ``TRAINING_MODEL_FORMAT_VERSION``,
+  which is not config (below). Ops-only config (``spark`` / ``mlflow`` /
+  ``cache``) is excluded structurally so changing it does not orphan an
+  otherwise-identical model.
 
 Two kinds of key are stripped from ``base_dataset_version``, for two different
 reasons, and the distinction is what keeps the ID meaning "the data this run
@@ -88,12 +89,21 @@ decision 9):
   version was forgotten.
 - ``TRAINING_PREDICTION_FORMAT_VERSION`` — **add 1 when a code change alters
   the test predictions training writes, for some deployment whose config it
-  leaves as it was, while the model stays the same** — typically the scoring
-  code training shares with inference, changed for inference's sake. It is in
-  no ID: the predict node records it per month in ``predict_manifest`` and
-  re-predicts every month recorded in another one, and nothing retrains.
-  Keeping it out of ``model_version`` is also what keeps a scoring change from
-  moving inference's version.
+  leaves as it was, while the model stays the same** — typically code on the
+  scoring side only, changed for inference's sake. It is in no ID: the
+  predict node records it per month in ``predict_manifest`` and re-predicts
+  every month recorded in another one, and nothing retrains. Keeping it out
+  of ``model_version`` is also what keeps a scoring change from moving
+  inference's version.
+
+Which one: **does the changed code also run while an HPO trial is scored,
+while the ``.bin`` is built, or while the model is fit?** Then it is the model
+version, even when the change was made for inference. "Scoring code" is not a
+safe label for that: ``pdf_to_X`` (what ``ModelAdapter.score`` encodes rows
+with) and the matrices training fits and HPO scores on are written through
+one batch encoder in ``io/extract.py``, so a change there changes the model.
+Only code the test predictions alone run — the rest of ``ModelAdapter.score``,
+``score_output.py``'s layout and checks — is the prediction version's.
 
 The rule-18 questions carry over: ask per deployment, of every module the code
 path imports, and ask whether output would change — not whether code did. A

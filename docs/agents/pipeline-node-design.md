@@ -677,7 +677,7 @@ return report
 |---|---|---|---|
 | `DATASET_ARTIFACT_FORMAT_VERSION` | `core/versioning.py` | dataset 落地的內容：各 split 的 keys 與 model_input、`preprocessor.json`、`preprocessed_feature_table` | 每個部署的 `base_dataset_version` 換一個，dataset 全部重建；`model_version`、HPO 的 `search_id` 都含它，所以每個部署都重訓 |
 | `TRAINING_MODEL_FORMAT_VERSION` | `core/versioning.py` | HPO 一個 trial 的分數，或 training 訓練出來的模型 | `model_version` 與 `search_id` 換一個：HPO 從頭搜、重訓、test 預測全部重寫。它也是 `.bin` 快取路徑的一段，所以 `.bin` 也重建 |
-| `TRAINING_PREDICTION_FORMAT_VERSION` | `core/versioning.py` | training 寫出的 test 預測，模型卻不變——例如為了 inference 改了兩邊共用的評分程式 | 不換任何版本 ID、不重訓。predict 在 `predict_manifest.json` 替每個月記了這個值，下次跑時記的值不同，所有月份的 test 預測重寫 |
+| `TRAINING_PREDICTION_FORMAT_VERSION` | `core/versioning.py` | training 寫出的 test 預測，模型卻不變——只有評分會跑的程式，例如 `score_output.py` 的組表與檢查 | 不換任何版本 ID、不重訓。predict 在 `predict_manifest.json` 替每個月記了這個值，下次跑時記的值不同，所有月份的 test 預測重寫 |
 | `TRAIN_DATA_CACHE_FORMAT_VERSION` | `pipelines/training/steps/train_data_cache.py` | `.bin` 快取目錄裡的東西：哪些列、列的順序、欄怎麼編碼、sidecar 記了什麼 | 只換快取路徑：第一次跑重建一次 `.bin` |
 
 要問的不是「這個改動有沒有動到設定」，而是：**有沒有哪一份合法的設定與資料，改動前後寫出來的內容不一樣？** 有一份就要加。只在某種資料才會變的也算，例如只在 entity 有 NULL 時才不同。兩個容易漏的範圍：
@@ -690,6 +690,7 @@ return report
 - **改了 `.bin` 的內容，多半也改了模型**：只把 query group 裡的列換個順序，lambdarank 的模型就會變（`TRAIN_DATA_CACHE_FORMAT_VERSION` 的 docstring 記了實測）。所以 `.bin` 的列順序算內容。兩個都要加。只加快取的那個，`search_id` 不變，接續的搜尋會把新舊檔案上跑出來的 trial 混在一起。只加模型的那個不會出錯：它是快取路徑的一段，`.bin` 會跟著重建。
 - **改了模型，預測一定跟著變**：只加模型的那個。它換了 `model_version`，所有預測本來就會重寫。
 - **只改了預測、模型不變**：只加預測的那個。加成模型的那個結果也對，但每個部署都要從頭跑 HPO（生產上是小時級）。
+- **「評分的程式」不等於「只改預測」**：要問的是改到的程式在 HPO 評一個 trial、建 `.bin`、訓練時會不會也跑到。會的話就是模型的那個，即使改它是為了 inference。例如 `ModelAdapter.score` 用 `io/extract.py` 的 `pdf_to_X` 把列編成矩陣，而訓練與 HPO 的矩陣走的是同一個批次編碼（`_write_batch_features`）：改那段，模型就變了。加錯成預測的那個，接續的搜尋會混進新舊兩種 trial，`.bin` 也不會重建。
 
 ### 不照做會怎樣
 

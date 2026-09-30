@@ -767,12 +767,10 @@ def _execute_pipeline(
     # predict_manifest_on_disk). Before the catalog is built and before
     # --dry-run / --list-nodes return, so a path to another file stops every
     # kind of run.
-    on_disk_errors = [
-        line
-        for on_disk, source in _ON_DISK_ENTRIES.items()
-        if any(on_disk in node.inputs for node in pipe.nodes)
-        for line in _derive_on_disk_entry(catalog_config, on_disk, source)
-    ]
+    on_disk_errors: list[str] = []
+    for on_disk, source in _ON_DISK_ENTRIES.items():
+        if any(on_disk in node.inputs for node in pipe.nodes):
+            on_disk_errors += _derive_on_disk_entry(catalog_config, on_disk, source)
     if on_disk_errors:
         for line in on_disk_errors:
             logger.error(line)
