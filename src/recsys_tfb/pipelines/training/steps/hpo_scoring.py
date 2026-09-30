@@ -18,6 +18,11 @@ around it (read the winner back from the on-disk checkpoint rather than out of
 memory), are recorded in ``docs/agents/architecture-constraints.md`` F3 —
 including why today's checkpoint cannot carry that weight as written.
 
+:func:`fit_stopping_on_train_dev` is how a trial trains. It is the one part
+the skip-HPO node (``train_with_fixed_params``) reuses, so a fit with fixed
+hyperparameters is a trial in everything but the choosing (ADR-0030
+decision 11).
+
 :func:`val_composition` and :func:`item_support` describe val once, before
 the search, for the two objectives that score every val row as a binary
 prediction (#430): what the score will be averaged over, printed by
@@ -199,6 +204,53 @@ def _predict_in_row_batches(adapter, X, budget: int | None = None) -> np.ndarray
     return out
 
 
+def fit_stopping_on_train_dev(
+    adapter,
+    train_lgb_handle,
+    train_dev_lgb_handle,
+    *,
+    train_weights: np.ndarray,
+    train_dev_weights: np.ndarray,
+    params: dict,
+    num_iterations: int,
+    early_stopping_rounds: int,
+):
+    """Fit ``adapter`` on the cached train ``.bin``, stopping early on
+    train_dev; return it fitted.
+
+    How one trial trains, and the one thing in here that runs outside a
+    search: skipping HPO trains one fit exactly this way with the config's
+    ``fixed_params`` where a trial's sample would be (ADR-0030 decision 11),
+    so the two cannot drift apart. The refit (``finalize_model``) is the
+    other kind of fit: both splits stacked, a fixed round count, no early
+    stopping.
+    """
+    with log_step(logger, "prepare_datasets"):
+        # Weights go on at read time rather than coming back out of the .bin:
+        # the binary is cached under a path that says nothing about
+        # `training.sample_weights`, so it deliberately carries none and this
+        # run's own vector is applied on top (#318). Both splits get it —
+        # train_dev is the early-stopping valid set, and an unweighted stopping
+        # signal would pick a different iteration for a weighted fit.
+        ds_train = adapter.load_train_data(
+            train_lgb_handle.bin_path, weight=train_weights)
+        ds_dev = adapter.load_train_data(
+            train_dev_lgb_handle.bin_path,
+            weight=train_dev_weights, reference=ds_train,
+        )
+    log_data_volume(logger, "tune.ds_train", ds_train)
+    log_data_volume(logger, "tune.ds_dev", ds_dev)
+
+    with log_step(logger, "train"):
+        adapter.train(
+            ds_train, params,
+            num_iterations=num_iterations,
+            early_stopping_rounds=early_stopping_rounds,
+            valid_data=ds_dev,
+        )
+    return adapter
+
+
 class TrialScorer:
     """Train one candidate, score it on val, and keep the search's winner.
 
@@ -317,31 +369,15 @@ class TrialScorer:
         )
         t0 = time.monotonic()
 
-        adapter = get_adapter(self.algorithm)
-        with log_step(logger, "prepare_datasets"):
-            # Weights go on at read time rather than coming back out of the
-            # .bin: the binary is cached under a path that says nothing about
-            # `training.sample_weights`, so it deliberately carries none and
-            # this run's own vector is applied on top (#318). Both splits get
-            # it — train_dev is the early-stopping valid set, and an unweighted
-            # stopping signal would pick a different iteration for a weighted
-            # fit.
-            ds_train = adapter.load_train_data(
-                self.train_lgb_handle.bin_path, weight=self.train_weights)
-            ds_dev = adapter.load_train_data(
-                self.train_dev_lgb_handle.bin_path,
-                weight=self.train_dev_weights, reference=ds_train,
-            )
-        log_data_volume(logger, "tune.ds_train", ds_train)
-        log_data_volume(logger, "tune.ds_dev", ds_dev)
-
-        with log_step(logger, "train"):
-            adapter.train(
-                ds_train, params,
-                num_iterations=self.num_iterations,
-                early_stopping_rounds=self.early_stopping_rounds,
-                valid_data=ds_dev,
-            )
+        adapter = fit_stopping_on_train_dev(
+            get_adapter(self.algorithm),
+            self.train_lgb_handle, self.train_dev_lgb_handle,
+            train_weights=self.train_weights,
+            train_dev_weights=self.train_dev_weights,
+            params=params,
+            num_iterations=self.num_iterations,
+            early_stopping_rounds=self.early_stopping_rounds,
+        )
 
         with log_step(logger, "predict"):
             y_pred = _predict_in_row_batches(adapter, self.X_val)

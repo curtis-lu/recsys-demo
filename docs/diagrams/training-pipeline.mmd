@@ -2,7 +2,7 @@
 %% ===========================================================================
 %% training pipeline node graph
 %% 唯一真實來源：src/recsys_tfb/pipelines/training/pipeline.py::create_pipeline
-%% node 函式散在兩處：12 個在 training/nodes.py，7 個在 diagnosis/model/
+%% node 函式散在兩處：14 個在 training/nodes.py（其中兩個依 training.hpo_enabled 二選一），7 個在 diagnosis/model/
 %% （見下方「node 函式不全在 training/nodes.py」）
 %% 姊妹圖：dataset-pipeline.mmd、inference-pipeline.mmd（同一套圖例，多出的形狀見下）
 
@@ -203,7 +203,7 @@ flowchart TB
     n_preplgb["prepare_train_inputs<br/><small>＋ T · V ・ 建 lgb.Dataset binary，跨 trial 不重新分箱</small>"]
     d_lgb_train(["train_lgb_handle"])
     d_lgb_traindev(["train_dev_lgb_handle"])
-    n_tune["tune_hyperparameters<br/><small>＋ V ・ <b>函式第一行 release_spark_session()</b><br/>Optuna study 依 search_id 續跑；--fresh-hpo 清掉重來</small>"]
+    n_tune["tune_hyperparameters<br/><small>＋ V ・ <b>函式第一行 release_spark_session()</b><br/>Optuna study 依 search_id 續跑；--fresh-hpo 清掉重來<br/>hpo_enabled: false 時換成 train_with_fixed_params（不吃 V，也沒有 cache_val_model_input）</small>"]
     d_bestp(["best_params　<b>[L]</b>"])
     d_besti(["best_iteration　<b>[L]</b>"])
     d_hpomodel(["hpo_best_model<br/><small>落地在 hpo/ 子目錄（sidecar 會撞名）</small>"])

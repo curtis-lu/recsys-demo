@@ -12,11 +12,23 @@ from recsys_tfb.evaluation.metrics import compute_ap
 from recsys_tfb.io.extract import extract_Xy
 from recsys_tfb.io.handles import LgbDatasetHandle, ParquetHandle
 from recsys_tfb.models.base import ModelAdapter
+from recsys_tfb.core.versioning import compute_search_id
 from recsys_tfb.pipelines.training.nodes import (
     finalize_model,
     log_experiment,
+    train_with_fixed_params,
     tune_hyperparameters,
 )
+
+
+def _sid(parameters: dict) -> str:
+    """The search_id tune_hyperparameters computes for ``parameters``; the
+    CLI no longer hands one in (ADR-0030 decision 13)."""
+    return compute_search_id(
+        parameters,
+        str(parameters.get("base_dataset_version", "")),
+        str(parameters.get("train_variant_id", "")),
+    )
 
 
 def _quick_train_adapter(lgb_handles, training_parameters):
@@ -445,20 +457,25 @@ class TestTuneHyperparameters:
         train_lgb_h, train_dev_lgb_h = lgb_handles
         val_h = synthetic_model_inputs[2]
 
-        def run(n):
-            p = {
-                **training_parameters, "search_id": "resumesid",
+        def params(n):
+            return {
+                **training_parameters,
                 "training": {**training_parameters["training"], "n_trials": n},
             }
+
+        def run(n):
             return tune_hyperparameters(
-                train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p
+                train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, params(n)
             )
 
+        # n_trials 不在 search_id 內 → 同一 study → 只補 2 個
+        sid = _sid(params(2))
+        assert sid == _sid(params(4))
         run(2)
-        sd = hpo_resume.hpo_study_dir("resumesid")
-        assert hpo_resume.count_completed(hpo_resume.open_study(sd, "resumesid", 42)) == 2
-        run(4)  # n_trials 不在 search_id 內 → 同一 study → 只補 2 個
-        assert hpo_resume.count_completed(hpo_resume.open_study(sd, "resumesid", 42)) == 4
+        sd = hpo_resume.hpo_study_dir(sid)
+        assert hpo_resume.count_completed(hpo_resume.open_study(sd, sid, 42)) == 2
+        run(4)
+        assert hpo_resume.count_completed(hpo_resume.open_study(sd, sid, 42)) == 4
 
     def test_fresh_hpo_clears_and_logs_discard(
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata,
@@ -468,12 +485,13 @@ class TestTuneHyperparameters:
         train_lgb_h, train_dev_lgb_h = lgb_handles
         val_h = synthetic_model_inputs[2]
         base = {
-            **training_parameters, "search_id": "freshsid",
+            **training_parameters,
             "training": {**training_parameters["training"], "n_trials": 2},
         }
+        sid = _sid(base)
         tune_hyperparameters(train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, base)
-        sd = hpo_resume.hpo_study_dir("freshsid")
-        assert hpo_resume.count_completed(hpo_resume.open_study(sd, "freshsid", 42)) == 2
+        sd = hpo_resume.hpo_study_dir(sid)
+        assert hpo_resume.count_completed(hpo_resume.open_study(sd, sid, 42)) == 2
 
         with caplog.at_level(logging.WARNING):
             tune_hyperparameters(
@@ -484,7 +502,7 @@ class TestTuneHyperparameters:
             "--fresh-hpo" in r.getMessage() and "discarding 2" in r.getMessage()
             for r in caplog.records
         )
-        assert hpo_resume.count_completed(hpo_resume.open_study(sd, "freshsid", 42)) == 2
+        assert hpo_resume.count_completed(hpo_resume.open_study(sd, sid, 42)) == 2
 
     def test_checkpointing_disabled_writes_no_files(
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata, training_parameters
@@ -492,14 +510,14 @@ class TestTuneHyperparameters:
         train_lgb_h, train_dev_lgb_h = lgb_handles
         val_h = synthetic_model_inputs[2]
         p = {
-            **training_parameters, "search_id": "nocp", "hpo_checkpointing": False,
+            **training_parameters, "hpo_checkpointing": False,
             "training": {**training_parameters["training"], "n_trials": 2},
         }
         _, _, bm = tune_hyperparameters(
             train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p
         )
         assert bm is not None
-        assert not (Path("data") / "models" / "_hpo" / "nocp").exists()
+        assert not (Path("data") / "models" / "_hpo" / _sid(p)).exists()
 
     def test_resume_recovers_best_model_without_retrain(
         self, lgb_handles, synthetic_model_inputs, preprocessor_metadata,
@@ -511,9 +529,10 @@ class TestTuneHyperparameters:
         train_lgb_h, train_dev_lgb_h = lgb_handles
         val_h = synthetic_model_inputs[2]
         p = {
-            **training_parameters, "search_id": "recoversid",
+            **training_parameters,
             "training": {**training_parameters["training"], "n_trials": 2},
         }
+        sid = _sid(p)
         bp0, bi0, _ = tune_hyperparameters(
             train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p
         )
@@ -532,11 +551,365 @@ class TestTuneHyperparameters:
         # an extra trial appended to a study that was already complete.
         assert (bp, bi) == (bp0, bi0)
         assert hpo_resume.count_completed(
-            hpo_resume.open_study(hpo_resume.hpo_study_dir("recoversid"), "recoversid", 42)
+            hpo_resume.open_study(hpo_resume.hpo_study_dir(sid), sid, 42)
         ) == 2
         assert not [
             r for r in caplog.records if "No usable best model" in r.getMessage()
         ]
+
+    def test_fixed_params_written_beside_a_search_is_called_out(
+        self, caplog, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters,
+    ):
+        """No trial reads it; the log says so rather than let the name imply
+        the search pins those hyperparameters."""
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        val_h = synthetic_model_inputs[2]
+        base = {**training_parameters["training"], "n_trials": 1}
+        for fixed, warned in (({"num_leaves": 7}, True), ({}, False)):
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                tune_hyperparameters(
+                    train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata,
+                    {**training_parameters,
+                     "training": {**base, "fixed_params": fixed}},
+                )
+            assert any(
+                "fixed_params is set but not used" in r.getMessage()
+                for r in caplog.records
+            ) is warned
+
+    @staticmethod
+    def _count_val_reads(monkeypatch):
+        """Wrap the one call that reads val, and count it."""
+        from recsys_tfb.pipelines.training import nodes
+
+        reads = []
+        real = nodes.extract_Xy_with_groups
+
+        def counting(*args, **kwargs):
+            reads.append(kwargs.get("on_disk_label"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(nodes, "extract_Xy_with_groups", counting)
+        return reads
+
+    def test_a_finished_search_with_a_readable_checkpoint_reads_no_val(
+        self, monkeypatch, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters,
+    ):
+        """ADR-0030 decision 12, item 1: nothing will score on val, so it is
+        not read — in production that read is a 37-89 GiB mapped matrix."""
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        val_h = synthetic_model_inputs[2]
+        p = {
+            **training_parameters,
+            "training": {**training_parameters["training"], "n_trials": 2},
+        }
+        reads = self._count_val_reads(monkeypatch)
+        first = tune_hyperparameters(
+            train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p)
+        assert reads == ["hpo_val_matrix"]
+
+        again = tune_hyperparameters(
+            train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p)
+        assert reads == ["hpo_val_matrix"], "a finished search read val again"
+        assert again[:2] == first[:2]
+        assert again[2].predict(
+            np.zeros((3, len(preprocessor_metadata["feature_columns"])))
+        ).shape == (3,)
+
+    def test_more_trials_to_run_still_read_val(
+        self, monkeypatch, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters,
+    ):
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        val_h = synthetic_model_inputs[2]
+
+        def params(n):
+            return {
+                **training_parameters,
+                "training": {**training_parameters["training"], "n_trials": n},
+            }
+
+        reads = self._count_val_reads(monkeypatch)
+        tune_hyperparameters(
+            train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, params(1))
+        tune_hyperparameters(
+            train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, params(2))
+        assert len(reads) == 2
+
+    def test_an_unreadable_checkpoint_reads_val_and_refits_the_best_once(
+        self, monkeypatch, caplog, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters,
+    ):
+        """The last resort needs val: it re-runs the best trial, which is
+        scored like any other."""
+        from recsys_tfb.pipelines.training.steps import hpo_resume
+
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        val_h = synthetic_model_inputs[2]
+        p = {
+            **training_parameters,
+            "training": {**training_parameters["training"], "n_trials": 2},
+        }
+        tune_hyperparameters(
+            train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p)
+        study_dir = hpo_resume.hpo_study_dir(_sid(p))
+        (study_dir / "checkpoint" / hpo_resume.CHECKPOINT_MODEL).write_text(
+            "not a model")
+
+        reads = self._count_val_reads(monkeypatch)
+        with caplog.at_level(logging.WARNING):
+            _, _, model = tune_hyperparameters(
+                train_lgb_h, train_dev_lgb_h, val_h, preprocessor_metadata, p)
+        assert reads == ["hpo_val_matrix"]
+        assert any("last-resort" in r.getMessage() for r in caplog.records)
+        assert hpo_resume.count_completed(
+            hpo_resume.open_study(study_dir, _sid(p), 42)) == 3
+        assert model is not None
+
+
+# ---- Tests: train_with_fixed_params ----
+
+
+class _SpyAdapter:
+    """Records how it is trained; enough of a ModelAdapter for one fit."""
+
+    best_iteration = 7
+
+    def __init__(self, record):
+        self.record = record
+        from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+
+        self.rules = LightGBMAdapter.rules
+
+    def load_train_data(self, path, *, weight, reference=None):
+        self.record.setdefault("weights", []).append(np.asarray(weight).tolist())
+        return object()
+
+    def train(self, train_data, params, *, num_iterations, early_stopping_rounds,
+              valid_data=None):
+        self.record["train"] = {
+            "params": dict(params), "num_iterations": num_iterations,
+            "early_stopping_rounds": early_stopping_rounds,
+            "stops_early_on_train_dev": valid_data is not None,
+        }
+
+    def predict(self, X):
+        return np.zeros(len(X))
+
+
+class _FakeLgbHandle:
+    def __init__(self, weights):
+        self.bin_path = "fake.bin"
+        self._weights = weights
+
+    def sample_weights(self, parameters, preprocessor_metadata):
+        return np.asarray(self._weights, dtype=float)
+
+
+def _skip_hpo_parameters(fixed_params, **training):
+    return {
+        "random_seed": 11,
+        "training": {
+            "algorithm": "lightgbm",
+            "algorithm_params": {"objective": "lambdarank", "verbosity": -1},
+            "hpo_enabled": False,
+            "fixed_params": fixed_params,
+            "num_iterations": 40,
+            "early_stopping_rounds": 6,
+            "n_trials": 3,
+            "search_space": [
+                {"name": "learning_rate", "type": "float", "low": 0.01, "high": 0.1},
+            ],
+            **training,
+        },
+    }
+
+
+class TestTrainWithFixedParams:
+    """ADR-0030 decision 11: skipping HPO trains one fit exactly the way one
+    trial does, with ``fixed_params`` where the trial's sample would be."""
+
+    @staticmethod
+    def _train_both_ways(monkeypatch, chosen):
+        """What a trial and the skip-HPO node each hand the adapter, for the
+        same chosen hyperparameters."""
+        import types
+        from functools import partial
+
+        from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+        from recsys_tfb.pipelines.training import nodes
+        from recsys_tfb.pipelines.training.steps import hpo_scoring
+        from recsys_tfb.pipelines.training.steps.fit_params import fit_params
+
+        parameters = _skip_hpo_parameters(chosen)
+        train_h, dev_h = _FakeLgbHandle([1.0, 2.0]), _FakeLgbHandle([3.0])
+
+        trial = {}
+        monkeypatch.setattr(hpo_scoring, "get_adapter", lambda a: _SpyAdapter(trial))
+        monkeypatch.setattr(hpo_scoring, "build_trial_params", lambda t, s: dict(chosen))
+        monkeypatch.setattr(hpo_scoring, "_hpo_score", lambda *a, **k: 0.5)
+        tp = parameters["training"]
+        hpo_scoring.TrialScorer(
+            train_lgb_handle=train_h, train_dev_lgb_handle=dev_h,
+            train_weights=train_h.sample_weights(parameters, {}),
+            train_dev_weights=dev_h.sample_weights(parameters, {}),
+            X_val=np.zeros((2, 1)), y_val=np.array([1, 0]),
+            groups_val=np.array([0, 0]), items_val=np.array([0, 1]),
+            algorithm="lightgbm",
+            params_for_trial=partial(fit_params, parameters, LightGBMAdapter.rules),
+            search_space=tp["search_space"], hpo_objective="mean_ap",
+            num_iterations=tp["num_iterations"],
+            early_stopping_rounds=tp["early_stopping_rounds"],
+            n_trials=1, search_id="unit", study_dir=None,
+        )(types.SimpleNamespace(number=0))
+
+        fixed = {}
+        monkeypatch.setattr(nodes, "get_adapter", lambda a: _SpyAdapter(fixed))
+        monkeypatch.setattr(nodes, "release_spark_session", lambda p: None)
+        outputs = train_with_fixed_params(train_h, dev_h, {}, parameters)
+        return trial, fixed, outputs
+
+    @pytest.mark.parametrize("chosen", [
+        {"learning_rate": 0.05, "num_leaves": 15},
+        {},
+    ])
+    def test_trains_exactly_like_one_trial(self, monkeypatch, chosen):
+        trial, fixed, _ = self._train_both_ways(monkeypatch, chosen)
+        assert fixed == trial
+
+    def test_empty_fixed_params_still_caps_rounds_and_stops_early(self, monkeypatch):
+        """Empty means "nothing beyond algorithm_params", not "LightGBM's
+        defaults": the round cap, the early stopping on train_dev, the seed and
+        the ranking metric the framework fills in all still apply."""
+        _, fixed, _ = self._train_both_ways(monkeypatch, {})
+        assert fixed["train"] == {
+            "params": {
+                "objective": "lambdarank", "verbosity": -1, "metric": "ndcg",
+                "seed": 11,
+            },
+            "num_iterations": 40, "early_stopping_rounds": 6,
+            "stops_early_on_train_dev": True,
+        }
+        assert fixed["weights"] == [[1.0, 2.0], [3.0]]
+
+    def test_hands_on_what_tune_hyperparameters_hands_on(self, monkeypatch):
+        """best_params is the chosen dict, as a trial's sample is — the refit
+        stacks it the same way (steps/fit_params.py)."""
+        _, _, (best_params, best_iteration, model) = self._train_both_ways(
+            monkeypatch, {"learning_rate": 0.05})
+        assert best_params == {"learning_rate": 0.05}
+        assert best_iteration == _SpyAdapter.best_iteration
+        assert isinstance(model, _SpyAdapter)
+
+    def test_absent_or_blank_fixed_params_is_empty(self, monkeypatch):
+        from recsys_tfb.pipelines.training import nodes
+
+        record = {}
+        monkeypatch.setattr(nodes, "get_adapter", lambda a: _SpyAdapter(record))
+        monkeypatch.setattr(nodes, "release_spark_session", lambda p: None)
+        for parameters in (_skip_hpo_parameters(None), _skip_hpo_parameters({})):
+            best_params, _, _ = train_with_fixed_params(
+                _FakeLgbHandle([1.0]), _FakeLgbHandle([1.0]), {}, parameters)
+            assert best_params == {}
+        parameters = _skip_hpo_parameters({})
+        del parameters["training"]["fixed_params"]
+        assert train_with_fixed_params(
+            _FakeLgbHandle([1.0]), _FakeLgbHandle([1.0]), {}, parameters)[0] == {}
+
+    def test_releases_spark_before_it_trains(self, monkeypatch):
+        """The same reason tune_hyperparameters releases it: Spark idles from
+        here to the predict node, and an idle application is reclaimed."""
+        from recsys_tfb.pipelines.training import nodes
+
+        order = []
+
+        class OrderedSpy(_SpyAdapter):
+            def load_train_data(self, path, *, weight, reference=None):
+                order.append("load")
+                return object()
+
+        monkeypatch.setattr(nodes, "get_adapter", lambda a: OrderedSpy({}))
+        monkeypatch.setattr(
+            nodes, "release_spark_session", lambda p: order.append("release"))
+        train_with_fixed_params(
+            _FakeLgbHandle([1.0]), _FakeLgbHandle([1.0]), {},
+            _skip_hpo_parameters({}))
+        assert order[0] == "release"
+
+    def test_says_the_search_keys_are_not_used(self, monkeypatch, caplog):
+        from recsys_tfb.pipelines.training import nodes
+
+        monkeypatch.setattr(nodes, "get_adapter", lambda a: _SpyAdapter({}))
+        monkeypatch.setattr(nodes, "release_spark_session", lambda p: None)
+        with caplog.at_level(logging.INFO, logger=nodes.logger.name):
+            train_with_fixed_params(
+                _FakeLgbHandle([1.0]), _FakeLgbHandle([1.0]), {},
+                _skip_hpo_parameters({}))
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "search_space" in text and "n_trials" in text
+
+    def test_refit_on_full_stacks_the_fixed_params(
+        self, monkeypatch, lgb_handles, synthetic_model_inputs,
+        preprocessor_metadata, training_parameters,
+    ):
+        """Both strategies work in this mode (decision 11): the refit trains
+        on train + train_dev under fixed_params, stacked as a trial's sample
+        is, for the fit's best_iteration rounds and no early stopping."""
+        from recsys_tfb.models.lightgbm_adapter import LightGBMAdapter
+        from recsys_tfb.pipelines.training.steps.fit_params import fit_params
+
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        train_h, train_dev_h, *_ = synthetic_model_inputs
+        chosen = {"learning_rate": 0.1, "num_leaves": 15}
+        p = {
+            **training_parameters,
+            "training": {
+                **training_parameters["training"], "hpo_enabled": False,
+                "fixed_params": chosen, "final_model_strategy": "refit_on_full",
+            },
+        }
+        best_params, best_iteration, fitted = train_with_fixed_params(
+            train_lgb_h, train_dev_lgb_h, preprocessor_metadata, p)
+
+        calls = []
+        real_train = LightGBMAdapter.train
+
+        def spy(self, data, params, **kwargs):
+            calls.append((dict(params), kwargs))
+            return real_train(self, data, params, **kwargs)
+
+        monkeypatch.setattr(LightGBMAdapter, "train", spy)
+        final = finalize_model(
+            train_h, train_dev_h, fitted, best_params, best_iteration,
+            preprocessor_metadata, p,
+        )
+        assert final is not fitted
+        (params, kwargs), = calls
+        assert params == fit_params(p, LightGBMAdapter.rules, chosen)
+        assert kwargs["num_iterations"] == best_iteration > 0
+        assert kwargs["early_stopping_rounds"] == 0
+
+    def test_trains_a_real_model(
+        self, lgb_handles, preprocessor_metadata, training_parameters,
+    ):
+        train_lgb_h, train_dev_lgb_h = lgb_handles
+        p = {
+            **training_parameters,
+            "training": {
+                **training_parameters["training"], "hpo_enabled": False,
+                "fixed_params": {"learning_rate": 0.1, "num_leaves": 15},
+            },
+        }
+        best_params, best_iteration, model = train_with_fixed_params(
+            train_lgb_h, train_dev_lgb_h, preprocessor_metadata, p)
+        assert best_params == {"learning_rate": 0.1, "num_leaves": 15}
+        assert isinstance(model, ModelAdapter)
+        assert 0 < best_iteration <= p["training"]["num_iterations"]
+        assert not (Path("data") / "models" / "_hpo").exists(), (
+            "skipping HPO opened a study")
 
 
 # ---- Tests: finalize_model ----

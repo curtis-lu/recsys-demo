@@ -15,9 +15,6 @@ from recsys_tfb.core.consistency import (
     compare_mutual_exclusive_errors,
     compare_source_key_exists,
     date_split_overlap_errors,
-    duplicate_test_month_errors,
-    entity_columns_declared_errors,
-    optional_role_columns_declared_errors,
     optional_role_monitoring_errors,
     etl_cli_var_errors,
     inference_grid_errors,
@@ -25,8 +22,6 @@ from recsys_tfb.core.consistency import (
     item_category_column_errors,
     candidate_feature_table_inference_errors,
     merged_etl_variables,
-    missing_test_month_errors,
-    scoring_param_errors,
     parse_etl_var_flags,
     post_training_snap_date_errors,
     prediction_quality_param_errors,
@@ -43,10 +38,6 @@ from recsys_tfb.core.consistency import (
     resolved_rebuild_dates,
     train_snap_dates_errors,
     train_version_landed_errors,
-    training_algorithm_errors,
-    zero_positive_group_weight_declared_errors,
-    binary_test_metrics_verdict,
-    resolved_zero_positive_group_ratio,
     ConfigConsistencyError,
     DATASET_TEST_RATIO_KEY,
     REBUILD_SNAP_DATES_KEY,
@@ -58,9 +49,7 @@ from recsys_tfb.core.schema import (
 )
 from recsys_tfb.core.versioning import (
     build_manifest_metadata,
-    compute_model_version,
     compute_popularity_source_version,
-    compute_search_id,
     find_latest_completed_model_version,
     read_manifest,
     resolve_base_dataset_version,
@@ -85,6 +74,7 @@ from recsys_tfb.pipelines.dataset.run_contract import (
     unlanded_train_tables,
     versions_for_run,
 )
+from recsys_tfb.pipelines.training import run_contract as training_contract
 from recsys_tfb.pipelines.training.cache_sources import inject_cache_source_tables
 
 app = typer.Typer(help="recsys_tfb: Product recommendation ranking model CLI")
@@ -363,7 +353,7 @@ def _derive_preprocessor_on_disk(catalog_config: dict) -> list[str]:
       and no error returned; the Runner reports the missing input as it would
       any other.
 
-    Mutates ``catalog_config``, like :func:`inject_cache_source_tables`.
+    Mutates ``catalog_config``.
     """
     preprocessor = catalog_config.get("preprocessor")
     if preprocessor is None:
@@ -762,11 +752,6 @@ def _execute_pipeline(
         config, params, runtime_params
     )
 
-    # Auto-inject cache source_tables from catalog config so cache nodes don't
-    # need a parallel parameters yaml mapping. Catalog.yaml's HiveTableDataset
-    # `table` field is the single source of truth for cache table resolution.
-    inject_cache_source_tables(substitution_params, catalog_config)
-
     # (A56) Asked of the DAG rather than of the pipeline's name: the entry is
     # derived exactly when a node reads it (dataset's fit, evaluation's
     # prepare_eval_data). Before the catalog is built and before --dry-run /
@@ -926,30 +911,6 @@ def _chunk_report_extra(version_dir: Path, run_id: str) -> Optional[dict]:
             "report": CHUNK_REPORT_NAME,
         }
     }
-
-
-def _sample_weight_extra(version_dir: Path) -> Optional[dict]:
-    """Read sample_weight_report.json (if present) into manifest extra_metadata."""
-    report = version_dir / "sample_weight_report.json"
-    if not report.exists():
-        return None
-    with open(report) as f:
-        return {"sample_weight": json.load(f)}
-
-
-def _group_filter_extra(version_dir: Path) -> Optional[dict]:
-    """Read group_filter_report.json (if present) into manifest extra_metadata.
-
-    Under lambdarank the training matrix holds fewer rows than the train /
-    train_dev tables do (zero-positive query groups are dropped). Recording
-    the counts here is what lets two runs be compared on training-set size
-    without re-deriving where the difference came from.
-    """
-    report = version_dir / "group_filter_report.json"
-    if not report.exists():
-        return None
-    with open(report) as f:
-        return {"group_filter": json.load(f)}
 
 
 def _run_etl(
@@ -1508,50 +1469,27 @@ def training(
 
     config, params, run_context = _load_config_and_setup("training", env)
 
-    # (A57) training.algorithm must name a registered adapter — asked of the
-    # registry the nodes dispatch on. Off the aggregator for A24's reason:
-    # only training reads the key. Before the cold start below: a typo used to
-    # surface in the first node that asked for the adapter, after Spark had
-    # started and the cache nodes had copied their splits.
-    algorithm_errors = training_algorithm_errors(params)
-    if algorithm_errors:
-        for line in algorithm_errors:
-            logger.error(line)
-        raise typer.Exit(code=1)
-
-    # (A26) dataset.test_snap_dates must not spell one month two ways. Wired
-    # here rather than aggregated by validate_config_consistency for A24's
-    # reason: that gate runs at the entry of EVERY command, while the harm is
-    # training-only — the dataset pipeline normalises its months through
-    # pd.Timestamp into a set (month_plans.plan_incremental_snap_dates), so two
-    # spellings collapse there, whereas the training cache keys on the YYYYMMDD
-    # directory name and would count that month's rows twice. Before A21 so
-    # "this month is named twice" is reported ahead of anything about the flag.
-    #
-    # (A36) training needs at least one test month (#133). Without one nothing
-    # in the pipeline objects until predict_and_write_test_predictions, after
-    # the whole HPO search. Off the aggregator for the same reason: the dataset
-    # command runs without one. Collected with A26 because both judge this one
-    # key (they cannot both fire — an empty list has no second spelling).
-    #
-    # (A53) the test_metrics block (ADR-0028): the scored months (a non-empty
-    # subset of test_snap_dates, no month spelled two ways) and the metric
-    # names. Collected here because the scored months are judged against this
-    # same key, and off the aggregator for the same reason: only training
-    # reads the block.
-    test_month_errors = (
-        missing_test_month_errors(params) + duplicate_test_month_errors(params)
-        + scoring_param_errors(params)
-    )
-    if test_month_errors:
-        for line in test_month_errors:
+    # Every config check only training runs, collected in one pass before the
+    # Spark cold start (pipelines/training/run_contract.py lists them; ADR-0030
+    # decision 13). Several guard mistakes a node would only trip on after the
+    # whole HPO search. None is on validate_config_consistency: only training
+    # reads these keys (#158). The catalog is resolved without the version IDs
+    # on purpose: the column checks compare names, and substitution fills
+    # partition values only, so waiting for the versions would buy nothing and
+    # cost the cold start these checks are placed above.
+    _, gate_catalog_config = _resolve_catalog(config, params, {})
+    contract_errors = training_contract.config_errors(params, gate_catalog_config)
+    if contract_errors:
+        for line in contract_errors:
             logger.error(line)
         raise typer.Exit(code=1)
 
     # (A21) --rebuild-dates ⊆ dataset.test_snap_dates — the same predicate the
     # dataset command uses, so the two halves of a backfill cannot disagree
-    # about which months are nameable. Checked before Spark starts: a typo here
-    # would otherwise cost a cold start before failing.
+    # about which months are nameable. After the checks above, so a month
+    # spelled two ways (A26) is reported before anything about the flag.
+    # Checked before Spark starts: a typo here would otherwise cost a cold
+    # start before failing.
     try:
         rebuild = resolved_rebuild_dates(
             params,
@@ -1561,86 +1499,32 @@ def training(
         logger.error(str(exc))
         raise typer.Exit(code=1)
 
-    # (A28) training_eval_predictions must declare every schema.entity column.
-    # Asked of the dataset object, not of its config entry, for the reason
-    # dataset's month-plan listing gives (pipelines/dataset/run_contract.py,
-    # _collect_existing_snap_dates): which columns an artifact keeps is the
-    # catalog's knowledge, not the CLI's.
-    #
-    # Before the cold start below, and long before the node that writes those
-    # columns — that node runs after HPO and finalize_model, so the same check
-    # inside it would report a one-word catalog typo only after the whole
-    # search had been paid for. This compares two lists of names and
-    # touches no data.
-    #
-    # runtime_params is deliberately empty: substitution fills partition
-    # *values* (${model_version}), while this reads only column *names* —
-    # declared columns, partition_filter keys, partition_cols names — none of
-    # which a substitution touches. Waiting for the versions would buy nothing
-    # and cost exactly the cold start this is placed above to avoid.
-    #
-    # An absent entry (get_dataset -> None) is deliberately not this gate's
-    # business: "declared the wrong columns" and "not in the catalog at all"
-    # need different fixes, and the runner already refuses to build a pipeline
-    # whose outputs it cannot resolve. Reporting it here would only move that
-    # message somewhere it explains less.
-    _, gate_catalog_config = _resolve_catalog(config, params, {})
-    gate_declared = getattr(
-        DataCatalog(gate_catalog_config).get_dataset("training_eval_predictions"),
-        "declared_columns",
-        None,
-    )
-    declaration_errors = [
-        *entity_columns_declared_errors(
-            params, gate_declared, "training_eval_predictions"
-        ),
-        # A39 — the same read of the same entry, so an operator who is missing
-        # both an entity column and an event column fixes one `columns:` list
-        # once. Separate predicate because the two failures read differently
-        # downstream (see A39 in core/consistency.py).
-        *optional_role_columns_declared_errors(
-            params, gate_declared, "training_eval_predictions"
-        ),
-        # A45 — same entry, same read: the zero-positive group weight the test
-        # table carries when dataset.test_zero_positive_group_ratio > 0 would
-        # otherwise be dropped by the save and evaluation would count rows.
-        *zero_positive_group_weight_declared_errors(
-            params, gate_declared, "training_eval_predictions"
-        ),
-    ]
-    if declaration_errors:
-        for line in declaration_errors:
-            logger.error(line)
-        raise typer.Exit(code=1)
-
     data_dir = _find_data_dir()
+    try:
+        params_training = config.get_parameters_by_name("parameters_training")
+    except KeyError:
+        params_training = {}
 
-    dataset_dir = data_dir / "dataset"
-    base_v = resolve_base_dataset_version(dataset_dir, base_dataset_version)
-    base_dir = dataset_dir / base_v
-    if base_dataset_version is not None and not base_dir.is_dir():
-        logger.error("Base dataset version directory not found: %s", base_dir)
+    try:
+        versions = training_contract.versions_for_run(
+            data_dir / "dataset", params_training, base_dataset_version, train_variant,
+        )
+    except ValueError as exc:
+        logger.error(str(exc))
         raise typer.Exit(code=1)
+    mv = versions.model_version
+    logger.info("Model version: %s", mv)
+    logger.info("base_dataset_version: %s", versions.base_dataset_version)
+    logger.info("train_variant_id:     %s", versions.train_variant_id)
 
-    train_v = resolve_train_variant_id(base_dir, train_variant)
-
-    # (A54) the dataset version this run reads, against what test is asked to
-    # score (ADR-0028 decision 4). validate_config_consistency already held
-    # the config to it; this catches the config raised after the data was
-    # built — a raised test ratio with no dataset rerun, `latest` pointing at
-    # an older version, or --base-dataset-version naming one. Here, not in
-    # the scoring node, so it stops before the HPO search rather than after;
-    # and before the cold start below, like A21 / A28 — resolving the version
-    # and reading its manifest touch the filesystem only. The node reads the
-    # same ratio (DATASET_TEST_RATIO_KEY below) for the objectives it
-    # withholds; the warning here says so hours earlier than the node does.
-    dataset_test_ratio = _dataset_version_test_ratio(base_dir)
+    # (A54) against the dataset version this run reads — before the cold
+    # start, like the checks above: resolving the version and reading its
+    # manifest touch the filesystem only.
     logger.info(
         "dataset version %s was built with test_zero_positive_group_ratio %s",
-        base_v, dataset_test_ratio,
+        versions.base_dataset_version, versions.dataset_test_ratio,
     )
-    verdict = binary_test_metrics_verdict(
-        params, dataset_version=base_v, dataset_test_ratio=dataset_test_ratio)
+    verdict = training_contract.dataset_version_verdict(params, versions)
     if verdict.errors:
         for line in verdict.errors:
             logger.error(line)
@@ -1648,35 +1532,38 @@ def training(
     for name, reason in verdict.withheld.items():
         logger.warning("%s will have no value on test: %s", name, reason)
 
+    # The run's mode picks which nodes exist (ADR-0030 decision 11).
+    pipeline_kwargs = training_contract.pipeline_kwargs(params)
+    if not pipeline_kwargs["hpo_enabled"]:
+        logger.info(
+            "training.hpo_enabled is false: no HPO search; one fit on "
+            "training.fixed_params, and val is neither copied nor read"
+        )
+        if fresh_hpo:
+            logger.warning(
+                "--fresh-hpo does nothing with training.hpo_enabled false: "
+                "there is no search to start over"
+            )
+
     get_or_create_spark_session(_load_spark_config(config, "training"))
 
-    try:
-        params_training = config.get_parameters_by_name("parameters_training")
-    except KeyError:
-        params_training = {}
-
-    mv = compute_model_version(params_training, base_v, train_v)
-    sid = compute_search_id(params_training, base_v, train_v)
-    logger.info("Model version: %s", mv)
-    logger.info("search_id: %s", sid)
-    logger.info("base_dataset_version: %s", base_v)
-    logger.info("train_variant_id:     %s", train_v)
-
     runtime_params = {
-        "base_dataset_version": base_v,
-        "train_variant_id": train_v,
+        "base_dataset_version": versions.base_dataset_version,
+        "train_variant_id": versions.train_variant_id,
         "model_version": mv,
-        "search_id": sid,
         "_fresh_hpo": fresh_hpo,
         "snap_date": _NONE_PLACEHOLDER,
         # Read by cache_test_model_input (drop the stale month) and by
         # predict_and_write_test_predictions (re-predict it).
         REBUILD_SNAP_DATES_KEY: rebuild,
         # Read by compute_test_metrics (A54, above).
-        DATASET_TEST_RATIO_KEY: dataset_test_ratio,
+        DATASET_TEST_RATIO_KEY: versions.dataset_test_ratio,
     }
-
-    pipeline_kwargs: dict = {}
+    # Which Hive table each cache node copies, and how its partitions are laid
+    # out, read off the catalog so the cache nodes need no parallel mapping in
+    # parameters. Training's alone: no other pipeline has a cache node.
+    _, run_catalog_config = _resolve_catalog(config, params, runtime_params)
+    inject_cache_source_tables(runtime_params, run_catalog_config)
 
     # Pre-run crash-safe provenance stub (skip-if-present, no symlink); the
     # post-run write below upgrades it to status=completed + artifacts.
@@ -1685,8 +1572,8 @@ def training(
             "version": mv,
             "pipeline": "training",
             "parameters": params_training,
-            "base_dataset_version": base_v,
-            "train_variant_id": train_v,
+            "base_dataset_version": versions.base_dataset_version,
+            "train_variant_id": versions.train_variant_id,
         }
         _write_manifest_stub(data_dir / "models" / mv, stub_kwargs, run_context.run_id)
 
@@ -1715,13 +1602,12 @@ def training(
         "version": mv,
         "pipeline": "training",
         "parameters": params_training,
-        "base_dataset_version": base_v,
-        "train_variant_id": train_v,
+        "base_dataset_version": versions.base_dataset_version,
+        "train_variant_id": versions.train_variant_id,
         "artifacts": _dir_artifacts(version_dir),
     }
 
-    extra = _sample_weight_extra(version_dir) or {}
-    extra.update(_group_filter_extra(version_dir) or {})
+    extra = training_contract.manifest_extra(version_dir)
     slice_extra = _slice_extra(from_node, only_node)
     if slice_extra:
         extra.update(slice_extra)
@@ -1735,25 +1621,6 @@ def training(
         params_dict=params_training,
     )
     logger.info("Pipeline 'training' completed successfully")
-
-
-def _dataset_version_test_ratio(base_dir: Path) -> float:
-    """The ``dataset.test_zero_positive_group_ratio`` a dataset version was
-    built with, as its manifest records it (the dataset command writes the
-    ``parameters_dataset`` it ran with there).
-
-    An absent key reads as the default 0, through the same resolver the
-    dataset nodes drew with: a version built before the key existed kept no
-    zero-positive test group. So does an absent manifest — every dataset run
-    writes one before it starts, so a directory without one was not built by
-    it, and nothing says its test kept those groups.
-    """
-    try:
-        manifest = read_manifest(base_dir)
-    except FileNotFoundError:
-        manifest = {}
-    return resolved_zero_positive_group_ratio(
-        manifest.get("parameters") or {}, "test")
 
 
 def _dataset_versions_from_model_manifest(

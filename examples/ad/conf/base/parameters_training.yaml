@@ -25,6 +25,9 @@ training:
   # 〈這組 conf 刻意沒打開的東西〉）。A48 要求 val 的 r > 0：parameters_dataset.yaml 設了
   # val_zero_positive_group_ratio: 0.5，拿掉它這裡就會被擋。
   hpo_objective: pooled_average_precision
+  # 跳過 HPO 的兩個鍵，說明見根目錄的 parameters_training.yaml。本示例照跑 HPO。
+  hpo_enabled: true
+  fixed_params: {}
   n_trials: 5
   num_iterations: 200
   early_stopping_rounds: 30

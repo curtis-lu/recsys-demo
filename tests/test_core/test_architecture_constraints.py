@@ -162,6 +162,10 @@ def test_static_coverage_floor():
     """
     total = sum(1 for _ in _node_calls())
     judgeable = sum(1 for _ in _judgeable_nodes())
+    # 63/60: #487 added training's `train_with_fixed_params`, one literal,
+    # statically judgeable call. The val copy's Node moved inside a
+    # conditional list (`*([Node(...)] if hpo_enabled else [])`) and is still
+    # a literal call the scan reads, so nothing else moved.
     # 62/59: #397 added evaluation's `build_popularity_period_counts` and a
     # second literal `compute_baseline_metrics` call (rate mode takes one more
     # input; two literal calls instead of a computed input list, which the
@@ -184,7 +188,7 @@ def test_static_coverage_floor():
     # of the two `validate_model_input_grain` calls (the branch existed only
     # to append the calibration pair to its input list). All three were
     # literal, so total and judgeable both drop by 3.
-    assert (total, judgeable) == (62, 59), (
+    assert (total, judgeable) == (63, 60), (
         f"Node coverage changed: {judgeable}/{total} statically judgeable. "
         "If this dropped, A5/A6 now have a bigger blind spot -- check why."
     )

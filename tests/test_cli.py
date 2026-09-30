@@ -313,8 +313,9 @@ class TestCLI:
             os.chdir(old_cwd)
 
     def test_training_auto_injects_cache_source_tables_from_catalog(self, tmp_path):
-        """_execute_pipeline calls inject_cache_source_tables with substitution_params
-        and catalog_config before constructing DataCatalog. Helper itself is
+        """The training command calls inject_cache_source_tables with its
+        runtime params and the resolved catalog config, before _execute_pipeline
+        builds the DataCatalog (ADR-0030 decision 13). Helper itself is
         unit-tested in TestInjectCacheSourceTables; this test only pins the wiring.
         """
         _setup_conf(
@@ -1216,48 +1217,6 @@ class TestEtlCliVarsA35:
             assert "--var" in result.output
         finally:
             os.chdir(old)
-
-
-def test_sample_weight_extra_reads_report(tmp_path):
-    import json
-    from recsys_tfb.__main__ import _sample_weight_extra
-    vdir = tmp_path / "models" / "mv"
-    vdir.mkdir(parents=True)
-    (vdir / "sample_weight_report.json").write_text(
-        json.dumps({"enabled": True, "weight_keys": ["prod_name"],
-                    "n_weight_entries": 1, "unmatched_keys": []}))
-    assert _sample_weight_extra(vdir) == {
-        "sample_weight": {"enabled": True, "weight_keys": ["prod_name"],
-                          "n_weight_entries": 1, "unmatched_keys": []}}
-
-
-def test_sample_weight_extra_absent_returns_none(tmp_path):
-    from recsys_tfb.__main__ import _sample_weight_extra
-    assert _sample_weight_extra(tmp_path) is None
-
-
-def test_group_filter_extra_reads_report(tmp_path):
-    """The lambdarank row counts land in the manifest, under their own key.
-
-    Two runs of the same model_version differ in training-set size only for a
-    reason; this is the reason, recorded next to the parameters that caused it.
-    """
-    import json
-    from recsys_tfb.__main__ import _group_filter_extra
-    vdir = tmp_path / "models" / "mv"
-    vdir.mkdir(parents=True)
-    report = {
-        "enabled": True, "objective": "lambdarank", "thin_splits": [],
-        "train": {"groups_total": 10, "groups_kept": 6, "groups_dropped": 4,
-                  "rows_total": 40, "rows_kept": 24, "rows_dropped": 16},
-    }
-    (vdir / "group_filter_report.json").write_text(json.dumps(report))
-    assert _group_filter_extra(vdir) == {"group_filter": report}
-
-
-def test_group_filter_extra_absent_returns_none(tmp_path):
-    from recsys_tfb.__main__ import _group_filter_extra
-    assert _group_filter_extra(tmp_path) is None
 
 
 def _chunk_report_file(vdir, **overrides):
@@ -4855,3 +4814,100 @@ class TestPreprocessorOnDiskWiring:
         runner.assert_not_called()
         assert "(A56)" in caplog.text
         assert "data/elsewhere.json" in caplog.text
+
+
+class TestTrainingSkipsHpo:
+    """ADR-0030 decisions 11 and 13, through the command: the mode reaches
+    ``create_pipeline``, its keys are checked before the cold start, and the
+    command no longer hands ``search_id`` to the DAG.
+
+    Borrows the valid conf of ``TestRetiredCalibrationKeysBlockEveryCommand``:
+    a minimal one exits on A36 first, and "exit 1" would then pass for the
+    wrong invariant.
+    """
+
+    _conf = TestRetiredCalibrationKeysBlockEveryCommand._conf
+    _invoke = TestRetiredCalibrationKeysBlockEveryCommand._invoke
+
+    @staticmethod
+    def _training(**keys):
+        return {"training": {"objective": "binary", **keys}}
+
+    def test_a58_stops_training_before_spark(self, tmp_path):
+        self._conf(tmp_path, training=self._training(fixed_params={"seed": 7}))
+        result, mock_spark = self._invoke(tmp_path, ["training"])
+        assert result.exit_code != 0
+        assert "A58" in result.output and "'seed'" in result.output
+        mock_spark.assert_not_called()
+
+    def test_a58_does_not_stop_the_other_commands(self, tmp_path):
+        """Only training reads the keys (#158)."""
+        self._conf(tmp_path, training=self._training(hpo_enabled="no"))
+        _, mock_spark = self._invoke(tmp_path, ["dataset"])
+        mock_spark.assert_called()
+
+    @pytest.mark.parametrize("hpo_enabled,present,absent", [
+        (False, "train_with_fixed_params", "tune_hyperparameters"),
+        (True, "tune_hyperparameters", "train_with_fixed_params"),
+    ])
+    def test_list_nodes_shows_the_dag_of_the_mode(
+        self, tmp_path, hpo_enabled, present, absent,
+    ):
+        self._conf(tmp_path, training=self._training(hpo_enabled=hpo_enabled))
+        result, _ = self._invoke(tmp_path, ["training", "--list-nodes"])
+        assert result.exit_code == 0, result.output
+        assert present in result.output
+        assert absent not in result.output
+        assert ("cache_val_model_input" in result.output) is hpo_enabled
+
+    def test_the_command_hands_no_search_id_to_the_dag(self, tmp_path, monkeypatch):
+        """``tune_hyperparameters`` computes it (node-design rule 15)."""
+        import recsys_tfb.__main__ as main_mod
+
+        captured = {}
+
+        def fake_execute(pipeline_name, pipeline_kwargs, runtime_params, *a, **kw):
+            captured.update(pipeline_kwargs=pipeline_kwargs,
+                            runtime_params=dict(runtime_params))
+            return False
+
+        monkeypatch.setattr(main_mod, "_execute_pipeline", fake_execute)
+        self._conf(tmp_path, training=self._training(hpo_enabled=False))
+        result, _ = self._invoke(tmp_path, ["training"])
+        assert result.exit_code == 0, result.output
+        assert "search_id" not in captured["runtime_params"]
+        assert captured["pipeline_kwargs"] == {"hpo_enabled": False}
+
+
+_HIVE_CACHE_SOURCE = {
+    "train_model_input": {
+        "type": "HiveTableDataset", "database": "db",
+        "table": "train_mi", "external": False, "columns": "auto",
+        "partition_filter": {"base_dataset_version": "b1"},
+    },
+}
+
+
+class TestCacheSourceTablesAreTrainingsAlone:
+    """ADR-0030 decision 13: only training has cache nodes, so only the
+    training command derives which Hive table each copies."""
+
+    @pytest.mark.parametrize("pipeline", ["dataset", "inference", "evaluation"])
+    def test_executing_another_pipeline_derives_none(self, pipeline):
+        from recsys_tfb.__main__ import MemoryDataset, _execute_pipeline
+
+        config = MagicMock()
+        config.get_catalog_config.return_value = dict(_HIVE_CACHE_SOURCE)
+        with patch("recsys_tfb.__main__.MemoryDataset", wraps=MemoryDataset) as made, \
+                patch("recsys_tfb.__main__.Runner"):
+            _execute_pipeline(
+                pipeline, {}, {"model_version": "m"}, config, {}, "local",
+                dry_run=True,
+            )
+
+        params = [
+            c.kwargs["data"] for c in made.call_args_list
+            if isinstance(c.kwargs.get("data"), dict)
+        ]
+        assert params, "the parameters dataset was not seen"
+        assert all("_cache_source_tables" not in p for p in params)

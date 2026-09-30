@@ -326,7 +326,7 @@ pipeline 切片只能在完整 node 邊界恢復。若 `tune_hyperparameters` �
 - 只提高 `n_trials` 可延長同一個 search
 - `--fresh-hpo` 可丟棄既有狀態並重新搜尋
 
-`search_id` 使用與 model version 相同的 model-defining 輸入，但排除 `n_trials`。因此改變 search space、資料版本、objective 或其他會改變 trial 意義的設定時，會自動建立新的 search；只改目標 trial 數則沿用既有 search。
+`search_id` 使用與 model version 相同的 model-defining 輸入，但排除 trial 不會讀的鍵（`n_trials`，以及跳過 HPO 時才用的 `fixed_params`、`hpo_enabled`）。因此改變 search space、資料版本、objective 或其他會改變 trial 意義的設定時，會自動建立新的 search；只改目標 trial 數則沿用既有 search。
 
 詳細行為見 [`pipelines/training.md` §7.3](pipelines/training.md)。
 

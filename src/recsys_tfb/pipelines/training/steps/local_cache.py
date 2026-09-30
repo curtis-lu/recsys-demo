@@ -266,8 +266,8 @@ def populate_cache_from_hive(
     every cache node clears and rebuilds it on the next run.
 
     Source-table resolution:
-      1. parameters['_cache_source_tables'][dataset_name] — auto-injected by
-         __main__.py:_execute_pipeline from catalog_config (HiveTableDataset.table).
+      1. parameters['_cache_source_tables'][dataset_name] — injected by the
+         training command from catalog_config (HiveTableDataset.table).
          This is the production path and works across envs that prefix table
          names (e.g. 'recsys_prod_train_model_input').
       2. CACHE_SOURCE_TABLES[dataset_name] — fallback used by unit tests that

@@ -842,6 +842,25 @@ class TestComputeSearchId:
         with pytest.raises(TypeError):
             compute_search_id(_tp(), "b", "t", "cal1")
 
+    def test_fixed_params_does_not_affect(self):
+        """ADR-0030 decision 11: a search never reads ``fixed_params``, so
+        editing it mid-search must leave the study resumable — and the model
+        it defines in the other mode still gets a new model_version."""
+        p1 = _tp(); p1["training"]["fixed_params"] = {}
+        p2 = _tp(); p2["training"]["fixed_params"] = {"learning_rate": 0.05}
+        assert compute_search_id(p1, "b", "t") == compute_search_id(p2, "b", "t")
+        assert compute_search_id(_tp(), "b", "t") == compute_search_id(p2, "b", "t")
+        assert compute_model_version(p1, "b", "t") != compute_model_version(p2, "b", "t")
+
+    def test_hpo_enabled_does_not_affect(self):
+        """Inside a search the switch can only read true, written or not, so
+        hashing it would only orphan the searches that finished before the
+        key existed — while still moving model_version (ADR-0030 decision 11)."""
+        p1 = _tp()
+        p2 = _tp(); p2["training"]["hpo_enabled"] = True
+        assert compute_search_id(p1, "b", "t") == compute_search_id(p2, "b", "t")
+        assert compute_model_version(p1, "b", "t") != compute_model_version(p2, "b", "t")
+
 
 class TestFindLatestCompletedModelVersion:
     def _write(self, d, manifest):
