@@ -11,7 +11,7 @@ import shap as _shap_mod  # noqa: F401  (ensure dependency present)
 
 from recsys_tfb.io.handles import ParquetHandle
 from tests.adapter_fits import fit_lightgbm
-from recsys_tfb.diagnosis import model as diag
+from recsys_tfb.pipelines.training import nodes as diag
 
 
 def _adapter_declaring(X, y, feature_name, **params):
@@ -323,38 +323,38 @@ def test_per_item_profile_positive_and_coverage(shap_setup):
 
 
 def test_divergence_identical_is_zero():
-    from recsys_tfb.diagnosis.model.shap_per_item import _divergence
+    from recsys_tfb.pipelines.training.steps.attribution_profiles import divergence
     import numpy as np
     v = np.array([3.0, 1.0, 2.0, 0.5])
-    div, idio = _divergence(v, v, "jaccard_topk", 2, ["a", "b", "c", "d"])
+    div, idio = divergence(v, v, "jaccard_topk", 2, ["a", "b", "c", "d"])
     assert div == 0.0
     assert idio == []
 
 
 def test_divergence_disjoint_top_is_one():
-    from recsys_tfb.diagnosis.model.shap_per_item import _divergence
+    from recsys_tfb.pipelines.training.steps.attribution_profiles import divergence
     import numpy as np
     item = np.array([0.0, 0.0, 5.0, 4.0])   # top2 = idx {2,3}
     glob = np.array([5.0, 4.0, 0.0, 0.0])   # top2 = idx {0,1}
-    div, idio = _divergence(item, glob, "jaccard_topk", 2, ["a", "b", "c", "d"])
+    div, idio = divergence(item, glob, "jaccard_topk", 2, ["a", "b", "c", "d"])
     assert div == 1.0
     assert set(idio) == {"c", "d"}
 
 
 def test_divergence_identical_spearman_is_zero():
-    from recsys_tfb.diagnosis.model.shap_per_item import _divergence
+    from recsys_tfb.pipelines.training.steps.attribution_profiles import divergence
     import numpy as np
     v = np.array([3.0, 1.0, 2.0, 0.5])
-    div, _ = _divergence(v, v, "spearman", 2, ["a", "b", "c", "d"])
+    div, _ = divergence(v, v, "spearman", 2, ["a", "b", "c", "d"])
     assert div == pytest.approx(0.0)
 
 
 def test_divergence_reversed_spearman_is_one():
-    from recsys_tfb.diagnosis.model.shap_per_item import _divergence
+    from recsys_tfb.pipelines.training.steps.attribution_profiles import divergence
     import numpy as np
     va = np.array([1.0, 2.0, 3.0, 4.0])
     vb = np.array([4.0, 3.0, 2.0, 1.0])
-    div, _ = _divergence(va, vb, "spearman", 2, ["a", "b", "c", "d"])
+    div, _ = divergence(va, vb, "spearman", 2, ["a", "b", "c", "d"])
     assert div == pytest.approx(1.0)
 
 
@@ -385,7 +385,7 @@ def test_summary_figures_global_and_per_item(shap_setup):
     """One figure per item plus the global one, under the names and
     sub-paths the PNGs have always had (ADR-0030 decision 7: same files, same
     place — the catalog entry roots them at diagnostics/summary/)."""
-    from recsys_tfb.diagnosis.model.paths import safe_name
+    from recsys_tfb.pipelines.training.steps.figures import safe_name
     adapter, handle, preprocessor, parameters = shap_setup
     out, figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     assert set(figures) == {"shap_summary_global.png"} | {
@@ -463,30 +463,30 @@ def test_shap_per_item_profile_positive_disabled(shap_setup):
 
 
 def test_per_item_background_cap():
-    from recsys_tfb.diagnosis.model.shap_per_item import _BACKGROUND_CAP, _per_item_background
+    from recsys_tfb.pipelines.training.steps.item_sampling import BACKGROUND_CAP as _BACKGROUND_CAP, per_item_background
     X = np.arange(300).reshape(150, 2).astype(float)
-    bg = _per_item_background(X, seed=42)
+    bg = per_item_background(X, seed=42)
     assert bg.shape[0] == min(150, _BACKGROUND_CAP)
     X_small = X[:50]
-    bg_small = _per_item_background(X_small, seed=42)
+    bg_small = per_item_background(X_small, seed=42)
     assert np.array_equal(bg_small, X_small)  # 未超過上限 → 原樣回傳
 
 
 def test_per_item_background_uses_item_subset_not_full_sample(shap_setup, monkeypatch):
     # 弄壞偵測：若 per-item 迴圈誤把整份抽樣 X 當背景（而非該 item 子母體），
-    # 這裡會抓到——_per_item_background 收到的列數應等於該 item 的 n_sampled,
+    # 這裡會抓到——per_item_background 收到的列數應等於該 item 的 n_sampled,
     # 不是整體抽樣列數。
     adapter, handle, preprocessor, parameters = shap_setup
     parameters["diagnostics"]["shap"]["background"] = "per_item"
-    import recsys_tfb.diagnosis.model.shap_per_item as spi
+    import recsys_tfb.pipelines.training.nodes as spi
     seen_shapes = []
-    real_bg = spi._per_item_background
+    real_bg = spi.per_item_background
 
     def spy_bg(X_item, seed):
         seen_shapes.append(len(X_item))
         return real_bg(X_item, seed)
 
-    monkeypatch.setattr(spi, "_per_item_background", spy_bg)
+    monkeypatch.setattr(spi, "per_item_background", spy_bg)
     out, _figures = diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
     n_sampled = sorted(blk["n_sampled"] for blk in out["per_item"].values())
     assert sorted(seen_shapes) == n_sampled
@@ -553,7 +553,7 @@ def test_divergence_integration_multifeature(tmp_path, monkeypatch):
 def test_feature_statistics_bounded_take(tmp_path, monkeypatch):
     import numpy as np
     import pandas as pd
-    from recsys_tfb.diagnosis.model import data_access
+    from recsys_tfb.pipelines.training.steps import bounded_reads
 
     n = 400
     rng = np.random.RandomState(0)
@@ -565,13 +565,13 @@ def test_feature_statistics_bounded_take(tmp_path, monkeypatch):
     parameters = {"diagnostics": {"feature_stats": {"enabled": True, "sample_rows": 100}}}
 
     seen = {}
-    real_take = data_access.take_rows
+    real_take = bounded_reads.take_rows
 
     def spy_take(p, indices, columns):
         seen["n_indices"] = len(indices)
         return real_take(p, indices, columns)
 
-    monkeypatch.setattr(data_access, "take_rows", spy_take)
+    monkeypatch.setattr(bounded_reads, "take_rows", spy_take)
     stats = diag.compute_feature_statistics(
         handle, DeclaredFeatures(["f0", "f1"]), preprocessor, parameters)
 
@@ -705,7 +705,7 @@ def test_positive_profile_extra_pass_and_bounded(tmp_path, monkeypatch):
     # 且 sample B 的 take_rows 只取 <= positive_sample_per_item * n_items 列(記憶體 bound,spec §6#5)。
     import numpy as np
     import pandas as pd
-    from recsys_tfb.diagnosis.model import data_access
+    from recsys_tfb.pipelines.training.steps import bounded_reads
 
     rng = np.random.RandomState(0)
     n = 2000
@@ -741,14 +741,14 @@ def test_positive_profile_extra_pass_and_bounded(tmp_path, monkeypatch):
         return real_attr(self, *a, **k)
 
     take_lens = []
-    real_take = data_access.take_rows
+    real_take = bounded_reads.take_rows
 
     def spy_take(p, indices, columns):
         take_lens.append(len(indices))
         return real_take(p, indices, columns)
 
     monkeypatch.setattr(type(adapter), "feature_attributions", counting_attr)
-    monkeypatch.setattr(data_access, "take_rows", spy_take)
+    monkeypatch.setattr(bounded_reads, "take_rows", spy_take)
 
     diag.compute_shap_diagnostics(adapter, handle, preprocessor, parameters)
 

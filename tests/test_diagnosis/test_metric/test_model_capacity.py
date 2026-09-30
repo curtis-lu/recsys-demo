@@ -1,7 +1,7 @@
 """model_capacity 計算層測試。
 
-``LEDGER`` 是 ``gain_ledger.py:217-232``（``compute_gain_ledger`` /
-``_ledger_from_trees`` 的正式輸出）**實際產出的巢狀 schema**——不是規格草稿
+``LEDGER`` 是 ``pipelines/training/steps/gain_ledger.py``（``compute_gain_ledger`` /
+``ledger_from_trees`` 的正式輸出）**實際產出的巢狀 schema**——不是規格草稿
 早先憑空捏造的扁平鍵。那份扁平 fixture（``item_id_gain``／
 ``post_item_context_gain`` 直接當頂層鍵）曾經讓 ``_compute.py`` 長出一段
 「相容讀取」備援，而備援把「schema 真的不符」偽裝成「正常的降級路徑」：
@@ -372,7 +372,7 @@ def test_schema_mismatch_reports_in_notes_without_raising():
 
 
 def test_fallback_ledger_leaves_context_share_none_not_zero():
-    """粗帳本降級（``gain_ledger.py:_coarse_ledger``，``:235-256``）：
+    """粗帳本降級（``pipelines/training/steps/gain_ledger.py`` 的 ``coarse_ledger``）：
     ``context``／``per_item`` 都是 ``None``、``fallback: True``。這是已知
     合法的退化形狀，不是 schema 不符——不該觸發 schema note，但
     context_gain／unaccounted_gain 的 share 必須留 ``None``，不能算成

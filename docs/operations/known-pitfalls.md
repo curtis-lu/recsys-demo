@@ -291,7 +291,7 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 - **規則**：改動任何 node 的 `inputs` 或其函式簽章之後，跑下面的並排比對。**新增診斷時尤其必跑**（Plan 2-5 每加一項診斷，`generate_report` 的簽章與 `inputs` 都不會變，因為診斷產物已經改走 `render_diagnosis_pages` 而非直接進 `generate_report`——但其他仍是「具名參數＋位置傳參」形狀的 node 一樣要跑這個檢查）。
 - **已知未修的同形狀 node（2026-07-20 盤點，範圍外，不在本次修復範圍）**：
   - ~~`log_experiment`（training）~~：**已修（2026-09-30，#486）**——`inputs` 改成 dict 照名字傳，參數全部必填、沒有預設值。
-  - `select_shap_population`（training，`diagnosis/model/population_spark.py`）：`inputs` 4 個元素、函式 4 個參數（3 個必填 ＋ `predict_manifest=None`）。同上，形狀小但機制相同。
+  - `select_shap_population`（training，`pipelines/training/nodes.py`；#489 之前在 `diagnosis/model/population_spark.py`）：`inputs` 4 個元素、函式 4 個參數（3 個必填 ＋ `predict_manifest=None`）。同上，形狀小但機制相同。
 - **驗證方式**：
   ```bash
   python -c "

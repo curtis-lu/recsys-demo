@@ -231,6 +231,24 @@ catalog 條目宣告的欄名由部署跟著 `schema` 寫。本份不加「catal
 
 **為什麼決策上浮，不照搬**：照搬會生出 7 個轉手殼，node 規則 3 的違例只是從「位置」換成「形狀」。使用者要能加新診斷，兩階段建模也要診斷分辨組合模型，這一塊之後會一直長，現在做對比較划算。
 
+> **實作註記（2026-09-30，#489）**：
+> - 7 個 `def` 在 `pipelines/training/nodes.py` 末段〈Diagnosis nodes〉，`pipeline.py` 的 21 個函式全部從 `nodes` 取。`diagnosis/model/` 整個刪掉，`diagnostics_dir` 搬到 `io/models_root.py`（見〈審查後〉(b)）。
+> - 機制進 `pipelines/training/steps/` 的八個模組，一模組一個 concern：`bounded_reads`（← `data_access`：parquet 的有界讀取）、`item_sampling`（← `sampling` 的兩個抽樣，加上 `shap_per_item` 的 `per_item_background` 與 `_BACKGROUND_CAP`）、`attribution_profiles`（← `shap_per_item` 的 `signed_profile`、`divergence`）、`gain_ledger`（← 帳本核心 `ledger_from_trees`、`coarse_ledger` 與它們的私有小函式）、`quadrant_population`（← `select_shap_population` body 裡的 Spark 機制：`label_quadrants`、`sample_each_cell`、`extremes_of_each_cell`，與 `QUADRANTS`）、`quadrant_cases`（← `shap_cases` 的 `_case_entry`、`_case_title`、`_CASES_SUBDIR`，加上 `case_chart`、`row_identity`）、`figures`（← `figures`，加上 `paths` 的 `safe_name`）、`diagnosis_artifacts`（← `_util` 的 `to_native`、`unsupported_artifact`）。`nodes.py` 呼叫得到的都去掉底線（node 規則 12），只在模組內用的照舊帶底線。
+> - 決策上浮，每個 node body 至少兩段 `# Decision —`。新上浮的：`compute_shap_diagnostics` 的預算閘、依 item 分層抽樣、`per_item` 背景與降級、正例抽樣、每個 item 的 profile 取自哪份歸因、`low_coverage`、beeswarm 畫哪份歸因、`notes` 什麼時候出現；`select_shap_population` 的象限定義、每格抽樣、每格極值；`compute_quadrant_profiles` 與 `compute_quadrant_cases` 怎麼處理空格與單列格、案例標籤為什麼是 identity；`compute_gain_ledger` 的粗帳本降級；`compute_feature_statistics` 讀哪些列、統計量的定義；`compute_feature_importance` 的排序與 dead 的定義。原本的 `_positive_profiles` 裝了三個決策（跑不跑、抽哪些列、少於幾列算低覆蓋），拆開寫進 node，機制只剩 `positive_item_sample`；`_model_cannot_attribute` 兩處都內聯。`compute_quadrant_cases` 的兩個巢狀函式（`_gkey`、`_case`）換成 `steps/quadrant_cases` 的具名步驟（node 規則 9）。
+> - 月份篩選照決定 12 的實作註記：`select_shap_population` 改呼叫 `steps/scored_months.py` 的 `restrict_to_scored_months`，函式庫裡那一份刪掉。改之前逐行比過兩者相同：當文字比（`cast("string")`），一個月用 `=`、多個月用 `isin`；`as_date_list` 正規化、空清單停下、零列對到停下三件留在 node，沒動。變異驗證：拿掉預測表或 `test_model_input` 任一邊的篩選，`tests/test_pipelines/test_training/test_quadrant_population.py` 的 `test_stray_month_rows_are_never_read` 都轉紅。
+> - `data/models` 收成一處（決定 16）：新模組 `io/models_root.py` 的 `MODELS_ROOT`，同一個模組的 `diagnostics_dir` 與 `steps/hpo_resume.py` 的 `hpo_study_dir` 都從它推。放 `io/` 的理由：`diagnostics_dir` 在函式庫，不得 import pipeline（S3、S8）；`io/disk_matrix.py` 的 `SCRATCH_ROOT` 是同一種「相對於執行目錄的落地根」。catalog 裡的 `data/models/${model_version}` 各條目仍然各寫各的，兩者一致沒有檢查（`MODELS_ROOT` 的 docstring 寫明 catalog 改了這裡要跟著改）。`__main__.py` 裡五處 `data_dir / "models"` 不在本票範圍，沒有動。
+> - 架構稽核：7 個 node 進了 A1 的掃描範圍，`tests/test_core/test_architecture_constraints.py` 全綠，數量釘子都沒變（`Node(...)` 呼叫數不變）。變異驗證它真的看得到：在 `compute_quadrant_cases` 插一個 `open(...)`，(d) 轉紅；在 `compute_feature_importance` 插 `catalog.load(...)`，(c) 轉紅。
+> - 行為不變的證據：純搬的機制函式 AST 逐函式比對 34 項相同（含 3 個常數），5 項不同、2 項拆掉，差異都是上面的上浮或 `MODELS_ROOT`；測試搬到 `tests/test_pipelines/test_training/`，只改 import、patch 目標與符號改名，三處 patch 逐一確認攔的是 node 執行時查的那個名字，兩處拿錯的模組試過會紅。產物比對（`run_e2e.sh --compare` 與 noise floor）不在實作者這一步，另外跑。
+> - **跟上文字面不同的地方**：
+>   - 上文第三點寫 `diagnostics_dir` 留在 `diagnosis/model/paths.py`。它留在函式庫，但搬到了 `io/models_root.py`，`diagnosis/model/` 整個消失（〈審查後〉(b)）。
+>   - log 的 logger 欄位變了（flow 規則 10 的第 5 種）：7 個 node 的 log 記在 `recsys_tfb.pipelines.training.nodes`，帳本那一行記在 `recsys_tfb.pipelines.training.steps.gain_ledger`，以前是 `recsys_tfb.diagnosis.model.*`。訊息文字一字未改（中文那兩行也是），以 logger 名過濾的監控要跟著改。
+>   - 中文沒有全部改成英文：`gain_ledger.json` 的 notes、`shap_diagnostics.json` 在 `per_item` 背景下的 notes 是產物內容，兩行 log 訊息是 log 介面，改了就不是行為不變，都照原文留著。`per_item` 那則 note 裡的「上限 128 列」審查後改由 `steps/item_sampling.py` 的 `BACKGROUND_CAP` 組字串，組出來逐字相同。
+> - **審查後**（三路審查：Standards、Spec、假設 ADR 寫錯）：
+>   - (a) `ledger_from_trees` 留在 `steps/gain_ledger.py`，不拆進 node。它是 gain 帳本這個指標的定義：一次走完每棵樹，同時算出隔離每個 item 花的 gain、隔離之後花在 context 的 gain、條件化之前的 unallocated，跟 evaluation 把 `compute_ap`／`compute_macro_per_item_map` 放在 node 外面是同一個道理；它的輸出形狀又是 evaluation `model_capacity` 讀的約定，所以只寫一份。`compute_gain_ledger` 呼叫它的地方加了一段 `# Decision —`，用 ML 故事的層級說帳本回答什麼。
+>   - (b) `diagnostics_dir` 搬到 `io/models_root.py`，放在它所依據的 `MODELS_ROOT` 旁邊，`diagnosis/model/` 整個刪掉。第一版照上文第三點留在 `diagnosis/model/paths.py`，結果是一個名叫「模型診斷」、裡面一個診斷都沒有的套件（node 規則 6 的反面：名字指向不存在的東西）。審查提過、第一版沒做；PR 開出後使用者 2026-09-30 問「留一個 `paths.py` 很奇怪」，改做。**更正上文第三點的理由**：「HPO 的搜尋診斷也用它」只說明它得留在函式庫（`diagnosis/hpo` 是函式庫，不得 import pipeline 或它的 `steps/`），說明不了它得留在 `diagnosis/model/`；而 `diagnosis/hpo` 自己在 `src/` 裡也只有 training 在用，同一個「只有一個消費者」的論證對它一樣成立。把 `diagnosis/hpo` 也搬進 `pipelines/training/steps/`、`diagnostics_dir` 跟著走，目錄會最乾淨，但那是本決定沒有涵蓋的另一次搬家，沒有做。
+>   - (c) `data/models` 根在程式裡仍有兩種拼法：`io/models_root.py` 的 `MODELS_ROOT`，與 `__main__.py` 的 `data_dir / "models"`（`training` 三處、`inference` 與 `evaluation` 各一處），加上 catalog 共三份，一致與否都沒有檢查。本票只收了決定 16 點名的兩處（`hpo_study_dir`、`diagnostics_dir`）；`MODELS_ROOT` 的 docstring 列出三份，catalog 的根改了要改的是三處。
+>   - `diagnosis/metric/model_capacity/_compute.py` 兩則 notes 原本指向已刪除的 `diagnosis/model/gain_ledger.py`，改指 `pipelines/training/steps/gain_ledger.py` 的 `ledger_from_trees`／`coarse_ledger`。這兩則只在 evaluation 讀到的帳本形狀不對時出現，正常路徑的產物不變。
+
 ## 決定 7　診斷的圖交給 catalog 存
 
 **規則**：`compute_shap_diagnostics` 與 `compute_quadrant_cases` 不自己 `savefig`。新增一種 catalog dataset 型別，負責把「一疊圖」存成 PNG（Kedro 的 matplotlib dataset 是同一個概念）。
@@ -484,6 +502,12 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 > - `persist_sample_weight_report` → `compute_sample_weight_report`；`persist_group_filter_report` 檢查過，同樣只回傳報告、存檔由 catalog 負責，一併改成 `compute_group_filter_report`。
 > - `conf/` 有兩行註解跟著改，使用者同意：`catalog.yaml` 寫著舊 node 名的那一行、`parameters_training.yaml` 的「5 個 cache node」。所以本票 `conf/` 的 diff 只有這兩行註解；改動前後 `yaml.safe_load` 的結果相同。
 
+> **實作註記（2026-09-30，#489）**：本票收掉決定 16 裡跟決定 6 同一段程式的幾項：
+> - `data/models/...` 寫死兩處：收成 `io/models_root.py` 的 `MODELS_ROOT`，見決定 6 的實作註記。「跟 catalog 各一份」那一半沒有收：catalog 仍然自己寫 `data/models/${model_version}`，一致與否沒有檢查。
+> - `nodes.py` 開頭的 node 數與導航段落改寫（21 個函式全在這個檔，分四段）。票面說的「Helpers 區段標題下其實是 node 的兩個函式」，#483 已經把它們移到〈Report nodes〉，本票沒有再動；`diagnosis/__init__.py` 對 `diagnosis.model` 的說明改寫，並跟 `diagnosis/model/__init__.py` 一起改成英文。
+> - `pipeline-node-design.md`〈已登記的例外〉第一筆刪除，標題改成 2 筆，並留一段說明那一筆為什麼不在了。
+> - `architecture-constraints.md` A1〈這個檢查看不到〉的「training 的 7 個診斷 node」改寫成盲區已不存在，附 2026-09-30 重盤結果：同一段的 evaluation `load_compare_predictions` 那一筆原文寫 `def` 在 `steps/`，重盤時 `pipeline.py` 接的是 `nodes.py` 的同名轉手函式，一併改成事實；另記一種重盤沒有追到底的形狀（evaluation 有 5 處 `Node(...)` 的第一參數是 factory 呼叫）。「不放寬 glob」那段只改寫事實（重開條件已成立），放不放寬仍由使用者決定。
+
 ---
 
 ## 版本與順序的約束
@@ -512,6 +536,9 @@ HPO 的搜尋診斷不在此列：它由 `tune_hyperparameters` 自己寫，而 
 
 **行為不變的證據**（flow 規則 8、9）：
 - 決定 6 **拿不到**「`pipeline.py` diff 為空」「AST 逐函式比對」這兩種便宜的證據：`pipeline.py` 的 import 一定要改，決策上浮也會改 node body。flow 規則 4 說過，搬移與決策上浮合在一起就只剩產物比對。所以它的證據是：`conf/` diff 為空（決定 7 已先落地）、產物跟 main 比對（扣掉 noise floor）；純搬過去、內容沒改的機制函式，另外用 AST 比對。
+
+  > **實作註記（2026-09-30，#489）**：決定 6 的 `conf/` diff 不是空的，差一行註解：`conf/base/catalog.yaml` 裡指向 `_CASES_SUBDIR` 的那一行改指新位置（`pipelines/training/steps/quadrant_cases.py`），使用者同意；改動前後 `yaml.safe_load` 的結果相同。AST 比對與測試搬移的結果見決定 6 的實作註記。
+
 - noise floor：第一個宣稱行為不變的 PR 之前，先讓 main 自己跑兩次，記下「本來就會不同」的檔案（SHAP 圖、時間戳記之類）。`examples/ad` 的 e2e digest（`run_e2e.sh --compare`）兩次跑的預測是一樣的，是最便宜的產物比對，先跑它。
 - 決定 14 跟第一個新增跨目錄 import 的 PR 一起進（flow 規則 6）。
 

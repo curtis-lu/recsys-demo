@@ -1,15 +1,18 @@
-"""Fourteen of the training pipeline's node functions; the other seven below.
+"""The training pipeline's node functions, all twenty-one of them.
 
 This module is the home of the pipeline's ML story: a reader who opens it sees
 each decision this pipeline makes about the data, without jumping files. The
 mechanisms those decisions are expressed in live in ``steps/``, one module per
 concern (``local_cache``, ``train_data_cache``, ``predict_months``,
-``scored_months``, ``search_space``, ``hpo_resume``, ``hpo_scoring``,
-``fit_params``, ``refit``, ``sample_weights``, ``experiment_log``).
-``cache_sources`` and ``run_contract`` sit beside this file instead, because
-``__main__.py`` asks them before the pipeline starts. ADR-0014 draws both
-lines and ``docs/agents/pipeline-node-design.md`` is where the placement
-criterion and the node-body shape are written down.
+``predict_partitions``, ``scored_months``, ``search_space``, ``hpo_resume``,
+``hpo_scoring``, ``fit_params``, ``refit``, ``sample_weights``,
+``experiment_log``, and for the diagnoses ``bounded_reads``,
+``item_sampling``, ``attribution_profiles``, ``gain_ledger``,
+``quadrant_population``, ``quadrant_cases``, ``figures``,
+``diagnosis_artifacts``). ``cache_sources`` and ``run_contract`` sit beside
+this file instead, because ``__main__.py`` asks them before the pipeline
+starts. ADR-0014 draws both lines and ``docs/agents/pipeline-node-design.md``
+is where the placement criterion and the node-body shape are written down.
 
 **Nothing in here is a pure function**, and the import list is the tell: these
 nodes delete cache directories (``shutil.rmtree``), copy Hive partitions onto
@@ -19,32 +22,22 @@ own call site. What the module promises is not purity but legibility: the
 *decision* behind every side effect is readable here rather than buried in a
 helper.
 
-Where the other seven nodes are
--------------------------------
+How the nodes are laid out
+--------------------------
 ``pipeline.py`` wires 20 nodes, or 19 when ``training.hpo_enabled`` is false:
 that mode drops the val copy and puts ``train_with_fixed_params`` where
-``tune_hyperparameters`` was (ADR-0030 decision 11). Fourteen functions are
-``def``-ed in this file, the two that choose the hyperparameters among them.
-The seven diagnosis nodes are ``def``-ed under ``recsys_tfb.diagnosis.model``:
+``tune_hyperparameters`` was (ADR-0030 decision 11). Every one of the 21
+functions is ``def``-ed here, in four sections: the two report nodes; the
+cache nodes, with ``select_features`` and ``prepare_train_inputs``; the
+pipeline nodes, from choosing the hyperparameters to MLflow and the test
+metrics; and the seven diagnosis nodes last.
 
-- ``compute_feature_statistics``  -> ``diagnosis/model/feature_stats.py``
-- ``compute_feature_importance``  -> ``diagnosis/model/importance.py``
-- ``compute_gain_ledger``         -> ``diagnosis/model/gain_ledger.py``
-- ``compute_shap_diagnostics``    -> ``diagnosis/model/shap_per_item.py``
-- ``select_shap_population``      -> ``diagnosis/model/population_spark.py``
-- ``compute_quadrant_profiles``   -> ``diagnosis/model/shap_cases.py``
-- ``compute_quadrant_cases``      -> ``diagnosis/model/shap_cases.py``
-
-They stay there deliberately, and this list is the price of that: the usual
-rule -- one pipeline, one ``nodes.py`` -- does not hold here, so the way back
-has to be written down. Three reasons they are not moved (ADR-0014 decision
-6). Their home is undecided: splitting diagnosis into a pipeline of its own
-is an open question, and a move now would be undone by it. Moving them means
-seven pass-through shells over ~1400 lines of helper, which is precisely the
-shape rule 3 exists to forbid; making them real nodes instead would mean
-floating that module's decisions up first, a separate piece of work. And a
-shell is one more file to open when chasing a bug — the cost this list is
-meant to pay off, not to add to.
+The diagnosis nodes were ``def``-ed under ``recsys_tfb.diagnosis.model``
+until ADR-0030 decision 6 brought them here, their decisions floated up into
+their bodies and their mechanisms moved into ``steps/``. ``diagnostics_dir``
+is in ``io/models_root.py``, beside the root it is built from: HPO's search
+diagnostics (``diagnosis/hpo``) write under the same directory, and a library
+may not import a pipeline.
 """
 
 import logging
@@ -55,7 +48,9 @@ from pathlib import Path
 import mlflow
 import numpy as np
 import optuna
+import pandas as pd
 import pyarrow.dataset as pads
+from pyspark.storagelevel import StorageLevel
 
 from recsys_tfb.core.consistency import (
     DATASET_TEST_RATIO_KEY,
@@ -77,6 +72,7 @@ from recsys_tfb.core.consistency import (
     test_carries_zero_positive_group_weight,
     weight_unknown_item_errors,
 )
+from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.preprocessing import preprocessor_item_values
 from recsys_tfb.core.versioning import (
@@ -84,7 +80,7 @@ from recsys_tfb.core.versioning import (
     compute_search_id,
 )
 from recsys_tfb.diagnosis.hpo import write_hpo_diagnostics
-from recsys_tfb.diagnosis.model import diagnostics_dir
+from recsys_tfb.io.models_root import diagnostics_dir
 from recsys_tfb.evaluation.metric_registry import (
     BINARY_PREDICTION_METRICS,
     METRIC_NAMES,
@@ -103,6 +99,7 @@ from recsys_tfb.io.extract import (
     extract_Xy_with_groups,
     extract_y,
     extract_y_with_groups,
+    pdf_to_X,
     weight_key_columns,
     weight_key_decode_map_from_config,
 )
@@ -110,12 +107,20 @@ from recsys_tfb.io.handles import (
     ParquetHandle,
     handle_paths,
     open_parquet_dataset,
+    require_complete_cache,
     write_group_filter_counts,
     write_weight_keys_sidecar,
 )
-from recsys_tfb.models.base import ModelAdapter, configured_algorithm, get_adapter
+from recsys_tfb.models.base import (
+    ModelAdapter,
+    UnsupportedCapability,
+    configured_algorithm,
+    get_adapter,
+)
 from recsys_tfb.models.feature_selection import apply_feature_selection
+from recsys_tfb.models.feature_view import model_feature_columns, model_feature_view
 from recsys_tfb.pipelines.training.steps import (
+    bounded_reads,
     experiment_log,
     hpo_resume,
     refit,
@@ -123,12 +128,31 @@ from recsys_tfb.pipelines.training.steps import (
     scored_months,
     train_data_cache,
 )
+from recsys_tfb.pipelines.training.steps.attribution_profiles import (
+    divergence,
+    signed_profile,
+)
+from recsys_tfb.pipelines.training.steps.diagnosis_artifacts import (
+    to_native,
+    unsupported_artifact,
+)
+from recsys_tfb.pipelines.training.steps.figures import beeswarm, safe_name
 from recsys_tfb.pipelines.training.steps.fit_params import fit_params
+from recsys_tfb.pipelines.training.steps.gain_ledger import (
+    coarse_ledger,
+    ledger_from_trees,
+)
 from recsys_tfb.pipelines.training.steps.hpo_scoring import (
     TrialScorer,
     fit_stopping_on_train_dev,
     item_support,
     val_composition,
+)
+from recsys_tfb.pipelines.training.steps.item_sampling import (
+    BACKGROUND_CAP,
+    per_item_background,
+    positive_item_sample,
+    stratified_item_sample,
 )
 from recsys_tfb.pipelines.training.steps.local_cache import (
     cache_exists,
@@ -160,12 +184,19 @@ from recsys_tfb.pipelines.training.steps.predict_months import (
 from recsys_tfb.pipelines.training.steps.predict_partitions import (
     partitions_from_directory_names,
 )
+from recsys_tfb.pipelines.training.steps.quadrant_cases import case_chart, row_identity
+from recsys_tfb.pipelines.training.steps.quadrant_population import (
+    QUADRANTS,
+    extremes_of_each_cell,
+    label_quadrants,
+    sample_each_cell,
+)
 from recsys_tfb.score_output import (
     ScoredFrameLayout,
     require_scored_chunk,
     require_single_partition,
 )
-from recsys_tfb.utils.ranking import item_sort_codes
+from recsys_tfb.utils.ranking import item_sort_codes, rank_by_score_then_item
 from recsys_tfb.utils.spark import release_spark_session
 
 logger = logging.getLogger(__name__)
@@ -1972,3 +2003,838 @@ def compute_test_metrics(
     )
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Diagnosis nodes
+# ---------------------------------------------------------------------------
+#
+# Seven nodes that describe the finished model; nothing downstream in this
+# pipeline reads them except log_experiment. Each returns its result and
+# writes nothing: the JSON and the figures are landed by their catalog entries
+# (ADR-0030 decision 7). The model is reached only through the adapter. A
+# model that cannot answer a diagnosis — UnsupportedCapability — skips it with
+# a warning and lands the "model cannot" shape; any other exception stops the
+# run (ADR-0030 decision 4). The mechanisms are in steps/ (bounded_reads,
+# item_sampling, attribution_profiles, gain_ledger, quadrant_population,
+# quadrant_cases, figures, diagnosis_artifacts).
+
+
+def compute_feature_statistics(
+    train_parquet_handle, model, preprocessor: dict, parameters: dict,
+) -> dict:
+    """Per-feature null_rate / mean,std,min,max (numeric) / n_distinct, plus the
+    ``single_value`` and ``high_null`` flags.
+
+    Memory: the row count comes from parquet metadata, then only the sampled
+    ``sample_rows`` rows are read (bounded take) instead of loading the whole
+    train split and down-sampling afterwards. The sampled indices are unchanged
+    (``RandomState(42).choice``), so the output stays bit-for-bit identical.
+
+    Takes ``model`` although this is a *data*-layer diagnosis — the null rate and
+    mean of a training feature owe nothing to a booster. The model is here purely
+    as the authority on *which* columns to summarize (ADR-0014 decision 7).
+
+    Not because the alternative is unsafe. Re-deriving the column set from
+    ``training.feature_selection`` cannot silently drift: that key lives in the
+    ``training:`` block, so editing it bumps ``model_version``, the model's
+    catalog path moves, and the whole training chain is pulled back. ADR-0014 is
+    explicit that this is interface work, not a bug fix. The reason is that
+    ``preprocessor_view`` is memory-only, so reading it forces ``select_features``
+    into any slice that wants this node — while ``model`` and ``preprocessor``
+    both have catalog entries.
+
+    The coupling is accepted because ``feature_statistics`` already lands under
+    ``data/models/${model_version}/``: computing it for a model that does not
+    exist was never meaningful.
+
+    The edge is not only a cost. It also orders this node after the one that
+    produces the model, where it always belonged: without it the topological sort
+    put a diagnosis of ``data/models/${model_version}/`` *ahead* of HPO, so
+    ``--from-node compute_feature_statistics`` re-ran HPO and the final fit to
+    regenerate this JSON (18 nodes, now 13). What it does cost is
+    ``--only-node compute_feature_statistics``, which now needs a
+    ``model_version``-scoped input rather than only ``base_dataset_version`` ones,
+    and ``--from-node finalize_model``, which picks up this node's train handle.
+    Both slices are pinned in ``tests/test_pipelines/test_resume_contracts.py``.
+    """
+    cfg = parameters.get("diagnostics", {}).get("feature_stats", {})
+    if not cfg.get("enabled", True):
+        return {}
+    sample_rows = int(cfg.get("sample_rows", 500000))
+    high_null_threshold = float(cfg.get("high_null_threshold", 0.5))
+    # Decision — which features get summarized: the model, not
+    # apply_feature_selection(preprocessor, parameters). Pick the config and the
+    # stats still come out, just over whatever column set the *current* config
+    # names; the docstring argues why that is a worse authority than the model
+    # even though the version mechanism keeps it from being an outright bug.
+    feature_cols = model_feature_columns(model, preprocessor)
+
+    # Pre-check (input) — an interrupted copy reads as a smaller split rather
+    # than as an error, so count_rows would return a number and every statistic
+    # below would describe an unknown fraction of train (ADR-0014 decision 7).
+    # The cache node's opposite behaviour on the same marker — clear and rebuild
+    # from Hive — is the right one there and is not touched.
+    require_complete_cache(train_parquet_handle)
+
+    # Decision — which rows: at most sample_rows of train, drawn uniformly
+    # without replacement under a fixed seed (RandomState(42)), and all of
+    # train when it is no bigger. Every number below describes that sample —
+    # n_distinct is capped by it — and the same seed on the same train gives
+    # the same numbers on every run.
+    path = train_parquet_handle.path
+    n = bounded_reads.count_rows(path)
+    if n > sample_rows:
+        idx = np.sort(np.random.RandomState(42).choice(n, size=sample_rows, replace=False))
+        logger.info("feature_statistics: bounded take %d of %d rows", sample_rows, n)
+    else:
+        idx = np.arange(n, dtype=np.int64)
+        logger.info("feature_statistics: reading all %d rows (<= sample_rows)", n)
+    pdf = bounded_reads.take_rows(path, idx, columns=feature_cols)
+    log_data_volume(logger, "feature_statistics.sample", pdf, deep=True)
+
+    # Decision — what summarizes a feature: its null rate and distinct count
+    # for every dtype, mean / std / min / max for numeric ones only.
+    # single_value flags at most one distinct non-null value; high_null a null
+    # rate at or above high_null_threshold. A NaN statistic lands as null.
+    stats: dict = {}
+    for col in feature_cols:
+        s = pdf[col]
+        null_rate = float(s.isna().mean())
+        n_distinct = int(s.nunique(dropna=True))
+        entry = {
+            "null_rate": null_rate,
+            "n_distinct": n_distinct,
+            "single_value": n_distinct <= 1,
+            "high_null": null_rate >= high_null_threshold,
+        }
+        if pd.api.types.is_numeric_dtype(s):
+            entry["mean"] = to_native(s.mean())
+            entry["std"] = to_native(s.std())
+            entry["min"] = to_native(s.min())
+            entry["max"] = to_native(s.max())
+        stats[col] = entry
+    logger.info("feature_statistics: %d features summarized", len(stats))
+    return stats
+
+
+def compute_feature_importance(model, parameters: dict) -> dict:
+    """Split + gain importance, ranked by gain, with the features no split uses.
+
+    A model that keeps no such counts (``UnsupportedCapability``) lands the
+    "model cannot" shape and the run goes on; anything else stops it
+    (ADR-0030 decision 4).
+    """
+    cfg = parameters.get("diagnostics", {}).get("feature_importance", {})
+    if not cfg.get("enabled", True):
+        return {}
+    # Decision — a model without split / gain bookkeeping skips this and says
+    # so, rather than stopping a run whose model is fine.
+    try:
+        split = model.feature_importance(kind="split")
+        gain = model.feature_importance(kind="gain")
+    except UnsupportedCapability as exc:
+        logger.warning("feature_importance: skipped, the model cannot provide it: %s", exc)
+        return unsupported_artifact(exc)
+    # Decision — ranked by gain: a split count says how often a feature is
+    # used, not how much it contributes. "Dead" is a split count of 0 — no
+    # split in any tree uses the feature — not a low gain, so it is a fact
+    # about the trees rather than a cut-off someone chose.
+    ranked = sorted(
+        ({"feature": f, "split": float(split[f]), "gain": float(gain[f])} for f in split),
+        key=lambda r: r["gain"],
+        reverse=True,
+    )
+    dead = sorted(f for f, v in split.items() if v == 0)
+    logger.info("feature_importance: %d features, %d dead", len(ranked), len(dead))
+    return {"ranked": ranked, "dead_features": dead}
+
+
+def compute_gain_ledger(model, preprocessor: dict, parameters: dict) -> dict:
+    """The model's split gain accounted per item: what isolating each item
+    costs and how much gain is spent on it afterwards. The accounting rules
+    are the ledger's definition as a metric, written once in
+    ``steps/gain_ledger.py`` (see the decision at the call below);
+    evaluation's ``model_capacity`` reads the result.
+
+    ``diagnostics.gain_ledger.enabled`` (default true) switched off returns
+    ``{"enabled": False}`` without touching the model.
+
+    A model with no tree structure (``UnsupportedCapability``) lands
+    ``{"enabled": True, "supported": False, "reason": ...}`` and the run goes
+    on. Any other exception is a bug and stops it (ADR-0030 decision 4).
+
+    ``preprocessor`` is the dataset-built artifact, not the training-stage view.
+    Unlike the other diagnosis nodes this one never slices X, so it needs only
+    the *encoding* half of the artifact: ``category_mappings`` is the code-to-item
+    lookup the tree table's integer category codes have to be read through, and
+    feature selection passes it through untouched either way (ADR-0014
+    decision 7).
+    """
+    cfg = (parameters.get("diagnostics", {}) or {}).get("gain_ledger", {}) or {}
+    if not cfg.get("enabled", True):
+        return {"enabled": False}
+
+    item_col = get_schema(parameters)["item"]
+    # Decision — a model without trees skips the ledger, warns and says so in
+    # the artifact; evaluation reads that as its own reason, not as "turned
+    # off" or "never ran".
+    try:
+        trees = model.tree_structure()
+    except UnsupportedCapability as exc:
+        logger.warning("gain_ledger: skipped, the model cannot provide it: %s", exc)
+        return unsupported_artifact(exc)
+    n_trees = int(trees["tree_index"].nunique())
+
+    # Decision — without the preprocessor's code-to-item mapping for the item
+    # column, land the coarse ledger (the item-id account alone, fallback:
+    # True, and a note saying why) rather than stop. The trees' category
+    # codes cannot be read as items, so the per-item and context accounts
+    # cannot be built, but the item-id account needs no codes; evaluation's
+    # model_capacity recognises the fallback and says so.
+    categories = (preprocessor or {}).get("category_mappings", {}).get(item_col)
+    if not categories:
+        logger.warning(
+            "gain_ledger: preprocessor 缺 category_mappings[%s]，降級為粗帳本", item_col
+        )
+        return coarse_ledger(trees, item_col, n_trees)
+
+    # Decision — what the ledger answers: of the gain the model's splits
+    # earn, how much went into isolating each item (the item-id splits), how
+    # much it spent on each item after isolating it (the context splits under
+    # an item split, per item), and how much it spent before conditioning on
+    # any item at all (the unallocated, pre-item splits, by feature). That is
+    # what tells "learned an interaction" from "memorised the item prior".
+    # The accounting rules — one walk down each tree carrying the items that
+    # can still reach a node — are the metric's definition, not a choice this
+    # node makes per run, so they are written once, in steps/gain_ledger.py,
+    # the way evaluation keeps compute_ap / compute_macro_per_item_map outside
+    # its nodes. Their output shape is also the contract evaluation's
+    # model_capacity reads; two copies of the rules could not disagree
+    # without that report silently changing meaning.
+    return ledger_from_trees(trees, item_col, list(categories))
+
+
+def compute_shap_diagnostics(
+    model, test_parquet_handle, preprocessor: dict, parameters: dict,
+) -> tuple[dict, dict]:
+    """SHAP over a sample of test: the global profile, a profile per item (a
+    population-representative sample), and how far each item's ranking of
+    the features is from the global one. One attribution pass over the sample
+    serves both the global and the per-item profiles; the positive profiles
+    take a second pass over a sample of their own.
+
+    Returns ``(shap_diagnostics, shap_summary_figures)``: the JSON result, and
+    ``{path under diagnostics/summary/: draw}`` for the beeswarm plots. Both
+    empty when disabled. A model that cannot attribute lands the "model
+    cannot" shape and no figures; every other exception stops the run
+    (ADR-0030 decision 4).
+
+    The model is reached only through the adapter (ADR-0030 decisions 1 and
+    4): ``attribution_cost`` for the budget guard, ``predict`` for each item's
+    score range, ``feature_attributions`` for the SHAP values. The ``notes``
+    written under ``background: per_item`` are part of the JSON and are kept
+    word for word.
+    """
+    cfg = parameters.get("diagnostics", {}).get("shap", {})
+    if not cfg.get("enabled", True):
+        return {}, {}
+
+    top_k = int(cfg.get("top_k", 30))
+    min_per_item = int(cfg.get("min_rows_per_item", 30))
+    sample_rows = int(cfg.get("sample_rows", 2000))
+    max_budget = int(cfg.get("max_budget", 4_000_000))
+    positive_min_rows = int(cfg.get("positive_min_rows", 20))
+    positive_sample_per_item = int(cfg.get("positive_sample_per_item", 30))
+    divergence_metric = str(cfg.get("divergence_metric", "jaccard_topk"))
+    # Usually smaller than top_k; it only sizes the top-k sets compared (the
+    # Jaccard metric's, and the idiosyncratic features).
+    divergence_top_k = int(cfg.get("divergence_top_k", 15))
+    profile_positive = bool(cfg.get("profile_positive", True))
+    background_mode = str(cfg.get("background", "global"))
+
+    schema = get_schema(parameters)
+    item_col, label_col = schema["item"], schema["label"]
+    # Decision — which features, and in what order: ask the model, not
+    # apply_feature_selection(preprocessor, parameters). This is not a drift fix:
+    # the exclude list lives in the `training:` block, so editing it bumps
+    # model_version, the model's catalog path moves with it, and the whole
+    # training chain is pulled back — ADR-0014 decision 7 is explicit that the
+    # version mechanism already blocks that, and that this is interface work, not
+    # a bug fix. What it buys is addressability: model and preprocessor both have
+    # catalog entries, while the config-derived view is memory-only and drags
+    # select_features into every diagnosis-only slice.
+    model_view = model_feature_view(model, preprocessor)
+    feature_cols = list(model_view["feature_columns"])
+
+    # Pre-check (input) — same contract as compute_feature_statistics: a
+    # half-copied month reads as a smaller month, so the stratified sample would
+    # be drawn from a split nobody knows the size of (ADR-0014 decision 7).
+    require_complete_cache(test_parquet_handle)
+
+    # Decision — which months: every month the test handle holds (the
+    # configured test months) read as one population, the same rows and the
+    # same strata as before test was cached a month per directory. A
+    # diagnosis per month is a separate question (issue #128, out of scope).
+    path = handle_paths(test_parquet_handle)
+
+    # Decision — a model that cannot attribute at all skips this diagnosis with
+    # a warning and says so in the artifact. Asked twice, here and at the
+    # first attribution below: cost is the cheap question, the first real
+    # attribution the one that settles it.
+    try:
+        n_trees = model.attribution_cost()
+    except UnsupportedCapability as exc:
+        logger.warning("shap diagnostics: skipped, the model cannot attribute: %s", exc)
+        return unsupported_artifact(exc), {}
+    # Decision — the budget guard: an attribution pass costs about rows ×
+    # attribution_cost (the trees), so when sample_rows × that exceeds
+    # max_budget the sample shrinks to fit — never below min_rows_per_item —
+    # and a warning says by how much. Without it the cost of this node grows
+    # with the size of the model, and nothing bounds it.
+    eff_sample = sample_rows
+    if eff_sample * max(1, n_trees) > max_budget:
+        eff_sample = max(min_per_item, max_budget // max(1, n_trees))
+        logger.warning(
+            "shap budget guard: sample_rows %d * n_trees %d > max_budget %d -> reduce to %d",
+            sample_rows, n_trees, max_budget, eff_sample,
+        )
+
+    # Decision — the sample is population-representative, stratified by
+    # item: each item gets max(min_rows_per_item, the sample size // the
+    # number of items) rows drawn at random under a fixed seed, all of its
+    # rows when it has fewer. Only the item column is read to draw it; the
+    # test split is never materialized.
+    item_values = bounded_reads.read_column(path, item_col)
+    idx = stratified_item_sample(item_values, eff_sample, min_per_item, seed=42)
+    if len(idx) == 0:
+        logger.warning("shap diagnostics: empty sample after stratification; skipping")
+        return {}, {}
+
+    # Only the drawn rows × (the feature columns + the item and label columns).
+    # In production the item column is usually a categorical feature already
+    # in feature_cols, but a diagnosis fixture or cache layout need not be;
+    # the per-item grouping below reads sample_pdf[item_col], so item and
+    # label are put in take_cols explicitly.
+    names = bounded_reads.schema_names(path)
+    take_cols = list(feature_cols)
+    for col in (item_col, label_col):
+        if col in names and col not in take_cols:
+            take_cols.append(col)
+    sample_pdf = bounded_reads.take_rows(path, idx, columns=take_cols).reset_index(drop=True)
+    logger.info("shap diagnostics: n_total=%d n_sampled=%d n_cols=%d",
+                len(item_values), len(sample_pdf), len(take_cols))
+    log_data_volume(logger, "shap.sample_pdf", sample_pdf, deep=True)
+
+    X = pdf_to_X(sample_pdf, model_view, parameters)
+    scores = model.predict(X)
+
+    try:
+        with log_step(logger, "shap_values"):
+            shap_values = model.feature_attributions(X)
+    except UnsupportedCapability as exc:
+        logger.warning("shap diagnostics: skipped, the model cannot attribute: %s", exc)
+        return unsupported_artifact(exc), {}
+    items = sample_pdf[item_col].values
+
+    # Decision — per_item attributes each item's rows against that item's own
+    # rows as background (its sampled rows, capped). A model that cannot
+    # attribute against a background — for any item — degrades the whole
+    # option to global with a note, and only that exception does; the global
+    # attributions above stay. Every item is attributed here, before anything
+    # is built from them, so an item that fails half way cannot leave a half
+    # per_item result. Today every LightGBM model degrades: shap 0.42.1
+    # cannot build an interventional explainer over the categorical splits
+    # every model here has on the item (the adapter's feature_attributions
+    # docstring has the evidence). Review fix 2026-07-08.
+    requested_background = background_mode
+    degrade_note = None
+    per_item_values = {}
+    if background_mode == "per_item":
+        try:
+            for item in pd.unique(items):
+                X_item = X[items == item]
+                bg = per_item_background(X_item, seed=42)
+                with log_step(logger, "shap_values_per_item"):
+                    per_item_values[item] = model.feature_attributions(
+                        X_item, background=bg)
+        except UnsupportedCapability as exc:
+            background_mode = "global"
+            per_item_values = {}
+            # The library's own error type is the informative one, as before
+            # the adapter wrapped it.
+            cause = exc.__cause__ or exc
+            degrade_note = (
+                "per_item 背景已降級為 global：interventional TreeSHAP 在目前"
+                f"版本組合下無法解析類別切分（{type(cause).__name__}）。"
+                "條件化背景不可行，見手冊已知限制。"
+            )
+            logger.warning("shap background=per_item 不可行，降級 global：%s", exc)
+
+    global_top, mean_abs = signed_profile(shap_values, feature_cols, top_k)
+
+    # Decision — positive profiles come from a sample of their own: at most
+    # positive_sample_per_item label == 1 rows per item, drawn apart from the
+    # stratified sample and attributed in a second pass, so an item whose
+    # positives are rare still gets enough of them to profile. An item with
+    # fewer than positive_min_rows gets no profile and is flagged low
+    # coverage. Skipped when profile_positive is off or the test data has no
+    # label column, and under the per_item background, which takes each
+    # item's label == 1 rows out of its own attributions instead (below). An
+    # UnsupportedCapability out of this pass is not caught: the model has
+    # just attributed the main sample the same way, so it would mean an
+    # adapter that can and cannot at once — a bug, which stops the run.
+    positive_profiles = {}
+    if (background_mode != "per_item" and profile_positive
+            and label_col in bounded_reads.schema_names(path)):
+        all_labels = bounded_reads.read_column(path, label_col)
+        pos_idx = positive_item_sample(
+            item_values, all_labels, positive_sample_per_item, seed=42)
+        if len(pos_idx) > 0:
+            pos_pdf = bounded_reads.take_rows(
+                path, pos_idx, columns=take_cols).reset_index(drop=True)
+            log_data_volume(logger, "shap.positive_sample_pdf", pos_pdf, deep=True)
+            X_pos = pdf_to_X(pos_pdf, model_view, parameters)
+            with log_step(logger, "shap_values_positive"):
+                shap_pos = model.feature_attributions(X_pos)
+            pos_items = pos_pdf[item_col].values
+            for item in pd.unique(pos_items):
+                m = pos_items == item
+                n = int(m.sum())
+                if n >= positive_min_rows:
+                    prof, _ = signed_profile(shap_pos[m], feature_cols, top_k)
+                    positive_profiles[str(item)] = (prof, n, False)
+                else:
+                    positive_profiles[str(item)] = (None, n, True)
+
+    label_present = background_mode == "per_item" and label_col in sample_pdf.columns
+    labels = sample_pdf[label_col].values if label_present else None
+    per_item = {}
+    for item in pd.unique(items):
+        mask = items == item
+        # Decision — an item's profile is over its own rows: their per-item
+        # background attributions under per_item, their slice of the global
+        # attributions otherwise. The global vector its divergence is measured
+        # against stays the global-background one either way, so under
+        # per_item the divergence mixes in the change of background (the
+        # note below says so; the handbook's §12 has how to read it).
+        if background_mode == "per_item":
+            sv_item = per_item_values[item]
+            prof_all, ai = signed_profile(sv_item, feature_cols, top_k)
+        else:
+            sv_item = None
+            prof_all, ai = signed_profile(shap_values[mask], feature_cols, top_k)
+        sc = scores[mask]
+        # Decision — divergence_metric "spearman" compares the whole rankings
+        # (Spearman rank correlation); any other value compares the top
+        # divergence_top_k sets (Jaccard). core/consistency.py has no
+        # predicate for this key, so a misspelt "spearman" silently becomes
+        # Jaccard — as it did before #489; not changed here.
+        div, idio = divergence(ai, mean_abs, divergence_metric, divergence_top_k, feature_cols)
+        # Decision — under per_item the positive profile is the item's
+        # label == 1 rows of its own per-item attributions: no extra draw, so
+        # its coverage is whatever the foreground sample holds, not the
+        # targeted oversampling above.
+        if background_mode == "per_item" and profile_positive and label_present:
+            pos_mask = labels[mask] == 1
+            n_pos = int(pos_mask.sum())
+            if n_pos >= positive_min_rows:
+                prof_pos, _ = signed_profile(sv_item[pos_mask], feature_cols, top_k)
+                pos_low = False
+            else:
+                prof_pos, pos_low = None, True
+        else:
+            prof_pos, n_pos, pos_low = positive_profiles.get(
+                str(item), (None, 0, bool(profile_positive)))
+        # Decision — low_coverage flags an item with fewer sampled rows than
+        # min_rows_per_item: it was taken whole and is still small, so its
+        # profile rests on few rows. Flagged, not dropped.
+        per_item[str(item)] = {
+            "top_features": prof_all,
+            "n_sampled": int(mask.sum()),
+            "n_positive": n_pos,
+            "score_min": float(sc.min()), "score_max": float(sc.max()),
+            "score_mean": float(sc.mean()),
+            "low_coverage": bool(mask.sum() < min_per_item),
+            "top_features_positive": prof_pos,
+            "positive_low_coverage": bool(pos_low),
+            "divergence_from_global": to_native(div),
+            "idiosyncratic_features": idio,
+        }
+
+    item_idiosyncrasy = sorted(
+        ({"item": k,
+          "divergence_from_global": v["divergence_from_global"],
+          "idiosyncratic_features": v["idiosyncratic_features"]}
+         for k, v in per_item.items()),
+        key=lambda r: r["divergence_from_global"],
+        reverse=True,
+    )
+
+    # Decision — the beeswarms plot the global-background attributions,
+    # the per-item ones too (the item's rows of them), whichever background
+    # was asked for. Drawn by the shap_summary_figures catalog entry when it
+    # saves, one at a time; a figure that fails is its warning, not this
+    # node's.
+    figures = {"shap_summary_global.png": beeswarm(shap_values, X, feature_cols)}
+    if cfg.get("per_item_beeswarm", True):
+        for item in pd.unique(items):
+            figures[f"per_item/shap_summary__{safe_name(item)}.png"] = beeswarm(
+                shap_values, X, feature_cols, rows=items == item)
+
+    logger.info("shap diagnostics: n_sample=%d n_trees=%d items=%d",
+                len(idx), n_trees, len(per_item))
+    out = {"global": {"top_features": global_top}, "per_item": per_item,
+           "item_idiosyncrasy": item_idiosyncrasy}
+    # Decision — notes appear only when per_item was asked for, including
+    # when it degraded to global (the note then says so). A global run's
+    # output has no notes key, as it never had.
+    if requested_background == "per_item":
+        out["notes"] = [degrade_note] if degrade_note else [
+            "shap background=per_item（interventional，背景=各 item 子母體，"
+            f"上限 {BACKGROUND_CAP} 列）；"
+            "divergence 的全域向量仍為 global 背景——占比混入背景效應，判讀見手冊 §12"
+        ]
+    return out, figures
+
+
+def select_shap_population(
+    training_eval_predictions, test_model_input, parameters, predict_manifest=None
+):
+    """Returns ``(shap_population, case_rows)``: who the quadrant diagnoses
+    attribute.
+
+    ``shap_population``: a deterministic sample of at most
+    ``quadrant_sample_per_cell`` candidates per (item × quadrant), with their
+    features, for ``compute_quadrant_profiles``. ``case_rows``: every
+    (item × quadrant) cell's highest- and lowest-scored candidate
+    (``role`` ``high`` / ``low``), carrying ``quadrant`` / ``role`` / ``rank``
+    / ``score`` / ``label``, the identity columns and the features, for
+    ``compute_quadrant_cases`` to chart one row at a time. Ranking, quadrants,
+    sampling and the joins all run on Spark (the executors); the driver only
+    collects the two small results.
+
+    ``quadrant_enabled: false`` → ``(None, None)``. ``predict_manifest`` is an
+    in-DAG ordering dependency only (the same convention as
+    ``compute_test_metrics``): none of the three data inputs has a node
+    producer, so without it the topological sort could run this before
+    predict and read predictions not yet written.
+
+    Reads ``dataset.test_snap_dates``' months only, from both tables, and ranks
+    with ``utils.ranking.rank_by_score_then_item`` on ``schema``'s score column
+    (ADR-0030 decisions 5 and 12). The ``score`` column this hands
+    ``compute_quadrant_cases`` is a name the two nodes agree on, not the
+    prediction table's column, so it stays ``score`` whatever ``schema`` calls
+    that one.
+
+    A failure stops the run: this node asks nothing of the model, so nothing
+    here is "the model cannot" (ADR-0030 decision 4). The two ``raise`` in the
+    body are a **runtime backstop** (no configured test month: A36 stops the
+    training command before Spark starts) and a **post-condition** (the
+    configured months matched no row: a population read as empty would land
+    as ``{}``, the shape "switched off" lands, and the quadrants would go
+    missing without a word).
+    """
+    cfg = parameters.get("diagnostics", {}).get("shap", {})
+    if not cfg.get("quadrant_enabled", True):
+        logger.info("select_shap_population: quadrant_enabled=false; skipping")
+        return None, None
+
+    top_k_decision = int(cfg.get("quadrant_top_k_decision", 1))
+    per_cell = int(cfg.get("quadrant_sample_per_cell", 30))
+
+    schema = get_schema(parameters)
+    item_col = schema["item"]
+    label_col = schema["label"]
+    score_col = schema["score"]
+    # The rank window is a query group; the two joins back to ``test_model_input``
+    # are at candidate grain, so they take identity (ADR-0025 decision 2).
+    group_cols = schema["query_group_columns"]
+    identity_cols = schema["identity_columns"]
+
+    # Decision — which months: dataset.test_snap_dates, the ones this run
+    # predicted and compute_shap_diagnostics describes (node rule 14). Both
+    # tables keep every month ever written under their version, so an
+    # unfiltered read grows with that history, not with this run. Normalised
+    # the way the scored months are (core.date_ranges.as_date_list) and
+    # compared as text, the rule compute_test_metrics reads the same
+    # prediction table with (steps/scored_months.restrict_to_scored_months,
+    # whose docstring says why).
+    months = as_date_list((parameters.get("dataset") or {}).get("test_snap_dates") or [])
+    # Runtime backstop — A36 rejects this config before Spark starts.
+    if not months:
+        raise ValueError(
+            "select_shap_population: dataset.test_snap_dates is unset or empty, "
+            "so there is no month to pick the quadrant population from.")
+    training_eval_predictions = scored_months.restrict_to_scored_months(
+        training_eval_predictions, schema["time"], months)
+    test_model_input = scored_months.restrict_to_scored_months(
+        test_model_input, schema["time"], months)
+
+    labeled = None
+    try:
+        # Decision — rank with the rule evaluation ranks with (score, then
+        # item, then each event column), so a declared event cannot make the
+        # quadrants' top-1 differ from evaluation's.
+        ranked = training_eval_predictions.withColumn(
+            "_rank",
+            rank_by_score_then_item(
+                group_cols, score_col, item_col, schema.get("event", [])),
+        )
+
+        # Decision — a candidate's quadrant crosses "ranked within
+        # quadrant_top_k_decision of its query group" with "label == 1": TP,
+        # FP, FN, TN — the recommendation the model would make against what
+        # happened.
+        # The two results below are each collected once (two actions);
+        # without the persist the rank's shuffle would run twice. The storage
+        # level is spelled out rather than left to the default: at production
+        # volume this intermediate may not fit in executor memory, and it must
+        # spill to disk rather than be dropped and recomputed.
+        labeled = label_quadrants(
+            ranked, "_rank", label_col, top_k_decision, identity_cols,
+        ).persist(StorageLevel.MEMORY_AND_DISK)
+
+        # Decision — the profile population: at most quadrant_sample_per_cell
+        # candidates per (item × quadrant), chosen by a hash of their identity
+        # (crc32) rather than at random or by score, so a rerun over the same
+        # predictions picks the same rows. Only their keys go back to
+        # test_model_input for the features.
+        keyset = sample_each_cell(labeled, item_col, per_cell).select(
+            *identity_cols, "quadrant")
+        pop_pdf = keyset.join(
+            test_model_input, on=identity_cols, how="inner").toPandas()
+
+        # Decision — the cases: every cell's highest- and lowest-scored
+        # candidate, over the whole cell rather than the sample. Ties on score
+        # are broken in opposite directions for the two, so a tied cell still
+        # gives two rows; only a one-row cell gives the same row as both.
+        extremes = extremes_of_each_cell(
+            labeled, item_col, "_rank", score_col, label_col, identity_cols)
+        # test_model_input has a label column too; it is dropped so the join
+        # is not ambiguous (the label is not a feature).
+        feats_only = (test_model_input.drop(label_col)
+                      if label_col in test_model_input.columns else test_model_input)
+        case_pdf = extremes.join(
+            feats_only, on=identity_cols, how="inner").toPandas()
+    finally:
+        # The Runner only releases MemoryDatasets and never touches a Spark
+        # DataFrame's storage (neither core/runner.py nor core/catalog.py
+        # unpersists). Without this, the cache holds the executors until the
+        # SparkSession ends.
+        # In a finally, not on the success path: a failure above leaves this
+        # function too, on its way to stopping the run.
+        if labeled is not None:
+            try:
+                labeled.unpersist()
+            except Exception as release_error:
+                # Logged, not raised. Raised from here it would replace the
+                # exception the body is propagating (the one that says what
+                # went wrong); on the success path the results are already in
+                # the driver, and the leaked cache is the whole cost.
+                logger.warning(
+                    "select_shap_population: unpersist failed: %s", release_error)
+
+    # Post-condition — every configured month was predicted
+    # (compute_test_metrics checks that first), so an empty population means
+    # the month filter or the join back to test_model_input matched nothing:
+    # a spelling that differs between the config and a table, say. Landed as
+    # {} it would read as "switched off".
+    if len(pop_pdf) == 0:
+        raise ValueError(
+            f"select_shap_population: no prediction for months {months} joined "
+            f"back to test_model_input. Check that {schema['time']} is spelled "
+            "in both tables as dataset.test_snap_dates spells it.")
+    logger.info(
+        "select_shap_population: pop_rows=%d case_rows=%d items=%d per_cell=%d",
+        len(pop_pdf), len(case_pdf), pop_pdf[item_col].nunique(), per_cell,
+    )
+    return pop_pdf, case_pdf
+
+
+def compute_quadrant_profiles(model, shap_population, preprocessor: dict, parameters: dict) -> dict:
+    """The mean signed SHAP profile of every (item × quadrant) cell of the
+    population ``select_shap_population`` drew, from one attribution pass.
+
+    Returns ``{"<item>": {"<quadrant>": {"top_features": […], "n_sampled": int,
+    "low_coverage": bool}}}``. ``shap_population`` is
+    ``select_shap_population``'s small pandas frame (features + item +
+    quadrant). ``None``, empty, or ``quadrant_enabled: false`` → ``{}``.
+
+    A model that cannot attribute lands the "model cannot" shape; any other
+    failure stops the run (ADR-0030 decision 4).
+    """
+    cfg = parameters.get("diagnostics", {}).get("shap", {})
+    if not cfg.get("quadrant_enabled", True):
+        return {}
+    if shap_population is None or len(shap_population) == 0:
+        logger.warning("quadrant profiles: empty population; skipping")
+        return {}
+
+    top_k = int(cfg.get("top_k", 30))
+    quadrant_min_rows = int(cfg.get("quadrant_min_rows", 10))
+    item_col = get_schema(parameters)["item"]
+    # Decision — which features, and in what order: ask the model, not
+    # apply_feature_selection(preprocessor, parameters). This is not a drift fix:
+    # the exclude list lives in the `training:` block, so editing it bumps
+    # model_version, the model's catalog path moves with it, and the whole
+    # training chain is pulled back — ADR-0014 decision 7 is explicit that the
+    # version mechanism already blocks that, and that this is interface work, not
+    # a bug fix. What it buys is addressability: model and preprocessor both have
+    # catalog entries, while the config-derived view is memory-only and drags
+    # select_features into every diagnosis-only slice.
+    model_view = model_feature_view(model, preprocessor)
+    feature_cols = list(model_view["feature_columns"])
+
+    pdf = shap_population.reset_index(drop=True)
+    X = pdf_to_X(pdf, model_view, parameters)
+    log_data_volume(logger, "quadrant.X", X)
+    # Decision — a model that cannot attribute skips this with a warning and
+    # says so; nothing else is caught (ADR-0030 decision 4).
+    try:
+        shap_values = model.feature_attributions(X)
+    except UnsupportedCapability as exc:
+        logger.warning("quadrant profiles: skipped, the model cannot attribute: %s", exc)
+        return unsupported_artifact(exc)
+    # Decision — one profile per cell that has rows; a cell with none is left
+    # out rather than listed empty (compute_quadrant_cases lists it).
+    # low_coverage flags a cell with fewer than quadrant_min_rows rows: its
+    # profile is kept, but it rests on few rows.
+    items = pdf[item_col].values
+    quads = pdf["quadrant"].values
+    out: dict = {}
+    for item in pd.unique(items):
+        for q in QUADRANTS:
+            mask = (items == item) & (quads == q)
+            n = int(mask.sum())
+            if n == 0:
+                continue
+            prof, _ = signed_profile(shap_values[mask], feature_cols, top_k)
+            out.setdefault(str(item), {})[q] = {
+                "top_features": prof,
+                "n_sampled": n,
+                "low_coverage": bool(n < quadrant_min_rows),
+            }
+    logger.info("quadrant profiles: items=%d", len(out))
+    return out
+
+
+def compute_quadrant_cases(
+    model, case_rows, preprocessor: dict, parameters: dict,
+) -> tuple[dict, dict]:
+    """Each (item × quadrant) cell's extreme cases as one-row signed SHAP bar
+    charts, plus a manifest that accounts for every cell.
+
+    ``case_rows`` is ``select_shap_population``'s second output (a ``high``
+    and a ``low`` row per item × quadrant); one attribution pass over those
+    few dozen rows. An empty cell records ``reason: empty``; a one-row cell's
+    low records ``reason: single_row_same_as_high`` (no duplicate file).
+
+    Returns ``(cases_manifest, case_figures)``: the manifest
+    ``{"<item>": {"<quadrant>": {"high"/"low": {rendered, png|reason, <identity
+    columns but the item>, rank, score, label}}}}``, and ``{path under
+    diagnostics/cases/: draw}`` for the charts. ``({}, {})`` for no case rows
+    or ``quadrant_enabled: false``.
+
+    ``rendered: True`` with a ``png`` says a chart for that case was handed to
+    the catalog. The catalog draws it when it saves, so a chart that then
+    fails to draw is a warning and a missing file (ADR-0030 decisions 4 and
+    7); the manifest, written before any chart is drawn, cannot say
+    ``render_failed`` any more. A model that cannot attribute → the "model
+    cannot" shape and no charts; any other failure stops the run.
+    """
+    cfg = parameters.get("diagnostics", {}).get("shap", {})
+    if not cfg.get("quadrant_enabled", True):
+        return {}, {}
+    if case_rows is None or len(case_rows) == 0:
+        logger.warning("quadrant cases: empty case_rows; skipping")
+        return {}, {}
+
+    case_top_k = int(cfg.get("case_top_k", 15))
+    schema = get_schema(parameters)
+    item_col = schema["item"]
+    identity_cols = schema["identity_columns"]
+    # Decision — a case's manifest label says which row its chart is of, so
+    # it is the identity; the item is dropped only because it is already the
+    # manifest's outer key, and writing it again says nothing new.
+    #
+    # Deliberately not the base key: the base key does not widen with
+    # occasion (ADR-0025 decision 2), which would give two rows of the same
+    # entity, the same period and different occasions the very same label —
+    # two different inputs mapped to one result. This subtracts one column
+    # from the identity, so it widens when the identity does. Today the two
+    # spellings agree value for value, so the manifest's content did not
+    # change when this was introduced.
+    case_label_cols = [c for c in identity_cols if c != item_col]
+    # Decision — which features, and in what order: ask the model, not
+    # apply_feature_selection(preprocessor, parameters). This is not a drift fix:
+    # the exclude list lives in the `training:` block, so editing it bumps
+    # model_version, the model's catalog path moves with it, and the whole
+    # training chain is pulled back — ADR-0014 decision 7 is explicit that the
+    # version mechanism already blocks that, and that this is interface work, not
+    # a bug fix. What it buys is addressability: model and preprocessor both have
+    # catalog entries, while the config-derived view is memory-only and drags
+    # select_features into every diagnosis-only slice.
+    model_view = model_feature_view(model, preprocessor)
+    feature_cols = list(model_view["feature_columns"])
+
+    pdf = case_rows.reset_index(drop=True)
+    X = pdf_to_X(pdf, model_view, parameters)
+    log_data_volume(logger, "cases.X", X)
+    # Decision — a model that cannot attribute skips this with a warning and
+    # says so; nothing else is caught (ADR-0030 decision 4).
+    try:
+        shap_values = model.feature_attributions(X)
+    except UnsupportedCapability as exc:
+        logger.warning("quadrant cases: skipped, the model cannot attribute: %s", exc)
+        return unsupported_artifact(exc), {}
+
+    items = pdf[item_col].values
+    quads = pdf["quadrant"].values
+    roles = pdf["role"].values
+
+    manifest: dict = {}
+    figures: dict = {}
+    for item in pd.unique(items):
+        item_entry: dict = {}
+        for q in QUADRANTS:
+            idx = np.where((items == item) & (quads == q))[0]
+            # Decision — every cell is accounted for: one with no row records
+            # reason "empty" for both roles instead of being left out, so a
+            # reader can tell an empty quadrant from a missing one.
+            if len(idx) == 0:
+                item_entry[q] = {
+                    "high": {"rendered": False, "reason": "empty"},
+                    "low": {"rendered": False, "reason": "empty"}}
+                continue
+            by_role = {roles[i]: i for i in idx}
+            hi, lo = by_role.get("high"), by_role.get("low")
+            cell: dict = {}
+            # high — a non-empty cell normally has one; a degenerate input
+            # holding only a low is recorded as "empty" rather than raised on.
+            if hi is None:
+                cell["high"] = {"rendered": False, "reason": "empty"}
+            else:
+                figure_path, cell["high"], draw = case_chart(
+                    pdf.iloc[hi], shap_values[hi], item, q, "high",
+                    feature_cols, case_top_k, case_label_cols)
+                figures[figure_path] = draw
+            # Decision — low: in a one-row cell the low is the high's row, so
+            # it records single_row_same_as_high and is not charted twice; a
+            # degenerate input holding only a high records "empty".
+            if lo is None:
+                cell["low"] = {"rendered": False, "reason": "empty"}
+            elif hi is not None and (row_identity(pdf.iloc[hi], identity_cols)
+                                     == row_identity(pdf.iloc[lo], identity_cols)):
+                cell["low"] = {"rendered": False,
+                               "reason": "single_row_same_as_high"}
+            else:
+                figure_path, cell["low"], draw = case_chart(
+                    pdf.iloc[lo], shap_values[lo], item, q, "low",
+                    feature_cols, case_top_k, case_label_cols)
+                figures[figure_path] = draw
+            item_entry[q] = cell
+        manifest[str(item)] = item_entry
+
+    logger.info("quadrant cases: items=%d charts=%d", len(manifest), len(figures))
+    return manifest, figures

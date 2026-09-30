@@ -1326,7 +1326,7 @@ def test_log_experiment_records_a_run_without_hpo_search_diagnostics(
     """A run that skipped HPO has no diagnostics/hpo/ (ADR-0030 decision 8).
     The search diagnostics are not an input, so nothing waits on them: the
     rest is logged and the directory goes up as it is."""
-    from recsys_tfb.diagnosis.model import diagnostics_dir
+    from recsys_tfb.io.models_root import diagnostics_dir
 
     logged_metrics, logged_artifacts = fake_mlflow
     monkeypatch.chdir(tmp_path)
@@ -1355,7 +1355,7 @@ def test_log_experiment_logs_diagnostics(fake_mlflow, monkeypatch, tmp_path):
     logged_metrics, logged_artifacts = fake_mlflow
     monkeypatch.chdir(tmp_path)
     parameters = {"model_version": "mv1", "mlflow": {}, "training": {}}
-    from recsys_tfb.diagnosis.model import diagnostics_dir
+    from recsys_tfb.io.models_root import diagnostics_dir
     diagnostics_dir(parameters)  # create the dir so log_artifacts has something
 
     class _Model:
@@ -2074,7 +2074,7 @@ def test_compute_sample_weight_report_reports_but_writes_nothing_when_disabled(
     back in the R4 direct-write registry
     (tests/test_core/test_architecture_constraints.py).
 
-    It patches the attribute on ``nodes`` rather than on ``diagnosis.model``
+    It patches the attribute on ``nodes`` rather than on ``io.models_root``
     because that is the name a re-added write would resolve: ``nodes`` binds
     ``diagnostics_dir`` at import time. Patch the defining module instead and
     the trap springs on nothing -- the write would go to the real version dir,

@@ -1,11 +1,12 @@
-"""JSON-safe scalar conversion, and the artifact a diagnosis writes when the
-model cannot answer it."""
+"""What goes into a diagnosis's JSON: JSON-safe scalars, and the artifact a
+diagnosis lands when the model cannot answer it."""
 
 import numpy as np
 
 
-def _to_native(v):
-    """np scalar / NaN → JSON-safe python scalar（NaN → None）。"""
+def to_native(v):
+    """A numpy scalar or NaN as a JSON-safe Python scalar: ``None`` and NaN
+    become ``None``, anything else a ``float``."""
     if v is None:
         return None
     f = float(v)

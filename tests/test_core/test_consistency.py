@@ -1122,7 +1122,7 @@ class TestTrainingDiagnosticsParamsA20:
 
     def test_non_bool_quadrant_enabled_rejected(self):
         # The failure mode this predicate exists to catch (see docstring):
-        # shap_cases.py / population_spark.py read
+        # the quadrant nodes in pipelines/training/nodes.py read
         # cfg.get("quadrant_enabled", True) with bare truthiness, so a
         # quoted YAML string like "false" is truthy in Python and would
         # silently enable the node instead of disabling it.

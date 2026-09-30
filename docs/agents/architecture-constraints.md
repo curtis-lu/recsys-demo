@@ -49,7 +49,7 @@
 
 | # | 規則 | 管到哪 | 這個檢查看不到 |
 |---|---|---|---|
-| [A1](#a1-資料流產物一律經-catalognode-不得自己讀寫它們) | 資料流產物一律經 catalog；node 不得自己讀寫它們 | `pipelines/` 底下的 node 函式與 `Node(...)` | 間接寫入（經專案 helper）；`steps/` 底下的程式碼；`def` 不在 `nodes*.py` 裡的 node（例：`diagnosis/model/` 的 7 個診斷 node，搬回 `nodes.py` 之前） |
+| [A1](#a1-資料流產物一律經-catalognode-不得自己讀寫它們) | 資料流產物一律經 catalog；node 不得自己讀寫它們 | `pipelines/` 底下的 node 函式與 `Node(...)` | 間接寫入（經專案 helper）；`steps/` 底下的程式碼；`def` 不在 `nodes*.py` 裡的 node（2026-09-30 重盤零命中；training 的 7 個診斷 node 在 #489 搬回 `nodes.py` 之前是這一類） |
 | [A2](#a2-node-函式不得依賴可變全域狀態) | node 函式不得依賴可變全域狀態 | 同上 | `core/`、`utils/` 不在掃描範圍（另由 R2 盯著） |
 | [A3](#a3-不得用-print) | 不得用 `print()` | 整個 `src/recsys_tfb/` | — |
 | [A4](#a4-src-不得-import-notebooks) | `src/` 不得 import `notebooks/` | 整個 `src/recsys_tfb/` | 「把探索性程式碼搬進 `src/`」抓不到 |
@@ -303,14 +303,16 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
 
   **這不是豁免**：`steps/` 裡出現 `catalog.load`／`catalog.save` 一樣違反 A1，只是**沒有測試會發現**，靠 code review。2026-09-19 對整個 `pipelines/**/*.py` 實查，catalog 存取零命中。
 
-  **不放寬 glob 是使用者的裁決**（2026-09-19，#163）。理由：看不到的地方裡真的有寫檔的只有 `diagnosis/model/`，而使用者傾向大幅簡化診斷，現在補可能白做；而檢查本身要留著——跑不到一秒，而且真的影響過設計（`pipelines/training/nodes.py` 的 cache node——當時 5 個，#413 之後 4 個，#483 再加上 `prepare_train_inputs`——刻意把刪檔留在 node 裡，就是為了讓它看得到，見 R4 表下的注記）。**什麼時候重開**：`diagnosis/model/` 的診斷簡化有了定案（那些 node 拿掉，或決定保留），或使用者重開這件事。放寬也不是換個 glob 就好：當天實測，寫檔檢查 (d) 會多出兩個**不是違例**的命中——`training/steps/hpo_resume.py`（HPO 中斷接續的 study 與 checkpoint）和 `source_etl/sql_runner.py`（這個套件沒有任何 `Node(...)`，本來就不歸 A1 管）。
-- **`def` 不在 `nodes*.py` 裡的 node。** (c) 與 (d) 用**檔名**挑要掃的檔，不是看「檔案裡有沒有被註冊成 node 的函式」。所以 `pipeline.py` 註冊了、但 `def` 寫在別的檔的 node，整個看不到。2026-09-19 盤點有兩處：
-  - training 的 7 個診斷 node，`def` 在 `src/recsys_tfb/diagnosis/model/`（對照表在 `pipelines/training/nodes.py` 的模組 docstring）。以前這裡有實際後果：`compute_shap_diagnostics` 與 `compute_quadrant_cases` 自己 `savefig`，目錄由 `diagnosis/model/paths.py` 的 helper `mkdir`，照 R4 的定義是「自己寫診斷副產物的 node」卻不在 R4 表上。#485（ADR-0030 決定 7）之後圖改由 catalog 的 `DiagnosticFiguresDataset` 條目存，兩個 node 不再寫檔，`paths.py` 只剩 `log_experiment` 用的 `diagnostics_dir` 一個 `mkdir`（2026-09-29 實查 `savefig`／`open(`／`mkdir` 在 `diagnosis/model/` 只剩這一處）。盲區本身還在：這些 node 若再加寫檔或 catalog 存取，測試照樣看不到，要等決定 6 把 `def` 搬回 `nodes.py`。
-  - evaluation 的 `load_compare_predictions`，`def` 在 `pipelines/evaluation/steps/compare_sources.py`（#365 搬進去）。當天實查零命中。
+  **不放寬 glob 是使用者的裁決**（2026-09-19，#163）。當時的理由：看不到的地方裡真的有寫檔的只有 `diagnosis/model/`，而使用者傾向大幅簡化診斷，現在補可能白做；而檢查本身要留著——跑不到一秒，而且真的影響過設計（`pipelines/training/nodes.py` 的 cache node——當時 5 個，#413 之後 4 個，#483 再加上 `prepare_train_inputs`——刻意把刪檔留在 node 裡，就是為了讓它看得到，見 R4 表下的注記）。**什麼時候重開**：當時訂的條件是「`diagnosis/model/` 的診斷簡化有了定案（那些 node 拿掉，或決定保留），或使用者重開這件事」。**這個條件已經成立**：使用者 2026-09-27 決定 7 個診斷全部保留。之後的事實：#489（ADR-0030 決定 6）把那 7 個 node 的 `def` 搬回 `pipelines/training/nodes.py`，現在在掃描範圍內；它們的機制搬進 `pipelines/training/steps/`，仍在範圍外（2026-09-30 對這批新模組 grep `open(`／`mkdir`／`savefig`／`to_parquet`／`.save(`／`rmtree` 零命中）；`diagnosis/model/` 整個刪掉，它唯一還會 `mkdir` 的 `diagnostics_dir` 搬到 `io/models_root.py`，不是 node，本來就不歸 A1 管。放不放寬由使用者重新決定，#489 沒有動 glob（ADR-0030〈沒做的事〉最後一列）。放寬也不是換個 glob 就好：當天實測，寫檔檢查 (d) 會多出兩個**不是違例**的命中——`training/steps/hpo_resume.py`（HPO 中斷接續的 study 與 checkpoint）和 `source_etl/sql_runner.py`（這個套件沒有任何 `Node(...)`，本來就不歸 A1 管）。
+- **`def` 不在 `nodes*.py` 裡的 node。** (c) 與 (d) 用**檔名**挑要掃的檔，不是看「檔案裡有沒有被註冊成 node 的函式」。所以 `pipeline.py` 註冊了、但 `def` 寫在別的檔的 node，整個看不到。2026-09-19 盤點有兩處，2026-09-30（#489）重盤時兩處都已經不在這個盲區：
+  - training 的 7 個診斷 node：`def` 原本在 `src/recsys_tfb/diagnosis/model/`。以前這裡有實際後果：`compute_shap_diagnostics` 與 `compute_quadrant_cases` 自己 `savefig`，目錄由 `diagnosis/model/paths.py` 的 helper `mkdir`，照 R4 的定義是「自己寫診斷副產物的 node」卻不在 R4 表上。#485（ADR-0030 決定 7）把圖交給 catalog 的 `DiagnosticFiguresDataset` 條目存，#489（決定 6）把 `def` 搬回 `pipelines/training/nodes.py`，所以 (c) 與 (d) 現在掃得到它們，稽核全綠：沒有 catalog 存取、沒有直接寫檔。它們的機制在 `pipelines/training/steps/`，屬於上一條的盲區，不屬於這一條。
+  - evaluation 的 `load_compare_predictions`：原文寫 `def` 在 `pipelines/evaluation/steps/compare_sources.py`（#365 搬進去）。重盤時 `pipelines/evaluation/pipeline.py` 接的是 `pipelines/evaluation/nodes.py` 的同名函式（轉手給 steps 那一個），所以 node 的 `def` 在掃描範圍內；實際讀取在 `steps/`，同樣屬於上一條。
+
+  重盤沒有追到底的一種形狀：evaluation 有 5 處 `Node(...)` 的第一參數是 `nodes.py` 裡 4 個 factory 的呼叫（`make_*_node(...)`），靜態讀 `pipeline.py` 只看得到 factory 本身，看不到它回傳的函式 `def` 在哪。
 
   **重盤方法**（上面的清單會過時，別直接引用）：取每個 `pipelines/*/pipeline.py` 裡 `Node(...)` 的第一參數，找它的 `def` 在哪個檔；不在 `pipelines/**/nodes*.py` 的就在盲區裡。
 
-  **這個盲區只記在這裡**（使用者 2026-09-19 裁決，#163）：不放寬掃描、不把上面那兩個存圖的 node 補進 R4、也不改它們（理由與什麼時候重開見上一節）。其中「不改它們」已由 ADR-0030 決定 7 取代：圖交給 catalog 之後，它們不再自己寫檔，也就不需要 R4。**也不得靠改檔名讓稽核看得到，或新增一條讓自己合規的規則**——那是繞過裁決，不是遵守它。在那之前，這些 node 新增 catalog 存取或寫檔，**沒有測試會發現**，靠 code review。
+  **這個盲區只記在這裡**（使用者 2026-09-19 裁決，#163）：不放寬掃描、不把當時那兩個存圖的 node 補進 R4、也不改它們（理由與什麼時候重開見上一節）。其中「不改它們」已由 ADR-0030 決定 7 取代（圖交給 catalog，它們不再自己寫檔，也就不需要 R4），「不搬」由決定 6 取代（#489 搬回 `nodes.py`）。**也不得靠改檔名讓稽核看得到，或新增一條讓自己合規的規則**——那是繞過裁決，不是遵守它。之後若又有 node 的 `def` 落在 `nodes*.py` 以外，它新增的 catalog 存取或寫檔，**沒有測試會發現**，靠 code review。
 
 ## A2. node 函式不得依賴可變全域狀態
 
@@ -398,7 +400,7 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py` 的 
 
 內容那一半由 [`pipeline-node-design.md`](pipeline-node-design.md) 定義：node 邊界、node body 的形狀、決策與機制的分界、`log_step` 的範圍、`steps/` 與根層的判準、命名與 docstring、讀取寫明月份、什麼可以從 CLI 注入、各 split 用同一個機制、資料閘的形狀、何時翻格式版本。那份十八條裡只有三條有部分機械檢查，其餘靠該檔開頭那張規則總表 ＋ code review。這是 ADR-0008 已知的最大殘留風險，不是疏漏。
 
-那份是判準的唯一真實來源，適用於**每一條** pipeline（S1 只管 dataset）；ADR-0008 保留為 dataset 那次裁決的記錄與完整論證。**已知的界外違例登記在該檔的〈已登記的例外〉**（training 的 7 個 diagnosis node 刻意不搬；dataset 的 `split_train_keys` 一個 node 兩個輸出、三個 build 共用 `build_model_input`），看到它們不必以為判準是裝飾。
+那份是判準的唯一真實來源，適用於**每一條** pipeline（S1 只管 dataset）；ADR-0008 保留為 dataset 那次裁決的記錄與完整論證。**已知的界外違例登記在該檔的〈已登記的例外〉**（dataset 的 `split_train_keys` 一個 node 兩個輸出、三個 build 共用 `build_model_input`），看到它們不必以為判準是裝飾。
 
 ## S2. `pipelines/dataset/month_plans.py` 不得 import pyspark
 
@@ -466,7 +468,7 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 
 | 你要做的事 | 正確寫法 | 現成範例 |
 |---|---|---|
-| 依 query group 分組 | `[schema["time"], *schema["entity"]]` | `evaluation/metrics_spark.py::rank_within_query`、`diagnosis/model/population_spark.py` |
+| 依 query group 分組 | `[schema["time"], *schema["entity"]]` | `evaluation/metrics_spark.py::rank_within_query`、`pipelines/training/nodes.py::select_shap_population` |
 | 依 entity 分組、算母體 | 整份 `schema["entity"]` | `pipelines/evaluation/steps/compare_universe.py::common_universe` |
 | 需要**比 query group 更粗**的單位（切分、抽樣） | 讓使用者宣告，不要自己挑一欄 | `core/schema.py::get_entity_grouping`（讀 `dataset.train_split_keys`／`val_sample_keys`，由 consistency 的 A29 驗證是 `schema.entity` 的非空子集） |
 
@@ -667,7 +669,7 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 
 - 比較報表（`--compare`）對齊兩邊 query group、數「共同的 query group 數」的地方（`pipelines/evaluation/steps/compare_universe.py` 的 `common_universe`／`restrict_to_common`、`pipelines/evaluation/nodes.py::_restrict_to_common`）
 - 以 query 為單位的診斷抽樣（`diagnosis/metric/sample.py::draw_diagnosis_sample`）
-- 診斷母體的分組（`diagnosis/model/population_spark.py::select_shap_population`）
+- 診斷母體的分組（`pipelines/training/nodes.py::select_shap_population`）
 
 反方向也有一個容易歸錯的：**整條離線推論 pipeline 用的是 base key**，包含它的排名 partition（`pipelines/inference/nodes.py::rank_predictions`）。那個 partition 表面上完全符合「界定名次比較的範圍」，但 ADR-0025 決定它維持 `time` ＋ `entity`——批次評分的當下沒有任何「場合」存在，候選是框架替每個 entity 乘上全部 item 產生的。**這是一個決定，不是推導出來的**，所以它必須寫在這裡而不是留給下一個人重推。
 

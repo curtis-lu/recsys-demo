@@ -2,20 +2,17 @@
 
 from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
-from recsys_tfb.diagnosis.model import (
-    compute_feature_importance,
-    compute_feature_statistics,
-    compute_quadrant_cases,
-    compute_quadrant_profiles,
-    compute_shap_diagnostics,
-)
-from recsys_tfb.diagnosis.model.gain_ledger import compute_gain_ledger
-from recsys_tfb.diagnosis.model.population_spark import select_shap_population
 from recsys_tfb.pipelines.training.nodes import (
     cache_test_model_input,
     cache_train_dev_model_input,
     cache_train_model_input,
     cache_val_model_input,
+    compute_feature_importance,
+    compute_feature_statistics,
+    compute_gain_ledger,
+    compute_quadrant_cases,
+    compute_quadrant_profiles,
+    compute_shap_diagnostics,
     compute_test_metrics,
     finalize_model,
     log_experiment,
@@ -24,6 +21,7 @@ from recsys_tfb.pipelines.training.nodes import (
     predict_and_write_test_predictions,
     prepare_train_inputs,
     select_features,
+    select_shap_population,
     train_with_fixed_params,
     tune_hyperparameters,
 )
@@ -209,8 +207,9 @@ def create_pipeline(hpo_enabled: bool = True) -> Pipeline:
         ),
         # P2b quadrant diagnostics: Spark picks the population (top@1 quadrant
         # plus a draw from every cell), then pandas builds a per-(item x
-        # quadrant) signed profile and writes per_quadrant.json on its own.
-        # compute_shap_diagnostics is untouched.
+        # quadrant) signed profile; the quadrant_profiles catalog entry lands
+        # it as per_quadrant.json (ADR-0030 decision 7: the node writes
+        # nothing). compute_shap_diagnostics is untouched.
         Node(
             select_shap_population,
             # predict_manifest is an ordering-only dependency (same convention as

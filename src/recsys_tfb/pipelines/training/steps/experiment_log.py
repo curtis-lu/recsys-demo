@@ -118,5 +118,5 @@ def log_diagnostics_summary(
 def _has_result(artifact) -> bool:
     """Not empty (disabled, or nothing to describe), and not skipped because
     the model cannot answer it — the shape
-    ``diagnosis/model/_util.unsupported_artifact`` lands."""
+    ``steps/diagnosis_artifacts.unsupported_artifact`` lands."""
     return bool(artifact) and artifact.get("supported") is not False

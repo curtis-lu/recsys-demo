@@ -545,7 +545,7 @@ def test_completeness_section_lists_notes():
 
 
 def test_fallback_ledger_reason_reaches_the_rendered_page():
-    """粗帳本降級（``gain_ledger.py:_coarse_ledger``）算出的 compute() 結果，
+    """粗帳本降級（``pipelines/training/steps/gain_ledger.py`` 的 ``coarse_ledger``）算出的 compute() 結果，
     餵進 render() 之後，「這是降級版本」的原因必須真的出現在頁面文字裡——
     不能只在 JSON 的 notes 裡有，頁面上卻悄悄消失。串接 compute()＋render()
     （而不是手造一份 RESULT）是為了驗證兩層真的接得起來。

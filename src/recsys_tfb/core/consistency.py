@@ -2445,7 +2445,8 @@ def training_diagnostics_param_errors(parameters: dict) -> list[str]:
     ``diagnostics.gain_ledger.enabled`` and ``diagnostics.shap.
     quadrant_enabled`` must be bool (a quoted YAML string like "false" is
     truthy in Python and would silently enable the node —
-    ``shap_cases.py``/``population_spark.py`` both read
+    ``compute_quadrant_profiles``/``compute_quadrant_cases``/
+    ``select_shap_population`` (``pipelines/training/nodes.py``) all read
     ``cfg.get("quadrant_enabled", True)`` bare); ``diagnostics.shap.
     quadrant_top_k_decision`` / ``quadrant_sample_per_cell`` /
     ``quadrant_min_rows`` must be integers >= 1. Absent keys use

@@ -1,18 +1,20 @@
-"""Bounded, memory-frugal parquet reads for training diagnostics.
+"""Bounded, memory-frugal parquet reads for the diagnosis nodes.
 
-I/O layer: the only place in diagnostics that reads parquet. Dataset construction
-itself now lives in ``io.handles.open_parquet_dataset`` (it is shared with the
-training predict node); this module owns the read patterns built on top of it.
-Reads operate on the hive-partitioned ``*_model_input`` caches
-(``…/snap_date=…/prod_name=…/``) written by the training cache nodes. A path
-may be a list of roots (test is cached one directory per month); pyarrow
-treats them as one dataset, and fragment order stays deterministic as long as
-the list itself is (see ``io.handles.handle_paths``).
+The only place the diagnosis nodes read parquet. Dataset construction itself
+lives in ``io.handles.open_parquet_dataset`` (shared with the training predict
+node); this module owns the read patterns built on top of it. Reads operate on
+the hive-partitioned ``*_model_input`` caches (``…/snap_date=…/prod_name=…/``)
+written by the training cache nodes. A path may be a list of roots (test is
+cached one directory per month); pyarrow treats them as one dataset, and
+fragment order stays deterministic as long as the list itself is (see
+``io.handles.handle_paths``).
 
 Row order is the deterministic path-sorted fragment order (``use_threads=False``),
 identical to ``pyarrow.parquet.read_table``. So positional indices computed
 against one read map 1:1 onto another — the byte-for-byte invariant the
-diagnostics memory refactor relies on.
+diagnostics memory refactor relies on: a sample drawn from ``read_column``'s
+positions and fetched with ``take_rows`` is the same rows as slicing a full
+read, without the full read.
 """
 
 from __future__ import annotations

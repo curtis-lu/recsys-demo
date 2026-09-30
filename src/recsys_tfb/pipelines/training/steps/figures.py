@@ -1,4 +1,5 @@
-"""How each diagnostic figure is drawn — as a function the catalog calls later.
+"""How each diagnostic figure is drawn — as a function the catalog calls later —
+and the file name it lands under.
 
 A diagnosis node returns ``{relative path: draw}`` and never touches the disk.
 The ``DiagnosticFiguresDataset`` catalog entry calls each ``draw()`` when it
@@ -10,6 +11,8 @@ a test can call a ``draw`` and inspect the figure without writing a file.
 Each ``draw`` returns the figure it drew. What it captures are the arrays it
 needs, sliced only when it runs.
 """
+
+import re
 
 import numpy as np
 
@@ -72,3 +75,15 @@ def signed_bars(row_values, feature_names, top_k, title):
         return fig
 
     return draw
+
+
+def safe_name(s: object) -> str:
+    """``s`` made safe for a file name (an item value may hold spaces or
+    slashes): every run of characters outside ``[0-9A-Za-z._-]`` becomes one
+    ``_``.
+
+    Two items that differ only in those characters get the same name, so the
+    figure of one replaces the other's in the ``{path: draw}`` a node returns
+    — without an error.
+    """
+    return re.sub(r"[^0-9A-Za-z._-]+", "_", str(s))

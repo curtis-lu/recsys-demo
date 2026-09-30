@@ -8,10 +8,14 @@ change with the table, and let two versions be ranked on different months
 with nothing saying so (ADR-0028 background three). ``compute_test_metrics``
 now scores the scored months alone (``core/consistency.py::
 scoring_snap_dates``); these are the two mechanisms that takes.
+``select_shap_population`` reads the same table, and ``test_model_input``,
+through ``restrict_to_scored_months`` too, over ``dataset.test_snap_dates``
+(ADR-0030 decision 12): the same comparison, other months.
 
 **The decisions are not here.** Which months, what a missing month means and
 what the log says are written at their call sites in ``compute_test_metrics``
-(``docs/agents/pipeline-node-design.md`` rules 4 and 9).
+and ``select_shap_population`` (``docs/agents/pipeline-node-design.md`` rules
+4 and 9).
 """
 
 from __future__ import annotations
