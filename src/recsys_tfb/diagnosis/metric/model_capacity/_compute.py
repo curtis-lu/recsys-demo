@@ -282,7 +282,8 @@ def _schema_notes(ledger: dict) -> list[str]:
     if not isinstance(ledger.get("item_id"), dict) or ledger["item_id"].get("gain_sum") is None:
         notes.append(
             "gain_ledger schema 不符：找不到 item_id.gain_sum（預期巢狀區塊 "
-            "'item_id'，見 diagnosis/model/gain_ledger.py 的正式輸出）——"
+            "'item_id'，見 pipelines/training/steps/gain_ledger.py 的 "
+            "ledger_from_trees／coarse_ledger 正式輸出）——"
             "item_id_gain 留空，不假裝算出一個數字。"
         )
     if not ledger.get("fallback") and (
@@ -291,7 +292,8 @@ def _schema_notes(ledger: dict) -> list[str]:
     ):
         notes.append(
             "gain_ledger schema 不符：找不到 context.gain_sum（預期巢狀區塊 "
-            "'context'，見 diagnosis/model/gain_ledger.py 的正式輸出；"
+            "'context'，見 pipelines/training/steps/gain_ledger.py 的 "
+            "ledger_from_trees 正式輸出；"
             "fallback=True 時 context 為 None 是已知合法形狀，不算這裡）——"
             "context_gain 留空，不假裝算出一個數字。"
         )

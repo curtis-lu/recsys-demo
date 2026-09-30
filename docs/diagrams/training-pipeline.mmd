@@ -28,7 +28,7 @@
 %%                  M=model（8 個）、T=train_parquet_handle（4 個）。
 %%                  **V 與 P 是兩份不同的東西，不是同一份的兩個名字**——見下方
 %%                  「為什麼有 V 也有 P」。
-%%   「全月讀回」    這條邊讀回來的是這個 model_version 底下**所有**月份（見下）。
+%%   「只讀 test 月份」這條邊只讀 dataset.test_snap_dates 的月份（ADR-0030 決定 12，見下）。
 %%   「只讀計分月份」 這條邊只讀 test_metrics 的計分月份（ADR-0028，見下）。
 
 %% 為什麼有 V 也有 P——這是本圖第二違反直覺的一件事
@@ -68,13 +68,16 @@
 %%   實際上就是 predict 節點查「哪些分區已經寫過」的那一刻。
 %%   所以圖上三個 subgraph 的分界不是美觀分組，是 Spark 活著／死著的分界。
 
-%% 為什麼 select_shap_population 標「全月讀回」、compute_test_metrics 標「只讀計分月份」
+%% 為什麼 select_shap_population 標「只讀 test 月份」、compute_test_metrics 標「只讀計分月份」
 %%   training_eval_predictions 的 catalog 條目 partition_filter 只鎖 model_version，
 %%   月份沒有任何東西擋，所以這張表裡是這個 model_version 累積過的**所有** test 月份。
-%%   select_shap_population 照單全收（診斷選樣，不裁）。compute_test_metrics 自己裁到
+%%   兩個消費者各自裁。select_shap_population 只讀 dataset.test_snap_dates——這次預測、
+%%   compute_shap_diagnostics 描述的月份——test_model_input 也照同樣的月份裁
+%%   （ADR-0030 決定 12；以前照單全收，成本跟著表的歷史長）。compute_test_metrics 裁到
 %%   計分月份（test_metrics.snap_date，沒寫＝dataset.test_snap_dates；ADR-0028）：
 %%   分數是 promote 挑版本的依據，跟著表裡累積了哪些月份變，兩個版本就可能考不同的
-%%   考卷。表裡其他月份不讀，log 列出略過了哪些（從檔案清單讀，不跑 Spark job）。
+%%   考卷，表裡其他月份它不讀，log 列出略過了哪些（從檔案清單讀，不跑 Spark job）。
+%%   兩邊用同一個比法：當文字比（steps/scored_months.py::restrict_to_scored_months）。
 %%   代價由 steps/predict_months.py::warn_about_surplus_partitions 說出來：item 改名
 %%   留下的 surplus 分區重跑也刪不掉，會一直混進計分月份的 metric，所以那裡發
 %%   warning 而不是靜靜跳過。
@@ -127,12 +130,17 @@
 %%   本圖 node name 一律等於函式名，這點跟 dataset 圖不同（那邊四個 build node 共用
 %%   一個函式），所以沒有「圖名 vs 函式名」的對照問題。
 
-%% 圖上寫不下、但決定產物在不在的兩個 best-effort
+%% 圖上寫不下、但決定產物在不在的幾件事（ADR-0030 決定 4、7）
 %%   quadrant 那一支（select_shap_population → profiles / cases）在
-%%   diagnostics.shap.quadrant_enabled=false 時回 (None, None)，選樣或畫圖失敗也只
-%%   log 不中斷訓練。邊照樣存在，只是流的是 None。
-%%   tune_hyperparameters 的 HPO 搜尋診斷（diagnosis.hpo::write_hpo_diagnostics）同理：
-%%   失敗只 warning。它寫進 diagnostics_dir/hpo/、由 log_experiment 的 log_artifacts
+%%   diagnostics.shap.quadrant_enabled=false 時回 (None, None)，兩個象限 node 也看同一個
+%%   開關、落地 {}。邊照樣存在，只是流的是 None。
+%%   模型做不到的診斷（adapter 丟 UnsupportedCapability）跳過並警告，產物寫成
+%%   {"enabled": true, "supported": false, "reason": ...}；其他錯誤一律讓 training 停下，
+%%   包括 select_shap_population 的 Spark 錯誤與「設定的月份一列都沒對到」。
+%%   某一張圖畫不出來只警告、跳過那一張：由 catalog 的圖 dataset（DiagnosticFiguresDataset，
+%%   shap_summary_figures／case_figures）負責，不在 node 裡吞例外。
+%%   tune_hyperparameters 的 HPO 搜尋診斷（diagnosis.hpo::write_hpo_diagnostics）不一樣：
+%%   它是 best-effort，失敗只 warning。它寫進 diagnostics_dir/hpo/、由 log_experiment 的 log_artifacts
 %%   撿走，是 architecture-constraints.md R4 登記裡唯一「間接寫入、AST 掃不到」的一筆。
 
 %% 已知落差（不是刻意不畫，是還沒補）
@@ -256,14 +264,14 @@ flowchart TB
   o_pred -- "只讀計分月份" --> n_map
   d_manifest -- "拓樸邊：內容只進 log" --> n_map
   n_map --> o_evalres
-  o_pred -- "全月讀回" --> n_selpop
+  o_pred -- "只讀 test 月份" --> n_selpop
   src_test -- "同一張表的第二個讀者<br/>（Spark 直讀，不經快取）" --> n_selpop
   d_manifest -. "純排序依賴：函式沒讀它" .-> n_selpop
   n_selpop --> d_pop
   n_selpop --> d_cases
 
   %% -------------------------- 診斷產物 ---------------------------
-  subgraph DIAG[" 診斷產物：driver-local pandas；quadrant 兩支是 best-effort "]
+  subgraph DIAG[" 診斷產物：driver-local pandas；模型做不到就跳過並寫明，其他錯誤停下 "]
     direction TB
     n_fstat["compute_feature_statistics<br/><small>＋ T · <b>M</b> · P ・ 只讀抽中的列<br/><b>吃 model 是刻意耦合</b>：它把這個 node 推到 finalize_model<br/>之後，接續執行要多付一段（見 test_resume_contracts.py）</small>"] --> o_fstat(["feature_statistics　<b>[L]</b>"])
     n_fimp["compute_feature_importance<br/><small>＋ M</small>"] --> o_fimp(["feature_importance　<b>[L]</b>"])

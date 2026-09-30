@@ -12,8 +12,9 @@ import numpy as np
 import pandas as pd
 
 #: Upper bound on the rows in one item's interventional background. A starting
-#: value, not a config key.
-_BACKGROUND_CAP = 128
+#: value, not a config key. Public because the note ``compute_shap_diagnostics``
+#: writes under ``background: per_item`` states it.
+BACKGROUND_CAP = 128
 
 
 def stratified_item_sample(item_values, total, min_per_item, seed):
@@ -66,11 +67,11 @@ def positive_item_sample(item_values, label_values, per_item, seed):
 
 def per_item_background(X_item, seed):
     """The item's own sub-population (the rows of the foreground sample that
-    belong to the item) as its background; above ``_BACKGROUND_CAP`` rows, a
+    belong to the item) as its background; above ``BACKGROUND_CAP`` rows, a
     fixed-seed ``RandomState`` draws that many without replacement."""
     n = len(X_item)
-    if n <= _BACKGROUND_CAP:
+    if n <= BACKGROUND_CAP:
         return X_item
     rng = np.random.RandomState(seed)
-    idx = rng.choice(n, size=_BACKGROUND_CAP, replace=False)
+    idx = rng.choice(n, size=BACKGROUND_CAP, replace=False)
     return X_item[idx]

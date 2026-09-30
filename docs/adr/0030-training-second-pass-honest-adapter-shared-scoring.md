@@ -242,7 +242,12 @@ catalog 條目宣告的欄名由部署跟著 `schema` 寫。本份不加「catal
 > - **跟上文字面不同的地方**：
 >   - 上文說「搬進 `steps/`，目錄列表就說實話」。`diagnosis/model/` 沒有整個消失，`__init__.py` 與 `paths.py` 留著：上文第三點要 `diagnostics_dir` 留在函式庫。
 >   - log 的 logger 欄位變了（flow 規則 10 的第 5 種）：7 個 node 的 log 記在 `recsys_tfb.pipelines.training.nodes`，帳本那一行記在 `recsys_tfb.pipelines.training.steps.gain_ledger`，以前是 `recsys_tfb.diagnosis.model.*`。訊息文字一字未改（中文那兩行也是），以 logger 名過濾的監控要跟著改。
->   - 中文沒有全部改成英文：`gain_ledger.json` 的 notes、`shap_diagnostics.json` 在 `per_item` 背景下的 notes 是產物內容，兩行 log 訊息是 log 介面，改了就不是行為不變，都照原文留著。`diagnosis/metric/model_capacity/_compute.py` 兩則 notes 裡寫的 `diagnosis/model/gain_ledger.py` 也是產物文字（evaluation 讀到的帳本形狀不對時才出現），同樣沒改，它指向的檔案已經不在。
+>   - 中文沒有全部改成英文：`gain_ledger.json` 的 notes、`shap_diagnostics.json` 在 `per_item` 背景下的 notes 是產物內容，兩行 log 訊息是 log 介面，改了就不是行為不變，都照原文留著。`per_item` 那則 note 裡的「上限 128 列」審查後改由 `steps/item_sampling.py` 的 `BACKGROUND_CAP` 組字串，組出來逐字相同。
+> - **審查後**（三路審查：Standards、Spec、假設 ADR 寫錯）：
+>   - (a) `ledger_from_trees` 留在 `steps/gain_ledger.py`，不拆進 node。它是 gain 帳本這個指標的定義：一次走完每棵樹，同時算出隔離每個 item 花的 gain、隔離之後花在 context 的 gain、條件化之前的 unallocated，跟 evaluation 把 `compute_ap`／`compute_macro_per_item_map` 放在 node 外面是同一個道理；它的輸出形狀又是 evaluation `model_capacity` 讀的約定，所以只寫一份。`compute_gain_ledger` 呼叫它的地方加了一段 `# Decision —`，用 ML 故事的層級說帳本回答什麼。
+>   - (b) `diagnosis/model/` 只剩 `diagnostics_dir`，套件名仍叫模型診斷。審查提過把它併進 `io/models_root.py`、讓整個套件消失，沒做：本決定第三點的理由仍成立（HPO 的搜尋診斷也用它、函式庫不得依賴 pipeline），而 `diagnosis.model.diagnostics_dir` 指的正是模型診斷產物的目錄。
+>   - (c) `data/models` 根在程式裡仍有兩種拼法：`io/models_root.py` 的 `MODELS_ROOT`，與 `__main__.py` 的 `data_dir / "models"`（`training` 三處、`inference` 與 `evaluation` 各一處），加上 catalog 共三份，一致與否都沒有檢查。本票只收了決定 16 點名的兩處（`hpo_study_dir`、`diagnostics_dir`）；`MODELS_ROOT` 的 docstring 列出三份，catalog 的根改了要改的是三處。
+>   - `diagnosis/metric/model_capacity/_compute.py` 兩則 notes 原本指向已刪除的 `diagnosis/model/gain_ledger.py`，改指 `pipelines/training/steps/gain_ledger.py` 的 `ledger_from_trees`／`coarse_ledger`。這兩則只在 evaluation 讀到的帳本形狀不對時出現，正常路徑的產物不變。
 
 ## 決定 7　診斷的圖交給 catalog 存
 

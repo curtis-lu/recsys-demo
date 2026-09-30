@@ -149,6 +149,7 @@ from recsys_tfb.pipelines.training.steps.hpo_scoring import (
     val_composition,
 )
 from recsys_tfb.pipelines.training.steps.item_sampling import (
+    BACKGROUND_CAP,
     per_item_background,
     positive_item_sample,
     stratified_item_sample,
@@ -2151,9 +2152,10 @@ def compute_feature_importance(model, parameters: dict) -> dict:
 
 def compute_gain_ledger(model, preprocessor: dict, parameters: dict) -> dict:
     """The model's split gain accounted per item: what isolating each item
-    costs and how much gain is spent on it afterwards. What each account
-    counts is written in ``steps/gain_ledger.py``; evaluation's
-    ``model_capacity`` reads the result.
+    costs and how much gain is spent on it afterwards. The accounting rules
+    are the ledger's definition as a metric, written once in
+    ``steps/gain_ledger.py`` (see the decision at the call below);
+    evaluation's ``model_capacity`` reads the result.
 
     ``diagnostics.gain_ledger.enabled`` (default true) switched off returns
     ``{"enabled": False}`` without touching the model.
@@ -2197,6 +2199,19 @@ def compute_gain_ledger(model, preprocessor: dict, parameters: dict) -> dict:
         )
         return coarse_ledger(trees, item_col, n_trees)
 
+    # Decision — what the ledger answers: of the gain the model's splits
+    # earn, how much went into isolating each item (the item-id splits), how
+    # much it spent on each item after isolating it (the context splits under
+    # an item split, per item), and how much it spent before conditioning on
+    # any item at all (the unallocated, pre-item splits, by feature). That is
+    # what tells "learned an interaction" from "memorised the item prior".
+    # The accounting rules — one walk down each tree carrying the items that
+    # can still reach a node — are the metric's definition, not a choice this
+    # node makes per run, so they are written once, in steps/gain_ledger.py,
+    # the way evaluation keeps compute_ap / compute_macro_per_item_map outside
+    # its nodes. Their output shape is also the contract evaluation's
+    # model_capacity reads; two copies of the rules could not disagree
+    # without that report silently changing meaning.
     return ledger_from_trees(trees, item_col, list(categories))
 
 
@@ -2410,6 +2425,11 @@ def compute_shap_diagnostics(
             sv_item = None
             prof_all, ai = signed_profile(shap_values[mask], feature_cols, top_k)
         sc = scores[mask]
+        # Decision — divergence_metric "spearman" compares the whole rankings
+        # (Spearman rank correlation); any other value compares the top
+        # divergence_top_k sets (Jaccard). core/consistency.py has no
+        # predicate for this key, so a misspelt "spearman" silently becomes
+        # Jaccard — as it did before #489; not changed here.
         div, idio = divergence(ai, mean_abs, divergence_metric, divergence_top_k, feature_cols)
         # Decision — under per_item the positive profile is the item's
         # label == 1 rows of its own per-item attributions: no extra draw, so
@@ -2471,7 +2491,8 @@ def compute_shap_diagnostics(
     # output has no notes key, as it never had.
     if requested_background == "per_item":
         out["notes"] = [degrade_note] if degrade_note else [
-            "shap background=per_item（interventional，背景=各 item 子母體，上限 128 列）；"
+            "shap background=per_item（interventional，背景=各 item 子母體，"
+            f"上限 {BACKGROUND_CAP} 列）；"
             "divergence 的全域向量仍為 global 背景——占比混入背景效應，判讀見手冊 §12"
         ]
     return out, figures

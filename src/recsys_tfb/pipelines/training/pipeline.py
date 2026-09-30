@@ -207,8 +207,9 @@ def create_pipeline(hpo_enabled: bool = True) -> Pipeline:
         ),
         # P2b quadrant diagnostics: Spark picks the population (top@1 quadrant
         # plus a draw from every cell), then pandas builds a per-(item x
-        # quadrant) signed profile and writes per_quadrant.json on its own.
-        # compute_shap_diagnostics is untouched.
+        # quadrant) signed profile; the quadrant_profiles catalog entry lands
+        # it as per_quadrant.json (ADR-0030 decision 7: the node writes
+        # nothing). compute_shap_diagnostics is untouched.
         Node(
             select_shap_population,
             # predict_manifest is an ordering-only dependency (same convention as

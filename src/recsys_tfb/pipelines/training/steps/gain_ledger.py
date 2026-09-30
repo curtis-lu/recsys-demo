@@ -39,7 +39,8 @@ adapter (ADR-0030 decision 1). A model with no trees raises
 which evaluation's ``model_capacity`` reports as its own reason (decision 4).
 
 The ``notes`` strings are part of ``gain_ledger.json`` and are kept word for
-word; so is the log line.
+word, as is ``ledger_from_trees``'s summary log line. The coarse-ledger
+warning is the node's (``compute_gain_ledger`` in ``nodes.py``).
 """
 
 import logging

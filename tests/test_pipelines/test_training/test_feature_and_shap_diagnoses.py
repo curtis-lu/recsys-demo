@@ -463,7 +463,7 @@ def test_shap_per_item_profile_positive_disabled(shap_setup):
 
 
 def test_per_item_background_cap():
-    from recsys_tfb.pipelines.training.steps.item_sampling import _BACKGROUND_CAP, per_item_background
+    from recsys_tfb.pipelines.training.steps.item_sampling import BACKGROUND_CAP as _BACKGROUND_CAP, per_item_background
     X = np.arange(300).reshape(150, 2).astype(float)
     bg = per_item_background(X, seed=42)
     assert bg.shape[0] == min(150, _BACKGROUND_CAP)
