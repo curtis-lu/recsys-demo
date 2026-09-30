@@ -597,6 +597,27 @@ class TestTrainDataCachePath:
         assert Path(after.bin_path).parent != Path(before.bin_path).parent
         assert len(reads) == 2
 
+    def test_a_model_format_version_bump_moves_the_cache_too(
+        self, tmp_path, monkeypatch,
+    ):
+        """ADR-0030 decision 9's model format version is a segment as well.
+        A change to how these files are built mostly changes the model, so it
+        bumps that version; if the cache's own version was forgotten, the new
+        search would otherwise train on files the old code built — and every
+        later run too. The search reruns anyway; one rebuild is the price."""
+        from recsys_tfb.pipelines.training.steps import train_data_cache
+
+        before, _ = self._build(tmp_path, _train_params(tmp_path / "cache"))
+        monkeypatch.setattr(
+            train_data_cache, "TRAINING_MODEL_FORMAT_VERSION",
+            train_data_cache.TRAINING_MODEL_FORMAT_VERSION + 1)
+        reads = self._count_matrix_reads(monkeypatch)
+
+        after, _ = self._build(tmp_path, _train_params(tmp_path / "cache"))
+
+        assert Path(after.bin_path).parent != Path(before.bin_path).parent
+        assert len(reads) == 2
+
     def test_a_directory_without_the_marker_is_rebuilt(self, tmp_path, monkeypatch):
         """An interrupted build leaves files and no marker. Its files are
         whatever landed before it died; they are dropped, not read."""

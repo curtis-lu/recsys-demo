@@ -48,7 +48,14 @@ ls -1 data/models/          # 目錄名就是 model_version
 
 **`train_variant_id` 一定要一起抄。** 只比對 `base_dataset_version` 會漏掉一整類錯誤——原因寫在步驟 2。
 
-**③ 框架升級之後、重訓之前，這套流程用不了。** 升級的框架若把「dataset 產物格式版本」加了 1（`core/versioning.py` 的 `DATASET_ARTIFACT_FORMAT_VERSION`；升級前後比對這個值），每個部署的 `base_dataset_version` 都會換掉。新版本還沒建，步驟 2 的 `--only-test-months` 會在開跑前被擋下（A55），training 算出的 `model_version` 也不再是現役模型的。先照 [dataset 手冊 §7.4](../../pipelines/dataset.md#74-修改設定時要重跑什麼) 重建 dataset、重訓，之後才能對新模型用這套流程。已經部署的推論與評估讀的是模型 manifest 記的版本，不受影響。
+**③ 框架升級之後、重訓之前，這套流程用不了。** 升級前後比對 `core/versioning.py` 的兩個值。任一個加了 1，training 算出的 `model_version` 就不再是現役模型的：
+
+- **dataset 產物格式版本**（`DATASET_ARTIFACT_FORMAT_VERSION`）：每個部署的 `base_dataset_version` 都會換掉。新版本還沒建，步驟 2 的 `--only-test-months` 會在開跑前被擋下（A55）。先照 [dataset 手冊 §7.4](../../pipelines/dataset.md#74-修改設定時要重跑什麼) 重建 dataset，再重訓。
+- **training 模型格式版本**（`TRAINING_MODEL_FORMAT_VERSION`）：dataset 不受影響，步驟 2 照常，但步驟 3 算出的 `model_version` 底下沒有模型，`--only-node` 會把超參數搜尋與訓練一起拉回來——那是重訓。先重訓。
+
+重訓之後才能對新模型用這套流程。已經部署的推論與評估讀的是模型 manifest 記的版本，不受影響。
+
+同一個檔的 **training 預測格式版本**（`TRAINING_PREDICTION_FORMAT_VERSION`）加了 1 不擋這套流程，也不重訓；只是步驟 3 會把所有月份的預測重寫一次（見步驟 3 的「成功的話」）。
 
 ## 步驟 1：把新月份加進設定
 
@@ -125,6 +132,14 @@ python -m recsys_tfb training \
 ```
 [months] predict: processed=2026-02-28 skipped=2026-01-31 rebuilt=-
 ```
+
+框架升級時把「training 預測格式版本」加了 1 的話（步驟 ③ 最後一段），這一輪會把**每個**月份都重寫：`processed` 列出所有月份、`skipped` 是 `-`，前面還有舊月份各一行警告：
+
+```
+[months] predict: 2026-01-31 is complete, but its predictions were recorded in prediction format 1, not 2 (this code's TRAINING_PREDICTION_FORMAT_VERSION); re-predicting it.
+```
+
+這是預期的，只會發生這一次：評分程式改了、模型沒變，舊月份的預測要用新程式重寫。模型沒有重訓——「跑完了，怎麼確認真的成功」第 1 件照樣成立。
 
 **最常壞的一種**：拋 `FileNotFoundError`，路徑裡帶著新月份。
 
@@ -237,6 +252,7 @@ python scripts/promote_model.py --env production --dry-run
 | `base_dataset_version` 或 `train_variant_id` 跟你抄下來的不一樣，但沒被擋下 | 這次還改到了別的設定，而且剛好對到一個以前建過的版本。把那些改動還原，只留新增的月份 |
 | `FileNotFoundError`，路徑帶著新月份 | 步驟 2 沒跑成功。回去重跑步驟 2 |
 | `No predictions found for evaluation.snap_date` | 步驟 3 沒跑。回去重跑步驟 3 |
+| 步驟 3 把舊月份也重寫了，log 有 `recorded in prediction format ..., not ...` | 框架升級改了評分程式（training 預測格式版本加了 1）。預期的，只有這一次；模型沒重訓（步驟 3） |
 | `test month '<月份>' ... has no rows in the test cache` | 這個月在設定裡但 dataset 還沒產出它。先跑步驟 2 |
 | 訊息帶 `(A24) ... name the same calendar day` | 這個月份已經在 train／val 其中一組裡了。從不該擁有它的那一組移除 |
 | promote `--dry-run` 把每個版本都列在 `Not ranked`，原因是 `scored on [...], not on the current scored months [...]` | 加月份之前沒固定計分月份。把 `test_metrics.snap_date` 寫成原本的月份（步驟 1 開頭） |

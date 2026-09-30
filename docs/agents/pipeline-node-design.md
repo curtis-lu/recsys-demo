@@ -4,7 +4,7 @@
 
 **這份不管位置合不合法。** 那是 [`architecture-constraints.md`](architecture-constraints.md) 的事，那份的每一條都有 `tests/test_core/test_architecture_constraints.py` 把關。這份管的是內容，而內容**幾乎沒有機械檢查**——測試全綠不代表符合這份，理由見〈這些規則大多沒人擋得住〉。兩份都要讀。
 
-**規則從哪來**：第一節與第二節多數條目是 [ADR-0008](../adr/0008-dataset-modules-split-by-role.md) §2、§3 在 dataset pipeline 上裁決的結果，這裡把它們一般化成跨 pipeline 的判準，並成為判準本身的唯一真實來源；ADR-0008 保留為 2026-08-05 那次決策的完整論證。規則 10 與規則 13 標了「首次寫下」，那是從既有程式碼讀出來、之前只活在某個模組 docstring 裡的慣例。規則 14–18 來自 dataset 的第二輪整理（[ADR-0029](../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md)）：ADR-0008 之後，dataset 加了十幾個功能，有幾種形狀一再長歪，這五條就是把它們寫成明文。
+**規則從哪來**：第一節與第二節多數條目是 [ADR-0008](../adr/0008-dataset-modules-split-by-role.md) §2、§3 在 dataset pipeline 上裁決的結果，這裡把它們一般化成跨 pipeline 的判準，並成為判準本身的唯一真實來源；ADR-0008 保留為 2026-08-05 那次決策的完整論證。規則 10 與規則 13 標了「首次寫下」，那是從既有程式碼讀出來、之前只活在某個模組 docstring 裡的慣例。規則 14–18 來自 dataset 的第二輪整理（[ADR-0029](../adr/0029-dataset-second-pass-scoped-reads-symmetric-splits.md)）：ADR-0008 之後，dataset 加了十幾個功能，有幾種形狀一再長歪，這五條就是把它們寫成明文。規則 18 在 training 的第二輪整理擴充到 training 的三個常數（[ADR-0030](../adr/0030-training-second-pass-honest-adapter-shared-scoring.md) 決定 9）。
 
 **詞彙**：query group、候選層級特徵表、month plan、資料閘、不變量代號（A 系列、B 系列）這些詞的意思，在 repo 根目錄的 [`CONTEXT.md`](../../CONTEXT.md)。
 
@@ -35,7 +35,7 @@
 | [15](#15-node-自己算得出來的值不從-cli-注入) | node 自己算得出來的值，不從 CLI 注入 | 注入的每一項，node 真的算不出來嗎？一行設定值或 node 已經收到的輸入算得出來，就不注入 | 沒人，只能人看 |
 | [16](#16-同一件事各-split-用同一個機制不對稱要寫理由而且理由不能是這個不對稱自己造成的) | 同一件事，各 split 用同一個機制；不對稱要寫理由，而且理由不能是這個不對稱自己造成的 | 假設這個不對稱不存在，docstring 寫的理由還成立嗎 | 沒人，只能人看 |
 | [17](#17-資料閘的-node-只寫查什麼與交給誰判斷收集事實與組報告進-steps) | 資料閘的 node 只寫「查什麼」與「交給誰判斷」；收集事實與組報告進 `steps/` | node body 裡有沒有巢狀函式、讀檔尾、組報告，或自己判斷有沒有違反不變量；決策（查什麼、政策、前置檢查）要留在 node | 沒人，只能人看 |
-| [18](#18-程式改了-dataset-落地的內容某個部署的設定卻沒動時把-dataset_artifact_format_version-加-1) | 程式改了 dataset 落地的內容、某個部署的設定卻沒動時，把 `DATASET_ARTIFACT_FORMAT_VERSION` 加 1 | 有沒有哪一份合法的設定與資料，改動前後寫出來的內容不一樣？包括 dataset import 的模組 | 沒人，只能人看 |
+| [18](#18-程式改了落地的內容某個部署的設定卻沒動時把對應的格式版本加-1) | 程式改了落地的內容、某個部署的設定卻沒動時，把對應的格式版本加 1（dataset 產物、training 模型、training 預測、`.bin` 快取，四個常數） | 有沒有哪一份合法的設定與資料，改動前後寫出來的內容不一樣？包括 import 的模組；改 `.bin` 內容多半也改模型，兩個都要加 | 沒人，只能人看 |
 
 外加一條體例：**程式碼註解與 docstring 一律英文**（對齊既有全部模組），**`docs/` 一律繁體中文**。
 
@@ -662,27 +662,43 @@ return report
 
 **誰擋得住**：沒有機械檢查。
 
-## 18. 程式改了 dataset 落地的內容、某個部署的設定卻沒動時，把 `DATASET_ARTIFACT_FORMAT_VERSION` 加 1
+## 18. 程式改了落地的內容、某個部署的設定卻沒動時，把對應的格式版本加 1
 
-dataset 的版本 ID（`base_dataset_version`）是拿設定算出來的雜湊。程式碼改了，它不會變。
+版本 ID 與快取路徑是拿設定算出來的雜湊。程式碼改了，它們不會變。
 
 先定兩個詞：
 
 - **部署**：一份設定（`conf/`）跑起來的一個實例。repo 裡的銀行示例、廣告示例各是一個；生產上的每一份設定也各是一個。
-- **落地內容**：版本 ID 底下、下游（training、evaluation、inference）會讀的表與檔，例如各 split 的 keys 與 model_input、`preprocessor.json`、`preprocessed_feature_table`。指的是資料本身（有哪些列、每一列的值），不含列的順序或檔案怎麼切。
+- **落地內容**：版本 ID 或快取路徑底下、之後會被讀的表與檔，例如 dataset 各 split 的 keys 與 model_input、`preprocessor.json`，training 的模型、test 預測、`.bin` 快取。指的是資料本身（有哪些列、每一列的值），不含列的順序或檔案怎麼切——`.bin` 例外，見下面「一個改動常常要加不只一個」。
 
-**規則**：程式改了 dataset pipeline 的落地內容，而某個部署的設定沒動時，把 `core/versioning.py` 的 `DATASET_ARTIFACT_FORMAT_VERSION` 加 1。它是雜湊的輸入之一，加 1 就讓每個部署的版本 ID 都換一個。**要跟那個改動同一次發布上線。**
+**規則**：程式改了下表某一列的內容，而某個部署的設定沒動時，把那一列的常數加 1。**要跟那個改動同一次發布上線。**
+
+| 常數 | 在哪 | 什麼改了要加 1 | 加 1 之後 |
+|---|---|---|---|
+| `DATASET_ARTIFACT_FORMAT_VERSION` | `core/versioning.py` | dataset 落地的內容：各 split 的 keys 與 model_input、`preprocessor.json`、`preprocessed_feature_table` | 每個部署的 `base_dataset_version` 換一個，dataset 全部重建；`model_version`、HPO 的 `search_id` 都含它，所以每個部署都重訓 |
+| `TRAINING_MODEL_FORMAT_VERSION` | `core/versioning.py` | HPO 一個 trial 的分數，或 training 訓練出來的模型 | `model_version` 與 `search_id` 換一個：HPO 從頭搜、重訓、test 預測全部重寫。它也是 `.bin` 快取路徑的一段，所以 `.bin` 也重建 |
+| `TRAINING_PREDICTION_FORMAT_VERSION` | `core/versioning.py` | training 寫出的 test 預測，模型卻不變——例如為了 inference 改了兩邊共用的評分程式 | 不換任何版本 ID、不重訓。predict 在 `predict_manifest.json` 替每個月記了這個值，下次跑時記的值不同，所有月份的 test 預測重寫 |
+| `TRAIN_DATA_CACHE_FORMAT_VERSION` | `pipelines/training/steps/train_data_cache.py` | `.bin` 快取目錄裡的東西：哪些列、列的順序、欄怎麼編碼、sidecar 記了什麼 | 只換快取路徑：第一次跑重建一次 `.bin` |
 
 要問的不是「這個改動有沒有動到設定」，而是：**有沒有哪一份合法的設定與資料，改動前後寫出來的內容不一樣？** 有一份就要加。只在某種資料才會變的也算，例如只在 entity 有 NULL 時才不同。兩個容易漏的範圍：
 
 - **新增一個設定鍵、預設值又跟舊行為不同**：這個改動「動了設定」，但沒寫那個鍵的部署，雜湊的輸入一個字都沒變，內容卻變了。
-- **「dataset 的程式」包括它 import 的模組**，不只 `pipelines/dataset/`。例如多欄 item 的分隔字元 `ITEM_SEPARATOR` 在 `core/schema.py`；改它，keys、model_input 與 `preprocessor.json` 都會變。
+- **「某條 pipeline 的程式」包括它 import 的模組**，不只 `pipelines/<那一條>/`。例如多欄 item 的分隔字元 `ITEM_SEPARATOR` 在 `core/schema.py`；改它，dataset 的 keys、model_input 與 `preprocessor.json` 都會變。training 的評分入口在 `models/`、寫出前的組表在 `score_output.py`，inference 也用它們。
+
+**一個改動常常要加不只一個**：
+
+- **改了 `.bin` 的內容，多半也改了模型**：只把 query group 裡的列換個順序，lambdarank 的模型就會變（`TRAIN_DATA_CACHE_FORMAT_VERSION` 的 docstring 記了實測）。所以 `.bin` 的列順序算內容。兩個都要加。只加快取的那個，`search_id` 不變，接續的搜尋會把新舊檔案上跑出來的 trial 混在一起。只加模型的那個不會出錯：它是快取路徑的一段，`.bin` 會跟著重建。
+- **改了模型，預測一定跟著變**：只加模型的那個。它換了 `model_version`，所有預測本來就會重寫。
+- **只改了預測、模型不變**：只加預測的那個。加成模型的那個結果也對，但每個部署都要從頭跑 HPO（生產上是小時級）。
 
 ### 不照做會怎樣
 
-新舊程式寫的內容，掛在同一個版本 ID 底下。test 月份是累積的：每次只寫新的月份，舊的不重寫。所以同一張 `test_keys`、同一個版本 ID 底下，舊月份是舊程式寫的，新月份是新程式寫的，而且不報錯。
+新舊程式寫的內容，掛在同一個版本 ID 或同一個快取路徑底下，而且不報錯。
 
-實例：ADR-0029 決定 4 讓 `test_keys` 變成「丟過無正例組的」。如果沒有加 1，同一個 ID 底下，舊月份沒丟過組、新月份丟過組。
+- **dataset**：test 月份是累積的，每次只寫新的月份，舊的不重寫。所以同一張 `test_keys`、同一個版本 ID 底下，舊月份是舊程式寫的，新月份是新程式寫的。實例：ADR-0029 決定 4 讓 `test_keys` 變成「丟過無正例組的」。如果沒有加 1，同一個 ID 底下，舊月份沒丟過組、新月份丟過組。
+- **training 模型**：HPO 續跑接上舊程式跑出來的 trial；test 預測跳過已寫過的月份，於是同一個 `model_version` 底下，舊月份是舊模型的預測、新月份是新模型的。
+- **training 預測**：同上，已寫過的月份被跳過，新舊評分程式寫的預測混在同一個版本底下。
+- **`.bin` 快取**：路徑存在、有 `_SUCCESS` 就直接用，新程式讀到舊程式建的檔案。
 
 ### 今天的樣子
 
@@ -690,19 +706,35 @@ dataset 的版本 ID（`base_dataset_version`）是拿設定算出來的雜湊�
 
 ```python
 DATASET_ARTIFACT_FORMAT_VERSION: int = 1
+TRAINING_MODEL_FORMAT_VERSION: int = 1
+TRAINING_PREDICTION_FORMAT_VERSION: int = 1
 ```
 
-它和設定一起進 `base_dataset_version` 的雜湊（鍵名 `dataset_artifact_format_version`）。什麼時候要加 1，那個模組的 docstring 用英文寫了同一條規則；兩邊有出入時，以 docstring 為準（`docs/agents/domain.md` 對版本 ID 的慣例）。
+`pipelines/training/steps/train_data_cache.py`：
 
-**代價要先講清楚**：加 1 之後，每個部署的版本 ID 都變，dataset 全部重建。模型版本（`model_version`）與 HPO 的搜尋 ID 都含這個 ID，所以每個部署都要重訓。重訓之前，「不重訓、只加評估月份」的流程（[`adding-an-eval-month.md`](../operations/user-guides/adding-an-eval-month.md)）對正在用的模型失效。
+```python
+TRAIN_DATA_CACHE_FORMAT_VERSION: int = 1
+```
 
-**同一次發布只要加一次**：生產只在發布時重建。所以動手前，先比對最新的發布 tag（`git tag -l 'v*'`）裡這個常數的值（沒有這個常數算 0）：main 上的值已經比它大，表示這次發布本來就會重建，不必再加；一樣大，就加 1。維護分支（`release/*`）上的修正若改了落地內容，要取一個 main 從沒用過的值；否則兩邊各自加到同一個數，內容不同、ID 卻相同。
+第一個和設定一起進 `base_dataset_version` 的雜湊（鍵名 `dataset_artifact_format_version`）；第二個進 `model_version` 與 `search_id` 的雜湊（鍵名 `training_model_format_version`），也是 `.bin` 路徑的 `model_format_v<M>` 那一段；第三個不進任何雜湊，predict 把它記進 `predict_manifest.json` 的 `prediction_format_versions`；第四個是 `.bin` 路徑的 `train_data_v<N>` 那一段。什麼時候要加 1，`core/versioning.py` 的模組 docstring 與 `TRAIN_DATA_CACHE_FORMAT_VERSION` 的 docstring 用英文寫了同一條規則；兩邊有出入時，以 docstring 為準（`docs/agents/domain.md` 對版本 ID 的慣例）。
+
+**代價要先講清楚**：
+
+- dataset 的加 1 之後，每個部署的版本 ID 都變，dataset 全部重建，而且每個部署都要重訓。
+- training 模型的加 1 之後，每個部署都要從頭跑 HPO、重訓。
+- 這兩種加 1 之後、重訓之前，「不重訓、只加評估月份」的流程（[`adding-an-eval-month.md`](../operations/user-guides/adding-an-eval-month.md)）對正在用的模型失效。
+- training 預測的加 1 只多花一次預測：每個部署下次跑 predict 時，所有 test 月份重寫一次。
+- `.bin` 快取的加 1 只多花一次建 `.bin`；舊目錄留在磁碟上，要手動刪。
+
+**同一次發布只要加一次**：生產只在發布時重建。所以動手前，先比對最新的發布 tag（`git tag -l 'v*'`）裡這個常數的值（沒有這個常數算 0）：main 上的值已經比它大，表示這次發布本來就會重建，不必再加；一樣大，就加 1。四個常數各比各的。維護分支（`release/*`）上的修正若改了落地內容，要取一個 main 從沒用過的值；否則兩邊各自加到同一個數，內容不同、ID 卻相同。
 
 ### 為什麼不是「接受同一個 ID 下內容改變」
 
 版本 ID 的用處是「同一個 ID 就是同一份資料」。讓它在部分部署失效，比多重建一次更難察覺：新舊月份混在一起時，沒有任何東西會報錯。
 
-**誰擋得住**：沒有機械檢查。「這個改動會不會改變落地內容」是判斷題，實作規格與 PR 審查要逐張問。有人提過一個部分擋法（PR #472 的審查）：廣告示例的端到端腳本（`examples/ad/run_e2e.sh`）會把各產物的指紋（digest）和存好的基準（`baseline_digest.json`）比對；可以再加一條，dataset 那一層的指紋變了、base 版本號卻沒變，就擋下。沒有做。
+training 為什麼分模型、預測兩個常數，而不是一個：只有一個的話，為了 inference 改一行評分程式，每個部署都要從頭跑 HPO。`.bin` 快取為什麼又自己一個：快取的格式改了（例如 sidecar 多一個欄位）不一定改變模型，跟模型共用一個常數會逼每個部署重訓。理由都在 ADR-0030 決定 9、10。
+
+**誰擋得住**：沒有機械檢查。「這個改動會不會改變落地內容」是判斷題，實作規格與 PR 審查要逐張問。有人提過一個部分擋法（PR #472 的審查）：廣告示例的端到端腳本（`examples/ad/run_e2e.sh`）會把各產物的指紋（digest）和存好的基準（`baseline_digest.json`）比對；可以再加一條，某一層的指紋變了、那一層的版本號卻沒變，就擋下。沒有做。
 
 ---
 

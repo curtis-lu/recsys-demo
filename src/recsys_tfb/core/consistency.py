@@ -664,21 +664,26 @@ Layer 1 — config-static (implemented here; aggregated by
   (``run_contract.unlanded_train_tables``, which also asks for
   ``train_dev_model_input`` unless ``train_dev_ratio`` is 0) — a rule, not an
   invariant, so it carries no A-code.
-* A56 — a catalog entry ``preprocessor_on_disk`` written by the deployment
-  must name the ``preprocessor`` entry's file (ADR-0029 decision 13). It is
-  the second name ``fit_preprocessor_metadata`` reads that file under before
-  overwriting it (a node may not read and write one name), and evaluation's
-  ``prepare_eval_data`` reads the evaluated model's list through it. The entry
-  is optional because the file does not exist before a version's first run,
-  so a path to anywhere else loads as ``None``, B19 takes it for a first run
-  and checks nothing. The CLI derives the entry from ``preprocessor`` when the
-  catalog leaves it out, which is the normal case; this catches the one left
-  over. Predicate: ``preprocessor_on_disk_path_errors`` (returns errors). The
-  CLI hands in the two filepaths when it builds the catalog for a pipeline
-  whose nodes read the entry — before any node runs, and before
-  ``--dry-run`` / ``--list-nodes`` return; this module never reads the
-  catalog (A28's reason). NOT aggregated, for A28's reason too: it needs the
-  resolved catalog.
+* A56 — a ``*_on_disk`` catalog entry written by the deployment must name the
+  file of the entry it reads: ``preprocessor_on_disk`` that of
+  ``preprocessor`` (ADR-0029 decision 13), ``predict_manifest_on_disk`` that
+  of ``predict_manifest`` (ADR-0030 decision 9). Each is the second name a
+  node reads a file under before overwriting it (a node may not read and
+  write one name): ``fit_preprocessor_metadata`` compares the item list
+  (B19), and evaluation's ``prepare_eval_data`` reads the evaluated model's
+  list, through the first; training's predict node reads the prediction
+  format each month was written in through the second. The entry is optional
+  because the file does not exist before a version's first run, so a path to
+  anywhere else loads as ``None`` and its reader takes every run for the
+  first: B19 checks nothing, and every month is re-predicted on every run.
+  The CLI derives the entry from its source when the catalog leaves it out,
+  which is the normal case; this catches the one left over. Predicate:
+  ``on_disk_entry_path_errors`` (returns errors). The CLI hands in the two
+  names and filepaths when it builds the catalog for a pipeline whose nodes
+  read the entry — before any node runs, and before ``--dry-run`` /
+  ``--list-nodes`` return; this module never reads the catalog (A28's
+  reason). NOT aggregated, for A28's reason too: it needs the resolved
+  catalog.
 * A57 — ``training.algorithm`` names no registered adapter (#387's training
   row, ADR-0030 decision 3). The check reads the registry the training nodes
   dispatch on, so an algorithm cannot pass here and be missing there, and
@@ -718,7 +723,7 @@ harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--
 + the filesystem), A35 (the ``--var`` CLI flags), A55 (``--only-test-months`` + the
 metastore). A56 needs the resolved catalog too, but hangs off no single command:
 the CLI checks it where it builds the catalog, for every pipeline whose nodes
-read ``preprocessor_on_disk``.
+read a ``*_on_disk`` entry.
 
 Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12
 + B13 + B14 + B15 + B16 + B17 + B18 + B19 implemented and wired):
@@ -5736,35 +5741,34 @@ def train_version_landed_errors(
     ]
 
 
-def preprocessor_on_disk_path_errors(
-    preprocessor_filepath: str, on_disk_filepath: str,
+def on_disk_entry_path_errors(
+    on_disk: str, source: str, source_filepath: str, on_disk_filepath: str,
 ) -> list[str]:
-    """(A56) ``preprocessor_on_disk`` must name ``preprocessor``'s file.
+    """(A56) The ``on_disk`` entry must name the ``source`` entry's file.
 
     Returns error strings (empty list when fine); the CLI stops the run.
 
     Only reached when a deployment's catalog writes the entry itself: left
-    out, the CLI derives it from ``preprocessor`` and there is nothing to
-    compare. Written, it has to be the same file, because the entry is
-    optional (the file does not exist before a version's first run): a path to
-    anywhere else loads as ``None``, and ``fit_preprocessor_metadata`` takes
-    that for a first run and skips the item-list comparison (B19) without a
-    word.
+    out, the CLI derives it from ``source`` and there is nothing to compare.
+    Written, it has to be the same file, because the entry is optional (the
+    file does not exist before a version's first run): a path to anywhere
+    else loads as ``None``, and the node reading it takes that for a first
+    run without a word — ``fit_preprocessor_metadata`` skips the item-list
+    comparison (B19), the predict node re-predicts every month.
 
     Paths are compared as paths, so ``./`` or a doubled slash is the same
     file. The strings are the resolved ones, ``${...}`` already substituted.
     """
-    if Path(preprocessor_filepath) == Path(on_disk_filepath):
+    if Path(source_filepath) == Path(on_disk_filepath):
         return []
     return [
-        f"(A56) catalog entry 'preprocessor_on_disk' reads "
-        f"{on_disk_filepath!r}, but 'preprocessor' writes "
-        f"{preprocessor_filepath!r}. The two names are one file: the fit reads "
-        f"it under the second name before overwriting it, to compare the item "
-        f"list (B19). The entry is optional, so from another path it loads as "
-        f"nothing and that comparison is skipped in silence. Remove the "
-        f"'preprocessor_on_disk' entry — the CLI derives it from "
-        f"'preprocessor' — or give it the same filepath."
+        f"(A56) catalog entry {on_disk!r} reads {on_disk_filepath!r}, but "
+        f"{source!r} writes {source_filepath!r}. The two names are one file: "
+        f"a node reads it under the second name before it is overwritten "
+        f"under the first. The entry is optional, so from another path it "
+        f"loads as nothing and that node takes every run for the first one, "
+        f"in silence. Remove the {on_disk!r} entry — the CLI derives it from "
+        f"{source!r} — or give it the same filepath."
     ]
 
 

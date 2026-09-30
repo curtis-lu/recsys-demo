@@ -71,6 +71,35 @@ evaluation month to the model in service does not work
 this mechanically; rule 18 of ``docs/agents/pipeline-node-design.md`` states
 it where whoever changes a dataset node reads first.
 
+Training has the same gap twice over, with two premises that break silently
+when code changes and config does not: "one ``search_id``'s trials can be
+resumed" (HPO) and "one ``model_version``'s test predictions do not change"
+(predict skips a month it already wrote). Two integers close it, rather than
+one, because the two re-runs they force differ by hours (ADR-0030
+decision 9):
+
+- ``TRAINING_MODEL_FORMAT_VERSION`` — **add 1 when a code change alters, for
+  some deployment whose config it leaves as it was, what an HPO trial scores
+  or the model training fits.** It is in the payload of both ``model_version``
+  and ``search_id``, so every deployment searches again, retrains and writes
+  its test predictions afresh. It is a segment of the ``.bin`` cache's path
+  too (``pipelines/training/steps/train_data_cache.py``), so a bump for a
+  change to how those files are built rebuilds them even if their own format
+  version was forgotten.
+- ``TRAINING_PREDICTION_FORMAT_VERSION`` — **add 1 when a code change alters
+  the test predictions training writes, for some deployment whose config it
+  leaves as it was, while the model stays the same** — typically the scoring
+  code training shares with inference, changed for inference's sake. It is in
+  no ID: the predict node records it per month in ``predict_manifest`` and
+  re-predicts every month recorded in another one, and nothing retrains.
+  Keeping it out of ``model_version`` is also what keeps a scoring change from
+  moving inference's version.
+
+The rule-18 questions carry over: ask per deployment, of every module the code
+path imports, and ask whether output would change — not whether code did. A
+change that alters the model alters its predictions too; that one raises the
+model version only, which re-predicts everything anyway.
+
 Also provides manifest generation, symlink management, and version resolution
 for dataset, training, and inference pipelines.
 """
@@ -155,6 +184,16 @@ GATE_POLICY_KEYS: frozenset[str] = frozenset({"numeric_precision_policy"})
 #: Add 1 when a code change alters what the dataset pipeline lands for a config
 #: that did not change (module docstring; ADR-0029 decision 15).
 DATASET_ARTIFACT_FORMAT_VERSION: int = 1
+
+#: Add 1 when a code change alters what an HPO trial scores or the model
+#: training fits, for a config that did not change (module docstring;
+#: ADR-0030 decision 9). Moves ``model_version`` and ``search_id``.
+TRAINING_MODEL_FORMAT_VERSION: int = 1
+
+#: Add 1 when a code change alters the test predictions training writes but
+#: not the model (module docstring; ADR-0030 decision 9). Moves no ID; the
+#: predict node re-writes every month recorded under another value.
+TRAINING_PREDICTION_FORMAT_VERSION: int = 1
 
 
 # Keys under training.algorithm_params that do NOT affect the trained model
@@ -259,18 +298,25 @@ def _model_version_payload(params: dict) -> dict:
     dropped. A new key *under* ``training:`` defaults to being included — safe
     over-invalidation, never a silent ``model_version`` collision.
 
+    ``TRAINING_MODEL_FORMAT_VERSION`` is always in the payload, beside the
+    ``training:`` block rather than inside it: it is not config, and
+    ``compute_search_id`` strips keys from that block only.
+
     Deep-copies so the caller's params dict is never mutated: the full,
     unscoped params are still written to ``manifest.json`` for provenance.
     """
+    payload: dict = {
+        "training_model_format_version": TRAINING_MODEL_FORMAT_VERSION,
+    }
     training = params.get("training")
-    if not isinstance(training, dict):
-        return {}
-    training = copy.deepcopy(training)
-    ap = training.get("algorithm_params")
-    if isinstance(ap, dict):
-        for key in MODEL_VERSION_IRRELEVANT_PARAMS:
-            ap.pop(key, None)
-    return {"training": training}
+    if isinstance(training, dict):
+        training = copy.deepcopy(training)
+        ap = training.get("algorithm_params")
+        if isinstance(ap, dict):
+            for key in MODEL_VERSION_IRRELEVANT_PARAMS:
+                ap.pop(key, None)
+        payload["training"] = training
+    return payload
 
 
 def compute_model_version(

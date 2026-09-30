@@ -124,11 +124,11 @@ dataset 產物的版本身分。精確定義：`src/recsys_tfb/core/versioning.p
 **dataset 產物格式版本**:
 框架自己的一個整數，進 base_dataset_version 的雜湊。程式改了 dataset 落地的內容、設定卻沒動時加 1，讓每個部署的版本身分都換一次。精確定義：`src/recsys_tfb/core/versioning.py` 的 `DATASET_ARTIFACT_FORMAT_VERSION` 與模組 docstring。
 
-**training 模型格式版本**（ADR-0030，尚未實作）:
-框架自己的一個整數，進 model_version 的雜湊，也進 HPO 用來判斷能不能接著上次搜尋的那個身分。程式改了、設定沒動，而 HPO 的 trial 分數或訓練出的模型會因此不同時加 1。是 dataset 產物格式版本在 training 的對應物。
+**training 模型格式版本**:
+框架自己的一個整數，進 model_version 的雜湊，也進 HPO 用來判斷能不能接著上次搜尋的那個身分。程式改了、設定沒動，而 HPO 的 trial 分數或訓練出的模型會因此不同時加 1。是 dataset 產物格式版本在 training 的對應物。精確定義：`src/recsys_tfb/core/versioning.py` 的 `TRAINING_MODEL_FORMAT_VERSION` 與模組 docstring。
 
-**training 預測格式版本**（ADR-0030，尚未實作）:
-框架自己的一個整數，記在 training 的 test 預測旁邊，不進任何版本身分。程式改了會讓寫出的 test 預測不同、但模型不變時加 1；記錄的值跟程式不同時，所有月份的預測重寫，不重訓。
+**training 預測格式版本**:
+框架自己的一個整數，不進任何版本身分；predict 把它逐月記進 `predict_manifest.json`。程式改了會讓寫出的 test 預測不同、但模型不變時加 1；某個月記錄的值跟程式不同（或沒有記錄）時，那個月的預測重寫，不重訓。精確定義：`src/recsys_tfb/core/versioning.py` 的 `TRAINING_PREDICTION_FORMAT_VERSION` 與模組 docstring。
 
 **不變量代號**:
 一致性規則的編號：A 系列檢查設定，B 系列檢查資料。精確定義與完整清單：`src/recsys_tfb/core/consistency.py` 模組 docstring 的 Invariant legend。

@@ -248,7 +248,11 @@ hpo_best_model:
 # ⚠ 落地的代價：切片會從磁碟載回**上一次** run 的 manifest 而不再補跑 predict。
 # 今天是安全的，因為兩個消費者都只拿它當 DAG 排序依賴——compute_test_metrics
 # 把它寫進 log（數字讀回來的是上一次的），select_shap_population 連讀都沒讀。
-# 哪天有人真的從裡面取值來算東西，這個條目就變成正確性風險，要一起重審。
+# 唯一從裡面取值的是 predict 自己的下一次執行：它用第二個名字
+# predict_manifest_on_disk 讀回每個月的預測格式版本（ADR-0030 決定 9；node 不能
+# 讀自己的輸出，A6）。那個條目由 CLI 從這一條推出，不用寫；寫了的話 filepath
+# 必須跟這一條相同（A56）。它要的正是上一次跑完時留下的這一份，所以不是風險。
+# 再有別人從裡面取值來算東西，這個條目就要一起重審。
 # 位置與 sample_weight_report 同理：版本目錄第一層，放進 diagnostics/ 就會從
 # manifest.json 的 artifacts 清單裡靜默消失（__main__._dir_artifacts 只列第一層）。
 predict_manifest:

@@ -153,6 +153,7 @@ def test_predict_and_write_emits_one_save_per_partition(tmp_path):
         test_parquet_handle=handle,
         preprocessor_metadata=_make_prep_meta(),
         parameters=_make_parameters(),
+        predict_manifest_on_disk=None,
         training_eval_predictions=write_ds,
     )
 
@@ -210,6 +211,7 @@ def test_predict_and_write_score_uncalibrated_equals_score(tmp_path):
         test_parquet_handle=handle,
         preprocessor_metadata=_make_prep_meta(),
         parameters=_make_parameters(),
+        predict_manifest_on_disk=None,
         training_eval_predictions=write_ds,
     )
 
@@ -269,6 +271,7 @@ def test_predict_covers_every_month_when_given_a_per_month_mapping(tmp_path):
         test_parquet_handle=handles,
         preprocessor_metadata=_make_prep_meta(),
         parameters=_make_parameters(),
+        predict_manifest_on_disk=None,
         training_eval_predictions=write_ds,
     )
 
@@ -337,14 +340,37 @@ def _params_with_test_dates(test_snap_dates, rebuild=None) -> dict:
     return params
 
 
-def _predict(handles, params, write_ds):
+def _manifest_in_this_format(params) -> dict:
+    """What the last completed run left behind, had it run this code: every
+    configured month recorded in this code's prediction format."""
+    from recsys_tfb.core.versioning import TRAINING_PREDICTION_FORMAT_VERSION
+    from recsys_tfb.pipelines.training.steps.predict_months import (
+        PREDICTION_FORMATS_FIELD,
+    )
+
+    return {PREDICTION_FORMATS_FIELD: {
+        month: TRAINING_PREDICTION_FORMAT_VERSION
+        for month in params["dataset"]["test_snap_dates"]
+    }}
+
+
+_IN_THIS_FORMAT = object()
+
+
+def _predict(handles, params, write_ds, on_disk=_IN_THIS_FORMAT):
+    """``on_disk`` is the manifest the node reads back. By default one from a
+    run of this code, so the month tests below exercise the partition side
+    alone; the prediction-format tests pass their own."""
     from recsys_tfb.pipelines.training.nodes import predict_and_write_test_predictions
 
+    if on_disk is _IN_THIS_FORMAT:
+        on_disk = _manifest_in_this_format(params)
     return predict_and_write_test_predictions(
         model=_model(),
         test_parquet_handle=handles,
         preprocessor_metadata=_make_prep_meta(),
         parameters=params,
+        predict_manifest_on_disk=on_disk,
         training_eval_predictions=write_ds,
     )
 
@@ -503,6 +529,165 @@ def test_a_configured_month_missing_from_the_cache_fails_loud(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# The prediction format version (ADR-0030 decision 9): a code change that
+# alters the predictions but not the model re-predicts every month under the
+# same model_version, and nothing retrains. Every test starts from both months
+# complete, so "processed" can only come from the format.
+# ---------------------------------------------------------------------------
+
+_BOTH_MONTHS = ("2025-01-31", "2025-02-28")
+
+
+def _every_partition_written():
+    return _write_ds(existing=[
+        (month, prod) for month in _BOTH_MONTHS for prod in ("prod_A", "prod_B")
+    ])
+
+
+def _both_months_complete(tmp_path):
+    """Call once per ``tmp_path``: the handles append to the parquet there."""
+    handles = {month: _month_handle(tmp_path, month) for month in _BOTH_MONTHS}
+    return handles, _every_partition_written()
+
+
+def _bump_prediction_format(monkeypatch) -> int:
+    """This code is one prediction format past the one the manifest recorded."""
+    from recsys_tfb.pipelines.training import nodes
+
+    bumped = nodes.TRAINING_PREDICTION_FORMAT_VERSION + 1
+    monkeypatch.setattr(nodes, "TRAINING_PREDICTION_FORMAT_VERSION", bumped)
+    return bumped
+
+
+def test_every_month_recorded_in_another_format_is_rewritten(
+    tmp_path, monkeypatch,
+):
+    """The version's whole job: complete months, but written by code that
+    predicted differently. Not reported as rebuilt — nobody named them."""
+    from recsys_tfb.pipelines.training.steps.predict_months import (
+        PREDICTION_FORMATS_FIELD,
+    )
+
+    handles, write_ds = _both_months_complete(tmp_path)
+    params = _params_with_test_dates(handles)
+    on_disk = _manifest_in_this_format(params)
+    bumped = _bump_prediction_format(monkeypatch)
+
+    manifest = _predict(handles, params, write_ds, on_disk=on_disk)
+
+    assert manifest["months_processed"] == list(_BOTH_MONTHS)
+    assert manifest["months_skipped"] == []
+    assert manifest["months_rebuilt"] == []
+    assert _saved_partitions(write_ds) == {
+        (month, prod) for month in _BOTH_MONTHS for prod in ("prod_A", "prod_B")
+    }
+    assert manifest[PREDICTION_FORMATS_FIELD] == {m: bumped for m in _BOTH_MONTHS}
+
+
+def test_the_same_recorded_format_still_skips(tmp_path, monkeypatch):
+    """Equal is equal whatever the number: a bumped code reading a manifest
+    its own kind wrote skips as before."""
+    from recsys_tfb.pipelines.training.steps.predict_months import (
+        PREDICTION_FORMATS_FIELD,
+    )
+
+    handles, write_ds = _both_months_complete(tmp_path)
+    bumped = _bump_prediction_format(monkeypatch)
+    on_disk = {PREDICTION_FORMATS_FIELD: {m: bumped for m in _BOTH_MONTHS}}
+
+    manifest = _predict(
+        handles, _params_with_test_dates(handles), write_ds, on_disk=on_disk,
+    )
+
+    assert manifest["months_skipped"] == list(_BOTH_MONTHS)
+    assert write_ds.save.call_count == 0
+
+
+def test_no_previous_manifest_rewrites_every_complete_month(tmp_path, caplog):
+    """No predict run has completed for this model_version, yet partitions are
+    there — a first run that died partway. Nothing vouches for their format,
+    so they are re-predicted: wasteful, never silently stale."""
+    import logging
+
+    handles, write_ds = _both_months_complete(tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        manifest = _predict(
+            handles, _params_with_test_dates(handles), write_ds, on_disk=None,
+        )
+
+    assert manifest["months_processed"] == list(_BOTH_MONTHS)
+    assert write_ds.save.call_count == 4
+    assert "<no record>" in caplog.text
+
+
+def test_a_manifest_from_before_the_field_rewrites_every_month(tmp_path):
+    """The first run after the upgrade that added the field (the ticket's
+    "manifest 裡還沒有這個欄位"): the old manifest names the months but not
+    their format."""
+    handles, write_ds = _both_months_complete(tmp_path)
+    legacy = {
+        "model_version": "v_test_001",
+        "months_processed": [],
+        "months_skipped": list(_BOTH_MONTHS),
+        "months_rebuilt": [],
+    }
+
+    manifest = _predict(
+        handles, _params_with_test_dates(handles), write_ds, on_disk=legacy,
+    )
+
+    assert manifest["months_processed"] == list(_BOTH_MONTHS)
+    assert manifest["months_skipped"] == []
+
+
+def test_a_month_the_last_run_did_not_configure_is_rewritten(tmp_path):
+    """February was dropped from the config when the last run completed, and
+    is configured again. Its partitions are complete, but no record says in
+    which format — a format bump in between would otherwise go unseen."""
+    from recsys_tfb.core.versioning import TRAINING_PREDICTION_FORMAT_VERSION
+    from recsys_tfb.pipelines.training.steps.predict_months import (
+        PREDICTION_FORMATS_FIELD,
+    )
+
+    handles, write_ds = _both_months_complete(tmp_path)
+    on_disk = {PREDICTION_FORMATS_FIELD: {
+        "2025-01-31": TRAINING_PREDICTION_FORMAT_VERSION,
+    }}
+
+    manifest = _predict(
+        handles, _params_with_test_dates(handles), write_ds, on_disk=on_disk,
+    )
+
+    assert manifest["months_processed"] == ["2025-02-28"]
+    assert manifest["months_skipped"] == ["2025-01-31"]
+
+
+def test_what_one_run_records_the_next_one_reads(tmp_path):
+    """Writer and reader agree: the manifest a run lands, loaded back through
+    the catalog's JSON, makes the next run skip every month it wrote — and
+    the month it skipped, which is in this format too."""
+    from recsys_tfb.io.json_dataset import JSONDataset
+
+    handles, _ = _both_months_complete(tmp_path)
+    params = _params_with_test_dates(handles)
+    first = _predict(
+        handles, params,
+        _write_ds(existing=[("2025-01-31", "prod_A"), ("2025-01-31", "prod_B")]),
+    )
+    assert first["months_processed"] == ["2025-02-28"]
+
+    landed = JSONDataset(str(tmp_path / "predict_manifest.json"))
+    landed.save(first)
+    write_ds = _every_partition_written()
+
+    second = _predict(handles, params, write_ds, on_disk=landed.load())
+
+    assert second["months_skipped"] == list(_BOTH_MONTHS)
+    assert write_ds.save.call_count == 0
+
+
+# ---------------------------------------------------------------------------
 # Two-column entity — the framework promises `schema.entity` is a list, and
 # this is what makes that promise cost something if it stops being true.
 #
@@ -648,6 +833,7 @@ def test_data_volume_names_are_fixed_and_identity_travels_as_fields(tmp_path, ca
             test_parquet_handle=handle,
             preprocessor_metadata=_make_prep_meta(),
             parameters=_make_parameters(),
+            predict_manifest_on_disk=None,
             training_eval_predictions=_write_ds(),
         )
 
@@ -751,6 +937,7 @@ def test_the_written_frame_carries_the_event_column(tmp_path):
         test_parquet_handle=handle,
         preprocessor_metadata=_make_prep_meta(),
         parameters=_make_event_parameters(),
+        predict_manifest_on_disk=None,
         training_eval_predictions=write_ds,
     )
 
@@ -780,6 +967,7 @@ def test_no_event_column_is_added_when_the_role_is_undeclared(tmp_path):
         test_parquet_handle=handle,
         preprocessor_metadata=_make_prep_meta(),
         parameters=_make_parameters(),
+        predict_manifest_on_disk=None,
         training_eval_predictions=write_ds,
     )
 
@@ -837,6 +1025,7 @@ def _predict_weighted(tmp_path, dataset, weights=4.0, declared=None):
             path=str(_make_weighted_test_parquet(tmp_path, weights))),
         preprocessor_metadata=_make_prep_meta(),
         parameters=params,
+        predict_manifest_on_disk=None,
         training_eval_predictions=write_ds,
     )
     return pd.concat(write_ds.saved, ignore_index=True)
@@ -909,6 +1098,7 @@ def test_the_weighted_path_reads_the_weight_column_and_nothing_unused(
             path=str(_make_weighted_test_parquet(tmp_path, 4.0))),
         preprocessor_metadata=_make_prep_meta(),
         parameters=params,
+        predict_manifest_on_disk=None,
         training_eval_predictions=write_ds,
     )
 
@@ -986,6 +1176,7 @@ def _run(tmp_path, parquet, params, model=None, write_ds=None):
         test_parquet_handle=ParquetHandle(path=str(parquet)),
         preprocessor_metadata=_make_prep_meta(),
         parameters=params,
+        predict_manifest_on_disk=None,
         training_eval_predictions=write_ds,
     )
     return manifest, write_ds
@@ -1137,6 +1328,7 @@ def test_an_item_that_is_a_feature_is_read_from_the_directory_name(tmp_path):
         test_parquet_handle=ParquetHandle(path=str(root)),
         preprocessor_metadata=prep,
         parameters=params,
+        predict_manifest_on_disk=None,
         training_eval_predictions=write_ds,
     )
 

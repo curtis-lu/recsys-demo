@@ -38,8 +38,51 @@ class TestTrainingPipeline:
             "val_model_input", "test_model_input",
             "preprocessor", "parameters",
             "training_eval_predictions",
+            # The manifest the last completed predict landed, under the second
+            # name the CLI derives (ADR-0030 decision 9, A56).
+            "predict_manifest_on_disk",
         }
         assert pipeline.inputs == expected
+
+    def test_predict_reads_its_last_manifest_under_a_second_name(self):
+        """Its own output as an input is A6, which ``Node`` raises at
+        construction — building the pipeline above is that check. The same
+        file is read under the name the CLI derives from ``predict_manifest``."""
+        node = next(
+            n for n in create_pipeline().nodes
+            if n.name == "predict_and_write_test_predictions"
+        )
+        assert "predict_manifest_on_disk" in node.inputs
+        assert "predict_manifest" not in node.inputs
+        assert node.outputs == ["predict_manifest"]
+
+    @pytest.mark.parametrize("hpo", [True, False], ids=["hpo", "skip_hpo"])
+    def test_an_absent_last_manifest_pulls_no_fit_into_a_predict_only_run(
+        self, hpo,
+    ):
+        """Re-predicting for a new prediction format is ``--only-node
+        predict_and_write_test_predictions`` against the model on disk. No node
+        produces the second name, so a manifest that is not there (no predict
+        has completed) adds no node to that slice — least of all the search or
+        the fit. The memory-only handles still pull their producers, as
+        before."""
+        pipe = create_pipeline(hpo_enabled=hpo)
+        memory_only = {"test_parquet_handle", "preprocessor_view"}
+
+        def nodes_of(can_load):
+            sliced, _ = pipe.slice_only(
+                "predict_and_write_test_predictions", can_load=can_load,
+            )
+            return {n.name for n in sliced.nodes}
+
+        without = nodes_of(
+            lambda name: name not in memory_only | {"predict_manifest_on_disk"})
+        with_it = nodes_of(lambda name: name not in memory_only)
+
+        assert without == with_it == {
+            "select_features", "cache_test_model_input",
+            "predict_and_write_test_predictions",
+        }
 
     def test_predict_node_declares_its_write_target(self):
         """R1's one registered write site, visible on the node definition."""

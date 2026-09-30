@@ -26,7 +26,7 @@ from recsys_tfb.core.consistency import (
     post_training_snap_date_errors,
     prediction_quality_param_errors,
     prediction_quality_population_errors,
-    preprocessor_on_disk_path_errors,
+    on_disk_entry_path_errors,
     baseline_rebuild_dates_absent_errors,
     baseline_score_errors,
     query_filter_param_errors,
@@ -326,45 +326,54 @@ def _resolve_catalog(config: ConfigLoader, params: dict, runtime_params: dict):
     )
 
 
-#: The second catalog name for ``preprocessor``'s file. A node may not read and
-#: write one name (architecture constraint A6), so the fit reads the file it is
-#: about to overwrite under this one.
-_PREPROCESSOR_ON_DISK = "preprocessor_on_disk"
+#: ``{second catalog name: the entry whose file it reads}``. A node may not
+#: read and write one name (architecture constraint A6), so a node that reads
+#: the file it is about to overwrite reads it under a second one, derived by
+#: :func:`_derive_on_disk_entry`:
+#:
+#: - ``preprocessor_on_disk`` (ADR-0029 decision 13): ``fit_preprocessor_
+#:   metadata`` compares the item list with the one it overwrites (B19), and
+#:   evaluation's ``prepare_eval_data`` reads the evaluated model's list;
+#: - ``predict_manifest_on_disk`` (ADR-0030 decision 9): the predict node reads
+#:   the prediction format each month was written in, from the manifest its
+#:   last completed run landed.
+_ON_DISK_ENTRIES: dict[str, str] = {
+    "preprocessor_on_disk": "preprocessor",
+    "predict_manifest_on_disk": "predict_manifest",
+}
 
 
-def _derive_preprocessor_on_disk(catalog_config: dict) -> list[str]:
-    """Give ``preprocessor_on_disk`` the ``preprocessor`` entry's file (ADR-0029 decision 13).
+def _derive_on_disk_entry(catalog_config: dict, on_disk: str, source: str) -> list[str]:
+    """Give the ``on_disk`` entry the ``source`` entry's file (A56).
 
-    ``fit_preprocessor_metadata`` reads the preprocessor it is about to
-    overwrite under this name (B19), and evaluation's ``prepare_eval_data``
-    reads the evaluated model's item list through it. The entry has to be
-    optional — the file does not exist before a version's first run — so a
-    hand-written path to anywhere else would load as ``None`` and B19 would
-    check nothing. Derived, the path cannot be wrong.
+    The entry has to be optional — the file does not exist before a version's
+    first run — so a hand-written path to anywhere else would load as ``None``
+    and its reader would take every run for the first one: B19 would check
+    nothing, and the predict node would re-predict every month on every run.
+    Derived, the path cannot be wrong.
 
-    - left out (the shipped catalogs): added in place, a copy of
-      ``preprocessor`` marked ``optional``;
+    - left out (the shipped catalogs): added in place, a copy of ``source``
+      marked ``optional``;
     - written, on the same file: used as written;
     - written, on another file: A56's errors are returned and the entry is
       left alone — the caller stops the run;
-    - left out, and nothing to derive it from — no ``preprocessor`` entry, or
-      one that is not a ``JSONDataset`` (the only type that takes
-      ``optional``; any other would fail every first run): nothing is added
-      and no error returned; the Runner reports the missing input as it would
-      any other.
+    - left out, and nothing to derive it from — no ``source`` entry, or one
+      that is not a ``JSONDataset`` (the only type that takes ``optional``; any
+      other would fail every first run): nothing is added and no error
+      returned; the Runner reports the missing input as it would any other.
 
     Mutates ``catalog_config``.
     """
-    preprocessor = catalog_config.get("preprocessor")
-    if preprocessor is None:
+    source_entry = catalog_config.get(source)
+    if source_entry is None:
         return []
-    written = catalog_config.get(_PREPROCESSOR_ON_DISK)
+    written = catalog_config.get(on_disk)
     if written is None:
-        if preprocessor.get("type") == "JSONDataset":
-            catalog_config[_PREPROCESSOR_ON_DISK] = {**preprocessor, "optional": True}
+        if source_entry.get("type") == "JSONDataset":
+            catalog_config[on_disk] = {**source_entry, "optional": True}
         return []
-    return preprocessor_on_disk_path_errors(
-        preprocessor["filepath"], written.get("filepath", ""),
+    return on_disk_entry_path_errors(
+        on_disk, source, source_entry["filepath"], written.get("filepath", ""),
     )
 
 
@@ -752,16 +761,22 @@ def _execute_pipeline(
         config, params, runtime_params
     )
 
-    # (A56) Asked of the DAG rather than of the pipeline's name: the entry is
-    # derived exactly when a node reads it (dataset's fit, evaluation's
-    # prepare_eval_data). Before the catalog is built and before --dry-run /
-    # --list-nodes return, so a path to another file stops every kind of run.
-    if any(_PREPROCESSOR_ON_DISK in node.inputs for node in pipe.nodes):
-        on_disk_errors = _derive_preprocessor_on_disk(catalog_config)
-        if on_disk_errors:
-            for line in on_disk_errors:
-                logger.error(line)
-            raise typer.Exit(code=1)
+    # (A56) Asked of the DAG rather than of the pipeline's name: an entry is
+    # derived exactly when a node reads it (dataset's fit and evaluation's
+    # prepare_eval_data read preprocessor_on_disk, training's predict node
+    # predict_manifest_on_disk). Before the catalog is built and before
+    # --dry-run / --list-nodes return, so a path to another file stops every
+    # kind of run.
+    on_disk_errors = [
+        line
+        for on_disk, source in _ON_DISK_ENTRIES.items()
+        if any(on_disk in node.inputs for node in pipe.nodes)
+        for line in _derive_on_disk_entry(catalog_config, on_disk, source)
+    ]
+    if on_disk_errors:
+        for line in on_disk_errors:
+            logger.error(line)
+        raise typer.Exit(code=1)
 
     # For inference: when no explicit --model-version is given, the model
     # artifact should be read via the "best" symlink; swap the model filepath.

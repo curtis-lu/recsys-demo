@@ -42,6 +42,13 @@ logger = logging.getLogger(__name__)
 #: Hive's stand-in for a NULL partition value.
 _HIVE_NULL_PARTITION = "__HIVE_DEFAULT_PARTITION__"
 
+#: The ``predict_manifest`` field recording, per configured month, the
+#: prediction format version (``core/versioning.py``'s
+#: ``TRAINING_PREDICTION_FORMAT_VERSION``) that month's predictions are in.
+#: Named here, beside its reader, rather than in the node that writes it, so
+#: the two cannot spell it differently.
+PREDICTION_FORMATS_FIELD = "prediction_format_versions"
+
 
 def month_dir(snap_date) -> str:
     """Directory-name form of a test month (``2026-01-31`` → ``20260131``).
@@ -181,6 +188,66 @@ def warn_about_surplus_partitions(
             "metrics until they are dropped by hand, and this month will "
             "be re-predicted on every run.",
             months[key], sorted(surplus),
+        )
+
+
+def recorded_prediction_formats(previous_manifest) -> dict[str, object]:
+    """``month key → prediction format version``, as the last completed predict
+    recorded it in its manifest.
+
+    Every way of having no record comes out empty: ``None`` (no predict run
+    has completed for this ``model_version`` — the catalog entry is optional),
+    a manifest written before the field existed, or a field that is not a
+    mapping. Empty reads as "every month in an unknown format", which
+    re-predicts; nothing here may produce a value nobody recorded, because a
+    value that happens to match would skip a month.
+
+    Keys are written as configured and normalised on the way back, so a month
+    recorded under one spelling is found under another.
+    """
+    if not isinstance(previous_manifest, Mapping):
+        return {}
+    recorded = previous_manifest.get(PREDICTION_FORMATS_FIELD)
+    if not isinstance(recorded, Mapping):
+        return {}
+    return {month_dir(month): version for month, version in recorded.items()}
+
+
+def months_in_another_format(
+    months: Mapping[str, str], recorded: Mapping[str, object], current: int
+) -> set[str]:
+    """Configured month keys not recorded as written in ``current`` format.
+
+    A month with no record is listed: it was never written by a run that
+    completed, or the last one did not configure it — which is how a month
+    dropped from the config and configured again after a format change is
+    caught. ``!=`` rather than ``<``: after a rollback, the older code cannot
+    vouch for what the newer one wrote either.
+    """
+    return {key for key in months if recorded.get(key) != current}
+
+
+def warn_about_months_in_another_format(
+    months: Mapping[str, str],
+    complete: Container[str],
+    stale: Iterable[str],
+    recorded: Mapping[str, object],
+    current: int,
+) -> None:
+    """Say which complete months are being re-predicted for their format.
+
+    Only the complete ones: a month with nothing written has no record either,
+    and predicting it was the plan regardless — naming it would warn on every
+    first run of a model_version.
+    """
+    for key in sorted(stale):
+        if key not in complete:
+            continue
+        logger.warning(
+            "[months] predict: %s is complete, but its predictions were "
+            "recorded in prediction format %s, not %s (this code's "
+            "TRAINING_PREDICTION_FORMAT_VERSION); re-predicting it.",
+            months[key], recorded.get(key, "<no record>"), current,
         )
 
 

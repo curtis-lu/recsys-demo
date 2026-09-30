@@ -16,13 +16,17 @@ from pathlib import Path
 
 from recsys_tfb.pipelines.training.steps import predict_months
 from recsys_tfb.pipelines.training.steps.predict_months import (
+    PREDICTION_FORMATS_FIELD,
     configured_months,
     month_dir,
     months_already_written,
+    months_in_another_format,
     plan_predict_months,
     rebuild_month_keys,
+    recorded_prediction_formats,
     require_months_are_cached,
     warn_about_surplus_partitions,
+    warn_about_months_in_another_format,
     written_prediction_partitions,
 )
 
@@ -182,6 +186,81 @@ class TestMonthsAlreadyWritten:
         one wrong answer that produces no error anywhere downstream."""
         with pytest.raises(KeyError):
             months_already_written({JAN_KEY: JAN}, {}, {})
+
+
+class TestRecordedPredictionFormats:
+    """What the last completed run recorded, read back. Every way of having
+    no record has to come out as "no record" — never as a value, because a
+    value that matches would skip a month nobody vouched for."""
+
+    def test_no_manifest_yet_is_no_record(self):
+        """The catalog entry is optional: ``None`` until a predict run for
+        this model_version has completed."""
+        assert recorded_prediction_formats(None) == {}
+
+    def test_a_manifest_from_before_the_field_is_no_record(self):
+        """The first run after the upgrade that added the field."""
+        manifest = {"months_processed": [JAN], "months_skipped": []}
+        assert recorded_prediction_formats(manifest) == {}
+
+    def test_months_are_keyed_the_way_every_month_is_compared(self):
+        """Written as configured, read back as month keys: a month recorded
+        under one spelling is the same month under another."""
+        manifest = {PREDICTION_FORMATS_FIELD: {JAN: 1, "20250228": 2}}
+        assert recorded_prediction_formats(manifest) == {JAN_KEY: 1, FEB_KEY: 2}
+
+    def test_a_field_that_is_not_a_mapping_is_no_record(self):
+        manifest = {PREDICTION_FORMATS_FIELD: 1}
+        assert recorded_prediction_formats(manifest) == {}
+
+
+class TestMonthsInAnotherFormat:
+    def test_a_month_recorded_in_this_format_is_not_listed(self):
+        assert months_in_another_format(
+            {JAN_KEY: JAN}, {JAN_KEY: 3}, current=3
+        ) == set()
+
+    def test_a_month_recorded_in_another_format_is_listed(self):
+        """The mutation target: the whole point of the version."""
+        assert months_in_another_format(
+            {JAN_KEY: JAN}, {JAN_KEY: 2}, current=3
+        ) == {JAN_KEY}
+
+    def test_a_month_with_no_record_is_listed(self):
+        """No record is an unknown format, and an unknown format re-predicts:
+        wasteful rather than silently stale. Covers a month dropped from the
+        config and configured again — the last run did not record it."""
+        assert months_in_another_format(
+            {JAN_KEY: JAN, FEB_KEY: FEB}, {JAN_KEY: 3}, current=3
+        ) == {FEB_KEY}
+
+    def test_a_newer_recorded_format_is_listed_too(self):
+        """``!=``, not ``<``: after a rollback the older code cannot vouch for
+        what the newer one wrote."""
+        assert months_in_another_format(
+            {JAN_KEY: JAN}, {JAN_KEY: 4}, current=3
+        ) == {JAN_KEY}
+
+
+class TestAnotherFormatWarning:
+    def test_a_complete_month_in_another_format_is_named(self, caplog):
+        with caplog.at_level(logging.WARNING, logger=predict_months.__name__):
+            warn_about_months_in_another_format(
+                {JAN_KEY: JAN}, complete={JAN_KEY}, stale={JAN_KEY},
+                recorded={JAN_KEY: 1}, current=2,
+            )
+        assert JAN in caplog.text
+        assert "1" in caplog.text and "2" in caplog.text
+
+    def test_a_month_with_nothing_written_says_nothing(self, caplog):
+        """A brand-new month has no record either, and re-predicting it is
+        the plan anyway: warning there would fire on every first run."""
+        with caplog.at_level(logging.WARNING, logger=predict_months.__name__):
+            warn_about_months_in_another_format(
+                {JAN_KEY: JAN}, complete=set(), stale={JAN_KEY},
+                recorded={}, current=2,
+            )
+        assert caplog.text == ""
 
 
 class TestPlanPredictMonths:
