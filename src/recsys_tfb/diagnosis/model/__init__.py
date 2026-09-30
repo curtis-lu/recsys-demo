@@ -1,18 +1,13 @@
-"""Training diagnostics 套件（feature stats / importance / SHAP）。
+"""The one piece of the training diagnoses that lives in this library.
 
-對外維持與舊 diagnostics.py 相容的 import 介面（pipeline.py、nodes.py、既有測試）。
+The seven diagnosis nodes are defined in ``pipelines/training/nodes.py`` and
+their mechanisms live in ``pipelines/training/steps/`` (ADR-0030 decision 6):
+training was their only consumer, so the directory listing now says so.
+``diagnostics_dir`` stays because HPO's search diagnostics
+(``diagnosis/hpo``) write under the same directory, and a library module may
+not import a pipeline (S8) or its ``steps/`` (S3).
 """
-from .feature_stats import compute_feature_statistics
-from .importance import compute_feature_importance
-from .paths import diagnostics_dir
-from .shap_cases import compute_quadrant_cases, compute_quadrant_profiles
-from .shap_per_item import compute_shap_diagnostics
 
-__all__ = [
-    "compute_feature_statistics",
-    "compute_feature_importance",
-    "compute_quadrant_cases",
-    "compute_quadrant_profiles",
-    "compute_shap_diagnostics",
-    "diagnostics_dir",
-]
+from .paths import diagnostics_dir
+
+__all__ = ["diagnostics_dir"]

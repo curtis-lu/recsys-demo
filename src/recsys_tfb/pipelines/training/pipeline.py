@@ -2,20 +2,17 @@
 
 from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
-from recsys_tfb.diagnosis.model import (
-    compute_feature_importance,
-    compute_feature_statistics,
-    compute_quadrant_cases,
-    compute_quadrant_profiles,
-    compute_shap_diagnostics,
-)
-from recsys_tfb.diagnosis.model.gain_ledger import compute_gain_ledger
-from recsys_tfb.diagnosis.model.population_spark import select_shap_population
 from recsys_tfb.pipelines.training.nodes import (
     cache_test_model_input,
     cache_train_dev_model_input,
     cache_train_model_input,
     cache_val_model_input,
+    compute_feature_importance,
+    compute_feature_statistics,
+    compute_gain_ledger,
+    compute_quadrant_cases,
+    compute_quadrant_profiles,
+    compute_shap_diagnostics,
     compute_test_metrics,
     finalize_model,
     log_experiment,
@@ -24,6 +21,7 @@ from recsys_tfb.pipelines.training.nodes import (
     predict_and_write_test_predictions,
     prepare_train_inputs,
     select_features,
+    select_shap_population,
     train_with_fixed_params,
     tune_hyperparameters,
 )

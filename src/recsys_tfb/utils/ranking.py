@@ -8,8 +8,9 @@ One rule, written twice — once per engine — and nowhere else:
   ``metrics_spark.rank_within_query`` rank with it; the latter serves every
   metric pass in both modes, and ``prepare_eval_data`` and the comparison mode
   use it to fill in or redo ``rank``. Training's quadrant diagnosis
-  (``diagnosis/model/population_spark.py``) ranks with it too, so its top-1 is
-  evaluation's top-1 when ``event`` is declared (ADR-0030 decision 12).
+  (``select_shap_population``, ``pipelines/training/nodes.py``) ranks with it
+  too, so its top-1 is evaluation's top-1 when ``event`` is declared (ADR-0030
+  decision 12).
 * :func:`order_by_score_then_item` is the numpy twin for the driver: the metric
   primitives in ``evaluation/metrics.py`` (which HPO scores trials with), the
   metric diagnoses and their bootstrap.

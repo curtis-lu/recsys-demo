@@ -1,4 +1,4 @@
-"""Tests for diagnostics.data_access — bounded parquet reads."""
+"""Tests for steps.bounded_reads — bounded parquet reads."""
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -6,7 +6,7 @@ import pyarrow.parquet as pq
 import pyarrow.dataset as pads
 import pytest
 
-from recsys_tfb.diagnosis.model import data_access as da
+from recsys_tfb.pipelines.training.steps import bounded_reads as da
 
 
 def _frame(n=50):

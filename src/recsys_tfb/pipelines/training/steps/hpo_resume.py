@@ -18,6 +18,8 @@ from typing import Optional
 
 import optuna
 
+from recsys_tfb.io.models_root import MODELS_ROOT
+
 logger = logging.getLogger(__name__)
 
 JOURNAL = "study_journal.log"
@@ -26,8 +28,9 @@ CHECKPOINT_META = "best_meta.json"
 
 
 def hpo_study_dir(search_id: str) -> Path:
-    """data/models/_hpo/<search_id>/ (relative; mirrors the diagnostics_dir convention)."""
-    return Path("data") / "models" / "_hpo" / str(search_id)
+    """data/models/_hpo/<search_id>/: under the model versions' root
+    (``io/models_root.MODELS_ROOT``; relative, as ``diagnostics_dir`` is)."""
+    return MODELS_ROOT / "_hpo" / str(search_id)
 
 
 def open_study(study_dir: Path, search_id: str, seed: int) -> optuna.Study:

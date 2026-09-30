@@ -17,7 +17,7 @@ _FEAT_COLS = ["snap_date", "cust_id", "prod_name", "f0", "f1"]
 
 
 def test_quadrant_assignment_and_features_joined(spark):
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
     preds = spark.createDataFrame(
         [("2024-01-31", "c1", "A", 0.9, 1),   # rank1 adopted -> TP
          ("2024-01-31", "c1", "B", 0.2, 0),   # rank2 not     -> TN
@@ -41,7 +41,7 @@ def test_quadrant_assignment_and_features_joined(spark):
 
 
 def test_per_cell_cap_and_determinism(spark):
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
     # (A, TP) 有 2 列;per_cell=1 → 只留 1,且兩次結果相同
     preds = spark.createDataFrame(
         [("2024-01-31", "c1", "A", 0.9, 1),
@@ -65,14 +65,14 @@ def test_per_cell_cap_and_determinism(spark):
 
 
 def test_disabled_returns_none(spark):
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
     preds = spark.createDataFrame([("2024-01-31", "c1", "A", 0.9, 1)], _PRED_COLS)
     feats = spark.createDataFrame([("2024-01-31", "c1", "A", 1.0, 2.0)], _FEAT_COLS)
     assert select_shap_population(preds, feats, _params(enabled=False)) == (None, None)
 
 
 def test_case_rows_extremes_role_and_features(spark):
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
     # c1/c2/c4 三位客戶,item A 都排第1(score 高於 B)→ (A, TP)。
     # (A, TP) 有 3 列,分數 0.9/0.7/0.5 → high=c1, low=c4。
     preds = spark.createDataFrame(
@@ -96,7 +96,7 @@ def test_case_rows_extremes_role_and_features(spark):
 
 
 def test_case_rows_single_row_cell_marks_same_row(spark):
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
     # (A, TP) 只有 c1 一列 → high 與 low 落在同一 group-key。
     preds = spark.createDataFrame(
         [("2024-01-31", "c1", "A", 0.9, 1), ("2024-01-31", "c1", "B", 0.1, 0)],
@@ -112,7 +112,7 @@ def test_case_rows_single_row_cell_marks_same_row(spark):
 
 
 def test_case_rows_tiebreak_same_score_picks_distinct_rows(spark):
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
     # (A, TP) 兩列同分(0.9)→ 不對稱 tiebreak 必須挑到不同列(high≠low)。
     preds = spark.createDataFrame(
         [("2024-01-31", "c1", "A", 0.9, 1), ("2024-01-31", "c1", "B", 0.1, 0),
@@ -135,8 +135,8 @@ def test_case_rows_feed_into_compute_quadrant_cases(spark, tmp_path, monkeypatch
     import numpy as np
 
     from tests.adapter_fits import fit_lightgbm
-    from recsys_tfb.diagnosis.model.shap_cases import compute_quadrant_cases
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import compute_quadrant_cases
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
 
     monkeypatch.chdir(tmp_path)
     rng = np.random.RandomState(0)
@@ -200,7 +200,7 @@ def test_success_path_leaves_no_spark_cache(spark):
     Runner 只釋放 MemoryDataset,不碰 Spark DataFrame 的 storage——少了
     unpersist,那份 cache 會佔著 executor 直到 SparkSession 結束。
     """
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
     preds, feats = _preds_and_feats(spark)
     before = _persistent_rdd_ids(spark)
     pop, cases = select_shap_population(preds, feats, _params())
@@ -216,7 +216,7 @@ def test_failure_path_leaves_no_spark_cache_and_stops_the_run(spark, monkeypatch
     """
     from pyspark.sql import DataFrame
 
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
 
     def _boom(self, other, allowMissingColumns=False):
         raise RuntimeError("injected failure after the first toPandas()")
@@ -238,7 +238,7 @@ def test_ranked_frame_is_persisted_with_explicit_memory_and_disk(spark, monkeypa
     """
     from pyspark.sql import DataFrame
 
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
 
     original_unpersist = DataFrame.unpersist
     observed = []
@@ -263,7 +263,7 @@ def test_unpersist_failure_is_logged_not_raised(spark, monkeypatch):
     """
     from pyspark.sql import DataFrame
 
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
 
     def _boom(self, blocking=False):
         raise RuntimeError("simulated dead SparkSession on release")
@@ -282,7 +282,7 @@ def test_reads_only_the_configured_test_months(spark):
     under their version; a month outside dataset.test_snap_dates must not
     reach the population or the cases (node rule 14). The stray month's
     customer would be the extreme of its cell if it were read."""
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
 
     preds, feats = _preds_and_feats(spark)
     stray_p = spark.createDataFrame(
@@ -299,7 +299,7 @@ def test_reads_only_the_configured_test_months(spark):
 
 
 def test_no_configured_test_month_stops_rather_than_reading_everything(spark):
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
 
     preds, feats = _preds_and_feats(spark)
     with pytest.raises(ValueError, match="test_snap_dates"):
@@ -322,7 +322,7 @@ def test_with_event_declared_top1_is_evaluations_top1(spark):
     too. The later event comes first in the input so that the old window —
     score, then item, nothing after — has no reason to agree."""
     from recsys_tfb.core.schema import get_schema
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
     from recsys_tfb.evaluation.metrics_spark import rank_within_query
 
     preds = spark.createDataFrame(
@@ -351,7 +351,7 @@ def test_the_score_column_follows_schema(spark):
     """A deployment that calls the score column something else. What goes to
     compute_quadrant_cases is still called ``score`` — the two modules'
     agreement, not the prediction table's column."""
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
 
     preds, feats = _preds_and_feats(spark)
     renamed = preds.withColumnRenamed("score", "pred")
@@ -376,7 +376,7 @@ def test_stray_month_rows_are_never_read(spark):
     by the later join, the rank window does."""
     from pyspark.sql import functions as F
 
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
 
     preds, feats = _preds_and_feats(spark)
     stray = (F.col("snap_date") == "2023-12-31")
@@ -396,7 +396,7 @@ def test_stray_month_rows_are_never_read(spark):
 def test_months_that_match_no_row_stop_rather_than_land_empty(spark):
     """An empty population would land as ``{}`` downstream — the shape of
     ``quadrant_enabled: false`` — and the quadrants would vanish silently."""
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
 
     preds, feats = _preds_and_feats(spark)
     with pytest.raises(ValueError, match="no prediction for months"):
@@ -414,7 +414,7 @@ def test_months_are_normalised_like_the_scored_months(spark, spelled):
     nothing."""
     import datetime
 
-    from recsys_tfb.diagnosis.model.population_spark import select_shap_population
+    from recsys_tfb.pipelines.training.nodes import select_shap_population
 
     month = datetime.datetime(2024, 1, 31) if spelled == "datetime" else spelled
     preds, feats = _preds_and_feats(spark)

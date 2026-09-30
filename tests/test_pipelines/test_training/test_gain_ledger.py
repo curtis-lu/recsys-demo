@@ -3,7 +3,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from recsys_tfb.diagnosis.model import gain_ledger
+from recsys_tfb.pipelines.training import nodes
+from recsys_tfb.pipelines.training.steps import gain_ledger
 
 ITEM_COL = "prod_code"
 CATEGORIES = ["A", "B", "C", "D"]  # 碼 = list 索引
@@ -61,11 +62,11 @@ def _df(rows):
     return pd.DataFrame(rows)
 
 
-# ---- _ledger_from_trees 手算錨 ----
+# ---- ledger_from_trees 手算錨 ----
 
 def test_ledger_hand_calc_item_id_and_total_gain():
     trees = _df(_tree0_rows())
-    result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
+    result = gain_ledger.ledger_from_trees(trees, ITEM_COL, CATEGORIES)
     assert result["item_id"]["split_count"] == 2
     assert result["item_id"]["gain_sum"] == pytest.approx(14.0)
     assert result["total_gain"] == pytest.approx(22.0)
@@ -75,14 +76,14 @@ def test_ledger_hand_calc_item_id_and_total_gain():
 
 def test_ledger_hand_calc_context_block():
     trees = _df(_tree0_rows())
-    result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
+    result = gain_ledger.ledger_from_trees(trees, ITEM_COL, CATEGORIES)
     assert result["context"]["split_count"] == 2  # S1, S3
     assert result["context"]["gain_sum"] == pytest.approx(8.0)  # 6 + 2
 
 
 def test_ledger_hand_calc_per_item_context_gain():
     trees = _df(_tree0_rows())
-    result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
+    result = gain_ledger.ledger_from_trees(trees, ITEM_COL, CATEGORIES)
     per_item = result["per_item"]
     assert per_item["A"]["context_gain"] == pytest.approx(6.0)
     assert per_item["C"]["context_gain"] == pytest.approx(6.0)
@@ -99,7 +100,7 @@ def test_context_split_isolated_count():
     context_gain_isolated 對稱的計數版。tree0 的 S3（reachable={D}，gain2）是
     唯一的私有 context 切點。"""
     trees = _df(_tree0_rows())
-    result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
+    result = gain_ledger.ledger_from_trees(trees, ITEM_COL, CATEGORIES)
     pi = result["per_item"]
     assert pi["D"]["context_split_isolated"] == 1
     assert pi["A"]["context_split_isolated"] == 0
@@ -110,14 +111,14 @@ def test_context_split_isolated_count():
 
 def test_ledger_hand_calc_isolating_split_count():
     trees = _df(_tree0_rows())
-    result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
+    result = gain_ledger.ledger_from_trees(trees, ITEM_COL, CATEGORIES)
     per_item = result["per_item"]
     assert [per_item[k]["isolating_split_count"] for k in ["A", "B", "C", "D"]] == [1, 2, 1, 2]
 
 
 def test_ledger_hand_calc_context_gain_share():
     trees = _df(_tree0_rows())
-    result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
+    result = gain_ledger.ledger_from_trees(trees, ITEM_COL, CATEGORIES)
     per_item = result["per_item"]
     assert per_item["A"]["context_gain_share"] == pytest.approx(6.0 / 14.0)
     assert per_item["B"]["context_gain_share"] == 0.0
@@ -125,7 +126,7 @@ def test_ledger_hand_calc_context_gain_share():
 
 def test_ledger_hand_calc_trees_touched_and_first_tree_index():
     trees = _df(_tree0_rows())
-    result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
+    result = gain_ledger.ledger_from_trees(trees, ITEM_COL, CATEGORIES)
     per_item = result["per_item"]
     for item in ["A", "B", "C", "D"]:
         assert per_item[item]["first_tree_index"] == 0
@@ -136,7 +137,7 @@ def test_ledger_hand_calc_trees_touched_and_first_tree_index():
 
 def test_unconditioned_root_split_not_booked():
     trees = _df(_tree0_rows() + _tree1_unconditioned_context_root())
-    result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
+    result = gain_ledger.ledger_from_trees(trees, ITEM_COL, CATEGORIES)
     assert result["per_item"]["A"]["context_gain"] == pytest.approx(6.0)
     assert result["context"]["gain_sum"] == pytest.approx(8.0)  # 不含 tree1 的 9.0
     assert result["total_gain"] == pytest.approx(31.0)  # 22 + 9
@@ -147,7 +148,7 @@ def test_unconditioned_root_split_not_booked():
 def test_total_split_count_counts_all_non_leaf_nodes():
     """tree0 有 4 個切點（S0/S1/S2/S3），葉不算。"""
     trees = _df(_tree0_rows())
-    result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
+    result = gain_ledger.ledger_from_trees(trees, ITEM_COL, CATEGORIES)
     assert result["total_split_count"] == 4
     # 未分配 split ＝ total − item_id − context（分帳殘差）
     unacc = (result["total_split_count"]
@@ -159,7 +160,7 @@ def test_total_split_count_counts_all_non_leaf_nodes():
 def test_coarse_ledger_still_has_total_split_count():
     """粗帳本降級沒有 reachable 走訪，但總 split 數只需數非葉節點，仍要有。"""
     trees = _df(_tree0_rows())
-    result = gain_ledger._coarse_ledger(trees, ITEM_COL, n_trees=1)
+    result = gain_ledger.coarse_ledger(trees, ITEM_COL, n_trees=1)
     assert result["total_split_count"] == 4
     assert result["pre_item"] is None            # 需走訪，粗帳本無從算
     assert result["first_item_split_depth"] is None
@@ -172,7 +173,7 @@ def test_pre_item_breakdown_reconciles_to_unaccounted():
     total − item_id − context（分帳殘差），且按特徵記得出是誰。tree1 的 root
     context f_region(gain9) 是唯一的 pre-item 切點。"""
     trees = _df(_tree0_rows() + _tree1_unconditioned_context_root())
-    result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
+    result = gain_ledger.ledger_from_trees(trees, ITEM_COL, CATEGORIES)
     pre = result["pre_item"]
     unacc_gain = (result["total_gain"]
                   - result["item_id"]["gain_sum"]
@@ -193,7 +194,7 @@ def test_pre_item_by_feature_sorted_by_gain_desc():
         _split(1, "1-S0", np.nan, "1-L0", "1-L1", "f_big", 9.0),
         _leaf(1, "1-L0", "1-S0"), _leaf(1, "1-L1", "1-S0"),
     ]
-    result = gain_ledger._ledger_from_trees(_df(rows), ITEM_COL, CATEGORIES)
+    result = gain_ledger.ledger_from_trees(_df(rows), ITEM_COL, CATEGORIES)
     feats = list(result["pre_item"]["by_feature"].keys())
     assert feats == ["f_big", "f_small"], f"未按 gain 遞減：{feats}"
 
@@ -214,7 +215,7 @@ def test_first_item_split_depth_summary():
         _leaf(1, "1-L0", "1-S1", node_depth=3), _leaf(1, "1-L1", "1-S1", node_depth=3),
         _leaf(1, "1-L2", "1-S0", node_depth=2),
     ]
-    result = gain_ledger._ledger_from_trees(_df(rows), ITEM_COL, CATEGORIES)
+    result = gain_ledger.ledger_from_trees(_df(rows), ITEM_COL, CATEGORIES)
     d = result["first_item_split_depth"]
     assert d["min"] == 1 and d["max"] == 2
     assert d["p50"] == pytest.approx(1.5)
@@ -225,7 +226,7 @@ def test_first_item_split_depth_summary():
 
 def test_unknown_code_ignored_with_note():
     trees = _df(_tree0_rows(s0_codes=(0, 2, 9)))
-    result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
+    result = gain_ledger.ledger_from_trees(trees, ITEM_COL, CATEGORIES)
     assert result["per_item"]["A"]["context_gain"] == pytest.approx(6.0)
     assert any("9" in n for n in result["notes"])
 
@@ -234,7 +235,7 @@ def test_unknown_code_ignored_with_note():
 
 def test_empty_side_skipped_without_crash():
     trees = _df(_tree0_rows(s0_codes=(0, 1, 2, 3)))  # S=全 item → 右側 reachable 為空
-    result = gain_ledger._ledger_from_trees(trees, ITEM_COL, CATEGORIES)
+    result = gain_ledger.ledger_from_trees(trees, ITEM_COL, CATEGORIES)
     assert result["item_id"]["split_count"] == 2
 
 
@@ -242,7 +243,7 @@ def test_empty_side_skipped_without_crash():
 
 def test_compute_gain_ledger_disabled():
     parameters = {"diagnostics": {"gain_ledger": {"enabled": False}}}
-    result = gain_ledger.compute_gain_ledger(None, {}, parameters)
+    result = nodes.compute_gain_ledger(None, {}, parameters)
     assert result == {"enabled": False}
 
 
@@ -272,7 +273,7 @@ def test_compute_gain_ledger_real_model_contract():
     parameters = {"schema": {"columns": {
         "time": "snap_date", "entity": ["cust_id"],
         "item": "prod_code"}}}
-    result = gain_ledger.compute_gain_ledger(adapter, preprocessor, parameters)
+    result = nodes.compute_gain_ledger(adapter, preprocessor, parameters)
     assert result["enabled"] is True
     assert result["fallback"] is False
     assert result["n_trees"] == 3          # num_iterations, no early stopping
@@ -287,7 +288,7 @@ def test_compute_gain_ledger_missing_category_mappings_falls_back():
     parameters = {"schema": {"columns": {
         "time": "snap_date", "entity": ["cust_id"],
         "item": "prod_code"}}}
-    result = gain_ledger.compute_gain_ledger(adapter, preprocessor, parameters)
+    result = nodes.compute_gain_ledger(adapter, preprocessor, parameters)
     assert result["fallback"] is True
     assert result["per_item"] is None
     assert result["context"] is None
@@ -309,7 +310,7 @@ def test_numeric_item_split_not_booked_but_noted():
         _leaf(2, "2-L1", "2-S1"),
         _leaf(2, "2-L2", "2-S1"),
     ]
-    out = gain_ledger._ledger_from_trees(_df(rows), ITEM_COL, CATEGORIES)
+    out = gain_ledger.ledger_from_trees(_df(rows), ITEM_COL, CATEGORIES)
     p = out["per_item"]
     # per-item 帳與純手算錨完全相同（數值切點與其子樹零貢獻）
     assert p["A"]["context_gain"] == pytest.approx(6.0)
@@ -335,7 +336,7 @@ def test_a_model_without_trees_lands_the_fourth_shape():
     reason, and no exception."""
     from tests.fake_adapter import FakeAdapter
 
-    result = gain_ledger.compute_gain_ledger(
+    result = nodes.compute_gain_ledger(
         FakeAdapter(), {"category_mappings": {"prod_code": CATEGORIES}}, _PARAMS)
     assert result["enabled"] is True
     assert result["supported"] is False
@@ -349,7 +350,7 @@ def test_any_other_failure_of_the_tree_read_stops_the_run():
             raise KeyError("split_gain")
 
     with pytest.raises(KeyError, match="split_gain"):
-        gain_ledger.compute_gain_ledger(Broken(), {}, _PARAMS)
+        nodes.compute_gain_ledger(Broken(), {}, _PARAMS)
 
 
 def test_real_model_ledger_matches_a_hand_decoded_walk():
@@ -375,6 +376,6 @@ def test_real_model_ledger_matches_a_hand_decoded_walk():
         tuple(int(t) for t in str(th).split("||")) if dt == "==" else None
         for th, dt in zip(raw["threshold"], raw["decision_type"])
     ]
-    decoded = gain_ledger._ledger_from_trees(adapter.tree_structure(), "prod_code", CATEGORIES)
+    decoded = gain_ledger.ledger_from_trees(adapter.tree_structure(), "prod_code", CATEGORIES)
     assert decoded["item_id"]["split_count"] > 0     # the item splits exist to decode
-    assert decoded == gain_ledger._ledger_from_trees(by_hand, "prod_code", CATEGORIES)
+    assert decoded == gain_ledger.ledger_from_trees(by_hand, "prod_code", CATEGORIES)

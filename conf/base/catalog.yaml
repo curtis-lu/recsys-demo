@@ -298,7 +298,7 @@ shap_diagnostics:
 # （ADR-0030 決定 4、7）。沒有 load：圖是給人看、給 log_experiment 上傳的，不是
 # 任何 node 的輸入。位置要在 diagnostics/ 底下，log_experiment 才會一起上傳；
 # case_figures 必須在 diagnostics/cases/，因為 cases_manifest 的 png 路徑寫的是
-# cases/<item>/<象限>_<角色>.png（diagnosis/model/shap_cases.py 的 _CASES_SUBDIR）。
+# cases/<item>/<象限>_<角色>.png（pipelines/training/steps/quadrant_cases.py 的 _CASES_SUBDIR）。
 shap_summary_figures:
   type: DiagnosticFiguresDataset
   filepath: data/models/${model_version}/diagnostics/summary

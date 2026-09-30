@@ -768,17 +768,18 @@ training 為什麼分模型、預測兩個常數，而不是一個：只有一�
 
 ---
 
-# 已登記的例外（3 筆）
+# 已登記的例外（2 筆）
 
 **看到這些不必以為判準是裝飾。** 它們各有登記過的理由：
 
 | 違例 | 違反哪條 | 為什麼還在 |
 |---|---|---|
-| `pipelines/training/` 的部分 node `def` 在 `recsys_tfb.diagnosis.model` 底下 | 8 | #222 重整 training 時**刻意不搬**（ADR-0014 決定 6）：搬進來會生出 7 個違反規則 3 的薄殼，而且這 7 個 node 未來要搬去 evaluation，現在搬等於白做。這也是 S1 無法一般化到所有 pipeline 的原因 |
 | dataset 的 `split_train_keys` 一個 node 產出兩樣東西，分別給兩個下游 | 1（反方向） | 兩樣東西是同一個式子的正反兩面，拆開就只剩「兩處程式碼碰巧一致」。見下方 |
 | dataset 的三個 build node 把組裝交給共用的 `build_model_input`，它裝了好幾個決策 | 3、4、5 | 四個 split 組 model_input 的決策完全相同，只差讀哪幾個月；拆成四份，一份先改了，四個 split 就不對稱了（規則 16）。見下方 |
 
-要新增一筆到這張表，**必須先問使用者**（同 `architecture-constraints.md` 節三的例外登記規則）。後兩筆使用者 2026-09-25 同意登記：`split_train_keys` 見 ADR-0029 決定 14，`build_model_input` 見 #467 的留言。
+要新增一筆到這張表，**必須先問使用者**（同 `architecture-constraints.md` 節三的例外登記規則）。兩筆都是使用者 2026-09-25 同意登記的：`split_train_keys` 見 ADR-0029 決定 14，`build_model_input` 見 #467 的留言。
+
+這張表原本還有一筆：training 的 7 個診斷 node 的 `def` 在 `recsys_tfb.diagnosis.model` 底下（違反規則 8，ADR-0014 決定 6 刻意不搬）。#489 照 [ADR-0030](../adr/0030-training-second-pass-honest-adapter-shared-scoring.md) 決定 6 把它們搬回 `pipelines/training/nodes.py`、判斷寫進 node body、機制進 `pipelines/training/steps/`，這一筆跟著刪掉（使用者 2026-09-28 同意）。
 
 ## `split_train_keys`：一個 node，兩個輸出
 

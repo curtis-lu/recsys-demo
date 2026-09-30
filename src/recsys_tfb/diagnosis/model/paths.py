@@ -1,25 +1,33 @@
-"""診斷產物路徑解析。
+"""Where a model version's diagnostics directory is.
 
-Only the diagnostics directory itself is resolved here: ``log_experiment``
-uploads it whole, and HPO's search diagnostics write under it. The figure
+Only the directory itself is resolved here: ``log_experiment`` uploads it
+whole, and HPO's search diagnostics (``diagnosis/hpo/paths.py``) write under
+it. That second reader is why this stayed in the library when the diagnosis
+nodes and their mechanisms moved into the training pipeline (ADR-0030
+decision 6): ``diagnosis/hpo`` is a library module, and a library module may
+not import a pipeline (S8) or reach into its ``steps/`` (S3). The figure
 subdirectories (``summary/``, ``cases/``) belong to their catalog entries
 (``shap_summary_figures``, ``case_figures``), which write them (ADR-0030
 decision 7).
 """
 
-import re
 from pathlib import Path
+
+from recsys_tfb.io.models_root import MODELS_ROOT
 
 
 def diagnostics_dir(parameters: dict) -> Path:
-    """Resolve（並建立）診斷產物 dir，對齊 catalog 的
-    data/models/${model_version}/diagnostics/ 慣例。"""
+    """Resolve (and create) the diagnostics directory: the one the catalog's
+    ``data/models/${model_version}/diagnostics/`` entries write into.
+
+    Recomputed here rather than read off a catalog entry because both of its
+    callers want the directory, not one of the files in it. It names the
+    catalog's directory because ``parameters["model_version"]`` is the value
+    the CLI substituted into the catalog's paths (the same runtime parameters
+    resolve both) — and only as long as ``io/models_root.MODELS_ROOT`` is the
+    catalog's root.
+    """
     mv = parameters["model_version"]
-    d = Path("data") / "models" / str(mv) / "diagnostics"
+    d = MODELS_ROOT / str(mv) / "diagnostics"
     d.mkdir(parents=True, exist_ok=True)
     return d
-
-
-def safe_name(s: object) -> str:
-    """檔名安全化（item 值可能含空白/斜線）。"""
-    return re.sub(r"[^0-9A-Za-z._-]+", "_", str(s))

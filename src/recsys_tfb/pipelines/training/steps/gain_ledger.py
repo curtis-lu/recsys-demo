@@ -1,32 +1,45 @@
-"""結構層 Gain 帳本：模型的樹跨樹按 item 記帳（完整集合遍歷變體）。
+"""The structural gain ledger: the model's trees, accounted per item across
+trees (the full-set traversal variant).
 
-從每棵樹的 root 走訪，把切點 gain 分成兩帳：item-id 切點的 gain（isolate-by-item 的
-成本）與已經過 item-id 切點「conditioned」之後的 context 切點 gain（item 隔出來之後
-還花了多少 gain 精修判別力）。「item 隔出來之後幾乎沒有後續 context gain」只說明模型
-沒在該 item 上換到個人化 gain，不說明原因：可能是沒分到容量（餓死型），也可能是資料裡
-沒有能分開它正負例的特徵（特徵缺失型）——兩型在帳本上長得一樣，帳本分不出來。
+Every tree is walked from its root and its split gain goes into two accounts:
+the gain of item-id splits (what isolating by item costs), and the gain of the
+context splits taken once an item-id split has "conditioned" the path (how
+much gain the model spends refining its discrimination after the item is
+isolated). "Almost no context gain after the item is isolated" only says the
+model bought no personalisation gain on that item; it does not say why. The
+item may have been starved of capacity, or the data may hold no feature that
+separates its positives from its negatives. The two look the same in the
+ledger, and the ledger cannot tell them apart.
 
-另外三個全域輸出（供 ``model_capacity`` 呈現層用，不影響上面兩帳）：
-``total_split_count``（非葉節點總數，讓 split 三分能算未分配殘差＝total−item−
-context）、``pre_item``（item 切點**之前**的未 conditioned 切點按特徵拆解，其 gain
-加總恆等於未分配殘差 ``total_gain−item_id_gain−context_gain``）、
-``first_item_split_depth``（每棵樹最淺 item 切點的 ``node_depth`` 分位摘要，root=1，
-量 item 條件化坐落多深）。粗帳本降級路徑只有 ``total_split_count``，
-``pre_item``／``first_item_split_depth`` 為 ``None``（需 reachable 走訪才算得出）。
+Three more global outputs, for the ``model_capacity`` presentation layer
+(they do not touch the two accounts above): ``total_split_count`` (non-leaf
+nodes in total, so the three-way split share can compute the unallocated
+residual = total − item − context); ``pre_item`` (the unconditioned splits
+taken **before** any item split, broken down by feature; their gain sums to
+exactly the unallocated residual ``total_gain − item_id_gain −
+context_gain``); ``first_item_split_depth`` (a quantile summary of each
+tree's shallowest item split's ``node_depth``, root = 1: how deep the item
+conditioning sits). The coarse ledger has ``total_split_count`` only;
+``pre_item`` and ``first_item_split_depth`` are ``None`` there, because both
+need the reachable-set traversal.
 
-雙層結構（可測性）：``_ledger_from_trees`` 是純 pandas/dict 核心（只吃
-``ModelAdapter.tree_structure()`` 的表，不碰 model/preprocessor，單元測試直接
-餵手工 DataFrame）；``compute_gain_ledger`` 是 thin wrapper——讀 config/schema、向
-adapter 要樹的切點結構、取 preprocessor 的 item 值映射後轉呼叫核心；映射缺席時降級為
-粗帳本。
+Two layers, for testability: ``ledger_from_trees`` is the pure pandas/dict
+core — it takes only ``ModelAdapter.tree_structure()``'s table and touches
+neither the model nor the preprocessor, so unit tests feed it hand-built
+frames — and ``compute_gain_ledger`` (``nodes.py``) is the node, which reads
+the config and schema, asks the adapter for the trees, and decides between
+this core and ``coarse_ledger``.
 
 The tree table is algorithm-neutral (``models/base.py``'s
 ``TREE_STRUCTURE_COLUMNS``): a categorical split arrives as the tuple of
 category codes sent left, already decoded from LightGBM's ``"2||3||4"`` by the
 adapter (ADR-0030 decision 1). A model with no trees raises
 ``UnsupportedCapability``; the ledger is then skipped and lands as the
-"model cannot" shape (``_util.unsupported_artifact``), which evaluation's
-``model_capacity`` reports as its own reason (decision 4).
+"model cannot" shape (``steps/diagnosis_artifacts.unsupported_artifact``),
+which evaluation's ``model_capacity`` reports as its own reason (decision 4).
+
+The ``notes`` strings are part of ``gain_ledger.json`` and are kept word for
+word; so is the log line.
 """
 
 import logging
@@ -34,23 +47,20 @@ import logging
 import numpy as np
 import pandas as pd
 
-from recsys_tfb.core.schema import get_schema
-from recsys_tfb.models.base import UnsupportedCapability
-
-from ._util import unsupported_artifact
-
 logger = logging.getLogger(__name__)
 
 
 def _total_gain(trees: pd.DataFrame) -> float:
-    """全部切點 split_gain 總和（leaf 的 NaN 視為 0，負值截為 0）。"""
+    """Sum of every split's ``split_gain`` (a leaf's NaN counts as 0, a
+    negative gain is clipped to 0)."""
     return float(
         pd.to_numeric(trees["split_gain"], errors="coerce").fillna(0).clip(lower=0).sum()
     )
 
 
 def _tree_index_summary(tree_indices: list) -> dict:
-    """item 切點 tree_index 的分位數摘要（min/max 為 int、p25/p50/p75 為 float）；空 list 全回 None。"""
+    """Quantile summary of the item splits' ``tree_index`` (min/max as int,
+    p25/p50/p75 as float); all ``None`` for an empty list."""
     if not tree_indices:
         return {"min": None, "p25": None, "p50": None, "p75": None, "max": None}
     arr = np.asarray(sorted(tree_indices), dtype=float)
@@ -64,11 +74,13 @@ def _tree_index_summary(tree_indices: list) -> dict:
 
 
 def _depth_summary(depths: list) -> dict:
-    """每棵樹最淺 item 切點深度的分位摘要（node_depth，root=1）；空 list 全回 None。
+    """Quantile summary of each tree's shallowest item-split depth
+    (``node_depth``, root = 1); all ``None`` for an empty list.
 
-    ``n_trees_with_item_split`` 是這批深度的來源樹數（有 ≥1 個 item 切點的樹），
-    讓讀者知道分位是算在幾棵樹上——與全模型樹數可能不同（有些樹整棵沒有 item
-    切點）。
+    ``n_trees_with_item_split`` is how many trees these depths come from (the
+    trees with at least one item split), so a reader knows how many trees the
+    quantiles are over — possibly fewer than the model has, since a tree can
+    hold no item split at all.
     """
     if not depths:
         return {"min": None, "p25": None, "p50": None, "p75": None,
@@ -85,11 +97,13 @@ def _depth_summary(depths: list) -> dict:
 
 
 def _item_id_block(trees: pd.DataFrame, item_feature: str, total_gain: float) -> dict:
-    """item-id 帳：對 ``split_feature == item_feature`` 的切點直接篩選加總。
+    """The item-id account: a plain filter-and-sum over the splits with
+    ``split_feature == item_feature``.
 
-    刻意與遍歷/reachable 無關——任何一個 item 切點，不論落在哪個（甚至已被上游條件
-    排除到不可能命中的）分支之下，其本身的 gain 仍算入 item-id 帳；這讓粗帳本降級
-    路徑可以重用同一段邏輯（完全不需要 categories）。
+    Deliberately independent of the traversal and of the reachable sets: an
+    item split's own gain counts in this account whichever branch it sits
+    under, even one an upstream condition has made impossible to reach. That
+    is what lets the coarse ledger reuse this code with no categories at all.
     """
     item_rows = trees[trees["split_feature"] == item_feature]
     gain_sum = float(
@@ -128,28 +142,35 @@ def _is_categorical_split(codes) -> bool:
     return isinstance(codes, (tuple, list))
 
 
-def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list) -> dict:
-    """純 pandas/dict 核心：從 ``ModelAdapter.tree_structure()`` 的表記帳。
+def ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list) -> dict:
+    """The pure pandas/dict core: the ledger, from
+    ``ModelAdapter.tree_structure()``'s table.
 
-    對每棵樹從 root 走訪（iterative stack），攜帶 ``reachable``（該節點可達的 item 值
-    集合，root＝全 item）與 ``conditioned``（路徑上是否已經過 ≥1 個 item 切點）：
+    Each tree is walked from its root (an iterative stack), carrying
+    ``reachable`` (the item values that can reach the node; the whole item set
+    at the root) and ``conditioned`` (whether the path has passed at least one
+    item split):
 
-    - **item 切點**（``split_feature == item_feature``）：``categories_left`` 的碼經
-      ``categories[code]`` 映成 item 值 S；左子 ``reachable ∩ S``、右子
-      ``reachable - S``，兩側 ``conditioned=True``。
-      gain 記入 item-id 帳（見 ``_item_id_block``，與遍歷無關）；對「當時 reachable」
-      （進入此節點時攜帶的集合）內每個 item 記 ``isolating_split_count``/
-      ``trees_touched``/``first_tree_index``。``categories_left`` 出現超出 categories
-      範圍的碼 → 忽略該碼並彙總記一筆 note，不炸。
-    - **context 切點**（其他特徵）：若 ``conditioned``，對 reachable 內每個 item 記
-      ``context_split_count``/``context_gain``（``len(reachable)==1`` 時另記
-      ``context_gain_isolated``），同時全域 context 帳的 ``split_count``/``gain_sum``
-      累加一次（不論 reachable 內有幾個 item，只算一次——避免依 item 數重複計）。未
-      conditioned 的全域切點（常見於 root 段）不進任何帳。
-    - 任一節點自身的 ``reachable`` 為空集合時：仍完成該節點自己的帳（item-id 帳本就
-      與遍歷無關；context 帳的 per-item 迴圈對空集合是 no-op，不會多記），但不再遞迴
-      進它的子節點——因為子樹內任何進一步的切點都不可能命中任何 item，繼續走訪沒有
-      意義。
+    - **An item split** (``split_feature == item_feature``): the codes in
+      ``categories_left`` map through ``categories[code]`` to a set S of item
+      values; the left child carries ``reachable ∩ S`` and the right child
+      ``reachable - S``, both with ``conditioned=True``. Its gain goes into the
+      item-id account (see ``_item_id_block``, which ignores the traversal);
+      every item in the reachable set it was entered with gets its
+      ``isolating_split_count`` / ``trees_touched`` / ``first_tree_index``
+      recorded. A code in ``categories_left`` outside ``categories`` is ignored
+      and summarised in one note, without raising.
+    - **A context split** (any other feature): when ``conditioned``, every item
+      in ``reachable`` gets ``context_split_count`` / ``context_gain`` (and
+      ``context_gain_isolated`` when ``len(reachable) == 1``), and the global
+      context account's ``split_count`` / ``gain_sum`` grows once — once, not
+      once per reachable item, so a split is never counted by the number of
+      items. A global split that is not yet conditioned (common near the root)
+      goes into none of those accounts; it is the ``pre_item`` breakdown.
+    - A node whose own ``reachable`` is empty still settles its own accounts
+      (the item-id account ignores the traversal anyway; the context account's
+      per-item loop is a no-op over an empty set, so nothing extra is counted)
+      but its children are not walked: no split below it can reach any item.
     """
     n_trees = int(trees["tree_index"].nunique())
     n_items = len(categories)
@@ -171,24 +192,26 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
     unknown_codes: set = set()
     numeric_item_splits = 0
 
-    # 未分配（pre-item）＝任何 item 切點**之前**（``conditioned=False``）的非 item
-    # 切點，模型還沒條件化到「哪個 item」就用的全域 context——按特徵記帳，讓
-    # ``model_capacity`` 能拆解「未分配那塊是哪些特徵撐起來的」。
-    # 這批切點在既有邏輯裡不進任何帳；其 gain 加總恆等於
-    # ``total_gain − item_id_gain − context_gain``（＝未分配殘差）。
+    # Unallocated (pre-item) = the non-item splits taken before any item split
+    # (``conditioned=False``): global context the model uses before it has
+    # conditioned on which item. Accounted by feature, so ``model_capacity``
+    # can break down which features hold up the unallocated share. These
+    # splits go into none of the other accounts; their gain sums to exactly
+    # ``total_gain − item_id_gain − context_gain`` (the unallocated residual).
     pre_item_gain_by_feat: dict = {}
     pre_item_split_by_feat: dict = {}
     pre_item_gain_sum = 0.0
     pre_item_split_count = 0
-    # 每棵樹「最淺的 item 切點」節點深度（node_depth，root=1）：item 條件化坐落
-    # 多深＝它上方壓了多少全域 context。只收有 item 切點的樹。
+    # Each tree's shallowest item split's depth (node_depth, root = 1): how
+    # deep the item conditioning sits, i.e. how much global context sits
+    # above it. Only trees with an item split contribute.
     first_item_split_depths: list = []
 
     for _, tdf in trees.groupby("tree_index"):
         tdf = tdf.set_index("node_index")
         roots = tdf.index[tdf["parent_index"].isna()]
         if len(roots) == 0:
-            continue  # 防禦性：畸形樹（無 root）直接跳過，不炸
+            continue  # Defensive: a malformed tree (no root) is skipped, not raised on.
         tree_item_depths: list = []
         stack = [(roots[0], set(all_items), False)]
         while stack:
@@ -196,17 +219,19 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
             row = tdf.loc[node]
             feat = row["split_feature"]
             if not isinstance(feat, str):
-                continue  # leaf：split_feature 非字串（NaN）
+                continue  # A leaf: split_feature is not a string (NaN).
             gain = row["split_gain"]
             gain = 0.0 if pd.isna(gain) else float(gain)
             t_idx = int(row["tree_index"])
 
             if feat == item_feature:
                 if not _is_categorical_split(row["categories_left"]):
-                    # item 欄出現非類別切點（欄位可能未宣告 categorical）——不解
-                    # 類別碼、不動 reachable、不記 per-item 帳，只計異常（防呆，
-                    # 審查修復 2026-07-08）。A numeric split has no
-                    # categories_left, so there is no set of items to send left.
+                    # A non-categorical split on the item column (the column
+                    # may not be declared categorical): no codes to decode,
+                    # reachable left as it is, no per-item accounting — only
+                    # counted as an anomaly (a guard, review fix 2026-07-08).
+                    # A numeric split has no categories_left, so there is no
+                    # set of items to send left.
                     numeric_item_splits += 1
                     stack.append((row["left_child"], reachable, conditioned))
                     stack.append((row["right_child"], reachable, conditioned))
@@ -235,7 +260,8 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
                             context_gain_isolated[it] += gain
                             context_split_isolated[it] += 1
                 else:
-                    # pre-item：item 條件化之前的全域 context 切點，按特徵記帳。
+                    # Pre-item: a global context split taken before item
+                    # conditioning, accounted by feature.
                     pre_item_gain_by_feat[feat] = (
                         pre_item_gain_by_feat.get(feat, 0.0) + gain
                     )
@@ -284,8 +310,8 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
         (context_global_gain_sum / total_gain) if total_gain > 0 else None
     )
 
-    # pre-item（未分配）按特徵，gain 遞減排序——讀者最想先看哪個全域特徵吃掉
-    # 最多未分配 gain。
+    # Pre-item (unallocated) by feature, gain descending: the global feature
+    # that eats the most unallocated gain is what a reader wants first.
     pre_item_by_feature = {
         f: {
             "gain": pre_item_gain_by_feat[f],
@@ -326,9 +352,10 @@ def _ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list)
     }
 
 
-def _coarse_ledger(trees: pd.DataFrame, item_feature: str, n_trees: int) -> dict:
-    """粗帳本降級：preprocessor 缺 item 值映射時，只留 item-id 帳（by-feature 篩選即得，
-    不需遍歷/categories）；``context``/``per_item`` 缺席（``None``），``fallback: True``。
+def coarse_ledger(trees: pd.DataFrame, item_feature: str, n_trees: int) -> dict:
+    """The coarse ledger: only the item-id account (a filter by feature, no
+    traversal, no categories needed). ``context`` and ``per_item`` are absent
+    (``None``) and ``fallback`` is ``True``.
     """
     total_gain = _total_gain(trees)
     item_block = _item_id_block(trees, item_feature, total_gain)
@@ -338,11 +365,13 @@ def _coarse_ledger(trees: pd.DataFrame, item_feature: str, n_trees: int) -> dict
         "n_trees": n_trees,
         "n_items": None,
         "total_gain": total_gain,
-        # 總 split 數只需數非葉節點、不需 reachable 走訪，粗帳本也能給。
+        # The total split count only needs the non-leaf nodes counted, not the
+        # reachable-set traversal, so the coarse ledger can give it too.
         "total_split_count": int(trees["split_feature"].notna().sum()),
         "item_id": item_block,
         "context": None,
-        # pre-item 拆解與 item 切點深度都需要 reachable 走訪，粗帳本無從算 → None。
+        # The pre-item breakdown and the item-split depth both need the
+        # reachable-set traversal, which the coarse ledger cannot do -> None.
         "pre_item": None,
         "first_item_split_depth": None,
         "per_item": None,
@@ -353,45 +382,3 @@ def _coarse_ledger(trees: pd.DataFrame, item_feature: str, n_trees: int) -> dict
             "與 item 切點深度）"
         ],
     }
-
-
-def compute_gain_ledger(model, preprocessor: dict, parameters: dict) -> dict:
-    """Thin wrapper：讀 config/schema，向 adapter 要樹的切點結構、取 item 值映射後轉呼叫 ``_ledger_from_trees``。
-
-    ``diagnostics.gain_ledger.enabled``（預設 True）關閉時直接回 ``{"enabled": False}``，
-    不觸碰 model。preprocessor 缺 ``category_mappings[item_col]`` 時降級為粗帳本。
-
-    A model with no tree structure (``UnsupportedCapability``) lands
-    ``{"enabled": True, "supported": False, "reason": ...}`` and the run goes
-    on. Any other exception is a bug and stops it (ADR-0030 decision 4).
-
-    ``preprocessor`` is the dataset-built artifact, not the training-stage view.
-    Unlike the other diagnosis nodes this one never slices X, so it needs only
-    the *encoding* half of the artifact: ``category_mappings`` is the code-to-item
-    lookup the tree table's integer category codes have to be read through, and
-    feature selection passes it through untouched either way (ADR-0014
-    decision 7).
-    """
-    cfg = (parameters.get("diagnostics", {}) or {}).get("gain_ledger", {}) or {}
-    if not cfg.get("enabled", True):
-        return {"enabled": False}
-
-    item_col = get_schema(parameters)["item"]
-    # Decision — a model without trees skips the ledger, warns and says so in
-    # the artifact; evaluation reads that as its own reason, not as "turned
-    # off" or "never ran".
-    try:
-        trees = model.tree_structure()
-    except UnsupportedCapability as exc:
-        logger.warning("gain_ledger: skipped, the model cannot provide it: %s", exc)
-        return unsupported_artifact(exc)
-    n_trees = int(trees["tree_index"].nunique())
-
-    categories = (preprocessor or {}).get("category_mappings", {}).get(item_col)
-    if not categories:
-        logger.warning(
-            "gain_ledger: preprocessor 缺 category_mappings[%s]，降級為粗帳本", item_col
-        )
-        return _coarse_ledger(trees, item_col, n_trees)
-
-    return _ledger_from_trees(trees, item_col, list(categories))

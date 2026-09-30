@@ -1,17 +1,29 @@
-"""診斷域 library：排序模型的「現象 → 成因」診斷。
+"""The diagnosis library: "symptom → cause" diagnoses of a ranking model.
 
-**本套件只忠實呈現資料與其邊界，不產生判定、不給建議動作、不用門檻把連續量
-切成類別——判斷是讀者的工作。** 這是設計不變量，不是風格偏好：曾經存在的
-``triage``（per-item 判定＋建議槓桿）與 ``quadrant``（AUC 門檻切象限）就是
-因為違反它而整層退場。新增模組前先確認自己沒有在重蹈那條路。
+**This package only presents the data and its limits faithfully. It makes no
+verdicts, recommends no actions, and cuts no continuous quantity into
+categories with a threshold — judging is the reader's job.** That is a design
+invariant, not a style preference: ``triage`` (a per-item verdict plus the
+lever to pull) and ``quadrant`` (quadrants cut at an AUC threshold) once
+existed here, and both layers were retired for breaking it. Before adding a
+module, check that it is not walking down that road again.
 
-- ``diagnosis.model``  — 模型結構層診斷（SHAP、importance、feature stats、
-  象限選樣與案例、gain ledger）。訓練 pipeline 的薄 node 呼叫它。
-- ``diagnosis.metric`` — 指標層診斷，跑在共用診斷抽樣上。評估 pipeline 的薄
-  node 呼叫它。（此處刻意不列舉子模組：清單增刪頻繁，列了必然與實況漂移。）
+- ``diagnosis.metric`` — metric-level diagnoses, run on the shared diagnosis
+  sample. The evaluation pipeline's nodes call it. (Its submodules are
+  deliberately not listed here: the list changes often, and a copy here would
+  drift.)
+- ``diagnosis.hpo`` — the HPO search diagnostics ``tune_hyperparameters``
+  writes.
+- ``diagnosis.model`` — only ``diagnostics_dir`` now. The model-structure
+  diagnoses (SHAP, importance, feature statistics, the quadrant population
+  and cases, the gain ledger) had training as their only consumer, so their
+  nodes are in ``pipelines/training/nodes.py`` and their mechanisms in
+  ``pipelines/training/steps/`` (ADR-0030 decision 6). ``diagnostics_dir``
+  stayed because ``diagnosis.hpo`` writes under the same directory.
 
-依賴方向（單向，違反即錯，見 spec §1 不變量 4）：
-``pipelines/* → diagnosis → core / evaluation(僅 numpy 原語 metrics.py) / io / utils``；
-本套件不得 import 任何 ``pipelines/*``。
-框架方法論見 docs/ranking-diagnosis-framework.md。
+Dependency direction (one way; breaking it is an error, see spec §1
+invariant 4, and S8 in ``docs/agents/architecture-constraints.md`` checks
+it): ``pipelines/* → diagnosis → core / evaluation (only the numpy primitives
+in metrics.py) / io / utils``; this package must not import any
+``pipelines/*``. The methodology is in docs/ranking-diagnosis-framework.md.
 """

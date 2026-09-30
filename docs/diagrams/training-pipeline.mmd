@@ -2,8 +2,8 @@
 %% ===========================================================================
 %% training pipeline node graph
 %% 唯一真實來源：src/recsys_tfb/pipelines/training/pipeline.py::create_pipeline
-%% node 函式散在兩處：14 個在 training/nodes.py（其中兩個依 training.hpo_enabled 二選一），7 個在 diagnosis/model/
-%% （見下方「node 函式不全在 training/nodes.py」）
+%% node 函式全在 training/nodes.py：21 個（其中兩個依 training.hpo_enabled 二選一）
+%% （見下方「node 函式都在 training/nodes.py」）
 %% 姊妹圖：dataset-pipeline.mmd、inference-pipeline.mmd（同一套圖例，多出的形狀見下）
 
 %% 圖例
@@ -103,7 +103,7 @@
 %%   共用目錄會互相覆蓋 sidecar（algorithm 名稱與 adapter 類別串味）。
 
 %% 唯一畫出來的虛線邊：select_shap_population 的 predict_manifest
-%%   這個參數在函式裡從頭到尾沒被讀過（population_spark.py 全檔只出現在簽名與
+%%   這個參數在函式裡從頭到尾沒被讀過（select_shap_population 裡只出現在簽名與
 %%   docstring）。掛它的理由是排序：那個 node 的三個資料輸入都沒有 node producer，
 %%   Kahn 拓樸排序會把它浮到 predict 之前，讀到還沒寫入的預測。
 %%   compute_test_metrics 的同名輸入不是虛線——它真的被讀了，但只進 logger
@@ -117,12 +117,13 @@
 %%   但快取裡沒有它的列，代表 dataset 從沒產過那個月——當成「已完成」跳過會靜靜交出
 %%   一份空報表。
 
-%% node 函式不全在 training/nodes.py
-%%   本圖 19 個 node 裡有 7 個的函式在 diagnosis/ 底下：compute_feature_statistics、
-%%   compute_feature_importance、compute_shap_diagnostics、compute_quadrant_profiles、
-%%   compute_quadrant_cases（diagnosis.model）、compute_gain_ledger
-%%   （diagnosis.model.gain_ledger）、select_shap_population
-%%   （diagnosis.model.population_spark，放那裡是因為它要用 Spark）。
+%% node 函式都在 training/nodes.py
+%%   #489 之前有 7 個診斷 node 的函式在 diagnosis/model/ 底下（compute_feature_statistics、
+%%   compute_feature_importance、compute_gain_ledger、compute_shap_diagnostics、
+%%   select_shap_population、compute_quadrant_profiles、compute_quadrant_cases）。
+%%   ADR-0030 決定 6 把它們搬回 training/nodes.py，機制進 training/steps/
+%%   （bounded_reads、item_sampling、attribution_profiles、gain_ledger、
+%%   quadrant_population、quadrant_cases、figures、diagnosis_artifacts）。
 %%   本圖 node name 一律等於函式名，這點跟 dataset 圖不同（那邊四個 build node 共用
 %%   一個函式），所以沒有「圖名 vs 函式名」的對照問題。
 

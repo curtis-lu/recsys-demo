@@ -79,8 +79,7 @@
 
 <div class="note">
 框內是 <b>node name</b>，可以直接餵給 <code>--from-node</code> / <code>--only-node</code>（<code>--list-nodes</code> 印的也是這個名字）。
-這條 pipeline 的 node name 都與函式名相同，但<b>函式不都在 <code>training/nodes.py</code></b>——
-7 個在 <code>diagnosis/</code> 底下（見節點對照表的「函式位置」欄）。<br>
+這條 pipeline 的 node name 都與函式名相同，函式全部在 <code>pipelines/training/nodes.py</code>（#489 之前有 7 個診斷 node 的函式在 <code>diagnosis/model/</code> 底下，ADR-0030 決定 6 把它們搬回來，機制進 <code>steps/</code>）。<br>
 <b>刻意不畫</b>：每個 node 都吃的 <code>parameters</code>、
 <code>compute_group_filter_report</code>（pipeline 實際有 20 個 node，本圖畫了 19 個；
 這是既有落差，與 calibration 移除無關，未在本輪一併補上）、
@@ -341,7 +340,7 @@ HPO 以 <code>search_id</code> 為鍵，兩者都是雜湊過的版本 ID，不�
           移除後兩欄恆等，這條分支已經消失（見函式 docstring）。<br>
           <b>只讀計分月份</b>，見上方第 2 點。</td>
     </tr>
-    <tr class="stage"><td colspan="4">模型診斷（7 個 node，函式都在 <code>diagnosis/</code>）</td></tr>
+    <tr class="stage"><td colspan="4">模型診斷（7 個 node，函式在 <code>pipelines/training/nodes.py</code>，機制在 <code>pipelines/training/steps/</code>）</td></tr>
     <tr>
       <td>compute_feature_statistics</td>
       <td>train_parquet_handle, <b>model</b>, <b>preprocessor</b></td>
@@ -351,14 +350,13 @@ HPO 以 <code>search_id</code> 為鍵，兩者都是雜湊過的版本 ID，不�
           <span class="warn">吃 <code>model</code> 是刻意耦合</span> 這條依賴把這個 node 推到
           <code>finalize_model</code> <b>之後</b>，接續執行要多付一段——代價寫在
           <code>tests/test_pipelines/test_resume_contracts.py</code> 的 <code>compute_feature_statistics</code> 條目。<br>
-          <code>diagnosis/model/feature_stats.py</code></td>
+          機制：<code>steps/bounded_reads.py</code></td>
     </tr>
     <tr>
       <td>compute_feature_importance</td>
       <td>model</td>
       <td>feature_importance<br><i>（落地）</i></td>
-      <td>LightGBM split ＋ gain importance，依 gain 排序，標出 dead features。<br>
-          <code>diagnosis/model/importance.py</code></td>
+      <td>LightGBM split ＋ gain importance，依 gain 排序，標出 dead features。</td>
     </tr>
     <tr>
       <td>compute_gain_ledger</td>
@@ -372,7 +370,7 @@ HPO 以 <code>search_id</code> 為鍵，兩者都是雜湊過的版本 ID，不�
           catalog 標 <code>optional</code>：單獨跑 evaluation、或訓練側是舊版沒跑過這個 node 時
           <code>load()</code> 回 <code>None</code> 而不是 raise，那是正常路徑。<br>
           <code>preprocessor</code> 缺 <code>category_mappings[item]</code> 時降級成粗帳本，不 raise。<br>
-          <code>diagnosis/model/gain_ledger.py</code></td>
+          帳本本身：<code>steps/gain_ledger.py</code></td>
     </tr>
     <tr>
       <td>compute_shap_diagnostics</td>
@@ -380,29 +378,28 @@ HPO 以 <code>search_id</code> 為鍵，兩者都是雜湊過的版本 ID，不�
       <td>shap_diagnostics<br><i>（落地）</i></td>
       <td>全域 ／ per-item（族群代表）SHAP，單次 <code>shap_values</code> 兩用。
           注意它吃的是 <b>test 快取</b>，跟評分節點同一份 handle。<br>
-          <code>diagnosis/model/shap_per_item.py</code></td>
+          機制：<code>steps/bounded_reads.py</code>、<code>item_sampling.py</code>、<code>attribution_profiles.py</code>、<code>figures.py</code></td>
     </tr>
     <tr>
       <td>select_shap_population</td>
       <td>training_eval_predictions <i>（全月讀回）</i>, test_model_input, predict_manifest</td>
       <td>shap_population, case_rows<br><i>（皆 MemoryDataset）</i></td>
       <td><span class="warn">全圖唯一的虛線邊</span> <code>predict_manifest</code> 在函式裡<b>從頭到尾沒被讀過</b>
-          （全檔只出現在簽名與 docstring）。掛它純粹是排序：三個資料輸入都沒有 node producer，
+          （函式裡只出現在簽名與 docstring）。掛它純粹是排序：三個資料輸入都沒有 node producer，
           Kahn 拓樸排序會把這個 node 浮到 predict 之前，讀到還沒寫入的預測。<br>
           <code>test_model_input</code> 是<b>這張表的第二個讀者</b>：Spark 直讀去 join 特徵，不經 parquet 快取
           （快取那條路是 driver-local，這裡需要在 executor 上做 window 與 join）。<br>
           rank／象限指派／抽樣／join 全在 Spark，driver 只 <code>toPandas</code> 小族群。
           <code>quadrant_enabled=false</code> → <code>(None, None)</code>；選樣失敗也回
           <code>(None, None)</code> 不中斷訓練。<br>
-          <code>diagnosis/model/population_spark.py</code>（放在這裡而不是純 python 的 diagnostics 子套件，因為它要用 Spark）</td>
+          Spark 機制：<code>steps/quadrant_population.py</code></td>
     </tr>
     <tr>
       <td>compute_quadrant_profiles</td>
       <td>model, shap_population, <b>preprocessor</b></td>
       <td>quadrant_profiles<br><i>（落地）</i></td>
       <td>per-(item×象限) 平均 signed profile，一次 SHAP。best-effort：失敗 log ＋ 回 <code>{}</code>。<br>
-          <span class="warn">catalog 名與檔名不同</span> 落地檔案叫 <code>per_quadrant.json</code>。<br>
-          <code>diagnosis/model/shap_cases.py</code></td>
+          <span class="warn">catalog 名與檔名不同</span> 落地檔案叫 <code>per_quadrant.json</code>。</td>
     </tr>
     <tr>
       <td>compute_quadrant_cases</td>
@@ -411,7 +408,7 @@ HPO 以 <code>search_id</code> 為鍵，兩者都是雜湊過的版本 ID，不�
       <td>每 (item×象限) 全格極值案例的單列 signed SHAP 橫條圖 ＋ 稽核 manifest。
           與 profile 依目的解耦：讀 <code>case_rows</code>、自己做一次小 SHAP，不動
           <code>compute_quadrant_profiles</code>。best-effort：整體失敗回 <code>{}</code>，單張圖失敗只記該筆。<br>
-          <code>diagnosis/model/shap_cases.py</code></td>
+          案例格式：<code>steps/quadrant_cases.py</code></td>
     </tr>
     <tr class="stage"><td colspan="4">記錄</td></tr>
     <tr>
