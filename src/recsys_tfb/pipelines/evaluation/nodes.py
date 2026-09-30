@@ -1537,7 +1537,7 @@ def _diagnosis_pages_dir(parameters: dict):
     （含 dash 已剝掉的 ``snap_date``）併進 node 拿到的 ``parameters``，再拿同
     一份 dict 去做 catalog 的 ``${...}`` 代換——所以這裡取的是 catalog 代換用
     的**同一組值**，不是另外猜一次。同樣的做法見
-    ``diagnosis.model.paths.diagnostics_dir``。
+    ``io.models_root.diagnostics_dir``。
 
     runtime 的值原樣使用：它就是 catalog 代換進路徑的那個字串。退回
     ``evaluation.snap_date`` 是給單元測試用的（那裡沒有 runtime_params），走的是

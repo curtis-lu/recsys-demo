@@ -1,11 +1,12 @@
-"""Where every model version's artifacts land: ``data/models``.
+"""Where every model version's artifacts land: ``data/models``, and the
+diagnostics directory under it.
 
 The same root the catalog's ``data/models/${model_version}/...`` entries write
 under (``conf/base/catalog.yaml``: the model, its reports, its diagnostics).
 This copy is for the code that builds such a path itself instead of going
-through a catalog entry: ``diagnosis/model/paths.diagnostics_dir`` (the
-directory ``log_experiment`` uploads and HPO's search diagnostics write under)
-and ``pipelines/training/steps/hpo_resume.hpo_study_dir`` (the crash-resumable
+through a catalog entry: ``diagnostics_dir`` below (the directory
+``log_experiment`` uploads and HPO's search diagnostics write under) and
+``pipelines/training/steps/hpo_resume.hpo_study_dir`` (the crash-resumable
 HPO study, which has no catalog entry at all). Those two used to spell the
 root out once each; ADR-0030 decision 16 collected them here.
 
@@ -32,3 +33,27 @@ runs in, so a worktree writes under its own tree.
 from pathlib import Path
 
 MODELS_ROOT: Path = Path("data") / "models"
+
+
+def diagnostics_dir(parameters: dict) -> Path:
+    """Resolve (and create) the diagnostics directory: the one the catalog's
+    ``data/models/${model_version}/diagnostics/`` entries write into.
+
+    Recomputed here rather than read off a catalog entry because both of its
+    callers want the directory, not one of the files in it. It names the
+    catalog's directory because ``parameters["model_version"]`` is the value
+    the CLI substituted into the catalog's paths (the same runtime parameters
+    resolve both) — and only as long as ``MODELS_ROOT`` is the catalog's root.
+
+    Lives here, beside ``MODELS_ROOT``, rather than in ``pipelines/training``:
+    HPO's search diagnostics (``diagnosis/hpo/paths.py``) write under it, and
+    ``diagnosis/hpo`` is a library module, which may not import a pipeline
+    (S8) or reach into its ``steps/`` (S3). The figure subdirectories
+    (``summary/``, ``cases/``) belong to their catalog entries
+    (``shap_summary_figures``, ``case_figures``), which write them (ADR-0030
+    decision 7).
+    """
+    mv = parameters["model_version"]
+    d = MODELS_ROOT / str(mv) / "diagnostics"
+    d.mkdir(parents=True, exist_ok=True)
+    return d

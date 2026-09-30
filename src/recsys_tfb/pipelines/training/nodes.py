@@ -34,10 +34,10 @@ metrics; and the seven diagnosis nodes last.
 
 The diagnosis nodes were ``def``-ed under ``recsys_tfb.diagnosis.model``
 until ADR-0030 decision 6 brought them here, their decisions floated up into
-their bodies and their mechanisms moved into ``steps/``. Only
-``diagnostics_dir`` stayed in that library: HPO's search diagnostics
-(``diagnosis/hpo``) write under the same directory, and a library may not
-import a pipeline.
+their bodies and their mechanisms moved into ``steps/``. ``diagnostics_dir``
+is in ``io/models_root.py``, beside the root it is built from: HPO's search
+diagnostics (``diagnosis/hpo``) write under the same directory, and a library
+may not import a pipeline.
 """
 
 import logging
@@ -80,7 +80,7 @@ from recsys_tfb.core.versioning import (
     compute_search_id,
 )
 from recsys_tfb.diagnosis.hpo import write_hpo_diagnostics
-from recsys_tfb.diagnosis.model import diagnostics_dir
+from recsys_tfb.io.models_root import diagnostics_dir
 from recsys_tfb.evaluation.metric_registry import (
     BINARY_PREDICTION_METRICS,
     METRIC_NAMES,

@@ -1,12 +1,12 @@
-"""HPO 搜尋診斷產物路徑。"""
+"""Where HPO's search diagnostics land."""
 
 from pathlib import Path
 
-from recsys_tfb.diagnosis.model.paths import diagnostics_dir
+from recsys_tfb.io.models_root import diagnostics_dir
 
 
 def hpo_dir(parameters: dict) -> Path:
-    """Resolve（並建立）diagnostics/hpo/ —— HPO 搜尋診斷產物。"""
+    """Resolve (and create) ``diagnostics/hpo/``: the HPO search diagnostics."""
     d = diagnostics_dir(parameters) / "hpo"
     d.mkdir(parents=True, exist_ok=True)
     return d

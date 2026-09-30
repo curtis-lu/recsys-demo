@@ -302,7 +302,7 @@ cust_id_col = entity_cols[0]
 
 > **被 [ADR-0030](0030-training-second-pass-honest-adapter-shared-scoring.md) 決定 6 取代（2026-09-28）。** 7 個 node 搬回 `pipelines/training/nodes.py`，判斷寫在 node、機制進 `pipelines/training/steps/`。下面三個理由的現況：第 2 條（未來要搬就白做）失效，因為診斷不獨立成 pipeline（使用者 2026-09-20），也不搬去 evaluation（2026-09-27）；第 1 條（轉手殼）由決策上浮解決；第 3 條（多跳一次檔）在 `def` 回到 `nodes.py` 之後不存在。ADR-0030 落地前，程式仍是本節描述的形狀。原文保留，不改寫。
 >
-> **已落地（2026-09-30，#489）。** 7 個 `def` 在 `pipelines/training/nodes.py`，機制在 `pipelines/training/steps/`，`diagnosis/model/` 只剩 `diagnostics_dir`；`nodes.py` 模組 docstring 的對照表已拿掉。細節見 ADR-0030 決定 6 的實作註記。
+> **已落地（2026-09-30，#489）。** 7 個 `def` 在 `pipelines/training/nodes.py`，機制在 `pipelines/training/steps/`，`diagnosis/model/` 整個刪掉（`diagnostics_dir` 在 `io/models_root.py`）；`nodes.py` 模組 docstring 的對照表已拿掉。細節見 ADR-0030 決定 6 的實作註記。
 
 **做什麼。** 這 7 個 node 的 `def` 在 `src/recsys_tfb/diagnosis/model/` 底下，**不搬**。改為在 `pipelines/training/nodes.py` 的模組 docstring 列出完整清單與理由：
 

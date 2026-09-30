@@ -14,12 +14,13 @@ module, check that it is not walking down that road again.
   drift.)
 - ``diagnosis.hpo`` — the HPO search diagnostics ``tune_hyperparameters``
   writes.
-- ``diagnosis.model`` — only ``diagnostics_dir`` now. The model-structure
-  diagnoses (SHAP, importance, feature statistics, the quadrant population
-  and cases, the gain ledger) had training as their only consumer, so their
-  nodes are in ``pipelines/training/nodes.py`` and their mechanisms in
-  ``pipelines/training/steps/`` (ADR-0030 decision 6). ``diagnostics_dir``
-  stayed because ``diagnosis.hpo`` writes under the same directory.
+
+The model-structure diagnoses (SHAP, importance, feature statistics, the
+quadrant population and cases, the gain ledger) used to be ``diagnosis.model``.
+Training was their only consumer, so their nodes are in
+``pipelines/training/nodes.py`` and their mechanisms in
+``pipelines/training/steps/`` (ADR-0030 decision 6); the directory they write
+under is ``io/models_root.diagnostics_dir``.
 
 Dependency direction (one way; breaking it is an error, see spec §1
 invariant 4, and S8 in ``docs/agents/architecture-constraints.md`` checks
