@@ -308,7 +308,7 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
   - training 的 7 個診斷 node：`def` 原本在 `src/recsys_tfb/diagnosis/model/`。以前這裡有實際後果：`compute_shap_diagnostics` 與 `compute_quadrant_cases` 自己 `savefig`，目錄由 `diagnosis/model/paths.py` 的 helper `mkdir`，照 R4 的定義是「自己寫診斷副產物的 node」卻不在 R4 表上。#485（ADR-0030 決定 7）把圖交給 catalog 的 `DiagnosticFiguresDataset` 條目存，#489（決定 6）把 `def` 搬回 `pipelines/training/nodes.py`，所以 (c) 與 (d) 現在掃得到它們，稽核全綠：沒有 catalog 存取、沒有直接寫檔。它們的機制在 `pipelines/training/steps/`，屬於上一條的盲區，不屬於這一條。
   - evaluation 的 `load_compare_predictions`：原文寫 `def` 在 `pipelines/evaluation/steps/compare_sources.py`（#365 搬進去）。重盤時 `pipelines/evaluation/pipeline.py` 接的是 `pipelines/evaluation/nodes.py` 的同名函式（轉手給 steps 那一個），所以 node 的 `def` 在掃描範圍內；實際讀取在 `steps/`，同樣屬於上一條。
 
-  重盤沒有追到底的一種形狀：evaluation 有 5 個 `Node(...)` 的第一參數是 `nodes.py` 裡 factory 的呼叫（`make_*_node(...)`），靜態讀 `pipeline.py` 只看得到 factory 本身，看不到它回傳的函式 `def` 在哪。
+  重盤沒有追到底的一種形狀：evaluation 有 5 處 `Node(...)` 的第一參數是 `nodes.py` 裡 4 個 factory 的呼叫（`make_*_node(...)`），靜態讀 `pipeline.py` 只看得到 factory 本身，看不到它回傳的函式 `def` 在哪。
 
   **重盤方法**（上面的清單會過時，別直接引用）：取每個 `pipelines/*/pipeline.py` 裡 `Node(...)` 的第一參數，找它的 `def` 在哪個檔；不在 `pipelines/**/nodes*.py` 的就在盲區裡。
 
