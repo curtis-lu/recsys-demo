@@ -3268,6 +3268,8 @@ class TestReportSectionKeysA34:
         message turned the family on, and ``--post-training`` then hit A46."""
         import re
 
+        import yaml
+
         from recsys_tfb.core.consistency import prediction_quality_on
         from recsys_tfb.evaluation.report_builder import _section_on
 
@@ -3278,17 +3280,23 @@ class TestReportSectionKeysA34:
                 return prediction_quality_on(params)
             return _section_on(params, name)
 
-        declared = {"dataset_overview": True}
-        undeclared = EVALUATION_REPORT_SECTIONS - set(declared)
-        errors = report_section_key_errors(_sections_params(declared))
-        assert len(errors) == 1
-        suggested = dict(re.findall(r"(\w+): (true|false)\b", errors[0]))
-        assert set(suggested) == undeclared
-        followed = {**declared,
-                    **{name: value == "true" for name, value in suggested.items()}}
-        for name in sorted(undeclared):
-            assert (runs(_sections_params(followed), name)
-                    == runs(_sections_params(declared), name)), name
+        every = sorted(EVALUATION_REPORT_SECTIONS)
+        # Each switch missing alone, then all but one missing at once.
+        for missing in [[name] for name in every] + [every[1:]]:
+            declared = {name: True for name in every if name not in missing}
+            errors = report_section_key_errors(_sections_params(declared))
+            assert len(errors) == 1, missing
+            # What a reader copies is the text between backticks, read as
+            # YAML: it has to load as a bool, not a string like 'false.'.
+            suggested = {}
+            for pair in re.findall(r"`([^`]*)`", errors[0]):
+                suggested.update(yaml.safe_load(pair))
+            assert set(suggested) == set(missing)
+            assert all(isinstance(v, bool) for v in suggested.values()), suggested
+            followed = {**declared, **suggested}
+            for name in missing:
+                assert (runs(_sections_params(followed), name)
+                        == runs(_sections_params(declared), name)), name
 
     def test_a_non_string_key_is_reported_not_crashed_on(self):
         """YAML loads an unquoted ``on:`` key as ``True``. Sorting it against

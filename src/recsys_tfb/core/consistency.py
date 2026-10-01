@@ -339,9 +339,11 @@ Layer 1 — config-static (implemented here; aggregated by
   ``evaluation/report_builder._section_on`` checks every name against. Both
   directions (ADR-0019 decision 6): a declared key nothing reads is a switch
   that does nothing (four shipped that way until #351), and a name the report
-  reads that no conf declares is a section on by default with no line to turn
-  it off (``diagnosis_links``). Containment in one direction passes one of the
-  two. The constant lives in ``core/`` because ``core/`` must not import the
+  reads that no conf declares is a switch with no line to flip it
+  (``diagnosis_links``, on by default). Containment in one direction passes one
+  of the two. For each missing switch the refusal names the value that keeps
+  what leaving it out does: ``true``, except the ones in
+  ``EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT`` (``prediction_quality``). The constant lives in ``core/`` because ``core/`` must not import the
   report layer. A ``sections`` block that declares no switch (absent, null or
   empty) is not checked, a visible opt-out to every default; once any switch
   is declared the block is checked in full. Predicate:
@@ -3705,16 +3707,18 @@ def report_section_key_errors(parameters: dict) -> list[str]:
         )
     undeclared = EVALUATION_REPORT_SECTIONS - declared
     if undeclared:
+        # Backticks around each pair: a trailing period copied along would
+        # load as the string 'false.', which is truthy.
         keep = ", ".join(
-            f"{name}: "
-            f"{'false' if name in EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT else 'true'}"
+            f"`{name}: "
+            f"{'false' if name in EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT else 'true'}`"
             for name in sorted(undeclared)
         )
         errors.append(
             f"A34: evaluation.report.sections does not declare "
             f"{sorted(undeclared)}, which the report reads — this conf has no "
-            f"line to switch it. Declare it; to keep what leaving it out does "
-            f"today, write {keep}."
+            f"line to switch them. Declare each; to keep what leaving one out "
+            f"does today, write {keep}"
         )
     return errors
 
