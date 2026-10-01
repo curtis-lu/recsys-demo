@@ -343,7 +343,8 @@ Layer 1 — config-static (implemented here; aggregated by
   (``diagnosis_links``, on by default). Containment in one direction passes one
   of the two. For each missing switch the refusal names the value that keeps
   what leaving it out does: ``true``, except the ones in
-  ``EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT`` (``prediction_quality``). The constant lives in ``core/`` because ``core/`` must not import the
+  ``EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT`` (``prediction_quality``).
+  The constant lives in ``core/`` because ``core/`` must not import the
   report layer. A ``sections`` block that declares no switch (absent, null or
   empty) is not checked, a visible opt-out to every default; once any switch
   is declared the block is checked in full. Predicate:
