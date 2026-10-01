@@ -57,8 +57,7 @@ Why the fingerprint lives inside the JSON, not in its path
 ==========================================================
 A hash in the path (``<mv>/<snap>/<hash>/...``) would retire stale files by
 itself, but every config change would grow another directory tree, and every
-directory reader (``--compare-only``, ``scripts/render_diagnosis.py``, the
-manifest's artifact list) would have to learn to pick one. Inside the file,
+directory reader (``--compare-only``, the manifest's artifact list) would have to learn to pick one. Inside the file,
 paths stay put and readers pay one check.
 
 Why stdlib only, and no ``diagnosis`` import
