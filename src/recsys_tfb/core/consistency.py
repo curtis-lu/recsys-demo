@@ -3514,6 +3514,14 @@ EVALUATION_REPORT_SECTIONS: frozenset[str] = frozenset({
     "prediction_quality",
 })
 
+#: The switches in :data:`EVALUATION_REPORT_SECTIONS` that are **off** when the
+#: conf leaves them out (``prediction_quality_on``, ADR-0024 decision 1); every
+#: other one is on (``report_builder._section_on``). A34's message names the
+#: value that keeps what an absent switch does today, so it needs the side.
+EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT: frozenset[str] = frozenset({
+    "prediction_quality",
+})
+
 #: ``evaluation.prediction_quality``'s keys and the value each takes when the
 #: conf leaves it out: fine bins over this data's score range (the threshold
 #: resolution), display bins they merge into (the report's bin table), and how
@@ -3697,11 +3705,16 @@ def report_section_key_errors(parameters: dict) -> list[str]:
         )
     undeclared = EVALUATION_REPORT_SECTIONS - declared
     if undeclared:
+        keep = ", ".join(
+            f"{name}: "
+            f"{'false' if name in EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT else 'true'}"
+            for name in sorted(undeclared)
+        )
         errors.append(
             f"A34: evaluation.report.sections does not declare "
-            f"{sorted(undeclared)}, which the report reads — the section is on "
-            f"by default and this conf has no line to turn it off. Declare it "
-            f"(true keeps the current behaviour)."
+            f"{sorted(undeclared)}, which the report reads — this conf has no "
+            f"line to switch it. Declare it; to keep what leaving it out does "
+            f"today, write {keep}."
         )
     return errors
 

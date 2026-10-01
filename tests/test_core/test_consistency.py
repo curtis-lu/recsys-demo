@@ -3261,6 +3261,35 @@ class TestReportSectionKeysA34:
         assert "does not declare" in errors[0]
         assert "'diagnosis_links'" in errors[0]
 
+    def test_the_suggested_values_keep_what_an_absent_switch_does(self):
+        """Writing what the message suggests must switch nothing. It used to
+        say ``true`` for every missing switch, but ``prediction_quality`` is
+        off when absent: a conf/base edited before v0.4.0 that followed the
+        message turned the family on, and ``--post-training`` then hit A46."""
+        import re
+
+        from recsys_tfb.core.consistency import prediction_quality_on
+        from recsys_tfb.evaluation.report_builder import _section_on
+
+        def runs(params, name):
+            # prediction_quality_on decides whether the family is computed;
+            # the report's _section_on alone would say on.
+            if name == "prediction_quality":
+                return prediction_quality_on(params)
+            return _section_on(params, name)
+
+        declared = {"dataset_overview": True}
+        undeclared = EVALUATION_REPORT_SECTIONS - set(declared)
+        errors = report_section_key_errors(_sections_params(declared))
+        assert len(errors) == 1
+        suggested = dict(re.findall(r"(\w+): (true|false)\b", errors[0]))
+        assert set(suggested) == undeclared
+        followed = {**declared,
+                    **{name: value == "true" for name, value in suggested.items()}}
+        for name in sorted(undeclared):
+            assert (runs(_sections_params(followed), name)
+                    == runs(_sections_params(declared), name)), name
+
     def test_a_non_string_key_is_reported_not_crashed_on(self):
         """YAML loads an unquoted ``on:`` key as ``True``. Sorting it against
         the str keys must not raise TypeError instead of reporting it."""
