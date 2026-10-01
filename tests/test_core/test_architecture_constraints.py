@@ -1228,7 +1228,7 @@ class TestS4NoFirstEntityColumn:
 #: a *test* that declares a schema the framework then drops is the false green
 #: this file exists to stop. ``scripts/`` is out: when S5 was ruled its only
 #: "schema" dicts were report metadata, in diagnosis scripts since deleted;
-#: adding it back is the user's call -- see S5 in the constraints doc.
+#: adding it is the user's call -- see S5 in the constraints doc.
 #:
 #: Spelled out rather than aliased to ``ENTITY_SCAN_ROOTS``: the two are equal
 #: today by coincidence of judgement, not by rule, and each constraint's
