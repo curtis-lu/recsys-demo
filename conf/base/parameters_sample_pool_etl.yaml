@@ -5,7 +5,12 @@
 # ${target_db}.feature_concat 與三張 label table 的 source_checks。
 
 sample_pool_etl:
-  dry_run: false   # bool；注意：此檔設 false 故 local 也實寫表（feature/label 未設→local 預設 dry-run，見 docs/pipelines/source_etl.md）
+  # 沒給 --target-dates 時用這裡的日期，例 ["2025-01-31"]（日期要加引號，否則 YAML 會讀成日期物件）；
+  # 兩邊都沒有就報錯。
+  target_dates: []
+  # 每次執行的 SQL 存到 <這裡>/<run_id>/<target_date>/<table>.sql；不想存就刪掉這行。
+  rendered_sql_dir: data/rendered_sql
+
   variables:
     target_db: "ml_recsys"  # ★換成你的 Hive database 名稱
 

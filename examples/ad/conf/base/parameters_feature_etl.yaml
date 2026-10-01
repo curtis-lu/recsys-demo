@@ -6,8 +6,9 @@
 #   candidate_feature_table 指到它。它不併進 feature_table：一次請求一列的表併進去，
 #   等於把每日特徵抄進每一次曝光。
 feature_etl:
-  dry_run: false   # 沒寫時 --env local 只 render SQL 不寫表（__main__._run_etl）
   # 資料的第 2～11 週。第 1 週 2025-10-27 只給後面的週當回看窗。
+  # 沒給 --target-dates 時用這裡的日期，例 ["2025-01-31"]（日期要加引號，否則 YAML 會讀成日期物件）；
+  # 兩邊都沒有就報錯。
   target_dates:
     - "2025-11-03"
     - "2025-11-10"
@@ -19,6 +20,8 @@ feature_etl:
     - "2025-12-22"
     - "2025-12-29"
     - "2026-01-05"
+  # 每次執行的 SQL 存到 <這裡>/<run_id>/<target_date>/<table>.sql；不想存就刪掉這行。
+  rendered_sql_dir: data/rendered_sql
   variables:
     target_db: "ad_recsys"
     raw_db: "ad_raw"

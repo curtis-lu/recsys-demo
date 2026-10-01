@@ -17,6 +17,7 @@ from recsys_tfb.core.consistency import (
     date_split_overlap_errors,
     optional_role_monitoring_errors,
     etl_cli_var_errors,
+    etl_stage_config_errors,
     inference_grid_errors,
     category_table_needed,
     item_category_column_errors,
@@ -933,6 +934,7 @@ def _run_etl(
     restart_from: Optional[str],
     source_check_only: bool = False,
     cli_vars: Optional[List[str]] = None,
+    dry_run: bool = False,
 ) -> None:
     """Shared executor for the feature/label/sample_pool/inference_population
     ETL sub-commands.
@@ -942,6 +944,18 @@ def _run_etl(
     logging/config lookup) and as the top-level YAML key of its parameters
     file. ``cli_vars`` is the raw ``--var KEY=VALUE`` strings, repeatable
     (#370).
+
+    ``dry_run`` 是命令列旗標 ``--dry-run``：只 render SQL，不在 Hive 執行、不寫表、
+    不寫 audit。它刻意不是 YAML 鍵，也不依 ``--env`` 給預設：
+    以前 ``etl_config.get("dry_run", env == "local")`` 讓「沒寫的設定」在
+    ``--env local`` 靜默只 render、其他環境才真的寫表——同一份 YAML 在兩個環境做
+    不同的事，而且看 YAML 看不出來（理由是 2026-03 本機沒有 Hive，2026-06 起本機
+    已有真 Spark＋Hive，理由消失）。原則：沒寫的設定不准在背後依環境做不同的事，
+    會產生副作用的預設值必須看得見。dry run 是「這一次只想看 SQL」的一次性意圖，
+    做成每次要打才生效的旗標（同 ``--source-check``），就不會有「為了看 SQL 改成
+    true、忘了改回、排程顯示成功卻沒寫表」。YAML 若還留著 ``dry_run`` 鍵，A59
+    直接報錯而不是靜默忽略（忽略的話，原本寫 ``dry_run: true`` 的人會開始真的寫表）。
+    ``--dry-run`` 與 ``--source-check`` 互斥：後者必須實查 Hive。
 
     Order (#370 rewired this to front-load every ETL-config check — A35, the
     ``SQLRunner`` build, and ``check_renders`` — before the Spark cold
@@ -960,6 +974,12 @@ def _run_etl(
     if source_check_only and restart_from:
         logger.error("--source-check 與 --restart-from 不能同時使用（檢查不寫表，無從續跑）。")
         raise typer.Exit(code=1)
+    if source_check_only and dry_run:
+        logger.error(
+            "--source-check 與 --dry-run 不能同時使用"
+            "（--source-check 必須實查 Hive，--dry-run 不執行任何 SQL）。"
+        )
+        raise typer.Exit(code=1)
 
     config, params, run_context = _load_config_and_setup(stage, env)
 
@@ -968,7 +988,6 @@ def _run_etl(
     params_etl = config.get_parameters_by_name(f"parameters_{stage}")
     etl_config = params_etl.get(stage, params_etl)
     sql_dir = conf_dir / "sql" / "etl"
-    dry_run = etl_config.get("dry_run", env == "local")
 
     if target_dates:
         date_list = [d.strip() for d in target_dates.split(",")]
@@ -981,7 +1000,10 @@ def _run_etl(
     # (A35) --var must be well-formed, declared, and safe to merge — before
     # the SQLRunner is even built, so a typo'd flag never gets a chance to
     # render (or worse, write) anything.
-    var_errors = etl_cli_var_errors(etl_config.get("variables"), cli_vars)
+    # (A59) 也在 SQLRunner 之前、--source-check 也要檢查，與 A35 合併一次報出。
+    var_errors = etl_stage_config_errors(etl_config) + etl_cli_var_errors(
+        etl_config.get("variables"), cli_vars
+    )
     if var_errors:
         logger.error("\n".join(var_errors))
         raise typer.Exit(code=1)
@@ -998,7 +1020,7 @@ def _run_etl(
         runner = SQLRunner(
             config=runner_config,
             sql_dir=sql_dir,
-            dry_run=False if source_check_only else dry_run,  # 檢查唯讀、必須實查 Hive
+            dry_run=dry_run,
             rendered_sql_dir=rendered_sql_dir,
             stage=stage,
         )
@@ -1065,6 +1087,13 @@ def _run_etl(
         logger.exception("%s pipeline failed", stage)
         raise typer.Exit(code=1)
 
+    if dry_run:
+        # 不印 completed successfully：那會讓人以為表已經寫了
+        logger.info(
+            "DRY RUN：只 render 了 SQL，沒有執行、沒有寫表（%s）。拿掉 --dry-run 才會真的寫。",
+            stage,
+        )
+        return
     logger.info("Pipeline '%s' completed successfully", stage)
 
 
@@ -1093,11 +1122,16 @@ def feature_etl(
              "variable. The name must already be declared in the YAML; "
              "target_date and target_db cannot be set this way — see (A35).",
     ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="只 render SQL（存進 rendered_sql_dir），不在 Hive 執行、不寫表、不寫 audit；"
+             "不能與 --source-check 同時使用。",
+    ),
 ):
     """Run the feature ETL pipeline (feature_aum/sav/ccard/info/concat/table)."""
     _run_etl(
         "feature_etl", env, target_dates, restart_from,
-        source_check_only=source_check, cli_vars=var,
+        source_check_only=source_check, cli_vars=var, dry_run=dry_run,
     )
 
 
@@ -1126,11 +1160,16 @@ def label_etl(
              "variable. The name must already be declared in the YAML; "
              "target_date and target_db cannot be set this way — see (A35).",
     ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="只 render SQL（存進 rendered_sql_dir），不在 Hive 執行、不寫表、不寫 audit；"
+             "不能與 --source-check 同時使用。",
+    ),
 ):
     """Run the label ETL pipeline (label_ccard/exchange/fund/table)."""
     _run_etl(
         "label_etl", env, target_dates, restart_from,
-        source_check_only=source_check, cli_vars=var,
+        source_check_only=source_check, cli_vars=var, dry_run=dry_run,
     )
 
 
@@ -1159,11 +1198,16 @@ def sample_pool_etl(
              "variable. The name must already be declared in the YAML; "
              "target_date and target_db cannot be set this way — see (A35).",
     ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="只 render SQL（存進 rendered_sql_dir），不在 Hive 執行、不寫表、不寫 audit；"
+             "不能與 --source-check 同時使用。",
+    ),
 ):
     """Run the sample_pool ETL pipeline. Requires feature_etl and label_etl outputs."""
     _run_etl(
         "sample_pool_etl", env, target_dates, restart_from,
-        source_check_only=source_check, cli_vars=var,
+        source_check_only=source_check, cli_vars=var, dry_run=dry_run,
     )
 
 
@@ -1192,11 +1236,16 @@ def inference_population_etl(
              "variable. The name must already be declared in the YAML; "
              "target_date and target_db cannot be set this way — see (A35).",
     ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="只 render SQL（存進 rendered_sql_dir），不在 Hive 執行、不寫表、不寫 audit；"
+             "不能與 --source-check 同時使用。",
+    ),
 ):
     """Run the inference population ETL pipeline (inference_population)."""
     _run_etl(
         "inference_population_etl", env, target_dates, restart_from,
-        source_check_only=source_check, cli_vars=var,
+        source_check_only=source_check, cli_vars=var, dry_run=dry_run,
     )
 
 

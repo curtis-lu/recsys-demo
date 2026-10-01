@@ -391,6 +391,25 @@ def test_a35_wired_into_run_etl_before_spark():
     )
 
 
+def test_a59_wired_into_run_etl_before_the_runner_and_spark():
+    # A59 只有 ETL 指令讀那兩個鍵，不併進全域 aggregator（A34/A35 的理由）；
+    # 要在 SQLRunner 建立之前、Spark 啟動之前檢查，--source-check 也走同一條。
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "etl_stage_config_errors" not in inspect.getsource(
+        validate_config_consistency
+    ), "A59 must stay off the global aggregator (A34/A35 precedent)"
+
+    src = inspect.getsource(m._run_etl)
+    assert "etl_stage_config_errors(" in src
+    assert src.index("etl_stage_config_errors(") < src.index("SQLRunner("), (
+        "A59 must fail before the SQLRunner is built"
+    )
+    assert src.index("etl_stage_config_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A59 must fail before the Spark cold start"
+
+
 def test_a38_reaches_the_global_aggregator():
     # A38 takes parameters alone and the mistake costs a whole training run to
     # find otherwise, so it belongs on the aggregator beside A2 — the rule it

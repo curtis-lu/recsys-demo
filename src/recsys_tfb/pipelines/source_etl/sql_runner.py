@@ -117,15 +117,17 @@ class SQLRunner:
         self._tables = [TableConfig.from_dict(t) for t in config["tables"]]
         self._source_checks = [
             SourceCheckConfig.from_dict(name, data)
-            for name, data in config.get("source_checks", {}).items()
+            # `or {}`：YAML 寫 `source_checks: ~` 讀進來是 None，要跟沒寫一樣
+            for name, data in (config.get("source_checks") or {}).items()
         ]
         self._variables = config.get("variables", {})
-        self._audit_config = config.get("audit", {})
+        self._audit_config = config.get("audit") or {}
         self._sql_dir = sql_dir
         self._dry_run = dry_run
         self._rendered_sql_dir = rendered_sql_dir
         self._renderer = SQLRenderer(sql_dir)
-        self._target_db = self._variables.get("target_db", "default")
+        # 不給預設值：沒宣告 target_db 就該在 CLI 被 A59(b) 擋下，而不是靜默寫進 Hive 的 default 庫
+        self._target_db = self._variables["target_db"]
         self._stage = stage
 
         # Validate depends_on consistency at init time

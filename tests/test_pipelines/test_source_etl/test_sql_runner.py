@@ -99,6 +99,23 @@ def _make_spark_mock(
     return spark
 
 
+class TestYamlNullBlocks:
+    """YAML 的 ``source_checks: ~``／``audit: ~`` 讀進來是 None，要跟沒寫一樣。"""
+
+    @pytest.mark.parametrize("key", ["source_checks", "audit"])
+    def test_null_block_builds_like_an_absent_one(self, sql_dir, key):
+        config = _base_config()
+        config[key] = None
+        runner = SQLRunner(config, sql_dir, dry_run=True)
+        assert len(runner._tables) == 3
+
+    def test_missing_target_db_has_no_default(self, sql_dir):
+        config = _base_config()
+        config["variables"] = {}
+        with pytest.raises(KeyError, match="target_db"):
+            SQLRunner(config, sql_dir, dry_run=True)
+
+
 class TestValidateOrder:
     def test_valid_order(self, sql_dir):
         """Tables in correct dependency order should pass."""
