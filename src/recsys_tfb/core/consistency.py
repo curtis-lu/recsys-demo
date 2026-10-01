@@ -339,9 +339,12 @@ Layer 1 — config-static (implemented here; aggregated by
   ``evaluation/report_builder._section_on`` checks every name against. Both
   directions (ADR-0019 decision 6): a declared key nothing reads is a switch
   that does nothing (four shipped that way until #351), and a name the report
-  reads that no conf declares is a section on by default with no line to turn
-  it off (``diagnosis_links``). Containment in one direction passes one of the
-  two. The constant lives in ``core/`` because ``core/`` must not import the
+  reads that no conf declares is a switch with no line to flip it
+  (``diagnosis_links``, on by default). Containment in one direction passes one
+  of the two. For each missing switch the refusal names the value that keeps
+  what leaving it out does: ``true``, except the ones in
+  ``EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT`` (``prediction_quality``).
+  The constant lives in ``core/`` because ``core/`` must not import the
   report layer. A ``sections`` block that declares no switch (absent, null or
   empty) is not checked, a visible opt-out to every default; once any switch
   is declared the block is checked in full. Predicate:
@@ -3514,6 +3517,14 @@ EVALUATION_REPORT_SECTIONS: frozenset[str] = frozenset({
     "prediction_quality",
 })
 
+#: The switches in :data:`EVALUATION_REPORT_SECTIONS` that are **off** when the
+#: conf leaves them out (``prediction_quality_on``, ADR-0024 decision 1); every
+#: other one is on (``report_builder._section_on``). A34's message names the
+#: value that keeps what an absent switch does today, so it needs the side.
+EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT: frozenset[str] = frozenset({
+    "prediction_quality",
+})
+
 #: ``evaluation.prediction_quality``'s keys and the value each takes when the
 #: conf leaves it out: fine bins over this data's score range (the threshold
 #: resolution), display bins they merge into (the report's bin table), and how
@@ -3697,11 +3708,18 @@ def report_section_key_errors(parameters: dict) -> list[str]:
         )
     undeclared = EVALUATION_REPORT_SECTIONS - declared
     if undeclared:
+        # Backticks around each pair: a trailing period copied along would
+        # load as the string 'false.', which is truthy.
+        keep = ", ".join(
+            f"`{name}: "
+            f"{'false' if name in EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT else 'true'}`"
+            for name in sorted(undeclared)
+        )
         errors.append(
             f"A34: evaluation.report.sections does not declare "
-            f"{sorted(undeclared)}, which the report reads — the section is on "
-            f"by default and this conf has no line to turn it off. Declare it "
-            f"(true keeps the current behaviour)."
+            f"{sorted(undeclared)}, which the report reads — this conf has no "
+            f"line to switch them. Declare each; to keep what leaving one out "
+            f"does today, write {keep}"
         )
     return errors
 
