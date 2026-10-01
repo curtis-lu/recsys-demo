@@ -21,8 +21,8 @@ reached the window or the array, so the same rows could be ranked differently
 on every run and by each place, and nothing raises (ADR-0020 bug 11, #355).
 
 **What it does not cover.** The manual spike scripts
-``scripts/item_ability_diagnosis.py``, ``scripts/suppression_ledger_diagnosis.py``
-and ``scripts/per_item_score_shift_optuna_diagnosis.py`` still sort with their
+``scripts/reference/item_ability_diagnosis.py``, ``scripts/reference/suppression_ledger_diagnosis.py``
+and ``scripts/reference/per_item_score_shift_optuna_diagnosis.py`` still sort with their
 own ``np.lexsort`` and hand string items to the metric primitives; they
 predate ``diagnosis/metric/`` and were left out of #355.
 

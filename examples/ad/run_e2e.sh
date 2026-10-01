@@ -8,7 +8,7 @@
 # 以 A47 擋下（不擋的話會在 Spark 起來之後才以 Missing feature columns 失敗）。這裡確認它真的
 # 在入口停下、而且訊息說得出原因。
 #
-# 對應銀行示例的 scripts/local_e2e.sh，多了 source_etl 與 evaluation 兩段：銀行示例直接
+# 對應銀行示例的 scripts/local/local_e2e.sh，多了 source_etl 與 evaluation 兩段：銀行示例直接
 # 寫出來源表、跳過 source_etl，而這個示例要讓後面幾張票的新路徑（event、候選層級特徵表、
 # item 清單從資料數、預測品質指標）從上游 SQL 一路被走到。
 #

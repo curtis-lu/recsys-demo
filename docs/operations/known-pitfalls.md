@@ -22,7 +22,7 @@
 - **(R1) 絕對路徑要含 `.worktrees/<name>`**：用 main repo 的絕對路徑 `Edit`/`Write` worktree 的 config —— 改錯邊，worktree 那份沒動、pipeline 讀的還是舊的。**徵兆：訓練出來的 `model_version` / best params 跟 baseline 完全相同。**
 - **(R2) `cd` 在 Bash tool 呼叫之間會持續**（system prompt 明文；但 skill 執行後 cwd 可能 reset，是兩回事）。`cd <wt>/data && ln -s ...` 後沒回 worktree root，下一個 training 指令 `Path.cwd()/"data"` 看到雙重 `data/data/dataset` → FileNotFoundError after Spark started。**規則：Bash 指令以 `cd <worktree-root> && ...` 開頭、或全用絕對路徑。**
 - **(R2b) cwd 漂移同樣會騙過「讀」指令（2026-08-01）**：heredoc／skill 執行後 cwd 可能 reset 回 main root，此時相對路徑的 `grep`／`sed` 讀到的是 **main 那份檔案**，於是剛寫好的改動看起來像**憑空消失**（`grep` 零命中、`sed` 範圍抓不到），很容易誤判成「工具把我的改動洗掉了」而開始亂修。**徵兆：改動明明剛驗證過，下一個 grep 卻找不到。規則：懷疑改動消失時先 `pwd`，或直接用 `git -C <abs-worktree> diff` 判定——它不受 cwd 影響。**
-- **(R3) Worktree `data/` 隔離**：每個 worktree 用**自己的真 `data/` 樹**，**不 symlink 到 main**（`cache.root` 已相對化＝`data/recsys_cache`、warehouse/metastore 也相對）。首次進 worktree 跑 `PYTHONPATH=src .venv/bin/python scripts/local_spark_setup.py` 重建本機資料；隔離驗證用 `scripts/local_spark_setup.py --check-isolation`。
+- **(R3) Worktree `data/` 隔離**：每個 worktree 用**自己的真 `data/` 樹**，**不 symlink 到 main**（`cache.root` 已相對化＝`data/recsys_cache`、warehouse/metastore 也相對）。首次進 worktree 跑 `PYTHONPATH=src .venv/bin/python scripts/local/local_spark_setup.py` 重建本機資料；隔離驗證用 `scripts/local/local_spark_setup.py --check-isolation`。
 
 完整 SOP：`docs/operations/dev-setup/worktree-venv-setup.md`。
 
@@ -262,7 +262,7 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 ## 9. 本機跑 evaluation 必須兩個旗標，少一個就跑不動（2026-07-19）
 
 - **症狀（第一分鐘認出它）**：不帶 `--post-training` → 第一個 node `prepare_eval_data` **秒炸** `Table or view not found: ml_recsys.ranked_predictions`——**這不是 Spark/catalog 壞掉，是模式選錯**（此分支首見 2026-07-08）；不帶 `--model-version` → `FileNotFoundError: No 'best' symlink found in .../data/models`。
-- **根因**：兩個獨立原因。(a) evaluation 預設模式讀 `ranked_predictions`——那是 **inference pipeline 的產物**，本機 warehouse 只有在實際跑過 `recsys_tfb inference --env local` 之後才有它；只跑 dataset→training 的 session 一定沒有。`--post-training` 改讀 training 自己產出的 `training_eval_predictions`（分歧點在 `pipelines/evaluation/pipeline.py` 的三元式）。（**2026-08-25 更正**：本條原寫「本機 inference 撞既有 issue #63」並引 `scripts/local_e2e.sh:6-9` 為證，兩者都已失效——#63 於 2026-08-09 CLOSED（NOT_PLANNED，由 #185 取代），而 `local_e2e.sh` 現在跑到 inference，其開頭註解正是在解釋這件事並註明舊說法過期。#63 已不再卡任何東西。**本機不能跑 inference 從來不是本條的理由，缺產物才是。**）(b) 不指定 model_version 會解析 `data/models/best` symlink，而那要 promote 才有——**promote 是使用者保留的人工步驟，Claude 不得自行執行**。
+- **根因**：兩個獨立原因。(a) evaluation 預設模式讀 `ranked_predictions`——那是 **inference pipeline 的產物**，本機 warehouse 只有在實際跑過 `recsys_tfb inference --env local` 之後才有它；只跑 dataset→training 的 session 一定沒有。`--post-training` 改讀 training 自己產出的 `training_eval_predictions`（分歧點在 `pipelines/evaluation/pipeline.py` 的三元式）。（**2026-08-25 更正**：本條原寫「本機 inference 撞既有 issue #63」並引 `scripts/local/local_e2e.sh:6-9` 為證，兩者都已失效——#63 於 2026-08-09 CLOSED（NOT_PLANNED，由 #185 取代），而 `local_e2e.sh` 現在跑到 inference，其開頭註解正是在解釋這件事並註明舊說法過期。#63 已不再卡任何東西。**本機不能跑 inference 從來不是本條的理由，缺產物才是。**）(b) 不指定 model_version 會解析 `data/models/best` symlink，而那要 promote 才有——**promote 是使用者保留的人工步驟，Claude 不得自行執行**。
 - **規則**：本機一律 `python -m recsys_tfb evaluation --env local --post-training --model-version <mv>`，`<mv>` 用 training 那步印出的值。**不要為了讓它跑起來而去 promote。**
 - **驗證方式**：先跑 `dataset` → `training`（training log 尾端會印 model_version 與 manifest 路徑），再帶入。完整建置鏈見 `docs/superpowers/plans/diag-redesign/00-shared-context.md` 的環境前置段。
 

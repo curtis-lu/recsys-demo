@@ -176,7 +176,7 @@ OVERVIEW_CELL_GROUPS = ("by_snap_date", "by_item", "by_segment")
 #: The two constants above are public because that script imports them: the
 #: detector and the migrator have to agree on the same list or a file can be
 #: refused by one and left alone by the other.
-MIGRATION_SCRIPT = "scripts/migrate_evaluation_results_keys.py"
+MIGRATION_SCRIPT = "scripts/migrations/migrate_evaluation_results_keys.py"
 
 
 def _dataset_overview(metrics: dict) -> dict:

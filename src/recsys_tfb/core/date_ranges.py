@@ -188,7 +188,7 @@ def as_date_list(value) -> list[str]:
 def the_only_date(value, *, setting: str, hint: str) -> str:
     """The one date a single-date reader needs from a setting that may hold several.
 
-    For tools that read the yaml themselves (``scripts/*_diagnosis.py``), so a
+    For tools that read the yaml themselves (``scripts/reference/*_diagnosis.py``), so a
     range arrives unexpanded and is expanded here. Nothing configured and more
     than one date are both refused: such a tool would otherwise compare the
     text of a list with a STRING time partition and match zero rows, silently.

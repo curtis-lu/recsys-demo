@@ -475,7 +475,7 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 | 形態 | 例子 | 靠掃描的哪個零件抓到 |
 |---|---|---|
 | 直接索引 | `schema["entity"][0]` | subscript 的 value 本身又是一個 `["entity"]` subscript |
-| 先取出清單、再索引 | `entity_cols = schema["entity"]` … `entity_cols[0]` | 模組內的名稱綁定：遞移（`b = a` 也繼承、跑到不動點）、含 `x: list[str] = ...`，以及**逐位配對的 tuple 解包**（`entity_cols, item_col = schema["entity"], schema["item"]`——`scripts/shap_margin_summary.py` 的那處違例上一行就是這個寫法） |
+| 先取出清單、再索引 | `entity_cols = schema["entity"]` … `entity_cols[0]` | 模組內的名稱綁定：遞移（`b = a` 也繼承、跑到不動點）、含 `x: list[str] = ...`，以及**逐位配對的 tuple 解包**（`entity_cols, item_col = schema["entity"], schema["item"]`——`scripts/reference/shap_margin_summary.py` 的那處違例上一行就是這個寫法） |
 | 索引「宣告出來的分組單位」 | `get_entity_grouping(...)` 的結果被 `[0]` | `ENTITY_LIST_CALLS` 名單 |
 
 前兩種就是那四處原本的寫法（見 #263、#264 的 diff）。`[:1]`／`[0:1]` 與 `[0]` 同罪——同一個讀法換個寫法。**左邊是什麼刻意不看**：`schema["entity"]`、`get_schema(parameters)["entity"]`、`params["schema"]["columns"]["entity"]` 對這條而言是同一個表達式，釘死任何一種寫法只會把盲區搬個位置。
@@ -500,7 +500,7 @@ pipelines/evaluation/comparison_nodes.py:48 in restrict_to_common(): ...["entity
 
 ### 這個檢查看不到
 
-- **`scripts/` 不在掃描範圍內。** ⚠ **`scripts/shap_margin_summary.py::main` 現在就有一處** `cust_col = schema["entity"][0]`，而且它拿去做事了（篩選與分組），所以在多欄 entity 下它算的東西會是錯的。
+- **`scripts/` 不在掃描範圍內。** ⚠ **`scripts/reference/shap_margin_summary.py::main` 現在就有一處** `cust_col = schema["entity"][0]`，而且它拿去做事了（篩選與分組），所以在多欄 entity 下它算的東西會是錯的。
   **這一處已裁決不修**（使用者，2026-09-02）：那是一支示範性質的離線腳本，手動執行、`src/` 沒有任何東西 import 它，壞了不會污染任何生產產物。**不要再把它當成待辦重新「發現」一次**——要處理它請先問使用者。
   連帶：`scripts/` 也就維持在掃描範圍外。擴進去只會逼出一筆例外登記，而登記的粒度是函式、代價比它擋下的東西大。
 - **其他取第一欄的寫法**（皆實測會漏）：星號解包（`first, *rest = schema["entity"]`——位置對不齊，刻意不猜）、`next(iter(...))`、`sorted(...)[0]`、`min(...)`、`list(...)[0]`、`.copy()[0]`、`.get("entity")[0]`、算出來的索引。**`[-1]`（取最後一欄）也漏**——那是同一個錯，只是本條的「第一欄」框架講不到它。釘死的是會被**順手寫出來**的那幾種；其餘要刻意才寫得出來。
@@ -572,7 +572,7 @@ tests/params.py:4: schema.identity_columns -- get_schema derives this; a declare
 
 ### 這個檢查看不到
 
-- **`scripts/` 不在掃描範圍內，而且那裡的 5 處同形是假陽性，不是缺陷。** `config_sorting_shift_diagnosis.py`、`item_ability_diagnosis.py`、`per_item_score_shift_diagnosis.py`、`per_item_score_shift_optuna_diagnosis.py`、`suppression_ledger_diagnosis.py` 各有一處 `report = {"schema": {"item": schema["item"]}, ...}`——那是**輸出報表的 metadata**，寫進 JSON 給人看的，從來不會餵進 `get_schema`。把 `scripts/` 擴進掃描範圍只會逼出一張全是假陽性的豁免表。**不要再把它當成待辦重新「發現」一次**（裁決日 2026-09-03，比照 S4 對 `scripts/shap_margin_summary.py` 的做法）。
+- **`scripts/` 不在掃描範圍內，而且那裡的 5 處同形是假陽性，不是缺陷。** `config_sorting_shift_diagnosis.py`、`item_ability_diagnosis.py`、`per_item_score_shift_diagnosis.py`、`per_item_score_shift_optuna_diagnosis.py`、`suppression_ledger_diagnosis.py` 各有一處 `report = {"schema": {"item": schema["item"]}, ...}`——那是**輸出報表的 metadata**，寫進 JSON 給人看的，從來不會餵進 `get_schema`。把 `scripts/` 擴進掃描範圍只會逼出一張全是假陽性的豁免表。**不要再把它當成待辦重新「發現」一次**（裁決日 2026-09-03，比照 S4 對 `scripts/reference/shap_margin_summary.py` 的做法）。
 - **`conf/` 的 YAML 不在範圍內。** 掃的是 Python 字面值。`conf/base/parameters.yaml` 現在寫對（`schema.columns`），但一份寫錯層的 YAML 會用完全一樣的方式安靜失效，而這條擋不住它。
 - **`schema` 區塊先綁到變數再組進 parameters 就看不到了**：
   ```python

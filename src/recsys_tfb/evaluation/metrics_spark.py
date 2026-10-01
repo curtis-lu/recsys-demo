@@ -1333,7 +1333,7 @@ def compute_all_metrics(
     three ``n_items`` / ``n_customers`` / ``avg_positives_per_customer``
     keys were renamed (see the block below). A file written before that is
     refused by ``evaluation/report_builder._dataset_overview`` and migrated by
-    ``scripts/migrate_evaluation_results_keys.py``; the ``snap_date`` spellings
+    ``scripts/migrations/migrate_evaluation_results_keys.py``; the ``snap_date`` spellings
     are kept deliberately (ADR-0017).
 
     Returns::

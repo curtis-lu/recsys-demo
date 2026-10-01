@@ -516,7 +516,7 @@ DROP TABLE IF EXISTS <db>.ranked_predictions;
 
 ```bash
 export SPARK_CONF_DIR=$PWD/conf/spark-local
-bash scripts/local_spark_shell.sh sql -e "
+bash scripts/local/local_spark_shell.sh sql -e "
   DROP TABLE IF EXISTS ml_recsys.score_table;
   DROP TABLE IF EXISTS ml_recsys.ranked_staging;
   DROP TABLE IF EXISTS ml_recsys.ranked_predictions;"
@@ -531,7 +531,7 @@ ls data/local_warehouse/ml_recsys.db/ranked_predictions/
 # 期望：model_version=<版本>/ ；若看到 snap_date=... 在最外層，就是沒 DROP 就套了新設定
 ```
 
-`scripts/local_e2e.sh` 末段的 assert 把這條釘住：它要求最外層是 `model_version=` 且值等於這次跑的版本。
+`scripts/local/local_e2e.sh` 末段的 assert 把這條釘住：它要求最外層是 `model_version=` 且值等於這次跑的版本。
 
 #### #188 的第二次遷移：`unranked_predictions` 多一個分區欄
 
