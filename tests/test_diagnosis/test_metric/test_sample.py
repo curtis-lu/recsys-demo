@@ -7,7 +7,7 @@ from pyspark.sql import functions as F
 from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
 
 
-def _params(max_queries=3, floor=2, seed=42, segment_columns=None):
+def _params(max_queries=3, floor=2, seed=42):
     evaluation = {
         "diagnosis": {
             "sample": {
@@ -17,8 +17,6 @@ def _params(max_queries=3, floor=2, seed=42, segment_columns=None):
             },
         },
     }
-    if segment_columns is not None:
-        evaluation["segment_columns"] = segment_columns
     return {
         "schema": {
             "columns": {
@@ -51,7 +49,7 @@ def _fixture(spark):
 
 
 def test_cold_item_queries_taken_in_full_and_no_positive_free_queries(spark):
-    pdf, meta = draw_diagnosis_sample(_fixture(spark), _params())
+    pdf, meta = draw_diagnosis_sample(_fixture(spark), _params(), segment_columns=[])
     custs = set(pdf["cust_id"])
     assert "C1" in custs            # cold 正例 query 數 1 < 保底 2 → 全取
     assert "N1" not in custs        # 無正例 query 不進樣本
@@ -61,15 +59,15 @@ def test_cold_item_queries_taken_in_full_and_no_positive_free_queries(spark):
 
 
 def test_sampled_queries_keep_all_candidate_rows(spark):
-    pdf, _ = draw_diagnosis_sample(_fixture(spark), _params())
+    pdf, _ = draw_diagnosis_sample(_fixture(spark), _params(), segment_columns=[])
     sizes = pdf.groupby(["snap_date", "cust_id"]).size()
     assert (sizes == 2).all()       # 被抽中的 query 帶完整候選列（含負例）
 
 
 def test_deterministic_given_seed(spark):
     df = _fixture(spark)
-    pdf1, meta1 = draw_diagnosis_sample(df, _params())
-    pdf2, meta2 = draw_diagnosis_sample(df, _params())
+    pdf1, meta1 = draw_diagnosis_sample(df, _params(), segment_columns=[])
+    pdf2, meta2 = draw_diagnosis_sample(df, _params(), segment_columns=[])
     key = ["snap_date", "cust_id", "prod_name"]
     pd.testing.assert_frame_equal(
         pdf1.sort_values(key).reset_index(drop=True),
@@ -79,7 +77,7 @@ def test_deterministic_given_seed(spark):
 
 
 def test_metadata_shape(spark):
-    _, meta = draw_diagnosis_sample(_fixture(spark), _params())
+    _, meta = draw_diagnosis_sample(_fixture(spark), _params(), segment_columns=[])
     for k in ["n_pos_queries_total", "n_queries_sampled", "take_all_items",
               "per_item_pos_queries_sampled", "max_queries",
               "min_pos_queries_per_item", "seed", "sample_ratio"]:
@@ -90,8 +88,9 @@ def test_metadata_shape(spark):
 
 def test_segment_columns_kept_when_configured_and_present(spark):
     sdf = _fixture(spark).withColumn("seg_a", F.lit("x"))
-    params = _params(segment_columns=["seg_a", "seg_missing"])
-    pdf, _meta = draw_diagnosis_sample(sdf, params)
+    pdf, _meta = draw_diagnosis_sample(
+        sdf, _params(), segment_columns=["seg_a", "seg_missing"]
+    )
     assert "seg_a" in pdf.columns          # 配置且存在 → 帶回
     assert "seg_missing" not in pdf.columns  # 配置但不存在 → 靜默略過
 
@@ -106,9 +105,8 @@ def test_reserved_column_in_segment_columns_fails_loud(spark, reserved):
     segment 撞名，等於把人送去追一條錯的線。
     """
     sdf = _fixture(spark).withColumn(reserved, F.lit("x"))
-    params = _params(segment_columns=[reserved])
     with pytest.raises(ValueError) as exc:
-        draw_diagnosis_sample(sdf, params)
+        draw_diagnosis_sample(sdf, _params(), segment_columns=[reserved])
     msg = str(exc.value)
     assert "segment_columns" in msg      # 點名是哪個配置鍵
     assert reserved in msg               # 點名是哪個欄
@@ -119,7 +117,9 @@ def test_reserved_column_in_segment_columns_fails_loud(spark, reserved):
 def test_non_reserved_segment_column_still_works(spark):
     """守衛不得誤傷正常 segment 欄——只有兩個保留名才擋。"""
     sdf = _fixture(spark).withColumn("seg_a", F.lit("x"))
-    pdf, _meta = draw_diagnosis_sample(sdf, _params(segment_columns=["seg_a"]))
+    pdf, _meta = draw_diagnosis_sample(
+        sdf, _params(), segment_columns=["seg_a"]
+    )
     assert "seg_a" in pdf.columns
 
 
@@ -127,13 +127,15 @@ def test_reserved_column_present_but_not_configured_is_fine(spark):
     """來源表剛好有同名欄、但沒配進 segment_columns → 不會被 keep_cols 選中，
     不構成撞名，不該擋。"""
     sdf = _fixture(spark).withColumn("stratum", F.lit("x"))
-    pdf, _meta = draw_diagnosis_sample(sdf, _params())
+    pdf, _meta = draw_diagnosis_sample(sdf, _params(), segment_columns=[])
     assert set(pdf["stratum"]) <= {"take_all", "hash_ratio"}
 
 
 def test_take_all_when_everything_is_small(spark):
     # 保底拉到 10 > 所有 item 的正例 query 數 → 全部 take-all、全量進樣本
-    pdf, meta = draw_diagnosis_sample(_fixture(spark), _params(floor=10))
+    pdf, meta = draw_diagnosis_sample(
+        _fixture(spark), _params(floor=10), segment_columns=[]
+    )
     assert sorted(meta["take_all_items"]) == ["cold", "hot"]
     assert meta["n_queries_sampled"] == 5
     assert set(pdf["cust_id"]) == {"H1", "H2", "H3", "H4", "C1"}
@@ -159,7 +161,7 @@ def _stratified_fixture(spark, n_hot=40):
 
 
 def test_sample_carries_inclusion_weight_and_stratum_columns(spark):
-    pdf, _meta = draw_diagnosis_sample(_fixture(spark), _params())
+    pdf, _meta = draw_diagnosis_sample(_fixture(spark), _params(), segment_columns=[])
     assert "inclusion_weight" in pdf.columns
     assert "stratum" in pdf.columns
     assert pdf["stratum"].notna().all()
@@ -168,7 +170,9 @@ def test_sample_carries_inclusion_weight_and_stratum_columns(spark):
 
 def test_inclusion_weight_degenerates_to_one_without_subsampling(spark):
     # max_queries 遠大於正例 query 數 → 沒有次抽樣，加權退化成全 1
-    pdf, meta = draw_diagnosis_sample(_fixture(spark), _params(max_queries=1000))
+    pdf, meta = draw_diagnosis_sample(
+        _fixture(spark), _params(max_queries=1000), segment_columns=[]
+    )
     assert meta["sample_ratio"] == 1.0
     assert (pdf["inclusion_weight"] == 1.0).all()
 
@@ -176,7 +180,8 @@ def test_inclusion_weight_degenerates_to_one_without_subsampling(spark):
 def test_inclusion_weight_is_inverse_probability_per_stratum(spark):
     # 自造 ratio < 1：40 個 hot query + 1 個 cold（take-all），max_queries=11
     pdf, meta = draw_diagnosis_sample(
-        _stratified_fixture(spark), _params(max_queries=11, floor=2)
+        _stratified_fixture(spark), _params(max_queries=11, floor=2),
+        segment_columns=[],
     )
     assert 0.0 < meta["sample_ratio"] < 1.0
     assert meta["take_all_items"], "測試情境沒產生 take-all 層，這條沒測到東西"
@@ -194,7 +199,8 @@ def test_inclusion_weight_is_inverse_probability_per_stratum(spark):
 def test_inclusion_weight_is_constant_within_a_query(spark):
     # 抽樣單位是 query → 同一 query 的所有候選列必須同權重
     pdf, _meta = draw_diagnosis_sample(
-        _stratified_fixture(spark), _params(max_queries=11, floor=2)
+        _stratified_fixture(spark), _params(max_queries=11, floor=2),
+        segment_columns=[],
     )
     per_query = pdf.groupby(["snap_date", "cust_id"])["inclusion_weight"].nunique()
     assert (per_query == 1).all()
@@ -202,7 +208,8 @@ def test_inclusion_weight_is_constant_within_a_query(spark):
 
 def test_meta_reports_strata_query_counts_and_weights(spark):
     _pdf, meta = draw_diagnosis_sample(
-        _stratified_fixture(spark), _params(max_queries=11, floor=2)
+        _stratified_fixture(spark), _params(max_queries=11, floor=2),
+        segment_columns=[],
     )
     strata = meta["strata"]
     assert set(strata) == {"take_all", "hash_ratio"}
@@ -218,7 +225,9 @@ def test_meta_reports_strata_query_counts_and_weights(spark):
 
 def test_strata_lists_only_existing_layers_when_all_take_all(spark):
     # floor 拉高 → 全部 take-all，不存在 hash_ratio 層
-    pdf, meta = draw_diagnosis_sample(_fixture(spark), _params(floor=10))
+    pdf, meta = draw_diagnosis_sample(
+        _fixture(spark), _params(floor=10), segment_columns=[]
+    )
     assert set(meta["strata"]) == {"take_all"}
     assert (pdf["inclusion_weight"] == 1.0).all()
     # 全 take-all 時 sample_ratio 是 0.0（「沒有 hash 層」的哨兵值），不是 1.0。
@@ -232,7 +241,7 @@ def test_strata_lists_only_existing_layers_when_all_take_all(spark):
 
 
 def test_sampling_description_present(spark):
-    _pdf, meta = draw_diagnosis_sample(_fixture(spark), _params())
+    _pdf, meta = draw_diagnosis_sample(_fixture(spark), _params(), segment_columns=[])
     assert "sampling_description" in meta
     assert isinstance(meta["sampling_description"], str)
     assert meta["sampling_description"]
@@ -241,7 +250,8 @@ def test_sampling_description_present(spark):
 def test_sampling_description_says_not_sampled_when_ratio_is_one(spark):
     # max_queries 遠大於正例 query 數 → sample_ratio == 1.0（有 hash 層但沒吃到）
     _pdf, meta = draw_diagnosis_sample(
-        _fixture(spark), _params(max_queries=1000)
+        _fixture(spark), _params(max_queries=1000),
+        segment_columns=[],
     )
     assert meta["sample_ratio"] == 1.0
     desc = meta["sampling_description"]
@@ -251,7 +261,9 @@ def test_sampling_description_says_not_sampled_when_ratio_is_one(spark):
 
 def test_sampling_description_says_no_hash_layer_when_ratio_is_zero_sentinel(spark):
     # floor 拉高 → 全 take-all，sample_ratio 的 0.0 是「無 hash 層」哨兵值
-    _pdf, meta = draw_diagnosis_sample(_fixture(spark), _params(floor=10))
+    _pdf, meta = draw_diagnosis_sample(
+        _fixture(spark), _params(floor=10), segment_columns=[]
+    )
     assert meta["sample_ratio"] == 0.0
     desc = meta["sampling_description"]
     assert "無 hash-ratio 層" in desc
@@ -262,7 +274,8 @@ def test_sampling_description_says_no_hash_layer_when_ratio_is_zero_sentinel(spa
 def test_sampling_description_says_stratified_with_actual_query_counts(spark):
     # 自造 ratio < 1 的情境：沿用既有的 _stratified_fixture(max_queries=11, floor=2)
     _pdf, meta = draw_diagnosis_sample(
-        _stratified_fixture(spark), _params(max_queries=11, floor=2)
+        _stratified_fixture(spark), _params(max_queries=11, floor=2),
+        segment_columns=[],
     )
     assert 0.0 < meta["sample_ratio"] < 1.0
     desc = meta["sampling_description"]
@@ -301,7 +314,9 @@ def test_items_below_floor_are_listed_in_item_order(spark):
     sdf = spark.createDataFrame(
         rows, schema=["snap_date", "cust_id", "prod_name", "score", "label"]
     ).repartition(5)
-    _pdf, meta = draw_diagnosis_sample(sdf, _params(max_queries=6, floor=5))
+    _pdf, meta = draw_diagnosis_sample(
+        sdf, _params(max_queries=6, floor=5), segment_columns=[]
+    )
     below = list(meta["items_below_floor_after_sampling"])
     assert len(below) >= 3 and below == sorted(below)
 
@@ -328,6 +343,6 @@ def test_the_sampling_unit_is_the_occasion_when_declared(spark):
     df = spark.createDataFrame(
         rows, schema=["snap_date", "cust_id", "req_id", "prod_name", "score", "label"]
     )
-    pdf, meta = draw_diagnosis_sample(df, params)
+    pdf, meta = draw_diagnosis_sample(df, params, segment_columns=[])
     assert meta["n_pos_queries_total"] == 4
     assert set(pdf["req_id"]) == {"r1", "r3", "r4", "r5"}
