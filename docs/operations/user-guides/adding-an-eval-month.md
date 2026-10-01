@@ -213,11 +213,13 @@ python -m recsys_tfb training \
 
 只跑第一行，預測還是舊資料算的；只跑第二行，讀到的還是回補前的資料。兩種情況報表數字都不會動。
 
+這兩行的月份必須已經在 `dataset.test_snap_dates` 裡，不在的話會在 Spark 起來之前就報錯退出。
+
 然後回到**步驟 4** 重跑 evaluation，該月的報表才會更新。
 
-**之後月份的報表也要重跑。** 報表裡的熱門度基準線（baseline）會回頭看前 `evaluation.baseline.lookback_months` 個月的 label，所以回補月份之後、在這個範圍內已經出過的報表也過時了，各自重跑一次步驟 4。設了 `evaluation.baseline.score: rate` 的話，重跑時再加 `--rebuild-dates <回補的月份>`：rate 會把每個月算過的數字存起來沿用，不點名就不會重算（見 [evaluation.md §3.4](../../pipelines/evaluation.md#34-popularity-baseline)）。
+**之後月份的報表也要重跑。** 報表裡的熱門度基準線（baseline）會回頭看評估月份**之前** `evaluation.baseline.lookback_months` 個月的資料，所以回補月份之後、在這個範圍內已經出過的報表也過時了，各自重跑一次步驟 4。
 
-**月份必須已經在 `dataset.test_snap_dates` 裡。** 不在的話會在 Spark 起來之前就報錯退出。
+設了 `evaluation.baseline.score: rate` 的話還要多一步。rate 把每個月的 label 與 `sample_pool` 數字算一次就存進一張所有模型共用的表，之後沿用、不重算。所以回補之後，**第一次**跑到回看範圍包含回補月份的 evaluation（不管哪個模型），要加 `--rebuild-dates <回補的月份>`，帶過一次就好。回補月份自己的報表不用帶：它的回看範圍不含它自己，帶了會被擋下（見 [evaluation.md §3.4](../../pipelines/evaluation.md#34-popularity-baseline)）。
 
 ## 跑完了，怎麼確認真的成功
 
@@ -263,9 +265,10 @@ python scripts/promote_model.py --env production --dry-run
 | 訊息帶 `(A53) test_metrics.snap_date month(s) ... are not in dataset.test_snap_dates` | 計分月份裡有月份不在 `dataset.test_snap_dates` 裡，或寫法不同。照 `dataset.test_snap_dates` 的寫法抄 |
 | 訊息帶 `(A26) ... spells one month more than one way` | 同一個月在 `dataset.test_snap_dates` 裡出現了兩種寫法（例如 `2026-01-31` 與 `20260131`）。只留 `YYYY-MM-DD` 那一種，刪掉其餘 |
 | 訊息帶 `(A22) evaluation.snap_date=... is not a test month` | 步驟 4 的日期不在 `dataset.test_snap_dates` 裡。漏做了步驟 1，補做步驟 1–3 |
-| 訊息帶 `--rebuild-dates`，還沒起 Spark 就退出 | 你要重算的月份不在 `dataset.test_snap_dates` 裡。先把它加進去 |
+| dataset 或 training 的訊息帶 `--rebuild-dates`，還沒起 Spark 就退出 | 你要重算的月份不在 `dataset.test_snap_dates` 裡。先把它加進去 |
+| evaluation 的訊息帶 `(A21)` 與 `popularity_period_counts` 或 `outside every lookback`，還沒起 Spark 就退出 | 沒設 `baseline.score: rate` 就用不到這個旗標，拿掉；有設的話，那個月不在這次評估月份的回看範圍裡（例如回補月份自己的報表），也拿掉（〈[上游回補了，要重算某個月份](#上游回補了要重算某個月份)〉） |
 | 重算之後數字跟上次逐位相同 | 只重算了其中一層。dataset 與 training 兩行都要帶 `--rebuild-dates`（〈[上游回補了，要重算某個月份](#上游回補了要重算某個月份)〉） |
-| `[rebuild] WARNING: ... had no effect` 或 `... is only half applied` | 你選的步驟範圍把預測那一步排除掉了。前者是一步都沒選到、旗標完全無事可做；後者是選到了「丟掉舊 cache」那一步、但沒選到重新預測那一步，所以 cache 重建了、預測沒重做。兩者都改用 `--only-node predict_and_write_test_predictions` |
+| `[rebuild] WARNING: ... had no effect` 或 `... is only half applied` | 你選的步驟範圍把預測那一步排除掉了。前者是一步都沒選到、旗標完全無事可做；後者是選到了「丟掉舊 cache」那一步、但沒選到重新預測那一步，所以 cache 重建了、預測沒重做。兩者都改用 `--only-node predict_and_write_test_predictions`。evaluation 也會印 `had no effect`，那是切片沒選到重數 baseline 的那一步，照警告下一行改用 `--from-node build_popularity_period_counts` |
 
 ## 相關文件
 

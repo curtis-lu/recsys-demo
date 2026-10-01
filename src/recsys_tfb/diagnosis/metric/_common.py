@@ -227,8 +227,9 @@ def per_item_ap(
     item 要照數字大小比，所以不能先轉成字串；回傳的 key 才轉字串。
 
     原本在 ``item_ability/_compute.py``
-    與 ``scripts/reference/item_ability_diagnosis.py``／``scripts/suppression_ledger_
-    diagnosis.py`` 各自維護一份逐位元組相同的副本，``suppression`` 是第四個
+    與 ``scripts/reference/item_ability_diagnosis.py``／
+    ``scripts/reference/suppression_ledger_diagnosis.py``
+    各自維護一份逐位元組相同的副本，``suppression`` 是第四個
     消費者，門檻到了（見本檔案模組 docstring：兩個以上實例逐字相同才抽），
     Task 5.1 把它搬到這裡共用。
     """

@@ -9,6 +9,8 @@ import copy
 import importlib
 import inspect
 import json
+import re
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -535,13 +537,53 @@ def test_render_refuses_results_computed_with_other_settings(
     assert "--from-node compute_metrics" in msg
 
 
+_PLOTLY_DIV_ID = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def test_render_pages_survive_a_json_round_trip(tmp_path, monkeypatch):
+    """Behaviour guard: results read back from JSON draw the same pages as
+    the in-memory results of the run that computed them.
+
+    A slice that skips the diagnosis nodes (``--only-node`` /
+    ``--from-node``) hands ``render_diagnosis_pages`` the catalog's
+    JSONDataset loads, not ``compute``'s own dicts: tuples come back as
+    lists, int keys as strings. A ``render`` that leans on either draws
+    differently, or raises, only on resume. Plotly makes a fresh div id each
+    time; the comparison strips it.
+    """
+    from recsys_tfb.pipelines.evaluation.nodes import render_diagnosis_pages
+
+    monkeypatch.chdir(tmp_path)
+    params = _render_params(config_shift=True)
+    sample = (_diag_sample_pdf(),
+              {"n_queries": 40, "sampling_description": SAMPLING_DESCRIPTION})
+    outputs = _node_outputs(params, sample)
+
+    def drawn(results):
+        pages = [Path(p) for p in render_diagnosis_pages(params, *results)]
+        return {
+            p.name: (_PLOTLY_DIV_ID.sub("ID", p.read_text(encoding="utf-8"))
+                     if p.suffix == ".html" else p.read_bytes())
+            for p in pages
+        }
+
+    in_memory = drawn(outputs)
+    read_back = drawn([json.loads(json.dumps(r)) for r in outputs])
+
+    assert "01-config-shift.html" in in_memory
+    assert sorted(read_back) == sorted(in_memory)
+    for name, content in in_memory.items():
+        assert read_back[name] == content, name
+
+
 # =====================================================================
 # generate_report 變純函式（Plan 1.5 Task 4）
 # =====================================================================
 
 
 def test_generate_report_takes_no_spark_dataframe():
-    """``generate_report`` 是純函式——這是主報表不依賴 Spark 就能產生的前提。
+    """``generate_report`` 是純函式——這是 ``--only-node generate_report`` 不重算任何 Spark 計算就能重繪主報表的前提。
 
     用簽章驗而不是「跑跑看有沒有用到 Spark」：後者在 diagnostics 關閉時會
     假綠（那條路徑本來就不碰 sdf）。

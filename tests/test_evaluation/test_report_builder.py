@@ -794,6 +794,13 @@ class TestLegacyDatasetOverviewRefused:
         assert "n_products" in message
         assert rb.MIGRATION_SCRIPT in message
 
+    def test_the_named_script_exists(self):
+        """訊息叫人跑的那支腳本要真的在那個路徑：搬家時只有這條會紅。"""
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[2]
+        assert (repo_root / rb.MIGRATION_SCRIPT).is_file(), rb.MIGRATION_SCRIPT
+
     def test_a_legacy_key_hiding_in_a_cell_is_found_too(self):
         """totals 可能已被手動改對，而 by_* 的 cell 沒有。
 
