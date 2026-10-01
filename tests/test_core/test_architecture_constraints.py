@@ -897,7 +897,7 @@ def _bindings(targets, value):
     Tuple targets are paired positionally, so
     ``entity_cols, item_col = schema["entity"], schema["item"]`` binds only the
     left name. That form is not hypothetical here: the line directly above the
-    known ``scripts/shap_margin_summary.py`` offender is
+    known ``scripts/reference/shap_margin_summary.py`` offender is
     ``time_col, item_col, label_col = schema["time"], schema["item"], ...``, so
     it is demonstrably how this repo unpacks a schema. A starred target
     (``first, *rest = ...``) is skipped -- positions stop lining up, and that

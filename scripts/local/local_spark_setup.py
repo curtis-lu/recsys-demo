@@ -5,7 +5,7 @@
 
 用法（從 repo/worktree root）：
     export SPARK_CONF_DIR=$PWD/conf/spark-local
-    PYTHONPATH=src .venv/bin/python scripts/local_spark_setup.py [--reset] [--check-isolation]
+    PYTHONPATH=src .venv/bin/python scripts/local/local_spark_setup.py [--reset] [--check-isolation]
 """
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def ensure_synthetic_data() -> None:
     missing = [str(p) for p in TABLES.values() if not p.exists()]
     if missing:
         print(f"[setup] 缺合成 parquet {missing} → 執行 generate_synthetic_data.py")
-        subprocess.run([sys.executable, "scripts/generate_synthetic_data.py"], check=True)
+        subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "generate_synthetic_data.py")], check=True)
 
 
 def main() -> None:

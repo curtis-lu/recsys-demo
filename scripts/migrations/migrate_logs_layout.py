@@ -9,8 +9,8 @@ successful migration is a no-op (idempotent).
 
 Run from the repo root::
 
-    PYTHONPATH=src .venv/bin/python scripts/migrate_logs_layout.py            # dry run
-    PYTHONPATH=src .venv/bin/python scripts/migrate_logs_layout.py --apply    # move
+    PYTHONPATH=src .venv/bin/python scripts/migrations/migrate_logs_layout.py            # dry run
+    PYTHONPATH=src .venv/bin/python scripts/migrations/migrate_logs_layout.py --apply    # move
 """
 from __future__ import annotations
 

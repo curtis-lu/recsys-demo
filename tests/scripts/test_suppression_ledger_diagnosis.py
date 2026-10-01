@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from recsys_tfb.core.schema import get_schema
-from scripts.suppression_ledger_diagnosis import (
+from scripts.reference.suppression_ledger_diagnosis import (
     analyze_suppression,
     resolve_snap_date,
     validate_and_prepare,

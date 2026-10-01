@@ -2,7 +2,7 @@ import argparse
 
 import pytest
 
-from scripts.config_sorting_shift_diagnosis import resolve_snap_date
+from scripts.reference.config_sorting_shift_diagnosis import resolve_snap_date
 
 
 def _args(snap_date=None):
@@ -60,7 +60,7 @@ def test_the_offset_universe_of_a_counted_item_list_is_what_was_observed():
     import pandas as pd
 
     from recsys_tfb.core.schema import get_schema
-    from scripts.config_sorting_shift_diagnosis import build_offset_frame
+    from scripts.reference.config_sorting_shift_diagnosis import build_offset_frame
 
     params = {
         "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],

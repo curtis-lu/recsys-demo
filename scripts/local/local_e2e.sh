@@ -11,10 +11,10 @@
 #
 # 模型：用 training 剛產出的版本，走既有的 --model-version 選項，**不觸發 promote**
 #   （promote 保留給人工）。
-# 用法（從 repo/worktree root）：  bash scripts/local_e2e.sh
+# 用法（從 repo/worktree root）：  bash scripts/local/local_e2e.sh
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 # 直譯器：預設用這個 repo／worktree 自己的 .venv，可用 RECSYS_PYTHON 覆寫。
 # 不寫死絕對路徑——寫死的話，除了原作者那台機器以外任何 clone 都跑不起來。
@@ -30,7 +30,7 @@ export PYTHONPATH="$ROOT/src"
 
 run() { echo; echo "▶ $*"; "$@"; }
 
-run "$VENV" scripts/local_spark_setup.py --reset
+run "$VENV" scripts/local/local_spark_setup.py --reset
 run "$VENV" -m recsys_tfb dataset  --env local
 run "$VENV" -m recsys_tfb training --env local
 

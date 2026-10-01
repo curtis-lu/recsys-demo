@@ -1,19 +1,20 @@
-"""Manual diagnosis: can per-item score shifts improve ranking mAP?
+"""Manual diagnosis: can Optuna-tuned per-item score shifts improve mAP?
 
 This is a standalone script for the redesign spike. It answers one narrow
 post-hoc ranking question:
 
     Without retraining the model, can fixed per-item score shifts improve
-    macro per-item mAP on held-out entities?
+    macro per-item mAP on held-out entities, while keeping top-k exposure
+    reasonably close to the observed positive-label distribution?
 
 The script reads the project catalog entry ``enriched_eval_predictions`` so
 users may still change the physical Hive table name in ``catalog.yaml``.
 
 Examples:
 
-  PYTHONPATH=src python scripts/per_item_score_shift_diagnosis.py \
+  PYTHONPATH=src python scripts/reference/per_item_score_shift_optuna_diagnosis.py \
       --model-version 20260717_xxx \
-      --output data/diagnosis/per_item_score_shift.html
+      --output data/diagnosis/per_item_score_shift_optuna.html
 """
 
 from __future__ import annotations
@@ -21,11 +22,15 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import logging
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+import optuna
 import yaml
 
 from recsys_tfb.core.date_ranges import the_only_date
@@ -39,6 +44,17 @@ from recsys_tfb.evaluation.metrics import (
 )
 
 ENRICHED_EVAL_ENTRY = "enriched_eval_predictions"
+LOGGER = logging.getLogger("per_item_score_shift_optuna_diagnosis")
+
+
+def configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stdout,
+        force=True,
+    )
 
 
 def _deep_merge(a: dict, b: dict) -> dict:
@@ -149,7 +165,7 @@ def load_enriched_eval_predictions(
 
     spark = (
         SparkSession.builder
-        .appName("per_item_score_shift_diagnosis")
+        .appName("per_item_score_shift_optuna_diagnosis")
         .enableHiveSupport()
         .getOrCreate()
     )
@@ -304,7 +320,94 @@ def n_pos_by_item(pdf: pd.DataFrame, schema: dict) -> dict[str, int]:
     return {str(k): int(v) for k, v in s.items()}
 
 
-def optimize_item_shifts(
+def positive_share_by_item(items: np.ndarray, y: np.ndarray) -> dict[str, float]:
+    uniq, inv = np.unique(items.astype(str), return_inverse=True)
+    counts = np.bincount(inv, weights=y.astype(np.float64), minlength=len(uniq))
+    total = float(counts.sum())
+    if total <= 0.0:
+        return {str(item): 0.0 for item in uniq}
+    return {str(item): float(count / total) for item, count in zip(uniq, counts)}
+
+
+def topk_share_by_item(
+    groups: np.ndarray,
+    items: np.ndarray,
+    score: np.ndarray,
+    k: int,
+) -> dict[str, float]:
+    if k <= 0:
+        raise ValueError("--exposure-k must be positive.")
+    if len(score) == 0:
+        return {}
+
+    item_strings = items.astype(str)
+    uniq_items, item_inv = np.unique(item_strings, return_inverse=True)
+    exposure_counts = np.zeros(len(uniq_items), dtype=np.float64)
+    order = np.lexsort((-score, groups))
+    g_sorted = groups[order]
+    boundaries = np.concatenate([
+        [0],
+        np.flatnonzero(np.diff(g_sorted)) + 1,
+        [len(g_sorted)],
+    ])
+    for i in range(len(boundaries) - 1):
+        start, end = boundaries[i], boundaries[i + 1]
+        top_idx = order[start:min(end, start + k)]
+        exposure_counts += np.bincount(
+            item_inv[top_idx],
+            minlength=len(uniq_items),
+        )
+    total = float(exposure_counts.sum())
+    if total <= 0.0:
+        return {str(item): 0.0 for item in uniq_items}
+    return {
+        str(item): float(count / total)
+        for item, count in zip(uniq_items, exposure_counts)
+    }
+
+
+def exposure_share_penalty(
+    pred_share: dict[str, float],
+    target_share: dict[str, float],
+) -> float:
+    items = sorted(set(pred_share) | set(target_share))
+    return float(sum(
+        (float(pred_share.get(item, 0.0)) - float(target_share.get(item, 0.0))) ** 2
+        for item in items
+    ))
+
+
+def exposure_share_rows(
+    groups: np.ndarray,
+    items: np.ndarray,
+    y: np.ndarray,
+    baseline_score: np.ndarray,
+    shifted: np.ndarray,
+    *,
+    exposure_k: int,
+) -> list[dict[str, Any]]:
+    target = positive_share_by_item(items, y)
+    baseline = topk_share_by_item(groups, items, baseline_score, exposure_k)
+    after = topk_share_by_item(groups, items, shifted, exposure_k)
+    rows: list[dict[str, Any]] = []
+    for item in sorted(set(target) | set(baseline) | set(after)):
+        target_v = float(target.get(item, 0.0))
+        base_v = float(baseline.get(item, 0.0))
+        after_v = float(after.get(item, 0.0))
+        rows.append({
+            "item": item,
+            "positive_share": target_v,
+            "baseline_topk_share": base_v,
+            "shifted_topk_share": after_v,
+            "baseline_minus_positive": base_v - target_v,
+            "shifted_minus_positive": after_v - target_v,
+            "topk_share_delta": after_v - base_v,
+        })
+    rows.sort(key=lambda r: abs(float(r["shifted_minus_positive"])), reverse=True)
+    return rows
+
+
+def optimize_item_shifts_optuna(
     groups: np.ndarray,
     items: np.ndarray,
     y: np.ndarray,
@@ -312,12 +415,32 @@ def optimize_item_shifts(
     mp: dict,
     *,
     max_abs_shift: float,
-    initial_step: float,
-    min_step: float,
-    max_sweeps_per_step: int,
     min_pos_for_shift: int,
-    candidate_multipliers: tuple[int, ...],
+    n_trials: int,
+    shift_step: float | None,
+    n_startup_trials: int,
+    seed: int,
+    timeout: float | None,
+    log_every_trials: int,
+    shift_l2: float,
+    exposure_k: int,
+    exposure_penalty: float,
 ) -> tuple[dict[str, float], dict]:
+    if max_abs_shift <= 0:
+        raise ValueError("--max-abs-shift must be positive.")
+    if n_trials <= 0:
+        raise ValueError("--n-trials must be positive.")
+    if shift_step is not None and shift_step <= 0:
+        raise ValueError("--shift-step must be positive when provided.")
+    if n_startup_trials < 0:
+        raise ValueError("--n-startup-trials must be non-negative.")
+    if shift_l2 < 0.0:
+        raise ValueError("--shift-l2 must be non-negative.")
+    if exposure_penalty < 0.0:
+        raise ValueError("--exposure-penalty must be non-negative.")
+    if exposure_k <= 0:
+        raise ValueError("--exposure-k must be positive.")
+
     uniq_items = sorted(str(x) for x in np.unique(items))
     pos_counts = {
         item: int(y[items == item].sum())
@@ -327,59 +450,162 @@ def optimize_item_shifts(
         item for item in uniq_items
         if pos_counts[item] >= min_pos_for_shift
     ]
-    shifts = {item: 0.0 for item in uniq_items}
     baseline_map = float(compute_macro_per_item_map(groups, items, y, base_score, **mp))
-    current_map = baseline_map
-    history: list[dict[str, Any]] = []
+    target_share = positive_share_by_item(items, y)
+    baseline_topk_share = topk_share_by_item(groups, items, base_score, exposure_k)
+    baseline_exposure_penalty = exposure_share_penalty(
+        baseline_topk_share,
+        target_share,
+    )
 
-    step = float(initial_step)
-    tol = 1e-12
-    while step >= min_step - 1e-12:
-        for sweep in range(max_sweeps_per_step):
-            improved = False
-            for item in shiftable:
-                best_shift = shifts[item]
-                best_map = current_map
-                for mult in candidate_multipliers:
-                    cand = float(np.clip(shifts[item] + mult * step, -max_abs_shift, max_abs_shift))
-                    if cand == shifts[item] and mult != 0:
-                        continue
-                    cand_shifts = dict(shifts)
-                    cand_shifts[item] = cand
-                    cand_score = shifted_score(base_score, items, cand_shifts)
-                    cand_map = float(compute_macro_per_item_map(groups, items, y, cand_score, **mp))
-                    if cand_map > best_map + tol:
-                        best_map = cand_map
-                        best_shift = cand
-                if best_shift != shifts[item]:
-                    shifts[item] = best_shift
-                    current_map = best_map
-                    improved = True
-            history.append({
-                "step": float(step),
-                "sweep": int(sweep),
-                "map": float(current_map),
-                "improved": bool(improved),
-            })
-            if not improved:
-                break
-        step = step / 2.0
+    item_to_idx = {item: idx for idx, item in enumerate(shiftable)}
+    shiftable_idx = np.array([item_to_idx[str(item)] for item in items if str(item) in item_to_idx], dtype=np.int64)
+    shiftable_row_mask = np.array([str(item) in item_to_idx for item in items], dtype=bool)
+
+    def score_from_vector(vector: np.ndarray) -> np.ndarray:
+        score = base_score.copy()
+        if len(vector):
+            score[shiftable_row_mask] += vector[shiftable_idx]
+        return score
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    sampler = optuna.samplers.TPESampler(
+        seed=seed,
+        n_startup_trials=n_startup_trials,
+    )
+    study = optuna.create_study(direction="maximize", sampler=sampler)
+    start = time.time()
+
+    def objective(trial: optuna.Trial) -> float:
+        vector = np.array(
+            [
+                trial.suggest_float(
+                    f"shift__{item}",
+                    -max_abs_shift,
+                    max_abs_shift,
+                    step=shift_step,
+                )
+                for item in shiftable
+            ],
+            dtype=np.float64,
+        )
+        score = score_from_vector(vector)
+        raw_map = float(compute_macro_per_item_map(groups, items, y, score, **mp))
+        l2_penalty = float(np.sum(vector ** 2))
+        pred_share = topk_share_by_item(groups, items, score, exposure_k)
+        exposure_loss = exposure_share_penalty(pred_share, target_share)
+        objective_value = (
+            raw_map
+            - shift_l2 * l2_penalty
+            - exposure_penalty * exposure_loss
+        )
+        trial.set_user_attr("raw_map", raw_map)
+        trial.set_user_attr("delta", raw_map - baseline_map)
+        trial.set_user_attr("shift_l2_penalty", l2_penalty)
+        trial.set_user_attr("exposure_penalty", exposure_loss)
+        return objective_value
+
+    def progress_callback(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        completed = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+        if completed == 1 or (
+            log_every_trials > 0 and completed % log_every_trials == 0
+        ):
+            best_raw_delta = float(
+                study.best_trial.user_attrs.get(
+                    "delta",
+                    study.best_value - baseline_map,
+                )
+            )
+            LOGGER.info(
+                "Optuna trial %d/%d done: best objective=%.6f, best raw delta=%.6f, elapsed=%.1fs",
+                completed,
+                n_trials,
+                float(study.best_value),
+                best_raw_delta,
+                time.time() - start,
+            )
+
+    LOGGER.info(
+        "Optuna search: %d shiftable items, %d trials, baseline mAP=%.6f, exposure_k=%d, shift_l2=%.6f, exposure_penalty=%.6f",
+        len(shiftable),
+        n_trials,
+        baseline_map,
+        exposure_k,
+        shift_l2,
+        exposure_penalty,
+    )
+    study.optimize(
+        objective,
+        n_trials=n_trials,
+        timeout=timeout,
+        callbacks=[progress_callback],
+        show_progress_bar=False,
+    )
+
+    best_params = dict(study.best_params) if len(study.trials) else {}
+    shifts = {item: 0.0 for item in uniq_items}
+    for item in shiftable:
+        shifts[item] = float(best_params.get(f"shift__{item}", 0.0))
 
     final_score = shifted_score(base_score, items, shifts)
     final_map = float(compute_macro_per_item_map(groups, items, y, final_score, **mp))
+    final_vector = np.array([shifts[item] for item in shiftable], dtype=np.float64)
+    final_shift_l2_penalty = float(np.sum(final_vector ** 2))
+    final_topk_share = topk_share_by_item(groups, items, final_score, exposure_k)
+    final_exposure_penalty = exposure_share_penalty(final_topk_share, target_share)
+    final_objective = (
+        final_map
+        - shift_l2 * final_shift_l2_penalty
+        - exposure_penalty * final_exposure_penalty
+    )
+    completed_trials = [
+        t for t in study.trials
+        if t.state == optuna.trial.TrialState.COMPLETE and t.value is not None
+    ]
+    best_trials = sorted(
+        completed_trials,
+        key=lambda t: float(t.value),
+        reverse=True,
+    )[:10]
     meta = {
+        "method": "optuna_tpe",
         "baseline_map": baseline_map,
         "shifted_map": final_map,
         "delta": final_map - baseline_map,
+        "objective_value": final_objective,
         "n_items": int(len(uniq_items)),
         "n_shiftable_items": int(len(shiftable)),
         "min_pos_for_shift": int(min_pos_for_shift),
         "max_abs_shift": float(max_abs_shift),
-        "initial_step": float(initial_step),
-        "min_step": float(min_step),
-        "max_sweeps_per_step": int(max_sweeps_per_step),
-        "candidate_multipliers": list(candidate_multipliers),
-        "history": history,
+        "n_trials_requested": int(n_trials),
+        "n_trials_completed": int(len(completed_trials)),
+        "shift_step": None if shift_step is None else float(shift_step),
+        "n_startup_trials": int(n_startup_trials),
+        "timeout": None if timeout is None else float(timeout),
+        "elapsed_seconds": float(time.time() - start),
+        "best_trial_number": None if not completed_trials else int(study.best_trial.number),
+        "shift_l2": float(shift_l2),
+        "shift_l2_penalty": final_shift_l2_penalty,
+        "exposure_k": int(exposure_k),
+        "exposure_penalty_weight": float(exposure_penalty),
+        "baseline_exposure_penalty": baseline_exposure_penalty,
+        "shifted_exposure_penalty": final_exposure_penalty,
+        "best_trials": [
+            {
+                "number": int(t.number),
+                "objective": float(t.value),
+                "map": float(t.user_attrs.get("raw_map", t.value)),
+                "delta": float(t.user_attrs.get("delta", t.value - baseline_map)),
+                "shift_l2_penalty": float(t.user_attrs.get("shift_l2_penalty", 0.0)),
+                "exposure_penalty": float(t.user_attrs.get("exposure_penalty", 0.0)),
+                "params": {
+                    str(k).replace("shift__", ""): float(v)
+                    for k, v in sorted(t.params.items())
+                    if abs(float(v)) > 1e-12
+                },
+            }
+            for t in best_trials
+        ],
     }
     return shifts, meta
 
@@ -481,18 +707,23 @@ def run_diagnosis(
     hold_groups, hold_items, hold_y, hold_z, hold_notes = arrays_for_metric(holdout, schema)
     full_tune_groups, full_tune_items, full_tune_y, full_tune_z, _ = arrays_for_metric(tune, schema)
 
-    shifts, tune_meta = optimize_item_shifts(
+    shifts, tune_meta = optimize_item_shifts_optuna(
         tune_groups,
         tune_items,
         tune_y,
         tune_z,
         mp,
         max_abs_shift=args.max_abs_shift,
-        initial_step=args.initial_step,
-        min_step=args.min_step,
-        max_sweeps_per_step=args.max_sweeps_per_step,
         min_pos_for_shift=args.min_pos_for_shift,
-        candidate_multipliers=tuple(args.candidate_multipliers),
+        n_trials=args.n_trials,
+        shift_step=args.shift_step,
+        n_startup_trials=args.n_startup_trials,
+        seed=args.seed,
+        timeout=args.optuna_timeout,
+        log_every_trials=args.log_every_trials,
+        shift_l2=args.shift_l2,
+        exposure_k=args.exposure_k,
+        exposure_penalty=args.exposure_penalty,
     )
     tune_meta["search_sample"] = search_meta
 
@@ -511,6 +742,31 @@ def run_diagnosis(
     hold_baseline = float(compute_macro_per_item_map(hold_groups, hold_items, hold_y, hold_z, **mp))
     hold_after = float(compute_macro_per_item_map(hold_groups, hold_items, hold_y, hold_shifted, **mp))
     hold_delta = hold_after - hold_baseline
+    hold_target_share = positive_share_by_item(hold_items, hold_y)
+    hold_baseline_topk_share = topk_share_by_item(
+        hold_groups,
+        hold_items,
+        hold_z,
+        args.exposure_k,
+    )
+    hold_shifted_topk_share = topk_share_by_item(
+        hold_groups,
+        hold_items,
+        hold_shifted,
+        args.exposure_k,
+    )
+    hold_exposure = {
+        "k": int(args.exposure_k),
+        "target": "positive_share",
+        "baseline_penalty": exposure_share_penalty(
+            hold_baseline_topk_share,
+            hold_target_share,
+        ),
+        "shifted_penalty": exposure_share_penalty(
+            hold_shifted_topk_share,
+            hold_target_share,
+        ),
+    }
 
     clusters = entity_clusters(holdout, schema)
     rng = np.random.RandomState(args.seed)
@@ -537,6 +793,14 @@ def run_diagnosis(
     for row in per_item:
         row["n_pos_tune"] = int(tune_pos.get(row["item"], 0))
     per_item.sort(key=lambda r: r["shift"])
+    exposure_rows = exposure_share_rows(
+        hold_groups,
+        hold_items,
+        hold_y,
+        hold_z,
+        hold_shifted,
+        exposure_k=args.exposure_k,
+    )
 
     return {
         "metric_params": mp,
@@ -556,8 +820,10 @@ def run_diagnosis(
             "n_entities": int(n_clusters),
             "n_positive_rows": int(hold_y.sum()),
         },
+        "holdout_exposure": hold_exposure,
         "shifts": [{"item": item, "shift": shift} for item, shift in sorted(shifts.items())],
         "per_item_holdout": per_item,
+        "exposure_holdout": exposure_rows,
     }
 
 
@@ -616,6 +882,7 @@ def interpretation(result: dict) -> str:
 def render_html(report: dict) -> str:
     result = report["result"]
     hold = result["holdout"]
+    hold_exposure = result.get("holdout_exposure", {})
     search = result["search"]
     split = report["split"]
     search_sample = search.get("search_sample", {})
@@ -642,6 +909,7 @@ def render_html(report: dict) -> str:
         ("holdout Delta", fmt_num(hold["delta"])),
         ("95% paired CI", f"[{fmt_num(hold['delta_ci_low'])}, {fmt_num(hold['delta_ci_high'])}]"),
         ("tune Delta", fmt_num(search["delta"])),
+        ("top-k share penalty", fmt_num(hold_exposure.get("shifted_penalty"))),
         ("nonzero shifts", f"{shifts_nonzero} / {len(result['shifts'])}"),
     ]
     cards_html = "".join(
@@ -650,9 +918,9 @@ def render_html(report: dict) -> str:
     )
 
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Per-Item Score Shift Diagnosis</title><style>{css}</style></head>
+<html><head><meta charset="utf-8"><title>Per-Item Score Shift Optuna Diagnosis</title><style>{css}</style></head>
 <body>
-<h1>Per-Item Score Shift Diagnosis</h1>
+<h1>Per-Item Score Shift Optuna Diagnosis</h1>
 <p class="muted">Question: without retraining, can fixed per-item score shifts improve macro per-item mAP?</p>
 <div class="summary">{cards_html}</div>
 <div class="note"><strong>Conclusion.</strong> {html.escape(interp)}</div>
@@ -681,17 +949,29 @@ def render_html(report: dict) -> str:
 </tbody></table>
 
 <h2>2. Search Summary</h2>
-<p>Coordinate search maximizes tune macro per-item mAP over bounded per-item constants.</p>
+<p>Optuna TPE search maximizes tune macro per-item mAP over bounded per-item constants.</p>
 <table><tbody>
+<tr><th>method</th><td>{html.escape(str(search.get("method", "optuna_tpe")))}</td></tr>
 <tr><th>tune baseline mAP</th><td>{fmt_num(search["baseline_map"])}</td></tr>
 <tr><th>tune shifted mAP</th><td>{fmt_num(search["shifted_map"])}</td></tr>
 <tr><th>tune Delta</th><td>{fmt_num(search["delta"])}</td></tr>
+<tr><th>objective value</th><td>{fmt_num(search["objective_value"])}</td></tr>
 <tr><th>full tune Delta</th><td>{fmt_num(search["full_tune_delta"])}</td></tr>
 <tr><th>shiftable items</th><td>{search["n_shiftable_items"]} / {search["n_items"]}</td></tr>
-<tr><th>bounds</th><td>abs shift <= {fmt_num(search["max_abs_shift"])}, min positives = {search["min_pos_for_shift"]}</td></tr>
+<tr><th>trials</th><td>{search["n_trials_completed"]} / {search["n_trials_requested"]}, startup={search["n_startup_trials"]}</td></tr>
+<tr><th>best trial</th><td>{html.escape(str(search.get("best_trial_number")))}</td></tr>
+<tr><th>bounds</th><td>abs shift <= {fmt_num(search["max_abs_shift"])}, step = {fmt_num(search["shift_step"])}, min positives = {search["min_pos_for_shift"]}</td></tr>
+<tr><th>guardrail</th><td>shift L2 weight = {fmt_num(search["shift_l2"])}, exposure weight = {fmt_num(search["exposure_penalty_weight"])}, top-k = {search["exposure_k"]}</td></tr>
+<tr><th>search exposure penalty</th><td>{fmt_num(search["baseline_exposure_penalty"])} baseline -> {fmt_num(search["shifted_exposure_penalty"])} shifted</td></tr>
+<tr><th>holdout exposure penalty</th><td>{fmt_num(hold_exposure.get("baseline_penalty"))} baseline -> {fmt_num(hold_exposure.get("shifted_penalty"))} shifted</td></tr>
+<tr><th>elapsed</th><td>{fmt_num(search["elapsed_seconds"], 1)} seconds</td></tr>
 </tbody></table>
 
-<h2>3. Learned Item Shifts</h2>
+<h2>3. Top-K Exposure Guardrail</h2>
+<p>Target share is each item's positive-label share. Top-k share is how often the item appears in the top k positions across queries.</p>
+{table_html(result["exposure_holdout"], [("item","item"),("positive_share","positive share"),("baseline_topk_share","baseline top-k share"),("shifted_topk_share","shifted top-k share"),("baseline_minus_positive","baseline - positive"),("shifted_minus_positive","shifted - positive"),("topk_share_delta","top-k share delta")])}
+
+<h2>4. Learned Item Shifts</h2>
 <p>Positive shift pushes an item up against other items in the same query; negative shift pushes it down.</p>
 {table_html(result["per_item_holdout"], [("item","item"),("shift","shift"),("delta_ap","holdout Delta AP"),("ap_baseline","holdout AP"),("ap_shifted","holdout shifted AP"),("n_pos_tune","n_pos tune"),("n_pos_holdout","n_pos holdout")])}
 </body></html>"""
@@ -726,13 +1006,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--params", action="append", help="YAML parameter file. Repeatable. Defaults to conf/base core parameter files.")
     p.add_argument("--snap-date", help="Override evaluation.snap_date.")
     p.add_argument("--model-version", required=True, help="model_version partition to read.")
-    p.add_argument("--output", default="data/diagnosis/per_item_score_shift.html")
+    p.add_argument("--output", default="data/diagnosis/per_item_score_shift_optuna.html")
     p.add_argument("--tune-fraction", type=float, default=0.5, help="Entity-level fraction used to learn shifts.")
     p.add_argument("--max-abs-shift", type=float, default=4.0)
-    p.add_argument("--initial-step", type=float, default=1.0)
-    p.add_argument("--min-step", type=float, default=0.125)
-    p.add_argument("--max-sweeps-per-step", type=int, default=3)
-    p.add_argument("--candidate-multipliers", type=int, nargs="+", default=[-1, 0, 1], help="Integer step multipliers evaluated for each item.")
+    p.add_argument("--shift-step", type=float, default=0.125, help="Discrete shift grid step used by Optuna. Use 0.125 to match the old coordinate-search minimum step.")
+    p.add_argument("--n-trials", type=int, default=150, help="Number of Optuna trials used to search item shifts.")
+    p.add_argument("--n-startup-trials", type=int, default=20, help="Random startup trials before TPE sampling.")
+    p.add_argument("--optuna-timeout", type=float, help="Optional Optuna search timeout in seconds.")
+    p.add_argument("--log-every-trials", type=int, default=10, help="Log Optuna progress every N completed trials. Set 0 to disable periodic logs.")
+    p.add_argument("--shift-l2", type=float, default=0.01, help="Penalty weight for sum of squared item shifts. Set 0 to disable.")
+    p.add_argument("--exposure-k", type=int, default=1, help="Top-k positions used for exposure-share guardrail.")
+    p.add_argument("--exposure-penalty", type=float, default=0.1, help="Penalty weight for squared distance between top-k share and positive-label share. Set 0 to disable.")
     p.add_argument("--min-pos-for-shift", type=int, default=50)
     p.add_argument("--search-max-queries", type=int, default=50000, help="Cap tune queries used to learn item shifts. Holdout evaluation remains full.")
     p.add_argument("--n-boot", type=int, default=200)
@@ -741,13 +1025,33 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    configure_logging()
     args = parse_args()
+    LOGGER.info("Loading parameters and schema ...")
     parameters = load_parameters(args.params)
     schema = get_schema(parameters)
+    LOGGER.info("Loading enriched evaluation predictions ...")
     pdf_raw, source_meta = load_enriched_eval_predictions(args, parameters, schema)
+    LOGGER.info("Spark sample loaded: %d rows.", len(pdf_raw))
+    LOGGER.info("Validating and preparing data ...")
     pdf, notes = validate_and_prepare(pdf_raw, schema)
+    LOGGER.info("Splitting by entity (tune_fraction=%.3f) ...", args.tune_fraction)
     tune, holdout, split_meta = split_by_entity(pdf, schema, args.tune_fraction, args.seed)
+    LOGGER.info(
+        "Split: tune=%d rows, holdout=%d rows.",
+        split_meta["n_rows_tune"],
+        split_meta["n_rows_holdout"],
+    )
     search_tune, search_meta = cap_queries(tune, schema, args.search_max_queries, args.seed)
+    if search_meta.get("applied"):
+        LOGGER.info(
+            "Search cap applied: %d -> %d rows, %d -> %d queries.",
+            search_meta["rows_before"],
+            search_meta["rows_after"],
+            search_meta["n_queries_before"],
+            search_meta["n_queries_after"],
+        )
+    LOGGER.info("Running Optuna score-shift diagnosis ...")
     result = run_diagnosis(tune, holdout, search_tune, search_meta, parameters, schema, args)
     report = {
         "schema": {"item": schema["item"]},
@@ -756,6 +1060,7 @@ def main() -> None:
         "notes": notes,
         "result": result,
     }
+    LOGGER.info("Writing outputs ...")
     write_outputs(report, args.output)
     hold = result["holdout"]
     print(f"Wrote {args.output}")

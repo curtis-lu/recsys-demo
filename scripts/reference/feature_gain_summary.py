@@ -7,7 +7,7 @@ split 次數與 gain 佔比是不是特別少——「訊號有進場但沒被�
 
 用法（公司環境照抄，換 model_version 即可）：
 
-  python scripts/feature_gain_summary.py \
+  python scripts/reference/feature_gain_summary.py \
       --model-file data/models/<model_version>/model.txt \
       --patterns bond,aum,fund,insur,overa \
       --top 30

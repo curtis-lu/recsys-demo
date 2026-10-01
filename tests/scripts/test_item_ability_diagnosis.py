@@ -6,7 +6,7 @@ import pytest
 
 from recsys_tfb.core.schema import get_schema
 
-from scripts.item_ability_diagnosis import (
+from scripts.reference.item_ability_diagnosis import (
     analyze_items,
     query_center_scores,
     resolve_snap_date,

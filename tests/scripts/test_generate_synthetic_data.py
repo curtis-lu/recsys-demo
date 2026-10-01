@@ -1,5 +1,5 @@
 import numpy as np
-from scripts.generate_synthetic_data import (
+from scripts.local.generate_synthetic_data import (
     generate_feature_table,
     generate_inference_population,
 )

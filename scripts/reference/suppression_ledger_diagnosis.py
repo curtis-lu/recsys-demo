@@ -21,7 +21,7 @@ users may still change the physical Hive table name in ``catalog.yaml``.
 Examples:
 
   MPLCONFIGDIR=/tmp/recsys-tfb-mpl PYTHONPATH=src \
-  python scripts/suppression_ledger_diagnosis.py \
+  python scripts/reference/suppression_ledger_diagnosis.py \
       --model-version 20260717_xxx \
       --output data/diagnosis/suppression_ledger.html
 """

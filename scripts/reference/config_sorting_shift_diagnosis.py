@@ -13,7 +13,7 @@ column used by dataset.sample_group_keys or training.sample_weight_keys.
 
 Examples:
 
-  PYTHONPATH=src python scripts/config_sorting_shift_diagnosis.py \
+  PYTHONPATH=src python scripts/reference/config_sorting_shift_diagnosis.py \
       --model-version 20260717_xxx \
       --output data/diagnosis/config_sorting_shift.html
 """

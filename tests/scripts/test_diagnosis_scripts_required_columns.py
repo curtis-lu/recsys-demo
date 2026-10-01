@@ -27,7 +27,7 @@ _SCRIPTS = [
 
 
 def _required(name):
-    module = importlib.import_module(f"scripts.{name}")
+    module = importlib.import_module(f"scripts.reference.{name}")
     schema = get_schema(_PARAMS)
     try:
         return module.required_columns(_PARAMS, schema)

@@ -21,7 +21,7 @@ does not emit verdicts or prescriptive actions.
 
 Examples:
 
-  PYTHONPATH=src python scripts/model_capacity_diagnosis.py \
+  PYTHONPATH=src python scripts/reference/model_capacity_diagnosis.py \
       --model-version 20260717_xxx \
       --output data/diagnosis/model_capacity.html
 """

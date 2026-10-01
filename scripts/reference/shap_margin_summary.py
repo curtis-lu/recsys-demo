@@ -13,7 +13,7 @@ query 的目標列與壓制者列，各自 ``booster.predict(pred_contrib=True)`
 
 用法（公司環境用 --hive-table；需 PYTHONPATH=src）：
 
-  PYTHONPATH=src python scripts/shap_margin_summary.py \
+  PYTHONPATH=src python scripts/reference/shap_margin_summary.py \
       --model-file data/models/<mv>/model.txt \
       --preprocessor-json data/dataset/<dsv>/preprocessor.json \
       --hive-table <db>.recsys_prod_test_model_input \

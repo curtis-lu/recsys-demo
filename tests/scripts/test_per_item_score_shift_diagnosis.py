@@ -2,7 +2,7 @@ import argparse
 
 import pytest
 
-from scripts.per_item_score_shift_diagnosis import resolve_snap_date
+from scripts.reference.per_item_score_shift_diagnosis import resolve_snap_date
 
 
 def _args(snap_date=None):
