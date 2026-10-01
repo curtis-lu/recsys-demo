@@ -888,8 +888,7 @@ class TestReservedSegmentColumnsA15:
     為什麼要在 config 層再擋一次（``sample.py::_guard_reserved_columns``
     已經有 runtime 守衛）：兩者驗的輸入不同。這條驗「config 宣告了什麼」，
     在 CLI entry 一秒內擋掉；runtime 那條驗「實際 DataFrame 有什麼欄」，
-    是給繞過 Layer-1 的呼叫路徑（``scripts/reference/*_diagnosis.py`` 直接 import）
-    的 backstop。少了這條，使用者要等 Spark 起來 2–4 分鐘才知道配置錯了。
+    是 schema 角色欄撞名時的 backstop（A15 只看 config 宣告的欄）。少了這條，使用者要等 Spark 起來 2–4 分鐘才知道配置錯了。
     """
 
     def _params(self, seg_cols):

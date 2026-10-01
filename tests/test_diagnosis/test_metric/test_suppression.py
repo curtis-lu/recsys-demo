@@ -147,7 +147,7 @@ def _scale_sample(n_queries: int, n_items: int, seed: int = 99) -> pd.DataFrame:
 
 
 def _reference_pair_ledger(sample: pd.DataFrame, params: dict) -> dict:
-    """依 ``scripts/reference/suppression_ledger_diagnosis.py:452-574`` 逐位元組抄的
+    """依 試作腳本 ``scripts/suppression_ledger_diagnosis.py:452-574``（commit d94fa0c4 帶入，已刪） 逐位元組抄的
     雙層 Python 迴圈版（外層 query、次層正例列、內層負例列），只算
     allocated_ap_gap／affected_positive_rows／mean_score_margin 三個值，用來
     對照向量化版本 ``compute`` 的正確性。刻意不重用 ``_compute.py`` 的任何

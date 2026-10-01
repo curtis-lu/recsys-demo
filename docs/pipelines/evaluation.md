@@ -861,7 +861,6 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 - 報表沒有自動 pass/fail threshold。模型是否 promotion 仍需由使用者依整體、per-item、per-segment、baseline 與業務限制人工判斷。
 - **評估多個日期時，信賴區間可能失準**（issue #389）：診斷頁的分層 bootstrap 會把同一個 entity 在不同日期、落在不同抽樣層的列當成互相獨立的 cluster，CI 偏窄；主報表的 metric CI 在觸發次抽樣時不套用抽樣權重，而多個日期讓 query 數成倍增加、更容易觸發。修正之前，主報表 metadata 在日期列下方會多一句警告；單一日期的報表沒有這一句。
 - 評估多個日期時，目錄名只看起迄兩端（見 7.1 節），而且 baseline 的月度趨勢表在視窗重疊時會重複計數（見 3.4 節）。
-- `scripts/` 底下的離線診斷腳本（例如 `scripts/reference/item_ability_diagnosis.py`、`scripts/reference/suppression_ledger_diagnosis.py`）只吃單一 `--snap-date`，不支援多個日期或區間。
 
 ## 10. 相關文件
 

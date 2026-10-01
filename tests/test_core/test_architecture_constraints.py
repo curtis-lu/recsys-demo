@@ -897,9 +897,10 @@ def _bindings(targets, value):
     Tuple targets are paired positionally, so
     ``entity_cols, item_col = schema["entity"], schema["item"]`` binds only the
     left name. That form is not hypothetical here: the line directly above the
-    known ``scripts/reference/shap_margin_summary.py`` offender is
+    offender in the since-deleted ``scripts/reference/shap_margin_summary.py``
+    (added in commit 198eae60) was
     ``time_col, item_col, label_col = schema["time"], schema["item"], ...``, so
-    it is demonstrably how this repo unpacks a schema. A starred target
+    it was demonstrably how this repo unpacked a schema. A starred target
     (``first, *rest = ...``) is skipped -- positions stop lining up, and that
     spelling is listed as a blind spot rather than guessed at.
     """
@@ -2030,7 +2031,7 @@ class TestS7DerivedKeysAreReadNotRespelled:
         )
         for label, root in KEY_SCAN_ROOTS.items():
             found = sum(1 for _ in root.rglob("*.py"))
-            assert found > 10, f"{label} -> {root} holds {found} .py files"
+            assert found > 5, f"{label} -> {root} holds {found} .py files"
 
     def test_catches_the_plus_spelling(self, tmp_path):
         (tmp_path / "m.py").write_text(
