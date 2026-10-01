@@ -113,7 +113,7 @@ mkdir -p conf/production
 
 大部分設定區沒有「未知鍵」檢查。`conf/<env>/` 裡留著一個新版已經改名或移除的鍵，多半不會有任何訊息，那個鍵只是再也沒有人讀它，該項行為會退回預設值——可能是 `conf/base/` 裡的新預設，也可能是寫在程式碼裡的預設。所以升級後如果行為變了卻找不到原因，先檢查自己的設定層有沒有對不上的鍵名。
 
-**會擋未知鍵的五區。** `schema.columns`、`evaluation.prediction_quality`（A42）、`evaluation.query_filter`（A49）、`evaluation.baseline`（A50）、最上層的 `test_metrics`（A53）。這五區裡寫了程式不認得的鍵，讀它的指令在開始跑之前就報錯，並列出那些鍵。
+**會擋未知鍵的六區。** `schema.columns`、`evaluation.report.sections`（A34）、`evaluation.prediction_quality`（A42）、`evaluation.query_filter`（A49）、`evaluation.baseline`（A50）、最上層的 `test_metrics`（A53）。這六區裡寫了程式不認得的鍵，讀它的指令在開始跑之前就報錯，並列出那些鍵。
 
 **例外：校準相關的退役鍵會報錯。** #411 移除機率校準機制後留下的六個設定鍵（`RETIRED_CALIBRATION_KEYS`：`dataset.enable_calibration`、`dataset.calibration_snap_dates`、`dataset.calibration_sample_ratio`、`dataset.calibration_sample_ratio_overrides`、`training.calibration`、`inference.use_calibration`），只要**出現**在設定裡就會被擋下，值設成 `false` 或 `[]` 一樣算數——因為它們位在算進 `base_dataset_version` / `model_version` 的子樹裡，留著會讓沒刪的 conf 樹算出跟已刪的 conf 樹不同的版本 ID。這是不變量 A37，predicate 是 `retired_calibration_key_errors`（`src/recsys_tfb/core/consistency.py`），常數定義在同一個模組。
 
@@ -164,19 +164,19 @@ diff -ru recsys_tfb-v0.3.0/conf recsys_tfb-v0.4.0/conf              # 或兩版�
 
 那幾個差異是升級前最值得花的時間：
 
-- `conf/base/` 的差異告訴你**設定鍵有沒有改名或搬家**，那是升級後最常見的故障來源，而且如上一節所說，對不上的鍵不會報錯。
+- `conf/base/` 的差異告訴你**設定鍵有沒有改名或搬家**，那是升級後最常見的故障來源，而且如 §5〈舊的鍵名多半不會報錯〉所說，除了那六區與三個例外，對不上的鍵不會報錯。
 - `conf/sql/` 與 `conf/spark-local/` 的差異告訴你**框架附的範本改了什麼**，你自己那兩份要不要跟著改。這兩處分層蓋不到，只能靠人比對。
 
 另外幾件會改變行為、光看設定差異容易漏掉的事：
 
 - 版本 ID 的計算方式若有變動（`src/recsys_tfb/core/versioning.py`），既有的資料集與模型版本不會被判定成命中，下一次執行會整批重算。
-  **移除機率校準的那一版就是這種情況**（#411）：校準相關的設定鍵整包從 `dataset:` 子樹拿掉，而 `base_dataset_version` 是對那整個子樹取 hash，所以每個 `base_dataset_version` 都會換一個值——既有資料集要重建、模型要重訓，並重新用 `scripts/promote_model.py` 人工 promote。`train_variant_id` 的算法沒動，值不受影響。這是刻意的版本決策，不是 bug；留在設定檔裡的校準鍵會被上一節那個例外擋下。
-  **v0.4.0 也是這種情況**（#488）：框架自己的格式版本號（`src/recsys_tfb/core/versioning.py` 的 `DATASET_ARTIFACT_FORMAT_VERSION`、`TRAINING_MODEL_FORMAT_VERSION`）從這一版起算進 `base_dataset_version` 與 `model_version`，所以從 v0.3.0 升上來，每個資料集與模型的版本號都會換值——資料集要重建、模型要重訓，並重新用 `scripts/promote_model.py` 人工 promote。
+  **移除機率校準的那一版就是這種情況**（#411）：校準相關的設定鍵整包從 `dataset:` 子樹拿掉，而 `base_dataset_version` 是對那整個子樹取 hash，所以每個 `base_dataset_version` 都會換一個值——既有資料集要重建、模型要重訓，並重新用 `scripts/promote_model.py` 人工 promote。`train_variant_id` 的算法沒動，值不受影響。這是刻意的版本決策，不是 bug；留在設定檔裡的校準鍵會被 §5 的第一個例外（A37）擋下。
+  **v0.4.0 也是這種情況**（#464、#488）：框架自己的格式版本號（`src/recsys_tfb/core/versioning.py` 的 `DATASET_ARTIFACT_FORMAT_VERSION`、`TRAINING_MODEL_FORMAT_VERSION`）從這一版起算進 `base_dataset_version` 與 `model_version`，所以從 v0.3.0 升上來，每個資料集與模型的版本號都會換值——資料集要重建、模型要重訓，並重新用 `scripts/promote_model.py` 人工 promote。`train_variant_id` 這次也會換值（跟上面 #411 那次不同）：#464 把 `dataset.carry_columns` 算進它，而 `conf/base/` 有宣告這個鍵。
 - **source ETL 的 dry run 不再依 `--env` 給預設，改成 `--dry-run` 旗標。** 以前 `feature_etl`、`label_etl` 的設定沒寫 `dry_run` 時，`--env local`（包括在正式機上忘了帶 `--env`，預設值就是 `local`）會靜默只 render SQL、不寫表；現在不管哪個 `--env`，沒加 `--dry-run` 就是真的寫表。要看 SQL 的那一次才加旗標，結尾會印 `DRY RUN：只 render 了 SQL，沒有執行、沒有寫表`。
 - **`conf/base/` 的 source ETL 範本現在預設開著 `rendered_sql_dir: data/rendered_sql`**，所以每次執行都會把 SQL 存到執行指令時所在目錄底下的 `data/rendered_sql/<run_id>/<日期>/<表名>.sql`（寫不進去只警告，不讓 ETL 失敗）。不要這個行為，不要改 `conf/base/`：在 `conf/<env>/` 的同名檔寫 `rendered_sql_dir: ~`（疊加層是逐層合併，刪不掉 base 的鍵，只能用 `~` 蓋掉）。
 - **`variables.target_db` 變成必填。** source ETL 的 stage 設定沒宣告它（或寫成空字串），指令會以 `(A59)` 報錯；以前是靜默寫進 Hive 的 `default` database。`conf/base/` 的範本本來就有寫，疊加層又是逐層合併，所以只有改過 `conf/base/` 把它拿掉、或在 `conf/<env>/` 把它寫成空字串的部署，升級後才會碰到。
 - 來源表 schema 的變動由上游決定，跟版本無關，但同樣會讓結果變化。
-- **promote 挑版本的規則若有變動，既有的模型版本可能一起退出排名。** training 開始在 `evaluation_results.json` 記下計分月份的那一版（v0.4.0，ADR-0028）就是這種情況：升級之前算的檔案都沒記月份，升級當下 `scripts/promote_model.py --dry-run` 把每個版本列在 `Not ranked`，不帶版本號的自動挑選不會挑任何版本。直接指定版本號照樣 promote 得了。[替舊版本補分數](rescoring-an-old-version.md) 能讓舊版本重新參加排名，但**只限用 v0.4.0 或更新版本訓練的版本**：v0.4.0 之前訓練的版本補不回來，因為格式版本號從 v0.4.0 起算進 `model_version`（見上面版本 ID 那一條），現在的程式算不出它原本的版本號。那些模型要回到排名裡，只能用 v0.4.0 重新訓練（會得到新的版本號）。同一版起 promote 要從 repo 根目錄執行並帶 `--env`，因為它改讀設定（[promote 一個版本](promoting-a-model.md)）。
+- **promote 挑版本的規則若有變動，既有的模型版本可能一起退出排名。** training 開始在 `evaluation_results.json` 記下計分月份的那一版（v0.4.0，ADR-0028）就是這種情況：升級之前算的檔案都沒記月份，升級當下 `scripts/promote_model.py --dry-run` 把每個版本列在 `Not ranked`，不帶版本號的自動挑選不會挑任何版本。直接指定版本號照樣 promote 得了。[替舊版本補分數](rescoring-an-old-version.md) 能讓舊版本重新參加排名，但**只限格式版本號跟現在的程式相同的版本**（從 v0.3.0 升上來的人：只有用 v0.4.0 訓練的才算）：v0.4.0 之前訓練的版本補不回來，因為格式版本號從 v0.4.0 起算進 `model_version`（見上面版本 ID 那一條），現在的程式算不出它原本的版本號。那些模型要回到排名裡，只能用 v0.4.0 重新訓練（會得到新的版本號）。同一版起 promote 要從 repo 根目錄執行並帶 `--env`，因為它改讀設定（[promote 一個版本](promoting-a-model.md)）。
 
 換版本之後先重跑 §6 確認環境仍然完整，再接自己的資料。
 

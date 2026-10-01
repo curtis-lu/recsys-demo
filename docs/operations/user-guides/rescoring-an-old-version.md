@@ -8,6 +8,7 @@ promote 的 `--dry-run` 把某個版本列在 `Not ranked`，你想讓它重新�
 
 - 這個版本就是**現在的設定**算出來的那一個（沒改過 `training:`、也沒換過 dataset 版本）→ 只要做步驟 3、4，而且不用帶 `--base-dataset-version`、`--train-variant` 這兩個旗標。加了評估月份後想讓 promote 用新月份比，就是這種，見 [新增一個評估月份](adding-an-eval-month.md#要讓-promote-用新月份比)。
 - promote 列的原因是 `no value for <指標>: <一段原因>`（冒號後面有 training 記下的原因）→ 先看〈[補不回來的情況](#補不回來的情況)〉。
+- promote 列的原因是 `records no scored months`，而這個版本是 v0.4.0 之前訓練的 → 補不回來，見〈[補不回來的情況](#補不回來的情況)〉最後一種。
 - 其他情況（`records no scored months`、`scored on [...], not on the current scored months`、`no value for <指標> (it has [...])`）→ 往下讀。
 
 下面的指令都用 `--env production`（`production` 是環境名稱的例子，見 [README](../../../README.md) §5 步驟 0；換成你自己取的名字）。本機執行請先照 [local-spark-setup.md](../dev-setup/local-spark-setup.md) 設好環境，並把 `--env` 換成 `local`。
