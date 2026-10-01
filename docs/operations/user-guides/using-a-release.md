@@ -163,13 +163,13 @@ diff -ru recsys_tfb-v0.2.0/conf recsys_tfb-v0.3.0/conf              # 或兩版�
 - `conf/base/` 的差異告訴你**設定鍵有沒有改名或搬家**，那是升級後最常見的故障來源，而且如上一節所說，對不上的鍵不會報錯。
 - `conf/sql/` 與 `conf/spark-local/` 的差異告訴你**框架附的範本改了什麼**，你自己那兩份要不要跟著改。這兩處分層蓋不到，只能靠人比對。
 
-另外幾件不會出現在設定差異裡、但會改變行為的事：
+另外幾件會改變行為、光看設定差異容易漏掉的事：
 
 - 版本 ID 的計算方式若有變動（`src/recsys_tfb/core/versioning.py`），既有的資料集與模型版本不會被判定成命中，下一次執行會整批重算。
   **移除機率校準的那一版就是這種情況**（#411）：校準相關的設定鍵整包從 `dataset:` 子樹拿掉，而 `base_dataset_version` 是對那整個子樹取 hash，所以每個 `base_dataset_version` 都會換一個值——既有資料集要重建、模型要重訓，並重新用 `scripts/promote_model.py` 人工 promote。`train_variant_id` 的算法沒動，值不受影響。這是刻意的版本決策，不是 bug；留在設定檔裡的校準鍵會被上一節那個例外擋下。
 - **source ETL 的 dry run 不再依 `--env` 給預設，改成 `--dry-run` 旗標。** 以前 `feature_etl`、`label_etl` 的設定沒寫 `dry_run` 時，`--env local`（包括在正式機上忘了帶 `--env`，預設值就是 `local`）會靜默只 render SQL、不寫表；現在不管哪個 `--env`，沒加 `--dry-run` 就是真的寫表。要看 SQL 的那一次才加旗標，結尾會印 `DRY RUN：只 render 了 SQL，沒有執行、沒有寫表`。
 - **`conf/base/` 的 source ETL 範本現在預設開著 `rendered_sql_dir: data/rendered_sql`**，所以每次執行都會把 SQL 存到執行指令時所在目錄底下的 `data/rendered_sql/<run_id>/<日期>/<表名>.sql`（寫不進去只警告，不讓 ETL 失敗）。不要這個行為，不要改 `conf/base/`：在 `conf/<env>/` 的同名檔寫 `rendered_sql_dir: ~`（疊加層是逐層合併，刪不掉 base 的鍵，只能用 `~` 蓋掉）。
-- **`variables.target_db` 變成必填。** source ETL 的 stage 設定沒宣告它（或寫成空字串），指令會以 `(A59)` 報錯；以前是靜默寫進 Hive 的 `default` database。你自己的設定層若整份覆蓋了 `variables`、卻沒寫 `target_db`，升級後會碰到。
+- **`variables.target_db` 變成必填。** source ETL 的 stage 設定沒宣告它（或寫成空字串），指令會以 `(A59)` 報錯；以前是靜默寫進 Hive 的 `default` database。`conf/base/` 的範本本來就有寫，疊加層又是逐層合併，所以只有改過 `conf/base/` 把它拿掉、或在 `conf/<env>/` 把它寫成空字串的部署，升級後才會碰到。
 - 來源表 schema 的變動由上游決定，跟版本無關，但同樣會讓結果變化。
 - **promote 挑版本的規則若有變動，既有的模型版本可能一起退出排名。** training 開始在 `evaluation_results.json` 記下計分月份的那一版（ADR-0028）就是這種情況：升級之前算的檔案都沒記月份，升級當下 `scripts/promote_model.py --dry-run` 把每個版本列在 `Not ranked`，不帶版本號的自動挑選不會挑任何版本。直接指定版本號照樣 promote 得了。要讓某個舊版本重新參加排名，照 [替舊版本補分數](rescoring-an-old-version.md) 做。同一版起 promote 要從 repo 根目錄執行並帶 `--env`，因為它改讀設定（[promote 一個版本](promoting-a-model.md)）。
 
