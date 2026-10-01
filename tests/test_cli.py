@@ -932,7 +932,9 @@ class TestDryRunFlagA59:
                 result = runner.invoke(app, [
                     "feature_etl", "--dry-run", "--target-dates", "2025-01-31"])
             assert result.exit_code == 0, result.output
-            assert "DRY RUN" in result.output
+            # 每張表都會印 `DRY RUN [<table>]:`，所以不能拿 "DRY RUN" 當證據；
+            # 只有結尾說明才有「沒有寫表」。
+            assert "沒有寫表" in result.output
             assert "completed successfully" not in result.output
         finally:
             os.chdir(old)

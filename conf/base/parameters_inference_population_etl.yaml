@@ -7,12 +7,16 @@ inference_population_etl:
   # 沒給 --target-dates 時用這裡的日期，例 ["2025-01-31"]（日期要加引號，否則 YAML 會讀成日期物件）；
   # 兩邊都沒有就報錯。
   target_dates: []
-  # 每次執行的 SQL 存到 <這裡>/<run_id>/<target_date>/<table>.sql；不想存就刪掉這行。
+  # 每次執行的 SQL 存到 <這裡>/<run_id>/<target_date>/<table>.sql；路徑相對於執行指令時的目錄（專案根目錄）。
+  # 不想存，就在 conf/<env>/ 的同名檔寫 rendered_sql_dir: ~（不要改 conf/base；overlay 是 deep merge，刪不掉鍵）。
   rendered_sql_dir: data/rendered_sql
 
   variables:
+    # 必填：中介表與最終表寫入的 Hive database；沒寫會被 A59 擋下。
     target_db: "ml_recsys"  # ★換成你的 Hive database 名稱
 
+  # 上游 source table 的新鮮度 / schema 檢查。只在加 --source-check 時執行，一般 ETL 不會跑。
+  # {}、~、整行不寫，都等於沒有要檢查的上游表。
   source_checks: {}
 
   # ★Output tables — sql_file／primary_key／partition_by 皆為範例資料專屬，整段換成你自己的來源表定義
@@ -25,6 +29,7 @@ inference_population_etl:
       quality_checks:
         max_duplicate_key_ratio: 0.0
 
+  # 稽核紀錄（寫到這張 Hive 表）。整段不寫或寫 ~ 就不寫稽核紀錄。
   audit:
     database: "${target_db}"
     table: etl_audit_log

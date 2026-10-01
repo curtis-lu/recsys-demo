@@ -952,16 +952,21 @@ def _run_etl(
     不同的事，而且看 YAML 看不出來（理由是 2026-03 本機沒有 Hive，2026-06 起本機
     已有真 Spark＋Hive，理由消失）。原則：沒寫的設定不准在背後依環境做不同的事，
     會產生副作用的預設值必須看得見。dry run 是「這一次只想看 SQL」的一次性意圖，
-    做成每次要打才生效的旗標（同 ``--source-check``），就不會有「為了看 SQL 改成
-    true、忘了改回、排程顯示成功卻沒寫表」。YAML 若還留著 ``dry_run`` 鍵，A59
-    直接報錯而不是靜默忽略（忽略的話，原本寫 ``dry_run: true`` 的人會開始真的寫表）。
+    做成寫在指令上的旗標（同 ``--source-check``），看得見：不再有「YAML 改成 true、忘了
+    改回」這種藏在設定檔裡的狀態。旗標不是萬能：排程的指令列若一直帶著 ``--dry-run``，
+    一樣會一直只 render、exit code 是 0。所以真正的緩解是結尾那行 DRY RUN 說明
+    （不印 completed successfully），讓看 log 的人一眼知道沒寫表。YAML 若還留著
+    ``dry_run`` 鍵，A59 直接報錯而不是靜默忽略（忽略的話，原本寫 ``dry_run: true`` 的人
+    會開始真的寫表）。
     ``--dry-run`` 與 ``--source-check`` 互斥：後者必須實查 Hive。
 
-    Order (#370 rewired this to front-load every ETL-config check — A35, the
-    ``SQLRunner`` build, and ``check_renders`` — before the Spark cold
+    Order (#370 rewired this to front-load every ETL-config check — A35/A59,
+    the ``SQLRunner`` build, and ``check_renders`` — before the Spark cold
     start, mirroring A21/A23/A24/A26/A27/A30's "fail before Spark" rule for
-    the other commands): the mutual-exclusion check, then config load, then
-    read the stage's parameters/date_list, then A35, then merge + build
+    the other commands): the mutual-exclusion checks (``--source-check`` with
+    ``--restart-from`` or ``--dry-run``), then config load, then
+    read the stage's parameters/date_list, then A59 and A35 (one collected
+    report; A59 first), then merge + build
     ``SQLRunner`` (its own ``_validate_order`` can still raise), then
     ``check_renders`` (run for ``--source-check`` too, per #370: the same
     one invocation should preflight-and-then-run, not preflight only on the

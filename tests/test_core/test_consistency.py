@@ -3944,6 +3944,13 @@ class TestA59EtlStageConfig:
     def test_b_null_target_db_is_left_to_a35(self):
         assert self._errors({"variables": {"target_db": None}}) == []
 
+    @pytest.mark.parametrize("blank", ["", "   ", "\t"])
+    def test_b_blank_target_db_is_refused(self, blank):
+        # 空字串會 render 出 `INSERT OVERWRITE TABLE .x`
+        errors = self._errors({"variables": {"target_db": blank}})
+        assert len(errors) == 1
+        assert "(A59)" in errors[0] and "empty" in errors[0]
+
     def test_a_and_b_are_both_reported(self):
         errors = self._errors({"dry_run": True, "variables": {}})
         assert len(errors) == 2

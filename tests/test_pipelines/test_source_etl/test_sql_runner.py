@@ -116,6 +116,41 @@ class TestYamlNullBlocks:
             SQLRunner(config, sql_dir, dry_run=True)
 
 
+class TestRenderedSqlDirIsBestEffort:
+    """rendered_sql_dir 預設開著，只是除錯副產品：寫不進去只警告，不讓表失敗。"""
+
+    def _blocked_dir(self, tmp_path):
+        blocked = tmp_path / "blocked"
+        blocked.write_text("a file where a directory is expected")
+        return blocked
+
+    def test_real_run_table_still_succeeds_and_warns(
+        self, sql_dir, tmp_path, caplog, monkeypatch
+    ):
+        # 輸出檢查不是這裡要測的：mock 的 Spark 查不到欄位，換成「全通過」
+        monkeypatch.setattr(OutputChecker, "run_all", lambda *a, **k: [])
+        runner = SQLRunner(
+            _base_config(), sql_dir, dry_run=False,
+            rendered_sql_dir=self._blocked_dir(tmp_path),
+        )
+        spark = _make_spark_mock()
+        table = runner._tables[0]
+        audit = MagicMock()
+        with caplog.at_level("WARNING"):
+            ok = runner._process_single_table(spark, table, "2024-01-31", "r1", audit)
+        assert ok is True
+        assert "Rendered SQL not saved" in caplog.text
+
+    def test_dry_run_table_still_succeeds_and_warns(self, sql_dir, tmp_path, caplog):
+        runner = SQLRunner(
+            _base_config(), sql_dir, dry_run=True,
+            rendered_sql_dir=self._blocked_dir(tmp_path),
+        )
+        with caplog.at_level("WARNING"):
+            runner.run(target_dates=["2024-01-31"])
+        assert "Rendered SQL not saved" in caplog.text
+
+
 class TestValidateOrder:
     def test_valid_order(self, sql_dir):
         """Tables in correct dependency order should pass."""

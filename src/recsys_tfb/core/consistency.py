@@ -412,23 +412,6 @@ Layer 1 — config-static (implemented here; aggregated by
   ``SQLRenderer.render``'s unresolved-variable regex was widened for this)
   or a missing SQL file is caught in the same pass, before the Spark cold
   start.
-* A59 — a source ETL stage's YAML block must not carry ``dry_run`` and must
-  declare ``variables.target_db``: (a) a ``dry_run`` key of any value
-  (``true``/``false``/``~``) is an error that says to delete the line and pass
-  ``--dry-run``. Dry run is a per-run intention, so it is a flag and not a
-  setting (the old default, ``env == "local"``, made the same YAML write
-  tables in one environment and not in another). Silently ignoring the old
-  key would make a YAML that still says ``dry_run: true`` start writing
-  tables; (b) ``variables.target_db`` absent is an error — ``SQLRunner`` used
-  to fall back to Hive's ``default`` database without a word. ``variables``
-  that is not a mapping belongs to A35(j) and ``target_db: ~`` to A35(i), so
-  (b) does not report them twice. Predicate: ``etl_stage_config_errors``
-  (returns errors; ``_run_etl`` raises before the ``SQLRunner`` is built, for
-  ``--source-check`` too, collected with A35). NOT aggregated by
-  ``validate_config_consistency``, for A34's and A35's reason: only the ETL
-  commands read these keys. The command also refuses ``--dry-run`` together
-  with ``--source-check`` (one renders without running, the other must run
-  against Hive), before the config is loaded.
 * A36 — training needs at least one ``dataset.test_snap_dates`` month.
   Without one, nothing in the training pipeline objects early:
   ``cache_test_model_input`` loops zero times and returns ``{}``, and the run
@@ -726,6 +709,29 @@ Layer 1 — config-static (implemented here; aggregated by
   ``search_space`` (#493, #492). Predicate: ``skip_hpo_param_errors``;
   resolver: ``hpo_enabled``. NOT aggregated, for A57's reason: only training
   reads the keys.
+* A59 — a source ETL stage's YAML block must not carry ``dry_run`` and must
+  declare ``variables.target_db``: (a) a ``dry_run`` key of any value
+  (``true``/``false``/``~``) is an error that says to delete the line and pass
+  ``--dry-run``. Even ``false``/``~`` is refused, for ADR-0019 decision 6's
+  reason (A34): a key nothing reads is a switch that does nothing — it
+  misleads whoever reads the YAML, and flipping it to ``true`` later would
+  change nothing. The error says what to do (delete the line, pass
+  ``--dry-run`` when wanted), so an upgrade that hits it is a one-line fix.
+  Dry run is a per-run intention, so it is a flag and not a
+  setting (the old default, ``env == "local"``, made the same YAML write
+  tables in one environment and not in another). Silently ignoring the old
+  key would make a YAML that still says ``dry_run: true`` start writing
+  tables; (b) ``variables.target_db`` absent, an empty string or only whitespace is an
+  error — ``SQLRunner`` used to fall back to Hive's ``default`` database
+  without a word, and an empty name renders ``INSERT OVERWRITE TABLE .x``. ``variables``
+  that is not a mapping belongs to A35(j) and ``target_db: ~`` to A35(i), so
+  (b) does not report them twice. Predicate: ``etl_stage_config_errors``
+  (returns errors; ``_run_etl`` raises before the ``SQLRunner`` is built, for
+  ``--source-check`` too, collected with A35). NOT aggregated by
+  ``validate_config_consistency``, for A34's and A35's reason: only the ETL
+  commands read these keys. The command also refuses ``--dry-run`` together
+  with ``--source-check`` (one renders without running, the other must run
+  against Hive), before the config is loaded.
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -5259,6 +5265,9 @@ def merged_etl_variables(variables, raw_vars: list[str] | None) -> dict:
     return merged
 
 
+_ABSENT = object()
+
+
 def etl_stage_config_errors(etl_config) -> list[str]:
     """(A59) A source ETL stage's config must not carry ``dry_run`` and must declare ``variables.target_db``.
 
@@ -5268,10 +5277,14 @@ def etl_stage_config_errors(etl_config) -> list[str]:
     (a) a ``dry_run`` key, whatever its value (``true``/``false``/``~``).
         Dry run is now the per-run ``--dry-run`` flag. If the key were
         silently ignored, someone whose YAML still says ``dry_run: true``
-        would see the next run write real tables.
-    (b) ``variables.target_db`` not declared. ``SQLRunner`` used to fall back
-        to Hive's ``default`` database, so a forgotten line wrote there
-        without a word. ``variables`` that is not a mapping is left to
+        would see the next run write real tables. ``false``/``~`` are refused
+        too (ADR-0019 decision 6, as A34): a key nothing reads is a switch
+        that does nothing and misleads the reader; the message says to delete
+        the line, so hitting it on upgrade is a one-line fix.
+    (b) ``variables.target_db`` not declared, or an empty/whitespace-only
+        string. ``SQLRunner`` used to fall back to Hive's ``default``
+        database, so a forgotten line wrote there without a word; an empty
+        name renders ``INSERT OVERWRITE TABLE .x``. ``variables`` that is not a mapping is left to
         A35(j), and ``target_db: ~`` to A35(i): reporting either here would
         say the same thing twice.
 
@@ -5293,20 +5306,18 @@ def etl_stage_config_errors(etl_config) -> list[str]:
         )
 
     variables = etl_config.get("variables")
-    if isinstance(variables, Mapping) and "target_db" not in variables:
-        errors.append(
-            "(A59) variables.target_db is not declared. It names the Hive "
-            "database every table is written to and has no default (it used "
-            "to fall back to `default`, silently). Declare it under "
-            "variables in the stage's parameters YAML."
-        )
-    elif variables is None:
-        errors.append(
-            "(A59) variables.target_db is not declared (the stage has no "
-            "variables block). It names the Hive database every table is "
-            "written to and has no default. Declare it under variables in "
-            "the stage's parameters YAML."
-        )
+    if variables is None or isinstance(variables, Mapping):
+        # target_db: ~ 交給 A35(i)；variables 不是 mapping 交給 A35(j)，不重複報
+        target_db = (variables or {}).get("target_db", _ABSENT)
+        blank = isinstance(target_db, str) and not target_db.strip()
+        if target_db is _ABSENT or blank:
+            what = "is an empty string" if blank else "is not declared"
+            errors.append(
+                f"(A59) variables.target_db {what}. It names the Hive "
+                f"database every table is written to and has no default (it "
+                f"used to fall back to `default`, silently). Declare it under "
+                f"variables in the stage's parameters YAML."
+            )
     return errors
 
 

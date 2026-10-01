@@ -114,7 +114,7 @@ feature_etl:
 | `variables` | 必填 | 提供 SQL 範本 `${...}` 變數的預設值；每個名字可在執行時用 `--var key=value` 覆寫，寫法與三種值的意義見下方說明 |
 | `variables.target_db` | 必填 | 中介表與最終表寫入的 Hive database，也可在 SQL 中以 `${target_db}` 引用；只能在這裡設定，不能用 `--var` 覆寫，也不能寫成 `~`（原因見下方說明）；沒宣告會被不變量 `A59` 擋下，因為框架不替它補預設值（以前會默默寫進 Hive 的 `default` database） |
 | `target_dates` | 與 `--target-dates` 二選一 | 沒給 CLI `--target-dates` 時使用的日期清單，例如 `["2025-01-31"]`（日期要加引號，否則 YAML 會讀成日期物件）；範本 YAML 寫 `[]`，兩邊都沒有就中止 |
-| `rendered_sql_dir` | 選填 | 每次執行的 SQL 存到 `<dir>/<run_id>/<target_date>/<table>.sql`；範本 YAML 寫 `data/rendered_sql`，不想存就刪掉這行（沒這個鍵就不存） |
+| `rendered_sql_dir` | 選填 | 每次執行的 SQL 存到 `<dir>/<run_id>/<target_date>/<table>.sql`；路徑相對於執行指令時的目錄（專案根目錄）。範本 YAML 寫 `data/rendered_sql`，所以預設每次都存。不想存：不要改 `conf/base/`，在 `conf/<env>/` 的同名檔寫 `rendered_sql_dir: ~`（疊加層是逐層合併，刪不掉 base 的鍵，只能用 `~` 蓋掉）；沒這個鍵或值是 `~` 就不存。寫檔失敗（唯讀、磁碟滿）只印警告，不讓 ETL 失敗 |
 | `source_checks` | 選填 | 上游 partition、資料量與 schema 的 preflight 設定；`{}`、`~` 或整行不寫都是「沒有要檢查的上游」 |
 | `tables` | 必填 | 依執行順序排列的輸出表清單 |
 | `audit` | 選填 | audit Hive table 的 database 與 table 名稱；`~` 或整行不寫就不寫 audit |
@@ -190,6 +190,8 @@ source_checks:
       aum_bal: decimal(18,2)
     allow_new_columns: true
 ```
+
+`--source-check` 不寫任何輸出表，但不是完全沒有副作用：它會先執行 `CREATE DATABASE IF NOT EXISTS <target_db>`（`target_db` 不存在就建立它）；任一檢查失敗時，若有設定 `audit`，會在 audit 表寫一筆 `table_name` 為 `__source_check__` 的紀錄（audit 表不存在會先建立）。`source_checks` 是空的時候直接結束，什麼都不碰。
 
 框架會先檢查 partition 是否存在；若不存在，該 table/date 的 row count 與 schema 檢查會略過。所有 tables 與 dates 都檢查完後才一次回報失敗項目，方便集中修正。
 
@@ -345,7 +347,7 @@ python -m recsys_tfb feature_etl --env production --target-dates 2026-01-31 \
 
 ### 4.2 建議執行流程
 
-在 YAML 設定好 `source_checks` 後，先對 feature 與 label 上游執行唯讀 preflight：
+在 YAML 設定好 `source_checks` 後，先對 feature 與 label 上游執行 preflight（不寫輸出表，只查上游；副作用見 §3.5）：
 
 ```bash
 python -m recsys_tfb feature_etl --env production --source-check --target-dates 2026-01-31
@@ -377,13 +379,17 @@ python -m recsys_tfb feature_etl --env production \
 
 ### 4.3 檢視 rendered SQL
 
-只想看這次會跑什麼 SQL，加 `--dry-run`：
+只想在不寫表的前提下檢查 SQL 範本與變數代換的結果，加 `--dry-run`：
 
 ```bash
 python -m recsys_tfb feature_etl --env production --target-dates 2026-01-31 --dry-run
 ```
 
-`--dry-run` 會 render 每張 table、每個日期的完整 SQL（存到 stage 設定的 `rendered_sql_dir`，沒設就只做渲染檢查），但不查詢或寫入業務 Hive tables，也不寫入 audit。結尾會印 `DRY RUN：只 render 了 SQL，沒有執行、沒有寫表`，不會印 `completed successfully`。CLI 啟動過程仍會初始化 Spark session。
+`--dry-run` 會 render 每張 table、每個日期的 SQL，但不查詢或寫入業務 Hive tables，也不寫入 audit。結尾會印 `DRY RUN：只 render 了 SQL，沒有執行、沒有寫表`，不會印 `completed successfully`。CLI 啟動過程仍會初始化 Spark session。
+
+**dry run 的 SQL 不等於真正執行的 SQL。** 它只是把你的 SELECT 包進一個單純的 `INSERT OVERWRITE`（檔頭有一行 `-- DRY RUN: table existence not checked; partition CAST skipped.`）：不檢查表存不存在、不做表不存在時的 CTAS、不做既有表的 schema 對齊、也不做 partition 欄位的型別 CAST。拿它去審查或手動執行，會跟正式寫進去的 SQL 不同。想看真正執行過的 SQL，要去真的執行之後的 `rendered_sql_dir`（見 §3.2）。
+
+dry run 的 SQL 一律全文印進 log（每張表一段 `DRY RUN [<table>]:`），不論有沒有設 `rendered_sql_dir`；有設的話同時存成檔案。
 
 為什麼是旗標而不是 YAML 設定：dry run 是「這一次只想看 SQL」的一次性意圖。若放在 YAML，為了看 SQL 改成 `true`、忘了改回，之後排程每天顯示成功卻沒寫表；旗標只在打的那一次生效，下一次執行自然回到寫表。以前沒寫 `dry_run` 時，`--env local` 還會靜默只 render、其他環境才真的寫表，同一份 YAML 在兩個環境做不同的事，現在已拿掉：不管哪個 `--env`，沒加旗標就是寫表。
 
@@ -445,7 +451,7 @@ ORDER BY created_at DESC;
 
 audit table 不分區，並以 append 方式保存歷次執行紀錄。只有設定 `min_row_count` 時，audit 的 `row_count` 才會取得該檢查算出的實際列數；未設定時即使資料存在，也可能記為 `0`。
 
-執行開始時，log 會印一行這次生效的所有變數與值，並標出哪些來自 `--var`。這行 log 會印出所有變數的最終值，包括從 `${env.X}` 帶進來的值，所以不要把密碼之類的機密放進 `variables`。audit table 不會多存一份變數值，所以 log 被清掉之後，就查不到那次執行實際用的變數值。
+執行開始時，log 會印一行這次生效的所有變數與值，並標出哪些來自 `--var`。這行 log 會印出所有變數的最終值，包括從 `${env.X}` 帶進來的值，所以不要把密碼之類的機密放進 `variables`。audit table 不會多存一份變數值。log 被清掉之後，那次執行實際用的變數值只剩一處可查：`rendered_sql_dir` 底下存下來的 SQL 檔（變數已經代換進去了；沒設 `rendered_sql_dir`，或那次存檔失敗，就查不到）。同樣的理由，機密也會出現在那些 SQL 檔裡。
 
 ## 7. 重跑與恢復
 
