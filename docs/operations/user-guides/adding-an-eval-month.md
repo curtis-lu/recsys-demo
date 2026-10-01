@@ -201,21 +201,23 @@ compute_test_metrics: scoring ['mean_ap', 'macro_per_item_map'] on ['2026-01-31'
 
 上游對一個**已經跑過**的月份補了或修了資料之後，重跑上面的四個步驟沒有用：那個月在 dataset 跟 predict 兩層都已經是「做完」狀態，兩層都會跳過它。
 
-**兩層都要指名重算，只做一層數字不會動。** 一行指令做完兩層：
+**兩層都要用 `--rebuild-dates` 指名重算，月份寫一樣：**
 
 ```bash
-bash scripts/rebuild_eval_month.sh 2026-01-31 --env production
+python -m recsys_tfb dataset \
+  --env production --only-test-months --rebuild-dates 2026-01-31
+python -m recsys_tfb training \
+  --env production --only-node predict_and_write_test_predictions --rebuild-dates 2026-01-31
 # 多個月份用逗號分隔：2026-01-31,2026-02-28
 ```
 
-`--env` **不要省略**：省略時這個腳本預設走 `local`，在其他環境會安靜地跑錯地方。
+只跑第一行，預測還是舊資料算的；只跑第二行，讀到的還是回補前的資料。兩種情況報表數字都不會動。
 
 然後回到**步驟 4** 重跑 evaluation，該月的報表才會更新。
 
-兩件事要知道：
+**之後月份的報表也要重跑。** 報表裡的熱門度基準線（baseline）會回頭看前 `evaluation.baseline.lookback_months` 個月的 label，所以回補月份之後、在這個範圍內已經出過的報表也過時了，各自重跑一次步驟 4。設了 `evaluation.baseline.score: rate` 的話，重跑時再加 `--rebuild-dates <回補的月份>`：rate 會把每個月算過的數字存起來沿用，不點名就不會重算（見 [evaluation.md §3.4](../../pipelines/evaluation.md#34-popularity-baseline)）。
 
-1. **月份必須已經在 `dataset.test_snap_dates` 裡。** 不在的話會在 Spark 起來之前就報錯退出。
-2. **只有你指名的月份會被重算**，其他月份不受影響。
+**月份必須已經在 `dataset.test_snap_dates` 裡。** 不在的話會在 Spark 起來之前就報錯退出。
 
 ## 跑完了，怎麼確認真的成功
 
@@ -262,7 +264,7 @@ python scripts/promote_model.py --env production --dry-run
 | 訊息帶 `(A26) ... spells one month more than one way` | 同一個月在 `dataset.test_snap_dates` 裡出現了兩種寫法（例如 `2026-01-31` 與 `20260131`）。只留 `YYYY-MM-DD` 那一種，刪掉其餘 |
 | 訊息帶 `(A22) evaluation.snap_date=... is not a test month` | 步驟 4 的日期不在 `dataset.test_snap_dates` 裡。漏做了步驟 1，補做步驟 1–3 |
 | 訊息帶 `--rebuild-dates`，還沒起 Spark 就退出 | 你要重算的月份不在 `dataset.test_snap_dates` 裡。先把它加進去 |
-| 重算之後數字跟上次逐位相同 | 只重算了其中一層。改用 `bash scripts/rebuild_eval_month.sh <月份>`，它一次做完兩層 |
+| 重算之後數字跟上次逐位相同 | 只重算了其中一層。dataset 與 training 兩行都要帶 `--rebuild-dates`（〈[上游回補了，要重算某個月份](#上游回補了要重算某個月份)〉） |
 | `[rebuild] WARNING: ... had no effect` 或 `... is only half applied` | 你選的步驟範圍把預測那一步排除掉了。前者是一步都沒選到、旗標完全無事可做；後者是選到了「丟掉舊 cache」那一步、但沒選到重新預測那一步，所以 cache 重建了、預測沒重做。兩者都改用 `--only-node predict_and_write_test_predictions` |
 
 ## 相關文件

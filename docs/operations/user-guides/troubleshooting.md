@@ -37,7 +37,7 @@
 | `sample_pool` 只放發生過事件的 item | 同一個 query group 裡幾乎沒有負例，模型學不到「哪些候選該排後面」 | `sample_pool` 放的是「當時有資格被排序的全部候選」；哪些成為正例由 `label_table` 標記 |
 | 把「label 還沒到齊」當成 0 | 大量正例被標成負例，指標和模型方向都失真 | 先確認觀察窗已經結束、來源 partition 已經到齊；只有「確定沒發生」才能當 0 |
 | 特徵用到了 `time` 之後才產生的資訊 | test 指標異常漂亮，上線後拿不到同樣的資訊 | 特徵 SQL 要做 point-in-time join（只取 `time` 當下已知的值）。框架不檢查這件事，是來源 SQL 的責任 |
-| 同一個日期的來源資料回補後重跑，結果沒變 | 版本只看設定、不看資料內容；那個日期已經做過的東西會被直接沿用 | test 的日期：`bash scripts/rebuild_eval_month.sh <日期> --env production`，它讓 dataset 與 training 都重算那個日期（見 [`adding-an-eval-month.md`](adding-an-eval-month.md)）。train 或 val 的日期：目前沒有指令能只重算它們（`--rebuild-dates` 只收 test 的日期） |
+| 同一個日期的來源資料回補後重跑，結果沒變 | 版本只看設定、不看資料內容；那個日期已經做過的東西會被直接沿用 | test 的日期：dataset 與 training 都帶 `--rebuild-dates <日期>` 重跑，兩條都要（指令見 [`adding-an-eval-month.md`](adding-an-eval-month.md#上游回補了要重算某個月份)）。train 或 val 的日期：目前沒有指令能只重算它們（`--rebuild-dates` 只收 test 的日期） |
 | 日期沒有重疊，但 val／test 早於 train，或 label 還沒成熟 | 拿未來的資料評估過去，或 ground truth 不完整 | 照 `train → val → test` 的時間順序切，每個日期都留足 label 觀察窗 |
 | 連續數值欄被列進 `categorical_columns` | 每個數值被當成一個獨立類別，編碼意思錯了 | 類別代碼先轉成字串或整數；真正的連續數值欄不要列進去 |
 | 手寫 `sample_weights`，key 跟資料對不上 | 那條權重規則沒套用（權重維持 1.0），冷門 item 或重要客群的權重沒有被調到 | 用 `scripts/sampling_overrides_editor.py` 產生 key；training 的 `manifest.json` 會列出沒對上的 key（`sample_weight.unmatched_keys`），要看 |
@@ -72,7 +72,7 @@ base_dataset_version        前處理器、val、test   ← schema、特徵欄�
 | 改了什麼 | 翻哪一層 | 要重跑 |
 |---|---|---|
 | 來源 SQL 改了 `feature_table` 的欄位（名稱、型別、順序） | `base_dataset_version` | source ETL → dataset → training → evaluation，核准後再 inference |
-| 同一日期的資料回補（欄位沒變） | 不翻 | 受影響日期的 source ETL →（test 的日期）`scripts/rebuild_eval_month.sh` → evaluation。train 或 val 的日期目前沒有指令能只重算，見上一節 |
+| 同一日期的資料回補（欄位沒變） | 不翻 | 受影響日期的 source ETL →（test 的日期）dataset 與 training 都帶 `--rebuild-dates` → evaluation。train 或 val 的日期目前沒有指令能只重算，見上一節 |
 | schema、特徵欄、`categorical_columns`、`drop_columns`、train／val 日期、`val_sample_ratio` | `base_dataset_version` | dataset → training → evaluation，核准後再 inference |
 | `sample_ratio`、`sample_ratio_overrides`、`sample_group_keys`、`train_dev_ratio`、`carry_columns` | `train_variant_id` | dataset（只重建 train／train_dev）→ training → evaluation |
 | `test_snap_dates`（加一個評估月份） | 不翻 | 照 [`adding-an-eval-month.md`](adding-an-eval-month.md) 的四個步驟 |
