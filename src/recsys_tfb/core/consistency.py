@@ -709,6 +709,29 @@ Layer 1 — config-static (implemented here; aggregated by
   ``search_space`` (#493, #492). Predicate: ``skip_hpo_param_errors``;
   resolver: ``hpo_enabled``. NOT aggregated, for A57's reason: only training
   reads the keys.
+* A59 — a source ETL stage's YAML block must not carry ``dry_run`` and must
+  declare ``variables.target_db``: (a) a ``dry_run`` key of any value
+  (``true``/``false``/``~``) is an error that says to delete the line and pass
+  ``--dry-run``. Even ``false``/``~`` is refused, for ADR-0019 decision 6's
+  reason (A34): a key nothing reads is a switch that does nothing — it
+  misleads whoever reads the YAML, and flipping it to ``true`` later would
+  change nothing. The error says what to do (delete the line, pass
+  ``--dry-run`` when wanted), so an upgrade that hits it is a one-line fix.
+  Dry run is a per-run intention, so it is a flag and not a
+  setting (the old default, ``env == "local"``, made the same YAML write
+  tables in one environment and not in another). Silently ignoring the old
+  key would make a YAML that still says ``dry_run: true`` start writing
+  tables; (b) ``variables.target_db`` absent, an empty string or only whitespace is an
+  error — ``SQLRunner`` used to fall back to Hive's ``default`` database
+  without a word, and an empty name renders ``INSERT OVERWRITE TABLE .x``. ``variables``
+  that is not a mapping belongs to A35(j) and ``target_db: ~`` to A35(i), so
+  (b) does not report them twice. Predicate: ``etl_stage_config_errors``
+  (returns errors; ``_run_etl`` raises before the ``SQLRunner`` is built, for
+  ``--source-check`` too, collected with A35). NOT aggregated by
+  ``validate_config_consistency``, for A34's and A35's reason: only the ETL
+  commands read these keys. The command also refuses ``--dry-run`` together
+  with ``--source-check`` (one renders without running, the other must run
+  against Hive), before the config is loaded.
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -721,7 +744,7 @@ Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
 flags), A22/A46/A51 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53/A57/A58 (config keys whose
 harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--env``
-+ the filesystem), A35 (the ``--var`` CLI flags), A55 (``--only-test-months`` + the
++ the filesystem), A35 (the ``--var`` CLI flags), A59 (the ETL stage's config keys), A55 (``--only-test-months`` + the
 metastore). A56 needs the resolved catalog too, but hangs off no single command:
 the CLI checks it where it builds the catalog, for every pipeline whose nodes
 read a ``*_on_disk`` entry.
@@ -5240,6 +5263,62 @@ def merged_etl_variables(variables, raw_vars: list[str] | None) -> dict:
     for key, value in parsed:
         merged[key] = value
     return merged
+
+
+_ABSENT = object()
+
+
+def etl_stage_config_errors(etl_config) -> list[str]:
+    """(A59) A source ETL stage's config must not carry ``dry_run`` and must declare ``variables.target_db``.
+
+    ``etl_config`` is the stage's YAML block (``params_etl.get(stage, ...)``).
+    Both checks are about a default that used to be invisible:
+
+    (a) a ``dry_run`` key, whatever its value (``true``/``false``/``~``).
+        Dry run is now the per-run ``--dry-run`` flag. If the key were
+        silently ignored, someone whose YAML still says ``dry_run: true``
+        would see the next run write real tables. ``false``/``~`` are refused
+        too (ADR-0019 decision 6, as A34): a key nothing reads is a switch
+        that does nothing and misleads the reader; the message says to delete
+        the line, so hitting it on upgrade is a one-line fix.
+    (b) ``variables.target_db`` not declared, or an empty/whitespace-only
+        string. ``SQLRunner`` used to fall back to Hive's ``default``
+        database, so a forgotten line wrote there without a word; an empty
+        name renders ``INSERT OVERWRITE TABLE .x``. ``variables`` that is not a mapping is left to
+        A35(j), and ``target_db: ~`` to A35(i): reporting either here would
+        say the same thing twice.
+
+    Returns error strings (empty when fine). NOT aggregated by
+    ``validate_config_consistency``, for A35's reason: only the ETL commands
+    read these keys.
+    """
+    errors: list[str] = []
+    if not isinstance(etl_config, Mapping):
+        return errors
+
+    if "dry_run" in etl_config:
+        errors.append(
+            f"(A59) dry_run={etl_config['dry_run']!r} is set in the stage's "
+            f"parameters YAML. The key is no longer read: remove that line "
+            f"and pass --dry-run on the command line for a run that only "
+            f"renders SQL. (Ignoring it silently would make a YAML that says "
+            f"`dry_run: true` start writing tables.)"
+        )
+
+    variables = etl_config.get("variables")
+    if variables is None or isinstance(variables, Mapping):
+        # target_db: ~ 交給 A35(i)；variables 不是 mapping 交給 A35(j)，不重複報
+        target_db = (variables or {}).get("target_db", _ABSENT)
+        blank = isinstance(target_db, str) and not target_db.strip()
+        if target_db is _ABSENT or blank:
+            what = "is an empty string" if blank else "is not declared"
+            errors.append(
+                f"(A59) variables.target_db {what}. It names the Hive "
+                f"database every table is written to and has no default (it "
+                f"used to fall back to `default`, silently). Declare it under "
+                f"variables in the stage's parameters YAML."
+            )
+    return errors
 
 
 def _iso_date(value) -> str | None:

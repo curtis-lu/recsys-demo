@@ -236,7 +236,7 @@ mkdir -p conf/production
 先用一個日期試：
 
 ```bash
-# 只讀不寫：檢查上游 partition、欄位與資料量
+# 不寫輸出表：只檢查上游 partition、欄位與資料量（但 target_db 不存在會建立它，檢查失敗會寫 audit，見 source_etl.md）
 python -m recsys_tfb feature_etl --env production --source-check --target-dates 2026-01-31
 python -m recsys_tfb label_etl   --env production --source-check --target-dates 2026-01-31
 

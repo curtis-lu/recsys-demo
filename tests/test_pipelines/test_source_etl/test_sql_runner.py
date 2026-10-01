@@ -99,6 +99,58 @@ def _make_spark_mock(
     return spark
 
 
+class TestYamlNullBlocks:
+    """YAML 的 ``source_checks: ~``／``audit: ~`` 讀進來是 None，要跟沒寫一樣。"""
+
+    @pytest.mark.parametrize("key", ["source_checks", "audit"])
+    def test_null_block_builds_like_an_absent_one(self, sql_dir, key):
+        config = _base_config()
+        config[key] = None
+        runner = SQLRunner(config, sql_dir, dry_run=True)
+        assert len(runner._tables) == 3
+
+    def test_missing_target_db_has_no_default(self, sql_dir):
+        config = _base_config()
+        config["variables"] = {}
+        with pytest.raises(KeyError, match="target_db"):
+            SQLRunner(config, sql_dir, dry_run=True)
+
+
+class TestRenderedSqlDirIsBestEffort:
+    """rendered_sql_dir 預設開著，只是除錯副產品：寫不進去只警告，不讓表失敗。"""
+
+    def _blocked_dir(self, tmp_path):
+        blocked = tmp_path / "blocked"
+        blocked.write_text("a file where a directory is expected")
+        return blocked
+
+    def test_real_run_table_still_succeeds_and_warns(
+        self, sql_dir, tmp_path, caplog, monkeypatch
+    ):
+        # 輸出檢查不是這裡要測的：mock 的 Spark 查不到欄位，換成「全通過」
+        monkeypatch.setattr(OutputChecker, "run_all", lambda *a, **k: [])
+        runner = SQLRunner(
+            _base_config(), sql_dir, dry_run=False,
+            rendered_sql_dir=self._blocked_dir(tmp_path),
+        )
+        spark = _make_spark_mock()
+        table = runner._tables[0]
+        audit = MagicMock()
+        with caplog.at_level("WARNING"):
+            ok = runner._process_single_table(spark, table, "2024-01-31", "r1", audit)
+        assert ok is True
+        assert "Rendered SQL not saved" in caplog.text
+
+    def test_dry_run_table_still_succeeds_and_warns(self, sql_dir, tmp_path, caplog):
+        runner = SQLRunner(
+            _base_config(), sql_dir, dry_run=True,
+            rendered_sql_dir=self._blocked_dir(tmp_path),
+        )
+        with caplog.at_level("WARNING"):
+            runner.run(target_dates=["2024-01-31"])
+        assert "Rendered SQL not saved" in caplog.text
+
+
 class TestValidateOrder:
     def test_valid_order(self, sql_dir):
         """Tables in correct dependency order should pass."""

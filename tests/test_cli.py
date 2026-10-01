@@ -684,7 +684,10 @@ class TestEvaluationCLIFlags:
             assert captured["runtime_params"]["post_training"] == flag
 
 
-def _setup_etl_conf(tmp_path, source_checks=None, variables=None, params_dataset=None):
+def _setup_etl_conf(
+    tmp_path, source_checks=None, variables=None, params_dataset=None,
+    stage_extra=None,
+):
     """conf/base + parameters_feature_etl.yaml（最小可跑 _run_etl）。
 
     ``variables`` overrides the stage's ``variables:`` block wholesale (for
@@ -693,6 +696,8 @@ def _setup_etl_conf(tmp_path, source_checks=None, variables=None, params_dataset
     A26-still-scoped-to-training regression). Does NOT write any SQL file
     under conf/sql/etl — a test that exercises the real render path
     (check_renders / a real run) must write its own via ``_write_etl_sql``.
+    ``stage_extra`` is merged into the stage block (A59 cases put a stale
+    ``dry_run`` key there).
     """
     _setup_conf(tmp_path, params_dataset=params_dataset)
     base_dir = tmp_path / "conf" / "base"
@@ -713,6 +718,7 @@ def _setup_etl_conf(tmp_path, source_checks=None, variables=None, params_dataset
             ],
         }
     }
+    params["feature_etl"].update(stage_extra or {})
     with open(base_dir / "parameters_feature_etl.yaml", "w") as f:
         yaml.dump(params, f)
 
@@ -809,9 +815,27 @@ class TestSourceCheckCLI:
         finally:
             os.chdir(old)
 
-    def test_source_check_forces_dry_run_false(self, tmp_path):
-        # In --env local, dry_run defaults to True; --source-check must override
-        # it to False so the read-only checks actually query Hive (design D2d).
+    def test_source_check_and_dry_run_are_mutually_exclusive(self, tmp_path, caplog):
+        # --source-check 必須實查 Hive，--dry-run 不執行任何 SQL：一起給就在載入
+        # config 之前報錯，SQLRunner 連建都不該建。
+        _setup_etl_conf(tmp_path, source_checks={"feat_a": {"partition_key": "snap_date"}})
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.utils.spark.get_or_create_spark_session") as mock_spark, \
+                 patch("recsys_tfb.pipelines.source_etl.sql_runner.SQLRunner") as MockRunner:
+                result = runner.invoke(
+                    app, ["feature_etl", "--source-check", "--dry-run",
+                          "--target-dates", "2025-01-31"])
+            assert result.exit_code == 1, result.output
+            # 此時還沒載入 config（logging 尚未設定），訊息只在 caplog
+            assert "--source-check" in caplog.text and "--dry-run" in caplog.text
+            MockRunner.assert_not_called()
+            mock_spark.assert_not_called()
+        finally:
+            os.chdir(old)
+
+    def test_source_check_builds_runner_with_dry_run_false(self, tmp_path):
+        # 檢查唯讀、必須實查 Hive：--source-check 時 runner 收到 dry_run=False。
         _setup_etl_conf(tmp_path, source_checks={"feat_a": {"partition_key": "snap_date"}})
         old = os.getcwd(); os.chdir(tmp_path)
         try:
@@ -829,6 +853,99 @@ class TestSourceCheckCLI:
             os.chdir(old)
 
 
+class TestDryRunFlagA59:
+    """dry run 是 ``--dry-run`` 旗標，不是 YAML 鍵、也不依 ``--env`` 給預設；
+    A59 擋掉殘留的 ``dry_run`` 鍵與沒宣告的 ``variables.target_db``。
+    """
+
+    @staticmethod
+    def _invoke(tmp_path, argv, **conf):
+        _setup_etl_conf(tmp_path, **conf)
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.utils.spark.get_or_create_spark_session",
+                       return_value=MagicMock()) as mock_spark, \
+                 patch("recsys_tfb.pipelines.source_etl.sql_runner.SQLRunner") as MockRunner:
+                MockRunner.return_value.check_renders.return_value = []
+                result = runner.invoke(
+                    app, ["feature_etl", "--target-dates", "2025-01-31", *argv])
+            return result, MockRunner, mock_spark
+        finally:
+            os.chdir(old)
+
+    def test_flag_in_help_of_all_four_commands(self):
+        for cmd in ("feature_etl", "label_etl", "sample_pool_etl",
+                    "inference_population_etl"):
+            result = runner.invoke(app, [cmd, "--help"])
+            assert result.exit_code == 0, result.output
+            assert "--dry-run" in result.output, cmd
+
+    def test_no_flag_means_dry_run_false_even_in_env_local(self, tmp_path):
+        result, MockRunner, _ = self._invoke(tmp_path, ["--env", "local"])
+        assert result.exit_code == 0, result.output
+        assert MockRunner.call_args.kwargs["dry_run"] is False
+
+    def test_flag_means_dry_run_true(self, tmp_path):
+        result, MockRunner, _ = self._invoke(tmp_path, ["--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert MockRunner.call_args.kwargs["dry_run"] is True
+
+    @pytest.mark.parametrize("value", [True, False, None])
+    def test_a59a_yaml_dry_run_key_is_refused(self, tmp_path, value):
+        result, MockRunner, mock_spark = self._invoke(
+            tmp_path, [], stage_extra={"dry_run": value})
+        assert result.exit_code == 1, result.output
+        assert "(A59)" in result.output
+        assert "--dry-run" in result.output
+        MockRunner.assert_not_called()
+        mock_spark.assert_not_called()
+
+    def test_a59b_missing_target_db_is_refused(self, tmp_path):
+        result, MockRunner, mock_spark = self._invoke(
+            tmp_path, [], variables={"raw_db": "x"})
+        assert result.exit_code == 1, result.output
+        assert "(A59)" in result.output and "target_db" in result.output
+        MockRunner.assert_not_called()
+        mock_spark.assert_not_called()
+
+    def test_a59_also_gates_source_check(self, tmp_path):
+        result, MockRunner, _ = self._invoke(
+            tmp_path, ["--source-check"], stage_extra={"dry_run": True})
+        assert result.exit_code == 1, result.output
+        assert "(A59)" in result.output
+        MockRunner.assert_not_called()
+
+    def test_a59_is_collected_with_a35_in_one_report(self, tmp_path):
+        result, _, _ = self._invoke(
+            tmp_path, ["--var", "typo=1"], stage_extra={"dry_run": True})
+        assert result.exit_code == 1, result.output
+        assert "(A59)" in result.output and "(A35)" in result.output
+
+    def test_dry_run_ends_with_a_notice_not_completed_successfully(self, tmp_path):
+        # SQLRunner 是真的（不 mock）：dry run 走完 render，結尾不能說 completed
+        # successfully（會讓人以為寫了表）。
+        _setup_etl_conf(tmp_path)
+        _write_etl_sql(tmp_path, "feature/feature_table.sql")
+        old = os.getcwd(); os.chdir(tmp_path)
+        try:
+            with patch("recsys_tfb.utils.spark.get_or_create_spark_session"):
+                result = runner.invoke(app, [
+                    "feature_etl", "--dry-run", "--target-dates", "2025-01-31"])
+            assert result.exit_code == 0, result.output
+            # 每張表都會印 `DRY RUN [<table>]:`，所以不能拿 "DRY RUN" 當證據；
+            # 只有結尾說明才有「沒有寫表」。
+            assert "沒有寫表" in result.output
+            assert "completed successfully" not in result.output
+        finally:
+            os.chdir(old)
+
+    def test_real_run_still_ends_with_completed_successfully(self, tmp_path):
+        result, _, _ = self._invoke(tmp_path, [])
+        assert result.exit_code == 0, result.output
+        assert "completed successfully" in result.output
+        assert "DRY RUN" not in result.output
+
+
 class TestEtlCliVarsA35:
     """#370: repeatable ``--var key=value`` on the ETL commands, gated by
     A35 before Spark starts. One CLI case per A35 failure letter (a-j), plus
@@ -838,14 +955,14 @@ class TestEtlCliVarsA35:
     @pytest.mark.parametrize(
         "case_id, variables, cli_vars",
         [
-            ("a_missing_equals", {"raw_db": "x"}, ["raw_db"]),
-            ("b_undeclared_name", {"raw_db": "x"}, ["typo_db=y"]),
-            ("c_var_target_date", {"raw_db": "x"}, ["target_date=2025-01-31"]),
+            ("a_missing_equals", {"target_db": "t", "raw_db": "x"}, ["raw_db"]),
+            ("b_undeclared_name", {"target_db": "t", "raw_db": "x"}, ["typo_db=y"]),
+            ("c_var_target_date", {"target_db": "t", "raw_db": "x"}, ["target_date=2025-01-31"]),
             ("d_var_target_db", {"target_db": "ml_recsys"}, ["target_db=other_db"]),
-            ("e_duplicate_name", {"raw_db": "x"}, ["raw_db=a", "raw_db=b"]),
-            ("f_null_no_override", {"raw_db": None}, []),
-            ("g_non_string_value", {"raw_db": 2025}, []),
-            ("h_yaml_declares_target_date", {"target_date": "2025-01-31"}, []),
+            ("e_duplicate_name", {"target_db": "t", "raw_db": "x"}, ["raw_db=a", "raw_db=b"]),
+            ("f_null_no_override", {"target_db": "t", "raw_db": None}, []),
+            ("g_non_string_value", {"target_db": "t", "raw_db": 2025}, []),
+            ("h_yaml_declares_target_date", {"target_db": "t", "target_date": "2025-01-31"}, []),
             ("i_yaml_target_db_null", {"target_db": None}, []),
             ("j_variables_not_a_mapping", ["not", "a", "mapping"], []),
         ],
@@ -886,7 +1003,7 @@ class TestEtlCliVarsA35:
     def test_multiple_a35_errors_listed_in_one_run(self, tmp_path):
         # Same fix-1 (M1) reasoning as above: a legal SQL file, so A35's own
         # exit is what this test is actually pinning.
-        _setup_etl_conf(tmp_path, variables={"raw_db": "x"})
+        _setup_etl_conf(tmp_path, variables={"target_db": "t", "raw_db": "x"})
         _write_etl_sql(
             tmp_path, "feature/feature_table.sql",
             "--partition by: snap_date\n\n"
@@ -964,7 +1081,7 @@ class TestEtlCliVarsA35:
             ):
                 result = runner.invoke(app, [
                     "feature_etl", "--target-dates", "2025-01-31",
-                    "--restart-from", "feature_b",
+                    "--restart-from", "feature_b", "--dry-run",
                 ])
             assert result.exit_code == 0, result.output
         finally:
@@ -972,7 +1089,7 @@ class TestEtlCliVarsA35:
 
     def test_source_check_with_bad_var_exits_before_spark(self, tmp_path):
         # Same fix-1 (M1) reasoning: a legal SQL file so A35 is the only gate.
-        _setup_etl_conf(tmp_path, variables={"raw_db": "x"})
+        _setup_etl_conf(tmp_path, variables={"target_db": "t", "raw_db": "x"})
         _write_etl_sql(
             tmp_path, "feature/feature_table.sql",
             "--partition by: snap_date\n\n"
@@ -1082,7 +1199,7 @@ class TestEtlCliVarsA35:
         # M1's batch) so (k)'s own exit is the only thing this test pins —
         # without it, a run with no SQL file at all is blocked by
         # check_renders's FileNotFoundError regardless of (k).
-        _setup_etl_conf(tmp_path, variables={"raw_db": "${other_var}"})
+        _setup_etl_conf(tmp_path, variables={"target_db": "t", "raw_db": "${other_var}"})
         _write_etl_sql(
             tmp_path, "feature/feature_table.sql",
             "--partition by: snap_date\n\n"
@@ -1130,7 +1247,8 @@ class TestEtlCliVarsA35:
                 "recsys_tfb.utils.spark.get_or_create_spark_session"
             ) as mock_spark:
                 result = runner.invoke(
-                    app, ["feature_etl", "--target-dates", "2025-01-31"])
+                    app, ["feature_etl", "--dry-run",
+                          "--target-dates", "2025-01-31"])
             assert result.exit_code == 0, result.output
             assert "(A35)" not in result.output
             assert "add_months('2025-01-31', -12)" in result.output
@@ -1147,7 +1265,7 @@ class TestEtlCliVarsA35:
         # line (sorted(merged_vars.items())) with "'<' not supported between
         # instances of 'int' and 'str'". SQLRunner is mocked — the point
         # here is only the log line, not check_renders/run.
-        _setup_etl_conf(tmp_path, variables={2025: "x", "raw_db": "y"})
+        _setup_etl_conf(tmp_path, variables={2025: "x", "target_db": "t", "raw_db": "y"})
         old = os.getcwd(); os.chdir(tmp_path)
         try:
             with patch(

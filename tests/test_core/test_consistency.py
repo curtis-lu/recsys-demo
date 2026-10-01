@@ -3910,6 +3910,52 @@ class TestParseEtlVarFlags:
         assert parse_etl_var_flags(None) == ([], [])
 
 
+class TestA59EtlStageConfig:
+    """A59 — a source ETL stage's YAML must not carry ``dry_run`` and must
+    declare ``variables.target_db``.
+    """
+
+    def _errors(self, etl_config):
+        from recsys_tfb.core.consistency import etl_stage_config_errors
+        return etl_stage_config_errors(etl_config)
+
+    def test_all_clear_returns_empty(self):
+        assert self._errors({"variables": {"target_db": "ml"}, "tables": []}) == []
+
+    @pytest.mark.parametrize("value", [True, False, None])
+    def test_a_dry_run_key_of_any_value_is_refused(self, value):
+        errors = self._errors(
+            {"dry_run": value, "variables": {"target_db": "ml"}})
+        assert len(errors) == 1
+        assert "(A59)" in errors[0] and "--dry-run" in errors[0]
+
+    def test_b_missing_target_db_is_refused(self):
+        errors = self._errors({"variables": {"raw_db": "x"}})
+        assert len(errors) == 1
+        assert "(A59)" in errors[0] and "target_db" in errors[0]
+
+    def test_b_absent_variables_block_is_refused(self):
+        errors = self._errors({"tables": []})
+        assert len(errors) == 1 and "target_db" in errors[0]
+
+    def test_b_variables_not_a_mapping_is_left_to_a35(self):
+        assert self._errors({"variables": ["not", "a", "mapping"]}) == []
+
+    def test_b_null_target_db_is_left_to_a35(self):
+        assert self._errors({"variables": {"target_db": None}}) == []
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\t"])
+    def test_b_blank_target_db_is_refused(self, blank):
+        # 空字串會 render 出 `INSERT OVERWRITE TABLE .x`
+        errors = self._errors({"variables": {"target_db": blank}})
+        assert len(errors) == 1
+        assert "(A59)" in errors[0] and "empty" in errors[0]
+
+    def test_a_and_b_are_both_reported(self):
+        errors = self._errors({"dry_run": True, "variables": {}})
+        assert len(errors) == 2
+
+
 class TestMergedEtlVariables:
     """CLI overrides win; the YAML dict handed in is never mutated (#370)."""
 

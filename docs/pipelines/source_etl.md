@@ -64,7 +64,7 @@ LEFT JOIN ${target_db}.label_table l
 4. **宣告輸出契約**：每張表都應設定 `partition_by` 與 `primary_key`，最終三張來源表應符合上表所列粒度。
 5. **對齊 item 集合**：`label_table` 與 `sample_pool` 產生的 item，應與 `parameters.yaml` 的 `schema.categorical_values.<item>` 及 `parameters_inference.yaml` 的候選集合一致。item 那一格寫 `from_train_data` 時（#379），清單就從 `sample_pool` 的 train 時段數，只剩 `label_table` 的 item 必須在 `sample_pool` 出現過。
 6. **準備抽樣欄位**：所有 `sample_group_keys` 都必須由 `sample_pool_etl` 寫入 `sample_pool`；需要使用 feature 欄位時，先在 SQL 中連接 `feature_table`。
-7. **決定執行環境**：確認該環境的 `dry_run` 設定，避免以為已寫表，實際上只 render SQL。
+7. **決定這一次要不要寫表**：預設一律真的寫表，不分 `--env`。只想看 SQL 時加 `--dry-run`（見 [4.3](#43-檢視-rendered-sql)）；加了旗標的那一次不會寫表，結尾訊息會明說 `DRY RUN`，不會印 `completed successfully`。
 
 > 本 repo 的本機合成資料流程會直接準備框架需要的來源資料，通常不必執行 source ETL。接入正式應用或真實 Hive 上游時，才需要依本文件建立 SQL 流程。
 
@@ -84,9 +84,8 @@ YAML 的基本結構如下：
 
 ```yaml
 feature_etl:
-  target_dates: ["2026-01-31"]
-  dry_run: false
-  rendered_sql_dir: data/rendered_sql
+  target_dates: ["2026-01-31"]       # 沒給 --target-dates 時用這裡；日期要加引號
+  rendered_sql_dir: data/rendered_sql  # 不想存 SQL 就刪掉這行
 
   variables:
     target_db: ml_recsys
@@ -112,14 +111,13 @@ feature_etl:
 
 | 設定 | 必要性 | 說明 |
 |---|---|---|
-| `variables` | 選填 | 提供 SQL 範本 `${...}` 變數的預設值；每個名字可在執行時用 `--var key=value` 覆寫，寫法與三種值的意義見下方說明 |
-| `variables.target_db` | 建議必填 | 中介表與最終表寫入的 Hive database，也可在 SQL 中以 `${target_db}` 引用；只能在這裡設定，不能用 `--var` 覆寫，也不能寫成 `~`（原因見下方說明） |
-| `target_dates` | 二選一 | 未提供 CLI `--target-dates` 時使用的日期清單 |
-| `dry_run` | 選填 | `true` 時只 render SQL，不執行 Hive DDL／DML，也不寫 audit |
-| `rendered_sql_dir` | 選填 | 保存最終 SQL；路徑結構為 `<dir>/<run_id>/<target_date>/<table>.sql` |
-| `source_checks` | 選填 | 上游 partition、資料量與 schema 的 preflight 設定 |
+| `variables` | 必填 | 提供 SQL 範本 `${...}` 變數的預設值；每個名字可在執行時用 `--var key=value` 覆寫，寫法與三種值的意義見下方說明 |
+| `variables.target_db` | 必填 | 中介表與最終表寫入的 Hive database，也可在 SQL 中以 `${target_db}` 引用；只能在這裡設定，不能用 `--var` 覆寫，也不能寫成 `~`（原因見下方說明）；沒宣告會被不變量 `A59` 擋下，因為框架不替它補預設值（以前會默默寫進 Hive 的 `default` database） |
+| `target_dates` | 與 `--target-dates` 二選一 | 沒給 CLI `--target-dates` 時使用的日期清單，例如 `["2025-01-31"]`（日期要加引號，否則 YAML 會讀成日期物件）；範本 YAML 寫 `[]`，兩邊都沒有就中止 |
+| `rendered_sql_dir` | 選填 | 每次執行的 SQL 存到 `<dir>/<run_id>/<target_date>/<table>.sql`；路徑相對於執行指令時的目錄（專案根目錄）。範本 YAML 寫 `data/rendered_sql`，所以預設每次都存。不想存：不要改 `conf/base/`，在 `conf/<env>/` 的同名檔寫 `rendered_sql_dir: ~`（疊加層是逐層合併，刪不掉 base 的鍵，只能用 `~` 蓋掉）；沒這個鍵或值是 `~` 就不存。寫檔失敗（唯讀、磁碟滿）只印警告，不讓 ETL 失敗 |
+| `source_checks` | 選填 | 上游 partition、資料量與 schema 的 preflight 設定；`{}`、`~` 或整行不寫都是「沒有要檢查的上游」 |
 | `tables` | 必填 | 依執行順序排列的輸出表清單 |
-| `audit` | 選填 | audit Hive table 的 database 與 table 名稱 |
+| `audit` | 選填 | audit Hive table 的 database 與 table 名稱；`~` 或整行不寫就不寫 audit |
 
 `variables` 底下每個名字的值有三種寫法：
 
@@ -134,7 +132,9 @@ feature_etl:
 
 以上任何一種情況——`--var` 帶到沒宣告的名字、同一個名字帶了兩次、`--var` 缺少 `=`、`variables` 的值型別不合法、`variables` 本身不是「名字 → 值」的對照、某個 `~` 名字沒有用 `--var` 帶、某個變數的最終值裡有 `${target_date}` 以外的 `${...}`、`--var` 帶了 `target_date` 或 `target_db`、YAML `variables` 宣告了 `target_date`，或 `variables.target_db` 寫成 `~`——都屬於不變量 `A35`，訊息以 `(A35)` 開頭，會在同一次執行裡把所有問題一次列出，並且在 Spark 啟動前完成檢查，見 `src/recsys_tfb/core/consistency.py` 的 invariant legend。
 
-YAML 寫 `my_var: "${env.MY_VAR}"` 這種用環境變數帶值的寫法照樣可用：`${env.X}` 在載入設定時就換掉了，`--var` 在它之後才覆寫，兩者不衝突。這些檢查不受 dry run 影響——不管有沒有開 dry run，都一樣會做。
+YAML 寫 `my_var: "${env.MY_VAR}"` 這種用環境變數帶值的寫法照樣可用：`${env.X}` 在載入設定時就換掉了，`--var` 在它之後才覆寫，兩者不衝突。這些檢查不受 dry run 影響——不管有沒有加 `--dry-run`，都一樣會做。
+
+**YAML 不能寫 `dry_run`。** 這個鍵已經拿掉，dry run 改由命令列旗標 `--dry-run` 決定（見 [4.3](#43-檢視-rendered-sql)）。stage 設定裡只要還留著 `dry_run`（不管值是 `true`、`false` 還是 `~`），就會被不變量 `A59` 擋下，訊息會叫你刪掉那行、改用旗標；不直接忽略，是因為忽略的話，原本寫 `dry_run: true` 的人下一次執行會真的開始寫表。`A59` 與 `A35` 一樣在 Spark 啟動前檢查（`--source-check` 也檢查），並跟 `A35` 的訊息一起一次列出。
 
 ### 3.3 Table 層級設定
 
@@ -143,9 +143,9 @@ YAML 寫 `my_var: "${env.MY_VAR}"` 這種用環境變數帶值的寫法照樣可
 | `name` | 必填 | 輸出 Hive table 名稱，實際寫入 `${target_db}.<name>` |
 | `sql_file` | 必填 | 相對於 `conf/sql/etl/` 的 SQL 路徑 |
 | `partition_by` | 必填 | 有順序的 `{欄位: Hive 型別}` mapping；不可使用 list |
-| `primary_key` | 建議必填 | 輸出資料的唯一鍵，同時作為 schema contract 與重複鍵檢查依據 |
-| `depends_on` | 選填 | 文件與順序驗證用途；相依表必須已列在同一份 `tables` 清單的前方 |
-| `quality_checks` | 選填 | SQL 寫入後執行的資料品質檢查 |
+| `primary_key` | 建議必填 | 輸出資料的唯一鍵，同時作為 schema contract 與重複鍵檢查依據；沒寫等於 `[]`，schema contract 與重複鍵檢查都不跑 |
+| `depends_on` | 選填 | 文件與順序驗證用途；相依表必須已列在同一份 `tables` 清單的前方；沒寫等於 `[]` |
+| `quality_checks` | 選填 | SQL 寫入後執行的資料品質檢查；沒寫等於 `{}`，下表三個檢查（`min_row_count`、`max_duplicate_key_ratio`、`max_null_ratio`）都不跑 |
 
 `tables` 的 list 順序就是實際執行順序。`depends_on` 不會建立 DAG，也不會自動調整順序或檢查其他 ETL 的新鮮度；它只會在初始化時驗證相依表是否已出現在清單前方。
 
@@ -191,6 +191,8 @@ source_checks:
     allow_new_columns: true
 ```
 
+`--source-check` 不寫任何輸出表，但不是完全沒有副作用：它會先執行 `CREATE DATABASE IF NOT EXISTS <target_db>`（`target_db` 不存在就建立它）；任一檢查失敗時，若有設定 `audit`，會在 audit 表寫一筆 `table_name` 為 `__source_check__` 的紀錄（audit 表不存在會先建立）。`source_checks` 是空的時候直接結束，什麼都不碰。
+
 框架會先檢查 partition 是否存在；若不存在，該 table/date 的 row count 與 schema 檢查會略過。所有 tables 與 dates 都檢查完後才一次回報失敗項目，方便集中修正。
 
 ### 3.6 輸出 quality checks
@@ -200,10 +202,10 @@ source_checks:
 | 檢查 | 設定方式 | 說明 |
 |---|---|---|
 | schema contract | 宣告 `primary_key` 後自動執行 | 確認 primary key 欄位實際存在於輸出表 |
-| 最少列數 | `min_row_count` | 目標 `snap_date` partition 至少應有多少列 |
-| 重複鍵比例 | `max_duplicate_key_ratio` | 依 `primary_key` 計算重複比例；設定 `0.0` 表示不允許重複 |
+| 最少列數 | `min_row_count`（沒寫就不檢查） | 目標 `snap_date` partition 至少應有多少列 |
+| 重複鍵比例 | `max_duplicate_key_ratio`（沒寫就不檢查） | 依 `primary_key` 計算重複比例；設定 `0.0` 表示不允許重複 |
 | primary key 為 NULL | 隨 `max_duplicate_key_ratio` 一起執行 | `primary_key` 任一欄出現 NULL 就 fail，並點名是哪一欄、幾列 |
-| 整體 NULL 比例 | `max_null_ratio` | 計算該 partition 所有資料格的整體 NULL 比例 |
+| 整體 NULL 比例 | `max_null_ratio`（沒寫就不檢查） | 計算該 partition 所有資料格的整體 NULL 比例 |
 
 ```yaml
 quality_checks:
@@ -321,13 +323,14 @@ GROUP BY i.snap_date, i.entity_id, i.request_id, i.item_id
 
 ### 4.1 CLI 選項
 
-三個 ETL 指令共用以下選項：
+四個 ETL 指令（feature／label／sample pool／inference population）共用以下選項：
 
 | 選項 | 預設 | 說明 |
 |---|---|---|
 | `--env`, `-e` | `local` | 選擇 `conf/<env>` 設定環境 |
 | `--target-dates` | YAML `target_dates` | 逗號分隔的日期，例如 `2026-01-31,2026-02-28` |
 | `--var key=value` | 無 | 覆寫 YAML `variables` 裡同名的值；只在第一個 `=` 切開（值裡可以再有 `=`），`key=` 代表空字串 |
+| `--dry-run` | 關閉 | 只 render SQL，不在 Hive 執行、不寫表、不寫 audit；每次要打才生效，不是 YAML 設定，也不依 `--env` 有不同預設 |
 | `--source-check` | 關閉 | 只執行該 stage 的上游 preflight，不執行 ETL |
 | `--restart-from` | 無 | 從指定 table 開始，略過清單中更早的 tables |
 
@@ -340,11 +343,11 @@ python -m recsys_tfb feature_etl --env production --target-dates 2026-01-31 \
 
 分隔多個變數靠重複 `--var`，不是逗號，所以值裡有逗號（例如上面的 `'a','b'`）也不會被切開；這跟 `--target-dates` 用逗號分隔日期是兩種不同的規則。
 
-`--source-check` 與 `--restart-from` 不能同時使用。source ETL 也不支援 DAG pipeline 的 `--from-node`、`--only-node`、`--list-nodes` 或 CLI `--dry-run`。
+`--source-check` 與 `--restart-from` 不能同時使用；`--source-check` 與 `--dry-run` 也不能同時使用（前者必須實查 Hive，後者不執行任何 SQL）。`--dry-run` 搭配 `--restart-from` 可以。source ETL 不支援 DAG pipeline 的 `--from-node`、`--only-node`、`--list-nodes`；它的 `--dry-run` 也只是 render SQL，跟 DAG pipeline 印 slice plan 的 `--dry-run` 是兩件事。
 
 ### 4.2 建議執行流程
 
-在 YAML 設定好 `source_checks` 後，先對 feature 與 label 上游執行唯讀 preflight：
+在 YAML 設定好 `source_checks` 後，先對 feature 與 label 上游執行 preflight（不寫輸出表，只查上游；副作用見 §3.5）：
 
 ```bash
 python -m recsys_tfb feature_etl --env production --source-check --target-dates 2026-01-31
@@ -376,14 +379,21 @@ python -m recsys_tfb feature_etl --env production \
 
 ### 4.3 檢視 rendered SQL
 
-source ETL 沒有 `--dry-run` CLI 旗標。若只想檢查 SQL，請在對應 YAML 設定：
+只想在不寫表的前提下檢查 SQL 範本與變數代換的結果，加 `--dry-run`：
 
-```yaml
-dry_run: true
-rendered_sql_dir: data/rendered_sql
+```bash
+python -m recsys_tfb feature_etl --env production --target-dates 2026-01-31 --dry-run
 ```
 
-dry-run 會 render 每張 table、每個日期的完整 SQL，但不查詢或寫入業務 Hive tables，也不寫入 audit。CLI 啟動過程仍可能初始化 Spark session；`--source-check` 則一定會實際查詢 Hive，即使該 stage 設定為 dry-run。
+`--dry-run` 會 render 每張 table、每個日期的 SQL，但不查詢或寫入業務 Hive tables，也不寫入 audit。結尾會印 `DRY RUN：只 render 了 SQL，沒有執行、沒有寫表`，不會印 `completed successfully`。CLI 啟動過程仍會初始化 Spark session。
+
+**dry run 的 SQL 不等於真正執行的 SQL。** 它只是把你的 SELECT 包進一個單純的 `INSERT OVERWRITE`（檔頭有一行 `-- DRY RUN: table existence not checked; partition CAST skipped.`）：不檢查表存不存在、不做表不存在時的 CTAS、不做既有表的 schema 對齊、也不做 partition 欄位的型別 CAST。拿它去審查或手動執行，會跟正式寫進去的 SQL 不同。想看真正執行過的 SQL，要去真的執行之後的 `rendered_sql_dir`（見 §3.2）。
+
+dry run 的 SQL 一律全文印進 log（每張表一段 `DRY RUN [<table>]:`），不論有沒有設 `rendered_sql_dir`；有設的話同時存成檔案。
+
+為什麼是旗標而不是 YAML 設定：dry run 是「這一次只想看 SQL」的一次性意圖。若放在 YAML，為了看 SQL 改成 `true`、忘了改回，之後排程每天顯示成功卻沒寫表；旗標只在打的那一次生效，下一次執行自然回到寫表。以前沒寫 `dry_run` 時，`--env local` 還會靜默只 render、其他環境才真的寫表，同一份 YAML 在兩個環境做不同的事，現在已拿掉：不管哪個 `--env`，沒加旗標就是寫表。
+
+`--source-check` 一定會實際查詢 Hive，所以不能與 `--dry-run` 一起用。
 
 ### 4.4 從指定 table 接續
 
@@ -441,7 +451,7 @@ ORDER BY created_at DESC;
 
 audit table 不分區，並以 append 方式保存歷次執行紀錄。只有設定 `min_row_count` 時，audit 的 `row_count` 才會取得該檢查算出的實際列數；未設定時即使資料存在，也可能記為 `0`。
 
-執行開始時，log 會印一行這次生效的所有變數與值，並標出哪些來自 `--var`。這行 log 會印出所有變數的最終值，包括從 `${env.X}` 帶進來的值，所以不要把密碼之類的機密放進 `variables`。audit table 不會多存一份變數值，所以 log 被清掉之後，就查不到那次執行實際用的變數值。
+執行開始時，log 會印一行這次生效的所有變數與值，並標出哪些來自 `--var`。這行 log 會印出所有變數的最終值，包括從 `${env.X}` 帶進來的值，所以不要把密碼之類的機密放進 `variables`。audit table 不會多存一份變數值。log 被清掉之後，那次執行實際用的變數值只剩一處可查：`rendered_sql_dir` 底下存下來的 SQL 檔（變數已經代換進去了；沒設 `rendered_sql_dir`，或那次存檔失敗，就查不到）。同樣的理由，機密也會出現在那些 SQL 檔裡。
 
 ## 7. 重跑與恢復
 
@@ -461,7 +471,10 @@ source ETL 的輸出不會因 SQL 或來源資料內容改變而自動產生新�
 
 | 症狀或訊息 | 常見原因 | 檢查與修正 |
 |---|---|---|
-| command 顯示成功但 Hive 沒有新資料 | 該環境啟用了 `dry_run` | 檢查 YAML 的 `dry_run` 與 log 中的 `DRY RUN`；需要寫表時改為 `false` |
+| 結尾印 `DRY RUN：只 render 了 SQL` 而 Hive 沒有新資料 | 這次指令帶了 `--dry-run` | 拿掉 `--dry-run` 重跑；dry run 只在加旗標的那一次生效，不會殘留 |
+| `(A59) dry_run=... is set in the stage's parameters YAML` | stage 設定還留著已拿掉的 `dry_run` 鍵 | 刪掉那一行；只想看 SQL 時改用 `--dry-run` 旗標 |
+| `(A59) variables.target_db is not declared` | stage 的 `variables` 沒宣告 `target_db` | 在 `variables` 下加 `target_db: <Hive database>`；框架不再替它補預設 |
+| `--source-check 與 --dry-run 不能同時使用` | 兩個旗標一起給 | 擇一：只想看 SQL 用 `--dry-run`，要實查上游用 `--source-check` |
 | `No target_dates provided` | CLI 與 YAML 都未提供日期 | 加上 `--target-dates`，或設定 stage 的 `target_dates` |
 | `No source_checks configured ... nothing to check` | `source_checks` 是空 map | 這不是檢查通過；先為實際上游 table 設定檢查內容 |
 | `Source check FAILED ... partition_exists` | 上游 partition 尚未產出或 partition key 設錯 | 以 `SHOW PARTITIONS <table>` 確認日期格式與欄位 |
