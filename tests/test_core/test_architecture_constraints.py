@@ -1226,8 +1226,9 @@ class TestS4NoFirstEntityColumn:
 
 #: Trees S5 scans, ``label -> root``. Same pair as S4 and for the same reason:
 #: a *test* that declares a schema the framework then drops is the false green
-#: this file exists to stop. ``scripts/`` is deliberately out -- its "schema"
-#: dicts are report metadata, not parameters; see S5 in the constraints doc.
+#: this file exists to stop. ``scripts/`` is out: when S5 was ruled its only
+#: "schema" dicts were report metadata, in diagnosis scripts since deleted;
+#: adding it back is the user's call -- see S5 in the constraints doc.
 #:
 #: Spelled out rather than aliased to ``ENTITY_SCAN_ROOTS``: the two are equal
 #: today by coincidence of judgement, not by rule, and each constraint's
@@ -1385,9 +1386,9 @@ class TestS5SchemaColumnsLayer:
         """
         assert set(SCHEMA_SCAN_ROOTS) == {"src/recsys_tfb", "tests"}, (
             "S5's scan roots changed. tests/ is in scope on purpose -- every "
-            "one of the 24 original sites was a test. scripts/ is out because its "
-            "schema dicts are report metadata, not parameters. Changing this needs "
-            "the user's sign-off."
+            "one of the 24 original sites was a test. scripts/ is out: its only "
+            "schema dicts were report metadata, in scripts since deleted. Changing "
+            "this needs the user's sign-off."
         )
         for label, root in SCHEMA_SCAN_ROOTS.items():
             found = sum(1 for _ in root.rglob("*.py"))

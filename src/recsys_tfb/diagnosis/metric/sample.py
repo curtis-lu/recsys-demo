@@ -97,7 +97,7 @@ def _guard_reserved_columns(keep_cols: list[str], seg_cols: list[str]) -> None:
     **這不是重複的真實來源，兩者驗的輸入不同**：``core.consistency`` 的 A15
     predicate（``diagnosis_metric_param_errors``）驗「config **宣告**了什麼」，
     在 CLI entry 一秒內擋掉，是主閘；本函式驗「實際 DataFrame **有**什麼欄」。
-    A15 只看 config 宣告的欄；schema 角色欄（entity／item／label 等）撞到
+    A15 只看 ``evaluation.segment_columns``；schema 角色欄（entity／item／label 等）撞到
     保留名只有這裡看得到。**刪掉任何一個都會留下缺口。**
 
     為什麼要在這裡擋：``draw_diagnosis_sample`` 會在 ``sampled`` 上自造
