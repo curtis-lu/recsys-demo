@@ -285,10 +285,9 @@ def test_every_registry_diagnosis_has_a_catalog_entry():
 
     漏掉的話 catalog 會自動建一個 MemoryDataset：``render_diagnosis_pages``
     吃的是 inputs，所以頁照畫、pipeline 跑得完，但**磁碟上沒有那份 JSON**——
-    ``scripts/render_diagnosis.py`` 離線重繪看不到它，``--only-node`` 等切片
-    接續也讀不到而得整段重算，而且沒有任何訊息。這個防護原本由「render 按
-    檔名讀、讀不到就進 missing」順帶提供；render 改吃 inputs 之後（#342，
-    ADR-0020 bug 9）只剩這條測試擋。
+    ``--only-node`` 等切片接續讀不到而得整段重算，而且沒有任何訊息。這個
+    防護原本由「render 按檔名讀、讀不到就進 missing」順帶提供；render 改吃
+    inputs 之後（#342，ADR-0020 bug 9）只剩這條測試擋。
 
     連 ``type`` 一起驗：只驗 key 存在的話，寫成 MemoryDataset 照樣通過，而那
     正是要擋的東西。
@@ -306,13 +305,9 @@ def test_every_registry_diagnosis_has_a_catalog_entry():
         key = f"evaluation_{name}"
         assert key in catalog, (
             f"{key} 不在 catalog.yaml——catalog 會改生 MemoryDataset，頁照畫"
-            "但 JSON 不落地，離線重繪與切片接續都看不到它"
+            "但 JSON 不落地，切片接續看不到它"
         )
         assert catalog[key]["type"] == "JSONDataset", (
             f"{key} 的 type 是 {catalog[key]['type']}，"
             "非 JSONDataset 就不會有磁碟產物"
-        )
-        assert catalog[key]["filepath"].endswith(f"diagnosis/{name}.json"), (
-            f"{key} 的 filepath 不是 diagnosis/{name}.json——"
-            "scripts/render_diagnosis.py 按檔名讀，路徑不對離線重繪就讀不到"
         )

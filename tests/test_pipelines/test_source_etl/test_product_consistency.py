@@ -161,7 +161,7 @@ def test_lint_uses_consistency_predicate_for_config_side():
 
     # PRODUCTS is a flat single-level list literal in the generator; this regex
     # assumes that (no nested brackets). Fine today; revisit if it ever nests.
-    gen = (REPO_ROOT / "scripts/generate_synthetic_data.py").read_text()
+    gen = (REPO_ROOT / "scripts/local/generate_synthetic_data.py").read_text()
     m = re.search(r"PRODUCTS\s*=\s*\[(.*?)\]", gen, re.S)
     syn = sorted(re.findall(r'"([a-z_]+)"', m.group(1)))
     assert syn == declared, f"synthetic PRODUCTS {syn} != declared {declared}"

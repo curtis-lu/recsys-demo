@@ -11,7 +11,7 @@ import pytest
 
 from recsys_tfb.evaluation import report_builder as rb
 from recsys_tfb.evaluation.report_builder import _dataset_overview
-from scripts.migrate_evaluation_results_keys import (
+from scripts.migrations.migrate_evaluation_results_keys import (
     RENAMES,
     apply_file,
     find_files,

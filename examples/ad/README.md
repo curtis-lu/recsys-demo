@@ -5,7 +5,7 @@
 ## 為什麼有這個示例
 
 - **後面幾張票的新路徑要有地方實跑。** `occasion` 角色（#428）、item 清單從資料數（#379）、候選層級特徵表（#380）、預測品質指標家族（#381），商銀示例資料一條都走不到；沒有這份資料，那幾張票只能靠單元測試。`event` 角色（#378）已用這份資料跑綠過，現在換成 `occasion` 示範。
-- **本機唯一真的跑 source_etl 的地方。** 商銀示例的 `scripts/local_spark_setup.py` 直接把來源表寫進 Hive，跳過 source_etl；這個示例從原始表開始，四條 ETL 都要跑過。第一次實跑就踩到 #390，見〈踩到的框架問題〉。
+- **本機唯一真的跑 source_etl 的地方。** 商銀示例的 `scripts/local/local_spark_setup.py` 直接把來源表寫進 Hive，跳過 source_etl；這個示例從原始表開始，四條 ETL 都要跑過。第一次實跑就踩到 #390，見〈踩到的框架問題〉。
 
 設計依據：ADR-0021（`time` 維持時段、`event` 是選用角色）、ADR-0025（`occasion` 角色，query group 因它變寬）、ADR-0026（特徵表照接的鍵分兩類）、`docs/notes/2026-09-16-event-support-plan.md` 的 P1。
 

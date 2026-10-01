@@ -29,8 +29,8 @@ guessed at.
 
 Run from the repo root::
 
-    PYTHONPATH=src .venv/bin/python scripts/migrate_evaluation_results_keys.py data/models
-    PYTHONPATH=src .venv/bin/python scripts/migrate_evaluation_results_keys.py data/models --apply
+    PYTHONPATH=src .venv/bin/python scripts/migrations/migrate_evaluation_results_keys.py data/models
+    PYTHONPATH=src .venv/bin/python scripts/migrations/migrate_evaluation_results_keys.py data/models --apply
 """
 from __future__ import annotations
 

@@ -32,7 +32,7 @@ sort-once bootstrap
 每個 item 的 AUC CI 都要靠分層 cluster bootstrap（見
 ``recsys_tfb.diagnosis.metric.uncertainty.iter_stratified_cluster_multipliers``
 ——本模組不寫第二份重抽迴圈，直接共用那份骨架）。試作腳本
-（``scripts/item_ability_diagnosis.py``）每次呼叫 ``weighted_auc`` 都重新排序
+（``scripts/item_ability_diagnosis.py``，commit d94fa0c4 帶入，已刪）每次呼叫 ``weighted_auc`` 都重新排序
 一次分數，公司規模（≈25 萬 query × 22 item ≈ 550 萬列）下這是
 ``n_items × (n_boot + 2)`` 次排序，慢到無法接受。
 
@@ -43,7 +43,7 @@ bootstrap 迴圈內只做「拿乘數 → 乘上 inclusion_weight → 依既定�
 → 呼叫 weighted_auc_presorted」。``test_bootstrap_sorts_once_per_item_regardless_of_n_boot``
 把這個效能宣稱釘死：排序次數固定是 ``2 × n_items``，與 ``n_boot`` 無關。
 
-三個相對於試作腳本（``scripts/item_ability_diagnosis.py``）的行為修正
+三個相對於試作腳本（``scripts/item_ability_diagnosis.py``，commit d94fa0c4 帶入，已刪）的行為修正
 -----------------------------------------------------------------------
 1. **讀不到分數欄直接 raise，不自己找一欄頂替。** 理由與 ``config_shift``
    相同：raw／centered AUC 是在模型輸出的 logit 空間上算的，換一個空間的量
@@ -234,7 +234,7 @@ def weighted_auc_presorted(
 
     權重為 0 的列自然貢獻 0（正例／負例權重和的加總本來就不含它），所以不需
     要另外過濾掉權重為 0 的列——原版 ``weighted_auc``（``scripts/
-    item_ability_diagnosis.py``）的 ``keep = w > 0`` 過濾在這裡拿掉了：過濾
+    item_ability_diagnosis.py``，commit d94fa0c4 帶入，已刪）的 ``keep = w > 0`` 過濾在這裡拿掉了：過濾
     會位移陣列索引，跟 ``tie_starts`` 記錄的絕對位置對不上。兩者在權重非負
     時數學上等價（``inclusion_weight`` 與 bootstrap 乘數都不會是負值）。
     """

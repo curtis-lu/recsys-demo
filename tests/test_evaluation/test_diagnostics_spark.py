@@ -302,9 +302,9 @@ class TestAggregateReportDiagnostics:
             assert all(isinstance(c, int) for c in out[key]["columns"]), key
 
     def test_columns_are_carried_so_the_payload_renders_standalone(self, spark):
-        """欄名要跟著 payload 走，不能在重繪時從 parameters 再推一次。
+        """欄名要跟著 payload 走，不能在渲染時從 parameters 再推一次。
 
-        離線重繪拷回來的是 JSON，不保證同一份 parameters 也拷了、更不保證那
+        JSON 落地後可能在 parameters 改過之後才被讀回（切片接續），不保證那
         份 parameters 的 schema 與產生這份 JSON 時相同。
         """
         out = aggregate_report_diagnostics(

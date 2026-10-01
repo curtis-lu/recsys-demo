@@ -10,7 +10,7 @@
    （``p_k_given_j``），以及這個條件機率相對 k 的基礎購買率高多少
    （``lift``）。
 
-移植來源：``scripts/suppression_ledger_diagnosis.py:388-757`` 的
+移植來源：試作腳本 ``scripts/suppression_ledger_diagnosis.py:388-757``（commit d94fa0c4 帶入，已刪）的
 ``analyze_suppression``（壓制帳本部分）。輸出鍵沿用它的 ``:727-757`` 那份
 return dict——那是唯一真實來源。``cross_purchase_stats`` 是全新函式，語意
 取代（不是移植）``cross_purchase.py`` 的 Spark 版本。

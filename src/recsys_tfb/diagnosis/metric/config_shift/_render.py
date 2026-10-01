@@ -1,9 +1,9 @@
 """config_shift 的呈現層：把 ``compute`` 的 JSON 轉成一串 ``ReportSection``。
 
 **為什麼這一層是純函式**：呈現是「常常變動」的那一層（換圖、換排版、換措辭），
-計算是「該持久化」的那一層。只要 ``render`` 只吃 ``compute`` 的 dict，使用者就
-能把公司環境跑出來的 JSON 拷回本機、用離線工具秒級重繪，不必為了改一句說明
-重跑一次 Spark。所以這個模組**不 import pyspark、不讀檔、不做任何計算**——
+計算是「該持久化」的那一層。``render`` 只吃 ``compute`` 落地的 dict，改呈現就
+不必動計算：``--only-node render_diagnosis_pages`` 從 JSON 重畫、不重算，單元
+測試也直接餵 dict。所以這個模組**不 import pyspark、不讀檔、不做任何計算**——
 出現在報表上的每個數字都必須已經在 JSON 裡。
 
 **為什麼是「多個 section」而不是一個**（版面定案，後四項診斷照抄這個形狀）：

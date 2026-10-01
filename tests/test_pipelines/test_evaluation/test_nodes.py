@@ -1871,6 +1871,7 @@ class TestDrawDiagnosisSampleNode:
         direct_pdf, direct_meta = draw_diagnosis_sample(
             self._eval_predictions(spark).drop(PARTITION_FINGERPRINT_COLUMN),
             params,
+            segment_columns=[],
         )
         node_pdf, node_meta = nodes.draw_diagnosis_sample_node(self._eval_predictions(spark), _no_segments(params), params)
         assert node_meta == direct_meta

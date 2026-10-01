@@ -266,8 +266,8 @@ def aggregate_report_diagnostics(
     關掉的家族**不放進 payload**（不是放空的）：空的看起來像「量到了、結果
     什麼都沒有」，那是這次重構要避免的誤讀。
 
-    ``columns`` 跟著 payload 走，好讓這份 JSON 拷到別的環境也能單獨重繪——
-    重繪端不保證拿得到同一份 ``parameters``。
+    ``columns`` 跟著 payload 走：JSON 落地後可能在 ``parameters`` 改過之後
+    才被讀回（切片接續），讀回端不保證拿得到同一份 ``parameters``。
     """
     out: dict = {
         "columns": {

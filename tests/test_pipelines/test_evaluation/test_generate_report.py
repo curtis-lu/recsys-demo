@@ -541,53 +541,40 @@ _PLOTLY_DIV_ID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
-def test_render_pages_match_the_file_based_path(tmp_path, monkeypatch):
-    """Behaviour guard: the same results draw the same pages whether read by
-    file name (the old path) or taken as inputs (the new one).
+def test_render_pages_survive_a_json_round_trip(tmp_path, monkeypatch):
+    """Behaviour guard: results read back from JSON draw the same pages as
+    the in-memory results of the run that computed them.
 
-    Old path: ``assemble_diagnosis_pages(load_results(dir)[0], ...)``. The new
-    path gets catalog-loaded dicts, so the results go through a JSON file and
-    back here too. Plotly makes a fresh div id each time; the comparison
-    strips it.
+    A slice that skips the diagnosis nodes (``--only-node`` /
+    ``--from-node``) hands ``render_diagnosis_pages`` the catalog's
+    JSONDataset loads, not ``compute``'s own dicts: tuples come back as
+    lists, int keys as strings. A ``render`` that leans on either draws
+    differently, or raises, only on resume. Plotly makes a fresh div id each
+    time; the comparison strips it.
     """
-    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-    from recsys_tfb.diagnosis.metric.results import load_results
-    from recsys_tfb.evaluation.report_builder import assemble_diagnosis_pages
-    from recsys_tfb.pipelines.evaluation.nodes import (
-        _diagnosis_pages_dir,
-        render_diagnosis_pages,
-    )
+    from recsys_tfb.pipelines.evaluation.nodes import render_diagnosis_pages
 
     monkeypatch.chdir(tmp_path)
     params = _render_params(config_shift=True)
     sample = (_diag_sample_pdf(),
               {"n_queries": 40, "sampling_description": SAMPLING_DESCRIPTION})
-    diag_dir = _diagnosis_pages_dir(params)
-    diag_dir.mkdir(parents=True)
-    for name, result in zip(DIAGNOSES, _node_outputs(params, sample)):
-        (diag_dir / f"{name}.json").write_text(json.dumps(result),
-                                               encoding="utf-8")
-    read_back = [
-        json.loads((diag_dir / f"{name}.json").read_text(encoding="utf-8"))
-        for name in DIAGNOSES
-    ]
+    outputs = _node_outputs(params, sample)
 
-    file_based = assemble_diagnosis_pages(
-        load_results(diag_dir)[0], params, tmp_path / "file_based")
-    from_inputs = [Path(p) for p in render_diagnosis_pages(params, *read_back)]
+    def drawn(results):
+        pages = [Path(p) for p in render_diagnosis_pages(params, *results)]
+        return {
+            p.name: (_PLOTLY_DIV_ID.sub("ID", p.read_text(encoding="utf-8"))
+                     if p.suffix == ".html" else p.read_bytes())
+            for p in pages
+        }
 
-    assert sorted(p.name for p in file_based) == \
-        sorted(p.name for p in from_inputs)
-    assert "01-config-shift.html" in {p.name for p in from_inputs}
-    by_name = {p.name: p for p in from_inputs}
-    for old in file_based:
-        new = by_name[old.name]
-        if old.suffix == ".html":
-            assert _PLOTLY_DIV_ID.sub("ID", old.read_text(encoding="utf-8")) \
-                == _PLOTLY_DIV_ID.sub("ID", new.read_text(encoding="utf-8")), \
-                old.name
-        else:
-            assert old.read_bytes() == new.read_bytes(), old.name
+    in_memory = drawn(outputs)
+    read_back = drawn([json.loads(json.dumps(r)) for r in outputs])
+
+    assert "01-config-shift.html" in in_memory
+    assert sorted(read_back) == sorted(in_memory)
+    for name, content in in_memory.items():
+        assert read_back[name] == content, name
 
 
 # =====================================================================
@@ -596,7 +583,7 @@ def test_render_pages_match_the_file_based_path(tmp_path, monkeypatch):
 
 
 def test_generate_report_takes_no_spark_dataframe():
-    """``generate_report`` 是純函式——這是主報表能離線重繪的前提。
+    """``generate_report`` 是純函式——這是 ``--only-node generate_report`` 不重算任何 Spark 計算就能重繪主報表的前提。
 
     用簽章驗而不是「跑跑看有沒有用到 Spark」：後者在 diagnostics 關閉時會
     假綠（那條路徑本來就不碰 sdf）。

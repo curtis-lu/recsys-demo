@@ -43,7 +43,7 @@ per-item mAP 變化多少（Δ）**。
 偏移整個漏掉**，所以 ``query_offset_spread`` 是必要的第二個視角，且它對兩種
 context 都成立。context 欄在 query 內非常數時 ``notes`` 會標明。
 
-三個相對於試作腳本（``scripts/config_sorting_shift_diagnosis.py``）的行為修正
+三個相對於試作腳本（``scripts/config_sorting_shift_diagnosis.py``，commit d94fa0c4 帶入，已刪）的行為修正
 --------------------------------------------------------------------------
 1. **讀不到分數欄直接 raise，不自己找一欄頂替。**
    offset 活在**模型輸出的 log-odds 空間**，只有模型原始輸出算得出有意義的

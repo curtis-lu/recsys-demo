@@ -12,7 +12,7 @@
 ```bash
 cd <repo-or-worktree-root>
 export SPARK_CONF_DIR=$PWD/conf/spark-local
-PYTHONPATH=src .venv/bin/python scripts/local_spark_setup.py        # 產合成資料 + 建 ml_recsys.* 表
+PYTHONPATH=src .venv/bin/python scripts/local/local_spark_setup.py        # 產合成資料 + 建 ml_recsys.* 表
 ```
 
 `local_spark_setup.py` 會：合成 parquet（缺則自動跑 `generate_synthetic_data.py`）→ `snap_date`
@@ -27,12 +27,12 @@ PYTHONPATH=src .venv/bin/python scripts/suggest_categorical_cols.py <args>
 PYTHONPATH=src .venv/bin/python scripts/sampling_overrides_editor.py <args>
 ```
 
-端到端一鍵：`bash scripts/local_e2e.sh`。
+端到端一鍵：`bash scripts/local/local_e2e.sh`。
 
 ## 重置
 
 ```bash
-PYTHONPATH=src .venv/bin/python scripts/local_spark_setup.py --reset   # rm warehouse+metastore 後重建
+PYTHONPATH=src .venv/bin/python scripts/local/local_spark_setup.py --reset   # rm warehouse+metastore 後重建
 ```
 
 ## 互動查表（ad-hoc）
@@ -41,9 +41,9 @@ PYTHONPATH=src .venv/bin/python scripts/local_spark_setup.py --reset   # rm ware
 `data/local_warehouse`、metadata 在內嵌 Derby `data/metastore_db`，跨行程持久）：
 
 ```bash
-bash scripts/local_spark_shell.sh                                    # pyspark：Python REPL，spark 已建好
-bash scripts/local_spark_shell.sh sql                                # spark-sql：純 SQL 提示符
-bash scripts/local_spark_shell.sh sql -e "SHOW TABLES IN ml_recsys"  # 一行式非互動查詢
+bash scripts/local/local_spark_shell.sh                                    # pyspark：Python REPL，spark 已建好
+bash scripts/local/local_spark_shell.sh sql                                # spark-sql：純 SQL 提示符
+bash scripts/local/local_spark_shell.sh sql -e "SHOW TABLES IN ml_recsys"  # 一行式非互動查詢
 ```
 
 pyspark REPL 裡：

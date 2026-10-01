@@ -897,9 +897,10 @@ def _bindings(targets, value):
     Tuple targets are paired positionally, so
     ``entity_cols, item_col = schema["entity"], schema["item"]`` binds only the
     left name. That form is not hypothetical here: the line directly above the
-    known ``scripts/shap_margin_summary.py`` offender is
+    offender in the since-deleted ``scripts/shap_margin_summary.py``
+    (added in commit 198eae60) was
     ``time_col, item_col, label_col = schema["time"], schema["item"], ...``, so
-    it is demonstrably how this repo unpacks a schema. A starred target
+    it was demonstrably how this repo unpacked a schema. A starred target
     (``first, *rest = ...``) is skipped -- positions stop lining up, and that
     spelling is listed as a blind spot rather than guessed at.
     """
@@ -1225,8 +1226,9 @@ class TestS4NoFirstEntityColumn:
 
 #: Trees S5 scans, ``label -> root``. Same pair as S4 and for the same reason:
 #: a *test* that declares a schema the framework then drops is the false green
-#: this file exists to stop. ``scripts/`` is deliberately out -- its "schema"
-#: dicts are report metadata, not parameters; see S5 in the constraints doc.
+#: this file exists to stop. ``scripts/`` is out: when S5 was ruled its only
+#: "schema" dicts were report metadata, in diagnosis scripts since deleted;
+#: adding it is the user's call -- see S5 in the constraints doc.
 #:
 #: Spelled out rather than aliased to ``ENTITY_SCAN_ROOTS``: the two are equal
 #: today by coincidence of judgement, not by rule, and each constraint's
@@ -1384,9 +1386,9 @@ class TestS5SchemaColumnsLayer:
         """
         assert set(SCHEMA_SCAN_ROOTS) == {"src/recsys_tfb", "tests"}, (
             "S5's scan roots changed. tests/ is in scope on purpose -- every "
-            "one of the 24 original sites was a test. scripts/ is out because its "
-            "schema dicts are report metadata, not parameters. Changing this needs "
-            "the user's sign-off."
+            "one of the 24 original sites was a test. scripts/ is out: its only "
+            "schema dicts were report metadata, in scripts since deleted. Changing "
+            "this needs the user's sign-off."
         )
         for label, root in SCHEMA_SCAN_ROOTS.items():
             found = sum(1 for _ in root.rglob("*.py"))
@@ -2030,7 +2032,7 @@ class TestS7DerivedKeysAreReadNotRespelled:
         )
         for label, root in KEY_SCAN_ROOTS.items():
             found = sum(1 for _ in root.rglob("*.py"))
-            assert found > 10, f"{label} -> {root} holds {found} .py files"
+            assert found > 5, f"{label} -> {root} holds {found} .py files"
 
     def test_catches_the_plus_spelling(self, tmp_path):
         (tmp_path / "m.py").write_text(

@@ -1,7 +1,7 @@
 """Tests for the one-time logs/ layout migration script."""
 from pathlib import Path
 
-from scripts.migrate_logs_layout import Move, apply_moves, plan_moves
+from scripts.migrations.migrate_logs_layout import Move, apply_moves, plan_moves
 
 
 def _touch(p: Path, content: str = "{}\n") -> None:

@@ -5789,9 +5789,9 @@ def train_version_landed_errors(
       that base was built.
 
     Both end in a full dataset run. The mode deliberately does not build the
-    missing variant itself: it stays "add a test month", and
-    ``scripts/rebuild_eval_month.sh`` does not grow back the train rebuild
-    ADR-0012 took out of it.
+    missing variant itself: it stays "add a test month", and the
+    ``--rebuild-dates`` recipe for a backfilled month does not grow back the
+    train rebuild ADR-0012 took out of it.
 
     NOT aggregated by :func:`validate_config_consistency`: it needs the
     ``--only-test-months`` flag and the metastore, neither of which that gate

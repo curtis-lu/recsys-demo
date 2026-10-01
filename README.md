@@ -185,7 +185,7 @@ item 自己的屬性（例如產品類型）不會另外變成特徵；模型學
 
 這一節帶你把自己的題目跑完一輪。主線用銀行產品推薦；廣告情境不一樣的地方，放在每一步最後的「**廣告情境**」框裡。
 
-開始前：照 [`using-a-release.md`](docs/operations/user-guides/using-a-release.md) 取得框架的一個發行版（git tag）並裝好，而且執行環境已經連得上 Spark 與 Hive。**想先看框架跑一次**：在本機建好環境（[`local-spark-setup.md`](docs/operations/dev-setup/local-spark-setup.md)）後，`bash scripts/local_e2e.sh` 用合成資料跑完銀行示例，`bash examples/ad/run_e2e.sh` 跑完廣告示例。
+開始前：照 [`using-a-release.md`](docs/operations/user-guides/using-a-release.md) 取得框架的一個發行版（git tag）並裝好，而且執行環境已經連得上 Spark 與 Hive。**想先看框架跑一次**：在本機建好環境（[`local-spark-setup.md`](docs/operations/dev-setup/local-spark-setup.md)）後，`bash scripts/local/local_e2e.sh` 用合成資料跑完銀行示例，`bash examples/ad/run_e2e.sh` 跑完廣告示例。
 
 ### 步驟 0：建自己的設定目錄
 

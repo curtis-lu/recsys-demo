@@ -1,6 +1,6 @@
 """廣告情境示例的本機 Spark 環境：清掉 data/、產生原始表、寫進 Hive 的 ad_raw 資料庫。
 
-對應銀行示例的 scripts/local_spark_setup.py，差在兩件事：
+對應銀行示例的 scripts/local/local_spark_setup.py，差在兩件事：
 
 - 寫進 Hive 的是**上游原始表**（ad_raw.*），不是框架的來源表。來源表由 source_etl
   從這裡算出來，所以本示例的 source_etl 是真的會跑的。

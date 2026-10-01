@@ -119,21 +119,21 @@ mkdir -p conf/production
 
 ## 6. 確認這份程式碼在你的機器上跑得起來
 
-repo 附的不是資料，是**產生器**：`data/` 在版本控制裡是空的，`scripts/generate_synthetic_data.py` 會在需要時產生合成資料，`scripts/local_spark_setup.py` 發現缺檔時會自動呼叫它。所以你 clone 下來看到空的 `data/` 是正常的。
+repo 附的不是資料，是**產生器**：`data/` 在版本控制裡是空的，`scripts/local/generate_synthetic_data.py` 會在需要時產生合成資料，`scripts/local/local_spark_setup.py` 發現缺檔時會自動呼叫它。所以你 clone 下來看到空的 `data/` 是正常的。
 
 跑之前先確認**作業系統時區與 Spark 設定的時區一致**。`conf/spark-local/spark-defaults.conf` 把 `spark.sql.session.timeZone` 設為 `Asia/Taipei`；作業系統時區不同時，以月份為單位的日期過濾可能篩不到任何資料，而且不會報錯，只會得到 0 列。對齊的方式是執行前設好環境變數：
 
 ```bash
 export TZ=Asia/Taipei
 export SPARK_CONF_DIR=$PWD/conf/spark-local
-.venv/bin/python scripts/local_spark_setup.py
+.venv/bin/python scripts/local/local_spark_setup.py
 .venv/bin/python -m recsys_tfb dataset  --env local
 .venv/bin/python -m recsys_tfb training --env local
 ```
 
 `local_spark_setup.py` 會建立本機 warehouse 與 metastore，並把合成資料載入成 `ml_recsys.*` 表（`ml_recsys` 是 `conf/base/parameters.yaml` 裡 `hive.db` 的值）。
 
-要一次跑完整條鏈（含 inference，並在結尾斷言三張推論表的分區結構），用 `bash scripts/local_e2e.sh`。**v0.1.1 起**這支腳本預設使用 repo 根目錄的 `.venv/bin/python`，要指定別的直譯器就設 `RECSYS_PYTHON=<python 路徑>`，找不到可執行的直譯器時會直接中止；`v0.1.0` 的版本把直譯器路徑寫死成開發者機器上的絕對路徑，在別的機器上跑不起來。腳本開頭會 `--reset`，本機 warehouse 與 metastore 會被清掉重建。
+要一次跑完整條鏈（含 inference，並在結尾斷言三張推論表的分區結構），用 `bash scripts/local/local_e2e.sh`。**v0.1.1 起**這支腳本預設使用 repo 根目錄的 `.venv/bin/python`，要指定別的直譯器就設 `RECSYS_PYTHON=<python 路徑>`，找不到可執行的直譯器時會直接中止；`v0.1.0` 的版本把直譯器路徑寫死成開發者機器上的絕對路徑，在別的機器上跑不起來。腳本開頭會 `--reset`，本機 warehouse 與 metastore 會被清掉重建。
 
 本機環境的完整說明見 [local-spark-setup.md](../dev-setup/local-spark-setup.md)。接自己的資料從 [README §5 快速上手](../../../README.md#5-快速上手) 開始。
 

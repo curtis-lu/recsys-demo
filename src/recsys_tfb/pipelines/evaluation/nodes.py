@@ -1592,7 +1592,7 @@ def render_diagnosis_pages(parameters: dict, *diagnosis_results) -> list[str]:
 
     **What reading by file name used to guard for free**: a registry
     diagnosis with no catalog entry. The catalog then makes a MemoryDataset,
-    the page is drawn and no JSON lands, so offline redraw and slice resumes
+    the page is drawn and no JSON lands, so slice resumes (``--only-node``)
     never see it. ``tests/test_diagnosis/test_metric/test_contract.py::
     test_every_registry_diagnosis_has_a_catalog_entry`` guards that now.
 
