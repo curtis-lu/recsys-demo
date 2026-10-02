@@ -2511,6 +2511,36 @@ class TestEvaluationRunNamesItsDates:
                                    pd.Timestamp("2026-03-31")]
 
 
+class TestEvaluationHandsOverTheCompareTables:
+    """The command reads each model_version compare source's physical table
+    off the catalog and hands it to the run as ``_compare_source_tables``:
+    ``load_compare_predictions`` only receives ``parameters``, and
+    ``conf/dev/catalog.yaml`` names tables differently from their entries.
+    """
+
+    def test_tables_come_from_the_catalog_entries(self, tmp_path, monkeypatch):
+        for name in ("enriched_eval_predictions", "ranked_predictions"):
+            monkeypatch.setitem(_REAL_CATALOG, name, {
+                **_REAL_CATALOG[name], "table": f"recsys_prod_{name}"})
+        execute = MagicMock(return_value=True)
+        result, _ = _run_evaluation_command(
+            tmp_path, ["evaluation", "--model-version", _EVAL_MV],
+            catalog_extra=("ranked_predictions",),
+            extra_patches=(
+                patch("recsys_tfb.__main__._execute_pipeline", execute),
+                patch("recsys_tfb.__main__._write_pipeline_manifest"),
+            ),
+        )
+        assert result.exit_code == 0, result.output
+        runtime_params = execute.call_args.args[2]
+        # training_eval_predictions is not in this catalog, so it has no row.
+        assert runtime_params["_compare_source_tables"] == {
+            "enriched_eval_predictions":
+                "ml_recsys.recsys_prod_enriched_eval_predictions",
+            "ranked_predictions": "ml_recsys.recsys_prod_ranked_predictions",
+        }
+
+
 class TestAnEvaluationMonthNotWrittenPullsTheJoinBack:
     """ADR-0018 decision 1: ``--from-node compute_metrics`` reads the table, and
     the table exists from the first evaluation onwards, so only a month plan can

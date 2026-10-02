@@ -84,6 +84,7 @@ from recsys_tfb.evaluation.report_builder import (
     assemble_report,
 )
 from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
+    compare_source_table,
     load_compare_predictions as _load_compare,
 )
 from recsys_tfb.pipelines.evaluation.steps.compare_universe import (
@@ -2075,7 +2076,8 @@ def validate_enriched_eval_predictions_present(
     and nothing in this run computed them.
     """
     mv = parameters.get("model_version", "unknown")
-    hive_db = (parameters.get("hive") or {}).get("db", "ml_recsys")
+    # The table the catalog read, not the entry name (conf/dev prefixes it).
+    table = compare_source_table(parameters, "enriched_eval_predictions")
 
     # Collect-all: a partition not written for this directory must not hide
     # the dates without rows from the same check, nor the other way round.
@@ -2095,7 +2097,7 @@ def validate_enriched_eval_predictions_present(
             f"evaluation.snap_date date(s) {missing}"
         )
         problems.append(
-            f"{hive_db}.enriched_eval_predictions has no partition "
+            f"{table} has no partition "
             f"for {asked} "
             f"model_version={mv!r}. "
             "Run `python -m recsys_tfb evaluation` (with or without "

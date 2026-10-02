@@ -75,6 +75,9 @@ from recsys_tfb.pipelines.dataset.run_contract import (
     unlanded_train_tables,
     versions_for_run,
 )
+from recsys_tfb.pipelines.evaluation.compare_tables import (
+    inject_compare_source_tables,
+)
 from recsys_tfb.pipelines.training import run_contract as training_contract
 from recsys_tfb.pipelines.training.cache_sources import inject_cache_source_tables
 
@@ -2110,6 +2113,9 @@ def evaluation(
         _, listing_catalog_config = _resolve_catalog(
             config, params, runtime_params)
     listing_catalog = DataCatalog(listing_catalog_config)
+    # The tables a model_version compare source reads, as this catalog names
+    # them: the loader reads B outside the catalog and sees only parameters.
+    inject_compare_source_tables(runtime_params, listing_catalog_config)
     month_plans = None
     extra_datasets = None
     if eval_dates:
