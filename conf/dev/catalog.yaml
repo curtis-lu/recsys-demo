@@ -1,14 +1,27 @@
 # conf/dev/ 疊在 conf/base/ 上面：同名的鍵以這裡為準，沒寫的鍵沿用 base（逐鍵合併，
 # 所以每個條目只要寫 table 一行）。
 #
-# 這份檔只做一件事：幫框架自己寫的 17 張 Hive 表加上前綴 recsys_prod_（prod＝產品），
-# 示範怎麼跟同一個 database 裡的其他表分開命名。
+# 這份檔只做一件事：幫每張 Hive 表加上前綴 recsys_prod_（prod＝產品），示範怎麼跟同一個
+# database 裡的其他表分開命名。
 # - 前綴可以換成你自己的。
 # - 換了表名，框架就讀寫新名字的那張表。舊表不會被搬過去，也不會被刪。
-# - 來源表（feature_table／label_table／sample_pool／inference_population，以及選用的
-#   candidate_feature_table）不在這裡：它們的名字由你的上游決定，不是框架決定的。
-# - 這份檔是框架附的：base 新增一張框架寫的表時，升級會在這裡補一條（見
+# - 來源表的名字要跟寫它的那一方對得上。用 repo 附的 source ETL 產生的話，它在
+#   conf/dev/parameters_*_etl.yaml 裡也加了同一個前綴；你的來源表由別的流程產生，就照那邊的實際表名寫。
+# - 這份檔是框架附的：base 新增一張 Hive 表時，升級會在這裡補一條（見
 #   docs/operations/user-guides/using-a-release.md §5）。
+
+# --- 來源表（source ETL 寫、pipeline 唯讀）---
+feature_table:
+  table: recsys_prod_feature_table
+
+label_table:
+  table: recsys_prod_label_table
+
+sample_pool:
+  table: recsys_prod_sample_pool
+
+inference_population:
+  table: recsys_prod_inference_population
 
 # --- dataset ---
 val_keys:

@@ -4,5 +4,5 @@ SELECT DISTINCT
     snap_date,
     user_id,
     slot_id
-FROM ${target_db}.feature_table
+FROM ${target_db}.${table_prefix}feature_table
 WHERE snap_date = DATE('${target_date}')

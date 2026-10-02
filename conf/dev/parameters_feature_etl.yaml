@@ -1,0 +1,64 @@
+# conf/dev/ 的 source ETL 設定：ETL 寫的每張表（中介表與最終表）都加前綴 recsys_prod_，
+# 跟 conf/dev/catalog.yaml 的來源表名對得上。
+# - variables.table_prefix：SQL 讀其他 ETL 表時用它（${target_db}.${table_prefix}<表名>）。
+# - tables：疊加層對清單是整段取代、不是逐項合併，所以整段從 conf/base/ 的同名檔抄過來，
+#   只把 name 與 depends_on 加上前綴。conf/base/ 的 tables 改了，這裡要跟著改。
+# - audit.table：ETL 稽核紀錄表也加前綴。
+
+feature_etl:
+  variables:
+    table_prefix: recsys_prod_
+  tables:
+  - name: recsys_prod_feature_aum
+    sql_file: feature/feature_aum.sql
+    partition_by:
+      snap_date: DATE
+    primary_key:
+    - snap_date
+    - cust_id
+  - name: recsys_prod_feature_sav
+    sql_file: feature/feature_sav.sql
+    partition_by:
+      snap_date: DATE
+    primary_key:
+    - snap_date
+    - cust_id
+  - name: recsys_prod_feature_ccard
+    sql_file: feature/feature_ccard.sql
+    partition_by:
+      snap_date: DATE
+    primary_key:
+    - snap_date
+    - cust_id
+  - name: recsys_prod_feature_info
+    sql_file: feature/feature_info.sql
+    partition_by:
+      snap_date: DATE
+    primary_key:
+    - snap_date
+    - cust_id
+  - name: recsys_prod_feature_concat
+    sql_file: feature/feature_concat.sql
+    partition_by:
+      snap_date: DATE
+    primary_key:
+    - snap_date
+    - cust_id
+    depends_on:
+    - recsys_prod_feature_aum
+    - recsys_prod_feature_sav
+    - recsys_prod_feature_ccard
+    - recsys_prod_feature_info
+  - name: recsys_prod_feature_table
+    sql_file: feature/feature_table.sql
+    partition_by:
+      snap_date: DATE
+    primary_key:
+    - snap_date
+    - cust_id
+    quality_checks:
+      max_duplicate_key_ratio: 0.0
+    depends_on:
+    - recsys_prod_feature_concat
+  audit:
+    table: recsys_prod_etl_audit_log

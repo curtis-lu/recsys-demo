@@ -4,5 +4,5 @@
 SELECT DISTINCT
     snap_date,
     cust_id
-FROM ${target_db}.feature_concat
+FROM ${target_db}.${table_prefix}feature_concat
 WHERE snap_date = DATE('${target_date}')

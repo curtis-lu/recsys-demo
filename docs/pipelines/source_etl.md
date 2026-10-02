@@ -41,14 +41,16 @@ SELECT
     f.cust_segment_typ,
     COALESCE(l.label, 0) AS label
 FROM candidate_pool p
-LEFT JOIN ${target_db}.feature_table f
+LEFT JOIN ${target_db}.${table_prefix}feature_table f
     ON p.snap_date = f.snap_date
    AND p.cust_id = f.cust_id
-LEFT JOIN ${target_db}.label_table l
+LEFT JOIN ${target_db}.${table_prefix}label_table l
     ON p.snap_date = l.snap_date
    AND p.cust_id = l.cust_id
    AND p.prod_name = l.prod_name
 ```
+
+（`${table_prefix}` 是表名前綴，見 [3.3](#33-table-層級設定)。）
 
 例如 `sample_group_keys: [cust_segment_typ, prod_name, label]` 時，這三個欄位都必須實際存在於 `sample_pool`。其中 `cust_segment_typ` 可由 `feature_table` 取得，`prod_name` 來自候選集合，`label` 則可由 sparse `label_table` left join 後補為 `0`。
 
@@ -140,12 +142,14 @@ YAML 寫 `my_var: "${env.MY_VAR}"` 這種用環境變數帶值的寫法照樣可
 
 | 設定 | 必要性 | 說明 |
 |---|---|---|
-| `name` | 必填 | 輸出 Hive table 名稱，實際寫入 `${target_db}.<name>` |
+| `name` | 必填 | 輸出 Hive table 名稱（含前綴），實際寫入 `${target_db}.<name>` |
 | `sql_file` | 必填 | 相對於 `conf/sql/etl/` 的 SQL 路徑 |
 | `partition_by` | 必填 | 有順序的 `{欄位: Hive 型別}` mapping；不可使用 list |
 | `primary_key` | 建議必填 | 輸出資料的唯一鍵，同時作為 schema contract 與重複鍵檢查依據；沒寫等於 `[]`，schema contract 與重複鍵檢查都不跑 |
 | `depends_on` | 選填 | 文件與順序驗證用途；相依表必須已列在同一份 `tables` 清單的前方；沒寫等於 `[]` |
 | `quality_checks` | 選填 | SQL 寫入後執行的資料品質檢查；沒寫等於 `{}`，下表三個檢查（`min_row_count`、`max_duplicate_key_ratio`、`max_null_ratio`）都不跑 |
+
+**表名前綴**：repo 附的範例 SQL 讀其他 ETL 表時寫 `${target_db}.${table_prefix}<表名>`。`table_prefix` 是 `variables` 裡一個普通的變數，框架不認得它，也不會拿它去改 `name`：`conf/base/` 是空字串；`conf/dev/` 是 `recsys_prod_`，並把整段 `tables` 抄過去、`name` 與 `depends_on` 都寫成帶前綴的完整表名（疊加層對清單是整段取代）。改前綴時這三處要一起改：`variables.table_prefix`、`tables` 的 `name`、`catalog.yaml` 的來源表名。
 
 `tables` 的 list 順序就是實際執行順序。`depends_on` 不會建立 DAG，也不會自動調整順序或檢查其他 ETL 的新鮮度；它只會在初始化時驗證相依表是否已出現在清單前方。
 
@@ -433,6 +437,8 @@ python -m recsys_tfb feature_etl --env dev \
 | `sample_pool` | `${target_db}.sample_pool` | 候選集合完整，與 label／設定中的 item 對齊 |
 | rendered SQL | `rendered_sql_dir/<run_id>/<date>/` | 變數、來源表、filter、join 與 partition 寫入符合預期 |
 | audit records | `${target_db}.etl_audit_log` | table record 與 `__summary__` 狀態為 `success` |
+
+表名是 `conf/base/` 的寫法；用 `conf/dev/` 時每張都多了前綴 `recsys_prod_`（例如 `recsys_prod_feature_table`、`recsys_prod_etl_audit_log`）。
 
 基本驗收查詢：
 

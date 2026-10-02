@@ -13,6 +13,10 @@ label_etl:
   variables:
     # 必填：中介表與最終表寫入的 Hive database；沒寫會被 A59 擋下。
     target_db: "ml_recsys"  # ★換成你的 Hive database 名稱
+    # ETL 寫的每張表（中介表與最終表）的表名前綴。SQL 讀這些表時寫
+    # ${target_db}.${table_prefix}<表名>；tables 的 name 要寫加了前綴的完整表名。
+    # base 不加前綴，conf/dev/ 示範加 recsys_prod_。
+    table_prefix: ""
 
   # 上游 source table 的新鮮度 / schema 檢查。只在加 --source-check 時執行，一般 ETL 不會跑。
   # {}、~、整行不寫，都等於沒有要檢查的上游表。
