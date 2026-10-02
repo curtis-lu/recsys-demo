@@ -193,7 +193,7 @@ item 自己的屬性（例如產品類型）不會另外變成特徵；模型學
 - `conf/dev/` 疊在 `conf/base/` 上面。檔名跟 `conf/base/` 裡的一樣，裡面只寫你要改的鍵，同名的鍵以你的為準。
 - **不要直接改 `conf/base/`**。那是框架附的示例設定，升級時會被新版蓋掉。
 - **pipeline 指令都要帶 `--env dev`**。不帶的話預設是 `local`，你的設定一條都不會生效，而且不會有任何錯誤。
-- **表名前綴**：框架自己寫的 Hive 表，在 `conf/base/catalog.yaml` 裡沒有前綴（例如 `train_keys`）。`conf/dev/catalog.yaml` 幫這 17 張表都加上前綴 `recsys_prod_`，示範怎麼跟同一個 database 裡的其他表分開命名。前綴可以改成你自己的；也可以不加前綴，改用另一個 database（`parameters.yaml` 的 `hive.db`）。來源表（`feature_table` 等）的名字由你的上游決定，不在這份檔裡。
+- **表名前綴**：框架自己寫的 Hive 表，在 `conf/base/catalog.yaml` 裡沒有前綴（例如 `train_keys`）。`conf/dev/catalog.yaml` 幫這 17 張表都加上前綴 `recsys_prod_`（prod＝產品，不是正式環境），示範怎麼跟同一個 database 裡的其他表分開命名。前綴可以改成你自己的。來源表（`feature_table` 等）的名字由你的上游決定，不在這份檔裡。
 - 兩個例外沒有環境分層：來源 SQL（`conf/sql/etl/`）與 Spark 連線設定（看 `SPARK_CONF_DIR`）。怎麼處理見 [`using-a-release.md`](docs/operations/user-guides/using-a-release.md) §5。
 - **已知缺口**：底下還有一層 key 的值（例如 `inference:` 底下的 `products`）是合併、不是取代——你可以改或加 key，但刪不掉 `conf/base/` 裡已有的 key。目前有三個鍵因此要直接改 `conf/base/`，後面用到時會提醒；代價是升級時這幾處要自己合併（issue #477）。
 

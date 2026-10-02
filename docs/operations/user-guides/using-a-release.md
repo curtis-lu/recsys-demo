@@ -94,7 +94,7 @@ repo 已經附了 `conf/dev/`，可以直接當你的環境層。想用別的名
 cp -r conf/dev conf/<你的名字>
 ```
 
-**例外：`conf/dev/catalog.yaml` 是框架附的，升級可能會改到它。** 它幫框架自己寫的 17 張 Hive 表加上前綴 `recsys_prod_`（見 [README](../../../README.md) §5 步驟 0）。`conf/base/catalog.yaml` 新增一張框架寫的表時，新版會在這份檔補一條；你改過這份檔的話，升級時要自己合併。
+**例外：`conf/dev/catalog.yaml` 是框架附的，升級可能會改到它。** 它幫框架自己寫的 17 張 Hive 表加上前綴 `recsys_prod_`（見 [README](../../../README.md) §5 步驟 0）。`conf/base/catalog.yaml` 新增一張框架寫的表時，新版會在這份檔補一條；你改過這份檔的話，升級時要自己合併。複製出去的那份不會跟著升級，新版在 `conf/dev/catalog.yaml` 補的條目要自己抄過去，否則那張表在你的環境裡不帶前綴。
 
 **檔名要和 `conf/base/` 裡的檔案逐字相同**：`conf/dev/parameters_training.yaml` 覆蓋 `conf/base/parameters_training.yaml`，兩邊的內容逐層合併。
 
@@ -109,7 +109,7 @@ cp -r conf/dev conf/<你的名字>
 
 相對地，**`conf/base/catalog.yaml` 是可以疊的**：要換 Hive database 或表名，在 `conf/<env>/catalog.yaml` 覆蓋即可，不必改 base。
 
-另外，`conf/<env>/` 是你自己新增的檔案，不在框架的版本控制裡。`git clean -fdx` 這類清理指令會把它刪掉，跟著 repo 一起做的備份也不會包含它。**請在 repo 以外另存一份。**
+另外，你在 `conf/<env>/` 新增的檔案（上面那份 `conf/dev/catalog.yaml` 除外）不在框架的版本控制裡。`git clean -fdx` 這類清理指令會把它們刪掉，跟著 repo 一起做的備份也不會包含它們。**請在 repo 以外另存一份。**
 
 ### 舊的鍵名多半不會報錯
 

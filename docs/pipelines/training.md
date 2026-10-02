@@ -691,13 +691,13 @@ training 不會建立或更新 `best` model alias。模型必須通過人工審�
 
 ```sql
 SELECT snap_date, prod_name, COUNT(*) AS rows
-FROM ml_recsys.training_eval_predictions
+FROM ml_recsys.recsys_prod_training_eval_predictions
 WHERE model_version = '<model_version>'
 GROUP BY snap_date, prod_name
 ORDER BY snap_date, prod_name;
 ```
 
-實際 database、table 名稱與 partition 欄位以 `conf/base/catalog.yaml` 為準。
+實際 database、table 名稱與 partition 欄位以你的環境疊加後的 catalog 為準：表名看 `conf/dev/catalog.yaml`（上面範例用的就是它的 `recsys_prod_` 表名），其餘看 `conf/base/catalog.yaml`。
 
 ## 7. 版本、重跑與恢復
 

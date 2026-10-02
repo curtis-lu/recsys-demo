@@ -3,8 +3,7 @@
 #
 # 這份檔只做一件事：幫框架自己寫的 17 張 Hive 表加上前綴 recsys_prod_（prod＝產品），
 # 示範怎麼跟同一個 database 裡的其他表分開命名。
-# - 前綴可以換成你自己的；不想要前綴就刪掉這份檔，改用 base 的表名。也可以不動表名，
-#   改 parameters.yaml 的 hive.db 換一個 database。
+# - 前綴可以換成你自己的。
 # - 換了表名，框架就讀寫新名字的那張表。舊表不會被搬過去，也不會被刪。
 # - 來源表（feature_table／label_table／sample_pool／inference_population，以及選用的
 #   candidate_feature_table）不在這裡：它們的名字由你的上游決定，不是框架決定的。

@@ -698,7 +698,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 SELECT snap_date, COUNT(*) AS rows,
        COUNT(DISTINCT cust_id) AS entities,
        COUNT(DISTINCT prod_name) AS items
-FROM ml_recsys.enriched_eval_predictions
+FROM ml_recsys.recsys_prod_enriched_eval_predictions
 WHERE model_version = '<model_version>'
   AND snap_date = '<snap_date>'
 GROUP BY snap_date;

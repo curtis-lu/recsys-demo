@@ -50,7 +50,7 @@ training 與 inference 沒有增量產物，判準仍是 `exists()` 一個。
 與 [`training.md` §7.4](../../pipelines/training.md)。這裡補一件最容易誤會的事：
 
 **版本化是靠 partition column，不是靠表名。** `catalog.yaml` 的 21 個 `HiveTableDataset` 裡（另外 4 個是唯讀的來源表），
-**17 個 pipeline 產物全部帶版本 `partition_filter`**（`base_dataset_version`／`train_variant_id`／
+**17 個 pipeline 產物全部帶版本 `partition_filter`**（`base_dataset_version`／`train_variant_id`／`popularity_source_version`／
 `model_version`）——包括表名看起來完全沒有版本的 `train_keys`。config 變了 → 版本變了 →
 `load()` 只讀新版本的 partition，舊版本的資料不會被讀進來。
 

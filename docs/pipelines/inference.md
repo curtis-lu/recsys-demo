@@ -483,7 +483,7 @@ SELECT snap_date, model_version,
        MAX(score) AS max_score,
        MIN(rank) AS min_rank,
        MAX(rank) AS max_rank
-FROM ml_recsys.ranked_predictions
+FROM ml_recsys.recsys_prod_ranked_predictions
 WHERE model_version = '<model_version>'
   AND snap_date = '<snap_date>'
 GROUP BY snap_date, model_version;
