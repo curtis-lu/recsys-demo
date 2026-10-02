@@ -124,6 +124,32 @@ def test_enriched_validator_raises_when_partition_empty(spark):
         )
 
 
+def test_enriched_validator_names_the_table_the_catalog_names(spark):
+    """The message names the physical table the catalog read, which under
+    ``conf/dev/catalog.yaml`` is not the entry name."""
+    from recsys_tfb.pipelines.evaluation.nodes import (
+        validate_enriched_eval_predictions_present,
+    )
+
+    empty = spark.createDataFrame(
+        [],
+        "cust_id STRING, snap_date STRING, prod_name STRING, "
+        "score DOUBLE, rank INT, label INT",
+    )
+    params = _base_params_for_validator()
+    params["hive"] = {"db": "ml_recsys"}
+    params["_compare_source_tables"] = {
+        "enriched_eval_predictions":
+            "ml_recsys.recsys_prod_enriched_eval_predictions"}
+    with pytest.raises(DataConsistencyError) as excinfo:
+        validate_enriched_eval_predictions_present(
+            empty, _landed_segments(params), params
+        )
+    assert str(excinfo.value).startswith(
+        "ml_recsys.recsys_prod_enriched_eval_predictions has no partition"
+    ), str(excinfo.value)
+
+
 def test_enriched_validator_raises_when_snap_date_filter_yields_empty(spark):
     """DataFrame has rows but no rows match the configured evaluation.snap_date.
     Validator filters then raises.

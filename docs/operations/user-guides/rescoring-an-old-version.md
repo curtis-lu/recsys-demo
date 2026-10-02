@@ -11,7 +11,7 @@ promote 的 `--dry-run` 把某個版本列在 `Not ranked`，你想讓它重新�
 - promote 列的原因是 `records no scored months` → 補不回來。會出現這個原因的版本都是 v0.4.0 之前的程式訓練的（v0.4.0 的 training 一定記下計分月份），見〈[補不回來的情況](#補不回來的情況)〉最後一種。
 - 其他情況（`scored on [...], not on the current scored months`、`no value for <指標> (it has [...])`）→ 往下讀。
 
-下面的指令都用 `--env production`（`production` 是環境名稱的例子，見 [README](../../../README.md) §5 步驟 0；換成你自己取的名字）。本機執行請先照 [local-spark-setup.md](../dev-setup/local-spark-setup.md) 設好環境，並把 `--env` 換成 `local`。
+下面的指令都用 `--env dev`（`dev` 是環境名稱的例子，見 [README](../../../README.md) §5 步驟 0；換成你自己取的名字）。本機執行請先照 [local-spark-setup.md](../dev-setup/local-spark-setup.md) 設好環境，並把 `--env` 換成 `local`。
 
 ## 為什麼這麼麻煩
 
@@ -44,7 +44,7 @@ training 沒有 `--model-version` 這種旗標：`model_version` 是從設定算
 
 ```bash
 mkdir -p rescore-backup
-python scripts/promote_model.py --env production --dry-run | tee rescore-backup/promote-before.txt
+python scripts/promote_model.py --env dev --dry-run | tee rescore-backup/promote-before.txt
 ```
 
 開頭三行：
@@ -94,7 +94,7 @@ cp data/models/<舊版本>/manifest.json rescore-backup/model-manifest.json
 
 manifest 也要備份，因為步驟 3、4 會用這次執行的內容覆寫 `data/models/<舊版本>/manifest.json`：`created_at`、`git_commit`、`run_id` 換成這次的，並多一個 `only_node`。模型本身不變，但「這個版本當初是哪一天、用哪個 commit 訓練的」只剩這份備份記得，做完之後別刪它。
 
-**下面的還原一律改 `conf/base/` 的檔案。** 印出來的 `training:`／`dataset:` 是當時 base 與環境層合併後的結果，已經是完整的一段。環境層（`conf/production/`）只能蓋過 base 的鍵，刪不掉 base 裡多出來的鍵，所以沒辦法拿它來「整段換」。環境層的 `parameters_training.yaml`／`parameters_dataset.yaml` 若也寫了 `training:`／`dataset:` 底下的鍵，步驟 1、2 期間把那些鍵刪掉；步驟 5 會連同它們一起還原。
+**下面的還原一律改 `conf/base/` 的檔案。** 印出來的 `training:`／`dataset:` 是當時 base 與環境層合併後的結果，已經是完整的一段。環境層（`conf/dev/`）只能蓋過 base 的鍵，刪不掉 base 裡多出來的鍵，所以沒辦法拿它來「整段換」。環境層的 `parameters_training.yaml`／`parameters_dataset.yaml` 若也寫了 `training:`／`dataset:` 底下的鍵，步驟 1、2 期間把那些鍵刪掉；步驟 5 會連同它們一起還原。
 
 ## 步驟 1：還原那個版本的 training 設定
 
@@ -124,7 +124,7 @@ test_metrics:
 **確認還原對了**——先不跑任何東西，只看版本號：
 
 ```bash
-python -m recsys_tfb training --env production \
+python -m recsys_tfb training --env dev \
   --base-dataset-version <它的 dataset 版本> --train-variant <它的 train 抽樣版本> \
   --dry-run
 ```
@@ -139,7 +139,7 @@ Model version: <舊版本>
 
 **最常壞的一種**：`Model version` 不是 `<舊版本>`。
 
-`training:` 沒有還原到一模一樣。常見原因：只改了部分鍵；或 `conf/production/parameters_training.yaml` 還留著 `training:` 底下的鍵，蓋過了 base 的值（動手前 ⑤ 最後一段）。修到印出 `<舊版本>` 為止，**不要往下做**——版本號不同，後面每一步都會對著另一個（可能還不存在的）版本做事。
+`training:` 沒有還原到一模一樣。常見原因：只改了部分鍵；或 `conf/dev/parameters_training.yaml` 還留著 `training:` 底下的鍵，蓋過了 base 的值（動手前 ⑤ 最後一段）。修到印出 `<舊版本>` 為止，**不要往下做**——版本號不同，後面每一步都會對著另一個（可能還不存在的）版本做事。
 
 ## 步驟 2：計分月份沒有資料時，補造它
 
@@ -170,7 +170,7 @@ dataset:
 `test_snap_dates` 不參與 `base_dataset_version` 的計算，所以換掉它不會變成另一個 dataset 版本；留著舊的那份，這一步就什麼月份都不會補。
 
 ```bash
-python -m recsys_tfb dataset --env production --only-test-months
+python -m recsys_tfb dataset --env dev --only-test-months
 ```
 
 **成功的話**，log 裡會有：
@@ -192,7 +192,7 @@ train_variant_id:     <它的 train 抽樣版本>
 ## 步驟 3：預測缺的月份
 
 ```bash
-python -m recsys_tfb training --env production \
+python -m recsys_tfb training --env dev \
   --base-dataset-version <它的 dataset 版本> --train-variant <它的 train 抽樣版本> \
   --only-node predict_and_write_test_predictions
 ```
@@ -211,7 +211,7 @@ Model version: <舊版本>
 ## 步驟 4：重算分數
 
 ```bash
-python -m recsys_tfb training --env production \
+python -m recsys_tfb training --env dev \
   --base-dataset-version <它的 dataset 版本> --train-variant <它的 train 抽樣版本> \
   --only-node compute_test_metrics
 ```
@@ -239,7 +239,7 @@ diff -r rescore-backup/conf conf
 **做過步驟 2 的話**，再用現在的設定跑一次 dataset，讓 `latest` 指回現在的版本：
 
 ```bash
-python -m recsys_tfb dataset --env production --only-test-months
+python -m recsys_tfb dataset --env dev --only-test-months
 readlink data/dataset/latest | diff rescore-backup/latest-before.txt -
 ```
 
@@ -250,7 +250,7 @@ log 的 `base_dataset_version:` 要是現在的版本，`diff` 沒有輸出。
 ## 跑完了，怎麼確認真的成功
 
 ```bash
-python scripts/promote_model.py --env production --dry-run | tee rescore-backup/promote-after.txt
+python scripts/promote_model.py --env dev --dry-run | tee rescore-backup/promote-after.txt
 head -3 rescore-backup/promote-after.txt | diff <(head -3 rescore-backup/promote-before.txt) -
 ```
 

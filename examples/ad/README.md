@@ -162,7 +162,7 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 
 ### 1. time 欄必須叫 `snap_date`（#390 的第二件）
 
-`src/recsys_tfb/pipelines/source_etl/checks.py` 的輸出檢查把 `WHERE snap_date = …` 寫死了，而 A32 強制 `sample_pool`、`label_table`、`feature_table` 都要做這些檢查。time 欄換別的名字，source_etl 就壞。所以這個示例的週也叫 `snap_date`。
+`src/recsys_tfb/pipelines/source_etl/checks.py` 的輸出檢查把 `WHERE snap_date = …` 寫死了，而 A32 強制 `sample_pool`、`label_table`、`feature_table` 都要做這些檢查（A32 只認這三個不帶前綴的名字；`conf/dev/` 的表名加了前綴，它認不得，但那幾份設定照樣寫了這些檢查）。time 欄換別的名字，source_etl 就壞。所以這個示例的週也叫 `snap_date`。
 
 ### 2. 兩種 SQL 寫法讓第二個日期寫不進去（#390）
 

@@ -169,7 +169,8 @@ def main() -> None:
 
     from recsys_tfb.core.config import ConfigLoader
 
-    params = ConfigLoader("conf", env="local").get_parameters()["feature_etl"]
+    # 與 run_e2e.sh 同一個 --env；表名對齊 conf/dev/（跟範例 SQL 一樣帶前綴 recsys_prod_）
+    params = ConfigLoader("conf", env="dev").get_parameters()["feature_etl"]
     db = params["variables"]["target_db"]
     weeks = sorted(params["target_dates"])
 
@@ -182,9 +183,9 @@ def main() -> None:
 
     spark = SparkSession.builder.appName("ad_example_check_features").getOrCreate()
     try:
-        got_realtime = spark.table(f"{db}.feature_realtime").toPandas()
-        got_profile = spark.table(f"{db}.feature_user").select("snap_date", "user_id", "profile_snap_date").toPandas()
-        got_features = spark.table(f"{db}.feature_table").toPandas()
+        got_realtime = spark.table(f"{db}.recsys_prod_feature_realtime").toPandas()
+        got_profile = spark.table(f"{db}.recsys_prod_feature_user").select("snap_date", "user_id", "profile_snap_date").toPandas()
+        got_features = spark.table(f"{db}.recsys_prod_feature_table").toPandas()
     finally:
         spark.stop()
     _as_iso_date(got_realtime, "snap_date")

@@ -55,14 +55,9 @@ def load_compare_predictions(parameters: dict, spark: SparkSession) -> SparkData
     eval_snap_dates(parameters)
 
     schema = get_schema(parameters)
-    # Empty/missing hive.db → bare table name (the loader resolves via Spark's
-    # current database, including registered temp views — used by unit tests).
-    # When hive.db is set, the loader prefixes the table name; required
-    # whenever no default database is configured in spark.sql.catalog.
-    hive_db = ((parameters.get("hive") or {}).get("db") or "").strip() or None
     kind = src.get("kind")
     if kind == "model_version":
-        return _load_model_version(src, parameters, spark, hive_db)
+        return _load_model_version(src, parameters, spark)
     if kind == "external_hive":
         return _load_external_hive(src, parameters, schema, spark)
     raise RuntimeError(f"unknown compare source kind={kind!r}")
@@ -99,9 +94,33 @@ MODEL_VERSION_SOURCES = (
     "training_eval_predictions",
 )
 
+#: ``{source: "database.table"}``, written into ``parameters`` by the evaluation
+#: command (``pipelines/evaluation/compare_tables.py``).
+COMPARE_SOURCE_TABLES_KEY = "_compare_source_tables"
+
+
+def compare_source_table(parameters: dict, source: str) -> str:
+    """The physical table behind ``source``, one of :data:`MODEL_VERSION_SOURCES`.
+
+    The catalog's answer when the command handed one over: the entry name is
+    not the table name once an environment prefixes it (``conf/dev/catalog.yaml``
+    does), and the catalog entry itself cannot be read here because its
+    ``partition_filter`` pins this run's ``model_version``, not B's. Without
+    one (unit tests, or a catalog that does not declare the entry), the entry
+    name under ``hive.db``; with ``hive.db`` empty too, the bare name, which
+    Spark resolves in its current database (temp views included — unit tests
+    use that). A set ``hive.db`` is required whenever no default database is
+    configured in ``spark.sql.catalog``.
+    """
+    table = (parameters.get(COMPARE_SOURCE_TABLES_KEY) or {}).get(source)
+    if table:
+        return table
+    hive_db = ((parameters.get("hive") or {}).get("db") or "").strip()
+    return f"{hive_db}.{source}" if hive_db else source
+
 
 def _load_model_version(
-    src: dict, parameters: dict, spark: SparkSession, hive_db: str | None,
+    src: dict, parameters: dict, spark: SparkSession,
 ) -> SparkDataFrame:
     mv = src["model_version"]
     source = src.get("source", "enriched_eval_predictions")
@@ -109,13 +128,13 @@ def _load_model_version(
         raise DataConsistencyError(
             f"compare source={source!r} not in {MODEL_VERSION_SOURCES}"
         )
-    table_name = f"{hive_db}.{source}" if hive_db else source
+    table_name = compare_source_table(parameters, source)
     df = spark.table(table_name).filter(F.col("model_version") == mv)
     no_rows = _no_rows_for(df, parameters)
     if no_rows:
         raise DataConsistencyError(
             f"compare model_version={mv!r} has no rows for {no_rows} "
-            f"in source={source!r}"
+            f"in source={source!r} (table {table_name})"
         )
     # enriched_eval_predictions carries each partition's settings fingerprint
     # (#374). B's are the settings of B's own run, so they are not checked

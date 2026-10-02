@@ -62,10 +62,10 @@ python3.10 -m venv .venv
 ## 4. 執行指令的兩個前提
 
 ```bash
-.venv/bin/python -m recsys_tfb <pipeline> --env production
+.venv/bin/python -m recsys_tfb <pipeline> --env dev
 ```
 
-`production` 是環境名稱的例子（§5 用它示範 `conf/production/`），換成你自己取的名字。
+`dev` 是環境名稱的例子（§5 用它示範 `conf/dev/`），換成你自己取的名字。
 
 `<pipeline>` 是這八個之一：`feature_etl`、`label_etl`、`sample_pool_etl`、`inference_population_etl`、`dataset`、`training`、`evaluation`、`inference`。沒有 `run` 子指令，也沒有 `--pipeline` 旗標。
 
@@ -88,13 +88,15 @@ conf/<env>/parameters.yaml     你的設定        ← 升級不會動到
 
 **不要直接修改 `conf/base/`。** 改了之後每次升級都會在框架的檔案裡產生衝突，而判斷「該留哪一邊」需要理解框架這一版改了什麼。
 
-建立自己的環境層：
+repo 已經附了 `conf/dev/`，可以直接當你的環境層。想用別的名字就複製一份：
 
 ```bash
-mkdir -p conf/production
+cp -r conf/dev conf/<你的名字>
 ```
 
-**檔名要和 `conf/base/` 裡的檔案逐字相同**：`conf/production/parameters_training.yaml` 覆蓋 `conf/base/parameters_training.yaml`，兩邊的內容逐層合併。
+**例外：`conf/dev/` 裡框架附的檔案，升級可能會改到它們。** `catalog.yaml` 幫每張 Hive 表加上前綴 `recsys_prod_`，四份 `parameters_*_etl.yaml` 讓 source ETL 寫出同樣帶前綴的表，`conf/sql/etl/` 的範例 SQL 讀的也是這些帶前綴的表名（見 [README](../../../README.md) §5 步驟 0）。`conf/base/catalog.yaml` 新增一張表、或 `conf/base/parameters_*_etl.yaml` 的 `tables` 改了，新版會一起改這幾份檔；你改過的話，升級時要自己合併。複製出去的那份不會跟著升級，新版的變更要自己抄過去，否則那張表在你的環境裡不帶前綴，或 ETL 寫的表名跟 catalog 對不上。
+
+**檔名要和 `conf/base/` 裡的檔案逐字相同**：`conf/dev/parameters_training.yaml` 覆蓋 `conf/base/parameters_training.yaml`，兩邊的內容逐層合併。
 
 檔名取錯**不會報錯，而且後果比完全失效更難發現**：框架有兩種取設定的方式，一種把所有 `parameters*.yaml` 合成一份（你那個檔名不存在於 base 的檔案也會被併進來），另一種按指定檔名取（呼叫點寫死檔名，看不到你的檔）。兩者都在 `src/recsys_tfb/core/config.py`。結果是**一部分節點吃到了你的設定、一部分沒有**；更糟的是資料集版本 ID 走的是後者，於是**行為變了、版本 ID 沒變**，下一次執行會把舊資料集判定成命中而直接跳過重算。所以檔名請照抄，不要自創。
 
@@ -107,7 +109,7 @@ mkdir -p conf/production
 
 相對地，**`conf/base/catalog.yaml` 是可以疊的**：要換 Hive database 或表名，在 `conf/<env>/catalog.yaml` 覆蓋即可，不必改 base。
 
-另外，`conf/<env>/` 是你自己新增的檔案，不在框架的版本控制裡。`git clean -fdx` 這類清理指令會把它刪掉，跟著 repo 一起做的備份也不會包含它。**請在 repo 以外另存一份。**
+另外，你在 `conf/<env>/` 新增的檔案（上面那幾份 `conf/dev/` 框架附的檔案除外）不在框架的版本控制裡。`git clean -fdx` 這類清理指令會把它們刪掉，跟著 repo 一起做的備份也不會包含它們。**請在 repo 以外另存一份。**
 
 ### 舊的鍵名多半不會報錯
 
@@ -151,6 +153,7 @@ git tag                                        # 有哪些新版本
 git diff v0.3.0..v0.4.0 -- conf/base/          # 預設設定改了什麼
 git diff v0.3.0..v0.4.0 -- conf/sql/           # 來源表 SQL 範本改了什麼
 git diff v0.3.0..v0.4.0 -- conf/spark-local/   # Spark 設定範本改了什麼
+git diff v0.3.0..v0.4.0 -- conf/dev/           # 示範環境層（表名前綴）改了什麼
 git checkout v0.4.0
 .venv/bin/pip install -e .                     # 相依套件可能跟著翻版本
 ```

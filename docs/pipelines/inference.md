@@ -222,7 +222,7 @@ catalog（`conf/base` 疊上 `--env` 那一層之後）有 `candidate_feature_ta
 ### 4.2 使用已核准模型
 
 ```bash
-python -m recsys_tfb inference --env production
+python -m recsys_tfb inference --env dev
 ```
 
 此指令會：
@@ -234,7 +234,7 @@ python -m recsys_tfb inference --env production
 training 完成後不會自動更新 `best`。人工核准候選版本後，先執行：
 
 ```bash
-python scripts/promote_model.py --env production --dry-run   # 列出版本與建議，不動 best
+python scripts/promote_model.py --env dev --dry-run   # 列出版本與建議，不動 best
 python scripts/promote_model.py <model_version>
 ```
 
@@ -244,7 +244,7 @@ python scripts/promote_model.py <model_version>
 
 ```bash
 python -m recsys_tfb inference \
-  --env production \
+  --env dev \
   --model-version <model_version>
 ```
 
@@ -483,7 +483,7 @@ SELECT snap_date, model_version,
        MAX(score) AS max_score,
        MIN(rank) AS min_rank,
        MAX(rank) AS max_rank
-FROM ml_recsys.ranked_predictions
+FROM ml_recsys.recsys_prod_ranked_predictions
 WHERE model_version = '<model_version>'
   AND snap_date = '<snap_date>'
 GROUP BY snap_date, model_version;

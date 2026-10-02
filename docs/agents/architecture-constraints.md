@@ -164,7 +164,7 @@ dict 寫法在建構期就拿函式簽章檢查（Kedro 也這樣做）：鍵拼
 
 所以現況是：
 
-- `conf/` 底下有 `base`／`local`／`spark-local`／`sql`。**`conf/local/` 是空的，只有 `.gitkeep`**，存在的唯一理由是預設值就是 `--env local`——少了這個目錄，A30 會擋掉每一次不帶 `--env` 的呼叫。它進版控，不要因為「裡面沒東西」而刪掉。
+- `conf/` 底下有 `base`／`dev`／`local`／`spark-local`／`sql`。`conf/dev/` 是 README 示範用的環境層，有一份 `catalog.yaml` 與四份 `parameters_*_etl.yaml`，幫每張 Hive 表（含 source ETL 寫的表）加上前綴。**`conf/local/` 是空的，只有 `.gitkeep`**，存在的唯一理由是預設值就是 `--env local`——少了這個目錄，A30 會擋掉每一次不帶 `--env` 的呼叫。它進版控，不要因為「裡面沒東西」而刪掉。
 - **打錯環境名現在會 exit 1**，訊息帶 `(A30)` 與 `conf/` 底下實際存在的目錄清單。反過來說：A30 只檢查目錄存在——`--env sql` 會通過（`conf/sql` 存在，但不是覆蓋層）。它擋的是手滑，不是刻意亂填。
 - `conf/spark-local/` **不是**環境覆蓋層。它只有 `spark-defaults.conf` 與 `spark-env.sh`，是給 Spark 自己讀的 `SPARK_CONF_DIR`。名字跟 Kedro 的 `conf/local`（使用者專屬、不進版控）很像但語意相反——**本 repo 的 `conf/spark-local` 與 `conf/local` 都進版控**。
 

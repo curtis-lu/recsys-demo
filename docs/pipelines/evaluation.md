@@ -483,7 +483,7 @@ evaluation:
 
 ```bash
 python -m recsys_tfb evaluation \
-  --env production \
+  --env dev \
   --post-training \
   --model-version <candidate_model_version>
 ```
@@ -496,14 +496,14 @@ python -m recsys_tfb evaluation \
 
 ```bash
 python -m recsys_tfb evaluation \
-  --env production \
+  --env dev \
   --model-version <production_model_version>
 ```
 
 若要監控目前 `best`，可省略版本：
 
 ```bash
-python -m recsys_tfb evaluation --env production
+python -m recsys_tfb evaluation --env dev
 ```
 
 此模式讀取 inference 正式發布的 `ranked_predictions`，再依目前 `label_table` 補入 ground truth。應在該 `snap_date` 的 label 觀察窗成熟後執行。
@@ -698,7 +698,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合與
 SELECT snap_date, COUNT(*) AS rows,
        COUNT(DISTINCT cust_id) AS entities,
        COUNT(DISTINCT prod_name) AS items
-FROM ml_recsys.enriched_eval_predictions
+FROM ml_recsys.recsys_prod_enriched_eval_predictions
 WHERE model_version = '<model_version>'
   AND snap_date = '<snap_date>'
 GROUP BY snap_date;

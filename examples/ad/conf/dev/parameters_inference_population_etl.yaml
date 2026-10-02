@@ -1,0 +1,21 @@
+# conf/dev/ 的 source ETL 設定：ETL 寫的每張表（中介表與最終表）都加前綴 recsys_prod_，
+# 跟 conf/dev/catalog.yaml 的來源表名、conf/sql/etl/ 範例 SQL 讀的表名對得上。
+# - tables：疊加層對清單是整段取代、不是逐項合併，所以整段從 conf/base/ 的同名檔抄過來，
+#   只把 name 與 depends_on 加上前綴。conf/base/ 的 tables 改了，這裡要跟著改。
+# - audit.table：ETL 稽核紀錄表也加前綴。
+
+inference_population_etl:
+  tables:
+  - name: recsys_prod_inference_population
+    sql_file: inference_population/inference_population.sql
+    partition_by:
+      snap_date: DATE
+    primary_key:
+    - snap_date
+    - user_id
+    - slot_id
+    quality_checks:
+      min_row_count: 1
+      max_duplicate_key_ratio: 0.0
+  audit:
+    table: recsys_prod_etl_audit_log

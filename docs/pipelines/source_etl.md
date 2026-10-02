@@ -41,14 +41,16 @@ SELECT
     f.cust_segment_typ,
     COALESCE(l.label, 0) AS label
 FROM candidate_pool p
-LEFT JOIN ${target_db}.feature_table f
+LEFT JOIN ${target_db}.recsys_prod_feature_table f
     ON p.snap_date = f.snap_date
    AND p.cust_id = f.cust_id
-LEFT JOIN ${target_db}.label_table l
+LEFT JOIN ${target_db}.recsys_prod_label_table l
     ON p.snap_date = l.snap_date
    AND p.cust_id = l.cust_id
    AND p.prod_name = l.prod_name
 ```
+
+（`recsys_prod_` 是 `conf/dev/` 的表名前綴，見 [3.3](#33-table-層級設定)。）
 
 例如 `sample_group_keys: [cust_segment_typ, prod_name, label]` 時，這三個欄位都必須實際存在於 `sample_pool`。其中 `cust_segment_typ` 可由 `feature_table` 取得，`prod_name` 來自候選集合，`label` 則可由 sparse `label_table` left join 後補為 `0`。
 
@@ -140,12 +142,14 @@ YAML 寫 `my_var: "${env.MY_VAR}"` 這種用環境變數帶值的寫法照樣可
 
 | 設定 | 必要性 | 說明 |
 |---|---|---|
-| `name` | 必填 | 輸出 Hive table 名稱，實際寫入 `${target_db}.<name>` |
+| `name` | 必填 | 輸出 Hive table 名稱（含前綴），實際寫入 `${target_db}.<name>` |
 | `sql_file` | 必填 | 相對於 `conf/sql/etl/` 的 SQL 路徑 |
 | `partition_by` | 必填 | 有順序的 `{欄位: Hive 型別}` mapping；不可使用 list |
 | `primary_key` | 建議必填 | 輸出資料的唯一鍵，同時作為 schema contract 與重複鍵檢查依據；沒寫等於 `[]`，schema contract 與重複鍵檢查都不跑 |
 | `depends_on` | 選填 | 文件與順序驗證用途；相依表必須已列在同一份 `tables` 清單的前方；沒寫等於 `[]` |
 | `quality_checks` | 選填 | SQL 寫入後執行的資料品質檢查；沒寫等於 `{}`，下表三個檢查（`min_row_count`、`max_duplicate_key_ratio`、`max_null_ratio`）都不跑 |
+
+**表名前綴**：repo 附的範例 SQL 對齊 `conf/dev/` 的表名，讀其他 ETL 表時直接寫帶前綴的完整表名（`${target_db}.recsys_prod_<表名>`）。`conf/sql/etl/` 沒有環境分層，所以這些 SQL 要配 `--env dev` 跑；用 `conf/base/` 的 `tables`（不帶前綴）跑 ETL，SQL 會讀不到表。`conf/dev/` 把整段 `tables` 抄過去、`name` 與 `depends_on` 都寫成帶前綴的完整表名（疊加層對清單是整段取代）。改前綴時，`recsys_prod_` 要全部一起換掉：`conf/dev/catalog.yaml` 的每個 `table`；四份 `conf/dev/parameters_*_etl.yaml` 的 `tables` 的 `name` 與 `depends_on`、`audit.table`；`conf/sql/etl/` 裡 SQL 讀的表名。漏改 `depends_on` 會在 Spark 啟動前報錯；漏改其他幾處不一定報錯，舊前綴的表還在時可能讀到它。
 
 `tables` 的 list 順序就是實際執行順序。`depends_on` 不會建立 DAG，也不會自動調整順序或檢查其他 ETL 的新鮮度；它只會在初始化時驗證相依表是否已出現在清單前方。
 
@@ -221,7 +225,9 @@ quality_checks:
 各自回報（`check` 欄位分別是 `max_duplicate_key_ratio` 與 `primary_key_not_null`），
 所以拿掉這個鍵會同時關掉兩者。dataset pipeline 讀的三張表——`sample_pool`、
 `label_table`、`feature_table`——由不變量 A32 在 CLI 進入點確保這個鍵還在，
-見 `src/recsys_tfb/core/consistency.py` 的 invariant legend。這道輸出檢查在整個框架的檢查裡屬於哪一層：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
+見 `src/recsys_tfb/core/consistency.py` 的 invariant legend。A32 是拿這三個名字去比 `tables` 的 `name`，
+只認不帶前綴的名字：名字加了前綴（例如 `conf/dev/` 的 `recsys_prod_sample_pool`）時它找不到這三張表，
+這個鍵被刪掉也不會有人報錯。這道輸出檢查在整個框架的檢查裡屬於哪一層：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
 
 ### 3.7 建表與 schema evolution
 
@@ -337,7 +343,7 @@ GROUP BY i.snap_date, i.entity_id, i.request_id, i.item_id
 帶多個變數就重複 `--var`：
 
 ```bash
-python -m recsys_tfb feature_etl --env production --target-dates 2026-01-31 \
+python -m recsys_tfb feature_etl --env dev --target-dates 2026-01-31 \
   --var raw_db=raw_lake --var allowed_values="'a','b'"
 ```
 
@@ -350,28 +356,28 @@ python -m recsys_tfb feature_etl --env production --target-dates 2026-01-31 \
 在 YAML 設定好 `source_checks` 後，先對 feature 與 label 上游執行 preflight（不寫輸出表，只查上游；副作用見 §3.5）：
 
 ```bash
-python -m recsys_tfb feature_etl --env production --source-check --target-dates 2026-01-31
-python -m recsys_tfb label_etl   --env production --source-check --target-dates 2026-01-31
+python -m recsys_tfb feature_etl --env dev --source-check --target-dates 2026-01-31
+python -m recsys_tfb label_etl   --env dev --source-check --target-dates 2026-01-31
 ```
 
 確認通過後，先產生 feature 與 label：
 
 ```bash
-python -m recsys_tfb feature_etl --env production --target-dates 2026-01-31
-python -m recsys_tfb label_etl   --env production --target-dates 2026-01-31
+python -m recsys_tfb feature_etl --env dev --target-dates 2026-01-31
+python -m recsys_tfb label_etl   --env dev --target-dates 2026-01-31
 ```
 
 若 `sample_pool_etl.source_checks` 有設定 feature、label 或其他上游表，可在兩者完成後先執行 preflight，再正式產生 sample pool：
 
 ```bash
-python -m recsys_tfb sample_pool_etl --env production --source-check --target-dates 2026-01-31
-python -m recsys_tfb sample_pool_etl --env production --target-dates 2026-01-31
+python -m recsys_tfb sample_pool_etl --env dev --source-check --target-dates 2026-01-31
+python -m recsys_tfb sample_pool_etl --env dev --target-dates 2026-01-31
 ```
 
 多個日期以逗號分隔，並依輸入順序逐日處理：
 
 ```bash
-python -m recsys_tfb feature_etl --env production \
+python -m recsys_tfb feature_etl --env dev \
   --target-dates 2026-01-31,2026-02-28,2026-03-31
 ```
 
@@ -382,7 +388,7 @@ python -m recsys_tfb feature_etl --env production \
 只想在不寫表的前提下檢查 SQL 範本與變數代換的結果，加 `--dry-run`：
 
 ```bash
-python -m recsys_tfb feature_etl --env production --target-dates 2026-01-31 --dry-run
+python -m recsys_tfb feature_etl --env dev --target-dates 2026-01-31 --dry-run
 ```
 
 `--dry-run` 會 render 每張 table、每個日期的 SQL，但不查詢或寫入業務 Hive tables，也不寫入 audit。結尾會印 `DRY RUN：只 render 了 SQL，沒有執行、沒有寫表`，不會印 `completed successfully`。CLI 啟動過程仍會初始化 Spark session。
@@ -400,10 +406,12 @@ dry run 的 SQL 一律全文印進 log（每張表一段 `DRY RUN [<table>]:`）
 若某張中介表失敗，修正後可從該表重新執行：
 
 ```bash
-python -m recsys_tfb feature_etl --env production \
+python -m recsys_tfb feature_etl --env dev \
   --target-dates 2026-01-31 \
-  --restart-from feature_concat
+  --restart-from recsys_prod_feature_concat
 ```
+
+`--restart-from` 要寫 `tables` 裡的完整表名；`conf/dev/` 的表名帶前綴 `recsys_prod_`。
 
 `--restart-from` 會略過 `tables` 清單中位於指定 table 之前的步驟。它不能與 `--source-check` 同時使用，也不會驗證被略過的產物是否仍符合目前 SQL 或上游資料。
 
@@ -433,6 +441,8 @@ python -m recsys_tfb feature_etl --env production \
 | `sample_pool` | `${target_db}.sample_pool` | 候選集合完整，與 label／設定中的 item 對齊 |
 | rendered SQL | `rendered_sql_dir/<run_id>/<date>/` | 變數、來源表、filter、join 與 partition 寫入符合預期 |
 | audit records | `${target_db}.etl_audit_log` | table record 與 `__summary__` 狀態為 `success` |
+
+表名是 `conf/base/` 的寫法；用 `conf/dev/` 時每張都多了前綴 `recsys_prod_`（例如 `recsys_prod_feature_table`、`recsys_prod_etl_audit_log`）。
 
 基本驗收查詢：
 

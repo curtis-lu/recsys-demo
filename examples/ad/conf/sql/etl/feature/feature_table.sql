@@ -21,11 +21,11 @@ SELECT
     s.slot_ctr_4w,
     COALESCE(us.us_imp_4w, 0)    AS us_imp_4w,
     COALESCE(us.us_click_4w, 0)  AS us_click_4w
-FROM ${target_db}.feature_user_slot us
-JOIN ${target_db}.feature_user u
+FROM ${target_db}.recsys_prod_feature_user_slot us
+JOIN ${target_db}.recsys_prod_feature_user u
   ON us.snap_date = u.snap_date
  AND us.user_id   = u.user_id
-JOIN ${target_db}.feature_slot s
+JOIN ${target_db}.recsys_prod_feature_slot s
   ON us.snap_date = s.snap_date
  AND us.slot_id   = s.slot_id
 WHERE us.snap_date = '${target_date}'

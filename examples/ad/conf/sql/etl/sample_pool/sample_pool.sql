@@ -18,7 +18,7 @@ WITH segment AS (
             WHEN tenure_days < 365 THEN 'regular'
             ELSE 'loyal'
         END AS user_segment
-    FROM ${target_db}.feature_user
+    FROM ${target_db}.recsys_prod_feature_user
     WHERE snap_date = '${target_date}'
 )
 SELECT
@@ -33,7 +33,7 @@ SELECT
     l.request_id,
     s.user_segment,
     l.label
-FROM ${target_db}.label_table l
+FROM ${target_db}.recsys_prod_label_table l
 LEFT JOIN segment s
   ON l.user_id = s.user_id
 WHERE l.snap_date = '${target_date}'

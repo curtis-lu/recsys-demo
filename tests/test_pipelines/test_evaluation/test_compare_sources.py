@@ -159,6 +159,62 @@ def test_model_version_hive_db_qualifies_table_name(spark, monkeypatch):
     assert seen == ["ml_recsys.ranked_predictions"]
 
 
+def test_model_version_reads_the_table_the_catalog_names(spark, monkeypatch):
+    """The physical table comes from the catalog entry, not the entry name.
+
+    ``conf/dev/catalog.yaml`` names the entry ``ranked_predictions`` but the
+    table ``recsys_prod_ranked_predictions``. A table under the bare entry
+    name is left in place with other scores: reading it would not fail, it
+    would compare against the wrong rows.
+    """
+    p = _params_for_mv("MV_A")
+    p["evaluation"]["compare"]["source"] = "ranked_predictions"
+    p["hive"] = {"db": "ml_recsys"}
+    p["_compare_source_tables"] = {
+        "ranked_predictions": "ml_recsys.recsys_prod_ranked_predictions"}
+    seen = []
+    real_table = spark.table
+
+    def spy_table(name):
+        seen.append(name)
+        return real_table(name.split(".", 1)[-1])
+
+    monkeypatch.setattr(spark, "table", spy_table)
+    columns = ["cust_id", "snap_date", "prod_name", "score", "model_version"]
+    spark.createDataFrame(
+        [("c1", "2026-01-31", "p1", 0.9, "MV_A")], columns,
+    ).createOrReplaceTempView("recsys_prod_ranked_predictions")
+    spark.createDataFrame(
+        [("c1", "2026-01-31", "p1", 0.1, "MV_A")], columns,
+    ).createOrReplaceTempView("ranked_predictions")
+    try:
+        out = load_compare_predictions(p, spark)
+        scores = [r["score"] for r in out.collect()]
+    finally:
+        spark.catalog.dropTempView("recsys_prod_ranked_predictions")
+        spark.catalog.dropTempView("ranked_predictions")
+    assert seen == ["ml_recsys.recsys_prod_ranked_predictions"]
+    assert scores == [0.9]
+
+
+def test_model_version_without_rows_names_the_table_it_read(
+    spark, ranked_predictions_view
+):
+    """B's rows may sit in a table under the entry name, written before the
+    environment prefixed it; the message names the table that was read."""
+    p = _params_for_mv("MV_GHOST")
+    p["evaluation"]["compare"]["source"] = "ranked_predictions"
+    p["_compare_source_tables"] = {"ranked_predictions": "ranked_predictions_v2"}
+    spark.table("ranked_predictions").createOrReplaceTempView(
+        "ranked_predictions_v2")
+    try:
+        with pytest.raises(DataConsistencyError) as excinfo:
+            load_compare_predictions(p, spark)
+    finally:
+        spark.catalog.dropTempView("ranked_predictions_v2")
+    assert "table ranked_predictions_v2" in str(excinfo.value), excinfo.value
+
+
 @pytest.fixture
 def enriched_eval_predictions_view(spark):
     """Mirrors the `enriched_eval_predictions` Hive table schema written by

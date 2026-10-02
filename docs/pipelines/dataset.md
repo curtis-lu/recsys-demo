@@ -571,7 +571,7 @@ miss 率只有在生產跑過一次才知道，本機量不到，所以「先量
 | Metadata | base、train variant 的 `manifest.json` | 對應版本目錄 |
 | Alias | 各層的 `latest` symlink | base 層指向最近一次成功執行的版本目錄；train variant 層指向最近一次「執行成功、而且 train 的 model input 在它底下都有表」的 variant（§7.5） |
 
-Hive 的實際 table 名稱與 partition 欄位以 `conf/base/catalog.yaml` 為準。
+Hive 的實際 table 名稱與 partition 欄位以你的環境疊加後的 catalog 為準：表名看 `conf/dev/catalog.yaml`（下面範例用的就是它的 `recsys_prod_` 表名），其餘看 `conf/base/catalog.yaml`。
 
 ### 6.2 驗收重點
 

@@ -1,8 +1,8 @@
 # ★＝換成你自己的資料時一定要改的鍵（值是示例資料專屬的）；README「一定要設的鍵」列的就是這些。
 # Sample pool ETL pipeline 配置
-# 上游依賴 feature_etl 產出的 feature_concat 與 label_etl 產出的
-# label_{ccard,exchange,fund}。未來如需做跨 DAG 新鮮度檢查，可加在
-# ${target_db}.feature_concat 與三張 label table 的 source_checks。
+# 上游依賴 feature_etl 產出的 feature_table 與 label_etl 產出的 label_table
+#（範例 SQL 讀的是 conf/dev/ 的表名 recsys_prod_<表名>）。未來如需做跨 DAG 新鮮度檢查，
+# 可加在這兩張表的 source_checks。
 
 sample_pool_etl:
   # 沒給 --target-dates 時用這裡的日期，例 ["2025-01-31"]（日期要加引號，否則 YAML 會讀成日期物件）；

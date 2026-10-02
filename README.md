@@ -40,7 +40,7 @@ inference_population ───────────────────�
                                               evaluation（上線後監控）
 ```
 
-每一段都是一條獨立的 pipeline，用同一種指令執行：`python -m recsys_tfb <pipeline> --env production`（`production` 是你的設定目錄名稱，見 §5 步驟 0）。
+每一段都是一條獨立的 pipeline，用同一種指令執行：`python -m recsys_tfb <pipeline> --env dev`（`dev` 是你的設定目錄名稱，見 §5 步驟 0）。
 
 ---
 
@@ -48,7 +48,7 @@ inference_population ───────────────────�
 
 ### 一筆候選、一個 query group
 
-框架不管你的欄位叫什麼，只認幾個**角色**。你在 `parameters.yaml` 的 `schema.columns` 告訴它哪一欄扮演哪個角色（你自己的設定放在 `conf/production/`，見 §5 步驟 0）。
+框架不管你的欄位叫什麼，只認幾個**角色**。你在 `parameters.yaml` 的 `schema.columns` 告訴它哪一欄扮演哪個角色（你自己的設定放在 `conf/dev/`，見 §5 步驟 0）。
 
 | 角色 | 意思 | 銀行產品推薦 | 廣告曝光 |
 |---|---|---|---|
@@ -187,16 +187,13 @@ item 自己的屬性（例如產品類型）不會另外變成特徵；模型學
 
 開始前：照 [`using-a-release.md`](docs/operations/user-guides/using-a-release.md) 取得框架的一個發行版（git tag）並裝好，而且執行環境已經連得上 Spark 與 Hive。**想先看框架跑一次**：在本機建好環境（[`local-spark-setup.md`](docs/operations/dev-setup/local-spark-setup.md)）後，`bash scripts/local/local_e2e.sh` 用合成資料跑完銀行示例，`bash examples/ad/run_e2e.sh` 跑完廣告示例。
 
-### 步驟 0：建自己的設定目錄
+### 步驟 0：準備自己的設定目錄
 
-```bash
-mkdir -p conf/production
-```
-
-- 本文件用 `production` 當你的環境名稱。名字可以自己取，換了就把後面每條指令的 `--env production` 一起換；但不要用 `local`，那是不帶 `--env` 時的預設，給本機測試用。
-- `conf/production/` 疊在 `conf/base/` 上面。檔名跟 `conf/base/` 裡的一樣，裡面只寫你要改的鍵，同名的鍵以你的為準。
+- 本文件用 `dev` 當你的環境名稱，repo 已經附了 `conf/dev/`。名字可以自己取（`cp -r conf/dev conf/<你的名字>`），換了就把後面每條指令的 `--env dev` 一起換；但不要用 `local`，那是不帶 `--env` 時的預設，給本機測試用。
+- `conf/dev/` 疊在 `conf/base/` 上面。檔名跟 `conf/base/` 裡的一樣，裡面只寫你要改的鍵，同名的鍵以你的為準。
 - **不要直接改 `conf/base/`**。那是框架附的示例設定，升級時會被新版蓋掉。
-- **pipeline 指令都要帶 `--env production`**。不帶的話預設是 `local`，你的設定一條都不會生效，而且不會有任何錯誤。
+- **pipeline 指令都要帶 `--env dev`**。不帶的話預設是 `local`，你的設定一條都不會生效，而且不會有任何錯誤。
+- **表名前綴**：`conf/base/` 裡的 Hive 表名都沒有前綴（例如 `train_keys`、`feature_table`）。`conf/dev/` 幫每張表都加上前綴 `recsys_prod_`（prod＝產品，不是正式環境），示範怎麼跟同一個 database 裡的其他表分開命名：`catalog.yaml` 改 pipeline 讀寫的表名，四份 `parameters_*_etl.yaml` 讓 source ETL 寫出同樣帶前綴的表（見步驟 2）。前綴可以改成你自己的，這幾份檔和 `conf/sql/etl/` 的 SQL 裡的表名要一起改。
 - 兩個例外沒有環境分層：來源 SQL（`conf/sql/etl/`）與 Spark 連線設定（看 `SPARK_CONF_DIR`）。怎麼處理見 [`using-a-release.md`](docs/operations/user-guides/using-a-release.md) §5。
 - **已知缺口**：底下還有一層 key 的值（例如 `inference:` 底下的 `products`）是合併、不是取代——你可以改或加 key，但刪不掉 `conf/base/` 裡已有的 key。目前有三個鍵因此要直接改 `conf/base/`，後面用到時會提醒；代價是升級時這幾處要自己合併（issue #477）。
 
@@ -225,7 +222,7 @@ mkdir -p conf/production
 
 ### 步驟 2：建來源表
 
-在 `conf/sql/etl/` 寫 SQL，產出 `feature_table`、`label_table`、`sample_pool`、`inference_population`。每張表的 SQL 檔、partition、`primary_key` 與品質檢查，設在 `parameters_{feature,label,sample_pool,inference_population}_etl.yaml` 的 `tables`；寫進哪個 database 設在同一檔的 `variables.target_db`。pipeline 讀表用的 database 是 `parameters.yaml` 的 `hive.db`，通常設成同一個。要換表名就改 `catalog.yaml`。
+在 `conf/sql/etl/` 寫 SQL，產出 `feature_table`、`label_table`、`sample_pool`、`inference_population`。每張表的 SQL 檔、partition、`primary_key` 與品質檢查，設在 `parameters_{feature,label,sample_pool,inference_population}_etl.yaml` 的 `tables`；寫進哪個 database 設在同一檔的 `variables.target_db`。pipeline 讀表用的 database 是 `parameters.yaml` 的 `hive.db`，通常設成同一個。表名有兩邊要對得上：ETL 寫出來的是 `tables` 的 `name`，pipeline 讀的是 `catalog.yaml` 的 `table`。範例 SQL 對齊 `conf/dev/` 的表名，讀其他 ETL 表時直接寫帶前綴的名字（例如 `${target_db}.recsys_prod_feature_table`），所以要配 `--env dev` 跑。
 
 三件最容易錯的事：
 
@@ -237,13 +234,13 @@ mkdir -p conf/production
 
 ```bash
 # 不寫輸出表：只檢查上游 partition、欄位與資料量（但 target_db 不存在會建立它，檢查失敗會寫 audit，見 source_etl.md）
-python -m recsys_tfb feature_etl --env production --source-check --target-dates 2026-01-31
-python -m recsys_tfb label_etl   --env production --source-check --target-dates 2026-01-31
+python -m recsys_tfb feature_etl --env dev --source-check --target-dates 2026-01-31
+python -m recsys_tfb label_etl   --env dev --source-check --target-dates 2026-01-31
 
 # 檢查通過再寫表
-python -m recsys_tfb feature_etl     --env production --target-dates 2026-01-31
-python -m recsys_tfb label_etl       --env production --target-dates 2026-01-31
-python -m recsys_tfb sample_pool_etl --env production --target-dates 2026-01-31
+python -m recsys_tfb feature_etl     --env dev --target-dates 2026-01-31
+python -m recsys_tfb label_etl       --env dev --target-dates 2026-01-31
+python -m recsys_tfb sample_pool_etl --env dev --target-dates 2026-01-31
 ```
 
 `--source-check` 查什麼，要先寫在 ETL 設定的 `source_checks`（例如 `feature_etl.source_checks`）；`conf/base/` 的是空的，不寫的話它只印一行警告就結束，什麼都沒查。
@@ -254,7 +251,7 @@ python -m recsys_tfb sample_pool_etl --env production --target-dates 2026-01-31
 
 ### 步驟 3：設定 schema 與資料切分
 
-在 `conf/production/parameters.yaml` 寫角色對應與 item 清單：
+在 `conf/dev/parameters.yaml` 寫角色對應與 item 清單：
 
 ```yaml
 schema:
@@ -269,7 +266,7 @@ schema:
 
 欄名換了，`catalog.yaml` 裡各表 `columns`、`partition_cols` 寫的欄名也要跟著換（item 由多欄組成時，框架寫的表裡欄名固定叫 `item`）。只有預測表缺 entity 欄時，training 一開始會擋；其他表不檢查，沒換會在寫表時失敗。
 
-同一份 item 清單也要寫進 `inference.products`（`parameters_inference.yaml`），框架會檢查兩處一致。不想逐一列出的話，item 那格寫 `from_train_data`（例：`prod_name: from_train_data`），框架從 train 期間的 `sample_pool` 數出清單。這時 `inference.products` 必須拿掉，留著會被擋；而它在 `conf/base/` 裡已經有一份，從 `conf/production/` 刪不掉，**要直接刪掉 `conf/base/parameters_inference.yaml` 裡的 `products`**（已知缺口）。代價是上線後才出現的新 item，要等它出現在 train 期間、重跑 dataset 與 training 才會被評分（見 [`dataset.md`](docs/pipelines/dataset.md) §3.10）。
+同一份 item 清單也要寫進 `inference.products`（`parameters_inference.yaml`），框架會檢查兩處一致。不想逐一列出的話，item 那格寫 `from_train_data`（例：`prod_name: from_train_data`），框架從 train 期間的 `sample_pool` 數出清單。這時 `inference.products` 必須拿掉，留著會被擋；而它在 `conf/base/` 裡已經有一份，從 `conf/dev/` 刪不掉，**要直接刪掉 `conf/base/parameters_inference.yaml` 裡的 `products`**（已知缺口）。代價是上線後才出現的新 item，要等它出現在 train 期間、重跑 dataset 與 training 才會被評分（見 [`dataset.md`](docs/pipelines/dataset.md) §3.10）。
 
 在 `parameters_dataset.yaml` 設定：
 
@@ -277,7 +274,7 @@ schema:
 - `dataset.prepare_model_input.categorical_columns`：類別欄，一定要包含 item 欄（為什麼，見 §8 Q1）。
 - `dataset.prepare_model_input.drop_columns`：不該進模型的欄，例如 identity 欄、label、觀察窗日期。
 - `dataset.sample_group_keys`：train 分層抽樣的分層欄。
-- `dataset.sample_ratio_overrides`：各分層的抽樣比例（哪些資料可以抽、哪些不行，見 §8 Q4）。`conf/base/` 裡示例的 key 用的是銀行的 item，換了 item 會被擋；從 `conf/production/` 刪不掉，**要直接改 `conf/base/parameters_dataset.yaml` 的這一段**（已知缺口）。
+- `dataset.sample_ratio_overrides`：各分層的抽樣比例（哪些資料可以抽、哪些不行，見 §8 Q4）。`conf/base/` 裡示例的 key 用的是銀行的 item，換了 item 會被擋；從 `conf/dev/` 刪不掉，**要直接改 `conf/base/parameters_dataset.yaml` 的這一段**（已知缺口）。
 - `dataset.carry_columns`：之後設樣本權重要用、但不是特徵的欄。
 
 類別欄與抽樣比例可以先讓工具給建議，你再審：
@@ -289,7 +286,7 @@ python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_over
 ```
 
 - `suggest_categorical_cols.py` 遇到大表，可以加 `--where` 只讀部分分區、或 `--sample-fraction` 抽樣加速（見 [`dataset.md`](docs/pipelines/dataset.md)）。
-- `sampling_overrides_editor.py` 預設讀 `conf/base/` 的示例設定，用 `--params`、`--train-params`、`--base-params` 改指到你的設定檔；`to-yaml` 產出兩段：`sample_weights` 貼到 `conf/production/parameters_training.yaml`；`sample_ratio_overrides` 要取代 `conf/base/parameters_dataset.yaml` 裡示例的那一段（貼到 `conf/production/` 會跟示例的 key 合併而被擋，見上面）。用法見 [`sampling-overrides-editor.md`](docs/operations/user-guides/sampling-overrides-editor.md)。
+- `sampling_overrides_editor.py` 預設讀 `conf/base/` 的示例設定，用 `--params`、`--train-params`、`--base-params` 改指到你的設定檔；`to-yaml` 產出兩段：`sample_weights` 貼到 `conf/dev/parameters_training.yaml`；`sample_ratio_overrides` 要取代 `conf/base/parameters_dataset.yaml` 裡示例的那一段（貼到 `conf/dev/` 會跟示例的 key 合併而被擋，見上面）。用法見 [`sampling-overrides-editor.md`](docs/operations/user-guides/sampling-overrides-editor.md)。
 
 > **廣告情境**：`schema.columns` 加 `occasion: request_id`；`request_id` 不能列進 `categorical_columns`；`catalog.yaml` 裡 `training_eval_predictions` 的欄位要加上 `request_id`（預測表只寫宣告過的欄，沒加會被設定檢查擋下）。完整清單見 [`impression-data-shapes.md`](docs/operations/user-guides/impression-data-shapes.md)。
 
@@ -336,21 +333,21 @@ python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_over
 ### 步驟 6：依序執行
 
 ```bash
-python -m recsys_tfb dataset    --env production            # 1. 組出四份資料
-python -m recsys_tfb training   --env production            # 2. 訓練；log 會印出這次的 model_version
-python -m recsys_tfb evaluation --env production --post-training --model-version <model_version>
+python -m recsys_tfb dataset    --env dev            # 1. 組出四份資料
+python -m recsys_tfb training   --env dev            # 2. 訓練；log 會印出這次的 model_version
+python -m recsys_tfb evaluation --env dev --post-training --model-version <model_version>
                                                             # 3. 上線前評估報表
-python scripts/promote_model.py --env production --dry-run  # 4. 列出候選版本
+python scripts/promote_model.py --env dev --dry-run  # 4. 列出候選版本
 python scripts/promote_model.py <model_version>             # 5. 看完報表，人工 promote
 
 # 6. 替推論日期產出 inference 要讀的兩張表，再評分、發布
-python -m recsys_tfb feature_etl              --env production --target-dates <推論日期>
-python -m recsys_tfb inference_population_etl --env production --target-dates <推論日期>
-python -m recsys_tfb inference                --env production
+python -m recsys_tfb feature_etl              --env dev --target-dates <推論日期>
+python -m recsys_tfb inference_population_etl --env dev --target-dates <推論日期>
+python -m recsys_tfb inference                --env dev
 
 # 7. 那一期的答案出來後：補上 label，評估已發布的結果
-python -m recsys_tfb label_etl  --env production --target-dates <推論日期>
-python -m recsys_tfb evaluation --env production
+python -m recsys_tfb label_etl  --env dev --target-dates <推論日期>
+python -m recsys_tfb evaluation --env dev
 ```
 
 - **產出在哪**：模型在 `data/models/<model_version>/`（目錄名就是 model_version）；評估報表在 `data/evaluation/<model_version>/<日期>/report.html`。

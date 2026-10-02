@@ -35,8 +35,9 @@ ROOT_CONF = REPO / "conf"
 
 @pytest.fixture(scope="module")
 def params():
-    resolved_env_dir(CONF, "local")
-    return ConfigLoader(str(CONF), env="local").get_parameters()
+    # run_e2e.sh 跑的環境：範例 SQL 對齊 conf/dev/ 的表名
+    resolved_env_dir(CONF, "dev")
+    return ConfigLoader(str(CONF), env="dev").get_parameters()
 
 
 @pytest.fixture(scope="module")
@@ -135,7 +136,7 @@ def test_the_candidate_feature_table_is_keyed_by_identity(params):
     """dataset 以 identity 接候選層級特徵表（ADR-0026），所以它的 ETL 鍵必須就是 identity，
     而且要擋重複：同一筆候選有兩列，接上去那筆候選就變成兩列。框架的 A32 看不到這張表
     （它只認 feature_table 等固定名字），這條由示例自己守。"""
-    catalog = yaml.safe_load((CONF / "base" / "catalog.yaml").read_text())
+    catalog = ConfigLoader(str(CONF), env="dev").get_catalog_config()
     physical = catalog["candidate_feature_table"]["table"]
     (table,) = [t for t in params["feature_etl"]["tables"] if t["name"] == physical]
     # 這張表是使用者的表，帶原欄：identity 的 item 換成組成它的兩欄（ADR-0027）
