@@ -5,8 +5,9 @@
 # database 裡的其他表分開命名。
 # - 前綴可以換成你自己的。
 # - 換了表名，框架就讀寫新名字的那張表。舊表不會被搬過去，也不會被刪。
-# - 來源表的名字要跟寫它的那一方對得上。用 repo 附的 source ETL 產生的話，它在
-#   conf/dev/parameters_*_etl.yaml 裡也加了同一個前綴；你的來源表由別的流程產生，就照那邊的實際表名寫。
+# - 來源表的名字要跟寫它的那一方對得上。用 repo 附的 source ETL 產生的話，它的
+#   conf/dev/parameters_*_etl.yaml 與 conf/sql/etl/ 的範例 SQL 也用同一個前綴；你的來源表由別的流程
+#   產生，就照那邊的實際表名寫。
 # - 這份檔是框架附的：base 新增一張 Hive 表時，升級會在這裡補一條（見
 #   docs/operations/user-guides/using-a-release.md §5）。
 

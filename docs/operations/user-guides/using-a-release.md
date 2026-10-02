@@ -94,7 +94,7 @@ repo 已經附了 `conf/dev/`，可以直接當你的環境層。想用別的名
 cp -r conf/dev conf/<你的名字>
 ```
 
-**例外：`conf/dev/` 裡框架附的檔案，升級可能會改到它們。** `catalog.yaml` 幫每張 Hive 表加上前綴 `recsys_prod_`，四份 `parameters_*_etl.yaml` 讓 source ETL 寫出同樣帶前綴的表（見 [README](../../../README.md) §5 步驟 0）。`conf/base/catalog.yaml` 新增一張表、或 `conf/base/parameters_*_etl.yaml` 的 `tables` 改了，新版會一起改這幾份檔；你改過的話，升級時要自己合併。複製出去的那份不會跟著升級，新版的變更要自己抄過去，否則那張表在你的環境裡不帶前綴，或 ETL 寫的表名跟 catalog 對不上。
+**例外：`conf/dev/` 裡框架附的檔案，升級可能會改到它們。** `catalog.yaml` 幫每張 Hive 表加上前綴 `recsys_prod_`，四份 `parameters_*_etl.yaml` 讓 source ETL 寫出同樣帶前綴的表，`conf/sql/etl/` 的範例 SQL 讀的也是這些帶前綴的表名（見 [README](../../../README.md) §5 步驟 0）。`conf/base/catalog.yaml` 新增一張表、或 `conf/base/parameters_*_etl.yaml` 的 `tables` 改了，新版會一起改這幾份檔；你改過的話，升級時要自己合併。複製出去的那份不會跟著升級，新版的變更要自己抄過去，否則那張表在你的環境裡不帶前綴，或 ETL 寫的表名跟 catalog 對不上。
 
 **檔名要和 `conf/base/` 裡的檔案逐字相同**：`conf/dev/parameters_training.yaml` 覆蓋 `conf/base/parameters_training.yaml`，兩邊的內容逐層合併。
 

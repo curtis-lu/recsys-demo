@@ -55,14 +55,14 @@ run() {
 
 T_START=$SECONDS
 run "setup（原始表）"          "$PY" setup_local.py
-run "feature_etl"              "$PY" -m recsys_tfb feature_etl --env local
+run "feature_etl"              "$PY" -m recsys_tfb feature_etl --env dev
 # 框架不檢查特徵有沒有偷看（ADR-0022 決定 3），這個示例自己比：SQL 的值與照定義重算的值逐列相同
 run "check 特徵不偷看"          "$PY" check_features.py
-run "label_etl"                "$PY" -m recsys_tfb label_etl --env local
-run "sample_pool_etl"          "$PY" -m recsys_tfb sample_pool_etl --env local
-run "inference_population_etl" "$PY" -m recsys_tfb inference_population_etl --env local
-run "dataset"                  "$PY" -m recsys_tfb dataset --env local
-run "training"                 "$PY" -m recsys_tfb training --env local
+run "label_etl"                "$PY" -m recsys_tfb label_etl --env dev
+run "sample_pool_etl"          "$PY" -m recsys_tfb sample_pool_etl --env dev
+run "inference_population_etl" "$PY" -m recsys_tfb inference_population_etl --env dev
+run "dataset"                  "$PY" -m recsys_tfb dataset --env dev
+run "training"                 "$PY" -m recsys_tfb training --env dev
 
 MODEL_VERSION="$("$PY" - <<'PY'
 import sys
@@ -80,7 +80,7 @@ echo "▶ model_version=$MODEL_VERSION"
 
 expect_inference_blocked() {
   local out
-  if out="$("$PY" -m recsys_tfb inference --env local --model-version "$MODEL_VERSION" 2>&1)"; then
+  if out="$("$PY" -m recsys_tfb inference --env dev --model-version "$MODEL_VERSION" 2>&1)"; then
     echo "$out" | tail -20
     echo "inference 沒有被擋下：宣告了 candidate_feature_table 時應該在入口停下（A47）" >&2
     return 1
@@ -94,7 +94,7 @@ expect_inference_blocked() {
 }
 run "inference（預期被 A47 擋下）" expect_inference_blocked
 
-run "evaluation --post-training" "$PY" -m recsys_tfb evaluation --env local --post-training --model-version "$MODEL_VERSION"
+run "evaluation --post-training" "$PY" -m recsys_tfb evaluation --env dev --post-training --model-version "$MODEL_VERSION"
 
 if [ "$COMPARE" = 1 ]; then
   run "digest（比對基準）"     "$PY" digest.py --model-version "$MODEL_VERSION" --out data/digest.json --compare baseline_digest.json

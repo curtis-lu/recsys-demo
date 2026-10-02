@@ -41,16 +41,16 @@ SELECT
     f.cust_segment_typ,
     COALESCE(l.label, 0) AS label
 FROM candidate_pool p
-LEFT JOIN ${target_db}.${table_prefix}feature_table f
+LEFT JOIN ${target_db}.recsys_prod_feature_table f
     ON p.snap_date = f.snap_date
    AND p.cust_id = f.cust_id
-LEFT JOIN ${target_db}.${table_prefix}label_table l
+LEFT JOIN ${target_db}.recsys_prod_label_table l
     ON p.snap_date = l.snap_date
    AND p.cust_id = l.cust_id
    AND p.prod_name = l.prod_name
 ```
 
-（`${table_prefix}` 是表名前綴，見 [3.3](#33-table-層級設定)。）
+（`recsys_prod_` 是 `conf/dev/` 的表名前綴，見 [3.3](#33-table-層級設定)。）
 
 例如 `sample_group_keys: [cust_segment_typ, prod_name, label]` 時，這三個欄位都必須實際存在於 `sample_pool`。其中 `cust_segment_typ` 可由 `feature_table` 取得，`prod_name` 來自候選集合，`label` 則可由 sparse `label_table` left join 後補為 `0`。
 
@@ -149,7 +149,7 @@ YAML 寫 `my_var: "${env.MY_VAR}"` 這種用環境變數帶值的寫法照樣可
 | `depends_on` | 選填 | 文件與順序驗證用途；相依表必須已列在同一份 `tables` 清單的前方；沒寫等於 `[]` |
 | `quality_checks` | 選填 | SQL 寫入後執行的資料品質檢查；沒寫等於 `{}`，下表三個檢查（`min_row_count`、`max_duplicate_key_ratio`、`max_null_ratio`）都不跑 |
 
-**表名前綴**：repo 附的範例 SQL 讀其他 ETL 表時寫 `${target_db}.${table_prefix}<表名>`。`table_prefix` 是 `variables` 裡一個普通的變數，框架不認得它，也不會拿它去改 `name`：`conf/base/` 是空字串；`conf/dev/` 是 `recsys_prod_`，並把整段 `tables` 抄過去、`name` 與 `depends_on` 都寫成帶前綴的完整表名（疊加層對清單是整段取代）。改前綴時，把 `conf/dev/` 裡的 `recsys_prod_` 全部一起換掉：`catalog.yaml` 的每個 `table`，以及四份 `parameters_*_etl.yaml` 的 `variables.table_prefix`、`tables` 的 `name` 與 `depends_on`、`audit.table`。漏改 `depends_on` 會在 Spark 啟動前報錯；漏改其他幾處不一定報錯，舊前綴的表還在時可能讀到它。**不要用 `--var` 覆寫 `table_prefix`**：它只改 SQL 讀的表，不改 `tables` 的 `name`（寫的表），讀寫會分家，而且沒有檢查會擋。
+**表名前綴**：repo 附的範例 SQL 對齊 `conf/dev/` 的表名，讀其他 ETL 表時直接寫帶前綴的完整表名（`${target_db}.recsys_prod_<表名>`）。`conf/sql/etl/` 沒有環境分層，所以這些 SQL 要配 `--env dev` 跑；用 `conf/base/` 的 `tables`（不帶前綴）跑 ETL，SQL 會讀不到表。`conf/dev/` 把整段 `tables` 抄過去、`name` 與 `depends_on` 都寫成帶前綴的完整表名（疊加層對清單是整段取代）。改前綴時，`recsys_prod_` 要全部一起換掉：`conf/dev/catalog.yaml` 的每個 `table`；四份 `conf/dev/parameters_*_etl.yaml` 的 `tables` 的 `name` 與 `depends_on`、`audit.table`；`conf/sql/etl/` 裡 SQL 讀的表名。漏改 `depends_on` 會在 Spark 啟動前報錯；漏改其他幾處不一定報錯，舊前綴的表還在時可能讀到它。
 
 `tables` 的 list 順序就是實際執行順序。`depends_on` 不會建立 DAG，也不會自動調整順序或檢查其他 ETL 的新鮮度；它只會在初始化時驗證相依表是否已出現在清單前方。
 

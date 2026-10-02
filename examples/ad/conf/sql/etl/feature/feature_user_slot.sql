@@ -2,10 +2,10 @@
 -- 使用者 × 版位一週一列，涵蓋全部組合（過去沒在這個版位看過廣告的補 0）。
 -- 全組合是必要的：推論時要替每個使用者的每個版位排序，不只替曝光過的。
 WITH users AS (
-    SELECT snap_date, user_id FROM ${target_db}.${table_prefix}feature_user WHERE snap_date = '${target_date}'
+    SELECT snap_date, user_id FROM ${target_db}.recsys_prod_feature_user WHERE snap_date = '${target_date}'
 ),
 slots AS (
-    SELECT slot_id FROM ${target_db}.${table_prefix}feature_slot WHERE snap_date = '${target_date}'
+    SELECT slot_id FROM ${target_db}.recsys_prod_feature_slot WHERE snap_date = '${target_date}'
 ),
 activity AS (
     SELECT

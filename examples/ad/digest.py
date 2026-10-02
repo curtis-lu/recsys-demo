@@ -54,7 +54,8 @@ class Tables:
     def __init__(self) -> None:
         from recsys_tfb.core.config import ConfigLoader
 
-        config = ConfigLoader("conf", env="local")
+        # 與 run_e2e.sh 同一個 --env：範例 SQL 對齊 conf/dev/ 的表名
+        config = ConfigLoader("conf", env="dev")
         params = config.get_parameters()
         self._db = params["hive"]["db"]
         self._catalog = config.get_catalog_config()

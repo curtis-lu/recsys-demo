@@ -193,7 +193,7 @@ item 自己的屬性（例如產品類型）不會另外變成特徵；模型學
 - `conf/dev/` 疊在 `conf/base/` 上面。檔名跟 `conf/base/` 裡的一樣，裡面只寫你要改的鍵，同名的鍵以你的為準。
 - **不要直接改 `conf/base/`**。那是框架附的示例設定，升級時會被新版蓋掉。
 - **pipeline 指令都要帶 `--env dev`**。不帶的話預設是 `local`，你的設定一條都不會生效，而且不會有任何錯誤。
-- **表名前綴**：`conf/base/` 裡的 Hive 表名都沒有前綴（例如 `train_keys`、`feature_table`）。`conf/dev/` 幫每張表都加上前綴 `recsys_prod_`（prod＝產品，不是正式環境），示範怎麼跟同一個 database 裡的其他表分開命名：`catalog.yaml` 改 pipeline 讀寫的表名，四份 `parameters_*_etl.yaml` 讓 source ETL 寫出同樣帶前綴的表（見步驟 2）。前綴可以改成你自己的，這幾份檔要一起改。
+- **表名前綴**：`conf/base/` 裡的 Hive 表名都沒有前綴（例如 `train_keys`、`feature_table`）。`conf/dev/` 幫每張表都加上前綴 `recsys_prod_`（prod＝產品，不是正式環境），示範怎麼跟同一個 database 裡的其他表分開命名：`catalog.yaml` 改 pipeline 讀寫的表名，四份 `parameters_*_etl.yaml` 讓 source ETL 寫出同樣帶前綴的表（見步驟 2）。前綴可以改成你自己的，這幾份檔和 `conf/sql/etl/` 的 SQL 裡的表名要一起改。
 - 兩個例外沒有環境分層：來源 SQL（`conf/sql/etl/`）與 Spark 連線設定（看 `SPARK_CONF_DIR`）。怎麼處理見 [`using-a-release.md`](docs/operations/user-guides/using-a-release.md) §5。
 - **已知缺口**：底下還有一層 key 的值（例如 `inference:` 底下的 `products`）是合併、不是取代——你可以改或加 key，但刪不掉 `conf/base/` 裡已有的 key。目前有三個鍵因此要直接改 `conf/base/`，後面用到時會提醒；代價是升級時這幾處要自己合併（issue #477）。
 
@@ -222,7 +222,7 @@ item 自己的屬性（例如產品類型）不會另外變成特徵；模型學
 
 ### 步驟 2：建來源表
 
-在 `conf/sql/etl/` 寫 SQL，產出 `feature_table`、`label_table`、`sample_pool`、`inference_population`。每張表的 SQL 檔、partition、`primary_key` 與品質檢查，設在 `parameters_{feature,label,sample_pool,inference_population}_etl.yaml` 的 `tables`；寫進哪個 database 設在同一檔的 `variables.target_db`。pipeline 讀表用的 database 是 `parameters.yaml` 的 `hive.db`，通常設成同一個。表名有兩邊要對得上：ETL 寫出來的是 `tables` 的 `name`，pipeline 讀的是 `catalog.yaml` 的 `table`。範例 SQL 讀其他 ETL 表時寫 `${target_db}.${table_prefix}<表名>`，`table_prefix` 是同一檔 `variables` 裡的前綴（`conf/base/` 是空字串，`conf/dev/` 是 `recsys_prod_`）。
+在 `conf/sql/etl/` 寫 SQL，產出 `feature_table`、`label_table`、`sample_pool`、`inference_population`。每張表的 SQL 檔、partition、`primary_key` 與品質檢查，設在 `parameters_{feature,label,sample_pool,inference_population}_etl.yaml` 的 `tables`；寫進哪個 database 設在同一檔的 `variables.target_db`。pipeline 讀表用的 database 是 `parameters.yaml` 的 `hive.db`，通常設成同一個。表名有兩邊要對得上：ETL 寫出來的是 `tables` 的 `name`，pipeline 讀的是 `catalog.yaml` 的 `table`。範例 SQL 對齊 `conf/dev/` 的表名，讀其他 ETL 表時直接寫帶前綴的名字（例如 `${target_db}.recsys_prod_feature_table`），所以要配 `--env dev` 跑。
 
 三件最容易錯的事：
 
