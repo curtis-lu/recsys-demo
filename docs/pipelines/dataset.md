@@ -589,12 +589,12 @@ Hive 的實際 table 名稱與 partition 欄位以 `conf/base/catalog.yaml` 為�
 
 ```sql
 SELECT COUNT(*)
-FROM ml_recsys.recsys_prod_train_model_input
+FROM ml_recsys.train_model_input
 WHERE base_dataset_version = '<base_version>'
   AND train_variant_id = '<train_variant>';
 
 SELECT snap_date, cust_id, COUNT(*) AS rows, SUM(label) AS positives
-FROM ml_recsys.recsys_prod_val_model_input
+FROM ml_recsys.val_model_input
 WHERE base_dataset_version = '<base_version>'
 GROUP BY snap_date, cust_id
 HAVING SUM(label) <= 0;

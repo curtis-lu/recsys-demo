@@ -337,7 +337,7 @@ GROUP BY i.snap_date, i.entity_id, i.request_id, i.item_id
 帶多個變數就重複 `--var`：
 
 ```bash
-python -m recsys_tfb feature_etl --env production --target-dates 2026-01-31 \
+python -m recsys_tfb feature_etl --env dev --target-dates 2026-01-31 \
   --var raw_db=raw_lake --var allowed_values="'a','b'"
 ```
 
@@ -350,28 +350,28 @@ python -m recsys_tfb feature_etl --env production --target-dates 2026-01-31 \
 在 YAML 設定好 `source_checks` 後，先對 feature 與 label 上游執行 preflight（不寫輸出表，只查上游；副作用見 §3.5）：
 
 ```bash
-python -m recsys_tfb feature_etl --env production --source-check --target-dates 2026-01-31
-python -m recsys_tfb label_etl   --env production --source-check --target-dates 2026-01-31
+python -m recsys_tfb feature_etl --env dev --source-check --target-dates 2026-01-31
+python -m recsys_tfb label_etl   --env dev --source-check --target-dates 2026-01-31
 ```
 
 確認通過後，先產生 feature 與 label：
 
 ```bash
-python -m recsys_tfb feature_etl --env production --target-dates 2026-01-31
-python -m recsys_tfb label_etl   --env production --target-dates 2026-01-31
+python -m recsys_tfb feature_etl --env dev --target-dates 2026-01-31
+python -m recsys_tfb label_etl   --env dev --target-dates 2026-01-31
 ```
 
 若 `sample_pool_etl.source_checks` 有設定 feature、label 或其他上游表，可在兩者完成後先執行 preflight，再正式產生 sample pool：
 
 ```bash
-python -m recsys_tfb sample_pool_etl --env production --source-check --target-dates 2026-01-31
-python -m recsys_tfb sample_pool_etl --env production --target-dates 2026-01-31
+python -m recsys_tfb sample_pool_etl --env dev --source-check --target-dates 2026-01-31
+python -m recsys_tfb sample_pool_etl --env dev --target-dates 2026-01-31
 ```
 
 多個日期以逗號分隔，並依輸入順序逐日處理：
 
 ```bash
-python -m recsys_tfb feature_etl --env production \
+python -m recsys_tfb feature_etl --env dev \
   --target-dates 2026-01-31,2026-02-28,2026-03-31
 ```
 
@@ -382,7 +382,7 @@ python -m recsys_tfb feature_etl --env production \
 只想在不寫表的前提下檢查 SQL 範本與變數代換的結果，加 `--dry-run`：
 
 ```bash
-python -m recsys_tfb feature_etl --env production --target-dates 2026-01-31 --dry-run
+python -m recsys_tfb feature_etl --env dev --target-dates 2026-01-31 --dry-run
 ```
 
 `--dry-run` 會 render 每張 table、每個日期的 SQL，但不查詢或寫入業務 Hive tables，也不寫入 audit。結尾會印 `DRY RUN：只 render 了 SQL，沒有執行、沒有寫表`，不會印 `completed successfully`。CLI 啟動過程仍會初始化 Spark session。
@@ -400,7 +400,7 @@ dry run 的 SQL 一律全文印進 log（每張表一段 `DRY RUN [<table>]:`）
 若某張中介表失敗，修正後可從該表重新執行：
 
 ```bash
-python -m recsys_tfb feature_etl --env production \
+python -m recsys_tfb feature_etl --env dev \
   --target-dates 2026-01-31 \
   --restart-from feature_concat
 ```

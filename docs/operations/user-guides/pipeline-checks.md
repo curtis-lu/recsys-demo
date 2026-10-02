@@ -29,7 +29,7 @@
 ## 三層
 
 ```
-python -m recsys_tfb <指令> --env production
+python -m recsys_tfb <指令> --env dev
 │
 ├─ ① 開跑前：看設定檔和指令參數。還沒啟動 Spark。
 │

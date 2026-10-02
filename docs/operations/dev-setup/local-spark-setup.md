@@ -51,7 +51,7 @@ pyspark REPL 裡：
 ```python
 spark.sql("SHOW TABLES IN ml_recsys").show(truncate=False)
 spark.sql("SELECT * FROM ml_recsys.feature_table LIMIT 5").show()
-spark.sql("SHOW PARTITIONS ml_recsys.recsys_prod_train_model_input").show(truncate=False)
+spark.sql("SHOW PARTITIONS ml_recsys.train_model_input").show(truncate=False)
 ```
 
 離開：pyspark `exit()`／spark-sql `quit;`／Ctrl-D。wrapper 已內建「從 root 啟動 +

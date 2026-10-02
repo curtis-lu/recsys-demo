@@ -487,7 +487,7 @@ python -m recsys_tfb training --env local
 
 ```bash
 python -m recsys_tfb training \
-  --env production \
+  --env dev \
   --base-dataset-version <base_version> \
   --train-variant <train_variant>
 ```

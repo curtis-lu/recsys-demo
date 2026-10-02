@@ -483,7 +483,7 @@ evaluation:
 
 ```bash
 python -m recsys_tfb evaluation \
-  --env production \
+  --env dev \
   --post-training \
   --model-version <candidate_model_version>
 ```
@@ -496,14 +496,14 @@ python -m recsys_tfb evaluation \
 
 ```bash
 python -m recsys_tfb evaluation \
-  --env production \
+  --env dev \
   --model-version <production_model_version>
 ```
 
 若要監控目前 `best`，可省略版本：
 
 ```bash
-python -m recsys_tfb evaluation --env production
+python -m recsys_tfb evaluation --env dev
 ```
 
 此模式讀取 inference 正式發布的 `ranked_predictions`，再依目前 `label_table` 補入 ground truth。應在該 `snap_date` 的 label 觀察窗成熟後執行。

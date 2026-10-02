@@ -62,10 +62,10 @@ python3.10 -m venv .venv
 ## 4. 執行指令的兩個前提
 
 ```bash
-.venv/bin/python -m recsys_tfb <pipeline> --env production
+.venv/bin/python -m recsys_tfb <pipeline> --env dev
 ```
 
-`production` 是環境名稱的例子（§5 用它示範 `conf/production/`），換成你自己取的名字。
+`dev` 是環境名稱的例子（§5 用它示範 `conf/dev/`），換成你自己取的名字。
 
 `<pipeline>` 是這八個之一：`feature_etl`、`label_etl`、`sample_pool_etl`、`inference_population_etl`、`dataset`、`training`、`evaluation`、`inference`。沒有 `run` 子指令，也沒有 `--pipeline` 旗標。
 
@@ -88,13 +88,15 @@ conf/<env>/parameters.yaml     你的設定        ← 升級不會動到
 
 **不要直接修改 `conf/base/`。** 改了之後每次升級都會在框架的檔案裡產生衝突，而判斷「該留哪一邊」需要理解框架這一版改了什麼。
 
-建立自己的環境層：
+repo 已經附了 `conf/dev/`，可以直接當你的環境層。想用別的名字就複製一份：
 
 ```bash
-mkdir -p conf/production
+cp -r conf/dev conf/<你的名字>
 ```
 
-**檔名要和 `conf/base/` 裡的檔案逐字相同**：`conf/production/parameters_training.yaml` 覆蓋 `conf/base/parameters_training.yaml`，兩邊的內容逐層合併。
+**例外：`conf/dev/catalog.yaml` 是框架附的，升級可能會改到它。** 它幫框架自己寫的 17 張 Hive 表加上前綴 `recsys_prod_`（見 [README](../../../README.md) §5 步驟 0）。`conf/base/catalog.yaml` 新增一張框架寫的表時，新版會在這份檔補一條；你改過這份檔的話，升級時要自己合併。
+
+**檔名要和 `conf/base/` 裡的檔案逐字相同**：`conf/dev/parameters_training.yaml` 覆蓋 `conf/base/parameters_training.yaml`，兩邊的內容逐層合併。
 
 檔名取錯**不會報錯，而且後果比完全失效更難發現**：框架有兩種取設定的方式，一種把所有 `parameters*.yaml` 合成一份（你那個檔名不存在於 base 的檔案也會被併進來），另一種按指定檔名取（呼叫點寫死檔名，看不到你的檔）。兩者都在 `src/recsys_tfb/core/config.py`。結果是**一部分節點吃到了你的設定、一部分沒有**；更糟的是資料集版本 ID 走的是後者，於是**行為變了、版本 ID 沒變**，下一次執行會把舊資料集判定成命中而直接跳過重算。所以檔名請照抄，不要自創。
 

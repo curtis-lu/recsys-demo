@@ -4473,7 +4473,9 @@ class TestTrainingReadsTheDatasetVersionsTestRatioA54:
 # --- #463: a train version is built when its tables are in the metastore ---
 #     (ADR-0029 decision 12, A55)
 
-#: The two train tables' physical names, as in conf/base/catalog.yaml.
+#: The two train tables' physical names, as in conf/dev/catalog.yaml. Kept
+#: different from the entry names so a code path that reads the entry name
+#: instead of ``table`` looks in the wrong place here.
 _TRAIN_TABLES = {
     "train_model_input": "recsys_prod_train_model_input",
     "train_dev_model_input": "recsys_prod_train_dev_model_input",
