@@ -2522,7 +2522,14 @@ class TestEvaluationHandsOverTheCompareTables:
         for name in ("enriched_eval_predictions", "ranked_predictions"):
             monkeypatch.setitem(_REAL_CATALOG, name, {
                 **_REAL_CATALOG[name], "table": f"recsys_prod_{name}"})
-        execute = MagicMock(return_value=True)
+        runtime_params = {}
+
+        def execute(*args, **kwargs):
+            # Copied at the call: the dict is the command's own, so a key
+            # added after the pipeline ran would still show up in it later.
+            runtime_params.update(args[2])
+            return True
+
         result, _ = _run_evaluation_command(
             tmp_path, ["evaluation", "--model-version", _EVAL_MV],
             catalog_extra=("ranked_predictions",),
@@ -2532,7 +2539,6 @@ class TestEvaluationHandsOverTheCompareTables:
             ),
         )
         assert result.exit_code == 0, result.output
-        runtime_params = execute.call_args.args[2]
         # training_eval_predictions is not in this catalog, so it has no row.
         assert runtime_params["_compare_source_tables"] == {
             "enriched_eval_predictions":
@@ -2630,6 +2636,21 @@ class TestCompareOnlyNamesWhatIsMissing:
         assert "enriched_eval_predictions has no partition for 2026-01-31" \
             in log, log
         assert "segment_columns.json" not in log, log
+
+    def test_the_missing_partition_names_the_table_the_catalog_names(
+        self, tmp_path, monkeypatch,
+    ):
+        """Under conf/dev/catalog.yaml the table is not the entry name; the
+        message names the table, which is where a user goes to look."""
+        monkeypatch.setitem(_REAL_CATALOG, "enriched_eval_predictions", {
+            **_REAL_CATALOG["enriched_eval_predictions"],
+            "table": "recsys_prod_enriched_eval_predictions"})
+        result, execute, log = self._invoke(
+            tmp_path, segment_columns_json=True, landed=("2025-12-31",))
+        assert result.exit_code == 1
+        execute.assert_not_called()
+        assert ("ml_recsys.recsys_prod_enriched_eval_predictions has no "
+                "partition for 2026-01-31") in log, log
 
     def test_each_evaluated_date_is_checked_for_its_partition(self, tmp_path):
         """#374: three dates configured, January landed. The two that did not

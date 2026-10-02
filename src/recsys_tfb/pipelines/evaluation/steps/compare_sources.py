@@ -134,7 +134,7 @@ def _load_model_version(
     if no_rows:
         raise DataConsistencyError(
             f"compare model_version={mv!r} has no rows for {no_rows} "
-            f"in source={source!r}"
+            f"in source={source!r} (table {table_name})"
         )
     # enriched_eval_predictions carries each partition's settings fingerprint
     # (#374). B's are the settings of B's own run, so they are not checked

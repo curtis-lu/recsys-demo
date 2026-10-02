@@ -501,7 +501,11 @@ def _compare_only_input_errors(plan, catalog, catalog_config, params) -> list[st
     errors = []
     if plan is not None and plan.to_process:
         months = ",".join(d.strftime("%Y-%m-%d") for d in plan.to_process)
-        errors.append(f"enriched_eval_predictions has no partition for {months}")
+        # The table, not the entry name: an environment may prefix it
+        # (conf/dev/catalog.yaml), and the user looks for the partition there.
+        entry = catalog_config["enriched_eval_predictions"]
+        table = ".".join(filter(None, (entry.get("database"), entry["table"])))
+        errors.append(f"{table} has no partition for {months}")
     names = ["evaluation_segment_columns"]
     if category_table_needed(params):
         names.append("evaluation_item_categories")

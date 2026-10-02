@@ -197,6 +197,24 @@ def test_model_version_reads_the_table_the_catalog_names(spark, monkeypatch):
     assert scores == [0.9]
 
 
+def test_model_version_without_rows_names_the_table_it_read(
+    spark, ranked_predictions_view
+):
+    """B's rows may sit in a table under the entry name, written before the
+    environment prefixed it; the message names the table that was read."""
+    p = _params_for_mv("MV_GHOST")
+    p["evaluation"]["compare"]["source"] = "ranked_predictions"
+    p["_compare_source_tables"] = {"ranked_predictions": "ranked_predictions_v2"}
+    spark.table("ranked_predictions").createOrReplaceTempView(
+        "ranked_predictions_v2")
+    try:
+        with pytest.raises(DataConsistencyError) as excinfo:
+            load_compare_predictions(p, spark)
+    finally:
+        spark.catalog.dropTempView("ranked_predictions_v2")
+    assert "table ranked_predictions_v2" in str(excinfo.value), excinfo.value
+
+
 @pytest.fixture
 def enriched_eval_predictions_view(spark):
     """Mirrors the `enriched_eval_predictions` Hive table schema written by
