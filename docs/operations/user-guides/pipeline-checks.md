@@ -69,7 +69,7 @@ python -m recsys_tfb <指令> --env dev
 - **`dataset.train_split_keys`、`dataset.val_sample_keys`**：有寫的話，必須是 `schema.columns.entity` 裡的欄，不能是空清單（`A29`）。
 - **`dataset.numeric_feature_storage_type`** 只能是 `float32` 或 `float64`；**`dataset.numeric_precision_policy`** 只能是 `block` 或 `truncate`。兩個都可以不寫，但不能寫成 `null`（`A31`）。
 - **`dataset.train_zero_positive_group_ratio`、`val_zero_positive_group_ratio`、`test_zero_positive_group_ratio`**（沒有正例的 query group 留多少）：有寫就必須是 0 到 1 之間的數字，不能是字串、true／false 或 `null`（`A44`）。它們會進版本 ID，寫錯會讓之後每個指令讀到別的版本路徑。
-- **`quality_checks.max_duplicate_key_ratio`**：source ETL 設定裡有 `sample_pool`、`label_table`、`feature_table` 這三張表的話，每一張都要寫，值在 0 到 1 之間、不含 1（`A32`）。拿掉它，那張表的主鍵重複檢查和主鍵空值檢查會一起默默關掉。候選層級特徵表不在這條的範圍內：這條只讀設定檔、拿上面三個名字去找表，而候選層級特徵表的實體表叫什麼由部署在 `catalog.yaml` 決定，這條找不到它。所以它的 `max_duplicate_key_ratio` 被刪掉時不會有人報錯。
+- **`quality_checks.max_duplicate_key_ratio`**：source ETL 設定裡有 `sample_pool`、`label_table`、`feature_table` 這三張表的話，每一張都要寫，值在 0 到 1 之間、不含 1（`A32`）。拿掉它，那張表的主鍵重複檢查和主鍵空值檢查會一起默默關掉。候選層級特徵表不在這條的範圍內：這條只讀設定檔、拿上面三個名字去找表，而候選層級特徵表的實體表叫什麼由部署在 `catalog.yaml` 決定，這條找不到它。所以它的 `max_duplicate_key_ratio` 被刪掉時不會有人報錯。同樣的理由，表名加了前綴時（例如 `conf/dev/` 的 `recsys_prod_sample_pool`），這條也找不到那三張表，刪掉這個鍵一樣不會有人報錯。
 
 **training 設定**
 - **`training.algorithm_params.objective` 與 `metric`**：objective 是排序目標時，metric 有寫就必須是排序 metric，`schema.columns.entity` 也不能是空的（`A7`）。哪些算排序目標、哪些算排序 metric、沒寫時預設哪一個，由演算法的 adapter 宣告；LightGBM 是排序目標 `lambdarank`、`rank_xendcg`，metric 要是 `ndcg`、`map` 或 `lambdarank`（沒寫預設 `ndcg`）。不擋的話，early stopping 看的指標沒有意義。

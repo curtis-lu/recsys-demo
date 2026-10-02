@@ -153,6 +153,7 @@ git tag                                        # 有哪些新版本
 git diff v0.3.0..v0.4.0 -- conf/base/          # 預設設定改了什麼
 git diff v0.3.0..v0.4.0 -- conf/sql/           # 來源表 SQL 範本改了什麼
 git diff v0.3.0..v0.4.0 -- conf/spark-local/   # Spark 設定範本改了什麼
+git diff v0.3.0..v0.4.0 -- conf/dev/           # 示範環境層（表名前綴）改了什麼
 git checkout v0.4.0
 .venv/bin/pip install -e .                     # 相依套件可能跟著翻版本
 ```

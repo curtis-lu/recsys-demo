@@ -149,7 +149,7 @@ YAML 寫 `my_var: "${env.MY_VAR}"` 這種用環境變數帶值的寫法照樣可
 | `depends_on` | 選填 | 文件與順序驗證用途；相依表必須已列在同一份 `tables` 清單的前方；沒寫等於 `[]` |
 | `quality_checks` | 選填 | SQL 寫入後執行的資料品質檢查；沒寫等於 `{}`，下表三個檢查（`min_row_count`、`max_duplicate_key_ratio`、`max_null_ratio`）都不跑 |
 
-**表名前綴**：repo 附的範例 SQL 讀其他 ETL 表時寫 `${target_db}.${table_prefix}<表名>`。`table_prefix` 是 `variables` 裡一個普通的變數，框架不認得它，也不會拿它去改 `name`：`conf/base/` 是空字串；`conf/dev/` 是 `recsys_prod_`，並把整段 `tables` 抄過去、`name` 與 `depends_on` 都寫成帶前綴的完整表名（疊加層對清單是整段取代）。改前綴時這三處要一起改：`variables.table_prefix`、`tables` 的 `name`、`catalog.yaml` 的來源表名。
+**表名前綴**：repo 附的範例 SQL 讀其他 ETL 表時寫 `${target_db}.${table_prefix}<表名>`。`table_prefix` 是 `variables` 裡一個普通的變數，框架不認得它，也不會拿它去改 `name`：`conf/base/` 是空字串；`conf/dev/` 是 `recsys_prod_`，並把整段 `tables` 抄過去、`name` 與 `depends_on` 都寫成帶前綴的完整表名（疊加層對清單是整段取代）。改前綴時，把 `conf/dev/` 裡的 `recsys_prod_` 全部一起換掉：`catalog.yaml` 的每個 `table`，以及四份 `parameters_*_etl.yaml` 的 `variables.table_prefix`、`tables` 的 `name` 與 `depends_on`、`audit.table`。漏改 `depends_on` 會在 Spark 啟動前報錯；漏改其他幾處不一定報錯，舊前綴的表還在時可能讀到它。**不要用 `--var` 覆寫 `table_prefix`**：它只改 SQL 讀的表，不改 `tables` 的 `name`（寫的表），讀寫會分家，而且沒有檢查會擋。
 
 `tables` 的 list 順序就是實際執行順序。`depends_on` 不會建立 DAG，也不會自動調整順序或檢查其他 ETL 的新鮮度；它只會在初始化時驗證相依表是否已出現在清單前方。
 
@@ -225,7 +225,9 @@ quality_checks:
 各自回報（`check` 欄位分別是 `max_duplicate_key_ratio` 與 `primary_key_not_null`），
 所以拿掉這個鍵會同時關掉兩者。dataset pipeline 讀的三張表——`sample_pool`、
 `label_table`、`feature_table`——由不變量 A32 在 CLI 進入點確保這個鍵還在，
-見 `src/recsys_tfb/core/consistency.py` 的 invariant legend。這道輸出檢查在整個框架的檢查裡屬於哪一層：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
+見 `src/recsys_tfb/core/consistency.py` 的 invariant legend。A32 是拿這三個名字去比 `tables` 的 `name`，
+只認不帶前綴的名字：名字加了前綴（例如 `conf/dev/` 的 `recsys_prod_sample_pool`）時它找不到這三張表，
+這個鍵被刪掉也不會有人報錯。這道輸出檢查在整個框架的檢查裡屬於哪一層：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
 
 ### 3.7 建表與 schema evolution
 
@@ -406,8 +408,10 @@ dry run 的 SQL 一律全文印進 log（每張表一段 `DRY RUN [<table>]:`）
 ```bash
 python -m recsys_tfb feature_etl --env dev \
   --target-dates 2026-01-31 \
-  --restart-from feature_concat
+  --restart-from recsys_prod_feature_concat
 ```
+
+`--restart-from` 要寫 `tables` 裡的完整表名；`conf/dev/` 的表名帶前綴 `recsys_prod_`。
 
 `--restart-from` 會略過 `tables` 清單中位於指定 table 之前的步驟。它不能與 `--source-check` 同時使用，也不會驗證被略過的產物是否仍符合目前 SQL 或上游資料。
 
