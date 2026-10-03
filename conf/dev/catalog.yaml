@@ -1,17 +1,5 @@
-# conf/dev/ 疊在 conf/base/ 上面：同名的鍵以這裡為準，沒寫的鍵沿用 base（逐鍵合併，
-# 所以每個條目只要寫 table 一行）。
-#
-# 這份檔只做一件事：幫每張 Hive 表加上前綴 recsys_prod_（prod＝產品），示範怎麼跟同一個
-# database 裡的其他表分開命名。
-# - 前綴可以換成你自己的。
-# - 換了表名，框架就讀寫新名字的那張表。舊表不會被搬過去，也不會被刪。
-# - 來源表的名字要跟寫它的那一方對得上。用 repo 附的 source ETL 產生的話，它的
-#   conf/dev/parameters_*_etl.yaml 與 conf/sql/etl/ 的範例 SQL 也用同一個前綴；你的來源表由別的流程
-#   產生，就照那邊的實際表名寫。
-# - 這份檔是框架附的：base 新增一張 Hive 表時，升級會在這裡補一條（見
-#   docs/operations/user-guides/using-a-release.md §5）。
+# 每張 Hive 表加前綴 recsys_prod_（prod＝產品），跟同一個 database 裡的其他表分開命名。
 
-# --- 來源表（source ETL 寫、pipeline 唯讀）---
 feature_table:
   table: recsys_prod_feature_table
 
@@ -24,7 +12,6 @@ sample_pool:
 inference_population:
   table: recsys_prod_inference_population
 
-# --- dataset ---
 val_keys:
   table: recsys_prod_val_keys
 
@@ -55,18 +42,15 @@ train_model_input:
 train_dev_model_input:
   table: recsys_prod_train_dev_model_input
 
-# --- training ---
 training_eval_predictions:
   table: recsys_prod_training_eval_predictions
 
-# --- evaluation ---
 enriched_eval_predictions:
   table: recsys_prod_enriched_eval_predictions
 
 popularity_period_counts:
   table: recsys_prod_popularity_period_counts
 
-# --- inference ---
 inference_population_features:
   table: recsys_prod_inference_population_features
 
