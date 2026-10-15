@@ -65,7 +65,7 @@ RESUME_CONTRACTS = {
         # prepare_train_inputs, tune_hyperparameters or finalize_model back in.
         #
         # What is left is the memory-only test parquet handle dragging its
-        # cache node (the shap and quadrant diagnoses read it), blocked on
+        # cache node (only predict and the shap diagnosis read it), blocked on
         # cache.root being a relative path (ADR-0014 decision 7, second gap).
         # The train handle no longer shows up here: no diagnosis reads it.
         # Pinned so the next reduction shows up as a diff.

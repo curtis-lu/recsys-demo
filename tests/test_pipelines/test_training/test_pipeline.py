@@ -202,7 +202,7 @@ class TestTrainingPipeline:
 
     def test_diagnosis_nodes_read_landed_artifacts_not_the_memory_only_view(self):
         """Every diagnosis input is addressable, which is what makes
-        `--from-node compute_gain_ledger` stand up and is the precondition
+        `--from-node compute_feature_importance` stand up and is the precondition
         for splitting diagnosis into its own pipeline (ADR-0014 decision 7).
 
         `preprocessor_view` is memory-only, so a node reading it can only be

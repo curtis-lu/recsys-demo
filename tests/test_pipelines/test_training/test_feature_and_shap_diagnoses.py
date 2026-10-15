@@ -58,7 +58,7 @@ def test_compute_feature_importance_disabled(fitted_adapter):
     assert diag.compute_feature_importance(fitted_adapter, params) == {}
 
 
-def _partial_cache(tmp_path, name="train"):
+def _partial_cache(tmp_path, name):
     """A cache directory holding data but no ``_SUCCESS`` — an interrupted copy."""
     root = tmp_path / name
     (root / "snap_date=2026-01-31").mkdir(parents=True)
@@ -74,7 +74,7 @@ def test_shap_diagnostics_refuses_a_partial_cache(tmp_path, shap_setup):
     ADR-0014 decision 7 splits this from the cache node's own behaviour, which is
     the opposite and correct: given the same marker-less directory *and a live
     source*, `cache_test_model_input` clears it and rebuilds from Hive
-    (test_cache_nodes.py::TestPartialCacheRecovery). By the time the handle is
+    (test_cache_nodes.py::TestPerMonthTestCache::test_partial_month_rebuilds_without_touching_siblings). By the time the handle is
     here the source is gone from the picture, and `read_column`/`take_rows` on a
     half-copied directory return rows without complaining -- the SHAP sample
     would be drawn from an unknown fraction of the split.
@@ -458,7 +458,7 @@ def test_shap_on_hive_partitioned_cache(tmp_path):
         partitioning=["snap_date", "prod_name"], partitioning_flavor="hive",
     )
     # The marker a cache node writes last. Without it this fixture is an
-    # interrupted copy, which the diagnosis nodes now refuse (ADR-0014
+    # interrupted copy, which the shap diagnosis now refuses (ADR-0014
     # decision 7) — production always has it.
     (pathlib.Path(base) / "_SUCCESS").touch()
     handle = ParquetHandle(path=base)

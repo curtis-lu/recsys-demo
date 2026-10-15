@@ -391,7 +391,8 @@ def cache_train_model_input(train_model_input, parameters: dict) -> ParquetHandl
     # computed over a silent subset. Rebuilding is only right here because the
     # Hive source is still in reach; a consumer holding nothing but the handle
     # cannot rebuild, which is why io.handles.require_complete_cache refuses
-    # instead of recovering.
+    # instead of recovering (the shap diagnosis, on the test handle, is the
+    # consumer that does).
     if is_partial_cache(local_path):
         log_partial_cache_cleared(local_path)
         shutil.rmtree(local_path, ignore_errors=True)

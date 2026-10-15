@@ -40,16 +40,6 @@ def part_path(tmp_path):
     return base, pdf
 
 
-def test_count_rows_flat(flat_path):
-    path, pdf = flat_path
-    assert da.count_rows(path) == len(pdf)
-
-
-def test_count_rows_partitioned(part_path):
-    path, pdf = part_path
-    assert da.count_rows(path) == len(pdf)
-
-
 def test_schema_names_includes_partition_cols(part_path):
     path, _ = part_path
     names = set(da.schema_names(path))

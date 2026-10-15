@@ -1384,6 +1384,17 @@ def test_log_experiment_logs_diagnostics(fake_mlflow, monkeypatch, tmp_path):
                          cases_manifest=dict(cannot))
     assert not {"n_dead_features", "n_quadrant_cells", "n_cases_rendered"} & set(logged_metrics)
 
+    # Positive control: a marker in one diagnosis must not stop the scalars of
+    # the others from being logged. Without this, the block above also passes
+    # when the whole summary is skipped.
+    logged_metrics.clear()
+    _call_log_experiment(_Model(), {}, 10, eval_results, parameters,
+                         feature_importance=dict(cannot),
+                         shap_diagnostics=shap_diagnostics,
+                         quadrant_profiles={"A": {"q1": {}, "q2": {}}})
+    assert "n_dead_features" not in logged_metrics
+    assert logged_metrics["n_quadrant_cells"] == 2
+
 
 def test_tune_defaults_ranking_metric(monkeypatch):
     """algorithm_params with a ranking objective and no metric => params

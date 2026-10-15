@@ -33,11 +33,6 @@ def _dataset(path: str | list[str]):
     return open_parquet_dataset(path)
 
 
-def count_rows(path: str | list[str]) -> int:
-    """Total row count from parquet metadata (no data scan)."""
-    return int(_dataset(path).count_rows())
-
-
 def schema_names(path: str | list[str]) -> list:
     """All column names (including hive partition columns)."""
     return list(_dataset(path).schema.names)
