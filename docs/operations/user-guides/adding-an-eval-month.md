@@ -98,7 +98,7 @@ python -m recsys_tfb dataset \
 ```
 base_dataset_version: <跟你抄下來的一模一樣>
 train_variant_id:     <跟你抄下來的一模一樣>
-[plan] only-test-months: 7 of the dataset pipeline's 17 nodes; ...
+[plan] only-test-months: 6 of the dataset pipeline's 16 nodes; ...
 [months] dataset=test_keys         processed=2026-02-28 skipped=2026-01-31
 [months] dataset=test_model_input  processed=2026-02-28 skipped=2026-01-31
 ```
@@ -256,6 +256,7 @@ python scripts/promote_model.py --env dev --dry-run
 | 步驟 2 開跑前就退出，訊息帶 `(A55)` 與 `never been built` | 這個 `base_dataset_version` 沒建過訓練資料：第一次跑、改到了 base 層設定或特徵表 schema，或框架升級。見步驟 2 |
 | 步驟 2 跑完了，但 log 最後有兩行 `[train_variant] 目前設定的 train 版本...還沒建` | 目前的 variant 少了一張 train 表，`latest` 沒動。不要跑步驟 3，先不帶旗標跑完整的一輪（步驟 2 最後一段） |
 | `base_dataset_version` 或 `train_variant_id` 跟你抄下來的不一樣，但沒被擋下 | 這次還改到了別的設定，而且剛好對到一個以前建過的版本。把那些改動還原，只留新增的月份 |
+| 步驟 2 一開始就退出，訊息是 `candidate_feature_table missing required snap_dates: [...]` | 你的部署宣告了候選層級特徵表，而它還沒有新月份的資料。補上那個月再重跑步驟 2 |
 | `FileNotFoundError`，路徑帶著新月份 | 步驟 2 沒跑成功。回去重跑步驟 2 |
 | `No predictions found for evaluation.snap_date` | 步驟 3 沒跑。回去重跑步驟 3 |
 | 步驟 3 把舊月份也重寫了，log 有 `recorded in prediction format ..., not ...` | 框架升級改了評分程式（training 預測格式版本加了 1）。預期的，只有這一次；模型沒重訓（步驟 3） |

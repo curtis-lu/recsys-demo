@@ -415,7 +415,7 @@ schema:
 |---|---|---|
 | `--env`, `-e` | `local` | 選擇設定環境 |
 | `--rebuild-dates <d1,d2>` | 無 | 強制重算指定 test 月份（即使 partition 已存在）；值必須是 `test_snap_dates` 的子集 |
-| `--only-test-months` | 關閉 | 宣告「這次只加評估月份」：只跑資料閘、test 鏈與檢查它的精度閘、粒度閘，train／val 的產物不重算。與 `--from-node`／`--only-node` 正交、可併用；上游缺料時當場報錯。它是**模式**不是切片，差別見 §5.1。開跑前先確認目前設定的 train 版本已經有表，沒有就擋下（A55，§7.5） |
+| `--only-test-months` | 關閉 | 宣告「這次只加評估月份」：只跑資料閘、test 鏈與檢查它的粒度閘，train／val 的產物不重算。與 `--from-node`／`--only-node` 正交、可併用；上游缺料時當場報錯。它是**模式**不是切片，差別見 §5.1。開跑前先確認目前設定的 train 版本已經有表，沒有就擋下（A55，§7.5） |
 | `--from-node <name>` | 無 | 從指定 node 與其後的 nodes 開始執行 |
 | `--only-node <name>` | 無 | 只執行指定 node，以及缺少輸入時必要的上游 nodes |
 | `--dry-run` | 關閉 | 顯示切片執行計畫後離開，不執行 pipeline |
@@ -490,11 +490,11 @@ python -m recsys_tfb dataset \
 
 ## 5. 執行流程
 
-資料閘、精度閘、粒度閘三個檢查步驟在整個框架的檢查裡屬於哪一層、擋不住什麼：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
+資料閘、粒度閘兩個檢查步驟在整個框架的檢查裡屬於哪一層、擋不住什麼：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
 
 | 階段 | node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
-| 資料閘 | `validate_data_consistency` | 三張來源表、parameters、`candidate_feature_table`（沒宣告時是 `None`） | 檢查 item coverage 與 categorical feature 型別；宣告了候選層級特徵表時，另查它有齊 identity 欄（B13）、沒有和 `feature_table` 重複的特徵欄（B14）；item 由多欄組成時，另查各表有齊原欄、沒有已叫 `item` 的欄（B16）、同一個原欄各表型別相同（B17），以及沒有兩個組合拼成同一個值（B15，§3.9）。收集問題後一次中止 | 無 |
+| 資料閘 | `validate_data_consistency` | 三張來源表、parameters、`candidate_feature_table`（沒宣告時是 `None`）、`test_model_input_month_plan`、`only_test_months`（執行模式，CLI 注入） | 檢查 item coverage 與 categorical feature 型別；宣告了候選層級特徵表時，另查它有齊 identity 欄（B13）、沒有和 `feature_table` 重複的特徵欄（B14），而且含有這次各 build 會讀的每個月份（月份檢查，見本節下方「整個月都沒有資料」）；item 由多欄組成時，另查各表有齊原欄、沒有已叫 `item` 的欄（B16）、同一個原欄各表型別相同（B17），以及沒有兩個組合拼成同一個值（B15，§3.9）。收集問題後一次中止 | 無 |
 | Train 抽樣 | `select_sample_keys` | `sample_pool` | 依 train 日期、分層比例與 overrides 做決定性抽樣 | `sample_keys` |
 | Train 切分 | `split_train_keys` | `sample_keys` | 依 entity 將資料互斥切成 train 與 train-dev | `train_keys_unfiltered`、`train_dev_keys_unfiltered`（不落地） |
 | Train 整組抽樣 | `filter_train_keys`、`filter_train_dev_keys` | 上一步的 keys、`label_table` | 依 `train_zero_positive_group_ratio` 整組丟掉部分無正例的 query group（label 取自 `label_table`，只讀 train 月份）；預設 r ＝ 1 原樣通過（§3.7） | `train_keys`、`train_dev_keys` |
@@ -502,7 +502,6 @@ python -m recsys_tfb dataset \
 | Val/Test 整組抽樣 | `filter_val_keys`、`filter_test_keys` | 上一步的 keys、`label_table`（test 另收 `test_keys_month_plan`） | 有正例的 query group 全留；無正例的依 `val_`／`test_zero_positive_group_ratio` 整組留下比例 r（預設 0：全丟；label 取自 `label_table`，只讀該 split 的月份），r > 0 時在 keys 上加權重欄，組裝時帶進 model input（§3.7） | `val_keys`、`test_keys` |
 | Fit 前處理器 | `fit_preprocessor_metadata` | `feature_table`、`candidate_feature_table`、`sample_pool`、`preprocessor_on_disk` | 只使用 train 日期建立 feature 清單與 category mappings（兩張特徵表都看，§3.8）；`drop_columns` 裡任何一張特徵表都沒有的欄在這裡記 warning。item 清單寫 `from_train_data` 時，從 train 時段的 `sample_pool` 數清單，並與磁碟上同版本的舊檔比對（B19，§3.10）；清單逐一列出時不使用這兩個輸入 | `preprocessor` |
 | 套用前處理 | `apply_preprocessor_to_features` | `feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan` | 編碼 feature categoricals；只處理計畫中的月份 | `preprocessed_feature_table` |
-| 精度閘 | `validate_numeric_precision` | `preprocessed_feature_table`、`preprocessor`、`preprocessed_feature_table_month_plan`、`candidate_feature_table`、`test_model_input_month_plan`、`only_test_months`（執行模式，CLI 注入） | 不變量 B8：讀剛落地那幾個月份的 parquet footer 統計值（零掃描），確認會被 cast 的欄（decimal、整數族與 boolean——有格點的那些）在該欄自己的解析度下撐得過 `numeric_feature_storage_type`；同時產出每欄的 headroom 報告。宣告了候選層級特徵表時，它不落地、沒有 footer 可讀，改成掃一次本次各 build 要讀的月份聯集（類別欄不在內：它們在 cast 之前已編成詞表索引）。聯集是 `train_snap_dates`、`val_snap_dates`、test 那份計畫要處理的月份；`--only-test-months` 時只有最後一份，同一次掃描也確認這些月份每個都有資料；報告多一段 `candidate_feature_table` | `numeric_precision_report` |
 | 組裝輸入 | `build_*_model_input` | keys、feature、label、preprocessor（test 另收 `test_model_input_month_plan`）、`candidate_feature_table` | 先把 `label_table`、`preprocessed_feature_table`、候選層級特徵表篩到自己 split 的月份（train／train-dev 讀 `train_snap_dates`、val 讀 `val_snap_dates`、test 讀計畫要處理的月份），再 left join label 與 feature（宣告了候選層級特徵表時，在這裡才讀它、編碼、接上），補齊缺失 label，選取欄位並把所有數值特徵欄轉成 `numeric_feature_storage_type` 宣告的型別（預設 float32）；val／test 在 item 清單從資料數時警告前處理器清單裡沒有的新 item（§3.10） | `train_model_input`、`train_dev_model_input`、`val_model_input`、`test_model_input` |
 | 粒度閘 | `validate_model_input_grain` | 四個 split 的 keys 與 model_input、`test_model_input_month_plan` | 不變量 B10：讀 parquet footer 的列數（零掃描），確認每張 model_input 的列數等於它的 keys 表。train、train_dev、val 比這個版本底下的全部檔案；test 是增量的，只比 test 組裝這次處理的月份（`test_model_input_month_plan` 的 `to_process`），而且逐月比（加總的話，一個月多、一個月少會互相抵銷）：沒有要處理的月份時，報告寫 `not written this run`、不算失敗；某個月兩邊都沒有檔（整月的組都被丟了）算 0 ＝ 0。test 某個月沒過時，那個月已經落地了，直接重跑會跳過它：修好上游之後要用 `--rebuild-dates` 指名重算。擋的是右表（`label_table`／`preprocessed_feature_table`／宣告了的候選層級特徵表）有重複 join 鍵造成的靜默放大；同時產出每個 split 的列數報告（test 另列每個月）。`--only-test-months` 也跑它：train／train_dev／val 沒有重建，只重讀檔尾 | `model_input_grain_report` |
 
@@ -532,7 +531,7 @@ model input 的組裝規則（讀取範圍見列表後）：
 | `preprocessed_feature_table` 沒有這筆 | 該列的 feature 欄全為 NULL，**列仍保留** | `sample_pool` 與 `feature_table` 的母體來自不同上游，miss 是結構性的常態；LightGBM 自行處理 missing |
 | 候選層級特徵表沒有這筆 | 該列的候選層級特徵欄全為 NULL，**列仍保留** | 與上一列同一個理由：丟列會悄悄改掉候選集合，mAP 的母體跟著變 |
 
-**整個月都沒有資料則是錯誤，不補 NULL**，這點兩張特徵表相同：少了一個月，那個月每一筆候選的特徵全是 NULL，left join 不會報錯，模型照樣訓練得完，沒有人會發現。`feature_table` 的月份在 fit 與 `apply_preprocessor_to_features` 時查；候選層級特徵表不經過後者，所以由 `fit_preprocessor_metadata` 查 `train_snap_dates` 的每個月、`validate_numeric_precision` 查本次執行要讀的每個月。後者與精度無關，`numeric_precision_policy: truncate` 時照樣擋。
+**整個月都沒有資料則是錯誤，不補 NULL**，這點兩張特徵表相同：少了一個月，那個月每一筆候選的特徵全是 NULL，left join 不會報錯，模型照樣訓練得完，沒有人會發現。`feature_table` 的月份在 fit 與 `apply_preprocessor_to_features` 時查；候選層級特徵表不經過後者，所以由兩處查：`validate_data_consistency`（pipeline 第一個 node）確認它含有這次各 build 會讀的每個月份，`fit_preprocessor_metadata` 另外查 `train_snap_dates` 的每個月。資料閘查的月份是 `train_snap_dates`、`val_snap_dates`，加上這次要做的 test 月（`test_model_input_month_plan` 的 `to_process`，已落地、這次跳過的 test 月不算）；`--only-test-months` 時只有這次要做的 test 月。缺月報 `ValueError`，訊息形如 `candidate_feature_table missing required snap_dates: ['2024-02-29']`；它是前置檢查，不和 B 系列收在同一次報錯裡。成本是只對那幾個月的時間欄做一次 distinct，落到 driver 的量跟月數成正比。
 
 **全 NULL 特徵列是合法輸出，不是 bug。** 看到它不代表資料壞了，代表這個
 `(time, entity)` 在 `feature_table` 裡沒有對應 row。目前刻意不加覆蓋率閘門：真實
@@ -545,7 +544,7 @@ miss 率只有在生產跑過一次才知道，本機量不到，所以「先量
 
 `apply_preprocessor_to_features`、`select_test_keys`、`filter_test_keys`、`build_test_model_input` 四個 node 只處理**尚未落地**的月份。train／train-dev／val **不是**增量的：它們一旦被執行就整批重算，把逐位元相同的內容覆寫回同一批 partition。
 
-省掉那次重算的方法是**不執行它們**，不是讓它們變成增量的。`--only-test-months` 就是這樣做的——它是 `create_pipeline` 的**模式**參數（不是切片），只組出資料閘、test 鏈與檢查它的精度閘、粒度閘，其餘節點根本不進 pipeline；留下哪些節點以 `pipelines/dataset/pipeline.py` 的 `ONLY_TEST_MONTHS_NODES` 為準。反過來說，**增量性與這個旗標無關**：上面四個 node 帶不帶旗標都只處理尚未落地的月份，旗標改的是節點集，不是增量性。模式與切片的分工見 [ADR-0013](../adr/0013-pipeline-modes-and-slicing-are-separate.md)，使用動線見[新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)。
+省掉那次重算的方法是**不執行它們**，不是讓它們變成增量的。`--only-test-months` 就是這樣做的——它是 `create_pipeline` 的**模式**參數（不是切片），只組出資料閘、test 鏈與檢查它的粒度閘，其餘節點根本不進 pipeline；留下哪些節點以 `pipelines/dataset/pipeline.py` 的 `ONLY_TEST_MONTHS_NODES` 為準。反過來說，**增量性與這個旗標無關**：上面四個 node 帶不帶旗標都只處理尚未落地的月份，旗標改的是節點集，不是增量性。模式與切片的分工見 [ADR-0013](../adr/0013-pipeline-modes-and-slicing-are-separate.md)，使用動線見[新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)。
 
 怎麼看出誰是增量的：**pipeline 定義上有 `*_month_plan` input 的就是**。CLI 在任何 Spark 工作開始之前列一次 metastore partition（零掃描）、算出三份計畫（`month_plans.build_month_plans`），以 `<產物名>_month_plan` 這三個名字放進 catalog；節點把它當一般 input 收下。所以：
 
@@ -728,8 +727,8 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 - dataset 的主要 Hive 產物具有版本 partitions，可降低設定改變後誤讀舊資料的風險；來源資料值回補與 seed 變更仍需人工判斷。
 - `validate_data_consistency` 沒有輸出，若它位於切片起點之前便不會自動重跑。source tables 或 item 資料有變時應執行 full run。
 - 候選層級特徵表不落地，train／train_dev／val 的 model input 每次執行都重讀它，所以它的回補在下一次完整執行就生效；已落地的 test 月份照樣被跳過，要用 `--rebuild-dates` 指名重算。
-- `validate_numeric_precision` 有輸出（`numeric_precision_report`），所以**不會**被當成側效應 node 跳過；但沒有任何 node 消費那份報告，所以它也不會被自動拉回來——切片起點在它之後就不會跑到它。候選層級特徵表的缺月檢查（§5）也在這個 node 裡：沒跑到它的那一輪，只剩 `fit_preprocessor_metadata`（如果有跑）查 train 月份，其餘缺的月份會變成一整個月的 NULL 特徵。
-- `validate_model_input_grain` 同樣有輸出（`model_input_grain_report`），行為與上一條一致：不會被當成側效應 node 跳過，但也沒有下游會把它拉回來。
+- `validate_model_input_grain` 有輸出（`model_input_grain_report`），所以**不會**被當成側效應 node 跳過；但沒有任何 node 消費那份報告，所以它也不會被自動拉回來——切片起點在它之後就不會跑到它。
+- 候選層級特徵表的缺月檢查（§5）在 `validate_data_consistency` 裡，而它沒有輸出，切片起點在它之後（`--from-node`／`--only-node` 從後面的 node 開始）就會被跳過（[`architecture-constraints.md`](../agents/architecture-constraints.md) F5）。這一輪候選層級特徵表只剩 `fit_preprocessor_metadata` 查 train 月份，而且要 fit 有跑才算；沒查到的月份缺資料時，會變成一整個月的 NULL 特徵。`--only-test-months` 是模式，資料閘留在清單裡，照常查這次要做的 test 月。
 - `val_keys_unfiltered` 與 `test_keys_unfiltered` 是記憶體中間結果；從 `filter_val_keys`／`filter_test_keys` 接續會補跑對應的 `select_val_keys`／`select_test_keys`（各自只讀自己的月份）。從 `fit_preprocessor_metadata` 接續也會補跑這兩個：四個整組抽樣 node 都排在 fit 之後。四個 split 的 model input 都由 build node 直接落地，所以從任何 build 接續都不會補跑別的 split 的 build。
 - `train_keys_unfiltered` 與 `train_dev_keys_unfiltered` 同樣不落地；從 `filter_train_keys`／`filter_train_dev_keys` 接續會補跑 `split_train_keys`（它不 shuffle，代價低）。落地的 `train_keys`／`train_dev_keys` 是整組抽樣之後的 keys，正是 build node 的輸入，所以 B10 的配對不受影響。
 - 切片執行會在 manifest 記錄 `resumed_from` 或 `only_node`，供後續追溯。
@@ -761,7 +760,7 @@ dataset 本身不接受指定版本的 CLI 旗標；執行時永遠以目前設�
 | `B17: item column '...' has different types across tables {...}` | item 由多欄組成，同一個原欄在兩張表型別不同（例如一張 `int`、一張 `double`） | 在各表的來源 SQL 轉成同一個型別（§3.9） |
 | `(A24) dataset.X_snap_dates [...] and dataset.Y_snap_dates [...] name the same calendar day` | train/val/test 使用相同日期 | 重新切分日期，確保集合互斥。此檢查在 Spark 啟動前執行，**按日比對而非按字面**，所以同一天的不同寫法也抓得到；訊息會分別印出兩邊各自的原始寫法 |
 | `N 個日期區間設定無法展開` | 某個 `{start, end, step}` 區間寫錯：起迄沒落在 step 上、迄日早於起日、`step` 拼錯、少鍵或多鍵 | 訊息逐一點名是哪個檔的哪個鍵、哪一端不對；所有寫錯的區間一次列完。規則見 §3.1 |
-| `feature_table missing required ... snap_dates`／`candidate_feature_table missing required ... snap_dates` | source ETL 未產出某些日期 | 補跑 feature ETL 或修正日期設定。後者點名的是候選層級特徵表：`train_snap_dates` 在 fit 前處理器時查，其餘要讀的月份在精度閘查（§5） |
+| `feature_table missing required ... snap_dates`／`candidate_feature_table missing required ... snap_dates` | source ETL 未產出某些日期 | 補跑 feature ETL 或修正日期設定。後者點名的是候選層級特徵表：這次各 build 要讀的月份由資料閘查，`train_snap_dates` 在 fit 前處理器時另外再查一次（§5） |
 | identity categorical missing declarations | item 等 identity 類別無法從 feature table fit | 在 `schema.categorical_values` 提供完整值域 |
 | log 出現 `unknowns in column ...` | 非 train 日期出現 mapping 未見的新類別 | 檢查是否為資料異常；必要時延伸 train mapping 或調整來源清理。只有 `feature_table` 的類別欄會數，候選層級特徵表的不會（§9） |
 | 抽樣結果為空或某分層消失 | ratio/override 為 0、key 格式不符或母體太小 | 檢查 profiling、override key 順序與實際分層值 |
@@ -806,7 +805,7 @@ B6 擋下來時，錯誤訊息會**逐欄點名**（`feature column 'cust_segmen
 - 宣告了候選層級特徵表時，以下幾件事沒有檢查守著，或要付額外成本（[ADR-0026](../adr/0026-feature-tables-by-join-key.md)〈後果〉）：
   - **重複的 identity 列只在這次組裝的表上抓得到。** B10 四個 split 都查，但 test 只看這次處理的月份；已經落地的 test 月份不會重查。真正擋它的是這張表 source ETL 的 `primary_key` 與 `max_duplicate_key_ratio: 0.0`（[`source_etl.md` §3.6](source_etl.md#36-輸出-quality-checks)），而不變量 A32 不守這項設定：A32 只讀 parameters，拿 `sample_pool`、`label_table`、`feature_table` 這三個固定名字去 ETL 設定裡找表。`candidate_feature_table` 是 catalog 的邏輯名，它在 ETL 設定裡的實體表叫什麼由部署決定，A32 看不到 catalog，也就找不到它。所以這個鍵被刪掉時沒有任何東西會報錯。
   - **類別欄出現 train 沒見過的值時，不會有 warning。** 值照樣編成 `-1`。`feature_table` 的未知值在 `apply_preprocessor_to_features` 數一次；候選層級特徵表在每個 split 組 model input 時才編碼，要數就得每個 split 多一次 Spark 動作。
-  - **B8 每次執行多掃一次這張表本次要讀的月份。** 它不落地，沒有框架自己寫的 parquet footer 可讀，框架也不規定部署的表用什麼格式，所以只能掃。每個 split 的組裝只讀自己的月份，B8 則把全部月份掃一次，所以讀這張表的量明顯變多（以廣告示例的月份數算約多 57%）；fit 另外讀 train 月份兩次（月份檢查與詞表）。`numeric_precision_policy: truncate` 只讓超標的值通過，不省這次掃描。
+  - **這張表每次執行被讀好幾次。** 它不落地，每個 split 的組裝各讀一次自己的月份（train 與 train-dev 各讀一次 train 月份），fit 另外讀 train 月份兩次（月份檢查與詞表），資料閘另對這次要讀的月份的時間欄做一次 distinct。
 - 多月份資料仍由 Spark lazy execution、shuffle spill 與 Hive partitions 處理；尖峰資源通常取決於單一 shuffle partition 與資料偏斜，而不是月份數本身。
 
 ## 10. 相關文件

@@ -820,6 +820,7 @@ src/recsys_tfb/evaluation/metrics_spark.py:221 in collapse_to_categories(): time
 > node**，登記跟著撤掉——A7 只管 `outputs=None` 的 node。記在這裡是因為「登記縮小不
 > 需要新例外」這件事本身容易被讀成「有人偷偷拿掉一筆」（前例：R4 的
 > `persist_sample_weight_report`，#483 起改名 `compute_sample_weight_report`）。附帶收穫是它不再被切片靜默跳過（F5）。
+> 這個 node 與 `numeric_precision_report` 已於 2026-10-16 隨 #518 整個拿掉。
 
 ## R4. 自己寫診斷副產物的 node（A1 的例外二）── 2 筆
 

@@ -91,6 +91,7 @@ regression 風險，用測試守得住，零 production 成本。
 （`source_etl` 的 `quality_checks`）。
 
 ## 修訂（2026-09-03，issue #281）：新增了一個需要「資料的事實」的閘門，零掃描仍然成立
+（2026-10-16：B8 已移除，見 #518）
 
 上面那段的界線是「**加一條 `groupBy` 全掃會改變這個節點的成本量級**」。#281 加的
 不變量 B8（被 cast narrow 的欄撐不撐得過宣告的 `numeric_feature_storage_type`）

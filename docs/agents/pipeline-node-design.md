@@ -514,7 +514,7 @@ return {
 }
 ```
 
-執行模式只注入給數值精度閘（B8，檢查數值特徵存成較窄的型別時會不會失真）。它要檢查這次各 build 讀的月份，而 `--only-test-months` 時只有 test 的 build 在跑，這件事它自己看不出來。所以只注入「是不是這個模式」，月份由它照各 build 的同一套規則自己算，不注入月份清單。兩邊算的一不一致，由 `test_month_scoped_reads.py` 的 `TestThePrecisionGateChecksWhatTheBuildsRead` 釘著。
+執行模式只注入給 `validate_data_consistency`（pipeline 第一個 node）。宣告了候選層級特徵表時，它要確認這張表含有這次各 build 讀的每個月份，而 `--only-test-months` 時只有 test 的 build 在跑，這件事它自己看不出來。所以只注入「是不是這個模式」，月份由它照各 build 的同一套規則自己算，不注入月份清單。兩邊算的一不一致，由 `test_candidate_feature_table.py` 的 `TestTheDataGateChecksTheCandidateTableHasEveryMonth` 釘著。
 
 ### 為什麼不是另一種做法
 
@@ -592,14 +592,14 @@ kept = keep_keys_of_drawn_groups(
 
 ## 17. 資料閘的 node 只寫「查什麼」與「交給誰判斷」；收集事實與組報告進 `steps/`
 
-資料閘是只做檢查、不產出資料的 node。這條管的是**判斷寫在 `core/consistency.py` 的 B 系列不變量**的那些（有代號、有 predicate）。dataset 今天有三個：`validate_data_consistency`（設定與來源表的矛盾）、`validate_numeric_precision`（數值精度閘，B8）、`validate_model_input_grain`（粒度閘，B10）。判斷不在 `core/consistency.py` 的檢查（例如 inference 的 `validate_predictions`）不歸這條管。要新增一個有代號的檢查，照規則 11 先在 `core/consistency.py` 加 predicate，這條就跟著適用。
+資料閘是只做檢查、不產出資料的 node。這條管的是**判斷寫在 `core/consistency.py` 的 B 系列不變量**的那些（有代號、有 predicate）。dataset 今天有兩個：`validate_data_consistency`（設定與來源表的矛盾）、`validate_model_input_grain`（粒度閘，B10）。判斷不在 `core/consistency.py` 的檢查（例如 inference 的 `validate_predictions`）不歸這條管。要新增一個有代號的檢查，照規則 11 先在 `core/consistency.py` 加 predicate，這條就跟著適用。
 
 這條是規則 4（決策留在 node body）與規則 11（驗證放哪）套在資料閘上的結果。node body 寫這幾件事：
 
 1. **查什麼。** 哪些表、哪些月份、哪些欄、用什麼單位比（例如粒度閘逐月配對，不比加總）。這些都是決策。
 2. **把收集到的事實交給 `core/consistency.py` 的 predicate。** 由它判斷有沒有違反不變量，並產出每一條失敗的訊息（包括帶代號的那些）。node 只給這一批訊息一行總標題，交給 `collect_all_message` 排成一則。
-3. **這個閘自己的政策。** 例如數值精度閘：設定是 `block` 就中止，是 `truncate` 就只警告。政策決定「找到問題之後停不停」，是決策，留在 node。
-4. **前置檢查。** 例如 `require_months_in`：這次要讀的月份在不在。照規則 11 標明種類。
+3. **這個閘自己的政策。** 例如設定成「找到就中止」或「只警告」（以前的數值精度閘 B8 就有 `block`／`truncate` 兩種，#518 已拿掉；今天的兩個閘找到就中止）。政策決定「找到問題之後停不停」，是決策，留在 node。
+4. **前置檢查。** 例如 `validate_model_input_grain` 先問：這張表有檔，這次的版本範圍底下卻一個都沒有嗎（`model_input_grain_scope_errors`）？是的話報錯，免得兩邊都讀到 0 的比對被當成通過；整張表一個檔都沒有則放行，那是本來就空的 split。報錯之後列數照樣比，所有錯誤收齊再一次中止，不提早 return。又如 `validate_data_consistency` 在宣告了候選層級特徵表時，先確認它含有這次各 build 讀的每個月份（`require_months_present`）。照規則 11 標明種類。
 
 這四件以外的決策也一樣留在 node，例如粒度閘的「兩邊都沒有檔的月份算 0＝0，不算失敗」。進 `steps/` 的只有機制：讀 parquet 檔尾、找出這次寫了哪些檔、Spark 聚合、組報告、把報告排成 log 行。每個函式具名、只做一件事。
 
@@ -626,7 +626,7 @@ def _item_combinations(df: DataFrame) -> list[tuple[tuple, object]]:
 
 讀者要逐行讀完巢狀函式，才知道這個閘查了什麼。藏在裡面的東西也沒人看見：`_item_combinations` 用的月份篩選是規則 14 那段說的舊寫法，要統一寫法時，得特地點名它才不會漏掉。
 
-同一種形狀長歪了不只一次：數值精度閘、粒度閘各有一份「這次寫了哪些檔」（一份在 `steps/precision.py`，一份是 `nodes.py` 裡的私有 helper），兩份比月份的方法還不一樣，一份轉成日期比，一份用字串比；組報告的迴圈直接寫在 node body 裡，加候選層級特徵表時又被複製了一份。
+同一種形狀長歪了不只一次：以前的數值精度閘（B8，#518 已拿掉）與粒度閘各有一份「這次寫了哪些檔」（一份在 `steps/precision.py`，一份是 `nodes.py` 裡的私有 helper），兩份比月份的方法還不一樣，一份轉成日期比，一份用字串比；組報告的迴圈直接寫在 node body 裡，加候選層級特徵表時又被複製了一份。
 
 ### 今天的樣子
 
@@ -640,24 +640,27 @@ sample_pool_items = item_combinations_in_months(sample_pool, schema, windows)
 label_items = item_combinations_in_months(label_table, schema, windows)
 ```
 
-`validate_numeric_precision` 的結尾，政策留在 node：
+`validate_model_input_grain` 的前置檢查留在 node：
 
 ```python
-# Decision — the policy key is what turns a finding into a stop. `block`
-# is the default because the failure it describes is silent everywhere
-# else; `truncate` exists so an operator who has read the finding can accept
-# the loss without editing the gate out.
-if policy == "block":
-    raise DataConsistencyError(message)
-logger.warning("%s", message)
-return report
+# Pre-check (this node's own inputs) — a scope that matches none of a
+# table's files would make the comparison below pass on two zeroes,
+# having looked at nothing; a table with no files at all is an empty
+# split and passes (model_input_grain_scope_errors says why).
+errors += model_input_grain_scope_errors(
+    split, "keys", files_in_table=keys_all_files,
+    files_in_scope=keys_files, scope=scope,
+) + model_input_grain_scope_errors(
+    split, "model_input", files_in_table=mi_all_files,
+    files_in_scope=mi_files, scope=scope,
+)
 ```
 
-「這次寫了哪些檔」只剩一套，在 `steps/footer_facts.py`，兩個閘共用；各閘自己的報告組裝各一個模組（`steps/precision.py`、`steps/model_input_grain.py`）。
+「這次寫了哪些檔」只剩一套，在 `steps/footer_facts.py`；粒度閘的報告組裝在 `steps/model_input_grain.py`。
 
 ### 為什麼不是另一種做法
 
-- **「只修被點名的那幾個函式」**：同一種形狀會在下一個資料閘再長一次。上面就是：先長在數值精度閘，再長在粒度閘，再長在候選層級表那一段。
+- **「只修被點名的那幾個函式」**：同一種形狀會在下一個資料閘再長一次。上面就是：先長在以前的數值精度閘，再長在粒度閘，再長在候選層級表那一段。
 - **「node 裡只留查什麼和交給 predicate，其他全搬走」**：政策與前置檢查也會被搬進 helper。那正是規則 4 說的：決策漏進 helper，讀 node 的人看不到「找到問題之後會不會停」。
 
 **誰擋得住**：沒有機械檢查。
