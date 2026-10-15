@@ -11,8 +11,9 @@ scripts/``, hits inside ``report/`` itself left out):
 * the four registry diagnoses under ``diagnosis/metric/`` — ``ScopeNote`` in
   each ``__init__.py``; ``ReportSection``, ``report.figures`` and
   ``report.fmt`` in each ``_render.py``.
-
-Nothing under ``scripts/`` imports it.
+* ``scripts/profile_feature_table.py`` — ``Page``, ``ReportSection``,
+  ``report.pages.write_pages`` and ``report.figures.heatmap``, to write the
+  feature-table profiling report.
 
 Modules:
 
