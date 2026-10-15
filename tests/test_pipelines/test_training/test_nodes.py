@@ -1383,6 +1383,10 @@ def test_log_experiment_logs_diagnostics(fake_mlflow, monkeypatch, tmp_path):
                          quadrant_profiles=dict(cannot),
                          cases_manifest=dict(cannot))
     assert not {"n_dead_features", "n_quadrant_cells", "n_cases_rendered"} & set(logged_metrics)
+    # ...and the summary ran to the end: the upload comes after it, and this
+    # run is not strict, so an exception raised inside it would be swallowed
+    # and the line above would pass anyway.
+    assert len(logged_artifacts) == 2
 
     # Positive control: a marker in one diagnosis must not stop the scalars of
     # the others from being logged. Without this, the block above also passes

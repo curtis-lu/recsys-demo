@@ -41,8 +41,6 @@
 %%   （gain_ledger、shap_diagnostics、quadrant_profiles、quadrant_cases）。
 %%   **這個切分是刻意的，不是漏接線**：diagnosis 改吃落地的 [P] 之後，只跑診斷的
 %%   接續執行不會再把 select_features 與整條訓練鏈拉回來——那正是這次改動要買的東西。
-%%   diagnosis node 都吃 model，所以拓撲序把它們排在 finalize_model 之後
-%%   （#411 移除校準器前，`model` 的生產者是 calibrate_model）。
 %%   哪個 node 才是特徵欄的權威，答案是模型自己：diagnosis 從 model.feature_names()
 %%   建 view，[P] 只提供其餘 metadata。
 

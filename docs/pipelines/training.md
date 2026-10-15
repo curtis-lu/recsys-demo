@@ -588,7 +588,7 @@ python -m recsys_tfb training \
 
 **還有一件事要知道**：`predict_manifest.json` 裡沒有 run_id，所以切片跳過 predict 的那種 run 跑完之後，版本目錄裡會有一份**上一次** run 寫的 `predict_manifest.json`，而同一層的 `manifest.json` 記的是這一次的 run_id。這不是這個條目特有的——`feature_importance.json`、`shap_diagnostics.json` 等等只要被切片跳過就都是這樣，`[plan] WARNING: resume assumes the skipped artifacts are still valid` 就是為此而印。要靠 `predict_manifest.json` 回答「**這一次**跑了哪些月」而不是「**最後一次預測**跑了哪些月」的話，得先給它一個 run_id，那是另一張票。
 
-**診斷改問模型，不是在修一個靜默錯誤。** 若改由 config 推導欄集**不會**漂移：`training.feature_selection.exclude` 住在 `training:` block，改它會 bump `model_version` → model 的 catalog 路徑跟著變 → 整條訓練鏈被拉回重跑。ADR-0014 決定 7 對這點有明確的誠實標註。**這是把介接口弄乾淨**，理由是可定址性（catalog 條目）與拓撲位置，不是正確性。（inference 那邊的理由不同、且真的關乎正確性，見 [ADR-0011](../adr/0011-inference-validation-two-layers.md) §5。）
+**診斷改問模型，不是在修一個靜默錯誤。** 就算改由 config 推導欄集，也**不會**漂移：`training.feature_selection.exclude` 住在 `training:` block，改它會 bump `model_version` → model 的 catalog 路徑跟著變 → 整條訓練鏈被拉回重跑。ADR-0014 決定 7 對這點有明確的誠實標註。**這是把介接口弄乾淨**，理由是可定址性（catalog 條目）與拓撲位置，不是正確性。（inference 那邊的理由不同、且真的關乎正確性，見 [ADR-0011](../adr/0011-inference-validation-two-layers.md) §5。）
 
 **半成品 cache 現在會擋下來。** cache node 的 `_SUCCESS` marker 是最後才寫的，所以「有目錄、沒 marker」＝複製到一半斷了。同一個 marker 兩邊行為刻意相反：
 

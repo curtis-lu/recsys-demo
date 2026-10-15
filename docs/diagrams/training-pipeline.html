@@ -209,8 +209,6 @@ HPO 以 <code>search_id</code> 為鍵，兩者都是雜湊過的版本 ID，不�
 <span class="tag">P</span> 之後，只跑診斷的接續執行不會再把 <code>select_features</code> 與整條訓練鏈
 拉回來——那正是這次改動要買的東西。哪個節點才是「特徵欄有哪些」的權威？答案是<b>模型自己</b>：
 診斷從 <code>model.feature_names()</code> 建 view，<span class="tag">P</span> 只提供其餘 metadata。</p>
-<p class="sub">診斷 node 都吃 <code>model</code>，所以拓撲序把它們排在 <code>finalize_model</code> 之後
-（#411 移除校準器前，<code>model</code> 的生產者是 <code>calibrate_model</code>）。</p>
 
 <h2>節點對照表</h2>
 <p class="sub">每個 node 都額外吃 <code>parameters</code>，下表省略。輸入輸出一律寫 <b>catalog 名</b>。

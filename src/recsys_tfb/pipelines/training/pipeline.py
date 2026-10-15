@@ -173,8 +173,9 @@ def create_pipeline(hpo_enabled: bool = True) -> Pipeline:
         # entries, so this group no longer drags `select_features` — and the whole
         # training chain feeding it — into a diagnosis-only rerun. The
         # diagnosis group's one handle input, `test_parquet_handle`, is still
-        # memory-only and deliberately left that way, so this is one edge removed, not a clean cut (ADR-0014
-        # decision 7 records the remaining blocker).
+        # memory-only and deliberately left that way, so this is one edge
+        # removed, not a clean cut (ADR-0014 decision 7 records the remaining
+        # blocker).
         #
         # The resume points this group gives (and what each one re-runs) are
         # pinned in tests/test_pipelines/test_resume_contracts.py.
