@@ -7,7 +7,7 @@
 
 **這一項不碰評測資料。** 它只讀訓練側產出的 ``gain_ledger``（模型的樹逐樹逐切點
 記帳，見 ``pipelines/training/steps/gain_ledger.py``），外加同一次執行裡
-``item_ability`` 的結果畫一張對照散點。與其餘四項診斷不同，它不吃共用的
+``item_ability`` 的結果畫一張對照散點。與其餘三項診斷不同，它不吃共用的
 ``diagnosis_sample``——``contract.INPUTS`` 因此宣告成
 ``("gain_ledger", "evaluation_item_ability", "parameters")``，``compute`` 的
 簽章對應改成 ``compute(gain_ledger, item_ability, parameters)``。

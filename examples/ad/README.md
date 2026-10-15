@@ -131,7 +131,7 @@ bash examples/ad/run_e2e.sh --compare   # 另外與 baseline_digest.json 逐項�
 | `source_etl` | 五張來源表的列數與內容指紋：`feature_table`、`candidate_feature_table`（＝`feature_realtime`）、`label_table`、`sample_pool`、`inference_population` |
 | `dataset` | 四個 split 的 model_input 列數與內容指紋；`preprocessor.json` 的內容指紋 |
 | `training` | `training_eval_predictions`（分數四捨五入到小數第 6 位） |
-| `evaluation` | 評估目錄下每份 JSON 攤平後的指紋（`metrics.json`、`baseline_metrics.json`、`prediction_quality.json`、`report_aggregates.json`、`segment_columns.json`、`diagnosis/` 五份診斷；數字四捨五入到小數第 6 位） |
+| `evaluation` | 評估目錄下每份 JSON 攤平後的指紋（`metrics.json`、`baseline_metrics.json`、`prediction_quality.json`、`report_aggregates.json`、`segment_columns.json`、`diagnosis/` 四份診斷；數字四捨五入到小數第 6 位） |
 
 - **內容指紋**：每列對所有欄（依欄名排序）取 `xxhash64` 後整張表加總，與列的順序無關。版本分區欄不進指紋，所以「只有版本號變了」與「內容變了」分得開。
 - **排除的東西**：JSON 裡的 `config_fingerprint`（設定的雜湊，新增一個「算的」設定鍵就會變，指標值卻沒動；放進來的話 #381 那種改動會讓這裡紅，「指標值逐值不變」反而驗不出來）；評估目錄的 `manifest.json`（執行紀錄，含執行時間、run_id、git commit）。
