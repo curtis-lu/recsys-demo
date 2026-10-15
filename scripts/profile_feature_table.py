@@ -433,7 +433,7 @@ def actions(col: dict, rows: list[int], flags: list[str],
             thresholds: dict[str, float]) -> list[str]:
     """這一欄在總結裡要做的事，依 ``ACTION_ORDER``；沒有問題回空清單。
 
-    一欄可能要做兩件事（例如某一期斷掉、又有幾期只有一個值），兩件都列。
+    一欄可能要做兩件事（例如某一期斷掉、其他期別每期各只有一個值），兩件都列。
     """
     if {"null_all", "const_all"} & set(flags):
         return ["exclude"]
@@ -452,6 +452,7 @@ def actions(col: dict, rows: list[int], flags: list[str],
 
 _VAR_CHOICES = (0, 0.5, 1, 5, 10)  # 〈有變動但沒達門檻〉的篩選選項，百分點
 _VAR_DEFAULT = 1
+SPARK_GAP_MAX_PERIODS = 75  # 小長條圖 150px：每根 1px 加 1px 空隙，最多 75 期
 
 
 def _pct_threshold(v: float) -> str:
@@ -662,6 +663,7 @@ details>summary{cursor:pointer;color:var(--link)}
 .spark i.h{background:linear-gradient(to top,var(--hit) var(--h),var(--track) var(--h))}
 .spark i.g{background:linear-gradient(to top,var(--grey) var(--h),var(--track) var(--h))}
 .spark i.on{outline:1px solid #111}
+.spark.dense{gap:0}.spark.dense i{min-width:0}
 .spark.key{width:auto;cursor:default;margin-right:4px}.spark.key i{width:6px;flex:none}
 .tip{position:fixed;z-index:50;background:#1f2328;color:#fff;font-size:12px;padding:3px 8px;border-radius:4px;pointer-events:none;white-space:nowrap}
 tr.detail td{background:var(--soft);white-space:normal}
@@ -715,7 +717,7 @@ document.addEventListener("click",function(ev){var b=ev.target.closest("button")
   copy(rowsOf(t).filter(function(r){return !r.hidden;}).map(function(r){return r.getAttribute("data-name");}).join("\n"),b);}
  else if(b.hasAttribute("data-copy-text")){copy(b.getAttribute("data-copy-text"),b);}
  else if(b.classList.contains("exp")){toggle(b.closest("tr"));}});
-var DATA=JSON.parse((document.getElementById("col-data")||{}).textContent||"{}");
+var DATA=JSON.parse((document.getElementById("fp-data")||{}).textContent||"{}");
 function fmt(v){if(v===null||v===undefined)return "";if(typeof v==="number"){
  return Number.isInteger(v)?v.toLocaleString("en-US"):v.toLocaleString("en-US",{maximumFractionDigits:6});}return String(v);}
 function pct(n,d){if(!d)return "";if(n===0)return "0%";if(n===d)return "100%";var x=n/d;
@@ -786,7 +788,8 @@ class _Report:
     def variation(self, col: dict) -> float:
         """各期空值比例最高 − 最低，百分點。"""
         r = self.ratios(col)
-        return (max(r) - min(r)) * 100
+        # 浮點數相減會把剛好 1 個百分點算成 0.999…，目錄的欄數就會跟表上的篩選對不上
+        return round((max(r) - min(r)) * 100, 9)
 
     def varying(self) -> list[dict]:
         """〈有變動但沒達門檻〉的候選：空值兩種都沒被標到的欄位。"""
@@ -799,13 +802,23 @@ class _Report:
             return full, full
         return f"{'、'.join(self.labels[t] for t in ts[:2])}…共 {len(ts)} 期", full
 
+    @staticmethod
+    def span(labels: list[str]) -> str:
+        return labels[0] if len(labels) == 1 else f"{labels[0]}～{labels[-1]}"
+
+    def spark_attrs(self, mode: str, col: dict) -> str:
+        """150px 寬、每根至少 1px 加 1px 空隙，最多放 75 期；更多期就拿掉空隙、不設最小寬度，
+        寬度照樣固定（超過 150 期時每根不到 1px，看單一期要點欄名展開明細）。"""
+        cls = "spark dense" if len(self.periods) > SPARK_GAP_MAX_PERIODS else "spark"
+        return f'class="{cls}" data-mode="{mode}" data-col="{_e(col["name"])}"'
+
     def spark_null(self, col: dict) -> str:
         """各期空值比例的小長條圖：一期一根，高度＝空值比例，達門檻橘色。"""
         bars = "".join(
             f'<i{" class=h" if r >= self.null_th else ""} style="--h:{r * 100:.1f}%"></i>'
             for r in self.ratios(col)
         )
-        return f'<span class="spark" data-mode="null" data-col="{_e(col["name"])}">{bars}</span>'
+        return f'<span {self.spark_attrs("null", col)}>{bars}</span>'
 
     def spark_const(self, col: dict) -> str:
         """各期是不是只有一個值：橘＝只有一個值，灰＝有變化，空白＝整期都是空值。"""
@@ -818,7 +831,7 @@ class _Report:
                 cells.append('<i class="g" style="--h:100%"></i>')
             else:
                 cells.append('<i style="--h:0%"></i>')
-        return f'<span class="spark" data-mode="const" data-col="{_e(col["name"])}">{"".join(cells)}</span>'
+        return f'<span {self.spark_attrs("const", col)}>{"".join(cells)}</span>'
 
     def null_legend(self) -> str:
         return _spark_legend([("", f"沒達 {self.th_text}，越高越空"), ("h", f"≥ {self.th_text}，達門檻")],
@@ -828,7 +841,7 @@ class _Report:
 
     def header(self) -> str:
         cfg = self.profile["config"]
-        span = (f"{_e(cfg['time_col'])} {_e(self.labels[0])}～{_e(self.labels[-1])}，共 {len(self.periods)} 期"
+        span = (f"{_e(cfg['time_col'])} {_e(self.span(self.labels))}，共 {len(self.periods)} 期"
                 if self.periods else "沒有讀到任何一期")
         per = f"每期 {min(self.rows):,}～{max(self.rows):,} 筆" if self.rows else ""
         where = f"篩選：<code>{_e(cfg['where'])}</code>" if cfg["where"] else "篩選：無"
@@ -1088,8 +1101,9 @@ class _Report:
                     ("float", "float"), ("string", "字串")]
         data = {"periods": self.periods, "labels": self.labels, "rows": self.rows,
                 "cols": {c["name"]: [c["null"], c["min"], c["max"]] for c in self.feats}}
-        # </ 會提早結束 <script>，JSON 裡的字串（欄名、字串欄位的值）要先換掉
-        blob = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+        # JSON 裡的字串（欄名、字串欄位的值）可能含 </script> 或 <!--<script，前者提早結束
+        # <script>，後者讓真正的 </script> 失效、吞掉後半頁；所有 < 都換成 \u003c
+        blob = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
         return _section("s-all", f"全部欄位（{len(self.feats)} 欄）", (
             _p("查單一欄位或一整族欄位（例如篩選 <code>cc_</code>）。點欄名展開各期的總筆數、空值筆數、"
                "最小值、最大值。表上的最小值、最大值是所有期別合計，只列數值欄位。預設依表裡的欄位順序。")
@@ -1097,7 +1111,7 @@ class _Report:
                                        ("dtype", "型別", type_opt, "", "token")))
             + _table("t-all", [("#", True), ("欄位", False), ("型別", False), ("問題", False), ("各期空值", False),
                                ("空值比例", False), ("最小值", True), ("最大值", True)], rows, sort=(0, "asc"))
-            + f'<script type="application/json" id="col-data">{blob}</script>'
+            + f'<script type="application/json" id="fp-data">{blob}</script>'
         ))
 
     # --- 行動建議總結 -------------------------------------------------------
@@ -1145,7 +1159,7 @@ class _Report:
             ]))
         return _section("s-actions", "行動建議總結", (
             _p("把前面各段的結果整理成做法。複製的欄名一行一個。同一欄可能出現在兩列，"
-               "例如某一期幾乎全空、又有另一期每期各只有一個值。")
+               "例如某一期幾乎全空、其他期別每期各只有一個值。")
             + _table("t-actions", [("做法", False), ("欄數", True), ("來自", False), ("欄位", False),
                                    ("", False)], rows, cls="actions")
             + _note(f"「請上游查」和「看業務意義」的分界是跳幅 {jump_txt}：出事那幾期比其他期別空很多，"
@@ -1157,8 +1171,7 @@ class _Report:
     def scope(self) -> str:
         cfg = self.profile["config"]
         code = lambda s: f"<code>{_e(s)}</code>"  # noqa: E731
-        span = (f"{_e(self.periods[0])}～{_e(self.periods[-1])}，共 {len(self.periods)} 期"
-                if self.periods else "無")
+        span = f"{_e(self.span(self.periods))}，共 {len(self.periods)} 期" if self.periods else "無"
         kv = [
             ("資料表", code(cfg["table"])),
             ("期別欄位", code(cfg["time_col"])),
@@ -1182,7 +1195,7 @@ class _Report:
         note = "可以在這支工具設定檔的 <code>thresholds</code> 區塊調整，再用 <code>render</code> 重畫，不必重跑 Spark。"
         if self.threshold_source:
             note += f"這次的值取自重畫時指定的設定檔 {code(self.threshold_source)}。"
-        unchecked = (_table("t-unchecked", [("欄位", False), ("型別", False)],
+        unchecked = (_toolbar("t-unchecked") + _table("t-unchecked", [("欄位", False), ("型別", False)],
                             [({"data-name": c["name"]}, [_td(_e(c["name"]), cls="name"), _td(_e(c["dtype"]))])
                              for c in self.unchecked])
                      if self.unchecked else _none())

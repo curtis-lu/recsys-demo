@@ -6,7 +6,7 @@
 # Spark 設定不寫在這裡：全部來自 SPARK_CONF_DIR，同 scripts/sampling_overrides_editor.py。
 
 table: mydb.feature_table     # 必填。要檢查的 Hive 表
-time_col: snap_date           # 必填。期別欄位；它是 NULL 的列不讀，筆數印在報告首頁
+time_col: snap_date           # 必填。期別欄位；它是 NULL 的列不讀，筆數印在報告的〈資料範圍與判斷標準〉
 key_cols: [cust_id]           # 必填，至少一欄。主鍵欄位，不檢查
 exclude_cols: []              # 沒寫＝不排除。不是特徵、也不是主鍵的欄位，例如寫入時間
 time_range:                   # 沒寫＝讀全部期別。start、end 可以只寫一個

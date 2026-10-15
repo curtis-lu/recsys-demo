@@ -357,10 +357,12 @@ class TestRender:
         from collections import Counter
 
         profile = _profile(tmp_path)
+        # 欄名剛好是 data：每列的 id 是 col-<欄名>，不能跟內嵌 JSON 的 id 撞
+        profile["columns"].append(dict(_col([0, 0, 0], [0, 0, 0], [9, 9, 9]), name="data"))
         write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
         ids = re.findall(r'\sid="([^"]+)"', (tmp_path / "index.html").read_text())
         assert [i for i, n in Counter(ids).items() if n > 1] == []
-        assert {"t-all", "col-data", "col-half_empty"} <= set(ids)
+        assert {"t-all", "fp-data", "col-data", "col-half_empty"} <= set(ids)
 
     def test_summary_groups_columns_and_lists_upstream_periods(self, tmp_path):
         profile = _profile(tmp_path)
@@ -381,6 +383,28 @@ class TestRender:
         assert 'data-name="cc_bal" data-bad="p1"' in some
         assert '<option value="p1">2024-02</option>' in some
 
+    def test_toc_count_matches_the_variation_filter_at_exactly_1_point(self, tmp_path):
+        # 28%、29%、28%：浮點數相減是 0.999… 個百分點，表上顯示 1.0、預設篩選（≥ 1）會列出
+        profile = _profile(tmp_path)
+        profile["columns"].append(dict(_col([28, 29, 28], [0, 0, 0], [9, 9, 9]), name="wobble"))
+        write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
+        page = (tmp_path / "index.html").read_text()
+        assert 'data-name="wobble" data-var="1.0"' in _section_html(page, "s-null-var")
+        # half_empty（95 個百分點）＋ wobble
+        assert "另有 2 欄有變動但沒達門檻" in _section_html(page, "s-overview")
+
+    def test_sparks_drop_the_gap_beyond_75_periods(self, tmp_path):
+        # 150px 寬、每根 1px 加 1px 空隙最多放 75 期；再多就要拿掉空隙，否則溢出
+        for n, cls in ((75, 'class="spark"'), (76, 'class="spark dense"')):
+            profile = _profile(tmp_path)
+            profile["periods"] = [f"p{t:03d}" for t in range(n)]
+            profile["rows"] = [100] * n
+            for c in profile["columns"]:
+                if c["kind"] != "unchecked":
+                    c.update(null=[0] * n, min=[0] * n, max=[9] * n)
+            write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
+            assert f'<span {cls} data-mode="null"' in (tmp_path / "index.html").read_text(), n
+
     def test_copied_names_are_one_per_line(self, tmp_path):
         profile = _profile(tmp_path)
         profile["columns"].append(dict(_col([0, 0, 0], [1, 1, 1]), name="flag_b"))
@@ -398,13 +422,18 @@ class TestRender:
 
     def test_string_values_cannot_close_the_embedded_json(self, tmp_path):
         profile = _profile(tmp_path)
-        profile["columns"].append(dict(_col([0, 0, 0], ["</script>"] * 3, ["z"] * 3, kind="string",
-                                            dtype="string"), name="s"))
+        profile["columns"] += [
+            dict(_col([0, 0, 0], ["</script>"] * 3, ["z"] * 3, kind="string", dtype="string"), name="s"),
+            # <!--<script 讓真正的 </script> 失效，後半頁會被吞進 JSON
+            dict(_col([0, 0, 0], ["<!--<script"] * 3, ["z"] * 3, kind="string", dtype="string"), name="s2"),
+        ]
         write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
         page = (tmp_path / "index.html").read_text()
-        # 只有兩個 <script>：內嵌的 JSON 與主程式；值裡的 </script> 被換成 <\/script>
+        blob = page.split('<script type="application/json" id="fp-data">')[1].split("</script>")[0]
+        assert "<" not in blob
+        assert json.loads(blob)["cols"]["s2"][1] == ["<!--<script"] * 3
+        # 只有兩個 <script>：內嵌的 JSON 與主程式
         assert page.count("</script>") == 2
-        assert "<\\/script>" in page
 
 
 # ---------------------------------------------------------------------------
