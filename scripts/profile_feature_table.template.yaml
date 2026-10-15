@@ -2,11 +2,11 @@
 #   python scripts/profile_feature_table.py run --config my_profile.yaml
 # 使用說明：docs/operations/user-guides/feature-table-profiling.md
 #
-# 這一版只有基本檢查（空值、只有一個值、float32 精度）。寫了這裡沒有的鍵會報錯。
+# 這一版只有基本檢查（空值、只有一個值）。寫了這裡沒有的鍵會報錯。
 # Spark 設定不寫在這裡：全部來自 SPARK_CONF_DIR，同 scripts/sampling_overrides_editor.py。
 
 table: mydb.feature_table     # 必填。要檢查的 Hive 表
-time_col: snap_date           # 必填。期別欄位；它是 NULL 的列不讀，筆數印在報告首頁
+time_col: snap_date           # 必填。期別欄位；它是 NULL 的列不讀，筆數印在報告的〈資料範圍與判斷標準〉
 key_cols: [cust_id]           # 必填，至少一欄。主鍵欄位，不檢查
 exclude_cols: []              # 沒寫＝不排除。不是特徵、也不是主鍵的欄位，例如寫入時間
 time_range:                   # 沒寫＝讀全部期別。start、end 可以只寫一個
@@ -15,5 +15,4 @@ time_range:                   # 沒寫＝讀全部期別。start、end 可以只
 where: null                   # 沒寫＝不篩選。額外的 Spark SQL 條件，和 time_range 用 AND 合併；篩的不是分區欄位會掃全表
 thresholds:                   # 沒寫的鍵用右邊的預設值
   null_ratio: 0.99            # 空值比例 ≥ 這個值算「幾乎是空值」。大於 0、不超過 1
-  precision_max_abs: 100000   # 有小數的欄位，絕對值最大 ≥ 這個值算 float32 精度不足；整數固定是超過 16,777,216
 output_dir: null              # 沒寫＝data/profiling/feature_profile/<表名>_<YYYYMMDD_HHMMSS>/（表名不含資料庫名稱）

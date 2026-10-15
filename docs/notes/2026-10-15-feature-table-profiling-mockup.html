@@ -1,545 +1,164 @@
-<title>特徵表剖析樣板</title>
-<meta name="claude:viewport-fit-sides" content="cover">
-<style>
-/* Layout：仿 recsys_tfb.report.write_pages 的單欄報表（同一套 h1/h2/公式塊/靜態表）；上方一條樣板說明＋檔名分頁，只為了在一頁裡切換 */
-:root{
-  --bg:#ffffff; --fg:#222222; --h2:#444444; --h3:#555555; --muted:#666666;
-  --border:#dddddd; --th:#f5f5f5; --zebra:#fafafa;
-  --formula-bg:#f5f7fa; --formula-bar:#94a3b8; --formula-fg:#1f2937;
-  --banner-bg:#eef4fc; --banner-fg:#184f95; --banner-line:#b7d3f6;
-  --tab-bg:#f1f1ef; --tab-fg:#52514e; --tab-on-bg:#ffffff; --tab-on-fg:#104281; --tab-line:#2a78d6;
-  --link:#1c5cab; --focus:#2a78d6;
-  --grid:#e1e0d9; --axis:#c3c2b7; --chart-muted:#6f6e69;
-  --mode:light;
-}
-@media (prefers-color-scheme: dark){
-  :root:not([data-theme="light"]){
-    --bg:#1a1a19; --fg:#f0efec; --h2:#d8d7d1; --h3:#c3c2b7; --muted:#a3a29b;
-    --border:#383835; --th:#252524; --zebra:#1f1f1e;
-    --formula-bg:#222427; --formula-bar:#64748b; --formula-fg:#e5e7eb;
-    --banner-bg:#14233a; --banner-fg:#b7d3f6; --banner-line:#1c5cab;
-    --tab-bg:#232322; --tab-fg:#c3c2b7; --tab-on-bg:#1a1a19; --tab-on-fg:#9ec5f4; --tab-line:#5598e7;
-    --link:#86b6ef; --focus:#5598e7;
-    --grid:#2c2c2a; --axis:#383835; --chart-muted:#a3a29b;
-    --mode:dark; color-scheme:dark;
-  }
-}
-:root[data-theme="dark"]{
-  --bg:#1a1a19; --fg:#f0efec; --h2:#d8d7d1; --h3:#c3c2b7; --muted:#a3a29b;
-  --border:#383835; --th:#252524; --zebra:#1f1f1e;
-  --formula-bg:#222427; --formula-bar:#64748b; --formula-fg:#e5e7eb;
-  --banner-bg:#14233a; --banner-fg:#b7d3f6; --banner-line:#1c5cab;
-  --tab-bg:#232322; --tab-fg:#c3c2b7; --tab-on-bg:#1a1a19; --tab-on-fg:#9ec5f4; --tab-line:#5598e7;
-  --link:#86b6ef; --focus:#5598e7;
-  --grid:#2c2c2a; --axis:#383835; --chart-muted:#a3a29b;
-  --mode:dark; color-scheme:dark;
-}
-body{background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang TC","Noto Sans TC",sans-serif;font-size:15px;line-height:1.6}
-.wrap{max-width:1180px;margin:0 auto;padding-block:20px 72px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
-.banner{background:var(--banner-bg);color:var(--banner-fg);border:1px solid var(--banner-line);border-radius:6px;padding:12px 16px;display:grid;gap:4px}
-.banner strong{font-size:1.02em}
-.banner p{margin:0;max-width:78ch}
-.tabs{display:flex;gap:2px;overflow-x:auto;margin:18px 0 0;border-bottom:1px solid var(--border)}
-.tabs button{appearance:none;border:0;border-bottom:3px solid transparent;background:var(--tab-bg);color:var(--tab-fg);font:inherit;font-size:.86em;padding:8px 12px;cursor:pointer;white-space:nowrap;border-radius:4px 4px 0 0;font-family:"SF Mono",Menlo,Consolas,monospace}
-.tabs button[aria-selected="true"]{background:var(--tab-on-bg);color:var(--tab-on-fg);border-bottom-color:var(--tab-line);font-weight:600}
-.tabs button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
-.page{padding-top:8px}
-h1{color:var(--fg);font-size:1.75em;margin:20px 0 12px;text-wrap:balance}
-h2{color:var(--h2);border-bottom:1px solid var(--border);padding-bottom:8px;margin-top:32px;font-size:1.3em;text-wrap:balance}
-a{color:var(--link)}
-.section{margin-bottom:36px}
-.description{color:var(--muted);margin:0 0 14px;max-width:80ch}
-.index-intro p{max-width:80ch}
-.tbl{overflow-x:auto;margin:12px 0 16px}
-table{border-collapse:collapse;font-variant-numeric:tabular-nums}
-th,td{border:1px solid var(--border);padding:7px 12px;text-align:left;vertical-align:top}
-th{background:var(--th);white-space:nowrap}
-tr:nth-child(even) td{background:var(--zebra)}
-td.n{text-align:right;white-space:nowrap}
-.formula{font-family:"SF Mono",Menlo,Consolas,monospace;background:var(--formula-bg);border-left:3px solid var(--formula-bar);padding:10px 16px;margin:12px 0 16px;border-radius:2px;font-size:.9em;color:var(--formula-fg);overflow-x:auto;white-space:pre-wrap}
-.section-bullets{margin:12px 0 16px;padding-left:22px;line-height:1.7}
-.section-bullets li{margin:4px 0;color:var(--muted)}
-details>summary{font-size:1.3em;color:var(--h2);cursor:pointer;margin:24px 0 8px}
-.fig{width:100%;min-height:120px}
-.noplot{color:var(--muted);font-style:italic;padding:12px 0}
-@media (prefers-reduced-motion: reduce){*{scroll-behavior:auto!important}}
-</style>
-
-<div class="wrap">
-  <div class="banner" role="note">
-    <strong>這是樣板，數字都是假的。</strong>
-    <p>實際輸出是一個資料夾，內含 <code>index.html</code>、01～05 五個頁面和 <code>plotly.min.js</code>。上面的按鈕只是方便在同一頁切換，實際報告是從 <code>index.html</code> 的連結開啟各頁。</p>
-    <p>表格不能排序或篩選；圖表可以把滑鼠移上去看數值、拖曳放大、用下拉選單切換欄位。建議處理方式的寫法還沒定案，開發時再一起決定。樣板為了預覽從網路載入畫圖程式；實際報告用資料夾裡的 <code>plotly.min.js</code>，不連網。</p>
-  </div>
-  <nav class="tabs" role="tablist" id="tabs"></nav>
-  <main id="pages"></main>
-</div>
-
-<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.26.0/plotly.min.js"></script>
-<script>
-(function(){
-"use strict";
-
-/* ---------- 示例資料（決定性亂數，每次打開都一樣） ---------- */
-const TIMES=["2024-01-31","2024-02-29","2024-03-31","2024-04-30","2024-05-31","2024-06-30","2024-07-31","2024-08-31","2024-09-30","2024-10-31","2024-11-30","2024-12-31","2025-01-31","2025-02-28"];
-const T=TIMES.length, LATEST=T-1;
-function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
-const rnd=mulberry32(20261015);
-const jit=a=>1+(rnd()-0.5)*a;
-const ROWS=TIMES.map((_,i)=>1182340+i*3127+((i*7)%5)*389);
-const smallPsi=()=>0.002+rnd()*0.02;
-
-/* 判斷標準：對應設定檔 thresholds 區塊 */
-const TH={null_ratio:0.99,precision_max_abs:100000,psi:0.25,tail_ratio:10,tail_log_ratio:1,corr:0.95};
-const slog=x=>Math.sign(x)*Math.log1p(Math.abs(x));
-const INT_EXACT=16777216; /* float32 能一個不差存下來的最大整數 2^24，固定不調 */
-
-const F=[];
-function rDec(v){return Math.abs(v)<100?Math.round(v*10000)/10000:Math.round(v*100)/100;}
-function addNum(name,dtype,o){
-  const f={name,kind:"num",dtype,dec:!!o.dec,null:[],min:[],max:[],q:[],psi:[],constAt:[],constVals:null};
-  const r=o.dec?rDec:Math.round;
-  for(let t=0;t<T;t++){
-    const nl=o.nullFn?o.nullFn(t):Math.min(1,(o.nul||0)*jit(0.12));
-    f.null.push(nl);
-    if(nl>=1){f.q.push(null);f.min.push(null);f.max.push(null);f.constAt.push(false);f.psi.push(o.psiFn?o.psiFn(t):null);continue;}
-    const cv=o.constAtFn?o.constAtFn(t):null;
-    let q,mx,mn;
-    if(cv!=null){q=[cv,cv,cv,cv,cv];mx=cv;mn=cv;}
-    else if(o.qFn){q=o.qFn(t);mx=o.maxFn?o.maxFn(t,q):o.max;mn=o.min!==undefined?o.min:0;}
-    else{
-      const s=o.scale*(o.mult?o.mult(t):1)*jit(0.03);
-      q=(o.shape||[0.01,0.35,0.8,1.6,7]).map(k=>k*s);
-      mx=o.maxFn?o.maxFn(t,q):q[4]*(o.maxMult||2.3)*jit(0.25);
-      mn=o.minFn?o.minFn(t):(o.min!==undefined?o.min:0);
-    }
-    q=q.map(r);
-    const mxr=r(mx), oddify=v=>(!o.dec&&Math.abs(v)>INT_EXACT&&v%2===0)?v+1:v;
-    f.q.push(q);f.max.push(oddify(mxr));f.min.push(r(mn));f.constAt.push(cv!=null);
-    f.psi.push(t===0?0:(o.psiFn?o.psiFn(t):smallPsi()));
-  }
-  addTails(f);F.push(f);return f;
-}
-function addTails(f){
-  f.tailHi=[];f.tailLo=[];f.logHi=[];f.logLo=[];
-  for(let t=0;t<T;t++){
-    const q=f.q[t];
-    if(!q||q[4]===q[0]){f.tailHi.push(null);f.tailLo.push(null);f.logHi.push(null);f.logLo.push(null);continue;}
-    const w=q[4]-q[0], wl=slog(q[4])-slog(q[0]);
-    f.tailHi.push((f.max[t]-q[4])/w);f.tailLo.push((q[0]-f.min[t])/w);
-    f.logHi.push((slog(f.max[t])-slog(q[4]))/wl);f.logLo.push((slog(q[0])-slog(f.min[t]))/wl);
-  }
-}
-function addConst(name,dtype,vals,dec){
-  const f={name,kind:"num",dtype,dec:!!dec,null:TIMES.map(()=>0),min:vals.slice(),max:vals.slice(),
-    q:vals.map(v=>[v,v,v,v,v]),psi:TIMES.map(()=>null),constAt:TIMES.map(()=>true),constVals:vals.slice()};
-  addTails(f);F.push(f);
-}
-function addStr(name,o){
-  const f={name,kind:"str",dtype:"string",cats:o.cats,null:[],shares:[],psi:[],q:TIMES.map(()=>null),max:TIMES.map(()=>null),min:TIMES.map(()=>null),
-    constAt:TIMES.map(()=>!!o.constVal),constVals:o.constVal?TIMES.map(()=>o.constVal):null};
-  for(let t=0;t<T;t++){
-    f.null.push(Math.min(1,(o.nul||0)*jit(0.12)));
-    f.shares.push(o.sharesFn(t));
-    f.psi.push(o.constVal?null:(t===0?0:(o.psiFn?o.psiFn(t):0.002+rnd()*0.015)));
-  }
-  addTails(f);F.push(f);return f;
-}
-
-addNum("bal_avg_1m","double",{dec:true,scale:82000,maxMult:36,nul:0.004});
-addNum("bal_avg_3m","double",{dec:true,scale:83500,maxMult:34,nul:0.004});
-addNum("bal_avg_6m","double",{dec:true,scale:84800,maxMult:33,nul:0.004});
-addNum("dep_bal","bigint",{scale:61000,maxMult:41,minFn:t=>t===4?-20000003:0});
-addNum("fund_aum","decimal(18,2)",{dec:true,scale:310000,maxMult:22,nul:0.70});
-addNum("loan_bal","bigint",{scale:900000,shape:[0.05,0.5,0.9,1.4,3.2],maxFn:(t,q)=>q[4]*1.35*jit(0.1),nul:0.85});
-addNum("loan_rate","double",{dec:true,qFn:()=>[0.012,0.021,0.026,0.033,0.068].map(v=>v*jit(0.02)),max:0.18,min:0.005,nul:0.85});
-addNum("txn_cnt_1m","int",{scale:9,shape:[0,0.45,1,1.9,6],maxFn:(t,q)=>t===6?100000:q[4]*2.4*jit(0.25)});
-addNum("txn_cnt_3m","int",{scale:27,shape:[0,0.45,1,1.9,6],maxMult:2.2});
-addNum("txn_amt_1m","bigint",{scale:21000,maxMult:18});
-addNum("txn_amt_3m","bigint",{scale:63000,maxFn:(t,q)=>t===12?25000001:q[4]*17*jit(0.25)});
-addNum("card_spend_1m","bigint",{scale:9800,maxMult:15,mult:t=>t>=11?100:1,psiFn:t=>t>=11?[4.81,4.93,4.77][t-11]:smallPsi()});
-addNum("card_spend_3m","bigint",{scale:29500,maxMult:14,mult:t=>t===11?34:t===12?67:t===13?100:1,psiFn:t=>t>=11?[1.24,2.93,4.62][t-11]:smallPsi()});
-addNum("salary_in_1m","bigint",{scale:46000,shape:[0.05,0.6,0.95,1.5,6.8],maxMult:8,nul:0.31});
-addNum("pt_bonus","int",{scale:1200,shape:[0,0.2,0.8,1.9,6],maxMult:3,constAtFn:t=>t===6?0:null,psiFn:t=>t===6?5.83:smallPsi()});
-addNum("age","int",{qFn:()=>[21,33,44,56,79],maxFn:t=>t===9?999:99,min:18});
-addNum("tenure_m","int",{qFn:t=>[1,22+t*0.1,61+t*0.2,118,302],max:471,min:0});
-addNum("prod_cnt","int",{qFn:()=>[1,1,2,3,7],max:14,min:1});
-addNum("credit_score","int",{qFn:()=>[412,598,671,733,812],max:850,min:300,nul:0.05});
-addNum("limit_util","double",{dec:true,qFn:()=>[0,0.04,0.19,0.47,0.98],max:1.43,min:0});
-addNum("app_days_1m","int",{qFn:t=>[0,2+0.25*t,8+0.6*t,17+0.5*t,30],max:31,min:0,psiFn:t=>0.024*t+(rnd()-0.5)*0.006});
-addNum("login_cnt_1m","int",{scale:6,shape:[0,0.4,1,2,7],maxMult:3});
-addNum("ib_login_3m","int",{scale:4,shape:[0,0.3,1,2.2,8],maxMult:3,nullFn:t=>t===8?1:0.021*jit(0.1),psiFn:t=>t===8?8.74:smallPsi()});
-addNum("mobile_os_ver","double",{dec:true,qFn:()=>[11.2,13.1,14.4,15.6,17.1],max:17.5,min:9,nullFn:()=>0.996+(rnd()-0.5)*0.002});
-addNum("old_campaign_flag","int",{nullFn:()=>1,psiFn:()=>null});
-addConst("sys_version","int",TIMES.map(()=>3));
-addConst("fx_rate_usd","double",[31.02,31.35,31.88,32.10,32.47,32.43,32.05,31.71,31.62,32.19,32.51,32.78,32.86,32.94],true);
-addNum("mort_flag","int",{qFn:()=>[0,0,0,0,0],max:1,min:0});
-addNum("vip_flag","int",{qFn:()=>[0,0,0,0,1],max:1,min:0});
-addStr("seg_code",{nul:0.003,cats:["A1","A2","A3","A4","A5"],sharesFn:()=>[0.41,0.24,0.18,0.11,0.06]});
-addStr("channel_pref",{nul:0.012,cats:["BRANCH","ATM","WEB","APP","APP_V2"],
-  sharesFn:t=>{const v=t>=10?[0.06,0.11,0.16,0.21][t-10]:0;return[0.34-v*0.4,0.22,0.19,0.25-v*0.6,v];},
-  psiFn:t=>t>=10?[0.12,0.21,0.29,0.38][t-10]:0.002+rnd()*0.015});
-addStr("legacy_tier",{nul:0,cats:["N"],sharesFn:()=>[1],constVal:"N"});
-
-/* 相關性（最新一期、抽 50,000 筆） */
-const CORR_FEATS=["bal_avg_1m","bal_avg_3m","bal_avg_6m","dep_bal","fund_aum","salary_in_1m","txn_cnt_1m","txn_cnt_3m","txn_amt_1m","txn_amt_3m","card_spend_1m","card_spend_3m"];
-const PAIR={"bal_avg_1m|bal_avg_3m":0.983,"bal_avg_3m|bal_avg_6m":0.977,"bal_avg_1m|bal_avg_6m":0.951,"txn_cnt_1m|txn_cnt_3m":0.962,"txn_amt_1m|card_spend_1m":0.957,
-"txn_amt_1m|txn_amt_3m":0.912,"card_spend_1m|card_spend_3m":0.931,"txn_amt_3m|card_spend_3m":0.904,"txn_amt_1m|card_spend_3m":0.88,"txn_amt_3m|card_spend_1m":0.89,
-"bal_avg_1m|dep_bal":0.862,"bal_avg_3m|dep_bal":0.848,"bal_avg_6m|dep_bal":0.823,
-"bal_avg_1m|fund_aum":0.412,"bal_avg_3m|fund_aum":0.418,"bal_avg_6m|fund_aum":0.421,"dep_bal|fund_aum":0.377,
-"bal_avg_1m|salary_in_1m":0.352,"bal_avg_3m|salary_in_1m":0.349,"bal_avg_6m|salary_in_1m":0.341,"dep_bal|salary_in_1m":0.318,
-"txn_amt_1m|txn_cnt_1m":0.644,"txn_amt_3m|txn_cnt_3m":0.661,"txn_amt_3m|txn_cnt_1m":0.598,"txn_amt_1m|txn_cnt_3m":0.602,"card_spend_1m|txn_cnt_1m":0.587,"card_spend_3m|txn_cnt_3m":0.603,"card_spend_3m|txn_cnt_1m":0.55,"card_spend_1m|txn_cnt_3m":0.56,
-"salary_in_1m|txn_amt_1m":0.281,"salary_in_1m|txn_amt_3m":0.289,"fund_aum|txn_cnt_1m":-0.084,"fund_aum|txn_cnt_3m":-0.071};
-const fnull=n=>F.find(f=>f.name===n).null[LATEST];
-const CORR={};
-CORR_FEATS.forEach((a,i)=>CORR_FEATS.forEach((b,j)=>{
-  if(j<=i)return;
-  const v=PAIR[a+"|"+b]??PAIR[b+"|"+a]??Math.round((0.05+rnd()*0.2)*1000)/1000;
-  const n=Math.round(50000*(1-fnull(a))*(1-fnull(b)));
-  CORR[a+"|"+b]={v,n};CORR[b+"|"+a]={v,n};
-}));
-const HIGH=Object.entries(CORR).filter(([k,o])=>{const[a,b]=k.split("|");return CORR_FEATS.indexOf(a)<CORR_FEATS.indexOf(b)&&Math.abs(o.v)>=TH.corr;})
-  .map(([k,o])=>{const[a,b]=k.split("|");return{a,b,v:o.v,n:o.n};}).sort((x,y)=>Math.abs(y.v)-Math.abs(x.v));
-const IN_HIGH=new Set(HIGH.flatMap(p=>[p.a,p.b]));
-const MATRIX=CORR_FEATS.filter(n=>IN_HIGH.has(n));
-
-/* ---------- 問題類型 ---------- */
-const FLAG={
-  null_all:{label:"每一期都幾乎是空值",cond:"每一期的空值比例都 ≥ 99%",act:"欄位沒有資訊，可以排除"},
-  const_all:{label:"整欄只有一個值",cond:"所有期別合計只有一個值（不含空值）",act:"欄位沒有資訊，可以排除"},
-  null_some:{label:"部分期別幾乎是空值",cond:"只有部分期別的空值比例 ≥ 99%",act:"欄位本身正常，請檢查這幾期的上游資料"},
-  const_some:{label:"部分期別只有一個值",cond:"只有部分期別只有一個值（不含空值）",act:"欄位本身正常，請檢查這幾期的上游資料"},
-  const_each:{label:"每期各只有一個值",cond:"每一期只有一個值，但各期的值不同",act:"通常是匯率這類每期一個數字的總體指標，不一定要排除"},
-  precision:{label:"float32 精度不足",cond:"有小數且絕對值最大 ≥ 100,000；或整數且絕對值最大 ≥ 16,777,216",act:"對 LightGBM 幾乎沒有影響；但整數與 decimal 欄位會被 dataset 的精度檢查擋下（numeric_precision_policy 預設 block），可請上游四捨五入，或改成 truncate 接受失真"},
-  drift:{label:"分布偏移",cond:"有一期的 PSI ≥ 0.25（和最早一期比較）",act:"到 03 頁看從哪一期開始變；若是單位改變，請上游修正"},
-  outlier:{label:"極端值",cond:"有一期倍數 ≥ 10，且取 log 後倍數 ≥ 1",act:"到 03 頁看那一期的最大值或最小值，確認是不是資料錯誤"},
-  corr:{label:"高度相關",cond:"最新一期 Spearman 相關係數的絕對值 ≥ 0.95",act:"同一組通常留一個就夠；樹模型不一定要刪"}
-};
-const FLAG_ORDER=["null_all","const_all","null_some","const_some","const_each","precision","drift","outlier","corr"];
-const EXCLUDE_KEYS=["null_all","const_all"];
-function outT(f){
-  const r=[];
-  for(let t=0;t<T;t++){
-    const hi=f.tailHi[t]!=null&&f.tailHi[t]>=TH.tail_ratio&&f.logHi[t]>=TH.tail_log_ratio;
-    const lo=f.tailLo[t]!=null&&f.tailLo[t]>=TH.tail_ratio&&f.logLo[t]>=TH.tail_log_ratio;
-    if(hi||lo)r.push(t);
-  }
-  return r;
-}
-/* 最離譜的那一期、那一側 */
-function worst(f){
-  let best=null;
-  outT(f).forEach(t=>{
-    [[true,f.tailHi[t],f.logHi[t],f.max[t]],[false,f.tailLo[t],f.logLo[t],f.min[t]]].forEach(([hi,r,l,v])=>{
-      if(r!=null&&r>=TH.tail_ratio&&l>=TH.tail_log_ratio&&(!best||l>best.l))best={t,hi,r,l,v};
-    });
-  });
-  return best;
-}
-const oddVal=w=>(w.hi?"最大值 ":"最小值 ")+num(w.v);
-F.forEach(f=>{
-  const fl=[];
-  const hi=f.null.map(v=>v>=TH.null_ratio);
-  if(hi.every(Boolean)){f.flags=["null_all"];return;}
-  if(hi.some(Boolean))fl.push("null_some");
-  if(f.constAt.every(Boolean)){
-    if(new Set(f.constVals).size===1){f.flags=["const_all"];return;}
-    fl.push("const_each");f.flags=fl;return;
-  }
-  if(f.constAt.some(Boolean))fl.push("const_some");
-  if(f.kind==="num"&&maxAbs(f)>=(f.dec?TH.precision_max_abs:INT_EXACT))fl.push("precision");
-  if(f.psi.some(v=>v!=null&&v>=TH.psi))fl.push("drift");
-  if(f.kind==="num"&&outT(f).length)fl.push("outlier");
-  if(IN_HIGH.has(f.name))fl.push("corr");
-  f.flags=fl;
-  f.nearconst=f.kind==="num"&&!f.constAt.some(Boolean)&&f.q.some(q=>q&&q[0]===q[4]);
-});
-function maxAbs(f){let m=-1,at=null;f.max.forEach((v,t)=>{if(v!=null&&Math.abs(v)>m){m=Math.abs(v);at=t;}});f.min.forEach((v,t)=>{if(v!=null&&Math.abs(v)>m){m=Math.abs(v);at=t;}});maxAbs.at=at;return m;}
-
-/* ---------- 小工具 ---------- */
-const esc=s=>String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-function num(x){if(x==null||Number.isNaN(x))return"";if(Number.isInteger(x))return x.toLocaleString("en-US");return x.toLocaleString("en-US",{maximumFractionDigits:4});}
-function pct(x){if(x==null)return"";if(x===0)return"0%";if(x>=0.99&&x<1)return(x*100).toFixed(1)+"%";return(x*100).toFixed(x<0.01?2:1)+"%";}
-const fx=(x,d)=>x==null?"":x.toFixed(d);
-const f32step=x=>Math.pow(2,Math.floor(Math.log2(Math.abs(x)))-23);
-function tbl(head,rows,numCols){
-  numCols=numCols||[];
-  return '<div class="tbl"><table><thead><tr>'+head.map(h=>"<th>"+esc(h)+"</th>").join("")+"</tr></thead><tbody>"+
-    rows.map(r=>"<tr>"+r.map((c,i)=>'<td'+(numCols.includes(i)?' class="n"':"")+">"+esc(c)+"</td>").join("")+"</tr>").join("")+"</tbody></table></div>";
-}
-function rawTbl(head,rows){return '<div class="tbl"><table>'+(head?"<thead><tr>"+head.map(h=>"<th>"+h+"</th>").join("")+"</tr></thead>":"")+"<tbody>"+rows.map(r=>"<tr>"+r.map(c=>"<td>"+c+"</td>").join("")+"</tr>").join("")+"</tbody></table></div>";}
-function sec(title,desc,parts,opt){
-  opt=opt||{};
-  let h=opt.collapsible?'<details class="section"><summary>'+esc(title)+"</summary>":'<div class="section"><h2>'+esc(title)+"</h2>";
-  if(desc)h+='<p class="description">'+esc(desc)+"</p>";
-  if(opt.formula)h+='<div class="formula">'+esc(opt.formula)+"</div>";
-  if(opt.bullets)h+='<ul class="section-bullets">'+opt.bullets.map(b=>"<li>"+esc(b)+"</li>").join("")+"</ul>";
-  h+=parts.join("");
-  return h+(opt.collapsible?"</details>":"</div>");
-}
-const fig=id=>'<div class="fig" id="'+id+'" role="img" aria-label="圖表"></div>';
-const flagNames=f=>f.flags.map(k=>FLAG[k].label).join("、");
-const withFlag=k=>F.filter(f=>f.flags.includes(k));
-const timesWhere=(arr,pred)=>arr.map((v,t)=>pred(v)?TIMES[t]:null).filter(Boolean);
-const NUMERIC=F.filter(f=>f.kind==="num"), STRS=F.filter(f=>f.kind==="str");
-const flaggedCols=F.filter(f=>f.flags.length);
-const exclCols=F.filter(f=>f.flags.some(k=>EXCLUDE_KEYS.includes(k)));
-const advice=k=>["建議處理方式："+FLAG[k].act];
-
-/* ---------- 各頁 ---------- */
-const PAGES=[
- {id:"index",file:"index.html"},
- {id:"flags",file:"01-flags.html",title:"01 需要處理的欄位"},
- {id:"basic",file:"02-basic.html",title:"02 空值與精度"},
- {id:"drift",file:"03-drift.html",title:"03 分布偏移與極端值"},
- {id:"corr",file:"04-corr.html",title:"04 相關性"},
- {id:"all",file:"05-all.html",title:"05 所有欄位明細"}
-];
-const link=id=>{const p=PAGES.find(x=>x.id===id);return'<a href="#p-'+id+'">'+esc(p.title)+"</a>";};
-const YAML=`table: ml_recsys.feature_table
+<!DOCTYPE html><html lang='zh-Hant'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>特徵表檢查報告：ml_recsys.feature_table</title><style>
+:root{--fg:#1f2328;--muted:#59636e;--line:#d1d9e0;--soft:#f6f8fa;--link:#0969da;
+--track:#eef1f4;--bar:#8fa7bf;--grey:#b8c4d0;--hit:#c2410c}
+*{box-sizing:border-box}
+body{margin:0;color:var(--fg);background:#fff;font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",
+"Microsoft JhengHei","PingFang TC","Noto Sans TC",sans-serif}
+code,.name,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px}
+a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
+header.top{position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid var(--line);
+padding:10px 24px;display:flex;flex-wrap:wrap;gap:4px 20px;align-items:center}
+header.top .title{font-size:16px;font-weight:600}
+header.top .scope{color:var(--muted);font-size:13px;flex:1 1 400px}
+header.top input{width:280px;padding:5px 8px;border:1px solid var(--line);border-radius:6px}
+.layout{display:grid;grid-template-columns:220px minmax(0,1fr);gap:32px;max-width:1500px;margin:0 auto;padding:20px 24px 80px}
+nav.toc{position:sticky;top:76px;align-self:start;font-size:13px}
+nav.toc a{display:flex;justify-content:space-between;color:var(--fg);padding:3px 8px;border-radius:6px}
+nav.toc a.sub{padding-left:22px;color:var(--muted);font-size:12px}
+nav.toc a:hover{background:var(--soft);text-decoration:none}
+nav.toc a span{color:var(--muted);font-variant-numeric:tabular-nums}
+nav.toc hr{border:0;border-top:1px solid var(--line);margin:8px 0}
+@media (max-width:1100px){.layout{grid-template-columns:1fr}nav.toc{position:static}}
+section{margin:0 0 40px;scroll-margin-top:80px}
+section section{margin:0 0 28px}
+h2{font-size:20px;margin:0 0 8px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+h3{font-size:16px;margin:24px 0 4px}
+p.desc{max-width:80ch;color:#333;margin:6px 0 10px}
+p.note{max-width:80ch;color:var(--muted);font-size:13px;margin:6px 0}
+p.none{color:var(--muted)}
+.tbox{max-height:72vh;overflow:auto;border:1px solid var(--line);border-radius:6px;margin:8px 0}
+table.t{border-collapse:separate;border-spacing:0;width:100%;font-variant-numeric:tabular-nums}
+table.t th,table.t td{padding:4px 10px;border-bottom:1px solid #eaeef2;text-align:left;vertical-align:middle;white-space:nowrap}
+table.t td.wrap{white-space:normal;min-width:120px;max-width:460px}
+table.t th{position:sticky;top:0;z-index:2;background:var(--soft);font-weight:600;cursor:pointer;user-select:none}
+table.t th[data-dir=asc]::after{content:" ▲";color:var(--muted)}
+table.t th[data-dir=desc]::after{content:" ▼";color:var(--muted)}
+table.t .n{text-align:right}
+table.t tbody tr:hover td{background:#f3f8ff}
+table.kv th{width:12em;cursor:default}
+table.actions td{vertical-align:top;padding:8px 10px}
+ul.periods{margin:6px 0 0;padding-left:18px;font-weight:normal;font-size:13px}
+ul.periods li{margin:2px 0}ul.periods button{margin-left:6px}
+.toolbar{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;margin:10px 0 0;font-size:13px}
+.toolbar input.q{width:260px;padding:4px 8px;border:1px solid var(--line);border-radius:6px}
+.toolbar select{padding:2px 4px}
+.toolbar .count{color:var(--muted)}
+button{font:inherit;font-size:12px;padding:3px 10px;border:1px solid var(--line);border-radius:6px;background:#fff;cursor:pointer}
+button:hover{background:var(--soft)}
+pre{background:var(--soft);border:1px solid var(--line);border-radius:6px;padding:10px 12px;margin:4px 0;overflow:auto;max-height:260px}
+details>summary{cursor:pointer;color:var(--link)}
+.legend{display:flex;flex-wrap:wrap;gap:4px 18px;font-size:12px;color:var(--muted);margin:6px 0 4px;align-items:center}
+.spark{display:inline-flex;align-items:stretch;gap:1px;width:150px;height:20px;vertical-align:middle;cursor:crosshair}
+.spark i{flex:1 1 0;min-width:1px;background:linear-gradient(to top,var(--bar) var(--h),var(--track) var(--h))}
+.spark i.h{background:linear-gradient(to top,var(--hit) var(--h),var(--track) var(--h))}
+.spark i.g{background:linear-gradient(to top,var(--grey) var(--h),var(--track) var(--h))}
+.spark i.on{outline:1px solid #111}
+.spark.dense{gap:0}.spark.dense i{min-width:0}
+.spark.key{width:auto;cursor:default;margin-right:4px}.spark.key i{width:6px;flex:none}
+.tip{position:fixed;z-index:50;background:#1f2328;color:#fff;font-size:12px;padding:3px 8px;border-radius:4px;pointer-events:none;white-space:nowrap}
+tr.detail td{background:var(--soft);white-space:normal}
+table.mini{border-collapse:collapse;margin:4px 0 8px;font-size:12px}
+table.mini th,table.mini td{padding:2px 10px;border-bottom:1px solid var(--line);text-align:right}
+table.mini th:first-child,table.mini td:first-child{text-align:left}
+button.exp{border:0;background:none;padding:0;color:var(--link);font-family:inherit;font-size:13px}
+button.exp::before{content:"▸ ";color:var(--muted)}tr.open button.exp::before{content:"▾ "}
+</style></head><body><header class="top"><div class="title">特徵表檢查報告 <code>ml_recsys.feature_table</code></div><div class="scope">snap_date 2025-01～2025-12，共 12 期｜每期 5,803,461～6,059,432 筆｜篩選：無｜產出 2026-10-15 14:02</div><input id="global-q" type="search" placeholder="篩選欄名（套用到每一張表）"></header><div class='layout'><nav class="toc"><a href="#s-overview">總覽</a><a href="#s-null">空值<span>7</span></a><a href="#s-null-all" class=sub>每一期都幾乎是空值<span>2</span></a><a href="#s-null-some" class=sub>部分期別幾乎是空值<span>5</span></a><a href="#s-null-var" class=sub>有變動但沒達門檻<span>0</span></a><a href="#s-const">只有一個值<span>6</span></a><a href="#s-const-all" class=sub>整欄只有一個值<span>2</span></a><a href="#s-const-some" class=sub>部分期別只有一個值<span>2</span></a><a href="#s-const-each" class=sub>每期各只有一個值<span>2</span></a><a href="#s-all">全部欄位<span>19</span></a><hr><a href="#s-actions">行動建議總結</a><a href="#s-scope">資料範圍與判斷標準</a></nav><main><section id="s-overview"><h2>總覽</h2><p class="desc">這份報告檢查 <code>ml_recsys.feature_table</code> 的 19 個特徵欄位（數值 16 欄、字串 3 欄），每一期看兩件事：空值多不多、是不是只有一個值。下面依檢視項目分段，最後的〈行動建議總結〉把結果整理成可以照做的清單。欄名點了會跳到〈全部欄位〉，展開看各期數字。</p><div class="tbox"><table id="t-overview" class="t "><thead><tr><th>檢視項目</th><th class="n">有事的欄位</th><th>細項</th></tr></thead><tbody><tr><td><a href="#s-null">空值</a></td><td class="n" data-v="7">7</td><td class="wrap">每一期都幾乎是空值 2、部分期別幾乎是空值 5；另有 0 欄有變動但沒達門檻，只供參考</td></tr><tr><td><a href="#s-const">只有一個值</a></td><td class="n" data-v="6">6</td><td class="wrap">整欄只有一個值 2、部分期別只有一個值 2、每期各只有一個值 2</td></tr><tr><td><a href="#s-all">沒有發現問題</a></td><td class="n" data-v="6">6</td><td>—</td></tr><tr><td><a href="#s-scope">未檢查</a></td><td class="n" data-v="1">1</td><td class="wrap">型別不支援，例如 date、timestamp</td></tr></tbody></table></div><p class="note">同一欄可能同時有兩種問題（例如某一期幾乎全空、又有幾期只有一個值），兩段都會列出。</p></section><section id="s-null"><h2>空值</h2><p class="desc">空值＝NULL、float／double 的 NaN 與 ±Infinity、字串的空字串。空值比例＝那一期的空值筆數 ÷ 那一期的總筆數。</p><div class="legend"><span><span class="spark key"><i class="" style="--h:60%"></i></span>沒達 99%，越高越空</span><span><span class="spark key"><i class="h" style="--h:100%"></i></span>≥ 99%，達門檻</span><span>一期一根，由左到右是最早到最新；滑鼠移到圖上看那一期的數字</span></div><section id="s-null-all"><h3>每一期都幾乎是空值（2 欄）</h3><p class="desc">每一期的空值比例都 ≥ 99%。</p><div class="toolbar" data-for="t-null-all"><input class="q" type="search" placeholder="篩選欄名，空白分隔多個關鍵字"><span class="count"></span><button type="button" data-copy-rows="t-null-all">複製列出的欄名</button></div><div class="tbox"><table id="t-null-all" class="t "><thead><tr><th>欄位</th><th>型別</th><th>各期</th><th data-dir="desc">空值比例</th><th class="n">每期有值的筆數</th></tr></thead><tbody><tr data-name="old_campaign_flag"><td class="name" data-v="old_campaign_flag"><a class="col" href="#col-old_campaign_flag" data-col="old_campaign_flag">old_campaign_flag</a></td><td>double</td><td data-v="0.9929999582922191"><span class="spark" data-mode="null" data-col="old_campaign_flag"><i class=h style="--h:99.7%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.7%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:100.0%"></i><i class=h style="--h:99.7%"></i><i class=h style="--h:100.0%"></i><i class=h style="--h:100.0%"></i></span></td><td data-v="0.9929999582922191">99.30%～100%</td><td class="n" data-v="0">0～41,749</td></tr><tr data-name="sav_td_have_fx_amt_avg_curr"><td class="name" data-v="sav_td_have_fx_amt_avg_curr"><a class="col" href="#col-sav_td_have_fx_amt_avg_curr" data-col="sav_td_have_fx_amt_avg_curr">sav_td_have_fx_amt_avg_curr</a></td><td>double</td><td data-v="0.9929999357637187"><span class="spark" data-mode="null" data-col="sav_td_have_fx_amt_avg_curr"><i class=h style="--h:99.7%"></i><i class=h style="--h:99.7%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.7%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:100.0%"></i><i class=h style="--h:99.7%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.3%"></i></span></td><td data-v="0.9929999357637187">99.30%～100%</td><td class="n" data-v="0">0～42,416</td></tr></tbody></table></div></section><section id="s-null-some"><h3>部分期別幾乎是空值（5 欄）</h3><p class="desc">只有部分期別的空值比例 ≥ 99%。跳幅大的，是那幾期突然空掉，通常是上游沒進資料；跳幅小的，是本來就很空、偶爾越過 99%。預設跳幅大的排前面；想看某一期斷了哪些欄，用「出事的期別」篩。</p><div class="toolbar" data-for="t-null-some"><input class="q" type="search" placeholder="篩選欄名，空白分隔多個關鍵字"><label>出事的期別 <select data-attr="bad" data-mode="token"><option value="" selected>全部</option><option value="p1">2025-02</option><option value="p3">2025-04</option><option value="p4">2025-05</option><option value="p5">2025-06</option><option value="p6">2025-07</option><option value="p7">2025-08</option><option value="p10">2025-11</option></select></label><span class="count"></span><button type="button" data-copy-rows="t-null-some">複製列出的欄名</button></div><div class="tbox"><table id="t-null-some" class="t "><thead><tr><th>欄位</th><th>型別</th><th>各期</th><th>出事的期別</th><th>其他期別</th><th class="n" data-dir="desc">跳幅（百分點）</th></tr></thead><tbody><tr data-name="cc_acct_revl_amt_curr" data-bad="p5"><td class="name" data-v="cc_acct_revl_amt_curr"><a class="col" href="#col-cc_acct_revl_amt_curr" data-col="cc_acct_revl_amt_curr">cc_acct_revl_amt_curr</a></td><td>double</td><td data-v="5"><span class="spark" data-mode="null" data-col="cc_acct_revl_amt_curr"><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i class=h style="--h:100.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i></span></td><td data-v="5">2025-06</td><td data-v="0.0400000820062417">其他 11 期：4.0%</td><td class="n" data-v="96.0">96.0</td></tr><tr data-name="cc_acct_revl_amt_m1" data-bad="p5"><td class="name" data-v="cc_acct_revl_amt_m1"><a class="col" href="#col-cc_acct_revl_amt_m1" data-col="cc_acct_revl_amt_m1">cc_acct_revl_amt_m1</a></td><td>double</td><td data-v="5"><span class="spark" data-mode="null" data-col="cc_acct_revl_amt_m1"><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i class=h style="--h:100.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i></span></td><td data-v="5">2025-06</td><td data-v="0.0400000820062417">其他 11 期：4.0%</td><td class="n" data-v="96.0">96.0</td></tr><tr data-name="cc_acct_revl_card_cnt_curr" data-bad="p5"><td class="name" data-v="cc_acct_revl_card_cnt_curr"><a class="col" href="#col-cc_acct_revl_card_cnt_curr" data-col="cc_acct_revl_card_cnt_curr">cc_acct_revl_card_cnt_curr</a></td><td>int</td><td data-v="5"><span class="spark" data-mode="null" data-col="cc_acct_revl_card_cnt_curr"><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i class=h style="--h:100.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i></span></td><td data-v="5">2025-06</td><td data-v="0.0400000820062417">其他 11 期：4.0%</td><td class="n" data-v="96.0">96.0</td></tr><tr data-name="loan_car_repay_amt_sum_l12m" data-bad="p3 p4 p5 p6"><td class="name" data-v="loan_car_repay_amt_sum_l12m"><a class="col" href="#col-loan_car_repay_amt_sum_l12m" data-col="loan_car_repay_amt_sum_l12m">loan_car_repay_amt_sum_l12m</a></td><td>bigint</td><td data-v="3"><span class="spark" data-mode="null" data-col="loan_car_repay_amt_sum_l12m"><i style="--h:98.5%"></i><i style="--h:98.5%"></i><i style="--h:98.5%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.1%"></i><i class=h style="--h:99.1%"></i><i class=h style="--h:99.3%"></i><i style="--h:97.8%"></i><i style="--h:97.8%"></i><i style="--h:97.8%"></i><i style="--h:97.8%"></i><i style="--h:97.8%"></i></span></td><td title="2025-04、2025-05、2025-06、2025-07" data-v="3">2025-04、2025-05…共 4 期</td><td data-v="0.9850000333150357">其他 8 期：97.8%～98.5%</td><td class="n" data-v="0.6">0.6</td></tr><tr data-name="loan_mtg_repay_amt_sum_l1m" data-bad="p1 p4 p5 p7 p10"><td class="name" data-v="loan_mtg_repay_amt_sum_l1m"><a class="col" href="#col-loan_mtg_repay_amt_sum_l1m" data-col="loan_mtg_repay_amt_sum_l1m">loan_mtg_repay_amt_sum_l1m</a></td><td>bigint</td><td data-v="1"><span class="spark" data-mode="null" data-col="loan_mtg_repay_amt_sum_l1m"><i style="--h:97.8%"></i><i class=h style="--h:99.3%"></i><i style="--h:97.8%"></i><i style="--h:97.8%"></i><i class=h style="--h:99.1%"></i><i class=h style="--h:99.3%"></i><i style="--h:97.8%"></i><i class=h style="--h:99.3%"></i><i style="--h:97.8%"></i><i style="--h:97.8%"></i><i class=h style="--h:99.3%"></i><i style="--h:98.5%"></i></span></td><td title="2025-02、2025-05、2025-06、2025-08、2025-11" data-v="1">2025-02、2025-05…共 5 期</td><td data-v="0.9850000792153456">其他 7 期：97.8%～98.5%</td><td class="n" data-v="0.6">0.6</td></tr></tbody></table></div><p class="note">跳幅＝出事那幾期最低的空值比例 − 其他期別最高的空值比例。例如出事那期 100%、其他期別最高 4.2%，跳幅就是 95.8。</p></section><section id="s-null-var"><h3>有變動但沒達門檻</h3><p class="desc">上面兩段沒列到的欄位裡，各期空值比例有變動的，只供參考，不算問題、不進總結。某一期突然變多、但沒到 99%，規則抓不到，可能是那一期少了一部分資料；也可能是慢慢變多。</p><div class="toolbar" data-for="t-null-var"><input class="q" type="search" placeholder="篩選欄名，空白分隔多個關鍵字"><label>只看變動幅度 ≥ <select data-attr="var" data-mode="min"><option value="0">0 個百分點</option><option value="0.5">0.5 個百分點</option><option value="1" selected>1 個百分點</option><option value="5">5 個百分點</option><option value="10">10 個百分點</option></select></label><span class="count"></span><button type="button" data-copy-rows="t-null-var">複製列出的欄名</button></div><div class="tbox"><table id="t-null-var" class="t "><thead><tr><th>欄位</th><th>型別</th><th>各期</th><th>空值比例</th><th class="n" data-dir="desc">變動幅度（百分點）</th></tr></thead><tbody><tr data-name="credit_score" data-var="0.927"><td class="name" data-v="credit_score"><a class="col" href="#col-credit_score" data-col="credit_score">credit_score</a></td><td>int</td><td data-v="0.927"><span class="spark" data-mode="null" data-col="credit_score"><i style="--h:5.3%"></i><i style="--h:5.0%"></i><i style="--h:5.2%"></i><i style="--h:5.5%"></i><i style="--h:4.9%"></i><i style="--h:4.7%"></i><i style="--h:5.4%"></i><i style="--h:5.1%"></i><i style="--h:4.7%"></i><i style="--h:5.0%"></i><i style="--h:4.6%"></i><i style="--h:5.4%"></i></span></td><td data-v="0.05484474755312343">4.6%～5.5%</td><td class="n" data-v="0.9">0.9</td></tr><tr data-name="cc_util_ratio_l1m" data-var="0.552"><td class="name" data-v="cc_util_ratio_l1m"><a class="col" href="#col-cc_util_ratio_l1m" data-col="cc_util_ratio_l1m">cc_util_ratio_l1m</a></td><td>double</td><td data-v="0.552"><span class="spark" data-mode="null" data-col="cc_util_ratio_l1m"><i style="--h:3.2%"></i><i style="--h:2.7%"></i><i style="--h:2.8%"></i><i style="--h:3.3%"></i><i style="--h:3.2%"></i><i style="--h:3.0%"></i><i style="--h:3.3%"></i><i style="--h:2.8%"></i><i style="--h:3.1%"></i><i style="--h:2.7%"></i><i style="--h:3.2%"></i><i style="--h:3.0%"></i></span></td><td data-v="0.032814071054101474">2.7%～3.3%</td><td class="n" data-v="0.6">0.6</td></tr><tr data-name="txn_amt_sum_l1m" data-var="0.373"><td class="name" data-v="txn_amt_sum_l1m"><a class="col" href="#col-txn_amt_sum_l1m" data-col="txn_amt_sum_l1m">txn_amt_sum_l1m</a></td><td>bigint</td><td data-v="0.373"><span class="spark" data-mode="null" data-col="txn_amt_sum_l1m"><i style="--h:2.2%"></i><i style="--h:2.0%"></i><i style="--h:1.9%"></i><i style="--h:1.8%"></i><i style="--h:2.0%"></i><i style="--h:1.9%"></i><i style="--h:1.8%"></i><i style="--h:1.8%"></i><i style="--h:1.8%"></i><i style="--h:2.1%"></i><i style="--h:2.0%"></i><i style="--h:2.0%"></i></span></td><td data-v="0.02191037382692845">1.8%～2.2%</td><td class="n" data-v="0.4">0.4</td></tr><tr data-name="login_cnt_l1m" data-var="0.192"><td class="name" data-v="login_cnt_l1m"><a class="col" href="#col-login_cnt_l1m" data-col="login_cnt_l1m">login_cnt_l1m</a></td><td>int</td><td data-v="0.192"><span class="spark" data-mode="null" data-col="login_cnt_l1m"><i style="--h:1.0%"></i><i style="--h:1.0%"></i><i style="--h:0.9%"></i><i style="--h:1.0%"></i><i style="--h:1.1%"></i><i style="--h:1.1%"></i><i style="--h:1.0%"></i><i style="--h:1.0%"></i><i style="--h:1.1%"></i><i style="--h:1.0%"></i><i style="--h:0.9%"></i><i style="--h:1.0%"></i></span></td><td data-v="0.010924299353002468">0.90%～1.09%</td><td class="n" data-v="0.2">0.2</td></tr><tr data-name="dep_bal_curr" data-var="0.078"><td class="name" data-v="dep_bal_curr"><a class="col" href="#col-dep_bal_curr" data-col="dep_bal_curr">dep_bal_curr</a></td><td>double</td><td data-v="0.078"><span class="spark" data-mode="null" data-col="dep_bal_curr"><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i></span></td><td data-v="0.004392630167396949">0.36%～0.44%</td><td class="n" data-v="0.1">0.1</td></tr><tr data-name="gender" data-var="0.0"><td class="name" data-v="gender"><a class="col" href="#col-gender" data-col="gender">gender</a></td><td>string</td><td data-v="0.0"><span class="spark" data-mode="null" data-col="gender"><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i></span></td><td data-v="0.0030000826520479463">0.30%</td><td class="n" data-v="0.0">0.0</td></tr><tr data-name="seg_code" data-var="0.0"><td class="name" data-v="seg_code"><a class="col" href="#col-seg_code" data-col="seg_code">seg_code</a></td><td>string</td><td data-v="0.0"><span class="spark" data-mode="null" data-col="seg_code"><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i></span></td><td data-v="0.0030000826520479463">0.30%</td><td class="n" data-v="0.0">0.0</td></tr><tr data-name="fx_rate_usd" data-var="0.0"><td class="name" data-v="fx_rate_usd"><a class="col" href="#col-fx_rate_usd" data-col="fx_rate_usd">fx_rate_usd</a></td><td>double</td><td data-v="0.0"><span class="spark" data-mode="null" data-col="fx_rate_usd"><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i></span></td><td data-v="0.0">0%</td><td class="n" data-v="0.0">0.0</td></tr><tr data-name="legacy_tier" data-var="0.0"><td class="name" data-v="legacy_tier"><a class="col" href="#col-legacy_tier" data-col="legacy_tier">legacy_tier</a></td><td>string</td><td data-v="0.0"><span class="spark" data-mode="null" data-col="legacy_tier"><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i></span></td><td data-v="0.0">0%</td><td class="n" data-v="0.0">0.0</td></tr><tr data-name="policy_rate" data-var="0.0"><td class="name" data-v="policy_rate"><a class="col" href="#col-policy_rate" data-col="policy_rate">policy_rate</a></td><td>double</td><td data-v="0.0"><span class="spark" data-mode="null" data-col="policy_rate"><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i></span></td><td data-v="0.0">0%</td><td class="n" data-v="0.0">0.0</td></tr><tr data-name="pt_bonus_l1m" data-var="0.0"><td class="name" data-v="pt_bonus_l1m"><a class="col" href="#col-pt_bonus_l1m" data-col="pt_bonus_l1m">pt_bonus_l1m</a></td><td>int</td><td data-v="0.0"><span class="spark" data-mode="null" data-col="pt_bonus_l1m"><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i></span></td><td data-v="0.0">0%</td><td class="n" data-v="0.0">0.0</td></tr><tr data-name="sys_version" data-var="0.0"><td class="name" data-v="sys_version"><a class="col" href="#col-sys_version" data-col="sys_version">sys_version</a></td><td>int</td><td data-v="0.0"><span class="spark" data-mode="null" data-col="sys_version"><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i></span></td><td data-v="0.0">0%</td><td class="n" data-v="0.0">0.0</td></tr></tbody></table></div><p class="note">變動幅度＝各期空值比例最高 − 最低。選「0 個百分點」會列出上面兩段以外的所有欄位。</p></section></section><section id="s-const"><h2>只有一個值</h2><p class="desc">只有一個值＝扣掉空值之後，那一期的最小值等於最大值。整期都是空值的那一期不算。</p><section id="s-const-all"><h3>整欄只有一個值（2 欄）</h3><p class="desc">所有期別合計只有一個值。</p><div class="toolbar" data-for="t-const-all"><input class="q" type="search" placeholder="篩選欄名，空白分隔多個關鍵字"><span class="count"></span><button type="button" data-copy-rows="t-const-all">複製列出的欄名</button></div><div class="tbox"><table id="t-const-all" class="t "><thead><tr><th data-dir="asc">欄位</th><th>型別</th><th>值</th><th>空值比例</th></tr></thead><tbody><tr data-name="legacy_tier"><td class="name" data-v="legacy_tier"><a class="col" href="#col-legacy_tier" data-col="legacy_tier">legacy_tier</a></td><td>string</td><td>N</td><td>0%</td></tr><tr data-name="sys_version"><td class="name" data-v="sys_version"><a class="col" href="#col-sys_version" data-col="sys_version">sys_version</a></td><td>int</td><td class="n" data-v="3">3</td><td>0%</td></tr></tbody></table></div></section><section id="s-const-some"><h3>部分期別只有一個值（2 欄）</h3><p class="desc">平常有變化，只有某幾期全部是同一個值，通常是那幾期上游填了預設值。</p><div class="legend"><span><span class="spark key"><i class="g" style="--h:100%"></i></span>有變化</span><span><span class="spark key"><i class="h" style="--h:100%"></i></span>只有一個值</span><span><span class="spark key"><i class="empty" style="--h:0%"></i></span>整期都是空值</span></div><div class="toolbar" data-for="t-const-some"><input class="q" type="search" placeholder="篩選欄名，空白分隔多個關鍵字"><span class="count"></span><button type="button" data-copy-rows="t-const-some">複製列出的欄名</button></div><div class="tbox"><table id="t-const-some" class="t "><thead><tr><th>欄位</th><th>型別</th><th>各期</th><th data-dir="asc">只有一個值的期別</th><th>那幾期的值</th><th>其他期別的範圍</th></tr></thead><tbody><tr data-name="credit_score"><td class="name" data-v="credit_score"><a class="col" href="#col-credit_score" data-col="credit_score">credit_score</a></td><td>int</td><td data-v="2"><span class="spark" data-mode="const" data-col="credit_score"><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="h" style="--h:100%"></i><i class="h" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i></span></td><td data-v="2">2025-03、2025-04</td><td>-1</td><td>301～1,092</td></tr><tr data-name="pt_bonus_l1m"><td class="name" data-v="pt_bonus_l1m"><a class="col" href="#col-pt_bonus_l1m" data-col="pt_bonus_l1m">pt_bonus_l1m</a></td><td>int</td><td data-v="6"><span class="spark" data-mode="const" data-col="pt_bonus_l1m"><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="h" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i><i class="g" style="--h:100%"></i></span></td><td data-v="6">2025-07</td><td>0</td><td>0～13,884</td></tr></tbody></table></div></section><section id="s-const-each"><h3>每期各只有一個值（2 欄）</h3><p class="desc">同一期裡每一筆的值都相同，但各期不同。通常是匯率、利率這類每期一個數字的總體指標。</p><div class="toolbar" data-for="t-const-each"><input class="q" type="search" placeholder="篩選欄名，空白分隔多個關鍵字"><span class="count"></span><button type="button" data-copy-rows="t-const-each">複製列出的欄名</button></div><div class="tbox"><table id="t-const-each" class="t "><thead><tr><th data-dir="asc">欄位</th><th>型別</th><th class="n">最早一期的值</th><th class="n">最新一期的值</th><th class="n">不同的值個數</th></tr></thead><tbody><tr data-name="fx_rate_usd"><td class="name" data-v="fx_rate_usd"><a class="col" href="#col-fx_rate_usd" data-col="fx_rate_usd">fx_rate_usd</a></td><td>double</td><td class="n" data-v="31.02">31.02</td><td class="n" data-v="32.78">32.78</td><td class="n" data-v="12">12</td></tr><tr data-name="policy_rate"><td class="name" data-v="policy_rate"><a class="col" href="#col-policy_rate" data-col="policy_rate">policy_rate</a></td><td>double</td><td class="n" data-v="2.0">2</td><td class="n" data-v="1.875">1.875</td><td class="n" data-v="2">2</td></tr></tbody></table></div></section></section><section id="s-all"><h2>全部欄位（19 欄）</h2><p class="desc">查單一欄位或一整族欄位（例如篩選 <code>cc_</code>）。點欄名展開各期的總筆數、空值筆數、最小值、最大值。表上的最小值、最大值是所有期別合計，只列數值欄位。預設依表裡的欄位順序。</p><div class="toolbar" data-for="t-all"><input class="q" type="search" placeholder="篩選欄名，空白分隔多個關鍵字"><label>問題 <select data-attr="flag" data-mode="token"><option value="" selected>全部</option><option value="null_all">每一期都幾乎是空值</option><option value="const_all">整欄只有一個值</option><option value="null_some">部分期別幾乎是空值</option><option value="const_some">部分期別只有一個值</option><option value="const_each">每期各只有一個值</option><option value="ok">沒有發現問題</option></select></label><label>型別 <select data-attr="dtype" data-mode="token"><option value="" selected>全部</option><option value="int">整數</option><option value="decimal">decimal</option><option value="double">double</option><option value="float">float</option><option value="string">字串</option></select></label><span class="count"></span><button type="button" data-copy-rows="t-all">複製列出的欄名</button></div><div class="tbox"><table id="t-all" class="t "><thead><tr><th class="n" data-dir="asc">#</th><th>欄位</th><th>型別</th><th>問題</th><th>各期空值</th><th>空值比例</th><th class="n">最小值</th><th class="n">最大值</th></tr></thead><tbody><tr id="col-dep_bal_curr" data-name="dep_bal_curr" data-flag="ok" data-dtype="double"><td class="n" data-v="0">1</td><td class="name" data-v="dep_bal_curr"><button type="button" class="exp">dep_bal_curr</button></td><td>double</td><td class="wrap">—</td><td data-v="0.004392630167396949"><span class="spark" data-mode="null" data-col="dep_bal_curr"><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i><i style="--h:0.4%"></i></span></td><td data-v="0.004392630167396949">0.36%～0.44%</td><td class="n" data-v="0.0">0</td><td class="n" data-v="3859326.75">3,859,326.75</td></tr><tr id="col-txn_amt_sum_l1m" data-name="txn_amt_sum_l1m" data-flag="ok" data-dtype="int"><td class="n" data-v="1">2</td><td class="name" data-v="txn_amt_sum_l1m"><button type="button" class="exp">txn_amt_sum_l1m</button></td><td>bigint</td><td class="wrap">—</td><td data-v="0.02191037382692845"><span class="spark" data-mode="null" data-col="txn_amt_sum_l1m"><i style="--h:2.2%"></i><i style="--h:2.0%"></i><i style="--h:1.9%"></i><i style="--h:1.8%"></i><i style="--h:2.0%"></i><i style="--h:1.9%"></i><i style="--h:1.8%"></i><i style="--h:1.8%"></i><i style="--h:1.8%"></i><i style="--h:2.1%"></i><i style="--h:2.0%"></i><i style="--h:2.0%"></i></span></td><td data-v="0.02191037382692845">1.8%～2.2%</td><td class="n" data-v="0">0</td><td class="n" data-v="1165697">1,165,697</td></tr><tr id="col-login_cnt_l1m" data-name="login_cnt_l1m" data-flag="ok" data-dtype="int"><td class="n" data-v="2">3</td><td class="name" data-v="login_cnt_l1m"><button type="button" class="exp">login_cnt_l1m</button></td><td>int</td><td class="wrap">—</td><td data-v="0.010924299353002468"><span class="spark" data-mode="null" data-col="login_cnt_l1m"><i style="--h:1.0%"></i><i style="--h:1.0%"></i><i style="--h:0.9%"></i><i style="--h:1.0%"></i><i style="--h:1.1%"></i><i style="--h:1.1%"></i><i style="--h:1.0%"></i><i style="--h:1.0%"></i><i style="--h:1.1%"></i><i style="--h:1.0%"></i><i style="--h:0.9%"></i><i style="--h:1.0%"></i></span></td><td data-v="0.010924299353002468">0.90%～1.09%</td><td class="n" data-v="0">0</td><td class="n" data-v="3068">3,068</td></tr><tr id="col-cc_util_ratio_l1m" data-name="cc_util_ratio_l1m" data-flag="ok" data-dtype="double"><td class="n" data-v="3">4</td><td class="name" data-v="cc_util_ratio_l1m"><button type="button" class="exp">cc_util_ratio_l1m</button></td><td>double</td><td class="wrap">—</td><td data-v="0.032814071054101474"><span class="spark" data-mode="null" data-col="cc_util_ratio_l1m"><i style="--h:3.2%"></i><i style="--h:2.7%"></i><i style="--h:2.8%"></i><i style="--h:3.3%"></i><i style="--h:3.2%"></i><i style="--h:3.0%"></i><i style="--h:3.3%"></i><i style="--h:2.8%"></i><i style="--h:3.1%"></i><i style="--h:2.7%"></i><i style="--h:3.2%"></i><i style="--h:3.0%"></i></span></td><td data-v="0.032814071054101474">2.7%～3.3%</td><td class="n" data-v="0.0">0</td><td class="n" data-v="15.95">15.95</td></tr><tr id="col-cc_acct_revl_amt_curr" data-name="cc_acct_revl_amt_curr" data-flag="null_some" data-dtype="double"><td class="n" data-v="4">5</td><td class="name" data-v="cc_acct_revl_amt_curr"><button type="button" class="exp">cc_acct_revl_amt_curr</button></td><td>double</td><td class="wrap">部分期別幾乎是空值</td><td data-v="1.0"><span class="spark" data-mode="null" data-col="cc_acct_revl_amt_curr"><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i class=h style="--h:100.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i></span></td><td data-v="1.0">4.0%～100%</td><td class="n" data-v="0.0">0</td><td class="n" data-v="451971.04">451,971.04</td></tr><tr id="col-cc_acct_revl_amt_m1" data-name="cc_acct_revl_amt_m1" data-flag="null_some" data-dtype="double"><td class="n" data-v="5">6</td><td class="name" data-v="cc_acct_revl_amt_m1"><button type="button" class="exp">cc_acct_revl_amt_m1</button></td><td>double</td><td class="wrap">部分期別幾乎是空值</td><td data-v="1.0"><span class="spark" data-mode="null" data-col="cc_acct_revl_amt_m1"><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i class=h style="--h:100.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i></span></td><td data-v="1.0">4.0%～100%</td><td class="n" data-v="0.0">0</td><td class="n" data-v="437029.62">437,029.62</td></tr><tr id="col-cc_acct_revl_card_cnt_curr" data-name="cc_acct_revl_card_cnt_curr" data-flag="null_some" data-dtype="int"><td class="n" data-v="6">7</td><td class="name" data-v="cc_acct_revl_card_cnt_curr"><button type="button" class="exp">cc_acct_revl_card_cnt_curr</button></td><td>int</td><td class="wrap">部分期別幾乎是空值</td><td data-v="1.0"><span class="spark" data-mode="null" data-col="cc_acct_revl_card_cnt_curr"><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i class=h style="--h:100.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i><i style="--h:4.0%"></i></span></td><td data-v="1.0">4.0%～100%</td><td class="n" data-v="0">0</td><td class="n" data-v="15">15</td></tr><tr id="col-loan_mtg_repay_amt_sum_l1m" data-name="loan_mtg_repay_amt_sum_l1m" data-flag="null_some" data-dtype="int"><td class="n" data-v="7">8</td><td class="name" data-v="loan_mtg_repay_amt_sum_l1m"><button type="button" class="exp">loan_mtg_repay_amt_sum_l1m</button></td><td>bigint</td><td class="wrap">部分期別幾乎是空值</td><td data-v="0.9930000631162218"><span class="spark" data-mode="null" data-col="loan_mtg_repay_amt_sum_l1m"><i style="--h:97.8%"></i><i class=h style="--h:99.3%"></i><i style="--h:97.8%"></i><i style="--h:97.8%"></i><i class=h style="--h:99.1%"></i><i class=h style="--h:99.3%"></i><i style="--h:97.8%"></i><i class=h style="--h:99.3%"></i><i style="--h:97.8%"></i><i style="--h:97.8%"></i><i class=h style="--h:99.3%"></i><i style="--h:98.5%"></i></span></td><td data-v="0.9930000631162218">97.80%～99.30%</td><td class="n" data-v="1003">1,003</td><td class="n" data-v="513209">513,209</td></tr><tr id="col-loan_car_repay_amt_sum_l12m" data-name="loan_car_repay_amt_sum_l12m" data-flag="null_some" data-dtype="int"><td class="n" data-v="8">9</td><td class="name" data-v="loan_car_repay_amt_sum_l12m"><button type="button" class="exp">loan_car_repay_amt_sum_l12m</button></td><td>bigint</td><td class="wrap">部分期別幾乎是空值</td><td data-v="0.9930000712302406"><span class="spark" data-mode="null" data-col="loan_car_repay_amt_sum_l12m"><i style="--h:98.5%"></i><i style="--h:98.5%"></i><i style="--h:98.5%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.1%"></i><i class=h style="--h:99.1%"></i><i class=h style="--h:99.3%"></i><i style="--h:97.8%"></i><i style="--h:97.8%"></i><i style="--h:97.8%"></i><i style="--h:97.8%"></i><i style="--h:97.8%"></i></span></td><td data-v="0.9930000712302406">97.80%～99.30%</td><td class="n" data-v="1003">1,003</td><td class="n" data-v="517399">517,399</td></tr><tr id="col-sav_td_have_fx_amt_avg_curr" data-name="sav_td_have_fx_amt_avg_curr" data-flag="null_all" data-dtype="double"><td class="n" data-v="9">10</td><td class="name" data-v="sav_td_have_fx_amt_avg_curr"><button type="button" class="exp">sav_td_have_fx_amt_avg_curr</button></td><td>double</td><td class="wrap">每一期都幾乎是空值</td><td data-v="1.0"><span class="spark" data-mode="null" data-col="sav_td_have_fx_amt_avg_curr"><i class=h style="--h:99.7%"></i><i class=h style="--h:99.7%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.7%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:100.0%"></i><i class=h style="--h:99.7%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.3%"></i></span></td><td data-v="1.0">99.30%～100%</td><td class="n" data-v="1.0">1</td><td class="n" data-v="112688.56">112,688.56</td></tr><tr id="col-old_campaign_flag" data-name="old_campaign_flag" data-flag="null_all" data-dtype="double"><td class="n" data-v="10">11</td><td class="name" data-v="old_campaign_flag"><button type="button" class="exp">old_campaign_flag</button></td><td>double</td><td class="wrap">每一期都幾乎是空值</td><td data-v="1.0"><span class="spark" data-mode="null" data-col="old_campaign_flag"><i class=h style="--h:99.7%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.7%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:99.3%"></i><i class=h style="--h:100.0%"></i><i class=h style="--h:99.7%"></i><i class=h style="--h:100.0%"></i><i class=h style="--h:100.0%"></i></span></td><td data-v="1.0">99.30%～100%</td><td class="n" data-v="1.02">1.02</td><td class="n" data-v="111043.7">111,043.7</td></tr><tr id="col-sys_version" data-name="sys_version" data-flag="const_all" data-dtype="int"><td class="n" data-v="11">12</td><td class="name" data-v="sys_version"><button type="button" class="exp">sys_version</button></td><td>int</td><td class="wrap">整欄只有一個值</td><td data-v="0.0"><span class="spark" data-mode="null" data-col="sys_version"><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i></span></td><td data-v="0.0">0%</td><td class="n" data-v="3">3</td><td class="n" data-v="3">3</td></tr><tr id="col-legacy_tier" data-name="legacy_tier" data-flag="const_all" data-dtype="string"><td class="n" data-v="12">13</td><td class="name" data-v="legacy_tier"><button type="button" class="exp">legacy_tier</button></td><td>string</td><td class="wrap">整欄只有一個值</td><td data-v="0.0"><span class="spark" data-mode="null" data-col="legacy_tier"><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i></span></td><td data-v="0.0">0%</td><td class="n" data-v=""></td><td class="n" data-v=""></td></tr><tr id="col-fx_rate_usd" data-name="fx_rate_usd" data-flag="const_each" data-dtype="double"><td class="n" data-v="13">14</td><td class="name" data-v="fx_rate_usd"><button type="button" class="exp">fx_rate_usd</button></td><td>double</td><td class="wrap">每期各只有一個值</td><td data-v="0.0"><span class="spark" data-mode="null" data-col="fx_rate_usd"><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i></span></td><td data-v="0.0">0%</td><td class="n" data-v="31.02">31.02</td><td class="n" data-v="32.78">32.78</td></tr><tr id="col-policy_rate" data-name="policy_rate" data-flag="const_each" data-dtype="double"><td class="n" data-v="14">15</td><td class="name" data-v="policy_rate"><button type="button" class="exp">policy_rate</button></td><td>double</td><td class="wrap">每期各只有一個值</td><td data-v="0.0"><span class="spark" data-mode="null" data-col="policy_rate"><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i></span></td><td data-v="0.0">0%</td><td class="n" data-v="1.875">1.875</td><td class="n" data-v="2.0">2</td></tr><tr id="col-pt_bonus_l1m" data-name="pt_bonus_l1m" data-flag="const_some" data-dtype="int"><td class="n" data-v="15">16</td><td class="name" data-v="pt_bonus_l1m"><button type="button" class="exp">pt_bonus_l1m</button></td><td>int</td><td class="wrap">部分期別只有一個值</td><td data-v="0.0"><span class="spark" data-mode="null" data-col="pt_bonus_l1m"><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i><i style="--h:0.0%"></i></span></td><td data-v="0.0">0%</td><td class="n" data-v="0">0</td><td class="n" data-v="13884">13,884</td></tr><tr id="col-credit_score" data-name="credit_score" data-flag="const_some" data-dtype="int"><td class="n" data-v="16">17</td><td class="name" data-v="credit_score"><button type="button" class="exp">credit_score</button></td><td>int</td><td class="wrap">部分期別只有一個值</td><td data-v="0.05484474755312343"><span class="spark" data-mode="null" data-col="credit_score"><i style="--h:5.3%"></i><i style="--h:5.0%"></i><i style="--h:5.2%"></i><i style="--h:5.5%"></i><i style="--h:4.9%"></i><i style="--h:4.7%"></i><i style="--h:5.4%"></i><i style="--h:5.1%"></i><i style="--h:4.7%"></i><i style="--h:5.0%"></i><i style="--h:4.6%"></i><i style="--h:5.4%"></i></span></td><td data-v="0.05484474755312343">4.6%～5.5%</td><td class="n" data-v="-1">-1</td><td class="n" data-v="1092">1,092</td></tr><tr id="col-seg_code" data-name="seg_code" data-flag="ok" data-dtype="string"><td class="n" data-v="17">18</td><td class="name" data-v="seg_code"><button type="button" class="exp">seg_code</button></td><td>string</td><td class="wrap">—</td><td data-v="0.0030000826520479463"><span class="spark" data-mode="null" data-col="seg_code"><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i></span></td><td data-v="0.0030000826520479463">0.30%</td><td class="n" data-v=""></td><td class="n" data-v=""></td></tr><tr id="col-gender" data-name="gender" data-flag="ok" data-dtype="string"><td class="n" data-v="18">19</td><td class="name" data-v="gender"><button type="button" class="exp">gender</button></td><td>string</td><td class="wrap">—</td><td data-v="0.0030000826520479463"><span class="spark" data-mode="null" data-col="gender"><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i><i style="--h:0.3%"></i></span></td><td data-v="0.0030000826520479463">0.30%</td><td class="n" data-v=""></td><td class="n" data-v=""></td></tr></tbody></table></div><script type="application/json" id="fp-data">{"periods": ["2025-01-31", "2025-02-28", "2025-03-31", "2025-04-30", "2025-05-31", "2025-06-30", "2025-07-31", "2025-08-31", "2025-09-30", "2025-10-31", "2025-11-30", "2025-12-31"], "labels": ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06", "2025-07", "2025-08", "2025-09", "2025-10", "2025-11", "2025-12"], "rows": [5803461, 5826251, 5853213, 5876880, 5892171, 5915660, 5938489, 5964180, 5992604, 6013922, 6036483, 6059432], "cols": {"dep_bal_curr": [[24559, 21245, 25711, 25530, 25208, 25672, 23399, 24621, 21906, 23772, 21820, 24636], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [3634533.77, 2423945.66, 2732317.44, 2803522.39, 3566500.84, 3067763.63, 3262739.39, 2305822.16, 2166910.4, 2467042.35, 3110536.02, 3859326.75]], "txn_amt_sum_l1m": [[127156, 115523, 109465, 106952, 115297, 110347, 107942, 110321, 109662, 126113, 121054, 120893], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [1022160, 977758, 1058603, 819229, 754712, 839685, 804361, 731164, 680744, 1165697, 706598, 666649]], "login_cnt_l1m": [[55817, 58991, 53973, 60632, 63780, 63307, 57363, 59272, 65465, 58350, 54376, 57878], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [2468, 2646, 2446, 3059, 1914, 2314, 3068, 2440, 2007, 2890, 1946, 2324]], "cc_util_ratio_l1m": [[183781, 159040, 163692, 191033, 191354, 176364, 194866, 166716, 185053, 165158, 194314, 179970], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [9.64, 9.29, 15.95, 12.15, 9.7, 14.05, 13.3, 12.14, 14.35, 15.35, 15.31, 14.6]], "cc_acct_revl_amt_curr": [[232138, 233050, 234129, 235075, 235687, 5915660, 237540, 238567, 239704, 240557, 241459, 242377], [0.0, 0.0, 0.0, 0.0, 0.0, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [416413.21, 349720.74, 451971.04, 263154.63, 252104.89, null, 288098.42, 400063.28, 377767.43, 353281.0, 343186.34, 332856.05]], "cc_acct_revl_amt_m1": [[232138, 233050, 234129, 235075, 235687, 5915660, 237540, 238567, 239704, 240557, 241459, 242377], [0.0, 0.0, 0.0, 0.0, 0.0, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [260871.76, 259584.83, 350393.73, 368895.68, 437029.62, null, 272148.22, 309853.66, 389785.05, 314190.86, 328317.46, 425963.89]], "cc_acct_revl_card_cnt_curr": [[232138, 233050, 234129, 235075, 235687, 5915660, 237540, 238567, 239704, 240557, 241459, 242377], [0, 0, 0, 0, 0, null, 0, 0, 0, 0, 0, 0], [10, 14, 9, 12, 10, null, 12, 13, 10, 14, 15, 15]], "loan_mtg_repay_amt_sum_l1m": [[5675785, 5785467, 5724442, 5747589, 5839141, 5874250, 5807842, 5922431, 5860767, 5881616, 5994228, 5968541], [1003, 1035, 1015, 1044, 1015, 1032, 1059, 1086, 1003, 1044, 1026, 1029], [366073, 425099, 324203, 415216, 410861, 508437, 326350, 368624, 513209, 465922, 459421, 281274]], "loan_car_repay_amt_sum_l12m": [[5716409, 5738857, 5765415, 5835742, 5839141, 5862419, 5896920, 5832968, 5860767, 5881616, 5903680, 5926124], [1072, 1052, 1077, 1068, 1045, 1012, 1065, 1047, 1058, 1040, 1065, 1003], [406890, 481662, 374246, 511589, 458437, 321216, 359711, 517399, 508464, 412066, 499792, 471515]], "sav_td_have_fx_amt_avg_curr": [[5786051, 5808772, 5812241, 5835742, 5874494, 5874250, 5896920, 5964180, 5974626, 5971825, 5994228, 6017016], [1.02, 1.02, 1.08, 1.08, 1.06, 1.08, 1.08, null, 1.02, 1.01, 1.08, 1.0], [111880.39, 69715.46, 83922.61, 82596.44, 95316.26, 106112.47, 89805.82, null, 76234.31, 109217.03, 112688.56, 71397.83]], "old_campaign_flag": [[5786051, 5785467, 5812241, 5835742, 5850926, 5897913, 5896920, 5922431, 5992604, 5995880, 6036483, 6059432], [1.08, 1.09, 1.02, 1.05, 1.03, 1.03, 1.09, 1.05, null, 1.06, null, null], [64895.84, 87545.95, 63710.6, 108766.71, 84042.34, 95652.37, 80986.52, 111043.7, null, 72448.41, null, null]], "sys_version": [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3], [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]], "legacy_tier": [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ["N", "N", "N", "N", "N", "N", "N", "N", "N", "N", "N", "N"], ["N", "N", "N", "N", "N", "N", "N", "N", "N", "N", "N", "N"]], "fx_rate_usd": [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [31.02, 31.35, 31.88, 32.1, 32.47, 32.43, 32.05, 31.71, 31.62, 32.19, 32.51, 32.78], [31.02, 31.35, 31.88, 32.1, 32.47, 32.43, 32.05, 31.71, 31.62, 32.19, 32.51, 32.78]], "policy_rate": [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 1.875, 1.875, 1.875, 1.875, 1.875, 1.875], [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 1.875, 1.875, 1.875, 1.875, 1.875, 1.875]], "pt_bonus_l1m": [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [9373, 8904, 10880, 11430, 12057, 12865, 0, 13720, 11432, 13884, 10706, 8821]], "credit_score": [[309227, 293797, 303747, 322316, 287713, 278290, 319500, 304782, 284525, 300612, 275084, 325856], [313, 303, -1, -1, 325, 301, 301, 317, 313, 325, 328, 304], [953, 951, -1, -1, 678, 1038, 617, 1092, 674, 606, 1085, 659]], "seg_code": [[17410, 17479, 17560, 17631, 17677, 17747, 17815, 17893, 17978, 18042, 18109, 18178], ["A1", "A1", "A1", "A1", "A1", "A1", "A1", "A1", "A1", "A1", "A1", "A1"], ["Z9", "Z9", "Z9", "Z9", "Z9", "Z9", "Z9", "Z9", "Z9", "Z9", "Z9", "Z9"]], "gender": [[17410, 17479, 17560, 17631, 17677, 17747, 17815, 17893, 17978, 18042, 18109, 18178], ["A1", "A1", "A1", "A1", "A1", "A1", "A1", "A1", "A1", "A1", "A1", "A1"], ["Z9", "Z9", "Z9", "Z9", "Z9", "Z9", "Z9", "Z9", "Z9", "Z9", "Z9", "Z9"]]}}</script></section><section id="s-actions"><h2>行動建議總結</h2><p class="desc">把前面各段的結果整理成做法。複製的欄名一行一個。同一欄可能出現在兩列，例如某一期幾乎全空、其他期別每期各只有一個值。</p><div class="tbox"><table id="t-actions" class="t actions"><thead><tr><th>做法</th><th class="n">欄數</th><th>來自</th><th>欄位</th><th></th></tr></thead><tbody><tr><td class="wrap"><b>可以排除：欄位沒有資訊</b></td><td class="n" data-v="4">4</td><td class="wrap">每一期都幾乎是空值、整欄只有一個值</td><td class="wrap"><details><summary>4 欄</summary><pre>sav_td_have_fx_amt_avg_curr
+old_campaign_flag
+sys_version
+legacy_tier</pre></details></td><td><button type="button" data-copy-text="sav_td_have_fx_amt_avg_curr
+old_campaign_flag
+sys_version
+legacy_tier">複製欄名</button></td></tr><tr><td class="wrap"><b>請上游查這幾期的資料</b><ul class="periods"><li><b>2025-03</b>　1 欄：credit_score <button type="button" data-copy-text="credit_score">複製這期的欄名</button></li><li><b>2025-04</b>　1 欄：credit_score <button type="button" data-copy-text="credit_score">複製這期的欄名</button></li><li><b>2025-06</b>　3 欄：cc_acct_revl_amt_curr、cc_acct_revl_amt_m1、cc_acct_revl_card_cnt_curr <button type="button" data-copy-text="cc_acct_revl_amt_curr
+cc_acct_revl_amt_m1
+cc_acct_revl_card_cnt_curr">複製這期的欄名</button></li><li><b>2025-07</b>　1 欄：pt_bonus_l1m <button type="button" data-copy-text="pt_bonus_l1m">複製這期的欄名</button></li></ul></td><td class="n" data-v="5">5</td><td class="wrap">部分期別幾乎是空值（跳幅 ≥ 10 個百分點）、部分期別只有一個值</td><td class="wrap"><details><summary>5 欄</summary><pre>cc_acct_revl_amt_curr
+cc_acct_revl_amt_m1
+cc_acct_revl_card_cnt_curr
+pt_bonus_l1m
+credit_score</pre></details></td><td><button type="button" data-copy-text="cc_acct_revl_amt_curr
+cc_acct_revl_amt_m1
+cc_acct_revl_card_cnt_curr
+pt_bonus_l1m
+credit_score">複製欄名</button></td></tr><tr><td class="wrap"><b>看業務意義決定要不要留</b></td><td class="n" data-v="4">4</td><td class="wrap">部分期別幾乎是空值（跳幅 &lt; 10 個百分點）、每期各只有一個值</td><td class="wrap"><details><summary>4 欄</summary><pre>loan_mtg_repay_amt_sum_l1m
+loan_car_repay_amt_sum_l12m
+fx_rate_usd
+policy_rate</pre></details></td><td><button type="button" data-copy-text="loan_mtg_repay_amt_sum_l1m
+loan_car_repay_amt_sum_l12m
+fx_rate_usd
+policy_rate">複製欄名</button></td></tr></tbody></table></div><p class="note">「請上游查」和「看業務意義」的分界是跳幅 10 個百分點：出事那幾期比其他期別空很多，才像是上游斷掉。</p></section><section id="s-scope"><h2>資料範圍與判斷標準</h2><div class="tbox"><table class="t kv"><tbody><tr><th>資料表</th><td><code>ml_recsys.feature_table</code></td></tr><tr><th>期別欄位</th><td><code>snap_date</code></td></tr><tr><th>主鍵欄位</th><td><code>cust_id</code></td></tr><tr><th>排除欄位</th><td>無</td></tr><tr><th>期間</th><td>2025-01-31～2025-12-31，共 12 期</td></tr><tr><th>篩選條件</th><td>無</td></tr><tr><th>每期筆數</th><td>5,803,461～6,059,432 筆，全部納入計算</td></tr><tr><th>期別欄位是空值的列</th><td>0 筆，不讀</td></tr><tr><th>執行項目</th><td>基本檢查</td></tr><tr><th>執行時間</th><td>30 分 30 秒，每批 200 欄</td></tr><tr><th>產出時間</th><td>2026-10-15 14:02:00</td></tr></tbody></table></div><h3>判斷標準</h3><p class="desc">可以在這支工具設定檔的 <code>thresholds</code> 區塊調整，再用 <code>render</code> 重畫，不必重跑 Spark。</p><div class="tbox"><table id="t-thresholds" class="t "><thead><tr><th>問題類型</th><th>判斷標準</th><th>設定鍵</th><th>這次的值</th></tr></thead><tbody><tr><td>每一期都幾乎是空值、部分期別幾乎是空值</td><td>空值比例 ≥ 99%</td><td><code>null_ratio</code></td><td>0.99</td></tr></tbody></table></div><p class="note">「只有一個值」的三種沒有門檻。總結裡「請上游查」和「看業務意義」的分界（跳幅 10 個百分點）寫在程式裡，不是設定鍵。</p><h3>未檢查的欄位</h3><p class="desc">型別不支援（date、timestamp、array、map、struct 等）而沒有檢查的欄位。</p><div class="toolbar" data-for="t-unchecked"><input class="q" type="search" placeholder="篩選欄名，空白分隔多個關鍵字"><span class="count"></span><button type="button" data-copy-rows="t-unchecked">複製列出的欄名</button></div><div class="tbox"><table id="t-unchecked" class="t "><thead><tr><th>欄位</th><th>型別</th></tr></thead><tbody><tr data-name="last_txn_dt"><td class="name">last_txn_dt</td><td>date</td></tr></tbody></table></div><details><summary><b>設定檔</b></summary><pre>table: ml_recsys.feature_table
 time_col: snap_date
 key_cols: [cust_id]
-exclude_cols: []            # 不是特徵、也不是主鍵的欄位，例如寫入時間
-time_range:                 # 不寫就讀全部期別
-  start: "2024-01-31"
-  end: "2025-02-28"
-where: null                 # 額外的 Spark SQL 篩選條件，和 time_range 同時套用
-checks:                     # 基本檢查一定會跑
-  distribution: true        # 分布偏移與極端值
-  correlation: true         # 相關性
-thresholds:                 # 不寫就用預設值
-  null_ratio: 0.99
-  precision_max_abs: 100000 # 有小數的欄位；整數固定用 16,777,216
-  psi: 0.25
-  tail_ratio: 10
-  tail_log_ratio: 1
-  corr: 0.95
-spark:                      # 不寫就用叢集的 spark-defaults.conf
-  spark.executor.memory: 8g
-  spark.executor.instances: 20
-output_dir: data/profiling/feature_profile/feature_table_20261015_140200`;
-
-function pageIndex(){
-  const th=[
-    ["每一期都幾乎是空值、部分期別幾乎是空值","空值比例 ≥ 99%","null_ratio","0.99"],
-    ["float32 精度不足","有小數且絕對值最大 ≥ 100,000；整數且絕對值最大 ≥ 16,777,216（固定，不能調）","precision_max_abs","100000"],
-    ["分布偏移","PSI ≥ 0.25","psi","0.25"],
-    ["極端值","倍數 ≥ 10，且取 log 後倍數 ≥ 1","tail_ratio、tail_log_ratio","10、1"],
-    ["高度相關","Spearman 相關係數的絕對值 ≥ 0.95","corr","0.95"]
-  ];
-  return '<h1>特徵表檢查報告：ml_recsys.feature_table</h1><div class="index-intro">'+
-  "<p>這份報告列出 <code>ml_recsys.feature_table</code> 中需要處理的欄位，以及建議的處理方式。請先看〈01 需要處理的欄位〉；想知道判斷依據，再看 02～04。</p>"+
-  "<h2>總覽</h2>"+rawTbl(null,[
-    ["特徵欄位",F.length+" 欄（數值 "+NUMERIC.length+" 欄、字串 "+STRS.length+" 欄）"],
-    ["需要處理",flaggedCols.length+" 欄"],
-    ["其中可直接排除",exclCols.length+" 欄"]
-  ])+
-  "<h2>資料範圍</h2>"+rawTbl(null,[
-    ["資料表","<code>ml_recsys.feature_table</code>"],
-    ["期別欄位","<code>snap_date</code>"],
-    ["主鍵欄位","<code>cust_id</code>"],
-    ["期間",TIMES[0]+" 至 "+TIMES[LATEST]+"，共 "+T+" 期"],
-    ["篩選條件","無"],
-    ["每期筆數",num(Math.min(...ROWS))+" 至 "+num(Math.max(...ROWS))+" 筆，全部納入計算"],
-    ["執行項目","基本檢查、分布偏移與極端值、相關性"],
-    ["執行時間","基本檢查與分布 6 分 12 秒，相關性 48 秒"],
-    ["產出時間","2026-10-15 14:02"]
-  ])+
-  "<h2>判斷標準</h2><p>以下是這次使用的標準，可以在設定檔的 <code>thresholds</code> 區塊調整。</p>"+
-  tbl(["問題類型","判斷標準","設定鍵","這次的值"],th)+
-  '</div><details class="section"><summary>設定檔</summary><div class="formula">'+esc(YAML)+"</div></details>"+
-  '<ul class="index-list">'+PAGES.slice(1).map(p=>"<li>"+link(p.id)+"</li>").join("")+"</ul>";
-}
-
-function pageFlags(){
-  let h="<h1>01 需要處理的欄位</h1>";
-  const summary=FLAG_ORDER.map(k=>[FLAG[k].label,FLAG[k].cond,String(withFlag(k).length),FLAG[k].act]);
-  h+=sec("總表","各類問題的欄位數與建議處理方式。各類的欄位清單在下方。",[tbl(["問題類型","判斷標準","欄位數","建議處理方式"],summary,[2])]);
-  const names=exclCols.map(f=>f.name);
-  h+=sec("可直接排除的欄位（"+exclCols.length+" 欄）","這些欄位每一期都幾乎是空值，或從頭到尾只有一個值，模型從中學不到東西。",
-    [tbl(["欄位","型別","問題類型","依據"],exclCols.map(f=>[f.name,f.dtype,flagNames(f),
-      f.flags.includes("null_all")?(Math.min(...f.null)>=1?"每一期都 100% 空值":"空值比例 "+pct(Math.min(...f.null))+" 至 "+pct(Math.max(...f.null))):"每一期都是 "+f.constVals[0]]))],
-    {formula:"# 只重新訓練、不重建 dataset：加到 conf/base/parameters_training.yaml\ntraining:\n  feature_selection:\n    exclude: ["+names.join(", ")+"]\n\n# 要連 dataset 一起拿掉：改加到 dataset.prepare_model_input.drop_columns（需要重建 dataset）"});
-  const ns=withFlag("null_some");
-  h+=sec("部分期別幾乎是空值（"+ns.length+" 欄）","平常有值，只有少數幾期幾乎全空，通常是那幾期的上游資料沒有進來。",
-    [tbl(["欄位","型別","空值比例 ≥ 99% 的期別","其他期別的空值比例"],ns.map(f=>[f.name,f.dtype,timesWhere(f.null,v=>v>=TH.null_ratio).join("、"),
-      pct(Math.min(...f.null.filter(v=>v<TH.null_ratio)))+" 至 "+pct(Math.max(...f.null.filter(v=>v<TH.null_ratio)))]))],{bullets:advice("null_some")});
-  const cs=withFlag("const_some");
-  h+=sec("部分期別只有一個值（"+cs.length+" 欄）","平常有變化，只有少數幾期全部是同一個值，通常是那幾期的上游資料填了預設值。",
-    [tbl(["欄位","型別","只有一個值的期別","那一期的值"],cs.map(f=>{const ts=f.constAt.map((v,t)=>v?t:null).filter(v=>v!=null);return[f.name,f.dtype,ts.map(t=>TIMES[t]).join("、"),ts.map(t=>num(f.min[t])).join("、")];}))],{bullets:advice("const_some")});
-  const ce=withFlag("const_each");
-  h+=sec("每期各只有一個值（"+ce.length+" 欄）","同一期裡每一筆的值都相同，但各期的值不同。",
-    [tbl(["欄位","型別","最早一期的值","最新一期的值","不同的值個數"],ce.map(f=>[f.name,f.dtype,num(f.constVals[0]),num(f.constVals[LATEST]),String(new Set(f.constVals).size)]),[2,3,4])],{bullets:advice("const_each")});
-  const pr=withFlag("precision");
-  h+=sec("float32 精度不足（"+pr.length+" 欄）","float32 只保留大約 7 位有效數字。有小數的欄位數值一大，小數就留不住；整數超過 16,777,216，個位數就可能被改掉。表中列出最大值存成 float32 後會變成多少。",
-    [tbl(["欄位","型別","絕對值最大","存成 float32 後","出現期別"],pr.map(f=>{const m=maxAbs(f);return[f.name,f.dtype,num(m),num(Math.fround(m)),TIMES[maxAbs.at]];}),[2,3])],{bullets:advice("precision")});
-  const dr=withFlag("drift");
-  h+=sec("分布偏移（"+dr.length+" 欄）","這些欄位有某一期的分布和最早一期差很多。各期走勢在 03 頁。",
-    [tbl(["欄位","型別","第一次 ≥ 0.25 的期別","PSI 最大值","出現期別"],dr.map(f=>{const mx=Math.max(...f.psi.filter(v=>v!=null));return[f.name,f.dtype,TIMES[f.psi.findIndex(v=>v!=null&&v>=TH.psi)],fx(mx,2),TIMES[f.psi.indexOf(mx)]];}),[3])],{bullets:advice("drift")});
-  const ol=withFlag("outlier");
-  h+=sec("極端值（"+ol.length+" 欄）","這些欄位有某一期的最大值或最小值，和大部分的值差距非常大。",
-    [tbl(["欄位","型別","期別","離譜的值","那一期的 p1","那一期的 p99"],ol.map(f=>{const w=worst(f);return[f.name,f.dtype,TIMES[w.t],oddVal(w),num(f.q[w.t][0]),num(f.q[w.t][4])];}),[4,5])],{bullets:advice("outlier")});
-  h+=sec("高度相關（"+HIGH.length+" 組）","最新一期中，這幾組欄位幾乎同步變大變小。完整矩陣在 04 頁。",
-    [tbl(["欄位 A","欄位 B","Spearman 相關係數"],HIGH.map(p=>[p.a,p.b,fx(p.v,3)]),[2])],{bullets:advice("corr")});
-  return h;
-}
-
-function pageBasic(){
-  const nullRows=F.filter(f=>Math.max(...f.null)>=0.005);
-  let h="<h1>02 空值與精度</h1>";
-  h+=sec("各期空值比例","列出至少有一期空值比例 ≥ 0.5% 的 "+nullRows.length+" 個欄位，最空的排最上面；格子裡標 ≥99% 的，表示那一期幾乎都是空值。其餘 "+(F.length-nullRows.length)+" 個欄位每一期都低於 0.5%。空值包含 NULL、double 欄位的 NaN，以及字串欄位的空字串。",[fig("fig-null")]);
-  const pr=F.filter(f=>f.kind==="num"&&!f.constAt.every(Boolean)&&f.q.some(Boolean)&&(f.dec||maxAbs(f)>=INT_EXACT));
-  h+=sec("float32 精度","有小數的欄位全部列出，整數欄位只列絕對值最大 ≥ 16,777,216 的，依絕對值最大值排序，並列出最大值存成 float32 後會變成多少。達到標準的欄位會列在 01 的 float32 精度不足。",
-    [tbl(["欄位","型別","絕對值最大","存成 float32 後","出現期別"],
-      pr.map(f=>({f,m:maxAbs(f),at:maxAbs.at})).sort((a,b)=>b.m-a.m).map(o=>[o.f.name,o.f.dtype,num(o.m),num(Math.fround(o.m)),TIMES[o.at]]),[2,3])],
-    {formula:"float32 只保留大約 7 位有效數字，數值越大，留得下的位數越少：\n100,000.37 → 100,000.3672（第二位小數開始不準）\n23,016,210.71 → 23,016,210（小數全部不見）\n25,000,001 → 25,000,000（整數超過 16,777,216，個位數被改掉）"});
-  h+=sec("所有欄位的各期空值比例","上方熱圖的完整數字。",
-    [tbl(["欄位"].concat(TIMES),F.map(f=>[f.name].concat(f.null.map(pct))),TIMES.map((_,i)=>i+1))],{collapsible:true});
-  return h;
-}
-
-function pageDrift(){
-  const psiRows=F.filter(f=>f.psi.some(v=>v!=null)).map(f=>({f,m:Math.max(...f.psi.filter(v=>v!=null))})).sort((a,b)=>b.m-a.m);
-  const rest=psiRows.slice(12);
-  let h="<h1>03 分布偏移與極端值</h1>";
-  h+=sec("分布偏移（PSI）","每一期都和最早一期（"+TIMES[0]+"）比較。圖中是 PSI 最大的 12 個欄位，格子裡有數字的表示 ≥ 0.25；顏色到 0.5 為止，實際數值請把滑鼠移到格子上。其餘 "+rest.length+" 個欄位每一期都低於 "+fx(Math.max(...rest.map(o=>o.m)),2)+"。可直接排除的欄位、每期各只有一個值的欄位不計算 PSI。",[fig("fig-psi")],
-    {formula:"PSI = Σ（本期占比 − 基準期占比）× ln（本期占比 ÷ 基準期占比）\n數值欄位：用最早一期的十分位數切成 10 組，空值另成 1 組。\n字串欄位：最早一期最常見的 20 個值各成 1 組，其他值合成 1 組，空值 1 組。"});
-  h+=sec("分位數走勢","PSI 只告訴你某一期變了，這張圖讓你看出是怎麼變的。選單裡是有分布偏移的數值欄位，PSI 最大的排最前面。線是中位數，深色帶是中間一半的資料（p25 至 p75），淺色帶是 98% 的資料（p1 至 p99）。整條帶子在某一期突然跳好幾倍，通常是換了單位；慢慢往上或往下移，通常是客群在變。",[fig("fig-band")]);
-  const sd=STRS.filter(f=>f.flags.includes("drift"));
-  h+=sec("字串欄位各值的占比","有分布偏移的字串欄位（"+sd.map(f=>f.name).join("、")+"）。每根長條是一期，不含空值。",sd.map(f=>fig("fig-str-"+f.name)));
-  const ol=NUMERIC.filter(f=>f.flags.includes("outlier"));
-  const olRows=ol.map(f=>{const w=worst(f);const q=f.q[w.t];return[f.name,TIMES[w.t],oddVal(w),num(q[0]),num(q[4]),fx(w.r,1),fx(w.l,2)];});
-  h+=sec("極端值","被標為極端值的欄位，列出最離譜的那一期和那個值。p1 等於 p99 的欄位不判斷。",
-    [tbl(["欄位","期別","離譜的值","p1","p99","倍數","log 後倍數"],olRows,[3,4,5,6])],
-    {formula:"倍數＝離譜的值到 p1～p99 這一段的距離 ÷ 這一段的寬度\n最大值那一側：（最大值 − p99）÷（p99 − p1）\n最小值那一側：（p1 − 最小值）÷（p99 − p1）\n兩側都會算，因為錯誤可能出現在任一側，例如正負號弄錯會變成很大的負數。表格列出比較離譜的那一側。\n\nlog 後倍數：先把這四個數都換成 sign(x) × ln(1 + |x|)，再用同樣的公式計算。\n兩個條件都成立才標出：倍數 ≥ 10，且 log 後倍數 ≥ 1。",
-     bullets:["為什麼要看 log 後倍數：金額類欄位天生長尾，最大值常是 p99 的幾十倍，只看倍數會標出一大堆正常欄位。取 log 後，正常長尾的倍數通常小於 1，資料錯誤（例如年齡 999）仍會大於 1。"]});
-  const nc=NUMERIC.filter(f=>f.nearconst);
-  h+=sec("值幾乎都相同的欄位","p1 等於 p99，表示至少約 98% 的值相同。這不算問題，列出來供參考：像 mort_flag 這種很少是 1 的欄位也會在這裡，是否處理請自行判斷。",
-    [tbl(["欄位","型別","p1 與 p99 的值","最大值","空值比例（最新一期）"],nc.map(f=>[f.name,f.dtype,num(f.q[LATEST][0]),num(f.max[LATEST]),pct(f.null[LATEST])]),[2,3,4])]);
-  return h;
-}
-
-function pageCorr(){
-  const skipped=F.filter(f=>!CORR_FEATS.includes(f.name)).map(f=>{
-    const why=f.kind==="str"?"字串欄位":f.null[LATEST]>=TH.null_ratio?"最新一期幾乎都是空值":f.constAt[LATEST]?"最新一期只有一個值":null;
-    return why?[f.name,why]:null;
-  }).filter(Boolean);
-  let h="<h1>04 相關性</h1>";
-  h+=sec("高度相關的欄位","在最新一期（"+TIMES[LATEST]+"）隨機抽 50,000 筆（seed 42），計算數值欄位兩兩之間的 Spearman 相關係數，每一組只用兩個欄位都有值的資料。Spearman 是先把數值換成排名再算相關，所以不受單位和極端值影響。下表是絕對值 ≥ 0.95 的組合，共 "+HIGH.length+" 組。",
-    [tbl(["欄位 A","欄位 B","Spearman 相關係數","兩欄都有值的筆數"],HIGH.map(p=>[p.a,p.b,fx(p.v,3),num(p.n)]),[2,3])]);
-  h+=sec("相關係數矩陣","只畫出現在上表的欄位。格子裡有數字的表示絕對值 ≥ 0.95；藍色是正相關，紅色是負相關。",[fig("fig-corr")]);
-  h+=sec("未計算的欄位","以下欄位沒有計算相關性。",[tbl(["欄位","原因"],skipped)]);
-  return h;
-}
-
-function pageAll(){
-  let h="<h1>05 所有欄位明細</h1>";
-  const rows=F.map(f=>{const nn=f.null;const q=f.q[LATEST];const ps=f.psi.filter(v=>v!=null);
-    return[f.name,f.dtype,flagNames(f)||"—",pct(Math.min(...nn))+" 至 "+pct(Math.max(...nn)),q?num(q[2]):"",f.max[LATEST]!=null?num(f.max[LATEST]):"",ps.length?fx(Math.max(...ps),2):""];});
-  h+=sec("各欄位摘要","每個欄位一列。中位數與最大值取最新一期。",[tbl(["欄位","型別","問題類型","空值比例（最低至最高）","中位數","最大值","PSI 最大值"],rows,[4,5,6])]);
-  h+=sec("各期中位數","數值欄位每一期的中位數。",[tbl(["欄位"].concat(TIMES),NUMERIC.map(f=>[f.name].concat(f.q.map(q=>q?num(q[2]):""))),TIMES.map((_,i)=>i+1))],{collapsible:true});
-  h+=sec("各期最大值","數值欄位每一期的最大值。",[tbl(["欄位"].concat(TIMES),NUMERIC.map(f=>[f.name].concat(f.max.map(v=>v==null?"":num(v)))),TIMES.map((_,i)=>i+1))],{collapsible:true});
-  h+=sec("各期 PSI","每一期和最早一期比較的 PSI。",[tbl(["欄位"].concat(TIMES),F.map(f=>[f.name].concat(f.psi.map(v=>v==null?"":fx(v,3)))),TIMES.map((_,i)=>i+1))],{collapsible:true});
-  h+=sec("未檢查的欄位","型別不支援（date、timestamp、array、map、struct）而沒有檢查的欄位。",["<p>這次沒有。</p>"]);
-  return h;
-}
-
-/* ---------- 圖（真的報表用 plotly python 畫，同一套 plotly.js） ---------- */
-function C(){const cs=getComputedStyle(document.documentElement);const g=n=>cs.getPropertyValue(n).trim();
-  return{bg:g("--bg"),fg:g("--fg"),muted:g("--chart-muted"),grid:g("--grid"),axis:g("--axis"),border:g("--border"),dark:g("--mode")==="dark"};}
-function seq(c){return c.dark?[[0,"#1a1a19"],[0.1,"#104281"],[0.35,"#256abf"],[0.5,"#5598e7"],[1,"#cde2fb"]]:[[0,"#fcfcfb"],[0.1,"#cde2fb"],[0.35,"#86b6ef"],[0.5,"#2a78d6"],[1,"#0d366b"]];}
-function div(c){return c.dark?[[0,"#f08a89"],[0.25,"#8a3a3a"],[0.5,"#383835"],[0.75,"#256abf"],[1,"#9ec5f4"]]:[[0,"#b8322f"],[0.25,"#f0a3a2"],[0.5,"#f0efec"],[0.75,"#86b6ef"],[1,"#104281"]];}
-const onCell=c=>c.dark?"#0d0d0d":"#ffffff";
-function base(c,extra){
-  const ax={gridcolor:c.grid,linecolor:c.axis,zerolinecolor:c.axis,tickfont:{color:c.muted},title:{font:{color:c.muted}}};
-  return Object.assign({paper_bgcolor:c.bg,plot_bgcolor:c.bg,font:{family:'-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang TC",sans-serif',color:c.fg,size:12},
-    margin:{l:130,r:20,t:20,b:80},hoverlabel:{bgcolor:c.bg,bordercolor:c.border,font:{color:c.fg}},
-    xaxis:Object.assign({},ax),yaxis:Object.assign({},ax)},extra||{});
-}
-const CFG={displaylogo:false,responsive:true};
-const PLOTS={
-  basic:[function(c){
-    const rows=F.filter(f=>Math.max(...f.null)>=0.005).sort((a,b)=>Math.max(...b.null)-Math.max(...a.null));
-    const L=base(c,{height:90+rows.length*28});L.xaxis.type="category";L.xaxis.tickangle=-45;L.yaxis.autorange="reversed";L.yaxis.type="category";
-    Plotly.react("fig-null",[{type:"heatmap",x:TIMES,y:rows.map(f=>f.name),z:rows.map(f=>f.null),zmin:0,zmax:1,colorscale:seq(c),xgap:2,ygap:2,
-      text:rows.map(f=>f.null.map(v=>v>=TH.null_ratio?"≥99%":"")),texttemplate:"%{text}",textfont:{color:onCell(c),size:10},
-      hovertemplate:"%{y}<br>%{x}<br>空值比例 %{z:.2%}<extra></extra>",
-      colorbar:{title:{text:"空值比例",font:{color:c.muted}},tickformat:".0%",outlinewidth:0,tickfont:{color:c.muted},thickness:12}}],L,CFG);
-  }],
-  drift:[function(c){
-    const rows=F.filter(f=>f.psi.some(v=>v!=null)).map(f=>({f,m:Math.max(...f.psi.filter(v=>v!=null))})).sort((a,b)=>b.m-a.m).slice(0,12).map(o=>o.f);
-    const L=base(c,{height:90+rows.length*30});L.xaxis.type="category";L.xaxis.tickangle=-45;L.yaxis.autorange="reversed";L.yaxis.type="category";
-    Plotly.react("fig-psi",[{type:"heatmap",x:TIMES,y:rows.map(f=>f.name),z:rows.map(f=>f.psi.map(v=>v==null?null:Math.min(v,0.5))),
-      customdata:rows.map(f=>f.psi),zmin:0,zmax:0.5,colorscale:seq(c),xgap:2,ygap:2,
-      text:rows.map(f=>f.psi.map(v=>v!=null&&v>=TH.psi?v.toFixed(2):"")),texttemplate:"%{text}",textfont:{color:onCell(c),size:10},
-      hovertemplate:"%{y}<br>%{x}<br>PSI %{customdata:.3f}<extra></extra>",
-      colorbar:{title:{text:"PSI",font:{color:c.muted}},tickvals:[0,0.1,0.25,0.5],ticktext:["0","0.1","0.25","≥ 0.5"],outlinewidth:0,tickfont:{color:c.muted},thickness:12}}],L,CFG);
-  },function(c){
-    const pmax=f=>Math.max(...f.psi.filter(v=>v!=null));
-    const feats=NUMERIC.filter(f=>f.flags.includes("drift")).sort((a,b)=>pmax(b)-pmax(a));
-    const wide=c.dark?"rgba(57,135,229,0.20)":"rgba(42,120,214,0.14)", mid=c.dark?"rgba(57,135,229,0.42)":"rgba(42,120,214,0.34)", line=c.dark?"#3987e5":"#2a78d6";
-    const traces=[];
-    feats.forEach((f,i)=>{
-      const g=k=>f.q.map(q=>q?q[k]:null), vis=i===0;
-      traces.push({x:TIMES,y:g(4),name:"p99",mode:"lines",line:{width:0},showlegend:false,visible:vis,hovertemplate:"p99 %{y:,}<extra></extra>"});
-      traces.push({x:TIMES,y:g(0),name:"p1 至 p99",mode:"lines",line:{width:0},fill:"tonexty",fillcolor:wide,visible:vis,hovertemplate:"p1 %{y:,}<extra></extra>"});
-      traces.push({x:TIMES,y:g(3),name:"p75",mode:"lines",line:{width:0},showlegend:false,visible:vis,hovertemplate:"p75 %{y:,}<extra></extra>"});
-      traces.push({x:TIMES,y:g(1),name:"p25 至 p75",mode:"lines",line:{width:0},fill:"tonexty",fillcolor:mid,visible:vis,hovertemplate:"p25 %{y:,}<extra></extra>"});
-      traces.push({x:TIMES,y:g(2),name:"中位數",mode:"lines+markers",line:{width:2,color:line},marker:{size:8,color:line,line:{color:c.bg,width:2}},visible:vis,hovertemplate:"中位數 %{y:,}<extra></extra>"});
-    });
-    const label=f=>f.name;
-    const buttons=feats.map((f,i)=>({label:label(f),method:"update",args:[{visible:traces.map((_,k)=>Math.floor(k/5)===i)}]}));
-    const L=base(c,{height:420,hovermode:"x unified",margin:{l:80,r:20,t:60,b:80},legend:{orientation:"h",x:1,xanchor:"right",y:1.12,font:{color:c.fg}},
-      updatemenus:[{type:"dropdown",x:0,xanchor:"left",y:1.16,yanchor:"top",buttons,bgcolor:c.bg,bordercolor:c.border,font:{color:c.fg},active:0}]});
-    L.xaxis.type="category";L.xaxis.tickangle=-45;L.yaxis.tickformat=",";
-    Plotly.react("fig-band",traces,L,CFG);
-  },function(c){
-    const pal=c.dark?["#3987e5","#d95926","#199e70","#c98500","#d55181"]:["#2a78d6","#eb6834","#1baf7a","#eda100","#e87ba4"];
-    STRS.filter(f=>f.flags.includes("drift")).forEach(f=>{
-      const tr=f.cats.map((cat,k)=>({type:"bar",name:cat,x:TIMES,y:f.shares.map(s=>s[k]),marker:{color:pal[k%pal.length],line:{color:c.bg,width:2}},hovertemplate:cat+" %{y:.1%}<extra></extra>"}));
-      const L=base(c,{height:380,barmode:"stack",bargap:0.25,margin:{l:60,r:20,t:40,b:80},legend:{orientation:"h",x:0,y:1.14,font:{color:c.fg}}});
-      L.xaxis.type="category";L.xaxis.tickangle=-45;L.yaxis.tickformat=".0%";L.yaxis.range=[0,1];
-      Plotly.react("fig-str-"+f.name,tr,L,CFG);
-    });
-  }],
-  corr:[function(c){
-    const n=MATRIX;
-    const z=n.map(a=>n.map(b=>a===b?null:CORR[a+"|"+b].v));
-    const L=base(c,{height:120+n.length*56,margin:{l:120,r:20,t:20,b:120}});L.yaxis.autorange="reversed";L.xaxis.tickangle=-45;L.xaxis.type="category";L.yaxis.type="category";
-    Plotly.react("fig-corr",[{type:"heatmap",x:n,y:n,z,zmin:-1,zmax:1,colorscale:div(c),xgap:2,ygap:2,
-      text:z.map(r=>r.map(v=>v!=null&&Math.abs(v)>=TH.corr?v.toFixed(2):"")),texttemplate:"%{text}",textfont:{color:onCell(c),size:10},
-      hovertemplate:"%{y} × %{x}<br>相關係數 %{z:.3f}<extra></extra>",
-      colorbar:{title:{text:"相關係數",font:{color:c.muted}},outlinewidth:0,tickfont:{color:c.muted},thickness:12}}],L,CFG);
-  }]
-};
-
-/* ---------- 分頁切換 ---------- */
-const RENDER={index:pageIndex,flags:pageFlags,basic:pageBasic,drift:pageDrift,corr:pageCorr,all:pageAll};
-const tabs=document.getElementById("tabs"), host=document.getElementById("pages");
-const drawn={};
-PAGES.forEach(p=>{
-  const b=document.createElement("button");b.type="button";b.id="tab-"+p.id;b.setAttribute("role","tab");b.setAttribute("aria-controls","p-"+p.id);b.textContent=p.file;
-  b.addEventListener("click",()=>{if(location.hash!=="#p-"+p.id)location.hash="p-"+p.id;else show(p.id);});
-  tabs.appendChild(b);
-  const s=document.createElement("section");s.className="page";s.id="p-"+p.id;s.setAttribute("role","tabpanel");s.hidden=true;
-  try{s.innerHTML=RENDER[p.id]();}catch(e){s.innerHTML='<p class="noplot">這一頁產生失敗：'+esc(e.message)+"</p>";}
-  host.appendChild(s);
-});
-function draw(id){
-  if(!PLOTS[id])return;
-  if(!window.Plotly){document.querySelectorAll("#p-"+id+" .fig").forEach(el=>{el.innerHTML='<p class="noplot">畫圖程式沒有載入，圖表無法顯示；表格不受影響。</p>';});return;}
-  const c=C();PLOTS[id].forEach(fn=>{try{fn(c);}catch(e){console.error(e);}});drawn[id]=true;
-}
-function show(id){
-  if(!RENDER[id])id="index";
-  PAGES.forEach(p=>{const on=p.id===id;document.getElementById("p-"+p.id).hidden=!on;document.getElementById("tab-"+p.id).setAttribute("aria-selected",on?"true":"false");});
-  requestAnimationFrame(()=>draw(id));
-}
-function current(){const m=location.hash.match(/^#p-([a-z]+)$/);return m&&RENDER[m[1]]?m[1]:"index";}
-window.addEventListener("hashchange",()=>{show(current());window.scrollTo(0,0);});
-show(current());
-function redraw(){Object.keys(drawn).forEach(k=>delete drawn[k]);draw(current());}
-try{window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change",redraw);}catch(e){}
-new MutationObserver(redraw).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]});
+</pre></details></section></main></div><script>
+(function(){"use strict";
+function key(td){if(!td)return null;var v=td.getAttribute("data-v");
+ if(v===null)return td.textContent.trim().toLowerCase();if(v==="")return null;
+ var n=Number(v);return isNaN(n)?v:n;}
+function rowsOf(t){return Array.prototype.filter.call(t.tBodies[0].rows,function(r){return !r.classList.contains("detail");});}
+function sortBy(t,i,dir){var tb=t.tBodies[0],rs=rowsOf(t),s=dir==="asc"?1:-1;
+ rs.forEach(function(r,k){r._k=k;});
+ rs.sort(function(a,b){var x=key(a.cells[i]),y=key(b.cells[i]);
+  if(x===null&&y===null)return a._k-b._k;if(x===null)return 1;if(y===null)return -1;
+  var c=(typeof x==="number"&&typeof y==="number")?x-y:String(x).localeCompare(String(y));
+  return c?c*s:a._k-b._k;});
+ rs.forEach(function(r){tb.appendChild(r);if(r._detail)tb.appendChild(r._detail);});
+ t.querySelectorAll("thead th").forEach(function(th,k){if(k===i)th.setAttribute("data-dir",dir);else th.removeAttribute("data-dir");});}
+document.querySelectorAll("table.t").forEach(function(t){if(t.classList.contains("kv"))return;
+ t.querySelectorAll("thead th").forEach(function(th,i){th.addEventListener("click",function(){
+  sortBy(t,i,th.getAttribute("data-dir")==="asc"?"desc":"asc");});});});
+function apply(bar){var t=document.getElementById(bar.getAttribute("data-for"));if(!t)return;
+ var q=bar.querySelector("input.q"),terms=(q?q.value:"").toLowerCase().split(/\s+/).filter(Boolean);
+ var sels=bar.querySelectorAll("select[data-attr]"),shown=0,total=0;
+ rowsOf(t).forEach(function(r){total++;var name=(r.getAttribute("data-name")||"").toLowerCase();
+  var ok=terms.every(function(w){return name.indexOf(w)>=0;});
+  sels.forEach(function(s){if(!ok||s.value==="")return;var v=r.getAttribute("data-"+s.getAttribute("data-attr"))||"";
+   ok=s.getAttribute("data-mode")==="min"?Number(v)>=Number(s.value):v.split(" ").indexOf(s.value)>=0;});
+  r.hidden=!ok;if(r._detail)r._detail.hidden=!ok||!r.classList.contains("open");if(ok)shown++;});
+ var cnt=bar.querySelector(".count");if(cnt)cnt.textContent="顯示 "+shown+"／"+total+" 列";}
+var bars=document.querySelectorAll(".toolbar");
+bars.forEach(function(bar){bar.querySelectorAll("input,select").forEach(function(el){
+ el.addEventListener(el.type==="search"?"input":"change",function(){apply(bar);});});});
+var g=document.getElementById("global-q");
+if(g)g.addEventListener("input",function(){bars.forEach(function(bar){var q=bar.querySelector("input.q");if(q){q.value=g.value;apply(bar);}});});
+function copy(text,btn){var old=btn.textContent;function say(s){btn.textContent=s;setTimeout(function(){btn.textContent=old;},1500);}
+ function fallback(){var ta=document.createElement("textarea");ta.value=text;ta.style.position="fixed";ta.style.opacity="0";
+  document.body.appendChild(ta);ta.select();var ok=false;try{ok=document.execCommand("copy");}catch(e){}
+  document.body.removeChild(ta);say(ok?"已複製":"複製失敗");}
+ if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(text).then(function(){say("已複製");},fallback);else fallback();}
+document.addEventListener("click",function(ev){var b=ev.target.closest("button");if(!b)return;
+ if(b.hasAttribute("data-copy-rows")){var t=document.getElementById(b.getAttribute("data-copy-rows"));
+  copy(rowsOf(t).filter(function(r){return !r.hidden;}).map(function(r){return r.getAttribute("data-name");}).join("\n"),b);}
+ else if(b.hasAttribute("data-copy-text")){copy(b.getAttribute("data-copy-text"),b);}
+ else if(b.classList.contains("exp")){toggle(b.closest("tr"));}});
+var DATA=JSON.parse((document.getElementById("fp-data")||{}).textContent||"{}");
+function fmt(v){if(v===null||v===undefined)return "";if(typeof v==="number"){
+ return Number.isInteger(v)?v.toLocaleString("en-US"):v.toLocaleString("en-US",{maximumFractionDigits:6});}return String(v);}
+function pct(n,d){if(!d)return "";if(n===0)return "0%";if(n===d)return "100%";var x=n/d;
+ var s=(x*100).toFixed(x<0.01||x>0.99?2:1);if(Number(s)>=100)return "> 99.99%";if(Number(s)===0)return "< 0.01%";return s+"%";}
+function toggle(tr){if(!tr)return;var name=tr.getAttribute("data-name"),c=DATA.cols&&DATA.cols[name];if(!c)return;
+ if(!tr._detail){var h="<table class='mini'><thead><tr><th>期別</th><th>總筆數</th><th>空值筆數</th><th>空值比例</th><th>最小值</th><th>最大值</th></tr></thead><tbody>";
+  DATA.periods.forEach(function(p,i){h+="<tr><td>"+esc(p)+"</td><td>"+fmt(DATA.rows[i])+"</td><td>"+fmt(c[0][i])+"</td><td>"+pct(c[0][i],DATA.rows[i])+
+   "</td><td>"+esc(fmt(c[1][i]))+"</td><td>"+esc(fmt(c[2][i]))+"</td></tr>";});
+  var d=document.createElement("tr");d.className="detail";d.innerHTML="<td colspan='"+tr.cells.length+"'>"+h+"</tbody></table></td>";
+  tr._detail=d;tr.parentNode.insertBefore(d,tr.nextSibling);tr.classList.add("open");return;}
+ var open=!tr.classList.contains("open");tr.classList.toggle("open",open);tr._detail.hidden=!open;}
+function esc(s){return String(s).replace(/[&<>"']/g,function(ch){return "&#"+ch.charCodeAt(0)+";";});}
+document.addEventListener("click",function(ev){var a=ev.target.closest("a.col");if(!a)return;
+ var tr=document.getElementById("col-"+a.getAttribute("data-col"));if(!tr)return;ev.preventDefault();
+ var bar=document.querySelector('.toolbar[data-for="t-all"]');
+ if(bar){bar.querySelectorAll("input.q").forEach(function(q){q.value="";});bar.querySelectorAll("select").forEach(function(s){s.selectedIndex=0;});apply(bar);}
+ if(!tr.classList.contains("open"))toggle(tr);tr.scrollIntoView({block:"center"});});
+function tipText(s,i){var c=DATA.cols&&DATA.cols[s.getAttribute("data-col")],p=DATA.labels[i];if(!c)return p;
+ var n=DATA.rows[i],nl=c[0][i];
+ if(s.getAttribute("data-mode")==="const"){if(nl===n)return p+"　整期都是空值";
+  return c[1][i]===c[2][i]?p+"　只有一個值："+fmt(c[1][i]):p+"　"+fmt(c[1][i])+"～"+fmt(c[2][i]);}
+ return p+"　空值 "+pct(nl,n)+"（"+fmt(n)+" 筆中 "+fmt(nl)+" 筆）";}
+var tip=document.createElement("div");tip.className="tip";tip.hidden=true;document.body.appendChild(tip);var lastOn=null;
+document.addEventListener("mousemove",function(ev){var s=ev.target.closest(".spark");
+ if(lastOn&&(!s||lastOn.parentNode!==s)){lastOn.classList.remove("on");lastOn=null;}
+ if(!s||s.classList.contains("key")){tip.hidden=true;return;}
+ var bs=s.children,r=s.getBoundingClientRect(),i=Math.min(bs.length-1,Math.max(0,Math.floor((ev.clientX-r.left)/r.width*bs.length)));
+ if(lastOn)lastOn.classList.remove("on");lastOn=bs[i];lastOn.classList.add("on");
+ tip.textContent=tipText(s,i);tip.hidden=false;
+ tip.style.left=Math.min(ev.clientX+12,window.innerWidth-tip.offsetWidth-8)+"px";tip.style.top=(ev.clientY+16)+"px";});
+bars.forEach(function(bar){try{apply(bar);}catch(e){if(window.console)console.error(e);}});
 })();
-</script>
+</script></body></html>
