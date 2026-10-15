@@ -132,13 +132,15 @@ def _labels(spark):
 
 
 def _candidate_table(spark):
+    """The same three candidates in the train and the val month: the data
+    gate asks it for every month the builds read."""
     return spark.createDataFrame(pd.DataFrame({
-        "snap_date": pd.to_datetime([_TRAIN] * 3),
-        "user_id": ["u1"] * 3,
-        "campaign_id": [c for c, _ in _COMBOS],
-        "creative_format": [f for _, f in _COMBOS],
-        "browse_30m": [1, 2, 3],
-        "page_type": ["home", "search", "home"],
+        "snap_date": pd.to_datetime([_TRAIN] * 3 + [_VAL] * 3),
+        "user_id": ["u1"] * 6,
+        "campaign_id": [c for c, _ in _COMBOS] * 2,
+        "creative_format": [f for _, f in _COMBOS] * 2,
+        "browse_30m": [1, 2, 3, 4, 5, 6],
+        "page_type": ["home", "search", "home"] * 2,
     }))
 
 
@@ -204,6 +206,7 @@ def _gate(spark, pool_records, label_rows=None, params=None, candidate=None):
     ))
     validate_data_consistency(
         pool, labels, _feature_table(spark), params or _params(), candidate,
+        SnapDatePlan(to_process=[], skipped=[]),
     )
 
 

@@ -5,24 +5,63 @@ from pathlib import Path
 import pytest
 import yaml
 
+from recsys_tfb.core.runner import Runner
 from recsys_tfb.pipelines.dataset import create_pipeline
 from recsys_tfb.pipelines.dataset import nodes
 from recsys_tfb.pipelines.dataset import pipeline as dataset_pipeline
 from recsys_tfb.pipelines.dataset.month_plans import (
     INCREMENTAL_DATASETS,
+    build_month_plans,
     month_plan_input,
+)
+from recsys_tfb.pipelines.dataset.run_contract import (
+    SourceFingerprints,
+    pipeline_inputs,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+class _FirstLoad(Exception):
+    """Raised by the first ``load``: the Runner's input check had passed."""
+
+
+class _NamesOnlyCatalog:
+    """A catalog that knows names and nothing else — what the Runner's pre-run
+    input check asks — and stops the run at the first ``load``."""
+
+    def __init__(self, names):
+        self._names = set(names)
+
+    def list(self):
+        return sorted(self._names)
+
+    def exists(self, name):
+        return name in self._names
+
+    def load(self, name):
+        raise _FirstLoad(name)
+
+
+def _runner_refusals(pipeline, names) -> list[str]:
+    """What the real Runner refuses before it runs a node: ``[]`` when every
+    input resolves, and it then stops at the first ``load``."""
+    try:
+        Runner().run(pipeline, _NamesOnlyCatalog(names))
+    except _FirstLoad:
+        return []
+    except ValueError as exc:
+        return [str(exc)]
+    raise AssertionError("the Runner finished without loading anything")
+
+
 class TestDatasetPipeline:
     def test_pipeline_node_count(self):
         pipeline = create_pipeline()
-        # 3 validate (Layer-2 data gate + B8 precision gate + B10 grain gate)
+        # 2 validate (Layer-2 data gate + B10 grain gate)
         # + 4 key-selection + 1 fit + 1 apply_features + 4 build_model_input
-        # + 4 filter keys (train/train_dev/val/test) = 17
-        assert len(pipeline.nodes) == 17
+        # + 4 filter keys (train/train_dev/val/test) = 16
+        assert len(pipeline.nodes) == 16
 
     def test_create_pipeline_takes_no_calibration_switch(self):
         """#414 removed the branch. A stale caller passing the old kwarg must
@@ -40,8 +79,8 @@ class TestDatasetPipeline:
             # Registered by the CLI for every deployment — `None` for the table
             # when none is declared (ADR-0026).
             "candidate_feature_table",
-            # The run mode, the one fact the precision gate cannot work out:
-            # no month list is injected, each node works out its own months
+            # The run mode, the one fact the data gate cannot work out: no
+            # month list is injected, each node works out its own months
             # (ADR-0029 decision 2).
             "only_test_months",
             # The preprocessor file already on disk, read by the fit before it
@@ -50,13 +89,48 @@ class TestDatasetPipeline:
             "preprocessor_on_disk",
         }
 
+    @pytest.mark.parametrize("candidate_declared", [False, True])
+    @pytest.mark.parametrize("only_test_months", [False, True])
+    def test_the_runner_finds_every_input_the_command_registers(
+        self, only_test_months, candidate_declared,
+    ):
+        """The real Runner's pre-run check, on the names the dataset command
+        registers: every ``conf/base/catalog.yaml`` entry, ``parameters``,
+        ``preprocessor_on_disk`` (derived from ``preprocessor``, ADR-0029
+        decision 13) and what ``run_contract.pipeline_inputs`` returns. A
+        declared candidate table is the deployment's own catalog entry.
+
+        The set above is hand-written and covers the full mode only. The
+        ``--only-test-months`` tests in ``tests/test_cli.py`` mock the Runner,
+        so nothing else asks it whether that mode's inputs resolve (#518)."""
+        catalog_names = set(yaml.safe_load(
+            (REPO_ROOT / "conf" / "base" / "catalog.yaml").read_text()))
+        if candidate_declared:
+            catalog_names.add("candidate_feature_table")
+        plans = build_month_plans({"dataset": {
+            "train_snap_dates": ["2024-01-31"],
+            "test_snap_dates": ["2024-03-31"],
+        }})
+        sources = SourceFingerprints(
+            "feature_table_fp", "candidate_fp" if candidate_declared else None)
+        registered = (
+            catalog_names | {"parameters", "preprocessor_on_disk"}
+            | set(pipeline_inputs(
+                plans, sources, only_test_months=only_test_months))
+        )
+
+        unresolved = _runner_refusals(
+            create_pipeline(only_test_months=only_test_months), registered)
+
+        assert unresolved == []
+
     def test_pipeline_outputs(self):
         pipeline = create_pipeline()
         expected = {
             "train_model_input", "train_dev_model_input",
             "val_model_input", "test_model_input",
             "preprocessor",
-            "preprocessed_feature_table", "numeric_precision_report",
+            "preprocessed_feature_table",
             "model_input_grain_report",
             "sample_keys", "train_keys", "train_dev_keys", "val_keys", "test_keys",
             "train_keys_unfiltered", "train_dev_keys_unfiltered",
@@ -93,7 +167,7 @@ class TestDatasetPipeline:
 
     def test_default_parameters(self):
         pipeline = create_pipeline()
-        assert len(pipeline.nodes) == 17
+        assert len(pipeline.nodes) == 16
 
     #: Each split's group drop: what it reads, in the order its function
     #: binds them.
@@ -146,7 +220,8 @@ class TestDatasetPipeline:
         first = pipeline.nodes[0]
         assert sorted(first.inputs) == [
             "candidate_feature_table", "feature_table", "label_table",
-            "parameters", "sample_pool",
+            "only_test_months", "parameters", "sample_pool",
+            "test_model_input_month_plan",
         ]
         assert first.outputs == []
 
@@ -198,7 +273,6 @@ class TestNodeNameToFunctionBinding:
         "filter_test_keys": nodes.filter_test_keys,
         "fit_preprocessor_metadata": nodes.fit_preprocessor_metadata,
         "apply_preprocessor_to_features": nodes.apply_preprocessor_to_features,
-        "validate_numeric_precision": nodes.validate_numeric_precision,
         "build_train_model_input": nodes.build_train_model_input,
         "build_train_dev_model_input": nodes.build_train_model_input,
         "build_val_model_input": nodes.build_val_model_input,
@@ -251,18 +325,14 @@ class TestMonthPlanWiring:
     #: node name -> the artifact whose plan scopes it. Not derivable from the
     #: node's own output: select_test_keys writes ``test_keys_unfiltered`` but
     #: is gated on ``test_keys``, the persistent table the pair of nodes
-    #: ultimately produces, and the two gates write reports.
+    #: ultimately produces, and the two gates write a report or nothing.
     EXPECTED_PLAN = {
+        # The data gate checks the candidate-level feature table holds every
+        # month this run's builds read; the test build reads its plan's
+        # to_process (ADR-0029 decision 2). Not an incremental node: the plan
+        # only says which test months to ask the table for.
+        "validate_data_consistency": {"test_model_input"},
         "apply_preprocessor_to_features": {"preprocessed_feature_table"},
-        # The B8 gate reads the same plan as the node that writes the table it
-        # checks — that shared plan is what makes "the months this run added get
-        # checked, and only those" true by construction rather than by comment.
-        # It also reads the test build's plan: the candidate-level feature
-        # table is checked over the months the builds read, and the test
-        # build reads that plan's (ADR-0029 decision 2).
-        "validate_numeric_precision": {
-            "preprocessed_feature_table", "test_model_input",
-        },
         "select_test_keys": {"test_keys"},
         # The group drop reads its labels for the months its keys were
         # selected for: the same plan, not the build's.
@@ -310,26 +380,6 @@ class TestMonthPlanWiring:
             assert month_plan_input(name) in pipeline.inputs
             assert month_plan_input(name) not in pipeline.outputs
 
-    def test_the_precision_gate_runs_before_every_model_input_build(self):
-        """Declaration order is what orders it, so a test has to hold the order.
-
-        Every build also reads ``preprocessed_feature_table``, the gate's last
-        unmet input, so no build becomes runnable before the gate; the builds
-        that become runnable at the same moment are queued with it, and Kahn
-        breaks the tie by list position (``core/pipeline.py``). Nothing in the
-        DAG forces the gate first — it produces no artifact anyone consumes — so
-        moving its entry down the list
-        in ``pipeline.py`` would silently let a narrowed value land before the
-        check that exists to stop it. That edit passes every other test here.
-        """
-        names = [n.name for n in create_pipeline().nodes]
-        gate = names.index("validate_numeric_precision")
-        builds = [i for i, n in enumerate(names) if n.startswith("build_")]
-        assert builds, "no build_* nodes found -- the guard would be vacuous"
-        assert gate < min(builds), (
-            f"precision gate at {gate} runs after a model_input build: {names}"
-        )
-
 
 class TestOnlyTestMonthsMode:
     """``--only-test-months``: the data gate plus the test chain (ADR-0013).
@@ -351,7 +401,6 @@ class TestOnlyTestMonthsMode:
         "select_test_keys",
         "apply_preprocessor_to_features",
         "filter_test_keys",
-        "validate_numeric_precision",
         "build_test_model_input",
         "validate_model_input_grain",
     ]
@@ -364,10 +413,10 @@ class TestOnlyTestMonthsMode:
         assert [n.name for n in pipeline.nodes] == self.EXPECTED
 
     def test_default_shape_is_unchanged_by_the_parameter(self):
-        # Not covered by TestDatasetPipeline's 17: that calls create_pipeline
+        # Not covered by TestDatasetPipeline's 16: that calls create_pipeline
         # without the kwarg, so it would still pass if False were not the
         # default. Spell the default out.
-        assert len(create_pipeline(only_test_months=False).nodes) == 17
+        assert len(create_pipeline(only_test_months=False).nodes) == 16
 
     def test_the_list_matches_the_dag_derived_test_chain(self):
         """Drift guard: the list == what the DAG says the test chain is.
@@ -376,15 +425,14 @@ class TestOnlyTestMonthsMode:
         (ADR-0012): a persisted artifact that is missing *this run's* months
         answers "no", so its producer is upstream of the test chain.
 
-        The three gates are added separately, and that is not a fudge — it is
+        The two gates are added separately, and that is not a fudge — it is
         the one structural fact this test cannot derive. ``_slice_with_expansion``
         walks *backwards* from an artifact somebody needs, so a node nothing
         downstream consumes is unreachable however useful it is:
         ``validate_data_consistency`` because it has no output at all, and
-        ``validate_numeric_precision`` and ``validate_model_input_grain``
-        because their outputs (``numeric_precision_report``,
-        ``model_input_grain_report``) are diagnostics with no consumer. All
-        three therefore have to be named here.
+        ``validate_model_input_grain`` because its output
+        (``model_input_grain_report``) is a diagnostic with no consumer. Both
+        therefore have to be named here.
 
         Fails when a node is added to the test chain and the list does not
         follow: the mode would then silently skip it.
@@ -401,8 +449,7 @@ class TestOnlyTestMonthsMode:
         full = create_pipeline()
         sliced, _ = full.slice_only("build_test_model_input", can_load)
         derived = {n.name for n in sliced.nodes} | {
-            "validate_data_consistency", "validate_numeric_precision",
-            "validate_model_input_grain",
+            "validate_data_consistency", "validate_model_input_grain",
         }
 
         assert derived == set(dataset_pipeline.ONLY_TEST_MONTHS_NODES)
@@ -485,7 +532,7 @@ class TestGrainGateWiring:
 
 class TestCandidateFeatureTableWiring:
     """Where the candidate-level feature table reaches (ADR-0026), and that it
-    and the precision gate's two trailing inputs bind to the right parameters.
+    and the data gate's two trailing inputs bind to the right parameters.
 
     They go last on every node that takes them, as optional trailing
     parameters, because the Runner binds ``inputs`` positionally. A node whose
@@ -505,21 +552,22 @@ class TestCandidateFeatureTableWiring:
     def _by_name(self):
         return {n.name: n for n in create_pipeline().nodes}
 
-    def test_the_table_reaches_the_gate_the_fit_the_precision_check_and_every_build(self):
+    def test_the_table_reaches_the_gate_the_fit_and_every_build(self):
         assert {
             name for name, node in self._by_name().items() if self.TABLE in node.inputs
         } == {
             "validate_data_consistency", "fit_preprocessor_metadata",
-            "validate_numeric_precision", *self.BUILDS,
+            *self.BUILDS,
         }
 
-    def test_the_precision_gate_binds_the_test_plan_and_the_run_mode_to_their_own_parameters(self):
+    def test_the_data_gate_binds_the_test_plan_and_the_run_mode_to_their_own_parameters(self):
         """Swapped, the plan would land in ``only_test_months`` — a non-empty
-        tuple, so truthy — and every full run would check the test months
-        alone, raising nothing."""
+        tuple, so truthy — and every full run would ask the candidate table
+        for the test months alone, raising nothing about a missing val
+        month."""
         import inspect
 
-        node = self._by_name()["validate_numeric_precision"]
+        node = self._by_name()["validate_data_consistency"]
         params = list(inspect.signature(node.func).parameters)
         assert node.inputs.index("test_model_input_month_plan") == params.index(
             "test_month_plan")

@@ -232,12 +232,9 @@ def castable_numeric_feature_columns(
 ) -> list[str]:
     """The feature columns ``cast_numeric_features_to_storage_type`` converts.
 
-    Split out from the cast itself because a second caller needs the answer
-    *without* the conversion: the dataset pipeline's B8 precision gate
-    (``core/consistency.py``) checks exactly the columns the cast will narrow,
-    and reading the same selector is what makes that a structural fact instead
-    of two lists that have to be kept in step by hand. Widening the cast is
-    therefore one edit here, and the gate widens with it.
+    Split out from the cast itself so the selection can be asked and tested
+    on its own, without converting anything; the cast reads it and nothing
+    else decides which columns it converts.
 
     **Every numeric type is in scope, including the ones that are already
     float32.** The point is a homogeneous frame, not a narrowing: a FloatType

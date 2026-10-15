@@ -189,10 +189,10 @@ def pipeline_inputs(
             month_plan_input(name): plan
             for name, plan in month_plans.items()
         },
-        # The run mode, for the one node that cannot see it: the precision
-        # gate checks the candidate-level feature table over the months
-        # this run's builds read, and under --only-test-months only the
-        # test build runs. Each build works out its own months (ADR-0029
+        # The run mode, for the one node that cannot see it: the data gate
+        # checks the candidate-level feature table holds the months this
+        # run's builds read, and under --only-test-months only the test
+        # build runs. Each build works out its own months (ADR-0029
         # decision 2), so no month list is injected.
         "only_test_months": only_test_months,
         # `None` is how a node learns none is declared. Only then: a

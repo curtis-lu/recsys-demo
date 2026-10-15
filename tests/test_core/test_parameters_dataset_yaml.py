@@ -61,19 +61,6 @@ def test_the_storage_type_is_documented_in_comments():
     )
 
 
-def test_the_policy_key_is_live_and_that_is_the_point_of_two_keys():
-    # The gate policy is the operator's only switch between "stop the run" and
-    # "accept the truncation", so hiding it in a comment would make it
-    # unreachable. It can be live precisely because it is stripped from the
-    # version hash (GATE_POLICY_KEYS) — setting it rebuilds nothing. If that
-    # ever stops holding, splitting the pair into two keys has lost its point.
-    from recsys_tfb.core.versioning import GATE_POLICY_KEYS
-    from recsys_tfb.core.consistency import PRECISION_POLICIES
-
-    assert "numeric_precision_policy" in GATE_POLICY_KEYS
-    assert _dataset_block().get("numeric_precision_policy") in PRECISION_POLICIES
-
-
 _ZERO_POSITIVE_KEYS = (
     "train_zero_positive_group_ratio",
     "val_zero_positive_group_ratio",

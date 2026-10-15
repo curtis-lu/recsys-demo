@@ -48,8 +48,6 @@ dataset:
   val_zero_positive_group_ratio: 0.5
   test_zero_positive_group_ratio: 0.5
 
-  numeric_precision_policy: block
-
   prepare_model_input:
     # 同時作用在 feature_table 與 candidate_feature_table（兩張都沒有的欄會警告）。
     # label 與非類別的 identity 欄（含 request_id）本來就不會變成特徵，前三行只是明寫；

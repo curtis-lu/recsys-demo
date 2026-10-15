@@ -4,7 +4,7 @@ This module is the one home of the pipeline's ML story: a reader who opens it
 sees each decision this pipeline makes about the data, without jumping files.
 The mechanisms those decisions are expressed in live in ``steps/``, one module per
 concern (``sampling``, ``scoping``, ``feature_columns``, ``categoricals``,
-``model_input``, and for the data gates ``footer_facts``, ``precision``,
+``model_input``, and for the data gates ``footer_facts`` and
 ``model_input_grain``). A data gate's node says what it checks; the predicate
 in ``core/consistency.py`` says what fails (ADR-0029 decision 7).
 ``month_plans`` stays beside this file instead, because
@@ -54,8 +54,6 @@ from recsys_tfb.core.consistency import (
     collect_all_message,
     model_input_grain_errors,
     model_input_grain_scope_errors,
-    numeric_precision_errors,
-    numeric_precision_file_errors,
     resolved_item_values,
     resolved_numeric_storage,
     resolved_zero_positive_group_ratio,
@@ -86,7 +84,6 @@ from recsys_tfb.pipelines.dataset.steps.feature_columns import (
     warn_missing_drop_columns,
 )
 from recsys_tfb.pipelines.dataset.steps.footer_facts import (
-    footer_max_abs,
     footer_rows,
     footer_rows_by_month,
 )
@@ -96,12 +93,6 @@ from recsys_tfb.pipelines.dataset.steps.model_input_grain import (
     grain_report_entry,
     monthly_grain_report_entry,
     split_row_counts_by_month,
-)
-from recsys_tfb.pipelines.dataset.steps.precision import (
-    column_precisions,
-    log_precision_report,
-    precision_report,
-    value_steps,
 )
 from recsys_tfb.pipelines.dataset.steps.model_input import (
     count_zero_positive_groups_kept,
@@ -131,14 +122,11 @@ from recsys_tfb.pipelines.dataset.steps.sampling import (
 )
 from recsys_tfb.pipelines.dataset.steps.scoping import (
     months_filter_as_date,
-    months_present_and_max_abs,
-    require_months_in,
     require_months_present,
 )
 from recsys_tfb.preprocessing import (
     preprocessor_item_values,
     cast_numeric_features_to_storage_type,
-    castable_numeric_feature_columns,
     encodable_categoricals,
     encode_categoricals,
     warn_unknown_encodings,
@@ -153,6 +141,8 @@ def validate_data_consistency(
     feature_table: DataFrame,
     parameters: dict,
     candidate_feature_table: DataFrame | None = None,
+    test_month_plan: SnapDatePlan | None = None,
+    only_test_months: bool = False,
 ) -> None:
     """Run the Layer-2 invariants (B1, B5, B6, B7, B11–B17) against the source
     tables.
@@ -161,6 +151,21 @@ def validate_data_consistency(
     declared, ``None`` otherwise (ADR-0026). Its columns can be features just as
     ``feature_table``'s can, so B5, B6, B7 and B12 ask both; B13 and B14 exist
     only for it.
+
+    Pre-check (input), candidate-level table only: it holds every month this
+    run's builds read (ADR-0026 decision 3). Every build reads it afresh, so a
+    month it lacks would become a month of NULL candidate features without a
+    word — and a test month written that way is skipped by every later run's
+    plan. The months are the union of what each build reads, worked out here
+    by the builds' own rules (ADR-0029 decision 2): ``train_snap_dates``,
+    ``val_snap_dates``, and ``test_month_plan``'s ``to_process``. Which builds
+    run is the one fact this node cannot see, so it is the one injected:
+    ``only_test_months`` (the run mode), under which only the test build runs.
+    Raises ``ValueError``, not collected with the invariants: it is the
+    message the fit's train-month check raises (``require_months_present``).
+    Known limit: a slice that starts after this node skips it (it has no
+    output, ``docs/agents/architecture-constraints.md`` F5), and then only the
+    fit's train-month check is left.
 
     Side-effect only: raises ``DataConsistencyError`` on violation, returns
     ``None`` when everything holds. Each invariant's meaning lives with its
@@ -177,10 +182,12 @@ def validate_data_consistency(
     Cost invariant (ADR-0006): the facts gathered here are cheap ones. Column
     types come from the metastore — metadata, no rows. The item values come from
     a distinct over the configured snap_date windows, so what lands on the driver
-    is bounded by item cardinality rather than by row count. What this gate does
-    not do is aggregate over a source table: that would change this node's cost
-    magnitude, and a check needing one is a data-quality check with a home of its
-    own upstream in ``source_etl``'s ``quality_checks``.
+    is bounded by item cardinality rather than by row count; the candidate
+    table's months, from a distinct over its time column in those months only,
+    bounded by the month count. What this gate does not do is aggregate over a
+    source table: that would change this node's cost magnitude, and a check
+    needing one is a data-quality check with a home of its own upstream in
+    ``source_etl``'s ``quality_checks``.
     """
     schema = get_schema(parameters)
     item = schema["item"]
@@ -202,6 +209,35 @@ def validate_data_consistency(
     ]
     if column_errors:
         raise DataConsistencyError(collect_all_message(headline, column_errors))
+
+    # Decision — the candidate table's months asked for are the months this
+    # run's builds read, by each build's own rule: the train months (train
+    # and train_dev), the val months, and the test plan's to_process. Under
+    # --only-test-months the test build is the only one in the run.
+    if candidate_feature_table is not None:
+        if test_month_plan is None:
+            # Pre-check (input): without the test build's plan its months
+            # would go unchecked, and nothing would say so — the reason
+            # build_model_input's ``months`` has no default either.
+            raise TypeError(
+                "validate_data_consistency needs test_month_plan when a "
+                "candidate_feature_table is given: it checks the table holds "
+                "the months the test build reads."
+            )
+        ds = parameters["dataset"]
+        build_months = [test_month_plan.to_process]
+        if not only_test_months:
+            build_months += [ds["train_snap_dates"], ds.get("val_snap_dates", [])]
+        candidate_months = sorted(
+            {pd.Timestamp(m) for months in build_months for m in months}
+        )
+        # Pre-check (input): every month this run reads is there.
+        with log_step(logger, "require_months_present(snap_dates, candidate)"):
+            require_months_present(
+                candidate_feature_table, schema["time"], candidate_months,
+                "snap_dates", table="candidate_feature_table",
+            )
+
     # B17 reads the tables as the user wrote them, before combining turns
     # the item columns into one text column.
     item_dtype_errors = item_source_dtype_errors(
@@ -1006,218 +1042,6 @@ def apply_preprocessor_to_features(
     return result
 
 
-def validate_numeric_precision(
-    preprocessed_feature_table: DataFrame,
-    preprocessor_metadata: dict,
-    month_plan: SnapDatePlan,
-    parameters: dict,
-    candidate_feature_table: DataFrame | None = None,
-    test_month_plan: SnapDatePlan | None = None,
-    only_test_months: bool = False,
-) -> dict:
-    """Measure the precision headroom of the months just encoded, and gate on it.
-
-    Two tables are measured when a deployment declares the candidate-level
-    feature table (ADR-0026; ``None`` otherwise): the entity-level one from the
-    footers of the months just encoded, as below, and the candidate-level one
-    from one scan of the months this run reads — it is never landed, so there
-    are no footers to read. The report gains a ``candidate_feature_table``
-    section only then, so a deployment without one gets the report it always
-    got.
-
-    Returns the report (catalog entry ``numeric_precision_report``); raises
-    ``DataConsistencyError`` on a breach under the default policy. The rule
-    itself lives with its predicates in ``core/consistency.py`` — this node
-    gathers facts, hands them over, and applies the configured policy.
-
-    **Why it reports rather than only gating.** A pass/fail answer tells an
-    operator nothing about the column sitting at 0.99 of its limit, which passes
-    today and stops the pipeline the month a larger value arrives. The report
-    carries every checked column with its headroom, closest-to-breaching first;
-    the gate is the same numbers read as a verdict.
-
-    **Why it sits between the write and the reads.** The values this node is
-    about are narrowed by ``cast_numeric_features_to_storage_type`` inside
-    ``build_model_input``, which is downstream; ``preprocessed_feature_table``
-    itself keeps its source dtypes. So it reads a table that has already landed
-    — the runner saves a node's output before the next node loads it — and still
-    stops the run before a single narrowed value is stored. Reading the landed
-    table rather than ``feature_table`` is what lets it assume parquet with
-    statistics: this repo writes that table, while ``feature_table`` is the
-    user's own and this framework does not dictate its format.
-
-    **Cost invariant (ADR-0006).** For ``preprocessed_feature_table`` the facts
-    come from parquet footers — a seek per file, no rows read — so that half of
-    the node does not change the pipeline's cost magnitude. An aggregation
-    would have, which is why that half is a footer read and not a
-    ``max(abs(...))``. The candidate-level table is the recorded exception
-    (ADR-0006's 2026-09-22 revision): it has no footers of this run's own, so
-    its half *is* one aggregation over the months this run reads.
-
-    **Incremental with the node above it** (ADR-0002/ADR-0012), for
-    ``preprocessed_feature_table``: it reads the months the same ``month_plan``
-    just encoded. A month that landed under an earlier run is not re-read — the
-    same coverage every other incremental artifact has, and the reason adding an
-    evaluation month checks that month. The candidate-level table is not
-    incremental: every build reads its months afresh, so every run checks every
-    month its builds read — the union of what each build reads, worked out
-    here by the builds' own rules (ADR-0029 decision 2): ``train_snap_dates``,
-    ``val_snap_dates``, and ``test_month_plan``'s ``to_process``. Which builds
-    run is the one fact this node cannot see, so it is the one injected:
-    ``only_test_months`` (the run mode), under which only the test build runs.
-
-    Pre-check (input), candidate-level table only: every month this run reads
-    is present in it. A missing month raises ``ValueError`` **whatever the
-    policy** — it is not a precision question, and ``truncate`` exists to accept
-    a narrowed value, not a month of NULL features.
-
-    Known limit: under ``block`` the run aborts, so the report never reaches the
-    catalog. The full table is logged before the raise for exactly that reason —
-    the survey workflow (run once under ``truncate``, read the artifact) is what
-    the persisted report is for.
-    """
-    schema = get_schema(parameters)
-    time_col = schema["time"]
-    feature_columns = preprocessor_metadata["feature_columns"]
-    storage_type, policy = resolved_numeric_storage(parameters)
-    months = month_plan.to_process
-
-    # Decision — what this gate may complain about is exactly what the cast will
-    # convert, narrowed to the columns whose dtype states a grid spacing. The
-    # first half reads the cast's own selector, so widening the cast widens the
-    # gate in the same edit; the second half is the bound's domain — float and
-    # double declare no grid, so no bound can be stated for them.
-    castable = castable_numeric_feature_columns(
-        preprocessed_feature_table.schema, feature_columns,
-    )
-    dtypes = dict(preprocessed_feature_table.dtypes)
-    steps = value_steps(dtypes, castable)
-    report = precision_report(storage_type, policy, months, {}, dtypes)
-
-    errors: list[str] = []
-    if not steps or not months:
-        logger.info(
-            "Numeric precision gate (%s): nothing to check "
-            "(castable=%d, with a value grid=%d, months=%d)",
-            storage_type, len(castable), len(steps), len(months),
-        )
-    else:
-        # Decision — the facts are read from the partitions this run just
-        # wrote, not from the whole table: its own version and months,
-        # selected out of the file paths.
-        base_version = parameters["base_dataset_version"]
-        max_abs, files = footer_max_abs(
-            preprocessed_feature_table,
-            base_version=base_version,
-            time_col=time_col,
-            months=months,
-            columns=sorted(steps),
-        )
-        # Pre-check (this node's own input) — no file for the months this run
-        # wrote leaves nothing to measure; that is reported once rather than
-        # as one unmeasured column each (numeric_precision_file_errors).
-        errors = numeric_precision_file_errors(
-            files, months=len(months), base_dataset_version=base_version,
-            columns=len(steps),
-        )
-        if not errors:
-            by_column = column_precisions(max_abs, steps)
-            report = precision_report(
-                storage_type, policy, months, by_column, dtypes,
-            )
-            logger.info(
-                "Numeric precision gate (%s): %d column(s) over %d file(s) in "
-                "%d month(s)", storage_type, len(by_column), files, len(months),
-            )
-            log_precision_report(report)
-            errors = numeric_precision_errors(by_column, storage_type)
-
-    # Decision — the candidate-level feature table is cast by
-    # build_model_input like every other feature, so it is this gate's too. Its
-    # facts come from one aggregation over the months this run reads: it is
-    # never landed, and the framework does not dictate the format of the
-    # deployment's own table, so there are no footers to read. That scan is the
-    # exception to ADR-0006's cost invariant that ADR-0026 records. Its
-    # categoricals are left out — they are encoded to vocabulary indices before
-    # the cast, so their raw values are not what gets narrowed.
-    if candidate_feature_table is not None:
-        identity_cols = schema["identity_columns"]
-        categorical_cols = preprocessor_metadata["categorical_columns"]
-        # Decision — the months checked are the months this run's builds read,
-        # by each build's own rule: the train months (train and train_dev),
-        # the val months, and the test plan's to_process. Under
-        # --only-test-months the test build is the only one in the run.
-        if test_month_plan is None:
-            # Pre-check (input): without the test build's plan its months
-            # would go unchecked, and nothing would say so — the reason
-            # build_model_input's ``months`` has no default either.
-            raise TypeError(
-                "validate_numeric_precision needs test_month_plan when a "
-                "candidate_feature_table is given: it checks the months the "
-                "test build reads."
-            )
-        ds = parameters["dataset"]
-        build_months = [test_month_plan.to_process]
-        if not only_test_months:
-            build_months += [ds["train_snap_dates"], ds.get("val_snap_dates", [])]
-        cand_months = sorted(
-            {pd.Timestamp(m) for months in build_months for m in months}
-        )
-        cand_dtypes = dict(candidate_feature_table.dtypes)
-        cand_steps = value_steps(
-            cand_dtypes,
-            castable_numeric_feature_columns(
-                candidate_feature_table.schema,
-                [
-                    c for c in candidate_feature_source_columns(
-                        candidate_feature_table.columns, identity_cols,
-                    )
-                    if c in feature_columns and c not in categorical_cols
-                ],
-            ),
-        )
-        with log_step(logger, "scan candidate_feature_table (months, max |x|)"):
-            present, cand_max_abs = months_present_and_max_abs(
-                candidate_feature_table, time_col, cand_months, sorted(cand_steps),
-            )
-        # Pre-check: every month this run reads is there. A missing one would
-        # become a month of NULL candidate features without a word — not a
-        # precision question, so it raises whatever the policy says.
-        require_months_in(
-            present, cand_months, "snap_dates", "candidate_feature_table",
-        )
-        cand_by_column = column_precisions(cand_max_abs, cand_steps)
-        report["candidate_feature_table"] = precision_report(
-            storage_type, policy, cand_months, cand_by_column, cand_dtypes,
-        )
-        logger.info(
-            "Numeric precision gate (%s): %d candidate_feature_table column(s) "
-            "over %d month(s)", storage_type, len(cand_by_column),
-            len(cand_months),
-        )
-        log_precision_report(report["candidate_feature_table"])
-        errors += numeric_precision_errors(
-            cand_by_column, storage_type, table="candidate_feature_table",
-        )
-
-    if not errors:
-        return report
-
-    message = collect_all_message(
-        f"Numeric precision check failed for "
-        f"dataset.numeric_feature_storage_type={storage_type}",
-        errors,
-    )
-    # Decision — the policy key is what turns a finding into a stop. `block`
-    # is the default because the failure it describes is silent everywhere
-    # else; `truncate` exists so an operator who has read the finding can accept
-    # the loss without editing the gate out.
-    if policy == "block":
-        raise DataConsistencyError(message)
-    logger.warning("%s", message)
-    return report
-
-
 def build_model_input(
     keys: DataFrame,
     preprocessed_feature_table: DataFrame,
@@ -1350,7 +1174,7 @@ def build_model_input(
     # use; decimal128 in particular materialises as Python Decimal objects and
     # was what OOM-killed the val read. Which types get cast, and why the answer
     # is "every numeric one", is the helper's business.
-    storage_type, _ = resolved_numeric_storage(parameters)
+    storage_type = resolved_numeric_storage(parameters)
     result, casted = cast_numeric_features_to_storage_type(
         result, feature_columns, storage_type,
     )
@@ -1430,16 +1254,16 @@ def validate_model_input_grain(
     an unlanded frame — a full scan, the cost escalation ADR-0006 exists to
     refuse. Once the table has landed, the same fact is a seek per file. Landing
     is the Runner's doing (it saves a node's output before the next node loads
-    it), so the gate has to be its own node; B8 sits where it does for the same
-    reason. It still stops the run before anything trains on the bad table.
+    it), so the gate has to be its own node. It still stops the run before
+    anything trains on the bad table.
     Under ``--only-test-months`` train, train_dev and val are not rebuilt; the
     gate re-reads their footers, which reads no data.
 
     **Why it reports rather than only gating.** A pass/fail answer cannot say
     how many rows each split actually holds, which is the number an operator
-    wants when a downstream memory estimate is wrong. Known limit, shared with
-    B8: on a raise the report never reaches the catalog, because the node does
-    not return. The counts are logged before the raise for that reason.
+    wants when a downstream memory estimate is wrong. Known limit: on a raise
+    the report never reaches the catalog, because the node does not return.
+    The counts are logged before the raise for that reason.
     """
     schema = get_schema(parameters)
     base_version = parameters["base_dataset_version"]
@@ -1530,7 +1354,7 @@ def validate_model_input_grain(
     # Collect-all, one raise: the measurement failures above and the grain
     # mismatches below are both "this gate has something to say about a split",
     # and an operator fixing one wants to see the other in the same pass. Same
-    # shape B8 uses.
+    # shape the Layer-2 data gate uses.
     errors += model_input_grain_errors(by_split, schema["identity_columns"])
     if errors:
         raise DataConsistencyError(

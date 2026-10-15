@@ -1,12 +1,11 @@
-"""Tests for the footer facts B8 and B10 stand on: which files this run landed,
+"""Tests for the footer facts B10 stands on: which files this run landed,
 and what their parquet footers record.
 
-The reader is what lets the gates answer "how large does this column get" and
-"how many rows landed" without an aggregation over the data (ADR-0006's cost
-invariant). Its halves are tested apart: partition-path parsing and file
-selection are pure string work and need no session, while the footer read is
-exercised against real parquet files — a hand-built fixture would only prove
-the parser matches the fixture.
+The reader is what lets the gate answer "how many rows landed" without an
+aggregation over the data (ADR-0006's cost invariant). Its halves are tested
+apart: partition-path parsing and file selection are pure string work and need
+no session, while the footer read is exercised against real parquet files — a
+hand-built fixture would only prove the parser matches the fixture.
 """
 
 import pandas as pd
@@ -14,13 +13,11 @@ import pytest
 
 from recsys_tfb.pipelines.dataset.steps.footer_facts import (
     filter_by_partitions,
-    footer_max_abs,
     footer_rows,
     footer_rows_by_month,
     group_by_partition,
     landed_partition_files,
     partition_value,
-    read_max_abs_stats,
     read_row_count,
 )
 
@@ -59,77 +56,6 @@ class TestGroupByPartition:
     def test_paths_without_the_key_are_dropped_not_grouped_under_none(self):
         grouped = group_by_partition(["/wh/t/a.parquet"], "snap_date")
         assert grouped == {}
-
-
-@pytest.mark.spark
-class TestReadMaxAbsStats:
-    @pytest.fixture
-    def written(self, spark, tmp_path):
-        from pyspark.sql import types as T
-
-        schema = T.StructType([
-            T.StructField("big_int", T.LongType()),
-            T.StructField("small_int", T.IntegerType()),
-            T.StructField("flag", T.BooleanType()),
-            T.StructField("dbl", T.DoubleType()),
-            T.StructField("all_null", T.LongType()),
-            T.StructField("negative", T.LongType()),
-        ])
-        rows = [
-            (999999957, 99, True, 0.99999, None, -(2 ** 25)),
-            (686, 0, False, 3.39e-08, None, 5),
-        ]
-        out = str(tmp_path / "pq")
-        spark.createDataFrame(rows, schema).coalesce(1).write.parquet(out)
-        import glob
-        return spark, sorted(glob.glob(out + "/*.parquet"))
-
-    def test_reads_max_abs_for_integer_columns(self, written):
-        spark, files = written
-        stats = read_max_abs_stats(spark, files, ["big_int", "small_int"])
-        assert stats == {"big_int": 999999957.0, "small_int": 99.0}
-
-    def test_negative_extreme_wins_over_the_positive_max(self, written):
-        # min=-2^25, max=5. Reading getMax() alone would report 5 and pass a
-        # column that collides — the whole gate would be a no-op for any column
-        # whose magnitude lives on the negative side.
-        spark, files = written
-        assert read_max_abs_stats(spark, files, ["negative"]) == {
-            "negative": float(2 ** 25)}
-
-    def test_boolean_reads_as_one(self, written):
-        # Footer stats for BOOLEAN are the strings "true"/"false"; a float()
-        # parse would raise and the column would look unmeasurable.
-        spark, files = written
-        assert read_max_abs_stats(spark, files, ["flag"]) == {"flag": 1.0}
-
-    def test_all_null_column_reads_as_zero_not_none(self, written):
-        # No min/max is recorded, but num_nulls == row count says why: there is
-        # nothing in the column to lose. Reporting None would make the gate
-        # refuse a column that is trivially safe.
-        spark, files = written
-        assert read_max_abs_stats(spark, files, ["all_null"]) == {"all_null": 0.0}
-
-    def test_a_column_absent_from_the_file_reads_as_none(self, written):
-        spark, files = written
-        assert read_max_abs_stats(spark, files, ["not_a_column"]) == {
-            "not_a_column": None}
-
-    def test_no_files_reads_as_none_for_every_column(self, written):
-        spark, _ = written
-        assert read_max_abs_stats(spark, [], ["big_int"]) == {"big_int": None}
-
-    def test_reads_across_several_files(self, written, spark, tmp_path):
-        from pyspark.sql import types as T
-
-        schema = T.StructType([T.StructField("big_int", T.LongType())])
-        second = str(tmp_path / "pq2")
-        spark.createDataFrame([(2 ** 40,)], schema).coalesce(1).write.parquet(second)
-        import glob
-        _, files = written
-        both = files + sorted(glob.glob(second + "/*.parquet"))
-        assert read_max_abs_stats(spark, both, ["big_int"]) == {
-            "big_int": float(2 ** 40)}
 
 
 class TestFilterByPartitions:
@@ -180,12 +106,11 @@ class TestReadRowCount:
         assert read_row_count(spark, []) == 0
 
 
-# --- landed_partition_files: which files B8 and B10's test months read ---
-# Pure path work, deliberately: it decides *which* footers a gate reads, and
-# getting it wrong is silent in both directions — too few files understates a
-# column's maximum and passes a lossy column, too many drags in months this run
-# never touched. Neither shows up as an error, so both need a test rather than a
-# Spark run to notice.
+# --- landed_partition_files: which files B10's test months read ---
+# Pure path work, deliberately: it decides *which* footers the gate reads, and
+# getting it wrong is silent in both directions — too few files undercounts a
+# month's rows, too many drags in months this run never touched. Neither shows
+# up as an error, so both need a test rather than a Spark run to notice.
 
 BASE = "hdfs://nn/wh/pft"
 VERSION = "ab12cd34"
@@ -313,12 +238,3 @@ class TestAFrameListingTwoVersions:
             months=["2026-01-31"],
         )
         assert counted[pd.Timestamp("2026-01-31")][0] == 7
-
-    def test_a_column_maximum_is_its_own_versions(self, two_versions):
-        # v1 holds ids 0..6, v2 holds 0..99.
-        max_abs, files = footer_max_abs(
-            two_versions, base_version="v1", time_col="snap_date",
-            months=["2026-01-31"], columns=["id"],
-        )
-        assert max_abs == {"id": 6.0}
-        assert 0 < files < len(two_versions.inputFiles())

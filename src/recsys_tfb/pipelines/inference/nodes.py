@@ -207,7 +207,7 @@ def build_inference_population_features(
     # ``dataset.numeric_feature_storage_type`` declares. Read here rather than
     # baked in so the scoring population is stored exactly as the training
     # frames were; which types get cast is the helper's business.
-    storage_type, _ = resolved_numeric_storage(parameters)
+    storage_type = resolved_numeric_storage(parameters)
     result, casted = cast_numeric_features_to_storage_type(
         result, feature_columns, storage_type,
     )
@@ -296,7 +296,7 @@ def predict_and_write_scores(
         log answers only "40 chunks were skipped" and the question people
         actually ask is *which* forty. Sent to the catalog as
         ``score_chunk_report`` — a diagnostic byproduct, same arrangement as
-        ``sample_weight_report`` and ``numeric_precision_report``.
+        ``sample_weight_report`` and ``model_input_grain_report``.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]

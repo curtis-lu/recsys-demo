@@ -120,7 +120,7 @@ def _candidate_feature_table(spark):
     ]))
 
 
-def _catalog(spark, params, only_test_months=False) -> dict:
+def _catalog(spark, params) -> dict:
     """Every input any node below reads, keyed by its catalog name. The test
     keys hold a month an earlier run landed, as the persistent table does."""
     train_keys = _keys(spark, _TRAIN)
@@ -146,12 +146,6 @@ def _catalog(spark, params, only_test_months=False) -> dict:
             to_process=[pd.Timestamp(m) for m in _TEST],
             skipped=[pd.Timestamp(_OTHER[0])],
         ),
-        # Every month already encoded: the precision gate's footer half has
-        # nothing to read, and its candidate-table half is what is tested.
-        "preprocessed_feature_table_month_plan": SnapDatePlan(
-            to_process=[], skipped=[pd.Timestamp(m) for m in _ALL],
-        ),
-        "only_test_months": only_test_months,
     }
 
 
@@ -263,32 +257,6 @@ class TestEachGroupDropReadsOnlyItsSplitsMonths:
         kept = _run(node, _catalog(spark, params))
 
         assert _months_read(kept, "label") == [set(months)]
-
-
-class TestThePrecisionGateChecksWhatTheBuildsRead:
-    """Decision 2: the gate works out the candidate table's months by the
-    builds' own rules instead of receiving a list. Asserted against what the
-    builds of the same run actually read, so a build that changes its rule
-    and a gate that does not follow disagree here."""
-
-    @pytest.mark.parametrize("only_test_months", [False, True])
-    def test_its_months_are_the_union_of_the_builds_reads(
-        self, spark, only_test_months,
-    ):
-        from recsys_tfb.pipelines.dataset.pipeline import create_pipeline
-
-        catalog = _catalog(spark, _params(), only_test_months=only_test_months)
-        read: set[str] = set()
-        for node in create_pipeline(only_test_months=only_test_months).nodes:
-            if node.name.startswith("build_"):
-                built = node.func(*[catalog[i] for i in node.inputs])
-                for months in _months_read(built, "f_candidate"):
-                    read |= months
-
-        report = _run("validate_numeric_precision", catalog)
-
-        assert read, "no build read the candidate table"
-        assert report["candidate_feature_table"]["months"] == sorted(read)
 
 
 class TestMonthPresenceAsksOnlyTheMonthsItChecks:

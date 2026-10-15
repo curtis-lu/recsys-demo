@@ -111,24 +111,10 @@ preprocessor:
   type: JSONDataset
   filepath: data/dataset/${base_dataset_version}/preprocessor.json
 
-# 診斷副產物，零下游消費者——條目在這裡是為了讓它撈得出來看（pipeline-node-design
-# 規則 1），不是為了餵誰，前例是 sample_weight_report。validate_numeric_precision
+# B10 閘門的診斷副產物，零下游消費者——條目在這裡是為了讓它撈得出來看
+# （pipeline-node-design 規則 1），不是為了餵誰，前例是 sample_weight_report；
+# 也因為「有輸出」才不會被切片靜默跳過（架構 F5）。validate_model_input_grain
 # 只回傳 dict，寫檔由這個條目負責。
-#
-# 為什麼值得落地而不是只印 log：閘門的 pass/fail 答不出「哪一欄快要撐不住了」。
-# 這份報告每一欄都有 headroom（上限 ÷ 實際最大值），最接近爆掉的排最前面，所以
-# 「下個月會不會被擋」在被擋之前就看得到。
-#
-# ⚠ policy=block 且真的有欄超界時，run 會中止，這個檔**不會**落地（node 沒回傳，
-#   catalog 就沒東西可寫）。整張表在 raise 之前已經進 log；要拿到檔案就用
-#   numeric_precision_policy: truncate 跑一輪。
-numeric_precision_report:
-  type: JSONDataset
-  filepath: data/dataset/${base_dataset_version}/numeric_precision_report.json
-
-# B10 閘門的診斷副產物，零下游消費者——與 numeric_precision_report 同一個理由
-# （pipeline-node-design 規則 1：撈得出來看），也同樣是「有輸出」才不會被切片
-# 靜默跳過（架構 F5）。
 #
 # 為什麼值得落地：pass/fail 答不出「這個 split 到底幾列」。下游的記憶體估算、
 # 「這個月是不是比上個月大很多」都要這個數字，而它是零掃描拿到的，別處沒有。
@@ -610,7 +596,7 @@ ranked_predictions:
 
 # --- Inference pipeline — 這一次跑了哪些 chunk（診斷副產物）---
 # 零下游消費者，條目在這裡是為了讓它撈得出來看（pipeline-node-design 規則 1），
-# 前例是 sample_weight_report 與 numeric_precision_report。
+# 前例是 sample_weight_report 與 model_input_grain_report。
 #
 # ⚠ 這不是 score_manifest 的落地版，**score_manifest 刻意不進本檔**。理由在
 # docs/pipelines/inference.md §7.4：它是 memory-only，所以任何切片都會補跑評分

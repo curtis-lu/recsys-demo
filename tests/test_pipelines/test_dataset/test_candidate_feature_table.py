@@ -22,7 +22,6 @@ from recsys_tfb.pipelines.dataset.nodes import (
     build_model_input,
     fit_preprocessor_metadata,
     validate_data_consistency,
-    validate_numeric_precision,
 )
 
 pytestmark = pytest.mark.spark
@@ -68,11 +67,6 @@ def _preprocessor() -> dict:
         "category_mappings": {"prod_name": list(_ITEMS), "page_type": list(_PAGES)},
         "drop_columns": ["snap_date", "cust_id", "label"],
     }
-
-
-def _plan(*months) -> SnapDatePlan:
-    """The entity-level table's month plan (B8's own input)."""
-    return SnapDatePlan(to_process=[pd.Timestamp(m) for m in months], skipped=[])
 
 
 def _months(*months) -> list:
@@ -360,10 +354,16 @@ def _sample_pool(spark):
     }))
 
 
+def _test_plan(test=(), skipped=()) -> SnapDatePlan:
+    """The test build's plan: ``skipped`` are test months an earlier run
+    landed."""
+    return SnapDatePlan(to_process=_months(*test), skipped=_months(*skipped))
+
+
 def _gate(spark, candidate, params=None):
     validate_data_consistency(
         _sample_pool(spark), _labels(spark), _raw_feature_table(spark),
-        params or _fit_params(), candidate,
+        params or _fit_params(), candidate, _test_plan(),
     )
 
 
@@ -406,179 +406,116 @@ class TestTheDataGateChecksTheCandidateTable:
         candidate = _raw_candidate_table(spark).withColumn("device", F.lit(1))
         with pytest.raises(DataConsistencyError, match="also a column of candidate_feature_table"):
             validate_data_consistency(
-                pool, _labels(spark), _raw_feature_table(spark), params, candidate,
+                pool, _labels(spark), _raw_feature_table(spark), params,
+                candidate, _test_plan(),
             )
 
 
-# --- B8 and month coverage -----------------------------------------------------
+# --- month coverage ------------------------------------------------------------
 
-#: The first integer float32 cannot hold exactly: 2**24 + 1 lands on 2**24.
-_BEYOND_FLOAT32 = 2**24 + 1
 #: A test month this run builds, and one an earlier run already landed.
 _TEST_MONTH = "2024-03-31"
 _LANDED_TEST_MONTH = "2023-12-31"
 
 
-def _precision_params(policy="block", train=(_MONTH,), val=()) -> dict:
-    params = _fit_params()
-    params["dataset"]["numeric_precision_policy"] = policy
-    params["dataset"]["train_snap_dates"] = list(train)
-    params["dataset"]["val_snap_dates"] = list(val)
-    return params
-
-
-def _entity_side(spark):
-    """An entity-level table whose only feature is a double: no value grid, so
-    B8 has nothing to check there and every finding below is the candidate
-    table's."""
-    return _preprocessed_feature_table(spark)
-
-
-def _candidate_with(spark, browse_by_month: dict):
-    """One candidate row per month, ``browse_30m`` set per month."""
+def _candidate_in(spark, months):
+    """One candidate row in each of ``months``, well formed otherwise."""
     return spark.createDataFrame(pd.DataFrame({
-        "snap_date": pd.to_datetime(list(browse_by_month)),
-        "cust_id": ["C1"] * len(browse_by_month),
-        "req_id": ["r1"] * len(browse_by_month),
-        "prod_name": ["p0"] * len(browse_by_month),
-        "impression_id": [f"i{n}" for n in range(len(browse_by_month))],
-        "browse_30m": list(browse_by_month.values()),
-        "page_type": ["home"] * len(browse_by_month),
+        "snap_date": pd.to_datetime(list(months)),
+        "cust_id": ["C1"] * len(months),
+        "req_id": ["r1"] * len(months),
+        "prod_name": ["p0"] * len(months),
+        "impression_id": [f"i{n}" for n in range(len(months))],
+        "browse_30m": [1] * len(months),
+        "page_type": ["home"] * len(months),
     }))
 
 
-def _check(
-    spark, candidate, train=(_MONTH,), val=(), test=(), skipped=(),
-    only_test_months=False, policy="block",
+def _coverage_gate(
+    spark, candidate_months, train=(_MONTH,), val=(), test=(), skipped=(),
+    only_test_months=False,
 ):
     """The gate with each build's months where the builds read them from: the
     train and val months in the config, the test months in the test build's
-    plan (``skipped`` are test months an earlier run landed)."""
-    test_plan = SnapDatePlan(to_process=_months(*test), skipped=_months(*skipped))
-    return validate_numeric_precision(
-        _entity_side(spark), _preprocessor(), _plan(),
-        _precision_params(policy, train=train, val=val),
-        candidate, test_plan, only_test_months,
+    plan."""
+    params = _fit_params()
+    params["dataset"]["train_snap_dates"] = list(train)
+    params["dataset"]["val_snap_dates"] = list(val)
+    params["dataset"]["test_snap_dates"] = [*test, *skipped]
+    validate_data_consistency(
+        _sample_pool(spark), _labels(spark), _raw_feature_table(spark), params,
+        _candidate_in(spark, candidate_months), _test_plan(test, skipped),
+        only_test_months,
     )
 
 
-class TestPrecisionGateCoversTheCandidateTable:
-    """The candidate table is cast to the storage type inside build_model_input
-    like every other feature, so B8 has to see it. It is never landed, so there
-    are no footers to read: one aggregation over the months this run reads
-    stands in for them (ADR-0026's recorded exception to ADR-0006)."""
+def _missing(month):
+    return rf"candidate_feature_table missing required snap_dates: \['{month}'\]"
 
-    def test_a_value_float32_cannot_hold_is_a_breach(self, spark):
-        with pytest.raises(DataConsistencyError, match="candidate_feature_table.*browse_30m"):
-            _check(spark, _candidate_with(spark, {_MONTH: _BEYOND_FLOAT32}))
 
-    def test_a_value_it_can_hold_passes_and_is_reported(self, spark):
-        report = _check(spark, _candidate_with(spark, {_MONTH: 3}))
+class TestTheDataGateChecksTheCandidateTableHasEveryMonth:
+    """The table is read afresh by every build, so a month it lacks would
+    become a month of NULL candidate features without a word (ADR-0026
+    decision 3) — and a test month written that way is skipped by every later
+    run's plan. The gate asks for the months each build reads, by the build's
+    own rule (ADR-0029 decision 2): the train and val months, and the test
+    plan's ``to_process``."""
 
-        section = report["candidate_feature_table"]
-        assert [(c["column"], c["max_abs"], c["verdict"]) for c in section["columns"]] == [
-            ("browse_30m", 3.0, "ok"),
-        ]
-        assert section["months"] == [_MONTH]
-
-    def test_only_the_months_this_run_reads_are_scanned(self, spark):
-        """A value in a month nothing reads this run is not this run's to judge."""
-        report = _check(
-            spark,
-            _candidate_with(spark, {_MONTH: 3, _OTHER_MONTH: _BEYOND_FLOAT32}),
+    def test_every_month_present_passes(self, spark):
+        _coverage_gate(
+            spark, [_MONTH, _OTHER_MONTH, _TEST_MONTH],
+            val=(_OTHER_MONTH,), test=(_TEST_MONTH,),
         )
 
-        assert report["candidate_feature_table"]["columns"][0]["max_abs"] == 3.0
+    def test_a_missing_train_month_is_an_error(self, spark):
+        with pytest.raises(ValueError, match=_missing(_MONTH)):
+            _coverage_gate(spark, [_OTHER_MONTH], val=(_OTHER_MONTH,))
 
-    def test_the_months_are_what_each_build_reads(self, spark):
-        """Each build's own rule, the union checked: the train months, the val
-        months, and the test plan's ``to_process`` — not the test month an
-        earlier run landed, which no build reads this run (ADR-0029
-        decision 2)."""
-        report = _check(
-            spark,
-            _candidate_with(spark, {
-                _MONTH: 3, _OTHER_MONTH: 3, _TEST_MONTH: 3,
-                _LANDED_TEST_MONTH: _BEYOND_FLOAT32,
-            }),
-            train=(_MONTH,), val=(_OTHER_MONTH,), test=(_TEST_MONTH,),
-            skipped=(_LANDED_TEST_MONTH,),
-        )
+    def test_a_missing_val_month_is_an_error(self, spark):
+        with pytest.raises(ValueError, match=_missing(_OTHER_MONTH)):
+            _coverage_gate(spark, [_MONTH], val=(_OTHER_MONTH,))
 
-        assert report["candidate_feature_table"]["months"] == [
-            _MONTH, _OTHER_MONTH, _TEST_MONTH,
-        ]
-
-    def test_only_test_months_checks_the_test_build_alone(self, spark):
-        """Under ``--only-test-months`` the test build is the only one in the
-        run, so the train and val months — configured, and holding a breach —
-        are not this run's to scan. The mode exists to make adding an eval
-        month cheap; scanning the train months of the biggest table in the
-        deployment would undo that."""
-        report = _check(
-            spark,
-            _candidate_with(spark, {
-                _MONTH: _BEYOND_FLOAT32, _OTHER_MONTH: _BEYOND_FLOAT32,
-                _TEST_MONTH: 3,
-            }),
-            train=(_MONTH,), val=(_OTHER_MONTH,), test=(_TEST_MONTH,),
-            only_test_months=True,
-        )
-
-        assert report["candidate_feature_table"]["months"] == [_TEST_MONTH]
-        assert report["candidate_feature_table"]["breaches"] == 0
-
-    def test_truncate_lets_a_breach_through(self, spark):
-        report = _check(
-            spark, _candidate_with(spark, {_MONTH: _BEYOND_FLOAT32}), policy="truncate",
-        )
-
-        assert report["candidate_feature_table"]["breaches"] == 1
-
-    def test_a_month_it_does_not_have_is_an_error_whatever_the_policy(self, spark):
-        """A month missing from a table that is read in full every run would
-        become a month of NULL features, silently. Not a precision question, so
-        ``truncate`` does not let it through."""
-        with pytest.raises(ValueError, match=r"candidate_feature_table missing required snap_dates: \['2024-02-29'\]"):
-            _check(
-                spark, _candidate_with(spark, {_MONTH: 3}),
-                val=(_OTHER_MONTH,), policy="truncate",
+    def test_a_missing_test_month_is_an_error(self, spark):
+        with pytest.raises(ValueError, match=_missing(_TEST_MONTH)):
+            _coverage_gate(
+                spark, [_MONTH, _OTHER_MONTH],
+                val=(_OTHER_MONTH,), test=(_TEST_MONTH,),
             )
+
+    def test_a_missing_test_month_is_an_error_under_only_test_months(self, spark):
+        with pytest.raises(ValueError, match=_missing(_TEST_MONTH)):
+            _coverage_gate(
+                spark, [_MONTH, _OTHER_MONTH],
+                val=(_OTHER_MONTH,), test=(_TEST_MONTH,), only_test_months=True,
+            )
+
+    def test_only_test_months_asks_for_the_test_build_alone(self, spark):
+        """Under ``--only-test-months`` the test build is the only one in the
+        run, so the configured train and val months are not this run's to
+        ask for: the mode exists to make adding an eval month cheap."""
+        _coverage_gate(
+            spark, [_TEST_MONTH],
+            val=(_OTHER_MONTH,), test=(_TEST_MONTH,), only_test_months=True,
+        )
+
+    def test_a_test_month_an_earlier_run_landed_is_not_asked_for(self, spark):
+        """No build reads it this run: the test plan skips it."""
+        _coverage_gate(
+            spark, [_MONTH, _TEST_MONTH],
+            test=(_TEST_MONTH,), skipped=(_LANDED_TEST_MONTH,),
+        )
 
     def test_a_candidate_table_without_the_test_plan_is_refused(self, spark):
-        """Without the test build's plan the test months would go unchecked
-        and nothing would say so — so a direct caller is stopped instead."""
+        """Without the test build's plan its months would go unchecked and
+        nothing would say so — so a direct caller is stopped instead."""
         with pytest.raises(TypeError, match="needs test_month_plan"):
-            validate_numeric_precision(
-                _entity_side(spark), _preprocessor(), _plan(), _precision_params(),
-                _candidate_with(spark, {_MONTH: 3}),
+            validate_data_consistency(
+                _sample_pool(spark), _labels(spark), _raw_feature_table(spark),
+                _fit_params(), _candidate_in(spark, [_MONTH]),
             )
 
-    def test_without_one_the_report_has_no_such_section(self, spark):
-        report = validate_numeric_precision(
-            _entity_side(spark), _preprocessor(), _plan(), _precision_params(),
+    def test_without_a_candidate_table_no_plan_is_needed(self, spark):
+        validate_data_consistency(
+            _sample_pool(spark), _labels(spark), _raw_feature_table(spark),
+            _fit_params(),
         )
-
-        assert "candidate_feature_table" not in report
-
-    def test_an_integer_categorical_is_judged_by_its_index_not_its_code(self, spark):
-        """``campaign_code`` is declared categorical: build_model_input encodes
-        it to a vocabulary index before the cast, so its raw values — however
-        large — are never what gets narrowed."""
-        preprocessor = {
-            **_preprocessor(),
-            "feature_columns": [*_preprocessor()["feature_columns"], "campaign_code"],
-            "categorical_columns": [*_preprocessor()["categorical_columns"], "campaign_code"],
-        }
-        candidate = _candidate_with(spark, {_MONTH: 3}).withColumn(
-            "campaign_code", F.lit(_BEYOND_FLOAT32).cast("bigint"),
-        )
-
-        report = validate_numeric_precision(
-            _entity_side(spark), preprocessor, _plan(), _precision_params(),
-            candidate, SnapDatePlan(to_process=[], skipped=[]),
-        )
-
-        assert [c["column"] for c in report["candidate_feature_table"]["columns"]] == [
-            "browse_30m",
-        ]

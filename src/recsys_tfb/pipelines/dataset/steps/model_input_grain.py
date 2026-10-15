@@ -4,7 +4,7 @@ The rule lives in ``core/consistency.py`` (``model_input_grain_errors`` and the
 scope check before it, ``model_input_grain_scope_errors``); the pairing — which
 keys table goes with which model_input, under which scope, over which months —
 in ``validate_model_input_grain``. The row counts come from
-``steps/footer_facts.py``, shared with B8. What is left is this module: the
+``steps/footer_facts.py``. What is left is this module: the
 report's shape, one entry per split, each logged as it is made.
 """
 
@@ -95,8 +95,8 @@ def grain_report(
     """The persisted report (catalog entry ``model_input_grain_report``)."""
     return {
         # The version and variant this report describes. The catalog keys its
-        # file on base_dataset_version alone (as numeric_precision_report does),
-        # so two runs of different train variants overwrite one file; carrying
+        # file on base_dataset_version alone, so two runs of different train
+        # variants overwrite one file; carrying
         # the variant inside is what stops a reader attributing one variant's
         # counts to another.
         "base_dataset_version": base_version,

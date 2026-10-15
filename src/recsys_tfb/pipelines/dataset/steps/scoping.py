@@ -82,9 +82,9 @@ def require_months_in(present, months: list, what: str, table: str) -> None:
     """Pre-check on months already collected: every month in ``months`` is in
     ``present``.
 
-    :func:`require_months_present` minus the collect, for a caller whose own
-    scan already returned the months it saw (the candidate table's B8 scan).
-    One definition of the message either way.
+    :func:`require_months_present` minus the collect: the message and the
+    date comparison, kept apart from the Spark question that gathers
+    ``present``.
     """
     present = {pd.Timestamp(d) for d in present if d is not None}
     missing = sorted({pd.Timestamp(d) for d in months} - present)
@@ -94,38 +94,3 @@ def require_months_in(present, months: list, what: str, table: str) -> None:
             f"{[d.strftime('%Y-%m-%d') for d in missing]}. A time column "
             f"stored as text counts only when written YYYY-MM-DD."
         )
-
-
-def months_present_and_max_abs(
-    df: DataFrame, time_col: str, months: list, columns: list[str],
-) -> tuple[set, dict[str, float]]:
-    """One aggregation over ``df``'s ``months``: which of them hold any row, and
-    each of ``columns``' largest absolute value.
-
-    The facts B8 needs about a table this framework does not write (the
-    candidate-level feature table, ADR-0026): there are no footers of its own
-    to read, and its format is the deployment's. The month set comes out of the
-    same scan so the coverage check costs nothing extra.
-
-    Values are compared as doubles: ``abs`` refuses a boolean, and the bound
-    B8 compares against sits far below where a double stops being exact. A
-    column with no non-NULL value over those months reports ``0.0`` — the
-    ``ColumnPrecision`` convention for a column with nothing to lose.
-
-    Cost: one scan of those months; one row per month reaches the driver.
-    """
-    rows = (
-        df.filter(months_filter_as_date(time_col, months))
-        .groupBy(F.to_date(F.col(time_col)).alias("__month"))
-        .agg(
-            F.count(F.lit(1)).alias("__rows"),
-            *[F.max(F.abs(F.col(c).cast("double"))).alias(c) for c in columns],
-        )
-        .collect()
-    )
-    present = {row["__month"] for row in rows}
-    max_abs = {
-        c: max((row[c] for row in rows if row[c] is not None), default=0.0)
-        for c in columns
-    }
-    return present, max_abs

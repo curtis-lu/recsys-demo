@@ -4,9 +4,9 @@ Provides two-layer hash-based version IDs for the dataset pipeline, plus the
 model version the training pipeline derives from them:
 
 - ``base_dataset_version``: derived from the dataset params minus the
-  train-only keys (``TRAIN_SAMPLING_KEYS``), the coverage-only keys
-  (``test_snap_dates``) and the gate-policy keys (``numeric_precision_policy``);
-  plus the full schema and ``DATASET_ARTIFACT_FORMAT_VERSION``. Keys the
+  train-only keys (``TRAIN_SAMPLING_KEYS``) and the coverage-only keys
+  (``test_snap_dates``); plus the full schema and
+  ``DATASET_ARTIFACT_FORMAT_VERSION``. Keys the
   outputs no train-only key can change (preprocessor,
   preprocessed_feature_table, val/test model_input). Test months accumulate
   *under* one version rather than minting a new one.
@@ -21,34 +21,12 @@ model version the training pipeline derives from them:
   ``cache``) is excluded structurally so changing it does not orphan an
   otherwise-identical model.
 
-Two kinds of key are stripped from ``base_dataset_version``, for two different
-reasons, and the distinction is what keeps the ID meaning "the data this run
-produced":
+Besides the train-only keys, one kind of key is stripped from
+``base_dataset_version``, and its reason is what keeps the ID meaning "the data
+this run produced":
 
 - **Coverage** (``COVERAGE_ONLY_KEYS``) — the key widens *which* months land,
   never *what* a month contains.
-- **Gate policy** (``GATE_POLICY_KEYS``) — the key decides how a *failure* is
-  reported, never what a success produces. ``numeric_precision_policy`` picks
-  between stopping the run and logging a warning when a column cannot survive
-  the declared storage type; a run that finishes writes the same parquet either
-  way. Hashing it would mean flipping the policy to inspect one column rebuilt
-  every artifact under the version, which is why the declaration
-  (``numeric_feature_storage_type``) and its gate live in two keys rather than
-  one. The declaration stays hashed because it is *about* the stored bytes, and
-  since issue #283 it genuinely decides them: ``cast_numeric_features_to_
-  storage_type`` reads the key and writes every numeric feature column at the
-  declared width. Before #283 the cast wrote float32 unconditionally, so
-  declaring float64 moved this ID without changing a single stored value —
-  which is why the two keys were split in the first place.
-
-  Known limit of that exclusion, recorded rather than fixed: the dataset is
-  built incrementally (ADR-0002), so a month admitted under ``truncate`` and a
-  month admitted under ``block`` accumulate under the *same*
-  ``base_dataset_version``. Per run the exclusion holds — a run that finishes
-  writes the same bytes either way — but across runs the ID no longer says
-  whether every month in it was proved lossless. Hashing the policy would fix
-  that at the cost of rebuilding everything whenever an operator flips it to
-  inspect one column, which is the trade issue #281 decided against.
 
 One input to ``base_dataset_version`` is not configuration:
 ``DATASET_ARTIFACT_FORMAT_VERSION``, an integer the framework owns (ADR-0029
@@ -183,14 +161,6 @@ BASE_VERSION_STRIPPED_SAMPLING_KEYS: frozenset[str] = TRAIN_SAMPLING_KEYS
 # See docs/adr/0001-test-dates-out-of-dataset-version-identity.md.
 COVERAGE_ONLY_KEYS: frozenset[str] = frozenset({"test_snap_dates"})
 
-# Dataset keys that decide how a *failure* is reported, never what a *success*
-# produces. Registered here rather than folded into ``COVERAGE_ONLY_KEYS``
-# because the two exclusions answer different questions — coverage is about
-# which months exist, policy is about how a run ends — and a reader who finds a
-# gate flag under a name that says "coverage" learns the wrong rule for the next
-# key. Why this one qualifies: module docstring.
-GATE_POLICY_KEYS: frozenset[str] = frozenset({"numeric_precision_policy"})
-
 #: Add 1 when a code change alters what the dataset pipeline lands for a config
 #: that did not change (module docstring; ADR-0029 decision 15).
 DATASET_ARTIFACT_FORMAT_VERSION: int = 1
@@ -250,10 +220,9 @@ def compute_base_dataset_version(
     stripped before hashing so train sampling experiments (and the carry
     columns) do not invalidate val/test/preprocessor artifacts. ``COVERAGE_ONLY_KEYS`` is stripped the
     same way so adding an evaluation month is O(1): coverage grows, identity
-    (and therefore ``model_version``) does not change. ``GATE_POLICY_KEYS`` is
-    stripped for the third reason in the module docstring.
-    ``DATASET_ARTIFACT_FORMAT_VERSION`` is always in the payload, also for the
-    reason given there.
+    (and therefore ``model_version``) does not change.
+    ``DATASET_ARTIFACT_FORMAT_VERSION`` is always in the payload, for the
+    reason given in the module docstring.
 
     ``feature_table_fingerprint`` (optional) reflects the actual
     ``feature_table`` schema (column name + dtype, ordered). When provided it
@@ -271,11 +240,7 @@ def compute_base_dataset_version(
     stripped = copy.deepcopy(params)
     ds = stripped.get("dataset")
     if isinstance(ds, dict):
-        for key in (
-            BASE_VERSION_STRIPPED_SAMPLING_KEYS
-            | COVERAGE_ONLY_KEYS
-            | GATE_POLICY_KEYS
-        ):
+        for key in BASE_VERSION_STRIPPED_SAMPLING_KEYS | COVERAGE_ONLY_KEYS:
             ds.pop(key, None)
     payload: dict = {
         "dataset": stripped,
