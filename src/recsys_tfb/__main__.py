@@ -559,7 +559,7 @@ def _maybe_warn_rebuild_sliced_away(pipe, rebuild_advice) -> list[str]:
     which for a *forward* slice was the same question — ``predict_manifest``
     was memory-only, so every forward slice that kept the cache node kept the
     predict node too. Landing ``predict_manifest`` (issue #233) ends that:
-    ``--from-node compute_feature_statistics --rebuild-dates ...`` now keeps
+    ``--from-node compute_feature_importance --rebuild-dates ...`` now keeps
     the cache node and drops predict, so the named months drop and rebuild
     their local cache and are never re-predicted. (The narrower version of the
     same hole predates it: ``--only-node cache_test_model_input`` was always

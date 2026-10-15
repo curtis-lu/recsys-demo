@@ -15,11 +15,11 @@ class TestTrainingPipeline:
         # select_features + 4 cache nodes (train, train_dev, val, test) + prepare_train_inputs
         # + compute_group_filter_report + compute_sample_weight_report + tune
         # + finalize + predict_and_write_test_predictions + compute_test_metrics
-        # + compute_feature_statistics + compute_feature_importance + compute_gain_ledger
+        # + compute_feature_importance + compute_gain_ledger
         # + compute_shap_diagnostics
         # + select_shap_population + compute_quadrant_profiles + compute_quadrant_cases
         # + log
-        assert len(pipeline.nodes) == 20
+        assert len(pipeline.nodes) == 19
 
     def test_pipeline_has_predict_and_write_node(self):
         pipeline = create_pipeline()
@@ -102,7 +102,7 @@ class TestTrainingPipeline:
             "train_parquet_handle", "train_dev_parquet_handle",
             "val_parquet_handle", "test_parquet_handle",
             "train_lgb_handle", "train_dev_lgb_handle",
-            "feature_statistics", "feature_importance", "gain_ledger", "shap_diagnostics",
+            "feature_importance", "gain_ledger", "shap_diagnostics",
             "shap_population", "case_rows", "quadrant_profiles", "cases_manifest",
             "shap_summary_figures", "case_figures",
             "sample_weight_report", "group_filter_report",
@@ -165,10 +165,10 @@ class TestTrainingPipeline:
         "predict_and_write_test_predictions",
     )
 
-    # The five diagnosis nodes that used to eat the view. They run after the
+    # The four diagnosis nodes that used to eat the view. They run after the
     # model exists, so they ask it instead (ADR-0014 decision 7).
     DIAGNOSIS_ARTIFACT_CONSUMERS = (
-        "compute_feature_statistics", "compute_gain_ledger",
+        "compute_gain_ledger",
         "compute_shap_diagnostics", "compute_quadrant_profiles",
         "compute_quadrant_cases",
     )
@@ -202,7 +202,7 @@ class TestTrainingPipeline:
 
     def test_diagnosis_nodes_read_landed_artifacts_not_the_memory_only_view(self):
         """Every diagnosis input is addressable, which is what makes
-        `--from-node compute_feature_statistics` stand up and is the precondition
+        `--from-node compute_gain_ledger` stand up and is the precondition
         for splitting diagnosis into its own pipeline (ADR-0014 decision 7).
 
         `preprocessor_view` is memory-only, so a node reading it can only be
@@ -215,35 +215,6 @@ class TestTrainingPipeline:
             inputs = by_name[name].inputs
             assert "preprocessor_view" not in inputs, name
             assert "preprocessor" in inputs, name
-
-    def test_feature_statistics_takes_the_model_as_its_column_authority(self):
-        """The one accepted new coupling: a data-layer diagnosis gains a `model`
-        input so the column set comes from the fitted booster rather than from a
-        config key that can be edited after training (ADR-0014 decision 7)."""
-        pipeline = create_pipeline()
-        node = next(
-            n for n in pipeline.nodes if n.name == "compute_feature_statistics"
-        )
-        assert node.inputs == [
-            "train_parquet_handle", "model", "preprocessor", "parameters",
-        ]
-        names = [n.name for n in pipeline.nodes]
-        assert names.index("finalize_model") < names.index("compute_feature_statistics")
-
-    def test_feature_statistics_sits_after_the_model_it_diagnoses(self):
-        """Ordering, and the slice it buys.
-
-        The node writes into `data/models/${model_version}/`, so it belongs after
-        the node that makes the model. Before it took `model` it had no such
-        dependency and the topological sort put it *ahead* of HPO, so
-        `--from-node compute_feature_statistics` swept tune_hyperparameters and
-        finalize_model back in. The exact resume set is pinned in
-        tests/test_pipelines/test_resume_contracts.py; this pins the ordering
-        that produces it.
-        """
-        names = [n.name for n in create_pipeline().nodes]
-        for earlier in ("tune_hyperparameters", "finalize_model"):
-            assert names.index(earlier) < names.index("compute_feature_statistics")
 
     def test_select_features_runs_before_prepare(self):
         pipeline = create_pipeline()
@@ -261,7 +232,7 @@ class TestSkippingHpo:
         assert "cache_val_model_input" not in names
         assert "tune_hyperparameters" not in names
         assert "train_with_fixed_params" in names
-        assert len(names) == 19
+        assert len(names) == 18
 
     def test_default_is_the_search(self):
         names = [n.name for n in create_pipeline().nodes]
@@ -310,9 +281,9 @@ class TestLogExperimentWiring:
     Held in both modes: skipping HPO swaps the node that feeds
     ``best_params``, nothing else upstream of the upload."""
 
-    # The seven diagnosis nodes (ADR-0030 decision 7).
+    # The six diagnosis nodes (ADR-0030 decision 7).
     DIAGNOSES = (
-        "compute_feature_statistics", "compute_feature_importance",
+        "compute_feature_importance",
         "compute_gain_ledger", "compute_shap_diagnostics",
         "select_shap_population", "compute_quadrant_profiles",
         "compute_quadrant_cases",
@@ -366,7 +337,7 @@ class TestLogExperimentWiring:
         }
 
         assert producers.keys() >= {
-            "compute_feature_statistics", "compute_feature_importance",
+            "compute_feature_importance",
             "compute_gain_ledger", "compute_shap_diagnostics",
             "compute_quadrant_profiles", "compute_quadrant_cases",
         }, "the catalog read found fewer diagnosis nodes than exist"
@@ -627,7 +598,7 @@ class TestTrainingPipelineE2E:
 
         # Also register the lgb handle slots and intermediate names the pipeline produces.
         for name in ("train_lgb_handle", "train_dev_lgb_handle",
-                     "feature_statistics", "feature_importance", "shap_diagnostics",
+                     "feature_importance", "shap_diagnostics",
                      "sample_weight_report"):
             catalog.add(name, MemoryDataset())
 

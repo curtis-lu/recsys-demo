@@ -1,4 +1,4 @@
-"""The training pipeline's node functions, all twenty-one of them.
+"""The training pipeline's node functions, all twenty of them.
 
 This module is the home of the pipeline's ML story: a reader who opens it sees
 each decision this pipeline makes about the data, without jumping files. The
@@ -24,13 +24,13 @@ helper.
 
 How the nodes are laid out
 --------------------------
-``pipeline.py`` wires 20 nodes, or 19 when ``training.hpo_enabled`` is false:
+``pipeline.py`` wires 19 nodes, or 18 when ``training.hpo_enabled`` is false:
 that mode drops the val copy and puts ``train_with_fixed_params`` where
-``tune_hyperparameters`` was (ADR-0030 decision 11). Every one of the 21
+``tune_hyperparameters`` was (ADR-0030 decision 11). Every one of the 20
 functions is ``def``-ed here, in four sections: the two report nodes; the
 cache nodes, with ``select_features`` and ``prepare_train_inputs``; the
 pipeline nodes, from choosing the hyperparameters to MLflow and the test
-metrics; and the seven diagnosis nodes last.
+metrics; and the six diagnosis nodes last.
 
 The diagnosis nodes were ``def``-ed under ``recsys_tfb.diagnosis.model``
 until ADR-0030 decision 6 brought them here, their decisions floated up into
@@ -118,7 +118,7 @@ from recsys_tfb.models.base import (
     get_adapter,
 )
 from recsys_tfb.models.feature_selection import apply_feature_selection
-from recsys_tfb.models.feature_view import model_feature_columns, model_feature_view
+from recsys_tfb.models.feature_view import model_feature_view
 from recsys_tfb.pipelines.training.steps import (
     bounded_reads,
     experiment_log,
@@ -1734,7 +1734,6 @@ def log_experiment(
     best_params: dict,
     best_iteration: int,
     evaluation_results: dict,
-    feature_statistics: dict,
     feature_importance: dict,
     gain_ledger: dict,
     shap_diagnostics: dict,
@@ -1803,8 +1802,7 @@ def log_experiment(
                 # The scalars are what makes runs comparable in the UI; the
                 # files are what someone opens once a scalar looks wrong.
                 experiment_log.log_diagnostics_summary(
-                    feature_statistics, feature_importance,
-                    quadrant_profiles, cases_manifest,
+                    feature_importance, quadrant_profiles, cases_manifest,
                 )
 
                 # --- diagnostics artifacts (JSON and PNG both written by the
@@ -2009,7 +2007,7 @@ def compute_test_metrics(
 # Diagnosis nodes
 # ---------------------------------------------------------------------------
 #
-# Seven nodes that describe the finished model; nothing downstream in this
+# Six nodes that describe the finished model; nothing downstream in this
 # pipeline reads them except log_experiment. Each returns its result and
 # writes nothing: the JSON and the figures are landed by their catalog entries
 # (ADR-0030 decision 7). The model is reached only through the adapter. A
@@ -2018,104 +2016,6 @@ def compute_test_metrics(
 # run (ADR-0030 decision 4). The mechanisms are in steps/ (bounded_reads,
 # item_sampling, attribution_profiles, gain_ledger, quadrant_population,
 # quadrant_cases, figures, diagnosis_artifacts).
-
-
-def compute_feature_statistics(
-    train_parquet_handle, model, preprocessor: dict, parameters: dict,
-) -> dict:
-    """Per-feature null_rate / mean,std,min,max (numeric) / n_distinct, plus the
-    ``single_value`` and ``high_null`` flags.
-
-    Memory: the row count comes from parquet metadata, then only the sampled
-    ``sample_rows`` rows are read (bounded take) instead of loading the whole
-    train split and down-sampling afterwards. The sampled indices are unchanged
-    (``RandomState(42).choice``), so the output stays bit-for-bit identical.
-
-    Takes ``model`` although this is a *data*-layer diagnosis — the null rate and
-    mean of a training feature owe nothing to a booster. The model is here purely
-    as the authority on *which* columns to summarize (ADR-0014 decision 7).
-
-    Not because the alternative is unsafe. Re-deriving the column set from
-    ``training.feature_selection`` cannot silently drift: that key lives in the
-    ``training:`` block, so editing it bumps ``model_version``, the model's
-    catalog path moves, and the whole training chain is pulled back. ADR-0014 is
-    explicit that this is interface work, not a bug fix. The reason is that
-    ``preprocessor_view`` is memory-only, so reading it forces ``select_features``
-    into any slice that wants this node — while ``model`` and ``preprocessor``
-    both have catalog entries.
-
-    The coupling is accepted because ``feature_statistics`` already lands under
-    ``data/models/${model_version}/``: computing it for a model that does not
-    exist was never meaningful.
-
-    The edge is not only a cost. It also orders this node after the one that
-    produces the model, where it always belonged: without it the topological sort
-    put a diagnosis of ``data/models/${model_version}/`` *ahead* of HPO, so
-    ``--from-node compute_feature_statistics`` re-ran HPO and the final fit to
-    regenerate this JSON (18 nodes, now 13). What it does cost is
-    ``--only-node compute_feature_statistics``, which now needs a
-    ``model_version``-scoped input rather than only ``base_dataset_version`` ones,
-    and ``--from-node finalize_model``, which picks up this node's train handle.
-    Both slices are pinned in ``tests/test_pipelines/test_resume_contracts.py``.
-    """
-    cfg = parameters.get("diagnostics", {}).get("feature_stats", {})
-    if not cfg.get("enabled", True):
-        return {}
-    sample_rows = int(cfg.get("sample_rows", 500000))
-    high_null_threshold = float(cfg.get("high_null_threshold", 0.5))
-    # Decision — which features get summarized: the model, not
-    # apply_feature_selection(preprocessor, parameters). Pick the config and the
-    # stats still come out, just over whatever column set the *current* config
-    # names; the docstring argues why that is a worse authority than the model
-    # even though the version mechanism keeps it from being an outright bug.
-    feature_cols = model_feature_columns(model, preprocessor)
-
-    # Pre-check (input) — an interrupted copy reads as a smaller split rather
-    # than as an error, so count_rows would return a number and every statistic
-    # below would describe an unknown fraction of train (ADR-0014 decision 7).
-    # The cache node's opposite behaviour on the same marker — clear and rebuild
-    # from Hive — is the right one there and is not touched.
-    require_complete_cache(train_parquet_handle)
-
-    # Decision — which rows: at most sample_rows of train, drawn uniformly
-    # without replacement under a fixed seed (RandomState(42)), and all of
-    # train when it is no bigger. Every number below describes that sample —
-    # n_distinct is capped by it — and the same seed on the same train gives
-    # the same numbers on every run.
-    path = train_parquet_handle.path
-    n = bounded_reads.count_rows(path)
-    if n > sample_rows:
-        idx = np.sort(np.random.RandomState(42).choice(n, size=sample_rows, replace=False))
-        logger.info("feature_statistics: bounded take %d of %d rows", sample_rows, n)
-    else:
-        idx = np.arange(n, dtype=np.int64)
-        logger.info("feature_statistics: reading all %d rows (<= sample_rows)", n)
-    pdf = bounded_reads.take_rows(path, idx, columns=feature_cols)
-    log_data_volume(logger, "feature_statistics.sample", pdf, deep=True)
-
-    # Decision — what summarizes a feature: its null rate and distinct count
-    # for every dtype, mean / std / min / max for numeric ones only.
-    # single_value flags at most one distinct non-null value; high_null a null
-    # rate at or above high_null_threshold. A NaN statistic lands as null.
-    stats: dict = {}
-    for col in feature_cols:
-        s = pdf[col]
-        null_rate = float(s.isna().mean())
-        n_distinct = int(s.nunique(dropna=True))
-        entry = {
-            "null_rate": null_rate,
-            "n_distinct": n_distinct,
-            "single_value": n_distinct <= 1,
-            "high_null": null_rate >= high_null_threshold,
-        }
-        if pd.api.types.is_numeric_dtype(s):
-            entry["mean"] = to_native(s.mean())
-            entry["std"] = to_native(s.std())
-            entry["min"] = to_native(s.min())
-            entry["max"] = to_native(s.max())
-        stats[col] = entry
-    logger.info("feature_statistics: %d features summarized", len(stats))
-    return stats
 
 
 def compute_feature_importance(model, parameters: dict) -> dict:
@@ -2267,9 +2167,9 @@ def compute_shap_diagnostics(
     model_view = model_feature_view(model, preprocessor)
     feature_cols = list(model_view["feature_columns"])
 
-    # Pre-check (input) — same contract as compute_feature_statistics: a
-    # half-copied month reads as a smaller month, so the stratified sample would
-    # be drawn from a split nobody knows the size of (ADR-0014 decision 7).
+    # Pre-check (input) — a half-copied month reads as a smaller month, so the
+    # stratified sample would be drawn from a split nobody knows the size of
+    # (ADR-0014 decision 7).
     require_complete_cache(test_parquet_handle)
 
     # Decision — which months: every month the test handle holds (the

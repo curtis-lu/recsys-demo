@@ -95,7 +95,6 @@ def _run(tmp_path, monkeypatch, model):
         "best_params": {}, "best_iteration": 5,
         "evaluation_results": {"overall_map": 0.5, "per_item_map_attr": {},
                                "n_queries": 1, "n_excluded_queries": 0},
-        "feature_statistics": {},
     }
     for name, value in inputs.items():
         catalog.add(name, MemoryDataset(value))

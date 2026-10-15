@@ -22,10 +22,10 @@
 %%                  另一條是 gain_ledger → log_experiment，藏在 [L] 記號裡沒畫）
 %%   [V][P][M][T][L] 接點記號，兩種方向：
 %%                  V/P/M/T 標在**產物**上，node 框內的「＋ P · M」代表它同時吃這幾個；
-%%                  L 反過來標在產物上，代表「log_experiment 吃它」——它一個人吃十個
-%%                  輸入，十條線畫出來會蓋掉整張圖。
-%%                  V=preprocessor_view（5 個消費者）、P=preprocessor（6 個）、
-%%                  M=model（8 個）、T=train_parquet_handle（4 個）。
+%%                  L 反過來標在產物上，代表「log_experiment 吃它」——它一個人吃九個
+%%                  輸入，九條線畫出來會蓋掉整張圖。
+%%                  V=preprocessor_view（5 個消費者）、P=preprocessor（5 個）、
+%%                  M=model（7 個）、T=train_parquet_handle（3 個）。
 %%                  **V 與 P 是兩份不同的東西，不是同一份的兩個名字**——見下方
 %%                  「為什麼有 V 也有 P」。
 %%   「只讀 test 月份」這條邊只讀 dataset.test_snap_dates 的月份（ADR-0030 決定 12，見下）。
@@ -37,13 +37,12 @@
 %%   training.feature_selection.exclude 之後的產物，memory-only、不在 catalog 裡。
 %%   吃 [V] 的是**訓練鏈**（prepare_train_inputs、compute_sample_weight_report、
 %%   tune_hyperparameters、finalize_model、predict_and_write_test_predictions，共 5 個）。
-%%   吃 [P] 的是 select_features 自己，加上**五個 diagnosis node**
-%%   （feature_statistics、gain_ledger、shap_diagnostics、quadrant_profiles、
-%%   quadrant_cases）。
+%%   吃 [P] 的是 select_features 自己，加上**四個 diagnosis node**
+%%   （gain_ledger、shap_diagnostics、quadrant_profiles、quadrant_cases）。
 %%   **這個切分是刻意的，不是漏接線**：diagnosis 改吃落地的 [P] 之後，只跑診斷的
 %%   接續執行不會再把 select_features 與整條訓練鏈拉回來——那正是這次改動要買的東西。
-%%   代價寫在 compute_feature_statistics 的框裡：它同時也吃 model，於是被推到
-%%   finalize_model 之後（#411 移除校準器前，`model` 的生產者是 calibrate_model）。
+%%   diagnosis node 都吃 model，所以拓撲序把它們排在 finalize_model 之後
+%%   （#411 移除校準器前，`model` 的生產者是 calibrate_model）。
 %%   哪個 node 才是特徵欄的權威，答案是模型自己：diagnosis 從 model.feature_names()
 %%   建 view，[P] 只提供其餘 metadata。
 
@@ -121,9 +120,9 @@
 %%   一份空報表。
 
 %% node 函式都在 training/nodes.py
-%%   #489 之前有 7 個診斷 node 的函式在 diagnosis/model/ 底下（compute_feature_statistics、
-%%   compute_feature_importance、compute_gain_ledger、compute_shap_diagnostics、
-%%   select_shap_population、compute_quadrant_profiles、compute_quadrant_cases）。
+%%   #489 之前有 7 個診斷 node 的函式在 diagnosis/model/ 底下（compute_feature_importance、
+%%   compute_gain_ledger、compute_shap_diagnostics、select_shap_population、
+%%   compute_quadrant_profiles、compute_quadrant_cases，加上後來移除的一個特徵統計 node）。
 %%   ADR-0030 決定 6 把它們搬回 training/nodes.py，機制進 training/steps/
 %%   （bounded_reads、item_sampling、attribution_profiles、gain_ledger、
 %%   quadrant_population、quadrant_cases、figures、diagnosis_artifacts）。
@@ -273,7 +272,6 @@ flowchart TB
   %% -------------------------- 診斷產物 ---------------------------
   subgraph DIAG[" 診斷產物：driver-local pandas；模型做不到就跳過並寫明，其他錯誤停下 "]
     direction TB
-    n_fstat["compute_feature_statistics<br/><small>＋ T · <b>M</b> · P ・ 只讀抽中的列<br/><b>吃 model 是刻意耦合</b>：它把這個 node 推到 finalize_model<br/>之後，接續執行要多付一段（見 test_resume_contracts.py）</small>"] --> o_fstat(["feature_statistics　<b>[L]</b>"])
     n_fimp["compute_feature_importance<br/><small>＋ M</small>"] --> o_fimp(["feature_importance　<b>[L]</b>"])
     n_gain["compute_gain_ledger<br/><small>＋ M · P ・ 逐樹逐切點記帳</small>"] --> o_gain(["gain_ledger　<b>[L]</b><br/><small>evaluation 的 model_capacity 吃 ・ catalog optional<br/>log_experiment 吃它，但不讀（沒有 scalar 進 MLflow）<br/>這條邊保證檔案在 log_artifacts 上傳前寫好</small>"])
     n_shap["compute_shap_diagnostics<br/><small>＋ M · P ・ 單次 shap_values 兩用</small>"] --> o_shap(["shap_diagnostics　<b>[L]</b>"])
@@ -281,7 +279,6 @@ flowchart TB
     n_qcase["compute_quadrant_cases<br/><small>＋ M · P ・ 每格極值案例單列圖</small>"] --> o_qcase(["cases_manifest　<b>[L]</b>"])
   end
 
-  d_h_train --> n_fstat
   d_h_test --> n_shap
   d_pop --> n_qprof
   d_cases --> n_qcase
@@ -303,8 +300,8 @@ flowchart TB
 
   class src_train,src_traindev,src_val,src_test src
   class art_prep art
-  class n_selfeat,n_c_train,n_c_traindev,n_c_val,n_c_test,n_preplgb,n_tune,n_final,n_sw,n_predict,n_map,n_selpop,n_fstat,n_fimp,n_gain,n_shap,n_qprof,n_qcase nd
-  class d_bestp,d_besti,d_hpomodel,d_manifest,d_sw,o_evalres,o_fstat,o_fimp,o_shap,o_qprof,o_qcase data
+  class n_selfeat,n_c_train,n_c_traindev,n_c_val,n_c_test,n_preplgb,n_tune,n_final,n_sw,n_predict,n_map,n_selpop,n_fimp,n_gain,n_shap,n_qprof,n_qcase nd
+  class d_bestp,d_besti,d_hpomodel,d_manifest,d_sw,o_evalres,o_fimp,o_shap,o_qprof,o_qcase data
   class d_view,d_h_train,d_h_traindev,d_h_val,d_h_test,d_lgb_train,d_lgb_traindev,d_pop,d_cases mem
   class o_model,o_pred,o_gain out
   class n_log sink
