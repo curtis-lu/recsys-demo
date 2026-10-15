@@ -5,6 +5,8 @@ date: 2026-09-16
 
 # 信賴區間的重抽單位用獨立設定，不沿用 `val_sample_keys`
 
+（2026-10-16 已移除，見 #515）
+
 ## 背景
 
 evaluation 診斷的 cluster bootstrap 信賴區間，要把「彼此相關的列」當成一群一起重抽。現行程式拿 `schema.entity` 的**全部欄位**當一群（`diagnosis/metric/uncertainty.py`，`cluster_key` 那一行）；`diagnosis/metric/item_ability/_compute.py` 與 `diagnosis/metric/config_shift/_compute.py` 也用同樣的方式定義 cluster。但程式註解寫「cluster id（entity only）」、`conf/base/parameters_evaluation.yaml` 的註解寫「cluster＝cust_id」——原意是「以客戶為單位」。
@@ -14,6 +16,8 @@ evaluation 診斷的 cluster bootstrap 信賴區間，要把「彼此相關的�
 這和 ADR-0016 是同一類問題：以 entity 為單位的操作，在多欄 entity 下單位悄悄變了，而且不會報錯。
 
 ## 決定
+
+（2026-10-16 已移除，見 #515）
 
 evaluation 新增一個設定鍵，宣告重抽單位：
 

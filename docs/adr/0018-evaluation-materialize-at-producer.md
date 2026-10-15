@@ -272,6 +272,8 @@ registry 診斷（`diagnosis/metric/contract.py::DIAGNOSES`，現行 `config_shi
 
 ### 決定
 
+（2026-10-16 已移除，見 #515）
+
 兩件事分開做：
 
 1. **監控模式不組出 registry 診斷 node。** 依 [ADR-0013](0013-pipeline-modes-and-slicing-are-separate.md)，「跑哪些 node」由 `create_pipeline` 的模式參數決定、明寫清單，不是 config 開關。`create_pipeline(post_training=False)` 不加入 `make_diagnosis_node(...)` 那一組，也**不加入 `render_diagnosis_pages`**。**保留** `draw_diagnosis_sample_node` → `compute_metric_ci`（指標的 bootstrap 信賴區間，監控正需要「這個月的數字可不可信」）與 `compute_report_aggregates`（主報表的 item 細節區，只看分數分佈，不需要原始分數）。

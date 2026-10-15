@@ -93,7 +93,7 @@
   <span class="lg"><span class="sw round" style="background:var(--out-bg);border-color:var(--out-bd)"></span>別的 pipeline／別的模式會吃的產物</span>
 </div>
 <div class="legend" style="margin-top:8px">
-  <span class="lg"><span class="tag">虛線邊</span>本圖只有 <code>render_diagnosis_pages</code> 的四條入邊是虛線，那是 #342 之前的畫法（值不讀、按檔名讀磁碟）；#342 起它們是資料流。這張預渲染圖只更新了文字，線型沒有重新產生，以 <code>evaluation-pipeline.mmd</code> 為準。#344 新增的 <code>evaluation_segment_columns</code>（<code>prepare_eval_data</code> 的第二個 output，餵給分群的 node）與它的五條邊同樣只畫在 <code>.mmd</code> 裡；本圖只更新了分群來源的文字。#345 起 <code>restrict_to_common</code> 不再讀 <code>label_table</code>（B 側抄 A 側的 label），圖上 <code>label_table</code> 到它的那條入邊同樣只在 <code>.mmd</code> 拿掉。#351 起 <code>evaluation_metrics</code>、<code>baseline_metrics</code> 落地成 catalog 條目，膠囊應改畫實線；這張預渲染 SVG 同樣沒有重新產生，圖上這兩個節點目前仍是虛線（MemoryDataset 樣式），文字已更新、形狀以 <code>.mmd</code> 為準。#352 起 <code>prepare_eval_data</code> 直接輸出 <code>enriched_eval_predictions</code>（落地為 Hive 表），原本另外把它落地的獨立 node 已刪除；下游每個讀者改讀這張表、各自用 <code>restrict_to_current_eval_partitions</code> 篩回本次評估日期並驗分區指紋（ADR-0018 決定 1；#374 起可以是多個日期、分區自帶設定指紋）。這張預渲染 SVG 同樣沒有重新產生：中央那個扇出到 5 個讀者的框，文字已改成 <code>enriched_eval_predictions</code>（膠囊仍畫成虛線／MemoryDataset 樣式，形狀未更新）；右側 <code>--compare-only</code> 驗證節點前方、原本畫著獨立落地 node 的框，文字已改標成「已刪除」；兩者之間的邊與座標是舊圖留下的幾何，未重新排版，正確拓樸與形狀以 <code>.mmd</code> 為準。#381 新增的 <code>compute_prediction_quality</code> 與它的產物 <code>prediction_quality_metrics</code>（<code>generate_report</code> 的第七個輸入）同樣只畫在 <code>.mmd</code> 裡。</span>
+  <span class="lg"><span class="tag">虛線邊</span>本圖只有 <code>render_diagnosis_pages</code> 的四條入邊是虛線，那是 #342 之前的畫法（值不讀、按檔名讀磁碟）；#342 起它們是資料流。這張預渲染圖只更新了文字，線型沒有重新產生，以 <code>evaluation-pipeline.mmd</code> 為準。#344 新增的 <code>evaluation_segment_columns</code>（<code>prepare_eval_data</code> 的第二個 output，餵給分群的 node）與它的五條邊同樣只畫在 <code>.mmd</code> 裡；本圖只更新了分群來源的文字。#345 起 <code>restrict_to_common</code> 不再讀 <code>label_table</code>（B 側抄 A 側的 label），圖上 <code>label_table</code> 到它的那條入邊同樣只在 <code>.mmd</code> 拿掉。#351 起 <code>evaluation_metrics</code>、<code>baseline_metrics</code> 落地成 catalog 條目，膠囊應改畫實線；這張預渲染 SVG 同樣沒有重新產生，圖上這兩個節點目前仍是虛線（MemoryDataset 樣式），文字已更新、形狀以 <code>.mmd</code> 為準。#352 起 <code>prepare_eval_data</code> 直接輸出 <code>enriched_eval_predictions</code>（落地為 Hive 表），原本另外把它落地的獨立 node 已刪除；下游每個讀者改讀這張表、各自用 <code>restrict_to_current_eval_partitions</code> 篩回本次評估日期並驗分區指紋（ADR-0018 決定 1；#374 起可以是多個日期、分區自帶設定指紋）。這張預渲染 SVG 同樣沒有重新產生：中央那個扇出到 5 個讀者的框，文字已改成 <code>enriched_eval_predictions</code>（膠囊仍畫成虛線／MemoryDataset 樣式，形狀未更新）；右側 <code>--compare-only</code> 驗證節點前方、原本畫著獨立落地 node 的框，文字已改標成「已刪除」；兩者之間的邊與座標是舊圖留下的幾何，未重新排版，正確拓樸與形狀以 <code>.mmd</code> 為準。#381 新增的 <code>compute_prediction_quality</code> 與它的產物 <code>prediction_quality_metrics</code>（<code>generate_report</code> 的最後一個輸入）同樣只畫在 <code>.mmd</code> 裡。#515 起 pipeline 沒有 <code>compute_metric_ci</code> 與 <code>evaluation_metric_ci</code>；圖上這兩個框與它們的三條邊同樣只在 <code>.mmd</code> 拿掉。</span>
 </div>
 <p class="sub" style="margin-top:6px">本圖<b>沒有</b>姊妹圖那兩種形狀：沒有六角形的閘、也沒有失敗路徑終點。evaluation 的檢查都寫在 node 裡、標為前置檢查，不是獨立的閘 node：<code>prepare_eval_data</code>（<code>label_table</code> 重複 key，bug 10）、<code>compute_baseline_metrics</code>（lookback 視窗沒有歷史，bug 1）、<code>generate_report</code>／<code>render_diagnosis_pages</code>／吃別項診斷結果的診斷 node（設定指紋不合，bug 2；<code>render_diagnosis_pages</code> 另擋診斷結果接錯，bug 9）、<code>restrict_to_common</code>（共同 query group 或 item 為空，B3）。
 唯一獨立成 node 的檢查是 <code>--compare-only</code> 的第一個 node（B4：指定 <code>snap_date</code> 沒有 row 就中止）。</p>
@@ -111,7 +111,7 @@
     所以監控模式由 <code>no_diagnosis_pages</code> 供一份空清單：它什麼都不讀。不沿用 <code>render_diagnosis_pages</code> 是因為那個
     要求每項 registry 診斷各一份帶名字的結果，監控模式一份都沒算。</li>
   <li><b>#351 起 <code>evaluation_metrics</code>、<code>baseline_metrics</code> 落地成 catalog 條目，這決定了重繪要花多少錢。</b>
-    四份診斷 JSON、<code>evaluation_metric_ci</code>、<code>evaluation_report_aggregates</code>、<code>evaluation_metrics</code>、
+    四份診斷 JSON、<code>evaluation_report_aggregates</code>、<code>evaluation_metrics</code>、
     <code>baseline_metrics</code> <b>有</b> catalog entry（<code>evaluation_metrics</code> / <code>baseline_metrics</code> 是
     <code>JSONDataset</code>，落地到 <code>data/evaluation/&lt;model_version&gt;/&lt;snap_date&gt;/</code>，皆含
     <code>config_fingerprint</code>；<code>report.sections.baseline: false</code> 時 baseline 那份是
@@ -131,9 +131,10 @@
     同一組 inputs 另外買到兩件事：<b>(1) 執行順序</b>——拓樸排序只看 <code>node.inputs</code>，排在所有診斷之後才拿得到這次的結果；
     <b>(2) 切片擴張</b>——JSON 已落地時 <code>--only-node render_diagnosis_pages</code> 不重算（讀回後比對指紋），
     全新 <code>model_version</code> 時才自動往上補算。</li>
-  <li><b>診斷抽樣只抽一次，下游共用。</b><code>draw_diagnosis_sample_node</code> 的產出被 <code>compute_metric_ci</code>
-    與各項診斷共用。各自重抽（同 seed）結果會相同，但那是 N 次全量掃描；更重要的是
-    「同一份樣本」本身是<b>正確性</b>性質——CI 與診斷講的必須是同一批 query，否則兩張圖對不起來。</li>
+  <li><b>診斷抽樣只抽一次，下游共用。</b><code>draw_diagnosis_sample_node</code> 的產出被 <code>--post-training</code>
+    的各項診斷共用。各自重抽（同 seed）結果會相同，但那是 N 次全量掃描；更重要的是
+    「同一份樣本」本身是<b>正確性</b>性質——並排讀的幾項診斷講的必須是同一批 query，否則兩張圖對不起來。
+    監控模式照樣接上這個 node、但不抽樣：它是改了 <code>evaluation.diagnosis.*</code> 之後 <code>--from-node</code> 的接續點。</li>
   <li><b>四項診斷由 registry 導出，形狀完全一樣。</b>來源是
     <code>diagnosis.metric.contract.DIAGNOSES</code>，node 函式由 <code>make_diagnosis_node</code> 生成。
     加第五項＝新增一個子套件 ＋ registry 補一行，<code>report_builder</code> 零改動。
@@ -170,9 +171,8 @@
     <tr><td>compute_metrics</td><td>同名</td><td>enriched_eval_predictions, evaluation_segment_columns</td><td>evaluation_metrics</td></tr>
     <tr><td>compute_baseline_metrics</td><td>同名</td><td>enriched_eval_predictions, label_table, evaluation_segment_columns</td><td>baseline_metrics</td></tr>
     <tr><td>compute_report_aggregates</td><td>同名</td><td>enriched_eval_predictions</td><td>evaluation_report_aggregates</td></tr>
-    <tr class="stage"><td colspan="4">診斷流（抽樣 → CI；四項診斷 → 分頁只在 <code>--post-training</code>）</td></tr>
-    <tr><td>draw_diagnosis_sample_node</td><td>make_draw_diagnosis_sample_node(模式)<br><small>監控模式只為 CI 抽，CI 關掉就不抽</small></td><td>enriched_eval_predictions, evaluation_segment_columns</td><td>diagnosis_sample</td></tr>
-    <tr><td>compute_metric_ci</td><td>同名</td><td>diagnosis_sample</td><td>evaluation_metric_ci</td></tr>
+    <tr class="stage"><td colspan="4">診斷流（抽樣；四項診斷 → 分頁只在 <code>--post-training</code>）</td></tr>
+    <tr><td>draw_diagnosis_sample_node</td><td>make_draw_diagnosis_sample_node(模式)<br><small>監控模式接上但不抽樣：沒有讀者，留作 <code>--from-node</code> 的接續點</small></td><td>enriched_eval_predictions, evaluation_segment_columns</td><td>diagnosis_sample</td></tr>
     <tr><td>diagnose_config_shift<br><small>僅 <code>--post-training</code>（以下四項同）</small></td><td>make_diagnosis_node("config_shift")</td><td>diagnosis_sample</td><td>evaluation_config_shift</td></tr>
     <tr><td>diagnose_item_ability</td><td>make_diagnosis_node("item_ability")</td><td>diagnosis_sample</td><td>evaluation_item_ability</td></tr>
     <tr><td>diagnose_suppression</td><td>make_diagnosis_node("suppression")</td><td>diagnosis_sample</td><td>evaluation_suppression</td></tr>
@@ -194,7 +194,7 @@
     <tr class="stage"><td colspan="4">匯流</td></tr>
     <tr>
       <td>generate_report</td><td>同名</td>
-      <td>evaluation_metrics, baseline_metrics, evaluation_metric_ci, evaluation_report_aggregates, evaluation_diagnosis_pages<br><small>（含 <code>parameters</code> 共 6 個必填，無預設值、無 varargs）</small></td>
+      <td>evaluation_metrics, baseline_metrics, evaluation_report_aggregates, evaluation_diagnosis_pages, prediction_quality_metrics<br><small>（含 <code>parameters</code> 共 6 個必填，無預設值、無 varargs）</small></td>
       <td>evaluation_report</td>
     </tr>
     <tr class="stage"><td colspan="4"><code>--compare &lt;key&gt;</code> 追加（<code>--compare-only</code> 則以第一列取代整條主鏈）</td></tr>

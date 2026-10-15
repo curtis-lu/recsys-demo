@@ -168,9 +168,9 @@ training_eval_predictions:
 | 評估的**監控模式**（不帶 `--post-training`） | **在 CLI 入口被擋下**（A40）。監控模式評估的是離線推論發布的表，它沒有 `occasion` 的欄，而 `label_table` 有——兩邊認列的方式不同，接出來的是錯的答案不是少的答案。用 `--post-training` |
 | 比較報表拿 `source: ranked_predictions` 當對手 | **在 CLI 入口被擋下**（A41），理由同上。用 `training_eval_predictions` 或 `enriched_eval_predictions` |
 | 診斷 `item_ability` | **自動跳過**，報表寫出原因。它先扣掉每組的平均分數再比較，假設那個平均代表「這個 entity 的整體分數水準」；一組是一次請求時，平均取決於這一次擺了哪幾個素材，只擺一個的請求扣完恆為 0 |
-| 診斷 `config_shift`、`suppression`、頭號指標的信賴區間 | 照跑，而且都以一次請求為一組。`suppression` 的共同購買（`cross_purchase`）因此數的是「同一次請求裡兩個素材都被點」：它說的是「這兩個素材常在同一刻一起被點」，不是「點過一個的人也常點另一個」 |
+| 診斷 `config_shift`、`suppression` | 照跑，而且都以一次請求為一組。`suppression` 的共同購買（`cross_purchase`）因此數的是「同一次請求裡兩個素材都被點」：它說的是「這兩個素材常在同一刻一起被點」，不是「點過一個的人也常點另一個」 |
 
-**兩個都宣告時**，同一次請求裡同一個 item 又可以有多列，所以：`k_values: "all"` 改成解析成最大一組的列數；`config_shift`、`item_ability`、`suppression` 與頭號指標的信賴區間**全部**跳過（理由見 [`one-row-per-event.md`](one-row-per-event.md)〈幾件會被擋下、或行為改變的事〉）。其餘各列相同。
+**兩個都宣告時**，同一次請求裡同一個 item 又可以有多列，所以：`k_values: "all"` 改成解析成最大一組的列數；`config_shift`、`item_ability`、`suppression` **全部**跳過（理由見 [`one-row-per-event.md`](one-row-per-event.md)〈幾件會被擋下、或行為改變的事〉）。其餘各列相同。
 
 ## 離線指標在這類資料上的三個限制
 
@@ -188,7 +188,6 @@ training_eval_predictions:
 
 - **`occasion` 的欄不得是 NULL。** 有 NULL 時會安靜地錯兩件事：label 以完整的 identity 接到候選列上，NULL 接不到任何東西，那些列的正例**全部變成 0**；分組時 training 把所有 NULL 的列併進同一組，評估則把它們當成另一個組。兩件都沒有錯誤訊息。擋法是把 `occasion` 的欄列進 `sample_pool` 與 `label_table` 的 `primary_key`（見③）。
 - **分群欄如果是「每次請求不同」的屬性**（例如頻道、裝置），預設的分群接法會以 base key 接，每個 entity 每個時段只取一個值，套到它所有的請求上。這種欄要用 `evaluation.segment_sources` 從一張以請求為鍵的表接，`key_columns` 寫 `[snap_date, user_id, slot_id, request_id]` 這類含 `occasion` 的鍵。
-- **`config_shift` 的信賴區間會偏窄。** 診斷抽樣以一次請求為單位分層，信賴區間卻以 entity 為單位重抽；同一個 entity 的請求落在不同層時，會被當成兩個獨立的單位。這是 [#389](https://github.com/curtis-lu/recsys-demo/issues/389) 的同一個機制，沒宣告 `occasion` 時要多個評估日期才會發生，宣告之後單一日期也會發生。
 - **比較報表的另一邊要是同一組角色宣告跑出來的。** 拿宣告 `occasion` 之前訓練的模型版本來比，它的預測表沒有 `occasion` 的值，兩邊一組也對不上，報表會停在「common_query_groups is empty」。
 
 ## 驗收：怎麼確認真的生效了
