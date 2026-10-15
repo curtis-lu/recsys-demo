@@ -248,14 +248,10 @@ mlflow:
 cache:
   root: data/recsys_cache
 
-# 訓練診斷產物（特徵統計 / 原生 importance / SHAP）。
+# 訓練診斷產物（原生 importance / gain ledger / SHAP 等）。
 # 刻意放 top-level（與 mlflow / cache 同層）：compute_model_version 只雜湊
 # training: block，故此 block 不影響 model_version（見 test_versioning）。
 diagnostics:
-  feature_stats:
-    enabled: true
-    sample_rows: 500000
-    high_null_threshold: 0.5
   feature_importance:
     enabled: true
   gain_ledger:

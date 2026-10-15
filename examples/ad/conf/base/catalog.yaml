@@ -203,10 +203,6 @@ group_filter_report:
   type: JSONDataset
   filepath: data/models/${model_version}/group_filter_report.json
 
-feature_statistics:
-  type: JSONDataset
-  filepath: data/models/${model_version}/diagnostics/feature_statistics.json
-
 feature_importance:
   type: JSONDataset
   filepath: data/models/${model_version}/diagnostics/feature_importance.json

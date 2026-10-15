@@ -58,10 +58,6 @@ cache:
   root: data/recsys_cache
 
 diagnostics:
-  feature_stats:
-    enabled: true
-    sample_rows: 500000
-    high_null_threshold: 0.5
   feature_importance:
     enabled: true
   gain_ledger:

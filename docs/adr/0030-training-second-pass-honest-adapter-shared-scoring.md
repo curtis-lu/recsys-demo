@@ -221,6 +221,8 @@ catalog 條目宣告的欄名由部署跟著 `schema` 寫。本份不加「catal
 
 ## 決定 6　7 個診斷 node 搬回 `nodes.py`；機制進 `pipelines/training/steps/`
 
+> 2026-10-16：其中的 `compute_feature_statistics` 已移除，剩 6 個，見 #516。
+
 **規則**：
 - `compute_feature_statistics`、`compute_feature_importance`、`compute_gain_ledger`、`compute_shap_diagnostics`、`select_shap_population`、`compute_quadrant_profiles`、`compute_quadrant_cases` 的 `def` 搬進 `pipelines/training/nodes.py`。
 - 搬法是**決策上浮**，不是照搬成轉手殼：預算閘、背景樣本降級、正例抽樣這類判斷寫進 node body，掛 `# Decision —`；跟演算法無關的機制進 `pipelines/training/steps/`；碰模型內部的部分走決定 1 的 adapter 能力。

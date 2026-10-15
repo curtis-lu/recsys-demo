@@ -15,7 +15,7 @@ module, check that it is not walking down that road again.
 - ``diagnosis.hpo`` — the HPO search diagnostics ``tune_hyperparameters``
   writes.
 
-The model-structure diagnoses (SHAP, importance, feature statistics, the
+The model-structure diagnoses (SHAP, importance, the
 quadrant population and cases, the gain ledger) used to be ``diagnosis.model``.
 Training was their only consumer, so their nodes are in
 ``pipelines/training/nodes.py`` and their mechanisms in

@@ -77,7 +77,6 @@ def log_evaluation_metrics(evaluation_results: dict) -> None:
 
 
 def log_diagnostics_summary(
-    feature_statistics: dict,
     feature_importance: dict,
     quadrant_profiles: dict,
     cases_manifest: dict,
@@ -92,15 +91,6 @@ def log_diagnostics_summary(
     """
     if _has_result(feature_importance):
         mlflow.log_metric("n_dead_features", len(feature_importance.get("dead_features", [])))
-    if feature_statistics:
-        mlflow.log_metric(
-            "n_single_value_features",
-            sum(1 for s in feature_statistics.values() if s.get("single_value")),
-        )
-        mlflow.log_metric(
-            "n_high_null_features",
-            sum(1 for s in feature_statistics.values() if s.get("high_null")),
-        )
     if _has_result(quadrant_profiles):
         n_cells = sum(len(v) for v in quadrant_profiles.values())
         mlflow.log_metric("n_quadrant_cells", n_cells)

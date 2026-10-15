@@ -8,7 +8,6 @@ from recsys_tfb.pipelines.training.nodes import (
     cache_train_model_input,
     cache_val_model_input,
     compute_feature_importance,
-    compute_feature_statistics,
     compute_gain_ledger,
     compute_quadrant_cases,
     compute_quadrant_profiles,
@@ -173,20 +172,13 @@ def create_pipeline(hpo_enabled: bool = True) -> Pipeline:
         # `model` which columns it actually used. Both of those have catalog
         # entries, so this group no longer drags `select_features` — and the whole
         # training chain feeding it — into a diagnosis-only rerun. The
-        # `*_parquet_handle` inputs are still memory-only and deliberately left
-        # that way, so this is one edge removed, not a clean cut (ADR-0014
-        # decision 7 records the remaining blocker).
+        # diagnosis group's one handle input, `test_parquet_handle`, is still
+        # memory-only and deliberately left that way, so this is one edge
+        # removed, not a clean cut (ADR-0014 decision 7 records the remaining
+        # blocker).
         #
-        # `model` is a new input for compute_feature_statistics specifically — a
-        # deliberate coupling, argued in its docstring. It also moves that node
-        # after finalize_model in the topological order, which is what drags the
-        # train handle into a `--from-node finalize_model` slice; see that entry
-        # in tests/test_pipelines/test_resume_contracts.py.
-        Node(
-            compute_feature_statistics,
-            inputs=["train_parquet_handle", "model", "preprocessor", "parameters"],
-            outputs="feature_statistics",
-        ),
+        # The resume points this group gives (and what each one re-runs) are
+        # pinned in tests/test_pipelines/test_resume_contracts.py.
         Node(
             compute_feature_importance,
             inputs=["model", "parameters"],
@@ -253,7 +245,6 @@ def create_pipeline(hpo_enabled: bool = True) -> Pipeline:
                 "best_params": "best_params",
                 "best_iteration": "best_iteration",
                 "evaluation_results": "evaluation_results",
-                "feature_statistics": "feature_statistics",
                 "feature_importance": "feature_importance",
                 "gain_ledger": "gain_ledger",
                 "shap_diagnostics": "shap_diagnostics",

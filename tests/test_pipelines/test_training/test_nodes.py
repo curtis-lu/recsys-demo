@@ -1362,18 +1362,14 @@ def test_log_experiment_logs_diagnostics(fake_mlflow, monkeypatch, tmp_path):
         def log_to_mlflow(self): pass
 
     eval_results = {"overall_map": 0.5, "per_item_map_attr": {}, "n_queries": 10, "n_excluded_queries": 0}
-    feature_statistics = {"f0": {"single_value": True, "high_null": False, "null_rate": 0.0, "n_distinct": 1}}
     feature_importance = {"ranked": [], "dead_features": ["f3", "f4"]}
     shap_diagnostics = {"global": {"top_features": []}, "per_item": {}, "item_idiosyncrasy": []}
 
     _call_log_experiment(_Model(), {}, 10, eval_results, parameters,
-                         feature_statistics=feature_statistics,
                          feature_importance=feature_importance,
                          shap_diagnostics=shap_diagnostics)
 
     assert logged_metrics["n_dead_features"] == 2
-    assert logged_metrics["n_single_value_features"] == 1
-    assert logged_metrics["n_high_null_features"] == 0
     assert len(logged_artifacts) == 1  # whole diagnostics dir uploaded once
 
     # A diagnosis the model could not answer (ADR-0030 decision 4) logs no
@@ -1382,13 +1378,26 @@ def test_log_experiment_logs_diagnostics(fake_mlflow, monkeypatch, tmp_path):
     logged_metrics.clear()
     cannot = {"enabled": True, "supported": False, "reason": "no trees"}
     _call_log_experiment(_Model(), {}, 10, eval_results, parameters,
-                         feature_statistics=feature_statistics,
                          feature_importance=dict(cannot),
                          shap_diagnostics=shap_diagnostics,
                          quadrant_profiles=dict(cannot),
                          cases_manifest=dict(cannot))
     assert not {"n_dead_features", "n_quadrant_cells", "n_cases_rendered"} & set(logged_metrics)
-    assert logged_metrics["n_single_value_features"] == 1
+    # ...and the summary ran to the end: the upload comes after it, and this
+    # run is not strict, so an exception raised inside it would be swallowed
+    # and the line above would pass anyway.
+    assert len(logged_artifacts) == 2
+
+    # Positive control: a marker in one diagnosis must not stop the scalars of
+    # the others from being logged. Without this, the block above also passes
+    # when the whole summary is skipped.
+    logged_metrics.clear()
+    _call_log_experiment(_Model(), {}, 10, eval_results, parameters,
+                         feature_importance=dict(cannot),
+                         shap_diagnostics=shap_diagnostics,
+                         quadrant_profiles={"A": {"q1": {}, "q2": {}}})
+    assert "n_dead_features" not in logged_metrics
+    assert logged_metrics["n_quadrant_cells"] == 2
 
 
 def test_tune_defaults_ranking_metric(monkeypatch):

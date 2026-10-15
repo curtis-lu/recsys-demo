@@ -361,6 +361,8 @@ cust_id_col = entity_cols[0]
 
 ### `compute_feature_statistics` 會多一個 `model` 輸入——這個耦合要寫下來
 
+> 2026-10-16：這個 node 已移除，本段與下方驗收條件第二列都不再適用，見 #516。
+
 它現在只用 `preprocessor_view["feature_columns"]` 決定「算哪些欄的統計」（`diagnosis/model/feature_stats.py`）。**它是資料層診斷**——訓練資料裡這些特徵的 null rate、mean、distinct——本來不需要模型。改成問 model 等於把資料診斷耦合到模型 artifact。
 
 **接續成本的影響，兩種切法不同**：

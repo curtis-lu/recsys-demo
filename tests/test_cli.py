@@ -3121,7 +3121,7 @@ class TestRebuildSlicedAwayWarning:
         end. While predict_manifest was memory-only the two always travelled
         together in a forward slice, so "some target is here" happened to imply
         "predict is here". Now that the manifest loads from disk,
-        ``--from-node compute_feature_statistics --rebuild-dates ...`` keeps
+        ``--from-node compute_feature_importance --rebuild-dates ...`` keeps
         cache_test_model_input and drops the predict node — the cache is
         rebuilt, nothing is re-predicted, and the run exits 0.
         """
@@ -3129,7 +3129,7 @@ class TestRebuildSlicedAwayWarning:
 
         lines = "\n".join(
             _maybe_warn_rebuild_sliced_away(
-                self._pipe("cache_test_model_input", "compute_feature_statistics"),
+                self._pipe("cache_test_model_input", "compute_feature_importance"),
                 self._training_advice(["2026-01-31"]),
             )
         )

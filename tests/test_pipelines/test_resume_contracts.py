@@ -58,19 +58,17 @@ RESUME_CONTRACTS = {
         "validate_model_input_grain": set(),
     },
     ("training", ()): {
-        # The diagnosis entry point (ADR-0014 decision 7). Before
-        # compute_feature_statistics took `model` it had no model dependency at
-        # all, so the topological sort placed a diagnosis of
-        # data/models/${model_version}/ *ahead* of the node producing the model —
-        # and "every node after it" then swept prepare_train_inputs,
-        # tune_hyperparameters and finalize_model back in. 18 nodes re-ran to
-        # regenerate a JSON of null rates. The edge moved it after finalize_model
-        # and the slice fell to 13.
+        # The diagnosis entry point (ADR-0014 decision 7):
+        # compute_feature_importance, the first node of the diagnosis group.
+        # It takes `model`, so the topological sort places it after
+        # finalize_model, and "every node after it" does not sweep
+        # prepare_train_inputs, tune_hyperparameters or finalize_model back in.
         #
-        # What is left is the two memory-only parquet handles dragging their
-        # cache nodes, blocked on cache.root being a relative path (ADR-0014
-        # decision 7, second gap). Pinned so the next reduction shows up as a
-        # diff.
+        # What is left is the memory-only test parquet handle dragging its
+        # cache node (only predict and the shap diagnosis read it), blocked on
+        # cache.root being a relative path (ADR-0014 decision 7, second gap).
+        # The train handle no longer shows up here: no diagnosis reads it.
+        # Pinned so the next reduction shows up as a diff.
         #
         # `predict_and_write_test_predictions` and `select_features` used to be
         # in this set too. predict_manifest was memory-only, so a diagnosis
@@ -79,10 +77,7 @@ RESUME_CONTRACTS = {
         # list its partitions -- and that node dragged select_features with it,
         # because predict *applies* a model and so needs preprocessor_view.
         # Landing predict_manifest (issue #233) removed both.
-        "compute_feature_statistics": {
-            "cache_train_model_input",
-            "cache_test_model_input",
-        },
+        "compute_feature_importance": {"cache_test_model_input"},
         # A resume point that only exists because predict_manifest lands:
         # recomputing the test metric now re-runs nothing at all. Both inputs
         # are loadable -- the Hive prediction table and the manifest -- so this
@@ -108,10 +103,7 @@ RESUME_CONTRACTS = {
     # The fit on fixed parameters hands on the three landed outputs the search
     # does, so every resume point after it costs what it costs above.
     ("training", (("hpo_enabled", False),)): {
-        "compute_feature_statistics": {
-            "cache_train_model_input",
-            "cache_test_model_input",
-        },
+        "compute_feature_importance": {"cache_test_model_input"},
         "compute_test_metrics": set(),
         "select_shap_population": set(),
         # Retraining the final model does not fit again: best_params,

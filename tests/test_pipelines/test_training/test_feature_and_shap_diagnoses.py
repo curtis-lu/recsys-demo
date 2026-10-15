@@ -28,21 +28,6 @@ def _adapter_declaring(X, y, feature_name, **params):
     return fit_lightgbm(X, y, params, feature_names=feature_name)
 
 
-class DeclaredFeatures:
-    """Stands in for a fitted model where only its feature declaration matters.
-
-    ``compute_feature_statistics`` reads nothing else off the model: the coupling
-    it accepts is to the column list, not to the booster (ADR-0014 decision 7).
-    """
-
-    def __init__(self, names):
-        self._names = list(names)
-
-    def feature_names(self):
-        return list(self._names)
-
-
-
 @pytest.fixture
 def fitted_adapter():
     rng = np.random.RandomState(0)
@@ -73,77 +58,7 @@ def test_compute_feature_importance_disabled(fitted_adapter):
     assert diag.compute_feature_importance(fitted_adapter, params) == {}
 
 
-def _write_parquet(tmp_path, pdf) -> ParquetHandle:
-    path = str(tmp_path / "feat.parquet")
-    pq.write_table(pa.Table.from_pandas(pdf), path)
-    return ParquetHandle(path=path)
-
-
-def test_compute_feature_statistics(tmp_path):
-    pdf = pd.DataFrame({
-        "f_num": [1.0, 2.0, 3.0, None],     # null_rate 0.25
-        "f_const": [5.0, 5.0, 5.0, 5.0],    # single_value
-        "f_cat": ["a", "b", "a", "c"],      # n_distinct 3, non-numeric
-    })
-    handle = _write_parquet(tmp_path, pdf)
-    preprocessor = {"feature_columns": ["f_num", "f_const", "f_cat"]}
-    params = {"diagnostics": {"feature_stats": {"enabled": True, "high_null_threshold": 0.5}}}
-
-    model = DeclaredFeatures(["f_num", "f_const", "f_cat"])
-
-    out = diag.compute_feature_statistics(handle, model, preprocessor, params)
-
-    assert out["f_num"]["null_rate"] == 0.25
-    assert out["f_num"]["n_distinct"] == 3
-    assert out["f_num"]["high_null"] is False
-    assert out["f_num"]["mean"] == pytest.approx(2.0)
-    assert out["f_const"]["single_value"] is True
-    assert out["f_cat"]["n_distinct"] == 3
-    # 非數值欄不應有 mean
-    assert "mean" not in out["f_cat"]
-
-
-def test_feature_statistics_columns_come_from_the_model_not_the_config(tmp_path):
-    """The model decides which columns get summarized — not the current config.
-
-    `f_dropped` is in the landed preprocessor but not in this model. Re-deriving
-    the column set from config instead (`apply_feature_selection`, which returns
-    all three when `exclude` is empty) would summarize a column the booster never
-    saw — this assertion is what turns that swap red.
-
-    Not a regression test for a bug that can happen in production: an `exclude`
-    edit bumps `model_version`, so the two answers cannot silently disagree here
-    (ADR-0014 decision 7). It is the mechanical guard that keeps the node wired to
-    the addressable authority rather than the memory-only one.
-    """
-    pdf = pd.DataFrame({
-        "f_a": [1.0, 2.0, 3.0, 4.0],
-        "f_dropped": [9.0, 9.0, 9.0, 9.0],
-        "f_b": [5.0, 6.0, 7.0, 8.0],
-    })
-    handle = _write_parquet(tmp_path, pdf)
-    preprocessor = {"feature_columns": ["f_a", "f_dropped", "f_b"]}
-    params = {"diagnostics": {"feature_stats": {"enabled": True}}}
-
-    out = diag.compute_feature_statistics(
-        handle, DeclaredFeatures(["f_a", "f_b"]), preprocessor, params)
-
-    assert set(out) == {"f_a", "f_b"}
-
-
-def test_feature_statistics_rejects_a_model_the_preprocessor_cannot_serve(tmp_path):
-    """A model column the artifact lacks raises rather than silently narrowing."""
-    pdf = pd.DataFrame({"f_a": [1.0, 2.0]})
-    handle = _write_parquet(tmp_path, pdf)
-    preprocessor = {"feature_columns": ["f_a"]}
-    params = {"diagnostics": {"feature_stats": {"enabled": True}}}
-
-    with pytest.raises(ValueError, match="order-preserving subsequence"):
-        diag.compute_feature_statistics(
-            handle, DeclaredFeatures(["f_a", "f_gone"]), preprocessor, params)
-
-
-def _partial_cache(tmp_path, name="train"):
+def _partial_cache(tmp_path, name):
     """A cache directory holding data but no ``_SUCCESS`` — an interrupted copy."""
     root = tmp_path / name
     (root / "snap_date=2026-01-31").mkdir(parents=True)
@@ -153,62 +68,22 @@ def _partial_cache(tmp_path, name="train"):
     return ParquetHandle(path=str(root))
 
 
-def test_feature_statistics_refuses_a_partial_cache_it_cannot_rebuild(tmp_path):
-    """Handed an interrupted copy, it must fail rather than publish numbers.
+def test_shap_diagnostics_refuses_a_partial_cache(tmp_path, shap_setup):
+    """An interrupted copy must fail rather than publish numbers.
 
     ADR-0014 decision 7 splits this from the cache node's own behaviour, which is
     the opposite and correct: given the same marker-less directory *and a live
-    source*, `cache_train_model_input` clears it and rebuilds from Hive
-    (test_cache_nodes.py::TestPartialCacheRecovery). By the time the handle is
-    here the source is gone from the picture, and `count_rows` on a half-copied
-    directory returns a number without complaining — stats get computed over an
-    unknown fraction of the split and MLflow records them as if whole.
-    """
-    handle = _partial_cache(tmp_path)
-    preprocessor = {"feature_columns": ["f_a", "f_b"]}
-    params = {"diagnostics": {"feature_stats": {"enabled": True}}}
-
-    with pytest.raises(ValueError, match="_SUCCESS"):
-        diag.compute_feature_statistics(
-            handle, DeclaredFeatures(["f_a", "f_b"]), preprocessor, params)
-
-
-def test_feature_statistics_accepts_the_same_cache_once_marked_complete(tmp_path):
-    """The negative's twin: only the marker separates the two runs."""
-    handle = _partial_cache(tmp_path)
-    (pathlib.Path(handle.path) / "_SUCCESS").touch()
-    preprocessor = {"feature_columns": ["f_a", "f_b"]}
-    params = {"diagnostics": {"feature_stats": {"enabled": True}}}
-
-    out = diag.compute_feature_statistics(
-        handle, DeclaredFeatures(["f_a", "f_b"]), preprocessor, params)
-
-    assert set(out) == {"f_a", "f_b"}
-
-
-def test_shap_diagnostics_refuses_a_partial_cache(tmp_path, shap_setup):
-    """Same contract on the other handle-reading diagnosis node.
-
-    Guarding only feature_statistics would leave the identical silent-subset read
-    open one node over: `read_column`/`take_rows` are as quiet on a half-copied
-    directory as `count_rows` is.
+    source*, `cache_test_model_input` clears it and rebuilds from Hive
+    (test_cache_nodes.py::TestPerMonthTestCache::test_partial_month_rebuilds_without_touching_siblings). By the time the handle is
+    here the source is gone from the picture, and `read_column`/`take_rows` on a
+    half-copied directory return rows without complaining -- the SHAP sample
+    would be drawn from an unknown fraction of the split.
     """
     adapter, _handle, preprocessor, parameters = shap_setup
 
     with pytest.raises(ValueError, match="_SUCCESS"):
         diag.compute_shap_diagnostics(
             adapter, _partial_cache(tmp_path, "test"), preprocessor, parameters)
-
-
-def test_compute_feature_statistics_sampling(tmp_path):
-    pdf = pd.DataFrame({"f": list(range(100))})
-    handle = _write_parquet(tmp_path, pdf)
-    preprocessor = {"feature_columns": ["f"]}
-    params = {"diagnostics": {"feature_stats": {"enabled": True, "sample_rows": 10}}}
-    out = diag.compute_feature_statistics(
-        handle, DeclaredFeatures(["f"]), preprocessor, params)
-    # 抽樣後仍回傳該特徵的統計（n_distinct 受抽樣上限約束）
-    assert out["f"]["n_distinct"] <= 10
 
 
 @pytest.fixture
@@ -550,37 +425,6 @@ def test_divergence_integration_multifeature(tmp_path, monkeypatch):
         assert any(d > 0.0 for d in divs)
 
 
-def test_feature_statistics_bounded_take(tmp_path, monkeypatch):
-    import numpy as np
-    import pandas as pd
-    from recsys_tfb.pipelines.training.steps import bounded_reads
-
-    n = 400
-    rng = np.random.RandomState(0)
-    pdf = pd.DataFrame({"f0": rng.randn(n), "f1": rng.randn(n)})
-    path = str(tmp_path / "train.parquet")
-    pq.write_table(pa.Table.from_pandas(pdf), path, row_group_size=50)
-    handle = ParquetHandle(path=path)
-    preprocessor = {"feature_columns": ["f0", "f1"]}
-    parameters = {"diagnostics": {"feature_stats": {"enabled": True, "sample_rows": 100}}}
-
-    seen = {}
-    real_take = bounded_reads.take_rows
-
-    def spy_take(p, indices, columns):
-        seen["n_indices"] = len(indices)
-        return real_take(p, indices, columns)
-
-    monkeypatch.setattr(bounded_reads, "take_rows", spy_take)
-    stats = diag.compute_feature_statistics(
-        handle, DeclaredFeatures(["f0", "f1"]), preprocessor, parameters)
-
-    # bounded: only sample_rows rows were taken, not the full 400
-    assert seen["n_indices"] == 100
-    assert set(stats) == {"f0", "f1"}
-    assert "mean" in stats["f0"]
-
-
 def test_shap_does_not_full_load_to_pandas(shap_setup, monkeypatch):
     # 重構意圖：SHAP 路徑不得再呼叫 ParquetHandle.to_pandas()（全量物化）。
     from recsys_tfb.io.handles import ParquetHandle
@@ -614,7 +458,7 @@ def test_shap_on_hive_partitioned_cache(tmp_path):
         partitioning=["snap_date", "prod_name"], partitioning_flavor="hive",
     )
     # The marker a cache node writes last. Without it this fixture is an
-    # interrupted copy, which the diagnosis nodes now refuse (ADR-0014
+    # interrupted copy, which the shap diagnosis now refuses (ADR-0014
     # decision 7) — production always has it.
     (pathlib.Path(base) / "_SUCCESS").touch()
     handle = ParquetHandle(path=base)

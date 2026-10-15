@@ -40,7 +40,7 @@ LightGBM 的 train/train-dev 會轉成可重用的 `.bin`，但這是目前 adap
 3. **item 保留為模型特徵**：`schema.item` 必須存在於 preprocessor 的 `feature_columns`，也不可被 `training.feature_selection.exclude` 排除。
 4. **Sample weight 欄位可用**：`sample_weight_keys` 中非 identity、label 或 categorical feature 的欄位，必須由 dataset 的 `carry_columns` 帶入 train model input。
 5. **Driver-local 空間足夠**：各 split 會從 Hive／HDFS 複製到 `cache.root`，模型、HPO study、診斷與 checkpoint 也會寫入 driver 本機檔案系統。**HPO 另外要 `data/_scratch` 放得下整份 val 矩陣**（`val 列數 × 特徵欄數 × itemsize`，生產規模 37～89 GiB）；不足時 `tune_hyperparameters` 會在建立前 raise，訊息含需求量、可用量與落點。檔案在映射完成當下就 unlink，跑完不留（見 §9.2）。
-6. **Driver 記憶體足夠**：模型訓練、部分指標計算及診斷會將資料讀入 driver；應依資料量控制 feature 數、HPO 規模與 SHAP／feature statistics 抽樣上限。
+6. **Driver 記憶體足夠**：模型訓練、部分指標計算及診斷會將資料讀入 driver；應依資料量控制 feature 數、HPO 規模與 SHAP 抽樣上限。
 
 CLI 啟動時會先執行設定一致性檢查，包括 ranking objective 與 metric 是否相容、HPO search space 格式、sample weight key 的欄位與段數、未知 item、feature selection 是否錯誤排除 item，以及 `hpo_objective` 與 `final_model_strategy` 是否為合法值（A25——打錯的話原本要等整輪 HPO 跑完才會炸），和選了 `pooled_average_precision`／`macro_per_item_average_precision` 時 val 有沒有留下沒有正例的 query group（A48，見 §3.2）。另外六項也在起 Spark 前由 training 指令擋下，一次列完：`training.algorithm` 不是已註冊的演算法（A57，訊息列出可用的名字）、跳過 HPO 的兩個鍵寫錯（A58，見 §3.2）、`dataset.test_snap_dates` 沒寫或是空清單（A36——原本要等整輪 HPO 跑完、到預測那一步才炸，訊息也沒提到這個設定）、`dataset.test_snap_dates` 用兩種拼法指到同一個月（A26）、`test_metrics` 區塊寫錯（A53，見 §3.7），以及 `training_eval_predictions` 這筆 catalog 條目沒有把 `schema.entity` 的每一欄都寫進 `columns:`（A28——Hive 寫入只留宣告過的欄，少宣告的那一欄會被靜默丟掉，寫出來的每一列都變成在指別的東西）。檢查分幾層、各在什麼時候擋下、哪些擋不住：[pipeline 的檢查](../operations/user-guides/pipeline-checks.md)。
 這些檢查可避免明顯設定錯誤進入長時間訓練，但不能判斷資料是否有 target leakage、日期切分是否符合業務觀察窗，或某個設定是否在統計上合理。
@@ -278,7 +278,6 @@ training 另會產生 `sample_weight_report.json`，列出實際 train 資料中
 | 區塊 | 用途 |
 |---|---|
 | `cache.root` | driver-local Parquet 與演算法格式快取根目錄 |
-| `diagnostics.feature_stats` | 控制特徵統計開關、抽樣列數與高 null threshold |
 | `diagnostics.feature_importance` | 控制模型原生 split/gain importance |
 | `diagnostics.gain_ledger` | 控制 Gain 帳本開關；跨樹按 item 記帳（id 切點 vs 子樹內 context 切點/Gain），量每個產品分到多少個人化容量。判讀見 `docs/pipelines/evaluation-diagnosis.md` §2（本檔不複述） |
 | `diagnostics.shap` | 控制 SHAP 開關、抽樣量、top K、計算預算、per-item 強化（方向、申辦客戶對照、偏離度）與象限診斷（per-(item×象限) profile 與極值案例圖）；`background: global\|per_item` 的條件化背景語意與版本限制見 `docs/pipelines/evaluation-diagnosis.md` §2.5 |
@@ -569,7 +568,6 @@ python -m recsys_tfb training \
 | 最終模型 | `finalize_model` | HPO 產物、train/train-dev handles | 沿用 HPO best 或在 train + train-dev refit | `model` |
 | Test 預測 | `predict_and_write_test_predictions` | model、test handles、上一次跑完時的 `predict_manifest`（`predict_manifest_on_disk`） | 逐月判斷是否需要預測，需要的月份再逐 `(time, item)` partition 預測並寫入 Hive | `training_eval_predictions`、`predict_manifest` |
 | Test 指標 | `compute_test_metrics` | test 預測 | 只讀計分月份，用 Spark 算 mAP、per-item attribution 與 §3.7 要的指標 | `evaluation_results` |
-| 特徵統計 | `compute_feature_statistics` | train handle、model、`preprocessor` | 抽樣計算 null、distinct 與數值分布 | `feature_statistics` |
 | 模型重要性 | `compute_feature_importance` | model | 計算 split、gain 與 dead features | `feature_importance` |
 | Gain 帳本 | `compute_gain_ledger` | model、`preprocessor` | 跨樹按 item 記帳（id 切點 vs context 切點的 Gain）；`preprocessor` 只用到 `category_mappings`，把整數切點還原成 item 值 | `gain_ledger` |
 | SHAP | `compute_shap_diagnostics` | model、test handle、`preprocessor` | 依 item 分層抽樣後計算全域 beeswarm、per-item 帶方向 SHAP profile（含申辦客戶對照）與偏離度排名 | `shap_diagnostics`、PNG |
@@ -578,32 +576,28 @@ python -m recsys_tfb training \
 | 象限案例 | `compute_quadrant_cases` | model、case_rows、`preprocessor` | 每 (item×象限) 極值案例單列 SHAP 圖 | `cases_manifest`、PNG |
 | 實驗記錄 | `log_experiment` | model、參數、指標、診斷 | 將實驗寫入 MLflow | 無 |
 
-**診斷 node 為什麼吃 `preprocessor` 而不是 `preprocessor_view`。** `preprocessor_view` 只活在記憶體裡，沒有 catalog 條目；吃它的 node 一定要連 `select_features` 一起重跑才叫得動。診斷 node 都在模型產出**之後**才跑，所以改問兩個已落地的產物：**用哪些特徵、什麼順序問模型**（`model.feature_names()`），**怎麼編碼問 `preprocessor`**。這五條邊因此消失了（[ADR-0014](../adr/0014-training-modules-split-by-role.md) 決定 7）。
+**診斷 node 為什麼吃 `preprocessor` 而不是 `preprocessor_view`。** `preprocessor_view` 只活在記憶體裡，沒有 catalog 條目；吃它的 node 一定要連 `select_features` 一起重跑才叫得動。診斷 node 都在模型產出**之後**才跑，所以改問兩個已落地的產物：**用哪些特徵、什麼順序問模型**（`model.feature_names()`），**怎麼編碼問 `preprocessor`**。這些診斷 node 對 `preprocessor_view` 的依賴因此消失了（[ADR-0014](../adr/0014-training-modules-split-by-role.md) 決定 7）。
 
-**實際省下的是 HPO。** `compute_feature_statistics` 從前沒有 model 依賴，拓撲序把一個寫進 `data/models/<model_version>/` 的診斷排到「產出模型的 node」之前；`--from-node` 是「跑指定 node 與其後全部」，於是為了重算一份 null rate 的 JSON，`prepare_train_inputs`（當時叫 `prepare_lgb_train_inputs`）、`tune_hyperparameters`、`finalize_model` 全被掃回來。實測 `--from-node compute_feature_statistics` **從 18 個 node 降到 13 個**，不再重跑 HPO。（issue #233 之後再降到 **11 個**——2026-08-31 於本機 `--env local` 量的，當時 calibration 啟用、pipeline 有 21 個 node（#411 之後是 20 個），`--from-node compute_feature_statistics --dry-run` 的輸出原文是 `[plan] running 11 of 21 nodes`。`--list-nodes` 不能與 `--from-node` 併用，它印的是每個 node 的 auto-included 清單，不是總數。）
+**從診斷起跑不會重跑 HPO。** 診斷群的第一個 node 是 `compute_feature_importance`，它吃 `model`，所以拓撲序把它排在產出模型的 `finalize_model` 之後；`--from-node` 是「跑指定 node 與其後全部」，於是從診斷起跑不會把 `prepare_train_inputs`、`tune_hyperparameters`、`finalize_model` 掃回來。（若診斷 node 沒有 model 依賴，拓撲序會把它排到 HPO 之前，一次診斷重跑就要重做 HPO 與最終訓練。）確切的補跑集合釘在 `tests/test_pipelines/test_resume_contracts.py`。
 
-**再省下的是預測那一步。** `predict_manifest` 也落地之後（issue #233），`--from-node compute_feature_statistics` 不再把 `predict_and_write_test_predictions` 拉回來，也就不再連帶拉回 `select_features`（predict node 是**套用**模型，吃 `preprocessor_view` 對它是正確的，所以只要它在切片裡，`select_features` 就跟著在）。省下的不是零：那個 node 就算判定全部月份都跳過、一列都不寫，開頭仍要列出 test cache 的分區目錄（#484 以前是把整張 test cache 的兩個字串欄拉進 driver 算 distinct，生產規模約 2.2 億列）。`compute_test_metrics` 與 `select_shap_population` 因此變成**零補跑**的接續點。
+**再省下的是預測那一步。** `predict_manifest` 也落地之後（issue #233），`--from-node compute_feature_importance` 不再把 `predict_and_write_test_predictions` 拉回來，也就不再連帶拉回 `select_features`（predict node 是**套用**模型，吃 `preprocessor_view` 對它是正確的，所以只要它在切片裡，`select_features` 就跟著在）。省下的不是零：那個 node 就算判定全部月份都跳過、一列都不寫，開頭仍要列出 test cache 的分區目錄（#484 以前是把整張 test cache 的兩個字串欄拉進 driver 算 distinct，生產規模約 2.2 億列）。`compute_test_metrics` 與 `select_shap_population` 因此變成**零補跑**的接續點。
 
-**還沒省下的**：兩個 `*_parquet_handle` 仍是 memory-only，所以切片仍會補跑兩個 cache node。要再往下砍，卡在 `cache.root` 是相對路徑：診斷若從別的目錄啟動會指到不同地方而且不報錯。確切的接續集合釘在 `tests/test_pipelines/test_resume_contracts.py`。
+**還沒省下的**：`test_parquet_handle` 仍是 memory-only，所以從診斷起跑仍會補跑 `cache_test_model_input`（`train_parquet_handle` 已經沒有診斷 node 讀它，不再被拖進來）。要再往下砍，卡在 `cache.root` 是相對路徑：診斷若從別的目錄啟動會指到不同地方而且不報錯。`--from-node compute_feature_importance` 實際執行的 node＝它與其後共 8 個 node，加上這一個 cache node，共 9 個（`--dry-run` 會印 `[plan] running 9 of 19 nodes`；`hpo_enabled: false` 時是 `9 of 18`）。
 
 **落地也有代價，寫在這裡免得被當成純賺**：切片跳過 predict node，就表示 `predict_manifest` 是從磁碟載回**上一次** run 的那一份。今天安全，因為吃它的兩個 node 都只拿它當排序依賴——`compute_test_metrics` 把它寫進 log，`select_shap_population` 連讀都沒讀；`--rebuild-dates` 被切片切掉時另有 `[rebuild] WARNING` 擋著。唯一從裡面取值的是 predict node 自己的下一次執行（讀每個月的預測格式版本，下面〈逐月增量〉），它要的正是上一次跑完時留下的那一份。中斷的 run 不會落地 manifest，讀到的就是更早那一次；只要程式沒有往回退，結果是多重寫、不是少重寫。往回退的那一種見〈逐月增量〉。真正沒有防護的是「加了新的 test 月份卻用 `--from-node` 從診斷那一帶起跑」：新月份不會被預測，指標也不會包含它。加月份的正規動線是 `--only-node predict_and_write_test_predictions`（見 [adding-an-eval-month.md](../operations/user-guides/adding-an-eval-month.md)），照著走就不會遇到。
 
-**還有一件事要知道**：`predict_manifest.json` 裡沒有 run_id，所以切片跳過 predict 的那種 run 跑完之後，版本目錄裡會有一份**上一次** run 寫的 `predict_manifest.json`，而同一層的 `manifest.json` 記的是這一次的 run_id。這不是這個條目特有的——`feature_statistics.json`、`shap_diagnostics.json` 等等只要被切片跳過就都是這樣，`[plan] WARNING: resume assumes the skipped artifacts are still valid` 就是為此而印。要靠 `predict_manifest.json` 回答「**這一次**跑了哪些月」而不是「**最後一次預測**跑了哪些月」的話，得先給它一個 run_id，那是另一張票。
+**還有一件事要知道**：`predict_manifest.json` 裡沒有 run_id，所以切片跳過 predict 的那種 run 跑完之後，版本目錄裡會有一份**上一次** run 寫的 `predict_manifest.json`，而同一層的 `manifest.json` 記的是這一次的 run_id。這不是這個條目特有的——`feature_importance.json`、`shap_diagnostics.json` 等等只要被切片跳過就都是這樣，`[plan] WARNING: resume assumes the skipped artifacts are still valid` 就是為此而印。要靠 `predict_manifest.json` 回答「**這一次**跑了哪些月」而不是「**最後一次預測**跑了哪些月」的話，得先給它一個 run_id，那是另一張票。
 
-代價是 `compute_feature_statistics` 多了一個 `model` 輸入——資料層診斷因此綁上模型 artifact。之所以接受：`feature_statistics` 本來就寫在 `data/models/<model_version>/` 底下，替一個不存在的模型算診斷本來就不成立。
-
-**這不是在修一個靜默錯誤。** 改由 config 推導欄集**不會**漂移：`training.feature_selection.exclude` 住在 `training:` block，改它會 bump `model_version` → model 的 catalog 路徑跟著變 → 整條訓練鏈被拉回重跑。ADR-0014 決定 7 對這點有明確的誠實標註。**這是把介接口弄乾淨**，理由是可定址性（catalog 條目）與拓撲位置，不是正確性。（inference 那邊的理由不同、且真的關乎正確性，見 [ADR-0011](../adr/0011-inference-validation-two-layers.md) §5。）
+**診斷改問模型，不是在修一個靜默錯誤。** 就算改由 config 推導欄集，也**不會**漂移：`training.feature_selection.exclude` 住在 `training:` block，改它會 bump `model_version` → model 的 catalog 路徑跟著變 → 整條訓練鏈被拉回重跑。ADR-0014 決定 7 對這點有明確的誠實標註。**這是把介接口弄乾淨**，理由是可定址性（catalog 條目）與拓撲位置，不是正確性。（inference 那邊的理由不同、且真的關乎正確性，見 [ADR-0011](../adr/0011-inference-validation-two-layers.md) §5。）
 
 **半成品 cache 現在會擋下來。** cache node 的 `_SUCCESS` marker 是最後才寫的，所以「有目錄、沒 marker」＝複製到一半斷了。同一個 marker 兩邊行為刻意相反：
 
 | 誰 | 拿到沒有 `_SUCCESS` 的目錄 | 為什麼 |
 |---|---|---|
 | `cache_train_model_input` 等 cache node | **清掉，從 Hive 重建** | 來源還在，重建是對的復原行為 |
-| `compute_feature_statistics`、`compute_shap_diagnostics` | **報錯**（`require_complete_cache`） | 它們只拿到 handle、重建不了；讀半成品不會報錯，統計會照算、MLflow 會照記，數字描述的是不知道多大的一部分資料 |
+| `compute_shap_diagnostics` | **報錯**（`require_complete_cache`） | 它只拿到 handle、重建不了；讀半成品不會報錯，SHAP 抽樣會照做、MLflow 會照記，數字描述的是不知道多大的一部分資料 |
 
 （[ADR-0014](../adr/0014-training-modules-split-by-role.md) 決定 7 的驗收條件，兩條分開測。）
-
-實務差別有兩處，方向相反：`--only-node compute_feature_statistics` 現在需要一個 `model_version` 範圍的輸入（變貴）；`--from-node compute_feature_statistics` 不再掃回 HPO（變便宜，見上）。
 
 test 預測會逐 partition 讀取 driver-local Parquet，避免一次將全部 test features 收進記憶體。有哪些 `(time, item)` partition 是從 cache 的分區目錄名稱取的，不讀任何一列資料；每個 partition 只讀兩種欄：寫出的表要帶的欄（entity、label、選用角色欄、有的話零正例組權重），以及模型評分要讀的欄（由模型 adapter 的 `scoring_columns` 回答，單一模型就是它自己的特徵）。分數經 `ModelAdapter.score` 取得，跟 inference 走同一個入口。
 每個 partition 寫出**前**都會檢查（#484 起；之前 training 不檢查），分兩種，失敗時該找的人不同：
@@ -638,7 +632,7 @@ manifest 只在 node 跑完時落地，所以記錄永遠是**上一次跑完**�
 | Test 指標 | `evaluation_results.json`（原本 4 個鍵，加上 `snap_dates`、`metrics`、`metrics_not_computed`、`selection_metric`、`hpo_objective`，見下方） | `data/models/<model_version>/` |
 | 權重診斷 | `sample_weight_report.json` | `data/models/<model_version>/` |
 | Test 預測的月份決定 | `predict_manifest.json`（`months_processed`／`months_skipped`／`months_rebuilt` 三份清單，與每個月的 `prediction_format_versions`） | `data/models/<model_version>/` |
-| 模型診斷 | feature statistics、importance、`shap_diagnostics.json`、`per_quadrant.json`、`cases/` PNG 與 `cases_manifest.json` | `data/models/<model_version>/diagnostics/` |
+| 模型診斷 | importance、`shap_diagnostics.json`、`per_quadrant.json`、`cases/` PNG 與 `cases_manifest.json` | `data/models/<model_version>/diagnostics/` |
 | 執行追溯 | `manifest.json`、`parameters_training.json` | `data/models/<model_version>/` |
 | Test 預測 | `training_eval_predictions` | Hive，以 `model_version`、time、item 分區 |
 | HPO 恢復狀態 | Optuna journal 與最佳 checkpoint | `data/models/_hpo/<search_id>/` |
@@ -685,7 +679,7 @@ training 不會建立或更新 `best` model alias。模型必須通過人工審�
 4. `sample_weight_report.json` 沒有未預期的 `unmatched_keys`。
 5. `training_eval_predictions` 的本次 `model_version` partition 有資料，entity、time、item 與 label 範圍合理。
 6. `evaluation_results.json` 的 `n_queries` 大於零，`snap_dates` 是你要的計分月份，`overall_map` 與 per-item attribution 可合理解讀；`metrics_not_computed` 通常是空的，只有「選版指標明寫成排序類、HPO 目標是二元預測類、test 沒留無正例的 query group」時會有那個 HPO 目標（§3.7）。
-7. diagnostics 開啟時，檢查 dead features、高 null／single-value features，以及 SHAP 抽樣覆蓋是否足夠；`item_idiosyncrasy` 中偏離度高的 item 表示共用模型依賴不同特徵組合，是評估 per-item 或兩階段模型的起點；`top_features_positive` 可對照申辦客戶與整體候選的驅動特徵差異。
+7. diagnostics 開啟時，檢查 dead features，以及 SHAP 抽樣覆蓋是否足夠；`item_idiosyncrasy` 中偏離度高的 item 表示共用模型依賴不同特徵組合，是評估 per-item 或兩階段模型的起點；`top_features_positive` 可對照申辦客戶與整體候選的驅動特徵差異。
 
 範例查詢：
 
@@ -839,7 +833,7 @@ training 版本描述的是模型設定、上游資料身分與框架的模型�
 - 目前實際註冊的演算法 adapter 為 LightGBM；其他演算法需要另外實作 `ModelAdapter` 的每個抽象方法（建原生訓練資料與存讀、帶早停訓練與回報最佳迭代數、predict、save/load、MLflow），並在 `rules` 宣告自己的排序目標、排序 metric、預設 metric 與丟不丟無正例的 query group。診斷用的三項能力是選用的：特徵歸因（SHAP）、樹的切點結構（gain 帳本）、內建重要度（split／gain）。做不到的不實作，ABC 的預設會丟 `UnsupportedCapability`，對應的診斷跳過並寫明「模型做不到」。
 - 模型訓練是 driver 上的單機 CPU 工作，不是 Spark distributed training；Spark 主要負責上游資料處理、Hive I/O 與 test 指標聚合。
 - train、train-dev、val 與 test 的 local Parquet 會占用 driver disk；cache 不會自動依版本數量清理。
-- feature statistics、SHAP 與部分模型資料抽取使用 pandas／NumPy，記憶體尖峰取決於 rows、features 與 tree 數。
+- SHAP 與部分模型資料抽取使用 pandas／NumPy，記憶體尖峰取決於 rows、features 與 tree 數。
 - **`prepare_train_inputs` 與 `refit_on_full` 的建矩陣步驟是全流程的 driver 記憶體峰值**，且它的觀測數字會低報——見 §9.1。
 - **HPO 期間的 val 矩陣不佔 driver 記憶體，改佔 driver disk**（#285）：`data/_scratch` 底下要有 `val 列數 × 特徵欄數 × itemsize` 的空間，空間不足會在建立前 raise。見 §9.2。
 - HPO study 不支援同一 `search_id` 由多個 training processes 同時寫入；應避免並行啟動相同搜尋。
