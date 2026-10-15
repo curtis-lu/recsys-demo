@@ -762,15 +762,13 @@ class TestCategoricalDtypeAllowList:
 
 
 class TestDiagnosisMetricParamsA15:
-    def _params(self, metric=None, sample=None, ci=None, item_ability=None):
+    def _params(self, metric=None, sample=None, item_ability=None):
         ev = {}
         if metric is not None:
             ev["metric"] = metric
         diag = {}
         if sample is not None:
             diag["sample"] = sample
-        if ci is not None:
-            diag["ci"] = ci
         if item_ability is not None:
             diag["item_ability"] = item_ability
         if diag:
@@ -794,7 +792,6 @@ class TestDiagnosisMetricParamsA15:
                     "shrinkage_k": 0},
             sample={"max_queries": 200000, "min_pos_queries_per_item": 50,
                     "seed": 42},
-            ci={"enabled": True, "n_boot": 200},
         )
         assert diagnosis_metric_param_errors(p) == []
 
@@ -804,20 +801,19 @@ class TestDiagnosisMetricParamsA15:
             metric={"weight_alpha": 1.5, "k": 0, "min_positives": -1,
                     "shrinkage_k": -0.1},
             sample={"max_queries": 0, "min_pos_queries_per_item": 0},
-            ci={"n_boot": 0},
             item_ability={"top_n": -1},
         )
         errors = diagnosis_metric_param_errors(p)
         joined = "\n".join(errors)
         # Token check first: if a predicate is dropped, the failure message
         # then names *which* key stopped being validated, instead of only
-        # reporting a count that went from 8 to 7.
+        # reporting a count that went from 7 to 6.
         for token in ["weight_alpha", "metric.k", "min_positives",
                       "shrinkage_k", "max_queries",
-                      "min_pos_queries_per_item", "n_boot",
+                      "min_pos_queries_per_item",
                       "item_ability.top_n"]:
             assert token in joined, f"{token} is no longer validated"
-        assert len(errors) == 8
+        assert len(errors) == 7
 
     def test_top_n_negative_or_non_int_rejected(self):
         """A15 自己就要擋 item_ability.top_n < 0 / bool / 非 int。
@@ -936,23 +932,17 @@ class TestReservedSegmentColumnsA15:
 class TestEnabledMustBeBool:
     """A15：enabled 必須是 bool——YAML 引號字串 "false" 恆真，會靜默啟用節點。"""
 
-    def test_ci_enabled_string_rejected(self):
-        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
-        p = {"evaluation": {"diagnosis": {"ci": {"enabled": "false"}}}}
-        errors = diagnosis_metric_param_errors(p)
-        assert len(errors) == 1 and "ci.enabled" in errors[0]
-
     def test_bool_values_clean(self):
         from recsys_tfb.core.consistency import diagnosis_metric_param_errors
-        p = {"evaluation": {"diagnosis": {"ci": {"enabled": False}}}}
+        p = {"evaluation": {"diagnosis": {"config_shift": {"enabled": False}}}}
         assert diagnosis_metric_param_errors(p) == []
 
     def test_config_shift_enabled_string_rejected(self):
         """同一個 YAML 陷阱套用在 config_shift 上。
 
-        歸在 A15（診斷抽樣與 CI 的參數家族）而不是開新代號：config_shift 的
-        enabled 決定的正是「共用診斷抽樣要不要抽」，跟 ci.enabled 是同一條
-        不變量的另一個成員。
+        歸在 A15（診斷抽樣的參數家族）而不是開新代號：config_shift 的
+        enabled 決定的正是「共用診斷抽樣要不要抽」，跟 diagnosis.sample 的
+        參數是同一條不變量的成員。
         """
         from recsys_tfb.core.consistency import diagnosis_metric_param_errors
         for bad in ("false", "true", 0, 1, None):
@@ -3169,6 +3159,60 @@ class TestRetiredCalibrationBinKeysA43:
             "include_calibration": True}}}
         assert retired_calibration_bin_key_errors(p), "premise: this conf is bad"
         validate_config_consistency(p)
+
+
+# --- A61: the confidence-interval block #515 retired --------------------------
+
+from recsys_tfb.core.consistency import (  # noqa: E402
+    RETIRED_DIAGNOSIS_CI_KEYS,
+    retired_diagnosis_ci_key_errors,
+)
+
+
+class TestRetiredDiagnosisCiKeyA61:
+    @pytest.mark.parametrize("value", [
+        {}, {"enabled": False}, {"enabled": True, "n_boot": 200}, None, False,
+    ], ids=["empty", "disabled", "the-old-default", "null", "false"])
+    def test_the_block_is_refused_whatever_its_value(self, value):
+        """Presence is the failure (A43's shape): ``enabled: false`` switches
+        off nothing that still exists, and the key sits in a fingerprinted
+        subtree, so leaving it behind is not the same conf as deleting it."""
+        p = {"evaluation": {"diagnosis": {
+            "sample": {"seed": 42}, "ci": value}}}
+        errors = retired_diagnosis_ci_key_errors(p)
+        assert len(errors) == 1
+        assert errors[0].startswith("A61:")
+        assert repr("evaluation.diagnosis.ci") in errors[0]
+        # The message says what to do and why there is nothing to switch to.
+        assert "Delete" in errors[0] and "#515" in errors[0]
+
+    def test_a_conf_without_it_passes(self):
+        assert retired_diagnosis_ci_key_errors({}) == []
+        assert retired_diagnosis_ci_key_errors({"evaluation": {"diagnosis": {
+            "sample": {"seed": 42}, "config_shift": {"enabled": True}}}}) == []
+        # A sibling key that merely contains the name is not the block.
+        assert retired_diagnosis_ci_key_errors({"evaluation": {
+            "ci": {"enabled": True}}}) == []
+
+    def test_the_shipped_confs_do_not_spell_it(self):
+        from pathlib import Path
+
+        from recsys_tfb.core.config import ConfigLoader
+
+        root = Path(__file__).resolve().parents[2]
+        for conf in (root / "conf", root / "examples" / "ad" / "conf"):
+            params = ConfigLoader(str(conf), env="local").get_parameters()
+            assert retired_diagnosis_ci_key_errors(params) == [], conf
+
+    def test_not_aggregated_by_validate_config_consistency(self):
+        """Evaluation-only key, A34's reason (issue #158)."""
+        p = _base({"inference": {"products": ["a", "b"]}})
+        p["evaluation"] = {"diagnosis": {"ci": {"enabled": True}}}
+        assert retired_diagnosis_ci_key_errors(p), "premise: this conf is bad"
+        validate_config_consistency(p)
+
+    def test_the_constant_names_the_block(self):
+        assert RETIRED_DIAGNOSIS_CI_KEYS == ("evaluation.diagnosis.ci",)
 
 
 # --- A33: migration-period check for the #327 config key rename --------------
