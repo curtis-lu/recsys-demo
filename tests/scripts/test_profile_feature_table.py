@@ -1,9 +1,10 @@
 """Tests for scripts/profile_feature_table.py (stage one: basic checks).
 
 The judgement rules are tested on hand-built stats (no Spark): each problem type
-gets one column that is flagged and one that only just is not. The Spark side
-gets its own tests for the empty-value cleaning (NaN, ±Infinity, empty string,
-all-empty periods) and the batching.
+gets one column that is flagged and one that only just is not. The report is a
+single page; its tests read the HTML the way the page's JS does (ids, data-*
+attributes). The Spark side gets its own tests for the empty-value cleaning
+(NaN, ±Infinity, empty string, all-empty periods) and the batching.
 """
 
 import json
@@ -14,9 +15,9 @@ from typer.testing import CliRunner
 
 from scripts.profile_feature_table import (
     DEFAULT_THRESHOLDS,
-    INT_EXACT,
     PROFILE_FILENAME,
     ProfileConfig,
+    actions,
     app,
     check_against_table,
     judge,
@@ -30,12 +31,11 @@ TH = dict(DEFAULT_THRESHOLDS)
 ROWS = [100, 100, 100]
 
 
-def _col(null, mins, maxs=None, *, kind="numeric", dtype="bigint", has_decimal=False):
+def _col(null, mins, maxs=None, *, kind="numeric", dtype="bigint"):
     return {
         "name": "x",
         "dtype": dtype,
         "kind": kind,
-        "has_decimal": has_decimal,
         "null": list(null),
         "min": list(mins),
         "max": list(mins if maxs is None else maxs),
@@ -92,65 +92,26 @@ class TestOneValueFlags:
         assert judge_column(_col([0, 0, 0], lo, hi), ROWS, TH) == []
 
     def test_one_value_per_period_but_different_values_is_const_each(self):
-        col = _col([0, 0, 0], [31.0, 31.5, 32.0], dtype="double", has_decimal=True)
+        col = _col([0, 0, 0], [31.0, 31.5, 32.0], dtype="double")
         assert judge_column(col, ROWS, TH) == ["const_each"]
 
     def test_one_value_per_period_and_all_equal_is_not_const_each(self):
-        col = _col([0, 0, 0], [31.0, 31.0, 31.0], dtype="double", has_decimal=True)
+        col = _col([0, 0, 0], [31.0, 31.0, 31.0], dtype="double")
         assert judge_column(col, ROWS, TH) == ["const_all"]
 
     def test_string_columns_compare_their_values(self):
-        col = _col([0, 0, 0], ["N", "N", "N"], kind="string", dtype="string",
-                   has_decimal=None)
+        col = _col([0, 0, 0], ["N", "N", "N"], kind="string", dtype="string")
         assert judge_column(col, ROWS, TH) == ["const_all"]
-        col = _col([0, 0, 0], ["A", "B", "A"], kind="string", dtype="string",
-                   has_decimal=None)
+        col = _col([0, 0, 0], ["A", "B", "A"], kind="string", dtype="string")
         assert judge_column(col, ROWS, TH) == ["const_each"]
 
 
-class TestPrecisionFlag:
-    def test_decimal_column_at_threshold_is_flagged(self):
-        col = _col([0, 0, 0], [0.5, 0.5, 0.5], [10.5, 100000.0, 10.5],
-                   dtype="double", has_decimal=True)
-        assert judge_column(col, ROWS, TH) == ["precision"]
-
-    def test_decimal_column_just_below_threshold_is_not_flagged(self):
-        col = _col([0, 0, 0], [0.5, 0.5, 0.5], [10.5, 99999.99, 10.5],
-                   dtype="double", has_decimal=True)
+class TestNoFloat32Check:
+    def test_large_values_are_not_a_problem(self):
+        # float32 精度檢查已拿掉：對 LightGBM 幾乎沒影響（設計文件附錄二）
+        col = _col([0, 0, 0], [0.5, 0.5, 0.5], [1.5, 272_528_123.98, 1.5], dtype="double")
         assert judge_column(col, ROWS, TH) == []
-
-    def test_integer_column_above_2_to_the_24_is_flagged(self):
-        col = _col([0, 0, 0], [0, 0, 0], [1, INT_EXACT + 1, 1])
-        assert judge_column(col, ROWS, TH) == ["precision"]
-
-    def test_integer_column_at_2_to_the_24_is_not_flagged(self):
-        # 2^24 本身存成 float32 一個不差
-        col = _col([0, 0, 0], [0, 0, 0], [1, INT_EXACT, 1])
-        assert judge_column(col, ROWS, TH) == []
-
-    def test_large_negative_minimum_counts(self):
-        col = _col([0, 0, 0], [0, -(INT_EXACT + 1), 0], [1, 1, 1])
-        assert judge_column(col, ROWS, TH) == ["precision"]
-
-    def test_float_typed_column_is_already_float32(self):
-        col = _col([0, 0, 0], [0.5, 0.5, 0.5], [10.5, 100000.367, 10.5],
-                   dtype="float", has_decimal=True)
-        assert judge_column(col, ROWS, TH) == []
-
-    def test_whole_valued_double_uses_the_integer_limit(self):
-        # 沒有小數的數值欄位當整數看，不管宣告的型別
-        col = _col([0, 0, 0], [0.0, 0.0, 0.0], [1.0, 200000.0, 1.0],
-                   dtype="double", has_decimal=False)
-        assert judge_column(col, ROWS, TH) == []
-
-    def test_strings_are_never_flagged(self):
-        col = _col([0, 0, 0], ["a", "a", "a"], ["zzz", "zzz", "zzz"],
-                   kind="string", dtype="string", has_decimal=None)
-        assert judge_column(col, ROWS, TH) == []
-
-    def test_const_each_skips_precision(self):
-        col = _col([0, 0, 0], [INT_EXACT, INT_EXACT + 1, INT_EXACT + 2])
-        assert judge_column(col, ROWS, TH) == ["const_each"]
+        assert judge_column(_col([0, 0, 0], [0, 0, 0], [1, 2**24 + 1, 1]), ROWS, TH) == []
 
 
 class TestOrderAndEdges:
@@ -187,6 +148,39 @@ class TestOrderAndEdges:
             ],
         }
         assert judge(profile, TH) == {"c": ["const_all"]}
+
+
+class TestActions:
+    """判斷結果到總結裡的三種做法。"""
+
+    def _actions(self, col, rows=ROWS):
+        return actions(col, rows, judge_column(col, rows, TH), TH)
+
+    def test_jump_of_at_least_10_points_means_upstream(self):
+        # 99% − 89% 剛好 10 個百分點（浮點數相減是 0.0999…，要算成 10）
+        lo, hi = _varying()
+        assert self._actions(_col([89, 99, 89], lo, hi)) == ["upstream"]
+
+    def test_jump_below_10_points_means_judge(self):
+        lo, hi = _varying()
+        assert self._actions(_col([90, 99, 90], lo, hi)) == ["judge"]
+
+    def test_const_some_means_upstream_and_const_each_means_judge(self):
+        assert self._actions(_col([0, 0, 0], [0, 7, 0], [10, 7, 10])) == ["upstream"]
+        assert self._actions(_col([0, 0, 0], [1, 2, 3])) == ["judge"]
+
+    def test_two_actions_are_both_listed(self):
+        # 中間那期斷掉（跳幅 96 個百分點），另外兩期各只有一個值、值不同
+        assert self._actions(_col([4, 100, 4], [1, None, 2])) == ["upstream", "judge"]
+
+    def test_excludable_columns_only_get_exclude(self):
+        assert self._actions(_col([0, 0, 0], [5, 5, 5])) == ["exclude"]
+        lo, hi = _varying()
+        assert self._actions(_col([99, 100, 99], lo, hi)) == ["exclude"]
+
+    def test_no_problem_no_action(self):
+        lo, hi = _varying()
+        assert self._actions(_col([0, 0, 0], lo, hi)) == []
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +229,10 @@ thresholds:
         for needle in ("table", "key_cols", "exlude_cols", "psi", "null_ratio"):
             assert needle in joined, needle
         assert len(problems) == 5
+
+    def test_removed_float32_threshold_is_an_unknown_key(self):
+        _, problems = parse_config(_GOOD + "thresholds:\n  precision_max_abs: 100000\n")
+        assert len(problems) == 1 and "precision_max_abs" in problems[0]
 
     def test_spark_settings_are_not_a_config_key(self):
         # 同 scripts/sampling_overrides_editor.py：Spark 設定全由 SPARK_CONF_DIR 決定
@@ -306,46 +304,107 @@ def _profile(tmp_path):
     return profile
 
 
+def _section_html(page, sid):
+    return page.split(f'<section id="{sid}">')[1].split("</section>")[0]
+
+
 class TestRender:
     def test_new_thresholds_change_the_judgement(self, tmp_path):
         _profile(tmp_path)
         runner = CliRunner()
         result = runner.invoke(app, ["render", str(tmp_path)])
         assert result.exit_code == 0, result.output
-        flags_page = (tmp_path / "01-flags.html").read_text()
-        assert "部分期別幾乎是空值（0 欄）" in flags_page
+        page = (tmp_path / "index.html").read_text()
+        assert "部分期別幾乎是空值（0 欄）" in page
 
         cfg = tmp_path / "loose.yaml"
         cfg.write_text(_GOOD + "thresholds:\n  null_ratio: 0.95\n")
         result = runner.invoke(app, ["render", str(tmp_path), "--config", str(cfg)])
         assert result.exit_code == 0, result.output
-        flags_page = (tmp_path / "01-flags.html").read_text()
-        assert "部分期別幾乎是空值（1 欄）" in flags_page
-        assert "half_empty" in flags_page
-        index = (tmp_path / "index.html").read_text()
-        assert "0.95" in index
+        page = (tmp_path / "index.html").read_text()
+        assert "部分期別幾乎是空值（1 欄）" in page
+        assert 'data-name="half_empty"' in _section_html(page, "s-null-some")
+        assert "0.95" in _section_html(page, "s-scope")
 
-    def test_report_pages_and_paste_ready_exclude_list(self, tmp_path):
+    def test_old_profile_with_the_removed_float32_threshold_still_renders(self, tmp_path):
+        # 上一版存的 profile.json 帶著 precision_max_abs 與 has_decimal
+        profile = _profile(tmp_path)
+        profile["config"]["thresholds"]["precision_max_abs"] = 100000
+        for c in profile["columns"]:
+            if c["kind"] != "unchecked":
+                c["has_decimal"] = False
+        (tmp_path / PROFILE_FILENAME).write_text(json.dumps(profile))
+        result = CliRunner().invoke(app, ["render", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        assert "precision_max_abs" not in _section_html((tmp_path / "index.html").read_text(), "s-scope")
+
+    def test_single_page_without_framework_wording(self, tmp_path):
+        profile = _profile(tmp_path)
+        path = write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
+        assert path == tmp_path / "index.html"
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["index.html", PROFILE_FILENAME]
+        page = path.read_text()
+        assert "load_dt" in _section_html(page, "s-scope")
+        # 使用者要求：報告不跟框架耦合，不提框架的設定或 pipeline
+        for word in ("dataset", "training", "feature_selection", "drop_columns", "float32", "LightGBM"):
+            assert word not in page, word
+        # 設計文件第六節：不用箭頭
+        assert "→" not in page
+
+    def test_element_ids_are_unique(self, tmp_path):
+        # 重複的 id 讓 getElementById 拿到 section 而不是表格，整段 JS 在載入時就壞掉
+        import re
+        from collections import Counter
+
         profile = _profile(tmp_path)
         write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
-        names = sorted(p.name for p in tmp_path.iterdir())
-        assert names == ["01-flags.html", "02-basic.html", "05-all.html",
-                         "index.html", "plotly.min.js", PROFILE_FILENAME]
-        flags_page = (tmp_path / "01-flags.html").read_text()
-        assert "exclude: [sys_version]" in flags_page
-        all_page = (tmp_path / "05-all.html").read_text()
-        assert "load_dt" in all_page
-        # 設計文件第六節：不用箭頭
-        for page in tmp_path.glob("*.html"):
-            assert "→" not in page.read_text(), page.name
+        ids = re.findall(r'\sid="([^"]+)"', (tmp_path / "index.html").read_text())
+        assert [i for i, n in Counter(ids).items() if n > 1] == []
+        assert {"t-all", "col-data", "col-half_empty"} <= set(ids)
 
-    def test_table_name_is_escaped_in_the_index(self, tmp_path):
+    def test_summary_groups_columns_and_lists_upstream_periods(self, tmp_path):
+        profile = _profile(tmp_path)
+        profile["columns"] += [
+            dict(_col([4, 100, 4], [0, None, 0], [9, None, 9]), name="cc_bal"),     # 跳幅 96：上游
+            dict(_col([95, 99, 95], [0, 0, 0], [9, 9, 9]), name="loan_amt"),        # 跳幅 4：看業務意義
+        ]
+        write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
+        page = (tmp_path / "index.html").read_text()
+        summary = _section_html(page, "s-actions")
+        exclude, upstream, judge_row = summary.split("<tr>")[2:5]
+        assert 'data-copy-text="sys_version"' in exclude
+        assert 'data-copy-text="cc_bal"' in upstream and "<b>2024-02</b>" in upstream
+        assert "loan_amt" not in upstream
+        assert 'data-copy-text="loan_amt"' in judge_row
+        # 期別篩選用期別的序號當代號，期別字串裡有空白也不會切壞
+        some = _section_html(page, "s-null-some")
+        assert 'data-name="cc_bal" data-bad="p1"' in some
+        assert '<option value="p1">2024-02</option>' in some
+
+    def test_copied_names_are_one_per_line(self, tmp_path):
+        profile = _profile(tmp_path)
+        profile["columns"].append(dict(_col([0, 0, 0], [1, 1, 1]), name="flag_b"))
+        write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
+        exclude = _section_html((tmp_path / "index.html").read_text(), "s-actions").split("<tr>")[2]
+        assert 'data-copy-text="sys_version\nflag_b"' in exclude or 'data-copy-text="flag_b\nsys_version"' in exclude
+
+    def test_table_name_is_escaped(self, tmp_path):
         profile = _profile(tmp_path)
         profile["config"]["table"] = "db.<b>t</b>"
         write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
-        index = (tmp_path / "index.html").read_text()
-        assert "<b>t</b>" not in index
-        assert "&lt;b&gt;t&lt;/b&gt;" in index
+        page = (tmp_path / "index.html").read_text()
+        assert "<b>t</b>" not in page
+        assert "&lt;b&gt;t&lt;/b&gt;" in page
+
+    def test_string_values_cannot_close_the_embedded_json(self, tmp_path):
+        profile = _profile(tmp_path)
+        profile["columns"].append(dict(_col([0, 0, 0], ["</script>"] * 3, ["z"] * 3, kind="string",
+                                            dtype="string"), name="s"))
+        write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
+        page = (tmp_path / "index.html").read_text()
+        # 只有兩個 <script>：內嵌的 JSON 與主程式；值裡的 </script> 被換成 <\/script>
+        assert page.count("</script>") == 2
+        assert "<\\/script>" in page
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +438,6 @@ class TestProfileTable:
         assert profile["periods"] == ["2024-01"] and profile["rows"] == [4]
         assert cols["d"]["null"] == [3]
         assert cols["d"]["min"] == [1.5] and cols["d"]["max"] == [1.5]
-        assert cols["d"]["has_decimal"] is True
         assert cols["s"]["null"] == [2]
         assert cols["s"]["kind"] == "string"
         assert cols["b"]["kind"] == "string"
@@ -399,7 +457,6 @@ class TestProfileTable:
         cols = _by_name(profile)
         assert cols["v"]["null"] == [2, 0]
         assert cols["v"]["min"] == [None, 10] and cols["v"]["max"] == [None, 20]
-        assert cols["c"]["has_decimal"] is False
         flags = judge(profile, DEFAULT_THRESHOLDS)
         assert flags["v"] == ["null_some"]
         assert flags["c"] == ["const_all"]
@@ -412,16 +469,16 @@ class TestProfileTable:
         many = profile_table(spark, _cfg("fp_batches"), batch_size=100)
         assert one["columns"] == many["columns"]
 
-    def test_decimal_fraction_and_unchecked_types(self, spark):
+    def test_decimal_and_unchecked_types(self, spark):
         df = spark.sql(
             "SELECT '2024-01' AS t, 1 AS k, CAST(12.50 AS DECIMAL(18,2)) AS dec_frac, "
             "CAST(12 AS DECIMAL(18,2)) AS dec_whole, DATE'2024-01-31' AS load_dt"
         )
         df.createOrReplaceTempView("fp_types")
         cols = _by_name(profile_table(spark, _cfg("fp_types"), batch_size=10))
-        assert cols["dec_frac"]["has_decimal"] is True
-        assert cols["dec_whole"]["has_decimal"] is False
         assert cols["dec_frac"]["max"] == [12.5]
+        assert cols["dec_whole"]["min"] == [12.0]
+        assert "has_decimal" not in cols["dec_frac"]  # 只給 float32 檢查用，已拿掉
         assert cols["load_dt"] == {"name": "load_dt", "dtype": "date", "kind": "unchecked"}
 
     def test_time_range_where_and_null_time_rows(self, spark):
@@ -468,4 +525,5 @@ class TestRunCommand:
         assert result.exit_code == 0, result.output
         profile = json.loads((out / PROFILE_FILENAME).read_text())
         assert profile["periods"] == ["2024-01", "2024-02"]
-        assert "dead" in (out / "01-flags.html").read_text()
+        page = (out / "index.html").read_text()
+        assert 'data-name="dead"' in _section_html(page, "s-null-all")

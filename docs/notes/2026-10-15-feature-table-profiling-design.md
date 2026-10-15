@@ -1,6 +1,6 @@
 # 特徵表檢查工具：設計
 
-> 2026-10-15 定案，開發照這份做。報告的樣子看同目錄的 `2026-10-15-feature-table-profiling-mockup.html`：數字是假的，用瀏覽器打開即可（樣板為了預覽從網路載入 plotly；實際報告用本機產生的 `plotly.min.js`，不連網）。
+> 2026-10-15 定案，開發照這份做。同日第二輪改版（使用者看過假資料 demo 才改）：報告改成依檢視項目分段的單一頁面、行動建議放最後總結、不提框架、拿掉 float32 精度檢查。報告的樣子看同目錄的 `2026-10-15-feature-table-profiling-mockup.html`：用工具本身的 `write_report` 畫 20 欄、12 期的假資料，用瀏覽器打開即可。
 
 ## 總表
 
@@ -9,16 +9,16 @@
 | 做什麼 | 檢查一張特徵表在每一期的狀況，標出需要處理的欄位，給建議的處理方式 |
 | 看什麼 | 一次看一張 Hive 表，表名由工具使用者指定，不綁 `catalog.yaml` |
 | 怎麼跑 | 獨立腳本 `scripts/profile_feature_table.py`，手動執行；設定寫在工具自己的 yaml，用 `--config` 指定 |
-| 和框架的關係 | 不讀 `conf/` 底下的任何設定；判斷規則也不沿用框架的函式（例如 float32 精度直接依 float32 本身的值域算） |
+| 和框架的關係 | 不讀 `conf/` 底下的任何設定；判斷規則也不沿用框架的函式；報告不提框架的設定或 pipeline |
 | 檢查項目 | 基本檢查（一定跑）、分布偏移與極端值（可選）、相關性（可選） |
 | 用多少資料 | 每一期都用全部資料；只有相關性是抽最新一期的 50,000 筆 |
-| 門檻 | 寫在 yaml 的 `thresholds`，沒寫就用預設值；報告首頁列出這次用的值 |
-| 輸出 | 先存成 `profile.json`，再畫成一個 HTML 資料夾。改了門檻只要重畫，不用重跑 Spark |
-| 建議處理方式 | 寫出真的設定鍵與可以直接貼上的欄名清單；字句在開發時 demo 給專案負責人，一起決定 |
+| 門檻 | 寫在 yaml 的 `thresholds`，沒寫就用預設值；報告的〈資料範圍與判斷標準〉列出這次用的值 |
+| 輸出 | 先存成 `profile.json`，再畫成單一頁面 `index.html`。改了門檻只要重畫，不用重跑 Spark |
+| 建議處理方式 | 報告最後的〈行動建議總結〉整理成三種做法，每種都能複製欄名；不寫框架的設定鍵 |
 
 ## 一、目的
 
-特徵表通常有上百到上千欄，每一期由上游 ETL 寫入。常見的問題有：整欄幾乎都是空值、某一期上游沒進資料、某一期填了預設值、單位在某一期改了、出現不合理的極端值、存成 float32 會改變數值、好幾欄幾乎是同一個東西。這些問題在訓練前就該知道。
+特徵表通常有上百到上千欄，每一期由上游 ETL 寫入。常見的問題有：整欄幾乎都是空值、某一期上游沒進資料、某一期填了預設值、單位在某一期改了、出現不合理的極端值、好幾欄幾乎是同一個東西。這些問題在訓練前就該知道。
 
 框架的 dataset pipeline 有幾道資料閘門（`src/recsys_tfb/core/consistency.py` 的 B 系列），但它們只擋「會讓 pipeline 跑錯」的情況，不會逐欄、逐期整理成報告；資料品質本身的檢查屬於上游（`docs/adr/0006-data-quality-checks-belong-upstream.md`）。這支工具補這一塊：工具使用者給一張表，工具用 Spark 算完每一期、每一欄的統計量，產出一份報告，告訴他哪些欄位要處理、怎麼處理。
 
@@ -32,6 +32,7 @@
 | 建議金額欄取 log 或換單位 | 對 LightGBM 沒有幫助，換成萬元再取整數還會變差（附錄二） |
 | 讀 parquet footer 的統計量來加速 | 任意一張 Hive 表不保證是 parquet；先用 Spark 量過實際耗時再決定 |
 | 改 training 既有的 `compute_feature_statistics`（`src/recsys_tfb/pipelines/training/nodes.py:2023`） | 那是訓練資料的摘要，用途不同，維持原樣 |
+| 檢查 float32 精度 | 第一輪有做，第二輪拿掉。對 LightGBM 幾乎沒有影響：欄位本身存成 float32，測試 AUC 到小數第五位都不變；會傷的只有「先存 float32 再相減」（上游的算法，工具從結果看不出來）與「值擠在很窄的範圍、數字又很大」的欄（附錄二） |
 
 ## 二、使用方式
 
@@ -62,20 +63,17 @@ checks:                       # 基本檢查一定會跑
   correlation: true           # 必填。相關性
 thresholds:                   # 沒寫的鍵用右邊的預設值
   null_ratio: 0.99
-  precision_max_abs: 100000   # 有小數的欄位；整數固定用 16,777,216
   psi: 0.25
   tail_ratio: 10
   tail_log_ratio: 1
   corr: 0.95
-spark:                        # 沒寫＝用叢集的 spark-defaults.conf
-  spark.executor.memory: 8g
 output_dir: null              # 沒寫＝data/profiling/feature_profile/<表名>_<YYYYMMDD_HHMMSS>/
 ```
 
 - `checks` 兩個鍵設為必填：它們決定要多跑幾趟 Spark，耗時差很多，讓工具使用者每次都明確選。
-- `time_range` 的 `start`／`end` 和 `time_col` 直接比較（`time_col` 是 date 時 Spark 會把字串轉成日期）。`time_col` 是 NULL 的列不讀，筆數印在報告首頁。
-- `where` 篩的如果不是分區欄位，Spark 會掃全表，會變慢。報告首頁印出 `where` 原文與實際讀到的期別。
-- `spark` 區塊合併在 `{"app_name": "feature-profile"}` 之上（工具使用者寫了 `app_name` 就用他的），交給 `get_or_create_spark_session`（`src/recsys_tfb/utils/spark.py:56`）。值只能是字串、整數或布林（同檔 `_validate_values`）。讀 Hive 需要叢集的 `SPARK_CONF_DIR`；本機驗證的設定見 `docs/operations/dev-setup/local-spark-setup.md`。
+- `time_range` 的 `start`／`end` 和 `time_col` 直接比較（`time_col` 是 date 時 Spark 會把字串轉成日期）。`time_col` 是 NULL 的列不讀，筆數印在報告的〈資料範圍與判斷標準〉。
+- `where` 篩的如果不是分區欄位，Spark 會掃全表，會變慢。報告最上面一行與〈資料範圍與判斷標準〉印出 `where` 原文與實際讀到的期別。
+- 設定檔沒有 Spark 區塊：開 Spark 的方式同 `scripts/sampling_overrides_editor.py`，只給 `{"app_name": "feature-profile"}` 交給 `get_or_create_spark_session`（`src/recsys_tfb/utils/spark.py`），其餘 Spark 設定全部來自 `SPARK_CONF_DIR`。本機驗證的設定見 `docs/operations/dev-setup/local-spark-setup.md`。
 - `output_dir` 預設的 `<表名>` 不含資料庫名稱（`mydb.feature_table` → `feature_table`）。
 - 開跑前先檢查設定，所有問題一次列完再結束：表不存在、`time_col`／`key_cols`／`exclude_cols` 有不存在的欄、必填鍵沒寫、`thresholds` 有不認得的鍵。
 
@@ -84,9 +82,8 @@ output_dir: null              # 沒寫＝data/profiling/feature_profile/<表名>
 - 扣掉 `time_col`、`key_cols`、`exclude_cols`，剩下的是特徵欄位。
 - **數值欄位**：tinyint、smallint、int、bigint、float、double、decimal。
 - **字串欄位**：string。boolean 先轉成字串（`cast(x as string)`），當字串欄位處理。
-- **未檢查的欄位**：其他型別（date、timestamp、array、map、struct），列在 05 頁的「未檢查的欄位」。
+- **未檢查的欄位**：其他型別（date、timestamp、array、map、struct），列在〈資料範圍與判斷標準〉的「未檢查的欄位」。
 - **空值**＝NULL，加上 float／double 的 NaN 與 ±Infinity，加上字串的空字串。後面所有統計量都先把這些換成 NULL 再算。
-- **有小數**＝任何一期有任何一個值的小數部分不是 0。沒有小數的數值欄位，在精度判斷時當整數看（不管宣告的型別）。
 
 ## 四、計算方式
 
@@ -100,8 +97,7 @@ output_dir: null              # 沒寫＝data/profiling/feature_profile/<表名>
 |---|---|---|
 | 總筆數 | `count(*)` | 空值比例的分母 |
 | 空值筆數 | `count(*) − count(x)` | 空值比例 |
-| 最小值、最大值 | `min(x)`、`max(x)` | 只有一個值（`min = max`）、精度、極端值 |
-| 有沒有小數 | `max(abs(x − floor(x))) > 0`（float／double／decimal 才算） | 精度 |
+| 最小值、最大值 | `min(x)`、`max(x)` | 只有一個值（`min = max`）、極端值 |
 
 `min = max` 就表示扣掉空值後只有一個值，不需要 `count(distinct)`。字串用字典序的 `min`／`max`，道理一樣。
 
@@ -127,7 +123,7 @@ output_dir: null              # 沒寫＝data/profiling/feature_profile/<表名>
 `render` 只靠這個檔重畫並重新判斷，所以它要存「算出來的統計量」，不存「判斷結果」：
 
 - `schema_version`、產出時間、設定檔原文、實際讀到的期別與每期筆數、執行時間。
-- 每一欄：型別、分類（數值／字串／未檢查）、有沒有小數；每一期的總筆數、空值筆數、最小值、最大值，有跑分布時再加分位數、PSI。
+- 每一欄：型別、分類（數值／字串／未檢查）；每一期的總筆數、空值筆數、最小值、最大值，有跑分布時再加分位數、PSI。
 - 字串欄位的分組占比（畫各值占比圖用）。
 - 相關性：絕對值 ≥ 0.5 的配對與兩欄都有值的筆數（所以 `render` 能把 `corr` 調低到 0.5；更低要重跑）；跳過的欄位與原因。
 
@@ -136,7 +132,7 @@ output_dir: null              # 沒寫＝data/profiling/feature_profile/<表名>
 ### 先後順序
 
 1. 標成「每一期都幾乎是空值」或「整欄只有一個值」的欄位，不再判斷其他問題：它們已經可以直接排除。
-2. 標成「每期各只有一個值」的欄位，不判斷 float32 精度、分布偏移、極端值。
+2. 標成「每期各只有一個值」的欄位，不判斷分布偏移、極端值。
 3. 其他問題可以同時成立，例如同一欄可以既是「部分期別幾乎是空值」又是「分布偏移」。
 
 ### 判斷標準
@@ -150,17 +146,10 @@ output_dir: null              # 沒寫＝data/profiling/feature_profile/<表名>
 | 整欄只有一個值 | 所有期別合計只有一個值 | — |
 | 部分期別只有一個值 | 只有部分期別只有一個值 | — |
 | 每期各只有一個值 | 每一期都只有一個值，但各期的值不同（例如每期一個數字的總體指標） | — |
-| float32 精度不足 | 有小數，而且絕對值最大 ≥ 100,000；或沒有小數，而且絕對值最大 ≥ 16,777,216 | `precision_max_abs`（只管有小數的；16,777,216 是 2^24，固定） |
 | 分布偏移 | 有一期的 PSI ≥ 0.25 | `psi` |
 | 極端值 | 有一期、同一側同時符合：倍數 ≥ 10，而且 log 後倍數 ≥ 1 | `tail_ratio`、`tail_log_ratio` |
 | 高度相關 | 最新一期的 Spearman 相關係數，絕對值 ≥ 0.95 | `corr` |
 | 值幾乎都相同（只供參考） | 有一期 p1 = p99，表示那一期至少約 98% 的值相同。不算問題 | — |
-
-### float32 精度不足
-
-float32 只保留大約 7 位有效數字。100,000 以上，第二位小數開始不準（100,000.37 存成 100,000.3672）；16,777,216 以上，整數的個位數開始被改掉（25,000,001 存成 25,000,000）。
-
-這對 LightGBM 幾乎沒有影響（附錄二）。但要知道：框架的 dataset 有一道精度閘門 B8（`validate_numeric_precision`，`src/recsys_tfb/pipelines/dataset/nodes.py:1009`），`dataset.numeric_precision_policy` 預設是 `block`，整數與 decimal 欄位撐不過 float32 時會讓 dataset 跑失敗；float／double 欄位它不檢查。這支工具的規則刻意不沿用它（不跟框架綁），所以兩邊標出的欄位不完全相同。建議處理方式的字句要提到這件事，例如「上游四捨五入，或把 `numeric_precision_policy` 改成 `truncate` 接受失真」，確切寫法 demo 時定。
 
 ### 極端值
 
@@ -181,44 +170,39 @@ log 不改變大小順序，所以不用另外對資料取 log：照常算 p1、
 
 ## 六、報告編排
 
-用 `recsys_tfb.report.write_pages`（`src/recsys_tfb/report/pages.py:262`）寫成一個資料夾：`index.html`、五個頁面、共用的 `plotly.min.js`。頁面的 slug 決定檔名與首頁的排列順序（`write_pages` 依 slug 排序），固定為 `01-flags`、`02-basic`、`03-drift`、`04-corr`、`05-all`。首頁最後的頁面清單由 `write_pages` 自動產生，不另做。`index_intro` 是原樣放進 HTML 的，表名、`where` 原文這類字串要先 escape。
+工具自己寫成單一頁面 `index.html`（純 HTML＋手寫 JS，不連網、不加套件），不用 `recsys_tfb.report`：要頁內目錄、表格排序、篩選、複製欄名，共用的多頁外框給不了，改它又會連帶改到 evaluation 的診斷頁。`Page.scope` 那種範圍說明框也不放：這份報告的目的就是依門檻標出問題並給建議，不適用 `docs/agents/diagnosis-report-presentation.md` 的「不下結論、不設門檻」。
 
-`Page.scope` 留空，不放「範圍說明」框：這份報告的目的就是依門檻標出問題並給建議，不適用 `docs/agents/diagnosis-report-presentation.md` 的「不下結論、不設門檻」。
+**依檢視項目分段，行動建議只在最後總結**（使用者第二輪的要求；第一輪的改版照「要做的事」分組，被退回）。報告不提框架的設定或 pipeline。
 
-表格是靜態的。圖用 plotly：熱圖可以用 `src/recsys_tfb/report/figures.py` 的 `heatmap`；分位數走勢（帶狀圖加下拉選單）、字串各值占比（堆疊長條）沒有現成的，直接用 plotly 在腳本裡畫。
+版面：最上面一行固定顯示表名、期間、每期筆數、篩選條件，旁邊一個欄名篩選框套到每一張表；左邊是目錄，每段後面是欄數。表格點表頭排序、表頭固定、欄名用等寬字、數字靠右；有欄名的表格上方都有篩選框與「複製列出的欄名」（一行一個）。欄名點了跳到〈全部欄位〉那一列並展開各期明細。
+
+**各期**一律用小長條圖：一期一根，由左到右是最早到最新，寬度固定（期別再多也不用左右捲）。空值的圖：高度＝空值比例，達門檻的是橘色；「只有一個值」的圖：橘＝只有一個值、灰＝有變化、空白＝整期都是空值。滑鼠移上去看那一期的數字。提示文字由內嵌的 JSON 現算，不放在每一根柱子上（上千欄 × 幾十期時頁面會小很多）。
 
 每一段都要說得出它幫讀者做哪個決定：
 
-| 頁 | 段落 | 幫讀者做什麼 |
+| 段落 | 內容 | 幫讀者做什麼 |
 |---|---|---|
-| 首頁 | 總覽 | 一眼看出有幾欄要處理、幾欄可以直接排除 |
-| | 資料範圍 | 確認算的是哪張表、哪幾期、有沒有篩選、每期幾筆、跑了多久 |
-| | 判斷標準 | 看這次用的標準；想調時知道改哪個鍵 |
-| | 設定檔（收合） | 要重跑一樣的報告時照抄 |
-| 01 需要處理的欄位 | 總表 | 每種問題有幾欄、建議怎麼處理 |
-| | 每種問題一段 | 欄名清單和依據；可以直接排除的那段附上能直接貼的設定（`training.feature_selection.exclude` 只需重訓；`dataset.prepare_model_input.drop_columns` 要重建 dataset） |
-| 02 空值與精度 | 各期空值比例（熱圖） | 看是哪幾期空掉。只畫至少有一期空值比例 ≥ 0.5% 的欄位 |
-| | float32 精度 | 每欄最大值存成 float32 後會變成多少。列出所有有小數的欄位，和絕對值最大 ≥ 16,777,216 的整數欄位 |
-| | 所有欄位的各期空值比例（收合） | 熱圖背後的完整數字 |
-| 03 分布偏移與極端值 | 分布偏移（PSI）熱圖 | 哪些欄位從哪一期開始變。只畫 PSI 最大的 12 欄，顏色到 0.5 為止，滑鼠移上去看原值 |
-| | 分位數走勢 | 看怎麼變：整條突然跳好幾倍通常是換了單位，慢慢移動通常是客群在變。選單只放有分布偏移的數值欄位，PSI 最大的排第一 |
-| | 字串欄位各值的占比 | 字串欄位的分布怎麼變 |
-| | 極端值 | 最離譜的那一期、那個值、p1、p99，判斷是不是資料錯了 |
-| | 值幾乎都相同 | 只供參考 |
-| 04 相關性 | 高度相關的欄位 | 哪幾組欄位幾乎一樣 |
-| | 相關係數矩陣 | 看是不是一整群欄位彼此都很像；只畫出現在上表的欄位 |
-| | 未計算的欄位 | 知道哪些欄位沒算相關性、為什麼 |
-| 05 所有欄位明細 | 各欄位摘要、各期中位數／最大值／PSI（收合） | 查單一欄位 |
-| | 未檢查的欄位 | 知道哪些欄位因為型別不支援而沒有檢查 |
+| 總覽 | 每個檢視項目有幾欄有事、細項各幾欄 | 一眼看出哪裡要看 |
+| 空值 | 每一期都幾乎是空值：各期圖、空值比例範圍、每期有值的筆數 | 確認可以排除 |
+| | 部分期別幾乎是空值：各期圖、出事的期別、其他期別的空值比例範圍、跳幅；預設跳幅大的排前面，可以用「出事的期別」篩 | 分辨某幾期斷掉，還是本來就很空 |
+| | 有變動但沒達門檻：上面兩段以外的欄位，預設只列變動幅度 ≥ 1 個百分點的；只供參考，不進總結 | 看規則抓不到的部分缺資料 |
+| 只有一個值 | 整欄只有一個值：那個值、空值比例 | 確認可以排除 |
+| | 部分期別只有一個值：各期圖、那幾期、那幾期的值、其他期別的範圍 | 找上游填預設值的期別 |
+| | 每期各只有一個值：最早一期與最新一期的值、不同的值個數 | 判斷是不是總體指標 |
+| 全部欄位 | 每欄的問題、各期空值圖、空值比例範圍、最小值、最大值；點欄名展開各期明細；可依問題、型別篩 | 查單一欄位 |
+| 行動建議總結 | 三種做法：可以排除／請上游查這幾期的資料（列出每一期斷了哪些欄）／看業務意義決定要不要留；每種都能複製欄名 | 照著做 |
+| 資料範圍與判斷標準 | 表、期間、篩選、每期筆數、執行時間、門檻、未檢查的欄位、設定檔原文 | 確認算的是什麼；想調門檻時知道改哪個鍵 |
 
-**用字**：用台灣的繁體中文寫法。標題用名詞，不放寫給作者自己的備註（例如「門檻（寫死在程式裡）」），括號只用來放數量或英文原名（「極端值（3 欄）」「分布偏移（PSI）」）；不用箭頭、問句。期別寫「期」，筆數寫「筆」；問題類型用白話句（「每一期都幾乎是空值」），不用自創的「X・Y」標籤。
+「請上游查」與「看業務意義」的分界：部分期別幾乎是空值的欄位，**跳幅**（出事那幾期最低的空值比例 − 其他期別最高的空值比例）≥ 10 個百分點算上游斷掉。這只決定總結裡的分組，寫在程式裡（`UPSTREAM_JUMP_MIN`），不是設定鍵。
+
+**用字**：用台灣的繁體中文寫法。標題用名詞，不放寫給作者自己的備註（例如「門檻（寫死在程式裡）」），括號只用來放數量、英文原名或單位（「部分期別幾乎是空值（24 欄）」「跳幅（百分點）」）；不用箭頭、問句。期別寫「期」，筆數寫「筆」；問題類型用白話句（「每一期都幾乎是空值」），不用自創的「X・Y」標籤。
 
 ## 七、實作約束
 
 - 程式放 `scripts/profile_feature_table.py`，和 `scripts/suggest_categorical_cols.py`、`scripts/sampling_overrides_editor.py` 一樣用 typer；測試放 `tests/scripts/test_profile_feature_table.py`，用 `from scripts.profile_feature_table import …`。
 - 只能用已宣告的套件：pyspark、pandas、numpy、plotly、typer。scipy 沒有宣告，Spearman 用 numpy 自己排名。
 - Spark 不用 UDF。
-- `src/recsys_tfb/report/__init__.py:15` 寫著「Nothing under ``scripts/`` imports it.」，這支工具上線後這句變假話，要一起改。
+- 報告不用 `recsys_tfb.report`，所以 `src/recsys_tfb/report/__init__.py` 寫的「Nothing under ``scripts/`` imports it」維持成立；之後要是改回借用它，那句要一起改。
 - 寫一份使用說明 `docs/operations/user-guides/feature-table-profiling.md`，同類文件可參考 `docs/operations/user-guides/sampling-overrides-editor.md`。
 
 ## 八、開發時待定事項
@@ -266,5 +250,17 @@ LightGBM 不是直接拿原始數字切，而是先把每個特徵分成最多 `
 | float32，元 ÷ 10000 | 397,985 | 0.72877 |
 | float32，元，四捨五入到整數 | 290,150 | 0.72876 |
 | float32，萬元，四捨五入到整數 | 1,795 | 0.72777 |
+
+**float32 對「變化量」欄位**（第二輪，決定拿掉 float32 檢查的依據）：60 萬筆，同一組 LightGBM 設定（`data/verification/feature-profile/f32_change_lgb.py`）。
+
+| 情境 | 不同的值有幾個 | 測試 AUC |
+|---|---|---|
+| 變化量在上游用 double 算好，存 double | 29,519 | 0.85153 |
+| 同一欄，改存 float32 | 29,519 | 0.85153（預測值有極小差異） |
+| 兩期餘額（1～2 億）先存 float32 再相減 | 61 | 0.84853 |
+| 值都在 1.6 億～1.6 億 + 200 之間，存 double | 20,001 | 0.83225 |
+| 同一欄，改存 float32 | 13 | 0.81917 |
+
+欄位本身存成 float32 不會傷；會傷的是 float32 把本來不同的值併成同一個：先存 float32 再相減，或值擠在很窄的範圍、數字又很大。前者是上游的算法，工具只看得到減完的結果；後者要值的範圍很窄、數字又很大才會發生。
 
 另外比了 `max_bin` 與事前依業務意義分箱（`money_bins_lgb.py`）：`max_bin` 從 255 調到 4095，AUC 只多 0.0003；依 1 萬、10 萬、100 萬、1000 萬分成 5 組，不管當數值或 categorical，AUC 都掉 0.009 以上，就算目標剛好在 100 萬有跳躍也一樣。事前分箱（例如 WOE）是邏輯迴歸評分卡的做法，用在 LightGBM 上不如直接給原始數值。
