@@ -209,7 +209,6 @@ class TestParseConfig:
         assert cfg.time_start is None and cfg.time_end is None
         assert cfg.where is None
         assert cfg.thresholds == DEFAULT_THRESHOLDS
-        assert cfg.spark == {}
 
     def test_thresholds_override_only_what_is_written(self):
         cfg, problems = parse_config(_GOOD + "thresholds:\n  null_ratio: 0.9\n")
@@ -230,15 +229,17 @@ exlude_cols: [x]
 thresholds:
   null_ratio: 1.5
   psi: 0.25
-spark:
-  spark.executor.cores: 1.5
 """
         _, problems = parse_config(text)
         joined = "\n".join(problems)
-        for needle in ("table", "key_cols", "exlude_cols", "psi", "null_ratio",
-                       "spark.executor.cores"):
+        for needle in ("table", "key_cols", "exlude_cols", "psi", "null_ratio"):
             assert needle in joined, needle
-        assert len(problems) == 6
+        assert len(problems) == 5
+
+    def test_spark_settings_are_not_a_config_key(self):
+        # 同 scripts/sampling_overrides_editor.py：Spark 設定全由 SPARK_CONF_DIR 決定
+        _, problems = parse_config(_GOOD + "spark:\n  spark.executor.memory: 8g\n")
+        assert len(problems) == 1 and "spark" in problems[0]
 
     def test_broken_yaml_is_one_problem(self):
         _, problems = parse_config("table: [unclosed\n")

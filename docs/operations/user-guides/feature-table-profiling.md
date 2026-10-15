@@ -13,17 +13,20 @@
 ## 1. 怎麼跑
 
 ```bash
+cd <repo-or-worktree-root>
+export SPARK_CONF_DIR=<Spark 設定目錄>      # 本機用 $PWD/conf/spark-local（見 local-spark-setup.md）
+
 # 1. 複製範本，改成你的表
 cp scripts/profile_feature_table.template.yaml my_profile.yaml
 
 # 2. 算統計量、存 profile.json、畫報告
-python scripts/profile_feature_table.py run --config my_profile.yaml
+PYTHONPATH=src .venv/bin/python scripts/profile_feature_table.py run --config my_profile.yaml
 
 # 3. 想換門檻：只重畫，不重跑 Spark
-python scripts/profile_feature_table.py render <輸出資料夾> --config my_profile.yaml
+PYTHONPATH=src .venv/bin/python scripts/profile_feature_table.py render <輸出資料夾> --config my_profile.yaml
 ```
 
-- 讀 Hive 需要叢集的 `SPARK_CONF_DIR`。本機驗證的環境見 `docs/operations/dev-setup/local-spark-setup.md`；在 worktree 裡跑要加 `PYTHONPATH=<worktree>/src`（CLAUDE.md 的 worktree 鐵則 5）。
+- 開 Spark 的方式同 `scripts/sampling_overrides_editor.py`：工具只給 `app_name: feature-profile`，其餘 Spark 設定（master、executor 記憶體、Hive metastore）全部來自 `SPARK_CONF_DIR` 目錄裡的設定檔，工具的設定檔裡沒有 Spark 區塊。要調 Spark 就改那個目錄。
 - 跑完會印出報告位置。用瀏覽器打開資料夾裡的 `index.html`；整個資料夾要一起帶走（頁面共用同一份 `plotly.min.js`，不連網）。
 - `render` 不給 `--config` 時，用 `profile.json` 裡存的門檻（也就是 `run` 當時的門檻）。`render` 不會改 `profile.json`。
 
@@ -42,7 +45,6 @@ python scripts/profile_feature_table.py render <輸出資料夾> --config my_pro
 | `time_range` | `start`、`end` 都含當期，可以只寫一個。直接和 `time_col` 比較 |
 | `where` | 篩的不是分區欄位時，Spark 會掃全表，會變慢 |
 | `thresholds` | 只認 `null_ratio`、`precision_max_abs`。沒寫的鍵用預設值 |
-| `spark` | 疊在 `app_name: feature-profile` 上面；值只能是字串、整數或布林 |
 
 **開跑前會先檢查設定**：必填鍵沒寫、不認得的鍵、值的型別不對、表不存在、`time_col`／`key_cols`／`exclude_cols` 有不存在的欄。所有問題一次列完再結束，不會改一個、跑一次、再冒出下一個。只有「連 `table` 都沒寫」時不開 Spark、直接列出其他問題。
 
