@@ -17,8 +17,10 @@ from scripts.profile_feature_table import (
     INT_EXACT,
     PROFILE_FILENAME,
     ProfileConfig,
+    actions,
     app,
     check_against_table,
+    float32_max_error,
     judge,
     judge_column,
     parse_config,
@@ -189,6 +191,53 @@ class TestOrderAndEdges:
         assert judge(profile, TH) == {"c": ["const_all"]}
 
 
+class TestActions:
+    """判斷結果 → 讀者要做的事。"""
+
+    def _actions(self, col, rows=ROWS):
+        return actions(col, rows, judge_column(col, rows, TH), TH)
+
+    def test_jump_of_at_least_10_points_means_upstream(self):
+        # 99% − 89% 剛好 10 個百分點（浮點數相減是 0.0999…，要算成 10）
+        lo, hi = _varying()
+        assert self._actions(_col([89, 99, 89], lo, hi)) == ["upstream"]
+
+    def test_jump_below_10_points_means_sparse_judge(self):
+        lo, hi = _varying()
+        assert self._actions(_col([90, 99, 90], lo, hi)) == ["judge"]
+
+    def test_const_some_means_upstream_and_const_each_means_judge(self):
+        assert self._actions(_col([0, 0, 0], [0, 7, 0], [10, 7, 10])) == ["upstream"]
+        assert self._actions(_col([0, 0, 0], [1, 2, 3])) == ["judge"]
+
+    def test_integer_precision_is_blocked_double_precision_is_ignorable(self):
+        assert self._actions(_col([0, 0, 0], [0, 0, 0], [1, INT_EXACT + 1, 1])) == ["blocked"]
+        col = _col([0, 0, 0], [0.5] * 3, [1.5, 3e6, 1.5], dtype="double", has_decimal=True)
+        assert self._actions(col) == ["ignore"]
+
+    def test_ignorable_float32_is_not_listed_next_to_a_real_action(self):
+        col = _col([4, 100, 4], [0.5, None, 0.5], [1.5, None, 3e6], dtype="double", has_decimal=True)
+        assert self._actions(col) == ["upstream"]
+
+    def test_two_real_actions_are_both_listed(self):
+        col = _col([4, 100, 4], [0, None, 0], [1, None, INT_EXACT + 1])
+        assert self._actions(col) == ["upstream", "blocked"]
+
+    def test_excludable_columns_only_get_exclude(self):
+        assert self._actions(_col([0, 0, 0], [5, 5, 5])) == ["exclude"]
+
+
+class TestFloat32MaxError:
+    def test_half_the_float32_spacing_at_the_largest_value(self):
+        assert float32_max_error(272_528_123.98) == 16          # [2^28, 2^29)
+        assert float32_max_error(101_127.48) == 2.0 ** -8       # [2^16, 2^17)
+        assert float32_max_error(INT_EXACT + 1) == 1
+
+    def test_just_below_a_power_of_two_uses_the_lower_spacing(self):
+        # np.spacing(np.float32(m)) 會因為進位到 2^24 而多算一倍
+        assert float32_max_error(INT_EXACT - 0.5) == 0.5
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -312,32 +361,61 @@ class TestRender:
         runner = CliRunner()
         result = runner.invoke(app, ["render", str(tmp_path)])
         assert result.exit_code == 0, result.output
-        flags_page = (tmp_path / "01-flags.html").read_text()
-        assert "部分期別幾乎是空值（0 欄）" in flags_page
+        page = (tmp_path / "index.html").read_text()
+        assert "回頭查上游（0 欄）" in page
 
         cfg = tmp_path / "loose.yaml"
         cfg.write_text(_GOOD + "thresholds:\n  null_ratio: 0.95\n")
         result = runner.invoke(app, ["render", str(tmp_path), "--config", str(cfg)])
         assert result.exit_code == 0, result.output
-        flags_page = (tmp_path / "01-flags.html").read_text()
-        assert "部分期別幾乎是空值（1 欄）" in flags_page
-        assert "half_empty" in flags_page
-        index = (tmp_path / "index.html").read_text()
-        assert "0.95" in index
+        page = (tmp_path / "index.html").read_text()
+        assert "回頭查上游（1 欄、1 期）" in page
+        assert 'data-name="half_empty"' in page
+        assert "0.95" in page
 
-    def test_report_pages_and_paste_ready_exclude_list(self, tmp_path):
+    def test_single_page_and_paste_ready_exclude_list(self, tmp_path):
         profile = _profile(tmp_path)
         write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
-        names = sorted(p.name for p in tmp_path.iterdir())
-        assert names == ["01-flags.html", "02-basic.html", "05-all.html",
-                         "index.html", "plotly.min.js", PROFILE_FILENAME]
-        flags_page = (tmp_path / "01-flags.html").read_text()
-        assert "exclude: [sys_version]" in flags_page
-        all_page = (tmp_path / "05-all.html").read_text()
-        assert "load_dt" in all_page
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["index.html", PROFILE_FILENAME]
+        page = (tmp_path / "index.html").read_text()
+        # 只給清單項目：帶 training: 這種頂層鍵照字面貼在檔尾，會蓋掉整個既有區塊
+        block = page.split('<pre id="yaml-train">')[1].split("</pre>")[0]
+        assert block == "      - sys_version"
+        assert "load_dt" in page
         # 設計文件第六節：不用箭頭
-        for page in tmp_path.glob("*.html"):
-            assert "→" not in page.read_text(), page.name
+        assert "→" not in page
+
+    def test_element_ids_are_unique(self, tmp_path):
+        # 重複的 id 讓 getElementById 拿到 section 而不是表格，整段 JS 在載入時就壞掉
+        import re
+        from collections import Counter
+
+        profile = _profile(tmp_path)
+        write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
+        ids = re.findall(r'\sid="([^"]+)"', (tmp_path / "index.html").read_text())
+        assert [i for i, n in Counter(ids).items() if n > 1] == []
+        assert "t-all" in ids
+
+    def test_upstream_period_table_lists_columns_by_period(self, tmp_path):
+        profile = _profile(tmp_path)
+        profile["columns"].append(dict(_col([4, 100, 4], [0, None, 0], [9, None, 9]), name="cc_bal"))
+        write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
+        page = (tmp_path / "index.html").read_text()
+        assert "回頭查上游（1 欄、1 期）" in page
+        period_row = page.split('<tr data-name="2024-02-29">')[1].split("</tr>")[0]
+        assert "cc_bal" in period_row
+        assert 'data-copy-text="cc_bal"' in period_row
+
+    def test_blocked_section_shows_how_far_over_the_limit(self, tmp_path):
+        profile = _profile(tmp_path)
+        profile["columns"].append(dict(_col([0, 0, 0], [0, 0, 0], [1, 168_935_786, 1]), name="atm_amt"))
+        write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
+        page = (tmp_path / "index.html").read_text()
+        blocked = page.split('<section id="blocked">')[1].split("</section>")[0]
+        assert "atm_amt" in blocked
+        assert ">10.07<" in blocked      # 168,935,786 ÷ 16,777,216
+        assert ">±8<" in blocked         # 2^(27 − 24)
+        assert "1／3（2024-02-29）" in blocked
 
     def test_table_name_is_escaped_in_the_index(self, tmp_path):
         profile = _profile(tmp_path)
@@ -346,6 +424,16 @@ class TestRender:
         index = (tmp_path / "index.html").read_text()
         assert "<b>t</b>" not in index
         assert "&lt;b&gt;t&lt;/b&gt;" in index
+
+    def test_string_values_cannot_close_the_embedded_json(self, tmp_path):
+        profile = _profile(tmp_path)
+        profile["columns"].append(_col([0, 0, 0], ["</script>"] * 3, ["z"] * 3, kind="string",
+                                       dtype="string", has_decimal=None))
+        write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
+        page = (tmp_path / "index.html").read_text()
+        # 只有兩個 <script>：內嵌的 JSON 與主程式；值裡的 </script> 被換成 <\/script>
+        assert page.count("</script>") == 2
+        assert "<\\/script>" in page
 
 
 # ---------------------------------------------------------------------------
@@ -468,4 +556,5 @@ class TestRunCommand:
         assert result.exit_code == 0, result.output
         profile = json.loads((out / PROFILE_FILENAME).read_text())
         assert profile["periods"] == ["2024-01", "2024-02"]
-        assert "dead" in (out / "01-flags.html").read_text()
+        exclude = (out / "index.html").read_text().split('<section id="exclude">')[1].split("</section>")[0]
+        assert "dead" in exclude
