@@ -15,7 +15,9 @@ Usage:
 
 跟框架的關係：不讀 ``conf/``，判斷規則也不沿用框架的函式（例如 float32 精度直接
 依 float32 本身算，不用 dataset 的精度閘門 B8），只借 ``recsys_tfb.report`` 畫頁面、
-``get_or_create_spark_session`` 開 Spark。
+``get_or_create_spark_session`` 開 Spark。開 Spark 的方式同
+``scripts/sampling_overrides_editor.py``：只給 ``app_name``，其餘 Spark 設定全由
+``SPARK_CONF_DIR`` 決定，工具的設定檔不另設 Spark 區塊。
 """
 
 from __future__ import annotations
@@ -55,7 +57,7 @@ DEFAULT_BATCH_SIZE = 200
 NULL_HEATMAP_MIN = 0.005
 
 _REQUIRED_KEYS = ("table", "time_col", "key_cols")
-_OPTIONAL_KEYS = ("exclude_cols", "time_range", "where", "thresholds", "spark", "output_dir")
+_OPTIONAL_KEYS = ("exclude_cols", "time_range", "where", "thresholds", "output_dir")
 _TIME_ALIAS = "__profile_time__"
 
 app = typer.Typer(help="檢查一張特徵表每一期的狀況，產出 HTML 報告", add_completion=False)
@@ -79,7 +81,6 @@ class ProfileConfig:
     time_end: str | int | None = None
     where: str | None = None
     thresholds: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_THRESHOLDS))
-    spark: dict[str, Any] = field(default_factory=dict)
     output_dir: str | None = None
 
 
@@ -186,18 +187,6 @@ def parse_config(text: str) -> tuple[ProfileConfig, list[str]]:
                     problems.append(f"thresholds.precision_max_abs 要大於 0；現在是 {v!r}")
                 else:
                     cfg.thresholds[k] = v
-
-    spark = raw.get("spark")
-    if spark is not None:
-        if not isinstance(spark, dict):
-            problems.append("spark 要是「鍵: 值」的對照表")
-        else:
-            # 同 recsys_tfb.utils.spark._validate_values：值只能是字串、整數或布林
-            bad = [str(k) for k, v in spark.items() if not isinstance(v, (str, int, bool))]
-            if bad:
-                problems.append(f"spark 的值只能是字串、整數或布林：{', '.join(bad)}")
-            else:
-                cfg.spark = dict(spark)
 
     return cfg, problems
 
@@ -865,24 +854,22 @@ def run(
     """算統計量、存 profile.json、畫報告。"""
     from pyspark.sql.utils import AnalysisException
 
-    from recsys_tfb.utils.spark import get_or_create_spark_session, stop_spark_session
+    from recsys_tfb.utils.spark import get_or_create_spark_session
 
     cfg, problems = parse_config(config.read_text(encoding="utf-8"))
     if cfg.table is None:
         _exit_with_problems(problems)  # 沒有表名，表與欄位就檢查不了
 
-    spark = get_or_create_spark_session({"app_name": "feature-profile", **cfg.spark})
+    # 同 scripts/sampling_overrides_editor.py：其餘 Spark 設定全由 SPARK_CONF_DIR 決定
+    spark = get_or_create_spark_session({"app_name": "feature-profile"})
     try:
-        try:
-            columns = spark.table(cfg.table).columns
-        except AnalysisException:
-            columns = None
-        problems += check_against_table(cfg, columns)
-        if problems:
-            _exit_with_problems(problems)
-        profile = profile_table(spark, cfg, batch_size)
-    finally:
-        stop_spark_session()
+        columns = spark.table(cfg.table).columns
+    except AnalysisException:
+        columns = None
+    problems += check_against_table(cfg, columns)
+    if problems:
+        _exit_with_problems(problems)
+    profile = profile_table(spark, cfg, batch_size)
 
     if not profile["periods"]:
         typer.echo("一期都沒讀到，請檢查 time_range 與 where。", err=True)
