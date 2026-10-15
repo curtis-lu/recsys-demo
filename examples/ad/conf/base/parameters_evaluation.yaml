@@ -64,9 +64,6 @@ evaluation:
       max_queries: 250000
       min_pos_queries_per_item: 50
       seed: 42
-    ci:
-      enabled: true
-      n_boot: 200
     config_shift:
       enabled: true
     item_ability:

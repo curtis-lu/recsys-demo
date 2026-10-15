@@ -2,9 +2,8 @@
 
 本檔案是 metric-diagnosis 家族（``config_shift``、``item_ability``、
 ``suppression``）的共用 helper。新增函式前先確認是「兩個以上實例逐字相同」
-才抽——見 :func:`query_key`／:func:`sample_arrays`／
-:func:`ci_for_corrected_minus_baseline` 各自的 docstring 交代「為什麼這是
-真的共用、什麼刻意沒抽」。
+才抽——見 :func:`query_key`／:func:`sample_arrays` 各自的 docstring 交代
+「為什麼這是真的共用、什麼刻意沒抽」。
 
 ``_HASH_BUCKETS`` 與 ``utils.hashing.HASH_BUCKETS`` 同值（100_000）——
 該模組 top-level import pyspark，而家族的 numpy-leaf 模組刻意保持
@@ -18,7 +17,6 @@ import numpy as np
 import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.diagnosis.metric.uncertainty import paired_bootstrap_delta
 from recsys_tfb.evaluation.metrics import macro_from_per_item, positive_row_contributions
 
 _CLIP_EPS = 1e-12
@@ -43,22 +41,14 @@ _HASH_BUCKETS = 100_000
 #: 重現。``model_capacity`` 不在此列：它只讀 booster 的 split gain，完全不碰
 #: 診斷抽樣，宣告什麼角色都與它無關。
 #:
-#: ``"ci"`` 也在裡面，雖然它不在 ``contract.DIAGNOSES`` 裡：它是共用診斷抽樣的
-#: 第四個消費者（``evaluation.diagnosis.ci``），而它的 bootstrap 一樣經
-#: ``positive_row_contributions`` 在 driver 上取組內名次（``uncertainty.py``）。
-#: 頭號 mAP 本身是 Spark 算的、有接 event 決勝欄，所以它是對的；跟著它的 CI 若
-#: 用另一套（任意的）同分順序算，兩個數字會併排印在同一行而彼此不對帳。
-#:
-#: 四項一起跳過還有一個結構上的後果，是刻意的：它們是共用抽樣僅有的消費者，
+#: 三項一起跳過還有一個結構上的後果，是刻意的：它們是共用抽樣僅有的消費者，
 #: 所以抽樣節點那一關「每個接線的消費者都停用了」會成立，整份抽樣不會被抽——
 #: 而那份抽樣的欄位本來就不含 ``event`` 的欄（見 :func:`draw_diagnosis_sample`
 #: 的 docstring），拿加寬後的 identity 去對它去重會 ``KeyError``。
-_QUERY_RANKING_DIAGNOSES = (
-    "config_shift", "item_ability", "suppression", "ci",
-)
+_QUERY_RANKING_DIAGNOSES = ("config_shift", "item_ability", "suppression")
 
 #: 只宣告 ``occasion`` 時跳過的（#428）。上面那條理由不成立——同組內 item 仍
-#: 唯一（重複檢查保證）——所以 ci、config_shift、suppression 照跑。跳過的依據
+#: 唯一（重複檢查保證）——所以 config_shift、suppression 照跑。跳過的依據
 #: 是 spec #426 決定 E 的另一條判準「假設每組候選數固定」，逐項對程式碼確認：
 #:
 #: * ``item_ability``——``query_center_scores`` 扣掉每組平均分數，SCOPE 說這是
@@ -128,9 +118,8 @@ def query_key(pdf: pd.DataFrame, cols: list[str]) -> pd.Series:
     ``config_shift._query_key`` 與 ``item_ability._join_key`` 逐字相同
     （僅函式名不同），這是 Task 3.3 逐行比對後**唯一**確認可以無條件合併的
     部分——兩邊都只是「join query id」或「join cluster id」的字串併鍵，語意
-    完全一致。呼叫端各自決定要不要 ``pd.factorize``：本函式**不**代做，見
-    :func:`sample_arrays` docstring 為什麼 clusters 的 factorize 不能抽到
-    這裡。
+    完全一致。呼叫端各自決定要不要 ``pd.factorize``：本函式**不**代做——
+    只數個數的呼叫端（``.nunique()``）用不到編號。
     """
     parts = [pdf[c].astype(str) for c in cols]
     out = parts[0]
@@ -163,15 +152,9 @@ def sample_arrays(
     與 ``w_pos_rows``），這裡順便去掉那個內部重複；``item_ability`` 本來就
     只要 ``row_weights`` 這一種，用 ``_`` 丟掉 ``ht_weights`` 即可。
 
-    ⚠ **``clusters`` 刻意不在這個回傳值裡。** ``config_shift`` 要的是未
-    factorize 的字串 ``pd.Series``（後面呼叫 ``.nunique()``，且直接把
-    ``.to_numpy()`` 交給會自行 ``pd.factorize`` 的
-    ``uncertainty.paired_bootstrap_delta``）；``item_ability`` 要的是**已經**
-    factorize 過的連續 0-based int 陣列（``iter_stratified_cluster_
-    multipliers`` 拿它直接當陣列索引，要求連續編碼，不能是任意 int）。這兩個
-    不是同一個東西，硬塞進同一個回傳值只會製造一個沒有人真正需要的中間型別
-    ——呼叫端各自用 ``query_key(pdf, schema["entity"])`` 現組，需要
-    factorize 的自己再包一層 ``pd.factorize(..., sort=True)[0]``。
+    ``clusters``（``entity`` 併鍵）不在這個回傳值裡：家族裡用到它的地方都只
+    拿來數 entity 個數，呼叫端用 ``query_key(pdf, schema["entity"])`` 現組
+    即可。
     """
     query_cols = schema["query_group_columns"]
     groups = pd.factorize(query_key(pdf, query_cols), sort=True)[0]
@@ -185,33 +168,6 @@ def sample_arrays(
         ht_weights = None
         row_weights = np.ones(len(pdf), dtype=np.float64)
     return groups, items, y, ht_weights, row_weights
-
-
-def ci_for_corrected_minus_baseline(
-    frame: pd.DataFrame,
-    metric_kwargs: dict,
-    shift,
-    *,
-    n_boot: int,
-    seed: int,
-) -> tuple[float, float]:
-    """``Δ = corrected − baseline`` 的 [2.5%, 97.5%]。
-
-    名字把方向講完了，所以呼叫端不必記得取負。``paired_bootstrap_delta``
-    回的是**反向**的差（``mAP(F) − mAP(F − shift)`` ＝ baseline − corrected），
-    取負之後上下界也要對調——這兩步只在這裡做一次，供家族內每個「Δ ＝
-    corrected − baseline」定義的診斷共用（目前僅 ``config_shift``；見 Task
-    3.3 對 (b) 單一消費者是否值得抽的判斷，寫在 PR 說明／回報裡，不重複貼在
-    這裡）。
-
-    ``frame`` 的欄位要求與 ``shift`` 的形狀完全比照
-    ``uncertainty.paired_bootstrap_delta``，不在此重複；本函式只包一層符號
-    轉換，不改變其餘語意。
-    """
-    lo, hi = paired_bootstrap_delta(
-        frame, metric_kwargs, shift, n_boot=n_boot, seed=seed,
-    )
-    return -hi, -lo
 
 
 def per_item_ap(

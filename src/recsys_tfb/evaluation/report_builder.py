@@ -120,14 +120,41 @@ _METRICS_SECTION_K = (1, 2, 3, 4, 5, "all")
 def _metrics_section_ks(all_k: int) -> list:
     """The K columns the metrics section's tables actually show at this grain.
 
-    One derivation for those tables and for the two CI notes that point into
-    them (``build_overview_section``'s and ``build_metrics_section``'s). A
-    note naming ``map_attr@{metric.k}`` is only true while that column
-    survives the ``resolve_display_k`` clamp; with a second copy of the list
-    the note could keep naming a column the table dropped, and nothing would
-    raise — the reader just gets pointed at a column that is not there.
+    One derivation for those tables and for the note that points into them
+    (:func:`_headline_column`, which ``build_overview_section`` and
+    ``build_metrics_section`` both show). A note naming
+    ``map_attr@{metric.k}`` is only true while that column survives the
+    ``resolve_display_k`` clamp; with a second copy of the list the note could
+    keep naming a column the table dropped, and nothing would raise — the
+    reader just gets pointed at a column that is not there.
     """
     return resolve_display_k(list(_METRICS_SECTION_K), all_k)
+
+
+def _headline_key(parameters: dict, all_k: int) -> str:
+    """The ``macro_avg["by_item"]`` key the headline macro per-item mAP is read at.
+
+    ``map_attr@{evaluation.metric.k}``, or ``@all`` (looked up at ``all_k``)
+    when ``metric.k`` is unset. ``metrics_spark._resolve_k_grids`` puts
+    ``metric.k`` into the per-item grid, so that key is always computed.
+    """
+    mk = metric_params(parameters)["k"]
+    return f"map_attr@{_k_to_lookup('all' if mk is None else mk, all_k)}"
+
+
+def _headline_column(parameters: dict, all_k: int, where: str) -> str:
+    """How the headline is truncated and where it sits in the metrics
+    section's map_attr table, as one phrase both sections show (``where``
+    names that section from the caller's side). Names the column only when
+    that table shows it (:func:`_metrics_section_ks`)."""
+    mk = metric_params(parameters)["k"]
+    if mk is None:
+        return (f"不截斷（metric.k 未設），即{where} B 塊「{_MACRO_LABEL}」列的 "
+                "map_attr@all")
+    if mk in _metrics_section_ks(all_k):
+        return (f"截斷在 {mk}（metric.k），即{where} B 塊「{_MACRO_LABEL}」列的 "
+                f"map_attr@{mk}")
+    return f"截斷在 {mk}（metric.k），{where}各表不顯示 @{mk} 欄"
 
 
 _MACRO_LABEL = "Macro 平均"
@@ -304,8 +331,8 @@ def macro_coverage_suffix_mb(
 # 全正的 query group（#376）
 # =====================================================================
 #
-# ``evaluation.query_filter.drop_all_positive_groups`` 只套用在衡量指標與熱門度
-# baseline；頭號指標＋CI、per-item 細部拆解、各診斷頁都不跟（使用者 2026-09-18
+# ``evaluation.query_filter.drop_all_positive_groups`` 只套用在衡量指標（含頭號
+# 指標）與熱門度 baseline；per-item 細部拆解、各診斷頁都不跟（使用者 2026-09-18
 # 決定：新開關不延伸進診斷）。所以開關開著時，同一份報表裡有兩批組，這一段的
 # 函式負責讓讀者看得出每個數字是哪一批。開關只經
 # ``metrics.drop_all_positive_groups`` 讀，警告只經
@@ -333,13 +360,6 @@ def _all_positive_kept_note(parameters: dict) -> str:
         f"⚠ {ALL_POSITIVE_KEPT_NOTE}：{_ALL_POSITIVE_SWITCH} 開著，但它只套用在"
         "衡量指標與熱門度 baseline。"
     )
-
-
-def _all_positive_kept_title(parameters: dict) -> str:
-    """同一句的表標題版（接在標題後面）；開關關著回 ``""``。"""
-    if not drop_all_positive_groups(parameters):
-        return ""
-    return f"　⚠ {ALL_POSITIVE_KEPT_NOTE}"
 
 
 def _grain_bundles(metrics: dict) -> list[tuple[str, dict]]:
@@ -397,8 +417,8 @@ def _group_ledger_line(grain: str, bundle: dict, parameters: dict) -> str | None
 
     開關關：全正的組照樣算進衡量指標，「算進衡量指標」＝「有正例」。開關開：
     有正例＝全正（已排除）＋算進衡量指標。無正例的組兩種都不算進衡量指標，
-    ``n_excluded_queries`` 也只數它們。帳上不說「算進 mAP」：同一份報表的頭號
-    macro per-item mAP 取自診斷抽樣，開關開著也沒有排除全正的組。
+    ``n_excluded_queries`` 也只數它們。帳上不說「算進 mAP」：同一份報表連結的
+    診斷頁也印 macro per-item mAP（取自診斷抽樣），開關開著也沒有排除全正的組。
 
     缺 ``n_queries``／``n_excluded_queries``（更早的 bundle）回 ``None``。只缺
     全正組數的，是 #376 之前算的 ``metrics.json``：開關關著時指紋沒變，照樣會被
@@ -488,7 +508,7 @@ def _query_count_rows(metrics: dict, parameters: dict) -> dict:
 
 
 def build_overview_section(
-    metrics: dict, parameters: dict, metric_ci: dict | None = None,
+    metrics: dict, parameters: dict,
     prediction_quality_shown: bool = False,
 ) -> ReportSection:
     """概覽（定向）：這份報表回答什麼、規模／分母、關鍵數、往哪找。
@@ -498,8 +518,8 @@ def build_overview_section(
     at a section the report left out.
 
     presentation §一.1：規模／歸一化分母與嚴重度訊號分開標——分母混進關鍵數
-    表會被讀成好壞。頭號指標＝macro per-item mAP（item 等權，＋CI 抽樣估計）；
-    overall per-query mAP 並列為「另一種加權」，不宣稱哪個才對（不變量 4）。
+    表會被讀成好壞。頭號指標＝macro per-item mAP（item 等權）；overall
+    per-query mAP 並列為「另一種加權」，不宣稱哪個才對（不變量 4）。
     """
     overall = metrics.get("overall", {})
     disp = _report_cfg(parameters).get("display", {}) or {}
@@ -509,58 +529,15 @@ def build_overview_section(
     tables: list[pd.DataFrame] = []
     titles: list[str] = []
 
-    # 關鍵指標 1：macro per-item mAP（頭號，含 bootstrap CI）——沿用 metric_ci
-    # 的讀法（macro / sample），避免定義漂移。
-    ci_note = ""
-    if metric_ci and metric_ci.get("enabled") and metric_ci.get("macro"):
-        m = metric_ci["macro"]
-        sample_meta = metric_ci.get("sample", {}) or {}
-        tables.append(pd.DataFrame(
-            [{"AP（點估）": m.get("ap"), "CI 2.5%": m.get("ci_low"),
-              "CI 97.5%": m.get("ci_high"),
-              "CI 用 query 數": sample_meta.get("n_queries_sampled")}],
-            index=["macro per-item mAP"],
-        ))
-        # #376: the switch does not reach this table (it is computed from the
-        # diagnosis sample). The note sits in this branch, the one that draws
-        # the table — with `event` declared `ci` is skipped, there is no
-        # table, and a note would point at nothing.
-        titles.append("頭號指標：macro per-item mAP（item 等權，含 bootstrap CI）"
-                      + _all_positive_kept_title(parameters))
-        n_boot = metric_ci.get("n_boot")
-        sd = sample_meta.get("sampling_description", "")
-        # Truncation of point estimate and CI follows metric.k (ADR-0020
-        # design H) instead of a hard-coded @all. Name the matching column
-        # only when the metrics section actually shows it.
-        mk = metric_params(parameters)["k"]
-        if mk is None:
-            trunc, col = "點估 AP 與 CI 都不截斷（metric.k 未設）", "all"
-        elif mk in _metrics_section_ks(all_k):
-            trunc, col = f"點估 AP 與 CI 都截斷在 {mk}（metric.k）", mk
-        else:
-            trunc, col = f"點估 AP 與 CI 都截斷在 {mk}（metric.k）", None
-        # With drop_all_positive_groups on, "same definition as the metrics
-        # section's macro" is false: that macro dropped the all-positive
-        # groups, this one did not (#376).
-        drop = drop_all_positive_groups(parameters)
-        if col is None:
-            trunc_note = f"{trunc}；衡量指標各表不顯示 @{mk} 欄。" + (
-                "頭號指標沒有排除全正的 query group，衡量指標各表已排除。"
-                if drop else ""
-            )
-        elif drop:
-            trunc_note = (
-                f"{trunc}；但頭號指標沒有排除全正的 query group，與衡量指標的 "
-                f"macro map_attr@{col}（已排除）不是同一批組。"
-            )
-        else:
-            trunc_note = (
-                f"{trunc}，與衡量指標的全量 macro map_attr@{col} 同一定義。"
-            )
-        ci_note = (
-            f"　CI 為 cluster bootstrap（cluster＝客戶，B＝{n_boot}）在診斷母體上"
-            f"重抽得到；{sd}{trunc_note}"
-        )
+    # 關鍵指標 1：macro per-item mAP（頭號）——讀 metrics.json 的 macro 列，與
+    # 衡量指標段 B 塊「Macro 平均」同一個數，不另算一份。
+    macro_item = (metrics.get("macro_avg") or {}).get("by_item") or {}
+    t_head = pd.DataFrame(
+        [{"value": macro_item.get(_headline_key(parameters, all_k))}],
+        index=["macro per-item mAP"],
+    )
+    tables.append(t_head)
+    titles.append("頭號指標：macro per-item mAP（item 等權）")
 
     # 關鍵指標 2：overall per-query mAP@k（另一種加權，並列不比高下）
     card = {
@@ -629,9 +606,9 @@ def build_overview_section(
         description=(
             "這份報表幫你判斷這個模型在 per-query 排序上表現如何、好壞落在哪些 "
             "item／segment、以及相對 popularity baseline 的位置。以下攤開多個粒度"
-            "與角度，判斷留給你。頭號指標為 macro per-item mAP（item 等權）；"
-            "overall mAP 為 per-query 等權，是另一種加權，並列呈現、不比高下。"
-            + ci_note
+            "與角度，判斷留給你。頭號指標為 macro per-item mAP（item 等權；"
+            f"{_headline_column(parameters, all_k, '衡量指標段')}）；overall mAP "
+            "為 per-query 等權，是另一種加權，並列呈現、不比高下。"
         ),
         tables=tables,
         table_titles=titles,
@@ -1007,7 +984,7 @@ def _entities_by_k_table(
 
 
 def build_metrics_section(
-    metrics: dict, parameters: dict, metric_ci: dict | None = None
+    metrics: dict, parameters: dict,
 ) -> ReportSection | None:
     """衡量指標：分兩塊、各塊內維度與方向一致。
 
@@ -1036,22 +1013,6 @@ def build_metrics_section(
         titles.append(title)
         collapsed.append(is_collapsed)
 
-    # 頭號指標：macro per-item mAP CI（可見，放最前）
-    if metric_ci and metric_ci.get("enabled") and metric_ci.get("macro"):
-        m = metric_ci["macro"]
-        sm = metric_ci.get("sample", {}) or {}
-        _add(
-            pd.DataFrame(
-                [{"AP（點估）": m.get("ap"), "CI 2.5%": m.get("ci_low"),
-                  "CI 97.5%": m.get("ci_high"),
-                  "CI 用 query 數": sm.get("n_queries_sampled")}],
-                index=["macro per-item mAP"],
-            ),
-            "頭號指標：macro per-item mAP（item 等權，含 bootstrap CI）"
-            + _all_positive_kept_title(parameters),
-            False,
-        )
-
     # ===== Block A：per-query 指標（map / precision / recall）=====
     _add(_families_by_k_table(overall, ks, all_k),
          "A · per-query｜overall（列＝map/precision/recall）", False)
@@ -1078,36 +1039,12 @@ def build_metrics_section(
     b_map = _per_item_metric_table(
         per_item, ks, all_k, "map_attr", "@{k}", macro_metrics=macro_item,
     )
-    # Whether this section shows any CI at all: the condition for the CI
-    # columns below, which #376's CI notes (the column title and the
-    # ci_point_note sentence) follow too — no CI on the page, nothing to
-    # qualify.
-    ci_shown = bool(metric_ci and metric_ci.get("enabled"))
-    if ci_shown:
-        ci_items = metric_ci.get("per_item", {}) or {}
-        ci_macro = metric_ci.get("macro") or {}
-
-        def _ci_val(idx, field):
-            src = ci_macro if idx == _MACRO_LABEL else ci_items.get(idx, {})
-            return src.get(field)
-
-        for col, field in (("CI 2.5%", "ci_low"), ("CI 97.5%", "ci_high"),
-                           ("n_pos（CI 用）", "n_pos")):
-            b_map[col] = [_ci_val(idx, field) for idx in b_map.index]
     # bug 5 (ADR-0020): the macro denominator is "items with a positive this
     # period" (and n_pos >= metric.min_positives); a zero-positive item drops
     # out of per_item silently. The title discloses N of M, only on a table
     # that has a Macro row.
     item_cov = macro_coverage_suffix(per_item, n_items, parameters, macro_item)
-    # #376: with the switch on, a row's point estimates dropped the
-    # all-positive groups and its CI columns (from the diagnosis sample) did
-    # not — say so on the table, not only in the section text. Same condition
-    # as the CI columns above: no columns, nothing to qualify.
-    drop = drop_all_positive_groups(parameters)
-    ci_cols = "；CI 沒有排除全正的 query group" if drop and ci_shown else ""
-    _add(b_map,
-         f"B · per-item 歸因｜map_attr@k（列＝item，＋CI 上下界{ci_cols}）{item_cov}",
-         True)
+    _add(b_map, f"B · per-item 歸因｜map_attr@k（列＝item）{item_cov}", True)
     _add(_per_item_recall_table(per_item, ks, all_k, macro_metrics=macro_item),
          f"B · per-item 歸因｜recall@k（列＝item）{item_cov}", True)
     if cat:
@@ -1123,36 +1060,6 @@ def build_metrics_section(
                                     macro_metrics=cat_macro_item),
              f"B · 大類 per-item 歸因｜recall@k（列＝大類）{cat_item_cov}", True)
 
-    # Which column the CI point estimate matches follows metric.k (ADR-0020
-    # design H) instead of a hard-coded @all; a column is named only when
-    # this section's tables (ks) actually show it.
-    mk = metric_params(parameters)["k"]
-    if mk is None:
-        trunc, col = "不截斷（metric.k 未設）", "all"
-    elif mk in ks:
-        trunc, col = f"截斷在 {mk}（metric.k）", mk
-    else:
-        trunc, col = f"截斷在 {mk}（metric.k）", None
-    # #376: with the switch on, the point estimates in a map_attr row dropped
-    # the all-positive groups and the CI beside them did not, so "same
-    # definition" is false and the point can fall outside its own CI. Said
-    # only when the section shows a CI (ci_shown), and the comparison with a
-    # row's point estimate only when that column is shown (col).
-    if col is None:
-        ci_point_note = (
-            f"CI 上下界的點估{trunc}，本段各表不顯示 @{mk} 欄" + (
-                "；頭號指標與 CI 沒有排除全正的 query group，A、B 塊各表已排除"
-                if drop and ci_shown else ""
-            )
-        )
-    elif drop and ci_shown:
-        ci_point_note = (
-            f"頭號指標與 CI 上下界{trunc}，但沒有排除全正的 query group；B 塊 "
-            f"map_attr 表同一列的 map_attr@{col} 點估已排除，和 CI 不是同一批組，"
-            "點估可能落在 CI 之外"
-        )
-    else:
-        ci_point_note = f"CI 上下界的點估與該列 map_attr@{col} 同一定義，{trunc}"
     ledger = [
         line for grain, bundle in _grain_bundles(metrics)
         if (line := _group_ledger_line(grain, bundle, parameters))
@@ -1168,11 +1075,11 @@ def build_metrics_section(
             "單一彙總（overall、大類 overall）用指標家族當列，多實體拆分（per-"
             "segment、per-item、大類 per-item）用實體當列；所有表 k 欄一致＝"
             "[1,2,3,4,5,all]、每張表一個 metric family。頭號指標＝macro per-item "
-            f"mAP（item 等權，含 bootstrap CI；{ci_point_note}）；"
+            f"mAP（item 等權；{_headline_column(parameters, all_k, '本段')}）；"
             "overall per-query mAP 是另一種加權，並列不比高下。手算核對：overall "
             "map@1 = recall@1（見核心概念，AP@k 分母＝R）。K=產品數時 precision "
-            "退化為 base rate、recall 恆為 1。CI 僅算到 item 層（大類 per-item 無 "
-            "bootstrap CI）。per-item 列序統一按字母。明細表點標題展開。"
+            "退化為 base rate、recall 恆為 1。per-item 列序統一按字母。明細表點標題"
+            "展開。"
         ),
         # The query-group ledger (#376), one line per grain, always printed:
         # the reader decides from it whether to turn the switch on.
@@ -2064,7 +1971,7 @@ def build_diagnosis_links_section(
 
 
 def build_completeness_section(
-    metrics: dict, parameters: dict, metric_ci: dict | None = None
+    metrics: dict, parameters: dict,
 ) -> ReportSection:
     """完整性檢查（殿後）：本次執行的事實 ＋「什麼看似正常其實沒量到」。
 
@@ -2073,7 +1980,6 @@ def build_completeness_section(
     eval_p = parameters.get("evaluation", {}) or {}
     totals = _dataset_overview(metrics).get("totals", {}) or {}
     metric_p = metric_params(parameters)
-    sample_meta = (metric_ci or {}).get("sample", {}) or {}
 
     mk = metric_p["k"]
     # 「item 數」的標籤印使用者自己的 item 欄名，不寫死「產品」（#327；同
@@ -2095,7 +2001,6 @@ def build_completeness_section(
             metric_p.get("min_positives"),
         "metric.shrinkage_k（向 pooled 平均收縮強度；0＝不收縮）":
             metric_p.get("shrinkage_k"),
-        "抽樣描述 sampling_description": sample_meta.get("sampling_description"),
     }
     # 同分列佔比：只有宣告了 event 的部署算得出來，也只有它需要看。這個數字
     # 是「名次由決勝規則決定、不是由分數決定」的列佔多少——決勝規則按 event
@@ -2130,7 +2035,7 @@ def build_completeness_section(
     return ReportSection(
         title="完整性檢查",
         description=(
-            "本次執行的事實（k、規模、抽樣、metric 參數）與「什麼情況數字看起來"
+            "本次執行的事實（k、規模、metric 參數）與「什麼情況數字看起來"
             "正常、其實沒量到或不完整」。放在最後，交代邊界。"
         ),
         tables=[facts_tbl],
@@ -2143,29 +2048,17 @@ def skipped_diagnosis_bullets(parameters: dict) -> list[str]:
     """每一項在目前 schema 下跳過的診斷，各一句「哪一項、為什麼」。
 
     走 ``contract.DIAGNOSES``（不是自己抄一份名單），所以之後新增的診斷自動
-    被問到；``"ci"`` 另外補上——它是共用診斷抽樣的第四個消費者，但不在那份
-    registry 裡（它是頭號指標的信賴區間，不是一頁診斷）。沒有任何一項被跳過時
-    回空 list，主報表因此逐字不變。
+    被問到。沒有任何一項被跳過時回空 list，主報表因此逐字不變。
     """
     from recsys_tfb.diagnosis.metric._common import schema_skip_reason
     from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
 
     out = []
-    for name in (*DIAGNOSES, "ci"):
+    for name in DIAGNOSES:
         reason = schema_skip_reason(parameters, name)
         if reason:
-            label = "頭號指標的信賴區間" if name == "ci" else f"診斷「{name}」"
-            out.append(f"{label}本次未算：{reason}")
+            out.append(f"診斷「{name}」本次未算：{reason}")
     return out
-
-
-def several_eval_dates(configured) -> bool:
-    """Whether the configured evaluation date value names more than one date.
-
-    ``len(as_date_list(value)) > 1``, the one test the repo uses for "several
-    dates" (``as_date_list`` already drops repeats).
-    """
-    return len(as_date_list(configured)) > 1
 
 
 def eval_dates_display(configured):
@@ -2191,7 +2084,6 @@ def assemble_report(
     parameters: dict,
     baseline_metrics: dict | None = None,
     report_aggregates: dict | None = None,
-    metric_ci: dict | None = None,
     diagnosis_pages: list | None = None,
     prediction_quality: dict | None = None,
 ) -> str:
@@ -2205,16 +2097,16 @@ def assemble_report(
     pq_section = build_prediction_quality_section(
         prediction_quality, metrics, parameters)
     candidates = [
-        build_overview_section(metrics, parameters, metric_ci=metric_ci,
+        build_overview_section(metrics, parameters,
                                prediction_quality_shown=pq_section is not None),
         build_core_concept_section(parameters),
         build_dataset_overview_section(metrics, parameters),
-        build_metrics_section(metrics, parameters, metric_ci=metric_ci),
+        build_metrics_section(metrics, parameters),
         pq_section,
         build_item_detail_section(report_aggregates, parameters),
         build_baseline_section(metrics, baseline_metrics, parameters),
         build_diagnosis_links_section(diagnosis_pages, parameters),
-        build_completeness_section(metrics, parameters, metric_ci=metric_ci),
+        build_completeness_section(metrics, parameters),
         build_glossary_section(parameters),
     ]
     sections = [s for s in candidates if s is not None]
@@ -2224,14 +2116,6 @@ def assemble_report(
         "Model Version": parameters.get("model_version", "unknown"),
         "Snap Date": eval_dates_display(configured_dates),
     }
-    if several_eval_dates(configured_dates):
-        # Right under the dates, the one place every reader passes. The
-        # bootstrap CIs (main report and diagnosis pages) were built for one
-        # date; issue #389 fixes them, and removes this line.
-        metadata["⚠ 信賴區間"] = (
-            "多個日期合併評估時，本報表與診斷頁的信賴區間可能偏窄或有偏，"
-            "詳見 issue #389。"
-        )
     metadata.update({
         "Generated At": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "Total Queries": metrics.get("n_queries"),

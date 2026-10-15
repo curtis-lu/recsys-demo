@@ -43,7 +43,7 @@ per-item mAP 變化多少（Δ）**。
 偏移整個漏掉**，所以 ``query_offset_spread`` 是必要的第二個視角，且它對兩種
 context 都成立。context 欄在 query 內非常數時 ``notes`` 會標明。
 
-三個相對於試作腳本（``scripts/config_sorting_shift_diagnosis.py``，commit d94fa0c4 帶入，已刪）的行為修正
+兩個相對於試作腳本（``scripts/config_sorting_shift_diagnosis.py``，commit d94fa0c4 帶入，已刪）的行為修正
 --------------------------------------------------------------------------
 1. **讀不到分數欄直接 raise，不自己找一欄頂替。**
    offset 活在**模型輸出的 log-odds 空間**，只有模型原始輸出算得出有意義的
@@ -65,10 +65,6 @@ context 都成立。context 欄在 query 內非常數時 ``notes`` 會標明。
    → spread 由 1.609 掉到 0.0、delta 由 −0.200 掉到 0.0、``notes`` 全空。
    零命中**不 raise**（config 裡有一條用不到的 override 是合法的），但必須
    出現在 ``unmatched_override_keys`` 與 ``notes`` 裡。
-3. **CI 用既有的 ``uncertainty.paired_bootstrap_delta``，不自己寫重抽迴圈。**
-   那份是經過驗收的分層配對版本（層內重抽、``inclusion_weight`` 修正、兩側在
-   同一組重抽樣本上相減）。在診斷模組裡再寫一份 bootstrap ＝ 兩份統計方法各自
-   漂移，而且第二份不會有人去驗。
 
 不下結論
 --------
@@ -90,8 +86,7 @@ from recsys_tfb.core.consistency import item_list_counted_from_data
 from recsys_tfb.core.logging import log_step
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric._common import (
-    ci_for_corrected_minus_baseline, diag_cfg, query_key, sample_arrays,
-    schema_skip_reason, to_logit,
+    diag_cfg, query_key, sample_arrays, schema_skip_reason, to_logit,
 )
 from recsys_tfb.evaluation.metrics import compute_macro_per_item_map, metric_params
 
@@ -124,7 +119,7 @@ def _weighted_quantile(
     為什麼要加權：``query_offset_spread`` 描述的是**母體**裡每個 query 的偏移
     範圍，而診斷抽樣是分層的——不吃 ``inclusion_weight`` 的話，被降抽那層的
     query 會被系統性低估，這個號稱「真正抵達排序的偏移」講的就只是樣本而不是
-    母體。同一份權重也餵給 delta／CI／n_pos_effective，三者必須一致。
+    母體。同一份權重也餵給 delta 與 n_pos_effective，三者必須一致。
 
     不插值是刻意的：插值會產生一個資料裡不存在的 spread 值，而這裡的每個值都
     對應「某個 query 實際出現的偏移範圍」，捏造中間值沒有意義。
@@ -153,7 +148,7 @@ FIELD_NOTES: dict[str, str] = {
     ),
     "query_offset_spread": (
         "在實際樣本上逐 query 算 max − min 的分布，依 inclusion_weight 加權"
-        "（與 delta／CI／n_pos_effective 同一組權重）。分位數為 inverse-CDF "
+        "（與 delta／n_pos_effective 同一組權重）。分位數為 inverse-CDF "
         "定義、不插值。帶抽樣誤差。"
     ),
     "n_queries_multi_candidate": (
@@ -166,8 +161,6 @@ FIELD_NOTES: dict[str, str] = {
         "shrinkage_k／weight_alpha 吃的是這個加權計數，不是 n_pos_raw。"
     ),
     "delta": "corrected_map − baseline_map（把理論 offset 扣掉之後的變化量）。",
-    "delta_ci_low": "delta 的 2.5 百分位（分層配對 cluster bootstrap）。",
-    "delta_ci_high": "delta 的 97.5 百分位（分層配對 cluster bootstrap）。",
     "offset_centered": "offset 減去該 context group 內的中位數。呈現用。",
     "unmatched_override_keys": "config 宣告了、但這批樣本一次都沒查到的 key。",
     "items_declared_not_observed": (
@@ -381,8 +374,8 @@ def row_offsets(
 ) -> np.ndarray:
     """逐列 offset 向量（與 ``pdf`` 等長、逐列對齊）。
 
-    Δ 與其 CI 都用這條向量：offset 依 (context, item) 決定，不是只依 item，所以
-    ``paired_bootstrap_delta`` 要走「向量」那條路而不是 ``{item: offset}`` dict。
+    Δ 用這條向量：offset 依 (context, item) 決定，不是只依 item，所以不能用
+    ``{item: offset}`` dict 代替。
     """
     item_col = schema["item"]
     a_cols = offset_context_columns(parameters, schema)
@@ -447,13 +440,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     schema = get_schema(parameters)
     diag = diag_cfg(parameters)
     cfg = diag.get("config_shift", {}) or {}
-    ci_cfg = diag.get("ci", {}) or {}
     mp = metric_params(parameters)
-    ci_info = {
-        "enabled": bool(ci_cfg.get("enabled", True)),
-        "n_boot": int(ci_cfg.get("n_boot", 200)),
-        "seed": int((diag.get("sample", {}) or {}).get("seed", 42)),
-    }
 
     out: dict[str, Any] = {
         "enabled": bool(cfg.get("enabled", True)),
@@ -470,9 +457,6 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         "baseline_map": None,
         "corrected_map": None,
         "delta": None,
-        "delta_ci_low": None,
-        "delta_ci_high": None,
-        "ci": ci_info,
         "per_item": [],
         "sample": {},
         "sample_meta": dict(sample_meta or {}),
@@ -558,10 +542,6 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         )
 
     groups, items, y, ht_weights, row_weights = sample_arrays(sample_pdf, schema)
-    # config_shift 要未 factorize 的字串 key（下面用 .nunique()，且
-    # paired_bootstrap_delta 會自己 factorize）——這是 sample_arrays 刻意不
-    # 把 clusters 一起回傳的原因，見該函式 docstring。
-    clusters = query_key(sample_pdf, entity_cols)
     z, logit_notes = to_logit(
         sample_pdf[schema["score"]].to_numpy(dtype=np.float64)
     )
@@ -581,7 +561,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     # 逐 query 的實際 offset 範圍。這一面對 entity 級與 item 級 context 都成立
     # （見模組 docstring「兩個 spread」）。只給分位數，不設門檻、不給布林。
     # ht_weights／row_weights 已由 sample_arrays 取好（同一組權重要餵給所有
-    # 估計量：分位數、baseline／corrected、CI、n_pos_effective）；row_weights
+    # 估計量：分位數、baseline／corrected、n_pos_effective）；row_weights
     # 是「缺 inclusion_weight 欄時填 1」的版本，這裡不用再自己算一次 fallback。
     q_frame = pd.DataFrame({
         "g": groups,
@@ -699,10 +679,10 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         )
 
     # ht_weights 由 sample_arrays 取好，同一組權重餵給所有估計量：分位數、
-    # baseline／corrected、CI、n_pos_effective。缺欄（未分層抽樣）時
+    # baseline／corrected、n_pos_effective。缺欄（未分層抽樣）時
     # ht_weights is None，走 weights=None 的原始未加權路徑。
-    # 以下三個區塊是本模組的全部耗時來源：兩次全樣本 mAP、一次配對重抽、
-    # 每個 item 一次全樣本 mAP。公司規模（≈25 萬 query × 22 item ≈ 5.5M 列）
+    # 以下兩個區塊是本模組的全部耗時來源：兩次全樣本 mAP、每個 item 一次
+    # 全樣本 mAP。公司規模（≈25 萬 query × 22 item ≈ 5.5M 列）
     # 下這段會安靜跑很久，看起來像卡住——所以逐段 log_step，per-item 那圈
     # 還要逐項報進度，否則 22 次 mAP 之間是一整段沒有任何輸出的空白。
     with log_step(logger, "config_shift.macro_map_baseline_and_corrected"):
@@ -715,28 +695,6 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     out["baseline_map"] = baseline
     out["corrected_map"] = corrected
     out["delta"] = float(corrected - baseline)
-
-    if ci_info["enabled"]:
-        frame = pd.DataFrame({
-            "group": groups,
-            "cluster": clusters.to_numpy(),
-            "item": items,
-            "label": y,
-            "score": z,
-        })
-        for col in ("stratum", "inclusion_weight"):
-            if col in sample_pdf.columns:
-                frame[col] = sample_pdf[col].to_numpy()
-        # 本模組的 Δ ＝ corrected − baseline；ci_for_corrected_minus_baseline
-        # 把「paired_bootstrap_delta 回的是反向差、取負後上下界要對調」這步
-        # 收在 _common.py 一處，理由見該函式 docstring。
-        with log_step(
-            logger, "config_shift.paired_bootstrap", n_boot=ci_info["n_boot"],
-        ):
-            out["delta_ci_low"], out["delta_ci_high"] = ci_for_corrected_minus_baseline(
-                frame, mp, offs,
-                n_boot=ci_info["n_boot"], seed=ci_info["seed"],
-            )
 
     # 逐項替換：一次只扣掉一個 item 的 offset。Σ Δ_j ≠ Δ（名次耦合），這句話由
     # Task 2.3 的 SCOPE 擁有並顯示，不在計算層再存一份。
@@ -788,7 +746,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     out["sample"] = {
         "n_rows": int(len(sample_pdf)),
         "n_queries": int(len(np.unique(groups))),
-        "n_entities": int(clusters.nunique()),
+        "n_entities": int(query_key(sample_pdf, entity_cols).nunique()),
         "n_items": int(len(set(items.tolist()))),
         "n_positive_rows": int(y.sum()),
         "n_positive_rows_effective": math.fsum(w_pos_rows[pos_mask]),  # 為何 fsum：見 per_item

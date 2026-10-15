@@ -18,8 +18,7 @@ PARAMS = {
         "sample_ratio_overrides": {"mass|ccard_ins|0": 0.5},
     },
     "training": {"sample_weight_keys": [], "sample_weights": {}},
-    "evaluation": {"diagnosis": {"ci": {"enabled": True, "n_boot": 20},
-                                 "config_shift": {"enabled": True}}},
+    "evaluation": {"diagnosis": {"config_shift": {"enabled": True}}},
 }
 
 
@@ -108,8 +107,7 @@ PARAMS_COUPLED = {
     **PARAMS,
     "dataset": {**PARAMS["dataset"],
                 "sample_ratio_overrides": {"mass|a|0": 0.5, "mass|b|0": 0.25}},
-    "evaluation": {"diagnosis": {"ci": {"enabled": False},
-                                 "config_shift": {"enabled": True}}},
+    "evaluation": {"diagnosis": {"config_shift": {"enabled": True}}},
 }
 
 
@@ -163,16 +161,15 @@ PARAMS_CORRECTION_HELPS = {
 
 
 def _sample_where_correction_helps():
-    """造一份「扣回 offset 一定改善排序」的資料，讓 Δ 與每個 replicate 同號。
+    """造一份「扣回 offset 一定改善排序」的資料，讓 Δ 必然為正。
 
     真實 logit：fund_bond = 1.0（每個 query 的正例）、ccard_ins = 0.0（負例）。
     config 給 ccard_ins 的理論 offset ＝ ln(1.0/0.1) ＝ ln 10 ≈ 2.303，觀測分數
     ＝ 真實 logit ＋ offset → ccard_ins 在**每個** query 都被抬到 fund_bond 之上，
     正例掉到第 2 名、AP ＝ 0.5；扣回 offset 後 fund_bond 回到第 1、AP ＝ 1.0。
 
-    因此 Δ ＝ +0.5，而且**任何** cluster 重抽組合算出來都是 +0.5——CI 兩端必然
-    同號且為正。符號寫反（直接回傳 paired_bootstrap_delta 的 baseline − corrected）
-    就會讓 ci_low 變成 −0.5，被下面的斷言抓到。
+    因此 Δ ＝ +0.5。符號寫反（回傳 baseline − corrected）就會變成 −0.5，被下面
+    的斷言抓到。
     """
     rows = []
     off = np.log(10.0)
@@ -190,20 +187,16 @@ def _sample_where_correction_helps():
     return pd.DataFrame(rows)
 
 
-def test_ci_has_same_sign_as_delta():
-    """CI 必須是 Δ 自己的區間，不是反號那一個。
+def test_delta_is_corrected_minus_baseline():
+    """Δ 的方向是 corrected − baseline，不是反過來。
 
-    ``uncertainty.paired_bootstrap_delta`` 回的是 ``mAP(F) − mAP(F − shift)``
-    ＝ baseline − corrected，與本模組的 Δ ＝ corrected − baseline 反號。漏掉取負
-    的話數值大小完全正確、只有方向相反——報表會出貨一個上下顛倒的信賴區間，
-    而任何「數值對不對」的斷言都抓不到。這裡用結構性的**同號**斷言。
+    反號的話數值大小完全正確、只有方向相反，而「扣回 offset 改善了排序」會被
+    讀成「變差」。用一份扣回 offset 必然改善的資料釘住正號。
     """
     out = compute((_sample_where_correction_helps(), {}),
                   PARAMS_CORRECTION_HELPS)
     assert out["delta"] == pytest.approx(0.5, abs=1e-9)
     assert out["delta"] > 0
-    assert out["delta_ci_low"] > 0
-    assert out["delta_ci_high"] > 0
 
 
 def _sample_with_two_tier_inclusion_weight():
@@ -231,22 +224,12 @@ def _sample_with_two_tier_inclusion_weight():
     return pd.DataFrame(rows)
 
 
-def test_ci_brackets_the_point_estimate():
-    """CI 必須包住點估計。符號寫反時這條會紅——那是唯一抓得到反號的形狀，
-    因為 delta 與 CI 的絕對值在反號後全部不變（見 ``test_ci_has_same_sign_
-    as_delta`` 的同一個坑：數值大小對、方向錯，一般數值斷言測不出來）。
-    這條是通用版：不管符號本身為何，Δ 都該落在自己的 CI 之內。
-    """
-    out = compute((_sample(), {"n_queries": 40}), PARAMS)
-    assert out["delta_ci_low"] <= out["delta"] <= out["delta_ci_high"]
-
-
 def test_point_estimate_uses_inclusion_weight():
-    """點估計必須吃 inclusion_weight，否則它與 CI 描述的不是同一個母體。
+    """點估計必須吃 inclusion_weight，否則它描述的是樣本而不是母體。
 
-    CI 側（``paired_bootstrap_delta``）本來就做 Horvitz–Thompson 修正。點估計
-    不做的話，兩個數字估的是兩個不同的量——公司環境目前 ratio == 1.0（權重全 1）
-    看不出差別，母體長過 max_queries 之後就會活過來。
+    不做 Horvitz–Thompson 修正的話，分層抽樣下被降抽那層會被系統性低估——
+    公司環境目前 ratio == 1.0（權重全 1）看不出差別，母體長過 max_queries
+    之後就會活過來。
     """
     weighted_pdf = _sample_with_two_tier_inclusion_weight()
     unweighted_pdf = weighted_pdf.drop(columns=["inclusion_weight"])
@@ -293,8 +276,7 @@ PARAMS_ITEM_LEVEL_CONTEXT = {
         "sample_ratio_overrides": {"hi|0": 0.1, "mid|0": 0.5, "lo|0": 1.0},
     },
     "training": {"sample_weight_keys": [], "sample_weights": {}},
-    "evaluation": {"diagnosis": {"ci": {"enabled": False},
-                                 "config_shift": {"enabled": True}}},
+    "evaluation": {"diagnosis": {"config_shift": {"enabled": True}}},
 }
 
 _TIER_OF = {"h1": "hi", "m1": "mid", "l1": "lo", "l2": "lo"}
@@ -378,7 +360,7 @@ def test_query_offset_spread_is_per_query_not_global():
 def test_query_offset_spread_respects_inclusion_weight():
     """分位數要吃 inclusion_weight，否則講的是樣本而不是母體。
 
-    delta／CI／n_pos_effective 全部走 HT 加權，分位數不走的話，分層抽樣一啟用
+    delta／n_pos_effective 全部走 HT 加權，分位數不走的話，分層抽樣一啟用
     （``max_queries`` 觸發時就會）這個號稱「真正抵達排序的偏移」就跟其他數字
     描述的不是同一個母體。
     """
@@ -482,8 +464,7 @@ PARAMS_INT_CONTEXT = {
         "sample_ratio_overrides": {"3|a|0": 0.2},
     },
     "training": {"sample_weight_keys": [], "sample_weights": {}},
-    "evaluation": {"diagnosis": {"ci": {"enabled": False},
-                                 "config_shift": {"enabled": True}}},
+    "evaluation": {"diagnosis": {"config_shift": {"enabled": True}}},
 }
 
 
@@ -541,8 +522,7 @@ PARAMS_NULL_CONTEXT = {
         "sample_ratio_overrides": {"hi|0": 0.1, "nan|0": 0.01},
     },
     "training": {"sample_weight_keys": [], "sample_weights": {}},
-    "evaluation": {"diagnosis": {"ci": {"enabled": False},
-                                 "config_shift": {"enabled": True}}},
+    "evaluation": {"diagnosis": {"config_shift": {"enabled": True}}},
 }
 
 
@@ -626,7 +606,8 @@ def test_per_item_reports_both_raw_and_effective_positive_counts():
 
     mAP 與 min_positives／shrinkage_k／weight_alpha 吃的是加權計數
     （``metrics.py`` 的 weights 路徑）。只報原始列數，讀者就會拿一個母體去篩
-    另一個母體算出來的數字——與先前修掉的「點估計與 CI 估不同的量」同一種病。
+    另一個母體算出來的數字——與「點估計不吃 inclusion_weight」同一種病（見
+    ``test_point_estimate_uses_inclusion_weight``）。
     """
     out = compute((_sample_with_two_tier_inclusion_weight(), {}), PARAMS)
     by_item = {r["item"]: r for r in out["per_item"]}
@@ -699,8 +680,7 @@ def test_all_return_paths_share_the_same_key_set():
     """
     disabled_params = {
         **PARAMS,
-        "evaluation": {"diagnosis": {"ci": {"enabled": True, "n_boot": 20},
-                                     "config_shift": {"enabled": False}}},
+        "evaluation": {"diagnosis": {"config_shift": {"enabled": False}}},
     }
     disabled = compute((_sample(), {"n_queries": 40}), disabled_params)
     empty = compute((_sample().iloc[0:0], {}), PARAMS)
@@ -733,7 +713,7 @@ def test_per_item_loop_reports_progress_per_item(caplog):
 
 
 def test_expensive_blocks_are_wrapped_in_log_step(caplog):
-    """三個耗時區塊各自要有 step_started／step_completed（含耗時）。"""
+    """兩個耗時區塊各自要有 step_started／step_completed（含耗時）。"""
     import logging
 
     with caplog.at_level(logging.INFO):
@@ -749,7 +729,7 @@ def test_expensive_blocks_are_wrapped_in_log_step(caplog):
 
 
 def test_step_names_are_fixed_and_the_scale_is_a_field(caplog):
-    """事件名不帶重抽次數／item 數，那兩個規模走 ``**fields``。
+    """事件名不帶 item 數，這個規模走 ``**fields``。
 
     ``log_step`` 把欄位接在 console 訊息尾巴，所以就地可讀性沒有損失；換到的是
     聚合端拿回固定的桶。順帶清掉事件名裡的中文（程式碼識別字一律英文）。
@@ -761,13 +741,8 @@ def test_step_names_are_fixed_and_the_scale_is_a_field(caplog):
 
     started = {r.step: r for r in caplog.records
                if getattr(r, "event", None) == "step_started"}
-    boot = started.get("config_shift.paired_bootstrap")
-    assert boot is not None, f"缺固定名 config_shift.paired_bootstrap；有 {sorted(started)}"
-    # 期望值取自 PARAMS 與 fixture，不從記錄回推——拿被測程式自己的輸出當期望
-    # 值會自我一致、恆真（見 test-false-green 形態 7）。_sample() 固定兩個 item。
-    assert getattr(boot, "n_boot", None) == 20
-    assert "n_boot=20" in boot.getMessage()
-
+    # 期望值取自 fixture，不從記錄回推——拿被測程式自己的輸出當期望值會自我
+    # 一致、恆真（見 test-false-green 形態 7）。_sample() 固定兩個 item。
     per_item = started["config_shift.per_item_replacement"]
     assert getattr(per_item, "n_items", None) == 2
     assert "n_items=2" in per_item.getMessage()

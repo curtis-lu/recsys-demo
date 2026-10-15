@@ -46,7 +46,6 @@ def create_pipeline(
     from recsys_tfb.pipelines.evaluation.nodes import (
         build_popularity_period_counts,
         compute_baseline_metrics,
-        compute_metric_ci,
         compute_metrics,
         compute_prediction_quality,
         compute_report_aggregates,
@@ -129,11 +128,14 @@ def create_pipeline(
             outputs=["enriched_eval_predictions", "evaluation_segment_columns",
                      "evaluation_item_categories"],
         ),
-        # Draw the driver-side diagnosis sample ONCE; compute_metric_ci and,
-        # in --post-training, the registry diagnoses read this shared
-        # in-memory output instead of each re-drawing it (same seed ->
-        # identical content). The node is told the mode so that monitoring
-        # mode, which wires no registry diagnosis, never draws for them.
+        # Draw the driver-side diagnosis sample ONCE; in --post-training the
+        # registry diagnoses read this shared in-memory output instead of each
+        # re-drawing it (same seed -> identical content). The node is told the
+        # mode so that monitoring mode, which wires no registry diagnosis,
+        # never draws. It is wired there all the same: it is where
+        # --from-node resumes after a change under evaluation.diagnosis
+        # (steps.config_fingerprint.COMPUTED_KEYS), and test_pipeline.py
+        # requires every node those rows name in every mode.
         Node(
             make_draw_diagnosis_sample_node(
                 registry_diagnoses_wired=post_training
@@ -207,11 +209,6 @@ def create_pipeline(
                     "parameters"],
             outputs="evaluation_report_aggregates",
         ),
-        Node(
-            compute_metric_ci,
-            inputs=["diagnosis_sample", "parameters"],
-            outputs="evaluation_metric_ci",
-        ),
     ]
     if post_training:
         nodes += [
@@ -273,7 +270,6 @@ def create_pipeline(
         Node(
             generate_report,
             inputs=["evaluation_metrics", "parameters", "baseline_metrics",
-                    "evaluation_metric_ci",
                     "evaluation_report_aggregates",
                     "evaluation_diagnosis_pages",
                     "prediction_quality_metrics"],

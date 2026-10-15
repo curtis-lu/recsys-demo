@@ -185,8 +185,8 @@ def _resolve_k_grids(
 
     Two independent axes (ADR-0020 design H). ``evaluation.k_values`` is the
     K grid of the ``@K`` families. ``evaluation.metric.k`` is the truncation
-    depth of the headline per-item macro only — point estimate and CI alike —
-    and need not be listed in ``k_values``. So:
+    depth of the headline per-item macro only, and need not be listed in
+    ``k_values``. So:
 
     * ``query_ks`` = ``k_values``: ``compute_per_query_metrics`` /
       ``aggregate_overall`` / ``aggregate_per_segment``.

@@ -5,7 +5,7 @@
 ``min_pos_queries_per_item`` 的 item 整批全取（take-all），其餘 query 用
 CRC32 hash-ratio（``utils.hashing``）抽到補滿 ``max_queries``。被抽中的
 query 帶回全部候選列（含負例，排序需要），``toPandas()`` 落到 driver 供
-numpy 迭代計算（bootstrap／成對帳本）重複使用。
+各項診斷的 numpy 計算（逐 item AUC、扣 offset 重排、成對帳本）重複使用。
 
 兩層的納入機率不同（take-all π=1、hash-ratio π=ratio），所以樣本**不是**
 簡單隨機樣本：``sample_pdf`` 帶出 ``stratum`` 與 ``inclusion_weight``
@@ -147,13 +147,13 @@ def draw_diagnosis_sample(
     ``evaluation.segment_columns`` 的預設。
 
     sample_pdf 欄位：query cols（time + entity）、item、label、score，
-    **不含選用角色（``event``）的欄**——本抽樣的四個消費者在宣告了那些角色時
+    **不含選用角色（``event``）的欄**——本抽樣的三個消費者在宣告了那些角色時
     全部跳過（``_common.schema_skip_reason``），所以這份表根本不會被抽；加寬
     這份欄位清單是替一個沒有消費者的產物付錢。下面以 ``identity_columns``
     去重因此是安全的——但**安全的理由要跟著 schema_skip_reason 走，不是跟著
-    「有沒有宣告選用角色」走**：今天只有 ``event`` 會讓那四項跳過，所以跑得到
+    「有沒有宣告選用角色」走**：今天只有 ``event`` 會讓那三項跳過，所以跑得到
     這一行就表示 identity ＝ query cols ＋ item。只宣告 ``occasion`` 時不一樣：
-    它加寬 query group，同組內 item 重新唯一，ci、config_shift、suppression
+    它加寬 query group，同組內 item 重新唯一，config_shift、suppression
     照常算（item_ability 因另一條理由跳過，見 ``_common``）——於是這一行會在
     identity 含 ``occasion`` 欄的情況下執行，而這份表帶得到那些欄（它們在
     ``query_cols`` 裡），所以仍然成立（#428 以廣告示例實跑確認）。**加第三個

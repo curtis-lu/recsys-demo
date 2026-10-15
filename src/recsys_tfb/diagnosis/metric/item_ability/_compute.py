@@ -27,23 +27,7 @@ raw AUC 反而被拉低）。方向本身就是訊號，散點圖偏離對角線
 值或反號都不會讓任何數值測試轉紅，只有方向測試
 （``test_auc_gap_is_raw_minus_centered_not_absolute``）守得住。
 
-sort-once bootstrap
---------------------
-每個 item 的 AUC CI 都要靠分層 cluster bootstrap（見
-``recsys_tfb.diagnosis.metric.uncertainty.iter_stratified_cluster_multipliers``
-——本模組不寫第二份重抽迴圈，直接共用那份骨架）。試作腳本
-（``scripts/item_ability_diagnosis.py``，commit d94fa0c4 帶入，已刪）每次呼叫 ``weighted_auc`` 都重新排序
-一次分數，公司規模（≈25 萬 query × 22 item ≈ 550 萬列）下這是
-``n_items × (n_boot + 2)`` 次排序，慢到無法接受。
-
-拆法：:func:`presort_by_score` 把「排序＋抓同分組邊界」獨立出來，每個 item
-的 raw／centered 分數**各排一次**（在 bootstrap 迴圈**外**）；
-:func:`weighted_auc_presorted` 只做那個線性掃描，**內部不得再排序**。
-bootstrap 迴圈內只做「拿乘數 → 乘上 inclusion_weight → 依既定的 order 重排
-→ 呼叫 weighted_auc_presorted」。``test_bootstrap_sorts_once_per_item_regardless_of_n_boot``
-把這個效能宣稱釘死：排序次數固定是 ``2 × n_items``，與 ``n_boot`` 無關。
-
-三個相對於試作腳本（``scripts/item_ability_diagnosis.py``，commit d94fa0c4 帶入，已刪）的行為修正
+兩個相對於試作腳本（``scripts/item_ability_diagnosis.py``，commit d94fa0c4 帶入，已刪）的行為修正
 -----------------------------------------------------------------------
 1. **讀不到分數欄直接 raise，不自己找一欄頂替。** 理由與 ``config_shift``
    相同：raw／centered AUC 是在模型輸出的 logit 空間上算的，換一個空間的量
@@ -52,17 +36,11 @@ bootstrap 迴圈內只做「拿乘數 → 乘上 inclusion_weight → 依既定�
    ``score_uncalibrated``，那是校準器還在、``score`` 可能是校準輸出時的權宜；
    校準器已隨 #411 移除，``score`` 就是模型原始輸出。``score_uncalibrated``
    仍在預測表上但已 deprecated（恆等於 ``score``，#412 移除），本模組不讀它。
-2. **點估計也吃 ``inclusion_weight``。** 試作腳本的 ``weighted_auc(z_i, yy)``
-   點估計沒有帶權重（``weight=None`` → 全 1）。診斷抽樣是分層的，不加權的
-   話某一層（例如 hash_ratio 降抽層）的客戶會被系統性低估——與
-   ``config_shift``／``uncertainty`` 對 ``inclusion_weight`` 的處理方式一致。
-   ``test_inclusion_weight_changes_the_auc`` 把這條釘在點估計（``n_boot=0``）
-   上，不是只釘在 CI 上。
-3. **bootstrap 改用分層 cluster 重抽，不是試作腳本的全域 SRS。** 試作腳本的
-   ``_bootstrap_item_auc`` 用 ``RandomState.randint`` 對全體客戶做無分層的
-   簡單隨機重抽，且完全不管 ``inclusion_weight``。這裡改用
-   :func:`~recsys_tfb.diagnosis.metric.uncertainty.iter_stratified_cluster_multipliers`
-   （層內獨立重抽、各層單位數維持原值），與本套診斷家族其他 CI 一致。
+2. **AUC 吃 ``inclusion_weight``。** 試作腳本的 ``weighted_auc(z_i, yy)``
+   沒有帶權重（``weight=None`` → 全 1）。診斷抽樣是分層的，不加權的話某一層
+   （例如 hash_ratio 降抽層）的客戶會被系統性低估——與 ``config_shift`` 對
+   ``inclusion_weight`` 的處理方式一致。``test_inclusion_weight_changes_the_auc``
+   把這條釘住。
 
 不下結論
 --------
@@ -85,7 +63,6 @@ from recsys_tfb.diagnosis.metric._common import (
     diag_cfg, per_item_ap, query_key, sample_arrays, schema_skip_reason,
     to_logit,
 )
-from recsys_tfb.diagnosis.metric.uncertainty import iter_stratified_cluster_multipliers
 from recsys_tfb.evaluation.metrics import metric_params
 from recsys_tfb.utils.ranking import order_by_score_then_item
 
@@ -111,10 +88,6 @@ FIELD_NOTES: dict[str, str] = {
         "被『買家恰好是整體分數較高的客戶』撐高、負值＝相反。無論正負，"
         "query_centered_auc 才是移除這個因素後 item 自己的排序能力。"
     ),
-    "raw_within_item_auc_ci_low": "raw_within_item_auc 的 2.5 百分位（分層 cluster bootstrap）。",
-    "raw_within_item_auc_ci_high": "raw_within_item_auc 的 97.5 百分位（分層 cluster bootstrap）。",
-    "query_centered_auc_ci_low": "query_centered_auc 的 2.5 百分位（分層 cluster bootstrap）。",
-    "query_centered_auc_ci_high": "query_centered_auc 的 97.5 百分位（分層 cluster bootstrap）。",
     "mean_relative_score_pos": "該 item 正例列的 query-centered 分數平均。",
     "mean_relative_score_neg": "該 item 負例列的 query-centered 分數平均。",
     "relative_score_gap": "mean_relative_score_pos − mean_relative_score_neg。",
@@ -195,9 +168,6 @@ def presort_by_score(score: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     組的起始索引，含結尾哨兵——例如排序後分數是 ``[1,1,2,3,3,3]`` 則
     ``tie_starts = [0,2,3,6]``（第一組 ``[0,2)``、第二組 ``[2,3)``、第三組
     ``[3,6)``）。
-
-    只在這裡排序一次：bootstrap 迴圈只換權重、重排到這個既定的 ``order``，
-    不再呼叫排序——這是本模組 sort-once 效能宣稱的唯一依據。
     """
     s = np.asarray(score, dtype=np.float64)
     order = np.argsort(s, kind="mergesort")
@@ -218,16 +188,14 @@ def weighted_auc_presorted(
     """已排序資料的加權 AUC；同分組給 0.5 分。**全向量化，無 Python 迴圈。**
 
     ``labels``／``weights`` 必須已依 :func:`presort_by_score` 回傳的
-    ``order`` 重排過。**內部不得再排序**——那正是 sort-once 效能宣稱的意義。
+    ``order`` 重排過；本函式只做線性掃描，不排序。
 
     效能（2026-07-21）：原本這裡是「逐同分組的 Python 迴圈」，同分組數 ≈ 相異
     分數數 ≈ 該 item 的列數；公司規模單一 item ≈25–30 萬列時每次呼叫要跑那麼多
-    次 Python 迭代（每次還做一次 numpy 切片＋``.sum()``），單次 ≈0.6 秒。而每個
-    item 要呼叫 ``2 + 2×n_boot`` 次（點估計 2 次＋bootstrap 每輪 raw/centered 各
-    一次），n_boot=200 時 ≈402 次 → 單 item ≈4–7 分鐘，瓶頸全在這個迴圈、幾乎
-    都在 CI bootstrap。改用 :func:`numpy.add.reduceat` 對 ``tie_starts`` 切段求和
-    後一次算完，單次呼叫從 ≈0.6 秒降到 ≈0.01 秒（≈49×），**輸出與舊版逐位元相
-    同**（``test_weighted_auc_vectorized_matches_reference`` 對隨機資料釘死等價）。
+    次 Python 迭代（每次還做一次 numpy 切片＋``.sum()``），單次 ≈0.6 秒。改用
+    :func:`numpy.add.reduceat` 對 ``tie_starts`` 切段求和後一次算完，單次呼叫從
+    ≈0.6 秒降到 ≈0.01 秒（≈49×），**輸出與舊版逐位元相同**
+    （``test_weighted_auc_vectorized_matches_reference`` 對隨機資料釘死等價）。
 
     ``tie_starts`` 由 :func:`presort_by_score` 產生、嚴格遞增（每個同分組非空），
     所以 ``reduceat`` 不會踩到「起點相鄰＝空段」那個會回傳單一元素而非 0 的坑。
@@ -236,7 +204,7 @@ def weighted_auc_presorted(
     要另外過濾掉權重為 0 的列——原版 ``weighted_auc``（``scripts/
     item_ability_diagnosis.py``，commit d94fa0c4 帶入，已刪）的 ``keep = w > 0`` 過濾在這裡拿掉了：過濾
     會位移陣列索引，跟 ``tie_starts`` 記錄的絕對位置對不上。兩者在權重非負
-    時數學上等價（``inclusion_weight`` 與 bootstrap 乘數都不會是負值）。
+    時數學上等價（``inclusion_weight`` 不會是負值）。
     """
     n = len(labels)
     if n == 0:
@@ -258,15 +226,6 @@ def weighted_auc_presorted(
     neg_before = np.cumsum(neg_w_grp) - neg_w_grp
     numer = float(np.sum(pos_w_grp * (neg_before + 0.5 * neg_w_grp)))
     return float(numer / (pos_total * neg_total))
-
-
-def _ci_bounds(boot: np.ndarray) -> tuple[Optional[float], Optional[float]]:
-    if len(boot) == 0 or np.all(np.isnan(boot)):
-        return None, None
-    return (
-        float(np.nanpercentile(boot, 2.5)),
-        float(np.nanpercentile(boot, 97.5)),
-    )
 
 
 def _validate(pdf: pd.DataFrame, schema: dict) -> None:
@@ -306,13 +265,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     schema = get_schema(parameters)
     diag = diag_cfg(parameters)
     cfg = diag.get("item_ability", {}) or {}
-    ci_cfg = diag.get("ci", {}) or {}
     mp = metric_params(parameters)
-    ci_info = {
-        "enabled": bool(ci_cfg.get("enabled", True)),
-        "n_boot": int(ci_cfg.get("n_boot", 200)),
-        "seed": int((diag.get("sample", {}) or {}).get("seed", 42)),
-    }
 
     out: dict[str, Any] = {
         "enabled": bool(cfg.get("enabled", True)),
@@ -327,7 +280,6 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         "n_positive_rows": 0,
         "macro_per_item_map": None,
         "candidates_per_query": None,
-        "ci": ci_info,
         "per_item": [],
         "sample_meta": dict(sample_meta or {}),
         "field_notes": FIELD_NOTES,
@@ -360,20 +312,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
     groups, items, y, _, ht_weight = sample_arrays(sample_pdf, schema)
     # item_ability 只需要「缺席時填 1」的權重（見 sample_arrays docstring 的
     # ht_weights／row_weights 區分），丟掉可為 None 的 ht_weights 那一個。
-    # clusters 這裡要**已經 factorize** 過的連續 int 陣列（下面
-    # iter_stratified_cluster_multipliers 拿它直接當索引），sample_arrays
-    # 刻意不回傳 clusters（config_shift 要的是另一種型別），故自己現組。
-    # sort=True：編號照 key 排序給，理由見 sample_arrays 的 groups。
-    clusters = pd.factorize(query_key(sample_pdf, entity_cols), sort=True)[0]
-    n_entities = int(clusters.max()) + 1
-
-    # strata 同一套來源，與 config_shift／uncertainty 一致：缺欄（未分層抽樣）
-    # 時退回單一層 "__all__"。
-    strata = (
-        sample_pdf["stratum"].astype(str).to_numpy()
-        if "stratum" in sample_pdf.columns
-        else np.full(len(sample_pdf), "__all__")
-    )
+    n_entities = int(query_key(sample_pdf, entity_cols).nunique())
 
     with log_step(logger, "item_ability.base_arrays"):
         z, logit_notes = to_logit(
@@ -386,8 +325,8 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         # 平行度就差在小數最後一位；positive_ranks 清單也照列序列出。排過之後
         # 同一份樣本逐位元相同（#355）。
         canon = order_by_score_then_item(groups, z, items)
-        groups, items, y, ht_weight, clusters, strata, z = (
-            a[canon] for a in (groups, items, y, ht_weight, clusters, strata, z)
+        groups, items, y, ht_weight, z = (
+            a[canon] for a in (groups, items, y, ht_weight, z)
         )
         rel = query_center_scores(groups, z)
         rank = descending_ranks(groups, z, items)
@@ -403,16 +342,12 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
         "max": int(query_sizes.max()),
     }
 
-    n_boot = ci_info["n_boot"] if ci_info["enabled"] else 0
-    seed = ci_info["seed"]
     unique_items = sorted(set(items.tolist()))
     n_items_total = len(unique_items)
 
     per_item: list[dict[str, Any]] = []
-    # per-item 迴圈是本模組最貴的一段（item 數 × 分層 cluster bootstrap）。
-    # 公司規模下這段會安靜跑很久，看起來像卡住，所以逐項印進度，不是只包一個
-    # log_step——只包外層的話，使用者看到的仍是「開始」與「結束」之間一段
-    # 長時間沒有任何輸出。
+    # 每個 item 的 raw／centered 分數各排序一次、各算一次 AUC。逐項印一行，
+    # log 裡看得到每個 item 的兩個 AUC。
     with log_step(logger, "item_ability.per_item_auc", n_items=n_items_total):
         for idx, item in enumerate(unique_items, start=1):
             mask = items == item
@@ -420,37 +355,16 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
             z_i = z[mask]
             rel_i = rel[mask]
             w_i = ht_weight[mask]
-            cl_i = clusters[mask]
-            strata_i = strata[mask]
             pos_mask = yy == 1
             neg_mask = yy == 0
 
-            # 排序只在這裡做一次（raw／centered 各一次），bootstrap 迴圈內
-            # 只換權重重排到這個既定的 order——sort-once 效能宣稱的落實處。
             order_raw, ts_raw = presort_by_score(z_i)
             order_cen, ts_cen = presort_by_score(rel_i)
-            yy_raw = yy[order_raw]
-            yy_cen = yy[order_cen]
+            raw_auc = weighted_auc_presorted(
+                yy[order_raw], w_i[order_raw], ts_raw)
+            centered_auc = weighted_auc_presorted(
+                yy[order_cen], w_i[order_cen], ts_cen)
 
-            raw_auc = weighted_auc_presorted(yy_raw, w_i[order_raw], ts_raw)
-            centered_auc = weighted_auc_presorted(yy_cen, w_i[order_cen], ts_cen)
-
-            boot_raw = np.full(n_boot, np.nan, dtype=np.float64)
-            boot_centered = np.full(n_boot, np.nan, dtype=np.float64)
-            if n_boot > 0 and len(cl_i) > 0:
-                for b, mult in enumerate(
-                    iter_stratified_cluster_multipliers(cl_i, strata_i, n_boot, seed)
-                ):
-                    w_b = mult * w_i
-                    auc_r = weighted_auc_presorted(yy_raw, w_b[order_raw], ts_raw)
-                    if auc_r is not None:
-                        boot_raw[b] = auc_r
-                    auc_c = weighted_auc_presorted(yy_cen, w_b[order_cen], ts_cen)
-                    if auc_c is not None:
-                        boot_centered[b] = auc_c
-
-            raw_ci_low, raw_ci_high = _ci_bounds(boot_raw)
-            centered_ci_low, centered_ci_high = _ci_bounds(boot_centered)
             gap = (
                 None if raw_auc is None or centered_auc is None
                 else float(raw_auc - centered_auc)
@@ -469,11 +383,7 @@ def compute(diagnosis_sample: tuple[pd.DataFrame, dict], parameters: dict) -> di
                 "n_pos": int(pos_mask.sum()),
                 "n_neg": int(neg_mask.sum()),
                 "query_centered_auc": centered_auc,
-                "query_centered_auc_ci_low": centered_ci_low,
-                "query_centered_auc_ci_high": centered_ci_high,
                 "raw_within_item_auc": raw_auc,
-                "raw_within_item_auc_ci_low": raw_ci_low,
-                "raw_within_item_auc_ci_high": raw_ci_high,
                 "auc_gap_raw_minus_centered": gap,
                 "mean_relative_score_pos": mean_pos,
                 "mean_relative_score_neg": mean_neg,

@@ -1255,20 +1255,6 @@ class TestComputePredictionQuality:
         assert result["overall"]["summary"]["n"] == 9
 
 
-def test_compute_metric_ci_disabled_returns_stub():
-    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
-    from recsys_tfb.pipelines.evaluation.nodes import compute_metric_ci
-    params = {
-        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
-                               "item": "prod_name", "label": "label",
-                               "score": "score", "rank": "rank"}},
-        "evaluation": {"diagnosis": {"ci": {"enabled": False}}},
-    }
-    assert compute_metric_ci(None, params) == {
-        "enabled": False, "config_fingerprint": fingerprint(params),
-    }
-
-
 def test_compute_report_aggregates_disabled_returns_fingerprinted_stub():
     from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
     from recsys_tfb.pipelines.evaluation.nodes import (
@@ -1278,64 +1264,6 @@ def test_compute_report_aggregates_disabled_returns_fingerprinted_stub():
     assert compute_report_aggregates(None, None, params) == {
         "enabled": False, "config_fingerprint": fingerprint(params),
     }
-
-
-def test_compute_metric_ci_end_to_end_small(spark):
-    from recsys_tfb.pipelines.evaluation.nodes import (
-        compute_metric_ci,
-        draw_diagnosis_sample_node,
-    )
-    df = spark.createDataFrame(
-        [
-            ("20240331", "C0", "A", 0.9, 1),
-            ("20240331", "C0", "B", 0.1, 0),
-            ("20240331", "C1", "A", 0.1, 1),
-            ("20240331", "C1", "B", 0.9, 0),
-        ],
-        schema=["snap_date", "cust_id", "prod_name", "score", "label"],
-    )
-    params = {
-        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
-                               "item": "prod_name", "label": "label",
-                               "score": "score", "rank": "rank"}},
-        "evaluation": {
-            "snap_date": "20240331",
-            "metric": {"weight_alpha": 0.0, "k": None,
-                       "min_positives": 0, "shrinkage_k": 0},
-            "diagnosis": {
-                "sample": {"max_queries": 100,
-                           "min_pos_queries_per_item": 1, "seed": 42},
-                "ci": {"enabled": True, "n_boot": 20},
-            },
-        },
-    }
-    # The sample is now drawn once by draw_diagnosis_sample_node and passed in.
-    from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
-        stamp_partition_fingerprint,
-    )
-    sample = draw_diagnosis_sample_node(
-        stamp_partition_fingerprint(df, params, []), _no_segments(params), params)
-    out = compute_metric_ci(sample, params)
-    assert out["enabled"] is True
-    assert "A" in out["per_item"] and "macro" in out and "sample" in out
-    assert out["sample"]["n_queries_sampled"] == 2
-    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
-    assert out["config_fingerprint"] == fingerprint(params)
-
-
-def test_compute_metric_ci_raises_when_enabled_but_sample_none(spark):
-    import pytest as _pytest
-    from recsys_tfb.pipelines.evaluation.nodes import compute_metric_ci
-    params = {
-        "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
-                               "item": "prod_name", "label": "label",
-                               "score": "score", "rank": "rank"}},
-        "evaluation": {"diagnosis": {"ci": {"enabled": True}}},
-    }
-    # gate/consumer drift guard: an enabled consumer must raise a clear
-    # ValueError (not AttributeError on None) if the shared sample is None.
-    with _pytest.raises(ValueError, match="compute_metric_ci"):
-        compute_metric_ci(None, params)
 
 
 class TestConsumersSegmentByTheLandedList:
@@ -1727,70 +1655,6 @@ class TestReadersRefuseAPartitionPreparedUnderOtherSettings:
         assert result is not None
 
 
-class TestCiConsumerEnabled:
-    """The gate reads the schema since #378, so every fixture here declares
-    one. A bare ``{}`` now raises the missing-role error rather than answering
-    — the same second gate ``get_schema`` applies to any caller that never
-    went through the CLI (#274)."""
-
-    @staticmethod
-    def _params(event=None, **evaluation):
-        columns = {"time": "snap_date", "entity": ["cust_id"],
-                   "item": "prod_name"}
-        if event is not None:
-            columns["event"] = event
-        return {"schema": {"columns": columns}, "evaluation": evaluation}
-
-    def test_default_true(self):
-        from recsys_tfb.pipelines.evaluation.nodes import (
-            _ci_consumer_enabled,
-        )
-        assert _ci_consumer_enabled(self._params()) is True
-
-    def test_respects_disabled(self):
-        from recsys_tfb.pipelines.evaluation.nodes import (
-            _ci_consumer_enabled,
-        )
-        params = self._params(diagnosis={"ci": {"enabled": False}})
-        assert _ci_consumer_enabled(params) is False
-
-    def test_false_when_an_optional_role_makes_it_inapplicable(self):
-        """The CI bootstraps on the driver through
-        ``positive_row_contributions``, which ranks within a query group by
-        item alone. With ``event`` declared that order is arbitrary, and the
-        interval would sit on the same report line as a Spark-computed point
-        estimate that used a different one."""
-        from recsys_tfb.pipelines.evaluation.nodes import (
-            _ci_consumer_enabled,
-        )
-        assert _ci_consumer_enabled(self._params(event="imp_id")) is False
-
-    def test_the_registry_gate_also_sees_inapplicability(self):
-        """The sample is drawn iff *either* gate says yes, so fixing only the
-        CI one leaves the sample drawn for diagnoses that will refuse to run —
-        and the sample frame carries no optional-role column, so deduplicating
-        it by identity raises ``KeyError: ['imp_id']``. That is what the ad
-        example's evaluation died on before this gate learnt the same rule."""
-        from recsys_tfb.pipelines.evaluation.nodes import (
-            _registry_diagnosis_enabled,
-        )
-        assert _registry_diagnosis_enabled(self._params()) is True
-        assert _registry_diagnosis_enabled(self._params(event="imp_id")) is False
-
-    def test_the_gate_and_the_consumer_agree(self):
-        """``compute_metric_ci`` raises when the gate says "nobody wants the
-        sample" while it still wants one. Both ask the same helper, so this
-        pins that they cannot drift into that state."""
-        from recsys_tfb.pipelines.evaluation.nodes import (
-            _ci_consumer_enabled, compute_metric_ci,
-        )
-        params = self._params(event="imp_id")
-        assert _ci_consumer_enabled(params) is False
-        out = compute_metric_ci(None, params)
-        assert out["enabled"] is False
-        assert "imp_id" in out["skipped_reason"]
-
-
 class TestDrawDiagnosisSampleNode:
     @staticmethod
     def _params():
@@ -1825,11 +1689,10 @@ class TestDrawDiagnosisSampleNode:
         from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
         from recsys_tfb.pipelines.evaluation import nodes
         params = self._params()
+        # registry 診斷（contract.DIAGNOSES）預設是 enabled，所以「全部停用」
+        # 要逐項關掉。
         params["evaluation"]["diagnosis"].update({
-            "ci": {"enabled": False},
-            # registry 診斷（contract.DIAGNOSES）預設也是 enabled，所以「全部
-            # 停用」必須連它們一起關——只關 ci 的話樣本仍然該抽。
-            **{name: {"enabled": False} for name in DIAGNOSES},
+            name: {"enabled": False} for name in DIAGNOSES
         })
         with patch(
             "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample"
@@ -1841,10 +1704,11 @@ class TestDrawDiagnosisSampleNode:
     def test_draws_when_one_enabled(self):
         from unittest.mock import patch
         import pandas as pd
+        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
         from recsys_tfb.pipelines.evaluation import nodes
         params = self._params()
         params["evaluation"]["diagnosis"].update({
-            "ci": {"enabled": True},
+            name: {"enabled": name == "config_shift"} for name in DIAGNOSES
         })
         with patch(
             "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample",
@@ -1866,7 +1730,7 @@ class TestDrawDiagnosisSampleNode:
         from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
             PARTITION_FINGERPRINT_COLUMN,
         )
-        params = self._params()  # both consumers default-enabled
+        params = self._params()  # registry diagnoses default-enabled
         # The node draws from the table as read: fingerprint checked, dropped.
         direct_pdf, direct_meta = draw_diagnosis_sample(
             self._eval_predictions(spark).drop(PARTITION_FINGERPRINT_COLUMN),
@@ -1885,30 +1749,38 @@ class TestDrawDiagnosisSampleNode:
         )
 
     def test_draw_diagnosis_sample_called_once_across_consumers(self):
+        import importlib
         from unittest.mock import patch
         import pandas as pd
         from recsys_tfb.pipelines.evaluation import nodes
-        params = self._params()  # ci default-enabled
+        params = self._params()  # registry diagnoses default-enabled
         stub_pdf = pd.DataFrame({
             "snap_date": ["20240331"], "cust_id": ["H1"],
             "prod_name": ["hot"], "score": [0.9], "label": [1],
         })
         stub = (stub_pdf, {"n_queries_sampled": 1})
+        consumers = ("config_shift", "item_ability")
+        computes = {
+            name: patch.object(
+                importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}"),
+                "compute", return_value={})
+            for name in consumers
+        }
         with patch(
             "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample",
             return_value=stub,
-        ) as spy, patch(
-            "recsys_tfb.pipelines.evaluation.nodes.bootstrap_per_item_ci",
-            return_value={"n_boot": 1},
-        ), patch.object(
+        ) as spy, patch.object(
             nodes, "restrict_to_current_eval_partitions", _kept_month_of
-        ):
+        ), computes["config_shift"] as cs, computes["item_ability"] as ia:
             sample = nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
-            nodes.compute_metric_ci(sample, params)
-        # exactly one draw, with the node's own inputs — the consumer must NOT
-        # re-draw (it consumes the shared sample).
+            for name in consumers:
+                nodes.make_diagnosis_node(name)(sample, params)
+        # exactly one draw, with the node's own inputs — the consumers must
+        # NOT re-draw (they consume the shared sample).
         spy.assert_called_once_with(
             ("kept month of", None), params, segment_columns=[])
+        assert cs.call_args.args[0] is sample
+        assert ia.call_args.args[0] is sample
 
     def test_node_logs_free_pandas_data_volume(self, spark, caplog):
         import logging
@@ -1928,13 +1800,7 @@ class TestDrawDiagnosisSampleNode:
 
 
 class TestRegistryDiagnosisEnabled:
-    """``_registry_diagnosis_enabled`` — registry 診斷的抽樣閘門。
-
-    為什麼跟 ``_ci_consumer_enabled`` 分開：既有的 ci 是非 registry 的消費者、
-    各診斷走 ``contract.DIAGNOSES``，兩組生命週期不同。合在一起的話，registry
-    每加一項診斷都要改解包點——而「新增診斷不必改接線」正是 registry 存在的
-    目的。
-    """
+    """``_registry_diagnosis_enabled`` — registry 診斷的抽樣閘門。"""
 
     #: 每個 fixture 都要帶 schema：#378 之後這個閘門除了 enabled 旗標，還問
     #: 「目前宣告的 schema 下這項診斷算不算得出來」，而 ``get_schema`` 不接受
@@ -1948,6 +1814,18 @@ class TestRegistryDiagnosisEnabled:
             _registry_diagnosis_enabled,
         )
         assert _registry_diagnosis_enabled({"schema": self._SCHEMA}) is True
+
+    def test_false_when_an_optional_role_makes_every_consumer_inapplicable(self):
+        """Drawing the sample for diagnoses that will refuse to run is not
+        only wasted: the sample frame carries no optional-role column, so
+        deduplicating it by identity raises ``KeyError: ['imp_id']``. That is
+        what the ad example's evaluation died on before this gate learnt the
+        same rule as the diagnoses (``schema_skip_reason``)."""
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            _registry_diagnosis_enabled,
+        )
+        with_event = {"columns": {**self._SCHEMA["columns"], "event": "imp_id"}}
+        assert _registry_diagnosis_enabled({"schema": with_event}) is False
 
     def test_false_only_when_every_registry_diagnosis_disabled(self):
         import importlib
@@ -1992,12 +1870,17 @@ class TestRegistryDiagnosisEnabled:
             )
 
 
-def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
-    """關掉 ci、只開 config_shift → 仍然必須抽樣。
+def _diagnosis_names():
+    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
+    return DIAGNOSES
 
-    這是本次接線最容易靜默失效的地方：抽樣閘門若只看舊的 ci，使用者關掉它
-    之後 ``diagnosis_sample`` 是 None，config_shift 節點就撞 fail-loud 的
-    ValueError——一個純粹由接線遺漏造成、使用者無從自救的失敗。
+
+def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
+    """只開 config_shift → 仍然必須抽樣。
+
+    抽樣閘門若漏看某一項吃抽樣的 registry 診斷，``diagnosis_sample`` 是
+    None，那個節點就撞 fail-loud 的 ValueError——一個純粹由接線遺漏造成、
+    使用者無從自救的失敗。
     """
     from unittest.mock import patch
     import pandas as pd
@@ -2010,8 +1893,8 @@ def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
         "evaluation": {"diagnosis": {
             "sample": {"max_queries": 10, "min_pos_queries_per_item": 2,
                        "seed": 42},
-            "ci": {"enabled": False},
-            "config_shift": {"enabled": True},
+            **{name: {"enabled": name == "config_shift"}
+               for name in _diagnosis_names()},
         }},
     }
     with patch(
@@ -2065,7 +1948,6 @@ def test_sample_not_drawn_when_only_non_sample_diagnoses_enabled(
             "label": "label", "score": "score", "rank": "rank",
         }},
         "evaluation": {"diagnosis": {
-            "ci": {"enabled": False},
             "fake_capacity": {"enabled": True},
         }},
     }
@@ -2417,7 +2299,6 @@ class TestAllPositiveQueryGroups:
                 "diagnosis": {
                     "sample": {"max_queries": 100,
                                "min_pos_queries_per_item": 1, "seed": 42},
-                    "ci": {"enabled": True, "n_boot": 20},
                 },
             },
         }
@@ -2576,23 +2457,27 @@ class TestAllPositiveQueryGroups:
         # The fixture can tell: without c1 the aggregates differ.
         assert run(False) != run(False, without=self.FINE)
 
-    def test_the_headline_ci_does_not_follow_it(self, spark):
-        """The report's headline per-item mAP and its CI come from the
-        diagnosis sample, not from ``compute_metrics``."""
-        from recsys_tfb.pipelines.evaluation.nodes import (
-            compute_metric_ci,
-            draw_diagnosis_sample_node,
-        )
+    # ---- the report headline follows it -----------------------------------
 
-        def run(switch, without=()):
+    def test_the_report_headline_follows_it(self, spark):
+        """The report's headline per-item mAP is read from
+        ``compute_metrics``'s result (``metrics.json``), so the switch reaches
+        it like every other measurement metric: switched on, it equals the
+        headline of the frame without the all-positive groups."""
+        from recsys_tfb.evaluation import report_builder as rb
+
+        def headline(switch, without=()):
             params = self._parameters(switch)
-            sample = draw_diagnosis_sample_node(
-                self._frame(spark, params, without), _no_segments(params),
-                params)
-            return self._unfingerprinted(compute_metric_ci(sample, params))
+            s = rb.build_overview_section(
+                self._metrics(spark, switch, without=without), params)
+            (i,) = [i for i, t in enumerate(s.table_titles)
+                    if t.startswith("頭號指標")]
+            return s.tables[i].loc["macro per-item mAP", "value"]
 
-        assert run(True) == run(False)
-        assert run(False)["macro"] != run(False, without=self.FINE)["macro"]
+        on = headline(True)
+        assert on == pytest.approx(headline(False, without=self.FINE))
+        # The fixture can tell: c1's all-positive group moves the headline.
+        assert on != pytest.approx(headline(False))
 
     # ---- the log -----------------------------------------------------------
 

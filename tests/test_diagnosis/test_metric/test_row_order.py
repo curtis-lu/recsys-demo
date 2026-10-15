@@ -4,8 +4,7 @@ The diagnosis sample reaches the driver through ``toPandas``, whose row order
 Spark does not promise: change the parallelism (``local[*]`` → ``local[2]``, or
 a different cluster) and the same rows arrive in a different order (#352). Every
 diagnosis output below used to follow that order somewhere — tied scores ranked
-by arrival, bootstrap clusters numbered by first appearance, top-N examples
-picked by first occurrence (#355).
+by arrival, top-N examples picked by first occurrence (#355).
 
 The fixture is built to hit those places: scores come from a three-value set so
 most queries hold ties, and several (positive, suppressor) pairs carry the same
@@ -31,7 +30,6 @@ from recsys_tfb.diagnosis.metric.item_ability._compute import (
 from recsys_tfb.diagnosis.metric.suppression._compute import (
     compute as suppression,
 )
-from recsys_tfb.diagnosis.metric.uncertainty import bootstrap_per_item_ci
 
 PARAMS = {
     "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
@@ -45,7 +43,6 @@ PARAMS = {
     "training": {"sample_weight_keys": [], "sample_weights": {}},
     "evaluation": {"diagnosis": {
         "sample": {"seed": 42},
-        "ci": {"enabled": True, "n_boot": 30},
         "config_shift": {"enabled": True},
         "item_ability": {"enabled": True, "top_n": 30},
         "suppression": {"enabled": True, "top_examples": 5},
@@ -80,7 +77,6 @@ def _tied_sample(item_type: str = "str") -> pd.DataFrame:
 
 
 DIAGNOSES = {
-    "metric_ci": lambda pdf: bootstrap_per_item_ci(pdf, PARAMS),
     "config_shift": lambda pdf: config_shift((pdf, {"n_queries": 30}), PARAMS),
     "item_ability": lambda pdf: item_ability((pdf, {"n_queries": 30}), PARAMS),
     "suppression": lambda pdf: suppression((pdf, {"n_queries": 30}), PARAMS),

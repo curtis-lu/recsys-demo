@@ -161,9 +161,9 @@ RESUME_CONTRACTS = {
         # settings (ADR-0020 decision 2), so it cannot draw old metrics under
         # new settings. What the fingerprint does not see is data. After a
         # label_table backfill the old contract did recompute the metrics and
-        # the baseline, but still reused the landed metric CI and report
-        # aggregates, so that report already mixed two data states; the new
-        # one reuses all four, so every number comes from one run. Picking up
+        # the baseline, but still reused the landed report aggregates, so that
+        # report already mixed two data states; the new one reuses every
+        # landed JSON, so every number comes from one run. Picking up
         # new data takes --from-node prepare_eval_data or a full run
         # (docs/pipelines/evaluation.md section 7.4 says so).
         #
@@ -172,11 +172,12 @@ RESUME_CONTRACTS = {
         # The resume point ADR-0018 decision 1 buys: prepare_eval_data writes
         # enriched_eval_predictions, so resuming at the metrics reads the table
         # instead of re-joining the predictions. Before that the set also held
-        # prepare_eval_data. What is left is memory-only and cheap: the
-        # zero-read stub, and the diagnosis sample compute_metric_ci reads.
+        # prepare_eval_data. What is left is the zero-read stub, memory-only
+        # and free; no node in this mode reads the diagnosis sample, so the
+        # slice does not pull its draw back.
         # This stub catalog answers "the table exists"; the evaluated month
         # missing from it is the CLI's month plan's business (test_cli.py).
-        "compute_metrics": {"draw_diagnosis_sample_node", "no_diagnosis_pages"},
+        "compute_metrics": {"no_diagnosis_pages"},
     },
     ("evaluation", (("post_training", True),)): {
         # Same landing and reasoning as above. render_diagnosis_pages stays

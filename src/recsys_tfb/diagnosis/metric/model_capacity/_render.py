@@ -237,7 +237,7 @@ def _per_item_section(result: dict) -> ReportSection | None:
 
     使用者回饋②：明細表保留 ledger 的全部容量原生欄位（split 數、私有
     context gain、item 路由足跡），不砍成只剩 gain；能力欄只放一欄
-    ``query_centered_auc`` 當橋接（AP／n_pos／CI 留在 item_ability 報表，不
+    ``query_centered_auc`` 當橋接（AP／n_pos 留在 item_ability 報表，不
     在這裡重複）。
     """
     s = result.get("summary") or {}

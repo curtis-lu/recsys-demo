@@ -113,8 +113,7 @@ def _params() -> dict:
             "metric": {"weight_alpha": 0.0, "k": None,
                        "min_positives": 0, "shrinkage_k": 0.0},
             "query_filter": {"drop_all_positive_groups": False},
-            "diagnosis": {"ci": {"enabled": True},
-                          "sample": {"seed": 42},
+            "diagnosis": {"sample": {"seed": 42},
                           "suppression": {"enabled": True}},
             "report": {
                 "sections": {"primary_map": True, "diagnosis_links": True,
@@ -221,10 +220,10 @@ def test_fingerprint_survives_a_json_round_trip():
     assert json.loads(json.dumps(fp)) == fp
     require_computed_with_current_config(
         [LoadedArtifact(
-            catalog_name="evaluation_metric_ci",
+            catalog_name="baseline_metrics",
             payload=json.loads(json.dumps(
                 {"enabled": False, "config_fingerprint": fp})),
-            produced_by="compute_metric_ci")],
+            produced_by="compute_baseline_metrics")],
         params,
     )
 
@@ -263,8 +262,8 @@ def test_int_keyed_config_is_stable_and_round_trips():
     stored = json.loads(json.dumps(
         {"enabled": False, "config_fingerprint": fp1}))
     require_computed_with_current_config(
-        [LoadedArtifact(catalog_name="evaluation_metric_ci", payload=stored,
-                        produced_by="compute_metric_ci")],
+        [LoadedArtifact(catalog_name="baseline_metrics", payload=stored,
+                        produced_by="compute_baseline_metrics")],
         params,
     )
 
@@ -287,9 +286,9 @@ def test_post_training_mismatch_names_the_key_and_rerun_node():
     new = _set(copy.deepcopy(old), "post_training", False)
     with pytest.raises(ValueError) as exc:
         require_computed_with_current_config(
-            [LoadedArtifact(catalog_name="evaluation_metric_ci",
+            [LoadedArtifact(catalog_name="baseline_metrics",
                             payload=_payload(old),
-                            produced_by="compute_metric_ci")],
+                            produced_by="compute_baseline_metrics")],
             new,
         )
     msg = str(exc.value)
@@ -307,9 +306,9 @@ def _payload(params, extra=()):
 def test_fresh_artifacts_pass():
     params = _params()
     require_computed_with_current_config(
-        [LoadedArtifact(catalog_name="evaluation_metric_ci",
+        [LoadedArtifact(catalog_name="baseline_metrics",
                         payload=_payload(params),
-                        produced_by="compute_metric_ci"),
+                        produced_by="compute_baseline_metrics"),
          LoadedArtifact(catalog_name="evaluation_config_shift",
                         payload=_payload(params, CONFIG_SHIFT_EXTRA),
                         produced_by="diagnose_config_shift",
@@ -323,14 +322,14 @@ def test_changed_key_names_the_leaf_values_and_rerun_node():
     new = _set(copy.deepcopy(old), "evaluation.metric.min_positives", 5)
     with pytest.raises(ValueError) as exc:
         require_computed_with_current_config(
-            [LoadedArtifact(catalog_name="evaluation_metric_ci",
+            [LoadedArtifact(catalog_name="baseline_metrics",
                             payload=_payload(old),
-                            produced_by="compute_metric_ci")],
+                            produced_by="compute_baseline_metrics")],
             new,
         )
     msg = str(exc.value)
-    assert "evaluation_metric_ci" in msg
-    assert "compute_metric_ci" in msg
+    assert "baseline_metrics" in msg
+    assert "compute_baseline_metrics" in msg
     assert "evaluation.metric.min_positives: 0 -> 5" in msg
     assert "--from-node compute_metrics" in msg
 
@@ -362,9 +361,9 @@ def test_rule_1_earliest_computed_key_wins_over_message_order():
             [LoadedArtifact(catalog_name="evaluation_report_aggregates",
                             payload=_payload(old),
                             produced_by="compute_report_aggregates"),
-             LoadedArtifact(catalog_name="evaluation_metric_ci",
+             LoadedArtifact(catalog_name="baseline_metrics",
                             payload=_payload(old),
-                            produced_by="compute_metric_ci")],
+                            produced_by="compute_baseline_metrics")],
             new,
         )
     msg = str(exc.value)
@@ -372,7 +371,7 @@ def test_rule_1_earliest_computed_key_wins_over_message_order():
     assert "--from-node compute_report_aggregates" not in msg
     # collect-all: both artifacts are reported
     assert "evaluation_report_aggregates" in msg
-    assert "evaluation_metric_ci" in msg
+    assert "baseline_metrics" in msg
 
 
 def test_rule_2_one_artifact_with_only_its_own_key_changed():
@@ -529,9 +528,9 @@ def test_long_values_are_truncated_in_the_message():
                [f"col_{i:03d}" for i in range(100)])
     with pytest.raises(ValueError) as exc:
         require_computed_with_current_config(
-            [LoadedArtifact(catalog_name="evaluation_metric_ci",
+            [LoadedArtifact(catalog_name="baseline_metrics",
                             payload=_payload(old),
-                            produced_by="compute_metric_ci")],
+                            produced_by="compute_baseline_metrics")],
             new,
         )
     msg = str(exc.value)

@@ -99,7 +99,7 @@ JSON_EXTRA_FIELDS = (
     # Scale, not identity: these keep a step name fixed while the number that
     # used to sit inside it stays visible (log_step appends every field to the
     # console message) and becomes summable.
-    "n_boot", "n_items", "n_rows", "n_pairs",
+    "n_items", "n_rows", "n_pairs",
     # Which Spark pass of training's test scoring a ``compute_metrics`` step
     # timed (``metric_registry``: one per pass, so each pass's time is its own).
     "test_pass",
