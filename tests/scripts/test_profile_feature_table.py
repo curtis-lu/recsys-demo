@@ -119,17 +119,23 @@ class TestPrecisionFlag:
                    dtype="double", has_decimal=True)
         assert judge_column(col, ROWS, TH) == []
 
-    def test_integer_column_at_2_to_the_24_is_flagged(self):
-        col = _col([0, 0, 0], [0, 0, 0], [1, INT_EXACT, 1])
+    def test_integer_column_above_2_to_the_24_is_flagged(self):
+        col = _col([0, 0, 0], [0, 0, 0], [1, INT_EXACT + 1, 1])
         assert judge_column(col, ROWS, TH) == ["precision"]
 
-    def test_integer_column_just_below_2_to_the_24_is_not_flagged(self):
-        col = _col([0, 0, 0], [0, 0, 0], [1, INT_EXACT - 1, 1])
+    def test_integer_column_at_2_to_the_24_is_not_flagged(self):
+        # 2^24 本身存成 float32 一個不差
+        col = _col([0, 0, 0], [0, 0, 0], [1, INT_EXACT, 1])
         assert judge_column(col, ROWS, TH) == []
 
     def test_large_negative_minimum_counts(self):
-        col = _col([0, 0, 0], [0, -INT_EXACT, 0], [1, 1, 1])
+        col = _col([0, 0, 0], [0, -(INT_EXACT + 1), 0], [1, 1, 1])
         assert judge_column(col, ROWS, TH) == ["precision"]
+
+    def test_float_typed_column_is_already_float32(self):
+        col = _col([0, 0, 0], [0.5, 0.5, 0.5], [10.5, 100000.367, 10.5],
+                   dtype="float", has_decimal=True)
+        assert judge_column(col, ROWS, TH) == []
 
     def test_whole_valued_double_uses_the_integer_limit(self):
         # 沒有小數的數值欄位當整數看，不管宣告的型別
@@ -288,6 +294,7 @@ def _profile(tmp_path):
         "rows": ROWS,
         "null_time_rows": 0,
         "elapsed_seconds": 75.0,
+        "batch_size": 200,
         "columns": [
             dict(_col([95, 0, 0], [0, 0, 0], [9, 9, 9]), name="half_empty"),
             dict(_col([0, 0, 0], [3, 3, 3]), name="sys_version"),
@@ -327,6 +334,9 @@ class TestRender:
         assert "exclude: [sys_version]" in flags_page
         all_page = (tmp_path / "05-all.html").read_text()
         assert "load_dt" in all_page
+        # 設計文件第六節：不用箭頭
+        for page in tmp_path.glob("*.html"):
+            assert "→" not in page.read_text(), page.name
 
     def test_table_name_is_escaped_in_the_index(self, tmp_path):
         profile = _profile(tmp_path)

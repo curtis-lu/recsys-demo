@@ -51,6 +51,8 @@ DEFAULT_THRESHOLDS: dict[str, float] = {"null_ratio": 0.99, "precision_max_abs":
 # 每批幾欄。一次 groupBy 帶上千個聚合式會讓執行計畫過大；確切大小要在正式環境的
 # 真表上量過再定（設計文件第八節），量之前先用 --batch-size 試。
 DEFAULT_BATCH_SIZE = 200
+# 02 的空值熱圖只畫至少有一期空值比例到這個值的欄位（設計文件第六節）
+NULL_HEATMAP_MIN = 0.005
 
 _REQUIRED_KEYS = ("table", "time_col", "key_cols")
 _OPTIONAL_KEYS = ("exclude_cols", "time_range", "where", "thresholds", "spark", "output_dir")
@@ -376,6 +378,7 @@ def profile_table(spark: "SparkSession", cfg: ProfileConfig, batch_size: int) ->
         "rows": rows,
         "null_time_rows": null_time_rows,
         "elapsed_seconds": round(time.monotonic() - started, 1),
+        "batch_size": batch_size,
         "columns": columns,
     }
 
@@ -424,12 +427,25 @@ def judge_column(col: dict, rows: list[int], thresholds: dict[str, float]) -> li
     if const:
         flags.append("const_some")
 
-    if col["kind"] == "numeric":
-        m = max_abs(col)
-        limit = thresholds["precision_max_abs"] if col["has_decimal"] else INT_EXACT
-        if m is not None and m[0] >= limit:
-            flags.append("precision")
+    if float32_lossy(col, thresholds):
+        flags.append("precision")
     return flags
+
+
+def float32_lossy(col: dict, thresholds: dict[str, float]) -> bool:
+    """存成 float32 會不會改變數值。
+
+    宣告成 float 的欄位本來就是 float32，不會再變。沒有小數的欄位當整數看：2^24
+    本身存得一個不差，超過才會被改掉（設計文件寫 ≥，差在 2^24 這一個值）。
+    """
+    if col["kind"] != "numeric" or col["dtype"] == "float":
+        return False
+    m = max_abs(col)
+    if m is None:
+        return False
+    if col["has_decimal"]:
+        return m[0] >= thresholds["precision_max_abs"]
+    return m[0] > INT_EXACT
 
 
 def judge(profile: dict, thresholds: dict[str, float]) -> dict[str, list[str]]:
@@ -489,18 +505,18 @@ def _flag_texts(th: dict[str, float]) -> dict[str, tuple[str, str, str]]:
     upstream = "欄位本身正常，請檢查這幾期的上游資料"
     return {
         "null_all": ("每一期都幾乎是空值", f"每一期的空值比例都 ≥ {null}", exclude),
-        "const_all": ("整欄只有一個值", "所有期別合計只有一個值（不含空值）", exclude),
+        "const_all": ("整欄只有一個值", "所有期別合計只有一個值，不含空值", exclude),
         "null_some": ("部分期別幾乎是空值", f"只有部分期別的空值比例 ≥ {null}", upstream),
-        "const_some": ("部分期別只有一個值", "只有部分期別只有一個值（不含空值）", upstream),
+        "const_some": ("部分期別只有一個值", "只有部分期別只有一個值，不含空值", upstream),
         "const_each": (
             "每期各只有一個值", "每一期只有一個值，但各期的值不同",
             "通常是匯率這類每期一個數字的總體指標，不一定要排除",
         ),
         "precision": (
             "float32 精度不足",
-            f"有小數且絕對值最大 ≥ {prec}；或整數且絕對值最大 ≥ {INT_EXACT:,}",
-            "對 LightGBM 幾乎沒有影響；但整數與 decimal 欄位會被 dataset 的精度檢查擋下"
-            "（numeric_precision_policy 預設 block），可請上游四捨五入，或改成 truncate 接受失真",
+            f"有小數且絕對值最大 ≥ {prec}；或整數且絕對值最大超過 {INT_EXACT:,}",
+            "對 LightGBM 幾乎沒有影響。但 numeric_precision_policy 預設是 block，"
+            "整數與 decimal 欄位會被 dataset 的精度檢查擋下；可請上游四捨五入，或改成 truncate 接受失真",
         ),
     }
 
@@ -528,8 +544,8 @@ class _Report:
     """把 profile 與判斷結果整理成各頁要用的量，每頁一個方法。"""
 
     def __init__(self, profile: dict, thresholds: dict[str, float]):
-        self.p = profile
-        self.th = thresholds
+        self.profile = profile
+        self.thresholds = thresholds
         self.periods: list[str] = profile["periods"]
         self.rows: list[int] = profile["rows"]
         self.feats = [c for c in profile["columns"] if c["kind"] != "unchecked"]
@@ -540,6 +556,9 @@ class _Report:
     def with_flag(self, key: str) -> list[dict]:
         return [c for c in self.feats if key in self.flags[c["name"]]]
 
+    def excludable(self) -> list[dict]:
+        return [c for c in self.feats if set(EXCLUDABLE) & set(self.flags[c["name"]])]
+
     def flag_names(self, col: dict) -> str:
         return "、".join(self.texts[k][0] for k in self.flags[col["name"]]) or "—"
 
@@ -549,13 +568,12 @@ class _Report:
     # --- 首頁 ---------------------------------------------------------------
 
     def index_intro(self, threshold_source: str | None) -> str:
-        cfg = self.p["config"]
+        cfg = self.profile["config"]
         e = html.escape
         code = lambda s: f"<code>{e(str(s))}</code>"  # noqa: E731
         n_num = sum(c["kind"] == "numeric" for c in self.feats)
         flagged = [c for c in self.feats if self.flags[c["name"]]]
-        excludable = [c for c in self.feats
-                      if any(k in EXCLUDABLE for k in self.flags[c["name"]])]
+        excludable = self.excludable()
         if self.periods:
             span = f"{e(self.periods[0])} 至 {e(self.periods[-1])}，共 {len(self.periods)} 期"
             per = f"{min(self.rows):,} 至 {max(self.rows):,} 筆，全部納入計算"
@@ -567,7 +585,7 @@ class _Report:
             ("其中可直接排除", f"{len(excludable)} 欄"),
         ]
         if self.unchecked:
-            overview.append(("未檢查", f"{len(self.unchecked)} 欄（型別不支援，見〈05 所有欄位明細〉）"))
+            overview.append(("未檢查", f"{len(self.unchecked)} 欄，型別不支援，見〈05 所有欄位明細〉"))
         scope = [
             ("資料表", code(cfg["table"])),
             ("期別欄位", code(cfg["time_col"])),
@@ -576,19 +594,20 @@ class _Report:
             ("期間", span),
             ("篩選條件", code(cfg["where"]) if cfg["where"] else "無"),
             ("每期筆數", per),
-            ("期別欄位是空值的列", f"{self.p['null_time_rows']:,} 筆，不讀"),
+            ("期別欄位是空值的列", f"{self.profile['null_time_rows']:,} 筆，不讀"),
             ("執行項目", "基本檢查"),
-            ("執行時間", _duration(self.p["elapsed_seconds"])),
-            ("產出時間", e(self.p["generated_at"].replace("T", " "))),
+            ("執行時間", f"{_duration(self.profile['elapsed_seconds'])}，"
+                         f"每批 {self.profile['batch_size']} 欄"),
+            ("產出時間", e(self.profile["generated_at"].replace("T", " "))),
         ]
         th_rows = [
             [self.texts["null_all"][0] + "、" + self.texts["null_some"][0],
-             f"空值比例 ≥ {_pct_threshold(self.th['null_ratio'])}", "null_ratio",
-             str(self.th["null_ratio"])],
+             f"空值比例 ≥ {_pct_threshold(self.thresholds['null_ratio'])}", "null_ratio",
+             str(self.thresholds["null_ratio"])],
             [self.texts["precision"][0],
-             f"有小數且絕對值最大 ≥ {_fmt_num(self.th['precision_max_abs'])}；"
-             f"整數且絕對值最大 ≥ {INT_EXACT:,}（固定，不能調）",
-             "precision_max_abs", str(self.th["precision_max_abs"])],
+             f"有小數且絕對值最大 ≥ {_fmt_num(self.thresholds['precision_max_abs'])}；"
+             f"整數且絕對值最大超過 {INT_EXACT:,}，這個值是 float32 本身的性質，不能調",
+             "precision_max_abs", str(self.thresholds["precision_max_abs"])],
         ]
         th_note = "以下是這次使用的標準，可以在設定檔的 <code>thresholds</code> 區塊調整。"
         if threshold_source:
@@ -601,7 +620,7 @@ class _Report:
             f"<h2>資料範圍</h2>{_kv_table(scope)}"
             f"<h2>判斷標準</h2><p>{th_note}</p>{th_html}"
             '<details class="section"><summary>設定檔</summary>'
-            f'<div class="formula">{e(self.p["config_text"])}</div></details>'
+            f'<div class="formula">{e(self.profile["config_text"])}</div></details>'
         )
 
     # --- 01 需要處理的欄位 ---------------------------------------------------
@@ -617,7 +636,7 @@ class _Report:
             tables=[summary],
         )]
 
-        excl = [c for c in self.feats if any(k in EXCLUDABLE for k in self.flags[c["name"]])]
+        excl = self.excludable()
         names = ", ".join(c["name"] for c in excl)
         sections.append(_section(
             f"可直接排除的欄位（{len(excl)} 欄）",
@@ -627,12 +646,12 @@ class _Report:
             formula=(
                 "# 只重新訓練、不重建 dataset：加到 conf/base/parameters_training.yaml\n"
                 f"training:\n  feature_selection:\n    exclude: [{names}]\n\n"
-                "# 要連 dataset 一起拿掉：改加到 dataset.prepare_model_input.drop_columns"
-                "（需要重建 dataset）"
+                "# 要連 dataset 一起拿掉：改加到 dataset.prepare_model_input.drop_columns，"
+                "需要重建 dataset"
             ),
         ))
 
-        null_th = self.th["null_ratio"]
+        null_th = self.thresholds["null_ratio"]
         rows = []
         for c in self.with_flag("null_some"):
             r = self.ratios(c)
@@ -705,11 +724,12 @@ class _Report:
     # --- 02 空值與精度 -------------------------------------------------------
 
     def page_basic(self) -> Page:
-        null_th = self.th["null_ratio"]
+        null_th = self.thresholds["null_ratio"]
         shown = sorted(
-            (c for c in self.feats if max(self.ratios(c)) >= 0.005),
+            (c for c in self.feats if max(self.ratios(c)) >= NULL_HEATMAP_MIN),
             key=lambda c: -max(self.ratios(c)),
         )
+        floor = _pct_threshold(NULL_HEATMAP_MIN)
         n_shown = len(shown)
         # 熱圖每格一個點，report.figures 一張圖最多 2000 個點
         cap = max(1, 2000 // max(1, len(self.periods)))
@@ -728,9 +748,9 @@ class _Report:
             fig.update_xaxes(type="category")
             fig.update_yaxes(type="category", autorange="reversed")
             desc = (
-                f"列出至少有一期空值比例 ≥ 0.5% 的 {n_shown} 個欄位，最空的排最上面；"
+                f"列出至少有一期空值比例 ≥ {floor} 的 {n_shown} 個欄位，最空的排最上面；"
                 f"格子裡標 {label} 的，表示那一期幾乎都是空值。"
-                f"其餘 {len(self.feats) - n_shown} 個欄位每一期都低於 0.5%。"
+                f"其餘 {len(self.feats) - n_shown} 個欄位每一期都低於 {floor}。"
             )
             if len(shown) < n_shown:
                 desc += f"欄位太多，圖中只畫最空的 {len(shown)} 個，完整數字在下方。"
@@ -739,28 +759,29 @@ class _Report:
         else:
             null_section = ReportSection(
                 title="各期空值比例",
-                description="每個欄位每一期的空值比例都低於 0.5%。" + empty_note,
+                description=f"每個欄位每一期的空值比例都低於 {floor}。" + empty_note,
             )
 
-        skip = {"null_all", "const_all", "const_each"}
+        skip = {*EXCLUDABLE, "const_each"}
         candidates = []
         for c in self.feats:
-            if c["kind"] != "numeric" or skip & set(self.flags[c["name"]]):
+            if c["kind"] != "numeric" or c["dtype"] == "float" or skip & set(self.flags[c["name"]]):
                 continue
             m = max_abs(c)
-            if m is not None and (c["has_decimal"] or m[0] >= INT_EXACT):
+            if m is not None and (c["has_decimal"] or m[0] > INT_EXACT):
                 candidates.append(c)
         precision = _section(
             "float32 精度",
-            f"有小數的欄位全部列出，整數欄位只列絕對值最大 ≥ {INT_EXACT:,} 的，依絕對值最大值排序，"
+            f"有小數的欄位全部列出，整數欄位只列絕對值最大超過 {INT_EXACT:,} 的，依絕對值最大值排序，"
             "並列出最大值存成 float32 後會變成多少。達到標準的欄位會列在〈01 需要處理的欄位〉的"
-            "「float32 精度不足」。可直接排除的欄位與每期各只有一個值的欄位不列。",
+            "「float32 精度不足」。可直接排除的欄位、每期各只有一個值的欄位、"
+            "本來就是 float 的欄位不列。",
             self._precision_table(candidates),
             formula=(
                 "float32 只保留大約 7 位有效數字，數值越大，留得下的位數越少：\n"
-                "100,000.37 → 100,000.3672（第二位小數開始不準）\n"
-                "23,016,210.71 → 23,016,210（小數全部不見）\n"
-                f"25,000,001 → 25,000,000（整數超過 {INT_EXACT:,}，個位數被改掉）"
+                "100,000.37 存成 100,000.3672，第二位小數開始不準\n"
+                "23,016,210.71 存成 23,016,210，小數全部不見\n"
+                f"25,000,001 存成 25,000,000，整數超過 {INT_EXACT:,} 後個位數會被改掉"
             ),
         )
 
@@ -779,17 +800,17 @@ class _Report:
         summary = []
         for c in self.feats:
             r = self.ratios(c)
-            numeric = c["kind"] == "numeric"
+            is_numeric = c["kind"] == "numeric"
             summary.append([
                 c["name"], c["dtype"], self.flag_names(c), f"{_pct(min(r))} 至 {_pct(max(r))}",
-                c["min"][-1] if numeric else None, c["max"][-1] if numeric else None,
+                c["min"][-1] if is_numeric else None, c["max"][-1] if is_numeric else None,
             ])
         numeric = [c for c in self.feats if c["kind"] == "numeric"]
         return Page(slug="05-all", title="05 所有欄位明細", scope=None, sections=(
             ReportSection(
                 title="各欄位摘要",
                 description="每個欄位一列。最小值與最大值取最新一期，只列數值欄位。",
-                tables=[_table(summary, ["欄位", "型別", "問題類型", "空值比例（最低至最高）",
+                tables=[_table(summary, ["欄位", "型別", "問題類型", "各期空值比例的範圍",
                                          "最小值", "最大值"])],
             ),
             ReportSection(

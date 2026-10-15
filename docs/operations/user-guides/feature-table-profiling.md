@@ -66,7 +66,7 @@ python scripts/profile_feature_table.py render <輸出資料夾> --config my_pro
 | 部分期別幾乎是空值 | 只有部分期別的空值比例 ≥ 99% | 欄位本身正常，檢查那幾期的上游資料 |
 | 部分期別只有一個值 | 只有部分期別只有一個值 | 欄位本身正常，檢查那幾期的上游資料 |
 | 每期各只有一個值 | 每一期都只有一個值，但各期的值不同 | 通常是匯率這類總體指標，不一定要排除 |
-| float32 精度不足 | 有小數且絕對值最大 ≥ 100,000；或沒有小數且絕對值最大 ≥ 16,777,216 | 對 LightGBM 幾乎沒影響；但整數與 decimal 欄位會被 dataset 的精度檢查擋下 |
+| float32 精度不足 | 有小數且絕對值最大 ≥ 100,000；或沒有小數且絕對值最大超過 16,777,216。宣告成 float 的欄位本來就是 float32，不判斷 | 對 LightGBM 幾乎沒影響；但整數與 decimal 欄位會被 dataset 的精度檢查擋下 |
 
 - 前兩種已經可以直接排除，不再判斷其他問題；「每期各只有一個值」不判斷 float32 精度。其他問題可以同時成立。
 - 可以直接排除的欄位，貼到 `training.feature_selection.exclude` 只需要重訓；要連 dataset 一起拿掉，改加到 `dataset.prepare_model_input.drop_columns`，要重建 dataset。
