@@ -255,7 +255,7 @@ diagnostics:
   feature_importance:
     enabled: true
   gain_ledger:
-    enabled: true   # 結構層 Gain 帳本（診斷項目 8）；判讀見 docs/pipelines/evaluation-diagnosis.md §12
+    enabled: true   # 結構層 Gain 帳本（診斷項目 8）；判讀見 docs/pipelines/evaluation-diagnosis.md §1
   shap:
     enabled: true
     background: global   # global | per_item（per_item＝背景取該 item 子母體，interventional；成本較高）
