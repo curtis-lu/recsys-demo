@@ -209,7 +209,7 @@ class TestDatasetPipeline:
 
     def test_no_model_input_is_left_unlanded(self):
         # The two `*_model_input_unfiltered` frames were memory-only: B10 had
-        # no footer to read for them, and resuming at their filters re-ran the
+        # no landed table to count for them, and resuming at their filters re-ran the
         # build. No such frame is left.
         outputs = create_pipeline().outputs
         assert not {o for o in outputs if o.endswith("_model_input_unfiltered")}
@@ -525,7 +525,7 @@ class TestGrainGateWiring:
         # It pairs test too, and adding a test month is that mode's whole job:
         # left out, the main path for a new test month would go unchecked
         # (ADR-0029 decision 4). The splits the mode does not rebuild are
-        # read back from their footers.
+        # counted from their landed tables.
         names = [n.name for n in create_pipeline(only_test_months=True).nodes]
         assert "validate_model_input_grain" in names
 
