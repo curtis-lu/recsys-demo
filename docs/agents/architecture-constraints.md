@@ -362,11 +362,11 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
 兩道檢查的盲區不同，**殘餘盲區是兩者的交集**：
 
 - **建構期檢查**要那一行真的被執行到，所以看不到「從沒被建構起來的 `Node(...)`」。
-- **AST 掃描**只讀得出字面值，且只掃 `pipelines/`：動態組出來的 `inputs`／`outputs`／`writes` 讀不出來就跳過（62 個 `Node` 中有 3 個是這種；`test_static_coverage_floor` 釘住總數 62 與讀得出來的 59），`pipelines/` 以外的 `Node(...)` 也不掃（現況為零）。dict 寫法的 `inputs`（F4）讀它的值，也就是 dataset 名；鍵或值有一個不是字面字串（含 `**` 展開）就算動態。
+- **AST 掃描**只讀得出字面值，且只掃 `pipelines/`：動態組出來的 `inputs`／`outputs`／`writes` 讀不出來就跳過（60 個 `Node` 中有 3 個是這種；`test_static_coverage_floor` 釘住總數 60 與讀得出來的 57），`pipelines/` 以外的 `Node(...)` 也不掃（現況為零）。dict 寫法的 `inputs`（F4）讀它的值，也就是 dataset 名；鍵或值有一個不是字面字串（含 `**` 展開）就算動態。
 
 **兩道相加仍看不到的**，是同時滿足「參數動態組出來（或位在 `pipelines/` 之外）」**且**「沒有任何測試或執行路徑會建構到」的 `Node(...)`。具體形狀：`pipelines/` 底下、掛在條件分支上（例如 `evaluation/pipeline.py` 的 `if compare_source is not None:`；`dataset/pipeline.py` 原本的 `if enable_calibration:` 已隨 #411 一起移除）、參數又是動態組的 node。現況那 3 個動態 node 全在無條件路徑上，所以**現在為零，但這是現況為零，不是結構上不可能**。
 
-`test_static_coverage_floor` 仍把「62 個裡有 59 個可被 AST 判定」釘死；它守的是「AST 這一道別再退步」，不是「A5／A6 總共有多少沒人看」。
+`test_static_coverage_floor` 仍把「60 個裡有 57 個可被 AST 判定」釘死；它守的是「AST 這一道別再退步」，不是「A5／A6 總共有多少沒人看」。
 
 ## A6. 同一 node 的 `input`／`writes` 名不得與 `output` 名相同
 
