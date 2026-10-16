@@ -90,10 +90,6 @@ preprocessor:
   type: JSONDataset
   filepath: data/dataset/${base_dataset_version}/preprocessor.json
 
-numeric_precision_report:
-  type: JSONDataset
-  filepath: data/dataset/${base_dataset_version}/numeric_precision_report.json
-
 model_input_grain_report:
   type: JSONDataset
   filepath: data/dataset/${base_dataset_version}/model_input_grain_report.json

@@ -120,7 +120,7 @@ def _candidate_feature_table(spark):
     ]))
 
 
-def _catalog(spark, params, only_test_months=False) -> dict:
+def _catalog(spark, params) -> dict:
     """Every input any node below reads, keyed by its catalog name. The test
     keys hold a month an earlier run landed, as the persistent table does."""
     train_keys = _keys(spark, _TRAIN)
@@ -146,12 +146,6 @@ def _catalog(spark, params, only_test_months=False) -> dict:
             to_process=[pd.Timestamp(m) for m in _TEST],
             skipped=[pd.Timestamp(_OTHER[0])],
         ),
-        # Every month already encoded: the precision gate's footer half has
-        # nothing to read, and its candidate-table half is what is tested.
-        "preprocessed_feature_table_month_plan": SnapDatePlan(
-            to_process=[], skipped=[pd.Timestamp(m) for m in _ALL],
-        ),
-        "only_test_months": only_test_months,
     }
 
 
@@ -265,19 +259,25 @@ class TestEachGroupDropReadsOnlyItsSplitsMonths:
         assert _months_read(kept, "label") == [set(months)]
 
 
-class TestThePrecisionGateChecksWhatTheBuildsRead:
-    """Decision 2: the gate works out the candidate table's months by the
-    builds' own rules instead of receiving a list. Asserted against what the
-    builds of the same run actually read, so a build that changes its rule
-    and a gate that does not follow disagree here."""
+class TestTheDataGateAsksForWhatTheBuildsRead:
+    """Decision 2: the data gate works out which months to ask the candidate
+    table for by the builds' own rules instead of receiving a list. Asserted
+    against what the builds of the same run actually read, so a build that
+    changes its rule and a gate that does not follow disagree here."""
 
     @pytest.mark.parametrize("only_test_months", [False, True])
     def test_its_months_are_the_union_of_the_builds_reads(
-        self, spark, only_test_months,
+        self, spark, monkeypatch, only_test_months,
     ):
+        from recsys_tfb.pipelines.dataset import nodes
         from recsys_tfb.pipelines.dataset.pipeline import create_pipeline
 
-        catalog = _catalog(spark, _params(), only_test_months=only_test_months)
+        catalog = {
+            **_catalog(spark, _params()),
+            "sample_pool": _sample_pool(spark, "date"),
+            "feature_table": _feature_table(spark, "date"),
+            "only_test_months": only_test_months,
+        }
         read: set[str] = set()
         for node in create_pipeline(only_test_months=only_test_months).nodes:
             if node.name.startswith("build_"):
@@ -285,10 +285,19 @@ class TestThePrecisionGateChecksWhatTheBuildsRead:
                 for months in _months_read(built, "f_candidate"):
                     read |= months
 
-        report = _run("validate_numeric_precision", catalog)
+        asked: list[set[str]] = []
+        real = nodes.require_months_present
+
+        def spy(df, time_col, months, what, table="feature_table"):
+            if table == "candidate_feature_table":
+                asked.append({pd.Timestamp(m).strftime("%Y-%m-%d") for m in months})
+            return real(df, time_col, months, what, table=table)
+
+        monkeypatch.setattr(nodes, "require_months_present", spy)
+        _run("validate_data_consistency", catalog)
 
         assert read, "no build read the candidate table"
-        assert report["candidate_feature_table"]["months"] == sorted(read)
+        assert asked == [read]
 
 
 class TestMonthPresenceAsksOnlyTheMonthsItChecks:

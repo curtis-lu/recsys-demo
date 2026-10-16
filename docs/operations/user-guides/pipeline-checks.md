@@ -67,7 +67,8 @@ python -m recsys_tfb <指令> --env dev
 **dataset 設定**
 - **`dataset.prepare_model_input.drop_columns` 與 `categorical_columns`**：同一個欄名不能兩邊都寫（`A1`）。一個說「這欄不要」，一個說「這欄當類別特徵」；不擋的話會默默以「不要」為準。
 - **`dataset.train_split_keys`、`dataset.val_sample_keys`**：有寫的話，必須是 `schema.columns.entity` 裡的欄，不能是空清單（`A29`）。
-- **`dataset.numeric_feature_storage_type`** 只能是 `float32` 或 `float64`；**`dataset.numeric_precision_policy`** 只能是 `block` 或 `truncate`。兩個都可以不寫，但不能寫成 `null`（`A31`）。
+- **`dataset.numeric_feature_storage_type`** 只能是 `float32` 或 `float64`。可以不寫，但不能寫成 `null`（`A31`）。
+- **`dataset.numeric_precision_policy`** 已經隨數值精度閘一起拿掉（#518）：conf 裡還寫著這一行就擋，不管值是什麼（含 `null`），刪掉那一行即可，沒有替代設定（`A60`）。不擋的話，留著這一行會讓版本 ID 改變，dataset 整個重建、模型重訓；刪掉之後版本 ID 跟以前一樣。這是過渡期的檢查，之後會拿掉。
 - **`dataset.train_zero_positive_group_ratio`、`val_zero_positive_group_ratio`、`test_zero_positive_group_ratio`**（沒有正例的 query group 留多少）：有寫就必須是 0 到 1 之間的數字，不能是字串、true／false 或 `null`（`A44`）。它們會進版本 ID，寫錯會讓之後每個指令讀到別的版本路徑。
 - **`quality_checks.max_duplicate_key_ratio`**：source ETL 設定裡有 `sample_pool`、`label_table`、`feature_table` 這三張表的話，每一張都要寫，值在 0 到 1 之間、不含 1（`A32`）。拿掉它，那張表的主鍵重複檢查和主鍵空值檢查會一起默默關掉。候選層級特徵表不在這條的範圍內：這條只讀設定檔、拿上面三個名字去找表，而候選層級特徵表的實體表叫什麼由部署在 `catalog.yaml` 決定，這條找不到它。所以它的 `max_duplicate_key_ratio` 被刪掉時不會有人報錯。同樣的理由，表名加了前綴時（例如 `conf/dev/` 的 `recsys_prod_sample_pool`），這條也找不到那三張表，刪掉這個鍵一樣不會有人報錯。
 
@@ -136,7 +137,7 @@ python -m recsys_tfb <指令> --env dev
 
 ### dataset
 
-dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，分別在最開頭、特徵編碼完、最後一步。除此之外，做事的步驟途中也會順便查幾件事。
+dataset 有兩個**資料閘**：專門檢查、本身不改資料的步驟，分別在最開頭與最後一步。除此之外，做事的步驟途中也會順便查幾件事。
 
 **資料閘 1：開頭**（pipeline 的第一步）
 - **item 值**：`sample_pool` 在 dataset 設定的月份裡出現的 item 值，必須跟 item 清單完全相同；`label_table` 出現的 item 值必須都在清單裡（`B1`）。這一條要實際讀這兩張表。item 清單從資料數時，`sample_pool` 不拿來比（它的 train 月份就是清單），`label_table` 出現的 item 值改成必須在 `sample_pool` 出現過。
@@ -149,18 +150,15 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
 
 後面六條只讀特徵表的欄位定義，不讀資料。
 
-**資料閘 2：精度閘**（特徵編碼完）
-- 會被轉型的特徵欄（整數、decimal、boolean 這類值有固定間距的欄），最大絕對值不能超過 `dataset.numeric_feature_storage_type` 在那個間距下能精確表示的上限（`B8`）。例：整數欄轉 `float32`，上限是 16,777,216；`decimal(18,2)` 轉 `float32`，上限是 131,072。超過的話，兩個不同的值會變成同一個，排序會悄悄改變。
-- 只查這一次處理的月份，只讀 parquet 檔尾的統計。`dataset.numeric_precision_policy: truncate` 時改成只警告。
-- 宣告了候選層級特徵表時，它的這類欄也查（類別欄除外：它們在轉型之前已經編成類別編號）。這張表不由框架寫出、沒有檔尾統計可讀，所以改成掃一次這次要讀的月份。同一次掃描也確認這些月份每個都有資料：缺一整個月就擋，`truncate` 也一樣，因為那不是精度問題，而是那個月的候選層級特徵會悄悄全變成 NULL。
+- **候選層級特徵表的月份**：宣告了候選層級特徵表，它就必須含有這次各 build 會讀的每個月份：`dataset.train_snap_dates`、`dataset.val_snap_dates`，以及這次要做的 test 月份（已經落地、這次跳過的 test 月份不算）。只加評估月份（`--only-test-months`）時，只查這次要做的 test 月份。缺月報 `ValueError`，訊息形如 `candidate_feature_table missing required snap_dates: ['2024-02-29']`。這條是前置檢查，等上面的 B 系列都過了才查：它要讀時間欄，而時間欄在不在是 `B13` 查的。不擋的話，缺的那個月每一筆候選的特徵會悄悄全變成 NULL；而 test 月份這樣落地之後，之後每一輪都會因為「已經有了」而跳過它。成本很低：只對那幾個月的時間欄做一次 distinct，落到 driver 的量跟月數成正比。如果用 `--from-node`／`--only-node` 從這一步後面開始跑，這一步會被跳過（見下方「三件擋不住的事」第 1 件）。
 
-**資料閘 3：粒度閘**（最後一步）
+**資料閘 2：粒度閘**（最後一步）
 - 每個 split（`train`、`train_dev`、`val`、`test`）的 model_input 列數，必須等於組它用的 key 表（每一列是一筆抽到的候選）（`B10`）。列數變多，代表 `label_table`、編碼後的特徵表或候選層級特徵表在 join 鍵上有重複列。只讀 parquet 檔尾的列數。test 是逐月累積的表，只比這次組裝的月份，而且逐月比；這次沒有 test 月份要組時，報告寫「not written this run」，不算失敗。test 某個月沒過時那個月已經落地，直接重跑會跳過它，要用 `--rebuild-dates` 指名重算（錯誤訊息會寫出月份）。四個 split 的無正例組都在 key 表落地之前丟（`dataset.*_zero_positive_group_ratio`），所以這條比對照樣是「相等」。對候選層級特徵表來說，這是框架裡唯一抓得到重複列的地方（`A32` 不守它，見 ①）；已經落地的 test 月份不會重查。
 
 **做事途中順便查的**
 - 會擋：
   - `feature_table` 必須有 time 與 entity 欄，而且 time 欄要出現設定要處理的每個月份。
-  - 候選層級特徵表必須有 `dataset.train_snap_dates` 的每個月份（建前處理器時查；其餘要讀的月份在精度閘查）。
+  - 候選層級特徵表必須有 `dataset.train_snap_dates` 的每個月份（建前處理器時查，保留；其餘要讀的月份，即 `val_snap_dates` 與這次要做的 test 月份，由資料閘 1 查）。
   - `dataset.train_dev_ratio` 不是 0，而抽樣切分後 train_dev 變成空的。
   - item 清單從資料數時，同一個 `base_dataset_version` 重跑、數出的清單跟磁碟上前處理器的不同（`B19`）。清單不在設定裡、版本號不會跟著變，照樣覆寫的話，用舊清單訓練的模型推論時編號全錯位。訊息列出多了、少了哪些 item，並建議先讓版本號變動再建（刪掉該版本目錄重建是最後手段：沒重訓的模型會靜默拿錯位的編號評分，見 `docs/pipelines/dataset.md` §3.10）。建前處理器時查，所以從那一步接續也擋得到。
 - 只警告：
@@ -262,7 +260,7 @@ dataset 有三個**資料閘**：專門檢查、本身不改資料的步驟，�
 ## 三件擋不住的事
 
 **1. 用 `--from-node`／`--only-node` 跳過的步驟，裡面的檢查不會跑。**
-dataset 的三個資料閘都在此列；就算切片自動補跑了前面的步驟，後面的資料閘也不會跟著補跑。執行計畫（`[plan]` 開頭的那幾行）會列出被跳過的步驟。上一輪跑完之後來源表如果變過，這一輪不會發現。① 開跑前的檢查不受影響，每次都會跑。
+dataset 的兩個資料閘都在此列；就算切片自動補跑了前面的步驟，後面的資料閘也不會跟著補跑。執行計畫（`[plan]` 開頭的那幾行）會列出被跳過的步驟。上一輪跑完之後來源表如果變過，這一輪不會發現。① 開跑前的檢查不受影響，每次都會跑。
 
 **2. 已經做好的產物會被直接沿用，框架不保證它是用現在的設定、程式、資料做的。**
 框架決定沿用還是重做，看的是產物在不在，以及版本號（evaluation 另外比對設定指紋）。版本號只由一部分設定和特徵表的欄位結構（`feature_table`，以及宣告了的候選層級特徵表）算出來。所以下面這些情況，舊產物照樣被沿用：

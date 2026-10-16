@@ -2678,17 +2678,9 @@ class TestA30EnvDirExists:
 
 from recsys_tfb.core.consistency import (
     DEFAULT_NUMERIC_STORAGE_TYPE,
-    DEFAULT_PRECISION_POLICY,
     NUMERIC_STORAGE_TYPES,
-    PRECISION_POLICIES,
-    SIGNIFICAND_BITS,
-    ColumnPrecision,
-    exact_value_limit,
-    numeric_precision_errors,
-    numeric_precision_rows,
     numeric_storage_param_errors,
     resolved_numeric_storage,
-    spark_dtype_value_step,
     validate_config_consistency,
 )
 
@@ -2697,7 +2689,7 @@ class TestNumericStorageParamsA31:
     def _params(self, **dataset) -> dict:
         return {"dataset": dataset}
 
-    def test_absent_keys_are_clean(self):
+    def test_absent_key_is_clean(self):
         # Every config in the repo today is in this state; declaring the gate
         # must not make them all fail.
         assert numeric_storage_param_errors({}) == []
@@ -2705,11 +2697,9 @@ class TestNumericStorageParamsA31:
 
     def test_declared_legal_values_are_accepted(self):
         for storage in NUMERIC_STORAGE_TYPES:
-            for policy in PRECISION_POLICIES:
-                assert numeric_storage_param_errors(self._params(
-                    numeric_feature_storage_type=storage,
-                    numeric_precision_policy=policy,
-                )) == [], (storage, policy)
+            assert numeric_storage_param_errors(self._params(
+                numeric_feature_storage_type=storage,
+            )) == [], storage
 
     def test_unknown_storage_type_is_rejected_and_lists_the_legal_values(self):
         errs = numeric_storage_param_errors(
@@ -2722,27 +2712,13 @@ class TestNumericStorageParamsA31:
         # to be in the message rather than in a doc they have to go find.
         assert "float32" in errs[0] and "float64" in errs[0]
 
-    def test_unknown_policy_is_rejected(self):
-        errs = numeric_storage_param_errors(
-            self._params(numeric_precision_policy="ignore"))
-        assert len(errs) == 1
-        assert "dataset.numeric_precision_policy" in errs[0]
-        assert "block" in errs[0] and "truncate" in errs[0]
-
     def test_explicit_yaml_null_is_rejected_not_treated_as_absent(self):
         # `key:` with no value is not the same artifact as an absent key: it is
         # present in the version payload. Mirrors A25/A29.
-        for key in ("numeric_feature_storage_type", "numeric_precision_policy"):
-            errs = numeric_storage_param_errors(self._params(**{key: None}))
-            assert len(errs) == 1, key
-            assert key in errs[0]
-
-    def test_both_keys_wrong_are_reported_together(self):
-        errs = numeric_storage_param_errors(self._params(
-            numeric_feature_storage_type="f32",
-            numeric_precision_policy="off",
-        ))
-        assert len(errs) == 2
+        errs = numeric_storage_param_errors(
+            self._params(numeric_feature_storage_type=None))
+        assert len(errs) == 1
+        assert "numeric_feature_storage_type" in errs[0]
 
     def test_wired_into_validate_config_consistency(self):
         params = {
@@ -2756,285 +2732,19 @@ class TestNumericStorageParamsA31:
 
 
 class TestResolvedNumericStorage:
-    def test_absent_keys_resolve_to_the_declared_defaults(self):
-        assert resolved_numeric_storage({}) == (
-            DEFAULT_NUMERIC_STORAGE_TYPE, DEFAULT_PRECISION_POLICY,
-        )
+    def test_absent_key_resolves_to_the_declared_default(self):
+        assert resolved_numeric_storage({}) == DEFAULT_NUMERIC_STORAGE_TYPE
 
-    def test_declared_values_win(self):
+    def test_declared_value_wins(self):
         assert resolved_numeric_storage({"dataset": {
             "numeric_feature_storage_type": "float64",
-            "numeric_precision_policy": "truncate",
-        }}) == ("float64", "truncate")
+        }}) == "float64"
 
-    def test_the_defaults_are_themselves_legal_values(self):
+    def test_the_default_is_itself_a_legal_value(self):
         # Guards the pair that A31 and this resolver would otherwise be free to
         # drift apart on: a default outside NUMERIC_STORAGE_TYPES would make
         # every untouched config fail its own gate.
         assert DEFAULT_NUMERIC_STORAGE_TYPE in NUMERIC_STORAGE_TYPES
-        assert DEFAULT_PRECISION_POLICY in PRECISION_POLICIES
-
-
-class TestSparkDtypeValueStep:
-    """The grid spacing each dtype states. Getting this wrong is silent."""
-
-    def test_integer_types_and_boolean_step_by_one(self):
-        for dtype in ("tinyint", "smallint", "int", "bigint", "boolean"):
-            assert spark_dtype_value_step(dtype) == 1.0, dtype
-
-    def test_decimal_steps_by_ten_to_minus_scale(self):
-        # The correction this ticket's review turned up: Spark DecimalType is
-        # exact fixed-point, so it HAS a grid — reading it as "approximate,
-        # therefore exempt" leaves the gate covering nothing, because decimal is
-        # what the cast converts today.
-        assert spark_dtype_value_step("decimal(38,10)") == 10.0 ** -10
-        assert spark_dtype_value_step("decimal(18,2)") == 0.01
-        assert spark_dtype_value_step("decimal(10,0)") == 1.0
-
-    def test_float_and_double_state_no_grid(self):
-        # These are genuinely approximate: nothing in the config says how far
-        # apart their values are, so no bound can be stated and the gate stays
-        # silent about them. This is what stops a permanent false alarm.
-        for dtype in ("float", "double"):
-            assert spark_dtype_value_step(dtype) is None, dtype
-
-    def test_non_numeric_types_state_no_grid(self):
-        for dtype in ("string", "date", "timestamp", "binary", "array<int>"):
-            assert spark_dtype_value_step(dtype) is None, dtype
-
-
-class TestExactValueLimit:
-    def test_unit_step_reduces_to_the_significand(self):
-        # The number issue #281 states, recovered from the general formula.
-        assert exact_value_limit(1.0, "float32") == float(2 ** 24)
-        assert exact_value_limit(1.0, "float64") == float(2 ** 53)
-
-    def test_a_non_power_of_two_step_floors_to_the_binade_below(self):
-        # The whole correction. `0.01 * 2**24` is 167,772.16 and is WRONG:
-        # float32's spacing there is already 0.015625, so values 0.01 apart have
-        # collided. Measured with numpy: 200k distinct values 0.01 apart keep
-        # 128,000 at 167,772 and all 200,000 at 131,072.
-        assert exact_value_limit(0.01, "float32") == 131072.0
-        assert exact_value_limit(0.01, "float32") < 0.01 * 2 ** 24
-
-    def test_a_power_of_two_step_needs_no_flooring(self):
-        assert exact_value_limit(0.5, "float32") == float(2 ** 23)
-
-    def test_bits_table_covers_every_declarable_storage_type(self):
-        assert set(SIGNIFICAND_BITS) == set(NUMERIC_STORAGE_TYPES)
-
-
-class TestNumericPrecisionErrorsB8:
-    @staticmethod
-    def _ints(**cols) -> dict:
-        return {c: ColumnPrecision(v, 1.0) for c, v in cols.items()}
-
-    def test_no_columns_is_clean(self):
-        assert numeric_precision_errors({}, "float32") == []
-
-    def test_max_exactly_at_the_limit_passes(self):
-        # 2^24 itself is representable; the first integer that is not is
-        # 2^24 + 1. An off-by-one here either rebuilds a dataset nobody needed
-        # to rebuild or lets a lossy column through.
-        assert numeric_precision_errors(self._ints(a=float(2 ** 24)), "float32") == []
-
-    def test_one_above_the_limit_is_rejected(self):
-        errs = numeric_precision_errors(self._ints(a=float(2 ** 24 + 1)), "float32")
-        assert len(errs) == 1
-        assert "B8" in errs[0]
-        assert "'a'" in errs[0]
-
-    def test_message_names_the_column_its_value_and_the_bound(self):
-        errs = numeric_precision_errors(self._ints(acct_bal=33554433.0), "float32")
-        assert "acct_bal" in errs[0]
-        assert "33,554,433" in errs[0]
-        assert "16,777,216" in errs[0]
-
-    def test_message_offers_float64_last_and_says_what_it_costs(self):
-        # #283 made the declaration real: the cast now reads
-        # numeric_feature_storage_type, so widening it genuinely stores wider
-        # values. Before that it was excluded on purpose — it would have
-        # rebuilt everything, changed no stored value, and only raised this
-        # gate's own bound, i.e. silenced the alarm.
-        #
-        # Offered last, and never bare: it widens every feature column to buy
-        # headroom for the few that need it, so a reader who sees only the
-        # remedy and not its price takes the expensive fix by default.
-        errs = numeric_precision_errors(self._ints(a=float(2 ** 24 + 1)), "float32")
-        msg = errs[0]
-        assert "numeric_feature_storage_type: float64" in msg
-        assert "doubles" in msg
-        assert "numeric_precision_policy: truncate" in msg
-        assert msg.index("representation upstream") < msg.index("float64")
-        assert msg.index("float64") < msg.index("numeric_precision_policy")
-
-    def test_a_decimal_column_is_bounded_by_its_own_resolution(self):
-        # The case the whole correction exists for: decimal(18,2) values 0.01
-        # apart cannot go past 131,072, far below the integer bound.
-        assert numeric_precision_errors(
-            {"bal": ColumnPrecision(131072.0, 0.01)}, "float32") == []
-        errs = numeric_precision_errors(
-            {"bal": ColumnPrecision(200000.0, 0.01)}, "float32")
-        assert len(errs) == 1
-        assert "131,072" in errs[0]
-        assert "0.01 apart" in errs[0]
-
-    def test_the_same_magnitude_passes_as_an_integer_and_fails_as_a_decimal(self):
-        # Paired so neither half can be vacuous: 200,000 is fine on a grid of 1
-        # and lossy on a grid of 0.01. A gate that ignored value_step would
-        # answer the same for both.
-        assert numeric_precision_errors(self._ints(a=200000.0), "float32") == []
-        assert len(numeric_precision_errors(
-            {"a": ColumnPrecision(200000.0, 0.01)}, "float32")) == 1
-
-    def test_boolean_shaped_and_small_values_pass(self):
-        assert numeric_precision_errors(
-            self._ints(flag=1.0, zero=0.0, small=99.0), "float32") == []
-
-    def test_all_null_column_reads_as_zero_and_passes(self):
-        # The reader reports max(|x|) over zero non-null values as 0.0; a column
-        # with no values cannot lose one.
-        assert numeric_precision_errors(self._ints(empty=0.0), "float32") == []
-
-    def test_missing_statistics_is_an_error_not_a_pass(self):
-        # The decision recorded for this ticket: a column the gate cannot prove
-        # safe is not a column it lets through.
-        errs = numeric_precision_errors(
-            {"mystery": ColumnPrecision(None, 1.0)}, "float32")
-        assert len(errs) == 1
-        assert "mystery" in errs[0]
-        assert "statistic" in errs[0].lower()
-        # The escape hatch has to be in the message, or the run is unrecoverable
-        # for a data-format reason that has nothing to do with correctness.
-        assert "numeric_precision_policy" in errs[0]
-
-    def test_float64_has_its_own_wider_limit(self):
-        assert numeric_precision_errors(self._ints(a=float(2 ** 53)), "float64") == []
-        assert len(numeric_precision_errors(
-            self._ints(a=2.0 ** 53 * 4), "float64")) == 1
-
-    def test_multiple_offenders_are_collected_not_first_one_wins(self):
-        errs = numeric_precision_errors({
-            "c": ColumnPrecision(2.0 ** 40, 1.0),
-            "a": ColumnPrecision(2.0 ** 30, 1.0),
-            "b": ColumnPrecision(None, 1.0),
-        }, "float32")
-        assert len(errs) == 3
-        # Sorted by column so two runs of the same config read the same way.
-        assert errs[0].index("'a'") > 0 and "'b'" in errs[1] and "'c'" in errs[2]
-
-    def test_an_undeclarable_storage_type_raises_rather_than_passing(self):
-        with pytest.raises(ConfigConsistencyError):
-            numeric_precision_errors(self._ints(a=1.0), "float16")
-
-    def test_a_table_name_leads_every_message_it_is_given(self):
-        # The candidate-level table's findings name their table; the
-        # entity-level table's never did, and keep not doing so.
-        by_column = {
-            "a": ColumnPrecision(2.0 ** 40, 1.0),
-            "b": ColumnPrecision(None, 1.0),
-        }
-        named = numeric_precision_errors(
-            by_column, "float32", table="candidate_feature_table")
-        plain = numeric_precision_errors(by_column, "float32")
-        assert named == [f"candidate_feature_table: {e}" for e in plain]
-        assert all(e.startswith("B8: ") for e in plain)
-
-
-from recsys_tfb.core.consistency import numeric_precision_file_errors
-
-
-class TestNumericPrecisionFileErrorsB8:
-    """Before the rule is asked: did the gate find the files this run wrote.
-
-    Found none, the precision of every checked column is unknown — one error,
-    not one "no statistics" per column, because the fix is different.
-    """
-
-    def test_files_found_is_clean(self):
-        assert numeric_precision_file_errors(
-            3, months=1, base_dataset_version="ab12cd34", columns=2) == []
-
-    def test_no_files_is_one_error_naming_the_scope_and_the_way_out(self):
-        errs = numeric_precision_file_errors(
-            0, months=2, base_dataset_version="ab12cd34", columns=5)
-        assert errs == [
-            "B8: found no parquet files for the 2 month(s) this run wrote "
-            "under base_dataset_version=ab12cd34, so the precision of 5 "
-            "feature column(s) could not be established. The gate reads "
-            "footer statistics from the landed partitions; set "
-            "dataset.numeric_precision_policy: truncate to proceed without "
-            "that check."
-        ]
-
-
-class TestNumericPrecisionRows:
-    """The report shape: every checked column, not only the failing ones."""
-
-    def _rows(self, by_column, storage="float32"):
-        return {r["column"]: r for r in numeric_precision_rows(by_column, storage)}
-
-    def test_a_passing_column_still_gets_a_row(self):
-        # The difference between this and the errors predicate, and the reason
-        # both exist: a gate reports failures, a report reports state.
-        rows = self._rows({"cust_age": ColumnPrecision(97.0, 1.0)})
-        assert rows["cust_age"]["verdict"] == "ok"
-        assert rows["cust_age"]["limit"] == float(2 ** 24)
-
-    def test_headroom_says_how_much_larger_the_column_may_get(self):
-        rows = self._rows({"fee": ColumnPrecision(65536.0, 0.01)})
-        # limit 131,072 over max 65,536 -> exactly 2x room left.
-        assert rows["fee"]["headroom"] == pytest.approx(2.0)
-        assert rows["fee"]["verdict"] == "ok"
-
-    def test_a_breach_is_marked_and_keeps_a_sub_one_headroom(self):
-        rows = self._rows({"bal": ColumnPrecision(262144.0, 0.01)})
-        assert rows["bal"]["verdict"] == "breach"
-        assert rows["bal"]["headroom"] == pytest.approx(0.5)
-
-    def test_unmeasured_and_empty_columns_have_no_headroom(self):
-        rows = self._rows({
-            "mystery": ColumnPrecision(None, 1.0),
-            "empty": ColumnPrecision(0.0, 1.0),
-        })
-        assert rows["mystery"]["verdict"] == "unmeasured"
-        assert rows["mystery"]["headroom"] is None
-        # An empty column is safe, but "infinite room" is not a number.
-        assert rows["empty"]["verdict"] == "ok"
-        assert rows["empty"]["headroom"] is None
-
-    def test_sorted_closest_to_breaching_first(self):
-        # The ordering is the report's whole usefulness: skimmed or truncated,
-        # the column about to stop the pipeline is the one you read.
-        ordered = [r["column"] for r in numeric_precision_rows({
-            "roomy": ColumnPrecision(97.0, 1.0),
-            "tight": ColumnPrecision(130900.0, 0.01),
-            "broken": ColumnPrecision(262144.0, 0.01),
-            "unknown": ColumnPrecision(None, 1.0),
-        }, "float32")]
-        assert ordered[:3] == ["broken", "tight", "roomy"]
-        # No-headroom rows sort last rather than mixing into the ranking.
-        assert ordered[3] == "unknown"
-
-    def test_a_row_exists_for_every_column_handed_in(self):
-        by_column = {c: ColumnPrecision(1.0, 1.0) for c in ("a", "b", "c")}
-        assert len(numeric_precision_rows(by_column, "float32")) == 3
-
-    def test_verdicts_agree_with_the_errors_predicate(self):
-        # Two readings of the same numbers must not drift: every column the
-        # gate rejects is a column the report marks, and no other.
-        by_column = {
-            "ok": ColumnPrecision(1000.0, 1.0),
-            "bad": ColumnPrecision(2.0 ** 40, 1.0),
-            "none": ColumnPrecision(None, 1.0),
-        }
-        flagged = {
-            r["column"] for r in numeric_precision_rows(by_column, "float32")
-            if r["verdict"] != "ok"
-        }
-        errors = numeric_precision_errors(by_column, "float32")
-        assert flagged == {"bad", "none"}
-        assert len(errors) == len(flagged)
 
 
 from recsys_tfb.core.consistency import (
@@ -4164,6 +3874,86 @@ class TestRetiredCalibrationKeysA37:
             "training.calibration",
             "inference.use_calibration",
         )
+
+
+# --- A60: migration-period check for the key #518 removed with B8 ------------
+
+from recsys_tfb.core.consistency import (
+    RETIRED_PRECISION_POLICY_KEY,
+    retired_precision_policy_key_errors,
+)
+
+
+class TestRetiredPrecisionPolicyKeyA60:
+    """A60 — a conf still spelling ``dataset.numeric_precision_policy`` after
+    #518 removed it with the B8 precision gate. A migration tool: the
+    retirement condition is in the module docstring's A60 entry."""
+
+    _SCHEMA = {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+    }}
+
+    def test_the_key_is_named_in_the_constant(self):
+        assert RETIRED_PRECISION_POLICY_KEY == "dataset.numeric_precision_policy"
+
+    def test_a_key_left_at_block_is_refused(self):
+        errors = retired_precision_policy_key_errors(
+            {"dataset": {"numeric_precision_policy": "block"}})
+        assert len(errors) == 1
+        assert errors[0].startswith("A60:")
+        assert "dataset.numeric_precision_policy" in errors[0]
+        assert "#518" in errors[0]
+        assert "Delete that line" in errors[0]
+
+    def test_a_key_left_as_null_is_refused_too(self):
+        # Presence, not value: a null is still a key in the version payload.
+        errors = retired_precision_policy_key_errors(
+            {"dataset": {"numeric_precision_policy": None}})
+        assert len(errors) == 1
+        assert errors[0].startswith("A60:")
+
+    def test_a_conf_without_the_key_passes(self):
+        assert retired_precision_policy_key_errors({}) == []
+        assert retired_precision_policy_key_errors({"dataset": None}) == []
+        assert retired_precision_policy_key_errors(
+            {"dataset": {"numeric_feature_storage_type": "float32"}}) == []
+        # The same leaf under another block is not the retired key.
+        assert retired_precision_policy_key_errors(
+            {"training": {"numeric_precision_policy": "block"}}) == []
+
+    def test_wired_into_validate_config_consistency(self):
+        clean = {"schema": self._SCHEMA, "dataset": {}}
+        # The control: without the key this config raises nothing, so the
+        # failure below is the key's.
+        validate_config_consistency(clean)
+        with pytest.raises(ConfigConsistencyError) as exc:
+            validate_config_consistency({
+                "schema": self._SCHEMA,
+                "dataset": {"numeric_precision_policy": "truncate"},
+            })
+        assert "A60: dataset.numeric_precision_policy" in str(exc.value)
+
+    def test_the_premise_a_kept_key_moves_base_dataset_version(self):
+        """Why the key cannot be left to be ignored: nothing strips it from the
+        hash any more. If this ever goes green the other way, the exclusion is
+        back and A60 has lost its reason."""
+        from recsys_tfb.core.versioning import compute_base_dataset_version
+
+        schema = {"time": "snap_date"}
+        without = compute_base_dataset_version({"dataset": {}}, schema)
+        kept = compute_base_dataset_version(
+            {"dataset": {"numeric_precision_policy": "block"}}, schema)
+        assert kept != without
+
+    def test_the_shipped_confs_do_not_spell_it(self):
+        from pathlib import Path
+
+        from recsys_tfb.core.config import ConfigLoader
+
+        root = Path(__file__).resolve().parents[2]
+        for conf in (root / "conf", root / "examples" / "ad" / "conf"):
+            params = ConfigLoader(str(conf), env="local").get_parameters()
+            assert retired_precision_policy_key_errors(params) == [], conf
 
 
 # =============================================================================

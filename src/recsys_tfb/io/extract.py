@@ -745,7 +745,7 @@ def matrix_dtype_checked_against_parquet(
         resolved_numeric_storage,
     )
 
-    declared, _ = resolved_numeric_storage(parameters)
+    declared = resolved_numeric_storage(parameters)
     deferred = _deferred_categoricals(preprocessor_metadata, parameters)
     field_type = _feature_field_types(handle, preprocessor_metadata)
     feature_types = {

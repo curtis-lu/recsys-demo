@@ -451,12 +451,10 @@ from recsys_tfb.preprocessing import castable_numeric_feature_columns
 
 
 class TestCastableNumericFeatureColumns:
-    """The selector both the cast and the B8 gate read, pinned once.
+    """The selector the cast reads, pinned on its own.
 
-    Sharing it is what makes "the gate checks exactly what the cast converts"
-    a structural property rather than a promise: widening the cast widens the
-    gate in the same edit. Takes a ``StructType`` rather than a DataFrame so the
-    rule can be tested without a SparkSession (cold start is minutes here).
+    Takes a ``StructType`` rather than a DataFrame so the rule can be tested
+    without a SparkSession (cold start is minutes here).
     """
 
     def _schema(self) -> T.StructType:
@@ -485,7 +483,7 @@ class TestCastableNumericFeatureColumns:
 
     def test_a_column_outside_feature_cols_is_never_selected(self):
         # Identity, label and anything else the frame carries are not the
-        # cast's business, and must not become the gate's either.
+        # cast's business.
         assert "non_feature_dec" not in castable_numeric_feature_columns(
             self._schema(), self._feature_cols())
 
@@ -521,8 +519,8 @@ class TestCastableNumericFeatureColumns:
 
 @pytest.mark.spark
 def test_cast_helper_and_selector_agree(mixed_df):
-    """The cast converts exactly what the selector names — the property B8's
-    scope rests on. Asserted against the real helper rather than assumed."""
+    """The cast converts exactly what the selector names. Asserted against
+    the real helper rather than assumed."""
     feature_cols = ["feature_a", "feature_b", "feature_c"]
     _, casted = cast_numeric_features_to_storage_type(mixed_df, feature_cols, "float32")
     assert casted == castable_numeric_feature_columns(

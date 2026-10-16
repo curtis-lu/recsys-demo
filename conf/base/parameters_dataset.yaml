@@ -116,18 +116,10 @@ dataset:
   #   一欄 boolean 就讓它變 object（就是 B6 要擋的那個 OOM）。實作與實測見
   #   preprocessing.cast_numeric_features_to_storage_type 的 docstring。
   # ⚠ 改此鍵會翻 base_dataset_version，而且會真的改變 parquet 的內容（#283 之後
-  #   cast helper 真的讀這個鍵；在那之前它把目標寫死 float32，宣告 float64 只會靜音
-  #   精度閘門而 parquet 逐位元不變）。
+  #   cast helper 真的讀這個鍵；在那之前它把目標寫死 float32，宣告 float64 只會翻版本
+  #   而 parquet 逐位元不變）。
   # 保持註解狀態＝維持預設；一旦寫成實鍵就會翻 base_dataset_version，即使值等同預設。
   # numeric_feature_storage_type: float32
-
-  # 撐不過上面那個型別的欄怎麼處置。不變量 B8 的閘門 validate_numeric_precision 讀它：
-  #   block    ——（預設）擋下來，dataset run 失敗，錯誤訊息列出欄名、實際最大值與上限。
-  #   truncate ——記一行 warning 後放行，等於刻意接受失真。
-  # 這是實鍵而不是註解，因為它**不進版本雜湊**（core/versioning.py 的 GATE_POLICY_KEYS）
-  # ——只決定失敗怎麼報，跑成功時產出的 parquet 逐位元相同，所以改它不會重算任何東西。
-  # 這正是它與上面那個鍵分成兩個鍵而不是一個的理由。
-  numeric_precision_policy: block
 
   prepare_model_input:
     drop_columns:  # ★換成你的資料要從模型輸入丟掉的欄（示例值為本檔範例資料的欄名）

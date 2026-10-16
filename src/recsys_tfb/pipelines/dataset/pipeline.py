@@ -4,7 +4,7 @@ from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
 
 #: The nodes ``--only-test-months`` keeps: the Layer-2 data gate, the nodes on
-#: the test chain, and the two gates that check what the chain writes. Adding a
+#: the test chain, and the gate that checks what the chain writes. Adding a
 #: ``test_snap_dates`` month cannot change what any other node writes, so the
 #: other ten recompute bit-identical content over the same partitions
 #: (ADR-0012's opening paragraph).
@@ -32,7 +32,6 @@ ONLY_TEST_MONTHS_NODES = (
     "select_test_keys",
     "apply_preprocessor_to_features",
     "filter_test_keys",
-    "validate_numeric_precision",
     "build_test_model_input",
     "validate_model_input_grain",
 )
@@ -73,9 +72,9 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
     """Build the dataset pipeline.
 
     Modes:
-      * default — the full DAG (17 nodes).
-      * ``--only-test-months`` — the data gate, the test chain and the gates
-        that check it, for a run that only adds ``test_snap_dates`` months.
+      * default — the full DAG (16 nodes).
+      * ``--only-test-months`` — the data gate, the test chain and the gate
+        that checks it, for a run that only adds ``test_snap_dates`` months.
         See :data:`ONLY_TEST_MONTHS_NODES`.
 
     A mode decides *which line of work* this run does; ``--from-node`` /
@@ -97,7 +96,6 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         split_train_keys,
         validate_data_consistency,
         validate_model_input_grain,
-        validate_numeric_precision,
     )
 
     nodes = [
@@ -107,9 +105,15 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         # (outputs=None), fail-fast before any sampling / preprocessing ---
         Node(
             validate_data_consistency,
+            # The candidate table is checked to hold the months this run's
+            # builds read, so the gate also takes the test build's plan and
+            # the run mode — under --only-test-months only the test build
+            # runs, which is the one fact the gate cannot work out for itself
+            # (ADR-0029 decision 2).
             inputs=[
                 "sample_pool", "label_table", "feature_table", "parameters",
                 "candidate_feature_table",
+                "test_model_input_month_plan", "only_test_months",
             ],
             outputs=None,
             name="validate_data_consistency",
@@ -193,8 +197,8 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
         #
         # `candidate_feature_table` (the optional candidate-level feature
         # table, ADR-0026) goes after every required input on each node that
-        # takes it — only the precision gate has inputs after it, two more
-        # optional ones. It is an optional trailing parameter and the
+        # takes it — the data gate's two inputs after it are optional too,
+        # as are the fit's below. It is an optional trailing parameter and the
         # Runner binds a list of inputs by position — this repo's convention
         # for a new optional input on a list-input node (a dict of inputs binds
         # by name instead; see core/node.py). The
@@ -226,38 +230,6 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
             ],
             outputs="preprocessed_feature_table",
             name="apply_preprocessor_to_features",
-        ),
-        # --- B8 precision gate: the months just encoded must survive the
-        #     declared numeric storage type. Declared HERE rather than anywhere
-        #     later in this list because list position is what orders it: every
-        #     build node below also reads `preprocessed_feature_table`, the
-        #     gate's last unmet input, so none becomes runnable before the gate.
-        #     The builds that become runnable at the same moment (the ones for
-        #     which it is the last unmet input too; the others still wait on
-        #     their own keys) are queued in declaration order
-        #     (`core/pipeline.py`). Moving this entry below them would let a
-        #     narrowed value land before the gate that exists to stop it.
-        #
-        #     It produces `numeric_precision_report` rather than being a
-        #     zero-output side-effect node, so it is NOT in A7's registry and is
-        #     not silently skipped by slicing (F5). Nothing consumes the report
-        #     — it exists so the headroom of every checked column can be pulled
-        #     out and looked at, which a pass/fail gate cannot answer ---
-        Node(
-            validate_numeric_precision,
-            # The candidate table is checked over the months this run's
-            # builds read, so the gate also takes the test build's plan and
-            # the run mode — under --only-test-months only the test build
-            # runs, which is the one fact the gate cannot work out for itself
-            # (ADR-0029 decision 2).
-            inputs=[
-                "preprocessed_feature_table", "preprocessor",
-                "preprocessed_feature_table_month_plan", "parameters",
-                "candidate_feature_table",
-                "test_model_input_month_plan", "only_test_months",
-            ],
-            outputs="numeric_precision_report",
-            name="validate_numeric_precision",
         ),
         # --- Build model_input per split (join keys + labels + encoded
         #     features). Each build reads its own split's months of the three
@@ -318,12 +290,12 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
     #     dependency buys is that the tables have LANDED: the Runner saves a
     #     node's output before the next node loads it, so this gate reads
     #     parquet footers rather than paying a count() on an unlanded frame
-    #     (ADR-0006's cost invariant, the same reason B8 is its own node).
+    #     (ADR-0006's cost invariant).
     #
     #     It produces `model_input_grain_report` rather than being a zero-output
     #     side-effect node, so it is NOT in A7's registry and is not silently
-    #     skipped by slicing (F5) — the same choice #281 made for B8, and for
-    #     the same two reasons.
+    #     skipped by slicing (F5); and the report says how many rows each
+    #     split holds, which a pass/fail gate cannot.
     #
     #     All four splits are paired; test over the months its build wrote,
     #     so the gate takes that build's month plan (see the node's
