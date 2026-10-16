@@ -514,7 +514,7 @@ return {
 }
 ```
 
-執行模式只注入給 `validate_data_consistency`（pipeline 第一個 node）。宣告了候選層級特徵表時，它要確認這張表含有這次各 build 讀的每個月份，而 `--only-test-months` 時只有 test 的 build 在跑，這件事它自己看不出來。所以只注入「是不是這個模式」，月份由它照各 build 的同一套規則自己算，不注入月份清單。兩邊算的一不一致，由 `test_candidate_feature_table.py` 的 `TestTheDataGateChecksTheCandidateTableHasEveryMonth` 釘著。
+執行模式只注入給 `validate_data_consistency`（pipeline 第一個 node）。宣告了候選層級特徵表時，它要確認這張表含有這次各 build 讀的每個月份，而 `--only-test-months` 時只有 test 的 build 在跑，這件事它自己看不出來。所以只注入「是不是這個模式」，月份由它照各 build 的同一套規則自己算，不注入月份清單。兩邊算的一不一致，由 `test_month_scoped_reads.py` 的 `TestTheDataGateAsksForWhatTheBuildsRead` 釘著：它拿同一輪各 build 實際讀到的月份，跟資料閘要的月份比。
 
 ### 為什麼不是另一種做法
 

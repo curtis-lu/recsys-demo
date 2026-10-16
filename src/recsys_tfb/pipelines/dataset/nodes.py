@@ -161,9 +161,9 @@ def validate_data_consistency(
     ``val_snap_dates``, and ``test_month_plan``'s ``to_process``. Which builds
     run is the one fact this node cannot see, so it is the one injected:
     ``only_test_months`` (the run mode), under which only the test build runs.
-    Raises ``ValueError``, not collected with the invariants: it is the
-    message the fit's train-month check raises (``require_months_present``).
-    Known limit: a slice that starts after this node skips it (it has no
+    Raises ``ValueError``, the message the fit's train-month check raises
+    (``require_months_present``), and only once the invariants below hold:
+    it reads the time column, which B13 checks is there. Known limit: a slice that starts after this node skips it (it has no
     output, ``docs/agents/architecture-constraints.md`` F5), and then only the
     fit's train-month check is left.
 
@@ -209,34 +209,15 @@ def validate_data_consistency(
     ]
     if column_errors:
         raise DataConsistencyError(collect_all_message(headline, column_errors))
-
-    # Decision — the candidate table's months asked for are the months this
-    # run's builds read, by each build's own rule: the train months (train
-    # and train_dev), the val months, and the test plan's to_process. Under
-    # --only-test-months the test build is the only one in the run.
-    if candidate_feature_table is not None:
-        if test_month_plan is None:
-            # Pre-check (input): without the test build's plan its months
-            # would go unchecked, and nothing would say so — the reason
-            # build_model_input's ``months`` has no default either.
-            raise TypeError(
-                "validate_data_consistency needs test_month_plan when a "
-                "candidate_feature_table is given: it checks the table holds "
-                "the months the test build reads."
-            )
-        ds = parameters["dataset"]
-        build_months = [test_month_plan.to_process]
-        if not only_test_months:
-            build_months += [ds["train_snap_dates"], ds.get("val_snap_dates", [])]
-        candidate_months = sorted(
-            {pd.Timestamp(m) for months in build_months for m in months}
+    if candidate_feature_table is not None and test_month_plan is None:
+        # Pre-check (input): without the test build's plan its months would
+        # go unchecked below, and nothing would say so — the reason
+        # build_model_input's ``months`` has no default either.
+        raise TypeError(
+            "validate_data_consistency needs test_month_plan when a "
+            "candidate_feature_table is given: it checks the table holds "
+            "the months the test build reads."
         )
-        # Pre-check (input): every month this run reads is there.
-        with log_step(logger, "require_months_present(snap_dates, candidate)"):
-            require_months_present(
-                candidate_feature_table, schema["time"], candidate_months,
-                "snap_dates", table="candidate_feature_table",
-            )
 
     # B17 reads the tables as the user wrote them, before combining turns
     # the item columns into one text column.
@@ -355,6 +336,27 @@ def validate_data_consistency(
         )
     if errors:
         raise DataConsistencyError(collect_all_message(headline, errors))
+
+    # Decision — the candidate table's months asked for are the months this
+    # run's builds read, by each build's own rule: the train months (train
+    # and train_dev), the val months, and the test plan's to_process. Under
+    # --only-test-months the test build is the only one in the run.
+    if candidate_feature_table is not None:
+        ds = parameters["dataset"]
+        build_months = [test_month_plan.to_process]
+        if not only_test_months:
+            build_months += [ds["train_snap_dates"], ds.get("val_snap_dates", [])]
+        candidate_months = sorted(
+            {pd.Timestamp(m) for months in build_months for m in months}
+        )
+        # Pre-check (input): every month this run reads is there. Asked
+        # after the invariants, because it reads the time column: B13 is
+        # what reports that column missing.
+        with log_step(logger, "require_months_present(snap_dates, candidate)"):
+            require_months_present(
+                candidate_feature_table, schema["time"], candidate_months,
+                "snap_dates", table="candidate_feature_table",
+            )
 
 
 def select_sample_keys(sample_pool: DataFrame, parameters: dict) -> DataFrame:

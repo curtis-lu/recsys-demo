@@ -561,6 +561,8 @@ class TestTrainingPipelineE2E:
         # The optional preprocessor_on_disk entry (#379) loads as None on a
         # first run; this hand-built catalog registers that directly.
         catalog.add("preprocessor_on_disk", MemoryDataset(None))
+        # The run mode the CLI registers for the data gate.
+        catalog.add("only_test_months", MemoryDataset(False))
         for name in (
             "sample_keys", "train_keys", "train_dev_keys", "val_keys", "test_keys",
             "train_set", "train_dev_set", "val_set", "test_set",

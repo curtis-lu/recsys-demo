@@ -928,7 +928,7 @@ lambdarank，預設 64 MiB batch，改前改後交替、各 4 次、每次一個
 | 當時的現況（有非數值欄） | ~142 GiB | 由 B6 擋掉（2026-07-11） |
 | 移除非數值欄 | ~54.7 GiB | 同上 |
 | ＋ 提早釋放 `pdf`、拿掉多餘的 `.copy()` | ~38.7 GiB | **已無此物**：#284 之後沒有 `pdf`，也沒有那個 `.copy()` |
-| ＋ 矩陣改用 4 bytes 格子 | ~27.5 GiB | **已做**：儲存型別由 `dataset.numeric_feature_storage_type` 宣告（預設 float32），dataset 端就收斂完（#283），training 端只是照著配置——⚠ 當時標註的「int64 欄若有值 > 2²⁴ 會失真」現在沒有檢查守著：原本負責的 B8 閘門已於 #518 拿掉，轉成 float32 時超過 2²⁴ 的整數值會失真 |
+| ＋ 矩陣改用 4 bytes 格子 | ~27.5 GiB | **已做**：儲存型別由 `dataset.numeric_feature_storage_type` 宣告（預設 float32），dataset 端就收斂完（#283），training 端只是照著配置——⚠ 當時標註的「int64 欄若有值 > 2²⁴ 會失真」原本由 B8 閘門負責，B8 已於 #518 拿掉，現在沒有檢查守著 |
 | 讓 LightGBM 直接讀 Arrow，不經過 pandas／numpy | ~18.5 GiB | 未做：需要 `cffi`（**不是** pyarrow 或 lightgbm 的相依套件，生產環境未必有） |
 | 一次只讀一小段、邊讀邊餵 | ~4 GiB | **已做（等價）**：#284 的逐 batch 填入拿到同樣的結構，且不需要 `lightgbm.Sequence`——矩陣仍是一次配置好的 numpy 陣列，LightGBM 那側不用改 |
 

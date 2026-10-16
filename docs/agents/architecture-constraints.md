@@ -808,7 +808,7 @@ src/recsys_tfb/evaluation/metrics_spark.py:221 in collapse_to_categories(): time
 
 | 位置 | node | 被切片跳過的後果 |
 |---|---|---|
-| `pipelines/dataset/pipeline.py` | `validate_data_consistency` | **Layer-2 資料一致性閘不會跑**。用 `--from-node` 接續 dataset pipeline 時，資料層不變量未經檢查。**例外：被模式明確點名時會跑**——`--only-test-months` 就是這樣把它留在清單裡的（見 F5） |
+| `pipelines/dataset/pipeline.py` | `validate_data_consistency` | **Layer-2 資料一致性閘不會跑**。用 `--from-node` 接續 dataset pipeline 時，資料層不變量未經檢查，候選層級特徵表的缺月檢查也不會跑（只剩 `fit_preprocessor_metadata` 查 train 月份，而且要它有跑）。**例外：被模式明確點名時會跑**——`--only-test-months` 就是這樣把它留在清單裡的（見 F5） |
 | `pipelines/training/pipeline.py` | `log_experiment` | MLflow 實驗記錄不會寫。不影響產物正確性，影響可追溯性 |
 | `pipelines/evaluation/pipeline.py` | `validate_enriched_eval_predictions_present` | `--compare-only` 的這道閘門不會跑（例：`--compare-only --from-node load_compare_predictions`）。分區**不在**仍擋得住：CLI 在任何 node 之前查分區清單與 `segment_columns.json`（`__main__.py::_compare_only_input_errors`）。只剩「分區列得出來、但某個評估日期沒有列」會漏，比較報表的 A 側會少那幾個日期（全部沒有列時是空的）。分區被另一組設定的執行蓋掉則不漏：`restrict_to_common` 讀表時自己逐日期比對分區指紋（#374）。它原本有輸出、由 `restrict_to_common` 讀，[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1 改成每個讀者自己讀表篩月份後才變成零輸出。#352 加入，使用者 2026-09-14 同意 |
 

@@ -380,6 +380,13 @@ class TestTheDataGateChecksTheCandidateTable:
         with pytest.raises(DataConsistencyError, match=r"B13: candidate_feature_table is missing identity column\(s\) \['req_id'\]"):
             _gate(spark, _raw_candidate_table(spark).drop("req_id"))
 
+    def test_a_missing_time_column_is_B13_not_a_spark_error(self, spark):
+        """The month check reads the time column, so it waits for B13: asked
+        first, a table without that column would fail as a Spark error that
+        names no table."""
+        with pytest.raises(DataConsistencyError, match=r"B13: candidate_feature_table is missing identity column\(s\) \['snap_date'\]"):
+            _gate(spark, _raw_candidate_table(spark).drop("snap_date"))
+
     def test_a_feature_in_both_tables_is_B14(self, spark):
         with pytest.raises(DataConsistencyError, match=r"B14: column\(s\) \['total_aum'\]"):
             _gate(spark, _raw_candidate_table(spark).withColumn("total_aum", F.lit(1.0)))

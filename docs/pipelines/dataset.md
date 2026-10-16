@@ -531,7 +531,7 @@ model input 的組裝規則（讀取範圍見列表後）：
 | `preprocessed_feature_table` 沒有這筆 | 該列的 feature 欄全為 NULL，**列仍保留** | `sample_pool` 與 `feature_table` 的母體來自不同上游，miss 是結構性的常態；LightGBM 自行處理 missing |
 | 候選層級特徵表沒有這筆 | 該列的候選層級特徵欄全為 NULL，**列仍保留** | 與上一列同一個理由：丟列會悄悄改掉候選集合，mAP 的母體跟著變 |
 
-**整個月都沒有資料則是錯誤，不補 NULL**，這點兩張特徵表相同：少了一個月，那個月每一筆候選的特徵全是 NULL，left join 不會報錯，模型照樣訓練得完，沒有人會發現。`feature_table` 的月份在 fit 與 `apply_preprocessor_to_features` 時查；候選層級特徵表不經過後者，所以由兩處查：`validate_data_consistency`（pipeline 第一個 node）確認它含有這次各 build 會讀的每個月份，`fit_preprocessor_metadata` 另外查 `train_snap_dates` 的每個月。資料閘查的月份是 `train_snap_dates`、`val_snap_dates`，加上這次要做的 test 月（`test_model_input_month_plan` 的 `to_process`，已落地、這次跳過的 test 月不算）；`--only-test-months` 時只有這次要做的 test 月。缺月報 `ValueError`，訊息形如 `candidate_feature_table missing required snap_dates: ['2024-02-29']`；它是前置檢查，不和 B 系列收在同一次報錯裡。成本是只對那幾個月的時間欄做一次 distinct，落到 driver 的量跟月數成正比。
+**整個月都沒有資料則是錯誤，不補 NULL**，這點兩張特徵表相同：少了一個月，那個月每一筆候選的特徵全是 NULL，left join 不會報錯，模型照樣訓練得完，沒有人會發現。`feature_table` 的月份在 fit 與 `apply_preprocessor_to_features` 時查；候選層級特徵表不經過後者，所以由兩處查：`validate_data_consistency`（pipeline 第一個 node）確認它含有這次各 build 會讀的每個月份，`fit_preprocessor_metadata` 另外查 `train_snap_dates` 的每個月。資料閘查的月份是 `train_snap_dates`、`val_snap_dates`，加上這次要做的 test 月（`test_model_input_month_plan` 的 `to_process`，已落地、這次跳過的 test 月不算）；`--only-test-months` 時只有這次要做的 test 月。缺月報 `ValueError`，訊息形如 `candidate_feature_table missing required snap_dates: ['2024-02-29']`；它是前置檢查，等 B 系列都過了才查：它要讀時間欄，而時間欄在不在是 B13 查的。成本是只對那幾個月的時間欄做一次 distinct，落到 driver 的量跟月數成正比。
 
 **全 NULL 特徵列是合法輸出，不是 bug。** 看到它不代表資料壞了，代表這個
 `(time, entity)` 在 `feature_table` 裡沒有對應 row。目前刻意不加覆蓋率閘門：真實

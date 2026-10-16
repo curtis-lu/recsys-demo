@@ -71,22 +71,11 @@ def require_months_present(
     driver is bounded by ``months``, not by row count.
     """
     present = {
-        row[0]
+        pd.Timestamp(row[0])
         for row in df.filter(months_filter_as_date(time_col, months))
         .select(F.to_date(F.col(time_col))).distinct().collect()
+        if row[0] is not None
     }
-    require_months_in(present, months, what, table)
-
-
-def require_months_in(present, months: list, what: str, table: str) -> None:
-    """Pre-check on months already collected: every month in ``months`` is in
-    ``present``.
-
-    :func:`require_months_present` minus the collect: the message and the
-    date comparison, kept apart from the Spark question that gathers
-    ``present``.
-    """
-    present = {pd.Timestamp(d) for d in present if d is not None}
     missing = sorted({pd.Timestamp(d) for d in months} - present)
     if missing:
         raise ValueError(

@@ -68,7 +68,7 @@ python -m recsys_tfb <指令> --env dev
 - **`dataset.prepare_model_input.drop_columns` 與 `categorical_columns`**：同一個欄名不能兩邊都寫（`A1`）。一個說「這欄不要」，一個說「這欄當類別特徵」；不擋的話會默默以「不要」為準。
 - **`dataset.train_split_keys`、`dataset.val_sample_keys`**：有寫的話，必須是 `schema.columns.entity` 裡的欄，不能是空清單（`A29`）。
 - **`dataset.numeric_feature_storage_type`** 只能是 `float32` 或 `float64`。可以不寫，但不能寫成 `null`（`A31`）。
-- **`dataset.numeric_precision_policy`** 已經隨數值精度閘一起拿掉（#518）：conf 裡還寫著這一行就擋，不管值是什麼（含 `null`），刪掉那一行即可，沒有替代設定（`A60`）。這個鍵以前不進版本 ID；現在拿掉了這項排除，留著的話版本 ID 會變、dataset 整個重建、模型重訓。刪掉之後版本 ID 跟拿掉精度閘之前相同。這是過渡期的檢查，確認公司環境的 conf 都已經沒有這一行之後就會刪掉。
+- **`dataset.numeric_precision_policy`** 已經隨數值精度閘一起拿掉（#518）：conf 裡還寫著這一行就擋，不管值是什麼（含 `null`），刪掉那一行即可，沒有替代設定（`A60`）。不擋的話，留著這一行會讓版本 ID 改變，dataset 整個重建、模型重訓；刪掉之後版本 ID 跟以前一樣。這是過渡期的檢查，之後會拿掉。
 - **`dataset.train_zero_positive_group_ratio`、`val_zero_positive_group_ratio`、`test_zero_positive_group_ratio`**（沒有正例的 query group 留多少）：有寫就必須是 0 到 1 之間的數字，不能是字串、true／false 或 `null`（`A44`）。它們會進版本 ID，寫錯會讓之後每個指令讀到別的版本路徑。
 - **`quality_checks.max_duplicate_key_ratio`**：source ETL 設定裡有 `sample_pool`、`label_table`、`feature_table` 這三張表的話，每一張都要寫，值在 0 到 1 之間、不含 1（`A32`）。拿掉它，那張表的主鍵重複檢查和主鍵空值檢查會一起默默關掉。候選層級特徵表不在這條的範圍內：這條只讀設定檔、拿上面三個名字去找表，而候選層級特徵表的實體表叫什麼由部署在 `catalog.yaml` 決定，這條找不到它。所以它的 `max_duplicate_key_ratio` 被刪掉時不會有人報錯。同樣的理由，表名加了前綴時（例如 `conf/dev/` 的 `recsys_prod_sample_pool`），這條也找不到那三張表，刪掉這個鍵一樣不會有人報錯。
 
@@ -150,7 +150,7 @@ dataset 有兩個**資料閘**：專門檢查、本身不改資料的步驟，�
 
 後面六條只讀特徵表的欄位定義，不讀資料。
 
-- **候選層級特徵表的月份**：宣告了候選層級特徵表，它就必須含有這次各 build 會讀的每個月份：`dataset.train_snap_dates`、`dataset.val_snap_dates`，以及這次要做的 test 月份（已經落地、這次跳過的 test 月份不算）。只加評估月份（`--only-test-months`）時，只查這次要做的 test 月份。缺月報 `ValueError`，訊息形如 `candidate_feature_table missing required snap_dates: ['2024-02-29']`。這條是前置檢查，不跟上面的 B 系列收在同一次報錯裡，所以修完這一條之後，B 系列的問題才會一次列出來。不擋的話，缺的那個月每一筆候選的特徵會悄悄全變成 NULL；而 test 月份這樣落地之後，之後每一輪都會因為「已經有了」而跳過它。成本很低：只對那幾個月的時間欄做一次 distinct，落到 driver 的量跟月數成正比。如果用 `--from-node`／`--only-node` 從這一步後面開始跑，這一步會被跳過（見下方「三件擋不住的事」第 1 件）。
+- **候選層級特徵表的月份**：宣告了候選層級特徵表，它就必須含有這次各 build 會讀的每個月份：`dataset.train_snap_dates`、`dataset.val_snap_dates`，以及這次要做的 test 月份（已經落地、這次跳過的 test 月份不算）。只加評估月份（`--only-test-months`）時，只查這次要做的 test 月份。缺月報 `ValueError`，訊息形如 `candidate_feature_table missing required snap_dates: ['2024-02-29']`。這條是前置檢查，等上面的 B 系列都過了才查：它要讀時間欄，而時間欄在不在是 `B13` 查的。不擋的話，缺的那個月每一筆候選的特徵會悄悄全變成 NULL；而 test 月份這樣落地之後，之後每一輪都會因為「已經有了」而跳過它。成本很低：只對那幾個月的時間欄做一次 distinct，落到 driver 的量跟月數成正比。如果用 `--from-node`／`--only-node` 從這一步後面開始跑，這一步會被跳過（見下方「三件擋不住的事」第 1 件）。
 
 **資料閘 2：粒度閘**（最後一步）
 - 每個 split（`train`、`train_dev`、`val`、`test`）的 model_input 列數，必須等於組它用的 key 表（每一列是一筆抽到的候選）（`B10`）。列數變多，代表 `label_table`、編碼後的特徵表或候選層級特徵表在 join 鍵上有重複列。只讀 parquet 檔尾的列數。test 是逐月累積的表，只比這次組裝的月份，而且逐月比；這次沒有 test 月份要組時，報告寫「not written this run」，不算失敗。test 某個月沒過時那個月已經落地，直接重跑會跳過它，要用 `--rebuild-dates` 指名重算（錯誤訊息會寫出月份）。四個 split 的無正例組都在 key 表落地之前丟（`dataset.*_zero_positive_group_ratio`），所以這條比對照樣是「相等」。對候選層級特徵表來說，這是框架裡唯一抓得到重複列的地方（`A32` 不守它，見 ①）；已經落地的 test 月份不會重查。

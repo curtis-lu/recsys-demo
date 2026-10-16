@@ -259,6 +259,47 @@ class TestEachGroupDropReadsOnlyItsSplitsMonths:
         assert _months_read(kept, "label") == [set(months)]
 
 
+class TestTheDataGateAsksForWhatTheBuildsRead:
+    """Decision 2: the data gate works out which months to ask the candidate
+    table for by the builds' own rules instead of receiving a list. Asserted
+    against what the builds of the same run actually read, so a build that
+    changes its rule and a gate that does not follow disagree here."""
+
+    @pytest.mark.parametrize("only_test_months", [False, True])
+    def test_its_months_are_the_union_of_the_builds_reads(
+        self, spark, monkeypatch, only_test_months,
+    ):
+        from recsys_tfb.pipelines.dataset import nodes
+        from recsys_tfb.pipelines.dataset.pipeline import create_pipeline
+
+        catalog = {
+            **_catalog(spark, _params()),
+            "sample_pool": _sample_pool(spark, "date"),
+            "feature_table": _feature_table(spark, "date"),
+            "only_test_months": only_test_months,
+        }
+        read: set[str] = set()
+        for node in create_pipeline(only_test_months=only_test_months).nodes:
+            if node.name.startswith("build_"):
+                built = node.func(*[catalog[i] for i in node.inputs])
+                for months in _months_read(built, "f_candidate"):
+                    read |= months
+
+        asked: list[set[str]] = []
+        real = nodes.require_months_present
+
+        def spy(df, time_col, months, what, table="feature_table"):
+            if table == "candidate_feature_table":
+                asked.append({pd.Timestamp(m).strftime("%Y-%m-%d") for m in months})
+            return real(df, time_col, months, what, table=table)
+
+        monkeypatch.setattr(nodes, "require_months_present", spy)
+        _run("validate_data_consistency", catalog)
+
+        assert read, "no build read the candidate table"
+        assert asked == [read]
+
+
 class TestMonthPresenceAsksOnlyTheMonthsItChecks:
     """Decision 1: ``require_months_present`` filters to the months it checks
     before asking which months exist, instead of reading the whole time
