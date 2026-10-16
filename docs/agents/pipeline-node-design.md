@@ -352,7 +352,7 @@ result = feature_table.filter(months_filter_as_date(time_col, months)).select(
 | 需要看到 | 家 |
 |---|---|
 | 只有 config | Layer-1 A 系列 predicate（`core/consistency.py`，CLI entry 執行） |
-| 來源表的 metadata 或廉價 distinct；本 pipeline 剛落地的 parquet 表的列數（只讀檔尾的 `count()`） | Layer-2 B 系列（資料閘，不把整張表讀一遍，[ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md) 與它的修訂） |
+| 來源表的 metadata 或廉價 distinct；本 pipeline 剛落地的 parquet 表的列數（只讀檔尾的 `count()`） | Layer-2 B 系列（資料閘，零掃描：廉價 distinct 之外，I/O 只讀 metadata／檔尾、不讀欄位資料，[ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md) 與它的修訂） |
 | node 執行期才存在的中間資料 | 留在 node，**且必須在 docstring 標明是前置檢查或後置條件** |
 
 **兩個詞不可混用**：
@@ -647,16 +647,14 @@ label_items = item_combinations_in_months(label_table, schema, windows)
 # table's files would make the comparison below pass on two zeroes,
 # having looked at nothing; a table with no files at all is an empty
 # split and passes (model_input_grain_scope_errors says why).
-errors += model_input_grain_scope_errors(
-    split, "keys", files_in_table=keys_all_files,
-    files_in_scope=keys_files, scope=scope,
-) + model_input_grain_scope_errors(
-    split, "model_input", files_in_table=mi_all_files,
-    files_in_scope=mi_files, scope=scope,
-)
+for side, count in whole[split].items():
+    errors += model_input_grain_scope_errors(
+        split, side, files_in_table=count.files_in_table,
+        files_in_scope=count.files_in_scope, scope=scope,
+    )
 ```
 
-「這次寫了哪些檔」只剩一套，在 `steps/footer_facts.py`；粒度閘的報告組裝在 `steps/model_input_grain.py`。
+兩個檔數是 `steps/footer_facts.py` 的 `plan_table_count` 從檔案清單數出來的，node 只決定拿哪個 scope 去問、問完怎麼處置。「這次寫了哪些檔」只剩一套，就在那個模組；粒度閘的報告組裝在 `steps/model_input_grain.py`。
 
 ### 為什麼不是另一種做法
 

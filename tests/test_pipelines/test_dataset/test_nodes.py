@@ -3752,8 +3752,11 @@ class TestB10CostInvariant:
     ADR-0006's line is that a Layer-2 gate's cost is set by metadata, not by
     the number of rows. B10 counts with ``count()`` on the landed table (#521,
     ADR-0006's 2026-10-16 amendment), which Spark plans on a parquet table as
-    a file scan needing no column. Two things keep it inside the line, and
-    both are pinned here rather than left to a docstring:
+    a file scan needing no column: its I/O stays on the metadata side of the
+    line (footers, no column data), while the executors' stepping through
+    the rows is CPU that grows with them and is not covered here. Two things
+    keep the I/O there, and both are pinned here rather than left to a
+    docstring:
 
     * the footer loop it replaced is gone — nothing on B10's path reads a
       footer on the driver, the one py4j round trip per file that made the
@@ -3915,6 +3918,28 @@ class TestB10CostInvariant:
             ) as exc:
                 _cost_gate(parameters, frames, train=(frames["whole"], filtered))
         assert "convertMetastoreParquet" not in str(exc.value)
+        assert counted == []
+
+    @pytest.mark.parametrize("aqe", ["true", "false"])
+    def test_a_test_month_count_that_reads_a_column_is_refused_before_it_runs(
+        self, spark, tmp_path, parameters, aqe, monkeypatch,
+    ):
+        """The test pair is counted by month, on a plan of its own — one the
+        guard has to be handed too. Here the planned months are on disk and
+        the test model_input is filtered on a data column; every other split
+        is clean, so only the test plan can stop the run."""
+        counted = _spy_on_counts(monkeypatch)
+        frames = _cost_frames(spark, tmp_path)
+        filtered = frames["by_month"].where(F.col("x") >= 0)
+        with _spark_conf(spark, **{"spark.sql.adaptive.enabled": aqe}):
+            with pytest.raises(
+                DataConsistencyError,
+                match=r"counting test_model_input's rows would read 1 column",
+            ):
+                _cost_gate(
+                    parameters, frames, plan=_plan(*_SNAP_DATES[:2]),
+                    test=(frames["by_month"], filtered),
+                )
         assert counted == []
 
 

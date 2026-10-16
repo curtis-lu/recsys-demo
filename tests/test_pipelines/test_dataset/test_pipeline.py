@@ -529,6 +529,38 @@ class TestGrainGateWiring:
         names = [n.name for n in create_pipeline(only_test_months=True).nodes]
         assert "validate_model_input_grain" in names
 
+    @pytest.mark.parametrize("conf_dir, env", [
+        ("conf", "local"), ("conf", "dev"),
+        ("examples/ad/conf", "local"), ("examples/ad/conf", "dev"),
+    ])
+    def test_every_table_it_counts_is_loaded_under_its_scope(self, conf_dir, env):
+        """B10 counts each table as the catalog loads it (#521): the entry's
+        ``partition_filter`` WHERE is what keeps the rows on this run's
+        version, while the node's own scope narrows only the file listing.
+        An entry without one would count every version the table holds, and
+        the scope pre-check, reading the listing, could not see it. So each
+        of the eight entries must filter on exactly the keys the node scopes
+        that split by: version and train variant for the train tables,
+        version alone for val and test. Read through ``ConfigLoader``, base
+        and env overlay merged, the way the CLI builds the catalog."""
+        from recsys_tfb.core.config import ConfigLoader
+
+        catalog = ConfigLoader(
+            str(REPO_ROOT / conf_dir), env=env).get_catalog_config()
+        version = {"base_dataset_version": "${base_dataset_version}"}
+        variant = {"train_variant_id": "${train_variant_id}"}
+        counted = [
+            name for name in self._grain_node(create_pipeline()).inputs
+            if name.endswith(("_keys", "_model_input"))
+        ]
+        assert len(counted) == 8
+        for name in counted:
+            expected = (
+                {**version, **variant} if name.startswith("train_")
+                else version
+            )
+            assert catalog[name].get("partition_filter") == expected, name
+
 
 class TestCandidateFeatureTableWiring:
     """Where the candidate-level feature table reaches (ADR-0026), and that it

@@ -2,7 +2,8 @@
 their rows are counted.
 
 The gate answers "how many rows landed" with a ``count()`` that Spark plans to
-read parquet footers only (ADR-0006's cost invariant, as amended for #521).
+read parquet footers only — the I/O half of ADR-0006's cost invariant, as
+amended for #521.
 Its halves are tested apart: partition-path parsing and file selection are
 pure string work and need no session, while the counts and the plan leaves
 they are planned on are exercised against real parquet files — a hand-built
@@ -301,15 +302,20 @@ class TestMonthlyCount:
 
 @pytest.mark.spark
 class TestAFrameListingTwoVersions:
-    """The version filter, pinned on a frame whose ``inputFiles()`` does list
-    two versions side by side.
+    """The version filter on the file listing, pinned on a frame whose
+    ``inputFiles()`` does list two versions side by side.
 
     A catalog-loaded frame lists other versions when
     ``spark.sql.hive.manageFilesourcePartitions`` is false (the module
     docstring), while its ``WHERE`` keeps the rows to its own version. A frame
     read from the table's root and filtered on the version does both under
-    any setting, so it stands in for that case here. Each count is the
-    version it was asked for, never the table's — files and rows alike.
+    any setting, so it stands in for that case here.
+
+    What is asserted is the listing side only — the file counts B10's scope
+    pre-check and report read, and which months it finds on disk for test.
+    The rows are the fixture's own ``WHERE`` and would only echo it back; that
+    the catalog's entries carry that ``WHERE`` is pinned on the catalog
+    itself (``test_pipeline.py``, ``TestGrainGateWiring``).
     """
 
     @pytest.fixture
@@ -317,11 +323,15 @@ class TestAFrameListingTwoVersions:
         from pyspark.sql import functions as F
 
         root = str(tmp_path / "t")
-        for version, rows in (("v1", 7), ("v2", 100)):
+        # v2 also holds a month v1 does not: the case where a listing that
+        # reaches past the version would find a month this run never wrote.
+        for version, month, rows in (("v1", "2026-01-31", 7),
+                                     ("v2", "2026-01-31", 100),
+                                     ("v2", "2026-02-28", 5)):
             (spark.range(0, rows)
              .withColumn("base_dataset_version", F.lit(version))
              .withColumn("train_variant_id", F.lit("t1"))
-             .withColumn("snap_date", F.lit("2026-01-31"))
+             .withColumn("snap_date", F.lit(month))
              .write.mode("append")
              .partitionBy("base_dataset_version", "train_variant_id", "snap_date")
              .parquet(root))
@@ -329,28 +339,44 @@ class TestAFrameListingTwoVersions:
                 .where(F.col("base_dataset_version") == "v1")
                 .drop("base_dataset_version", "train_variant_id"))
 
+    @staticmethod
+    def _v1_files(frame):
+        return [p for p in frame.inputFiles()
+                if partition_value(p, "base_dataset_version") == "v1"]
+
     def test_the_frame_lists_both_versions(self, two_versions):
-        # The premise. Without it the two below would pass for a gate that
+        # The premise. Without it the ones below would pass for a gate that
         # filters nothing.
         assert {
             partition_value(p, "base_dataset_version")
             for p in two_versions.inputFiles()
         } == {"v1", "v2"}
 
-    def test_a_table_compared_whole_counts_its_own_version(self, two_versions):
+    def test_a_table_compared_whole_lists_only_its_own_version(
+        self, two_versions,
+    ):
         planned = plan_table_count(
             two_versions, {"base_dataset_version": "v1", "train_variant_id": "t1"})
-        assert table_rows(planned) == 7
+        assert planned.files_in_scope == len(self._v1_files(two_versions))
         assert planned.files_in_scope < planned.files_in_table
 
-    def test_a_table_compared_by_month_counts_its_own_version(self, two_versions):
+    def test_a_table_compared_by_month_lists_only_its_own_version(
+        self, two_versions,
+    ):
         planned = plan_monthly_count(
             two_versions, base_version="v1", time_col="snap_date",
             months=["2026-01-31"],
         )
-        rows, files = monthly_rows(planned)[pd.Timestamp("2026-01-31")]
-        assert rows == 7
-        assert files == len([
-            p for p in two_versions.inputFiles()
-            if partition_value(p, "base_dataset_version") == "v1"
-        ])
+        assert planned.files == {
+            pd.Timestamp("2026-01-31"): len(self._v1_files(two_versions))}
+
+    def test_a_month_only_another_version_holds_is_not_found(self, two_versions):
+        # Found through v2's files, the month would be counted on the v1
+        # frame (0 rows) yet reported as holding files, and its partition
+        # value would be put in the count's filter.
+        planned = plan_monthly_count(
+            two_versions, base_version="v1", time_col="snap_date",
+            months=["2026-02-28"],
+        )
+        assert planned.counting is None
+        assert monthly_rows(planned) == {pd.Timestamp("2026-02-28"): (0, 0)}

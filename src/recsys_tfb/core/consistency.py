@@ -4434,7 +4434,16 @@ def model_input_grain_count_plan_errors(
     and nothing else would say it happened: the count would still be right.
     So the gate refuses before counting anything. The message for the first
     case names the setting, because that is the one a cluster's defaults can
-    flip without anyone touching this repo.
+    flip without anyone touching this repo. It reads node classes and
+    required columns only, not the file format: a Hive table stored as
+    anything but parquet is refused too, and the message says the format may
+    be the cause.
+
+    **Not covered:** files Spark skips. Under
+    ``spark.sql.files.ignoreCorruptFiles`` (or, by the same mechanism,
+    ``ignoreMissingFiles``) a count passes over an unreadable file with the
+    same plan, so this guard lets it through and the count comes out short
+    (ADR-0006's 2026-10-16 amendment, known limits).
     """
     others = sorted({node for node, _ in leaves if node != COUNT_SCAN_NODE})
     columns = max(
@@ -4452,7 +4461,10 @@ def model_input_grain_count_plan_errors(
             f"Leave that key at Spark's default (true) for the dataset run. "
             f"Under that setting the table's file listing is its root "
             f"directory alone, so a B10 \"parquet file(s) but none under\" "
-            f"message for the same table has this same cause."
+            f"message for the same table has this same cause. If {table} is "
+            f"not stored as parquet, the cause is the format itself rather "
+            f"than this key: B10 counts only tables this pipeline landed as "
+            f"parquet."
         )
     if columns:
         errors.append(

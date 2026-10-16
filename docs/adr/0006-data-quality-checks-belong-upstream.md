@@ -240,9 +240,9 @@ grep 會被那句解釋「為什麼不用 `df.count()`」的 docstring 自己命
 
 ## 修訂（2026-10-16，issue #521）：B10 改用 Spark 的 `count()`，讀的仍然只有檔尾
 
-上面兩則修訂都說「零掃描是硬界線」，2026-09-07 那則把它落實成「B10 不呼叫 `count()`」：driver 一個檔一個檔讀 footer、把 `getRowCount()` 加起來，`TestB10CostInvariant` 用 AST 禁止那條路徑呼叫 `count` 等讀列的方法。**界線本身不變；被推翻的是「`count()` 等於掃描」這個前提。**
+2026-09-03（#281）與 2026-09-07（#306）兩則修訂都說「零掃描是硬界線」，並把界線寫成「成本由 metadata 的規模決定，不由資料的列數決定」。2026-09-07 那則把它落實成「B10 不呼叫 `count()`」：driver 一個檔一個檔讀 footer、把 `getRowCount()` 加起來，`TestB10CostInvariant` 用 AST 禁止那條路徑呼叫 `count` 等讀列的方法。**這次只有 I/O 那一半照舊：仍然只讀檔尾、不讀欄位資料。另一半不再成立：executor 要把每一列數過去，這部分 CPU 會隨列數增加，生產環境沒有量過。**被推翻的前提是「`count()` 等於掃描」。
 
-**這個前提對已落地的 parquet 表不成立。** Spark 對這種表的 `count()` 規劃成一個 `FileSourceScanExec`，而且它需要的資料欄是 0 欄（required schema 為空）。這樣的掃描只讀每個檔的 footer，不讀任何欄位的資料：I/O 跟舊做法一樣，差別在由誰讀。舊做法在 driver 上用 Python 迴圈、每個檔一次 py4j 往返；`count()` 交給 executor 去讀。
+**就 I/O 而言，這個前提對已落地的 parquet 表不成立。** Spark 對這種表的 `count()` 規劃成一個 `FileSourceScanExec`，而且它需要的資料欄是 0 欄（required schema 為空）。這樣的掃描只讀每個檔的 footer，不讀任何欄位的資料：I/O 跟舊做法一樣，差別在由誰讀。舊做法在 driver 上用 Python 迴圈、每個檔一次 py4j 往返；`count()` 交給 executor 去讀。
 
 **為什麼要換。** 舊做法的成本跟檔案數成正比，而且全壓在 driver 的一個 Python 行程上。公司環境的 model_input 表寫入前沒有 repartition，碎成上萬個小檔，B10 因此很慢。以下是本機實測（2026-10-16，local[4]），只看形狀，不代表生產環境的秒數：
 
@@ -271,3 +271,9 @@ grep 會被那句解釋「為什麼不用 `df.count()`」的 docstring 自己命
 - 「這張表有檔、這個版本的範圍內卻一個都沒有」的前置檢查保留。它只需要列出檔案，不讀 footer。
 - test 的月份照舊以日期比對（`20260131` 與 `2026-01-31` 是同一個月），規則與 `landed_partition_files` 相同。
 - 模組 `pipelines/dataset/steps/footer_facts.py` 的檔名沿用；讀 footer 的函式已經刪掉。
+
+**已知限制（只記下，程式沒有處理）。**
+
+- **Spark 跳過的檔不會被數到，保險也看不出來。** `spark.sql.files.ignoreCorruptFiles` 為 true 時，`count()` 會略過讀不了的檔、悄悄少算；執行計畫跟正常時一模一樣，保險照樣放行。審查時實跑過：一張 1000 列的表少算成 873。舊做法會在 `readFooter` 那一步 raise。`spark.sql.files.ignoreMissingFiles` 是推論為同一個機制（沒有實跑）。後果：只有 keys 或 model_input 其中一邊有壞檔時，B10 會報一個誤導的「列數不符」，看起來像右表有重複鍵；兩邊都有壞檔時，少算的列數可能互相抵消，B10 照樣通過。repo 沒有設這兩個鍵。
+- **保險只看節點類別與 required schema，不看檔案格式。** 不是 parquet 的 Hive SerDe 表也會被擋下（葉節點同樣不是 `FileSourceScanExec`），但原因是格式本身，不是 `convertMetastoreParquet`。錯誤訊息因此補了一句：表不是 parquet 時，原因可能是格式。
+- **列數靠 catalog 的 `WHERE` 限定版本。** 舊做法用 node 自己的 scope 篩檔再讀 footer，不受 catalog 寫法影響；現在列數是 catalog 讀出的 frame 整張的數。B10 的八個輸入條目若有一個沒寫 `partition_filter`，列數會把表裡每個版本都算進去，而 scope 前置檢查只看檔案清單，擋不到。守住它的是 `tests/test_pipelines/test_dataset/test_pipeline.py` 裡對兩份 `catalog.yaml` 的檢查：八個條目都要有 `partition_filter`，鍵要跟 `validate_model_input_grain` 用的 scope 相同。

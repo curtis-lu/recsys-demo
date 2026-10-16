@@ -1,8 +1,11 @@
 """Which files this run landed, and how B10 counts their rows.
 
-The facts the B10 gate stands on. It holds the dataset pipeline's cost
-invariant (ADR-0006): a gate's cost is set by metadata, not by how many rows
-the data holds. Two kinds of fact, from two places:
+The facts the B10 gate stands on. It holds the I/O half of the dataset
+gates' cost invariant (ADR-0006): it reads file listings and parquet footers,
+never column data. The other half — a cost independent of how many rows the
+data holds — no longer holds for B10 since #521: the executors step through
+every row to count it, CPU that grows with the rows and has not been measured
+at production scale. Two kinds of fact, from two places:
 
 * **Which files.** :func:`filter_by_partitions` narrows a file listing to the
   partition scope the table was written under — the dataset version, and for
@@ -16,20 +19,35 @@ the data holds. Two kinds of fact, from two places:
   guard can read the plan in between (:func:`scan_leaves`, judged by
   ``model_input_grain_count_plan_errors`` in ``core/consistency.py``).
 
-**Why ``count()`` stays inside the invariant.** On a parquet table Spark plans
-the count as a ``FileSourceScanExec`` that needs no column, and such a scan
-reads each file's footer and no column chunk; the executors still step through
-the rows, but read no column data. That holds only for that plan, which is
-what the guard checks — under ``spark.sql.hive.convertMetastoreParquet`` false
-the same call reads every row through the Hive SerDe. Until #521 this module
+**What ``count()`` costs.** On a parquet table Spark plans the count as a
+``FileSourceScanExec`` that needs no column, and such a scan reads each file's
+footer and no column chunk — the same I/O as reading the footers directly.
+The executors still step through the rows to count them: no column data, but
+CPU that grows with the row count, unmeasured at production scale. The I/O
+claim holds only for that plan, which is what the guard checks — under
+``spark.sql.hive.convertMetastoreParquet`` false the same call reads every row
+through the Hive SerDe. Until #521 this module
 read the footers itself, on the driver, one py4j round trip per file: on a
 table split into tens of thousands of small files that loop was B10's whole
 cost, and threads did not shorten it. Measurements: ADR-0006's 2026-10-16
 amendment.
 
+**Known limit: files Spark skips are not counted, and nothing says so.**
+With ``spark.sql.files.ignoreCorruptFiles`` true the count passes over a file
+it cannot read and comes out short; the plan is the same, so the guard lets
+it through (measured in review: a 1,000-row table counted 873). The footer
+read this replaced raised on such a file. ``ignoreMissingFiles`` is inferred
+to behave the same way, not measured. One side short reads as a B10
+mismatch that looks like a duplicated join key; both sides short can cancel
+out and pass. This repo sets neither key.
+
 **Why select by version at all.** The rows are counted on the frame the
 catalog loaded (``HiveTableDataset.load()``, a ``WHERE`` on the partition
-filter), so they are this version's whatever the listing says. The listing is
+filter), so they are this version's whatever the listing says — provided
+the entry has a ``partition_filter`` at all. Without one the count adds up
+every version in the table and the scope pre-check, which reads only the
+listing, cannot see it; ``tests/test_pipelines/test_dataset/test_pipeline.py``
+pins all eight of B10's entries to the node's scope keys. The listing is
 another matter: what ``DataFrame.inputFiles()`` lists for such a frame depends
 on two Spark settings. Measured on one table holding two versions, local
 ``[*]``, 2026-09-26:
