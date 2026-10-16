@@ -272,7 +272,7 @@ registry 診斷（`diagnosis/metric/contract.py::DIAGNOSES`，現行 `config_shi
 
 ### 決定
 
-（2026-10-16 已移除，見 #515）
+（2026-10-16：第 1 點「保留 `compute_metric_ci`」已隨信賴區間移除，見 #515；其餘仍有效）
 
 兩件事分開做：
 
