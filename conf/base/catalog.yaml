@@ -117,7 +117,7 @@ preprocessor:
 # 只回傳 dict，寫檔由這個條目負責。
 #
 # 為什麼值得落地：pass/fail 答不出「這個 split 到底幾列」。下游的記憶體估算、
-# 「這個月是不是比上個月大很多」都要這個數字，而它是零掃描拿到的，別處沒有。
+# 「這個月是不是比上個月大很多」都要這個數字，而它只讀 parquet 檔尾就拿得到（不讀欄位資料），別處沒有。
 # 報告內含 train_variant_id：檔名只帶
 # base_dataset_version，換 train variant 重跑會覆蓋同一個檔。
 #

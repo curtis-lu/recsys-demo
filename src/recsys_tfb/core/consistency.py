@@ -903,11 +903,18 @@ Layer 2 — data-stage validation (B1 + B5 + B6 + B7 + B9 + B10 + B11 + B12
   ``validate_model_input_grain`` (``pipelines/dataset/nodes.py``), which runs
   after the ``build_*_model_input`` nodes have landed their tables.
 
-  **Facts come from parquet footer row counts, not from ``count()``** — the
-  dataset gates' cost invariant (ADR-0006 and its amendments): a footer read
-  costs one seek per file and is independent of how many rows the file holds.
-  B10 sums ``block.getRowCount()`` over the row groups, one call per row group
-  whatever the column count.
+  **Row counts come from Spark's ``count()`` on the landed table, planned to
+  read parquet footers only** (#521; ADR-0006's 2026-10-16 amendment). On a
+  parquet table that count is a ``FileSourceScanExec`` needing no column:
+  its I/O is the footers, while the executors still step through the rows
+  without reading column data. Until #521 B10 read every footer on the
+  driver itself, one py4j round trip per file, which on a table split into
+  tens of thousands of small files was the slow part. Asked before any count
+  runs, ``model_input_grain_count_plan_errors`` is the cost guard: every leaf
+  of the count's plan must be that scan with no column required, or the
+  gate raises without counting — under
+  ``spark.sql.hive.convertMetastoreParquet`` false the same ``count()``
+  would read every row through the Hive SerDe.
 
   **All four splits are covered** (ADR-0029 decision 4). Every model_input
   lands straight out of ``build_model_input``, and every split's
@@ -4232,9 +4239,11 @@ def model_input_grain_errors(
     """B10 invariant — the single definition.
 
     Pure — no Spark, no parquet, no filesystem. How the two numbers are
-    obtained without scanning the data is the caller's problem (``footer_rows``
-    in the dataset pipeline's ``steps/footer_facts.py``), and keeping it out of
-    here is what lets the rule be tested by handing it a dict.
+    obtained without reading the data is the caller's problem (``table_rows``
+    and ``monthly_rows`` in the dataset pipeline's ``steps/footer_facts.py``,
+    each run only after :func:`model_input_grain_count_plan_errors` passed its
+    plan), and keeping it out of here is what lets the rule be tested by
+    handing it a dict.
 
     **Equality, not a bound.** ``build_model_input`` joins keys to labels and to
     features with LEFT joins on the keys' own grain, so a key that matches
@@ -4348,8 +4357,9 @@ def model_input_grain_scope_errors(
 ) -> list[str]:
     """B10, asked before the rule: a table compared whole has files in scope.
 
-    Pure — the caller counts both numbers (``footer_rows`` in the dataset
-    pipeline's ``steps/footer_facts.py``). ``side`` is ``"keys"`` or
+    Pure — the caller counts both numbers off the table's file listing
+    (``plan_table_count`` in the dataset pipeline's
+    ``steps/footer_facts.py``). ``side`` is ``"keys"`` or
     ``"model_input"``; ``scope`` is the partition values the table was written
     under (the dataset version, and for the train tables the train variant).
 
@@ -4387,6 +4397,87 @@ def model_input_grain_scope_errors(
         f"val: every query group dropped — r = 0 and the val "
         f"month's labels not in yet, say)."
     ]
+
+
+#: The one physical scan a B10 row count may run on: Spark's own file scan.
+#: With no column of data required (``requiredSchema`` empty), it reads each
+#: parquet file's footer and no column chunk (ADR-0006's 2026-10-16
+#: amendment).
+COUNT_SCAN_NODE = "FileSourceScanExec"
+
+
+def model_input_grain_count_plan_errors(
+    table: str,
+    leaves: Sequence[tuple[str, int | None]],
+) -> list[str]:
+    """B10's cost guard, asked before any of its counts runs.
+
+    Pure — the caller reads the leaves off the count's physical plan
+    (``scan_leaves`` in the dataset pipeline's ``steps/footer_facts.py``),
+    each a ``(node class name, data columns it reads)`` pair, the column count
+    ``None`` where the node is not a file scan. ``table`` is the table being
+    counted (``train_keys``, ``test_model_input`` ...).
+
+    **Why there is a guard.** B10 counts rows with ``count()`` on the landed
+    table. On a parquet table Spark plans that as a ``FileSourceScanExec``
+    that needs no column, and such a scan reads the footers and no column
+    chunk. Whether Spark plans it that way is not this repo's choice, and two
+    plans would turn the same call into a read of the data, silently:
+
+    * a leaf that is not a file scan — what a catalog-loaded Hive table plans
+      when ``spark.sql.hive.convertMetastoreParquet`` is false
+      (``HiveTableScanExec``, which reads every row through the Hive SerDe);
+    * a file scan that needs columns — a filter or grouping on a column that
+      is not a partition column, which reads that column in full.
+
+    Either is the cost escalation ADR-0006 keeps out of the dataset gates,
+    and nothing else would say it happened: the count would still be right.
+    So the gate refuses before counting anything. The message for the first
+    case names the setting, because that is the one a cluster's defaults can
+    flip without anyone touching this repo. It reads node classes and
+    required columns only, not the file format: a Hive table stored as
+    anything but parquet is refused too, and the message says the format may
+    be the cause.
+
+    **Not covered:** files Spark skips. Under
+    ``spark.sql.files.ignoreCorruptFiles`` (or, by the same mechanism,
+    ``ignoreMissingFiles``) a count passes over an unreadable file with the
+    same plan, so this guard lets it through and the count comes out short
+    (ADR-0006's 2026-10-16 amendment, known limits).
+    """
+    others = sorted({node for node, _ in leaves if node != COUNT_SCAN_NODE})
+    columns = max(
+        (n or 0 for node, n in leaves if node == COUNT_SCAN_NODE), default=0)
+    errors: list[str] = []
+    if others:
+        errors.append(
+            f"B10: counting {table}'s rows would run on {', '.join(others)} "
+            f"instead of {COUNT_SCAN_NODE}, which reads every row of the "
+            f"table instead of the parquet footers alone — the cost ADR-0006 "
+            f"keeps out of the dataset gates. Nothing was counted. A "
+            f"catalog-loaded table plans this way when "
+            f"spark.sql.hive.convertMetastoreParquet is false: Spark then "
+            f"reads it through the Hive SerDe, not its own parquet reader. "
+            f"Leave that key at Spark's default (true) for the dataset run. "
+            f"Under that setting the table's file listing is its root "
+            f"directory alone, so a B10 \"parquet file(s) but none under\" "
+            f"message for the same table has this same cause. If {table} is "
+            f"not stored as parquet, the cause is the format itself rather "
+            f"than this key: B10 counts only tables this pipeline landed as "
+            f"parquet."
+        )
+    if columns:
+        errors.append(
+            f"B10: counting {table}'s rows would read {columns} column(s) of "
+            f"data, not the parquet footers alone — a full read of those "
+            f"columns, the cost ADR-0006 keeps out of the dataset gates. "
+            f"Nothing was counted. B10 filters and groups the frame the "
+            f"catalog loaded on partition columns only (the version, the "
+            f"train variant and, for test, the time column), so one of those "
+            f"is not a partition column of {table}: check its catalog "
+            f"entry's partition_filter and partition_cols."
+        )
+    return errors
 
 
 # ---------------------------------------------------------------------------

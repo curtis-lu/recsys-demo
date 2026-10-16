@@ -158,6 +158,8 @@ ADR-0008 那一輪的結構搬移在 2026-08-08（PR #176）合併時，`pipelin
   - `validate_model_input_grain` 與新的 test keys 篩選 node 都要加進 `ONLY_TEST_MONTHS_NODES`。前者不加，「涵蓋 test」會在加 test 月份的主要路徑上落空；後者不加，`test_keys` 的新月份不會落地。B10 的輸出沒有下游讀者，防漂移測試從終點往回推導推不到它，所以要跟精度閘一樣在測試裡明列。
   - `core/consistency.py` 的 B10 說明裡「只涵蓋兩個 split 是限制、不是疏忽」那一段（理由是 val／test 在建表之後才丟組）會被推翻，要跟著改寫。
 
+> 2026-10-16 補記（#521）：B10 已不在 driver 讀檔尾，改用 I/O 只讀檔尾的 Spark `count()`，見 [ADR-0006](0006-data-quality-checks-belong-upstream.md) 的 2026-10-16 修訂。
+
 **r ＝ 0 或 1 時結果不變**：判斷用的仍是 `label_table` 的 label，看到的仍是同一批 keys。ADR-0025 決定 3 的補記（2026-09-21）對 train 做過同一個搬遷，並寫明留下的組與列跟建表之後再丟逐列相同。val／test 的 r 預設是 0。
 
 **0 < r < 1 時留下的無正例組會換一批**：
@@ -282,6 +284,8 @@ ADR-0008 那一輪的結構搬移在 2026-08-08（PR #176）合併時，`pipelin
 > - 被搬走的 log 行換了 logger 名：B10 逐 split 那一行從 `recsys_tfb.pipelines.dataset.nodes` 變成 `...steps.model_input_grain`，B8 的逐欄表格變成 `...steps.precision`。文字不變；以 logger 名過濾的監控要跟著改。
 > - 給寫規則 17（決定 14）的人：B8 的 node 除了「查什麼」與「交給 predicate」，還負責套用政策（`block` 就 raise、`truncate` 就警告）與前置檢查（`require_months_in`）。規則的字面要給這兩件事留位置，否則照字面做會把政策搬進 helper。
 > - **更正決定 8 的行數估計**：`nodes.py` 在本份寫成時（`2e99c573`）是 1733 行，本票開工時（`6d1d8ca5`）是 1999 行，本票做完（merge 進 main 的 `2ec9b792`）是 1807 行，不是 1200–1300 行。估計錯在方向：決定 4 沒有刪掉 node，是把 val、test 在 model_input 上丟組的兩個 node 換成在 keys 上丟組的兩個，同時讓 B10 多比 val、test 兩對，所以 #461 讓它多了 159 行（#460 多 66 行、#462 多 41 行）。決定 8 不拆檔的理由不靠行數，結論不變。
+
+> 2026-10-16 補記（#521）：B10 已不在 driver 讀檔尾，改用 I/O 只讀檔尾的 Spark `count()`，見 [ADR-0006](0006-data-quality-checks-belong-upstream.md) 的 2026-10-16 修訂。
 
 ## 決定 8　`nodes.py` 不拆檔
 
@@ -469,6 +473,7 @@ CLI 只留通用的部分：寫 manifest、執行 pipeline。
 >   - 查的時候多找到同一件事的兩處：`architecture-constraints.md` 的 F8 與 S5 的說明還寫著 `evaluation/nodes_spark.py`、`test_nodes_spark.py`，一起改了。
 > - **審查後改的幾件**（三路審查，其中一路專找「本份與 #467 哪裡寫錯」）：
 >   - node 規則 11 的表第二列補上「本 pipeline 剛落地的產物的 parquet 檔尾」。B8、B10 讀的就是這個（ADR-0006 的修訂），原本的表只寫來源表，規則 17 引用它時對不上。
+>     - （2026-10-16 由 #521 補記，不是這一輪審查改的）B10 已不在 driver 讀檔尾，改用 I/O 只讀檔尾的 Spark `count()`，見 [ADR-0006](0006-data-quality-checks-belong-upstream.md) 的 2026-10-16 修訂。
 >   - 規則 17 的範圍改成只用「判斷寫在 `core/consistency.py` 的 B 系列」界定，不再引用規則 11 的列。node body 要寫的事改成開放的：查哪些表、月份、欄、用什麼單位比，都是決策，清單以外的決策也留在 node（例如粒度閘的 0＝0 不算失敗）。照原本的封閉清單做，這些決策會被搬進 `steps/`，跟決定 7 實作註記警告的是同一種錯。
 >   - `build_model_input` 那筆例外也違反規則 4（換成機械名之後，build 的 node body 只剩月份），補進違反的條目。例外只登記這一組；原本寫的「三個條件成立就算例外」刪掉，因為那等於不問使用者就能新增例外。審查另外建議把它改寫進規則 5、從例外表拿掉，那是放寬規則 5，留給使用者決定。
 >   - 規則 18 原本寫「一批改動只加一次」，agent 看不到「一批」的邊界。改成：比對最新的發布 tag 裡常數的值，main 上已經比它大就不必再加；維護分支（`release/*`）上的修正要取 main 沒用過的值，否則兩邊加到同一個數。

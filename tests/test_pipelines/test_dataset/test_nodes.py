@@ -1,5 +1,6 @@
 """Tests for the dataset pipeline's node functions, Layer-2 gate included."""
 
+import contextlib
 import logging
 import operator
 from functools import reduce
@@ -3346,7 +3347,8 @@ class TestSelectValKeysTwoColumnEntity:
 
 
 # --- B10 model_input grain gate ----------------------------------------------
-# The gate counts rows out of parquet footers, so these tests land real
+# The gate counts landed parquet with a count() planned to read footers only,
+# and lists the files under their partition scope, so these tests land real
 # partitioned parquet and hand the node the frames read back from it. The
 # headline cases run the real ``build_model_input`` against a right table whose
 # keys were deliberately duplicated: a hand-built pair of row counts would test
@@ -3380,8 +3382,10 @@ def _land(spark, tmp_path, df, name, *, variant_col="train_variant_id",
     matching). ``snap_date`` is a partition column in the real catalog too,
     but the gate never looks at it for these tables, which rebuild in full.
     The partition_filter columns are dropped on read because
-    ``HiveTableDataset.load`` drops them; the gate reads paths, not columns, so
-    this is fidelity rather than a dependency.
+    ``HiveTableDataset.load`` drops them; the gate scopes files by their
+    paths, not by columns, so this is fidelity rather than a dependency. Read
+    back from the root, the frame holds every row written under ``name``, as
+    a catalog-loaded frame holds its WHERE's.
     """
     root = str(tmp_path / name)
     (df.withColumn("base_dataset_version", F.lit(base))
@@ -3390,12 +3394,14 @@ def _land(spark, tmp_path, df, name, *, variant_col="train_variant_id",
     return spark.read.parquet(root).drop("base_dataset_version", variant_col)
 
 
-def _land_by_month(spark, tmp_path, df, name, *, base=_BASE_VERSION):
+def _land_by_month(spark, tmp_path, df, name, *, base=_BASE_VERSION,
+                   spelling="yyyy-MM-dd"):
     """Write ``df`` the way the catalog writes the incremental test tables:
     under the version, one partition per month, the month spelled as the
-    STRING partition value the catalog declares."""
+    STRING partition value the catalog declares (``spelling``: the source
+    column decides it, so ``yyyyMMdd`` is as legal as the default)."""
     root = str(tmp_path / name)
-    (df.withColumn("snap_date", F.date_format("snap_date", "yyyy-MM-dd"))
+    (df.withColumn("snap_date", F.date_format("snap_date", spelling))
        .withColumn("base_dataset_version", F.lit(base))
        .write.partitionBy("base_dataset_version", "snap_date").parquet(root))
     return spark.read.parquet(root).drop("base_dataset_version")
@@ -3671,11 +3677,13 @@ class TestValidateModelInputGrain:
     def test_a_version_beside_it_in_the_same_table_is_not_counted(
         self, spark, tmp_path, parameters, clean,
     ):
-        """train_keys' files include another version's, holding the keys
-        twice over; train_model_input has no such version. Counted across the
-        table the two would disagree; counted under this version they agree
-        (a catalog-loaded frame lists other versions under some Spark
-        settings: steps/footer_facts.py)."""
+        """train_keys' table holds another version beside this one, the keys
+        twice over; train_model_input has no such version. The frame is what
+        the catalog loads under ``manageFilesourcePartitions`` false: its
+        WHERE holds this version's rows only, while ``inputFiles()`` lists
+        every version's files (steps/footer_facts.py). The rows are counted
+        on the frame and the files under this version, so both describe this
+        version — counted across the table the files would not."""
         keys, _ = clean["built"]
         root = str(tmp_path / "two_versions")
         for base, df in ((_BASE_VERSION, keys),
@@ -3685,11 +3693,42 @@ class TestValidateModelInputGrain:
                .write.mode("append")
                .partitionBy("base_dataset_version", "train_variant_id")
                .parquet(root))
-        two_versions = spark.read.parquet(root).drop(
-            "base_dataset_version", "train_variant_id")
+        two_versions = (
+            spark.read.parquet(root)
+            .where(F.col("base_dataset_version") == _BASE_VERSION)
+            .drop("base_dataset_version", "train_variant_id")
+        )
+        listed = two_versions.inputFiles()
+        own = [p for p in listed if f"base_dataset_version={_BASE_VERSION}/" in p]
+        # The premise: the listing reaches past this version. Without it the
+        # file count below would pass for a gate that filters nothing.
+        assert len(own) < len(listed)
+
         report = self._gate(parameters, clean, train=(
             two_versions, clean["model_input"]))
         assert report["splits"]["train"]["keys_rows"] == keys.count()
+        assert report["splits"]["train"]["keys_files"] == len(own)
+
+    def test_a_test_month_spelled_differently_on_disk_is_still_counted(
+        self, spark, tmp_path, parameters, clean,
+    ):
+        """The plan says ``2024-01-31``; the partition says ``20240131``
+        (the source column's spelling — A26 exists because the two can
+        disagree). Found by date, the month's rows are counted on both sides;
+        found by string, both sides would read 0 and the gate would pass
+        having looked at nothing."""
+        keys, model_input = clean["built"]
+        month = _SNAP_DATES[0]
+        report = self._gate(parameters, clean, plan=_plan(month), test=(
+            _land_by_month(spark, tmp_path, keys, "ck", spelling="yyyyMMdd"),
+            _land_by_month(spark, tmp_path, model_input, "cmi",
+                           spelling="yyyyMMdd"),
+        ))
+        expected = _in_month(keys, month).count()
+        assert expected > 0
+        assert report["splits"]["test"]["months"][month] == {
+            "keys_rows": expected, "model_input_rows": expected,
+        }
 
     def test_the_pairing_takes_test_months_from_the_builds_plan(self):
         """B10 reads the plan ``build_test_model_input`` ran under, not
@@ -3708,65 +3747,304 @@ class TestValidateModelInputGrain:
 
 
 class TestB10CostInvariant:
-    """The gate's whole justification: it establishes a row count without scanning.
+    """The gate's cost: row counts that read parquet footers and no column.
 
-    ADR-0006's line is that a Layer-2 gate's cost is set by metadata, not by the
-    number of rows. ``count()`` looks like the obvious way to implement B10 and
-    would cross that line silently — nothing would fail, the gate would still be
-    correct, and the dataset pipeline would just get slower for every future run.
-    So the claim is pinned here rather than left in a docstring.
+    ADR-0006's line is that a Layer-2 gate's cost is set by metadata, not by
+    the number of rows. B10 counts with ``count()`` on the landed table (#521,
+    ADR-0006's 2026-10-16 amendment), which Spark plans on a parquet table as
+    a file scan needing no column: its I/O stays on the metadata side of the
+    line (footers, no column data), while the executors' stepping through
+    the rows is CPU that grows with them and is not covered here. Two things
+    keep the I/O there, and both are pinned here rather than left to a
+    docstring:
 
-    Reading the AST rather than grepping the file: a grep matches the words
-    ``df.count()`` in the very docstring that explains why it is not used.
+    * the footer loop it replaced is gone — nothing on B10's path reads a
+      footer on the driver, the one py4j round trip per file that made the
+      gate slow on a table of many small files;
+    * the cost guard — before counting, every leaf of each count's plan must
+      be that scan with no column required. Under
+      ``spark.sql.hive.convertMetastoreParquet`` false the same ``count()``
+      reads every row, and a count filtered on a data column reads that
+      column; nothing would fail and the counts would be right, every run
+      would just get slower. The guard reads the plan from before AQE, so it
+      is exercised with AQE on and off.
     """
 
-    _SCANNING = {
-        "count", "groupBy", "groupby", "agg", "collect", "distinct",
-        "isEmpty", "toPandas", "take", "head", "first", "rdd",
-    }
+    #: The driver-side footer read #521 removed, by the names it was made of.
+    _FOOTER_READ = {"ParquetFileReader", "readFooter", "readFooters",
+                    "getBlocks", "getRowCount"}
 
-    def _calls_in(self, module_path, func_names):
+    def _names_in(self, module_path, func_names=None):
+        """Every attribute and name the module — or the named functions in
+        it — refers to. Read off the AST rather than grepped: a grep matches
+        the docstrings that say what was removed."""
         import ast
         from pathlib import Path
 
-        src = Path(module_path).read_text()
-        tree = ast.parse(src)
-        found = {}
-        for fn in ast.walk(tree):
-            if isinstance(fn, ast.FunctionDef) and fn.name in func_names:
-                found[fn.name] = {
-                    c.func.attr for c in ast.walk(fn)
-                    if isinstance(c, ast.Call)
-                    and isinstance(c.func, ast.Attribute)
-                }
-        assert sorted(found) == sorted(func_names), (
-            f"{module_path}: expected {func_names}, found {sorted(found)} — "
-            f"a function was renamed and this guard stopped looking at it."
-        )
-        return found
+        tree = ast.parse(Path(module_path).read_text())
+        roots = [tree]
+        if func_names is not None:
+            roots = [
+                fn for fn in ast.walk(tree)
+                if isinstance(fn, ast.FunctionDef) and fn.name in func_names
+            ]
+            assert sorted(fn.name for fn in roots) == sorted(func_names), (
+                f"{module_path}: expected {func_names} — a function was "
+                f"renamed and this guard stopped looking at it."
+            )
+        names = set()
+        for root in roots:
+            for n in ast.walk(root):
+                if isinstance(n, ast.Attribute):
+                    names.add(n.attr)
+                elif isinstance(n, ast.Name):
+                    names.add(n.id)
+        return names
 
-    def test_the_gate_calls_nothing_that_reads_rows(self):
+    def test_nothing_on_the_gates_path_reads_a_footer(self):
         from recsys_tfb.pipelines.dataset import nodes as _nodes
         from recsys_tfb.pipelines.dataset.steps import footer_facts as _facts
+        from recsys_tfb.pipelines.dataset.steps import (
+            model_input_grain as _grain,
+        )
 
-        for module, names in (
+        for module_path, funcs in (
             (_nodes.__file__, ["validate_model_input_grain"]),
-            (_facts.__file__,
-             ["footer_rows", "footer_rows_by_month", "landed_partition_files",
-              "read_row_count", "filter_by_partitions"]),
+            (_facts.__file__, None),
+            (_grain.__file__, None),
         ):
-            for name, calls in self._calls_in(module, names).items():
-                assert not (calls & self._SCANNING), (
-                    f"{name} calls {sorted(calls & self._SCANNING)}, which "
-                    f"reads rows. B10's facts must come from parquet footers "
-                    f"(ADR-0006)."
+            found = self._names_in(module_path, funcs) & self._FOOTER_READ
+            assert not found, (
+                f"{module_path} refers to {sorted(found)}: a footer read on "
+                f"the driver, one py4j round trip per file. B10 counts with "
+                f"count() on the landed table (ADR-0006, 2026-10-16)."
+            )
+
+    def test_the_rows_are_counted_by_spark_not_read_by_the_driver(
+        self, spark, tmp_path, parameters, monkeypatch,
+    ):
+        """The structural half of "the counts are right": the removed footer
+        loop reached Parquet's reader through the session's JVM gateway
+        (``spark._jvm``). With that door shut the gate must still count every
+        split, test month by month — a value check alone would pass either
+        way, since both ways count the same rows."""
+        frames = _cost_frames(spark, tmp_path)
+        expected = frames["src"].count()
+        per_month = {
+            m: _in_month(frames["src"], m).count() for m in _SNAP_DATES[:2]}
+        # The premise: the door shut below is the one the frames' session uses.
+        assert frames["whole"].sparkSession is spark
+        assert frames["by_month"].sparkSession is spark
+
+        monkeypatch.setattr(spark, "_jvm", _ShutDoor())
+        report = _cost_gate(parameters, frames, plan=_plan(*_SNAP_DATES[:2]))
+
+        for split in ("train", "train_dev", "val"):
+            entry = report["splits"][split]
+            assert entry["keys_rows"] == entry["model_input_rows"] == expected
+        assert report["splits"]["test"]["months"] == {
+            m: {"keys_rows": n, "model_input_rows": n}
+            for m, n in per_month.items()
+        }
+
+    @pytest.mark.parametrize("aqe", ["true", "false"])
+    def test_under_spark_defaults_each_count_plans_a_footer_read(
+        self, spark, tmp_path, parameters, aqe,
+    ):
+        """The guard's other side: the plan it exists to let through. Both
+        kinds of count — a table whole, a table by month — plan one file scan
+        that needs no column, and the gate counts."""
+        from recsys_tfb.pipelines.dataset.steps.footer_facts import (
+            plan_monthly_count,
+            plan_table_count,
+            scan_leaves,
+        )
+
+        frames = _cost_frames(spark, tmp_path)
+        with _spark_conf(spark, **{"spark.sql.adaptive.enabled": aqe}):
+            whole = plan_table_count(
+                frames["whole"], {"base_dataset_version": _BASE_VERSION})
+            monthly = plan_monthly_count(
+                frames["by_month"], base_version=_BASE_VERSION,
+                time_col="snap_date", months=_SNAP_DATES[:2])
+            assert scan_leaves(whole.counting) == [("FileSourceScanExec", 0)]
+            assert scan_leaves(monthly.counting) == [("FileSourceScanExec", 0)]
+            report = _cost_gate(
+                parameters, frames, plan=_plan(*_SNAP_DATES[:2]))
+        assert report["splits"]["train"]["keys_rows"] == frames["src"].count()
+
+    @pytest.mark.parametrize("aqe", ["true", "false"])
+    def test_a_count_through_the_hive_serde_is_refused_before_it_runs(
+        self, spark, tmp_path, parameters, aqe, monkeypatch,
+    ):
+        """``spark.sql.hive.convertMetastoreParquet`` false: Spark reads a
+        catalog-loaded table through the Hive SerDe, and ``count()`` there is a
+        real scan of every row (``HiveTableScanExec``). The gate must refuse
+        it, say which setting did it, and count nothing on the way."""
+        counted = _spy_on_counts(monkeypatch)
+        frames = _cost_frames(spark, tmp_path)
+        with _hive_pair(spark, frames["src"]) as (keys_ds, mi_ds), _spark_conf(
+            spark, **{
+                "spark.sql.adaptive.enabled": aqe,
+                "spark.sql.hive.convertMetastoreParquet": "false",
+            },
+        ):
+            with pytest.raises(
+                DataConsistencyError,
+                match="spark.sql.hive.convertMetastoreParquet",
+            ) as exc:
+                _cost_gate(parameters, frames,
+                           train=(keys_ds.load(), mi_ds.load()))
+        message = str(exc.value)
+        assert "B10: counting train_keys's rows would run on HiveTableScanExec" in message
+        assert "B10: counting train_model_input's rows" in message
+        assert counted == []
+
+    @pytest.mark.parametrize("aqe", ["true", "false"])
+    def test_a_count_that_reads_a_column_is_refused_before_it_runs(
+        self, spark, tmp_path, parameters, aqe, monkeypatch,
+    ):
+        """The guard's second condition. A frame filtered on a data column
+        still plans a ``FileSourceScanExec`` — only the column it requires
+        tells it apart from a footer read, so a guard judging the node class
+        alone would let this count run."""
+        counted = _spy_on_counts(monkeypatch)
+        frames = _cost_frames(spark, tmp_path)
+        filtered = frames["whole"].where(F.col("x") >= 0)
+        with _spark_conf(spark, **{"spark.sql.adaptive.enabled": aqe}):
+            with pytest.raises(
+                DataConsistencyError,
+                match=r"counting train_model_input's rows would read 1 column",
+            ) as exc:
+                _cost_gate(parameters, frames, train=(frames["whole"], filtered))
+        assert "convertMetastoreParquet" not in str(exc.value)
+        assert counted == []
+
+    @pytest.mark.parametrize("aqe", ["true", "false"])
+    def test_a_test_month_count_that_reads_a_column_is_refused_before_it_runs(
+        self, spark, tmp_path, parameters, aqe, monkeypatch,
+    ):
+        """The test pair is counted by month, on a plan of its own — one the
+        guard has to be handed too. Here the planned months are on disk and
+        the test model_input is filtered on a data column; every other split
+        is clean, so only the test plan can stop the run."""
+        counted = _spy_on_counts(monkeypatch)
+        frames = _cost_frames(spark, tmp_path)
+        filtered = frames["by_month"].where(F.col("x") >= 0)
+        with _spark_conf(spark, **{"spark.sql.adaptive.enabled": aqe}):
+            with pytest.raises(
+                DataConsistencyError,
+                match=r"counting test_model_input's rows would read 1 column",
+            ):
+                _cost_gate(
+                    parameters, frames, plan=_plan(*_SNAP_DATES[:2]),
+                    test=(frames["by_month"], filtered),
                 )
+        assert counted == []
 
-    def test_the_only_frame_method_the_gate_uses_is_inputFiles(self):
-        # The positive half: a guard that only forbids things passes just as
-        # well when the function stops touching the frame at all.
-        from recsys_tfb.pipelines.dataset.steps import footer_facts as _facts
 
-        calls = self._calls_in(
-            _facts.__file__, ["footer_rows"])["footer_rows"]
-        assert "inputFiles" in calls
+class _ShutDoor:
+    """Stands in for ``spark._jvm``: any use of it fails the test."""
+
+    def __getattr__(self, name):
+        raise AssertionError(
+            f"B10 reached for spark._jvm.{name} — the driver-side footer "
+            f"read #521 removed")
+
+
+def _spy_on_counts(monkeypatch) -> list:
+    """Record every count the node runs; the guard is to stop before any."""
+    from recsys_tfb.pipelines.dataset import nodes as _nodes
+
+    counted = []
+    for name in ("table_rows", "monthly_rows"):
+        real = getattr(_nodes, name)
+        monkeypatch.setattr(
+            _nodes, name,
+            lambda planned, _real=real, _name=name: (
+                counted.append(_name) or _real(planned)),
+        )
+    return counted
+
+
+# --- helpers for TestB10CostInvariant: a small pair of equal-count tables,
+# landed whole and by month, and a Hive-table pair loaded the catalog's way ---
+
+
+@contextlib.contextmanager
+def _spark_conf(spark, **settings):
+    """Set session confs for the block, then put back what was there."""
+    before = {}
+    for key in settings:
+        try:
+            before[key] = spark.conf.get(key)
+        except Exception:  # not set and no default: unset it afterwards
+            before[key] = None
+    for key, value in settings.items():
+        spark.conf.set(key, value)
+    try:
+        yield
+    finally:
+        for key, value in before.items():
+            if value is None:
+                spark.conf.unset(key)
+            else:
+                spark.conf.set(key, value)
+
+
+def _cost_frames(spark, tmp_path) -> dict:
+    """One small table shaped like a keys / model_input table (two months,
+    a data column besides the time column), landed whole and by month. Keys
+    and model_input are the same rows, so every pair agrees: what these tests
+    vary is how the rows are counted, not whether they match."""
+    src = (
+        spark.range(0, 12)
+        .withColumn("snap_date", F.when(
+            F.col("id") % 2 == 0, F.lit(_SNAP_DATES[0]),
+        ).otherwise(F.lit(_SNAP_DATES[1])).cast("date"))
+        .withColumn("x", F.col("id").cast("double"))
+    )
+    return {
+        "src": src,
+        "whole": _land(spark, tmp_path, src, "cost_whole"),
+        "by_month": _land_by_month(spark, tmp_path, src, "cost_by_month"),
+    }
+
+
+def _cost_gate(parameters, frames, *, plan=_NO_TEST_MONTH, **pairs):
+    whole = (frames["whole"], frames["whole"])
+    by_month = (frames["by_month"], frames["by_month"])
+    return validate_model_input_grain(
+        *pairs.get("train", whole), *pairs.get("train_dev", whole),
+        *pairs.get("val", whole), *pairs.get("test", by_month),
+        plan, _grain_params(parameters),
+    )
+
+
+@contextlib.contextmanager
+def _hive_pair(spark, src):
+    """``src`` saved twice through ``HiveTableDataset`` — the catalog's
+    train tables: partitioned by version, variant and month — and the two
+    datasets handed back, so a test loads them under the settings it sets."""
+    from recsys_tfb.io.hive_table_dataset import HiveTableDataset
+
+    db = "b10_cost_guard"
+    spark.sql(f"CREATE DATABASE IF NOT EXISTS {db}")
+    try:
+        datasets = []
+        for table in ("train_keys", "train_model_input"):
+            spark.sql(f"DROP TABLE IF EXISTS {db}.{table}")
+            ds = HiveTableDataset(
+                database=db, table=table, columns="auto", external=False,
+                partition_filter={
+                    "base_dataset_version": _BASE_VERSION,
+                    "train_variant_id": _TRAIN_VARIANT,
+                },
+                partition_cols=[{"name": "snap_date", "type": "STRING"}],
+            )
+            ds.save(src.withColumn(
+                "snap_date", F.date_format("snap_date", "yyyy-MM-dd")))
+            datasets.append(ds)
+        yield tuple(datasets)
+    finally:
+        spark.sql(f"DROP DATABASE IF EXISTS {db} CASCADE")

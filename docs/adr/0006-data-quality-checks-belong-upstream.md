@@ -236,3 +236,44 @@ grep 會被那句解釋「為什麼不用 `df.count()`」的 docstring 自己命
 ## 修訂（2026-09-26，#467）：`filter_groups_with_positives` 已不存在
 
 上文三處引用的 `filter_groups_with_positives` 已經拆掉。現在丟無正例 query group 的是三個 node：`filter_train_keys`、`filter_val_keys`、`filter_test_keys`（`pipelines/dataset/nodes.py`），三者都在 keys 上、建表之前丟（[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 4）。「整組留或整組丟」的抽樣在 `pipelines/dataset/steps/model_input.py` 的 `keep_zero_positive_groups_drawn_under_ratio`。上文說的性質「只丟整組、不丟組內 item」不變。
+
+
+## 修訂（2026-10-16，issue #521）：B10 改用 Spark 的 `count()`，讀的仍然只有檔尾
+
+2026-09-03（#281）與 2026-09-07（#306）兩則修訂都說「零掃描是硬界線」，並把界線寫成「成本由 metadata 的規模決定，不由資料的列數決定」。2026-09-07 那則把它落實成「B10 不呼叫 `count()`」：driver 一個檔一個檔讀 footer、把 `getRowCount()` 加起來，`TestB10CostInvariant` 用 AST 禁止那條路徑呼叫 `count` 等讀列的方法。**這次只有 I/O 那一半照舊：仍然只讀檔尾、不讀欄位資料。另一半不再成立：executor 要把每一列數過去，這部分 CPU 會隨列數增加，生產環境沒有量過。**被推翻的前提是「`count()` 等於掃描」。
+
+**就 I/O 而言，這個前提對已落地的 parquet 表不成立。** Spark 對這種表的 `count()` 規劃成一個 `FileSourceScanExec`，而且它需要的資料欄是 0 欄（required schema 為空）。這樣的掃描只讀每個檔的 footer，不讀任何欄位的資料：I/O 跟舊做法一樣，差別在由誰讀。舊做法在 driver 上用 Python 迴圈、每個檔一次 py4j 往返；`count()` 交給 executor 去讀。
+
+**為什麼要換。** 舊做法的成本跟檔案數成正比，而且全壓在 driver 的一個 Python 行程上。公司環境的 model_input 表寫入前沒有 repartition，碎成上萬個小檔，B10 因此很慢。以下是本機實測（2026-10-16，local[4]），只看形狀，不代表生產環境的秒數：
+
+- 舊做法改用 16 個 Python 執行緒平行讀 footer（7,040 個檔）：19s，單執行緒是 20s。時間花在受 GIL 限制的 py4j 往返，平行化救不了。
+- 用 repo 自己的 `HiveTableDataset` 寫一張兩個版本並存的分區表（12,672 個檔），照 catalog 的方式 `load()`：footer 迴圈 36.3s，`count()` 3.7s，列數相同。`count()` 的掃描葉節點是 `FileSourceScanExec`、required schema 0 欄。逐月的 `groupBy(snap_date).count()` 與逐月的 footer 加總，每個月都相同。
+- 同一張表、`spark.sql.hive.convertMetastoreParquet` 設成 false：葉節點變成 `HiveTableScanExec`，`count()` 35.9s，是真的把整張表讀過一遍。
+
+**成本哪裡沒變、哪裡變了。**
+
+| | 2026-09-07 的 B10 | 現在的 B10 |
+|---|---|---|
+| 列數從哪來 | driver 讀 footer 的 `getRowCount()` | executor 跑 `count()`，計畫只讀 footer |
+| I/O | 每個檔讀一次 footer | 每個檔讀一次 footer |
+| 與列數的關係 | 無 | I/O 無；executor 仍然要把每一列數過去 |
+
+最後一格照實寫：executor 數列是 CPU 工作，不讀欄位資料，會隨列數增加。本機上看不出來；**生產規模下這部分的成本沒有量過。**
+
+**只讀檔尾的前提只對一種執行計畫成立，所以加一道保險。** 上面第三個實測就是反例：Spark 改走 Hive SerDe 時，同一個 `count()` 會讀全部資料，而且算出來的數字照樣正確，沒有東西會報錯。repo 沒有設這個鍵，生產叢集可能設。舊做法在這個設定下也量不到——`inputFiles()` 只回傳表的根目錄，B10 以「範圍內零個檔」停下——只是訊息沒說原因。
+
+現在 B10 在跑任何 `count()` 之前，先看每個 count 的執行計畫（AQE 介入之前的 `sparkPlan`）：每個葉節點都必須是 `FileSourceScanExec`，而且 required schema 是 0 欄。不是的話就 raise、一列都不數；葉節點不是檔案掃描時，訊息點名 `spark.sql.hive.convertMetastoreParquet`。檢查欄數那一半擋的是另一種情況：對非分區欄做篩選或分組的 count，葉節點一樣是 `FileSourceScanExec`，但會把那一欄整欄讀過。理由跟 2026-09-03 修訂第 3 點相同：成本不能**靜默**升級成一次實掃。判斷規則在 `core/consistency.py` 的 `model_input_grain_count_plan_errors`；`TestB10CostInvariant` 改成釘兩件事：B10 的路徑上沒有 footer 讀取，以及這道保險在 AQE 開、關兩種設定下都生效。
+
+**沿用的部分。**
+
+- 2026-09-07 修訂的第 1 點不變：B10 仍是 build 之後的獨立 node。對還沒落地的 frame 呼叫 `count()`，等於把整個 join 重算一次，仍是本 ADR 要拒絕的成本升級；只讀檔尾的前提只對已落地的 parquet 表成立。
+- 第 2 點不變：只數本 repo 自己寫的表。
+- 「這張表有檔、這個版本的範圍內卻一個都沒有」的前置檢查保留。它只需要列出檔案，不讀 footer。
+- test 的月份照舊以日期比對（`20260131` 與 `2026-01-31` 是同一個月），規則與 `landed_partition_files` 相同。
+- 模組 `pipelines/dataset/steps/footer_facts.py` 的檔名沿用；讀 footer 的函式已經刪掉。
+
+**已知限制（只記下，程式沒有處理）。**
+
+- **Spark 跳過的檔不會被數到，保險也看不出來。** `spark.sql.files.ignoreCorruptFiles` 為 true 時，`count()` 會略過讀不了的檔、悄悄少算；執行計畫跟正常時一模一樣，保險照樣放行。審查時實跑過：一張 1000 列的表少算成 873。舊做法會在 `readFooter` 那一步 raise。`spark.sql.files.ignoreMissingFiles` 是推論為同一個機制（沒有實跑）。後果：只有 keys 或 model_input 其中一邊有壞檔時，B10 會報一個誤導的「列數不符」，看起來像右表有重複鍵；兩邊都有壞檔時，少算的列數可能互相抵消，B10 照樣通過。repo 沒有設這兩個鍵。
+- **保險只看節點類別與 required schema，不看檔案格式。** 不是 parquet 的 Hive SerDe 表也會被擋下（葉節點同樣不是 `FileSourceScanExec`），但原因是格式本身，不是 `convertMetastoreParquet`。錯誤訊息因此補了一句：表不是 parquet 時，原因可能是格式。
+- **列數靠 catalog 的 `WHERE` 限定版本。** 舊做法用 node 自己的 scope 篩檔再讀 footer，不受 catalog 寫法影響；現在列數是 catalog 讀出的 frame 整張的數。B10 的八個輸入條目若有一個沒寫 `partition_filter`，列數會把表裡每個版本都算進去，而 scope 前置檢查只看檔案清單，擋不到。守住它的是 `tests/test_pipelines/test_dataset/test_pipeline.py` 裡對兩份 `catalog.yaml` 的檢查：八個條目都要有 `partition_filter`，鍵要跟 `validate_model_input_grain` 用的 scope 相同。

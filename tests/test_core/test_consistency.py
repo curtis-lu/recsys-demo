@@ -3296,8 +3296,9 @@ class TestModelInputGrainErrorsB10:
 
     Pure — the caller gathers the two numbers. Handing it a dict is what lets
     "what the rule is" be tested apart from "how a row count is obtained
-    without scanning", which is ``read_row_count``'s problem and has its own
-    tests in ``test_pipelines/test_dataset/test_footer_facts.py``.
+    without reading the data", which is ``table_rows`` / ``monthly_rows``'
+    problem and has its own tests in
+    ``test_pipelines/test_dataset/test_footer_facts.py``.
     """
 
     def test_equal_counts_pass(self):
@@ -3449,6 +3450,73 @@ class TestModelInputGrainScopeErrorsB10:
             "r = 0 and the val month's labels not in yet, say)."
         ]
 
+
+
+from recsys_tfb.core.consistency import (
+    COUNT_SCAN_NODE,
+    model_input_grain_count_plan_errors,
+)
+
+
+class TestModelInputGrainCountPlanErrorsB10:
+    """B10's cost guard: before any count runs, every leaf of its plan is a
+    parquet file scan that needs no column — the footers, nothing more.
+
+    Pure — the leaves come in as ``(node class, columns read)`` pairs. Reading
+    them off a real plan, under AQE on and off and under
+    ``spark.sql.hive.convertMetastoreParquet`` false, is tested in
+    ``test_pipelines/test_dataset/test_nodes.py::TestB10CostInvariant``.
+    """
+
+    def test_a_file_scan_reading_no_column_passes(self):
+        assert model_input_grain_count_plan_errors(
+            "train_keys", [(COUNT_SCAN_NODE, 0)]) == []
+
+    def test_the_node_is_spark_s_own_file_scan(self):
+        # The class name the guard compares against, written out once: a
+        # typo in the constant would refuse every count, or none.
+        assert COUNT_SCAN_NODE == "FileSourceScanExec"
+
+    def test_a_hive_table_scan_is_refused_and_the_setting_named(self):
+        errors = model_input_grain_count_plan_errors(
+            "val_model_input", [("HiveTableScanExec", None)])
+        assert len(errors) == 1
+        assert errors[0].startswith(
+            "B10: counting val_model_input's rows would run on "
+            "HiveTableScanExec instead of FileSourceScanExec")
+        assert "spark.sql.hive.convertMetastoreParquet" in errors[0]
+        assert "Nothing was counted" in errors[0]
+
+    def test_a_file_scan_that_reads_a_column_is_refused(self):
+        # Same node class as a footer read; only the columns tell them apart.
+        errors = model_input_grain_count_plan_errors(
+            "test_keys", [(COUNT_SCAN_NODE, 1)])
+        assert len(errors) == 1
+        assert errors[0].startswith(
+            "B10: counting test_keys's rows would read 1 column(s) of data")
+        assert "partition_cols" in errors[0]
+        # Not the SerDe's cause, so not its remedy.
+        assert "convertMetastoreParquet" not in errors[0]
+
+    def test_every_leaf_is_judged(self):
+        # A frame over two scans (a union, say) is only as cheap as its
+        # dearest leaf.
+        errors = model_input_grain_count_plan_errors(
+            "train_keys",
+            [(COUNT_SCAN_NODE, 0), ("HiveTableScanExec", None),
+             (COUNT_SCAN_NODE, 2)],
+        )
+        assert len(errors) == 2
+        assert "HiveTableScanExec" in errors[0]
+        assert "would read 2 column(s)" in errors[1]
+
+    def test_a_frame_not_read_from_files_is_refused(self):
+        # An in-memory frame plans no file scan at all: counting it would not
+        # be reading a landed table's footers either.
+        errors = model_input_grain_count_plan_errors(
+            "train_keys", [("RDDScanExec", None)])
+        assert len(errors) == 1
+        assert "RDDScanExec" in errors[0]
 
 class TestA35EtlCliVars:
     """A35 — the four source ETL commands' repeatable ``--var key=value``

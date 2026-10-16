@@ -154,7 +154,7 @@ dataset 有兩個**資料閘**：專門檢查、本身不改資料的步驟，�
 - **候選層級特徵表的月份**：宣告了候選層級特徵表，它就必須含有這次各 build 會讀的每個月份：`dataset.train_snap_dates`、`dataset.val_snap_dates`，以及這次要做的 test 月份（已經落地、這次跳過的 test 月份不算）。只加評估月份（`--only-test-months`）時，只查這次要做的 test 月份。缺月報 `ValueError`，訊息形如 `candidate_feature_table missing required snap_dates: ['2024-02-29']`。這條是前置檢查，等上面的 B 系列都過了才查：它要讀時間欄，而時間欄在不在是 `B13` 查的。不擋的話，缺的那個月每一筆候選的特徵會悄悄全變成 NULL；而 test 月份這樣落地之後，之後每一輪都會因為「已經有了」而跳過它。成本很低：只對那幾個月的時間欄做一次 distinct，落到 driver 的量跟月數成正比。如果用 `--from-node`／`--only-node` 從這一步後面開始跑，這一步會被跳過（見下方「三件擋不住的事」第 1 件）。
 
 **資料閘 2：粒度閘**（最後一步）
-- 每個 split（`train`、`train_dev`、`val`、`test`）的 model_input 列數，必須等於組它用的 key 表（每一列是一筆抽到的候選）（`B10`）。列數變多，代表 `label_table`、編碼後的特徵表或候選層級特徵表在 join 鍵上有重複列。只讀 parquet 檔尾的列數。test 是逐月累積的表，只比這次組裝的月份，而且逐月比；這次沒有 test 月份要組時，報告寫「not written this run」，不算失敗。test 某個月沒過時那個月已經落地，直接重跑會跳過它，要用 `--rebuild-dates` 指名重算（錯誤訊息會寫出月份）。四個 split 的無正例組都在 key 表落地之前丟（`dataset.*_zero_positive_group_ratio`），所以這條比對照樣是「相等」。對候選層級特徵表來說，這是框架裡唯一抓得到重複列的地方（`A32` 不守它，見 ①）；已經落地的 test 月份不會重查。
+- 每個 split（`train`、`train_dev`、`val`、`test`）的 model_input 列數，必須等於組它用的 key 表（每一列是一筆抽到的候選）（`B10`）。列數變多，代表 `label_table`、編碼後的特徵表或候選層級特徵表在 join 鍵上有重複列。列數用 Spark 對已經落地的表做 `count()`，只讀 parquet 檔尾、不讀欄位資料；如果 Spark 設定會讓它變成全表掃描（`spark.sql.hive.convertMetastoreParquet=false`），這一步直接報錯停下，不會悄悄掃整張表。test 是逐月累積的表，只比這次組裝的月份，而且逐月比；這次沒有 test 月份要組時，報告寫「not written this run」，不算失敗。test 某個月沒過時那個月已經落地，直接重跑會跳過它，要用 `--rebuild-dates` 指名重算（錯誤訊息會寫出月份）。四個 split 的無正例組都在 key 表落地之前丟（`dataset.*_zero_positive_group_ratio`），所以這條比對照樣是「相等」。對候選層級特徵表來說，這是框架裡唯一抓得到重複列的地方（`A32` 不守它，見 ①）；已經落地的 test 月份不會重查。
 
 **做事途中順便查的**
 - 會擋：

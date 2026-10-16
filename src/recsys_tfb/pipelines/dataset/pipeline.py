@@ -21,9 +21,10 @@ from recsys_tfb.core.pipeline import Pipeline
 #: run is not "just adding an eval month" (ADR-0013 consequences).
 #:
 #: ``validate_model_input_grain`` (B10) is here because it pairs test too: left
-#: out, the main path for adding a test month would never be checked. It reads
-#: train / train_dev / val's footers as well, which this mode does not rebuild
-#: — a seek per file, no data (ADR-0029 decision 4).
+#: out, the main path for adding a test month would never be checked. It counts
+#: train / train_dev / val as well, which this mode does not rebuild — a count()
+#: over a landed parquet table, whose scan reads footers and no column data
+#: (ADR-0029 decision 4; ADR-0006's #521 amendment).
 #:
 #: Listed in the order the pipeline runs them: ``create_pipeline`` re-sorts
 #: whatever it keeps, and ``tests/test_cli.py`` compares the two.
@@ -288,9 +289,10 @@ def create_pipeline(only_test_months: bool = False) -> Pipeline:
     #     Its position in this list carries no ordering weight — it depends on
     #     every build node's output, so Kahn can only reach it last. What the
     #     dependency buys is that the tables have LANDED: the Runner saves a
-    #     node's output before the next node loads it, so this gate reads
-    #     parquet footers rather than paying a count() on an unlanded frame
-    #     (ADR-0006's cost invariant).
+    #     node's output before the next node loads it, so this gate counts the
+    #     landed tables — a scan that reads parquet footers only — rather than
+    #     paying a count() on an unlanded frame, which reruns the whole build
+    #     (ADR-0006's cost invariant, as amended by #521).
     #
     #     It produces `model_input_grain_report` rather than being a zero-output
     #     side-effect node, so it is NOT in A7's registry and is not silently
