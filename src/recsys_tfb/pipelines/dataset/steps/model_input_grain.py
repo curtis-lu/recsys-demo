@@ -1,9 +1,10 @@
 """What the B10 model-input grain gate reports.
 
 The rule lives in ``core/consistency.py`` (``model_input_grain_errors`` and the
-scope check before it, ``model_input_grain_scope_errors``); the pairing — which
+two checks before it, ``model_input_grain_scope_errors`` and the cost guard
+``model_input_grain_count_plan_errors``); the pairing — which
 keys table goes with which model_input, under which scope, over which months —
-in ``validate_model_input_grain``. The row counts come from
+in ``validate_model_input_grain``. The row counts and file counts come from
 ``steps/footer_facts.py``. What is left is this module: the
 report's shape, one entry per split, each logged as it is made.
 """
@@ -53,7 +54,7 @@ def split_row_counts_by_month(
     """``{"YYYY-MM-DD": SplitRowCounts}`` — each month its own pair, the shape
     ``model_input_grain_errors`` takes for a split written a month at a time.
 
-    Both mappings are ``footer_rows_by_month``'s, over the same months.
+    Both mappings are ``monthly_rows``', over the same months.
     """
     return {
         month.strftime("%Y-%m-%d"): SplitRowCounts(

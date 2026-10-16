@@ -34,7 +34,7 @@
 | [14](#14-讀來源表或增量產物時在程式碼裡寫明讀哪些-time-值) | 讀來源表或增量產物時，在程式碼裡寫明讀哪些 time 值 | 讀來源表或增量產物的地方，join 之前有沒有月份篩選；新的讀取點在 `test_month_scoped_reads.py` 加一個案例 | **部分**：`test_month_scoped_reads.py` 釘住今天的讀取點，新加的沒人擋 |
 | [15](#15-node-自己算得出來的值不從-cli-注入) | node 自己算得出來的值，不從 CLI 注入 | 注入的每一項，node 真的算不出來嗎？一行設定值或 node 已經收到的輸入算得出來，就不注入 | 沒人，只能人看 |
 | [16](#16-同一件事各-split-用同一個機制不對稱要寫理由而且理由不能是這個不對稱自己造成的) | 同一件事，各 split 用同一個機制；不對稱要寫理由，而且理由不能是這個不對稱自己造成的 | 假設這個不對稱不存在，docstring 寫的理由還成立嗎 | 沒人，只能人看 |
-| [17](#17-資料閘的-node-只寫查什麼與交給誰判斷收集事實與組報告進-steps) | 資料閘的 node 只寫「查什麼」與「交給誰判斷」；收集事實與組報告進 `steps/` | node body 裡有沒有巢狀函式、讀檔尾、組報告，或自己判斷有沒有違反不變量；決策（查什麼、政策、前置檢查）要留在 node | 沒人，只能人看 |
+| [17](#17-資料閘的-node-只寫查什麼與交給誰判斷收集事實與組報告進-steps) | 資料閘的 node 只寫「查什麼」與「交給誰判斷」；收集事實與組報告進 `steps/` | node body 裡有沒有巢狀函式、數列數、組報告，或自己判斷有沒有違反不變量；決策（查什麼、政策、前置檢查）要留在 node | 沒人，只能人看 |
 | [18](#18-程式改了落地的內容某個部署的設定卻沒動時把對應的格式版本加-1) | 程式改了落地的內容、某個部署的設定卻沒動時，把對應的格式版本加 1（dataset 產物、training 模型、training 預測、`.bin` 快取，四個常數） | 有沒有哪一份合法的設定與資料，改動前後寫出來的內容不一樣？包括 import 的模組；改 `.bin` 內容多半也改模型，兩個都要加 | 沒人，只能人看 |
 
 外加一條體例：**程式碼註解與 docstring 一律英文**（對齊既有全部模組），**`docs/` 一律繁體中文**。
@@ -352,7 +352,7 @@ result = feature_table.filter(months_filter_as_date(time_col, months)).select(
 | 需要看到 | 家 |
 |---|---|
 | 只有 config | Layer-1 A 系列 predicate（`core/consistency.py`，CLI entry 執行） |
-| 來源表的 metadata 或廉價 distinct；本 pipeline 剛落地的產物的 parquet 檔尾 | Layer-2 B 系列（資料閘，零掃描，[ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md) 與它的修訂） |
+| 來源表的 metadata 或廉價 distinct；本 pipeline 剛落地的 parquet 表的列數（只讀檔尾的 `count()`） | Layer-2 B 系列（資料閘，不把整張表讀一遍，[ADR-0006](../adr/0006-data-quality-checks-belong-upstream.md) 與它的修訂） |
 | node 執行期才存在的中間資料 | 留在 node，**且必須在 docstring 標明是前置檢查或後置條件** |
 
 **兩個詞不可混用**：
@@ -599,9 +599,9 @@ kept = keep_keys_of_drawn_groups(
 1. **查什麼。** 哪些表、哪些月份、哪些欄、用什麼單位比（例如粒度閘逐月配對，不比加總）。這些都是決策。
 2. **把收集到的事實交給 `core/consistency.py` 的 predicate。** 由它判斷有沒有違反不變量，並產出每一條失敗的訊息（包括帶代號的那些）。node 只給這一批訊息一行總標題，交給 `collect_all_message` 排成一則。
 3. **這個閘自己的政策。** 例如設定成「找到就中止」或「只警告」（以前的數值精度閘 B8 就有 `block`／`truncate` 兩種，#518 已拿掉；今天的兩個閘找到就中止）。政策決定「找到問題之後停不停」，是決策，留在 node。
-4. **前置檢查。** 例如 `validate_model_input_grain` 先問：這張表有檔，這次的版本範圍底下卻一個都沒有嗎（`model_input_grain_scope_errors`）？是的話報錯，免得兩邊都讀到 0 的比對被當成通過；整張表一個檔都沒有則放行，那是本來就空的 split。報錯之後列數照樣比，所有錯誤收齊再一次中止，不提早 return。又如 `validate_data_consistency` 在宣告了候選層級特徵表時，先確認它含有這次各 build 讀的每個月份（`require_months_present`）。照規則 11 標明種類。
+4. **前置檢查。** 例如 `validate_model_input_grain` 先問：這張表有檔，這次的版本範圍底下卻一個都沒有嗎（`model_input_grain_scope_errors`）？是的話報錯，免得兩邊都讀到 0 的比對被當成通過；整張表一個檔都沒有則放行，那是本來就空的 split。報錯之後列數照樣比，所有錯誤收齊再一次中止，不提早 return。它的第二個前置檢查是例外：數列數之前先看 `count()` 的執行計畫是不是只讀 parquet 檔尾（`model_input_grain_count_plan_errors`），不是就連同前面的錯誤一起中止、一列都不數——為了收齊錯誤而去數，正是它要擋的成本。又如 `validate_data_consistency` 在宣告了候選層級特徵表時，先確認它含有這次各 build 讀的每個月份（`require_months_present`）。照規則 11 標明種類。
 
-這四件以外的決策也一樣留在 node，例如粒度閘的「兩邊都沒有檔的月份算 0＝0，不算失敗」。進 `steps/` 的只有機制：讀 parquet 檔尾、找出這次寫了哪些檔、Spark 聚合、組報告、把報告排成 log 行。每個函式具名、只做一件事。
+這四件以外的決策也一樣留在 node，例如粒度閘的「兩邊都沒有檔的月份算 0＝0，不算失敗」。進 `steps/` 的只有機制：數列數與讀出它的執行計畫、找出這次寫了哪些檔、Spark 聚合、組報告、把報告排成 log 行。每個函式具名、只做一件事。
 
 ### 不照做會長成這樣
 

@@ -52,6 +52,7 @@ from recsys_tfb.core.consistency import (
     override_unknown_item_errors,
     SplitRowCounts,
     collect_all_message,
+    model_input_grain_count_plan_errors,
     model_input_grain_errors,
     model_input_grain_scope_errors,
     resolved_item_values,
@@ -84,8 +85,13 @@ from recsys_tfb.pipelines.dataset.steps.feature_columns import (
     warn_missing_drop_columns,
 )
 from recsys_tfb.pipelines.dataset.steps.footer_facts import (
-    footer_rows,
-    footer_rows_by_month,
+    MonthlyCount,
+    TableCount,
+    monthly_rows,
+    plan_monthly_count,
+    plan_table_count,
+    scan_leaves,
+    table_rows,
 )
 from recsys_tfb.pipelines.dataset.steps.model_input_grain import (
     TEST_NOT_WRITTEN,
@@ -1253,13 +1259,15 @@ def validate_model_input_grain(
 
     **Why it is a node after the builds rather than a post-condition inside
     one.** Getting a row count inside ``build_model_input`` means ``count()`` on
-    an unlanded frame — a full scan, the cost escalation ADR-0006 exists to
-    refuse. Once the table has landed, the same fact is a seek per file. Landing
-    is the Runner's doing (it saves a node's output before the next node loads
-    it), so the gate has to be its own node. It still stops the run before
-    anything trains on the bad table.
+    an unlanded frame — the whole join recomputed, the cost escalation
+    ADR-0006 exists to refuse. Once the table has landed as parquet, the same
+    ``count()`` reads its footers and no column data (ADR-0006's 2026-10-16
+    amendment), and the cost guard below makes sure it is planned that way.
+    Landing is the Runner's doing (it saves a node's output before the next
+    node loads it), so the gate has to be its own node. It still stops the run
+    before anything trains on the bad table.
     Under ``--only-test-months`` train, train_dev and val are not rebuilt; the
-    gate re-reads their footers, which reads no data.
+    gate counts them again, which reads their footers and no column data.
 
     **Why it reports rather than only gating.** A pass/fail answer cannot say
     how many rows each split actually holds, which is the number an operator
@@ -1276,7 +1284,8 @@ def validate_model_input_grain(
     base_scope = {"base_dataset_version": base_version}
 
     # Decision — the tables rebuilt in full are compared whole, each side's
-    # files counted under the partition scope it was written to. The scope is
+    # rows counted as the catalog loaded it (its WHERE is the scope) and its
+    # files listed under the partition scope it was written to. The scope is
     # not decoration: these tables accumulate versions (and train variants)
     # side by side under one Hive table, and under some Spark settings
     # `inputFiles()` lists all of them (steps/footer_facts.py says which).
@@ -1286,49 +1295,34 @@ def validate_model_input_grain(
         ("val", val_keys, val_model_input, base_scope),
     ]
 
-    by_split: dict[str, SplitRowCounts | dict[str, SplitRowCounts]] = {}
-    splits: dict[str, dict] = {}
     errors: list[str] = []
+    whole: dict[str, dict[str, TableCount]] = {}
     for split, keys, model_input, scope in pairs:
-        keys_rows, keys_files, keys_all_files = footer_rows(keys, scope)
-        mi_rows, mi_files, mi_all_files = footer_rows(model_input, scope)
+        whole[split] = {
+            "keys": plan_table_count(keys, scope),
+            "model_input": plan_table_count(model_input, scope),
+        }
         # Pre-check (this node's own inputs) — a scope that matches none of a
         # table's files would make the comparison below pass on two zeroes,
         # having looked at nothing; a table with no files at all is an empty
         # split and passes (model_input_grain_scope_errors says why).
-        errors += model_input_grain_scope_errors(
-            split, "keys", files_in_table=keys_all_files,
-            files_in_scope=keys_files, scope=scope,
-        ) + model_input_grain_scope_errors(
-            split, "model_input", files_in_table=mi_all_files,
-            files_in_scope=mi_files, scope=scope,
-        )
-        by_split[split] = SplitRowCounts(keys_rows, mi_rows)
-        splits[split] = grain_report_entry(
-            split, (keys_rows, keys_files), (mi_rows, mi_files))
+        for side, count in whole[split].items():
+            errors += model_input_grain_scope_errors(
+                split, side, files_in_table=count.files_in_table,
+                files_in_scope=count.files_in_scope, scope=scope,
+            )
 
     # Decision — test is compared over the months this run's test build wrote,
     # and only those: the plan it ran under, not test_keys' own (see the
     # docstring). A run that wrote no test month has no test pair; that is
     # said in the report and the log, not failed.
     not_checked: dict[str, str] = {}
+    by_month: dict[str, MonthlyCount] = {}
     test_months = test_model_input_month_plan.to_process
     if not test_months:
         not_checked["test"] = TEST_NOT_WRITTEN
         logger.info("Model input grain gate: test %s", TEST_NOT_WRITTEN)
     else:
-        test_keys_rows = footer_rows_by_month(
-            test_keys, base_version=base_version, time_col=schema["time"],
-            months=test_months,
-        )
-        test_mi_rows = footer_rows_by_month(
-            test_model_input, base_version=base_version,
-            time_col=schema["time"], months=test_months,
-        )
-        # Decision — each month is its own pair, not one sum over the months:
-        # a month the build fanned out and another it left short would cancel
-        # in a sum.
-        #
         # Decision — a planned month with no file on either side is 0 = 0 and
         # is reported as such: the group drop emptied it (r = 0 and its labels
         # not in yet, say), and the two tables agree they hold nothing. So the
@@ -1339,12 +1333,70 @@ def validate_model_input_grain(
         # only where `inputFiles()` lists other versions; under Spark's
         # defaults such a version reads as empty on every pair
         # (steps/footer_facts.py). The month partition is named by the time
-        # column the build wrote with (saving refuses a frame without it). One
-        # side without files and the other with rows is still a mismatch, and
-        # the predicate says so.
-        by_split["test"] = split_row_counts_by_month(test_keys_rows, test_mi_rows)
+        # column the build wrote with (saving refuses a frame without it), and
+        # a month is found on disk by its date, not its spelling. One side
+        # without files and the other with rows is still a mismatch, and the
+        # predicate says so.
+        by_month = {
+            side: plan_monthly_count(
+                frame, base_version=base_version, time_col=schema["time"],
+                months=test_months,
+            )
+            for side, frame in (("keys", test_keys),
+                                ("model_input", test_model_input))
+        }
+
+    # Pre-check (this node's own inputs) — B10's cost guard: every count
+    # planned above must read parquet footers only. Under some Spark settings
+    # the same count() reads every row (model_input_grain_count_plan_errors
+    # says which), and the count would still be right, so nothing else would
+    # notice. Unlike the other checks this one stops before anything is
+    # counted: running the counts to collect more errors is the very cost
+    # being refused.
+    planned = [
+        (f"{split}_{side}", count.counting)
+        for split, sides in whole.items() for side, count in sides.items()
+    ] + [
+        (f"test_{side}", count.counting)
+        for side, count in by_month.items() if count.counting is not None
+    ]
+    guard_errors = [
+        error
+        for table, counting in planned
+        for error in model_input_grain_count_plan_errors(
+            table, scan_leaves(counting))
+    ]
+    if guard_errors:
+        raise DataConsistencyError(collect_all_message(
+            "Model input grain check failed", errors + guard_errors))
+
+    by_split: dict[str, SplitRowCounts | dict[str, SplitRowCounts]] = {}
+    splits: dict[str, dict] = {}
+    for split, sides in whole.items():
+        rows: dict[str, int] = {}
+        for side, count in sides.items():
+            with log_step(logger, "count_rows(model_input_grain)",
+                          table_name=f"{split}_{side}"):
+                rows[side] = table_rows(count)
+        by_split[split] = SplitRowCounts(rows["keys"], rows["model_input"])
+        splits[split] = grain_report_entry(
+            split,
+            (rows["keys"], sides["keys"].files_in_scope),
+            (rows["model_input"], sides["model_input"].files_in_scope),
+        )
+    if by_month:
+        rows_by_month: dict[str, dict] = {}
+        for side, count in by_month.items():
+            with log_step(logger, "count_rows(model_input_grain)",
+                          table_name=f"test_{side}"):
+                rows_by_month[side] = monthly_rows(count)
+        # Decision — each month is its own pair, not one sum over the months:
+        # a month the build fanned out and another it left short would cancel
+        # in a sum.
+        by_split["test"] = split_row_counts_by_month(
+            rows_by_month["keys"], rows_by_month["model_input"])
         splits["test"] = monthly_grain_report_entry(
-            "test", test_keys_rows, test_mi_rows)
+            "test", rows_by_month["keys"], rows_by_month["model_input"])
 
     report = grain_report(
         base_version=base_version,

@@ -1,55 +1,66 @@
-"""Which files this run landed, and what their parquet footers record.
+"""Which files this run landed, and how B10 counts their rows.
 
 The facts the B10 gate stands on. It holds the dataset pipeline's cost
-invariant — facts from metadata, never from an aggregation over the data
-(ADR-0006) — and parquet carries what it needs in every file's footer: a row
-count per row group, written by the writer as it went. Reading it is a seek to
-the end of each file:
+invariant (ADR-0006): a gate's cost is set by metadata, not by how many rows
+the data holds. Two kinds of fact, from two places:
 
 * **Which files.** :func:`filter_by_partitions` narrows a file listing to the
   partition scope the table was written under — the dataset version, and for
   the train tables the train variant. It is the one version filter here;
   :func:`landed_partition_files` narrows its result further to the months a
-  plan wrote.
-* **What the footers say.** :func:`read_row_count` reads them;
-  :func:`footer_rows` and :func:`footer_rows_by_month` put both questions
-  together for a landed frame.
+  plan wrote. Both are string work on ``DataFrame.inputFiles()``, no read.
+* **How many rows.** Spark's ``count()`` on the frame the catalog loaded:
+  :func:`plan_table_count` / :func:`table_rows` for a table compared whole,
+  :func:`plan_monthly_count` / :func:`monthly_rows` for one compared a month
+  at a time. Planning and running are separate calls so that B10's cost
+  guard can read the plan in between (:func:`scan_leaves`, judged by
+  ``model_input_grain_count_plan_errors`` in ``core/consistency.py``).
 
-**Why select by version at all.** What ``DataFrame.inputFiles()`` lists for a
-frame the catalog loaded (``HiveTableDataset.load()``, a ``WHERE`` on the
-partition filter) depends on two Spark settings. Measured on one table holding
-two versions, local ``[*]``, 2026-09-26:
+**Why ``count()`` stays inside the invariant.** On a parquet table Spark plans
+the count as a ``FileSourceScanExec`` that needs no column, and such a scan
+reads each file's footer and no column chunk; the executors still step through
+the rows, but read no column data. That holds only for that plan, which is
+what the guard checks — under ``spark.sql.hive.convertMetastoreParquet`` false
+the same call reads every row through the Hive SerDe. Until #521 this module
+read the footers itself, on the driver, one py4j round trip per file: on a
+table split into tens of thousands of small files that loop was B10's whole
+cost, and threads did not shorten it. Measurements: ADR-0006's 2026-10-16
+amendment.
+
+**Why select by version at all.** The rows are counted on the frame the
+catalog loaded (``HiveTableDataset.load()``, a ``WHERE`` on the partition
+filter), so they are this version's whatever the listing says. The listing is
+another matter: what ``DataFrame.inputFiles()`` lists for such a frame depends
+on two Spark settings. Measured on one table holding two versions, local
+``[*]``, 2026-09-26:
 
 * both at Spark's default (``spark.sql.hive.manageFilesourcePartitions`` and
   ``spark.sql.hive.convertMetastoreParquet`` true) — only the loaded version's
   files. The version filter here changes nothing.
 * ``manageFilesourcePartitions`` false — every version's files. The filter is
-  what keeps a gate on the rows this run wrote; without it the gate reports on
-  another version's parquet, and nothing says so.
+  what keeps B10's scope pre-check, the file counts in its report and the
+  test months it finds on this run's version; without it they would describe
+  another version's parquet, and nothing would say so.
 * ``convertMetastoreParquet`` false — the table's root directory alone, with
-  no partition in the path. Nothing here can select a file from that: B10
-  finds none in scope and reports a failure to measure, which stops the run.
+  no partition in the path. Nothing here can select a file from that, and the
+  count would be a full read: B10's cost guard refuses before counting.
 
 This repo sets neither key; a deployment's cluster may. So the filter stays —
 a string comparison per path — and
 ``tests/test_pipelines/test_dataset/test_footer_facts.py`` pins it on a frame
 that lists two versions, the second case.
-
-The read goes through the Spark JVM's Hadoop ``FileSystem`` — the door this repo
-already uses for a Hive table's files (``utils/hdfs.copy_hdfs_to_local``), and
-not pyarrow, whose own HDFS client needs a second JVM loaded into the Python
-process. Why that choice and not the alternatives: ADR-0006's 2026-09-03
-amendment. Paths are matched as text rather than through Spark filters, which is
-also why the only pyspark import here is for type hints.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING, NamedTuple
 
 import pandas as pd
+from pyspark.sql import functions as F
+
+from recsys_tfb.core.consistency import COUNT_SCAN_NODE
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame
@@ -93,7 +104,7 @@ def filter_by_partitions(
 ) -> list[str]:
     """``paths`` narrowed to those whose Hive partition values match every pair.
 
-    The version (and variant) filter every footer fact here is read under; the
+    The version (and variant) filter every file fact here is read under; the
     module docstring says under which Spark settings it is what keeps a gate on
     this run's version. Values compare as the partition directory's text: a
     version ID is a hash the pipeline itself wrote, so there is one spelling of
@@ -109,6 +120,14 @@ def filter_by_partitions(
         p for p in paths
         if all(partition_value(p, k) == v for k, v in partition_filter.items())
     )
+
+
+def _as_month(value) -> pd.Timestamp | None:
+    """``value`` as a calendar day, or None when it is not a date at all."""
+    try:
+        return pd.Timestamp(str(value)).normalize()
+    except ValueError:
+        return None
 
 
 def landed_partition_files(
@@ -145,81 +164,136 @@ def landed_partition_files(
     scoped = filter_by_partitions(paths, {"base_dataset_version": base_version})
     selected: list[str] = []
     for value, files in group_by_partition(scoped, time_col).items():
-        try:
-            landed = pd.Timestamp(value).normalize()
-        except ValueError:
-            continue
-        if landed in wanted:
+        if _as_month(value) in wanted:
             selected.extend(files)
     return sorted(selected)
 
 
-def read_row_count(spark, paths: Sequence[str]) -> int:
-    """Total rows over ``paths``, summed from footers.
+class ScanLeaf(NamedTuple):
+    """One leaf of a count's physical plan, as B10's cost guard reads it."""
 
-    Every parquet row group's footer records how many rows it holds
-    (``getRowCount()``). So a row count costs one seek per file and is
-    independent of how many rows the file holds, which is what keeps a caller
-    inside the dataset gates' cost invariant (ADR-0006) where ``df.count()``
-    would not be.
+    #: The plan node's class, e.g. ``FileSourceScanExec``.
+    node: str
+    #: Data columns the scan reads (its ``requiredSchema``); ``None`` where
+    #: the node is not a file scan and has no such schema.
+    columns_read: int | None
 
-    No "statistics missing" case exists here: the row count is structural in
-    the format rather than optional column statistics, so every footer has
-    one. An empty ``paths`` is 0 — a caller that needs to tell
-    "no rows" from "no files found" must check the paths itself, because from
-    here the two are the same number.
+
+def scan_leaves(counting: DataFrame) -> list[ScanLeaf]:
+    """The leaves of ``counting``'s physical plan — where it reads from.
+
+    Read off ``queryExecution().sparkPlan()``: the planner's output before
+    ``prepareForExecution``, so before adaptive execution wraps the plan.
+    Its leaves are the same scans with AQE on and off (the tests run both);
+    the plan AQE executes is only settled while it runs, which is too late
+    for a check meant to stop the run first. Builds the plan, reads nothing.
     """
-    jvm = spark._jvm
-    hadoop_conf = spark._jsc.hadoopConfiguration()
-    hadoop_path = jvm.org.apache.hadoop.fs.Path
-    no_filter = jvm.org.apache.parquet.format.converter.ParquetMetadataConverter.NO_FILTER
-    reader = jvm.org.apache.parquet.hadoop.ParquetFileReader
+    leaves = counting._jdf.queryExecution().sparkPlan().collectLeaves()
+    found = []
+    for i in range(leaves.size()):
+        leaf = leaves.apply(i)
+        node = leaf.getClass().getSimpleName()
+        # Only a file scan has a required schema to ask about.
+        columns = (
+            leaf.requiredSchema().length() if node == COUNT_SCAN_NODE else None
+        )
+        found.append(ScanLeaf(node, columns))
+    return found
 
-    total = 0
-    for path in paths:
-        footer = reader.readFooter(hadoop_conf, hadoop_path(path), no_filter)
-        for block in footer.getBlocks():
-            total += block.getRowCount()
-    return total
+
+class TableCount(NamedTuple):
+    """A table compared whole: its row count, planned and not yet run, and
+    the file counts B10's scope pre-check reads."""
+
+    #: The aggregate whose one row is the table's row count — what
+    #: ``df.count()`` runs, kept as a frame so its plan can be read first.
+    counting: DataFrame
+    files_in_scope: int
+    files_in_table: int
 
 
-def footer_rows(
-    df: DataFrame,
-    scope: Mapping[str, str],
-) -> tuple[int, int, int]:
-    """``(rows, files in scope, files the table has)`` — footer arithmetic only.
+def plan_table_count(df: DataFrame, scope: Mapping[str, str]) -> TableCount:
+    """Plan ``df``'s row count and list its files; read nothing.
 
-    For a table compared whole. It counts, it does not judge: whether a table
-    that has files but none in ``scope`` is an error is B10's to say
-    (``model_input_grain_scope_errors`` in ``core/consistency.py``), and
-    returning the two file counts separately is what leaves that to it.
+    The count is the whole frame as the catalog loaded it — its ``WHERE`` is
+    already the scope. The two file counts come from the listing, narrowed by
+    :func:`filter_by_partitions`: whether a table with files but none in
+    ``scope`` is an error is B10's to say (``model_input_grain_scope_errors``
+    in ``core/consistency.py``), and returning both is what leaves that to it.
     """
     all_paths = df.inputFiles()
-    files = filter_by_partitions(all_paths, scope)
-    return read_row_count(df.sparkSession, files), len(files), len(all_paths)
+    return TableCount(
+        counting=df.groupBy().count(),
+        files_in_scope=len(filter_by_partitions(all_paths, scope)),
+        files_in_table=len(all_paths),
+    )
 
 
-def footer_rows_by_month(
+def table_rows(planned: TableCount) -> int:
+    """Run the count :func:`plan_table_count` planned."""
+    return planned.counting.collect()[0][0]
+
+
+class MonthlyCount(NamedTuple):
+    """A table compared a month at a time: its per-month row count, planned
+    and not yet run, and the files found for each month."""
+
+    #: ``groupBy(<time column>).count()`` over the months found on disk, or
+    #: ``None`` when no planned month has a file: there is nothing to count.
+    counting: DataFrame | None
+    #: Every planned month, as a calendar day, to the files found for it.
+    files: dict[pd.Timestamp, int]
+
+
+def plan_monthly_count(
     df: DataFrame,
     *,
     base_version: str,
     time_col: str,
-    months: list,
-) -> dict[pd.Timestamp, tuple[int, int]]:
-    """``{month: (rows, files)}`` under ``base_version`` — footer arithmetic
-    only, for a table written one month partition at a time.
+    months: Iterable,
+) -> MonthlyCount:
+    """Plan ``df``'s row count per month of ``months``; read nothing.
 
-    Each month's files are :func:`landed_partition_files`' — so a partition
-    value spelled differently from the plan's month is still found. A month
-    with no file is ``(0, 0)``: whether that is fine is the caller's decision.
+    Which partitions hold a planned month is :func:`landed_partition_files`'
+    answer, so a partition spelled differently from the plan's month is still
+    found. The count then filters on those partitions' own values, as text: a
+    partition column is whatever type the table declares or Spark infers
+    (``20260131`` reads back as an integer, ``2026-01-31`` as a date), and its
+    text is the spelling the listing found.
+
+    No planned month with a file builds no count at all rather than one over
+    an empty filter: Spark plans that as an empty local relation, not a file
+    scan, and the cost guard would refuse a count that reads nothing.
     """
     paths = df.inputFiles()
-    counted = {}
+    files: dict[pd.Timestamp, int] = {}
+    values: set[str] = set()
     for month in months:
-        files = landed_partition_files(
+        landed = landed_partition_files(
             paths, base_version=base_version, time_col=time_col, months=[month],
         )
-        counted[pd.Timestamp(month)] = (
-            read_row_count(df.sparkSession, files), len(files),
+        files[pd.Timestamp(month).normalize()] = len(landed)
+        values.update(partition_value(p, time_col) for p in landed)
+    counting = None
+    if values:
+        counting = (
+            df.where(F.col(time_col).cast("string").isin(sorted(values)))
+            .groupBy(time_col)
+            .count()
         )
-    return counted
+    return MonthlyCount(counting, files)
+
+
+def monthly_rows(planned: MonthlyCount) -> dict[pd.Timestamp, tuple[int, int]]:
+    """Run the count :func:`plan_monthly_count` planned: ``{month: (rows,
+    files)}`` for every planned month.
+
+    A month with no file is ``(0, 0)``: whether that is fine is the caller's
+    decision. Two spellings of one month on disk are summed into it, the way
+    their files were both found for it.
+    """
+    rows = dict.fromkeys(planned.files, 0)
+    if planned.counting is not None:
+        for value, count in planned.counting.collect():
+            rows[_as_month(value)] += count
+    return {month: (rows[month], planned.files[month]) for month in planned.files}
