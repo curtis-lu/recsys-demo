@@ -111,6 +111,16 @@ def test_overview_headline_without_metric_k_reads_map_attr_at_all():
     assert _headline(s) == pytest.approx(0.435)   # map_attr@2，n_items＝2
 
 
+def test_overview_draws_no_headline_table_when_the_macro_has_no_value():
+    """沒有任何 item 進 macro（例如 metric.min_positives 高過每個 item 的正例
+    數）時 metrics.json 那一格是 None：不畫一張空白的頭號表，其餘照畫。"""
+    m = _metrics()
+    m["macro_avg"]["by_item"]["map_attr@2"] = None
+    s = rb.build_overview_section(m, _params())
+    assert not any(t.startswith("頭號指標") for t in s.table_titles)
+    assert _overview_card(s).loc["map@1", "value"] == pytest.approx(0.5)
+
+
 def _params_with_metric_k(k):
     p = _params()
     p["evaluation"]["metric"] = {"k": k}

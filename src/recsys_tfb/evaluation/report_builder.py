@@ -135,8 +135,10 @@ def _headline_key(parameters: dict, all_k: int) -> str:
     """The ``macro_avg["by_item"]`` key the headline macro per-item mAP is read at.
 
     ``map_attr@{evaluation.metric.k}``, or ``@all`` (looked up at ``all_k``)
-    when ``metric.k`` is unset. ``metrics_spark._resolve_k_grids`` puts
-    ``metric.k`` into the per-item grid, so that key is always computed.
+    when ``metric.k`` is unset. ``metrics_spark._resolve_k_grids`` puts that
+    K into the per-item grid whether or not ``k_values`` lists it, so the
+    key is computed; its value is ``None`` when no item enters the macro
+    (e.g. ``metric.min_positives`` above every item's count).
     """
     mk = metric_params(parameters)["k"]
     return f"map_attr@{_k_to_lookup('all' if mk is None else mk, all_k)}"
@@ -530,14 +532,14 @@ def build_overview_section(
     titles: list[str] = []
 
     # 關鍵指標 1：macro per-item mAP（頭號）——讀 metrics.json 的 macro 列，與
-    # 衡量指標段 B 塊「Macro 平均」同一個數，不另算一份。
+    # 衡量指標段 B 塊「Macro 平均」同一個數，不另算一份。沒有值（沒有任何
+    # item 進 macro）就不畫這張表：一格空白的頭號表看起來像「算了、結果是空」。
     macro_item = (metrics.get("macro_avg") or {}).get("by_item") or {}
-    t_head = pd.DataFrame(
-        [{"value": macro_item.get(_headline_key(parameters, all_k))}],
-        index=["macro per-item mAP"],
-    )
-    tables.append(t_head)
-    titles.append("頭號指標：macro per-item mAP（item 等權）")
+    headline = macro_item.get(_headline_key(parameters, all_k))
+    if headline is not None:
+        tables.append(pd.DataFrame(
+            [{"value": headline}], index=["macro per-item mAP"]))
+        titles.append("頭號指標：macro per-item mAP（item 等權）")
 
     # 關鍵指標 2：overall per-query mAP@k（另一種加權，並列不比高下）
     card = {

@@ -184,22 +184,26 @@ def _resolve_k_grids(
     """``(query_ks, item_ks)``: the per-query and the per-item K grids.
 
     Two independent axes (ADR-0020 design H). ``evaluation.k_values`` is the
-    K grid of the ``@K`` families. ``evaluation.metric.k`` is the truncation
-    depth of the headline per-item macro only, and need not be listed in
-    ``k_values``. So:
+    K grid of the ``@K`` families. The headline per-item macro is truncated at
+    its own K — ``evaluation.metric.k``, or ``all_k`` (no truncation) when that
+    is unset — which need not be listed in ``k_values``. So:
 
     * ``query_ks`` = ``k_values``: ``compute_per_query_metrics`` /
       ``aggregate_overall`` / ``aggregate_per_segment``.
-    * ``item_ks`` = ``k_values`` ∪ {``metric.k``}: ``add_row_contributions``
+    * ``item_ks`` = ``k_values`` ∪ {headline K}: ``add_row_contributions``
       and ``aggregate_per_item`` (per_item and per_item_segment), which is
-      what guarantees ``macro_avg["by_item"][f"map_attr@{metric.k}"]``.
+      what guarantees ``macro_avg["by_item"][f"map_attr@{headline K}"]``,
+      the number the report's headline reads
+      (``report_builder._headline_key``). Without ``all_k`` here a
+      ``k_values`` that leaves out ``"all"`` would leave that cell blank.
 
-    Putting ``metric.k`` into the per-query grid is wrong without being an
+    Putting the headline K into the per-query grid is wrong without being an
     error: ``overall`` / ``per_segment`` silently gain ``map@k`` /
     ``precision@k`` / ``recall@k`` that nobody listed, and the
     comparison report prints every ``overall`` key as a row. ``item_ks`` is a
     superset of ``query_ks``, so the per-query layer only reads a subset of
-    the enriched columns. ``metric.k=None`` makes the two grids equal.
+    the enriched columns. The two grids are equal when ``k_values`` already
+    holds the headline K (with ``metric.k`` unset: when it lists ``"all"``).
 
     ``_compute_core`` and ``compute_overall_per_item`` (the baseline's slim
     path) both resolve through this one function, so the two sides line up.
@@ -207,9 +211,8 @@ def _resolve_k_grids(
     eval_params = parameters.get("evaluation", {}) or {}
     query_ks = _resolve_k_values(eval_params.get("k_values", [5, "all"]), all_k)
     metric_k = metric_params(parameters)["k"]
-    if metric_k is None:
-        return query_ks, query_ks
-    return query_ks, sorted(set(query_ks) | {metric_k})
+    headline_k = all_k if metric_k is None else metric_k
+    return query_ks, sorted(set(query_ks) | {headline_k})
 
 
 def hand_category_mapping(

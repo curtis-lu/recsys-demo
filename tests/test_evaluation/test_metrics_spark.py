@@ -970,6 +970,29 @@ def test_metric_k_reaches_only_the_per_item_family(spark):
     assert slim["per_item"] == full["per_item"]
 
 
+def test_headline_k_is_computed_when_k_values_leaves_out_all(spark):
+    """With ``metric.k`` unset the report's headline is
+    ``macro_avg["by_item"]["map_attr@{all_k}"]`` (``report_builder.
+    _headline_key``), and ``k_values`` is only the @K grid of the families —
+    it need not list ``"all"``. So the per-item grid adds the headline's K
+    itself, as it does for ``metric.k``; the per-query grid stays
+    ``k_values``.
+
+    ``_metric_k_pdf`` untruncated: A .75, B 5/6, C 2/3 -> macro .75.
+    """
+    from recsys_tfb.evaluation.metrics import resolved_all_k
+
+    pdf = _metric_k_pdf()
+    params = _make_parameters(k_values=[1, 2])
+    result = ms.compute_all_metrics(spark.createDataFrame(pdf), params)
+    all_k = resolved_all_k(result)
+    assert all_k == 3
+
+    assert result["macro_avg"]["by_item"][f"map_attr@{all_k}"] == (
+        pytest.approx(0.75))
+    assert [k for k in result["overall"] if k.endswith(f"@{all_k}")] == []
+
+
 # ===========================================================================
 # per_item_segment — two-level dict, no more "_"-joined keys (ADR-0020 bug 12)
 # ===========================================================================
