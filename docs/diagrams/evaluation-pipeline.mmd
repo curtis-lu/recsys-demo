@@ -27,7 +27,7 @@
 %%   （data/evaluation/<model_version>/<snap_date>/metrics.json 與同目錄
 %%   baseline_metrics.json，皆含 config_fingerprint；report.sections.baseline: false
 %%   時 baseline 是 {"enabled": false, "config_fingerprint": ...} stub），跟四份診斷
-%%   JSON、metric_ci、report_aggregates 一樣畫成實線膠囊（有 catalog entry）。
+%%   JSON、report_aggregates 一樣畫成實線膠囊（有 catalog entry）。
 %%   仍是虛線膠囊（MemoryDataset，沒有 catalog entry）的只剩 evaluation_diagnosis_pages。
 %%   後果：切片的停止條件是 can_load（＝檔案在不在），所以 `--only-node generate_report`
 %%   現在只會自動補跑一個不碰 Spark 的 node——監控模式是 no_diagnosis_pages，
@@ -35,7 +35,7 @@
 %%   can_load 直接讀舊檔，不會重跑診斷）；不會再沿線把
 %%   prepare_eval_data / compute_metrics / compute_baseline_metrics
 %%   拉回來重跑全量 Spark。
-%%   generate_report 是純函式（7 個必填輸入、無 varargs）本來就是為了「便宜重繪」
+%%   generate_report 是純函式（6 個必填輸入、無 varargs）本來就是為了「便宜重繪」
 %%   而做的投資，#351 之前這條 catalog 缺口把它抵銷掉，補上後才真的便宜。
 %%   連帶：那些落地的 JSON 路徑只用 (model_version, snap_date) 當 key。
 %%   #342 起每份落地 JSON 內帶 config_fingerprint（只涵蓋「算的」設定）：
@@ -72,9 +72,11 @@
 %%       全新 model_version 時才自動往上補算。
 
 %% 為什麼診斷抽樣只抽一次
-%%   draw_diagnosis_sample_node 的產出被 compute_metric_ci 與各項診斷共用。
+%%   draw_diagnosis_sample_node 的產出被 --post-training 的各項診斷共用。
 %%   各自重抽（同 seed）結果會相同，但那是 N 次全量掃描；更重要的是
-%%   「同一份樣本」本身是正確性性質——CI 與診斷講的必須是同一批 query。
+%%   「同一份樣本」本身是正確性性質——並排讀的診斷必須講同一批 query。
+%%   監控模式照樣接上這個 node 但不抽樣：它是改了 evaluation.diagnosis.*
+%%   之後 --from-node 的接續點（COMPUTED_KEYS 要求它在每種模式都在）。
 
 %% 四項診斷為什麼長得一模一樣
 %%   它們由 registry（diagnosis.metric.contract.DIAGNOSES）導出，node 函式
@@ -113,10 +115,8 @@ flowchart TB
   d_agg(["evaluation_report_aggregates<br/><small>JSON</small>"])
 
   %% ---------------------- 診斷流 ----------------------
-  n_sample["draw_diagnosis_sample_node<br/><small>單位＝有正例的 query ・ 只抽一次，下游共用</small>"]
+  n_sample["draw_diagnosis_sample_node<br/><small>單位＝有正例的 query ・ 只抽一次，下游共用 ・ 監控模式不抽</small>"]
   d_sample(["diagnosis_sample"])
-  n_ci["compute_metric_ci<br/><small>per-item AP 與 macro 的 cluster bootstrap（cluster ＝ entity）</small>"]
-  d_ci(["evaluation_metric_ci<br/><small>JSON</small>"])
   subgraph POST[" 僅 --post-training：registry 診斷 ＋ 分頁 "]
     n_cs["diagnose_config_shift"]
     d_cs(["evaluation_config_shift<br/><small>JSON</small>"])
@@ -134,7 +134,7 @@ flowchart TB
   d_pages(["evaluation_diagnosis_pages<br/><small>兩種模式各由一個 node 產出</small>"])
 
   %% ---------------------- 匯流 ----------------------
-  n_report["generate_report<br/><small><b>純函式</b>：7 個必填輸入、無 varargs、不含任何 Spark 物件或 action</small>"]
+  n_report["generate_report<br/><small><b>純函式</b>：6 個必填輸入、無 varargs、不含任何 Spark 物件或 action</small>"]
   o_report(["evaluation_report　★ report.html<br/><small>data/evaluation/&lt;model_version&gt;/&lt;YYYYMMDD&gt;/</small>"])
 
   %% ---------------------- 比較模式（追加） ----------------------
@@ -182,8 +182,6 @@ flowchart TB
 
   o_enriched --> n_sample
   n_sample --> d_sample
-  d_sample --> n_ci
-  n_ci --> d_ci
   d_sample --> n_cs
   n_cs --> d_cs
   d_sample --> n_ia
@@ -203,7 +201,6 @@ flowchart TB
 
   d_metrics --> n_report
   d_baseline --> n_report
-  d_ci --> n_report
   d_agg --> n_report
   d_pages --> n_report
   d_pq --> n_report
@@ -230,7 +227,7 @@ flowchart TB
   class src_ranked,src_teval,src_label,src_seg src
   class cfg_cat cfg
   class art_gain art
-  class n_prep,n_metrics,n_baseline,n_pq,n_agg,n_sample,n_ci,n_cs,n_ia,n_mc,n_sup,n_pages,n_nopages,n_report,n_validate,n_loadb,n_restrict,n_creport nd
-  class d_ci,d_cs,d_ia,d_mc,d_sup,d_agg,d_metrics,d_baseline,d_pq data
+  class n_prep,n_metrics,n_baseline,n_pq,n_agg,n_sample,n_cs,n_ia,n_mc,n_sup,n_pages,n_nopages,n_report,n_validate,n_loadb,n_restrict,n_creport nd
+  class d_cs,d_ia,d_mc,d_sup,d_agg,d_metrics,d_baseline,d_pq data
   class d_sample,d_pages,d_braw,d_common mem
   class o_report,o_enriched,o_creport out

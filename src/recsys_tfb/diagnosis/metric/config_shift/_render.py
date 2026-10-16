@@ -24,7 +24,7 @@ no network、no additional packages，外部 CDN 一定載不到，報表上只�
 
 **呈現層的三條鐵則**（整個 diag-redesign 的共同約定）：
 
-1. 不下結論——沒有 severity／verdict／建議動作，也不替讀者判讀 CI 有沒有跨 0。
+1. 不下結論——沒有 severity／verdict／建議動作。
 2. 不設門檻——不拿 config 門檻把連續量切成離散類別；顏色只編碼大小與正負。
    唯一的門檻是 ``MAX_FIGURE_POINTS``，它管的是**繪圖能力**不是資料的意義，
    所以超標時只換呈現形式（圖 → 表），一列資料都不丟。
@@ -415,10 +415,10 @@ def _query_spread_section(result: dict) -> ReportSection | None:
 
 
 def _delta_section(result: dict) -> ReportSection:
-    """4. Δ 與區間（只給數字與區間，判讀留給讀者）。
+    """4. Δ（只給數字，判讀留給讀者）。
 
-    這一節刻意沒有圖也沒有表：它就是兩三個數字，畫成圖只是把一個數字變成一根
-    條子。數字放在 bullets 裡，讀者掃過去就看得完。
+    這一節刻意沒有圖也沒有表：它就是 Δ 與相減的兩邊共三個數字，畫成圖只是把
+    一個數字變成一根條子。數字放在 bullets 裡，讀者掃過去就看得完。
     """
     score_col = result.get("score_col_used") or "score"
     delta = result.get("delta")
@@ -430,13 +430,6 @@ def _delta_section(result: dict) -> ReportSection:
             f"（corrected_map {fmt_ap(result.get('corrected_map'))} − "
             f"baseline_map {fmt_ap(result.get('baseline_map'))}）。"
         ]
-        lo, hi = result.get("delta_ci_low"), result.get("delta_ci_high")
-        if lo is not None and hi is not None:
-            n_boot = (result.get("ci") or {}).get("n_boot")
-            bullets.append(
-                f"95% 區間 [{fmt_delta(lo)}, {fmt_delta(hi)}]，來自分層配對 cluster "
-                f"bootstrap {fmt_count(n_boot)} 次重抽。"
-            )
 
     return ReportSection(
         title="扣掉 offset 之後的 mAP 變化",

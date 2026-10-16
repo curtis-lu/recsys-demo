@@ -67,9 +67,6 @@ def _result() -> dict:
         "baseline_map": 0.4211,
         "corrected_map": 0.4011,
         "delta": -0.02,
-        "delta_ci_low": -0.05,
-        "delta_ci_high": 0.01,
-        "ci": {"enabled": True, "n_boot": 200, "seed": 42},
         "per_item": [
             {
                 "item": "item_a", "delta_j": 0.0031,
@@ -316,11 +313,10 @@ def test_sum_note_is_shown():
     assert "Σ Δⱼ ≠ Δ" in text or "Σ Δ_j ≠ Δ" in text
 
 
-def test_delta_and_ci_are_shown_without_a_significance_verdict():
-    """Δ 與區間都要在，但不得替讀者判讀區間有沒有跨 0。"""
+def test_delta_is_shown_without_a_significance_verdict():
+    """Δ 要在，但不得替讀者判讀它大不大。"""
     text = _all_text(config_shift.render(_result(), {}))
     assert "-0.0200" in text
-    assert "-0.0500" in text and "+0.0100" in text
     for word in ("顯著", "不顯著"):
         assert word not in text
 
@@ -411,7 +407,6 @@ def test_render_survives_an_empty_sample():
         "items": [], "offset_matrix": {}, "offset_centered": {},
         "offset_spread_by_context": {}, "query_offset_spread": {},
         "per_item": [], "sample": {}, "delta": None,
-        "delta_ci_low": None, "delta_ci_high": None,
         "notes": ["診斷抽樣為空——offset 矩陣與 Δ 均未計算。"],
     })
     sections = config_shift.render(result, {})
@@ -431,7 +426,6 @@ def test_empty_sample_produces_no_hollow_sections():
         "items": [], "offset_matrix": {}, "offset_centered": {},
         "offset_spread_by_context": {}, "query_offset_spread": {},
         "per_item": [], "sample": {}, "delta": None,
-        "delta_ci_low": None, "delta_ci_high": None,
         "notes": ["診斷抽樣為空——offset 矩陣與 Δ 均未計算。"],
     })
     for section in config_shift.render(result, {}):

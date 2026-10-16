@@ -42,7 +42,6 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.diagnosis.metric._common import schema_skip_reason
 from recsys_tfb.diagnosis.metric import contract
 from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
-from recsys_tfb.diagnosis.metric.uncertainty import bootstrap_per_item_ci
 from recsys_tfb.evaluation.baselines import (
     CANDIDATES_COL,
     POSITIVES_COL,
@@ -216,37 +215,11 @@ def _landed_category_mapping(
     )
 
 
-def _ci_consumer_enabled(parameters: dict) -> bool:
-    """Whether the metric-CI diagnosis (the one non-registry consumer of the
-    shared sample) is enabled.
-
-    ``draw_diagnosis_sample_node`` draws the sample iff this or any registry
-    diagnosis is enabled; ``compute_metric_ci`` still checks its own flag.
-    Reading it here with the exact same key/default as the consumer prevents
-    gate/consumer drift.
-    """
-    if schema_skip_reason(parameters, "ci"):
-        # Not applicable under the declared schema, which is a different thing
-        # from the user turning it off — but it reaches this gate the same way,
-        # because the gate's question is only "does anything still want the
-        # sample". compute_metric_ci asks the same helper, so the two cannot
-        # drift into the "gate out of sync with the consumer" state its own
-        # pre-check raises about.
-        return False
-    diag = ((parameters.get("evaluation", {}) or {}).get("diagnosis", {}) or {})
-    return bool((diag.get("ci", {}) or {}).get("enabled", True))
-
-
 def _registry_diagnosis_enabled(parameters: dict) -> bool:
     """registry 診斷（``contract.DIAGNOSES``）裡**吃共用抽樣**的那些有任一啟用嗎。
 
     只在 ``--post-training`` 被問：監控模式不組 registry 診斷，那裡的抽樣閘門
     不看這個函式（見 ``make_draw_diagnosis_sample_node``）。
-
-    與 ``_ci_consumer_enabled`` 分開的理由：既有的 ci（非 registry 消費者）
-    與 registry 診斷的生命週期不同。合在一起
-    的話 Plan 2–5 每加一項診斷都要改所有解包點，而那正是
-    registry 要消除的東西——所以這裡回一個 bool，不回擴增的 tuple。
 
     判準是「這項診斷的 ``INPUTS`` 裡有沒有 ``diagnosis_sample``」，不是
     「有沒有在 ``DIAGNOSES`` 裡」：不吃抽樣的診斷（例如讀 ``gain_ledger`` 的
@@ -255,8 +228,8 @@ def _registry_diagnosis_enabled(parameters: dict) -> bool:
     測試會轉紅、也不會有錯誤訊息，pipeline 只是安靜地變慢。
 
     鍵與預設值必須跟各消費節點自己讀的完全一致（``enabled``，預設 True），
-    否則閘門與消費端會漂移：使用者關掉 ci、只開一項吃抽樣的 registry 診斷
-    時，樣本不會被抽，消費節點拿到 None 而 fail-loud。
+    否則閘門與消費端會漂移：閘門判定沒人要抽樣而不抽，仍啟用的消費節點拿到
+    None 而 fail-loud。
 
     ``contract.DIAGNOSES`` is read as a module attribute, not through
     ``from ... import DIAGNOSES``. ``contract`` is imported at module level, so
@@ -690,16 +663,21 @@ def make_draw_diagnosis_sample_node(registry_diagnoses_wired: bool):
     """Build the node that draws the shared driver-side diagnosis sample.
 
     Which consumers exist is a property of the pipeline's mode, not of the
-    config: ``--post-training`` wires ``compute_metric_ci`` plus every registry
-    diagnosis, monitoring mode only ``compute_metric_ci`` (ADR-0018 decision 5).
-    The registry diagnoses' ``enabled`` flags default to true in both modes, so
-    a gate reading only the config would, in monitoring mode with the CI
-    switched off, draw a sample nobody reads: a driver-side ``toPandas`` of up
-    to ``diagnosis.sample.max_queries`` queries, no error, only a slower run.
+    config: ``--post-training`` wires every registry diagnosis, monitoring mode
+    none. The registry diagnoses' ``enabled`` flags default to true in both
+    modes, so a gate reading only the config would, in monitoring mode, draw a
+    sample nobody reads: a driver-side ``toPandas`` of up to
+    ``diagnosis.sample.max_queries`` queries, no error, only a slower run.
     ``create_pipeline`` passes the mode in instead.
 
-    Both modes get the node name ``draw_diagnosis_sample_node``, so
-    ``--from-node`` and the docs name one node whichever mode is running.
+    Monitoring mode still wires the node, which there always returns ``None``.
+    It is the node ``--from-node`` resumes from after a change under
+    ``evaluation.diagnosis`` (that row of
+    ``steps.config_fingerprint.COMPUTED_KEYS``), and every node those rows name
+    must exist in every mode (``test_pipeline.py::TestFingerprintRerunNodes::
+    test_every_rerun_node_exists_in_every_mode``). Both modes get the node name
+    ``draw_diagnosis_sample_node``, so ``--from-node`` and the docs name one
+    node whichever mode is running.
     """
     def draw_diagnosis_sample_node(
         eval_predictions: SparkDataFrame,
@@ -708,13 +686,14 @@ def make_draw_diagnosis_sample_node(registry_diagnoses_wired: bool):
     ) -> Optional[tuple]:
         """Draw the shared driver-side diagnosis sample ONCE per run.
 
-        ``compute_metric_ci`` plus, in ``--post-training``, every registry
-        diagnosis (``contract.DIAGNOSES``, e.g. ``diagnose_config_shift``) all
-        consume this single sample instead of each re-drawing it (same seed ->
-        identical content; N Spark scans collapse to 1). Sharing one sample is
-        also a correctness property, not just a speed one: numbers computed on
-        different populations must not be read side by side. Returns ``None``
-        only when *every* wired consumer is disabled.
+        In ``--post-training``, every registry diagnosis
+        (``contract.DIAGNOSES``, e.g. ``diagnose_config_shift``) that reads the
+        sample consumes this single one instead of each re-drawing it (same
+        seed -> identical content; N Spark scans collapse to 1). Sharing one
+        sample is also a correctness property, not just a speed one: numbers
+        computed on different populations must not be read side by side.
+        Returns ``None`` when *every* wired consumer is disabled, which in
+        monitoring mode, where none is wired, is always.
 
         The sample carries the segment columns ``prepare_eval_data`` joined
         (``segment_columns["joined"]``), not the configured ones found in the
@@ -723,15 +702,13 @@ def make_draw_diagnosis_sample_node(registry_diagnoses_wired: bool):
         Pre-check (inputs): the partition was prepared under today's settings
         (``_require_prepared_with_current_config``).
         """
-        ci_on = _ci_consumer_enabled(parameters)
-        registry_on = (
-            registry_diagnoses_wired and _registry_diagnosis_enabled(parameters)
-        )
-        if not (ci_on or registry_on):
+        if not (registry_diagnoses_wired
+                and _registry_diagnosis_enabled(parameters)):
             logger.info(
-                "diagnosis sample: every wired consumer (ci%s) disabled — "
-                "skipping sample draw",
-                " + registry diagnoses" if registry_diagnoses_wired else "",
+                "diagnosis sample: %s — skipping sample draw",
+                "every registry diagnosis that reads it is disabled"
+                if registry_diagnoses_wired
+                else "no consumer is wired in monitoring mode",
             )
             return None
 
@@ -753,9 +730,8 @@ def make_draw_diagnosis_sample_node(registry_diagnoses_wired: bool):
         # not "free", which is the constraint for this always-on instrumentation.
         log_data_volume(logger, "diagnosis.sample_pdf", sample_pdf, deep=False)
         logger.info(
-            "diagnosis sample drawn once (ci_enabled=%s, registry diagnoses "
-            "enabled=%s): %d queries sampled",
-            ci_on, registry_on, sample_meta["n_queries_sampled"],
+            "diagnosis sample drawn once: %d queries sampled",
+            sample_meta["n_queries_sampled"],
         )
         return sample_pdf, sample_meta
 
@@ -1322,56 +1298,6 @@ def compute_prediction_quality(
     return out
 
 
-def compute_metric_ci(
-    diagnosis_sample: Optional[tuple],
-    parameters: dict,
-) -> dict:
-    """診斷抽樣＋cluster bootstrap CI（spec §3 Phase 1）。
-
-    抽樣改由 ``draw_diagnosis_sample_node`` 一次抽好、經 ``diagnosis_sample``
-    傳入（同 seed→內容與各自重抽相同）。停用時回傳 stub（catalog 仍寫出
-    ``{"enabled": false}``）。輸出含 ``sample`` metadata——CI 是抽樣估計，
-    報表必須標示樣本規模。
-
-    Both the stub and the full result carry ``config_fingerprint``: the JSON
-    lands, and ``generate_report`` refuses one computed under other settings.
-
-    Pre-check (input): with the CI enabled, ``diagnosis_sample`` is not
-    ``None`` (``ValueError``). ``None`` there means
-    ``draw_diagnosis_sample_node``'s gate disagrees with this node's flag.
-    """
-    eval_params = parameters.get("evaluation", {}) or {}
-    ci_cfg = ((eval_params.get("diagnosis", {}) or {}).get("ci", {}) or {})
-    skip = schema_skip_reason(parameters, "ci")
-    if skip:
-        logger.info("metric CI not applicable — writing stub: %s", skip)
-        return {
-            "enabled": False,
-            "skipped_reason": skip,
-            "config_fingerprint": fingerprint(parameters),
-        }
-    if not ci_cfg.get("enabled", True):
-        logger.info("metric CI disabled — writing stub")
-        return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
-
-    if diagnosis_sample is None:
-        raise ValueError(
-            "compute_metric_ci: diagnosis_sample is None while "
-            "evaluation.diagnosis.ci.enabled is true — draw_diagnosis_sample_node "
-            "gate is out of sync with the consumer enable flag"
-        )
-
-    sample_pdf, sample_meta = diagnosis_sample
-    out = bootstrap_per_item_ci(sample_pdf, parameters)
-    out["sample"] = sample_meta
-    out["config_fingerprint"] = fingerprint(parameters)
-    logger.info(
-        "metric CI computed on %d sampled queries (n_boot=%d)",
-        sample_meta["n_queries_sampled"], out["n_boot"],
-    )
-    return out
-
-
 def make_diagnosis_node(name: str):
     """為 registry 裡的一項診斷造一個薄 node 函式。
 
@@ -1667,20 +1593,19 @@ def _describe_node_input(value) -> str:
         # config_fingerprint), but a JSON written before #342 gave diagnosis
         # results a name and a fingerprint at all. A --from-node on the
         # diagnosis nodes alone would recompute them but leave
-        # baseline_metrics / metric_ci / report_aggregates on their old,
-        # unfingerprinted disk state, so the fix is the whole pipeline, not a
-        # slice.
+        # baseline_metrics / report_aggregates on their old, unfingerprinted
+        # disk state, so the fix is the whole pipeline, not a slice.
         return (
             "a dict with neither a 'diagnosis' nor a 'config_fingerprint' "
             "key: this looks like a result written before results carried "
             "their name and fingerprint (before #342). Re-run the whole "
             "pipeline (no --from-node / --only-node) — from-node-ing just "
-            "the diagnoses would still leave metric CI / report aggregates "
-            "unfingerprinted, costing extra Spark rounds"
+            "the diagnoses would still leave baseline metrics / report "
+            "aggregates unfingerprinted, costing extra Spark rounds"
         )
     # Fingerprint but no name: name and fingerprint arrived together, so this
-    # is not an old JSON but another fingerprinted artifact (metric CI, report
-    # aggregates) wired into a diagnosis slot.
+    # is not an old JSON but another fingerprinted artifact (baseline metrics,
+    # report aggregates) wired into a diagnosis slot.
     return ("a dict with a 'config_fingerprint' but no 'diagnosis' key: a "
             "fingerprinted artifact that is not a registry diagnosis result, "
             "wired into this slot")
@@ -1777,7 +1702,6 @@ def generate_report(
     evaluation_metrics: dict,
     parameters: dict,
     baseline_metrics: dict,
-    metric_ci: dict,
     report_aggregates: dict,
     diagnosis_pages: Optional[list],
     prediction_quality_metrics: dict,
@@ -1791,10 +1715,9 @@ def generate_report(
     的路徑清單、放一個連結進主報表。
 
     Pre-check (inputs): ``evaluation_metrics``, ``baseline_metrics``,
-    ``metric_ci``, ``report_aggregates`` and ``prediction_quality_metrics``
-    were computed with the current computed settings
-    (``steps.config_fingerprint``). All five are
-    landed JSON (ADR-0018 decision 2), and ``--only-node generate_report``
+    ``report_aggregates`` and ``prediction_quality_metrics`` were computed
+    with the current computed settings (``steps.config_fingerprint``). All
+    four are landed JSON (ADR-0018 decision 2), and ``--only-node generate_report``
     stops at "the JSON exists", so without this a setting changed since the
     last run is drawn from the old JSON with exit code 0 (ADR-0020 bug 2);
     with it the run raises, naming the key and the node to ``--from-node``.
@@ -1812,9 +1735,6 @@ def generate_report(
             LoadedArtifact(catalog_name="baseline_metrics",
                            payload=baseline_metrics,
                            produced_by="compute_baseline_metrics"),
-            LoadedArtifact(catalog_name="evaluation_metric_ci",
-                           payload=metric_ci,
-                           produced_by="compute_metric_ci"),
             LoadedArtifact(catalog_name="evaluation_report_aggregates",
                            payload=report_aggregates,
                            produced_by="compute_report_aggregates"),
@@ -1828,7 +1748,6 @@ def generate_report(
         evaluation_metrics, parameters,
         baseline_metrics=baseline_metrics,
         report_aggregates=report_aggregates,
-        metric_ci=metric_ci,
         diagnosis_pages=diagnosis_pages,
         prediction_quality=prediction_quality_metrics,
     )

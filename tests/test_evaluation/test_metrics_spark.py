@@ -892,17 +892,21 @@ def _metric_k_pdf():
 
 
 def _metric_k_params():
-    params = _make_parameters(k_values=[1, "all"], metric={"k": 2})
-    params["evaluation"]["diagnosis"] = {"ci": {"n_boot": 20}}
-    return params
+    return _make_parameters(k_values=[1, "all"], metric={"k": 2})
 
 
-def test_metric_k_truncates_main_macro_same_as_ci_point(spark):
+def test_metric_k_truncates_main_macro_same_as_the_numpy_twin(spark):
     """metric.k is not in k_values, yet the main path still emits
-    map_attr@{metric.k}, and it equals the CI point estimate on the same
-    data — they only match when both are truncated the same way.
+    map_attr@{metric.k}, and it equals ``metrics.compute_macro_per_item_map``
+    (the driver-side numpy implementation HPO and the diagnoses use) on the
+    same data — they only match when both are truncated the same way.
     """
-    from recsys_tfb.diagnosis.metric.uncertainty import bootstrap_per_item_ci
+    import pandas as pd
+
+    from recsys_tfb.evaluation.metrics import (
+        compute_macro_per_item_map,
+        metric_params,
+    )
 
     pdf = _metric_k_pdf()
     params = _metric_k_params()
@@ -910,8 +914,13 @@ def test_metric_k_truncates_main_macro_same_as_ci_point(spark):
     main = result["macro_avg"]["by_item"]["map_attr@2"]
     assert main == pytest.approx(5 / 12)
 
-    ci = bootstrap_per_item_ci(pdf, params)
-    assert ci["macro"]["ap"] == pytest.approx(main)
+    groups = pd.factorize(
+        pdf["snap_date"] + "|" + pdf["cust_id"], sort=True)[0]
+    driver = compute_macro_per_item_map(
+        groups, pdf["prod_name"].to_numpy(), pdf["label"].to_numpy(),
+        pdf["score"].to_numpy(), **metric_params(params),
+    )
+    assert driver == pytest.approx(main)
 
 
 def test_metric_k_grid_shared_by_slim_path(spark):
@@ -959,6 +968,29 @@ def test_metric_k_reaches_only_the_per_item_family(spark):
     assert slim["overall"] == full["overall"]
     assert slim["per_segment"] == full["per_segment"]
     assert slim["per_item"] == full["per_item"]
+
+
+def test_headline_k_is_computed_when_k_values_leaves_out_all(spark):
+    """With ``metric.k`` unset the report's headline is
+    ``macro_avg["by_item"]["map_attr@{all_k}"]`` (``report_builder.
+    _headline_key``), and ``k_values`` is only the @K grid of the families —
+    it need not list ``"all"``. So the per-item grid adds the headline's K
+    itself, as it does for ``metric.k``; the per-query grid stays
+    ``k_values``.
+
+    ``_metric_k_pdf`` untruncated: A .75, B 5/6, C 2/3 -> macro .75.
+    """
+    from recsys_tfb.evaluation.metrics import resolved_all_k
+
+    pdf = _metric_k_pdf()
+    params = _make_parameters(k_values=[1, 2])
+    result = ms.compute_all_metrics(spark.createDataFrame(pdf), params)
+    all_k = resolved_all_k(result)
+    assert all_k == 3
+
+    assert result["macro_avg"]["by_item"][f"map_attr@{all_k}"] == (
+        pytest.approx(0.75))
+    assert [k for k in result["overall"] if k.endswith(f"@{all_k}")] == []
 
 
 # ===========================================================================

@@ -44,7 +44,6 @@ def _params(score_col: str = "score") -> dict:
         "evaluation": {
             "metric": {"k": 3},
             "diagnosis": {
-                "ci": {"enabled": True, "n_boot": 20},
                 "sample": {"seed": 42},
                 "config_shift": {"enabled": True},
                 "item_ability": {"enabled": True, "top_n": 30},

@@ -1,8 +1,8 @@
 {
   "measured": {
-    "date": "2026-09-30",
-    "code_commit": "2c523a4e",
-    "how": "run_e2e.sh --compare 跑 feat/format-versions（#488，ADR-0030 決定 9）：TRAINING_MODEL_FORMAT_VERSION 第一次進 model_version 與 search_id 的雜湊，所以 model_version 預期變一次；其餘各層預期全部不變（預測格式版本不進任何版本 ID；.bin 快取路徑多一段 model_format_v1，只讓 .bin 重建一次，內容不變）。結果與預期相同：與舊基準比，只有 versions.model_version 不同（951b1936 → b9861487），source_etl、dataset、training、inference、evaluation 五層全部相同。search_id 也變了（b6657291 → af9584fb，training log 印的），這是預期的：模型格式版本也進 search_id。本檔即在 2c523a4e 的程式碼上跑出的 data/digest.json（跑的時候還沒 commit，內容與 2c523a4e 相同）；收審查的 commit 改了 predict 讀回格式記錄時核對 model_version、決定註解與 docstring，並清空 examples/ad/data 後以 run_e2e.sh --compare 對本檔重驗：六層全部相同。"
+    "date": "2026-10-16",
+    "code_commit": "368dbabe",
+    "how": "run_e2e.sh --compare 跑 feat/remove-ci（#515 拿掉信賴區間）：預期只有評估層的兩處變——diagnosis/metric_ci.json 整份不再產出、diagnosis/config_shift.json 少掉 CI 的鍵（delta_ci_low、delta_ci_high、ci 區塊與兩條欄位說明）；其餘各層與其餘評估 JSON 預期全部不變。結果與預期相同：與舊基準比只有這 4 處不同（config_shift.json 葉子 228 → 221，metric_ci.json 不存在），versions、source_etl、dataset、training 與 metrics.json、baseline_metrics.json、prediction_quality.json、report_aggregates.json、segment_columns.json、其餘診斷全部相同。本檔即在 368dbabe 的程式碼上跑出的 data/digest.json。"
   },
   "noisy": {},
   "versions": {
@@ -232,16 +232,12 @@
       "hash": "270d44eee5d87c4733d369f4316b48d1705d19ed6f484f99b4af5649bf2cdf59"
     },
     "diagnosis/config_shift.json": {
-      "leaves": 228,
-      "hash": "1e5cc170fade31b70f8afe2d24a5e2eb68bf96257f3c46f24c8c92b6be08d81c"
+      "leaves": 221,
+      "hash": "ad90724ee9143e306728179fa090103ed8a1e808893089a3237e774809517931"
     },
     "diagnosis/item_ability.json": {
       "leaves": 3,
       "hash": "9e2cfdc91a7a349bcd0597cc03f69a10284a956a817dbc31a4c1148819f40d3f"
-    },
-    "diagnosis/metric_ci.json": {
-      "leaves": 88,
-      "hash": "8acc122c443110262d4395695973f87db975cb1570746ad747156826a0b0eb05"
     },
     "diagnosis/model_capacity.json": {
       "leaves": 308,

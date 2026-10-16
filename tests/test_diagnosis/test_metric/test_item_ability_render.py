@@ -22,7 +22,6 @@ from recsys_tfb.report import ReportSection, ScopeNote
 _SUMMARY_TITLE = "概覽"
 _FOUNDATION_TITLE = "核心概念：兩個 AUC 與它們的差"
 _SCATTER_TITLE = "raw vs query-centered AUC 散點"
-_PER_ITEM_AUC_TITLE = "逐 item 的 AUC（含信賴區間）"
 _AUC_VS_AP_TITLE = "query-centered AUC vs AP"
 _RANK_TITLE = "正例名次分布"
 _COMPLETENESS_TITLE = "本次執行的完整性檢查"
@@ -30,9 +29,7 @@ _COMPLETENESS_TITLE = "本次執行的完整性檢查"
 
 def _per_item_row(
     item: str, ap: float, n_pos: int, n_neg: int,
-    raw: float | None, raw_lo: float | None, raw_hi: float | None,
-    centered: float | None, centered_lo: float | None, centered_hi: float | None,
-    ranks: list[int],
+    raw: float | None, centered: float | None, ranks: list[int],
 ) -> dict:
     """一列 per_item；``ranks`` 是該 item 正例列的名次（1＝排最前），其餘百分位
     比照 ``_compute`` 由 ranks 導出。"""
@@ -49,11 +46,7 @@ def _per_item_row(
     return {
         "item": item, "ap": ap, "n_pos": n_pos, "n_neg": n_neg,
         "query_centered_auc": centered,
-        "query_centered_auc_ci_low": centered_lo,
-        "query_centered_auc_ci_high": centered_hi,
         "raw_within_item_auc": raw,
-        "raw_within_item_auc_ci_low": raw_lo,
-        "raw_within_item_auc_ci_high": raw_hi,
         "auc_gap_raw_minus_centered": gap,
         "mean_relative_score_pos": 0.1 if raw is not None else None,
         "mean_relative_score_neg": -0.05 if raw is not None else None,
@@ -94,24 +87,20 @@ def _result() -> dict:
         "n_positive_rows": 60,
         "macro_per_item_map": 0.4123,
         "candidates_per_query": {"min": 4, "median": 4.0, "max": 4},
-        "ci": {"enabled": True, "n_boot": 200, "seed": 42},
         "per_item": [
             _per_item_row(
                 "item_a", 0.20, 10, 30,
-                raw=0.50, raw_lo=0.40, raw_hi=0.60,
-                centered=0.55, centered_lo=0.45, centered_hi=0.65,
+                raw=0.50, centered=0.55,
                 ranks=[4, 4, 3, 4, 3, 4, 4, 3, 4, 4],
             ),
             _per_item_row(
                 "item_b", 0.35, 20, 40,
-                raw=0.75, raw_lo=0.65, raw_hi=0.85,
-                centered=0.60, centered_lo=0.50, centered_hi=0.70,
+                raw=0.75, centered=0.60,
                 ranks=[1, 2, 1, 2, 1, 1, 2, 1, 2, 1] * 2,
             ),
             _per_item_row(
                 "item_c", 0.50, 5, 0,
-                raw=None, raw_lo=None, raw_hi=None,
-                centered=None, centered_lo=None, centered_hi=None,
+                raw=None, centered=None,
                 ranks=[2, 3, 2, 3, 2],
             ),
         ],
@@ -151,7 +140,7 @@ def test_render_returns_sections():
 
 
 def test_render_returns_multiple_sections():
-    """概覽＋核心概念＋4 個資料區＋完整性檢查＝7 節。"""
+    """概覽＋核心概念＋3 個資料區＋完整性檢查＝6 節。"""
     sections = item_ability.render(_result(), {})
     assert len(sections) >= 6
     assert all(s.title.strip() for s in sections)
@@ -343,15 +332,6 @@ def test_reference_point_is_stated_once_not_twice():
     assert "0.500" in text
     assert "購買率" not in text
     assert "popularity" not in text.lower()
-
-
-def test_per_item_auc_section_has_error_bars():
-    section = _section(item_ability.render(_result(), {}), _PER_ITEM_AUC_TITLE)
-    assert section.figures, "逐 item AUC section 沒有畫出圖"
-    assert any(
-        fig.data[0].error_y is not None and fig.data[0].error_y.array is not None
-        for fig in section.figures
-    ), "逐 item AUC 條圖應含 CI 誤差線"
 
 
 def test_auc_vs_ap_section_exists_with_a_figure():

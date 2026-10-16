@@ -351,10 +351,6 @@ prediction_quality_metrics:
   filepath: data/evaluation/${model_version}/${snap_date}/prediction_quality.json
 
 # --- Evaluation pipeline — 診斷產物（Phase 1 起；抽樣估計，含 sample metadata）---
-evaluation_metric_ci:
-  type: JSONDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/metric_ci.json
-
 # registry 診斷（diagnosis.metric.contract.DIAGNOSES）1／4
 evaluation_config_shift:
   type: JSONDataset
@@ -373,9 +369,8 @@ evaluation_suppression:
   filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/suppression.json
 
 # 主報表診斷區的 Spark 聚合（Plan 1.5 從 generate_report 拆出）。
-# 落地的理由不只是快取：generate_report 因此是純函式。它的七個輸入裡五份是落地 JSON
-# （本條、evaluation_metrics、baseline_metrics、evaluation_metric_ci、
-# prediction_quality_metrics）、一份是
+# 落地的理由不只是快取：generate_report 因此是純函式。它的六個輸入裡四份是落地 JSON
+# （本條、evaluation_metrics、baseline_metrics、prediction_quality_metrics）、一份是
 # parameters，診斷頁清單由不跑 Spark 的 node 補（監控 no_diagnosis_pages、
 # --post-training render_diagnosis_pages），所以 --only-node generate_report 不重算任何
 # 指標就能重繪主報表（ADR-0018 決定 2；補跑集合釘在 tests/test_pipelines/test_resume_contracts.py）。

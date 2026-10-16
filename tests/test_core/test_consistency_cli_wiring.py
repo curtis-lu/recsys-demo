@@ -2,6 +2,8 @@
 
 import inspect
 
+import pytest
+
 from recsys_tfb import __main__ as m
 from recsys_tfb.pipelines.training import run_contract as training_contract
 
@@ -477,6 +479,88 @@ def test_a43_wired_into_evaluation_command_before_spark():
     assert src.index("retired_calibration_bin_key_errors(") < src.index(
         "get_or_create_spark_session("
     ), "A43 must fail before the Spark cold start, like A34"
+
+
+def test_a61_wired_into_evaluation_command_before_spark():
+    # A61 reads an evaluation-only key: A43's placement, for A34's reason.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert "retired_diagnosis_ci_key_errors" not in inspect.getsource(
+        validate_config_consistency
+    ), "A61 must stay off the global aggregator (#158 precedent)"
+    src = inspect.getsource(m.evaluation)
+    assert "retired_diagnosis_ci_key_errors(params)" in src
+    assert src.index("retired_diagnosis_ci_key_errors(") < src.index(
+        "get_or_create_spark_session("
+    ), "A61 must fail before the Spark cold start, like A34"
+
+
+def _run_evaluation_command(monkeypatch, tmp_path, diagnosis):
+    """Run ``evaluation`` with everything upstream of ``_execute_pipeline``
+    stubbed (the shape of ``test_cli.py``'s ``post_training`` test); returns
+    whether the run reached the pipeline."""
+    import recsys_tfb.utils.spark as spark_mod
+
+    params = {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}},
+        "dataset": {"test_snap_dates": ["2026-01-31"]},
+        "evaluation": {"snap_date": "2026-01-31", "diagnosis": diagnosis},
+    }
+
+    class _ConfigStub:
+        def get_parameters_by_name(self, name):
+            return {}
+
+        def get_catalog_config(self, runtime_params):
+            return {}
+
+    reached = []
+    monkeypatch.setattr(
+        m, "_load_config_and_setup",
+        lambda pipeline, env: (_ConfigStub(), params, None))
+    monkeypatch.setattr(m, "_find_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        m, "resolve_model_version", lambda models_dir, mv: "mv_test")
+    monkeypatch.setattr(
+        m, "_dataset_versions_from_model_manifest",
+        lambda models_dir, data_dir: ("basev", "trainv"))
+    monkeypatch.setattr(
+        m, "_execute_pipeline", lambda *a, **k: reached.append(True) or False)
+    monkeypatch.setattr(
+        spark_mod, "get_or_create_spark_session", lambda *a, **k: None)
+    m.evaluation(
+        env="local", model_version=None, post_training=False,
+        compare=None, compare_only=None, rebuild_dates=None,
+        from_node=None, only_node=None, dry_run=False, list_nodes=False,
+    )
+    return bool(reached)
+
+
+@pytest.mark.parametrize("ci", [{}, {"enabled": False}, None],
+                         ids=["empty", "disabled", "null"])
+def test_a61_the_evaluation_command_stops_on_the_retired_block(
+    ci, monkeypatch, tmp_path, caplog,
+):
+    """Behavioural half: whatever the block holds, the command stops before
+    the pipeline and says A61."""
+    import logging
+
+    import typer
+
+    with caplog.at_level(logging.ERROR), pytest.raises(typer.Exit):
+        _run_evaluation_command(
+            monkeypatch, tmp_path, {"sample": {"seed": 42}, "ci": ci})
+    assert "A61:" in caplog.text
+
+
+def test_a61_the_evaluation_command_runs_without_the_block(
+    monkeypatch, tmp_path,
+):
+    """The control: the same stubbed run without the block reaches the
+    pipeline, so the test above is red for A61 and not for the stubs."""
+    assert _run_evaluation_command(
+        monkeypatch, tmp_path, {"sample": {"seed": 42}})
 
 
 def test_a44_reaches_the_global_aggregator():

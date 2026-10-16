@@ -36,7 +36,7 @@ def test_per_item_reports_ranks_not_percentiles():
     合成樣本每 query 只有 2 個候選，名次只可能是 1 或 2——若實作退回百分位
     （0.5／1.0）這條會紅。
     """
-    out = compute((_sample(), {"n_queries": 40}), _params(n_boot=0))
+    out = compute((_sample(), {"n_queries": 40}), _params())
     item = out["per_item"][0]
     assert set(item["positive_ranks"]) <= {1, 2}
     assert item["median_positive_rank"] in (1.0, 1.5, 2.0)
@@ -47,7 +47,7 @@ def test_per_item_reports_ranks_not_percentiles():
 
 def test_candidates_per_query_reports_query_size():
     """名次的分母（每 query 幾個候選）要交代清楚。合成樣本固定 2 個候選。"""
-    out = compute((_sample(), {"n_queries": 40}), _params(n_boot=0))
+    out = compute((_sample(), {"n_queries": 40}), _params())
     cpq = out["candidates_per_query"]
     assert cpq == {"min": 2, "median": 2.0, "max": 2}
 
@@ -128,37 +128,6 @@ def test_weighted_auc_vectorized_matches_reference():
             assert vec == pytest.approx(ref, abs=1e-12), f"trial {trial}: {vec} != {ref}"
 
 
-def test_bootstrap_sorts_once_per_item_regardless_of_n_boot(monkeypatch):
-    """效能契約：排序次數 ＝ item 數，與 n_boot 無關。
-
-    腳本原版每次 weighted_auc 呼叫都重排（N_items × (n_boot+2) 次排序）。
-
-    這裡數的是本模組自己的 presort_by_score，不是 np.argsort——np.argsort
-    連 pandas 內部的排序都會數進來，得到的數字既不穩定也指不出是誰在排。
-    斷言用「等於 item 數」而不只是「與 n_boot 無關」：後者對一個
-    「每個 item 排兩次」的實作照樣成立。
-    """
-    import recsys_tfb.diagnosis.metric.item_ability._compute as m
-
-    calls = {"n": 0}
-    real = m.presort_by_score
-    monkeypatch.setattr(
-        m, "presort_by_score",
-        lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), real(*a, **k))[1],
-    )
-
-    sample = _sample()
-    n_items = sample["prod_name"].nunique()
-    compute((sample, {"n_queries": 40}), _params(n_boot=5))
-    few = calls["n"]
-    calls["n"] = 0
-    compute((sample, {"n_queries": 40}), _params(n_boot=200))
-    many = calls["n"]
-    assert few == many, f"排序次數隨 n_boot 增長：{few} → {many}"
-    # raw 與 query-centered 各排一次 → 每個 item 兩次
-    assert many == 2 * n_items, f"預期 {2 * n_items} 次排序，實得 {many}"
-
-
 def test_reports_both_raw_and_query_centered_auc():
     out = compute((_sample(), {"n_queries": 40}), _params())
     item = out["per_item"][0]
@@ -189,8 +158,8 @@ def test_inclusion_weight_changes_the_auc():
     base["inclusion_weight"] = 1.0
     heavy = base.copy()
     heavy.loc[heavy["cust_id"] < "c20", "inclusion_weight"] = 8.0
-    a = compute((base, {"n_queries": 40}), _params(n_boot=0))
-    b = compute((heavy, {"n_queries": 40}), _params(n_boot=0))
+    a = compute((base, {"n_queries": 40}), _params())
+    b = compute((heavy, {"n_queries": 40}), _params())
     assert a["per_item"][0]["raw_within_item_auc"] != \
         b["per_item"][0]["raw_within_item_auc"]
 
@@ -233,13 +202,12 @@ def test_disabled_returns_stub_with_same_key_set():
     assert stub["enabled"] is False
 
 
-def _params(n_boot=20):
+def _params():
     return {
         "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
                                "item": "prod_name", "label": "label",
                                "score": "score"}},
-        "evaluation": {"diagnosis": {"ci": {"enabled": True, "n_boot": n_boot},
-                                     "sample": {"seed": 42},
+        "evaluation": {"diagnosis": {"sample": {"seed": 42},
                                      "item_ability": {"enabled": True, "top_n": 30}}},
     }
 
@@ -270,7 +238,7 @@ def test_per_item_step_name_is_fixed_and_the_scale_is_a_field(caplog):
     import logging
 
     with caplog.at_level(logging.INFO):
-        compute((_sample(), {"n_queries": 40}), _params(n_boot=0))
+        compute((_sample(), {"n_queries": 40}), _params())
 
     started = [r for r in caplog.records
                if getattr(r, "event", None) == "step_started"]

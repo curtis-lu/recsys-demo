@@ -118,7 +118,7 @@ evaluation:
   # shrinkage_k=0 ＝ 不收縮。作用順序：min_positives 先排除 → shrinkage 向
   # pooled（n_pos 加權）平均收縮 → weight_alpha 加權（w_j ∝ n_pos^α）。
   # 只作用於 item 粒度（by_item / by_item_segment）；by_segment 維持等權。
-  # k = 主指標家族（per-item macro 的點估與 CI）計算 AP 的截斷 k；null ＝ 不截斷
+  # k = 主指標家族（per-item macro，含報表的頭號 mAP）計算 AP 的截斷 k；null ＝ 不截斷
   # （full mAP）。跟 k_values 是兩個獨立的軸：不必列在 k_values 裡，主線會自己補算
   # map_attr@k。
   metric:
@@ -131,18 +131,18 @@ evaluation:
   # 的「全正的 query group」）。全正＝組內每一筆候選的 label 都是正例
   # （label 有分級時，每一筆都是同一個正值），不管怎麼排，它的組層級排序
   # 指標（mAP／precision／recall）都一樣、排法分不出好壞。開了之後，衡量
-  # 指標（overall／per-item／分群／大類）、熱門度基準線，以及
-  # `--compare`／`--compare-only` 比較報表的兩側都排除這種組（兩側各自依
-  # 自己的列判定）；不論開或關都會多印全正組數與佔比，佔比超過 10%（寫死
-  # 在程式，非設定鍵）就警告。**不套用**：頭號 mAP、報表診斷段、各診斷、
-  # training 的 test mAP 與 HPO 目標（唯讀入口見
+  # 指標（overall／per-item／分群／大類，含報表的頭號 mAP）、熱門度基準線，
+  # 以及 `--compare`／`--compare-only` 比較報表的兩側都排除這種組（兩側各自
+  # 依自己的列判定）；不論開或關都會多印全正組數與佔比，佔比超過 10%（寫死
+  # 在程式，非設定鍵）就警告。**不套用**：報表診斷段、各診斷、training 的
+  # test mAP 與 HPO 目標（唯讀入口見
   # `evaluation/metrics.py::drop_all_positive_groups`；設定檢查見
   # `core/consistency.py` A49）。改這個鍵要從 compute_metrics 重跑
   # （`COMPUTED_KEYS`）。
   # query_filter:
   #   drop_all_positive_groups: false
 
-  # 評估側診斷（Phase 1 起；spec §2 共用抽樣底座 + §3 Phase 1 CI）。
+  # 評估側診斷（Phase 1 起；spec §2 共用抽樣底座）。
   # 每項診斷只有這一個開關。關掉 => 仍會落地一份 {"enabled": false} 的 stub
   # JSON、但不產生頁面。想讓一項診斷「完全不存在」是改 code
   # （diagnosis.metric.contract.DIAGNOSES），不是改這裡。
@@ -168,12 +168,6 @@ evaluation:
       max_queries: 250000
       min_pos_queries_per_item: 50
       seed: 42
-    # per-item AP 與 macro 的 cluster bootstrap CI（cluster＝cust_id，
-    # 同一客戶跨期整批重抽）。driver 端 numpy、跑在上面的抽樣上。
-    ci:
-      enabled: true
-      n_boot: 200
-
     # 診斷 1／4：配置引入的排序偏移。純 config 算術＋2 次 mAP＋每 item 一次
     # 替換實驗。讀 schema 的 score 角色欄（offset 活在模型輸出的 log-odds
     # 空間，而 #411 移除校準器之後 score 就是模型原始輸出）。

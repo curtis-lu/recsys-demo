@@ -28,7 +28,7 @@ INPUTS: tuple[str, ...] = ("gain_ledger", "evaluation_item_ability", "parameters
 #:
 #: ``blind_to`` 前三條逐字對應任務規格的三個誠實條款：gain 是訓練期的量、
 #: 不是評測期的貢獻；「未分配」是 item 切點前的切點，不是誤差；這一項不吃
-#: 診斷抽樣，樣本規模與其餘四項無關。
+#: 診斷抽樣，樣本規模與其餘三項無關。
 SCOPE = ScopeNote(
     measures=(
         "全模型 LightGBM booster 的 split gain，依切點種類分成三份：item-id "

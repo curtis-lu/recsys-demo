@@ -88,8 +88,8 @@ python -m recsys_tfb <指令> --env dev
   - `external_hive` 類：要寫 `table`、`prod_mapping`，以及 `columns`：time、每一個 entity 欄、item、score 各要對到外部表的一欄。`unmapped_policy` 只能是 `fail` 或 `drop`，沒寫就是 `fail`。
 - **evaluation 的數值與開關**（`A15`、`A19`）：
   - `evaluation.metric.weight_alpha` 在 0 到 1 之間；`evaluation.metric.k` 是 `null` 或大於等於 1 的整數；`evaluation.metric.min_positives`、`evaluation.metric.shrinkage_k` 不能是負數。
-  - `evaluation.diagnosis.sample.max_queries`、`evaluation.diagnosis.sample.min_pos_queries_per_item`、`evaluation.diagnosis.ci.n_boot` 至少是 1；`evaluation.diagnosis.item_ability.top_n`、`evaluation.diagnosis.suppression.top_examples` 不能是負數。
-  - `evaluation.diagnosis.ci.enabled` 和每一個診斷的 `evaluation.diagnosis.<診斷名>.enabled`，必須是真正的 true／false。寫成字串 `"false"` 會被當成打開。
+  - `evaluation.diagnosis.sample.max_queries`、`evaluation.diagnosis.sample.min_pos_queries_per_item` 至少是 1；`evaluation.diagnosis.item_ability.top_n`、`evaluation.diagnosis.suppression.top_examples` 不能是負數。
+  - 每一個診斷的 `evaluation.diagnosis.<診斷名>.enabled` 必須是真正的 true／false。寫成字串 `"false"` 會被當成打開。
   - `evaluation.segment_columns` 不能用 `stratum`、`inclusion_weight` 這兩個保留名稱。
 - **`evaluation.product_categories`**：已經改名成 `evaluation.item_categories`，還寫舊名就擋（`A33`）。
 
@@ -113,6 +113,7 @@ python -m recsys_tfb <指令> --env dev
   - `evaluation.report.sections` 有寫任何開關的話，開關名稱必須剛好是 `dataset_overview`、`primary_map`、`diagnostics`、`baseline`、`diagnosis_links`、`prediction_quality` 這六個，多一個或少一個都擋（`A34`）。
   - `evaluation.prediction_quality` 的 `n_bins`、`n_display_bins` 是大於等於 1 的整數，而且後者要整除前者；`top_n` 是大於等於 0 的整數；這個區塊裡不能有別的鍵（`A42`）。不擋的話，分箱表最後一格會比其他格窄，而報表不會提；寫 `enabled: true` 也打不開這一段，開關在 `report.sections.prediction_quality`。
   - `evaluation.report.diagnostics` 底下不能再寫 `include_calibration`、`n_calibration_bins`，不論值是什麼（`A43`）。它們設定的 calibration 分箱表 #381 已經移除，留著不會有任何作用；分數分箱改由預測品質指標家族提供。
+  - `evaluation.diagnosis` 底下不能寫 `ci`，不論值是什麼，`enabled: false` 或空的區塊也擋（`A61`）。沒有程式讀這一段，刪掉整段即可，沒有替代的設定鍵。
   - 帶 `--post-training` 又打開 `evaluation.report.sections.prediction_quality` 時，`dataset.test_zero_positive_group_ratio` 必須大於 0（`A46`）。r 為 0（預設）的 test 表已經丟掉所有沒有正例的 query group，把每一列當二元預測的指標會系統性偏高。監控模式不查。
   - `evaluation.query_filter.drop_all_positive_groups` 有寫的話必須是 `true`／`false`；這個區塊裡不能有別的鍵（`A49`）。唯一的讀法（`evaluation/metrics.py::drop_all_positive_groups`）只用真假值判斷，寫錯值或鍵名不會報錯，只會悄悄不生效。
   - `evaluation.baseline.score` 有寫的話必須是 `count` 或 `rate`；`evaluation.baseline` 底下只能有 `lookback_months`、`score` 兩個鍵（`A50`）。唯一的讀法（`evaluation/baselines.py::baseline_score`）遇到不認得的值或鍵名不會報錯，只會悄悄維持正例數。

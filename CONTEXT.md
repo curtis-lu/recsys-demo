@@ -169,7 +169,7 @@ _Avoid_: test 月份（`test_snap_dates` 決定的是要預測哪些 time 值）
 
 **test mAP**:
 training 在 test 上算的 mAP：每個 query group 的 AP 不截斷、算完再對 query group 平均，產物鍵是 `overall_map`；當 HPO 目標或選版指標時叫 `mean_ap`。
-_Avoid_: 頭號 mAP（evaluation 報表開頭的數字：每個 item 先算再平均，截斷深度看 `evaluation.metric.k`；兩者不可對帳）
+_Avoid_: 頭號 mAP（evaluation 報表開頭的數字，取自 `metrics.json` 的 macro `map_attr@{evaluation.metric.k}`（未設時 `@all`）：每個 item 先算再平均；兩者不可對帳）
 
 ### 評估
 
@@ -192,9 +192,6 @@ _Avoid_: 大類（那是 item 的分組）
 
 **macro**:
 以 item 為單位先算、再跨 item 平均的指標彙整方式。
-
-**重抽單位**（ADR-0023，尚未實作）:
-算信賴區間時一起被重抽的 entity 欄位子集。
 
 **熱門度基準線**:
 不看模型、只按每個 item 過去一段時間的正例數（或正例率）排出名次的對照組，用來回答「模型有沒有比只看熱門度好」。

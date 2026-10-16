@@ -27,7 +27,7 @@ class TestEvaluationPipelineDefault:
             "evaluation_segment_columns", "evaluation_item_categories",
             "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
-            "enriched_eval_predictions", "evaluation_metric_ci",
+            "enriched_eval_predictions",
             "evaluation_diagnosis_pages",
             "evaluation_report_aggregates",
             "prediction_quality_metrics",
@@ -43,7 +43,6 @@ class TestEvaluationPipelineDefault:
             "compute_metrics", "compute_baseline_metrics",
             "compute_prediction_quality",
             "compute_report_aggregates",
-            "compute_metric_ci",
             "generate_report",
         ]
 
@@ -124,9 +123,8 @@ class TestRegistryDiagnosesFollowTheMode:
             assert len(producers) == 1, f"[{label}] {producers}"
 
     def test_monitoring_draws_no_sample_for_diagnoses_it_does_not_wire(self):
-        """With the metric CI off, monitoring mode has no consumer of the
-        diagnosis sample left, so it must not draw one; post-training still
-        does, for its registry diagnoses.
+        """Monitoring mode wires no consumer of the diagnosis sample, so it
+        must not draw one; post-training does, for its registry diagnoses.
 
         The draw is a driver-side ``toPandas`` of up to
         ``diagnosis.sample.max_queries`` queries. Drawing it for nobody raises
@@ -150,7 +148,7 @@ class TestRegistryDiagnosesFollowTheMode:
             "schema": {"columns": {
                 "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
             }},
-            "evaluation": {"diagnosis": {"ci": {"enabled": False}}},
+            "evaluation": {},
         }
         segments = {"joined": [], "config_fingerprint": fingerprint(params)}
         outcome = {}
@@ -206,7 +204,7 @@ class TestFingerprintRerunNodes:
     FINGERPRINTED_PRODUCERS = {
         "compute_metrics", "compute_baseline_metrics",
         "compute_prediction_quality",
-        "compute_report_aggregates", "compute_metric_ci",
+        "compute_report_aggregates",
     }
     MODES = TestRegistryDiagnosesFollowTheMode.MODES
 
@@ -263,7 +261,6 @@ class TestEvaluationPipelinePostTraining:
             "compute_metrics", "compute_baseline_metrics",
             "compute_prediction_quality",
             "compute_report_aggregates",
-            "compute_metric_ci",
             "diagnose_config_shift",
             "diagnose_item_ability",
             "diagnose_suppression",
@@ -283,7 +280,7 @@ class TestEvaluationPipelinePostTraining:
             "evaluation_segment_columns", "evaluation_item_categories",
             "diagnosis_sample", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
-            "enriched_eval_predictions", "evaluation_metric_ci",
+            "enriched_eval_predictions",
             "evaluation_config_shift", "evaluation_item_ability",
             "evaluation_model_capacity", "evaluation_suppression",
             "evaluation_diagnosis_pages",
@@ -307,9 +304,9 @@ class TestEvaluationPipelineCompareMode:
             "draw_diagnosis_sample_node", "compute_metrics",
             "compute_baseline_metrics", "compute_prediction_quality",
             "compute_report_aggregates",
-            "restrict_to_common", "compute_metric_ci",
-            "generate_comparison_report",
+            "restrict_to_common",
             "generate_report",
+            "generate_comparison_report",
         ]
 
     def test_pipeline_outputs_include_comparison_report(self):
@@ -590,8 +587,8 @@ class TestGenerateReportNodeWiring:
     report section just goes missing. This test pins that ordering.
 
     Catalog keys and parameter names aren't spelled identically: some carry an
-    "evaluation_" prefix the parameter names drop (evaluation_metric_ci ->
-    metric_ci). So the checkable property is: each catalog key equals its
+    "evaluation_" prefix the parameter names drop (evaluation_report_aggregates
+    -> report_aggregates). So the checkable property is: each catalog key equals its
     parameter name, optionally after stripping a leading "evaluation_",
     position-for-position.
 

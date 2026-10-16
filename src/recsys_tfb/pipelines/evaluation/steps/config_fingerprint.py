@@ -137,8 +137,8 @@ __all__ = [
 #: depending on it. Without it, a ``--post-training`` run followed by a
 #: monitoring ``--only-node generate_report`` on the same ``(model_version,
 #: snap_date)`` writes/reads the same catalog paths, the fingerprints of the
-#: unrelated keys match, and the report mixes metric CI / report aggregates
-#: computed on one population with metrics computed on the other, exit code 0.
+#: unrelated keys match, and the report mixes report aggregates computed on
+#: one population with metrics computed on the other, exit code 0.
 #: Unit tests that build ``parameters`` without a ``post_training`` key see it
 #: absent on both the write side (``fingerprint()`` in the producing node) and
 #: the check side (``require_computed_with_current_config``), so those stay

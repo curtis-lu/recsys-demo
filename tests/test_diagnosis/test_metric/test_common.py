@@ -90,32 +90,6 @@ def test_sample_arrays_with_inclusion_weight_populates_both():
     np.testing.assert_array_equal(row_weights, [2.0, 2.0, 5.0])
 
 
-def test_ci_for_corrected_minus_baseline_flips_sign_and_forwards_args(monkeypatch):
-    """兩件事一起釘：(1) 符號翻轉＋上下界對調——paired_bootstrap_delta 回反向差
-    (baseline − corrected) 的 [lo, hi]，wrapper 要回 corrected − baseline 即
-    (-hi, -lo)；(2) frame/metric_kwargs/shift/n_boot/seed 有正確轉發。純吞引數的
-    stub 測不出轉發錯位，改用記錄 call args 的 spy。"""
-    import recsys_tfb.diagnosis.metric._common as common
-    calls = {}
-
-    def spy(frame, metric_kwargs, shift, *, n_boot, seed):
-        calls.update(frame=frame, metric_kwargs=metric_kwargs, shift=shift,
-                     n_boot=n_boot, seed=seed)
-        return (0.1, 0.4)
-
-    monkeypatch.setattr(common, "paired_bootstrap_delta", spy)
-    sentinel_frame, sentinel_shift = object(), object()
-    lo, hi = common.ci_for_corrected_minus_baseline(
-        frame=sentinel_frame, metric_kwargs={"k": 3}, shift=sentinel_shift,
-        n_boot=17, seed=99,
-    )
-    assert (lo, hi) == (-0.4, -0.1)                    # 符號翻轉＋界對調
-    assert calls == {                                  # 引數逐一正確轉發
-        "frame": sentinel_frame, "metric_kwargs": {"k": 3},
-        "shift": sentinel_shift, "n_boot": 17, "seed": 99,
-    }
-
-
 def test_to_logit_transforms_scores_in_unit_interval():
     import numpy as np
     from recsys_tfb.diagnosis.metric._common import to_logit
@@ -214,18 +188,16 @@ def test_every_query_ranking_consumer_is_skipped_with_event():
     from recsys_tfb.diagnosis.metric._common import schema_skip_reason
 
     params = _skip_params(event="imp_id")
-    assert {
-        "config_shift", "item_ability", "suppression", "ci",
-    } == {
+    assert {"config_shift", "item_ability", "suppression"} == {
         n for n in ("config_shift", "item_ability", "suppression",
-                    "model_capacity", "ci")
+                    "model_capacity")
         if schema_skip_reason(params, n)
     }
 
 
 def test_only_item_ability_is_skipped_with_only_occasion():
     """只宣告 occasion（#428）：同組內 item 仍唯一，所以 event 的那條理由不
-    成立，ci、config_shift、suppression 照跑。item_ability 跳過，理由是另一條
+    成立，config_shift、suppression 照跑。item_ability 跳過，理由是另一條
     判準（spec #426 決定 E：「假設每組候選數固定」）——它扣掉每組的平均分數
     才比較，一組是一次請求時，那個平均取決於這次擺了哪幾個素材，不再是它
     SCOPE 說的「這個 entity 的整體分數水準」；只擺一個素材的請求扣完恆為 0。"""
@@ -234,7 +206,7 @@ def test_only_item_ability_is_skipped_with_only_occasion():
     params = _skip_params(occasion="req_id")
     assert {
         n for n in ("config_shift", "item_ability", "suppression",
-                    "model_capacity", "ci")
+                    "model_capacity")
         if schema_skip_reason(params, n)
     } == {"item_ability"}
     reason = schema_skip_reason(params, "item_ability")
@@ -242,15 +214,15 @@ def test_only_item_ability_is_skipped_with_only_occasion():
 
 
 def test_event_decides_when_both_roles_are_declared():
-    """兩個都宣告：同組同 item 多列又回來了，event 那條理由涵蓋四項。"""
+    """兩個都宣告：同組同 item 多列又回來了，event 那條理由涵蓋三項。"""
     from recsys_tfb.diagnosis.metric._common import schema_skip_reason
 
     params = _skip_params(event="imp_id", occasion="req_id")
     assert {
-        n for n in ("config_shift", "item_ability", "suppression", "ci")
+        n for n in ("config_shift", "item_ability", "suppression")
         if schema_skip_reason(params, n)
-    } == {"config_shift", "item_ability", "suppression", "ci"}
-    assert "event" in schema_skip_reason(params, "ci")
+    } == {"config_shift", "item_ability", "suppression"}
+    assert "event" in schema_skip_reason(params, "config_shift")
 
 
 def test_model_capacity_still_runs_with_event():
@@ -293,9 +265,8 @@ def test_the_report_says_why_a_skipped_page_is_missing():
 
     assert skipped_diagnosis_bullets(_skip_params()) == []
     lines = skipped_diagnosis_bullets(_skip_params(event="imp_id"))
-    # 三項 registry 診斷 ＋ 頭號指標的信賴區間（共用抽樣的第四個消費者，不在
-    # contract.DIAGNOSES 裡，所以只列 DIAGNOSES 會漏掉它）。
-    assert len(lines) == 4
+    # 吃共用抽樣的三項 registry 診斷；model_capacity 照跑，不在裡面。
+    assert len(lines) == 3
     assert all("event" in line for line in lines)
     assert any("suppression" in line for line in lines)
-    assert any("信賴區間" in line for line in lines)
+    assert not any("model_capacity" in line for line in lines)

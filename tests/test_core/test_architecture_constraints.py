@@ -162,6 +162,8 @@ def test_static_coverage_floor():
     """
     total = sum(1 for _ in _node_calls())
     judgeable = sum(1 for _ in _judgeable_nodes())
+    # 60/57: #515 deleted evaluation's confidence-interval node, one literal,
+    # statically judgeable call.
     # 61/58: #518 deleted dataset's `validate_numeric_precision` (the B8
     # precision gate), one literal, statically judgeable call.
     # 62/59: removing training's feature-statistics node deleted one
@@ -192,7 +194,7 @@ def test_static_coverage_floor():
     # of the two `validate_model_input_grain` calls (the branch existed only
     # to append the calibration pair to its input list). All three were
     # literal, so total and judgeable both drop by 3.
-    assert (total, judgeable) == (61, 58), (
+    assert (total, judgeable) == (60, 57), (
         f"Node coverage changed: {judgeable}/{total} statically judgeable. "
         "If this dropped, A5/A6 now have a bigger blind spot -- check why."
     )

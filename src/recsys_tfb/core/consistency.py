@@ -106,8 +106,7 @@ Layer 1 — config-static (implemented here; aggregated by
   ``weight_alpha`` ∈ [0,1]; ``k`` null or int ≥ 1; ``min_positives`` ≥ 0;
   ``shrinkage_k`` ≥ 0; ``diagnosis.sample.max_queries`` ≥ 1;
   ``diagnosis.sample.min_pos_queries_per_item`` ≥ 1;
-  ``diagnosis.ci.n_boot`` ≥ 1; ``diagnosis.item_ability.top_n`` ≥ 0;
-  ``diagnosis.ci.enabled`` and every
+  ``diagnosis.item_ability.top_n`` ≥ 0; every
   ``diagnosis.<name>.enabled`` for ``name`` in
   ``diagnosis.metric.contract.DIAGNOSES`` must be a real bool (a quoted YAML
   ``"false"`` is truthy and would silently enable the node); and
@@ -115,8 +114,8 @@ Layer 1 — config-static (implemented here; aggregated by
   ``stratum`` / ``inclusion_weight``. Predicate:
   ``diagnosis_metric_param_errors``. Registry diagnoses stay in A15 rather
   than getting their own code: their ``enabled`` flag is what decides whether
-  the shared diagnosis sample is drawn, i.e. the same invariant family as
-  ``ci.enabled``.
+  the shared diagnosis sample is drawn, i.e. the same invariant family as the
+  ``diagnosis.sample`` domains.
 * A16 — retired 2026-07-17 with the reconciliation layer. The code is NOT
   renumbered: existing docs and plans cite invariants by number, so reusing
   A16 or shifting A17+ would silently repoint those references.
@@ -755,6 +754,17 @@ Layer 1 — config-static (implemented here; aggregated by
   predicate, its wiring, its tests and this legend entry. Leave the code slot
   ``A60`` retired-not-renumbered afterwards, per A16/A17/A18. Tracked in issue
   #518.
+* A61 — a conf still spelling ``evaluation.diagnosis.ci``. It configured the
+  bootstrap confidence intervals (the headline macro per-item mAP's,
+  ``config_shift``'s Δ and ``item_ability``'s per-item AUC); #515 removed all
+  three. A43's shape: **presence is the failure, whatever the value** —
+  ``enabled: false`` switches off nothing that still exists, and the key sits
+  under ``evaluation.diagnosis``, a fingerprinted subtree (``COMPUTED_KEYS``),
+  so a conf that keeps it is not the conf that deleted it. Keys:
+  :data:`RETIRED_DIAGNOSIS_CI_KEYS`. Predicate:
+  ``retired_diagnosis_ci_key_errors`` (returns errors; the evaluation command
+  raises, collected with A22/A34/A42/A43). NOT aggregated, for A43's reason:
+  the harm belongs to evaluation alone (A34's reason, issue #158).
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -765,7 +775,7 @@ window of ``evaluation.snap_date`` and be a time value sample_pool holds there.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
-flags), A22/A46/A51 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53/A57/A58 (config keys whose
+flags), A22/A46/A51 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53/A57/A58/A61 (config keys whose
 harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags), A59 (the ETL stage's config keys), A55 (``--only-test-months`` + the
 metastore). A56 needs the resolved catalog too, but hangs off no single command:
@@ -2286,15 +2296,13 @@ def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
 
     Absent blocks are fine (all keys have behavior-preserving defaults);
     present values must be in-domain, else the metric family silently
-    degenerates (e.g. alpha>1 over-concentrates on hot items) or the
-    bootstrap is undefined (n_boot<1).
+    degenerates (e.g. alpha>1 over-concentrates on hot items).
     """
     errors: list[str] = []
     ev = parameters.get("evaluation", {}) or {}
     metric = ev.get("metric", {}) or {}
     diag = ev.get("diagnosis", {}) or {}
     sample = diag.get("sample", {}) or {}
-    ci = diag.get("ci", {}) or {}
 
     alpha = metric.get("weight_alpha", 0.0)
     if not (_is_number(alpha) and 0.0 <= float(alpha) <= 1.0):
@@ -2326,7 +2334,6 @@ def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
          sample.get("max_queries", 200000), 1),
         ("evaluation.diagnosis.sample.min_pos_queries_per_item",
          sample.get("min_pos_queries_per_item", 50), 1),
-        ("evaluation.diagnosis.ci.n_boot", ci.get("n_boot", 200), 1),
         ("evaluation.diagnosis.item_ability.top_n",
          (diag.get("item_ability", {}) or {}).get("top_n", 30), 0),
     ):
@@ -2334,19 +2341,11 @@ def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
                 and val >= floor):
             errors.append(f"{key}={val!r} must be an int >= {floor}.")
 
-    en = ci.get("enabled", True)
-    if not isinstance(en, bool):
-        errors.append(
-            f"evaluation.diagnosis.ci.enabled={en!r} must be a boolean "
-            f"(YAML true/false; a quoted string like \"false\" is truthy and "
-            f"would silently enable the node)."
-        )
-
-    # Same YAML trap for every registry diagnosis (diagnosis.metric.contract.
-    # DIAGNOSES). These belong to A15 rather than a new code: their `enabled`
-    # is what decides whether the SHARED diagnosis sample gets drawn at all,
-    # so it is another member of the same invariant as ci.enabled — not a
-    # separate concern.
+    # A quoted YAML "false" is truthy, for every registry diagnosis
+    # (diagnosis.metric.contract.DIAGNOSES). These belong to A15 rather than a
+    # new code: their `enabled` is what decides whether the SHARED diagnosis
+    # sample gets drawn at all, so they are members of the same invariant as
+    # the sample's own parameters above — not a separate concern.
     #
     # Imported lazily: core/ must not gain an import-time dependency on
     # diagnosis/ (the layering claim is that diagnosis sits above the core
@@ -3456,6 +3455,35 @@ def retired_precision_policy_key_errors(parameters: dict) -> list[str]:
         f"to be left out of base_dataset_version, and with that exclusion gone, "
         f"keeping the line computes a different base_dataset_version than "
         f"deleting it, which rebuilds the dataset and retrains every model."
+    ]
+
+
+#: A61: the ``evaluation.diagnosis`` block that configured the bootstrap
+#: confidence intervals #515 removed.
+RETIRED_DIAGNOSIS_CI_KEYS: tuple[str, ...] = (
+    "evaluation.diagnosis.ci",
+)
+
+
+def retired_diagnosis_ci_key_errors(parameters: dict) -> list[str]:
+    """A61 — refuse the confidence-interval block #515 retired, whatever its value.
+
+    Same reasoning as A43 (``retired_calibration_bin_key_errors``): nothing
+    reads it, so left in place it switches nothing and says nothing; and it
+    sits in a fingerprinted subtree, so keeping it is not the same conf as
+    deleting it.
+    """
+    present = [
+        dotted for dotted in RETIRED_DIAGNOSIS_CI_KEYS
+        if _dotted_key_present(parameters, dotted)
+    ]
+    if not present:
+        return []
+    return [
+        "A61: " + ", ".join(repr(k) for k in present) + " configured the "
+        "confidence intervals that #515 removed, and nothing reads it. Delete "
+        "the whole block; there is no replacement setting. The value does not "
+        "matter — `enabled: false` and an empty block are rejected too."
     ]
 
 

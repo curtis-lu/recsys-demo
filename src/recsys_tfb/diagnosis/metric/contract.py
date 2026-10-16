@@ -96,7 +96,7 @@ DIAGNOSES: tuple[str, ...] = (
 #:
 #: Declared by the diagnosis rather than added to the shared list because only
 #: that diagnosis reads them: in the shared list, changing
-#: ``dataset.sample_ratio`` would also mark the metric CI and the report
+#: ``dataset.sample_ratio`` would also mark ``metrics.json`` and the report
 #: aggregates stale. Combined in the node, with the fingerprint module never
 #: importing this package: the same dependency direction as :func:`inputs_for`
 #: (ADR-0020 decision 2). A missed declaration fails **silently**: change that

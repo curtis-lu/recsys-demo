@@ -16,10 +16,9 @@ centering、與它們的差講清楚一次），後面每區都是這組數字�
    auc_gap 的方向意義，用本次資料裡 |gap| 最大的 item 走一遍。
 1. **raw vs query-centered 散點**——把 auc_gap 畫成幾何（點沿 y 軸偏離對角線的
    落差）＋逐 item 精確值表（raw／centered／gap）。
-2. **逐 item AUC 的信賴區間**——raw／centered 各一張條圖，含 95% CI 與 0.500 線。
-3. **query-centered AUC vs AP**——能力 proxy 與實際排序指標對不對得上。
-4. **正例名次分布**——heatmap，每格是名次（1＝排最前），非百分位。
-5. **完整性檢查**（固定殿後）。
+2. **query-centered AUC vs AP**——能力 proxy 與實際排序指標對不對得上。
+3. **正例名次分布**——heatmap，每格是名次（1＝排最前），非百分位。
+4. **完整性檢查**（固定殿後）。
 
 **兩個 AUC 的定義在核心概念講一次**，各區只補自己專屬的數字定義（集中在
 :data:`_DEFS`，單一真實來源）。
@@ -40,17 +39,13 @@ import pandas as pd
 
 from recsys_tfb.report import ReportSection
 from recsys_tfb.report.figures import (
-    MAX_FIGURE_POINTS, bar, fits_budget, heatmap, scatter,
+    MAX_FIGURE_POINTS, fits_budget, heatmap, scatter,
 )
 from recsys_tfb.report.fmt import fmt_ap, fmt_auc, fmt_count, fmt_delta, fmt_mean
 
 _ITEM = "item"
 _RAW_AUC = "raw_within_item_auc"
 _CENTERED_AUC = "query_centered_auc"
-_RAW_CI_LOW = "raw_within_item_auc_ci_low"
-_RAW_CI_HIGH = "raw_within_item_auc_ci_high"
-_CENTERED_CI_LOW = "query_centered_auc_ci_low"
-_CENTERED_CI_HIGH = "query_centered_auc_ci_high"
 _GAP = "auc_gap_raw_minus_centered"
 _AP = "ap"
 
@@ -147,8 +142,6 @@ def _summary_section(result: dict) -> ReportSection:
                    f"{fmt_count(result.get('n_positive_rows'))} 正例列"},
             {"分類": "規模與尺度（非好壞）", "指標": "每 query 候選數（名次的分母）",
              "值": _candidates_display(result)},
-            {"分類": "規模與尺度（非好壞）", "指標": "bootstrap 重抽次數",
-             "值": fmt_count((result.get("ci") or {}).get("n_boot"))},
         ],
         columns=["分類", "指標", "值"],
     )
@@ -167,7 +160,6 @@ def _summary_section(result: dict) -> ReportSection:
             "如何讀這頁（想回答什麼 → 看哪一區，順序不必照排）：",
             "想知道看起來的排序能力是真的、還是來自客戶整體分數水準 → "
             "「核心概念」＋「raw vs query-centered 散點」。",
-            "想逐 item 看兩個 AUC 有多少不確定性 → 「逐 item AUC 的信賴區間」。",
             "想看排序能力（query-centered AUC）跟實際排序指標（AP）對不對得起來 "
             "→ 「query-centered AUC vs AP」。",
             "想知道某個 item 的買家實際排在 query 內第幾名 → 「正例名次分布」。",
@@ -245,7 +237,7 @@ def _foundation_section(result: dict) -> ReportSection:
             "所以 query-centered AUC 才是 item 自己的排序能力；raw 與 gap 是用來看"
             "「有沒有混入、混入多少、哪個方向」。",
             "下面每一區都是這組數字的不同切面：散點看 raw 與 centered 的關係與 gap "
-            "的幾何、CI 看每個 AUC 的不確定性、AUC vs AP 看能力對不對得上實際指標、"
+            "的幾何、AUC vs AP 看能力對不對得上實際指標、"
             "名次分布看買家實際排第幾。",
         ],
         tables=tables,
@@ -277,8 +269,8 @@ def _scatter_section(result: dict) -> ReportSection | None:
         "散點看形狀、表看精確值。",
         "表上 gap 由未捨入的 AUC 算出，與顯示的 raw、centered（各 3 位小數）相減"
         "可能差在末位。",
-        "這張圖看不到不確定性：AUC 的信賴區間在下一區，n_pos 小的 item 點位可能"
-        "只是抽樣雜訊。",
+        "這張圖看不到不確定性：n_pos 小的 item 點位可能只是抽樣雜訊，對照右表的"
+        " n_pos 欄。",
     ]
 
     if fits_budget(len(rows)):
@@ -332,82 +324,7 @@ def _scatter_section(result: dict) -> ReportSection | None:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 2. 逐 item AUC 的信賴區間
-# ─────────────────────────────────────────────────────────────────────────
-
-def _per_item_auc_ci_section(result: dict) -> ReportSection | None:
-    rows = _rows_with(result.get("per_item") or [], _RAW_AUC, _CENTERED_AUC)
-    if not rows:
-        return None
-
-    items = [str(r[_ITEM]) for r in rows]
-    n_boot = (result.get("ci") or {}).get("n_boot")
-
-    figures: list[Any] = []
-    tables: list[pd.DataFrame] = [_defs_table("raw AUC", "query-centered AUC")]
-    table_titles: list[str] = [_DEFS_TITLE]
-    bullets = [
-        f"每根長條是一個 item 的 AUC，誤差線是 95% 信賴區間；0.500 的橫虛線"
-        f"（{_RANDOM_AUC:.3f}）＝在這個 item 內完全分不出正負例。",
-        "某 item 的 query-centered AUC 誤差線整段在 0.500 之上，代表在這份樣本"
-        "上它的 query 內排序能力與「隨機」可區分；壓到 0.500 則不可區分——"
-        "n_pos 小的 item 區間通常較寬。",
-        "兩張圖分開看 raw 與 centered；同一個 item 兩者的落差就是前一區的 gap。",
-        "長條依 item 的 AP 由低到高排列（與散點表的 |gap| 序、名次熱圖的名次序"
-        "不同，跨區找同一個 item 要各區重找）。",
-    ]
-
-    if fits_budget(len(rows)):
-        for auc_key, ci_lo_key, ci_hi_key, label in (
-            (_RAW_AUC, _RAW_CI_LOW, _RAW_CI_HIGH, "raw AUC"),
-            (_CENTERED_AUC, _CENTERED_CI_LOW, _CENTERED_CI_HIGH, "query-centered AUC"),
-        ):
-            fig = bar(
-                x=items, y=[r[auc_key] for r in rows],
-                title=f"逐 item 的 {label}（95% CI）",
-                x_title=_ITEM, y_title=label,
-                ci_low=[r.get(ci_lo_key) for r in rows],
-                ci_high=[r.get(ci_hi_key) for r in rows],
-            )
-            fig.add_hline(y=_RANDOM_AUC, line=dict(dash="dot", width=1))
-            figures.append(fig)
-    else:
-        tables.append(pd.DataFrame(
-            [
-                {
-                    _ITEM: r[_ITEM],
-                    "raw AUC": fmt_auc(r.get(_RAW_AUC)),
-                    "raw CI": f"[{fmt_auc(r.get(_RAW_CI_LOW))}, {fmt_auc(r.get(_RAW_CI_HIGH))}]",
-                    "centered AUC": fmt_auc(r.get(_CENTERED_AUC)),
-                    "centered CI": f"[{fmt_auc(r.get(_CENTERED_CI_LOW))}, "
-                                   f"{fmt_auc(r.get(_CENTERED_CI_HIGH))}]",
-                }
-                for r in rows
-            ],
-            columns=[_ITEM, "raw AUC", "raw CI", "centered AUC", "centered CI"],
-        ))
-        table_titles.append("逐 item 的 raw／query-centered AUC（95% CI）")
-        bullets.append(
-            f"item 共 {len(rows)} 個，超過單張圖的 {MAX_FIGURE_POINTS} 點上限，"
-            "改以表格呈現。"
-        )
-
-    if n_boot is not None:
-        bullets.append(f"CI 來自 {fmt_count(n_boot)} 次分層 cluster bootstrap 重抽。")
-
-    return ReportSection(
-        title="逐 item 的 AUC（含信賴區間）",
-        description="raw 與 query-centered AUC 各自的點估計與 95% 區間，逐 item 對照。",
-        formula="誤差線 ＝ 95% 區間（分層 cluster bootstrap，cluster＝entity）；橫虛線 0.500＝沒有辨識力",
-        bullets=bullets,
-        figures=figures,
-        tables=tables,
-        table_titles=table_titles,
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# 3. query-centered AUC vs AP——能力 proxy 與實際排序指標
+# 2. query-centered AUC vs AP——能力 proxy 與實際排序指標
 # ─────────────────────────────────────────────────────────────────────────
 
 def _auc_vs_ap_section(result: dict) -> ReportSection | None:
@@ -469,7 +386,7 @@ def _auc_vs_ap_section(result: dict) -> ReportSection | None:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 4. 正例名次分布——heatmap，格子是名次（1＝排最前）
+# 3. 正例名次分布——heatmap，格子是名次（1＝排最前）
 # ─────────────────────────────────────────────────────────────────────────
 
 def _rank_section(result: dict) -> ReportSection | None:
@@ -529,19 +446,18 @@ def _rank_section(result: dict) -> ReportSection | None:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 5. 完整性檢查
+# 4. 完整性檢查
 # ─────────────────────────────────────────────────────────────────────────
 
 def _completeness_section(result: dict) -> ReportSection:
     """本次執行的完整性檢查——不可省，空的時候也照樣印「無」。
 
     與 ``config_shift`` 的 ``_visibility_section`` 同一份角色分工：頁首
-    ``ScopeNote.blind_to`` 是這個指標**結構上**推論不到的事，這一節是三種
+    ``ScopeNote.blind_to`` 是這個指標**結構上**推論不到的事，這一節是兩種
     **已知靜默失效**在**本次執行**的實際結果。
     """
     per_item = result.get("per_item") or []
     notes = result.get("notes") or []
-    ci_info = result.get("ci") or {}
     mp = result.get("metric_params") or {}
 
     missing_auc = [
@@ -555,14 +471,9 @@ def _completeness_section(result: dict) -> ReportSection:
         f"每 query 候選數（名次的分母）：{_candidates_display(result)}。",
         "計算層 notes（含 logit 轉換的觀測）："
         + (f"{len(notes)} 則，列於下方" if notes else "無"),
-        "本次抽樣中正例或負例列數為 0、未算出 AUC 的 item（不進散點圖與長條圖，"
+        "本次抽樣中正例或負例列數為 0、未算出 AUC 的 item（不進散點圖，"
         "但仍計入下面的 item 總數）："
         + (", ".join(missing_auc) if missing_auc else "無"),
-        "本次執行是否啟用信賴區間 bootstrap："
-        + (
-            f"啟用，{fmt_count(ci_info.get('n_boot'))} 次重抽"
-            if ci_info.get("enabled") else "未啟用"
-        ),
     ]
     bullets.extend(str(n) for n in notes)
     bullets.append(
@@ -584,8 +495,8 @@ def render(result: dict, parameters: dict) -> tuple[ReportSection, ...]:
     """把 ``compute`` 的輸出轉成一串報表章節；停用時回空 tuple。
 
     順序即閱讀順序：概覽 → 核心概念（兩個 AUC 與它們的差）→ raw vs centered
-    散點（gap 的幾何）→ 逐 item AUC 的信賴區間 → query-centered AUC vs AP →
-    正例名次分布 → 完整性檢查。概覽與核心概念永遠在最前、完整性檢查永遠殿後。
+    散點（gap 的幾何）→ query-centered AUC vs AP → 正例名次分布 → 完整性
+    檢查。概覽與核心概念永遠在最前、完整性檢查永遠殿後。
     """
     if not result.get("enabled"):
         return ()
@@ -594,7 +505,6 @@ def render(result: dict, parameters: dict) -> tuple[ReportSection, ...]:
         _summary_section(result),
         _foundation_section(result),
         _scatter_section(result),
-        _per_item_auc_ci_section(result),
         _auc_vs_ap_section(result),
         _rank_section(result),
         _completeness_section(result),

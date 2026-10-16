@@ -12,8 +12,8 @@ One rule, written twice — once per engine — and nowhere else:
   too, so its top-1 is evaluation's top-1 when ``event`` is declared (ADR-0030
   decision 12).
 * :func:`order_by_score_then_item` is the numpy twin for the driver: the metric
-  primitives in ``evaluation/metrics.py`` (which HPO scores trials with), the
-  metric diagnoses and their bootstrap.
+  primitives in ``evaluation/metrics.py`` (which HPO scores trials with) and
+  the metric diagnoses.
 
 Every one of those places used to spell the sort out itself — Spark as
 ``row_number()`` by score descending, numpy as ``np.lexsort((-score, groups))``

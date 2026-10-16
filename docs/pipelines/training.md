@@ -279,8 +279,8 @@ training 另會產生 `sample_weight_report.json`，列出實際 train 資料中
 |---|---|
 | `cache.root` | driver-local Parquet 與演算法格式快取根目錄 |
 | `diagnostics.feature_importance` | 控制模型原生 split/gain importance |
-| `diagnostics.gain_ledger` | 控制 Gain 帳本開關；跨樹按 item 記帳（id 切點 vs 子樹內 context 切點/Gain），量每個產品分到多少個人化容量。判讀見 `docs/pipelines/evaluation-diagnosis.md` §2（本檔不複述） |
-| `diagnostics.shap` | 控制 SHAP 開關、抽樣量、top K、計算預算、per-item 強化（方向、申辦客戶對照、偏離度）與象限診斷（per-(item×象限) profile 與極值案例圖）；`background: global\|per_item` 的條件化背景語意與版本限制見 `docs/pipelines/evaluation-diagnosis.md` §2.5 |
+| `diagnostics.gain_ledger` | 控制 Gain 帳本開關；跨樹按 item 記帳（id 切點 vs 子樹內 context 切點/Gain），量每個產品分到多少個人化容量。判讀見 `docs/pipelines/evaluation-diagnosis.md` §1（本檔不複述） |
+| `diagnostics.shap` | 控制 SHAP 開關、抽樣量、top K、計算預算、per-item 強化（方向、申辦客戶對照、偏離度）與象限診斷（per-(item×象限) profile 與極值案例圖）；`background: global\|per_item` 的條件化背景語意與版本限制見 `docs/pipelines/evaluation-diagnosis.md` §1.5 |
 | `mlflow` | 設定 experiment、tracking URI 與失敗策略 |
 | `hpo_checkpointing` | 是否持久化 Optuna study 與最佳模型 checkpoint |
 | `spark` | training CLI 初始化 Spark 使用的執行設定 |

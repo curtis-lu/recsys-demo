@@ -123,6 +123,8 @@ cp -r conf/dev conf/<你的名字>
 
 **第三個例外：evaluation 診斷的兩個校準分箱鍵，不論值都會報錯。** `evaluation.report.diagnostics.include_calibration` 與 `evaluation.report.diagnostics.n_calibration_bins` 只要還寫在設定裡，evaluation 就以 `A43:` 開頭的訊息停下來。它們設定的是一張分數分箱表，沒有人讀，#381 把它拿掉了。處理方式：刪掉那兩行。這是不變量 A43，predicate 是 `retired_calibration_bin_key_errors`（`src/recsys_tfb/core/consistency.py`）。
 
+**第四個例外：evaluation 的信賴區間設定 `evaluation.diagnosis.ci`，不論值都會報錯。** 設定裡只要還留著 `evaluation.diagnosis.ci` 這一段（`enabled: false` 或空的區塊也一樣），evaluation 就以 `A61:` 開頭的訊息停下來，還沒啟動 Spark。它設定的是頭號指標、`config_shift`、`item_ability` 的 bootstrap 信賴區間，#515 把它們拿掉了，沒有替代的設定鍵。處理方式：刪掉整段 `ci:`。這是不變量 A61，predicate 是 `retired_diagnosis_ci_key_errors`（`src/recsys_tfb/core/consistency.py`）。
+
 ## 6. 確認這份程式碼在你的機器上跑得起來
 
 repo 附的不是資料，是**產生器**：`data/` 在版本控制裡是空的，`scripts/local/generate_synthetic_data.py` 會在需要時產生合成資料，`scripts/local/local_spark_setup.py` 發現缺檔時會自動呼叫它。所以你 clone 下來看到空的 `data/` 是正常的。
@@ -167,7 +169,7 @@ diff -ru recsys_tfb-v0.3.0/conf recsys_tfb-v0.4.0/conf              # 或兩版�
 
 那幾個差異是升級前最值得花的時間：
 
-- `conf/base/` 的差異告訴你**設定鍵有沒有改名或搬家**，那是升級後最常見的故障來源，而且如 §5〈舊的鍵名多半不會報錯〉所說，除了那六區與三個例外，對不上的鍵不會報錯。
+- `conf/base/` 的差異告訴你**設定鍵有沒有改名或搬家**，那是升級後最常見的故障來源，而且如 §5〈舊的鍵名多半不會報錯〉所說，除了那六區與四個例外，對不上的鍵不會報錯。
 - `conf/sql/` 與 `conf/spark-local/` 的差異告訴你**框架附的範本改了什麼**，你自己那兩份要不要跟著改。這兩處分層蓋不到，只能靠人比對。
 
 另外幾件會改變行為、光看設定差異容易漏掉的事：

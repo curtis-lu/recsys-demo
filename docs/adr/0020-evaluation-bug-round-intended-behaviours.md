@@ -252,6 +252,8 @@ date: 2026-09-13
 
 ### 設計 H（併入本輪）：`evaluation.metric` 有多份讀取程式碼，`metric.k` 只有 CI 那邊讀
 
+（2026-10-16：文中 metric CI 的部分已隨信賴區間移除，見 #515；`metric.k` 的定義仍有效）
+
 **現象**：`metric.k` 設成非 null 時，metric CI 會截斷在 k、主指標的點估不會，而概覽段的註腳宣稱兩者相同。讀 `evaluation.metric` 的程式碼：`src/` 四個讀取點（`metrics_spark.py`、`diagnosis/metric/uncertainty.py`、`diagnosis/metric/_common.py`、`report_builder.py`）**形狀各異**——有的讀 `k` 有的不讀、缺鍵時的 fallback 不同；`scripts/` 五份 `metric_params()` 彼此逐字相同、但跟 `_common.py` 那份在 `or 0.0` 的 fallback 上語意不同。
 
 **決定**：

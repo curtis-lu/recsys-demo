@@ -457,7 +457,9 @@ def test_the_report_finds_map_and_recall_at_all_with_the_event_role(spark):
     assert overall.loc["map", "@all"] == pytest.approx(0.625)
     assert overall.loc["recall", "@all"] == pytest.approx(1.0)
 
-    card = rb.build_overview_section(out, params).tables[0]
+    s = rb.build_overview_section(out, params)
+    card = s.tables[s.table_titles.index(
+        "overall mAP@k（per-query 等權，另一種加權）")]
     assert card.loc["map@all", "value"] == pytest.approx(0.625)
 
 
