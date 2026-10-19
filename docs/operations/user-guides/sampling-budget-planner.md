@@ -47,7 +47,7 @@ PYTHONPATH=src .venv/bin/python scripts/profile_sample_pool.py run ml_recsys.sam
 
 `ml_recsys.sample_pool` 是表名的例子，換成你的表；也可以給 parquet 路徑。
 
-**設定的讀法跟 pipeline 一樣**：先讀 `conf/base/`，再把 `conf/<env>/` 疊上去。`<env>` 填你跑 pipeline 時給 `--env` 的那個值；不寫就是 `local`，跟 pipeline 一樣。`conf/` 底下沒有這個資料夾（例如打錯字）會直接報錯，不會只用 `conf/base/` 默默跑完。設定是從目前目錄的 `conf/` 讀的，所以要在 repo 根目錄下指令。步驟 2 和編輯器也是這樣讀設定。
+**設定的讀法跟 pipeline 一樣**：先讀 `conf/base/`，再把 `conf/<env>/` 疊上去。`<env>` 填你跑 pipeline 時給 `--env` 的那個值；不寫就是 `local`，跟 pipeline 一樣。`conf/` 底下沒有這個資料夾（例如打錯字）會直接報錯，不會只用 `conf/base/` 默默跑完。設定裡的 `${env.*}` 也跟 pipeline 一樣要先設好環境變數，缺了會直接報錯，並寫出缺哪個。設定是從目前目錄的 `conf/` 讀的，所以要在放 `conf/` 的那個目錄下指令，一般就是 repo 根目錄。步驟 2 和編輯器也是這樣讀設定。
 
 **它數的是 dataset pipeline 抽樣時看到的那批列**，所以數出來的筆數就是預算要分配的母體：
 
@@ -93,7 +93,7 @@ PYTHONPATH=src .venv/bin/python scripts/sampling_budget_planner.py plan \
 
 ### 產出三個檔
 
-**`sample_ratio_overrides.yaml`**：每個抽樣格、正負兩類都寫出來，不留給 `dataset.sample_ratio` 補。key 照 `sample_group_keys` 的順序用 `|` 串接，label 那一段填 `0`（負）或 `1`（正）。例如 `sample_group_keys` 是 `[seg, prod, label]` 時，一格會寫成兩行：
+**`sample_ratio_overrides.yaml`**：每個有資料的抽樣格，正負兩類都寫出來，不留給 `dataset.sample_ratio` 補；沒資料的 key 不寫，見下面 `report.md` 的「沒寫進設定的 key」。key 照 `sample_group_keys` 的順序用 `|` 串接，label 那一段填 `0`（負）或 `1`（正）。例如 `sample_group_keys` 是 `[seg, prod, label]` 時，一格會寫成兩行：
 
 ```yaml
   sample_ratio_overrides:
@@ -105,13 +105,18 @@ PYTHONPATH=src .venv/bin/python scripts/sampling_budget_planner.py plan \
 
 **`sample_weights.yaml`**：`sample_weight_keys`（設成跟 `sample_group_keys` 一樣）和 `sample_weights`，key 跟保留率那份逐字相同。
 
-兩份檔的開頭都用註解記下這次的預算、profile 檔和旋鈕值，事後看得出是怎麼算出來的。保留率那份只記會影響保留率的旋鈕。
+兩份檔的開頭都用註解記下這次的預算、profile 檔和旋鈕值，事後看得出是怎麼算出來的。保留率那份只記會影響保留率的旋鈕。開頭最後一行寫有幾個 key 沒寫（`… key(s) have no entry`），全部都寫了就是 `Every key of every combination has an entry`。
 
 **`report.md`**：同樣的摘要也會印在終端。內容：
 
 - **λ、k、期望筆數。** λ 是讓期望筆數剛好等於預算的那個門檻；k 是讓抽出來的列平均權重等於 1 的倍數（LightGBM 的 `min_sum_hessian_in_leaf` 這類參數是絕對量，權重的整體大小會影響模型）。期望筆數拆成正、負兩類，並列出跟預算的差，差距來自換成整數個桶。最後是實際抽出筆數的標準差：每一列各自擲一次骰，所以實際抽出的筆數會在期望筆數上下這麼多的範圍內浮動。
 - **各 item 一張表：** 正樣本總數 P、留下的正樣本、正樣本保留 %、留下的負樣本、neg:pos、注意力 A、負樣本折數 v。
 - **被限制卡住的格數：** 保留率碰到 1、碰到正樣本下限、只剩 1 個桶的各有幾類。
+- **沒寫進設定的 key**（`Keys with no entry`）：逐一列出兩份檔裡沒有的 key 和原因，讓你分得出「故意不寫」和「設定漏了」。原因有三種：
+  - `no positive rows`／`no negative rows`：這一格在訓練月份裡只有另一類的列。
+  - `no rows at all`：這個組合在訓練月份裡完全沒有列，兩個 key 都不寫。組合的算法是：每個分層欄在 profile 裡出現過的值交叉起來，item 欄另外加上 `schema.categorical_values` 宣告的所有 item（item 清單是從資料數出來的就不加）。所以宣告了、但完全沒資料的 item 也會列在這裡。這種組合太多時只列前 100 個，但總數照算。
+
+  這些 key 在這次訓練裡沒有資料，沒東西可留、也沒東西可加權，不寫不影響結果。之後如果有這種列進來（例如資料更新或換了月份），抽樣時會用 `dataset.sample_ratio`、權重是 1.0；遇到這種情況要重跑步驟 1。
 - **自我檢查**，四條都要是 `[PASS]`：同 item 同一類在各分層的保留率 × 權重相等；各 item 加權後的正樣本率等於 `--weight-t`；各 item 的 loss 佔比跟 P 的 (1 − `--weight-alpha`) 次方成正比；平均權重等於 1。檢查讀的是寫進檔的文字，保留率照 pipeline 的方式截斷成整數個桶。任何一條失敗，工具只寫報告、不寫兩份設定檔。
 
 報告可能多出兩種說明：
@@ -128,6 +133,7 @@ PYTHONPATH=src .venv/bin/python scripts/sampling_budget_planner.py plan \
 k = 1.3031
 expected rows: 9,206 positive + 20,794 negative = 30,000 (budget 30,000, difference -0.01; the draw's standard deviation ≈ 114 rows)
 cell-classes held by a limit: capped at 1 24, positive floor 0, 1-bucket floor 0
+keys with no entry: 0
 self-checks: 4/4 passed
 ```
 

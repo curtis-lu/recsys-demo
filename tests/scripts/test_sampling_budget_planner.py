@@ -28,6 +28,7 @@ from typer.testing import CliRunner
 
 from recsys_tfb.utils.hashing import HASH_BUCKETS
 from scripts.sampling_budget_planner import (
+    NO_ROWS_SHOWN,
     PROFILE_FORMAT_VERSION,
     app,
     Cell,
@@ -35,6 +36,7 @@ from scripts.sampling_budget_planner import (
     PlanError,
     cells_from_profile,
     config_problems,
+    missing_entries,
     output_problems,
     override_entries,
     plan,
@@ -411,6 +413,59 @@ class TestEntries:
         assert overrides["seg_1|1|prod_A"] == "1.00000"
 
 
+class TestMissingEntries:
+    """Every key the snippets leave out is named, with why — so a reader can
+    tell a key left out on purpose from one the config forgot."""
+
+    def _missing(self, cells, group_keys=GROUP_KEYS_SPL, **kwargs):
+        result = plan(cells, budget=200_000, knobs=Knobs())
+        return missing_entries(result, override_entries(result, group_keys, "label"),
+                               group_keys, "label", **kwargs)
+
+    def test_a_class_with_no_rows_is_named(self):
+        # seg_3 never bought prod_C: its positive key has nothing to keep.
+        missing = self._missing(MIXED_CELLS)
+        assert missing.one_class == [("seg_3|prod_C|1", "no positive rows")]
+        assert (missing.no_rows, missing.keys) == (0, 1)
+
+    def test_a_combination_with_no_rows_names_both_keys(self):
+        # (seg_2, prod_B) is in neither class: seg_2 and prod_B each have rows
+        # elsewhere, so the grid seg x prod has it, and the profile does not.
+        cells = [c for c in MIXED_CELLS if c.values != ("seg_2", "prod_B")]
+        missing = self._missing(cells, group_keys=GROUP_KEYS)   # label in the middle
+        assert missing.one_class == [("seg_3|1|prod_C", "no positive rows")]
+        assert missing.no_rows == 1
+        assert missing.no_rows_shown == [("seg_2|0|prod_B", "seg_2|1|prod_B")]
+        assert missing.keys == 3
+
+    def test_a_declared_item_without_rows_is_a_combination_with_no_rows(self):
+        missing = self._missing(MIXED_CELLS, extra_levels={
+            "prod": ["prod_A", "prod_B", "prod_C", "prod_D"]})
+        assert missing.no_rows == 3
+        assert [neg for neg, _ in missing.no_rows_shown] == [
+            "seg_1|prod_D|0", "seg_2|prod_D|0", "seg_3|prod_D|0"]
+
+    def test_every_key_of_the_grid_is_written_or_named(self):
+        # The grid by hand: 3 segs x 4 items x 2 labels = 24 keys.
+        cells = [c for c in MIXED_CELLS if c.values != ("seg_2", "prod_B")]
+        result = plan(cells, budget=200_000, knobs=Knobs())
+        overrides = override_entries(result, GROUP_KEYS_SPL, "label")
+        missing = missing_entries(result, overrides, GROUP_KEYS_SPL, "label",
+                                  extra_levels={"prod": ["prod_D"]})
+        named = {k for k, _ in missing.one_class} | {
+            k for pair in missing.no_rows_shown for k in pair}
+        grid = {f"{s}|{p}|{y}" for s in ("seg_1", "seg_2", "seg_3")
+                for p in ("prod_A", "prod_B", "prod_C", "prod_D") for y in "01"}
+        assert set(overrides) | named == grid and not set(overrides) & named
+        assert len(overrides) + missing.keys == 24
+
+    def test_only_the_first_combinations_are_listed_but_all_are_counted(self):
+        many = [f"prod_{i:03d}" for i in range(200)]
+        missing = self._missing(MIXED_CELLS, extra_levels={"prod": many})
+        assert missing.no_rows == 3 * 200          # every declared item is new
+        assert len(missing.no_rows_shown) == NO_ROWS_SHOWN
+
+
 class TestSelfChecks:
     """#525 acceptance 3: the checks the report prints, run on the emitted
     entries (the text that gets pasted), not on the plan's own floats."""
@@ -694,11 +749,10 @@ class TestCli:
         monkeypatch.chdir(tmp_path)
 
     def _run(self, tmp_path, *extra, params=None, profile=None, out="out", budget=200_000,
-             env_params=None, env="dev", cli_env="dev"):
+             env_params=None, env="dev", env_args=("--env", "dev")):
         profile_path = tmp_path / "profile.json"
         profile_path.write_text(json.dumps(profile or _mixed_profile()))
         _write_conf(tmp_path, params, env=env, env_params=env_params)
-        env_args = [] if cli_env is None else ["--env", cli_env]
         return CliRunner().invoke(app, [
             "plan", str(profile_path), "--budget", str(budget),
             "--out-dir", str(tmp_path / out), *env_args, *extra,
@@ -717,7 +771,7 @@ class TestCli:
 
     def test_an_env_without_a_conf_directory_is_refused(self, tmp_path):
         # A typo must not quietly plan on conf/base alone (A30, as the pipelines).
-        result = self._run(tmp_path, cli_env="dve")
+        result = self._run(tmp_path, env_args=("-e", "dve"))
         assert result.exit_code == 1
         assert "(A30) --env='dve'" in result.stderr
         assert not (tmp_path / "out").exists()
@@ -730,9 +784,40 @@ class TestCli:
         assert "differs" not in result.stderr
 
     def test_env_defaults_to_local_as_for_the_pipelines(self, tmp_path):
-        result = self._run(tmp_path, env="local", env_params=ONE_MONTH_OVERLAY, cli_env=None)
+        result = self._run(tmp_path, env="local", env_params=ONE_MONTH_OVERLAY, env_args=())
         assert result.exit_code == 0, result.stdout + result.stderr
         assert "dataset.train_snap_dates ['2025-01-31'] differs" in result.stderr
+
+    @staticmethod
+    def _headers(tmp_path):
+        return ["".join(line for line in (tmp_path / "out" / name).read_text().splitlines(True)
+                        if line.startswith("#"))
+                for name in ("sample_ratio_overrides.yaml", "sample_weights.yaml")]
+
+    def test_keys_left_out_are_said_in_both_snippets_the_report_and_the_terminal(
+            self, tmp_path):
+        # seg_3 never bought prod_C: one key. prod_D is declared but has no
+        # rows at all: three combinations, two keys each.
+        params = _params()
+        params["schema"]["categorical_values"]["prod"].append("prod_D")
+        result = self._run(tmp_path, params=params)
+        assert result.exit_code == 0, result.stdout + result.stderr
+        for header in self._headers(tmp_path):
+            assert "# 7 key(s) have no entry" in header, header
+            assert "kept at dataset.sample_ratio and weighted 1.0" in header
+        report = (tmp_path / "out" / "report.md").read_text()
+        section = report.split("## Keys with no entry\n")[1].split("\n## ")[0]
+        assert "- `seg_3|prod_C|1` — no positive rows\n" in section
+        assert "- `seg_1|prod_D|0`, `seg_1|prod_D|1` — no rows at all\n" in section
+        assert "keys with no entry: 7" in result.stdout
+
+    def test_when_no_key_is_left_out_the_snippets_say_so(self, tmp_path):
+        full = _profile([(c.values, c.n_pos or 1, c.n_neg) for c in MIXED_CELLS])
+        result = self._run(tmp_path, profile=full)
+        assert result.exit_code == 0, result.stdout + result.stderr
+        for header in self._headers(tmp_path):
+            assert "# Every key of every combination has an entry" in header, header
+        assert "keys with no entry: 0" in result.stdout
 
     def test_writes_two_pasteable_snippets_and_a_report(self, tmp_path):
         result = self._run(tmp_path)

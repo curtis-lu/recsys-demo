@@ -975,7 +975,7 @@ def _write_conf(root, *, schema, dataset, training, env="dev", env_params=None):
 
 
 class TestToYamlCli:
-    def _write_params(self, tmp_path):
+    def _write_params(self, tmp_path, env_params=None):
         # time / entity / item have no defaults since #328, so all three are
         # declared; label keeps its default in get_schema.
         _write_conf(
@@ -985,24 +985,36 @@ class TestToYamlCli:
                     "categorical_values": {"prod_name": ["a", "b"]}},
             dataset={"prepare_model_input": {"categorical_columns": ["prod_name"]},
                      "sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
-            training={"sample_weight_keys": ["prod_name", "label"]})
+            training={"sample_weight_keys": ["prod_name", "label"]},
+            env_params=env_params)
 
-    def test_to_yaml_prints_both_blocks(self, tmp_path, monkeypatch):
+    def _to_yaml(self, tmp_path, monkeypatch, weight_item="b", env_params=None):
         export = {
             "sample_group_keys": ["cust_segment_typ", "prod_name", "label"],
             "sample_weight_keys": ["prod_name", "label"],
             "ratio_rows": [{"keys": ["mass", "a"], "ratio": 0.5}],
-            "weight_rows": [{"keys": ["b"], "w_pos": 0.7, "w_neg": 0.2}],
+            "weight_rows": [{"keys": [weight_item], "w_pos": 0.7, "w_neg": 0.2}],
         }
         jf = tmp_path / "e.json"
         jf.write_text(json.dumps(export))
-        self._write_params(tmp_path)
+        self._write_params(tmp_path, env_params)
         monkeypatch.chdir(tmp_path)    # conf/ is read from the working directory
-        r = CliRunner().invoke(app, ["to-yaml", str(jf), "--env", "dev"])
+        return CliRunner().invoke(app, ["to-yaml", str(jf), "--env", "dev"])
+
+    def test_to_yaml_prints_both_blocks(self, tmp_path, monkeypatch):
+        r = self._to_yaml(tmp_path, monkeypatch)
         assert r.exit_code == 0, r.output
         assert "sample_ratio_overrides:" in r.output and "mass|a|0" in r.output
         assert "sample_weights:" in r.output
         assert "b|1" in r.output and "b|0" in r.output
+
+    def test_items_are_checked_against_the_env_overlay(self, tmp_path, monkeypatch):
+        # Only conf/dev declares item c, so a weight on c passes A9c only when
+        # the overlay was read.
+        r = self._to_yaml(tmp_path, monkeypatch, weight_item="c", env_params={
+            "parameters": {"schema": {"categorical_values": {"prod_name": ["a", "b", "c"]}}}})
+        assert r.exit_code == 0, r.output
+        assert "c|1" in r.output and "c|0" in r.output
 
     def test_env_defaults_to_local_as_for_the_pipelines(self, tmp_path, monkeypatch):
         jf = tmp_path / "e.json"
@@ -1023,16 +1035,20 @@ class TestProfileReadsTheConfigAsThePipelinesDo:
     """
 
     def _invoke(self, tmp_path, monkeypatch, train_snap_dates, env_params=None,
-                cli_env="dev"):
+                env_args=("--env", "dev")):
         import scripts.sampling_overrides_editor as editor
 
         seen = {}
+
+        def fake_load_spark_df(source):
+            seen["read"] = source
+            return object()
 
         def fake_profile_stats(df, snaps, **kwargs):
             seen["snaps"] = snaps
             raise ValueError("stop after the dates were read")
 
-        monkeypatch.setattr(editor, "_load_spark_df", lambda source: object())
+        monkeypatch.setattr(editor, "_load_spark_df", fake_load_spark_df)
         monkeypatch.setattr(editor, "profile_stats", fake_profile_stats)
         _write_conf(
             tmp_path,
@@ -1043,7 +1059,6 @@ class TestProfileReadsTheConfigAsThePipelinesDo:
             training={"sample_weight_keys": ["prod_name", "label"]},
             env_params=env_params)
         monkeypatch.chdir(tmp_path)
-        env_args = [] if cli_env is None else ["--env", cli_env]
         result = CliRunner().invoke(app, ["profile", "db.t", *env_args])
         return result, seen
 
@@ -1057,13 +1072,15 @@ class TestProfileReadsTheConfigAsThePipelinesDo:
         assert "ratio_dims=['prod_name']" in result.output
 
     def test_an_env_without_a_conf_directory_is_refused(self, tmp_path, monkeypatch):
-        result, seen = self._invoke(tmp_path, monkeypatch, ["2025-01-31"], cli_env="dve")
+        # Refused before sample_pool is read, not after Spark has started.
+        result, seen = self._invoke(tmp_path, monkeypatch, ["2025-01-31"],
+                                    env_args=("-e", "dve"))
         assert result.exit_code == 1
-        assert "snaps" not in seen
+        assert "read" not in seen and "snaps" not in seen
         assert "(A30) --env='dve'" in result.output
 
     def test_env_defaults_to_local_as_for_the_pipelines(self, tmp_path, monkeypatch):
-        result, _ = self._invoke(tmp_path, monkeypatch, ["2025-01-31"], cli_env=None)
+        result, _ = self._invoke(tmp_path, monkeypatch, ["2025-01-31"], env_args=())
         assert result.exit_code == 1               # only conf/dev was written
         assert "(A30) --env='local'" in result.output
 

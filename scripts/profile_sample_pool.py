@@ -34,7 +34,8 @@ scripts/sampling_overrides_editor.py — unit-tested via
 ``from scripts.profile_sample_pool import ...`` in tests/scripts/. Not part of
 the production DAG.
 
-Usage (from the repo root; config read as ``--env`` reads it for the pipelines):
+Usage (from the directory holding conf/, the repo root as a rule; config read
+as ``--env`` reads it for the pipelines):
   python scripts/profile_sample_pool.py run ml_recsys.sample_pool --env <env>
   python scripts/profile_sample_pool.py run data/sample_pool.parquet --env <env>
 """

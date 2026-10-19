@@ -19,7 +19,8 @@ scripts/promote_model.py / scripts/suggest_categorical_cols.py convention —
 unit-tested via ``from scripts.sampling_overrides_editor import ...`` in
 tests/scripts/. Not part of the production DAG.
 
-Usage (from the repo root; config read as ``--env`` reads it for the pipelines):
+Usage (from the directory holding conf/, the repo root as a rule; config read
+as ``--env`` reads it for the pipelines):
   python scripts/sampling_overrides_editor.py profile ml_recsys.sample_pool --env <env>
   python scripts/sampling_overrides_editor.py to-yaml \\
       data/profiling/sampling_overrides_export.json --env <env>

@@ -192,7 +192,7 @@ class TestCli:
     the pipelines read it (conf/base, then the ``--env`` overlay)."""
 
     def _run(self, spark, tmp_path, monkeypatch, rows=ROWS, env_params=None, env="dev",
-             cli_env="dev"):
+             env_args=("--env", "dev")):
         source = tmp_path / "pool.parquet"
         _frame(spark, rows).write.parquet(str(source))
         params = _params(training={"sample_weight_keys": ["seg", "prod_name", "label", "risk_band"]})
@@ -210,9 +210,19 @@ class TestCli:
             (overlay / f"{stem}.yaml").write_text(yaml.safe_dump(content))
         monkeypatch.chdir(tmp_path)    # after the spark fixture built its session
         out = tmp_path / "profiling" / "profile.json"
-        env_args = [] if cli_env is None else ["--env", cli_env]
         result = CliRunner().invoke(app, ["run", str(source), "--out", str(out), *env_args])
         return result, out
+
+    @staticmethod
+    def _record_reads(monkeypatch):
+        """Record every sample_pool read, so a test can say none happened."""
+        import scripts.profile_sample_pool as profiler
+
+        reads = []
+        real = profiler._load_spark_df
+        monkeypatch.setattr(profiler, "_load_spark_df",
+                            lambda source: reads.append(source) or real(source))
+        return reads
 
     def test_null_key_rows_are_warned_about_on_the_terminal(self, spark, tmp_path, monkeypatch):
         rows = ROWS + [("2025-01-31", "c9", "prod_A", None, 0)] * 3
@@ -236,14 +246,17 @@ class TestCli:
         ]
 
     def test_an_env_without_a_conf_directory_is_refused(self, spark, tmp_path, monkeypatch):
-        # A typo must not quietly count with conf/base alone (A30, as the pipelines).
-        result, out = self._run(spark, tmp_path, monkeypatch, cli_env="dve")
+        # A typo must not quietly count with conf/base alone (A30, as the
+        # pipelines) — and must say so before sample_pool is read, not after
+        # minutes of SparkSession start-up.
+        reads = self._record_reads(monkeypatch)
+        result, out = self._run(spark, tmp_path, monkeypatch, env_args=("-e", "dve"))
         assert result.exit_code == 1
         assert "(A30) --env='dve'" in result.stderr
-        assert not out.exists()
+        assert reads == [] and not out.exists()
 
     def test_env_defaults_to_local_as_for_the_pipelines(self, spark, tmp_path, monkeypatch):
-        result, _ = self._run(spark, tmp_path, monkeypatch, cli_env=None)
+        result, _ = self._run(spark, tmp_path, monkeypatch, env_args=())
         assert result.exit_code == 1               # only conf/dev was written
         assert "(A30) --env='local'" in result.stderr
 

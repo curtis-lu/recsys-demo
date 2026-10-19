@@ -345,7 +345,7 @@ PYTHONPATH=src .venv/bin/python scripts/sampling_overrides_editor.py profile <db
   [--t 0.1666] [--alpha 0.5] [--target-neg-pos 5.0] [--pos-warn-min 30]
 ```
 
-`profile` 和 `to-yaml` 讀設定的方式都跟 pipeline 一樣：先讀 `conf/base/`，再把 `--env` 指定的 `conf/<env>/` 疊上去（不寫就是 `local`）。`conf/` 底下沒有這個資料夾會直接報錯。設定從目前目錄的 `conf/` 讀，所以要在 repo 根目錄下指令。
+`profile` 和 `to-yaml` 讀設定的方式都跟 pipeline 一樣：先讀 `conf/base/`，再把 `--env` 指定的 `conf/<env>/` 疊上去（不寫就是 `local`）。`conf/` 底下沒有這個資料夾會直接報錯。設定裡的 `${env.*}` 也跟 pipeline 一樣要先設好環境變數，缺了會直接報錯。設定從目前目錄的 `conf/` 讀，所以要在放 `conf/` 的那個目錄下指令，一般就是 repo 根目錄。
 
 1. **profile**：對 `sample_group_keys ∪ sample_weight_keys`（去 label）的最細粒度，掃 `sample_pool`
    各格 `n_pos`/`n_neg`，產出 HTML。
