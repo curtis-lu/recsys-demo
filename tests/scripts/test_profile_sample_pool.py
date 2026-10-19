@@ -104,6 +104,37 @@ class TestPopulation:
         ]
 
 
+class TestKeysMatchThePipelines:
+    @pytest.mark.parametrize("time_type", ["string", "date", "timestamp"])
+    def test_planner_keys_from_profile_values_are_the_draws_own_keys(self, spark, time_type):
+        # The draw joins overrides on its own `_gk` (every key part cast to
+        # string in Spark). A profile value recorded any other way — a BOOLEAN
+        # as Python prints it ("True", not "true"), say — builds a key that
+        # never matches. Read back through JSON, as the planner reads it.
+        from pyspark.sql import functions as F
+
+        from recsys_tfb.pipelines.dataset.steps.sampling import with_effective_sample_ratio
+        from recsys_tfb.pipelines.dataset.steps.scoping import months_filter_as_date
+        from scripts.sampling_budget_planner import cell_key
+
+        group_keys = ["snap_date", "is_vip", "prod_name", "label"]
+        df = _frame(spark, time_type=time_type).withColumn("is_vip", F.col("cust_id") == "c1")
+        profile = json.loads(json.dumps(build_profile(
+            df, _params(dataset={"sample_group_keys": group_keys},
+                        training={"sample_weight_keys": []}), "pool")))
+        planner_keys = {
+            cell_key(tuple(c["values"].values()), group_keys, "label", label)
+            for c in profile["cells"]
+            for label, n in (("1", c["n_pos"]), ("0", c["n_neg"])) if n
+        }
+        drawn = with_effective_sample_ratio(
+            df.filter(months_filter_as_date("snap_date", TRAIN_MONTHS)),
+            group_keys, 1.0, {"unused": 0.5})
+        pipeline_keys = {r["_gk"] for r in drawn.select("_gk").distinct().collect()}
+        assert planner_keys == pipeline_keys
+        assert len(planner_keys) == 5
+
+
 class TestWhatTheFileRecords:
     def test_the_conditions_it_was_made_under(self, spark):
         profile = build_profile(_frame(spark), _params(), "db.sample_pool")

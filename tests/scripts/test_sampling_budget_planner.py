@@ -145,6 +145,16 @@ class TestRetentionAtAFixedLambda:
         assert r[("s1", "A")] == pytest.approx((1.0, 1 / 7))   # r_IS+ = 9/7 -> 1
         assert r[("s2", "A")] == pytest.approx((1 / 3, 1 / 3))
 
+    def test_the_item_average_counts_a_capped_cell_at_its_cap(self):
+        # lambda=1/10: r_IS-(A,s1) = 10/14, r_IS-(A,s2) = 10/6 -> kept whole.
+        # rbar_A = (90k * 10/14 + 10k * 1) / 100k = 26/35, not the 17/21 an
+        # uncapped average gives; it is what the item really keeps.
+        knobs = Knobs(**{**HAND_KNOBS.__dict__, "eta": 0.5})
+        cells = plan(HAND_CELLS, budget=10**9, knobs=knobs).cells
+        r = dict(zip([c.cell.values for c in cells], retention(cells, lam=0.1, knobs=knobs)))
+        assert r[("s1", "A")][1] == pytest.approx(0.5 * 10 / 14 + 0.5 * 26 / 35)   # 51/70
+        assert r[("s2", "A")][1] == 1.0
+
     def test_gamma_takes_the_value_to_a_power_before_dividing(self):
         r = self._retention(gamma=0.5, eta=0.0, pos_floor=0.0)
         assert r[("s2", "A")] == pytest.approx(((5000 / 3) ** 0.5 / 10_000,) * 2)
@@ -378,6 +388,20 @@ class TestSelfChecks:
             "loss_share_follows_P_to_the_1_minus_weight_alpha",
             "mean_weight_is_one",
         ]
+        assert all(c.passed for c in checks), [c for c in checks if not c.passed]
+
+    def test_a_keep_rate_is_read_back_as_the_pipeline_truncates_it(self):
+        # (b + 0.5) / 100000 is the fallback literal: as a float it is half a
+        # bucket off b / 100000, truncated it is exactly b. The weights were
+        # divided by b / 100000, so only the truncating reading agrees.
+        keys = ["seg", "prod", "label"]
+        result = plan(MIXED_CELLS, budget=200_000, knobs=Knobs())
+        overrides = {
+            key: f"{(round(float(text) * HASH_BUCKETS) + 0.5) / HASH_BUCKETS:.6f}"
+            for key, text in override_entries(result, keys, "label").items()
+        }
+        checks = self_checks(result, overrides, weight_entries(result, keys, "label"),
+                             keys, "label")
         assert all(c.passed for c in checks), [c for c in checks if not c.passed]
 
     @pytest.mark.parametrize("victims, failing", [
