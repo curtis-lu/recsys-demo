@@ -93,7 +93,7 @@ PYTHONPATH=src .venv/bin/python scripts/sampling_budget_planner.py plan \
 
 ### 產出三個檔
 
-**`sample_ratio_overrides.yaml`**：每個有資料的抽樣格，正負兩類都寫出來，不留給 `dataset.sample_ratio` 補；沒資料的 key 不寫，見下面 `report.md` 的「沒寫進設定的 key」。key 照 `sample_group_keys` 的順序用 `|` 串接，label 那一段填 `0`（負）或 `1`（正）。例如 `sample_group_keys` 是 `[seg, prod, label]` 時，一格會寫成兩行：
+**`sample_ratio_overrides.yaml`**：每一格的正、負兩類，只要有資料就寫一個 key，不留給 `dataset.sample_ratio` 補。沒有資料的那一類不寫，所以只有一類資料的格只會有一個 key；見下面 `report.md` 的「沒寫進設定的 key」。key 照 `sample_group_keys` 的順序用 `|` 串接，label 那一段填 `0`（負）或 `1`（正）。例如 `sample_group_keys` 是 `[seg, prod, label]` 時，一格會寫成兩行：
 
 ```yaml
   sample_ratio_overrides:
@@ -105,18 +105,21 @@ PYTHONPATH=src .venv/bin/python scripts/sampling_budget_planner.py plan \
 
 **`sample_weights.yaml`**：`sample_weight_keys`（設成跟 `sample_group_keys` 一樣）和 `sample_weights`，key 跟保留率那份逐字相同。
 
-兩份檔的開頭都用註解記下這次的預算、profile 檔和旋鈕值，事後看得出是怎麼算出來的。保留率那份只記會影響保留率的旋鈕。開頭最後一行寫有幾個 key 沒寫（`… key(s) have no entry`），全部都寫了就是 `Every key of every combination has an entry`。
+兩份檔的開頭都用註解記下這次的預算、profile 檔和旋鈕值，事後看得出是怎麼算出來的。保留率那份只記會影響保留率的旋鈕。開頭最後幾行寫有幾個 key 沒寫、各是哪種原因（`… key(s) have no entry`）；有宣告了卻完全沒資料的 item，會另寫一行點名（`Declared value(s) with no rows at all`）。全部都寫了，就只有一行 `Every key of every combination has an entry.`。
 
 **`report.md`**：同樣的摘要也會印在終端。內容：
 
 - **λ、k、期望筆數。** λ 是讓期望筆數剛好等於預算的那個門檻；k 是讓抽出來的列平均權重等於 1 的倍數（LightGBM 的 `min_sum_hessian_in_leaf` 這類參數是絕對量，權重的整體大小會影響模型）。期望筆數拆成正、負兩類，並列出跟預算的差，差距來自換成整數個桶。最後是實際抽出筆數的標準差：每一列各自擲一次骰，所以實際抽出的筆數會在期望筆數上下這麼多的範圍內浮動。
 - **各 item 一張表：** 正樣本總數 P、留下的正樣本、正樣本保留 %、留下的負樣本、neg:pos、注意力 A、負樣本折數 v。
 - **被限制卡住的格數：** 保留率碰到 1、碰到正樣本下限、只剩 1 個桶的各有幾類。
-- **沒寫進設定的 key**（`Keys with no entry`）：逐一列出兩份檔裡沒有的 key 和原因，讓你分得出「故意不寫」和「設定漏了」。原因有三種：
+- **沒寫進設定的 key**（`Keys with no entry`）：逐一列出兩份檔裡沒有的 key 和原因，讓你分得出「故意不寫」和「設定漏了」。
+  - **宣告了卻完全沒資料的 item** 列在最前面。它會讓所有跟它交叉的組合都沒有資料，通常就是你要回頭查的那一個。
   - `no positive rows`／`no negative rows`：這一格在訓練月份裡只有另一類的列。
-  - `no rows at all`：這個組合在訓練月份裡完全沒有列，兩個 key 都不寫。組合的算法是：每個分層欄在 profile 裡出現過的值交叉起來，item 欄另外加上 `schema.categorical_values` 宣告的所有 item（item 清單是從資料數出來的就不加）。所以宣告了、但完全沒資料的 item 也會列在這裡。這種組合太多時只列前 100 個，但總數照算。
+  - `no rows at all`：這個組合在訓練月份裡完全沒有列，兩個 key 都不寫。組合的算法是：每個分層欄在 profile 裡出現過的值交叉起來，item 欄另外加上 `schema.categorical_values` 宣告的所有 item（item 清單是從資料數出來的就不加）。所以本來就不可能出現的組合也算在這裡，例如分層欄有上下層關係（城市一定屬於某個區域）時，「A 區的 B 區城市」也會列出來。這種組合太多時只列前 100 個，但總數照算，開頭那行也會註明只列了前 100 個。
 
-  這些 key 在這次訓練裡沒有資料，沒東西可留、也沒東西可加權，不寫不影響結果。之後如果有這種列進來（例如資料更新或換了月份），抽樣時會用 `dataset.sample_ratio`、權重是 1.0；遇到這種情況要重跑步驟 1。
+  沒寫的 key 是指：**依 sample_pool 的 label 和分層值**，訓練月份裡沒有這種列，抽樣時沒有東西可留。之後如果有這種列進來（例如資料更新或換了月份），抽樣時會用 `dataset.sample_ratio`；遇到這種情況要重跑步驟 1。
+
+  權重那邊多一個例外：訓練時的 label 來自 label_table，不是 sample_pool。某一列的 label 在兩張表不一樣時，它是照 sample_pool 的 label 抽的，權重卻照 label_table 的 label 去找 key；那個 key 如果沒寫，這一列的權重就是 1.0，不是照規劃算的權重。工具目前沒有檢查兩張表的 label 一不一致。
 - **自我檢查**，四條都要是 `[PASS]`：同 item 同一類在各分層的保留率 × 權重相等；各 item 加權後的正樣本率等於 `--weight-t`；各 item 的 loss 佔比跟 P 的 (1 − `--weight-alpha`) 次方成正比；平均權重等於 1。檢查讀的是寫進檔的文字，保留率照 pipeline 的方式截斷成整數個桶。任何一條失敗，工具只寫報告、不寫兩份設定檔。
 
 報告可能多出兩種說明：

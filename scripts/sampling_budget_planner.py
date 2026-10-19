@@ -458,12 +458,18 @@ class Missing:
     ``one_class``: ``(key, why)`` for each cell that has rows of one class
     only. ``no_rows``: how many combinations have no rows at all, each leaving
     out both its keys; ``no_rows_shown`` lists the first :data:`NO_ROWS_SHOWN`
-    of them as ``(negative key, positive key)``.
+    of them as ``(negative key, positive key)``. ``values_without_rows``:
+    ``{sampling key: [values]}``, the values the grid takes from
+    ``extra_levels`` that no profiled row has (a declared item with no data).
+    Each one empties a whole slice of the grid, and strata nested in one
+    another (a city within its region) can fill the first combinations listed
+    with ones that cannot occur, so these are named apart, first.
     """
 
     one_class: list
     no_rows: int
     no_rows_shown: list
+    values_without_rows: dict
 
     @property
     def keys(self) -> int:
@@ -477,10 +483,13 @@ def missing_entries(result: Plan, overrides: dict[str, str], group_keys: list[st
 
     The grid crosses, for each sampling key, every value the profile has, plus
     ``extra_levels`` (the CLI passes the declared items, so that an item with
-    no rows at all is named too). A key is left out because it has no rows in
-    the profiled train months: there is nothing to keep or to weigh. Rows
-    under it that reach the draw later are kept at ``dataset.sample_ratio`` and
-    weighted 1.0 (``with_effective_sample_ratio``; ``io/extract.py``).
+    no rows at all is named too). A key is left out because sample_pool has
+    no rows under it in the profiled train months: the draw has nothing to
+    keep under it. A row drawn under such a key later is kept at
+    ``dataset.sample_ratio`` (``with_effective_sample_ratio``); a row trained
+    under one is weighted 1.0 (``io/extract.py``) — which also happens when a
+    row's label_table label differs from its sample_pool label, since the
+    draw keys rows by the one and the weights by the other.
     """
     one_class = sorted(
         (key, why)
@@ -489,15 +498,17 @@ def missing_entries(result: Plan, overrides: dict[str, str], group_keys: list[st
         if (key := cell_key(c.cell.values, group_keys, label_col, label)) not in overrides
     )
     dims = [k for k in group_keys if k != label_col]
-    levels = [sorted({c.cell.values[i] for c in result.cells}
-                     | {str(v) for v in (extra_levels or {}).get(dim, [])})
-              for i, dim in enumerate(dims)]
+    observed = [{c.cell.values[i] for c in result.cells} for i in range(len(dims))]
+    extra = [{str(v) for v in (extra_levels or {}).get(dim, [])} for dim in dims]
+    levels = [sorted(o | e) for o, e in zip(observed, extra)]
     seen = {c.cell.values for c in result.cells}
     unseen = (v for v in itertools.product(*levels) if v not in seen)
     shown = [tuple(cell_key(v, group_keys, label_col, label) for label in (_NEG_LABEL, _POS_LABEL))
              for v in itertools.islice(unseen, NO_ROWS_SHOWN)]
     return Missing(one_class=one_class, no_rows=math.prod(map(len, levels)) - len(seen),
-                   no_rows_shown=shown)
+                   no_rows_shown=shown,
+                   values_without_rows={dim: sorted(e - o)
+                                        for dim, o, e in zip(dims, observed, extra) if e - o})
 
 
 @dataclass(frozen=True)
@@ -737,14 +748,40 @@ def _source_lines(profile_path: str, profile: dict, budget: int) -> list[str]:
     ]
 
 
-def _missing_line(missing: Missing) -> str:
-    """One line on the keys left out, for both snippets' headers."""
+_VALUES_SHOWN = 10     # values without rows a header or terminal line names
+
+
+def _values_without_rows_text(missing: Missing) -> str:
+    """``dim: v1, v2`` per sampling key, at most :data:`_VALUES_SHOWN` values each."""
+    parts = []
+    for dim, values in missing.values_without_rows.items():
+        more = len(values) - _VALUES_SHOWN
+        parts.append(f"{dim}: {', '.join(values[:_VALUES_SHOWN])}"
+                     + (f" and {more} more" if more > 0 else ""))
+    return "; ".join(parts)
+
+
+def _missing_counts(missing: Missing) -> str:
+    return (f"{len(missing.one_class)} from cells with one class only, "
+            f"{2 * missing.no_rows} from {missing.no_rows} combination(s) with no rows at all")
+
+
+def _missing_lines(missing: Missing) -> list[str]:
+    """The lines on the keys left out, for both snippets' headers."""
     if not missing.keys:
-        return ("Every key of every combination has an entry: none is left to "
-                "dataset.sample_ratio.")
-    return (f"{missing.keys} key(s) have no entry: no such rows in the train months "
-            f"profiled (report.md lists them). Rows under such a key, should any reach "
-            f"the draw, are kept at dataset.sample_ratio and weighted 1.0.")
+        return ["Every key of every combination has an entry."]
+    listed = ("report.md lists them" if missing.no_rows == len(missing.no_rows_shown)
+              else f"report.md lists them, the first {NO_ROWS_SHOWN} combinations only")
+    lines = [
+        f"{missing.keys} key(s) have no entry: sample_pool has no such rows in the train "
+        f"months profiled. {_missing_counts(missing)}; {listed}.",
+    ]
+    if missing.values_without_rows:
+        lines.append(f"Declared value(s) with no rows at all: {_values_without_rows_text(missing)}.")
+    lines.append("A row drawn under such a key is kept at dataset.sample_ratio; a row trained "
+                 "under one is weighted 1.0 (as when its label_table label differs from "
+                 "sample_pool's).")
+    return lines
 
 
 def render_ratio_yaml(overrides: dict[str, str], profile_path: str, profile: dict,
@@ -762,7 +799,7 @@ def render_ratio_yaml(overrides: dict[str, str], profile_path: str, profile: dic
         _knob_line(knobs),
         "weight_t / weight_alpha do not reach this file: change only them and it "
         "stays byte-identical.",
-        _missing_line(missing),
+        *_missing_lines(missing),
     ]
     body = ["  sample_ratio_overrides:"] + [
         f"    {json.dumps(k, ensure_ascii=False)}: {overrides[k]}" for k in sorted(overrides)]
@@ -782,7 +819,7 @@ def render_weight_yaml(weights: dict[str, float], group_keys: list[str], profile
         f"weight_alpha={knobs.weight_alpha_used}",
         "sample_weight_keys = dataset.sample_group_keys: HT needs weight keys at "
         "least as fine as the sampling keys.",
-        _missing_line(missing),
+        *_missing_lines(missing),
     ]
     body = (["  sample_weight_keys:"]
             + [f"    - {json.dumps(k, ensure_ascii=False)}" for k in group_keys]
@@ -853,13 +890,23 @@ def _missing_section(missing: Missing) -> list[str]:
     table: keys hold ``|``, which a markdown table would split on."""
     lines = ["## Keys with no entry", "",
              "Combinations cross every value each sampling key has in the profile, "
-             "plus every declared item. A key below has no rows in the train months "
-             "profiled, so there is nothing to keep or weigh and the snippets leave "
-             "it out. Rows under it that reach the draw later (new data, other "
-             "months) are kept at `dataset.sample_ratio` and weighted 1.0; rerun the "
-             "profile then.", ""]
+             "plus every declared item; one that cannot occur (a city outside its "
+             "region, say) is counted too. sample_pool has no rows under a key below "
+             "in the train months profiled, so the draw has nothing to keep under it "
+             "and the snippets leave it out. A row drawn under such a key later (new "
+             "data, other months) is kept at `dataset.sample_ratio`; rerun the profile "
+             "then. A row trained under one is weighted 1.0, which also happens when a "
+             "row's label in label_table differs from its label in sample_pool: the "
+             "draw keys rows by sample_pool's label, the weights by label_table's.", ""]
     if not missing.keys:
         return lines + ["None.", ""]
+    lines += [f"- {_missing_counts(missing)}.", ""]
+    if missing.values_without_rows:
+        lines += ["Declared values with no rows at all (every combination with one is "
+                  "left out):", ""]
+        lines += [f"- `{dim}`: {', '.join(values)}"
+                  for dim, values in missing.values_without_rows.items()]
+        lines += [""]
     lines += [f"- `{key}` — {why}" for key, why in missing.one_class]
     lines += [f"- `{neg}`, `{pos}` — no rows at all" for neg, pos in missing.no_rows_shown]
     unlisted = missing.no_rows - len(missing.no_rows_shown)
@@ -993,8 +1040,9 @@ def plan_command(
     for line in summary_lines(result):
         typer.echo(line)
     typer.echo(f"keys with no entry: {missing.keys}"
-               + (" — no such rows in the train months; report.md lists them"
-                  if missing.keys else ""))
+               + (f" — {_missing_counts(missing)}; report.md lists them" if missing.keys else ""))
+    if missing.values_without_rows:
+        typer.echo(f"declared value(s) with no rows at all: {_values_without_rows_text(missing)}")
     passed = sum(c.passed for c in checks)
     typer.echo(f"self-checks: {passed}/{len(checks)} passed")
     if passed != len(checks):
