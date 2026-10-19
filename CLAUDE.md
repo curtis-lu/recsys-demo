@@ -32,7 +32,7 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 | 踩到怪錯誤（ELOOP / 改了沒生效 / 組合跑才 fail） | `docs/operations/known-pitfalls.md` |
 | HPO 中斷接續 | `docs/pipelines/training.md` §4.7（操作）＋ §7.3（恢復語意與 `_hpo/` 清理） |
 | 想多評估一個月份（加 `test_snap_dates`） | `docs/operations/user-guides/adding-an-eval-month.md`（不翻版本、不重訓；四步驟＋驗收） |
-| 抽樣權重設定 | `docs/operations/user-guides/sampling-overrides-editor.md`（部分 config 靠 `scripts/sampling_overrides_editor.py`、`scripts/suggest_categorical_cols.py` 推導，非手填） |
+| 抽樣權重設定 | 給抽樣預算一次算完：`docs/operations/user-guides/sampling-budget-planner.md`（`scripts/profile_sample_pool.py` 數 sample_pool → `scripts/sampling_budget_planner.py` 算兩份設定）；一格一格手調：`docs/operations/user-guides/sampling-overrides-editor.md`（部分 config 靠 `scripts/sampling_overrides_editor.py`、`scripts/suggest_categorical_cols.py` 推導，非手填） |
 | 做／改診斷報表的呈現層（表格、圖、定義、編排） | `docs/agents/diagnosis-report-presentation.md`（每段資訊扣回目的、地基量開頭講一次、選最能凸顯重點的媒介、判斷留給讀者） |
 | 派 subagent / 選模型 / 驗收 | 判準已常駐於 `~/.claude/rules/00-core.md`；寫派工 prompt 前載入 `dispatch-subagents` skill |
 

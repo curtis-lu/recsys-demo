@@ -751,7 +751,7 @@ def summary_lines(result: Plan) -> list[str]:
     lines += [
         f"k = {result.k:.6g}",
         f"expected rows: {pos:,.0f} positive + {neg:,.0f} negative = {pos + neg:,.0f} "
-        f"(budget {result.budget:,}, difference {pos + neg - result.budget:+,.0f})",
+        f"(budget {result.budget:,}, difference {pos + neg - result.budget:+,.2f})",
         "cell-classes held by a limit: " + ", ".join(
             f"{name} {n}" for name, n in _limit_counts(result).items()),
     ]
