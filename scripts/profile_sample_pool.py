@@ -19,7 +19,8 @@ logic, so changing a budget or a knob never rescans the table.
 - label: sample_pool's own column, the one the draw's keys are built from.
 
 **Granularity** is ``(sample_group_keys ∪ sample_weight_keys) \\ {label}``,
-sampling keys first — the editor's granularity, so it can read this file too.
+sampling keys first — the editor's granularity, so that the editor, once
+rewritten to read this file, needs no profile of its own.
 A weight key sample_pool does not have (a categorical only the feature table
 carries) is skipped, said out loud, and recorded. Every value is recorded the
 way the draw's key sees it: cast to string in Spark.
@@ -90,7 +91,12 @@ def granularity(parameters: dict, columns: list[str]) -> tuple[list[str], list[s
 
 
 def _train_months(dataset_cfg: dict) -> list[str]:
-    months = dataset_cfg["train_snap_dates"]
+    months = dataset_cfg.get("train_snap_dates")
+    if not months:
+        raise ValueError(
+            "dataset.train_snap_dates is not set in --params; the profile counts "
+            "the train months, so it needs them."
+        )
     if isinstance(months, dict):
         # Read here, not through ConfigLoader, so a range is expanded here (#374).
         months = expand_date_range(months, "dataset.train_snap_dates")
@@ -209,6 +215,23 @@ def _main() -> None:
     """Keeps ``run`` a named subcommand (Typer collapses a lone command)."""
 
 
+def _load_parameters(params: Path, train_params: Path, base_params: Path) -> dict:
+    """One parameters dict from the three yamls, the way the editor reads them.
+
+    Same text as sampling_budget_planner.py's, so the two scripts read one
+    config the same way (each stays self-contained).
+    """
+    ds = yaml.safe_load(params.read_text()) or {}
+    merged: dict = {}
+    if base_params.exists():
+        merged.update(yaml.safe_load(base_params.read_text()) or {})
+    if "schema" in ds:
+        merged["schema"] = ds["schema"]
+    merged["dataset"] = ds.get("dataset", ds)
+    merged["training"] = (yaml.safe_load(train_params.read_text()) or {}).get("training", {}) or {}
+    return merged
+
+
 def _load_spark_df(source: str):
     """A Hive table (db.table) or a parquet path, as the editor reads it."""
     from recsys_tfb.utils.spark import get_or_create_spark_session
@@ -231,12 +254,7 @@ def run(
         Path("conf/base/parameters.yaml"), help="base params yaml — source of schema"),
     out: Path = typer.Option(DEFAULT_OUT, help="where profile.json goes"),
 ) -> None:
-    ds = yaml.safe_load(params.read_text()) or {}
-    parameters = {
-        **(yaml.safe_load(base_params.read_text()) or {}),
-        "dataset": ds.get("dataset", ds),
-        "training": (yaml.safe_load(train_params.read_text()) or {}).get("training", {}) or {},
-    }
+    parameters = _load_parameters(params, train_params, base_params)
     typer.echo(f"[1/3] reading {source} (SparkSession start-up can take minutes)…")
     df = _load_spark_df(source)
     typer.echo("[2/3] counting: one group-by over the train months…")

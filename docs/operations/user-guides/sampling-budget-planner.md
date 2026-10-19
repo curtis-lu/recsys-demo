@@ -33,7 +33,7 @@
 
 **① `dataset.sample_group_keys` 要含 item 欄和 label 欄。** 工具替每個 item 的正、負兩類各算一個保留率，少了任何一個就無從分起，會直接擋下。
 
-**② 分層欄都要能當權重的 key。** 分層欄就是 `sample_group_keys` 裡 item、label 以外的欄。工具會把 `training.sample_weight_keys` 設成跟 `sample_group_keys` 一樣，因為權重要補回抽樣的偏差，就得跟抽樣分得一樣細。而 train 的 model_input 只帶 identity 欄、label、`dataset.carry_columns` 與宣告過的類別欄，所以分層欄要列在 `carry_columns` 裡（如果特徵表也有這一欄，還要列進 `dataset.prepare_model_input.drop_columns`，見 B7）。不然權重會安靜地維持 1.0，工具會以 A9a 擋下。
+**② 分層欄都要能當權重的 key。** 分層欄就是 `sample_group_keys` 裡 item、label 以外的欄。工具會把 `training.sample_weight_keys` 設成跟 `sample_group_keys` 一樣，因為權重要補回抽樣的偏差，就得跟抽樣分得一樣細。而 train 的 model_input 只帶 identity 欄、label、`dataset.carry_columns` 與宣告過的類別欄，所以分層欄要列在 `carry_columns` 裡（time 這類 identity 欄本來就帶著，不用列）。如果特徵表也有這一欄，還要列進 `dataset.prepare_model_input.drop_columns`，否則 dataset 第一個 node 會擋下：訊息寫著這一欄 `is in dataset.carry_columns and is also a column of feature_table`，因為兩邊各帶一份同名欄沒辦法 join。分層欄不在這些欄裡的話，權重會安靜地維持 1.0，所以工具會先擋下，訊息開頭是 `A9a:`。
 
 **③ `training.algorithm_params.objective` 是 `binary`。** 用權重把抽樣偏差補回來，只在 pointwise loss 下成立。ranking objective 是成對計算的，逐列抽樣也會拆散 query group。不是 `binary` 時工具照樣算，但會警告。
 
@@ -55,7 +55,7 @@ PYTHONPATH=src .venv/bin/python scripts/profile_sample_pool.py run ml_recsys.sam
 
 **產出：** `data/profiling/sample_pool_profile/profile.json`（要換位置用 `--out`）。每一格記一組欄值和正、負筆數，另外記下產生時的條件：依哪些欄分格、label 欄、item 欄、訓練月份、來源表、時間。
 
-分格的欄是 `sample_group_keys` 與 `sample_weight_keys` 的聯集去掉 label。比預算工具需要的細，是為了讓編輯器之後也能讀同一份檔；預算工具讀進來會自己加總。
+分格的欄是 `sample_group_keys` 與 `sample_weight_keys` 的聯集去掉 label，比預算工具需要的細；預算工具讀進來會自己加總到抽樣格。
 
 **可能看到的警告：**
 
@@ -99,7 +99,7 @@ PYTHONPATH=src .venv/bin/python scripts/sampling_budget_planner.py plan \
     "seg_1|prod_A|1": 1.00000
 ```
 
-每個保留率都對應整數個桶。pipeline 把列分進 100000 個 hash 桶，留下桶號小於 `int(保留率 × 100000)` 的列，所以保留率只能是 0.00001 的整數倍；每一類至少一個桶，不會整類消失。大約 5% 的桶數會寫成六位小數，例如 7 個桶寫成 `0.000075`：寫成 `0.00007` 的話，電腦算 `0.00007 × 100000` 得到 6.999…，截斷成 6 個桶。多加半個桶，pipeline 讀到的桶數才跟工具算的一樣。
+每個保留率都對應整數個桶。pipeline 把列分進 100000 個 hash 桶，留下桶號小於 `int(保留率 × 100000)` 的列，所以保留率只能是 0.00001 的整數倍；每一類至少一個桶，不會整類消失。少數桶數會寫成六位小數，例如 7 個桶寫成 `0.000075`：寫成 `0.00007` 的話，電腦算 `0.00007 × 100000` 得到 6.999…，截斷成 6 個桶。多加半個桶，pipeline 讀到的桶數才跟工具算的一樣。
 
 **`sample_weights.yaml`**：`sample_weight_keys`（設成跟 `sample_group_keys` 一樣）和 `sample_weights`，key 跟保留率那份逐字相同。
 
@@ -107,7 +107,7 @@ PYTHONPATH=src .venv/bin/python scripts/sampling_budget_planner.py plan \
 
 **`report.md`**：同樣的摘要也會印在終端。內容：
 
-- **λ、k、期望筆數。** λ 是讓期望筆數剛好等於預算的那個門檻；k 是讓抽出來的列平均權重等於 1 的倍數（LightGBM 的 `min_sum_hessian_in_leaf` 這類參數是絕對量，權重的整體大小會影響模型）。期望筆數拆成正、負兩類，並列出跟預算的差，差距來自換成整數個桶。
+- **λ、k、期望筆數。** λ 是讓期望筆數剛好等於預算的那個門檻；k 是讓抽出來的列平均權重等於 1 的倍數（LightGBM 的 `min_sum_hessian_in_leaf` 這類參數是絕對量，權重的整體大小會影響模型）。期望筆數拆成正、負兩類，並列出跟預算的差，差距來自換成整數個桶。最後是實際抽出筆數的標準差：每一列各自擲一次骰，所以實際抽出的筆數會在期望筆數上下這麼多的範圍內浮動。
 - **各 item 一張表：** 正樣本總數 P、留下的正樣本、正樣本保留 %、留下的負樣本、neg:pos、注意力 A、負樣本折數 v。
 - **被限制卡住的格數：** 保留率碰到 1、碰到正樣本下限、只剩 1 個桶的各有幾類。
 - **自我檢查**，四條都要是 `[PASS]`：同 item 同一類在各分層的保留率 × 權重相等；各 item 加權後的正樣本率等於 `--weight-t`；各 item 的 loss 佔比跟 P 的 (1 − `--weight-alpha`) 次方成正比；平均權重等於 1。檢查讀的是寫進檔的文字，保留率照 pipeline 的方式截斷成整數個桶。任何一條失敗，工具只寫報告、不寫兩份設定檔。
@@ -124,7 +124,7 @@ PYTHONPATH=src .venv/bin/python scripts/sampling_budget_planner.py plan \
 ```
 λ = 0.148271
 k = 1.3031
-expected rows: 9,206 positive + 20,794 negative = 30,000 (budget 30,000, difference -0.01)
+expected rows: 9,206 positive + 20,794 negative = 30,000 (budget 30,000, difference -0.01; the draw's standard deviation ≈ 114 rows)
 cell-classes held by a limit: capped at 1 24, positive floor 0, 1-bucket floor 0
 self-checks: 4/4 passed
 ```
@@ -142,7 +142,7 @@ self-checks: 4/4 passed
 
 照平常的方式跑 dataset，再跑 training。
 
-**① 筆數對得上報告。** training 的 log 裡，`prepare_train_inputs` 這個 node 印的兩行 `extract_Xy: parquet metadata num_rows=`，一行是 train、一行是 train_dev，加起來應該接近報告的期望筆數。抽樣是逐列擲骰，會有一點誤差。前面那份示例資料實跑：train 27,384 筆加 train_dev 2,580 筆，共 29,964 筆，比期望少 36 筆。正樣本全留，剛好 9,206 筆；負樣本 20,758 筆比期望少 36 筆，大約是抽樣標準差（約 114 筆）的三分之一。
+**① 筆數對得上報告。** training 的 log 裡，`prepare_train_inputs` 這個 node 印的兩行 `extract_Xy: parquet metadata num_rows=`，一行是 train、一行是 train_dev，加起來跟報告的期望筆數比，差距應該在報告印的標準差的兩三倍以內。拿前面那份示例資料把四個步驟跑完：train 27,384 筆加 train_dev 2,580 筆，共 29,964 筆，比期望少 36 筆。正樣本全留，剛好 9,206 筆；少的 36 筆都是負樣本，大約是報告印的標準差（114 筆）的三分之一。
 
 **② 權重都對上了資料。** 打開 `data/models/<model_version>/sample_weight_report.json`，`unmatched_keys` 應該是空的。唯一的例外是期望筆數不到 1 的 key：那一類太小，抽不到任何列，對不上是正常的。其他 key 對不上，代表 key 的字串跟資料對不起來，回頭檢查分層欄的值。
 

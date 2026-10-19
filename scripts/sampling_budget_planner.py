@@ -218,12 +218,17 @@ def retention(
             total_neg[c.cell.item] = total_neg.get(c.cell.item, 0) + c.cell.n_neg
     r_bar = {item: kept_neg[item] / total_neg[item] for item in kept_neg}
 
+    # Step 8's one-bucket floor is applied here already, so that lambda is
+    # solved with the rows it forces: applied only after the solve, a class
+    # held at one bucket would spend rows on top of the budget.
+    one_bucket = 1 / HASH_BUCKETS
     out = []
     for b, c, r_neg in zip(base, cells, r_is_neg):
-        r_pos = (max(knobs.pos_floor, min(1.0, b / c.cell.n_pos))
+        r_pos = (max(knobs.pos_floor, one_bucket, min(1.0, b / c.cell.n_pos))
                  if c.cell.n_pos else None)
         if r_neg is not None:
-            r_neg = min(1.0, (1 - knobs.eta) * r_neg + knobs.eta * r_bar[c.cell.item])
+            r_neg = max(one_bucket, min(
+                1.0, (1 - knobs.eta) * r_neg + knobs.eta * r_bar[c.cell.item]))
         out.append((r_pos, r_neg))
     return out
 
@@ -271,16 +276,20 @@ def _solve_lambda(cells: list[CellPlan], budget: float, knobs: Knobs) -> tuple[f
     The expected row count falls monotonically as lambda grows, so bisection
     (geometric, since lambda spans orders of magnitude) finds the budget.
 
-    The top of the range is where every class with value is kept whole. That
-    can still be short of the budget: a cell with no positives has M = 0 and
-    only ever gets ``eta * rbar`` of its negatives. Then the budget cannot be
-    spent; the lambda that comes closest is returned and the caller says so.
+    The bottom of the range, ``lo``, is where every class with value is kept
+    whole: r_IS >= 1 / (1 - eta) there, so even the mixed negative rate
+    ``(1 - eta) r_IS + eta rbar`` reaches 1 (with eta = 1 the rate is rbar
+    itself, already at its largest once every r_IS >= 1). Nothing smaller
+    keeps more. That can still be short of the budget: a cell with no
+    positives has M = 0 and only ever gets ``eta * rbar`` of its negatives.
+    Then the budget cannot be spent; ``lo`` is returned and the caller says so.
     """
     valued = [c for c in cells if c.M > 0]
     if not valued:
         lam = 1.0
         return lam, _expected_rows(cells, retention(cells, lam, knobs))
-    lo = min(c.M ** knobs.gamma / max(c.cell.n_pos, c.cell.n_neg) for c in valued)
+    saturate = 1 - knobs.eta if knobs.eta < 1 else 1.0
+    lo = saturate * min(c.M ** knobs.gamma / max(c.cell.n_pos, c.cell.n_neg) for c in valued)
 
     def total(lam: float) -> float:
         return _expected_rows(cells, retention(cells, lam, knobs))
@@ -377,8 +386,7 @@ def plan(cells: list[Cell], budget: float, knobs: Knobs) -> Plan:
     # keep-rates above never read them, so changing only those leaves the
     # overrides byte-identical — and HT needs nothing more than w = q / r.
     weight_targets = item_targets(cells, knobs.weight_t_used, knobs.weight_alpha_used)
-    kept = sum(c.cell.n_pos * (c.r_eff_pos or 0.0) + c.cell.n_neg * (c.r_eff_neg or 0.0)
-               for c in cell_plans)
+    kept = sum(_kept_split(cell_plans))
     target_mass = sum(c.cell.n_pos * weight_targets[c.cell.item].q_pos
                       + c.cell.n_neg * weight_targets[c.cell.item].q_neg
                       for c in cell_plans)
@@ -722,21 +730,32 @@ def _limit_counts(result: Plan) -> dict[str, int]:
             if r is None:
                 continue
             capped += r == 1.0
-            one_bucket += b == 1 and r * HASH_BUCKETS < 0.5
+            one_bucket += r == 1 / HASH_BUCKETS     # retention() floors it there
         floor += (c.r_pos is not None and 0 < result.knobs.pos_floor < 1
                   and c.r_pos == result.knobs.pos_floor)
     return {"capped at 1": capped, "positive floor": floor, "1-bucket floor": one_bucket}
 
 
-def _expected_split(result: Plan) -> tuple[float, float]:
-    pos = sum(c.cell.n_pos * (c.r_eff_pos or 0.0) for c in result.cells)
-    neg = sum(c.cell.n_neg * (c.r_eff_neg or 0.0) for c in result.cells)
+def _kept_split(cells: list[CellPlan]) -> tuple[float, float]:
+    """Expected ``(positive, negative)`` rows the draw keeps: n x bucketed rate."""
+    pos = sum(c.cell.n_pos * (c.r_eff_pos or 0.0) for c in cells)
+    neg = sum(c.cell.n_neg * (c.r_eff_neg or 0.0) for c in cells)
     return pos, neg
+
+
+def _kept_sd(cells: list[CellPlan]) -> float:
+    """Standard deviation of the kept row count: each row is its own draw."""
+    return math.sqrt(sum(
+        n * r * (1 - r)
+        for c in cells
+        for n, r in ((c.cell.n_pos, c.r_eff_pos), (c.cell.n_neg, c.r_eff_neg))
+        if r is not None
+    ))
 
 
 def summary_lines(result: Plan) -> list[str]:
     """λ, k, expected rows against the budget, and the limit counts."""
-    pos, neg = _expected_split(result)
+    pos, neg = _kept_split(result.cells)
     lines = []
     if result.keeps_everything:
         lines.append(f"budget {result.budget:,} >= population {result.population:,}: "
@@ -751,7 +770,8 @@ def summary_lines(result: Plan) -> list[str]:
     lines += [
         f"k = {result.k:.6g}",
         f"expected rows: {pos:,.0f} positive + {neg:,.0f} negative = {pos + neg:,.0f} "
-        f"(budget {result.budget:,}, difference {pos + neg - result.budget:+,.2f})",
+        f"(budget {result.budget:,}, difference {pos + neg - result.budget:+,.2f}; "
+        f"the draw's standard deviation ≈ {_kept_sd(result.cells):,.0f} rows)",
         "cell-classes held by a limit: " + ", ".join(
             f"{name} {n}" for name, n in _limit_counts(result).items()),
     ]
@@ -794,6 +814,10 @@ app = typer.Typer(help="Sampling budget planner: profile.json + budget -> "
                   add_completion=False)
 
 
+# The CLI's defaults are Knobs' own, so the two cannot drift apart.
+_DEFAULT_KNOBS = Knobs()
+
+
 @app.callback()
 def _main() -> None:
     """Keeps ``plan`` a named subcommand (Typer collapses a lone command)."""
@@ -822,11 +846,13 @@ def _fail(messages: list[str]) -> None:
 def plan_command(
     profile_json: Path = typer.Argument(..., help="profile.json from profile_sample_pool.py"),
     budget: int = typer.Option(..., help="sampling budget: train + train_dev rows"),
-    t: float = typer.Option(1 / 6, help="weighted positive rate every item is set to"),
-    alpha: float = typer.Option(0.5, help="attention to cold items (0 = none)"),
-    gamma: float = typer.Option(1.0, help="budget across cells: 1 ∝ value, 0.5 ∝ sqrt(value)"),
-    eta: float = typer.Option(0.2, help="negative safety floor (defensive mixture share)"),
-    pos_floor: float = typer.Option(0.6, help="lowest positive keep-rate"),
+    t: float = typer.Option(_DEFAULT_KNOBS.t, help="weighted positive rate every item is set to"),
+    alpha: float = typer.Option(_DEFAULT_KNOBS.alpha, help="attention to cold items (0 = none)"),
+    gamma: float = typer.Option(
+        _DEFAULT_KNOBS.gamma, help="budget across cells: 1 ∝ value, 0.5 ∝ sqrt(value)"),
+    eta: float = typer.Option(
+        _DEFAULT_KNOBS.eta, help="negative safety floor (defensive mixture share)"),
+    pos_floor: float = typer.Option(_DEFAULT_KNOBS.pos_floor, help="lowest positive keep-rate"),
     weight_t: Optional[float] = typer.Option(None, help="t for the weights only (default: --t)"),
     weight_alpha: Optional[float] = typer.Option(
         None, help="alpha for the weights only (default: --alpha)"),

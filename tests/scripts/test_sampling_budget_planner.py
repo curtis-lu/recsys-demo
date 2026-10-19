@@ -41,6 +41,7 @@ from scripts.sampling_budget_planner import (
     ratio_literal,
     retention,
     self_checks,
+    summary_lines,
     to_bucket,
     weight_entries,
     yaml_float,
@@ -123,8 +124,8 @@ class TestRetentionAtAFixedLambda:
         assert r[("s2", "A")] == pytest.approx((1 / 6, 1 / 6))
         assert r[("s1", "B")] == pytest.approx((9 / 38, 1 / 38))
         # No positives: no positive rate at all, and with eta=0 nothing left
-        # for the negatives either (the 1-bucket floor is step 8's job).
-        assert r[("s2", "B")] == (None, 0.0)
+        # for the negatives but the 1-bucket floor.
+        assert r[("s2", "B")] == (None, 1 / HASH_BUCKETS)
 
     def test_positive_floor_and_negative_defensive_mixture(self):
         r = self._retention(eta=0.5, pos_floor=0.5)
@@ -195,9 +196,11 @@ class TestLambda:
 
     def test_hand_example_lambda_is_twice_the_total_value_over_the_budget(self):
         # gamma=1, eta=0, f=0 and nothing capped: each cell keeps M/lambda rows
-        # of each class, so the budget is 2 * sum(M) / lambda.
+        # of each class, so the budget is 2 * sum(M) / lambda — plus the one
+        # bucket the never-sold (s2, B) keeps of its 40k negatives, 0.4 rows.
         result = plan(HAND_CELLS, budget=20_000, knobs=HAND_KNOBS)
-        assert result.lam == pytest.approx(2 * sum(HAND_M.values()) / 20_000)
+        floor_rows = 40_000 / HASH_BUCKETS
+        assert result.lam == pytest.approx(2 * sum(HAND_M.values()) / (20_000 - floor_rows))
         cells = _by_values(result)
         assert cells[("s1", "A")].r_pos == pytest.approx(HAND_M[("s1", "A")] / (result.lam * 10_000))
         assert cells[("s1", "B")].r_neg == pytest.approx(HAND_M[("s1", "B")] / (result.lam * 360_000))
@@ -210,6 +213,20 @@ class TestLambda:
     def test_expected_rows_equal_the_budget(self, knobs):
         result = plan(MIXED_CELLS, budget=200_000, knobs=knobs)
         assert _continuous_total(result) == pytest.approx(200_000, rel=1e-9)
+        # What the report prints: the bucketed rates. Rounding to the nearest
+        # bucket moves each class by at most half a bucket.
+        half_bucket_per_row = sum(c.n_pos + c.n_neg for c in MIXED_CELLS) * 0.5 / HASH_BUCKETS
+        assert abs(_kept(result) - 200_000) <= half_bucket_per_row
+
+    def test_classes_held_at_one_bucket_are_inside_the_budget(self):
+        # seg_2 never sold: with eta=0 its 10M negatives keep only the
+        # 1-bucket floor, 100 rows. Spent outside the solve, those 100 rows
+        # would land on top of a 300-row budget.
+        cells = [Cell(values=("seg_1", "prod_A"), item="prod_A", n_pos=1_000, n_neg=1_000_000),
+                 Cell(values=("seg_2", "prod_A"), item="prod_A", n_pos=0, n_neg=10_000_000)]
+        result = plan(cells, budget=300, knobs=Knobs(eta=0.0, pos_floor=0.0))
+        half_bucket_per_row = 11_001_000 * 0.5 / HASH_BUCKETS
+        assert abs(_kept(result) - 300) <= half_bucket_per_row
 
     def test_gamma_one_without_floors_keeps_both_classes_one_to_one(self):
         knobs = Knobs(gamma=1.0, eta=0.0, pos_floor=0.0)
@@ -231,19 +248,21 @@ class TestLambda:
         assert max(linear) / min(linear) > 2
 
     def test_defensive_mixture_leaves_each_items_negative_total_unchanged(self):
-        no_mix = plan(MIXED_CELLS, budget=200_000, knobs=Knobs(eta=0.0, pos_floor=0.0))
-        mixed = plan(MIXED_CELLS, budget=200_000, knobs=Knobs(eta=0.5, pos_floor=0.0))
-        assert all((c.r_neg or 0) < 1 for c in mixed.cells + no_mix.cells)
+        # Two mixtures rather than none vs some: with eta=0 the never-sold cell
+        # sits on the 1-bucket floor, and a floor is not value-driven.
+        light = plan(MIXED_CELLS, budget=200_000, knobs=Knobs(eta=0.25, pos_floor=0.0))
+        heavy = plan(MIXED_CELLS, budget=200_000, knobs=Knobs(eta=0.5, pos_floor=0.0))
+        assert all(1 / HASH_BUCKETS < (c.r_neg or 0.5) < 1 for c in heavy.cells + light.cells)
 
         def neg_total(result, item):
             return sum(c.cell.n_neg * c.r_neg for c in result.cells
                        if c.cell.item == item and c.r_neg is not None)
 
         for item in ("prod_A", "prod_B", "prod_C"):
-            assert neg_total(mixed, item) == pytest.approx(neg_total(no_mix, item))
+            assert neg_total(heavy, item) == pytest.approx(neg_total(light, item))
         # It does move negatives between cells: the zero-positive cell gains.
         zero_pos = ("seg_3", "prod_C")
-        assert _by_values(mixed)[zero_pos].r_neg > _by_values(no_mix)[zero_pos].r_neg
+        assert _by_values(heavy)[zero_pos].r_neg > _by_values(light)[zero_pos].r_neg
 
     def test_a_budget_at_least_the_population_keeps_everything(self):
         result = plan(MIXED_CELLS, budget=MIXED_POPULATION, knobs=Knobs())
@@ -255,6 +274,23 @@ class TestLambda:
         # f * (all positives) alone is 0.6 * 51,950 = 31,170 rows.
         with pytest.raises(PlanError, match="budget"):
             plan(MIXED_CELLS, budget=30_000, knobs=Knobs(pos_floor=0.6))
+
+    def test_a_budget_below_one_bucket_per_class_is_refused(self):
+        # f=0, so only the 1-bucket floor is left: 5,000,000 rows / 100000.
+        with pytest.raises(PlanError, match="budget"):
+            plan(MIXED_CELLS, budget=40, knobs=Knobs(pos_floor=0.0))
+
+    def test_the_most_rows_any_plan_can_keep_is_found_not_underestimated(self):
+        # (10, 100) has value, (0, 1000) never sold; eta = 0.2. As lambda -> 0
+        # the first cell is kept whole (110 rows) and the second keeps
+        # eta * rbar = 0.2 * 100/1100 of its 1000 negatives: 128.18 rows.
+        cells = [Cell(values=("seg_1", "prod_A"), item="prod_A", n_pos=10, n_neg=100),
+                 Cell(values=("seg_2", "prod_A"), item="prod_A", n_pos=0, n_neg=1000)]
+        knobs = Knobs(eta=0.2, pos_floor=0.0)
+        assert plan(cells, budget=1100, knobs=knobs).max_reachable == pytest.approx(
+            110 + 1000 * 0.2 * 100 / 1100)
+        result = plan(cells, budget=120, knobs=knobs)
+        assert _continuous_total(result) == pytest.approx(120, rel=1e-9)
 
     def test_a_budget_the_cells_cannot_absorb_is_reported_not_faked(self):
         # Every class with value already at 1; the zero-positive cell's
@@ -355,6 +391,15 @@ GROUP_KEYS_SPL = ["seg", "prod", "label"]   # the order _params() configures
 
 
 class TestEntries:
+    def test_a_cell_without_negatives_gets_no_negative_key(self):
+        cells = [Cell(values=("seg_1", "prod_A"), item="prod_A", n_pos=10, n_neg=90),
+                 Cell(values=("seg_2", "prod_A"), item="prod_A", n_pos=5, n_neg=0)]
+        result = plan(cells, budget=50, knobs=Knobs())
+        overrides = override_entries(result, GROUP_KEYS, "label")
+        weights = weight_entries(result, GROUP_KEYS, "label")
+        assert "seg_2|1|prod_A" in overrides and "seg_2|0|prod_A" not in overrides
+        assert set(weights) == set(overrides)
+
     def test_keys_follow_sample_group_keys_with_the_label_component_in_place(self):
         cells = [Cell(values=("seg_1", "prod_A"), item="prod_A", n_pos=10, n_neg=90),
                  Cell(values=("seg_2", "prod_A"), item="prod_A", n_pos=0, n_neg=50)]
@@ -578,6 +623,39 @@ class TestOutputProblems:
         keys = ["seg", "prod", "label"]
         assert output_problems(_params(), override_entries(result, keys, "label"),
                                weight_entries(result, keys, "label")) == []
+
+
+class TestSummary:
+    def test_reports_the_draws_standard_deviation(self):
+        # One item, every row positive: nothing has value, so the positives
+        # sit on the 0.5 floor. 100,000 rows each kept with probability 1/2:
+        # sd = sqrt(100,000 * 0.5 * 0.5) = 158.1.
+        cells = [Cell(values=("seg_1", "prod_A"), item="prod_A", n_pos=100_000, n_neg=0)]
+        result = plan(cells, budget=50_000, knobs=Knobs(pos_floor=0.5))
+        line = next(x for x in summary_lines(result) if x.startswith("expected rows"))
+        assert "standard deviation ≈ 158 rows" in line
+
+    def test_counts_the_classes_each_limit_decided(self):
+        # Hand example, eta=0, f=0: only the never-sold (s2, B) negatives are
+        # held at one bucket.
+        line = next(x for x in summary_lines(plan(HAND_CELLS, 20_000, HAND_KNOBS))
+                    if x.startswith("cell-classes"))
+        assert line.endswith("capped at 1 0, positive floor 0, 1-bucket floor 1")
+        # f=1/2, budget 40k: if every positive sits on the floor they take
+        # 0.5 * 60k = 30k rows, leaving 10k - 0.4 for the negatives' M/lambda,
+        # so lambda = sum(M) / 9,999.6 = 1.757. Every pure-value positive rate
+        # (9/14, 1/6, 9/38 divided by lambda) is then under 1/2: all three
+        # positive classes are held by the floor.
+        knobs = Knobs(**{**HAND_KNOBS.__dict__, "pos_floor": 0.5})
+        result = plan(HAND_CELLS, 40_000, knobs)
+        assert result.lam == pytest.approx(sum(HAND_M.values()) / (10_000 - 0.4))
+        line = next(x for x in summary_lines(result) if x.startswith("cell-classes"))
+        assert "positive floor 3" in line and "1-bucket floor 1" in line
+
+    def test_keeping_everything_has_no_spread(self):
+        result = plan(MIXED_CELLS, budget=MIXED_POPULATION, knobs=Knobs())
+        line = next(x for x in summary_lines(result) if x.startswith("expected rows"))
+        assert "standard deviation ≈ 0 rows" in line
 
 
 class TestYamlFloat:

@@ -174,6 +174,12 @@ class TestWhatTheFileRecords:
         assert profile["cells"] == EXPECTED_CELLS
         assert profile["null_rows"] == {"rows": 4, "by_column": {"seg": 3, "label": 1}}
 
+    def test_missing_train_months_are_refused_by_name(self, spark):
+        params = _params()
+        del params["dataset"]["train_snap_dates"]
+        with pytest.raises(ValueError, match="train_snap_dates"):
+            build_profile(_frame(spark), params, "pool")
+
     def test_a_label_that_does_not_read_as_0_or_1_is_refused(self, spark):
         df = _frame(spark)
         df = df.withColumn("label", df.label.cast("double"))
@@ -182,15 +188,19 @@ class TestWhatTheFileRecords:
 
 
 class TestCli:
-    def test_run_writes_the_profile_json(self, spark, tmp_path):
+    def _run(self, spark, tmp_path, rows=ROWS, base_has_schema=True):
         source = tmp_path / "pool.parquet"
-        _frame(spark).write.parquet(str(source))
+        _frame(spark, rows).write.parquet(str(source))
         params = _params(training={"sample_weight_keys": ["seg", "prod_name", "label", "risk_band"]})
-        (tmp_path / "base.yaml").write_text(yaml.safe_dump({"schema": params["schema"]}))
-        (tmp_path / "dataset.yaml").write_text(yaml.safe_dump({"dataset": {
-            **params["dataset"],
-            "train_snap_dates": {"start": "2025-01-31", "end": "2025-02-28", "step": "month_end"},
-        }}))
+        dataset = {**params["dataset"], "train_snap_dates": {
+            "start": "2025-01-31", "end": "2025-02-28", "step": "month_end"}}
+        if base_has_schema:
+            (tmp_path / "base.yaml").write_text(yaml.safe_dump({"schema": params["schema"]}))
+            (tmp_path / "dataset.yaml").write_text(yaml.safe_dump({"dataset": dataset}))
+        else:
+            # The schema written inline in --params, as the planner also accepts.
+            (tmp_path / "dataset.yaml").write_text(yaml.safe_dump(
+                {"schema": params["schema"], "dataset": dataset}))
         (tmp_path / "training.yaml").write_text(yaml.safe_dump({"training": params["training"]}))
         out = tmp_path / "profiling" / "profile.json"
         result = CliRunner().invoke(app, [
@@ -199,6 +209,22 @@ class TestCli:
             "--train-params", str(tmp_path / "training.yaml"),
             "--base-params", str(tmp_path / "base.yaml"),
         ])
+        return result, out
+
+    def test_null_key_rows_are_warned_about_on_the_terminal(self, spark, tmp_path):
+        rows = ROWS + [("2025-01-31", "c9", "prod_A", None, 0)] * 3
+        result, _ = self._run(spark, tmp_path, rows)
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert "3 row(s) have a NULL in a key column" in result.stderr
+        assert "'seg': 3" in result.stderr
+
+    def test_reads_the_config_the_way_the_planner_does(self, spark, tmp_path):
+        result, out = self._run(spark, tmp_path, base_has_schema=False)
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert json.loads(out.read_text())["cells"] == EXPECTED_CELLS
+
+    def test_run_writes_the_profile_json(self, spark, tmp_path):
+        result, out = self._run(spark, tmp_path)
         assert result.exit_code == 0, result.stdout + result.stderr
         profile = json.loads(out.read_text())
         assert profile["cells"] == EXPECTED_CELLS
