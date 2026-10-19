@@ -11,6 +11,9 @@
 > 設計 spec：`docs/superpowers/specs/2026-06-10-sampling-weight-twofactor-design.md`、
 > `docs/superpowers/specs/2026-06-12-sampling-editor-ratio-input-modes-batch-design.md`。
 
+> 想給一個抽樣預算、讓工具一次算完整套保留率與權重，用 [`sampling-budget-planner.md`](sampling-budget-planner.md)
+> 的兩支腳本；產出的 key 格式跟這裡相同。
+
 HTML 內只放「操作當下必要的提醒＋公式速查」；**完整概念、推導與範例在本文件**。看不懂某個欄位
 （`v`、`A`、`t`、`α`、couple/decouple…）時回來查這裡。
 

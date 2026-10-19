@@ -110,6 +110,25 @@ _Avoid_: 產品清單；也不要和 `inference.products`（逐一列出時，�
 **month plan**:
 一次執行中，某個增量產物要處理、要跳過哪些 time 值的清單；名字沿用月份字樣，實際單位是 time。
 
+### 抽樣與權重
+
+**抽樣預算**:
+抽樣之後 train 與 train_dev 加起來的總筆數上限。
+
+**抽樣格**:
+`dataset.sample_group_keys` 裡 label 以外的欄位，每一組值是一格；一格再按 label 分成正、負兩類。item 以外的那些欄叫**分層欄**。
+_Avoid_: segment、分群（那是評估時把 query group 切片的說法）
+
+**保留率**:
+一個抽樣格裡某一類（正或負）的列被留下的機率，就是 `dataset.sample_ratio_overrides` 裡的值；沒列到的格用 `dataset.sample_ratio`。
+_Avoid_: 抽樣率（容易和「抽掉的比例」搞反）
+
+**目標權重**:
+假設不抽樣、資料全部用得上時，希望一列在 loss 裡算幾份；它決定模型要學成什麼。
+
+**樣本權重**:
+訓練時一列在 loss 裡實際算幾份，就是 `training.sample_weights` 裡的值。要讓抽樣不改變模型要學的東西，它必須等於目標權重 ÷ 保留率，再乘一個所有列共用的常數。
+
 ### 版本與不變量（只寫意思，精確定義見 docstring）
 
 **base_dataset_version**:
