@@ -960,23 +960,34 @@ class TestAggregateSurfaces:
 # ---------------------------------------------------------------------------
 # Typer CLI (to-yaml end-to-end; profile's Spark path covered above)
 # ---------------------------------------------------------------------------
+def _write_conf(root, *, schema, dataset, training, env="dev", env_params=None):
+    """A ``conf/`` tree under ``root`` the way the pipelines read it: base plus
+    the ``env`` overlay (``env_params``, {file stem: content})."""
+    base = root / "conf" / "base"
+    base.mkdir(parents=True)
+    (base / "parameters.yaml").write_text(yaml.safe_dump({"schema": schema}))
+    (base / "parameters_dataset.yaml").write_text(yaml.safe_dump({"dataset": dataset}))
+    (base / "parameters_training.yaml").write_text(yaml.safe_dump({"training": training}))
+    overlay = root / "conf" / env
+    overlay.mkdir()
+    for stem, content in (env_params or {}).items():
+        (overlay / f"{stem}.yaml").write_text(yaml.safe_dump(content))
+
+
 class TestToYamlCli:
     def _write_params(self, tmp_path):
-        params = tmp_path / "p.yaml"
         # time / entity / item have no defaults since #328, so all three are
         # declared; label keeps its default in get_schema.
-        params.write_text(
-            "schema:\n  columns:\n    time: snap_date\n"
-            "    entity: [cust_id]\n    item: prod_name\n"
-            "  categorical_values:\n    prod_name: [a, b]\n"
-            "dataset:\n  prepare_model_input:\n"
-            "    categorical_columns: [prod_name]\n"
-            "  sample_group_keys: [cust_segment_typ, prod_name, label]\n")
-        train = tmp_path / "t.yaml"
-        train.write_text("training:\n  sample_weight_keys: [prod_name, label]\n")
-        return params, train
+        _write_conf(
+            tmp_path,
+            schema={"columns": {"time": "snap_date", "entity": ["cust_id"],
+                                "item": "prod_name"},
+                    "categorical_values": {"prod_name": ["a", "b"]}},
+            dataset={"prepare_model_input": {"categorical_columns": ["prod_name"]},
+                     "sample_group_keys": ["cust_segment_typ", "prod_name", "label"]},
+            training={"sample_weight_keys": ["prod_name", "label"]})
 
-    def test_to_yaml_prints_both_blocks(self, tmp_path):
+    def test_to_yaml_prints_both_blocks(self, tmp_path, monkeypatch):
         export = {
             "sample_group_keys": ["cust_segment_typ", "prod_name", "label"],
             "sample_weight_keys": ["prod_name", "label"],
@@ -985,25 +996,34 @@ class TestToYamlCli:
         }
         jf = tmp_path / "e.json"
         jf.write_text(json.dumps(export))
-        params, train = self._write_params(tmp_path)
-        r = CliRunner().invoke(app, [
-            "to-yaml", str(jf), "--params", str(params),
-            "--train-params", str(train), "--base-params", str(params)])
+        self._write_params(tmp_path)
+        monkeypatch.chdir(tmp_path)    # conf/ is read from the working directory
+        r = CliRunner().invoke(app, ["to-yaml", str(jf), "--env", "dev"])
         assert r.exit_code == 0, r.output
         assert "sample_ratio_overrides:" in r.output and "mass|a|0" in r.output
         assert "sample_weights:" in r.output
         assert "b|1" in r.output and "b|0" in r.output
 
+    def test_env_defaults_to_local_as_for_the_pipelines(self, tmp_path, monkeypatch):
+        jf = tmp_path / "e.json"
+        jf.write_text("{}")
+        self._write_params(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        r = CliRunner().invoke(app, ["to-yaml", str(jf)])
+        assert r.exit_code == 1                    # only conf/dev was written
+        assert "(A30) --env='local'" in r.output
 
-class TestProfileReadsTrainDatesWrittenAsARange:
-    """``profile`` reads the dataset yaml itself, without ``ConfigLoader``.
 
-    So it has to expand a ``{start, end, step}`` range on its own (#374); left
-    alone it would profile the range dict's three keys as if they were dates.
-    Spark is cut at ``profile_stats``: the dates it receives are the claim.
+class TestProfileReadsTheConfigAsThePipelinesDo:
+    """``profile`` reads conf/base with the ``--env`` overlay merged over it,
+    through ``ConfigLoader`` — which also expands a ``{start, end, step}``
+    range (#374); left alone it would profile the range dict's three keys as
+    if they were dates. Spark is cut at ``profile_stats``: the dates it
+    receives are the claim.
     """
 
-    def _invoke(self, tmp_path, monkeypatch, train_snap_dates):
+    def _invoke(self, tmp_path, monkeypatch, train_snap_dates, env_params=None,
+                cli_env="dev"):
         import scripts.sampling_overrides_editor as editor
 
         seen = {}
@@ -1014,21 +1034,38 @@ class TestProfileReadsTrainDatesWrittenAsARange:
 
         monkeypatch.setattr(editor, "_load_spark_df", lambda source: object())
         monkeypatch.setattr(editor, "profile_stats", fake_profile_stats)
-        params = tmp_path / "d.yaml"
-        params.write_text(yaml.safe_dump({"dataset": {
-            "train_snap_dates": train_snap_dates,
-            "sample_group_keys": ["prod_name", "label"],
-        }}))
-        base = tmp_path / "b.yaml"
-        base.write_text(
-            "schema:\n  columns:\n    time: snap_date\n"
-            "    entity: [cust_id]\n    item: prod_name\n    label: label\n")
-        train = tmp_path / "t.yaml"
-        train.write_text("training:\n  sample_weight_keys: [prod_name, label]\n")
-        result = CliRunner().invoke(app, [
-            "profile", "db.t", "--params", str(params),
-            "--train-params", str(train), "--base-params", str(base)])
+        _write_conf(
+            tmp_path,
+            schema={"columns": {"time": "snap_date", "entity": ["cust_id"],
+                                "item": "prod_name", "label": "label"}},
+            dataset={"train_snap_dates": train_snap_dates,
+                     "sample_group_keys": ["prod_name", "label"]},
+            training={"sample_weight_keys": ["prod_name", "label"]},
+            env_params=env_params)
+        monkeypatch.chdir(tmp_path)
+        env_args = [] if cli_env is None else ["--env", cli_env]
+        result = CliRunner().invoke(app, ["profile", "db.t", *env_args])
         return result, seen
+
+    def test_the_env_overlay_is_merged_over_base(self, tmp_path, monkeypatch):
+        # conf/dev sets only the months; the keys still come from conf/base.
+        result, seen = self._invoke(
+            tmp_path, monkeypatch, ["2025-01-31", "2025-02-28"],
+            env_params={"parameters_dataset": {"dataset": {
+                "train_snap_dates": ["2025-02-28"]}}})
+        assert seen["snaps"] == [pd.Timestamp("2025-02-28")], result.output
+        assert "ratio_dims=['prod_name']" in result.output
+
+    def test_an_env_without_a_conf_directory_is_refused(self, tmp_path, monkeypatch):
+        result, seen = self._invoke(tmp_path, monkeypatch, ["2025-01-31"], cli_env="dve")
+        assert result.exit_code == 1
+        assert "snaps" not in seen
+        assert "(A30) --env='dve'" in result.output
+
+    def test_env_defaults_to_local_as_for_the_pipelines(self, tmp_path, monkeypatch):
+        result, _ = self._invoke(tmp_path, monkeypatch, ["2025-01-31"], cli_env=None)
+        assert result.exit_code == 1               # only conf/dev was written
+        assert "(A30) --env='local'" in result.output
 
     def test_range_is_profiled_as_the_dates_it_stands_for(self, tmp_path, monkeypatch):
         result, seen = self._invoke(tmp_path, monkeypatch, {

@@ -42,10 +42,12 @@
 ## 步驟 1：數 sample_pool
 
 ```bash
-PYTHONPATH=src .venv/bin/python scripts/profile_sample_pool.py run ml_recsys.sample_pool
+PYTHONPATH=src .venv/bin/python scripts/profile_sample_pool.py run ml_recsys.sample_pool --env <env>
 ```
 
-`ml_recsys.sample_pool` 是表名的例子，換成你的表；也可以給 parquet 路徑。設定從 `conf/base/` 的三個檔讀，要換檔用 `--params`、`--train-params`、`--base-params`，跟編輯器一樣。
+`ml_recsys.sample_pool` 是表名的例子，換成你的表；也可以給 parquet 路徑。
+
+**設定的讀法跟 pipeline 一樣**：先讀 `conf/base/`，再把 `conf/<env>/` 疊上去。`<env>` 填你跑 pipeline 時給 `--env` 的那個值；不寫就是 `local`，跟 pipeline 一樣。`conf/` 底下沒有這個資料夾（例如打錯字）會直接報錯，不會只用 `conf/base/` 默默跑完。設定是從目前目錄的 `conf/` 讀的，所以要在 repo 根目錄下指令。步驟 2 和編輯器也是這樣讀設定。
 
 **它數的是 dataset pipeline 抽樣時看到的那批列**，所以數出來的筆數就是預算要分配的母體：
 
@@ -70,10 +72,10 @@ PYTHONPATH=src .venv/bin/python scripts/profile_sample_pool.py run ml_recsys.sam
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/sampling_budget_planner.py plan \
-    data/profiling/sample_pool_profile/profile.json --budget 10000000
+    data/profiling/sample_pool_profile/profile.json --budget 10000000 --env <env>
 ```
 
-`--budget` 是 train 加 train_dev 的總筆數，必填；`10000000` 是例子。
+`--budget` 是 train 加 train_dev 的總筆數，必填；`10000000` 是例子。`--env` 給跟步驟 1 一樣的值。
 
 ### 旋鈕
 

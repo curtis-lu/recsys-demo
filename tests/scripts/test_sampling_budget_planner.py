@@ -585,11 +585,6 @@ class TestConfigProblems:
         _, warnings = self._problems(_params(train_snap_dates=["2025-01-31"]))
         assert any("train_snap_dates" in w and "profile" in w for w in warnings), warnings
 
-    def test_a_train_month_range_is_compared_as_the_months_it_stands_for(self):
-        params = _params(train_snap_dates={"start": "2025-01-31", "end": "2025-02-28",
-                                           "step": "month_end"})
-        assert self._problems(params) == ([], [])
-
     def test_a_ranking_objective_warns(self):
         params = _params()
         params["training"]["algorithm_params"]["objective"] = "lambdarank"
@@ -665,14 +660,24 @@ class TestYamlFloat:
         assert isinstance(loaded, float) and loaded == x
 
 
-def _write_conf(tmp_path, params=None):
+def _write_conf(root, params=None, *, env="dev", env_params=None):
+    """A ``conf/`` tree under ``root`` the way the pipelines read it: ``params``
+    as conf/base plus the ``env`` overlay (``env_params``, {file stem: content})."""
     params = params or _params()
-    (tmp_path / "base.yaml").write_text(yaml.safe_dump({"schema": params["schema"]}))
-    (tmp_path / "dataset.yaml").write_text(yaml.safe_dump({"dataset": params["dataset"]}))
-    (tmp_path / "training.yaml").write_text(yaml.safe_dump({"training": params["training"]}))
-    return ["--params", str(tmp_path / "dataset.yaml"),
-            "--train-params", str(tmp_path / "training.yaml"),
-            "--base-params", str(tmp_path / "base.yaml")]
+    base = root / "conf" / "base"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "parameters.yaml").write_text(yaml.safe_dump({"schema": params["schema"]}))
+    (base / "parameters_dataset.yaml").write_text(yaml.safe_dump({"dataset": params["dataset"]}))
+    (base / "parameters_training.yaml").write_text(
+        yaml.safe_dump({"training": params["training"]}))
+    overlay = root / "conf" / env
+    overlay.mkdir(exist_ok=True)
+    for stem, content in (env_params or {}).items():
+        (overlay / f"{stem}.yaml").write_text(yaml.safe_dump(content))
+
+
+# conf/<env> naming only the train months: the rest stays conf/base's.
+ONE_MONTH_OVERLAY = {"parameters_dataset": {"dataset": {"train_snap_dates": ["2025-01-31"]}}}
 
 
 def _mixed_profile():
@@ -680,15 +685,54 @@ def _mixed_profile():
 
 
 class TestCli:
-    """``plan`` end to end: a fake profile.json and conf yamls in, files out."""
+    """``plan`` end to end: a fake profile.json and a conf/ tree in, files out.
+    Run from ``tmp_path``: conf/ is read from the working directory, as the
+    pipelines read it."""
 
-    def _run(self, tmp_path, *extra, params=None, profile=None, out="out", budget=200_000):
+    @pytest.fixture(autouse=True)
+    def _in_tmp(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+    def _run(self, tmp_path, *extra, params=None, profile=None, out="out", budget=200_000,
+             env_params=None, env="dev", cli_env="dev"):
         profile_path = tmp_path / "profile.json"
         profile_path.write_text(json.dumps(profile or _mixed_profile()))
+        _write_conf(tmp_path, params, env=env, env_params=env_params)
+        env_args = [] if cli_env is None else ["--env", cli_env]
         return CliRunner().invoke(app, [
             "plan", str(profile_path), "--budget", str(budget),
-            "--out-dir", str(tmp_path / out), *_write_conf(tmp_path, params), *extra,
+            "--out-dir", str(tmp_path / out), *env_args, *extra,
         ])
+
+    def test_reads_conf_base_with_the_env_merged_over_it(self, tmp_path):
+        # conf/dev sets only the train months. They are read (the profile
+        # counted two months, so the planner warns), and so is everything
+        # conf/dev leaves out: base's sample_group_keys still give 17 entries.
+        result = self._run(tmp_path, env_params=ONE_MONTH_OVERLAY)
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert "dataset.train_snap_dates ['2025-01-31'] differs" in result.stderr
+        ratio_text = (tmp_path / "out" / "sample_ratio_overrides.yaml").read_text()
+        assert len(yaml.safe_load("dataset:\n" + ratio_text)["dataset"]
+                   ["sample_ratio_overrides"]) == 17
+
+    def test_an_env_without_a_conf_directory_is_refused(self, tmp_path):
+        # A typo must not quietly plan on conf/base alone (A30, as the pipelines).
+        result = self._run(tmp_path, cli_env="dve")
+        assert result.exit_code == 1
+        assert "(A30) --env='dve'" in result.stderr
+        assert not (tmp_path / "out").exists()
+
+    def test_a_train_month_range_is_compared_as_the_months_it_stands_for(self, tmp_path):
+        params = _params(train_snap_dates={"start": "2025-01-31", "end": "2025-02-28",
+                                           "step": "month_end"})
+        result = self._run(tmp_path, params=params)
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert "differs" not in result.stderr
+
+    def test_env_defaults_to_local_as_for_the_pipelines(self, tmp_path):
+        result = self._run(tmp_path, env="local", env_params=ONE_MONTH_OVERLAY, cli_env=None)
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert "dataset.train_snap_dates ['2025-01-31'] differs" in result.stderr
 
     def test_writes_two_pasteable_snippets_and_a_report(self, tmp_path):
         result = self._run(tmp_path)

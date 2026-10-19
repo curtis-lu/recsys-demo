@@ -23,9 +23,9 @@ scripts/sampling_overrides_editor.py — unit-tested via
 ``from scripts.sampling_budget_planner import ...`` in tests/scripts/. Not part
 of the production DAG.
 
-Usage:
+Usage (from the repo root; config read as ``--env`` reads it for the pipelines):
   python scripts/sampling_budget_planner.py plan \\
-      data/profiling/sample_pool_profile/profile.json --budget 10000000
+      data/profiling/sample_pool_profile/profile.json --budget 10000000 --env <env>
 """
 
 from __future__ import annotations
@@ -37,15 +37,15 @@ from pathlib import Path
 from typing import Optional
 
 import typer
-import yaml
 
+from recsys_tfb.core.config import ConfigLoader
 from recsys_tfb.core.consistency import (
     override_unknown_item_errors,
+    resolved_env_dir,
     weight_key_arity_mismatch,
     weight_key_columns_unavailable,
     weight_unknown_item_errors,
 )
-from recsys_tfb.core.date_ranges import expand_date_range
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.utils.hashing import HASH_BUCKETS
 
@@ -507,15 +507,9 @@ def self_checks(
 # profile.json and config: what the plan is made from, and what it must fit.
 # ---------------------------------------------------------------------------
 def _train_months(dataset_cfg: dict) -> list[str]:
-    """``dataset.train_snap_dates`` as ``YYYY-MM-DD`` strings, a range expanded.
-
-    The yaml is read here, not through ConfigLoader, so a ``{start, end,
-    step}`` range has to be expanded here too (#374).
-    """
-    months = dataset_cfg.get("train_snap_dates") or []
-    if isinstance(months, dict):
-        months = expand_date_range(months, "dataset.train_snap_dates")
-    return [str(m)[:10] for m in months]
+    """``dataset.train_snap_dates`` as ``YYYY-MM-DD`` strings (ConfigLoader
+    has already expanded a ``{start, end, step}`` range into its list)."""
+    return [str(m)[:10] for m in dataset_cfg.get("train_snap_dates") or []]
 
 
 def cells_from_profile(profile: dict, parameters: dict) -> list[Cell]:
@@ -823,17 +817,18 @@ def _main() -> None:
     """Keeps ``plan`` a named subcommand (Typer collapses a lone command)."""
 
 
-def _load_parameters(params: Path, train_params: Path, base_params: Path) -> dict:
-    """One parameters dict from the three yamls, the way the editor reads them."""
-    ds = yaml.safe_load(params.read_text()) or {}
-    merged: dict = {}
-    if base_params.exists():
-        merged.update(yaml.safe_load(base_params.read_text()) or {})
-    if "schema" in ds:
-        merged["schema"] = ds["schema"]
-    merged["dataset"] = ds.get("dataset", ds)
-    merged["training"] = (yaml.safe_load(train_params.read_text()) or {}).get("training", {}) or {}
-    return merged
+def _load_parameters(env: str) -> dict:
+    """The parameters the pipelines read for ``--env``: conf/base with
+    conf/<env> deep-merged over it, from the working directory's ``conf/``.
+
+    A conf/<env> that does not exist is refused (A30), as the pipelines refuse
+    it: the loader would read it as an empty overlay and plan on conf/base
+    alone. Same text in profile_sample_pool.py and sampling_overrides_editor.py
+    (each script stays self-contained). Raises ``ValueError``.
+    """
+    conf_dir = Path.cwd() / "conf"
+    resolved_env_dir(conf_dir, env)
+    return ConfigLoader(str(conf_dir), env=env).get_parameters()
 
 
 def _fail(messages: list[str]) -> None:
@@ -856,18 +851,18 @@ def plan_command(
     weight_t: Optional[float] = typer.Option(None, help="t for the weights only (default: --t)"),
     weight_alpha: Optional[float] = typer.Option(
         None, help="alpha for the weights only (default: --alpha)"),
-    params: Path = typer.Option(
-        Path("conf/base/parameters_dataset.yaml"), help="dataset params yaml"),
-    train_params: Path = typer.Option(
-        Path("conf/base/parameters_training.yaml"), help="training params yaml"),
-    base_params: Path = typer.Option(
-        Path("conf/base/parameters.yaml"), help="base params yaml — source of schema"),
+    env: str = typer.Option(
+        "local", "--env", "-e",
+        help="config environment, as for the pipelines: conf/base with conf/<env> over it"),
     out_dir: Path = typer.Option(DEFAULT_OUT_DIR, help="where the snippets and report go"),
 ) -> None:
     knobs = Knobs(t=t, alpha=alpha, gamma=gamma, eta=eta, pos_floor=pos_floor,
                   weight_t=weight_t, weight_alpha=weight_alpha)
     profile = json.loads(profile_json.read_text())
-    parameters = _load_parameters(params, train_params, base_params)
+    try:
+        parameters = _load_parameters(env)
+    except ValueError as e:
+        _fail([str(e)])
     group_keys = list(parameters["dataset"].get("sample_group_keys") or [])
     label_col = get_schema(parameters)["label"]
 

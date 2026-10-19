@@ -188,43 +188,67 @@ class TestWhatTheFileRecords:
 
 
 class TestCli:
-    def _run(self, spark, tmp_path, rows=ROWS, base_has_schema=True):
+    """``run`` from ``tmp_path``: conf/ is read from the working directory, as
+    the pipelines read it (conf/base, then the ``--env`` overlay)."""
+
+    def _run(self, spark, tmp_path, monkeypatch, rows=ROWS, env_params=None, env="dev",
+             cli_env="dev"):
         source = tmp_path / "pool.parquet"
         _frame(spark, rows).write.parquet(str(source))
         params = _params(training={"sample_weight_keys": ["seg", "prod_name", "label", "risk_band"]})
         dataset = {**params["dataset"], "train_snap_dates": {
             "start": "2025-01-31", "end": "2025-02-28", "step": "month_end"}}
-        if base_has_schema:
-            (tmp_path / "base.yaml").write_text(yaml.safe_dump({"schema": params["schema"]}))
-            (tmp_path / "dataset.yaml").write_text(yaml.safe_dump({"dataset": dataset}))
-        else:
-            # The schema written inline in --params, as the planner also accepts.
-            (tmp_path / "dataset.yaml").write_text(yaml.safe_dump(
-                {"schema": params["schema"], "dataset": dataset}))
-        (tmp_path / "training.yaml").write_text(yaml.safe_dump({"training": params["training"]}))
+        base = tmp_path / "conf" / "base"
+        base.mkdir(parents=True)
+        (base / "parameters.yaml").write_text(yaml.safe_dump({"schema": params["schema"]}))
+        (base / "parameters_dataset.yaml").write_text(yaml.safe_dump({"dataset": dataset}))
+        (base / "parameters_training.yaml").write_text(
+            yaml.safe_dump({"training": params["training"]}))
+        overlay = tmp_path / "conf" / env
+        overlay.mkdir()
+        for stem, content in (env_params or {}).items():
+            (overlay / f"{stem}.yaml").write_text(yaml.safe_dump(content))
+        monkeypatch.chdir(tmp_path)    # after the spark fixture built its session
         out = tmp_path / "profiling" / "profile.json"
-        result = CliRunner().invoke(app, [
-            "run", str(source), "--out", str(out),
-            "--params", str(tmp_path / "dataset.yaml"),
-            "--train-params", str(tmp_path / "training.yaml"),
-            "--base-params", str(tmp_path / "base.yaml"),
-        ])
+        env_args = [] if cli_env is None else ["--env", cli_env]
+        result = CliRunner().invoke(app, ["run", str(source), "--out", str(out), *env_args])
         return result, out
 
-    def test_null_key_rows_are_warned_about_on_the_terminal(self, spark, tmp_path):
+    def test_null_key_rows_are_warned_about_on_the_terminal(self, spark, tmp_path, monkeypatch):
         rows = ROWS + [("2025-01-31", "c9", "prod_A", None, 0)] * 3
-        result, _ = self._run(spark, tmp_path, rows)
+        result, _ = self._run(spark, tmp_path, monkeypatch, rows)
         assert result.exit_code == 0, result.stdout + result.stderr
         assert "3 row(s) have a NULL in a key column" in result.stderr
         assert "'seg': 3" in result.stderr
 
-    def test_reads_the_config_the_way_the_planner_does(self, spark, tmp_path):
-        result, out = self._run(spark, tmp_path, base_has_schema=False)
+    def test_reads_conf_base_with_the_env_merged_over_it(self, spark, tmp_path, monkeypatch):
+        # conf/dev sets only the train months: January alone is counted, by
+        # the sampling keys conf/base still supplies.
+        result, out = self._run(spark, tmp_path, monkeypatch, env_params={
+            "parameters_dataset": {"dataset": {"train_snap_dates": ["2025-01-31"]}}})
         assert result.exit_code == 0, result.stdout + result.stderr
-        assert json.loads(out.read_text())["cells"] == EXPECTED_CELLS
+        profile = json.loads(out.read_text())
+        assert profile["train_snap_dates"] == ["2025-01-31"]
+        assert profile["granularity"] == ["seg", "prod_name"]
+        assert profile["cells"] == [
+            {"values": {"seg": "seg_1", "prod_name": "prod_A"}, "n_pos": 1, "n_neg": 2},
+            {"values": {"seg": "seg_2", "prod_name": "prod_B"}, "n_pos": 1, "n_neg": 0},
+        ]
 
-    def test_run_writes_the_profile_json(self, spark, tmp_path):
-        result, out = self._run(spark, tmp_path)
+    def test_an_env_without_a_conf_directory_is_refused(self, spark, tmp_path, monkeypatch):
+        # A typo must not quietly count with conf/base alone (A30, as the pipelines).
+        result, out = self._run(spark, tmp_path, monkeypatch, cli_env="dve")
+        assert result.exit_code == 1
+        assert "(A30) --env='dve'" in result.stderr
+        assert not out.exists()
+
+    def test_env_defaults_to_local_as_for_the_pipelines(self, spark, tmp_path, monkeypatch):
+        result, _ = self._run(spark, tmp_path, monkeypatch, cli_env=None)
+        assert result.exit_code == 1               # only conf/dev was written
+        assert "(A30) --env='local'" in result.stderr
+
+    def test_run_writes_the_profile_json(self, spark, tmp_path, monkeypatch):
+        result, out = self._run(spark, tmp_path, monkeypatch)
         assert result.exit_code == 0, result.stdout + result.stderr
         profile = json.loads(out.read_text())
         assert profile["cells"] == EXPECTED_CELLS
