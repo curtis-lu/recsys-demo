@@ -34,9 +34,10 @@ scripts/sampling_overrides_editor.py — unit-tested via
 ``from scripts.profile_sample_pool import ...`` in tests/scripts/. Not part of
 the production DAG.
 
-Usage:
-  python scripts/profile_sample_pool.py run ml_recsys.sample_pool
-  python scripts/profile_sample_pool.py run data/sample_pool.parquet
+Usage (from the directory holding conf/, the repo root as a rule; config read
+as ``--env`` reads it for the pipelines):
+  python scripts/profile_sample_pool.py run ml_recsys.sample_pool --env <env>
+  python scripts/profile_sample_pool.py run data/sample_pool.parquet --env <env>
 """
 
 from __future__ import annotations
@@ -46,9 +47,9 @@ import json
 from pathlib import Path
 
 import typer
-import yaml
 
-from recsys_tfb.core.date_ranges import expand_date_range
+from recsys_tfb.core.config import ConfigLoader
+from recsys_tfb.core.consistency import resolved_env_dir
 from recsys_tfb.core.schema import get_schema
 
 # Bumped when the layout below changes; scripts/sampling_budget_planner.py
@@ -91,15 +92,14 @@ def granularity(parameters: dict, columns: list[str]) -> tuple[list[str], list[s
 
 
 def _train_months(dataset_cfg: dict) -> list[str]:
+    """``dataset.train_snap_dates`` as ``YYYY-MM-DD`` strings (ConfigLoader
+    has already expanded a ``{start, end, step}`` range into its list)."""
     months = dataset_cfg.get("train_snap_dates")
     if not months:
         raise ValueError(
-            "dataset.train_snap_dates is not set in --params; the profile counts "
-            "the train months, so it needs them."
+            "dataset.train_snap_dates is not set in conf/base or the --env "
+            "overlay; the profile counts the train months, so it needs them."
         )
-    if isinstance(months, dict):
-        # Read here, not through ConfigLoader, so a range is expanded here (#374).
-        months = expand_date_range(months, "dataset.train_snap_dates")
     return [str(m)[:10] for m in months]
 
 
@@ -215,21 +215,19 @@ def _main() -> None:
     """Keeps ``run`` a named subcommand (Typer collapses a lone command)."""
 
 
-def _load_parameters(params: Path, train_params: Path, base_params: Path) -> dict:
-    """One parameters dict from the three yamls, the way the editor reads them.
+def _load_parameters(env: str) -> dict:
+    """The parameters the pipelines read for ``--env``: conf/base with
+    conf/<env> deep-merged over it, from the working directory's ``conf/``.
 
-    Same text as sampling_budget_planner.py's, so the two scripts read one
-    config the same way (each stays self-contained).
+    A conf/<env> that does not exist is refused (A30), as the pipelines refuse
+    it: the loader would read it as an empty overlay and count with conf/base
+    alone. Same text in sampling_budget_planner.py and
+    sampling_overrides_editor.py (each script stays self-contained). Raises
+    ``ValueError``.
     """
-    ds = yaml.safe_load(params.read_text()) or {}
-    merged: dict = {}
-    if base_params.exists():
-        merged.update(yaml.safe_load(base_params.read_text()) or {})
-    if "schema" in ds:
-        merged["schema"] = ds["schema"]
-    merged["dataset"] = ds.get("dataset", ds)
-    merged["training"] = (yaml.safe_load(train_params.read_text()) or {}).get("training", {}) or {}
-    return merged
+    conf_dir = Path.cwd() / "conf"
+    resolved_env_dir(conf_dir, env)
+    return ConfigLoader(str(conf_dir), env=env).get_parameters()
 
 
 def _load_spark_df(source: str):
@@ -245,16 +243,16 @@ def _load_spark_df(source: str):
 @app.command()
 def run(
     source: str = typer.Argument(..., help="Hive table db.table or parquet path"),
-    params: Path = typer.Option(
-        Path("conf/base/parameters_dataset.yaml"), help="dataset params yaml"),
-    train_params: Path = typer.Option(
-        Path("conf/base/parameters_training.yaml"),
-        help="training params yaml — source of sample_weight_keys"),
-    base_params: Path = typer.Option(
-        Path("conf/base/parameters.yaml"), help="base params yaml — source of schema"),
+    env: str = typer.Option(
+        "local", "--env", "-e",
+        help="config environment, as for the pipelines: conf/base with conf/<env> over it"),
     out: Path = typer.Option(DEFAULT_OUT, help="where profile.json goes"),
 ) -> None:
-    parameters = _load_parameters(params, train_params, base_params)
+    try:
+        parameters = _load_parameters(env)
+    except ValueError as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=1)
     typer.echo(f"[1/3] reading {source} (SparkSession start-up can take minutes)…")
     df = _load_spark_df(source)
     typer.echo("[2/3] counting: one group-by over the train months…")

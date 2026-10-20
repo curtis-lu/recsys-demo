@@ -19,10 +19,11 @@ scripts/promote_model.py / scripts/suggest_categorical_cols.py convention —
 unit-tested via ``from scripts.sampling_overrides_editor import ...`` in
 tests/scripts/. Not part of the production DAG.
 
-Usage:
-  python scripts/sampling_overrides_editor.py profile ml_recsys.sample_pool
+Usage (from the directory holding conf/, the repo root as a rule; config read
+as ``--env`` reads it for the pipelines):
+  python scripts/sampling_overrides_editor.py profile ml_recsys.sample_pool --env <env>
   python scripts/sampling_overrides_editor.py to-yaml \\
-      data/profiling/sampling_overrides_export.json
+      data/profiling/sampling_overrides_export.json --env <env>
 """
 
 from __future__ import annotations
@@ -34,12 +35,13 @@ from pathlib import Path
 import typer
 import yaml
 
+from recsys_tfb.core.config import ConfigLoader
 from recsys_tfb.core.consistency import (
     override_unknown_items,
+    resolved_env_dir,
     weight_key_arity_mismatch,
     weight_unknown_items,
 )
-from recsys_tfb.core.date_ranges import expand_date_range
 from recsys_tfb.core.schema import get_schema
 PROFILING_DIR = Path("data/profiling")
 
@@ -141,7 +143,8 @@ def resolve_keys(dataset_cfg: dict, training_cfg: dict, schema_cfg: dict) -> dic
     except KeyError as exc:
         raise ValueError(
             f"schema.columns is missing {exc}; cannot resolve profiling "
-            "columns. Check the base parameters yaml."
+            "columns. Check schema.columns in conf/base/parameters.yaml or "
+            "the --env overlay."
         ) from exc
     group_keys = list(dataset_cfg.get("sample_group_keys", []))
     if label_col not in group_keys:
@@ -1037,17 +1040,27 @@ def _load_spark_df(source: str):
     return spark.table(source)
 
 
+def _load_parameters(env: str) -> dict:
+    """The parameters the pipelines read for ``--env``: conf/base with
+    conf/<env> deep-merged over it, from the working directory's ``conf/``.
+
+    A conf/<env> that does not exist is refused (A30), as the pipelines refuse
+    it: the loader would read it as an empty overlay and edit against conf/base
+    alone. Same text in profile_sample_pool.py and sampling_budget_planner.py
+    (each script stays self-contained). Raises ``ValueError``.
+    """
+    conf_dir = Path.cwd() / "conf"
+    resolved_env_dir(conf_dir, env)
+    return ConfigLoader(str(conf_dir), env=env).get_parameters()
+
+
+_ENV_HELP = "config environment, as for the pipelines: conf/base with conf/<env> over it"
+
+
 @app.command()
 def profile(
     source: str = typer.Argument(..., help="Hive table db.table or parquet path"),
-    params: Path = typer.Option(
-        Path("conf/base/parameters_dataset.yaml"), help="dataset params yaml"),
-    train_params: Path = typer.Option(
-        Path("conf/base/parameters_training.yaml"),
-        help="training params yaml — source of sample_weight_keys"),
-    base_params: Path = typer.Option(
-        Path("conf/base/parameters.yaml"),
-        help="base params yaml — source of schema.columns"),
+    env: str = typer.Option("local", "--env", "-e", help=_ENV_HELP),
     t: float = typer.Option(
         1 / 6, help="weight floor target pos-rate (lift all products to this)"),
     alpha: float = typer.Option(
@@ -1059,23 +1072,19 @@ def profile(
         help="yellow-flag a cell whose post-downsample n_pos falls below this "
              "(zero is always flagged red); adjustable in the browser too"),
 ) -> None:
-    cfg = yaml.safe_load(params.read_text())
-    ds = cfg.get("dataset", cfg)
-    training_cfg = yaml.safe_load(train_params.read_text()).get("training", {}) or {}
-    schema_cfg = yaml.safe_load(base_params.read_text()).get("schema", {})
-    snap_dates = ds["train_snap_dates"]
     try:
-        # This yaml is read here, not through ConfigLoader, so a
-        # {start, end, step} range has to be expanded here too (#374).
-        if isinstance(snap_dates, dict):
-            snap_dates = expand_date_range(
-                snap_dates, f"{params} -> dataset.train_snap_dates")
+        # ConfigLoader has already expanded a {start, end, step} range (#374).
+        parameters = _load_parameters(env)
+        ds = parameters.get("dataset") or {}
+        training_cfg = parameters.get("training") or {}
+        schema_cfg = parameters.get("schema") or {}
+        snap_dates = ds["train_snap_dates"]
         keys = resolve_keys(ds, training_cfg, schema_cfg)
     except ValueError as e:
         typer.echo(f"ERROR: {e}", err=True)
         raise typer.Exit(code=1)
     typer.echo(
-        f"[1/4] config: {len(snap_dates)} snap date(s) from {params}; "
+        f"[1/4] config: {len(snap_dates)} snap date(s) from conf/base + conf/{env}; "
         f"ratio_dims={keys['ratio_dims']} weight_dims={keys['weight_dims']} "
         f"label={keys['label_col']} union_dims={keys['union_dims']} "
         f"(t={t} alpha={alpha} default keep-rate={ds.get('sample_ratio', 1.0)} "
@@ -1117,36 +1126,24 @@ def profile(
 @app.command("to-yaml")
 def to_yaml(
     export_json: Path = typer.Argument(..., help="browser JSON export"),
-    params: Path = typer.Option(
-        Path("conf/base/parameters_dataset.yaml"), help="dataset params yaml"),
-    train_params: Path = typer.Option(
-        Path("conf/base/parameters_training.yaml"),
-        help="training params yaml — source of sample_weight_keys"),
-    base_params: Path = typer.Option(
-        Path("conf/base/parameters.yaml"),
-        help="base params yaml — source of schema for A5/A9"),
+    env: str = typer.Option("local", "--env", "-e", help=_ENV_HELP),
 ) -> None:
-    ds = yaml.safe_load(params.read_text())
-    ds_cfg = ds.get("dataset", ds)
-    # Assemble a single parameters dict the consistency predicates accept:
-    # schema from base_params (or an inline schema in --params, for tests),
-    # dataset from --params, training from --train-params.
-    merged: dict = {}
-    if base_params.exists():
-        merged.update(yaml.safe_load(base_params.read_text()) or {})
-    if "schema" in ds:
-        merged["schema"] = ds["schema"]
-    merged["dataset"] = ds_cfg
-    merged["training"] = yaml.safe_load(train_params.read_text()).get("training", {}) or {}
-    if not (merged.get("schema") or {}).get("columns") and not (merged.get("schema") or {}).get("categorical_values"):
+    try:
+        parameters = _load_parameters(env)
+    except ValueError as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=1)
+    ds_cfg = parameters.get("dataset") or {}
+    schema = parameters.get("schema") or {}
+    if not schema.get("columns") and not schema.get("categorical_values"):
         typer.echo(
-            "WARNING: no schema resolved from --base-params / --params; "
+            f"WARNING: no schema resolved from conf/base + conf/{env}; "
             "unknown-product validation (A5/A9c) may be skipped silently.",
             err=True)
     export = json.loads(export_json.read_text())
     default_ratio = float(ds_cfg.get("sample_ratio", 1.0))
     try:
-        out = grid_to_yaml(export, merged, default_ratio)
+        out = grid_to_yaml(export, parameters, default_ratio)
     except ValueError as e:
         typer.echo(f"ERROR: {e}", err=True)
         raise typer.Exit(code=1)

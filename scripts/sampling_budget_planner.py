@@ -6,10 +6,14 @@ many train + train_dev rows the training environment can hold) into two
 config snippets:
 
 - ``dataset.sample_ratio_overrides``: a keep-rate for every sampling cell and
-  class, so the budget is spent on the rows that carry the most information;
+  class that has rows, so the budget is spent on the rows that carry the most
+  information;
 - ``training.sample_weights`` (+ ``training.sample_weight_keys``): the weights
   that undo the bias the keep-rates introduce (Horvitz-Thompson: weight =
   target weight / keep-rate, times one constant).
+
+Every key left out — a class or a combination with no rows — is counted in
+both snippets' headers and named, with why, in the report (``missing_entries``).
 
 The computation is specified step by step in issue #525 ("計算規格"); the step
 numbers in the comments below are that spec's. Terms (抽樣預算, 抽樣格, 分層欄,
@@ -23,13 +27,15 @@ scripts/sampling_overrides_editor.py — unit-tested via
 ``from scripts.sampling_budget_planner import ...`` in tests/scripts/. Not part
 of the production DAG.
 
-Usage:
+Usage (from the directory holding conf/, the repo root as a rule; config read
+as ``--env`` reads it for the pipelines):
   python scripts/sampling_budget_planner.py plan \\
-      data/profiling/sample_pool_profile/profile.json --budget 10000000
+      data/profiling/sample_pool_profile/profile.json --budget 10000000 --env <env>
 """
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 from dataclasses import dataclass
@@ -37,15 +43,17 @@ from pathlib import Path
 from typing import Optional
 
 import typer
-import yaml
 
+from recsys_tfb.core.config import ConfigLoader
 from recsys_tfb.core.consistency import (
+    item_list_counted_from_data,
     override_unknown_item_errors,
+    resolved_env_dir,
+    resolved_item_values,
     weight_key_arity_mismatch,
     weight_key_columns_unavailable,
     weight_unknown_item_errors,
 )
-from recsys_tfb.core.date_ranges import expand_date_range
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.utils.hashing import HASH_BUCKETS
 
@@ -54,6 +62,8 @@ from recsys_tfb.utils.hashing import HASH_BUCKETS
 # both say the same number.
 PROFILE_FORMAT_VERSION = 1
 DEFAULT_OUT_DIR = Path("data/profiling/sampling_budget_plan")
+# Combinations with no rows at all that the report lists; every one is counted.
+NO_ROWS_SHOWN = 100
 
 # The label component of a key: the framework's label is 0/1 and every key
 # part is the value cast to string (sampling.py's with_effective_sample_ratio).
@@ -413,8 +423,9 @@ def cell_key(values: tuple, group_keys: list[str], label_col: str, label: str) -
 
 
 def override_entries(result: Plan, group_keys: list[str], label_col: str) -> dict[str, str]:
-    """Every cell and class as ``{key: YAML ratio text}`` — never sparse, so no
-    cell is left to ``dataset.sample_ratio``."""
+    """Every cell and class that has rows as ``{key: YAML ratio text}``, so no
+    row of the profiled population is left to ``dataset.sample_ratio``. The
+    keys left out are :func:`missing_entries`'."""
     out = {}
     for c in result.cells:
         if c.b_pos is not None:
@@ -434,6 +445,70 @@ def weight_entries(result: Plan, group_keys: list[str], label_col: str) -> dict[
         if c.w_neg is not None:
             out[cell_key(c.cell.values, group_keys, label_col, _NEG_LABEL)] = c.w_neg
     return out
+
+
+_NO_POS_ROWS, _NO_NEG_ROWS = "no positive rows", "no negative rows"
+
+
+@dataclass(frozen=True)
+class Missing:
+    """The keys the snippets leave out (:func:`missing_entries`), so that a
+    reader can tell them from keys a config forgot.
+
+    ``one_class``: ``(key, why)`` for each cell that has rows of one class
+    only. ``no_rows``: how many combinations have no rows at all, each leaving
+    out both its keys; ``no_rows_shown`` lists the first :data:`NO_ROWS_SHOWN`
+    of them as ``(negative key, positive key)``. ``values_without_rows``:
+    ``{sampling key: [values]}``, the values the grid takes from
+    ``extra_levels`` that no profiled row has (a declared item with no data).
+    Each one empties a whole slice of the grid, and strata nested in one
+    another (a city within its region) can fill the first combinations listed
+    with ones that cannot occur, so these are named apart, first.
+    """
+
+    one_class: list
+    no_rows: int
+    no_rows_shown: list
+    values_without_rows: dict
+
+    @property
+    def keys(self) -> int:
+        return len(self.one_class) + 2 * self.no_rows
+
+
+def missing_entries(result: Plan, overrides: dict[str, str], group_keys: list[str],
+                    label_col: str, extra_levels: dict[str, list] | None = None) -> Missing:
+    """Every key of the sampling grid that ``overrides`` — and so the weights,
+    which have the same keys — leaves out.
+
+    The grid crosses, for each sampling key, every value the profile has, plus
+    ``extra_levels`` (the CLI passes the declared items, so that an item with
+    no rows at all is named too). A key is left out because sample_pool has
+    no rows under it in the profiled train months: the draw has nothing to
+    keep under it. A row drawn under such a key later is kept at
+    ``dataset.sample_ratio`` (``with_effective_sample_ratio``); a row trained
+    under one is weighted 1.0 (``io/extract.py``) — which also happens when a
+    row's label_table label differs from its sample_pool label, since the
+    draw keys rows by the one and the weights by the other.
+    """
+    one_class = sorted(
+        (key, why)
+        for c in result.cells
+        for label, why in ((_NEG_LABEL, _NO_NEG_ROWS), (_POS_LABEL, _NO_POS_ROWS))
+        if (key := cell_key(c.cell.values, group_keys, label_col, label)) not in overrides
+    )
+    dims = [k for k in group_keys if k != label_col]
+    observed = [{c.cell.values[i] for c in result.cells} for i in range(len(dims))]
+    extra = [{str(v) for v in (extra_levels or {}).get(dim, [])} for dim in dims]
+    levels = [sorted(o | e) for o, e in zip(observed, extra)]
+    seen = {c.cell.values for c in result.cells}
+    unseen = (v for v in itertools.product(*levels) if v not in seen)
+    shown = [tuple(cell_key(v, group_keys, label_col, label) for label in (_NEG_LABEL, _POS_LABEL))
+             for v in itertools.islice(unseen, NO_ROWS_SHOWN)]
+    return Missing(one_class=one_class, no_rows=math.prod(map(len, levels)) - len(seen),
+                   no_rows_shown=shown,
+                   values_without_rows={dim: sorted(e - o)
+                                        for dim, o, e in zip(dims, observed, extra) if e - o})
 
 
 @dataclass(frozen=True)
@@ -507,15 +582,9 @@ def self_checks(
 # profile.json and config: what the plan is made from, and what it must fit.
 # ---------------------------------------------------------------------------
 def _train_months(dataset_cfg: dict) -> list[str]:
-    """``dataset.train_snap_dates`` as ``YYYY-MM-DD`` strings, a range expanded.
-
-    The yaml is read here, not through ConfigLoader, so a ``{start, end,
-    step}`` range has to be expanded here too (#374).
-    """
-    months = dataset_cfg.get("train_snap_dates") or []
-    if isinstance(months, dict):
-        months = expand_date_range(months, "dataset.train_snap_dates")
-    return [str(m)[:10] for m in months]
+    """``dataset.train_snap_dates`` as ``YYYY-MM-DD`` strings (ConfigLoader
+    has already expanded a ``{start, end, step}`` range into its list)."""
+    return [str(m)[:10] for m in dataset_cfg.get("train_snap_dates") or []]
 
 
 def cells_from_profile(profile: dict, parameters: dict) -> list[Cell]:
@@ -679,8 +748,44 @@ def _source_lines(profile_path: str, profile: dict, budget: int) -> list[str]:
     ]
 
 
+_VALUES_SHOWN = 10     # values without rows a header or terminal line names
+
+
+def _values_without_rows_text(missing: Missing) -> str:
+    """``dim: v1, v2`` per sampling key, at most :data:`_VALUES_SHOWN` values each."""
+    parts = []
+    for dim, values in missing.values_without_rows.items():
+        more = len(values) - _VALUES_SHOWN
+        parts.append(f"{dim}: {', '.join(values[:_VALUES_SHOWN])}"
+                     + (f" and {more} more" if more > 0 else ""))
+    return "; ".join(parts)
+
+
+def _missing_counts(missing: Missing) -> str:
+    return (f"{len(missing.one_class)} from cells with one class only, "
+            f"{2 * missing.no_rows} from {missing.no_rows} combination(s) with no rows at all")
+
+
+def _missing_lines(missing: Missing) -> list[str]:
+    """The lines on the keys left out, for both snippets' headers."""
+    if not missing.keys:
+        return ["Every key of every combination has an entry."]
+    listed = ("report.md lists them" if missing.no_rows == len(missing.no_rows_shown)
+              else f"report.md lists them, the first {NO_ROWS_SHOWN} combinations only")
+    lines = [
+        f"{missing.keys} key(s) have no entry: sample_pool has no such rows in the train "
+        f"months profiled. {_missing_counts(missing)}; {listed}.",
+    ]
+    if missing.values_without_rows:
+        lines.append(f"Declared value(s) with no rows at all: {_values_without_rows_text(missing)}.")
+    lines.append("A row drawn under such a key is kept at dataset.sample_ratio; a row trained "
+                 "under one is weighted 1.0 (as when its label_table label differs from "
+                 "sample_pool's).")
+    return lines
+
+
 def render_ratio_yaml(overrides: dict[str, str], profile_path: str, profile: dict,
-                      budget: int, knobs: Knobs) -> str:
+                      budget: int, knobs: Knobs, missing: Missing) -> str:
     """The overrides snippet, indented to paste under ``dataset:``.
 
     The header names only what decides these numbers: the weight knobs are
@@ -694,6 +799,7 @@ def render_ratio_yaml(overrides: dict[str, str], profile_path: str, profile: dic
         _knob_line(knobs),
         "weight_t / weight_alpha do not reach this file: change only them and it "
         "stays byte-identical.",
+        *_missing_lines(missing),
     ]
     body = ["  sample_ratio_overrides:"] + [
         f"    {json.dumps(k, ensure_ascii=False)}: {overrides[k]}" for k in sorted(overrides)]
@@ -701,7 +807,7 @@ def render_ratio_yaml(overrides: dict[str, str], profile_path: str, profile: dic
 
 
 def render_weight_yaml(weights: dict[str, float], group_keys: list[str], profile_path: str,
-                       profile: dict, budget: int, knobs: Knobs) -> str:
+                       profile: dict, budget: int, knobs: Knobs, missing: Missing) -> str:
     """The weights snippet, indented to paste under ``training:``."""
     header = [
         "Generated by scripts/sampling_budget_planner.py plan.",
@@ -713,6 +819,7 @@ def render_weight_yaml(weights: dict[str, float], group_keys: list[str], profile
         f"weight_alpha={knobs.weight_alpha_used}",
         "sample_weight_keys = dataset.sample_group_keys: HT needs weight keys at "
         "least as fine as the sampling keys.",
+        *_missing_lines(missing),
     ]
     body = (["  sample_weight_keys:"]
             + [f"    - {json.dumps(k, ensure_ascii=False)}" for k in group_keys]
@@ -778,8 +885,38 @@ def summary_lines(result: Plan) -> list[str]:
     return lines
 
 
+def _missing_section(missing: Missing) -> list[str]:
+    """The report's list of the keys left out, each with why. A list, not a
+    table: keys hold ``|``, which a markdown table would split on."""
+    lines = ["## Keys with no entry", "",
+             "Combinations cross every value each sampling key has in the profile, "
+             "plus every declared item; one that cannot occur (a city outside its "
+             "region, say) is counted too. sample_pool has no rows under a key below "
+             "in the train months profiled, so the draw has nothing to keep under it "
+             "and the snippets leave it out. A row drawn under such a key later (new "
+             "data, other months) is kept at `dataset.sample_ratio`; rerun the profile "
+             "then. A row trained under one is weighted 1.0, which also happens when a "
+             "row's label in label_table differs from its label in sample_pool: the "
+             "draw keys rows by sample_pool's label, the weights by label_table's.", ""]
+    if not missing.keys:
+        return lines + ["None.", ""]
+    lines += [f"- {_missing_counts(missing)}.", ""]
+    if missing.values_without_rows:
+        lines += ["Declared values with no rows at all (every combination with one is "
+                  "left out):", ""]
+        lines += [f"- `{dim}`: {', '.join(values)}"
+                  for dim, values in missing.values_without_rows.items()]
+        lines += [""]
+    lines += [f"- `{key}` — {why}" for key, why in missing.one_class]
+    lines += [f"- `{neg}`, `{pos}` — no rows at all" for neg, pos in missing.no_rows_shown]
+    unlisted = missing.no_rows - len(missing.no_rows_shown)
+    if unlisted:
+        lines += ["", f"{unlisted:,} more combination(s) with no rows at all are not listed."]
+    return lines + [""]
+
+
 def render_report(result: Plan, checks: list[Check], warnings: list[str],
-                  profile_path: str, profile: dict) -> str:
+                  profile_path: str, profile: dict, missing: Missing) -> str:
     lines = ["# Sampling budget plan", ""]
     lines += [f"- {line}" for line in _source_lines(profile_path, profile, result.budget)]
     lines += [f"- train months profiled: {', '.join(profile.get('train_snap_dates') or [])}",
@@ -801,7 +938,8 @@ def render_report(result: Plan, checks: list[Check], warnings: list[str],
         lines.append(
             f"| {item} | {target.P:,} | {kept_pos:,.0f} | {100 * kept_pos / target.P:.1f}% "
             f"| {kept_neg:,.0f} | {kept_neg / kept_pos:.2f} | {target.A:.4g} | {target.v:.4g} |")
-    lines += ["", "## Self-checks", ""]
+    lines += [""] + _missing_section(missing)
+    lines += ["## Self-checks", ""]
     lines += [f"- [{'PASS' if c.passed else 'FAIL'}] {c.name} — {c.detail}" for c in checks]
     return "\n".join(lines) + "\n"
 
@@ -823,17 +961,18 @@ def _main() -> None:
     """Keeps ``plan`` a named subcommand (Typer collapses a lone command)."""
 
 
-def _load_parameters(params: Path, train_params: Path, base_params: Path) -> dict:
-    """One parameters dict from the three yamls, the way the editor reads them."""
-    ds = yaml.safe_load(params.read_text()) or {}
-    merged: dict = {}
-    if base_params.exists():
-        merged.update(yaml.safe_load(base_params.read_text()) or {})
-    if "schema" in ds:
-        merged["schema"] = ds["schema"]
-    merged["dataset"] = ds.get("dataset", ds)
-    merged["training"] = (yaml.safe_load(train_params.read_text()) or {}).get("training", {}) or {}
-    return merged
+def _load_parameters(env: str) -> dict:
+    """The parameters the pipelines read for ``--env``: conf/base with
+    conf/<env> deep-merged over it, from the working directory's ``conf/``.
+
+    A conf/<env> that does not exist is refused (A30), as the pipelines refuse
+    it: the loader would read it as an empty overlay and plan on conf/base
+    alone. Same text in profile_sample_pool.py and sampling_overrides_editor.py
+    (each script stays self-contained). Raises ``ValueError``.
+    """
+    conf_dir = Path.cwd() / "conf"
+    resolved_env_dir(conf_dir, env)
+    return ConfigLoader(str(conf_dir), env=env).get_parameters()
 
 
 def _fail(messages: list[str]) -> None:
@@ -856,18 +995,18 @@ def plan_command(
     weight_t: Optional[float] = typer.Option(None, help="t for the weights only (default: --t)"),
     weight_alpha: Optional[float] = typer.Option(
         None, help="alpha for the weights only (default: --alpha)"),
-    params: Path = typer.Option(
-        Path("conf/base/parameters_dataset.yaml"), help="dataset params yaml"),
-    train_params: Path = typer.Option(
-        Path("conf/base/parameters_training.yaml"), help="training params yaml"),
-    base_params: Path = typer.Option(
-        Path("conf/base/parameters.yaml"), help="base params yaml — source of schema"),
+    env: str = typer.Option(
+        "local", "--env", "-e",
+        help="config environment, as for the pipelines: conf/base with conf/<env> over it"),
     out_dir: Path = typer.Option(DEFAULT_OUT_DIR, help="where the snippets and report go"),
 ) -> None:
     knobs = Knobs(t=t, alpha=alpha, gamma=gamma, eta=eta, pos_floor=pos_floor,
                   weight_t=weight_t, weight_alpha=weight_alpha)
     profile = json.loads(profile_json.read_text())
-    parameters = _load_parameters(params, train_params, base_params)
+    try:
+        parameters = _load_parameters(env)
+    except ValueError as e:
+        _fail([str(e)])
     group_keys = list(parameters["dataset"].get("sample_group_keys") or [])
     label_col = get_schema(parameters)["label"]
 
@@ -885,15 +1024,25 @@ def plan_command(
     if errors:
         _fail(errors)
     checks = self_checks(result, overrides, weights, group_keys, label_col)
+    # With an item list counted from the data (#379) none is declared: the
+    # items the profile has are the list.
+    declared = [] if item_list_counted_from_data(parameters) else resolved_item_values(parameters)
+    missing = missing_entries(result, overrides, group_keys, label_col,
+                              {get_schema(parameters)["item"]: declared})
 
     for w in warnings:
         typer.echo(f"WARNING: {w}", err=True)
     out_dir.mkdir(parents=True, exist_ok=True)
     report = out_dir / "report.md"
-    report.write_text(render_report(result, checks, warnings, str(profile_json), profile))
+    report.write_text(render_report(result, checks, warnings, str(profile_json), profile,
+                                    missing))
     typer.echo(f"profile: {profile_json} — {len(cells)} sampling cell(s)")
     for line in summary_lines(result):
         typer.echo(line)
+    typer.echo(f"keys with no entry: {missing.keys}"
+               + (f" — {_missing_counts(missing)}; report.md lists them" if missing.keys else ""))
+    if missing.values_without_rows:
+        typer.echo(f"declared value(s) with no rows at all: {_values_without_rows_text(missing)}")
     passed = sum(c.passed for c in checks)
     typer.echo(f"self-checks: {passed}/{len(checks)} passed")
     if passed != len(checks):
@@ -901,9 +1050,10 @@ def plan_command(
               + [f"{c.name}: {c.detail}" for c in checks if not c.passed])
     ratio_path = out_dir / "sample_ratio_overrides.yaml"
     weight_path = out_dir / "sample_weights.yaml"
-    ratio_path.write_text(render_ratio_yaml(overrides, str(profile_json), profile, budget, knobs))
+    ratio_path.write_text(render_ratio_yaml(overrides, str(profile_json), profile, budget, knobs,
+                                            missing))
     weight_path.write_text(render_weight_yaml(weights, group_keys, str(profile_json), profile,
-                                              budget, knobs))
+                                              budget, knobs, missing))
     typer.echo(f"wrote {ratio_path} (under dataset:), {weight_path} (under training:), {report}")
 
 

@@ -281,12 +281,12 @@ schema:
 
 ```bash
 python scripts/suggest_categorical_cols.py <database>.feature_table --max-cardinality 30
-python scripts/sampling_overrides_editor.py profile <database>.sample_pool
-python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_overrides_export.json
+python scripts/sampling_overrides_editor.py profile <database>.sample_pool --env dev
+python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_overrides_export.json --env dev
 ```
 
 - `suggest_categorical_cols.py` 遇到大表，可以加 `--where` 只讀部分分區、或 `--sample-fraction` 抽樣加速（見 [`dataset.md`](docs/pipelines/dataset.md)）。
-- `sampling_overrides_editor.py` 預設讀 `conf/base/` 的示例設定，用 `--params`、`--train-params`、`--base-params` 改指到你的設定檔；`to-yaml` 產出兩段：`sample_weights` 貼到 `conf/dev/parameters_training.yaml`；`sample_ratio_overrides` 要取代 `conf/base/parameters_dataset.yaml` 裡示例的那一段（貼到 `conf/dev/` 會跟示例的 key 合併而被擋，見上面）。用法見 [`sampling-overrides-editor.md`](docs/operations/user-guides/sampling-overrides-editor.md)。
+- `sampling_overrides_editor.py` 讀設定的方式跟 pipeline 一樣：`conf/base/` 再疊上 `--env` 指定的 `conf/<env>/`（不寫就是 `local`）；`to-yaml` 產出兩段：`sample_weights` 貼到 `conf/dev/parameters_training.yaml`；`sample_ratio_overrides` 要取代 `conf/base/parameters_dataset.yaml` 裡示例的那一段（貼到 `conf/dev/` 會跟示例的 key 合併而被擋，見上面）。用法見 [`sampling-overrides-editor.md`](docs/operations/user-guides/sampling-overrides-editor.md)。
 
 > **廣告情境**：`schema.columns` 加 `occasion: request_id`；`request_id` 不能列進 `categorical_columns`；`catalog.yaml` 裡 `training_eval_predictions` 的欄位要加上 `request_id`（預測表只寫宣告過的欄，沒加會被設定檢查擋下）。完整清單見 [`impression-data-shapes.md`](docs/operations/user-guides/impression-data-shapes.md)。
 
