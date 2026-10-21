@@ -1,0 +1,44 @@
+# 你的設定：conf/base/ 同名檔裡標 ★ 的鍵（換成你的資料一定要改）都在這裡，值還是銀行示例的。
+# 其他鍵沿用 conf/base/，各鍵的說明也在那裡。
+dataset:
+  # 三段日期照時間先後、互不重疊
+  train_snap_dates:
+    - "2025-01-31"
+    - "2025-02-28"
+    - "2025-03-31"
+    - "2025-04-30"
+    - "2025-05-31"
+    - "2025-06-30"
+    - "2025-07-31"
+    - "2025-08-31"
+    - "2025-09-30"
+    - "2025-10-31"
+  val_snap_dates:
+    - "2025-12-31"
+  test_snap_dates:
+    - "2026-01-31"
+
+  sample_group_keys:  # train 分層抽樣的分層欄
+    - "cust_segment_typ"
+    - "prod_name"
+    - "label"
+  # sample_ratio_overrides 不放這裡：這一層刪不掉 conf/base/ 已有的鍵，
+  # 要改請直接改 conf/base/parameters_dataset.yaml 的那一段（issue #477）。
+  carry_columns:  # 設樣本權重要用、但不是特徵的欄
+    - cust_segment_typ
+
+  prepare_model_input:
+    drop_columns:  # 不進模型的欄
+      - "snap_date"
+      - "cust_id"
+      - "label"
+      - "apply_start_date"
+      - "apply_end_date"
+      - "cust_segment_typ"
+    categorical_columns:  # 類別欄，一定要包含 item 欄
+      - "prod_name"
+      - "gender"
+      - "risk_attr"
+      - "education_level"
+      - "marital_status"
+      - "channel_preference"

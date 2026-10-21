@@ -191,13 +191,14 @@ item 自己的屬性（例如產品類型）不會另外變成特徵；模型學
 
 - 本文件用 `dev` 當你的環境名稱，repo 已經附了 `conf/dev/`。名字可以自己取（`cp -r conf/dev conf/<你的名字>`），換了就把後面每條指令的 `--env dev` 一起換；但不要用 `local`，那是不帶 `--env` 時的預設，給本機測試用。
 - `conf/dev/` 疊在 `conf/base/` 上面。檔名跟 `conf/base/` 裡的一樣，裡面只寫你要改的鍵，同名的鍵以你的為準。
+- **換成你的資料一定要改的鍵，`conf/dev/` 幾乎都已經放好了**（就是 `conf/base/` 裡標 ★ 的那些），值還是銀行示例的。照著改 `conf/dev/` 的檔就好；例外是 `catalog.yaml` 的欄名（步驟 3），和下面「已知缺口」那三個鍵。其他鍵沿用 `conf/base/`，想改哪個就把它加進 `conf/dev/` 的同名檔。
 - **不要直接改 `conf/base/`**。那是框架附的示例設定，升級時會被新版蓋掉。
 - **pipeline 指令都要帶 `--env dev`**。不帶的話預設是 `local`，你的設定一條都不會生效，而且不會有任何錯誤。
 - **表名前綴**：`conf/base/` 裡的 Hive 表名都沒有前綴（例如 `train_keys`、`feature_table`）。`conf/dev/` 幫每張表都加上前綴 `recsys_prod_`（prod＝產品，不是正式環境），示範怎麼跟同一個 database 裡的其他表分開命名：`catalog.yaml` 改 pipeline 讀寫的表名，四份 `parameters_*_etl.yaml` 讓 source ETL 寫出同樣帶前綴的表（見步驟 2）。前綴可以改成你自己的，這幾份檔和 `conf/sql/etl/` 的 SQL 裡的表名要一起改。
 - 兩個例外沒有環境分層：來源 SQL（`conf/sql/etl/`）與 Spark 連線設定（看 `SPARK_CONF_DIR`）。怎麼處理見 [`using-a-release.md`](docs/operations/user-guides/using-a-release.md) §5。
 - **已知缺口**：底下還有一層 key 的值（例如 `inference:` 底下的 `products`）是合併、不是取代——你可以改或加 key，但刪不掉 `conf/base/` 裡已有的 key。目前有三個鍵因此要直接改 `conf/base/`，後面用到時會提醒；代價是升級時這幾處要自己合併（issue #477）。
 
-`conf/base/` 裡的值是銀行示例專屬的（欄名、item 名、日期、表名），換成你的資料一定要改。每一步會講要改哪些；步驟 5 有一張總表，讓你跑之前對一次。
+`conf/dev/` 裡的值是銀行示例專屬的（欄名、item 名、日期、Hive database），換成你的資料一定要改。每一步會講要改哪些；步驟 5 有一張總表，讓你跑之前對一次。
 
 ### 步驟 1：定義排序契約
 
@@ -222,7 +223,7 @@ item 自己的屬性（例如產品類型）不會另外變成特徵；模型學
 
 ### 步驟 2：建來源表
 
-在 `conf/sql/etl/` 寫 SQL，產出 `feature_table`、`label_table`、`sample_pool`、`inference_population`。每張表的 SQL 檔、partition、`primary_key` 與品質檢查，設在 `parameters_{feature,label,sample_pool,inference_population}_etl.yaml` 的 `tables`；寫進哪個 database 設在同一檔的 `variables.target_db`。pipeline 讀表用的 database 是 `parameters.yaml` 的 `hive.db`，通常設成同一個。表名有兩邊要對得上：ETL 寫出來的是 `tables` 的 `name`，pipeline 讀的是 `catalog.yaml` 的 `table`。範例 SQL 對齊 `conf/dev/` 的表名，讀其他 ETL 表時直接寫帶前綴的名字（例如 `${target_db}.recsys_prod_feature_table`），所以要配 `--env dev` 跑。
+在 `conf/sql/etl/` 寫 SQL，產出訓練要用的 `feature_table`、`label_table`、`sample_pool`。每張表的 SQL 檔、partition、`primary_key` 與品質檢查，設在 `conf/dev/parameters_{feature,label,sample_pool}_etl.yaml` 的 `tables`；寫進哪個 database 設在同一檔的 `variables.target_db`。第四張 `inference_population` 只有推論會用，promote 之後再做（步驟 7）。pipeline 讀表用的 database 是 `parameters.yaml` 的 `hive.db`，通常設成同一個。表名有兩邊要對得上：ETL 寫出來的是 `tables` 的 `name`，pipeline 讀的是 `catalog.yaml` 的 `table`。範例 SQL 對齊 `conf/dev/` 的表名，讀其他 ETL 表時直接寫帶前綴的名字（例如 `${target_db}.recsys_prod_feature_table`），所以要配 `--env dev` 跑。
 
 三件最容易錯的事：
 
@@ -245,7 +246,7 @@ python -m recsys_tfb sample_pool_etl --env dev --target-dates 2026-01-31
 
 `--source-check` 查什麼，要先寫在 ETL 設定的 `source_checks`（例如 `feature_etl.source_checks`）；`conf/base/` 的是空的，不寫的話它只印一行警告就結束，什麼都沒查。
 
-單日沒問題，再把 `--target-dates` 擴大到 train、val、test 需要的所有日期；inference 要的日期在步驟 6 再產。完整設定見 [`source_etl.md`](docs/pipelines/source_etl.md)。
+單日沒問題，再把 `--target-dates` 擴大到 train、val、test 需要的所有日期；inference 要的日期在步驟 7 再產。完整設定見 [`source_etl.md`](docs/pipelines/source_etl.md)。
 
 > **廣告情境**：`sample_pool` 與 `label_table` 都要帶 `request_id`，兩張表的 `primary_key` 也要加上它。候選層級特徵表在 `catalog.yaml` 加一個 `candidate_feature_table` 條目指過去。SQL 範例在 `examples/ad/conf/sql/etl/`。
 
@@ -266,9 +267,9 @@ schema:
 
 欄名換了，`catalog.yaml` 裡各表 `columns`、`partition_cols` 寫的欄名也要跟著換（item 由多欄組成時，框架寫的表裡欄名固定叫 `item`）。只有預測表缺 entity 欄時，training 一開始會擋；其他表不檢查，沒換會在寫表時失敗。
 
-同一份 item 清單也要寫進 `inference.products`（`parameters_inference.yaml`），框架會檢查兩處一致。不想逐一列出的話，item 那格寫 `from_train_data`（例：`prod_name: from_train_data`），框架從 train 期間的 `sample_pool` 數出清單。這時 `inference.products` 必須拿掉，留著會被擋；而它在 `conf/base/` 裡已經有一份，從 `conf/dev/` 刪不掉，**要直接刪掉 `conf/base/parameters_inference.yaml` 裡的 `products`**（已知缺口）。代價是上線後才出現的新 item，要等它出現在 train 期間、重跑 dataset 與 training 才會被評分（見 [`dataset.md`](docs/pipelines/dataset.md) §3.10）。
+同一份 item 清單也要寫進 `inference.products`（`conf/dev/parameters_inference.yaml`），框架會檢查兩處一致。不想逐一列出的話，item 那格寫 `from_train_data`（例：`prod_name: from_train_data`），框架從 train 期間的 `sample_pool` 數出清單。這時 `inference.products` 必須拿掉，留著會被擋：`conf/dev/parameters_inference.yaml` 的刪掉；`conf/base/` 裡也有一份，從 `conf/dev/` 刪不掉，**要直接刪掉 `conf/base/parameters_inference.yaml` 裡的 `products`**（已知缺口）。代價是上線後才出現的新 item，要等它出現在 train 期間、重跑 dataset 與 training 才會被評分（見 [`dataset.md`](docs/pipelines/dataset.md) §3.10）。
 
-在 `parameters_dataset.yaml` 設定：
+在 `conf/dev/parameters_dataset.yaml` 設定：
 
 - `dataset.train_snap_dates`、`dataset.val_snap_dates`、`dataset.test_snap_dates`：照時間先後、互不重疊（為什麼照時間切、train_dev 是什麼，見 §8 Q5）。
 - `dataset.prepare_model_input.categorical_columns`：類別欄，一定要包含 item 欄（為什麼，見 §8 Q1）。
@@ -292,14 +293,14 @@ python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_over
 
 ### 步驟 4：設定模型與評估
 
-在 `parameters_training.yaml`：
+在 `conf/dev/parameters_training.yaml`：
 
 - `training.algorithm_params.objective`（模型學什麼）：第一版用 `binary`，流程最好驗證。想讓模型直接學組內順序，再試 `lambdarank` 或 `rank_xendcg`，並把 `training.algorithm_params.metric` 改成 `ndcg` 或 `map`。
 - `training.hpo_objective`（調參時在 val 上看什麼）：`conf/base/` 預設 `macro_per_item_map`，讓每個 item 一樣重，避免熱門 item 主導調參；想讓每個 query group 一樣重，改 `mean_ap`。它跟 objective 的差別見 §8 Q6。
 - `training.sample_weight_keys`：`conf/base/` 是銀行的 item 欄 `prod_name`，改成你的 item 欄，沒改會被設定檢查擋下。要用 `sampling_overrides_editor.py` 產生權重的話，還要加上 label 欄（例如 `[prod_name, label]`），不然它會報錯。
 - 第一次試跑可以先調低 `training.n_trials` 與 `training.num_iterations`，確認資料流沒問題再調回來。
 
-在 `parameters_evaluation.yaml`：
+在 `conf/dev/parameters_evaluation.yaml`：
 
 - `evaluation.k_values` 設成下游實際的名額（例如只推 3 個產品，就特別看 @3）。
 - `evaluation.segment_columns` 列出要分開看的客群，避免整體數字蓋掉某個客群變差。
@@ -309,28 +310,28 @@ python scripts/sampling_overrides_editor.py to-yaml data/profiling/sampling_over
 
 ### 步驟 5：跑之前，對一次一定要設的鍵
 
-下面這些鍵在 `conf/base/` 裡是銀行示例的值，換成你的資料一定要改。`conf/base/` 裡標 ★ 的就是這些。
+下面這些鍵是銀行示例的值，換成你的資料一定要改；`conf/base/` 裡標 ★ 的就是這些。除了 `catalog.yaml` 的欄名，都已經放在 `conf/dev/` 的同名檔裡，直接改那裡。標「**直接改 `conf/base/`**」的是步驟 0 講的已知缺口。
 
 | 檔案 | 鍵 | 設成什麼 |
 |---|---|---|
 | `parameters.yaml` | `hive.db` | 你的 Hive database |
 | | `schema.columns` 的 `time`、`entity`、`item`、`label` | 你的欄名 |
 | | `schema.categorical_values.<item 欄>` | 你全部的 item，或 `from_train_data` |
-| `catalog.yaml` | 各表 `partition_cols`、`columns` 裡的 `snap_date`、`cust_id`、`prod_name`、`label` | 你的欄名 |
+| `catalog.yaml` | 各表 `partition_cols`、`columns` 裡的 `snap_date`、`cust_id`、`prod_name`、`label` | 你的欄名。`conf/dev/catalog.yaml` 現在只改表名，欄名要你在對應的條目加上 `partition_cols`、`columns` |
 | `parameters_<名稱>_etl.yaml`（四個） | `<名稱>_etl.variables.target_db`、`<名稱>_etl.tables` | 你的 database、你的來源表定義 |
 | `parameters_dataset.yaml` | `dataset.train_snap_dates`、`dataset.val_snap_dates`、`dataset.test_snap_dates` | 你的日期 |
 | | `dataset.prepare_model_input.categorical_columns`、`dataset.prepare_model_input.drop_columns` | 你的類別欄、不進模型的欄 |
 | | `dataset.sample_group_keys`、`dataset.carry_columns` | 你的分層欄、權重要用的欄 |
 | | `dataset.sample_ratio_overrides` | 你的分層比例，或整段清空（**直接改 `conf/base/`**） |
 | `parameters_training.yaml` | `training.sample_weight_keys` | 你的 item 欄；用 `sampling_overrides_editor.py` 產生權重時再加上 label 欄 |
-| `parameters_inference.yaml` | `inference.snap_dates` | 要評分的日期 |
-| | `inference.products` | 你全部的 item；用 `from_train_data` 時要刪掉（**直接改 `conf/base/`**） |
+| `parameters_inference.yaml` | `inference.snap_dates` | 要評分的日期；推論時再設（步驟 7） |
+| | `inference.products` | 你全部的 item；用 `from_train_data` 時 `conf/dev/` 和 `conf/base/` 的都要刪（**`conf/base/` 那份直接改**） |
 | `parameters_evaluation.yaml` | `evaluation.snap_date` | 要評估的日期 |
 | | `evaluation.item_categories` | 不用就 `enabled: false`；要用就改 `mapping`（**直接改 `conf/base/`**） |
 
 `evaluation.segment_columns` 也標了 ★：沒改不會出錯，只是分群報表會註明找不到那一欄。其他鍵都有通用的預設值，跑通之後再調。
 
-### 步驟 6：依序執行
+### 步驟 6：訓練、評估、promote
 
 ```bash
 python -m recsys_tfb dataset    --env dev            # 1. 組出四份資料
@@ -339,26 +340,55 @@ python -m recsys_tfb evaluation --env dev --post-training --model-version <model
                                                             # 3. 上線前評估報表
 python scripts/promote_model.py --env dev --dry-run  # 4. 列出候選版本
 python scripts/promote_model.py <model_version>             # 5. 看完報表，人工 promote
+```
 
-# 6. 替推論日期產出 inference 要讀的兩張表，再評分、發布
+- **產出在哪**：模型在 `data/models/<model_version>/`（目錄名就是 model_version）；評估報表在 `data/evaluation/<model_version>/<日期>/report.html`。
+- **第 3 步**評的是 `evaluation.snap_date`，它要在 `dataset.test_snap_dates` 裡。這份報表是決定要不要上線的依據：先確認模型贏過熱門度基準線，各 item、各客群沒有明顯變差。一定要帶 `--model-version`：不帶的話，evaluation 評的是 `best`（上一個 promote 過的版本），不是剛訓練好的這個。
+- **第 5 步**：training 不會自己上線。從沒 promote 過，inference 會停下並提示你先 promote；以前 promote 過，inference 會安靜地繼續用舊模型。指定版本號時 promote 不讀設定，所以不用帶 `--env`。怎麼挑版本見 [`promoting-a-model.md`](docs/operations/user-guides/promoting-a-model.md)。
+
+> **廣告情境**：只跑到第 3 步，步驟 7 不適用。宣告了候選層級特徵表，inference 在入口就會停下（評分要交給線上系統）；宣告了 `occasion`，上線後監控模式的 evaluation 也不能用。
+
+### 步驟 7：推論
+
+promote 之後，替你要的日期排出結果。先做三件事，再跑 inference。
+
+**① 填設定**
+
+- `conf/dev/parameters_inference.yaml`：`inference.snap_dates` 寫要評分的日期。`inference.products` 在步驟 3 已經跟 item 清單一起填好了。
+- `conf/dev/parameters_inference_population_etl.yaml`：`inference_population` 這張表的 SQL 檔、partition、`primary_key`，寫法跟步驟 2 那三張表一樣。`primary_key` 是 `time` ＋ `entity`：每個日期、每個 entity 一列。
+
+**② 寫 SQL**
+
+在 `conf/sql/etl/inference_population/inference_population.sql` 選出這次要替誰排，例如還沒流失、符合行銷資格的客戶。每列要有 `time` 與 `entity` 欄；想在上線後分客群看指標，就把 `evaluation.segment_columns` 的欄也帶上。
+
+**③ 產出那個日期的表**
+
+```bash
 python -m recsys_tfb feature_etl              --env dev --target-dates <推論日期>
 python -m recsys_tfb inference_population_etl --env dev --target-dates <推論日期>
-python -m recsys_tfb inference                --env dev
+```
 
-# 7. 那一期的答案出來後：補上 label，評估已發布的結果
+`<推論日期>` 跟 `inference.snap_dates` 寫同一天。
+
+**跑 inference**
+
+```bash
+python -m recsys_tfb inference --env dev
+```
+
+- 用的是 promote 過的版本（`best`）。要排哪幾天只看 `inference.snap_dates`，不能在指令上指定。
+- 每個 entity 配上整份 item 清單評分、排名，檢查通過才寫進 `ranked_predictions`。用 `conf/dev/` 時表名是 `recsys_prod_ranked_predictions`（在 `hive.db` 裡）；不同模型版本的結果放在同一張表，查的時候要帶 `model_version` 條件。
+- 確認結果對不對：[`inference.md`](docs/pipelines/inference.md) §6.4 有檢查清單與查詢。
+- **之後每一期**：只重做這一步——把 `inference.snap_dates` 換成新日期、產那個日期的兩張表、跑 inference。不用重訓，也不用再 promote。
+
+**那一期的答案出來後**：先把 `conf/dev/parameters_evaluation.yaml` 的 `evaluation.snap_date` 改成推論日期，再補 label、評估已發布的結果。要等 label 觀察窗結束、答案補齊才跑。
+
+```bash
 python -m recsys_tfb label_etl  --env dev --target-dates <推論日期>
 python -m recsys_tfb evaluation --env dev
 ```
 
-- **產出在哪**：模型在 `data/models/<model_version>/`（目錄名就是 model_version）；評估報表在 `data/evaluation/<model_version>/<日期>/report.html`。
-- **第 3 步**的報表是決定要不要上線的依據：先確認模型贏過熱門度基準線，各 item、各客群沒有明顯變差。一定要帶 `--model-version`：不帶的話，evaluation 評的是 `best`（上一個 promote 過的版本），不是剛訓練好的這個。
-- **第 5 步**：training 不會自己上線。從沒 promote 過，inference 會停下並提示你先 promote；以前 promote 過，inference 會安靜地繼續用舊模型。指定版本號時 promote 不讀設定，所以不用帶 `--env`。怎麼挑版本見 [`promoting-a-model.md`](docs/operations/user-guides/promoting-a-model.md)。
-- **日期都寫在設定裡**：第 3 步評 `evaluation.snap_date`，它要在 `dataset.test_snap_dates` 裡；第 6 步替 `inference.snap_dates` 排；第 7 步要先把 `evaluation.snap_date` 改成推論日期。
-- **第 7 步**要等那一期的 label 觀察窗結束、答案補齊才跑。
-
-> **廣告情境**：只跑到第 3 步。宣告了候選層級特徵表，inference 在入口就會停下（評分要交給線上系統）；宣告了 `occasion`，上線後監控模式的 evaluation 也不能用。
-
-### 步驟 7：驗收第一版
+### 步驟 8：驗收第一版
 
 pipeline 顯示成功不代表結果對。至少再確認：
 

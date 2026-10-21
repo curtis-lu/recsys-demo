@@ -81,7 +81,7 @@ python3.10 -m venv .venv
 ```
 conf/base/parameters.yaml      框架附的預設值  ← 升級時會被新版覆蓋
         ＋
-conf/<env>/parameters.yaml     你的設定        ← 升級不會動到
+conf/<env>/parameters.yaml     你的設定        ← 升級不會動到（repo 附的 conf/dev/ 例外，見下）
         ＝
 這次執行實際生效的設定
 ```
@@ -94,7 +94,7 @@ repo 已經附了 `conf/dev/`，可以直接當你的環境層。想用別的名
 cp -r conf/dev conf/<你的名字>
 ```
 
-**例外：`conf/dev/` 裡框架附的檔案，升級可能會改到它們。** `catalog.yaml` 幫每張 Hive 表加上前綴 `recsys_prod_`，四份 `parameters_*_etl.yaml` 讓 source ETL 寫出同樣帶前綴的表，`conf/sql/etl/` 的範例 SQL 讀的也是這些帶前綴的表名（見 [README](../../../README.md) §5 步驟 0）。`conf/base/catalog.yaml` 新增一張表、或 `conf/base/parameters_*_etl.yaml` 的 `tables` 改了，新版會一起改這幾份檔；你改過的話，升級時要自己合併。複製出去的那份不會跟著升級，新版的變更要自己抄過去，否則那張表在你的環境裡不帶前綴，或 ETL 寫的表名跟 catalog 對不上。
+**例外：`conf/dev/` 裡框架附的檔案，升級可能會改到它們。** 這些檔放著換成你的資料一定要改的鍵（`conf/base/` 裡標 ★ 的那些，值是銀行示例的）；另外 `catalog.yaml` 幫每張 Hive 表加上前綴 `recsys_prod_`，四份 `parameters_*_etl.yaml` 讓 source ETL 寫出同樣帶前綴的表，`conf/sql/etl/` 的範例 SQL 讀的也是這些帶前綴的表名（見 [README](../../../README.md) §5 步驟 0）。`conf/base/` 多了或改了 ★ 鍵、`conf/base/catalog.yaml` 新增一張表、或 `conf/base/parameters_*_etl.yaml` 的 `tables` 改了，新版會一起改這幾份檔；你改過的話，升級時要自己合併。複製出去的那份不會跟著升級，新版的變更要自己抄過去，否則新的 ★ 鍵在你的環境裡用的是 `conf/base/` 的示例值，或那張表不帶前綴、ETL 寫的表名跟 catalog 對不上。
 
 **檔名要和 `conf/base/` 裡的檔案逐字相同**：`conf/dev/parameters_training.yaml` 覆蓋 `conf/base/parameters_training.yaml`，兩邊的內容逐層合併。
 
@@ -155,7 +155,7 @@ git tag                                        # 有哪些新版本
 git diff v0.3.0..v0.4.0 -- conf/base/          # 預設設定改了什麼
 git diff v0.3.0..v0.4.0 -- conf/sql/           # 來源表 SQL 範本改了什麼
 git diff v0.3.0..v0.4.0 -- conf/spark-local/   # Spark 設定範本改了什麼
-git diff v0.3.0..v0.4.0 -- conf/dev/           # 示範環境層（表名前綴）改了什麼
+git diff v0.3.0..v0.4.0 -- conf/dev/           # 示範環境層（★ 鍵、表名前綴）改了什麼
 git checkout v0.4.0
 .venv/bin/pip install -e .                     # 相依套件可能跟著翻版本
 ```
@@ -180,6 +180,9 @@ diff -ru recsys_tfb-v0.3.0/conf recsys_tfb-v0.4.0/conf              # 或兩版�
 - **source ETL 的 dry run 不再依 `--env` 給預設，改成 `--dry-run` 旗標。** 以前 `feature_etl`、`label_etl` 的設定沒寫 `dry_run` 時，`--env local`（包括在正式機上忘了帶 `--env`，預設值就是 `local`）會靜默只 render SQL、不寫表；現在不管哪個 `--env`，沒加 `--dry-run` 就是真的寫表。要看 SQL 的那一次才加旗標，結尾會印 `DRY RUN：只 render 了 SQL，沒有執行、沒有寫表`。
 - **`conf/base/` 的 source ETL 範本現在預設開著 `rendered_sql_dir: data/rendered_sql`**，所以每次執行都會把 SQL 存到執行指令時所在目錄底下的 `data/rendered_sql/<run_id>/<日期>/<表名>.sql`（寫不進去只警告，不讓 ETL 失敗）。不要這個行為，不要改 `conf/base/`：在 `conf/<env>/` 的同名檔寫 `rendered_sql_dir: ~`（疊加層是逐層合併，刪不掉 base 的鍵，只能用 `~` 蓋掉）。
 - **`variables.target_db` 變成必填。** source ETL 的 stage 設定沒宣告它（或寫成空字串），指令會以 `(A59)` 報錯；以前是靜默寫進 Hive 的 `default` database。`conf/base/` 的範本本來就有寫，疊加層又是逐層合併，所以只有改過 `conf/base/` 把它拿掉、或在 `conf/<env>/` 把它寫成空字串的部署，升級後才會碰到。
+- **`conf/dev/` 多了五份 `parameters*.yaml`**（`parameters.yaml` 與 dataset、training、inference、evaluation 各一份），放著 `conf/base/` 標 ★ 的鍵，值是銀行示例的。用自己取名的環境（`conf/<你的名字>/`）不受影響；直接用 repo 附的 `conf/dev/` 的部署，升級前查兩件事：
+  - 你改過 `conf/base/` 的 ★ 鍵，升級後會被這幾份檔的示例值蓋掉，不一定會報錯。先把那些改動搬進 `conf/dev/` 的同名檔。
+  - 你自己建過這幾個檔名的 `conf/dev/parameters*.yaml`，`git checkout` 會因為有未追蹤的同名檔而擋下來。先把它們移開，換版之後再把內容合進新檔。
 - 來源表 schema 的變動由上游決定，跟版本無關，但同樣會讓結果變化。
 - **promote 挑版本的規則若有變動，既有的模型版本可能一起退出排名。** training 開始在 `evaluation_results.json` 記下計分月份的那一版（v0.4.0，ADR-0028）就是這種情況：升級之前算的檔案都沒記月份，升級當下 `scripts/promote_model.py --dry-run` 把每個版本列在 `Not ranked`，不帶版本號的自動挑選不會挑任何版本。直接指定版本號照樣 promote 得了。[替舊版本補分數](rescoring-an-old-version.md) 能讓舊版本重新參加排名，但**只限格式版本號跟現在的程式相同的版本**（從 v0.3.0 升上來的人：只有用 v0.4.0 訓練的才算）：v0.4.0 之前訓練的版本補不回來，因為格式版本號從 v0.4.0 起算進 `model_version`（見上面版本 ID 那一條），現在的程式算不出它原本的版本號。那些模型要回到排名裡，只能用 v0.4.0 重新訓練（會得到新的版本號）。同一版起 promote 要從 repo 根目錄執行並帶 `--env`，因為它改讀設定（[promote 一個版本](promoting-a-model.md)）。
 

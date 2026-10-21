@@ -59,10 +59,10 @@ ls -1 data/models/          # 目錄名就是 model_version
 
 ## 步驟 1：把新月份加進設定
 
-**先固定計分月份。** 打開 `conf/base/parameters_training.yaml`，看 `test_metrics.snap_date`：
+**先固定計分月份。** 看 `conf/dev/parameters_training.yaml` 和 `conf/base/parameters_training.yaml` 有沒有寫 `test_metrics.snap_date`（生效的是兩份疊起來的結果，兩份都寫了以 `conf/dev/` 為準）：
 
 - **有寫**：不用動，跳到下面加新月份。
-- **沒寫**（出貨的設定是註解掉的）：把**現在的** `dataset.test_snap_dates` 原樣抄進去，寫法要一模一樣：
+- **兩份都沒寫**（repo 附的兩份都沒寫：`conf/dev/` 沒有這個鍵，`conf/base/` 的那一行是註解掉的）：在 `conf/dev/parameters_training.yaml` 最外層加上 `test_metrics:`，把**現在的** `dataset.test_snap_dates` 原樣抄進去，寫法要一模一樣：
 
 ```yaml
 test_metrics:
@@ -71,7 +71,7 @@ test_metrics:
 
 為什麼：training 在 test 上算分數時，只算「計分月份」（`test_metrics.snap_date`）；沒寫就是整份 `dataset.test_snap_dates`。promote 挑版本時，只拿「當初算分數的月份跟現在的計分月份完全一樣」的版本互相比。所以沒寫這一行就加月份，計分月份跟著變成兩個月，**每一個**版本記下的都只有舊月份，全部退出 promote 的排名。寫下這一行，計分月份就停在舊月份，加進來的月份只給 evaluation 用。
 
-**再把新月份加進去。** 編輯 `conf/base/parameters_dataset.yaml`：
+**再把新月份加進去。** 編輯 `conf/dev/parameters_dataset.yaml`：
 
 ```yaml
 dataset:
@@ -149,7 +149,7 @@ python -m recsys_tfb training \
 
 ## 步驟 4：產出報表
 
-編輯 `conf/base/parameters_evaluation.yaml`，把日期指到新月份：
+編輯 `conf/dev/parameters_evaluation.yaml`，把日期指到新月份：
 
 ```yaml
 evaluation:

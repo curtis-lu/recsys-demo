@@ -60,7 +60,7 @@ LEFT JOIN ${target_db}.recsys_prod_label_table l
 
 正式執行前，建議依序確認：
 
-1. **定義 schema 角色**：先在 `conf/base/parameters.yaml` 設定 `time`、`entity`、`item` 與 `label` 對應的實際欄位名稱。
+1. **定義 schema 角色**：先在你的環境層（例如 `conf/dev/parameters.yaml`）設定 `time`、`entity`、`item` 與 `label` 對應的實際欄位名稱。
 2. **確認來源資料成熟**：目標日期的上游 partition 必須完成載入；若 label 需要觀察窗，應確認該日期的 ground truth 已成熟。
 3. **準備 SQL 與執行順序**：每張中介表各自使用一支 SQL，並依實際相依順序列在 YAML 的 `tables` 中。
 4. **宣告輸出契約**：每張表都應設定 `partition_by` 與 `primary_key`，最終三張來源表應符合上表所列粒度。

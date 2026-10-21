@@ -31,7 +31,7 @@
 執行 dataset 前，建議依序確認：
 
 1. **來源表已就緒**：`feature_table` 與 `sample_pool` 必須涵蓋所有設定日期；宣告了候選層級特徵表時，它必須涵蓋本次執行要讀的每個月份（§3.8）；`label_table` 可以是只保存正例的 sparse table，但 label 觀察窗必須成熟。
-2. **schema 角色正確**：`conf/base/parameters.yaml` 的 `time`、`entity`、`item` 與 `label` 必須對應實際欄位。
+2. **schema 角色正確**：你的環境層（例如 `conf/dev/parameters.yaml`）的 `time`、`entity`、`item` 與 `label` 必須對應實際欄位。
 3. **item 集合一致**：item 清單逐一列出時，`sample_pool` 在本次日期範圍內的 item 集合必須與 `schema.categorical_values.<item>` 完全一致；`label_table` 不可產生未宣告 item。item 清單從資料數時（§3.10），`label_table` 的 item 必須在 `sample_pool` 出現過。
 4. **日期切分互斥**：train、val 與 test 日期不可重疊，並應由使用者依時間先後安排，避免資料洩漏。
 5. **類別欄位已人工確認**：可先使用 `scripts/suggest_categorical_cols.py` 依型別與 cardinality 產生候選清單——低 cardinality 的字串／布林／整數欄建議進 `categorical_columns`、高 cardinality 字串欄進 `drop_columns`，其餘型別欄（date／timestamp／binary／複合型）另列一個待人工判斷的 review 區塊（它們不能當類別欄，只能 drop 或回 source ETL 轉換）；再由你決定各欄歸屬（工具只建議、不改設定。輸出格式與大表加速選項見 §3.5）。

@@ -1,0 +1,17 @@
+# 你的設定：conf/base/ 同名檔裡標 ★ 的鍵（換成你的資料一定要改）都在這裡，值還是銀行示例的。
+# 其他鍵沿用 conf/base/，各鍵的說明也在那裡。
+inference:
+  snap_dates:  # 這次要評分的日期
+    - "2025-12-31"
+  # 跟 parameters.yaml 的 schema.categorical_values 裡的 item 清單一樣。
+  # 那裡寫 from_train_data 時，這裡和 conf/base/parameters_inference.yaml 的 products
+  # 都要刪掉：這一層刪不掉 conf/base/ 已有的鍵（issue #477）。
+  products:
+    - "exchange_usd"
+    - "exchange_fx"
+    - "fund_stock"
+    - "fund_bond"
+    - "fund_mix"
+    - "ccard_ins"
+    - "ccard_bill"
+    - "ccard_cash"
