@@ -385,17 +385,19 @@ diagnosis/metric/    contract.py
 |---|---|---|
 | 改一段報表 | 在「衡量指標」段的表加一欄 | 只改那一段的檔，加測試 |
 | 調段落順序 | 把兩段對調 | 段落清單改一行 |
-| 拿掉一段 | 拿掉「預測品質」段 | 刪那段的檔、段落清單刪一行；它的計算由需求清單自動不跑 |
+| 拿掉一段 | 拿掉「預測品質」段 | 刪那段的檔、段落清單刪一行，連同它的開關；它的計算由需求清單自動不跑 |
 | 重畫不重算 | 主報表、比較報表都用 `--only-node` 重畫 | 不重算任何指標 |
 | 加指標 | 加上下面這批指標，當最後一張票 | 每個指標只在指標目錄加一筆，加測試；兩份報表的程式不改 |
 
 驗收用的指標是擁有者列的這批：precision@K、F1@K、AUC-ROC、AUC-PR，各要整體、per-item、macro；加上 query group 層級的 hit_rate@K（只有整體，沒有 per-item）。今天已經有的（整體的 precision@K、整體的分箱 AUC）照舊。定義的邊界情況（例如某個 item 從沒排進前 K 名時 precision 怎麼算、macro 怎麼處理、per-item 那一種算進哪些 query group）在那張票開工時定。
 
+**拿掉一段要連開關一起拿（作者補充）。** 一段有開關時（例如 `report.sections.prediction_quality`），A34 要求開關清單跟報表讀的段一一對應，那份清單放在 `core/`（`EVALUATION_REPORT_SECTIONS`），因為 `core/` 不能 import 報表層；各份設定檔也宣告了它。所以拿掉一段時，那個開關要從 `core/` 的清單與設定檔一起拿掉，A34 會指出漏了哪裡。這兩處算進及格線。
+
 **重畫不啟動 Spark。** 今天就算只重畫，CLI 也會先初始化 Spark（`docs/pipelines/evaluation.md` 4.6 節）。擁有者偏向重畫時連 Spark 都不啟動。只改 `__main__.py` 做得到就做；要動 `core/` 的執行器或 catalog 才做得到，就算太複雜，改開 issue 記著。
 
 ### 決定 2　拿掉全部診斷頁
 
-拿掉 `diagnosis.metric.contract.DIAGNOSES` 列的全部診斷：`config_shift`、`item_ability`、`model_capacity`、`suppression`。只為它們存在的東西一起拿掉：共用準備步驟 `make_draw_diagnosis_sample_node`、`render_diagnosis_pages` 與監控模式的 `no_diagnosis_pages`、報表的「排序診斷連結」段（`build_diagnosis_links_section`）與它的開關 `report.sections.diagnosis_links`（A34 要求開關清單跟 `EVALUATION_REPORT_SECTIONS` 完全相等，兩邊一起拿）、`evaluation.diagnosis.*` 設定鍵，以及一致性檢查裡只檢查這些鍵的部分。A15 同時檢查 `evaluation.metric` 與 `evaluation.diagnosis`（`consistency.py:2302`），只拿掉後者那一半。
+拿掉 `diagnosis.metric.contract.DIAGNOSES` 列的全部診斷：`config_shift`、`item_ability`、`model_capacity`、`suppression`。只為它們存在的東西一起拿掉：共用準備步驟 `make_draw_diagnosis_sample_node`、`render_diagnosis_pages` 與監控模式的 `no_diagnosis_pages`、報表的「排序診斷連結」段（`build_diagnosis_links_section`）與它的開關 `report.sections.diagnosis_links`（A34 要求開關清單跟 `EVALUATION_REPORT_SECTIONS` 完全相等，兩邊一起拿）、`evaluation.diagnosis.*` 設定鍵，以及一致性檢查裡只檢查這些鍵的部分。A15 同時檢查 `evaluation.metric` 與 `evaluation.diagnosis`（`consistency.py:2302`），只拿掉後者那一半；A15 另外擋 `evaluation.segment_columns` 用到保留名 `stratum`／`inclusion_weight`（`consistency.py:2371-2389`），理由是診斷抽樣會自己加這兩欄，這一塊跟著拿掉。A19 整條只檢查 `evaluation.diagnosis.suppression.top_examples`，整條退休，代號不重編（照 A16／A17／A18 的慣例）。
 
 - **為什麼。** 留下的每一頁都要搬家、拆開計算與畫圖、補宣告；擁有者判斷沒有讀者會看完這幾頁就做決定。這是第四節第 1 步「先決定要留什麼」的答案。
 - **連帶消失的問題。** 原則 2 補充三（共用準備步驟只留有正例的 query）、原則 4 的 config_shift 防線，以及 item_ability 的 AUC 沒算進無正例的 query group（它的母體是只含有正例 query 的診斷抽樣）。
@@ -498,8 +500,8 @@ diagnosis/metric/    contract.py
 
 ### 決定 11　比較報表只顯示「要比的指標」
 
-- 比較報表放一份「要比的指標」清單，所有表只顯示清單上的；預設跟今天一樣是頭號指標加護欄指標（`report.display.primary_map_k`、`guardrail_recall_k`）。今天整體表把每個鍵都印出來（`comparison/report.py:172-198`），改成也只列清單上的。
-- 每段自己宣告要比哪些：主報表 baseline 段一份、比較報表一份。今天兩邊顯示的本來就不同。baseline 段的預設照今天：overall 的 map／recall／precision（K 用 `k_super`），加上 per-item 的 recall 與 `map_attr`（K 用 `primary_map_k`）（`report_builder.py:1603-1612`、`1628-1632`）；不要把比較報表的「頭號加護欄」套過去，否則 baseline 段會少掉 overall 那幾張表。
+- 比較報表放一份「要比的指標」清單，所有表只顯示清單上的。清單的一項是指標目錄的一筆（名字＋算法＋粒度），因為同一個名字可以在兩種算法各有一筆（決定 6）。預設跟今天一樣是頭號指標加護欄指標：macro 與 per-item 的 `map_attr`（K 用 `report.display.primary_map_k`）、per-item 的 `recall`（K 用 `guardrail_recall_k`）（`comparison/report.py:235-247`）。今天整體表把每個鍵都印出來（`comparison/report.py:172-198`），改成也只列清單上的。預設清單裡沒有 query group 層級的指標，所以照預設，整體表沒有東西可印、就不印；這會改變比較報表的長相，demo 時讓擁有者確認（決定 9）。
+- 每段自己宣告要比哪些：主報表 baseline 段一份、比較報表一份。今天兩邊顯示的本來就不同。baseline 段的預設照今天印的四組表（`report_builder.py:1603-1683`）：overall 的 map／recall／precision；per-item 的 recall 與 `map_attr`（K 用 `primary_map_k`），含 Macro 列；per-segment 的 map；大類 overall 的 map。overall、per-segment、大類三組的 K 是寫死的 `[1, 2, 3, 4, 5, "all"]`，不是設定鍵。不要把比較報表的「頭號加護欄」套過去，否則 baseline 段會少掉 overall、per-segment、大類那幾張表。
 - 比較報表與主報表共用同一套指標表的程式；比較報表裡每一格是「這次／對照／差值」。
 - **理由。** 比較報表的目的是「要不要換模型」，每個數字都要扣回這個目的（`diagnosis-report-presentation.md` 第零節）。加指標快不快跟這題無關，決定它的是表照名字讀目錄（決定 6）。
 
