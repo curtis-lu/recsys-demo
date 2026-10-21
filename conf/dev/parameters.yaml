@@ -1,0 +1,23 @@
+# 你的設定：conf/base/ 同名檔裡標 ★ 的鍵（換成你的資料一定要改）都在這裡，值還是銀行示例的。
+# 其他鍵沿用 conf/base/，各鍵的說明也在那裡。
+hive:
+  db: ml_recsys  # 你的 Hive database
+
+schema:
+  columns:
+    time: snap_date
+    entity: [cust_id]
+    item: prod_name
+    label: label
+  categorical_values:
+    # 鍵名＝上面 item 的欄名；值＝你全部的 item。也可以整格寫 from_train_data，
+    # 這時 parameters_inference.yaml 的 inference.products 要刪掉（那裡有說明）。
+    prod_name:
+      - ccard_bill
+      - ccard_cash
+      - ccard_ins
+      - exchange_fx
+      - exchange_usd
+      - fund_bond
+      - fund_mix
+      - fund_stock

@@ -1,0 +1,6 @@
+# 你的設定：conf/base/ 同名檔裡標 ★ 的鍵（換成你的資料一定要改）都在這裡，值還是銀行示例的。
+# 其他鍵沿用 conf/base/，各鍵的說明也在那裡。
+training:
+  # 你的 item 欄；用 scripts/sampling_overrides_editor.py 產生權重時，再加上 label 欄
+  sample_weight_keys:
+    - prod_name

@@ -1,5 +1,9 @@
 # 表名加前綴 recsys_prod_。tables 照抄 conf/base/ 的同名檔，只改 name 與 depends_on（清單只能整段覆蓋）。
+# target_db 換成你的 Hive database。
 feature_etl:
+  variables:
+    target_db: "ml_recsys"
+
   tables:
     - name: recsys_prod_feature_aum
       sql_file: feature/feature_aum.sql

@@ -149,6 +149,8 @@ self-checks: 4/4 passed
 
 貼在 `conf/base/`，不要貼在 `conf/<env>/`：環境檔只能覆蓋或新增 key，刪不掉 base 裡原有的 override key（issue #477）。原有的 key 如果是現在已經不存在的格，就會殘留下來。
 
+反過來，環境檔裡同名的 key 會蓋掉你剛貼進 base 的值：repo 附的 `conf/dev/parameters_training.yaml` 寫了 `sample_weight_keys`，要把它刪掉，或改成跟 `sample_weights.yaml` 裡的一樣。
+
 ## 步驟 4：跑 dataset 與 training，確認成功
 
 照平常的方式跑 dataset，再跑 training。

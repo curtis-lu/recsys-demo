@@ -105,7 +105,7 @@ dataset pipeline 在 val 與 test 預設只留至少有一個正例的組（`fil
 ### ① 設定：宣告角色
 
 ```yaml
-# conf/base/parameters.yaml
+# conf/dev/parameters.yaml
 schema:
   columns:
     time: snap_date

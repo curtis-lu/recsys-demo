@@ -1,0 +1,10 @@
+# 你的設定：conf/base/ 同名檔裡標 ★ 的鍵（換成你的資料一定要改）都在這裡，值還是銀行示例的。
+# 其他鍵沿用 conf/base/，各鍵的說明也在那裡。
+evaluation:
+  snap_date: "2026-01-31"  # 要評估的日期
+  segment_columns:  # 要分開看的客群欄；表上沒有這欄不會中止，只在報表註明
+    - cust_segment_typ
+  item_categories:
+    # 不用 item 大類報表就設 false。要用的話，大類對照表 mapping 要直接改
+    # conf/base/parameters_evaluation.yaml：這一層刪不掉 conf/base/ 已有的鍵（issue #477）。
+    enabled: true

@@ -282,7 +282,7 @@ inference 不會直接將排名結果寫入 production `ranked_predictions`。�
 
 框架無法自動判斷所有業務與時間語意。例如特徵是否包含未來資訊、label 觀察窗是否真正成熟、候選資格是否符合法規，仍需由 source SQL 設計、資料驗收與人工發布流程負責。
 
-README §5 步驟 7「驗收第一版」與 [`troubleshooting.md`](operations/user-guides/troubleshooting.md) §2 列出這些目前不能完全由程式驗證的重要事項。
+README §5 步驟 8「驗收第一版」與 [`troubleshooting.md`](operations/user-guides/troubleshooting.md) §2 列出這些目前不能完全由程式驗證的重要事項。
 
 ## 6. 可恢復執行
 
