@@ -26,7 +26,7 @@ class ReportSection:
     * ``bullets`` —— 重點，每則一句。``description`` 在渲染器裡包進單一
       ``<p>``，塞不進列點；長段落正是被抱怨「沒耐心看完」的那個形狀。
 
-    **兩者都必須維持可選且有預設值**：``evaluation/report_builder.py`` 有 13 個
+    **兩者都必須維持可選且有預設值**：``evaluation/report_builder.py`` 大多數
     既有的 ``build_*_section`` 只傳 title/description，加必填欄位會讓它們全部
     ``TypeError``。渲染器是 ``evaluation/report.py``，它經
     ``report.pages.render_section_extras`` 畫這兩個欄位。
@@ -43,5 +43,5 @@ class ReportSection:
     # ``collapsed_tables`` —— 與 ``tables`` 平行的旗標，``True`` 的那張明細表
     # 預設收合（``<details class="table-collapse">``，點標題才展開）。``collapsible``
     # 收的是**整段**；這個收的是**單張表**，兩者正交。維持可選有預設（同 formula/
-    # bullets 的理由：13 個既有 build_* 全不傳）；缺項／短於 tables 的位置視為不收合。
+    # bullets 的理由：大多數既有 build_* 不傳）；缺項／短於 tables 的位置視為不收合。
     collapsed_tables: list[bool] = field(default_factory=list)

@@ -283,7 +283,7 @@ label、score、rank 框架自帶預設欄名），其餘特徵 / 分群 / carry
   </g>
 </svg>
 
-<p class="sub">※ 跨階段的輸入有兩種畫法：別階段產出的主幹產物（<code>model</code>、<code>training_eval_predictions</code>、<code>ranked_predictions</code>）畫成叢集之間的實線，同時在下游叢集內以虛線框標明來源；其餘來源表與 <code>preprocessor</code> 為避免長跨線，圖上不畫線，只在下游叢集內以虛線框列出輸入與來源。各項的完整流向（含已畫線的 <code>gain_ledger</code>）如下：
+<p class="sub">※ 跨階段的輸入有兩種畫法：別階段產出的主幹產物（<code>model</code>、<code>training_eval_predictions</code>、<code>ranked_predictions</code>）畫成叢集之間的實線，同時在下游叢集內以虛線框標明來源；其餘來源表與 <code>preprocessor</code> 為避免長跨線，圖上不畫線，只在下游叢集內以虛線框列出輸入與來源。各項的完整流向如下：
 <code>label_table</code> 同時餵 dataset（組 model_input）與 evaluation（算指標與 baseline；<code>--post-training</code> 的 label 沿用預測自帶的）；
 <code>feature_table</code> 同時餵 dataset（前處理）與 inference（組評分母體）；
 <code>sample_pool</code> 除了 dataset（抽樣）之外，在 <code>--post-training</code> 也餵 evaluation（分群母體表）；

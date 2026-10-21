@@ -627,7 +627,7 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 
 | 類別 | 為什麼合法 | 筆數 |
 |---|---|---|
-| `evaluation.snap_date` 等**設定鍵**的讀取 | 那是 config 鍵名，不是 DataFrame 欄名。time 語彙刻意保留（ADR-0017） | 12 |
+| `evaluation.snap_date` 等**設定鍵**的讀取 | 那是 config 鍵名，不是 DataFrame 欄名。time 語彙刻意保留（ADR-0017） | 11 |
 | `core/logging` 的觀測欄白名單、`source_etl` 稽核表的欄名 | 那是**它們自己的**欄位，只是拼法相同 | 3 |
 
 開局是 15 筆，第 15 筆是 `core/schema` 的內建預設，標註為暫時的。**#328 已把預設與那一筆登記一起拿掉**，所以剩下的全部是上表那兩類——沒有一筆是暫時的了。之後的增減：#374 加了 `core/date_ranges.py` 一筆，同時讓 `prepare_eval_data` 與 `load_compare_predictions` 改經 `eval_snap_dates` 讀設定鍵、刪掉它們各自那一筆，變成 13 筆。#452 加了 `core/consistency.py` 兩筆（新設定鍵 `test_metrics.snap_date`，計分月份，[ADR-0028](../adr/0028-test-metrics-set-by-config.md)），變成 15 筆。#532 拿掉診斷頁，`pipelines/evaluation/nodes.py` 的 `_diagnosis_pages_dir` 連同它的那一筆登記一起刪掉，現在是 14 筆。

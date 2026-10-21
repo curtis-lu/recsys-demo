@@ -1,7 +1,7 @@
 """Evaluation pipeline nodes, for every run mode ``pipeline.py`` wires
 (monitoring, ``--post-training``, ``--compare``, ``--compare-only``).
 
-Every node body lives in this module. Two are built by factories here
+Every node body lives in this module. Some are built by factories here
 rather than defined at top level: ``prepare_eval_data``
 (``make_prepare_eval_data_node``) and ``restrict_to_common``
 (``make_restrict_to_common_node``, #374). The architecture audit's AST scan

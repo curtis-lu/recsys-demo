@@ -111,8 +111,8 @@ def generate_html_report(
         # went with that section in #532; no description holds markup now.
         # Escaping it is #537's (#366 item 1).
         html_parts.append(f'<p class="description">{section.description}</p>')
-        # 與 report/pages.py 共用同一個 helper：兩邊各寫一份的話，之後只改其中
-        # 一邊，另一邊會靜默丟掉 formula/bullets 而不報任何錯。
+        # formula／bullets 由 report/pages.py 的 helper 畫（#532 拿掉多頁外殼之前，
+        # 兩個渲染器共用它，各寫一份的話只改一邊、另一邊會靜默丟掉欄位）。
         html_parts.extend(render_section_extras(section))
 
         for fig in section.figures:

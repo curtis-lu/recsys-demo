@@ -171,16 +171,9 @@ class TestEvaluationPipelinePostTraining:
         assert "ranked_predictions" not in pipeline.inputs
 
     def test_pipeline_outputs_match_monitoring(self):
-        pipeline = create_pipeline(post_training=True)
-        expected = {
-            "evaluation_segment_columns", "evaluation_item_categories",
-            "evaluation_metrics",
-            "baseline_metrics", "evaluation_report",
-            "enriched_eval_predictions",
-            "evaluation_report_aggregates",
-            "prediction_quality_metrics",
-        }
-        assert pipeline.outputs == expected
+        """Since #532 the modes differ only in the predictions table read."""
+        assert (create_pipeline(post_training=True).outputs
+                == create_pipeline().outputs)
 
 
 class TestEvaluationPipelineCompareMode:

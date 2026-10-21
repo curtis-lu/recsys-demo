@@ -1,8 +1,8 @@
 {
   "measured": {
-    "date": "2026-10-16",
-    "code_commit": "368dbabe",
-    "how": "run_e2e.sh --compare 跑 feat/remove-ci（#515 拿掉信賴區間）：預期只有評估層的兩處變——diagnosis/metric_ci.json 整份不再產出、diagnosis/config_shift.json 少掉 CI 的鍵（delta_ci_low、delta_ci_high、ci 區塊與兩條欄位說明）；其餘各層與其餘評估 JSON 預期全部不變。結果與預期相同：與舊基準比只有這 4 處不同（config_shift.json 葉子 228 → 221，metric_ci.json 不存在），versions、source_etl、dataset、training 與 metrics.json、baseline_metrics.json、prediction_quality.json、report_aggregates.json、segment_columns.json、其餘診斷全部相同。本檔即在 368dbabe 的程式碼上跑出的 data/digest.json。"
+    "date": "2026-10-22",
+    "code_commit": "904014ef",
+    "how": "run_e2e.sh --compare 跑 feat/remove-diagnosis（#532 拿掉全部診斷頁）：預期只有評估層 diagnosis/ 底下的四份診斷 JSON（config_shift、item_ability、model_capacity、suppression）不再產出，其餘各層與其餘評估 JSON 全部不變。結果與預期相同：與舊基準比只有這四份不存在（8 處：各自的 hash 與 leaves），versions、source_etl、dataset、training、inference 與 metrics.json、baseline_metrics.json、prediction_quality.json、report_aggregates.json、segment_columns.json、item_categories.json 全部相同。本檔即在 904014ef 的程式碼上跑出的 data/digest.json。"
   },
   "noisy": {},
   "versions": {
@@ -230,22 +230,6 @@
     "baseline_metrics.json": {
       "leaves": 302,
       "hash": "270d44eee5d87c4733d369f4316b48d1705d19ed6f484f99b4af5649bf2cdf59"
-    },
-    "diagnosis/config_shift.json": {
-      "leaves": 221,
-      "hash": "ad90724ee9143e306728179fa090103ed8a1e808893089a3237e774809517931"
-    },
-    "diagnosis/item_ability.json": {
-      "leaves": 3,
-      "hash": "9e2cfdc91a7a349bcd0597cc03f69a10284a956a817dbc31a4c1148819f40d3f"
-    },
-    "diagnosis/model_capacity.json": {
-      "leaves": 308,
-      "hash": "0150e62eee76214a95eab52075214db3a64b43945dbcf4fbed52f0c8df7272a0"
-    },
-    "diagnosis/suppression.json": {
-      "leaves": 3364,
-      "hash": "6592bb03e1ed688b0e9e52c46f176750fabf4272f1f99bb765474be45398caad"
     },
     "item_categories.json": {
       "leaves": 24,

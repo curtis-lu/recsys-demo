@@ -2002,8 +2002,8 @@ class TestS7DerivedKeysAreReadNotRespelled:
     could. ADR-0025's optional ``occasion`` role widens the first and must
     never widen the second -- at which point every respelling silently keeps
     the old meaning, and the ones that are wrong produce numbers rather than
-    errors (the comparison report's "common query groups" count, the
-    per-query diagnosis sample, the diagnosis population's grouping).
+    errors (the comparison report's "common query groups" count, and until
+    #532 the per-query diagnosis sample and its population's grouping).
 
     So the scan is not here to tidy spellings. It is here so that the next
     widening is a one-line change in ``core/schema.py`` instead of a

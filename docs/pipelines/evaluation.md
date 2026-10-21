@@ -823,7 +823,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 | compare-only 讀到錯誤情境 | 同 model/date enriched partition 曾被另一種模式覆寫 | 以正確 `--post-training` 狀態重跑標準 evaluation |
 | `per_item_breakdown` 段過慢 | 多次 Spark aggregation、items 或 bins 過多 | 關閉不需要的段落（例如 `report.sections.per_item_breakdown: false`）或縮減 K／items |
 | `Unknown node` | node 名稱拼錯或 compare mode 的 DAG 不同 | 先用相同模式執行 `--list-nodes` |
-| 部分重跑出現大量 auto-included | 該落地的 JSON 不在磁碟（前一次 run 沒跑完），或這個月的 `enriched_eval_predictions` partition 還沒寫過（會把 `prepare_eval_data` 拉回來，見 4.6 節） | 先用 `--dry-run` 看補跑清單；前次完整 run 成功時，`--only-node generate_report` 只會補一個不跑 Spark 的 node（4.6 節）。要重做比較可改用 `--compare-only` |
+| 部分重跑出現大量 auto-included | 該落地的 JSON 不在磁碟（前一次 run 沒跑完），或這個月的 `enriched_eval_predictions` partition 還沒寫過（會把 `prepare_eval_data` 拉回來，見 4.6 節） | 先用 `--dry-run` 看補跑清單；前次完整 run 成功時，`--only-node generate_report` 不補跑任何 node（4.6 節）。要重做比較可改用 `--compare-only` |
 
 ## 9. 限制與注意事項
 

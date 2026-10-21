@@ -319,8 +319,7 @@ class TestAggregateReportDiagnostics:
     def test_disabled_families_are_absent_not_empty(self, spark):
         """關掉的家族是「不存在」不是「空的」。
 
-        空的看起來像「量到了、結果什麼都沒有」，那是這次重構要避免的誤讀
-        （與 ``assemble_diagnosis_pages`` 對空頁的處理同一個立場）。
+        空的看起來像「量到了、結果什麼都沒有」，那是這次重構要避免的誤讀。
 
         """
         out = aggregate_report_diagnostics(

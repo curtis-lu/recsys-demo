@@ -31,15 +31,15 @@ def _unread_stub(params):
     return {"enabled": False, "config_fingerprint": fingerprint(params)}
 
 
-def _params(diagnostics=False):
+def _params(per_item_breakdown=False):
     return {
         "schema": {"columns": {
             "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
             "label": "label", "score": "score", "rank": "rank"}},
         "evaluation": {"snap_date": "20240331", "report": {
-            "sections": {"per_item_breakdown": diagnostics},
+            "sections": {"per_item_breakdown": per_item_breakdown},
             "display": {"primary_map_k": [1], "guardrail_recall_k": [1]},
-            "diagnostics": {"include_distributions": diagnostics}}},
+            "diagnostics": {"include_distributions": per_item_breakdown}}},
     }
 
 
@@ -111,18 +111,34 @@ def test_generate_report_with_diagnostics(spark):
     assert '<details class="table-collapse"' in html
 
 
-def test_the_main_report_has_no_diagnosis_section():
+def test_the_main_report_has_no_diagnosis_section(spark):
     """#532 (ADR-0031 decision 2) removed the diagnosis pages, the report's
-    "排序診斷（獨立報表）" link section and the overview row pointing at it.
+    "排序診斷（獨立報表）" link section, the overview row pointing at it and
+    the prediction-quality note comparing its AUC with the "item 能力" page.
     ``--post-training`` was the mode that linked to them, so that is the run
-    drawn here; the section must not come back under either mode."""
-    params = _params_computed_without_baseline()
+    drawn here, with every section that could name them switched on."""
+    from recsys_tfb.pipelines.evaluation.nodes import (
+        compute_prediction_quality,
+    )
+
+    params = _params(True)
     params["post_training"] = True
-    baseline, aggregates, pq = _landed_inputs(params)
-    html = generate_report(_landed_metrics(params), params, baseline,
-                           aggregates, pq)
-    assert "概覽" in html, "premise: the report was drawn"
+    params["evaluation"]["report"]["sections"].update(
+        {"prediction_quality": True, "baseline": False})
+    params["evaluation"]["prediction_quality"] = {
+        "n_bins": 10, "n_display_bins": 5, "top_n": 1}
+    eval_pred = stamp_partition_fingerprint(
+        _eval_pred(spark).drop("eval_partition_fingerprint"), params, [])
+    pq = compute_prediction_quality(
+        eval_pred, _landed_segments(params), params)
+    aggregates = compute_report_aggregates(
+        eval_pred, _landed_segments(params), params)
+    html = generate_report(_landed_metrics(params), params,
+                           _unread_stub(params), aggregates, pq)
+    # Premise: the sections that used to name the diagnoses were drawn.
+    assert "概覽" in html and "預測品質" in html and "per-item 細部拆解" in html
     assert "排序診斷" not in html
+    assert "item 能力" not in html
     assert "diagnosis/" not in html
 
 

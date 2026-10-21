@@ -2427,8 +2427,7 @@ def training_hpo_finalize_param_errors(parameters: dict) -> list[str]:
     empty means OK.
     """
     # Imported here, not at the top: core/ has no import-time dependency on
-    # the layers above it, and evaluation/metrics_spark imports this module
-    # (the A15 precedent for diagnosis/).
+    # the layers above it, and evaluation/metrics_spark imports this module.
     from recsys_tfb.evaluation.metric_registry import METRIC_NAMES
 
     errors: list[str] = []
@@ -2683,8 +2682,7 @@ def hpo_objective_population_errors(parameters: dict) -> list[str]:
     build is rerun either way.
     """
     # Imported here, not at the top: core/ has no import-time dependency on
-    # the layers above it, and evaluation/metrics_spark imports this module
-    # (the A15 precedent for diagnosis/).
+    # the layers above it, and evaluation/metrics_spark imports this module.
     from recsys_tfb.evaluation.metric_registry import BINARY_PREDICTION_METRICS
 
     training = parameters.get("training") or {}
@@ -2761,8 +2759,7 @@ def binary_test_metrics_verdict(
     ``test_metrics`` block or unknown names, to A53 / A25.
     """
     # Imported here, not at the top: core/ has no import-time dependency on
-    # the layers above it, and evaluation/metrics_spark imports this module
-    # (the A15 precedent for diagnosis/).
+    # the layers above it, and evaluation/metrics_spark imports this module.
     from recsys_tfb.evaluation.metric_registry import (
         BINARY_PREDICTION_METRICS,
         effective_hpo_objective,
@@ -3745,7 +3742,6 @@ def validate_config_consistency(parameters: dict) -> None:
     errors.extend(segment_source_override_errors(parameters))
 
     errors.extend(evaluation_metric_param_errors(parameters))
-
 
     errors.extend(training_diagnostics_param_errors(parameters))
 
@@ -5857,8 +5853,7 @@ def scoring_param_errors(parameters: dict) -> list[str]:
     Nothing about whether a metric can be computed on test is decided here.
     """
     # Imported here, not at the top: core/ has no import-time dependency on
-    # the layers above it, and evaluation/metrics_spark imports this module
-    # (the A15 precedent for diagnosis/).
+    # the layers above it, and evaluation/metrics_spark imports this module.
     from recsys_tfb.evaluation.metric_registry import METRIC_NAMES
 
     known_keys = ("snap_date", "metrics", "selection_metric")

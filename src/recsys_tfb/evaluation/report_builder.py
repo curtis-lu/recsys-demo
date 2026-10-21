@@ -334,9 +334,9 @@ def macro_coverage_suffix_mb(
 # =====================================================================
 #
 # ``evaluation.query_filter.drop_all_positive_groups`` 只套用在衡量指標（含頭號
-# 指標）與熱門度 baseline；per-item 細部拆解、各診斷頁都不跟（使用者 2026-09-18
-# 決定：新開關不延伸進診斷）。所以開關開著時，同一份報表裡有兩批組，這一段的
-# 函式負責讓讀者看得出每個數字是哪一批。開關只經
+# 指標）與熱門度 baseline；per-item 細部拆解不跟（使用者 2026-09-18 決定：新開關
+# 不延伸進診斷；當時的診斷頁已隨 #532 拿掉）。所以開關開著時，同一份報表裡有兩批
+# 組，這一段的函式負責讓讀者看得出每個數字是哪一批。開關只經
 # ``metrics.drop_all_positive_groups`` 讀，警告只經
 # ``metrics.all_positive_share_warns`` 判斷——log 與報表不會各說各話。
 
@@ -419,8 +419,9 @@ def _group_ledger_line(grain: str, bundle: dict, parameters: dict) -> str | None
 
     開關關：全正的組照樣算進衡量指標，「算進衡量指標」＝「有正例」。開關開：
     有正例＝全正（已排除）＋算進衡量指標。無正例的組兩種都不算進衡量指標，
-    ``n_excluded_queries`` 也只數它們。帳上不說「算進 mAP」：同一份報表連結的
-    診斷頁也印 macro per-item mAP（取自診斷抽樣），開關開著也沒有排除全正的組。
+    ``n_excluded_queries`` 也只數它們。帳上不說「算進 mAP」：當初的理由是同一份
+    報表連結的診斷頁也印 macro per-item mAP、而且不排除全正的組；診斷頁隨 #532
+    拿掉之後，這個措辭照留。
 
     缺 ``n_queries``／``n_excluded_queries``（更早的 bundle）回 ``None``。只缺
     全正組數的，是 #376 之前算的 ``metrics.json``：開關關著時指紋沒變，照樣會被
@@ -1326,8 +1327,6 @@ def build_prediction_quality_section(
             "算的 average precision 或 ROC-AUC 直接比較。",
             "per-item 的 precision 分母是該 item 在門檻以上的列數；主指標段的 "
             "precision@K 分母是 K（每個 query group 的前 K 名），是不同的量。",
-            "per-item 的 roc_auc 母體是該 item 的全部候選列，與排序診斷「item "
-            "能力」頁的 AUC（只含有正例的 query 的抽樣）不同，不可並排比較。",
             "分箱表把每格的平均分數與實際正例率放在一起，只是並列兩個量：框架"
             "不做校準（#411），分數不保證是機率。上面每個指標都只看分數的大小"
             "順序，兩者相近或相差都不改變它們。",

@@ -50,9 +50,8 @@ class TestGenerateHtmlReport:
     def test_formula_rendered(self):
         """主報表也要渲染 ``formula``。
 
-        只改診斷頁那個渲染器的話，``ReportSection`` 就多了一個「某個渲染器
-        會默默丟掉」的欄位——之後有人在主報表的 section 加公式會靜默消失，
-        而那種 bug 沒有任何錯誤訊息。
+        漏畫的話，``ReportSection`` 就多了一個「渲染器會默默丟掉」的欄位——
+        有人在主報表的 section 加公式會靜默消失，而那種 bug 沒有任何錯誤訊息。
         """
         sections = [ReportSection(title="S", description="d",
                                   formula="Δ = mAP(F − offset) − mAP(F)")]
@@ -74,8 +73,36 @@ class TestGenerateHtmlReport:
         assert "<script>alert(1)</script>" not in html
         assert "&lt;script&gt;" in html
 
+    def test_formula_precedes_bullets_and_both_precede_figures(self):
+        """順序：description → formula → bullets → 圖。
+
+        讀者要先知道「這個數字怎麼算的」才看得懂圖；公式排在圖後面等於沒有。
+        （原本守在多頁外殼的測試裡，#532 拿掉多頁外殼時搬來這裡。）
+        """
+        sections = [ReportSection(
+            title="S", description="d", formula="F = x + y",
+            bullets=["一則重點"], figures=[_make_figure()])]
+        html = generate_html_report(sections)
+        body = html[html.index("</nav>"):]
+        assert (body.index("F = x + y") < body.index("一則重點")
+                < body.index("plotly-graph-div"))
+
+    def test_a_formula_pulls_in_no_external_script(self):
+        """生產限制是 no network——MathJax／KaTeX 的 CDN 一定載不到，公式要用
+        Unicode 純文字畫。不能用「html 裡沒有 mathjax 字樣」來驗：主報表把
+        plotly.js 整份內嵌，它自己就提到 MathJax。所以驗的是頁面沒有任何
+        外部載入的 ``<script src>``／``<link href>``。"""
+        import re
+
+        sections = [ReportSection(title="S", description="d",
+                                  formula="Σ Δⱼ ≠ Δ")]
+        html = generate_html_report(sections)
+        assert "Σ Δⱼ ≠ Δ" in html, "premise: the formula was drawn"
+        assert re.findall(r"<script[^>]*\bsrc=[^>]*>", html) == []
+        assert re.findall(r"<link[^>]*\bhref=[^>]*>", html) == []
+
     def test_empty_formula_and_bullets_render_nothing(self):
-        """既有 13 個 ``build_*_section`` 的輸出必須不受影響。
+        """不帶這兩個欄位的 ``build_*_section`` 輸出必須不受影響。
 
         ``<ul>`` 在主報表被目錄用掉了，所以只數 section 區塊之後的部分；
         比對渲染出的**標籤**而不是字串 "formula"，避免命中 CSS 裡的樣式定義。
