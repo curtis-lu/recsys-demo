@@ -17,7 +17,7 @@ date: 2026-10-16
 >
 > **相關判準。** 跨 pipeline 的形狀判準在 [`pipeline-node-design.md`](../agents/pipeline-node-design.md)，本份稱「node 規則 N」；流程判準在 [`pipeline-refactor-process.md`](../agents/pipeline-refactor-process.md)，本份稱「flow 規則 N」。
 >
-> **數字是快照。** 文中的行數與計數都是 main @ `11ad407e`（2026-10-16）量的，程式一改就會變；重現指令在附錄二。檔案位置只寫檔名與函式名，不寫行號。
+> **數字是快照。** 第一～五節的行數與計數是 main @ `11ad407e`（2026-10-16）量的，重現指令在附錄二；第六節是 main @ `fe3c30dd`（2026-10-21）。程式一改就會變。第一～五節的檔案位置只寫檔名與函式名，不寫行號；第六節為了讓切票的人直接找得到，附了行號。
 >
 > **用詞。**
 >
@@ -183,7 +183,7 @@ Node(
 
 **補充一：需求清單要列到「每個結果要哪些變體」。** #520 的審查抓到一個 bug：頭號指標要的是 `map_attr@{metric.k，沒設才是 all}`，但 Spark 只算 `k_values` 有列的 K；`k_values` 沒列 `"all"`、`metric.k` 又沒設時，頭號那一格是空白。這個 bug 已在 #520 裡修掉（`metrics_spark._resolve_k_grids`，commit `465fa928`），修法是讓計算端一律補算頭號要的 K。教訓是：報表需要什麼，計算端並不知道。如果需求清單把變體也列進去、由計算單元保證算出來，這一類 bug 就不會再發生。
 
-**補充二：報表只讀需求清單裡的結果，空殼可能就不用寫了。** 現在關掉的診斷會寫一個 `{"enabled": false}` 的空殼 JSON，理由有兩個：讓報表的位置參數有東西可收，以及避免報表讀到上一次留下的舊結果。報表改成只讀需求清單裡的結果之後，這兩個理由看起來都不成立。這點列為待決定，盤點時確認。（2026-10-21：預設拿掉，見決定 15。）
+**補充二：報表只讀需求清單裡的結果，空殼可能就不用寫了。** 現在關掉的診斷會寫一個 `{"enabled": false}` 的空殼 JSON，理由有兩個：讓報表的位置參數有東西可收，以及避免報表讀到上一次留下的舊結果。報表改成只讀需求清單裡的結果之後，這兩個理由看起來都不成立。這點列為待決定，盤點時確認。（2026-10-21：作者建議預設拿掉，開工時定，見決定 15。）
 
 **跟 ADR-0013 的關係。** [ADR-0013](0013-pipeline-modes-and-slicing-are-separate.md) 的做法是在 `create_pipeline` 裡**明列**要跑哪些 node；本份改成由各單元的宣告**推導**。這是對 ADR-0013 的修訂：核准本份時，在 ADR-0013 的對應段落加一行指向本份。
 
@@ -231,6 +231,8 @@ Node(
 **附帶的問題。** `COMPUTED_KEYS` 有一列 `("evaluation.diagnosis", "draw_diagnosis_sample_node")`，要求每種模式都要有那個 node，讓使用框架的人可以從它重跑。所以就算在不跑診斷的監控模式，也得留著一個什麼都不做的抽樣 node。
 
 **已拍板：放進重構範圍。**
+
+**2026-10-21 更新。** suppression 與「附帶的問題」裡的 `draw_diagnosis_sample_node` 都隨決定 2 拿掉，上面的例子只剩說明用途；規則本身不變。
 
 **作者建議的順序。** 這條會改變「哪些結果算過期」，屬於行為變更。照 flow 規則 3（行為變更先做，純搬移放最後），它排在純搬移之前；又因為要用到原則 3 的宣告，排在原則 3 之後。這條會改動 [ADR-0020](0020-evaluation-bug-round-intended-behaviours.md)「二、bug 2 的修法」定下的指紋機制，是幾條原則裡改動最大的；現況的代價是白白重跑，結果不會錯。
 
@@ -344,7 +346,7 @@ diagnosis/metric/    contract.py
 |---|---|
 | 哪些診斷要留 | 決定 2：全部拿掉 |
 | 原則 2 的實際切法 | 決定 4、7；量時間見決定 13 |
-| 原則 3 補充二：空殼能不能拿掉 | 決定 15：預設拿掉 |
+| 原則 3 補充二：空殼能不能拿掉 | 決定 15：作者建議預設拿掉，開工時定 |
 | 原則 6 的目標樣子細節，以及根層 `report/` 的讀者 | 原則 6 的 2026-10-21 更新；目錄細節在搬移那張票定 |
 | 比較報表的內容 | 決定 5、11 |
 | 每條原則實際要改幾個檔、花多久 | 沒有回答：等 `/to-spec`、`/to-tickets` 切票時估 |
@@ -353,7 +355,7 @@ diagnosis/metric/    contract.py
 
 ## 六、決定清單（2026-10-21）
 
-本節是 2026-10-21 與擁有者逐題拷問的結果。行號是 main @ `fe3c30dd` 的快照，程式一改就會變。
+本節是 2026-10-21 與擁有者逐題拷問的結果。行號與計數是 main @ `fe3c30dd` 的快照，程式一改就會變。標「作者建議」的是寫本節時補的、擁有者沒有逐條看過的項目，切票時可以推翻。
 
 ### 決定總表
 
@@ -361,7 +363,7 @@ diagnosis/metric/    contract.py
 |---|---|---|
 | 1 | 驗收標準：改報表只動一段的檔、兩份報表不跑 Spark 計算就能重畫、加指標只在目錄加一筆 | 無（這是驗收的尺） |
 | 2 | 拿掉全部診斷頁 | 診斷頁、共用準備步驟、報表的「排序診斷連結」段消失 |
-| 3 | 主報表留下哪些段 | 詞彙表段消失；calibration bins 不再算 |
+| 3 | 主報表留下哪些段 | 詞彙表段消失 |
 | 4 | 四層：資料、指標、比較、報表 | 新增「列的事實」產物；每份指標結果附母體帳 |
 | 5 | 比較自己一層，差值只在這裡算 | 比較結果落地；`--compare-only` 之後可以只重畫 |
 | 6 | 指標目錄：一個指標一筆 | 無 |
@@ -393,12 +395,13 @@ diagnosis/metric/    contract.py
 
 ### 決定 2　拿掉全部診斷頁
 
-拿掉 `diagnosis.metric.contract.DIAGNOSES` 列的全部診斷：`config_shift`、`item_ability`、`model_capacity`、`suppression`。只為它們存在的東西一起拿掉：共用準備步驟 `make_draw_diagnosis_sample_node`、`render_diagnosis_pages` 與監控模式的 `no_diagnosis_pages`、報表的「排序診斷連結」段（`build_diagnosis_links_section`）、`evaluation.diagnosis.*` 設定鍵與讀它們的一致性檢查。
+拿掉 `diagnosis.metric.contract.DIAGNOSES` 列的全部診斷：`config_shift`、`item_ability`、`model_capacity`、`suppression`。只為它們存在的東西一起拿掉：共用準備步驟 `make_draw_diagnosis_sample_node`、`render_diagnosis_pages` 與監控模式的 `no_diagnosis_pages`、報表的「排序診斷連結」段（`build_diagnosis_links_section`）與它的開關 `report.sections.diagnosis_links`（A34 要求開關清單跟 `EVALUATION_REPORT_SECTIONS` 完全相等，兩邊一起拿）、`evaluation.diagnosis.*` 設定鍵，以及一致性檢查裡只檢查這些鍵的部分。A15 同時檢查 `evaluation.metric` 與 `evaluation.diagnosis`（`consistency.py:2302`），只拿掉後者那一半。
 
 - **為什麼。** 留下的每一頁都要搬家、拆開計算與畫圖、補宣告；擁有者判斷沒有讀者會看完這幾頁就做決定。這是第四節第 1 步「先決定要留什麼」的答案。
-- **連帶消失的問題。** 原則 2 補充三（共用準備步驟只留有正例的 query）、原則 4 的 config_shift 防線，以及 item_ability 的 AUC 沒算進沒有正例的 entity（它的母體是只含有正例 query 的診斷抽樣）。
-- **training 不動。** 四項裡只有 `model_capacity` 讀 training 的產物 `gain_ledger`，而 training 自己的 `log_experiment` 也讀它（`pipelines/training/pipeline.py:249`）。範圍規則：拿掉之後，若 training 有產物變成沒有任何讀者，先問擁有者，不自己刪。
-- **舊設定鍵。** 公司的設定檔可能還寫著 `evaluation.diagnosis.*`。照 repo 擋舊設定鍵的慣例在 `core/consistency.py` 加一條，並列進 #524 的退場清單。
+- **連帶消失的問題。** 原則 2 補充三（共用準備步驟只留有正例的 query）、原則 4 的 config_shift 防線，以及 item_ability 的 AUC 沒算進無正例的 query group（它的母體是只含有正例 query 的診斷抽樣）。
+- **training 不動。** 四項裡只有 `model_capacity` 讀 training 的產物 `gain_ledger`。training 的 `log_experiment` 也把它當輸入，跟其他診斷檔一起上傳到 MLflow（`pipelines/training/pipeline.py:249`），所以拿掉之後它仍有去處。範圍規則：拿掉之後，若 training 有產物變成沒有任何去處，先問擁有者，不自己刪。
+- **舊設定鍵。** 公司的設定檔可能還寫著 `evaluation.diagnosis.*`。照 repo 擋舊設定鍵的慣例在 `core/consistency.py` 擋下，跟既有的 A61（擋 `evaluation.diagnosis.ci`）合成一條，並列進 #524 的退場清單。
+- **報表外殼的跳脫。** `evaluation/report.py:109` 的註解說段落說明不跳脫，因為 `build_diagnosis_links_section` 在說明裡放連結（ADR-0019 決定 5）。連結段拿掉後這個理由消失；跳脫的修法併進 #366。
 - **詞彙表。** `CONTEXT.md` 的 `roc_auc` 條拿 `raw_within_item_auc`／`query_centered_auc` 當對照，這兩個隨 item_ability 消失；那一句在這張票裡刪，不提前刪（程式還在）。
 
 ### 決定 3　主報表留下的段
@@ -407,7 +410,7 @@ diagnosis/metric/    contract.py
 
 - **per-item 細部拆解留著。** 主報表只有它畫出 item 落在第幾名；它的計算已經落地成 `report_aggregates.json`，報表只畫圖。
 - **開關不改名。** 這一段的開關叫 `report.sections.diagnostics`。診斷拿掉後這個名字會誤導，但改名會讓公司的設定檔跟著改，所以這輪不改，只改它的說明，寫明它管的是 per-item 細部拆解。
-- **calibration bins 拿掉。** `compute_report_aggregates` 算了、報表從來不畫（#363 第 5 項）。
+- **calibration bins 早就拿掉了。** #363 第 5 項問的那份 calibration bins，#381 已經移除（`diagnostics_spark.py:261-264` 的 docstring）。這一項沒事可做。擋它舊設定鍵的 A43 照舊留著，退場跟著 #524。
 
 ### 決定 4　四層：資料、指標、比較、報表
 
@@ -433,19 +436,21 @@ diagnosis/metric/    contract.py
 
 - **列的事實自己一份。** 今天資料概況與組數帳藏在 `metrics.json`，熱門度視窗的事實藏在 `baseline_metrics.json`，比較的涵蓋率只在記憶體。A 與 baseline 是同一批列，共用一份；A′、B′ 各一份。
 - **每份指標結果附母體帳。** 只照名字 join，有四種情況會默默算錯：兩邊的 `all` 解析成不同的 K、進 macro 的 item 不同、算進指標的組不同、B 沒有分群欄（今天 B 用 `segment_columns=[]` 算，`nodes.py:1941`）。所以每份結果要記下：`all` 解析成幾、哪些 item 進了 macro、算進指標的組數。比較層靠它判斷能不能比、要怎麼標註。
-- **需求清單分 side。** A 要全部；baseline、A′、B′ 只要「要比的指標」所屬的那幾種算法；預測品質與分布只有 A 有。同一種算法的指標一起算（原則 2 第 1 條），所以清單只要動到已經算過的算法，就只要重畫。
+- **需求清單分 side。** A 要全部；baseline、A′、B′ 只要「要比的指標」所屬的那幾種算法。預測品質段的分箱表與門檻掃描、per-item 細部拆解的分布只有 A 有。把分數當機率的那一種算法（AUC；今天由 `compute_prediction_quality` 算，開關 `report.sections.prediction_quality` 預設關）只有被某段的「要比的指標」清單列到時，baseline、A′、B′ 才算。同一種算法的指標一起算（原則 2 第 1 條），所以清單只要動到已經算過的算法，就只要重畫。
+- **清單要的結果沒算到時要報錯。** 「要比的指標」清單寫在各段的檔裡（決定 11），它決定 baseline、A′、B′ 要算哪幾種算法，所以改它可能要重算，不只是重畫；而清單在程式裡，設定指紋看不到它。所以報表或比較層要讀的指標在落地結果裡找不到時，報錯並指出從哪個 node 重跑，不默默留白。
 
 ### 決定 5　比較自己一層，差值只在這裡算
 
 - **擁有者的看法。** 比較報表是一份獨立的報表；比較要對兩份指標做 join，是獨立的一層。主報表的 baseline 段也是同一件事（這次的模型對熱門度基準線），所以兩種比較共用這一層。
 - **今天差值散在好幾處。** `build_baseline_section` 呼叫 `compare.build_comparison_result`；`per_item_metric_compare_table` 自己算 Macro 列的差值；`generate_comparison_report` 在 node 裡算。收成比較層一份。
 - **比較結果落地。** 這樣比較報表也能不跑 Spark 重畫（決定 1）。今天 `generate_comparison_report` 每次都在 node 裡跑兩次 `compute_all_metrics`（`nodes.py:1934-1944`），結果不落地。
-- **落地的路徑要帶「跟誰比」**：比較對象是哪個 model_version 或哪張表。不然先跟 X 比、再跟 Y 比之後只重畫，會讀到 X 的數字、印上 Y 的標籤；今天的指紋刻意不含 `evaluation.compare`（`config_fingerprint.py:46-49`），擋不下來。
+- **落地的結果要帶「跟誰比」**：`evaluation.compare_sources.<key>` 底下每個決定 B′ 內容的鍵，也就是 `kind`、model_version 或表名、`source`、`columns`、`prod_mapping`、`unmapped_policy`（`compare_sources.py:58-179`）；`label` 只影響顯示。不然先跟 X 比、再跟 Y 比（或改了 `prod_mapping`）之後只重畫，會讀到舊的數字、印上新的標籤；今天的指紋刻意不含 `evaluation.compare`（`config_fingerprint.py:46-48`），擋不下來。
 - **考慮過、沒選：不另立一層。** 分層審查建議，差值在「同時拿得到兩邊數字」的那個單元裡順手算，少一層。沒選，因為它反對分層的主要理由是「照名字 join 會缺資訊」，而這已由母體帳補上（決定 4）；母體帳兩種做法都需要，補上之後分層不比較貴，差值也只有一個地方。
 
 ### 決定 6　指標目錄：一個指標一筆
 
 - **每筆寫什麼。** 名字、屬於哪一種算法（決定 7）、公式（由那一種算法備好的共用數字算出）、粒度（整體、per-item、macro、分群、大類）、母體（算在哪些列上）、報表顯示名、一句話定義。
+- **一筆＝一個名字在一種算法裡。** 同一個名字可以在兩種算法各有一筆、定義不同。例如 query group 那一種的 `recall@K`（每組的正例裡排進前 K 名的比例，再對組平均），與 item 那一種的 `recall@K`（該 item 的正例裡排進前 K 名的比例）；`precision@K`、`F1@K` 也是。落地結果裡兩者在不同的區塊（`overall` 對 `per_item`），報表顯示名要分得出來。
 - **目錄只放資料，不做計算。** 計算、比較層、主報表、比較報表都照名字讀它，取代今天寫死在各處的名單（`metrics_spark.py:729`；`report_builder.py:967`、`1027`、`1603`；`comparison/report.py:246`）。因為它不計算，報表讀它不違反原則 1 預告的「報表模組不准 import 計算模組」。
 - **報表上的指標定義從目錄來**（決定 9）。
 - **跟 training 的 `metric_registry.py` 這輪分開**，不動 training（決定 2 的範圍規則）。兩邊同一個數字卻不同名字的地方，在目錄裡註明，例如 training 的 `macro_per_item_map` 與 evaluation 的 macro `map_attr@all`。
@@ -457,13 +462,14 @@ diagnosis/metric/    contract.py
 | 算法 | 母體 | 指標 |
 |---|---|---|
 | 每個 query group 先算、再平均 | 有正例的 query group；全正組照 `evaluation.query_filter` | map@K、precision@K、recall@K、F1@K、hit_rate@K |
-| 每個 item 一份，再對 item 平均成 macro | 該 item 的列；「排進前 K 名」就算推薦了一次 | recall@K（今天的 `hit_rate@K`）、precision@K、F1@K、map_attr@K |
-| 把分數當機率 | 全部候選列，包含沒有正例的 entity（ADR-0025）；分箱近似（ADR-0024） | AUC-ROC、AUC-PR：整體＝全部列、per-item＝該 item 的全部列、macro＝對 item 平均 |
+| 每個 item 一份，再對 item 平均成 macro | 該 item 的列（算進哪些 query group，驗收那張票定）；「排進前 K 名」就算推薦了一次 | recall@K（今天的 `hit_rate@K`）、precision@K、F1@K、map_attr@K |
+| 把分數當機率 | 全部候選列，包含無正例的 query group（ADR-0025）；分箱近似（ADR-0024） | AUC-ROC、AUC-PR：整體＝全部列、per-item＝該 item 的全部列、macro＝對 item 平均 |
 
 表裡今天還沒有的（F1@K、query group 層級的 hit_rate@K、per-item 的 precision@K 與 F1@K、全部 item 的 per-item AUC 與 macro AUC）都是驗收那張票才加。重構只負責讓三種算法的共用數字齊備。
 
-- **`hit_rate@K` 名字取錯了。** 今天它是「該 item 的正例列裡，排進前 K 名的比例」（`metrics_spark.py:858-860`），也就是 per-item recall，報表也標成「recall@k (per-item)」。改名成 per-item 的 `recall@K`。另外新增 query group 層級的 `hit_rate@K`：有正例的 query group 裡，前 K 名至少中一個的比例（驗收那張票加）。改名之後，舊 `metrics.json` 的鍵名不同；報表要認出舊格式並報錯（照 `report_builder.py` 既有的舊鍵檢查做），不能讓那幾格默默留白。
-- **每個 item 那一種要先備齊共用數字。** 今天它只看正例列（`aggregate_per_item`，`metrics_spark.py:878`），算不出 precision 要的「排進前 K 名的次數」。重構時改成看該 item 的列並備好這些次數；之後加指標只是寫公式。
+- **`hit_rate@K` 名字取錯了。** 今天它是「該 item 的正例列裡，排進前 K 名的比例」（`metrics_spark.py:858-860`），也就是 per-item recall，報表也標成「recall@k (per-item)」。改名成 per-item 的 `recall@K`。另外新增 query group 層級的 `hit_rate@K`：有正例的 query group 裡，前 K 名至少中一個的比例（驗收那張票加）。改名之後，舊 `metrics.json` 的鍵名不同；報表要認出舊格式並報錯（照 `report_builder.py` 既有的舊鍵檢查做），不能讓那幾格默默留白。判斷舊格式只看 per-item 的區塊裡有沒有 `hit_rate@`，不看整份檔，因為驗收那張票會在 query group 層級加回新的 `hit_rate@K`。
+- **改名推翻了程式裡寫明的理由。** `aggregate_per_item` 的 NOTE（`metrics_spark.py:869-872`）說 per-item 刻意不叫 precision／recall，因為 K 的分母是 query group 的概念。照決定 7 的定義，per-item precision 的分母是「這個 item 被推薦了幾次」，那條理由不再成立；改名時一起改寫那段 NOTE。
+- **每個 item 那一種要先備齊共用數字。** 今天它只看正例列（`aggregate_per_item`，`metrics_spark.py:878`），算不出 precision 要的「排進前 K 名的次數」。重構時改成看該 item 的列並備好這些次數；之後加指標只是寫公式。算進哪些 query group 留給驗收那張票定，所以共用數字要把「有正例的 query group」與「無正例的 query group」分開記，驗收時選定義不必再改算法。
 - **AUC 這輪維持分箱版**（ADR-0024）。補上全部 item 與 macro 是驗收那張票的事；精確版不在這輪。
 
 ### 決定 8　baseline 走跟模型同一套指標計算
@@ -471,16 +477,16 @@ diagnosis/metric/    contract.py
 - **今天的缺口。** baseline 走精簡路徑 `compute_overall_per_item`（`metrics_spark.py:1161`），不產出 `macro_avg`；報表卻照著讀 baseline 的 macro（`report_builder.py:1619`）。所以 baseline 段沒有 Macro 列，頭號指標從沒跟 baseline 比過。測試沒抓到：夾具 `_baseline_metrics_full`（`tests/test_evaluation/test_report_builder.py:936`）放了一份程式從不產出的 `macro_avg`，是假綠。
 - **改成跟模型走同一套**（決定 4 的指標層），這個缺口順著補上。這是行為變更：baseline 段第一次出現 Macro 列。
 - **baseline 不產出列的事實。** 資料概況屬於列的事實，A 與 baseline 共用一份（決定 4）。報表不讀 baseline 自己的資料概況：熱門度分數同一個 item 都一樣，同分列的數字會跟 A 不同，讀者看不懂。
-- **成本沒量**，照原則 2 補充一先量再定。
+- **成本沒量。** 這條決定不等量完才算數；量是為了估時間、找出要先處理的貴步驟（原則 2 補充一）。
 
 ### 決定 9　報表每段獨立
 
 「一段」是報表一個大標題底下的內容。一段一個檔，段落順序放在一份清單。這是擁有者提的做法；作者原本提的是「由各段宣告自動產生導覽表與詞彙表」，那也是一種耦合。
 
 - **每段在自己的檔裡宣告**：段名、一句話「這段回答什麼問題」、要讀哪些落地結果（照名字）。
-- **不手寫導覽表。** 頁面外殼已經照段落標題產生目錄（`evaluation/report.py:88-98`）；每段那一句「回答什麼問題」顯示在目錄的標題旁。這取代概覽裡手寫的導覽表（`report_builder.py:580-603`），它今天在某段關掉時照樣印出那一列。
+- **不手寫導覽表。** 頁面外殼已經照段落標題產生目錄（`evaluation/report.py:88-98`）；每段那一句「回答什麼問題」顯示在目錄的標題旁（作者建議的細節，要改外殼；demo 時確認）。這取代概覽裡手寫的導覽表（`report_builder.py:580-603`），它今天在某段關掉時照樣印出那一列。
 - **拿掉詞彙表段。** 定義貼在數字所在的段，[`diagnosis-report-presentation.md`](../agents/diagnosis-report-presentation.md) 第三節本來就這樣要求；指標的定義從指標目錄來。比較報表借用主報表詞彙表、詞對不上的問題一起消失。
-- **段落之間不互相提到。** 加一條測試：一段的文字裡不得出現別段的標題。
+- **段落之間不互相提到。** 加一條測試：一段的文字裡不得出現別段的標題，核心概念段除外（見下一條）。
 - **只留一個單向依賴。** 核心概念段講地基概念，其他段需要時回指它；它不依賴任何段（同份規則第一節第 2 點）。
 - **比較報表照同一套。**
 - **動手前先給 demo。** 這會改報表的長相，所以先用假資料做一份給擁有者看，點頭才做。
@@ -492,7 +498,7 @@ diagnosis/metric/    contract.py
 ### 決定 11　比較報表只顯示「要比的指標」
 
 - 比較報表放一份「要比的指標」清單，所有表只顯示清單上的；預設跟今天一樣是頭號指標加護欄指標（`report.display.primary_map_k`、`guardrail_recall_k`）。今天整體表把每個鍵都印出來（`comparison/report.py:172-198`），改成也只列清單上的。
-- 每段自己宣告要比哪些：主報表 baseline 段一份、比較報表一份。今天兩邊顯示的本來就不同。
+- 每段自己宣告要比哪些：主報表 baseline 段一份、比較報表一份。今天兩邊顯示的本來就不同。baseline 段的預設照今天：overall 的 map／recall／precision（K 用 `k_super`），加上 per-item 的 recall 與 `map_attr`（K 用 `primary_map_k`）（`report_builder.py:1603-1612`、`1628-1632`）；不要把比較報表的「頭號加護欄」套過去，否則 baseline 段會少掉 overall 那幾張表。
 - 比較報表與主報表共用同一套指標表的程式；比較報表裡每一格是「這次／對照／差值」。
 - **理由。** 比較報表的目的是「要不要換模型」，每個數字都要扣回這個目的（`diagnosis-report-presentation.md` 第零節）。加指標快不快跟這題無關，決定它的是表照名字讀目錄（決定 6）。
 
@@ -502,15 +508,17 @@ diagnosis/metric/    contract.py
 |---|---|
 | #366、#368、#505、#361 | 併入：碰到的正是要重寫的程式 |
 | #450 | 併入：每一項改之前、改之後量時間 |
-| #363 | 第 1 項跟 #450 一起量；第 3 項＝決定 5；第 5 項＝決定 3；第 6 項＝決定 6；第 4 項在診斷拿掉後不存在；第 2 項（兩種模式分開存）等 inference 部署、監控模式真的用上再開新票。整張可關 |
+| #363 | 第 1 項跟 #450 一起量；第 3 項＝決定 5；第 5 項 #381 已做完（決定 3）；第 6 項＝決定 6；第 4 項在診斷拿掉後不存在；第 2 項（兩種模式分開存）等 inference 部署、監控模式真的用上再開新票。整張可關 |
 | #446 | 併入：熱門度的資料要搬進資料層；它的「開工先決定」到那張票再問 |
 | #396、#524、#402 | 留著：#396 要等部署有隨機流量，#524 要等公司的設定檔清乾淨，#402 跨三條 pipeline |
 
 關票與在票上留言，等本份的 PR 開出時再跟擁有者確認。
 
+切票時才發現的 evaluation 舊票，照擁有者給的同一個方針：碰到要重寫的程式就併入；前提已經不在就關掉，關之前先問擁有者。
+
 ### 決定 13　順序的約束
 
-PR 怎麼切、先後怎麼排，擁有者決定另用 `/to-spec`、`/to-tickets` 設計。本份只定約束：
+PR 怎麼切、先後怎麼排，擁有者決定另用 `/to-spec`、`/to-tickets` 設計。下面是作者建議的約束，擁有者只拍板了「順序另外設計」，切票時可以推翻；其中「行為變更先做、純搬移最後」來自 flow 規則 3：
 
 - 拿掉診斷（決定 2）排第一：刪掉的就不用整理。
 - 宣告（原則 3、5）寫在計算單元旁邊，所以分層（決定 4）先於需求清單與指紋。
@@ -525,15 +533,16 @@ PR 怎麼切、先後怎麼排，擁有者決定另用 `/to-spec`、`/to-tickets
 
 ### 決定 15　開工時再定的技術細節與預設做法
 
-這幾項要對著程式才定得準，到那張票開工時定；下面是預設做法。
+這幾項要對著程式才定得準，到那張票開工時定；下面是預設做法。標「作者建議」的兩列是寫本節時補的，其餘擁有者在拷問時看過。
 
 | 項目 | 哪一步 | 預設做法 |
 |---|---|---|
 | 需求清單會讓 pipeline 的形狀跟著設定變，但今天 `test_pipeline.py` 要求 `COMPUTED_KEYS` 點名的每個重跑起點在每種模式都存在（`pipeline.py:131-138` 的註解；`config_fingerprint.py:99-121`） | 需求清單 | 指紋的錯誤訊息只指向這次真的存在的 node；那條測試改成檢查這件事 |
-| 空殼（原則 3 補充二） | 需求清單 | 拿掉：報表只讀需求清單裡的結果，`--only-node generate_report` 不讀清單以外的舊檔 |
+| 空殼（原則 3 補充二；作者建議） | 需求清單 | 拿掉：報表只讀需求清單裡的結果，`--only-node generate_report` 不讀清單以外的舊檔 |
 | 指標鍵存邏輯名（`map@all`）還是解析後的整數 K | 指標層 | 先查當初為什麼存整數；理由還成立就不改，`all` 解析成幾記在母體帳 |
 | 指紋分兩種：輸入資料當時的設定、這一步套用的設定。例如 `--compare-only` 的 A′ 用分區記錄的設定檢查分區，卻用今天的 `k_values` 計算 | 指紋 | 兩種都記、分開比對 |
 | 大類算哪一層 | 指標層 | 照今天，當成指標層的一種粒度 |
+| 公式在指標目錄裡怎麼表示（作者建議） | 指標層 | 宣告「由哪幾個共用數字怎麼組合」，不放 Spark 物件；報表讀目錄不必 import Spark 計算模組。不得用 UDF |
 
 ### 對既有 ADR 的修訂
 

@@ -292,4 +292,4 @@ ADR-0014 在 training 收了 21 處。evaluation 的 13 處全在 `nodes_spark.p
 
 ## 修訂（2026-10-21，ADR-0031）
 
-本份把 `report_builder.py` 與被它拉住的模組（`report.py`、`compare.py`、`diagnostics_spark.py`、`distributions.py`、`baselines.py` 等）留在根層 `evaluation/`，理由是兩支 script 在 import `report_builder.py`。這個理由已經不成立：`render_diagnosis.py` 已刪，`migrate_evaluation_results_keys.py` 依 ADR-0031 原則 6 的已拍板項改成自帶那兩個常數。[ADR-0031](0031-evaluation-second-pass-layers-and-single-source.md) 原則 6 把它們搬進 evaluation pipeline，比較報表跟著一起搬。
+本份把 `report_builder.py` 與被它拉住的模組（`report.py`、`compare.py`、`diagnostics_spark.py`、`distributions.py`、`baselines.py` 等）留在根層 `evaluation/`，理由是兩支 script 在 import `report_builder.py`。`render_diagnosis.py` 已刪；`migrate_evaluation_results_keys.py` 今天仍 import 那兩個常數，照 ADR-0031 原則 6 的已拍板項改成自帶之後，這個理由就不成立。[ADR-0031](0031-evaluation-second-pass-layers-and-single-source.md) 原則 6 把它們搬進 evaluation pipeline，比較報表跟著一起搬。
