@@ -340,3 +340,7 @@ date: 2026-09-13
 - `_require_prepared_with_current_config`（這份 JSON 對今天設定的比對）保留：分群清單仍然從它來。
 - 上面〈接受的漏洞〉裡「`compute_report_aggregates` 與 `restrict_to_common` 讀表但不讀這份 JSON」那一條，因為它們現在比分區自己的指紋而關上（`restrict_to_common` 在一般 `--compare` 模式比今天的設定，`--only-node generate_comparison_report` 的切片也擋得下）；「Runner 先存分區、再存 JSON 之間中斷」那一條，分區這一半也由分區指紋擋下。
 - 沒修、留著的：`segment_sources` 列了沒用到的欄也會改變指紋而誤擋（`PARTITION_CONTENT_KEYS` 原本就整段比 `segment_sources`，#374 之前就有）；`scripts/` 底下讀這張表的診斷腳本不驗指紋。
+
+## 修訂（2026-10-21，ADR-0031）
+
+〈橫切決定二〉讓每份落地結果都用同一張 `COMPUTED_KEYS` 算指紋。[ADR-0031](0031-evaluation-second-pass-layers-and-single-source.md) 原則 5 改成：每份結果只對它真的讀過的設定算指紋，設定改了只有讀過它的結果算過期。「算的」與「畫的」設定分開這件事不變。細節與預設做法見 ADR-0031 決定 15。

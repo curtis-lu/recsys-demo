@@ -199,7 +199,15 @@ evaluation 以 `sample_pool` 當母體的評估模式。
 evaluation 以 `inference_population` 當母體的評估模式。
 
 **per-item attribution**:
-把 query group 層級的指標拆成各 item 的貢獻，只在該 item 為正例的列上彙整；指標名帶 `_attr`（例如 `map_attr@K`），不是單一 item 自己的 mAP。
+把 query group 層級的指標拆成各 item 的貢獻，只在該 item 為正例的列上彙整；指標名帶 `_attr`（例如 `map_attr@K`），不是單一 item 自己的 mAP。per-item 的 precision@K 不屬於這一類：它的母體是該 item 排進前 K 名的列，不只正例列（見 **per-item 的 @K 指標**）。
+
+**per-item 的 @K 指標**（ADR-0031）:
+一個 item 自己的 @K 指標：把「這個 item 在某個 query group 排進前 K 名」當成推薦了它一次。recall@K＝它的正例裡排進前 K 名的比例；precision@K＝推薦了它的那些次裡是正例的比例（尚未實作）。K 跟 query group 層級的 @K 是同一個 K；macro 是對 item 平均。
+_Avoid_: 把 K 當成「替這個 item 挑幾個 entity」；把 per-item 的 recall 叫 hit rate（今天程式裡的 per-item `hit_rate@K` 就是它，ADR-0031 決定 7 改名）
+
+**hit_rate@K**（ADR-0031，尚未實作）:
+有正例的 query group 裡，前 K 名至少有一個正例的比例。只有 query group 層級，沒有 per-item 版本。
+_Avoid_: 跟 per-item 的 recall@K 混用（今天程式裡叫 `hit_rate@K` 的 per-item 指標是後者）
 
 **大類**:
 item 的分組，一個 item 只屬於一個大類，而且不隨時間變（例如三種基金併成「基金」）；evaluation 會在大類粒度上把指標再算一次。可以在設定裡逐一對應，也可以取自候選的某一欄（只在 post-training 模式）。
@@ -242,5 +250,5 @@ _Avoid_: `pr_auc`、aucpr；也不要單獨叫 average precision 或 AP（那是
 裡面每一筆候選的 label 都是正例的 query group；label 有分級時，指每一筆都是同一個正值。不管怎麼排，它的組層級排序指標都一樣，排法分不出好壞。evaluation 預設照樣算進衡量指標，只印出它的佔比；`evaluation.query_filter.drop_all_positive_groups` 打開時才排除。
 
 **`roc_auc`**（ADR-0024）:
-ROC 曲線下的面積，母體是全部候選列；同一個分數箱裡的列視為同分，同分算一半。
+ROC 曲線下的面積，母體是全部候選列；同一個分數箱裡的列視為同分，同分算一半。per-item 版本把母體換成該 item 的全部候選列，macro 是 per-item 對 item 平均；`pr_auc` 也一樣。今天只有列數最多的前幾個 item 有 per-item 值、沒有 macro，ADR-0031 決定 7 要補。
 _Avoid_: 跟 `raw_within_item_auc`／`query_centered_auc` 混用（那兩個的母體是「只含有正例的 query」的診斷抽樣，不可與本項相比）
