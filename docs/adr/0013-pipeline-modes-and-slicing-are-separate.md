@@ -88,3 +88,7 @@ preset 只寫兩個節點名這件事，需要一整段關於 producer map 的�
 ### 修訂（2026-09-26，#467）
 
 上文的 `ONLY_TEST_MONTHS_NODES` 是 5 個，今天是 7 個。上一段修訂記了 ADR-0029 的兩個改動（`filter_test_model_input` 換成 `filter_test_keys`、加進 `validate_model_input_grain`），漏了更早的一個：數值精度閘 `validate_numeric_precision` 在 #281（`66618bf8`）加進這份清單，當時沒有回頭修訂本份。清單的唯一真實來源是 `pipelines/dataset/pipeline.py` 的 `ONLY_TEST_MONTHS_NODES`。
+
+### 修訂（2026-10-21，ADR-0031）
+
+evaluation 的 `create_pipeline` 要從「明列要跑哪些 node」改成「由各計算單元的宣告推導」（[ADR-0031](0031-evaluation-second-pass-layers-and-single-source.md) 原則 3）。模式參數與切片分開這件事不變；變的是 evaluation 組出節點集的方式。細節與預設做法見 ADR-0031 決定 15。
