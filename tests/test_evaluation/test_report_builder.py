@@ -1951,7 +1951,6 @@ def test_prediction_quality_weighted_note_names_the_weight_and_the_ratio():
 
 import re  # noqa: E402
 
-from recsys_tfb.diagnosis.metric._common import schema_skip_reason  # noqa: E402
 from recsys_tfb.evaluation.metrics import ALL_POSITIVE_KEY  # noqa: E402
 
 #: 開關開著時，不套用它的段落旁印的那一句（票面原文）。用字面值、不 import
@@ -2225,10 +2224,9 @@ def test_overview_headline_follows_the_all_positive_switch(drop):
 
 
 def test_overview_with_event_declared_still_has_the_headline():
-    """宣告 event 時診斷抽樣的消費者全部跳過，但頭號表讀的是 Spark 算的
-    metrics.json（有接 event 決勝欄），照印。"""
+    """宣告 event 時頭號表照印：它讀的是 Spark 算的 metrics.json（有接 event
+    決勝欄）。"""
     p = _ap_params(True, event=True)
-    assert schema_skip_reason(p, "config_shift")   # 前提：這份 fixture 讓診斷跳過
     m = _ap_metrics()
     s = rb.build_overview_section(m, p)
     assert _headline(s) == m["macro_avg"]["by_item"]["map_attr@2"]

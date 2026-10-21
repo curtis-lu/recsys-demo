@@ -157,11 +157,15 @@ def _global_stmts(directory):
 def test_static_coverage_floor():
     """This file's A5/A6 tests skip dynamically-built nodes. Pin how many.
 
-    ``Node.__init__`` covers those four (#157), so this floor guards the
+    ``Node.__init__`` covers the ones it skips (#157), so this floor guards the
     static scan's own reach rather than the constraints' total coverage.
     """
     total = sum(1 for _ in _node_calls())
     judgeable = sum(1 for _ in _judgeable_nodes())
+    # 56/55: #532 deleted evaluation's diagnosis nodes: four calls, two of them
+    # judgeable (draw_diagnosis_sample_node and no_diagnosis_pages, literal
+    # inputs and outputs) and two not (the registry comprehension and
+    # render_diagnosis_pages' starred inputs).
     # 60/57: #515 deleted evaluation's confidence-interval node, one literal,
     # statically judgeable call.
     # 61/58: #518 deleted dataset's `validate_numeric_precision` (the B8
@@ -194,7 +198,7 @@ def test_static_coverage_floor():
     # of the two `validate_model_input_grain` calls (the branch existed only
     # to append the calibration pair to its input list). All three were
     # literal, so total and judgeable both drop by 3.
-    assert (total, judgeable) == (60, 57), (
+    assert (total, judgeable) == (56, 55), (
         f"Node coverage changed: {judgeable}/{total} statically judgeable. "
         "If this dropped, A5/A6 now have a bigger blind spot -- check why."
     )
@@ -1588,7 +1592,6 @@ LITERAL_COLUMN_EXCEPTIONS = frozenset({
     ("src/recsys_tfb/core/consistency.py", "post_training_snap_date_errors"),
     ("src/recsys_tfb/evaluation/comparison/report.py", "assemble_comparison_report"),
     ("src/recsys_tfb/evaluation/report_builder.py", "assemble_report"),
-    ("src/recsys_tfb/pipelines/evaluation/nodes.py", "_diagnosis_pages_dir"),
     # The config loader's list of date settings that accept a range, which
     # names this key among them (#374).
     ("src/recsys_tfb/core/date_ranges.py", "<module>"),

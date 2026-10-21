@@ -27,8 +27,8 @@ def test_report_display_and_sections():
     # out here rather than read from EVALUATION_REPORT_SECTIONS, so this test
     # is an independent statement of the decision.
     assert rep["sections"] == {
-        "dataset_overview": True, "primary_map": True, "diagnostics": True,
-        "baseline": True, "diagnosis_links": True,
+        "dataset_overview": True, "primary_map": True,
+        "per_item_breakdown": True, "baseline": True,
         # Off in the framework's conf, on in the ad example's (ADR-0024
         # decision 1).
         "prediction_quality": False,
@@ -47,13 +47,10 @@ def test_baseline_block_is_lookback_only():
     assert cfg == {"lookback_months": 12}
 
 
-def test_metric_and_diagnosis_blocks():
+def test_metric_block_and_no_diagnosis_block():
     ev = _load()
     assert ev["metric"] == {
         "weight_alpha": 0.0, "k": None, "min_positives": 0, "shrinkage_k": 0,
     }
-    diag = ev["diagnosis"]
-    assert diag["sample"] == {
-        "max_queries": 250000, "min_pos_queries_per_item": 50, "seed": 42,
-    }
-    assert "ci" not in diag
+    # #532 removed the diagnoses; A61 refuses a conf that still has the block.
+    assert "diagnosis" not in ev

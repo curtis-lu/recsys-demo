@@ -123,7 +123,9 @@ cp -r conf/dev conf/<你的名字>
 
 **第三個例外：evaluation 診斷的兩個校準分箱鍵，不論值都會報錯。** `evaluation.report.diagnostics.include_calibration` 與 `evaluation.report.diagnostics.n_calibration_bins` 只要還寫在設定裡，evaluation 就以 `A43:` 開頭的訊息停下來。它們設定的是一張分數分箱表，沒有人讀，#381 把它拿掉了。處理方式：刪掉那兩行。這是不變量 A43，predicate 是 `retired_calibration_bin_key_errors`（`src/recsys_tfb/core/consistency.py`）。
 
-**第四個例外：evaluation 的信賴區間設定 `evaluation.diagnosis.ci`，不論值都會報錯。** 設定裡只要還留著 `evaluation.diagnosis.ci` 這一段（`enabled: false` 或空的區塊也一樣），evaluation 就以 `A61:` 開頭的訊息停下來，還沒啟動 Spark。它設定的是頭號指標、`config_shift`、`item_ability` 的 bootstrap 信賴區間，#515 把它們拿掉了，沒有替代的設定鍵。處理方式：刪掉整段 `ci:`。這是不變量 A61，predicate 是 `retired_diagnosis_ci_key_errors`（`src/recsys_tfb/core/consistency.py`）。
+**第四個例外：evaluation 的 `evaluation.diagnosis` 區塊，不論值都會報錯。** 設定裡只要還留著 `evaluation.diagnosis` 這一段（`ci:`、各診斷的 `enabled: false` 或空的區塊都一樣），evaluation 就以 `A61:` 開頭的訊息停下來，還沒啟動 Spark。evaluation 的診斷頁（`config_shift`、`item_ability`、`model_capacity`、`suppression`）與先前的信賴區間都已拿掉（#532、#515），沒有替代的設定鍵。處理方式：刪掉整個 `evaluation.diagnosis` 區塊。這是不變量 A61，predicate 是 `retired_diagnosis_key_errors`（`src/recsys_tfb/core/consistency.py`）。
+
+同一次升級，`evaluation.report.sections` 也要照著改：把 `diagnostics` 改名為 `per_item_breakdown`、刪掉 `diagnosis_links`，每個開關的值寫不加引號的 `true`／`false`（字串 `"false"` 會被當成打開）。沒改的話 evaluation 以 `A34:` 開頭的訊息停下來，還沒啟動 Spark，訊息列出多出來與缺少的開關名（這一區本來就在上面「會擋未知鍵的六區」裡）。
 
 ## 6. 確認這份程式碼在你的機器上跑得起來
 

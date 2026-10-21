@@ -1260,7 +1260,7 @@ def test_compute_report_aggregates_disabled_returns_fingerprinted_stub():
     from recsys_tfb.pipelines.evaluation.nodes import (
         compute_report_aggregates,
     )
-    params = {"evaluation": {"report": {"sections": {"diagnostics": False}}}}
+    params = {"evaluation": {"report": {"sections": {"per_item_breakdown": False}}}}
     assert compute_report_aggregates(None, None, params) == {
         "enabled": False, "config_fingerprint": fingerprint(params),
     }
@@ -1297,9 +1297,6 @@ class TestConsumersSegmentByTheLandedList:
                 "segment_columns": ["stale_seg", "cust_segment_typ",
                                     "holding_combo"],
                 "baseline": {"lookback_months": 12},
-                "diagnosis": {"sample": {
-                    "max_queries": 10, "min_pos_queries_per_item": 1,
-                    "seed": 42}},
             },
         }
 
@@ -1345,16 +1342,6 @@ class TestConsumersSegmentByTheLandedList:
             self._segments(), self._parameters())
         assert set(result["per_segment"]) == {"mass", "hnw"}
 
-    def test_draw_diagnosis_sample_node(self, spark):
-        from recsys_tfb.pipelines.evaluation.nodes import (
-            draw_diagnosis_sample_node,
-        )
-
-        sample_pdf, _meta = draw_diagnosis_sample_node(
-            self._frame(spark), self._segments(), self._parameters())
-        assert "cust_segment_typ" in sample_pdf.columns
-        assert "stale_seg" not in sample_pdf.columns
-
     def test_generate_comparison_report(self, monkeypatch):
         """Only the model side has segment columns; the compared side is a
         prediction table of its own. No rendered section shows segments, so
@@ -1395,8 +1382,6 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
     def _parameters(snap_date="2025-01-31"):
         params = TestComputeBaselineMetrics._parameters()
         params["evaluation"]["snap_date"] = snap_date
-        params["evaluation"]["diagnosis"] = {"sample": {
-            "max_queries": 10, "min_pos_queries_per_item": 1, "seed": 42}}
         # On, so compute_prediction_quality reads the frame instead of
         # returning its stub (#381).
         params["evaluation"]["report"]["sections"]["prediction_quality"] = True
@@ -1465,17 +1450,6 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
         assert both["overall"]["summary"]["n"] == 6
         assert both == alone
 
-    def test_draw_diagnosis_sample_node(self, spark):
-        from recsys_tfb.pipelines.evaluation.nodes import (
-            draw_diagnosis_sample_node,
-        )
-
-        params = self._parameters()
-        sample_pdf, meta = draw_diagnosis_sample_node(
-            self._two_months(spark), _no_segments(params), params)
-        assert set(sample_pdf["snap_date"]) == {"2025-01-31"}
-        assert meta["n_queries_sampled"] == 2
-
     def test_compute_metrics_refuses_a_month_with_no_rows(self, spark):
         """Postcondition: the evaluated month's partition is empty or was never
         written, and reading the table raised nothing."""
@@ -1519,8 +1493,7 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
     # --- partitions rewritten by another run (#374) ------------------------
 
     _READERS = ("compute_metrics", "compute_baseline_metrics",
-                "compute_report_aggregates", "draw_diagnosis_sample_node",
-                "compute_prediction_quality")
+                "compute_report_aggregates", "compute_prediction_quality")
 
     @staticmethod
     def _read(name, frame, spark, params):
@@ -1618,8 +1591,7 @@ class TestReadersRefuseAPartitionPreparedUnderOtherSettings:
     bug 6).
     """
 
-    _READERS = ("compute_metrics", "compute_baseline_metrics",
-                "draw_diagnosis_sample_node")
+    _READERS = ("compute_metrics", "compute_baseline_metrics")
 
     @staticmethod
     def _call(name, frame, labels, segments, params):
@@ -1655,582 +1627,6 @@ class TestReadersRefuseAPartitionPreparedUnderOtherSettings:
         assert result is not None
 
 
-class TestDrawDiagnosisSampleNode:
-    @staticmethod
-    def _params():
-        return {
-            "schema": {"columns": {
-                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-                "label": "label", "score": "score", "rank": "rank",
-            }},
-            "evaluation": {"snap_date": "20240331", "diagnosis": {"sample": {
-                "max_queries": 10, "min_pos_queries_per_item": 2, "seed": 42,
-            }}},
-        }
-
-    @classmethod
-    def _eval_predictions(cls, spark):
-        from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
-            stamp_partition_fingerprint,
-        )
-
-        rows = []
-        for cust in ["H1", "H2", "H3", "H4"]:
-            rows.append(("20240331", cust, "hot", 0.9, 1))
-            rows.append(("20240331", cust, "cold", 0.1, 0))
-        rows.append(("20240331", "C1", "hot", 0.9, 0))
-        rows.append(("20240331", "C1", "cold", 0.1, 1))
-        return stamp_partition_fingerprint(spark.createDataFrame(
-            rows, schema=["snap_date", "cust_id", "prod_name", "score", "label"]
-        ), cls._params(), [])
-
-    def test_returns_none_and_skips_draw_when_all_disabled(self, spark):
-        from unittest.mock import patch
-        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-        from recsys_tfb.pipelines.evaluation import nodes
-        params = self._params()
-        # registry 診斷（contract.DIAGNOSES）預設是 enabled，所以「全部停用」
-        # 要逐項關掉。
-        params["evaluation"]["diagnosis"].update({
-            name: {"enabled": False} for name in DIAGNOSES
-        })
-        with patch(
-            "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample"
-        ) as spy:
-            result = nodes.draw_diagnosis_sample_node(self._eval_predictions(spark), _no_segments(params), params)
-        assert result is None
-        assert spy.call_count == 0
-
-    def test_draws_when_one_enabled(self):
-        from unittest.mock import patch
-        import pandas as pd
-        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-        from recsys_tfb.pipelines.evaluation import nodes
-        params = self._params()
-        params["evaluation"]["diagnosis"].update({
-            name: {"enabled": name == "config_shift"} for name in DIAGNOSES
-        })
-        with patch(
-            "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample",
-            return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
-        ) as spy, patch.object(
-            nodes, "restrict_to_current_eval_partitions", _kept_month_of
-        ):
-            nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
-        # exact args, not just count: the draw gets the month-restricted table
-        # (ADR-0018 decision 1), not the table itself, and params uncopied.
-        spy.assert_called_once_with(
-            ("kept month of", None), params, segment_columns=[])
-
-    def test_node_output_equals_direct_draw(self, spark):
-        # Faithfulness / behaviour-preservation: the node is a pass-through of
-        # draw_diagnosis_sample. Same seed -> identical content.
-        from recsys_tfb.diagnosis.metric.sample import draw_diagnosis_sample
-        from recsys_tfb.pipelines.evaluation import nodes
-        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
-            PARTITION_FINGERPRINT_COLUMN,
-        )
-        params = self._params()  # registry diagnoses default-enabled
-        # The node draws from the table as read: fingerprint checked, dropped.
-        direct_pdf, direct_meta = draw_diagnosis_sample(
-            self._eval_predictions(spark).drop(PARTITION_FINGERPRINT_COLUMN),
-            params,
-            segment_columns=[],
-        )
-        node_pdf, node_meta = nodes.draw_diagnosis_sample_node(self._eval_predictions(spark), _no_segments(params), params)
-        assert node_meta == direct_meta
-        assert (
-            node_pdf.sort_values(list(node_pdf.columns))
-            .reset_index(drop=True)
-            .equals(
-                direct_pdf.sort_values(list(direct_pdf.columns))
-                .reset_index(drop=True)
-            )
-        )
-
-    def test_draw_diagnosis_sample_called_once_across_consumers(self):
-        import importlib
-        from unittest.mock import patch
-        import pandas as pd
-        from recsys_tfb.pipelines.evaluation import nodes
-        params = self._params()  # registry diagnoses default-enabled
-        stub_pdf = pd.DataFrame({
-            "snap_date": ["20240331"], "cust_id": ["H1"],
-            "prod_name": ["hot"], "score": [0.9], "label": [1],
-        })
-        stub = (stub_pdf, {"n_queries_sampled": 1})
-        consumers = ("config_shift", "item_ability")
-        computes = {
-            name: patch.object(
-                importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}"),
-                "compute", return_value={})
-            for name in consumers
-        }
-        with patch(
-            "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample",
-            return_value=stub,
-        ) as spy, patch.object(
-            nodes, "restrict_to_current_eval_partitions", _kept_month_of
-        ), computes["config_shift"] as cs, computes["item_ability"] as ia:
-            sample = nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
-            for name in consumers:
-                nodes.make_diagnosis_node(name)(sample, params)
-        # exactly one draw, with the node's own inputs — the consumers must
-        # NOT re-draw (they consume the shared sample).
-        spy.assert_called_once_with(
-            ("kept month of", None), params, segment_columns=[])
-        assert cs.call_args.args[0] is sample
-        assert ia.call_args.args[0] is sample
-
-    def test_node_logs_free_pandas_data_volume(self, spark, caplog):
-        import logging
-        from recsys_tfb.pipelines.evaluation import nodes
-        params = self._params()  # all enabled
-        with caplog.at_level(logging.INFO):
-            nodes.draw_diagnosis_sample_node(self._eval_predictions(spark), _no_segments(params), params)
-        vols = [
-            r.volume for r in caplog.records
-            if getattr(r, "event", None) == "data_volume"
-            and getattr(r, "volume", {}).get("name") == "diagnosis.sample_pdf"
-        ]
-        assert vols, "expected a data_volume event for diagnosis.sample_pdf"
-        # Free pandas measurement (rows populated), NOT a Spark count.
-        assert vols[0]["kind"] == "pandas"
-        assert vols[0]["rows"] is not None
-
-
-class TestRegistryDiagnosisEnabled:
-    """``_registry_diagnosis_enabled`` — registry 診斷的抽樣閘門。"""
-
-    #: 每個 fixture 都要帶 schema：#378 之後這個閘門除了 enabled 旗標，還問
-    #: 「目前宣告的 schema 下這項診斷算不算得出來」，而 ``get_schema`` 不接受
-    #: 一個沒宣告任何角色的設定。
-    _SCHEMA = {"columns": {
-        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-    }}
-
-    def test_defaults_true(self):
-        from recsys_tfb.pipelines.evaluation.nodes import (
-            _registry_diagnosis_enabled,
-        )
-        assert _registry_diagnosis_enabled({"schema": self._SCHEMA}) is True
-
-    def test_false_when_an_optional_role_makes_every_consumer_inapplicable(self):
-        """Drawing the sample for diagnoses that will refuse to run is not
-        only wasted: the sample frame carries no optional-role column, so
-        deduplicating it by identity raises ``KeyError: ['imp_id']``. That is
-        what the ad example's evaluation died on before this gate learnt the
-        same rule as the diagnoses (``schema_skip_reason``)."""
-        from recsys_tfb.pipelines.evaluation.nodes import (
-            _registry_diagnosis_enabled,
-        )
-        with_event = {"columns": {**self._SCHEMA["columns"], "event": "imp_id"}}
-        assert _registry_diagnosis_enabled({"schema": with_event}) is False
-
-    def test_false_only_when_every_registry_diagnosis_disabled(self):
-        import importlib
-
-        from recsys_tfb.diagnosis.metric import contract
-        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-        from recsys_tfb.pipelines.evaluation.nodes import (
-            _registry_diagnosis_enabled,
-        )
-        all_off = {"schema": self._SCHEMA, "evaluation": {"diagnosis": {
-            name: {"enabled": False} for name in DIAGNOSES
-        }}}
-        assert _registry_diagnosis_enabled(all_off) is False
-
-        # 任一「吃共用抽樣」的診斷開著就是 True。逐項單開，避免哪天 registry
-        # 只剩一項時這條測試退化成「跟上一條測同一件事」。
-        #
-        # ``model_capacity``（Plan 2 Task 4）刻意排除在這個迴圈之外：它的
-        # ``INPUTS`` 沒有 ``diagnosis_sample``（只讀 ``gain_ledger``），單獨
-        # 開啟它不該觸發抽樣——這正是 ``_registry_diagnosis_enabled`` 的判準
-        # 本身（見該函式 docstring），下面另外斷言這個反例。
-        sample_consumers = [
-            name for name in DIAGNOSES
-            if "diagnosis_sample" in contract.inputs_for(
-                importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
-            )
-        ]
-        assert sample_consumers, "registry 裡至少要有一項吃共用抽樣的診斷，否則這條測試是空的"
-        for name in sample_consumers:
-            params = {"schema": self._SCHEMA, "evaluation": {"diagnosis": {
-                other: {"enabled": other == name} for other in DIAGNOSES
-            }}}
-            assert _registry_diagnosis_enabled(params) is True, name
-
-        non_sample_consumers = [n for n in DIAGNOSES if n not in sample_consumers]
-        for name in non_sample_consumers:
-            params = {"evaluation": {"diagnosis": {
-                other: {"enabled": other == name} for other in DIAGNOSES
-            }}}
-            assert _registry_diagnosis_enabled(params) is False, (
-                f"{name} 不吃 diagnosis_sample，單獨開啟不該觸發抽樣閘門"
-            )
-
-
-def _diagnosis_names():
-    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-    return DIAGNOSES
-
-
-def test_draw_diagnosis_sample_node_draws_for_registry_only_consumer():
-    """只開 config_shift → 仍然必須抽樣。
-
-    抽樣閘門若漏看某一項吃抽樣的 registry 診斷，``diagnosis_sample`` 是
-    None，那個節點就撞 fail-loud 的 ValueError——一個純粹由接線遺漏造成、
-    使用者無從自救的失敗。
-    """
-    from unittest.mock import patch
-    import pandas as pd
-    from recsys_tfb.pipelines.evaluation import nodes
-    params = {
-        "schema": {"columns": {
-            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-            "label": "label", "score": "score", "rank": "rank",
-        }},
-        "evaluation": {"diagnosis": {
-            "sample": {"max_queries": 10, "min_pos_queries_per_item": 2,
-                       "seed": 42},
-            **{name: {"enabled": name == "config_shift"}
-               for name in _diagnosis_names()},
-        }},
-    }
-    with patch(
-        "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample",
-        return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
-    ) as spy, patch.object(
-        nodes, "restrict_to_current_eval_partitions", _kept_month_of
-    ):
-        result = nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
-    assert result is not None, (
-        "sample gate ignored the registry diagnoses — config_shift is enabled "
-        "but no sample was drawn"
-    )
-    spy.assert_called_once_with(
-        ("kept month of", None), params, segment_columns=[])
-
-
-def test_sample_not_drawn_when_only_non_sample_diagnoses_enabled(
-    caplog, monkeypatch
-):
-    """只開不吃抽樣的診斷時不得抽樣。
-
-    斷言落在「回傳 None ＋ log 說了 skipping」，不能只斷言沒呼叫 Spark——
-    後者被「正確跳過」與「根本沒走到這段」同時滿足（本專案踩過的假綠形態，
-    見 known-pitfalls 的教訓 3）。
-
-    目前 ``DIAGNOSES`` 還沒有不吃抽樣的成員（``model_capacity`` 是下一個
-    task），這裡用 monkeypatch 造一個假的——``INPUTS`` 裡沒有
-    ``diagnosis_sample``，只讀 ``gain_ledger``。``contract.DIAGNOSES`` 走模組
-    屬性存取（見 ``_registry_diagnosis_enabled`` 的 docstring），所以這裡對
-    ``contract`` 模組本身 patch 屬性即可生效。
-    """
-    import logging
-    import sys
-    import types
-    from unittest.mock import patch
-
-    from recsys_tfb.diagnosis.metric import contract
-    from recsys_tfb.pipelines.evaluation import nodes
-
-    fake = types.ModuleType("recsys_tfb.diagnosis.metric.fake_capacity")
-    fake.INPUTS = ("gain_ledger", "parameters")
-    fake.compute = lambda gain_ledger, parameters: {}
-    monkeypatch.setitem(
-        sys.modules, "recsys_tfb.diagnosis.metric.fake_capacity", fake)
-    monkeypatch.setattr(contract, "DIAGNOSES", ("fake_capacity",))
-
-    params = {
-        "schema": {"columns": {
-            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-            "label": "label", "score": "score", "rank": "rank",
-        }},
-        "evaluation": {"diagnosis": {
-            "fake_capacity": {"enabled": True},
-        }},
-    }
-
-    with caplog.at_level(logging.INFO), patch(
-        "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample"
-    ) as spy:
-        result = nodes.draw_diagnosis_sample_node(None, _no_segments(params), params)
-
-    assert result is None
-    assert spy.call_count == 0
-    assert any(
-        "skip" in record.getMessage().lower() for record in caplog.records
-    ), "expected a log message explaining the sample draw was skipped"
-
-
-def test_generated_node_writes_stub_when_disabled():
-    """The stub carries the name and the fingerprint too: a disabled
-    diagnosis is still a landed JSON that ``render_diagnosis_pages`` checks."""
-    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
-    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
-
-    node_fn = make_diagnosis_node("config_shift")
-    params = {"evaluation": {"diagnosis": {"config_shift": {"enabled": False}}}}
-    assert node_fn(None, params) == {
-        "enabled": False,
-        "diagnosis": "config_shift",
-        "config_fingerprint": fingerprint(params, (
-            "dataset.sample_group_keys", "dataset.sample_ratio",
-            "dataset.sample_ratio_overrides", "training.sample_weight_keys",
-            "training.sample_weights",
-        )),
-    }
-
-
-def test_diagnosis_fingerprint_moves_only_with_its_own_extra_keys():
-    """``config_shift`` reads ``dataset.sample_ratio_overrides``; ``item_ability``
-    does not. Shared-key fingerprints would make one stale with the other."""
-    import copy
-    import importlib
-
-    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES, inputs_for
-    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
-
-    before = {
-        "dataset": {"sample_ratio_overrides": {"k|1": 0.5}},
-        "evaluation": {"diagnosis": {n: {"enabled": False} for n in DIAGNOSES}},
-    }
-    after = copy.deepcopy(before)
-    after["dataset"]["sample_ratio_overrides"] = {"k|1": 0.25}
-
-    def fingerprint_of(name, params):
-        mod = importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
-        upstream = [None] * (len(inputs_for(mod)) - 1)
-        return make_diagnosis_node(name)(*upstream, params)["config_fingerprint"]
-
-    assert fingerprint_of("config_shift", before) != \
-        fingerprint_of("config_shift", after)
-    assert fingerprint_of("item_ability", before) == \
-        fingerprint_of("item_ability", after)
-
-
-def test_generated_node_raises_when_enabled_but_sample_none():
-    """The wiring-bug message, which must stay reachable: enabled, applicable,
-    and still handed no sample means the gate really is out of sync."""
-    import pytest as _pytest
-
-    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
-
-    node_fn = make_diagnosis_node("config_shift")
-    params = {"schema": {"columns": {
-        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-    }}}
-    with _pytest.raises(ValueError, match="draw_diagnosis_sample_node"):
-        node_fn(None, params)
-
-
-def test_generated_node_stubs_instead_of_raising_when_not_applicable():
-    """An optional role makes this diagnosis inapplicable, so the sample gate
-    deliberately drew nothing — and the node must read that as a skip, not as
-    the wiring bug above. Getting this wrong is what ended the ad example's
-    evaluation with "gate out of sync with the consumer flag", pointing the
-    reader at a bug that was not there."""
-    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
-
-    node_fn = make_diagnosis_node("config_shift")
-    params = {"schema": {"columns": {
-        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-        "event": "imp_id",
-    }}}
-    out = node_fn(None, params)
-    assert out["enabled"] is False
-    assert "imp_id" in out["skipped_reason"]
-    assert out["diagnosis"] == "config_shift"
-
-
-def test_generated_node_delegates_to_the_named_module(monkeypatch):
-    """轉呼叫的是**以名字查到的**模組，不是寫死的 config_shift。
-
-    工廠若把模組名寫死，registry 只有一項時**每一條測試都會照樣綠**——
-    Plan 2 加第二項才會爆，而症狀是「第二項診斷的頁面印出第一項的數字」，
-    每頁看起來都很正常。所以這裡注入一個假模組，用它有沒有被呼叫到來證明
-    查表這件事真的發生了。
-    """
-    import sys
-    import types
-
-    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
-
-    called = {}
-    fake = types.ModuleType("recsys_tfb.diagnosis.metric.fake_diag")
-
-    def _compute(diagnosis_sample, parameters):
-        called["sample"] = diagnosis_sample
-        return {"marker": "from_fake"}
-
-    fake.compute = _compute
-    fake.EXTRA_CONFIG_KEYS = ("dataset.only_fake_reads_this",)
-    monkeypatch.setitem(
-        sys.modules, "recsys_tfb.diagnosis.metric.fake_diag", fake)
-
-    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
-
-    node_fn = make_diagnosis_node("fake_diag")
-    sample = ("pdf-sentinel", {"sampling_description": "x"})
-    params = {"dataset": {"only_fake_reads_this": 3}}
-    out = node_fn(sample, params)
-
-    # The computed path carries the name and a fingerprint over the module's
-    # own declared keys: with the key present in params, a fingerprint that
-    # ignored EXTRA_CONFIG_KEYS would hash differently.
-    assert out == {
-        "marker": "from_fake",
-        "diagnosis": "fake_diag",
-        "config_fingerprint": fingerprint(
-            params, ("dataset.only_fake_reads_this",)),
-    }
-    assert out["config_fingerprint"] != fingerprint(params)
-    # compute 拿到的是整個 tuple，不是解包後的 sample_pdf——契約在
-    # contract._SIGNATURES 釘住，抄形狀時最容易改壞的就是這裡。
-    assert called["sample"] is sample
-
-
-def _install_fake_upstream_and_downstream(monkeypatch):
-    """A fake diagnosis pair shaped like ``model_capacity`` reading
-    ``evaluation_item_ability``, generalised with made-up names so the
-    precondition is proven generic rather than special-cased.
-
-    ``fake_downstream.INPUTS`` names ``evaluation_fake_upstream`` — a
-    landed result of another registry diagnosis — plus ``parameters``.
-    ``contract.DIAGNOSES`` is patched to contain both names, which is what
-    ``make_diagnosis_node._run``'s new pre-check keys off of (an
-    ``evaluation_<x>`` input where ``<x>`` is itself in ``DIAGNOSES``).
-
-    Returns the dict ``compute`` records its received upstream payload into,
-    so a test can tell whether ``compute`` ran at all and with what.
-    """
-    import sys
-    import types
-
-    from recsys_tfb.diagnosis.metric import contract
-
-    upstream_mod = types.ModuleType("recsys_tfb.diagnosis.metric.fake_upstream")
-    upstream_mod.EXTRA_CONFIG_KEYS = ("dataset.only_upstream_reads_this",)
-    upstream_mod.compute = lambda *a: {}  # never called directly in these tests
-
-    downstream_mod = types.ModuleType(
-        "recsys_tfb.diagnosis.metric.fake_downstream")
-    downstream_mod.INPUTS = ("evaluation_fake_upstream", "parameters")
-    received = {}
-
-    def _compute(evaluation_fake_upstream, parameters):
-        received["upstream_payload"] = evaluation_fake_upstream
-        return {"marker": "downstream_computed"}
-
-    downstream_mod.compute = _compute
-
-    monkeypatch.setitem(
-        sys.modules, "recsys_tfb.diagnosis.metric.fake_upstream", upstream_mod)
-    monkeypatch.setitem(
-        sys.modules, "recsys_tfb.diagnosis.metric.fake_downstream",
-        downstream_mod)
-    monkeypatch.setattr(
-        contract, "DIAGNOSES", ("fake_upstream", "fake_downstream"))
-    return received
-
-
-def test_downstream_diagnosis_refuses_a_stale_upstream_result(monkeypatch):
-    """(#342 F8) ``--only-node diagnose_fake_downstream`` loading a stale
-    ``evaluation_fake_upstream`` JSON must raise, naming the changed key and
-    the upstream's rerun node — the same freshness check
-    ``render_diagnosis_pages`` runs, but here it must run *inside* the
-    downstream diagnosis's own node, before it stamps the CURRENT fingerprint
-    over a result actually computed on stale input."""
-    import copy
-
-    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
-    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
-
-    _install_fake_upstream_and_downstream(monkeypatch)
-
-    old_params = {"dataset": {"only_upstream_reads_this": 1},
-                  "evaluation": {"diagnosis": {}}}
-    new_params = copy.deepcopy(old_params)
-    new_params["dataset"]["only_upstream_reads_this"] = 2
-
-    stale_upstream_payload = {
-        "enabled": True, "diagnosis": "fake_upstream",
-        "config_fingerprint": fingerprint(
-            old_params, ("dataset.only_upstream_reads_this",)),
-    }
-
-    node_fn = make_diagnosis_node("fake_downstream")
-    with pytest.raises(ValueError) as exc:
-        node_fn(stale_upstream_payload, new_params)
-    msg = str(exc.value)
-    assert "dataset.only_upstream_reads_this: 1 -> 2" in msg
-    assert "--from-node diagnose_fake_upstream" in msg
-
-
-def test_downstream_diagnosis_computes_on_a_fresh_upstream_result(monkeypatch):
-    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
-    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
-
-    received = _install_fake_upstream_and_downstream(monkeypatch)
-
-    params = {"dataset": {"only_upstream_reads_this": 1},
-              "evaluation": {"diagnosis": {}}}
-    fresh_upstream_payload = {
-        "enabled": True, "diagnosis": "fake_upstream",
-        "config_fingerprint": fingerprint(
-            params, ("dataset.only_upstream_reads_this",)),
-    }
-
-    node_fn = make_diagnosis_node("fake_downstream")
-    out = node_fn(fresh_upstream_payload, params)
-    assert out["marker"] == "downstream_computed"
-    assert received["upstream_payload"] is fresh_upstream_payload
-
-
-def test_disabled_downstream_diagnosis_skips_the_upstream_check(monkeypatch):
-    """A disabled downstream returns its stub before reaching compute (and
-    before this precondition), so a stale upstream must not raise here —
-    the existing enabled-gate ordering is unchanged."""
-    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
-    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
-
-    _install_fake_upstream_and_downstream(monkeypatch)
-
-    old_params = {"dataset": {"only_upstream_reads_this": 1},
-                  "evaluation": {"diagnosis": {
-                      "fake_downstream": {"enabled": False}}}}
-    stale_upstream_payload = {
-        "enabled": True, "diagnosis": "fake_upstream",
-        "config_fingerprint": fingerprint(
-            old_params, ("dataset.only_upstream_reads_this",)),
-    }
-    # Change the key after stamping the payload, so it really is stale
-    # relative to `old_params` as passed to the disabled downstream node.
-    old_params["dataset"]["only_upstream_reads_this"] = 2
-
-    node_fn = make_diagnosis_node("fake_downstream")
-    out = node_fn(stale_upstream_payload, old_params)
-    assert out == {
-        "enabled": False, "diagnosis": "fake_downstream",
-        "config_fingerprint": fingerprint(old_params),
-    }
-
-
-def test_each_diagnosis_node_gets_a_distinct_name():
-    """``Node.name`` 預設取 ``func.__name__``（core/node.py:8）。
-
-    工廠不設 ``__name__`` 的話五個 node 全叫 ``_run``：``--only-node`` 指不到
-    任何一個，log 也分不出誰是誰。而 pipeline 照樣跑得完——這是靜默的。
-    """
-    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
-
-    names = [make_diagnosis_node(n).__name__ for n in DIAGNOSES]
-    assert names == [f"diagnose_{n}" for n in DIAGNOSES]
-    assert len(set(names)) == len(names)
-
-
 class TestAllPositiveQueryGroups:
     """#376: ``evaluation.query_filter.drop_all_positive_groups``.
 
@@ -2238,7 +1634,8 @@ class TestAllPositiveQueryGroups:
     every per-query metric of it is the same whatever the order. The switch drops
     those groups from the measurement metrics, the popularity baseline and
     both sides of the comparison report — at each grain, decided on that
-    grain's own frame. It does not reach the diagnoses. With it off, the
+    grain's own frame. It does not reach the per-item breakdown's
+    aggregates. With it off, the
     evaluation nodes warn when those groups are more than 10% of the groups
     holding a positive.
 
@@ -2295,10 +1692,6 @@ class TestAllPositiveQueryGroups:
                     "enabled": True, "unmapped": "singleton",
                     "mapping": (mapping if mapping is not None
                                 else {"fund": ["fund_stock", "fund_bond"]}),
-                },
-                "diagnosis": {
-                    "sample": {"max_queries": 100,
-                               "min_pos_queries_per_item": 1, "seed": 42},
                 },
             },
         }
@@ -2434,7 +1827,7 @@ class TestAllPositiveQueryGroups:
         assert seen["a"]["overall"]["map@3"] == pytest.approx(0.5)
         assert seen["b"]["overall"]["map@3"] == pytest.approx(0.75)
 
-    # ---- the diagnoses do not follow it ------------------------------------
+    # ---- the per-item breakdown does not follow it ------------------------
 
     @staticmethod
     def _unfingerprinted(result):

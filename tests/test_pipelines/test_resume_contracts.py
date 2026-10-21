@@ -144,16 +144,18 @@ RESUME_CONTRACTS = {
         # upstream has to re-run — no population/feature join, no preprocessing.
         "predict_and_write_scores": set(),
     },
-    # Monitoring mode (no post_training): no registry diagnosis is wired
-    # (ADR-0018 decision 5), so generate_report's pages input comes from the
-    # zero-read no_diagnosis_pages stub — memory-only, and free to re-run.
+    # Monitoring and --post-training wire the same nodes since #532 removed
+    # the diagnoses (ADR-0031 decision 2), so the two entries hold the same
+    # contract; both are listed because they read different prediction tables.
     ("evaluation", ()): {
-        # Redrawing the report re-runs no Spark node (ADR-0018 decision 2):
-        # generate_report reads four landed JSONs plus parameters, and its
-        # pages list comes from the zero-read stub. Before evaluation_metrics
-        # and baseline_metrics had catalog entries this set also held
-        # prepare_eval_data, compute_metrics and compute_baseline_metrics — a
-        # "redraw" re-joined the predictions and recomputed every metric.
+        # Redrawing the report re-runs no node (ADR-0018 decision 2):
+        # generate_report reads four landed JSONs plus parameters. Before
+        # evaluation_metrics and baseline_metrics had catalog entries this set
+        # also held prepare_eval_data, compute_metrics and
+        # compute_baseline_metrics — a "redraw" re-joined the predictions and
+        # recomputed every metric. Until #532 it also held the memory-only
+        # diagnosis-pages producer (no_diagnosis_pages here,
+        # render_diagnosis_pages under --post-training).
         #
         # Why the cheaper contract is accepted. What the redraw reads back from
         # disk is checked, not trusted: generate_report refuses any landed
@@ -168,28 +170,19 @@ RESUME_CONTRACTS = {
         # (docs/pipelines/evaluation.md section 7.4 says so).
         #
         # Un-land evaluation_metrics or baseline_metrics and this turns red.
-        "generate_report": {"no_diagnosis_pages"},
+        "generate_report": set(),
         # The resume point ADR-0018 decision 1 buys: prepare_eval_data writes
         # enriched_eval_predictions, so resuming at the metrics reads the table
         # instead of re-joining the predictions. Before that the set also held
-        # prepare_eval_data. What is left is the zero-read stub, memory-only
-        # and free; no node in this mode reads the diagnosis sample, so the
-        # slice does not pull its draw back.
+        # prepare_eval_data.
         # This stub catalog answers "the table exists"; the evaluated month
         # missing from it is the CLI's month plan's business (test_cli.py).
-        "compute_metrics": {"no_diagnosis_pages"},
+        "compute_metrics": set(),
     },
     ("evaluation", (("post_training", True),)): {
-        # Same landing and reasoning as above. render_diagnosis_pages stays
-        # memory-only on purpose (its output is a list of paths, meaningful
-        # only for the run that wrote them); it re-renders the pages from the
-        # landed diagnosis JSONs, the half-second path. When those JSONs are
-        # not on disk the slice pulls the diagnosis nodes back as well, which
-        # is correct and outside this contract: contracts describe the
-        # "previous full run succeeded" scenario.
-        "generate_report": {"render_diagnosis_pages"},
-        # Same unlock as the monitoring entry: the table is read, not re-joined.
-        "compute_metrics": {"draw_diagnosis_sample_node"},
+        # Same landing and reasoning as above.
+        "generate_report": set(),
+        "compute_metrics": set(),
     },
 }
 

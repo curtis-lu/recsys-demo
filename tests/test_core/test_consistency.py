@@ -761,18 +761,11 @@ class TestCategoricalDtypeAllowList:
         assert "drop_columns" in msg
 
 
-class TestDiagnosisMetricParamsA15:
-    def _params(self, metric=None, sample=None, item_ability=None):
-        ev = {}
+class TestMetricParamsA15:
+    def _params(self, metric=None, **evaluation):
+        ev = dict(evaluation)
         if metric is not None:
             ev["metric"] = metric
-        diag = {}
-        if sample is not None:
-            diag["sample"] = sample
-        if item_ability is not None:
-            diag["item_ability"] = item_ability
-        if diag:
-            ev["diagnosis"] = diag
         # validate_config_consistency resolves the schema, and since #328 the
         # three user-owned roles have no built-in answer. Carried by every
         # _params here so the predicate-level and aggregator-level call styles
@@ -781,91 +774,33 @@ class TestDiagnosisMetricParamsA15:
             "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}}}
 
     def test_absent_blocks_are_clean(self):
-        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
-        assert diagnosis_metric_param_errors({}) == []
-        assert diagnosis_metric_param_errors(self._params()) == []
+        from recsys_tfb.core.consistency import evaluation_metric_param_errors
+        assert evaluation_metric_param_errors({}) == []
+        assert evaluation_metric_param_errors(self._params()) == []
 
     def test_valid_defaults_are_clean(self):
-        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        from recsys_tfb.core.consistency import evaluation_metric_param_errors
         p = self._params(
             metric={"weight_alpha": 0.0, "k": None, "min_positives": 0,
                     "shrinkage_k": 0},
-            sample={"max_queries": 200000, "min_pos_queries_per_item": 50,
-                    "seed": 42},
         )
-        assert diagnosis_metric_param_errors(p) == []
+        assert evaluation_metric_param_errors(p) == []
 
     def test_each_bad_value_reports(self):
-        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
+        from recsys_tfb.core.consistency import evaluation_metric_param_errors
         p = self._params(
             metric={"weight_alpha": 1.5, "k": 0, "min_positives": -1,
                     "shrinkage_k": -0.1},
-            sample={"max_queries": 0, "min_pos_queries_per_item": 0},
-            item_ability={"top_n": -1},
         )
-        errors = diagnosis_metric_param_errors(p)
+        errors = evaluation_metric_param_errors(p)
         joined = "\n".join(errors)
         # Token check first: if a predicate is dropped, the failure message
         # then names *which* key stopped being validated, instead of only
-        # reporting a count that went from 7 to 6.
+        # reporting a count that went from 4 to 3.
         for token in ["weight_alpha", "metric.k", "min_positives",
-                      "shrinkage_k", "max_queries",
-                      "min_pos_queries_per_item",
-                      "item_ability.top_n"]:
+                      "shrinkage_k"]:
             assert token in joined, f"{token} is no longer validated"
-        assert len(errors) == 7
-
-    def test_top_n_negative_or_non_int_rejected(self):
-        """A15 自己就要擋 item_ability.top_n < 0 / bool / 非 int。
-
-        top_n = 0 是良性退化（不顯示任何 item），所以 floor 是 0，與 sibling
-        suppression.top_examples（A19）一致。真正的危害是負數（Python 會從尾端
-        切片）與 bool（True == 1 會溜過一個天真的 >= 0 檢查）。
-        """
-        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
-        for bad in (-1, True, "30", 1.5):
-            errors = diagnosis_metric_param_errors(
-                self._params(item_ability={"top_n": bad})
-            )
-            assert len(errors) == 1, errors
-            assert "item_ability.top_n" in errors[0]
-
-    def test_top_n_zero_and_default_are_clean(self):
-        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
-        assert diagnosis_metric_param_errors(
-            self._params(item_ability={"top_n": 0})
-        ) == []
-        assert diagnosis_metric_param_errors(
-            self._params(item_ability={"top_n": 30})
-        ) == []
-
-    def test_max_queries_below_one_rejected(self):
-        """A15 must reject ``max_queries <= 0`` on its own.
-
-        Not redundant with test_each_bad_value_reports: this is the one key
-        whose absence degrades *silently* rather than crashing.
-        ``draw_diagnosis_sample`` with ``max_queries=0`` and a take-all item
-        does not raise — it returns a 1-query sample with
-        ``sample_ratio=0.0``, i.e. a plausible-looking artefact computed from
-        almost no data. (With no take-all item it instead dies at
-        ``sample.py`` with an opaque ``AttributeError: 'NoneType' object has
-        no attribute 'withColumn'``.) Both are config errors that must be
-        caught at CLI entry, before Spark starts. Mirrors the >= 1 guard on
-        the training-side ``diagnostics.shap.quadrant_*`` int keys (A20).
-        """
-        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
-        for bad in (0, -1):
-            errors = diagnosis_metric_param_errors(
-                self._params(sample={"max_queries": bad})
-            )
-            assert len(errors) == 1, errors
-            assert "max_queries" in errors[0] and "int >= 1" in errors[0]
-        # a bool is not an acceptable int here (True == 1 would slip through
-        # a naive `>= 1` check)
-        errors = diagnosis_metric_param_errors(
-            self._params(sample={"max_queries": True})
-        )
-        assert len(errors) == 1 and "max_queries" in errors[0]
+        assert len(errors) == 4
 
     def test_wired_into_validate(self):
         import pytest as _pytest
@@ -877,192 +812,27 @@ class TestDiagnosisMetricParamsA15:
         with _pytest.raises(ConfigConsistencyError, match="weight_alpha"):
             validate_config_consistency(p)
 
+    def test_the_retired_diagnosis_block_is_not_a15s(self):
+        """#532 took ``evaluation.diagnosis`` out of A15 with the diagnoses.
+        A conf still carrying the block is refused whole by A61 at the
+        evaluation command; A15 judging values under it would answer a key
+        nothing reads with advice to fix its value."""
+        from recsys_tfb.core.consistency import evaluation_metric_param_errors
+        p = self._params(diagnosis={
+            "sample": {"max_queries": 0, "min_pos_queries_per_item": 0},
+            "item_ability": {"top_n": -1},
+            "config_shift": {"enabled": "false"},
+        })
+        assert evaluation_metric_param_errors(p) == []
 
-class TestReservedSegmentColumnsA15:
-    """A15：segment_columns 不得用抽樣器的保留欄名。
-
-    為什麼要在 config 層再擋一次（``sample.py::_guard_reserved_columns``
-    已經有 runtime 守衛）：兩者驗的輸入不同。這條驗「config 宣告了什麼」，
-    在 CLI entry 一秒內擋掉；runtime 那條驗「實際 DataFrame 有什麼欄」，
-    也是 schema 角色欄撞名時唯一的一道檢查（A15 只看 ``evaluation.segment_columns``）。少了這條，使用者要等 Spark 起來 2–4 分鐘才知道配置錯了。
-    """
-
-    def _params(self, seg_cols):
-        return {"evaluation": {"segment_columns": seg_cols}, "schema": {"columns": {
-            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}},}
-
-    def test_reserved_names_rejected(self):
-        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
-        for bad in ("stratum", "inclusion_weight"):
-            errors = diagnosis_metric_param_errors(self._params([bad]))
-            assert len(errors) == 1, errors
-            assert bad in errors[0] and "reserved" in errors[0]
-
-    def test_both_reserved_names_reported_together(self):
-        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
-        errors = diagnosis_metric_param_errors(
-            self._params(["cust_segment_typ", "stratum", "inclusion_weight"])
-        )
-        assert len(errors) == 2
-        joined = "\n".join(errors)
-        assert "stratum" in joined and "inclusion_weight" in joined
-
-    def test_ordinary_segment_columns_clean(self):
-        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
-        assert diagnosis_metric_param_errors(
-            self._params(["cust_segment_typ", "age_band"])
-        ) == []
-        # 缺席 / None 都不算錯
-        assert diagnosis_metric_param_errors({"evaluation": {}}) == []
-        assert diagnosis_metric_param_errors(self._params(None)) == []
-
-    def test_wired_into_validate(self):
-        import pytest as _pytest
-        from recsys_tfb.core.consistency import (
-            ConfigConsistencyError,
-            validate_config_consistency,
-        )
-        # match 用 "reserved" 而非 "stratum"：A10（segment_columns 沒有對應
-        # segment_source）也會對同一份 config 報錯、訊息裡同樣有 "stratum"，
-        # 拿 "stratum" 當 match 的話這條測試在 A15 被拔掉後照樣會綠。
-        with _pytest.raises(ConfigConsistencyError, match="reserved column"):
-            validate_config_consistency(self._params(["stratum"]))
-
-
-class TestEnabledMustBeBool:
-    """A15：enabled 必須是 bool——YAML 引號字串 "false" 恆真，會靜默啟用節點。"""
-
-    def test_bool_values_clean(self):
-        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
-        p = {"evaluation": {"diagnosis": {"config_shift": {"enabled": False}}}}
-        assert diagnosis_metric_param_errors(p) == []
-
-    def test_config_shift_enabled_string_rejected(self):
-        """同一個 YAML 陷阱套用在 config_shift 上。
-
-        歸在 A15（診斷抽樣的參數家族）而不是開新代號：config_shift 的
-        enabled 決定的正是「共用診斷抽樣要不要抽」，跟 diagnosis.sample 的
-        參數是同一條不變量的成員。
-        """
-        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
-        for bad in ("false", "true", 0, 1, None):
-            p = {"evaluation": {"diagnosis": {
-                "config_shift": {"enabled": bad}
-            }}}
-            errors = diagnosis_metric_param_errors(p)
-            assert len(errors) == 1, (bad, errors)
-            assert "config_shift.enabled" in errors[0], (bad, errors)
-
-    def test_config_shift_bool_values_clean(self):
-        from recsys_tfb.core.consistency import diagnosis_metric_param_errors
-        for good in (True, False):
-            p = {"evaluation": {"diagnosis": {
-                "config_shift": {"enabled": good}
-            }}}
-            assert diagnosis_metric_param_errors(p) == [], good
-        # 缺席 / 空 block 都採預設值，不算錯
-        assert diagnosis_metric_param_errors(
-            {"evaluation": {"diagnosis": {"config_shift": {}}}}
-        ) == []
-
-    def test_config_shift_wired_into_validate(self):
-        import pytest as _pytest
-        from recsys_tfb.core.consistency import (
-            ConfigConsistencyError,
-            validate_config_consistency,
-        )
-        p = {
-            "evaluation": {"diagnosis": {"config_shift": {"enabled": "false"}}},
-            "schema": {"columns": {
-                "time": "snap_date", "entity": ["cust_id"],
-                "item": "prod_name"}},
-        }
-        # match 挑 "config_shift.enabled"：這個 repo 踩過「match pattern 被別條
-        # predicate 的訊息滿足」的假綠。沒有第二條 predicate 會對這份 config
-        # 吐出這個字串，所以拔掉本檢查這條測試一定紅。
-        with _pytest.raises(
-            ConfigConsistencyError, match=r"config_shift\.enabled"
-        ):
-            validate_config_consistency(p)
-
-
-class TestSuppressionParamsA19:
-    """A19 改軌（Plan 3 Task 5.3）：驗 ``suppression.top_examples``。
-    ``enabled`` 不在這裡驗——``suppression``
-    進了 ``diagnosis.metric.contract.DIAGNOSES`` 之後，A15
-    （``diagnosis_metric_param_errors``）已經對 registry 裡每個名字驗過
-    ``enabled``，兩邊都驗會對同一個壞值吐兩條訊息。
-
-    ⚠ ``match="suppression"`` 選字陷阱：A15 對同一份 config 也會 raise，
-    訊息裡含 ``evaluation.diagnosis.suppression.enabled=...``——也含
-    "suppression" 這個子字串。所以
-    ``test_registered_in_validate_config_consistency`` 改用只有 A19 訊息
-    才有的 "top_examples" 當 match pattern，並且參數只給
-    ``top_examples``（不去動 ``enabled``），避免真的觸發 A15 而讓這條測試
-    在「哪個 predicate 負責」這件事上失去辨識力。
-    """
-
-    def _params(self, suppression=None):
-        diag = {}
-        if suppression is not None:
-            diag["suppression"] = suppression
-        return {"evaluation": {"diagnosis": diag}, "schema": {"columns": {
-            "time": "snap_date", "entity": ["cust_id"], "item": "prod_name"}},}
-
-    def test_absent_and_valid_defaults_clean(self):
-        from recsys_tfb.core.consistency import suppression_param_errors
-        assert suppression_param_errors({}) == []
-        assert suppression_param_errors(self._params()) == []
-        assert suppression_param_errors(
-            self._params({"top_examples": 50})
-        ) == []
-        assert suppression_param_errors(
-            self._params({"top_examples": 0})
-        ) == [], "0 是合法值（不列具體案例），不是 falsy 就該擋"
-
-    def test_non_int_top_examples_rejected(self):
-        from recsys_tfb.core.consistency import suppression_param_errors
-        errs = suppression_param_errors(self._params({"top_examples": "50"}))
-        assert len(errs) == 1
-        assert "evaluation.diagnosis.suppression.top_examples" in errs[0]
-
-    def test_bool_top_examples_rejected(self):
-        """``isinstance(True, int)`` 是 ``True``——bool 不算數，必須先擋。"""
-        from recsys_tfb.core.consistency import suppression_param_errors
-        errs = suppression_param_errors(self._params({"top_examples": True}))
-        assert len(errs) == 1
-        assert "top_examples" in errs[0]
-
-    def test_negative_top_examples_rejected(self):
-        from recsys_tfb.core.consistency import suppression_param_errors
-        errs = suppression_param_errors(self._params({"top_examples": -1}))
-        assert len(errs) == 1
-        assert "top_examples" in errs[0]
-
-    def test_missing_block_defaults_clean(self):
-        from recsys_tfb.core.consistency import suppression_param_errors
-        params = self._params({"top_examples": 50})
-        params["evaluation"]["diagnosis"].pop("suppression", None)
-        assert suppression_param_errors(params) == []
-
-    def test_enabled_is_not_validated_here(self):
-        """``enabled`` 的型別檢查交給 A15，A19 不重複驗——即使給一個非
-        bool 的 enabled，這個 predicate 也不該對它有意見。"""
-        from recsys_tfb.core.consistency import suppression_param_errors
-        errs = suppression_param_errors(
-            self._params({"enabled": "yes", "top_examples": 50})
-        )
-        assert errs == []
-
-    def test_registered_in_validate_config_consistency(self):
-        import pytest as _pytest
-        from recsys_tfb.core.consistency import (
-            ConfigConsistencyError, validate_config_consistency,
-        )
-        with _pytest.raises(ConfigConsistencyError, match="top_examples"):
-            validate_config_consistency(
-                self._params({"top_examples": "50"})
-            )
+    def test_the_old_sampler_column_names_are_ordinary_segment_columns(self):
+        """``stratum`` / ``inclusion_weight`` were reserved because the
+        diagnosis sampler added columns of those names and joined them onto
+        the predictions. The sampler went with the diagnoses (#532), so a
+        segment column may be called that now."""
+        from recsys_tfb.core.consistency import evaluation_metric_param_errors
+        p = self._params(segment_columns=["stratum", "inclusion_weight"])
+        assert evaluation_metric_param_errors(p) == []
 
 
 class TestTrainingDiagnosticsParamsA20:
@@ -2959,7 +2729,37 @@ class TestReportSectionKeysA34:
             _sections_params({"baseline": True}))
         assert len(errors) == 1
         assert "does not declare" in errors[0]
-        assert "'diagnosis_links'" in errors[0]
+        assert "'per_item_breakdown'" in errors[0]
+
+    def test_a_conf_written_before_532_is_refused_naming_each_key(self):
+        """#532 removed ``diagnosis_links`` with the diagnosis pages and
+        renamed ``diagnostics`` to ``per_item_breakdown``. A34's equality is
+        the whole check for both: the old names are declared and not read,
+        the new name is read and not declared."""
+        old = {"dataset_overview": True, "primary_map": True,
+               "diagnostics": True, "baseline": True,
+               "diagnosis_links": True, "prediction_quality": False}
+        errors = report_section_key_errors(_sections_params(old))
+        assert len(errors) == 2
+        unread, undeclared = errors
+        assert "declares ['diagnosis_links', 'diagnostics']" in unread
+        assert "does not declare ['per_item_breakdown']" in undeclared
+
+    @pytest.mark.parametrize("value", ["false", "true", 0, 1, "false`", None],
+                             ids=["str-false", "str-true", "int-0", "int-1",
+                                  "copied-backtick", "null"])
+    def test_a_switch_that_is_not_a_bool_is_refused(self, value):
+        """#505: every reader takes the switch by truthiness, so ``"false"``
+        (any non-empty string) reads as on. The message shows the value with
+        its quotes and says to write true or false unquoted."""
+        for name in sorted(EVALUATION_REPORT_SECTIONS):
+            sections = {n: True for n in EVALUATION_REPORT_SECTIONS}
+            sections[name] = value
+            errors = report_section_key_errors(_sections_params(sections))
+            assert len(errors) == 1, (name, errors)
+            assert errors[0].startswith("A34:"), name
+            assert f"{name}: {value!r}" in errors[0], (name, errors[0])
+            assert "true or false" in errors[0], name
 
     def test_the_suggested_values_keep_what_an_absent_switch_does(self):
         """Writing what the message suggests must switch nothing. It used to
@@ -3161,38 +2961,41 @@ class TestRetiredCalibrationBinKeysA43:
         validate_config_consistency(p)
 
 
-# --- A61: the confidence-interval block #515 retired --------------------------
+# --- A61: the evaluation.diagnosis block (#515 retired its ci, #532 the rest) --
 
 from recsys_tfb.core.consistency import (  # noqa: E402
-    RETIRED_DIAGNOSIS_CI_KEYS,
-    retired_diagnosis_ci_key_errors,
+    RETIRED_DIAGNOSIS_KEYS,
+    retired_diagnosis_key_errors,
 )
 
 
-class TestRetiredDiagnosisCiKeyA61:
+class TestRetiredDiagnosisKeyA61:
     @pytest.mark.parametrize("value", [
-        {}, {"enabled": False}, {"enabled": True, "n_boot": 200}, None, False,
-    ], ids=["empty", "disabled", "the-old-default", "null", "false"])
+        {}, {"ci": {"enabled": False}}, {"sample": {"seed": 42}},
+        {"config_shift": {"enabled": False}},
+        {"suppression": {"enabled": True, "top_examples": 50}}, None, False,
+    ], ids=["empty", "ci-only", "sample-only", "a-diagnosis-switched-off",
+            "a-diagnosis-on", "null", "false"])
     def test_the_block_is_refused_whatever_its_value(self, value):
         """Presence is the failure (A43's shape): ``enabled: false`` switches
         off nothing that still exists, and the key sits in a fingerprinted
         subtree, so leaving it behind is not the same conf as deleting it."""
-        p = {"evaluation": {"diagnosis": {
-            "sample": {"seed": 42}, "ci": value}}}
-        errors = retired_diagnosis_ci_key_errors(p)
+        p = {"evaluation": {"diagnosis": value}}
+        errors = retired_diagnosis_key_errors(p)
         assert len(errors) == 1
         assert errors[0].startswith("A61:")
-        assert repr("evaluation.diagnosis.ci") in errors[0]
+        assert repr("evaluation.diagnosis") in errors[0]
         # The message says what to do and why there is nothing to switch to.
-        assert "Delete" in errors[0] and "#515" in errors[0]
+        assert "Delete" in errors[0] and "#532" in errors[0]
 
     def test_a_conf_without_it_passes(self):
-        assert retired_diagnosis_ci_key_errors({}) == []
-        assert retired_diagnosis_ci_key_errors({"evaluation": {"diagnosis": {
-            "sample": {"seed": 42}, "config_shift": {"enabled": True}}}}) == []
+        assert retired_diagnosis_key_errors({}) == []
+        # The per-item breakdown's own block shares the stem, not the key.
+        assert retired_diagnosis_key_errors({"evaluation": {"report": {
+            "diagnostics": {"include_distributions": True}}}}) == []
         # A sibling key that merely contains the name is not the block.
-        assert retired_diagnosis_ci_key_errors({"evaluation": {
-            "ci": {"enabled": True}}}) == []
+        assert retired_diagnosis_key_errors({"evaluation": {
+            "diagnosis_links": True}}) == []
 
     def test_the_shipped_confs_do_not_spell_it(self):
         from pathlib import Path
@@ -3202,17 +3005,17 @@ class TestRetiredDiagnosisCiKeyA61:
         root = Path(__file__).resolve().parents[2]
         for conf in (root / "conf", root / "examples" / "ad" / "conf"):
             params = ConfigLoader(str(conf), env="local").get_parameters()
-            assert retired_diagnosis_ci_key_errors(params) == [], conf
+            assert retired_diagnosis_key_errors(params) == [], conf
 
     def test_not_aggregated_by_validate_config_consistency(self):
         """Evaluation-only key, A34's reason (issue #158)."""
         p = _base({"inference": {"products": ["a", "b"]}})
         p["evaluation"] = {"diagnosis": {"ci": {"enabled": True}}}
-        assert retired_diagnosis_ci_key_errors(p), "premise: this conf is bad"
+        assert retired_diagnosis_key_errors(p), "premise: this conf is bad"
         validate_config_consistency(p)
 
     def test_the_constant_names_the_block(self):
-        assert RETIRED_DIAGNOSIS_CI_KEYS == ("evaluation.diagnosis.ci",)
+        assert RETIRED_DIAGNOSIS_KEYS == ("evaluation.diagnosis",)
 
 
 # --- A33: migration-period check for the #327 config key rename --------------

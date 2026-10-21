@@ -2055,8 +2055,10 @@ def compute_gain_ledger(model, preprocessor: dict, parameters: dict) -> dict:
     """The model's split gain accounted per item: what isolating each item
     costs and how much gain is spent on it afterwards. The accounting rules
     are the ledger's definition as a metric, written once in
-    ``steps/gain_ledger.py`` (see the decision at the call below);
-    evaluation's ``model_capacity`` reads the result.
+    ``steps/gain_ledger.py`` (see the decision at the call below).
+    ``log_experiment`` uploads the result with the other diagnosis files;
+    evaluation's ``model_capacity`` read it until #532 removed that
+    diagnosis.
 
     ``diagnostics.gain_ledger.enabled`` (default true) switched off returns
     ``{"enabled": False}`` without touching the model.
@@ -2078,8 +2080,8 @@ def compute_gain_ledger(model, preprocessor: dict, parameters: dict) -> dict:
 
     item_col = get_schema(parameters)["item"]
     # Decision — a model without trees skips the ledger, warns and says so in
-    # the artifact; evaluation reads that as its own reason, not as "turned
-    # off" or "never ran".
+    # the artifact, so whoever reads it sees its own reason, not "turned off"
+    # or "never ran".
     try:
         trees = model.tree_structure()
     except UnsupportedCapability as exc:
@@ -2091,8 +2093,8 @@ def compute_gain_ledger(model, preprocessor: dict, parameters: dict) -> dict:
     # column, land the coarse ledger (the item-id account alone, fallback:
     # True, and a note saying why) rather than stop. The trees' category
     # codes cannot be read as items, so the per-item and context accounts
-    # cannot be built, but the item-id account needs no codes; evaluation's
-    # model_capacity recognises the fallback and says so.
+    # cannot be built, but the item-id account needs no codes; the ledger's
+    # fallback flag and note say so.
     categories = (preprocessor or {}).get("category_mappings", {}).get(item_col)
     if not categories:
         logger.warning(
@@ -2110,9 +2112,7 @@ def compute_gain_ledger(model, preprocessor: dict, parameters: dict) -> dict:
     # can still reach a node — are the metric's definition, not a choice this
     # node makes per run, so they are written once, in steps/gain_ledger.py,
     # the way evaluation keeps compute_ap / compute_macro_per_item_map outside
-    # its nodes. Their output shape is also the contract evaluation's
-    # model_capacity reads; two copies of the rules could not disagree
-    # without that report silently changing meaning.
+    # its nodes.
     return ledger_from_trees(trees, item_col, list(categories))
 
 

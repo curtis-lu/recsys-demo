@@ -300,10 +300,10 @@ cases_manifest:
 gain_ledger:
   type: JSONDataset
   filepath: data/models/${model_version}/diagnostics/gain_ledger.json
-  # optional: 訓練側未跑該 node 時 load() 回 None 而非 raise——evaluation 的
-  # model_capacity 診斷（2026-07-20 接上）把它當 node input，單獨跑
-  # evaluation、或訓練側是舊版沒跑過這個 node 時都可能是 None，這是正常路徑
-  # （見 diagnosis/metric/model_capacity/_compute.py 的三種拿不到資料路徑）。
+  # optional: 缺檔時 load() 回 None 而非 raise。當初是給 evaluation 的
+  # model_capacity 診斷用的（它在別次 run 讀這份檔）；#532 拿掉了那個診斷，
+  # 現在只剩同一次 training run 的 log_experiment 讀它。拿不拿掉 optional 是
+  # training 的行為變更，不在 #532 範圍，留給擁有者決定。
   optional: true
 
 # prepare_eval_data 的第二個 output：這次實際 join 進來的 segment 欄（joined）、
@@ -350,30 +350,11 @@ prediction_quality_metrics:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/prediction_quality.json
 
-# --- Evaluation pipeline — 診斷產物（Phase 1 起；抽樣估計，含 sample metadata）---
-# registry 診斷（diagnosis.metric.contract.DIAGNOSES）1／4
-evaluation_config_shift:
-  type: JSONDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/config_shift.json
-
-evaluation_item_ability:
-  type: JSONDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/item_ability.json
-
-evaluation_model_capacity:
-  type: JSONDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/model_capacity.json
-
-evaluation_suppression:
-  type: JSONDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/suppression.json
-
-# 主報表診斷區的 Spark 聚合（Plan 1.5 從 generate_report 拆出）。
-# 落地的理由不只是快取：generate_report 因此是純函式。它的六個輸入裡四份是落地 JSON
-# （本條、evaluation_metrics、baseline_metrics、prediction_quality_metrics）、一份是
-# parameters，診斷頁清單由不跑 Spark 的 node 補（監控 no_diagnosis_pages、
-# --post-training render_diagnosis_pages），所以 --only-node generate_report 不重算任何
-# 指標就能重繪主報表（ADR-0018 決定 2；補跑集合釘在 tests/test_pipelines/test_resume_contracts.py）。
+# 主報表 per-item 細部拆解段的 Spark 聚合（Plan 1.5 從 generate_report 拆出）。
+# 落地的理由不只是快取：generate_report 因此是純函式。它的輸入除了 parameters 都是
+# 落地 JSON（本條、evaluation_metrics、baseline_metrics、prediction_quality_metrics），
+# 所以 --only-node generate_report 不重算任何指標就能重繪主報表（ADR-0018 決定 2；
+# 補跑集合釘在 tests/test_pipelines/test_resume_contracts.py）。
 evaluation_report_aggregates:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/report_aggregates.json

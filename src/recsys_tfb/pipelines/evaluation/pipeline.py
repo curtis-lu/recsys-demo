@@ -1,10 +1,7 @@
 """Evaluation pipeline definition."""
 
-import importlib
-
 from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
-from recsys_tfb.diagnosis.metric.contract import DIAGNOSES, inputs_for
 
 
 def create_pipeline(
@@ -19,11 +16,8 @@ def create_pipeline(
       * default (no flags) — monitoring: ``prepare_eval_data`` writes this
         month's partition of the ``enriched_eval_predictions`` Hive table, so
         the join is computed once, and every metrics/report node reads the
-        table back, keeping the evaluated month (ADR-0018 decision 1). No
-        registry diagnosis: ``no_diagnosis_pages`` supplies
-        ``generate_report``'s pages input.
-      * --post-training — same chain read from ``training_eval_predictions``,
-        plus every registry diagnosis and ``render_diagnosis_pages``.
+        table back, keeping the evaluated month (ADR-0018 decision 1).
+      * --post-training — same chain read from ``training_eval_predictions``.
       * --compare X — adds 3 compare nodes to either of the above; both
         standalone and comparison reports produced.
       * --compare-only X — short pipeline that reads the
@@ -52,12 +46,8 @@ def create_pipeline(
         generate_comparison_report,
         generate_report,
         load_compare_predictions,
-        make_diagnosis_node,
-        make_draw_diagnosis_sample_node,
         make_prepare_eval_data_node,
         make_restrict_to_common_node,
-        no_diagnosis_pages,
-        render_diagnosis_pages,
         validate_enriched_eval_predictions_present,
     )
 
@@ -128,22 +118,6 @@ def create_pipeline(
             outputs=["enriched_eval_predictions", "evaluation_segment_columns",
                      "evaluation_item_categories"],
         ),
-        # Draw the driver-side diagnosis sample ONCE; in --post-training the
-        # registry diagnoses read this shared in-memory output instead of each
-        # re-drawing it (same seed -> identical content). The node is told the
-        # mode so that monitoring mode, which wires no registry diagnosis,
-        # never draws. It is wired there all the same: it is where
-        # --from-node resumes after a change under evaluation.diagnosis
-        # (steps.config_fingerprint.COMPUTED_KEYS), and test_pipeline.py
-        # requires every node those rows name in every mode.
-        Node(
-            make_draw_diagnosis_sample_node(
-                registry_diagnoses_wired=post_training
-            ),
-            inputs=["enriched_eval_predictions", "evaluation_segment_columns",
-                    "parameters"],
-            outputs="diagnosis_sample",
-        ),
         Node(
             compute_metrics,
             inputs=["enriched_eval_predictions", "evaluation_segment_columns",
@@ -210,68 +184,11 @@ def create_pipeline(
             outputs="evaluation_report_aggregates",
         ),
     ]
-    if post_training:
-        nodes += [
-            # 各診斷的 Node 全部由 registry 導出。手寫的話 Plan 2-5 會產生四份
-            # 只差模組名的複製品，而它們會各自漂移（見 make_diagnosis_node）。
-            # inputs 不是寫死的 ["diagnosis_sample", "parameters"]：每項診斷
-            # 宣告自己的 INPUTS（contract.inputs_for），多數診斷沒宣告就落回吃
-            # 共用抽樣的預設值。不吃抽樣的診斷（例如讀 gain_ledger 的
-            # model_capacity）就此能宣告自己的 node inputs，不必讓每項診斷都收
-            # 寬簽章。
-            *[
-                Node(
-                    make_diagnosis_node(name),
-                    inputs=list(inputs_for(
-                        importlib.import_module(
-                            f"recsys_tfb.diagnosis.metric.{name}"
-                        )
-                    )),
-                    outputs=f"evaluation_{name}",
-                )
-                for name in DIAGNOSES
-            ],
-            # These inputs are the values that get drawn: the node draws the
-            # diagnosis results it is given, one per DIAGNOSES entry in
-            # registry order, and checks each result's name and config
-            # fingerprint before drawing (see its docstring). The same inputs
-            # also place it after every diagnosis node and let --only-node
-            # pull a diagnosis whose JSON is missing back in.
-            Node(
-                render_diagnosis_pages,
-                inputs=["parameters",
-                        *(f"evaluation_{name}" for name in DIAGNOSES)],
-                outputs="evaluation_diagnosis_pages",
-            ),
-        ]
-    else:
-        # Monitoring mode wires no registry diagnosis (ADR-0018 decision 5).
-        # The reason is no longer "they need score_uncalibrated, which this
-        # mode's source does not have": #411 removed the calibrator, so
-        # schema["score"] IS the raw model output and the diagnoses read that
-        # (#415). item_ability and suppression only need the query columns,
-        # item, label and score, all of which this mode's frame has, so they
-        # would in fact run here. What still holds: the mode decides the shape
-        # (ADR-0013), not a config switch; and config_shift cannot run here
-        # either way, because its offset context columns (derived from
-        # dataset.sample_group_keys / training.sample_weight_keys) come from
-        # sample_pool and monitoring joins inference_population instead.
-        # Leaving the shape alone was a scope decision, not a data limitation.
-        # generate_report still needs its diagnosis-pages input, so the
-        # zero-read stub supplies an empty list; why a stub, see its docstring.
-        nodes.append(
-            Node(
-                no_diagnosis_pages,
-                inputs=["parameters"],
-                outputs="evaluation_diagnosis_pages",
-            )
-        )
     nodes += [
         Node(
             generate_report,
             inputs=["evaluation_metrics", "parameters", "baseline_metrics",
                     "evaluation_report_aggregates",
-                    "evaluation_diagnosis_pages",
                     "prediction_quality_metrics"],
             outputs="evaluation_report",
         ),

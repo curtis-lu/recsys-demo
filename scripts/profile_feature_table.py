@@ -18,8 +18,8 @@ Usage:
 只借 ``get_or_create_spark_session`` 開 Spark。開 Spark 的方式同
 ``scripts/sampling_overrides_editor.py``：只給 ``app_name``，其餘 Spark 設定全由
 ``SPARK_CONF_DIR`` 決定，工具的設定檔不另設 Spark 區塊。報告是工具自己產生的單一頁面
-（不用 ``recsys_tfb.report``）：要排序、篩選、複製欄名、頁內目錄，共用的多頁外框
-給不了，改它又會連帶改到 evaluation 的診斷頁。
+（不用 ``recsys_tfb.report``）：要排序、篩選、複製欄名、頁內目錄，框架的報表外殼
+只畫靜態表格。
 """
 
 from __future__ import annotations

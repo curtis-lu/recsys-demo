@@ -251,4 +251,3 @@ _Avoid_: `pr_auc`、aucpr；也不要單獨叫 average precision 或 AP（那是
 
 **`roc_auc`**（ADR-0024）:
 ROC 曲線下的面積，母體是全部候選列；同一個分數箱裡的列視為同分，同分算一半。per-item 版本把母體換成該 item 的全部候選列，macro 是 per-item 對 item 平均；`pr_auc` 也一樣。今天只有列數最多的前幾個 item 有 per-item 值、沒有 macro，ADR-0031 決定 7 要補。
-_Avoid_: 跟 `raw_within_item_auc`／`query_centered_auc` 混用（那兩個的母體是「只含有正例的 query」的診斷抽樣，不可與本項相比）

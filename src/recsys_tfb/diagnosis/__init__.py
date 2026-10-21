@@ -8,12 +8,11 @@ lever to pull) and ``quadrant`` (quadrants cut at an AUC threshold) once
 existed here, and both layers were retired for breaking it. Before adding a
 module, check that it is not walking down that road again.
 
-- ``diagnosis.metric`` — metric-level diagnoses, run on the shared diagnosis
-  sample. The evaluation pipeline's nodes call it. (Its submodules are
-  deliberately not listed here: the list changes often, and a copy here would
-  drift.)
 - ``diagnosis.hpo`` — the HPO search diagnostics ``tune_hyperparameters``
   writes.
+
+The metric-level diagnoses evaluation drew pages from (``diagnosis.metric``)
+were removed in #532 (ADR-0031 decision 2).
 
 The model-structure diagnoses (SHAP, importance, the
 quadrant population and cases, the gain ledger) used to be ``diagnosis.model``.
@@ -24,7 +23,6 @@ under is ``io/models_root.diagnostics_dir``.
 
 Dependency direction (one way; breaking it is an error, see spec §1
 invariant 4, and S8 in ``docs/agents/architecture-constraints.md`` checks
-it): ``pipelines/* → diagnosis → core / evaluation (only the numpy primitives
-in metrics.py) / io / utils``; this package must not import any
-``pipelines/*``. The methodology is in docs/ranking-diagnosis-framework.md.
+it): ``pipelines/* → diagnosis → core / io / utils``; this package must not
+import any ``pipelines/*``. The methodology is in docs/ranking-diagnosis-framework.md.
 """

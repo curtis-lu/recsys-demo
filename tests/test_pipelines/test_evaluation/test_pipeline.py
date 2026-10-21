@@ -25,10 +25,9 @@ class TestEvaluationPipelineDefault:
         pipeline = create_pipeline()
         expected = {
             "evaluation_segment_columns", "evaluation_item_categories",
-            "diagnosis_sample", "evaluation_metrics",
+            "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions",
-            "evaluation_diagnosis_pages",
             "evaluation_report_aggregates",
             "prediction_quality_metrics",
         }
@@ -38,8 +37,7 @@ class TestEvaluationPipelineDefault:
         pipeline = create_pipeline()
         names = [n.name for n in pipeline.nodes]
         assert names == [
-            "prepare_eval_data", "no_diagnosis_pages",
-            "draw_diagnosis_sample_node",
+            "prepare_eval_data",
             "compute_metrics", "compute_baseline_metrics",
             "compute_prediction_quality",
             "compute_report_aggregates",
@@ -47,23 +45,14 @@ class TestEvaluationPipelineDefault:
         ]
 
 
-class TestRegistryDiagnosesFollowTheMode:
-    """Registry diagnoses are wired in ``--post-training`` only (ADR-0018
-    decision 5).
-
-    The old reason was that they needed ``score_uncalibrated``, which the
-    monitoring source did not have. #411 removed the calibrator, so they read
-    ``schema["score"]`` now (#415) and two of them would in fact run here; the
-    mode still decides the shape (ADR-0013), and ``config_shift`` still needs
-    offset context columns the monitoring join does not guarantee.
-    Monitoring mode's ``evaluation_diagnosis_pages`` comes from
-    the zero-read ``no_diagnosis_pages`` instead, not from
-    ``render_diagnosis_pages``: that one requires one named, fingerprinted
-    result per registry diagnosis, and this mode computes none (why the stub,
-    see ``no_diagnosis_pages``' docstring).
+class TestNoDiagnosisInAnyMode:
+    """#532 (ADR-0031 decision 2) removed every evaluation diagnosis: the four
+    registry diagnoses, the shared sample they drew, their pages and the
+    monitoring-mode stub that stood in for those pages. No mode may wire any of
+    it back, under any name: a node or dataset whose name says "diagnos".
 
     The three ``--compare`` nodes are added outside the mode switch, so each
-    mode with a comparison must still match its own shape.
+    mode with a comparison is listed on its own.
     """
 
     MODES = {
@@ -84,103 +73,20 @@ class TestRegistryDiagnosesFollowTheMode:
             "compare_source": {"kind": "hive", "model_version": "v1"},
         },
     }
+    COMPARE_ONLY = {
+        "compare_only": True,
+        "compare_source": {"kind": "hive", "model_version": "v1"},
+    }
 
-    @staticmethod
-    def _names(**kwargs):
-        return [n.name for n in create_pipeline(**kwargs).nodes]
-
-    def test_monitoring_modes_wire_no_registry_diagnosis(self):
-        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-
-        for label in ("monitoring", "monitoring --compare"):
-            names = self._names(**self.MODES[label])
-            leaked = [
-                n for n in names
-                if n in {f"diagnose_{d}" for d in DIAGNOSES}
-                or n == "render_diagnosis_pages"
-            ]
+    def test_no_node_or_dataset_is_a_diagnosis(self):
+        for label, kwargs in {**self.MODES, "--compare-only": self.COMPARE_ONLY}.items():
+            pipeline = create_pipeline(**kwargs)
+            names = {n.name for n in pipeline.nodes}
+            datasets = set(pipeline.inputs) | set(pipeline.outputs)
+            for n in pipeline.nodes:
+                datasets |= set(n.inputs) | set(n.outputs)
+            leaked = sorted(x for x in names | datasets if "diagnos" in x)
             assert leaked == [], f"[{label}] {leaked}"
-            assert "no_diagnosis_pages" in names, label
-
-    def test_post_training_modes_wire_every_registry_diagnosis(self):
-        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-
-        for label in ("post-training", "post-training --compare"):
-            names = self._names(**self.MODES[label])
-            for d in DIAGNOSES:
-                assert f"diagnose_{d}" in names, f"[{label}] diagnose_{d}"
-            assert "render_diagnosis_pages" in names, label
-            assert "no_diagnosis_pages" not in names, label
-
-    def test_exactly_one_producer_of_the_diagnosis_pages_in_every_mode(self):
-        """``generate_report`` 位置綁定、每個輸入都必填：每種模式都得有人產出它的
-        診斷頁輸入，而且只能有一個。"""
-        for label, kwargs in self.MODES.items():
-            producers = [
-                n.name for n in create_pipeline(**kwargs).nodes
-                if "evaluation_diagnosis_pages" in n.outputs
-            ]
-            assert len(producers) == 1, f"[{label}] {producers}"
-
-    def test_monitoring_draws_no_sample_for_diagnoses_it_does_not_wire(self):
-        """Monitoring mode wires no consumer of the diagnosis sample, so it
-        must not draw one; post-training does, for its registry diagnoses.
-
-        The draw is a driver-side ``toPandas`` of up to
-        ``diagnosis.sample.max_queries`` queries. Drawing it for nobody raises
-        nothing and only shows up as a slower run. The registry diagnoses'
-        ``enabled`` flags default to true in both modes, so the config cannot
-        tell the modes apart; the pipeline has to.
-        """
-        from unittest.mock import patch
-
-        import pandas as pd
-
-        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
-        from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
-            EvalPartitions,
-        )
-
-        # The schema block is required since #378: the sample gate asks
-        # whether an optional role makes its consumers inapplicable, and
-        # `get_schema` refuses a config that declares no roles at all.
-        params = {
-            "schema": {"columns": {
-                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
-            }},
-            "evaluation": {},
-        }
-        segments = {"joined": [], "config_fingerprint": fingerprint(params)}
-        outcome = {}
-        for label in ("monitoring", "post-training"):
-            node = next(
-                n for n in create_pipeline(**self.MODES[label]).nodes
-                if n.name == "draw_diagnosis_sample_node"
-            )
-            # No frame here, so the month restriction is a pass-through; what
-            # is counted is the draw.
-            with patch(
-                "recsys_tfb.pipelines.evaluation.nodes.draw_diagnosis_sample",
-                return_value=(pd.DataFrame(), {"n_queries_sampled": 0}),
-            ) as spy, patch(
-                "recsys_tfb.pipelines.evaluation.nodes."
-                "restrict_to_current_eval_partitions",
-                lambda df, parameters, *_, **__: EvalPartitions(df, []),
-            ):
-                result = node.func(None, segments, params)
-            outcome[label] = {"draws": spy.call_count, "sample": result is not None}
-        assert outcome == {
-            "monitoring": {"draws": 0, "sample": False},
-            "post-training": {"draws": 1, "sample": True},
-        }
-
-    def test_monitoring_stub_reads_nothing_and_returns_no_pages(self):
-        node = next(
-            n for n in create_pipeline().nodes if n.name == "no_diagnosis_pages"
-        )
-        assert node.inputs == ["parameters"]
-        assert node.outputs == ["evaluation_diagnosis_pages"]
-        assert node.func({"evaluation": {}}) == []
 
 
 class TestFingerprintRerunNodes:
@@ -206,15 +112,10 @@ class TestFingerprintRerunNodes:
         "compute_prediction_quality",
         "compute_report_aggregates",
     }
-    MODES = TestRegistryDiagnosesFollowTheMode.MODES
+    MODES = TestNoDiagnosisInAnyMode.MODES
 
     def _producers(self, kwargs):
-        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-
-        producers = set(self.FINGERPRINTED_PRODUCERS)
-        if kwargs.get("post_training"):
-            producers |= {f"diagnose_{name}" for name in DIAGNOSES}
-        return producers
+        return set(self.FINGERPRINTED_PRODUCERS)
 
     def test_every_rerun_node_exists_in_every_mode(self):
         from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import COMPUTED_KEYS
@@ -257,15 +158,10 @@ class TestEvaluationPipelinePostTraining:
         pipeline = create_pipeline(post_training=True)
         names = [n.name for n in pipeline.nodes]
         assert names == [
-            "prepare_eval_data", "draw_diagnosis_sample_node",
+            "prepare_eval_data",
             "compute_metrics", "compute_baseline_metrics",
             "compute_prediction_quality",
             "compute_report_aggregates",
-            "diagnose_config_shift",
-            "diagnose_item_ability",
-            "diagnose_suppression",
-            "diagnose_model_capacity",
-            "render_diagnosis_pages",
             "generate_report",
         ]
 
@@ -274,16 +170,13 @@ class TestEvaluationPipelinePostTraining:
         assert "training_eval_predictions" in pipeline.inputs
         assert "ranked_predictions" not in pipeline.inputs
 
-    def test_pipeline_outputs_add_the_registry_diagnoses(self):
+    def test_pipeline_outputs_match_monitoring(self):
         pipeline = create_pipeline(post_training=True)
         expected = {
             "evaluation_segment_columns", "evaluation_item_categories",
-            "diagnosis_sample", "evaluation_metrics",
+            "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions",
-            "evaluation_config_shift", "evaluation_item_ability",
-            "evaluation_model_capacity", "evaluation_suppression",
-            "evaluation_diagnosis_pages",
             "evaluation_report_aggregates",
             "prediction_quality_metrics",
         }
@@ -292,16 +185,15 @@ class TestEvaluationPipelinePostTraining:
 
 class TestEvaluationPipelineCompareMode:
     """compare_source set (monitoring) — 3 compare nodes appended, both reports
-    produced. Which diagnoses ride along is pinned per mode in
-    ``TestRegistryDiagnosesFollowTheMode``."""
+    produced."""
 
     def test_full_node_name_order(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})
         names = [n.name for n in pipeline.nodes]
         assert names == [
-            "prepare_eval_data", "no_diagnosis_pages",
+            "prepare_eval_data",
             "load_compare_predictions",
-            "draw_diagnosis_sample_node", "compute_metrics",
+            "compute_metrics",
             "compute_baseline_metrics", "compute_prediction_quality",
             "compute_report_aggregates",
             "restrict_to_common",
@@ -386,8 +278,7 @@ class TestSegmentColumnsWiring:
         cases = [
             (kwargs, name)
             for kwargs in ({}, {"post_training": True})
-            for name in ("compute_metrics", "compute_baseline_metrics",
-                         "draw_diagnosis_sample_node")
+            for name in ("compute_metrics", "compute_baseline_metrics")
         ] + [
             ({"compare_source": self._COMPARE}, "generate_comparison_report"),
             ({"compare_source": self._COMPARE, "compare_only": True},
@@ -535,7 +426,7 @@ class TestEveryEnrichedReaderKeepsTheEvaluatedMonth:
     """
 
     MODES = {
-        **TestRegistryDiagnosesFollowTheMode.MODES,
+        **TestNoDiagnosisInAnyMode.MODES,
         "compare-only": {
             "compare_only": True,
             "compare_source": {"kind": "hive", "model_version": "v1"},
@@ -596,8 +487,7 @@ class TestGenerateReportNodeWiring:
     properties are what makes a stale pipeline.py fail loudly: with 4 optional
     params plus ``*registry_diagnoses``, 6/7/8/9 inputs were all legal, which
     is exactly how the 2026-07-20 production TypeError happened — the count
-    was fine, the positions were not. Diagnosis results no longer appear here
-    at all; they are ``render_diagnosis_pages``' business.
+    was fine, the positions were not.
     """
 
     def test_inputs_positionally_match_signature(self):
@@ -638,84 +528,6 @@ class TestGenerateReportNodeWiring:
                 f"positionally bind to parameter {param_name!r} — inputs "
                 f"list and function signature are out of sync."
             )
-
-    def test_no_diagnosis_input_reaches_generate_report(self):
-        """加第六項診斷不得再動到 generate_report。
-
-        這條是本次重構的宣稱本身。用 DIAGNOSES 動態導出，Plan 2-5 每加一項
-        自動收緊。
-        """
-        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-
-        pipeline = create_pipeline(post_training=True)
-        node = next(n for n in pipeline.nodes if n.name == "generate_report")
-        leaked = [
-            i for i in node.inputs
-            if any(i == f"evaluation_{name}" for name in DIAGNOSES)
-        ]
-        assert leaked == [], (
-            f"diagnosis results {leaked} are wired into generate_report "
-            "again — they belong to render_diagnosis_pages."
-        )
-
-
-class TestRenderDiagnosisPagesNodeWiring:
-    """診斷產物接到 ``render_diagnosis_pages``，而且只接到它。
-
-    這個 node 畫的就是這些 inputs 的值（#342 之前按檔名讀磁碟、inputs 只當
-    依賴宣告）。同一組 inputs 另外買到兩件事，測試分別對應：執行順序與切片
-    擴張。
-
-    只有 ``--post-training`` 組出這個 node（監控模式見
-    ``TestRegistryDiagnosesFollowTheMode``），所以這裡都建 post-training 的 DAG。
-    """
-
-    def test_every_registry_diagnosis_is_wired_as_a_dependency(self):
-        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-
-        pipeline = create_pipeline(post_training=True)
-        node = next(
-            n for n in pipeline.nodes if n.name == "render_diagnosis_pages"
-        )
-        assert node.inputs == [
-            "parameters", *(f"evaluation_{name}" for name in DIAGNOSES)
-        ]
-
-    def test_runs_after_every_diagnosis_node(self):
-        """**主要理由**：拓撲排序只看 ``node.inputs``。
-
-        拿掉診斷 inputs 的話這個 node 的 in-degree 是 0（``parameters`` 沒有
-        生產者），Kahn 會把它排到診斷節點**之前**。#342 之前它按檔名讀，那樣
-        會讀到上次留下的舊 JSON 而且照樣「成功」；現在它畫的是 inputs，排在
-        所有診斷之後就是它拿得到這次結果的前提。這條測試釘的是「它在所有診斷
-        之後」，不是 inputs 字串長什麼樣。
-        """
-        from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-
-        names = [n.name for n in create_pipeline(post_training=True).nodes]
-        me = names.index("render_diagnosis_pages")
-        for diag in DIAGNOSES:
-            assert names.index(f"diagnose_{diag}") < me, (
-                f"render_diagnosis_pages 排在 diagnose_{diag} 之前，"
-                "拿不到這次執行的診斷結果"
-            )
-
-    def test_slicing_pulls_in_the_diagnosis_nodes_when_nothing_is_on_disk(self):
-        """次要理由：切片擴張。
-
-        ``can_load`` 全回 False ＝ 什麼都還沒落地（全新 model_version），切片
-        必須把整條上游拉回來。**注意這不是「防止讀到舊 JSON」**——診斷 JSON
-        已落地時 ``can_load`` 為 True，切片刻意不重算，那正是 ``--only-node``
-        想要的便宜重繪。
-        """
-        pipeline = create_pipeline(post_training=True)
-        sliced, _plan = pipeline.slice_only(
-            "render_diagnosis_pages", lambda name: False
-        )
-        names = [n.name for n in sliced.nodes]
-        assert "diagnose_config_shift" in names
-        assert "draw_diagnosis_sample_node" in names
-
 
 class TestGenerateComparisonReportNodeWiring:
     """Same positional-binding hazard as TestGenerateReportNodeWiring, but a
@@ -791,35 +603,3 @@ class TestGenerateComparisonReportNodeWiring:
         for label, node in self._comparison_nodes().items():
             assert node.inputs[0] == "eval_predictions_common", label
             assert node.inputs[1] == "compare_predictions_common", label
-
-
-class TestConfigShiftNodeWiring:
-    """診斷 1／4（config_shift）接上 evaluation pipeline。
-
-    只驗接線，不驗計算——計算層的測試在 tests/test_diagnosis/。這裡要釘的是
-    「它真的吃到共用的 diagnosis_sample」：各診斷共用同一份樣本是一致性
-    保證（不同母體的數字並排解讀會錯），一旦哪天有人把 inputs 改成
-    enriched_eval_predictions 自己重抽，數字看起來仍然合理，只是不再可比。
-    """
-
-    def test_config_shift_node_wired_after_diagnosis_sample(self):
-        pipeline = create_pipeline(post_training=True)
-        names = [n.name for n in pipeline.nodes]
-        assert "diagnose_config_shift" in names
-        assert (
-            names.index("draw_diagnosis_sample_node")
-            < names.index("diagnose_config_shift")
-        )
-
-    def test_config_shift_inputs_and_outputs(self):
-        pipeline = create_pipeline(post_training=True)
-        node = next(
-            n for n in pipeline.nodes if n.name == "diagnose_config_shift"
-        )
-        assert node.inputs == ["diagnosis_sample", "parameters"]
-        assert node.outputs == ["evaluation_config_shift"]
-
-    def test_config_shift_not_wired_in_monitoring_mode(self):
-        """監控模式不組 registry 診斷（ADR-0018 決定 5，理由見類別 docstring）。"""
-        pipeline = create_pipeline()
-        assert "evaluation_config_shift" not in pipeline.outputs

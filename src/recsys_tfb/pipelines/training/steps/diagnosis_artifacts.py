@@ -21,7 +21,8 @@ def unsupported_artifact(exc: Exception) -> dict:
     mean something to a reader, and a skipped diagnosis landing as either
     would be reported with the wrong cause and the wrong fix. ``enabled``
     stays ``True`` because nobody switched it off; ``supported: False`` is
-    the key readers test for — evaluation's ``model_capacity`` for
-    ``gain_ledger.json``, ``log_experiment`` for the rest.
+    the key readers test for — ``log_experiment`` for every artifact but
+    ``gain_ledger.json``, which evaluation's ``model_capacity`` tested until
+    #532 removed that diagnosis.
     """
     return {"enabled": True, "supported": False, "reason": str(exc)}

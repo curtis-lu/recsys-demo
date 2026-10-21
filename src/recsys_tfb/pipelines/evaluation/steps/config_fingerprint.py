@@ -14,16 +14,17 @@ Two kinds of settings (ADR-0020 decision 2)
   the node :data:`COMPUTED_KEYS` names for it (normally its first reader).
 * **Drawn**: ``evaluation.report.display.*`` and every
   ``evaluation.report.sections.*`` key except ``baseline``,
-  ``diagnostics`` and ``prediction_quality``. They only change what the
+  ``per_item_breakdown`` and ``prediction_quality``. They only change what the
   report shows, so ``--only-node generate_report`` is enough and takes
   seconds.
 
 Only computed settings go into the fingerprint. Fingerprinting drawn ones too
 would make every cosmetic change raise, which is the "re-run everything on any
-change" the user rejected. ``sections.baseline``, ``sections.diagnostics``
-and ``sections.prediction_quality`` are computed, not drawn: ``baseline:
-false`` makes ``compute_baseline_metrics`` return a stub, and ``diagnostics:
-false`` / ``prediction_quality: false`` do the same for
+change" the user rejected. ``sections.baseline``,
+``sections.per_item_breakdown`` and ``sections.prediction_quality`` are
+computed, not drawn: ``baseline: false`` makes ``compute_baseline_metrics``
+return a stub, and ``per_item_breakdown: false`` / ``prediction_quality:
+false`` do the same for
 ``compute_report_aggregates`` / ``compute_prediction_quality``; treated as
 drawn, flipping them back and re-drawing yields a report with a section
 silently missing.
@@ -46,12 +47,10 @@ Why a closed list, not a hash of the whole ``evaluation`` subtree
 * ``evaluation.compare`` is injected into that subtree by the CLI at run time
   (``__main__.py``). Hashing the subtree would make a ``--compare`` run and a
   plain run disagree on every artifact: raises everywhere, all false.
-* Some computations read keys outside the subtree (``config_shift`` reads
-  ``dataset.*`` and ``training.*``). Each registry diagnosis declares those
-  itself (``EXTRA_CONFIG_KEYS``, read through
-  ``diagnosis.metric.contract.extra_config_keys_for``), and the caller passes
-  them in as ``extra_keys``. A diagnosis JSON's fingerprint is this list plus
-  what that diagnosis declares.
+* A computation that reads keys outside the subtree has the caller pass them
+  in as ``extra_keys``; that artifact's fingerprint is this list plus those.
+  The evaluation diagnoses did (``config_shift`` read ``dataset.*`` and
+  ``training.*``) until #532 removed them; no node passes any today.
 
 Why the fingerprint lives inside the JSON, not in its path
 ==========================================================
@@ -61,13 +60,9 @@ directory reader (``--compare-only``, the manifest's artifact list) would
 have to learn to pick one. Inside the file, paths stay put and readers pay
 one check.
 
-Why stdlib only, and no ``diagnosis`` import
-============================================
-Dependency direction: diagnoses declare their extra keys in their own package,
-and the combining happens in ``pipelines/evaluation/`` nodes
-(``make_diagnosis_node`` when writing, ``render_diagnosis_pages`` when
-checking), the same direction ``pipeline.py`` already uses for
-``contract.inputs_for``. The module itself imports nothing from the project;
+Why stdlib only
+===============
+The module itself imports nothing from the project;
 ``tests/test_pipelines/test_evaluation/test_config_fingerprint.py`` pins that by
 scanning its imports. That no longer makes it Spark-free to import: since it
 moved into ``pipelines/evaluation/steps/`` (#365), importing it runs the
@@ -161,7 +156,6 @@ COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
     # landed empty (column mode was off), so compute_metrics then refuses it
     # and names prepare_eval_data — loud, never a wrong report.
     ("evaluation.item_categories.column", "prepare_eval_data"),
-    ("evaluation.diagnosis", "draw_diagnosis_sample_node"),
     ("evaluation.k_values", "compute_metrics"),
     ("evaluation.item_categories", "compute_metrics"),
     ("evaluation.metric", "compute_metrics"),
@@ -181,7 +175,7 @@ COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
     ("evaluation.baseline", "compute_metrics"),
     ("evaluation.report.sections.baseline", "compute_metrics"),
     ("evaluation.report.diagnostics", "compute_metrics"),
-    ("evaluation.report.sections.diagnostics", "compute_metrics"),
+    ("evaluation.report.sections.per_item_breakdown", "compute_metrics"),
     # First read by compute_prediction_quality, which sorts after
     # compute_metrics in both modes; same reason (ADR-0024).
     ("evaluation.prediction_quality", "compute_metrics"),
@@ -278,9 +272,8 @@ def _tag_non_str_keys(value: Any) -> Any:
     of 'str' and 'int'``) — crashing the node on a legal config. Second, JSON
     itself has no non-string keys, so ``json.dumps({1: 0.5})`` and
     ``json.dumps({"1": 0.5})`` both serialise to ``{"1": 0.5}`` — identical
-    fingerprints for two configs that behave differently, because every
-    lookup against these dicts (e.g. ``config_shift``'s ``_key_from_values``)
-    keys by ``str`` and ``{1: 0.5}`` therefore never matches.
+    fingerprints for two configs that behave differently whenever a lookup
+    against the dict keys by one type and not the other.
 
     A ``str`` key is kept as-is so stored ``values`` stay readable for the
     common case. A non-``str`` key ``k`` is rewritten to

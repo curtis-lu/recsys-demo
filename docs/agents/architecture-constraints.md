@@ -454,7 +454,7 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 它讀的是 AST 裡的 import 語句，所以兩類東西走得過去：
 
 - **先 import 套件、再走屬性。** 一個模組 import `recsys_tfb.pipelines.training`，之後讀 `training.steps.hpo_resume`。
-- **字串組出來的 import**（`importlib.import_module("recsys_tfb.pipelines.training.steps.hpo_resume")`）。任何靜態掃描都看不到，不是這條的特例。⚠ `importlib.import_module` 在 `src/` 有七處**確實在用**，只是沒有一處指向 `steps/`：`pipelines/__init__.py` 的 `_REGISTRY` 查表（指向 pipeline 套件），以及 `evaluation/pipeline.py`、`evaluation/nodes.py`、`evaluation/report_builder.py` 的 `recsys_tfb.diagnosis.metric.{name}`。
+- **字串組出來的 import**（`importlib.import_module("recsys_tfb.pipelines.training.steps.hpo_resume")`）。任何靜態掃描都看不到，不是這條的特例。⚠ `importlib.import_module` 在 `src/` **確實在用**，只是沒有一處指向 `steps/`：`pipelines/__init__.py` 的 `_REGISTRY` 查表（指向 pipeline 套件）。以前還有 `evaluation/` 底下幾處讀 `recsys_tfb.diagnosis.metric.{name}` 的，已隨 #532 刪除。
 
 現況全樹兩類都沒有指向 `steps/` 的命中。值得釘的是 import 語句那個形式——會被順手寫出來的是它，另外兩種要刻意才寫得出來。
 
@@ -582,8 +582,8 @@ tests/params.py:4: schema.identity_columns -- get_schema derives this; a declare
   ```
   認的是 `{"schema": {...}}` 這個字面形狀。這個取捨是刻意的：**它同時是「不要誤報已解析 schema」的那道界線**——`get_schema` 的回傳值合法地帶著 `identity_columns`，`tests/test_core/test_versioning.py::_sample_schema` 就是那個形狀，必須維持合法。放寬到「任何含角色名的 dict」會把它一起打死。
 
-  **這個盲區有實例，不是理論**：`tests/test_diagnosis/test_metric/test_suppression_render.py` 的 `_SCHEMA` 就是這個形狀（`{"schema": _SCHEMA}`，角色名少一層 `columns`），S5 上線後仍然看不見它，而它靠「寫下的值剛好等於內建預設」全綠了一整段時間——直到 #328 把 `time`／`entity`／`item` 的預設拿掉才炸出來。**擋住它的不是這條掃描，是「沒有預設可以掉」**。
-- **這條不保證呼叫端傳對東西。** 修 #274 時實測到：`test_config_shift.py` 與 `test_suppression.py` 共 5 個呼叫點把 `PARAMS["schema"]`（設定區塊）當成**已解析的 schema** 直接傳進 `build_offset_frame`／`cross_purchase_stats`——那只有在設定寫錯層、形狀剛好長得像已解析 schema 的時候才行得通。包上 `columns` 之後它們立刻 `KeyError`，已改走 `get_schema(...)`。**S5 抓不到這種「兩種形狀被混為一談」的呼叫**，它只管宣告端。
+  **這個盲區有實例，不是理論**（那支測試已隨 #532 刪除）：`tests/test_diagnosis/test_metric/test_suppression_render.py` 的 `_SCHEMA` 就是這個形狀（`{"schema": _SCHEMA}`，角色名少一層 `columns`），S5 上線後仍然看不見它，而它靠「寫下的值剛好等於內建預設」全綠了一整段時間——直到 #328 把 `time`／`entity`／`item` 的預設拿掉才炸出來。**擋住它的不是這條掃描，是「沒有預設可以掉」**。
+- **這條不保證呼叫端傳對東西。** 修 #274 時實測到（這些測試與被呼叫的診斷程式已隨 #532 刪除）：`test_config_shift.py` 與 `test_suppression.py` 共 5 個呼叫點把 `PARAMS["schema"]`（設定區塊）當成**已解析的 schema** 直接傳進 `build_offset_frame`／`cross_purchase_stats`——那只有在設定寫錯層、形狀剛好長得像已解析 schema 的時候才行得通。包上 `columns` 之後它們立刻 `KeyError`，已改走 `get_schema(...)`。**S5 抓不到這種「兩種形狀被混為一談」的呼叫**，它只管宣告端。
 
 ---
 
@@ -621,7 +621,7 @@ src/recsys_tfb/evaluation/statistics.py:8 in compute_product_statistics(): 'prod
 
 **例外登記機制**：測試檔的模組級常數 `LITERAL_COLUMN_EXCEPTIONS`，內容是 `(repo 相對的模組路徑, 所在函式名)`，跟 S4 的 `ENTITY_FIRST_COLUMN_EXCEPTIONS` 同一種形狀，也同樣是**過濾器**而非 Counter——登記一筆會讓那個函式裡所有字面值一起靜音。逐筆理由見 [R6](#r6-src-的字面示例欄名s6-的例外-15-筆)。
 
-### ⚠ 這張登記表有 15 筆，那是規則在運作、不是規則被稀釋
+### ⚠ 這張登記表有 14 筆，那是規則在運作、不是規則被稀釋
 
 S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠是錯的」。S6 擋的是一種**拼法**，而有三類拼法是合法的：
 
@@ -630,7 +630,7 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 | `evaluation.snap_date` 等**設定鍵**的讀取 | 那是 config 鍵名，不是 DataFrame 欄名。time 語彙刻意保留（ADR-0017） | 12 |
 | `core/logging` 的觀測欄白名單、`source_etl` 稽核表的欄名 | 那是**它們自己的**欄位，只是拼法相同 | 3 |
 
-開局是 15 筆，第 15 筆是 `core/schema` 的內建預設，標註為暫時的。**#328 已把預設與那一筆登記一起拿掉**，所以剩下的全部是上表那兩類——沒有一筆是暫時的了。之後的增減：#374 加了 `core/date_ranges.py` 一筆，同時讓 `prepare_eval_data` 與 `load_compare_predictions` 改經 `eval_snap_dates` 讀設定鍵、刪掉它們各自那一筆，變成 13 筆。#452 加了 `core/consistency.py` 兩筆（新設定鍵 `test_metrics.snap_date`，計分月份，[ADR-0028](../adr/0028-test-metrics-set-by-config.md)），現在是 15 筆。
+開局是 15 筆，第 15 筆是 `core/schema` 的內建預設，標註為暫時的。**#328 已把預設與那一筆登記一起拿掉**，所以剩下的全部是上表那兩類——沒有一筆是暫時的了。之後的增減：#374 加了 `core/date_ranges.py` 一筆，同時讓 `prepare_eval_data` 與 `load_compare_predictions` 改經 `eval_snap_dates` 讀設定鍵、刪掉它們各自那一筆，變成 13 筆。#452 加了 `core/consistency.py` 兩筆（新設定鍵 `test_metrics.snap_date`，計分月份，[ADR-0028](../adr/0028-test-metrics-set-by-config.md)），變成 15 筆。#532 拿掉診斷頁，`pipelines/evaluation/nodes.py` 的 `_diagnosis_pages_dir` 連同它的那一筆登記一起刪掉，現在是 14 筆。
 
 所以這張表同時是另一件事的完整帳目：**框架目前還借用了多少示例字彙**。要翻案 time 語彙的保留決定（ADR-0017 決定一），這個數字就是起點。
 
@@ -664,10 +664,9 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 
 開票時（#427）程式裡手拼的 `[time] + entity` 有二十多處，**意思至少兩種**：上表的前兩格。今天兩者同值，所以沒有任何東西分得出誰是誰——包括寫的人。[ADR-0025](../adr/0025-query-group-widened-by-occasion-role.md) 的選用角色 `occasion` 讓第一格變寬、第二格不能變，那一刻每一處手拼都會安靜地留在舊意思上。
 
-**留錯了不會報錯。** 下面三處尤其危險，它們也不受「離線推論忽略新角色、監控模式在 CLI 入口擋下」那道保護：
+**留錯了不會報錯。** 下面幾處尤其危險，它們也不受「離線推論忽略新角色、監控模式在 CLI 入口擋下」那道保護：
 
 - 比較報表（`--compare`）對齊兩邊 query group、數「共同的 query group 數」的地方（`pipelines/evaluation/steps/compare_universe.py` 的 `common_universe`／`restrict_to_common`、`pipelines/evaluation/nodes.py::_restrict_to_common`）
-- 以 query 為單位的診斷抽樣（`diagnosis/metric/sample.py::draw_diagnosis_sample`）
 - 診斷母體的分組（`pipelines/training/nodes.py::select_shap_population`）
 
 反方向也有一個容易歸錯的：**整條離線推論 pipeline 用的是 base key**，包含它的排名 partition（`pipelines/inference/nodes.py::rank_predictions`）。那個 partition 表面上完全符合「界定名次比較的範圍」，但 ADR-0025 決定它維持 `time` ＋ `entity`——批次評分的當下沒有任何「場合」存在，候選是框架替每個 entity 乘上全部 item 產生的。**這是一個決定，不是推導出來的**，所以它必須寫在這裡而不是留給下一個人重推。
@@ -860,11 +859,11 @@ src/recsys_tfb/evaluation/metrics_spark.py:221 in collapse_to_categories(): time
 > 這張是**過濾器**——登記過的 `(模組, 函式)` 會被跳過，所以登記一筆會讓那個函式裡**所有**取第一欄的地方一起靜音。**登記的粒度是函式，不是行。** 要登記就把該函式為什麼整個豁免寫清楚。
 
 
-## R6. `src/` 的字面示例欄名（S6 的例外）── 15 筆
+## R6. `src/` 的字面示例欄名（S6 的例外）── 14 筆
 
-**這張表開局就不是零，而那是規則在運作**——理由與三類合法拼法見 [S6](#s6-src-不得出現示例部署的字面欄名) 的「⚠ 這張登記表有 15 筆」那一段。這張表同時是「框架目前還借用了多少示例字彙」的完整帳目。
+**這張表開局就不是零，而那是規則在運作**——理由與三類合法拼法見 [S6](#s6-src-不得出現示例部署的字面欄名) 的「⚠ 這張登記表有 14 筆」那一段。這張表同時是「框架目前還借用了多少示例字彙」的完整帳目。
 
-**一、`evaluation.snap_date` 與 `test_metrics.snap_date` 兩個設定鍵的讀取（12 筆）** —— time 語彙刻意保留（[ADR-0017](../adr/0017-framework-vocabulary-boundary.md) 決定一）。`test_metrics.snap_date` 的寫法刻意與 `evaluation.snap_date` 相同（[ADR-0028](../adr/0028-test-metrics-set-by-config.md) 決定 1）。
+**一、`evaluation.snap_date` 與 `test_metrics.snap_date` 兩個設定鍵的讀取（11 筆）** —— time 語彙刻意保留（[ADR-0017](../adr/0017-framework-vocabulary-boundary.md) 決定一）。`test_metrics.snap_date` 的寫法刻意與 `evaluation.snap_date` 相同（[ADR-0028](../adr/0028-test-metrics-set-by-config.md) 決定 1）。
 
 | 位置 | 函式 | 那個字面值在做什麼 |
 |---|---|---|
@@ -875,7 +874,6 @@ src/recsys_tfb/evaluation/metrics_spark.py:221 in collapse_to_categories(): time
 | `core/consistency.py` | `post_training_snap_date_errors` | A22 讀 `evaluation.snap_date` |
 | `evaluation/comparison/report.py` | `assemble_comparison_report` | 比較報表 metadata 讀同一個設定鍵 |
 | `evaluation/report_builder.py` | `assemble_report` | 報表 metadata 讀同一個設定鍵 |
-| `pipelines/evaluation/nodes.py` | `_diagnosis_pages_dir` | 同上（診斷頁目錄名） |
 | `core/date_ranges.py` | `<module>` | `DATE_LIST_KEYS` 列出可以寫成日期區間的設定鍵，`("evaluation", "snap_date")` 是其中一個（#452 起 `("test_metrics", "snap_date")` 也是，同一筆登記涵蓋）；`ConfigLoader` 載入時據此展開（#374）。第一版寫成一整串 `"evaluation.snap_date"` 再切開，掃描器看不到，審查時改成看得到的寫法並登記——帳目要完整 |
 | `pipelines/evaluation/steps/snap_date_scope.py` | `eval_snap_dates` | 同上。`enriched_eval_predictions` 的每個讀者都經 `restrict_to_current_eval_partitions` 從這裡拿評估日期（一個或多個，[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1），所以是一筆、不是每個讀者一筆。#352 加入時同步刪掉 `comparison_nodes.py::validate_enriched_eval_predictions_present` 那筆（它改成跟這裡拿），總數不變。#374 讓設定可以是多個日期時由 `eval_snap_date` 改名而來（使用者同意的替換），同時 `prepare_eval_data` 與 `load_compare_predictions` 也改跟這裡拿，它們各自那筆刪掉 |
 | `core/consistency.py` | `scoring_snap_dates` | 讀 `test_metrics.snap_date`（計分月份）設定鍵；計分 node 與 A53 都經這裡拿月份，所以是一筆、不是每個讀者一筆。#452 使用者同意 |

@@ -189,7 +189,7 @@ label、score、rank 框架自帶預設欄名），其餘特徵 / 分群 / carry
     <text x="707" y="509">evaluation_results</text>
     <rect x="132" y="528" width="736" height="38" rx="6" fill="var(--json)" stroke="var(--json-b)"/>
     <text x="500" y="543">診斷 JSON（diagnostics/）：feature_importance · shap_diagnostics</text>
-    <text x="500" y="557">quadrant_profiles · cases_manifest · gain_ledger（--post-training 時 evaluation 的 model_capacity 診斷讀它）</text>
+    <text x="500" y="557">quadrant_profiles · cases_manifest · gain_ledger</text>
   </g>
   <text x="132" y="582" font-size="10" fill="#495057">evaluation_results 由 compute_test_metrics 在 training 內產生（讀 training_eval_predictions 的計分月份），非 evaluation pipeline</text>
 
@@ -199,7 +199,6 @@ label、score、rank 框架自帶預設欄名），其餘特徵 / 分群 / carry
   <!-- training -> evaluation 情境 1（畫在 evaluation 框之前；箭頭止於框的上緣） -->
   <line x1="860" y1="592" x2="860" y2="770" stroke="#e8590c" stroke-width="1.6" marker-end="url(#ar-o)"/>
   <text x="848" y="650" font-size="10.5" fill="#e8590c" text-anchor="end">training_eval_predictions（--post-training）</text>
-  <text x="848" y="665" font-size="10.5" fill="#e8590c" text-anchor="end">gain_ledger（--post-training 的 model_capacity 診斷）</text>
 
   <!-- ===== inference ===== -->
   <rect x="40" y="640" width="400" height="256" rx="12" fill="var(--mv)" stroke="#69db7c"/>
@@ -253,24 +252,21 @@ label、score、rank 框架自帶預設欄名），其餘特徵 / 分群 / carry
     <rect x="580" y="860" width="180" height="30" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
     <rect x="580" y="896" width="180" height="30" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
     <rect x="770" y="824" width="180" height="30" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
-    <rect x="770" y="860" width="180" height="30" rx="6" fill="var(--json)" stroke="var(--json-b)"/>
-    <rect x="770" y="896" width="180" height="30" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
+    <rect x="770" y="860" width="180" height="30" rx="6" fill="var(--hive)" stroke="var(--hive-b)"/>
   </g>
   <g font-size="10.5">
     <text x="588" y="837">ranked_predictions</text>
     <text x="588" y="873">label_table</text>
     <text x="588" y="909">inference_population</text>
     <text x="778" y="837">training_eval_predictions</text>
-    <text x="778" y="873">gain_ledger</text>
-    <text x="778" y="909">sample_pool</text>
+    <text x="778" y="873">sample_pool</text>
   </g>
   <g font-size="9" fill="#59636e">
     <text x="588" y="849">← inference</text>
     <text x="588" y="885">← source_etl（兩情境都讀）</text>
     <text x="588" y="921">← source_etl（分群母體表）</text>
     <text x="778" y="849">← training</text>
-    <text x="778" y="885">← training（model_capacity 診斷）</text>
-    <text x="778" y="921">← source_etl（分群母體表）</text>
+    <text x="778" y="885">← source_etl（分群母體表）</text>
   </g>
   <g font-size="10.5" text-anchor="middle">
     <rect x="580" y="940" width="370" height="26" rx="6" fill="var(--report)" stroke="var(--report-b)"/>
@@ -287,13 +283,12 @@ label、score、rank 框架自帶預設欄名），其餘特徵 / 分群 / carry
   </g>
 </svg>
 
-<p class="sub">※ 跨階段的輸入有兩種畫法：別階段產出的主幹產物（<code>model</code>、<code>training_eval_predictions</code>、<code>gain_ledger</code>、<code>ranked_predictions</code>）畫成叢集之間的實線，同時在下游叢集內以虛線框標明來源；其餘來源表與 <code>preprocessor</code> 為避免長跨線，圖上不畫線，只在下游叢集內以虛線框列出輸入與來源。各項的完整流向（含已畫線的 <code>gain_ledger</code>）如下：
+<p class="sub">※ 跨階段的輸入有兩種畫法：別階段產出的主幹產物（<code>model</code>、<code>training_eval_predictions</code>、<code>ranked_predictions</code>）畫成叢集之間的實線，同時在下游叢集內以虛線框標明來源；其餘來源表與 <code>preprocessor</code> 為避免長跨線，圖上不畫線，只在下游叢集內以虛線框列出輸入與來源。各項的完整流向（含已畫線的 <code>gain_ledger</code>）如下：
 <code>label_table</code> 同時餵 dataset（組 model_input）與 evaluation（算指標與 baseline；<code>--post-training</code> 的 label 沿用預測自帶的）；
 <code>feature_table</code> 同時餵 dataset（前處理）與 inference（組評分母體）；
 <code>sample_pool</code> 除了 dataset（抽樣）之外，在 <code>--post-training</code> 也餵 evaluation（分群母體表）；
 <code>inference_population</code> 不進 dataset，餵 inference，在預設監控情境也餵 evaluation（分群母體表）；
-<code>preprocessor</code> 由 dataset 產出，training 與 inference 都讀；
-training 產的 <code>gain_ledger</code> 在 <code>--post-training</code> 被 evaluation 的 model_capacity 診斷讀。</p>
+<code>preprocessor</code> 由 dataset 產出，training 與 inference 都讀。</p>
 
 <h2 id="grain_overview">顆粒度與唯一性總覽</h2>
 <p class="sub">顆粒度＝這張表的一列代表什麼；主鍵用 schema 的角色表達：<code>time</code>（示例 <code>snap_date</code>）、
@@ -669,7 +664,7 @@ C000010   0.83    0.83                1      （示意）</div>
   <div class="meta"><b>產生</b>：training · compute_feature_importance（讀 model）/ compute_shap_diagnostics（讀 model + test 快取 + preprocessor）　|
   <b>下游</b>：training（log_experiment → MLflow）　|
   <b>path</b>：<code>data/models/&lt;model_version&gt;/diagnostics/*.json</code></div>
-  <p class="sub">訓練診斷：LightGBM 原生 importance、SHAP。這兩個皆為 model_version 層的旁路產物，不影響下游 inference / evaluation。同目錄另有本卡未列的診斷產物（<code>gain_ledger.json</code>、<code>per_quadrant.json</code>、<code>cases/cases_manifest.json</code>）；其中 <code>gain_ledger.json</code> 會被 evaluation <code>--post-training</code> 的 model_capacity 診斷讀，不算旁路。</p>
+  <p class="sub">訓練診斷：LightGBM 原生 importance、SHAP。這兩個皆為 model_version 層的旁路產物，不影響下游 inference / evaluation。同目錄另有本卡未列的診斷產物（<code>gain_ledger.json</code>、<code>per_quadrant.json</code>、<code>cases/cases_manifest.json</code>）。</p>
 </div>
 
 <!-- ===================== inference ===================== -->
@@ -738,7 +733,7 @@ C000010   0.83    0.83                 1      （示意）</div>
 
 <div class="card" id="evaluation_report">
   <h4>evaluation_report <span class="badge b-report">報表</span><span class="vl vl-mv">model_version</span></h4>
-  <div class="meta"><b>產生</b>：evaluation · generate_report（吃 evaluation_metrics + baseline_metrics + evaluation_report_aggregates + evaluation_diagnosis_pages + prediction_quality_metrics）　|
+  <div class="meta"><b>產生</b>：evaluation · generate_report（吃 evaluation_metrics + baseline_metrics + evaluation_report_aggregates + prediction_quality_metrics）　|
   <b>下游</b>：—（終端產物，給人看）　|
   <b>path</b>：<code>data/evaluation/&lt;model_version&gt;/&lt;snap_date&gt;/report.html</code>（路徑上的 <code>&lt;snap_date&gt;</code> 是 <code>YYYYMMDD</code>；多個評估日期時為 <code>&lt;最早&gt;-&lt;最晚&gt;</code>）</div>
   <p class="sub">enriched_eval_predictions 由 prepare_eval_data 把預測（情境 1 = training_eval_predictions，label 沿用它自帶的那欄、label_table 的 label 欄在此丟掉；情境 2 = ranked_predictions，label 取自 label_table）連上分群欄而來，join 只算一次、直接落地（ADR-0018 決定 1）。evaluation_metrics / baseline_metrics 落地為 <code>JSONDataset</code>：<code>data/evaluation/&lt;model_version&gt;/&lt;snap_date&gt;/metrics.json</code> 與同目錄的 <code>baseline_metrics.json</code>，皆含 <code>config_fingerprint</code>；<code>report.sections.baseline: false</code> 時 baseline 那份是 <code>{"enabled": false, "config_fingerprint": ...}</code> stub。</p>
@@ -747,7 +742,7 @@ C000010   0.83    0.83                 1      （示意）</div>
 <div class="card" id="enriched_eval_predictions">
   <h4>enriched_eval_predictions <span class="badge b-hive">Hive</span><span class="vl vl-mv">model_version</span></h4>
   <div class="meta"><b>產生</b>：evaluation · prepare_eval_data（label join + rank + segment enrichment 後直接寫回 Hive，這個 model_version、本次評估日期（一個或多個）各自的 partition；dynamic partition overwrite 只換這幾格）　|
-  <b>下游</b>：evaluation（compute_metrics／compute_baseline_metrics／compute_prediction_quality／compute_report_aggregates／draw_diagnosis_sample_node／restrict_to_common 各自讀表、以 restrict_to_current_eval_partitions 篩回本次評估日期（一個或多個）並驗分區指紋；<code>--compare-only</code> 沒有 prepare_eval_data，由 catalog auto-load 讀回：CLI 在任何節點前先查 partition 與 <code>segment_columns.json</code> 在不在（<code>_compare_only_input_errors</code>），閘門節點 <code>validate_enriched_eval_predictions_present</code> 再查各評估日期有沒有列、分區指紋對不對；<code>load_compare_predictions</code> 在比較對象是另一個 model_version 時，預設 source 也是這張表，讀的是那個 model_version 的 partition）　|
+  <b>下游</b>：evaluation（compute_metrics／compute_baseline_metrics／compute_prediction_quality／compute_report_aggregates／restrict_to_common 各自讀表、以 restrict_to_current_eval_partitions 篩回本次評估日期（一個或多個）並驗分區指紋；<code>--compare-only</code> 沒有 prepare_eval_data，由 catalog auto-load 讀回：CLI 在任何節點前先查 partition 與 <code>segment_columns.json</code> 在不在（<code>_compare_only_input_errors</code>），閘門節點 <code>validate_enriched_eval_predictions_present</code> 再查各評估日期有沒有列、分區指紋對不對；<code>load_compare_predictions</code> 在比較對象是另一個 model_version 時，預設 source 也是這張表，讀的是那個 model_version 的 partition）　|
   <b>partition</b>：snap_date（外加 model_version）；columns: auto（schema 從 DataFrame 推得）</div>
   <div class="grain"><span class="gtag g-none">框架不檢查</span><b>顆粒度</b>：<code>time × entity × item</code>（示例 <code>snap_date × cust_id × prod_name</code>；<code>--post-training</code> 時只保留至少有一個正例的 query group）　|　<b>實體主鍵</b>：邏輯主鍵是上述三個角色；實體上另含 <code>model_version</code>（版本欄）　|　兩側分開看。左表（predictions）：<code>--post-training</code> 取 <code>training_eval_predictions</code>、預設監控取 <code>ranked_predictions</code>，<code>prepare_eval_data</code> 不再驗左表，重複列會原樣穿過 LEFT JOIN；右表 <code>label_table</code> 在 <code>prepare_eval_data</code> 對評估月份重驗，對 identity 有重複即中止、不代為去重（<code>--post-training</code> 的 label 雖沿用預測表自帶的，這道檢查仍先跑）；分群欄 join 前先對鍵去重，不會放大列數。標籤看的是這一步自己的行為：<code>prepare_eval_data</code> 對本表主鍵沒有直接檢查（只驗右表 <code>label_table</code>，且只涵蓋評估月份），所以標「框架不檢查」，不從左表或上游繼承；<code>eval_partition_fingerprint</code> 逐日期比對的是「這格是否被另一組設定蓋過」，不是唯一性。<a class="glink" href="#grain_overview">（標籤說明）</a></div>
   <p class="sub">兩種模式共用此表，schema 是聯集：另一模式 join 過的 segment 欄，在這次寫入的列上是 NULL。所以分群一律照同時落地的 <code>evaluation_segment_columns</code>（<code>segment_columns.json</code>），不看表上有哪些欄（見 evaluation.md §3.2）。</p>
@@ -763,7 +758,7 @@ C000010   0.83    0.83                 1      （示意）</div>
 
 <p class="sub" style="margin-top:30px;color:#9198a1">
 未列為 catalog 產物的中間物（MemoryDataset / driver-local handle），例如：score_manifest · validated_predictions ·
-preprocessor_view · shap_population · case_rows · diagnosis_sample · evaluation_diagnosis_pages ·
+preprocessor_view · shap_population · case_rows ·
 *_parquet_handle · *_lgb_handle · *_keys_unfiltered ·
 compare_predictions_raw · compare_predictions_common · eval_predictions_common · compare_coverage_partial。
 這些只在單次 DAG 內銜接，不持久化；此清單只是舉例、不窮盡（以各 <code>pipeline.py</code> 的節點接線為準）。

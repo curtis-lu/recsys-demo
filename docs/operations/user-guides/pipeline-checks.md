@@ -86,11 +86,8 @@ python -m recsys_tfb <指令> --env dev
   - `kind` 是 `model_version` 或 `external_hive`，而且要有 `label`。
   - `model_version` 類：要寫 `model_version`；`source` 有寫的話只能是 `enriched_eval_predictions`、`ranked_predictions`、`training_eval_predictions`；不能寫 `columns`、`prod_mapping`。
   - `external_hive` 類：要寫 `table`、`prod_mapping`，以及 `columns`：time、每一個 entity 欄、item、score 各要對到外部表的一欄。`unmapped_policy` 只能是 `fail` 或 `drop`，沒寫就是 `fail`。
-- **evaluation 的數值與開關**（`A15`、`A19`）：
+- **evaluation 的數值**（`A15`；`A19` 已退休，代號不重編）：
   - `evaluation.metric.weight_alpha` 在 0 到 1 之間；`evaluation.metric.k` 是 `null` 或大於等於 1 的整數；`evaluation.metric.min_positives`、`evaluation.metric.shrinkage_k` 不能是負數。
-  - `evaluation.diagnosis.sample.max_queries`、`evaluation.diagnosis.sample.min_pos_queries_per_item` 至少是 1；`evaluation.diagnosis.item_ability.top_n`、`evaluation.diagnosis.suppression.top_examples` 不能是負數。
-  - 每一個診斷的 `evaluation.diagnosis.<診斷名>.enabled` 必須是真正的 true／false。寫成字串 `"false"` 會被當成打開。
-  - `evaluation.segment_columns` 不能用 `stratum`、`inclusion_weight` 這兩個保留名稱。
 - **`evaluation.product_categories`**：已經改名成 `evaluation.item_categories`，還寫舊名就擋（`A33`）。
 
 ### 只在某個指令查
@@ -110,10 +107,10 @@ python -m recsys_tfb <指令> --env dev
   - `catalog.yaml` 不能宣告候選層級特徵表（`A47`）。推論只讀 `feature_table`，而這種設定下訓練的模型需要候選層級表的欄；不擋的話，推論會在啟動 Spark、讀完母體之後才以 `Missing feature columns` 失敗，訊息也不說原因。只宣告 `occasion`、`event` 而沒有候選層級特徵表時照跑。inference 的每一種跑法都查，包含 `--dry-run`、`--list-nodes`。
 - **evaluation**
   - 帶 `--post-training` 時，`evaluation.snap_date` 一定要寫，而且必須在 `dataset.test_snap_dates` 裡（`A22`）。
-  - `evaluation.report.sections` 有寫任何開關的話，開關名稱必須剛好是 `dataset_overview`、`primary_map`、`diagnostics`、`baseline`、`diagnosis_links`、`prediction_quality` 這六個，多一個或少一個都擋（`A34`）。
+  - `evaluation.report.sections` 有寫任何開關的話，開關名稱必須剛好是 `dataset_overview`、`primary_map`、`per_item_breakdown`、`baseline`、`prediction_quality`，多一個或少一個都擋，每個值也必須是不加引號的 true／false，字串 `"false"` 會被擋（`A34`）。舊名 `diagnostics` 與 `diagnosis_links` 同樣在這裡被擋。
   - `evaluation.prediction_quality` 的 `n_bins`、`n_display_bins` 是大於等於 1 的整數，而且後者要整除前者；`top_n` 是大於等於 0 的整數；這個區塊裡不能有別的鍵（`A42`）。不擋的話，分箱表最後一格會比其他格窄，而報表不會提；寫 `enabled: true` 也打不開這一段，開關在 `report.sections.prediction_quality`。
   - `evaluation.report.diagnostics` 底下不能再寫 `include_calibration`、`n_calibration_bins`，不論值是什麼（`A43`）。它們設定的 calibration 分箱表 #381 已經移除，留著不會有任何作用；分數分箱改由預測品質指標家族提供。
-  - `evaluation.diagnosis` 底下不能寫 `ci`，不論值是什麼，`enabled: false` 或空的區塊也擋（`A61`）。沒有程式讀這一段，刪掉整段即可，沒有替代的設定鍵。
+  - `evaluation.diagnosis` 這個區塊不能寫，不論裡面是什麼，`enabled: false` 或空的區塊也擋（`A61`）。診斷頁整批拿掉了（#532），沒有程式讀這一段，刪掉整段即可，沒有替代的設定鍵。
   - 帶 `--post-training` 又打開 `evaluation.report.sections.prediction_quality` 時，`dataset.test_zero_positive_group_ratio` 必須大於 0（`A46`）。r 為 0（預設）的 test 表已經丟掉所有沒有正例的 query group，把每一列當二元預測的指標會系統性偏高。監控模式不查。
   - `evaluation.query_filter.drop_all_positive_groups` 有寫的話必須是 `true`／`false`；這個區塊裡不能有別的鍵（`A49`）。唯一的讀法（`evaluation/metrics.py::drop_all_positive_groups`）只用真假值判斷，寫錯值或鍵名不會報錯，只會悄悄不生效。
   - `evaluation.baseline.score` 有寫的話必須是 `count` 或 `rate`；`evaluation.baseline` 底下只能有 `lookback_months`、`score` 兩個鍵（`A50`）。唯一的讀法（`evaluation/baselines.py::baseline_score`）遇到不認得的值或鍵名不會報錯，只會悄悄維持正例數。
@@ -199,7 +196,7 @@ dataset 有兩個**資料閘**：專門檢查、本身不改資料的步驟，�
 - 會擋：
   - **評估月份**：`evaluation.snap_date` 一定要寫。預測表在這個月必須有資料：帶 `--post-training` 讀 `training_eval_predictions`，不帶讀 `ranked_predictions`。
   - **label 重複**：`label_table` 在這個月，同一組 time、entity、item 不能有兩列。不擋的話，join 之後候選會被複製成多列，名次全錯。
-  - **沿用上一輪的結果**：`enriched_eval_predictions`、指標、診斷結果這些已經落地的東西，必須是用現在「會影響計算」的那組設定算的。不是就擋，訊息會告訴你從哪一步重跑。
+  - **沿用上一輪的結果**：`enriched_eval_predictions`、指標這些已經落地的東西，必須是用現在「會影響計算」的那組設定算的。不是就擋，訊息會告訴你從哪一步重跑。
   - **分群**：`evaluation.segment_sources.<名稱>` 的表必須讀得到，而且有宣告的欄。
   - **baseline**：報表有開 baseline 時，`label_table` 在 `evaluation.baseline.lookback_months` 那段期間必須有資料。
   - **item 大類**：`evaluation.item_categories.enabled` 打開時，`evaluation.item_categories.mapping` 用到的 item 必須在 item 清單裡（清單從資料數時，是被評估模型前處理器的清單；前處理器檔不在就擋，訊息說要先補回再從 `prepare_eval_data` 重跑），`evaluation.item_categories.unmapped` 只能是 `singleton`。寫 `evaluation.item_categories.column`（取自候選的某一欄）時：`sample_pool` 必須有這一欄；同一個 item 在評估月份裡（同月或跨月）不能對到兩個不同的非 NULL 值（`B18`）——對照表只用 item 連接，不擋的話它的預測會被算進兩個大類。改了這一欄之後，從 `prepare_eval_data` 之後接續會被擋，訊息指示 `--from-node prepare_eval_data`。
@@ -209,13 +206,9 @@ dataset 有兩個**資料閘**：專門檢查、本身不改資料的步驟，�
     - 比較對象在這個月必須有資料。
     - `unmapped_policy: fail` 時，外部 Hive 表出現的 item 值都必須在 `prod_mapping` 裡。
     - 兩邊至少要有一個共同的 entity 和一個共同的 item。
-  - **診斷（`--post-training`）**：
-    - config_shift 診斷打開、而且抽樣分層或樣本權重有用到 label 欄時，對應的抽樣比例（`dataset.sample_ratio`、`dataset.sample_ratio_overrides`）與樣本權重（`training.sample_weights`）必須大於 0。
-    - 有打開、而且需要原始分數的診斷，預測表必須有 schema 宣告的 score 角色欄（`schema["score"]`，預設 `score`；`item_ability`／`suppression`／`config_shift` 已改讀這欄，不再讀已 deprecated 的 `score_uncalibrated`，#415），而且不能全是空值。
 - 只警告：
   - `evaluation.segment_columns` 指到母體表沒有的欄。
   - `unmapped_policy: drop` 時，外部表裡對不上 `prod_mapping` 的 item 被丟掉。
-  - 診斷抽樣時，一定要全取的 query 已經超過 `evaluation.diagnosis.sample.max_queries`；或抽樣後，沒被全取的 item 裡，有含正例 query 數低於 `min_pos_queries_per_item` 的。
   - 這個月沒有任何含正例的 query，指標算不出來。
 
 ---
