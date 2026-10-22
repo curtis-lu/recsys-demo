@@ -61,9 +61,8 @@ QUERY_GROUP_SHARED_NUMBERS: dict[str, str] = {
 #: ``dataset.test_zero_positive_group_ratio`` is set, and then only a sample
 #: whose rows weigh ``1 / r``.
 ITEM_SHARED_NUMBERS: dict[str, str] = {
-    "n_rows": "the item's rows",
-    "n_top": "of them, the rows ranked within the top K: the times the item "
-             "was recommended (per K)",
+    "n_top": "the item's rows ranked within the top K: the times it was "
+             "recommended (per K)",
     "n_pos": "the item's positive rows",
     "hits": "positive rows ranked within the top K (per K)",
     "ap_sum": "Σ ap_contrib@K over the positive rows: the precision at the "
@@ -73,8 +72,8 @@ ITEM_SHARED_NUMBERS: dict[str, str] = {
 ITEM_SHARED_NUMBERS_PER_K = ("n_top", "hits", "ap_sum")
 
 
-# One formula shape covers every metric the catalog holds. A metric it cannot
-# say (F1@K combines two ratios) comes with a new shape here and the code in
+# :class:`Ratio` says every metric the catalog holds. A metric it cannot say
+# (F1@K combines two ratios) comes with a new shape here and the code in
 # ``metrics_spark`` that builds it.
 
 

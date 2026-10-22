@@ -214,10 +214,10 @@ def _resolve_k_grids(
     * ``query_ks`` = ``k_values``: ``compute_per_query_metrics`` /
       ``aggregate_overall`` / ``aggregate_per_segment``.
     * ``item_ks`` = ``k_values`` ∪ {headline K}: ``add_row_contributions``
-      and ``aggregate_per_item`` (per_item and per_item_segment), which is
-      what guarantees ``macro_avg["by_item"][f"map_attr@{headline K}"]``,
-      the number the report's headline reads
-      (``report_sections.overview._headline_key``). Without ``all_k`` here a
+      and ``aggregate_item_shared_numbers`` (per_item and per_item_segment),
+      which is what guarantees
+      ``macro_avg["by_item"][f"map_attr@{headline K}"]``, the number the
+      report's headline reads (``report_sections.overview._headline_key``). Without ``all_k`` here a
       ``k_values`` that leaves out ``"all"`` would leave that cell blank.
 
     Putting the headline K into the per-query grid is wrong without being an
@@ -878,41 +878,34 @@ def aggregate_per_segment(
     return out
 
 
-#: The item shared numbers that are sums of fractions; the others are counts.
-_FRACTIONAL_ITEM_SHARED_NUMBERS = ("ap_sum",)
-
-
 def _item_shared_number_aggs(
     label_col: str, k_values: list[int]
 ) -> list[tuple[str, F.Column]]:
     """``(key, aggregate)`` for every item shared number (``metric_catalog.
     ITEM_SHARED_NUMBERS``): the ones without K first, then the per-K ones at
-    each K, the order the metric cells use."""
+    each K, the order the metric cells use. Counts are integer sums, so they
+    come back as ``int``; ``ap_sum`` as ``float``."""
     positive = F.col(label_col) == 1
 
     def count(condition: F.Column) -> F.Column:
         return F.sum(F.when(condition, 1).otherwise(0))
 
-    def at_k(name: str, k: int) -> F.Column:
-        top = F.col(f"top_k@{k}") == 1
-        if name == "n_top":
-            return count(top)
-        if name == "hits":
-            return count(positive & top)
-        if name == "ap_sum":
-            return F.sum(F.when(positive, F.col(f"ap_contrib@{k}"))
-                         .otherwise(0.0))
-        raise ValueError(f"no aggregate for item shared number {name!r}")
+    def top(k: int) -> F.Column:
+        return F.col(f"top_k@{k}") == 1
 
-    once = {
-        "n_rows": F.count(F.lit(1)),
-        "n_pos": count(positive),
-        "pos_sum": F.sum(F.when(positive, F.col("pos")).otherwise(0)),
+    # One aggregate per shared number, at K (ignored by the ones not per K).
+    aggregate = {
+        "n_pos": lambda k: count(positive),
+        "pos_sum": lambda k: F.sum(F.when(positive, F.col("pos")).otherwise(0)),
+        "n_top": lambda k: count(top(k)),
+        "hits": lambda k: count(positive & top(k)),
+        "ap_sum": lambda k: F.sum(
+            F.when(positive, F.col(f"ap_contrib@{k}")).otherwise(0.0)),
     }
-    out = [(name, once[name]) for name in ITEM_SHARED_NUMBERS
+    out = [(name, aggregate[name](None)) for name in ITEM_SHARED_NUMBERS
            if name not in ITEM_SHARED_NUMBERS_PER_K]
     for k in k_values:
-        out.extend((f"{name}@{k}", at_k(name, k))
+        out.extend((f"{name}@{k}", aggregate[name](k))
                    for name in ITEM_SHARED_NUMBERS
                    if name in ITEM_SHARED_NUMBERS_PER_K)
     return out
@@ -920,7 +913,7 @@ def _item_shared_number_aggs(
 
 def _nest_by_dims(rows, dim_cols: list[str], cell_of) -> dict[str, dict]:
     """``{item: cell}`` for ``[item_col]``, ``{item: {segment: cell}}`` for
-    ``[item_col, seg_col]``; a row whose ``cell_of`` is ``None`` is left out.
+    ``[item_col, seg_col]``.
 
     Two levels rather than a joined string key (ADR-0020 bug 12):
     ``"_".join`` turned ``(item="a", seg="b_c")`` and ``(item="a_b",
@@ -929,16 +922,13 @@ def _nest_by_dims(rows, dim_cols: list[str], cell_of) -> dict[str, dict]:
     """
     out: dict[str, dict] = {}
     for r in rows:
-        cell = cell_of(r)
-        if cell is None:
-            continue
         item = str(r[dim_cols[0]])
         if len(dim_cols) == 1:
-            out[item] = cell
+            out[item] = cell_of(r)
         else:
             # The second dim is the segment (the one two-column caller passes
             # [item, segment]); NULL there is the unmatched group.
-            out.setdefault(item, {})[segment_key(r[dim_cols[1]])] = cell
+            out.setdefault(item, {})[segment_key(r[dim_cols[1]])] = cell_of(r)
     return out
 
 
@@ -958,8 +948,8 @@ def aggregate_item_shared_numbers(
     ``dim_cols`` is ``[item_col]`` or ``[item_col, seg_col]``; the output nests
     one level per column (:func:`_nest_by_dims`):
 
-        [item_col]          → {item: {n_rows, n_pos, pos_sum, n_top@K, …}}
-        [item_col, seg_col] → {item: {segment: {n_rows, …}}}
+        [item_col]          → {item: {n_pos, pos_sum, n_top@K, hits@K, …}}
+        [item_col, seg_col] → {item: {segment: {n_pos, …}}}
 
     Any other column count raises ``ValueError``. An item never positive here
     still gets a cell: ``n_top@K`` over all of its rows is the times it was
@@ -977,14 +967,8 @@ def aggregate_item_shared_numbers(
     rows = enriched.groupBy(*dim_cols).agg(
         *[agg.alias(key) for key, agg in aggs]).collect()
 
-    def cell_of(r) -> dict:
-        return {
-            key: (float(r[key])
-                  if key.split("@", 1)[0] in _FRACTIONAL_ITEM_SHARED_NUMBERS
-                  else int(r[key]))
-            for key, _ in aggs
-        }
-    return _nest_by_dims(rows, dim_cols, cell_of)
+    return _nest_by_dims(
+        rows, dim_cols, lambda r: {key: r[key] for key, _ in aggs})
 
 
 def _item_number(cell: dict, name: str, k: int) -> float:
@@ -1566,7 +1550,7 @@ def compute_all_metrics(
                           Read it through
                           ``metrics.resolved_all_k``, never by counting items.
           "per_item_shared_numbers":
-              {item: {n_rows, n_pos, pos_sum, n_top@K, hits@K, ap_sum@K, ...}}
+              {item: {n_pos, pos_sum, n_top@K, hits@K, ap_sum@K, ...}}
               (#534) what the per_item metrics are computed from, for every
               item with a row in the scored groups — never positive included
               (``aggregate_item_shared_numbers``),

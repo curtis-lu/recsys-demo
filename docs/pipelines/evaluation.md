@@ -112,7 +112,7 @@ overall 指標先在每個 query group 計算，再對 query 等權平均；per-
 
 per-item 的 `recall@K` 跟 overall 的 `recall@K` 同名、不同算法：一個是該 item 的正例裡排進前 K 名的比例，一個是每個 query group 的正例裡排進前 K 名的比例、再對組平均（[ADR-0031](../adr/0031-evaluation-second-pass-layers-and-single-source.md) 決定 6、7）。報表上 per-item 那個顯示成 `per-item recall`。它以前叫 `hit_rate@K`；per-item 區塊還寫著 `hit_rate@K` 的舊 `metrics.json`，報表會拒絕畫，照錯誤訊息 `--from-node compute_metrics` 重算即可。
 
-per-item 的指標都由每個 item 的**共用數字**相除而來：先在 overall 指標算進的那些 query group 裡，加總該 item 的每一列（正例與否都算）——列數、排進前 K 名的次數、正例數、正例排進前 K 名的次數、AP 貢獻與正例名次的加總——再照指標目錄（`evaluation/metric_catalog.py`）的公式算出 `recall@K`、`map_attr@K`、`mean_pos`。這些數落地在 `metrics.json` 的 `per_item_shared_numbers`（有分群欄時另有 `per_item_segment_shared_numbers`），讓之後加的 per-item 指標（例如 precision@K＝正例排進前 K 名的次數÷排進前 K 名的次數）只要在目錄寫公式。沒有正例的 query group 不算進來：`--post-training` 評的 test 表預設不留這種組（`dataset.test_zero_positive_group_ratio`），留了也只是抽樣。
+per-item 的指標都由每個 item 的**共用數字**相除而來：先在 overall 指標算進的那些 query group 裡，加總該 item 的每一列（正例與否都算）——排進前 K 名的次數、正例數、正例排進前 K 名的次數、AP 貢獻與正例名次的加總——再照指標目錄（`evaluation/metric_catalog.py`）的公式算出 `recall@K`、`map_attr@K`、`mean_pos`。這些數落地在 `metrics.json` 的 `per_item_shared_numbers`（有分群欄時另有 `per_item_segment_shared_numbers`），讓之後加的 per-item 指標（例如 precision@K＝正例排進前 K 名的次數÷排進前 K 名的次數）只要在目錄寫公式。沒有正例的 query group 不算進來：`--post-training` 評的 test 表預設不留這種組（`dataset.test_zero_positive_group_ratio`），留了也只是抽樣。
 
 完全沒有正例的 query group 無法定義 AP，因此會從 metric computation 排除；報表仍會記錄 `n_queries` 與 `n_excluded_queries`。
 

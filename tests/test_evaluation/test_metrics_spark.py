@@ -550,20 +550,20 @@ def test_compute_all_metrics_lands_each_items_shared_numbers(spark):
     # K = 4 too: "all" (4 items) is computed for the per-item side whenever
     # evaluation.metric.k is unset (_resolve_k_grids).
     assert result["per_item_shared_numbers"] == {
-        "A": {"n_rows": 2, "n_pos": 1, "pos_sum": 1,
+        "A": {"n_pos": 1, "pos_sum": 1,
               "n_top@1": 1, "hits@1": 1, "ap_sum@1": 1.0,
               "n_top@3": 1, "hits@3": 1, "ap_sum@3": 1.0,
               "n_top@4": 2, "hits@4": 1, "ap_sum@4": 1.0},
-        "B": {"n_rows": 2, "n_pos": 1, "pos_sum": 1,
+        "B": {"n_pos": 1, "pos_sum": 1,
               "n_top@1": 1, "hits@1": 1, "ap_sum@1": 1.0,
               "n_top@3": 2, "hits@3": 1, "ap_sum@3": 1.0,
               "n_top@4": 2, "hits@4": 1, "ap_sum@4": 1.0},
-        "C": {"n_rows": 2, "n_pos": 1, "pos_sum": 4,
+        "C": {"n_pos": 1, "pos_sum": 4,
               "n_top@1": 0, "hits@1": 0, "ap_sum@1": 0.0,
               "n_top@3": 1, "hits@3": 0, "ap_sum@3": 0.0,
               # C0 rank 4: 2 positives in the top 4 → precision 2/4
               "n_top@4": 2, "hits@4": 1, "ap_sum@4": 0.5},
-        "D": {"n_rows": 2, "n_pos": 0, "pos_sum": 0,
+        "D": {"n_pos": 0, "pos_sum": 0,
               "n_top@1": 0, "hits@1": 0, "ap_sum@1": 0.0,
               "n_top@3": 2, "hits@3": 0, "ap_sum@3": 0.0,
               "n_top@4": 2, "hits@4": 0, "ap_sum@4": 0.0},

@@ -237,8 +237,9 @@ def build(
     """衡量指標：分兩塊、各塊內維度與方向一致。
 
     A｜per-query 指標（map/precision/recall）——overall、per-segment、大類 overall。
-    B｜per-item 歸因（map_attr/recall）——per-item、大類 per-item。precision 是
-    per-query 量（整組 top-k 的性質），無法歸因到單一 item，故 B 塊沒有 precision。
+    B｜per-item 歸因（map_attr/recall）——per-item、大類 per-item。A 塊的
+    precision@k 分母是 k（整組 top-k 的性質），拆不到單一 item 頭上，所以不在 B 塊；
+    per-item 的 precision 分母是該 item 排進前 k 名的次數，是另一個指標。
     方向規則：單一彙總用指標家族當列；多實體拆分用實體當列。所有表 k 欄統一＝
     [1,2,3,4,5,all]，每張表只一個 metric family（避免寬混表）。全克制、明細收合。
     """
@@ -285,7 +286,7 @@ def build(
         _add(_families_by_k_table(cat.get("overall", {}), cks, cat_k),
              f"A · per-query｜大類 overall（列＝{families}）", True)
 
-    # ===== Block B：per-item 歸因（map_attr / recall；無 precision）=====
+    # ===== Block B：per-item 歸因（目錄裡 item 那種算法的指標）=====
     map_attr = entry("map_attr", ITEM).name
     attr_label = entry("map_attr", ITEM).display_name
     recall_label = entry("recall", ITEM).display_name
@@ -336,8 +337,8 @@ def build(
             "分兩塊、各塊內維度與方向一致。A｜per-query 指標（map／precision／"
             "recall）——對 overall、per-segment、大類 overall；precision@k 是"
             " per-query 量（整組 top-k 命中幾個），只在這塊。B｜per-item 歸因"
-            "（map_attr／recall）——對 per-item、大類 per-item；precision 無法歸因"
-            "到單一 item（那是整組 top-k 的性質），故 B 塊沒有 precision。方向規則："
+            "（map_attr／recall）——對 per-item、大類 per-item；A 塊的 precision@k"
+            " 分母是 k（整組 top-k 的性質），拆不到單一 item 頭上，所以不在這塊。方向規則："
             "單一彙總（overall、大類 overall）用指標家族當列，多實體拆分（per-"
             "segment、per-item、大類 per-item）用實體當列；所有表 k 欄一致＝"
             "[1,2,3,4,5,all]、每張表一個 metric family。頭號指標＝macro per-item "
