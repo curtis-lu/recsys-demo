@@ -4,7 +4,7 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 
 ## 這個專案是什麼
 
-通用的**排序（learning-to-rank）批次建模框架**：對每個 query group（`time` × `entity`，宣告了選用角色 `occasion` 時再加上它）把候選 `item` 依模型分數排名。欄位角色由 `conf/base/parameters.yaml` 的 `schema` 區塊配置；來源表（`feature_table`/`sample_pool`/`label_table`）由使用者自定義。排序是預設情境（每個 query group 的候選集合是全網格），不是定位的全部：框架也支援拿展示紀錄訓練與評估的推薦情境（候選集合是被展示的子集；`CONTEXT.md` 的 **候選集合**）。**商業銀行產品推薦、線上廣告推薦都只是示例 instantiation，不是框架限定應用**——寫文件時保持抽象框架定位。
+通用的**排序（learning-to-rank）批次建模框架**：對每個 query group 把候選 `item` 依模型分數排名；預設候選集合是全網格，也支援拿展示紀錄訓練與評估的推薦情境。欄位角色由 `conf/base/parameters.yaml` 的 `schema` 區塊配置，來源表（`feature_table`/`sample_pool`/`label_table`）由使用者自定義；詞的定義見 `CONTEXT.md`。**商業銀行產品推薦、線上廣告推薦都只是示例，不是框架限定應用**——寫文件時保持抽象框架定位。
 
 框架是 **Kedro 風格的手刻實作**（`src/recsys_tfb/core/` 自製 DataCatalog/Node/Pipeline/Runner，`src/recsys_tfb/io/*` 仿 kedro.io；**無 kedro 套件依賴**，Ploomber 僅作排程）。規模與細節見 README.md 與 docs/。
 
@@ -22,9 +22,9 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 | 任務 | 先讀 |
 |---|---|
 | 動 `core/` 框架抽象；新增或修改 pipeline node／catalog 條目 | `docs/agents/architecture-constraints.md`（框架事實＋10 條可機械檢查的約束＋例外登記。例外登記要加一筆必須先問使用者；稽核測試＝`tests/test_core/test_architecture_constraints.py`） |
-| 寫或改一個 node 的**內容**（邊界畫哪、body 長什麼樣、機制放哪個檔、命名、讀哪些月份、要不要翻版本） | `docs/agents/pipeline-node-design.md`（跨 pipeline 的判準，18 條裡**只有 3 條有部分機械檢查**——上一列那份擋得住位置，這份擋的是內容。界外違例登記在其〈已登記的例外〉，要加一筆先問使用者） |
-| 重整一整條 pipeline（不是改單一 node）：排順序、切 PR、選驗證手段、收尾清掃 | `docs/agents/pipeline-refactor-process.md`（**流程**判準，上一列那份是形狀判準。dataset／inference 兩輪 18 個 PR 歸納，每條附得出證據的 PR 或 commit） |
-| 優化任何一條 pipeline 的效能（量測、提假設、下結論） | `docs/agents/pipeline-performance-work.md`（**先於** `docs/handbooks/spark-tuning/`——那套教你怎麼調 Spark，這份擋的是「還沒確定那件事該不該做就開始讓它變快」。9 條推理紀律，一條機械檢查都沒有；2026-09-06 dataset 實測的六個假設裡四個被否決，這份是那四個的一般化） |
+| 寫或改一個 node 的**內容**（邊界畫哪、body 長什麼樣、機制放哪個檔、命名、讀哪些月份、要不要翻版本） | `docs/agents/pipeline-node-design.md`（跨 pipeline 的判準，多數沒有機械檢查——上一列那份擋得住位置，這份擋的是內容。界外違例登記在其〈已登記的例外〉，要加一筆先問使用者） |
+| 重整一整條 pipeline（不是改單一 node）：排順序、切 PR、選驗證手段、收尾清掃 | `docs/agents/pipeline-refactor-process.md`（**流程**判準，上一列那份是形狀判準） |
+| 優化任何一條 pipeline 的效能（量測、提假設、下結論） | `docs/agents/pipeline-performance-work.md`（**先於** `docs/handbooks/spark-tuning/`——那套教你怎麼調 Spark，這份擋的是「還沒確定那件事該不該做就開始讓它變快」；沒有機械檢查） |
 | worktree / venv 任何操作 | `docs/operations/dev-setup/worktree-venv-setup.md` ＋ 下方 pre-flight |
 | 本機跑 Spark pipeline | `docs/operations/dev-setup/local-spark-setup.md`（或 local-spark skill）＋ 下方指令塊 |
 | pipeline 部分執行（模式 vs 切片、加月份的 auto-included、接續前提） | `docs/operations/user-guides/pipeline-slicing.md`；旗標本身的用法在該 pipeline 文件 §4 |
@@ -33,7 +33,6 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 | 想多評估一個月份（加 `test_snap_dates`） | `docs/operations/user-guides/adding-an-eval-month.md`（不翻版本、不重訓；四步驟＋驗收） |
 | 抽樣權重設定 | 給抽樣預算一次算完：`docs/operations/user-guides/sampling-budget-planner.md`（`scripts/profile_sample_pool.py` 數 sample_pool → `scripts/sampling_budget_planner.py` 算兩份設定）；一格一格手調：`docs/operations/user-guides/sampling-overrides-editor.md`（部分 config 靠 `scripts/sampling_overrides_editor.py`、`scripts/suggest_categorical_cols.py` 推導，非手填） |
 | 做／改診斷報表的呈現層（表格、圖、定義、編排） | `docs/agents/diagnosis-report-presentation.md`（每段資訊扣回目的、地基量開頭講一次、選最能凸顯重點的媒介、判斷留給讀者） |
-| 派 subagent / 選模型 / 驗收 | 判準已常駐於 `~/.claude/rules/00-core.md`；寫派工 prompt 前載入 `dispatch-subagents` skill |
 
 ## Worktree 鐵則（細節與事故記錄：known-pitfalls.md §3）
 
@@ -68,22 +67,21 @@ cd <root> && SPARK_CONF_DIR=<root>/conf/spark-local PYTHONPATH=<root>/src /Users
 
 ## 測試（跑快，不是少跑）
 
-- 單次改動只跑相關測試檔——理由是聚焦，**不是耗時**：全量 `tests/test_evaluation`（302 個測試）實測 **54 秒**（2026-08-08）。
-- **寫耗時要連量測環境一起寫。** 本檔曾長期寫「~33 分鐘」——那是 Docker 時代量的，2026-06-09 換成 `local[*]` 之後就失效了，但沒人回頭重量，還被 10 份以上的 plan／spec 轉引當作跳過測試的理由。原委與規則：known-pitfalls.md §4。
+- 單次改動只跑相關測試檔——理由是聚焦，**不是耗時**。
+- **寫耗時要連量測環境與日期一起寫**，換執行環境就重量；實測數字、原委與加速手段 backlog：known-pitfalls.md §4。
 - 可能 >2 分鐘的指令一律 background 執行（曾因 foreground 重跑全量空轉整晚）。
 - 驗證優先 `git diff <base>..<head>`（SHA-based、秒級）＋針對性 grep；不重跑 subagent 已驗過的。
 - **main 上有既知 failing/互擾測試，改動前先建 baseline**——清單見 known-pitfalls.md §5。
-- 加速手段 backlog 與量測原則：known-pitfalls.md §4。
 
 ## Config consistency gate
 
-不變量（Layer-1 的 A 系列 ＋ 資料閘的 B 系列）的**唯一真實來源＝`src/recsys_tfb/core/consistency.py`**，各代號意義見該檔模組 docstring 的 Invariant legend。**新增一致性不變量必須在該模組加 predicate，不得在各 pipeline ad-hoc 散落**。Layer-1 `validate_config_consistency` 在 CLI entry 執行、collect-all 一次 raise；Layer-2 `validate_data_consistency`（`pipelines/dataset/nodes.py`）是 dataset pipeline 第一個 side-effect 節點。改動這一帶之前先讀該模組 docstring，不要依賴本段的摘要。
+不變量（A 系列＝設定層、B 系列＝資料層）的**唯一真實來源＝`src/recsys_tfb/core/consistency.py`**，各代號意義與在哪裡執行見該檔模組 docstring。**新增一致性不變量必須在該模組加 predicate，不得在各 pipeline ad-hoc 散落**。
 
 ## Agent skills
 
 供 `mattpocock-skills` 系列（`/to-tickets`／`/triage`／`/implement` 等）讀取的 per-repo 設定；細節在指向的檔案，本段只路由。
 
-**產出路徑（硬規則）**：本系列 skill 的產物只寫進 `docs/adr/`、`docs/agents/` 與 repo 根目錄的 `CONTEXT.md`（詞彙表，由 `/domain-modeling` 維護），路徑未指定的長文產出（如 `/research`）寫進 `docs/notes/`。**`docs/superpowers/` 是 superpowers skill 寫死的專屬存檔區（`plans/`／`specs/`），本系列一律不得寫入**——兩套 skill 的命名慣例相反（前者用工具名 namespace、後者用產物類型），混寫會讓目錄名再也對不上內容。
+**產出路徑（硬規則）**：本系列 skill 的產物只寫進 `docs/adr/`、`docs/agents/` 與 repo 根目錄的 `CONTEXT.md`（詞彙表，由 `/domain-modeling` 維護），路徑未指定的長文產出（如 `/research`）寫進 `docs/notes/`。**`docs/superpowers/` 是 superpowers skill 的專屬存檔區，本系列一律不得寫入**。
 
 ### Issue tracker
 
@@ -91,11 +89,11 @@ GitHub Issues（`curtis-lu/recsys-demo`），用 `gh` CLI 操作。見 `docs/age
 
 ### Triage labels
 
-五個角色沿用預設字串（`wontfix` 已存在，其餘四個首次 `/triage` 時建立）。見 `docs/agents/triage-labels.md`。
+五個角色沿用預設字串。見 `docs/agents/triage-labels.md`。
 
 ### Domain docs
 
-Single-context。**詞彙表在 repo 根目錄 `CONTEXT.md`**（每個詞是什麼，一兩句）。版本 ID（`core/versioning.py`）與不變量代號（`core/consistency.py`）的精確定義仍在 docstring，`CONTEXT.md` 只寫一句意思並指過去，兩邊有出入以 docstring 為準；`docs/` 只做白話解釋。見 `docs/agents/domain.md`。
+Single-context。**詞彙表在 repo 根目錄 `CONTEXT.md`**；它與 docstring、`docs/` 的分工見 `docs/agents/domain.md`。
 
 ## Viz content
 
