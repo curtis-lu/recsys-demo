@@ -1140,7 +1140,12 @@ def _compute_core(
         carry = [active_seg_col] if active_seg_col else []
         per_query = compute_per_query_metrics(
             enriched, group_cols, label_col, query_ks, carry_cols=carry
-        ).cache()
+        )
+        # Read twice only with a segment (aggregate_overall, then
+        # aggregate_per_segment); with one reader a cache would only write a
+        # copy to memory (#450).
+        if active_seg_col:
+            per_query = per_query.cache()
         try:
             # ---- Layer 3: aggregations ----
             overall = aggregate_overall(per_query, query_ks)
@@ -1200,7 +1205,10 @@ def _compute_core(
                 **recorded_k,
             }
         finally:
-            per_query.unpersist()
+            # Guarded: Spark uncaches by plan, so unpersist on a frame never
+            # cached could drop another cache of the same plan.
+            if active_seg_col:
+                per_query.unpersist()
     finally:
         enriched.unpersist()
 
