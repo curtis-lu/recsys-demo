@@ -9,13 +9,11 @@
 
 **規則：`.venv` 永不進版控**。`git ls-files | grep -x .venv` 一旦出現被追蹤就停下、`git rm --cached .venv`、commit 並**進 main**（否則各分支/worktree 一直繼承）。已追蹤的檔案無視 `.gitignore`。
 
-## 2. graphify hook 擋 git checkout/merge（**已修 2026-05，殘留規則仍有效**）
+## 2. 串接的 git 指令靜默失敗、HEAD 沒動
 
-歷史問題：graphify 的 post-checkout/post-commit hook 會把當時 **tracked** 的 `graphify-out/GRAPH_REPORT.md` 改髒，使隨後的 `git checkout` / `git merge --ff-only` 被「local changes would be overwritten」擋住；若指令用 `&&`+`set -e`+`>/dev/null` 串接，因 `set -e` 的 AND-list 例外會**靜默失敗、HEAD 沒動**而你以為成功了。
+起因（2026-05）：當時的 graphify git hook 會把被追蹤的檔改髒，使隨後的 `git checkout` / `git merge --ff-only` 被「local changes would be overwritten」擋住；指令用 `&&`+`set -e`+`>/dev/null` 串接時，因 `set -e` 的 AND-list 例外會**靜默失敗、HEAD 沒動**而你以為成功了。graphify 已於 2026-10 整套移除，但任何把工作樹改髒的東西都會重現這個坑。
 
-**已修**：`61ee9ac` untrack 了 GRAPH_REPORT.md（2026-07-04 以 `git ls-files graphify-out/` 為空驗證），hook 不再擋 checkout。
-
-**仍有效的通用規則**：git 串接指令不要吞 stdout/exit code；切分支/合併後用 `git rev-parse HEAD` 確認真的動了。「指令看起來成功」不等於「狀態真的變了」。
+**規則**：git 串接指令不要吞 stdout/exit code；切分支/合併後用 `git rev-parse HEAD` 確認真的動了。「指令看起來成功」不等於「狀態真的變了」。
 
 ## 3. Worktree 三件路徑踩坑 R1/R2/R3（2026-05-24 單日浪費 ≥3 次 Spark cold start）
 

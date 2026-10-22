@@ -68,21 +68,9 @@ The editable install points at **main's `src`**. So:
 Bash cwd resets after a skill/`cd`, and a relative path can read the stale
 main tree. Always use absolute paths or `git -C <abs-worktree-path> …`.
 
-## Known gotcha: graphify hook blocks (and silently fails) checkout/merge
+## Known gotcha: chained git checkout/merge can fail silently
 
-A graphify post-checkout / post-commit hook regenerates the **tracked** file
-`graphify-out/GRAPH_REPORT.md`, leaving it modified. The next `git checkout`
-or `git merge --ff-only` then refuses ("local changes would be overwritten")
-and leaves HEAD unmoved. If the git commands are chained with
-`&&` + `set -e` + `>/dev/null`, `set -e`'s AND-list exception swallows the
-failure — the script continues and looks successful while the merge never
-happened.
-
-Rules:
-- Before any branch switch / ff-merge: `git -C <path> checkout --
-  graphify-out/GRAPH_REPORT.md` to discard the auto-gen churn.
-- Never `>/dev/null` a chained git checkout/merge; print exit codes and
-  verify `git log -1` actually moved.
+See `docs/operations/known-pitfalls.md` §2.
 
 ## Worktree data/ 隔離（重要）
 

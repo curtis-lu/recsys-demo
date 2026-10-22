@@ -2,7 +2,7 @@
 
 這個框架**長什麼樣**（節一），以及新東西**該長什麼樣**（節二、節三）。
 
-程式碼現況請讀 `graphify-out/GRAPH_REPORT.md`；設計取捨的白話背景請讀 `docs/design-principles.md`（那份給人讀，本檔給 agent 讀）。
+設計取捨的白話背景請讀 `docs/design-principles.md`（那份給人讀，本檔給 agent 讀）。
 
 ## 你要做什麼 → 先讀哪幾條
 
@@ -921,7 +921,6 @@ src/recsys_tfb/evaluation/metrics_spark.py:221 in collapse_to_categories(): time
 
 | 想知道 | 讀 |
 |---|---|
-| 程式碼現在長什麼樣（模組關係、god node） | `graphify-out/GRAPH_REPORT.md` |
 | node 內容該長什麼樣（S1 擋不住的那一半） | [`pipeline-node-design.md`](pipeline-node-design.md) |
 | 設計取捨的白話背景（給人讀） | `docs/design-principles.md` |
 | 不變量代號 A 系列／B 系列的意義 | `src/recsys_tfb/core/consistency.py` 模組 docstring |

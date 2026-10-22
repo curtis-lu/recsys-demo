@@ -28,11 +28,6 @@ dependencies = [
 dev = [
     "pytest==7.3.1",
     "pytest-cov==4.0.0",
-    # Code knowledge-graph tooling (graphify-out/, /graphify, git hooks).
-    # Dev-only: not shipped to the prod Hadoop env. Unpinned on purpose — it's a
-    # dev-collaboration aid, not a runtime dep. The git hook and /graphify skill
-    # both use whatever graphifyy is installed, so track latest rather than pin.
-    "graphifyy",
 ]
 notebook = [
     "ipykernel==6.29.5",

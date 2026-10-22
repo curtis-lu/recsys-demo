@@ -20,7 +20,6 @@ How the engineering skills should consume this repo's domain documentation when 
 其次：
 
 - **`docs/adr/`** — 動到相關區域前，先讀觸及該區域的 ADR。
-- **`graphify-out/GRAPH_REPORT.md`** — 架構／重構／探索任務的**強制**起點，見 `CLAUDE.md` 路由表。這一步不得用 Explore agent 代替。
 
 If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) adds terms to `CONTEXT.md` and creates ADRs lazily when decisions actually get resolved.
 

@@ -21,7 +21,6 @@ Claude Code 在此 repo 的最小規範。原則：本檔只放「每個 session
 
 | 任務 | 先讀 |
 |---|---|
-| 架構 / 重構 / 探索 codebase | `graphify-out/GRAPH_REPORT.md`（**強制**，不得用 Explore agent 替代這一步；有 `graphify-out/wiki/index.md` 就導航 wiki 而非讀原始檔） |
 | 動 `core/` 框架抽象；新增或修改 pipeline node／catalog 條目 | `docs/agents/architecture-constraints.md`（框架事實＋10 條可機械檢查的約束＋例外登記。例外登記要加一筆必須先問使用者；稽核測試＝`tests/test_core/test_architecture_constraints.py`） |
 | 寫或改一個 node 的**內容**（邊界畫哪、body 長什麼樣、機制放哪個檔、命名、讀哪些月份、要不要翻版本） | `docs/agents/pipeline-node-design.md`（跨 pipeline 的判準，18 條裡**只有 3 條有部分機械檢查**——上一列那份擋得住位置，這份擋的是內容。界外違例登記在其〈已登記的例外〉，要加一筆先問使用者） |
 | 重整一整條 pipeline（不是改單一 node）：排順序、切 PR、選驗證手段、收尾清掃 | `docs/agents/pipeline-refactor-process.md`（**流程**判準，上一列那份是形狀判準。dataset／inference 兩輪 18 個 PR 歸納，每條附得出證據的 PR 或 commit） |
@@ -79,12 +78,6 @@ cd <root> && SPARK_CONF_DIR=<root>/conf/spark-local PYTHONPATH=<root>/src /Users
 ## Config consistency gate
 
 不變量（Layer-1 的 A 系列 ＋ 資料閘的 B 系列）的**唯一真實來源＝`src/recsys_tfb/core/consistency.py`**，各代號意義見該檔模組 docstring 的 Invariant legend。**新增一致性不變量必須在該模組加 predicate，不得在各 pipeline ad-hoc 散落**。Layer-1 `validate_config_consistency` 在 CLI entry 執行、collect-all 一次 raise；Layer-2 `validate_data_consistency`（`pipelines/dataset/nodes.py`）是 dataset pipeline 第一個 side-effect 節點。改動這一帶之前先讀該模組 docstring，不要依賴本段的摘要。
-
-## graphify
-
-- 架構/重構/探索任務：先讀 `graphify-out/GRAPH_REPORT.md`（見路由表，強制）。
-- 本 session 改過 code 檔案後，跑 `.venv/bin/python -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` 讓圖保持最新（graphify 裝在 .venv 的 dev extras；裸 `python3` 在非 pyenv shell 會是 3.12 且無此套件）。
-- 歷史上 hook 曾擋 checkout，**已修**（61ee9ac）；殘留通用規則見 known-pitfalls.md §2。
 
 ## Agent skills
 
