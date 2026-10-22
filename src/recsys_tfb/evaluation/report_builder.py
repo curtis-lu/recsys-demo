@@ -334,9 +334,9 @@ def macro_coverage_suffix_mb(
 # =====================================================================
 #
 # ``evaluation.query_filter.drop_all_positive_groups`` 只套用在衡量指標（含頭號
-# 指標）與熱門度 baseline；per-item 細部拆解、各診斷頁都不跟（使用者 2026-09-18
-# 決定：新開關不延伸進診斷）。所以開關開著時，同一份報表裡有兩批組，這一段的
-# 函式負責讓讀者看得出每個數字是哪一批。開關只經
+# 指標）與熱門度 baseline；per-item 細部拆解不跟（使用者 2026-09-18 決定：新開關
+# 不延伸進診斷；當時的診斷頁已隨 #532 拿掉）。所以開關開著時，同一份報表裡有兩批
+# 組，這一段的函式負責讓讀者看得出每個數字是哪一批。開關只經
 # ``metrics.drop_all_positive_groups`` 讀，警告只經
 # ``metrics.all_positive_share_warns`` 判斷——log 與報表不會各說各話。
 
@@ -419,8 +419,9 @@ def _group_ledger_line(grain: str, bundle: dict, parameters: dict) -> str | None
 
     開關關：全正的組照樣算進衡量指標，「算進衡量指標」＝「有正例」。開關開：
     有正例＝全正（已排除）＋算進衡量指標。無正例的組兩種都不算進衡量指標，
-    ``n_excluded_queries`` 也只數它們。帳上不說「算進 mAP」：同一份報表連結的
-    診斷頁也印 macro per-item mAP（取自診斷抽樣），開關開著也沒有排除全正的組。
+    ``n_excluded_queries`` 也只數它們。帳上不說「算進 mAP」：當初的理由是同一份
+    報表連結的診斷頁也印 macro per-item mAP、而且不排除全正的組；診斷頁隨 #532
+    拿掉之後，這個措辭照留。
 
     缺 ``n_queries``／``n_excluded_queries``（更早的 bundle）回 ``None``。只缺
     全正組數的，是 #376 之前算的 ``metrics.json``：開關關著時指紋沒變，照樣會被
@@ -583,7 +584,6 @@ def build_overview_section(
             "哪些 item／segment 排得弱",
             "每個 item 的分數與名次分布長怎樣",
             "跟熱門度（popularity）比如何",
-            "想深入各項診斷（排序偏移、item 能力、壓制帳本…）",
             "本次量到什麼、沒量到什麼",
         ],
         "看哪一區": [
@@ -591,7 +591,6 @@ def build_overview_section(
             "衡量指標（per-item／per-segment）",
             "per-item 細部拆解",
             "baseline",
-            "排序診斷（獨立報表）",
             "完整性檢查",
         ],
     })
@@ -721,7 +720,7 @@ def build_dataset_overview_section(
     by_snap = pd.DataFrame(ov.get("by_snap_date", {})).T
 
     # per-item 正例組成：正例數 / 正樣本率 / 正例佔比（＝n_positives÷總正例，
-    # render 端純算術、無 Spark）。密集候選下三欄同序，ScopeNote 於 description。
+    # render 端純算術、無 Spark）。密集候選下三欄同序，範圍說明於 description。
     total_pos = totals_d.get("n_positives") or 0
     by_item_rows: dict = {}
     # per-item 列序統一按字母（與衡量指標、item-share 對齊）
@@ -1328,8 +1327,6 @@ def build_prediction_quality_section(
             "算的 average precision 或 ROC-AUC 直接比較。",
             "per-item 的 precision 分母是該 item 在門檻以上的列數；主指標段的 "
             "precision@K 分母是 K（每個 query group 的前 K 名），是不同的量。",
-            "per-item 的 roc_auc 母體是該 item 的全部候選列，與排序診斷「item "
-            "能力」頁的 AUC（只含有正例的 query 的抽樣）不同，不可並排比較。",
             "分箱表把每格的平均分數與實際正例率放在一起，只是並列兩個量：框架"
             "不做校準（#411），分數不保證是機率。上面每個指標都只看分數的大小"
             "順序，兩者相近或相差都不改變它們。",
@@ -1371,7 +1368,7 @@ def build_item_detail_section(
     ``calibration`` 鍵（在 ``[0, 1]`` 上等寬切），本段一直不畫它，讀到舊檔也
     一樣不畫。
     """
-    if not _section_on(parameters, "diagnostics"):
+    if not _section_on(parameters, "per_item_breakdown"):
         return None
     # 與 build_diagnostics_figures 同一個「有沒有 score_histogram 家族」判斷；
     # 沒有分布家族時（包括只剩舊檔的 calibration 鍵），本段不畫。
@@ -1809,169 +1806,6 @@ def build_glossary_section(parameters: dict) -> ReportSection:
     )
 
 
-# =====================================================================
-# registry 診斷的多頁輸出
-# =====================================================================
-#
-# **這一段刻意不認識任何單一診斷。** 走的是
-# ``diagnosis.metric.contract.DIAGNOSES``：對每個名字 import 模組、讀
-# ``TITLE``／``SCOPE``／``render``。因此新增第六項診斷 ＝ 新增一個子套件 ＋ 在
-# registry 補一行，本檔零改動。
-#
-# 為什麼數字不複製一份到主報表：主報表只放入口
-# （``build_diagnosis_links_section``）。同一個數字出現在兩個地方，就會有兩份
-# 各自演化的格式與措辭，而讀者無從得知哪一份是後改的。
-
-#: 索引頁的邏輯架構：每項診斷各回答什麼、各排除什麼，以及編號代表的意思。
-#:
-#: **這張表是規劃層級的敘述**（各診斷的分工），不是 registry。哪些項目真的
-#: 存在由 ``DIAGNOSES`` 決定，見 :func:`_diagnosis_index_intro` 的狀態欄——
-#: 兩者分開，索引頁才不會在有項目尚未落地時假裝它都在。
-_DIAGNOSIS_PLAN = (
-    ("config_shift", "配置引入的排序偏移",
-     "抽樣比例與 sample weight 有沒有在每個 item 上引入 log-odds 偏移。",
-     "偏移為 0 時，排序落差的來源就不在訓練設定這一側。"),
-    ("item_ability", "item 辨識力",
-     "模型能不能在同一個 query 內分辨誰會買哪一個 item。",
-     "把客戶活躍度誤讀成 item 推薦能力。"),
-    ("model_capacity", "模型容量分配",
-     "gain／split 花在 item 身分，還是花在 context 特徵。",
-     "把「學到互動訊號」與「只記住 item prior」分開。"),
-    ("suppression", "壓制帳本",
-     "哪些 label=0 排在 label=1 之前，造成多少 AP 缺口。",
-     "把「模型排錯」與「商品本來就競爭」分開。"),
-)
-
-
-def _diagnosis_index_intro() -> str:
-    """索引頁的說明片段（raw HTML，``write_pages`` 不 escape）。
-
-    **這段文字就是使用者要的產出本身，不是裝飾**：需求原話是「忠實呈現數據，
-    但是用一個清楚好懂的邏輯架構來幫助人類判斷，而不是直接給結論」。這裡寫
-    的是那個邏輯架構——每項診斷回答什麼、排除什麼、為什麼是這個順序——讀者
-    據此自己判斷，而報表本身一個結論都不下。
-
-    狀態欄從 ``DIAGNOSES`` 動態導出，不寫死：``_DIAGNOSIS_PLAN`` 若列入尚未
-    落地的診斷，寫死的話這頁會在它落地前就宣稱它在（而那種錯看不出來，因為
-    字串長得很合理）。目前列出的診斷皆已落地。
-    """
-    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-
-    rows = []
-    for i, (name, title, answers, rules_out) in enumerate(
-        _DIAGNOSIS_PLAN, start=1
-    ):
-        live = name in DIAGNOSES
-        status = "已在 registry" if live else "尚未進 registry"
-        rows.append(
-            f"<tr><td>{i}</td><td>{title}<br><code>{name}</code></td>"
-            f"<td>{answers}</td><td>{rules_out}</td><td>{status}</td></tr>"
-        )
-    table = (
-        "<table><thead><tr>"
-        "<th>#</th><th>診斷</th><th>回答什麼</th><th>排除什麼</th>"
-        "<th>目前狀態</th>"
-        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
-    )
-    return (
-        "<p>這裡把排序結果拆成彼此不重疊的幾個提問。每一頁只呈現它量到的"
-        "數字，並在頁首用「範圍說明」寫出這些數字量的是什麼、算在哪批列上、"
-        "看不見什麼。判讀留給讀者。</p>"
-        + table
-        + "<p><strong>編號的意思</strong>：由「資料與訓練設定造成的」往"
-        "「模型學到什麼」再往「排序結果本身」推進。前一層解釋得掉的部分，"
-        "後一層就不必重複歸因——這是歸因的優先權，也是預設的閱讀順序。</p>"
-        "<p><strong>編號不是硬閘門</strong>：已實作的項目每次都會跑、都會"
-        "呈現，前一項的結果不會擋掉後一項；任何一頁都可以單獨打開來讀。</p>"
-        "<p>狀態欄若標「尚未進 registry」，代表該項還沒有實作、這次執行不會"
-        "有它的頁面；下方清單列出的就是本次實際寫出的全部頁面。</p>"
-    )
-
-
-def assemble_diagnosis_pages(results: dict, parameters: dict, out_dir) -> list:
-    """把每項診斷的結果組成獨立頁面。本函式不認識任何單一診斷。
-
-    Args:
-        results: ``{診斷名: compute 的輸出 dict}``。缺席或 ``render`` 回**空
-            序列**（例如該項停用）的診斷不會產生頁面——**缺席是「這頁不存在」，
-            不是「這頁是空的」**；空頁看起來像「量到了、結果什麼都沒有」。
-            ``render`` 回傳的是多個 section（一張圖／一張表各一個 section，
-            各自帶標題、公式與重點），整頁的 section 順序即閱讀順序。
-        out_dir: 頁面輸出目錄（與各診斷 JSON 同一個 ``diagnosis/`` 目錄）。
-
-    Returns:
-        實際寫出的檔案路徑（``plotly.min.js`` 最先、各頁、``index.html`` 最後）。
-    """
-    import dataclasses
-    import importlib
-
-    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-    from recsys_tfb.report import Page
-    from recsys_tfb.report.pages import write_pages
-
-    # #376：evaluation.query_filter.drop_all_positive_groups 不套用在任何診斷。
-    # 開著時每頁「算在哪批列上」補一句，同樣在這裡統一填、不逐項診斷各加。
-    kept = _all_positive_kept_note(parameters)
-    pages = []
-    for i, name in enumerate(DIAGNOSES, start=1):
-        result = (results or {}).get(name)
-        if result is None:
-            continue
-        mod = importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
-        sections = mod.render(result, parameters)
-        if not sections:
-            continue
-        slug = f"{i:02d}-{name.replace('_', '-')}"   # 數字前綴＝閱讀順序
-        # SCOPE.sampling 在這裡統一填，不是每項診斷自己填：各診斷共用同一份
-        # diagnosis_sample，sampling_description 永遠在同一個位置。讓各診斷
-        # 各帶一個 hook 等於同一段 replace 被逐項重抄。
-        scope = dataclasses.replace(
-            mod.SCOPE,
-            sampling=(result.get("sample_meta", {}) or {}).get(
-                "sampling_description", ""),
-            population=(f"{mod.SCOPE.population}　{kept}" if kept
-                        else mod.SCOPE.population),
-        )
-        pages.append(Page(slug=slug, title=mod.TITLE,
-                          scope=scope, sections=tuple(sections)))
-    if not pages:
-        # 一頁都沒有就完全不落地。否則會留下一個「index.html 列了診斷、清單
-        # 是空的、外加 3.5MB plotly.min.js」的目錄，看起來像跑過但什麼都沒
-        # 量到——那是本重構要避免的誤讀，不是「誠實地呈現沒有資料」。
-        return []
-    return write_pages(pages, out_dir=out_dir,
-                       index_title="排序診斷",
-                       index_intro=_diagnosis_index_intro())
-
-
-def build_diagnosis_links_section(
-    diagnosis_pages: list | None,
-    parameters: dict,
-) -> ReportSection | None:
-    """主報表指向診斷頁的入口。**只放連結，不放任何診斷數字。**
-
-    數字複製一份到主報表就會有兩個真實來源；改了其中一邊，讀者無從得知哪一
-    份是後改的。一頁都沒寫出來時回 ``None``——指向 404 的入口比沒有入口更糟。
-
-    連結是相對路徑：主報表在 ``…/<snap_date>/report.html``，診斷頁在同層的
-    ``diagnosis/``，兩者一起搬移時連結仍有效。
-    """
-    if not diagnosis_pages or not _section_on(parameters, "diagnosis_links"):
-        return None
-    n_pages = sum(
-        1 for p in diagnosis_pages
-        if str(p).endswith(".html") and not str(p).endswith("index.html")
-    )
-    return ReportSection(
-        title="排序診斷（獨立報表）",
-        description=(
-            '<a href="diagnosis/index.html">診斷索引 diagnosis/index.html</a>'
-            f"　—　本次寫出 {n_pages} 頁。索引頁說明每一項回答什麼、排除"
-            "什麼，各頁的數字與範圍說明都留在該頁，這裡不複製一份。"
-        ),
-    )
-
-
 def build_completeness_section(
     metrics: dict, parameters: dict,
 ) -> ReportSection:
@@ -2029,11 +1863,6 @@ def build_completeness_section(
         "候選集為密集時每 item 候選覆蓋率恆 100%——per-item 正例佔比與正例數"
         "同序，非獨立軸。",
     ]
-    # 跳過的診斷寫在這裡，不寫在診斷索引頁：這一段的題目就是「什麼看起來正常
-    # 其實沒量到」，而一頁憑空消失正是那種看起來正常。原因字串與各診斷自己
-    # 印的那一句同一個來源（``diagnosis.metric._common.schema_skip_reason``），
-    # 兩邊不會漂。沒宣告選用角色時這個迴圈一句也不加，既有報表逐字不變。
-    bullets.extend(skipped_diagnosis_bullets(parameters))
     return ReportSection(
         title="完整性檢查",
         description=(
@@ -2044,23 +1873,6 @@ def build_completeness_section(
         table_titles=["本次執行事實"],
         bullets=bullets,
     )
-
-
-def skipped_diagnosis_bullets(parameters: dict) -> list[str]:
-    """每一項在目前 schema 下跳過的診斷，各一句「哪一項、為什麼」。
-
-    走 ``contract.DIAGNOSES``（不是自己抄一份名單），所以之後新增的診斷自動
-    被問到。沒有任何一項被跳過時回空 list，主報表因此逐字不變。
-    """
-    from recsys_tfb.diagnosis.metric._common import schema_skip_reason
-    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-
-    out = []
-    for name in DIAGNOSES:
-        reason = schema_skip_reason(parameters, name)
-        if reason:
-            out.append(f"診斷「{name}」本次未算：{reason}")
-    return out
 
 
 def eval_dates_display(configured):
@@ -2086,7 +1898,6 @@ def assemble_report(
     parameters: dict,
     baseline_metrics: dict | None = None,
     report_aggregates: dict | None = None,
-    diagnosis_pages: list | None = None,
     prediction_quality: dict | None = None,
 ) -> str:
     """Assemble every enabled section (the ``candidates`` list below is the
@@ -2094,7 +1905,7 @@ def assemble_report(
 
     spine（目的驅動、由粗到細、克制）：概覽 → 核心概念 → 基本統計 →
     衡量指標 → 預測品質（開了才有）→ per-item 細部拆解 → baseline →
-    排序診斷連結 → 完整性檢查 → 詞彙表。
+    完整性檢查 → 詞彙表。
     """
     pq_section = build_prediction_quality_section(
         prediction_quality, metrics, parameters)
@@ -2107,7 +1918,6 @@ def assemble_report(
         pq_section,
         build_item_detail_section(report_aggregates, parameters),
         build_baseline_section(metrics, baseline_metrics, parameters),
-        build_diagnosis_links_section(diagnosis_pages, parameters),
         build_completeness_section(metrics, parameters),
         build_glossary_section(parameters),
     ]

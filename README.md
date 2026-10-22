@@ -410,7 +410,7 @@ pipeline 顯示成功不代表結果對。至少再確認：
 
 **training**：把四份資料複製到 driver 本機；用 train 訓練、train_dev 決定樹長到第幾棵停、val 挑超參數（Optuna）；產出最終模型，對 test 預測並算指標；可以另外輸出特徵重要度與 SHAP 診斷，並記錄到 MLflow。可以排除特徵、設樣本權重，都不用重建 dataset。→ [`training.md`](docs/pipelines/training.md)
 
-**evaluation**：有兩種模式。`--post-training` 評 training 對 test 的預測（上線前）；預設模式評 inference 發布的結果（上線後，等答案出來）。以 query group 為單位算 mAP、precision、recall 等 @K 指標，再拆到各 item、各客群、各 item 大類，並跟熱門度基準線比；也可以跟另一個模型版本或外部預測表比。報表附一組自動診斷：`--post-training` 另寫一組診斷頁，每頁自帶範圍說明與判讀方式；訓練側 Gain 帳本與 SHAP 背景的判讀見 [`evaluation-diagnosis.md`](docs/pipelines/evaluation-diagnosis.md)。→ [`evaluation.md`](docs/pipelines/evaluation.md)
+**evaluation**：有兩種模式。`--post-training` 評 training 對 test 的預測（上線前）；預設模式評 inference 發布的結果（上線後，等答案出來）。以 query group 為單位算 mAP、precision、recall 等 @K 指標，再拆到各 item、各客群、各 item 大類，並跟熱門度基準線比；也可以跟另一個模型版本或外部預測表比。訓練側 Gain 帳本與 SHAP 背景的判讀見 [`evaluation-diagnosis.md`](docs/pipelines/evaluation-diagnosis.md)。→ [`evaluation.md`](docs/pipelines/evaluation.md)
 
 **inference**：讀 `inference_population`，每個 entity 配上整份 item 清單，用 `best`（或 `--model-version` 指定的版本）評分、排名；檢查通過才發布到 `ranked_predictions`。→ [`inference.md`](docs/pipelines/inference.md)
 

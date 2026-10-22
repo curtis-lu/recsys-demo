@@ -34,7 +34,7 @@ from recsys_tfb.core.consistency import (
     report_section_key_errors,
     resolved_env_dir,
     retired_calibration_bin_key_errors,
-    retired_diagnosis_ci_key_errors,
+    retired_diagnosis_key_errors,
     resolved_baseline_rebuild_dates,
     resolved_inference_rebuild_dates,
     resolved_rebuild_dates,
@@ -1965,9 +1965,9 @@ def evaluation(
     section_errs += prediction_quality_param_errors(params)
     # (A43) the calibration-bin keys #381 retired; evaluation-only, same place.
     section_errs += retired_calibration_bin_key_errors(params)
-    # (A61) the confidence-interval block #515 retired; evaluation-only, same
-    # place.
-    section_errs += retired_diagnosis_ci_key_errors(params)
+    # (A61) the evaluation.diagnosis block #515 and #532 retired;
+    # evaluation-only, same place.
+    section_errs += retired_diagnosis_key_errors(params)
     # (A49) evaluation.query_filter.drop_all_positive_groups's value domain
     # (#376); evaluation-only key, so wired here for A34's reason. The sole
     # reader takes it with plain truthiness and never raises, so a typo'd

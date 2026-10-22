@@ -18,28 +18,25 @@
 %%   前置檢查，不是獨立的閘 node：
 %%     prepare_eval_data          label_table 重複 key（bug 10）
 %%     compute_baseline_metrics   lookback 視窗沒有歷史（bug 1）
-%%     generate_report、render_diagnosis_pages、吃別項診斷結果的診斷 node
-%%                                設定指紋不合（bug 2）；render_diagnosis_pages 另擋診斷結果接錯（bug 9）
+%%     generate_report            設定指紋不合（bug 2）
 %%     restrict_to_common         共同 query group（time × entity）或 item 為空（B3，在 common_universe 裡）
 %%   唯一獨立成 node 的檢查是 --compare-only 的第一個 node（B4，見下）。
 
 %% #351 起 evaluation_metrics、baseline_metrics 落地成 JSONDataset
 %%   （data/evaluation/<model_version>/<snap_date>/metrics.json 與同目錄
 %%   baseline_metrics.json，皆含 config_fingerprint；report.sections.baseline: false
-%%   時 baseline 是 {"enabled": false, "config_fingerprint": ...} stub），跟四份診斷
-%%   JSON、report_aggregates 一樣畫成實線膠囊（有 catalog entry）。
-%%   仍是虛線膠囊（MemoryDataset，沒有 catalog entry）的只剩 evaluation_diagnosis_pages。
-%%   後果：切片的停止條件是 can_load（＝檔案在不在），所以 `--only-node generate_report`
-%%   現在只會自動補跑一個不碰 Spark 的 node——監控模式是 no_diagnosis_pages，
-%%   --post-training 是 render_diagnosis_pages（它的四個診斷輸入本身已落地，
-%%   can_load 直接讀舊檔，不會重跑診斷）；不會再沿線把
+%%   時 baseline 是 {"enabled": false, "config_fingerprint": ...} stub），跟
+%%   report_aggregates 一樣畫成實線膠囊（有 catalog entry）。
+%%   generate_report 的輸入全部落地（#532 拿掉最後一個 MemoryDataset 輸入，
+%%   也就是診斷頁清單），所以切片的停止條件 can_load（＝檔案在不在）
+%%   讓 `--only-node generate_report` 不會自動補跑任何 node，也不會沿線把
 %%   prepare_eval_data / compute_metrics / compute_baseline_metrics
 %%   拉回來重跑全量 Spark。
-%%   generate_report 是純函式（6 個必填輸入、無 varargs）本來就是為了「便宜重繪」
+%%   generate_report 是純函式（無 varargs）本來就是為了「便宜重繪」
 %%   而做的投資，#351 之前這條 catalog 缺口把它抵銷掉，補上後才真的便宜。
 %%   連帶：那些落地的 JSON 路徑只用 (model_version, snap_date) 當 key。
 %%   #342 起每份落地 JSON 內帶 config_fingerprint（只涵蓋「算的」設定）：
-%%   改了算的設定再 --only-node 重繪，render_diagnosis_pages／generate_report
+%%   改了算的設定再 --only-node 重繪，generate_report
 %%   會 raise 並指出該 --from-node 哪個 node；只改畫的設定（report.display.* 等）
 %%   照常重繪。分類見 docs/pipelines/evaluation.md §7.2。
 
@@ -49,40 +46,17 @@
 %%   再由獨立的 persist node 寫表——那個 persist node 已刪除，DAG 上不再有
 %%   它的名字。join 只算這一次；compute_metrics／
 %%   compute_baseline_metrics／compute_report_aggregates／
-%%   draw_diagnosis_sample_node／restrict_to_common 全部從 enriched_eval_predictions
+%%   compute_baseline_metrics／compute_report_aggregates／
+%%   restrict_to_common 全部從 enriched_eval_predictions
 %%   讀表，讀到的是這個 model_version 評估過的所有月份，各自用
 %%   restrict_to_current_eval_partitions 篩回本次評估日期（一個或多個），並逐日期
 %%   比對分區自帶的設定指紋（#374）。--compare-only 沒有
 %%   prepare_eval_data，一樣直接讀這張表；validate_enriched_eval_predictions_present
 %%   維持零輸出檢查（B4：該月無資料就擋）。
 
-%% 兩種模式的形狀不同（ADR-0018 決定 5）
-%%   registry 診斷與 render_diagnosis_pages 只在 --post-training 組出來；
-%%   監控模式（預設，含 --compare）改組 no_diagnosis_pages：零讀取、回空清單，
-%%   只為了讓 generate_report 的診斷頁位置輸入有人產出。它不能沿用
-%%   render_diagnosis_pages——那個要求每項 registry 診斷各一份帶名字的結果，
-%%   監控模式一份都沒算。
-
-%% render_diagnosis_pages 的四條入邊是資料流（#342 起；之前是虛線：值不讀、按檔名讀磁碟）
-%%   函式簽章是 (parameters, *diagnosis_results)，畫的就是這四份結果。畫之前檢查
-%%   第 i 個結果帶著 DIAGNOSES[i] 的名字、設定指紋與目前的「算的」設定一致，不合就 raise。
-%%   同一組 inputs 另外買到兩件事：
-%%   (1) 執行順序：拓樸排序只看 node.inputs，排在所有診斷之後才拿得到這次的結果。
-%%   (2) 切片擴張：JSON 已落地時 --only-node 不重算（讀回後比對指紋），
-%%       全新 model_version 時才自動往上補算。
-
-%% 為什麼診斷抽樣只抽一次
-%%   draw_diagnosis_sample_node 的產出被 --post-training 的各項診斷共用。
-%%   各自重抽（同 seed）結果會相同，但那是 N 次全量掃描；更重要的是
-%%   「同一份樣本」本身是正確性性質——並排讀的診斷必須講同一批 query。
-%%   監控模式照樣接上這個 node 但不抽樣：它是改了 evaluation.diagnosis.*
-%%   之後 --from-node 的接續點（COMPUTED_KEYS 要求它在每種模式都在）。
-
-%% 四項診斷為什麼長得一模一樣
-%%   它們由 registry（diagnosis.metric.contract.DIAGNOSES）導出，node 函式
-%%   由 make_diagnosis_node 生成。加第五項＝新增一個子套件 ＋ registry 補一行，
-%%   report_builder 零改動。model_capacity 是唯一宣告自己 INPUTS 的那個
-%%   （吃 gain_ledger ＋ item_ability，不吃共用抽樣）。
+%% 兩種模式的 node 一樣（#532 起）
+%%   --post-training 與監控模式（預設，含 --compare）只差 prepare_eval_data 讀哪張預測表、
+%%   用哪張母體表分群；evaluation 沒有診斷頁，不再有只屬於某一種模式的 node。
 
 flowchart TB
 
@@ -95,7 +69,6 @@ flowchart TB
     src_seg[("sample_pool ／ inference_population<br/><small>該模式的母體表（post-training ／ 監控）・ 以 (time, entity) 補分群欄<br/>segment_sources.&lt;欄&gt;.table 可覆寫</small>")]
   end
 
-  art_gain[["gain_ledger<br/><small>training 落地 ・ optional，可缺席</small>"]]
   cfg_cat[/"evaluation.item_categories<br/><small>mapping（手寫）或 column（取自 sample_pool 的一欄，只在 --post-training，#379）<br/>啟用時整套指標對大類粒度再跑第二輪</small>"/]
 
   %% ---------------------- 主鏈：整理 ----------------------
@@ -111,30 +84,11 @@ flowchart TB
   d_baseline(["baseline_metrics<br/><small>JSON</small>"])
   n_pq["compute_prediction_quality<br/><small>每一列候選當二元預測 ・ 一次 groupBy(item, 細箱) ・ 不排除無正例的 query group<br/>report.sections.prediction_quality: false（框架預設）時只寫 stub</small>"]
   d_pq(["prediction_quality_metrics<br/><small>JSON</small>"])
-  n_agg["compute_report_aggregates<br/><small>主報表診斷區的 Spark 端聚合（bin 計數／quartile／rank 矩陣）</small>"]
+  n_agg["compute_report_aggregates<br/><small>主報表 per-item 細部拆解段的 Spark 端聚合（bin 計數／quartile／rank 矩陣）</small>"]
   d_agg(["evaluation_report_aggregates<br/><small>JSON</small>"])
 
-  %% ---------------------- 診斷流 ----------------------
-  n_sample["draw_diagnosis_sample_node<br/><small>單位＝有正例的 query ・ 只抽一次，下游共用 ・ 監控模式不抽</small>"]
-  d_sample(["diagnosis_sample"])
-  subgraph POST[" 僅 --post-training：registry 診斷 ＋ 分頁 "]
-    n_cs["diagnose_config_shift"]
-    d_cs(["evaluation_config_shift<br/><small>JSON</small>"])
-    n_ia["diagnose_item_ability"]
-    d_ia(["evaluation_item_ability<br/><small>JSON</small>"])
-    n_mc["diagnose_model_capacity"]
-    d_mc(["evaluation_model_capacity<br/><small>JSON</small>"])
-    n_sup["diagnose_suppression"]
-    d_sup(["evaluation_suppression<br/><small>JSON</small>"])
-    n_pages["render_diagnosis_pages<br/><small>畫這次的診斷結果 ・ 先比對名字與設定指紋 ・ 停用的那項就沒有那一頁</small>"]
-  end
-  subgraph MON[" 僅監控模式（預設，含 --compare） "]
-    n_nopages["no_diagnosis_pages<br/><small>零讀取 ・ 回空清單：只為了 generate_report 的診斷頁位置輸入</small>"]
-  end
-  d_pages(["evaluation_diagnosis_pages<br/><small>兩種模式各由一個 node 產出</small>"])
-
   %% ---------------------- 匯流 ----------------------
-  n_report["generate_report<br/><small><b>純函式</b>：6 個必填輸入、無 varargs、不含任何 Spark 物件或 action</small>"]
+  n_report["generate_report<br/><small><b>純函式</b>：輸入全部是落地的 JSON、無 varargs、不含任何 Spark 物件或 action</small>"]
   o_report(["evaluation_report　★ report.html<br/><small>data/evaluation/&lt;model_version&gt;/&lt;YYYYMMDD&gt;/</small>"])
 
   %% ---------------------- 比較模式（追加） ----------------------
@@ -157,7 +111,6 @@ flowchart TB
   n_prep --> d_segcols
   d_segcols --> n_metrics
   d_segcols --> n_baseline
-  d_segcols --> n_sample
   d_segcols -- "--compare-only：讀寫 enriched 那次落地的" --> n_creport
   d_segcols -- "只取 joined：分區指紋的一部分（#374）" --> n_agg
   d_segcols -- "只取 joined" --> n_pq
@@ -180,29 +133,9 @@ flowchart TB
   o_enriched --> n_pq
   n_pq --> d_pq
 
-  o_enriched --> n_sample
-  n_sample --> d_sample
-  d_sample --> n_cs
-  n_cs --> d_cs
-  d_sample --> n_ia
-  n_ia --> d_ia
-  d_sample --> n_sup
-  n_sup --> d_sup
-  art_gain --> n_mc
-  d_ia -- "同一次執行的 item_ability 結果" --> n_mc
-  n_mc --> d_mc
-
-  d_cs -- "依 DIAGNOSES 順序<br/>讀值並比對指紋" --> n_pages
-  d_ia --> n_pages
-  d_mc --> n_pages
-  d_sup --> n_pages
-  n_pages --> d_pages
-  n_nopages --> d_pages
-
   d_metrics --> n_report
   d_baseline --> n_report
   d_agg --> n_report
-  d_pages --> n_report
   d_pq --> n_report
   n_report --> o_report
 
@@ -218,7 +151,6 @@ flowchart TB
   %% ---------------------------- 樣式 -------------------------------
   classDef src fill:#a5d8ff,stroke:#1971c2,stroke-width:1.5px,color:#0b3d6b
   classDef cfg fill:#e5dbff,stroke:#7048e8,stroke-width:1.5px,color:#3b2a7a
-  classDef art fill:#c3fae8,stroke:#0ca678,stroke-width:1.5px,color:#0b4f3f
   classDef nd fill:#ffffff,stroke:#57606a,stroke-width:1.5px,color:#1f2328
   classDef data fill:#f1f3f5,stroke:#adb5bd,stroke-width:1px,color:#343a40
   classDef mem fill:#ffffff,stroke:#adb5bd,stroke-width:1px,stroke-dasharray:5 3,color:#6a737d
@@ -226,8 +158,7 @@ flowchart TB
 
   class src_ranked,src_teval,src_label,src_seg src
   class cfg_cat cfg
-  class art_gain art
-  class n_prep,n_metrics,n_baseline,n_pq,n_agg,n_sample,n_cs,n_ia,n_mc,n_sup,n_pages,n_nopages,n_report,n_validate,n_loadb,n_restrict,n_creport nd
-  class d_cs,d_ia,d_mc,d_sup,d_agg,d_metrics,d_baseline,d_pq data
-  class d_sample,d_pages,d_braw,d_common mem
+    class n_prep,n_metrics,n_baseline,n_pq,n_agg,n_report,n_validate,n_loadb,n_restrict,n_creport nd
+  class d_agg,d_metrics,d_baseline,d_pq data
+  class d_braw,d_common mem
   class o_report,o_enriched,o_creport out

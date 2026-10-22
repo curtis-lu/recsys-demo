@@ -2,7 +2,7 @@
 
 This is a leaf module: its module-level imports are ``logging`` / ``typing``
 / ``numpy``, plus ``utils.ranking`` for the within-query order. Do not add any
-other project import — ``diagnosis.metric.*``, ``evaluation.metrics_spark``,
+other project import — ``evaluation.metrics_spark``,
 ``evaluation.report_builder`` and several ``scripts/`` import from here, so a
 project import risks a cycle. ``utils.ranking`` is the exception because it
 imports nothing from the project, so it cannot close one; it is where the tie
@@ -16,10 +16,10 @@ What lives here:
   training pipeline). HPO scores each trial on driver-side numpy arrays;
   going through Spark for one scalar per trial would be massive overhead.
 * The per-item macro primitives (``positive_row_contributions`` /
-  ``macro_from_per_item`` / ``compute_macro_per_item_map``), shared by HPO,
-  ``metrics_spark.macro_average`` and the metric diagnoses.
+  ``macro_from_per_item`` / ``compute_macro_per_item_map``), shared by HPO
+  and ``metrics_spark.macro_average``.
 * :func:`metric_params` — the only reader of ``evaluation.metric`` that the
-  metrics, diagnosis and report code uses (ADR-0020 design H), so the
+  metrics and report code uses (ADR-0020 design H), so the
   fallback semantics cannot drift between copies. A15 in
   ``core/consistency.py`` reads the same block separately, only to validate
   value domains.
@@ -56,18 +56,17 @@ logger = logging.getLogger(__name__)
 def metric_params(parameters: dict) -> dict:
     """Read ``evaluation.metric`` → ``{"k", "weight_alpha", "min_positives", "shrinkage_k"}``.
 
-    The one reader of that block that the metrics / diagnosis / report code
-    uses (ADR-0020 design H): the Spark main metrics, the diagnosis family,
-    the report and the ``scripts/`` diagnoses all call this
+    The one reader of that block that the metrics / report code uses
+    (ADR-0020 design H): the Spark main metrics and the report call this
     instead of keeping their own copy. A15
-    (``core.consistency.diagnosis_metric_param_errors``) reads the same block
+    (``core.consistency.evaluation_metric_param_errors``) reads the same block
     separately, only to validate value domains; it resolves no fallbacks.
 
     Fallback: a missing ``evaluation`` / ``metric`` block, a missing key, or
     an explicit ``None`` value all resolve to ``k=None`` (no truncation),
     ``weight_alpha=0.0``, ``min_positives=0``, ``shrinkage_k=0.0`` — the plain
     equal-weight, untruncated macro. Value domains are validated by A15
-    (``core.consistency.diagnosis_metric_param_errors``), not here.
+    (``core.consistency.evaluation_metric_param_errors``), not here.
 
     ``k`` and ``evaluation.k_values`` are independent axes. ``k_values`` is
     the K grid of the ``@K`` families. ``k`` is the truncation depth of the
@@ -326,9 +325,9 @@ def positive_row_contributions(
     row_idx[i] (zeroed when its rank exceeds ``k``). Queries with no
     positive rows contribute nothing. Within a query rows rank by score
     descending, ties by ``items`` ascending (:mod:`recsys_tfb.utils.ranking`);
-    ``items`` takes the raw item values and only breaks ties. Shared by
-    :func:`compute_macro_per_item_map` and the diagnoses' per-item AP
-    (``diagnosis.metric._common.per_item_ap``).
+    ``items`` takes the raw item values and only breaks ties. Used by
+    :func:`compute_macro_per_item_map`; the diagnoses' per-item AP shared it
+    until #532 removed them.
 
     Returns a **fixed 2-tuple** ``(contrib, row_idx)`` — always, for every
     argument combination. Sampling weights deliberately do NOT belong here:
@@ -380,8 +379,9 @@ def align_positive_row_weights(
     """Validate a query-level weight vector and select the positive rows.
 
     ``weights`` is **row-aligned**: one entry per input row, every row of a
-    query carrying that query's weight (e.g. the inverse inclusion
-    probability of a stratified diagnosis sample). ``n_rows`` is the input
+    query carrying that query's weight. Its one caller passed the inverse
+    inclusion probability of the stratified diagnosis sample; #532 removed
+    the diagnoses, and nothing passes weights now. ``n_rows`` is the input
     row count the vector must match (``len(groups)``); ``row_idx`` is the
     original-order index vector returned by
     :func:`positive_row_contributions`. Returns ``weights[row_idx]`` as
@@ -471,10 +471,12 @@ def compute_macro_per_item_map(
     :func:`macro_from_per_item` for the exact formulas.
 
     ``weights`` (optional) is a **row-aligned, query-level** weight vector —
-    typically the inverse inclusion probability of a stratified diagnosis
-    sample, where unweighted estimates are biased whenever the sampling ratio
-    is below 1. Semantics: giving a query weight ``w`` is defined to be exactly
-    equivalent to that query appearing ``w`` times in the input. Concretely,
+    the inverse inclusion probability of a stratified sample, where
+    unweighted estimates are biased whenever the sampling ratio is below 1.
+    The diagnosis sample was the one caller that passed it; #532 removed the
+    diagnoses, and no caller passes it now. Semantics: giving a query
+    weight ``w`` is defined to be exactly equivalent to that query appearing
+    ``w`` times in the input. Concretely,
     each item's AP becomes the *weighted* mean over its positive rows, and the
     per-item ``n_pos`` handed to :func:`macro_from_per_item` becomes the sum of
     those weights — so ``min_positives`` / ``shrinkage_k`` / ``weight_alpha``
@@ -488,8 +490,8 @@ def compute_macro_per_item_map(
     the weight, so a second weight channel there would double-count.
 
     ``weights=None`` (the default) runs the original unweighted code path
-    verbatim — no ``np.ones`` fill-in — so the main metric path, which shares
-    these primitives with the diagnosis layer, stays bit-for-bit unchanged.
+    verbatim — no ``np.ones`` fill-in — so the main metric path stays
+    bit-for-bit what it was before the weighted path was added.
 
     Empty input, or no positive rows anywhere, returns ``0.0``. If every
     item is excluded by ``min_positives``, also returns ``0.0``.
@@ -564,7 +566,7 @@ def compute_pooled_average_precision(
 
     scikit-learn is imported here rather than at the top: importing
     ``sklearn.metrics`` takes about 0.6 s, and every importer of this module
-    (the reports, diagnosis, ``scripts/``) would pay it for two functions only
+    (the reports, ``scripts/``) would pay it for two functions only
     the HPO loop calls.
 
     No positive row raises ``ValueError``: a **pre-check** on the input.

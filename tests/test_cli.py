@@ -2577,8 +2577,12 @@ class TestAnEvaluationMonthNotWrittenPullsTheJoinBack:
 
     def test_a_landed_month_is_read_not_rejoined(self, tmp_path):
         plan = self._plan(tmp_path, landed=("2025-12-31", "2026-01-31"))
-        # Non-empty first: a slice that pulled nothing would pass the second.
-        assert plan.auto_included, "the slice pulled nothing back at all"
+        # The planner weighed the join and skipped it: a slice that never
+        # looked at prepare_eval_data would pass the second assertion too.
+        # (Until #532 the guard was "auto_included is non-empty": the
+        # memory-only diagnosis-pages stub was always pulled back. Nothing
+        # memory-only sits upstream of the report any more.)
+        assert "prepare_eval_data" in plan.skipped, plan
         assert "prepare_eval_data" not in plan.auto_included
 
 

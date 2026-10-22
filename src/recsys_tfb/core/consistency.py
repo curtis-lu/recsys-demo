@@ -102,20 +102,12 @@ Layer 1 — config-static (implemented here; aggregated by
   Training-stage feature selection must never drop the item column (for a
   ranking task the item must stay a model feature; mirrors A2/A7). Predicate:
   ``feature_selection_excludes_item``.
-* A15 — ``evaluation.metric`` / ``evaluation.diagnosis`` parameter domains:
-  ``weight_alpha`` ∈ [0,1]; ``k`` null or int ≥ 1; ``min_positives`` ≥ 0;
-  ``shrinkage_k`` ≥ 0; ``diagnosis.sample.max_queries`` ≥ 1;
-  ``diagnosis.sample.min_pos_queries_per_item`` ≥ 1;
-  ``diagnosis.item_ability.top_n`` ≥ 0; every
-  ``diagnosis.<name>.enabled`` for ``name`` in
-  ``diagnosis.metric.contract.DIAGNOSES`` must be a real bool (a quoted YAML
-  ``"false"`` is truthy and would silently enable the node); and
-  ``evaluation.segment_columns`` must not use the sampler's reserved names
-  ``stratum`` / ``inclusion_weight``. Predicate:
-  ``diagnosis_metric_param_errors``. Registry diagnoses stay in A15 rather
-  than getting their own code: their ``enabled`` flag is what decides whether
-  the shared diagnosis sample is drawn, i.e. the same invariant family as the
-  ``diagnosis.sample`` domains.
+* A15 — ``evaluation.metric`` parameter domains: ``weight_alpha`` ∈ [0,1];
+  ``k`` null or int ≥ 1; ``min_positives`` ≥ 0; ``shrinkage_k`` ≥ 0.
+  Predicate: ``evaluation_metric_param_errors``. Until #532 it also checked
+  the ``evaluation.diagnosis`` domains and kept ``evaluation.segment_columns``
+  off the diagnosis sampler's own column names; both went with the diagnoses
+  (ADR-0031 decision 2), and A61 now refuses the whole block.
 * A16 — retired 2026-07-17 with the reconciliation layer. The code is NOT
   renumbered: existing docs and plans cite invariants by number, so reusing
   A16 or shifting A17+ would silently repoint those references.
@@ -127,8 +119,10 @@ Layer 1 — config-static (implemented here; aggregated by
 * A18 — retired 2026-07-22 with the offset_sweep diagnosis layer. The code is
   NOT renumbered: existing docs and plans cite invariants by number, so reusing
   A18 or shifting A19+ would silently repoint those references.
-* A19 — evaluation.diagnosis.suppression.top_examples must be a non-negative
-  int (enabled is covered by A15). Predicate: ``suppression_param_errors``.
+* A19 — retired 2026-10-22 with the evaluation diagnosis pages (#532, ADR-0031
+  decision 2): it only checked ``evaluation.diagnosis.suppression``. The code is
+  NOT renumbered: existing docs and plans cite invariants by number, so
+  reusing A19 or shifting A20+ would silently repoint those references.
 * A20 — training-side ``diagnostics.*`` parameter domains:
   ``diagnostics.shap.background`` ∈ {global, per_item};
   ``diagnostics.gain_ledger.enabled`` and ``diagnostics.shap.
@@ -339,10 +333,15 @@ Layer 1 — config-static (implemented here; aggregated by
   directions (ADR-0019 decision 6): a declared key nothing reads is a switch
   that does nothing (four shipped that way until #351), and a name the report
   reads that no conf declares is a switch with no line to flip it
-  (``diagnosis_links``, on by default). Containment in one direction passes one
-  of the two. For each missing switch the refusal names the value that keeps
-  what leaving it out does: ``true``, except the ones in
-  ``EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT`` (``prediction_quality``).
+  (``diagnosis_links``, on by default, until #532 removed it). Containment in
+  one direction passes one of the two. For each missing switch the refusal
+  names the value that keeps what leaving it out does: ``true``, except the
+  ones in ``EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT``
+  (``prediction_quality``). Each declared value must be a YAML bool (#505):
+  every reader takes the switch by truthiness, so a quoted ``"false"`` reads
+  as on. A renamed switch needs no check of its own: the old name is declared
+  and not read, the new one read and not declared (``diagnostics`` became
+  ``per_item_breakdown`` in #532).
   The constant lives in ``core/`` because ``core/`` must not import the
   report layer. A ``sections`` block that declares no switch (absent, null or
   empty) is not checked, a visible opt-out to every default; once any switch
@@ -754,15 +753,17 @@ Layer 1 — config-static (implemented here; aggregated by
   predicate, its wiring, its tests and this legend entry. Leave the code slot
   ``A60`` retired-not-renumbered afterwards, per A16/A17/A18. Tracked in issue
   #518.
-* A61 — a conf still spelling ``evaluation.diagnosis.ci``. It configured the
-  bootstrap confidence intervals (the headline macro per-item mAP's,
-  ``config_shift``'s Δ and ``item_ability``'s per-item AUC); #515 removed all
-  three. A43's shape: **presence is the failure, whatever the value** —
-  ``enabled: false`` switches off nothing that still exists, and the key sits
-  under ``evaluation.diagnosis``, a fingerprinted subtree (``COMPUTED_KEYS``),
-  so a conf that keeps it is not the conf that deleted it. Keys:
-  :data:`RETIRED_DIAGNOSIS_CI_KEYS`. Predicate:
-  ``retired_diagnosis_ci_key_errors`` (returns errors; the evaluation command
+* A61 — a conf still spelling ``evaluation.diagnosis``. #515 removed the
+  bootstrap confidence intervals it configured under ``ci``; #532 removed the
+  rest (the four diagnoses ``config_shift``, ``item_ability``,
+  ``model_capacity`` and ``suppression``, and the sample they shared). A43's
+  shape: **presence is the failure, whatever the value** — ``enabled: false``
+  switches off nothing that still exists, and nothing reads the block, so a
+  conf that keeps it gets no word that it does nothing. Unlike A43's keys it
+  no longer moves a fingerprint: #532 dropped its ``COMPUTED_KEYS`` row, so
+  keeping it and deleting it compute the same artifacts; the harm is the
+  silence alone. Keys: :data:`RETIRED_DIAGNOSIS_KEYS`. Predicate:
+  ``retired_diagnosis_key_errors`` (returns errors; the evaluation command
   raises, collected with A22/A34/A42/A43). NOT aggregated, for A43's reason:
   the harm belongs to evaluation alone (A34's reason, issue #158).
 
@@ -2298,8 +2299,8 @@ def segment_source_override_errors(parameters: dict) -> list[str]:
     return errors
 
 
-def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
-    """evaluation.metric / evaluation.diagnosis parameter domains (A15).
+def evaluation_metric_param_errors(parameters: dict) -> list[str]:
+    """evaluation.metric parameter domains (A15).
 
     Absent blocks are fine (all keys have behavior-preserving defaults);
     present values must be in-domain, else the metric family silently
@@ -2308,8 +2309,6 @@ def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
     errors: list[str] = []
     ev = parameters.get("evaluation", {}) or {}
     metric = ev.get("metric", {}) or {}
-    diag = ev.get("diagnosis", {}) or {}
-    sample = diag.get("sample", {}) or {}
 
     alpha = metric.get("weight_alpha", 0.0)
     if not (_is_number(alpha) and 0.0 <= float(alpha) <= 1.0):
@@ -2334,82 +2333,6 @@ def diagnosis_metric_param_errors(parameters: dict) -> list[str]:
     if not (_is_number(sk) and float(sk) >= 0.0):
         errors.append(
             f"evaluation.metric.shrinkage_k={sk!r} must be a number >= 0."
-        )
-
-    for key, val, floor in (
-        ("evaluation.diagnosis.sample.max_queries",
-         sample.get("max_queries", 200000), 1),
-        ("evaluation.diagnosis.sample.min_pos_queries_per_item",
-         sample.get("min_pos_queries_per_item", 50), 1),
-        ("evaluation.diagnosis.item_ability.top_n",
-         (diag.get("item_ability", {}) or {}).get("top_n", 30), 0),
-    ):
-        if not (isinstance(val, int) and not isinstance(val, bool)
-                and val >= floor):
-            errors.append(f"{key}={val!r} must be an int >= {floor}.")
-
-    # A quoted YAML "false" is truthy, for every registry diagnosis
-    # (diagnosis.metric.contract.DIAGNOSES). These belong to A15 rather than a
-    # new code: their `enabled` is what decides whether the SHARED diagnosis
-    # sample gets drawn at all, so they are members of the same invariant as
-    # the sample's own parameters above — not a separate concern.
-    #
-    # Imported lazily: core/ must not gain an import-time dependency on
-    # diagnosis/ (the layering claim is that diagnosis sits above the core
-    # config layer, not beside it).
-    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-
-    for name in DIAGNOSES:
-        val = (diag.get(name, {}) or {}).get("enabled", True)
-        if not isinstance(val, bool):
-            errors.append(
-                f"evaluation.diagnosis.{name}.enabled={val!r} must be a "
-                f"boolean (YAML true/false; a quoted string like \"false\" is "
-                f"truthy and would silently enable the node)."
-            )
-
-    # ``draw_diagnosis_sample`` adds its own 'stratum' / 'inclusion_weight'
-    # columns to the sample, then joins them onto the predictions by query
-    # key. A segment column of the same name would be duplicated by that join
-    # and blow up far downstream with an opaque pandas error ("Grouper for
-    # 'stratum' not 1-dimensional"). Catching it here means the CLI rejects
-    # the config in ~1s instead of 2-4 minutes into a Spark job.
-    reserved = {"stratum", "inclusion_weight"}
-    bad_seg = sorted(
-        set(ev.get("segment_columns", []) or []) & reserved
-    )
-    for col in bad_seg:
-        errors.append(
-            f"evaluation.segment_columns entry {col!r} is a reserved column "
-            f"name: the diagnosis sampler creates its own 'stratum' and "
-            f"'inclusion_weight' columns, so a segment column of the same "
-            f"name would collide in the sample join. Rename it in the source "
-            f"table or drop it from evaluation.segment_columns."
-        )
-    return errors
-
-
-def suppression_param_errors(parameters: dict) -> list[str]:
-    """evaluation.diagnosis.suppression.top_examples parameter domain (A19).
-
-    ``enabled`` is intentionally NOT re-validated here: A15
-    (``diagnosis_metric_param_errors``) already walks every name in
-    ``diagnosis.metric.contract.DIAGNOSES`` — including ``suppression`` once
-    it is registered — and validates its ``enabled`` flag there. Checking it
-    again here would raise two error messages for the same bad value.
-    """
-    errors: list[str] = []
-    diag = ((parameters.get("evaluation", {}) or {})
-            .get("diagnosis", {}) or {})
-    cfg = diag.get("suppression", {}) or {}
-    top_examples = cfg.get("top_examples", 50)
-    if not (
-        isinstance(top_examples, int) and not isinstance(top_examples, bool)
-        and top_examples >= 0
-    ):
-        errors.append(
-            f"evaluation.diagnosis.suppression.top_examples={top_examples!r} "
-            "must be a non-negative int."
         )
     return errors
 
@@ -2506,8 +2429,7 @@ def training_hpo_finalize_param_errors(parameters: dict) -> list[str]:
     empty means OK.
     """
     # Imported here, not at the top: core/ has no import-time dependency on
-    # the layers above it, and evaluation/metrics_spark imports this module
-    # (the A15 precedent for diagnosis/).
+    # the layers above it, and evaluation/metrics_spark imports this module.
     from recsys_tfb.evaluation.metric_registry import METRIC_NAMES
 
     errors: list[str] = []
@@ -2762,8 +2684,7 @@ def hpo_objective_population_errors(parameters: dict) -> list[str]:
     build is rerun either way.
     """
     # Imported here, not at the top: core/ has no import-time dependency on
-    # the layers above it, and evaluation/metrics_spark imports this module
-    # (the A15 precedent for diagnosis/).
+    # the layers above it, and evaluation/metrics_spark imports this module.
     from recsys_tfb.evaluation.metric_registry import BINARY_PREDICTION_METRICS
 
     training = parameters.get("training") or {}
@@ -2840,8 +2761,7 @@ def binary_test_metrics_verdict(
     ``test_metrics`` block or unknown names, to A53 / A25.
     """
     # Imported here, not at the top: core/ has no import-time dependency on
-    # the layers above it, and evaluation/metrics_spark imports this module
-    # (the A15 precedent for diagnosis/).
+    # the layers above it, and evaluation/metrics_spark imports this module.
     from recsys_tfb.evaluation.metric_registry import (
         BINARY_PREDICTION_METRICS,
         effective_hpo_objective,
@@ -3465,29 +3385,32 @@ def retired_precision_policy_key_errors(parameters: dict) -> list[str]:
     ]
 
 
-#: A61: the ``evaluation.diagnosis`` block that configured the bootstrap
-#: confidence intervals #515 removed.
-RETIRED_DIAGNOSIS_CI_KEYS: tuple[str, ...] = (
-    "evaluation.diagnosis.ci",
+#: A61: the ``evaluation.diagnosis`` block. #515 removed the bootstrap
+#: confidence intervals under its ``ci``, #532 every diagnosis and the sample
+#: they shared.
+RETIRED_DIAGNOSIS_KEYS: tuple[str, ...] = (
+    "evaluation.diagnosis",
 )
 
 
-def retired_diagnosis_ci_key_errors(parameters: dict) -> list[str]:
-    """A61 — refuse the confidence-interval block #515 retired, whatever its value.
+def retired_diagnosis_key_errors(parameters: dict) -> list[str]:
+    """A61 — refuse the diagnosis block #515 and #532 retired, whatever its value.
 
-    Same reasoning as A43 (``retired_calibration_bin_key_errors``): nothing
-    reads it, so left in place it switches nothing and says nothing; and it
-    sits in a fingerprinted subtree, so keeping it is not the same conf as
-    deleting it.
+    Same shape as A43 (``retired_calibration_bin_key_errors``): nothing reads
+    it, so left in place it switches nothing and says nothing. Unlike A43's
+    keys it moves no fingerprint any more (#532 dropped its ``COMPUTED_KEYS``
+    row); the silence is the whole harm.
     """
     present = [
-        dotted for dotted in RETIRED_DIAGNOSIS_CI_KEYS
+        dotted for dotted in RETIRED_DIAGNOSIS_KEYS
         if _dotted_key_present(parameters, dotted)
     ]
     if not present:
         return []
     return [
         "A61: " + ", ".join(repr(k) for k in present) + " configured the "
+        "diagnosis pages that #532 removed (config_shift, item_ability, "
+        "model_capacity, suppression and their shared sample) and the "
         "confidence intervals that #515 removed, and nothing reads it. Delete "
         "the whole block; there is no replacement setting. The value does not "
         "matter — `enabled: false` and an empty block are rejected too."
@@ -3497,7 +3420,7 @@ def retired_diagnosis_ci_key_errors(parameters: dict) -> list[str]:
 #: The ``evaluation.report.sections`` switches the report reads: one name per
 #: ``_section_on(parameters, name)`` call in ``evaluation/report_builder.py``,
 #: which refuses any name not listed here (A34). ``baseline``,
-#: ``diagnostics`` and ``prediction_quality`` are also read directly by the
+#: ``per_item_breakdown`` and ``prediction_quality`` are also read directly by the
 #: nodes that skip computing (``compute_baseline_metrics`` /
 #: ``compute_report_aggregates`` / ``compute_prediction_quality``); those reads
 #: bypass the ``_section_on`` pre-check, so a new direct read of a name that is
@@ -3507,9 +3430,8 @@ def retired_diagnosis_ci_key_errors(parameters: dict) -> list[str]:
 EVALUATION_REPORT_SECTIONS: frozenset[str] = frozenset({
     "dataset_overview",
     "primary_map",
-    "diagnostics",
+    "per_item_breakdown",
     "baseline",
-    "diagnosis_links",
     "prediction_quality",
 })
 
@@ -3671,6 +3593,13 @@ def report_section_key_errors(parameters: dict) -> list[str]:
     empty mapping) is not checked: declaring nothing is a visible opt-out to
     every default, not a key that drifted quietly. Once any switch is
     declared, the block is checked in full.
+
+    Each switch the report reads must also hold a bool (#505). Every reader
+    takes it by truthiness (``_section_on``, ``prediction_quality_on``, the
+    nodes that write a stub), so ``"false"`` — or ``'false`'``, what selecting
+    this check's own advice up to the line end copies — reads as on. Those
+    readers are left as they are: the evaluation command runs this check
+    before any of them.
     """
     eval_params = parameters.get("evaluation", {}) or {}
     if not isinstance(eval_params, Mapping):
@@ -3701,6 +3630,17 @@ def report_section_key_errors(parameters: dict) -> list[str]:
             f"the report never reads — setting it changes nothing. Delete the "
             f"key(s). The switches the report reads are "
             f"{sorted(EVALUATION_REPORT_SECTIONS)}."
+        )
+    not_bool = [
+        (name, sections[name]) for name in sorted(declared - unread, key=str)
+        if not isinstance(sections[name], bool)
+    ]
+    if not_bool:
+        errors.append(
+            "A34: evaluation.report.sections switches must be true or false, "
+            "written unquoted; every reader takes them by truthiness, so a "
+            "quoted 'false' reads as on. Not a bool: "
+            + ", ".join(f"`{name}: {value!r}`" for name, value in not_bool)
         )
     undeclared = EVALUATION_REPORT_SECTIONS - declared
     if undeclared:
@@ -3803,9 +3743,7 @@ def validate_config_consistency(parameters: dict) -> None:
 
     errors.extend(segment_source_override_errors(parameters))
 
-    errors.extend(diagnosis_metric_param_errors(parameters))
-
-    errors.extend(suppression_param_errors(parameters))
+    errors.extend(evaluation_metric_param_errors(parameters))
 
     errors.extend(training_diagnostics_param_errors(parameters))
 
@@ -5917,8 +5855,7 @@ def scoring_param_errors(parameters: dict) -> list[str]:
     Nothing about whether a metric can be computed on test is decided here.
     """
     # Imported here, not at the top: core/ has no import-time dependency on
-    # the layers above it, and evaluation/metrics_spark imports this module
-    # (the A15 precedent for diagnosis/).
+    # the layers above it, and evaluation/metrics_spark imports this module.
     from recsys_tfb.evaluation.metric_registry import METRIC_NAMES
 
     known_keys = ("snap_date", "metrics", "selection_metric")

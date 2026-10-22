@@ -275,20 +275,20 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 
 ## 11. pandas `groupby` 預設 `dropna=True` 讓 NULL 群整組消失（診斷層尤其危險，2026-07-20）
 
-- **症狀（第一分鐘認出它）**：某個彙總表／矩陣少了一整個群，而其他數字（總量、極值、逐列計算的結果）顯示那個群明明存在。實例：`config_shift` 的 `query_offset_spread.max = 4.605`，但 `offset_matrix` 裡沒有任何一個 group 的 spread 解釋得了這個值；`notes` 也是空的。
+- **症狀（第一分鐘認出它）**：某個彙總表／矩陣少了一整個群，而其他數字（總量、極值、逐列計算的結果）顯示那個群明明存在。實例（該診斷已隨 #532 整批刪除，教訓不變）：`config_shift` 的 `query_offset_spread.max = 4.605`，但 `offset_matrix` 裡沒有任何一個 group 的 spread 解釋得了這個值；`notes` 也是空的。
 - **根因**：`DataFrame.groupby()` 的 `dropna` 預設是 `True`——**分組鍵含 NaN 的列被整批丟棄，不報錯、不警告**。而 Spark 端的整數欄只要有任一 NULL，`toPandas()` 之後必然是 `float64` 帶 `NaN`（同 §8 的 dtype 家族）。用 `drop_duplicates().sort_values()` 手動迭代則會保留 NaN，所以**把手動迭代重構成 groupby 是典型的引入點**——這正是本次的實際來源（重構前後測試全綠）。
 - **為什麼在診斷層特別貴**：診斷的輸出常被讀成「我量過了，沒事」。一個群靜默消失會讓「沒量到」與「量到零」在報表上長得一模一樣，讀者據此排除掉真正的原因——比不提供這項診斷更糟。
 - **規則**：**彙總診斷數字的 `groupby` 一律顯式寫 `dropna=False`**，NaN 群給明確標籤（如 `"<NULL>"`），並讓輸出帶一則「有 N 個 NULL 群」的觀測。要丟棄 NaN 也可以，但必須是寫出來的決定，不是撿到的預設。
 - **驗證方式**：`grep -rn "groupby(" src/recsys_tfb/diagnosis/` 拿到**候選清單**（不是通過／失敗閘——實測 10 個命中只有 1 個相關，當閘用會被當噪音略過）。逐一問一個問題：**這個分組鍵可能是 NaN 嗎？** 來自使用者資料的欄（context 欄、item、entity）可能；自己造的（`factorize` 碼、自己組的字串標籤）不可能。只有前者需要 `dropna=False`。
   針對性測試：造一份分組鍵半數為 `float64` NaN 的 fixture，斷言該群出現在輸出裡；mutation 靶＝拿掉 `dropna=False`，測試必須轉紅。
-  **已知待查（2026-07-20 掃到、未處理）**：`diagnosis/metric/sample.py:281` 的 `groupby(item_col)` 分組鍵來自使用者資料，item 為 NULL 時該筆會從 `per_item_sampled` 計數靜默消失。屬 Plan 0 已 merge 的程式碼，尚未評估 item 欄是否有上游 not-null 保證。
+  （2026-07-20 曾登記一筆待查：`diagnosis/metric/sample.py` 的 `groupby(item_col)`；那支檔案已隨 #532 刪除，不再待查。）
 
 ## 12. 清單寫法的 Node inputs 與函式簽章是**位置**綁定：少一個輸入就整排平移（2026-07-20 公司環境實例；`generate_report` 已於同日修復；dict 寫法照名字綁，2026-09-30 起）
 
 - **症狀（第一分鐘認出它）**：某個 node 收到「另一個 node 的產物」。徵兆是型別完全不合的錯誤出現在看似無關的函式裡，例如 `build_offset_sweep_section` 爆 `TypeError: list indices must be integers or slices, not dict`——因為 `offset_sweep` 參數收到的是 `config_shift` 的 dict（它的 `per_item` 是 list of dicts，而 offset_sweep 的是 dict）。
 - **根因（通用，清單寫法的 node 仍然存在）**：`inputs` 寫成清單時，`core/runner.py` 是 `node.func(*args, ...)`，**位置展開**。`node.inputs` 少了一個元素，其後每個參數都往前移一格。**運氣好才會爆**——兩邊型別相容時不會有任何錯誤，報表會靜靜把 A 診斷的數字印在 B 診斷的標題底下。清單寫法的 node 只要具名參數 ≥2 個都吃這條規則。**出路（更新於 2026-09-30，ADR-0030 決定 8，#486）**：`inputs` 可以寫成 `{參數名: dataset 名}` 的 dict，Runner 照名字傳，這種 node 沒有位置可錯（`architecture-constraints.md` F4）。
-- **`generate_report` 這個實例已修復（2026-07-20，Plan 1.5）**：修復前它是「7 個具名參數 ＋ `*args` varargs」——registry 診斷用 `*(f"evaluation_{name}" for name in DIAGNOSES)` 展開接在尾端，中間漏一個完全不會報錯，只會平移。修法是**把簽章改成剛好 8 個必填、無預設值、無 varargs 的參數**（`evaluation_metrics, parameters, baseline_metrics, metric_ci, offset_sweep, pair_ledger, report_aggregates, diagnosis_pages`），對應 `pipeline.py` 裡剛好 8 個元素的 `inputs` 列表（**2026-07-22 更新**：`offset_sweep`（PR#114）與 `pair_ledger`（Plan 3 併入 suppression）其後移除，`generate_report` 當時剩 6 個必填參數＝`evaluation_metrics, parameters, baseline_metrics, metric_ci, report_aggregates, diagnosis_pages`；位置綁定機制與教訓不變。現行簽章：#381 加上 `prediction_quality_metrics`、#515 拿掉 `metric_ci`，仍是 6 個＝`evaluation_metrics, parameters, baseline_metrics, report_aggregates, diagnosis_pages, prediction_quality_metrics`）。**varargs 消失才是真正的修復**：少一個輸入現在會直接 `TypeError: missing 1 required positional argument`，在 node 呼叫當下就炸，不會等到報表算出一堆型別兜得上但語意錯的數字。純粹「參數個數對得上」不算修好——8 對 8 只是把賭注從「兩邊型別碰巧相容」降到「兩邊個數碰巧相同」，varargs 沒了才是把「漏一個不報錯」這個洞本身補起來。
-- **規則**：改動任何 node 的 `inputs` 或其函式簽章之後，跑下面的並排比對。**新增診斷時尤其必跑**（Plan 2-5 每加一項診斷，`generate_report` 的簽章與 `inputs` 都不會變，因為診斷產物已經改走 `render_diagnosis_pages` 而非直接進 `generate_report`——但其他仍是「具名參數＋位置傳參」形狀的 node 一樣要跑這個檢查）。
+- **`generate_report` 這個實例已修復（2026-07-20，Plan 1.5）**：修復前它是「7 個具名參數 ＋ `*args` varargs」——診斷結果用 `*(f"evaluation_{name}" for name in DIAGNOSES)`（當時的診斷 registry）展開接在尾端，中間漏一個完全不會報錯，只會平移。修法是**把簽章改成剛好 8 個必填、無預設值、無 varargs 的參數**（`evaluation_metrics, parameters, baseline_metrics, metric_ci, offset_sweep, pair_ledger, report_aggregates, diagnosis_pages`），對應 `pipeline.py` 裡剛好 8 個元素的 `inputs` 列表（**2026-07-22 更新**：`offset_sweep`（PR#114）與 `pair_ledger`（Plan 3 併入 suppression）其後移除，`generate_report` 當時剩 6 個必填參數＝`evaluation_metrics, parameters, baseline_metrics, metric_ci, report_aggregates, diagnosis_pages`；位置綁定機制與教訓不變。之後 #381 加上 `prediction_quality_metrics`、#515 拿掉 `metric_ci`、#532 拿掉 `diagnosis_pages`；現行簽章是 `evaluation_metrics, parameters, baseline_metrics, report_aggregates, prediction_quality_metrics`，以 `src/recsys_tfb/pipelines/evaluation/nodes.py` 的 `generate_report` 為準）。**varargs 消失才是真正的修復**：少一個輸入現在會直接 `TypeError: missing 1 required positional argument`，在 node 呼叫當下就炸，不會等到報表算出一堆型別兜得上但語意錯的數字。純粹「參數個數對得上」不算修好——8 對 8 只是把賭注從「兩邊型別碰巧相容」降到「兩邊個數碰巧相同」，varargs 沒了才是把「漏一個不報錯」這個洞本身補起來。
+- **規則**：改動任何 node 的 `inputs` 或其函式簽章之後，跑下面的並排比對。其他仍是「具名參數＋位置傳參」形狀的 node 一樣要跑這個檢查。
 - **已知未修的同形狀 node（2026-07-20 盤點，範圍外，不在本次修復範圍）**：
   - ~~`log_experiment`（training）~~：**已修（2026-09-30，#486）**——`inputs` 改成 dict 照名字傳，參數全部必填、沒有預設值。
   - `select_shap_population`（training，`pipelines/training/nodes.py`；#489 之前在 `diagnosis/model/population_spark.py`）：`inputs` 4 個元素、函式 4 個參數（3 個必填 ＋ `predict_manifest=None`）。同上，形狀小但機制相同。
@@ -296,7 +296,6 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
   ```bash
   python -c "
   import inspect
-  from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
   from recsys_tfb.pipelines.evaluation.nodes import generate_report
   from recsys_tfb.pipelines.evaluation.pipeline import create_pipeline
   sig = list(inspect.signature(generate_report).parameters)
@@ -306,7 +305,7 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
       print('%-2d %-24s %s' % (i+1, s, n))
   "
   ```
-  （`create_pipeline()` 不帶參數——舊版寫 `create_pipeline({})`，`{}` 是 falsy，剛好被當成 `post_training=False` 的預設值用，能跑只是巧合，不要照抄。）第 4 位應為 `report_aggregates` ↔ `evaluation_report_aggregates`、第 5 位 `diagnosis_pages` ↔ `evaluation_diagnosis_pages`。repo 內另有 `test_inputs_positionally_match_signature` 守這件事，但**它守不了手動同步的環境**（見 §13）。
+  （`create_pipeline()` 不帶參數——舊版寫 `create_pipeline({})`，`{}` 是 falsy，剛好被當成 `post_training=False` 的預設值用，能跑只是巧合，不要照抄。）第 4 位應為 `report_aggregates` ↔ `evaluation_report_aggregates`、第 5 位 `prediction_quality_metrics` ↔ `prediction_quality_metrics`。repo 內另有 `test_inputs_positionally_match_signature` 守這件事，但**它守不了手動同步的環境**（見 §13）。
 
 ## 13. 隔離環境（不能連 git）手動同步後，必須逐檔核對 hash（2026-07-20）
 
@@ -432,5 +431,5 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 
 - **症狀（第一分鐘認出它）**：「換平行度前後產物逐字相同」的比對，**改動前的程式碼也通過**。沒跑舊程式對照的話，你只會看到「新程式通過」，以為修好了。
 - **根因**：本機合成資料小（一個月約 5 千列），同一份資料在 `local[*]` 與 `local[2]` 下走出的 shuffle 與讀檔順序可以完全一樣。#352 在另一份資料上用同一招看到了差異，所以「`local[2]` 會改變列序」不是恆真。
-- **規則**：驗「產物不隨列序變」時，**先用改動前的程式碼跑同一組比對，確認它會不同**，比對才算有鑑別力。本機要真的打亂列序，用 `SPARK_CONF_DIR` 指向一份複本 conf：`spark.master local[2]`、`spark.sql.shuffle.partitions 7`、`spark.sql.adaptive.enabled false`（不要改 `conf/spark-local/` 本身）。另外，合成資料的抽樣權重全是 1，小數權重造成的加總順序差異在本機實跑看不到，要靠單元測試（範例：`tests/test_diagnosis/test_metric/test_row_order.py` 用 1/0.37 的權重）。
+- **規則**：驗「產物不隨列序變」時，**先用改動前的程式碼跑同一組比對，確認它會不同**，比對才算有鑑別力。本機要真的打亂列序，用 `SPARK_CONF_DIR` 指向一份複本 conf：`spark.master local[2]`、`spark.sql.shuffle.partitions 7`、`spark.sql.adaptive.enabled false`（不要改 `conf/spark-local/` 本身）。另外，合成資料的抽樣權重全是 1，小數權重造成的加總順序差異在本機實跑看不到，要靠單元測試（範例：`tests/test_diagnosis/test_metric/test_row_order.py` 用 1/0.37 的權重，該測試已隨 #532 刪除）。
 - **驗證方式**：2026-09-19 實測（`f1e8ac63`，`evaluation --post-training`）：只換 `local[2]` 時，舊程式碼 10 份 JSON 只有 `manifest.json`（時間戳）不同；加上 shuffle 分區 7 與關 AQE 後，舊程式碼 8 份不同，#355 之後只剩 Spark 端聚合的浮點末位。

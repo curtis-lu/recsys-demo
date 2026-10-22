@@ -41,10 +41,9 @@ SPEC_COMPUTED_PATHS = {
     # #376: the all-positive query group filter, applied in compute_metrics
     # (fine + category grain) and compute_baseline_metrics.
     "evaluation.query_filter",
-    "evaluation.diagnosis",
     "evaluation.report.diagnostics",
     "evaluation.report.sections.baseline",
-    "evaluation.report.sections.diagnostics",
+    "evaluation.report.sections.per_item_breakdown",
     # ADR-0024 decision 1 / #381: the prediction-quality family.
     "evaluation.prediction_quality",
     "evaluation.report.sections.prediction_quality",
@@ -63,11 +62,9 @@ SPEC_COMPUTED_LEAVES = [
     "evaluation.baseline.lookback_months",
     "evaluation.metric.min_positives",
     "evaluation.query_filter.drop_all_positive_groups",
-    "evaluation.diagnosis.sample.seed",
-    "evaluation.diagnosis.suppression.enabled",
     "evaluation.report.diagnostics.include_distributions",
     "evaluation.report.sections.baseline",
-    "evaluation.report.sections.diagnostics",
+    "evaluation.report.sections.per_item_breakdown",
     "evaluation.prediction_quality.n_bins",
     "evaluation.prediction_quality.top_n",
     "evaluation.report.sections.prediction_quality",
@@ -78,10 +75,12 @@ SPEC_DRAWN_LEAVES = [
     "evaluation.report.display.primary_map_k",
     "evaluation.report.display.guardrail_recall_k",
     "evaluation.report.sections.primary_map",
-    "evaluation.report.sections.diagnosis_links",
 ]
 
-CONFIG_SHIFT_EXTRA = (
+#: Keys outside the ``evaluation`` subtree, declared through ``extra_keys``.
+#: The ``config_shift`` diagnosis declared these until #532 removed it; no node
+#: declares any today, so the names below only stand for "some producer".
+OUTSIDE_KEYS = (
     "dataset.sample_group_keys",
     "dataset.sample_ratio",
     "dataset.sample_ratio_overrides",
@@ -113,11 +112,9 @@ def _params() -> dict:
             "metric": {"weight_alpha": 0.0, "k": None,
                        "min_positives": 0, "shrinkage_k": 0.0},
             "query_filter": {"drop_all_positive_groups": False},
-            "diagnosis": {"sample": {"seed": 42},
-                          "suppression": {"enabled": True}},
             "report": {
-                "sections": {"primary_map": True, "diagnosis_links": True,
-                             "baseline": True, "diagnostics": True,
+                "sections": {"primary_map": True, "baseline": True,
+                             "per_item_breakdown": True,
                              "prediction_quality": True},
                 "display": {"primary_map_k": [1, 3, 5, "all"],
                             "guardrail_recall_k": [1, 2]},
@@ -195,8 +192,8 @@ def test_extra_keys_only_affect_the_fingerprint_that_declares_them():
     base = _params()
     moved = _set(copy.deepcopy(base), "dataset.sample_ratio_overrides",
                  {"x|1": 0.25})
-    assert fingerprint(moved, CONFIG_SHIFT_EXTRA)["sha256"] != \
-        fingerprint(base, CONFIG_SHIFT_EXTRA)["sha256"]
+    assert fingerprint(moved, OUTSIDE_KEYS)["sha256"] != \
+        fingerprint(base, OUTSIDE_KEYS)["sha256"]
     assert fingerprint(moved) == fingerprint(base)
 
 
@@ -309,10 +306,10 @@ def test_fresh_artifacts_pass():
         [LoadedArtifact(catalog_name="baseline_metrics",
                         payload=_payload(params),
                         produced_by="compute_baseline_metrics"),
-         LoadedArtifact(catalog_name="evaluation_config_shift",
-                        payload=_payload(params, CONFIG_SHIFT_EXTRA),
-                        produced_by="diagnose_config_shift",
-                        extra_keys=CONFIG_SHIFT_EXTRA)],
+         LoadedArtifact(catalog_name="artifact_reading_outside_keys",
+                        payload=_payload(params, OUTSIDE_KEYS),
+                        produced_by="node_reading_outside_keys",
+                        extra_keys=OUTSIDE_KEYS)],
         params,
     )
 
@@ -380,19 +377,19 @@ def test_rule_2_one_artifact_with_only_its_own_key_changed():
                {"x|1": 0.25})
     with pytest.raises(ValueError) as exc:
         require_computed_with_current_config(
-            [LoadedArtifact(catalog_name="evaluation_item_ability",
+            [LoadedArtifact(catalog_name="artifact_b",
                             payload=_payload(old),
-                            produced_by="diagnose_item_ability"),
-             LoadedArtifact(catalog_name="evaluation_config_shift",
-                            payload=_payload(old, CONFIG_SHIFT_EXTRA),
-                            produced_by="diagnose_config_shift",
-                            extra_keys=CONFIG_SHIFT_EXTRA)],
+                            produced_by="node_b"),
+             LoadedArtifact(catalog_name="artifact_reading_outside_keys",
+                            payload=_payload(old, OUTSIDE_KEYS),
+                            produced_by="node_reading_outside_keys",
+                            extra_keys=OUTSIDE_KEYS)],
             new,
         )
     msg = str(exc.value)
     assert "dataset.sample_ratio_overrides.x|1: 0.5 -> 0.25" in msg
-    assert "--from-node diagnose_config_shift" in msg
-    assert "evaluation_item_ability" not in msg
+    assert "--from-node node_reading_outside_keys" in msg
+    assert "artifact_b" not in msg
 
 
 # ------------------------------------ what the enriched partition was made with
@@ -494,12 +491,12 @@ def test_narrowed_comparison_still_refuses_an_unfingerprinted_json():
 def test_rule_2_one_artifact_without_fingerprint():
     with pytest.raises(ValueError) as exc:
         require_computed_with_current_config(
-            [LoadedArtifact(catalog_name="evaluation_suppression",
+            [LoadedArtifact(catalog_name="artifact_c",
                             payload={"enabled": False},
-                            produced_by="diagnose_suppression")],
+                            produced_by="node_c")],
             _params(),
         )
-    assert "--from-node diagnose_suppression" in str(exc.value)
+    assert "--from-node node_c" in str(exc.value)
 
 
 def test_rule_3_several_artifacts_no_computed_key_suggests_full_run():
@@ -507,13 +504,13 @@ def test_rule_3_several_artifacts_no_computed_key_suggests_full_run():
     new = _set(copy.deepcopy(old), "dataset.sample_ratio", 0.5)
     with pytest.raises(ValueError) as exc:
         require_computed_with_current_config(
-            [LoadedArtifact(catalog_name="evaluation_config_shift",
-                            payload=_payload(old, CONFIG_SHIFT_EXTRA),
-                            produced_by="diagnose_config_shift",
-                            extra_keys=CONFIG_SHIFT_EXTRA),
-             LoadedArtifact(catalog_name="evaluation_suppression",
+            [LoadedArtifact(catalog_name="artifact_reading_outside_keys",
+                            payload=_payload(old, OUTSIDE_KEYS),
+                            produced_by="node_reading_outside_keys",
+                            extra_keys=OUTSIDE_KEYS),
+             LoadedArtifact(catalog_name="artifact_c",
                             payload={"enabled": False},
-                            produced_by="diagnose_suppression")],
+                            produced_by="node_c")],
             new,
         )
     msg = str(exc.value)
@@ -545,8 +542,7 @@ def test_long_values_are_truncated_in_the_message():
 
 
 def test_module_imports_no_project_or_spark_code():
-    """Pure stdlib: ``diagnosis/`` depends on nothing here and the node layer
-    does the combining (ADR-0020 decision 2, dependency direction)."""
+    """Pure stdlib (ADR-0020 decision 2, dependency direction)."""
     import recsys_tfb.pipelines.evaluation.steps.config_fingerprint as mod
 
     tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))

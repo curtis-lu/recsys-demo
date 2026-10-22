@@ -86,23 +86,22 @@ evaluation:
   # Report 產生選項
   # 這一區的鍵分兩類（ADR-0020 決定二；完整對照表在
   # src/recsys_tfb/pipelines/evaluation/steps/config_fingerprint.py 的 COMPUTED_KEYS）：
-  #   「算的」：sections.baseline、sections.diagnostics、sections.prediction_quality、
+  #   「算的」：sections.baseline、sections.per_item_breakdown、sections.prediction_quality、
   #     diagnostics.*、上面的 prediction_quality.*。它們決定要不要算、
   #     怎麼算，會進落地 JSON 的設定指紋。改了要照錯誤訊息點名的 --from-node 重跑
   #     （對照表在 pipelines/evaluation/steps/config_fingerprint.py 的 COMPUTED_KEYS；不一定是產出那份
   #     JSON 的 node）；只做 --only-node generate_report 會被擋下，錯誤訊息會寫出變了
   #     哪個鍵、該 --from-node 哪個 node。
   #   「畫的」：sections 其餘鍵、display.*。只改報表長相，改完 --only-node generate_report 即可。
-  # sections 的鍵必須剛好是報表讀的這六個：多寫一個（沒人讀、設了沒用）或少寫一個
-  # （讀了卻關不掉），evaluation 指令一進來就擋（A34，清單在 core/consistency.py 的
-  # EVALUATION_REPORT_SECTIONS）。
+  # sections 的鍵必須剛好是報表讀的那幾個：多寫一個（沒人讀、設了沒用）或少寫一個
+  # （讀了卻關不掉），evaluation 指令一進來就擋；值必須是 true／false，不加引號
+  # （A34，清單在 core/consistency.py 的 EVALUATION_REPORT_SECTIONS）。
   report:
     sections:
       dataset_overview: true
       primary_map: true          # 衡量指標段：overall、per-item、per-segment、大類
-      diagnostics: true          # 算的：false 時 compute_report_aggregates 只寫 stub
+      per_item_breakdown: true   # per-item 細部拆解段。算的：false 時 compute_report_aggregates 只寫 stub
       baseline: true             # 算的：false 時 compute_baseline_metrics 只寫 stub
-      diagnosis_links: true      # 主報表指向診斷頁的入口（只有 --post-training 有頁可指）
       prediction_quality: false  # 算的：預測品質指標家族（見上方 prediction_quality）；
                                  # false 時 compute_prediction_quality 只寫 stub
     display:                     # 畫的
@@ -134,70 +133,13 @@ evaluation:
   # 指標（overall／per-item／分群／大類，含報表的頭號 mAP）、熱門度基準線，
   # 以及 `--compare`／`--compare-only` 比較報表的兩側都排除這種組（兩側各自
   # 依自己的列判定）；不論開或關都會多印全正組數與佔比，佔比超過 10%（寫死
-  # 在程式，非設定鍵）就警告。**不套用**：報表診斷段、各診斷、training 的
+  # 在程式，非設定鍵）就警告。**不套用**：報表的 per-item 細部拆解段、training 的
   # test mAP 與 HPO 目標（唯讀入口見
   # `evaluation/metrics.py::drop_all_positive_groups`；設定檢查見
   # `core/consistency.py` A49）。改這個鍵要從 compute_metrics 重跑
   # （`COMPUTED_KEYS`）。
   # query_filter:
   #   drop_all_positive_groups: false
-
-  # 評估側診斷（Phase 1 起；spec §2 共用抽樣底座）。
-  # 每項診斷只有這一個開關。關掉 => 仍會落地一份 {"enabled": false} 的 stub
-  # JSON、但不產生頁面。想讓一項診斷「完全不存在」是改 code
-  # （diagnosis.metric.contract.DIAGNOSES），不是改這裡。
-  diagnosis:
-    # 診斷抽樣：單位＝query（snap_date × cust_id）、只取有正例的 query；
-    # 兩趟設計——正例 query 數低於保底的 item 整批全取，其餘 CRC32
-    # hash-ratio 抽到補滿 max_queries。中型 item 抽後仍可能低於保底：
-    # 不硬補，metadata 誠實回報（報表會標示樣本規模）。
-    # max_queries 設在「有正例的 query 總數」之上 → ratio == 1.0 → 不觸發
-    # 次抽樣，診斷是母體普查而非抽樣估計。2026-07-19 實況：公司環境有正例的
-    # query 約 22 萬，故設 25 萬。driver 記憶體不是約束（128GB；25 萬 query ×
-    # 22 個 item ≈ 5.5M 列 ≈ 1.25GB）。
-    #
-    # ⚠ 若母體成長超過此值，次抽樣會自動恢復：分層權重（inclusion_weight）
-    # 會接手做 Horvitz–Thompson 修正，metadata 的 sampling_description 也會
-    # 從「未抽樣」改口。**不會靜默偏差**，但普查的解讀更乾淨，發現超過時
-    # 優先調高這個值而不是靠加權。
-    #
-    # 這個值不是控制運算成本的旋鈕——貴的診斷各自有自己的預算旋鈕，
-    # 原則是「搜尋用子樣本、量測用全樣本」。
-    # 用縮小共用樣本來省錢會讓便宜的診斷也一起失去母體性。
-    sample:
-      max_queries: 250000
-      min_pos_queries_per_item: 50
-      seed: 42
-    # 診斷 1／4：配置引入的排序偏移。純 config 算術＋2 次 mAP＋每 item 一次
-    # 替換實驗。讀 schema 的 score 角色欄（offset 活在模型輸出的 log-odds
-    # 空間，而 #411 移除校準器之後 score 就是模型原始輸出）。
-    config_shift:
-      enabled: true
-
-    # 診斷 2／4：item 排序能力——同一 item 內正例列 vs 負例列的加權 AUC，
-    # raw（原始分數）與 query_centered（扣掉各自 query 平均後）各算一次；
-    # 差值即客戶活躍度被誤計入 item 推薦能力的量。讀 schema 的 score 角色欄
-    # （與 config_shift 同一個 log-odds 空間）。top_n＝正例名次百分位分布只看
-    # macro per-item AP 最低的前幾個 item。
-    item_ability:
-      enabled: true
-      top_n: 30
-
-    # 診斷 3／4：模型容量分配——全模型 split gain 分成 Item Prior（item-id
-    # 切點）、Post-Item Context（item 切點之後的 context 切點，逐 item 分配）
-    # 與未分配三份；用來分辨「學到互動訊號」與「只記住 item prior」。不吃
-    # 診斷抽樣，只讀訓練側的 gain_ledger（optional，可能缺席）＋同一次執行
-    # 的 item_ability 結果畫對照散點。
-    model_capacity:
-      enabled: true
-
-    # 診斷 4／4：壓制帳本與交叉購買——同一 query 內，label=0 的 item 排在
-    # label=1 之前時，把該正例列的 AP 缺口依比例分攤給排在它上面的每個負例
-    # （壓制矩陣熱圖）；並列出同一批 query 單位上的實際標籤共買 lift（泡泡
-    # 格圖，同軸序對照）。top_examples＝具體案例表最多列出幾筆。
-    suppression:
-      enabled: true
-      top_examples: 50
 
   # Compare sources（多模型比較）。有填內容的 entry 才 unlock
   # `evaluation --compare <key>` / `--compare-only <key>`；<key>（v_prev/ext_proj_x…）

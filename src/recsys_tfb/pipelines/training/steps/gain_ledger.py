@@ -11,8 +11,10 @@ item may have been starved of capacity, or the data may hold no feature that
 separates its positives from its negatives. The two look the same in the
 ledger, and the ledger cannot tell them apart.
 
-Three more global outputs, for the ``model_capacity`` presentation layer
-(they do not touch the two accounts above): ``total_split_count`` (non-leaf
+Three more global outputs, written for evaluation's ``model_capacity``
+presentation layer, which #532 removed; nothing in the framework reads them
+now, they go to MLflow with the rest of the ledger (they do not touch the two
+accounts above): ``total_split_count`` (non-leaf
 nodes in total, so the three-way split share can compute the unallocated
 residual = total − item − context); ``pre_item`` (the unconditioned splits
 taken **before** any item split, broken down by feature; their gain sums to
@@ -36,7 +38,8 @@ category codes sent left, already decoded from LightGBM's ``"2||3||4"`` by the
 adapter (ADR-0030 decision 1). A model with no trees raises
 ``UnsupportedCapability``; the ledger is then skipped and lands as the
 "model cannot" shape (``steps/diagnosis_artifacts.unsupported_artifact``),
-which evaluation's ``model_capacity`` reports as its own reason (decision 4).
+so its reader sees that reason rather than "switched off" or "never ran"
+(decision 4).
 
 The ``notes`` strings are part of ``gain_ledger.json`` and are kept word for
 word, as is ``ledger_from_trees``'s summary log line. The coarse-ledger
@@ -195,8 +198,8 @@ def ledger_from_trees(trees: pd.DataFrame, item_feature: str, categories: list) 
 
     # Unallocated (pre-item) = the non-item splits taken before any item split
     # (``conditioned=False``): global context the model uses before it has
-    # conditioned on which item. Accounted by feature, so ``model_capacity``
-    # can break down which features hold up the unallocated share. These
+    # conditioned on which item. Accounted by feature, so a reader can break
+    # down which features hold up the unallocated share. These
     # splits go into none of the other accounts; their gain sums to exactly
     # ``total_gain − item_id_gain − context_gain`` (the unallocated residual).
     pre_item_gain_by_feat: dict = {}

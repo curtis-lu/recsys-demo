@@ -167,10 +167,8 @@ training_eval_predictions:
 | 離線推論 | 照跑，但**忽略** `occasion`：候選是框架替每個 entity 乘上全部 item 產生的，批次評分的當下沒有請求可言。產物沒有 `occasion` 的欄，名次在 `time` ＋ `entity` 裡比 |
 | 評估的**監控模式**（不帶 `--post-training`） | **在 CLI 入口被擋下**（A40）。監控模式評估的是離線推論發布的表，它沒有 `occasion` 的欄，而 `label_table` 有——兩邊認列的方式不同，接出來的是錯的答案不是少的答案。用 `--post-training` |
 | 比較報表拿 `source: ranked_predictions` 當對手 | **在 CLI 入口被擋下**（A41），理由同上。用 `training_eval_predictions` 或 `enriched_eval_predictions` |
-| 診斷 `item_ability` | **自動跳過**，報表寫出原因。它先扣掉每組的平均分數再比較，假設那個平均代表「這個 entity 的整體分數水準」；一組是一次請求時，平均取決於這一次擺了哪幾個素材，只擺一個的請求扣完恆為 0 |
-| 診斷 `config_shift`、`suppression` | 照跑，而且都以一次請求為一組。`suppression` 的共同購買（`cross_purchase`）因此數的是「同一次請求裡兩個素材都被點」：它說的是「這兩個素材常在同一刻一起被點」，不是「點過一個的人也常點另一個」 |
 
-**兩個都宣告時**，同一次請求裡同一個 item 又可以有多列，所以：`k_values: "all"` 改成解析成最大一組的列數；`config_shift`、`item_ability`、`suppression` **全部**跳過（理由見 [`one-row-per-event.md`](one-row-per-event.md)〈幾件會被擋下、或行為改變的事〉）。其餘各列相同。
+**兩個都宣告時**，同一次請求裡同一個 item 又可以有多列，所以：`k_values: "all"` 改成解析成最大一組的列數。其餘各列相同。
 
 ## 離線指標在這類資料上的三個限制
 
@@ -195,7 +193,7 @@ training_eval_predictions:
 1. `base_dataset_version` 應該**變了**。沒變代表設定沒被讀到，先確認改的是對的 `conf/` 目錄。
 2. `sample_pool` 與 `label_table` 都有 `occasion` 的欄，而且沒有 NULL。
 3. 評估報表〈規模〉一段的「全部 query 數」應該是 test 那段時間**有正例的請求數**，不是 entity 數。廣告示例 test 週是 445。
-4. 報表〈完整性檢查〉出現「同分列數」「同分列佔比」，診斷入口少了 `item_ability`，並寫著跳過的原因。
+4. 報表〈完整性檢查〉出現「同分列數」「同分列佔比」。
 
 ## 相關文件
 

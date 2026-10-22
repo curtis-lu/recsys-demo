@@ -724,7 +724,7 @@ def test_completeness_section_lists_run_facts():
               + " ".join(t.to_string() for t in s.tables))
     assert "k" in joined.lower()               # k_values / metric.k 交代
     assert "query" in joined.lower()           # 規模
-    # 抽樣描述屬於診斷頁（SCOPE.sampling），主報表的事實表不印。
+    # 抽樣描述原本屬於診斷頁（隨 #532 拿掉），主報表的事實表從來不印。
     assert "sampling_description" not in joined
 
 
@@ -1951,7 +1951,6 @@ def test_prediction_quality_weighted_note_names_the_weight_and_the_ratio():
 
 import re  # noqa: E402
 
-from recsys_tfb.diagnosis.metric._common import schema_skip_reason  # noqa: E402
 from recsys_tfb.evaluation.metrics import ALL_POSITIVE_KEY  # noqa: E402
 
 #: 開關開著時，不套用它的段落旁印的那一句（票面原文）。用字面值、不 import
@@ -2130,8 +2129,8 @@ def test_ledger_and_warning_carry_no_verdict_or_full_marks_wording():
 
 
 def test_ledger_and_warning_name_the_measurement_and_group_level_metrics():
-    """帳上說「算進衡量指標」、不說「算進 mAP」：同一份報表連結的診斷頁也印
-    macro per-item mAP（取自診斷抽樣），開關開著也沒排除全正組。與排法無關的只有組層級
+    """帳上說「算進衡量指標」、不說「算進 mAP」（當初的理由是報表連結的診斷頁也印
+    macro per-item mAP、不排除全正組；診斷頁隨 #532 拿掉，措辭照留）。與排法無關的只有組層級
     （per-query）指標：per-item 的 map_attr／hit_rate／mean_pos 在 K 小於組的
     列數時仍看誰排進前 K，所以不說「每組的分數都一樣」。"""
     m = _ap_metrics(n_all_positive=500, category=_ap_category())
@@ -2225,10 +2224,9 @@ def test_overview_headline_follows_the_all_positive_switch(drop):
 
 
 def test_overview_with_event_declared_still_has_the_headline():
-    """宣告 event 時診斷抽樣的消費者全部跳過，但頭號表讀的是 Spark 算的
-    metrics.json（有接 event 決勝欄），照印。"""
+    """宣告 event 時頭號表照印：它讀的是 Spark 算的 metrics.json（有接 event
+    決勝欄）。"""
     p = _ap_params(True, event=True)
-    assert schema_skip_reason(p, "config_shift")   # 前提：這份 fixture 讓診斷跳過
     m = _ap_metrics()
     s = rb.build_overview_section(m, p)
     assert _headline(s) == m["macro_avg"]["by_item"]["map_attr@2"]

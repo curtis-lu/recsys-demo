@@ -271,7 +271,7 @@ flowchart TB
   subgraph DIAG[" 診斷產物：driver-local pandas；模型做不到就跳過並寫明，其他錯誤停下 "]
     direction TB
     n_fimp["compute_feature_importance<br/><small>＋ M</small>"] --> o_fimp(["feature_importance　<b>[L]</b>"])
-    n_gain["compute_gain_ledger<br/><small>＋ M · P ・ 逐樹逐切點記帳</small>"] --> o_gain(["gain_ledger　<b>[L]</b><br/><small>evaluation 的 model_capacity 吃 ・ catalog optional<br/>log_experiment 吃它，但不讀（沒有 scalar 進 MLflow）<br/>這條邊保證檔案在 log_artifacts 上傳前寫好</small>"])
+    n_gain["compute_gain_ledger<br/><small>＋ M · P ・ 逐樹逐切點記帳</small>"] --> o_gain(["gain_ledger　<b>[L]</b><br/><small>catalog optional<br/>log_experiment 吃它，但不讀（沒有 scalar 進 MLflow）<br/>這條邊保證檔案在 log_artifacts 上傳前寫好</small>"])
     n_shap["compute_shap_diagnostics<br/><small>＋ M · P ・ 單次 shap_values 兩用</small>"] --> o_shap(["shap_diagnostics　<b>[L]</b>"])
     n_qprof["compute_quadrant_profiles<br/><small>＋ M · P ・ per-(item×象限) 平均 signed profile</small>"] --> o_qprof(["quadrant_profiles　<b>[L]</b>"])
     n_qcase["compute_quadrant_cases<br/><small>＋ M · P ・ 每格極值案例單列圖</small>"] --> o_qcase(["cases_manifest　<b>[L]</b>"])

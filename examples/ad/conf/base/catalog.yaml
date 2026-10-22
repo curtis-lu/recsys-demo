@@ -278,22 +278,6 @@ prediction_quality_metrics:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/prediction_quality.json
 
-evaluation_config_shift:
-  type: JSONDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/config_shift.json
-
-evaluation_item_ability:
-  type: JSONDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/item_ability.json
-
-evaluation_model_capacity:
-  type: JSONDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/model_capacity.json
-
-evaluation_suppression:
-  type: JSONDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/diagnosis/suppression.json
-
 evaluation_report_aggregates:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/report_aggregates.json

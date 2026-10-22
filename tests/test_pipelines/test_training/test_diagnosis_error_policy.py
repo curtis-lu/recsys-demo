@@ -115,16 +115,12 @@ def test_a_model_without_trees_finishes_the_run_and_says_why(tmp_path, monkeypat
     assert not list(diag.rglob("*.png"))
     assert sum("cannot" in r.getMessage() for r in caplog.records
                if r.levelno == logging.WARNING) == 5
-
-    # The evaluation side reads the landed ledger and names the cause —
-    # neither "evaluation ran alone" nor "switched off in training".
-    from recsys_tfb.diagnosis.metric.model_capacity import compute
-
-    report = compute(json.loads((diag / "gain_ledger.json").read_text()), None,
-                     {"evaluation": {"diagnosis": {}}})
-    assert report["available"] is False
-    assert "模型做不到" in report["reason"]
-    assert "tree" in report["reason"]          # the adapter's own words
+    # The ledger names the cause in the adapter's own words, so its reader
+    # sees "the model cannot", not "switched off" or "never ran". (Until #532
+    # evaluation's model_capacity was that reader and this test went on to
+    # check what it drew.)
+    ledger = json.loads((diag / "gain_ledger.json").read_text())
+    assert "tree" in ledger["reason"]
 
 
 def test_a_diagnosis_that_fails_for_another_reason_stops_the_run(tmp_path, monkeypatch):

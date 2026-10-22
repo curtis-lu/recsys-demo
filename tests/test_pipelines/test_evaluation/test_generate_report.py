@@ -6,14 +6,8 @@ that into ``generate_report`` — exactly the two-step path the pipeline wires.
 """
 
 import copy
-import importlib
-import inspect
 import json
-import re
-from pathlib import Path
 
-import numpy as np
-import pandas as pd
 import pytest
 
 from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
@@ -37,15 +31,15 @@ def _unread_stub(params):
     return {"enabled": False, "config_fingerprint": fingerprint(params)}
 
 
-def _params(diagnostics=False):
+def _params(per_item_breakdown=False):
     return {
         "schema": {"columns": {
             "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
             "label": "label", "score": "score", "rank": "rank"}},
         "evaluation": {"snap_date": "20240331", "report": {
-            "sections": {"diagnostics": diagnostics},
+            "sections": {"per_item_breakdown": per_item_breakdown},
             "display": {"primary_map_k": [1], "guardrail_recall_k": [1]},
-            "diagnostics": {"include_distributions": diagnostics}}},
+            "diagnostics": {"include_distributions": per_item_breakdown}}},
     }
 
 
@@ -95,7 +89,7 @@ def test_generate_report_html_no_diagnostics(spark):
         _eval_pred(spark), _landed_segments(params), params)
     html = generate_report(_landed_metrics(params), params,
                             _unread_stub(params),
-                            aggregates, None, _unread_stub(params))
+                            aggregates, _unread_stub(params))
     assert html.startswith("<!DOCTYPE html>")
     assert "概覽" in html
     # diagnostics off → 沒有可收合的診斷 section（<details class="section">）。
@@ -110,11 +104,42 @@ def test_generate_report_with_diagnostics(spark):
     assert aggregates["config_fingerprint"] == fingerprint(params)
     html = generate_report(_landed_metrics(params), params,
                             _unread_stub(params),
-                            aggregates, None, _unread_stub(params))
+                            aggregates, _unread_stub(params))
     # 診斷升為頂層「per-item 細部拆解」段（非收合 section）；其明細數字表用
     # 逐表收合 <details class="table-collapse">。
     assert "per-item 細部拆解" in html
     assert '<details class="table-collapse"' in html
+
+
+def test_the_main_report_has_no_diagnosis_section(spark):
+    """#532 (ADR-0031 decision 2) removed the diagnosis pages, the report's
+    "排序診斷（獨立報表）" link section, the overview row pointing at it and
+    the prediction-quality note comparing its AUC with the "item 能力" page.
+    ``--post-training`` was the mode that linked to them, so that is the run
+    drawn here, with every section that could name them switched on."""
+    from recsys_tfb.pipelines.evaluation.nodes import (
+        compute_prediction_quality,
+    )
+
+    params = _params(True)
+    params["post_training"] = True
+    params["evaluation"]["report"]["sections"].update(
+        {"prediction_quality": True, "baseline": False})
+    params["evaluation"]["prediction_quality"] = {
+        "n_bins": 10, "n_display_bins": 5, "top_n": 1}
+    eval_pred = stamp_partition_fingerprint(
+        _eval_pred(spark).drop("eval_partition_fingerprint"), params, [])
+    pq = compute_prediction_quality(
+        eval_pred, _landed_segments(params), params)
+    aggregates = compute_report_aggregates(
+        eval_pred, _landed_segments(params), params)
+    html = generate_report(_landed_metrics(params), params,
+                           _unread_stub(params), aggregates, pq)
+    # Premise: the sections that used to name the diagnoses were drawn.
+    assert "概覽" in html and "預測品質" in html and "per-item 細部拆解" in html
+    assert "排序診斷" not in html
+    assert "item 能力" not in html
+    assert "diagnosis/" not in html
 
 
 def _params_diag_full():
@@ -154,427 +179,13 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
         _eval_pred_n(spark, 3000), _landed_segments(params), params)
     small = generate_report(
         _landed_metrics(params), params, _unread_stub(params),
-        small_aggregates, None, _unread_stub(params),
+        small_aggregates, _unread_stub(params),
     )
     large = generate_report(
         _landed_metrics(params), params, _unread_stub(params),
-        large_aggregates, None, _unread_stub(params),
+        large_aggregates, _unread_stub(params),
     )
     assert abs(len(large) - len(small)) < 20000
-
-
-# =====================================================================
-# 診斷多頁輸出（Task 2.5）：報表層與 registry 診斷解耦
-# =====================================================================
-
-SAMPLING_DESCRIPTION = "分層抽樣：正例 query 全取，負例 query 依 hash 取 40%。"
-
-_DIAG_PARAMS = {
-    "schema": {"columns": {"time": "snap_date", "entity": ["cust_id"],
-                           "item": "prod_name", "label": "label",
-                           "score": "score"}},
-    "dataset": {
-        "sample_group_keys": ["cust_segment_typ", "prod_name", "label"],
-        "sample_ratio": 1.0,
-        "sample_ratio_overrides": {"mass|ccard_ins|0": 0.5},
-    },
-    "training": {"sample_weight_keys": [], "sample_weights": {}},
-    "evaluation": {"diagnosis": {"config_shift": {"enabled": True}}},
-}
-
-
-def _diag_sample_pdf() -> pd.DataFrame:
-    """兩個客群 × 兩個 item 的小樣本（形狀取自 test_config_shift.py）。"""
-    rng = np.random.default_rng(0)
-    rows = []
-    for c in range(40):
-        segment = "mass" if c % 2 == 0 else "affluent"
-        for item in ("ccard_ins", "fund_bond"):
-            rows.append({
-                "snap_date": "2026-01-31", "cust_id": f"c{c}",
-                "prod_name": item, "cust_segment_typ": segment,
-                "label": int((item == "ccard_ins" and c % 2 == 0)
-                             or (item == "fund_bond" and c % 5 == 0)),
-                "score": float(rng.uniform(0.05, 0.95)),
-            })
-    return pd.DataFrame(rows)
-
-
-def _diag_results() -> dict:
-    """用**真的** ``config_shift.compute`` 產生 fixture，不手刻 dict。
-
-    手刻的 22 個頂層鍵會跟 ``compute`` 的實際輸出漂移，而漂移的方向剛好是
-    「測試綠、real-run 紅」——組裝層讀的每個鍵都必須是計算層真的會給的。
-    """
-    from recsys_tfb.diagnosis.metric import config_shift
-
-    sample_meta = {"n_queries": 40,
-                   "sampling_description": SAMPLING_DESCRIPTION}
-    return {"config_shift": config_shift.compute(
-        (_diag_sample_pdf(), sample_meta), _DIAG_PARAMS)}
-
-
-def test_report_builder_has_no_per_diagnosis_builders():
-    """報表層不得認識任何 registry 診斷——這是解耦的驗收條件。
-
-    禁用清單動態從 DIAGNOSES 導出：Plan 2-5 每加一項診斷這條自動收緊。
-    """
-    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-    from recsys_tfb.evaluation import report_builder
-
-    names = [n for n, _ in inspect.getmembers(report_builder, inspect.isfunction)]
-    forbidden = [n for n in names
-                 if n.startswith("build_") and any(d in n for d in DIAGNOSES)]
-    assert not forbidden, f"report_builder 仍認識個別 registry 診斷：{forbidden}"
-
-
-def test_diagnosis_pages_written(tmp_path):
-    from recsys_tfb.evaluation.report_builder import assemble_diagnosis_pages
-
-    written = assemble_diagnosis_pages(_diag_results(), {}, out_dir=tmp_path)
-    names = sorted(p.name for p in written)
-    assert "01-config-shift.html" in names
-    assert "index.html" in names
-    assert "plotly.min.js" in names
-
-
-def test_index_intro_states_order_is_not_a_gate():
-    """閱讀順序不是硬閘門——各診斷都會跑、都會呈現，前一項擋不掉後一項。
-
-    沒有這句，編號會被讀成「第 1 項沒事就不必看後面」，而那正是這份索引
-    要避免的誤讀。
-    """
-    from recsys_tfb.evaluation.report_builder import _diagnosis_index_intro
-
-    intro = _diagnosis_index_intro()
-    assert "不是硬閘門" in intro
-
-
-def test_index_intro_has_no_verdict_vocabulary():
-    """鐵則 1（不下結論）同樣適用於索引頁的說明文字本身。"""
-    from recsys_tfb.evaluation.report_builder import _diagnosis_index_intro
-
-    forbidden = ["建議", "應該", "異常", "不足", "有問題", "健康",
-                 "通過", "失敗", "verdict", "severity", "recommend"]
-    intro = _diagnosis_index_intro()
-    hits = [word for word in forbidden if word in intro]
-    assert not hits, f"索引說明出現下結論字眼：{hits}"
-
-
-def test_unimplemented_diagnoses_produce_no_page(tmp_path):
-    """``results`` 只有 config_shift 時，不生出其他頁、也不 raise。
-
-    未實作的診斷在 ``results`` 裡就是缺席，組裝層必須把缺席當成「這頁不
-    存在」而不是「這頁是空的」——空頁看起來像「量到了、結果什麼都沒有」。
-    """
-    from recsys_tfb.evaluation.report_builder import assemble_diagnosis_pages
-
-    written = assemble_diagnosis_pages(_diag_results(), {}, out_dir=tmp_path)
-    page_names = sorted(p.name for p in written if p.suffix == ".html")
-    assert page_names == ["01-config-shift.html", "index.html"]
-
-
-def test_sampling_description_flows_into_page_scope(tmp_path):
-    """``sample_meta["sampling_description"]`` 必須進到該頁的 ScopeNote。
-
-    這條守的是組裝層那一句 ``dataclasses.replace``：模組層級的 ``SCOPE``
-    刻意留空 ``sampling``（執行期事實不寫死進常數），填值只發生在這裡。
-    """
-    from recsys_tfb.evaluation.report_builder import assemble_diagnosis_pages
-
-    written = assemble_diagnosis_pages(_diag_results(), {}, out_dir=tmp_path)
-    page = next(p for p in written if p.name == "01-config-shift.html")
-    html = page.read_text()
-    assert SAMPLING_DESCRIPTION in html
-    assert "抽樣設計" in html
-
-
-@pytest.mark.parametrize("drop", [True, False])
-def test_diagnosis_pages_say_they_keep_the_all_positive_groups_when_on(
-    tmp_path, drop
-):
-    """#376：evaluation.query_filter.drop_all_positive_groups 不套用在診斷。
-    開著時每一頁的範圍說明要講「這段沒有排除全正的 query group」，關著時不講
-    （否則「每頁都印」也會綠）。"""
-    from recsys_tfb.evaluation.report_builder import assemble_diagnosis_pages
-
-    params = {"evaluation": {"query_filter": {"drop_all_positive_groups": drop}}}
-    written = assemble_diagnosis_pages(_diag_results(), params, out_dir=tmp_path)
-    page = next(p for p in written if p.name == "01-config-shift.html")
-    html = page.read_text()
-    assert ("這段沒有排除全正的 query group" in html) is drop
-    # 放在範圍說明「算在哪批列上」那一格，不是頁尾
-    scope = html[html.index('<div class="scope-note">'):]
-    scope = scope[:scope.index("</div>")]
-    assert ("這段沒有排除全正的 query group" in scope) is drop
-
-
-def test_main_report_links_out_without_duplicating_numbers(tmp_path):
-    """主報表只給入口，數字留在專屬頁——複製一份就會有兩個真實來源。"""
-    from recsys_tfb.evaluation.report_builder import (
-        assemble_diagnosis_pages,
-        build_diagnosis_links_section,
-    )
-
-    written = assemble_diagnosis_pages(_diag_results(), {}, out_dir=tmp_path)
-    section = build_diagnosis_links_section(written, {})
-    text = "\n".join(
-        [section.title, section.description, *section.table_titles]
-        + [t.to_string() for t in section.tables]
-    )
-    assert "diagnosis/index.html" in text
-    for number_word in ("delta", "Δ", "offset", "mAP"):
-        assert number_word not in text, f"主報表複製了診斷數字：{number_word}"
-
-
-def test_main_report_renders_the_diagnosis_link_as_an_anchor(tmp_path):
-    """The link sits in ``description``, so the main report renderer must not
-    escape it — escaped, the entry point prints as literal ``<a href=…>`` text
-    and nothing raises."""
-    from recsys_tfb.evaluation.report import generate_html_report
-    from recsys_tfb.evaluation.report_builder import (
-        assemble_diagnosis_pages,
-        build_diagnosis_links_section,
-    )
-
-    written = assemble_diagnosis_pages(_diag_results(), {}, out_dir=tmp_path)
-    html = generate_html_report([build_diagnosis_links_section(written, {})])
-    assert '<p class="description"><a href="diagnosis/index.html">' in html
-
-
-def test_no_diagnosis_pages_means_no_links_section():
-    """一頁都沒寫出來時不放入口——連出去是 404 的連結比沒有連結更糟。"""
-    from recsys_tfb.evaluation.report_builder import (
-        build_diagnosis_links_section,
-    )
-
-    assert build_diagnosis_links_section([], {}) is None
-
-
-# =====================================================================
-# render_diagnosis_pages draws this run's results (#342, ADR-0020 bug 9)
-# =====================================================================
-
-
-def _render_params(**enabled):
-    """Every registry diagnosis disabled unless named in ``enabled``."""
-    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-
-    params = copy.deepcopy(_DIAG_PARAMS)
-    params["model_version"] = "mv_render_test"
-    params["snap_date"] = "20260131"
-    diag = params["evaluation"]["diagnosis"]
-    for name in DIAGNOSES:
-        diag[name] = {"enabled": bool(enabled.get(name, False))}
-    return params
-
-
-def _node_outputs(params, sample=None):
-    """Each diagnosis's ``make_diagnosis_node`` output, in ``DIAGNOSES`` order.
-
-    Built by the real node factory, not hand-written dicts: the factory adds
-    the name and the fingerprint, and a hand-written dict would test the
-    test's idea of that shape. Disabled diagnoses read no input besides the
-    sample, so the rest are None.
-    """
-    from recsys_tfb.diagnosis.metric import contract
-    from recsys_tfb.pipelines.evaluation.nodes import make_diagnosis_node
-
-    outputs = []
-    for name in contract.DIAGNOSES:
-        mod = importlib.import_module(f"recsys_tfb.diagnosis.metric.{name}")
-        upstream = [sample if key == "diagnosis_sample" else None
-                    for key in contract.inputs_for(mod)[:-1]]
-        outputs.append(make_diagnosis_node(name)(*upstream, params))
-    return outputs
-
-
-@pytest.mark.parametrize("first, second", [
-    # config_shift declares EXTRA_CONFIG_KEYS and item_ability does not, so
-    # their fingerprints differ and the freshness check would also object.
-    ("config_shift", "item_ability"),
-    # Neither declares extra keys: identical fingerprints, so the name check
-    # is the only thing between this swap and pages drawn under wrong titles.
-    ("item_ability", "suppression"),
-])
-def test_render_refuses_diagnosis_results_in_the_wrong_order(
-    tmp_path, monkeypatch, first, second,
-):
-    """Both results are dicts and the count is right: only a content check
-    catches this (known-pitfalls.md §12)."""
-    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-    from recsys_tfb.pipelines.evaluation.nodes import (
-        render_diagnosis_pages,
-    )
-
-    monkeypatch.chdir(tmp_path)
-    params = _render_params()
-    results = _node_outputs(params)
-    i, j = DIAGNOSES.index(first), DIAGNOSES.index(second)
-    results[i], results[j] = results[j], results[i]
-    with pytest.raises(TypeError,
-                       match=rf"should be the result of '{first}'"):
-        render_diagnosis_pages(params, *results)
-
-
-def test_render_refuses_parameters_swapped_with_a_result(tmp_path, monkeypatch):
-    from recsys_tfb.pipelines.evaluation.nodes import (
-        render_diagnosis_pages,
-    )
-
-    monkeypatch.chdir(tmp_path)
-    params = _render_params()
-    results = _node_outputs(params)
-    with pytest.raises(TypeError,
-                       match="first input must be the parameters dict"):
-        render_diagnosis_pages(results[0], params, *results[1:])
-
-
-def test_render_refuses_a_missing_result(tmp_path, monkeypatch):
-    from recsys_tfb.diagnosis.metric.contract import DIAGNOSES
-    from recsys_tfb.pipelines.evaluation.nodes import (
-        render_diagnosis_pages,
-    )
-
-    monkeypatch.chdir(tmp_path)
-    params = _render_params()
-    with pytest.raises(TypeError,
-                       match=rf"expected {len(DIAGNOSES)} diagnosis results"):
-        render_diagnosis_pages(params, *_node_outputs(params)[:-1])
-
-
-def test_render_refuses_a_legacy_pre_fingerprint_result(tmp_path, monkeypatch):
-    """A dict result written before #342 has neither 'diagnosis' nor
-    'config_fingerprint'. The wiring TypeError must say so and recommend a
-    full re-run rather than a from-node on the diagnoses alone: that would
-    leave baseline_metrics / report_aggregates on their old,
-    unfingerprinted disk state, costing extra Spark rounds to discover."""
-    from recsys_tfb.pipelines.evaluation.nodes import (
-        render_diagnosis_pages,
-    )
-
-    monkeypatch.chdir(tmp_path)
-    params = _render_params()
-    results = _node_outputs(params)
-    results[0] = {"delta": 0.01}  # pre-#342 shape: no name, no fingerprint
-    with pytest.raises(TypeError) as exc:
-        render_diagnosis_pages(params, *results)
-    msg = str(exc.value)
-    assert "before results carried their name and fingerprint" in msg
-    assert "Re-run the whole pipeline (no --from-node / --only-node)" in msg
-
-
-def test_render_draws_this_runs_results_not_files_left_on_disk(
-    tmp_path, monkeypatch,
-):
-    """A drawable JSON an earlier run left in the directory must not appear
-    when this run did not compute that diagnosis.
-
-    Every diagnosis is disabled here. The file-name implementation found that
-    ``config_shift.json`` and drew a page from it, so the main report gained a
-    link to the old result, with exit code 0.
-    """
-    from recsys_tfb.evaluation.report_builder import (
-        build_diagnosis_links_section,
-    )
-    from recsys_tfb.pipelines.evaluation.nodes import (
-        _diagnosis_pages_dir,
-        render_diagnosis_pages,
-    )
-
-    monkeypatch.chdir(tmp_path)
-    params = _render_params()
-    leftover_dir = _diagnosis_pages_dir(params)
-    leftover_dir.mkdir(parents=True)
-    (leftover_dir / "config_shift.json").write_text(
-        json.dumps(_diag_results()["config_shift"]), encoding="utf-8")
-
-    pages = render_diagnosis_pages(params, *_node_outputs(params))
-
-    assert not [p for p in pages if "config-shift" in p]
-    assert pages == []
-    assert build_diagnosis_links_section(pages, params) is None
-
-
-@pytest.mark.parametrize("runtime, configured, segment", [
-    # The CLI's runtime value is what the catalog substitutes into
-    # data/evaluation/${model_version}/${snap_date}/, so it is used as is.
-    ("20260131", "2026-01-31", "20260131"),
-    ("20260131-20260331", ["2026-01-31", "2026-03-31"], "20260131-20260331"),
-    # No runtime value (unit tests): the same label from the setting.
-    (None, "2026-01-31", "20260131"),
-    (None, ["2026-03-31", "2026-01-31", "2026-02-28"], "20260131-20260331"),
-])
-def test_diagnosis_pages_dir_is_the_catalogs_path_segment(
-    runtime, configured, segment,
-):
-    """#374: several dates name their directory ``<earliest>-<latest>``; the
-    dash in it is part of the name, not a date separator to strip."""
-    from recsys_tfb.pipelines.evaluation.nodes import _diagnosis_pages_dir
-
-    params = {"model_version": "mv", "evaluation": {"snap_date": configured}}
-    if runtime is not None:
-        params["snap_date"] = runtime
-    assert _diagnosis_pages_dir(params).parts == (
-        "data", "evaluation", "mv", segment, "diagnosis")
-
-
-def test_render_refuses_results_computed_with_other_settings(
-    tmp_path, monkeypatch,
-):
-    from recsys_tfb.pipelines.evaluation.nodes import (
-        render_diagnosis_pages,
-    )
-
-    monkeypatch.chdir(tmp_path)
-    computed_with = _render_params()
-    computed_with["evaluation"]["metric"] = {"min_positives": 5}
-    with pytest.raises(ValueError) as exc:
-        render_diagnosis_pages(_render_params(),
-                               *_node_outputs(computed_with))
-    msg = str(exc.value)
-    assert "evaluation.metric.min_positives" in msg
-    assert "--from-node compute_metrics" in msg
-
-
-_PLOTLY_DIV_ID = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-
-
-def test_render_pages_survive_a_json_round_trip(tmp_path, monkeypatch):
-    """Behaviour guard: results read back from JSON draw the same pages as
-    the in-memory results of the run that computed them.
-
-    A slice that skips the diagnosis nodes (``--only-node`` /
-    ``--from-node``) hands ``render_diagnosis_pages`` the catalog's
-    JSONDataset loads, not ``compute``'s own dicts: tuples come back as
-    lists, int keys as strings. A ``render`` that leans on either draws
-    differently, or raises, only on resume. Plotly makes a fresh div id each
-    time; the comparison strips it.
-    """
-    from recsys_tfb.pipelines.evaluation.nodes import render_diagnosis_pages
-
-    monkeypatch.chdir(tmp_path)
-    params = _render_params(config_shift=True)
-    sample = (_diag_sample_pdf(),
-              {"n_queries": 40, "sampling_description": SAMPLING_DESCRIPTION})
-    outputs = _node_outputs(params, sample)
-
-    def drawn(results):
-        pages = [Path(p) for p in render_diagnosis_pages(params, *results)]
-        return {
-            p.name: (_PLOTLY_DIV_ID.sub("ID", p.read_text(encoding="utf-8"))
-                     if p.suffix == ".html" else p.read_bytes())
-            for p in pages
-        }
-
-    in_memory = drawn(outputs)
-    read_back = drawn([json.loads(json.dumps(r)) for r in outputs])
-
-    assert "01-config-shift.html" in in_memory
-    assert sorted(read_back) == sorted(in_memory)
-    for name, content in in_memory.items():
-        assert read_back[name] == content, name
 
 
 # =====================================================================
@@ -676,7 +287,7 @@ def test_generate_report_refuses_a_computed_setting_flipped_after_the_run():
 
     with pytest.raises(ValueError) as exc:
         generate_report(_landed_metrics(computed_with), now, baseline,
-                        aggregates, None, pq)
+                        aggregates, pq)
 
     msg = str(exc.value)
     assert "evaluation.report.sections.baseline" in msg
@@ -697,7 +308,7 @@ def test_generate_report_refuses_metrics_computed_with_other_settings():
 
     with pytest.raises(ValueError) as exc:
         generate_report(_landed_metrics(computed_with), now, baseline,
-                        aggregates, None, pq)
+                        aggregates, pq)
 
     msg = str(exc.value)
     assert "evaluation_metrics (written by compute_metrics)" in msg
@@ -712,7 +323,7 @@ def test_generate_report_refuses_metrics_without_a_fingerprint():
 
     with pytest.raises(ValueError) as exc:
         generate_report(_metrics(), params, baseline, aggregates,
-                        None, pq)
+                        pq)
 
     msg = str(exc.value)
     assert ("evaluation_metrics (written by compute_metrics) has no "
@@ -731,7 +342,7 @@ def test_generate_report_redraws_when_only_drawn_settings_changed():
 
     html = generate_report(_landed_metrics(computed_with), now, baseline,
                            aggregates,
-                           None, pq)
+                           pq)
 
     assert html.startswith("<!DOCTYPE html>")
 
@@ -749,7 +360,7 @@ def test_generate_report_refuses_prediction_quality_switched_on_after_the_run():
 
     with pytest.raises(ValueError) as exc:
         generate_report(_landed_metrics(computed_with), now, baseline,
-                        aggregates, None, pq)
+                        aggregates, pq)
 
     msg = str(exc.value)
     assert "evaluation.report.sections.prediction_quality" in msg
@@ -762,7 +373,7 @@ def test_generate_report_refuses_a_prediction_quality_json_without_fingerprint()
 
     with pytest.raises(ValueError) as exc:
         generate_report(_landed_metrics(params), params, baseline,
-                        aggregates, None, {"enabled": False})
+                        aggregates, {"enabled": False})
 
     assert ("prediction_quality_metrics (written by "
             "compute_prediction_quality) has no config_fingerprint"
@@ -792,5 +403,5 @@ def test_generate_report_draws_prediction_quality_from_the_nodes_output(spark):
         eval_pred, _landed_segments(params), params)
     html = generate_report(_landed_metrics(params), params,
                            _unread_stub(params),
-                           aggregates, None, pq)
+                           aggregates, pq)
     assert "預測品質" in html
