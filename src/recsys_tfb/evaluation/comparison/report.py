@@ -2,44 +2,59 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 
 import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.compare import build_comparison_result
+from recsys_tfb.evaluation.metric_catalog import ITEM, entry
 from recsys_tfb.evaluation.metrics import (
     drop_all_positive_groups,
     resolved_all_k,
 )
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
-from recsys_tfb.evaluation.report_builder import (
-    build_glossary_section,
+from recsys_tfb.evaluation.report_sections import glossary
+from recsys_tfb.evaluation.report_sections.shared import (
     count_items,
     drop_metric_keys_above_all_k,
     eval_dates_display,
     macro_coverage_suffix_mb,
     per_item_metric_compare_table,
     resolve_display_k,
+    results_read_by,
+)
+
+#: What ``assemble_comparison_report`` reads, by name: both sides' metrics
+#: bundles, their comparison and the common-universe coverage
+#: (``compare_coverage_partial``).
+READS = ("metrics_a", "metrics_b", "comparison", "compare_coverage_partial")
+
+#: The per-item metrics both per-item sections compare, by catalog entry,
+#: each with the ``report.display`` key that lists its K (ADR-0031 decision
+#: 11: the report declares what it compares).
+_PER_ITEM_COMPARED = (
+    (("hit_rate", ITEM), "guardrail_recall_k", [1, 3, 5]),
+    (("map_attr", ITEM), "primary_map_k", [1, 3, 5, "all"]),
 )
 
 
 def assemble_comparison_report(
-    metrics_a: dict,
-    metrics_b: dict,
-    comparison: dict,
-    coverage_info: dict,
-    parameters: dict,
+    results: Mapping[str, dict], parameters: dict,
 ) -> str:
-    """Compose the 4-section + glossary HTML."""
-    sections = [
-        _build_coverage_section(comparison, coverage_info, parameters),
-        _build_overall_section(metrics_a, comparison),
-        _build_per_item_section(metrics_a, metrics_b, comparison, parameters),
-        _build_category_section(metrics_a, metrics_b, parameters),
-        build_glossary_section(parameters),
-    ]
+    """Compose the comparison report's sections, then the main report's
+    glossary, from ``results`` (:data:`READS`)."""
+    results = results_read_by("assemble_comparison_report", READS, results)
+    sections = [build(results, parameters) for build in (
+        _build_coverage_section,
+        _build_overall_section,
+        _build_per_item_section,
+        _build_category_section,
+    )]
+    sections.append(glossary.build({}, parameters))
     sections = [s for s in sections if s is not None]
+    comparison = results["comparison"]
     label_a = comparison["label_a"]
     label_b = comparison["label_b"]
     eval_params = parameters.get("evaluation", {}) or {}
@@ -56,8 +71,9 @@ def assemble_comparison_report(
 
 
 def _build_coverage_section(
-    comparison: dict, cov: dict, parameters: dict
+    results: Mapping[str, dict], parameters: dict
 ) -> ReportSection:
+    comparison, cov = results["comparison"], results["compare_coverage_partial"]
     label_a, label_b = comparison["label_a"], comparison["label_b"]
     # The query group, said in words. With `occasion` declared the count is
     # of occasions, and a sentence that still said "time × entity" would
@@ -169,7 +185,10 @@ def _each_side_up_to_its_k(
     )
 
 
-def _build_overall_section(metrics_a: dict, comparison: dict) -> ReportSection:
+def _build_overall_section(
+    results: Mapping[str, dict], parameters: dict
+) -> ReportSection:
+    metrics_a, comparison = results["metrics_a"], results["comparison"]
     label_a, label_b = comparison["label_a"], comparison["label_b"]
     overall_a = comparison["result_a"].get("overall", {}) or {}
     overall_b = comparison["result_b"].get("overall", {}) or {}
@@ -217,9 +236,33 @@ def _empty_overall_note(
     return f" — {sides}，Δ 欄留空"
 
 
+def _per_item_compare_tables(
+    per_item_a: dict, per_item_b: dict, per_item_delta: dict, disp: dict,
+    all_k_a: int, all_k_b: int, macro_a: dict | None, macro_b: dict | None,
+    title_prefix: str, item_cov: str,
+) -> tuple[list[pd.DataFrame], list[str]]:
+    """One M/B/Δ table per :data:`_PER_ITEM_COMPARED` entry, labelled by the
+    catalog's display name; the item and category grains share it so the two
+    cannot come to compare different metrics."""
+    tables, titles = [], []
+    for compared, ks_key, ks_default in _PER_ITEM_COMPARED:
+        metric = entry(*compared)
+        label = metric.display_name
+        ks = resolve_display_k(disp.get(ks_key, ks_default), all_k_a)
+        tables.append(per_item_metric_compare_table(
+            per_item_a, per_item_b, per_item_delta,
+            ks, all_k_a, metric.name, f"{label}@{{k}}",
+            macro_a=macro_a, macro_b=macro_b, all_k_b=all_k_b,
+        ))
+        titles.append(f"{title_prefix} {label}@k (M/B/Δ){item_cov}")
+    return tables, titles
+
+
 def _build_per_item_section(
-    metrics_a: dict, metrics_b: dict, comparison: dict, parameters: dict
+    results: Mapping[str, dict], parameters: dict
 ) -> ReportSection | None:
+    metrics_a, metrics_b = results["metrics_a"], results["metrics_b"]
+    comparison = results["comparison"]
     per_item_a = metrics_a.get("per_item", {}) or {}
     per_item_b = metrics_b.get("per_item", {}) or {}
     per_item_delta = comparison.get("per_item_delta", {}) or {}
@@ -232,9 +275,6 @@ def _build_per_item_section(
     n_items = count_items(metrics_a)
     # Each side's "all" at its own K (#434); the int columns follow A's.
     all_k_a, all_k_b = resolved_all_k(metrics_a), resolved_all_k(metrics_b)
-    rec_ks = resolve_display_k(disp.get("guardrail_recall_k", [1, 3, 5]), all_k_a)
-    attr_ks = resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), all_k_a)
-
     macro_a = (metrics_a.get("macro_avg", {}) or {}).get("by_item")
     macro_b = (metrics_b.get("macro_avg", {}) or {}).get("by_item")
     # bug 5 (ADR-0020): disclose each side's macro item coverage.
@@ -242,18 +282,10 @@ def _build_per_item_section(
         per_item_a, per_item_b, n_items, parameters, macro_a, macro_b
     )
 
-    tables, titles = [], []
-    for metric_key, col_fmt, ks, title in (
-        ("hit_rate", "recall@{k}", rec_ks, "per-item recall@k (M/B/Δ)"),
-        ("map_attr", "map_attr@{k}", attr_ks, "per-item map_attr@k (M/B/Δ)"),
-    ):
-        tbl = per_item_metric_compare_table(
-            per_item_a, per_item_b, per_item_delta,
-            ks, all_k_a, metric_key, col_fmt,
-            macro_a=macro_a, macro_b=macro_b, all_k_b=all_k_b,
-        )
-        tables.append(tbl)
-        titles.append(f"{title}{item_cov}")
+    tables, titles = _per_item_compare_tables(
+        per_item_a, per_item_b, per_item_delta, disp, all_k_a, all_k_b,
+        macro_a, macro_b, "per-item", item_cov,
+    )
     return ReportSection(
         title="per-item M/B/Δ",
         description="細產品粒度的 recall / map_attr,頂列 Macro 平均。",
@@ -263,8 +295,9 @@ def _build_per_item_section(
 
 
 def _build_category_section(
-    metrics_a: dict, metrics_b: dict, parameters: dict
+    results: Mapping[str, dict], parameters: dict
 ) -> ReportSection | None:
+    metrics_a, metrics_b = results["metrics_a"], results["metrics_b"]
     eval_params = parameters.get("evaluation", {}) or {}
     if not (eval_params.get("item_categories", {}) or {}).get("enabled"):
         return None
@@ -283,8 +316,6 @@ def _build_category_section(
     disp = (eval_params.get("report", {}) or {}).get("display", {}) or {}
     n_cat = count_items(cat_a)
     cat_k_a, cat_k_b = resolved_all_k(cat_a), resolved_all_k(cat_b)
-    rec_ks = resolve_display_k(disp.get("guardrail_recall_k", [1, 3, 5]), cat_k_a)
-    attr_ks = resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), cat_k_a)
     macro_a = (cat_a.get("macro_avg", {}) or {}).get("by_item")
     macro_b = (cat_b.get("macro_avg", {}) or {}).get("by_item")
 
@@ -312,17 +343,12 @@ def _build_category_section(
     item_cov = macro_coverage_suffix_mb(
         per_item_a, per_item_b, n_cat, parameters, macro_a, macro_b
     )
-    for metric_key, col_fmt, ks, title in (
-        ("hit_rate", "recall@{k}", rec_ks, "大類 per-item recall@k (M/B/Δ)"),
-        ("map_attr", "map_attr@{k}", attr_ks, "大類 per-item map_attr@k (M/B/Δ)"),
-    ):
-        tbl = per_item_metric_compare_table(
-            per_item_a, per_item_b, per_item_delta,
-            ks, cat_k_a, metric_key, col_fmt,
-            macro_a=macro_a, macro_b=macro_b, all_k_b=cat_k_b,
-        )
-        tables.append(tbl)
-        titles.append(f"{title}{item_cov}")
+    more_tables, more_titles = _per_item_compare_tables(
+        per_item_a, per_item_b, per_item_delta, disp, cat_k_a, cat_k_b,
+        macro_a, macro_b, "大類 per-item", item_cov,
+    )
+    tables += more_tables
+    titles += more_titles
     return ReportSection(
         title="大類 Category M/B/Δ",
         description="大類粒度 overall + per-category recall/map_attr。只列雙方共通的大類。",

@@ -679,7 +679,7 @@ class TestResolvedAllK:
 
     def test_neither_means_unknown(self):
         """A slim baseline bundle carries no overview. 0 is "unknown", the
-        reading ``report_builder.count_items`` already gives it."""
+        reading ``report_sections.shared.count_items`` already gives it."""
         from recsys_tfb.evaluation.metrics import resolved_all_k
 
         assert resolved_all_k({"overall": {"map@1": 0.5}}) == 0

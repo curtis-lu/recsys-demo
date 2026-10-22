@@ -18,9 +18,9 @@ and the same again inside the nested ``category`` bundle, which carries its own
 the single most likely way to break a file with this script.
 
 Why a script rather than a read-side fallback: the reader
-(``evaluation/report_builder._dataset_overview``) refuses an old file outright,
-so nothing has to carry two spellings forever, and nobody has to re-run a whole
-evaluation just to change key names.
+(``evaluation/report_sections/shared.read_dataset_overview``) refuses an old
+file outright, so nothing has to carry two spellings forever, and nobody has
+to re-run a whole evaluation just to change key names.
 
 Defaults to a dry run that prints what it would rewrite; pass ``--apply`` to
 write. Re-running after a successful migration is a no-op (idempotent), and a
@@ -40,7 +40,7 @@ from typing import NamedTuple
 
 import typer
 
-from recsys_tfb.evaluation.report_builder import (
+from recsys_tfb.evaluation.report_sections.shared import (
     OVERVIEW_CELL_GROUPS as CELL_GROUPS,
     RENAMED_OVERVIEW_KEYS as RENAMES,
 )
@@ -49,10 +49,10 @@ app = typer.Typer(add_completion=False)
 
 #: ``RENAMES`` (``old key -> new key``) and ``CELL_GROUPS`` are **imported, not
 #: restated**. The reader that refuses an un-migrated file
-#: (``report_builder._dataset_overview``) reads the same two, so the migrator
-#: cannot come to disagree with the detector about which keys are old — the one
-#: drift that would leave a file refused by the reader and reported "already
-#: migrated" by this script.
+#: (``report_sections.shared.read_dataset_overview``) reads the same two, so
+#: the migrator cannot come to disagree with the detector about which keys are
+#: old — the one drift that would leave a file refused by the reader and
+#: reported "already migrated" by this script.
 #:
 #: Deliberately absent from ``RENAMES``: anything spelled ``snap_date``. The
 #: time vocabulary is kept (ADR-0017), so ``by_snap_date`` / ``n_snap_dates``

@@ -102,7 +102,7 @@ class TestGenerateHtmlReport:
         assert re.findall(r"<link[^>]*\bhref=[^>]*>", html) == []
 
     def test_empty_formula_and_bullets_render_nothing(self):
-        """不帶這兩個欄位的 ``build_*_section`` 輸出必須不受影響。
+        """不帶這兩個欄位的段（各段的 ``build``）輸出必須不受影響。
 
         ``<ul>`` 在主報表被目錄用掉了，所以只數 section 區塊之後的部分；
         比對渲染出的**標籤**而不是字串 "formula"，避免命中 CSS 裡的樣式定義。

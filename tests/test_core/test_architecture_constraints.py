@@ -1715,7 +1715,7 @@ class TestS6NoLiteralExampleColumnNames:
             "src/ spelled an example deployment's column name (S6): "
             f"{offenders}. Column names come from the user's config -- read "
             "them through core/schema.get_schema (see "
-            "evaluation/report_builder.py::build_core_concept_section). "
+            "evaluation/report_sections/core_concepts.py::build). "
             "Exceptions are registered in R6 of "
             "docs/agents/architecture-constraints.md and need sign-off."
         )

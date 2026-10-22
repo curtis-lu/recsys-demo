@@ -91,6 +91,7 @@ from recsys_tfb.core.consistency import (
     item_list_counted_from_data,
 )
 from recsys_tfb.core.schema import declares_optional_role, get_schema
+from recsys_tfb.evaluation.metric_catalog import ITEM, QUERY_GROUP, metrics_of
 from recsys_tfb.evaluation.metrics import (
     ALL_K_KEY,
     ALL_POSITIVE_KEY,
@@ -194,7 +195,7 @@ def _resolve_k_grids(
       and ``aggregate_per_item`` (per_item and per_item_segment), which is
       what guarantees ``macro_avg["by_item"][f"map_attr@{headline K}"]``,
       the number the report's headline reads
-      (``report_builder._headline_key``). Without ``all_k`` here a
+      (``report_sections.overview._headline_key``). Without ``all_k`` here a
       ``k_values`` that leaves out ``"all"`` would leave that cell blank.
 
     Putting the headline K into the per-query grid is wrong without being an
@@ -726,12 +727,20 @@ def add_row_contributions(
 # ---------------------------------------------------------------------------
 
 
-_PER_QUERY_KINDS = ("map", "precision", "recall")
-
-
 def _per_query_metric_cols(k_values: list[int]) -> list[str]:
-    """Names of metric columns produced by compute_per_query_metrics."""
-    return [f"{kind}@{k}" for k in k_values for kind in _PER_QUERY_KINDS]
+    """Names of metric columns produced by compute_per_query_metrics: every
+    query-group entry of ``metric_catalog``, at each K."""
+    return [m.key(k) for k in k_values for m in metrics_of(QUERY_GROUP)]
+
+
+def _query_group_number(name: str, k: int) -> F.Column:
+    """A shared number of the query-group method (``metric_catalog.
+    QUERY_GROUP_SHARED_NUMBERS``) as a column of the per-query frame at ``k``."""
+    if name == "total_rel":
+        return F.col("total_rel")
+    if name == "K":
+        return F.lit(k)
+    return F.col(f"_{name}_{k}")
 
 
 def compute_per_query_metrics(
@@ -745,14 +754,16 @@ def compute_per_query_metrics(
 
     Output columns:
         group_cols, total_rel,
-        map@K, precision@K, recall@K for each K,
+        every query-group entry of ``metric_catalog`` for each K,
         plus any column in ``carry_cols`` (taken via F.first within the query —
         valid for per-customer attributes constant within a query, e.g. segment).
 
-    Per-query formulas:
-        map@K        = sum(ap_contrib@K)             / total_rel
-        precision@K  = sum(label * top_k@K) / K
-        recall@K     = sum(label * top_k@K) / total_rel
+    Shared numbers, summed per query and K, that the formulas divide:
+        ap_sum@K     = sum(ap_contrib@K)
+        hits@K       = sum(label * top_k@K)
+    Each entry's formula is a ``metric_catalog.Ratio`` of two of them,
+    ``total_rel`` or ``K``; e.g. map@K = ap_sum@K / total_rel,
+    precision@K = hits@K / K, recall@K = hits@K / total_rel.
 
     See module docstring for the degenerate behaviour of precision@K and
     recall@K when K >= n_items.
@@ -773,13 +784,13 @@ def compute_per_query_metrics(
     per_query = enriched.groupBy(*group_cols).agg(*sums)
 
     for k in k_values:
-        per_query = (
-            per_query
-            .withColumn(f"map@{k}", F.col(f"_ap_sum_{k}") / F.col("total_rel"))
-            .withColumn(f"precision@{k}", F.col(f"_hits_{k}") / F.lit(k))
-            .withColumn(f"recall@{k}", F.col(f"_hits_{k}") / F.col("total_rel"))
-            .drop(f"_ap_sum_{k}", f"_hits_{k}")
-        )
+        for metric in metrics_of(QUERY_GROUP):
+            per_query = per_query.withColumn(
+                metric.key(k),
+                _query_group_number(metric.formula.numerator, k)
+                / _query_group_number(metric.formula.denominator, k),
+            )
+        per_query = per_query.drop(f"_ap_sum_{k}", f"_hits_{k}")
 
     keep = list(group_cols) + ["total_rel"] + carry_cols + _per_query_metric_cols(k_values)
     return per_query.select(*keep)
@@ -825,12 +836,16 @@ def aggregate_per_segment(
     return out
 
 
-def _per_item_metric_cols(k_values: list[int]) -> list[str]:
-    """Metric column names emitted by aggregate_per_item (per K + mean_pos)."""
-    cols = ["mean_pos"]
+def _per_item_metrics(k_values: list[int]) -> list[tuple[str, str]]:
+    """``(metric key, row column)`` for every item entry of ``metric_catalog``:
+    the ones without K first, then the per-K ones at each K. The column is the
+    one the entry's ``MeanOverPositiveRows`` averages, at that K when per K."""
+    out = [(m.key(), m.formula.column)
+           for m in metrics_of(ITEM) if not m.per_k]
     for k in k_values:
-        cols.extend([f"hit_rate@{k}", f"map_attr@{k}"])
-    return cols
+        out.extend((m.key(k), f"{m.formula.column}@{k}")
+                   for m in metrics_of(ITEM) if m.per_k)
+    return out
 
 
 def aggregate_per_item(
@@ -853,7 +868,8 @@ def aggregate_per_item(
     earlier one. Any other column count raises ``ValueError``. Dim values
     are stringified.
 
-    Metrics per cell:
+    Metrics per cell — every item entry of ``metric_catalog``, each the mean
+    of one row column over P-positive rows (``MeanOverPositiveRows``):
 
         hit_rate@K   = mean(top_k@K) over P-positive rows
                        = P(rank(P) <= K | P is positive)
@@ -877,20 +893,12 @@ def aggregate_per_item(
         )
     rel = enriched.filter(F.col(label_col) == 1)
 
-    aggs = [
-        F.mean(F.col("pos").cast("double")).alias("mean_pos"),
-        F.count(F.lit(1)).alias("n_pos"),
-    ]
-    for k in k_values:
-        aggs.extend(
-            [
-                F.mean(f"top_k@{k}").alias(f"hit_rate@{k}"),
-                F.mean(f"ap_contrib@{k}").alias(f"map_attr@{k}"),
-            ]
-        )
+    metrics = _per_item_metrics(k_values)
+    aggs = [F.mean(F.col(col).cast("double")).alias(key) for key, col in metrics]
+    aggs.append(F.count(F.lit(1)).alias("n_pos"))
     rows = rel.groupBy(*dim_cols).agg(*aggs).collect()
 
-    metric_cols = _per_item_metric_cols(k_values)
+    metric_cols = [key for key, _ in metrics]
     out: dict[str, dict] = {}
     for r in rows:
         cell: dict = {c: float(r[c]) for c in metric_cols}
@@ -1235,7 +1243,7 @@ def compute_overall_per_item(
     all_k = _resolve_all_k(eval_predictions, group_cols, item_col, event_cols)
     # Same grids as _compute_core (metric.k on the per-item side only), so
     # baseline and model keys line up. Nothing is recorded: the report reads
-    # this bundle at the model's K (report_builder.build_baseline_section).
+    # this bundle at the model's K (report_sections/popularity_baseline.py).
     query_ks, item_ks = _resolve_k_grids(parameters, all_k)
 
     df = rank_within_query(
@@ -1335,7 +1343,7 @@ def compute_all_metrics(
     ⚠ **Not backward compatible below ``dataset_overview``** since #327: the
     three ``n_items`` / ``n_customers`` / ``avg_positives_per_customer``
     keys were renamed (see the block below). A file written before that is
-    refused by ``evaluation/report_builder._dataset_overview`` and migrated by
+    refused by ``evaluation/report_sections/shared.read_dataset_overview`` and migrated by
     ``scripts/migrations/migrate_evaluation_results_keys.py``; the ``snap_date`` spellings
     are kept deliberately (ADR-0017).
 

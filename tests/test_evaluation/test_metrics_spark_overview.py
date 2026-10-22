@@ -4,7 +4,7 @@ import pytest
 
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation import metrics_spark as ms
-from recsys_tfb.evaluation import report_builder as rb
+from recsys_tfb.evaluation.report_sections import overview, ranking_metrics
 from recsys_tfb.evaluation.metrics import ALL_K_KEY, resolved_all_k
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
@@ -453,11 +453,14 @@ def test_the_report_finds_map_and_recall_at_all_with_the_event_role(spark):
     params = _event_params_with_categories()
     out = ms.compute_all_metrics(_wide_event_df(spark), params)
 
-    overall = _table(rb.build_metrics_section(out, params), "overall（")
+    overall = _table(ranking_metrics.build(
+        {"evaluation_metrics": out}, params), "overall（")
     assert overall.loc["map", "@all"] == pytest.approx(0.625)
     assert overall.loc["recall", "@all"] == pytest.approx(1.0)
 
-    s = rb.build_overview_section(out, params)
+    s = overview.build(
+        {"evaluation_metrics": out, "prediction_quality_metrics": None},
+        params)
     card = s.tables[s.table_titles.index(
         "overall mAP@k（per-query 等權，另一種加權）")]
     assert card.loc["map@all", "value"] == pytest.approx(0.625)
@@ -490,6 +493,7 @@ def test_category_all_is_the_category_count_with_the_event_role(spark):
     params = _event_params_with_categories()
     out = ms.compute_all_metrics(_wide_event_df(spark), params)
 
-    cat = _table(rb.build_metrics_section(out, params), "大類 overall")
+    cat = _table(ranking_metrics.build(
+        {"evaluation_metrics": out}, params), "大類 overall")
     assert cat.loc["map", "@all"] == pytest.approx(1.0)
     assert cat.loc["precision", "@all"] == pytest.approx(0.5)

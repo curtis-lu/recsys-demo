@@ -22,7 +22,7 @@ def resolve_lookback_months(parameters: dict) -> int:
     """``evaluation.baseline.lookback_months``, defaulting to 12.
 
     The single place both the node (``compute_baseline_metrics``) and the
-    report (``build_baseline_section``) read this from — before this helper
+    report (``report_sections/popularity_baseline.py``) read this from — before this helper
     existed the two had drifted to two different defaults (node: 12, report:
     ``None``), so a run using the implicit default silently printed no
     lookback sentence at all while the node had in fact used 12 months

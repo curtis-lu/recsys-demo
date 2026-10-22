@@ -3,7 +3,7 @@
 This is a leaf module: its module-level imports are ``logging`` / ``typing``
 / ``numpy``, plus ``utils.ranking`` for the within-query order. Do not add any
 other project import — ``evaluation.metrics_spark``,
-``evaluation.report_builder`` and several ``scripts/`` import from here, so a
+the report's sections and several ``scripts/`` import from here, so a
 project import risks a cycle. ``utils.ranking`` is the exception because it
 imports nothing from the project, so it cannot close one; it is where the tie
 rule lives, shared with the Spark ranking (#355). scikit-learn is imported
@@ -211,11 +211,11 @@ def resolved_all_k(bundle: dict) -> int:
       artifact of a deployment without ``event`` stays value-for-value what it
       was.
     * ``0`` when the bundle carries neither: a slim baseline bundle, which has
-      no overview. ``0`` means unknown, as ``report_builder.count_items``
+      no overview. ``0`` means unknown, as ``report_sections.shared.count_items``
       already reads it; the report reads a baseline at the model's K instead.
 
     Reads the overview directly rather than through
-    ``report_builder.count_items`` because this module imports nothing from the
+    ``report_sections.shared.count_items`` because this module imports nothing from the
     project. The pre-#327 refusal lives there, and every report section still
     reads the overview through it.
     """
