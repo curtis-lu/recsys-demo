@@ -146,12 +146,12 @@ inference 的順序是行為全部先（#191–#196）→ 純結構最後（#198
 
 | 手段 | 成本 | 抓得到什麼 |
 |---|---|---|
-| **mutation（弄壞一行，看紅在哪一行）** | 分鐘級 | 假綠。兩輪幾乎每個 PR 都做，每次 2–13 條 |
+| **mutation（弄壞一行，看紅在哪一行）** | 分鐘級 | 假綠。兩輪幾乎每個 PR 都做，每次 2–13 條。工具：`scripts/dev/mutate.py` |
 | **`git diff main..HEAD -- conf/` 為空** | 免費 | 版本中性＝不重建、不重訓 |
 | **`pipeline.py` diff 為空** | 免費 | DAG 與 `--only-node` 可定址性不變 |
-| **AST 逐函式比對** | 秒級腳本 | 把「純搬移」從宣稱變成證明：#173 十三個函式逐字相同、#174 二十九個 `def`、#198 十個 helper |
+| **AST 逐函式比對** | 秒級腳本 | 把「純搬移」從宣稱變成證明：#173 十三個函式逐字相同、#174 二十九個 `def`、#198 十個 helper。工具：`scripts/dev/ast_compare.py` |
 | **同一份 `data/` 的測試 baseline** | 分鐘級 | 分辨「本來就壞」與「被我改壞」 |
-| **本機實跑逐列／digest 對照** | Spark cold start 2–4 分 ＋ 一次跑 | **唯一回答「輸出到底變了沒」的東西** |
+| **本機實跑逐列／digest 對照** | Spark cold start 2–4 分 ＋ 一次跑 | **唯一回答「輸出到底變了沒」的東西**。evaluation 的現成做法：`scripts/local/eval_parity.py`（含 noise floor 的步驟） |
 | **`local_e2e.sh` 末段 assert 逐票累加** | 一次 e2e | 只有實跑看得到的失效（送進去對、存進去錯） |
 | **成本驗收量次數不量秒數** | 讀 log | 合成資料的 wall clock 外推不到生產 |
 
@@ -240,5 +240,6 @@ inference 的順序是行為全部先（#191–#196）→ 純結構最後（#198
 | 可機械檢查的約束、框架事實、例外登記 | [`architecture-constraints.md`](architecture-constraints.md) |
 | 測試 baseline 怎麼建、弄壞驗證怎麼還原、PR 推了新 commit 的坑 | [`known-pitfalls.md`](../operations/known-pitfalls.md) §5、§5b、§16 |
 | 假綠的形態對照、mutation 下在哪一行 | `test-false-green` skill |
+| 不讀全文看懂一個大模組：每個函式在哪幾行、用到誰、誰 import 它（拆檔、搬移前） | `scripts/dev/module_map.py` |
 | 派工與審查 prompt 怎麼寫 | `dispatch-subagents` skill |
 | 兩輪各自的完整論證 | [ADR-0008](../adr/0008-dataset-modules-split-by-role.md)、[ADR-0010](../adr/0010-inference-chunked-scoring-shape.md)、[ADR-0011](../adr/0011-inference-validation-two-layers.md) |
