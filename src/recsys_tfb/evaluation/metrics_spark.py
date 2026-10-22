@@ -1483,14 +1483,25 @@ def compute_all_metrics(
         # column the frame does not have. The switch is the same; which
         # queries it drops is decided on this frame (label = max of the
         # children), so a query mixed row by row can be all-positive here.
-        cat_overview = compute_dataset_overview(
-            collapsed, parameters, segment_columns=segment_columns
-        )
-        cat = _compute_core(
-            collapsed, parameters, segment_columns, event_cols=(),
-            drop_all_positive_groups=drop_all_positive_groups,
-            n_items=cat_overview["totals"]["n_items"],
-        )
+        # Cached for the pass (#450): the collapse is a join plus a groupBy
+        # over the whole fine-grained frame, and 5 to 7 actions of this pass
+        # read it: the overview's 3 to 5, and the core's query-group count and
+        # the action that fills its own cache. Not the fine frame's memory
+        # question (ADR-0018 〈為什麼不是 .cache()〉): this holds one narrow
+        # row per (query group, category), next to the category core's own
+        # cache; the fine pass's caches are released by now.
+        collapsed = collapsed.cache()
+        try:
+            cat_overview = compute_dataset_overview(
+                collapsed, parameters, segment_columns=segment_columns
+            )
+            cat = _compute_core(
+                collapsed, parameters, segment_columns, event_cols=(),
+                drop_all_positive_groups=drop_all_positive_groups,
+                n_items=cat_overview["totals"]["n_items"],
+            )
+        finally:
+            collapsed.unpersist()
         cat["dataset_overview"] = cat_overview
         result["category"] = cat
 

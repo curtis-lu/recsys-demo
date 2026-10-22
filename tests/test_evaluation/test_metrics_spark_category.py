@@ -222,3 +222,29 @@ def test_with_category_false_skips_the_category_pass(spark, params):
         p["evaluation"]["item_categories"]["mapping"]["x"] = ["not_a_product"]
     out = ms.compute_all_metrics(_raw(spark), p, with_category=False)
     assert "category" not in out
+
+
+def test_the_category_pass_collapses_once(spark, monkeypatch):
+    """#450 item 5. The collapse is a join plus a ``groupBy`` over the whole
+    fine-grained frame, and 5 to 7 actions of the category pass read it (its
+    overview's, then its core's). Uncached, each one collapsed again. So both
+    halves of the pass get one frame that is cached when they read it, and it
+    is released when the pass is done. Measured on main: not cached."""
+    seen = []
+    for name in ("compute_dataset_overview", "_compute_core"):
+        real = getattr(ms, name)
+
+        def spy(frame, *a, _real=real, _name=name, **k):
+            seen.append((_name, frame, frame.is_cached))
+            return _real(frame, *a, **k)
+
+        monkeypatch.setattr(ms, name, spy)
+    fine = _raw(spark)
+    ms.compute_all_metrics(fine, _params(), segment_columns=["cust_segment_typ"])
+
+    category = [(name, frame, cached) for name, frame, cached in seen
+                if frame is not fine]
+    assert [(name, cached) for name, _, cached in category] == [
+        ("compute_dataset_overview", True), ("_compute_core", True)]
+    assert category[0][1] is category[1][1]
+    assert not category[0][1].is_cached
