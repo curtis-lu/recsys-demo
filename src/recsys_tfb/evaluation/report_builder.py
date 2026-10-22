@@ -33,6 +33,7 @@ from recsys_tfb.evaluation.report_sections.shared import (
     ALL_POSITIVE_WHY,
     eval_dates_display,
     grain_bundles,
+    results_read_by,
 )
 
 #: The main report's sections, in page order. Moving a section is moving
@@ -91,14 +92,9 @@ def assemble_report(results: Mapping[str, dict], parameters: dict) -> str:
     """
     sections = []
     for section in SECTIONS:
-        missing = [name for name in section.READS if name not in results]
-        if missing:
-            raise ValueError(
-                f"assemble_report: section {section.__name__} reads {missing}, "
-                f"which the report was not given (it has {sorted(results)})."
-            )
         built = section.build(
-            {name: results[name] for name in section.READS}, parameters)
+            results_read_by(section.__name__, section.READS, results),
+            parameters)
         if built is not None:
             sections.append(built)
     metrics = results["evaluation_metrics"]

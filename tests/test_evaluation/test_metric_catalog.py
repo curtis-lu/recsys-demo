@@ -112,7 +112,13 @@ def _assert_keys_are_the_catalog(bundle: dict, where: str):
 def test_catalog_names_are_the_keys_the_spark_metrics_write(spark):
     """Every block of both bundles — the full one the report reads and the
     baseline's slim one — holds exactly the catalog's names of its method,
-    each with ``@K`` when the entry is per K; the category bundles too."""
+    each with ``@K`` when the entry is per K; the category bundles too.
+
+    The Spark side builds its columns from the catalog, so what this guards
+    is a key written past it: a block that adds a metric of its own, or a
+    path that stops going through the catalog. Which metrics exist at all is
+    the value tests' job (``test_metrics_spark*.py``): drop an entry and
+    their keys go missing there, not here."""
     frame, params = _frame(spark), _params()
     full = compute_all_metrics(frame, params, segment_columns=["seg"])
     _assert_keys_are_the_catalog(full, "full")

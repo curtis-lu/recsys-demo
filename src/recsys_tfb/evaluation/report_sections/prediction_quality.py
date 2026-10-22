@@ -15,7 +15,7 @@ from recsys_tfb.evaluation.report import ReportSection
 from recsys_tfb.evaluation.report_sections.shared import (
     ALL_POSITIVE_SWITCH,
     kept_zero_positive_groups_note,
-    section_on,
+    prediction_quality_shown,
 )
 
 #: The results this section reads, by catalog name (ADR-0031 principle 1).
@@ -76,16 +76,6 @@ def _pq_threshold_figure(sweep: pd.DataFrame):
 _PQ_TITLE = "預測品質 — 把每一列候選當二元預測"
 
 
-def shown(results: Mapping[str, dict], parameters: dict) -> bool:
-    """Whether this section is on the page: its switch is on and
-    ``compute_prediction_quality`` computed the payload rather than writing
-    its stub."""
-    prediction_quality = results["prediction_quality_metrics"]
-    return bool(section_on(parameters, "prediction_quality")
-                and prediction_quality
-                and prediction_quality.get("enabled") is True)
-
-
 def build(
     results: Mapping[str, dict], parameters: dict
 ) -> ReportSection | None:
@@ -112,9 +102,9 @@ def build(
     at the CLI entry, so a fresh run no longer produces it; it stays for a
     payload computed before the weight existed.
     """
-    if not shown(results, parameters):
-        return None
     prediction_quality = results["prediction_quality_metrics"]
+    if not prediction_quality_shown(prediction_quality, parameters):
+        return None
     metrics = results["evaluation_metrics"]
     from recsys_tfb.evaluation.diagnostics_spark import frame_from_json
     from recsys_tfb.evaluation.prediction_quality import (

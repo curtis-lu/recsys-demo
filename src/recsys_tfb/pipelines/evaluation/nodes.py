@@ -1236,31 +1236,29 @@ def generate_report(
     settings count, so changing ``report.display.*`` and the other drawn keys
     still redraws without recomputing anything.
     """
+    loaded = [
+        LoadedArtifact(catalog_name="evaluation_metrics",
+                       payload=evaluation_metrics,
+                       produced_by="compute_metrics"),
+        LoadedArtifact(catalog_name="baseline_metrics",
+                       payload=baseline_metrics,
+                       produced_by="compute_baseline_metrics"),
+        LoadedArtifact(catalog_name="evaluation_report_aggregates",
+                       payload=evaluation_report_aggregates,
+                       produced_by="compute_report_aggregates"),
+        LoadedArtifact(catalog_name="prediction_quality_metrics",
+                       payload=prediction_quality_metrics,
+                       produced_by="compute_prediction_quality"),
+    ]
+    require_computed_with_current_config(loaded, parameters)
     # Decision — hand the report one bundle of results keyed by catalog name
     # (ADR-0031 principle 1): each section takes the names it declares, so a
     # new result reaches its section without passing through every signature
     # on the way. The bundle lives only here; each result already landed.
-    results = {
-        "evaluation_metrics": evaluation_metrics,
-        "baseline_metrics": baseline_metrics,
-        "evaluation_report_aggregates": evaluation_report_aggregates,
-        "prediction_quality_metrics": prediction_quality_metrics,
-    }
-    produced_by = {
-        "evaluation_metrics": "compute_metrics",
-        "baseline_metrics": "compute_baseline_metrics",
-        "evaluation_report_aggregates": "compute_report_aggregates",
-        "prediction_quality_metrics": "compute_prediction_quality",
-    }
-    require_computed_with_current_config(
-        [
-            LoadedArtifact(catalog_name=name, payload=payload,
-                           produced_by=produced_by[name])
-            for name, payload in results.items()
-        ],
+    return assemble_report(
+        {artifact.catalog_name: artifact.payload for artifact in loaded},
         parameters,
     )
-    return assemble_report(results, parameters)
 
 
 def load_compare_predictions(parameters: dict) -> SparkDataFrame:

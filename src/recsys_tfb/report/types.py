@@ -27,7 +27,7 @@ class ReportSection:
       ``<p>``，塞不進列點；長段落正是被抱怨「沒耐心看完」的那個形狀。
 
     **兩者都必須維持可選且有預設值**：``evaluation/report_sections/`` 大多數
-    既有的 ``build_*_section`` 只傳 title/description，加必填欄位會讓它們全部
+    段的 ``build`` 只傳 title/description，加必填欄位會讓它們全部
     ``TypeError``。渲染器是 ``evaluation/report.py``，它經
     ``report.pages.render_section_extras`` 畫這兩個欄位。
     """

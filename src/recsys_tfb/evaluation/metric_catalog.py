@@ -31,9 +31,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-#: 每個 query group 先算、再對 query group 平均（ADR-0031 決定 7 的第一種算法）。
+#: Computed per query group, then averaged over query groups (ADR-0031
+#: decision 7, first method).
 QUERY_GROUP = "query_group"
-#: 每個 item 一份，再對 item 平均成 macro（決定 7 的第二種算法）。
+#: One value per item, averaged over items into the macro (decision 7,
+#: second method).
 ITEM = "item"
 
 #: The query-group method's shared numbers: what ``compute_per_query_metrics``
@@ -55,6 +57,12 @@ ITEM_ROW_COLUMNS: dict[str, str] = {
                   "K, else 0 (per K)",
     "pos": "the row's rank in its query group",
 }
+
+
+# Two formula shapes cover every metric the catalog holds. A metric neither
+# can say (F1@K combines two metrics; a per-item precision needs rows the item
+# method does not keep yet) comes with a new shape here and the code in
+# ``metrics_spark`` that builds it.
 
 
 @dataclass(frozen=True)

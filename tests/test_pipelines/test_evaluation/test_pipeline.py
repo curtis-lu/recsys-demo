@@ -489,6 +489,19 @@ class TestGenerateReportNodeWiring:
                 if p.default is not inspect.Parameter.empty
             ], "generate_report grew a defaulted parameter"
 
+    def test_the_wired_results_are_the_ones_the_sections_read(self):
+        """A result wired here that no section declares in ``READS`` is
+        loaded for nothing; one a section declares that is not wired fails
+        only when the report is drawn. The two sets are the same."""
+        from recsys_tfb.evaluation.report_builder import SECTIONS
+
+        read = set().union(*(section.READS for section in SECTIONS))
+        for kwargs in ({}, {"post_training": True}):
+            node = next(n for n in create_pipeline(**kwargs).nodes
+                        if n.name == "generate_report")
+            wired = set(node.keyword_inputs) - {"parameters"}
+            assert wired == read, (kwargs, sorted(wired), sorted(read))
+
 class TestGenerateComparisonReportNodeWiring:
     """Same positional-binding hazard as TestGenerateReportNodeWiring, but a
     strictly more silent failure mode.

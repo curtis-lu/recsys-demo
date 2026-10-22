@@ -8,12 +8,13 @@ from collections.abc import Mapping
 import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
+from recsys_tfb.evaluation.metric_catalog import ITEM, QUERY_GROUP, entry
 from recsys_tfb.evaluation.metrics import metric_params, resolved_all_k
 from recsys_tfb.evaluation.report import ReportSection
-from recsys_tfb.evaluation.report_sections import prediction_quality
 from recsys_tfb.evaluation.report_sections.shared import (
     headline_column,
     k_to_lookup,
+    prediction_quality_shown,
     query_count_rows,
     read_dataset_overview,
     report_cfg,
@@ -34,24 +35,26 @@ def _headline_key(parameters: dict, all_k: int) -> str:
     (e.g. ``metric.min_positives`` above every item's count).
     """
     mk = metric_params(parameters)["k"]
-    return f"map_attr@{k_to_lookup('all' if mk is None else mk, all_k)}"
+    return entry("map_attr", ITEM).key(
+        k_to_lookup("all" if mk is None else mk, all_k))
 
 
 def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
     """概覽（定向）：這份報表回答什麼、規模／分母、關鍵數、往哪找。
 
     The navigation table gains the prediction-quality row only when that
-    section is on the page (``prediction_quality.shown``), so the row never
-    points at a section the report left out. That is the one place one
-    section reads another; the navigation table goes in #537 (ADR-0031
-    decision 9), and the import with it.
+    section is on the page (``shared.prediction_quality_shown``), so the row
+    never points at a section the report left out. That is why this section
+    reads ``prediction_quality_metrics``; ADR-0031 decision 9 drops the
+    navigation table, and the read with it.
 
     presentation §一.1：規模／歸一化分母與嚴重度訊號分開標——分母混進關鍵數
     表會被讀成好壞。頭號指標＝macro per-item mAP（item 等權）；overall
     per-query mAP 並列為「另一種加權」，不宣稱哪個才對（不變量 4）。
     """
     metrics = results["evaluation_metrics"]
-    prediction_quality_shown = prediction_quality.shown(results, parameters)
+    pq_shown = prediction_quality_shown(
+        results["prediction_quality_metrics"], parameters)
     overall = metrics.get("overall", {})
     disp = report_cfg(parameters).get("display", {}) or {}
     all_k = resolved_all_k(metrics)
@@ -71,8 +74,10 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
         titles.append("頭號指標：macro per-item mAP（item 等權）")
 
     # 關鍵指標 2：overall per-query mAP@k（另一種加權，並列不比高下）
+    overall_map = entry("map", QUERY_GROUP)
     card = {
-        f"map@{k}": overall.get(f"map@{k_to_lookup(k, all_k)}") for k in ks
+        overall_map.key(k): overall.get(overall_map.key(k_to_lookup(k, all_k)))
+        for k in ks
     }
     t_overall = pd.DataFrame([card]).T
     t_overall.columns = ["value"]
@@ -122,7 +127,7 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
             "完整性檢查",
         ],
     })
-    if prediction_quality_shown:
+    if pq_shown:
         nav.loc[len(nav)] = [
             "把每一列候選當二元預測：門檻切在哪、precision／recall 多少",
             "預測品質",

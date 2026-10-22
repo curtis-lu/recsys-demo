@@ -193,15 +193,15 @@ def build(
     overall_b = comp["result_b"].get("overall", {}) or {}
     overall_delta = comp["overall_delta"]
     for metric in (entry(*c) for c in _COMPARED_OVERALL):
-        fam, label = metric.name, metric.display_name
         data = {}
         for who, src in (("Model", overall_a), ("Baseline", overall_b),
                          ("Δ", overall_delta)):
             data[who] = {
-                f"@{k}": src.get(f"{fam}@{k_to_lookup(k, all_k)}")
+                f"@{k}": src.get(metric.key(k_to_lookup(k, all_k)))
                 for k in k_super
             }
-        _add(pd.DataFrame(data).T, f"overall {label}@k (M/B/Δ)", True)
+        _add(pd.DataFrame(data).T,
+             f"overall {metric.display_name}@k (M/B/Δ)", True)
 
     # [3] per-item compare tables — only when baseline has per_item；明細收合。
     per_item_a = comp["result_a"].get("per_item", {}) or {}

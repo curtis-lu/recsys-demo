@@ -323,6 +323,11 @@ diagnosis/metric/    contract.py
 - **更正（#533 實作時發現，2026-10-23）**：
   - 比較報表借用的 7 個名字裡有一個是整段（詞彙表 `build_glossary_section`）。它照「一段一個檔」放在自己的檔，比較報表讀那個檔；其餘 6 個放共用檔。詞彙表在決定 3 拿掉之後，這一條跟著消失。
   - 檔名用決定 16 第 4 項定案的新段名（例如衡量指標段的檔叫 `ranking_metrics.py`），不用拆檔當下的段名（擁有者 2026-10-23 決定），#537 改段名時就不必再改檔名。在那之前，檔名跟畫面上的段名對不上；每個檔開頭寫了兩個名字。
+  - 本份引用的報表函式搬家後的位置（都在 `evaluation/report_sections/`）：`_headline_key` → `overview.py`；`_headline_column` → `shared.headline_column`；`_macro_item_coverage` → `shared.macro_item_coverage`；`build_baseline_section` → `popularity_baseline.build`；`build_completeness_section` → `completeness.build`；其餘 `build_*_section` 同樣是各段檔的 `build`。行號仍是 `fe3c30dd` 的快照。
+- **更正（#533 實作時發現，2026-10-23）：決定 6、7 的指標目錄。**
+  - 目錄 `evaluation/metric_catalog.py` 先只收前兩種算法的指標。第三種（把分數當機率，預測品質段的分箱 `pr_auc`／`roc_auc`）由 `evaluation/prediction_quality.py` 用自己的函式算，沒有可讓公式指名的共用數字；等那種算法備齊共用數字時再進目錄。
+  - 決定 6 要 query group 的 `recall@K` 與 per-item 的那一個「報表顯示名要分得出來」。#533 要求兩份 HTML 一字不差，所以目錄裡兩者的顯示名都照今天的報表寫 `recall`；分開它們留給改名那一步（per-item 的 `hit_rate@K` 改叫 `recall@K` 時），那一步的驗收本來就有這一條。
+  - 決定 11 讓各段自己宣告「要比哪些」，所以熱門度基準段與比較報表各留一份「要比的目錄條目」清單；衡量指標段則對目錄裡每個指標都畫表（per-item 那塊既有的兩張表照舊，其餘每個 per-K 的 item 指標各一張）。照決定 11，新指標要出現在比較表裡，仍要改那兩份清單；這跟決定 1「加指標兩份報表的程式不改」衝突，留給驗收那張票定（例如改成在目錄上加「要比」的標記，決定 16 第 1 項的模型選擇指標標記是同一種做法）。
 
 ---
 

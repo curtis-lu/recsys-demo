@@ -754,8 +754,7 @@ def compute_per_query_metrics(
 
     Output columns:
         group_cols, total_rel,
-        every query-group entry of ``metric_catalog`` for each K
-        (map@K, precision@K, recall@K),
+        every query-group entry of ``metric_catalog`` for each K,
         plus any column in ``carry_cols`` (taken via F.first within the query —
         valid for per-customer attributes constant within a query, e.g. segment).
 

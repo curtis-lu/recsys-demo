@@ -2432,3 +2432,24 @@ def test_tables_name_metrics_by_their_catalog_display_name(monkeypatch):
     baseline = popularity_baseline.build(results, _params()).table_titles
     assert "overall MAP!@k (M/B/Δ)" in baseline
     assert any(t.startswith("per-item item-recall@k (M/B/Δ)") for t in baseline)
+
+
+def test_a_new_item_entry_gets_its_own_per_item_table(monkeypatch):
+    """Block B draws today's map_attr and recall tables as they were, and a
+    table of its own for any other per-K item entry — so an item metric added
+    to the catalog shows with no change to the section."""
+    from recsys_tfb.evaluation import metric_catalog as mc
+
+    _with_catalog(monkeypatch, mc.Metric(
+        name="toy_i", method=mc.ITEM,
+        formula=mc.MeanOverPositiveRows("top_k"), per_k=True,
+        grains=("per_item",), population="toy", display_name="toy-item",
+        definition="toy"))
+    m = _metrics()
+    m["per_item"]["A"]["toy_i@1"] = 0.42
+    m["macro_avg"]["by_item"]["toy_i@1"] = 0.21
+    s = ranking_metrics.build(_results(evaluation_metrics=m), _params())
+    (i,) = [i for i, t in enumerate(s.table_titles)
+            if t.startswith("B · per-item 歸因｜toy-item@k（列＝item）")]
+    assert s.tables[i].loc["A", "@1"] == pytest.approx(0.42)
+    assert s.tables[i].loc[shared.MACRO_LABEL, "@1"] == pytest.approx(0.21)

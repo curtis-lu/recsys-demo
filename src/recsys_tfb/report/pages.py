@@ -87,7 +87,7 @@ def render_section_extras(section) -> list[str]:
     """``formula`` 與 ``bullets`` 的 HTML；兩者皆空時回空 list。
 
     回空 list 而不是空字串是刻意的：呼叫端 ``extend`` 之後**一個標籤都不會多**，
-    所以不帶這兩個欄位的 ``build_*_section`` 輸出逐位元不變。
+    所以不帶這兩個欄位的段（各段的 ``build``）輸出逐位元不變。
     """
     parts: list[str] = []
     if section.formula:

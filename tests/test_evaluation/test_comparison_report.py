@@ -148,7 +148,7 @@ def test_per_item_row_missing_on_one_side_has_blank_delta():
     m_a, m_b = _metrics(), _metrics()
     del m_b["per_item"]["p2"]
     comp = _comparison(m_a, m_b)
-    sec = _build_per_item_section(m_a, m_b, comp, _params())
+    sec = _build_per_item_section({"metrics_a": m_a, "metrics_b": m_b, "comparison": comp}, _params())
     assert sec is not None
     recall = sec.tables[0]
     assert recall.loc["p2", "recall@1 M"] == pytest.approx(0.5)
@@ -167,7 +167,7 @@ def test_macro_row_delta_blank_when_one_side_lacks_the_key():
 
     def _macro_recall_at_1(m_b):
         m_a = _metrics()
-        sec = _build_per_item_section(m_a, m_b, _comparison(m_a, m_b), _params())
+        sec = _build_per_item_section({"metrics_a": m_a, "metrics_b": m_b, "comparison": _comparison(m_a, m_b)}, _params())
         recall = sec.tables[0]  # 2 items → only recall@1 survives the K clamp
         return recall.loc[recall.index[0]]
 
@@ -190,7 +190,7 @@ def test_empty_overall_side_blanks_delta_column_and_says_why():
 
     m_a, m_b = _metrics(0.6), _metrics(0.4)
     m_b["overall"] = {}
-    sec = _build_overall_section(m_a, _comparison(m_a, m_b))
+    sec = _build_overall_section({"metrics_a": m_a, "comparison": _comparison(m_a, m_b)}, _params())
     tbl = sec.tables[0]
     assert len(tbl.index) > 0, "no rows — the Δ column check would pass vacuously"
     assert tbl["Δ"].isna().all()
@@ -202,7 +202,7 @@ def test_overall_title_has_no_empty_side_note_when_both_sides_have_metrics():
     from recsys_tfb.evaluation.comparison.report import _build_overall_section
 
     m_a, m_b = _metrics(0.6), _metrics(0.4)
-    sec = _build_overall_section(m_a, _comparison(m_a, m_b))
+    sec = _build_overall_section({"metrics_a": m_a, "comparison": _comparison(m_a, m_b)}, _params())
     assert "無可比的 query" not in sec.table_titles[0]
     assert sec.tables[0].loc["map@1", "Δ"] == pytest.approx(0.2)
 
@@ -292,7 +292,7 @@ def test_category_section_columns_clamp_to_category_count():
     p = _params()
     p["evaluation"]["item_categories"]["enabled"] = True
     p["evaluation"]["report"]["display"]["primary_map_k"] = [1, 3, 5, "all"]
-    sec = _build_category_section(m_a, m_b, p)
+    sec = _build_category_section({"metrics_a": m_a, "metrics_b": m_b}, p)
     assert sec is not None
     tbl = sec.tables[sec.table_titles.index(
         next(t for t in sec.table_titles if t.startswith(
@@ -311,7 +311,7 @@ def test_per_item_section_discloses_macro_item_coverage():
 
     m_a, m_b = _metrics(), _metrics()
     comp = _comparison(m_a, m_b)
-    sec = _build_per_item_section(m_a, m_b, comp, _params())
+    sec = _build_per_item_section({"metrics_a": m_a, "metrics_b": m_b, "comparison": comp}, _params())
     assert sec is not None
     for title in sec.table_titles:
         assert "參與 macro 的 item 數" in title
@@ -333,7 +333,7 @@ def test_category_section_discloses_macro_item_coverage():
     m_b["category"] = cat_metrics
     p = _params()
     p["evaluation"]["item_categories"]["enabled"] = True
-    sec = _build_category_section(m_a, m_b, p)
+    sec = _build_category_section({"metrics_a": m_a, "metrics_b": m_b}, p)
     assert sec is not None
     per_item_titles = [t for t in sec.table_titles if t != "大類 overall"]
     assert per_item_titles
@@ -359,7 +359,7 @@ def test_category_overall_title_names_the_empty_side():
     m_b["category"] = {**cat_a, "overall": {}}
     p = _params()
     p["evaluation"]["item_categories"]["enabled"] = True
-    sec = _build_category_section(m_a, m_b, p)
+    sec = _build_category_section({"metrics_a": m_a, "metrics_b": m_b}, p)
     assert sec is not None, "section returned None — nothing was checked"
     title = next(t for t in sec.table_titles if t.startswith("大類 overall"))
     assert "Compare 側無可比的 query（全部零正例）" in title
@@ -396,7 +396,7 @@ def test_category_overall_table_drops_keys_with_k_above_category_count():
     m_b["category"] = cat_metrics
     p = _params()
     p["evaluation"]["item_categories"]["enabled"] = True
-    sec = _build_category_section(m_a, m_b, p)
+    sec = _build_category_section({"metrics_a": m_a, "metrics_b": m_b}, p)
     assert sec is not None
     overall = sec.tables[sec.table_titles.index("大類 overall")]
     idx = [str(i) for i in overall.index]
@@ -419,7 +419,7 @@ def test_overall_table_drops_keys_with_k_above_item_count():
         for m in (m_a, m_b):
             m["overall"] = dict(full)
             m["dataset_overview"]["totals"]["n_items"] = n_items
-        sec = _build_overall_section(m_a, _comparison(m_a, m_b))
+        sec = _build_overall_section({"metrics_a": m_a, "comparison": _comparison(m_a, m_b)}, _params())
         idx = [str(i) for i in sec.tables[0].index]
         assert sorted(idx) == expected, n_items
 
@@ -528,7 +528,7 @@ def test_overall_table_keeps_the_all_row_past_the_item_count():
     from recsys_tfb.evaluation.comparison.report import _build_overall_section
 
     m_a, m_b = _metrics_at_all_k(17, 0.5), _metrics_at_all_k(17, 0.3)
-    sec = _build_overall_section(m_a, _comparison(m_a, m_b))
+    sec = _build_overall_section({"metrics_a": m_a, "comparison": _comparison(m_a, m_b)}, _params())
     tbl = sec.tables[0]
     assert tbl.loc["map@17", "Model"] == pytest.approx(0.5)
     assert tbl.loc["map@17", "Δ"] == pytest.approx(0.2)
@@ -544,7 +544,7 @@ def test_overall_table_filters_each_side_at_its_own_k():
     m_a["overall"]["precision@4"] = 0.1
     m_b["overall"]["precision@4"] = 0.2
     m_b["dataset_overview"]["totals"]["n_items"] = 4
-    sec = _build_overall_section(m_a, _comparison(m_a, m_b))
+    sec = _build_overall_section({"metrics_a": m_a, "comparison": _comparison(m_a, m_b)}, _params())
     tbl = sec.tables[0]
     assert pd.isna(tbl.loc["precision@4", "Model"])
     assert tbl.loc["precision@4", "ExtX"] == pytest.approx(0.2)
@@ -558,7 +558,7 @@ def test_per_item_all_column_reads_each_side_at_its_own_k():
     from recsys_tfb.evaluation.comparison.report import _build_per_item_section
 
     m_a, m_b = _metrics_at_all_k(17, 0.5), _metrics_at_all_k(19, 0.3)
-    sec = _build_per_item_section(m_a, m_b, _comparison(m_a, m_b), _params())
+    sec = _build_per_item_section({"metrics_a": m_a, "metrics_b": m_b, "comparison": _comparison(m_a, m_b)}, _params())
     attr = sec.tables[1]
     assert attr.loc["p1", "map_attr@all M"] == pytest.approx(0.5)
     assert attr.loc["p1", "map_attr@all B"] == pytest.approx(0.3)

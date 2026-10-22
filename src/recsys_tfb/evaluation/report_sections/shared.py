@@ -4,6 +4,8 @@ one section uses stays in that section's file."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import pandas as pd
 
 from recsys_tfb.core.consistency import (
@@ -155,6 +157,33 @@ def section_on(parameters: dict, name: str) -> bool:
         )
     sections = report_cfg(parameters).get("sections", {}) or {}
     return bool(sections.get(name, True))
+
+
+def prediction_quality_shown(
+    prediction_quality_metrics: dict | None, parameters: dict
+) -> bool:
+    """Whether the prediction-quality section is on the page: its switch is on
+    and ``compute_prediction_quality`` computed the payload rather than writing
+    its stub. Here rather than in that section's file because the overview's
+    navigation table asks it too, and sections do not import each other."""
+    return bool(section_on(parameters, "prediction_quality")
+                and prediction_quality_metrics
+                and prediction_quality_metrics.get("enabled") is True)
+
+
+def results_read_by(
+    reader: str, reads: tuple[str, ...], results: Mapping[str, dict]
+) -> dict:
+    """The results ``reader`` declared in ``reads``, and no others; raises
+    naming the missing ones. Handing a reader only what it declared is what
+    keeps the declaration true: a read it did not declare fails here."""
+    missing = [name for name in reads if name not in results]
+    if missing:
+        raise ValueError(
+            f"{reader} reads {missing}, which it was not given "
+            f"(given {sorted(results)})."
+        )
+    return {name: results[name] for name in reads}
 
 
 #: ``evaluation_results.json`` keys renamed by #327, ``old -> new``. The
@@ -318,7 +347,7 @@ def grain_bundles(metrics: dict) -> list[tuple[str, dict]]:
     return out
 
 
-def zero_positive_draw(parameters: dict) -> float | None:
+def zero_positive_draw_on_test(parameters: dict) -> float | None:
     """dataset 對 test 表無正例 query group 的抽樣：監控模式回 ``None``（沒有
     dataset 抽樣，數到的是資料本身）；``--post-training`` 且 test 表帶權重欄
     （``test_carries_zero_positive_group_weight``）回保留比例 r（> 0）；不帶
@@ -378,7 +407,7 @@ def kept_zero_positive_groups_note(metrics: dict, parameters: dict) -> str:
     weight: few kept groups means the weighted numbers are not stable, and the
     reader should see the count next to them.
     """
-    ratio = zero_positive_draw(parameters)
+    ratio = zero_positive_draw_on_test(parameters)
     if not ratio:   # monitoring (None), or the dataset dropped them all (0.0)
         return ""
     n_kept = metrics.get("n_excluded_queries")

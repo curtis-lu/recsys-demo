@@ -34,7 +34,7 @@ from recsys_tfb.evaluation.report_sections.shared import (
     metrics_section_ks,
     section_on,
     unmatched_last,
-    zero_positive_draw,
+    zero_positive_draw_on_test,
 )
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
@@ -69,7 +69,7 @@ def _zero_positive_origin(parameters: dict) -> str:
     全丟了，帳上恆為 0；r > 0 時留下的是抽過的一部分。不說的話，讀者會把 0 讀成
     「資料裡沒有這種組」。監控模式沒有 dataset 抽樣，帳上是實際組數，回 ``""``。
     """
-    ratio = zero_positive_draw(parameters)
+    ratio = zero_positive_draw_on_test(parameters)
     if ratio is None:
         return ""
     if ratio > 0:
@@ -181,15 +181,32 @@ def _per_item_recall_table(
 
 def _families_by_k_table(overall: dict, ks: list, all_k: int) -> pd.DataFrame:
     """單一 per-query aggregate → rows=指標目錄裡 query group 那種算法的每個
-    指標（map、precision、recall）、cols=@k。
+    指標、cols=@k。
 
     給「單一彙總」用（overall、大類 overall）：只有一個實體，故用指標家族當列。
     """
+    # Rows are labelled by the metric's name, as the report always printed
+    # them; the catalog's display names take over when ADR-0031 decision 16
+    # relabels the section.
     rows = {}
     for fam in _query_group_names():
         rows[fam] = {f"@{k}": overall.get(f"{fam}@{k_to_lookup(k, all_k)}")
                      for k in ks}
     return pd.DataFrame(rows).T
+
+
+#: Block B's item metrics drawn in an arrangement of their own: map_attr's
+#: table, then recall's (``hit_rate``) with mean_pos as an extra column. Every
+#: other per-K item entry of the catalog gets a table of its own after them
+#: (:func:`_other_item_metrics`).
+_ARRANGED_ITEM_METRICS = ("map_attr", "hit_rate", "mean_pos")
+
+
+def _other_item_metrics() -> list:
+    """The per-K item entries block B has no arrangement for, in catalog
+    order: each is drawn like map_attr, one table per grain."""
+    return [m for m in metrics_of(ITEM)
+            if m.per_k and m.name not in _ARRANGED_ITEM_METRICS]
 
 
 def _query_group_names() -> list[str]:
@@ -284,6 +301,11 @@ def build(
          True)
     _add(_per_item_recall_table(per_item, ks, all_k, macro_metrics=macro_item),
          f"B · per-item 歸因｜{recall_label}@k（列＝item）{item_cov}", True)
+    for metric in _other_item_metrics():
+        _add(_per_item_metric_table(per_item, ks, all_k, metric.name, "@{k}",
+                                    macro_metrics=macro_item),
+             f"B · per-item 歸因｜{metric.display_name}@k（列＝item）{item_cov}",
+             True)
     if cat:
         cat_macro_item = cat.get("macro_avg", {}).get("by_item", {})
         cat_pi = dict(sorted((cat.get("per_item", {}) or {}).items()))
@@ -298,6 +320,11 @@ def build(
                                     macro_metrics=cat_macro_item),
              f"B · 大類 per-item 歸因｜{recall_label}@k（列＝大類）"
              f"{cat_item_cov}", True)
+        for metric in _other_item_metrics():
+            _add(_per_item_metric_table(cat_pi, cks, cat_k, metric.name,
+                                        "@{k}", macro_metrics=cat_macro_item),
+                 f"B · 大類 per-item 歸因｜{metric.display_name}@k（列＝大類）"
+                 f"{cat_item_cov}", True)
 
     ledger = [
         line for grain, bundle in grain_bundles(metrics)
