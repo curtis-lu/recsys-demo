@@ -840,4 +840,3 @@ def build_model_input(
 | node 邊界該不該合併的實例論證 | [ADR-0010](../adr/0010-inference-chunked-scoring-shape.md) §4 |
 | 驗證分層（chunk 層 vs batch 層）的實例論證 | [ADR-0011](../adr/0011-inference-validation-two-layers.md) §3 |
 | 不變量代號 A 系列／B 系列的意義 | `src/recsys_tfb/core/consistency.py` 模組 docstring |
-| 程式碼現在長什麼樣 | `graphify-out/GRAPH_REPORT.md` |
