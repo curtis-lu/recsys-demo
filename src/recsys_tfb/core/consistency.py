@@ -758,9 +758,11 @@ Layer 1 — config-static (implemented here; aggregated by
   rest (the four diagnoses ``config_shift``, ``item_ability``,
   ``model_capacity`` and ``suppression``, and the sample they shared). A43's
   shape: **presence is the failure, whatever the value** — ``enabled: false``
-  switches off nothing that still exists, and the block sat in a fingerprinted
-  subtree (``COMPUTED_KEYS`` until #532), so a conf that keeps it is not the
-  conf that deleted it. Keys: :data:`RETIRED_DIAGNOSIS_KEYS`. Predicate:
+  switches off nothing that still exists, and nothing reads the block, so a
+  conf that keeps it gets no word that it does nothing. Unlike A43's keys it
+  no longer moves a fingerprint: #532 dropped its ``COMPUTED_KEYS`` row, so
+  keeping it and deleting it compute the same artifacts; the harm is the
+  silence alone. Keys: :data:`RETIRED_DIAGNOSIS_KEYS`. Predicate:
   ``retired_diagnosis_key_errors`` (returns errors; the evaluation command
   raises, collected with A22/A34/A42/A43). NOT aggregated, for A43's reason:
   the harm belongs to evaluation alone (A34's reason, issue #158).
@@ -3394,10 +3396,10 @@ RETIRED_DIAGNOSIS_KEYS: tuple[str, ...] = (
 def retired_diagnosis_key_errors(parameters: dict) -> list[str]:
     """A61 — refuse the diagnosis block #515 and #532 retired, whatever its value.
 
-    Same reasoning as A43 (``retired_calibration_bin_key_errors``): nothing
-    reads it, so left in place it switches nothing and says nothing; and it
-    sits in a fingerprinted subtree, so keeping it is not the same conf as
-    deleting it.
+    Same shape as A43 (``retired_calibration_bin_key_errors``): nothing reads
+    it, so left in place it switches nothing and says nothing. Unlike A43's
+    keys it moves no fingerprint any more (#532 dropped its ``COMPUTED_KEYS``
+    row); the silence is the whole harm.
     """
     present = [
         dotted for dotted in RETIRED_DIAGNOSIS_KEYS
