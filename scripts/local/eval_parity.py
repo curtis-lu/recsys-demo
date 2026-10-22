@@ -29,7 +29,11 @@ refused: the overlay would mix with them, and removing it would delete them.
 Each run records ``SOURCE``: a digest of every file under ``src/``, the commit,
 and uncommitted changes under ``src/``. The digest is taken before and after
 the run, and a run during which the code changed is refused — a comparison
-is only evidence for the code that produced it.
+is only evidence for the code that produced it. ``conf/`` is not in the
+digest: change it between the runs you compare and the comparison is about
+the settings, not the code. Each run first clears the model's
+``data/evaluation/<model_version>/``, so a file the changed code stopped
+writing shows as missing instead of as the previous run's copy.
 
 Run from the repo or worktree root (the CLI finds ``conf/`` and ``data/``
 from the current directory), with the repo's interpreter:
@@ -43,7 +47,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import shutil
+import signal
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -56,6 +62,8 @@ COMPARE_KEY = "parity_self"
 #: Where each run's copy goes, under the root.
 VERIFICATION_DIR = Path("data/verification/eval_parity")
 _HEADER = "# Written by scripts/local/eval_parity.py for one command; removed after it.\n"
+#: A run label is a directory name under VERIFICATION_DIR, nothing more.
+_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
 
 def overlay_files(base_conf: Path, model_version: str | None) -> dict[str, str]:
@@ -93,6 +101,11 @@ def overlay(conf_local: Path, files: dict[str, str]):
         raise RuntimeError(
             f"{conf_local} already holds {present}; the overlay would mix with "
             "them and removing it would delete them. Move them aside first.")
+    def interrupted(signum, frame):
+        raise SystemExit(f"interrupted by signal {signum}; overlay removed")
+
+    handlers = {sig: signal.signal(sig, interrupted)
+                for sig in (signal.SIGTERM, signal.SIGHUP)}
     written = []
     try:
         for name, text in files.items():
@@ -102,6 +115,8 @@ def overlay(conf_local: Path, files: dict[str, str]):
     finally:
         for path in written:
             path.unlink(missing_ok=True)
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
 
 
 def src_digest(src: Path) -> str:
@@ -119,6 +134,12 @@ def _cli(root: Path, *args: str) -> None:
            "PYTHONPATH": str(root / "src")}
     print(f"▶ {' '.join(args)}", flush=True)
     subprocess.run([sys.executable, *args], cwd=root, env=env, check=True)
+
+
+def _git(root: Path, *args: str) -> str:
+    run = subprocess.run(["git", *args], cwd=root, capture_output=True,
+                         text=True)
+    return run.stdout.strip() if run.returncode == 0 else "(no git checkout)"
 
 
 def _latest_model(root: Path) -> str:
@@ -141,9 +162,15 @@ def prepare(root: Path) -> None:
 
 
 def run(root: Path, label: str) -> Path:
+    if not _LABEL.fullmatch(label):
+        raise SystemExit(f"label {label!r}: use a plain name such as base1 "
+                         "(letters, digits, '_', '-', '.')")
     model_version = _latest_model(root)
     before = src_digest(root / "src")
     files = overlay_files(root / "conf" / "base", model_version)
+    previous = root / "data" / "evaluation" / model_version
+    if previous.exists():
+        shutil.rmtree(previous)
     with overlay(root / "conf" / "local", files):
         _cli(root, "-m", "recsys_tfb", "evaluation", "--env", "local",
              "--post-training", "--model-version", model_version,
@@ -155,12 +182,10 @@ def run(root: Path, label: str) -> Path:
     if out.exists():
         shutil.rmtree(out)
     shutil.copytree(root / "data" / "evaluation" / model_version, out)
-    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True,
-                          capture_output=True, text=True).stdout.strip()
-    status = subprocess.run(["git", "status", "--short", "--", "src"], cwd=root,
-                            check=True, capture_output=True, text=True).stdout
+    head = _git(root, "rev-parse", "--short=8", "HEAD")
+    status = _git(root, "status", "--short", "--", "src")
     (out / "SOURCE").write_text(
-        f"src digest {before[:16]} · HEAD {head[:8]}\n{status}")
+        f"src digest {before[:16]} · HEAD {head}\n{status}\n")
     print(f"copied to {out}")
     return out
 

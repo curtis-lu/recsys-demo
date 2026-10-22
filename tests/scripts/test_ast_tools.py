@@ -89,3 +89,41 @@ def test_docstrings_count_unless_told_otherwise(tmp_path):
     assert dict(compare([old], [new]))["_helper"] == "CHANGED"
     assert dict(compare([old], [new], ignore_docstrings=True))["_helper"] \
         == "SAME"
+
+
+def test_module_level_statements_are_compared_too(tmp_path):
+    """A registry call or an ``if`` block at module level is code a move must
+    keep; it is compared as one group, wherever in the new files it lands."""
+    base = textwrap.dedent(_OLD) + "\nREGISTRY = []\n"
+    old = _write(tmp_path / "old.py", base + "REGISTRY.append(section)\n")
+    kept = _write(tmp_path / "kept.py", base + "REGISTRY.append(section)\n")
+    dropped = _write(tmp_path / "dropped.py", base)
+    assert dict(compare([old], [kept]))["<module statements>"] == "SAME"
+    assert dict(compare([old], [dropped]))["<module statements>"] == "CHANGED"
+
+
+def test_a_name_defined_twice_on_the_old_side_is_a_duplicate(tmp_path):
+    a = _write(tmp_path / "a.py", _OLD)
+    b = _write(tmp_path / "b.py", _OLD.replace("x + 1", "x + 2"))
+    new = _write(tmp_path / "new.py", _OLD)
+    assert dict(compare([a, b], [new]))["_helper"] == "DUPLICATE"
+
+
+def test_a_rename_that_would_touch_a_local_name_is_refused(tmp_path):
+    import pytest
+
+    old = _write(tmp_path / "old.py", _OLD + '''
+    def other(_helper):
+        return _helper
+    ''')
+    new = _write(tmp_path / "new.py", _OLD.replace("_helper", "helper"))
+    with pytest.raises(ValueError, match="_helper"):
+        compare([old], [new], renames={"_helper": "helper"})
+
+
+def test_comparing_nothing_fails(tmp_path):
+    from scripts.dev.ast_compare import main
+
+    empty_old = _write(tmp_path / "old.py", "import os\n")
+    empty_new = _write(tmp_path / "new.py", "import os\n")
+    assert main(["--old", str(empty_old), "--new", str(empty_new)]) == 1

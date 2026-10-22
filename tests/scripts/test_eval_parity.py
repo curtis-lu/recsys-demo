@@ -68,3 +68,47 @@ def test_the_digest_follows_any_source_file(tmp_path):
     assert edited != before
     (tmp_path / "pkg" / "new.py").write_text("y = 2\n")
     assert src_digest(tmp_path) != edited
+
+
+def _fake_root(tmp_path, conf):
+    root = tmp_path / "root"
+    (root / "conf").mkdir(parents=True)
+    for sub in ("base", "local"):
+        (root / "conf" / sub).symlink_to(conf / sub)
+    (root / "src").mkdir()
+    (root / "src" / "m.py").write_text("x = 1\n")
+    return root
+
+
+def test_a_file_the_new_run_did_not_write_is_not_carried_over(
+        tmp_path, conf, monkeypatch):
+    """The run's outputs are cleared first: a file the changed code stopped
+    writing must show as missing, not as the previous run's copy."""
+    import scripts.local.eval_parity as ep
+
+    root = _fake_root(tmp_path, conf)
+    out = root / "data" / "evaluation" / "abc12345" / "20260131"
+    writes = iter([("metrics.json", "report_comparison.html"),
+                   ("metrics.json",)])
+
+    def fake_cli(_root, *args):
+        out.mkdir(parents=True, exist_ok=True)
+        for name in next(writes):
+            (out / name).write_text("{}")
+
+    monkeypatch.setattr(ep, "_cli", fake_cli)
+    monkeypatch.setattr(ep, "_latest_model", lambda _root: "abc12345")
+    first = ep.run(root, "first")
+    second = ep.run(root, "second")
+    assert (first / "20260131" / "report_comparison.html").is_file()
+    assert not (second / "20260131" / "report_comparison.html").exists()
+
+
+@pytest.mark.parametrize("label", ["../src", "a/b", "..", ""])
+def test_a_label_that_is_not_a_plain_name_is_refused(tmp_path, conf, label):
+    import scripts.local.eval_parity as ep
+
+    root = _fake_root(tmp_path, conf)
+    with pytest.raises(SystemExit, match="label"):
+        ep.run(root, label)
+    assert (root / "src" / "m.py").is_file()
