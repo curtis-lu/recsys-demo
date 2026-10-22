@@ -3,14 +3,16 @@
 
 One rule, written twice — once per engine — and nowhere else:
 
-* :func:`rank_by_score_then_item` is the Spark window. Inference's
+* :func:`rank_by_score_then_item` is the Spark rank, a ``row_number`` over
+  :func:`score_then_item_window`. Inference's
   ``rank_predictions`` (the published ``rank``) and evaluation's
   ``metrics_spark.rank_within_query`` rank with it; the latter serves every
   metric pass in both modes, and ``prepare_eval_data`` and the comparison mode
   use it to fill in or redo ``rank``. Training's quadrant diagnosis
   (``select_shap_population``, ``pipelines/training/nodes.py``) ranks with it
   too, so its top-1 is evaluation's top-1 when ``event`` is declared (ADR-0030
-  decision 12).
+  decision 12). ``metrics_spark.add_row_contributions`` orders its running
+  sum by the window itself, so the rows are sorted once (#450).
 * :func:`order_by_score_then_item` is the numpy twin for the driver: the metric
   primitives in ``evaluation/metrics.py`` (which HPO scores trials with) and
   the metric diagnoses.

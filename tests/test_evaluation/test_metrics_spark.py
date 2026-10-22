@@ -227,6 +227,14 @@ def _sorts_in_plan(df) -> int:
     return len(re.findall(r"\bSort \[", plan))
 
 
+def _window_order(df, out_col) -> str:
+    """The order spec of the Window node that computes ``out_col``."""
+    plan = df._jdf.queryExecution().executedPlan().toString()
+    line = next(ln for ln in plan.splitlines()
+                if "Window [" in ln and f" AS {out_col}#" in ln)
+    return line.rsplit("], [", 1)[1]
+
+
 def _scored_with_contributions(df, event_cols):
     group_cols = ["snap_date", "cust_id"]
     df = ms.rank_within_query(df, group_cols, "score", "prod_name", event_cols)
@@ -244,7 +252,12 @@ def test_the_scored_frame_is_sorted_once(spark, event_cols):
     cannot tell ``pos`` is the row_number of (score desc, item asc, event
     asc), so it sorted the whole frame a second time. Measured on main: 2."""
     df = _two_customer_raw(spark).withColumn("impression_id", F.lit("e1"))
-    assert _sorts_in_plan(_scored_with_contributions(df, event_cols)) == 1
+    out = _scored_with_contributions(df, event_cols)
+    assert _sorts_in_plan(out) == 1
+    # One sort would also follow from ordering by a prefix of the rank's
+    # order (say, without the event), and the values could still come out
+    # right by the rows' physical order. Pin the order itself.
+    assert _window_order(out, "cum_rel") == _window_order(out, "pos")
 
 
 def test_cum_rel_follows_pos_through_score_ties(spark):
@@ -805,6 +818,24 @@ def test_a_passed_segment_column_missing_from_the_frame_raises(spark):
     with pytest.raises(ValueError, match="cust_segment_typ.*not in the frame"):
         ms.compute_all_metrics(
             df, _make_parameters(k_values=[3]),
+            segment_columns=["cust_segment_typ"],
+        )
+
+
+def test_a_missing_segment_column_fails_before_any_scan(spark, monkeypatch):
+    """Since #450 the overview runs before the core; the check the core opens
+    with must still come first, or the wiring error costs a full scan."""
+    from pyspark.sql import DataFrame
+
+    def scan(self, *a, **k):
+        raise AssertionError("scanned before the segment check")
+
+    monkeypatch.setattr(DataFrame, "collect", scan)
+    monkeypatch.setattr(DataFrame, "count", scan)
+    with pytest.raises(ValueError, match="cust_segment_typ.*not in the frame"):
+        ms.compute_all_metrics(
+            _make_eval_predictions(spark, with_segment=False),
+            _make_parameters(k_values=[3]),
             segment_columns=["cust_segment_typ"],
         )
 

@@ -226,7 +226,7 @@ def test_with_category_false_skips_the_category_pass(spark, params):
 
 def test_the_category_pass_collapses_once(spark, monkeypatch):
     """#450 item 5. The collapse is a join plus a ``groupBy`` over the whole
-    fine-grained frame, and 5 to 7 actions of the category pass read it (its
+    fine-grained frame, and every action of the category pass reads it (its
     overview's, then its core's). Uncached, each one collapsed again. So both
     halves of the pass get one frame that is cached when they read it, and it
     is released when the pass is done. Measured on main: not cached."""

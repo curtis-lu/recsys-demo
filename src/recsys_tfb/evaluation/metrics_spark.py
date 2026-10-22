@@ -131,7 +131,7 @@ def _resolve_all_k(
     event_cols: Sequence[str],
     *,
     n_items: int | None = None,
-    widest_group: int | None = None,
+    widest_group_rows: int | None = None,
 ) -> int:
     """What ``k_values: "all"`` means for this frame — the K that truncates
     nothing.
@@ -169,16 +169,19 @@ def _resolve_all_k(
     ``groupBy(query_group).count()`` in the event case — unless the caller
     passes the number it needs: ``n_items`` (``dataset_overview.totals
     .n_items`` of the same frame: ``countDistinct(struct(item))`` counts a
-    NULL item once, as ``distinct().count()`` does) or ``widest_group`` (the
-    fourth number of ``_count_query_groups``). ``_compute_core`` passes both,
-    which both count anyway (#450).
+    NULL item once, as ``distinct().count()`` does) or ``widest_group_rows``
+    (the last number ``_count_query_groups`` returns). ``_compute_core``
+    passes both, which it counts anyway (#450). Passed, they must be counted
+    on this same frame: the category pass's item count is the category count,
+    and handing either pass the other's would key every ``@all`` metric at the
+    wrong K with no error.
     """
     if not event_cols:
         if n_items is None:
             n_items = frame.select(item_col).distinct().count()
         return n_items
-    if widest_group is None:
-        widest_group = (
+    if widest_group_rows is None:
+        widest_group_rows = (
             frame.groupBy(*group_cols)
             .agg(F.count(F.lit(1)).alias("_n_rows"))
             .agg(F.max("_n_rows").alias("_max_rows"))
@@ -186,7 +189,7 @@ def _resolve_all_k(
         )
     # An empty frame has no widest group. 0 is what the item-count branch
     # returns for the same frame, so the two branches degrade alike.
-    return int(widest_group or 0)
+    return int(widest_group_rows or 0)
 
 
 def _resolve_k_grids(
@@ -654,7 +657,7 @@ def _count_query_groups(
             F.sum(
                 F.when(has_positive & F.col("_all_positive"), 1).otherwise(0)
             ).alias("n_all_positive"),
-            F.max("_n_rows").alias("widest_group"),
+            F.max("_n_rows").alias("widest_group_rows"),
         )
         .collect()[0]
     )
@@ -662,7 +665,7 @@ def _count_query_groups(
         int(row["n_queries"]),
         int(row["n_with_positive"] or 0),
         int(row["n_all_positive"] or 0),
-        int(row["widest_group"] or 0),
+        int(row["widest_group_rows"] or 0),
     )
 
 
@@ -720,8 +723,11 @@ def add_row_contributions(
     ``item_col`` and ``event_cols``: the running sum orders by that rule
     (``score_then_item_window``) rather than by ``pos``. The two orders are the
     same, but ordered by ``pos`` Spark cannot see it and sorts the whole
-    scored frame a second time (#450). No default for ``event_cols``, for the
-    reason ``_compute_core`` gives.
+    scored frame a second time (#450). A mismatch raises nothing: ``cum_rel``
+    is counted in one order while ``pos`` numbers another, so ``prec_at_pos``
+    and every ``ap_contrib`` come out wrong. Hence no defaults, so each call
+    site shows its three arguments next to the ``rank_within_query`` call
+    they must match.
 
     Always added:
         cum_rel       cumulative positives up to & including this position
@@ -1091,10 +1097,11 @@ def _compute_core(
     }
 
     (n_queries_total, n_queries_with_pos, n_all_positive,
-     widest_group) = _count_query_groups(eval_predictions, group_cols, label_col)
+     widest_group_rows) = _count_query_groups(
+        eval_predictions, group_cols, label_col)
     all_k = _resolve_all_k(
         eval_predictions, group_cols, item_col, event_cols,
-        n_items=n_items, widest_group=widest_group,
+        n_items=n_items, widest_group_rows=widest_group_rows,
     )
     query_ks, item_ks = _resolve_k_grids(parameters, all_k)
     # Written only when it can differ from dataset_overview.totals.n_items —
@@ -1462,7 +1469,9 @@ def compute_all_metrics(
     """
     # The overview goes first so the core can take its item count for "all"
     # instead of counting it again (#450); the key is added after the core's,
-    # where it always was.
+    # where it always was. The segment check the core opens with runs here
+    # too, so a missing column still fails before any scan.
+    _require_segment_columns_in_frame(eval_predictions, segment_columns)
     overview = compute_dataset_overview(
         eval_predictions, parameters, segment_columns=segment_columns
     )
@@ -1492,12 +1501,14 @@ def compute_all_metrics(
         # queries it drops is decided on this frame (label = max of the
         # children), so a query mixed row by row can be all-positive here.
         # Cached for the pass (#450): the collapse is a join plus a groupBy
-        # over the whole fine-grained frame, and 5 to 7 actions of this pass
-        # read it: the overview's 3 to 5, and the core's query-group count and
-        # the action that fills its own cache. Not the fine frame's memory
+        # over the whole fine-grained frame, and every action of this pass
+        # reads it: the overview's, and the core's query-group count and the
+        # action that fills its own cache. Not the fine frame's memory
         # question (ADR-0018 〈為什麼不是 .cache()〉): this holds one narrow
         # row per (query group, category), next to the category core's own
-        # cache; the fine pass's caches are released by now.
+        # cache; the fine pass's caches are released by now. Where every item
+        # is its own category that is as many rows as the fine frame; the
+        # default storage level spills to disk rather than fail.
         collapsed = collapsed.cache()
         try:
             cat_overview = compute_dataset_overview(
