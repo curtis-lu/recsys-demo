@@ -88,3 +88,7 @@ date: 2026-09-16
 4. **實跑證據的位置（決定 1）。** 決定 1 說「如果連示例 conf 都不開，`scripts/local_e2e.sh` 走不到這條路」。那支腳本本來就不跑 evaluation；跑廣告示例 evaluation 的是 `examples/ad/run_e2e.sh`。本家族的實跑證據來自它。
 5. **`calibration_bins` 收掉了（〈後果〉第二條）。** 〈後果〉說「要不要收掉由實作決定」。實作把它連同 `evaluation.report.diagnostics` 的 `include_calibration`、`n_calibration_bins` 兩個鍵一起移除。它在 `[0, 1]` 上等寬切，沒有任何讀者；留著的話，就是兩份語意不同的分箱表同時存在，而那正是〈後果〉不接受的。conf 還寫著這兩個鍵時，evaluation 入口擋下（新不變量 A43，照 A37 的形狀：不論值是什麼都擋）。
 6. **「這個家族不需要校準」要加一個前提（〈後果〉第一條）。** 那一條說 precision、recall、F1、`pr_auc`、`roc_auc` 都只吃分數的大小順序——但這裡的大小順序是**跨所有 query group** 的順序：一個門檻橫跨所有列，前提是不同 query group 的分數彼此可比。模型用排序類目標（`lambdarank`、`rank_xendcg`）訓練時，分數只為同一個 query group 內的先後而學，這個前提沒有保證；`binary` 目標沒有這個問題。框架不依目標函數擋下或改算（evaluation 讀到的是模型的分數，不是訓練設定），報表與 `docs/pipelines/evaluation.md` 3.7 節把這一句印出來。
+
+## 修訂（2026-10-22，ADR-0031）
+
+〈考慮過、沒選的做法〉第一條因為要對全量列依分數排序的成本，沒選精確的 average precision。[ADR-0031](0031-evaluation-second-pass-layers-and-single-source.md) 決定 16 第 3 項改成：主報表概覽與比較報表每次都算 pooled AP 與 macro per-item AP，用 training 已有的 Spark 計算（`metrics_spark.compute_pooled_average_precision`、`compute_macro_per_item_average_precision`）。擁有者知道成本沒量；#450 一起量，太貴再加開關。本家族的分箱 `pr_auc` 照舊，兩個數字並存，不可互相對帳的說法不變。
