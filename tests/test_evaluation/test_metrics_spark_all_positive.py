@@ -132,16 +132,18 @@ def test_switched_off_the_bundle_is_what_it_was_plus_the_count(spark):
     assert off["overall"] != on["overall"]
     assert off["category"]["overall"] != on["category"]["overall"]
 
+    # The item method's shared numbers (#534) are in every bundle too.
+    shared = {"per_item_shared_numbers", "per_item_segment_shared_numbers"}
     assert set(off) == {
         "overall", "per_segment", "per_item", "per_item_segment",
         "macro_avg", "observation_items", "n_queries", "n_excluded_queries",
         "n_all_positive_queries", "dataset_overview", "category",
-    }
+    } | shared
     assert set(off["category"]) == {
         "overall", "per_segment", "per_item", "per_item_segment",
         "macro_avg", "observation_items", "n_queries", "n_excluded_queries",
         "n_all_positive_queries", "dataset_overview",
-    }
+    } | shared
     # Not a metric: the comparison report takes every key of `overall` for one.
     assert ALL_POSITIVE_KEY not in off["overall"]
 

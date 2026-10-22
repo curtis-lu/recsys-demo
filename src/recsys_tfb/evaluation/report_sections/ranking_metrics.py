@@ -166,14 +166,14 @@ def _per_item_metric_table(
 def _per_item_recall_table(
     per_item: dict, ks: list, all_k: int, macro_metrics: dict | None = None
 ) -> pd.DataFrame:
-    """Rows = items; bare ``@k`` cols (from hit_rate@k) + mean_pos.
+    """Rows = items; bare ``@k`` cols (from the per-item recall@k) + mean_pos.
 
     欄名裸 @k、family（recall）在呼叫端的表標題交代——與 A 塊 per-query 表
     及 per-item map_attr 表的欄名慣例一致（family 不重複塞進欄名）。
     """
     mean_pos = entry("mean_pos", ITEM)
     return _per_item_metric_table(
-        per_item, ks, all_k, entry("hit_rate", ITEM).name, "@{k}",
+        per_item, ks, all_k, entry("recall", ITEM).name, "@{k}",
         extra_cols={mean_pos.display_name: mean_pos.key()},
         macro_metrics=macro_metrics,
     )
@@ -196,10 +196,10 @@ def _families_by_k_table(overall: dict, ks: list, all_k: int) -> pd.DataFrame:
 
 
 #: Block B's item metrics drawn in an arrangement of their own: map_attr's
-#: table, then recall's (``hit_rate``) with mean_pos as an extra column. Every
+#: table, then recall's with mean_pos as an extra column. Every
 #: other per-K item entry of the catalog gets a table of its own after them
 #: (:func:`_other_item_metrics`).
-_ARRANGED_ITEM_METRICS = ("map_attr", "hit_rate", "mean_pos")
+_ARRANGED_ITEM_METRICS = ("map_attr", "recall", "mean_pos")
 
 
 def _other_item_metrics() -> list:
@@ -288,7 +288,7 @@ def build(
     # ===== Block B：per-item 歸因（map_attr / recall；無 precision）=====
     map_attr = entry("map_attr", ITEM).name
     attr_label = entry("map_attr", ITEM).display_name
-    recall_label = entry("hit_rate", ITEM).display_name
+    recall_label = entry("recall", ITEM).display_name
     b_map = _per_item_metric_table(
         per_item, ks, all_k, map_attr, "@{k}", macro_metrics=macro_item,
     )

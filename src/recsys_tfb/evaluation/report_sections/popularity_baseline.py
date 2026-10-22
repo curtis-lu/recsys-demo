@@ -33,7 +33,7 @@ READS = ("evaluation_metrics", "baseline_metrics")
 #: so a name the catalog lacks raises there.
 _COMPARED_OVERALL = (("map", QUERY_GROUP), ("recall", QUERY_GROUP),
                      ("precision", QUERY_GROUP))
-_COMPARED_PER_ITEM = (("hit_rate", ITEM), ("map_attr", ITEM))
+_COMPARED_PER_ITEM = (("recall", ITEM), ("map_attr", ITEM))
 _COMPARED_PER_SEGMENT_AND_CATEGORY = ("map", QUERY_GROUP)
 
 
@@ -225,7 +225,9 @@ def build(
                     attr_ks, all_k, metric.name, f"{label}@{{k}}",
                     macro_a=macro_a, macro_b=macro_b, all_k_b=all_k,
                 ),
-                f"per-item {label}@k (M/B/Δ){item_cov}", True,
+                # No "per-item" in front: the display name says it for
+                # the one metric whose name a query-group one shares.
+                f"{label}@k (M/B/Δ){item_cov}", True,
             )
 
     # [4] per-segment mAP@k M/B/Δ — 只比主指標 mAP（控寬，reference 段）；rows＝

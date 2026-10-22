@@ -69,7 +69,7 @@ evaluation:
 | 設定 | 說明 |
 |---|---|
 | `snap_date` | 本次評估的時間切點：一個日期，或多個日期（三種寫法見表下）。日期一律使用 `YYYY-MM-DD` |
-| `k_values` | @K 家族（map@K、precision@K、recall@K、map_attr@K）要實際計算的 K 值 superset。`evaluation.metric.k` 是另一個獨立的軸：主指標 per-item macro（含報表的頭號 mAP）的截斷深度。它非 null 時，per-item 那一族（map_attr、hit_rate）會多算 `@metric.k`，overall／per-segment 的 @K 家族不受影響，所以不必自己把它列進 `k_values` |
+| `k_values` | @K 家族（map@K、precision@K、recall@K、map_attr@K）要實際計算的 K 值 superset。`evaluation.metric.k` 是另一個獨立的軸：主指標 per-item macro（含報表的頭號 mAP）的截斷深度。它非 null 時，per-item 那一族（map_attr、recall）會多算 `@metric.k`，overall／per-segment 的 @K 家族不受影響，所以不必自己把它列進 `k_values` |
 | `"all"` | 在細 item 粒度解析為 distinct item 數；在 category 粒度重新解析為 distinct category 數。宣告 `event` 時，細 item 粒度改取最寬 query group 的列數（一組 30 列、12 個 item 時取 12 會截斷），並把這個數寫進評估指標檔 `metrics.json`（catalog 的 `evaluation_metrics`）的 `all_k`；報表、比較報表與 training 的 test mAP 都照同一個鍵查 `@all`，不自己數 item（#434）。category 粒度不變：聚合之後每組每個大類只剩一列 |
 
 `snap_date` 有三種寫法：
@@ -103,12 +103,16 @@ pipeline 會先依 `model_version` 與 `snap_date` 篩選預測。**每一個**�
 | 層次 | 指標 |
 |---|---|
 | Overall／per-segment | `map@K`、`precision@K`、`recall@K` |
-| Per-item | `hit_rate@K`、`map_attr@K`、`mean_pos` |
+| Per-item | `recall@K`、`map_attr@K`、`mean_pos` |
 | Macro average | 對 item、segment 或 item-segment 等權平均 |
 
 NDCG 不算，報表與落地的 `metrics.json` 都沒有它（[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 4）。`training.algorithm_params.metric: ndcg` 是 LightGBM 自己的 early-stopping 指標，跟這裡無關。
 
 overall 指標先在每個 query group 計算，再對 query 等權平均；per-item attribution 則只在該 item 為正例的 rows 上彙整。兩者回答的問題不同，不應將 `map_attr@K` 誤讀為單一 item 自己的 mAP。
+
+per-item 的 `recall@K` 跟 overall 的 `recall@K` 同名、不同算法：一個是該 item 的正例裡排進前 K 名的比例，一個是每個 query group 的正例裡排進前 K 名的比例、再對組平均（[ADR-0031](../adr/0031-evaluation-second-pass-layers-and-single-source.md) 決定 6、7）。報表上 per-item 那個顯示成 `per-item recall`。它以前叫 `hit_rate@K`；per-item 區塊還寫著 `hit_rate@K` 的舊 `metrics.json`，報表會拒絕畫，照錯誤訊息 `--from-node compute_metrics` 重算即可。
+
+per-item 的指標都由每個 item 的**共用數字**相除而來：先在 overall 指標算進的那些 query group 裡，加總該 item 的每一列（正例與否都算）——列數、排進前 K 名的次數、正例數、正例排進前 K 名的次數、AP 貢獻與正例名次的加總——再照指標目錄（`evaluation/metric_catalog.py`）的公式算出 `recall@K`、`map_attr@K`、`mean_pos`。這些數落地在 `metrics.json` 的 `per_item_shared_numbers`（有分群欄時另有 `per_item_segment_shared_numbers`），讓之後加的 per-item 指標（例如 precision@K＝正例排進前 K 名的次數÷排進前 K 名的次數）只要在目錄寫公式。沒有正例的 query group 不算進來：`--post-training` 評的 test 表預設不留這種組（`dataset.test_zero_positive_group_ratio`），留了也只是抽樣。
 
 完全沒有正例的 query group 無法定義 AP，因此會從 metric computation 排除；報表仍會記錄 `n_queries` 與 `n_excluded_queries`。
 
@@ -638,7 +642,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合拆
 | `report.html` | `data/evaluation/<model_version>/<YYYYMMDD>/report.html` | 標準、`--compare` |
 | `report_comparison.html` | `data/evaluation/<model_version>/<YYYYMMDD>/report_comparison.html` | `--compare`、`--compare-only` |
 | `manifest.json` | `data/evaluation/<model_version>/<YYYYMMDD>/manifest.json` | 所有實際執行模式 |
-| `metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/metrics.json`（`evaluation_metrics`：overall、per-item、per-segment、macro、overview 與 category 指標，帶 `config_fingerprint`） | 標準、`--compare` |
+| `metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/metrics.json`（`evaluation_metrics`：overall、per-item、per-segment、macro、overview 與 category 指標，per-item 指標的共用數字，帶 `config_fingerprint`） | 標準、`--compare` |
 | `baseline_metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/baseline_metrics.json`（`baseline_metrics`；`report.sections.baseline: false` 時是 `{"enabled": false}` stub，一樣帶指紋） | 標準、`--compare` |
 | `prediction_quality.json` | `data/evaluation/<model_version>/<YYYYMMDD>/prediction_quality.json`（`prediction_quality_metrics`，見 3.7 節；`report.sections.prediction_quality: false` 時是 `{"enabled": false}` stub，一樣帶指紋） | 標準、`--compare` |
 | `segment_columns.json` | `data/evaluation/<model_version>/<YYYYMMDD>/segment_columns.json`（`evaluation_segment_columns`，見 3.2 節） | 標準、`--compare` 寫；`--compare-only` 讀 |

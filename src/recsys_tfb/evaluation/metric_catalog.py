@@ -8,10 +8,10 @@ them here by entry (:func:`entry`), so a name it shows is one the computation
 produces.
 
 **Data only.** No computation and no Spark object: a formula says which shared
-numbers it combines and how (:class:`Ratio`, :class:`MeanOverPositiveRows`), and
-``metrics_spark`` turns that into Spark columns. So a report reading the
-catalog imports nothing that computes (ADR-0031 principle 1), and reading it
-pulls in neither Spark nor pandas.
+numbers it combines and how (:class:`Ratio`), and ``metrics_spark`` computes it
+— as Spark columns per query group, or from each item's collected numbers. So
+a report reading the catalog imports nothing that computes (ADR-0031
+principle 1), and reading it pulls in neither Spark nor pandas.
 
 **One entry is one name in one method.** The same name may stand in two
 methods with two definitions; the two land in different blocks of a metrics
@@ -22,9 +22,12 @@ number both compute under different names says so in ``training_name``.
 
 **Not in it yet: the third method of decision 7**, the score read as a
 probability (the binned ``pr_auc`` / ``roc_auc`` of the prediction-quality
-section). ``evaluation/prediction_quality.py`` computes those by functions of
-its own, with no shared numbers a formula here could name; they join the
-catalog when that method gets them.
+section). Its shared numbers are the bin table of
+``evaluation/prediction_quality.aggregate_score_bins`` — per score bin, the rows
+and the positives, for every item in Spark (only the ``top_n`` items' reach the
+driver) — and ``prediction_quality`` computes the two areas from it by
+functions of its own. Its metrics join the catalog with a formula shape for
+an area under a bin table.
 """
 
 from __future__ import annotations
@@ -47,45 +50,45 @@ QUERY_GROUP_SHARED_NUMBERS: dict[str, str] = {
     "K": "the cut-off",
 }
 
-#: The item method's per-row columns (``metrics_spark.add_row_contributions``
-#: and ``rank_within_query``): a formula averages one of them over the rows
-#: where the item is a positive. ``@K`` columns exist once per K.
-ITEM_ROW_COLUMNS: dict[str, str] = {
-    "top_k": "1 when the row ranks within the top K, else 0 (per K)",
-    "ap_contrib": "the row's share of its query group's AP@K numerator: the "
-                  "precision at its rank when it is a positive within the top "
-                  "K, else 0 (per K)",
-    "pos": "the row's rank in its query group",
+#: The item method's shared numbers: what ``metrics_spark.
+#: aggregate_item_shared_numbers`` sums over every row of the item — positive or
+#: not — in the query groups the query-group method scores, before any formula
+#: reads it. A positive row is one labelled 1. The ones in
+#: :data:`ITEM_SHARED_NUMBERS_PER_K` exist once per K, as ``name@K``.
+#:
+#: The query groups without a positive are not counted (#534): ``--post-
+#: training`` evaluates the test split, which keeps none of them unless
+#: ``dataset.test_zero_positive_group_ratio`` is set, and then only a sample
+#: whose rows weigh ``1 / r``.
+ITEM_SHARED_NUMBERS: dict[str, str] = {
+    "n_rows": "the item's rows",
+    "n_top": "of them, the rows ranked within the top K: the times the item "
+             "was recommended (per K)",
+    "n_pos": "the item's positive rows",
+    "hits": "positive rows ranked within the top K (per K)",
+    "ap_sum": "Σ ap_contrib@K over the positive rows: the precision at the "
+              "row's rank when it is within the top K, else 0 (per K)",
+    "pos_sum": "Σ rank over the positive rows",
 }
+ITEM_SHARED_NUMBERS_PER_K = ("n_top", "hits", "ap_sum")
 
 
-# Two formula shapes cover every metric the catalog holds. A metric neither
-# can say (F1@K combines two metrics; a per-item precision needs rows the item
-# method does not keep yet) comes with a new shape here and the code in
+# One formula shape covers every metric the catalog holds. A metric it cannot
+# say (F1@K combines two ratios) comes with a new shape here and the code in
 # ``metrics_spark`` that builds it.
 
 
 @dataclass(frozen=True)
 class Ratio:
-    """``numerator / denominator`` per query group, both names from
-    :data:`QUERY_GROUP_SHARED_NUMBERS`."""
+    """``numerator / denominator``, both names from the method's shared
+    numbers: :data:`QUERY_GROUP_SHARED_NUMBERS` per query group,
+    :data:`ITEM_SHARED_NUMBERS` per item."""
 
     numerator: str
     denominator: str
 
     def __str__(self) -> str:
         return f"{self.numerator} / {self.denominator}"
-
-
-@dataclass(frozen=True)
-class MeanOverPositiveRows:
-    """The mean of one :data:`ITEM_ROW_COLUMNS` column over the rows where the
-    item is a positive."""
-
-    column: str
-
-    def __str__(self) -> str:
-        return f"mean({self.column}) over the item's positive rows"
 
 
 @dataclass(frozen=True)
@@ -100,7 +103,7 @@ class Metric:
 
     name: str
     method: str
-    formula: Ratio | MeanOverPositiveRows
+    formula: Ratio
     per_k: bool
     grains: tuple[str, ...]
     population: str
@@ -167,19 +170,19 @@ METRICS: tuple[Metric, ...] = (
         ),
     ),
     Metric(
-        name="hit_rate",
+        name="recall",
         method=ITEM,
-        formula=MeanOverPositiveRows("top_k"),
+        formula=Ratio("hits", "n_pos"),
         per_k=True,
         grains=_ITEM_GRAINS,
         population=_ITEM_POPULATION,
-        display_name="recall",
-        definition="該 item 為正例的列裡，排進前 K 名的比例（per-item 的 recall）",
+        display_name="per-item recall",
+        definition="該 item 為正例的列裡，排進前 K 名的比例",
     ),
     Metric(
         name="map_attr",
         method=ITEM,
-        formula=MeanOverPositiveRows("ap_contrib"),
+        formula=Ratio("ap_sum", "n_pos"),
         per_k=True,
         grains=_ITEM_GRAINS,
         population=_ITEM_POPULATION,
@@ -198,7 +201,7 @@ METRICS: tuple[Metric, ...] = (
     Metric(
         name="mean_pos",
         method=ITEM,
-        formula=MeanOverPositiveRows("pos"),
+        formula=Ratio("pos_sum", "n_pos"),
         per_k=False,
         grains=_ITEM_GRAINS,
         population=_ITEM_POPULATION,

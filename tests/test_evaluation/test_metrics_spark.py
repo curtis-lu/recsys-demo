@@ -424,55 +424,54 @@ def test_aggregate_per_segment_non_string_keys_stringified(spark):
 # ===========================================================================
 
 
-def test_aggregate_per_item_emits_attribution_keys_not_precision_recall(spark):
-    """per_item emits hit_rate / map_attr / mean_pos — NOT precision / recall."""
+def test_aggregate_per_item_emits_the_catalogs_item_metrics(spark):
+    """per_item emits recall / map_attr / mean_pos and the n_pos weight; no
+    precision yet (#541 adds it)."""
     enriched = _enriched(spark, k_values=[3])
     per_item = ms.aggregate_per_item(enriched, ["prod_name"], "label", [3])
     assert set(per_item.keys()) == {"A", "B", "C"}
     for prod, m in per_item.items():
-        assert set(m.keys()) == {"mean_pos", "n_pos", "hit_rate@3", "map_attr@3"}
-        assert "precision@3" not in m
-        assert "recall@3" not in m
+        assert set(m.keys()) == {"mean_pos", "n_pos", "recall@3", "map_attr@3"}
 
 
 def test_aggregate_per_item_known_values(spark):
     """Same fixture:
         A: label=1 only at (C0, pos=1) → top_k@3=1, prec_at_pos=1.0
-            hit_rate@3 = 1.0
+            recall@3 = 1.0
             map_attr@3 = 1.0
             mean_pos   = 1.0
         B: label=1 only at (C1, pos=1) → identical pattern
-            hit_rate@3 = 1.0
+            recall@3 = 1.0
             map_attr@3 = 1.0
             mean_pos   = 1.0
         C: label=1 only at (C0, pos=3) → top_k@3=1, prec_at_pos=2/3
-            hit_rate@3 = 1.0
+            recall@3 = 1.0
             map_attr@3 = 2/3
             mean_pos   = 3.0
     """
     enriched = _enriched(spark, k_values=[3])
     per_item = ms.aggregate_per_item(enriched, ["prod_name"], "label", [3])
 
-    assert abs(per_item["A"]["hit_rate@3"] - 1.0) < 1e-12
+    assert abs(per_item["A"]["recall@3"] - 1.0) < 1e-12
     assert abs(per_item["A"]["map_attr@3"] - 1.0) < 1e-12
     assert per_item["A"]["mean_pos"] == 1.0
 
-    assert abs(per_item["B"]["hit_rate@3"] - 1.0) < 1e-12
+    assert abs(per_item["B"]["recall@3"] - 1.0) < 1e-12
     assert abs(per_item["B"]["map_attr@3"] - 1.0) < 1e-12
     assert per_item["B"]["mean_pos"] == 1.0
 
-    assert abs(per_item["C"]["hit_rate@3"] - 1.0) < 1e-12
+    assert abs(per_item["C"]["recall@3"] - 1.0) < 1e-12
     assert abs(per_item["C"]["map_attr@3"] - 2 / 3) < 1e-12
     assert per_item["C"]["mean_pos"] == 3.0
 
 
-def test_aggregate_per_item_hit_rate_below_one_when_pos_above_k(spark):
-    """K=1: C is at pos=3 → hit_rate@1 = 0 for C, but still 1 for A and B."""
+def test_aggregate_per_item_recall_below_one_when_pos_above_k(spark):
+    """K=1: C is at pos=3 → recall@1 = 0 for C, but still 1 for A and B."""
     enriched = _enriched(spark, k_values=[1])
     per_item = ms.aggregate_per_item(enriched, ["prod_name"], "label", [1])
-    assert per_item["A"]["hit_rate@1"] == 1.0
-    assert per_item["B"]["hit_rate@1"] == 1.0
-    assert per_item["C"]["hit_rate@1"] == 0.0
+    assert per_item["A"]["recall@1"] == 1.0
+    assert per_item["B"]["recall@1"] == 1.0
+    assert per_item["C"]["recall@1"] == 0.0
 
 
 def test_aggregate_per_item_multi_column_key(spark):
@@ -516,6 +515,92 @@ def test_aggregate_per_item_emits_n_pos(spark):
     assert isinstance(per_item["A"]["n_pos"], int)
 
 
+# ===========================================================================
+# Per-item shared numbers (ADR-0031 decision 7, #534)
+# ===========================================================================
+
+
+def _shared_numbers_predictions(spark):
+    """Four items in three query groups; D is never a positive, C2 holds none.
+
+        C0 (total_rel 2): A 0.9 l1 → pos 1, D 0.7 → 2, B 0.5 → 3, C 0.1 l1 → 4
+        C1 (total_rel 1): B 0.8 l1 → pos 1, C 0.6 → 2, D 0.4 → 3, A 0.3 → 4
+        C2 (no positive): A, B, C, D — not a group the ranking metrics score
+    """
+    rows = [
+        ("C0", "A", 0.9, 1), ("C0", "D", 0.7, 0),
+        ("C0", "B", 0.5, 0), ("C0", "C", 0.1, 1),
+        ("C1", "B", 0.8, 1), ("C1", "C", 0.6, 0),
+        ("C1", "D", 0.4, 0), ("C1", "A", 0.3, 0),
+        ("C2", "A", 0.9, 0), ("C2", "B", 0.8, 0),
+        ("C2", "C", 0.7, 0), ("C2", "D", 0.6, 0),
+    ]
+    return spark.createDataFrame(
+        [("20240331",) + r for r in rows],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label"],
+    )
+
+
+def test_compute_all_metrics_lands_each_items_shared_numbers(spark):
+    """Every row of the item in the scored query groups, not only its
+    positives: D (never a positive) is there, and B's rank-3 negative in C0
+    counts toward n_top@3. C2 holds no positive and counts nowhere."""
+    result = ms.compute_all_metrics(
+        _shared_numbers_predictions(spark), _make_parameters(k_values=[1, 3]))
+    # K = 4 too: "all" (4 items) is computed for the per-item side whenever
+    # evaluation.metric.k is unset (_resolve_k_grids).
+    assert result["per_item_shared_numbers"] == {
+        "A": {"n_rows": 2, "n_pos": 1, "pos_sum": 1,
+              "n_top@1": 1, "hits@1": 1, "ap_sum@1": 1.0,
+              "n_top@3": 1, "hits@3": 1, "ap_sum@3": 1.0,
+              "n_top@4": 2, "hits@4": 1, "ap_sum@4": 1.0},
+        "B": {"n_rows": 2, "n_pos": 1, "pos_sum": 1,
+              "n_top@1": 1, "hits@1": 1, "ap_sum@1": 1.0,
+              "n_top@3": 2, "hits@3": 1, "ap_sum@3": 1.0,
+              "n_top@4": 2, "hits@4": 1, "ap_sum@4": 1.0},
+        "C": {"n_rows": 2, "n_pos": 1, "pos_sum": 4,
+              "n_top@1": 0, "hits@1": 0, "ap_sum@1": 0.0,
+              "n_top@3": 1, "hits@3": 0, "ap_sum@3": 0.0,
+              # C0 rank 4: 2 positives in the top 4 → precision 2/4
+              "n_top@4": 2, "hits@4": 1, "ap_sum@4": 0.5},
+        "D": {"n_rows": 2, "n_pos": 0, "pos_sum": 0,
+              "n_top@1": 0, "hits@1": 0, "ap_sum@1": 0.0,
+              "n_top@3": 2, "hits@3": 0, "ap_sum@3": 0.0,
+              "n_top@4": 2, "hits@4": 0, "ap_sum@4": 0.0},
+    }
+
+
+def test_per_item_metrics_are_the_catalog_formulas_of_the_shared_numbers(spark):
+    """recall@K = hits@K / n_pos, map_attr@K = ap_sum@K / n_pos, mean_pos =
+    pos_sum / n_pos; an item with no positive (D) has no metrics, as before."""
+    result = ms.compute_all_metrics(
+        _shared_numbers_predictions(spark), _make_parameters(k_values=[1, 3]))
+    assert result["per_item"] == {
+        "A": {"recall@1": 1.0, "map_attr@1": 1.0, "recall@3": 1.0,
+              "map_attr@3": 1.0, "recall@4": 1.0, "map_attr@4": 1.0,
+              "mean_pos": 1.0, "n_pos": 1},
+        "B": {"recall@1": 1.0, "map_attr@1": 1.0, "recall@3": 1.0,
+              "map_attr@3": 1.0, "recall@4": 1.0, "map_attr@4": 1.0,
+              "mean_pos": 1.0, "n_pos": 1},
+        "C": {"recall@1": 0.0, "map_attr@1": 0.0, "recall@3": 0.0,
+              "map_attr@3": 0.0, "recall@4": 1.0, "map_attr@4": 0.5,
+              "mean_pos": 4.0, "n_pos": 1},
+    }
+
+
+def test_shared_numbers_per_item_and_segment_nest_two_levels(spark):
+    """The per-(item, segment) shared numbers nest as per_item_segment does."""
+    df = _shared_numbers_predictions(spark).withColumn(
+        "seg", F.when(F.col("cust_id") == "C0", "mass").otherwise("affluent"))
+    result = ms.compute_all_metrics(
+        df, _make_parameters(k_values=[3], segment_columns=["seg"]),
+        segment_columns=["seg"])
+    shared = result["per_item_segment_shared_numbers"]
+    assert set(shared["D"]) == {"mass", "affluent"}
+    assert shared["B"]["mass"]["n_top@3"] == 1      # C0, rank 3, negative
+    assert shared["B"]["affluent"]["hits@3"] == 1   # C1, rank 1, positive
+
+
 def test_macro_average_excludes_n_pos_from_output(spark=None):
     per_dim = {
         "A": {"map_attr@3": 0.75, "n_pos": 2},
@@ -533,10 +618,10 @@ def test_macro_average_excludes_n_pos_from_output(spark=None):
 
 def test_macro_average_basic():
     per_dim = {
-        "A": {"hit_rate@3": 1.0, "map_attr@3": 0.5},
-        "B": {"hit_rate@3": 0.5, "map_attr@3": 0.7},
+        "A": {"recall@3": 1.0, "map_attr@3": 0.5},
+        "B": {"recall@3": 0.5, "map_attr@3": 0.7},
     }
-    assert ms.macro_average(per_dim) == {"hit_rate@3": 0.75, "map_attr@3": 0.6}
+    assert ms.macro_average(per_dim) == {"recall@3": 0.75, "map_attr@3": 0.6}
 
 
 def test_macro_average_empty():
@@ -547,11 +632,11 @@ def test_macro_average_skips_missing_keys():
     """If a key is missing in some dim entries, it is averaged only over the
     entries where it appears."""
     per_dim = {
-        "A": {"hit_rate@3": 1.0, "map_attr@3": 0.5},
-        "B": {"hit_rate@3": 0.5},                       # no map_attr@3
+        "A": {"recall@3": 1.0, "map_attr@3": 0.5},
+        "B": {"recall@3": 0.5},                       # no map_attr@3
     }
     avg = ms.macro_average(per_dim)
-    assert avg["hit_rate@3"] == 0.75
+    assert avg["recall@3"] == 0.75
     assert avg["map_attr@3"] == 0.5   # only A contributes
 
 
@@ -586,6 +671,8 @@ def test_compute_all_metrics_returns_expected_keys(spark):
         # #376: written whether or not the switch drops those groups.
         "n_all_positive_queries",
         "dataset_overview",
+        # #534: the item method's shared numbers.
+        "per_item_shared_numbers", "per_item_segment_shared_numbers",
     }
 
 

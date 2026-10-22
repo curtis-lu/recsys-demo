@@ -35,7 +35,7 @@ READS = ("metrics_a", "metrics_b", "comparison", "compare_coverage_partial")
 #: each with the ``report.display`` key that lists its K (ADR-0031 decision
 #: 11: the report declares what it compares).
 _PER_ITEM_COMPARED = (
-    (("hit_rate", ITEM), "guardrail_recall_k", [1, 3, 5]),
+    (("recall", ITEM), "guardrail_recall_k", [1, 3, 5]),
     (("map_attr", ITEM), "primary_map_k", [1, 3, 5, "all"]),
 )
 
@@ -254,7 +254,7 @@ def _per_item_compare_tables(
             ks, all_k_a, metric.name, f"{label}@{{k}}",
             macro_a=macro_a, macro_b=macro_b, all_k_b=all_k_b,
         ))
-        titles.append(f"{title_prefix} {label}@k (M/B/Δ){item_cov}")
+        titles.append(f"{title_prefix}{label}@k (M/B/Δ){item_cov}")
     return tables, titles
 
 
@@ -284,7 +284,9 @@ def _build_per_item_section(
 
     tables, titles = _per_item_compare_tables(
         per_item_a, per_item_b, per_item_delta, disp, all_k_a, all_k_b,
-        macro_a, macro_b, "per-item", item_cov,
+        # No "per-item" prefix: the section says it, and the per-item
+        # recall's display name says it again.
+        macro_a, macro_b, "", item_cov,
     )
     return ReportSection(
         title="per-item M/B/Δ",
@@ -345,7 +347,7 @@ def _build_category_section(
     )
     more_tables, more_titles = _per_item_compare_tables(
         per_item_a, per_item_b, per_item_delta, disp, cat_k_a, cat_k_b,
-        macro_a, macro_b, "大類 per-item", item_cov,
+        macro_a, macro_b, "大類 ", item_cov,
     )
     tables += more_tables
     titles += more_titles
