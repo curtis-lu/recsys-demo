@@ -9,8 +9,8 @@ import json
 
 import pytest
 
-from recsys_tfb.evaluation import report_builder as rb
-from recsys_tfb.evaluation.report_builder import _dataset_overview
+from recsys_tfb.evaluation.report_sections import shared
+from recsys_tfb.evaluation.report_sections.shared import read_dataset_overview
 from scripts.migrations.migrate_evaluation_results_keys import (
     RENAMES,
     apply_file,
@@ -89,7 +89,7 @@ def test_the_migrator_and_the_reader_share_one_rename_map():
     map but not the migrator's leaves a file that the reader refuses and this
     script reports as "already migrated", with no way forward.
     """
-    assert RENAMES is rb.RENAMED_OVERVIEW_KEYS
+    assert RENAMES is shared.RENAMED_OVERVIEW_KEYS
 
 
 def test_the_time_vocabulary_survives_untouched():
@@ -139,7 +139,7 @@ def test_a_file_carrying_both_spellings_is_reported_not_guessed():
 def test_apply_rewrites_the_file_and_the_reader_then_accepts_it(tmp_path):
     """End to end: the refusal this script exists to clear actually clears.
 
-    Asserting against ``_dataset_overview`` (the reader that raises) rather than
+    Asserting against ``read_dataset_overview`` (the reader that raises) rather than
     against the JSON keeps the two sides from drifting into agreeing about
     different key names.
     """
@@ -148,12 +148,12 @@ def test_apply_rewrites_the_file_and_the_reader_then_accepts_it(tmp_path):
 
     before = json.loads(path.read_text())
     with pytest.raises(ValueError, match="predates the #327 key rename"):
-        _dataset_overview(before)
+        read_dataset_overview(before)
 
     apply_file(path)
 
     after = json.loads(path.read_text())
-    assert _dataset_overview(after)["totals"]["n_items"] == 2
+    assert read_dataset_overview(after)["totals"]["n_items"] == 2
 
 
 def test_dry_run_leaves_the_file_alone(tmp_path):

@@ -329,7 +329,7 @@ Layer 1 — config-static (implemented here; aggregated by
   ``A33`` retired-not-renumbered afterwards, per A16/A17/A18.
 * A34 — ``evaluation.report.sections`` declares exactly the switches the
   report reads: its key set equals ``EVALUATION_REPORT_SECTIONS``, the constant
-  ``evaluation/report_builder._section_on`` checks every name against. Both
+  ``evaluation/report_sections/shared.section_on`` checks every name against. Both
   directions (ADR-0019 decision 6): a declared key nothing reads is a switch
   that does nothing (four shipped that way until #351), and a name the report
   reads that no conf declares is a switch with no line to flip it
@@ -3418,15 +3418,15 @@ def retired_diagnosis_key_errors(parameters: dict) -> list[str]:
 
 
 #: The ``evaluation.report.sections`` switches the report reads: one name per
-#: ``_section_on(parameters, name)`` call in ``evaluation/report_builder.py``,
+#: ``section_on(parameters, name)`` call in ``evaluation/report_sections/``,
 #: which refuses any name not listed here (A34). ``baseline``,
 #: ``per_item_breakdown`` and ``prediction_quality`` are also read directly by the
 #: nodes that skip computing (``compute_baseline_metrics`` /
 #: ``compute_report_aggregates`` / ``compute_prediction_quality``); those reads
-#: bypass the ``_section_on`` pre-check, so a new direct read of a name that is
-#: not listed here is caught by nothing. ``report_builder`` imports this
-#: constant, not the other way round: ``core/`` has no import-time dependency on
-#: the layers above it, and ``report_builder`` drags pandas and plotly in.
+#: bypass the ``section_on`` pre-check, so a new direct read of a name that is
+#: not listed here is caught by nothing. The report imports this constant,
+#: not the other way round: ``core/`` has no import-time dependency on the
+#: layers above it, and the report drags pandas and plotly in.
 EVALUATION_REPORT_SECTIONS: frozenset[str] = frozenset({
     "dataset_overview",
     "primary_map",
@@ -3437,7 +3437,7 @@ EVALUATION_REPORT_SECTIONS: frozenset[str] = frozenset({
 
 #: The switches in :data:`EVALUATION_REPORT_SECTIONS` that are **off** when the
 #: conf leaves them out (``prediction_quality_on``, ADR-0024 decision 1); every
-#: other one is on (``report_builder._section_on``). A34's message names the
+#: other one is on (``report_sections.shared.section_on``). A34's message names the
 #: value that keeps what an absent switch does today, so it needs the side.
 EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT: frozenset[str] = frozenset({
     "prediction_quality",
@@ -3586,7 +3586,7 @@ def report_section_key_errors(parameters: dict) -> list[str]:
       it off.
 
     A check that fires only when the report asks for a name (the pre-check in
-    ``_section_on``) never sees the first shape, which is why this runs on the
+    ``section_on``) never sees the first shape, which is why this runs on the
     conf itself.
 
     A ``sections`` block that declares no switch at all (absent, null, or an
@@ -3595,7 +3595,7 @@ def report_section_key_errors(parameters: dict) -> list[str]:
     declared, the block is checked in full.
 
     Each switch the report reads must also hold a bool (#505). Every reader
-    takes it by truthiness (``_section_on``, ``prediction_quality_on``, the
+    takes it by truthiness (``section_on``, ``prediction_quality_on``, the
     nodes that write a stub), so ``"false"`` — or ``'false`'``, what selecting
     this check's own advice up to the line end copies — reads as on. Those
     readers are left as they are: the evaluation command runs this check

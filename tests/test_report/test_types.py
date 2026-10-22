@@ -11,7 +11,7 @@ def test_old_import_path_still_works_and_is_same_class():
 
 
 def test_formula_and_bullets_are_optional_with_empty_defaults():
-    """新欄位必須可選——``report_builder`` 有 13 個既有的 ``build_*_section``
+    """新欄位必須可選——``report_sections`` 的各段 ``build``
     只傳 title/description，加必填欄位會讓它們全部 TypeError。
     """
     section = ReportSection(title="T", description="d")

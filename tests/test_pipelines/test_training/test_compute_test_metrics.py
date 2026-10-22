@@ -113,7 +113,7 @@ def test_test_map_matches_the_report_when_event_is_declared(spark):
     worked out by hand, and the same number the report prints under
     ``map@all``. Per item, B's one positive contributes 1/4 and C's 1.
     """
-    from recsys_tfb.evaluation import report_builder as rb
+    from recsys_tfb.evaluation.report_sections import overview
     from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
     from recsys_tfb.pipelines.training.nodes import compute_test_metrics
 
@@ -140,8 +140,11 @@ def test_test_map_matches_the_report_when_event_is_declared(spark):
     assert result["per_item_map_attr"] == {
         "B": pytest.approx(0.25), "C": pytest.approx(1.0),
     }
-    overview = rb.build_overview_section(compute_all_metrics(df, params), params)
-    report_card = overview.tables[overview.table_titles.index(
+    section = overview.build(
+        {"evaluation_metrics": compute_all_metrics(df, params),
+         "prediction_quality_metrics": None},
+        params)
+    report_card = section.tables[section.table_titles.index(
         "overall mAP@k（per-query 等權，另一種加權）")]
     assert result["overall_map"] == pytest.approx(
         report_card.loc["map@all", "value"])

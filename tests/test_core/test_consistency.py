@@ -2707,7 +2707,7 @@ class TestReportSectionKeysA34:
         assert "'per_segment'" in errors[0]
 
     def test_a_read_switch_left_undeclared_is_reported(self, monkeypatch):
-        """The shape of adding a ``_section_on("new_section")`` call and its
+        """The shape of adding a ``section_on("new_section")`` call and its
         name to the constant without declaring it in the YAML."""
         declared = {name: True for name in EVALUATION_REPORT_SECTIONS}
         monkeypatch.setattr(
@@ -2771,14 +2771,14 @@ class TestReportSectionKeysA34:
         import yaml
 
         from recsys_tfb.core.consistency import prediction_quality_on
-        from recsys_tfb.evaluation.report_builder import _section_on
+        from recsys_tfb.evaluation.report_sections.shared import section_on
 
         def runs(params, name):
             # prediction_quality_on decides whether the family is computed;
-            # the report's _section_on alone would say on.
+            # the report's section_on alone would say on.
             if name == "prediction_quality":
                 return prediction_quality_on(params)
-            return _section_on(params, name)
+            return section_on(params, name)
 
         every = sorted(EVALUATION_REPORT_SECTIONS)
         # Each switch missing alone, then all but one missing at once.

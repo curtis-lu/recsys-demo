@@ -63,15 +63,24 @@ def _coverage() -> dict:
 def test_returns_html_string():
     m_a, m_b = _metrics(0.6), _metrics(0.4)
     comp = _comparison(m_a, m_b)
-    out = assemble_comparison_report(m_a, m_b, comp, _coverage(), _params())
+    out = assemble_comparison_report({
+        "metrics_a": m_a,
+        "metrics_b": m_b,
+        "comparison": comp,
+        "compare_coverage_partial": _coverage(),
+    }, _params())
     assert isinstance(out, str)
     assert "<html" in out.lower()
 
 
 def test_metadata_shows_one_date_as_configured():
     m_a, m_b = _metrics(0.6), _metrics(0.4)
-    out = assemble_comparison_report(
-        m_a, m_b, _comparison(m_a, m_b), _coverage(), _params())
+    out = assemble_comparison_report({
+        "metrics_a": m_a,
+        "metrics_b": m_b,
+        "comparison": _comparison(m_a, m_b),
+        "compare_coverage_partial": _coverage(),
+    }, _params())
     assert "<tr><th>Snap Date</th><td>2026-01-31</td></tr>" in out
 
 
@@ -80,8 +89,12 @@ def test_metadata_shows_several_dates_as_a_range():
     m_a, m_b = _metrics(0.6), _metrics(0.4)
     p = _params()
     p["evaluation"]["snap_date"] = ["2026-01-31", "2026-03-31", "2026-02-28"]
-    out = assemble_comparison_report(
-        m_a, m_b, _comparison(m_a, m_b), _coverage(), p)
+    out = assemble_comparison_report({
+        "metrics_a": m_a,
+        "metrics_b": m_b,
+        "comparison": _comparison(m_a, m_b),
+        "compare_coverage_partial": _coverage(),
+    }, p)
     assert ("<tr><th>Snap Date</th><td>2026-01-31 ~ 2026-03-31（3 個日期）"
             "</td></tr>") in out
 
@@ -89,14 +102,24 @@ def test_metadata_shows_several_dates_as_a_range():
 def test_labels_visible_in_html():
     m_a, m_b = _metrics(0.6), _metrics(0.4)
     comp = _comparison(m_a, m_b)
-    out = assemble_comparison_report(m_a, m_b, comp, _coverage(), _params())
+    out = assemble_comparison_report({
+        "metrics_a": m_a,
+        "metrics_b": m_b,
+        "comparison": comp,
+        "compare_coverage_partial": _coverage(),
+    }, _params())
     assert "Model" in out and "ExtX" in out
 
 
 def test_coverage_numbers_in_html():
     m_a, m_b = _metrics(), _metrics()
     comp = _comparison(m_a, m_b)
-    out = assemble_comparison_report(m_a, m_b, comp, _coverage(), _params())
+    out = assemble_comparison_report({
+        "metrics_a": m_a,
+        "metrics_b": m_b,
+        "comparison": comp,
+        "compare_coverage_partial": _coverage(),
+    }, _params())
     assert "4800" in out or "4,800" in out
     assert "10000" in out or "10,000" in out
     assert "fund_misc" in out  # dropped items listed
@@ -106,7 +129,12 @@ def test_overall_metrics_have_delta():
     m_a = _metrics(map_at_1=0.6)
     m_b = _metrics(map_at_1=0.4)
     comp = _comparison(m_a, m_b)
-    out = assemble_comparison_report(m_a, m_b, comp, _coverage(), _params())
+    out = assemble_comparison_report({
+        "metrics_a": m_a,
+        "metrics_b": m_b,
+        "comparison": comp,
+        "compare_coverage_partial": _coverage(),
+    }, _params())
     # Δ for map@1 = 0.2; rendered somewhere
     assert "0.2" in out or "+0.2" in out
 
@@ -182,7 +210,12 @@ def test_overall_title_has_no_empty_side_note_when_both_sides_have_metrics():
 def test_category_section_absent_when_disabled():
     m_a, m_b = _metrics(), _metrics()
     comp = _comparison(m_a, m_b)
-    out = assemble_comparison_report(m_a, m_b, comp, _coverage(), _params())
+    out = assemble_comparison_report({
+        "metrics_a": m_a,
+        "metrics_b": m_b,
+        "comparison": comp,
+        "compare_coverage_partial": _coverage(),
+    }, _params())
     assert "大類" not in out  # category section is disabled in _params()
 
 
@@ -200,7 +233,12 @@ def test_category_section_present_when_enabled_and_present():
     p = _params()
     p["evaluation"]["item_categories"]["enabled"] = True
     comp = _comparison(m_a, m_b)
-    out = assemble_comparison_report(m_a, m_b, comp, _coverage(), p)
+    out = assemble_comparison_report({
+        "metrics_a": m_a,
+        "metrics_b": m_b,
+        "comparison": comp,
+        "compare_coverage_partial": _coverage(),
+    }, p)
     assert "大類" in out
 
 
@@ -221,8 +259,12 @@ def test_category_section_present_in_column_mode():
     p = _params()
     p["evaluation"]["item_categories"] = {
         "enabled": True, "unmapped": "singleton", "column": "campaign_id"}
-    out = assemble_comparison_report(m_a, m_b, _comparison(m_a, m_b),
-                                     _coverage(), p)
+    out = assemble_comparison_report({
+        "metrics_a": m_a,
+        "metrics_b": m_b,
+        "comparison": _comparison(m_a, m_b),
+        "compare_coverage_partial": _coverage(),
+    }, p)
     assert "大類" in out and "c01" in out
 
 
@@ -385,7 +427,12 @@ def test_overall_table_drops_keys_with_k_above_item_count():
 def test_glossary_section_present():
     m_a, m_b = _metrics(), _metrics()
     comp = _comparison(m_a, m_b)
-    out = assemble_comparison_report(m_a, m_b, comp, _coverage(), _params())
+    out = assemble_comparison_report({
+        "metrics_a": m_a,
+        "metrics_b": m_b,
+        "comparison": comp,
+        "compare_coverage_partial": _coverage(),
+    }, _params())
     assert "詞彙" in out or "Glossary" in out
 
 
@@ -397,10 +444,19 @@ def test_coverage_text_names_the_query_unit():
     says so (#428)."""
     m_a, m_b = _metrics(), _metrics()
     comp = _comparison(m_a, m_b)
-    plain = assemble_comparison_report(m_a, m_b, comp, _coverage(), _params())
+    plain = assemble_comparison_report({
+        "metrics_a": m_a,
+        "metrics_b": m_b,
+        "comparison": comp,
+        "compare_coverage_partial": _coverage(),
+    }, _params())
     assert "「一個時間 × 一個 entity」的相異組合數" in plain
-    widened = assemble_comparison_report(
-        m_a, m_b, comp, _coverage(), _params(occasion="req_id"))
+    widened = assemble_comparison_report({
+        "metrics_a": m_a,
+        "metrics_b": m_b,
+        "comparison": comp,
+        "compare_coverage_partial": _coverage(),
+    }, _params(occasion="req_id"))
     assert "「一個時間 × 一個 entity × 一個場合（occasion）」的相異組合數" in widened
 
 
@@ -415,8 +471,12 @@ def test_coverage_text_is_unchanged_with_the_all_positive_switch_off(switch):
     p = _params()
     if switch is not None:
         p["evaluation"]["query_filter"] = {"drop_all_positive_groups": switch}
-    out = assemble_comparison_report(
-        m_a, m_b, _comparison(m_a, m_b), _coverage(), p)
+    out = assemble_comparison_report({
+        "metrics_a": m_a,
+        "metrics_b": m_b,
+        "comparison": _comparison(m_a, m_b),
+        "compare_coverage_partial": _coverage(),
+    }, p)
     assert _DENOMINATOR in out
     assert "全正" not in out
 
@@ -429,8 +489,12 @@ def test_coverage_text_discloses_the_all_positive_exclusion_when_on():
     m_a, m_b = _metrics(), _metrics()
     p = _params()
     p["evaluation"]["query_filter"] = {"drop_all_positive_groups": True}
-    out = assemble_comparison_report(
-        m_a, m_b, _comparison(m_a, m_b), _coverage(), p)
+    out = assemble_comparison_report({
+        "metrics_a": m_a,
+        "metrics_b": m_b,
+        "comparison": _comparison(m_a, m_b),
+        "compare_coverage_partial": _coverage(),
+    }, p)
     assert "兩側都排除了全正的 query group" in out
     assert "各自依自己的列判定" in out
     assert "候選列不對稱" in out and "一側排除、一側保留" in out
@@ -500,3 +564,29 @@ def test_per_item_all_column_reads_each_side_at_its_own_k():
     assert attr.loc["p1", "map_attr@all B"] == pytest.approx(0.3)
     assert attr.loc["p1", "map_attr@all Δ"] == pytest.approx(0.2)
     assert attr.loc["Macro 平均", "map_attr@all Δ"] == pytest.approx(0.2)
+
+
+def test_per_item_tables_name_metrics_by_their_catalog_display_name(
+        monkeypatch):
+    """The comparison report's per-item recall and map_attr are labelled from
+    the metric catalog (ADR-0031 decision 6), not by a name of its own."""
+    from dataclasses import replace
+
+    from recsys_tfb.evaluation import metric_catalog as mc
+
+    renamed = {("hit_rate", mc.ITEM): "item-recall",
+               ("map_attr", mc.ITEM): "attr!"}
+    monkeypatch.setattr(mc, "METRICS", tuple(
+        replace(m, display_name=renamed[(m.name, m.method)])
+        if (m.name, m.method) in renamed else m
+        for m in mc.METRICS))
+    m_a, m_b = _metrics(0.6), _metrics(0.4)
+    out = assemble_comparison_report({
+        "metrics_a": m_a,
+        "metrics_b": m_b,
+        "comparison": _comparison(m_a, m_b),
+        "compare_coverage_partial": _coverage(),
+    }, _params())
+    assert "per-item item-recall@k (M/B/Δ)" in out
+    assert "item-recall@1 M" in out
+    assert "per-item attr!@k (M/B/Δ)" in out

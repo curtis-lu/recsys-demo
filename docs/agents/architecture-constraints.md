@@ -605,7 +605,7 @@ tests/params.py:4: schema.identity_columns -- get_schema derives this; a declare
 
 **完全相等，不是包含**，這是這條規則活得下去的關鍵：`"by_snap_date"`、`"test_snap_dates"`、`f"snap_date={v}"` 三者都合法、也都含那串字。改成子字串比對會讓登記表膨脹到沒人讀，而沒人讀的登記表擋不住東西。
 
-**該怎麼寫**：欄名一律走 `core/schema.get_schema`，現成範例是 `evaluation/report_builder.py::build_core_concept_section`（它印的每一個欄名都是使用者的）。
+**該怎麼寫**：欄名一律走 `core/schema.get_schema`，現成範例是 `evaluation/report_sections/core_concepts.py::build`（它印的每一個欄名都是使用者的）。
 
 **只掃 `src/`，`tests/` 與 `scripts/` 刻意在外**——這跟 S4／S5 的取捨相反，理由也不同：S4／S5 擋的是「這段程式碼把設定讀成什麼」，而**測試正是重災區**；S6 擋的是「框架有沒有替使用者決定欄名」，而一個 fixture 本來就得寫下某個具體欄名，寫示例那組是誠實的選擇。把 `tests/` 擴進來只會生出幾百筆例外。
 

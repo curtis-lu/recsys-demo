@@ -890,7 +890,7 @@ def compute_baseline_metrics(
     # count below is per item.
     label_table = combine_item_columns(label_table, schema, "label_table")
     # Single source of the default (bug 1, ADR-0020): before this helper
-    # existed, this node defaulted to 12 while build_baseline_section
+    # existed, this node defaulted to 12 while the report's baseline section
     # defaulted to None (printing nothing), so a run relying on the implicit
     # default silently disagreed with itself about what it had used.
     lookback_months = resolve_lookback_months(parameters)
@@ -1215,49 +1215,52 @@ def compute_report_aggregates(
 
 def generate_report(
     evaluation_metrics: dict,
-    parameters: dict,
     baseline_metrics: dict,
-    report_aggregates: dict,
+    evaluation_report_aggregates: dict,
     prediction_quality_metrics: dict,
+    parameters: dict,
 ) -> str:
-    """Build the HTML report. Metrics dicts drive §0–§8; the per-item
-    breakdown section (when enabled) reads the already-aggregated Spark JSON
-    from ``compute_report_aggregates`` (Plan 1.5) so this function stays pure
-    — no SparkDataFrame in the signature, no Spark action in the body.
+    """Build the HTML report from the landed results, wired by name
+    (ADR-0030 decision 8); each parameter is named after its catalog entry.
+    The per-item breakdown section (when enabled) reads the already-aggregated
+    Spark JSON from ``compute_report_aggregates`` (Plan 1.5) so this function
+    stays pure — no SparkDataFrame in the signature, no Spark action in the
+    body.
 
-    Pre-check (inputs): ``evaluation_metrics``, ``baseline_metrics``,
-    ``report_aggregates`` and ``prediction_quality_metrics`` were computed
-    with the current computed settings (``steps.config_fingerprint``). All
-    four are landed JSON (ADR-0018 decision 2), and ``--only-node generate_report``
-    stops at "the JSON exists", so without this a setting changed since the
-    last run is drawn from the old JSON with exit code 0 (ADR-0020 bug 2);
-    with it the run raises, naming the key and the node to ``--from-node``.
-    Only computed settings count, so changing ``report.display.*`` and the
-    other drawn keys still redraws without recomputing anything.
+    Pre-check (inputs): every result was computed with the current computed
+    settings (``steps.config_fingerprint``). All of them are landed JSON
+    (ADR-0018 decision 2), and ``--only-node generate_report`` stops at "the
+    JSON exists", so without this a setting changed since the last run is
+    drawn from the old JSON with exit code 0 (ADR-0020 bug 2); with it the
+    run raises, naming the key and the node to ``--from-node``. Only computed
+    settings count, so changing ``report.display.*`` and the other drawn keys
+    still redraws without recomputing anything.
     """
+    # Decision — hand the report one bundle of results keyed by catalog name
+    # (ADR-0031 principle 1): each section takes the names it declares, so a
+    # new result reaches its section without passing through every signature
+    # on the way. The bundle lives only here; each result already landed.
+    results = {
+        "evaluation_metrics": evaluation_metrics,
+        "baseline_metrics": baseline_metrics,
+        "evaluation_report_aggregates": evaluation_report_aggregates,
+        "prediction_quality_metrics": prediction_quality_metrics,
+    }
+    produced_by = {
+        "evaluation_metrics": "compute_metrics",
+        "baseline_metrics": "compute_baseline_metrics",
+        "evaluation_report_aggregates": "compute_report_aggregates",
+        "prediction_quality_metrics": "compute_prediction_quality",
+    }
     require_computed_with_current_config(
         [
-            LoadedArtifact(catalog_name="evaluation_metrics",
-                           payload=evaluation_metrics,
-                           produced_by="compute_metrics"),
-            LoadedArtifact(catalog_name="baseline_metrics",
-                           payload=baseline_metrics,
-                           produced_by="compute_baseline_metrics"),
-            LoadedArtifact(catalog_name="evaluation_report_aggregates",
-                           payload=report_aggregates,
-                           produced_by="compute_report_aggregates"),
-            LoadedArtifact(catalog_name="prediction_quality_metrics",
-                           payload=prediction_quality_metrics,
-                           produced_by="compute_prediction_quality"),
+            LoadedArtifact(catalog_name=name, payload=payload,
+                           produced_by=produced_by[name])
+            for name, payload in results.items()
         ],
         parameters,
     )
-    return assemble_report(
-        evaluation_metrics, parameters,
-        baseline_metrics=baseline_metrics,
-        report_aggregates=report_aggregates,
-        prediction_quality=prediction_quality_metrics,
-    )
+    return assemble_report(results, parameters)
 
 
 def load_compare_predictions(parameters: dict) -> SparkDataFrame:
@@ -1456,7 +1459,13 @@ def generate_comparison_report(
     comparison = build_comparison_result(metrics_a, metrics_b, label_a, label_b)
 
     return assemble_comparison_report(
-        metrics_a, metrics_b, comparison, coverage_partial, parameters
+        {
+            "metrics_a": metrics_a,
+            "metrics_b": metrics_b,
+            "comparison": comparison,
+            "compare_coverage_partial": coverage_partial,
+        },
+        parameters,
     )
 
 

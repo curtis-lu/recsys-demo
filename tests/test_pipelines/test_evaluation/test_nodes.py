@@ -1857,12 +1857,15 @@ class TestAllPositiveQueryGroups:
         ``compute_metrics``'s result (``metrics.json``), so the switch reaches
         it like every other measurement metric: switched on, it equals the
         headline of the frame without the all-positive groups."""
-        from recsys_tfb.evaluation import report_builder as rb
+        from recsys_tfb.evaluation.report_sections import overview
 
         def headline(switch, without=()):
             params = self._parameters(switch)
-            s = rb.build_overview_section(
-                self._metrics(spark, switch, without=without), params)
+            s = overview.build(
+                {"evaluation_metrics":
+                     self._metrics(spark, switch, without=without),
+                 "prediction_quality_metrics": None},
+                params)
             (i,) = [i for i, t in enumerate(s.table_titles)
                     if t.startswith("頭號指標")]
             return s.tables[i].loc["macro per-item mAP", "value"]

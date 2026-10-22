@@ -87,9 +87,13 @@ def test_generate_report_html_no_diagnostics(spark):
     params = _params(False)
     aggregates = compute_report_aggregates(
         _eval_pred(spark), _landed_segments(params), params)
-    html = generate_report(_landed_metrics(params), params,
-                            _unread_stub(params),
-                            aggregates, _unread_stub(params))
+    html = generate_report(
+        evaluation_metrics=_landed_metrics(params),
+        baseline_metrics=_unread_stub(params),
+        evaluation_report_aggregates=aggregates,
+        prediction_quality_metrics=_unread_stub(params),
+        parameters=params,
+    )
     assert html.startswith("<!DOCTYPE html>")
     assert "概覽" in html
     # diagnostics off → 沒有可收合的診斷 section（<details class="section">）。
@@ -102,9 +106,13 @@ def test_generate_report_with_diagnostics(spark):
     aggregates = compute_report_aggregates(
         _eval_pred(spark), _landed_segments(params), params)
     assert aggregates["config_fingerprint"] == fingerprint(params)
-    html = generate_report(_landed_metrics(params), params,
-                            _unread_stub(params),
-                            aggregates, _unread_stub(params))
+    html = generate_report(
+        evaluation_metrics=_landed_metrics(params),
+        baseline_metrics=_unread_stub(params),
+        evaluation_report_aggregates=aggregates,
+        prediction_quality_metrics=_unread_stub(params),
+        parameters=params,
+    )
     # 診斷升為頂層「per-item 細部拆解」段（非收合 section）；其明細數字表用
     # 逐表收合 <details class="table-collapse">。
     assert "per-item 細部拆解" in html
@@ -133,8 +141,13 @@ def test_the_main_report_has_no_diagnosis_section(spark):
         eval_pred, _landed_segments(params), params)
     aggregates = compute_report_aggregates(
         eval_pred, _landed_segments(params), params)
-    html = generate_report(_landed_metrics(params), params,
-                           _unread_stub(params), aggregates, pq)
+    html = generate_report(
+        evaluation_metrics=_landed_metrics(params),
+        baseline_metrics=_unread_stub(params),
+        evaluation_report_aggregates=aggregates,
+        prediction_quality_metrics=pq,
+        parameters=params,
+    )
     # Premise: the sections that used to name the diagnoses were drawn.
     assert "概覽" in html and "預測品質" in html and "per-item 細部拆解" in html
     assert "排序診斷" not in html
@@ -178,12 +191,18 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
     large_aggregates = compute_report_aggregates(
         _eval_pred_n(spark, 3000), _landed_segments(params), params)
     small = generate_report(
-        _landed_metrics(params), params, _unread_stub(params),
-        small_aggregates, _unread_stub(params),
+        evaluation_metrics=_landed_metrics(params),
+        baseline_metrics=_unread_stub(params),
+        evaluation_report_aggregates=small_aggregates,
+        prediction_quality_metrics=_unread_stub(params),
+        parameters=params,
     )
     large = generate_report(
-        _landed_metrics(params), params, _unread_stub(params),
-        large_aggregates, _unread_stub(params),
+        evaluation_metrics=_landed_metrics(params),
+        baseline_metrics=_unread_stub(params),
+        evaluation_report_aggregates=large_aggregates,
+        prediction_quality_metrics=_unread_stub(params),
+        parameters=params,
     )
     assert abs(len(large) - len(small)) < 20000
 
@@ -286,8 +305,13 @@ def test_generate_report_refuses_a_computed_setting_flipped_after_the_run():
     now["evaluation"]["report"]["sections"]["baseline"] = True
 
     with pytest.raises(ValueError) as exc:
-        generate_report(_landed_metrics(computed_with), now, baseline,
-                        aggregates, pq)
+        generate_report(
+            evaluation_metrics=_landed_metrics(computed_with),
+            baseline_metrics=baseline,
+            evaluation_report_aggregates=aggregates,
+            prediction_quality_metrics=pq,
+            parameters=now,
+        )
 
     msg = str(exc.value)
     assert "evaluation.report.sections.baseline" in msg
@@ -307,8 +331,13 @@ def test_generate_report_refuses_metrics_computed_with_other_settings():
     now["evaluation"]["metric"] = {"min_positives": 5}
 
     with pytest.raises(ValueError) as exc:
-        generate_report(_landed_metrics(computed_with), now, baseline,
-                        aggregates, pq)
+        generate_report(
+            evaluation_metrics=_landed_metrics(computed_with),
+            baseline_metrics=baseline,
+            evaluation_report_aggregates=aggregates,
+            prediction_quality_metrics=pq,
+            parameters=now,
+        )
 
     msg = str(exc.value)
     assert "evaluation_metrics (written by compute_metrics)" in msg
@@ -322,8 +351,13 @@ def test_generate_report_refuses_metrics_without_a_fingerprint():
     baseline, aggregates, pq = _landed_inputs(params)
 
     with pytest.raises(ValueError) as exc:
-        generate_report(_metrics(), params, baseline, aggregates,
-                        pq)
+        generate_report(
+            evaluation_metrics=_metrics(),
+            baseline_metrics=baseline,
+            evaluation_report_aggregates=aggregates,
+            prediction_quality_metrics=pq,
+            parameters=params,
+        )
 
     msg = str(exc.value)
     assert ("evaluation_metrics (written by compute_metrics) has no "
@@ -340,9 +374,13 @@ def test_generate_report_redraws_when_only_drawn_settings_changed():
     now["evaluation"]["report"]["display"]["primary_map_k"] = [1, "all"]
     now["evaluation"]["report"]["sections"]["primary_map"] = False
 
-    html = generate_report(_landed_metrics(computed_with), now, baseline,
-                           aggregates,
-                           pq)
+    html = generate_report(
+        evaluation_metrics=_landed_metrics(computed_with),
+        baseline_metrics=baseline,
+        evaluation_report_aggregates=aggregates,
+        prediction_quality_metrics=pq,
+        parameters=now,
+    )
 
     assert html.startswith("<!DOCTYPE html>")
 
@@ -359,8 +397,13 @@ def test_generate_report_refuses_prediction_quality_switched_on_after_the_run():
     now["evaluation"]["report"]["sections"]["prediction_quality"] = True
 
     with pytest.raises(ValueError) as exc:
-        generate_report(_landed_metrics(computed_with), now, baseline,
-                        aggregates, pq)
+        generate_report(
+            evaluation_metrics=_landed_metrics(computed_with),
+            baseline_metrics=baseline,
+            evaluation_report_aggregates=aggregates,
+            prediction_quality_metrics=pq,
+            parameters=now,
+        )
 
     msg = str(exc.value)
     assert "evaluation.report.sections.prediction_quality" in msg
@@ -372,8 +415,13 @@ def test_generate_report_refuses_a_prediction_quality_json_without_fingerprint()
     baseline, aggregates, _pq = _landed_inputs(params)
 
     with pytest.raises(ValueError) as exc:
-        generate_report(_landed_metrics(params), params, baseline,
-                        aggregates, {"enabled": False})
+        generate_report(
+            evaluation_metrics=_landed_metrics(params),
+            baseline_metrics=baseline,
+            evaluation_report_aggregates=aggregates,
+            prediction_quality_metrics={"enabled": False},
+            parameters=params,
+        )
 
     assert ("prediction_quality_metrics (written by "
             "compute_prediction_quality) has no config_fingerprint"
@@ -401,7 +449,11 @@ def test_generate_report_draws_prediction_quality_from_the_nodes_output(spark):
     assert pq["overall"]["summary"]["n"] == 4
     aggregates = compute_report_aggregates(
         eval_pred, _landed_segments(params), params)
-    html = generate_report(_landed_metrics(params), params,
-                           _unread_stub(params),
-                           aggregates, pq)
+    html = generate_report(
+        evaluation_metrics=_landed_metrics(params),
+        baseline_metrics=_unread_stub(params),
+        evaluation_report_aggregates=aggregates,
+        prediction_quality_metrics=pq,
+        parameters=params,
+    )
     assert "預測品質" in html

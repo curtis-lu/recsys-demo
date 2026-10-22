@@ -462,65 +462,32 @@ class TestEveryEnrichedReaderKeepsTheEvaluatedMonth:
 
 
 class TestGenerateReportNodeWiring:
-    """core/runner.py binds a list of Node inputs to the wrapped function
-    purely by position — no keyword matching (only a dict of inputs binds by
-    name, and generate_report's is a list). generate_report's parameters are all
-    dict-typed, so if the Node's ``inputs=[...]`` list in pipeline.py drifts
-    out of sync with the signature's parameter order, one dict silently lands
-    in the wrong parameter — Python raises no TypeError and the corresponding
-    report section just goes missing. This test pins that ordering.
+    """generate_report is wired by name (ADR-0030 decision 8, ADR-0031
+    principle 1): the Node binds each catalog entry to the parameter its
+    ``inputs`` dict names, and the report keys every result by that name.
 
-    Catalog keys and parameter names aren't spelled identically: some carry an
-    "evaluation_" prefix the parameter names drop (evaluation_report_aggregates
-    -> report_aggregates). So the checkable property is: each catalog key equals its
-    parameter name, optionally after stripping a leading "evaluation_",
-    position-for-position.
-
-    **The signature must have no varargs and no defaults** (Plan 1.5). Both
-    properties are what makes a stale pipeline.py fail loudly: with 4 optional
-    params plus ``*registry_diagnoses``, 6/7/8/9 inputs were all legal, which
-    is exactly how the 2026-07-20 production TypeError happened — the count
-    was fine, the positions were not.
+    So the property to pin is that every parameter is named after the entry
+    it is fed: ``{"evaluation_metrics": "baseline_metrics"}`` binds without an
+    error, and the report would draw the baseline where the model's metrics
+    go. And no parameter has a default: an entry left out of the dict would
+    then arrive as the default instead of failing where the Node is built
+    (Plan 1.5; the 2026-07-20 production TypeError was a stale wiring that
+    defaults let through).
     """
 
-    def test_inputs_positionally_match_signature(self):
+    def test_every_parameter_is_fed_the_entry_it_is_named_after(self):
         for kwargs in ({}, {"post_training": True}):
-            self._check_inputs_positionally_match_signature(
-                create_pipeline(**kwargs)
-            )
-
-    @staticmethod
-    def _check_inputs_positionally_match_signature(pipeline):
-        node = next(n for n in pipeline.nodes if n.name == "generate_report")
-        params = inspect.signature(node.func).parameters
-
-        assert not any(
-            p.kind is inspect.Parameter.VAR_POSITIONAL for p in params.values()
-        ), (
-            "generate_report grew varargs again — that reopens the "
-            "'count is legal, positions are wrong' failure mode."
-        )
-        assert not [
-            name for name, p in params.items()
-            if p.default is not inspect.Parameter.empty
-        ], (
-            "generate_report grew a defaulted parameter — a stale inputs list "
-            "would then bind silently instead of raising TypeError."
-        )
-        assert len(node.inputs) == len(params), (
-            f"generate_report takes {list(params)} but the Node wires "
-            f"{node.inputs} — positional binding would misalign."
-        )
-        for position, (catalog_key, param_name) in enumerate(
-            zip(node.inputs, params)
-        ):
-            stripped = catalog_key[len("evaluation_"):] \
-                if catalog_key.startswith("evaluation_") else catalog_key
-            assert catalog_key == param_name or stripped == param_name, (
-                f"position {position}: catalog key {catalog_key!r} would "
-                f"positionally bind to parameter {param_name!r} — inputs "
-                f"list and function signature are out of sync."
-            )
+            node = next(n for n in create_pipeline(**kwargs).nodes
+                        if n.name == "generate_report")
+            params = inspect.signature(node.func).parameters
+            assert node.keyword_inputs is not None, (
+                "generate_report is wired by position again", kwargs)
+            assert node.keyword_inputs == {name: name for name in params}, (
+                kwargs, node.keyword_inputs)
+            assert not [
+                name for name, p in params.items()
+                if p.default is not inspect.Parameter.empty
+            ], "generate_report grew a defaulted parameter"
 
 class TestGenerateComparisonReportNodeWiring:
     """Same positional-binding hazard as TestGenerateReportNodeWiring, but a

@@ -185,11 +185,17 @@ def create_pipeline(
         ),
     ]
     nodes += [
+        # By name (ADR-0030 decision 8): the report keys each result by its
+        # catalog name, so every parameter is named after its entry.
         Node(
             generate_report,
-            inputs=["evaluation_metrics", "parameters", "baseline_metrics",
-                    "evaluation_report_aggregates",
-                    "prediction_quality_metrics"],
+            inputs={
+                "evaluation_metrics": "evaluation_metrics",
+                "baseline_metrics": "baseline_metrics",
+                "evaluation_report_aggregates": "evaluation_report_aggregates",
+                "prediction_quality_metrics": "prediction_quality_metrics",
+                "parameters": "parameters",
+            },
             outputs="evaluation_report",
         ),
     ]

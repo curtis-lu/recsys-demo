@@ -972,7 +972,7 @@ def test_metric_k_reaches_only_the_per_item_family(spark):
 
 def test_headline_k_is_computed_when_k_values_leaves_out_all(spark):
     """With ``metric.k`` unset the report's headline is
-    ``macro_avg["by_item"]["map_attr@{all_k}"]`` (``report_builder.
+    ``macro_avg["by_item"]["map_attr@{all_k}"]`` (``report_sections.overview.
     _headline_key``), and ``k_values`` is only the @K grid of the families —
     it need not list ``"all"``. So the per-item grid adds the headline's K
     itself, as it does for ``metric.k``; the per-query grid stays
