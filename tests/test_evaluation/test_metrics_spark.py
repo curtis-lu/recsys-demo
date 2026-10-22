@@ -631,29 +631,6 @@ def test_compute_all_metrics_with_segment_column(spark):
     assert "by_item_segment" in result["macro_avg"]
 
 
-@pytest.mark.parametrize("with_segment", [False, True], ids=["no-segment", "segment"])
-def test_per_query_is_cached_only_when_it_is_read_twice(
-    spark, monkeypatch, with_segment,
-):
-    """#450 item 6. The per-query frame is read by ``aggregate_overall`` and,
-    with a segment, by ``aggregate_per_segment``. With one reader a cache
-    only writes a copy to memory. Measured on main: cached either way."""
-    seen = []
-    real = ms.aggregate_overall
-
-    def spy(per_query, *a, **k):
-        seen.append(per_query.is_cached)
-        return real(per_query, *a, **k)
-
-    monkeypatch.setattr(ms, "aggregate_overall", spy)
-    ms.compute_all_metrics(
-        _make_eval_predictions(spark, with_segment=with_segment),
-        _make_parameters(k_values=[3]),
-        segment_columns=["cust_segment_typ"] if with_segment else [],
-    )
-    assert seen == [with_segment]
-
-
 def test_compute_all_metrics_excluded_queries_counted(spark):
     """A query with no positives is excluded; n_excluded_queries reflects that."""
     df = spark.createDataFrame(

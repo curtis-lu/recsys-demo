@@ -1145,14 +1145,12 @@ def _compute_core(
     try:
         # ---- Layer 2: per-query metrics (carries seg for per_segment) ----
         carry = [active_seg_col] if active_seg_col else []
+        # Cached with or without a segment, though without one only
+        # aggregate_overall reads it: skipping the cache there measured no
+        # difference (#450 item 6), so the branch was not kept.
         per_query = compute_per_query_metrics(
             enriched, group_cols, label_col, query_ks, carry_cols=carry
-        )
-        # Read twice only with a segment (aggregate_overall, then
-        # aggregate_per_segment); with one reader a cache would only write a
-        # copy to memory (#450).
-        if active_seg_col:
-            per_query = per_query.cache()
+        ).cache()
         try:
             # ---- Layer 3: aggregations ----
             overall = aggregate_overall(per_query, query_ks)
@@ -1212,10 +1210,7 @@ def _compute_core(
                 **recorded_k,
             }
         finally:
-            # Guarded: Spark uncaches by plan, so unpersist on a frame never
-            # cached could drop another cache of the same plan.
-            if active_seg_col:
-                per_query.unpersist()
+            per_query.unpersist()
     finally:
         enriched.unpersist()
 
@@ -1500,27 +1495,21 @@ def compute_all_metrics(
         # column the frame does not have. The switch is the same; which
         # queries it drops is decided on this frame (label = max of the
         # children), so a query mixed row by row can be all-positive here.
-        # Cached for the pass (#450): the collapse is a join plus a groupBy
-        # over the whole fine-grained frame, and every action of this pass
-        # reads it: the overview's, and the core's query-group count and the
-        # action that fills its own cache. Not the fine frame's memory
-        # question (ADR-0018 〈為什麼不是 .cache()〉): this holds one narrow
-        # row per (query group, category), next to the category core's own
-        # cache; the fine pass's caches are released by now. Where every item
-        # is its own category that is as many rows as the fine frame; the
-        # default storage level spills to disk rather than fail.
-        collapsed = collapsed.cache()
-        try:
-            cat_overview = compute_dataset_overview(
-                collapsed, parameters, segment_columns=segment_columns
-            )
-            cat = _compute_core(
-                collapsed, parameters, segment_columns, event_cols=(),
-                drop_all_positive_groups=drop_all_positive_groups,
-                n_items=cat_overview["totals"]["n_items"],
-            )
-        finally:
-            collapsed.unpersist()
+        # Not cached, though every action of this pass collapses again
+        # (#450 item 5): cached, the pass measured slower, not faster. The
+        # cache holds spark.sql.shuffle.partitions partitions (AQE does not
+        # coalesce a cached plan's output), and while one groupBy read it
+        # faster than a fresh collapse, compute_dataset_overview as a whole
+        # took longer on it. Not traced stage by stage; measured on 2.4M local
+        # rows, so re-measure before caching it at production scale.
+        cat_overview = compute_dataset_overview(
+            collapsed, parameters, segment_columns=segment_columns
+        )
+        cat = _compute_core(
+            collapsed, parameters, segment_columns, event_cols=(),
+            drop_all_positive_groups=drop_all_positive_groups,
+            n_items=cat_overview["totals"]["n_items"],
+        )
         cat["dataset_overview"] = cat_overview
         result["category"] = cat
 
