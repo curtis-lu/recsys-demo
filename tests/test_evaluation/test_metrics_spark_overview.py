@@ -316,6 +316,42 @@ def test_all_resolves_to_the_widest_query_group_with_the_event_role(spark):
     ) == 4
 
 
+def _spark_jobs(spark, run):
+    """How many Spark jobs ``run`` submits, counted by the status tracker."""
+    import uuid
+
+    group = f"cost-{uuid.uuid4().hex}"
+    context = spark.sparkContext
+    context.setJobGroup(group, group)
+    try:
+        run()
+    finally:
+        context.setLocalProperty("spark.jobGroup.id", None)
+    return len(context.statusTracker().getJobIdsForGroup(group))
+
+
+@pytest.mark.parametrize("with_event", [False, True], ids=["items", "event"])
+def test_resolving_all_costs_no_job_of_its_own(spark, monkeypatch, with_event):
+    """#450 item 4. Both answers ``_resolve_all_k`` can give are counted
+    anyway: the item count is ``dataset_overview.totals.n_items``, the widest
+    group comes out of the query-group count's ``groupBy``. So the bundle
+    submits no more jobs than one whose ``"all"`` is free. Measured on main:
+    more (its own distinct count, or its own ``groupBy``)."""
+    df, params = (_event_df(spark), _event_params()) if with_event else (
+        _df(spark), _params())
+    params["evaluation"] = {"k_values": [1, "all"]}
+    run = lambda: ms.compute_all_metrics(df, params, with_category=False)  # noqa: E731
+    expected = run()
+    real = _spark_jobs(spark, run)
+
+    all_k = ms._resolve_all_k(df, ["snap_date", "cust_id"], "prod_name",
+                              event_cols=["imp_id"] if with_event else [])
+    monkeypatch.setattr(ms, "_resolve_all_k", lambda *a, **k: all_k)
+    free = _spark_jobs(spark, run)
+    assert json.dumps(run(), sort_keys=True) == json.dumps(expected, sort_keys=True)
+    assert real == free
+
+
 # ---------------------------------------------------------------------------
 # `occasion` declared (#428): the same two numbers, scoped to one occasion
 # ---------------------------------------------------------------------------

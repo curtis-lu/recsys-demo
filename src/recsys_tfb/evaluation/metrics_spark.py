@@ -129,6 +129,9 @@ def _resolve_all_k(
     group_cols: Sequence[str],
     item_col: str,
     event_cols: Sequence[str],
+    *,
+    n_items: int | None = None,
+    widest_group: int | None = None,
 ) -> int:
     """What ``k_values: "all"`` means for this frame — the K that truncates
     nothing.
@@ -162,21 +165,28 @@ def _resolve_all_k(
     bundle in the first case; in the second it is
     ``dataset_overview.totals.n_items`` of the same frame.
 
-    Costs one extra shuffle over the same frame in the event case only —
-    a ``groupBy(query_group).count()`` whose driver-side result is a single
-    number.
+    Costs one action over the frame — a distinct item count, or a
+    ``groupBy(query_group).count()`` in the event case — unless the caller
+    passes the number it needs: ``n_items`` (``dataset_overview.totals
+    .n_items`` of the same frame: ``countDistinct(struct(item))`` counts a
+    NULL item once, as ``distinct().count()`` does) or ``widest_group`` (the
+    fourth number of ``_count_query_groups``). ``_compute_core`` passes both,
+    which both count anyway (#450).
     """
     if not event_cols:
-        return frame.select(item_col).distinct().count()
-    per_group = (
-        frame.groupBy(*group_cols)
-        .agg(F.count(F.lit(1)).alias("_n_rows"))
-        .agg(F.max("_n_rows").alias("_max_rows"))
-        .collect()[0]["_max_rows"]
-    )
+        if n_items is None:
+            n_items = frame.select(item_col).distinct().count()
+        return n_items
+    if widest_group is None:
+        widest_group = (
+            frame.groupBy(*group_cols)
+            .agg(F.count(F.lit(1)).alias("_n_rows"))
+            .agg(F.max("_n_rows").alias("_max_rows"))
+            .collect()[0]["_max_rows"]
+        )
     # An empty frame has no widest group. 0 is what the item-count branch
     # returns for the same frame, so the two branches degrade alike.
-    return int(per_group or 0)
+    return int(widest_group or 0)
 
 
 def _resolve_k_grids(
@@ -610,8 +620,9 @@ def _all_positive_group(label_col: str, window: WindowSpec | None = None):
 
 def _count_query_groups(
     frame: SparkDataFrame, group_cols: Sequence[str], label_col: str
-) -> tuple[int, int, int]:
-    """``(all, holding a positive, all-positive)`` query groups, in one action.
+) -> tuple[int, int, int, int]:
+    """``(all, holding a positive, all-positive)`` query groups and the row
+    count of the widest one, in one action.
 
     Replaces two ``select(group_cols).distinct().count()`` — one on the frame,
     one on the frame after the rank and ``total_rel`` windows — with a single
@@ -624,6 +635,10 @@ def _count_query_groups(
     An all-positive group holds a positive by construction (every group has a
     row); the ``AND`` only keeps the subset relation that
     ``metrics.all_positive_share`` divides by explicit.
+
+    The widest group is what ``"all"`` resolves to on a frame of event rows
+    (``_resolve_all_k``), which used to count it with a ``groupBy`` of its
+    own over the same keys (#450); 0 on an empty frame, as there.
     """
     has_positive = F.col("_total_rel") > 0
     row = (
@@ -631,6 +646,7 @@ def _count_query_groups(
         .agg(
             F.sum(F.col(label_col)).alias("_total_rel"),
             _all_positive_group(label_col).alias("_all_positive"),
+            F.count(F.lit(1)).alias("_n_rows"),
         )
         .agg(
             F.count(F.lit(1)).alias("n_queries"),
@@ -638,6 +654,7 @@ def _count_query_groups(
             F.sum(
                 F.when(has_positive & F.col("_all_positive"), 1).otherwise(0)
             ).alias("n_all_positive"),
+            F.max("_n_rows").alias("widest_group"),
         )
         .collect()[0]
     )
@@ -645,6 +662,7 @@ def _count_query_groups(
         int(row["n_queries"]),
         int(row["n_with_positive"] or 0),
         int(row["n_all_positive"] or 0),
+        int(row["widest_group"] or 0),
     )
 
 
@@ -1013,6 +1031,7 @@ def _compute_core(
     *,
     event_cols: Sequence[str],
     drop_all_positive_groups: bool,
+    n_items: int,
 ) -> dict:
     """The fine-grained metric bundle (overall/per_item/per_segment/...).
 
@@ -1048,6 +1067,11 @@ def _compute_core(
     ``event_cols`` also decides what ``"all"`` resolves to (``_resolve_all_k``)
     and whether the bundle records it under ``metrics.ALL_K_KEY``: it is the
     one argument that says whether this frame's rows are events.
+
+    ``n_items`` is ``dataset_overview.totals.n_items`` of this same frame,
+    which the caller computes anyway: with no event rows it is what ``"all"``
+    resolves to, and passing it saves the scan that would count it again
+    (#450).
     """
     schema = get_schema(parameters)
     item_col = schema["item"]
@@ -1066,14 +1090,17 @@ def _compute_core(
         name: v for name, v in metric_params(parameters).items() if name != "k"
     }
 
-    all_k = _resolve_all_k(eval_predictions, group_cols, item_col, event_cols)
+    (n_queries_total, n_queries_with_pos, n_all_positive,
+     widest_group) = _count_query_groups(eval_predictions, group_cols, label_col)
+    all_k = _resolve_all_k(
+        eval_predictions, group_cols, item_col, event_cols,
+        n_items=n_items, widest_group=widest_group,
+    )
     query_ks, item_ks = _resolve_k_grids(parameters, all_k)
     # Written only when it can differ from dataset_overview.totals.n_items —
     # the one other place metrics.resolved_all_k looks — so a bundle computed
     # without event rows gains no key.
     recorded_k = {ALL_K_KEY: all_k} if event_cols else {}
-    n_queries_total, n_queries_with_pos, n_all_positive = _count_query_groups(
-        eval_predictions, group_cols, label_col)
     counts = {
         "n_queries": n_queries_total,
         "n_excluded_queries": n_queries_total - n_queries_with_pos,
@@ -1425,16 +1452,21 @@ def compute_all_metrics(
     top_k@K``: which rows reach the top K decides which items get the
     credit); switched on, those queries leave them too.
     """
+    # The overview goes first so the core can take its item count for "all"
+    # instead of counting it again (#450); the key is added after the core's,
+    # where it always was.
+    overview = compute_dataset_overview(
+        eval_predictions, parameters, segment_columns=segment_columns
+    )
     # The fine-grained pass ranks the rows as they were written: one per
     # candidate, so `event` is what tells two rows of one item apart.
     result = _compute_core(
         eval_predictions, parameters, segment_columns,
         event_cols=get_schema(parameters).get("event", []),
         drop_all_positive_groups=drop_all_positive_groups,
+        n_items=overview["totals"]["n_items"],
     )
-    result["dataset_overview"] = compute_dataset_overview(
-        eval_predictions, parameters, segment_columns=segment_columns
-    )
+    result["dataset_overview"] = overview
 
     mapping = (_resolve_category_mapping(parameters, category_mapping)
                if with_category else None)
@@ -1451,13 +1483,15 @@ def compute_all_metrics(
         # column the frame does not have. The switch is the same; which
         # queries it drops is decided on this frame (label = max of the
         # children), so a query mixed row by row can be all-positive here.
+        cat_overview = compute_dataset_overview(
+            collapsed, parameters, segment_columns=segment_columns
+        )
         cat = _compute_core(
             collapsed, parameters, segment_columns, event_cols=(),
             drop_all_positive_groups=drop_all_positive_groups,
+            n_items=cat_overview["totals"]["n_items"],
         )
-        cat["dataset_overview"] = compute_dataset_overview(
-            collapsed, parameters, segment_columns=segment_columns
-        )
+        cat["dataset_overview"] = cat_overview
         result["category"] = cat
 
     return result
