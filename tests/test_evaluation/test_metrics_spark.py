@@ -14,6 +14,8 @@ is the sole source of truth for these metrics.
 """
 
 
+import re
+
 import pytest
 from pyspark.sql import functions as F
 
@@ -46,13 +48,18 @@ def _two_customer_raw(spark):
     )
 
 
+# The ranking rule rank_within_query numbered `pos` with; the running sum
+# orders by it (#450).
+_ORDER = {"score_col": "score", "item_col": "prod_name", "event_cols": []}
+
+
 def _enriched(spark, k_values=(3,)):
     df = _two_customer_raw(spark)
     group_cols = ["snap_date", "cust_id"]
     df = ms.rank_within_query(df, group_cols, "score", "prod_name")
     df = ms.add_query_total_rel(df, group_cols, "label")
     df = df.filter(F.col("total_rel") > 0)
-    df = ms.add_row_contributions(df, group_cols, "label", list(k_values))
+    df = ms.add_row_contributions(df, group_cols, "label", list(k_values), **_ORDER)
     return df
 
 
@@ -168,7 +175,7 @@ def test_add_row_contributions_basic_columns(spark):
         schema=["snap_date", "cust_id", "prod_name", "score", "label", "pos", "total_rel"],
     )
     rows = ms.add_row_contributions(
-        df, ["snap_date", "cust_id"], "label", k_values=[3]
+        df, ["snap_date", "cust_id"], "label", k_values=[3], **_ORDER
     ).orderBy("pos").collect()
 
     assert [r["cum_rel"] for r in rows] == [1, 1, 2]
@@ -191,7 +198,7 @@ def test_add_row_contributions_top_k_cutoff(spark):
         schema=["snap_date", "cust_id", "prod_name", "score", "label", "pos", "total_rel"],
     )
     rows = ms.add_row_contributions(
-        df, ["snap_date", "cust_id"], "label", k_values=[2]
+        df, ["snap_date", "cust_id"], "label", k_values=[2], **_ORDER
     ).orderBy("pos").collect()
     assert [r["top_k@2"] for r in rows] == [1.0, 1.0, 0.0]
     assert rows[2]["ap_contrib@2"] == 0.0   # hit at pos 3 cut off by K=2
@@ -206,13 +213,58 @@ def test_add_row_contributions_adds_exactly_the_ap_family_columns(spark):
         schema=["snap_date", "cust_id", "prod_name", "score", "label", "pos", "total_rel"],
     )
     out = ms.add_row_contributions(
-        df, ["snap_date", "cust_id"], "label", k_values=[1, 3]
+        df, ["snap_date", "cust_id"], "label", k_values=[1, 3], **_ORDER
     )
     added = set(out.columns) - set(df.columns)
     assert added == {
         "cum_rel", "prec_at_pos",
         "top_k@1", "ap_contrib@1", "top_k@3", "ap_contrib@3",
     }
+
+
+def _sorts_in_plan(df) -> int:
+    plan = df._jdf.queryExecution().executedPlan().toString()
+    return len(re.findall(r"\bSort \[", plan))
+
+
+def _scored_with_contributions(df, event_cols):
+    group_cols = ["snap_date", "cust_id"]
+    df = ms.rank_within_query(df, group_cols, "score", "prod_name", event_cols)
+    df = ms.add_query_total_rel(df, group_cols, "label")
+    df = ms._keep_scored_query_groups(
+        df, group_cols, "label", drop_all_positive_groups=True)
+    return ms.add_row_contributions(
+        df, group_cols, "label", [2], score_col="score",
+        item_col="prod_name", event_cols=event_cols)
+
+
+@pytest.mark.parametrize("event_cols", [[], ["impression_id"]])
+def test_the_scored_frame_is_sorted_once(spark, event_cols):
+    """#450 item 3. The cumulative window used to order by ``pos``; Spark
+    cannot tell ``pos`` is the row_number of (score desc, item asc, event
+    asc), so it sorted the whole frame a second time. Measured on main: 2."""
+    df = _two_customer_raw(spark).withColumn("impression_id", F.lit("e1"))
+    assert _sorts_in_plan(_scored_with_contributions(df, event_cols)) == 1
+
+
+def test_cum_rel_follows_pos_through_score_ties(spark):
+    """Every row of the group ties at 0.5 but one: ``pos`` is decided by the
+    item, then the event, and ``cum_rel`` has to count in that order.
+    Worked by hand: C(0.9, 0) A/e1(1) A/e2(0) B/e1(1) -> 0, 1, 1, 2."""
+    df = spark.createDataFrame(
+        [
+            ("d", "C0", "B", 0.5, 1, "e1"),
+            ("d", "C0", "A", 0.5, 0, "e2"),
+            ("d", "C0", "A", 0.5, 1, "e1"),
+            ("d", "C0", "C", 0.9, 0, "e1"),
+        ],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label",
+                "impression_id"],
+    )
+    rows = _scored_with_contributions(df, ["impression_id"]).orderBy("pos").collect()
+    assert [(r["prod_name"], r["impression_id"]) for r in rows] == [
+        ("C", "e1"), ("A", "e1"), ("A", "e2"), ("B", "e1")]
+    assert [r["cum_rel"] for r in rows] == [0, 1, 1, 2]
 
 
 # ===========================================================================

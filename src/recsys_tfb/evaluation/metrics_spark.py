@@ -99,7 +99,7 @@ from recsys_tfb.evaluation.metrics import (
     metric_params,
 )
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT, segment_key
-from recsys_tfb.utils.ranking import rank_by_score_then_item
+from recsys_tfb.utils.ranking import rank_by_score_then_item, score_then_item_window
 
 logger = logging.getLogger(__name__)
 
@@ -691,8 +691,19 @@ def add_row_contributions(
     group_cols: list[str],
     label_col: str,
     k_values: list[int],
+    *,
+    score_col: str,
+    item_col: str,
+    event_cols: Sequence[str],
 ) -> SparkDataFrame:
     """Add per-row contribution columns. Requires upstream ``pos`` + ``total_rel``.
+
+    ``pos`` must come from ``rank_within_query`` with the same ``score_col``,
+    ``item_col`` and ``event_cols``: the running sum orders by that rule
+    (``score_then_item_window``) rather than by ``pos``. The two orders are the
+    same, but ordered by ``pos`` Spark cannot see it and sorts the whole
+    scored frame a second time (#450). No default for ``event_cols``, for the
+    reason ``_compute_core`` gives.
 
     Always added:
         cum_rel       cumulative positives up to & including this position
@@ -703,11 +714,9 @@ def add_row_contributions(
         ap_contrib@K  prec_at_pos * label * top_k@K
                       (sum over a query's label=1 rows = numerator of AP@K)
     """
-    w_cum = (
-        Window.partitionBy(*group_cols)
-        .orderBy(F.col("pos"))
-        .rowsBetween(Window.unboundedPreceding, Window.currentRow)
-    )
+    w_cum = score_then_item_window(
+        group_cols, score_col, item_col, event_cols,
+    ).rowsBetween(Window.unboundedPreceding, Window.currentRow)
     df = df.withColumn("cum_rel", F.sum(F.col(label_col)).over(w_cum))
     df = df.withColumn("prec_at_pos", F.col("cum_rel") / F.col("pos"))
 
@@ -1094,7 +1103,10 @@ def _compute_core(
         )
         return {**_EMPTY_RESULT, **counts, **recorded_k}
 
-    enriched = add_row_contributions(scored, group_cols, label_col, item_ks)
+    enriched = add_row_contributions(
+        scored, group_cols, label_col, item_ks,
+        score_col=score_col, item_col=item_col, event_cols=event_cols,
+    )
     enriched = enriched.cache()
     try:
         # ---- Layer 2: per-query metrics (carries seg for per_segment) ----
@@ -1269,7 +1281,8 @@ def compute_overall_per_item(
         return {"overall": {}, "per_item": {}}
 
     enriched = add_row_contributions(
-        scored, group_cols, label_col, item_ks
+        scored, group_cols, label_col, item_ks,
+        score_col=score_col, item_col=item_col, event_cols=list(event_cols),
     ).cache()
     try:
         carry = [active_seg_col] if active_seg_col else []
@@ -1546,15 +1559,18 @@ def compute_untruncated_ap(
     label_col = schema["label"]
     group_cols = schema["query_group_columns"]
 
-    df = rank_within_query(
-        frame, group_cols, schema["score"], item_col, schema.get("event", []),
-    )
+    score_col = schema["score"]
+    event_cols = schema.get("event", [])
+    df = rank_within_query(frame, group_cols, score_col, item_col, event_cols)
     df = add_query_total_rel(df, group_cols, label_col)
     scored = _keep_scored_query_groups(
         df, group_cols, label_col, drop_all_positive_groups=False,
     )
     enriched = (
-        add_row_contributions(scored, group_cols, label_col, [])
+        add_row_contributions(
+            scored, group_cols, label_col, [],
+            score_col=score_col, item_col=item_col, event_cols=event_cols,
+        )
         .withColumn("_ap_contrib", F.col("prec_at_pos") * F.col(label_col))
         .cache()
     )
