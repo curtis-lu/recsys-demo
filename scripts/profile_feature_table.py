@@ -1,10 +1,13 @@
 """特徵表檢查工具：算一張特徵表每一期、每一欄的統計量，標出要處理的欄位。
 
 設計文件：``docs/notes/2026-10-15-feature-table-profiling-design.md``；使用說明：
-``docs/operations/user-guides/feature-table-profiling.md``。這一版是第一階段，
-只有基本檢查（設計文件第五節的空值與「只有一個值」五種問題）；分布偏移與極端值、
-相關性是後兩階段，所以設定檔還沒有 ``checks`` 區塊，``thresholds`` 也只認這一階段
-用得到的鍵。
+``docs/operations/user-guides/feature-table-profiling.md``。這一版到第二階段：基本檢查
+（空值與「只有一個值」五種問題）一定跑，``checks.distribution`` 打開時再加分布偏移
+（每一期和最早一期比的 PSI）與極端值。相關性是第三階段，所以 ``checks`` 與
+``thresholds`` 還不認它的鍵。
+
+Spark 的趟數（每一趟都依 ``--batch-size`` 把欄位分批）：基本檢查一趟（有跑分布時順便算
+分位數）；分布再加兩趟——只讀基準期、找字串欄位最常見的值，與所有期別的 PSI 分組筆數。
 
 Usage:
     python scripts/profile_feature_table.py run --config my_profile.yaml
@@ -27,6 +30,7 @@ from __future__ import annotations
 import datetime as dt
 import html
 import json
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -44,12 +48,25 @@ SCHEMA_VERSION = 1
 PROFILE_FILENAME = "profile.json"
 OUTPUT_ROOT = Path("data/profiling/feature_profile")
 
-DEFAULT_THRESHOLDS: dict[str, float] = {"null_ratio": 0.99}
+DEFAULT_THRESHOLDS: dict[str, float] = {
+    "null_ratio": 0.99, "psi": 0.25, "tail_ratio": 10, "tail_log_ratio": 1,
+}
 # 每批幾欄。一次 groupBy 帶上千個聚合式會讓執行計畫過大；確切大小要在正式環境的
 # 真表上量過再定（設計文件第八節），量之前先用 --batch-size 試。
 DEFAULT_BATCH_SIZE = 200
+# 分布檢查在基本檢查那一趟一起算的分位數。p1、p25、p50、p75、p99 給走勢圖與極端值用，
+# 十分位數只用最早一期的，當 PSI 的切點。p1 一定排第一、p99 一定排最後（tail_ratios 靠這個）。
+QUANTILE_PROBS = (0.01, 0.1, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 0.99)
+_BAND_PROBS = (0.01, 0.25, 0.5, 0.75, 0.99)
+_DECILES = tuple(QUANTILE_PROBS.index(p) for p in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9))
+# percentile_approx 的精度（Spark 的預設值）。越大越準、越耗記憶體；正式環境量過再定
+# （設計文件第八節），量之前先用 --accuracy 試。
+DEFAULT_QUANTILE_ACCURACY = 10000
+PSI_TOP_VALUES = 20  # 字串欄位取基準期最常見的幾個值各成一組
 
-_REQUIRED_KEYS = ("table", "time_col", "key_cols")
+_REQUIRED_KEYS = ("table", "time_col", "key_cols", "checks")
+# 每一項都必填：決定要多跑幾趟 Spark，耗時差很多，讓工具使用者每次都明確選
+_CHECK_KEYS = ("distribution",)
 _OPTIONAL_KEYS = ("exclude_cols", "time_range", "where", "thresholds", "output_dir")
 _TIME_ALIAS = "__profile_time__"
 
@@ -73,6 +90,7 @@ class ProfileConfig:
     time_start: str | int | None = None
     time_end: str | int | None = None
     where: str | None = None
+    distribution: bool = False
     thresholds: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_THRESHOLDS))
     output_dir: str | None = None
 
@@ -157,6 +175,23 @@ def parse_config(text: str) -> tuple[ProfileConfig, list[str]]:
         else:
             problems.append(f"{key} 要是字串；現在是 {v!r}")
 
+    checks = raw.get("checks")
+    if checks is not None:
+        if not isinstance(checks, dict):
+            problems.append("checks 要是含 distribution 的對照表")
+        else:
+            extra = sorted(str(k) for k in set(checks) - set(_CHECK_KEYS))
+            if extra:
+                problems.append(f"checks 不認得的鍵：{', '.join(extra)}（這一版只有 {'、'.join(_CHECK_KEYS)}）")
+            for k in _CHECK_KEYS:
+                v = checks.get(k)
+                if v is None:
+                    problems.append(f"必填鍵 checks.{k} 沒寫")
+                elif not isinstance(v, bool):
+                    problems.append(f"checks.{k} 要是 true 或 false；現在是 {v!r}")
+                else:
+                    setattr(cfg, k, v)
+
     thresholds = raw.get("thresholds")
     if thresholds is not None:
         if not isinstance(thresholds, dict):
@@ -176,6 +211,8 @@ def parse_config(text: str) -> tuple[ProfileConfig, list[str]]:
                     problems.append(f"thresholds.{k} 要是數字；現在是 {v!r}")
                 elif k == "null_ratio" and not 0 < v <= 1:
                     problems.append(f"thresholds.null_ratio 要大於 0、不超過 1；現在是 {v!r}")
+                elif v <= 0:
+                    problems.append(f"thresholds.{k} 要大於 0；現在是 {v!r}")
                 else:
                     cfg.thresholds[k] = v
 
@@ -266,12 +303,14 @@ def read_table(spark: "SparkSession", cfg: ProfileConfig) -> "SparkDataFrame":
 
 
 def compute_basic_stats(
-    df: "SparkDataFrame", time_col: str, columns: list[dict], batch_size: int
-) -> tuple[list[str], list[int], int, dict[str, dict]]:
+    df: "SparkDataFrame", time_col: str, columns: list[dict], batch_size: int,
+    *, accuracy: int | None = None,
+) -> tuple[list, list[int], int, dict[str, dict]]:
     """欄位分批，每批一趟 ``groupBy(time_col)``，只讀自己那幾欄。只用 Spark 內建函式。
 
-    回傳（期別、每期筆數、期別是 NULL 的筆數、每欄的統計量）。``min = max``
-    就表示扣掉空值後只有一個值，所以不用 ``count(distinct)``。
+    回傳（期別的原始值、每期筆數、期別是 NULL 的筆數、每欄的統計量）。``min = max``
+    就表示扣掉空值後只有一個值，所以不用 ``count(distinct)``。給了 ``accuracy`` 時，
+    數值欄位在同一趟多算 ``QUANTILE_PROBS`` 的分位數（整期都是空值的那一期是 None）。
     """
     from pyspark.sql import functions as F
 
@@ -290,6 +329,8 @@ def compute_basic_stats(
                 F.min(x).alias(f"_{i}_min"),
                 F.max(x).alias(f"_{i}_max"),
             ]
+            if accuracy is not None and c["kind"] == "numeric":
+                exprs.append(F.percentile_approx(x, list(QUANTILE_PROBS), accuracy).alias(f"_{i}_q"))
         selected = df.select(
             F.col(_quote(time_col)).alias(_TIME_ALIAS),
             *[F.col(_quote(c["name"])) for c in batch],
@@ -307,10 +348,107 @@ def compute_basic_stats(
                 "min": [_json_value(r[f"_{i}_min"]) for r in per],
                 "max": [_json_value(r[f"_{i}_max"]) for r in per],
             }
-    return [_period_label(p) for p in periods], rows, null_time_rows, stats
+            if accuracy is not None and c["kind"] == "numeric":
+                stats[c["name"]]["quantiles"] = [
+                    None if r[f"_{i}_q"] is None else [_json_value(v) for v in r[f"_{i}_q"]] for r in per
+                ]
+    return periods, rows, null_time_rows, stats
 
 
-def profile_table(spark: "SparkSession", cfg: ProfileConfig, batch_size: int) -> dict:
+def compute_top_values(
+    df: "SparkDataFrame", time_col: str, base_period: Any, columns: list[dict], batch_size: int
+) -> dict[str, list[str]]:
+    """基準期每個字串欄位最常見的 ``PSI_TOP_VALUES`` 個值，次數多的在前、同次數依值排。
+
+    只讀基準期那一期。一批一趟：每一列攤成（第幾欄、值）再數，不必一欄一趟。
+    """
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    strings = [c for c in columns if c["kind"] == "string"]
+    out: dict[str, list[str]] = {c["name"]: [] for c in strings}
+    base = df.where(F.col(_quote(time_col)) == F.lit(base_period))
+    for b in range(0, len(strings), batch_size):
+        batch = strings[b:b + batch_size]
+        pairs = F.explode(F.array(*[
+            F.struct(F.lit(i).alias("k"), _cleaned(c["name"], c["dtype"]).alias("v"))
+            for i, c in enumerate(batch)
+        ])).alias("p")
+        counted = (base.select(pairs).select("p.k", "p.v").where(F.col("v").isNotNull())
+                   .groupBy("k", "v").count())
+        rank = F.row_number().over(Window.partitionBy("k").orderBy(F.desc("count"), F.asc("v")))
+        top = counted.withColumn("_r", rank).where(F.col("_r") <= PSI_TOP_VALUES).collect()
+        for r in sorted(top, key=lambda r: (r["k"], r["_r"])):
+            out[batch[r["k"]]["name"]].append(r["v"])
+    return out
+
+
+def compute_bin_counts(
+    df: "SparkDataFrame", time_col: str, periods: list, specs: list[tuple[dict, dict]], batch_size: int
+) -> dict[str, list[list[int]]]:
+    """PSI 的分組筆數：每一欄、每一期、每一組幾筆。
+
+    ``specs`` 是（欄、分組方式）；分組方式是 ``{"edges": [...]}``（數值欄，每組含上界：
+    (−∞, e1]、(e1, e2]、…、(ek, ∞)）或 ``{"values": [...]}``（字串欄，每個值一組、其他值
+    一組）。最後一組都是空值。一批一趟：每一列先算出各欄的組別，攤成（期別、第幾欄、組別）
+    再數，執行計畫只跟欄數成正比，不跟「欄數 × 組數」成正比。
+    """
+    from pyspark.sql import functions as F
+
+    out: dict[str, list[list[int]]] = {}
+    index = {p: t for t, p in enumerate(periods)}
+    for b in range(0, len(specs), batch_size):
+        batch = specs[b:b + batch_size]
+        items = []
+        for i, (c, spec) in enumerate(batch):
+            x = _cleaned(c["name"], c["dtype"])
+            if "edges" in spec:
+                n = len(spec["edges"]) + 1
+                group = F.when(x.isNull(), n)
+                for k, e in enumerate(spec["edges"]):
+                    group = group.when(x <= F.lit(e), k)
+                group = group.otherwise(n - 1)
+            else:
+                n = len(spec["values"]) + 1
+                lookup = F.create_map(*[F.lit(v) for k, val in enumerate(spec["values"]) for v in (val, k)])
+                group = F.when(x.isNull(), n).otherwise(F.coalesce(lookup[x], F.lit(n - 1)))
+            items.append(F.struct(F.lit(i).alias("k"), group.alias("g")))
+            out[c["name"]] = [[0] * (n + 1) for _ in periods]
+        exploded = df.select(F.col(_quote(time_col)).alias(_TIME_ALIAS), F.explode(F.array(*items)).alias("p"))
+        counted = exploded.groupBy(_TIME_ALIAS, "p.k", "p.g").count().collect()
+        for r in counted:
+            t = index.get(r[_TIME_ALIAS])
+            if t is not None:  # 期別是 NULL 的列不讀
+                out[batch[r["k"]][0]["name"]][t][r["g"]] = r["count"]
+    return out
+
+
+def add_bins(df: "SparkDataFrame", time_col: str, periods: list, columns: list[dict],
+             batch_size: int, passes: dict[str, float]) -> None:
+    """替每個數值、字串欄位加上 ``bins``（PSI 的分組方式與每期各組筆數）。基準期整期都是
+    空值的欄位沒辦法分組，``bins`` 是 None。數值欄的切點是基準期的十分位數，相同的合併。"""
+    started = time.monotonic()
+    top = compute_top_values(df, time_col, periods[0], columns, batch_size)
+    passes["top_values"] = round(time.monotonic() - started, 1)
+
+    started = time.monotonic()
+    specs = []
+    for c in columns:
+        if c["kind"] == "numeric" and c["quantiles"][0] is not None:
+            specs.append((c, {"edges": sorted({c["quantiles"][0][i] for i in _DECILES})}))
+        elif c["kind"] == "string" and top[c["name"]]:
+            specs.append((c, {"values": top[c["name"]]}))
+    counts = compute_bin_counts(df, time_col, periods, specs, batch_size)
+    for c in columns:
+        if c["kind"] != "unchecked":
+            c["bins"] = None
+    for c, spec in specs:
+        c["bins"] = {**spec, "counts": counts[c["name"]]}
+    passes["bins"] = round(time.monotonic() - started, 1)
+
+
+def profile_table(spark: "SparkSession", cfg: ProfileConfig, batch_size: int,
+                  accuracy: int = DEFAULT_QUANTILE_ACCURACY) -> dict:
     """算出 ``profile.json`` 的內容。只有統計量，沒有判斷結果。"""
     started = time.monotonic()
     df = read_table(spark, cfg)
@@ -322,10 +460,13 @@ def profile_table(spark: "SparkSession", cfg: ProfileConfig, batch_size: int) ->
         if f.name.lower() not in skip
     ]
     periods, rows, null_time_rows, stats = compute_basic_stats(
-        df, cfg.time_col, columns, batch_size
+        df, cfg.time_col, columns, batch_size, accuracy=accuracy if cfg.distribution else None
     )
+    passes = {"basic": round(time.monotonic() - started, 1)}
     for c in columns:
         c.update(stats.get(c["name"], {}))
+    if cfg.distribution and periods:
+        add_bins(df, cfg.time_col, periods, columns, batch_size, passes)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
@@ -337,12 +478,15 @@ def profile_table(spark: "SparkSession", cfg: ProfileConfig, batch_size: int) ->
             "exclude_cols": cfg.exclude_cols,
             "time_range": {"start": cfg.time_start, "end": cfg.time_end},
             "where": cfg.where,
+            "checks": {"distribution": cfg.distribution},
             "thresholds": cfg.thresholds,
         },
-        "periods": periods,
+        "periods": [_period_label(p) for p in periods],
         "rows": rows,
         "null_time_rows": null_time_rows,
         "elapsed_seconds": round(time.monotonic() - started, 1),
+        "pass_seconds": passes,
+        **({"quantile_accuracy": accuracy} if cfg.distribution else {}),
         "batch_size": batch_size,
         "columns": columns,
     }
@@ -352,13 +496,15 @@ def profile_table(spark: "SparkSession", cfg: ProfileConfig, batch_size: int) ->
 # 判斷（不開 Spark；render 換門檻就是重跑這一段）
 # ---------------------------------------------------------------------------
 
-FLAG_ORDER = ("null_all", "const_all", "null_some", "const_some", "const_each")
+FLAG_ORDER = ("null_all", "const_all", "null_some", "const_some", "const_each", "drift", "tail")
 FLAG_NAMES = {
     "null_all": "每一期都幾乎是空值",
     "null_some": "部分期別幾乎是空值",
     "const_all": "整欄只有一個值",
     "const_some": "部分期別只有一個值",
     "const_each": "每期各只有一個值",
+    "drift": "分布偏移",
+    "tail": "極端值",
 }
 NULL_FLAGS = ("null_all", "null_some")
 CONST_FLAGS = ("const_all", "const_some", "const_each")
@@ -375,6 +521,93 @@ def one_value_periods(col: dict, rows: list[int]) -> tuple[list[int], list[int]]
     return valued, const
 
 
+PSI_EMPTY_SHARE = 0.0001  # 占比是 0 的組用這個值代替，避免 ln(0)
+
+
+def psi_terms(base: list[int], cur: list[int]) -> list[float]:
+    """PSI 每一組的項：（本期占比 − 基準期占比）× ln（本期占比 ÷ 基準期占比）。"""
+    b_n, c_n = sum(base), sum(cur)
+    out = []
+    for b, c in zip(base, cur):
+        p = (b / b_n) or PSI_EMPTY_SHARE
+        q = (c / c_n) or PSI_EMPTY_SHARE
+        out.append((q - p) * math.log(q / p))
+    return out
+
+
+def psi_by_period(col: dict) -> list[float] | None:
+    """每一期和最早一期（基準期）比的 PSI。不算的情況回 None：沒跑分布檢查（舊的
+    ``profile.json``）、只讀到一期、基準期這一欄全是空值（最後一組是空值）。"""
+    counts = (col.get("bins") or {}).get("counts")
+    if not counts or len(counts) < 2 or not any(counts[0][:-1]):
+        return None
+    return [sum(psi_terms(counts[0], c)) for c in counts]
+
+
+def drift_periods(col: dict, thresholds: dict[str, float]) -> list[int]:
+    psi = psi_by_period(col) or []
+    # 四捨五入到遠小於顯示精度的位數再比門檻，浮點誤差才不會讓剛好等於門檻的值漏掉
+    return [t for t, v in enumerate(psi) if round(v, 9) >= thresholds["psi"]]
+
+
+def drift_source(col: dict, thresholds: dict[str, float]) -> str:
+    """PSI 最大的那一期，扣掉空值、只比有值的那幾組再算一次 PSI：沒達門檻（或那一期整期
+    都是空值）算 ``null``，是空值比例在變；達門檻算 ``value``，是值的分布本身在變。"""
+    counts = col["bins"]["counts"]
+    psi = psi_by_period(col)
+    t = max(range(len(psi)), key=lambda k: psi[k])
+    if not any(counts[t][:-1]):
+        return "null"
+    values_only = sum(psi_terms(counts[0][:-1], counts[t][:-1]))
+    return "value" if round(values_only, 9) >= thresholds["psi"] else "null"
+
+
+def _slog(x: float) -> float:
+    """sign(x) × ln(1 + |x|)：有正有負、有 0 也能取 log，而且不改變大小順序。"""
+    return math.copysign(math.log1p(abs(x)), x)
+
+
+def tail_ratios(col: dict, t: int) -> dict[str, tuple[float, float]] | None:
+    """第 t 期最大值、最小值兩側的（倍數、log 後倍數）。
+
+    倍數＝最大值離 p99（或最小值離 p1）的距離 ÷（p99 − p1）；log 後倍數是四個數先取
+    ``_slog`` 再用同樣的公式。沒有分位數（字串欄、舊的 ``profile.json``）、整期都是空值、
+    p1 = p99 時回 None：p1 = p99 時寬度是 0，「離多遠」沒有意義。
+    """
+    qs = col.get("quantiles")
+    if not qs or qs[t] is None:
+        return None
+    p1, p99 = qs[t][0], qs[t][-1]
+    if p1 == p99:
+        return None
+    lo, hi = col["min"][t], col["max"][t]
+    out = {}
+    for side, far, near in (("max", hi, p99), ("min", lo, p1)):
+        sign = 1 if side == "max" else -1
+        raw = sign * (far - near) / (p99 - p1)
+        log = sign * (_slog(far) - _slog(near)) / (_slog(p99) - _slog(p1))
+        out[side] = (raw, log)
+    return out
+
+
+def near_const_periods(col: dict) -> list[int]:
+    """p1 = p99、但不只一個值的期別：那一期至少約 98% 的值相同。只供參考，不算問題；
+    只有一個值（最小值 = 最大值）的期別是另一種問題，不重複列。"""
+    qs = col.get("quantiles") or []
+    return [t for t, q in enumerate(qs)
+            if q is not None and q[0] == q[-1] and col["min"][t] != col["max"][t]]
+
+
+def tail_hits(col: dict, thresholds: dict[str, float]) -> list[tuple[int, str, float, float]]:
+    """同一期、同一側兩個條件都成立的（期別、哪一側、倍數、log 後倍數），依期別排。"""
+    hits = []
+    for t in range(len(col["min"])):
+        for side, (raw, log) in (tail_ratios(col, t) or {}).items():
+            if round(raw, 9) >= thresholds["tail_ratio"] and round(log, 9) >= thresholds["tail_log_ratio"]:
+                hits.append((t, side, raw, log))
+    return hits
+
+
 def judge_column(col: dict, rows: list[int], thresholds: dict[str, float]) -> list[str]:
     """一欄的問題類型，依 ``FLAG_ORDER`` 排。先後順序見設計文件第五節。"""
     high = [r >= thresholds["null_ratio"] for r in null_ratios(col, rows)]
@@ -389,6 +622,10 @@ def judge_column(col: dict, rows: list[int], thresholds: dict[str, float]) -> li
         return flags + ["const_each"]
     if const:
         flags.append("const_some")
+    if drift_periods(col, thresholds):
+        flags.append("drift")
+    if tail_hits(col, thresholds):
+        flags.append("tail")
     return flags
 
 
@@ -408,11 +645,15 @@ def judge(profile: dict, thresholds: dict[str, float]) -> dict[str, list[str]]:
 # 才算上游斷掉；不到的是平常就很稀疏、偶爾越過門檻的欄位，歸「看業務意義決定」。
 # 只決定總結裡的分組，不改判斷，所以不進 thresholds。
 UPSTREAM_JUMP_MIN = 0.10
+# 極端值在至少這個比例的期別都被標，比較像欄位本來就長尾（例如資產），歸「看業務意義決定」；
+# 不到的像那幾期的資料錯了，歸「請上游查」。同樣只決定總結裡的分組，不進 thresholds。
+TAIL_LONG_SHARE = 0.5
 
-ACTION_ORDER = ("exclude", "upstream", "judge")
+ACTION_ORDER = ("exclude", "upstream", "check", "judge")
 ACTION_TEXTS = {
     "exclude": "可以排除：欄位沒有資訊",
     "upstream": "請上游查這幾期的資料",
+    "check": "確認分布為什麼變了",
     "judge": "看業務意義決定要不要留",
 }
 
@@ -429,6 +670,33 @@ def null_jump(col: dict, rows: list[int], thresholds: dict[str, float]) -> float
     return round(min(hit) - max(rest), 9)
 
 
+def worst_tail(col: dict, thresholds: dict[str, float]) -> tuple[int, str, float, float]:
+    """標到的期別、側裡，log 後倍數最大的那一個。"""
+    return max(tail_hits(col, thresholds), key=lambda h: h[3])
+
+
+def long_tail(col: dict, thresholds: dict[str, float]) -> bool:
+    """有判斷的期別裡，至少 ``TAIL_LONG_SHARE`` 被標成極端值：比較像欄位本來就長尾。"""
+    judged = sum(1 for t in range(len(col["min"])) if tail_ratios(col, t) is not None)
+    hit = len({h[0] for h in tail_hits(col, thresholds)})
+    return hit >= TAIL_LONG_SHARE * judged
+
+
+def upstream_periods_of(col: dict, rows: list[int], flags: list[str],
+                        thresholds: dict[str, float]) -> list[int]:
+    """這一欄要請上游查的期別；不用請上游查時回空清單。"""
+    ts: set[int] = set()
+    jump = null_jump(col, rows, thresholds) if "null_some" in flags else None
+    if jump is not None and jump >= UPSTREAM_JUMP_MIN:
+        ts |= {t for t, r in enumerate(null_ratios(col, rows)) if r >= thresholds["null_ratio"]}
+    if "const_some" in flags:
+        ts |= set(one_value_periods(col, rows)[1])
+    if "tail" in flags and not long_tail(col, thresholds):
+        # 只放最離譜的那一期：同一欄的其他期別多半是同一個原因
+        ts.add(worst_tail(col, thresholds)[0])
+    return sorted(ts)
+
+
 def actions(col: dict, rows: list[int], flags: list[str],
             thresholds: dict[str, float]) -> list[str]:
     """這一欄在總結裡要做的事，依 ``ACTION_ORDER``；沒有問題回空清單。
@@ -439,9 +707,14 @@ def actions(col: dict, rows: list[int], flags: list[str],
         return ["exclude"]
     out = []
     jump = null_jump(col, rows, thresholds) if "null_some" in flags else None
-    if "const_some" in flags or (jump is not None and jump >= UPSTREAM_JUMP_MIN):
+    upstream = upstream_periods_of(col, rows, flags, thresholds)
+    if upstream:
         out.append("upstream")
-    if "const_each" in flags or (jump is not None and jump < UPSTREAM_JUMP_MIN):
+    # 偏移的期別都已經列在「請上游查」：同一件事（例如那一期斷掉、填了預設值），不重複列
+    if "drift" in flags and not set(drift_periods(col, thresholds)) <= set(upstream):
+        out.append("check")
+    if ("const_each" in flags or (jump is not None and jump < UPSTREAM_JUMP_MIN)
+            or ("tail" in flags and long_tail(col, thresholds))):
         out.append("judge")
     return out
 
@@ -453,6 +726,9 @@ def actions(col: dict, rows: list[int], flags: list[str],
 _VAR_CHOICES = (0, 0.5, 1, 5, 10)  # 〈有變動但沒達門檻〉的篩選選項，百分點
 _VAR_DEFAULT = 1
 SPARK_GAP_MAX_PERIODS = 75  # 小長條圖 150px：每根 1px 加 1px 空隙，最多 75 期
+# 字串欄位各值占比的顏色，依基準期占比排；第 7 名以後淺灰褐、其他值深灰、空值淺灰
+_CAT_COLORS = ("#4e79a7", "#76b7b2", "#b07aa1", "#9c755f", "#59a14f", "#edc948")
+_CAT_REST, _CAT_OTHER, _CAT_NULL = "#d4ccc6", "#7b7470", "#e3e7ec"
 
 
 def _pct_threshold(v: float) -> str:
@@ -466,7 +742,9 @@ def _fmt_num(v: Any) -> str:
         return v
     if isinstance(v, int) or float(v).is_integer():
         return f"{int(v):,}"
-    return f"{v:,.6f}".rstrip("0").rstrip(".")
+    # 最多 6 位小數，但整數部分很長時少給幾位：double 只有約 15 位有效數字，再多就是浮點雜訊
+    digits = max(0, min(6, 15 - len(str(int(abs(v))))))
+    return f"{v:,.{digits}f}".rstrip("0").rstrip(".")
 
 
 def _pct(x: float | None, digits: int | None = None) -> str:
@@ -597,6 +875,11 @@ def _none() -> str:
     return '<p class="none">這次沒有。</p>'
 
 
+def _not_run() -> str:
+    return ('<p class="none">這次沒有跑。要看這一段，把設定檔的 <code>checks.distribution</code> 改成 '
+            "<code>true</code> 再跑一次 <code>run</code>；<code>render</code> 不會補算。</p>")
+
+
 def _spark_legend(items: list[tuple[str, str]], how_to_read: str = "") -> str:
     """小長條圖的圖例：（樣式、說明），最後可以再接一句怎麼讀。"""
     out = []
@@ -610,7 +893,7 @@ def _spark_legend(items: list[tuple[str, str]], how_to_read: str = "") -> str:
 
 _CSS = """
 :root{--fg:#1f2328;--muted:#59636e;--line:#d1d9e0;--soft:#f6f8fa;--link:#0969da;
---track:#eef1f4;--bar:#8fa7bf;--grey:#b8c4d0;--hit:#c2410c}
+--track:#eef1f4;--bar:#8fa7bf;--grey:#b8c4d0;--hit:#c2410c;--qo:#cfdae6;--qi:#8fa7bf}
 *{box-sizing:border-box}
 body{margin:0;color:var(--fg);background:#fff;font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",
 "Microsoft JhengHei","PingFang TC","Noto Sans TC",sans-serif}
@@ -640,6 +923,7 @@ p.none{color:var(--muted)}
 table.t{border-collapse:separate;border-spacing:0;width:100%;font-variant-numeric:tabular-nums}
 table.t th,table.t td{padding:4px 10px;border-bottom:1px solid #eaeef2;text-align:left;vertical-align:middle;white-space:nowrap}
 table.t td.wrap{white-space:normal;min-width:120px;max-width:460px}
+table.t td.brk{white-space:normal;word-break:keep-all}
 table.t th{position:sticky;top:0;z-index:2;background:var(--soft);font-weight:600;cursor:pointer;user-select:none}
 table.t th[data-dir=asc]::after{content:" ▲";color:var(--muted)}
 table.t th[data-dir=desc]::after{content:" ▼";color:var(--muted)}
@@ -662,9 +946,20 @@ details>summary{cursor:pointer;color:var(--link)}
 .spark i{flex:1 1 0;min-width:1px;background:linear-gradient(to top,var(--bar) var(--h),var(--track) var(--h))}
 .spark i.h{background:linear-gradient(to top,var(--hit) var(--h),var(--track) var(--h))}
 .spark i.g{background:linear-gradient(to top,var(--grey) var(--h),var(--track) var(--h))}
+.spark i.d{background:linear-gradient(to top,var(--muted) var(--h),var(--track) var(--h))}
 .spark i.on{outline:1px solid #111}
 .spark.dense{gap:0}.spark.dense i{min-width:0}
 .spark.key{width:auto;cursor:default;margin-right:4px}.spark.key i{width:6px;flex:none}
+.spark.tall{height:30px}
+.spark i.q{--a:var(--la);--b:var(--lb);--m:var(--lm);--c:var(--lc);--d:var(--ld)}
+.linq .spark i.q{--a:var(--xa);--b:var(--xb);--m:var(--xm);--c:var(--xc);--d:var(--xd)}
+.spark i.q{background:linear-gradient(to top,transparent calc(var(--m) - 1px),var(--fg) calc(var(--m) - 1px),
+var(--fg) calc(var(--m) + 1px),transparent calc(var(--m) + 1px)),linear-gradient(to top,var(--track) var(--a),
+var(--qo) var(--a),var(--qo) var(--b),var(--qi) var(--b),var(--qi) var(--c),var(--qo) var(--c),var(--qo) var(--d),
+var(--track) var(--d))}
+.qkey{display:inline-block;width:14px;height:10px;margin-right:4px;vertical-align:middle}
+button[data-scale].on{background:var(--soft);font-weight:600}
+.qkey.o{background:var(--qo)}.qkey.i{background:var(--qi)}.qkey.m{height:2px;background:var(--fg)}
 .tip{position:fixed;z-index:50;background:#1f2328;color:#fff;font-size:12px;padding:3px 8px;border-radius:4px;pointer-events:none;white-space:nowrap}
 tr.detail td{background:var(--soft);white-space:normal}
 table.mini{border-collapse:collapse;margin:4px 0 8px;font-size:12px}
@@ -713,6 +1008,8 @@ function copy(text,btn){var old=btn.textContent;function say(s){btn.textContent=
   document.body.removeChild(ta);say(ok?"已複製":"複製失敗");}
  if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(text).then(function(){say("已複製");},fallback);else fallback();}
 document.addEventListener("click",function(ev){var b=ev.target.closest("button");if(!b)return;
+ if(b.hasAttribute("data-scale")){var lin=b.getAttribute("data-scale")==="lin";document.body.classList.toggle("linq",lin);
+  document.querySelectorAll("button[data-scale]").forEach(function(x){x.classList.toggle("on",x.getAttribute("data-scale")===(lin?"lin":"log"));});return;}
  if(b.hasAttribute("data-copy-rows")){var t=document.getElementById(b.getAttribute("data-copy-rows"));
   copy(rowsOf(t).filter(function(r){return !r.hidden;}).map(function(r){return r.getAttribute("data-name");}).join("\n"),b);}
  else if(b.hasAttribute("data-copy-text")){copy(b.getAttribute("data-copy-text"),b);}
@@ -722,10 +1019,14 @@ function fmt(v){if(v===null||v===undefined)return "";if(typeof v==="number"){
  return Number.isInteger(v)?v.toLocaleString("en-US"):v.toLocaleString("en-US",{maximumFractionDigits:6});}return String(v);}
 function pct(n,d){if(!d)return "";if(n===0)return "0%";if(n===d)return "100%";var x=n/d;
  var s=(x*100).toFixed(x<0.01||x>0.99?2:1);if(Number(s)>=100)return "> 99.99%";if(Number(s)===0)return "< 0.01%";return s+"%";}
+function pctx(x){return pct(Math.round(x*10000),10000);}
 function toggle(tr){if(!tr)return;var name=tr.getAttribute("data-name"),c=DATA.cols&&DATA.cols[name];if(!c)return;
- if(!tr._detail){var h="<table class='mini'><thead><tr><th>期別</th><th>總筆數</th><th>空值筆數</th><th>空值比例</th><th>最小值</th><th>最大值</th></tr></thead><tbody>";
-  DATA.periods.forEach(function(p,i){h+="<tr><td>"+esc(p)+"</td><td>"+fmt(DATA.rows[i])+"</td><td>"+fmt(c[0][i])+"</td><td>"+pct(c[0][i],DATA.rows[i])+
-   "</td><td>"+esc(fmt(c[1][i]))+"</td><td>"+esc(fmt(c[2][i]))+"</td></tr>";});
+ if(!tr._detail){var d=(DATA.dist||{})[name],hq=d&&d.q,hp=d&&d.psi;
+  var h="<table class='mini'><thead><tr><th>期別</th><th>總筆數</th><th>空值筆數</th><th>空值比例</th><th>最小值</th>"+
+   (hq?"<th>p1</th><th>p25</th><th>中位數</th><th>p75</th><th>p99</th>":"")+"<th>最大值</th>"+(hp?"<th>PSI</th>":"")+"</tr></thead><tbody>";
+  DATA.periods.forEach(function(p,i){var q=hq&&d.q[i];h+="<tr><td>"+esc(p)+"</td><td>"+fmt(DATA.rows[i])+"</td><td>"+fmt(c[0][i])+"</td><td>"+pct(c[0][i],DATA.rows[i])+
+   "</td><td>"+esc(fmt(c[1][i]))+"</td>"+(hq?[0,1,2,3,4].map(function(k){return "<td>"+(q?esc(fmt(q[k])):"")+"</td>";}).join(""):"")+
+   "<td>"+esc(fmt(c[2][i]))+"</td>"+(hp?"<td>"+(i===0?"基準期":d.psi[i].toFixed(3))+"</td>":"")+"</tr>";});
   var d=document.createElement("tr");d.className="detail";d.innerHTML="<td colspan='"+tr.cells.length+"'>"+h+"</tbody></table></td>";
   tr._detail=d;tr.parentNode.insertBefore(d,tr.nextSibling);tr.classList.add("open");return;}
  var open=!tr.classList.contains("open");tr.classList.toggle("open",open);tr._detail.hidden=!open;}
@@ -735,10 +1036,23 @@ document.addEventListener("click",function(ev){var a=ev.target.closest("a.col");
  var bar=document.querySelector('.toolbar[data-for="t-all"]');
  if(bar){bar.querySelectorAll("input.q").forEach(function(q){q.value="";});bar.querySelectorAll("select").forEach(function(s){s.selectedIndex=0;});apply(bar);}
  if(!tr.classList.contains("open"))toggle(tr);tr.scrollIntoView({block:"center"});});
-function tipText(s,i){var c=DATA.cols&&DATA.cols[s.getAttribute("data-col")],p=DATA.labels[i];if(!c)return p;
- var n=DATA.rows[i],nl=c[0][i];
- if(s.getAttribute("data-mode")==="const"){if(nl===n)return p+"　整期都是空值";
+function tipText(s,i){var name=s.getAttribute("data-col"),c=DATA.cols&&DATA.cols[name],d=(DATA.dist||{})[name],p=DATA.labels[i];if(!c)return p;
+ var n=DATA.rows[i],nl=c[0][i],mode=s.getAttribute("data-mode");
+ if(mode==="const"){if(nl===n)return p+"　整期都是空值";
   return c[1][i]===c[2][i]?p+"　只有一個值："+fmt(c[1][i]):p+"　"+fmt(c[1][i])+"～"+fmt(c[2][i]);}
+ if(mode==="psi")return i===0?p+"　基準期":p+"　PSI "+d.psi[i].toFixed(3);
+ if(mode==="q"){var q=d.q[i];if(!q)return p+"　整期都是空值";
+  return p+"　p1 "+fmt(q[0])+"、p25 "+fmt(q[1])+"、中位數 "+fmt(q[2])+"、p75 "+fmt(q[3])+"、p99 "+fmt(q[4]);}
+ if(mode==="cat"){var sh=d.sh[i],ks=sh.map(function(v,k){return k;}).filter(function(k){return sh[k]>0;});
+  ks.sort(function(a,b){return sh[b]-sh[a];});
+  return p+"　"+ks.slice(0,6).map(function(k){return d.cats[k]+" "+pctx(sh[k]);}).join("、")+(ks.length>6?"…":"");}
+ if(mode==="tail"){if(nl===n)return p+"　整期都是空值";var r=d.tail[i];if(!r)return p+"　p1＝p99，不判斷";
+  function x(v,d){return v.toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d});}
+  return p+"　最大值 "+fmt(c[2][i])+"：倍數 "+x(r[0],1)+"、log 後倍數 "+x(r[1],2)+
+   "｜最小值 "+fmt(c[1][i])+"：倍數 "+x(r[2],1)+"、log 後倍數 "+x(r[3],2);}
+ if(mode==="near"){if(nl===n)return p+"　整期都是空值";if(c[1][i]===c[2][i])return p+"　只有一個值："+fmt(c[1][i]);
+  var b=d.q[i];return b[0]===b[4]?p+"　p1＝p99＝"+fmt(b[0])+"（最小值 "+fmt(c[1][i])+"、最大值 "+fmt(c[2][i])+"）"
+   :p+"　有變化：p1 "+fmt(b[0])+"、p99 "+fmt(b[4]);}
  return p+"　空值 "+pct(nl,n)+"（"+fmt(n)+" 筆中 "+fmt(nl)+" 筆）";}
 var tip=document.createElement("div");tip.className="tip";tip.hidden=true;document.body.appendChild(tip);var lastOn=null;
 document.addEventListener("mousemove",function(ev){var s=ev.target.closest(".spark");
@@ -770,6 +1084,13 @@ class _Report:
         self.flags = judge(profile, thresholds)
         self.actions = {c["name"]: actions(c, self.rows, self.flags[c["name"]], thresholds)
                         for c in self.feats}
+        # 有沒有跑分布偏移與極端值；只有基本檢查的舊 profile.json 沒有這個鍵
+        self.dist = bool(profile["config"].get("checks", {}).get("distribution"))
+        self.psis = {c["name"]: psi_by_period(c) for c in self.feats}
+        self.tails = {c["name"]: tail_hits(c, thresholds) for c in self.feats}
+        skip = {"null_all", "const_all", "const_each"}
+        self.near = {c["name"]: near_const_periods(c) for c in self.feats
+                     if not skip & set(self.flags[c["name"]])}
 
     # --- 共用 ---------------------------------------------------------------
 
@@ -806,10 +1127,12 @@ class _Report:
     def span(labels: list[str]) -> str:
         return labels[0] if len(labels) == 1 else f"{labels[0]}～{labels[-1]}"
 
-    def spark_attrs(self, mode: str, col: dict) -> str:
+    def spark_attrs(self, mode: str, col: dict, *, tall: bool = False) -> str:
         """150px 寬、每根至少 1px 加 1px 空隙，最多放 75 期；更多期就拿掉空隙、不設最小寬度，
         寬度照樣固定（超過 150 期時每根不到 1px，看單一期要點欄名展開明細）。"""
         cls = "spark dense" if len(self.periods) > SPARK_GAP_MAX_PERIODS else "spark"
+        if tall:  # 分位數、各值占比：沒有空隙，一期接一期看起來才是連續的帶子
+            cls = "spark dense tall"
         return f'class="{cls}" data-mode="{mode}" data-col="{_e(col["name"])}"'
 
     def spark_null(self, col: dict) -> str:
@@ -832,6 +1155,83 @@ class _Report:
             else:
                 cells.append('<i style="--h:0%"></i>')
         return f'<span {self.spark_attrs("const", col)}>{"".join(cells)}</span>'
+
+    def psi_cap(self) -> float:
+        """PSI 小長條圖的滿格：門檻的兩倍（預設 0.5），門檻剛好在半高。"""
+        return 2 * self.thresholds["psi"]
+
+    def spark_psi(self, col: dict) -> str:
+        """各期 PSI：一期一根，最左邊是基準期（0），達門檻橘色。"""
+        th, cap = self.thresholds["psi"], self.psi_cap()
+        bars = "".join(
+            f'<i{" class=h" if round(v, 9) >= th else ""} style="--h:{min(v, cap) / cap * 100:.1f}%"></i>'
+            for v in self.psis[col["name"]]
+        )
+        return f'<span {self.spark_attrs("psi", col)}>{bars}</span>'
+
+    def spark_q(self, col: dict) -> str:
+        """分位數走勢：一期一根，淺色是 p1～p99、深色是 p25～p75、橫線是中位數。
+        每欄自己的刻度，從各期最低的 p1 到最高的 p99。"""
+        idx = [QUANTILE_PROBS.index(p) for p in _BAND_PROBS]
+        qs = col["quantiles"]
+        have = [q for q in qs if q is not None]
+        scales = []
+        for f in (lambda v: v, _slog):  # 一般刻度、log 刻度（頁面上切換）
+            lo, hi = f(min(q[0] for q in have)), f(max(q[-1] for q in have))
+            scales.append((f, lo, hi))
+
+        cells = []
+        for q in qs:
+            if q is None:
+                cells.append('<i style="--h:0%"></i>')
+                continue
+            style = []
+            for prefix, (f, lo, hi) in zip(("x", "l"), scales):
+                ys = [50.0 if hi == lo else (f(q[i]) - lo) / (hi - lo) * 100 for i in idx]
+                style += [f"--{prefix}{k}:{y:.1f}%" for k, y in zip("abmcd", ys)]
+            cells.append(f'<i class="q" style="{";".join(style)}"></i>')
+        return f'<span {self.spark_attrs("q", col, tall=True)}>{"".join(cells)}</span>'
+
+    def spark_cat(self, col: dict) -> str:
+        """字串欄位各值的占比：一期一根，由下往上依基準期的占比排，最上面是其他值、空值。"""
+        n_values = len(col["bins"]["values"])
+        colors = [_CAT_COLORS[k] if k < len(_CAT_COLORS) else _CAT_REST for k in range(n_values)]
+        colors += [_CAT_OTHER, _CAT_NULL]
+        cells = []
+        for counts in col["bins"]["counts"]:
+            total, acc, stops = sum(counts), 0.0, []
+            for k, n in enumerate(counts):
+                if n:
+                    start, acc = acc, acc + n / total * 100
+                    stops.append(f"{colors[k]} {start:.1f}% {acc:.1f}%")
+            cells.append(f'<i class="c" style="background:linear-gradient(to top,{",".join(stops)})"></i>')
+        return f'<span {self.spark_attrs("cat", col, tall=True)}>{"".join(cells)}</span>'
+
+    def spark_tail(self, col: dict) -> str:
+        """各期兩側較大的 log 後倍數：高度到門檻的兩倍為止，同一側兩個條件都達門檻是橘色。"""
+        cap = 2 * self.thresholds["tail_log_ratio"]
+        hit = {t for t, *_ in self.tails[col["name"]]}
+        cells = []
+        for t in range(len(self.periods)):
+            r = tail_ratios(col, t)
+            h = 0.0 if r is None else max(0.0, *(log for _, log in r.values()))
+            cells.append(f'<i{" class=h" if t in hit else ""} style="--h:{min(h, cap) / cap * 100:.1f}%"></i>')
+        return f'<span {self.spark_attrs("tail", col)}>{"".join(cells)}</span>'
+
+    def spark_near(self, col: dict) -> str:
+        """各期是不是 p1 = p99：深灰＝是（含只有一個值；只供參考，不用問題的橘色），淺灰＝有變化，
+        空白＝整期都是空值。"""
+        valued, const = one_value_periods(col, self.rows)
+        near = set(self.near[col["name"]]) | set(const)
+        cells = []
+        for t in range(len(self.periods)):
+            if t in near:
+                cells.append('<i class="d" style="--h:100%"></i>')
+            elif t in valued:
+                cells.append('<i class="g" style="--h:100%"></i>')
+            else:
+                cells.append('<i style="--h:0%"></i>')
+        return f'<span {self.spark_attrs("near", col)}>{"".join(cells)}</span>'
 
     def null_legend(self) -> str:
         return _spark_legend([("", f"沒達 {self.th_text}，越高越空"), ("h", f"≥ {self.th_text}，達門檻")],
@@ -868,6 +1268,12 @@ class _Report:
             ("s-const-all", FLAG_NAMES["const_all"], len(self.with_flag("const_all")), True),
             ("s-const-some", FLAG_NAMES["const_some"], len(self.with_flag("const_some")), True),
             ("s-const-each", FLAG_NAMES["const_each"], len(self.with_flag("const_each")), True),
+            ("s-const-near", "值幾乎都相同", self.n_near() if self.dist else None, True),
+            ("s-drift", "分布偏移", len(self.with_flag("drift")) if self.dist else None, False),
+            *([("s-drift-num", "數值欄位", len(self.drift_cols("numeric")), True),
+               ("s-drift-str", "字串欄位", len(self.drift_cols("string")), True)]
+              if self.dist and len(self.periods) > 1 else []),
+            ("s-tail", "極端值", len(self.with_flag("tail")) if self.dist else None, False),
             ("s-all", "全部欄位", len(self.feats), False),
             None,
             ("s-actions", "行動建議總結", None, False),
@@ -894,11 +1300,27 @@ class _Report:
                        f"{FLAG_NAMES['null_some']} {len(self.with_flag('null_some'))}；"
                        f"另有 {self.n_varying_default()} 欄有變動但沒達門檻，只供參考")
         const_detail = "、".join(f"{FLAG_NAMES[k]} {len(self.with_flag(k))}" for k in CONST_FLAGS)
+        if self.dist:
+            const_detail += f"；另有 {self.n_near()} 欄值幾乎都相同，只供參考"
+        n_drift, n_tail = len(self.with_flag("drift")), len(self.with_flag("tail"))
+        sides = [self.worst_tail(c)[1] for c in self.with_flag("tail")]
+        n_by_null = sum(1 for c in self.with_flag("drift") if self.psi_source(c) == "null")
+        dist_rows = [
+            ("s-drift", "分布偏移", n_drift,
+             f"數值欄位 {len(self.drift_cols('numeric'))}、字串欄位 {len(self.drift_cols('string'))}；"
+             f"其中 {n_by_null} 欄的變化主要來自空值比例"),
+            ("s-tail", "極端值", n_tail,
+             f"最大值那一側 {sides.count('max')}、最小值那一側 {sides.count('min')}"),
+        ]
         rows = [
             ({}, [_td('<a href="#s-null">空值</a>'), _td(str(n_null), v=n_null, num=True),
                   _td(_e(null_detail), cls="wrap")]),
             ({}, [_td('<a href="#s-const">只有一個值</a>'), _td(str(n_const), v=n_const, num=True),
                   _td(_e(const_detail), cls="wrap")]),
+            *(({}, [_td(f'<a href="#{sid}">{label}</a>'),
+                    _td(str(n), v=n, num=True) if self.dist else _td("—"),
+                    _td(_e(detail if self.dist else "這次沒有跑"), cls="wrap")])
+              for sid, label, n, detail in dist_rows),
             ({}, [_td('<a href="#s-all">沒有發現問題</a>'), _td(str(ok), v=ok, num=True), _td("—")]),
             ({}, [_td('<a href="#s-scope">未檢查</a>'),
                   _td(str(len(self.unchecked)), v=len(self.unchecked), num=True),
@@ -906,8 +1328,10 @@ class _Report:
         ]
         return _section("s-overview", "總覽", (
             _p(f"這份報告檢查 <code>{_e(self.profile['config']['table'])}</code> 的 {len(self.feats)} 個特徵欄位"
-               f"（數值 {n_num} 欄、字串 {len(self.feats) - n_num} 欄），每一期看兩件事：空值多不多、"
-               "是不是只有一個值。下面依檢視項目分段，最後的〈行動建議總結〉把結果整理成可以照做的清單。"
+               f"（數值 {n_num} 欄、字串 {len(self.feats) - n_num} 欄），每一期看"
+               + ("四件事：空值多不多、是不是只有一個值、分布和最早一期差多少、有沒有離譜的最大值或最小值。"
+                  if self.dist else "兩件事：空值多不多、是不是只有一個值。")
+               + "下面依檢視項目分段，最後的〈行動建議總結〉把結果整理成可以照做的清單。"
                "欄名點了會跳到〈全部欄位〉，展開看各期數字。")
             + _table("t-overview", [("檢視項目", False), ("有事的欄位", True), ("細項", False)], rows)
             + _note("同一欄可能同時有兩種問題（例如某一期幾乎全空、又有幾期只有一個值），兩段都會列出。")
@@ -1007,7 +1431,7 @@ class _Report:
     def consts(self) -> str:
         return _section("s-const", "只有一個值", (
             _p("只有一個值＝扣掉空值之後，那一期的最小值等於最大值。整期都是空值的那一期不算。")
-            + self.const_all() + self.const_some() + self.const_each()
+            + self.const_all() + self.const_some() + self.const_each() + self.const_near()
         ))
 
     def const_all(self) -> str:
@@ -1076,6 +1500,190 @@ class _Report:
             body += _none()
         return _section("s-const-each", f"{FLAG_NAMES['const_each']}（{len(rows)} 欄）", body, level=3)
 
+    def n_near(self) -> int:
+        return sum(1 for ts in self.near.values() if ts)
+
+    def const_near(self) -> str:
+        title = "值幾乎都相同"
+        if not self.dist:
+            return _section("s-const-near", title, _not_run(), level=3)
+        order = []
+        for c in self.feats:
+            ts = self.near.get(c["name"])
+            if not ts:
+                continue
+            shown, full = self.periods_text(ts)
+            values = "、".join(dict.fromkeys(_fmt_num(c["quantiles"][t][0]) for t in ts))
+            order.append(((-len(ts), c["name"]), ({"data-name": c["name"]}, [
+                _td_name(c["name"]), _td(_e(c["dtype"])), _td(self.spark_near(c), v=len(ts)),
+                _td(_e(shown), v=ts[0], title=full if shown != full else ""), _td(_e(values)),
+                _td_num(len(ts)),
+            ])))
+        rows = [row for _, row in sorted(order, key=lambda x: x[0])]
+        body = (_p("p1＝p99：那一期至少約 98% 的值相同，只有少數幾筆不一樣，例如很少發生的事件旗標。"
+                   "只供參考，不算問題、不進總結；這幾期也不判斷極端值。")
+                + _spark_legend([("g", "有變化"), ("d", "p1＝p99"), ("empty", "整期都是空值")]))
+        if rows:
+            body += _toolbar("t-const-near") + _table(
+                "t-const-near", [("欄位", False), ("型別", False), ("各期", False), ("p1＝p99 的期別", False),
+                                 ("多數的值", False), ("期數", True)], rows, sort=(5, "desc"))
+        else:
+            body += _none()
+        return _section("s-const-near", f"{title}（{len(rows)} 欄）", body, level=3)
+
+    # --- 分布偏移 -----------------------------------------------------------
+
+    def drift_cols(self, kind: str) -> list[dict]:
+        return [c for c in self.with_flag("drift") if c["kind"] == kind]
+
+    def top_psi(self, col: dict) -> int:
+        psi = self.psis[col["name"]]
+        return max(range(len(psi)), key=lambda t: psi[t])
+
+    def psi_source(self, col: dict) -> str:
+        return drift_source(col, self.thresholds)
+
+    def top_change(self, col: dict) -> str:
+        """字串欄位：PSI 最大的那一期，和基準期比占比差最多的值（不含空值）。"""
+        counts, t = col["bins"]["counts"], self.top_psi(col)
+        base = [n / sum(counts[0]) for n in counts[0]]
+        cur = [n / sum(counts[t]) for n in counts[t]]
+        names = col["bins"]["values"] + ["其他值"]
+        k = max(range(len(names)), key=lambda i: abs(cur[i] - base[i]))
+        return f"{names[k]}：{_pct(base[k])} 變 {_pct(cur[k])}"
+
+    def drift(self) -> str:
+        if not self.dist:
+            return _section("s-drift", "分布偏移", _not_run())
+        th = self.thresholds["psi"]
+        if len(self.periods) < 2:
+            return _section("s-drift", "分布偏移", '<p class="none">只讀到一期，沒有可以比的期別。</p>')
+        skip = {"null_all", "const_all", "const_each"}
+        base_empty = [c["name"] for c in self.feats
+                      if self.psis[c["name"]] is None and not skip & set(self.flags[c["name"]])]
+        intro = _p(f"每一期和最早一期（基準期 {_e(self.labels[0])}）比，分布差多少用 PSI（Population Stability Index）"
+                   f"表示：0 是一模一樣，越大差越多，≥ {th:g} 算明顯不同。數值欄位用基準期的十分位數切成 10 組，"
+                   "字串欄位取基準期最常見的 20 個值各成一組、其他值合成一組，空值都另成一組；"
+                   "PSI 比的是每一組的占比。")
+        legend = _spark_legend([("", f"沒達 {th:g}"), ("h", f"≥ {th:g}，達門檻")],
+                               f"一期一根，最左邊是基準期；高度到 PSI {self.psi_cap():g} 為止")
+        notes = _note("變化主要來自＝PSI 最大的那一期，扣掉空值、只比有值的那幾組再算一次 PSI：沒達門檻是"
+                      "「空值比例」，那幾期空值變多或變少，〈空值〉那一段也看得到；達門檻是「值的分布」。"
+                      "兩張表預設「值的分布」排前面，同一種再依最大 PSI 排。")
+        notes += _note("沒有比較：每一期都幾乎是空值、整欄只有一個值、每期各只有一個值的欄位"
+                       + (f"，以及基準期整期都是空值的 {len(base_empty)} 欄（{_e('、'.join(base_empty))}）"
+                          if base_empty else "") + "。")
+        return _section("s-drift", "分布偏移", intro + legend + notes
+                        + self.drift_table("numeric") + self.drift_table("string"))
+
+    def drift_table(self, kind: str) -> str:
+        sid, tid = ("s-drift-num", "t-drift-num") if kind == "numeric" else ("s-drift-str", "t-drift-str")
+        order, hit_periods = [], set()
+        for c in self.drift_cols(kind):
+            psi, ts, top = self.psis[c["name"]], drift_periods(c, self.thresholds), self.top_psi(c)
+            hit_periods.update(ts)
+            shown, full = self.periods_text(ts)
+            src = self.psi_source(c)
+            cells = [
+                _td_name(c["name"]), _td(_e(c["dtype"])), _td(self.spark_psi(c), v=ts[0]),
+                _td(_e(shown), v=ts[0], title=full if shown != full else "", cls="brk"),
+                _td(_e(self.labels[top]), v=top), _td_num(round(psi[top], 3), f"{psi[top]:.3f}"),
+                _td("空值比例" if src == "null" else "值的分布", v=int(src == "null")),
+            ]
+            if kind == "numeric":
+                cells.append(_td(self.spark_q(c)))
+            else:
+                cells += [_td(self.spark_cat(c)), _td(_e(self.top_change(c)), cls="brk")]
+            attrs = {"data-name": c["name"], "data-drift": " ".join(f"p{t}" for t in ts), "data-src": src}
+            order.append(((src == "null", -psi[top], c["name"]), (attrs, cells)))
+        rows = [row for _, row in sorted(order, key=lambda x: x[0])]
+        head = [("欄位", False), ("型別", False), ("各期 PSI", False), ("PSI 達門檻的期別", False),
+                ("PSI 最大的期別", False), ("最大 PSI", True), ("變化主要來自", False)]
+        if kind == "numeric":
+            title = "數值欄位"
+            body = (_p("PSI 只說差多少，不說怎麼變，要看分位數走勢：整條突然跳好幾倍，通常是換了單位或計算方式；"
+                       "慢慢移動，通常是客群在變。")
+                    + '<div class="legend"><span><span class="qkey o"></span>p1～p99</span>'
+                    '<span><span class="qkey i"></span>p25～p75</span><span><span class="qkey m"></span>中位數</span>'
+                    "<span>每欄自己的刻度，從各期最低的 p1 到最高的 p99；滑鼠移到圖上看那一期的數字</span>"
+                    '<span>刻度 <button type="button" data-scale="log" class="on">log</button>'
+                    '<button type="button" data-scale="lin">一般</button></span></div>')
+            head.append(("分位數走勢", False))
+            note = ("log 刻度＝每個數先換成 sign(x) × ln(1 + |x|) 再畫，負數與 0 也能畫。金額這類長尾欄位用一般刻度時，"
+                    "p99 會把中間壓扁；log 刻度看得到整條分布，整條跳好幾倍時是一段落差。")
+        else:
+            title = "字串欄位"
+            swatches = "".join(f'<span class="qkey" style="background:{c}"></span>' for c in _CAT_COLORS)
+            body = (_p("字串欄位看各值的占比怎麼變。")
+                    + f'<div class="legend"><span>{swatches}基準期占比第 1～6 名</span>'
+                    f'<span><span class="qkey" style="background:{_CAT_REST}"></span>第 7 名以後</span>'
+                    f'<span><span class="qkey" style="background:{_CAT_OTHER}"></span>其他值</span>'
+                    f'<span><span class="qkey" style="background:{_CAT_NULL}"></span>空值</span>'
+                    "<span>由下往上依基準期的占比排；滑鼠移到圖上看那一期各值的占比</span></div>")
+            head += [("各值占比", False), ("占比變最多的值", False)]
+            note = "占比變最多的值＝PSI 最大的那一期和基準期比，占比差最多的值。"
+        if rows:
+            options = [("", "全部")] + [(f"p{t}", self.labels[t]) for t in sorted(hit_periods)]
+            src_opt = [("", "全部"), ("value", "值的分布"), ("null", "空值比例")]
+            body += (
+                _toolbar(tid, selects=(("drift", "PSI 達門檻的期別", options, "", "token"),
+                                       ("src", "變化主要來自", src_opt, "", "token")))
+                + _table(tid, head, rows, sort=(6, "asc")) + _note(note)
+            )
+        else:
+            body += _none()
+        return _section(sid, f"{title}（{len(rows)} 欄）", body, level=3)
+
+    # --- 極端值 -------------------------------------------------------------
+
+    def worst_tail(self, col: dict) -> tuple[int, str, float, float]:
+        return worst_tail(col, self.thresholds)
+
+    def tail(self) -> str:
+        if not self.dist:
+            return _section("s-tail", "極端值", _not_run())
+        th = self.thresholds
+        order = []
+        for c in self.with_flag("tail"):
+            t, side, raw, log = self.worst_tail(c)
+            q = c["quantiles"][t]
+            value = c["max"][t] if side == "max" else c["min"][t]
+            n_hit = len({h[0] for h in self.tails[c["name"]]})
+            order.append(((n_hit, -log, c["name"]), ({"data-name": c["name"], "data-side": side}, [
+                _td_name(c["name"]), _td(_e(c["dtype"])), _td(self.spark_tail(c), v=n_hit), _td_num(n_hit),
+                _td(_e(f"{self.labels[t]} {'最大值' if side == 'max' else '最小值'}"), v=t, cls="brk"),
+                # 表太寬時在「～」後面換行（<wbr> 不會被複製進去）
+                _td_num(value), _td(f"{_e(_fmt_num(q[0]))}～<wbr>{_e(_fmt_num(q[-1]))}", v=q[-1], num=True, cls="brk"),
+                _td_num(round(raw, 1), f"{raw:,.1f}"), _td_num(round(log, 2), f"{log:.2f}"),
+            ])))
+        rows = [row for _, row in sorted(order, key=lambda x: x[0])]
+        r, lr = _fmt_num(th["tail_ratio"]), _fmt_num(th["tail_log_ratio"])
+        body = (
+            _p("看每一期的最大值、最小值離中間 98% 的值（p1～p99）有多遠。只看距離，金額這類天生長尾的欄位"
+               f"幾乎都會被標，所以同一期、同一側要兩個條件都成立才標：倍數 ≥ {r}（真的離很遠），"
+               f"而且 log 後倍數 ≥ {lr}（取 log 之後還是很遠，排除正常的長尾）。p1＝p99 的那一期不判斷。")
+            + "<pre>最小值 ···· p1 ═══════ p99 ····················· 最大值\n"
+              "              └─寬度─┘    └─────── 距離 ───────┘\n"
+              "倍數＝距離 ÷ 寬度；log 後倍數＝四個數先換成 sign(x) × ln(1 + |x|)，再用同樣的公式</pre>"
+            + _spark_legend([("", "沒達門檻"), ("h", "同一側兩個條件都達門檻")],
+                            f"一期一根；高度是兩側較大的 log 後倍數，到 {_fmt_num(2 * th['tail_log_ratio'])} 為止；"
+                            "空白是 p1＝p99 或整期都是空值，不判斷")
+        )
+        if rows:
+            side_opt = [("", "全部"), ("max", "最大值"), ("min", "最小值")]
+            body += (
+                _toolbar("t-tail", selects=(("side", "哪一側", side_opt, "", "token"),))
+                + _table("t-tail", [("欄位", False), ("型別", False), ("各期", False), ("標到的期數", True),
+                                    ("最離譜的那一期", False), ("那個值", True), ("p1～p99", True),
+                                    ("倍數", True), ("log 後倍數", True)], rows, sort=(3, "asc"))
+                + _note("最離譜的那一期＝標到的期別裡，log 後倍數最大的那一期、那一側。只有一兩期被標的，"
+                        "比較像那幾期的資料錯了；大部分期別都被標的，比較像欄位本來就是長尾。"
+                        "預設標到的期數少的排前面。")
+            )
+        else:
+            body += _none()
+        return _section("s-tail", f"極端值（{len(rows)} 欄）", body)
+
     # --- 全部欄位 -----------------------------------------------------------
 
     def all_columns(self) -> str:
@@ -1100,13 +1708,15 @@ class _Report:
         type_opt = [("", "全部"), ("int", "整數"), ("decimal", "decimal"), ("double", "double"),
                     ("float", "float"), ("string", "字串")]
         data = {"periods": self.periods, "labels": self.labels, "rows": self.rows,
-                "cols": {c["name"]: [c["null"], c["min"], c["max"]] for c in self.feats}}
+                "cols": {c["name"]: [c["null"], c["min"], c["max"]] for c in self.feats},
+                "dist": {c["name"]: d for c in self.feats if (d := self.dist_data(c))}}
         # JSON 裡的字串（欄名、字串欄位的值）可能含 </script> 或 <!--<script，前者提早結束
         # <script>，後者讓真正的 </script> 失效、吞掉後半頁；所有 < 都換成 \u003c
         blob = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
         return _section("s-all", f"全部欄位（{len(self.feats)} 欄）", (
             _p("查單一欄位或一整族欄位（例如篩選 <code>cc_</code>）。點欄名展開各期的總筆數、空值筆數、"
-               "最小值、最大值。表上的最小值、最大值是所有期別合計，只列數值欄位。預設依表裡的欄位順序。")
+               "最小值、最大值" + ("，以及分位數與 PSI" if self.dist else "") + "。"
+               "表上的最小值、最大值是所有期別合計，只列數值欄位。預設依表裡的欄位順序。")
             + _toolbar("t-all", selects=(("flag", "問題", flag_opt, "", "token"),
                                        ("dtype", "型別", type_opt, "", "token")))
             + _table("t-all", [("#", True), ("欄位", False), ("型別", False), ("問題", False), ("各期空值", False),
@@ -1114,41 +1724,70 @@ class _Report:
             + f'<script type="application/json" id="fp-data">{blob}</script>'
         ))
 
+    def dist_data(self, col: dict) -> dict | None:
+        """滑鼠提示與展開明細用的每期數字（JS 只負責排版，數字都在這裡算好）。"""
+        out: dict[str, Any] = {}
+        if col.get("quantiles"):
+            idx = [QUANTILE_PROBS.index(p) for p in _BAND_PROBS]
+            out["q"] = [None if q is None else [q[i] for i in idx] for q in col["quantiles"]]
+            tails = [tail_ratios(col, t) for t in range(len(self.periods))]
+            out["tail"] = [None if r is None else [round(v, 3) for side in ("max", "min") for v in r[side]]
+                           for r in tails]
+        psi = self.psis[col["name"]]
+        if psi:
+            out["psi"] = [round(v, 4) for v in psi]
+        if psi and col["kind"] == "string":
+            out["cats"] = col["bins"]["values"] + ["其他值", "空值"]
+            out["sh"] = [[round(n / sum(cnt), 4) for n in cnt] for cnt in col["bins"]["counts"]]
+        return out or None
+
     # --- 行動建議總結 -------------------------------------------------------
 
     def upstream_periods(self) -> dict[int, list[str]]:
         """要請上游查的期別 → 欄名，只算這一欄被歸到「請上游查」的那種問題。"""
         out: dict[int, list[str]] = {}
         for c in self.with_action("upstream"):
-            flags = self.flags[c["name"]]
-            jump = null_jump(c, self.rows, self.thresholds) if "null_some" in flags else None
-            ts = self.bad_null(c) if jump is not None and jump >= UPSTREAM_JUMP_MIN else []
-            if "const_some" in flags:
-                ts = sorted(set(ts) | set(one_value_periods(c, self.rows)[1]))
-            for t in ts:
+            for t in upstream_periods_of(c, self.rows, self.flags[c["name"]], self.thresholds):
                 out.setdefault(t, []).append(c["name"])
         return dict(sorted(out.items()))
+
+    def drift_start_periods(self) -> dict[int, list[str]]:
+        """PSI 第一次達門檻的期別 → 欄名：同一期開始變的一批欄，多半是同一件事。"""
+        out: dict[int, list[str]] = {}
+        for c in self.with_action("check"):
+            out.setdefault(drift_periods(c, self.thresholds)[0], []).append(c["name"])
+        return dict(sorted(out.items()))
+
+    def period_list(self, by_period: dict[int, list[str]], button: str) -> str:
+        items = "".join(
+            f'<li><b>{_e(self.labels[t])}</b>　{len(names)} 欄：{_e("、".join(names[:6]))}'
+            f'{"…" if len(names) > 6 else ""}'
+            f' <button type="button" data-copy-text="{_e(chr(10).join(names))}">{_e(button)}</button></li>'
+            for t, names in by_period.items()
+        )
+        return f'<ul class="periods">{items}</ul>'
 
     def action_summary(self) -> str:
         jump_txt = f"{UPSTREAM_JUMP_MIN * 100:g} 個百分點"
         sources = {
             "exclude": f"{FLAG_NAMES['null_all']}、{FLAG_NAMES['const_all']}",
-            "upstream": f"{FLAG_NAMES['null_some']}（跳幅 ≥ {jump_txt}）、{FLAG_NAMES['const_some']}",
-            "judge": f"{FLAG_NAMES['null_some']}（跳幅 < {jump_txt}）、{FLAG_NAMES['const_each']}",
+            "upstream": f"{FLAG_NAMES['null_some']}（跳幅 ≥ {jump_txt}）、{FLAG_NAMES['const_some']}"
+                        + (f"、{FLAG_NAMES['tail']}（被標的期別不到一半，只列最離譜的那一期）" if self.dist else ""),
+            "check": f"{FLAG_NAMES['drift']}（偏移的期別都已經列在「請上游查」的除外）",
+            "judge": f"{FLAG_NAMES['null_some']}（跳幅 < {jump_txt}）、{FLAG_NAMES['const_each']}"
+                     + (f"、{FLAG_NAMES['tail']}（一半以上的期別都被標）" if self.dist else ""),
         }
         rows = []
         for key in ACTION_ORDER:
+            if key == "check" and not self.dist:
+                continue
             cols = self.with_action(key)
             listing = "\n".join(c["name"] for c in cols)
             extra = ""
             if key == "upstream" and cols:
-                items = "".join(
-                    f'<li><b>{_e(self.labels[t])}</b>　{len(names)} 欄：{_e("、".join(names[:6]))}'
-                    f'{"…" if len(names) > 6 else ""}'
-                    f' <button type="button" data-copy-text="{_e(chr(10).join(names))}">複製這期的欄名</button></li>'
-                    for t, names in self.upstream_periods().items()
-                )
-                extra = f'<ul class="periods">{items}</ul>'
+                extra = self.period_list(self.upstream_periods(), "複製這期的欄名")
+            elif key == "check" and cols:
+                extra = self.period_list(self.drift_start_periods(), "複製這期開始變的欄名")
             detail = (f"<details><summary>{len(cols)} 欄</summary><pre>{_e(listing)}</pre></details>"
                       if cols else "0 欄")
             copy = (f'<button type="button" data-copy-text="{_e(listing)}">複製欄名</button>' if cols else "")
@@ -1162,8 +1801,10 @@ class _Report:
                "例如某一期幾乎全空、其他期別每期各只有一個值。")
             + _table("t-actions", [("做法", False), ("欄數", True), ("來自", False), ("欄位", False),
                                    ("", False)], rows, cls="actions")
-            + _note(f"「請上游查」和「看業務意義」的分界是跳幅 {jump_txt}：出事那幾期比其他期別空很多，"
-                    "才像是上游斷掉。")
+            + _note(f"「請上游查」和「看業務意義」的分界：空值看跳幅 {jump_txt}，出事那幾期比其他期別空很多，"
+                    "才像是上游斷掉"
+                    + ("；極端值看被標的期別有沒有到一半，只有少數幾期被標的像那幾期的資料錯了，"
+                       "大部分期別都被標的像欄位本來就是長尾" if self.dist else "") + "。")
         ))
 
     # --- 資料範圍與判斷標準 -------------------------------------------------
@@ -1181,17 +1822,33 @@ class _Report:
             ("篩選條件", code(cfg["where"]) if cfg["where"] else "無"),
             ("每期筆數", f"{min(self.rows):,}～{max(self.rows):,} 筆，全部納入計算" if self.rows else "無"),
             ("期別欄位是空值的列", f"{self.profile['null_time_rows']:,} 筆，不讀"),
-            ("執行項目", "基本檢查"),
-            ("執行時間", f"{_duration(self.profile['elapsed_seconds'])}，每批 {self.profile['batch_size']} 欄"),
+            ("執行項目", "基本檢查、分布偏移與極端值" if self.dist else "基本檢查"),
+            *([("基準期", f"{_e(self.periods[0])}（這次讀到的最早一期；想換基準期，改 {code('time_range')} "
+                          f"或 {code('where')}）"),
+               ("分位數", f"Spark 的 percentile_approx 估計，精度 {self.profile['quantile_accuracy']:,}"
+                         f"（排名誤差約 1／{self.profile['quantile_accuracy']:,}）")]
+              if self.dist and self.periods else []),
+            ("執行時間", self.elapsed_text()),
             ("產出時間", _e(self.profile["generated_at"].replace("T", " "))),
         ]
         kv_html = ('<div class="tbox"><table class="t kv"><tbody>'
                    + "".join(f"<tr><th>{_e(k)}</th><td>{v}</td></tr>" for k, v in kv)
                    + "</tbody></table></div>")
+        th = self.thresholds
         th_rows = [({}, [
             _td(_e(f"{FLAG_NAMES['null_all']}、{FLAG_NAMES['null_some']}")),
             _td(_e(f"空值比例 ≥ {self.th_text}")), _td(code("null_ratio")), _td(_e(self.null_th)),
         ])]
+        if self.dist:
+            th_rows += [
+                ({}, [_td(_e(FLAG_NAMES["drift"])), _td(_e(f"有一期和基準期比的 PSI ≥ {th['psi']:g}")),
+                      _td(code("psi")), _td(_e(th["psi"]))]),
+                ({}, [_td(_e(FLAG_NAMES["tail"])),
+                      _td(_e(f"同一期、同一側：倍數 ≥ {_fmt_num(th['tail_ratio'])}，"
+                             f"而且 log 後倍數 ≥ {_fmt_num(th['tail_log_ratio'])}")),
+                      _td(f"{code('tail_ratio')}、{code('tail_log_ratio')}"),
+                      _td(_e(f"{th['tail_ratio']}、{th['tail_log_ratio']}"))]),
+            ]
         note = "可以在這支工具設定檔的 <code>thresholds</code> 區塊調整，再用 <code>render</code> 重畫，不必重跑 Spark。"
         if self.threshold_source:
             note += f"這次的值取自重畫時指定的設定檔 {code(self.threshold_source)}。"
@@ -1204,7 +1861,7 @@ class _Report:
             + "<h3>判斷標準</h3>" + _p(note)
             + _table("t-thresholds", [("問題類型", False), ("判斷標準", False), ("設定鍵", False),
                                       ("這次的值", False)], th_rows)
-            + _note("「只有一個值」的三種沒有門檻。總結裡「請上游查」和「看業務意義」的分界"
+            + _note("「只有一個值」的三種與「值幾乎都相同」沒有門檻。總結裡「請上游查」和「看業務意義」的分界"
                     f"（跳幅 {UPSTREAM_JUMP_MIN * 100:g} 個百分點）寫在程式裡，不是設定鍵。")
             + "<h3>未檢查的欄位</h3>"
             + _p("型別不支援（date、timestamp、array、map、struct 等）而沒有檢查的欄位。")
@@ -1212,10 +1869,18 @@ class _Report:
             + f"<details><summary><b>設定檔</b></summary><pre>{_e(self.profile['config_text'])}</pre></details>"
         ))
 
+    def elapsed_text(self) -> str:
+        text = f"{_duration(self.profile['elapsed_seconds'])}，每批 {self.profile['batch_size']} 欄"
+        passes = self.profile.get("pass_seconds")
+        if passes and len(passes) > 1:
+            names = {"basic": "基本檢查與分位數", "top_values": "字串欄位的常見值", "bins": "PSI 分組筆數"}
+            text += "（" + "、".join(f"{names[k]} {_duration(v)}" for k, v in passes.items()) + "）"
+        return text
+
     def page(self) -> str:
         table = self.profile["config"]["table"]
-        main = "".join([self.overview(), self.nulls(), self.consts(), self.all_columns(),
-                        self.action_summary(), self.scope()])
+        main = "".join([self.overview(), self.nulls(), self.consts(), self.drift(), self.tail(),
+                        self.all_columns(), self.action_summary(), self.scope()])
         return (
             "<!DOCTYPE html><html lang='zh-Hant'><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -1263,6 +1928,10 @@ def run(
         DEFAULT_BATCH_SIZE, "--batch-size", min=1,
         help="每一趟 Spark 聚合帶幾欄。正式環境量過耗時再定預設值",
     ),
+    accuracy: int = typer.Option(
+        DEFAULT_QUANTILE_ACCURACY, "--accuracy", min=1,
+        help="分位數（percentile_approx）的精度，只在 checks.distribution: true 時用到。正式環境量過再定預設值",
+    ),
 ) -> None:
     """算統計量、存 profile.json、畫報告。"""
     from pyspark.sql.utils import AnalysisException
@@ -1282,7 +1951,7 @@ def run(
     problems += check_against_table(cfg, columns)
     if problems:
         _exit_with_problems(problems)
-    profile = profile_table(spark, cfg, batch_size)
+    profile = profile_table(spark, cfg, batch_size, accuracy)
 
     if not profile["periods"]:
         typer.echo("一期都沒讀到，請檢查 time_range 與 where。", err=True)
