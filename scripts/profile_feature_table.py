@@ -72,6 +72,9 @@ CORR_SAMPLE_SEED = 42
 CORR_MIN_ROWS = 1_000  # 兩欄都有值的筆數少於這個數，不給相關係數
 # profile.json 只存絕對值 ≥ 這個值的配對，所以 render 的 corr 最低只能調到這裡
 CORR_KEEP = 0.5
+# 先用整欄名次的近似值篩，絕對值 ≥ CORR_KEEP 減這麼多的配對才逐對算精確值。近似和精確實測差到 0.03
+# （空值的機率跟值的大小有關時），留三倍多的餘裕
+CORR_SCREEN_MARGIN = 0.1
 
 _REQUIRED_KEYS = ("table", "time_col", "key_cols", "checks")
 # 每一項都必填：決定要多跑幾趟 Spark，耗時差很多，讓工具使用者每次都明確選
@@ -460,18 +463,46 @@ def add_bins(df: "SparkDataFrame", time_col: str, periods: list, columns: list[d
     passes["bins"] = round(time.monotonic() - started, 1)
 
 
-def corr_skip_reasons(columns: list[dict], rows: list[int], null_ratio: float) -> dict[str, str]:
-    """不算相關性的欄位與原因：``string``（字串欄位）、``null``（最新一期的空值比例 ≥
-    ``null_ratio``，含整期都是空值）、``const``（最新一期只有一個值）。只看基本檢查的統計量。"""
+def corr_skip_reasons(columns: list[dict], rows: list[int]) -> dict[str, str]:
+    """run 時就不算相關性的欄位與原因：``string``（字串欄位）、``empty``（最新一期整期都是空值）、
+    ``const``（最新一期只有一個值）。都不靠門檻：最新一期「幾乎都是空值」的照樣算，由 ``render`` 依
+    當下的 ``null_ratio`` 排除（``corr_excluded``），換門檻才不用重跑。"""
     out = {}
     for c in columns:
         if c["kind"] == "string":
             out[c["name"]] = "string"
         elif c["kind"] == "numeric":
-            if c["null"][-1] / rows[-1] >= null_ratio:
-                out[c["name"]] = "null"
+            if c["null"][-1] == rows[-1]:
+                out[c["name"]] = "empty"
             elif c["min"][-1] == c["max"][-1]:
                 out[c["name"]] = "const"
+    return out
+
+
+def _sorted_groups(x: "np.ndarray") -> tuple["np.ndarray", "np.ndarray", "np.ndarray"]:
+    """一欄有值的列依值排好：（列號、每一群同值在排序後的起點、排序後每一筆屬於第幾群）。"""
+    import numpy as np
+
+    idx = np.flatnonzero(~np.isnan(x))
+    order = idx[np.argsort(x[idx])]  # 同值取平均名次，不需要穩定排序
+    sv = x[order]
+    new = np.r_[True, sv[1:] != sv[:-1]]
+    # 抽樣最多約 5 萬筆，int32 就夠，記憶體省一半
+    return order.astype(np.int32), np.flatnonzero(new).astype(np.int32), (np.cumsum(new) - 1).astype(np.int32)
+
+
+def _ranks_within(groups: tuple, mask: "np.ndarray") -> "np.ndarray":
+    """一欄在 ``mask`` 那些筆裡的名次（從 1 起算，同值取平均），依列號放回；``mask`` 以外的列沒有意義。
+
+    沿用 ``_sorted_groups`` 排好的順序，只數 ``mask`` 裡的筆，不重新排序，每一對欄位只要正比於筆數的時間。
+    """
+    import numpy as np
+
+    order, starts, gid = groups
+    size = np.add.reduceat(mask[order].astype(np.int64), starts) if len(order) else np.zeros(0)
+    before = np.cumsum(size) - size  # 每一群同值之前，mask 裡有幾筆
+    out = np.empty(len(mask))
+    out[order] = (before + (size + 1) / 2)[gid]
     return out
 
 
@@ -479,39 +510,33 @@ def _average_ranks(x: "np.ndarray") -> "np.ndarray":
     """一欄換成名次（從 1 起算，同值取平均名次）；NaN 留著。"""
     import numpy as np
 
-    out = np.full(x.shape, np.nan)
     ok = ~np.isnan(x)
-    v = x[ok]
-    order = np.argsort(v, kind="mergesort")
-    sv = v[order]
-    first = np.flatnonzero(np.r_[True, sv[1:] != sv[:-1]])  # 每一群同值從排序後的第幾筆開始
-    size = np.diff(np.r_[first, len(sv)])
-    ranks = np.empty(len(v))
-    ranks[order] = np.repeat(first + (size + 1) / 2, size)
-    out[ok] = ranks
-    return out
+    return np.where(ok, _ranks_within(_sorted_groups(x), ok), np.nan)
 
 
 def spearman_pairs(values: "np.ndarray", names: list[str], *, min_rows: int = CORR_MIN_ROWS,
                    keep: float = CORR_KEEP) -> dict:
-    """``values`` 每一欄的兩兩 Spearman 相關係數（NaN 是空值），每一組只用兩欄都有值的筆數。
+    """``values`` 每一欄的兩兩 Spearman 相關係數（NaN 是空值），每一對只用兩欄都有值的筆數。
 
-    每一欄先換成名次，再算名次的 Pearson 相關係數。兩兩的筆數、和、平方和、交叉乘積各用一次
-    矩陣相乘算完，不逐對迴圈。名次是整欄一起排的，不是每一組各自重排：兩欄都沒有空值時就是
-    Spearman，有空值時是它的近似（設計文件第四節）。兩欄都有值的筆數少於 ``min_rows``、
-    或其中一欄在這些筆裡沒有變化，不給相關係數。
+    分兩步。先篩：每一欄整欄排名次，兩兩的筆數、和、平方和、交叉乘積各用一次矩陣相乘算完，不逐對
+    迴圈。這一步的名次是整欄一起排的，有空值時只是近似：空值的機率跟值的大小有關時（例如資產越多越
+    可能有某產品的餘額），實測差到 0.03，會把 0.95 的門檻翻過去。所以只拿它篩：絕對值 ≥ ``keep`` −
+    ``CORR_SCREEN_MARGIN`` 的配對，再逐對在兩欄都有值的那些筆裡重排名次、算精確值，存精確值 ≥ ``keep``
+    的。兩欄都有值的筆就是兩欄各自有值的全部筆時，整欄的名次已經是精確的，不重算。
 
-    回傳 ``pairs``：絕對值 ≥ ``keep`` 的 [欄, 欄, 相關係數, 兩欄都有值的筆數]；``sparse``：
-    有值的筆數本身就少於 ``min_rows`` 的欄 → 有值的筆數（它的每一組都算不了）；``flat``：在這些筆裡
-    只有一個值的欄；``few_pairs``、``flat_pairs``：其他兩欄各自都夠、但這一組筆數不夠或沒有變化的組數。
-    原因歸到欄位本身，報告才不會因為一欄很空，就把每一欄都列成「有配對沒算」。
+    兩欄都有值的筆數少於 ``min_rows``、或其中一欄在這些筆裡沒有變化，不給相關係數。回傳 ``pairs``：
+    [欄, 欄, 相關係數, 兩欄都有值的筆數]；``sparse``：有值的筆數本身就少於 ``min_rows`` 的欄 → 有值的
+    筆數（它的每一對都算不了）；``flat``：在這些筆裡只有一個值的欄；``few_pairs``、``flat_pairs``：
+    兩欄各自都夠、這一對卻筆數不夠或沒有變化的對數。原因歸到欄位本身，報告才不會因為一欄很空，
+    就把每一欄都列成「有配對沒算」。
     """
     import numpy as np
 
+    values = np.asfortranarray(values)  # 一欄連續存放，逐欄排名次時才不會跳著讀；run 拉回來時就是這樣
     k = values.shape[1]
     valid = ~np.isnan(values)
     m = valid.astype(np.float64)
-    x = np.zeros(values.shape)
+    x = np.zeros(values.shape, order="F")
     for j in range(k):
         rk = _average_ranks(values[:, j])[valid[:, j]]
         if len(rk):
@@ -534,9 +559,19 @@ def spearman_pairs(values: "np.ndarray", names: list[str], *, min_rows: int = CO
     sparse = count < min_rows
     col_flat = ~sparse & np.diagonal(flat)  # 對角線＝這一欄自己有值的那些筆
     iu, ju = np.triu_indices(k, 1)
-    sel = ~few[iu, ju] & ~no_var[iu, ju] & (np.round(np.abs(r[iu, ju]), 9) >= keep)
-    pairs = [[names[i], names[j], round(float(np.clip(r[i, j], -1.0, 1.0)), 6), int(n[i, j])]
-             for i, j in zip(iu[sel], ju[sel])]
+    screen = ~few[iu, ju] & ~no_var[iu, ju] & (np.abs(r[iu, ju]) >= keep - CORR_SCREEN_MARGIN)
+    by_col = valid.T  # valid 是一欄連續存放，轉置後一欄就是連續的一列
+    groups: dict[int, tuple] = {}  # 只替要重排的欄排序、留著，不是每一欄都留
+    pairs = []
+    for i, j in zip(iu[screen], ju[screen]):
+        v = r[i, j]
+        if not n[i, j] == count[i] == count[j]:  # 有一欄在對方空的地方有值：名次要在兩欄都有值的筆裡重排
+            both = by_col[i] & by_col[j]
+            gi = groups.get(i) or groups.setdefault(i, _sorted_groups(values[:, i]))
+            gj = groups.get(j) or groups.setdefault(j, _sorted_groups(values[:, j]))
+            v = np.corrcoef(_ranks_within(gi, both)[both], _ranks_within(gj, both)[both])[0, 1]
+        if round(abs(float(v)), 9) >= keep:
+            pairs.append([names[i], names[j], round(float(np.clip(v, -1.0, 1.0)), 6), int(n[i, j])])
     bad = sparse | col_flat
     rest = ~bad[iu] & ~bad[ju]
     return {
@@ -549,7 +584,7 @@ def spearman_pairs(values: "np.ndarray", names: list[str], *, min_rows: int = CO
 
 
 def compute_correlation(df: "SparkDataFrame", time_col: str, latest: Any, latest_rows: int,
-                        columns: list[dict], rows: list[int], null_ratio: float, batch_size: int) -> dict:
+                        columns: list[dict], rows: list[int], batch_size: int) -> dict:
     """最新一期抽約 ``CORR_SAMPLE_ROWS`` 筆、拉回 driver 算 Spearman。
 
     抽樣在 Spark 做、seed 固定：``sample(fraction = 50,000 ÷ 該期筆數)``，該期不到 50,000 筆就全拿；
@@ -560,7 +595,7 @@ def compute_correlation(df: "SparkDataFrame", time_col: str, latest: Any, latest
     import numpy as np
     from pyspark.sql import functions as F
 
-    skipped = corr_skip_reasons(columns, rows, null_ratio)
+    skipped = corr_skip_reasons(columns, rows)
     use = [c for c in columns if c["kind"] == "numeric" and c["name"] not in skipped]
     out = {"period_rows": latest_rows, "rows": 0, "columns": [c["name"] for c in use], "skipped": skipped,
            "pairs": [], "sparse": {}, "flat": [], "few_pairs": 0, "flat_pairs": 0}
@@ -578,7 +613,7 @@ def compute_correlation(df: "SparkDataFrame", time_col: str, latest: Any, latest
             cols = [f"_{i}" for i in range(b, min(len(use), b + batch_size))]
             got = sorted(sample.select("_id", *cols).collect(), key=lambda r: r[0])
             if values is None:
-                ids, values = [r[0] for r in got], np.empty((len(got), len(use)))
+                ids, values = [r[0] for r in got], np.empty((len(got), len(use)), order="F")
             elif [r[0] for r in got] != ids:  # 每一批都要是同一批筆，否則欄和欄會錯位
                 raise RuntimeError("相關性的抽樣在兩批欄位之間變了，請重跑")
             values[:, b:b + len(cols)] = np.array([r[1:] for r in got], dtype=float).reshape(len(got), len(cols))
@@ -612,8 +647,7 @@ def profile_table(spark: "SparkSession", cfg: ProfileConfig, batch_size: int,
     corr = None
     if cfg.correlation and periods:
         t0 = time.monotonic()
-        corr = compute_correlation(df, cfg.time_col, periods[-1], rows[-1], columns, rows,
-                                   cfg.thresholds["null_ratio"], batch_size)
+        corr = compute_correlation(df, cfg.time_col, periods[-1], rows[-1], columns, rows, batch_size)
         passes["correlation"] = round(time.monotonic() - t0, 1)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -794,17 +828,46 @@ def judge_column(col: dict, rows: list[int], thresholds: dict[str, float]) -> li
     return flags
 
 
+CORR_REASONS = ("string", "empty", "null", "const", "sparse", "flat")  # 〈未計算的欄位〉的原因，依這個順序認
+
+
+def corr_excluded(profile: dict, thresholds: dict[str, float]) -> dict[str, str]:
+    """沒有相關係數、或這次不列進高度相關的欄位 → 原因代號（``CORR_REASONS``）。
+
+    run 時就沒算的（字串欄位、最新一期整期都是空值、最新一期只有一個值），抽到的筆數裡有值的太少或
+    只有一個值的，加上依這次的 ``null_ratio``、最新一期幾乎都是空值的（``null``）。最後這種 run 時
+    照樣算，在這裡才排除：``render`` 換門檻時跟〈空值〉一起變，不用重跑。
+    """
+    corr = profile.get("correlation")
+    if not corr:
+        return {}
+    out = dict(corr["skipped"])
+    for c in profile["columns"]:
+        name = c["name"]
+        if name in out or c["kind"] != "numeric":
+            continue
+        if c["null"][-1] / profile["rows"][-1] >= thresholds["null_ratio"]:
+            out[name] = "null"
+        elif name in corr["sparse"]:
+            out[name] = "sparse"
+        elif name in corr["flat"]:
+            out[name] = "flat"
+    return out
+
+
 def high_corr_pairs(profile: dict, thresholds: dict[str, float],
                     flags: dict[str, list[str]]) -> list[tuple[str, str, float, int]]:
     """（欄、欄、相關係數、兩欄都有值的筆數），絕對值 ≥ ``corr``。沒跑相關性（舊的
-    ``profile.json``）回空清單；已經可以直接排除的欄位不列。"""
+    ``profile.json``）回空清單；這次不列的欄（``corr_excluded``）與已經可以直接排除的欄位不列。"""
     corr = profile.get("correlation")
     if not corr:
         return []
+    excluded = corr_excluded(profile, thresholds)
     return [
         (a, b, r, n) for a, b, r, n in corr["pairs"]
         # 四捨五入到遠小於顯示精度的位數再比門檻，剛好等於門檻的才不會因為浮點誤差漏掉
         if round(abs(r), 9) >= thresholds["corr"]
+        and a not in excluded and b not in excluded
         and not set(EXCLUDE_FLAGS) & (set(flags[a]) | set(flags[b]))
     ]
 
@@ -940,8 +1003,9 @@ _CAT_REST, _CAT_OTHER, _CAT_NULL = "#d4ccc6", "#7b7470", "#e3e7ec"
 # 正式環境量過再定（設計文件第八節）。格子的深淺：絕對值 0.5～0.8 淺、0.8～門檻深、達門檻橘。
 CORR_MATRIX_MAX_COLS = 40
 _CM_MID = 0.8
-_CORR_SKIP_NAMES = {"string": "字串欄位", "null": "最新一期幾乎都是空值", "const": "最新一期只有一個值",
-                    "sparse": "抽到的筆數裡有值的太少", "flat": "抽到的筆數裡只有一個值"}
+_CORR_SKIP_NAMES = {"string": "字串欄位", "empty": "最新一期整期都是空值", "null": "最新一期幾乎都是空值",
+                    "const": "最新一期只有一個值", "sparse": "抽到的筆數裡有值的太少",
+                    "flat": "抽到的筆數裡只有一個值"}
 
 
 def _pct_threshold(v: float) -> str:
@@ -1007,6 +1071,14 @@ def _dtype_group(dtype: str) -> str:
     if dtype in _FLOAT_TYPES:
         return dtype
     return "string"
+
+
+def _shorten(items: list[str], unit: str) -> tuple[str, str]:
+    """（顯示文字、完整清單）。超過三個只寫前兩個和總數，完整清單放滑鼠提示。"""
+    full = "、".join(items)
+    if len(items) <= 3:
+        return full, full
+    return f"{'、'.join(items[:2])}…共 {len(items)} {unit}", full
 
 
 def _e(v: Any) -> str:
@@ -1144,8 +1216,8 @@ table.t .n{text-align:right}
 table.t tbody tr:hover td{background:#f3f8ff}
 table.kv th{width:12em;cursor:default}
 table.actions td{vertical-align:top;padding:8px 10px}
-ul.periods{margin:6px 0 0;padding-left:18px;font-weight:normal;font-size:13px}
-ul.periods li{margin:2px 0}ul.periods button{margin-left:6px}
+ul.names{margin:6px 0 0;padding-left:18px;font-weight:normal;font-size:13px}
+ul.names li{margin:2px 0}ul.names button{margin-left:6px}
 .toolbar{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;margin:10px 0 0;font-size:13px}
 .toolbar input.q{width:260px;padding:4px 8px;border:1px solid var(--line);border-radius:6px}
 .toolbar select{padding:2px 4px}
@@ -1279,7 +1351,7 @@ function tipText(s,i){var name=s.getAttribute("data-col"),c=DATA.cols&&DATA.cols
  return p+"　空值 "+pct(nl,n)+"（"+fmt(n)+" 筆中 "+fmt(nl)+" 筆）";}
 function cmText(m,i){var g=DATA.cm[Number(m.getAttribute("data-cm"))],k=g.names.length,a=Math.floor(i/k),b=i%k;
  if(a===b)return g.names[a];var r=g.r[i];
- return g.names[a]+" 和 "+g.names[b]+"　"+(r===null?"絕對值不到 "+DATA.corrKeep+"，或沒有算"
+ return g.names[a]+" 和 "+g.names[b]+"　"+(r===null?"絕對值不到 "+DATA.corrKeep+"，或沒算"
   :"相關係數 "+r.toFixed(3)+"（"+fmt(g.n[i])+" 筆兩欄都有值）");}
 var tip=document.createElement("div");tip.className="tip";tip.hidden=true;document.body.appendChild(tip);var lastOn=null;
 document.addEventListener("mousemove",function(ev){var s=ev.target.closest(".spark"),cell=ev.target.closest(".cm i");
@@ -1324,7 +1396,9 @@ class _Report:
         self.corr = (bool(profile["config"].get("checks", {}).get("correlation"))
                      and "correlation" in profile)
         self.corr_pairs = high_corr_pairs(profile, thresholds, self.flags)
-        self.groups = corr_groups(self.corr_pairs, [c["name"] for c in self.feats])
+        self.corr_groups = corr_groups(self.corr_pairs, [c["name"] for c in self.feats])
+        self.corr_excluded = corr_excluded(profile, thresholds)
+        self.matrices = self.build_matrices()
 
     # --- 共用 ---------------------------------------------------------------
 
@@ -1351,11 +1425,7 @@ class _Report:
         return [c for c in self.feats if not set(NULL_FLAGS) & set(self.flags[c["name"]])]
 
     def periods_text(self, ts: list[int]) -> tuple[str, str]:
-        """（顯示文字、完整清單）。超過三期只寫前兩期和總數，完整清單放滑鼠提示。"""
-        full = "、".join(self.labels[t] for t in ts)
-        if len(ts) <= 3:
-            return full, full
-        return f"{'、'.join(self.labels[t] for t in ts[:2])}…共 {len(ts)} 期", full
+        return _shorten([self.labels[t] for t in ts], "期")
 
     @staticmethod
     def span(labels: list[str]) -> str:
@@ -1509,7 +1579,7 @@ class _Report:
             ("s-tail", "極端值", len(self.with_flag("tail")) if self.dist else None, False),
             ("s-corr", "相關性", len(self.with_flag("corr")) if self.corr else None, False),
             *([("s-corr-high", "高度相關的欄位", len(self.with_flag("corr")), True),
-               ("s-corr-matrix", "相關係數矩陣", len(self.matrix_groups()), True),
+               ("s-corr-matrix", "相關係數矩陣", len(self.matrices), True),
                ("s-corr-skip", "未計算的欄位", len(self.corr_skipped()), True)]
               if self.corr else []),
             ("s-all", "全部欄位", len(self.feats), False),
@@ -1554,10 +1624,11 @@ class _Report:
         corr_row = None
         if self.corr:
             reasons = [why for _, why, _ in self.corr_skipped()]
-            skipped = "、".join(f"{_CORR_SKIP_NAMES[k]} {reasons.count(k)}" for k in _CORR_SKIP_NAMES
-                                if reasons.count(k))
-            biggest = f"，最大的一組 {len(self.groups[0])} 欄" if self.groups else ""
-            corr_row = (f"{len(self.groups)} 組{biggest}；另有 {len(reasons)} 欄沒算（{skipped}）")
+            corr_row = f"{len(self.corr_groups)} 組" + (
+                f"，最大的一組 {len(self.corr_groups[0])} 欄" if self.corr_groups else "")
+            if reasons:
+                corr_row += f"；另有 {len(reasons)} 欄沒算：" + "、".join(
+                    f"{_CORR_SKIP_NAMES[k]} {reasons.count(k)}" for k in CORR_REASONS if k in reasons)
         rows = [
             ({}, [_td('<a href="#s-null">空值</a>'), _td(str(n_null), v=n_null, num=True),
                   _td(_e(null_detail), cls="wrap")]),
@@ -1941,14 +2012,17 @@ class _Report:
         if not self.corr:
             return _section("s-corr", "相關性", _not_run("correlation"))
         info, th = self.profile["correlation"], self.thresholds["corr"]
-        took = (f"全部 {info['rows']:,} 筆都拿" if info["rows"] == info["period_rows"]
-                else f"抽 {info['rows']:,} 筆（該期 {info['period_rows']:,} 筆）")
-        intro = _p(f"在最新一期（{_e(self.labels[-1])}）{took}，數值欄位兩兩算 Spearman 相關係數。"
-                   "它看兩欄的大小順序有多一致：1 是一欄越大、另一欄也越大，順序完全一樣；−1 是順序完全相反；"
-                   "0 是看不出關係。只看順序、不看數值本身，所以同一個金額換成千元或取 log，和原欄還是 1。"
-                   f"絕對值 ≥ {th:g} 算高度相關，兩欄幾乎是同一個資訊。")
-        note = _note(f"每一組只用兩欄都有值的筆數；少於 {CORR_MIN_ROWS:,} 筆、或其中一欄在這些筆裡沒有變化，"
-                     "就不算，列在〈未計算的欄位〉。")
+        if info["columns"]:
+            took = (f"全部 {info['rows']:,} 筆都拿" if info["rows"] == info["period_rows"]
+                    else f"抽 {info['rows']:,} 筆（該期 {info['period_rows']:,} 筆）")
+            intro = _p(f"在最新一期，也就是 {_e(self.labels[-1])}，{took}，數值欄位兩兩算 Spearman 相關係數。"
+                       "它看兩欄的大小順序有多一致：1 是一欄越大、另一欄也越大，順序完全一樣；−1 是順序完全相反；"
+                       "0 是看不出關係。只看順序、不看數值本身，所以同一個金額換成千元或取 log，和原欄還是 1。"
+                       f"絕對值 ≥ {th:g} 算高度相關，兩欄幾乎是同一個資訊。")
+        else:
+            intro = _p(f"最新一期，也就是 {_e(self.labels[-1])}，沒有可以算相關係數的數值欄位，"
+                       "原因見〈未計算的欄位〉。")
+        note = _note(f"每一對欄位只用兩欄都有值的筆數；少於 {CORR_MIN_ROWS:,} 筆、或其中一欄在這些筆裡沒有變化，就沒算。")
         return _section("s-corr", "相關性", intro + note + self.corr_high() + self.corr_matrix() + self.corr_skip())
 
     def corr_high(self) -> str:
@@ -1956,17 +2030,16 @@ class _Report:
         by_name = {c["name"]: c for c in self.feats}
         partners = self.corr_partners()
         rows = []
-        for g, names in enumerate(self.groups):
+        for g, names in enumerate(self.corr_groups):
             for name in names:
                 c, ps = by_name[name], partners[name]
-                listed = [p for p, _ in ps]
-                shown = "、".join(listed[:3]) + (f"…共 {len(listed)} 欄" if len(listed) > 3 else "")
+                shown, full = _shorten([p for p, _ in ps], "欄")
                 top = ps[0][1]
                 latest = self.ratios(c)[-1]
                 others = [FLAG_NAMES[k] for k in self.flags[name] if k != "corr"]
                 rows.append(({"data-name": name, "data-grp": f"g{g}"}, [
                     _td(f"第 {g + 1} 組", v=g), _td_name(name), _td(_e(c["dtype"])),
-                    _td(_e(shown), title="、".join(listed) if len(listed) > 3 else "", cls="brk"),
+                    _td(_e(shown), title=full if shown != full else "", cls="brk"),
                     _td(_e(f"{top:.3f}"), v=round(abs(top), 6), num=True),
                     _td(_e(_pct(latest)), v=latest, num=True),
                     _td(_e("、".join(others) or "—"), cls="wrap"),
@@ -1974,7 +2047,8 @@ class _Report:
         body = _p(f"相關係數絕對值 ≥ {th:g} 的欄位。A 像 B、B 像 C 時，三欄算同一組，所以同一組裡也可能有兩欄"
                   f"沒到 {th:g}，下面的矩陣看得到。預設大的組排前面；想看某一組，用「組別」篩，再複製欄名。")
         if rows:
-            options = [("", "全部")] + [(f"g{g}", f"第 {g + 1} 組（{len(n)} 欄）") for g, n in enumerate(self.groups)]
+            options = [("", "全部")] + [(f"g{g}", f"第 {g + 1} 組（{len(n)} 欄）")
+                                        for g, n in enumerate(self.corr_groups)]
             body += (
                 _toolbar("t-corr-high", selects=(("grp", "組別", options, "", "token"),))
                 + _table("t-corr-high", [("組別", True), ("欄位", False), ("型別", False),
@@ -1985,26 +2059,42 @@ class _Report:
             )
         else:
             body += _none()
-        return _section("s-corr-high", f"高度相關的欄位（{len(rows)} 欄，{len(self.groups)} 組）", body, level=3)
+        return _section("s-corr-high", f"高度相關的欄位（{len(rows)} 欄，{len(self.corr_groups)} 組）", body,
+                        level=3)
 
-    def matrix_groups(self) -> list[tuple[int, list[str]]]:
-        """要畫矩陣的組（組的序號、要畫的欄）：三欄以上的組；太大的取前 ``CORR_MATRIX_MAX_COLS`` 欄。"""
-        return [(g, names[:CORR_MATRIX_MAX_COLS]) for g, names in enumerate(self.groups) if len(names) >= 3]
+    def build_matrices(self) -> list[tuple[int, dict]]:
+        """要畫的矩陣（組的序號、每一格的資料）：三欄以上的組，太大的取前 ``CORR_MATRIX_MAX_COLS`` 欄。
 
-    def matrix_data(self, names: list[str]) -> dict:
-        """一張矩陣每一格的相關係數與兩欄都有值的筆數（一列接一列攤平）；沒存的配對是 None。"""
-        index = {n: i for i, n in enumerate(names)}
-        k = len(names)
-        r: list[float | None] = [None] * (k * k)
-        n: list[int | None] = [None] * (k * k)
+        每一格的相關係數與兩欄都有值的筆數一列接一列攤平；沒存的配對（絕對值不到 0.5 或沒算）是 None。
+        """
+        if not self.corr:
+            return []
+        index = {}
         for a, b, v, cnt in self.profile["correlation"]["pairs"]:
-            if a in index and b in index:
-                for i, j in ((index[a], index[b]), (index[b], index[a])):
-                    r[i * k + j], n[i * k + j] = v, cnt
-        return {"names": names, "r": r, "n": n}
+            index[(a, b)] = index[(b, a)] = (v, cnt)
+        out = []
+        for g, names in enumerate(self.corr_groups):
+            if len(names) < 3:
+                continue
+            names = names[:CORR_MATRIX_MAX_COLS]
+            cells = [index.get((a, b)) for a in names for b in names]
+            out.append((g, {"names": names, "r": [c and c[0] for c in cells], "n": [c and c[1] for c in cells]}))
+        return out
 
-    def matrix(self, m: int, g: int, names: list[str], data: dict) -> str:
-        th, k = self.thresholds["corr"], len(names)
+    def cm_bands(self) -> list[tuple[str, str]]:
+        """矩陣格子的顏色與圖例：（class、說明）。門檻 ≤ 0.8 時沒有「0.8～門檻」那一段。"""
+        th = self.thresholds["corr"]
+        mid = min(_CM_MID, th)
+        bands = [("h", f"≥ {th:g}，達門檻")]
+        if mid < th:
+            bands.append(("b", f"{mid:g}～{th:g}"))
+        if CORR_KEEP < mid:
+            bands.append(("a", f"{CORR_KEEP:g}～{mid:g}"))
+        return bands + [("", f"不到 {CORR_KEEP:g}，或沒算"), ("d", "自己")]
+
+    def matrix(self, m: int, g: int, data: dict) -> str:
+        th, names = self.thresholds["corr"], data["names"]
+        mid, k = min(_CM_MID, th), len(names)
         cells = []
         for i, v in enumerate(data["r"]):
             if i // k == i % k:
@@ -2014,9 +2104,9 @@ class _Report:
             elif round(abs(v), 9) >= th:
                 cls = "h"
             else:
-                cls = "b" if abs(v) >= _CM_MID else "a"
+                cls = "b" if abs(v) >= mid else "a"
             cells.append(f'<i class="{cls}"></i>' if cls else "<i></i>")
-        total = len(self.groups[g])
+        total = len(self.corr_groups[g])
         cap = f"第 {g + 1} 組（{total} 欄" + (f"，只畫前 {k} 欄）" if total > k else "）")
         row_labels = "".join(f"<span><b>{i + 1}</b>{_e(n)}</span>" for i, n in enumerate(names))
         col_labels = "".join(f"<span>{i + 1}</span>" for i in range(k))
@@ -2025,71 +2115,64 @@ class _Report:
                 f'<div class="cm" data-cm="{m}">{"".join(cells)}</div></div>')
 
     def corr_matrix(self) -> str:
-        th = self.thresholds["corr"]
-        groups = self.matrix_groups()
-        body = _p("三欄以上的組各畫一張，看整組是不是彼此都很像：整片橘色，是每兩欄都幾乎一樣；有些格子不是橘色，"
-                  "是一欄接一欄地像（A 像 B、B 像 C），A 和 C 差得比較多。兩欄一組的，上表就看得到。")
-        keys = [("h", f"≥ {th:g}，達門檻"), ("b", f"{_CM_MID:g}～{th:g}"), ("a", f"{CORR_KEEP:g}～{_CM_MID:g}"),
-                ("", f"不到 {CORR_KEEP:g}，或沒有算"), ("d", "自己")]
         swatch = {"h": "var(--hit)", "b": "var(--bar)", "a": "var(--qo)", "": "var(--track)", "d": "var(--fg)"}
-        body += ('<div class="legend">'
-                 + "".join(f'<span><span class="qkey cell" style="background:{swatch[c]}"></span>{_e(t)}</span>'
-                           for c, t in keys)
-                 + "<span>顏色看絕對值；滑鼠移到格子上看兩欄的名字、相關係數與兩欄都有值的筆數</span></div>")
-        if groups:
-            data = self.matrix_payload()
-            body += ('<div class="cms">' + "".join(self.matrix(m, g, names, data[m])
-                                                   for m, (g, names) in enumerate(groups)) + "</div>")
-            if any(len(self.groups[g]) > len(names) for g, names in groups):
+        body = (_p("三欄以上的組各畫一張，看整組是不是彼此都很像：整片橘色，是每兩欄都幾乎一樣；有些格子不是橘色，"
+                   "是一欄接一欄地像（A 像 B、B 像 C），A 和 C 差得比較多。兩欄一組的，上表就看得到。")
+                + '<div class="legend">'
+                + "".join(f'<span><span class="qkey cell" style="background:{swatch[c]}"></span>{_e(t)}</span>'
+                          for c, t in self.cm_bands())
+                + "<span>顏色看絕對值；滑鼠移到格子上看兩欄的名字、相關係數與兩欄都有值的筆數</span></div>")
+        if self.matrices:
+            body += ('<div class="cms">' + "".join(self.matrix(m, g, data) for m, (g, data) in enumerate(self.matrices))
+                     + "</div>")
+            if any(len(self.corr_groups[g]) > len(data["names"]) for g, data in self.matrices):
                 body += _note(f"一張最多畫 {CORR_MATRIX_MAX_COLS} 欄，超過的依表裡的欄位順序取前面的。")
         else:
             body += _none()
-        return _section("s-corr-matrix", f"相關係數矩陣（{len(groups)} 組）", body, level=3)
-
-    def matrix_payload(self) -> list[dict]:
-        return [self.matrix_data(names) for _, names in self.matrix_groups()]
+        return _section("s-corr-matrix", f"相關係數矩陣（{len(self.matrices)} 組）", body, level=3)
 
     def corr_skipped(self) -> list[tuple[dict, str, str]]:
         """〈未計算的欄位〉：（欄、原因代號、原因），依表裡的欄位順序。"""
         info = self.profile["correlation"]
         out = []
         for c in self.feats:
-            name = c["name"]
-            why = info["skipped"].get(name)
+            why = self.corr_excluded.get(c["name"])
             if why == "string":
                 text = "字串欄位，沒有大小順序"
+            elif why == "empty":
+                text = "最新一期整期都是空值"
             elif why == "null":
-                latest = self.ratios(c)[-1]
-                text = "最新一期整期都是空值" if latest == 1 else f"最新一期幾乎都是空值（{_pct(latest)}）"
+                text = f"最新一期幾乎都是空值（{_pct(self.ratios(c)[-1])}）"
             elif why == "const":
-                text = f"最新一期只有一個值（{_fmt_num(c['min'][-1])}）"
-            elif name in info["sparse"]:
-                why, text = "sparse", (f"抽到的 {info['rows']:,} 筆裡只有 {info['sparse'][name]:,} 筆有值，"
-                                       f"不到 {CORR_MIN_ROWS:,}")
-            elif name in info["flat"]:
-                why, text = "flat", f"抽到的 {info['rows']:,} 筆裡只有一個值（整期不只一個值，但很少見）"
+                text = f"最新一期只有一個值：{_fmt_num(c['min'][-1])}"
+            elif why == "sparse":
+                text = (f"抽到的 {info['rows']:,} 筆裡只有 {info['sparse'][c['name']]:,} 筆有值，"
+                        f"不到 {CORR_MIN_ROWS:,} 筆")
+            elif why == "flat":
+                text = f"抽到的 {info['rows']:,} 筆裡只有一個值；整期不只一個值，只是很少見"
             else:
                 continue
             out.append((c, why, text))
         return out
 
     def corr_skip(self) -> str:
+        info = self.profile["correlation"]
         items = self.corr_skipped()
         rows = [({"data-name": c["name"], "data-why": why},
                  [_td_name(c["name"]), _td(_e(c["dtype"])), _td(_e(text), cls="wrap")]) for c, why, text in items]
-        info = self.profile["correlation"]
-        body = _p("這些欄位和任何一欄都沒有相關係數。")
+        body = _p("這些欄位和任何一欄都沒有相關係數，或這次不列進高度相關。")
         if rows:
-            why_opt = [("", "全部")] + list(_CORR_SKIP_NAMES.items())
+            reasons = {why for _, why, _ in items}
+            why_opt = [("", "全部")] + [(k, _CORR_SKIP_NAMES[k]) for k in CORR_REASONS if k in reasons]
             body += (_toolbar("t-corr-skip", selects=(("why", "原因", why_opt, "", "token"),))
                      + _table("t-corr-skip", [("欄位", False), ("型別", False), ("原因", False)], rows))
         else:
             body += _none()
-        parts = ([f"兩欄都有值的筆數不到 {CORR_MIN_ROWS:,}（兩欄很少同時有值）的 {info['few_pairs']} 組"]
-                 if info["few_pairs"] else []) + (
-                [f"其中一欄在兩欄都有值的那些筆裡沒有變化的 {info['flat_pairs']} 組"] if info["flat_pairs"] else [])
+        parts = ([f"兩欄都有值的不到 {CORR_MIN_ROWS:,} 筆的 {info['few_pairs']} 對"] if info["few_pairs"] else []) + (
+            [f"其中一欄在兩欄都有值的那些筆裡沒有變化的 {info['flat_pairs']} 對"] if info["flat_pairs"] else [])
         if parts:
-            body += _note("另外有幾組配對沒有相關係數，但兩欄各自和別的欄都有算：" + "；".join(parts) + "。")
+            body += _note("另外有幾對欄位沒有相關係數，但兩欄各自和別的欄都有算：" + "；".join(parts)
+                          + "。筆數不夠的，通常是兩欄很少同時有值。")
         return _section("s-corr-skip", f"未計算的欄位（{len(rows)} 欄）", body, level=3)
 
     # --- 全部欄位 -----------------------------------------------------------
@@ -2118,7 +2201,7 @@ class _Report:
         data = {"periods": self.periods, "labels": self.labels, "rows": self.rows,
                 "cols": {c["name"]: [c["null"], c["min"], c["max"]] for c in self.feats},
                 "dist": {c["name"]: d for c in self.feats if (d := self.dist_data(c))},
-                **({"cm": self.matrix_payload(), "corrKeep": CORR_KEEP} if self.corr else {})}
+                **({"cm": [data for _, data in self.matrices], "corrKeep": CORR_KEEP} if self.corr else {})}
         # JSON 裡的字串（欄名、字串欄位的值）可能含 </script> 或 <!--<script，前者提早結束
         # <script>，後者讓真正的 </script> 失效、吞掉後半頁；所有 < 都換成 \u003c
         blob = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
@@ -2179,7 +2262,7 @@ class _Report:
             f' <button type="button" data-copy-text="{_e(chr(10).join(names))}">{_e(button)}</button></li>'
             for label, names in items
         )
-        return f'<ul class="periods">{lis}</ul>'
+        return f'<ul class="names">{lis}</ul>'
 
     def action_summary(self) -> str:
         jump_txt = f"{UPSTREAM_JUMP_MIN * 100:g} 個百分點"
@@ -2191,8 +2274,9 @@ class _Report:
             "check": f"{FLAG_NAMES['drift']}（偏移的期別都已經列在「請上游查」的除外）",
             "judge": f"{FLAG_NAMES['null_some']}（跳幅 < {jump_txt}）、{FLAG_NAMES['const_each']}"
                      + (f"、{FLAG_NAMES['tail']}（{long_txt} 以上的期別都被標）" if self.dist else ""),
-            "corr": f"{FLAG_NAMES['corr']}（最新一期的相關係數絕對值 ≥ {self.thresholds.get('corr', 0):g}）",
         }
+        if self.corr:
+            sources["corr"] = f"{FLAG_NAMES['corr']}：最新一期的相關係數，絕對值 ≥ {self.thresholds['corr']:g}"
         rows = []
         for key in ACTION_ORDER:
             if (key == "check" and not self.dist) or (key == "corr" and not self.corr):
@@ -2205,7 +2289,7 @@ class _Report:
             elif key == "check" and cols:
                 extra = self.period_list(self.drift_start_periods(), "複製這期開始變的欄名")
             elif key == "corr" and cols:
-                extra = self.name_list([(f"第 {g + 1} 組", names) for g, names in enumerate(self.groups)],
+                extra = self.name_list([(f"第 {g + 1} 組", names) for g, names in enumerate(self.corr_groups)],
                                        "複製這組的欄名")
             detail = (f"<details><summary>{len(cols)} 欄</summary><pre>{_e(listing)}</pre></details>"
                       if cols else "0 欄")
@@ -2300,8 +2384,10 @@ class _Report:
 
     def corr_scope(self) -> str:
         info = self.profile["correlation"]
+        if not info["columns"]:
+            return f"最新一期 {_e(self.periods[-1])} 沒有可以算相關係數的數值欄位"
         took = (f"全部 {info['rows']:,} 筆" if info["rows"] == info["period_rows"]
-                else f"抽 {info['rows']:,} 筆（該期 {info['period_rows']:,} 筆，seed {CORR_SAMPLE_SEED}）")
+                else f"抽 {info['rows']:,} 筆，該期 {info['period_rows']:,} 筆，抽樣的 seed 是 {CORR_SAMPLE_SEED}")
         return (f"最新一期 {_e(self.periods[-1])} {took}；數值欄位 {len(info['columns'])} 欄兩兩算 Spearman "
                 f"相關係數，存絕對值 ≥ {CORR_KEEP:g} 的配對")
 

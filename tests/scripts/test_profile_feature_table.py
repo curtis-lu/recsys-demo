@@ -23,6 +23,7 @@ from scripts.profile_feature_table import (
     actions,
     app,
     check_against_table,
+    corr_excluded,
     corr_groups,
     corr_skip_reasons,
     drift_source,
@@ -337,10 +338,9 @@ class TestActions:
 
 
 def _ref_spearman(values, i, j):
-    """逐對計算的對照：名次是整欄一起排（pandas 的平均名次），再取兩欄都有值的筆算 Pearson。"""
-    ranks = pd.DataFrame(values).rank(method="average").to_numpy()
+    """逐對計算的對照：只取兩欄都有值的筆，在這些筆裡重排名次（pandas 的 Spearman）。"""
     ok = ~np.isnan(values[:, i]) & ~np.isnan(values[:, j])
-    return np.corrcoef(ranks[ok, i], ranks[ok, j])[0, 1], int(ok.sum())
+    return pd.Series(values[ok, i]).corr(pd.Series(values[ok, j]), method="spearman"), int(ok.sum())
 
 
 class TestSpearman:
@@ -359,7 +359,8 @@ class TestSpearman:
             assert r == pytest.approx(ref.loc[a_, b_], abs=1e-6) and n == 3000
 
     def test_matrix_matches_pair_by_pair_with_empty_values(self):
-        # 驗收條件：兩兩的計算用矩陣運算，和逐對計算的結果對照
+        # 驗收條件：兩兩的計算用矩陣運算，和逐對計算的結果對照。keep=0 時每一對都會逐對重排，
+        # 這裡驗的是重排的名次對不對
         rng = np.random.default_rng(2)
         base = rng.normal(size=(5000, 4))
         values = np.exp(base[:, [0, 0, 1, 1, 2, 3]] + rng.normal(size=(5000, 6)) * 0.3)
@@ -372,6 +373,27 @@ class TestSpearman:
             for j in range(i + 1, 6):
                 ref, n = _ref_spearman(values, i, j)
                 assert got[(names[i], names[j])] == (pytest.approx(ref, abs=1e-6), n), (i, j)
+
+    def test_empty_values_that_depend_on_the_value_do_not_hide_a_high_correlation(self):
+        # 規格審查的反例：值越大越可能空（有某產品才有餘額）。整欄一起排的名次算出 0.938，
+        # 在兩欄都有值的筆裡重排才是 0.965，0.95 的門檻會被翻過去
+        rng = np.random.default_rng(0)
+        u = rng.random(50_000)
+        a = u + rng.normal(size=50_000) * 0.05
+        a[rng.random(50_000) < u ** (1 / 3)] = np.nan
+        (pair,) = spearman_pairs(np.column_stack([a, u]), ["a", "u"])["pairs"]
+        ref, n = _ref_spearman(np.column_stack([a, u]), 0, 1)
+        assert pair == ["a", "u", pytest.approx(ref, abs=1e-6), n] and pair[2] > 0.96
+        # 只存 ≥ 0.95 時也要留：整欄名次的 0.938 先篩掉的話，精確的 0.965 就沒機會算
+        assert len(spearman_pairs(np.column_stack([a, u]), ["a", "u"], keep=0.95)["pairs"]) == 1
+
+    def test_no_empty_values_keep_the_matrix_value(self):
+        # 兩欄都沒有空值時整欄的名次就是精確的，不重算，和 pandas 的 Spearman 一樣
+        rng = np.random.default_rng(5)
+        a = rng.normal(size=3000)
+        values = np.column_stack([a, a + rng.normal(size=3000) * 0.3])
+        (pair,) = spearman_pairs(values, ["a", "b"])["pairs"]
+        assert pair[2] == pytest.approx(_ref_spearman(values, 0, 1)[0], abs=1e-6)
 
     def test_fewer_than_1000_rows_in_common_gives_no_coefficient(self):
         # a、b 各自有 1,500 筆有值，同時有值的只有 999 或 1,000 筆
@@ -415,21 +437,31 @@ class TestSpearman:
         assert out["pairs"][0][2] < -0.99
 
 
+def _skip_cols():
+    return [
+        dict(_col([0, 0, 0], [0, 0, 0], [9, 9, 9]), name="fine"),
+        dict(_col([100, 0, 0], [None, 0, 0], [None, 9, 9]), name="empty_before"),  # 只看最新一期
+        dict(_col([0, 0, 99], [0, 0, 0], [9, 9, 9]), name="latest_99"),            # 剛好 99%
+        dict(_col([0, 0, 98], [0, 0, 0], [9, 9, 9]), name="latest_98"),
+        dict(_col([0, 0, 100], [0, 0, None], [9, 9, None]), name="latest_empty"),
+        dict(_col([0, 0, 0], [0, 0, 3], [9, 9, 3]), name="latest_one"),
+        dict(_col([0, 0, 0], ["a"] * 3, ["z"] * 3, kind="string", dtype="string"), name="s"),
+        {"name": "load_dt", "dtype": "date", "kind": "unchecked"},
+    ]
+
+
 class TestCorrSkip:
-    def test_reasons_come_from_the_latest_period(self):
-        cols = [
-            dict(_col([0, 0, 0], [0, 0, 0], [9, 9, 9]), name="fine"),
-            dict(_col([100, 0, 0], [None, 0, 0], [None, 9, 9]), name="empty_before"),  # 只看最新一期
-            dict(_col([0, 0, 99], [0, 0, 0], [9, 9, 9]), name="latest_99"),            # 剛好 99%
-            dict(_col([0, 0, 98], [0, 0, 0], [9, 9, 9]), name="latest_98"),
-            dict(_col([0, 0, 100], [0, 0, None], [9, 9, None]), name="latest_empty"),
-            dict(_col([0, 0, 0], [0, 0, 3], [9, 9, 3]), name="latest_one"),
-            dict(_col([0, 0, 0], ["a"] * 3, ["z"] * 3, kind="string", dtype="string"), name="s"),
-            {"name": "load_dt", "dtype": "date", "kind": "unchecked"},
-        ]
-        assert corr_skip_reasons(cols, ROWS, 0.99) == {
-            "latest_99": "null", "latest_empty": "null", "latest_one": "const", "s": "string",
-        }
+    def test_run_skips_only_what_needs_no_threshold(self):
+        # 最新一期「幾乎都是空值」的照樣算，render 時才依門檻排除，換門檻不用重跑
+        assert corr_skip_reasons(_skip_cols(), ROWS) == {"latest_empty": "empty", "latest_one": "const", "s": "string"}
+
+    def test_render_excludes_mostly_empty_columns_by_the_current_threshold(self):
+        profile = {"rows": ROWS, "columns": _skip_cols(), "correlation": {
+            "skipped": corr_skip_reasons(_skip_cols(), ROWS), "sparse": {"fine": 40}, "flat": ["latest_98"]}}
+        base = {"latest_empty": "empty", "latest_one": "const", "s": "string"}
+        assert corr_excluded(profile, TH) == {**base, "latest_99": "null", "fine": "sparse", "latest_98": "flat"}
+        assert corr_excluded(profile, {**TH, "null_ratio": 0.999}) == {**base, "fine": "sparse", "latest_98": "flat"}
+        assert corr_excluded({"columns": []}, TH) == {}  # 沒跑相關性
 
 
 def _corr_profile_stub(pairs, flags_cols=()):
@@ -437,7 +469,8 @@ def _corr_profile_stub(pairs, flags_cols=()):
     names = sorted({x for a, b, _, _ in pairs for x in (a, b)})
     cols = [dict(_col([0, 0, 0], [0, 0, 0], [9, 9, 9]), name=n) for n in names if n not in dict(flags_cols)]
     cols += [dict(c, name=n) for n, c in flags_cols]
-    return {"rows": ROWS, "columns": cols, "correlation": {"pairs": [list(p) for p in pairs]}}
+    return {"rows": ROWS, "columns": cols, "correlation": {
+        "pairs": [list(p) for p in pairs], "skipped": {}, "sparse": {}, "flat": []}}
 
 
 class TestHighCorr:
@@ -794,8 +827,7 @@ class TestRender:
         assert drift.index('data-name="unit_change"') < drift.index('data-name="cc_bal"')
         assert 'data-name="cc_bal" data-drift="p1" data-src="null"' in drift
         # 不比分布的欄位（這裡是每期各只有一個值），展開明細也不放 PSI，免得看到 PSI 很大卻沒被標
-        blob = page.split('<script type="application/json" id="fp-data">')[1].split("</script>")[0]
-        dist = json.loads(blob)["dist"]
+        dist = _blob(page)["dist"]
         assert "psi" in dist["unit_change"] and "psi" not in dist["fx_rate"]
 
     def test_summary_places_drift_and_tail(self, tmp_path):
@@ -837,7 +869,7 @@ class TestRender:
         result = CliRunner().invoke(app, ["render", str(tmp_path)])
         assert result.exit_code == 0, result.output
         page = (tmp_path / "index.html").read_text()
-        for sid in ("s-drift", "s-tail", "s-const-near"):
+        for sid in ("s-drift", "s-tail", "s-const-near", "s-corr"):
             assert "這次沒有跑" in _section_html(page, sid), sid
         assert 'href="#s-drift-num"' not in page and "確認分布" not in page
 
@@ -865,7 +897,7 @@ class TestRender:
         page = (tmp_path / "index.html").read_text()
         blob = page.split('<script type="application/json" id="fp-data">')[1].split("</script>")[0]
         assert "<" not in blob
-        assert json.loads(blob)["cols"]["s2"][1] == ["<!--<script"] * 3
+        assert _blob(page)["cols"]["s2"][1] == ["<!--<script"] * 3
         # 只有兩個 <script>：內嵌的 JSON 與主程式
         assert page.count("</script>") == 2
 
@@ -915,8 +947,9 @@ class TestCorrelationReport:
         for name, why in (("loan", "sparse"), ("flag", "flat"), ("sys_version", "const"), ("s", "string")):
             assert f'data-name="{name}" data-why="{why}"' in skip, name
         assert _names_in(skip) == {"loan", "flag", "sys_version", "s"}
-        assert "只有 40 筆有值" in skip and "的 2 組" in skip
-        assert "2 組，最大的一組 3 欄；另有 4 欄沒算" in _section_html(page, "s-overview")
+        assert "只有 40 筆有值" in skip and "的 2 對" in skip and "沒有變化的" not in skip
+        assert ("2 組，最大的一組 3 欄；另有 4 欄沒算：字串欄位 1、最新一期只有一個值 1、"
+                "抽到的筆數裡有值的太少 1、抽到的筆數裡只有一個值 1") in _section_html(page, "s-overview")
 
     def test_embedded_matrix_data_matches_the_drawing(self, tmp_path):
         write_report(_corr_profile(tmp_path), tmp_path, DEFAULT_THRESHOLDS, None)
@@ -969,6 +1002,41 @@ class TestCorrelationReport:
         assert "這次沒有跑" in corr and "checks.correlation" in corr
         assert 'href="#s-corr-high"' not in page and "每組留一欄" not in page
         assert "cm" not in _blob(page)
+
+    def test_new_null_ratio_moves_mostly_empty_columns_out_of_the_pairs(self, tmp_path):
+        # 最新一期 60% 是空值：run 時照樣算；render 的 null_ratio 調到 0.5 時，跟〈空值〉一起變
+        profile = _corr_profile(tmp_path)
+        profile["columns"] += [dict(_col([0, 0, 60], [0, 0, 0], [9, 9, 9]), name="thin"),
+                               dict(_col([0, 0, 0], [0, 0, 0], [9, 9, 9]), name="twin")]
+        profile["correlation"]["pairs"].append(["thin", "twin", 0.99, 40])
+        for null_ratio, high in ((0.99, True), (0.5, False)):
+            write_report(profile, tmp_path, {**DEFAULT_THRESHOLDS, "null_ratio": null_ratio}, None)
+            page = (tmp_path / "index.html").read_text()
+            assert ("thin" in _names_in(_section_html(page, "s-corr-high"))) is high, null_ratio
+            assert ('data-name="thin" data-why="null"' in _section_html(page, "s-corr-skip")) is not high
+            assert ("twin" in _names_in(_section_html(page, "s-corr-high"))) is high
+
+    def test_overview_without_skipped_columns(self, tmp_path):
+        profile = _corr_profile(tmp_path)
+        profile["correlation"].update(skipped={}, sparse={}, flat=[])
+        write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
+        page = (tmp_path / "index.html").read_text()
+        row = _section_html(page, "s-overview").split('href="#s-corr"')[1].split("</tr>")[0]
+        assert "2 組，最大的一組 3 欄</td>" in row and "沒算" not in row and "（）" not in page
+
+    def test_matrix_legend_follows_a_threshold_below_0_8(self, tmp_path):
+        write_report(_corr_profile(tmp_path), tmp_path, {**DEFAULT_THRESHOLDS, "corr": 0.6}, None)
+        matrix = (tmp_path / "index.html").read_text().split('<section id="s-corr-matrix">')[1].split(
+            '<section id="s-corr-skip">')[0]
+        assert "≥ 0.6，達門檻" in matrix and "0.5～0.6" in matrix and "0.8～" not in matrix
+        assert 'class="b"' not in matrix.split('data-cm="0">')[1]  # 0.93 達門檻，不是 0.8～門檻那一段
+
+    def test_no_numeric_column_to_correlate(self, tmp_path):
+        profile = _corr_profile(tmp_path)
+        profile["correlation"].update(columns=[], rows=0, pairs=[], sparse={}, flat=[], few_pairs=0)
+        write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
+        page = (tmp_path / "index.html").read_text()
+        assert "沒有可以算相關係數的數值欄位" in _section_html(page, "s-corr") and "抽 0 筆" not in page
 
     def test_page_ids_and_wording(self, tmp_path):
         import re
@@ -1149,9 +1217,8 @@ class TestCorrelationStats:
         assert corr["rows"] == corr["period_rows"] == 1500  # 不到 50,000 筆就全拿
         assert corr["skipped"] == {"d": "string", "e": "const"}
         assert corr["columns"] == ["a", "b", "c"]
-        # 每 15 筆有 3 筆是 NaN 或 ±Infinity：c 剩 1,200 筆。名次是整欄一起排，有空值時是近似，不是剛好 1
-        assert [(x, y, n) for x, y, _, n in corr["pairs"]] == [("a", "b", 1500), ("a", "c", 1200), ("b", "c", 1200)]
-        assert [r for _, _, r, _ in corr["pairs"]] == [1.0, pytest.approx(1, abs=1e-5), pytest.approx(1, abs=1e-5)]
+        # 每 15 筆有 3 筆是 NaN 或 ±Infinity：c 剩 1,200 筆。在兩欄都有值的筆裡重排名次，所以剛好是 1
+        assert corr["pairs"] == [["a", "b", 1.0, 1500], ["a", "c", 1.0, 1200], ["b", "c", 1.0, 1200]]
         assert set(profile["pass_seconds"]) == {"basic", "correlation"}
 
     def test_batches_give_the_same_correlation(self, spark):
@@ -1209,8 +1276,8 @@ class TestRunCommand:
         assert result.exit_code == 0, result.output
         profile = json.loads((out / PROFILE_FILENAME).read_text())
         assert profile["periods"] == ["2024-01", "2024-02"]
-        assert profile["correlation"]["skipped"] == {"dead": "null"}
+        assert profile["correlation"]["skipped"] == {"dead": "empty"}
         assert set(profile["pass_seconds"]) == {"basic", "correlation"}
         page = (out / "index.html").read_text()
         assert 'data-name="dead"' in _section_html(page, "s-null-all")
-        assert 'data-name="dead" data-why="null"' in _section_html(page, "s-corr-skip")
+        assert 'data-name="dead" data-why="empty"' in _section_html(page, "s-corr-skip")
