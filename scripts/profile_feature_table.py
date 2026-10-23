@@ -2177,7 +2177,7 @@ class _Report:
         parts = ([f"兩欄都有值的不到 {CORR_MIN_ROWS:,} 筆的 {info['few_pairs']} 對"] if info["few_pairs"] else []) + (
             [f"其中一欄在兩欄都有值的那些筆裡沒有變化的 {info['flat_pairs']} 對"] if info["flat_pairs"] else [])
         if parts:
-            body += _note("另外有幾對欄位沒有相關係數，兩欄都不在上表：" + "；".join(parts)
+            body += _note("另外有幾對欄位沒有相關係數，原因不在單一欄位，所以不列在上表：" + "；".join(parts)
                           + "。筆數不夠的，通常是兩欄很少同時有值。")
         return _section("s-corr-skip", f"未計算的欄位（{len(rows)} 欄）", body, level=3)
 
