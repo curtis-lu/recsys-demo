@@ -18,12 +18,10 @@ from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
 
 # The landed form of these frames lives with the report's readers (#536): the
-# report reads it back without importing this Spark module. Imported back so
-# the callers of these names here keep working.
-from recsys_tfb.evaluation.result_readers import (  # noqa: F401
+# report reads it back without importing this Spark module.
+from recsys_tfb.evaluation.result_readers import (
     FRAME_LONG as _LONG,
     FRAME_MATRIX as _MATRIX,
-    frame_from_json,
     frame_to_json,
 )
 

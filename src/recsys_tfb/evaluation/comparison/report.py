@@ -31,6 +31,7 @@ from recsys_tfb.evaluation.report_sections.shared import (
     results_read_by,
 )
 from recsys_tfb.evaluation.result_readers import (
+    CELLS,
     DIFF,
     DISPLAY_GUARDRAIL_RECALL_K,
     DISPLAY_PRIMARY_MAP_K,
@@ -194,7 +195,7 @@ def _every_key_table(block: dict, rows: dict, column_a: str,
     K cut kept (``display_ks.every_key_rows``): a side's cell where the cut
     kept that side's key, the difference where it kept both, blank
     elsewhere."""
-    cells = block["cells"]
+    cells = block[CELLS]
     keys = rows[DISPLAY_ROWS]
 
     def column(side: str) -> list:

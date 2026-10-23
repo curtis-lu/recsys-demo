@@ -7,8 +7,7 @@ The report modules (``report_sections/*``, ``report_builder``,
 ``evaluation/report.py``) read through this module instead of importing the
 modules that compute the results (``metrics``, ``metrics_spark``,
 ``baselines``, ``prediction_quality``, ``diagnostics_spark``). Those modules
-import the names back from here, so their other callers — the nodes, the
-scripts, training — did not change.
+do not re-export these names: every caller imports them from here.
 
 Imports nothing from the project and not pyspark, so it cannot close an
 import cycle and loading it costs a report nothing. ``pandas`` is imported
@@ -68,9 +67,35 @@ ALL_POSITIVE_WARNS_KEY = "all_positive_warns"
 #: With the switch off, the log and the report warn when the all-positive
 #: groups are more than this share of the groups holding a positive (#376).
 #: A constant, not a setting. Here because the report prints it beside the
-#: landed warning, and its share format reads it (``report_sections.shared
-#: .format_share``).
+#: landed warning, and its share format reads it (:func:`format_share`).
 ALL_POSITIVE_WARN_SHARE = 0.10
+
+
+def format_share(share: float) -> str:
+    """An all-positive share as the log and the report print it: ``5.3%``.
+
+    One decimal, unless the share is above :data:`ALL_POSITIVE_WARN_SHARE`
+    and one decimal rounds it down to the threshold — 1004 of 10000 printed
+    as ``10.0%`` beside "above 10%". Then more decimals, at most four, until
+    the printed value is above the threshold too (``10.04%``). One function,
+    so the log and the report cannot print the same share two ways (#376).
+    Here, not in the report's modules: the evaluation node's log and the
+    report both print it, and neither side may import the other.
+    """
+    for digits in range(1, 5):
+        text = f"{share:.{digits}%}"
+        if (not share > ALL_POSITIVE_WARN_SHARE
+                or float(text[:-1]) / 100 > ALL_POSITIVE_WARN_SHARE):
+            break
+    return text
+
+
+#: The node a result landed before #534 / #535 / #536 is re-computed from,
+#: named in every message that refuses such a result (the report's refusals
+#: and the computation layer's pre-checks): it is the first node of the main
+#: line whose slice re-lands the row facts, the metrics and the baseline.
+#: One name, so a rename of the node edits one line.
+LEDGER_RERUN_NODE = "compute_row_facts"
 
 
 # ---------------------------------------------------------------------------

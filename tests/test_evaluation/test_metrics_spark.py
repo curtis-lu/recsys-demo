@@ -1094,10 +1094,8 @@ def test_metric_k_truncates_main_macro_same_as_the_numpy_twin(spark):
     """
     import pandas as pd
 
-    from recsys_tfb.evaluation.metrics import (
-        compute_macro_per_item_map,
-        metric_params,
-    )
+    from recsys_tfb.evaluation.metrics import compute_macro_per_item_map
+    from recsys_tfb.evaluation.result_readers import metric_params
 
     pdf = _metric_k_pdf()
     params = _metric_k_params()
@@ -1152,7 +1150,7 @@ def test_headline_k_is_computed_when_k_values_leaves_out_all(spark):
 
     ``_metric_k_pdf`` untruncated: A .75, B 5/6, C 2/3 -> macro .75.
     """
-    from recsys_tfb.evaluation.metrics import resolved_all_k
+    from recsys_tfb.evaluation.result_readers import resolved_all_k
 
     pdf = _metric_k_pdf()
     params = _make_parameters(k_values=[1, 2])

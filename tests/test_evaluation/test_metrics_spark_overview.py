@@ -5,7 +5,7 @@ import pytest
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation import metrics_spark as ms
 from recsys_tfb.evaluation.report_sections import overview, ranking_metrics
-from recsys_tfb.evaluation.metrics import POPULATION_KEY, resolved_all_k
+from recsys_tfb.evaluation.result_readers import POPULATION_KEY, resolved_all_k
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
 

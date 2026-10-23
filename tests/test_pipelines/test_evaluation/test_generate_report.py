@@ -995,25 +995,59 @@ def test_compare_only_sends_a_changed_computed_setting_to_a_node_it_has():
         assert expected in names, (compare_only, expected)
 
 
-def test_a_changed_display_k_sends_the_redraw_to_the_comparison_cut():
-    """The comparison report's K are cut by
-    ``resolve_comparison_display_ks`` and landed; its fingerprint carries
-    the display keys it read, so it alone is stale and the advice is its own
-    node — no computed setting moved, nothing above it re-runs."""
+@pytest.mark.parametrize("compare_only, key, change, expected", [
+    # --compare-only has no main line: the cut's own node is the narrowest.
+    (True, "guardrail_recall_k", [1, 2], "resolve_comparison_display_ks"),
+    (True, "primary_map_k", [1, 2], "resolve_comparison_display_ks"),
+    # --compare: the slice from the cut ends in generate_report, which
+    # refuses display_ks.json, stale under primary_map_k too. The advice is
+    # the node before both cuts.
+    (False, "guardrail_recall_k", [1, 2], "resolve_display_ks"),
+    (False, "primary_map_k", [1, 2], "resolve_display_ks"),
+])
+def test_a_changed_display_k_sends_the_comparison_redraw_to_a_slice_that_draws(
+        compare_only, key, change, expected):
+    """The comparison report's K are cut by ``resolve_comparison_display_ks``
+    and landed; its fingerprint carries the display keys it read, so it alone
+    is stale. The advice names the node of the run's mode whose slice also
+    re-runs everything else a draw needs, without a Spark node."""
+    import re
+    from pathlib import Path
+
+    import yaml
+
+    from recsys_tfb.pipelines.evaluation import create_pipeline
+
     computed_with = _compare_params(dict(_OTHER_MODEL))
-    landed = _comparison_inputs(computed_with)
+    landed = _comparison_inputs(computed_with, compare_only)
     now = copy.deepcopy(computed_with)
-    now["evaluation"]["report"]["display"]["guardrail_recall_k"] = [1, 2]
+    now["evaluation"]["report"]["display"][key] = change
 
     with pytest.raises(ValueError) as exc:
-        _comparison_node("generate_comparison_report", False).func(
+        _comparison_node("generate_comparison_report", compare_only).func(
             **landed, parameters=now)
 
     msg = str(exc.value)
     assert ("comparison_display_ks (written by resolve_comparison_display_ks)"
             " was computed with different settings") in msg
-    assert "evaluation.report.display.guardrail_recall_k: [1] -> [1, 2]" in msg
-    assert "--from-node resolve_comparison_display_ks" in msg
+    assert f"evaluation.report.display.{key}: " in msg
+    assert re.findall(r"--from-node (\w+)", msg) == [expected]
+
+    pipeline = create_pipeline(
+        compare_source=_OTHER_MODEL, compare_only=compare_only)
+    catalog = set(yaml.safe_load(
+        (Path(__file__).parents[3] / "conf/base/catalog.yaml").read_text()))
+    sliced, _plan = pipeline.slice_from(
+        expected, lambda name: name in catalog or name == "parameters")
+    ran = {n.name for n in sliced.nodes}
+    assert {"resolve_comparison_display_ks",
+            "generate_comparison_report"} <= ran
+    if not compare_only:
+        assert {"resolve_display_ks", "generate_report"} <= ran
+    spark_nodes = {"prepare_eval_data", "compute_row_facts", "compute_metrics",
+                   "compute_baseline_metrics", "compute_compare_metrics",
+                   "compute_prediction_quality", "compute_report_aggregates"}
+    assert ran & spark_nodes == set(), sorted(ran)
 
 
 @pytest.mark.parametrize("reader", ["compare_to_source",

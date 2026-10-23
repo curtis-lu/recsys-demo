@@ -771,7 +771,7 @@ training 為什麼分模型、預測兩個常數，而不是一個：只有一�
 
 ---
 
-# 已登記的例外（2 筆）
+# 已登記的例外（3 筆）
 
 **看到這些不必以為判準是裝飾。** 它們各有登記過的理由：
 
@@ -779,8 +779,9 @@ training 為什麼分模型、預測兩個常數，而不是一個：只有一�
 |---|---|---|
 | dataset 的 `split_train_keys` 一個 node 產出兩樣東西，分別給兩個下游 | 1（反方向） | 兩樣東西是同一個式子的正反兩面，拆開就只剩「兩處程式碼碰巧一致」。見下方 |
 | dataset 的三個 build node 把組裝交給共用的 `build_model_input`，它裝了好幾個決策 | 3、4、5 | 四個 split 組 model_input 的決策完全相同，只差讀哪幾個月；拆成四份，一份先改了，四個 split 就不對稱了（規則 16）。見下方 |
+| evaluation 的 `compute_compare_metrics` 一個 node 產出四樣東西（A′、B′ 各自的列的事實與指標），分別給兩個下游 | 1（反方向） | 四樣都落地、各有 catalog 條目，拆開不多一個能撈出來看的地方，也不多一個用得到的接續點。見下方 |
 
-要新增一筆到這張表，**必須先問使用者**（同 `architecture-constraints.md` 節三的例外登記規則）。兩筆都是使用者 2026-09-25 同意登記的：`split_train_keys` 見 ADR-0029 決定 14，`build_model_input` 見 #467 的留言。
+要新增一筆到這張表，**必須先問使用者**（同 `architecture-constraints.md` 節三的例外登記規則）。前兩筆是使用者 2026-09-25 同意登記的：`split_train_keys` 見 ADR-0029 決定 14，`build_model_input` 見 #467 的留言。`compute_compare_metrics` 是使用者 2026-10-23 在 #536 審查時同意登記的。
 
 這張表原本還有一筆：training 的 7 個診斷 node 的 `def` 在 `recsys_tfb.diagnosis.model` 底下（違反規則 8，ADR-0014 決定 6 刻意不搬）。#489 照 [ADR-0030](../adr/0030-training-second-pass-honest-adapter-shared-scoring.md) 決定 6 把它們搬回 `pipelines/training/nodes.py`、判斷寫進 node body、機制進 `pipelines/training/steps/`，這一筆跟著刪掉（使用者 2026-09-28 同意）。
 
@@ -799,6 +800,20 @@ train_dev_keys = keys.filter(to_dev)
 ```
 
 train_dev 取「抽到門檻以下」，train 取它的否定。同一個式子的正反兩面，所以每一列必定落在剛好一邊。拆成兩個 node，就得各算一次抽樣，這個保證就從「同一個式子的正反兩面」退化成「兩處程式碼碰巧一致」。哪天只改了一邊，就會有列同時在兩邊、或兩邊都不在，而且不報錯。
+
+## `compute_compare_metrics`：一個 node，四個輸出
+
+它在比較的共同母體上，對兩邊（這次的模型 A′、比較對象 B′）各做同一件事：先數列的事實，再用那份列的事實算指標。產出 `compare_row_facts_a`、`compare_metrics_a`、`compare_row_facts_b`、`compare_metrics_b`；兩份指標給 `compare_to_source`，A′ 的列的事實給 `generate_comparison_report`。照規則 1 的反方向，這是「先數、再算」兩個 node 被塞在一起；主線就是拆開的（`compute_row_facts`、`compute_metrics`）。
+
+**為什麼留**：
+
+- 規則 1 的判定問題是「出事的時候能不能單獨撈出來看」。四樣都有 catalog 條目、都落地，已經各自撈得出來；拆開不會多一個觀察點。
+- 主線拆開，是為了讓設定改了之後有一個共同的重跑起點（`COMPUTED_KEYS` 指向 `compute_row_facts`）。比較這側不需要：它自己的重跑建議（換了比較對象、`--compare-only` 下改了算的設定）都從這個 node 開始（`COMPARISON_RERUN_NODE`），`--compare` 下改了算的設定則從主線的 `COMPUTED_KEYS` 那一列開始；拆出列的事實那一半，沒有人會從它接續。
+- 兩邊走同一個迴圈、同一段程式，A′ 與 B′ 必定用同一套算法；這點拆開也保得住，不是留下的理由，只是拆開不會壞掉它。
+
+**代價與守門**：四個輸出照位置對應 `pipeline.py` 的 outputs，對調了不會報錯，比較報表會把兩邊標反。有一條測試在對調時轉紅（斷言經 outputs 名字拿到的 A′ 帶分群欄、B′ 沒有）。
+
+這筆例外只登記這一個 node。比較這側以後多算一種結果（例如決定 16 的兩個 AP），要不要另開 node，照規則 1 重新判斷。
 
 ## `build_model_input`：一個 helper，好幾個決策
 

@@ -208,3 +208,22 @@ def _annotations(this: dict, reference: dict) -> dict:
         a, b = read(this), read(reference)
         out[name] = {THIS: a, REFERENCE: b, SAME: a == b}
     return out
+
+
+def populations_that_differ(comparison: dict) -> list[str]:
+    """The annotations of the population ledger on which the two sides of
+    ``comparison`` disagree, as ``"<grain>: <name>"`` (the category grain
+    only when compared); empty when they agree on all four.
+
+    One reading of ``SAME`` for both callers: the baseline comparison, whose
+    sides agree by construction (one that does not is a bug upstream), and the
+    comparison with another source, whose sides need not.
+    """
+    return [
+        f"{grain}: {name}"
+        for grain, block in (("item grain", comparison),
+                             ("category grain", comparison["category"]))
+        if block is not None
+        for name, annotation in block[POPULATION_KEY].items()
+        if not annotation[SAME]
+    ]

@@ -601,26 +601,26 @@ class TestMetricParams:
     }
 
     def test_missing_block_falls_back(self):
-        from recsys_tfb.evaluation.metrics import metric_params
+        from recsys_tfb.evaluation.result_readers import metric_params
 
         assert metric_params({}) == self.DEFAULTS
         assert metric_params({"evaluation": None}) == self.DEFAULTS
         assert metric_params({"evaluation": {"metric": None}}) == self.DEFAULTS
 
     def test_missing_keys_fall_back(self):
-        from recsys_tfb.evaluation.metrics import metric_params
+        from recsys_tfb.evaluation.result_readers import metric_params
 
         assert metric_params({"evaluation": {"metric": {}}}) == self.DEFAULTS
 
     def test_none_values_fall_back(self):
-        from recsys_tfb.evaluation.metrics import metric_params
+        from recsys_tfb.evaluation.result_readers import metric_params
 
         cfg = {"k": None, "weight_alpha": None, "min_positives": None,
                "shrinkage_k": None}
         assert metric_params({"evaluation": {"metric": cfg}}) == self.DEFAULTS
 
     def test_values_are_type_normalised(self):
-        from recsys_tfb.evaluation.metrics import metric_params
+        from recsys_tfb.evaluation.result_readers import metric_params
 
         cfg = {"k": 3, "weight_alpha": 1, "min_positives": 2, "shrinkage_k": 5}
         out = metric_params({"evaluation": {"metric": cfg}})
@@ -665,8 +665,11 @@ class TestResolvedAllK:
     def test_the_bundle_s_own_ledger_answers(self):
         """Each bundle is read at the K it records (#535), not at an item
         count: with ``event`` declared the two differ (#434)."""
-        from recsys_tfb.evaluation.metrics import (
-            ALL_K_KEY, POPULATION_KEY, resolved_all_k)
+        from recsys_tfb.evaluation.result_readers import (
+            ALL_K_KEY,
+            POPULATION_KEY,
+            resolved_all_k,
+        )
 
         assert resolved_all_k({POPULATION_KEY: {ALL_K_KEY: 17}}) == 17
 
@@ -674,7 +677,7 @@ class TestResolvedAllK:
         """A bundle written before #535: the report refuses it first
         (``refuse_pre_ledger``); here there is no item count to fall back on,
         the row facts left the bundle."""
-        from recsys_tfb.evaluation.metrics import resolved_all_k
+        from recsys_tfb.evaluation.result_readers import resolved_all_k
 
         with pytest.raises(KeyError):
             resolved_all_k({"dataset_overview": {"totals": {"n_items": 12}}})
@@ -687,7 +690,9 @@ class TestResolvedAllK:
 
 class TestDropAllPositiveGroups:
     def test_missing_block_or_none_means_off(self):
-        from recsys_tfb.evaluation.metrics import drop_all_positive_groups
+        from recsys_tfb.evaluation.result_readers import (
+            drop_all_positive_groups,
+        )
 
         assert drop_all_positive_groups({}) is False
         assert drop_all_positive_groups({"evaluation": None}) is False
@@ -698,7 +703,9 @@ class TestDropAllPositiveGroups:
                 "drop_all_positive_groups": None}}}) is False
 
     def test_true_turns_it_on(self):
-        from recsys_tfb.evaluation.metrics import drop_all_positive_groups
+        from recsys_tfb.evaluation.result_readers import (
+            drop_all_positive_groups,
+        )
 
         assert drop_all_positive_groups(
             {"evaluation": {"query_filter": {
@@ -707,7 +714,9 @@ class TestDropAllPositiveGroups:
     def test_not_read_from_evaluation_metric(self):
         """``metric_params`` silently drops unknown keys of
         ``evaluation.metric``, so a switch written there would do nothing."""
-        from recsys_tfb.evaluation.metrics import drop_all_positive_groups
+        from recsys_tfb.evaluation.result_readers import (
+            drop_all_positive_groups,
+        )
 
         assert drop_all_positive_groups(
             {"evaluation": {"metric": {
@@ -718,9 +727,8 @@ class TestAllPositiveShare:
     def test_denominator_is_the_groups_with_a_positive(self):
         """The mAP denominator: ``n_queries - n_excluded_queries``, where
         ``n_excluded_queries`` counts only the zero-positive groups."""
-        from recsys_tfb.evaluation.metrics import (
-            ALL_POSITIVE_KEY, all_positive_share,
-        )
+        from recsys_tfb.evaluation.metrics import all_positive_share
+        from recsys_tfb.evaluation.result_readers import ALL_POSITIVE_KEY
 
         bundle = {"n_queries": 1000, "n_excluded_queries": 50,
                   ALL_POSITIVE_KEY: 95}
@@ -729,9 +737,8 @@ class TestAllPositiveShare:
     def test_unknown_when_the_count_is_missing_or_no_group_has_a_positive(self):
         """A bundle written before #376 has no count; a run where no group
         holds a positive has no denominator."""
-        from recsys_tfb.evaluation.metrics import (
-            ALL_POSITIVE_KEY, all_positive_share,
-        )
+        from recsys_tfb.evaluation.metrics import all_positive_share
+        from recsys_tfb.evaluation.result_readers import ALL_POSITIVE_KEY
 
         assert all_positive_share(
             {"n_queries": 10, "n_excluded_queries": 0}) is None
@@ -766,7 +773,7 @@ class TestFormatShare:
     the report's side since #536 (``report_sections.shared``)."""
 
     def test_one_decimal_by_default(self):
-        from recsys_tfb.evaluation.report_sections.shared import format_share
+        from recsys_tfb.evaluation.result_readers import format_share
 
         assert format_share(0.053) == "5.3%"
         assert format_share(50 / 950) == "5.3%"
@@ -776,7 +783,7 @@ class TestFormatShare:
     def test_above_the_threshold_never_prints_as_the_threshold(self):
         """1004 / 10000 is above 10% and would print 10.0% beside "above
         10%"; more decimals until the printed value is above it too."""
-        from recsys_tfb.evaluation.report_sections.shared import format_share
+        from recsys_tfb.evaluation.result_readers import format_share
 
         assert format_share(1004 / 10000) != "10.0%"
         assert format_share(1004 / 10000) == "10.04%"
@@ -789,7 +796,7 @@ class TestAllPositiveShareWarns:
 
     @staticmethod
     def _bundle(n_all_positive: int, n_with_positive: int = 100) -> dict:
-        from recsys_tfb.evaluation.metrics import ALL_POSITIVE_KEY
+        from recsys_tfb.evaluation.result_readers import ALL_POSITIVE_KEY
 
         return {"n_queries": n_with_positive + 7, "n_excluded_queries": 7,
                 ALL_POSITIVE_KEY: n_all_positive}
@@ -800,8 +807,9 @@ class TestAllPositiveShareWarns:
         assert all_positive_share_warns(self._bundle(11), {}) is True
 
     def test_exactly_the_threshold_does_not_warn(self):
-        from recsys_tfb.evaluation.metrics import (
-            ALL_POSITIVE_WARN_SHARE, all_positive_share_warns,
+        from recsys_tfb.evaluation.metrics import all_positive_share_warns
+        from recsys_tfb.evaluation.result_readers import (
+            ALL_POSITIVE_WARN_SHARE,
         )
 
         assert ALL_POSITIVE_WARN_SHARE == 0.10

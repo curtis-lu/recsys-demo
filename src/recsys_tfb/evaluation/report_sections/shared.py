@@ -18,13 +18,13 @@ from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.evaluation.result_readers import (
     ALL_POSITIVE_KEY,
     ALL_POSITIVE_SHARE_KEY,
-    ALL_POSITIVE_WARN_SHARE,
     ALL_POSITIVE_WARNS_KEY,
     CELLS,
     DIFF,
     DISPLAY_BINS_KEY,
     DISPLAY_HEADLINE_SHOWN,
     ENTRIES,
+    LEDGER_RERUN_NODE,
     N_SCORED_WITH_POSITIVE_KEY,
     N_WITH_POSITIVE_KEY,
     POPULARITY_WINDOW_KEY,
@@ -243,7 +243,7 @@ def refuse_pre_rename_per_item(name: str, bundle: dict | None) -> None:
                 f"{name} predates the #534 rename: its per_item block "
                 f"({grain}) still carries {found}, the per-item recall@K's "
                 f"old name. Re-compute it — `python -m recsys_tfb evaluation "
-                f"--from-node compute_row_facts`, with the flags of the run "
+                f"--from-node {LEDGER_RERUN_NODE}`, with the flags of the run "
                 f"that wrote it (e.g. --post-training) — then re-draw. Drawn "
                 f"as-is, every per-item recall cell would be blank."
             )
@@ -265,7 +265,7 @@ def refuse_pre_ledger(name: str, bundle: dict | None) -> None:
         raise ValueError(
             f"{name} predates #535: it carries no {POPULATION_KEY!r} ledger, "
             f"and its run landed no row_facts.json. Re-compute it — `python "
-            f"-m recsys_tfb evaluation --from-node compute_row_facts`, with "
+            f"-m recsys_tfb evaluation --from-node {LEDGER_RERUN_NODE}`, with "
             f"the flags of the run that wrote it (e.g. --post-training) — "
             f"then re-draw."
         )
@@ -312,7 +312,7 @@ def refuse_pre_landed_reads(results: Mapping[str, dict | None]) -> None:
         raise ValueError(
             f"Landed before #536, these results lack what the report reads "
             f"instead of computing: {'; '.join(missing)}. Re-compute them — "
-            f"`python -m recsys_tfb evaluation --from-node compute_row_facts`, "
+            f"`python -m recsys_tfb evaluation --from-node {LEDGER_RERUN_NODE}`, "
             f"with the flags of the run that wrote them (e.g. "
             f"--post-training) — then re-draw."
         )
@@ -422,25 +422,6 @@ def _macro_coverage_mb(n_a: int, n_b: int, n_items: int) -> str:
 #: 開關的設定鍵全名：印進警告與加註，讀者照著就找得到要改哪裡。
 ALL_POSITIVE_SWITCH = "evaluation.query_filter.drop_all_positive_groups"
 
-
-def format_share(share: float) -> str:
-    """An all-positive share as the log and the report print it: ``5.3%``.
-
-    One decimal, unless the share is above
-    ``result_readers.ALL_POSITIVE_WARN_SHARE`` and one decimal rounds it down
-    to the threshold — 1004 of 10000 printed as ``10.0%`` beside "above
-    10%". Then more decimals, at most four, until the printed value is above
-    the threshold too (``10.04%``). One function, so the log and the report
-    cannot print the same share two ways (#376). Formatting, so it lives on
-    the report's side (#536); the evaluation nodes' log imports it from here.
-    """
-    for digits in range(1, 5):
-        text = f"{share:.{digits}%}"
-        if (not share > ALL_POSITIVE_WARN_SHARE
-                or float(text[:-1]) / 100 > ALL_POSITIVE_WARN_SHARE):
-            break
-    return text
-
 #: 全正的組為什麼值得數。不寫「AP 都是 1」或「滿分」：label 只有 0／1 時，K 小於
 #: 組的列數 n 的 ``map@K``＝K/n、K 大於 n 的 ``precision@K``＝n/K，label 分級時
 #: 值又不同；永遠成立的只有「排法不影響它的組層級（per-query）指標」。也不寫「每組
@@ -478,10 +459,13 @@ def zero_positive_draw_on_test(parameters: dict) -> float | None:
 
 
 def scored_with_positive(metrics: dict) -> int | None:
-    """算進衡量指標的組數：指標結果母體帳落地的
-    ``n_scored_queries_with_positive``（#536）。報表不再拿「有正例的 − 全正的」
-    自己減：同一個數由算指標的那一次記下，報表與比較層讀同一份。帳缺這個鍵
-    （#535 之前的檔，報表先 ``refuse_pre_ledger`` 擋下）回 ``None``。"""
+    """The number of query groups counted into the metrics: the
+    ``n_scored_queries_with_positive`` of the population ledger the metrics
+    result lands (#536). The report no longer subtracts "all-positive" from
+    "with a positive" itself: the run that computed the metrics recorded the
+    number once, and the report and the comparison layer read the same one.
+    ``None`` when the ledger lacks the key (a file from before #535, which
+    the report refuses first with ``refuse_pre_ledger``)."""
     return ((metrics or {}).get(POPULATION_KEY) or {}).get(
         N_SCORED_WITH_POSITIVE_KEY)
 

@@ -14,12 +14,12 @@ from recsys_tfb.evaluation.metric_catalog import (
     metrics_of,
 )
 from recsys_tfb.evaluation.report import ReportSection
+from recsys_tfb.evaluation.result_readers import format_share
 from recsys_tfb.evaluation.report_sections.shared import (
     ALL_POSITIVE_WHY,
     DISPLAY_KS,
     MACRO_LABEL,
     count_items,
-    format_share,
     grain_bundles,
     headline_column,
     k_to_lookup,

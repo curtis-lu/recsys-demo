@@ -2439,7 +2439,7 @@ def _report_import_offenders(root):
             by_line.setdefault(lineno, []).append(module)
         for lineno, modules in sorted(by_line.items()):
             files = {m: _module_file(m, root) for m in modules}
-            steps = {
+            path_steps = {
                 f for f in files.values()
                 if f is not None and f.name == "__init__.py" and any(
                     g != f and g.parts[:len(f.parts) - 1] == f.parts[:-1]
@@ -2452,7 +2452,7 @@ def _report_import_offenders(root):
                 if f is None:
                     if module.split(".")[0] in _REPORT_FORBIDDEN_PACKAGES:
                         hits.setdefault(module.split(".")[0], module)
-                elif f not in steps and not _under(f, allowed):
+                elif f not in path_steps and not _under(f, allowed):
                     hits.setdefault(f, module)
             offenders += [f"{rel}:{lineno}: imports {m}" for m in hits.values()]
     return offenders

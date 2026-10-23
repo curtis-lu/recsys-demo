@@ -163,8 +163,9 @@ class TestFrameJson:
     def test_matrix_round_trip_preserves_index_and_int_columns(self):
         import json
 
-        from recsys_tfb.evaluation.diagnostics_spark import (
-            frame_from_json, frame_to_json,
+        from recsys_tfb.evaluation.result_readers import (
+            frame_from_json,
+            frame_to_json,
         )
         mat = pd.DataFrame([[1, 2], [3, 4]],
                            index=["insur", "loan"], columns=[1, 2])
@@ -179,8 +180,9 @@ class TestFrameJson:
     def test_long_round_trip_drops_the_meaningless_index(self):
         import json
 
-        from recsys_tfb.evaluation.diagnostics_spark import (
-            frame_from_json, frame_to_json,
+        from recsys_tfb.evaluation.result_readers import (
+            frame_from_json,
+            frame_to_json,
         )
         long = pd.DataFrame({"prod_name": ["a", "b"], "count": [1, 2]})
         payload = frame_to_json(long, "long")
@@ -198,7 +200,7 @@ class TestFrameJson:
         """
         import pytest
 
-        from recsys_tfb.evaluation.diagnostics_spark import frame_to_json
+        from recsys_tfb.evaluation.result_readers import frame_to_json
         with pytest.raises(ValueError, match="kind"):
             frame_to_json(pd.DataFrame({"a": [1]}), "records")
 
@@ -211,8 +213,9 @@ class TestFrameJson:
         """
         import json
 
-        from recsys_tfb.evaluation.diagnostics_spark import (
-            frame_from_json, frame_to_json,
+        from recsys_tfb.evaluation.result_readers import (
+            frame_from_json,
+            frame_to_json,
         )
         empty = pd.DataFrame(columns=["prod_name", "count"])
         back = frame_from_json(
@@ -235,7 +238,7 @@ class TestFrameJson:
 
         import numpy as np
 
-        from recsys_tfb.evaluation.diagnostics_spark import frame_to_json
+        from recsys_tfb.evaluation.result_readers import frame_to_json
         df = pd.DataFrame({"a": [1.0, np.nan]})
         text = json.dumps(frame_to_json(df, "long"))
 

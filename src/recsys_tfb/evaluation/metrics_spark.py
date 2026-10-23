@@ -105,20 +105,20 @@ from recsys_tfb.evaluation.metric_catalog import (
     metrics_of,
 )
 from recsys_tfb.evaluation.metrics import (
-    ALL_K_KEY,
-    ALL_POSITIVE_KEY,
-    MACRO_ITEMS_KEY,
-    POPULATION_KEY,
-    WIDEST_GROUP_KEY,
     all_positive_accounts,
     macro_from_per_item,
-    metric_params,
     n_groups_with_positive,
 )
 from recsys_tfb.evaluation.result_readers import (
+    ALL_K_KEY,
+    ALL_POSITIVE_KEY,
+    MACRO_ITEMS_KEY,
     N_SCORED_WITH_POSITIVE_KEY,
     N_SCORED_WITHOUT_POSITIVE_KEY,
+    POPULATION_KEY,
     SEGMENT_COLUMNS_KEY,
+    WIDEST_GROUP_KEY,
+    metric_params,
 )
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT, segment_key
 from recsys_tfb.utils.ranking import rank_by_score_then_item, score_then_item_window

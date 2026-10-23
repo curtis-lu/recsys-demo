@@ -260,6 +260,13 @@ class LoadedArtifact(NamedTuple):
     #: those values: for an artifact that a change to the other rows cannot
     #: make stale, see :data:`PARTITION_CONTENT_KEYS`.
     compared_keys: Optional[Sequence[str]] = None
+    #: The node ``--from-node`` names when this is the one stale artifact
+    #: (rule 2 of :func:`require_computed_with_current_config`); ``None`` means
+    #: ``produced_by``. For a reader whose run mode makes the producer's own
+    #: slice miss a node that is stale too: under ``--compare`` the slice from
+    #: ``resolve_comparison_display_ks`` stops at ``generate_report``, which
+    #: refuses the stale ``display_ks.json`` first.
+    rerun_node: Optional[str] = None
 
 
 def _tag_non_str_keys(value: Any) -> Any:
@@ -419,7 +426,8 @@ def require_computed_with_current_config(
        fingerprinted producer of that mode;
        ``test_pipeline.py::TestFingerprintRerunNodes`` pins that.
     2. Otherwise exactly one artifact is stale (only its own declared keys
-       moved, or it has no fingerprint): ``--from-node`` its producer.
+       moved, or it has no fingerprint): ``--from-node`` its producer, or the
+       artifact's ``rerun_node`` where it names one.
     3. Otherwise no single node is known to cover them all: the full pipeline.
     """
     current_by_extra: dict[tuple[str, ...], dict] = {}
@@ -442,7 +450,7 @@ def require_computed_with_current_config(
                 f"{artifact.produced_by}) has no config_fingerprint: written "
                 "before fingerprints existed, or not by this pipeline."
             )
-            stale_producers.append(artifact.produced_by)
+            stale_producers.append(artifact.rerun_node or artifact.produced_by)
             continue
         if artifact.compared_keys is None:
             if stored["sha256"] == current["sha256"]:
@@ -487,7 +495,7 @@ def require_computed_with_current_config(
             f"  - {artifact.catalog_name} (written by {artifact.produced_by}) "
             "was computed with different settings:\n" + "\n".join(lines)
         )
-        stale_producers.append(artifact.produced_by)
+        stale_producers.append(artifact.rerun_node or artifact.produced_by)
 
     if not problems:
         return

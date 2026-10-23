@@ -1028,7 +1028,7 @@ class TestComputeBaselineMetrics:
         macro included. Popularity A=3 > B=1 > C=0 ranks A, B, C in both
         groups: c1's positives A and C sit 1st and 3rd, c2's B 2nd. Per-item
         recall@1 is A 1, B 0, C 0; recall@2 is A 1, B 1, C 0."""
-        from recsys_tfb.evaluation.metrics import POPULATION_KEY
+        from recsys_tfb.evaluation.result_readers import POPULATION_KEY
         from recsys_tfb.pipelines.evaluation.nodes import (
             compute_baseline_metrics,
         )
@@ -1447,7 +1447,7 @@ class TestComputeRowFacts:
         """The population ledger (ADR-0031 decision 4). Dropping the
         all-positive c3 leaves c1 the one group scored, so B — positive in c3
         only — is in no macro, while ``"all"`` still resolves on every row."""
-        from recsys_tfb.evaluation.metrics import POPULATION_KEY
+        from recsys_tfb.evaluation.result_readers import POPULATION_KEY
         from recsys_tfb.pipelines.evaluation.nodes import (
             compute_metrics,
             compute_row_facts,
@@ -1509,7 +1509,7 @@ class TestComputeRowFacts:
         assert set(metrics["per_item"]) == {"A", "B", "C"}
 
     def test_counts_the_rows_and_their_query_groups(self, spark):
-        from recsys_tfb.evaluation.metrics import ALL_POSITIVE_KEY
+        from recsys_tfb.evaluation.result_readers import ALL_POSITIVE_KEY
         from recsys_tfb.pipelines.evaluation.nodes import compute_row_facts
         from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
             fingerprint,
@@ -1894,6 +1894,37 @@ class TestConsumersSegmentByTheLandedList:
         assert set(facts_a["dataset_overview"]["by_segment"]) == {"mass", "hnw"}
         assert metrics_b["per_segment"] == {}
         assert metrics_b["population"]["segment_columns"] == []
+
+    def test_the_pipeline_names_each_output_after_the_side_it_holds(
+            self, spark):
+        """The node returns four results by position and the pipeline names
+        them (``pipeline._comparison_nodes``): swap two names there and
+        nothing raises — A's metrics would land as the compared source's, and
+        the report would draw each side under the other's label. Read through
+        the node's own ``outputs``, side A is the one segmented by the landed
+        list, side B the one computed with none."""
+        from recsys_tfb.pipelines.evaluation import create_pipeline
+
+        node = next(
+            n for n in create_pipeline(compare_source={
+                "kind": "model_version", "model_version": "v0"}).nodes
+            if n.name == "compute_compare_metrics")
+        frame = self._frame(spark)
+        landed = dict(zip(node.outputs, node.func(
+            frame, frame.drop("eval_partition_fingerprint"),
+            self._segments(), self._parameters())))
+
+        assert sorted(landed) == ["compare_metrics_a", "compare_metrics_b",
+                                  "compare_row_facts_a", "compare_row_facts_b"]
+        assert landed["compare_metrics_a"]["population"]["segment_columns"] \
+            == ["cust_segment_typ"]
+        assert landed["compare_metrics_b"]["population"]["segment_columns"] \
+            == []
+        by_segment = {name: set(landed[name]["dataset_overview"].get(
+            "by_segment") or {}) for name in ("compare_row_facts_a",
+                                              "compare_row_facts_b")}
+        assert by_segment == {"compare_row_facts_a": {"mass", "hnw"},
+                              "compare_row_facts_b": set()}
 
     def test_compute_compare_metrics_lands_what_it_was_computed_with(
             self, spark):

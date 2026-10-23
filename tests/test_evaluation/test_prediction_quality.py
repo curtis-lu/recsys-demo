@@ -333,7 +333,7 @@ class TestBuildPayload:
         json.dumps(self._payload(spark), allow_nan=False)
 
     def test_bin_tables_round_trip_to_the_same_display_table(self, spark):
-        from recsys_tfb.evaluation.diagnostics_spark import frame_from_json
+        from recsys_tfb.evaluation.result_readers import frame_from_json
 
         payload = self._payload(spark)
         bins = frame_from_json(payload["overall"]["bins"])

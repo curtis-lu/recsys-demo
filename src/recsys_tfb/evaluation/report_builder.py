@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from datetime import datetime
 
 from recsys_tfb.evaluation.report import generate_html_report
+from recsys_tfb.evaluation.result_readers import format_share
 from recsys_tfb.evaluation.report_sections import (
     completeness,
     core_concepts,
@@ -23,7 +24,6 @@ from recsys_tfb.evaluation.report_sections.shared import (
     ALL_POSITIVE_SWITCH,
     ALL_POSITIVE_WHY,
     eval_dates_display,
-    format_share,
     grain_bundles,
     refuse_pre_landed_reads,
     refuse_pre_ledger,

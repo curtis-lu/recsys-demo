@@ -54,12 +54,6 @@ from recsys_tfb.evaluation.baselines import (
 )
 from recsys_tfb.evaluation.comparison.report import assemble_comparison_report
 from recsys_tfb.evaluation.diagnostics_spark import aggregate_report_diagnostics
-from recsys_tfb.evaluation.metrics import (
-    ALL_K_KEY,
-    ALL_POSITIVE_KEY,
-    POPULATION_KEY,
-    drop_all_positive_groups,
-)
 from recsys_tfb.evaluation.metrics_spark import (
     compute_all_metrics,
     compute_row_facts as _count_row_facts,
@@ -71,24 +65,30 @@ from recsys_tfb.evaluation.prediction_quality import (
     build_payload,
 )
 from recsys_tfb.evaluation.report_builder import assemble_report
-from recsys_tfb.evaluation.report_sections.shared import format_share
 from recsys_tfb.evaluation.result_readers import (
+    ALL_K_KEY,
+    ALL_POSITIVE_KEY,
     ALL_POSITIVE_SHARE_KEY,
     ALL_POSITIVE_WARNS_KEY,
+    CELLS,
     DISPLAY_ALL_K,
     DISPLAY_METRICS_SECTION,
     DISPLAY_PRIMARY_MAP_K,
+    LEDGER_RERUN_NODE,
     N_WITH_POSITIVE_KEY,
     POPULARITY_WINDOW_KEY,
+    POPULATION_KEY,
     REFERENCE,
-    SAME,
     THIS,
+    drop_all_positive_groups,
+    format_share,
     metric_params,
     resolved_all_k,
 )
 from recsys_tfb.pipelines.evaluation.steps.comparison_layer import (
     compare_metric_results,
     ledger_keys_missing,
+    populations_that_differ,
 )
 from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
     COMPARE_SOURCE_KEY,
@@ -1392,7 +1392,8 @@ def compare_to_baseline(
         raise ValueError(
             f"compare_to_baseline: the population ledger lacks "
             f"{'; '.join(missing)} — landed before #536. Re-compute — "
-            f"`python -m recsys_tfb evaluation --from-node compute_row_facts`, "
+            f"`python -m recsys_tfb evaluation --from-node "
+            f"{LEDGER_RERUN_NODE}`, "
             f"with the flags of the run that wrote them (e.g. "
             f"--post-training) — then re-draw."
         )
@@ -1406,14 +1407,7 @@ def compare_to_baseline(
     # so the two agree on all four annotations by construction (decision 4,
     # correction); one that does not is a bug upstream, and the report draws
     # no mark for it — say it here.
-    differing = [
-        f"{grain}: {name}"
-        for grain, block in (("item grain", comparison),
-                             ("category grain", comparison["category"]))
-        if block is not None
-        for name, annotation in block[POPULATION_KEY].items()
-        if not annotation["same"]
-    ]
+    differing = populations_that_differ(comparison)
     if differing:
         logger.warning(
             "The model and its baseline were computed on different "
@@ -1422,9 +1416,9 @@ def compare_to_baseline(
     logger.info(
         "Compared the model with its baseline: %d overall keys, %d items, "
         "%d segments%s",
-        len(comparison["overall"]["cells"]),
-        len(comparison["per_item"]["cells"]),
-        len(comparison["per_segment"]["cells"]),
+        len(comparison["overall"][CELLS]),
+        len(comparison["per_item"][CELLS]),
+        len(comparison["per_segment"][CELLS]),
         ", and the category grain" if comparison["category"] else "",
     )
     return comparison
@@ -1472,7 +1466,8 @@ def resolve_display_ks(
         raise ValueError(
             f"resolve_display_ks: evaluation_metrics' population ledger lacks "
             f"{'; '.join(missing)} — landed before #536. Re-compute — "
-            f"`python -m recsys_tfb evaluation --from-node compute_row_facts`, "
+            f"`python -m recsys_tfb evaluation --from-node "
+            f"{LEDGER_RERUN_NODE}`, "
             f"with the flags of the run that wrote it (e.g. --post-training) "
             f"— then re-draw."
         )
@@ -1732,6 +1727,18 @@ restrict_to_common = make_restrict_to_common_node(compare_only=False)
 #: ``test_pipeline.py::TestTheComparisonReRunsOnItsOwn`` pins both.
 COMPARISON_RERUN_NODE = "compute_compare_metrics"
 
+#: Where ``--compare`` sends a redraw of the comparison report whose K cut
+#: went stale because a display key changed. The cut's own node
+#: (``resolve_comparison_display_ks``) is the narrowest re-run, but under
+#: ``--compare`` its slice ends in ``generate_report``, and that report
+#: refuses ``display_ks.json``, stale under the same key
+#: (``primary_map_k``), so the comparison report would never be drawn.
+#: ``resolve_display_ks`` precedes both cuts and both reports and has no Spark
+#: node in its slice. Under ``--compare-only`` there is no main line and the
+#: cut's own node is the answer. ``test_pipeline.py::TestFingerprintRerunNodes``
+#: and ``test_generate_report.py`` pin the slice.
+COMPARE_MODE_DISPLAY_RERUN_NODE = "resolve_display_ks"
+
 
 def _require_comparison_inputs_current(
     artifacts: list[LoadedArtifact], parameters: dict, compare_only: bool,
@@ -1872,19 +1879,12 @@ def make_compare_to_source_node(compare_only: bool):
         # own rows (with event rows their "all" can differ, #434), and the
         # compared side is computed without segments. Said here; the report
         # draws no mark for it (#537).
-        differing = [
-            f"{grain}: {name}"
-            for grain, block in (("item grain", comparison),
-                                 ("category grain", comparison["category"]))
-            if block is not None
-            for name, annotation in block[POPULATION_KEY].items()
-            if not annotation[SAME]
-        ]
+        differing = populations_that_differ(comparison)
         logger.info(
             "Compared this run with the compared source: %d overall keys, %d "
             "items%s; populations differ in: %s",
-            len(comparison["overall"]["cells"]),
-            len(comparison["per_item"]["cells"]),
+            len(comparison["overall"][CELLS]),
+            len(comparison["per_item"][CELLS]),
             ", and the category grain" if comparison["category"] else "",
             ", ".join(differing) or "nothing",
         )
@@ -1924,9 +1924,16 @@ def make_resolve_comparison_display_ks_node(compare_only: bool):
         guardrail_recall_k = configured_guardrail_recall_k(parameters)
         primary_map_k = configured_primary_map_k(parameters)
 
-        def grain_cut(grain: dict) -> dict:
+        # The item grain and, when both sides have it, the category grain are
+        # cut by the same two decisions, so one pass over them.
+        cuts = {}
+        for name, grain in (("item", source_comparison),
+                            ("category", source_comparison["category"])):
+            if grain is None:
+                cuts[name] = None
+                continue
             all_k = grain[POPULATION_KEY][ALL_K_KEY]
-            return {
+            cuts[name] = {
                 # Decision — the per-item tables' int K columns are cut at
                 # this run's side's "all" only, as they always were: the two
                 # sides' "all" cell is the comparison's own pairing
@@ -1940,12 +1947,10 @@ def make_resolve_comparison_display_ks_node(compare_only: bool):
                 # differ, and one bound would hide whichever side's "all" row
                 # lies past it. No Δ where a side's cell was cut.
                 "overall": every_key_rows(
-                    grain["overall"]["cells"], all_k[THIS], all_k[REFERENCE]),
+                    grain["overall"][CELLS], all_k[THIS], all_k[REFERENCE]),
             }
-
-        category = source_comparison["category"]
-        out = {**grain_cut(source_comparison),
-               "category": grain_cut(category) if category else None,
+        out = {**cuts["item"],
+               "category": cuts["category"],
                "config_fingerprint": fingerprint(
                    parameters, COMPARISON_DISPLAY_KEYS_READ),
                COMPARE_SOURCE_KEY: compare_source_identity(parameters)}
@@ -1996,7 +2001,9 @@ def make_generate_comparison_report_node(compare_only: bool):
             LoadedArtifact(catalog_name="comparison_display_ks",
                            payload=comparison_display_ks,
                            produced_by="resolve_comparison_display_ks",
-                           extra_keys=COMPARISON_DISPLAY_KEYS_READ),
+                           extra_keys=COMPARISON_DISPLAY_KEYS_READ,
+                           rerun_node=(None if compare_only
+                                       else COMPARE_MODE_DISPLAY_RERUN_NODE)),
         ]
         _require_comparison_inputs_current(loaded, parameters, compare_only)
         return assemble_comparison_report(

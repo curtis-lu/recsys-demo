@@ -2277,7 +2277,7 @@ def test_prediction_quality_weighted_note_names_the_weight_and_the_ratio():
 # #376：全正的 query group——組數帳、佔比警告、開關開著時的加註與改寫
 # ---------------------------------------------------------------------------
 
-from recsys_tfb.evaluation.metrics import ALL_POSITIVE_KEY  # noqa: E402
+from recsys_tfb.evaluation.result_readers import ALL_POSITIVE_KEY
 
 #: 開關開著時，不套用它的段落旁印的那一句（票面原文）。用字面值、不 import
 #: 報表各段的常數：常數的字被改掉時這裡要紅。

@@ -29,7 +29,7 @@ import logging
 import pytest
 
 from recsys_tfb.evaluation import metrics_spark as ms
-from recsys_tfb.evaluation.metrics import ALL_POSITIVE_KEY
+from recsys_tfb.evaluation.result_readers import ALL_POSITIVE_KEY
 
 #: The keys a bundle's metrics live under — everything but the counts, which
 #: count the frame as given and so differ from a frame with rows removed.

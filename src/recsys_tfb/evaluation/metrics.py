@@ -31,13 +31,11 @@ What lives here:
   ``pr_auc`` (``evaluation.prediction_quality``): exact where that one is
   binned, and never to be reconciled with it.
 
-Imported back from ``evaluation.result_readers``, their home since #536, so
-the callers here did not change: :func:`metric_params` (the only reader of
-``evaluation.metric``, ADR-0020 design H), :func:`resolved_all_k` (the K a
-bundle's ``"all"`` is stored at, #434), :func:`drop_all_positive_groups` (the
-only reader of ``evaluation.query_filter.drop_all_positive_groups``), and the
-keys of the row facts and of a bundle's population ledger. How the share
-prints is the report's (``report_sections.shared.format_share``).
+The keys of the row facts and of a bundle's population ledger, the settings
+readers (:func:`metric_params`, :func:`resolved_all_k`,
+:func:`drop_all_positive_groups`) and how the share prints
+(``format_share``) live in ``evaluation.result_readers`` since #536; callers
+import them from there.
 
 The dict-shaped per-segment / per-item / overall metrics of the evaluation
 pipeline run on Spark — see ``recsys_tfb.evaluation.metrics_spark``.
@@ -49,22 +47,13 @@ from typing import Optional
 
 import numpy as np
 
-# The keys, settings readers and ledger readers the reports use live in
-# result_readers (#536); imported back so every caller of these names here
-# keeps working. That module imports nothing from the project.
-from recsys_tfb.evaluation.result_readers import (  # noqa: F401
-    ALL_K_KEY,
+from recsys_tfb.evaluation.result_readers import (
     ALL_POSITIVE_KEY,
     ALL_POSITIVE_SHARE_KEY,
     ALL_POSITIVE_WARN_SHARE,
     ALL_POSITIVE_WARNS_KEY,
-    MACRO_ITEMS_KEY,
     N_WITH_POSITIVE_KEY,
-    POPULATION_KEY,
-    WIDEST_GROUP_KEY,
     drop_all_positive_groups,
-    metric_params,
-    resolved_all_k,
 )
 from recsys_tfb.utils.ranking import order_by_score_then_item
 
@@ -136,7 +125,7 @@ def all_positive_accounts(facts: dict, parameters: dict) -> dict:
     every set of row facts carries them — the model's and, under
     ``--compare``, each side's — and the report and the log read them rather
     than computing them again (ADR-0031 principle 1). Formatting the share is
-    the report's (``report_sections.shared.format_share``).
+    the report's (``result_readers.format_share``).
     """
     return {
         N_WITH_POSITIVE_KEY: n_groups_with_positive(facts),
