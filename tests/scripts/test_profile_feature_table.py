@@ -23,7 +23,6 @@ from scripts.profile_feature_table import (
     actions,
     app,
     check_against_table,
-    compute_correlation,
     corr_groups,
     corr_skip_reasons,
     drift_source,
