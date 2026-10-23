@@ -92,3 +92,7 @@ date: 2026-09-16
 ## 修訂（2026-10-22，ADR-0031）
 
 〈考慮過、沒選的做法〉第一條因為要對全量列依分數排序的成本，沒選精確的 average precision。[ADR-0031](0031-evaluation-second-pass-layers-and-single-source.md) 決定 16 第 3 項改成：主報表概覽與比較報表每次都算 pooled AP 與 macro per-item AP，用 training 已有的 Spark 計算（`metrics_spark.compute_pooled_average_precision`、`compute_macro_per_item_average_precision`）。擁有者知道成本沒量；#450 一起量，太貴再加開關。本家族的分箱 `pr_auc` 照舊，兩個數字並存，不可互相對帳的說法不變。
+
+## 修訂（2026-10-23，ADR-0031 決定 7，#534）
+
+決定 6 拿來對照的〈per-item 指標沒有 precision〉，已被 [ADR-0031](0031-evaluation-second-pass-layers-and-single-source.md) 決定 7 推翻。那條說 `@K` 家族的 precision 分母是 K、攤不到單一 item 頭上；決定 7 把「這個 item 在某個 query group 排進前 K 名」當成推薦了它一次，所以 per-item 的 precision@K 分母是該 item 排進前 K 名的次數，不是 K。`metrics_spark.py::aggregate_per_item` 的 NOTE 已跟著改寫。決定 6 的結論不變：本家族 per-item 的 precision 分母是「該 item 在門檻以上的曝光數」，跟 per-item 的 precision@K 仍是兩個不同的量。

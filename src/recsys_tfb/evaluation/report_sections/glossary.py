@@ -14,7 +14,7 @@ READS = ()
 
 _GLOSSARY = [
     ("mAP@k", "per-query Average Precision@k 對 query 平均；主指標"),
-    ("recall@k (per-item)",
+    ("per-item recall@k",
      "P(rank(P)≤k | P 為正)，命中事件等權；map_attr@k 的互補角度"
      "（正例有沒有進 top-k），不下 pass/fail"),
     ("precision@k", "per-query 命中數/k；k=產品數時退化為 base rate"),

@@ -326,7 +326,7 @@ diagnosis/metric/    contract.py
   - 本份引用的報表函式搬家後的位置（都在 `evaluation/report_sections/`）：`_headline_key` → `overview.py`；`_headline_column` → `shared.headline_column`；`_macro_item_coverage` → `shared.macro_item_coverage`；`build_baseline_section` → `popularity_baseline.build`；`build_completeness_section` → `completeness.build`；其餘 `build_*_section` 同樣是各段檔的 `build`。行號仍是 `fe3c30dd` 的快照。
 - **更正（#533 實作時發現，2026-10-23）：決定 6、7 的指標目錄。**
   - 目錄 `evaluation/metric_catalog.py` 先只收前兩種算法的指標。第三種（把分數當機率，預測品質段的分箱 `pr_auc`／`roc_auc`）由 `evaluation/prediction_quality.py` 用自己的函式算，沒有可讓公式指名的共用數字；等那種算法備齊共用數字時再進目錄。
-  - 決定 6 要 query group 的 `recall@K` 與 per-item 的那一個「報表顯示名要分得出來」。#533 要求兩份 HTML 一字不差，所以目錄裡兩者的顯示名都照今天的報表寫 `recall`；分開它們留給改名那一步（per-item 的 `hit_rate@K` 改叫 `recall@K` 時），那一步的驗收本來就有這一條。
+  - 決定 6 要 query group 的 `recall@K` 與 per-item 的那一個「報表顯示名要分得出來」。#533 要求兩份 HTML 一字不差，所以目錄裡兩者的顯示名都照今天的報表寫 `recall`；分開它們留給改名那一步（per-item 的 `hit_rate@K` 改叫 `recall@K` 時），那一步的驗收本來就有這一條。#534 已分開，見決定 7 的更正；同一則更正也寫了第三種算法的共用數字是什麼。
   - 決定 11 讓各段自己宣告「要比哪些」，所以熱門度基準段與比較報表各留一份「要比的目錄條目」清單；衡量指標段則對目錄裡每個指標都畫表（per-item 那塊既有的兩張表照舊，其餘每個 per-K 的 item 指標各一張）。照決定 11，新指標要出現在比較表裡，仍要改那兩份清單；這跟決定 1「加指標兩份報表的程式不改」衝突，留給驗收那張票定（例如改成在目錄上加「要比」的標記，決定 16 第 1 項的模型選擇指標標記是同一種做法）。
 
 ---
@@ -487,6 +487,11 @@ diagnosis/metric/    contract.py
 - **改名推翻了程式裡寫明的理由。** `aggregate_per_item` 的 NOTE（`metrics_spark.py:869-872`）說 per-item 刻意不叫 precision／recall，因為 K 的分母是 query group 的概念。照決定 7 的定義，per-item precision 的分母是「這個 item 被推薦了幾次」，那條理由不再成立；改名時一起改寫那段 NOTE。
 - **每個 item 那一種要先備齊共用數字。** 今天它只看正例列（`aggregate_per_item`，`metrics_spark.py:878`），算不出 precision 要的「排進前 K 名的次數」。重構時改成看該 item 的列並備好這些次數；之後加指標只是寫公式。算進哪些 query group 留給驗收那張票定，所以共用數字要把「有正例的 query group」與「無正例的 query group」分開記，驗收時選定義不必再改算法。
 - **AUC 這輪維持分箱版**（ADR-0024）。補上全部 item 與 macro 是驗收那張票的事；精確版不在這輪。決定 16 第 3 項加的 pooled AP 與 macro per-item AP 是擁有者知情下的例外：它們在原始分數上算，是三種算法之外的第四種，用 training 已有的 Spark 計算，跟分箱 AUC 並存，不是取代。
+- **更正（#534 實作時發現，2026-10-23）。**
+  - **沒有正例的 query group 不記。** 上面寫「有正例與無正例的 query group 分開記」，但 `--post-training` 評的 test 表預設不留沒有正例的組（`dataset.test_zero_positive_group_ratio` 預設 0）；設了也只是抽樣，留下的列帶權重 1／r（ADR-0025）。只有監控模式有完整的。直接數列數，抽樣時會算錯。擁有者 2026-10-23 決定：每個 item 那一種只看 query group 那種算進的組，在這些組裡看該 item 的全部列，不只正例列。#541 若要把沒有正例的組算進 per-item 指標，要回來改算法，並一起決定權重（決定 16 已把「evaluation 的列帶不帶權重」留給 #541）。
+  - **另外兩種算法的共用數字本來就齊，這張票不改它們的程式。** query group 那種的 `ap_sum`、`hits`、`total_rel`、`K` 已經算得出 F1@K（＝2·hits／(K＋total_rel)）與 query group 層級的 hit_rate@K（hits ≥ 1）。把分數當機率那種的共用數字，是 `prediction_quality.aggregate_score_bins` 的分箱表：Spark 端每個 item 都有，只有列數最多的 `top_n` 個收回 driver（ADR-0024 決定 6）。全部 item 的 per-item AUC 要放寬 `top_n` 還是改在 Spark 算，#541 定。數字齊了，不等於「之後加指標只是在目錄寫公式」：目錄今天只有一種公式寫法 `Ratio`（兩個共用數字相除）。#541 要加的指標裡，只有 per-item 的 precision@K（`hits`／`n_top`）寫得成 `Ratio`。F1@K（兩種算法都是）、query group 層級的 hit_rate@K、per-item 與 macro 的 AUC，都要先在目錄加一種公式寫法，並在 `metrics_spark` 寫它的算法（`metric_catalog.py` 那段註解寫明了這條路）。這跟決定 1「加指標只在目錄加一筆」衝突，留給 #541 定。
+  - **落在哪。** `metrics.json` 的 `per_item_shared_numbers`，有分群欄時另有 `per_item_segment_shared_numbers`，大類 bundle 也各有一份。不塞進 `per_item` 的格子，因為 macro 與報表會把格子裡的每個鍵當成指標。per-item 的三個指標改由這些數照目錄的公式相除，值跟改名前相同。熱門度基準線這張票只改名、不落地共用數字（決定 8 由 #535 讓它走同一套）。
+  - **顯示名。** per-item 那個 recall 的顯示名改成「per-item recall」（決定 16 第 5 項），跟 query group 那個 `recall` 分開。熱門度基準段與比較報表的 per-item 表，標題原本在顯示名前加「per-item」，改名後會出現兩次，所以拿掉這個前綴。`map_attr` 的表標題因此不再帶「per-item」。排序指標段 B 塊的標題寫成「B · per-item 歸因｜per-item recall@k」，前一個「per-item 歸因」是塊名，跟顯示名沒有緊貼著重複，所以這張票沒改。這些標題 #537 照決定 16 重定表名時一起處理。
 
 ### 決定 8　baseline 走跟模型同一套指標計算
 
@@ -611,7 +616,7 @@ PR 怎麼切、先後怎麼排，擁有者決定另用 `/to-spec`、`/to-tickets
 15. **能不能比**（決定 4）。主報表熱門度基準段與比較報表概覽用同一張「能不能比」表，列四件事：全部＝@幾、進 Macro 的 item、算進指標的 query group、分群欄。兩邊不同時，受影響的欄頭或列名標 ⚠，表下一行寫兩邊各是多少；數字照印。對照沒有分群欄時，分群表整張不印，只在「能不能比」表寫明。
 16. **「跟誰比」表**（決定 5）：印出決定對照內容的每個鍵，也就是 `kind`、model_version 或表名、`source`、`columns`、`prod_mapping`、`unmapped_policy`。
 17. **其他。**
-    - 各 item 那種算法這次還沒有 precision：今天的算法只看正例列，數不出「排進前 K 名幾次」。決定 7 由 #541 補上 per-item 的 precision@K 與 F1@K。
+    - 各 item 那種算法這次還沒有 precision：今天的算法只看正例列，數不出「排進前 K 名幾次」。決定 7 由 #541 補上 per-item 的 precision@K 與 F1@K。（#534 之後已數得出「排進前 K 名幾次」，見決定 7 的更正；precision@K 仍由 #541 加。）
     - `mean_pos` 從排序指標搬到名次分布，叫「正例平均名次」。
     - 預測品質的兩張關鍵數表拿掉候選列、正例數、正例率。
     - 分箱表的欄分三組：分數、這一格、門檻以上。

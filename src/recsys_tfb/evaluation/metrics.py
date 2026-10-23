@@ -91,7 +91,7 @@ def metric_params(parameters: dict) -> dict:
 #: (``map@K`` / ``precision@K`` / ``recall@K``) comes out the same whatever
 #: the order (with 0/1 labels the untruncated AP is 1; ``map@K`` below the
 #: group's row count is K / rows, ``precision@K`` above it is rows / K). The
-#: per-item metrics (``map_attr@K`` / ``hit_rate@K`` / ``mean_pos``) are not:
+#: per-item metrics (``map_attr@K`` / ``recall@K`` / ``mean_pos``) are not:
 #: with K below the row count, which rows reach the top K still decides which
 #: items get the credit. Always written, whether or not
 #: ``evaluation.query_filter.drop_all_positive_groups`` drops them, because the

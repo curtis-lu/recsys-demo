@@ -65,7 +65,7 @@ def _landed_segments(params):
 def _metrics():
     return {
         "overall": {"map@1": 0.5},
-        "per_item": {"A": {"hit_rate@1": 0.5, "mean_pos": 1.5}},
+        "per_item": {"A": {"recall@1": 0.5, "mean_pos": 1.5}},
         "per_segment": {},
         "dataset_overview": {
             "totals": {"n_rows": 4, "n_entities": 2, "n_items": 2,

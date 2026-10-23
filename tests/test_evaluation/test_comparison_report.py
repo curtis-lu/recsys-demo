@@ -4,18 +4,18 @@ import pytest
 from recsys_tfb.evaluation.comparison.report import assemble_comparison_report
 
 
-def _metrics(map_at_1: float = 0.5, hit_rate_at_3: float = 0.7) -> dict:
+def _metrics(map_at_1: float = 0.5, recall_at_3: float = 0.7) -> dict:
     """Minimal metrics dict (compute_all_metrics shape)."""
     return {
         "n_queries": 100, "n_excluded_queries": 0,
         "overall": {"map@1": map_at_1, "map@3": 0.6, "recall@3": 0.55},
         "per_item": {
-            "p1": {"hit_rate@1": hit_rate_at_3, "hit_rate@3": 0.8,
+            "p1": {"recall@1": recall_at_3, "recall@3": 0.8,
                    "map_attr@1": 0.4, "map_attr@3": 0.5, "mean_pos": 1.5},
-            "p2": {"hit_rate@1": 0.5, "hit_rate@3": 0.7,
+            "p2": {"recall@1": 0.5, "recall@3": 0.7,
                    "map_attr@1": 0.3, "map_attr@3": 0.4, "mean_pos": 2.0},
         },
-        "macro_avg": {"by_item": {"hit_rate@1": 0.6, "hit_rate@3": 0.75,
+        "macro_avg": {"by_item": {"recall@1": 0.6, "recall@3": 0.75,
                                   "map_attr@3": 0.45}},
         "dataset_overview": {"totals": {"n_items": 2}},
     }
@@ -151,11 +151,11 @@ def test_per_item_row_missing_on_one_side_has_blank_delta():
     sec = _build_per_item_section({"metrics_a": m_a, "metrics_b": m_b, "comparison": comp}, _params())
     assert sec is not None
     recall = sec.tables[0]
-    assert recall.loc["p2", "recall@1 M"] == pytest.approx(0.5)
-    assert pd.isna(recall.loc["p2", "recall@1 B"])
-    assert pd.isna(recall.loc["p2", "recall@1 Δ"])
+    assert recall.loc["p2", "per-item recall@1 M"] == pytest.approx(0.5)
+    assert pd.isna(recall.loc["p2", "per-item recall@1 B"])
+    assert pd.isna(recall.loc["p2", "per-item recall@1 Δ"])
     # both sides have p1 → Δ unchanged (0.7 − 0.7)
-    assert recall.loc["p1", "recall@1 Δ"] == pytest.approx(0.0)
+    assert recall.loc["p1", "per-item recall@1 Δ"] == pytest.approx(0.0)
 
 
 def test_macro_row_delta_blank_when_one_side_lacks_the_key():
@@ -172,14 +172,14 @@ def test_macro_row_delta_blank_when_one_side_lacks_the_key():
         return recall.loc[recall.index[0]]
 
     m_b = _metrics()
-    m_b["macro_avg"]["by_item"]["hit_rate@1"] = 0.5
+    m_b["macro_avg"]["by_item"]["recall@1"] = 0.5
     both = _macro_recall_at_1(m_b)
-    assert both["recall@1 Δ"] == pytest.approx(0.1)  # both sides → A − B
+    assert both["per-item recall@1 Δ"] == pytest.approx(0.1)  # both sides → A − B
 
-    del m_b["macro_avg"]["by_item"]["hit_rate@1"]
+    del m_b["macro_avg"]["by_item"]["recall@1"]
     one = _macro_recall_at_1(m_b)
-    assert one["recall@1 M"] == pytest.approx(0.6)
-    assert pd.isna(one["recall@1 Δ"])
+    assert one["per-item recall@1 M"] == pytest.approx(0.6)
+    assert pd.isna(one["per-item recall@1 Δ"])
 
 
 def test_empty_overall_side_blanks_delta_column_and_says_why():
@@ -223,9 +223,9 @@ def test_category_section_present_when_enabled_and_present():
     m_a = _metrics(); m_b = _metrics()
     cat_metrics = {
         "overall": {"map@1": 0.5, "map@3": 0.55},
-        "per_item": {"fund": {"hit_rate@1": 0.6, "hit_rate@3": 0.7,
+        "per_item": {"fund": {"recall@1": 0.6, "recall@3": 0.7,
                               "map_attr@1": 0.4, "map_attr@3": 0.5}},
-        "macro_avg": {"by_item": {"hit_rate@1": 0.6}},
+        "macro_avg": {"by_item": {"recall@1": 0.6}},
         "dataset_overview": {"totals": {"n_items": 1}},
     }
     m_a["category"] = cat_metrics
@@ -249,9 +249,9 @@ def test_category_section_present_in_column_mode():
     m_a = _metrics(); m_b = _metrics()
     cat_metrics = {
         "overall": {"map@1": 0.5, "map@3": 0.55},
-        "per_item": {"c01": {"hit_rate@1": 0.6, "hit_rate@3": 0.7,
+        "per_item": {"c01": {"recall@1": 0.6, "recall@3": 0.7,
                              "map_attr@1": 0.4, "map_attr@3": 0.5}},
-        "macro_avg": {"by_item": {"hit_rate@1": 0.6}},
+        "macro_avg": {"by_item": {"recall@1": 0.6}},
         "dataset_overview": {"totals": {"n_items": 1}},
     }
     m_a["category"] = cat_metrics
@@ -277,14 +277,14 @@ def test_category_section_columns_clamp_to_category_count():
     cat_metrics = {
         "overall": {"map@1": 0.4},
         "per_item": {
-            "fund": {"hit_rate@1": 0.5, "map_attr@1": 0.4, "map_attr@3": 0.5,
+            "fund": {"recall@1": 0.5, "map_attr@1": 0.4, "map_attr@3": 0.5,
                      "map_attr@5": 0.5, "mean_pos": 1.0},
-            "exchange": {"hit_rate@1": 0.4, "map_attr@1": 0.3, "map_attr@3": 0.4,
+            "exchange": {"recall@1": 0.4, "map_attr@1": 0.3, "map_attr@3": 0.4,
                         "map_attr@5": 0.4, "mean_pos": 1.5},
-            "ccard": {"hit_rate@1": 0.3, "map_attr@1": 0.2, "map_attr@3": 0.3,
+            "ccard": {"recall@1": 0.3, "map_attr@1": 0.2, "map_attr@3": 0.3,
                      "map_attr@5": 0.3, "mean_pos": 2.0},
         },
-        "macro_avg": {"by_item": {"hit_rate@1": 0.4, "map_attr@3": 0.4}},
+        "macro_avg": {"by_item": {"recall@1": 0.4, "map_attr@3": 0.4}},
         "dataset_overview": {"totals": {"n_items": 3}},
     }
     m_a["category"] = cat_metrics
@@ -296,7 +296,7 @@ def test_category_section_columns_clamp_to_category_count():
     assert sec is not None
     tbl = sec.tables[sec.table_titles.index(
         next(t for t in sec.table_titles if t.startswith(
-            "大類 per-item map_attr@k (M/B/Δ)"
+            "大類 map_attr@k (M/B/Δ)"
         ))
     )]
     cols = [str(c) for c in tbl.columns]
@@ -324,9 +324,9 @@ def test_category_section_discloses_macro_item_coverage():
     m_a, m_b = _metrics(), _metrics()
     cat_metrics = {
         "overall": {"map@1": 0.5, "map@3": 0.55},
-        "per_item": {"fund": {"hit_rate@1": 0.6, "hit_rate@3": 0.7,
+        "per_item": {"fund": {"recall@1": 0.6, "recall@3": 0.7,
                               "map_attr@1": 0.4, "map_attr@3": 0.5}},
-        "macro_avg": {"by_item": {"hit_rate@1": 0.6}},
+        "macro_avg": {"by_item": {"recall@1": 0.6}},
         "dataset_overview": {"totals": {"n_items": 1}},
     }
     m_a["category"] = cat_metrics
@@ -351,8 +351,8 @@ def test_category_overall_title_names_the_empty_side():
     m_a, m_b = _metrics(), _metrics()
     cat_a = {
         "overall": {"map@1": 0.5},
-        "per_item": {"fund": {"hit_rate@1": 0.6, "map_attr@1": 0.4}},
-        "macro_avg": {"by_item": {"hit_rate@1": 0.6}},
+        "per_item": {"fund": {"recall@1": 0.6, "map_attr@1": 0.4}},
+        "macro_avg": {"by_item": {"recall@1": 0.6}},
         "dataset_overview": {"totals": {"n_items": 1}},
     }
     m_a["category"] = cat_a
@@ -386,10 +386,10 @@ def test_category_overall_table_drops_keys_with_k_above_category_count():
     cat_metrics = {
         "overall": _overall_up_to_k5(),
         "per_item": {
-            c: {"hit_rate@1": 0.5, "map_attr@1": 0.4}
+            c: {"recall@1": 0.5, "map_attr@1": 0.4}
             for c in ("fund", "exchange", "ccard")
         },
-        "macro_avg": {"by_item": {"hit_rate@1": 0.5}},
+        "macro_avg": {"by_item": {"recall@1": 0.5}},
         "dataset_overview": {"totals": {"n_items": 3}},
     }
     m_a["category"] = cat_metrics
@@ -574,7 +574,7 @@ def test_per_item_tables_name_metrics_by_their_catalog_display_name(
 
     from recsys_tfb.evaluation import metric_catalog as mc
 
-    renamed = {("hit_rate", mc.ITEM): "item-recall",
+    renamed = {("recall", mc.ITEM): "item-recall",
                ("map_attr", mc.ITEM): "attr!"}
     monkeypatch.setattr(mc, "METRICS", tuple(
         replace(m, display_name=renamed[(m.name, m.method)])
@@ -587,6 +587,21 @@ def test_per_item_tables_name_metrics_by_their_catalog_display_name(
         "comparison": _comparison(m_a, m_b),
         "compare_coverage_partial": _coverage(),
     }, _params())
-    assert "per-item item-recall@k (M/B/Δ)" in out
+    assert "item-recall@k (M/B/Δ)" in out
     assert "item-recall@1 M" in out
-    assert "per-item attr!@k (M/B/Δ)" in out
+    assert "attr!@k (M/B/Δ)" in out
+
+
+def test_the_per_item_recall_is_told_apart_from_the_query_group_one():
+    """Both are named ``recall`` (ADR-0031 decision 6); the overall table's
+    rows are the query-group one, the per-item table's columns say per-item,
+    and no title says it twice."""
+    m_a, m_b = _metrics(0.6), _metrics(0.4)
+    out = assemble_comparison_report({
+        "metrics_a": m_a,
+        "metrics_b": m_b,
+        "comparison": _comparison(m_a, m_b),
+        "compare_coverage_partial": _coverage(),
+    }, _params())
+    assert "per-item recall@1 M" in out
+    assert "per-item per-item" not in out

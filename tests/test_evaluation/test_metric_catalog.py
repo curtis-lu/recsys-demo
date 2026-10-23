@@ -144,19 +144,22 @@ def test_a_new_entry_is_computed_with_no_change_to_the_spark_code(
 
     Worked by hand on :func:`_frame` (``"all"`` is 3, the item count). c1
     ranks A(+) B C(+), c2 ranks B(+) C A. ``hits / K`` is precision@K: at K=2
-    each group has one positive in its top two, so 0.5. ``mean(top_k)`` over
-    an item's positive rows: A is a positive once, ranked 1st; C once, 3rd.
+    each group has one positive in its top two, so 0.5. ``hits / n_top`` per
+    item reads a shared number no shipped entry reads: of the item's rows in
+    the top K, the share that are positives. A is in the top 1 once (c1, a
+    positive); C is in the top 2 once (c2, a negative), and in the top 3 twice,
+    one of them its positive in c1.
     """
     monkeypatch.setattr(mc, "METRICS", mc.METRICS + (
         _toy_metric("toy_q", QUERY_GROUP, mc.Ratio("hits", "K")),
-        _toy_metric("toy_i", ITEM, mc.MeanOverPositiveRows("top_k")),
+        _toy_metric("toy_i", ITEM, mc.Ratio("hits", "n_top")),
     ))
     full = compute_all_metrics(_frame(spark), _params(), segment_columns=["seg"])
     assert full["overall"]["toy_q@1"] == pytest.approx(1.0)
     assert full["overall"]["toy_q@2"] == pytest.approx(0.5)
     assert full["per_item"]["A"]["toy_i@1"] == pytest.approx(1.0)
     assert full["per_item"]["C"]["toy_i@2"] == pytest.approx(0.0)
-    assert full["per_item"]["C"]["toy_i@3"] == pytest.approx(1.0)
+    assert full["per_item"]["C"]["toy_i@3"] == pytest.approx(0.5)
 
 
 def test_entry_refuses_a_name_the_catalog_lacks():

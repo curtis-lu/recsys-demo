@@ -33,6 +33,7 @@ from recsys_tfb.evaluation.report_sections.shared import (
     ALL_POSITIVE_WHY,
     eval_dates_display,
     grain_bundles,
+    refuse_pre_rename_per_item,
     results_read_by,
 )
 
@@ -49,6 +50,11 @@ SECTIONS = (
     completeness,
     glossary,
 )
+
+#: The results that are metrics bundles, the ones with a per-item block. The
+#: others carry a ``per_item`` of their own shape (the prediction-quality
+#: payload's is keyed by item), which the pre-rename check must not read.
+_METRICS_BUNDLES = ("evaluation_metrics", "baseline_metrics")
 
 
 def _all_positive_warnings(metrics: dict, parameters: dict) -> dict[str, str]:
@@ -84,12 +90,16 @@ def assemble_report(results: Mapping[str, dict], parameters: dict) -> str:
     builds it). Each section gets the ones it declares in ``READS`` and no
     other, so a section reading a result it did not declare fails here rather
     than drifting from its declaration. A section returns ``None`` when its
-    switch is off or it has nothing to show.
+    switch is off or it has nothing to show. Before any section, a metrics
+    bundle written before the per-item ``recall@K`` rename is refused
+    (``refuse_pre_rename_per_item``).
 
     spine（目的驅動、由粗到細、克制）：概覽 → 核心概念 → 基本統計 →
     衡量指標 → 預測品質（開了才有）→ per-item 細部拆解 → baseline →
     完整性檢查 → 詞彙表。
     """
+    for name in _METRICS_BUNDLES:
+        refuse_pre_rename_per_item(name, results.get(name))
     sections = []
     for section in SECTIONS:
         built = section.build(

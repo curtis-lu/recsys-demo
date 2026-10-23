@@ -210,6 +210,46 @@ OVERVIEW_CELL_GROUPS = ("by_snap_date", "by_item", "by_segment")
 MIGRATION_SCRIPT = "scripts/migrations/migrate_evaluation_results_keys.py"
 
 
+#: What the per-item ``recall@K`` was called before #534 (ADR-0031 decision 7).
+PRE_RENAME_PER_ITEM_PREFIX = "hit_rate@"
+
+
+def refuse_pre_rename_per_item(name: str, bundle: dict | None) -> None:
+    """Raise when the result ``name`` is a metrics bundle written before #534:
+    its per-item block — at the item grain or the category grain — still
+    spells the per-item recall ``hit_rate@K``.
+
+    **Only the per-item block decides.** A query-group ``hit_rate@K`` — the
+    share of query groups with a hit in the top K — lands in ``overall``
+    (ADR-0031 decision 7); that is the new format, not the old.
+
+    **Why refuse** rather than read both spellings, the reason
+    :func:`read_dataset_overview` gives: drawn as-is every per-item recall cell
+    is blank, and a blank reads as "recalled nothing", not as "this file is
+    old". No migration script: the file a re-run writes also carries the item
+    shared numbers (``per_item_shared_numbers``), which a renamed old file
+    would still lack.
+    """
+    if not isinstance(bundle, dict):
+        return
+    for grain, grain_bundle in grain_bundles(bundle):
+        found = sorted({
+            key
+            for cell in (grain_bundle.get("per_item") or {}).values()
+            if isinstance(cell, dict)
+            for key in cell if key.startswith(PRE_RENAME_PER_ITEM_PREFIX)
+        })
+        if found:
+            raise ValueError(
+                f"{name} predates the #534 rename: its per_item block "
+                f"({grain}) still carries {found}, the per-item recall@K's "
+                f"old name. Re-compute it — `python -m recsys_tfb evaluation "
+                f"--from-node compute_metrics`, with the flags of the run "
+                f"that wrote it (e.g. --post-training) — then re-draw. Drawn "
+                f"as-is, every per-item recall cell would be blank."
+            )
+
+
 def read_dataset_overview(metrics: dict) -> dict:
     """``metrics["dataset_overview"]``, refusing a pre-#327 payload.
 
@@ -330,7 +370,7 @@ ALL_POSITIVE_SWITCH = "evaluation.query_filter.drop_all_positive_groups"
 #: 全正的組為什麼值得數。不寫「AP 都是 1」或「滿分」：label 只有 0／1 時，K 小於
 #: 組的列數 n 的 ``map@K``＝K/n、K 大於 n 的 ``precision@K``＝n/K，label 分級時
 #: 值又不同；永遠成立的只有「排法不影響它的組層級（per-query）指標」。也不寫「每組
-#: 的分數都一樣」：per-item 的 ``map_attr@K``／``hit_rate@K``／``mean_pos`` 在 K
+#: 的分數都一樣」：per-item 的 ``map_attr@K``／``recall@K``／``mean_pos`` 在 K
 #: 小於列數時仍看誰排進前 K。
 ALL_POSITIVE_WHY = "不管怎麼排，組層級指標 mAP／precision／recall 都一樣"
 

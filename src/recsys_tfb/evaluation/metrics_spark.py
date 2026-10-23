@@ -16,9 +16,10 @@ Layered structure (each layer has a single responsibility):
     Layer 3: aggregations                      (Spark DF → Python dict)
         aggregate_overall              query-equal-weight mean of per-query
         aggregate_per_segment          query-equal-weight mean within segment
-        aggregate_per_item             row-equal-weight mean over P-positive
-                                       rows; emits hit_rate@K / map_attr@K /
-                                       mean_pos
+        aggregate_item_shared_numbers  per item: sums over all its rows
+                                       (n_top@K, hits@K, ap_sum@K, …)
+        item_metrics                   the catalog's item formulas on those
+                                       sums: recall@K / map_attr@K / mean_pos
 
     Layer 4: orchestrator
         compute_all_metrics            wires everything; reads parameters
@@ -43,18 +44,20 @@ metric (``training.algorithm_params.metric``) is a different thing and is not
 affected.
 
 Naming convention (intentional, NOT pandas-mirroring):
-    * ``@K`` keys (map@K, precision@K, recall@K) live in
-      ``overall`` / ``per_segment`` — they are *per-query metrics aggregated
-      across queries*. K names the per-query truncation point.
+    * ``@K`` keys (map@K, precision@K, recall@K) in ``overall`` /
+      ``per_segment`` are *per-query metrics aggregated across queries*. K
+      names the per-query truncation point.
     * ``_attr@K`` keys (map_attr@K) live in ``per_item`` —
       they are *per-row attribution contributions averaged across all rows
       where the item appears as a positive*. The "attribution" suffix marks
       them as fragments of per-query metrics, not per-query metrics
       themselves.
-    * ``hit_rate@K`` (per_item) is the marginal recall of the item:
-      ``P(rank(item) ≤ K | item is positive)``. Same conditional probability
-      as ``recall@K`` in ``overall``, but aggregated row-equal-weight rather
-      than query-equal-weight; the different key name disambiguates.
+    * ``recall@K`` in ``per_item`` is the marginal recall of the item:
+      ``P(rank(item) ≤ K | item is positive)``. One name in two methods
+      (ADR-0031 decision 6): the same conditional probability as ``recall@K``
+      in ``overall``, aggregated row-equal-weight rather than
+      query-equal-weight; the bundle block, not the key, tells them apart.
+      Called ``hit_rate@K`` before #534.
     * ``mean_pos`` (per_item) is the mean rank position over P-positive rows.
 
 Degenerate cases (documented, not pruned):
@@ -91,7 +94,13 @@ from recsys_tfb.core.consistency import (
     item_list_counted_from_data,
 )
 from recsys_tfb.core.schema import declares_optional_role, get_schema
-from recsys_tfb.evaluation.metric_catalog import ITEM, QUERY_GROUP, metrics_of
+from recsys_tfb.evaluation.metric_catalog import (
+    ITEM,
+    ITEM_SHARED_NUMBERS,
+    ITEM_SHARED_NUMBERS_PER_K,
+    QUERY_GROUP,
+    metrics_of,
+)
 from recsys_tfb.evaluation.metrics import (
     ALL_K_KEY,
     ALL_POSITIVE_KEY,
@@ -205,10 +214,10 @@ def _resolve_k_grids(
     * ``query_ks`` = ``k_values``: ``compute_per_query_metrics`` /
       ``aggregate_overall`` / ``aggregate_per_segment``.
     * ``item_ks`` = ``k_values`` ∪ {headline K}: ``add_row_contributions``
-      and ``aggregate_per_item`` (per_item and per_item_segment), which is
-      what guarantees ``macro_avg["by_item"][f"map_attr@{headline K}"]``,
-      the number the report's headline reads
-      (``report_sections.overview._headline_key``). Without ``all_k`` here a
+      and ``aggregate_item_shared_numbers`` (per_item and per_item_segment),
+      which is what guarantees
+      ``macro_avg["by_item"][f"map_attr@{headline K}"]``, the number the
+      report's headline reads (``report_sections.overview._headline_key``). Without ``all_k`` here a
       ``k_values`` that leaves out ``"all"`` would leave that cell blank.
 
     Putting the headline K into the per-query grid is wrong without being an
@@ -869,15 +878,148 @@ def aggregate_per_segment(
     return out
 
 
-def _per_item_metrics(k_values: list[int]) -> list[tuple[str, str]]:
-    """``(metric key, row column)`` for every item entry of ``metric_catalog``:
-    the ones without K first, then the per-K ones at each K. The column is the
-    one the entry's ``MeanOverPositiveRows`` averages, at that K when per K."""
-    out = [(m.key(), m.formula.column)
-           for m in metrics_of(ITEM) if not m.per_k]
+def _item_shared_number_aggs(
+    label_col: str, k_values: list[int]
+) -> list[tuple[str, F.Column]]:
+    """``(key, aggregate)`` for every item shared number (``metric_catalog.
+    ITEM_SHARED_NUMBERS``): the ones without K first, then the per-K ones at
+    each K, the order the metric cells use. Counts are integer sums, so they
+    come back as ``int``; ``ap_sum`` as ``float``."""
+    positive = F.col(label_col) == 1
+
+    def count(condition: F.Column) -> F.Column:
+        return F.sum(F.when(condition, 1).otherwise(0))
+
+    def top(k: int) -> F.Column:
+        return F.col(f"top_k@{k}") == 1
+
+    # One aggregate per shared number, at K (ignored by the ones not per K).
+    aggregate = {
+        "n_pos": lambda k: count(positive),
+        "pos_sum": lambda k: F.sum(F.when(positive, F.col("pos")).otherwise(0)),
+        "n_top": lambda k: count(top(k)),
+        "hits": lambda k: count(positive & top(k)),
+        "ap_sum": lambda k: F.sum(
+            F.when(positive, F.col(f"ap_contrib@{k}")).otherwise(0.0)),
+    }
+    out = [(name, aggregate[name](None)) for name in ITEM_SHARED_NUMBERS
+           if name not in ITEM_SHARED_NUMBERS_PER_K]
     for k in k_values:
-        out.extend((m.key(k), f"{m.formula.column}@{k}")
-                   for m in metrics_of(ITEM) if m.per_k)
+        out.extend((f"{name}@{k}", aggregate[name](k))
+                   for name in ITEM_SHARED_NUMBERS
+                   if name in ITEM_SHARED_NUMBERS_PER_K)
+    return out
+
+
+def _nest_by_dims(rows, dim_cols: list[str], cell_of) -> dict[str, dict]:
+    """``{item: cell}`` for ``[item_col]``, ``{item: {segment: cell}}`` for
+    ``[item_col, seg_col]``.
+
+    Two levels rather than a joined string key (ADR-0020 bug 12):
+    ``"_".join`` turned ``(item="a", seg="b_c")`` and ``(item="a_b",
+    seg="c")`` into the same key and the later row silently overwrote the
+    earlier one. Dim values are stringified.
+    """
+    out: dict[str, dict] = {}
+    for r in rows:
+        item = str(r[dim_cols[0]])
+        if len(dim_cols) == 1:
+            out[item] = cell_of(r)
+        else:
+            # The second dim is the segment (the one two-column caller passes
+            # [item, segment]); NULL there is the unmatched group.
+            out.setdefault(item, {})[segment_key(r[dim_cols[1]])] = cell_of(r)
+    return out
+
+
+def aggregate_item_shared_numbers(
+    enriched: SparkDataFrame,
+    dim_cols: list[str],
+    label_col: str,
+    k_values: list[int],
+) -> dict[str, dict]:
+    """The item method's shared numbers (``metric_catalog.
+    ITEM_SHARED_NUMBERS``, ADR-0031 decision 7), one cell per item or per
+    (item, segment), over **every** row of it in ``enriched`` — positive or
+    not. ``enriched`` holds the query groups the query-group method scores and
+    the ``pos`` / ``top_k@K`` / ``ap_contrib@K`` columns of
+    ``add_row_contributions`` at every K of ``k_values``.
+
+    ``dim_cols`` is ``[item_col]`` or ``[item_col, seg_col]``; the output nests
+    one level per column (:func:`_nest_by_dims`):
+
+        [item_col]          → {item: {n_pos, pos_sum, n_top@K, hits@K, …}}
+        [item_col, seg_col] → {item: {segment: {n_pos, …}}}
+
+    Any other column count raises ``ValueError``. An item never positive here
+    still gets a cell: ``n_top@K`` over all of its rows is the times it was
+    recommended, whether or not any of them was a hit.
+
+    One ``groupBy`` and one collect; what reaches the driver is a handful of
+    numbers per item and K.
+    """
+    if len(dim_cols) not in (1, 2):
+        raise ValueError(
+            f"aggregate_item_shared_numbers supports 1 or 2 dim_cols, got "
+            f"{dim_cols!r}"
+        )
+    aggs = _item_shared_number_aggs(label_col, k_values)
+    rows = enriched.groupBy(*dim_cols).agg(
+        *[agg.alias(key) for key, agg in aggs]).collect()
+
+    return _nest_by_dims(
+        rows, dim_cols, lambda r: {key: r[key] for key, _ in aggs})
+
+
+def _item_number(cell: dict, name: str, k: int) -> float:
+    """One shared number of a cell of :func:`aggregate_item_shared_numbers`,
+    at ``k`` when it is per K."""
+    return float(cell[f"{name}@{k}" if name in ITEM_SHARED_NUMBERS_PER_K
+                      else name])
+
+
+def _item_metric_cell(cell: dict, k_values: list[int]) -> dict | None:
+    """Every item entry of ``metric_catalog`` computed from one cell of shared
+    numbers by its formula, the ones without K first, then the per-K ones at
+    each K; plus ``n_pos``, the weight ``macro_average`` reads.
+
+    A metric whose denominator is 0 is undefined and left out of the cell, and
+    a cell left with no metric is ``None``. Every entry today divides by
+    ``n_pos``, so an item never positive has no metrics — as before #534,
+    when only the positive rows were read.
+    """
+    def value(metric, k: int | None) -> float | None:
+        denominator = _item_number(cell, metric.formula.denominator, k)
+        if denominator == 0:
+            return None
+        return _item_number(cell, metric.formula.numerator, k) / denominator
+
+    entries = [(m.key(), value(m, None))
+               for m in metrics_of(ITEM) if not m.per_k]
+    for k in k_values:
+        entries.extend((m.key(k), value(m, k))
+                       for m in metrics_of(ITEM) if m.per_k)
+    out = {key: v for key, v in entries if v is not None}
+    if not out:
+        return None
+    out[_N_POS_KEY] = cell["n_pos"]
+    return out
+
+
+def item_metrics(
+    shared: dict[str, dict], k_values: list[int], n_dims: int
+) -> dict[str, dict]:
+    """The per-item metric cells of :func:`aggregate_item_shared_numbers`'
+    output, nested the same way (``n_dims`` levels). Plain Python: the
+    formulas divide numbers already on the driver."""
+    if n_dims == 1:
+        return {item: m for item, cell in shared.items()
+                if (m := _item_metric_cell(cell, k_values)) is not None}
+    out: dict[str, dict] = {}
+    for item, by_seg in shared.items():
+        cells = item_metrics(by_seg, k_values, 1)
+        if cells:
+            out[item] = cells
     return out
 
 
@@ -887,63 +1029,37 @@ def aggregate_per_item(
     label_col: str,
     k_values: list[int],
 ) -> dict[str, dict]:
-    """Row-equal-weight mean of per-row contributions over label=1 rows.
+    """The per-item metric cells straight from ``enriched``:
+    :func:`aggregate_item_shared_numbers`, then :func:`item_metrics`. For a
+    caller that lands the metrics but not the shared numbers (the popularity
+    baseline).
 
-    ``dim_cols`` is ``[item_col]`` for per_item or ``[item_col, seg_col]``
-    for per_item_segment; the output nests one level per column:
+    Metrics per cell — every item entry of ``metric_catalog``, a ratio of the
+    item's shared numbers:
 
-        [item_col]          → {item: {metrics…, n_pos}}
-        [item_col, seg_col] → {item: {segment: {metrics…, n_pos}}}
-
-    Two levels rather than a joined string key (ADR-0020 bug 12):
-    ``"_".join`` turned ``(item="a", seg="b_c")`` and ``(item="a_b",
-    seg="c")`` into the same key and the later row silently overwrote the
-    earlier one. Any other column count raises ``ValueError``. Dim values
-    are stringified.
-
-    Metrics per cell — every item entry of ``metric_catalog``, each the mean
-    of one row column over P-positive rows (``MeanOverPositiveRows``):
-
-        hit_rate@K   = mean(top_k@K) over P-positive rows
+        recall@K     = hits@K / n_pos
                        = P(rank(P) <= K | P is positive)
-                         (item-level marginal recall; row-equal-weight)
-        map_attr@K   = mean(ap_contrib@K) over P-positive rows
+                         (row-equal-weight over the item's positive rows)
+        map_attr@K   = ap_sum@K / n_pos
                        (per-row AP@K contribution averaged across all
                         queries where P is positive; carries cumulative-
                         precision weighting)
-        mean_pos     = mean(pos) over P-positive rows
+        mean_pos     = pos_sum / n_pos
                        (average ranked position of P when it is the truth)
         n_pos        = count of P-positive rows (weight source for macro_average)
 
-    NOTE: no precision@K / recall@K here on purpose. Their query-level
-    definitions don't carry over cleanly to the per-item dimension
-    (the K denominator is a per-query concept). Use ``hit_rate@K`` for
-    the item-level recall analogue.
+    NOTE: ``recall@K`` is also a query-group metric (in ``overall``). One name
+    in two methods (ADR-0031 decision 6): both are the share of positives
+    ranked within the top K, over one query group's positives there and over
+    one item's here. Until #534 this was ``hit_rate@K``, on the reasoning that
+    precision / recall do not carry over to an item because K is a per-query
+    count. Decision 7 answers it: per item, "ranked within the top K" counts
+    as one recommendation, so a per-item precision divides by ``n_top@K`` —
+    the times the item was recommended — not by K.
     """
-    if len(dim_cols) not in (1, 2):
-        raise ValueError(
-            f"aggregate_per_item supports 1 or 2 dim_cols, got {dim_cols!r}"
-        )
-    rel = enriched.filter(F.col(label_col) == 1)
-
-    metrics = _per_item_metrics(k_values)
-    aggs = [F.mean(F.col(col).cast("double")).alias(key) for key, col in metrics]
-    aggs.append(F.count(F.lit(1)).alias("n_pos"))
-    rows = rel.groupBy(*dim_cols).agg(*aggs).collect()
-
-    metric_cols = [key for key, _ in metrics]
-    out: dict[str, dict] = {}
-    for r in rows:
-        cell: dict = {c: float(r[c]) for c in metric_cols}
-        cell["n_pos"] = int(r["n_pos"])
-        keys = [str(r[c]) for c in dim_cols]
-        if len(keys) == 1:
-            out[keys[0]] = cell
-        else:
-            # The second dim is the segment (the one two-column caller passes
-            # [item, segment]); NULL there is the unmatched group.
-            out.setdefault(keys[0], {})[segment_key(r[dim_cols[1]])] = cell
-    return out
+    return item_metrics(
+        aggregate_item_shared_numbers(enriched, dim_cols, label_col, k_values),
+        k_values, len(dim_cols))
 
 
 # ---------------------------------------------------------------------------
@@ -1027,6 +1143,8 @@ _EMPTY_RESULT = {
     "per_item_segment": {},
     "macro_avg": {},
     "observation_items": [],
+    "per_item_shared_numbers": {},
+    "per_item_segment_shared_numbers": {},
 }
 
 
@@ -1154,19 +1272,23 @@ def _compute_core(
         try:
             # ---- Layer 3: aggregations ----
             overall = aggregate_overall(per_query, query_ks)
-            per_item = aggregate_per_item(
+            per_item_shared = aggregate_item_shared_numbers(
                 enriched, [item_col], label_col, item_ks
             )
+            per_item = item_metrics(per_item_shared, item_ks, 1)
 
             per_segment: dict = {}
             per_item_segment: dict = {}
+            per_item_segment_shared: dict = {}
             if active_seg_col:
                 per_segment = aggregate_per_segment(
                     per_query, active_seg_col, query_ks
                 )
-                per_item_segment = aggregate_per_item(
+                per_item_segment_shared = aggregate_item_shared_numbers(
                     enriched, [item_col, active_seg_col], label_col, item_ks
                 )
+                per_item_segment = item_metrics(
+                    per_item_segment_shared, item_ks, 2)
 
             macro_avg: dict = {"by_item": macro_average(per_item, **macro_params)}
             # The unmatched group stays in per_segment / per_item_segment (the
@@ -1208,6 +1330,8 @@ def _compute_core(
                 "observation_items": observation_items,
                 **counts,
                 **recorded_k,
+                "per_item_shared_numbers": per_item_shared,
+                "per_item_segment_shared_numbers": per_item_segment_shared,
             }
         finally:
             per_query.unpersist()
@@ -1402,12 +1526,12 @@ def compute_all_metrics(
         {
           "overall":          {map@K, precision@K, recall@K, ...},
           "per_segment":      {seg_value: {map@K, precision@K, recall@K, ...}},
-          "per_item":         {item: {hit_rate@K, map_attr@K, mean_pos, ...}},
-          "per_item_segment": {item: {segment: {hit_rate@K, map_attr@K, mean_pos, n_pos}}},
+          "per_item":         {item: {recall@K, map_attr@K, mean_pos, ...}},
+          "per_item_segment": {item: {segment: {recall@K, map_attr@K, mean_pos, n_pos}}},
           "macro_avg": {
               "by_segment":      {map@K, precision@K, recall@K, ...},
-              "by_item":         {hit_rate@K, map_attr@K, mean_pos, ...},
-              "by_item_segment": {hit_rate@K, map_attr@K, mean_pos, ...},
+              "by_item":         {recall@K, map_attr@K, mean_pos, ...},
+              "by_item_segment": {recall@K, map_attr@K, mean_pos, ...},
           },
           "observation_items": [item, ...]（n_pos < evaluation.metric.min_positives 的 item；additive，預設空）
           "n_queries":          int  (total distinct queries before filtering),
@@ -1425,6 +1549,14 @@ def compute_all_metrics(
                           ``"all"`` resolved to — the widest query group.
                           Read it through
                           ``metrics.resolved_all_k``, never by counting items.
+          "per_item_shared_numbers":
+              {item: {n_pos, pos_sum, n_top@K, hits@K, ap_sum@K, ...}}
+              (#534) what the per_item metrics are computed from, for every
+              item with a row in the scored groups — never positive included
+              (``aggregate_item_shared_numbers``),
+          "per_item_segment_shared_numbers":
+              {item: {segment: {...}}}  the same per (item, segment); empty
+              without a segment column,
           "dataset_overview": {
               "totals":       {n_rows, n_entities, n_items, n_snap_dates,
                                n_positives, positive_rate,
@@ -1437,7 +1569,8 @@ def compute_all_metrics(
           "category":  (only when item_categories.enabled)
               same shape as the top level (overall / per_item / per_segment /
               per_item_segment / macro_avg / n_queries / n_excluded_queries /
-              n_all_positive_queries) PLUS its own "dataset_overview"; never
+              n_all_positive_queries / the two shared-number blocks) PLUS its
+              own "dataset_overview"; never
               contains "category".
         }
 
@@ -1457,7 +1590,7 @@ def compute_all_metrics(
     every category it holds gets the same positive label (the max of its
     children), which a query mixed row by row can be. Off, every key but the
     new count is value-for-value what it was. Known effect, not a bug:
-    per-item keys such as ``map_attr@K`` and ``hit_rate@K`` still depend on
+    per-item keys such as ``map_attr@K`` and ``recall@K`` still depend on
     the order inside an all-positive query when K is below its row count (``ap_contrib@K = prec_at_pos × label ×
     top_k@K``: which rows reach the top K decides which items get the
     credit); switched on, those queries leave them too.

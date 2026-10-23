@@ -48,11 +48,11 @@ def _metrics():
         "overall": {"map@1": 0.5, "map@3": 0.6, "map@5": 0.65,
                     "map@10": 0.7, "precision@1": 0.4,
                     "recall@1": 0.3},
-        "per_item": {"A": {"hit_rate@1": 0.2, "hit_rate@2": 0.4,
+        "per_item": {"A": {"recall@1": 0.2, "recall@2": 0.4,
                            "mean_pos": 3.0,
                            "map_attr@1": 0.5, "map_attr@3": 0.6,
                            "map_attr@2": 0.55},
-                     "B": {"hit_rate@1": 0.1, "hit_rate@2": 0.3,
+                     "B": {"recall@1": 0.1, "recall@2": 0.3,
                            "mean_pos": 5.0,
                            "map_attr@1": 0.3, "map_attr@3": 0.35,
                            "map_attr@2": 0.32}},
@@ -77,7 +77,7 @@ def _metrics():
                       "query_share": 0.4}}},
         "macro_avg": {
             "by_item": {
-                "hit_rate@1": 0.15, "hit_rate@2": 0.35, "mean_pos": 4.0,
+                "recall@1": 0.15, "recall@2": 0.35, "mean_pos": 4.0,
                 "map_attr@1": 0.4, "map_attr@2": 0.435, "map_attr@3": 0.475,
             },
         },
@@ -455,8 +455,8 @@ def test_metrics_section_two_family_blocks_consistent():
     m["per_segment"] = {"seg1": {"map@1": 0.5, "precision@1": 0.4, "recall@1": 0.3}}
     m["category"] = {
         "overall": {"map@1": 0.4, "precision@1": 0.3, "recall@1": 0.2},
-        "per_item": {"fund": {"hit_rate@1": 0.3, "map_attr@1": 0.5, "mean_pos": 2.0}},
-        "macro_avg": {"by_item": {"hit_rate@1": 0.3, "map_attr@1": 0.5,
+        "per_item": {"fund": {"recall@1": 0.3, "map_attr@1": 0.5, "mean_pos": 2.0}},
+        "macro_avg": {"by_item": {"recall@1": 0.3, "map_attr@1": 0.5,
                                   "mean_pos": 2.0}},
         "dataset_overview": {"totals": {"n_items": 2}},
     }
@@ -598,8 +598,8 @@ def test_metrics_section_category_present_when_key():
     m = _metrics()
     m["category"] = {
         "overall": {"map@1": 0.4, "map@2": 0.45},
-        "per_item": {"fund": {"hit_rate@1": 0.3, "mean_pos": 2.0}},
-        "macro_avg": {"by_item": {"hit_rate@1": 0.3, "mean_pos": 2.0}},
+        "per_item": {"fund": {"recall@1": 0.3, "mean_pos": 2.0}},
+        "macro_avg": {"by_item": {"recall@1": 0.3, "mean_pos": 2.0}},
         "dataset_overview": {"totals": {"n_items": 2}},
     }
     s = ranking_metrics.build(_results(evaluation_metrics=m), _params())
@@ -613,10 +613,10 @@ def test_metrics_section_category_columns_clamp_to_category_count():
     m = _metrics()
     m["category"] = {
         "overall": {"map@1": 0.4, "map@2": 0.45, "map@3": 0.5},
-        "per_item": {"fund": {"hit_rate@1": 0.3, "mean_pos": 2.0},
-                     "exchange": {"hit_rate@1": 0.4, "mean_pos": 1.5},
-                     "ccard": {"hit_rate@1": 0.5, "mean_pos": 1.0}},
-        "macro_avg": {"by_item": {"hit_rate@1": 0.4, "mean_pos": 1.5}},
+        "per_item": {"fund": {"recall@1": 0.3, "mean_pos": 2.0},
+                     "exchange": {"recall@1": 0.4, "mean_pos": 1.5},
+                     "ccard": {"recall@1": 0.5, "mean_pos": 1.0}},
+        "macro_avg": {"by_item": {"recall@1": 0.4, "mean_pos": 1.5}},
         "dataset_overview": {"totals": {"n_items": 3}},
     }
     s = ranking_metrics.build(_results(evaluation_metrics=m), _params())
@@ -883,6 +883,57 @@ class TestLegacyDatasetOverviewRefused:
         assert shared.count_items({"overall": {"map@1": 0.5}}) == 0
 
 
+class TestPreRenamePerItemRefused:
+    """#534 renamed the per-item ``hit_rate@K`` to ``recall@K``. A metrics file
+    written before that would render its per-item recall cells blank, so the
+    report refuses it and says how to get a new one."""
+
+    @staticmethod
+    def _legacy_per_item(bundle: dict) -> dict:
+        for cell in bundle["per_item"].values():
+            for key in [k for k in cell if k.startswith("recall@")]:
+                cell["hit_rate@" + key.split("@", 1)[1]] = cell.pop(key)
+        return bundle
+
+    def test_a_pre_rename_metrics_file_is_refused_with_the_rerun(self):
+        legacy = self._legacy_per_item(_metrics())
+        with pytest.raises(ValueError) as exc:
+            rb.assemble_report(_results(evaluation_metrics=legacy), _params())
+        message = str(exc.value)
+        assert "evaluation_metrics" in message
+        assert "hit_rate@" in message
+        assert "--from-node compute_metrics" in message
+
+    def test_the_category_bundle_is_checked_too(self):
+        metrics = _metrics()
+        metrics["category"] = self._legacy_per_item(_metrics())
+        with pytest.raises(ValueError, match="hit_rate@"):
+            rb.assemble_report(_results(evaluation_metrics=metrics), _params())
+
+    def test_a_pre_rename_baseline_file_is_refused(self):
+        legacy = self._legacy_per_item(_baseline_metrics_full())
+        with pytest.raises(ValueError, match="baseline_metrics"):
+            rb.assemble_report(_results(evaluation_metrics=_metrics(),
+                                        baseline_metrics=legacy), _params())
+
+    def test_a_query_group_hit_rate_is_not_the_old_format(self):
+        """#541 adds a query-group ``hit_rate@K`` to ``overall``: only the
+        per-item block tells the old format apart."""
+        metrics = _metrics()
+        metrics["overall"]["hit_rate@1"] = 0.6
+        rb.assemble_report(_results(evaluation_metrics=metrics), _params())
+
+
+def test_the_two_recalls_have_different_display_names_in_the_report():
+    """The query-group recall and the per-item one share the name ``recall``
+    (ADR-0031 decision 6); the page tells them apart by display name."""
+    html = rb.assemble_report(
+        _results(evaluation_metrics=_metrics(),
+                 baseline_metrics=_baseline_metrics_full()), _params())
+    assert "per-item recall@1 M" in html  # a column of the baseline's per-item table
+    assert "overall recall@k" in html     # the title of its query-group table
+
+
 class TestResolveDisplayKClampsToItemCount:
     """bug 8 (ADR-0020): the display K list used to be an unclamped
     superset — with only 3 categories, the report still printed @4/@5,
@@ -930,7 +981,7 @@ class TestDropMetricKeysAboveAllK:
 
 def test_glossary_section_always_built():
     s = glossary.build(_results(), _params())
-    assert "recall@k (per-item)" in " ".join(
+    assert "per-item recall@k" in " ".join(
         map(str, s.tables[0].to_dict().values()))
 
 
@@ -982,12 +1033,12 @@ def _baseline_metrics_full():
         "overall": {"map@1": 0.4, "map@3": 0.5,
                     "precision@1": 0.3, "recall@1": 0.25},
         "per_item": {
-            "A": {"hit_rate@1": 0.15, "hit_rate@2": 0.30, "mean_pos": 3.5,
+            "A": {"recall@1": 0.15, "recall@2": 0.30, "mean_pos": 3.5,
                   "map_attr@1": 0.40, "map_attr@2": 0.45, "map_attr@3": 0.50},
-            "B": {"hit_rate@1": 0.08, "hit_rate@2": 0.20, "mean_pos": 5.5,
+            "B": {"recall@1": 0.08, "recall@2": 0.20, "mean_pos": 5.5,
                   "map_attr@1": 0.25, "map_attr@2": 0.28, "map_attr@3": 0.30}},
         "macro_avg": {"by_item": {
-            "hit_rate@1": 0.115, "hit_rate@2": 0.25, "mean_pos": 4.5,
+            "recall@1": 0.115, "recall@2": 0.25, "mean_pos": 4.5,
             "map_attr@1": 0.325, "map_attr@2": 0.365, "map_attr@3": 0.40,
         }},
     }
@@ -1306,7 +1357,7 @@ def test_baseline_section_renders_popularity_table():
     m = _metrics()
     base = {
         "overall": {"map@1": 0.4},
-        "per_item": {"A": {"hit_rate@1": 0.1}},
+        "per_item": {"A": {"recall@1": 0.1}},
         "purchase_counts": {"A": 50, "B": 200, "C": 10},
     }
     s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
@@ -1471,7 +1522,7 @@ def test_baseline_section_omits_popularity_when_purchase_counts_absent():
     """Backward compat: no purchase_counts -> no popularity table, others stay."""
     m = _metrics()
     base = {"overall": {"map@1": 0.4},
-            "per_item": {"A": {"hit_rate@1": 0.1}}}
+            "per_item": {"A": {"recall@1": 0.1}}}
     s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
     assert s is not None
     assert "popularity 排名組成" not in s.table_titles
@@ -1481,7 +1532,7 @@ def test_baseline_section_omits_popularity_when_purchase_counts_empty():
     """Empty purchase_counts dict -> no popularity table."""
     m = _metrics()
     base = {"overall": {"map@1": 0.4},
-            "per_item": {"A": {"hit_rate@1": 0.1}},
+            "per_item": {"A": {"recall@1": 0.1}},
             "purchase_counts": {}}
     s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
     assert s is not None
@@ -1493,7 +1544,7 @@ def test_baseline_section_overall_map_table_mbdelta_rows_k_cols():
     m = _metrics()
     base = {
         "overall": {"map@1": 0.40},
-        "per_item": {"A": {"hit_rate@1": 0.1}},
+        "per_item": {"A": {"recall@1": 0.1}},
     }
     s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
     assert s is not None
@@ -1512,7 +1563,7 @@ def test_baseline_section_overall_tables_use_k_superset_columns():
     display columns with K > n_items — the fixture has n_items=2, so
     @3/@4/@5 must not appear, leaving [1,2,all]."""
     m = _metrics()
-    base = {"overall": {"map@1": 0.4}, "per_item": {"A": {"hit_rate@1": 0.1}}}
+    base = {"overall": {"map@1": 0.4}, "per_item": {"A": {"recall@1": 0.1}}}
     s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
     idx = s.table_titles.index("overall mAP@k (M/B/Δ)")
     cols = [str(c) for c in s.tables[idx].columns]
@@ -1535,7 +1586,7 @@ def test_baseline_section_has_two_per_item_compare_tables():
     # Two new titles present, each carrying the bug-5 coverage suffix.
     for prefix in (
         "per-item recall@k (M/B/Δ)",
-        "per-item map_attr@k (M/B/Δ)",
+        "map_attr@k (M/B/Δ)",
     ):
         matches = [t for t in s.table_titles if t.startswith(prefix)]
         assert len(matches) == 1, prefix
@@ -1557,18 +1608,18 @@ def test_baseline_section_per_item_recall_table_three_cols_per_k():
     title = _title_starting_with(s.table_titles, "per-item recall@k (M/B/Δ)")
     tbl = s.tables[s.table_titles.index(title)]
     assert list(tbl.columns) == [
-        "recall@1 M", "recall@1 B", "recall@1 Δ",
-        "recall@all M", "recall@all B", "recall@all Δ",
+        "per-item recall@1 M", "per-item recall@1 B", "per-item recall@1 Δ",
+        "per-item recall@all M", "per-item recall@all B", "per-item recall@all Δ",
     ]
     # Macro row first.
     assert list(tbl.index)[0] == "Macro 平均"
-    # Spot-check A: Model hit_rate@1=0.2, Baseline=0.15, Δ from per_item_delta.
-    assert tbl.loc["A", "recall@1 M"] == 0.2
-    assert tbl.loc["A", "recall@1 B"] == 0.15
-    assert abs(tbl.loc["A", "recall@1 Δ"] - (0.2 - 0.15)) < 1e-9
+    # Spot-check A: Model recall@1=0.2, Baseline=0.15, Δ from per_item_delta.
+    assert tbl.loc["A", "per-item recall@1 M"] == 0.2
+    assert tbl.loc["A", "per-item recall@1 B"] == 0.15
+    assert abs(tbl.loc["A", "per-item recall@1 Δ"] - (0.2 - 0.15)) < 1e-9
     # Macro row Δ from macro_a − macro_b.
     assert abs(
-        tbl.loc["Macro 平均", "recall@1 Δ"] - (0.15 - 0.115)
+        tbl.loc["Macro 平均", "per-item recall@1 Δ"] - (0.15 - 0.115)
     ) < 1e-9
     # bug 5: title discloses both sides' macro item coverage (fixture: A/B on
     # both sides, no n_pos in either -> default min_positives=0 counts both).
@@ -1582,7 +1633,7 @@ def test_baseline_section_per_item_attr_tables_use_primary_map_k():
     m = _metrics()
     base = _baseline_metrics_full()
     s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
-    title = _title_starting_with(s.table_titles, "per-item map_attr@k (M/B/Δ)")
+    title = _title_starting_with(s.table_titles, "map_attr@k (M/B/Δ)")
     tbl = s.tables[s.table_titles.index(title)]
     assert list(tbl.columns) == [
         "map_attr@1 M", "map_attr@1 B", "map_attr@1 Δ",
@@ -1601,7 +1652,7 @@ def test_baseline_section_omits_per_item_compare_when_no_baseline_per_item():
     assert s is not None
     for title in (
         "per-item recall@k (M/B/Δ)",
-        "per-item map_attr@k (M/B/Δ)",
+        "map_attr@k (M/B/Δ)",
     ):
         assert title not in s.table_titles
 
@@ -1611,12 +1662,12 @@ def _metrics_min():
         "overall": {"map@2": 0.8, "precision@2": 0.5, "recall@2": 1.0},
         "per_item": {
             "A": {"map_attr@2": 0.75,
-                  "hit_rate@2": 1.0, "mean_pos": 1.5, "n_pos": 2},
+                  "recall@2": 1.0, "mean_pos": 1.5, "n_pos": 2},
             "B": {"map_attr@2": 1.0,
-                  "hit_rate@2": 1.0, "mean_pos": 1.0, "n_pos": 1},
+                  "recall@2": 1.0, "mean_pos": 1.0, "n_pos": 1},
         },
         "macro_avg": {"by_item": {"map_attr@2": 0.875,
-                                  "hit_rate@2": 1.0, "mean_pos": 1.25}},
+                                  "recall@2": 1.0, "mean_pos": 1.25}},
         "observation_items": [],
         "n_queries": 3,
         "n_excluded_queries": 0,
@@ -1678,8 +1729,8 @@ def _metrics_with_recorded_all_k():
     m["per_segment"]["X"]["map@4"] = 0.8
     m["per_segment"]["Y"]["map@4"] = 0.7
     for item, v in (("A", 0.66), ("B", 0.44)):
-        m["per_item"][item].update({"map_attr@4": v, "hit_rate@4": 1.0})
-    m["macro_avg"]["by_item"].update({"map_attr@4": 0.55, "hit_rate@4": 1.0})
+        m["per_item"][item].update({"map_attr@4": v, "recall@4": 1.0})
+    m["macro_avg"]["by_item"].update({"map_attr@4": 0.55, "recall@4": 1.0})
     return m
 
 
@@ -1687,7 +1738,7 @@ def _baseline_at_recorded_all_k():
     base = _baseline_with_seg_cat()
     base["overall"] = {**base["overall"], "map@2": 0.05, "map@4": 0.6}
     base["per_item"] = {
-        item: {**cell, "map_attr@4": v, "hit_rate@4": 1.0}
+        item: {**cell, "map_attr@4": v, "recall@4": 1.0}
         for (item, cell), v in zip(base["per_item"].items(), (0.5, 0.3))
     }
     for seg, v in (("X", 0.5), ("Y", 0.4)):
@@ -1741,7 +1792,7 @@ def test_baseline_section_reads_both_sides_at_the_model_recorded_k():
     assert overall.loc["Baseline", "@all"] == pytest.approx(0.6)
     assert overall.loc["Δ", "@all"] == pytest.approx(0.3)
     attr = next(t for t, tt in zip(s.tables, s.table_titles)
-                if tt.startswith("per-item map_attr@k"))
+                if tt.startswith("map_attr@k"))
     assert attr.loc["A", "map_attr@all M"] == pytest.approx(0.66)
     assert attr.loc["A", "map_attr@all B"] == pytest.approx(0.5)
     seg = s.tables[s.table_titles.index("per-segment mAP@k (M/B/Δ)")]
@@ -1981,8 +2032,8 @@ def _ap_category(n_queries=1000, n_excluded=100, n_all_positive=300):
     """大類子 bundle，帶它自己的組數（和細粒度是兩個不同的數）。"""
     cat = {
         "overall": {"map@1": 0.4, "map@2": 0.45},
-        "per_item": {"fund": {"hit_rate@1": 0.3, "mean_pos": 2.0}},
-        "macro_avg": {"by_item": {"hit_rate@1": 0.3, "mean_pos": 2.0}},
+        "per_item": {"fund": {"recall@1": 0.3, "mean_pos": 2.0}},
+        "macro_avg": {"by_item": {"recall@1": 0.3, "mean_pos": 2.0}},
         "dataset_overview": {"totals": {"n_items": 2}},
         "n_queries": n_queries, "n_excluded_queries": n_excluded,
     }
@@ -2129,7 +2180,7 @@ def test_ledger_and_warning_carry_no_verdict_or_full_marks_wording():
 def test_ledger_and_warning_name_the_measurement_and_group_level_metrics():
     """帳上說「算進衡量指標」、不說「算進 mAP」（當初的理由是報表連結的診斷頁也印
     macro per-item mAP、不排除全正組；診斷頁隨 #532 拿掉，措辭照留）。與排法無關的只有組層級
-    （per-query）指標：per-item 的 map_attr／hit_rate／mean_pos 在 K 小於組的
+    （per-query）指標：per-item 的 map_attr／recall／mean_pos 在 K 小於組的
     列數時仍看誰排進前 K，所以不說「每組的分數都一樣」。"""
     m = _ap_metrics(n_all_positive=500, category=_ap_category())
     for drop in (False, True):
@@ -2419,11 +2470,11 @@ def test_a_new_query_group_entry_gets_its_row_and_its_segment_table(
 
 
 def test_tables_name_metrics_by_their_catalog_display_name(monkeypatch):
-    """The per-item recall (``hit_rate``) and the per-query mAP are labelled
-    from the catalog in both sections that show them."""
+    """The per-item recall and the per-query mAP are labelled from the
+    catalog in both sections that show them."""
     from recsys_tfb.evaluation.metric_catalog import ITEM, QUERY_GROUP
 
-    _with_catalog(monkeypatch, **{f"hit_rate_{ITEM}": "item-recall",
+    _with_catalog(monkeypatch, **{f"recall_{ITEM}": "item-recall",
                                   f"map_{QUERY_GROUP}": "MAP!"})
     results = _results(evaluation_metrics=_metrics(),
                        baseline_metrics=_baseline_metrics_full())
@@ -2431,7 +2482,7 @@ def test_tables_name_metrics_by_their_catalog_display_name(monkeypatch):
     assert any(t.startswith("B · per-item 歸因｜item-recall@k") for t in ranking)
     baseline = popularity_baseline.build(results, _params()).table_titles
     assert "overall MAP!@k (M/B/Δ)" in baseline
-    assert any(t.startswith("per-item item-recall@k (M/B/Δ)") for t in baseline)
+    assert any(t.startswith("item-recall@k (M/B/Δ)") for t in baseline)
 
 
 def test_a_new_item_entry_gets_its_own_per_item_table(monkeypatch):
@@ -2442,7 +2493,7 @@ def test_a_new_item_entry_gets_its_own_per_item_table(monkeypatch):
 
     _with_catalog(monkeypatch, mc.Metric(
         name="toy_i", method=mc.ITEM,
-        formula=mc.MeanOverPositiveRows("top_k"), per_k=True,
+        formula=mc.Ratio("hits", "n_pos"), per_k=True,
         grains=("per_item",), population="toy", display_name="toy-item",
         definition="toy"))
     m = _metrics()

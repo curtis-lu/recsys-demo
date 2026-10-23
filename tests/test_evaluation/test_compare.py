@@ -27,7 +27,7 @@ def _make_result_dict(seed: int) -> dict:
     }
     per_item = {
         it: {
-            "hit_rate@3": float(rng.rand()),
+            "recall@3": float(rng.rand()),
             "map_attr@3": float(rng.rand()),
             "mean_pos": float(rng.rand() * 3 + 1),
         }
@@ -44,7 +44,7 @@ def _make_result_dict(seed: int) -> dict:
     per_item_segment = {
         it: {
             s: {
-                "hit_rate@3": float(rng.rand()),
+                "recall@3": float(rng.rand()),
                 "map_attr@3": float(rng.rand()),
                 "mean_pos": float(rng.rand() * 3 + 1),
             }
@@ -54,16 +54,16 @@ def _make_result_dict(seed: int) -> dict:
     }
     macro_avg = {
         "by_item": {
-            "hit_rate@3": float(np.mean([v["hit_rate@3"] for v in per_item.values()])),
+            "recall@3": float(np.mean([v["recall@3"] for v in per_item.values()])),
             "map_attr@3": float(np.mean([v["map_attr@3"] for v in per_item.values()])),
         },
         "by_segment": {
             "map@3": float(np.mean([v["map@3"] for v in per_segment.values()])),
         },
         "by_item_segment": {
-            "hit_rate@3": float(
+            "recall@3": float(
                 np.mean([
-                    cell["hit_rate@3"]
+                    cell["recall@3"]
                     for by_seg in per_item_segment.values()
                     for cell in by_seg.values()
                 ])
@@ -108,11 +108,11 @@ class TestBuildComparisonResult:
 
 def test_build_comparison_keeps_overall_and_per_item_only():
     from recsys_tfb.evaluation.compare import build_comparison_result
-    a = {"overall": {"map@5": 0.5}, "per_item": {"A": {"hit_rate@5": 0.4}}}
-    b = {"overall": {"map@5": 0.3}, "per_item": {"A": {"hit_rate@5": 0.1}}}
+    a = {"overall": {"map@5": 0.5}, "per_item": {"A": {"recall@5": 0.4}}}
+    b = {"overall": {"map@5": 0.3}, "per_item": {"A": {"recall@5": 0.1}}}
     c = build_comparison_result(a, b, "M", "B")
     assert c["overall_delta"]["map@5"] == pytest.approx(0.2)
-    assert c["per_item_delta"]["A"]["hit_rate@5"] == pytest.approx(0.3)
+    assert c["per_item_delta"]["A"]["recall@5"] == pytest.approx(0.3)
     assert "per_segment_delta" not in c
     assert "macro_avg_delta" not in c
 
@@ -127,18 +127,18 @@ def test_delta_only_where_both_sides_have_the_key():
     a = {
         "overall": {"map@5": 0.5},
         "per_item": {
-            "p1": {"hit_rate@5": 0.4, "map_attr@5": 0.3},
-            "p2": {"hit_rate@5": 0.42},
+            "p1": {"recall@5": 0.4, "map_attr@5": 0.3},
+            "p2": {"recall@5": 0.42},
         },
     }
     b = {
         "overall": {"map@5": 0.3},
-        "per_item": {"p1": {"hit_rate@5": 0.1}},
+        "per_item": {"p1": {"recall@5": 0.1}},
     }
     c = build_comparison_result(a, b)
     assert "p2" not in c["per_item_delta"]           # item on A only
     assert "map_attr@5" not in c["per_item_delta"]["p1"]  # key on A only
-    assert c["per_item_delta"]["p1"]["hit_rate@5"] == pytest.approx(0.3)
+    assert c["per_item_delta"]["p1"]["recall@5"] == pytest.approx(0.3)
     assert c["overall_delta"]["map@5"] == pytest.approx(0.2)
 
 
