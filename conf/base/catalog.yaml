@@ -331,7 +331,7 @@ evaluation_item_categories:
   optional: true
 
 # compute_row_facts 的輸出（#535，ADR-0031 決定 4）：評估列的事實——資料概況、組數、
-# 全正組數、分群欄，跟分數無關（同分列數除外，見 compute_row_facts）。模型與熱門度 baseline
+# 全正組數、分群欄，跟分數無關（同分列數跟分數有關，在 metrics.json）。模型與熱門度 baseline
 # 是同一批列，共用這一份：兩個指標 node 從它讀組數與 item 數，主報表的概覽、基本統計、
 # 組數帳也讀它。帶 config_fingerprint。
 evaluation_row_facts:

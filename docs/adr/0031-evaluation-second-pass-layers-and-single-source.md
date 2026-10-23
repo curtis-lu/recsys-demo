@@ -456,9 +456,10 @@ diagnosis/metric/    contract.py
 - **改寫（2026-10-22，決定 16 第 3 項）。** 主報表概覽固定列 pooled AP 與 macro per-item AP，比較報表的預設清單也有，所以 A、A′、B′ 每次都要算這兩個。它們跟 AUC 一樣把每一列當一次二元預測，但在原始分數上算，不是上一條講的分箱版，不受「清單列到才算」限制。
 - **更正（#535 實作時發現，2026-10-23）。**
   - **熱門度視窗的事實留在 `baseline_metrics.json`，不進列的事實。** 本條第一點把 `purchase_counts`、`monthly_counts`、`window_months_covered`、`popularity_rate` 算成列的事實。它們是 baseline 分數本身的來源（每個 item 在回看窗裡的正例數或正例率），不是這批列跟分數無關的事實；算進列的事實，等於 baseline 產出自己的列的事實，跟決定 8 衝突。窗的涵蓋月數改由計算層算，是決定 10 的事（#536）。
-  - **同分列數跟分數有關，仍放在列的事實。** `dataset_overview.totals.n_tied_rows`／`tied_row_share`（宣告了 optional role 才寫）數的是「組內跟別列同分的列」，用的是模型的分數。決定 8 說報表不讀 baseline 的資料概況，理由正是熱門度分數的同分數字會不同，所以它照舊記在模型這一份；`compute_row_facts` 的 docstring 寫明了這一點。
+  - **同分列數跟分數有關，搬到指標結果，不放在列的事實。** `n_tied_rows`／`tied_row_share`（宣告了 optional role 才寫）數的是「組內跟別列同分的列」，數的是這組分數的同分；今天它在資料概況裡（`dataset_overview.totals`），決定 8 不讓報表讀 baseline 的資料概況，理由也正是熱門度分數的同分數字不同。所以它跟著分數走：每份指標結果各記一份（item 與大類粒度，baseline 的是熱門度分數的），主報表的完整性檢查段讀模型那份，畫面不變；列的事實只剩跟分數無關的數字（擁有者 2026-10-23 選定，審查時抓到）。
   - **列的事實是一個 node（`compute_row_facts`），排在兩個指標 node 前面，兩個指標 node 從它讀組數、item 數與最寬組的列數，不再自己數。** 所以它是第一個寫帶指紋產物的 node，`COMPUTED_KEYS` 裡原本指向 `compute_metrics` 的列都改成指向它；設定改了之後，錯誤訊息建議 `--from-node compute_row_facts`（擁有者 2026-10-23 在「放指標前面、組數只算一次」與「跟指標並排、各自再數一次」之間選了前者）。
   - **母體帳的樣子。** 每份指標結果（模型、baseline、比較報表的兩邊；大類粒度各一份）多一個 `population`：`all_k`（`all` 解析成幾，以前只有宣告 `event` 才寫，而且寫在頂層）、`macro_items`（進 `macro_avg.by_item` 的 item）、`n_scored_queries_with_positive`、`n_scored_queries_without_positive`（算進指標的組，今天沒有正例的組一律不算，所以是 0）。列的事實（組數、資料概況、分群欄）從 `metrics.json` 拿掉，報表改讀 `row_facts.json`。
+  - **baseline 的母體帳一定跟模型的相同，查不出兩邊不同。** 它的組數與 `all_k` 是從模型那份列的事實推出來的；(A, baseline) 這一對靠構造保證是同一批列（`build_baseline_frame` 是一對一的 left join，分數表的 (time, item) 不重複），不靠查帳。母體帳拿來判斷「能不能比」的是 A′、B′：兩邊各數各的列的事實。帳上也還沒有決定 4 第四種情況（B 沒有分群欄）的欄位，也只記組數、不記是哪些組；比較層落地時（#536）照它需要的補。
   - **比較報表的 A′、B′ 這張先在記憶體裡算列的事實**（`generate_comparison_report` 兩邊各算一次），落地是 #536 比較層的事。
 
 ### 決定 5　比較自己一層，差值只在這裡算

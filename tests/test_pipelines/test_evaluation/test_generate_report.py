@@ -503,7 +503,9 @@ class TestTheBaselineIsTheModelsComputation:
     The data: two query groups, each holding A, B, C, A the one positive in
     both. The model ranks A first in both. The history makes C the most
     popular, then B, then A, so the baseline ranks A last in both — a tie
-    broken by item name would have ranked it first.
+    broken by item name would have ranked it first. Each group is its own
+    segment and the items map to two categories, so every slice the report
+    compares is computed.
     """
 
     @staticmethod
@@ -515,6 +517,9 @@ class TestTheBaselineIsTheModelsComputation:
             "evaluation": {
                 "snap_date": "2024-03-31",
                 "k_values": [1, 2, 3],
+                "segment_columns": ["seg"],
+                "item_categories": {"enabled": True, "unmapped": "singleton",
+                                    "mapping": {"AB": ["A", "B"]}},
                 "baseline": {"lookback_months": 12},
                 "report": {
                     "sections": {"per_item_breakdown": False},
@@ -533,23 +538,25 @@ class TestTheBaselineIsTheModelsComputation:
         )
 
         params = cls._params()
+        params["schema"]["categorical_values"] = {"prod_name": ["A", "B", "C"]}
         frame = stamp_partition_fingerprint(spark.createDataFrame(
-            [("2024-03-31", "c1", "A", 0.9, 1, 1),
-             ("2024-03-31", "c1", "B", 0.5, 0, 2),
-             ("2024-03-31", "c1", "C", 0.1, 0, 3),
-             ("2024-03-31", "c2", "A", 0.8, 1, 1),
-             ("2024-03-31", "c2", "B", 0.3, 0, 2),
-             ("2024-03-31", "c2", "C", 0.2, 0, 3)],
+            [("2024-03-31", "c1", "A", 0.9, 1, 1, "X"),
+             ("2024-03-31", "c1", "B", 0.5, 0, 2, "X"),
+             ("2024-03-31", "c1", "C", 0.1, 0, 3, "X"),
+             ("2024-03-31", "c2", "A", 0.8, 1, 1, "Y"),
+             ("2024-03-31", "c2", "B", 0.3, 0, 2, "Y"),
+             ("2024-03-31", "c2", "C", 0.2, 0, 3, "Y")],
             schema=["snap_date", "cust_id", "prod_name", "score", "label",
-                    "rank"],
-        ), params, [])
+                    "rank", "seg"],
+        ), params, ["seg"])
         # Positives in the lookback window: C 3, B 2, A 1.
         history = spark.createDataFrame(
             [("2023-12-31", f"h{i}", item, int(i < n))
              for i in range(3) for item, n in (("A", 1), ("B", 2), ("C", 3))],
             schema=["snap_date", "cust_id", "prod_name", "label"],
         )
-        segments = _landed_segments(params)
+        segments = {**_landed_segments(params), "joined": ["seg"],
+                    "sources": {"seg": "sample_pool"}}
         facts = compute_row_facts(frame, segments, params)
         metrics = compute_metrics(frame, facts, segments, params)
         baseline = compute_baseline_metrics(
@@ -577,15 +584,17 @@ class TestTheBaselineIsTheModelsComputation:
         cells = re.findall(r"<td>([^<]*)</td>", macro[:macro.index("</tr>")])
         assert cells == ["1", "0", "1"]   # recall@1 M, B, Δ
 
+    @pytest.mark.parametrize("fixture", [
+        "_baseline_metrics_full", "_baseline_with_seg_cat"])
     def test_the_hand_written_baseline_holds_only_what_the_node_writes(
-            self, spark):
-        """``test_report_builder._baseline_metrics_full`` still draws the
-        baseline section in the report tests that need no Spark. Every key
-        path in it must be one ``compute_baseline_metrics`` writes, items and
-        months read as any key — the macro it held before #535 was not."""
-        from tests.test_evaluation.test_report_builder import (
-            _baseline_metrics_full,
-        )
+            self, spark, fixture):
+        """The hand-written baselines of ``test_report_builder`` still draw
+        the baseline section in the report tests that need no Spark. Every
+        key path in them must be one ``compute_baseline_metrics`` writes,
+        items, segments and months read as any key — the macro
+        ``_baseline_metrics_full`` held before #535 was not. Keys only: the
+        values there are made up."""
+        from tests.test_evaluation import test_report_builder
 
         any_key_below = {"per_item": 1, "per_segment": 1,
                          "per_item_segment": 2, "purchase_counts": 1,
@@ -604,5 +613,6 @@ class TestTheBaselineIsTheModelsComputation:
             return paths
 
         *_, baseline = self._computed(spark)
-        unwritten = key_paths(_baseline_metrics_full()) - key_paths(baseline)
+        hand_written = getattr(test_report_builder, fixture)()
+        unwritten = key_paths(hand_written) - key_paths(baseline)
         assert unwritten == set()

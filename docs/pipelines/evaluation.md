@@ -563,13 +563,13 @@ python -m recsys_tfb evaluation \
   --dry-run
 ```
 
-`generate_report` 是純函式，參數全部是別的 node 算好的產物（見 5.1 節的表）。其中 `evaluation_row_facts`（`row_facts.json`）、`evaluation_metrics`（`metrics.json`）、`baseline_metrics`（`baseline_metrics.json`）、`evaluation_report_aggregates`、`prediction_quality_metrics`（`prediction_quality.json`）已落地成 `JSONDataset`（前兩者見 [ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 2），也是，沒有記憶體中間結果。切片的自動擴張只看「輸出是否已落地」（見 [`pipeline-slicing.md`](../operations/user-guides/pipeline-slicing.md) 的「自動擴張補跑」），所以從 `generate_report` 接續，前次完整 run 成功時不會自動補跑任何 node，不跑 Spark。補跑清單釘在 `tests/test_pipelines/test_resume_contracts.py` 的 `RESUME_CONTRACTS`，之後改動 node 的形狀，該測試會紅燈提醒同步文件。
+`generate_report` 是純函式，參數全部是別的 node 算好的產物（見 5.1 節的表）。其中 `evaluation_row_facts`（`row_facts.json`）、`evaluation_metrics`（`metrics.json`）、`baseline_metrics`（`baseline_metrics.json`）、`evaluation_report_aggregates`、`prediction_quality_metrics`（`prediction_quality.json`）已落地成 `JSONDataset`（`metrics.json` 與 `baseline_metrics.json` 見 [ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 2），也是，沒有記憶體中間結果。切片的自動擴張只看「輸出是否已落地」（見 [`pipeline-slicing.md`](../operations/user-guides/pipeline-slicing.md) 的「自動擴張補跑」），所以從 `generate_report` 接續，前次完整 run 成功時不會自動補跑任何 node，不跑 Spark。補跑清單釘在 `tests/test_pipelines/test_resume_contracts.py` 的 `RESUME_CONTRACTS`，之後改動 node 的形狀，該測試會紅燈提醒同步文件。
 
 接續時直接讀回的落地 JSON（`evaluation_row_facts`、`evaluation_metrics`、`baseline_metrics`、`evaluation_report_aggregates`、`prediction_quality_metrics`）若是在不同的「算的」設定下算出來的，`generate_report` 會在畫之前 raise，訊息列出哪份產物、哪個鍵從什麼值變成什麼值、該 `--from-node` 哪個 node。只改了「畫的」設定則照常重繪。兩類設定的分法見 7.2 節。
 
 因此只改了「畫的」設定時，`--only-node generate_report` 就是便宜的重繪接續點：不重算任何指標（CLI 仍會照 4.1 節所說初始化 Spark）。需要只重做模型比較時，應使用持久化 `enriched_eval_predictions` 的 `--compare-only`。
 
-從列的事實或指標接續（`--from-node compute_row_facts`、`--from-node compute_metrics`）也不重做 join：`prepare_eval_data` 把連好 label、rank 與 segment 的列直接寫進 `enriched_eval_predictions`，之後的 node 讀表（[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1）。前次完整 run 成功時，不會補跑任何 node（沒有 memory-only 的中間結果）；清單同樣釘在 `RESUME_CONTRACTS` 的 `"compute_row_facts"`、`"compute_metrics"`。兩個情況會把 `prepare_eval_data` 拉回來或擋下：
+從列的事實接續（`--from-node compute_row_facts`，設定改了之後錯誤訊息建議的就是這個）也不重做 join：`prepare_eval_data` 把連好 label、rank 與 segment 的列直接寫進 `enriched_eval_predictions`，之後的 node 讀表（[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1）。前次完整 run 成功時，不會補跑任何 node（沒有 memory-only 的中間結果）；清單同樣釘在 `RESUME_CONTRACTS` 的 `"compute_row_facts"`、`"compute_metrics"`。`--from-node compute_metrics` 也走得通，但切片照拓撲順序的位置切，它不重數列的事實（讀落地的 `row_facts.json`），也不重跑排在它前面的 `compute_prediction_quality`、`compute_report_aggregates`；partition 用同樣的設定重寫過之後（例如補了遲到的 label 再單跑某個月），列的事實只檢查設定指紋、看不出列變了，要從 `compute_row_facts` 接續。兩個情況會把 `prepare_eval_data` 拉回來或擋下：
 
 - **評估日期的 partition 不在**：這張表從第一次評估之後就一直存在，所以 CLI 不問「表在不在」，問「`evaluation.snap_date` 的每一個日期的 partition 在不在」。任一個不在就把 `prepare_eval_data` 拉回切片，全都在就直接讀。
 - **partition 在，但寫的時候設定不同**：兩道比對，擋的是兩件事。
@@ -644,7 +644,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合拆
 | `report_comparison.html` | `data/evaluation/<model_version>/<YYYYMMDD>/report_comparison.html` | `--compare`、`--compare-only` |
 | `manifest.json` | `data/evaluation/<model_version>/<YYYYMMDD>/manifest.json` | 所有實際執行模式 |
 | `row_facts.json` | `data/evaluation/<model_version>/<YYYYMMDD>/row_facts.json`（`evaluation_row_facts`：資料概況、query group 數、無正例與全正的組數、分群欄，item 與大類粒度，帶 `config_fingerprint`） | 標準、`--compare` |
-| `metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/metrics.json`（`evaluation_metrics`：overall、per-item、per-segment、macro 與 category 指標，per-item 指標的共用數字，母體帳 `population`，帶 `config_fingerprint`） | 標準、`--compare` |
+| `metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/metrics.json`（`evaluation_metrics`：overall、per-item、per-segment、macro 與 category 指標，per-item 指標的共用數字，母體帳 `population`；宣告 `event`／`occasion` 時另有同分列數 `n_tied_rows`／`tied_row_share`；帶 `config_fingerprint`） | 標準、`--compare` |
 | `baseline_metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/baseline_metrics.json`（`baseline_metrics`；`report.sections.baseline: false` 時是 `{"enabled": false}` stub，一樣帶指紋） | 標準、`--compare` |
 | `prediction_quality.json` | `data/evaluation/<model_version>/<YYYYMMDD>/prediction_quality.json`（`prediction_quality_metrics`，見 3.7 節；`report.sections.prediction_quality: false` 時是 `{"enabled": false}` stub，一樣帶指紋） | 標準、`--compare` |
 | `segment_columns.json` | `data/evaluation/<model_version>/<YYYYMMDD>/segment_columns.json`（`evaluation_segment_columns`，見 3.2 節） | 標準、`--compare` 寫；`--compare-only` 讀 |
@@ -727,7 +727,7 @@ report path 會將 ISO 日期移除 `-`，例如 `2026-01-31` 寫入 `data/evalu
 
 每個讀表 node 讀之前逐日期比對「今天的設定＋這個目錄 JSON 的 `joined`」（`--compare-only` 例外，設定取 JSON 記錄的，見 5.3 節），上例第 3 步會 raise 並點名 3 月，反方向（先單月、再用別的設定跑區間、再接續單月）一樣。
 
-**成本**：每個讀表 node 多一次小 action（標準執行的 4 個讀表 node 各一次，`--compare`／`--compare-only` 的 `restrict_to_common` 再一次；`--compare-only` 的閘門則是把原本的逐日期空值檢查換成這一次，不另外加）。這次 action 對每個評估日期只讀那個 partition 的一列（每支 `coalesce(1).limit(1)`，全部 union 後 collect 一次），日期數只影響 union 的支數，不整欄掃描。Spark 3.3.2（AQE 開啟）實測：一個日期或三個日期都是 1 個 job。前提是一個 partition 由一次 dynamic overwrite 寫成、整格同一個指紋值，所以一列就代表整格；用別的方式把列塞進某一格會讓這個檢查看不到第二種值。compare 的 `external_hive` 來源是例外：使用者的表不保證依時間分區，所以逐日期用 `isEmpty` 平行檢查（每個日期一個 job），不用單一 task 的讀法。理由與取捨見 [ADR-0020](../adr/0020-evaluation-bug-round-intended-behaviours.md) 文末〈補充（#374）〉。
+**成本**：每個讀表 node 多一次小 action（標準執行的每個讀表 node 各一次，`--compare`／`--compare-only` 的 `restrict_to_common` 再一次；`--compare-only` 的閘門則是把原本的逐日期空值檢查換成這一次，不另外加）。這次 action 對每個評估日期只讀那個 partition 的一列（每支 `coalesce(1).limit(1)`，全部 union 後 collect 一次），日期數只影響 union 的支數，不整欄掃描。Spark 3.3.2（AQE 開啟）實測：一個日期或三個日期都是 1 個 job。前提是一個 partition 由一次 dynamic overwrite 寫成、整格同一個指紋值，所以一列就代表整格；用別的方式把列塞進某一格會讓這個檢查看不到第二種值。compare 的 `external_hive` 來源是例外：使用者的表不保證依時間分區，所以逐日期用 `isEmpty` 平行檢查（每個日期一個 job），不用單一 task 的讀法。理由與取捨見 [ADR-0020](../adr/0020-evaluation-bug-round-intended-behaviours.md) 文末〈補充（#374）〉。
 
 同一個 model version 與日期下修改 K、segments、categories、baseline、report sections 或 compare source，都會覆寫相同報表路徑；標準／`--compare` 模式也會覆寫相同 enriched partition。
 manifest 會保存最後一次執行的 evaluation parameters、git commit、run ID、`post_training` 與 slicing metadata。

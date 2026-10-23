@@ -83,8 +83,9 @@ def metric_params(parameters: dict) -> dict:
     }
 
 
-#: Top-level key of a ``metrics_spark.compute_all_metrics`` bundle and of its
-#: ``category`` sub-bundle (#376): how many of the query groups holding a
+#: Top-level key of the row facts (``metrics_spark.compute_row_facts``,
+#: ``row_facts.json``) and of their ``category`` grain (#376; in the metrics
+#: bundle before #535): how many of the query groups holding a
 #: positive are *all-positive* — every row carries the same positive label
 #: (with 0/1 labels: every row positive; the rule is
 #: ``metrics_spark._all_positive_group``), so every per-query ranking metric
@@ -95,7 +96,7 @@ def metric_params(parameters: dict) -> dict:
 #: with K below the row count, which rows reach the top K still decides which
 #: items get the credit. Always written, whether or not
 #: ``evaluation.query_filter.drop_all_positive_groups`` drops them, because the
-#: report reads only the written bundle. ``n_excluded_queries`` keeps counting
+#: report reads only the written facts. ``n_excluded_queries`` keeps counting
 #: only the zero-positive groups.
 ALL_POSITIVE_KEY = "n_all_positive_queries"
 
@@ -124,7 +125,7 @@ def drop_all_positive_groups(parameters: dict) -> bool:
 
 
 def n_groups_with_positive(bundle: dict) -> Optional[int]:
-    """Query groups holding a positive in one metrics bundle:
+    """Query groups holding a positive in one grain of the row facts:
     ``n_queries - n_excluded_queries``.
 
     The one place that subtraction is written (#376):
@@ -142,7 +143,8 @@ def n_groups_with_positive(bundle: dict) -> Optional[int]:
 
 
 def all_positive_share(bundle: dict) -> Optional[float]:
-    """All-positive groups ÷ groups holding a positive, for one metrics bundle.
+    """All-positive groups ÷ groups holding a positive, for one grain of the
+    row facts.
 
     The denominator is :func:`n_groups_with_positive`, the groups the
     measurement metrics score with the switch off, so the share reads as
@@ -217,9 +219,11 @@ def resolved_all_k(bundle: dict) -> int:
     lookup missed and nothing raised (a blank ``map@all`` cell, a test mAP
     logged as 0.0).
 
-    Read off the bundle's own population ledger (:data:`POPULATION_KEY`), so
-    the model, its baseline and a compared model are each read at the K they
-    were computed at. The keys stay the resolved number, not ``map@all``
+    Read off the bundle's own population ledger (:data:`POPULATION_KEY`).
+    The comparison report reads each side at its own; the main report reads
+    the baseline at the model's, which is the same K by construction — the
+    baseline re-scores the model's rows and counts off their row facts. The
+    keys stay the resolved number, not ``map@all``
     (ADR-0031 decision 15, checked in #535): two sides whose ``"all"``
     resolved to different K then never pair up under one name.
 

@@ -268,20 +268,31 @@ def _event_df(spark):
     )
 
 
+def _metrics_of(frame, params):
+    """The metrics bundle of ``frame``, counting off its own row facts."""
+    return ms.compute_all_metrics(
+        frame, params, ms.compute_row_facts(frame, params))
+
+
 def test_tied_row_share_is_absent_without_the_event_role(spark):
     """The compatibility half: the artifact must stay value-for-value what it
     was for every deployment that declares no optional role."""
-    totals = ms.compute_dataset_overview(_df(spark), _params())["totals"]
-    assert "n_tied_rows" not in totals
-    assert "tied_row_share" not in totals
+    metrics = _metrics_of(_df(spark), _params())
+    assert "n_tied_rows" not in metrics
+    assert "tied_row_share" not in metrics
 
 
 def test_tied_row_share_counts_rows_whose_rank_the_tiebreak_decided(spark):
-    totals = ms.compute_dataset_overview(_event_df(spark), _event_params())["totals"]
+    """In the metrics, not the row facts (#535): the count is of these
+    scores' ties, and the row facts hold only what the scores do not move."""
+    frame, params = _event_df(spark), _event_params()
+    metrics = _metrics_of(frame, params)
     # The two 0.9 rows of (c1, A). The 0.4 and 0.1 rows are alone at their
     # score, and c2's single row is alone in its query group.
-    assert totals["n_tied_rows"] == 2
-    assert totals["tied_row_share"] == pytest.approx(2 / 5)
+    assert metrics.get("n_tied_rows") == 2
+    assert metrics.get("tied_row_share") == pytest.approx(2 / 5)
+    totals = ms.compute_row_facts(frame, params)["dataset_overview"]["totals"]
+    assert "n_tied_rows" not in totals
 
 
 def test_tied_rows_are_counted_within_a_query_group_not_across(spark):
@@ -295,8 +306,7 @@ def test_tied_rows_are_counted_within_a_query_group_not_across(spark):
         ],
         schema=["snap_date", "cust_id", "prod_name", "imp_id", "score", "label"],
     )
-    totals = ms.compute_dataset_overview(df, _event_params())["totals"]
-    assert totals["n_tied_rows"] == 0
+    assert _metrics_of(df, _event_params())["n_tied_rows"] == 0
 
 
 def test_all_resolves_to_the_distinct_item_count_without_the_event_role(spark):
@@ -435,11 +445,9 @@ def test_tied_row_share_is_reported_with_the_occasion_role(spark):
     """B and C tie at 0.5 inside r1. r2's A also scores 0.5 but is alone in
     its occasion — under ``time`` + ``entity`` alone the three 0.5 rows would
     all have counted as tied."""
-    totals = ms.compute_dataset_overview(
-        _occasion_df(spark), _occasion_params()
-    )["totals"]
-    assert totals["n_tied_rows"] == 2
-    assert totals["tied_row_share"] == pytest.approx(2 / 5)
+    metrics = _metrics_of(_occasion_df(spark), _occasion_params())
+    assert metrics["n_tied_rows"] == 2
+    assert metrics["tied_row_share"] == pytest.approx(2 / 5)
 
 
 def test_evaluated_queries_are_the_occasions_with_a_positive(spark):

@@ -530,41 +530,55 @@ def compute_dataset_overview(
         "by_snap_date": _group(time_col),
         "by_item": _group(item_col),
     }
-    # The share of rows whose rank the tie-break decided rather than the score.
-    # Added ONLY when an optional role is declared, so every existing artifact
-    # stays value-for-value what it was; the extra shuffle is likewise only
-    # paid by a deployment that asked for the role.
-    #
-    # With only `occasion` declared, items are unique within a query group
-    # and the tie-break is the item alone (spec #426 decision D), which is the
-    # rule every undeclared deployment already lives with — but the query
-    # groups are small, so a tie decides a larger share of each ranking, and
-    # the number is printed for the same reason.
-    #
-    # Why it is reported at all: with `event` declared and no per-impression
-    # features attached, every row of one item in one query group necessarily
-    # scores the same, so *everything* ties and the rank is decided entirely by
-    # `event` ascending. That direction is not neutral — an event timestamp
-    # ranks the earlier impression first, worth about 0.02 mAP on this repo's
-    # ad example (#378). The framework does not choose for the deployment
-    # (ADR-0025 rejected hashing the identity instead); it prints the number
-    # that says how much the choice could be worth here.
-    if declares_optional_role(schema):
-        n_tied = (
-            eval_predictions.groupBy(*group_cols, schema["score"])
-            .agg(F.count(F.lit(1)).alias("_n"))
-            .filter(F.col("_n") > 1)
-            .agg(F.sum("_n").alias("_tied"))
-            .collect()[0]["_tied"]
-        )
-        n_tied = int(n_tied or 0)
-        result["totals"]["n_tied_rows"] = n_tied
-        result["totals"]["tied_row_share"] = (n_tied / n_rows) if n_rows else 0.0
     if active_seg_col:
         result["by_segment"] = _group(
             active_seg_col, with_queries=True, to_key=segment_key
         )
     return result
+
+
+def _tied_rows(
+    frame: SparkDataFrame, parameters: dict, n_rows: int,
+) -> dict:
+    """``{"n_tied_rows", "tied_row_share"}`` of ``frame``'s scores, or ``{}``.
+
+    The share of rows whose rank the tie-break decided rather than the score.
+    Counted ONLY when an optional role is declared, so every other artifact
+    stays value-for-value what it was; the extra shuffle is likewise only
+    paid by a deployment that asked for the role.
+
+    With only `occasion` declared, items are unique within a query group
+    and the tie-break is the item alone (spec #426 decision D), which is the
+    rule every undeclared deployment already lives with — but the query
+    groups are small, so a tie decides a larger share of each ranking, and
+    the number is printed for the same reason.
+
+    Why it is reported at all: with `event` declared and no per-impression
+    features attached, every row of one item in one query group necessarily
+    scores the same, so *everything* ties and the rank is decided entirely by
+    `event` ascending. That direction is not neutral — an event timestamp
+    ranks the earlier impression first, worth about 0.02 mAP on this repo's
+    ad example (#378). The framework does not choose for the deployment
+    (ADR-0025 rejected hashing the identity instead); it prints the number
+    that says how much the choice could be worth here.
+
+    A metrics key, not a row fact (#535): it counts ties of these scores, so
+    the popularity baseline's — one score per item — differ from the model's
+    on the same rows. ``n_rows`` is the row facts' count of ``frame``.
+    """
+    schema = get_schema(parameters)
+    if not declares_optional_role(schema):
+        return {}
+    n_tied = (
+        frame.groupBy(*schema["query_group_columns"], schema["score"])
+        .agg(F.count(F.lit(1)).alias("_n"))
+        .filter(F.col("_n") > 1)
+        .agg(F.sum("_n").alias("_tied"))
+        .collect()[0]["_tied"]
+    )
+    n_tied = int(n_tied or 0)
+    return {"n_tied_rows": n_tied,
+            "tied_row_share": (n_tied / n_rows) if n_rows else 0.0}
 
 
 # ---------------------------------------------------------------------------
@@ -1038,9 +1052,10 @@ def aggregate_per_item(
     k_values: list[int],
 ) -> dict[str, dict]:
     """The per-item metric cells straight from ``enriched``:
-    :func:`aggregate_item_shared_numbers`, then :func:`item_metrics`. For a
-    caller that lands the metrics but not the shared numbers (the popularity
-    baseline).
+    :func:`aggregate_item_shared_numbers`, then :func:`item_metrics`. No
+    pipeline calls it since #535 (the popularity baseline went through
+    ``compute_all_metrics``, which keeps the shared numbers); the tests
+    use it to check the per-item formulas on an enriched frame.
 
     Metrics per cell — every item entry of ``metric_catalog``, a ratio of the
     item's shared numbers:
@@ -1117,7 +1132,7 @@ def macro_average(
         raise ValueError(
             f"macro_average: weight_alpha/min_positives/shrinkage_k need "
             f"'n_pos' in every per-item dict; missing for {missing}. "
-            f"Upstream must be aggregate_per_item (which emits n_pos)."
+            f"Upstream must be item_metrics (which emits n_pos)."
         )
 
     pairs_by_metric: dict[str, list[tuple[float, float]]] = {}
@@ -1228,6 +1243,11 @@ def _compute_core(
         widest_group_rows=facts[WIDEST_GROUP_KEY],
     )
     query_ks, item_ks = _resolve_k_grids(parameters, all_k)
+    # Before the empty returns, which carry it too: the ties are of the
+    # scores, whether or not any group is left to score.
+    ties = _tied_rows(
+        eval_predictions, parameters,
+        facts["dataset_overview"]["totals"]["n_rows"])
 
     def population(per_item: dict) -> dict:
         # The groups scored are the ones holding a positive (AP is undefined
@@ -1259,7 +1279,7 @@ def _compute_core(
 
     if n_queries_with_pos == 0:
         logger.warning("No queries with positive labels found")
-        return {**_EMPTY_RESULT, **population({})}
+        return {**_EMPTY_RESULT, **population({}), **ties}
     if drop_all_positive_groups and n_all_positive == n_queries_with_pos:
         logger.warning(
             "No query group left to score: all %d holding a positive are "
@@ -1267,7 +1287,7 @@ def _compute_core(
             "drop_all_positive_groups drops them",
             n_all_positive,
         )
-        return {**_EMPTY_RESULT, **population({})}
+        return {**_EMPTY_RESULT, **population({}), **ties}
 
     enriched = add_row_contributions(
         scored, group_cols, label_col, item_ks,
@@ -1343,6 +1363,7 @@ def _compute_core(
                 "macro_avg": macro_avg,
                 "observation_items": observation_items,
                 **population(per_item),
+                **ties,
                 "per_item_shared_numbers": per_item_shared,
                 "per_item_segment_shared_numbers": per_item_segment_shared,
             }
@@ -1399,13 +1420,6 @@ def compute_row_facts(
     positive, whatever ``evaluation.query_filter.drop_all_positive_groups``
     says — which of them the metrics scored is the metrics' own ledger
     (``metrics.POPULATION_KEY``).
-
-    One number here does depend on the scores: ``dataset_overview.totals
-    .n_tied_rows`` (written only with an optional role declared) counts the
-    rows sharing a score in their group, under the scores of the frame
-    passed. The evaluation passes the model's rows; the baseline's popularity
-    scores tie far more, which is why the report never reads a baseline's
-    overview (ADR-0031 decision 8).
 
     The category grain collapses the frame as ``compute_all_metrics`` does,
     with the same ``category_mapping`` (``None`` reads the hand-written

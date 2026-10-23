@@ -804,7 +804,8 @@ def test_completeness_facts_label_n_queries_as_the_full_total():
     rf = _row_facts()
     rf["n_queries"] = 1_000_000
     rf["n_excluded_queries"] = 950_000
-    s = completeness.build(_results(evaluation_row_facts=rf), _params())
+    s = completeness.build(_results(evaluation_row_facts=rf,
+                                    evaluation_metrics=_metrics()), _params())
     idx = [str(i) for i in s.tables[0].index]
     assert "全部 query 數 n_queries" in idx
     assert not any("有正例 query 數" in i for i in idx)
@@ -812,6 +813,17 @@ def test_completeness_facts_label_n_queries_as_the_full_total():
     row = dict(zip(idx, s.tables[0]["value"]))
     assert row["全部 query 數 n_queries"] == 1_000_000
     assert row["有正例的 query 數"] == 50_000
+
+
+def test_completeness_prints_the_tied_rows_off_the_model_s_metrics():
+    """#535: the tie count is of the model's scores, so it lands with the
+    model's metrics; the row facts hold only what the scores do not move."""
+    metrics = {**_metrics(), "n_tied_rows": 7, "tied_row_share": 0.07}
+    section = completeness.build(
+        _results(evaluation_metrics=metrics), _params())
+    facts = section.tables[0]["value"]
+    assert facts.get("同分列數 n_tied_rows（名次由 item／event 決勝，非由分數決定）") == 7
+    assert facts.get("同分列佔比 tied_row_share") == "7.0%"
 
 
 def test_completeness_section_no_verdict_vocabulary():

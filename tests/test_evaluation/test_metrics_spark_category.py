@@ -129,9 +129,9 @@ def test_both_faces_count_ties_on_their_own_grain(spark):
     分數決定的」——但兩面的列不是同一批。逐列那一面數的是同組同分的候選列，
     大類面數的是聚合後同組同分的大類。這裡的資料兩面都沒有同分，所以兩邊都是
     0；釘的是「兩邊各自算在自己的表上」而不是某個特定數值。"""
-    facts, _ = _both(_event_raw(spark), _event_category_params())
-    assert facts["dataset_overview"]["totals"]["n_tied_rows"] == 0
-    assert facts["category"]["dataset_overview"]["totals"]["n_tied_rows"] == 0
+    _, out = _both(_event_raw(spark), _event_category_params())
+    assert out["n_tied_rows"] == 0
+    assert out["category"]["n_tied_rows"] == 0
 
 
 def test_tied_rows_are_counted_on_the_row_face(spark):
@@ -144,8 +144,8 @@ def test_tied_rows_are_counted_on_the_row_face(spark):
         ],
         schema=["snap_date", "cust_id", "prod_name", "imp_id", "score", "label"],
     )
-    facts, _ = _both(df, _event_category_params())
-    assert facts["dataset_overview"]["totals"]["n_tied_rows"] == 2
+    _, out = _both(df, _event_category_params())
+    assert out["n_tied_rows"] == 2
 
 
 # ---------------------------------------------------------------------------

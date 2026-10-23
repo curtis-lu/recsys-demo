@@ -159,7 +159,8 @@ COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
     # Every row from here is listed at compute_row_facts, the first
     # fingerprinted producer, whichever node first reads it (the rule above):
     # compute_metrics reads k_values, metric and query_filter, the latter
-    # also compute_baseline_metrics (#376); compute_baseline_metrics and
+    # also compute_baseline_metrics (#376) and compute_row_facts (its
+    # all-positive log and warning); compute_baseline_metrics and
     # compute_report_aggregates the baseline and report rows;
     # compute_prediction_quality the last two (ADR-0024). Not on
     # prepare_eval_data: none of them changes the join.
