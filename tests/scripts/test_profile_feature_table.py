@@ -415,6 +415,14 @@ class TestSpearman:
         out = spearman_pairs(np.column_stack(cols), ["x", "y"], keep=0)
         assert out["pairs"] == [] and out["flat_pairs"] == 1 and out["flat"] == []
 
+    def test_a_column_with_no_value_in_the_sample(self):
+        # 整期不是全空（run 時沒跳過），但抽到的筆裡一筆有值都沒有
+        rng = np.random.default_rng(6)
+        a = rng.normal(size=2000)
+        values = np.column_stack([a, a * 2, np.full(2000, np.nan)])
+        out = spearman_pairs(values, ["a", "b", "none"])
+        assert out["sparse"] == {"none": 0} and [p[:2] for p in out["pairs"]] == [["a", "b"]]
+
     def test_sparse_and_flat_columns_are_named_but_not_their_partners(self):
         rng = np.random.default_rng(3)
         n = 5000
@@ -948,7 +956,7 @@ class TestCorrelationReport:
             assert f'data-name="{name}" data-why="{why}"' in skip, name
         assert _names_in(skip) == {"loan", "flag", "sys_version", "s"}
         assert "只有 40 筆有值" in skip and "的 2 對" in skip and "沒有變化的" not in skip
-        assert ("2 組，最大的一組 3 欄；另有 4 欄沒算：字串欄位 1、最新一期只有一個值 1、"
+        assert ("2 組，最大的一組 3 欄；另有 4 欄列在〈未計算的欄位〉：字串欄位 1、最新一期只有一個值 1、"
                 "抽到的筆數裡有值的太少 1、抽到的筆數裡只有一個值 1") in _section_html(page, "s-overview")
 
     def test_embedded_matrix_data_matches_the_drawing(self, tmp_path):
@@ -1022,7 +1030,7 @@ class TestCorrelationReport:
         write_report(profile, tmp_path, DEFAULT_THRESHOLDS, None)
         page = (tmp_path / "index.html").read_text()
         row = _section_html(page, "s-overview").split('href="#s-corr"')[1].split("</tr>")[0]
-        assert "2 組，最大的一組 3 欄</td>" in row and "沒算" not in row and "（）" not in page
+        assert "2 組，最大的一組 3 欄</td>" in row and "未計算" not in row and "（）" not in page
 
     def test_matrix_legend_follows_a_threshold_below_0_8(self, tmp_path):
         write_report(_corr_profile(tmp_path), tmp_path, {**DEFAULT_THRESHOLDS, "corr": 0.6}, None)

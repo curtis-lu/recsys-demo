@@ -486,7 +486,7 @@ def _sorted_groups(x: "np.ndarray") -> tuple["np.ndarray", "np.ndarray", "np.nda
     idx = np.flatnonzero(~np.isnan(x))
     order = idx[np.argsort(x[idx])]  # 同值取平均名次，不需要穩定排序
     sv = x[order]
-    new = np.r_[True, sv[1:] != sv[:-1]]
+    new = np.r_[True, sv[1:] != sv[:-1]] if len(sv) else np.zeros(0, dtype=bool)  # 整欄都是空值時沒有任何一群
     # 抽樣最多約 5 萬筆，int32 就夠，記憶體省一半
     return order.astype(np.int32), np.flatnonzero(new).astype(np.int32), (np.cumsum(new) - 1).astype(np.int32)
 
@@ -561,15 +561,21 @@ def spearman_pairs(values: "np.ndarray", names: list[str], *, min_rows: int = CO
     iu, ju = np.triu_indices(k, 1)
     screen = ~few[iu, ju] & ~no_var[iu, ju] & (np.abs(r[iu, ju]) >= keep - CORR_SCREEN_MARGIN)
     by_col = valid.T  # valid 是一欄連續存放，轉置後一欄就是連續的一列
-    groups: dict[int, tuple] = {}  # 只替要重排的欄排序、留著，不是每一欄都留
+    groups: dict[int, tuple] = {}  # 只替要重排的欄再排一次序、留著，不是每一欄都留
+
+    def ranks(c: int, both: "np.ndarray", n_both: int) -> "np.ndarray":
+        if n_both == count[c]:  # 這一欄有值的筆就是兩欄都有值的筆：整欄的名次已經是精確的
+            return x[both, c]
+        if c not in groups:
+            groups[c] = _sorted_groups(values[:, c])
+        return _ranks_within(groups[c], both)[both]
+
     pairs = []
     for i, j in zip(iu[screen], ju[screen]):
         v = r[i, j]
-        if not n[i, j] == count[i] == count[j]:  # 有一欄在對方空的地方有值：名次要在兩欄都有值的筆裡重排
+        if not n[i, j] == count[i] == count[j]:  # 有一欄在對方空的地方有值：那一欄的名次要在兩欄都有值的筆裡重排
             both = by_col[i] & by_col[j]
-            gi = groups.get(i) or groups.setdefault(i, _sorted_groups(values[:, i]))
-            gj = groups.get(j) or groups.setdefault(j, _sorted_groups(values[:, j]))
-            v = np.corrcoef(_ranks_within(gi, both)[both], _ranks_within(gj, both)[both])[0, 1]
+            v = np.corrcoef(ranks(i, both, n[i, j]), ranks(j, both, n[i, j]))[0, 1]
         if round(abs(float(v)), 9) >= keep:
             pairs.append([names[i], names[j], round(float(np.clip(v, -1.0, 1.0)), 6), int(n[i, j])])
     bad = sparse | col_flat
@@ -1627,7 +1633,7 @@ class _Report:
             corr_row = f"{len(self.corr_groups)} 組" + (
                 f"，最大的一組 {len(self.corr_groups[0])} 欄" if self.corr_groups else "")
             if reasons:
-                corr_row += f"；另有 {len(reasons)} 欄沒算：" + "、".join(
+                corr_row += f"；另有 {len(reasons)} 欄列在〈未計算的欄位〉：" + "、".join(
                     f"{_CORR_SKIP_NAMES[k]} {reasons.count(k)}" for k in CORR_REASONS if k in reasons)
         rows = [
             ({}, [_td('<a href="#s-null">空值</a>'), _td(str(n_null), v=n_null, num=True),
@@ -2014,7 +2020,7 @@ class _Report:
         info, th = self.profile["correlation"], self.thresholds["corr"]
         if info["columns"]:
             took = (f"全部 {info['rows']:,} 筆都拿" if info["rows"] == info["period_rows"]
-                    else f"抽 {info['rows']:,} 筆（該期 {info['period_rows']:,} 筆）")
+                    else f"抽 {info['rows']:,} 筆，該期 {info['period_rows']:,} 筆")
             intro = _p(f"在最新一期，也就是 {_e(self.labels[-1])}，{took}，數值欄位兩兩算 Spearman 相關係數。"
                        "它看兩欄的大小順序有多一致：1 是一欄越大、另一欄也越大，順序完全一樣；−1 是順序完全相反；"
                        "0 是看不出關係。只看順序、不看數值本身，所以同一個金額換成千元或取 log，和原欄還是 1。"
@@ -2171,7 +2177,7 @@ class _Report:
         parts = ([f"兩欄都有值的不到 {CORR_MIN_ROWS:,} 筆的 {info['few_pairs']} 對"] if info["few_pairs"] else []) + (
             [f"其中一欄在兩欄都有值的那些筆裡沒有變化的 {info['flat_pairs']} 對"] if info["flat_pairs"] else [])
         if parts:
-            body += _note("另外有幾對欄位沒有相關係數，但兩欄各自和別的欄都有算：" + "；".join(parts)
+            body += _note("另外有幾對欄位沒有相關係數，兩欄都不在上表：" + "；".join(parts)
                           + "。筆數不夠的，通常是兩欄很少同時有值。")
         return _section("s-corr-skip", f"未計算的欄位（{len(rows)} 欄）", body, level=3)
 
