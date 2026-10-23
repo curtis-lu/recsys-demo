@@ -5,7 +5,8 @@ Issues and PRDs for this repo live as GitHub issues (`curtis-lu/recsys-demo`). U
 ## Conventions
 
 - **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies.
-- **Read an issue**: `gh issue view <number> --comments`, filtering comments by `jq` and also fetching labels.
+- **Read an issue**: `gh issue view <number>` prints the title, labels, the comment count (`comments: N`) and the body. When N > 0, read the comments with `gh issue view <number> --json comments --jq '.comments[] | "--- \(.author.login) \(.createdAt)\n\(.body)"'`.
+  - 本 repo 補充：不要加 `--comments` 讀票。在 agent 的 shell（非 TTY）裡它只印留言、不印本文，沒有留言就整個空白；空白看起來像 `gh` 壞了，本文就漏讀了。2026-10-23 實測 #536、PR #552（都沒有留言）輸出 0 bytes；同一天讀 #535 第一次就是空的，查 #434 的 subagent 也因此把空白當成 auth 或網路問題，沒讀到那張票的本文。
 - **List issues**: `gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'` with appropriate `--label` and `--state` filters.
 - **Comment on an issue**: `gh issue comment <number> --body "..."`
 - **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
@@ -42,7 +43,7 @@ Infer the repo from `git remote -v` — `gh` does this automatically when run in
 
 When set to `yes`, PRs run through the same labels and states as issues, using the `gh pr` equivalents:
 
-- **Read a PR**: `gh pr view <number> --comments` and `gh pr diff <number>` for the diff.
+- **Read a PR**: `gh pr view <number>` for the body, `gh pr view <number> --json comments,reviews --jq '(.comments + .reviews)[] | "--- \(.author.login)\n\(.body)"'` for the discussion (same `--comments` trap as issues), and `gh pr diff <number>` for the diff.
 - **List external PRs for triage**: `gh pr list --state open --json number,title,body,labels,author,authorAssociation,comments` then keep only `authorAssociation` of `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, or `NONE` (drop `OWNER`/`MEMBER`/`COLLABORATOR`).
 - **Comment / label / close**: `gh pr comment`, `gh pr edit --add-label`/`--remove-label`, `gh pr close`.
 
@@ -54,7 +55,7 @@ Create a GitHub issue.
 
 ## When a skill says "fetch the relevant ticket"
 
-Run `gh issue view <number> --comments`.
+Read it as **Read an issue** above says: body first, then the comments.
 
 ## Wayfinding operations
 
