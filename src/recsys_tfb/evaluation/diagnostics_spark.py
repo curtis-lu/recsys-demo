@@ -12,12 +12,20 @@ rest is ``groupBy`` + ``count``/``sum``.
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pandas as pd
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
+
+# The landed form of these frames lives with the report's readers (#536): the
+# report reads it back without importing this Spark module. Imported back so
+# the callers of these names here keep working.
+from recsys_tfb.evaluation.result_readers import (  # noqa: F401
+    FRAME_LONG as _LONG,
+    FRAME_MATRIX as _MATRIX,
+    frame_from_json,
+    frame_to_json,
+)
 
 # Quartile probabilities (incl. min/max) for boxplot stats.
 _PCTS = [0.0, 0.25, 0.5, 0.75, 1.0]
@@ -100,7 +108,17 @@ def score_box_stats_by_label(
     accuracy: int = 10000,
 ) -> pd.DataFrame:
     """Boxplot stats per (item, label): one row per (item, label), sorted by
-    item then label (why: :func:`score_histogram_counts`)."""
+    item then label (why: :func:`score_histogram_counts`).
+
+    The quartiles are approximate and may move with how the rows are
+    partitioned; accepted (#366 item 4, settled in #536). The error is
+    bounded: each value is a score that occurs in its group, ranked within
+    floor((p - 1/accuracy) * N) .. ceil((p + 1/accuracy) * N) of the group's
+    N rows (the bound PySpark documents for ``DataFrame.approxQuantile``,
+    the same algorithm). At ``accuracy=10000`` a group of a million rows is
+    off by at most 100 ranks. Exact quartiles would hold every score of a
+    group in memory, which production volumes do not allow.
+    """
     rows = (
         sdf.groupBy(item_col, label_col)
         .agg(F.percentile_approx(F.col(score_col), _PCTS, accuracy).alias("p"))
@@ -197,52 +215,6 @@ def positive_rate_matrix(
     denom = np.where(total.values > 0, total.values, 1)
     rate = np.where(total.values > 0, pos.values / denom, 0.0)
     return pd.DataFrame(rate, index=total.index, columns=total.columns)
-
-
-#: :func:`frame_to_json` 支援的兩種形狀。
-_LONG = "long"
-_MATRIX = "matrix"
-
-
-def _no_nan(value):
-    """NaN → None。理由見 :func:`frame_to_json` 的 docstring。"""
-    return None if isinstance(value, float) and math.isnan(value) else value
-
-
-def frame_to_json(df: pd.DataFrame, kind: str) -> dict:
-    """把聚合出來的小 frame 轉成可以落地的 dict。
-
-    ``kind`` 明寫而不是從 index 型別推斷：長格式的 index 是無意義的
-    ``RangeIndex``（丟掉），矩陣的 index 是 item 名稱（丟了 heatmap 就沒有
-    y 軸標籤）。推斷會在「item 剛好是 0, 1, 2」時猜錯，而那不會有任何測試轉紅。
-
-    ``to_dict("split")`` **已經**把 numpy 純量轉成 Python 原生型別（實測
-    ``int64`` → ``int``、object index → ``str``），所以這裡不逐格轉型。但它
-    **不處理 NaN**：``JSONDataset`` 用預設 ``allow_nan=True``，NaN 會寫成
-    ``NaN`` 這個非合法 JSON 的字面值，Python 讀得回來、別的工具不行——而這些
-    檔案的用途正是被拷到別的環境去讀。所以在這裡換成 ``None``。
-    """
-    if kind not in (_LONG, _MATRIX):
-        raise ValueError(
-            f"kind must be {_LONG!r} or {_MATRIX!r}, got {kind!r}"
-        )
-    split = df.to_dict("split")
-    out = {
-        "kind": kind,
-        "columns": list(split["columns"]),
-        "data": [[_no_nan(v) for v in row] for row in split["data"]],
-    }
-    if kind == _MATRIX:
-        out["index"] = list(split["index"])
-    return out
-
-
-def frame_from_json(payload: dict) -> pd.DataFrame:
-    """:func:`frame_to_json` 的反向。回傳的 frame 直接餵給繪圖函式。"""
-    df = pd.DataFrame(payload["data"], columns=payload["columns"])
-    if payload.get("kind") == _MATRIX:
-        df.index = payload["index"]
-    return df
 
 
 def aggregate_report_diagnostics(

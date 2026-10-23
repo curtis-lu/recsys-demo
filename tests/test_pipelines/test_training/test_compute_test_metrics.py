@@ -143,11 +143,22 @@ def test_test_map_matches_the_report_when_event_is_declared(spark):
     assert result["per_item_map_attr"] == {
         "B": pytest.approx(0.25), "C": pytest.approx(1.0),
     }
+    from recsys_tfb.pipelines.evaluation.nodes import resolve_display_ks
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+        fingerprint,
+    )
+
     facts = compute_row_facts(df, params)
+    metrics = compute_all_metrics(df, params, facts)
+    # The card's K columns are the evaluation K cut's (#536); no baseline
+    # here, so the comparison it reads is the stub.
+    stamp = {"config_fingerprint": fingerprint(params)}
     section = overview.build(
         {"evaluation_row_facts": facts,
-         "evaluation_metrics": compute_all_metrics(df, params, facts),
-         "prediction_quality_metrics": None},
+         "evaluation_metrics": metrics,
+         "prediction_quality_metrics": None,
+         "evaluation_display_ks": resolve_display_ks(
+             {**metrics, **stamp}, {"enabled": False, **stamp}, params)},
         params)
     report_card = section.tables[section.table_titles.index(
         "overall mAP@k（per-query 等權，另一種加權）")]

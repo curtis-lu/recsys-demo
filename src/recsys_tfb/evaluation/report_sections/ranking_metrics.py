@@ -13,51 +13,57 @@ from recsys_tfb.evaluation.metric_catalog import (
     entry,
     metrics_of,
 )
-from recsys_tfb.evaluation.metrics import (
-    ALL_POSITIVE_KEY,
-    all_positive_share,
-    drop_all_positive_groups,
-    format_share,
-    n_groups_with_positive,
-    resolved_all_k,
-)
 from recsys_tfb.evaluation.report import ReportSection
 from recsys_tfb.evaluation.report_sections.shared import (
     ALL_POSITIVE_WHY,
+    DISPLAY_KS,
     MACRO_LABEL,
     count_items,
+    format_share,
     grain_bundles,
     headline_column,
     k_to_lookup,
     kept_ratio_phrase,
-    macro_item_coverage,
-    metrics_section_ks,
+    landed_value,
+    scored_with_positive,
     section_on,
     unmatched_last,
     zero_positive_draw_on_test,
 )
+from recsys_tfb.evaluation.result_readers import (
+    ALL_POSITIVE_KEY,
+    ALL_POSITIVE_SHARE_KEY,
+    DISPLAY_METRICS_SECTION,
+    N_WITH_POSITIVE_KEY,
+    drop_all_positive_groups,
+    macro_item_count,
+    resolved_all_k,
+)
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
-#: The results this section reads, by catalog name (ADR-0031 principle 1).
-READS = ("evaluation_row_facts", "evaluation_metrics")
+#: The results this section reads, by catalog name (ADR-0031 principle 1);
+#: each grain's K columns off the cut (#536).
+READS = ("evaluation_row_facts", "evaluation_metrics", DISPLAY_KS)
 
 
 def macro_coverage_suffix(
-    per_item: dict, n_items: int, parameters: dict, macro: dict | None
+    bundle: dict, n_items: int, macro: dict | None
 ) -> str:
-    """Title suffix disclosing a single-sided per-item macro's coverage (bug 5).
+    """Title suffix disclosing a single-sided per-item macro's coverage (bug 5):
+    the items ``bundle``'s macro averaged (its ledger's ``macro_items``,
+    ``result_readers.macro_item_count``, #536) of the grain's ``n_items``.
 
     Returns ``""`` unless ``macro`` is truthy — the same test
     ``_per_item_metric_table`` uses (``if macro_metrics:``) to prepend the
     Macro row. The suffix describes that row's denominator, so it has to
-    appear exactly when the row does. ``macro_coverage_suffix_mb`` tests
-    ``is not None`` instead, matching its own table; using one helper on the
+    appear exactly when the row does. ``shared.compared_macro_coverage_suffix``
+    tests both sides present instead, matching its own table; using one helper on the
     other's table puts the suffix on a table without a Macro row (or drops it
     from one that has it) for an empty-dict macro, and nothing raises.
     """
     if not macro:
         return ""
-    n = macro_item_coverage(per_item, parameters)
+    n = macro_item_count(bundle)
     return f"（參與 macro 的 item 數 {n}／全部 {n_items}）"
 
 
@@ -83,7 +89,8 @@ def _zero_positive_origin(parameters: dict) -> str:
     )
 
 
-def _group_ledger_line(grain: str, bundle: dict, parameters: dict) -> str | None:
+def _group_ledger_line(grain: str, bundle: dict, metrics: dict | None,
+                       parameters: dict) -> str | None:
     """一個粒度的組數帳（#376）：有正例的組、其中全正、算進衡量指標、無正例的組。
 
     開關關：全正的組照樣算進衡量指標，「算進衡量指標」＝「有正例」。開關開：
@@ -92,12 +99,16 @@ def _group_ledger_line(grain: str, bundle: dict, parameters: dict) -> str | None
     報表連結的診斷頁也印 macro per-item mAP、而且不排除全正的組；診斷頁隨 #532
     拿掉之後，這個措辭照留。
 
-    ``bundle`` 是列的事實（``row_facts.json``，#535）的一個粒度。缺
-    ``n_queries``／``n_excluded_queries`` 回 ``None``。只缺全正組數的，#535 之前
-    是 #376 之前算的 ``metrics.json``；``compute_row_facts`` 一定寫這個數，所以
-    今天只有手組的 dict 會走到這裡：不報錯，印得出的照印，並說怎麼補。
+    ``bundle`` 是列的事實（``row_facts.json``，#535）的一個粒度；有正例的組數與
+    全正佔比讀它落地的帳（``metrics.all_positive_accounts``，#536），不重算。
+    ``metrics`` 是同一粒度的指標結果：開關開時算進衡量指標的組數讀它的母體帳
+    （``shared.scored_with_positive``），不在這裡拿有正例的減全正的。
+    有正例的組數是 ``None``（缺 ``n_queries``／``n_excluded_queries``）回
+    ``None``。只缺全正組數的，#535 之前是 #376 之前算的 ``metrics.json``；
+    ``compute_row_facts`` 一定寫這個數，所以今天只有手組的 dict 會走到這裡：不
+    報錯，印得出的照印，並說怎麼補。
     """
-    n_pos = n_groups_with_positive(bundle)
+    n_pos = bundle.get(N_WITH_POSITIVE_KEY)
     if n_pos is None:
         return None
     n_zero = bundle["n_excluded_queries"]
@@ -113,10 +124,10 @@ def _group_ledger_line(grain: str, bundle: dict, parameters: dict) -> str | None
     elif drop:
         head = (
             f"有正例的組 {n_pos:,}，其中全正 {n_all:,} 已排除，"
-            f"算進衡量指標的有 {n_pos - n_all:,}"
+            f"算進衡量指標的有 {scored_with_positive(metrics):,}"
         )
     else:
-        share = all_positive_share(bundle)
+        share = bundle[ALL_POSITIVE_SHARE_KEY]
         pct = f"{format_share(share)}；" if share is not None else ""
         head = (
             f"有正例的組 {n_pos:,}，其中全正 {n_all:,}（{pct}{ALL_POSITIVE_WHY}）"
@@ -253,8 +264,12 @@ def build(
     per_item = dict(sorted((metrics.get("per_item", {}) or {}).items()))
     macro_item = metrics.get("macro_avg", {}).get("by_item", {})
     n_items = count_items(facts)
+    display_ks = results[DISPLAY_KS]
     all_k = resolved_all_k(metrics)
-    ks = metrics_section_ks(all_k)  # one K list for every table
+    # One K list for every table of a grain, cut before the report
+    # (evaluation_display_ks).
+    ks = landed_value(display_ks, DISPLAY_KS, "evaluation_metrics",
+                      DISPLAY_METRICS_SECTION)
 
     tables: list[pd.DataFrame] = []
     titles: list[str] = []
@@ -284,7 +299,8 @@ def build(
     if cat:
         n_cat = count_items(facts.get("category") or {})
         cat_k = resolved_all_k(cat)
-        cks = metrics_section_ks(cat_k)
+        cks = landed_value(display_ks, DISPLAY_KS, "evaluation_metrics",
+                           "category", DISPLAY_METRICS_SECTION)
         _add(_families_by_k_table(cat.get("overall", {}), cks, cat_k),
              f"A · per-query｜大類 overall（列＝{families}）", True)
 
@@ -299,7 +315,7 @@ def build(
     # period" (and n_pos >= metric.min_positives); a zero-positive item drops
     # out of per_item silently. The title discloses N of M, only on a table
     # that has a Macro row.
-    item_cov = macro_coverage_suffix(per_item, n_items, parameters, macro_item)
+    item_cov = macro_coverage_suffix(metrics, n_items, macro_item)
     _add(b_map, f"B · per-item 歸因｜{attr_label}@k（列＝item）{item_cov}",
          True)
     _add(_per_item_recall_table(per_item, ks, all_k, macro_metrics=macro_item),
@@ -312,9 +328,7 @@ def build(
     if cat:
         cat_macro_item = cat.get("macro_avg", {}).get("by_item", {})
         cat_pi = dict(sorted((cat.get("per_item", {}) or {}).items()))
-        cat_item_cov = macro_coverage_suffix(
-            cat_pi, n_cat, parameters, cat_macro_item
-        )
+        cat_item_cov = macro_coverage_suffix(cat, n_cat, cat_macro_item)
         _add(_per_item_metric_table(cat_pi, cks, cat_k, map_attr,
                                     "@{k}", macro_metrics=cat_macro_item),
              f"B · 大類 per-item 歸因｜{attr_label}@k（列＝大類）{cat_item_cov}",
@@ -329,9 +343,13 @@ def build(
                  f"B · 大類 per-item 歸因｜{metric.display_name}@k（列＝大類）"
                  f"{cat_item_cov}", True)
 
+    # Each grain's facts beside the same grain's metrics: the ledger line
+    # reads the groups scored off the metrics' ledger.
     ledger = [
-        line for grain, bundle in grain_bundles(facts)
-        if (line := _group_ledger_line(grain, bundle, parameters))
+        line for (grain, bundle), grain_metrics in zip(
+            grain_bundles(facts), (metrics, metrics.get("category")))
+        if (line := _group_ledger_line(grain, bundle, grain_metrics,
+                                       parameters))
     ]
     return ReportSection(
         title="衡量指標",
@@ -344,7 +362,7 @@ def build(
             "單一彙總（overall、大類 overall）用指標家族當列，多實體拆分（per-"
             "segment、per-item、大類 per-item）用實體當列；所有表 k 欄一致＝"
             "[1,2,3,4,5,all]、每張表一個 metric family。頭號指標＝macro per-item "
-            f"mAP（item 等權；{headline_column(parameters, all_k, '本段')}）；"
+            f"mAP（item 等權；{headline_column(parameters, display_ks, '本段')}）；"
             "overall per-query mAP 是另一種加權，並列不比高下。手算核對：overall "
             "map@1 = recall@1（見核心概念，AP@k 分母＝R）。K=產品數時 precision "
             "退化為 base rate、recall 恆為 1。per-item 列序統一按字母。明細表點標題"

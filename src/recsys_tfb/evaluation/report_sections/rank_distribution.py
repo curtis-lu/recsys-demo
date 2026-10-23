@@ -8,11 +8,14 @@ from collections.abc import Mapping
 
 import pandas as pd
 
-from recsys_tfb.evaluation.metrics import drop_all_positive_groups
 from recsys_tfb.evaluation.report import ReportSection
 from recsys_tfb.evaluation.report_sections.shared import (
     ALL_POSITIVE_SWITCH,
     section_on,
+)
+from recsys_tfb.evaluation.result_readers import (
+    drop_all_positive_groups,
+    frame_from_json,
 )
 
 #: The results this section reads, by catalog name (ADR-0031 principle 1).
@@ -65,7 +68,6 @@ def build(
     if not report_aggregates or "score_histogram" not in report_aggregates:
         return None
 
-    from recsys_tfb.evaluation.diagnostics_spark import frame_from_json
     from recsys_tfb.evaluation.distributions import (
         plot_positive_rank_heatmap,
         plot_positive_rate_rank_heatmap,

@@ -68,7 +68,10 @@ def _metrics():
         "overall": {"map@1": 0.5},
         "per_item": {"A": {"recall@1": 0.5, "mean_pos": 1.5}},
         "per_segment": {},
-        "population": {"all_k": 2},
+        "population": {"all_k": 2, "macro_items": ["A"],
+                       "n_scored_queries_with_positive": 2,
+                       "n_scored_queries_without_positive": 0,
+                       "segment_columns": []},
     }
 
 
@@ -80,8 +83,11 @@ def _landed_metrics(params):
 
 def _landed_row_facts(params):
     """What ``compute_row_facts`` lands for the four-row partition of
-    :func:`_eval_pred`, by hand, for the tests that draw no partition."""
-    return {
+    :func:`_eval_pred`, by hand, for the tests that draw no partition; the
+    all-positive accounts (#536) by the node's own rule."""
+    from recsys_tfb.evaluation.metrics import all_positive_accounts
+
+    counts = {
         "dataset_overview": {
             "totals": {"n_rows": 4, "n_entities": 2, "n_items": 2,
                        "n_snap_dates": 1, "n_positives": 2,
@@ -90,9 +96,28 @@ def _landed_row_facts(params):
             "by_snap_date": {}, "by_item": {}},
         "n_queries": 2, "n_excluded_queries": 0,
         "n_all_positive_queries": 0, "widest_group_rows": 2,
+    }
+    return {
+        **counts, **all_positive_accounts(counts, params),
         "segments": _landed_segments(params),
         "config_fingerprint": fingerprint(params),
     }
+
+
+def _landed_after_the_metrics(metrics, baseline, params):
+    """What ``compare_to_baseline`` and ``resolve_display_ks`` land off
+    ``metrics`` and ``baseline`` under ``params`` (#536), by those nodes:
+    the report's two inputs that are neither computed on Spark nor
+    hand-written."""
+    from recsys_tfb.pipelines.evaluation.nodes import (
+        compare_to_baseline,
+        resolve_display_ks,
+    )
+
+    comparison = compare_to_baseline(metrics, baseline, params)
+    return {"baseline_comparison": comparison,
+            "evaluation_display_ks": resolve_display_ks(
+                metrics, comparison, params)}
 
 
 def _row_facts_of(eval_pred, params):
@@ -111,6 +136,8 @@ def test_generate_report_html_no_diagnostics(spark):
         baseline_metrics=_unread_stub(params),
         evaluation_report_aggregates=aggregates,
         prediction_quality_metrics=_unread_stub(params),
+        **_landed_after_the_metrics(
+            _landed_metrics(params), _unread_stub(params), params),
         parameters=params,
     )
     assert html.startswith("<!DOCTYPE html>")
@@ -132,6 +159,8 @@ def test_generate_report_with_diagnostics(spark):
         baseline_metrics=_unread_stub(params),
         evaluation_report_aggregates=aggregates,
         prediction_quality_metrics=_unread_stub(params),
+        **_landed_after_the_metrics(
+            _landed_metrics(params), _unread_stub(params), params),
         parameters=params,
     )
     # 診斷升為頂層「per-item 細部拆解」段（非收合 section）；其明細數字表用
@@ -168,6 +197,8 @@ def test_the_main_report_has_no_diagnosis_section(spark):
         baseline_metrics=_unread_stub(params),
         evaluation_report_aggregates=aggregates,
         prediction_quality_metrics=pq,
+        **_landed_after_the_metrics(
+            _landed_metrics(params), _unread_stub(params), params),
         parameters=params,
     )
     # Premise: the sections that used to name the diagnoses were drawn.
@@ -220,6 +251,8 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
         baseline_metrics=_unread_stub(params),
         evaluation_report_aggregates=small_aggregates,
         prediction_quality_metrics=_unread_stub(params),
+        **_landed_after_the_metrics(
+            _landed_metrics(params), _unread_stub(params), params),
         parameters=params,
     )
     large = generate_report(
@@ -228,6 +261,8 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
         baseline_metrics=_unread_stub(params),
         evaluation_report_aggregates=large_aggregates,
         prediction_quality_metrics=_unread_stub(params),
+        **_landed_after_the_metrics(
+            _landed_metrics(params), _unread_stub(params), params),
         parameters=params,
     )
     assert abs(len(large) - len(small)) < 20000
@@ -337,6 +372,8 @@ def test_generate_report_refuses_a_computed_setting_flipped_after_the_run():
             baseline_metrics=baseline,
             evaluation_report_aggregates=aggregates,
             prediction_quality_metrics=pq,
+            **_landed_after_the_metrics(
+                _landed_metrics(computed_with), baseline, computed_with),
             parameters=now,
         )
 
@@ -365,6 +402,8 @@ def test_generate_report_refuses_metrics_computed_with_other_settings():
             baseline_metrics=baseline,
             evaluation_report_aggregates=aggregates,
             prediction_quality_metrics=pq,
+            **_landed_after_the_metrics(
+                _landed_metrics(computed_with), baseline, computed_with),
             parameters=now,
         )
 
@@ -386,6 +425,8 @@ def test_generate_report_refuses_metrics_without_a_fingerprint():
             baseline_metrics=baseline,
             evaluation_report_aggregates=aggregates,
             prediction_quality_metrics=pq,
+            **_landed_after_the_metrics(
+                _landed_metrics(params), baseline, params),
             parameters=params,
         )
 
@@ -397,11 +438,12 @@ def test_generate_report_refuses_metrics_without_a_fingerprint():
 
 def test_generate_report_redraws_when_only_drawn_settings_changed():
     """A changed drawn key only needs a redraw; a fingerprint that counted
-    drawn keys would block every layout tweak."""
+    drawn keys would block every layout tweak. Not ``primary_map_k``: the
+    main report's K are cut before it since #536 (the next test)."""
     computed_with = _params_computed_without_baseline()
     baseline, aggregates, pq = _landed_inputs(computed_with)
     now = copy.deepcopy(computed_with)
-    now["evaluation"]["report"]["display"]["primary_map_k"] = [1, "all"]
+    now["evaluation"]["report"]["display"]["guardrail_recall_k"] = [1, 2]
     now["evaluation"]["report"]["sections"]["primary_map"] = False
 
     html = generate_report(
@@ -410,10 +452,69 @@ def test_generate_report_redraws_when_only_drawn_settings_changed():
         baseline_metrics=baseline,
         evaluation_report_aggregates=aggregates,
         prediction_quality_metrics=pq,
+        **_landed_after_the_metrics(
+            _landed_metrics(computed_with), baseline, computed_with),
         parameters=now,
     )
 
     assert html.startswith("<!DOCTYPE html>")
+
+
+def test_generate_report_refuses_a_display_k_changed_after_the_cut():
+    """#536: the K each table shows is cut by ``resolve_display_ks`` and
+    landed, so a changed ``primary_map_k`` drawn with only a redraw would
+    print the old columns, exit code 0. The cut's fingerprint carries the
+    display key, so it alone is stale and the advice is its own node — not
+    ``compute_row_facts``: no computed setting moved."""
+    computed_with = _params_computed_without_baseline()
+    baseline, aggregates, pq = _landed_inputs(computed_with)
+    now = copy.deepcopy(computed_with)
+    now["evaluation"]["report"]["display"]["primary_map_k"] = [1, "all"]
+
+    with pytest.raises(ValueError) as exc:
+        generate_report(
+            evaluation_row_facts=_landed_row_facts(computed_with),
+            evaluation_metrics=_landed_metrics(computed_with),
+            baseline_metrics=baseline,
+            evaluation_report_aggregates=aggregates,
+            prediction_quality_metrics=pq,
+            **_landed_after_the_metrics(
+                _landed_metrics(computed_with), baseline, computed_with),
+            parameters=now,
+        )
+
+    msg = str(exc.value)
+    assert ("evaluation_display_ks (written by resolve_display_ks) was "
+            "computed with different settings") in msg
+    assert "evaluation.report.display.primary_map_k: [1] -> [1, 'all']" in msg
+    assert "--from-node resolve_display_ks" in msg
+
+
+def test_generate_report_refuses_a_comparison_without_a_fingerprint():
+    """The comparison is one of the report's landed inputs (#536) and is
+    checked like the others: one written without a fingerprint is the single
+    stale artifact, and the advice is its own producer."""
+    params = _params_computed_without_baseline()
+    baseline, aggregates, pq = _landed_inputs(params)
+    landed = _landed_after_the_metrics(_landed_metrics(params), baseline,
+                                       params)
+    del landed["baseline_comparison"]["config_fingerprint"]
+
+    with pytest.raises(ValueError) as exc:
+        generate_report(
+            evaluation_row_facts=_landed_row_facts(params),
+            evaluation_metrics=_landed_metrics(params),
+            baseline_metrics=baseline,
+            evaluation_report_aggregates=aggregates,
+            prediction_quality_metrics=pq,
+            **landed,
+            parameters=params,
+        )
+
+    msg = str(exc.value)
+    assert ("baseline_comparison (written by compare_to_baseline) has no "
+            "config_fingerprint") in msg
+    assert "--from-node compare_to_baseline" in msg
 
 
 def test_generate_report_refuses_prediction_quality_switched_on_after_the_run():
@@ -434,6 +535,8 @@ def test_generate_report_refuses_prediction_quality_switched_on_after_the_run():
             baseline_metrics=baseline,
             evaluation_report_aggregates=aggregates,
             prediction_quality_metrics=pq,
+            **_landed_after_the_metrics(
+                _landed_metrics(computed_with), baseline, computed_with),
             parameters=now,
         )
 
@@ -453,6 +556,8 @@ def test_generate_report_refuses_a_prediction_quality_json_without_fingerprint()
             baseline_metrics=baseline,
             evaluation_report_aggregates=aggregates,
             prediction_quality_metrics={"enabled": False},
+            **_landed_after_the_metrics(
+                _landed_metrics(params), baseline, params),
             parameters=params,
         )
 
@@ -488,9 +593,17 @@ def test_generate_report_draws_prediction_quality_from_the_nodes_output(spark):
         baseline_metrics=_unread_stub(params),
         evaluation_report_aggregates=aggregates,
         prediction_quality_metrics=pq,
+        **_landed_after_the_metrics(
+            _landed_metrics(params), _unread_stub(params), params),
         parameters=params,
     )
     assert "預測品質" in html
+    # #536: the hand-written payload the report tests draw from holds the
+    # node's keys in both blocks the report reads (the display tables).
+    from tests.test_evaluation import test_report_builder
+    hand = test_report_builder._pq_payload()
+    for block in ("overall", "per_item"):
+        assert set(hand[block]) == set(pq[block]), block
 
 
 class TestTheBaselineIsTheModelsComputation:
@@ -575,6 +688,8 @@ class TestTheBaselineIsTheModelsComputation:
             baseline_metrics=baseline,
             evaluation_report_aggregates=_unread_stub(params),
             prediction_quality_metrics=_unread_stub(params),
+            **_landed_after_the_metrics(
+                metrics, baseline, params),
             parameters=params,
         )
         table = html[html.index("<summary>per-item recall@k (M/B/Δ)"):]
@@ -583,6 +698,48 @@ class TestTheBaselineIsTheModelsComputation:
         macro = table[table.index("<th>Macro 平均</th>"):]
         cells = re.findall(r"<td>([^<]*)</td>", macro[:macro.index("</tr>")])
         assert cells == ["1", "0", "1"]   # recall@1 M, B, Δ
+
+    def _drawn_from(self, params, facts, metrics, baseline, landed):
+        """``generate_report`` on the nodes' results, the comparison and the
+        cut read back from JSON as ``--only-node generate_report`` reads
+        them."""
+        return generate_report(
+            evaluation_row_facts=facts,
+            evaluation_metrics=metrics,
+            baseline_metrics=baseline,
+            evaluation_report_aggregates=_unread_stub(params),
+            prediction_quality_metrics=_unread_stub(params),
+            **json.loads(json.dumps(landed)),
+            parameters=params,
+        )
+
+    def test_a_comparison_without_a_block_the_section_draws_is_refused(
+            self, spark):
+        """#536 acceptance 4: a comparison landed without the per-segment
+        block — by an older compare_to_baseline — must not leave the
+        per-segment table out without a word, or stop on a bare KeyError.
+        Its fingerprint still matches: no setting changed."""
+        params, facts, metrics, baseline = self._computed(spark)
+        landed = _landed_after_the_metrics(metrics, baseline, params)
+        assert "per-segment mAP@k (M/B/Δ)" in self._drawn_from(
+            params, facts, metrics, baseline, landed)   # drawn when there
+        del landed["baseline_comparison"]["per_segment"]
+        with pytest.raises(ValueError) as exc:
+            self._drawn_from(params, facts, metrics, baseline, landed)
+        assert "baseline_comparison has no per_segment" in str(exc.value)
+        assert "--from-node compare_to_baseline" in str(exc.value)
+
+    def test_a_cut_without_a_table_s_k_is_refused(self, spark):
+        """The same for the K cut: the metrics have a category grain, the
+        cut landed no K for its tables."""
+        params, facts, metrics, baseline = self._computed(spark)
+        landed = _landed_after_the_metrics(metrics, baseline, params)
+        landed["evaluation_display_ks"]["evaluation_metrics"]["category"] = None
+        with pytest.raises(ValueError) as exc:
+            self._drawn_from(params, facts, metrics, baseline, landed)
+        assert ("evaluation_display_ks has no evaluation_metrics.category."
+                "metrics_section") in str(exc.value)
+        assert "--from-node resolve_display_ks" in str(exc.value)
 
     @pytest.mark.parametrize("fixture", [
         "_baseline_metrics_full", "_baseline_with_seg_cat"])
@@ -598,7 +755,7 @@ class TestTheBaselineIsTheModelsComputation:
 
         any_key_below = {"per_item": 1, "per_segment": 1,
                          "per_item_segment": 2, "purchase_counts": 1,
-                         "monthly_counts": 2}
+                         "monthly_counts": 2, "window_months_covered": 1}
 
         def key_paths(bundle, prefix=(), wild=0):
             paths = set()
@@ -616,3 +773,306 @@ class TestTheBaselineIsTheModelsComputation:
         hand_written = getattr(test_report_builder, fixture)()
         unwritten = key_paths(hand_written) - key_paths(baseline)
         assert unwritten == set()
+
+    def test_the_hand_written_row_facts_hold_the_keys_the_node_writes(
+            self, spark):
+        """#536: the report reads the all-positive accounts the row facts
+        land, and ``test_report_builder`` draws from hand-written row facts.
+        At the item grain they hold exactly the node's keys, bar the two the
+        report never reads; at the category grain none it does not write, and
+        every account. Keys only: the values there are made up."""
+        from recsys_tfb.evaluation.result_readers import (
+            ALL_POSITIVE_SHARE_KEY,
+            ALL_POSITIVE_WARNS_KEY,
+            N_WITH_POSITIVE_KEY,
+        )
+        from tests.test_evaluation import test_report_builder
+
+        accounts = {N_WITH_POSITIVE_KEY, ALL_POSITIVE_SHARE_KEY,
+                    ALL_POSITIVE_WARNS_KEY}
+        _, facts, *_ = self._computed(spark)
+        hand = test_report_builder._row_facts()
+        assert set(hand) == set(facts) - {"segments", "config_fingerprint",
+                                          "category"}
+        category = test_report_builder._ap_facts(
+            category=test_report_builder._ap_category())["category"]
+        assert set(category) <= set(facts["category"])
+        assert accounts <= set(category)
+
+    def test_the_hand_written_window_holds_the_keys_the_node_writes(
+            self, spark):
+        """#536: the baseline section reads the window the node lands
+        (``popularity_window``), and the report tests draw it from
+        ``test_report_builder._windowed``. Both hold the same keys. Keys only:
+        the values follow each fixture's own counts."""
+        from recsys_tfb.evaluation.result_readers import POPULARITY_WINDOW_KEY
+        from tests.test_evaluation import test_report_builder
+
+        *_, baseline = self._computed(spark)
+        hand = test_report_builder._baseline_metrics_full()
+        assert (set(hand[POPULARITY_WINDOW_KEY])
+                == set(baseline[POPULARITY_WINDOW_KEY]))
+
+
+# =====================================================================
+# generate_comparison_report only reads landed results (#536, ADR-0031
+# decisions 4 and 5)
+# =====================================================================
+
+
+def _comparison_node(name, compare_only):
+    """The node ``name`` as the comparison chain of one compare mode wires
+    it (the mode is baked into its pre-check's advice)."""
+    from recsys_tfb.pipelines.evaluation import create_pipeline
+
+    pipeline = create_pipeline(
+        compare_source={"kind": "model_version", "model_version": "v0"},
+        compare_only=compare_only)
+    return next(n for n in pipeline.nodes if n.name == name)
+
+
+def _compare_params(compare):
+    params = _params()
+    params["evaluation"]["compare"] = compare
+    return params
+
+
+_EXTERNAL = {
+    "kind": "external_hive", "table": "other_project.predictions",
+    "label": "ExtX",
+    "columns": {"cust_id": "customer_id", "snap_date": "as_of_date",
+                "prod_name": "item_code", "score": "pred_score"},
+    "prod_mapping": {"ext_a": "A", "ext_b": "B"},
+    "unmapped_policy": "fail",
+}
+_OTHER_MODEL = {"kind": "model_version", "model_version": "v0", "label": "v0"}
+
+
+def _stamped_for_comparison(result, params):
+    """``result`` as a comparison producer lands it under ``params``: the
+    fingerprint and the compare source (``compute_compare_metrics`` stamps
+    both; ``test_nodes.py::TestComputeCompareMetrics`` pins it)."""
+    from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
+        compare_source_identity,
+    )
+
+    return {**result, "config_fingerprint": fingerprint(params),
+            "compare_source": compare_source_identity(params)}
+
+
+def _comparison_inputs(params, compare_only=False):
+    """What ``generate_comparison_report`` reads, landed under ``params``:
+    the coverage and A's row facts by hand in their producers' shape, the
+    comparison and the K cut by the real nodes, off ``_metrics()`` against a
+    weaker copy of it."""
+    weaker = copy.deepcopy(_metrics())
+    weaker["overall"]["map@1"] = 0.25
+    comparison = _comparison_node("compare_to_source", compare_only).func(
+        _stamped_for_comparison(_metrics(), params),
+        _stamped_for_comparison(weaker, params), params)
+    coverage = {"kind_a": "model_version", "model_version_a": "(this run)",
+                "kind_b": params["evaluation"]["compare"]["kind"],
+                "n_query_group_A_full": 2, "n_query_group_B_full": 2,
+                "n_query_group_common": 2, "n_item_A_full": 2,
+                "n_item_B_full": 2, "n_item_common": 2,
+                "dropped_items_A": [], "dropped_items_B": []}
+    return {
+        "compare_coverage": _stamped_for_comparison(coverage, params),
+        "compare_row_facts_a": _stamped_for_comparison(
+            {k: v for k, v in _landed_row_facts(params).items()
+             if k not in ("segments", "config_fingerprint")}, params),
+        "source_comparison": comparison,
+        "comparison_display_ks": _comparison_node(
+            "resolve_comparison_display_ks", compare_only).func(
+                comparison, params),
+    }
+
+
+def test_generate_comparison_report_takes_no_spark_dataframe():
+    """The redraw's premise (ADR-0031 decision 5): nothing it is handed is a
+    Spark frame, in either compare mode. Checked on the type object, for
+    the reason ``test_generate_report_takes_no_spark_dataframe`` gives."""
+    import inspect
+
+    from pyspark.sql import DataFrame as SparkDataFrame
+
+    for compare_only in (False, True):
+        node = _comparison_node("generate_comparison_report", compare_only)
+        annotations = [p.annotation for p in
+                       inspect.signature(node.func).parameters.values()]
+        hits = [a for a in annotations if a is SparkDataFrame
+                or "pyspark.sql.dataframe.DataFrame" in str(a)
+                or "SparkDataFrame" in str(a)]
+        assert not hits, (compare_only, hits)
+
+
+def test_generate_comparison_report_body_has_no_spark_actions():
+    """The body too: what the old node ran on every draw (row facts and
+    metrics of both sides) must not come back."""
+    import inspect
+
+    for compare_only in (False, True):
+        source = inspect.getsource(
+            _comparison_node("generate_comparison_report", compare_only).func)
+        forbidden = [tok for tok in ("compute_all_metrics", "_count_row_facts",
+                                     ".select(", ".cache(", ".collect(")
+                     if tok in source]
+        assert not forbidden, (compare_only, forbidden)
+
+
+@pytest.mark.parametrize("compare_only", [False, True])
+def test_a_redraw_after_prod_mapping_changed_is_refused(compare_only):
+    """Unchecked, the old source's numbers would print under the new
+    mapping, exit code 0: the fingerprint leaves evaluation.compare out."""
+    computed_with = _compare_params(copy.deepcopy(_EXTERNAL))
+    landed = _comparison_inputs(computed_with, compare_only)
+    now = copy.deepcopy(computed_with)
+    now["evaluation"]["compare"]["prod_mapping"]["ext_b"] = "A"
+
+    with pytest.raises(ValueError) as exc:
+        _comparison_node("generate_comparison_report", compare_only).func(
+            **landed, parameters=now)
+
+    msg = str(exc.value)
+    assert "evaluation.compare.prod_mapping.ext_b: 'B' -> 'A'" in msg
+    assert "--from-node compute_compare_metrics" in msg
+
+
+def test_a_redraw_against_another_model_version_is_refused():
+    computed_with = _compare_params(dict(_OTHER_MODEL))
+    landed = _comparison_inputs(computed_with)
+    now = _compare_params({**_OTHER_MODEL, "model_version": "v9"})
+
+    with pytest.raises(ValueError) as exc:
+        _comparison_node("generate_comparison_report", False).func(
+            **landed, parameters=now)
+
+    msg = str(exc.value)
+    assert "evaluation.compare.model_version: 'v0' -> 'v9'" in msg
+    assert "--from-node compute_compare_metrics" in msg
+
+
+def test_a_new_label_redraws_with_the_new_label():
+    """``label`` only names the compared source: no re-run, and the report
+    prints today's."""
+    computed_with = _compare_params(dict(_OTHER_MODEL))
+    landed = _comparison_inputs(computed_with)
+    now = _compare_params({**_OTHER_MODEL, "label": "last quarter's model"})
+
+    html = _comparison_node("generate_comparison_report", False).func(
+        **landed, parameters=now)
+
+    assert "Model vs last quarter&#x27;s model" in html \
+        or "Model vs last quarter's model" in html
+    assert "Model vs v0" not in html
+
+
+def test_compare_only_sends_a_changed_computed_setting_to_a_node_it_has():
+    """ADR-0031 decision 15, first row: ``--compare-only`` has neither
+    ``prepare_eval_data`` nor ``compute_row_facts``, the nodes
+    ``COMPUTED_KEYS`` names, so the advice must be one of its own — and
+    ``--compare`` keeps the ``COMPUTED_KEYS`` node, whose slice also
+    re-runs the main line the change made stale."""
+    import re
+
+    from recsys_tfb.pipelines.evaluation import create_pipeline
+
+    computed_with = _compare_params(dict(_OTHER_MODEL))
+    now = copy.deepcopy(computed_with)
+    now["evaluation"]["metric"] = {"min_positives": 5}
+    for compare_only, expected in ((True, "compute_compare_metrics"),
+                                   (False, "compute_row_facts")):
+        landed = _comparison_inputs(computed_with, compare_only)
+        with pytest.raises(ValueError) as exc:
+            _comparison_node("generate_comparison_report", compare_only).func(
+                **landed, parameters=now)
+        msg = str(exc.value)
+        assert "evaluation.metric.min_positives" in msg, compare_only
+        advised = re.findall(r"--from-node (\w+)", msg)
+        assert advised == [expected], (compare_only, advised)
+        names = {n.name for n in create_pipeline(
+            compare_source=_OTHER_MODEL, compare_only=compare_only).nodes}
+        assert expected in names, (compare_only, expected)
+
+
+def test_a_changed_display_k_sends_the_redraw_to_the_comparison_cut():
+    """The comparison report's K are cut by
+    ``resolve_comparison_display_ks`` and landed; its fingerprint carries
+    the display keys it read, so it alone is stale and the advice is its own
+    node — no computed setting moved, nothing above it re-runs."""
+    computed_with = _compare_params(dict(_OTHER_MODEL))
+    landed = _comparison_inputs(computed_with)
+    now = copy.deepcopy(computed_with)
+    now["evaluation"]["report"]["display"]["guardrail_recall_k"] = [1, 2]
+
+    with pytest.raises(ValueError) as exc:
+        _comparison_node("generate_comparison_report", False).func(
+            **landed, parameters=now)
+
+    msg = str(exc.value)
+    assert ("comparison_display_ks (written by resolve_comparison_display_ks)"
+            " was computed with different settings") in msg
+    assert "evaluation.report.display.guardrail_recall_k: [1] -> [1, 2]" in msg
+    assert "--from-node resolve_comparison_display_ks" in msg
+
+
+@pytest.mark.parametrize("reader", ["compare_to_source",
+                                    "resolve_comparison_display_ks"])
+def test_the_comparison_readers_refuse_results_of_another_source(reader):
+    """Each reader checks its inputs before computing, so ``--only-node``
+    of it after the source changed cannot stamp today's source on the old
+    numbers."""
+    computed_with = _compare_params(dict(_OTHER_MODEL))
+    now = _compare_params({**_OTHER_MODEL, "model_version": "v9"})
+    if reader == "compare_to_source":
+        inputs = (_stamped_for_comparison(_metrics(), computed_with),
+                  _stamped_for_comparison(_metrics(), computed_with))
+    else:
+        inputs = (_comparison_inputs(computed_with)["source_comparison"],)
+
+    with pytest.raises(ValueError) as exc:
+        _comparison_node(reader, False).func(*inputs, now)
+
+    msg = str(exc.value)
+    assert "evaluation.compare.model_version: 'v0' -> 'v9'" in msg
+    assert "--from-node compute_compare_metrics" in msg
+
+
+def test_the_comparison_and_its_cut_land_what_they_were_computed_with():
+    """Both carry the fingerprint — the cut's with the display keys it read
+    — and the compare source; the cut holds each table's lists, cut at what
+    ``"all"`` stands for: the per-item columns at this run's side's K, the
+    every-key table each side at its own (``_metrics()`` holds two items).
+    """
+    from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
+        compare_source_identity,
+    )
+
+    params = _compare_params(dict(_OTHER_MODEL))
+    params["evaluation"]["report"]["display"] = {
+        "guardrail_recall_k": [1, 2, 3], "primary_map_k": [1, 3, "all"]}
+    weaker = copy.deepcopy(_metrics())
+    weaker["overall"] = {"map@1": 0.25, "map@3": 0.3}
+    weaker["population"] = {**weaker["population"], "all_k": 3}
+    comparison = _comparison_node("compare_to_source", False).func(
+        _stamped_for_comparison(_metrics(), params),
+        _stamped_for_comparison(weaker, params), params)
+    cut = _comparison_node("resolve_comparison_display_ks", False).func(
+        comparison, params)
+
+    identity = compare_source_identity(params)
+    assert comparison["config_fingerprint"] == fingerprint(params)
+    assert comparison["compare_source"] == identity
+    assert comparison["overall"]["cells"]["map@1"] == {
+        "this": 0.5, "reference": 0.25, "diff": 0.25}
+    assert cut == {
+        "per_item": {"guardrail_recall_k": [1, 2],
+                     "primary_map_k": [1, "all"]},
+        "overall": {"rows": ["map@1", "map@3"], "this": ["map@1"],
+                    "reference": ["map@1", "map@3"], "diff": ["map@1"]},
+        "category": None,
+        "config_fingerprint": fingerprint(
+            params, ("evaluation.report.display.guardrail_recall_k",
+                     "evaluation.report.display.primary_map_k")),
+        "compare_source": identity,
+    }

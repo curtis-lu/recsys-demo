@@ -92,7 +92,14 @@ evaluation:
   #     （對照表在 pipelines/evaluation/steps/config_fingerprint.py 的 COMPUTED_KEYS；不一定是產出那份
   #     JSON 的 node）；只做 --only-node generate_report 會被擋下，錯誤訊息會寫出變了
   #     哪個鍵、該 --from-node 哪個 node。
-  #   「畫的」：sections 其餘鍵、display.*。只改報表長相，改完 --only-node generate_report 即可。
+  #   「畫的」：sections 其餘鍵、display.*。只改報表長相，不重算任何指標：
+  #     sections 其餘鍵改完 --only-node generate_report 即可。
+  #     display.primary_map_k 例外：主報表每張表顯示哪些 K 由 resolve_display_ks 先切好落地
+  #     （display_ks.json，#536），改完要 --from-node resolve_display_ks（只重跑 K 截斷與報表，
+  #     不跑 Spark）；只做 --only-node generate_report 會被擋下，錯誤訊息會指出這個 node。
+  #     比較報表（--compare／--compare-only）同理：display.guardrail_recall_k 與 primary_map_k
+  #     由 resolve_comparison_display_ks 切好落地（comparison_display_ks.json），改完要
+  #     --from-node resolve_comparison_display_ks；只做 --only-node generate_comparison_report 會被擋下。
   # sections 的鍵必須剛好是報表讀的那幾個：多寫一個（沒人讀、設了沒用）或少寫一個
   # （讀了卻關不掉），evaluation 指令一進來就擋；值必須是 true／false，不加引號
   # （A34，清單在 core/consistency.py 的 EVALUATION_REPORT_SECTIONS）。

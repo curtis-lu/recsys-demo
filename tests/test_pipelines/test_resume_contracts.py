@@ -27,6 +27,17 @@ def _catalog_defined() -> set[str]:
     return set(cfg) | {"parameters"}
 
 
+#: The compare source the comparison modes are built with, frozen: a contract
+#: key must hash, and ``compare_source`` is a dict (:func:`_kwargs` thaws it).
+_COMPARE_SOURCE = (("kind", "model_version"), ("model_version", "v0"))
+
+
+def _kwargs(kwargs_items: tuple) -> dict:
+    """A contract key's frozen kwargs as ``get_pipeline`` takes them."""
+    return {name: dict(value) if name == "compare_source" else value
+            for name, value in kwargs_items}
+
+
 # (pipeline, frozen kwargs) -> {resume node -> exact allowed auto-included set}
 RESUME_CONTRACTS = {
     ("dataset", ()): {
@@ -181,12 +192,53 @@ RESUME_CONTRACTS = {
         # Where a changed computed setting sends the re-run (#535,
         # COMPUTED_KEYS): the same table read back, nothing re-joined.
         "compute_row_facts": set(),
+        # The comparison layer and the K cut (#536) read landed JSON only:
+        # resuming at either re-runs no metrics node. resolve_display_ks is
+        # where a changed display K sends the re-run (ADR-0031 decision 16).
+        # Un-land baseline_comparison and resuming at the cut pulls the
+        # comparison back.
+        "compare_to_baseline": set(),
+        "resolve_display_ks": set(),
     },
     ("evaluation", (("post_training", True),)): {
         # Same landing and reasoning as above.
         "generate_report": set(),
         "compute_metrics": set(),
         "compute_row_facts": set(),
+        "compare_to_baseline": set(),
+        "resolve_display_ks": set(),
+    },
+    # The comparison chain (#536, ADR-0031 decision 5): after the Spark node
+    # every comparison result lands, so redrawing the comparison report, or
+    # re-running its comparison or its K cut, re-runs nothing above them.
+    # Before #536 the report node took the two aligned frames and computed
+    # both sides' metrics itself, so a redraw pulled back
+    # load_compare_predictions and restrict_to_common and ran the metrics
+    # twice. Un-land source_comparison, comparison_display_ks or one of the
+    # compute_compare_metrics outputs and these turn red.
+    #
+    # compute_compare_metrics is where another compare source sends the
+    # re-run (nodes.COMPARISON_RERUN_NODE): its inputs are the aligned
+    # frames, memory-only Spark frames that cannot land, so it pulls back
+    # the loader and the alignment — and nothing of the main line
+    # (test_pipeline.py::TestTheComparisonReRunsOnItsOwn checks the forward
+    # slice).
+    ("evaluation", (("compare_source", _COMPARE_SOURCE),)): {
+        "compute_compare_metrics": {"restrict_to_common",
+                                    "load_compare_predictions"},
+        "compare_to_source": set(),
+        "resolve_comparison_display_ks": set(),
+        "generate_comparison_report": set(),
+    },
+    # --compare-only builds a different pipeline (a mode, not a slice), so it
+    # gets its own contract; the same chain, the same costs.
+    ("evaluation", (("compare_source", _COMPARE_SOURCE),
+                    ("compare_only", True))): {
+        "compute_compare_metrics": {"restrict_to_common",
+                                    "load_compare_predictions"},
+        "compare_to_source": set(),
+        "resolve_comparison_display_ks": set(),
+        "generate_comparison_report": set(),
     },
 }
 
@@ -197,13 +249,13 @@ class TestResumeContracts:
         can_load = lambda name: name in defined
         failures = []
         for (pipeline_name, kwargs_items), contracts in RESUME_CONTRACTS.items():
-            pipe = get_pipeline(pipeline_name, **dict(kwargs_items))
+            pipe = get_pipeline(pipeline_name, **_kwargs(kwargs_items))
             for start, allowed in contracts.items():
                 _, plan = pipe.slice_from(start, can_load)
                 actual = set(plan.auto_included)
                 if actual != allowed:
                     failures.append(
-                        f"{pipeline_name}{dict(kwargs_items) or ''}::{start}: "
+                        f"{pipeline_name}{_kwargs(kwargs_items) or ''}::{start}: "
                         f"auto-included {dict(plan.auto_included)} "
                         f"!= contract {sorted(allowed)}.\n"
                         f"  New memory-only dataset degrading this resume point? "
@@ -256,7 +308,7 @@ class TestResumeContracts:
         # slice_from/_node_index resolve nodes BY NAME (first match wins);
         # duplicate names would silently slice from the wrong node.
         for (pipeline_name, kwargs_items) in RESUME_CONTRACTS:
-            pipe = get_pipeline(pipeline_name, **dict(kwargs_items))
+            pipe = get_pipeline(pipeline_name, **_kwargs(kwargs_items))
             names = [n.name for n in pipe.nodes]
             assert len(names) == len(set(names)), (
                 f"{pipeline_name}: duplicate node names {names}"

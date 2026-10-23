@@ -693,6 +693,8 @@ def test_compute_all_metrics_returns_expected_keys(spark):
         "dataset_overview", "n_queries", "n_excluded_queries",
         # #376: written whether or not the switch drops those groups.
         "n_all_positive_queries", "widest_group_rows",
+        # #536: the accounts the report reads instead of computing them.
+        "n_groups_with_positive", "all_positive_share", "all_positive_warns",
     }
 
 

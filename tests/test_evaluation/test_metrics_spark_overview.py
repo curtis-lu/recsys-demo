@@ -511,6 +511,21 @@ def _table(section, title_part):
                 if title_part in tt)
 
 
+def _display_ks(out, params):
+    """The K cut ``resolve_display_ks`` lands for the metrics ``out`` (#536):
+    the sections read each table's K columns off it. No baseline is computed
+    here, so the comparison it reads is the stub ``compare_to_baseline``
+    writes for none."""
+    from recsys_tfb.pipelines.evaluation.nodes import resolve_display_ks
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+        fingerprint,
+    )
+
+    stamp = {"config_fingerprint": fingerprint(params)}
+    return resolve_display_ks({**out, **stamp}, {"enabled": False, **stamp},
+                              params)
+
+
 def test_the_report_finds_map_and_recall_at_all_with_the_event_role(spark):
     """The bug: metrics stored at the widest group (``map@4``), the report
     asked for the item count (``map@3``), and the ``@all`` cell was blank with
@@ -520,14 +535,16 @@ def test_the_report_finds_map_and_recall_at_all_with_the_event_role(spark):
     facts, out = _both(_wide_event_df(spark), params)
 
     overall = _table(ranking_metrics.build(
-        {"evaluation_row_facts": facts, "evaluation_metrics": out},
+        {"evaluation_row_facts": facts, "evaluation_metrics": out,
+         "evaluation_display_ks": _display_ks(out, params)},
         params), "overall（")
     assert overall.loc["map", "@all"] == pytest.approx(0.625)
     assert overall.loc["recall", "@all"] == pytest.approx(1.0)
 
     s = overview.build(
         {"evaluation_row_facts": facts, "evaluation_metrics": out,
-         "prediction_quality_metrics": None},
+         "prediction_quality_metrics": None,
+         "evaluation_display_ks": _display_ks(out, params)},
         params)
     card = s.tables[s.table_titles.index(
         "overall mAP@k（per-query 等權，另一種加權）")]
@@ -563,7 +580,8 @@ def test_category_all_is_the_category_count_with_the_event_role(spark):
     facts, out = _both(_wide_event_df(spark), params)
 
     cat = _table(ranking_metrics.build(
-        {"evaluation_row_facts": facts, "evaluation_metrics": out},
+        {"evaluation_row_facts": facts, "evaluation_metrics": out,
+         "evaluation_display_ks": _display_ks(out, params)},
         params), "大類 overall")
     assert cat.loc["map", "@all"] == pytest.approx(1.0)
     assert cat.loc["precision", "@all"] == pytest.approx(0.5)

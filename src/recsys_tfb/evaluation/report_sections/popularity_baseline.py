@@ -7,24 +7,41 @@ from collections.abc import Mapping
 
 import pandas as pd
 
-from recsys_tfb.evaluation.baselines import baseline_score, resolve_lookback_months
 from recsys_tfb.evaluation.metric_catalog import ITEM, QUERY_GROUP, entry
-from recsys_tfb.evaluation.metrics import resolved_all_k
 from recsys_tfb.evaluation.report import ReportSection
 from recsys_tfb.evaluation.report_sections.shared import (
+    BASELINE_COMPARISON,
+    DISPLAY_KS,
+    compared_macro_coverage_suffix,
+    compared_per_item_table,
+    compared_value,
     count_items,
-    k_to_lookup,
-    macro_coverage_suffix_mb,
-    none_safe_diff,
-    per_item_metric_compare_table,
-    report_cfg,
-    resolve_display_k,
+    has_entries,
+    landed_value,
     section_on,
     unmatched_last,
 )
+from recsys_tfb.evaluation.result_readers import (
+    CELLS,
+    DIFF,
+    DISPLAY_METRICS_SECTION,
+    DISPLAY_PRIMARY_MAP_K,
+    MACRO_ITEMS_KEY,
+    POPULARITY_WINDOW_KEY,
+    POPULATION_KEY,
+    REFERENCE,
+    THIS,
+)
 
-#: The results this section reads, by catalog name (ADR-0031 principle 1).
-READS = ("evaluation_row_facts", "evaluation_metrics", "baseline_metrics")
+#: The results this section reads, by catalog name (ADR-0031 principle 1):
+#: the window facts off the baseline's own result, the model's value, the
+#: baseline's and their difference off the comparison (#536), and each
+#: table's K off the cut.
+READS = ("evaluation_row_facts", "baseline_metrics", BASELINE_COMPARISON,
+         DISPLAY_KS)
+
+#: The rows of each M/B/Δ table and the comparison side each one reads.
+_SIDES = (("Model", THIS), ("Baseline", REFERENCE), ("Δ", DIFF))
 
 #: What this section compares, by catalog entry (ADR-0031 decision 11: each
 #: section declares its own list): the query-group metrics overall, the
@@ -40,7 +57,6 @@ _COMPARED_PER_SEGMENT_AND_CATEGORY = ("map", QUERY_GROUP)
 def build(
     results: Mapping[str, dict], parameters: dict
 ) -> ReportSection | None:
-    metrics = results["evaluation_metrics"]
     baseline_metrics = results["baseline_metrics"]
     # compute_baseline_metrics writes {"enabled": False, "config_fingerprint":
     # ...} when the section is off, so the stub can carry its fingerprint;
@@ -48,27 +64,32 @@ def build(
     if (not section_on(parameters, "baseline") or baseline_metrics is None
             or baseline_metrics.get("enabled") is False):
         return None
-    from recsys_tfb.evaluation.compare import build_comparison_result
 
-    comp = build_comparison_result(
-        metrics, baseline_metrics, "Model", "Baseline"
-    )
-    disp = report_cfg(parameters).get("display", {}) or {}
+    # Every number below is read: the model's value, the baseline's and their
+    # difference off the comparison (compare_to_baseline, #536), every K
+    # list off the cut (evaluation_display_ks). A value either lacks raises,
+    # naming the node to re-run (landed_value).
+    def compared(*path):
+        return landed_value(results[BASELINE_COMPARISON], BASELINE_COMPARISON,
+                            *path)
+
+    def ks(*path):
+        return landed_value(results[DISPLAY_KS], DISPLAY_KS,
+                            BASELINE_COMPARISON, *path)
+
     n_items = count_items(results["evaluation_row_facts"])
-    # One K for both sides, the model's: the baseline is scored on the model's
-    # own rows (build_baseline_frame), so its "all" resolved to the same K
-    # (#434); each bundle records its own all the same.
-    all_k = resolved_all_k(metrics)
-    attr_ks = resolve_display_k(
-        disp.get("primary_map_k", [1, 3, 5, "all"]), all_k
-    )
+    # The per-item tables' K: primary_map_k, cut at the model's "all" — the
+    # baseline's is the same K, it is scored on the model's own rows.
+    attr_ks = ks(DISPLAY_PRIMARY_MAP_K)
     # overall 三表用 k superset（使用者指定，k 放欄位）
-    k_super = resolve_display_k([1, 2, 3, 4, 5, "all"], all_k)
-    # Same helper the node (compute_baseline_metrics) reads (bug 1,
-    # ADR-0020): before it existed this line read .get("lookback_months")
-    # with no default, so an unset key printed nothing here while the node
-    # had in fact used 12.
-    lookback = resolve_lookback_months(parameters)
+    k_super = ks(DISPLAY_METRICS_SECTION)
+    # The window as compute_baseline_metrics counted it (#536,
+    # baselines.popularity_window): the lookback it used — read off the
+    # result, not off parameters (bug 1, ADR-0020: this line once read the
+    # key with no default and printed nothing while the node had used 12) —
+    # and the coverage below.
+    window = baseline_metrics[POPULARITY_WINDOW_KEY]
+    lookback = window["lookback_months"]
 
     tables: list[pd.DataFrame] = []
     titles: list[str] = []
@@ -79,44 +100,27 @@ def build(
         titles.append(title)
         collapsed.append(is_collapsed)
 
-    # bug 1 (ADR-0020), partial window: _lookback_window raises only when the
-    # window has no label rows at all, so a label_table covering 2 of 12
-    # lookback months passes. It used to print the plain 12-month sentence
-    # and divide the per-month average by 12, understating it 6x with no
-    # error. monthly_counts holds only months with label rows inside the
-    # window, so its distinct months are the coverage; without it (older
-    # results) the configured lookback stays both text and divisor.
-    # #397: rate 模式（node 寫了非空 popularity_rate）的涵蓋月數看 sample_pool
-    # 的候選列：monthly_positives 在每個有候選列的月份都有值（正例數可為 0），
-    # window_months_covered 是各視窗有候選列的月數。count 模式（沒有這個鍵）
-    # 照舊看 label_table 的 monthly_counts。下面的涵蓋算法兩種模式共用。
+    # bug 1 (ADR-0020) partial window and #374 several dates: whether the
+    # window is partial, how many months it covered, and what the per-month
+    # average divides by are the node's (popularity_window, #536), read here.
+    # #397: rate 模式（node 寫了非空 popularity_rate）的月度表是 sample_pool 的
+    # monthly_positives，count 模式是 label_table 的 monthly_counts；涵蓋月數
+    # 由 node 照同一張表數好落地。
     rate_info = (baseline_metrics or {}).get("popularity_rate") or None
     rate_mode = bool(rate_info)
-    source = rate_info if rate_mode else (baseline_metrics or {})
 
     monthly = (
         rate_info.get("monthly_positives") if rate_mode
         else (baseline_metrics or {}).get("monthly_counts")
     ) or {}
+    # The trend table's month columns, in order.
     months = sorted({mo for per in monthly.values() for mo in per})
-    covered = len(months)
-    window_partial = 0 < covered < lookback
-    per_month_divisor = covered if window_partial else lookback
-    # Several evaluated dates (#374): one window per date, and purchase_counts
-    # sums them all, so the per-month average divides by the window-months
-    # behind that sum — each window's covered months under the same partial
-    # rule as above — not by one window's lookback (N times too high). The
-    # node writes window_months_covered only then; the distinct months of
-    # monthly_counts cannot stand in for it, since overlapping windows share
-    # months and a boundary month can hold rows for one window and not the other.
-    windows = source.get("window_months_covered") or {}
+    covered = window["months_covered"]
+    window_partial = window["window_partial"]
+    per_month_divisor = window["per_month_divisor"]
+    full_window_months = window["full_window_months"]
+    windows = window["window_months_covered"]
     several_dates = len(windows) > 1
-    if several_dates:
-        full_window_months = len(windows) * lookback
-        per_month_divisor = sum(
-            c if 0 < c < lookback else lookback for c in windows.values()
-        )
-        window_partial = per_month_divisor < full_window_months
 
     # [1] popularity 排名組成：rate 模式印正例率／分母／分子（purchase_counts／
     #     monthly_counts 在 rate 模式仍由 label_table 算，這裡不拿來印）；
@@ -188,43 +192,32 @@ def build(
             _add(mdf, "popularity 月度趨勢", True)
 
     # [2] overall：mAP / recall / precision 各一張，rows=[Model,Baseline,Δ]、
-    #     cols=@k（superset），明細收合。
-    overall_a = comp["result_a"].get("overall", {}) or {}
-    overall_b = comp["result_b"].get("overall", {}) or {}
-    overall_delta = comp["overall_delta"]
+    #     cols=@k（superset），明細收合。"all" 讀比較層配好的 name@all 格。
+    overall = compared("overall", CELLS)
     for metric in (entry(*c) for c in _COMPARED_OVERALL):
-        data = {}
-        for who, src in (("Model", overall_a), ("Baseline", overall_b),
-                         ("Δ", overall_delta)):
-            data[who] = {
-                f"@{k}": src.get(metric.key(k_to_lookup(k, all_k)))
-                for k in k_super
-            }
+        data = {
+            who: {f"@{k}": compared_value(overall, metric.key(k), side)
+                  for k in k_super}
+            for who, side in _SIDES
+        }
         _add(pd.DataFrame(data).T,
              f"overall {metric.display_name}@k (M/B/Δ)", True)
 
     # [3] per-item compare tables — only when baseline has per_item；明細收合。
-    per_item_a = comp["result_a"].get("per_item", {}) or {}
-    per_item_b = comp["result_b"].get("per_item", {}) or {}
-    per_item_delta = comp.get("per_item_delta", {}) or {}
-    macro_a = (metrics.get("macro_avg", {}) or {}).get("by_item")
-    macro_b = (baseline_metrics.get("macro_avg", {}) or {}).get("by_item")
-    if per_item_b:
+    per_item = compared("per_item")
+    macro = compared("macro_by_item")
+    if has_entries(per_item, REFERENCE):
         # bug 5 (ADR-0020): either side's macro denominator can shrink
         # silently, so Model and Baseline are disclosed separately.
-        item_cov = macro_coverage_suffix_mb(
-            per_item_a, per_item_b, n_items, parameters, macro_a, macro_b
-        )
+        item_cov = compared_macro_coverage_suffix(
+            macro, compared(POPULATION_KEY, MACRO_ITEMS_KEY), n_items)
         # 兩張 per-item M/B/Δ 用同一組 k（attr_ks＝primary_map_k），彼此一致；
         # 為控寬用縮減集，與衡量指標 per-item 的完整 [1..5,all] 不同（描述封邊）。
         for metric in (entry(*c) for c in _COMPARED_PER_ITEM):
             label = metric.display_name
             _add(
-                per_item_metric_compare_table(
-                    per_item_a, per_item_b, per_item_delta,
-                    attr_ks, all_k, metric.name, f"{label}@{{k}}",
-                    macro_a=macro_a, macro_b=macro_b, all_k_b=all_k,
-                ),
+                compared_per_item_table(
+                    per_item, macro, attr_ks, metric.name, f"{label}@{{k}}"),
                 # No "per-item" in front: the display name says it for
                 # the one metric whose name a query-group one shares.
                 f"{label}@k (M/B/Δ){item_cov}", True,
@@ -234,50 +227,38 @@ def build(
     #     每個 segment 的 Model/Baseline/Δ 三列、cols＝@k。需 model 與 baseline
     #     兩側都有 per_segment（key 由同一 active_seg_col 對齊）。明細收合。
     one = entry(*_COMPARED_PER_SEGMENT_AND_CATEGORY)
-    seg_a = metrics.get("per_segment", {}) or {}
-    seg_b = (baseline_metrics or {}).get("per_segment", {}) or {}
-    if seg_a and seg_b:
+    per_segment = compared("per_segment")
+    if has_entries(per_segment, THIS) and has_entries(per_segment, REFERENCE):
+        by_segment = per_segment[CELLS]
         rows: dict[str, dict] = {}
-        for seg in unmatched_last(
-            {s: None for s in sorted(set(seg_a) | set(seg_b))}
-        ):
-            a, b = seg_a.get(seg, {}) or {}, seg_b.get(seg, {}) or {}
-            for who, src in ((f"{seg} · Model", a), (f"{seg} · Baseline", b)):
-                rows[who] = {
-                    f"@{k}": src.get(one.key(k_to_lookup(k, all_k)))
+        for seg in unmatched_last({s: None for s in sorted(by_segment)}):
+            for who, side in _SIDES:
+                rows[f"{seg} · {who}"] = {
+                    f"@{k}": compared_value(by_segment[seg], one.key(k), side)
                     for k in k_super
                 }
-            rows[f"{seg} · Δ"] = {
-                f"@{k}": none_safe_diff(a.get(one.key(k_to_lookup(k, all_k))),
-                                        b.get(one.key(k_to_lookup(k, all_k))))
-                for k in k_super
-            }
         _add(pd.DataFrame(rows).T,
              f"per-segment {one.display_name}@k (M/B/Δ)", True)
 
     # [5] 大類 overall mAP@k M/B/Δ — 大類粒度的 overall mAP 對照；rows＝
-    #     [Model,Baseline,Δ]、cols＝@k。cat_k 取 model 的 category bundle 的 K
-    #     （baseline 與 model 是同一批列，兩側同一 category 集）。
-    cat_a = (metrics.get("category") or {}).get("overall", {}) or {}
-    cat_b = ((baseline_metrics or {}).get("category") or {}).get("overall", {}) or {}
-    if cat_a and cat_b:
-        cat_k = resolved_all_k(metrics.get("category") or {}) or all_k
-        cks = resolve_display_k([1, 2, 3, 4, 5, "all"], cat_k)
-        data = {}
-        for who, src in (("Model", cat_a), ("Baseline", cat_b)):
-            data[who] = {
-                f"@{k}": src.get(one.key(k_to_lookup(k, cat_k))) for k in cks
+    #     [Model,Baseline,Δ]、cols＝@k，K 是大類粒度切好的那份。比較層只在兩側
+    #     都有大類時比（baseline 與 model 是同一批列，兩側同一 category 集）。
+    if compared("category") is not None:
+        cat_overall = compared("category", "overall")
+        if (has_entries(cat_overall, THIS)
+                and has_entries(cat_overall, REFERENCE)):
+            cks = ks("category", DISPLAY_METRICS_SECTION)
+            data = {
+                who: {f"@{k}": compared_value(cat_overall[CELLS], one.key(k),
+                                              side)
+                      for k in cks}
+                for who, side in _SIDES
             }
-        data["Δ"] = {
-            f"@{k}": none_safe_diff(cat_a.get(one.key(k_to_lookup(k, cat_k))),
-                                    cat_b.get(one.key(k_to_lookup(k, cat_k))))
-            for k in cks
-        }
-        _add(pd.DataFrame(data).T,
-             f"大類 overall {one.display_name}@k (M/B/Δ)", True)
+            _add(pd.DataFrame(data).T,
+                 f"大類 overall {one.display_name}@k (M/B/Δ)", True)
 
-    # Always printed (bug 1): lookback is resolved via the shared helper above
-    # and is never unset. A partially covered window also states how many
+    # Always printed (bug 1): the node lands the lookback it used, never
+    # unset. A partially covered window also states how many
     # months it actually had (see window_partial above).
     trend_note = ""
     composition_note = (
@@ -340,7 +321,7 @@ def build(
                 "視窗彼此重疊時，同一個月會被每個涵蓋它的視窗各算一次，"
                 "所以月度趨勢表的逐月數字是重複計數後的合計。"
             )
-        if baseline_score(parameters) == "rate":
+        if window["score"] == "rate":
             # score: rate 但 node 沒寫 popularity_rate：監控模式（#397）。
             lookback_note += (
                 "設定是 evaluation.baseline.score: rate，但監控模式評的是離線推論"

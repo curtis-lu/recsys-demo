@@ -653,7 +653,7 @@ def test_metric_params_is_defined_exactly_once():
             n = len(pattern.findall(path.read_text(encoding="utf-8")))
             hits.extend([path.relative_to(root).as_posix()] * n)
     assert len(hits) == 1, hits
-    assert hits == ["src/recsys_tfb/evaluation/metrics.py"]
+    assert hits == ["src/recsys_tfb/evaluation/result_readers.py"]
 
 
 # ---------------------------------------------------------------------------
@@ -762,8 +762,11 @@ class TestNGroupsWithPositive:
 
 
 class TestFormatShare:
+    """How the report and the log print a share: formatting, so it lives on
+    the report's side since #536 (``report_sections.shared``)."""
+
     def test_one_decimal_by_default(self):
-        from recsys_tfb.evaluation.metrics import format_share
+        from recsys_tfb.evaluation.report_sections.shared import format_share
 
         assert format_share(0.053) == "5.3%"
         assert format_share(50 / 950) == "5.3%"
@@ -773,7 +776,7 @@ class TestFormatShare:
     def test_above_the_threshold_never_prints_as_the_threshold(self):
         """1004 / 10000 is above 10% and would print 10.0% beside "above
         10%"; more decimals until the printed value is above it too."""
-        from recsys_tfb.evaluation.metrics import format_share
+        from recsys_tfb.evaluation.report_sections.shared import format_share
 
         assert format_share(1004 / 10000) != "10.0%"
         assert format_share(1004 / 10000) == "10.04%"

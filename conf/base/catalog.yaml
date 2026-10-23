@@ -321,7 +321,7 @@ evaluation_segment_columns:
 # prepare_eval_data 的第三個 output（#379）：evaluation.item_categories.column 設定時，
 # 每個 item 的大類——從這次評估月份的 sample_pool 那一欄讀出來的對照表（column、mapping）。
 # 沒設 column 時也落地，mapping 是空的，讀者照舊從 parameters 讀手寫的 mapping。
-# compute_row_facts／compute_metrics／compute_baseline_metrics／generate_comparison_report 讀它；
+# compute_row_facts／compute_metrics／compute_baseline_metrics／compute_compare_metrics 讀它；
 # config_fingerprint 同 segment_columns.json 那樣比。optional：#379 之前寫的評估目錄沒有
 # 這份檔，沒設 column 的讀者也不需要它，缺檔時 load() 回 None 而不是 raise——欄模式下缺檔
 # 由 CLI 在 --compare-only 的任何 node 之前擋下（__main__.py::_compare_only_input_errors）。
@@ -359,10 +359,71 @@ prediction_quality_metrics:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/prediction_quality.json
 
+# compare_to_baseline 的輸出（#536，ADR-0031 決定 4、5）：比較層的第一對——模型對熱門度
+# baseline，照名字與粒度 join，每格是這次、對照、差（差＝這次 − 對照，兩邊都有才算），
+# 落地 evaluation.k_values 的全部 K（K 截斷在下一條之後才做）；另記兩邊的母體帳四項
+# （all 解析成幾、進 macro 的 item、算進指標的組數、分群欄）與是否相同。主報表的 baseline
+# 段只讀它，不自己算差。帶 config_fingerprint；baseline 段關掉時是 {"enabled": false} stub。
+baseline_comparison:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/baseline_comparison.json
+
+# resolve_display_ks 的輸出（#536，ADR-0031 決定 10、16）：主報表每張表顯示哪些 K——
+# 依表的來源（evaluation_metrics、baseline_comparison）各一塊，int K 超過該粒度 all 的
+# 已濾掉（ADR-0020 bug 8）。報表照名字讀，不自己截斷。設定指紋多帶它讀的 display 鍵
+# （report.display.primary_map_k），所以改了那個鍵只重畫會被擋下、建議
+# --from-node resolve_display_ks。
+evaluation_display_ks:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/display_ks.json
+
+# --- Evaluation pipeline — 比較那側（--compare／--compare-only，#536，ADR-0031 決定 4、5）---
+# 比較報表只讀下面這幾份，所以 --only-node generate_comparison_report 不跑 Spark 就能重畫。
+# 每份都帶 config_fingerprint，也帶 compare_source：決定 B 內容的那幾個
+# evaluation.compare 鍵（steps/compare_sources.py::compare_source_identity；label 不算）。
+# 換了比較對象或改了 prod_mapping 之後只重畫，讀者會擋下、建議
+# --from-node compute_compare_metrics。
+#
+# restrict_to_common 的涵蓋率：兩側裁切前後的 query group 數、item 數、被剔除的 item。
+compare_coverage:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/compare_coverage.json
+
+# compute_compare_metrics 的四個輸出：這次的模型（A′）與比較對象（B′）在共同母體上
+# 各自的列的事實與指標（各帶母體帳）。A′ 依 evaluation_segment_columns 分群，B′ 不分群。
+compare_row_facts_a:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/compare_row_facts_a.json
+
+compare_metrics_a:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/compare_metrics_a.json
+
+compare_row_facts_b:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/compare_row_facts_b.json
+
+compare_metrics_b:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/compare_metrics_b.json
+
+# compare_to_source 的輸出：比較層的第二對——A′ 對 B′，形狀同 baseline_comparison
+# （每格這次、對照、差；全部 K；母體帳四項）。
+source_comparison:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/source_comparison.json
+
+# resolve_comparison_display_ks 的輸出：比較報表每張表顯示哪些 K 與哪些列。指紋多帶
+# 它讀的 display 鍵（guardrail_recall_k、primary_map_k），改了只重畫會被擋下、建議
+# --from-node resolve_comparison_display_ks。
+comparison_display_ks:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/comparison_display_ks.json
+
 # 主報表 per-item 細部拆解段的 Spark 聚合（Plan 1.5 從 generate_report 拆出）。
 # 落地的理由不只是快取：generate_report 因此是純函式。它的輸入除了 parameters 都是
 # 落地 JSON（本條、evaluation_row_facts、evaluation_metrics、baseline_metrics、
-# prediction_quality_metrics），
+# prediction_quality_metrics、baseline_comparison、evaluation_display_ks），
 # 所以 --only-node generate_report 不重算任何指標就能重繪主報表（ADR-0018 決定 2；
 # 補跑集合釘在 tests/test_pipelines/test_resume_contracts.py）。
 evaluation_report_aggregates:

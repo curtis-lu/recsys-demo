@@ -4,6 +4,93 @@ from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
 
 
+def _comparison_nodes(compare_only: bool) -> list[Node]:
+    """The comparison chain, one copy for ``--compare`` and ``--compare-only``
+    (#536): B's rows aligned with A's, both sides' facts and metrics landed,
+    compared, K cut, drawn. The mode reaches the nodes whose behaviour
+    depends on it through their factories: which settings side A's
+    partitions are checked against (``restrict_to_common``), and where a
+    stale input's refusal sends the re-run (the three readers).
+
+    Only ``compute_compare_metrics`` runs Spark after the alignment; the
+    nodes after it read landed JSON, so ``--only-node
+    generate_comparison_report`` redraws without recomputing (ADR-0031
+    decision 5). The comparison lands every K and the cut comes after it
+    (decision 16).
+    """
+    from recsys_tfb.pipelines.evaluation.nodes import (
+        compute_compare_metrics,
+        load_compare_predictions,
+        make_compare_to_source_node,
+        make_generate_comparison_report_node,
+        make_resolve_comparison_display_ks_node,
+        make_restrict_to_common_node,
+    )
+
+    return [
+        Node(
+            load_compare_predictions,
+            inputs=["parameters"],
+            outputs="compare_predictions_raw",
+        ),
+        # Under --compare checks side A's partitions against today's
+        # settings, under --compare-only against the directory JSON's (#374;
+        # see make_restrict_to_common_node). The coverage lands; the two
+        # aligned frames stay in memory.
+        Node(
+            make_restrict_to_common_node(compare_only=compare_only),
+            inputs=["enriched_eval_predictions", "compare_predictions_raw",
+                    "evaluation_segment_columns", "parameters"],
+            outputs=["eval_predictions_common", "compare_predictions_common",
+                     "compare_coverage"],
+        ),
+        # By name: the two frames are both Spark frames, and swapped by
+        # position they would raise nothing and relabel the two sides.
+        Node(
+            compute_compare_metrics,
+            inputs={
+                "eval_predictions_common": "eval_predictions_common",
+                "compare_predictions_common": "compare_predictions_common",
+                "segment_columns": "evaluation_segment_columns",
+                "parameters": "parameters",
+                "item_categories": "evaluation_item_categories",
+            },
+            outputs=["compare_row_facts_a", "compare_metrics_a",
+                     "compare_row_facts_b", "compare_metrics_b"],
+        ),
+        Node(
+            make_compare_to_source_node(compare_only),
+            inputs={
+                "compare_metrics_a": "compare_metrics_a",
+                "compare_metrics_b": "compare_metrics_b",
+                "parameters": "parameters",
+            },
+            outputs="source_comparison",
+        ),
+        Node(
+            make_resolve_comparison_display_ks_node(compare_only),
+            inputs={
+                "source_comparison": "source_comparison",
+                "parameters": "parameters",
+            },
+            outputs="comparison_display_ks",
+        ),
+        # By name (ADR-0030 decision 8), like generate_report: every
+        # parameter is named after the entry it reads.
+        Node(
+            make_generate_comparison_report_node(compare_only),
+            inputs={
+                "compare_coverage": "compare_coverage",
+                "compare_row_facts_a": "compare_row_facts_a",
+                "source_comparison": "source_comparison",
+                "comparison_display_ks": "comparison_display_ks",
+                "parameters": "parameters",
+            },
+            outputs="evaluation_comparison_report",
+        ),
+    ]
+
+
 def create_pipeline(
     post_training: bool = False,
     compare_source: dict | None = None,
@@ -18,17 +105,17 @@ def create_pipeline(
         the join is computed once, and every metrics/report node reads the
         table back, keeping the evaluated month (ADR-0018 decision 1).
       * --post-training — same chain read from ``training_eval_predictions``.
-      * --compare X — adds 3 compare nodes to either of the above; both
-        standalone and comparison reports produced.
+      * --compare X — adds the comparison chain (``_comparison_nodes``) to
+        either of the above; both standalone and comparison reports produced.
       * --compare-only X — short pipeline that reads the
         ``enriched_eval_predictions`` an earlier run wrote, gates on the
-        evaluated month being there (zero-output), and only produces
-        report_comparison.html. It also loads ``evaluation_segment_columns``,
-        landed by the run that wrote that partition, since there is no
-        ``prepare_eval_data`` here to say which segment columns the
-        partition's rows were joined with, and ``evaluation_item_categories``
-        (#379) for the category table it read — optional, see its catalog
-        entry.
+        evaluated month being there (zero-output), and runs the same
+        comparison chain, producing only report_comparison.html. It also
+        loads ``evaluation_segment_columns``, landed by the run that wrote
+        that partition, since there is no ``prepare_eval_data`` here to say
+        which segment columns the partition's rows were joined with, and
+        ``evaluation_item_categories`` (#379) for the category table it read
+        — optional, see its catalog entry.
 
     ``baseline_rate`` (the CLI's ``baseline_scores_by_rate``, #397: ``score:
     rate`` under ``--post-training``) adds ``build_popularity_period_counts``
@@ -39,16 +126,15 @@ def create_pipeline(
     """
     from recsys_tfb.pipelines.evaluation.nodes import (
         build_popularity_period_counts,
+        compare_to_baseline,
         compute_baseline_metrics,
         compute_metrics,
         compute_prediction_quality,
         compute_report_aggregates,
         compute_row_facts,
-        generate_comparison_report,
         generate_report,
-        load_compare_predictions,
         make_prepare_eval_data_node,
-        make_restrict_to_common_node,
+        resolve_display_ks,
         validate_enriched_eval_predictions_present,
     )
 
@@ -69,25 +155,7 @@ def create_pipeline(
                 inputs=["enriched_eval_predictions",
                         "evaluation_segment_columns", "parameters"],
             ),
-            Node(
-                load_compare_predictions,
-                inputs=["parameters"],
-                outputs="compare_predictions_raw",
-            ),
-            Node(
-                make_restrict_to_common_node(compare_only=True),
-                inputs=["enriched_eval_predictions", "compare_predictions_raw",
-                        "evaluation_segment_columns", "parameters"],
-                outputs=["eval_predictions_common", "compare_predictions_common",
-                         "compare_coverage_partial"],
-            ),
-            Node(
-                generate_comparison_report,
-                inputs=["eval_predictions_common", "compare_predictions_common",
-                        "compare_coverage_partial", "evaluation_segment_columns",
-                        "parameters", "evaluation_item_categories"],
-                outputs="evaluation_comparison_report",
-            ),
+            *_comparison_nodes(compare_only=True),
         ])
 
     predictions_input = (
@@ -200,6 +268,23 @@ def create_pipeline(
         ),
     ]
     nodes += [
+        # The comparison layer's first pair (ADR-0031 decisions 4 and 5): the
+        # model against its baseline, cell by cell, every K — no Spark, both
+        # inputs landed. The report reads the differences off it.
+        Node(
+            compare_to_baseline,
+            inputs=["evaluation_metrics", "baseline_metrics", "parameters"],
+            outputs="baseline_comparison",
+        ),
+        # The K each table shows, cut after the comparison (decision 16): a
+        # changed display K re-runs this node and the report, nothing above.
+        # It reads the comparison for the baseline section's lists, which
+        # also keeps it after the comparison in every topological order.
+        Node(
+            resolve_display_ks,
+            inputs=["evaluation_metrics", "baseline_comparison", "parameters"],
+            outputs="evaluation_display_ks",
+        ),
         # By name (ADR-0030 decision 8): the report keys each result by its
         # catalog name, so every parameter is named after its entry.
         Node(
@@ -210,34 +295,13 @@ def create_pipeline(
                 "baseline_metrics": "baseline_metrics",
                 "evaluation_report_aggregates": "evaluation_report_aggregates",
                 "prediction_quality_metrics": "prediction_quality_metrics",
+                "baseline_comparison": "baseline_comparison",
+                "evaluation_display_ks": "evaluation_display_ks",
                 "parameters": "parameters",
             },
             outputs="evaluation_report",
         ),
     ]
     if compare_source is not None:
-        nodes += [
-            Node(
-                load_compare_predictions,
-                inputs=["parameters"],
-                outputs="compare_predictions_raw",
-            ),
-            # Checks partitions against today's settings, not the directory
-            # JSON's: a --only-node generate_comparison_report slice reads
-            # partitions an earlier run wrote, whose JSON is as old (#374).
-            Node(
-                make_restrict_to_common_node(compare_only=False),
-                inputs=["enriched_eval_predictions", "compare_predictions_raw",
-                        "evaluation_segment_columns", "parameters"],
-                outputs=["eval_predictions_common", "compare_predictions_common",
-                         "compare_coverage_partial"],
-            ),
-            Node(
-                generate_comparison_report,
-                inputs=["eval_predictions_common", "compare_predictions_common",
-                        "compare_coverage_partial", "evaluation_segment_columns",
-                        "parameters", "evaluation_item_categories"],
-                outputs="evaluation_comparison_report",
-            ),
-        ]
+        nodes += _comparison_nodes(compare_only=False)
     return Pipeline(nodes)

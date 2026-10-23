@@ -224,27 +224,20 @@ class TestReadersRankTheLandedTable:
             _labels(spark, ("2024-12-31",)), segments, params, categories)
         assert set(result["category"]["per_item"]) == {"x", "y"}
 
-    def test_generate_comparison_report_ranks_both_sides_by_it(
-        self, spark, monkeypatch,
-    ):
-        from recsys_tfb.pipelines.evaluation import nodes
+    def test_compute_compare_metrics_ranks_both_sides_by_it(self, spark):
+        """Both sides of a comparison (#536: computed by
+        ``compute_compare_metrics``, no longer inside the report)."""
+        from recsys_tfb.pipelines.evaluation.nodes import compute_compare_metrics
 
-        seen = {}
-
-        def capture(metrics_a, metrics_b, *_a, **_k):
-            seen["a"], seen["b"] = metrics_a, metrics_b
-            return {}
-
-        monkeypatch.setattr(nodes, "build_comparison_result", capture)
-        monkeypatch.setattr(nodes, "assemble_comparison_report",
-                            lambda *a, **k: "<html/>")
         params = _params()
+        params["evaluation"]["compare"] = {"kind": "model_version",
+                                           "model_version": "v0"}
         frame, segments, categories = _landed(spark, params)
-        nodes.generate_comparison_report(
-            frame, frame.drop("eval_partition_fingerprint"), {}, segments,
+        _facts_a, metrics_a, _facts_b, metrics_b = compute_compare_metrics(
+            frame, frame.drop("eval_partition_fingerprint"), segments,
             params, categories)
-        assert set(seen["a"]["category"]["per_item"]) == {"x", "y"}
-        assert set(seen["b"]["category"]["per_item"]) == {"x", "y"}
+        assert set(metrics_a["category"]["per_item"]) == {"x", "y"}
+        assert set(metrics_b["category"]["per_item"]) == {"x", "y"}
 
 
 class TestAStaleOrMissingTableIsRefused:
@@ -264,15 +257,15 @@ class TestAStaleOrMissingTableIsRefused:
         assert "--from-node prepare_eval_data" in message
 
     def test_compare_only_refuses_a_table_read_off_another_column(self, spark):
-        """``--compare-only`` compares no fingerprint with today's settings
-        (``post_training`` is inert there), so the landed table's own
+        """``--compare-only`` compares no fingerprint of the landed table with
+        today's settings (``post_training`` is inert there), so its own
         ``column`` is the one thing that says it is stale."""
-        from recsys_tfb.pipelines.evaluation import nodes
+        from recsys_tfb.pipelines.evaluation.nodes import compute_compare_metrics
 
         frame, segments, categories = _landed(spark, _params())
         with pytest.raises(ValueError) as excinfo:
-            nodes.generate_comparison_report(
-                frame, frame.drop("eval_partition_fingerprint"), {}, segments,
+            compute_compare_metrics(
+                frame, frame.drop("eval_partition_fingerprint"), segments,
                 _params(column="family2"), categories)
         message = str(excinfo.value)
         assert "read off 'family'" in message
@@ -303,19 +296,19 @@ class TestAStaleOrMissingTableIsRefused:
 
 
 def test_compare_only_with_a_hand_mapping_and_no_json_runs_the_reader(
-    spark, tmp_path, monkeypatch,
+    spark, tmp_path,
 ):
     """#379: ``--compare-only`` in a directory written before #379 (no
     item_categories.json) with a hand mapping. The CLI lets it through
     (``_compare_only_input_errors``); what must also hold is that the node
     reading it runs: the real catalog entry loads the missing file as None,
-    and ``generate_comparison_report`` takes the mapping from parameters."""
+    and ``compute_compare_metrics`` takes the mapping from parameters."""
     from pathlib import Path
 
     import yaml
 
     from recsys_tfb.core.catalog import DataCatalog
-    from recsys_tfb.pipelines.evaluation import nodes
+    from recsys_tfb.pipelines.evaluation.nodes import compute_compare_metrics
 
     entry = dict(yaml.safe_load(
         (Path(__file__).resolve().parents[3] / "conf" / "base" / "catalog.yaml")
@@ -325,21 +318,14 @@ def test_compare_only_with_a_hand_mapping_and_no_json_runs_the_reader(
         "evaluation_item_categories")
     assert loaded is None
 
-    seen = {}
-
-    def capture(metrics_a, metrics_b, *_a, **_k):
-        seen["a"] = metrics_a
-        return {}
-
-    monkeypatch.setattr(nodes, "build_comparison_result", capture)
-    monkeypatch.setattr(nodes, "assemble_comparison_report",
-                        lambda *a, **k: "<html/>")
     params = _params(column=None, mapping={"xy": ["A", "B"]})
+    params["evaluation"]["compare"] = {"kind": "model_version",
+                                       "model_version": "v0"}
     frame, segments, _categories = _landed(spark, params)
-    nodes.generate_comparison_report(
-        frame, frame.drop("eval_partition_fingerprint"), {}, segments, params,
+    _facts_a, metrics_a, _facts_b, _metrics_b = compute_compare_metrics(
+        frame, frame.drop("eval_partition_fingerprint"), segments, params,
         loaded)
-    assert set(seen["a"]["category"]["per_item"]) == {"xy"}
+    assert set(metrics_a["category"]["per_item"]) == {"xy"}
 
 
 # ---------------------------------------------------------------------------

@@ -107,11 +107,18 @@ from recsys_tfb.evaluation.metric_catalog import (
 from recsys_tfb.evaluation.metrics import (
     ALL_K_KEY,
     ALL_POSITIVE_KEY,
+    MACRO_ITEMS_KEY,
     POPULATION_KEY,
     WIDEST_GROUP_KEY,
+    all_positive_accounts,
     macro_from_per_item,
     metric_params,
     n_groups_with_positive,
+)
+from recsys_tfb.evaluation.result_readers import (
+    N_SCORED_WITH_POSITIVE_KEY,
+    N_SCORED_WITHOUT_POSITIVE_KEY,
+    SEGMENT_COLUMNS_KEY,
 )
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT, segment_key
 from recsys_tfb.utils.ranking import rank_by_score_then_item, score_then_item_window
@@ -1254,16 +1261,19 @@ def _compute_core(
         # without one), less the all-positive ones when the switch drops
         # them; none without a positive, so that count is 0 by construction.
         # The macro averages the per-item cells kept by min_positives, the
-        # rule macro_average applies.
+        # rule macro_average applies. The segment columns are the ones this
+        # call was handed (#536): a side computed with none — the compared
+        # side of --compare — says so, and the comparison layer reads it.
         return {POPULATION_KEY: {
             ALL_K_KEY: all_k,
-            "macro_items": sorted(
+            MACRO_ITEMS_KEY: sorted(
                 item for item, m in per_item.items()
                 if m.get(_N_POS_KEY, 0) >= macro_params["min_positives"]),
-            "n_scored_queries_with_positive": (
+            N_SCORED_WITH_POSITIVE_KEY: (
                 n_queries_with_pos
                 - (n_all_positive if drop_all_positive_groups else 0)),
-            "n_scored_queries_without_positive": 0,
+            N_SCORED_WITHOUT_POSITIVE_KEY: 0,
+            SEGMENT_COLUMNS_KEY: list(segment_columns),
         }}
 
     # ---- Layer 1: row-level enrichment ----
@@ -1376,18 +1386,22 @@ def _compute_core(
 def _grain_row_facts(
     frame: SparkDataFrame, parameters: dict, segment_columns: Sequence[str],
 ) -> dict:
-    """The row facts of one grain: the overview and the query group counts.
+    """The row facts of one grain: the overview, the query group counts and
+    the all-positive accounts.
 
     The counts are ``_count_query_groups``' one action; ``WIDEST_GROUP_KEY``
     is what ``"all"`` resolves to on a frame of event rows
     (``_resolve_all_k``), recorded on every grain so the metrics never count
-    it again.
+    it again. The accounts (``metrics.all_positive_accounts``, #536) are
+    computed here off those counts, so every caller's facts carry them —
+    the run's rows and, under ``--compare``, each side's — and the report and
+    the log read them instead of computing them.
     """
     schema = get_schema(parameters)
     n_queries, n_with_positive, n_all_positive, widest_group_rows = (
         _count_query_groups(
             frame, schema["query_group_columns"], schema["label"]))
-    return {
+    facts = {
         "dataset_overview": compute_dataset_overview(
             frame, parameters, segment_columns=segment_columns),
         "n_queries": n_queries,
@@ -1395,6 +1409,8 @@ def _grain_row_facts(
         ALL_POSITIVE_KEY: n_all_positive,
         WIDEST_GROUP_KEY: widest_group_rows,
     }
+    facts.update(all_positive_accounts(facts, parameters))
+    return facts
 
 
 def compute_row_facts(
@@ -1419,7 +1435,10 @@ def compute_row_facts(
     ``metrics.ALL_POSITIVE_KEY`` the all-positive ones among those holding a
     positive, whatever ``evaluation.query_filter.drop_all_positive_groups``
     says — which of them the metrics scored is the metrics' own ledger
-    (``metrics.POPULATION_KEY``).
+    (``metrics.POPULATION_KEY``). Beside them, per grain, the accounts the
+    report reads (``metrics.all_positive_accounts``, #536): the groups
+    holding a positive, the all-positive share, and whether it warns — the
+    one fact that reads the switch (it warns only with the switch off).
 
     The category grain collapses the frame as ``compute_all_metrics`` does,
     with the same ``category_mapping`` (``None`` reads the hand-written
@@ -1503,7 +1522,8 @@ def compute_all_metrics(
               "n_scored_queries_with_positive" / "..._without_positive" (the
               query groups scored: those holding a positive, less the
               all-positive ones when ``drop_all_positive_groups``; none
-              without a positive),
+              without a positive), "segment_columns" (the
+              ``segment_columns`` passed here, #536),
           "per_item_shared_numbers":
               {item: {n_pos, pos_sum, n_top@K, hits@K, ap_sum@K, ...}}
               (#534) what the per_item metrics are computed from, for every

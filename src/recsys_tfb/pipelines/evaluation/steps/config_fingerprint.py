@@ -16,7 +16,11 @@ Two kinds of settings (ADR-0020 decision 2)
   ``evaluation.report.sections.*`` key except ``baseline``,
   ``per_item_breakdown`` and ``prediction_quality``. They only change what the
   report shows, so ``--only-node generate_report`` is enough and takes
-  seconds.
+  seconds — except the display keys the K cut reads
+  (``steps.display_ks.DISPLAY_KEYS_READ``, #536): ``resolve_display_ks``
+  lands the K each table shows, so its artifact carries them as
+  ``extra_keys`` and a change re-runs from that node, which runs no Spark
+  either.
 
 Only computed settings go into the fingerprint. Fingerprinting drawn ones too
 would make every cosmetic change raise, which is the "re-run everything on any
@@ -47,10 +51,14 @@ Why a closed list, not a hash of the whole ``evaluation`` subtree
 * ``evaluation.compare`` is injected into that subtree by the CLI at run time
   (``__main__.py``). Hashing the subtree would make a ``--compare`` run and a
   plain run disagree on every artifact: raises everywhere, all false.
-* A computation that reads keys outside the subtree has the caller pass them
+* A computation that reads keys outside this list has the caller pass them
   in as ``extra_keys``; that artifact's fingerprint is this list plus those.
   The evaluation diagnoses did (``config_shift`` read ``dataset.*`` and
-  ``training.*``) until #532 removed them; no node passes any today.
+  ``training.*``) until #532 removed them. Today ``resolve_display_ks`` does
+  (#536): the drawn display keys its K cut reads, so only its artifact goes
+  stale when one changes and the advice is its own node (an extra key is in
+  no :data:`COMPUTED_KEYS` row, so rule 2 of
+  :func:`require_computed_with_current_config` names the producer).
 
 Why the fingerprint lives inside the JSON, not in its path
 ==========================================================
@@ -87,8 +95,8 @@ from typing import Any, Iterable, NamedTuple, Optional, Sequence
 __all__ = [
     "COMPUTED_KEYS", "LoadedArtifact", "PARTITION_CONTENT_KEYS",
     "PARTITION_FINGERPRINT_COLUMN", "PARTITION_FINGERPRINT_KEYS", "fingerprint",
-    "partition_fingerprint", "recorded_partition_fingerprint",
-    "require_computed_with_current_config",
+    "normalised", "partition_fingerprint", "recorded_partition_fingerprint",
+    "require_computed_with_current_config", "require_same_recorded_values",
 ]
 
 #: Computed settings: ``(dotted path from the parameters root, node to re-run
@@ -356,15 +364,23 @@ def recorded_partition_fingerprint(payload: Any) -> Optional[str]:
                     _JOINED: list(payload["joined"])})
 
 
+def normalised(value: Any) -> Any:
+    """``value`` as a landed JSON holds it once read back: non-``str`` dict
+    keys tagged (:func:`_tag_non_str_keys`), then a JSON round trip
+    (``default=str``). What a node records in its artifact goes through this,
+    so the value read back compares equal to today's normalised one."""
+    return json.loads(json.dumps(
+        _tag_non_str_keys(value), sort_keys=True, ensure_ascii=False,
+        default=str))
+
+
 def _declared_values(parameters: dict, paths: Iterable[str]) -> dict[str, Any]:
-    """Each present path's value, normalised through a JSON round trip."""
+    """Each present path's value, :func:`normalised`."""
     values: dict[str, Any] = {}
     for path in paths:
         found, value = _lookup(parameters, path)
         if found:
-            values[path] = json.loads(json.dumps(
-                _tag_non_str_keys(value), sort_keys=True, ensure_ascii=False,
-                default=str))
+            values[path] = normalised(value)
     return values
 
 
@@ -377,6 +393,8 @@ def _sha256(values: dict[str, Any]) -> str:
 def require_computed_with_current_config(
     artifacts: Iterable[LoadedArtifact],
     parameters: dict,
+    *,
+    computed_rerun_node: Optional[str] = None,
 ) -> None:
     """Pre-check (inputs): every artifact was computed with today's settings.
 
@@ -392,7 +410,14 @@ def require_computed_with_current_config(
 
     1. A key from :data:`COMPUTED_KEYS` changed: ``--from-node`` the node of
        the first changed row. That node precedes every fingerprinted producer
-       (see :data:`COMPUTED_KEYS`), so it recomputes all of them.
+       (see :data:`COMPUTED_KEYS`), so it recomputes all of them. A run mode
+       that has none of those nodes passes ``computed_rerun_node`` instead:
+       ``--compare-only`` has no ``prepare_eval_data`` and no
+       ``compute_row_facts``, and advice naming them would point at a node
+       that is not in the run (ADR-0031 decision 15, first row). The caller
+       names a node of its mode whose forward slice holds every
+       fingerprinted producer of that mode;
+       ``test_pipeline.py::TestFingerprintRerunNodes`` pins that.
     2. Otherwise exactly one artifact is stale (only its own declared keys
        moved, or it has no fingerprint): ``--from-node`` its producer.
     3. Otherwise no single node is known to cover them all: the full pipeline.
@@ -468,7 +493,8 @@ def require_computed_with_current_config(
         return
 
     if first_computed is not None:
-        advice = (f"Re-run with --from-node {COMPUTED_KEYS[first_computed][1]}, "
+        node = computed_rerun_node or COMPUTED_KEYS[first_computed][1]
+        advice = (f"Re-run with --from-node {node}, "
                   "which recomputes every artifact above.")
     elif len(stale_producers) == 1:
         advice = f"Re-run with --from-node {stale_producers[0]}."
@@ -481,6 +507,64 @@ def require_computed_with_current_config(
         "report from them would mix old and new settings:\n"
         + "\n".join(problems) + "\n" + advice
     )
+
+
+def require_same_recorded_values(
+    artifacts: Iterable[LoadedArtifact],
+    key: str,
+    current: dict,
+    *,
+    setting: str,
+    rerun_node: str,
+) -> None:
+    """Pre-check (inputs): every artifact recorded ``current`` under ``key``.
+
+    For values a fingerprint deliberately leaves out but some artifacts still
+    depend on: the compare source (``evaluation.compare``, ADR-0031 decision
+    5) is injected per run by the CLI, so :data:`COMPUTED_KEYS` leaves it out
+    (see the module docstring), yet every comparison artifact holds one
+    source's numbers. Its writer records the value (``current``, already
+    :func:`normalised`) under ``key``; this compares what was recorded.
+
+    Why the re-run is the caller's ``rerun_node`` and not the fingerprint
+    rules: a changed value makes every artifact that records it stale at
+    once, so the advice is the first node whose output depends on it,
+    however many of them the caller happens to read. The fingerprint's rule 2
+    would name a reader's one producer, whose re-run then raises on the next,
+    and its rule 3 the full pipeline.
+
+    Collect-all, like :func:`require_computed_with_current_config`; an
+    artifact recording nothing under ``key`` is stale too. ``setting`` names
+    the value in the message, and also prefixes each changed leaf, so the
+    reader is told the setting path to look at.
+    """
+    problems: list[str] = []
+    for artifact in artifacts:
+        recorded = artifact.payload.get(key, _ABSENT) \
+            if isinstance(artifact.payload, dict) else _ABSENT
+        if recorded is _ABSENT:
+            problems.append(
+                f"  - {artifact.catalog_name} (written by "
+                f"{artifact.produced_by}) records no {key}: written before "
+                "it was recorded, or not by this pipeline."
+            )
+            continue
+        leaves = _changed_leaves(setting, recorded, current)
+        if leaves:
+            problems.append(
+                f"  - {artifact.catalog_name} (written by "
+                f"{artifact.produced_by}) was computed with another {setting}:\n"
+                + "\n".join(f"      {leaf}: {_short(old)} -> {_short(new)}"
+                            for leaf, old, new in leaves)
+            )
+    if problems:
+        raise ValueError(
+            f"Evaluation artifacts on disk were computed with another "
+            f"{setting} than today's; drawing from them would mix the two:\n"
+            + "\n".join(problems) + "\n"
+            f"Re-run with --from-node {rerun_node}, which recomputes every "
+            "artifact above."
+        )
 
 
 def _lookup(parameters: dict, path: str) -> tuple[bool, Any]:

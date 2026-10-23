@@ -20,13 +20,16 @@
 %%     compute_baseline_metrics   lookback 視窗沒有歷史（bug 1）
 %%     generate_report            設定指紋不合（bug 2）
 %%     restrict_to_common         共同 query group（time × entity）或 item 為空（B3，在 common_universe 裡）
-%%   唯一獨立成 node 的檢查是 --compare-only 的第一個 node（B4，見下）。
+%%   唯一獨立成 node 的檢查是 --compare-only 的第一個 node（該月沒有資料就擋，見下）。
 
 %% #351 起 evaluation_metrics、baseline_metrics 落地成 JSONDataset
 %%   （data/evaluation/<model_version>/<snap_date>/metrics.json 與同目錄
 %%   baseline_metrics.json，皆含 config_fingerprint；report.sections.baseline: false
 %%   時 baseline 是 {"enabled": false, "config_fingerprint": ...} stub），跟
 %%   report_aggregates 一樣畫成實線膠囊（有 catalog entry）。
+%%   #536 起報表只讀落地結果：compare_to_baseline 算模型對 baseline 的差值（baseline_comparison.json），
+%%   resolve_display_ks 把每張表要印的 K 切好（display_ks.json），兩個 node 都不跑 Spark。
+%%   改了 report.display.primary_map_k 要 --from-node resolve_display_ks。
 %%   generate_report 的輸入全部落地（#532 拿掉最後一個 MemoryDataset 輸入，
 %%   也就是診斷頁清單），所以切片的停止條件 can_load（＝檔案在不在）
 %%   讓 `--only-node generate_report` 不會自動補跑任何 node，也不會沿線把
@@ -37,8 +40,8 @@
 %%   連帶：那些落地的 JSON 路徑只用 (model_version, snap_date) 當 key。
 %%   #342 起每份落地 JSON 內帶 config_fingerprint（只涵蓋「算的」設定）：
 %%   改了算的設定再 --only-node 重繪，generate_report
-%%   會 raise 並指出該 --from-node 哪個 node；只改畫的設定（report.display.* 等）
-%%   照常重繪。分類見 docs/pipelines/evaluation.md §7.2。
+%%   會 raise 並指出該 --from-node 哪個 node；只改畫的設定（report.sections 其餘鍵）
+%%   照常重繪，report.display.primary_map_k 例外（見上）。分類見 docs/pipelines/evaluation.md §7.2。
 
 %% #352 起（ADR-0018 決定 1）prepare_eval_data 的 join 結果直接落地為
 %%   enriched_eval_predictions（既有 Hive 表：partition_filter model_version、
@@ -46,13 +49,12 @@
 %%   再由獨立的 persist node 寫表——那個 persist node 已刪除，DAG 上不再有
 %%   它的名字。join 只算這一次；compute_metrics／
 %%   compute_baseline_metrics／compute_report_aggregates／
-%%   compute_baseline_metrics／compute_report_aggregates／
 %%   restrict_to_common 全部從 enriched_eval_predictions
 %%   讀表，讀到的是這個 model_version 評估過的所有月份，各自用
 %%   restrict_to_current_eval_partitions 篩回本次評估日期（一個或多個），並逐日期
 %%   比對分區自帶的設定指紋（#374）。--compare-only 沒有
 %%   prepare_eval_data，一樣直接讀這張表；validate_enriched_eval_predictions_present
-%%   維持零輸出檢查（B4：該月無資料就擋）。
+%%   維持零輸出檢查（該月沒有資料就擋）。
 
 %% 兩種模式的 node 一樣（#532 起）
 %%   --post-training 與監控模式（預設，含 --compare）只差 prepare_eval_data 讀哪張預測表、
@@ -89,18 +91,34 @@ flowchart TB
   n_agg["compute_report_aggregates<br/><small>主報表 per-item 細部拆解段的 Spark 端聚合（bin 計數／quartile／rank 矩陣）</small>"]
   d_agg(["evaluation_report_aggregates<br/><small>JSON</small>"])
 
+  %% ---------------------- 比較層與 K 截斷 ----------------------
+  n_cmpbase["compare_to_baseline<br/><small>不跑 Spark ・ 模型對 baseline 每格的這次、對照、差（全部 K）<br/>＋ 四項能不能比的標註（all、macro item、組數、分群欄）</small>"]
+  d_cmpbase(["baseline_comparison<br/><small>JSON ・ baseline_comparison.json</small>"])
+  n_dispk["resolve_display_ks<br/><small>不跑 Spark ・ 每張表要印的 K，超過該粒度 all 的整數 K 已濾掉<br/>改 report.display.primary_map_k 從這裡接續</small>"]
+  d_dispk(["evaluation_display_ks<br/><small>JSON ・ display_ks.json</small>"])
+
   %% ---------------------- 匯流 ----------------------
   n_report["generate_report<br/><small><b>純函式</b>：輸入全部是落地的 JSON、無 varargs、不含任何 Spark 物件或 action</small>"]
   o_report(["evaluation_report　★ report.html<br/><small>data/evaluation/&lt;model_version&gt;/&lt;YYYYMMDD&gt;/</small>"])
 
   %% ---------------------- 比較模式（追加） ----------------------
-  subgraph CMP[" --compare &lt;key&gt; 追加這三個 node（--compare-only 則只跑這三個 ＋ 一個驗證 node） "]
-    n_validate["validate_enriched_eval_predictions_present<br/><small>僅 --compare-only ・ B4：該 snap_date 無 row 就 fail loud</small>"]
+  subgraph CMP[" --compare &lt;key&gt; 追加這六個 node（--compare-only 則跑這六個 ＋ 一個驗證 node，共七個）・ 前三個跑 Spark，後三個只讀落地的 JSON "]
+    n_validate["validate_enriched_eval_predictions_present<br/><small>僅 --compare-only ・ 該 snap_date 沒有資料就擋</small>"]
     n_loadb["load_compare_predictions<br/><small>依 compare_sources 載入 Model B ・ 欄位與 item mapping</small>"]
     d_braw(["compare_predictions_raw"])
     n_restrict["restrict_to_common<br/><small>取共同 query group 與 item ・ 雙方重新排名<br/>B 一律抄 A 的 label</small>"]
-    d_common(["eval_predictions_common<br/>compare_predictions_common<br/>compare_coverage_partial"])
-    n_creport["generate_comparison_report<br/><small>兩側各重跑一次 compute_row_facts ＋ compute_all_metrics，再組 HTML（算與畫同一個 node）<br/>只有 Model A 照 evaluation_segment_columns 分群</small>"]
+    d_common(["eval_predictions_common<br/>compare_predictions_common"])
+    d_cover(["compare_coverage<br/><small>JSON ・ compare_coverage.json</small>"])
+    n_cmetrics["compute_compare_metrics<br/><small>共同母體上兩側各算列的事實與指標（含母體帳）<br/>只有 Model A 照 evaluation_segment_columns 分群</small>"]
+    d_cfa(["compare_row_facts_a<br/><small>JSON</small>"])
+    d_cma(["compare_metrics_a<br/><small>JSON</small>"])
+    d_cfb(["compare_row_facts_b<br/><small>JSON</small>"])
+    d_cmb(["compare_metrics_b<br/><small>JSON</small>"])
+    n_csource["compare_to_source<br/><small>不跑 Spark ・ Model A 對 Model B 每格的這次、對照、差（全部 K）<br/>＋ 四項能不能比的標註 ・ 比對「跟誰比」的身分</small>"]
+    d_csource(["source_comparison<br/><small>JSON</small>"])
+    n_cdispk["resolve_comparison_display_ks<br/><small>不跑 Spark ・ 比較報表每張表要印的 K 與列<br/>改 guardrail_recall_k、primary_map_k 從這裡接續</small>"]
+    d_cdispk(["comparison_display_ks<br/><small>JSON</small>"])
+    n_creport["generate_comparison_report<br/><small><b>純函式</b>：只讀落地的 JSON，不跑 Spark、不取差值、不截斷 K</small>"]
     o_creport(["evaluation_comparison_report　★ report_comparison.html"])
   end
 
@@ -114,7 +132,7 @@ flowchart TB
   d_segcols --> n_rowfacts
   d_segcols --> n_metrics
   d_segcols --> n_baseline
-  d_segcols -- "--compare-only：讀寫 enriched 那次落地的" --> n_creport
+  d_segcols -- "--compare-only：讀寫 enriched 那次落地的" --> n_cmetrics
   d_segcols -- "只取 joined：分區指紋的一部分（#374）" --> n_agg
   d_segcols -- "只取 joined" --> n_pq
   d_segcols --> n_restrict
@@ -124,7 +142,7 @@ flowchart TB
   d_catmap --> n_rowfacts
   d_catmap --> n_metrics
   d_catmap --> n_baseline
-  d_catmap -- "--compare-only：欄模式才需要" --> n_creport
+  d_catmap -- "--compare-only：欄模式才需要" --> n_cmetrics
 
   o_enriched --> n_rowfacts
   n_rowfacts --> d_rowfacts
@@ -141,11 +159,20 @@ flowchart TB
   o_enriched --> n_pq
   n_pq --> d_pq
 
+  d_metrics --> n_cmpbase
+  d_baseline --> n_cmpbase
+  n_cmpbase --> d_cmpbase
+  d_metrics --> n_dispk
+  d_cmpbase --> n_dispk
+  n_dispk --> d_dispk
+
   d_rowfacts --> n_report
   d_metrics --> n_report
   d_baseline --> n_report
   d_agg --> n_report
   d_pq --> n_report
+  d_cmpbase --> n_report
+  d_dispk --> n_report
   n_report --> o_report
 
   o_enriched --> n_restrict
@@ -154,7 +181,21 @@ flowchart TB
   n_loadb --> d_braw
   d_braw --> n_restrict
   n_restrict --> d_common
-  d_common --> n_creport
+  n_restrict --> d_cover
+  d_common --> n_cmetrics
+  n_cmetrics --> d_cfa
+  n_cmetrics --> d_cma
+  n_cmetrics --> d_cfb
+  n_cmetrics --> d_cmb
+  d_cma --> n_csource
+  d_cmb --> n_csource
+  n_csource --> d_csource
+  d_csource --> n_cdispk
+  n_cdispk --> d_cdispk
+  d_cover --> n_creport
+  d_cfa --> n_creport
+  d_csource --> n_creport
+  d_cdispk --> n_creport
   n_creport --> o_creport
 
   %% ---------------------------- 樣式 -------------------------------
@@ -167,7 +208,8 @@ flowchart TB
 
   class src_ranked,src_teval,src_label,src_seg src
   class cfg_cat cfg
-    class n_prep,n_rowfacts,n_metrics,n_baseline,n_pq,n_agg,n_report,n_validate,n_loadb,n_restrict,n_creport nd
-  class d_agg,d_rowfacts,d_metrics,d_baseline,d_pq data
+    class n_prep,n_rowfacts,n_metrics,n_baseline,n_pq,n_agg,n_cmpbase,n_dispk,n_report,n_validate,n_loadb,n_restrict,n_cmetrics,n_csource,n_cdispk,n_creport nd
+  class d_agg,d_rowfacts,d_metrics,d_baseline,d_pq,d_cmpbase,d_dispk data
   class d_braw,d_common mem
+  class d_cover,d_cfa,d_cma,d_cfb,d_cmb,d_csource,d_cdispk data
   class o_report,o_enriched,o_creport out

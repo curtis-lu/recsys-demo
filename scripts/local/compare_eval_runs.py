@@ -19,7 +19,7 @@ Run it on two runs of the unchanged code first (the noise floor, ADR-0031's
 tickets and ``docs/agents/pipeline-refactor-process.md`` rule 9); only when
 that comes back all ``SAME`` does the same comparison against the changed code
 mean anything. Each run directory holds a ``SOURCE`` file
-(``eval_parity.sh``): check the changed run's digest is the code you are
+(``eval_parity.py``): check the changed run's digest is the code you are
 claiming about.
 
 Usage: python scripts/local/compare_eval_runs.py <run_a> <run_b>

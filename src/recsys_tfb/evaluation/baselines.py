@@ -21,17 +21,84 @@ logger = logging.getLogger(__name__)
 def resolve_lookback_months(parameters: dict) -> int:
     """``evaluation.baseline.lookback_months``, defaulting to 12.
 
-    The single place both the node (``compute_baseline_metrics``) and the
-    report (``report_sections/popularity_baseline.py``) read this from — before this helper
-    existed the two had drifted to two different defaults (node: 12, report:
-    ``None``), so a run using the implicit default silently printed no
-    lookback sentence at all while the node had in fact used 12 months
-    (bug 1, ADR-0020).
+    The single place this is read. Before this helper existed the node
+    (``compute_baseline_metrics``) and the report had drifted to two
+    different defaults (node: 12, report: ``None``), so a run using the
+    implicit default silently printed no lookback sentence at all while the
+    node had in fact used 12 months (bug 1, ADR-0020). Since #536 the report
+    does not read it at all: the node lands the value it used
+    (:func:`popularity_window`).
     """
     eval_params = parameters.get("evaluation", {}) or {}
     return int(
         (eval_params.get("baseline", {}) or {}).get("lookback_months", 12)
     )
+
+
+def popularity_window(
+    monthly: dict,
+    window_months_covered: dict | None,
+    *,
+    snap_dates: list,
+    lookback_months: int,
+    score: str,
+) -> dict:
+    """The lookback window as the report prints it (#536; the report used to
+    work this out itself, ADR-0031 principle 1). Landed by
+    ``compute_baseline_metrics`` as ``result_readers.POPULARITY_WINDOW_KEY``.
+
+    ``monthly`` is the ``{item: {month: count}}`` table the report prints —
+    label_table's ``monthly_counts``, or sample_pool's ``monthly_positives``
+    in rate mode; it holds only months with rows inside the window, so its
+    distinct months are the coverage (``months_covered``).
+    ``window_months_covered`` is each evaluated date's months with rows in
+    its own window, where the node counted them per window; ``None`` with one
+    evaluated date (``snap_dates``), whose window's months are ``monthly``'s.
+
+    bug 1 (ADR-0020), partial window: a window with rows in only some of its
+    lookback months raises nothing (``_lookback_window`` refuses only an
+    empty one), and dividing the per-month average by the full lookback
+    understated it. So ``window_partial`` is ``0 < months_covered <
+    lookback`` and ``per_month_divisor`` is the covered months when partial,
+    the lookback otherwise. With several windows (#374) the counts are summed
+    over all of them, so the divisor is the window-months behind that sum —
+    each window's covered months under the same partial rule — and the window
+    is partial when that falls short of ``full_window_months`` (windows ×
+    lookback). Distinct months of ``monthly`` cannot stand in for those:
+    overlapping windows share months, and a boundary month can hold rows for
+    one window and not the other.
+
+    ``lookback_months`` and ``score`` (``evaluation.baseline.score`` as
+    configured — monitoring with ``rate`` still ranks by the count) are the
+    settings it was counted with, landed so the report reads them here and
+    not off ``parameters``.
+    """
+    months_covered = len({mo for per in monthly.values() for mo in per})
+    if window_months_covered is None:
+        if len(snap_dates) != 1:
+            raise ValueError(
+                f"popularity_window: {len(snap_dates)} evaluated dates but no "
+                f"per-window coverage; only one date's window is the monthly "
+                f"table's months.")
+        window_months_covered = {str(snap_dates[0]): months_covered}
+    window_partial = 0 < months_covered < lookback_months
+    per_month_divisor = months_covered if window_partial else lookback_months
+    full_window_months = len(window_months_covered) * lookback_months
+    if len(window_months_covered) > 1:
+        per_month_divisor = sum(
+            c if 0 < c < lookback_months else lookback_months
+            for c in window_months_covered.values()
+        )
+        window_partial = per_month_divisor < full_window_months
+    return {
+        "lookback_months": lookback_months,
+        "score": score,
+        "months_covered": months_covered,
+        "window_months_covered": dict(window_months_covered),
+        "full_window_months": full_window_months,
+        "per_month_divisor": per_month_divisor,
+        "window_partial": window_partial,
+    }
 
 
 def _window_bounds(snap_date: str, lookback_months: int) -> tuple[str, str]:

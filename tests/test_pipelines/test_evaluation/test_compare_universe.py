@@ -1,4 +1,4 @@
-"""Tests for steps.compare_universe — common_universe and restrict_to_common."""
+"""Tests for steps.compare_universe — common_universe and trim_to_common_universe."""
 
 import pytest
 from pyspark.sql import DataFrame as SparkDataFrame
@@ -6,7 +6,7 @@ from pyspark.sql import DataFrame as SparkDataFrame
 from recsys_tfb.core.consistency import DataConsistencyError
 from recsys_tfb.pipelines.evaluation.steps.compare_universe import (
     common_universe,
-    restrict_to_common,
+    trim_to_common_universe,
 )
 
 _MONTH = "2026-01-31"
@@ -192,7 +192,7 @@ def test_null_only_intersection_fails_the_gate_instead_of_passing_it(spark):
     """A null-keyed shared entity is not a usable common query group.
 
     ``intersect`` counts ``NULL == NULL`` as a match, so it would let this
-    universe through the empty-universe gate — and the equi-join in ``restrict_to_common``
+    universe through the empty-universe gate — and the equi-join in ``trim_to_common_universe``
     would then drop the row, leaving both sides empty with no error raised
     anywhere. The gate uses the same join semantics as the restriction it
     guards, so the two cannot disagree and this fails loud.
@@ -256,7 +256,7 @@ def b_df(spark):
 
 
 def test_restricts_to_common_entities_and_items(a_df, b_df):
-    a_c, b_c, _ = restrict_to_common(a_df, b_df, _params())
+    a_c, b_c, _ = trim_to_common_universe(a_df, b_df, _params())
     a_rows = sorted((r["cust_id"], r["prod_name"]) for r in a_c.collect())
     b_rows = sorted((r["cust_id"], r["prod_name"]) for r in b_c.collect())
     # common cust = {c1, c2}; common prod = {p1, p2, p3}
@@ -311,7 +311,7 @@ def test_a_month_b_did_not_score_for_an_entity_is_dropped_from_a(spark):
     both sides, but B scored it in January only; keeping A's February c1 rows
     would compare the two models on different populations."""
     a, b = _two_month_sides(spark)
-    a_c, b_c, _ = restrict_to_common(a, b, _params())
+    a_c, b_c, _ = trim_to_common_universe(a, b, _params())
     assert _keys(a_c) == _COMMON_TWO_MONTH_KEYS
     assert _keys(b_c) == _COMMON_TWO_MONTH_KEYS
 
@@ -323,7 +323,7 @@ def test_query_groups_match_when_the_time_columns_differ_in_type(spark):
     come from A."""
     a, b = _two_month_sides(spark, b_time_type="date")
     assert dict(b.dtypes)["snap_date"] == "date"
-    a_c, b_c, _ = restrict_to_common(a, b, _params())
+    a_c, b_c, _ = trim_to_common_universe(a, b, _params())
     assert _keys(a_c) == _COMMON_TWO_MONTH_KEYS
     assert _keys(b_c) == _COMMON_TWO_MONTH_KEYS
     labels = {(str(r["snap_date"]), r["cust_id"], r["prod_name"]): r["label"]
@@ -333,7 +333,7 @@ def test_query_groups_match_when_the_time_columns_differ_in_type(spark):
 
 
 def test_rank_recomputed_within_common(a_df, b_df):
-    a_c, b_c, _ = restrict_to_common(a_df, b_df, _params())
+    a_c, b_c, _ = trim_to_common_universe(a_df, b_df, _params())
     # B for c1 in common prods: scores p1=0.6, p2=0.8, p3=0.5 → ranks 2, 1, 3
     b_c1 = {r["prod_name"]: r["rank"] for r in b_c.filter("cust_id='c1'").collect()}
     assert b_c1 == {"p2": 1, "p1": 2, "p3": 3}
@@ -358,8 +358,8 @@ def test_b_label_follows_a_not_its_own_copy(a_df, b_df):
         .otherwise(F.col("label")),
     )
 
-    _, b_from_stale, _ = restrict_to_common(a_moved, stale_b, _params())
-    _, b_from_bare, _ = restrict_to_common(a_moved, b_df, _params())
+    _, b_from_stale, _ = trim_to_common_universe(a_moved, stale_b, _params())
+    _, b_from_bare, _ = trim_to_common_universe(a_moved, b_df, _params())
 
     def _rows(df):
         return sorted(tuple(r[c] for c in sorted(df.columns)) for r in df.collect())
@@ -378,13 +378,13 @@ def test_b_label_follows_a_not_its_own_copy(a_df, b_df):
 def test_b_row_a_did_not_score_counts_as_zero(a_df, b_df):
     """(c1, p3) survives restriction — c1 and p3 each appear on both sides —
     but A never scored that pair, so B has no answer to copy there."""
-    _, b_c, _ = restrict_to_common(a_df, b_df, _params())
+    _, b_c, _ = trim_to_common_universe(a_df, b_df, _params())
     b_labels = {(r["cust_id"], r["prod_name"]): r["label"] for r in b_c.collect()}
     assert b_labels[("c1", "p3")] == 0
 
 
 def test_a_preserves_existing_label(a_df, b_df):
-    a_c, _, _ = restrict_to_common(a_df, b_df, _params())
+    a_c, _, _ = trim_to_common_universe(a_df, b_df, _params())
     a_labels = {(r["cust_id"], r["prod_name"]): r["label"] for r in a_c.collect()}
     # A's c1,p1 label was 1 in source fixture — preserved (not re-joined)
     assert a_labels[("c1", "p1")] == 1
@@ -413,7 +413,7 @@ def test_entity_join_is_not_forced_to_broadcast(a_df, b_df, spark):
     old = spark.conf.get("spark.sql.autoBroadcastJoinThreshold")
     spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
     try:
-        a_common, _, _ = restrict_to_common(a_df, b_df, _params())
+        a_common, _, _ = trim_to_common_universe(a_df, b_df, _params())
         joins = _join_lines(a_common)
     finally:
         spark.conf.set("spark.sql.autoBroadcastJoinThreshold", old)

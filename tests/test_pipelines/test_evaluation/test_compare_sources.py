@@ -453,3 +453,51 @@ def test_external_hive_unmapped_drop_filters_and_warns(spark, monkeypatch, ext_p
     prods = {r["prod_name"] for r in out.collect()}
     assert prods == {"fund_stock"}
     assert any("ext_fund_b" in rec.message or "ext_usd" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Which source a comparison was computed against (#536, ADR-0031 decision 5)
+# ---------------------------------------------------------------------------
+
+
+def test_the_identity_is_what_decides_side_b_and_not_its_label():
+    """Per kind, the keys the loader reads to build B; ``label`` only names
+    it in the report, so a relabelled source is the same comparison."""
+    from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
+        compare_source_identity,
+    )
+
+    ext = _params_for_ext()
+    assert compare_source_identity(ext) == {
+        "kind": "external_hive", "table": "ext_proj.preds",
+        "columns": ext["evaluation"]["compare"]["columns"],
+        "prod_mapping": ext["evaluation"]["compare"]["prod_mapping"],
+        "unmapped_policy": "fail",
+    }
+    relabelled = _params_for_mv("MV_B")
+    relabelled["evaluation"]["compare"]["label"] = "another name"
+    assert (compare_source_identity(relabelled)
+            == compare_source_identity(_params_for_mv("MV_B"))
+            == {"kind": "model_version", "model_version": "MV_B",
+                "source": "enriched_eval_predictions"})
+
+
+def test_an_omitted_default_is_the_source_the_loader_reads():
+    """``source`` left out reads ``enriched_eval_predictions``, and an
+    external source without ``unmapped_policy`` / ``prod_mapping`` fails on
+    an unmapped item with no mapping: written out or not, the loader builds
+    the same B, so the identity is the same."""
+    from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
+        compare_source_identity,
+    )
+
+    explicit = _params_for_mv("MV_B")
+    explicit["evaluation"]["compare"]["source"] = "enriched_eval_predictions"
+    assert (compare_source_identity(explicit)
+            == compare_source_identity(_params_for_mv("MV_B")))
+    bare = _params_for_ext()
+    del bare["evaluation"]["compare"]["unmapped_policy"]
+    del bare["evaluation"]["compare"]["prod_mapping"]
+    written = _params_for_ext(policy="fail")
+    written["evaluation"]["compare"]["prod_mapping"] = {}
+    assert compare_source_identity(bare) == compare_source_identity(written)

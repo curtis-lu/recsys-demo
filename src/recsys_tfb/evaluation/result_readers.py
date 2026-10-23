@@ -1,0 +1,367 @@
+"""What a report may import to read the landed evaluation results (ADR-0031
+principle 1): the keys the results land under, the readers of the settings a
+report draws by, the readers of a metrics bundle's ledger, and the JSON form
+of a small frame. Nothing here computes a result.
+
+The report modules (``report_sections/*``, ``report_builder``,
+``evaluation/report.py``) read through this module instead of importing the
+modules that compute the results (``metrics``, ``metrics_spark``,
+``baselines``, ``prediction_quality``, ``diagnostics_spark``). Those modules
+import the names back from here, so their other callers — the nodes, the
+scripts, training — did not change.
+
+Imports nothing from the project and not pyspark, so it cannot close an
+import cycle and loading it costs a report nothing. ``pandas`` is imported
+inside :func:`frame_from_json`, the one function that builds a frame:
+``metrics`` imports this module and calls itself a numpy leaf.
+"""
+
+from __future__ import annotations
+
+import math
+
+
+# ---------------------------------------------------------------------------
+# The row facts (``metrics_spark.compute_row_facts``, ``row_facts.json``)
+# ---------------------------------------------------------------------------
+
+#: Top-level key of the row facts (``metrics_spark.compute_row_facts``,
+#: ``row_facts.json``) and of their ``category`` grain (#376; in the metrics
+#: bundle before #535): how many of the query groups holding a
+#: positive are *all-positive* — every row carries the same positive label
+#: (with 0/1 labels: every row positive; the rule is
+#: ``metrics_spark._all_positive_group``), so every per-query ranking metric
+#: (``map@K`` / ``precision@K`` / ``recall@K``) comes out the same whatever
+#: the order (with 0/1 labels the untruncated AP is 1; ``map@K`` below the
+#: group's row count is K / rows, ``precision@K`` above it is rows / K). The
+#: per-item metrics (``map_attr@K`` / ``recall@K`` / ``mean_pos``) are not:
+#: with K below the row count, which rows reach the top K still decides which
+#: items get the credit. Always written, whether or not
+#: ``evaluation.query_filter.drop_all_positive_groups`` drops them, because the
+#: report reads only the written facts. ``n_excluded_queries`` keeps counting
+#: only the zero-positive groups.
+ALL_POSITIVE_KEY = "n_all_positive_queries"
+
+#: Row facts key (``metrics_spark.compute_row_facts``): the row count of the
+#: widest query group, what ``evaluation.k_values: "all"`` resolves to on a
+#: frame of event rows.
+WIDEST_GROUP_KEY = "widest_group_rows"
+
+#: Row facts key, at each grain (#536): the query groups holding a positive,
+#: ``n_queries - n_excluded_queries`` (``metrics.n_groups_with_positive``).
+#: ``None`` only when either count is missing.
+N_WITH_POSITIVE_KEY = "n_groups_with_positive"
+
+#: Row facts key, at each grain (#536): the all-positive groups' share of the
+#: groups holding a positive (``metrics.all_positive_share``); ``None`` when
+#: no group holds a positive.
+ALL_POSITIVE_SHARE_KEY = "all_positive_share"
+
+#: Row facts key, at each grain (#536): whether that share warns
+#: (``metrics.all_positive_share_warns``) — only with
+#: ``evaluation.query_filter.drop_all_positive_groups`` off, and only strictly
+#: above :data:`ALL_POSITIVE_WARN_SHARE`. The one fact of the row facts that
+#: reads a setting; ``evaluation.query_filter`` is a computed key, so a
+#: changed switch re-counts the facts.
+ALL_POSITIVE_WARNS_KEY = "all_positive_warns"
+
+#: With the switch off, the log and the report warn when the all-positive
+#: groups are more than this share of the groups holding a positive (#376).
+#: A constant, not a setting. Here because the report prints it beside the
+#: landed warning, and its share format reads it (``report_sections.shared
+#: .format_share``).
+ALL_POSITIVE_WARN_SHARE = 0.10
+
+
+# ---------------------------------------------------------------------------
+# A metrics bundle (``metrics_spark.compute_all_metrics``)
+# ---------------------------------------------------------------------------
+
+#: Top-level key of a ``metrics_spark.compute_all_metrics`` bundle, at each
+#: grain: the population ledger (ADR-0031 decision 4), what this bundle's
+#: numbers were computed on, so two bundles joined by metric name can be told
+#: comparable or not. Holds :data:`ALL_K_KEY`; :data:`MACRO_ITEMS_KEY`, the
+#: items the per-item macro averaged over;
+#: :data:`N_SCORED_WITH_POSITIVE_KEY` / :data:`N_SCORED_WITHOUT_POSITIVE_KEY`,
+#: the query groups the ranking metrics scored; and
+#: :data:`SEGMENT_COLUMNS_KEY`, the columns it sliced by. The facts of the
+#: rows themselves are the row facts', not here
+#: (``metrics_spark.compute_row_facts``).
+POPULATION_KEY = "population"
+
+#: Population ledger key: the K ``evaluation.k_values: "all"`` resolved to
+#: (``resolved_all_k``). Recorded on every bundle since #535; before, only
+#: when the ranked frame held one row per event, and as a top-level key.
+ALL_K_KEY = "all_k"
+
+#: Population ledger key: the items ``macro_avg.by_item`` averaged over,
+#: sorted — every item of ``per_item`` with ``n_pos`` at least
+#: ``evaluation.metric.min_positives`` (``metrics_spark._compute_core``). The
+#: reports count it (:func:`macro_item_count`) instead of applying that rule
+#: a second time (#536).
+MACRO_ITEMS_KEY = "macro_items"
+
+#: Population ledger keys: the query groups the ranking metrics scored —
+#: those holding a positive, less the all-positive ones when
+#: ``evaluation.query_filter.drop_all_positive_groups`` drops them — and the
+#: ones without a positive, 0 by construction (AP is undefined there).
+N_SCORED_WITH_POSITIVE_KEY = "n_scored_queries_with_positive"
+N_SCORED_WITHOUT_POSITIVE_KEY = "n_scored_queries_without_positive"
+
+#: Population ledger key (#536): the segment columns the bundle was computed
+#: with, the ``segment_columns`` ``compute_all_metrics`` was handed — its
+#: ``per_segment`` slices by the first. The comparison layer reads it to tell
+#: a side computed without segments (ADR-0031 decision 4's fourth case: the
+#: compared side of ``--compare`` is computed with none).
+SEGMENT_COLUMNS_KEY = "segment_columns"
+
+
+# ---------------------------------------------------------------------------
+# The popularity baseline (``compute_baseline_metrics``)
+# ---------------------------------------------------------------------------
+
+#: Top-level key of ``baseline_metrics.json`` (#536): the lookback window the
+#: popularity was counted over, as the report prints it, in every mode
+#: (count or rate, one evaluated date or several) —
+#: ``baselines.popularity_window``. Holds ``lookback_months`` and ``score``
+#: (the settings it was counted with), ``months_covered`` (the calendar
+#: months the printed monthly table holds), ``window_months_covered``
+#: (``{evaluated date: months with rows in its window}``),
+#: ``full_window_months``, ``per_month_divisor`` and ``window_partial``.
+POPULARITY_WINDOW_KEY = "popularity_window"
+
+
+# ---------------------------------------------------------------------------
+# A comparison (``pipelines/evaluation/steps/comparison_layer``, #536)
+# ---------------------------------------------------------------------------
+# The full shape is in that module's docstring. In short: per grain, a block
+# per metrics block (:data:`COMPARED_BLOCKS`), each ``{ENTRIES: {THIS, REFERENCE},
+# CELLS: ...}``; a cell is ``{THIS, REFERENCE, DIFF}``; and the four
+# annotations (:data:`COMPARED_ANNOTATIONS`) under :data:`POPULATION_KEY`,
+# each ``{THIS, REFERENCE, SAME}``.
+
+#: The two sides of a comparison and their difference, ``THIS − REFERENCE``
+#: (ADR-0031 decision 16 item 8: 這次、對照、差).
+THIS = "this"
+REFERENCE = "reference"
+DIFF = "diff"
+
+#: Annotation key: whether the two sides' values are equal.
+SAME = "same"
+
+#: Block keys: how many entries each side's block held (``None`` where that
+#: side had no such block), and the joined cells.
+ENTRIES = "entries"
+CELLS = "cells"
+
+#: The blocks of each grain, named after where they sit in a metrics bundle
+#: (``macro_by_item`` is ``macro_avg.by_item``).
+COMPARED_BLOCKS = ("overall", "per_item", "macro_by_item", "per_segment")
+
+#: The K label of the cell pairing each side's ``"all"`` (``name@all``): the
+#: two sides' ``"all"`` can resolve to different K (:data:`ALL_K_KEY`), so
+#: their keys never pair up by name (#434).
+ALL_LABEL = "all"
+
+#: Annotation key: the query groups each side scored,
+#: ``{N_SCORED_WITH_POSITIVE_KEY, N_SCORED_WITHOUT_POSITIVE_KEY}``.
+SCORED_QUERIES_KEY = "scored_queries"
+
+#: The four things two results must share to be compared as they are
+#: (ADR-0031 decision 4 and decision 15): what ``"all"`` resolved to, the
+#: items in the macro, the query groups scored, the segment columns.
+COMPARED_ANNOTATIONS = (ALL_K_KEY, MACRO_ITEMS_KEY, SCORED_QUERIES_KEY,
+                        SEGMENT_COLUMNS_KEY)
+
+
+# ---------------------------------------------------------------------------
+# The K each table shows (``pipelines/evaluation/steps/display_ks``, #536)
+# ---------------------------------------------------------------------------
+# One block per result the tables are drawn from, keyed by its catalog name
+# (``evaluation_metrics``, ``baseline_comparison``); the comparison report's
+# own cut (``comparison_display_ks``) is keyed by block. See that module.
+
+#: Block key: the K ``"all"`` stands for in the result the block cuts for.
+#: The lists below never hold an int K above it (bug 8, ADR-0020).
+DISPLAY_ALL_K = ALL_K_KEY
+
+#: Block key: ``evaluation.report.display.primary_map_k``, cut.
+DISPLAY_PRIMARY_MAP_K = "primary_map_k"
+
+#: Block key: the K columns of every metrics-section table, cut.
+DISPLAY_METRICS_SECTION = "metrics_section"
+
+#: Block key of ``evaluation_metrics``' block: whether the metrics section's
+#: per-item ``map_attr`` table shows the ``@{evaluation.metric.k}`` column the
+#: headline note names.
+DISPLAY_HEADLINE_SHOWN = "headline_column_shown"
+
+#: Block key of the comparison report's cut (``comparison_display_ks``):
+#: ``evaluation.report.display.guardrail_recall_k``, cut.
+DISPLAY_GUARDRAIL_RECALL_K = "guardrail_recall_k"
+
+#: Key of an every-key table's cut in ``comparison_display_ks``: the table's
+#: rows, beside the keys whose :data:`THIS`, :data:`REFERENCE` and
+#: :data:`DIFF` cells are drawn.
+DISPLAY_ROWS = "rows"
+
+
+# ---------------------------------------------------------------------------
+# The prediction-quality payload (``prediction_quality.build_payload``)
+# ---------------------------------------------------------------------------
+
+#: Key under ``overall`` and ``per_item`` of ``prediction_quality.json``
+#: (#536): the report's display bin table (``prediction_quality
+#: .coarse_bin_table``), as :func:`frame_to_json` long frames; under
+#: ``per_item`` one table for every listed item, the item column first.
+DISPLAY_BINS_KEY = "display_bins"
+
+#: Key under ``overall`` of ``prediction_quality.json`` (#536): the threshold
+#: sweep the report draws (``prediction_quality.threshold_sweep``, one row
+#: per non-empty fine bin), as a :func:`frame_to_json` long frame.
+THRESHOLD_SWEEP_KEY = "threshold_sweep"
+
+
+# ---------------------------------------------------------------------------
+# Settings a report draws by
+# ---------------------------------------------------------------------------
+
+
+def metric_params(parameters: dict) -> dict:
+    """Read ``evaluation.metric`` → ``{"k", "weight_alpha", "min_positives", "shrinkage_k"}``.
+
+    The one reader of that block that the metrics / report code uses
+    (ADR-0020 design H): the Spark main metrics and the report call this
+    instead of keeping their own copy. A15
+    (``core.consistency.evaluation_metric_param_errors``) reads the same block
+    separately, only to validate value domains; it resolves no fallbacks.
+
+    Fallback: a missing ``evaluation`` / ``metric`` block, a missing key, or
+    an explicit ``None`` value all resolve to ``k=None`` (no truncation),
+    ``weight_alpha=0.0``, ``min_positives=0``, ``shrinkage_k=0.0`` — the plain
+    equal-weight, untruncated macro. Value domains are validated by A15
+    (``core.consistency.evaluation_metric_param_errors``), not here.
+
+    ``k`` and ``evaluation.k_values`` are independent axes. ``k_values`` is
+    the K grid of the ``@K`` families. ``k`` is the truncation depth of the
+    headline per-item macro family.
+    ``metrics.macro_from_per_item`` and ``metrics_spark.macro_average`` do not
+    accept ``k``; callers split it off.
+    """
+    m = ((parameters.get("evaluation", {}) or {}).get("metric", {}) or {})
+    return {
+        "k": None if m.get("k") is None else int(m["k"]),
+        "weight_alpha": float(m.get("weight_alpha", 0.0) or 0.0),
+        "min_positives": int(m.get("min_positives", 0) or 0),
+        "shrinkage_k": float(m.get("shrinkage_k", 0.0) or 0.0),
+    }
+
+
+def drop_all_positive_groups(parameters: dict) -> bool:
+    """Read ``evaluation.query_filter.drop_all_positive_groups``; off unless ``True``.
+
+    The one reader of the switch (#376). A missing block, a missing key or an
+    explicit ``None`` all mean off. Not under ``evaluation.metric``:
+    :func:`metric_params` returns four fixed keys and drops any other, so a
+    switch written there would silently do nothing. The value domain (a bool)
+    is validated by A49 in ``core/consistency.py``, not here.
+    """
+    qf = ((parameters.get("evaluation", {}) or {}).get("query_filter", {}) or {})
+    return bool(qf.get("drop_all_positive_groups", False) or False)
+
+
+# ---------------------------------------------------------------------------
+# A metrics bundle's ledger
+# ---------------------------------------------------------------------------
+
+
+def resolved_all_k(bundle: dict) -> int:
+    """The K a metrics bundle's ``"all"`` values are stored at (``map@{K}``).
+
+    The one reader of that number (#434). ``"all"`` has one producer
+    (``metrics_spark._resolve_all_k``) and several readers — the main report
+    and the comparison report, and training's test mAP until ADR-0028 took K
+    out of it. Each used to count the items itself; with ``event`` declared
+    the producer's K is the widest query group, not the item count, so every
+    lookup missed and nothing raised (a blank ``map@all`` cell, a test mAP
+    logged as 0.0).
+
+    Read off the bundle's own population ledger (:data:`POPULATION_KEY`).
+    The comparison report reads each side at its own; the main report reads
+    the baseline at the model's, which is the same K by construction — the
+    baseline re-scores the model's rows and counts off their row facts. The
+    keys stay the resolved number, not ``map@all``
+    (ADR-0031 decision 15, checked in #535): two sides whose ``"all"``
+    resolved to different K then never pair up under one name.
+
+    Raises ``KeyError`` on a bundle with no ledger, one written before #535:
+    the report refuses such a file first (``report_sections.shared
+    .refuse_pre_ledger``), with the node to re-run.
+    """
+    return int(bundle[POPULATION_KEY][ALL_K_KEY])
+
+
+def macro_item_count(bundle: dict) -> int:
+    """How many items a metrics bundle's per-item macro averaged over: the
+    length of its ledger's :data:`MACRO_ITEMS_KEY`.
+
+    bug 5 (ADR-0020): an item with no positive this period has no
+    ``per_item`` cell, and ``evaluation.metric.min_positives`` drops more, so
+    the macro's denominator moves month to month; the reports disclose it.
+    Counted off the list the computation landed (#536), not by applying
+    ``min_positives`` to ``per_item`` again. Raises ``KeyError`` on a bundle
+    with no ledger, like :func:`resolved_all_k`.
+    """
+    return len(bundle[POPULATION_KEY][MACRO_ITEMS_KEY])
+
+
+# ---------------------------------------------------------------------------
+# A small frame as landed JSON
+# ---------------------------------------------------------------------------
+
+#: The two shapes :func:`frame_to_json` lands.
+FRAME_LONG = "long"
+FRAME_MATRIX = "matrix"
+
+
+def _no_nan(value):
+    """NaN → None。理由見 :func:`frame_to_json` 的 docstring。"""
+    return None if isinstance(value, float) and math.isnan(value) else value
+
+
+def frame_to_json(df, kind: str) -> dict:
+    """把聚合出來的小 frame 轉成可以落地的 dict。
+
+    ``kind`` 明寫而不是從 index 型別推斷：長格式的 index 是無意義的
+    ``RangeIndex``（丟掉），矩陣的 index 是 item 名稱（丟了 heatmap 就沒有
+    y 軸標籤）。推斷會在「item 剛好是 0, 1, 2」時猜錯，而那不會有任何測試轉紅。
+
+    ``to_dict("split")`` **已經**把 numpy 純量轉成 Python 原生型別（實測
+    ``int64`` → ``int``、object index → ``str``），所以這裡不逐格轉型。但它
+    **不處理 NaN**：``JSONDataset`` 用預設 ``allow_nan=True``，NaN 會寫成
+    ``NaN`` 這個非合法 JSON 的字面值，Python 讀得回來、別的工具不行——而這些
+    檔案的用途正是被拷到別的環境去讀。所以在這裡換成 ``None``。
+    """
+    if kind not in (FRAME_LONG, FRAME_MATRIX):
+        raise ValueError(
+            f"kind must be {FRAME_LONG!r} or {FRAME_MATRIX!r}, got {kind!r}"
+        )
+    split = df.to_dict("split")
+    out = {
+        "kind": kind,
+        "columns": list(split["columns"]),
+        "data": [[_no_nan(v) for v in row] for row in split["data"]],
+    }
+    if kind == FRAME_MATRIX:
+        out["index"] = list(split["index"])
+    return out
+
+
+def frame_from_json(payload: dict):
+    """:func:`frame_to_json` 的反向。回傳的 frame 直接餵給繪圖函式。"""
+    import pandas as pd
+
+    df = pd.DataFrame(payload["data"], columns=payload["columns"])
+    if payload.get("kind") == FRAME_MATRIX:
+        df.index = payload["index"]
+    return df

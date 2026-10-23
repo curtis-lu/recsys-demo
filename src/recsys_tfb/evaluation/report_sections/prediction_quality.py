@@ -7,15 +7,18 @@ from collections.abc import Mapping
 
 import pandas as pd
 
-from recsys_tfb.evaluation.metrics import (
-    ALL_POSITIVE_KEY,
-    drop_all_positive_groups,
-)
 from recsys_tfb.evaluation.report import ReportSection
 from recsys_tfb.evaluation.report_sections.shared import (
     ALL_POSITIVE_SWITCH,
     kept_zero_positive_groups_note,
     prediction_quality_shown,
+)
+from recsys_tfb.evaluation.result_readers import (
+    ALL_POSITIVE_KEY,
+    DISPLAY_BINS_KEY,
+    THRESHOLD_SWEEP_KEY,
+    drop_all_positive_groups,
+    frame_from_json,
 )
 
 #: The results this section reads, by catalog name (ADR-0031 principle 1).
@@ -82,10 +85,12 @@ def build(
     """The prediction-quality section (ADR-0024): every candidate row as one
     binary prediction, binned by score.
 
-    Every number here comes from the fine bin tables in the payload, through
-    the same functions ``compute_prediction_quality`` used for the headline
-    numbers (``evaluation/prediction_quality.py``), so the threshold sweep and
-    the bin table cannot disagree. The row facts are read for one thing: the
+    Every number here is read off the payload: the headline numbers, the
+    display bin tables and the threshold sweep, all computed by
+    ``compute_prediction_quality`` from the same fine bins
+    (``evaluation/prediction_quality.py``, landed since #536), so the
+    threshold sweep and the bin table cannot disagree. The row facts are read
+    for one thing: the
     query groups the ranking section excludes, so the population note can put
     the two populations side by side with numbers.
 
@@ -106,12 +111,6 @@ def build(
     if not prediction_quality_shown(prediction_quality, parameters):
         return None
     facts = results["evaluation_row_facts"]
-    from recsys_tfb.evaluation.diagnostics_spark import frame_from_json
-    from recsys_tfb.evaluation.prediction_quality import (
-        bins_of_item,
-        coarse_bin_table,
-        threshold_sweep,
-    )
 
     bins_cfg = prediction_quality["bins"]
     lo, width = bins_cfg["lo"], bins_cfg["width"]
@@ -192,10 +191,8 @@ def build(
     }]).T
     card.columns = ["value"]
 
-    fine_bins = frame_from_json(overall["bins"])
-    bin_table = coarse_bin_table(
-        fine_bins, lo=lo, width=width, n_bins=n_bins, n_display_bins=n_display,
-    ).rename(columns=_PQ_BIN_COLUMNS)
+    bin_table = frame_from_json(overall[DISPLAY_BINS_KEY]).rename(
+        columns=_PQ_BIN_COLUMNS)
 
     tables = [card, bin_table]
     titles = [
@@ -215,24 +212,18 @@ def build(
             f"共 {n_items} 個；其餘只算進整體）"
         )
         collapsed.append(False)
-        item_bins = frame_from_json(per_item["bins"])
-        long = []
-        for item in listed:
-            tbl = coarse_bin_table(
-                bins_of_item(item_bins, item_col, item), lo=lo, width=width,
-                n_bins=n_bins, n_display_bins=n_display,
-            ).rename(columns=_PQ_BIN_COLUMNS)
-            tbl.insert(0, item_col, item)
-            long.append(tbl)
-        tables.append(pd.concat(long, ignore_index=True))
+        # Every listed item's display bins, in listed order, the item
+        # column first.
+        tables.append(frame_from_json(per_item[DISPLAY_BINS_KEY]).rename(
+            columns=_PQ_BIN_COLUMNS))
         titles.append(f"per-item：分箱表（每個 {item_col} {n_display} 格，"
                       f"讀法同整體分箱表）")
         collapsed.append(True)
 
     figures = []
-    sweep = threshold_sweep(fine_bins, lo=lo, width=width)
     if summary.get("n_pos"):
-        figures.append(_pq_threshold_figure(sweep))
+        figures.append(_pq_threshold_figure(
+            frame_from_json(overall[THRESHOLD_SWEEP_KEY])))
 
     return ReportSection(
         title=_PQ_TITLE,

@@ -52,7 +52,7 @@ is what makes it general.
 Restricting to it
 -----------------
 
-``restrict_to_common``: keep each side's rows inside that universe.
+``trim_to_common_universe``: keep each side's rows inside that universe.
 
 A side: already carries ``label`` (added upstream by ``prepare_eval_data``, or
    persisted with ``enriched_eval_predictions`` under ``--compare-only``);
@@ -190,8 +190,8 @@ def common_universe(
     b_groups = query_groups_with_text_time(b, time_col, query_group_cols)
     # A left-semi join, not ``intersect``. Both compute the same set for
     # non-null keys, but they disagree on nulls: ``intersect`` treats
-    # ``NULL == NULL`` as a match, while the equi-join that ``restrict_to_common``
-    # then runs drops null keys. Using the join here keeps the empty-universe gate and the
+    # ``NULL == NULL`` as a match, while the equi-join that
+    # ``trim_to_common_universe`` then runs drops null keys. Using the join here keeps the empty-universe gate and the
     # restriction that follows it agreeing on what "common" means — otherwise a
     # universe whose only shared entity is null-keyed passes the gate and then
     # restricts to zero rows, silently.
@@ -227,7 +227,7 @@ def common_universe(
     return CommonUniverse(common_query_groups, common_items, a_items, b_items)
 
 
-def restrict_to_common(
+def trim_to_common_universe(
     a: SparkDataFrame,
     b: SparkDataFrame,
     parameters: dict,

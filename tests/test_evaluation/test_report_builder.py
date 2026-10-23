@@ -25,19 +25,87 @@ _RESULT_NAMES = ("evaluation_row_facts", "evaluation_metrics",
                  "baseline_metrics", "evaluation_report_aggregates",
                  "prediction_quality_metrics")
 
+#: The two results the nodes between the metrics and the report land off
+#: them (#536): the comparison with the baseline and the K cut.
+_LANDED_OFF_THEM = ("baseline_comparison", "evaluation_display_ks")
+
 
 def _results(**by_name) -> dict:
     """The report's input bundle, fed by name; a result not given is ``None``
     (what a caller passing no baseline / aggregates / prediction quality
     hands over). The row facts default to ``_row_facts()``: a test that
     changes a row fact (scale, group counts, segments, category) passes its
-    own."""
-    unknown = set(by_name) - set(_RESULT_NAMES)
+    own. The comparison and the K cut are left out unless given: they depend
+    on the settings, so :func:`_draw` / :func:`_assemble` land them when the
+    report is drawn."""
+    unknown = set(by_name) - set(_RESULT_NAMES) - set(_LANDED_OFF_THEM)
     assert not unknown, unknown
     out = {name: by_name.get(name) for name in _RESULT_NAMES}
+    out.update({name: by_name[name] for name in _LANDED_OFF_THEM
+                if name in by_name})
     if "evaluation_row_facts" not in by_name:
         out["evaluation_row_facts"] = _row_facts()
     return out
+
+
+def _stamped(result: dict, parameters: dict) -> dict:
+    """``result`` as landed under ``parameters``: with its fingerprint, which
+    the comparison and the K cut nodes check before reading it."""
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+        fingerprint,
+    )
+
+    return {**result, "config_fingerprint": fingerprint(parameters)}
+
+
+def _with_landed(results: dict, parameters: dict) -> dict:
+    """``results`` plus what ``compare_to_baseline`` and
+    ``resolve_display_ks`` land off its metrics under ``parameters`` —
+    computed by those nodes, at draw time, so a test that changes the
+    metrics or the settings after building ``results`` draws what a run
+    with them would. A result the test handed over by name is kept. No
+    model metrics, no comparison and no cut (a section test that reads
+    neither); no baseline, the stub the comparison node writes for one."""
+    from recsys_tfb.pipelines.evaluation.nodes import (
+        compare_to_baseline,
+        resolve_display_ks,
+    )
+
+    out = dict(results)
+    metrics = out.get("evaluation_metrics")
+    if "baseline_comparison" not in out:
+        baseline = out.get("baseline_metrics")
+        if (metrics is not None and isinstance(baseline, dict)
+                and baseline.get("enabled") is not False
+                and "population" not in baseline):
+            # A hand-written baseline without a ledger compares with the one
+            # compute_baseline_metrics lands for it: the model's, by
+            # construction (it re-scores the model's rows, counted off their
+            # row facts — ADR-0031 decision 4, correction).
+            baseline = {**baseline, "population": metrics["population"]}
+        out["baseline_comparison"] = (
+            None if metrics is None or baseline is None else
+            compare_to_baseline(_stamped(metrics, parameters),
+                                _stamped(baseline, parameters), parameters))
+    if "evaluation_display_ks" not in out:
+        comparison = out["baseline_comparison"] or {"enabled": False}
+        out["evaluation_display_ks"] = (
+            None if metrics is None else
+            resolve_display_ks(_stamped(metrics, parameters),
+                               _stamped(comparison, parameters), parameters))
+    return out
+
+
+def _draw(section, results: dict, parameters: dict):
+    """``section.build`` on ``results`` and what the nodes land off them
+    (:func:`_with_landed`)."""
+    return section.build(_with_landed(results, parameters), parameters)
+
+
+def _assemble(results: dict, parameters: dict) -> str:
+    """``rb.assemble_report`` on ``results`` and what the nodes land off them
+    (:func:`_with_landed`)."""
+    return rb.assemble_report(_with_landed(results, parameters), parameters)
 
 
 def _params():
@@ -70,14 +138,38 @@ def _metrics():
         },
         "population": {"all_k": 2, "macro_items": ["A", "B"],
                        "n_scored_queries_with_positive": 10,
-                       "n_scored_queries_without_positive": 0},
+                       "n_scored_queries_without_positive": 0,
+                       "segment_columns": []},
     }
+
+
+def _full_ledger(all_k, macro_items, segment_columns=()):
+    """A population ledger holding every key ``compute_all_metrics`` writes
+    (#536 added ``segment_columns``, which the comparison layer reads); the
+    group counts are made up like the rest of each fixture."""
+    return {"all_k": all_k, "macro_items": list(macro_items),
+            "n_scored_queries_with_positive": 10,
+            "n_scored_queries_without_positive": 0,
+            "segment_columns": list(segment_columns)}
+
+
+def _accounted(facts, parameters=None):
+    """``facts`` with the all-positive accounts ``compute_row_facts`` lands
+    beside the group counts (#536), at each grain, by the node's own rule
+    (``metrics.all_positive_accounts``) under ``parameters``: a fixture whose
+    counts change must not keep accounts those counts would not give."""
+    from recsys_tfb.evaluation.metrics import all_positive_accounts
+
+    out = {**facts, **all_positive_accounts(facts, parameters or {})}
+    if facts.get("category"):
+        out["category"] = _accounted(facts["category"], parameters)
+    return out
 
 
 def _row_facts():
     """The row facts matching ``_metrics()``: the facts about the rows (scale,
     group counts), kept apart from the metric values."""
-    return {
+    return _accounted({
         "dataset_overview": {
             "totals": {"n_rows": 100, "n_entities": 10, "n_items": 2,
                        "n_snap_dates": 1, "n_positives": 20,
@@ -99,11 +191,11 @@ def _row_facts():
                       "query_share": 0.4}}},
         "n_queries": 10, "n_excluded_queries": 0,
         "n_all_positive_queries": 0, "widest_group_rows": 2,
-    }
+    })
 
 
 def test_overview_section_has_purpose_and_macro_headline():
-    s = overview.build(_results(evaluation_metrics=_metrics()), _params())
+    s = _draw(overview, _results(evaluation_metrics=_metrics()), _params())
     assert s.title == "概覽"
     # 目的句提到排序（這份報表在幹嘛）
     assert "排序" in s.description
@@ -116,7 +208,7 @@ def test_overview_section_has_purpose_and_macro_headline():
 
 def test_overview_scale_and_severity_separated():
     # 規模／分母（n_queries 等）與關鍵指標分成不同表，避免分母被讀成嚴重度
-    s = overview.build(_results(evaluation_metrics=_metrics()), _params())
+    s = _draw(overview, _results(evaluation_metrics=_metrics()), _params())
     assert len(s.tables) >= 2
     # overall per-query mAP 明標為「另一種加權」，不宣稱哪個才對
     joined = s.description + " ".join(s.table_titles) + " ".join(
@@ -143,7 +235,7 @@ def test_overview_headline_reads_metric_k_from_metrics_json():
     指標段 B 塊「Macro 平均」同一格，不另算一份。期望值寫死：同一份 bundle 的
     @1／@2（＝@all）／@3 是三個不同的數，讀錯 K 就對不上。"""
     p = _params_with_metric_k(3)
-    s = overview.build(_results_with_n_items(5), p)
+    s = _draw(overview, _results_with_n_items(5), p)
     assert _headline(s) == pytest.approx(0.475)
     title = next(t for t in s.table_titles if t.startswith("頭號指標"))
     assert title == "頭號指標：macro per-item mAP（item 等權）"
@@ -152,7 +244,7 @@ def test_overview_headline_reads_metric_k_from_metrics_json():
 
 
 def test_overview_headline_without_metric_k_reads_map_attr_at_all():
-    s = overview.build(_results(evaluation_metrics=_metrics()), _params())
+    s = _draw(overview, _results(evaluation_metrics=_metrics()), _params())
     assert _headline(s) == pytest.approx(0.435)   # map_attr@2，n_items＝2
 
 
@@ -161,7 +253,7 @@ def test_overview_draws_no_headline_table_when_the_macro_has_no_value():
     數）時 metrics.json 那一格是 None：不畫一張空白的頭號表，其餘照畫。"""
     m = _metrics()
     m["macro_avg"]["by_item"]["map_attr@2"] = None
-    s = overview.build(_results(evaluation_metrics=m), _params())
+    s = _draw(overview, _results(evaluation_metrics=m), _params())
     assert not any(t.startswith("頭號指標") for t in s.table_titles)
     assert _overview_card(s).loc["map@1", "value"] == pytest.approx(0.5)
 
@@ -188,7 +280,7 @@ def _row_facts_with_category(overview):
     """``_row_facts()`` plus the category grain's own overview."""
     rf = _row_facts()
     rf["category"] = {"dataset_overview": overview}
-    return rf
+    return _accounted(rf)
 
 
 def _results_with_n_items(n):
@@ -205,12 +297,12 @@ def test_overview_headline_note_follows_metric_k():
     section's Macro map_attr@k. n_items=5 keeps @3 among the metrics
     section's displayed columns.
     """
-    s3 = overview.build(_results_with_n_items(5), _params_with_metric_k(3))
+    s3 = _draw(overview, _results_with_n_items(5), _params_with_metric_k(3))
     assert "截斷在 3" in s3.description
     assert "map_attr@3" in s3.description
     assert "map_attr@all 相同" not in s3.description
 
-    s_null = overview.build(_results_with_n_items(5), _params_with_metric_k(None))
+    s_null = _draw(overview, _results_with_n_items(5), _params_with_metric_k(None))
     assert "不截斷" in s_null.description
     assert "map_attr@all" in s_null.description
 
@@ -218,12 +310,12 @@ def test_overview_headline_note_follows_metric_k():
 def test_metrics_section_headline_note_follows_metric_k():
     """Design H: the metrics section's note on which column is the headline
     also follows metric.k."""
-    s3 = ranking_metrics.build(_results_with_n_items(5), _params_with_metric_k(3))
+    s3 = _draw(ranking_metrics, _results_with_n_items(5), _params_with_metric_k(3))
     assert "截斷在 3" in s3.description
     assert "map_attr@3" in s3.description
     assert "map_attr@all" not in s3.description
 
-    s_null = ranking_metrics.build(_results_with_n_items(5), _params_with_metric_k(None))
+    s_null = _draw(ranking_metrics, _results_with_n_items(5), _params_with_metric_k(None))
     assert "不截斷" in s_null.description
     assert "map_attr@all" in s_null.description
 
@@ -236,8 +328,8 @@ def test_headline_notes_do_not_name_a_column_the_metrics_section_hides(n_items, 
     truncation, and say the tables have no @k column."""
     p = _params_with_metric_k(k)
     for section in (
-        overview.build(_results_with_n_items(n_items), p),
-        ranking_metrics.build(_results_with_n_items(n_items), p),
+        _draw(overview, _results_with_n_items(n_items), p),
+        _draw(ranking_metrics, _results_with_n_items(n_items), p),
     ):
         assert f"map_attr@{k}" not in section.description
         assert f"截斷在 {k}" in section.description
@@ -252,10 +344,9 @@ def test_overview_scale_table_labels_n_queries_as_the_full_total():
     million positive queries and exclude 950k of them). The label must say
     "all queries", and the actually-missing number (queries with a positive
     = n_queries - n_excluded_queries) must be printed somewhere."""
-    rf = _row_facts()
-    rf["n_queries"] = 1_000_000
-    rf["n_excluded_queries"] = 950_000
-    s = overview.build(_results(evaluation_row_facts=rf,
+    rf = _accounted({**_row_facts(), "n_queries": 1_000_000,
+                     "n_excluded_queries": 950_000})
+    s = _draw(overview, _results(evaluation_row_facts=rf,
                                 evaluation_metrics=_metrics()), _params())
     scale = next(t for t in s.tables if "n_excluded_queries" in " ".join(
         str(i) for i in t.index))
@@ -269,7 +360,7 @@ def test_overview_scale_table_labels_n_queries_as_the_full_total():
 
 
 def test_overview_no_verdict_vocabulary():
-    s = overview.build(_results(evaluation_metrics=_metrics()), _params())
+    s = _draw(overview, _results(evaluation_metrics=_metrics()), _params())
     text = (s.description + " ".join(s.table_titles)
             + " ".join(t.to_string() for t in s.tables) + " ".join(s.bullets))
     for bad in ("偏高", "偏低", "不足", "異常", "達標", "未達標", "嚴重", "良好"):
@@ -419,14 +510,14 @@ def test_metrics_section_puts_unmatched_last_and_says_it_is_not_in_macro():
     }
     m["macro_avg"]["by_segment"] = {
         "map@1": 0.6, "precision@1": 0.5, "recall@1": 0.3}
-    s = ranking_metrics.build(_results(evaluation_metrics=m), _params())
+    s = _draw(ranking_metrics, _results(evaluation_metrics=m), _params())
     table, title = next((t, tt) for t, tt in zip(s.tables, s.table_titles)
                         if "per-segment map@k" in tt)
     assert list(table.index)[-1] == "(unmatched)"
     assert "(unmatched) 不含在 Macro" in title
 
     del m["per_segment"]["(unmatched)"]
-    s = ranking_metrics.build(_results(evaluation_metrics=m), _params())
+    s = _draw(ranking_metrics, _results(evaluation_metrics=m), _params())
     assert not [tt for tt in s.table_titles if "(unmatched)" in tt]
 
 
@@ -436,7 +527,7 @@ def test_baseline_per_segment_table_puts_unmatched_last():
     m["per_segment"]["(unmatched)"] = {"map@1": 0.1, "map@2": 0.1, "map@3": 0.1}
     b["per_segment"]["(unmatched)"] = {"map@1": 0.05, "map@2": 0.05,
                                        "map@3": 0.05}
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=b), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=b), _params())
     table = next(t for t, tt in zip(s.tables, s.table_titles)
                  if "per-segment mAP@k" in tt)
     assert list(table.index)[-3:] == [
@@ -480,7 +571,7 @@ def test_dataset_section_flags_remaining_phase2():
 
 def test_metrics_section_overall_orientation_locked():
     # families（map/precision/recall）是 overall 彙總表的 row index，非欄（方向鎖）
-    s = ranking_metrics.build(_results(evaluation_metrics=_metrics()), _params())
+    s = _draw(ranking_metrics, _results(evaluation_metrics=_metrics()), _params())
     fam_tbl = next(t for t in s.tables
                    if set(["map", "precision", "recall"]).issubset(set(t.index)))
     assert "map" in fam_tbl.index and "recall" in fam_tbl.index
@@ -494,10 +585,10 @@ def test_metrics_section_two_family_blocks_consistent():
         "per_item": {"fund": {"recall@1": 0.3, "map_attr@1": 0.5, "mean_pos": 2.0}},
         "macro_avg": {"by_item": {"recall@1": 0.3, "map_attr@1": 0.5,
                                   "mean_pos": 2.0}},
-        "population": {"all_k": 2},
+        "population": _full_ledger(2, ["fund"]),
     }
     rf = _row_facts_with_category({"totals": {"n_items": 2}})
-    s = ranking_metrics.build(_results(evaluation_row_facts=rf,
+    s = _draw(ranking_metrics, _results(evaluation_row_facts=rf,
                                        evaluation_metrics=m), _params())
     tt = s.table_titles
     # A 塊 per-segment 拆成 map/precision/recall 三張
@@ -516,7 +607,7 @@ def test_metrics_section_two_family_blocks_consistent():
 def test_metrics_section_names_the_headline_without_a_table_of_its_own():
     """頭號數字就是 B 塊 map_attr 表「Macro 平均」列的那一格，本段不再另印一張
     頭號表重複它；說明文字指出是哪一格。"""
-    s = ranking_metrics.build(_results(evaluation_metrics=_metrics()), _params())
+    s = _draw(ranking_metrics, _results(evaluation_metrics=_metrics()), _params())
     assert not any("頭號" in tt for tt in s.table_titles)
     assert "頭號指標＝macro per-item mAP" in s.description
     assert f"「{shared.MACRO_LABEL}」列的 map_attr@all" in s.description
@@ -528,7 +619,7 @@ def test_metrics_section_per_item_columns_bare_at_k_family_in_title():
     防退化：改回冗餘欄名 map_attr@1／recall@1 (per-item)，或把 family
     從標題拿掉，本測試都該轉紅。也順帶驗兩張 per-item 表都在（attr+recall）。
     """
-    s = ranking_metrics.build(_results(evaluation_metrics=_metrics()), _params())
+    s = _draw(ranking_metrics, _results(evaluation_metrics=_metrics()), _params())
     by_title = dict(zip(s.table_titles, s.tables))
     map_title = next(t for t in s.table_titles
                      if "per-item 歸因" in t and "map_attr@k" in t
@@ -548,7 +639,7 @@ def test_metrics_section_per_item_columns_bare_at_k_family_in_title():
 
 
 def test_metrics_section_no_guardrail_verdict():
-    s = ranking_metrics.build(_results(evaluation_metrics=_metrics()), _params())
+    s = _draw(ranking_metrics, _results(evaluation_metrics=_metrics()), _params())
     text = (s.description + " ".join(s.table_titles)
             + " ".join(t.to_string() for t in s.tables))
     for bad in ("護欄", "pass/fail", "達標", "未達標", "偏高", "偏低",
@@ -557,7 +648,7 @@ def test_metrics_section_no_guardrail_verdict():
 
 
 def test_metrics_section_detail_tables_collapsed():
-    s = ranking_metrics.build(_results(evaluation_metrics=_metrics()), _params())
+    s = _draw(ranking_metrics, _results(evaluation_metrics=_metrics()), _params())
     assert any(s.collapsed_tables)      # 明細收合
     assert not s.collapsed_tables[0]    # overall 頂線可見
 
@@ -573,7 +664,7 @@ def test_metrics_section_per_item_macro_titles_disclose_item_coverage():
     """
     m = _metrics()  # per_item has exactly {"A", "B"} — 2 items
     rf = _row_facts_with_n_items(3)  # a 3rd item had 0 positives
-    s = ranking_metrics.build(_results(evaluation_row_facts=rf,
+    s = _draw(ranking_metrics, _results(evaluation_row_facts=rf,
                                        evaluation_metrics=m), _params())
     map_title = next(t for t in s.table_titles
                      if "per-item 歸因" in t and "map_attr@k" in t
@@ -590,18 +681,22 @@ def test_metrics_section_per_item_macro_titles_disclose_item_coverage():
     assert macro_row["@1"] == m["macro_avg"]["by_item"]["map_attr@1"]
 
 
-def test_metrics_section_item_coverage_counts_only_items_meeting_min_positives():
+def test_metrics_section_item_coverage_counts_the_macro_items_the_metrics_landed():
     """bug 5: evaluation.metric.min_positives drops items from the macro as
-    silently as zero positives do, so N counts per_item entries with
-    n_pos >= min_positives, not every per_item key. A (n_pos 100) is in,
-    B (n_pos 10 < 50) is out, and the grain has 3 items."""
+    silently as zero positives do, so N is the items the macro averaged, not
+    every per_item key. The metrics land that list (``population.macro_items``,
+    the rule in ``metrics_spark``); the report counts it (#536) rather than
+    applying ``min_positives`` again. With min_positives 50, A (n_pos 100) is
+    in and B (n_pos 10) is out — the list the node lands — and the grain has 3
+    items."""
     m = _metrics()
     m["per_item"]["A"]["n_pos"] = 100
     m["per_item"]["B"]["n_pos"] = 10
+    m["population"]["macro_items"] = ["A"]
     rf = _row_facts_with_n_items(3)
     p = _params()
     p["evaluation"]["metric"] = {"min_positives": 50}
-    s = ranking_metrics.build(_results(evaluation_row_facts=rf,
+    s = _draw(ranking_metrics, _results(evaluation_row_facts=rf,
                                        evaluation_metrics=m), p)
     map_title = next(t for t in s.table_titles
                      if "per-item 歸因" in t and "map_attr@k" in t
@@ -611,22 +706,37 @@ def test_metrics_section_item_coverage_counts_only_items_meeting_min_positives()
 
 def test_macro_coverage_suffixes_follow_each_tables_macro_row_condition():
     """The single-sided suffix appears only for a truthy macro (the Macro row
-    test of _per_item_metric_table); the M/B one only when both macros are
-    not None (the test of per_item_metric_compare_table, where {} counts)."""
-    per_item = {"A": {"n_pos": 1}}
-    p = _params()
-    assert ranking_metrics.macro_coverage_suffix(per_item, 2, p, {}) == ""
-    assert ranking_metrics.macro_coverage_suffix(per_item, 2, p, {"map_attr@1": 0.1}) == (
+    test of _per_item_metric_table); the M/B one only when both sides had a
+    macro, an empty one included (the test of compared_per_item_table). Each
+    side's N is its own ledger's ``macro_items`` (#536) — on an M/B table,
+    as the comparison layer records them."""
+    from recsys_tfb.pipelines.evaluation.steps.comparison_layer import (
+        compare_metric_results,
+    )
+
+    a = {"per_item": {"A": {"n_pos": 1}},
+         "population": _full_ledger(2, ["A"])}
+    b = {"per_item": {"A": {"n_pos": 1}, "B": {"n_pos": 1}},
+         "population": _full_ledger(2, ["A", "B"])}
+    assert ranking_metrics.macro_coverage_suffix(a, 2, {}) == ""
+    assert ranking_metrics.macro_coverage_suffix(a, 2, {"map_attr@1": 0.1}) == (
         "（參與 macro 的 item 數 1／全部 2）"
     )
-    assert shared.macro_coverage_suffix_mb(per_item, per_item, 2, p, {}, None) == ""
-    assert shared.macro_coverage_suffix_mb(per_item, per_item, 2, p, {}, {}) == (
-        "（參與 macro 的 item 數 M 1／B 1／全部 2）"
-    )
+
+    def mb(macro_a, macro_b):
+        comparison = compare_metric_results(
+            {**a, **({} if macro_a is None else {"macro_avg": {"by_item": macro_a}})},
+            {**b, **({} if macro_b is None else {"macro_avg": {"by_item": macro_b}})})
+        return shared.compared_macro_coverage_suffix(
+            comparison["macro_by_item"],
+            comparison["population"]["macro_items"], 2)
+
+    assert mb({}, None) == ""
+    assert mb({}, {}) == "（參與 macro 的 item 數 M 1／B 2／全部 2）"
 
 
 def test_metrics_section_has_macro_rows():
-    s = ranking_metrics.build(_results(evaluation_metrics=_metrics()), _params())
+    s = _draw(ranking_metrics, _results(evaluation_metrics=_metrics()), _params())
     # 以標題定位 per-item map_attr 表（欄名裸 @k，不能再靠欄名找）
     map_tbl = next(t for t, tt in zip(s.tables, s.table_titles)
                    if "per-item 歸因" in tt and "map_attr@k" in tt
@@ -640,10 +750,10 @@ def test_metrics_section_category_present_when_key():
         "overall": {"map@1": 0.4, "map@2": 0.45},
         "per_item": {"fund": {"recall@1": 0.3, "mean_pos": 2.0}},
         "macro_avg": {"by_item": {"recall@1": 0.3, "mean_pos": 2.0}},
-        "population": {"all_k": 2},
+        "population": _full_ledger(2, ["fund"]),
     }
     rf = _row_facts_with_category({"totals": {"n_items": 2}})
-    s = ranking_metrics.build(_results(evaluation_row_facts=rf,
+    s = _draw(ranking_metrics, _results(evaluation_row_facts=rf,
                                        evaluation_metrics=m), _params())
     assert any("大類" in tt for tt in s.table_titles)
 
@@ -659,10 +769,10 @@ def test_metrics_section_category_columns_clamp_to_category_count():
                      "exchange": {"recall@1": 0.4, "mean_pos": 1.5},
                      "ccard": {"recall@1": 0.5, "mean_pos": 1.0}},
         "macro_avg": {"by_item": {"recall@1": 0.4, "mean_pos": 1.5}},
-        "population": {"all_k": 3},
+        "population": _full_ledger(3, ["ccard", "exchange", "fund"]),
     }
     rf = _row_facts_with_category({"totals": {"n_items": 3}})
-    s = ranking_metrics.build(_results(evaluation_row_facts=rf,
+    s = _draw(ranking_metrics, _results(evaluation_row_facts=rf,
                                        evaluation_metrics=m), _params())
     cat_overall = next(t for t, tt in zip(s.tables, s.table_titles)
                        if "大類 overall" in tt)
@@ -673,7 +783,7 @@ def test_metrics_section_category_columns_clamp_to_category_count():
 def test_metrics_section_none_when_off():
     p = _params()
     p["evaluation"]["report"]["sections"] = {"primary_map": False}
-    assert ranking_metrics.build(_results(evaluation_metrics=_metrics()), p) is None
+    assert _draw(ranking_metrics, _results(evaluation_metrics=_metrics()), p) is None
 
 
 def test_section_on_refuses_a_name_outside_the_declared_set():
@@ -787,7 +897,7 @@ def test_item_detail_has_item_share_tables():
 # ---- Task 9: 完整性檢查 ----
 
 def test_completeness_section_lists_run_facts():
-    s = completeness.build(_results(evaluation_metrics=_metrics()), _params())
+    s = _draw(completeness, _results(evaluation_metrics=_metrics()), _params())
     assert s.title == "完整性檢查"
     joined = (s.description + " ".join(s.bullets)
               + " ".join(t.to_string() for t in s.tables))
@@ -801,10 +911,9 @@ def test_completeness_facts_label_n_queries_as_the_full_total():
     """bug 3 (ADR-0020): same fix as the overview section, mirrored here.
     Only the two n_queries-related labels change — the metric_p rows of
     ``completeness.build`` are out of scope for this bug."""
-    rf = _row_facts()
-    rf["n_queries"] = 1_000_000
-    rf["n_excluded_queries"] = 950_000
-    s = completeness.build(_results(evaluation_row_facts=rf,
+    rf = _accounted({**_row_facts(), "n_queries": 1_000_000,
+                     "n_excluded_queries": 950_000})
+    s = _draw(completeness, _results(evaluation_row_facts=rf,
                                     evaluation_metrics=_metrics()), _params())
     idx = [str(i) for i in s.tables[0].index]
     assert "全部 query 數 n_queries" in idx
@@ -819,7 +928,7 @@ def test_completeness_prints_the_tied_rows_off_the_model_s_metrics():
     """#535: the tie count is of the model's scores, so it lands with the
     model's metrics; the row facts hold only what the scores do not move."""
     metrics = {**_metrics(), "n_tied_rows": 7, "tied_row_share": 0.07}
-    section = completeness.build(
+    section = _draw(completeness, 
         _results(evaluation_metrics=metrics), _params())
     facts = section.tables[0]["value"]
     assert facts.get("同分列數 n_tied_rows（名次由 item／event 決勝，非由分數決定）") == 7
@@ -827,7 +936,7 @@ def test_completeness_prints_the_tied_rows_off_the_model_s_metrics():
 
 
 def test_completeness_section_no_verdict_vocabulary():
-    s = completeness.build(_results(evaluation_metrics=_metrics()), _params())
+    s = _draw(completeness, _results(evaluation_metrics=_metrics()), _params())
     text = (s.description + " ".join(s.bullets)
             + " ".join(t.to_string() for t in s.tables))
     for bad in ("偏高", "偏低", "不足", "異常", "達標", "未達標", "嚴重", "良好"):
@@ -853,7 +962,7 @@ class TestRenamedSchemaLabels:
     def test_completeness_facts_label_names_the_users_item_column(
         self, renamed_schema_params
     ):
-        s = completeness.build(_results(evaluation_metrics=_metrics()), self._renamed(renamed_schema_params))
+        s = _draw(completeness, _results(evaluation_metrics=_metrics()), self._renamed(renamed_schema_params))
         text = " ".join(t.to_string() for t in s.tables)
         assert "sku 數 n_items" in text
         assert "產品數" not in text
@@ -861,7 +970,7 @@ class TestRenamedSchemaLabels:
     def test_overview_scale_label_names_the_users_entity_columns(
         self, renamed_schema_params
     ):
-        s = overview.build(_results(evaluation_metrics=_metrics()), self._renamed(renamed_schema_params))
+        s = _draw(overview, _results(evaluation_metrics=_metrics()), self._renamed(renamed_schema_params))
         text = " ".join(t.to_string() for t in s.tables)
         assert "每 store_id 平均正例數 avg_positives_per_entity" in text
         assert "每客戶平均正例數" not in text
@@ -876,7 +985,7 @@ class TestRenamedSchemaLabels:
         """
         params = dict(two_column_entity_params)
         params["evaluation"] = _params()["evaluation"]
-        s = overview.build(_results(evaluation_metrics=_metrics()), params)
+        s = _draw(overview, _results(evaluation_metrics=_metrics()), params)
         text = " ".join(t.to_string() for t in s.tables)
         entity = "×".join(two_column_entity_params["schema"]["columns"]["entity"])
         assert "×" in entity, "fixture 不再是多欄 entity，這條測試已失去意義"
@@ -928,12 +1037,12 @@ class TestLegacyDatasetOverviewRefused:
 
         legacy = self._legacy()
         for call in (
-            lambda: overview.build(_results(evaluation_row_facts=legacy,
+            lambda: _draw(overview, _results(evaluation_row_facts=legacy,
                                             evaluation_metrics=_metrics()),
                                    _params()),
             lambda: data_stats.build(_results(evaluation_row_facts=legacy),
                                      _params()),
-            lambda: completeness.build(_results(evaluation_row_facts=legacy),
+            lambda: _draw(completeness, _results(evaluation_row_facts=legacy),
                                        _params()),
             lambda: cmp_report.count_items(legacy),
         ):
@@ -961,7 +1070,7 @@ class TestPreRenamePerItemRefused:
     def test_a_pre_rename_metrics_file_is_refused_with_the_rerun(self):
         legacy = self._legacy_per_item(_metrics())
         with pytest.raises(ValueError) as exc:
-            rb.assemble_report(_results(evaluation_metrics=legacy), _params())
+            _assemble(_results(evaluation_metrics=legacy), _params())
         message = str(exc.value)
         assert "evaluation_metrics" in message
         assert "hit_rate@" in message
@@ -971,12 +1080,12 @@ class TestPreRenamePerItemRefused:
         metrics = _metrics()
         metrics["category"] = self._legacy_per_item(_metrics())
         with pytest.raises(ValueError, match="hit_rate@"):
-            rb.assemble_report(_results(evaluation_metrics=metrics), _params())
+            _assemble(_results(evaluation_metrics=metrics), _params())
 
     def test_a_pre_rename_baseline_file_is_refused(self):
         legacy = self._legacy_per_item(_baseline_metrics_full())
         with pytest.raises(ValueError, match="baseline_metrics"):
-            rb.assemble_report(_results(evaluation_metrics=_metrics(),
+            _assemble(_results(evaluation_metrics=_metrics(),
                                         baseline_metrics=legacy), _params())
 
     def test_a_query_group_hit_rate_is_not_the_old_format(self):
@@ -984,13 +1093,19 @@ class TestPreRenamePerItemRefused:
         per-item block tells the old format apart."""
         metrics = _metrics()
         metrics["overall"]["hit_rate@1"] = 0.6
-        rb.assemble_report(_results(evaluation_metrics=metrics), _params())
+        _assemble(_results(evaluation_metrics=metrics), _params())
 
 
 class TestPreLedgerRefused:
     """#535: a metrics bundle without the population ledger was written before
     the row facts landed on their own, so its run has no ``row_facts.json``
-    either. Refused before any section, naming the node to re-run from."""
+    either. Refused before any section, naming the node to re-run from.
+
+    The comparison and the K cut are handed over as ``None``: the nodes that
+    land them refuse such a bundle themselves (their own tests), and this is
+    the report's check, for a directory whose two files are older still."""
+
+    _NOT_LANDED = {"baseline_comparison": None, "evaluation_display_ks": None}
 
     def test_the_model_s_metrics_without_a_ledger_are_refused(self):
         metrics = _metrics()
@@ -998,77 +1113,83 @@ class TestPreLedgerRefused:
         with pytest.raises(ValueError, match=(
                 r"evaluation_metrics predates #535.*"
                 r"--from-node compute_row_facts")):
-            rb.assemble_report(_results(evaluation_metrics=metrics), _params())
+            _assemble(_results(evaluation_metrics=metrics,
+                               **self._NOT_LANDED), _params())
 
     def test_the_baseline_s_metrics_without_a_ledger_are_refused(self):
         baseline = _baseline_metrics_full()
         del baseline["population"]
         with pytest.raises(ValueError, match=r"baseline_metrics predates #535"):
-            rb.assemble_report(_results(evaluation_metrics=_metrics(),
-                                        baseline_metrics=baseline), _params())
+            _assemble(_results(evaluation_metrics=_metrics(),
+                               baseline_metrics=baseline,
+                               **self._NOT_LANDED), _params())
 
     def test_the_baseline_stub_carries_no_ledger_and_passes(self):
         """Section off: ``compute_baseline_metrics`` writes a stub, not a
         bundle."""
-        html = rb.assemble_report(_results(
+        html = _assemble(_results(
             evaluation_metrics=_metrics(),
             baseline_metrics={"enabled": False}), _params())
         assert html.startswith("<!DOCTYPE html>")
 
 
+class TestPreLandedReadsRefused:
+    """#536: the report reads what it used to compute — the row facts'
+    all-positive accounts, among others. A result landed before carries
+    none of them, and its fingerprint still matches (no setting changed), so
+    drawn as is the ledger and the warning would vanish without a word.
+    Refused before any section, naming the node to re-run from."""
+
+    @pytest.mark.parametrize("key", [
+        "n_groups_with_positive", "all_positive_share", "all_positive_warns"])
+    @pytest.mark.parametrize("grain", ["item", "category"])
+    def test_row_facts_without_an_account_are_refused(self, grain, key):
+        rf = _ap_facts(category=_ap_category())
+        del (rf if grain == "item" else rf["category"])[key]
+        with pytest.raises(ValueError) as exc:
+            _assemble(_results(evaluation_row_facts=rf,
+                                        evaluation_metrics=_ap_metrics(True)),
+                               _ap_params())
+        msg = str(exc.value)
+        assert "evaluation_row_facts" in msg and "#536" in msg
+        assert repr(key) in msg
+        assert "--from-node compute_row_facts" in msg
+
+    @pytest.mark.parametrize("block, key", [
+        ("overall", "display_bins"), ("overall", "threshold_sweep"),
+        ("per_item", "display_bins")])
+    def test_prediction_quality_without_its_display_tables_is_refused(
+            self, block, key):
+        pq = _pq_payload()
+        del pq[block][key]
+        with pytest.raises(ValueError) as exc:
+            _assemble(_results(evaluation_metrics=_metrics(),
+                                        prediction_quality_metrics=pq),
+                               _params())
+        msg = str(exc.value)
+        assert "prediction_quality_metrics" in msg
+        assert f"{block}.{key}" in msg
+        assert "--from-node compute_row_facts" in msg
+
+    def test_a_baseline_without_its_window_is_refused(self):
+        base = _baseline_metrics_full()
+        del base["popularity_window"]
+        with pytest.raises(ValueError) as exc:
+            _assemble(_results(evaluation_metrics=_metrics(),
+                                        baseline_metrics=base), _params())
+        msg = str(exc.value)
+        assert "baseline_metrics" in msg and "'popularity_window'" in msg
+        assert "--from-node compute_row_facts" in msg
+
+
 def test_the_two_recalls_have_different_display_names_in_the_report():
     """The query-group recall and the per-item one share the name ``recall``
     (ADR-0031 decision 6); the page tells them apart by display name."""
-    html = rb.assemble_report(
+    html = _assemble(
         _results(evaluation_metrics=_metrics(),
                  baseline_metrics=_baseline_metrics_full()), _params())
     assert "per-item recall@1 M" in html  # a column of the baseline's per-item table
     assert "overall recall@k" in html     # the title of its query-group table
-
-
-class TestResolveDisplayKClampsToItemCount:
-    """bug 8 (ADR-0020): the display K list used to be an unclamped
-    superset — with only 3 categories, the report still printed @4/@5,
-    whose precision denominator is just K (not min(K, n_items)), so those
-    columns decline purely because the denominator grew, not because the
-    model did anything different. Fix is a filter over the given list
-    (never regenerates it — a caller list without "all" doesn't gain one),
-    keeping "all" always."""
-
-    def test_drops_k_above_n_items_keeps_all(self):
-        assert shared.resolve_display_k([1, 3, 5, "all"], 3) == [1, 3, "all"]
-
-    def test_keeps_everything_when_n_items_covers_it(self):
-        assert shared.resolve_display_k([1, 3, 5, "all"], 5) == [1, 3, 5, "all"]
-
-    def test_does_not_add_all_when_caller_list_lacks_it(self):
-        assert shared.resolve_display_k([1, 3, 5], 3) == [1, 3]
-
-    def test_skips_the_filter_when_n_items_is_zero_or_unknown(self):
-        """n_items<=0 means overview data is missing (e.g. baseline's slim
-        per_item bundle) — filtering would collapse every table down to
-        just "@all"."""
-        assert shared.resolve_display_k([1, 3, 5, "all"], 0) == [1, 3, 5, "all"]
-
-
-class TestDropMetricKeysAboveAllK:
-    """bug 8 (ADR-0020) for key-agnostic tables: the same K > all_k rule as
-    resolve_display_k, applied to metric keys instead of a display list.
-    The bounds below are item counts: what all_k is without event."""
-
-    def test_drops_only_integer_k_above_the_count(self):
-        keys = ["map@3", "precision@4", "recall@5", "mean_pos", "map@all"]
-        assert shared.drop_metric_keys_above_all_k(keys, 3) == [
-            "map@3", "mean_pos", "map@all",
-        ]
-
-    def test_keeps_k_equal_to_the_count(self):
-        assert shared.drop_metric_keys_above_all_k(["precision@3"], 3) == [
-            "precision@3"
-        ]
-
-    def test_skips_the_filter_when_n_items_is_zero_or_unknown(self):
-        assert shared.drop_metric_keys_above_all_k(["map@5"], 0) == ["map@5"]
 
 
 def test_glossary_section_always_built():
@@ -1078,13 +1199,13 @@ def test_glossary_section_always_built():
 
 
 def test_assemble_report_is_html():
-    html = rb.assemble_report(_results(evaluation_metrics=_metrics()), _params())
+    html = _assemble(_results(evaluation_metrics=_metrics()), _params())
     assert html.startswith("<!DOCTYPE html>")
     assert "概覽" in html                    # 新 spine 第一段
 
 
 def test_assemble_report_new_spine_order():
-    html = rb.assemble_report(_results(evaluation_metrics=_metrics(), baseline_metrics=_baseline_metrics_full()), _params())
+    html = _assemble(_results(evaluation_metrics=_metrics(), baseline_metrics=_baseline_metrics_full()), _params())
     # 概覽最前、詞彙表殿後、完整性檢查在詞彙表之前
     assert html.index("概覽") < html.index("核心概念")
     assert html.index("完整性檢查") < html.index("詞彙表")
@@ -1104,13 +1225,13 @@ def test_the_section_list_alone_decides_the_order(monkeypatch):
     else."""
     results = _results(evaluation_metrics=_metrics(),
                        baseline_metrics=_baseline_metrics_full())
-    before = _toc_titles(rb.assemble_report(results, _params()))
+    before = _toc_titles(_assemble(results, _params()))
     i = rb.SECTIONS.index(core_concepts)
     j = rb.SECTIONS.index(popularity_baseline)
     swapped = list(rb.SECTIONS)
     swapped[i], swapped[j] = swapped[j], swapped[i]
     monkeypatch.setattr(rb, "SECTIONS", tuple(swapped))
-    after = _toc_titles(rb.assemble_report(results, _params()))
+    after = _toc_titles(_assemble(results, _params()))
 
     a = before.index("核心概念 — 一個 query 的排序")
     b = before.index("baseline — popularity 對照")
@@ -1119,9 +1240,36 @@ def test_the_section_list_alone_decides_the_order(monkeypatch):
     assert after == expected
 
 
-def _baseline_metrics_full():
-    """Baseline metrics dict mirroring _metrics() per_item / macro shape."""
-    return {
+def _windowed(base, parameters, *, windows=None):
+    """``base`` with the popularity window ``compute_baseline_metrics`` lands
+    for it under ``parameters`` (#536), by the node's own rule
+    (``baselines.popularity_window``): over the monthly table the section
+    prints (``popularity_rate.monthly_positives`` in rate mode,
+    ``monthly_counts`` otherwise) and each evaluated date's covered months —
+    the rate block's own, ``windows`` for several dates in count mode, or
+    one date's window holding the monthly table's months. Recomputed on every
+    call, so a test that changes the counts re-lands its window."""
+    from recsys_tfb.evaluation.baselines import (
+        baseline_score,
+        popularity_window,
+        resolve_lookback_months,
+    )
+
+    rate = base.get("popularity_rate")
+    monthly = (rate.get("monthly_positives") if rate
+               else base.get("monthly_counts")) or {}
+    if rate:
+        windows = rate.get("window_months_covered")
+    return {**base, "popularity_window": popularity_window(
+        monthly, windows, snap_dates=["2026-01-31"],
+        lookback_months=resolve_lookback_months(parameters),
+        score=baseline_score(parameters))}
+
+
+def _baseline_metrics_full(parameters=None):
+    """Baseline metrics dict mirroring _metrics() per_item / macro shape, with
+    the window it lands under ``parameters`` (``_params()`` by default)."""
+    return _windowed({
         "overall": {"map@1": 0.4, "map@3": 0.5,
                     "precision@1": 0.3, "recall@1": 0.25},
         "per_item": {
@@ -1133,14 +1281,17 @@ def _baseline_metrics_full():
             "recall@1": 0.115, "recall@2": 0.25, "mean_pos": 4.5,
             "map_attr@1": 0.325, "map_attr@2": 0.365, "map_attr@3": 0.40,
         }},
-        "population": {"all_k": 2},
-    }
+        "population": {"all_k": 2, "macro_items": ["A", "B"],
+                       "n_scored_queries_with_positive": 10,
+                       "n_scored_queries_without_positive": 0,
+                       "segment_columns": []},
+    }, parameters or _params())
 
 
 def test_assemble_metadata_has_model_version_and_generated_at():
     p = _params()
     p["model_version"] = "v_test"
-    html = rb.assemble_report(_results(evaluation_metrics=_metrics()), p)
+    html = _assemble(_results(evaluation_metrics=_metrics()), p)
     assert "v_test" in html
     assert "Generated At" in html
 
@@ -1155,7 +1306,7 @@ def test_metadata_one_date_is_shown_as_configured():
     as written, no several-date wording anywhere in the page."""
     p = _params()
     p["evaluation"]["snap_date"] = "2026-01-31"
-    html = rb.assemble_report(_results(evaluation_metrics=_metrics()), p)
+    html = _assemble(_results(evaluation_metrics=_metrics()), p)
     block = _metadata_block(html)
     assert [row.split("</th>")[0] for row in block.split("<tr><th>")[1:]] == [
         "Model Version", "Snap Date", "Generated At", "Total Queries",
@@ -1169,7 +1320,7 @@ def test_metadata_several_dates_show_the_range():
     same five as for one date."""
     p = _params()
     p["evaluation"]["snap_date"] = ["2026-02-28", "2026-01-31", "2026-03-31"]
-    html = rb.assemble_report(_results(evaluation_metrics=_metrics()), p)
+    html = _assemble(_results(evaluation_metrics=_metrics()), p)
     block = _metadata_block(html)
     assert ("<tr><th>Snap Date</th><td>2026-01-31 ~ 2026-03-31（3 個日期）"
             "</td></tr>") in block, block
@@ -1191,7 +1342,7 @@ def test_dataset_overview_adds_by_category_when_present():
 def test_baseline_section_no_per_item_delta_omits_table():
     m = _metrics()
     base = {"overall": {"map@1": 0.4}}          # no per_item -> per_item_delta empty
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_windowed(base, _params())), _params())
     assert s is not None
     # 無 per_item、無 purchase_counts → 只剩 overall 三張 family 表
     assert s.table_titles == [
@@ -1240,9 +1391,18 @@ def _metrics_with_seg_cat():
     }
     m["category"] = {
         "overall": {"map@1": 0.55, "map@3": 0.6, "map@2": 0.58},
-        "population": {"all_k": 3},
+        "population": _category_ledger(),
     }
+    m["population"]["segment_columns"] = ["segment"]
     return m
+
+
+def _category_ledger():
+    """A category grain's ledger for the seg/cat fixtures: 3 categories."""
+    return {"all_k": 3, "macro_items": [],
+            "n_scored_queries_with_positive": 10,
+            "n_scored_queries_without_positive": 0,
+            "segment_columns": ["segment"]}
 
 
 def _row_facts_with_seg_cat():
@@ -1260,13 +1420,14 @@ def _baseline_with_seg_cat():
     }
     base["category"] = {
         "overall": {"map@1": 0.45, "map@3": 0.5, "map@2": 0.48},
-        "population": {"all_k": 3},
+        "population": _category_ledger(),
     }
+    base["population"] = {**base["population"], "segment_columns": ["segment"]}
     return base
 
 
 def test_baseline_per_segment_map_compare_table():
-    s = popularity_baseline.build(_results(evaluation_metrics=_metrics_with_seg_cat(), baseline_metrics=_baseline_with_seg_cat()), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=_metrics_with_seg_cat(), baseline_metrics=_baseline_with_seg_cat()), _params())
     title = "per-segment mAP@k (M/B/Δ)"
     assert title in s.table_titles
     tbl = s.tables[s.table_titles.index(title)]
@@ -1282,7 +1443,7 @@ def test_baseline_per_segment_map_compare_table():
 
 
 def test_baseline_category_overall_map_compare_table():
-    s = popularity_baseline.build(_results(evaluation_metrics=_metrics_with_seg_cat(), baseline_metrics=_baseline_with_seg_cat()), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=_metrics_with_seg_cat(), baseline_metrics=_baseline_with_seg_cat()), _params())
     title = "大類 overall mAP@k (M/B/Δ)"
     assert title in s.table_titles
     tbl = s.tables[s.table_titles.index(title)]
@@ -1299,19 +1460,19 @@ def test_baseline_section_absent_when_the_baseline_was_not_computed():
     every metric is missing."""
     stub = {"enabled": False,
             "config_fingerprint": {"sha256": "0" * 64, "values": {}}}
-    assert popularity_baseline.build(_results(evaluation_metrics=_metrics(), baseline_metrics=stub), _params()) is None
+    assert _draw(popularity_baseline, _results(evaluation_metrics=_metrics(), baseline_metrics=stub), _params()) is None
 
 
 def test_baseline_omits_seg_cat_tables_when_absent():
     """Backward compat: baseline without per_segment/category -> no extra
     tables (older artifacts, or model without those slices)."""
-    s = popularity_baseline.build(_results(evaluation_metrics=_metrics(), baseline_metrics=_baseline_metrics_full()), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=_metrics(), baseline_metrics=_baseline_metrics_full()), _params())
     assert "per-segment mAP@k (M/B/Δ)" not in s.table_titles
     assert "大類 overall mAP@k (M/B/Δ)" not in s.table_titles
 
 
 def test_baseline_shows_lookback_window():
-    s = popularity_baseline.build(_results(evaluation_metrics=_metrics(), baseline_metrics=_baseline_metrics_full()), _params_lookback())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=_metrics(), baseline_metrics=_baseline_metrics_full()), _params_lookback())
     assert "12" in s.description
 
 
@@ -1321,7 +1482,7 @@ def test_baseline_lookback_sentence_prints_the_nodes_actual_default():
     the report used to default to None instead and print no lookback
     sentence at all for that same run — two different beliefs about what was
     actually computed. Both must now read the same shared default (12)."""
-    s = popularity_baseline.build(_results(evaluation_metrics=_metrics(), baseline_metrics=_baseline_metrics_full()), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=_metrics(), baseline_metrics=_baseline_metrics_full()), _params())
     assert "過去 12 個月" in s.description
 
 
@@ -1329,12 +1490,12 @@ def test_baseline_lookback_sentence_reflects_a_configured_value():
     """Guardrail: an explicit lookback_months still prints its own value."""
     p = _params_lookback()
     p["evaluation"]["baseline"]["lookback_months"] = 6
-    s = popularity_baseline.build(_results(evaluation_metrics=_metrics(), baseline_metrics=_baseline_metrics_full()), p)
+    s = _draw(popularity_baseline, _results(evaluation_metrics=_metrics(), baseline_metrics=_baseline_metrics_full(p)), p)
     assert "過去 6 個月" in s.description
 
 
 def test_baseline_overall_three_tables_k_as_columns():
-    s = popularity_baseline.build(_results(evaluation_metrics=_metrics(), baseline_metrics=_baseline_metrics_full()), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=_metrics(), baseline_metrics=_baseline_metrics_full()), _params())
     fam = [tt for tt in s.table_titles if tt.startswith("overall ")]
     assert len(fam) == 3          # mAP / recall / precision 各一
     idx = s.table_titles.index("overall mAP@k (M/B/Δ)")
@@ -1343,7 +1504,7 @@ def test_baseline_overall_three_tables_k_as_columns():
 
 
 def test_baseline_detail_tables_collapsed():
-    s = popularity_baseline.build(_results(evaluation_metrics=_metrics(), baseline_metrics=_baseline_metrics_full()), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=_metrics(), baseline_metrics=_baseline_metrics_full()), _params())
     idx = s.table_titles.index("overall mAP@k (M/B/Δ)")
     assert s.collapsed_tables[idx] is True     # overall 明細收合
 
@@ -1351,7 +1512,7 @@ def test_baseline_detail_tables_collapsed():
 def test_baseline_popularity_avg_per_month_when_lookback():
     m = _metrics()
     base = {"overall": {"map@1": 0.4}, "purchase_counts": {"A": 120, "B": 240}}
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params_lookback())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_windowed(base, _params_lookback())), _params_lookback())
     pop = s.tables[s.table_titles.index("popularity 排名組成")]
     assert "平均每月" in pop.columns
     assert pop.loc["B", "平均每月"] == 20.0     # 240 / 12
@@ -1373,7 +1534,7 @@ def test_baseline_discloses_a_partially_covered_lookback_window():
             "B": {"2025-12": 6},
         },
     }
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params_lookback())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_windowed(base, _params_lookback())), _params_lookback())
     assert "實際只涵蓋 2 個月" in s.description
     pop = s.tables[s.table_titles.index("popularity 排名組成")]
     assert pop.loc["A", "平均每月"] == 12.0     # 24 / 2 covered months
@@ -1387,7 +1548,7 @@ def test_baseline_fully_covered_lookback_window_keeps_the_plain_sentence():
         "purchase_counts": {"A": 24},
         "monthly_counts": {"A": {mo: 2 for mo in months}},
     }
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params_lookback())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_windowed(base, _params_lookback())), _params_lookback())
     assert "popularity 以過去 12 個月的歷史購買計數重排。" in s.description
     assert "實際只涵蓋" not in s.description
     pop = s.tables[s.table_titles.index("popularity 排名組成")]
@@ -1402,9 +1563,10 @@ def test_baseline_several_dates_divide_by_every_windows_months():
         "overall": {"map@1": 0.4},
         "purchase_counts": {"A": 240},
         "monthly_counts": {"A": {f"2025-{mo:02d}": 20 for mo in range(1, 13)}},
-        "window_months_covered": {"2026-01-31": 12, "2026-02-28": 12},
     }
-    s = popularity_baseline.build(_results(evaluation_metrics=_metrics(), baseline_metrics=base), _params_lookback())
+    landed = _windowed(base, _params_lookback(),
+                       windows={"2026-01-31": 12, "2026-02-28": 12})
+    s = _draw(popularity_baseline, _results(evaluation_metrics=_metrics(), baseline_metrics=landed), _params_lookback())
     pop = s.tables[s.table_titles.index("popularity 排名組成")]
     assert pop.loc["A", "平均每月"] == 10.0
     assert "對 2 個評估日期各以該日期之前 12 個月" in s.description
@@ -1422,9 +1584,10 @@ def test_baseline_several_dates_with_partial_windows_divide_by_covered_months():
         "overall": {"map@1": 0.4},
         "purchase_counts": {"A": 240},
         "monthly_counts": {"A": {"2025-11": 100, "2025-12": 100, "2026-01": 40}},
-        "window_months_covered": {"2026-01-31": 2, "2026-02-28": 3},
     }
-    s = popularity_baseline.build(_results(evaluation_metrics=_metrics(), baseline_metrics=base), _params_lookback())
+    landed = _windowed(base, _params_lookback(),
+                       windows={"2026-01-31": 2, "2026-02-28": 3})
+    s = _draw(popularity_baseline, _results(evaluation_metrics=_metrics(), baseline_metrics=landed), _params_lookback())
     pop = s.tables[s.table_titles.index("popularity 排名組成")]
     assert pop.loc["A", "平均每月"] == 48.0
     assert "實際只涵蓋 5 個視窗月" in s.description
@@ -1432,14 +1595,14 @@ def test_baseline_several_dates_with_partial_windows_divide_by_covered_months():
 
 
 def test_baseline_one_date_says_nothing_about_several_dates():
-    """No window_months_covered (a single-date result): none of the
+    """One evaluated date, so one window in the landed block: none of the
     several-date wording appears."""
     base = {
         "overall": {"map@1": 0.4},
         "purchase_counts": {"A": 24},
         "monthly_counts": {"A": {"2025-11": 12, "2025-12": 12}},
     }
-    s = popularity_baseline.build(_results(evaluation_metrics=_metrics(), baseline_metrics=base), _params_lookback())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=_metrics(), baseline_metrics=_windowed(base, _params_lookback())), _params_lookback())
     for text in ("評估日期", "視窗月", "重複計數"):
         assert text not in s.description, text
 
@@ -1458,7 +1621,7 @@ def test_baseline_section_renders_popularity_table():
         "per_item": {"A": {"recall@1": 0.1}},
         "purchase_counts": {"A": 50, "B": 200, "C": 10},
     }
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_windowed(base, _params())), _params())
     assert s is not None
     assert "popularity 排名組成" in s.table_titles
     idx = s.table_titles.index("popularity 排名組成")
@@ -1481,7 +1644,7 @@ def test_baseline_monthly_trend_table():
             "B": {"2024-06": 1},
         },
     }
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_windowed(base, _params())), _params())
     assert "popularity 月度趨勢" in s.table_titles
     tbl = s.tables[s.table_titles.index("popularity 月度趨勢")]
     assert list(tbl.columns) == ["2024-06", "2024-12", "合計"]
@@ -1495,8 +1658,9 @@ def test_baseline_monthly_trend_table():
 def _rate_baseline():
     """#397 rate-mode fixture: popularity_rate + count-mode leftovers that the
     rate-mode report must NOT read (monthly_counts/purchase_counts differ from
-    the rate numbers on purpose, so reading the wrong source fails loudly)."""
-    return {
+    the rate numbers on purpose, so reading the wrong source fails loudly).
+    With the window it lands under ``_params_lookback()``."""
+    return _windowed({
         "overall": {"map@1": 0.4},
         "purchase_counts": {"A": 999, "B": 999, "C": 999},
         "monthly_counts": {
@@ -1513,14 +1677,14 @@ def _rate_baseline():
             },
             "window_months_covered": {"2026-01-31": 2},
         },
-    }
+    }, _params_lookback())
 
 
 def test_baseline_rate_mode_composition_table_sorted_and_columns():
     """(a) rate 模式排名組成表：照正例率降序；欄位恰為四個；每列正例率 ≈
     正例數 ÷ 當候選次數。"""
     m = _metrics()
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=_rate_baseline()), _params_lookback())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_rate_baseline()), _params_lookback())
     pop = s.tables[s.table_titles.index("popularity 排名組成")]
     assert list(pop.columns) == ["正例率", "當候選次數", "正例數", "rank"]
     assert list(pop.index) == ["B", "A", "C"]       # 0.8 > 0.5 > 0.2
@@ -1537,7 +1701,7 @@ def test_baseline_rate_mode_no_count_or_avg_per_month_wording():
     """(b) rate 模式：description 與表標題都不含「購買計數」「平均每月」；
     表裡沒有 count 欄。"""
     m = _metrics()
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=_rate_baseline()), _params_lookback())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_rate_baseline()), _params_lookback())
     for banned in ("購買計數", "平均每月"):
         assert banned not in s.description, banned
     pop = s.tables[s.table_titles.index("popularity 排名組成")]
@@ -1550,7 +1714,7 @@ def test_baseline_rate_mode_monthly_trend_uses_monthly_positives():
     monthly_positives，不是 monthly_counts（fixture 讓兩者刻意不同）。"""
     m = _metrics()
     base = _rate_baseline()
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params_lookback())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_windowed(base, _params_lookback())), _params_lookback())
     pop = s.tables[s.table_titles.index("popularity 排名組成")]
     trend = s.tables[s.table_titles.index("popularity 月度趨勢")]
     assert list(trend.index) == list(pop.index)     # 同序：照正例率排
@@ -1564,7 +1728,7 @@ def test_baseline_rate_mode_single_date_discloses_covered_months():
     """(d) rate 模式、單一評估日期、window_months_covered 小於 lookback：
     文字寫出涵蓋月數，且提到 sample_pool。"""
     m = _metrics()
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=_rate_baseline()), _params_lookback())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_rate_baseline()), _params_lookback())
     assert "實際只涵蓋 2 個月" in s.description
     assert "sample_pool" in s.description
     assert "label_table" not in s.description
@@ -1576,7 +1740,7 @@ def test_baseline_rate_mode_several_dates_says_each_period_counts_once():
     base = _rate_baseline()
     base["popularity_rate"]["window_months_covered"] = {
         "2026-01-31": 12, "2026-02-28": 12}
-    s = popularity_baseline.build(_results(evaluation_metrics=_metrics(), baseline_metrics=base), _params_lookback())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=_metrics(), baseline_metrics=_windowed(base, _params_lookback())), _params_lookback())
     assert "對 2 個評估日期" in s.description
     assert "每期只算一次" in s.description
     assert "重複計數" not in s.description
@@ -1587,7 +1751,7 @@ def test_baseline_rate_mode_shows_small_rates_by_significant_digits():
     """Click-rate-sized rates would all print 0.0 at four decimals."""
     base = _rate_baseline()
     base["popularity_rate"]["rate"] = {"A": 3.21e-5, "B": 8.76e-5, "C": 4.1e-5}
-    s = popularity_baseline.build(_results(evaluation_metrics=_metrics(), baseline_metrics=base), _params_lookback())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=_metrics(), baseline_metrics=_windowed(base, _params_lookback())), _params_lookback())
     pop = s.tables[s.table_titles.index("popularity 排名組成")]
     assert list(pop["正例率"]) == [8.76e-5, 4.1e-5, 3.21e-5]
 
@@ -1599,12 +1763,12 @@ def test_baseline_count_mode_under_score_rate_says_why():
     params["evaluation"]["baseline"]["score"] = "rate"
     base = {"overall": {"map@1": 0.4}, "purchase_counts": {"A": 3},
             "monthly_counts": {"A": {"2025-06": 3}}}
-    s = popularity_baseline.build(_results(evaluation_metrics=_metrics(), baseline_metrics=base), params)
+    s = _draw(popularity_baseline, _results(evaluation_metrics=_metrics(), baseline_metrics=_windowed(base, params)), params)
     assert "監控模式評的是離線推論的全網格" in s.description
     pop = s.tables[s.table_titles.index("popularity 排名組成")]
     assert "count" in pop.columns
     # Without score: rate the sentence is not there (count mode as on main).
-    plain = popularity_baseline.build(_results(evaluation_metrics=_metrics(), baseline_metrics=base), _params_lookback())
+    plain = _draw(popularity_baseline, _results(evaluation_metrics=_metrics(), baseline_metrics=_windowed(base, _params_lookback())), _params_lookback())
     assert "全網格" not in plain.description
 
 
@@ -1612,7 +1776,7 @@ def test_baseline_omits_monthly_trend_when_absent():
     """Backward compat: no monthly_counts -> no 月度趨勢 table."""
     m = _metrics()
     base = {"overall": {"map@1": 0.4}, "purchase_counts": {"A": 3}}
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_windowed(base, _params())), _params())
     assert "popularity 月度趨勢" not in s.table_titles
 
 
@@ -1621,7 +1785,7 @@ def test_baseline_section_omits_popularity_when_purchase_counts_absent():
     m = _metrics()
     base = {"overall": {"map@1": 0.4},
             "per_item": {"A": {"recall@1": 0.1}}}
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_windowed(base, _params())), _params())
     assert s is not None
     assert "popularity 排名組成" not in s.table_titles
 
@@ -1632,7 +1796,7 @@ def test_baseline_section_omits_popularity_when_purchase_counts_empty():
     base = {"overall": {"map@1": 0.4},
             "per_item": {"A": {"recall@1": 0.1}},
             "purchase_counts": {}}
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_windowed(base, _params())), _params())
     assert s is not None
     assert "popularity 排名組成" not in s.table_titles
 
@@ -1644,7 +1808,7 @@ def test_baseline_section_overall_map_table_mbdelta_rows_k_cols():
         "overall": {"map@1": 0.40},
         "per_item": {"A": {"recall@1": 0.1}},
     }
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_windowed(base, _params())), _params())
     assert s is not None
     idx = s.table_titles.index("overall mAP@k (M/B/Δ)")
     tbl = s.tables[idx]
@@ -1662,7 +1826,7 @@ def test_baseline_section_overall_tables_use_k_superset_columns():
     @3/@4/@5 must not appear, leaving [1,2,all]."""
     m = _metrics()
     base = {"overall": {"map@1": 0.4}, "per_item": {"A": {"recall@1": 0.1}}}
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_windowed(base, _params())), _params())
     idx = s.table_titles.index("overall mAP@k (M/B/Δ)")
     cols = [str(c) for c in s.tables[idx].columns]
     assert "@1" in cols and "@2" in cols and "@all" in cols
@@ -1677,7 +1841,7 @@ def test_baseline_section_has_two_per_item_compare_tables():
     when both sides have a Macro row (as they do here)."""
     m = _metrics()
     base = _baseline_metrics_full()
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_windowed(base, _params())), _params())
     assert s is not None
     # Old delta-only title must be gone.
     assert not any(t.startswith("per-item recall@k delta") for t in s.table_titles)
@@ -1702,7 +1866,7 @@ def test_baseline_section_per_item_recall_table_three_cols_per_k():
     [1, all] (@all still resolves to @2)."""
     m = _metrics()
     base = _baseline_metrics_full()
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_windowed(base, _params())), _params())
     title = _title_starting_with(s.table_titles, "per-item recall@k (M/B/Δ)")
     tbl = s.tables[s.table_titles.index(title)]
     assert list(tbl.columns) == [
@@ -1730,7 +1894,7 @@ def test_baseline_section_per_item_attr_tables_use_primary_map_k():
     clamps K=3 out (3 > n_items=2), leaving [1, all]."""
     m = _metrics()
     base = _baseline_metrics_full()
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_windowed(base, _params())), _params())
     title = _title_starting_with(s.table_titles, "map_attr@k (M/B/Δ)")
     tbl = s.tables[s.table_titles.index(title)]
     assert list(tbl.columns) == [
@@ -1746,7 +1910,7 @@ def test_baseline_section_omits_per_item_compare_when_no_baseline_per_item():
     """No baseline per_item -> per-item compare tables skipped (overall stays)."""
     m = _metrics()
     base = {"overall": {"map@1": 0.4}}  # no per_item
-    s = popularity_baseline.build(_results(evaluation_metrics=m, baseline_metrics=base), _params())
+    s = _draw(popularity_baseline, _results(evaluation_metrics=m, baseline_metrics=_windowed(base, _params())), _params())
     assert s is not None
     for title in (
         "per-item recall@k (M/B/Δ)",
@@ -1767,14 +1931,14 @@ def _metrics_min():
         "macro_avg": {"by_item": {"map_attr@2": 0.875,
                                   "recall@2": 1.0, "mean_pos": 1.25}},
         "observation_items": [],
-        "population": {"all_k": 2},
+        "population": _full_ledger(2, ["A", "B"]),
     }
 
 
 def _row_facts_min():
-    return {"dataset_overview": {"totals": {"n_items": 2}},
-            "n_queries": 3, "n_excluded_queries": 0,
-            "n_all_positive_queries": 0, "widest_group_rows": 2}
+    return _accounted({"dataset_overview": {"totals": {"n_items": 2}},
+                       "n_queries": 3, "n_excluded_queries": 0,
+                       "n_all_positive_queries": 0, "widest_group_rows": 2})
 
 
 def _params_min():
@@ -1787,7 +1951,7 @@ def _params_min():
 
 def test_assemble_report_has_no_reconciliation_section():
     """對帳層已退場——report.html 不得再出現該段落。"""
-    html = rb.assemble_report(
+    html = _assemble(
         _results(evaluation_row_facts=_row_facts_min(),
                  evaluation_metrics=_metrics_min()), _params_min())
     assert "對帳" not in html
@@ -1836,7 +2000,11 @@ def _metrics_with_recorded_all_k():
 
 
 def _baseline_at_recorded_all_k():
+    """The baseline of :func:`_metrics_with_recorded_all_k`'s rows: scored on
+    the model's own rows (``build_baseline_frame``), so its ``"all"``
+    resolved to the model's K, 4, and its ledger says so (#535)."""
     base = _baseline_with_seg_cat()
+    base["population"] = {**base["population"], "all_k": 4}
     base["overall"] = {**base["overall"], "map@2": 0.05, "map@4": 0.6}
     base["per_item"] = {
         item: {**cell, "map_attr@4": v, "recall@4": 1.0}
@@ -1849,7 +2017,7 @@ def _baseline_at_recorded_all_k():
 
 def test_metrics_section_reads_all_at_the_recorded_k():
     m = _metrics_with_recorded_all_k()
-    s = ranking_metrics.build(_results(evaluation_metrics=m), _params())
+    s = _draw(ranking_metrics, _results(evaluation_metrics=m), _params())
     overall = s.tables[s.table_titles.index(
         "A · per-query｜overall（列＝map/precision/recall）")]
     assert overall.loc["map", "@all"] == pytest.approx(0.9)
@@ -1866,28 +2034,30 @@ def test_metrics_section_reads_all_at_the_recorded_k():
 def test_display_k_is_clamped_at_the_recorded_k_not_the_item_count():
     """bug 8's bound is the K past which @K means nothing: the longest list.
     With 4-row groups, @3 and @4 rank real rows although there are 2 items."""
-    s = ranking_metrics.build(_results(evaluation_metrics=_metrics_with_recorded_all_k()), _params())
+    s = _draw(ranking_metrics, _results(evaluation_metrics=_metrics_with_recorded_all_k()), _params())
     overall = s.tables[s.table_titles.index(
         "A · per-query｜overall（列＝map/precision/recall）")]
     assert list(overall.columns) == ["@1", "@2", "@3", "@4", "@all"]
 
 
 def test_overview_card_reads_map_at_all_at_the_recorded_k():
-    card = _overview_card(overview.build(_results(evaluation_metrics=_metrics_with_recorded_all_k()), _params()))
+    card = _overview_card(_draw(overview, _results(evaluation_metrics=_metrics_with_recorded_all_k()), _params()))
     assert card.loc["map@all", "value"] == pytest.approx(0.9)
 
 
 def test_overview_headline_without_metric_k_reads_all_at_the_recorded_k():
     """metric.k 未設時頭號讀 macro map_attr@all，"all" 照 bundle 記的 K
     （resolved_all_k＝4）查，不是 item 數（2，會讀到 0.435）。"""
-    s = overview.build(_results(evaluation_metrics=_metrics_with_recorded_all_k()), _params())
+    s = _draw(overview, _results(evaluation_metrics=_metrics_with_recorded_all_k()), _params())
     assert _headline(s) == pytest.approx(0.55)
 
 
 def test_baseline_section_reads_both_sides_at_the_model_recorded_k():
-    """The slim baseline bundle records nothing; it is scored on the model's
-    own rows (``build_baseline_frame``), so the model's K is its K too."""
-    s = popularity_baseline.build(_results(evaluation_metrics=_metrics_with_recorded_all_k(), baseline_metrics=_baseline_at_recorded_all_k()), _params())
+    """The baseline is scored on the model's own rows
+    (``build_baseline_frame``), so its recorded K is the model's; the
+    comparison pairs each side's ``"all"`` at that K (``name@all``), never
+    at the item count (2, which holds other numbers on both sides)."""
+    s = _draw(popularity_baseline, _results(evaluation_metrics=_metrics_with_recorded_all_k(), baseline_metrics=_baseline_at_recorded_all_k()), _params())
     overall = s.tables[s.table_titles.index("overall mAP@k (M/B/Δ)")]
     assert overall.loc["Model", "@all"] == pytest.approx(0.9)
     assert overall.loc["Baseline", "@all"] == pytest.approx(0.6)
@@ -1983,7 +2153,7 @@ def test_prediction_quality_prints_the_bin_width_and_why_it_matters():
 def test_prediction_quality_states_both_populations_with_numbers():
     """Decision 7, the second: this section counts every candidate row, the
     ranking section only query groups with a positive."""
-    rf = {**_row_facts(), "n_queries": 12, "n_excluded_queries": 5}
+    rf = _accounted({**_row_facts(), "n_queries": 12, "n_excluded_queries": 5})
     text = _pq_text(prediction_quality.build(_results(prediction_quality_metrics=_pq_payload(), evaluation_row_facts=rf, evaluation_metrics=_metrics()), _params()))
     assert "8 列" in text
     assert "排除 5 個" in text
@@ -2004,7 +2174,7 @@ def test_prediction_quality_post_training_does_not_call_equal_populations_differ
     """Under --post-training with nothing excluded by the ranking section,
     both sections see the same rows; the note must say so, not say "the two
     populations differ" and then take it back."""
-    rf = {**_row_facts(), "n_queries": 12, "n_excluded_queries": 0}
+    rf = _accounted({**_row_facts(), "n_queries": 12, "n_excluded_queries": 0})
     text = _pq_text(prediction_quality.build(_results(prediction_quality_metrics=_pq_payload(), evaluation_row_facts=rf, evaluation_metrics=_metrics()), _pq_params(post_training=True)))
     assert "兩段的母體相同" in text
     assert "兩段的母體不同" not in text
@@ -2039,7 +2209,7 @@ def test_prediction_quality_per_item_lists_the_budgeted_items_and_says_how_many(
 
 
 def test_assemble_report_places_prediction_quality_after_the_metrics_section():
-    html = rb.assemble_report(_results(evaluation_metrics=_metrics(), prediction_quality_metrics=_pq_payload()), _params())
+    html = _assemble(_results(evaluation_metrics=_metrics(), prediction_quality_metrics=_pq_payload()), _params())
     assert html.index("衡量指標") < html.index("預測品質")
     assert html.index("預測品質") < html.index("完整性檢查")
     # The report's own guard word (test_assemble_report_has_no_reconciliation
@@ -2049,7 +2219,7 @@ def test_assemble_report_places_prediction_quality_after_the_metrics_section():
 
 def test_overview_navigation_points_at_prediction_quality_only_when_drawn():
     def nav(prediction_quality):
-        html = rb.assemble_report(_results(evaluation_metrics=_metrics(), prediction_quality_metrics=prediction_quality), _params())
+        html = _assemble(_results(evaluation_metrics=_metrics(), prediction_quality_metrics=prediction_quality), _params())
         return "門檻切在哪" in html
 
     assert nav(_pq_payload())
@@ -2074,7 +2244,7 @@ def _weighted_pq_payload():
 
 
 def test_dataset_overview_prints_the_test_ratio_and_the_kept_groups():
-    rf = {**_row_facts(), "n_excluded_queries": 7}
+    rf = _accounted({**_row_facts(), "n_excluded_queries": 7})
     s = data_stats.build(_results(evaluation_row_facts=rf), _kept_params(0.25))
     assert "r＝0.25" in s.description
     assert "7 個" in s.description
@@ -2093,7 +2263,7 @@ def test_dataset_overview_says_nothing_when_no_zero_positive_group_was_kept(
 
 
 def test_prediction_quality_weighted_note_names_the_weight_and_the_ratio():
-    rf = {**_row_facts(), "n_queries": 12, "n_excluded_queries": 5}
+    rf = _accounted({**_row_facts(), "n_queries": 12, "n_excluded_queries": 5})
     text = _pq_text(prediction_quality.build(_results(prediction_quality_metrics=_weighted_pq_payload(), evaluation_row_facts=rf, evaluation_metrics=_metrics()), _kept_params(0.5)))
     assert "zero_positive_group_weight" in text
     assert "加權" in text
@@ -2116,10 +2286,11 @@ _SWITCH = "evaluation.query_filter.drop_all_positive_groups"
 
 
 def _ap_facts(n_queries=1000, n_excluded=50, n_all_positive=50,
-              category=None):
+              category=None, drop=None):
     """``_row_facts()`` 帶上 #376 的組數（組數在 row facts，不在指標結果）；
     ``n_all_positive=None`` ＝ #376 之前算的 row facts（沒有這個鍵）。預設：
-    有正例 950、其中全正 50、無正例 50。"""
+    有正例 950、其中全正 50、無正例 50。每個粒度的帳（#536）照 ``drop`` 這個
+    開關算，跟 ``compute_row_facts`` 在那個設定下落地的一樣。"""
     rf = _row_facts()
     rf["n_queries"] = n_queries
     rf["n_excluded_queries"] = n_excluded
@@ -2129,7 +2300,7 @@ def _ap_facts(n_queries=1000, n_excluded=50, n_all_positive=50,
         del rf[ALL_POSITIVE_KEY]
     if category is not None:
         rf["category"] = category
-    return rf
+    return _accounted(rf, _ap_params(drop))
 
 
 def _ap_metrics(with_category=False):
@@ -2141,7 +2312,7 @@ def _ap_metrics(with_category=False):
             "overall": {"map@1": 0.4, "map@2": 0.45},
             "per_item": {"fund": {"recall@1": 0.3, "mean_pos": 2.0}},
             "macro_avg": {"by_item": {"recall@1": 0.3, "mean_pos": 2.0}},
-            "population": {"all_k": 2},
+            "population": _full_ledger(2, ["fund"]),
         }
     return m
 
@@ -2157,14 +2328,32 @@ def _ap_category(n_queries=1000, n_excluded=100, n_all_positive=300):
     return cat
 
 
+def _scored(facts, drop):
+    """The groups the metrics score off ``facts`` under the switch ``drop``
+    (``metrics_spark``'s rule): those holding a positive, less the
+    all-positive ones when the switch drops them."""
+    with_positive = facts["n_queries"] - facts["n_excluded_queries"]
+    return with_positive - (facts.get(ALL_POSITIVE_KEY) or 0 if drop else 0)
+
+
 def _ap_results(n_queries=1000, n_excluded=50, n_all_positive=50,
-                category=None, **more):
+                category=None, drop=None, **more):
     """The report's inputs for a #376 test: ``_ap_facts`` row facts with the
-    matching ``_ap_metrics`` (a category block on both when ``category``)."""
-    return _results(
-        evaluation_row_facts=_ap_facts(n_queries, n_excluded, n_all_positive,
-                                       category),
-        evaluation_metrics=_ap_metrics(category is not None), **more)
+    matching ``_ap_metrics`` (a category block on both when ``category``),
+    their accounts landed, and the groups the metrics' ledger says were
+    scored counted (#536), under the switch ``drop`` — draw them with that
+    switch."""
+    facts = _ap_facts(n_queries, n_excluded, n_all_positive, category, drop)
+    metrics = _ap_metrics(category is not None)
+    metrics["population"] = {
+        **metrics["population"],
+        "n_scored_queries_with_positive": _scored(facts, drop)}
+    if category is not None:
+        metrics["category"]["population"] = {
+            **metrics["category"]["population"],
+            "n_scored_queries_with_positive": _scored(category, drop)}
+    return _results(evaluation_row_facts=facts, evaluation_metrics=metrics,
+                    **more)
 
 
 def _ap_params(drop=None, *, occasion=False, event=False, post_training=None,
@@ -2215,7 +2404,7 @@ def _section_text(s):
 @pytest.mark.parametrize("drop", [None, False])
 def test_ledger_switch_off_puts_every_group_with_a_positive_into_the_map(drop):
     """開關關：全正的組照樣算進衡量指標，所以「算進衡量指標」＝「有正例」。"""
-    s = ranking_metrics.build(_ap_results(), _ap_params(drop))
+    s = _draw(ranking_metrics, _ap_results(), _ap_params(drop))
     line = _ledger(s, "item 粒度")
     assert "有正例的組 950，其中全正 50（5.3%" in line
     with_pos = _num(r"有正例的組 ([\d,]+)", line)
@@ -2227,8 +2416,9 @@ def test_ledger_switch_off_puts_every_group_with_a_positive_into_the_map(drop):
 
 
 def test_ledger_switch_on_adds_up_to_the_groups_with_a_positive():
-    """開關開：有正例＝全正（已排除）＋算進衡量指標。"""
-    s = ranking_metrics.build(_ap_results(), _ap_params(True))
+    """開關開：有正例＝全正（已排除）＋算進衡量指標。算進衡量指標的組數讀指標
+    母體帳（#536），夾具照指標的規則記帳。"""
+    s = _draw(ranking_metrics, _ap_results(drop=True), _ap_params(True))
     line = _ledger(s, "item 粒度")
     assert "有正例的組 950，其中全正 50 已排除，算進衡量指標的有 900" in line
     with_pos = _num(r"有正例的組 ([\d,]+)", line)
@@ -2242,7 +2432,7 @@ def test_ledger_switch_on_adds_up_to_the_groups_with_a_positive():
 def test_ledger_post_training_says_the_dataset_already_dropped_them(ratio):
     """--post-training 吃 dataset 過濾後的 test 表；r 預設 0 → 無正例的組在
     dataset 就全丟了，這裡恆 0，要說明為什麼。"""
-    s = ranking_metrics.build(_ap_results(n_queries=950, n_excluded=0), _ap_params(False, post_training=True, ratio=ratio))
+    s = _draw(ranking_metrics, _ap_results(n_queries=950, n_excluded=0), _ap_params(False, post_training=True, ratio=ratio))
     line = _ledger(s, "item 粒度")
     assert "無正例的組 0（" in line
     assert "dataset 已依 dataset.test_zero_positive_group_ratio" in line
@@ -2250,21 +2440,21 @@ def test_ledger_post_training_says_the_dataset_already_dropped_them(ratio):
 
 
 def test_ledger_post_training_with_a_kept_ratio_names_the_ratio():
-    s = ranking_metrics.build(_ap_results(n_queries=957, n_excluded=7), _ap_params(False, post_training=True, ratio=0.25))
+    s = _draw(ranking_metrics, _ap_results(n_queries=957, n_excluded=7), _ap_params(False, post_training=True, ratio=0.25))
     line = _ledger(s, "item 粒度")
     assert "無正例的組 7（" in line
     assert "抽過" in line and "r＝0.25" in line
 
 
 def test_ledger_monitoring_prints_the_count_without_the_dataset_sentence():
-    s = ranking_metrics.build(_ap_results(), _ap_params(False, post_training=False, ratio=0.25))
+    s = _draw(ranking_metrics, _ap_results(), _ap_params(False, post_training=False, ratio=0.25))
     line = _ledger(s, "item 粒度")
     assert "無正例的組 50" in line
     assert "dataset" not in line
 
 
 def test_ledger_category_gets_its_own_line_with_its_own_counts():
-    s = ranking_metrics.build(_ap_results(category=_ap_category()), _ap_params(False))
+    s = _draw(ranking_metrics, _ap_results(category=_ap_category()), _ap_params(False))
     assert "有正例的組 950，其中全正 50" in _ledger(s, "item 粒度")
     cat = _ledger(s, "大類粒度")
     assert "有正例的組 900，其中全正 300（33.3%" in cat
@@ -2272,7 +2462,7 @@ def test_ledger_category_gets_its_own_line_with_its_own_counts():
 
 
 def test_ledger_has_no_category_line_without_a_category_bundle():
-    s = ranking_metrics.build(_ap_results(), _ap_params(False))
+    s = _draw(ranking_metrics, _ap_results(), _ap_params(False))
     assert not any(b.startswith("組數帳（大類粒度）") for b in s.bullets)
 
 
@@ -2282,14 +2472,14 @@ def test_ledger_on_a_bundle_from_before_the_count_says_how_to_get_it(drop):
     新報表畫出來：不得報錯，印得出的照印，並說怎麼補。"""
     r = _ap_results(n_all_positive=None,
                     category=_ap_category(n_all_positive=None))
-    s = ranking_metrics.build(r, _ap_params(drop))
+    s = _draw(ranking_metrics, r, _ap_params(drop))
     for grain, with_pos in (("item 粒度", "950"), ("大類粒度", "900")):
         line = _ledger(s, grain)
         assert f"有正例的組 {with_pos}" in line
         assert "無正例的組" in line
         assert "compute_row_facts" in line and "重跑" in line
         assert "其中全正" not in line
-    html = rb.assemble_report(r, _ap_params(drop))
+    html = _assemble(r, _ap_params(drop))
     assert "組數帳（item 粒度）" in html
     assert "⚠ 全正" not in html
 
@@ -2298,8 +2488,8 @@ def test_ledger_and_warning_carry_no_verdict_or_full_marks_wording():
     """「每組 AP 都是 1」只對不截斷的 AP 成立（K 小於組的列數時 map@K＝K/n），
     「滿分」同理；判斷字眼也不得出現。"""
     r = _ap_results(n_all_positive=500, category=_ap_category())
-    html = rb.assemble_report(r, _ap_params(False))
-    text = " ".join(_ledger(ranking_metrics.build(r, _ap_params(False)), g)
+    html = _assemble(r, _ap_params(False))
+    text = " ".join(_ledger(_draw(ranking_metrics, r, _ap_params(False)), g)
                     for g in ("item 粒度", "大類粒度"))
     text += _metadata_block(html)
     assert "⚠ 全正" in text
@@ -2315,14 +2505,14 @@ def test_ledger_and_warning_name_the_measurement_and_group_level_metrics():
     列數時仍看誰排進前 K，所以不說「每組的分數都一樣」。"""
     r = _ap_results(n_all_positive=500, category=_ap_category())
     for drop in (False, True):
-        s = ranking_metrics.build(r, _ap_params(drop))
+        s = _draw(ranking_metrics, r, _ap_params(drop))
         for grain in ("item 粒度", "大類粒度"):
             line = _ledger(s, grain)
             assert "算進衡量指標的有" in line and "不算進衡量指標" in line
             assert "mAP 的有" not in line and "不算進 mAP" not in line
-    off_line = _ledger(ranking_metrics.build(r, _ap_params(False)), "item 粒度")
+    off_line = _ledger(_draw(ranking_metrics, r, _ap_params(False)), "item 粒度")
     assert "組層級指標" in off_line and "每組的分數都一樣" not in off_line
-    html = rb.assemble_report(r, _ap_params(False))
+    html = _assemble(r, _ap_params(False))
     warn = " ".join(_warn_rows(html).values())
     assert "組層級指標" in warn and "照樣算進衡量指標" in warn
     for old in ("每組的分數都一樣", "拿到一樣的分數", "算進 mAP"):
@@ -2344,7 +2534,7 @@ def _warn_rows(html):
 
 def test_warning_when_the_all_positive_share_is_above_ten_percent():
     r = _ap_results(n_queries=1000, n_excluded=0, n_all_positive=101)
-    html = rb.assemble_report(r, _ap_params(False))
+    html = _assemble(r, _ap_params(False))
     rows = _warn_rows(html)
     assert list(rows) == ["⚠ 全正 query group（item 粒度）"]
     text = rows["⚠ 全正 query group（item 粒度）"]
@@ -2357,36 +2547,36 @@ def test_a_share_just_above_ten_percent_never_prints_as_ten_point_zero():
     """1004／10000 用一位小數會印成 10.0%，旁邊卻寫「超過 10%」；警告與組數帳
     印的是同一個數。"""
     r = _ap_results(n_queries=10000, n_excluded=0, n_all_positive=1004)
-    html = rb.assemble_report(r, _ap_params(False))
+    html = _assemble(r, _ap_params(False))
     text = _warn_rows(html)["⚠ 全正 query group（item 粒度）"]
     assert "10.0%" not in text
     assert "10.04%" in text
-    line = _ledger(ranking_metrics.build(r, _ap_params(False)), "item 粒度")
+    line = _ledger(_draw(ranking_metrics, r, _ap_params(False)), "item 粒度")
     assert "10.0%" not in line and "10.04%" in line
 
 
 def test_no_warning_at_exactly_ten_percent():
     r = _ap_results(n_queries=1000, n_excluded=0, n_all_positive=100)
-    html = rb.assemble_report(r, _ap_params(False))
+    html = _assemble(r, _ap_params(False))
     assert _warn_rows(html) == {}
 
 
 def test_no_warning_with_the_switch_on():
     r = _ap_results(n_queries=1000, n_excluded=0, n_all_positive=500,
-                    category=_ap_category(n_all_positive=800))
-    html = rb.assemble_report(r, _ap_params(True))
+                    category=_ap_category(n_all_positive=800), drop=True)
+    html = _assemble(r, _ap_params(True))
     assert _warn_rows(html) == {}
 
 
 def test_warning_is_judged_per_grain():
     # 細粒度 50／950＝5.3%、大類 300／900＝33.3% → 只有大類
     r = _ap_results(category=_ap_category(n_all_positive=300))
-    rows = _warn_rows(rb.assemble_report(r, _ap_params(False)))
+    rows = _warn_rows(_assemble(r, _ap_params(False)))
     assert list(rows) == ["⚠ 全正 query group（大類粒度）"]
     assert "33.3%" in rows["⚠ 全正 query group（大類粒度）"]
     # 細粒度 190／950＝20%、大類 45／900＝5% → 只有細粒度
     r = _ap_results(n_all_positive=190, category=_ap_category(n_all_positive=45))
-    rows = _warn_rows(rb.assemble_report(r, _ap_params(False)))
+    rows = _warn_rows(_assemble(r, _ap_params(False)))
     assert list(rows) == ["⚠ 全正 query group（item 粒度）"]
 
 
@@ -2397,7 +2587,7 @@ def test_overview_headline_follows_the_all_positive_switch(drop):
     """頭號數字讀 metrics.json，開關開著時已排除全正組，跟其他衡量指標同一批
     組：不加「沒有排除」的註，數字就是 B 塊「Macro 平均」那一格。"""
     r = _ap_results()
-    s = overview.build(r, _ap_params(drop, occasion=True))
+    s = _draw(overview, r, _ap_params(drop, occasion=True))
     assert _headline(s) == r["evaluation_metrics"]["macro_avg"]["by_item"]["map_attr@2"]
     assert _KEPT not in _section_text(s)
     assert "沒有排除全正" not in s.description
@@ -2408,17 +2598,17 @@ def test_overview_with_event_declared_still_has_the_headline():
     決勝欄）。"""
     p = _ap_params(True, event=True)
     r = _ap_results()
-    s = overview.build(r, p)
+    s = _draw(overview, r, p)
     assert _headline(s) == r["evaluation_metrics"]["macro_avg"]["by_item"]["map_attr@2"]
     assert _KEPT not in _section_text(s)
-    ms = ranking_metrics.build(r, p)
+    ms = _draw(ranking_metrics, r, p)
     assert not any(t.startswith("頭號指標") for t in ms.table_titles)
     assert "沒有排除全正" not in ms.description
 
 
 def test_metrics_section_has_no_headline_table_and_no_kept_marks():
     def section(drop):
-        return ranking_metrics.build(_ap_results(), _ap_params(drop, occasion=True))
+        return _draw(ranking_metrics, _ap_results(), _ap_params(drop, occasion=True))
 
     for drop in (False, True):
         sec = section(drop)
@@ -2448,7 +2638,7 @@ def test_headline_note_is_the_same_with_the_switch_on_or_off(k, build):
     _set_n_items(r, 5)   # @3 在衡量指標段看得到
 
     def desc(drop):
-        return section.build(
+        return _draw(section, 
             r,
             _ap_params(drop, occasion=True, metric_k=k)).description
 
@@ -2463,8 +2653,8 @@ def test_headline_notes_for_a_hidden_column_say_only_the_truncation():
     r = _ap_results()
     _set_n_items(r, 5)
     p = _ap_params(True, occasion=True, metric_k=7)
-    ov = overview.build(r, p).description
-    ms = ranking_metrics.build(r, p).description
+    ov = _draw(overview, r, p).description
+    ms = _draw(ranking_metrics, r, p).description
     assert "截斷在 7" in ov and "不顯示 @7 欄" in ov
     assert "截斷在 7" in ms and "不顯示 @7 欄" in ms
     for text in (ov, ms):
@@ -2505,9 +2695,9 @@ def test_query_count_rows_say_what_was_excluded_when_on(build):
     section = {"overview": overview, "completeness": completeness}[build]
 
     def fn(results, params):
-        return section.build(results, params)
+        return _draw(section, results, params)
 
-    on = _count_rows(fn(_ap_results(), _ap_params(True)))
+    on = _count_rows(fn(_ap_results(drop=True), _ap_params(True)))
     assert "排除 query 數 n_excluded_queries" not in on
     assert on["無正例而排除的 query 數 n_excluded_queries"] == 50
     assert on["有正例的 query 數"] == 950
@@ -2523,7 +2713,7 @@ def test_query_count_rows_say_what_was_excluded_when_on(build):
 
 def test_metadata_splits_excluded_queries_by_reason_when_on():
     def labels_values(drop):
-        rows = _metadata_block(rb.assemble_report(_ap_results(), _ap_params(drop))
+        rows = _metadata_block(_assemble(_ap_results(), _ap_params(drop))
         ).split("<tr><th>")[1:]
         return {r.split("</th>")[0]: r.split("<td>")[1].split("</td>")[0]
                 for r in rows}
@@ -2541,8 +2731,8 @@ def test_full_report_switch_on_prints_the_notes_and_none_of_the_old_sentences():
     """渲染到 HTML 之後也成立（bullets 走 escape、description 不走）。"""
     r = _ap_results()
     _set_n_items(r, 5)
-    on = rb.assemble_report({**r, "evaluation_report_aggregates": _report_aggregates(), "prediction_quality_metrics": _pq_payload()}, _ap_params(True, occasion=True))
-    off = rb.assemble_report({**r, "evaluation_report_aggregates": _report_aggregates(), "prediction_quality_metrics": _pq_payload()}, _ap_params(False, occasion=True))
+    on = _assemble({**r, "evaluation_report_aggregates": _report_aggregates(), "prediction_quality_metrics": _pq_payload()}, _ap_params(True, occasion=True))
+    off = _assemble({**r, "evaluation_report_aggregates": _report_aggregates(), "prediction_quality_metrics": _pq_payload()}, _ap_params(False, occasion=True))
     old = ("主指標段（mAP／precision@K／recall@K）只算有正例的 query group",)
     for sentence in old:
         assert sentence in off, sentence
@@ -2591,7 +2781,7 @@ def test_a_new_query_group_entry_gets_its_row_and_its_segment_table(
     m["overall"]["toy@1"] = 0.123
     m["per_segment"] = {"X": {"map@1": 0.5, "toy@1": 0.321},
                         "Y": {"map@1": 0.4, "toy@1": 0.111}}
-    s = ranking_metrics.build(_results(evaluation_metrics=m), _params())
+    s = _draw(ranking_metrics, _results(evaluation_metrics=m), _params())
     overall = s.tables[0]
     assert list(overall.index) == ["map", "precision", "recall", "toy"]
     assert overall.loc["toy", "@1"] == pytest.approx(0.123)
@@ -2609,9 +2799,9 @@ def test_tables_name_metrics_by_their_catalog_display_name(monkeypatch):
                                   f"map_{QUERY_GROUP}": "MAP!"})
     results = _results(evaluation_metrics=_metrics(),
                        baseline_metrics=_baseline_metrics_full())
-    ranking = ranking_metrics.build(results, _params()).table_titles
+    ranking = _draw(ranking_metrics, results, _params()).table_titles
     assert any(t.startswith("B · per-item 歸因｜item-recall@k") for t in ranking)
-    baseline = popularity_baseline.build(results, _params()).table_titles
+    baseline = _draw(popularity_baseline, results, _params()).table_titles
     assert "overall MAP!@k (M/B/Δ)" in baseline
     assert any(t.startswith("item-recall@k (M/B/Δ)") for t in baseline)
 
@@ -2630,8 +2820,38 @@ def test_a_new_item_entry_gets_its_own_per_item_table(monkeypatch):
     m = _metrics()
     m["per_item"]["A"]["toy_i@1"] = 0.42
     m["macro_avg"]["by_item"]["toy_i@1"] = 0.21
-    s = ranking_metrics.build(_results(evaluation_metrics=m), _params())
+    s = _draw(ranking_metrics, _results(evaluation_metrics=m), _params())
     (i,) = [i for i, t in enumerate(s.table_titles)
             if t.startswith("B · per-item 歸因｜toy-item@k（列＝item）")]
     assert s.tables[i].loc["A", "@1"] == pytest.approx(0.42)
     assert s.tables[i].loc[shared.MACRO_LABEL, "@1"] == pytest.approx(0.21)
+
+
+# ---------------------------------------------------------------------------
+# The report reads the landed results through a module that computes nothing
+# (#536, ADR-0031 principle 1)
+# ---------------------------------------------------------------------------
+
+
+def test_the_reports_reader_module_loads_without_spark_or_a_computation_module():
+    """``evaluation.result_readers`` is what the report modules import to read
+    the landed results. It must load with pyspark blocked and must not pull in
+    a module that computes those results: the report importing one is how it
+    used to compute instead of read. A subprocess, because in this session
+    those modules are already loaded."""
+    import subprocess
+    import sys
+
+    computing = ("metrics", "metrics_spark", "baselines",
+                 "prediction_quality", "diagnostics_spark", "compare")
+    code = (
+        "import sys\n"
+        "sys.modules['pyspark'] = None\n"
+        "import recsys_tfb.evaluation.result_readers\n"
+        f"loaded = [m for m in {computing!r}\n"
+        "          if 'recsys_tfb.evaluation.' + m in sys.modules]\n"
+        "assert not loaded, loaded\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr[-2000:]

@@ -162,6 +162,8 @@ def test_static_coverage_floor():
     """
     total = sum(1 for _ in _node_calls())
     judgeable = sum(1 for _ in _judgeable_nodes())
+    # 59/58: #536 added evaluation's `compare_to_baseline` and
+    # `resolve_display_ks`, two literal, statically judgeable calls.
     # 57/56: #535 added evaluation's `compute_row_facts`, one literal,
     # statically judgeable call.
     # 56/55: #532 deleted evaluation's diagnosis nodes: four calls, two of them
@@ -200,7 +202,7 @@ def test_static_coverage_floor():
     # of the two `validate_model_input_grain` calls (the branch existed only
     # to append the calibration pair to its input list). All three were
     # literal, so total and judgeable both drop by 3.
-    assert (total, judgeable) == (57, 56), (
+    assert (total, judgeable) == (59, 58), (
         f"Node coverage changed: {judgeable}/{total} statically judgeable. "
         "If this dropped, A5/A6 now have a bigger blind spot -- check why."
     )
@@ -2365,6 +2367,228 @@ class TestS8PipelinesDoNotImportEachOther:
         })
         assert _pipeline_import_offenders(root) == [
             "pipelines/training/b.py:1: imports recsys_tfb.pipelines.inference"
+        ]
+
+
+#: S9 (ADR-0031 principle 1): the report modules, which only assemble landed
+#: results, and the modules they may import besides each other. Paths are
+#: relative to the ``recsys_tfb`` package; a directory stands for every module
+#: under it. Every other ``recsys_tfb`` module counts as computing.
+_REPORT_MODULES = (
+    "evaluation/report.py",
+    "evaluation/report_builder.py",
+    "evaluation/report_sections",
+    "evaluation/comparison",
+    "report",
+)
+_REPORT_MAY_ALSO_IMPORT = (
+    "evaluation/result_readers.py",
+    "evaluation/metric_catalog.py",
+    "evaluation/segment_keys.py",
+    "evaluation/distributions.py",
+    "core/schema.py",
+    "core/consistency.py",
+    "core/date_ranges.py",
+)
+#: Third-party packages that compute; a report module imports none of them.
+_REPORT_FORBIDDEN_PACKAGES = ("pyspark",)
+
+
+def _under(rel, entries):
+    """Whether ``rel`` (a path relative to the package) is one of ``entries``
+    or lies under one of them."""
+    text = rel.as_posix()
+    return any(text == e or text.startswith(e + "/") for e in entries)
+
+
+def _module_file(module, root):
+    """The file a dotted ``recsys_tfb`` path lands on, relative to ``root``:
+    its longest prefix that is a module or a package. ``None`` for a path
+    outside ``recsys_tfb``."""
+    parts = module.split(".")
+    if parts[0] != "recsys_tfb":
+        return None
+    for n in range(len(parts), 0, -1):
+        base = root.joinpath(*parts[1:n])
+        if n > 1 and base.with_suffix(".py").is_file():
+            return base.with_suffix(".py").relative_to(root)
+        if (base / "__init__.py").is_file():
+            return (base / "__init__.py").relative_to(root)
+    return None
+
+
+def _report_import_offenders(root):
+    """``file:line: imports module`` for every import a report module makes of
+    a computing module or package (S9). Empty means the reports only read.
+
+    ``root`` is the ``recsys_tfb`` package directory (``SRC`` for the real
+    tree). ``from X import Y`` yields both ``X`` and ``X.Y``
+    (``_module_imports_at``); when ``X.Y`` is a module under package ``X``,
+    ``X``'s ``__init__`` is only the path to it, so it is not judged.
+    ``from recsys_tfb.core import schema`` imports ``core/schema.py``, not
+    ``core/__init__.py`` and the runner it pulls in.
+    """
+    allowed = _REPORT_MODULES + _REPORT_MAY_ALSO_IMPORT
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root)
+        if not _under(rel, _REPORT_MODULES):
+            continue
+        by_line = {}
+        for lineno, module in _module_imports_at(path, root):
+            by_line.setdefault(lineno, []).append(module)
+        for lineno, modules in sorted(by_line.items()):
+            files = {m: _module_file(m, root) for m in modules}
+            steps = {
+                f for f in files.values()
+                if f is not None and f.name == "__init__.py" and any(
+                    g != f and g.parts[:len(f.parts) - 1] == f.parts[:-1]
+                    for g in files.values() if g is not None
+                )
+            }
+            hits = {}
+            for module in sorted(modules, key=len):
+                f = files[module]
+                if f is None:
+                    if module.split(".")[0] in _REPORT_FORBIDDEN_PACKAGES:
+                        hits.setdefault(module.split(".")[0], module)
+                elif f not in steps and not _under(f, allowed):
+                    hits.setdefault(f, module)
+            offenders += [f"{rel}:{lineno}: imports {m}" for m in hits.values()]
+    return offenders
+
+
+class TestS9ReportsDoNotImportComputation:
+    """S9: the report modules only read landed results and assemble them.
+
+    ADR-0031 principle 1: computation lands its results; the reports read them
+    and compute nothing. #536 moved the last computations out (differences,
+    K truncation, the all-positive accounts, the popularity window, the
+    display bins), so the reports no longer import ``metrics``,
+    ``baselines``, ``prediction_quality``, ``compare`` or Spark. The allowed
+    list is closed: a module the reports may read from is named in
+    ``_REPORT_MAY_ALSO_IMPORT``, and anything else under ``recsys_tfb`` counts
+    as computing.
+
+    Direct imports only, scanned the way S8 scans them (relative imports
+    resolved, both halves of ``from X import Y``, imports inside functions).
+    Tests are not scanned, for the reason S3 gives.
+    """
+
+    def test_the_real_tree_is_clean(self):
+        offenders = _report_import_offenders(SRC)
+        assert offenders == [], (
+            "a report module imported a computing module (S9):\n"
+            + "\n".join(offenders)
+            + "\nLand what the report needs in a computing node and read it "
+            "back (evaluation/result_readers.py holds the readers); see "
+            "docs/agents/architecture-constraints.md S9."
+        )
+
+    def test_every_listed_path_exists(self):
+        """A renamed module would leave its entry naming nothing: the list
+        would still read as a rule while guarding a path nobody uses."""
+        missing = [
+            entry for entry in _REPORT_MODULES + _REPORT_MAY_ALSO_IMPORT
+            if not (SRC / entry).exists()
+        ]
+        assert missing == [], missing
+
+    def _tree(self, tmp_path, files):
+        root = tmp_path / "recsys_tfb"
+        skeleton = {
+            "__init__.py": "",
+            "core/__init__.py": "",
+            "core/schema.py": "",
+            "core/runner.py": "",
+            "evaluation/__init__.py": "",
+            "evaluation/metrics.py": "",
+            "evaluation/result_readers.py": "",
+            "evaluation/report.py": "",
+            "evaluation/report_sections/__init__.py": "",
+            "evaluation/report_sections/shared.py": "",
+            "evaluation/comparison/__init__.py": "",
+            "pipelines/__init__.py": "",
+            "pipelines/evaluation/__init__.py": "",
+            "pipelines/evaluation/steps/__init__.py": "",
+            "pipelines/evaluation/steps/config_fingerprint.py": "",
+            "report/__init__.py": "",
+            "report/pages.py": "",
+        }
+        for name, source in {**skeleton, **files}.items():
+            target = root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(source)
+        return root
+
+    def test_catches_every_spelling(self, tmp_path):
+        files = {
+            "evaluation/report_sections/abs_module.py":
+                "from recsys_tfb.evaluation.metrics import x\n",
+            "evaluation/report_sections/plain_import.py":
+                "import recsys_tfb.evaluation.metrics\n",
+            "evaluation/report_sections/second_half.py":
+                "from recsys_tfb.evaluation import metrics\n",
+            "evaluation/report_sections/rel_module.py":
+                "from ..metrics import x\n",
+            "evaluation/report_sections/rel_package.py":
+                "from .. import metrics\n",
+            "evaluation/report_sections/in_function.py":
+                "def f():\n    from recsys_tfb.evaluation import metrics\n",
+            "evaluation/report_sections/steps.py":
+                "from recsys_tfb.pipelines.evaluation.steps import "
+                "config_fingerprint\n",
+            "evaluation/report_sections/core_names.py":
+                "from recsys_tfb.core import Runner\n",
+            "evaluation/report_sections/spark.py": "import pyspark\n",
+            "evaluation/report_sections/spark_from.py":
+                "from pyspark.sql import functions as F\n",
+            "evaluation/comparison/report.py":
+                "from recsys_tfb.evaluation.metrics import x\n",
+            "evaluation/report_builder.py":
+                "from .metrics import x\n",
+            "report/types.py": "from ..evaluation import metrics\n",
+        }
+        root = self._tree(tmp_path, files)
+        found = _report_import_offenders(root)
+        lines = {"evaluation/report_sections/in_function.py": 2}
+        for name in files:
+            line = lines.get(name, 1)
+            assert any(f.startswith(f"{name}:{line}: imports ") for f in found), (
+                f"{name}: this spelling escaped the scan; found {found}"
+            )
+        assert len(found) == len(files), found
+
+    def test_allowed_imports_are_left_alone(self, tmp_path):
+        files = {
+            "evaluation/report_sections/ok.py":
+                "import json\nimport pandas as pd\n"
+                "from recsys_tfb.evaluation.result_readers import x\n"
+                "from recsys_tfb.evaluation import result_readers\n"
+                "from recsys_tfb.core.schema import get_schema\n"
+                "from recsys_tfb.core import schema\n"
+                "from recsys_tfb.evaluation.report_sections.shared import y\n"
+                "from .shared import y\nfrom . import shared\n"
+                "from ..report import z\n"
+                "from recsys_tfb.report.pages import render_table\n"
+                "from recsys_tfb import report\n",
+            "evaluation/comparison/report.py":
+                "from ..report_sections import shared\n",
+            # not a report module: computing modules import what they like
+            "evaluation/baselines.py":
+                "import pyspark\nfrom recsys_tfb.evaluation import metrics\n",
+        }
+        root = self._tree(tmp_path, files)
+        assert _report_import_offenders(root) == []
+
+    def test_the_message_names_file_line_and_module(self, tmp_path):
+        root = self._tree(tmp_path, {
+            "evaluation/report_sections/foo.py":
+                "import os\n\nfrom ..metrics import x\n",
+        })
+        assert _report_import_offenders(root) == [
+            "evaluation/report_sections/foo.py:3: imports "
+            "recsys_tfb.evaluation.metrics"
         ]
 
 
