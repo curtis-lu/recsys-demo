@@ -18,7 +18,7 @@ from recsys_tfb.evaluation.report_sections.shared import (
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
 #: The results this section reads, by catalog name (ADR-0031 principle 1).
-READS = ("evaluation_metrics",)
+READS = ("evaluation_row_facts",)
 
 
 def build(
@@ -26,8 +26,8 @@ def build(
 ) -> ReportSection | None:
     if not section_on(parameters, "dataset_overview"):
         return None
-    metrics = results["evaluation_metrics"]
-    ov = read_dataset_overview(metrics)
+    facts = results["evaluation_row_facts"]
+    ov = read_dataset_overview(facts)
     totals_d = ov.get("totals", {}) or {}
     totals = pd.DataFrame([totals_d]).T
     totals.columns = ["value"]
@@ -71,7 +71,7 @@ def build(
         tables.append(pd.DataFrame(seg_rows).T)
         titles.append("per-segment 正例組成")
         collapsed.append(False)
-    cat = metrics.get("category")
+    cat = facts.get("category")
     if cat:
         cat_by_item = read_dataset_overview(cat).get("by_item", {})
         if cat_by_item:
@@ -98,25 +98,24 @@ def build(
                 "表，會隨 r 改變，不代表全部曝光（要估全部曝光的正例率，看預測品質"
                 "段的加權數字）。與 r ＝ 0 時的報表相比數字變了是預期的，不是 "
                 "regression；固定整數 K 的排序指標則逐值不變。"
-                if (note := kept_zero_positive_groups_note(metrics, parameters))
+                if (note := kept_zero_positive_groups_note(facts, parameters))
                 else ""
             )
         ),
         tables=tables,
         table_titles=titles,
         collapsed_tables=collapsed,
-        bullets=_segment_notes(metrics.get("segments"), by_seg),
+        bullets=_segment_notes(facts.get("segments"), by_seg),
     )
 
 
 def _segment_notes(segments: dict | None, by_segment: dict) -> list[str]:
     """讀分群表前要知道的事：欄取自哪張表、哪張表缺欄、(unmatched) 怎麼算。
 
-    ``segments`` 是 ``compute_metrics`` 從 ``evaluation_segment_columns`` 帶來的
+    ``segments`` 是 ``compute_row_facts`` 從 ``evaluation_segment_columns`` 帶來的
     ``joined``／``sources``／``missing``（ADR-0020 bug 6）。缺欄時分群表根本不
     出現，這裡是唯一交代「為什麼沒有」的地方，所以表名與欄名都要印——設定
-    打錯欄名也會落到這裡。沒有 ``segments`` 的 metrics（這個機制之前寫的、
-    比較報表算的）不寫。
+    打錯欄名也會落到這裡。沒有 ``segments`` 的列的事實不寫。
     """
     if not segments:
         return []

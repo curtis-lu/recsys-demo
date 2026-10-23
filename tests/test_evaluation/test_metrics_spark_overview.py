@@ -5,7 +5,7 @@ import pytest
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation import metrics_spark as ms
 from recsys_tfb.evaluation.report_sections import overview, ranking_metrics
-from recsys_tfb.evaluation.metrics import ALL_K_KEY, resolved_all_k
+from recsys_tfb.evaluation.metrics import POPULATION_KEY, resolved_all_k
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
 
@@ -94,14 +94,12 @@ def test_dataset_overview_no_by_segment_without_seg_col(spark):
 # ---------------------------------------------------------------------------
 # 鍵含 NULL 時的計數（ADR-0018 決定 3）。整份輸出逐字釘住：收斂 job 數之後
 # 輸出不准變。比 JSON 字串而不只比 dict，因為 dict 的 == 看不出 6 變成 6.0。
-# 期望值是從資料列手算的，兩種計法並存是既有行為：
-#   totals 的 n_entities／n_items／n_snap_dates、by_segment 分母的 query 總數
-#       → NULL 算成一個值（跟 select(...).distinct().count() 一樣）
+# 期望值是從資料列手算的。總數與分群內是同一種計法（#361）：
+#   totals 的 n_entities／n_items／n_snap_dates、by_segment 分母的 query 總數、
 #   分群內的 n_entities／n_queries
-#       → 鍵裡任一欄是 NULL 就不算進 distinct（裸 countDistinct 的計法）；
-#         分群那一列本身照樣保留
-# 這裡釘的是「本張前的行為」，不是「正確的行為」：鍵含 NULL 時分子不算、
-# 分母算，by_segment 的 query_share 加總不到 1（見下面 by_segment 那條）。
+#       → NULL 算成一個值（跟 select(...).distinct().count() 一樣）
+# 所以鍵含 NULL 時 by_segment 的 query_share 照樣加總＝1。#361 之前分群內用裸
+# countDistinct，鍵裡任一欄是 NULL 就不算，加總只有 2/4。
 # ---------------------------------------------------------------------------
 
 
@@ -139,20 +137,20 @@ def _expected_null_keys():
             "avg_positives_per_entity": 3 / 3,
         },
         "by_snap_date": {
-            "20240331": {"n_rows": 4, "n_positives": 2, "n_entities": 1,
-                         "positive_rate": 2 / 4},
+            "20240331": {"n_rows": 4, "n_positives": 2, "n_entities": 2,
+                         "positive_rate": 2 / 4},       # c1、NULL
             "None": {"n_rows": 1, "n_positives": 1, "n_entities": 1,
                      "positive_rate": 1 / 1},
             "20240229": {"n_rows": 1, "n_positives": 0, "n_entities": 1,
                          "positive_rate": 0 / 1},
         },
         "by_item": {
-            "A": {"n_rows": 2, "n_positives": 1, "n_entities": 1,
-                  "positive_rate": 1 / 2},
+            "A": {"n_rows": 2, "n_positives": 1, "n_entities": 2,
+                  "positive_rate": 1 / 2},              # c1、NULL
             "B": {"n_rows": 2, "n_positives": 1, "n_entities": 2,
                   "positive_rate": 1 / 2},
-            "None": {"n_rows": 2, "n_positives": 1, "n_entities": 1,
-                     "positive_rate": 1 / 2},
+            "None": {"n_rows": 2, "n_positives": 1, "n_entities": 2,
+                     "positive_rate": 1 / 2},           # NULL、c2
         },
     }
 
@@ -167,7 +165,7 @@ def test_dataset_overview_null_keys_without_segment(spark):
 def test_dataset_overview_null_keys_by_segment(spark):
     # query 總數＝(snap_date, cust_id) 含 NULL 的 distinct＝4：
     # (0331,c1)、(0331,NULL)、(NULL,c2)、(0229,c2)
-    # 各 segment 的 n_queries 不算含 NULL 的鍵 → query_share 加總＝2/4，不是 1
+    # 各 segment 的 n_queries 也算含 NULL 的鍵 → query_share 加總＝1（#361）
     ov = ms.compute_dataset_overview(
         _df_null_keys(spark), _params(), segment_columns=["seg"]
     )
@@ -175,13 +173,14 @@ def test_dataset_overview_null_keys_by_segment(spark):
     expected["by_segment"] = {
         "X": {"n_rows": 2, "n_positives": 1, "n_entities": 1,
               "positive_rate": 1 / 2, "n_queries": 1, "query_share": 1 / 4},
-        UNMATCHED_SEGMENT: {"n_rows": 2, "n_positives": 1, "n_entities": 0,
-                            "positive_rate": 1 / 2, "n_queries": 0,
-                            "query_share": 0 / 4},
+        UNMATCHED_SEGMENT: {"n_rows": 2, "n_positives": 1, "n_entities": 1,
+                            "positive_rate": 1 / 2, "n_queries": 1,
+                            "query_share": 1 / 4},       # (0331,NULL)
         "Y": {"n_rows": 2, "n_positives": 1, "n_entities": 1,
-              "positive_rate": 1 / 2, "n_queries": 1, "query_share": 1 / 4},
+              "positive_rate": 1 / 2, "n_queries": 2, "query_share": 2 / 4},
     }
     assert ov["by_segment"] == expected["by_segment"]
+    assert sum(c["query_share"] for c in ov["by_segment"].values()) == 1
     _assert_same_json(ov, expected)
 
 
@@ -215,22 +214,25 @@ def test_dataset_overview_null_keys_two_column_entity(
             "avg_positives_per_entity": 2 / 3,
         },
         "by_snap_date": {
-            "20240331": {"n_rows": 4, "n_positives": 2, "n_entities": 1,
+            # (b1,c1)、(b1,NULL)、(NULL,NULL)
+            "20240331": {"n_rows": 4, "n_positives": 2, "n_entities": 3,
                          "positive_rate": 2 / 4},
             "20240229": {"n_rows": 1, "n_positives": 0, "n_entities": 1,
                          "positive_rate": 0 / 1},
         },
         "by_item": {
-            "p1": {"n_rows": 3, "n_positives": 1, "n_entities": 1,
+            "p1": {"n_rows": 3, "n_positives": 1, "n_entities": 3,
                    "positive_rate": 1 / 3},
-            "p2": {"n_rows": 2, "n_positives": 1, "n_entities": 1,
+            "p2": {"n_rows": 2, "n_positives": 1, "n_entities": 2,
                    "positive_rate": 1 / 2},
         },
         "by_segment": {
-            "X": {"n_rows": 4, "n_positives": 2, "n_entities": 1,
-                  "positive_rate": 2 / 4, "n_queries": 2, "query_share": 2 / 4},
-            "Y": {"n_rows": 1, "n_positives": 0, "n_entities": 0,
-                  "positive_rate": 0 / 1, "n_queries": 0, "query_share": 0 / 4},
+            # (0331,b1,c1)、(0331,b1,NULL)、(0229,b1,c1)
+            "X": {"n_rows": 4, "n_positives": 2, "n_entities": 2,
+                  "positive_rate": 2 / 4, "n_queries": 3, "query_share": 3 / 4},
+            # (0331,NULL,NULL)
+            "Y": {"n_rows": 1, "n_positives": 0, "n_entities": 1,
+                  "positive_rate": 0 / 1, "n_queries": 1, "query_share": 1 / 4},
         },
     })
 
@@ -316,6 +318,12 @@ def test_all_resolves_to_the_widest_query_group_with_the_event_role(spark):
     ) == 4
 
 
+def _both(frame, params, **kw):
+    """Row facts and metrics of the same frame, as the pipeline computes them."""
+    facts = ms.compute_row_facts(frame, params, **kw)
+    return facts, ms.compute_all_metrics(frame, params, facts, **kw)
+
+
 def _spark_jobs(spark, run):
     """How many Spark jobs ``run`` submits, counted by the status tracker
     (the form of ``test_categoricals._jobs_run_by``)."""
@@ -351,7 +359,9 @@ def test_resolving_all_costs_no_job_of_its_own(spark, monkeypatch, with_event):
     df, params = (_event_df(spark), _event_params()) if with_event else (
         _df(spark), _params())
     params["evaluation"] = {"k_values": [1, "all"]}
-    run = lambda: ms.compute_all_metrics(df, params, with_category=False)  # noqa: E731
+    facts = ms.compute_row_facts(df, params, with_category=False)
+    run = lambda: ms.compute_all_metrics(  # noqa: E731
+        df, params, facts, with_category=False)
     expected = run()
     real = _spark_jobs(spark, run)
 
@@ -415,8 +425,9 @@ def test_the_report_finds_map_at_all_with_the_occasion_role(spark):
     will ask for, and nothing new written to ask it with."""
     params = _occasion_params()
     params["evaluation"] = {"k_values": [1, "all"]}
-    out = ms.compute_all_metrics(_occasion_df(spark), params)
-    assert ALL_K_KEY not in out
+    _, out = _both(_occasion_df(spark), params)
+    # No event role: "all" is the item count (A, B, C, D), recorded in the ledger.
+    assert resolved_all_k(out) == 4
     assert f"map@{resolved_all_k(out)}" in out["overall"]
 
 
@@ -435,9 +446,9 @@ def test_evaluated_queries_are_the_occasions_with_a_positive(spark):
     """Three occasions (r1, r2, r3); only r1 holds a click. So three queries,
     two excluded, one evaluated — under ``time`` + ``entity`` it would be two
     queries, c1's pooling r1 with r2."""
-    out = ms.compute_all_metrics(_occasion_df(spark), _occasion_params())
-    assert out["n_queries"] == 3
-    assert out["n_queries"] - out["n_excluded_queries"] == 1
+    facts, _ = _both(_occasion_df(spark), _occasion_params())
+    assert facts["n_queries"] == 3
+    assert facts["n_queries"] - facts["n_excluded_queries"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -498,33 +509,36 @@ def test_the_report_finds_map_and_recall_at_all_with_the_event_role(spark):
     nothing raised. Expected values are worked out by hand in
     ``_wide_event_df``."""
     params = _event_params_with_categories()
-    out = ms.compute_all_metrics(_wide_event_df(spark), params)
+    facts, out = _both(_wide_event_df(spark), params)
 
     overall = _table(ranking_metrics.build(
-        {"evaluation_metrics": out}, params), "overall（")
+        {"evaluation_row_facts": facts, "evaluation_metrics": out},
+        params), "overall（")
     assert overall.loc["map", "@all"] == pytest.approx(0.625)
     assert overall.loc["recall", "@all"] == pytest.approx(1.0)
 
     s = overview.build(
-        {"evaluation_metrics": out, "prediction_quality_metrics": None},
+        {"evaluation_row_facts": facts, "evaluation_metrics": out,
+         "prediction_quality_metrics": None},
         params)
     card = s.tables[s.table_titles.index(
         "overall mAP@k（per-query 等權，另一種加權）")]
     assert card.loc["map@all", "value"] == pytest.approx(0.625)
 
 
-def test_all_k_is_written_only_when_the_frame_holds_event_rows(spark):
-    """Written for the fine-grained pass, where the widest group can outgrow
-    the item list. Not for the category pass — collapsing leaves one row per
-    (query group, category), so no event rows remain — and not at all without
-    the role, which keeps every existing artifact value-for-value."""
-    out = ms.compute_all_metrics(
-        _wide_event_df(spark), _event_params_with_categories())
-    assert out[ALL_K_KEY] == 4
-    assert ALL_K_KEY not in out["category"]
+def test_all_k_is_written_for_every_grain_whatever_it_resolved_to(spark):
+    """Every bundle records what ``"all"`` resolved to (``population.all_k``),
+    so no reader recomputes it (#434, #535): the widest group for the
+    fine-grained pass when the frame holds event rows (the widest group can
+    outgrow the item list), the category count for the category pass —
+    collapsing leaves one row per (query group, category), so no event rows
+    remain — and the item count without the role."""
+    _, out = _both(_wide_event_df(spark), _event_params_with_categories())
+    assert out[POPULATION_KEY]["all_k"] == 4
+    assert out["category"][POPULATION_KEY]["all_k"] == 2
 
-    undeclared = ms.compute_all_metrics(_df(spark), _params())
-    assert ALL_K_KEY not in undeclared
+    _, undeclared = _both(_df(spark), _params())
+    assert undeclared[POPULATION_KEY]["all_k"] == 2
 
 
 def test_category_all_is_the_category_count_with_the_event_role(spark):
@@ -538,9 +552,10 @@ def test_category_all_is_the_category_count_with_the_event_role(spark):
     come out the same at either K, since neither truncates. Each clicked group
     holds one positive over K = 2, so 0.5; at K = 1 it would be 1.0."""
     params = _event_params_with_categories()
-    out = ms.compute_all_metrics(_wide_event_df(spark), params)
+    facts, out = _both(_wide_event_df(spark), params)
 
     cat = _table(ranking_metrics.build(
-        {"evaluation_metrics": out}, params), "大類 overall")
+        {"evaluation_row_facts": facts, "evaluation_metrics": out},
+        params), "大類 overall")
     assert cat.loc["map", "@all"] == pytest.approx(1.0)
     assert cat.loc["precision", "@all"] == pytest.approx(0.5)

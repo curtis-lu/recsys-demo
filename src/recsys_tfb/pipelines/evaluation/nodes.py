@@ -52,7 +52,9 @@ from recsys_tfb.evaluation.compare import build_comparison_result
 from recsys_tfb.evaluation.comparison.report import assemble_comparison_report
 from recsys_tfb.evaluation.diagnostics_spark import aggregate_report_diagnostics
 from recsys_tfb.evaluation.metrics import (
+    ALL_K_KEY,
     ALL_POSITIVE_KEY,
+    POPULATION_KEY,
     all_positive_share,
     all_positive_share_warns,
     drop_all_positive_groups,
@@ -61,7 +63,7 @@ from recsys_tfb.evaluation.metrics import (
 )
 from recsys_tfb.evaluation.metrics_spark import (
     compute_all_metrics,
-    compute_overall_per_item,
+    compute_row_facts as _count_row_facts,
     hand_category_mapping,
     rank_within_query,
 )
@@ -603,36 +605,32 @@ def make_prepare_eval_data_node(population_name: str):
     return prepare_eval_data
 
 
-def compute_metrics(
+def compute_row_facts(
     eval_predictions: SparkDataFrame,
     segment_columns: dict,
     parameters: dict,
     item_categories: Optional[dict] = None,
 ) -> dict:
-    """Compute ranking metrics using the Spark-native pipeline.
+    """The facts of the evaluated rows, whatever their scores (ADR-0031
+    decision 4): the dataset overview and the query group counts, per grain
+    (``evaluation.metrics_spark.compute_row_facts``), plus the segment columns
+    ``prepare_eval_data`` joined.
 
-    Thin wrapper over `evaluation.metrics_spark.compute_all_metrics`. All
-    row-level work stays in Spark; only small aggregated dicts are collected.
+    Lands as ``evaluation_row_facts`` (``row_facts.json``) and carries
+    ``config_fingerprint``. One result for the model and its popularity
+    baseline: the baseline re-scores these same rows (a left join,
+    ``baselines.build_baseline_frame``), so ``compute_metrics`` and
+    ``compute_baseline_metrics`` both take it instead of counting again, and
+    the baseline produces no facts of its own (ADR-0031 decision 8).
 
-    Segments by what ``prepare_eval_data`` joined (``segment_columns``, the
-    landed ``evaluation_segment_columns``), and copies its ``joined`` /
-    ``sources`` / ``missing`` into the result as ``segments``: the report says
-    which table each column came from and which one lacked a column.
+    Copies ``joined`` / ``sources`` / ``missing`` of ``segment_columns`` as
+    ``segments``: the report says which table each column came from and which
+    one lacked a column.
 
-    The result lands as ``evaluation_metrics`` (``metrics.json``, ADR-0018
-    decision 2) and carries ``config_fingerprint``, which ``generate_report``
-    checks before drawing from it.
-
-    ``evaluation.query_filter.drop_all_positive_groups`` (#376) decides whether
-    the all-positive query groups leave the metrics; the count
-    ``n_all_positive_queries`` is in the result either way, per grain, and
-    logged with its share of the groups holding a positive — warned about
-    when the switch is off and the share is above
-    ``metrics.ALL_POSITIVE_WARN_SHARE``.
-
-    The category pass ranks by ``item_categories`` (the landed
-    ``evaluation_item_categories``) in column mode, by the hand-written
-    mapping in ``parameters`` otherwise (``_landed_category_mapping``, #379).
+    ``n_all_positive_queries`` is logged per grain with its share of the
+    groups holding a positive, and warned about when
+    ``evaluation.query_filter.drop_all_positive_groups`` is off and the share
+    is above ``metrics.ALL_POSITIVE_WARN_SHARE`` (#376).
 
     Pre-checks (inputs): the landed segment list and category table were
     prepared under today's settings (``_require_prepared_with_current_config``,
@@ -640,7 +638,7 @@ def compute_metrics(
     (``restrict_to_current_eval_partitions``).
 
     Postcondition: every configured date was evaluated, i.e. the number of
-    months in the result equals the number of configured dates. The
+    months in the facts equals the number of configured dates. The
     restriction leaves at most that many, so what this refuses is fewer, an
     empty or never-written partition for some date; reading a Hive table
     raises nothing for either. The dates are evaluated together, as one set of
@@ -650,31 +648,22 @@ def compute_metrics(
     _require_prepared_with_current_config(
         segment_columns, parameters, item_categories)
     category_mapping = _landed_category_mapping(item_categories, parameters)
-    # Decision — evaluate the configured dates only, from partitions written
+    # Decision — count the configured dates only, from partitions written
     # under today's settings: the table holds every month this model_version
     # was evaluated on.
     eval_predictions = restrict_to_current_eval_partitions(
         eval_predictions, parameters, segment_columns).frame
-
-    # Decision — drop the all-positive query groups (the same positive label on
-    # every row, so every per-query metric is the same whatever the order)
-    # only when evaluation.query_filter.drop_all_positive_groups says so;
-    # counted either way. Read here and passed down, never inside
-    # metrics_spark: that module also holds training's test scoring
-    # (compute_untruncated_ap), which must not follow the switch (#376).
-    drop_all_positive = drop_all_positive_groups(parameters)
-    result = compute_all_metrics(
+    facts = _count_row_facts(
         eval_predictions, parameters,
         segment_columns=segment_columns["joined"],
-        drop_all_positive_groups=drop_all_positive,
         category_mapping=category_mapping,
     )
-    n_snap_dates = result["dataset_overview"]["totals"]["n_snap_dates"]
+    n_snap_dates = facts["dataset_overview"]["totals"]["n_snap_dates"]
     snap_dates = eval_snap_dates(parameters)
     if n_snap_dates != len(snap_dates):
         one = len(snap_dates) == 1
         raise ValueError(
-            f"compute_metrics postcondition: {n_snap_dates} evaluated months "
+            f"compute_row_facts postcondition: {n_snap_dates} evaluated months "
             f"in enriched_eval_predictions for evaluation.snap_date="
             f"{snap_dates[0] if one else snap_dates!r} "
             f"(model_version={parameters.get('model_version')!r}), expected "
@@ -685,16 +674,17 @@ def compute_metrics(
                "written")
             + "; re-run with --from-node prepare_eval_data."
         )
-    result["segments"] = {
+    facts["segments"] = {
         k: segment_columns[k] for k in ("joined", "sources", "missing")
     }
-    result["config_fingerprint"] = fingerprint(parameters)
+    facts["config_fingerprint"] = fingerprint(parameters)
+    drop_all_positive = drop_all_positive_groups(parameters)
     # One line of accounts per grain, and a warning when the all-positive
     # share is high with the switch off (the rule:
     # metrics.all_positive_share_warns, which the report calls too). Each
     # grain decides on its own frame, so the two can disagree.
-    for grain, bundle in (("fine", result),
-                          ("category", result.get("category"))):
+    for grain, bundle in (("fine", facts),
+                          ("category", facts.get("category"))):
         if bundle is None:
             continue
         n_with_positive = n_groups_with_positive(bundle)
@@ -702,7 +692,7 @@ def compute_metrics(
         share = all_positive_share(bundle)
         share_text = "n/a" if share is None else format_share(share)
         logger.info(
-            "Spark metrics computed (%s grain): n_queries=%d, n_excluded=%d "
+            "Row facts counted (%s grain): n_queries=%d, n_excluded=%d "
             "(no positive); %d hold a positive, of which %d all-positive "
             "(%s) — %s",
             grain, bundle["n_queries"], bundle["n_excluded_queries"],
@@ -723,6 +713,88 @@ def compute_metrics(
                 "true to drop them from the metrics and the baseline.",
                 grain, n_all_positive, n_with_positive, share_text,
             )
+    return facts
+
+
+def _require_row_facts_current(row_facts: dict, parameters: dict) -> None:
+    """Pre-check (inputs): the landed row facts were counted under today's
+    settings. A slice starting at a metrics node reads them back from disk,
+    and facts counted on another population would key every ``@all`` metric
+    at the wrong K with no error (``metrics_spark._compute_core``)."""
+    require_computed_with_current_config(
+        [LoadedArtifact(catalog_name="evaluation_row_facts",
+                        payload=row_facts, produced_by="compute_row_facts")],
+        parameters)
+
+
+def compute_metrics(
+    eval_predictions: SparkDataFrame,
+    row_facts: dict,
+    segment_columns: dict,
+    parameters: dict,
+    item_categories: Optional[dict] = None,
+) -> dict:
+    """Compute ranking metrics using the Spark-native pipeline.
+
+    Thin wrapper over `evaluation.metrics_spark.compute_all_metrics`. All
+    row-level work stays in Spark; only small aggregated dicts are collected.
+
+    Segments by what ``prepare_eval_data`` joined (``segment_columns``, the
+    landed ``evaluation_segment_columns``). Reads the query group counts and
+    the item count off ``row_facts`` (``compute_row_facts``, landed just
+    before), counted on these same rows; the result keeps none of them, only
+    the population ledger of what it was computed on
+    (``metrics.POPULATION_KEY``).
+
+    The result lands as ``evaluation_metrics`` (``metrics.json``, ADR-0018
+    decision 2) and carries ``config_fingerprint``, which ``generate_report``
+    checks before drawing from it.
+
+    ``evaluation.query_filter.drop_all_positive_groups`` (#376) decides whether
+    the all-positive query groups leave the metrics; how many there are is the
+    row facts' to count and log.
+
+    The category pass ranks by ``item_categories`` (the landed
+    ``evaluation_item_categories``) in column mode, by the hand-written
+    mapping in ``parameters`` otherwise (``_landed_category_mapping``, #379).
+
+    Pre-checks (inputs): the landed segment list, category table and row facts
+    were prepared under today's settings (``_require_prepared_with_current_config``,
+    ``_landed_category_mapping``, ``_require_row_facts_current``), and so was
+    each evaluated date's partition (``restrict_to_current_eval_partitions``).
+    That the row facts were counted on the same partitions is not checked:
+    re-running this node alone after the partitions were rewritten under the
+    same settings reads facts of rows that are gone (``--from-node
+    compute_row_facts`` re-counts them).
+    """
+    _require_prepared_with_current_config(
+        segment_columns, parameters, item_categories)
+    _require_row_facts_current(row_facts, parameters)
+    category_mapping = _landed_category_mapping(item_categories, parameters)
+    # Decision — evaluate the configured dates only, from partitions written
+    # under today's settings: the table holds every month this model_version
+    # was evaluated on.
+    eval_predictions = restrict_to_current_eval_partitions(
+        eval_predictions, parameters, segment_columns).frame
+
+    # Decision — drop the all-positive query groups (the same positive label on
+    # every row, so every per-query metric is the same whatever the order)
+    # only when evaluation.query_filter.drop_all_positive_groups says so.
+    # Read here and passed down, never inside metrics_spark: that module also
+    # holds training's test scoring (compute_untruncated_ap), which must not
+    # follow the switch (#376).
+    result = compute_all_metrics(
+        eval_predictions, parameters, row_facts,
+        segment_columns=segment_columns["joined"],
+        drop_all_positive_groups=drop_all_positive_groups(parameters),
+        category_mapping=category_mapping,
+    )
+    result["config_fingerprint"] = fingerprint(parameters)
+    logger.info(
+        "Spark metrics computed: %d query groups scored, all resolves to %d",
+        result[POPULATION_KEY]["n_scored_queries_with_positive"],
+        result[POPULATION_KEY][ALL_K_KEY],
+    )
     return result
 
 
@@ -811,6 +883,7 @@ def _positive_rate_block(period_counts, snap_dates, lookback_months, parameters)
 
 def compute_baseline_metrics(
     eval_predictions: SparkDataFrame,
+    row_facts: dict,
     label_table: SparkDataFrame,
     segment_columns: dict,
     parameters: dict,
@@ -824,10 +897,15 @@ def compute_baseline_metrics(
     purchase count — or, with ``evaluation.baseline.score: rate`` under
     ``--post-training`` (#397), its positive rate read off
     ``popularity_period_counts``, restricted to the periods the month plan
-    lists (both wired as the sixth and seventh input only then) — then runs the
-    slim metrics path (overall + per_item). ``item_categories`` is the fifth
-    input in both wirings, not appended after those two: inputs bind by
-    position, and appended it would take ``popularity_period_counts``' slot
+    lists (both wired as the seventh and eighth input only then) — then
+    computes the model's metrics on it, ``compute_all_metrics`` as
+    ``compute_metrics`` calls it (ADR-0031 decision 8): the same slices, the
+    same macro. ``row_facts`` is the model's (``compute_row_facts``): the
+    baseline re-scores those rows one for one (``build_baseline_frame``, a
+    left join), so it counts nothing of its own and produces no row facts.
+    ``row_facts`` is the second input and ``item_categories`` the sixth in
+    both wirings, not appended after the two rate inputs: inputs bind by
+    position, and appended they would take ``popularity_period_counts``' slot
     in the wiring without them (``known-pitfalls.md`` §12). Its category
     slice ranks by it as ``compute_metrics`` does. Which one is the wiring's call
     (ADR-0013): monitoring with ``score: rate`` gets no counts and ranks by
@@ -839,9 +917,9 @@ def compute_baseline_metrics(
     off under the current settings" from "left over from an older run"
     (ADR-0018 decision 2, ADR-0020 decision 2).
 
-    Returns dict with keys:
-      - overall:        dict[str, float]   slim metrics
-      - per_item:       dict[str, dict]    per-product slim metrics
+    Returns ``compute_all_metrics``' bundle — ``overall``, ``per_item``,
+    ``macro_avg``, the population ledger and the rest, as in
+    ``evaluation_metrics`` — plus:
       - purchase_counts: dict[str, int]    per-product popularity count
             aggregated across eval snap_dates (sum). Drives the report's
             popularity-composition table; consumers must treat absence
@@ -860,9 +938,10 @@ def compute_baseline_metrics(
             ``generate_report``.
 
     Pre-checks (inputs), past the stub: the landed segment list, category
-    table and each evaluated date's partition were prepared under today's
-    settings (``_require_prepared_with_current_config``,
-    ``_landed_category_mapping``, ``restrict_to_current_eval_partitions``).
+    table, row facts and each evaluated date's partition were prepared under
+    today's settings (``_require_prepared_with_current_config``,
+    ``_require_row_facts_current``, ``_landed_category_mapping``,
+    ``restrict_to_current_eval_partitions``).
     """
     eval_params = parameters.get("evaluation", {}) or {}
     sections = (eval_params.get("report", {}) or {}).get("sections", {}) or {}
@@ -874,6 +953,7 @@ def compute_baseline_metrics(
 
     _require_prepared_with_current_config(
         segment_columns, parameters, item_categories)
+    _require_row_facts_current(row_facts, parameters)
     category_mapping = _landed_category_mapping(item_categories, parameters)
     # Decision — score the evaluated dates only, from partitions written under
     # today's settings: the table holds every month this model_version was
@@ -977,17 +1057,14 @@ def compute_baseline_metrics(
         }
     baseline_frame = build_baseline_frame(
         eval_predictions, rate_scores if rate_mode else counts, parameters)
-    # per_segment / category slices for the report's by-segment / 大類 vs
-    # baseline comparison. Gated by what turns them on for the model (the
-    # segment columns prepare_eval_data joined / item_categories maps items),
-    # so the baseline pays for a slice only when the model computed its match.
-    # Decision — drop the all-positive query groups exactly when compute_metrics
-    # does (#376): the report reads the baseline against the model.
-    metrics = compute_overall_per_item(
-        baseline_frame,
-        parameters,
+    # Decision — the model's metrics on the baseline's scores, called as
+    # compute_metrics calls them (ADR-0031 decision 8): the same segment and
+    # category slices, the same macro, and the all-positive query groups
+    # dropped exactly when the model's are (#376). The report reads the
+    # baseline against the model, number for number.
+    metrics = compute_all_metrics(
+        baseline_frame, parameters, row_facts,
         segment_columns=segment_columns["joined"],
-        with_category=True,
         drop_all_positive_groups=drop_all_positive_groups(parameters),
         category_mapping=category_mapping,
     )
@@ -1000,7 +1077,7 @@ def compute_baseline_metrics(
             popularity_period_counts, snap_dates, lookback_months, parameters)
     metrics["config_fingerprint"] = fingerprint(parameters)
     logger.info(
-        "Baseline metrics computed (overall + per_item) for snap_dates=%s; "
+        "Baseline metrics computed for snap_dates=%s; "
         "purchase_counts has %d products, monthly_counts spans %d months",
         snap_dates, len(purchase_counts),
         len({mo for per in monthly_counts.values() for mo in per}),
@@ -1214,6 +1291,7 @@ def compute_report_aggregates(
 
 
 def generate_report(
+    evaluation_row_facts: dict,
     evaluation_metrics: dict,
     baseline_metrics: dict,
     evaluation_report_aggregates: dict,
@@ -1237,6 +1315,9 @@ def generate_report(
     still redraws without recomputing anything.
     """
     loaded = [
+        LoadedArtifact(catalog_name="evaluation_row_facts",
+                       payload=evaluation_row_facts,
+                       produced_by="compute_row_facts"),
         LoadedArtifact(catalog_name="evaluation_metrics",
                        payload=evaluation_metrics,
                        produced_by="compute_metrics"),
@@ -1409,7 +1490,7 @@ def generate_comparison_report(
     parameters: dict,
     item_categories: Optional[dict] = None,
 ) -> str:
-    """Run compute_all_metrics on both sides + assemble HTML.
+    """Run compute_row_facts + compute_all_metrics on both sides + assemble HTML.
 
     Only this run's side segments, by what ``prepare_eval_data`` joined
     (``segment_columns``; under ``--compare-only`` the copy landed next to the
@@ -1434,22 +1515,29 @@ def generate_comparison_report(
     which only column mode refuses (``_landed_category_mapping``; the CLI
     refuses it earlier, ``_compare_only_input_errors``).
 
+    Each side's metrics count off that side's own row facts
+    (``compute_row_facts``): the two frames are not the same rows, so the
+    landed facts of the run's rows fit neither. Counted here and not landed —
+    the comparison layer that lands them is #536.
+
     Pre-check (inputs): in column mode, the category table was landed and
     read off today's column (``_landed_category_mapping``).
     """
     drop_all_positive = drop_all_positive_groups(parameters)
     category_mapping = _landed_category_mapping(item_categories, parameters)
-    metrics_a = compute_all_metrics(
-        eval_predictions_common, parameters,
-        segment_columns=segment_columns["joined"],
-        drop_all_positive_groups=drop_all_positive,
-        category_mapping=category_mapping,
-    )
-    metrics_b = compute_all_metrics(
-        compare_predictions_common, parameters, segment_columns=[],
-        drop_all_positive_groups=drop_all_positive,
-        category_mapping=category_mapping,
-    )
+    sides = {}
+    for side, frame, segments in (
+            ("a", eval_predictions_common, segment_columns["joined"]),
+            ("b", compare_predictions_common, [])):
+        facts = _count_row_facts(
+            frame, parameters, segment_columns=segments,
+            category_mapping=category_mapping)
+        sides[side] = (facts, compute_all_metrics(
+            frame, parameters, facts, segment_columns=segments,
+            drop_all_positive_groups=drop_all_positive,
+            category_mapping=category_mapping,
+        ))
+    (row_facts_a, metrics_a), (_, metrics_b) = sides["a"], sides["b"]
 
     src = (parameters.get("evaluation", {}) or {}).get("compare", {}) or {}
     label_a = "Model"
@@ -1458,6 +1546,7 @@ def generate_comparison_report(
 
     return assemble_comparison_report(
         {
+            "row_facts_a": row_facts_a,
             "metrics_a": metrics_a,
             "metrics_b": metrics_b,
             "comparison": comparison,

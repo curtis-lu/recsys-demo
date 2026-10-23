@@ -78,9 +78,11 @@ flowchart TB
   d_catmap(["evaluation_item_categories<br/><small>JSON ・ column ／ mapping（只有欄模式有內容）<br/>optional：#379 之前的評估目錄沒有它</small>"])
 
   %% ---------------------- 指標流 ----------------------
-  n_metrics["compute_metrics<br/><small>overall / per_item / per_segment / per_item_segment<br/>＋ macro_avg ＋ dataset_overview ＋（可選）category</small>"]
+  n_rowfacts["compute_row_facts<br/><small>列的事實（跟分數無關）：dataset_overview ＋ query group 數 ＋ 無正例／全正組數<br/>item 與（可選）大類粒度 ・ 模型與 baseline 共用（#535）</small>"]
+  d_rowfacts(["evaluation_row_facts<br/><small>JSON</small>"])
+  n_metrics["compute_metrics<br/><small>overall / per_item / per_segment / per_item_segment<br/>＋ macro_avg ＋ 母體帳 population ＋（可選）category</small>"]
   d_metrics(["evaluation_metrics<br/><small>JSON</small>"])
-  n_baseline["compute_baseline_metrics<br/><small>popularity baseline：近 lookback_months 的購買數當分數</small>"]
+  n_baseline["compute_baseline_metrics<br/><small>popularity baseline：近 lookback_months 的購買數當分數<br/>同一批列、跟模型同一套指標計算（含 macro）</small>"]
   d_baseline(["baseline_metrics<br/><small>JSON</small>"])
   n_pq["compute_prediction_quality<br/><small>每一列候選當二元預測 ・ 一次 groupBy(item, 細箱) ・ 不排除無正例的 query group<br/>report.sections.prediction_quality: false（框架預設）時只寫 stub</small>"]
   d_pq(["prediction_quality_metrics<br/><small>JSON</small>"])
@@ -98,7 +100,7 @@ flowchart TB
     d_braw(["compare_predictions_raw"])
     n_restrict["restrict_to_common<br/><small>取共同 query group 與 item ・ 雙方重新排名<br/>B 一律抄 A 的 label</small>"]
     d_common(["eval_predictions_common<br/>compare_predictions_common<br/>compare_coverage_partial"])
-    n_creport["generate_comparison_report<br/><small>兩側各重跑一次 compute_all_metrics，再組 HTML（算與畫同一個 node）<br/>只有 Model A 照 evaluation_segment_columns 分群</small>"]
+    n_creport["generate_comparison_report<br/><small>兩側各重跑一次 compute_row_facts ＋ compute_all_metrics，再組 HTML（算與畫同一個 node）<br/>只有 Model A 照 evaluation_segment_columns 分群</small>"]
     o_creport(["evaluation_comparison_report　★ report_comparison.html"])
   end
 
@@ -109,6 +111,7 @@ flowchart TB
   src_seg -- "先讀欄位清單（只碰 metastore）<br/>dropDuplicates(key) 後 left join" --> n_prep
   n_prep --> o_enriched
   n_prep --> d_segcols
+  d_segcols --> n_rowfacts
   d_segcols --> n_metrics
   d_segcols --> n_baseline
   d_segcols -- "--compare-only：讀寫 enriched 那次落地的" --> n_creport
@@ -118,10 +121,15 @@ flowchart TB
   d_segcols --> n_validate
   cfg_cat -- "column：只讀評估月份的 sample_pool<br/>一個 item 兩個大類就擋（B18）" --> n_prep
   n_prep --> d_catmap
+  d_catmap --> n_rowfacts
   d_catmap --> n_metrics
   d_catmap --> n_baseline
   d_catmap -- "--compare-only：欄模式才需要" --> n_creport
 
+  o_enriched --> n_rowfacts
+  n_rowfacts --> d_rowfacts
+  d_rowfacts -- "組數與 item 數" --> n_metrics
+  d_rowfacts -- "組數與 item 數" --> n_baseline
   o_enriched --> n_metrics
   cfg_cat --> n_metrics
   n_metrics --> d_metrics
@@ -133,6 +141,7 @@ flowchart TB
   o_enriched --> n_pq
   n_pq --> d_pq
 
+  d_rowfacts --> n_report
   d_metrics --> n_report
   d_baseline --> n_report
   d_agg --> n_report
@@ -158,7 +167,7 @@ flowchart TB
 
   class src_ranked,src_teval,src_label,src_seg src
   class cfg_cat cfg
-    class n_prep,n_metrics,n_baseline,n_pq,n_agg,n_report,n_validate,n_loadb,n_restrict,n_creport nd
-  class d_agg,d_metrics,d_baseline,d_pq data
+    class n_prep,n_rowfacts,n_metrics,n_baseline,n_pq,n_agg,n_report,n_validate,n_loadb,n_restrict,n_creport nd
+  class d_agg,d_rowfacts,d_metrics,d_baseline,d_pq data
   class d_braw,d_common mem
   class o_report,o_enriched,o_creport out

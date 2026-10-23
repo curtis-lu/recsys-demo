@@ -15,7 +15,7 @@ from recsys_tfb.evaluation.report_sections.shared import (
 )
 
 #: The results this section reads, by catalog name (ADR-0031 principle 1).
-READS = ("evaluation_metrics",)
+READS = ("evaluation_row_facts",)
 
 
 def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
@@ -23,9 +23,9 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
 
     presentation §一.4：交代邊界。只陳述事實，不評級。
     """
-    metrics = results["evaluation_metrics"]
+    row_facts = results["evaluation_row_facts"]
     eval_p = parameters.get("evaluation", {}) or {}
-    totals = read_dataset_overview(metrics).get("totals", {}) or {}
+    totals = read_dataset_overview(row_facts).get("totals", {}) or {}
     metric_p = metric_params(parameters)
 
     mk = metric_p["k"]
@@ -37,7 +37,7 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
     facts = {
         "k_values": eval_p.get("k_values"),
         # Same rows as the overview's scale table, one derivation (#376).
-        **query_count_rows(metrics, parameters),
+        **query_count_rows(row_facts, parameters),
         "正例列數 n_positives": totals.get("n_positives"),
         f"{item_col} 數 n_items": totals.get("n_items"),
         "metric.weight_alpha（item 加權指數 α；0＝item 等權）":

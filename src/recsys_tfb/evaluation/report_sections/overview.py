@@ -22,7 +22,8 @@ from recsys_tfb.evaluation.report_sections.shared import (
 )
 
 #: The results this section reads, by catalog name (ADR-0031 principle 1).
-READS = ("evaluation_metrics", "prediction_quality_metrics")
+READS = ("evaluation_row_facts", "evaluation_metrics",
+         "prediction_quality_metrics")
 
 
 def _headline_key(parameters: dict, all_k: int) -> str:
@@ -88,7 +89,8 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
     # 「每 X 平均正例數」的 X 印使用者自己的 entity 欄，不寫死「客戶」——entity
     # 是門市時，「每客戶平均」要讀者在腦中翻譯一次才看得懂這個數字在數什麼
     # （#327）。欄名一律走 core.schema.get_schema，理由同核心概念那一段。
-    totals = read_dataset_overview(metrics).get("totals", {}) or {}
+    facts = results["evaluation_row_facts"]
+    totals = read_dataset_overview(facts).get("totals", {}) or {}
     entity_str = "×".join(get_schema(parameters)["entity"])
     # bug 3 (ADR-0020): n_queries is compute_dataset_overview's count of all
     # queries before filtering, but the old label called it "queries with a
@@ -99,7 +101,7 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
     # drop_all_positive_groups on, the rows say which groups each count is
     # (#376, query_count_rows).
     scale = {
-        **query_count_rows(metrics, parameters),
+        **query_count_rows(facts, parameters),
         "正例列數 n_positives": totals.get("n_positives"),
         "母體正樣本率（÷全體候選列）": totals.get("positive_rate"),
         f"每 {entity_str} 平均正例數 avg_positives_per_entity":

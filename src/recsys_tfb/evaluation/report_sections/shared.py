@@ -17,6 +17,7 @@ from recsys_tfb.core.consistency import (
 from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.evaluation.metrics import (
     ALL_POSITIVE_KEY,
+    POPULATION_KEY,
     drop_all_positive_groups,
     metric_params,
     n_groups_with_positive,
@@ -244,14 +245,39 @@ def refuse_pre_rename_per_item(name: str, bundle: dict | None) -> None:
                 f"{name} predates the #534 rename: its per_item block "
                 f"({grain}) still carries {found}, the per-item recall@K's "
                 f"old name. Re-compute it — `python -m recsys_tfb evaluation "
-                f"--from-node compute_metrics`, with the flags of the run "
+                f"--from-node compute_row_facts`, with the flags of the run "
                 f"that wrote it (e.g. --post-training) — then re-draw. Drawn "
                 f"as-is, every per-item recall cell would be blank."
             )
 
 
+def refuse_pre_ledger(name: str, bundle: dict | None) -> None:
+    """Raise when the result ``name`` is a metrics bundle written before
+    #535: it carries no population ledger (``metrics.POPULATION_KEY``).
+
+    **Why refuse**: the ledger is where each bundle says what ``"all"``
+    resolved to (``metrics.resolved_all_k``), and a file this old also still
+    holds the row facts that now land on their own — the report reads those
+    from ``row_facts.json``, which that run never wrote. The baseline's stub
+    (``{"enabled": false}``, section off) is not a bundle and passes.
+    """
+    if not isinstance(bundle, dict) or bundle.get("enabled") is False:
+        return
+    if POPULATION_KEY not in bundle:
+        raise ValueError(
+            f"{name} predates #535: it carries no {POPULATION_KEY!r} ledger, "
+            f"and its run landed no row_facts.json. Re-compute it — `python "
+            f"-m recsys_tfb evaluation --from-node compute_row_facts`, with "
+            f"the flags of the run that wrote it (e.g. --post-training) — "
+            f"then re-draw."
+        )
+
+
 def read_dataset_overview(metrics: dict) -> dict:
     """``metrics["dataset_overview"]``, refusing a pre-#327 payload.
+
+    ``metrics`` is the row facts (``row_facts.json``, #535) or one grain of
+    them; a metrics bundle written before #535 held the overview itself.
 
     Every read of the overview — each section's and
     ``evaluation/comparison/report.py``'s — goes through here, so the old shape
@@ -268,9 +294,8 @@ def read_dataset_overview(metrics: dict) -> dict:
     comparison renders as a full table of blanks that reads like "the model
     scored nothing" rather than "this file is old".
 
-    An overview with *neither* spelling is left alone — a slim metrics bundle
-    legitimately carries no ``dataset_overview`` at all, and the baseline
-    bundles are exactly that shape.
+    An overview with *neither* spelling is left alone, and so is a dict with
+    no overview at all.
     """
     overview = metrics.get("dataset_overview", {}) or {}
     cells = [overview.get("totals", {}) or {}]
@@ -295,13 +320,13 @@ def read_dataset_overview(metrics: dict) -> dict:
 
 
 def count_items(metrics: dict) -> int:
-    """``dataset_overview.totals.n_items`` of a metrics bundle, ``0`` when absent.
+    """``dataset_overview.totals.n_items`` of the row facts, ``0`` when absent.
 
-    ``0`` means "unknown", not "no items": a slim baseline bundle carries no
-    overview. It is the item count the reports show — in the macro-coverage
-    titles and the comparison report's metadata. It is not the K ``"all"`` is looked up at — that is ``metrics.resolved_all_k``,
-    which falls back to this same number only when the bundle records no
-    ``all_k`` (#434).
+    ``metrics`` is the row facts or one grain of them (``row_facts.json``,
+    #535). ``0`` means "unknown", not "no items". It is the item count the
+    reports show — in the macro-coverage titles and the comparison report's
+    metadata. It is not the K ``"all"`` is looked up at — that is
+    ``metrics.resolved_all_k``, which each metrics bundle records (#434).
     """
     return int((read_dataset_overview(metrics).get("totals", {}) or {}).get("n_items", 0))
 

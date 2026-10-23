@@ -182,6 +182,23 @@ def _landed(spark, params, family_of_item=_FAMILY, months=(JAN,)):
                     _sample_pool(spark, _grid(months, family_of_item)), months)
 
 
+def _facts(frame, segments, params, categories=None):
+    """What the compute_row_facts node lands for these rows."""
+    from recsys_tfb.pipelines.evaluation.nodes import compute_row_facts
+
+    return compute_row_facts(frame, segments, params, categories)
+
+
+def _stub_facts(params):
+    """Row facts with nothing but the fingerprint: for the tests of a refusal
+    that comes after the facts are checked and before they are read."""
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+        fingerprint,
+    )
+
+    return {"config_fingerprint": fingerprint(params)}
+
+
 class TestReadersRankTheLandedTable:
     def test_compute_metrics(self, spark):
         """c1: x=max(.9,.1) no, y=.5 yes → y at rank 2. c2: x=max(.2,.3)
@@ -190,10 +207,11 @@ class TestReadersRankTheLandedTable:
 
         params = _params()
         frame, segments, categories = _landed(spark, params)
-        result = compute_metrics(frame, segments, params, categories)
+        facts = _facts(frame, segments, params, categories)
+        result = compute_metrics(frame, facts, segments, params, categories)
         assert set(result["category"]["per_item"]) == {"x", "y"}
         assert result["category"]["overall"]["map@1"] == pytest.approx(0.0)
-        assert result["category"]["dataset_overview"]["totals"]["n_items"] == 2
+        assert facts["category"]["dataset_overview"]["totals"]["n_items"] == 2
 
     def test_compute_baseline_metrics(self, spark):
         from recsys_tfb.pipelines.evaluation.nodes import compute_baseline_metrics
@@ -202,7 +220,8 @@ class TestReadersRankTheLandedTable:
         params["evaluation"]["baseline"] = {"lookback_months": 12}
         frame, segments, categories = _landed(spark, params)
         result = compute_baseline_metrics(
-            frame, _labels(spark, ("2024-12-31",)), segments, params, categories)
+            frame, _facts(frame, segments, params, categories),
+            _labels(spark, ("2024-12-31",)), segments, params, categories)
         assert set(result["category"]["per_item"]) == {"x", "y"}
 
     def test_generate_comparison_report_ranks_both_sides_by_it(
@@ -236,8 +255,9 @@ class TestAStaleOrMissingTableIsRefused:
         from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
 
         frame, segments, categories = _landed(spark, _params())
+        facts = _facts(frame, segments, _params(), categories)
         with pytest.raises(ValueError) as excinfo:
-            compute_metrics(frame, segments, _params(column="family2"),
+            compute_metrics(frame, facts, segments, _params(column="family2"),
                             categories)
         message = str(excinfo.value)
         assert "evaluation.item_categories.column" in message
@@ -262,9 +282,12 @@ class TestAStaleOrMissingTableIsRefused:
         from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
 
         params = _params()
-        frame, segments, _categories = _landed(spark, params)
+        frame, segments, categories = _landed(spark, params)
+        facts = _facts(frame, segments, params, categories)
         with pytest.raises(ValueError, match="--from-node prepare_eval_data"):
-            compute_metrics(frame, segments, params, None)
+            compute_metrics(frame, facts, segments, params, None)
+        with pytest.raises(ValueError, match="--from-node prepare_eval_data"):
+            _facts(frame, segments, params, None)
 
     def test_a_hand_mapping_reads_the_conf_with_no_table_at_all(self, spark):
         """An evaluation directory written before #379 has no
@@ -274,7 +297,8 @@ class TestAStaleOrMissingTableIsRefused:
 
         params = _params(column=None, mapping={"xy": ["A", "B"]})
         frame, segments, _categories = _landed(spark, params)
-        result = compute_metrics(frame, segments, params, None)
+        facts = _facts(frame, segments, params, None)
+        result = compute_metrics(frame, facts, segments, params, None)
         assert set(result["category"]["per_item"]) == {"xy"}
 
 
@@ -362,8 +386,9 @@ class TestAHandMappingAgainstACountedList:
 
         params = _counted(_params(column=None, mapping={"ab": ["A", "B"]}))
         frame, segments, categories = _prepare_counted(spark, params)
-        result = compute_metrics(frame, segments, params, categories)
-        assert set(result["category"]["dataset_overview"]["by_item"]) == {"ab", "C"}
+        facts = _facts(frame, segments, params, categories)
+        assert compute_metrics(frame, facts, segments, params, categories)
+        assert set(facts["category"]["dataset_overview"]["by_item"]) == {"ab", "C"}
 
     def test_a_mapping_naming_an_item_the_list_lacks_is_refused(self, spark):
         from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
@@ -371,7 +396,10 @@ class TestAHandMappingAgainstACountedList:
         params = _counted(_params(column=None, mapping={"bc": ["B", "C"]}))
         frame, segments, categories = _prepare_counted(spark, params)
         with pytest.raises(ValueError, match="'C'"):
-            compute_metrics(frame, segments, params, categories)
+            compute_metrics(frame, _stub_facts(params), segments, params,
+                            categories)
+        with pytest.raises(ValueError, match="'C'"):
+            _facts(frame, segments, params, categories)
 
     def test_without_the_models_list_it_names_the_way_out(self, spark):
         from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
@@ -379,7 +407,10 @@ class TestAHandMappingAgainstACountedList:
         params = _counted(_params(column=None, mapping={"ab": ["A", "B"]}))
         frame, segments, categories = _prepare_counted(spark, params, None)
         with pytest.raises(ValueError, match="preprocessor"):
-            compute_metrics(frame, segments, params, categories)
+            compute_metrics(frame, _stub_facts(params), segments, params,
+                            categories)
+        with pytest.raises(ValueError, match="preprocessor"):
+            _facts(frame, segments, params, categories)
 
 
 class TestAnItemWithNoCategoryIsItsOwn:
@@ -391,16 +422,16 @@ class TestAnItemWithNoCategoryIsItsOwn:
         inner join, c2 would have no positive left at the category grain and
         leave the ranking metrics: the two passes would count different
         query groups."""
-        from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+        from recsys_tfb.evaluation.metrics_spark import compute_row_facts
 
         params = _params()
         frame, _segments, _categories = _landed(spark, params)
-        result = compute_all_metrics(
+        facts = compute_row_facts(
             frame, params, category_mapping={"B": "y", "C": "x"})
-        assert result["category"]["n_queries"] == result["n_queries"]
-        assert result["category"]["n_excluded_queries"] == \
-            result["n_excluded_queries"] == 0
-        assert "A" in result["category"]["dataset_overview"]["by_item"]
+        assert facts["category"]["n_queries"] == facts["n_queries"]
+        assert facts["category"]["n_excluded_queries"] == \
+            facts["n_excluded_queries"] == 0
+        assert "A" in facts["category"]["dataset_overview"]["by_item"]
 
     def test_a_table_covering_every_item_collapses_as_before(self, spark):
         """Worked by hand: with every item mapped the left join keeps what

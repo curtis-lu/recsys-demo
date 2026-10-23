@@ -185,6 +185,7 @@ diff -ru recsys_tfb-v0.3.0/conf recsys_tfb-v0.4.0/conf              # 或兩版�
 - **`conf/dev/` 多了五份 `parameters*.yaml`**（`parameters.yaml` 與 dataset、training、inference、evaluation 各一份），放著 `conf/base/` 標 ★ 的鍵，值是銀行示例的。用自己取名的環境（`conf/<你的名字>/`）不受影響；直接用 repo 附的 `conf/dev/` 的部署，升級前查兩件事：
   - 你改過 `conf/base/` 的 ★ 鍵，升級後會被這幾份檔的示例值蓋掉，不一定會報錯。先把那些改動搬進 `conf/dev/` 的同名檔。
   - 你自己建過這幾個檔名的 `conf/dev/parameters*.yaml`，`git checkout` 會因為有未追蹤的同名檔而擋下來。先把它們移開，換版之後再把內容合進新檔。
+- **evaluation 的資料概況與組數從 `metrics.json` 搬到 `row_facts.json`**（#535）。`metrics.json` 不再有 `dataset_overview`、`n_queries`、`n_excluded_queries`、`n_all_positive_queries`、`segments`，改成每份多一個母體帳 `population`（`all` 解析成幾、進 macro 的 item、算進的組數）；`baseline_metrics.json` 也是同一套指標，第一次有 `macro_avg`。用程式讀這兩個檔的人要改讀法。升級之前寫的評估目錄不能直接 `--only-node generate_report` 重畫：報表會以 `predates #535` 停下，照訊息 `--from-node compute_row_facts` 重算一次即可，不用重做 join。
 - 來源表 schema 的變動由上游決定，跟版本無關，但同樣會讓結果變化。
 - **promote 挑版本的規則若有變動，既有的模型版本可能一起退出排名。** training 開始在 `evaluation_results.json` 記下計分月份的那一版（v0.4.0，ADR-0028）就是這種情況：升級之前算的檔案都沒記月份，升級當下 `scripts/promote_model.py --dry-run` 把每個版本列在 `Not ranked`，不帶版本號的自動挑選不會挑任何版本。直接指定版本號照樣 promote 得了。[替舊版本補分數](rescoring-an-old-version.md) 能讓舊版本重新參加排名，但**只限格式版本號跟現在的程式相同的版本**（從 v0.3.0 升上來的人：只有用 v0.4.0 訓練的才算）：v0.4.0 之前訓練的版本補不回來，因為格式版本號從 v0.4.0 起算進 `model_version`（見上面版本 ID 那一條），現在的程式算不出它原本的版本號。那些模型要回到排名裡，只能用 v0.4.0 重新訓練（會得到新的版本號）。同一版起 promote 要從 repo 根目錄執行並帶 `--env`，因為它改讀設定（[promote 一個版本](promoting-a-model.md)）。
 

@@ -36,6 +36,13 @@ def _segments(params):
     return _no_segments(params)
 
 
+def _facts(frame, params):
+    """The row facts of ``frame``, as the compute_row_facts node lands them."""
+    from tests.test_pipelines.test_evaluation.test_nodes import _row_facts
+
+    return _row_facts(frame, params)
+
+
 def _eval_predictions(spark, params=None):
     """2025-01-31: c1 holds positives A and C, c2 holds B. Stamped with the
     fingerprint of ``params`` (the fixture's own by default), as
@@ -98,7 +105,7 @@ class TestPipelineShape:
         baseline = next(n for n in off.nodes
                         if n.name == "compute_baseline_metrics")
         assert baseline.inputs == [
-            "enriched_eval_predictions", "label_table",
+            "enriched_eval_predictions", "evaluation_row_facts", "label_table",
             "evaluation_segment_columns", "parameters",
             "evaluation_item_categories"]
 
@@ -144,11 +151,12 @@ def _rate_run(spark, params, pool, labels, plan, eval_predictions=None):
         _node(_NODE, post_training=True, baseline_rate=True),
         sample_pool=pool, label_table=labels, parameters=params,
         popularity_period_counts_month_plan=plan)
+    frame = (eval_predictions if eval_predictions is not None
+             else _eval_predictions(spark))
     return _call(
         _node("compute_baseline_metrics", post_training=True, baseline_rate=True),
-        enriched_eval_predictions=(
-            eval_predictions if eval_predictions is not None
-            else _eval_predictions(spark)),
+        enriched_eval_predictions=frame,
+        evaluation_row_facts=_facts(frame, params),
         label_table=labels, evaluation_segment_columns=_segments(params),
         parameters=params, evaluation_item_categories=None,
         popularity_period_counts=counts,
@@ -187,8 +195,9 @@ def test_monitoring_with_score_rate_ranks_by_the_count(spark):
     params = _rate_params()
     params["post_training"] = False
     _pool, labels = _history(spark)
+    frame = _eval_predictions(spark, params)
     result = compute_baseline_metrics(
-        _eval_predictions(spark, params), labels, _segments(params), params)
+        frame, _facts(frame, params), labels, _segments(params), params)
     assert "popularity_rate" not in result
     count_map = ((1 + 2 / 3) / 2 + 1 / 2) / 2
     assert result["overall"]["map@3"] == pytest.approx(count_map)
@@ -199,8 +208,9 @@ def test_count_mode_writes_no_rate_keys(spark):
 
     params = _rate_params("count")
     _pool, labels = _history(spark)
+    frame = _eval_predictions(spark)
     result = compute_baseline_metrics(
-        _eval_predictions(spark), labels, _segments(params), params)
+        frame, _facts(frame, params), labels, _segments(params), params)
     assert "popularity_rate" not in result
     count_map = ((1 + 2 / 3) / 2 + 1 / 2) / 2
     assert result["overall"]["map@3"] == pytest.approx(count_map)
@@ -236,9 +246,10 @@ def test_post_training_rate_mode_needs_its_counts(spark):
     params = _rate_params()
     params["post_training"] = True
     _pool, labels = _history(spark)
+    frame = _eval_predictions(spark, params)
     with pytest.raises(RuntimeError, match="popularity_period_counts"):
         compute_baseline_metrics(
-            _eval_predictions(spark, params), labels, _segments(params), params)
+            frame, _facts(frame, params), labels, _segments(params), params)
 
 
 def test_partial_coverage_does_not_raise(spark):
@@ -264,9 +275,11 @@ def test_a_landed_period_sample_pool_no_longer_holds_is_not_summed(spark):
         _node(_NODE, post_training=True, baseline_rate=True),
         sample_pool=pool, label_table=labels, parameters=params,
         popularity_period_counts_month_plan=plan).unionByName(stale)
+    frame = _eval_predictions(spark)
     result = _call(
         _node("compute_baseline_metrics", post_training=True, baseline_rate=True),
-        enriched_eval_predictions=_eval_predictions(spark), label_table=labels,
+        enriched_eval_predictions=frame,
+        evaluation_row_facts=_facts(frame, params), label_table=labels,
         evaluation_segment_columns=_segments(params), parameters=params,
         evaluation_item_categories=None, popularity_period_counts=counts,
         popularity_period_counts_month_plan=plan)
@@ -305,8 +318,9 @@ def test_count_mode_trend_counts_a_positive_sample_pool_lacks(spark):
     orphan = spark.createDataFrame(pd.DataFrame(
         [("2024-07-31", "nobody", "C", 1)],
         columns=["snap_date", "cust_id", "prod_name", "label"]))
+    frame = _eval_predictions(spark)
     result = compute_baseline_metrics(
-        _eval_predictions(spark), labels.unionByName(orphan),
+        frame, _facts(frame, params), labels.unionByName(orphan),
         _segments(params), params)
     assert result["monthly_counts"]["C"] == {"2024-07": 1}
     assert result["purchase_counts"]["C"] == 1

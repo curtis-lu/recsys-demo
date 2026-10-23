@@ -79,6 +79,17 @@ def _metrics(bundle):
     return {k: bundle[k] for k in _METRIC_KEYS}
 
 
+def _both(frame, params, **kw):
+    """Row facts and metrics of the same frame, as the pipeline computes them."""
+    facts = ms.compute_row_facts(frame, params)
+    return facts, ms.compute_all_metrics(frame, params, facts, **kw)
+
+
+def _bundle(frame, params, **kw):
+    """Just the metrics of ``frame``."""
+    return _both(frame, params, **kw)[1]
+
+
 def _switch(value):
     """Keyword arguments for the switch; ``None`` leaves it out (the default
     every caller outside evaluation — training — relies on)."""
@@ -86,18 +97,19 @@ def _switch(value):
 
 
 # ---------------------------------------------------------------------------
-# compute_all_metrics (the measurement metrics, and the comparison report)
+# compute_all_metrics (the measurement metrics, the popularity baseline and the
+# comparison report all run it; the counts live in compute_row_facts)
 # ---------------------------------------------------------------------------
 
 
 def test_the_switch_drops_the_fine_grained_all_positive_groups(spark):
     """On, the fine-grained bundle is what the switch-off bundle of the frame
     without c1 — the one fine-grained all-positive group — would be."""
-    on = ms.compute_all_metrics(
+    on = _bundle(
         _df(spark), _params(), drop_all_positive_groups=True)
     assert on["overall"]["map@3"] == pytest.approx(0.5)
     assert on["overall"]["map@1"] == pytest.approx(0.0)
-    assert _metrics(on) == _metrics(ms.compute_all_metrics(
+    assert _metrics(on) == _metrics(_bundle(
         _df(spark, without={"c1"}), _params()))
     # c1's two positives are gone from the per-item family as well.
     assert {i: m["n_pos"] for i, m in on["per_item"].items()} == {
@@ -109,21 +121,22 @@ def test_the_switch_drops_the_category_grain_all_positive_groups(spark):
     but all-positive once fund_stock and fund_bond fold into one category, so
     it is dropped there and only there. A category pass that did not get the
     keyword keeps c1 and c2 and scores 5/6."""
-    on = ms.compute_all_metrics(
+    on = _bundle(
         _df(spark), _params(), drop_all_positive_groups=True)
     assert on["category"]["overall"]["map@2"] == pytest.approx(0.5)
-    assert _metrics(on["category"]) == _metrics(ms.compute_all_metrics(
+    assert _metrics(on["category"]) == _metrics(_bundle(
         _df(spark, without={"c1", "c2"}), _params())["category"])
 
 
 def test_switched_off_the_bundle_is_what_it_was_plus_the_count(spark):
     """Off is the default, value for value; it differs from on on this
     fixture, so the two paths are not the same by accident of the data; and
-    the only new key is the count, at the top level of each grain."""
-    default = ms.compute_all_metrics(_df(spark), _params())
-    off = ms.compute_all_metrics(
+    the count lives in the row facts, at the top level of each grain, and the
+    bundle carries the population ledger instead."""
+    facts, default = _both(_df(spark), _params())
+    off = _bundle(
         _df(spark), _params(), drop_all_positive_groups=False)
-    on = ms.compute_all_metrics(
+    on = _bundle(
         _df(spark), _params(), drop_all_positive_groups=True)
 
     assert off == default
@@ -136,14 +149,20 @@ def test_switched_off_the_bundle_is_what_it_was_plus_the_count(spark):
     shared = {"per_item_shared_numbers", "per_item_segment_shared_numbers"}
     assert set(off) == {
         "overall", "per_segment", "per_item", "per_item_segment",
-        "macro_avg", "observation_items", "n_queries", "n_excluded_queries",
-        "n_all_positive_queries", "dataset_overview", "category",
+        "macro_avg", "observation_items", "population", "category",
     } | shared
     assert set(off["category"]) == {
         "overall", "per_segment", "per_item", "per_item_segment",
-        "macro_avg", "observation_items", "n_queries", "n_excluded_queries",
-        "n_all_positive_queries", "dataset_overview",
+        "macro_avg", "observation_items", "population",
     } | shared
+    assert set(facts) == {
+        "dataset_overview", "n_queries", "n_excluded_queries",
+        "n_all_positive_queries", "widest_group_rows", "category",
+    }
+    assert set(facts["category"]) == {
+        "dataset_overview", "n_queries", "n_excluded_queries",
+        "n_all_positive_queries", "widest_group_rows",
+    }
     # Not a metric: the comparison report takes every key of `overall` for one.
     assert ALL_POSITIVE_KEY not in off["overall"]
 
@@ -155,7 +174,7 @@ def test_each_grain_counts_its_own_all_positive_groups(spark, switch):
     ``n_excluded_queries`` keeps counting only the groups holding no positive
     (c4) — the report reads ``n_queries - n_excluded_queries`` as the groups
     holding a positive."""
-    out = ms.compute_all_metrics(_df(spark), _params(), **_switch(switch))
+    out, _ = _both(_df(spark), _params(), **_switch(switch))
     assert out[ALL_POSITIVE_KEY] == 1
     assert out["category"][ALL_POSITIVE_KEY] == 2
     assert (out["n_queries"], out["n_excluded_queries"]) == (4, 1)
@@ -167,11 +186,10 @@ def test_each_grain_counts_its_own_all_positive_groups(spark, switch):
 def test_no_positive_anywhere_still_writes_the_count(spark, switch):
     df = spark.createDataFrame(
         [r for r in _ROWS if r[1] == "c4"], schema=_COLS)
-    out = ms.compute_all_metrics(
-        df, _params(categories=False), **_switch(switch))
+    facts, out = _both(df, _params(categories=False), **_switch(switch))
     assert out["overall"] == {}
-    assert (out["n_queries"], out["n_excluded_queries"],
-            out[ALL_POSITIVE_KEY]) == (1, 1, 0)
+    assert (facts["n_queries"], facts["n_excluded_queries"],
+            facts[ALL_POSITIVE_KEY]) == (1, 1, 0)
 
 
 def test_nothing_left_once_dropped_is_empty_and_says_why(spark, caplog):
@@ -181,11 +199,11 @@ def test_nothing_left_once_dropped_is_empty_and_says_why(spark, caplog):
     df = spark.createDataFrame(
         [r for r in _ROWS if r[1] in ("c1", "c4")], schema=_COLS)
     with caplog.at_level(logging.WARNING, logger=ms.logger.name):
-        out = ms.compute_all_metrics(
+        facts, out = _both(
             df, _params(categories=False), drop_all_positive_groups=True)
     assert out["overall"] == {} and out["per_item"] == {}
-    assert (out["n_queries"], out["n_excluded_queries"],
-            out[ALL_POSITIVE_KEY]) == (2, 1, 1)
+    assert (facts["n_queries"], facts["n_excluded_queries"],
+            facts[ALL_POSITIVE_KEY]) == (2, 1, 1)
     said = [r.getMessage() for r in caplog.records
             if r.levelno == logging.WARNING]
     assert any("drop_all_positive_groups" in m for m in said), said
@@ -221,14 +239,15 @@ def test_with_event_a_group_is_all_positive_only_if_every_row_is(spark):
         schema=["snap_date", "cust_id", "prod_name", "imp_id", "score",
                 "label"],
     )
-    on = ms.compute_all_metrics(
+    facts, on = _both(
         df, _event_params(), drop_all_positive_groups=True)
     # "all" is the widest query group once `event` is declared: 2 rows.
     assert on["overall"]["map@2"] == pytest.approx(0.5)
-    assert on[ALL_POSITIVE_KEY] == 2
-    assert (on["n_queries"], on["n_excluded_queries"]) == (4, 1)
+    assert on["population"]["all_k"] == 2
+    assert facts[ALL_POSITIVE_KEY] == 2
+    assert (facts["n_queries"], facts["n_excluded_queries"]) == (4, 1)
     assert set(on["per_item"]) == {"A"}
-    off = ms.compute_all_metrics(df, _event_params())
+    off = _bundle(df, _event_params())
     assert off["overall"]["map@2"] == pytest.approx((0.5 + 1 + 1) / 3)
 
 
@@ -260,7 +279,7 @@ def test_graded_labels_count_only_the_group_with_one_positive_label(
         spark, switch):
     """g2 (2, 2) is counted; g1 (2, 3) is not, although every row of it is
     positive."""
-    out = ms.compute_all_metrics(
+    out, _ = _both(
         _graded_df(spark), _params(categories=False), **_switch(switch))
     assert out[ALL_POSITIVE_KEY] == 1
     assert (out["n_queries"], out["n_excluded_queries"]) == (3, 0)
@@ -270,21 +289,16 @@ def test_graded_labels_the_switch_keeps_a_group_whose_labels_differ(spark):
     """On, only g2 goes: the bundle is the switch-off bundle of the frame
     without g2, which still holds g1. Dropping g1 too would leave g3 alone."""
     params = _params(categories=False)
-    on = ms.compute_all_metrics(
+    on = _bundle(
         _graded_df(spark), params, drop_all_positive_groups=True)
-    without_g2 = ms.compute_all_metrics(
+    without_g2 = _bundle(
         _graded_df(spark, without={"g2"}), params)
     assert _metrics(on) == _metrics(without_g2)
     # The fixture can tell the three outcomes apart.
-    assert without_g2["overall"] != ms.compute_all_metrics(
+    assert without_g2["overall"] != _bundle(
         _graded_df(spark, without={"g1", "g2"}), params)["overall"]
-    assert on["overall"] != ms.compute_all_metrics(
+    assert on["overall"] != _bundle(
         _graded_df(spark), params)["overall"]
-    # The popularity baseline's slim path decides the same way.
-    slim = ms.compute_overall_per_item(
-        _graded_df(spark), params, drop_all_positive_groups=True)
-    assert slim["overall"] == without_g2["overall"]
-    assert slim["per_item"] == without_g2["per_item"]
 
 
 def test_a_null_label_is_not_positive(spark):
@@ -299,73 +313,5 @@ def test_a_null_label_is_not_positive(spark):
         schema="snap_date string, cust_id string, prod_name string, "
                "score double, label int",
     )
-    out = ms.compute_all_metrics(df, _params(categories=False))
+    out, _ = _both(df, _params(categories=False))
     assert out[ALL_POSITIVE_KEY] == 1
-
-
-# ---------------------------------------------------------------------------
-# compute_overall_per_item (the popularity baseline's slim path)
-# ---------------------------------------------------------------------------
-
-
-def test_the_slim_path_drops_the_fine_grained_all_positive_groups(spark):
-    on = ms.compute_overall_per_item(
-        _df(spark), _params(), drop_all_positive_groups=True)
-    assert on["overall"]["map@3"] == pytest.approx(0.5)
-    slim_without = ms.compute_overall_per_item(
-        _df(spark, without={"c1"}), _params())
-    assert on["overall"] == slim_without["overall"]
-    assert on["per_item"] == slim_without["per_item"]
-
-
-def test_the_slim_path_drops_the_category_grain_all_positive_groups(spark):
-    """Through the recursion for the category pass: without the keyword there,
-    the category grain keeps c1 and c2 and scores 5/6."""
-    on = ms.compute_overall_per_item(
-        _df(spark), _params(), with_category=True,
-        drop_all_positive_groups=True)
-    assert on["category"]["overall"]["map@2"] == pytest.approx(0.5)
-    without = ms.compute_overall_per_item(
-        _df(spark, without={"c1", "c2"}), _params(), with_category=True)
-    assert on["category"]["overall"] == without["category"]["overall"]
-    assert on["category"]["per_item"] == without["category"]["per_item"]
-
-
-def test_the_slim_path_matches_the_full_path_with_the_switch_on(spark):
-    """The baseline is read against the model's metrics; both sides must drop
-    the same groups. It writes no count: the report's ledger reads the
-    model's bundle, and the baseline scores the same groups."""
-    slim = ms.compute_overall_per_item(
-        _df(spark), _params(), with_category=True,
-        drop_all_positive_groups=True)
-    full = ms.compute_all_metrics(
-        _df(spark), _params(), drop_all_positive_groups=True)
-    assert slim["overall"] == full["overall"]
-    assert slim["per_item"] == full["per_item"]
-    assert slim["category"]["overall"] == full["category"]["overall"]
-    assert set(slim) == {"overall", "per_item", "category"}
-    assert set(slim["category"]) == {"overall", "per_item"}
-
-
-def test_the_slim_path_switched_off_is_what_it_was(spark):
-    default = ms.compute_overall_per_item(
-        _df(spark), _params(), with_category=True)
-    off = ms.compute_overall_per_item(
-        _df(spark), _params(), with_category=True,
-        drop_all_positive_groups=False)
-    assert off == default
-    assert off["overall"]["map@3"] == pytest.approx(2 / 3)
-    assert off["category"]["overall"]["map@2"] == pytest.approx(5 / 6)
-
-
-def test_the_slim_path_with_nothing_left_says_why(spark, caplog):
-    df = spark.createDataFrame(
-        [r for r in _ROWS if r[1] in ("c1", "c4")], schema=_COLS)
-    with caplog.at_level(logging.WARNING, logger=ms.logger.name):
-        out = ms.compute_overall_per_item(
-            df, _params(categories=False), drop_all_positive_groups=True)
-    assert out == {"overall": {}, "per_item": {}}
-    said = [r.getMessage() for r in caplog.records
-            if r.levelno == logging.WARNING]
-    assert any("drop_all_positive_groups" in m for m in said), said
-    assert not any("No queries with positive labels" in m for m in said), said

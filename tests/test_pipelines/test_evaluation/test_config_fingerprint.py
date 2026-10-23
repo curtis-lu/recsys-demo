@@ -328,7 +328,7 @@ def test_changed_key_names_the_leaf_values_and_rerun_node():
     assert "baseline_metrics" in msg
     assert "compute_baseline_metrics" in msg
     assert "evaluation.metric.min_positives: 0 -> 5" in msg
-    assert "--from-node compute_metrics" in msg
+    assert "--from-node compute_row_facts" in msg
 
 
 def test_missing_fingerprint_names_the_artifact():
@@ -364,7 +364,7 @@ def test_rule_1_earliest_computed_key_wins_over_message_order():
             new,
         )
     msg = str(exc.value)
-    assert "--from-node compute_metrics" in msg
+    assert "--from-node compute_row_facts" in msg
     assert "--from-node compute_report_aggregates" not in msg
     # collect-all: both artifacts are reported
     assert "evaluation_report_aggregates" in msg
@@ -443,9 +443,9 @@ def test_no_other_computed_setting_makes_the_partition_stale(path):
 
 def test_changing_the_category_column_advises_the_join_from_any_artifact():
     """#379: the column sits under a block listed at
-    compute_metrics too, so both rows move; the earlier one — where the table
+    compute_row_facts too, so both rows move; the earlier one — where the table
     is read — must win, from the segment JSON and from metrics.json alike.
-    Advised at compute_metrics, the re-run would reuse the old table."""
+    Advised at compute_row_facts, the re-run would reuse the old table."""
     old = _set(_params(), "evaluation.item_categories",
                {"enabled": True, "column": "family"})
     new = _set(copy.deepcopy(old), "evaluation.item_categories.column", "tier")

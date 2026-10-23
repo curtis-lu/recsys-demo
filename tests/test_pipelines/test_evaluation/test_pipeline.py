@@ -25,7 +25,7 @@ class TestEvaluationPipelineDefault:
         pipeline = create_pipeline()
         expected = {
             "evaluation_segment_columns", "evaluation_item_categories",
-            "evaluation_metrics",
+            "evaluation_row_facts", "evaluation_metrics",
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions",
             "evaluation_report_aggregates",
@@ -37,10 +37,10 @@ class TestEvaluationPipelineDefault:
         pipeline = create_pipeline()
         names = [n.name for n in pipeline.nodes]
         assert names == [
-            "prepare_eval_data",
-            "compute_metrics", "compute_baseline_metrics",
+            "prepare_eval_data", "compute_row_facts",
             "compute_prediction_quality",
             "compute_report_aggregates",
+            "compute_metrics", "compute_baseline_metrics",
             "generate_report",
         ]
 
@@ -108,7 +108,7 @@ class TestFingerprintRerunNodes:
     """
 
     FINGERPRINTED_PRODUCERS = {
-        "compute_metrics", "compute_baseline_metrics",
+        "compute_row_facts", "compute_metrics", "compute_baseline_metrics",
         "compute_prediction_quality",
         "compute_report_aggregates",
     }
@@ -158,10 +158,10 @@ class TestEvaluationPipelinePostTraining:
         pipeline = create_pipeline(post_training=True)
         names = [n.name for n in pipeline.nodes]
         assert names == [
-            "prepare_eval_data",
-            "compute_metrics", "compute_baseline_metrics",
+            "prepare_eval_data", "compute_row_facts",
             "compute_prediction_quality",
             "compute_report_aggregates",
+            "compute_metrics", "compute_baseline_metrics",
             "generate_report",
         ]
 
@@ -186,12 +186,14 @@ class TestEvaluationPipelineCompareMode:
         assert names == [
             "prepare_eval_data",
             "load_compare_predictions",
-            "compute_metrics",
-            "compute_baseline_metrics", "compute_prediction_quality",
+            "compute_row_facts",
+            "compute_prediction_quality",
             "compute_report_aggregates",
             "restrict_to_common",
-            "generate_report",
+            "compute_metrics",
+            "compute_baseline_metrics",
             "generate_comparison_report",
+            "generate_report",
         ]
 
     def test_pipeline_outputs_include_comparison_report(self):
@@ -271,7 +273,8 @@ class TestSegmentColumnsWiring:
         cases = [
             (kwargs, name)
             for kwargs in ({}, {"post_training": True})
-            for name in ("compute_metrics", "compute_baseline_metrics")
+            for name in ("compute_row_facts", "compute_metrics",
+                         "compute_baseline_metrics")
         ] + [
             ({"compare_source": self._COMPARE}, "generate_comparison_report"),
             ({"compare_source": self._COMPARE, "compare_only": True},
@@ -293,7 +296,8 @@ class TestSegmentColumnsWiring:
             (kwargs, name)
             for kwargs in ({}, {"post_training": True},
                            {"post_training": True, "baseline_rate": True})
-            for name in ("compute_metrics", "compute_baseline_metrics")
+            for name in ("compute_row_facts", "compute_metrics",
+                         "compute_baseline_metrics")
         ] + [
             ({"compare_source": self._COMPARE}, "generate_comparison_report"),
             ({"compare_source": self._COMPARE, "compare_only": True},
@@ -305,6 +309,35 @@ class TestSegmentColumnsWiring:
             assert "evaluation_item_categories" in node.inputs, (kwargs, name)
             assert node.inputs.index("evaluation_item_categories") == \
                 params.index("item_categories"), (kwargs, name, node.inputs)
+
+    def test_every_row_facts_reader_reads_them_at_the_right_position(self):
+        """#535: the model's metrics and the baseline's both count off the
+        landed row facts; positional binding, so its position is checked
+        against the parameter named ``row_facts``."""
+        for kwargs in ({}, {"post_training": True},
+                       {"post_training": True, "baseline_rate": True}):
+            pipeline = create_pipeline(**kwargs)
+            for name in ("compute_metrics", "compute_baseline_metrics"):
+                node = self._node(pipeline, name)
+                params = list(inspect.signature(node.func).parameters)
+                assert "evaluation_row_facts" in node.inputs, (kwargs, name)
+                assert node.inputs.index("evaluation_row_facts") == \
+                    params.index("row_facts"), (kwargs, name, node.inputs)
+
+    def test_the_row_facts_land_next_to_the_metrics(self):
+        """Without an entry the catalog makes it a MemoryDataset: nothing
+        lands, and ``--only-node generate_report`` has nothing to read."""
+        from pathlib import Path
+
+        import yaml
+
+        catalog = yaml.safe_load(
+            (Path(__file__).parents[3] / "conf/base/catalog.yaml").read_text())
+        assert catalog["evaluation_row_facts"] == {
+            "type": "JSONDataset",
+            "filepath": "data/evaluation/${model_version}/${snap_date}/"
+                        "row_facts.json",
+        }
 
     def test_the_category_table_is_an_optional_catalog_entry(self):
         """Optional: an evaluation directory written before #379 has no such

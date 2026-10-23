@@ -149,7 +149,7 @@ RESUME_CONTRACTS = {
     # contract; both are listed because they read different prediction tables.
     ("evaluation", ()): {
         # Redrawing the report re-runs no node (ADR-0018 decision 2):
-        # generate_report reads four landed JSONs plus parameters. Before
+        # generate_report reads five landed JSONs plus parameters. Before
         # evaluation_metrics and baseline_metrics had catalog entries this set
         # also held prepare_eval_data, compute_metrics and
         # compute_baseline_metrics — a "redraw" re-joined the predictions and
@@ -178,11 +178,15 @@ RESUME_CONTRACTS = {
         # This stub catalog answers "the table exists"; the evaluated month
         # missing from it is the CLI's month plan's business (test_cli.py).
         "compute_metrics": set(),
+        # Where a changed computed setting sends the re-run (#535,
+        # COMPUTED_KEYS): the same table read back, nothing re-joined.
+        "compute_row_facts": set(),
     },
     ("evaluation", (("post_training", True),)): {
         # Same landing and reasoning as above.
         "generate_report": set(),
         "compute_metrics": set(),
+        "compute_row_facts": set(),
     },
 }
 

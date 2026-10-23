@@ -33,7 +33,7 @@ def create_pipeline(
     ``baseline_rate`` (the CLI's ``baseline_scores_by_rate``, #397: ``score:
     rate`` under ``--post-training``) adds ``build_popularity_period_counts``
     and hands its table and month plan to ``compute_baseline_metrics`` as a
-    fifth and sixth input. Off (the default, and always in monitoring mode),
+    seventh and eighth input. Off (the default, and always in monitoring mode),
     the pipeline is node for node the one without the feature: no extra node,
     and monitoring mode reads no ``sample_pool``.
     """
@@ -43,6 +43,7 @@ def create_pipeline(
         compute_metrics,
         compute_prediction_quality,
         compute_report_aggregates,
+        compute_row_facts,
         generate_comparison_report,
         generate_report,
         load_compare_predictions,
@@ -103,10 +104,10 @@ def create_pipeline(
         # The join is computed here once and lands as this month's partition;
         # dynamic partition overwrite replaces that partition only. The
         # category table (#379) is a third output rather than a node of its
-        # own: a node between this one and compute_metrics would move
-        # compute_metrics after compute_prediction_quality /
-        # compute_report_aggregates, and `--from-node compute_metrics` would
-        # then leave those stale.
+        # own: a node between this one and compute_row_facts would move
+        # compute_row_facts after compute_prediction_quality /
+        # compute_report_aggregates, and `--from-node compute_row_facts`
+        # would then leave those stale.
         # `preprocessor_on_disk` last (#379): with the item list counted from
         # the data, the evaluated model's list is read off it and landed for a
         # hand mapping to be checked against. Optional, so an evaluation that
@@ -118,10 +119,21 @@ def create_pipeline(
             outputs=["enriched_eval_predictions", "evaluation_segment_columns",
                      "evaluation_item_categories"],
         ),
+        # The facts of the evaluated rows (ADR-0031 decision 4), landed once
+        # for the model's metrics, the baseline's and the report. Before
+        # both metrics nodes, which count off it: it is the first
+        # fingerprinted producer, where COMPUTED_KEYS sends a re-run.
         Node(
-            compute_metrics,
+            compute_row_facts,
             inputs=["enriched_eval_predictions", "evaluation_segment_columns",
                     "parameters", "evaluation_item_categories"],
+            outputs="evaluation_row_facts",
+        ),
+        Node(
+            compute_metrics,
+            inputs=["enriched_eval_predictions", "evaluation_row_facts",
+                    "evaluation_segment_columns", "parameters",
+                    "evaluation_item_categories"],
             outputs="evaluation_metrics",
         ),
     ]
@@ -145,9 +157,11 @@ def create_pipeline(
                 compute_baseline_metrics,
                 # The plan again: the table keeps every period it ever
                 # counted, the baseline sums the ones sample_pool holds now.
-                # The category table is fifth in both wirings (positional
-                # binding; see compute_baseline_metrics).
-                inputs=["enriched_eval_predictions", "label_table",
+                # The row facts are second and the category table sixth in
+                # both wirings (positional binding; see
+                # compute_baseline_metrics).
+                inputs=["enriched_eval_predictions", "evaluation_row_facts",
+                        "label_table",
                         "evaluation_segment_columns", "parameters",
                         "evaluation_item_categories",
                         "popularity_period_counts",
@@ -159,7 +173,8 @@ def create_pipeline(
         nodes.append(
             Node(
                 compute_baseline_metrics,
-                inputs=["enriched_eval_predictions", "label_table",
+                inputs=["enriched_eval_predictions", "evaluation_row_facts",
+                        "label_table",
                         "evaluation_segment_columns", "parameters",
                         "evaluation_item_categories"],
                 outputs="baseline_metrics",
@@ -190,6 +205,7 @@ def create_pipeline(
         Node(
             generate_report,
             inputs={
+                "evaluation_row_facts": "evaluation_row_facts",
                 "evaluation_metrics": "evaluation_metrics",
                 "baseline_metrics": "baseline_metrics",
                 "evaluation_report_aggregates": "evaluation_report_aggregates",

@@ -266,6 +266,11 @@ evaluation_item_categories:
   filepath: data/evaluation/${model_version}/${snap_date}/item_categories.json
   optional: true
 
+# 列的事實（#535）：資料概況與組數，模型與 baseline 共用
+evaluation_row_facts:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/row_facts.json
+
 evaluation_metrics:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/metrics.json

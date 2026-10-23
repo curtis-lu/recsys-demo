@@ -19,7 +19,7 @@ from recsys_tfb.evaluation.report_sections.shared import (
 )
 
 #: The results this section reads, by catalog name (ADR-0031 principle 1).
-READS = ("prediction_quality_metrics", "evaluation_metrics")
+READS = ("prediction_quality_metrics", "evaluation_row_facts")
 
 
 #: The display bin table's columns, as the report prints them. The first six
@@ -85,8 +85,8 @@ def build(
     Every number here comes from the fine bin tables in the payload, through
     the same functions ``compute_prediction_quality`` used for the headline
     numbers (``evaluation/prediction_quality.py``), so the threshold sweep and
-    the bin table cannot disagree. ``metrics`` is read for one thing: the
-    ranking section's excluded query groups, so the population note can put
+    the bin table cannot disagree. The row facts are read for one thing: the
+    query groups the ranking section excludes, so the population note can put
     the two populations side by side with numbers.
 
     Decision 7's three statements are always printed, each where the number
@@ -105,7 +105,7 @@ def build(
     prediction_quality = results["prediction_quality_metrics"]
     if not prediction_quality_shown(prediction_quality, parameters):
         return None
-    metrics = results["evaluation_metrics"]
+    facts = results["evaluation_row_facts"]
     from recsys_tfb.evaluation.diagnostics_spark import frame_from_json
     from recsys_tfb.evaluation.prediction_quality import (
         bins_of_item,
@@ -131,12 +131,12 @@ def build(
     # One sentence per run mode, not a correction appended to the other: under
     # --post-training the test table arrives already filtered, so with nothing
     # excluded here the two sections read the same rows.
-    n_excl = metrics.get("n_excluded_queries")
+    n_excl = facts.get("n_excluded_queries")
     # #376: with drop_all_positive_groups on, the ranking section also drops
     # the all-positive groups; "only groups with a positive" and "the two
     # populations are the same" would both be false.
     drop = drop_all_positive_groups(parameters)
-    n_all = metrics.get(ALL_POSITIVE_KEY)
+    n_all = facts.get(ALL_POSITIVE_KEY)
     if drop:
         ranking_rule = (
             "主指標段（mAP／precision@K／recall@K）只算有正例、而且不是全正的 "
@@ -158,7 +158,7 @@ def build(
             f"母體：本段算在本次評估的全部候選列上，本身不排除任何 query group；"
             "但這是 --post-training，test 表在 dataset 階段只留下有正例的 query "
             "group 與一部分沒有正例的（filter_test_keys）。"
-            + kept_zero_positive_groups_note(metrics, parameters)
+            + kept_zero_positive_groups_note(facts, parameters)
             + f"本段的列數與正例數都是乘上 {weight_col} 之後的加權數（共 "
             f"{n_rows:,}），代表還原到全部曝光的估計。{ranking_rule}{excluded}。"
             "兩段的母體不同，precision 不可互相比較。"

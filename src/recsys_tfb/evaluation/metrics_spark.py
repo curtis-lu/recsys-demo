@@ -21,8 +21,10 @@ Layered structure (each layer has a single responsibility):
         item_metrics                   the catalog's item formulas on those
                                        sums: recall@K / map_attr@K / mean_pos
 
-    Layer 4: orchestrator
-        compute_all_metrics            wires everything; reads parameters
+    Layer 4: orchestrators
+        compute_row_facts              the rows' overview + query group counts
+        compute_all_metrics            wires everything, counting off the
+                                       row facts; reads parameters
 
     Training's test scoring (ADR-0028), apart from the four layers
         count_query_groups_by_time     query group counts + time values present
@@ -32,7 +34,8 @@ Layered structure (each layer has a single responsibility):
                                        as HPO scores them on val
 
 The evaluation report and the popularity baseline are the callers of
-``compute_all_metrics`` / ``compute_overall_per_item``. Training scored its test
+``compute_row_facts`` / ``compute_all_metrics`` (the baseline through the
+same two since #535, ADR-0031 decision 8). Training scored its test
 set through ``compute_all_metrics`` too until ADR-0028, keeping four values of
 the bundle; it now calls the last two functions of this module, which compute
 only those, with the same Layer-1 building blocks.
@@ -104,8 +107,11 @@ from recsys_tfb.evaluation.metric_catalog import (
 from recsys_tfb.evaluation.metrics import (
     ALL_K_KEY,
     ALL_POSITIVE_KEY,
+    POPULATION_KEY,
+    WIDEST_GROUP_KEY,
     macro_from_per_item,
     metric_params,
+    n_groups_with_positive,
 )
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT, segment_key
 from recsys_tfb.utils.ranking import rank_by_score_then_item, score_then_item_window
@@ -228,8 +234,8 @@ def _resolve_k_grids(
     the enriched columns. The two grids are equal when ``k_values`` already
     holds the headline K (with ``metric.k`` unset: when it lists ``"all"``).
 
-    ``_compute_core`` and ``compute_overall_per_item`` (the baseline's slim
-    path) both resolve through this one function, so the two sides line up.
+    The model and its baseline both resolve through this one function, in
+    ``_compute_core``, so the two sides line up.
     """
     eval_params = parameters.get("evaluation", {}) or {}
     query_ks = _resolve_k_values(eval_params.get("k_values", [5, "all"]), all_k)
@@ -476,17 +482,19 @@ def compute_dataset_overview(
     total_queries = totals["n_queries"] if active_seg_col else 0
 
     def _group(col: str, with_queries: bool = False, to_key=None) -> dict:
-        # Inside a group, n_entities / n_queries stay bare countDistinct: an
-        # entity or query key with a NULL in it is not counted (the group row
-        # itself is kept). That differs from the totals above on purpose —
-        # switching to struct here would change the published numbers.
+        # Inside a group, n_entities / n_queries count a struct too, as the
+        # totals do (#361): an entity or query key with a NULL in it counts as
+        # one value. A bare countDistinct there dropped those keys while the
+        # totals kept them, so query_share — a group's queries over the
+        # total — summed below 1 whenever a time or entity was NULL.
         aggs = [
             F.count(F.lit(1)).alias("n_rows"),
             F.sum(F.col(label_col)).alias("n_positives"),
-            F.countDistinct(*entity_cols).alias("n_entities"),
+            F.countDistinct(F.struct(*entity_cols)).alias("n_entities"),
         ]
         if with_queries:
-            aggs.append(F.countDistinct(*group_cols).alias("n_queries"))
+            aggs.append(
+                F.countDistinct(F.struct(*group_cols)).alias("n_queries"))
         rows = eval_predictions.groupBy(col).agg(*aggs).collect()
         out = {}
         for r in rows:
@@ -698,9 +706,9 @@ def _keep_scored_query_groups(
     construction, not by a test's fixture. Switched on, the extra window has
     the same spec as ``total_rel``'s, which Spark evaluates in the same pass.
 
-    The measurement metrics (``_compute_core``) and the popularity baseline
-    (``compute_overall_per_item``) both filter here, so the two sides of the
-    report's comparison cannot drop different groups.
+    Every metrics pass filters here (``_compute_core``), the popularity
+    baseline's included, so the two sides of the report's comparison cannot
+    drop different groups.
     """
     has_positive = F.col("total_rel") > 0
     if not drop_all_positive_groups:
@@ -1155,13 +1163,12 @@ def _compute_core(
     *,
     event_cols: Sequence[str],
     drop_all_positive_groups: bool,
-    n_items: int,
+    facts: Mapping,
 ) -> dict:
     """The fine-grained metric bundle (overall/per_item/per_segment/...).
 
-    Body identical to the pre-refactor compute_all_metrics — no category,
-    no dataset_overview. Used for both fine-grained and (on a collapsed DF)
-    category-grain passes.
+    No category, no row facts. Used for both fine-grained and (on a collapsed
+    DF) category-grain passes.
 
     ``drop_all_positive_groups`` has no default for the reason given for
     ``event_cols`` below: both call sites must pass it, and a default would
@@ -1169,14 +1176,19 @@ def _compute_core(
     ``event_cols`` the two passes get the same value; what differs is the
     frame the all-positive groups are decided on (see ``compute_all_metrics``).
 
-    The counts are written whatever the switch: ``n_queries`` (every group),
-    ``n_excluded_queries`` (groups holding no positive — only those, the
-    report reads ``n_queries - n_excluded_queries`` as the groups holding a
-    positive) and ``metrics.ALL_POSITIVE_KEY`` (of those, the all-positive
-    ones). Switched on, the bundle scores ``n_queries - n_excluded_queries -
-    n_all_positive_queries`` groups; when that is 0 the bundle is the empty
-    one, counts included, and the log says the switch left nothing rather
-    than that no group holds a positive.
+    ``facts`` is this grain's row facts (``compute_row_facts``), counted on
+    this same frame or on one holding the same rows under other scores: the
+    query group counts decide whether anything is left to score, and the item
+    count and widest group what ``"all"`` resolves to. Counted on another
+    frame — the category pass handed the item grain's, a baseline handed
+    another month's — every ``@all`` metric is keyed at the wrong K and no
+    error is raised. Switched on, the bundle scores the groups holding a
+    positive less the all-positive ones; when that is 0 the bundle is the
+    empty one and the log says the switch left nothing rather than that no
+    group holds a positive.
+
+    The bundle records what it was computed on (``metrics.POPULATION_KEY``),
+    the empty one included.
 
     ``event_cols`` is passed in rather than read from ``parameters``, and has
     no default, because **the two passes need different answers and the frame
@@ -1188,14 +1200,8 @@ def _compute_core(
     Spark raised ``Column 'impression_id' does not exist`` halfway through
     training.
 
-    ``event_cols`` also decides what ``"all"`` resolves to (``_resolve_all_k``)
-    and whether the bundle records it under ``metrics.ALL_K_KEY``: it is the
-    one argument that says whether this frame's rows are events.
-
-    ``n_items`` is ``dataset_overview.totals.n_items`` of this same frame,
-    which the caller computes anyway: with no event rows it is what ``"all"``
-    resolves to, and passing it saves the scan that would count it again
-    (#450).
+    ``event_cols`` also decides what ``"all"`` resolves to (``_resolve_all_k``):
+    it is the one argument that says whether this frame's rows are events.
     """
     schema = get_schema(parameters)
     item_col = schema["item"]
@@ -1214,23 +1220,31 @@ def _compute_core(
         name: v for name, v in metric_params(parameters).items() if name != "k"
     }
 
-    (n_queries_total, n_queries_with_pos, n_all_positive,
-     widest_group_rows) = _count_query_groups(
-        eval_predictions, group_cols, label_col)
+    n_queries_with_pos = n_groups_with_positive(facts)
+    n_all_positive = facts[ALL_POSITIVE_KEY]
     all_k = _resolve_all_k(
         eval_predictions, group_cols, item_col, event_cols,
-        n_items=n_items, widest_group_rows=widest_group_rows,
+        n_items=facts["dataset_overview"]["totals"]["n_items"],
+        widest_group_rows=facts[WIDEST_GROUP_KEY],
     )
     query_ks, item_ks = _resolve_k_grids(parameters, all_k)
-    # Written only when it can differ from dataset_overview.totals.n_items —
-    # the one other place metrics.resolved_all_k looks — so a bundle computed
-    # without event rows gains no key.
-    recorded_k = {ALL_K_KEY: all_k} if event_cols else {}
-    counts = {
-        "n_queries": n_queries_total,
-        "n_excluded_queries": n_queries_total - n_queries_with_pos,
-        ALL_POSITIVE_KEY: n_all_positive,
-    }
+
+    def population(per_item: dict) -> dict:
+        # The groups scored are the ones holding a positive (AP is undefined
+        # without one), less the all-positive ones when the switch drops
+        # them; none without a positive, so that count is 0 by construction.
+        # The macro averages the per-item cells kept by min_positives, the
+        # rule macro_average applies.
+        return {POPULATION_KEY: {
+            ALL_K_KEY: all_k,
+            "macro_items": sorted(
+                item for item, m in per_item.items()
+                if m.get(_N_POS_KEY, 0) >= macro_params["min_positives"]),
+            "n_scored_queries_with_positive": (
+                n_queries_with_pos
+                - (n_all_positive if drop_all_positive_groups else 0)),
+            "n_scored_queries_without_positive": 0,
+        }}
 
     # ---- Layer 1: row-level enrichment ----
     df = rank_within_query(
@@ -1245,7 +1259,7 @@ def _compute_core(
 
     if n_queries_with_pos == 0:
         logger.warning("No queries with positive labels found")
-        return {**_EMPTY_RESULT, **counts, **recorded_k}
+        return {**_EMPTY_RESULT, **population({})}
     if drop_all_positive_groups and n_all_positive == n_queries_with_pos:
         logger.warning(
             "No query group left to score: all %d holding a positive are "
@@ -1253,7 +1267,7 @@ def _compute_core(
             "drop_all_positive_groups drops them",
             n_all_positive,
         )
-        return {**_EMPTY_RESULT, **counts, **recorded_k}
+        return {**_EMPTY_RESULT, **population({})}
 
     enriched = add_row_contributions(
         scored, group_cols, label_col, item_ks,
@@ -1328,8 +1342,7 @@ def _compute_core(
                 "per_item_segment": per_item_segment,
                 "macro_avg": macro_avg,
                 "observation_items": observation_items,
-                **counts,
-                **recorded_k,
+                **population(per_item),
                 "per_item_shared_numbers": per_item_shared,
                 "per_item_segment_shared_numbers": per_item_segment_shared,
             }
@@ -1339,156 +1352,91 @@ def _compute_core(
         enriched.unpersist()
 
 
-def compute_overall_per_item(
+def _grain_row_facts(
+    frame: SparkDataFrame, parameters: dict, segment_columns: Sequence[str],
+) -> dict:
+    """The row facts of one grain: the overview and the query group counts.
+
+    The counts are ``_count_query_groups``' one action; ``WIDEST_GROUP_KEY``
+    is what ``"all"`` resolves to on a frame of event rows
+    (``_resolve_all_k``), recorded on every grain so the metrics never count
+    it again.
+    """
+    schema = get_schema(parameters)
+    n_queries, n_with_positive, n_all_positive, widest_group_rows = (
+        _count_query_groups(
+            frame, schema["query_group_columns"], schema["label"]))
+    return {
+        "dataset_overview": compute_dataset_overview(
+            frame, parameters, segment_columns=segment_columns),
+        "n_queries": n_queries,
+        "n_excluded_queries": n_queries - n_with_positive,
+        ALL_POSITIVE_KEY: n_all_positive,
+        WIDEST_GROUP_KEY: widest_group_rows,
+    }
+
+
+def compute_row_facts(
     eval_predictions: SparkDataFrame,
     parameters: dict,
     *,
     segment_columns: Sequence[str] = (),
-    with_category: bool = False,
-    event_cols: Sequence[str] | None = None,
-    drop_all_positive_groups: bool = False,
+    with_category: bool = True,
     category_mapping: Mapping[str, str] | None = None,
 ) -> dict:
-    """Slim metric bundle: ``overall`` + ``per_item`` (+ optional slices).
+    """What the rows hold whatever their scores (ADR-0031 decision 4): the
+    dataset overview and the query group counts, at the item grain and — when
+    ``item_categories`` maps the items — at the category grain under
+    ``category``.
 
-    Composes the same Layer-1/2/3 building blocks as ``_compute_core`` but
-    skips per-item-segment, macro_avg, and dataset_overview. Used by the
-    popularity baseline, whose report section consumes these keys.
+    One result for every side ranked on these rows: the model and its
+    popularity baseline are the same rows with other scores, so they share
+    it, and ``compute_all_metrics`` takes it instead of counting again.
 
-    ``drop_all_positive_groups`` drops the all-positive query groups as
-    ``compute_all_metrics`` does, through the same filter
-    (``_keep_scored_query_groups``), so the baseline and the model it is read
-    against score the same groups. The caller reads the switch
-    (``metrics.drop_all_positive_groups``); this function never reads it from
-    ``parameters``. The recursion for the category pass passes it on — left
-    out there, the category grain would silently keep its all-positive
-    groups. Nothing is counted: the report's ledger reads the model's bundle,
-    and the baseline scores the same groups.
+    The counts are of the rows, before any filter: ``n_queries`` every group,
+    ``n_excluded_queries`` the ones holding no positive, and
+    ``metrics.ALL_POSITIVE_KEY`` the all-positive ones among those holding a
+    positive, whatever ``evaluation.query_filter.drop_all_positive_groups``
+    says — which of them the metrics scored is the metrics' own ledger
+    (``metrics.POPULATION_KEY``).
 
-    ``event_cols`` names the tie-break columns after the item. ``None`` — every
-    caller but one — means "read ``schema.columns.event``", which is right for
-    any frame at candidate grain. The exception is this function's own
-    recursion for the category pass: ``collapse_to_categories`` aggregates by
-    (query group, category), so its output holds one row per pair and no
-    ``event`` column at all. That call passes ``()`` explicitly. Getting it
-    wrong is not a wrong number but an ``AnalysisException`` for a column the
-    frame does not have, raised in the middle of an evaluation run — which is
-    how it was found.
+    One number here does depend on the scores: ``dataset_overview.totals
+    .n_tied_rows`` (written only with an optional role declared) counts the
+    rows sharing a score in their group, under the scores of the frame
+    passed. The evaluation passes the model's rows; the baseline's popularity
+    scores tie far more, which is why the report never reads a baseline's
+    overview (ADR-0031 decision 8).
 
-    **Why this one defaults and ``_compute_core`` does not**, given the hazard
-    is identical: ``_compute_core`` is private with exactly two call sites, so
-    requiring the argument costs nothing and removes the footgun outright.
-    This one is read by a dozen tests that pass candidate-grain frames and
-    have no opinion about tie-breaks; requiring it there would make every one
-    of them state an answer it does not care about, which is how a required
-    argument turns into a copy-pasted one. The residual risk is a future
-    caller handing this a collapsed frame and forgetting — covered by
-    ``test_slim_category_pass_works_when_event_is_declared``.
-
-    Slices (each costed against the model's matching pass, so the baseline
-    comparison stays symmetric only when the model already computed them):
-      - ``segment_columns``: when non-empty, also emit ``per_segment`` (overall
-        metrics per value of the first one, the same column ``_compute_core``
-        uses), reusing the cached ``enriched`` — no extra full pass, just one
-        extra groupBy.
-      - ``with_category``: also emit ``category`` (a nested slim bundle on the
-        category-collapsed frame — one extra collapse pass), only when
-        ``item_categories`` maps the items — by hand, or through
-        ``category_mapping`` (:func:`_resolve_category_mapping`). Nested
-        bundle never re-nests.
-
-    Returns ``{"overall": {...}, "per_item": {...}}`` (plus ``per_segment`` /
-    ``category`` when requested and available); overall/per_item empty when no
-    query group is left to score — none holds a positive label, or, switched
-    on, every one holding a positive is all-positive.
+    The category grain collapses the frame as ``compute_all_metrics`` does,
+    with the same ``category_mapping`` (``None`` reads the hand-written
+    mapping, :func:`_resolve_category_mapping`), so the two grains' facts
+    describe the frames the two grains' metrics rank.
     """
-    schema = get_schema(parameters)
-    item_col = schema["item"]
-    label_col = schema["label"]
-    score_col = schema["score"]
-    group_cols = schema["query_group_columns"]
-
-    eval_params = parameters.get("evaluation", {}) or {}
     _require_segment_columns_in_frame(eval_predictions, segment_columns)
-    active_seg_col = segment_columns[0] if segment_columns else None
-    if event_cols is None:
-        event_cols = schema.get("event", [])
-    all_k = _resolve_all_k(eval_predictions, group_cols, item_col, event_cols)
-    # Same grids as _compute_core (metric.k on the per-item side only), so
-    # baseline and model keys line up. Nothing is recorded: the report reads
-    # this bundle at the model's K (report_sections/popularity_baseline.py).
-    query_ks, item_ks = _resolve_k_grids(parameters, all_k)
-
-    df = rank_within_query(
-        eval_predictions, group_cols, score_col, item_col, list(event_cols),
-    )
-    df = add_query_total_rel(df, group_cols, label_col)
-    scored = _keep_scored_query_groups(
-        df, group_cols, label_col,
-        drop_all_positive_groups=drop_all_positive_groups,
-    )
-    if scored.limit(1).count() == 0:
-        # Which of the two emptied it takes one more action, paid only here.
-        if drop_all_positive_groups and _keep_scored_query_groups(
-            df, group_cols, label_col, drop_all_positive_groups=False,
-        ).limit(1).count() > 0:
-            logger.warning(
-                "No query group left to score: every one holding a positive "
-                "is all-positive, and evaluation.query_filter."
-                "drop_all_positive_groups drops them"
-            )
-        else:
-            logger.warning("No queries with positive labels found")
-        return {"overall": {}, "per_item": {}}
-
-    enriched = add_row_contributions(
-        scored, group_cols, label_col, item_ks,
-        score_col=score_col, item_col=item_col, event_cols=list(event_cols),
-    ).cache()
-    try:
-        carry = [active_seg_col] if active_seg_col else []
-        per_query = compute_per_query_metrics(
-            enriched, group_cols, label_col, query_ks, carry_cols=carry
-        )
-        result = {
-            "overall": aggregate_overall(per_query, query_ks),
-            "per_item": aggregate_per_item(
-                enriched, [item_col], label_col, item_ks
-            ),
-        }
-        if active_seg_col:
-            result["per_segment"] = aggregate_per_segment(
-                per_query, active_seg_col, query_ks
-            )
-    finally:
-        enriched.unpersist()
-
+    facts = _grain_row_facts(eval_predictions, parameters, segment_columns)
     mapping = (_resolve_category_mapping(parameters, category_mapping)
                if with_category else None)
     if mapping is not None:
         collapsed = collapse_to_categories(
-            eval_predictions, parameters, category_mapping=mapping)
-        # `event_cols=()`: the collapse has aggregated those columns away —
-        # see this function's docstring, and the twin call in
-        # `compute_all_metrics`. The switch goes on unchanged; the category
-        # frame decides which of its groups are all-positive.
-        result["category"] = compute_overall_per_item(
-            collapsed, parameters, event_cols=(),
-            drop_all_positive_groups=drop_all_positive_groups,
+            eval_predictions, parameters, segment_columns=segment_columns,
+            category_mapping=mapping,
         )
-    return result
+        facts["category"] = _grain_row_facts(
+            collapsed, parameters, segment_columns)
+    return facts
 
 
 def compute_all_metrics(
     eval_predictions: SparkDataFrame,
     parameters: dict,
+    row_facts: Mapping,
     *,
     segment_columns: Sequence[str] = (),
     drop_all_positive_groups: bool = False,
     with_category: bool = True,
     category_mapping: Mapping[str, str] | None = None,
 ) -> dict:
-    """Full bundle: fine-grained core + dataset_overview + optional category.
+    """Full bundle: fine-grained core + optional category.
 
     Required columns: ``time``, ``entity``, ``item``, ``label``, ``score``
     (column names resolved from parameters['schema']), plus every column in
@@ -1497,13 +1445,19 @@ def compute_all_metrics(
     ``evaluation.segment_columns`` filtered by the frame's columns (see
     ``_require_segment_columns_in_frame``). Empty means no per-segment slice. A NULL
     segment value is the ``segments.UNMATCHED_SEGMENT`` group: present in
-    ``per_segment``, ``per_item_segment`` and ``dataset_overview.by_segment``,
-    absent from every macro.
+    ``per_segment`` and ``per_item_segment``, absent from every macro.
 
-    Every pre-existing top-level key is unchanged; ``dataset_overview`` is
-    always added; ``category`` (same shape as the top level, plus its own
-    ``dataset_overview``, never re-nested) is added only when
-    ``item_categories.enabled`` and ``with_category``.
+    ``row_facts`` is :func:`compute_row_facts` of these rows, with the same
+    ``segment_columns``, ``with_category`` and ``category_mapping``: the
+    metrics read their query group counts, item count and widest group off
+    it rather than counting them again (ADR-0031 principle 4). Its scores do
+    not matter — the popularity baseline passes the facts of the model's rows
+    it re-scored — its rows do: see ``_compute_core`` for what goes wrong
+    without an error otherwise. The facts are not copied into the bundle; it
+    records only what it was computed on (``metrics.POPULATION_KEY``).
+
+    ``category`` (same shape as the top level, never re-nested) is added only
+    when ``item_categories.enabled`` and ``with_category``.
 
     ``category_mapping`` is the table a column-mode evaluation run read off
     the data (#379); ``None`` reads the hand-written mapping from
@@ -1513,13 +1467,6 @@ def compute_all_metrics(
     to pass. #379 added it for training's test scoring, which ADR-0028 then
     moved to ``compute_untruncated_ap`` (never a category pass); no pipeline
     node passes it today.
-
-    ⚠ **Not backward compatible below ``dataset_overview``** since #327: the
-    three ``n_items`` / ``n_customers`` / ``avg_positives_per_customer``
-    keys were renamed (see the block below). A file written before that is
-    refused by ``evaluation/report_sections/shared.read_dataset_overview`` and migrated by
-    ``scripts/migrations/migrate_evaluation_results_keys.py``; the ``snap_date`` spellings
-    are kept deliberately (ADR-0017).
 
     Returns::
 
@@ -1534,21 +1481,15 @@ def compute_all_metrics(
               "by_item_segment": {recall@K, map_attr@K, mean_pos, ...},
           },
           "observation_items": [item, ...]（n_pos < evaluation.metric.min_positives 的 item；additive，預設空）
-          "n_queries":          int  (total distinct queries before filtering),
-          "n_excluded_queries": int  (queries with zero positives → dropped;
-                                      only those, switch on or off),
-          "n_all_positive_queries":
-                                int  (metrics.ALL_POSITIVE_KEY; always
-                                      written) of the queries holding a
-                                      positive, those whose every row carries
-                                      the same positive label
-                                      (``_all_positive_group``). Dropped only
-                                      when ``drop_all_positive_groups``.
-          "all_k":  int  (metrics.ALL_K_KEY; only when schema declares
-                          ``event``, and never inside ``category``) the K
-                          ``"all"`` resolved to — the widest query group.
-                          Read it through
-                          ``metrics.resolved_all_k``, never by counting items.
+          "population": (metrics.POPULATION_KEY) what the numbers were
+              computed on, at this grain: "all_k" (metrics.ALL_K_KEY, the K
+              ``"all"`` resolved to — read it through
+              ``metrics.resolved_all_k``, never by counting items),
+              "macro_items" (the items ``macro_avg.by_item`` averaged over),
+              "n_scored_queries_with_positive" / "..._without_positive" (the
+              query groups scored: those holding a positive, less the
+              all-positive ones when ``drop_all_positive_groups``; none
+              without a positive),
           "per_item_shared_numbers":
               {item: {n_pos, pos_sum, n_top@K, hits@K, ap_sum@K, ...}}
               (#534) what the per_item metrics are computed from, for every
@@ -1557,21 +1498,10 @@ def compute_all_metrics(
           "per_item_segment_shared_numbers":
               {item: {segment: {...}}}  the same per (item, segment); empty
               without a segment column,
-          "dataset_overview": {
-              "totals":       {n_rows, n_entities, n_items, n_snap_dates,
-                               n_positives, positive_rate,
-                               avg_positives_per_entity},
-              "by_snap_date": {snap: {n_rows, n_positives, n_entities,
-                                      positive_rate}},
-              "by_item":      {item: {n_rows, n_positives, n_entities,
-                                      positive_rate}},
-          },
           "category":  (only when item_categories.enabled)
               same shape as the top level (overall / per_item / per_segment /
-              per_item_segment / macro_avg / n_queries / n_excluded_queries /
-              n_all_positive_queries / the two shared-number blocks) PLUS its
-              own "dataset_overview"; never
-              contains "category".
+              per_item_segment / macro_avg / population / the two
+              shared-number blocks); never contains "category".
         }
 
     Queries with zero positives are excluded from the metric computation
@@ -1588,34 +1518,35 @@ def compute_all_metrics(
     groups.) Each grain decides
     on its own frame: at the category grain a query is all-positive when
     every category it holds gets the same positive label (the max of its
-    children), which a query mixed row by row can be. Off, every key but the
-    new count is value-for-value what it was. Known effect, not a bug:
+    children), which a query mixed row by row can be. Off, every key is
+    value-for-value what it was. Known effect, not a bug:
     per-item keys such as ``map_attr@K`` and ``recall@K`` still depend on
     the order inside an all-positive query when K is below its row count (``ap_contrib@K = prec_at_pos × label ×
     top_k@K``: which rows reach the top K decides which items get the
     credit); switched on, those queries leave them too.
     """
-    # The overview goes first so the core can take its item count for "all"
-    # instead of counting it again (#450); the key is added after the core's,
-    # where it always was. The segment check the core opens with runs here
-    # too, so a missing column still fails before any scan.
+    # The segment check the core opens with runs here too, so a missing
+    # column still fails before any scan.
     _require_segment_columns_in_frame(eval_predictions, segment_columns)
-    overview = compute_dataset_overview(
-        eval_predictions, parameters, segment_columns=segment_columns
-    )
     # The fine-grained pass ranks the rows as they were written: one per
     # candidate, so `event` is what tells two rows of one item apart.
     result = _compute_core(
         eval_predictions, parameters, segment_columns,
         event_cols=get_schema(parameters).get("event", []),
         drop_all_positive_groups=drop_all_positive_groups,
-        n_items=overview["totals"]["n_items"],
+        facts=row_facts,
     )
-    result["dataset_overview"] = overview
 
     mapping = (_resolve_category_mapping(parameters, category_mapping)
                if with_category else None)
     if mapping is not None:
+        if "category" not in row_facts:
+            raise ValueError(
+                "compute_all_metrics: item_categories maps the items, but the "
+                "row facts passed hold no category grain — they were counted "
+                "with another category setting than these metrics. Count them "
+                "with the same with_category / category_mapping "
+                "(compute_row_facts).")
         collapsed = collapse_to_categories(
             eval_predictions, parameters, segment_columns=segment_columns,
             category_mapping=mapping,
@@ -1627,7 +1558,8 @@ def compute_all_metrics(
         # decides every tie, and asking for `event` here is asking for a
         # column the frame does not have. The switch is the same; which
         # queries it drops is decided on this frame (label = max of the
-        # children), so a query mixed row by row can be all-positive here.
+        # children), so a query mixed row by row can be all-positive here —
+        # hence the category grain's own facts.
         # Not cached, though every action of this pass collapses again
         # (#450 item 5): cached, the pass measured slower, not faster. The
         # cache holds spark.sql.shuffle.partitions partitions (AQE does not
@@ -1635,16 +1567,11 @@ def compute_all_metrics(
         # faster than a fresh collapse, compute_dataset_overview as a whole
         # took longer on it. Not traced stage by stage; measured on 2.4M local
         # rows, so re-measure before caching it at production scale.
-        cat_overview = compute_dataset_overview(
-            collapsed, parameters, segment_columns=segment_columns
-        )
-        cat = _compute_core(
+        result["category"] = _compute_core(
             collapsed, parameters, segment_columns, event_cols=(),
             drop_all_positive_groups=drop_all_positive_groups,
-            n_items=cat_overview["totals"]["n_items"],
+            facts=row_facts["category"],
         )
-        cat["dataset_overview"] = cat_overview
-        result["category"] = cat
 
     return result
 
