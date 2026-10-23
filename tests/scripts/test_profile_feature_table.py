@@ -1,4 +1,4 @@
-"""Tests for scripts/profile_feature_table.py (stage one: basic checks).
+"""Tests for scripts/profile_feature_table.py (basic checks, drift and extreme values).
 
 The judgement rules are tested on hand-built stats (no Spark): each problem type
 gets one column that is flagged and one that only just is not. The report is a
@@ -270,7 +270,7 @@ class TestOrderAndEdges:
 
 
 class TestActions:
-    """判斷結果到總結裡的三種做法。"""
+    """判斷結果到總結裡的四種做法。"""
 
     def _actions(self, col, rows=ROWS):
         return actions(col, rows, judge_column(col, rows, TH), TH)
@@ -497,6 +497,8 @@ def _dist_profile(tmp_path):
         _named("assets", _dist([[50, 50, 0]] * 3, quantiles=[(100862, 5212476)] * 3,  # 每期都被標：長尾
                                mins=[100000] * 3, maxs=[4.97e10] * 3)),
         _named("rare_flag", _dist([[99, 1, 0]] * 3, quantiles=[(0, 0)] * 3, mins=[0] * 3, maxs=[1] * 3)),
+        _named("fx_rate", _dist([[50, 50, 0], [100, 0, 0], [100, 0, 0]],                # 每期各只有一個值
+                                quantiles=[(1, 1), (2, 2), (3, 3)], mins=[1, 2, 3], maxs=[1, 2, 3])),
     ]
     (tmp_path / PROFILE_FILENAME).write_text(json.dumps(profile))
     return profile
@@ -631,6 +633,10 @@ class TestRender:
         drift = _section_html(page, "s-drift-num")
         assert drift.index('data-name="unit_change"') < drift.index('data-name="cc_bal"')
         assert 'data-name="cc_bal" data-drift="p1" data-src="null"' in drift
+        # 不比分布的欄位（這裡是每期各只有一個值），展開明細也不放 PSI，免得看到 PSI 很大卻沒被標
+        blob = page.split('<script type="application/json" id="fp-data">')[1].split("</script>")[0]
+        dist = json.loads(blob)["dist"]
+        assert "psi" in dist["unit_change"] and "psi" not in dist["fx_rate"]
 
     def test_summary_places_drift_and_tail(self, tmp_path):
         profile = _dist_profile(tmp_path)

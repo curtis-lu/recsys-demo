@@ -14,7 +14,7 @@ time_range:                   # 沒寫＝讀全部期別。start、end 可以只
   end: "2025-02-28"           # 含這一期
 where: null                   # 沒寫＝不篩選。額外的 Spark SQL 條件，和 time_range 用 AND 合併；篩的不是分區欄位會掃全表
 checks:                       # 必填。基本檢查一定會跑；下面每一項都必填，因為要多跑的 Spark 耗時差很多
-  distribution: true          # 必填，true 或 false。分布偏移與極端值：基本檢查那一趟多算分位數，再多跑一趟算 PSI 的分組筆數
+  distribution: true          # 必填，true 或 false。分布偏移與極端值：基本檢查那一趟多算分位數，再多跑兩趟（只讀最早一期找字串欄位的常見值；所有期別算 PSI 的分組筆數）
 thresholds:                   # 沒寫的鍵用右邊的預設值
   null_ratio: 0.99            # 空值比例 ≥ 這個值算「幾乎是空值」。大於 0、不超過 1
   psi: 0.25                   # 有一期和最早一期比的 PSI ≥ 這個值，算「分布偏移」。大於 0
