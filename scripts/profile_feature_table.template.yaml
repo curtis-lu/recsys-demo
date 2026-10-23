@@ -2,7 +2,7 @@
 #   python scripts/profile_feature_table.py run --config my_profile.yaml
 # 使用說明：docs/operations/user-guides/feature-table-profiling.md
 #
-# 這一版有基本檢查（空值、只有一個值）與分布偏移、極端值。寫了這裡沒有的鍵會報錯。
+# 檢查項目：基本檢查（空值、只有一個值）、分布偏移與極端值、相關性。寫了這裡沒有的鍵會報錯。
 # Spark 設定不寫在這裡：全部來自 SPARK_CONF_DIR，同 scripts/sampling_overrides_editor.py。
 
 table: mydb.feature_table     # 必填。要檢查的 Hive 表
@@ -15,9 +15,11 @@ time_range:                   # 沒寫＝讀全部期別。start、end 可以只
 where: null                   # 沒寫＝不篩選。額外的 Spark SQL 條件，和 time_range 用 AND 合併；篩的不是分區欄位會掃全表
 checks:                       # 必填。基本檢查一定會跑；下面每一項都必填，因為要多跑的 Spark 耗時差很多
   distribution: true          # 必填，true 或 false。分布偏移與極端值：基本檢查那一趟多算分位數，再多跑兩趟（只讀最早一期找字串欄位的常見值；所有期別算 PSI 的分組筆數）
+  correlation: true           # 必填，true 或 false。相關性：只讀最新一期，抽約 50,000 筆拉回 driver，數值欄位兩兩算 Spearman 相關係數
 thresholds:                   # 沒寫的鍵用右邊的預設值
   null_ratio: 0.99            # 空值比例 ≥ 這個值算「幾乎是空值」。大於 0、不超過 1
   psi: 0.25                   # 有一期和最早一期比的 PSI ≥ 這個值，算「分布偏移」。大於 0
   tail_ratio: 10              # 極端值：同一期、同一側的倍數 ≥ 這個值，
   tail_log_ratio: 1           # 而且 log 後倍數 ≥ 這個值，才算。都要大於 0
+  corr: 0.95                  # 最新一期的 Spearman 相關係數，絕對值 ≥ 這個值算「高度相關」。0.5～1（只存了絕對值 ≥ 0.5 的配對）
 output_dir: null              # 沒寫＝data/profiling/feature_profile/<表名>_<YYYYMMDD_HHMMSS>/（表名不含資料庫名稱）
