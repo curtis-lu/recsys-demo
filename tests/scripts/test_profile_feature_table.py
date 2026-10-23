@@ -1,4 +1,4 @@
-"""Tests for scripts/profile_feature_table.py (basic checks, drift and extreme values).
+"""Tests for scripts/profile_feature_table.py (basic checks, drift and extreme values, correlation).
 
 The judgement rules are tested on hand-built stats (no Spark): each problem type
 gets one column that is flagged and one that only just is not. The report is a
@@ -10,6 +10,8 @@ attributes). The Spark side gets its own tests for the empty-value cleaning
 import json
 import math
 
+import numpy as np
+import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
@@ -17,16 +19,22 @@ from scripts.profile_feature_table import (
     DEFAULT_THRESHOLDS,
     PROFILE_FILENAME,
     ProfileConfig,
+    _average_ranks,
     actions,
     app,
     check_against_table,
+    compute_correlation,
+    corr_groups,
+    corr_skip_reasons,
     drift_source,
+    high_corr_pairs,
     judge,
     judge_column,
     near_const_periods,
     parse_config,
     profile_table,
     psi_by_period,
+    spearman_pairs,
     tail_hits,
     upstream_periods_of,
     write_report,
@@ -325,6 +333,148 @@ class TestActions:
 
 
 # ---------------------------------------------------------------------------
+# Correlation (no Spark): Spearman on the latest-period sample, skip reasons, groups
+# ---------------------------------------------------------------------------
+
+
+def _ref_spearman(values, i, j):
+    """逐對計算的對照：名次是整欄一起排（pandas 的平均名次），再取兩欄都有值的筆算 Pearson。"""
+    ranks = pd.DataFrame(values).rank(method="average").to_numpy()
+    ok = ~np.isnan(values[:, i]) & ~np.isnan(values[:, j])
+    return np.corrcoef(ranks[ok, i], ranks[ok, j])[0, 1], int(ok.sum())
+
+
+class TestSpearman:
+    def test_ties_get_the_average_rank_and_empty_values_stay_empty(self):
+        got = _average_ranks(np.array([10, 20, 20, np.nan, 5.0]))
+        assert np.allclose(got, [2, 3.5, 3.5, np.nan, 1], equal_nan=True)
+
+    def test_equals_spearman_when_nothing_is_empty(self):
+        rng = np.random.default_rng(1)
+        a = rng.integers(0, 20, 3000).astype(float)  # 很多同值
+        values = np.column_stack([a, a * 3 + rng.integers(0, 5, 3000), rng.normal(size=3000), -np.log1p(a)])
+        out = spearman_pairs(values, list("abcd"), keep=0)
+        ref = pd.DataFrame(values, columns=list("abcd")).corr(method="spearman")
+        assert len(out["pairs"]) == 6
+        for a_, b_, r, n in out["pairs"]:
+            assert r == pytest.approx(ref.loc[a_, b_], abs=1e-6) and n == 3000
+
+    def test_matrix_matches_pair_by_pair_with_empty_values(self):
+        # 驗收條件：兩兩的計算用矩陣運算，和逐對計算的結果對照
+        rng = np.random.default_rng(2)
+        base = rng.normal(size=(5000, 4))
+        values = np.exp(base[:, [0, 0, 1, 1, 2, 3]] + rng.normal(size=(5000, 6)) * 0.3)
+        values[rng.random(values.shape) < 0.2] = np.nan
+        values[values[:, 1] > np.nanquantile(values[:, 1], 0.7), 1] = np.nan  # 大的值才空
+        names = [f"c{i}" for i in range(6)]
+        got = {(a, b): (r, n) for a, b, r, n in spearman_pairs(values, names, keep=0)["pairs"]}
+        assert len(got) == 15
+        for i in range(6):
+            for j in range(i + 1, 6):
+                ref, n = _ref_spearman(values, i, j)
+                assert got[(names[i], names[j])] == (pytest.approx(ref, abs=1e-6), n), (i, j)
+
+    def test_fewer_than_1000_rows_in_common_gives_no_coefficient(self):
+        # a、b 各自有 1,500 筆有值，同時有值的只有 999 或 1,000 筆
+        for common, kept in ((999, False), (1000, True)):
+            a = np.full(3000, np.nan)
+            b = np.full(3000, np.nan)
+            a[:1500] = np.arange(1500)
+            b[1500 - common:3000 - common] = np.arange(1500)
+            out = spearman_pairs(np.column_stack([a, b]), ["a", "b"])
+            assert bool(out["pairs"]) is kept, common
+            assert out["few_pairs"] == (0 if kept else 1) and out["sparse"] == {}, common
+
+    @pytest.mark.parametrize("first", [True, False])
+    def test_no_variation_where_both_have_values_gives_no_coefficient(self, first):
+        # flat 只在 other 有值的那些筆裡都是 7，整欄是有變化的；放在第一欄或第二欄都要擋
+        flat = np.r_[np.full(2000, 7.0), np.arange(2000.0)]
+        other = np.r_[np.arange(2000.0), np.full(2000, np.nan)]
+        cols = [flat, other] if first else [other, flat]
+        out = spearman_pairs(np.column_stack(cols), ["x", "y"], keep=0)
+        assert out["pairs"] == [] and out["flat_pairs"] == 1 and out["flat"] == []
+
+    def test_sparse_and_flat_columns_are_named_but_not_their_partners(self):
+        rng = np.random.default_rng(3)
+        n = 5000
+        good = rng.normal(size=(n, 2))
+        sparse = np.full(n, np.nan)
+        sparse[:600] = rng.normal(size=600)
+        values = np.column_stack([good, sparse, np.full(n, 4.0)])
+        out = spearman_pairs(values, ["g1", "g2", "sparse", "const"], keep=0)
+        assert out["sparse"] == {"sparse": 600} and out["flat"] == ["const"]
+        # 跟 sparse、const 配不成的組，不再算進「兩欄各自都夠」的組數
+        assert out["few_pairs"] == 0 and out["flat_pairs"] == 0
+        assert [p[:2] for p in out["pairs"]] == [["g1", "g2"]]
+
+    def test_only_pairs_at_or_above_0_5_are_kept_with_their_sign(self):
+        rng = np.random.default_rng(4)
+        a = rng.normal(size=4000)
+        values = np.column_stack([a, -a + rng.normal(size=4000) * 0.05, a + rng.normal(size=4000) * 3])
+        out = spearman_pairs(values, ["a", "neg", "weak"])
+        assert [(x, y) for x, y, _, _ in out["pairs"]] == [("a", "neg")]
+        assert out["pairs"][0][2] < -0.99
+
+
+class TestCorrSkip:
+    def test_reasons_come_from_the_latest_period(self):
+        cols = [
+            dict(_col([0, 0, 0], [0, 0, 0], [9, 9, 9]), name="fine"),
+            dict(_col([100, 0, 0], [None, 0, 0], [None, 9, 9]), name="empty_before"),  # 只看最新一期
+            dict(_col([0, 0, 99], [0, 0, 0], [9, 9, 9]), name="latest_99"),            # 剛好 99%
+            dict(_col([0, 0, 98], [0, 0, 0], [9, 9, 9]), name="latest_98"),
+            dict(_col([0, 0, 100], [0, 0, None], [9, 9, None]), name="latest_empty"),
+            dict(_col([0, 0, 0], [0, 0, 3], [9, 9, 3]), name="latest_one"),
+            dict(_col([0, 0, 0], ["a"] * 3, ["z"] * 3, kind="string", dtype="string"), name="s"),
+            {"name": "load_dt", "dtype": "date", "kind": "unchecked"},
+        ]
+        assert corr_skip_reasons(cols, ROWS, 0.99) == {
+            "latest_99": "null", "latest_empty": "null", "latest_one": "const", "s": "string",
+        }
+
+
+def _corr_profile_stub(pairs, flags_cols=()):
+    """judge 用的最小 profile：每一欄都正常，除了 flags_cols 給的。"""
+    names = sorted({x for a, b, _, _ in pairs for x in (a, b)})
+    cols = [dict(_col([0, 0, 0], [0, 0, 0], [9, 9, 9]), name=n) for n in names if n not in dict(flags_cols)]
+    cols += [dict(c, name=n) for n, c in flags_cols]
+    return {"rows": ROWS, "columns": cols, "correlation": {"pairs": [list(p) for p in pairs]}}
+
+
+class TestHighCorr:
+    def test_at_threshold_is_high_correlation(self):
+        profile = _corr_profile_stub([("a", "b", 0.95, 2000), ("c", "d", -0.95, 2000), ("e", "f", 0.949999, 2000)])
+        flags = judge(profile, TH)
+        assert [k for k in "abcdef" if "corr" in flags[k]] == list("abcd")
+
+    def test_excludable_columns_are_not_paired(self):
+        # 已經可以直接排除的欄位，不再判斷其他問題；它的夥伴也不因為它而被標
+        profile = _corr_profile_stub(
+            [("dead", "x", 0.99, 2000), ("one", "y", 0.99, 2000)],
+            flags_cols=[("dead", _col([99, 99, 100], [0, 0, None], [9, 9, None])),
+                        ("one", _col([0, 0, 0], [3, 3, 3]))],
+        )
+        flags = judge(profile, TH)
+        assert flags["dead"] == ["null_all"] and flags["one"] == ["const_all"]
+        assert flags["x"] == [] and flags["y"] == []
+        assert high_corr_pairs(profile, TH, flags) == []
+
+    def test_old_profile_has_no_pairs(self):
+        assert high_corr_pairs({"columns": []}, {"null_ratio": 0.99}, {}) == []
+
+    def test_groups_join_chains_and_follow_the_table_order(self):
+        pairs = [("b", "c", 0.96, 1), ("e", "d", 0.97, 1), ("a", "b", 0.99, 1), ("x", "y", 0.98, 1),
+                 ("y", "z", 0.98, 1)]
+        order = ["x", "y", "z", "a", "b", "c", "d", "e"]
+        assert corr_groups(pairs, order) == [["x", "y", "z"], ["a", "b", "c"], ["d", "e"]]
+
+    def test_high_correlation_means_keep_one_per_group(self):
+        col = _col([0, 0, 0], [0, 0, 0], [9, 9, 9])
+        assert actions(col, ROWS, ["corr"], TH) == ["corr"]
+        assert actions(col, ROWS, ["const_each", "corr"], TH) == ["judge", "corr"]
+
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
@@ -334,6 +484,7 @@ time_col: snap_date
 key_cols: [cust_id]
 checks:
   distribution: true
+  correlation: false
 """
 
 
@@ -345,7 +496,7 @@ class TestParseConfig:
         assert cfg.exclude_cols == []
         assert cfg.time_start is None and cfg.time_end is None
         assert cfg.where is None
-        assert cfg.distribution is True
+        assert cfg.distribution is True and cfg.correlation is False
         assert cfg.thresholds == DEFAULT_THRESHOLDS
 
     def test_thresholds_override_only_what_is_written(self):
@@ -367,26 +518,36 @@ exlude_cols: [x]
 thresholds:
   null_ratio: 1.5
   psi: 0
-  corr: 0.95
+  corr: 0.4
+  cor: 0.9
 """
         _, problems = parse_config(text)
         joined = "\n".join(problems)
-        # corr 是第三階段（相關性）才有的鍵
-        for needle in ("table", "key_cols", "checks", "exlude_cols", "corr", "null_ratio", "psi"):
+        for needle in ("table", "key_cols", "checks", "exlude_cols", "鍵：cor（", "null_ratio", "psi", "corr"):
             assert needle in joined, needle
-        assert len(problems) == 7
+        assert len(problems) == 8
 
-    def test_checks_distribution_must_be_written_as_true_or_false(self):
+    def test_checks_must_be_written_as_true_or_false(self):
         base = _GOOD.split("checks:")[0]
         for checks, needle in (
-            ("checks: {}\n", "checks.distribution"),
-            ("checks:\n  distribution: maybe\n", "true 或 false"),
-            ("checks:\n  distribution: false\n  correlation: true\n", "correlation"),
+            ("checks:\n  correlation: false\n", "checks.distribution"),
+            ("checks:\n  distribution: false\n", "checks.correlation"),
+            ("checks:\n  distribution: maybe\n  correlation: false\n", "true 或 false"),
+            ("checks:\n  distribution: false\n  correlation: false\n  corr: true\n", "corr"),
         ):
             _, problems = parse_config(base + checks)
             assert len(problems) == 1 and needle in problems[0], (checks, problems)
-        cfg, problems = parse_config(base + "checks:\n  distribution: false\n")
-        assert problems == [] and cfg.distribution is False
+        cfg, problems = parse_config(base + "checks:\n  distribution: false\n  correlation: true\n")
+        assert problems == [] and cfg.distribution is False and cfg.correlation is True
+
+    def test_corr_threshold_is_between_0_5_and_1(self):
+        # profile.json 只存絕對值 ≥ 0.5 的配對，再低就畫不出來
+        for v, ok in ((0.5, True), (1, True), (0.49, False), (1.01, False), (0, False)):
+            cfg, problems = parse_config(_GOOD + f"thresholds:\n  corr: {v}\n")
+            if ok:
+                assert problems == [] and cfg.thresholds["corr"] == v, v
+            else:
+                assert len(problems) == 1 and "thresholds.corr 要介於 0.5 到 1" in problems[0], (v, problems)
 
     def test_drift_and_tail_thresholds_must_be_positive(self):
         text = _GOOD + "thresholds:\n  psi: -1\n  tail_ratio: 0\n  tail_log_ratio: 0.5\n"
@@ -422,7 +583,7 @@ thresholds:
         raw = yaml.safe_load(text)
         assert set(raw) == set(pft._REQUIRED_KEYS) | set(pft._OPTIONAL_KEYS)
         assert set(raw["thresholds"]) == set(DEFAULT_THRESHOLDS)
-        assert set(raw["checks"]) == {"distribution"}
+        assert set(raw["checks"]) == set(pft._CHECK_KEYS) == {"distribution", "correlation"}
 
 
 class TestCheckAgainstTable:
@@ -710,6 +871,119 @@ class TestRender:
         assert page.count("</script>") == 2
 
 
+def _corr_profile(tmp_path, *, thresholds=None):
+    """有跑相關性的 profile：一組三欄的鏈（a 像 b、b 像 c）、一組負相關、各種沒算的原因。"""
+    profile = _profile(tmp_path)
+    profile["config"]["checks"] = {"distribution": False, "correlation": True}
+    if thresholds is not None:
+        profile["config"]["thresholds"] = thresholds
+    ok = lambda name: dict(_col([0, 0, 0], [0, 0, 0], [9, 9, 9]), name=name)  # noqa: E731
+    profile["columns"] += [ok(n) for n in ("dep_a", "dep_b", "dep_c", "login", "days", "loan", "flag")]
+    profile["columns"].append(dict(_col([0, 0, 0], ["a"] * 3, ["z"] * 3, kind="string", dtype="string"), name="s"))
+    profile["correlation"] = {
+        "period_rows": 100, "rows": 100,
+        "columns": ["half_empty", "dep_a", "dep_b", "dep_c", "login", "days", "loan", "flag"],
+        "skipped": {"sys_version": "const", "s": "string"},
+        "pairs": [["dep_a", "dep_b", 0.99, 100], ["dep_b", "dep_c", 0.97, 100], ["dep_a", "dep_c", 0.93, 100],
+                  ["dep_a", "login", 0.6, 100], ["login", "days", -0.98, 100]],
+        "sparse": {"loan": 40}, "flat": ["flag"], "few_pairs": 2, "flat_pairs": 0,
+    }
+    (tmp_path / PROFILE_FILENAME).write_text(json.dumps(profile))
+    return profile
+
+
+def _blob(page):
+    return json.loads(page.split('<script type="application/json" id="fp-data">')[1].split("</script>")[0])
+
+
+class TestCorrelationReport:
+    def test_correlation_sections(self, tmp_path):
+        write_report(_corr_profile(tmp_path), tmp_path, DEFAULT_THRESHOLDS, None)
+        page = (tmp_path / "index.html").read_text()
+        high = _section_html(page, "s-corr-high")
+        assert _names_in(high) == {"dep_a", "dep_b", "dep_c", "login", "days"}
+        assert "（5 欄，2 組）" in high
+        # 大的組在前；組內依表裡的欄位順序
+        assert 'data-name="dep_a" data-grp="g0"' in high and 'data-name="days" data-grp="g1"' in high
+        assert "-0.980" in high  # 負相關照實寫
+        matrix = page.split('<section id="s-corr-matrix">')[1].split('<section id="s-corr-skip">')[0]
+        assert matrix.count('class="cm"') == 1  # 兩欄一組的不畫
+        cells = matrix.split('data-cm="0">')[1].split("</div>")[0]
+        assert cells == ('<i class="d"></i><i class="h"></i><i class="b"></i>'
+                         '<i class="h"></i><i class="d"></i><i class="h"></i>'
+                         '<i class="b"></i><i class="h"></i><i class="d"></i>')
+        skip = _section_html(page, "s-corr-skip")
+        for name, why in (("loan", "sparse"), ("flag", "flat"), ("sys_version", "const"), ("s", "string")):
+            assert f'data-name="{name}" data-why="{why}"' in skip, name
+        assert _names_in(skip) == {"loan", "flag", "sys_version", "s"}
+        assert "只有 40 筆有值" in skip and "的 2 組" in skip
+        assert "2 組，最大的一組 3 欄；另有 4 欄沒算" in _section_html(page, "s-overview")
+
+    def test_embedded_matrix_data_matches_the_drawing(self, tmp_path):
+        write_report(_corr_profile(tmp_path), tmp_path, DEFAULT_THRESHOLDS, None)
+        data = _blob((tmp_path / "index.html").read_text())
+        assert data["corrKeep"] == 0.5
+        (cm,) = data["cm"]
+        assert cm["names"] == ["dep_a", "dep_b", "dep_c"]
+        assert cm["r"][2] == cm["r"][6] == 0.93 and cm["n"][2] == 100
+        assert cm["r"][0] is None  # 對角線
+
+    def test_summary_keeps_one_per_group(self, tmp_path):
+        write_report(_corr_profile(tmp_path), tmp_path, DEFAULT_THRESHOLDS, None)
+        row = _section_html((tmp_path / "index.html").read_text(), "s-actions").split("<tr>")[-1]
+        assert "高度相關的欄位每組留一欄" in row
+        assert "<b>第 1 組</b>" in row and 'data-copy-text="dep_a\ndep_b\ndep_c"' in row
+        assert 'data-copy-text="login\ndays"' in row
+
+    def test_new_corr_threshold_changes_the_judgement(self, tmp_path):
+        _corr_profile(tmp_path)
+        runner = CliRunner()
+        for corr, names, groups in (
+            (None, {"dep_a", "dep_b", "dep_c", "login", "days"}, 2),
+            ("0.98", {"dep_a", "dep_b", "login", "days"}, 2),            # 0.97 那組不算了
+            ("0.6", {"dep_a", "dep_b", "dep_c", "login", "days"}, 1),    # 0.6 把兩組連成一組
+        ):
+            args = ["render", str(tmp_path)]
+            if corr:
+                cfg = tmp_path / "th.yaml"
+                cfg.write_text(_GOOD + f"thresholds:\n  corr: {corr}\n")
+                args += ["--config", str(cfg)]
+            result = runner.invoke(app, args)
+            assert result.exit_code == 0, result.output
+            high = _section_html((tmp_path / "index.html").read_text(), "s-corr-high")
+            assert _names_in(high) == names, corr
+            assert f"，{groups} 組）" in high, corr
+        cfg.write_text(_GOOD + "thresholds:\n  corr: 0.4\n")
+        result = runner.invoke(app, ["render", str(tmp_path), "--config", str(cfg)])
+        assert result.exit_code == 1 and "thresholds.corr" in result.output
+
+    def test_profile_without_correlation_says_not_run(self, tmp_path):
+        # 第二階段存的 profile.json：沒有 checks.correlation、沒有 correlation，門檻也沒有 corr
+        profile = _dist_profile(tmp_path)
+        profile["config"]["checks"] = {"distribution": True}
+        profile["config"]["thresholds"] = {k: v for k, v in DEFAULT_THRESHOLDS.items() if k != "corr"}
+        (tmp_path / PROFILE_FILENAME).write_text(json.dumps(profile))
+        result = CliRunner().invoke(app, ["render", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        page = (tmp_path / "index.html").read_text()
+        corr = _section_html(page, "s-corr")
+        assert "這次沒有跑" in corr and "checks.correlation" in corr
+        assert 'href="#s-corr-high"' not in page and "每組留一欄" not in page
+        assert "cm" not in _blob(page)
+
+    def test_page_ids_and_wording(self, tmp_path):
+        import re
+        from collections import Counter
+
+        write_report(_corr_profile(tmp_path), tmp_path, DEFAULT_THRESHOLDS, None)
+        page = (tmp_path / "index.html").read_text()
+        ids = re.findall(r'\sid="([^"]+)"', page)
+        assert [i for i, n in Counter(ids).items() if n > 1] == []
+        assert {"s-corr", "s-corr-high", "s-corr-matrix", "s-corr-skip", "t-corr-high", "t-corr-skip"} <= set(ids)
+        for word in ("dataset", "training", "feature_selection", "drop_columns", "LightGBM", "→"):
+            assert word not in page, word
+
+
 # ---------------------------------------------------------------------------
 # Spark: statistics
 # ---------------------------------------------------------------------------
@@ -802,7 +1076,8 @@ class TestProfileTable:
         spark.createDataFrame([("2024-01", 1, 1)], "t string, k int, v int").createOrReplaceTempView("fp_basic_only")
         profile = profile_table(spark, _cfg("fp_basic_only", distribution=False), batch_size=10)
         assert set(_by_name(profile)["v"]) == {"name", "dtype", "kind", "null", "min", "max"}
-        assert profile["config"]["checks"] == {"distribution": False}
+        assert profile["config"]["checks"] == {"distribution": False, "correlation": False}
+        assert "correlation" not in profile
 
 
 @pytest.mark.spark
@@ -858,6 +1133,54 @@ class TestDistributionStats:
 
 
 @pytest.mark.spark
+class TestCorrelationStats:
+    def _table(self, spark, view):
+        # 最早一期 a、b 反向；最新一期 a、b、c 同向，c 有 NaN、±Infinity；e 最新一期只有一個值
+        early = [("2024-01", 10_000 + i, float(i), float(-i), 1.0, "x", float(i)) for i in range(50)]
+        inf = float("inf")
+        latest = [("2024-02", i, float(i), float(2 * i),
+                   {0: float("nan"), 1: inf, 2: -inf}.get(i % 15, float(i)), "y", 5.0) for i in range(1500)]
+        spark.createDataFrame(early + latest, "t string, k int, a double, b double, c double, d string, e double") \
+            .createOrReplaceTempView(view)
+
+    def test_latest_period_only_with_empty_values_cleaned(self, spark):
+        self._table(spark, "fp_corr")
+        profile = profile_table(spark, _cfg("fp_corr", distribution=False, correlation=True), batch_size=10)
+        corr = profile["correlation"]
+        assert corr["rows"] == corr["period_rows"] == 1500  # 不到 50,000 筆就全拿
+        assert corr["skipped"] == {"d": "string", "e": "const"}
+        assert corr["columns"] == ["a", "b", "c"]
+        # 每 15 筆有 3 筆是 NaN 或 ±Infinity：c 剩 1,200 筆。名次是整欄一起排，有空值時是近似，不是剛好 1
+        assert [(x, y, n) for x, y, _, n in corr["pairs"]] == [("a", "b", 1500), ("a", "c", 1200), ("b", "c", 1200)]
+        assert [r for _, _, r, _ in corr["pairs"]] == [1.0, pytest.approx(1, abs=1e-5), pytest.approx(1, abs=1e-5)]
+        assert set(profile["pass_seconds"]) == {"basic", "correlation"}
+
+    def test_batches_give_the_same_correlation(self, spark):
+        self._table(spark, "fp_corr_batch")
+        cfg = _cfg("fp_corr_batch", distribution=False, correlation=True)
+        one = profile_table(spark, cfg, batch_size=1)["correlation"]
+        many = profile_table(spark, cfg, batch_size=100)["correlation"]
+        assert one == many
+
+    def test_sample_is_about_50000_rows_and_seeded(self, spark):
+        from pyspark.sql import functions as F
+
+        latest = spark.range(120_000).select(
+            F.lit("2024-02").alias("t"), F.col("id").alias("k"), F.col("id").cast("double").alias("a"),
+            (F.col("id") % 977).cast("double").alias("b"),
+        )
+        early = spark.range(10).select(F.lit("2024-01").alias("t"), (F.col("id") + 10**6).alias("k"),
+                                       F.col("id").cast("double").alias("a"), F.col("id").cast("double").alias("b"))
+        latest.unionByName(early).createOrReplaceTempView("fp_corr_sample")
+        cfg = _cfg("fp_corr_sample", distribution=False, correlation=True)
+        first = profile_table(spark, cfg, batch_size=1)["correlation"]
+        second = profile_table(spark, cfg, batch_size=1)["correlation"]
+        assert first["period_rows"] == 120_000
+        assert 49_000 <= first["rows"] <= 51_000
+        assert first == second  # seed 固定：同一張表抽到同一批
+
+
+@pytest.mark.spark
 class TestRunCommand:
     def test_config_problems_listed_at_once_then_exit(self, spark, tmp_path):
         spark.createDataFrame([("2024-01", 1, 1)], "t string, k int, v int") \
@@ -865,11 +1188,11 @@ class TestRunCommand:
         cfg = tmp_path / "bad.yaml"
         cfg.write_text(
             "table: fp_cli_bad\ntime_col: t\nexclude_cols: [gone]\n"
-            "checks:\n  distribution: false\nthresholds:\n  corr: 0.9\n"
+            "checks:\n  distribution: false\n  correlation: false\nthresholds:\n  corr: 0.3\n"
         )
         result = CliRunner().invoke(app, ["run", "--config", str(cfg)])
         assert result.exit_code == 1
-        for needle in ("key_cols", "gone", "corr"):
+        for needle in ("key_cols", "gone", "thresholds.corr 要介於"):
             assert needle in result.output, result.output
 
     def test_run_writes_profile_and_report(self, spark, tmp_path):
@@ -881,11 +1204,14 @@ class TestRunCommand:
         cfg = tmp_path / "ok.yaml"
         cfg.write_text(
             f"table: fp_cli_ok\ntime_col: t\nkey_cols: [k]\noutput_dir: {out}\n"
-            "checks:\n  distribution: false\n"
+            "checks:\n  distribution: false\n  correlation: true\n"
         )
         result = CliRunner().invoke(app, ["run", "--config", str(cfg)])
         assert result.exit_code == 0, result.output
         profile = json.loads((out / PROFILE_FILENAME).read_text())
         assert profile["periods"] == ["2024-01", "2024-02"]
+        assert profile["correlation"]["skipped"] == {"dead": "null"}
+        assert set(profile["pass_seconds"]) == {"basic", "correlation"}
         page = (out / "index.html").read_text()
         assert 'data-name="dead"' in _section_html(page, "s-null-all")
+        assert 'data-name="dead" data-why="null"' in _section_html(page, "s-corr-skip")
