@@ -24,7 +24,7 @@ from recsys_tfb.evaluation.report_sections.shared import (
 )
 
 #: The results this section reads, by catalog name (ADR-0031 principle 1).
-READS = ("evaluation_metrics", "baseline_metrics")
+READS = ("evaluation_row_facts", "evaluation_metrics", "baseline_metrics")
 
 #: What this section compares, by catalog entry (ADR-0031 decision 11: each
 #: section declares its own list): the query-group metrics overall, the
@@ -54,10 +54,10 @@ def build(
         metrics, baseline_metrics, "Model", "Baseline"
     )
     disp = report_cfg(parameters).get("display", {}) or {}
-    n_items = count_items(metrics)
+    n_items = count_items(results["evaluation_row_facts"])
     # One K for both sides, the model's: the baseline is scored on the model's
-    # own rows (build_baseline_frame), so its "all" resolved to the same K,
-    # and its slim bundle records neither that nor an item count (#434).
+    # own rows (build_baseline_frame), so its "all" resolved to the same K
+    # (#434); each bundle records its own all the same.
     all_k = resolved_all_k(metrics)
     attr_ks = resolve_display_k(
         disp.get("primary_map_k", [1, 3, 5, "all"]), all_k
@@ -257,7 +257,7 @@ def build(
 
     # [5] 大類 overall mAP@k M/B/Δ — 大類粒度的 overall mAP 對照；rows＝
     #     [Model,Baseline,Δ]、cols＝@k。cat_k 取 model 的 category bundle 的 K
-    #     （baseline slim bundle 無 dataset_overview，兩側同一 category 集）。
+    #     （baseline 與 model 是同一批列，兩側同一 category 集）。
     cat_a = (metrics.get("category") or {}).get("overall", {}) or {}
     cat_b = ((baseline_metrics or {}).get("category") or {}).get("overall", {}) or {}
     if cat_a and cat_b:

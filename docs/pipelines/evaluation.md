@@ -70,7 +70,7 @@ evaluation:
 |---|---|
 | `snap_date` | 本次評估的時間切點：一個日期，或多個日期（三種寫法見表下）。日期一律使用 `YYYY-MM-DD` |
 | `k_values` | @K 家族（map@K、precision@K、recall@K、map_attr@K）要實際計算的 K 值 superset。`evaluation.metric.k` 是另一個獨立的軸：主指標 per-item macro（含報表的頭號 mAP）的截斷深度。它非 null 時，per-item 那一族（map_attr、recall）會多算 `@metric.k`，overall／per-segment 的 @K 家族不受影響，所以不必自己把它列進 `k_values` |
-| `"all"` | 在細 item 粒度解析為 distinct item 數；在 category 粒度重新解析為 distinct category 數。宣告 `event` 時，細 item 粒度改取最寬 query group 的列數（一組 30 列、12 個 item 時取 12 會截斷），並把這個數寫進評估指標檔 `metrics.json`（catalog 的 `evaluation_metrics`）的 `all_k`；報表、比較報表與 training 的 test mAP 都照同一個鍵查 `@all`，不自己數 item（#434）。category 粒度不變：聚合之後每組每個大類只剩一列 |
+| `"all"` | 在細 item 粒度解析為 distinct item 數；在 category 粒度重新解析為 distinct category 數。宣告 `event` 時，細 item 粒度改取最寬 query group 的列數（一組 30 列、12 個 item 時取 12 會截斷），每份指標結果都把解析成的數記在 `metrics.json`（catalog 的 `evaluation_metrics`）的母體帳 `population.all_k`（#535 之前只有宣告 `event` 時才寫，而且寫在頂層的 `all_k`）；報表與比較報表都照同一個鍵查 `@all`，不自己數 item（#434）。鍵存的是解析後的數（`map@12`），不是 `map@all`：比較兩個模型時兩邊的 `all` 可能解析成不同的數，存成數字才不會被當成同一格相減（[ADR-0031](../adr/0031-evaluation-second-pass-layers-and-single-source.md) 決定 15，#535 查證）。category 粒度不變：聚合之後每組每個大類只剩一列 |
 
 `snap_date` 有三種寫法：
 
@@ -110,11 +110,11 @@ NDCG 不算，報表與落地的 `metrics.json` 都沒有它（[ADR-0018](../adr
 
 overall 指標先在每個 query group 計算，再對 query 等權平均；per-item attribution 則只在該 item 為正例的 rows 上彙整。兩者回答的問題不同，不應將 `map_attr@K` 誤讀為單一 item 自己的 mAP。
 
-per-item 的 `recall@K` 跟 overall 的 `recall@K` 同名、不同算法：一個是該 item 的正例裡排進前 K 名的比例，一個是每個 query group 的正例裡排進前 K 名的比例、再對組平均（[ADR-0031](../adr/0031-evaluation-second-pass-layers-and-single-source.md) 決定 6、7）。報表上 per-item 那個顯示成 `per-item recall`。它以前叫 `hit_rate@K`；per-item 區塊還寫著 `hit_rate@K` 的舊 `metrics.json`，報表會拒絕畫，照錯誤訊息 `--from-node compute_metrics` 重算即可。
+per-item 的 `recall@K` 跟 overall 的 `recall@K` 同名、不同算法：一個是該 item 的正例裡排進前 K 名的比例，一個是每個 query group 的正例裡排進前 K 名的比例、再對組平均（[ADR-0031](../adr/0031-evaluation-second-pass-layers-and-single-source.md) 決定 6、7）。報表上 per-item 那個顯示成 `per-item recall`。它以前叫 `hit_rate@K`；per-item 區塊還寫著 `hit_rate@K` 的舊 `metrics.json`，報表會拒絕畫，照錯誤訊息 `--from-node compute_row_facts` 重算即可。
 
 per-item 的指標都由每個 item 的**共用數字**相除而來：先在 overall 指標算進的那些 query group 裡，加總該 item 的每一列（正例與否都算）——排進前 K 名的次數、正例數、正例排進前 K 名的次數、AP 貢獻與正例名次的加總——再照指標目錄（`evaluation/metric_catalog.py`）的公式算出 `recall@K`、`map_attr@K`、`mean_pos`。這些數落地在 `metrics.json` 的 `per_item_shared_numbers`（有分群欄時另有 `per_item_segment_shared_numbers`）。沒有正例的 query group 不算進這些數：`--post-training` 評的 test 表預設不留這種組（`dataset.test_zero_positive_group_ratio`），留了也只是抽樣；而這三個指標只用到正例列，算不算這種組結果都一樣。per-item 的 precision@K（正例排進前 K 名的次數÷排進前 K 名的次數）不同：它的分母要算進全部的 query group，包含沒有正例的，抽樣留下的照 1／r 加權，r 就是上面的 `dataset.test_zero_positive_group_ratio`（擁有者 2026-10-23 定案，見 #541）。所以加它時要改這裡的算法，不只是在目錄寫公式。
 
-完全沒有正例的 query group 無法定義 AP，因此會從 metric computation 排除；報表仍會記錄 `n_queries` 與 `n_excluded_queries`。
+完全沒有正例的 query group 無法定義 AP，因此會從 metric computation 排除；`n_queries` 與 `n_excluded_queries` 照樣記在列的事實 `row_facts.json`（catalog 的 `evaluation_row_facts`，#535），報表從那裡讀。每份指標結果另記母體帳 `population`：`all` 解析成幾、哪些 item 進了 macro、算進指標的 query group 有幾組（有正例／無正例分開記；今天無正例的一律是 0）。
 
 ### 3.2 分群評估
 
@@ -142,7 +142,7 @@ evaluation:
 | `missing` | 母體表沒有、因此跳過的欄 → 那張表 |
 | `config_fingerprint` | 算它時的「算的」設定（見 7.2 節）；寫進去供事後查看，沒有 node 比對它 |
 
-分群的 node（`compute_metrics`、`compute_baseline_metrics`、`generate_comparison_report`）照 `joined` 分群，**不看 frame 的欄位**：`enriched_eval_predictions` 兩種模式共用一張表，另一模式 join 過的欄在這次的列上是全 NULL，照欄位挑會把它挑進來。`--compare-only` 沒有 `prepare_eval_data`，靠寫 enriched partition 那次落地的這份檔知道當時 join 了哪些欄。
+分群的 node（`compute_row_facts`、`compute_metrics`、`compute_baseline_metrics`、`generate_comparison_report`）照 `joined` 分群，**不看 frame 的欄位**：`enriched_eval_predictions` 兩種模式共用一張表，另一模式 join 過的欄在這次的列上是全 NULL，照欄位挑會把它挑進來。`--compare-only` 沒有 `prepare_eval_data`，靠寫 enriched partition 那次落地的這份檔知道當時 join 了哪些欄。
 
 **對不到與缺欄是兩件事：**
 
@@ -206,7 +206,7 @@ evaluation:
     column: campaign_id   # sample_pool 的任何一欄；與 mapping 二選一
 ```
 
-- **讀哪些列**：這次評估的月份（`evaluation.snap_date`）在 `sample_pool` 的列，不看 train 月份。`prepare_eval_data` 讀一次，對照表落地成 `item_categories.json`（catalog 條目 `evaluation_item_categories`，`prepare_eval_data` 的第三個 output）；`compute_metrics`、`compute_baseline_metrics`、`generate_comparison_report` 都照這份排大類。沒設 `column` 時這份檔也照樣落地，`mapping` 是空的，讀者照舊從設定讀手寫的 mapping。
+- **讀哪些列**：這次評估的月份（`evaluation.snap_date`）在 `sample_pool` 的列，不看 train 月份。`prepare_eval_data` 讀一次，對照表落地成 `item_categories.json`（catalog 條目 `evaluation_item_categories`，`prepare_eval_data` 的第三個 output）；`compute_row_facts`、`compute_metrics`、`compute_baseline_metrics`、`generate_comparison_report` 都照這份排大類。沒設 `column` 時這份檔也照樣落地，`mapping` 是空的，讀者照舊從設定讀手寫的 mapping。
 - **這一欄可以是組成 item 的其中一欄**（例：item 宣告成 `[campaign_id, creative_format]` 時的 `campaign_id`）。框架先把這一欄抄出來再拼 item，所以拼完丟掉原欄不影響它。
 - **NULL**：同一個 item 在別列有非 NULL 的值，就忽略 NULL；全部都是 NULL，這個 item 自成一類。
 - **大類不隨時間變**：同一個 item 在這次評估的列裡（同一個月或跨月）對到兩個以上不同的非 NULL 值，`prepare_eval_data` 就擋下（B18），訊息列出 item、各個值與各自出現的月份。理由：多個評估月份是一起算的，對照表只用 item 連接，一個 item 有兩列的話，它的預測會被複製進兩個大類、重複計數。
@@ -563,17 +563,17 @@ python -m recsys_tfb evaluation \
   --dry-run
 ```
 
-`generate_report` 是純函式，參數全部是別的 node 算好的產物（見 5.1 節的表）。其中 `evaluation_metrics`（`metrics.json`）、`baseline_metrics`（`baseline_metrics.json`）、`evaluation_report_aggregates`、`prediction_quality_metrics`（`prediction_quality.json`）已落地成 `JSONDataset`（前兩者見 [ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 2），也是，沒有記憶體中間結果。切片的自動擴張只看「輸出是否已落地」（見 [`pipeline-slicing.md`](../operations/user-guides/pipeline-slicing.md) 的「自動擴張補跑」），所以從 `generate_report` 接續，前次完整 run 成功時不會自動補跑任何 node，不跑 Spark。補跑清單釘在 `tests/test_pipelines/test_resume_contracts.py` 的 `RESUME_CONTRACTS`，之後改動 node 的形狀，該測試會紅燈提醒同步文件。
+`generate_report` 是純函式，參數全部是別的 node 算好的產物（見 5.1 節的表）。其中 `evaluation_row_facts`（`row_facts.json`）、`evaluation_metrics`（`metrics.json`）、`baseline_metrics`（`baseline_metrics.json`）、`evaluation_report_aggregates`、`prediction_quality_metrics`（`prediction_quality.json`）已落地成 `JSONDataset`（`metrics.json` 與 `baseline_metrics.json` 見 [ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 2），也是，沒有記憶體中間結果。切片的自動擴張只看「輸出是否已落地」（見 [`pipeline-slicing.md`](../operations/user-guides/pipeline-slicing.md) 的「自動擴張補跑」），所以從 `generate_report` 接續，前次完整 run 成功時不會自動補跑任何 node，不跑 Spark。補跑清單釘在 `tests/test_pipelines/test_resume_contracts.py` 的 `RESUME_CONTRACTS`，之後改動 node 的形狀，該測試會紅燈提醒同步文件。
 
-接續時直接讀回的落地 JSON（`evaluation_metrics`、`baseline_metrics`、`evaluation_report_aggregates`、`prediction_quality_metrics`）若是在不同的「算的」設定下算出來的，`generate_report` 會在畫之前 raise，訊息列出哪份產物、哪個鍵從什麼值變成什麼值、該 `--from-node` 哪個 node。只改了「畫的」設定則照常重繪。兩類設定的分法見 7.2 節。
+接續時直接讀回的落地 JSON（`evaluation_row_facts`、`evaluation_metrics`、`baseline_metrics`、`evaluation_report_aggregates`、`prediction_quality_metrics`）若是在不同的「算的」設定下算出來的，`generate_report` 會在畫之前 raise，訊息列出哪份產物、哪個鍵從什麼值變成什麼值、該 `--from-node` 哪個 node。只改了「畫的」設定則照常重繪。兩類設定的分法見 7.2 節。
 
 因此只改了「畫的」設定時，`--only-node generate_report` 就是便宜的重繪接續點：不重算任何指標（CLI 仍會照 4.1 節所說初始化 Spark）。需要只重做模型比較時，應使用持久化 `enriched_eval_predictions` 的 `--compare-only`。
 
-從指標接續（`--from-node compute_metrics`）也不重做 join：`prepare_eval_data` 把連好 label、rank 與 segment 的列直接寫進 `enriched_eval_predictions`，之後的 node 讀表（[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1）。前次完整 run 成功時，不會補跑任何 node（沒有 memory-only 的中間結果）；清單同樣釘在 `RESUME_CONTRACTS` 的 `"compute_metrics"`。兩個情況會把 `prepare_eval_data` 拉回來或擋下：
+從列的事實接續（`--from-node compute_row_facts`，設定改了之後錯誤訊息建議的就是這個）也不重做 join：`prepare_eval_data` 把連好 label、rank 與 segment 的列直接寫進 `enriched_eval_predictions`，之後的 node 讀表（[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1）。前次完整 run 成功時，不會補跑任何 node（沒有 memory-only 的中間結果）；清單同樣釘在 `RESUME_CONTRACTS` 的 `"compute_row_facts"`、`"compute_metrics"`。`--from-node compute_metrics` 也走得通，但切片照拓撲順序的位置切，它不重數列的事實（讀落地的 `row_facts.json`），也不重跑排在它前面的 `compute_prediction_quality`、`compute_report_aggregates`；partition 用同樣的設定重寫過之後（例如補了遲到的 label 再單跑某個月），列的事實只檢查設定指紋、看不出列變了，要從 `compute_row_facts` 接續。兩個情況會把 `prepare_eval_data` 拉回來或擋下：
 
 - **評估日期的 partition 不在**：這張表從第一次評估之後就一直存在，所以 CLI 不問「表在不在」，問「`evaluation.snap_date` 的每一個日期的 partition 在不在」。任一個不在就把 `prepare_eval_data` 拉回切片，全都在就直接讀。
 - **partition 在，但寫的時候設定不同**：兩道比對，擋的是兩件事。
-  - `prepare_eval_data` 跟 partition 一起寫的 `segment_columns.json` 帶設定指紋。分群的讀表 node（`compute_metrics`、`compute_baseline_metrics`）先比對其中五個決定 `prepare_eval_data` 產出的鍵（`post_training`、`evaluation.snap_date`、`evaluation.segment_columns`、`evaluation.segment_sources`、`evaluation.item_categories.column`），不合就 raise，指示 `--from-node prepare_eval_data`。只比這五個鍵的理由：改 `k_values` 這類只影響後段計算的設定，照訊息從 `compute_metrics` 重跑不會重寫 partition，全部都比的話會一直被擋。`compute_metrics`、`compute_baseline_metrics` 讀到的 `item_categories.json`（3.3 節）也照同一組鍵比；欄模式下這份檔不在、或是從別的欄讀的，同樣擋下並指示 `--from-node prepare_eval_data`。
+  - `prepare_eval_data` 跟 partition 一起寫的 `segment_columns.json` 帶設定指紋。分群的讀表 node（`compute_row_facts`、`compute_metrics`、`compute_baseline_metrics`）先比對其中五個決定 `prepare_eval_data` 產出的鍵（`post_training`、`evaluation.snap_date`、`evaluation.segment_columns`、`evaluation.segment_sources`、`evaluation.item_categories.column`），不合就 raise，指示 `--from-node prepare_eval_data`。只比這五個鍵的理由：改 `k_values` 這類只影響後段計算的設定，照訊息從 `compute_row_facts` 重跑不會重寫 partition，全部都比的話會一直被擋。`compute_row_facts`、`compute_metrics`、`compute_baseline_metrics` 讀到的 `item_categories.json`（3.3 節）也照同一組鍵比；欄模式下這份檔不在、或是從別的欄讀的，同樣擋下並指示 `--from-node prepare_eval_data`。
   - 每個 partition 的每一列另外帶 `eval_partition_fingerprint`（#374）：寫它的那次執行的 `post_training`、`segment_columns`、`segment_sources`（不含 `snap_date`），加上那次**實際 join 進去的分群欄**（`segment_columns.json` 的 `joined`）。**每個**讀表 node 讀之前逐日期比對「今天的設定＋這個目錄 JSON 的 `joined`」，不合或是空值就 raise，列出所有有問題的日期，指示 `--from-node prepare_eval_data`。這道擋的是「這個日期後來被另一次執行蓋掉」：同一個日期會被目錄不同的執行寫到（單跑 3 月寫 `20260331/`、1–3 月一起跑寫 `20260131-20260331/`），目錄裡那份 JSON 只代表自己那次寫的東西，看不出分區後來被誰蓋過。詳細的反例與理由見 7.1 節。
 
 `--from-node` 使用拓撲順序語意，會執行指定 node 與拓撲序中其後的 nodes；`--only-node` 則不執行下游 consumers。只要 pipeline 實際執行，CLI 仍會寫 evaluation manifest 並更新 `data/evaluation/latest`，所以單 node 模式應視為進階除錯工具。
@@ -587,14 +587,15 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合拆
 | 階段 | node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
 | 整理資料 | `prepare_eval_data` | 預測、`label_table`、該模式的母體表（`sample_pool`／`inference_population`）、parameters | 篩選模型與日期、檢查 `label_table` 在 identity 上沒有重複 key、補 label、必要時重算 rank、從母體表或覆寫表連接 segments（見 3.2 節）；欄模式下從 `sample_pool` 讀大類對照表（見 3.3 節）。join 只在這裡算一次，結果寫進這個月的 Hive partition | `enriched_eval_predictions`、`evaluation_segment_columns`、`evaluation_item_categories` |
-| 模型指標 | `compute_metrics` | `enriched_eval_predictions`、`evaluation_segment_columns`、`evaluation_item_categories` | 計算 overall、per-item、per-segment、macro、overview 與可選 category metrics；照 `joined` 分群，並把 `joined`／`sources`／`missing` 帶給報表；結果帶設定指紋。後置條件：篩完之後的月份數不等於設定的日期數（某個日期的 partition 空的或沒寫過）就 raise，訊息寫出預期數與實際數 | `evaluation_metrics`（落地 `metrics.json`） |
+| 列的事實 | `compute_row_facts` | `enriched_eval_predictions`、`evaluation_segment_columns`、`evaluation_item_categories` | 數評估列的事實，跟分數無關：資料概況（列數、entity／item／月份數、正例率、各月份／item／segment 的概況）、query group 數、無正例與全正的組數，item 與大類兩個粒度各一份；把 `joined`／`sources`／`missing` 帶給報表；結果帶設定指紋。模型與 baseline 是同一批列，共用這一份（[ADR-0031](../adr/0031-evaluation-second-pass-layers-and-single-source.md) 決定 4、8）。後置條件：篩完之後的月份數不等於設定的日期數（某個日期的 partition 空的或沒寫過）就 raise，訊息寫出預期數與實際數 | `evaluation_row_facts`（落地 `row_facts.json`） |
+| 模型指標 | `compute_metrics` | `enriched_eval_predictions`、`evaluation_row_facts`、`evaluation_segment_columns`、`evaluation_item_categories` | 計算 overall、per-item、per-segment、macro 與可選 category metrics，組數與 item 數從列的事實讀、不再數一次；照 `joined` 分群；結果帶母體帳 `population` 與設定指紋 | `evaluation_metrics`（落地 `metrics.json`） |
 | Baseline 每期彙總（僅 `baseline.score: rate` 且 `--post-training`） | `build_popularity_period_counts` | `sample_pool`、`label_table`、`popularity_period_counts_month_plan`（CLI 算的期計畫）、parameters | 只算計畫裡還沒落地的期（加上 `--rebuild-dates` 點名的）：每個 time 值 × item 的候選數與正例數。與模型無關（見 3.4 節） | `popularity_period_counts`（Hive） |
-| Baseline | `compute_baseline_metrics` | `enriched_eval_predictions`、歷史 labels、`evaluation_segment_columns`、`evaluation_item_categories`；正例率模式再加 `popularity_period_counts`（讀回整張表）與期計畫（只加總計畫裡的期） | 建立 popularity scores（正例數，或正例率模式的正例率）並計算對照指標；`report.sections.baseline: false` 時不算，只回 `{"enabled": false}` stub（帶設定指紋） | `baseline_metrics`（落地 `baseline_metrics.json`） |
+| Baseline | `compute_baseline_metrics` | `enriched_eval_predictions`、`evaluation_row_facts`、歷史 labels、`evaluation_segment_columns`、`evaluation_item_categories`；正例率模式再加 `popularity_period_counts`（讀回整張表）與期計畫（只加總計畫裡的期） | 建立 popularity scores（正例數，或正例率模式的正例率），在同一批列上用跟模型同一套計算算對照指標（含 macro，#535 之前沒有）；不產出自己的列的事實；`report.sections.baseline: false` 時不算，只回 `{"enabled": false}` stub（帶設定指紋） | `baseline_metrics`（落地 `baseline_metrics.json`） |
 | 預測品質 | `compute_prediction_quality` | `enriched_eval_predictions`、`evaluation_segment_columns`（只取 `joined` 確認分區指紋，不分群）、parameters | 把每一列候選當二元預測：一次 `groupBy(item, 細箱)` 的分箱表，加上從它推出的 `pr_auc`、`roc_auc`、F1 最佳門檻（見 3.7 節）；不排除沒有正例的 query group。`report.sections.prediction_quality: false`（框架預設）時不算，只回 `{"enabled": false}` stub（帶設定指紋） | `prediction_quality_metrics`（落地 `prediction_quality.json`） |
 | 報表區 Spark 聚合 | `compute_report_aggregates` | `enriched_eval_predictions`、`evaluation_segment_columns`（只取 `joined` 確認分區指紋，不分群）、parameters | 標準報表 per-item 細部拆解段要用的 Spark 端聚合（bin 計數／quartile／rank 矩陣），落地後 `generate_report` 才能是純函式 | `evaluation_report_aggregates` |
-| 標準報表 | `generate_report` | `evaluation_metrics`、parameters、`baseline_metrics`、`evaluation_report_aggregates`、`prediction_quality_metrics`（皆為必填參數，無預設值） | 產生互動式 HTML；純函式，不含任何 Spark 物件或 action。概覽的頭號 macro per-item mAP 就是 `metrics.json` 的 `macro_avg.by_item.map_attr@{metric.k}`（未設時是 `@all`），不另算。畫之前比對 `evaluation_metrics`、`baseline_metrics`、`evaluation_report_aggregates`、`prediction_quality_metrics` 的設定指紋，不合就 raise | `evaluation_report` |
+| 標準報表 | `generate_report` | `evaluation_row_facts`、`evaluation_metrics`、parameters、`baseline_metrics`、`evaluation_report_aggregates`、`prediction_quality_metrics`（皆為必填參數，無預設值） | 產生互動式 HTML；純函式，不含任何 Spark 物件或 action。概覽的頭號 macro per-item mAP 就是 `metrics.json` 的 `macro_avg.by_item.map_attr@{metric.k}`（未設時是 `@all`），不另算。畫之前比對 `evaluation_row_facts`、`evaluation_metrics`、`baseline_metrics`、`evaluation_report_aggregates`、`prediction_quality_metrics` 的設定指紋，不合就 raise | `evaluation_report` |
 
-讀 `enriched_eval_predictions` 的 node，第一步都先篩到 `evaluation.snap_date` 的日期（一個或多個）：表裡是這個 model_version 評估過的**所有月份**，catalog 只替你篩掉別的 model_version。篩的同時逐日期確認分區指紋（見 4.6 節），再把指紋欄丟掉往下用。忘了篩不會報錯，只會把所有月份一起算進去，所以 `tests/test_pipelines/test_evaluation/test_pipeline.py` 有一條 AST 測試：接上這張表、函式裡卻沒呼叫 `restrict_to_current_eval_partitions` 的 node 會讓測試失敗（只呼叫只篩不驗的 `restrict_to_eval_snap_dates` 也算沒做）。讀表的 node 之中，分群的 `compute_metrics`、`compute_baseline_metrics` 另外先比對 `segment_columns.json` 的指紋（見 4.6 節）。
+讀 `enriched_eval_predictions` 的 node，第一步都先篩到 `evaluation.snap_date` 的日期（一個或多個）：表裡是這個 model_version 評估過的**所有月份**，catalog 只替你篩掉別的 model_version。篩的同時逐日期確認分區指紋（見 4.6 節），再把指紋欄丟掉往下用。忘了篩不會報錯，只會把所有月份一起算進去，所以 `tests/test_pipelines/test_evaluation/test_pipeline.py` 有一條 AST 測試：接上這張表、函式裡卻沒呼叫 `restrict_to_current_eval_partitions` 的 node 會讓測試失敗（只呼叫只篩不驗的 `restrict_to_eval_snap_dates` 也算沒做）。讀表的 node 之中，分群的 `compute_row_facts`、`compute_metrics`、`compute_baseline_metrics` 另外先比對 `segment_columns.json` 的指紋（見 4.6 節）；後兩個也比對 `row_facts.json` 的指紋。
 
 `training_eval_predictions` 不保存 rank，因此 post-training 模式會依 score 在每個 query group 內重算。監控模式的 `ranked_predictions` 已有 rank，`prepare_eval_data` 會保留發布結果中的 rank；metric computation 本身仍會依 score 重新建立內部 position。
 
@@ -642,7 +643,8 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合拆
 | `report.html` | `data/evaluation/<model_version>/<YYYYMMDD>/report.html` | 標準、`--compare` |
 | `report_comparison.html` | `data/evaluation/<model_version>/<YYYYMMDD>/report_comparison.html` | `--compare`、`--compare-only` |
 | `manifest.json` | `data/evaluation/<model_version>/<YYYYMMDD>/manifest.json` | 所有實際執行模式 |
-| `metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/metrics.json`（`evaluation_metrics`：overall、per-item、per-segment、macro、overview 與 category 指標，per-item 指標的共用數字，帶 `config_fingerprint`） | 標準、`--compare` |
+| `row_facts.json` | `data/evaluation/<model_version>/<YYYYMMDD>/row_facts.json`（`evaluation_row_facts`：資料概況、query group 數、無正例與全正的組數、分群欄，item 與大類粒度，帶 `config_fingerprint`） | 標準、`--compare` |
+| `metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/metrics.json`（`evaluation_metrics`：overall、per-item、per-segment、macro 與 category 指標，per-item 指標的共用數字，母體帳 `population`；宣告 `event`／`occasion` 時另有同分列數 `n_tied_rows`／`tied_row_share`；帶 `config_fingerprint`） | 標準、`--compare` |
 | `baseline_metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/baseline_metrics.json`（`baseline_metrics`；`report.sections.baseline: false` 時是 `{"enabled": false}` stub，一樣帶指紋） | 標準、`--compare` |
 | `prediction_quality.json` | `data/evaluation/<model_version>/<YYYYMMDD>/prediction_quality.json`（`prediction_quality_metrics`，見 3.7 節；`report.sections.prediction_quality: false` 時是 `{"enabled": false}` stub，一樣帶指紋） | 標準、`--compare` |
 | `segment_columns.json` | `data/evaluation/<model_version>/<YYYYMMDD>/segment_columns.json`（`evaluation_segment_columns`，見 3.2 節） | 標準、`--compare` 寫；`--compare-only` 讀 |
@@ -662,7 +664,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合拆
 標準評估完成後至少確認：
 
 1. 報表 metadata 的 model version 與 snap date 正確（多個日期時顯示「最早 ~ 最晚（N 個日期）」，N 應等於設定的日期數）。
-2. `n_queries` 大於零，`n_excluded_queries` 比例合理。
+2. `row_facts.json` 的 `n_queries` 大於零，`n_excluded_queries` 比例合理。
 3. dataset overview 的 entities、items、rows 與 positives 符合該批次預期。
 4. 主要 `map@K` 與 `recall@K` 使用的 K 符合實際展示空間。
 5. per-item 與 per-segment 沒有被整體平均掩蓋的明顯退化。
@@ -725,7 +727,7 @@ report path 會將 ISO 日期移除 `-`，例如 `2026-01-31` 寫入 `data/evalu
 
 每個讀表 node 讀之前逐日期比對「今天的設定＋這個目錄 JSON 的 `joined`」（`--compare-only` 例外，設定取 JSON 記錄的，見 5.3 節），上例第 3 步會 raise 並點名 3 月，反方向（先單月、再用別的設定跑區間、再接續單月）一樣。
 
-**成本**：每個讀表 node 多一次小 action（標準執行的 4 個讀表 node 各一次，`--compare`／`--compare-only` 的 `restrict_to_common` 再一次；`--compare-only` 的閘門則是把原本的逐日期空值檢查換成這一次，不另外加）。這次 action 對每個評估日期只讀那個 partition 的一列（每支 `coalesce(1).limit(1)`，全部 union 後 collect 一次），日期數只影響 union 的支數，不整欄掃描。Spark 3.3.2（AQE 開啟）實測：一個日期或三個日期都是 1 個 job。前提是一個 partition 由一次 dynamic overwrite 寫成、整格同一個指紋值，所以一列就代表整格；用別的方式把列塞進某一格會讓這個檢查看不到第二種值。compare 的 `external_hive` 來源是例外：使用者的表不保證依時間分區，所以逐日期用 `isEmpty` 平行檢查（每個日期一個 job），不用單一 task 的讀法。理由與取捨見 [ADR-0020](../adr/0020-evaluation-bug-round-intended-behaviours.md) 文末〈補充（#374）〉。
+**成本**：每個讀表 node 多一次小 action（標準執行的每個讀表 node 各一次，`--compare`／`--compare-only` 的 `restrict_to_common` 再一次；`--compare-only` 的閘門則是把原本的逐日期空值檢查換成這一次，不另外加）。這次 action 對每個評估日期只讀那個 partition 的一列（每支 `coalesce(1).limit(1)`，全部 union 後 collect 一次），日期數只影響 union 的支數，不整欄掃描。Spark 3.3.2（AQE 開啟）實測：一個日期或三個日期都是 1 個 job。前提是一個 partition 由一次 dynamic overwrite 寫成、整格同一個指紋值，所以一列就代表整格；用別的方式把列塞進某一格會讓這個檢查看不到第二種值。compare 的 `external_hive` 來源是例外：使用者的表不保證依時間分區，所以逐日期用 `isEmpty` 平行檢查（每個日期一個 job），不用單一 task 的讀法。理由與取捨見 [ADR-0020](../adr/0020-evaluation-bug-round-intended-behaviours.md) 文末〈補充（#374）〉。
 
 同一個 model version 與日期下修改 K、segments、categories、baseline、report sections 或 compare source，都會覆寫相同報表路徑；標準／`--compare` 模式也會覆寫相同 enriched partition。
 manifest 會保存最後一次執行的 evaluation parameters、git commit、run ID、`post_training` 與 slicing metadata。
@@ -738,7 +740,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 
 | 類別 | 鍵 | 變了要做什麼 | 做錯會怎樣 |
 |---|---|---|---|
-| **算的**：改變 Spark 計算、抽樣，或決定要不要算 | `evaluation.` 底下的 `snap_date`、`segment_columns`、`segment_sources`、`k_values`、`item_categories.*`、`metric.*`、`query_filter.*`（`drop_all_positive_groups`）、`baseline.*`、`prediction_quality.*`、`report.sections.baseline`、`report.sections.per_item_breakdown`、`report.sections.prediction_quality`、`report.diagnostics.*` | 從該鍵對應的 node 重跑（`--from-node`），或標準 full run。每個鍵對應哪個 node，錯誤訊息會直接寫出來；對照表住在 `src/recsys_tfb/pipelines/evaluation/steps/config_fingerprint.py` 的 `COMPUTED_KEYS`（例：`metric.*` → `compute_metrics`；`item_categories.column` → `prepare_eval_data`，其餘 `item_categories.*` → `compute_metrics`） | 只做 `--only-node generate_report`，或做了沒涵蓋那個 node 的切片：`generate_report` 在畫之前 raise，訊息列出哪份產物、哪個鍵從什麼值變成什麼值、該 `--from-node` 哪個 node。不會產出混著新舊設定的報表 |
+| **算的**：改變 Spark 計算、抽樣，或決定要不要算 | `evaluation.` 底下的 `snap_date`、`segment_columns`、`segment_sources`、`k_values`、`item_categories.*`、`metric.*`、`query_filter.*`（`drop_all_positive_groups`）、`baseline.*`、`prediction_quality.*`、`report.sections.baseline`、`report.sections.per_item_breakdown`、`report.sections.prediction_quality`、`report.diagnostics.*` | 從該鍵對應的 node 重跑（`--from-node`），或標準 full run。每個鍵對應哪個 node，錯誤訊息會直接寫出來；對照表住在 `src/recsys_tfb/pipelines/evaluation/steps/config_fingerprint.py` 的 `COMPUTED_KEYS`（例：`metric.*` → `compute_row_facts`；`item_categories.column` → `prepare_eval_data`，其餘 `item_categories.*` → `compute_row_facts`） | 只做 `--only-node generate_report`，或做了沒涵蓋那個 node 的切片：`generate_report` 在畫之前 raise，訊息列出哪份產物、哪個鍵從什麼值變成什麼值、該 `--from-node` 哪個 node。不會產出混著新舊設定的報表 |
 | **算的**：切換執行模式（`--post-training` ↔ 監控） | 不是 `evaluation.*` 底下的使用者設定，是 CLI 注入 `parameters` 頂層的 run mode（同 `model_version`／`snap_date`），對照表裡的鍵名是 `post_training` | 照錯誤訊息從 `prepare_eval_data` 重跑（`--from-node prepare_eval_data`），或標準 full run | 同一 `(model_version, snap_date)` 先跑過一種模式、再切另一種模式做 `--only-node generate_report`：`prepare_eval_data` 讀的預測表不同（`training_eval_predictions` vs `ranked_predictions`），不擋的話兩種母體的數字會混進同一份報表 |
 | **畫的**：只改報表長相 | `evaluation.report.sections` 的其餘鍵（`dataset_overview`、`primary_map`）、`evaluation.report.display.*` | `--only-node generate_report` | 不會出錯；做 full run 也可以，只是多花時間 |
 
@@ -797,7 +799,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 | 評估到上一版模型 | `--post-training` 仍省略 `--model-version` | post-training 不會自動選最新模型；指定 candidate ID |
 | `No predictions found for evaluation.snap_date`（多個日期時是 `No predictions found for N of M evaluation.snap_date dates: [...]`） | 日期錯誤、模式用錯、對應 partition 未產生；多個日期時只有列出的那幾個沒有預測 | 檢查 model、日期、`training_eval_predictions`／`ranked_predictions` |
 | `enriched_eval_predictions holds evaluated date(s) not written under ...`，列出 `<日期>: written under other settings` 或 `<日期>: written before partitions carried a settings fingerprint` | 前者：那個日期的 partition 後來被另一組設定（另一種模式、別的分群設定）的執行蓋掉，或那次執行時母體表的分群欄跟現在這個目錄記錄的不同（實際 join 進去的欄不一樣），常見於單月與區間交錯跑再接續；也可能是設定改了之後只做切片（見 7.1 節）。後者：partition 是 #374 之前寫的。`--compare-only` 的閘門會把這兩類和「某日期沒有列」一次列完 | `--from-node prepare_eval_data` 重寫那些日期；`--compare-only` 沒有 `prepare_eval_data`，先用想比的設定重跑那些日期的標準 evaluation |
-| `compute_metrics postcondition: N evaluated months ... expected exactly M` | 某個評估日期的 `enriched_eval_predictions` partition 是空的或沒寫過（多半是從 `prepare_eval_data` 之後接續） | 照訊息 `--from-node prepare_eval_data` 重跑 |
+| `compute_row_facts postcondition: N evaluated months ... expected exactly M` | 某個評估日期的 `enriched_eval_predictions` partition 是空的或沒寫過（多半是從 `prepare_eval_data` 之後接續） | 照訊息 `--from-node prepare_eval_data` 重跑 |
 | `N duplicated label_table key(s) on [...]` | `label_table` 在該月的 `time + entity + item` 上有重複列 | 在上游去重。evaluation 不替你挑一列：重複的 key 會讓 LEFT JOIN 把候選複製成多列、rank 全錯，而且不會報錯 |
 | `Type conflict writing to Hive table '…enriched_eval_predictions' (rank: … ／ label: …)` | 這張表是舊版寫的：當時 `--post-training` 補出來的 `rank` 是 INT（現在是 BIGINT），監控模式的 `label` 沿用 `label_table` 的型別（現在一律 INT） | 表內容可由重跑 evaluation 重建：DROP 這張表，再對需要的月份重跑。同一模式重跑也會撞，不是只有換模式；這張表跨所有 model_version 與月份，DROP 之後到重跑之前 `--compare-only` 找不到 Model A |
 | `Evaluation artifacts on disk do not match the current computed settings` | 改了「算的」設定之後只重繪（例如只做 `--only-node generate_report`）；或磁碟上的 JSON 是指紋機制之前寫的（訊息寫 `has no config_fingerprint`） | 照訊息最後一行的 `--from-node` 重跑。只改了「畫的」鍵卻看到它，先對照 7.2 節確認那個鍵的分類 |

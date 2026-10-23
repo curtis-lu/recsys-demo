@@ -662,28 +662,22 @@ def test_metric_params_is_defined_exactly_once():
 
 
 class TestResolvedAllK:
-    def test_the_recorded_k_wins_over_the_item_count(self):
-        from recsys_tfb.evaluation.metrics import ALL_K_KEY, resolved_all_k
+    def test_the_bundle_s_own_ledger_answers(self):
+        """Each bundle is read at the K it records (#535), not at an item
+        count: with ``event`` declared the two differ (#434)."""
+        from recsys_tfb.evaluation.metrics import (
+            ALL_K_KEY, POPULATION_KEY, resolved_all_k)
 
-        bundle = {ALL_K_KEY: 17,
-                  "dataset_overview": {"totals": {"n_items": 12}}}
-        assert resolved_all_k(bundle) == 17
+        assert resolved_all_k({POPULATION_KEY: {ALL_K_KEY: 17}}) == 17
 
-    def test_nothing_recorded_means_the_item_count(self):
-        """Every bundle computed without ``event``: nothing new is written,
-        and the producer's K was the item count of the same frame."""
+    def test_a_bundle_without_a_ledger_is_not_guessed_at(self):
+        """A bundle written before #535: the report refuses it first
+        (``refuse_pre_ledger``); here there is no item count to fall back on,
+        the row facts left the bundle."""
         from recsys_tfb.evaluation.metrics import resolved_all_k
 
-        assert resolved_all_k(
-            {"dataset_overview": {"totals": {"n_items": 12}}}) == 12
-
-    def test_neither_means_unknown(self):
-        """A slim baseline bundle carries no overview. 0 is "unknown", the
-        reading ``report_sections.shared.count_items`` already gives it."""
-        from recsys_tfb.evaluation.metrics import resolved_all_k
-
-        assert resolved_all_k({"overall": {"map@1": 0.5}}) == 0
-        assert resolved_all_k({}) == 0
+        with pytest.raises(KeyError):
+            resolved_all_k({"dataset_overview": {"totals": {"n_items": 12}}})
 
 
 # ---------------------------------------------------------------------------

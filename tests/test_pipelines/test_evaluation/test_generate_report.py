@@ -13,6 +13,7 @@ import pytest
 from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
 from recsys_tfb.pipelines.evaluation.nodes import (
     compute_report_aggregates,
+    compute_row_facts,
     generate_report,
 )
 from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
@@ -67,13 +68,7 @@ def _metrics():
         "overall": {"map@1": 0.5},
         "per_item": {"A": {"recall@1": 0.5, "mean_pos": 1.5}},
         "per_segment": {},
-        "dataset_overview": {
-            "totals": {"n_rows": 4, "n_entities": 2, "n_items": 2,
-                       "n_snap_dates": 1, "n_positives": 2,
-                       "positive_rate": 0.5,
-                       "avg_positives_per_entity": 1.0},
-            "by_snap_date": {}, "by_item": {}},
-        "n_queries": 2, "n_excluded_queries": 0,
+        "population": {"all_k": 2},
     }
 
 
@@ -83,11 +78,35 @@ def _landed_metrics(params):
     return {**_metrics(), "config_fingerprint": fingerprint(params)}
 
 
+def _landed_row_facts(params):
+    """What ``compute_row_facts`` lands for the four-row partition of
+    :func:`_eval_pred`, by hand, for the tests that draw no partition."""
+    return {
+        "dataset_overview": {
+            "totals": {"n_rows": 4, "n_entities": 2, "n_items": 2,
+                       "n_snap_dates": 1, "n_positives": 2,
+                       "positive_rate": 0.5,
+                       "avg_positives_per_entity": 1.0},
+            "by_snap_date": {}, "by_item": {}},
+        "n_queries": 2, "n_excluded_queries": 0,
+        "n_all_positive_queries": 0, "widest_group_rows": 2,
+        "segments": _landed_segments(params),
+        "config_fingerprint": fingerprint(params),
+    }
+
+
+def _row_facts_of(eval_pred, params):
+    """The row facts of ``eval_pred`` as the real node lands them."""
+    return compute_row_facts(eval_pred, _landed_segments(params), params)
+
+
 def test_generate_report_html_no_diagnostics(spark):
     params = _params(False)
+    eval_pred = _eval_pred(spark)
     aggregates = compute_report_aggregates(
-        _eval_pred(spark), _landed_segments(params), params)
+        eval_pred, _landed_segments(params), params)
     html = generate_report(
+        evaluation_row_facts=_row_facts_of(eval_pred, params),
         evaluation_metrics=_landed_metrics(params),
         baseline_metrics=_unread_stub(params),
         evaluation_report_aggregates=aggregates,
@@ -103,10 +122,12 @@ def test_generate_report_html_no_diagnostics(spark):
 
 def test_generate_report_with_diagnostics(spark):
     params = _params(True)
+    eval_pred = _eval_pred(spark)
     aggregates = compute_report_aggregates(
-        _eval_pred(spark), _landed_segments(params), params)
+        eval_pred, _landed_segments(params), params)
     assert aggregates["config_fingerprint"] == fingerprint(params)
     html = generate_report(
+        evaluation_row_facts=_row_facts_of(eval_pred, params),
         evaluation_metrics=_landed_metrics(params),
         baseline_metrics=_unread_stub(params),
         evaluation_report_aggregates=aggregates,
@@ -142,6 +163,7 @@ def test_the_main_report_has_no_diagnosis_section(spark):
     aggregates = compute_report_aggregates(
         eval_pred, _landed_segments(params), params)
     html = generate_report(
+        evaluation_row_facts=_row_facts_of(eval_pred, params),
         evaluation_metrics=_landed_metrics(params),
         baseline_metrics=_unread_stub(params),
         evaluation_report_aggregates=aggregates,
@@ -186,11 +208,14 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
     yields a bounded report.
     """
     params = _params_diag_full()
+    small_pred = _eval_pred_n(spark, 100)
+    large_pred = _eval_pred_n(spark, 3000)
     small_aggregates = compute_report_aggregates(
-        _eval_pred_n(spark, 100), _landed_segments(params), params)
+        small_pred, _landed_segments(params), params)
     large_aggregates = compute_report_aggregates(
-        _eval_pred_n(spark, 3000), _landed_segments(params), params)
+        large_pred, _landed_segments(params), params)
     small = generate_report(
+        evaluation_row_facts=_row_facts_of(small_pred, params),
         evaluation_metrics=_landed_metrics(params),
         baseline_metrics=_unread_stub(params),
         evaluation_report_aggregates=small_aggregates,
@@ -198,6 +223,7 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
         parameters=params,
     )
     large = generate_report(
+        evaluation_row_facts=_row_facts_of(large_pred, params),
         evaluation_metrics=_landed_metrics(params),
         baseline_metrics=_unread_stub(params),
         evaluation_report_aggregates=large_aggregates,
@@ -290,7 +316,7 @@ def _landed_inputs(params):
         compute_prediction_quality,
     )
 
-    return (compute_baseline_metrics(None, None, None, params),
+    return (compute_baseline_metrics(None, None, None, None, params),
             compute_report_aggregates(None, None, params),
             compute_prediction_quality(None, None, params))
 
@@ -306,6 +332,7 @@ def test_generate_report_refuses_a_computed_setting_flipped_after_the_run():
 
     with pytest.raises(ValueError) as exc:
         generate_report(
+            evaluation_row_facts=_landed_row_facts(computed_with),
             evaluation_metrics=_landed_metrics(computed_with),
             baseline_metrics=baseline,
             evaluation_report_aggregates=aggregates,
@@ -315,10 +342,11 @@ def test_generate_report_refuses_a_computed_setting_flipped_after_the_run():
 
     msg = str(exc.value)
     assert "evaluation.report.sections.baseline" in msg
-    # compute_metrics, not compute_baseline_metrics: metrics.json carries the
-    # same fingerprint and sorts first, so re-running from the baseline would
-    # leave it stale and this raise would repeat (COMPUTED_KEYS).
-    assert "--from-node compute_metrics" in msg
+    # compute_row_facts, not compute_baseline_metrics: row_facts.json and
+    # metrics.json carry the same fingerprint and sort first, so re-running
+    # from the baseline would leave them stale and this raise would repeat
+    # (COMPUTED_KEYS).
+    assert "--from-node compute_row_facts" in msg
 
 
 def test_generate_report_refuses_metrics_computed_with_other_settings():
@@ -332,6 +360,7 @@ def test_generate_report_refuses_metrics_computed_with_other_settings():
 
     with pytest.raises(ValueError) as exc:
         generate_report(
+            evaluation_row_facts=_landed_row_facts(computed_with),
             evaluation_metrics=_landed_metrics(computed_with),
             baseline_metrics=baseline,
             evaluation_report_aggregates=aggregates,
@@ -341,7 +370,7 @@ def test_generate_report_refuses_metrics_computed_with_other_settings():
 
     msg = str(exc.value)
     assert "evaluation_metrics (written by compute_metrics)" in msg
-    assert "--from-node compute_metrics" in msg
+    assert "--from-node compute_row_facts" in msg
 
 
 def test_generate_report_refuses_metrics_without_a_fingerprint():
@@ -352,6 +381,7 @@ def test_generate_report_refuses_metrics_without_a_fingerprint():
 
     with pytest.raises(ValueError) as exc:
         generate_report(
+            evaluation_row_facts=_landed_row_facts(params),
             evaluation_metrics=_metrics(),
             baseline_metrics=baseline,
             evaluation_report_aggregates=aggregates,
@@ -375,6 +405,7 @@ def test_generate_report_redraws_when_only_drawn_settings_changed():
     now["evaluation"]["report"]["sections"]["primary_map"] = False
 
     html = generate_report(
+        evaluation_row_facts=_landed_row_facts(computed_with),
         evaluation_metrics=_landed_metrics(computed_with),
         baseline_metrics=baseline,
         evaluation_report_aggregates=aggregates,
@@ -398,6 +429,7 @@ def test_generate_report_refuses_prediction_quality_switched_on_after_the_run():
 
     with pytest.raises(ValueError) as exc:
         generate_report(
+            evaluation_row_facts=_landed_row_facts(computed_with),
             evaluation_metrics=_landed_metrics(computed_with),
             baseline_metrics=baseline,
             evaluation_report_aggregates=aggregates,
@@ -407,7 +439,7 @@ def test_generate_report_refuses_prediction_quality_switched_on_after_the_run():
 
     msg = str(exc.value)
     assert "evaluation.report.sections.prediction_quality" in msg
-    assert "--from-node compute_metrics" in msg
+    assert "--from-node compute_row_facts" in msg
 
 
 def test_generate_report_refuses_a_prediction_quality_json_without_fingerprint():
@@ -416,6 +448,7 @@ def test_generate_report_refuses_a_prediction_quality_json_without_fingerprint()
 
     with pytest.raises(ValueError) as exc:
         generate_report(
+            evaluation_row_facts=_landed_row_facts(params),
             evaluation_metrics=_landed_metrics(params),
             baseline_metrics=baseline,
             evaluation_report_aggregates=aggregates,
@@ -450,6 +483,7 @@ def test_generate_report_draws_prediction_quality_from_the_nodes_output(spark):
     aggregates = compute_report_aggregates(
         eval_pred, _landed_segments(params), params)
     html = generate_report(
+        evaluation_row_facts=_row_facts_of(eval_pred, params),
         evaluation_metrics=_landed_metrics(params),
         baseline_metrics=_unread_stub(params),
         evaluation_report_aggregates=aggregates,
@@ -457,3 +491,128 @@ def test_generate_report_draws_prediction_quality_from_the_nodes_output(spark):
         parameters=params,
     )
     assert "預測品質" in html
+
+
+class TestTheBaselineIsTheModelsComputation:
+    """ADR-0031 decision 8: the baseline goes through the model's metrics,
+    macro included. These tests draw the baseline section from what the nodes
+    compute. Before #535 the report tests drew it from a hand-written bundle
+    holding a ``macro_avg`` the baseline never wrote, so the section's Macro
+    row passed every test and appeared in no report.
+
+    The data: two query groups, each holding A, B, C, A the one positive in
+    both. The model ranks A first in both. The history makes C the most
+    popular, then B, then A, so the baseline ranks A last in both — a tie
+    broken by item name would have ranked it first. Each group is its own
+    segment and the items map to two categories, so every slice the report
+    compares is computed.
+    """
+
+    @staticmethod
+    def _params():
+        return {
+            "schema": {"columns": {
+                "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+                "label": "label", "score": "score", "rank": "rank"}},
+            "evaluation": {
+                "snap_date": "2024-03-31",
+                "k_values": [1, 2, 3],
+                "segment_columns": ["seg"],
+                "item_categories": {"enabled": True, "unmapped": "singleton",
+                                    "mapping": {"AB": ["A", "B"]}},
+                "baseline": {"lookback_months": 12},
+                "report": {
+                    "sections": {"per_item_breakdown": False},
+                    "display": {"primary_map_k": [1],
+                                "guardrail_recall_k": [1]}},
+            },
+        }
+
+    @classmethod
+    def _computed(cls, spark):
+        """``(params, row facts, model metrics, baseline metrics)`` as the
+        three nodes compute them."""
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_baseline_metrics,
+            compute_metrics,
+        )
+
+        params = cls._params()
+        params["schema"]["categorical_values"] = {"prod_name": ["A", "B", "C"]}
+        frame = stamp_partition_fingerprint(spark.createDataFrame(
+            [("2024-03-31", "c1", "A", 0.9, 1, 1, "X"),
+             ("2024-03-31", "c1", "B", 0.5, 0, 2, "X"),
+             ("2024-03-31", "c1", "C", 0.1, 0, 3, "X"),
+             ("2024-03-31", "c2", "A", 0.8, 1, 1, "Y"),
+             ("2024-03-31", "c2", "B", 0.3, 0, 2, "Y"),
+             ("2024-03-31", "c2", "C", 0.2, 0, 3, "Y")],
+            schema=["snap_date", "cust_id", "prod_name", "score", "label",
+                    "rank", "seg"],
+        ), params, ["seg"])
+        # Positives in the lookback window: C 3, B 2, A 1.
+        history = spark.createDataFrame(
+            [("2023-12-31", f"h{i}", item, int(i < n))
+             for i in range(3) for item, n in (("A", 1), ("B", 2), ("C", 3))],
+            schema=["snap_date", "cust_id", "prod_name", "label"],
+        )
+        segments = {**_landed_segments(params), "joined": ["seg"],
+                    "sources": {"seg": "sample_pool"}}
+        facts = compute_row_facts(frame, segments, params)
+        metrics = compute_metrics(frame, facts, segments, params)
+        baseline = compute_baseline_metrics(
+            frame, facts, history, segments, params)
+        return params, facts, metrics, baseline
+
+    def test_the_baseline_section_draws_the_baseline_s_macro(self, spark):
+        """Per-item recall@1 of A, the one item with a positive: 1 for the
+        model, 0 for the baseline; so is each Macro."""
+        import re
+
+        params, facts, metrics, baseline = self._computed(spark)
+        html = generate_report(
+            evaluation_row_facts=facts,
+            evaluation_metrics=metrics,
+            baseline_metrics=baseline,
+            evaluation_report_aggregates=_unread_stub(params),
+            prediction_quality_metrics=_unread_stub(params),
+            parameters=params,
+        )
+        table = html[html.index("<summary>per-item recall@k (M/B/Δ)"):]
+        table = table[:table.index("</table>")]
+        assert "<th>Macro 平均</th>" in table, table
+        macro = table[table.index("<th>Macro 平均</th>"):]
+        cells = re.findall(r"<td>([^<]*)</td>", macro[:macro.index("</tr>")])
+        assert cells == ["1", "0", "1"]   # recall@1 M, B, Δ
+
+    @pytest.mark.parametrize("fixture", [
+        "_baseline_metrics_full", "_baseline_with_seg_cat"])
+    def test_the_hand_written_baseline_holds_only_what_the_node_writes(
+            self, spark, fixture):
+        """The hand-written baselines of ``test_report_builder`` still draw
+        the baseline section in the report tests that need no Spark. Every
+        key path in them must be one ``compute_baseline_metrics`` writes,
+        items, segments and months read as any key — the macro
+        ``_baseline_metrics_full`` held before #535 was not. Keys only: the
+        values there are made up."""
+        from tests.test_evaluation import test_report_builder
+
+        any_key_below = {"per_item": 1, "per_segment": 1,
+                         "per_item_segment": 2, "purchase_counts": 1,
+                         "monthly_counts": 2}
+
+        def key_paths(bundle, prefix=(), wild=0):
+            paths = set()
+            for key, value in bundle.items():
+                path = prefix + ("*" if wild else key,)
+                if isinstance(value, dict) and value:
+                    paths |= key_paths(
+                        value, path,
+                        wild - 1 if wild else any_key_below.get(key, 0))
+                else:
+                    paths.add(path)
+            return paths
+
+        *_, baseline = self._computed(spark)
+        hand_written = getattr(test_report_builder, fixture)()
+        unwritten = key_paths(hand_written) - key_paths(baseline)
+        assert unwritten == set()

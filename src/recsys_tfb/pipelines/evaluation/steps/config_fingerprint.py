@@ -97,18 +97,18 @@ __all__ = [
 #:
 #: The node is **the earlier, in topological order, of the key's first reader
 #: and the first node that writes a fingerprinted artifact**
-#: (``compute_metrics``), not simply the first reader. Every fingerprinted
-#: artifact hashes every row here, so a change makes all of them stale, and
-#: ``--from-node`` must re-run all of their producers. The ``baseline`` and
-#: ``report.*`` rows are where the two differ: first read by
-#: ``compute_baseline_metrics`` / ``compute_report_aggregates``, which both
-#: sort after ``compute_metrics`` in both modes. Since ``evaluation_metrics``
-#: and ``baseline_metrics`` land on disk (ADR-0018 decision 2), a slice no
-#: longer pulls their producers back on its own, so advising the first reader
-#: would leave ``metrics.json``'s old fingerprint in place and the next report
-#: would raise with the same advice, a loop with no exit. The price is one
-#: extra ``compute_metrics`` when only a baseline or report-aggregate setting
-#: changed.
+#: (``compute_row_facts``, #535), not simply the first reader. Every
+#: fingerprinted artifact hashes every row here, so a change makes all of them
+#: stale, and ``--from-node`` must re-run all of their producers. Every row
+#: past ``prepare_eval_data``'s is where the two differ: first read by
+#: ``compute_metrics``, ``compute_baseline_metrics`` or a later node, all
+#: sorting after ``compute_row_facts`` in both modes. Since ``row_facts.json``
+#: lands on disk like the other results (ADR-0018 decision 2), a slice no
+#: longer pulls its producer back on its own, so advising the first reader
+#: would leave ``row_facts.json``'s old fingerprint in place and the next
+#: report would raise with the same advice, a loop with no exit. The price is
+#: one extra ``compute_row_facts`` (and ``compute_metrics``) when only a later
+#: node's setting changed.
 #:
 #: ``tests/test_pipelines/test_evaluation/test_pipeline.py::
 #: TestFingerprintRerunNodes`` pins it in both modes: a row whose node sorts
@@ -119,7 +119,7 @@ __all__ = [
 #: partition), yet the rule above does not move every row to it. That artifact
 #: is compared on :data:`PARTITION_CONTENT_KEYS` only, the rows already pointing
 #: at ``prepare_eval_data``, so a change to any other row never makes it stale
-#: and ``--from-node compute_metrics`` stays enough for those (see that
+#: and ``--from-node compute_row_facts`` stays enough for those (see that
 #: constant for why this is not the same loop).
 #:
 #: The first row, ``post_training``, is not a user config key: it is the
@@ -148,38 +148,32 @@ COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
     ("evaluation.segment_sources", "prepare_eval_data"),
     # prepare_eval_data reads the category table off this sample_pool column
     # and lands it (#379). Its own row although the whole block has one at
-    # compute_metrics below: changing the column moves both, and the earlier
-    # row decides the advice. At compute_metrics alone, the re-run would rank
-    # by the old table. A change to the rest of the block (enabled, mapping)
-    # still advises compute_metrics. One transition takes a second step:
-    # switching `enabled` on while `column` is already written. The table was
-    # landed empty (column mode was off), so compute_metrics then refuses it
-    # and names prepare_eval_data — loud, never a wrong report.
+    # compute_row_facts below: changing the column moves both, and the earlier
+    # row decides the advice. At compute_row_facts alone, the re-run would
+    # rank by the old table. A change to the rest of the block (enabled,
+    # mapping) still advises compute_row_facts. One transition takes a second
+    # step: switching `enabled` on while `column` is already written. The
+    # table was landed empty (column mode was off), so compute_row_facts then
+    # refuses it and names prepare_eval_data — loud, never a wrong report.
     ("evaluation.item_categories.column", "prepare_eval_data"),
-    ("evaluation.k_values", "compute_metrics"),
-    ("evaluation.item_categories", "compute_metrics"),
-    ("evaluation.metric", "compute_metrics"),
-    # First read by evaluation/metrics.py::drop_all_positive_groups, called
-    # from compute_metrics (fine grain and category grain) and
-    # compute_baseline_metrics (#376). Listed at compute_metrics, the first
-    # fingerprinted producer, for the same reason as the baseline/report rows
-    # below: flipping it changes which query groups are dropped before any
-    # ranking metric is computed, so both a stale evaluation_metrics.json and
-    # a stale baseline_metrics.json must be caught, and both sort no earlier
-    # than compute_metrics. Not on prepare_eval_data: the filter runs after
-    # the Hive read, on the already-joined rows, not on the join itself.
-    ("evaluation.query_filter", "compute_metrics"),
-    # First read by compute_baseline_metrics / compute_report_aggregates;
-    # listed at compute_metrics, the first fingerprinted producer, for the
-    # reason in the comment above.
-    ("evaluation.baseline", "compute_metrics"),
-    ("evaluation.report.sections.baseline", "compute_metrics"),
-    ("evaluation.report.diagnostics", "compute_metrics"),
-    ("evaluation.report.sections.per_item_breakdown", "compute_metrics"),
-    # First read by compute_prediction_quality, which sorts after
-    # compute_metrics in both modes; same reason (ADR-0024).
-    ("evaluation.prediction_quality", "compute_metrics"),
-    ("evaluation.report.sections.prediction_quality", "compute_metrics"),
+    # Every row from here is listed at compute_row_facts, the first
+    # fingerprinted producer, whichever node first reads it (the rule above):
+    # compute_metrics reads k_values, metric and query_filter, the latter
+    # also compute_baseline_metrics (#376) and compute_row_facts (its
+    # all-positive log and warning); compute_baseline_metrics and
+    # compute_report_aggregates the baseline and report rows;
+    # compute_prediction_quality the last two (ADR-0024). Not on
+    # prepare_eval_data: none of them changes the join.
+    ("evaluation.k_values", "compute_row_facts"),
+    ("evaluation.item_categories", "compute_row_facts"),
+    ("evaluation.metric", "compute_row_facts"),
+    ("evaluation.query_filter", "compute_row_facts"),
+    ("evaluation.baseline", "compute_row_facts"),
+    ("evaluation.report.sections.baseline", "compute_row_facts"),
+    ("evaluation.report.diagnostics", "compute_row_facts"),
+    ("evaluation.report.sections.per_item_breakdown", "compute_row_facts"),
+    ("evaluation.prediction_quality", "compute_row_facts"),
+    ("evaluation.report.sections.prediction_quality", "compute_row_facts"),
 )
 
 #: The computed settings that decide what ``prepare_eval_data`` writes: the
@@ -191,7 +185,7 @@ COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
 #: correction): the partition is read back from Hive, so a slice starting after
 #: ``prepare_eval_data`` does not rewrite it. Compared on every row, changing
 #: ``evaluation.k_values`` would make it stale, the advice would be
-#: ``--from-node compute_metrics`` (that row's node), the re-run would leave it
+#: ``--from-node compute_row_facts`` (that row's node), the re-run would leave it
 #: as it was, and the next run would raise the same way: a loop with no exit.
 #: Moving every row to ``prepare_eval_data`` instead would end the loop by
 #: re-joining the predictions on any setting change. Neither is needed: no

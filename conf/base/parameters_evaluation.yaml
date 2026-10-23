@@ -136,7 +136,7 @@ evaluation:
   # 在程式，非設定鍵）就警告。**不套用**：報表的 per-item 細部拆解段、training 的
   # test mAP 與 HPO 目標（唯讀入口見
   # `evaluation/metrics.py::drop_all_positive_groups`；設定檢查見
-  # `core/consistency.py` A49）。改這個鍵要從 compute_metrics 重跑
+  # `core/consistency.py` A49）。改這個鍵要從 compute_row_facts 重跑
   # （`COMPUTED_KEYS`）。
   # query_filter:
   #   drop_all_positive_groups: false

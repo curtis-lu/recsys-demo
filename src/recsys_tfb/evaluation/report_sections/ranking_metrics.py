@@ -39,7 +39,7 @@ from recsys_tfb.evaluation.report_sections.shared import (
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
 #: The results this section reads, by catalog name (ADR-0031 principle 1).
-READS = ("evaluation_metrics",)
+READS = ("evaluation_row_facts", "evaluation_metrics")
 
 
 def macro_coverage_suffix(
@@ -92,9 +92,10 @@ def _group_ledger_line(grain: str, bundle: dict, parameters: dict) -> str | None
     報表連結的診斷頁也印 macro per-item mAP、而且不排除全正的組；診斷頁隨 #532
     拿掉之後，這個措辭照留。
 
-    缺 ``n_queries``／``n_excluded_queries``（更早的 bundle）回 ``None``。只缺
-    全正組數的，是 #376 之前算的 ``metrics.json``：開關關著時指紋沒變，照樣會被
-    畫出來，所以不報錯，印得出的照印，並說怎麼補。
+    ``bundle`` 是列的事實（``row_facts.json``，#535）的一個粒度。缺
+    ``n_queries``／``n_excluded_queries`` 回 ``None``。只缺全正組數的，#535 之前
+    是 #376 之前算的 ``metrics.json``；``compute_row_facts`` 一定寫這個數，所以
+    今天只有手組的 dict 會走到這裡：不報錯，印得出的照印，並說怎麼補。
     """
     n_pos = n_groups_with_positive(bundle)
     if n_pos is None:
@@ -107,7 +108,7 @@ def _group_ledger_line(grain: str, bundle: dict, parameters: dict) -> str | None
             f"有正例的組 {n_pos:,}"
             + ("" if drop else "，全部算進衡量指標")
             + "（這份結果沒有全正的組數：它在這個計數加入之前算的，從 "
-            "compute_metrics 重跑可得）"
+            "compute_row_facts 重跑可得）"
         )
     elif drop:
         head = (
@@ -245,12 +246,13 @@ def build(
     """
     if not section_on(parameters, "primary_map"):
         return None
+    facts = results["evaluation_row_facts"]
     metrics = results["evaluation_metrics"]
     overall = metrics.get("overall", {})
     # per-item 列序全報表統一按字母（與 per-item 細部拆解的 item-share 表對齊）
     per_item = dict(sorted((metrics.get("per_item", {}) or {}).items()))
     macro_item = metrics.get("macro_avg", {}).get("by_item", {})
-    n_items = count_items(metrics)
+    n_items = count_items(facts)
     all_k = resolved_all_k(metrics)
     ks = metrics_section_ks(all_k)  # one K list for every table
 
@@ -280,7 +282,7 @@ def build(
     cat = metrics.get("category")
     cks = None
     if cat:
-        n_cat = count_items(cat)
+        n_cat = count_items(facts.get("category") or {})
         cat_k = resolved_all_k(cat)
         cks = metrics_section_ks(cat_k)
         _add(_families_by_k_table(cat.get("overall", {}), cks, cat_k),
@@ -328,7 +330,7 @@ def build(
                  f"{cat_item_cov}", True)
 
     ledger = [
-        line for grain, bundle in grain_bundles(metrics)
+        line for grain, bundle in grain_bundles(facts)
         if (line := _group_ledger_line(grain, bundle, parameters))
     ]
     return ReportSection(

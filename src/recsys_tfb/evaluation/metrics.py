@@ -83,8 +83,9 @@ def metric_params(parameters: dict) -> dict:
     }
 
 
-#: Top-level key of a ``metrics_spark.compute_all_metrics`` bundle and of its
-#: ``category`` sub-bundle (#376): how many of the query groups holding a
+#: Top-level key of the row facts (``metrics_spark.compute_row_facts``,
+#: ``row_facts.json``) and of their ``category`` grain (#376; in the metrics
+#: bundle before #535): how many of the query groups holding a
 #: positive are *all-positive* — every row carries the same positive label
 #: (with 0/1 labels: every row positive; the rule is
 #: ``metrics_spark._all_positive_group``), so every per-query ranking metric
@@ -95,9 +96,14 @@ def metric_params(parameters: dict) -> dict:
 #: with K below the row count, which rows reach the top K still decides which
 #: items get the credit. Always written, whether or not
 #: ``evaluation.query_filter.drop_all_positive_groups`` drops them, because the
-#: report reads only the written bundle. ``n_excluded_queries`` keeps counting
+#: report reads only the written facts. ``n_excluded_queries`` keeps counting
 #: only the zero-positive groups.
 ALL_POSITIVE_KEY = "n_all_positive_queries"
+
+#: Row facts key (``metrics_spark.compute_row_facts``): the row count of the
+#: widest query group, what ``evaluation.k_values: "all"`` resolves to on a
+#: frame of event rows.
+WIDEST_GROUP_KEY = "widest_group_rows"
 
 #: With the switch off, the log and the report warn when the all-positive
 #: groups are more than this share of the groups holding a positive (#376).
@@ -119,7 +125,7 @@ def drop_all_positive_groups(parameters: dict) -> bool:
 
 
 def n_groups_with_positive(bundle: dict) -> Optional[int]:
-    """Query groups holding a positive in one metrics bundle:
+    """Query groups holding a positive in one grain of the row facts:
     ``n_queries - n_excluded_queries``.
 
     The one place that subtraction is written (#376):
@@ -137,7 +143,8 @@ def n_groups_with_positive(bundle: dict) -> Optional[int]:
 
 
 def all_positive_share(bundle: dict) -> Optional[float]:
-    """All-positive groups ÷ groups holding a positive, for one metrics bundle.
+    """All-positive groups ÷ groups holding a positive, for one grain of the
+    row facts.
 
     The denominator is :func:`n_groups_with_positive`, the groups the
     measurement metrics score with the switch off, so the share reads as
@@ -185,10 +192,19 @@ def all_positive_share_warns(bundle: dict, parameters: dict) -> bool:
     return share is not None and share > ALL_POSITIVE_WARN_SHARE
 
 
-#: Top-level key of a ``metrics_spark.compute_all_metrics`` bundle: the K
-#: ``evaluation.k_values: "all"`` resolved to. Written only when the ranked
-#: frame holds one row per event — the one case in which it can differ from
-#: the item count (``resolved_all_k``).
+#: Top-level key of a ``metrics_spark.compute_all_metrics`` bundle, at each
+#: grain: the population ledger (ADR-0031 decision 4), what this bundle's
+#: numbers were computed on, so two bundles joined by metric name can be told
+#: comparable or not. Holds :data:`ALL_K_KEY`; ``macro_items``, the items the
+#: per-item macro averaged over; and ``n_scored_queries_with_positive`` /
+#: ``n_scored_queries_without_positive``, the query groups the ranking metrics
+#: scored. The facts of the rows themselves are the row facts', not here
+#: (``metrics_spark.compute_row_facts``).
+POPULATION_KEY = "population"
+
+#: Population ledger key: the K ``evaluation.k_values: "all"`` resolved to
+#: (``resolved_all_k``). Recorded on every bundle since #535; before, only
+#: when the ranked frame held one row per event, and as a top-level key.
 ALL_K_KEY = "all_k"
 
 
@@ -196,34 +212,26 @@ def resolved_all_k(bundle: dict) -> int:
     """The K a metrics bundle's ``"all"`` values are stored at (``map@{K}``).
 
     The one reader of that number (#434). ``"all"`` has one producer
-    (``metrics_spark._resolve_all_k``) and several readers — the main report,
-    the comparison report, and training's test mAP until ADR-0028 took K out
-    of it. Each used to count the items
-    itself; with ``event`` declared the producer's K is the widest query
-    group, not the item count, so every lookup missed and nothing raised (a
-    blank ``map@all`` cell, a test mAP logged as 0.0).
+    (``metrics_spark._resolve_all_k``) and several readers — the main report
+    and the comparison report, and training's test mAP until ADR-0028 took K
+    out of it. Each used to count the items itself; with ``event`` declared
+    the producer's K is the widest query group, not the item count, so every
+    lookup missed and nothing raised (a blank ``map@all`` cell, a test mAP
+    logged as 0.0).
 
-    * ``bundle[ALL_K_KEY]`` when present. The producer writes it only when the
-      frame it ranked held one row per event, the one case in which the widest
-      group can be longer than the item list.
-    * Otherwise ``dataset_overview.totals.n_items`` — the producer's K in every
-      other case, counted over the same frame. Nothing is written then, so the
-      artifact of a deployment without ``event`` stays value-for-value what it
-      was.
-    * ``0`` when the bundle carries neither: a slim baseline bundle, which has
-      no overview. ``0`` means unknown, as ``report_sections.shared.count_items``
-      already reads it; the report reads a baseline at the model's K instead.
+    Read off the bundle's own population ledger (:data:`POPULATION_KEY`).
+    The comparison report reads each side at its own; the main report reads
+    the baseline at the model's, which is the same K by construction — the
+    baseline re-scores the model's rows and counts off their row facts. The
+    keys stay the resolved number, not ``map@all``
+    (ADR-0031 decision 15, checked in #535): two sides whose ``"all"``
+    resolved to different K then never pair up under one name.
 
-    Reads the overview directly rather than through
-    ``report_sections.shared.count_items`` because this module imports nothing from the
-    project. The pre-#327 refusal lives there, and every report section still
-    reads the overview through it.
+    Raises ``KeyError`` on a bundle with no ledger, one written before #535:
+    the report refuses such a file first (``report_sections.shared
+    .refuse_pre_ledger``), with the node to re-run.
     """
-    recorded = bundle.get(ALL_K_KEY)
-    if recorded is not None:
-        return int(recorded)
-    totals = (bundle.get("dataset_overview") or {}).get("totals") or {}
-    return int(totals.get("n_items", 0))
+    return int(bundle[POPULATION_KEY][ALL_K_KEY])
 
 
 def compute_ap(y_true: np.ndarray, y_score: np.ndarray) -> Optional[float]:

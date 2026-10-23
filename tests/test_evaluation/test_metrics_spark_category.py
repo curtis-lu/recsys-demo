@@ -101,6 +101,12 @@ def _event_raw(spark):
     )
 
 
+def _both(frame, params, **kw):
+    """Row facts and metrics of the same frame, as the pipeline computes them."""
+    facts = ms.compute_row_facts(frame, params, **kw)
+    return facts, ms.compute_all_metrics(frame, params, facts, **kw)
+
+
 def test_category_pass_works_when_event_is_declared(spark):
     """collapse_to_categories 以 (query group, 大類) 聚合並取 max(score)，所以
     它產出的每一對只有一列、event 欄被聚掉了。分類面若沿用逐列那一面的決勝欄，
@@ -109,13 +115,13 @@ def test_category_pass_works_when_event_is_declared(spark):
 
     這一條釘的是「兩面的粒度不同、決勝欄也不同」，不是某個數值。
     """
-    out = ms.compute_all_metrics(_event_raw(spark), _event_category_params())
+    facts, out = _both(_event_raw(spark), _event_category_params())
     assert "category" in out
     # 大類面把 fund_bond 與 fund_stock 併成 fund，加上 exchange_fx，共 2 個。
-    assert out["category"]["dataset_overview"]["totals"]["n_items"] == 2
+    assert facts["category"]["dataset_overview"]["totals"]["n_items"] == 2
     # 逐列那一面仍然是 4 列 3 個 item。
-    assert out["dataset_overview"]["totals"]["n_rows"] == 4
-    assert out["dataset_overview"]["totals"]["n_items"] == 3
+    assert facts["dataset_overview"]["totals"]["n_rows"] == 4
+    assert facts["dataset_overview"]["totals"]["n_items"] == 3
 
 
 def test_both_faces_count_ties_on_their_own_grain(spark):
@@ -123,9 +129,9 @@ def test_both_faces_count_ties_on_their_own_grain(spark):
     分數決定的」——但兩面的列不是同一批。逐列那一面數的是同組同分的候選列，
     大類面數的是聚合後同組同分的大類。這裡的資料兩面都沒有同分，所以兩邊都是
     0；釘的是「兩邊各自算在自己的表上」而不是某個特定數值。"""
-    out = ms.compute_all_metrics(_event_raw(spark), _event_category_params())
-    assert out["dataset_overview"]["totals"]["n_tied_rows"] == 0
-    assert out["category"]["dataset_overview"]["totals"]["n_tied_rows"] == 0
+    _, out = _both(_event_raw(spark), _event_category_params())
+    assert out["n_tied_rows"] == 0
+    assert out["category"]["n_tied_rows"] == 0
 
 
 def test_tied_rows_are_counted_on_the_row_face(spark):
@@ -138,8 +144,8 @@ def test_tied_rows_are_counted_on_the_row_face(spark):
         ],
         schema=["snap_date", "cust_id", "prod_name", "imp_id", "score", "label"],
     )
-    out = ms.compute_all_metrics(df, _event_category_params())
-    assert out["dataset_overview"]["totals"]["n_tied_rows"] == 2
+    _, out = _both(df, _event_category_params())
+    assert out["n_tied_rows"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -195,20 +201,12 @@ def test_column_mode_without_the_table_fails_loud():
 
 
 def test_compute_all_metrics_ranks_the_passed_categories(spark):
-    out = ms.compute_all_metrics(
+    facts, out = _both(
         _raw(spark), _column_params(), segment_columns=["cust_segment_typ"],
         category_mapping=_FROM_COLUMN,
     )
     assert set(out["category"]["per_item"]) == {"safe"}   # the one positive
-    assert out["category"]["dataset_overview"]["totals"]["n_items"] == 2
-
-
-def test_slim_path_ranks_the_passed_categories(spark):
-    out = ms.compute_overall_per_item(
-        _raw(spark), _column_params(), with_category=True,
-        category_mapping=_FROM_COLUMN,
-    )
-    assert set(out["category"]["per_item"]) == {"safe"}
+    assert facts["category"]["dataset_overview"]["totals"]["n_items"] == 2
 
 
 @pytest.mark.parametrize("params", [_params, _column_params],
@@ -220,5 +218,6 @@ def test_with_category_false_skips_the_category_pass(spark, params):
     p = params()
     if "mapping" in p["evaluation"]["item_categories"]:
         p["evaluation"]["item_categories"]["mapping"]["x"] = ["not_a_product"]
-    out = ms.compute_all_metrics(_raw(spark), p, with_category=False)
+    facts, out = _both(_raw(spark), p, with_category=False)
     assert "category" not in out
+    assert "category" not in facts

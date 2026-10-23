@@ -321,7 +321,7 @@ evaluation_segment_columns:
 # prepare_eval_data 的第三個 output（#379）：evaluation.item_categories.column 設定時，
 # 每個 item 的大類——從這次評估月份的 sample_pool 那一欄讀出來的對照表（column、mapping）。
 # 沒設 column 時也落地，mapping 是空的，讀者照舊從 parameters 讀手寫的 mapping。
-# compute_metrics／compute_baseline_metrics／generate_comparison_report 讀它；
+# compute_row_facts／compute_metrics／compute_baseline_metrics／generate_comparison_report 讀它；
 # config_fingerprint 同 segment_columns.json 那樣比。optional：#379 之前寫的評估目錄沒有
 # 這份檔，沒設 column 的讀者也不需要它，缺檔時 load() 回 None 而不是 raise——欄模式下缺檔
 # 由 CLI 在 --compare-only 的任何 node 之前擋下（__main__.py::_compare_only_input_errors）。
@@ -330,11 +330,20 @@ evaluation_item_categories:
   filepath: data/evaluation/${model_version}/${snap_date}/item_categories.json
   optional: true
 
+# compute_row_facts 的輸出（#535，ADR-0031 決定 4）：評估列的事實——資料概況、組數、
+# 全正組數、分群欄，跟分數無關（同分列數跟分數有關，在 metrics.json）。模型與熱門度 baseline
+# 是同一批列，共用這一份：兩個指標 node 從它讀組數與 item 數，主報表的概覽、基本統計、
+# 組數帳也讀它。帶 config_fingerprint。
+evaluation_row_facts:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/row_facts.json
+
 # --- Evaluation pipeline — 指標（ADR-0018 決定 2）---
 # compute_metrics／compute_baseline_metrics 的輸出落地：重繪主報表不必重算指標，也留下
-# 機器可讀的指標歷史。兩份都帶 config_fingerprint，generate_report 讀回時比對，設定變了
-# 就擋下；report.sections.baseline: false 時 baseline_metrics 是 {"enabled": false} stub
-# （一樣帶指紋）。
+# 機器可讀的指標歷史。兩份是同一套計算（#535 起 baseline 也有 macro），各帶母體帳
+# population（all 解析成幾、進 macro 的 item、算進的組數）與 config_fingerprint，
+# generate_report 讀回時比對，設定變了就擋下；report.sections.baseline: false 時
+# baseline_metrics 是 {"enabled": false} stub（一樣帶指紋）。
 evaluation_metrics:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/metrics.json
@@ -352,7 +361,8 @@ prediction_quality_metrics:
 
 # 主報表 per-item 細部拆解段的 Spark 聚合（Plan 1.5 從 generate_report 拆出）。
 # 落地的理由不只是快取：generate_report 因此是純函式。它的輸入除了 parameters 都是
-# 落地 JSON（本條、evaluation_metrics、baseline_metrics、prediction_quality_metrics），
+# 落地 JSON（本條、evaluation_row_facts、evaluation_metrics、baseline_metrics、
+# prediction_quality_metrics），
 # 所以 --only-node generate_report 不重算任何指標就能重繪主報表（ADR-0018 決定 2；
 # 補跑集合釘在 tests/test_pipelines/test_resume_contracts.py）。
 evaluation_report_aggregates:

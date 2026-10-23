@@ -33,6 +33,7 @@ from recsys_tfb.evaluation.report_sections.shared import (
     ALL_POSITIVE_WHY,
     eval_dates_display,
     grain_bundles,
+    refuse_pre_ledger,
     refuse_pre_rename_per_item,
     results_read_by,
 )
@@ -57,7 +58,7 @@ SECTIONS = (
 _METRICS_BUNDLES = ("evaluation_metrics", "baseline_metrics")
 
 
-def _all_positive_warnings(metrics: dict, parameters: dict) -> dict[str, str]:
+def _all_positive_warnings(row_facts: dict, parameters: dict) -> dict[str, str]:
     """報表頭 metadata 的警告列：每個 ``all_positive_share_warns`` 為真的粒度一列。
 
     門檻與開關只經 ``metrics.all_positive_share_warns`` 判斷（log 用同一個），這裡
@@ -65,7 +66,7 @@ def _all_positive_warnings(metrics: dict, parameters: dict) -> dict[str, str]:
     第一段。只陳述數字與設定鍵，不評這個比例高不高。
     """
     out = {}
-    for grain, bundle in grain_bundles(metrics):
+    for grain, bundle in grain_bundles(row_facts):
         if not all_positive_share_warns(bundle, parameters):
             continue
         # all_positive_share_warns is true only when the share is known, so
@@ -91,8 +92,9 @@ def assemble_report(results: Mapping[str, dict], parameters: dict) -> str:
     other, so a section reading a result it did not declare fails here rather
     than drifting from its declaration. A section returns ``None`` when its
     switch is off or it has nothing to show. Before any section, a metrics
-    bundle written before the per-item ``recall@K`` rename is refused
-    (``refuse_pre_rename_per_item``).
+    bundle written before the per-item ``recall@K`` rename
+    (``refuse_pre_rename_per_item``) or before the population ledger
+    (``refuse_pre_ledger``) is refused.
 
     spine（目的驅動、由粗到細、克制）：概覽 → 核心概念 → 基本統計 →
     衡量指標 → 預測品質（開了才有）→ per-item 細部拆解 → baseline →
@@ -100,6 +102,7 @@ def assemble_report(results: Mapping[str, dict], parameters: dict) -> str:
     """
     for name in _METRICS_BUNDLES:
         refuse_pre_rename_per_item(name, results.get(name))
+        refuse_pre_ledger(name, results.get(name))
     sections = []
     for section in SECTIONS:
         built = section.build(
@@ -107,7 +110,7 @@ def assemble_report(results: Mapping[str, dict], parameters: dict) -> str:
             parameters)
         if built is not None:
             sections.append(built)
-    metrics = results["evaluation_metrics"]
+    row_facts = results["evaluation_row_facts"]
     eval_params = parameters.get("evaluation", {}) or {}
     configured_dates = eval_params.get("snap_date", "unknown")
     metadata = {
@@ -116,20 +119,20 @@ def assemble_report(results: Mapping[str, dict], parameters: dict) -> str:
     }
     metadata.update({
         "Generated At": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Total Queries": metrics.get("n_queries"),
+        "Total Queries": row_facts.get("n_queries"),
     })
     # n_excluded_queries counts only the groups without a positive. With
     # drop_all_positive_groups on, the all-positive groups are excluded too,
     # and a bare "Excluded Queries" would read as the whole count (#376).
     if drop_all_positive_groups(parameters):
-        metadata["Excluded Queries (no positive)"] = metrics.get(
+        metadata["Excluded Queries (no positive)"] = row_facts.get(
             "n_excluded_queries")
-        metadata["Excluded Queries (all positive)"] = metrics.get(
+        metadata["Excluded Queries (all positive)"] = row_facts.get(
             ALL_POSITIVE_KEY)
     else:
-        metadata["Excluded Queries"] = metrics.get("n_excluded_queries")
+        metadata["Excluded Queries"] = row_facts.get("n_excluded_queries")
     # The all-positive share warning, right under the counts it is about.
-    metadata.update(_all_positive_warnings(metrics, parameters))
+    metadata.update(_all_positive_warnings(row_facts, parameters))
     return generate_html_report(
         sections, title="Model Evaluation Report", metadata=metadata
     )

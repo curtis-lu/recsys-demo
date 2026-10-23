@@ -10,7 +10,7 @@ from recsys_tfb.evaluation import metric_catalog as mc
 from recsys_tfb.evaluation.metric_catalog import ITEM, QUERY_GROUP
 from recsys_tfb.evaluation.metrics_spark import (
     compute_all_metrics,
-    compute_overall_per_item,
+    compute_row_facts,
 )
 
 
@@ -110,9 +110,9 @@ def _assert_keys_are_the_catalog(bundle: dict, where: str):
 
 
 def test_catalog_names_are_the_keys_the_spark_metrics_write(spark):
-    """Every block of both bundles — the full one the report reads and the
-    baseline's slim one — holds exactly the catalog's names of its method,
-    each with ``@K`` when the entry is per K; the category bundles too.
+    """Every block of the bundle — the one the report reads, and the baseline
+    is the same one — holds exactly the catalog's names of its method, each
+    with ``@K`` when the entry is per K; the category bundle too.
 
     The Spark side builds its columns from the catalog, so what this guards
     is a key written past it: a block that adds a metric of its own, or a
@@ -120,13 +120,10 @@ def test_catalog_names_are_the_keys_the_spark_metrics_write(spark):
     the value tests' job (``test_metrics_spark*.py``): drop an entry and
     their keys go missing there, not here."""
     frame, params = _frame(spark), _params()
-    full = compute_all_metrics(frame, params, segment_columns=["seg"])
+    facts = compute_row_facts(frame, params, segment_columns=["seg"])
+    full = compute_all_metrics(frame, params, facts, segment_columns=["seg"])
     _assert_keys_are_the_catalog(full, "full")
     _assert_keys_are_the_catalog(full["category"], "full.category")
-    slim = compute_overall_per_item(
-        frame, params, segment_columns=["seg"], with_category=True)
-    _assert_keys_are_the_catalog(slim, "slim")
-    _assert_keys_are_the_catalog(slim["category"], "slim.category")
 
 
 def _toy_metric(name, method, formula):
@@ -154,7 +151,9 @@ def test_a_new_entry_is_computed_with_no_change_to_the_spark_code(
         _toy_metric("toy_q", QUERY_GROUP, mc.Ratio("hits", "K")),
         _toy_metric("toy_i", ITEM, mc.Ratio("hits", "n_top")),
     ))
-    full = compute_all_metrics(_frame(spark), _params(), segment_columns=["seg"])
+    facts = compute_row_facts(_frame(spark), _params(), segment_columns=["seg"])
+    full = compute_all_metrics(
+        _frame(spark), _params(), facts, segment_columns=["seg"])
     assert full["overall"]["toy_q@1"] == pytest.approx(1.0)
     assert full["overall"]["toy_q@2"] == pytest.approx(0.5)
     assert full["per_item"]["A"]["toy_i@1"] == pytest.approx(1.0)

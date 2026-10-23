@@ -15,7 +15,7 @@ from recsys_tfb.evaluation.report_sections.shared import (
 )
 
 #: The results this section reads, by catalog name (ADR-0031 principle 1).
-READS = ("evaluation_metrics",)
+READS = ("evaluation_row_facts", "evaluation_metrics")
 
 
 def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
@@ -23,9 +23,10 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
 
     presentation §一.4：交代邊界。只陳述事實，不評級。
     """
+    row_facts = results["evaluation_row_facts"]
     metrics = results["evaluation_metrics"]
     eval_p = parameters.get("evaluation", {}) or {}
-    totals = read_dataset_overview(metrics).get("totals", {}) or {}
+    totals = read_dataset_overview(row_facts).get("totals", {}) or {}
     metric_p = metric_params(parameters)
 
     mk = metric_p["k"]
@@ -37,7 +38,7 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
     facts = {
         "k_values": eval_p.get("k_values"),
         # Same rows as the overview's scale table, one derivation (#376).
-        **query_count_rows(metrics, parameters),
+        **query_count_rows(row_facts, parameters),
         "正例列數 n_positives": totals.get("n_positives"),
         f"{item_col} 數 n_items": totals.get("n_items"),
         "metric.weight_alpha（item 加權指數 α；0＝item 等權）":
@@ -54,11 +55,12 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
     # 由小到大，event 是時間戳時等於早的曝光永遠排前面，而那個方向不是中性的
     # （廣告示例實測約 0.02 mAP，#378）。框架不替使用者選，把數字印出來讓他
     # 自己判斷這件事在他的資料上有多大。沒宣告時這兩列不存在，既有報表不變。
-    if totals.get("n_tied_rows") is not None:
+    # 數的是模型分數的同分，所以在模型的指標結果裡，不在列的事實（#535）。
+    if metrics.get("n_tied_rows") is not None:
         facts["同分列數 n_tied_rows（名次由 item／event 決勝，非由分數決定）"] = (
-            totals.get("n_tied_rows")
+            metrics.get("n_tied_rows")
         )
-        share = totals.get("tied_row_share")
+        share = metrics.get("tied_row_share")
         facts["同分列佔比 tied_row_share"] = (
             None if share is None else f"{share:.1%}"
         )

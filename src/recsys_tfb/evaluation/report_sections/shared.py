@@ -17,6 +17,7 @@ from recsys_tfb.core.consistency import (
 from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.evaluation.metrics import (
     ALL_POSITIVE_KEY,
+    POPULATION_KEY,
     drop_all_positive_groups,
     metric_params,
     n_groups_with_positive,
@@ -43,8 +44,7 @@ def resolve_display_k(raw_k: list, all_k: int) -> list:
     ``event`` rows a 30-row group gives @13 real rows to rank although there
     are 12 items. This is a filter over the given list, not a regenerated
     one: a caller list without "all" does not gain one, and "all" is always
-    kept. When ``all_k <= 0`` (unknown — e.g. baseline's slim per_item
-    bundle has no dataset_overview) skip the filter entirely, since
+    kept. When ``all_k <= 0`` (unknown) skip the filter entirely, since
     filtering by an unknown bound would collapse every table down to just
     "@all".
     """
@@ -244,14 +244,39 @@ def refuse_pre_rename_per_item(name: str, bundle: dict | None) -> None:
                 f"{name} predates the #534 rename: its per_item block "
                 f"({grain}) still carries {found}, the per-item recall@K's "
                 f"old name. Re-compute it — `python -m recsys_tfb evaluation "
-                f"--from-node compute_metrics`, with the flags of the run "
+                f"--from-node compute_row_facts`, with the flags of the run "
                 f"that wrote it (e.g. --post-training) — then re-draw. Drawn "
                 f"as-is, every per-item recall cell would be blank."
             )
 
 
-def read_dataset_overview(metrics: dict) -> dict:
-    """``metrics["dataset_overview"]``, refusing a pre-#327 payload.
+def refuse_pre_ledger(name: str, bundle: dict | None) -> None:
+    """Raise when the result ``name`` is a metrics bundle written before
+    #535: it carries no population ledger (``metrics.POPULATION_KEY``).
+
+    **Why refuse**: the ledger is where each bundle says what ``"all"``
+    resolved to (``metrics.resolved_all_k``), and a file this old also still
+    holds the row facts that now land on their own — the report reads those
+    from ``row_facts.json``, which that run never wrote. The baseline's stub
+    (``{"enabled": false}``, section off) is not a bundle and passes.
+    """
+    if not isinstance(bundle, dict) or bundle.get("enabled") is False:
+        return
+    if POPULATION_KEY not in bundle:
+        raise ValueError(
+            f"{name} predates #535: it carries no {POPULATION_KEY!r} ledger, "
+            f"and its run landed no row_facts.json. Re-compute it — `python "
+            f"-m recsys_tfb evaluation --from-node compute_row_facts`, with "
+            f"the flags of the run that wrote it (e.g. --post-training) — "
+            f"then re-draw."
+        )
+
+
+def read_dataset_overview(facts: dict) -> dict:
+    """``facts["dataset_overview"]``, refusing a pre-#327 payload.
+
+    ``facts`` is the row facts (``row_facts.json``, #535) or one grain of
+    them; a metrics bundle written before #535 held the overview itself.
 
     Every read of the overview — each section's and
     ``evaluation/comparison/report.py``'s — goes through here, so the old shape
@@ -268,11 +293,10 @@ def read_dataset_overview(metrics: dict) -> dict:
     comparison renders as a full table of blanks that reads like "the model
     scored nothing" rather than "this file is old".
 
-    An overview with *neither* spelling is left alone — a slim metrics bundle
-    legitimately carries no ``dataset_overview`` at all, and the baseline
-    bundles are exactly that shape.
+    An overview with *neither* spelling is left alone, and so is a dict with
+    no overview at all.
     """
-    overview = metrics.get("dataset_overview", {}) or {}
+    overview = facts.get("dataset_overview", {}) or {}
     cells = [overview.get("totals", {}) or {}]
     for group in OVERVIEW_CELL_GROUPS:
         cells.extend(
@@ -294,16 +318,16 @@ def read_dataset_overview(metrics: dict) -> dict:
     return overview
 
 
-def count_items(metrics: dict) -> int:
-    """``dataset_overview.totals.n_items`` of a metrics bundle, ``0`` when absent.
+def count_items(facts: dict) -> int:
+    """``dataset_overview.totals.n_items`` of the row facts, ``0`` when absent.
 
-    ``0`` means "unknown", not "no items": a slim baseline bundle carries no
-    overview. It is the item count the reports show — in the macro-coverage
-    titles and the comparison report's metadata. It is not the K ``"all"`` is looked up at — that is ``metrics.resolved_all_k``,
-    which falls back to this same number only when the bundle records no
-    ``all_k`` (#434).
+    ``facts`` is the row facts or one grain of them (``row_facts.json``,
+    #535). ``0`` means "unknown", not "no items". It is the item count the
+    reports show — in the macro-coverage titles and the comparison report's
+    metadata. It is not the K ``"all"`` is looked up at — that is
+    ``metrics.resolved_all_k``, which each metrics bundle records (#434).
     """
-    return int((read_dataset_overview(metrics).get("totals", {}) or {}).get("n_items", 0))
+    return int((read_dataset_overview(facts).get("totals", {}) or {}).get("n_items", 0))
 
 
 def macro_item_coverage(per_item: dict, parameters: dict) -> int:
@@ -375,15 +399,15 @@ ALL_POSITIVE_SWITCH = "evaluation.query_filter.drop_all_positive_groups"
 ALL_POSITIVE_WHY = "不管怎麼排，組層級指標 mAP／precision／recall 都一樣"
 
 
-def grain_bundles(metrics: dict) -> list[tuple[str, dict]]:
+def grain_bundles(facts: dict) -> list[tuple[str, dict]]:
     """組數帳與警告逐粒度走的清單：item 粒度，有大類時再加大類粒度。
 
     大類的全正＝每個大類都至少有一個正例子列（大類那一輪 label＝子列最大值），
     和 item 粒度的全正是兩個不同的數，所以各一行帳、各自判斷警告。
     """
-    out = [("item 粒度", metrics)]
-    if metrics.get("category"):
-        out.append(("大類粒度", metrics["category"]))
+    out = [("item 粒度", facts)]
+    if facts.get("category"):
+        out.append(("大類粒度", facts["category"]))
     return out
 
 
@@ -403,7 +427,7 @@ def zero_positive_draw_on_test(parameters: dict) -> float | None:
     return resolved_zero_positive_group_ratio(parameters, "test")
 
 
-def query_count_rows(metrics: dict, parameters: dict) -> dict:
+def query_count_rows(facts: dict, parameters: dict) -> dict:
     """「規模／分母」與「本次執行事實」共用的 query 組數列。
 
     開關關時與 #376 之前逐字相同。開關開時 ``n_excluded_queries`` 只數無正例的
@@ -411,16 +435,16 @@ def query_count_rows(metrics: dict, parameters: dict) -> dict:
     組數：標籤改成說清楚是哪一批，並另列全正與算進衡量指標兩列（兩列相加＝有
     正例的 query 數）。
     """
-    n_queries = metrics.get("n_queries")
-    n_zero = metrics.get("n_excluded_queries")
-    n_pos = n_groups_with_positive(metrics)
+    n_queries = facts.get("n_queries")
+    n_zero = facts.get("n_excluded_queries")
+    n_pos = n_groups_with_positive(facts)
     if not drop_all_positive_groups(parameters):
         return {
             "全部 query 數 n_queries": n_queries,
             "有正例的 query 數": n_pos,
             "排除 query 數 n_excluded_queries": n_zero,
         }
-    n_all = metrics.get(ALL_POSITIVE_KEY)
+    n_all = facts.get(ALL_POSITIVE_KEY)
     return {
         "全部 query 數 n_queries": n_queries,
         "有正例的 query 數": n_pos,
@@ -436,7 +460,7 @@ def kept_ratio_phrase(ratio: float) -> str:
     return f"test 表保留了比例 r＝{ratio:g} 的無正例 query group"
 
 
-def kept_zero_positive_groups_note(metrics: dict, parameters: dict) -> str:
+def kept_zero_positive_groups_note(facts: dict, parameters: dict) -> str:
     """How many test query groups holding no positive this run evaluated, and
     at what ratio they were kept — empty unless ``--post-training`` with
     ``dataset.test_zero_positive_group_ratio`` above 0 (ADR-0025 decision 3).
@@ -450,7 +474,7 @@ def kept_zero_positive_groups_note(metrics: dict, parameters: dict) -> str:
     ratio = zero_positive_draw_on_test(parameters)
     if not ratio:   # monitoring (None), or the dataset dropped them all (0.0)
         return ""
-    n_kept = metrics.get("n_excluded_queries")
+    n_kept = facts.get("n_excluded_queries")
     kept = f"本次評估資料裡有 {n_kept:,} 個" if n_kept is not None else "本次評估資料裡有一些"
     return (
         f"{kept_ratio_phrase(ratio)}"

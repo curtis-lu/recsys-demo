@@ -1,8 +1,8 @@
 {
   "measured": {
-    "date": "2026-10-22",
-    "code_commit": "904014ef",
-    "how": "run_e2e.sh --compare 跑 feat/remove-diagnosis（#532 拿掉全部診斷頁）：預期只有評估層 diagnosis/ 底下的四份診斷 JSON（config_shift、item_ability、model_capacity、suppression）不再產出，其餘各層與其餘評估 JSON 全部不變。結果與預期相同：與舊基準比只有這四份不存在（8 處：各自的 hash 與 leaves），versions、source_etl、dataset、training、inference 與 metrics.json、baseline_metrics.json、prediction_quality.json、report_aggregates.json、segment_columns.json、item_categories.json 全部相同。本檔即在 904014ef 的程式碼上跑出的 data/digest.json。"
+    "date": "2026-10-23",
+    "code_commit": "2d2babaa（加上下一筆審查收尾 commit 的改動）",
+    "how": "run_e2e.sh --compare 跑 feat/535-row-facts（#535 列的事實與母體帳落地、baseline 走跟模型同一套指標計算）：預期只有評估層變：metrics.json（拿掉資料概況與組數、加母體帳 population 與同分列數；另含 #534 加的 per-item 共用數字——#534 沒換基準）、baseline_metrics.json（改成完整一份指標）、新增 row_facts.json。結果與預期相同：與舊基準比只有這三份不同（6 處：各自的 hash 與 leaves），versions、source_etl、dataset、training、inference 與 prediction_quality.json、report_aggregates.json、segment_columns.json、item_categories.json 全部相同。本檔即那次跑出的 data/digest.json。"
   },
   "noisy": {},
   "versions": {
@@ -228,16 +228,16 @@
   },
   "evaluation": {
     "baseline_metrics.json": {
-      "leaves": 302,
-      "hash": "270d44eee5d87c4733d369f4316b48d1705d19ed6f484f99b4af5649bf2cdf59"
+      "leaves": 1841,
+      "hash": "088754be2ad2b269559a5ffa2ff0c5146b0b4f74ce6c350678bcb815a6ba86af"
     },
     "item_categories.json": {
       "leaves": 24,
       "hash": "3c72fa9f3afe31efc3940d5f91348d51f9d67bbb1f8235b22dc056e988a480f3"
     },
     "metrics.json": {
-      "leaves": 928,
-      "hash": "e9b067f7b4b0c54242ca42098cdd840a4dd72c9721b310957ab4058d5dec88d0"
+      "leaves": 1806,
+      "hash": "75a09982e806432ac677551f82d8bc79ad81cac653e76e4a4d8fd16fb1765a19"
     },
     "prediction_quality.json": {
       "leaves": 12206,
@@ -246,6 +246,10 @@
     "report_aggregates.json": {
       "leaves": 2045,
       "hash": "6f70fb59a7f266c6304a1b31987b0d5c08da32ffa83034ab6934535d4cb8689e"
+    },
+    "row_facts.json": {
+      "leaves": 132,
+      "hash": "4c5bf444c2dff77a8a96ece5484001a6e3a3f82ec469f535955155a03db04b77"
     },
     "segment_columns.json": {
       "leaves": 2,

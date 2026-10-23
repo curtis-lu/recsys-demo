@@ -14,6 +14,7 @@ from tests.test_pipelines.test_evaluation import test_nodes as single_column
 from tests.test_pipelines.test_evaluation.test_nodes import (
     _no_segments,
     _prepare_eval_data,
+    _row_facts,
 )
 from tests.test_pipelines.test_evaluation.test_popularity_rate import (
     _call,
@@ -110,8 +111,9 @@ class TestPopularityBaseline:
 
         params = _baseline_params("count")
         _pool, labels = _history(spark)
+        frame = _eval_predictions(spark, params)
         result = compute_baseline_metrics(
-            _eval_predictions(spark, params), _split_item(labels),
+            frame, _row_facts(frame, params), _split_item(labels),
             _no_segments(params), params)
         assert result["purchase_counts"] == {"A-x": 3, "B-x": 1}
         count_map = ((1 + 2 / 3) / 2 + 1 / 2) / 2
@@ -126,10 +128,12 @@ class TestPopularityBaseline:
                   baseline_rate=True),
             sample_pool=_split_item(pool), label_table=_split_item(labels),
             parameters=params, popularity_period_counts_month_plan=plan)
+        frame = _eval_predictions(spark, params)
         result = _call(
             _node("compute_baseline_metrics", post_training=True,
                   baseline_rate=True),
-            enriched_eval_predictions=_eval_predictions(spark, params),
+            enriched_eval_predictions=frame,
+            evaluation_row_facts=_row_facts(frame, params),
             label_table=_split_item(labels),
             evaluation_segment_columns=_no_segments(params),
             parameters=params, evaluation_item_categories=None,

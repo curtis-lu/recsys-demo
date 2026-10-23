@@ -27,6 +27,21 @@ from recsys_tfb.evaluation import metrics_spark as ms
 # ===========================================================================
 
 
+def _both(frame, params, **kw):
+    """Row facts and metrics of the same frame, as the pipeline computes them.
+
+    ``kw`` (segment_columns, with_category, category_mapping) goes to both, as
+    ``compute_all_metrics`` requires.
+    """
+    facts = ms.compute_row_facts(frame, params, **kw)
+    return facts, ms.compute_all_metrics(frame, params, facts, **kw)
+
+
+def _bundle(frame, params, **kw):
+    """Just the metrics of ``frame``."""
+    return _both(frame, params, **kw)[1]
+
+
 def _two_customer_raw(spark):
     """Predictions for 2 customers, 3 products. Used across many tests.
 
@@ -545,7 +560,7 @@ def test_compute_all_metrics_lands_each_items_shared_numbers(spark):
     """Every row of the item in the scored query groups, not only its
     positives: D (never a positive) is there, and B's rank-3 negative in C0
     counts toward n_top@3. C2 holds no positive and counts nowhere."""
-    result = ms.compute_all_metrics(
+    result = _bundle(
         _shared_numbers_predictions(spark), _make_parameters(k_values=[1, 3]))
     # K = 4 too: "all" (4 items) is computed for the per-item side whenever
     # evaluation.metric.k is unset (_resolve_k_grids).
@@ -573,7 +588,7 @@ def test_compute_all_metrics_lands_each_items_shared_numbers(spark):
 def test_per_item_metrics_are_the_catalog_formulas_of_the_shared_numbers(spark):
     """recall@K = hits@K / n_pos, map_attr@K = ap_sum@K / n_pos, mean_pos =
     pos_sum / n_pos; an item with no positive (D) has no metrics, as before."""
-    result = ms.compute_all_metrics(
+    result = _bundle(
         _shared_numbers_predictions(spark), _make_parameters(k_values=[1, 3]))
     assert result["per_item"] == {
         "A": {"recall@1": 1.0, "map_attr@1": 1.0, "recall@3": 1.0,
@@ -592,7 +607,7 @@ def test_shared_numbers_per_item_and_segment_nest_two_levels(spark):
     """The per-(item, segment) shared numbers nest as per_item_segment does."""
     df = _shared_numbers_predictions(spark).withColumn(
         "seg", F.when(F.col("cust_id") == "C0", "mass").otherwise("affluent"))
-    result = ms.compute_all_metrics(
+    result = _bundle(
         df, _make_parameters(k_values=[3], segment_columns=["seg"]),
         segment_columns=["seg"])
     shared = result["per_item_segment_shared_numbers"]
@@ -664,22 +679,27 @@ def _make_eval_predictions(spark, with_segment: bool):
 def test_compute_all_metrics_returns_expected_keys(spark):
     df = _make_eval_predictions(spark, with_segment=True)
     params = _make_parameters(k_values=[3], segment_columns=["cust_segment_typ"])
-    result = ms.compute_all_metrics(df, params)
+    facts, result = _both(df, params, segment_columns=["cust_segment_typ"])
     assert set(result.keys()) == {
         "overall", "per_segment", "per_item", "per_item_segment",
-        "macro_avg", "observation_items", "n_queries", "n_excluded_queries",
-        # #376: written whether or not the switch drops those groups.
-        "n_all_positive_queries",
-        "dataset_overview",
+        "macro_avg", "observation_items",
+        # #535: the groups the metrics scored and the K "all" resolved to; the
+        # row counts and dataset overview live in the row facts instead.
+        "population",
         # #534: the item method's shared numbers.
         "per_item_shared_numbers", "per_item_segment_shared_numbers",
+    }
+    assert set(facts) == {
+        "dataset_overview", "n_queries", "n_excluded_queries",
+        # #376: written whether or not the switch drops those groups.
+        "n_all_positive_queries", "widest_group_rows",
     }
 
 
 def test_compute_all_metrics_per_item_known_values(spark):
     """map_attr@3: A=1.0, B=1.0, C=2/3 (same as the layer-3 test, end-to-end)."""
     df = _make_eval_predictions(spark, with_segment=False)
-    result = ms.compute_all_metrics(df, _make_parameters(k_values=[3]))
+    result = _bundle(df, _make_parameters(k_values=[3]))
     pi = result["per_item"]
     assert abs(pi["A"]["map_attr@3"] - 1.0) < 1e-9
     assert abs(pi["B"]["map_attr@3"] - 1.0) < 1e-9
@@ -689,14 +709,14 @@ def test_compute_all_metrics_per_item_known_values(spark):
 def test_compute_all_metrics_overall_per_query_aggregation(spark):
     """Overall map@3 = mean of per-query AP@3 = (5/6 + 1.0) / 2 = 11/12."""
     df = _make_eval_predictions(spark, with_segment=False)
-    result = ms.compute_all_metrics(df, _make_parameters(k_values=[3]))
+    result = _bundle(df, _make_parameters(k_values=[3]))
     assert abs(result["overall"]["map@3"] - 11 / 12) < 1e-9
 
 
 def test_compute_all_metrics_no_segment_column(spark):
     df = _make_eval_predictions(spark, with_segment=False)
     params = _make_parameters(k_values=[3], segment_columns=["cust_segment_typ"])
-    result = ms.compute_all_metrics(df, params)
+    result = _bundle(df, params)
     assert result["per_segment"] == {}
     assert result["per_item_segment"] == {}
     assert "by_segment" not in result["macro_avg"]
@@ -707,7 +727,7 @@ def test_compute_all_metrics_no_segment_column(spark):
 def test_compute_all_metrics_with_segment_column(spark):
     df = _make_eval_predictions(spark, with_segment=True)
     params = _make_parameters(k_values=[3])
-    result = ms.compute_all_metrics(
+    result = _bundle(
         df, params, segment_columns=["cust_segment_typ"]
     )
     assert set(result["per_segment"].keys()) == {"mass", "affluent"}
@@ -729,9 +749,9 @@ def test_compute_all_metrics_excluded_queries_counted(spark):
         ],
         schema=["snap_date", "cust_id", "prod_name", "score", "label"],
     )
-    result = ms.compute_all_metrics(df, _make_parameters(k_values=[2]))
-    assert result["n_queries"] == 2
-    assert result["n_excluded_queries"] == 1
+    facts, _ = _both(df, _make_parameters(k_values=[2]))
+    assert facts["n_queries"] == 2
+    assert facts["n_excluded_queries"] == 1
 
 
 def test_compute_all_metrics_default_k_values_resolves_all(spark):
@@ -739,7 +759,7 @@ def test_compute_all_metrics_default_k_values_resolves_all(spark):
     df = _make_eval_predictions(spark, with_segment=False)
     params = _make_parameters()
     params["evaluation"].pop("k_values")
-    result = ms.compute_all_metrics(df, params)
+    result = _bundle(df, params)
     keys = set(result["overall"].keys())
     assert "map@3" in keys
     assert "map@5" in keys
@@ -756,14 +776,14 @@ def test_compute_all_metrics_all_queries_excluded(spark):
         ],
         schema=["snap_date", "cust_id", "prod_name", "score", "label"],
     )
-    result = ms.compute_all_metrics(df, _make_parameters(k_values=[2]))
+    facts, result = _both(df, _make_parameters(k_values=[2]))
     assert result["overall"] == {}
     assert result["per_segment"] == {}
     assert result["per_item"] == {}
     assert result["per_item_segment"] == {}
     assert result["macro_avg"] == {}
-    assert result["n_queries"] == 2
-    assert result["n_excluded_queries"] == 2
+    assert facts["n_queries"] == 2
+    assert facts["n_excluded_queries"] == 2
 
 
 def test_unmatched_segment_is_named_counted_and_kept_out_of_macro(spark):
@@ -793,7 +813,7 @@ def test_unmatched_segment_is_named_counted_and_kept_out_of_macro(spark):
                "score double, label int, cust_segment_typ string",
     )
     params = _make_parameters(k_values=[3])
-    result = ms.compute_all_metrics(
+    facts, result = _both(
         df, params, segment_columns=["cust_segment_typ"]
     )
 
@@ -803,7 +823,7 @@ def test_unmatched_segment_is_named_counted_and_kept_out_of_macro(spark):
     assert result["macro_avg"]["by_item_segment"]["map_attr@3"] == \
         pytest.approx(8 / 9)
 
-    by_seg = result["dataset_overview"]["by_segment"]
+    by_seg = facts["dataset_overview"]["by_segment"]
     assert by_seg["(unmatched)"]["n_queries"] == 1
     assert by_seg["(unmatched)"]["query_share"] == pytest.approx(1 / 3)
 
@@ -829,7 +849,7 @@ def test_a_real_segment_ending_like_the_unmatched_name_stays_in_the_macro(spark)
         schema=["snap_date", "cust_id", "prod_name", "score", "label",
                 "cust_segment_typ"],
     )
-    result = ms.compute_all_metrics(
+    result = _bundle(
         df, _make_parameters(k_values=[3]),
         segment_columns=["cust_segment_typ"],
     )
@@ -860,30 +880,27 @@ def test_segments_come_from_the_passed_list_not_the_frame(spark):
     params["evaluation"]["item_categories"] = {
         "enabled": True, "unmapped": "singleton", "mapping": {"AB": ["A", "B"]}}
 
-    full = ms.compute_all_metrics(df, params, segment_columns=["cust_segment_typ"])
+    facts, full = _both(df, params, segment_columns=["cust_segment_typ"])
     assert set(full["per_segment"]) == {"mass", "affluent"}
-    assert set(full["dataset_overview"]["by_segment"]) == {"mass", "affluent"}
+    assert set(facts["dataset_overview"]["by_segment"]) == {"mass", "affluent"}
     assert set(full["category"]["per_segment"]) == {"mass", "affluent"}
 
-    slim = ms.compute_overall_per_item(
-        df, params, segment_columns=["cust_segment_typ"]
-    )
-    assert set(slim["per_segment"]) == {"mass", "affluent"}
-
-    none = ms.compute_all_metrics(df, params, segment_columns=[])
+    none_facts, none = _both(df, params, segment_columns=[])
     assert none["per_segment"] == {}
-    assert "by_segment" not in none["dataset_overview"]
+    assert "by_segment" not in none_facts["dataset_overview"]
 
 
 def test_a_passed_segment_column_missing_from_the_frame_raises(spark):
     """The list and the frame come from the same producer; disagreeing means
     the wiring is wrong, and silently dropping the column would hide it."""
     df = _make_eval_predictions(spark, with_segment=False)
+    params = _make_parameters(k_values=[3])
+    with pytest.raises(ValueError, match="cust_segment_typ.*not in the frame"):
+        ms.compute_row_facts(df, params, segment_columns=["cust_segment_typ"])
+    facts = ms.compute_row_facts(df, params)
     with pytest.raises(ValueError, match="cust_segment_typ.*not in the frame"):
         ms.compute_all_metrics(
-            df, _make_parameters(k_values=[3]),
-            segment_columns=["cust_segment_typ"],
-        )
+            df, params, facts, segment_columns=["cust_segment_typ"])
 
 
 def test_a_missing_segment_column_fails_before_any_scan(spark, monkeypatch):
@@ -894,14 +911,16 @@ def test_a_missing_segment_column_fails_before_any_scan(spark, monkeypatch):
     def scan(self, *a, **k):
         raise AssertionError("scanned before the segment check")
 
+    frame = _make_eval_predictions(spark, with_segment=False)
+    params = _make_parameters(k_values=[3])
+    facts = ms.compute_row_facts(frame, params)  # before the scans are blocked
     monkeypatch.setattr(DataFrame, "collect", scan)
     monkeypatch.setattr(DataFrame, "count", scan)
     with pytest.raises(ValueError, match="cust_segment_typ.*not in the frame"):
+        ms.compute_row_facts(frame, params, segment_columns=["cust_segment_typ"])
+    with pytest.raises(ValueError, match="cust_segment_typ.*not in the frame"):
         ms.compute_all_metrics(
-            _make_eval_predictions(spark, with_segment=False),
-            _make_parameters(k_values=[3]),
-            segment_columns=["cust_segment_typ"],
-        )
+            frame, params, facts, segment_columns=["cust_segment_typ"])
 
 
 def test_compute_all_metrics_precision_at_n_items_is_base_rate(spark):
@@ -909,7 +928,7 @@ def test_compute_all_metrics_precision_at_n_items_is_base_rate(spark):
        overall.precision@3 must equal 0.5 (degenerate K=all case).
     """
     df = _make_eval_predictions(spark, with_segment=False)
-    result = ms.compute_all_metrics(df, _make_parameters(k_values=[3]))
+    result = _bundle(df, _make_parameters(k_values=[3]))
     assert abs(result["overall"]["precision@3"] - 0.5) < 1e-12
 
 
@@ -926,7 +945,7 @@ def test_macro_per_item_map_numpy_matches_spark(spark):
 
     df = _two_customer_raw(spark)
     params = _make_parameters(k_values=(3,))
-    result = ms.compute_all_metrics(df, params)
+    result = _bundle(df, params)
     spark_macro = result["macro_avg"]["by_item"]["map_attr@3"]
 
     rows = df.collect()
@@ -987,7 +1006,7 @@ def test_macro_average_missing_n_pos_fails_loud():
 def test_compute_all_metrics_observation_items_and_param_macro(spark):
     df = _three_customer_raw(spark)
     # 預設參數：additive 鍵存在且為空、macro 不變
-    base = ms.compute_all_metrics(df, _make_parameters(k_values=[2]))
+    base = _bundle(df, _make_parameters(k_values=[2]))
     assert base["observation_items"] == []
     assert base["macro_avg"]["by_item"]["map_attr@2"] == pytest.approx(0.875)
     # min_positives=2：B 進觀察名單、macro 只剩 A
@@ -995,7 +1014,7 @@ def test_compute_all_metrics_observation_items_and_param_macro(spark):
         k_values=[2],
         metric={"weight_alpha": 0.0, "min_positives": 2, "shrinkage_k": 0},
     )
-    result = ms.compute_all_metrics(df, params)
+    result = _bundle(df, params)
     assert result["observation_items"] == ["B"]
     assert result["macro_avg"]["by_item"]["map_attr@2"] == pytest.approx(0.75)
 
@@ -1010,7 +1029,7 @@ def test_param_macro_numpy_matches_spark(spark):
     # weight_alpha 與 shrinkage_k 刻意用相異值：兩者同值時，_compute_core 把
     # 兩個 config 鍵接反（swap bug）也測不出來（審查用 fault injection 實證過）。
     metric = {"weight_alpha": 1.0, "min_positives": 0, "shrinkage_k": 2.0}
-    result = ms.compute_all_metrics(df, _make_parameters(k_values=[2], metric=metric))
+    result = _bundle(df, _make_parameters(k_values=[2], metric=metric))
     spark_macro = result["macro_avg"]["by_item"]["map_attr@2"]
 
     rows = df.collect()
@@ -1080,7 +1099,7 @@ def test_metric_k_truncates_main_macro_same_as_the_numpy_twin(spark):
 
     pdf = _metric_k_pdf()
     params = _metric_k_params()
-    result = ms.compute_all_metrics(spark.createDataFrame(pdf), params)
+    result = _bundle(spark.createDataFrame(pdf), params)
     main = result["macro_avg"]["by_item"]["map_attr@2"]
     assert main == pytest.approx(5 / 12)
 
@@ -1091,18 +1110,6 @@ def test_metric_k_truncates_main_macro_same_as_the_numpy_twin(spark):
         pdf["score"].to_numpy(), **metric_params(params),
     )
     assert driver == pytest.approx(main)
-
-
-def test_metric_k_grid_shared_by_slim_path(spark):
-    """The baseline's slim path uses the same K grids as the main path
-    (metric.k included on the per-item side), so the two sides line up."""
-    pdf = _metric_k_pdf()
-    params = _metric_k_params()
-    slim = ms.compute_overall_per_item(spark.createDataFrame(pdf), params)
-    full = ms.compute_all_metrics(spark.createDataFrame(pdf), params)
-    assert "map_attr@2" in slim["per_item"]["A"]
-    assert slim["per_item"] == full["per_item"]
-    assert slim["overall"] == full["overall"]
 
 
 def test_metric_k_reaches_only_the_per_item_family(spark):
@@ -1117,7 +1124,7 @@ def test_metric_k_reaches_only_the_per_item_family(spark):
     pdf = _metric_k_pdf()
     pdf["seg"] = pdf["cust_id"].map({"C0": "s1", "C1": "s1", "C2": "s2"})
     params = _make_parameters(k_values=[1, "all"], metric={"k": 2})
-    full = ms.compute_all_metrics(
+    full = _bundle(
         spark.createDataFrame(pdf), params, segment_columns=["seg"]
     )
 
@@ -1131,13 +1138,6 @@ def test_metric_k_reaches_only_the_per_item_family(spark):
     assert full["macro_avg"]["by_item"]["map_attr@2"] == pytest.approx(5 / 12)
     assert "map_attr@2" in full["per_item_segment"]["A"]["s1"]
     assert "map_attr@2" in full["macro_avg"]["by_item_segment"]
-
-    slim = ms.compute_overall_per_item(
-        spark.createDataFrame(pdf), params, segment_columns=["seg"]
-    )
-    assert slim["overall"] == full["overall"]
-    assert slim["per_segment"] == full["per_segment"]
-    assert slim["per_item"] == full["per_item"]
 
 
 def test_headline_k_is_computed_when_k_values_leaves_out_all(spark):
@@ -1154,7 +1154,7 @@ def test_headline_k_is_computed_when_k_values_leaves_out_all(spark):
 
     pdf = _metric_k_pdf()
     params = _make_parameters(k_values=[1, 2])
-    result = ms.compute_all_metrics(spark.createDataFrame(pdf), params)
+    result = _bundle(spark.createDataFrame(pdf), params)
     all_k = resolved_all_k(result)
     assert all_k == 3
 
@@ -1185,7 +1185,7 @@ def test_per_item_segment_is_two_level_and_collision_free(spark):
         ],
         schema=["snap_date", "cust_id", "prod_name", "score", "label", "seg"],
     )
-    result = ms.compute_all_metrics(
+    result = _bundle(
         df, _make_parameters(k_values=[2]), segment_columns=["seg"]
     )
     pis = result["per_item_segment"]

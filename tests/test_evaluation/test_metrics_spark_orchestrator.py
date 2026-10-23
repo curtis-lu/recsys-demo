@@ -36,24 +36,34 @@ def _df(spark):
     )
 
 
+def _both(frame, params, **kw):
+    """Row facts and metrics of the same frame, as the pipeline computes them."""
+    facts = ms.compute_row_facts(frame, params, **kw)
+    return facts, ms.compute_all_metrics(frame, params, facts, **kw)
+
+
 def test_backward_compatible_keys_present(spark):
-    r = ms.compute_all_metrics(_df(spark), _params())
+    facts, r = _both(_df(spark), _params())
     for k in ("overall", "per_segment", "per_item", "per_item_segment",
-              "macro_avg", "n_queries", "n_excluded_queries"):
+              "macro_avg"):
         assert k in r
+    for k in ("n_queries", "n_excluded_queries"):
+        assert k in facts
 
 
 def test_dataset_overview_and_category_added(spark):
-    r = ms.compute_all_metrics(_df(spark), _params())
-    assert "dataset_overview" in r
-    assert r["dataset_overview"]["totals"]["n_rows"] == 6
+    facts, r = _both(_df(spark), _params())
+    assert "dataset_overview" in facts
+    assert facts["dataset_overview"]["totals"]["n_rows"] == 6
     assert "category" in r
     assert set(r["category"]["per_item"]) == {"fund", "exchange_fx"}
-    assert "dataset_overview" in r["category"]
+    assert "category" in facts
+    assert "dataset_overview" in facts["category"]
     assert "category" not in r["category"]  # no infinite nesting
 
 
 def test_category_absent_when_disabled(spark):
-    r = ms.compute_all_metrics(_df(spark), _params(categories=False))
+    facts, r = _both(_df(spark), _params(categories=False))
     assert "category" not in r
-    assert "dataset_overview" in r
+    assert "category" not in facts
+    assert "dataset_overview" in facts

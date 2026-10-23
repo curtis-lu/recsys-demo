@@ -162,6 +162,8 @@ def test_static_coverage_floor():
     """
     total = sum(1 for _ in _node_calls())
     judgeable = sum(1 for _ in _judgeable_nodes())
+    # 57/56: #535 added evaluation's `compute_row_facts`, one literal,
+    # statically judgeable call.
     # 56/55: #532 deleted evaluation's diagnosis nodes: four calls, two of them
     # judgeable (draw_diagnosis_sample_node and no_diagnosis_pages, literal
     # inputs and outputs) and two not (the registry comprehension and
@@ -198,7 +200,7 @@ def test_static_coverage_floor():
     # of the two `validate_model_input_grain` calls (the branch existed only
     # to append the calibration pair to its input list). All three were
     # literal, so total and judgeable both drop by 3.
-    assert (total, judgeable) == (56, 55), (
+    assert (total, judgeable) == (57, 56), (
         f"Node coverage changed: {judgeable}/{total} statically judgeable. "
         "If this dropped, A5/A6 now have a bigger blind spot -- check why."
     )

@@ -26,10 +26,11 @@ from recsys_tfb.evaluation.report_sections.shared import (
     results_read_by,
 )
 
-#: What ``assemble_comparison_report`` reads, by name: both sides' metrics
-#: bundles, their comparison and the common-universe coverage
-#: (``compare_coverage_partial``).
-READS = ("metrics_a", "metrics_b", "comparison", "compare_coverage_partial")
+#: What ``assemble_comparison_report`` reads, by name: this run's side's row
+#: facts (its item counts), both sides' metrics bundles, their comparison and
+#: the common-universe coverage (``compare_coverage_partial``).
+READS = ("row_facts_a", "metrics_a", "metrics_b", "comparison",
+         "compare_coverage_partial")
 
 #: The per-item metrics both per-item sections compare, by catalog entry,
 #: each with the ``report.display`` key that lists its K (ADR-0031 decision
@@ -272,7 +273,7 @@ def _build_per_item_section(
     disp = (
         (parameters.get("evaluation", {}) or {}).get("report", {}) or {}
     ).get("display", {}) or {}
-    n_items = count_items(metrics_a)
+    n_items = count_items(results["row_facts_a"])
     # Each side's "all" at its own K (#434); the int columns follow A's.
     all_k_a, all_k_b = resolved_all_k(metrics_a), resolved_all_k(metrics_b)
     macro_a = (metrics_a.get("macro_avg", {}) or {}).get("by_item")
@@ -316,7 +317,7 @@ def _build_category_section(
     per_item_b = cat_b.get("per_item", {}) or {}
     per_item_delta = comparison_cat.get("per_item_delta", {}) or {}
     disp = (eval_params.get("report", {}) or {}).get("display", {}) or {}
-    n_cat = count_items(cat_a)
+    n_cat = count_items(results["row_facts_a"].get("category") or {})
     cat_k_a, cat_k_b = resolved_all_k(cat_a), resolved_all_k(cat_b)
     macro_a = (cat_a.get("macro_avg", {}) or {}).get("by_item")
     macro_b = (cat_b.get("macro_avg", {}) or {}).get("by_item")

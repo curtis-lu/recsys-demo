@@ -20,6 +20,16 @@ def _no_segments(parameters):
             "config_fingerprint": fingerprint(parameters)}
 
 
+def _row_facts(frame, parameters, segment_columns=None):
+    """What ``compute_row_facts`` lands for ``frame``, for the nodes reading
+    it: their tests pass the facts of the rows they compute on, as a run
+    does."""
+    from recsys_tfb.pipelines.evaluation.nodes import compute_row_facts
+
+    return compute_row_facts(
+        frame, segment_columns or _no_segments(parameters), parameters)
+
+
 def _kept_month_of(df, parameters, *_segments, **_mode):
     """Stand-in for ``restrict_to_current_eval_partitions`` in tests that pass
     no frame: marks what the node forwarded as the restricted one."""
@@ -777,7 +787,10 @@ class TestAPartitionCarriesTheSegmentColumnsActuallyJoined:
         Resuming the range: its JSON still says joined=[tier] and the
         settings match, so without the joined list in the fingerprint all of
         February would land in the unmatched segment, exit 0."""
-        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_metrics,
+            compute_row_facts,
+        )
 
         range_rows, range_segments = self._run(
             spark, self.MONTHS, self.MONTHS, with_tier=True)
@@ -786,12 +799,19 @@ class TestAPartitionCarriesTheSegmentColumnsActuallyJoined:
         assert february_segments["joined"] == []
         table = range_rows.filter("snap_date = '2025-01-31'").unionByName(
             february_rows, allowMissingColumns=True)
+        params = self._params(self.MONTHS)
+        # Facts counted on the range run's own (clean) rows, as landed.
+        facts = _row_facts(range_rows, params, range_segments)
 
-        with pytest.raises(ValueError) as excinfo:
-            compute_metrics(table, range_segments, self._params(self.MONTHS))
-        message = str(excinfo.value)
-        assert "2025-02-28: written under other settings" in message, message
-        assert "2025-01-31" not in message, message
+        for read in (
+            lambda: compute_row_facts(table, range_segments, params),
+            lambda: compute_metrics(table, facts, range_segments, params),
+        ):
+            with pytest.raises(ValueError) as excinfo:
+                read()
+            message = str(excinfo.value)
+            assert "2025-02-28: written under other settings" in message, message
+            assert "2025-01-31" not in message, message
 
     def test_same_settings_and_population_over_other_dates_are_read(self, spark):
         """Same settings, same population: the month a single-date run wrote
@@ -804,8 +824,11 @@ class TestAPartitionCarriesTheSegmentColumnsActuallyJoined:
             spark, "2025-02-28", ["2025-02-28"], with_tier=True)
         table = range_rows.filter("snap_date = '2025-01-31'").unionByName(
             february_rows)
-        result = compute_metrics(table, range_segments, self._params(self.MONTHS))
-        assert result["dataset_overview"]["totals"]["n_snap_dates"] == 2
+        params = self._params(self.MONTHS)
+        facts = _row_facts(table, params, range_segments)
+        assert facts["dataset_overview"]["totals"]["n_snap_dates"] == 2
+        # The metrics reader reads the same table without refusing it.
+        assert compute_metrics(table, facts, range_segments, params)
 
 
 def test_prepare_eval_data_keeps_every_configured_date(spark):
@@ -968,16 +991,23 @@ class TestComputeBaselineMetrics:
             compute_baseline_metrics,
         )
 
+        frame = self._eval_predictions(spark)
         result = compute_baseline_metrics(
-            self._eval_predictions(spark),
+            frame,
+            _row_facts(frame, self._parameters()),
             self._label_table(spark),
             _no_segments(self._parameters()),
             self._parameters(),
         )
         from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
 
+        # The model's whole bundle (ADR-0031 decision 8) plus the baseline's own
+        # counts; no category (no mapping configured), no dataset_overview.
         assert set(result.keys()) == {
-            "overall", "per_item", "purchase_counts", "monthly_counts",
+            "overall", "per_item", "macro_avg", "per_segment",
+            "per_item_segment", "per_item_shared_numbers",
+            "per_item_segment_shared_numbers", "population",
+            "observation_items", "purchase_counts", "monthly_counts",
             "config_fingerprint",
         }
         assert result["config_fingerprint"] == fingerprint(self._parameters())
@@ -992,6 +1022,28 @@ class TestComputeBaselineMetrics:
         assert result["monthly_counts"] == {
             "A": {"2024-06": 3}, "B": {"2024-06": 1}, "C": {"2024-06": 0},
         }
+
+    def test_the_baseline_has_the_macro_the_model_has(self, spark):
+        """ADR-0031 decision 8: the baseline goes through the model's metrics,
+        macro included. Popularity A=3 > B=1 > C=0 ranks A, B, C in both
+        groups: c1's positives A and C sit 1st and 3rd, c2's B 2nd. Per-item
+        recall@1 is A 1, B 0, C 0; recall@2 is A 1, B 1, C 0."""
+        from recsys_tfb.evaluation.metrics import POPULATION_KEY
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_baseline_metrics,
+        )
+
+        params = self._parameters()
+        frame = self._eval_predictions(spark)
+        result = compute_baseline_metrics(
+            frame, _row_facts(frame, params), self._label_table(spark),
+            _no_segments(params), params)
+        macro = (result.get("macro_avg") or {}).get("by_item") or {}
+        assert macro.get("recall@1") == pytest.approx(1 / 3)
+        assert macro.get("recall@2") == pytest.approx(2 / 3)
+        assert result[POPULATION_KEY]["macro_items"] == ["A", "B", "C"]
+        # The facts of these rows are the model's (decision 8).
+        assert "dataset_overview" not in result
 
     def test_several_dates_record_each_windows_covered_months(self, spark):
         """#374: two evaluated dates, two lookback windows. History at
@@ -1012,9 +1064,10 @@ class TestComputeBaselineMetrics:
                 "snap_date": ["2025-01-31"] * 3, "cust_id": ["h0"] * 3,
                 "prod_name": ["A", "B", "C"], "label": [1, 0, 0],
             })))
+        frame = TestEnrichedReadersKeepTheEvaluatedMonth._two_months(spark)
         result = compute_baseline_metrics(
-            TestEnrichedReadersKeepTheEvaluatedMonth._two_months(spark),
-            labels, _no_segments(params), params)
+            frame, _row_facts(frame, params), labels,
+            _no_segments(params), params)
         assert result["window_months_covered"] == {
             "2025-01-31": 1, "2025-02-28": 2}
         # A: 3 in the January window, 3 + 1 in the February one.
@@ -1035,10 +1088,100 @@ class TestComputeBaselineMetrics:
         )
 
         params = self._parameters(baseline_section=False)
-        result = compute_baseline_metrics(None, None, _no_segments(params), params)
+        result = compute_baseline_metrics(
+            None, None, None, _no_segments(params), params)
         assert result == {
             "enabled": False, "config_fingerprint": fingerprint(params),
         }
+
+
+class TestComputeRowFacts:
+    """compute_row_facts: what the rows hold whatever their scores
+    (ADR-0031 decision 4), landed once for the model, its baseline and the
+    report to read by name."""
+
+    @staticmethod
+    def _parameters(drop_all_positive=False):
+        params = TestComputeBaselineMetrics._parameters()
+        params["evaluation"]["query_filter"] = {
+            "drop_all_positive_groups": drop_all_positive}
+        return params
+
+    @classmethod
+    def _frame(cls, spark, params=None):
+        """Three query groups: c1 holds a positive, c2 none, c3 is
+        all-positive. B is positive in c3 only."""
+        import pandas as pd
+
+        from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
+            stamp_partition_fingerprint,
+        )
+
+        return stamp_partition_fingerprint(spark.createDataFrame(pd.DataFrame({
+            "snap_date": ["2025-01-31"] * 9,
+            "cust_id": ["c1"] * 3 + ["c2"] * 3 + ["c3"] * 3,
+            "prod_name": ["A", "B", "C"] * 3,
+            "label": [1, 0, 1, 0, 0, 0, 1, 1, 1],
+            "score": [0.9, 0.5, 0.1, 0.2, 0.8, 0.3, 0.4, 0.6, 0.7],
+            "rank": [1, 2, 3, 3, 1, 2, 3, 2, 1],
+        })), params or cls._parameters(), [])
+
+    def test_the_metrics_record_what_they_were_computed_on(self, spark):
+        """The population ledger (ADR-0031 decision 4). Dropping the
+        all-positive c3 leaves c1 the one group scored, so B — positive in c3
+        only — is in no macro, while ``"all"`` still resolves on every row."""
+        from recsys_tfb.evaluation.metrics import POPULATION_KEY
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_metrics,
+            compute_row_facts,
+        )
+
+        params = self._parameters(drop_all_positive=True)
+        frame = self._frame(spark, params)
+        facts = compute_row_facts(frame, _no_segments(params), params)
+        metrics = compute_metrics(frame, facts, _no_segments(params), params)
+        assert metrics[POPULATION_KEY] == {
+            "all_k": 3,
+            "macro_items": ["A", "C"],
+            "n_scored_queries_with_positive": 1,
+            "n_scored_queries_without_positive": 0,
+        }
+        # The facts are the row facts' alone.
+        assert not {"dataset_overview", "n_queries", "segments"} & set(metrics)
+
+    def test_the_metrics_refuse_facts_counted_under_other_settings(
+            self, spark):
+        """A slice re-running compute_metrics alone reads the landed facts."""
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_metrics,
+            compute_row_facts,
+        )
+
+        old = self._parameters()
+        new = self._parameters(drop_all_positive=True)
+        facts = compute_row_facts(
+            self._frame(spark, old), _no_segments(old), old)
+        with pytest.raises(Exception, match=r"--from-node compute_row_facts"):
+            compute_metrics(self._frame(spark, new), facts,
+                            _no_segments(new), new)
+
+    def test_counts_the_rows_and_their_query_groups(self, spark):
+        from recsys_tfb.evaluation.metrics import ALL_POSITIVE_KEY
+        from recsys_tfb.pipelines.evaluation.nodes import compute_row_facts
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            fingerprint,
+        )
+
+        params = self._parameters()
+        facts = compute_row_facts(
+            self._frame(spark), _no_segments(params), params)
+        totals = facts["dataset_overview"]["totals"]
+        assert (totals["n_rows"], totals["n_entities"], totals["n_items"],
+                totals["n_positives"]) == (9, 3, 3, 5)
+        assert (facts["n_queries"], facts["n_excluded_queries"],
+                facts[ALL_POSITIVE_KEY]) == (3, 1, 1)
+        assert facts["segments"] == {"joined": [], "sources": {}, "missing": {}}
+        assert facts["config_fingerprint"] == fingerprint(params)
 
 
 class TestComputePredictionQuality:
@@ -1318,18 +1461,21 @@ class TestConsumersSegmentByTheLandedList:
     def test_compute_metrics(self, spark):
         from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
 
+        frame = self._frame(spark)
+        facts = _row_facts(frame, self._parameters(), self._segments())
         result = compute_metrics(
-            self._frame(spark), self._segments(), self._parameters())
+            frame, facts, self._segments(), self._parameters())
         assert set(result["per_segment"]) == {"mass", "hnw"}
-        assert set(result["dataset_overview"]["by_segment"]) == {"mass", "hnw"}
-        # What the report says about segments travels with the metrics.
-        assert result["segments"] == {
+        assert set(facts["dataset_overview"]["by_segment"]) == {"mass", "hnw"}
+        # What the report says about segments travels with the row facts.
+        assert facts["segments"] == {
             k: self._segments()[k] for k in ("joined", "sources", "missing")}
-        # It lands as metrics.json, so it records the computed settings it
-        # was made with and generate_report can refuse a stale one
-        # (ADR-0018 decision 2, ADR-0020 decision 2).
+        # They land as JSON, so they record the computed settings they
+        # were made with and generate_report can refuse a stale one
+        # (ADR-0018 decision 2, ADR-0020 decision 2); so do the metrics.
         from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
 
+        assert facts["config_fingerprint"] == fingerprint(self._parameters())
         assert result["config_fingerprint"] == fingerprint(self._parameters())
 
     def test_compute_baseline_metrics(self, spark):
@@ -1337,8 +1483,10 @@ class TestConsumersSegmentByTheLandedList:
             compute_baseline_metrics,
         )
 
+        frame = self._frame(spark)
         result = compute_baseline_metrics(
-            self._frame(spark), TestComputeBaselineMetrics._label_table(spark),
+            frame, _row_facts(frame, self._parameters(), self._segments()),
+            TestComputeBaselineMetrics._label_table(spark),
             self._segments(), self._parameters())
         assert set(result["per_segment"]) == {"mass", "hnw"}
 
@@ -1350,12 +1498,18 @@ class TestConsumersSegmentByTheLandedList:
 
         asked = []
 
-        def fake_metrics(df, parameters, *, segment_columns=(),
+        def fake_facts(df, parameters, *, segment_columns=(),
+                       category_mapping=None):
+            return {"facts of": df}
+
+        def fake_metrics(df, parameters, row_facts, *, segment_columns=(),
                          drop_all_positive_groups=False,
                          category_mapping=None):
+            assert row_facts == {"facts of": df}
             asked.append((df, list(segment_columns)))
             return {}
 
+        monkeypatch.setattr(nodes, "_count_row_facts", fake_facts)
         monkeypatch.setattr(nodes, "compute_all_metrics", fake_metrics)
         monkeypatch.setattr(nodes, "build_comparison_result",
                             lambda *a, **k: {})
@@ -1405,10 +1559,17 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
         from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
 
         params = self._parameters()
-        both = compute_metrics(self._two_months(spark), _no_segments(params),
-                               params)
-        alone = compute_metrics(self._one_month(spark), _no_segments(params),
-                                params)
+        two, one = self._two_months(spark), self._one_month(spark)
+        both = compute_metrics(two, _row_facts(two, params),
+                               _no_segments(params), params)
+        alone = compute_metrics(one, _row_facts(one, params),
+                                _no_segments(params), params)
+        assert both == alone
+
+    def test_compute_row_facts(self, spark):
+        params = self._parameters()
+        both = _row_facts(self._two_months(spark), params)
+        alone = _row_facts(self._one_month(spark), params)
         assert both["dataset_overview"]["totals"]["n_snap_dates"] == 1
         assert both == alone
 
@@ -1419,10 +1580,11 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
 
         params = self._parameters()
         labels = TestComputeBaselineMetrics._label_table(spark)
+        two, one = self._two_months(spark), self._one_month(spark)
         both = compute_baseline_metrics(
-            self._two_months(spark), labels, _no_segments(params), params)
+            two, _row_facts(two, params), labels, _no_segments(params), params)
         alone = compute_baseline_metrics(
-            self._one_month(spark), labels, _no_segments(params), params)
+            one, _row_facts(one, params), labels, _no_segments(params), params)
         assert both == alone
 
     def test_compute_report_aggregates(self, spark):
@@ -1450,58 +1612,56 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
         assert both["overall"]["summary"]["n"] == 6
         assert both == alone
 
-    def test_compute_metrics_refuses_a_month_with_no_rows(self, spark):
+    def test_compute_row_facts_refuses_a_month_with_no_rows(self, spark):
         """Postcondition: the evaluated month's partition is empty or was never
         written, and reading the table raised nothing."""
-        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
-
         params = self._parameters(snap_date="2025-03-31")
         with pytest.raises(
             ValueError,
-            match=r"compute_metrics postcondition: 0 evaluated months",
+            match=r"compute_row_facts postcondition: 0 evaluated months",
         ):
-            compute_metrics(self._two_months(spark), _no_segments(params),
-                            params)
+            _row_facts(self._two_months(spark), params)
 
-    def test_compute_metrics_evaluates_every_configured_date_together(self, spark):
+    def test_compute_row_facts_evaluates_every_configured_date_together(self, spark):
         """#374: two dates configured, both months' query groups go into one
-        set of metrics — 2 customers × 2 months = 4 query groups."""
-        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
-
+        set of facts — 2 customers × 2 months = 4 query groups."""
         params = self._parameters(snap_date=["2025-01-31", "2025-02-28"])
-        result = compute_metrics(self._two_months(spark), _no_segments(params),
-                                 params)
+        result = _row_facts(self._two_months(spark), params)
         overview = result["dataset_overview"]
         assert overview["totals"]["n_snap_dates"] == 2
         assert sorted(overview["by_snap_date"]) == ["2025-01-31", "2025-02-28"]
         assert result["n_queries"] + result["n_excluded_queries"] == 4
 
-    def test_compute_metrics_refuses_a_configured_date_with_no_rows(self, spark):
+    def test_compute_row_facts_refuses_a_configured_date_with_no_rows(self, spark):
         """Two dates configured, the partition holds one of them: expected 2,
         evaluated 1."""
-        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
-
         params = self._parameters(snap_date=["2025-01-31", "2025-03-31"])
         with pytest.raises(
             ValueError,
-            match=r"compute_metrics postcondition: 1 evaluated months .*"
+            match=r"compute_row_facts postcondition: 1 evaluated months .*"
                   r"expected exactly 2",
         ):
-            compute_metrics(self._two_months(spark), _no_segments(params),
-                            params)
+            _row_facts(self._two_months(spark), params)
 
     # --- partitions rewritten by another run (#374) ------------------------
 
-    _READERS = ("compute_metrics", "compute_baseline_metrics",
+    _READERS = ("compute_row_facts", "compute_metrics",
+                "compute_baseline_metrics",
                 "compute_report_aggregates", "compute_prediction_quality")
 
-    @staticmethod
-    def _read(name, frame, spark, params):
+    @classmethod
+    def _read(cls, name, frame, spark, params):
         from recsys_tfb.pipelines.evaluation import nodes
 
+        # The metrics readers take the facts landed from the clean table.
+        if name == "compute_metrics":
+            return nodes.compute_metrics(
+                frame, _row_facts(cls._two_months(spark), params),
+                _no_segments(params), params)
         if name == "compute_baseline_metrics":
             return nodes.compute_baseline_metrics(
-                frame, TestComputeBaselineMetrics._label_table(spark),
+                frame, _row_facts(cls._two_months(spark), params),
+                TestComputeBaselineMetrics._label_table(spark),
                 _no_segments(params), params)
         if name == "compute_report_aggregates":
             return nodes.compute_report_aggregates(
@@ -1553,9 +1713,10 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
         range_run = self._parameters(snap_date=["2025-01-31", "2025-02-28"])
         range_run["post_training"] = True
         table = self._rewrite(self._two_months(spark), "2025-02-28", range_run)
+        facts = _row_facts(self._two_months(spark), params)
         with pytest.raises(ValueError,
                            match=r"2025-02-28: written under other settings"):
-            compute_metrics(table, _no_segments(params), params)
+            compute_metrics(table, facts, _no_segments(params), params)
 
     def test_a_partition_written_before_fingerprints_is_refused(self, spark):
         from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
@@ -1565,8 +1726,9 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
 
         params = self._parameters()
         table = self._two_months(spark).drop(PARTITION_FINGERPRINT_COLUMN)
+        facts = _row_facts(self._two_months(spark), params)
         with pytest.raises(ValueError, match=r"2025-01-31: written before"):
-            compute_metrics(table, _no_segments(params), params)
+            compute_metrics(table, facts, _no_segments(params), params)
 
     def test_a_range_resume_reads_a_month_a_same_settings_single_run_wrote(
         self, spark,
@@ -1578,8 +1740,9 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
         params = self._parameters(snap_date=["2025-01-31", "2025-02-28"])
         table = self._rewrite(self._two_months(spark), "2025-02-28",
                               self._parameters(snap_date="2025-02-28"))
-        result = compute_metrics(table, _no_segments(params), params)
-        assert result["dataset_overview"]["totals"]["n_snap_dates"] == 2
+        facts = _row_facts(table, params)
+        assert facts["dataset_overview"]["totals"]["n_snap_dates"] == 2
+        assert compute_metrics(table, facts, _no_segments(params), params)
 
 
 class TestReadersRefuseAPartitionPreparedUnderOtherSettings:
@@ -1591,16 +1754,21 @@ class TestReadersRefuseAPartitionPreparedUnderOtherSettings:
     bug 6).
     """
 
-    _READERS = ("compute_metrics", "compute_baseline_metrics")
+    _READERS = ("compute_row_facts", "compute_metrics",
+                "compute_baseline_metrics")
 
     @staticmethod
-    def _call(name, frame, labels, segments, params):
+    def _call(name, frame, labels, segments, params, facts=None):
+        """``facts``: the row facts the metrics readers take; the segment
+        check comes first, so a test of it passes none."""
         from recsys_tfb.pipelines.evaluation import nodes
 
         if name == "compute_baseline_metrics":
             return nodes.compute_baseline_metrics(
-                frame, labels, segments, params)
-        return getattr(nodes, name)(frame, segments, params)
+                frame, facts, labels, segments, params)
+        if name == "compute_metrics":
+            return nodes.compute_metrics(frame, facts, segments, params)
+        return nodes.compute_row_facts(frame, segments, params)
 
     @pytest.mark.parametrize("name", _READERS)
     def test_a_changed_segment_setting_names_the_join_to_re_run(self, name):
@@ -1619,11 +1787,13 @@ class TestReadersRefuseAPartitionPreparedUnderOtherSettings:
         prepared_under = TestEnrichedReadersKeepTheEvaluatedMonth._parameters()
         now = TestEnrichedReadersKeepTheEvaluatedMonth._parameters()
         now["evaluation"]["k_values"] = [1, 2]
+        frame = TestEnrichedReadersKeepTheEvaluatedMonth._one_month(spark)
         result = self._call(
             name,
-            TestEnrichedReadersKeepTheEvaluatedMonth._one_month(spark),
+            frame,
             TestComputeBaselineMetrics._label_table(spark),
-            _no_segments(prepared_under), now)
+            _no_segments(prepared_under), now,
+            facts=_row_facts(frame, now, _no_segments(prepared_under)))
         assert result is not None
 
 
@@ -1745,7 +1915,8 @@ class TestAllPositiveQueryGroups:
         from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
 
         params = self._parameters(switch)
-        return compute_metrics(self._frame(spark, params, without),
+        frame = self._frame(spark, params, without)
+        return compute_metrics(frame, _row_facts(frame, params),
                                _no_segments(params), params)
 
     def _baseline(self, spark, switch, without=()):
@@ -1754,8 +1925,9 @@ class TestAllPositiveQueryGroups:
         )
 
         params = self._parameters(switch)
+        frame = self._frame(spark, params, without)
         return compute_baseline_metrics(
-            self._frame(spark, params, without), self._label_table(spark),
+            frame, _row_facts(frame, params), self._label_table(spark),
             _no_segments(params), params)
 
     # ---- the measurement metrics -------------------------------------------
@@ -1799,7 +1971,10 @@ class TestAllPositiveQueryGroups:
         different groups. Each side is checked against its own frame with the
         all-positive groups removed; the sides score differently (fine-grained
         map@3 without c1: 1/2 on the model side, 3/4 on the compared one)."""
-        from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+        from recsys_tfb.evaluation.metrics_spark import (
+            compute_all_metrics,
+            compute_row_facts as count_row_facts,
+        )
         from recsys_tfb.pipelines.evaluation import nodes
 
         seen = {}
@@ -1817,10 +1992,12 @@ class TestAllPositiveQueryGroups:
             {}, _no_segments(on), on)
 
         for side, rows in (("a", self.ROWS), ("b", self.COMPARED_ROWS)):
+            fine_frame = self._frame(spark, off, self.FINE, rows=rows)
+            cat_frame = self._frame(spark, off, self.CATEGORY, rows=rows)
             fine = compute_all_metrics(
-                self._frame(spark, off, self.FINE, rows=rows), off)
+                fine_frame, off, count_row_facts(fine_frame, off))
             cat = compute_all_metrics(
-                self._frame(spark, off, self.CATEGORY, rows=rows), off)
+                cat_frame, off, count_row_facts(cat_frame, off))
             assert seen[side]["overall"] == fine["overall"], side
             assert (seen[side]["category"]["overall"]
                     == cat["category"]["overall"]), side
@@ -1861,8 +2038,10 @@ class TestAllPositiveQueryGroups:
 
         def headline(switch, without=()):
             params = self._parameters(switch)
+            frame = self._frame(spark, params, without)
             s = overview.build(
-                {"evaluation_metrics":
+                {"evaluation_row_facts": _row_facts(frame, params),
+                 "evaluation_metrics":
                      self._metrics(spark, switch, without=without),
                  "prediction_quality_metrics": None},
                 params)
@@ -1885,11 +2064,8 @@ class TestAllPositiveQueryGroups:
     )
 
     def _warnings(self, caplog, spark, params, rows=None):
-        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
-
         with caplog.at_level(logging.INFO, logger=self.NODES_LOGGER):
-            compute_metrics(self._frame(spark, params, rows=rows),
-                            _no_segments(params), params)
+            _row_facts(self._frame(spark, params, rows=rows), params)
         return [r.getMessage() for r in caplog.records
                 if r.name == self.NODES_LOGGER
                 and r.levelno == logging.WARNING]
@@ -1905,7 +2081,7 @@ class TestAllPositiveQueryGroups:
         ledger = [r.getMessage() for r in caplog.records
                   if r.name == self.NODES_LOGGER
                   and r.levelno == logging.INFO
-                  and "Spark metrics computed" in r.getMessage()]
+                  and "Row facts counted" in r.getMessage()]
         assert len(ledger) == 2, ledger
 
     def test_exactly_ten_percent_does_not_warn(self, spark, caplog):

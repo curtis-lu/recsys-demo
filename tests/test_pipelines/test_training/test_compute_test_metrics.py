@@ -114,7 +114,10 @@ def test_test_map_matches_the_report_when_event_is_declared(spark):
     ``map@all``. Per item, B's one positive contributes 1/4 and C's 1.
     """
     from recsys_tfb.evaluation.report_sections import overview
-    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+    from recsys_tfb.evaluation.metrics_spark import (
+        compute_all_metrics,
+        compute_row_facts,
+    )
     from recsys_tfb.pipelines.training.nodes import compute_test_metrics
 
     params = _make_parameters()
@@ -140,8 +143,10 @@ def test_test_map_matches_the_report_when_event_is_declared(spark):
     assert result["per_item_map_attr"] == {
         "B": pytest.approx(0.25), "C": pytest.approx(1.0),
     }
+    facts = compute_row_facts(df, params)
     section = overview.build(
-        {"evaluation_metrics": compute_all_metrics(df, params),
+        {"evaluation_row_facts": facts,
+         "evaluation_metrics": compute_all_metrics(df, params, facts),
          "prediction_quality_metrics": None},
         params)
     report_card = section.tables[section.table_titles.index(
@@ -160,7 +165,10 @@ def test_test_map_does_not_follow_the_all_positive_switch(spark):
     c1 is all-positive (AP 1 whatever the order), c2 puts its positive second
     (AP 1/2): mAP 3/4 with c1, 1/2 without — the fixture can tell.
     """
-    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+    from recsys_tfb.evaluation.metrics_spark import (
+        compute_all_metrics,
+        compute_row_facts,
+    )
     from recsys_tfb.pipelines.training.nodes import compute_test_metrics
 
     rows = [
@@ -186,7 +194,8 @@ def test_test_map_does_not_follow_the_all_positive_switch(spark):
     assert with_switch == without_switch
     assert with_switch["overall_map"] == pytest.approx(0.75)
     dropped = compute_all_metrics(
-        df, _make_parameters(), drop_all_positive_groups=True)
+        df, _make_parameters(), compute_row_facts(df, _make_parameters()),
+        drop_all_positive_groups=True)
     assert dropped["overall"]["map@2"] == pytest.approx(0.5)
 
 
@@ -274,17 +283,21 @@ def test_the_four_values_do_not_follow_evaluation_settings(spark, evaluation):
     changed what was computed. Now nothing under ``evaluation`` is read: every
     setting gives what the report's ``map@all`` path gives with the default
     ones."""
-    from recsys_tfb.evaluation.metrics_spark import compute_all_metrics
+    from recsys_tfb.evaluation.metrics_spark import (
+        compute_all_metrics,
+        compute_row_facts,
+    )
     from recsys_tfb.pipelines.training.nodes import compute_test_metrics
 
     df = _frame(spark)
-    reference = compute_all_metrics(df, _make_parameters())
+    facts = compute_row_facts(df, _make_parameters())
+    reference = compute_all_metrics(df, _make_parameters(), facts)
     expected = {
         "overall_map": reference["overall"]["map@3"],
         "per_item_map_attr": {
             k: v["map_attr@3"] for k, v in reference["per_item"].items()},
-        "n_queries": reference["n_queries"],
-        "n_excluded_queries": reference["n_excluded_queries"],
+        "n_queries": facts["n_queries"],
+        "n_excluded_queries": facts["n_excluded_queries"],
     }
     assert expected["overall_map"] == pytest.approx(2 / 3)
 
