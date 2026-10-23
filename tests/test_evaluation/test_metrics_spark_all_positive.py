@@ -29,7 +29,7 @@ import logging
 import pytest
 
 from recsys_tfb.evaluation import metrics_spark as ms
-from recsys_tfb.evaluation.metrics import ALL_POSITIVE_KEY
+from recsys_tfb.evaluation.result_readers import ALL_POSITIVE_KEY
 
 #: The keys a bundle's metrics live under — everything but the counts, which
 #: count the frame as given and so differ from a frame with rows removed.
@@ -155,14 +155,17 @@ def test_switched_off_the_bundle_is_what_it_was_plus_the_count(spark):
         "overall", "per_segment", "per_item", "per_item_segment",
         "macro_avg", "observation_items", "population",
     } | shared
+    # #536: each grain carries the accounts the report reads.
+    accounts = {"n_groups_with_positive", "all_positive_share",
+                "all_positive_warns"}
     assert set(facts) == {
         "dataset_overview", "n_queries", "n_excluded_queries",
         "n_all_positive_queries", "widest_group_rows", "category",
-    }
+    } | accounts
     assert set(facts["category"]) == {
         "dataset_overview", "n_queries", "n_excluded_queries",
         "n_all_positive_queries", "widest_group_rows",
-    }
+    } | accounts
     # Not a metric: the comparison report takes every key of `overall` for one.
     assert ALL_POSITIVE_KEY not in off["overall"]
 

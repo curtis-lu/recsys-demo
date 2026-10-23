@@ -3,16 +3,19 @@
 
 Every node body lives in this module. Some are built by factories here
 rather than defined at top level: ``prepare_eval_data``
-(``make_prepare_eval_data_node``) and ``restrict_to_common``
-(``make_restrict_to_common_node``, #374). The architecture audit's AST scan
-reads top-level definitions only, so it does not see those nodes'
-definitions (ADR-0019 decision 2).
+(``make_prepare_eval_data_node``), ``restrict_to_common``
+(``make_restrict_to_common_node``, #374), and the three comparison readers
+whose pre-check advice depends on the compare mode (``compare_to_source``,
+``resolve_comparison_display_ks``, ``generate_comparison_report``, #536).
+The architecture audit's AST scan reads top-level definitions only, so it
+does not see those nodes' definitions (ADR-0019 decision 2).
 
 The mechanisms these nodes call come from two places: ``steps/``, which nothing
 outside this pipeline imports, and the ``recsys_tfb.evaluation`` library. The
 library also holds ``baselines``, although only these nodes call its Spark
-functions, because the shared report builder imports it (ADR-0019, correction
-to the caller facts).
+functions, because the shared report builder imported it (ADR-0019, correction
+to the caller facts). Since #536 the report reads the landed results through
+``evaluation.result_readers`` and imports ``baselines`` no longer.
 """
 
 import logging
@@ -45,22 +48,12 @@ from recsys_tfb.evaluation.baselines import (
     compute_period_candidate_counts,
     compute_positive_rates,
     compute_purchase_counts,
+    popularity_window,
     resolve_lookback_months,
     restrict_to_periods,
 )
-from recsys_tfb.evaluation.compare import build_comparison_result
 from recsys_tfb.evaluation.comparison.report import assemble_comparison_report
 from recsys_tfb.evaluation.diagnostics_spark import aggregate_report_diagnostics
-from recsys_tfb.evaluation.metrics import (
-    ALL_K_KEY,
-    ALL_POSITIVE_KEY,
-    POPULATION_KEY,
-    all_positive_share,
-    all_positive_share_warns,
-    drop_all_positive_groups,
-    format_share,
-    n_groups_with_positive,
-)
 from recsys_tfb.evaluation.metrics_spark import (
     compute_all_metrics,
     compute_row_facts as _count_row_facts,
@@ -72,19 +65,57 @@ from recsys_tfb.evaluation.prediction_quality import (
     build_payload,
 )
 from recsys_tfb.evaluation.report_builder import assemble_report
+from recsys_tfb.evaluation.result_readers import (
+    ALL_K_KEY,
+    ALL_POSITIVE_KEY,
+    ALL_POSITIVE_SHARE_KEY,
+    ALL_POSITIVE_WARNS_KEY,
+    CELLS,
+    DISPLAY_ALL_K,
+    DISPLAY_METRICS_SECTION,
+    DISPLAY_PRIMARY_MAP_K,
+    LEDGER_RERUN_NODE,
+    N_WITH_POSITIVE_KEY,
+    POPULARITY_WINDOW_KEY,
+    POPULATION_KEY,
+    REFERENCE,
+    THIS,
+    drop_all_positive_groups,
+    format_share,
+    metric_params,
+    resolved_all_k,
+)
+from recsys_tfb.pipelines.evaluation.steps.comparison_layer import (
+    compare_metric_results,
+    ledger_keys_missing,
+    populations_that_differ,
+)
 from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
+    COMPARE_SOURCE_KEY,
+    compare_source_identity,
     compare_source_table,
     load_compare_predictions as _load_compare,
 )
 from recsys_tfb.pipelines.evaluation.steps.compare_universe import (
     query_groups_with_text_time,
-    restrict_to_common as _restrict,
+    trim_to_common_universe,
 )
 from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
     PARTITION_CONTENT_KEYS,
     LoadedArtifact,
     fingerprint,
     require_computed_with_current_config,
+    require_same_recorded_values,
+)
+from recsys_tfb.pipelines.evaluation.steps.display_ks import (
+    COMPARISON_DISPLAY_KEYS_READ,
+    DISPLAY_KEYS_READ,
+    configured_guardrail_recall_k,
+    configured_primary_map_k,
+    cut_at,
+    every_key_rows,
+    per_item_lists,
+    with_headline_flag,
 )
 from recsys_tfb.pipelines.evaluation.steps.item_categories import (
     category_of_each_item,
@@ -630,7 +661,9 @@ def compute_row_facts(
     ``n_all_positive_queries`` is logged per grain with its share of the
     groups holding a positive, and warned about when
     ``evaluation.query_filter.drop_all_positive_groups`` is off and the share
-    is above ``metrics.ALL_POSITIVE_WARN_SHARE`` (#376).
+    is above ``result_readers.ALL_POSITIVE_WARN_SHARE`` (#376) — both read off
+    the accounts the facts land (``metrics.all_positive_accounts``, #536),
+    which the report reads too.
 
     Pre-checks (inputs): the landed segment list and category table were
     prepared under today's settings (``_require_prepared_with_current_config``,
@@ -680,16 +713,16 @@ def compute_row_facts(
     facts["config_fingerprint"] = fingerprint(parameters)
     drop_all_positive = drop_all_positive_groups(parameters)
     # One line of accounts per grain, and a warning when the all-positive
-    # share is high with the switch off (the rule:
-    # metrics.all_positive_share_warns, which the report calls too). Each
+    # share is high with the switch off — read off the landed accounts
+    # (metrics.all_positive_accounts), which the report reads too. Each
     # grain decides on its own frame, so the two can disagree.
     for grain, bundle in (("fine", facts),
                           ("category", facts.get("category"))):
         if bundle is None:
             continue
-        n_with_positive = n_groups_with_positive(bundle)
+        n_with_positive = bundle[N_WITH_POSITIVE_KEY]
         n_all_positive = bundle[ALL_POSITIVE_KEY]
-        share = all_positive_share(bundle)
+        share = bundle[ALL_POSITIVE_SHARE_KEY]
         share_text = "n/a" if share is None else format_share(share)
         logger.info(
             "Row facts counted (%s grain): n_queries=%d, n_excluded=%d "
@@ -703,7 +736,7 @@ def compute_row_facts(
             ("scored like the others (evaluation.query_filter."
              "drop_all_positive_groups off)"),
         )
-        if all_positive_share_warns(bundle, parameters):
+        if bundle[ALL_POSITIVE_WARNS_KEY]:
             logger.warning(
                 "All-positive query groups at the %s grain: %d of the %d "
                 "holding a positive (%s). Every row carries the same positive "
@@ -926,13 +959,19 @@ def compute_baseline_metrics(
             as backward-compatible (older results may omit it).
       - monthly_counts: dict[str, dict[str, int]]  the same counts per
             item per calendar month, summed over the windows.
-      - window_months_covered: dict[str, int]  only when several dates are
-            evaluated (#374): per evaluated date, the months with label rows
-            in its lookback window. Absent means one date.
       - popularity_rate: only in rate mode (see ``_positive_rate_block``);
             absent otherwise, so a count-mode result is exactly what it was.
             ``purchase_counts`` / ``monthly_counts`` stay label_table's in
             both modes.
+      - popularity_window (``result_readers.POPULARITY_WINDOW_KEY``, #536):
+            the lookback window as the report prints it, in every mode
+            (``baselines.popularity_window``): the settings it was counted
+            with, the months the printed monthly table holds, each evaluated
+            date's covered months (#374: counted per window when several
+            dates are evaluated — top-level ``window_months_covered`` before
+            #536), whether the window is partial and what the per-month
+            average divides by. The report reads it instead of re-counting
+            months and re-reading ``evaluation.baseline``.
       - config_fingerprint: the computed settings it was made with
             (``steps.config_fingerprint``), checked by
             ``generate_report``.
@@ -1035,10 +1074,9 @@ def compute_baseline_metrics(
         # Several evaluated dates (#374), one lookback window each. The same
         # counts kept apart per window (one scan of label_table), so one
         # collect gives both the trend (summed over windows) and how many
-        # months with label rows each window had. The report divides the
-        # per-month average by the sum of those, not by one window's lookback:
-        # purchase_counts is summed over all windows. Written only here, so a
-        # single-date result stays exactly what it was.
+        # months with label rows each window had. The per-month average
+        # divides by the sum of those, not by one window's lookback:
+        # purchase_counts is summed over all windows (popularity_window).
         months_by_window: dict[str, set] = {s: set() for s in snap_dates}
         summed: dict[str, dict[str, float]] = {}
         for r in compute_monthly_purchase_counts_by_window(
@@ -1070,11 +1108,20 @@ def compute_baseline_metrics(
     )
     metrics["purchase_counts"] = purchase_counts
     metrics["monthly_counts"] = monthly_counts
-    if window_months_covered is not None:
-        metrics["window_months_covered"] = window_months_covered
     if rate_mode:
         metrics["popularity_rate"] = _positive_rate_block(
             popularity_period_counts, snap_dates, lookback_months, parameters)
+    # Decision — land the window as the report prints it (#536): over the
+    # table it prints (sample_pool's monthly positives in rate mode,
+    # label_table's monthly counts otherwise), with each window's covered
+    # months where they were counted per window.
+    rate_block = metrics.get("popularity_rate")
+    metrics[POPULARITY_WINDOW_KEY] = popularity_window(
+        rate_block["monthly_positives"] if rate_block else monthly_counts,
+        (rate_block["window_months_covered"] if rate_block
+         else window_months_covered),
+        snap_dates=snap_dates, lookback_months=lookback_months,
+        score=baseline_score(parameters))
     metrics["config_fingerprint"] = fingerprint(parameters)
     logger.info(
         "Baseline metrics computed for snap_dates=%s; "
@@ -1122,8 +1169,9 @@ def compute_prediction_quality(
     Lands as ``prediction_quality_metrics`` (``prediction_quality.json``): the
     fine bin tables overall and for the ``top_n`` items with the most rows,
     and the headline numbers computed from them (``pr_auc``, ``roc_auc``, the
-    best-F1 bin edge). ``generate_report`` re-derives the threshold sweep and
-    the bin table from the same bins. What each number means and cannot mean
+    best-F1 bin edge), and the tables the report draws from the same bins —
+    the display bin tables and the threshold sweep (#536); ``generate_report``
+    reads them. What each number means and cannot mean
     is in ``evaluation/prediction_quality.py``'s docstring.
 
     Off unless ``evaluation.report.sections.prediction_quality`` is true (the
@@ -1290,12 +1338,179 @@ def compute_report_aggregates(
     return out
 
 
+def compare_to_baseline(
+    evaluation_metrics: dict,
+    baseline_metrics: dict,
+    parameters: dict,
+) -> dict:
+    """The model's metrics against its popularity baseline's, cell by cell:
+    the comparison layer's first pair (ADR-0031 decisions 4 and 5,
+    ``steps/comparison_layer``). Lands as ``baseline_comparison``
+    (``baseline_comparison.json``); the main report's baseline section reads
+    the model's value, the baseline's and their difference off it instead of
+    taking the difference itself. No Spark: both inputs are landed JSON.
+
+    Every K the metrics hold is compared; the K a table shows is cut later,
+    by ``resolve_display_ks`` (decision 16), so a change of display K never
+    re-runs this node.
+
+    Carries ``config_fingerprint`` like every landed result; with the
+    baseline section off (``baseline_metrics`` is the stub) the result is a
+    stub too, ``{"enabled": False, "config_fingerprint": ...}``, so the
+    report can tell "switched off under these settings" from "left over".
+
+    Pre-checks (inputs):
+
+    * both results were computed under today's settings
+      (``require_computed_with_current_config``) — unchecked, ``--only-node
+      compare_to_baseline`` after a setting changed would compare the old
+      metrics and stamp today's fingerprint on the result, which the report
+      then accepts, exit code 0;
+    * both carry the population ledger the layer reads
+      (``comparison_layer.ledger_keys_missing``) — a result landed before
+      #536 lacks ``segment_columns`` and passes the fingerprint check. The
+      advice is ``compute_row_facts``, not ``compute_metrics``: the row facts
+      of such a run lack the all-positive accounts (#536) too, and the report
+      would refuse them next (``shared.refuse_pre_landed_reads``).
+    """
+    require_computed_with_current_config([
+        LoadedArtifact(catalog_name="evaluation_metrics",
+                       payload=evaluation_metrics,
+                       produced_by="compute_metrics"),
+        LoadedArtifact(catalog_name="baseline_metrics",
+                       payload=baseline_metrics,
+                       produced_by="compute_baseline_metrics"),
+    ], parameters)
+    if baseline_metrics.get("enabled") is False:
+        logger.info("Baseline section disabled — writing the comparison stub")
+        return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
+    missing = [f"{name} ({key})"
+               for name, bundle in (("evaluation_metrics", evaluation_metrics),
+                                    ("baseline_metrics", baseline_metrics))
+               for key in ledger_keys_missing(bundle)]
+    if missing:
+        raise ValueError(
+            f"compare_to_baseline: the population ledger lacks "
+            f"{'; '.join(missing)} — landed before #536. Re-compute — "
+            f"`python -m recsys_tfb evaluation --from-node "
+            f"{LEDGER_RERUN_NODE}`, "
+            f"with the flags of the run that wrote them (e.g. "
+            f"--post-training) — then re-draw."
+        )
+    # Decision — compare the model with the baseline scored on its own rows,
+    # at every grain both computed, every K included; which cells a table
+    # shows is resolve_display_ks' to cut.
+    comparison = compare_metric_results(evaluation_metrics, baseline_metrics)
+    comparison["enabled"] = True
+    comparison["config_fingerprint"] = fingerprint(parameters)
+    # The baseline re-scores the model's rows and counts off their row facts,
+    # so the two agree on all four annotations by construction (decision 4,
+    # correction); one that does not is a bug upstream, and the report draws
+    # no mark for it — say it here.
+    differing = populations_that_differ(comparison)
+    if differing:
+        logger.warning(
+            "The model and its baseline were computed on different "
+            "populations (%s); the report compares them cell by cell all the "
+            "same.", ", ".join(differing))
+    logger.info(
+        "Compared the model with its baseline: %d overall keys, %d items, "
+        "%d segments%s",
+        len(comparison["overall"][CELLS]),
+        len(comparison["per_item"][CELLS]),
+        len(comparison["per_segment"][CELLS]),
+        ", and the category grain" if comparison["category"] else "",
+    )
+    return comparison
+
+
+def resolve_display_ks(
+    evaluation_metrics: dict,
+    baseline_comparison: dict,
+    parameters: dict,
+) -> dict:
+    """The K columns each table of the main report shows, cut at what
+    ``"all"`` stands for in the result it is drawn from (bug 8, ADR-0020;
+    ADR-0031 decision 10: the cut is a computation, so it lands). Lands as
+    ``evaluation_display_ks`` (``display_ks.json``, shape in
+    ``steps/display_ks``); the report reads each list by name and cuts
+    nothing. No Spark.
+
+    After the comparison on purpose (decision 16): the comparison lands
+    every K, so a change of display K re-runs this node and the report only
+    — ``--from-node resolve_display_ks``, what the fingerprint check
+    advises. Its fingerprint carries the display keys it read
+    (``display_ks.DISPLAY_KEYS_READ``) on top of the computed settings, so
+    it alone goes stale when one changes; ``generate_report`` then refuses to
+    draw. Unfingerprinted, ``--only-node generate_report`` would draw the old
+    columns under the new setting, exit code 0.
+
+    Pre-checks (inputs): both results were computed under today's computed
+    settings (``require_computed_with_current_config``), and the metrics
+    carry the ledger the cut reads ``"all"`` off
+    (``comparison_layer.ledger_keys_missing``, the comparison's own check:
+    with the baseline section off the comparison is a stub and checked
+    nothing; re-run from ``compute_row_facts``, why in
+    ``compare_to_baseline``).
+    """
+    require_computed_with_current_config([
+        LoadedArtifact(catalog_name="evaluation_metrics",
+                       payload=evaluation_metrics,
+                       produced_by="compute_metrics"),
+        LoadedArtifact(catalog_name="baseline_comparison",
+                       payload=baseline_comparison,
+                       produced_by="compare_to_baseline"),
+    ], parameters)
+    missing = ledger_keys_missing(evaluation_metrics)
+    if missing:
+        raise ValueError(
+            f"resolve_display_ks: evaluation_metrics' population ledger lacks "
+            f"{'; '.join(missing)} — landed before #536. Re-compute — "
+            f"`python -m recsys_tfb evaluation --from-node "
+            f"{LEDGER_RERUN_NODE}`, "
+            f"with the flags of the run that wrote it (e.g. --post-training) "
+            f"— then re-draw."
+        )
+    primary_map_k = configured_primary_map_k(parameters)
+    # Decision — the overview and the metrics section draw off the model's
+    # metrics, so each grain's lists are cut at that grain's "all" there. The
+    # headline note names its column only while the metrics section shows it.
+    category = evaluation_metrics.get("category")
+    model_block = with_headline_flag(
+        cut_at(resolved_all_k(evaluation_metrics),
+               resolved_all_k(category) if category else None,
+               primary_map_k),
+        metric_params(parameters)["k"])
+    # Decision — the baseline section draws off the comparison, and both of
+    # its sides at the model's K: the baseline re-scores the model's rows,
+    # so its "all" is the same number (the comparison's all_k annotation
+    # says so). None while the section is off: nothing is drawn.
+    baseline_block = None
+    if baseline_comparison.get("enabled") is not False:
+        compared_category = baseline_comparison["category"]
+        baseline_block = cut_at(
+            baseline_comparison[POPULATION_KEY][ALL_K_KEY][THIS],
+            (compared_category[POPULATION_KEY][ALL_K_KEY][THIS]
+             if compared_category else None),
+            primary_map_k)
+    out = {"evaluation_metrics": model_block,
+           "baseline_comparison": baseline_block,
+           "config_fingerprint": fingerprint(parameters, DISPLAY_KEYS_READ)}
+    logger.info(
+        "Display K resolved: metrics section %s, primary_map_k %s (all = %d)",
+        model_block[DISPLAY_METRICS_SECTION],
+        model_block[DISPLAY_PRIMARY_MAP_K], model_block[DISPLAY_ALL_K])
+    return out
+
+
 def generate_report(
     evaluation_row_facts: dict,
     evaluation_metrics: dict,
     baseline_metrics: dict,
     evaluation_report_aggregates: dict,
     prediction_quality_metrics: dict,
+    baseline_comparison: dict,
+    evaluation_display_ks: dict,
     parameters: dict,
 ) -> str:
     """Build the HTML report from the landed results, wired by name
@@ -1303,16 +1518,20 @@ def generate_report(
     The per-item breakdown section (when enabled) reads the already-aggregated
     Spark JSON from ``compute_report_aggregates`` (Plan 1.5) so this function
     stays pure — no SparkDataFrame in the signature, no Spark action in the
-    body.
+    body. The differences the baseline section prints are
+    ``baseline_comparison``'s and every table's K columns
+    ``evaluation_display_ks``' (#536): the report takes no difference and
+    cuts no K itself (ADR-0031 principle 1).
 
     Pre-check (inputs): every result was computed with the current computed
-    settings (``steps.config_fingerprint``). All of them are landed JSON
-    (ADR-0018 decision 2), and ``--only-node generate_report`` stops at "the
-    JSON exists", so without this a setting changed since the last run is
-    drawn from the old JSON with exit code 0 (ADR-0020 bug 2); with it the
-    run raises, naming the key and the node to ``--from-node``. Only computed
-    settings count, so changing ``report.display.*`` and the other drawn keys
-    still redraws without recomputing anything.
+    settings (``steps.config_fingerprint``) — and the K cut also with the
+    current display keys it read (``display_ks.DISPLAY_KEYS_READ``). All of
+    them are landed JSON (ADR-0018 decision 2), and ``--only-node
+    generate_report`` stops at "the JSON exists", so without this a setting
+    changed since the last run is drawn from the old JSON with exit code 0
+    (ADR-0020 bug 2); with it the run raises, naming the key and the node to
+    ``--from-node``: ``resolve_display_ks`` when only a display key it read
+    moved. The other drawn keys still redraw without recomputing anything.
     """
     loaded = [
         LoadedArtifact(catalog_name="evaluation_row_facts",
@@ -1330,6 +1549,13 @@ def generate_report(
         LoadedArtifact(catalog_name="prediction_quality_metrics",
                        payload=prediction_quality_metrics,
                        produced_by="compute_prediction_quality"),
+        LoadedArtifact(catalog_name="baseline_comparison",
+                       payload=baseline_comparison,
+                       produced_by="compare_to_baseline"),
+        LoadedArtifact(catalog_name="evaluation_display_ks",
+                       payload=evaluation_display_ks,
+                       produced_by="resolve_display_ks",
+                       extra_keys=DISPLAY_KEYS_READ),
     ]
     require_computed_with_current_config(loaded, parameters)
     # Decision — hand the report one bundle of results keyed by catalog name
@@ -1357,11 +1583,12 @@ def make_restrict_to_common_node(compare_only: bool):
 
     * ``--compare``: today's settings, like every other reader. The same run
       normally wrote the partitions, but a slice does not:
-      ``--compare X --only-node generate_comparison_report`` runs only
-      ``load_compare_predictions``, this node and the report, so after a
-      segment setting changed or the run mode switched, the partitions and
-      the directory's ``segment_columns.json`` both still say the old
-      settings. Compared with that JSON, the old rows would pass.
+      ``--compare X --from-node compute_compare_metrics`` (where a changed
+      compare source sends the re-run) pulls back only
+      ``load_compare_predictions`` and this node, so after a segment setting
+      changed or the run mode switched, the partitions and the directory's
+      ``segment_columns.json`` both still say the old settings. Compared
+      with that JSON, the old rows would pass.
     * ``--compare-only``: the settings that JSON records. ``--post-training``
       is inert on that path, so today's value of it says nothing about which
       population an earlier standard run wrote (ADR-0020 bug 6, #352
@@ -1401,9 +1628,12 @@ def _restrict_to_common(
     ``eval_predictions`` is already kept to the evaluated dates and checked
     (``make_restrict_to_common_node``).
 
-    Returns ``(a_common, b_common, coverage_partial)`` — coverage_partial
-    carries full-universe sizes, the common sizes and dropped item lists so
-    the report can show what was filtered.
+    Returns ``(a_common, b_common, coverage)`` — the coverage carries
+    full-universe sizes, the common sizes and dropped item lists so the
+    report can show what was filtered. It lands (``compare_coverage``, #536)
+    with ``config_fingerprint`` and the compare source it was computed
+    against (``compare_sources.compare_source_identity``), which every
+    reader of it checks; the two frames stay in memory.
 
     Population size is counted in **query groups** — distinct
     ``query_group_columns`` combinations (time, every column of
@@ -1420,7 +1650,7 @@ def _restrict_to_common(
     The node does not compare ``segment_columns.json``'s own fingerprint with
     today's settings; it checks the partitions it reads instead. Under
     ``--compare`` A's partitions are checked against today's settings, so a
-    sliced ``--only-node generate_comparison_report`` after a settings change
+    sliced ``--from-node compute_compare_metrics`` after a settings change
     raises. Under ``--compare-only`` they are checked against the settings that
     JSON records, because ``post_training`` is inert there (ADR-0020 bug 6, #352
     correction, and its #374 addendum).
@@ -1434,7 +1664,7 @@ def _restrict_to_common(
     # label_table under --post-training / --compare-only. One answer for both
     # sides in every mode (ADR-0020 bug 7; the full why is in
     # steps/compare_universe.py).
-    a_common, b_common, universe = _restrict(
+    a_common, b_common, universe = trim_to_common_universe(
         eval_predictions, compare_predictions_raw, parameters
     )
 
@@ -1458,7 +1688,7 @@ def _restrict_to_common(
     common_items = universe.common_items
 
     src = (parameters.get("evaluation", {}) or {}).get("compare", {}) or {}
-    coverage_partial = {
+    coverage = {
         "kind_a": "model_version",
         "model_version_a": parameters.get("model_version", "(this run)"),
         "kind_b": src.get("kind", ""),
@@ -1472,8 +1702,12 @@ def _restrict_to_common(
         "n_item_common": len(common_items),
         "dropped_items_A": sorted(universe.a_items - common_items),
         "dropped_items_B": sorted(universe.b_items - common_items),
+        # Lands as compare_coverage (#536): the redraw reads it back, so it
+        # says what it was computed under and against.
+        "config_fingerprint": fingerprint(parameters),
+        COMPARE_SOURCE_KEY: compare_source_identity(parameters),
     }
-    return a_common, b_common, coverage_partial
+    return a_common, b_common, coverage
 
 
 #: The ``--compare`` shape, checked against today's settings. Kept as a
@@ -1482,78 +1716,302 @@ def _restrict_to_common(
 restrict_to_common = make_restrict_to_common_node(compare_only=False)
 
 
-def generate_comparison_report(
+#: Where a comparison artifact computed against another compare source sends
+#: the re-run, in both modes — and, under ``--compare-only``, one computed
+#: under other settings (that mode has no node of ``COMPUTED_KEYS``). The
+#: first node whose output is side B's numbers: its inputs are memory-only
+#: frames, so its slice pulls ``load_compare_predictions`` and
+#: ``restrict_to_common`` back with it (the coverage is rewritten too), and
+#: under ``--compare`` runs no Spark node of the main line — every node of
+#: that line sorting after it reads landed JSON only.
+#: ``test_pipeline.py::TestTheComparisonReRunsOnItsOwn`` pins both.
+COMPARISON_RERUN_NODE = "compute_compare_metrics"
+
+#: Where ``--compare`` sends a redraw of the comparison report whose K cut
+#: went stale because a display key changed. The cut's own node
+#: (``resolve_comparison_display_ks``) is the narrowest re-run, but under
+#: ``--compare`` its slice ends in ``generate_report``, and that report
+#: refuses ``display_ks.json``, stale under the same key
+#: (``primary_map_k``), so the comparison report would never be drawn.
+#: ``resolve_display_ks`` precedes both cuts and both reports and has no Spark
+#: node in its slice. Under ``--compare-only`` there is no main line and the
+#: cut's own node is the answer. ``test_pipeline.py::TestFingerprintRerunNodes``
+#: and ``test_generate_report.py`` pin the slice.
+COMPARE_MODE_DISPLAY_RERUN_NODE = "resolve_display_ks"
+
+
+def _require_comparison_inputs_current(
+    artifacts: list[LoadedArtifact], parameters: dict, compare_only: bool,
+) -> None:
+    """Pre-check (inputs) of every node reading a comparison artifact: each
+    was computed under today's computed settings, and against today's
+    compare source (``compare_sources.compare_source_identity``, recorded
+    under ``COMPARE_SOURCE_KEY``; ADR-0031 decision 5).
+
+    The fingerprint leaves ``evaluation.compare`` out on purpose
+    (``config_fingerprint``: the CLI injects it per run), so without the
+    second check a redraw after switching the compared source, or changing
+    its ``prod_mapping``, would print the old source's numbers under the new
+    one's label, exit code 0.
+
+    The advice names a node of the run's mode: under ``--compare`` a changed
+    computed setting goes to its ``COMPUTED_KEYS`` node (the main line is
+    stale too, and a slice from the comparison would stop at
+    ``generate_report``); under ``--compare-only``, which has none of those
+    nodes, to :data:`COMPARISON_RERUN_NODE` (ADR-0031 decision 15, first
+    row). Another source is :data:`COMPARISON_RERUN_NODE` in both.
+    """
+    require_computed_with_current_config(
+        artifacts, parameters,
+        computed_rerun_node=COMPARISON_RERUN_NODE if compare_only else None)
+    require_same_recorded_values(
+        artifacts, COMPARE_SOURCE_KEY, compare_source_identity(parameters),
+        setting="evaluation.compare", rerun_node=COMPARISON_RERUN_NODE)
+
+
+def compute_compare_metrics(
     eval_predictions_common: SparkDataFrame,
     compare_predictions_common: SparkDataFrame,
-    coverage_partial: dict,
     segment_columns: dict,
     parameters: dict,
     item_categories: Optional[dict] = None,
-) -> str:
-    """Run compute_row_facts + compute_all_metrics on both sides + assemble HTML.
+) -> tuple[dict, dict, dict, dict]:
+    """The row facts and the metrics of both sides of a comparison, on their
+    common universe (``restrict_to_common``): ``(row facts A′, metrics A′,
+    row facts B′, metrics B′)``, landed as ``compare_row_facts_a``,
+    ``compare_metrics_a``, ``compare_row_facts_b``, ``compare_metrics_b``
+    (ADR-0031 decision 4). Each carries ``config_fingerprint`` and the
+    compare source it was computed against (``COMPARE_SOURCE_KEY``). Until
+    #536 ``generate_comparison_report`` computed all four on every draw and
+    landed none.
 
-    Only this run's side segments, by what ``prepare_eval_data`` joined
-    (``segment_columns``; under ``--compare-only`` the copy landed next to the
-    enriched partition). Its frame can hold a column the other run mode joined,
-    all NULL, so the frame's columns are not asked (ADR-0020 bug 6). The
-    compared side is another prediction table with no segment columns.
-
-    Both sides drop the all-positive query groups, or neither, per
-    ``evaluation.query_filter.drop_all_positive_groups`` (#376), read once.
-    Each side decides which of its groups are all-positive on its own rows,
-    so the Δ can still compare different sets of groups: both frames hold only
-    the common (query group × item) universe, but one group's candidate rows
-    can differ between them (``_restrict_to_common``), and such a group can be
-    all-positive on one side — dropped there — and mixed on the other — kept
-    there. The comparison report says so when the switch is on.
-
-    Both sides' category passes rank by one table: in column mode the one
-    this run's side landed (``item_categories``, #379; the compared side
-    holds only the common items, so it covers them), otherwise the
-    hand-written mapping in ``parameters``. Under ``--compare-only`` that
-    file may be missing from a directory written before #379: ``None`` then,
-    which only column mode refuses (``_landed_category_mapping``; the CLI
-    refuses it earlier, ``_compare_only_input_errors``).
-
-    Each side's metrics count off that side's own row facts
-    (``compute_row_facts``): the two frames are not the same rows, so the
-    landed facts of the run's rows fit neither. Counted here and not landed —
-    the comparison layer that lands them is #536.
+    Each side's metrics count off that side's own row facts: the two frames
+    are not the same rows, so the run's landed ``evaluation_row_facts`` fit
+    neither.
 
     Pre-check (inputs): in column mode, the category table was landed and
-    read off today's column (``_landed_category_mapping``).
+    read off today's column (``_landed_category_mapping``). The frames are
+    ``restrict_to_common``'s, which checked side A's partitions.
     """
-    drop_all_positive = drop_all_positive_groups(parameters)
     category_mapping = _landed_category_mapping(item_categories, parameters)
-    sides = {}
-    for side, frame, segments in (
-            ("a", eval_predictions_common, segment_columns["joined"]),
-            ("b", compare_predictions_common, [])):
+    # Decision — both sides drop the all-positive query groups, or neither,
+    # per evaluation.query_filter.drop_all_positive_groups (#376), read once.
+    # Each side decides which of its groups are all-positive on its own
+    # rows, so the Δ can still compare different sets of groups: one group's
+    # candidate rows can differ between the frames, all-positive on one side
+    # (dropped) and mixed on the other (kept). The report says so.
+    drop_all_positive = drop_all_positive_groups(parameters)
+    stamp = {"config_fingerprint": fingerprint(parameters),
+             COMPARE_SOURCE_KEY: compare_source_identity(parameters)}
+    landed = []
+    # Decision — only this run's side segments, by what prepare_eval_data
+    # joined (under --compare-only the copy landed next to the partition):
+    # its frame can hold a column the other run mode joined, all NULL, so
+    # the frame's columns are not asked (ADR-0020 bug 6). The compared side
+    # is another prediction table with no segment columns, so it is computed
+    # with none — the ledger's segment_columns annotation says so.
+    # Both sides' category passes rank by one table: in column mode the one
+    # this run's side landed (#379; the compared side holds only the common
+    # items, so it covers them), otherwise the hand-written mapping.
+    for frame, segments in ((eval_predictions_common, segment_columns["joined"]),
+                            (compare_predictions_common, [])):
         facts = _count_row_facts(
             frame, parameters, segment_columns=segments,
             category_mapping=category_mapping)
-        sides[side] = (facts, compute_all_metrics(
+        metrics = compute_all_metrics(
             frame, parameters, facts, segment_columns=segments,
             drop_all_positive_groups=drop_all_positive,
             category_mapping=category_mapping,
-        ))
-    (row_facts_a, metrics_a), (_, metrics_b) = sides["a"], sides["b"]
-
-    src = (parameters.get("evaluation", {}) or {}).get("compare", {}) or {}
-    label_a = "Model"
-    label_b = src.get("label", "Compare")
-    comparison = build_comparison_result(metrics_a, metrics_b, label_a, label_b)
-
-    return assemble_comparison_report(
-        {
-            "row_facts_a": row_facts_a,
-            "metrics_a": metrics_a,
-            "metrics_b": metrics_b,
-            "comparison": comparison,
-            "compare_coverage_partial": coverage_partial,
-        },
-        parameters,
+        )
+        landed += [{**facts, **stamp}, {**metrics, **stamp}]
+    row_facts_a, metrics_a, row_facts_b, metrics_b = landed
+    logger.info(
+        "Comparison metrics computed: %d / %d query groups scored, all "
+        "resolves to %d / %d (this run / compared source)",
+        metrics_a[POPULATION_KEY]["n_scored_queries_with_positive"],
+        metrics_b[POPULATION_KEY]["n_scored_queries_with_positive"],
+        metrics_a[POPULATION_KEY][ALL_K_KEY],
+        metrics_b[POPULATION_KEY][ALL_K_KEY],
     )
+    return row_facts_a, metrics_a, row_facts_b, metrics_b
+
+
+def make_compare_to_source_node(compare_only: bool):
+    """Build ``compare_to_source`` for ``--compare`` or ``--compare-only``:
+    the mode decides only where its pre-check sends a re-run
+    (``_require_comparison_inputs_current``), as it does for
+    ``make_restrict_to_common_node``."""
+    def compare_to_source(
+        compare_metrics_a: dict,
+        compare_metrics_b: dict,
+        parameters: dict,
+    ) -> dict:
+        """This run's side against the compared source, cell by cell, every
+        K: the comparison layer's second pair (ADR-0031 decisions 4 and 5,
+        ``steps/comparison_layer``), landed as ``source_comparison``. The
+        comparison report reads each side and their difference off it
+        instead of taking the difference itself. No Spark.
+
+        Carries ``config_fingerprint``, the compare source it was computed
+        against (``COMPARE_SOURCE_KEY``), and the four annotations
+        (``population``, decision 16). Which K a table shows is cut later
+        (``resolve_comparison_display_ks``).
+
+        Pre-check (inputs): both results were computed under today's
+        settings and against today's source
+        (``_require_comparison_inputs_current``). No ledger check: the
+        results were first landed with the full ledger (#536).
+        """
+        _require_comparison_inputs_current([
+            LoadedArtifact(catalog_name="compare_metrics_a",
+                           payload=compare_metrics_a,
+                           produced_by=COMPARISON_RERUN_NODE),
+            LoadedArtifact(catalog_name="compare_metrics_b",
+                           payload=compare_metrics_b,
+                           produced_by=COMPARISON_RERUN_NODE),
+        ], parameters, compare_only)
+        # Decision — compare the two sides on their common universe, at every
+        # grain both computed, every K included.
+        comparison = compare_metric_results(compare_metrics_a, compare_metrics_b)
+        comparison["config_fingerprint"] = fingerprint(parameters)
+        comparison[COMPARE_SOURCE_KEY] = compare_source_identity(parameters)
+        # Unlike the baseline, the two sides need not agree: each keeps its
+        # own rows (with event rows their "all" can differ, #434), and the
+        # compared side is computed without segments. Said here; the report
+        # draws no mark for it (#537).
+        differing = populations_that_differ(comparison)
+        logger.info(
+            "Compared this run with the compared source: %d overall keys, %d "
+            "items%s; populations differ in: %s",
+            len(comparison["overall"][CELLS]),
+            len(comparison["per_item"][CELLS]),
+            ", and the category grain" if comparison["category"] else "",
+            ", ".join(differing) or "nothing",
+        )
+        return comparison
+
+    return compare_to_source
+
+
+def make_resolve_comparison_display_ks_node(compare_only: bool):
+    """Build ``resolve_comparison_display_ks`` for ``--compare`` or
+    ``--compare-only``; the mode decides only where its pre-check sends a
+    re-run (``_require_comparison_inputs_current``)."""
+    def resolve_comparison_display_ks(
+        source_comparison: dict,
+        parameters: dict,
+    ) -> dict:
+        """The K columns and rows each table of the comparison report shows,
+        cut at what ``"all"`` stands for (bug 8, ADR-0020; ADR-0031 decision
+        10), landed as ``comparison_display_ks`` (shape in
+        ``steps/display_ks``). After the comparison (decision 16): a changed
+        display K re-runs this node and the report only. No Spark.
+
+        Its fingerprint carries the display keys it read
+        (``display_ks.COMPARISON_DISPLAY_KEYS_READ``), so it alone goes stale
+        when one changes and ``generate_comparison_report`` sends the re-run
+        here. Also carries the compare source (``COMPARE_SOURCE_KEY``).
+
+        Pre-check (inputs): the comparison was computed under today's
+        settings and against today's source
+        (``_require_comparison_inputs_current``).
+        """
+        _require_comparison_inputs_current([
+            LoadedArtifact(catalog_name="source_comparison",
+                           payload=source_comparison,
+                           produced_by="compare_to_source"),
+        ], parameters, compare_only)
+        guardrail_recall_k = configured_guardrail_recall_k(parameters)
+        primary_map_k = configured_primary_map_k(parameters)
+
+        # The item grain and, when both sides have it, the category grain are
+        # cut by the same two decisions, so one pass over them.
+        cuts = {}
+        for name, grain in (("item", source_comparison),
+                            ("category", source_comparison["category"])):
+            if grain is None:
+                cuts[name] = None
+                continue
+            all_k = grain[POPULATION_KEY][ALL_K_KEY]
+            cuts[name] = {
+                # Decision — the per-item tables' int K columns are cut at
+                # this run's side's "all" only, as they always were: the two
+                # sides' "all" cell is the comparison's own pairing
+                # (name@all), so only the int columns need a bound, and one
+                # bound keeps every row of a table on the same columns.
+                "per_item": per_item_lists(
+                    all_k[THIS], guardrail_recall_k, primary_map_k),
+                # Decision — a table printing every key cuts each side at its
+                # own "all" (#434): the two sides keep their own rows inside
+                # the common universe, so with event rows their widest groups
+                # differ, and one bound would hide whichever side's "all" row
+                # lies past it. No Δ where a side's cell was cut.
+                "overall": every_key_rows(
+                    grain["overall"][CELLS], all_k[THIS], all_k[REFERENCE]),
+            }
+        out = {**cuts["item"],
+               "category": cuts["category"],
+               "config_fingerprint": fingerprint(
+                   parameters, COMPARISON_DISPLAY_KEYS_READ),
+               COMPARE_SOURCE_KEY: compare_source_identity(parameters)}
+        logger.info(
+            "Comparison report K resolved: per-item %s, overall %d rows",
+            out["per_item"], len(out["overall"]["rows"]))
+        return out
+
+    return resolve_comparison_display_ks
+
+
+def make_generate_comparison_report_node(compare_only: bool):
+    """Build ``generate_comparison_report`` for ``--compare`` or
+    ``--compare-only``; the mode decides only where its pre-check sends a
+    re-run (``_require_comparison_inputs_current``)."""
+    def generate_comparison_report(
+        compare_coverage: dict,
+        compare_row_facts_a: dict,
+        source_comparison: dict,
+        comparison_display_ks: dict,
+        parameters: dict,
+    ) -> str:
+        """Build ``report_comparison.html`` from the landed comparison
+        results, wired by name (ADR-0030 decision 8): each parameter is named
+        after its catalog entry. No Spark frame in the signature, no Spark
+        in the body (ADR-0031 principle 1): the coverage, this run's side's
+        row facts, the comparison and the K cut are all landed JSON, so a
+        redraw — ``--only-node generate_comparison_report``, in either
+        compare mode — computes nothing.
+
+        Pre-check (inputs): every input was computed under today's computed
+        settings — the K cut also under the display keys it read — and
+        against today's compare source
+        (``_require_comparison_inputs_current``). ``label`` is not part of
+        that source: the report reads it off today's parameters, so a
+        renamed source redraws.
+        """
+        loaded = [
+            LoadedArtifact(catalog_name="compare_coverage",
+                           payload=compare_coverage,
+                           produced_by="restrict_to_common"),
+            LoadedArtifact(catalog_name="compare_row_facts_a",
+                           payload=compare_row_facts_a,
+                           produced_by=COMPARISON_RERUN_NODE),
+            LoadedArtifact(catalog_name="source_comparison",
+                           payload=source_comparison,
+                           produced_by="compare_to_source"),
+            LoadedArtifact(catalog_name="comparison_display_ks",
+                           payload=comparison_display_ks,
+                           produced_by="resolve_comparison_display_ks",
+                           extra_keys=COMPARISON_DISPLAY_KEYS_READ,
+                           rerun_node=(None if compare_only
+                                       else COMPARE_MODE_DISPLAY_RERUN_NODE)),
+        ]
+        _require_comparison_inputs_current(loaded, parameters, compare_only)
+        return assemble_comparison_report(
+            {artifact.catalog_name: artifact.payload for artifact in loaded},
+            parameters,
+        )
+
+    return generate_comparison_report
 
 
 def validate_enriched_eval_predictions_present(

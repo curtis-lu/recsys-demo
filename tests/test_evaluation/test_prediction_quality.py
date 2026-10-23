@@ -333,7 +333,7 @@ class TestBuildPayload:
         json.dumps(self._payload(spark), allow_nan=False)
 
     def test_bin_tables_round_trip_to_the_same_display_table(self, spark):
-        from recsys_tfb.evaluation.diagnostics_spark import frame_from_json
+        from recsys_tfb.evaluation.result_readers import frame_from_json
 
         payload = self._payload(spark)
         bins = frame_from_json(payload["overall"]["bins"])
@@ -343,6 +343,28 @@ class TestBuildPayload:
         # 5 display bins of 0.002 from 0.001: rows at 0.001 (x2) | 0.0035 |
         # 0.0055 (x2) | none | 0.011 -> 2, 1, 2, 0, 1.
         assert list(tbl["n"]) == [2, 1, 2, 0, 1]
+
+    def test_lands_the_display_bin_table_the_report_prints(self, spark):
+        """#536: the report reads the display bins off the payload. Same
+        worked example as above: 5 display bins holding 2, 1, 2, 0, 1 rows;
+        item A's table holds A's 3 rows; the sweep starts at the highest
+        non-empty fine bin's edge and ends at the data's minimum."""
+        from recsys_tfb.evaluation.result_readers import (
+            DISPLAY_BINS_KEY,
+            THRESHOLD_SWEEP_KEY,
+            frame_from_json,
+        )
+
+        payload = self._payload(spark)
+        tbl = frame_from_json(payload["overall"][DISPLAY_BINS_KEY])
+        assert list(tbl["n"]) == [2, 1, 2, 0, 1]
+        items = frame_from_json(payload["per_item"][DISPLAY_BINS_KEY])
+        assert set(items["item"]) == {"A", "B"}
+        assert items.loc[items["item"] == "A", "n"].sum() == 3
+        sweep = frame_from_json(payload["overall"][THRESHOLD_SWEEP_KEY])
+        assert sweep["threshold"].iloc[-1] == pytest.approx(
+            payload["bins"]["lo"])
+        assert sweep["tp"].iloc[-1] + sweep["fp"].iloc[-1] == 6
 
     def test_headline_numbers_overall_and_per_listed_item(self, spark):
         payload = self._payload(spark)

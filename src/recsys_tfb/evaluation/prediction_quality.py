@@ -17,7 +17,8 @@ with ``sum(weight)``, ``sum(label * weight)`` and ``sum(score * weight)``.
 Every number the report shows — the threshold sweep, ``pr_auc``, ``roc_auc``,
 the best-F1 threshold and the display bin table — is computed by the pure
 functions below from that one table, so the threshold sweep and the bin table
-can never disagree.
+can never disagree. All of them are computed when the payload is built
+(:func:`build_payload`) and land with it; the report reads them (#536).
 
 Bins are **global and equal-width over this data's ``min(score)`` ..
 ``max(score)``**, never a fixed ``[0, 1]``: at click rates of 0.1%-1% the
@@ -58,6 +59,13 @@ import numpy as np
 import pandas as pd
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
+
+from recsys_tfb.evaluation.result_readers import (
+    DISPLAY_BINS_KEY,
+    FRAME_LONG,
+    THRESHOLD_SWEEP_KEY,
+    frame_to_json,
+)
 
 #: Columns of every bin table this module hands out or reads back.
 BIN_COLUMNS = ["bin", "n", "n_pos", "score_sum"]
@@ -293,25 +301,36 @@ def build_payload(
     top_n: int,
 ) -> dict:
     """The landed JSON: :func:`aggregate_score_bins`' tables plus the
-    :func:`binary_summary` of each.
+    :func:`binary_summary` of each, and the tables the report draws (#536):
+    the display bin table (:func:`coarse_bin_table`) overall and for every
+    listed item, and the threshold sweep (:func:`threshold_sweep`) the report
+    plots — under ``result_readers.DISPLAY_BINS_KEY`` /
+    ``THRESHOLD_SWEEP_KEY``, ``None`` when there is no row. The report reads
+    them instead of re-deriving them (ADR-0031 principle 1); all come from
+    the same fine bins, so they still cannot disagree.
 
-    The fine bin tables are kept, not only the summaries: the report
-    re-derives its threshold sweep and display bin table from them with the
-    same functions, and the JSON can be re-drawn elsewhere without the
-    ``parameters`` that made it (``columns`` and ``bins`` travel with it, as
-    in ``diagnostics_spark.aggregate_report_diagnostics``).
+    The fine bin tables are kept too, so the JSON can be re-drawn elsewhere
+    without the ``parameters`` that made it (``columns`` and ``bins`` travel
+    with it, as in ``diagnostics_spark.aggregate_report_diagnostics``).
     """
-    from recsys_tfb.evaluation.diagnostics_spark import frame_to_json
-
     lo, width = aggregated["lo"], aggregated["width"]
     overall = aggregated["overall"]
     per_item = aggregated["per_item"]
     listed = aggregated["listed_items"]
     per_item_summary = {}
+    overall_display = overall_sweep = item_display = None
     if lo is not None:
         for item in listed:
             per_item_summary[item] = binary_summary(
                 bins_of_item(per_item, item_col, item), lo=lo, width=width)
+        overall_display = frame_to_json(coarse_bin_table(
+            overall, lo=lo, width=width, n_bins=n_bins,
+            n_display_bins=n_display_bins), FRAME_LONG)
+        overall_sweep = frame_to_json(
+            threshold_sweep(overall, lo=lo, width=width), FRAME_LONG)
+        item_display = frame_to_json(_listed_display_bins(
+            per_item, listed, item_col=item_col, lo=lo, width=width,
+            n_bins=n_bins, n_display_bins=n_display_bins), FRAME_LONG)
     return {
         "columns": {"item": item_col, "score": score_col,
                     "label": label_col, "weight": weight_col},
@@ -320,17 +339,50 @@ def build_payload(
         "overall": {
             "summary": (binary_summary(overall, lo=lo, width=width)
                         if lo is not None else None),
-            "bins": frame_to_json(overall, "long"),
+            "bins": frame_to_json(overall, FRAME_LONG),
+            DISPLAY_BINS_KEY: overall_display,
+            THRESHOLD_SWEEP_KEY: overall_sweep,
         },
         "per_item": {
             "top_n": top_n,
             "n_items": int(len(aggregated["item_totals"])),
             "listed": list(listed),
-            "totals": frame_to_json(aggregated["item_totals"], "long"),
+            "totals": frame_to_json(aggregated["item_totals"], FRAME_LONG),
             "summary": per_item_summary,
-            "bins": frame_to_json(per_item, "long"),
+            "bins": frame_to_json(per_item, FRAME_LONG),
+            DISPLAY_BINS_KEY: item_display,
         },
     }
+
+
+#: The columns of :func:`coarse_bin_table`, the report's display bin table.
+DISPLAY_BIN_COLUMNS = ["score_from", "score_to", "n", "n_pos", "mean_score",
+                       "positive_rate", "precision", "recall", "f1"]
+
+
+def _listed_display_bins(
+    per_item: pd.DataFrame,
+    listed: list,
+    *,
+    item_col: str,
+    lo: float,
+    width: float,
+    n_bins: int,
+    n_display_bins: int,
+) -> pd.DataFrame:
+    """Every listed item's :func:`coarse_bin_table`, in ``listed`` order, the
+    item column first: the report's per-item display table as one long
+    frame."""
+    tables = []
+    for item in listed:
+        tbl = coarse_bin_table(
+            bins_of_item(per_item, item_col, item), lo=lo, width=width,
+            n_bins=n_bins, n_display_bins=n_display_bins)
+        tbl.insert(0, item_col, item)
+        tables.append(tbl)
+    if not tables:
+        return pd.DataFrame(columns=[item_col, *DISPLAY_BIN_COLUMNS])
+    return pd.concat(tables, ignore_index=True)
 
 
 def bins_of_item(per_item: pd.DataFrame, item_col: str, item: str) -> pd.DataFrame:

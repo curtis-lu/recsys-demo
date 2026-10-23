@@ -206,7 +206,7 @@ def restrict_to_current_eval_partitions(
     earlier standard run wrote (the reason that path never checked the JSON
     against today's settings, #352 correction). Everywhere else today's
     settings are what the rows are read for, the ``--compare`` mode included:
-    a slice such as ``--compare X --only-node generate_comparison_report``
+    a slice such as ``--compare X --from-node compute_compare_metrics``
     reads partitions an earlier run wrote, whose directory JSON says the same
     old settings as they do.
 

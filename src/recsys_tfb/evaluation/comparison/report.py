@@ -1,4 +1,11 @@
-"""Assemble report_comparison.html from A/B compare result + coverage info."""
+"""Assemble report_comparison.html from the landed comparison results: the
+common-universe coverage, this run's side's row facts, the comparison of the
+two sides (``source_comparison``) and the K cut (``comparison_display_ks``).
+
+It only reads and draws (ADR-0031 principle 1): every difference is the
+comparison layer's, every K list and row list the cut's, and a value missing
+from them is refused with the node to re-run (``shared.landed_value``).
+"""
 
 from __future__ import annotations
 
@@ -8,37 +15,63 @@ from datetime import datetime
 import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.compare import build_comparison_result
 from recsys_tfb.evaluation.metric_catalog import ITEM, entry
-from recsys_tfb.evaluation.metrics import (
-    drop_all_positive_groups,
-    resolved_all_k,
-)
 from recsys_tfb.evaluation.report import ReportSection, generate_html_report
 from recsys_tfb.evaluation.report_sections import glossary
 from recsys_tfb.evaluation.report_sections.shared import (
+    COMPARISON_DISPLAY_KS,
+    SOURCE_COMPARISON,
+    compared_macro_coverage_suffix,
+    compared_per_item_table,
+    compared_value,
     count_items,
-    drop_metric_keys_above_all_k,
     eval_dates_display,
-    macro_coverage_suffix_mb,
-    per_item_metric_compare_table,
-    resolve_display_k,
+    has_entries,
+    landed_value,
     results_read_by,
 )
+from recsys_tfb.evaluation.result_readers import (
+    CELLS,
+    DIFF,
+    DISPLAY_GUARDRAIL_RECALL_K,
+    DISPLAY_PRIMARY_MAP_K,
+    DISPLAY_ROWS,
+    MACRO_ITEMS_KEY,
+    POPULATION_KEY,
+    REFERENCE,
+    THIS,
+    drop_all_positive_groups,
+)
 
-#: What ``assemble_comparison_report`` reads, by name: this run's side's row
-#: facts (its item counts), both sides' metrics bundles, their comparison and
-#: the common-universe coverage (``compare_coverage_partial``).
-READS = ("row_facts_a", "metrics_a", "metrics_b", "comparison",
-         "compare_coverage_partial")
+#: The catalog names of the coverage and of this run's side's row facts.
+COVERAGE = "compare_coverage"
+ROW_FACTS_A = "compare_row_facts_a"
+
+#: What ``assemble_comparison_report`` reads, by name: the coverage, this
+#: run's side's row facts (its item counts), the comparison and its K cut.
+READS = (COVERAGE, ROW_FACTS_A, SOURCE_COMPARISON, COMPARISON_DISPLAY_KS)
 
 #: The per-item metrics both per-item sections compare, by catalog entry,
-#: each with the ``report.display`` key that lists its K (ADR-0031 decision
-#: 11: the report declares what it compares).
+#: each with the K cut's list its columns are (ADR-0031 decision 11: the
+#: report declares what it compares).
 _PER_ITEM_COMPARED = (
-    (("recall", ITEM), "guardrail_recall_k", [1, 3, 5]),
-    (("map_attr", ITEM), "primary_map_k", [1, 3, 5, "all"]),
+    (("recall", ITEM), DISPLAY_GUARDRAIL_RECALL_K),
+    (("map_attr", ITEM), DISPLAY_PRIMARY_MAP_K),
 )
+
+#: This run's side's name in the report; the compared source's is its
+#: ``label``, or this when it has none.
+_LABEL_A = "Model"
+_LABEL_B_DEFAULT = "Compare"
+
+
+def _labels(parameters: dict) -> tuple[str, str]:
+    """Both sides' names, read off today's parameters: ``label`` only names
+    the compared source, so it is not part of what the results were computed
+    against (``compare_sources.compare_source_identity``) and a renamed
+    source redraws with the new name."""
+    src = (parameters.get("evaluation", {}) or {}).get("compare", {}) or {}
+    return _LABEL_A, src.get("label", _LABEL_B_DEFAULT)
 
 
 def assemble_comparison_report(
@@ -55,9 +88,7 @@ def assemble_comparison_report(
     )]
     sections.append(glossary.build({}, parameters))
     sections = [s for s in sections if s is not None]
-    comparison = results["comparison"]
-    label_a = comparison["label_a"]
-    label_b = comparison["label_b"]
+    label_a, label_b = _labels(parameters)
     eval_params = parameters.get("evaluation", {}) or {}
     metadata = {
         "Comparison": f"{label_a} vs {label_b}",
@@ -74,8 +105,8 @@ def assemble_comparison_report(
 def _build_coverage_section(
     results: Mapping[str, dict], parameters: dict
 ) -> ReportSection:
-    comparison, cov = results["comparison"], results["compare_coverage_partial"]
-    label_a, label_b = comparison["label_a"], comparison["label_b"]
+    cov = results[COVERAGE]
+    label_a, label_b = _labels(parameters)
     # The query group, said in words. With `occasion` declared the count is
     # of occasions, and a sentence that still said "time × entity" would
     # describe a smaller number than the one printed beside it (#428).
@@ -158,53 +189,36 @@ def _build_coverage_section(
     )
 
 
-def _each_side_up_to_its_k(
-    overall_a: dict, overall_b: dict, overall_d: dict, all_k_a: int, all_k_b: int,
-) -> tuple[list, dict, dict, dict]:
-    """``(keys, a, b, Δ)`` of an every-key table, each side cut at its own K.
+def _every_key_table(block: dict, rows: dict, column_a: str,
+                     column_b: str) -> pd.DataFrame:
+    """An M/B/Δ table of every key of a compared block, one row per key the
+    K cut kept (``display_ks.every_key_rows``): a side's cell where the cut
+    kept that side's key, the difference where it kept both, blank
+    elsewhere."""
+    cells = block[CELLS]
+    keys = rows[DISPLAY_ROWS]
 
-    bug 8 (ADR-0020): these tables print every computed key, so a key whose
-    @K is past the longest list is dropped — precision@K keeps falling there
-    only because its denominator is K. The bound is each side's own
-    ``metrics.resolved_all_k``: the two sides keep their own rows inside the
-    common universe, so with ``event`` their widest groups, and so their
-    ``"all"`` keys, can differ (#434). A single bound — it used to be side
-    A's item count — hides whichever side's ``"all"`` row lies past it.
+    def column(side: str) -> list:
+        return [compared_value(cells, key, side) if key in rows[side] else None
+                for key in keys]
 
-    Rows are the union of what each side keeps; a side's cell is blank where
-    it cut the key, and so is the Δ. With equal bounds this is exactly the old
-    single filter.
-    """
-    kept_a = drop_metric_keys_above_all_k(overall_a, all_k_a)
-    kept_b = drop_metric_keys_above_all_k(overall_b, all_k_b)
-    both = set(kept_a) & set(kept_b)
-    return (
-        sorted(set(kept_a) | set(kept_b)),
-        {k: overall_a[k] for k in kept_a},
-        {k: overall_b[k] for k in kept_b},
-        {k: v for k, v in overall_d.items() if k in both},
+    return pd.DataFrame(
+        {column_a: column(THIS), column_b: column(REFERENCE),
+         "Δ": column(DIFF)},
+        index=keys,
     )
 
 
 def _build_overall_section(
     results: Mapping[str, dict], parameters: dict
 ) -> ReportSection:
-    metrics_a, comparison = results["metrics_a"], results["comparison"]
-    label_a, label_b = comparison["label_a"], comparison["label_b"]
-    overall_a = comparison["result_a"].get("overall", {}) or {}
-    overall_b = comparison["result_b"].get("overall", {}) or {}
-    keys, cells_a, cells_b, cells_d = _each_side_up_to_its_k(
-        overall_a, overall_b, comparison["overall_delta"],
-        resolved_all_k(metrics_a), resolved_all_k(comparison["result_b"]),
-    )
-    tbl = pd.DataFrame(
-        {
-            label_a: [cells_a.get(k) for k in keys],
-            label_b: [cells_b.get(k) for k in keys],
-            "Δ": [cells_d.get(k) for k in keys],
-        },
-        index=keys,
-    )
+    comparison = results[SOURCE_COMPARISON]
+    label_a, label_b = _labels(parameters)
+    block = landed_value(comparison, SOURCE_COMPARISON, "overall")
+    tbl = _every_key_table(
+        block, landed_value(results[COMPARISON_DISPLAY_KS],
+                            COMPARISON_DISPLAY_KS, "overall"),
+        label_a, label_b)
     return ReportSection(
         title="overall metrics (M/B/Δ)",
         description=(
@@ -213,24 +227,21 @@ def _build_overall_section(
         ),
         tables=[tbl],
         table_titles=[
-            f"overall{_empty_overall_note(overall_a, overall_b, label_a, label_b)}"
+            f"overall{_empty_overall_note(block, label_a, label_b)}"
         ],
     )
 
 
-def _empty_overall_note(
-    overall_a: dict, overall_b: dict, label_a: str, label_b: str
-) -> str:
+def _empty_overall_note(block: dict, label_a: str, label_b: str) -> str:
     """Title suffix naming each side whose ``overall`` is empty (ADR-0020 bug 4).
 
     ``overall`` is empty when every query on that side had zero positives, so
     no row has a Δ and the whole Δ column is blank. Without this line the
-    reader sees an empty column and nothing saying why.
+    reader sees an empty column and nothing saying why. The comparison's
+    ``entries`` say it: none, or no block at all.
     """
-    empty = [
-        label for label, overall in ((label_a, overall_a), (label_b, overall_b))
-        if not overall
-    ]
+    empty = [label for label, side in ((label_a, THIS), (label_b, REFERENCE))
+             if not has_entries(block, side)]
     if not empty:
         return ""
     sides = "、".join(f"{label} 側無可比的 query（全部零正例）" for label in empty)
@@ -238,23 +249,18 @@ def _empty_overall_note(
 
 
 def _per_item_compare_tables(
-    per_item_a: dict, per_item_b: dict, per_item_delta: dict, disp: dict,
-    all_k_a: int, all_k_b: int, macro_a: dict | None, macro_b: dict | None,
-    title_prefix: str, item_cov: str,
+    per_item: dict, macro: dict, ks: dict, title_prefix: str, item_cov: str,
 ) -> tuple[list[pd.DataFrame], list[str]]:
     """One M/B/Δ table per :data:`_PER_ITEM_COMPARED` entry, labelled by the
-    catalog's display name; the item and category grains share it so the two
-    cannot come to compare different metrics."""
+    catalog's display name, its columns the K cut's list for it; the item
+    and category grains share it so the two cannot come to compare
+    different metrics."""
     tables, titles = [], []
-    for compared, ks_key, ks_default in _PER_ITEM_COMPARED:
+    for compared, ks_key in _PER_ITEM_COMPARED:
         metric = entry(*compared)
         label = metric.display_name
-        ks = resolve_display_k(disp.get(ks_key, ks_default), all_k_a)
-        tables.append(per_item_metric_compare_table(
-            per_item_a, per_item_b, per_item_delta,
-            ks, all_k_a, metric.name, f"{label}@{{k}}",
-            macro_a=macro_a, macro_b=macro_b, all_k_b=all_k_b,
-        ))
+        tables.append(compared_per_item_table(
+            per_item, macro, ks[ks_key], metric.name, f"{label}@{{k}}"))
         titles.append(f"{title_prefix}{label}@k (M/B/Δ){item_cov}")
     return tables, titles
 
@@ -262,32 +268,25 @@ def _per_item_compare_tables(
 def _build_per_item_section(
     results: Mapping[str, dict], parameters: dict
 ) -> ReportSection | None:
-    metrics_a, metrics_b = results["metrics_a"], results["metrics_b"]
-    comparison = results["comparison"]
-    per_item_a = metrics_a.get("per_item", {}) or {}
-    per_item_b = metrics_b.get("per_item", {}) or {}
-    per_item_delta = comparison.get("per_item_delta", {}) or {}
-    if not per_item_b:
+    comparison = results[SOURCE_COMPARISON]
+    per_item = landed_value(comparison, SOURCE_COMPARISON, "per_item")
+    if not has_entries(per_item, REFERENCE):
         return None
-
-    disp = (
-        (parameters.get("evaluation", {}) or {}).get("report", {}) or {}
-    ).get("display", {}) or {}
-    n_items = count_items(results["row_facts_a"])
-    # Each side's "all" at its own K (#434); the int columns follow A's.
-    all_k_a, all_k_b = resolved_all_k(metrics_a), resolved_all_k(metrics_b)
-    macro_a = (metrics_a.get("macro_avg", {}) or {}).get("by_item")
-    macro_b = (metrics_b.get("macro_avg", {}) or {}).get("by_item")
+    macro = landed_value(comparison, SOURCE_COMPARISON, "macro_by_item")
     # bug 5 (ADR-0020): disclose each side's macro item coverage.
-    item_cov = macro_coverage_suffix_mb(
-        per_item_a, per_item_b, n_items, parameters, macro_a, macro_b
+    item_cov = compared_macro_coverage_suffix(
+        macro,
+        landed_value(comparison, SOURCE_COMPARISON, POPULATION_KEY,
+                     MACRO_ITEMS_KEY),
+        count_items(results[ROW_FACTS_A]),
     )
-
     tables, titles = _per_item_compare_tables(
-        per_item_a, per_item_b, per_item_delta, disp, all_k_a, all_k_b,
+        per_item, macro,
+        landed_value(results[COMPARISON_DISPLAY_KS], COMPARISON_DISPLAY_KS,
+                     "per_item"),
         # No "per-item" prefix: the section says it, and the per-item
         # recall's display name says it again.
-        macro_a, macro_b, "", item_cov,
+        "", item_cov,
     )
     return ReportSection(
         title="per-item M/B/Δ",
@@ -300,55 +299,37 @@ def _build_per_item_section(
 def _build_category_section(
     results: Mapping[str, dict], parameters: dict
 ) -> ReportSection | None:
-    metrics_a, metrics_b = results["metrics_a"], results["metrics_b"]
     eval_params = parameters.get("evaluation", {}) or {}
     if not (eval_params.get("item_categories", {}) or {}).get("enabled"):
         return None
-    cat_a = metrics_a.get("category")
-    cat_b = metrics_b.get("category")
-    if not cat_a or not cat_b:
+    # Compared only when both sides have the grain (the comparison layer).
+    category = landed_value(results[SOURCE_COMPARISON], SOURCE_COMPARISON,
+                            "category")
+    if category is None:
         return None
-    comparison_cat = build_comparison_result(
-        cat_a, cat_b,
-        label_a="Model_cat",  # internal labels only — display uses metadata
-        label_b="Compare_cat",
-    )
-    per_item_a = cat_a.get("per_item", {}) or {}
-    per_item_b = cat_b.get("per_item", {}) or {}
-    per_item_delta = comparison_cat.get("per_item_delta", {}) or {}
-    disp = (eval_params.get("report", {}) or {}).get("display", {}) or {}
-    n_cat = count_items(results["row_facts_a"].get("category") or {})
-    cat_k_a, cat_k_b = resolved_all_k(cat_a), resolved_all_k(cat_b)
-    macro_a = (cat_a.get("macro_avg", {}) or {}).get("by_item")
-    macro_b = (cat_b.get("macro_avg", {}) or {}).get("by_item")
+    cut = results[COMPARISON_DISPLAY_KS]
+    n_cat = count_items(results[ROW_FACTS_A].get("category") or {})
 
     tables, titles = [], []
-    # bug 8 (ADR-0020): same per-side key filter as _build_overall_section,
-    # against each side's category K — 3 categories must not print
-    # precision@4 / @5.
-    overall_a = cat_a.get("overall", {}) or {}
-    overall_b = cat_b.get("overall", {}) or {}
-    keys, cells_a, cells_b, cells_d = _each_side_up_to_its_k(
-        overall_a, overall_b, comparison_cat["overall_delta"], cat_k_a, cat_k_b,
-    )
+    # bug 8 (ADR-0020): each side cut at its own category K, like the overall
+    # section — 3 categories must not print precision@4 / @5.
     side_a, side_b = "Model", "Compare"
-    overall_tbl = pd.DataFrame(
-        {side_a: [cells_a.get(k) for k in keys],
-         side_b: [cells_b.get(k) for k in keys],
-         "Δ": [cells_d.get(k) for k in keys]},
-        index=keys,
-    )
-    tables.append(overall_tbl)
+    tables.append(_every_key_table(
+        category["overall"],
+        landed_value(cut, COMPARISON_DISPLAY_KS, "category", "overall"),
+        side_a, side_b))
     titles.append(
-        f"大類 overall{_empty_overall_note(overall_a, overall_b, side_a, side_b)}"
+        f"大類 overall"
+        f"{_empty_overall_note(category['overall'], side_a, side_b)}"
     )
     # bug 5 (ADR-0020): same disclosure as the fine-grained per-item section.
-    item_cov = macro_coverage_suffix_mb(
-        per_item_a, per_item_b, n_cat, parameters, macro_a, macro_b
-    )
+    item_cov = compared_macro_coverage_suffix(
+        category["macro_by_item"], category[POPULATION_KEY][MACRO_ITEMS_KEY],
+        n_cat)
     more_tables, more_titles = _per_item_compare_tables(
-        per_item_a, per_item_b, per_item_delta, disp, cat_k_a, cat_k_b,
-        macro_a, macro_b, "大類 ", item_cov,
+        category["per_item"], category["macro_by_item"],
+        landed_value(cut, COMPARISON_DISPLAY_KS, "category", "per_item"),
+        "大類 ", item_cov,
     )
     tables += more_tables
     titles += more_titles

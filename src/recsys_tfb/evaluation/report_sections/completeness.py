@@ -7,12 +7,12 @@ from collections.abc import Mapping
 import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.metrics import metric_params
 from recsys_tfb.evaluation.report import ReportSection
 from recsys_tfb.evaluation.report_sections.shared import (
     query_count_rows,
     read_dataset_overview,
 )
+from recsys_tfb.evaluation.result_readers import metric_params
 
 #: The results this section reads, by catalog name (ADR-0031 principle 1).
 READS = ("evaluation_row_facts", "evaluation_metrics")
@@ -38,7 +38,7 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
     facts = {
         "k_values": eval_p.get("k_values"),
         # Same rows as the overview's scale table, one derivation (#376).
-        **query_count_rows(row_facts, parameters),
+        **query_count_rows(row_facts, metrics, parameters),
         "正例列數 n_positives": totals.get("n_positives"),
         f"{item_col} 數 n_items": totals.get("n_items"),
         "metric.weight_alpha（item 加權指數 α；0＝item 等權）":

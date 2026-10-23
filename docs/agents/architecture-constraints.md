@@ -16,6 +16,7 @@
 | 在測試或 `src/` 裡寫一份 `parameters` 的 `schema` 區塊 | S5 |
 | 在 `src/` 裡寫下任何具體欄名（字串、預設參數、log 欄位） | S6 ＋ [ADR-0017](../adr/0017-framework-vocabulary-boundary.md) |
 | 新增跨目錄的 import；想讓兩條 pipeline 共用一段程式 | S8（共用的東西往下搬，不橫向 import）＋ S3 ＋ [ADR-0030](../adr/0030-training-second-pass-honest-adapter-shared-scoring.md) 決定 14 |
+| 改 evaluation 的報表（主報表、比較報表），想讓它多顯示一個數字 | S9（先在計算 node 算好、落地，報表再讀） |
 | 新增 catalog 條目 | A1 ＋ F10 |
 | 想破例（寫檔、零輸出 node、`writes=`） | 節三——**要加一筆必須先問使用者** |
 | 覺得「測試綠了應該就沒問題」 | 每條約束底下的「**這個檢查看不到**」 |
@@ -43,9 +44,9 @@
 
 ---
 
-## 15 條約束一覽
+## 16 條約束一覽
 
-`tests/test_core/test_architecture_constraints.py` 執行，**62 個測試，7.72–8.36 秒**（2026-09-30 共 3 次量測，`load average 2.26–2.41`（`uptime` 的 1 分鐘值）；多的一個是 ADR-0030 決定 8 的 dict 寫法讀取測試）。前一版：61 個測試 9.18–9.64 秒（2026-09-29，3 次量測，`load average 5.55–5.75`，那台機器當時有別的 session 在跑，數字偏高；S8 加進來之後——它又多一次各自完整解析 `src/` 的所有檔案）。再前一版：52 個測試 6.17–6.20 秒（2026-09-20，3 次量測，`load average 1.95`）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔前幾版分別量到 39 個測試 2.86–3.23 秒、26 個測試 1.06–1.10 秒、20 個測試 1.4–1.7 秒、17 個測試 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
+`tests/test_core/test_architecture_constraints.py` 執行，**67 個測試，7.37–7.41 秒**（2026-10-23 共 3 次量測，`load average 4.23–4.82`（`uptime` 的 1 分鐘值）；多的五個是 S9）。前一版：62 個測試 7.72–8.36 秒（2026-09-30 共 3 次量測，`load average 2.26–2.41`；多的一個是 ADR-0030 決定 8 的 dict 寫法讀取測試）。再前一版：61 個測試 9.18–9.64 秒（2026-09-29，3 次量測，`load average 5.55–5.75`，那台機器當時有別的 session 在跑，數字偏高；S8 加進來之後——它又多一次各自完整解析 `src/` 的所有檔案）。更早一版：52 個測試 6.17–6.20 秒（2026-09-20，3 次量測，`load average 1.95`）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔前幾版分別量到 39 個測試 2.86–3.23 秒、26 個測試 1.06–1.10 秒、20 個測試 1.4–1.7 秒、17 個測試 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
 
 | # | 規則 | 管到哪 | 這個檢查看不到 |
 |---|---|---|---|
@@ -64,6 +65,7 @@
 | [S6](#s6-src-不得出現示例部署的字面欄名) | `src/` 不得出現示例部署的字面欄名（`snap_date`／`cust_id`／`prod_name`） | `src/recsys_tfb/`（**只有這一棵**；`tests/`／`scripts/` 刻意在外） | 註解；f-string 片段與任何子字串；字串拼接出來的欄名；不在那三個名字裡的其他示例欄名；`conf/` 的 YAML |
 | [S7](#s7-query-groupbase-keyidentity-只能從-get_schema-取不得手拼) | query group／base key／identity 只能從 `get_schema` 取，不得手拼 | `src/recsys_tfb/` ＋ `tests/` ＋ `scripts/`（比 S4／S5／S6 多一棵，見該條） | 欄名不是從 schema 讀出來的（模組常數、字面字串）；清單多出任何一欄就放行（刻意）；`conf/` 的 YAML |
 | [S8](#s8-pipeline-之間不互相-importpipeline-以外的-src-模組不-import-pipeline) | pipeline 之間不互相 import；pipeline 以外的 `src/` 模組不 import pipeline（CLI `__main__.py` 除外） | 整個 `src/recsys_tfb/`（測試刻意不掃） | `importlib.import_module` 字串 import；先 import 套件再走屬性；經 `get_pipeline` 登記表拿另一條；CLI 例外本身；現況零命中 |
+| [S9](#s9-報表模組不-import-計算模組) | 報表模組不 import 計算模組（只准別的報表模組與一份封閉的可讀清單；不准 `pyspark`） | `evaluation/report.py`、`report_builder.py`、`report_sections/`、`comparison/`、`report/` | 遞移的 import；不靠 import 的計算（報表自己寫的加減與判斷）；可讀清單本身放錯 |
 
 **CLI 層（`__main__.py`）、`core/`、`io/` 不在 A1／A2 管轄內**——那幾層本來就負責 I/O 與程序級資源。
 
@@ -308,7 +310,7 @@ pipeline 各節點之間傳遞的資料（會被下游 node 消費的東西）�
   - training 的 7 個診斷 node：`def` 原本在 `src/recsys_tfb/diagnosis/model/`。以前這裡有實際後果：`compute_shap_diagnostics` 與 `compute_quadrant_cases` 自己 `savefig`，目錄由 `diagnosis/model/paths.py` 的 helper `mkdir`，照 R4 的定義是「自己寫診斷副產物的 node」卻不在 R4 表上。#485（ADR-0030 決定 7）把圖交給 catalog 的 `DiagnosticFiguresDataset` 條目存，#489（決定 6）把 `def` 搬回 `pipelines/training/nodes.py`，所以 (c) 與 (d) 現在掃得到它們，稽核全綠：沒有 catalog 存取、沒有直接寫檔。它們的機制在 `pipelines/training/steps/`，屬於上一條的盲區，不屬於這一條。
   - evaluation 的 `load_compare_predictions`：原文寫 `def` 在 `pipelines/evaluation/steps/compare_sources.py`（#365 搬進去）。重盤時 `pipelines/evaluation/pipeline.py` 接的是 `pipelines/evaluation/nodes.py` 的同名函式（轉手給 steps 那一個），所以 node 的 `def` 在掃描範圍內；實際讀取在 `steps/`，同樣屬於上一條。
 
-  重盤沒有追到底的一種形狀：evaluation 有 5 處 `Node(...)` 的第一參數是 `nodes.py` 裡 4 個 factory 的呼叫（`make_*_node(...)`），靜態讀 `pipeline.py` 只看得到 factory 本身，看不到它回傳的函式 `def` 在哪。
+  重盤沒有追到底的一種形狀：evaluation 有幾處 `Node(...)` 的第一參數是 `nodes.py` 裡 factory 的呼叫（`make_*_node(...)`），靜態讀 `pipeline.py` 只看得到 factory 本身，看不到它回傳的函式 `def` 在哪。現在有哪些，照下一段的重盤方法數（`grep -n "make_[a-z_]*_node(" src/recsys_tfb/pipelines/*/pipeline.py`）。
 
   **重盤方法**（上面的清單會過時，別直接引用）：取每個 `pipelines/*/pipeline.py` 裡 `Node(...)` 的第一參數，找它的 `def` 在哪個檔；不在 `pipelines/**/nodes*.py` 的就在盲區裡。
 
@@ -400,7 +402,7 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py` 的 
 
 內容那一半由 [`pipeline-node-design.md`](pipeline-node-design.md) 定義：node 邊界、node body 的形狀、決策與機制的分界、`log_step` 的範圍、`steps/` 與根層的判準、命名與 docstring、讀取寫明月份、什麼可以從 CLI 注入、各 split 用同一個機制、資料閘的形狀、何時翻格式版本。那份十八條裡只有三條有部分機械檢查，其餘靠該檔開頭那張規則總表 ＋ code review。這是 ADR-0008 已知的最大殘留風險，不是疏漏。
 
-那份是判準的唯一真實來源，適用於**每一條** pipeline（S1 只管 dataset）；ADR-0008 保留為 dataset 那次裁決的記錄與完整論證。**已知的界外違例登記在該檔的〈已登記的例外〉**（dataset 的 `split_train_keys` 一個 node 兩個輸出、三個 build 共用 `build_model_input`），看到它們不必以為判準是裝飾。
+那份是判準的唯一真實來源，適用於**每一條** pipeline（S1 只管 dataset）；ADR-0008 保留為 dataset 那次裁決的記錄與完整論證。**已知的界外違例登記在該檔的〈已登記的例外〉**（dataset 的 `split_train_keys` 一個 node 兩個輸出、三個 build 共用 `build_model_input`、evaluation 的 `compute_compare_metrics` 一個 node 四個輸出），看到它們不必以為判準是裝飾。
 
 ## S2. `pipelines/dataset/month_plans.py` 不得 import pyspark
 
@@ -760,6 +762,34 @@ src/recsys_tfb/evaluation/metrics_spark.py:221 in collapse_to_categories(): time
 - **`<b>` 只認掃描那棵樹裡真的存在的目錄或 `.py`。** 一個 import 指向已經不存在的 pipeline，不是這條的事（那會在 import 時就爆）。
 - **只掃 `src/recsys_tfb/`。** `scripts/`、`tests/`、`notebooks/` 不在範圍內。
 - **它證明不了共用的東西放對了地方**，只證明沒有橫向或向上的 import；往下搬的目標是否合理（放 `models/` 還是放頂層）是判斷題。
+
+## S9. 報表模組不 import 計算模組
+
+報表模組只讀落地結果、組裝成畫面，不算任何東西（[ADR-0031](../adr/0031-evaluation-second-pass-layers-and-single-source.md) 原則 1）。所以報表模組只准 import 兩種 `recsys_tfb` 模組：別的報表模組，以及一份封閉的「可讀」清單。其他 `recsys_tfb` 模組都算計算模組。第三方套件裡，`pyspark` 也不准。
+
+- **報表模組**（被掃的）：`evaluation/report.py`、`evaluation/report_builder.py`、`evaluation/report_sections/`、`evaluation/comparison/`、`report/`。
+- **可讀清單**：`evaluation/result_readers.py`（讀落地結果的函式與鍵名）、`evaluation/metric_catalog.py`（指標目錄，只放資料）、`evaluation/segment_keys.py`、`evaluation/distributions.py`（畫圖）、`core/schema.py`、`core/consistency.py`、`core/date_ranges.py`。
+
+兩份清單寫在測試檔的 `_REPORT_MODULES`、`_REPORT_MAY_ALSO_IMPORT`。報表要用一個新的數字，先在計算 node 裡算好、落地，報表再讀回來；不要把計算模組加進可讀清單。
+
+**為什麼要守。** #536 之前，報表自己算差值、K 截斷、全正組帳、熱門度窗的月數、顯示分箱，還在模組層 import `metrics`、`baselines` 這些會帶進 pyspark 的模組。結果有兩個：同一個數字算兩次，兩份規則會分岔；報表重畫時看不出它其實在重算。#536 把這些搬進計算 node 並落地之後，加這條擋住再犯。
+
+**檢查**：`TestS9ReportsDoNotImportComputation`。掃描重用 S8 的 `_module_imports_at`（相對 import 還原、`from X import Y` 兩半都算、函式內的 import）。`from X import Y` 時，如果 `X.Y` 是 `X` 底下的模組，`X` 的 `__init__` 只是路徑，不算 import 了它：`from recsys_tfb.core import schema` 算 import `core/schema.py`，不算 `core/__init__.py`（它會帶進 Runner）。
+
+1. **現有程式全綠**——`test_the_real_tree_is_clean`。訊息逐行印 `檔案:行號: imports 模組`。
+2. **清單上的路徑都存在**——`test_every_listed_path_exists`：模組改名後，舊條目不會默默變成空話。
+3. **抓得到每種寫法**——`test_catches_every_spelling`，在 `tmp_path` 造一棵迷你樹：絕對、`import a.b.c`、只有第二半指到計算模組、兩種相對寫法、函式內、import `steps/`、從 `core` 套件取名字、`import pyspark`、`from pyspark.sql import ...`，以及比較報表、`report_builder.py`、`report/` 三處的違例。
+4. **合法的不被抓**——`test_allowed_imports_are_left_alone`：報表模組互相 import、可讀清單、`core` 套件只當路徑、標準庫與 pandas；計算模組 import 什麼都不管。
+5. 訊息格式——`test_the_message_names_file_line_and_module`。
+
+**沒有例外登記表。** 現況全樹零違例。
+
+### 這個檢查看不到
+
+- **遞移的 import。** 只看報表模組自己寫的 import。可讀清單裡的模組再 import 什麼，不在範圍內：例如 `core/schema.py` 會先執行 `core/__init__.py`，那裡 import 了 Runner。要擋遞移，得照 S2 的 `_spark_reachable_from` 另寫。
+- **字串組出來的 import、先 import 套件再走屬性。** 同 S8。
+- **報表裡不靠 import 的計算。** 報表自己寫一段加減、排序挑名次、判斷兩邊相不相同，這條看不出來。哪些算計算，判準在 ADR-0031 原則 1（「這個數字別的地方會不會用到？會不會拿來比較或判斷？」）。
+- **計算模組放錯清單。** 有人把一個計算模組加進 `_REPORT_MAY_ALSO_IMPORT`，測試照樣綠；清單的改動要在審查時看。
 
 ---
 

@@ -1008,7 +1008,7 @@ class TestComputeBaselineMetrics:
             "per_item_segment", "per_item_shared_numbers",
             "per_item_segment_shared_numbers", "population",
             "observation_items", "purchase_counts", "monthly_counts",
-            "config_fingerprint",
+            "popularity_window", "config_fingerprint",
         }
         assert result["config_fingerprint"] == fingerprint(self._parameters())
         assert "A" in result["per_item"]
@@ -1028,7 +1028,7 @@ class TestComputeBaselineMetrics:
         macro included. Popularity A=3 > B=1 > C=0 ranks A, B, C in both
         groups: c1's positives A and C sit 1st and 3rd, c2's B 2nd. Per-item
         recall@1 is A 1, B 0, C 0; recall@2 is A 1, B 1, C 0."""
-        from recsys_tfb.evaluation.metrics import POPULATION_KEY
+        from recsys_tfb.evaluation.result_readers import POPULATION_KEY
         from recsys_tfb.pipelines.evaluation.nodes import (
             compute_baseline_metrics,
         )
@@ -1045,14 +1045,38 @@ class TestComputeBaselineMetrics:
         # The facts of these rows are the model's (decision 8).
         assert "dataset_overview" not in result
 
+    def test_one_date_lands_its_window_as_the_report_prints_it(self, spark):
+        """#536: the report reads the window instead of re-counting months
+        and re-reading the settings. All history sits in 2024-06, so the
+        2025-01-31 window has label rows in 1 of its 12 months: partial, and
+        the per-month average divides by 1."""
+        from recsys_tfb.evaluation.result_readers import POPULARITY_WINDOW_KEY
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_baseline_metrics,
+        )
+
+        params = self._parameters()
+        frame = self._eval_predictions(spark)
+        result = compute_baseline_metrics(
+            frame, _row_facts(frame, params), self._label_table(spark),
+            _no_segments(params), params)
+        assert result[POPULARITY_WINDOW_KEY] == {
+            "lookback_months": 12, "score": "count", "months_covered": 1,
+            "window_months_covered": {"2025-01-31": 1},
+            "full_window_months": 12, "per_month_divisor": 1,
+            "window_partial": True,
+        }
+
     def test_several_dates_record_each_windows_covered_months(self, spark):
         """#374: two evaluated dates, two lookback windows. History at
         2024-06-30 falls in both; history at 2025-01-31 only in the February
         window (the January window ends before its own date). Counts sum over
-        the windows; each window's months with label rows are recorded so the
-        report can divide by window-months, not by one window's 12."""
+        the windows; each window's months with label rows are recorded, and
+        the report divides by window-months, 1 + 2, not by one window's 12
+        (#536: landed in the window block, the divisor too)."""
         import pandas as pd
 
+        from recsys_tfb.evaluation.result_readers import POPULARITY_WINDOW_KEY
         from recsys_tfb.pipelines.evaluation.nodes import (
             compute_baseline_metrics,
         )
@@ -1068,8 +1092,13 @@ class TestComputeBaselineMetrics:
         result = compute_baseline_metrics(
             frame, _row_facts(frame, params), labels,
             _no_segments(params), params)
-        assert result["window_months_covered"] == {
-            "2025-01-31": 1, "2025-02-28": 2}
+        assert result[POPULARITY_WINDOW_KEY] == {
+            "lookback_months": 12, "score": "count", "months_covered": 2,
+            "window_months_covered": {"2025-01-31": 1, "2025-02-28": 2},
+            "full_window_months": 24, "per_month_divisor": 3,
+            "window_partial": True,
+        }
+        assert "window_months_covered" not in result   # only in the block
         # A: 3 in the January window, 3 + 1 in the February one.
         assert result["purchase_counts"] == {"A": 7, "B": 2, "C": 0}
         assert result["monthly_counts"] == {
@@ -1093,6 +1122,294 @@ class TestComputeBaselineMetrics:
         assert result == {
             "enabled": False, "config_fingerprint": fingerprint(params),
         }
+
+
+class TestCompareToBaseline:
+    """The comparison layer (#536, ADR-0031 decisions 4 and 5) and its first
+    node, ``compare_to_baseline``: two results as the metrics nodes compute
+    them, joined cell by cell. The rows are ``TestComputeBaselineMetrics``':
+    the model ranks c1 A, B, C (positives A and C) and c2 B, C, A (positive
+    B); popularity A 3 > B 1 > C 0 ranks A, B, C in both."""
+
+    @staticmethod
+    def _parameters(**evaluation):
+        params = TestComputeBaselineMetrics._parameters()
+        params["evaluation"].update(evaluation)
+        return params
+
+    @staticmethod
+    def _metrics(spark, frame, params):
+        from recsys_tfb.pipelines.evaluation.nodes import compute_metrics
+
+        return compute_metrics(
+            frame, _row_facts(frame, params), _no_segments(params), params)
+
+    @classmethod
+    def _model_and_baseline(cls, spark, params):
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_baseline_metrics,
+        )
+
+        frame = TestComputeBaselineMetrics._eval_predictions(spark)
+        baseline = compute_baseline_metrics(
+            frame, _row_facts(frame, params),
+            TestComputeBaselineMetrics._label_table(spark),
+            _no_segments(params), params)
+        return cls._metrics(spark, frame, params), baseline
+
+    def test_each_cell_is_the_model_the_baseline_and_their_difference(
+            self, spark):
+        """map@1: the model's c1 AP@1 is 1/2 (two positives, the first at 1)
+        and c2's 1, so 0.75; the baseline's 1/2 and 0, so 0.25."""
+        from recsys_tfb.pipelines.evaluation.nodes import compare_to_baseline
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            fingerprint,
+        )
+
+        params = self._parameters()
+        metrics, baseline = self._model_and_baseline(spark, params)
+        out = compare_to_baseline(metrics, baseline, params)
+        cell = out["overall"]["cells"]["map@1"]
+        assert cell["this"] == metrics["overall"]["map@1"] == pytest.approx(0.75)
+        assert cell["reference"] == baseline["overall"]["map@1"] \
+            == pytest.approx(0.25)
+        assert cell["diff"] == pytest.approx(0.5)
+        # Per item and in the macro too: per-item recall@1 of A, B, C is
+        # 1, 1, 0 for the model and 1, 0, 0 for the baseline.
+        assert out["per_item"]["cells"]["B"]["recall@1"] == {
+            "this": 1.0, "reference": 0.0, "diff": 1.0}
+        macro = out["macro_by_item"]["cells"]["recall@1"]
+        assert macro["diff"] == pytest.approx(1 / 3)
+        assert out.get("config_fingerprint") == fingerprint(params)
+
+    def test_the_all_cells_pair_each_side_s_own_all(self, spark):
+        """Two results whose ``"all"`` resolved to different K (3 items
+        against 2): ``map@all`` pairs the model's ``map@3`` with the other's
+        ``map@2``, and ``map@3``, which only one side holds, has no
+        difference. The comparison layer as ``--compare`` will call it, on
+        two results the metrics node computed. Without C, both groups rank
+        their one positive first (AP 1); with it, c1's second positive sits
+        3rd: (1 + 2/3) / 2."""
+        from pyspark.sql import functions as F
+
+        from recsys_tfb.pipelines.evaluation.steps.comparison_layer import (
+            compare_metric_results,
+        )
+
+        params = self._parameters(k_values=[1, "all"])
+        frame = TestComputeBaselineMetrics._eval_predictions(spark)
+        three = self._metrics(spark, frame, params)
+        two = self._metrics(
+            spark, frame.filter(F.col("prod_name") != "C"), params)
+        out = compare_metric_results(three, two)
+        assert out["population"]["all_k"] == {
+            "this": 3, "reference": 2, "same": False}
+        cell = out["overall"]["cells"]["map@all"]
+        assert cell["this"] == three["overall"]["map@3"] \
+            == pytest.approx((1 + (1 + 2 / 3) / 2) / 2)
+        assert cell["reference"] == two["overall"]["map@2"] == 1.0
+        assert cell["diff"] == pytest.approx(cell["this"] - 1.0)
+        assert out["overall"]["cells"]["map@3"] == {
+            "this": three["overall"]["map@3"], "reference": None,
+            "diff": None}
+        # C has rows on one side only: its cells have no other side, and
+        # the per-item block says how many items each side held.
+        assert out["per_item"]["cells"]["C"]["recall@1"] == {
+            "this": three["per_item"]["C"]["recall@1"], "reference": None,
+            "diff": None}
+        assert out["per_item"]["entries"] == {"this": 3, "reference": 2}
+
+    def test_a_switched_off_baseline_lands_a_stub(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_baseline_metrics,
+            compare_to_baseline,
+        )
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            fingerprint,
+        )
+
+        params = TestComputeBaselineMetrics._parameters(baseline_section=False)
+        frame = TestComputeBaselineMetrics._eval_predictions(spark)
+        metrics = self._metrics(spark, frame, params)
+        stub = compute_baseline_metrics(
+            None, None, None, _no_segments(params), params)
+        assert compare_to_baseline(metrics, stub, params) == {
+            "enabled": False, "config_fingerprint": fingerprint(params)}
+
+    def test_inputs_computed_under_other_settings_are_refused(self, spark):
+        """Unchecked, ``--only-node compare_to_baseline`` after a setting
+        changed compares the old metrics and stamps today's fingerprint on
+        the result, which the report then accepts."""
+        from recsys_tfb.pipelines.evaluation.nodes import compare_to_baseline
+
+        computed_with = self._parameters()
+        metrics, baseline = self._model_and_baseline(spark, computed_with)
+        now = self._parameters(metric={"min_positives": 2})
+        with pytest.raises(ValueError) as exc:
+            compare_to_baseline(metrics, baseline, now)
+        assert "evaluation.metric.min_positives" in str(exc.value)
+        assert "--from-node compute_row_facts" in str(exc.value)
+
+    def test_a_ledger_landed_before_its_segment_columns_is_refused(
+            self, spark):
+        """A ``metrics.json`` written before #536 has no
+        ``population.segment_columns``; the fingerprint passes it (no
+        setting changed)."""
+        from recsys_tfb.pipelines.evaluation.nodes import compare_to_baseline
+
+        params = self._parameters()
+        metrics, baseline = self._model_and_baseline(spark, params)
+        del metrics["population"]["segment_columns"]
+        with pytest.raises(ValueError) as exc:
+            compare_to_baseline(metrics, baseline, params)
+        assert "evaluation_metrics" in str(exc.value)
+        assert "population.segment_columns" in str(exc.value)
+        # Not compute_metrics: the row facts of a run that old lack the
+        # all-positive accounts too, and the report would refuse them next.
+        assert "--from-node compute_row_facts" in str(exc.value)
+
+
+from recsys_tfb.pipelines.evaluation.steps.display_ks import (  # noqa: E402
+    drop_metric_keys_above_all_k,
+    resolve_display_k,
+)
+
+
+class TestResolveDisplayKClampsToItemCount:
+    """bug 8 (ADR-0020): the display K list used to be an unclamped
+    superset — with only 3 categories, the report still printed @4/@5,
+    whose precision denominator is just K (not min(K, n_items)), so those
+    columns decline purely because the denominator grew, not because the
+    model did anything different. Fix is a filter over the given list
+    (never regenerates it — a caller list without "all" doesn't gain one),
+    keeping "all" always. The cut moved from the report to the K-cut nodes'
+    module (``steps/display_ks``, #536)."""
+
+    def test_drops_k_above_n_items_keeps_all(self):
+        assert resolve_display_k([1, 3, 5, "all"], 3) == [1, 3, "all"]
+
+    def test_keeps_everything_when_n_items_covers_it(self):
+        assert resolve_display_k([1, 3, 5, "all"], 5) == [1, 3, 5, "all"]
+
+    def test_does_not_add_all_when_caller_list_lacks_it(self):
+        assert resolve_display_k([1, 3, 5], 3) == [1, 3]
+
+    def test_skips_the_filter_when_n_items_is_zero_or_unknown(self):
+        """n_items<=0 means overview data is missing (e.g. baseline's slim
+        per_item bundle) — filtering would collapse every table down to
+        just "@all"."""
+        assert resolve_display_k([1, 3, 5, "all"], 0) == [1, 3, 5, "all"]
+
+
+class TestDropMetricKeysAboveAllK:
+    """bug 8 (ADR-0020) for key-agnostic tables: the same K > all_k rule as
+    resolve_display_k, applied to metric keys instead of a display list.
+    The bounds below are item counts: what all_k is without event."""
+
+    def test_drops_only_integer_k_above_the_count(self):
+        keys = ["map@3", "precision@4", "recall@5", "mean_pos", "map@all"]
+        assert drop_metric_keys_above_all_k(keys, 3) == [
+            "map@3", "mean_pos", "map@all",
+        ]
+
+    def test_keeps_k_equal_to_the_count(self):
+        assert drop_metric_keys_above_all_k(["precision@3"], 3) == [
+            "precision@3"
+        ]
+
+    def test_skips_the_filter_when_n_items_is_zero_or_unknown(self):
+        assert drop_metric_keys_above_all_k(["map@5"], 0) == ["map@5"]
+
+
+class TestResolveDisplayKs:
+    """resolve_display_ks: the K each table of the main report shows, cut
+    after the comparison (#536, ADR-0031 decisions 10 and 16), from what the
+    metrics and comparison nodes compute. Three items, so ``"all"`` is 3 at
+    the item grain; items A and B share category AB, so 2 at the category
+    grain."""
+
+    @staticmethod
+    def _parameters(primary_map_k, metric_k):
+        params = TestCompareToBaseline._parameters(
+            item_categories={"enabled": True, "unmapped": "singleton",
+                             "mapping": {"AB": ["A", "B"]}},
+            metric={"k": metric_k})
+        params["schema"]["categorical_values"] = {"prod_name": ["A", "B", "C"]}
+        params["evaluation"]["report"]["display"] = {
+            "primary_map_k": primary_map_k}
+        return params
+
+    def _resolved(self, spark, params):
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compare_to_baseline,
+            resolve_display_ks,
+        )
+
+        metrics, baseline = TestCompareToBaseline._model_and_baseline(
+            spark, params)
+        return resolve_display_ks(
+            metrics, compare_to_baseline(metrics, baseline, params), params)
+
+    def test_each_list_drops_the_k_above_what_all_stands_for(self, spark):
+        """bug 8 (ADR-0020): an int K above ``"all"`` is dropped, ``"all"``
+        kept. ``metric.k`` 5 is cut too, so the headline note may not name
+        its column."""
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            fingerprint,
+        )
+
+        params = self._parameters([1, 3, 5, "all"], metric_k=5)
+        out = self._resolved(spark, params)
+        cut = {"all_k": 3, "primary_map_k": [1, 3, "all"],
+               "metrics_section": [1, 2, 3, "all"],
+               "category": {"all_k": 2, "metrics_section": [1, 2, "all"]}}
+        assert out.get("evaluation_metrics") == {
+            **cut, "headline_column_shown": False}
+        # The baseline section's tables, cut at the comparison's K: the
+        # model's, which its baseline shares.
+        assert out.get("baseline_comparison") == cut
+        # Its fingerprint holds the display key it read, so a changed
+        # primary_map_k makes it — and only it — stale.
+        assert out.get("config_fingerprint") == fingerprint(
+            params, ("evaluation.report.display.primary_map_k",))
+
+    def test_the_headline_note_names_a_column_the_section_shows(self, spark):
+        out = self._resolved(spark, self._parameters([1], metric_k=2))
+        assert out["evaluation_metrics"]["headline_column_shown"] is True
+
+    def test_a_switched_off_baseline_has_no_lists(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compare_to_baseline,
+            compute_baseline_metrics,
+            resolve_display_ks,
+        )
+
+        params = TestComputeBaselineMetrics._parameters(baseline_section=False)
+        frame = TestComputeBaselineMetrics._eval_predictions(spark)
+        metrics = TestCompareToBaseline._metrics(spark, frame, params)
+        stub = compare_to_baseline(metrics, compute_baseline_metrics(
+            None, None, None, _no_segments(params), params), params)
+        out = resolve_display_ks(metrics, stub, params)
+        assert out.get("baseline_comparison", "absent") is None
+        assert out["evaluation_metrics"]["primary_map_k"] == [1, 3, "all"]
+
+    def test_a_comparison_computed_under_other_settings_is_refused(
+            self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compare_to_baseline,
+            resolve_display_ks,
+        )
+
+        computed_with = self._parameters([1], metric_k=2)
+        metrics, baseline = TestCompareToBaseline._model_and_baseline(
+            spark, computed_with)
+        comparison = compare_to_baseline(metrics, baseline, computed_with)
+        now = self._parameters([1], metric_k=3)
+        with pytest.raises(ValueError) as exc:
+            resolve_display_ks(metrics, comparison, now)
+        assert "baseline_comparison (written by compare_to_baseline)" in str(
+            exc.value)
+        assert "--from-node compute_row_facts" in str(exc.value)
 
 
 class TestComputeRowFacts:
@@ -1130,7 +1447,7 @@ class TestComputeRowFacts:
         """The population ledger (ADR-0031 decision 4). Dropping the
         all-positive c3 leaves c1 the one group scored, so B — positive in c3
         only — is in no macro, while ``"all"`` still resolves on every row."""
-        from recsys_tfb.evaluation.metrics import POPULATION_KEY
+        from recsys_tfb.evaluation.result_readers import POPULATION_KEY
         from recsys_tfb.pipelines.evaluation.nodes import (
             compute_metrics,
             compute_row_facts,
@@ -1145,6 +1462,9 @@ class TestComputeRowFacts:
             "macro_items": ["A", "C"],
             "n_scored_queries_with_positive": 1,
             "n_scored_queries_without_positive": 0,
+            # The segment columns it sliced by (#536): what the comparison
+            # layer reads to tell a side computed without them.
+            "segment_columns": [],
         }
         # The facts are the row facts' alone.
         assert not {"dataset_overview", "n_queries", "segments"} & set(metrics)
@@ -1165,8 +1485,31 @@ class TestComputeRowFacts:
             compute_metrics(self._frame(spark, new), facts,
                             _no_segments(new), new)
 
+    def test_the_macro_items_leave_out_items_below_min_positives(self, spark):
+        """The reports count ``population.macro_items`` instead of applying
+        ``evaluation.metric.min_positives`` again (#536), so the rule lives
+        here alone. Switch off, c1 and c3 are scored: A and C hold two
+        positives each, B one (c3). min_positives 2 keeps A and C; B is still
+        a per_item cell, drawn but not averaged."""
+        from recsys_tfb.evaluation.result_readers import (
+            MACRO_ITEMS_KEY,
+            POPULATION_KEY,
+        )
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_metrics,
+            compute_row_facts,
+        )
+
+        params = self._parameters()
+        params["evaluation"]["metric"] = {"min_positives": 2}
+        frame = self._frame(spark, params)
+        facts = compute_row_facts(frame, _no_segments(params), params)
+        metrics = compute_metrics(frame, facts, _no_segments(params), params)
+        assert metrics[POPULATION_KEY][MACRO_ITEMS_KEY] == ["A", "C"]
+        assert set(metrics["per_item"]) == {"A", "B", "C"}
+
     def test_counts_the_rows_and_their_query_groups(self, spark):
-        from recsys_tfb.evaluation.metrics import ALL_POSITIVE_KEY
+        from recsys_tfb.evaluation.result_readers import ALL_POSITIVE_KEY
         from recsys_tfb.pipelines.evaluation.nodes import compute_row_facts
         from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
             fingerprint,
@@ -1268,6 +1611,48 @@ class TestComputePredictionQuality:
         assert result["per_item"]["n_items"] == 3
         assert result["enabled"] is True
         assert result["config_fingerprint"] == fingerprint(params)
+
+    def test_lands_the_display_bins_and_the_sweep_the_report_draws(
+            self, spark):
+        """#536: the report draws these instead of re-deriving them from the
+        fine bins. Checkable by hand whatever bin each score falls in: the 4
+        display bins hold all 9 rows and 3 positives, each listed item's its
+        own 3 rows and 1 positive; the lowest display edge is the data's
+        minimum (0.1), so it predicts every row positive — precision 3/9,
+        recall 1 — and so does the sweep's last (lowest) threshold. Read back
+        through JSON, as the report reads it."""
+        import json
+
+        from recsys_tfb.evaluation.result_readers import (
+            DISPLAY_BINS_KEY,
+            THRESHOLD_SWEEP_KEY,
+            frame_from_json,
+        )
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._parameters(n_bins=8, n_display_bins=4, top_n=3)
+        result = json.loads(json.dumps(compute_prediction_quality(
+            self._with_a_query_group_without_a_positive(spark),
+            _no_segments(params), params)))
+        overall = frame_from_json(result["overall"][DISPLAY_BINS_KEY])
+        assert len(overall) == 4
+        assert (overall["n"].sum(), overall["n_pos"].sum()) == (9, 3)
+        assert overall.loc[0, "score_from"] == pytest.approx(0.1)
+        assert overall.loc[0, "precision"] == pytest.approx(3 / 9)
+        assert overall.loc[0, "recall"] == pytest.approx(1.0)
+        items = frame_from_json(result["per_item"][DISPLAY_BINS_KEY])
+        assert items.columns[0] == "prod_name" and len(items) == 3 * 4
+        by_item = items.groupby("prod_name")[["n", "n_pos"]].sum()
+        assert by_item.to_dict("index") == {
+            item: {"n": 3, "n_pos": 1} for item in ("A", "B", "C")}
+        sweep = frame_from_json(result["overall"][THRESHOLD_SWEEP_KEY])
+        assert sweep["threshold"].is_monotonic_decreasing
+        lowest = sweep.iloc[-1]
+        assert lowest["threshold"] == pytest.approx(0.1)
+        assert (lowest["tp"], lowest["fp"]) == (3, 6)
+        assert lowest["recall"] == pytest.approx(1.0)
 
     def test_the_default_bins_apply_when_the_block_is_absent(self, spark):
         from recsys_tfb.core.consistency import PREDICTION_QUALITY_DEFAULTS
@@ -1466,6 +1851,8 @@ class TestConsumersSegmentByTheLandedList:
         result = compute_metrics(
             frame, facts, self._segments(), self._parameters())
         assert set(result["per_segment"]) == {"mass", "hnw"}
+        # The ledger records the list it sliced by, the landed one (#536).
+        assert result["population"]["segment_columns"] == ["cust_segment_typ"]
         assert set(facts["dataset_overview"]["by_segment"]) == {"mass", "hnw"}
         # What the report says about segments travels with the row facts.
         assert facts["segments"] == {
@@ -1490,36 +1877,79 @@ class TestConsumersSegmentByTheLandedList:
             self._segments(), self._parameters())
         assert set(result["per_segment"]) == {"mass", "hnw"}
 
-    def test_generate_comparison_report(self, monkeypatch):
-        """Only the model side has segment columns; the compared side is a
-        prediction table of its own. No rendered section shows segments, so
-        the observable is what each side is asked to segment by."""
-        from recsys_tfb.pipelines.evaluation import nodes
+    def test_compute_compare_metrics(self, spark):
+        """Only the model side segments, by the landed list; the compared
+        side is a prediction table of its own, computed with none (#536: the
+        ledger says so, and the comparison's annotation reads it). Its frame
+        keeps the segment column here, so segmenting it would show."""
+        from recsys_tfb.pipelines.evaluation.nodes import compute_compare_metrics
 
-        asked = []
+        frame = self._frame(spark)
+        facts_a, metrics_a, facts_b, metrics_b = compute_compare_metrics(
+            frame, frame.drop("eval_partition_fingerprint"),
+            self._segments(), self._parameters())
+        assert set(metrics_a["per_segment"]) == {"mass", "hnw"}
+        assert metrics_a["population"]["segment_columns"] == [
+            "cust_segment_typ"]
+        assert set(facts_a["dataset_overview"]["by_segment"]) == {"mass", "hnw"}
+        assert metrics_b["per_segment"] == {}
+        assert metrics_b["population"]["segment_columns"] == []
 
-        def fake_facts(df, parameters, *, segment_columns=(),
-                       category_mapping=None):
-            return {"facts of": df}
+    def test_the_pipeline_names_each_output_after_the_side_it_holds(
+            self, spark):
+        """The node returns four results by position and the pipeline names
+        them (``pipeline._comparison_nodes``): swap two names there and
+        nothing raises — A's metrics would land as the compared source's, and
+        the report would draw each side under the other's label. Read through
+        the node's own ``outputs``, side A is the one segmented by the landed
+        list, side B the one computed with none."""
+        from recsys_tfb.pipelines.evaluation import create_pipeline
 
-        def fake_metrics(df, parameters, row_facts, *, segment_columns=(),
-                         drop_all_positive_groups=False,
-                         category_mapping=None):
-            assert row_facts == {"facts of": df}
-            asked.append((df, list(segment_columns)))
-            return {}
+        node = next(
+            n for n in create_pipeline(compare_source={
+                "kind": "model_version", "model_version": "v0"}).nodes
+            if n.name == "compute_compare_metrics")
+        frame = self._frame(spark)
+        landed = dict(zip(node.outputs, node.func(
+            frame, frame.drop("eval_partition_fingerprint"),
+            self._segments(), self._parameters())))
 
-        monkeypatch.setattr(nodes, "_count_row_facts", fake_facts)
-        monkeypatch.setattr(nodes, "compute_all_metrics", fake_metrics)
-        monkeypatch.setattr(nodes, "build_comparison_result",
-                            lambda *a, **k: {})
-        monkeypatch.setattr(nodes, "assemble_comparison_report",
-                            lambda *a, **k: "<html/>")
-        nodes.generate_comparison_report(
-            "model_side", "compared_side", {}, self._segments(),
-            self._parameters())
-        assert asked == [("model_side", ["cust_segment_typ"]),
-                         ("compared_side", [])]
+        assert sorted(landed) == ["compare_metrics_a", "compare_metrics_b",
+                                  "compare_row_facts_a", "compare_row_facts_b"]
+        assert landed["compare_metrics_a"]["population"]["segment_columns"] \
+            == ["cust_segment_typ"]
+        assert landed["compare_metrics_b"]["population"]["segment_columns"] \
+            == []
+        by_segment = {name: set(landed[name]["dataset_overview"].get(
+            "by_segment") or {}) for name in ("compare_row_facts_a",
+                                              "compare_row_facts_b")}
+        assert by_segment == {"compare_row_facts_a": {"mass", "hnw"},
+                              "compare_row_facts_b": set()}
+
+    def test_compute_compare_metrics_lands_what_it_was_computed_with(
+            self, spark):
+        """All four results land (#536), each with the fingerprint and the
+        compare source the readers check: ``compare_sources.
+        compare_source_identity`` of today's parameters, ``label`` left
+        out. The report tests stamp their hand-written results the same
+        way, on this test's word."""
+        from recsys_tfb.pipelines.evaluation.nodes import compute_compare_metrics
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            fingerprint,
+        )
+
+        params = self._parameters()
+        params["evaluation"]["compare"] = {
+            "kind": "model_version", "model_version": "v0", "label": "old"}
+        frame = self._frame(spark)
+        landed = compute_compare_metrics(
+            frame, frame, self._segments(), params)
+        assert len(landed) == 4
+        for result in landed:
+            assert result.get("config_fingerprint") == fingerprint(params)
+            assert result.get("compare_source") == {
+                "kind": "model_version", "model_version": "v0",
+                "source": "enriched_eval_predictions"}
 
 
 class TestEnrichedReadersKeepTheEvaluatedMonth:
@@ -1965,8 +2395,7 @@ class TestAllPositiveQueryGroups:
 
     # ---- the comparison report ---------------------------------------------
 
-    def test_generate_comparison_report_drops_them_on_both_sides(
-            self, spark, monkeypatch):
+    def test_compute_compare_metrics_drops_them_on_both_sides(self, spark):
         """The two sides must be read under the same rule, or the Δ compares
         different groups. Each side is checked against its own frame with the
         all-positive groups removed; the sides score differently (fine-grained
@@ -1975,21 +2404,13 @@ class TestAllPositiveQueryGroups:
             compute_all_metrics,
             compute_row_facts as count_row_facts,
         )
-        from recsys_tfb.pipelines.evaluation import nodes
+        from recsys_tfb.pipelines.evaluation.nodes import compute_compare_metrics
 
-        seen = {}
-
-        def capture(metrics_a, metrics_b, *_a, **_k):
-            seen["a"], seen["b"] = metrics_a, metrics_b
-            return {}
-
-        monkeypatch.setattr(nodes, "build_comparison_result", capture)
-        monkeypatch.setattr(nodes, "assemble_comparison_report",
-                            lambda *a, **k: "<html/>")
         on, off = self._parameters(True), self._parameters(False)
-        nodes.generate_comparison_report(
+        _fa, metrics_a, _fb, metrics_b = compute_compare_metrics(
             self._frame(spark, on), self._frame(spark, on, rows=self.COMPARED_ROWS),
-            {}, _no_segments(on), on)
+            _no_segments(on), on)
+        seen = {"a": metrics_a, "b": metrics_b}
 
         for side, rows in (("a", self.ROWS), ("b", self.COMPARED_ROWS)):
             fine_frame = self._frame(spark, off, self.FINE, rows=rows)
@@ -2035,15 +2456,26 @@ class TestAllPositiveQueryGroups:
         it like every other measurement metric: switched on, it equals the
         headline of the frame without the all-positive groups."""
         from recsys_tfb.evaluation.report_sections import overview
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compare_to_baseline,
+            resolve_display_ks,
+        )
 
         def headline(switch, without=()):
             params = self._parameters(switch)
             frame = self._frame(spark, params, without)
+            metrics = self._metrics(spark, switch, without=without)
+            # The overview's K columns are the cut's (#536), landed after
+            # the comparison with the baseline.
+            comparison = compare_to_baseline(
+                metrics, self._baseline(spark, switch, without=without),
+                params)
             s = overview.build(
                 {"evaluation_row_facts": _row_facts(frame, params),
-                 "evaluation_metrics":
-                     self._metrics(spark, switch, without=without),
-                 "prediction_quality_metrics": None},
+                 "evaluation_metrics": metrics,
+                 "prediction_quality_metrics": None,
+                 "evaluation_display_ks": resolve_display_ks(
+                     metrics, comparison, params)},
                 params)
             (i,) = [i for i, t in enumerate(s.table_titles)
                     if t.startswith("頭號指標")]
@@ -2053,6 +2485,45 @@ class TestAllPositiveQueryGroups:
         assert on == pytest.approx(headline(False, without=self.FINE))
         # The fixture can tell: c1's all-positive group moves the headline.
         assert on != pytest.approx(headline(False))
+
+    def test_the_groups_scored_are_the_metrics_own_count(self, spark):
+        """Switched on, the report prints how many groups the measurement
+        metrics scored — in the overview's and the completeness section's
+        count rows and in the metrics section's ledger, at each grain. Read
+        off the metrics' landed ledger since #536, it must be the number the
+        report printed before, holding a positive less all-positive, here by
+        hand: three groups hold a positive at either grain (all but c4); c1
+        is all-positive at the fine grain, c1 and c2 at the category one."""
+        from recsys_tfb.evaluation.report_sections import (
+            completeness,
+            overview,
+            ranking_metrics,
+        )
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compare_to_baseline,
+            resolve_display_ks,
+        )
+
+        params = self._parameters(True)
+        frame = self._frame(spark, params)
+        facts = _row_facts(frame, params)
+        metrics = self._metrics(spark, True)
+        results = {
+            "evaluation_row_facts": facts, "evaluation_metrics": metrics,
+            "prediction_quality_metrics": None,
+            "evaluation_display_ks": resolve_display_ks(
+                metrics, compare_to_baseline(
+                    metrics, self._baseline(spark, True), params), params),
+        }
+        label = "其中算進衡量指標的 query 數（有正例的 − 全正的）"
+        for section in (overview, completeness):
+            built = section.build(results, params)
+            (table,) = [t for t in built.tables if label in t.index]
+            assert table.loc[label].iloc[0] == 3 - 1, section.__name__
+        ledger = [b for b in ranking_metrics.build(results, params).bullets
+                  if b.startswith("組數帳")]
+        assert "算進衡量指標的有 2；" in ledger[0], ledger
+        assert "算進衡量指標的有 1；" in ledger[1], ledger
 
     # ---- the log -----------------------------------------------------------
 
@@ -2116,3 +2587,59 @@ class TestAllPositiveQueryGroups:
 
     def test_switched_on_does_not_warn(self, spark, caplog):
         assert self._warnings(caplog, spark, self._parameters(True)) == []
+
+    # ---- the landed accounts (#536) ----------------------------------------
+
+    def test_compute_compare_metrics_lands_each_side_s_ledger_and_accounts(
+            self, spark):
+        """The comparison report counts each side's ``population.macro_items``
+        at both grains, and its row facts carry the all-positive accounts:
+        they come out of ``metrics_spark.compute_row_facts``, the function
+        the run's own facts come out of (#536). By hand: fund_bond is never
+        positive, so the fine-grained macro holds the other two items; at the
+        category grain fund and exchange_fx both hold a positive. The
+        accounts are those of ``ROWS`` (switch off)."""
+        from recsys_tfb.evaluation.result_readers import (
+            ALL_POSITIVE_SHARE_KEY,
+            ALL_POSITIVE_WARNS_KEY,
+            MACRO_ITEMS_KEY,
+            N_WITH_POSITIVE_KEY,
+            POPULATION_KEY,
+        )
+        from recsys_tfb.pipelines.evaluation.nodes import compute_compare_metrics
+
+        params = self._parameters(False)
+        facts, metrics_a, _facts_b, metrics_b = compute_compare_metrics(
+            self._frame(spark, params),
+            self._frame(spark, params, rows=self.COMPARED_ROWS),
+            _no_segments(params), params)
+        seen = {"metrics_a": metrics_a, "metrics_b": metrics_b}
+        for side in ("metrics_a", "metrics_b"):
+            assert seen[side][POPULATION_KEY][MACRO_ITEMS_KEY] == [
+                "exchange_fx", "fund_stock"], side
+            assert seen[side]["category"][POPULATION_KEY][MACRO_ITEMS_KEY] == [
+                "exchange_fx", "fund"], side
+        for grain, share in ((facts, 1 / 3), (facts["category"], 2 / 3)):
+            assert grain[N_WITH_POSITIVE_KEY] == 3
+            assert grain[ALL_POSITIVE_SHARE_KEY] == pytest.approx(share)
+            assert grain[ALL_POSITIVE_WARNS_KEY] is True
+
+    @pytest.mark.parametrize("switch", [False, True])
+    def test_the_row_facts_land_each_grain_s_accounts(self, spark, switch):
+        """The report reads these instead of computing them (ADR-0031
+        principle 1). By hand from ``ROWS``: three groups hold a positive at
+        either grain (all but c4); one is all-positive at the fine grain (c1),
+        two at the category grain (c1, c2). Both shares are above 10%, so
+        each grain warns exactly when the switch is off."""
+        from recsys_tfb.evaluation.result_readers import (
+            ALL_POSITIVE_SHARE_KEY,
+            ALL_POSITIVE_WARNS_KEY,
+            N_WITH_POSITIVE_KEY,
+        )
+
+        params = self._parameters(switch)
+        facts = _row_facts(self._frame(spark, params), params)
+        for grain, share in ((facts, 1 / 3), (facts["category"], 2 / 3)):
+            assert grain[N_WITH_POSITIVE_KEY] == 3
+            assert grain[ALL_POSITIVE_SHARE_KEY] == pytest.approx(share)
+            assert grain[ALL_POSITIVE_WARNS_KEY] is (not switch)

@@ -1,7 +1,24 @@
-"""Tests for comparison.report — assemble_comparison_report (pure dict → HTML)."""
+"""Tests for comparison.report — assemble_comparison_report (pure dict → HTML).
+
+The report reads four landed results (#536): the coverage and this run's
+side's row facts, written here by hand in the shape their producers land, and
+the comparison and its K cut, which :func:`_inputs` computes off two
+hand-written metrics bundles with the real nodes (``compare_to_source``,
+``resolve_comparison_display_ks``) — the report draws what a run with those
+metrics would land, never a comparison built by hand.
+"""
 
 import pytest
 from recsys_tfb.evaluation.comparison.report import assemble_comparison_report
+
+
+def _ledger(all_k: int, macro_items, segment_columns=()) -> dict:
+    """A population ledger holding every key ``compute_all_metrics`` writes;
+    the group counts are made up like the rest of each fixture."""
+    return {"all_k": all_k, "macro_items": list(macro_items),
+            "n_scored_queries_with_positive": 10,
+            "n_scored_queries_without_positive": 0,
+            "segment_columns": list(segment_columns)}
 
 
 def _metrics(map_at_1: float = 0.5, recall_at_3: float = 0.7) -> dict:
@@ -16,7 +33,7 @@ def _metrics(map_at_1: float = 0.5, recall_at_3: float = 0.7) -> dict:
         },
         "macro_avg": {"by_item": {"recall@1": 0.6, "recall@3": 0.75,
                                   "map_attr@3": 0.45}},
-        "population": {"all_k": 2},
+        "population": _ledger(2, ["p1", "p2"]),
     }
 
 
@@ -36,11 +53,6 @@ def _cat_facts(n_categories: int) -> dict:
     return {"dataset_overview": {"totals": {"n_items": n_categories}}}
 
 
-def _comparison(a, b):
-    from recsys_tfb.evaluation.compare import build_comparison_result
-    return build_comparison_result(a, b, "Model", "ExtX")
-
-
 def _params(**extra_columns) -> dict:
     """``schema`` is here because the coverage text names the query unit from
     it (#428); every real run has one, validated at the CLI entry."""
@@ -58,6 +70,14 @@ def _params(**extra_columns) -> dict:
                 },
             },
             "item_categories": {"enabled": False},
+            "compare": {
+                "kind": "external_hive", "table": "other_project.predictions",
+                "label": "ExtX",
+                "columns": {"cust_id": "customer_id",
+                            "snap_date": "as_of_date",
+                            "prod_name": "item_code", "score": "pred_score"},
+                "prod_mapping": {"ext_p1": "p1", "ext_p2": "p2"},
+            },
         },
     }
 
@@ -75,29 +95,53 @@ def _coverage() -> dict:
     }
 
 
+def _landed(result: dict, params: dict) -> dict:
+    """``result`` as its producer lands it under ``params``: with the
+    fingerprint and the compare source every comparison artifact carries."""
+    from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
+        compare_source_identity,
+    )
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+        fingerprint,
+    )
+
+    return {**result, "config_fingerprint": fingerprint(params),
+            "compare_source": compare_source_identity(params)}
+
+
+def _inputs(m_a: dict, m_b: dict, params: dict, row_facts=None,
+            coverage=None) -> dict:
+    """What ``generate_comparison_report`` reads, by catalog name: the
+    coverage and A's row facts as landed (by hand), the comparison of
+    ``m_a`` with ``m_b`` and its K cut as the real nodes land them."""
+    from recsys_tfb.pipelines.evaluation.nodes import (
+        make_compare_to_source_node,
+        make_resolve_comparison_display_ks_node,
+    )
+
+    comparison = make_compare_to_source_node(compare_only=False)(
+        _landed(m_a, params), _landed(m_b, params), params)
+    return {
+        "compare_coverage": _landed(coverage or _coverage(), params),
+        "compare_row_facts_a": _landed(row_facts or _row_facts(), params),
+        "source_comparison": comparison,
+        "comparison_display_ks": make_resolve_comparison_display_ks_node(
+            compare_only=False)(comparison, params),
+    }
+
+
 def test_returns_html_string():
     m_a, m_b = _metrics(0.6), _metrics(0.4)
-    comp = _comparison(m_a, m_b)
-    out = assemble_comparison_report({
-        "metrics_a": m_a,
-        "metrics_b": m_b,
-        "comparison": comp,
-        "compare_coverage_partial": _coverage(),
-        "row_facts_a": _row_facts(),
-    }, _params())
+    out = assemble_comparison_report(
+        _inputs(m_a, m_b, _params()), _params())
     assert isinstance(out, str)
     assert "<html" in out.lower()
 
 
 def test_metadata_shows_one_date_as_configured():
     m_a, m_b = _metrics(0.6), _metrics(0.4)
-    out = assemble_comparison_report({
-        "metrics_a": m_a,
-        "metrics_b": m_b,
-        "comparison": _comparison(m_a, m_b),
-        "compare_coverage_partial": _coverage(),
-        "row_facts_a": _row_facts(),
-    }, _params())
+    out = assemble_comparison_report(
+        _inputs(m_a, m_b, _params()), _params())
     assert "<tr><th>Snap Date</th><td>2026-01-31</td></tr>" in out
 
 
@@ -106,40 +150,23 @@ def test_metadata_shows_several_dates_as_a_range():
     m_a, m_b = _metrics(0.6), _metrics(0.4)
     p = _params()
     p["evaluation"]["snap_date"] = ["2026-01-31", "2026-03-31", "2026-02-28"]
-    out = assemble_comparison_report({
-        "metrics_a": m_a,
-        "metrics_b": m_b,
-        "comparison": _comparison(m_a, m_b),
-        "compare_coverage_partial": _coverage(),
-        "row_facts_a": _row_facts(),
-    }, p)
+    out = assemble_comparison_report(
+        _inputs(m_a, m_b, p), p)
     assert ("<tr><th>Snap Date</th><td>2026-01-31 ~ 2026-03-31（3 個日期）"
             "</td></tr>") in out
 
 
 def test_labels_visible_in_html():
     m_a, m_b = _metrics(0.6), _metrics(0.4)
-    comp = _comparison(m_a, m_b)
-    out = assemble_comparison_report({
-        "metrics_a": m_a,
-        "metrics_b": m_b,
-        "comparison": comp,
-        "compare_coverage_partial": _coverage(),
-        "row_facts_a": _row_facts(),
-    }, _params())
+    out = assemble_comparison_report(
+        _inputs(m_a, m_b, _params()), _params())
     assert "Model" in out and "ExtX" in out
 
 
 def test_coverage_numbers_in_html():
     m_a, m_b = _metrics(), _metrics()
-    comp = _comparison(m_a, m_b)
-    out = assemble_comparison_report({
-        "metrics_a": m_a,
-        "metrics_b": m_b,
-        "comparison": comp,
-        "compare_coverage_partial": _coverage(),
-        "row_facts_a": _row_facts(),
-    }, _params())
+    out = assemble_comparison_report(
+        _inputs(m_a, m_b, _params()), _params())
     assert "4800" in out or "4,800" in out
     assert "10000" in out or "10,000" in out
     assert "fund_misc" in out  # dropped items listed
@@ -148,14 +175,8 @@ def test_coverage_numbers_in_html():
 def test_overall_metrics_have_delta():
     m_a = _metrics(map_at_1=0.6)
     m_b = _metrics(map_at_1=0.4)
-    comp = _comparison(m_a, m_b)
-    out = assemble_comparison_report({
-        "metrics_a": m_a,
-        "metrics_b": m_b,
-        "comparison": comp,
-        "compare_coverage_partial": _coverage(),
-        "row_facts_a": _row_facts(),
-    }, _params())
+    out = assemble_comparison_report(
+        _inputs(m_a, m_b, _params()), _params())
     # Δ for map@1 = 0.2; rendered somewhere
     assert "0.2" in out or "+0.2" in out
 
@@ -168,8 +189,7 @@ def test_per_item_row_missing_on_one_side_has_blank_delta():
 
     m_a, m_b = _metrics(), _metrics()
     del m_b["per_item"]["p2"]
-    comp = _comparison(m_a, m_b)
-    sec = _build_per_item_section({"metrics_a": m_a, "metrics_b": m_b, "comparison": comp, "row_facts_a": _row_facts()}, _params())
+    sec = _build_per_item_section(_inputs(m_a, m_b, _params()), _params())
     assert sec is not None
     recall = sec.tables[0]
     assert recall.loc["p2", "per-item recall@1 M"] == pytest.approx(0.5)
@@ -181,14 +201,15 @@ def test_per_item_row_missing_on_one_side_has_blank_delta():
 
 def test_macro_row_delta_blank_when_one_side_lacks_the_key():
     """bug 4 (ADR-0020), second copy of the same fallback: the Macro row's Δ
-    is computed in the table builder, not in build_comparison_result, and it
-    read a missing side as 0.0 too."""
+    used to be computed in the table builder, apart from the per-item one,
+    and it read a missing side as 0.0 too. Both come from the comparison
+    layer now (#536); the row must keep a blank Δ."""
     import pandas as pd
     from recsys_tfb.evaluation.comparison.report import _build_per_item_section
 
     def _macro_recall_at_1(m_b):
         m_a = _metrics()
-        sec = _build_per_item_section({"metrics_a": m_a, "metrics_b": m_b, "comparison": _comparison(m_a, m_b), "row_facts_a": _row_facts()}, _params())
+        sec = _build_per_item_section(_inputs(m_a, m_b, _params()), _params())
         recall = sec.tables[0]  # 2 items → only recall@1 survives the K clamp
         return recall.loc[recall.index[0]]
 
@@ -211,7 +232,7 @@ def test_empty_overall_side_blanks_delta_column_and_says_why():
 
     m_a, m_b = _metrics(0.6), _metrics(0.4)
     m_b["overall"] = {}
-    sec = _build_overall_section({"metrics_a": m_a, "comparison": _comparison(m_a, m_b), "row_facts_a": _row_facts()}, _params())
+    sec = _build_overall_section(_inputs(m_a, m_b, _params()), _params())
     tbl = sec.tables[0]
     assert len(tbl.index) > 0, "no rows — the Δ column check would pass vacuously"
     assert tbl["Δ"].isna().all()
@@ -223,21 +244,15 @@ def test_overall_title_has_no_empty_side_note_when_both_sides_have_metrics():
     from recsys_tfb.evaluation.comparison.report import _build_overall_section
 
     m_a, m_b = _metrics(0.6), _metrics(0.4)
-    sec = _build_overall_section({"metrics_a": m_a, "comparison": _comparison(m_a, m_b), "row_facts_a": _row_facts()}, _params())
+    sec = _build_overall_section(_inputs(m_a, m_b, _params()), _params())
     assert "無可比的 query" not in sec.table_titles[0]
     assert sec.tables[0].loc["map@1", "Δ"] == pytest.approx(0.2)
 
 
 def test_category_section_absent_when_disabled():
     m_a, m_b = _metrics(), _metrics()
-    comp = _comparison(m_a, m_b)
-    out = assemble_comparison_report({
-        "metrics_a": m_a,
-        "metrics_b": m_b,
-        "comparison": comp,
-        "compare_coverage_partial": _coverage(),
-        "row_facts_a": _row_facts(),
-    }, _params())
+    out = assemble_comparison_report(
+        _inputs(m_a, m_b, _params()), _params())
     assert "大類" not in out  # category section is disabled in _params()
 
 
@@ -248,20 +263,14 @@ def test_category_section_present_when_enabled_and_present():
         "per_item": {"fund": {"recall@1": 0.6, "recall@3": 0.7,
                               "map_attr@1": 0.4, "map_attr@3": 0.5}},
         "macro_avg": {"by_item": {"recall@1": 0.6}},
-        "population": {"all_k": 1},
+        "population": _ledger(1, ["fund"]),
     }
     m_a["category"] = cat_metrics
     m_b["category"] = cat_metrics
     p = _params()
     p["evaluation"]["item_categories"]["enabled"] = True
-    comp = _comparison(m_a, m_b)
-    out = assemble_comparison_report({
-        "metrics_a": m_a,
-        "metrics_b": m_b,
-        "comparison": comp,
-        "compare_coverage_partial": _coverage(),
-        "row_facts_a": _row_facts(category=_cat_facts(1)),
-    }, p)
+    out = assemble_comparison_report(
+        _inputs(m_a, m_b, p, row_facts=_row_facts(category=_cat_facts(1))), p)
     assert "大類" in out
 
 
@@ -275,20 +284,15 @@ def test_category_section_present_in_column_mode():
         "per_item": {"c01": {"recall@1": 0.6, "recall@3": 0.7,
                              "map_attr@1": 0.4, "map_attr@3": 0.5}},
         "macro_avg": {"by_item": {"recall@1": 0.6}},
-        "population": {"all_k": 1},
+        "population": _ledger(1, ["c01"]),
     }
     m_a["category"] = cat_metrics
     m_b["category"] = cat_metrics
     p = _params()
     p["evaluation"]["item_categories"] = {
         "enabled": True, "unmapped": "singleton", "column": "campaign_id"}
-    out = assemble_comparison_report({
-        "metrics_a": m_a,
-        "metrics_b": m_b,
-        "comparison": _comparison(m_a, m_b),
-        "compare_coverage_partial": _coverage(),
-        "row_facts_a": _row_facts(category=_cat_facts(1)),
-    }, p)
+    out = assemble_comparison_report(
+        _inputs(m_a, m_b, p, row_facts=_row_facts(category=_cat_facts(1))), p)
     assert "大類" in out and "c01" in out
 
 
@@ -309,7 +313,7 @@ def test_category_section_columns_clamp_to_category_count():
                      "map_attr@5": 0.3, "mean_pos": 2.0},
         },
         "macro_avg": {"by_item": {"recall@1": 0.4, "map_attr@3": 0.4}},
-        "population": {"all_k": 3},
+        "population": _ledger(3, ["ccard", "exchange", "fund"]),
     }
     m_a["category"] = cat_metrics
     m_b["category"] = cat_metrics
@@ -317,7 +321,7 @@ def test_category_section_columns_clamp_to_category_count():
     p["evaluation"]["item_categories"]["enabled"] = True
     p["evaluation"]["report"]["display"]["primary_map_k"] = [1, 3, 5, "all"]
     sec = _build_category_section(
-        {"metrics_a": m_a, "metrics_b": m_b, "row_facts_a": _row_facts(category=_cat_facts(3))}, p)
+        _inputs(m_a, m_b, p, row_facts=_row_facts(category=_cat_facts(3))), p)
     assert sec is not None
     tbl = sec.tables[sec.table_titles.index(
         next(t for t in sec.table_titles if t.startswith(
@@ -331,16 +335,23 @@ def test_category_section_columns_clamp_to_category_count():
 
 def test_per_item_section_discloses_macro_item_coverage():
     """bug 5 (ADR-0020): comparison report's per-item M/B/Δ titles state each
-    side's macro item coverage, same as the main report."""
+    side's macro item coverage, same as the main report — each side's own
+    ``population.macro_items`` (#536). With min_positives 2, B's p2 (one
+    positive) is out of B's macro: the list the node lands for B."""
     from recsys_tfb.evaluation.comparison.report import _build_per_item_section
 
     m_a, m_b = _metrics(), _metrics()
-    comp = _comparison(m_a, m_b)
-    sec = _build_per_item_section({"metrics_a": m_a, "metrics_b": m_b, "comparison": comp, "row_facts_a": _row_facts()}, _params())
+    for m, n_pos in ((m_a, {"p1": 5, "p2": 3}), (m_b, {"p1": 5, "p2": 1})):
+        for item, n in n_pos.items():
+            m["per_item"][item]["n_pos"] = n
+    m_b["population"]["macro_items"] = ["p1"]
+    p = _params()
+    p["evaluation"]["metric"] = {"min_positives": 2}
+    sec = _build_per_item_section(_inputs(m_a, m_b, p), p)
     assert sec is not None
     for title in sec.table_titles:
         assert "參與 macro 的 item 數" in title
-        assert "M 2／B 2／全部 2）" in title  # both sides: p1,p2 in per_item, n_items=2
+        assert "M 2／B 1／全部 2）" in title
 
 
 def test_category_section_discloses_macro_item_coverage():
@@ -352,14 +363,14 @@ def test_category_section_discloses_macro_item_coverage():
         "per_item": {"fund": {"recall@1": 0.6, "recall@3": 0.7,
                               "map_attr@1": 0.4, "map_attr@3": 0.5}},
         "macro_avg": {"by_item": {"recall@1": 0.6}},
-        "population": {"all_k": 1},
+        "population": _ledger(1, ["fund"]),
     }
     m_a["category"] = cat_metrics
     m_b["category"] = cat_metrics
     p = _params()
     p["evaluation"]["item_categories"]["enabled"] = True
     sec = _build_category_section(
-        {"metrics_a": m_a, "metrics_b": m_b, "row_facts_a": _row_facts(category=_cat_facts(1))}, p)
+        _inputs(m_a, m_b, p, row_facts=_row_facts(category=_cat_facts(1))), p)
     assert sec is not None
     per_item_titles = [t for t in sec.table_titles if t != "大類 overall"]
     assert per_item_titles
@@ -379,14 +390,14 @@ def test_category_overall_title_names_the_empty_side():
         "overall": {"map@1": 0.5},
         "per_item": {"fund": {"recall@1": 0.6, "map_attr@1": 0.4}},
         "macro_avg": {"by_item": {"recall@1": 0.6}},
-        "population": {"all_k": 1},
+        "population": _ledger(1, ["fund"]),
     }
     m_a["category"] = cat_a
     m_b["category"] = {**cat_a, "overall": {}}
     p = _params()
     p["evaluation"]["item_categories"]["enabled"] = True
     sec = _build_category_section(
-        {"metrics_a": m_a, "metrics_b": m_b, "row_facts_a": _row_facts(category=_cat_facts(1))}, p)
+        _inputs(m_a, m_b, p, row_facts=_row_facts(category=_cat_facts(1))), p)
     assert sec is not None, "section returned None — nothing was checked"
     title = next(t for t in sec.table_titles if t.startswith("大類 overall"))
     assert "Compare 側無可比的 query（全部零正例）" in title
@@ -417,14 +428,14 @@ def test_category_overall_table_drops_keys_with_k_above_category_count():
             for c in ("fund", "exchange", "ccard")
         },
         "macro_avg": {"by_item": {"recall@1": 0.5}},
-        "population": {"all_k": 3},
+        "population": _ledger(3, ["ccard", "exchange", "fund"]),
     }
     m_a["category"] = cat_metrics
     m_b["category"] = cat_metrics
     p = _params()
     p["evaluation"]["item_categories"]["enabled"] = True
     sec = _build_category_section(
-        {"metrics_a": m_a, "metrics_b": m_b, "row_facts_a": _row_facts(category=_cat_facts(3))}, p)
+        _inputs(m_a, m_b, p, row_facts=_row_facts(category=_cat_facts(3))), p)
     assert sec is not None
     overall = sec.tables[sec.table_titles.index("大類 overall")]
     idx = [str(i) for i in overall.index]
@@ -447,21 +458,15 @@ def test_overall_table_drops_keys_with_k_above_item_count():
         for m in (m_a, m_b):
             m["overall"] = dict(full)
             m["population"]["all_k"] = n_items
-        sec = _build_overall_section({"metrics_a": m_a, "comparison": _comparison(m_a, m_b), "row_facts_a": _row_facts(n_items)}, _params())
+        sec = _build_overall_section(_inputs(m_a, m_b, _params(), row_facts=_row_facts(n_items)), _params())
         idx = [str(i) for i in sec.tables[0].index]
         assert sorted(idx) == expected, n_items
 
 
 def test_glossary_section_present():
     m_a, m_b = _metrics(), _metrics()
-    comp = _comparison(m_a, m_b)
-    out = assemble_comparison_report({
-        "metrics_a": m_a,
-        "metrics_b": m_b,
-        "comparison": comp,
-        "compare_coverage_partial": _coverage(),
-        "row_facts_a": _row_facts(),
-    }, _params())
+    out = assemble_comparison_report(
+        _inputs(m_a, m_b, _params()), _params())
     assert "詞彙" in out or "Glossary" in out
 
 
@@ -472,22 +477,11 @@ def test_coverage_text_names_the_query_unit():
     ``occasion`` declared the count beside it is of occasions, so the text
     says so (#428)."""
     m_a, m_b = _metrics(), _metrics()
-    comp = _comparison(m_a, m_b)
-    plain = assemble_comparison_report({
-        "metrics_a": m_a,
-        "metrics_b": m_b,
-        "comparison": comp,
-        "compare_coverage_partial": _coverage(),
-        "row_facts_a": _row_facts(),
-    }, _params())
+    plain = assemble_comparison_report(
+        _inputs(m_a, m_b, _params()), _params())
     assert "「一個時間 × 一個 entity」的相異組合數" in plain
-    widened = assemble_comparison_report({
-        "metrics_a": m_a,
-        "metrics_b": m_b,
-        "comparison": comp,
-        "compare_coverage_partial": _coverage(),
-        "row_facts_a": _row_facts(),
-    }, _params(occasion="req_id"))
+    widened = assemble_comparison_report(
+        _inputs(m_a, m_b, _params(occasion="req_id")), _params(occasion="req_id"))
     assert "「一個時間 × 一個 entity × 一個場合（occasion）」的相異組合數" in widened
 
 
@@ -502,13 +496,8 @@ def test_coverage_text_is_unchanged_with_the_all_positive_switch_off(switch):
     p = _params()
     if switch is not None:
         p["evaluation"]["query_filter"] = {"drop_all_positive_groups": switch}
-    out = assemble_comparison_report({
-        "metrics_a": m_a,
-        "metrics_b": m_b,
-        "comparison": _comparison(m_a, m_b),
-        "compare_coverage_partial": _coverage(),
-        "row_facts_a": _row_facts(),
-    }, p)
+    out = assemble_comparison_report(
+        _inputs(m_a, m_b, p), p)
     assert _DENOMINATOR in out
     assert "全正" not in out
 
@@ -521,13 +510,8 @@ def test_coverage_text_discloses_the_all_positive_exclusion_when_on():
     m_a, m_b = _metrics(), _metrics()
     p = _params()
     p["evaluation"]["query_filter"] = {"drop_all_positive_groups": True}
-    out = assemble_comparison_report({
-        "metrics_a": m_a,
-        "metrics_b": m_b,
-        "comparison": _comparison(m_a, m_b),
-        "compare_coverage_partial": _coverage(),
-        "row_facts_a": _row_facts(),
-    }, p)
+    out = assemble_comparison_report(
+        _inputs(m_a, m_b, p), p)
     assert "兩側都排除了全正的 query group" in out
     assert "各自依自己的列判定" in out
     assert "候選列不對稱" in out and "一側排除、一側保留" in out
@@ -559,7 +543,7 @@ def test_overall_table_keeps_the_all_row_past_the_item_count():
     from recsys_tfb.evaluation.comparison.report import _build_overall_section
 
     m_a, m_b = _metrics_at_all_k(17, 0.5), _metrics_at_all_k(17, 0.3)
-    sec = _build_overall_section({"metrics_a": m_a, "comparison": _comparison(m_a, m_b), "row_facts_a": _row_facts()}, _params())
+    sec = _build_overall_section(_inputs(m_a, m_b, _params()), _params())
     tbl = sec.tables[0]
     assert tbl.loc["map@17", "Model"] == pytest.approx(0.5)
     assert tbl.loc["map@17", "Δ"] == pytest.approx(0.2)
@@ -575,7 +559,7 @@ def test_overall_table_filters_each_side_at_its_own_k():
     m_a["overall"]["precision@4"] = 0.1
     m_b["overall"]["precision@4"] = 0.2
     m_b["population"]["all_k"] = 4
-    sec = _build_overall_section({"metrics_a": m_a, "comparison": _comparison(m_a, m_b), "row_facts_a": _row_facts()}, _params())
+    sec = _build_overall_section(_inputs(m_a, m_b, _params()), _params())
     tbl = sec.tables[0]
     assert pd.isna(tbl.loc["precision@4", "Model"])
     assert tbl.loc["precision@4", "ExtX"] == pytest.approx(0.2)
@@ -589,7 +573,7 @@ def test_per_item_all_column_reads_each_side_at_its_own_k():
     from recsys_tfb.evaluation.comparison.report import _build_per_item_section
 
     m_a, m_b = _metrics_at_all_k(17, 0.5), _metrics_at_all_k(19, 0.3)
-    sec = _build_per_item_section({"metrics_a": m_a, "metrics_b": m_b, "comparison": _comparison(m_a, m_b), "row_facts_a": _row_facts()}, _params())
+    sec = _build_per_item_section(_inputs(m_a, m_b, _params()), _params())
     attr = sec.tables[1]
     assert attr.loc["p1", "map_attr@all M"] == pytest.approx(0.5)
     assert attr.loc["p1", "map_attr@all B"] == pytest.approx(0.3)
@@ -612,13 +596,8 @@ def test_per_item_tables_name_metrics_by_their_catalog_display_name(
         if (m.name, m.method) in renamed else m
         for m in mc.METRICS))
     m_a, m_b = _metrics(0.6), _metrics(0.4)
-    out = assemble_comparison_report({
-        "metrics_a": m_a,
-        "metrics_b": m_b,
-        "comparison": _comparison(m_a, m_b),
-        "compare_coverage_partial": _coverage(),
-        "row_facts_a": _row_facts(),
-    }, _params())
+    out = assemble_comparison_report(
+        _inputs(m_a, m_b, _params()), _params())
     assert "item-recall@k (M/B/Δ)" in out
     assert "item-recall@1 M" in out
     assert "attr!@k (M/B/Δ)" in out
@@ -629,12 +608,7 @@ def test_the_per_item_recall_is_told_apart_from_the_query_group_one():
     rows are the query-group one, the per-item table's columns say per-item,
     and no title says it twice."""
     m_a, m_b = _metrics(0.6), _metrics(0.4)
-    out = assemble_comparison_report({
-        "metrics_a": m_a,
-        "metrics_b": m_b,
-        "comparison": _comparison(m_a, m_b),
-        "compare_coverage_partial": _coverage(),
-        "row_facts_a": _row_facts(),
-    }, _params())
+    out = assemble_comparison_report(
+        _inputs(m_a, m_b, _params()), _params())
     assert "per-item recall@1 M" in out
     assert "per-item per-item" not in out

@@ -1,14 +1,15 @@
-"""Metric primitives on numpy arrays, plus the shared reader of ``evaluation.metric``.
+"""Metric primitives on numpy arrays, and the rule behind the all-positive accounts.
 
 This is a leaf module: its module-level imports are ``logging`` / ``typing``
-/ ``numpy``, plus ``utils.ranking`` for the within-query order. Do not add any
-other project import — ``evaluation.metrics_spark``,
-the report's sections and several ``scripts/`` import from here, so a
-project import risks a cycle. ``utils.ranking`` is the exception because it
-imports nothing from the project, so it cannot close one; it is where the tie
-rule lives, shared with the Spark ranking (#355). scikit-learn is imported
-only inside the two functions that need it (the binary-prediction average
-precision below), so importers of this module do not pay its load time.
+/ ``numpy``, plus ``utils.ranking`` for the within-query order and
+``evaluation.result_readers`` for the names the reports read. Do not add any
+other project import — ``evaluation.metrics_spark`` and several ``scripts/``
+import from here, so a project import risks a cycle. Those two are the
+exceptions because they import nothing from the project, so they cannot close
+one; ``utils.ranking`` is where the tie rule lives, shared with the Spark
+ranking (#355). scikit-learn is imported only inside the two functions that
+need it (the binary-prediction average precision below), so importers of this
+module do not pay its load time.
 
 What lives here:
 
@@ -18,25 +19,23 @@ What lives here:
 * The per-item macro primitives (``positive_row_contributions`` /
   ``macro_from_per_item`` / ``compute_macro_per_item_map``), shared by HPO
   and ``metrics_spark.macro_average``.
-* :func:`metric_params` — the only reader of ``evaluation.metric`` that the
-  metrics and report code uses (ADR-0020 design H), so the
-  fallback semantics cannot drift between copies. A15 in
-  ``core/consistency.py`` reads the same block separately, only to validate
-  value domains.
-* :func:`resolved_all_k` — the only reader of the K a metrics bundle's
-  ``"all"`` values are stored at, for the reports (#434).
-* :func:`drop_all_positive_groups` / :func:`n_groups_with_positive` /
-  :func:`all_positive_share` / :func:`all_positive_share_warns` /
-  :func:`format_share` — the only reader of
-  ``evaluation.query_filter.drop_all_positive_groups``, the one count of the
-  groups holding a positive, and the one rule for when the all-positive share
-  warns and how it prints, shared by the evaluation nodes (log) and the
-  report (#376).
+* :func:`n_groups_with_positive` / :func:`all_positive_share` /
+  :func:`all_positive_share_warns` / :func:`all_positive_accounts` — the one
+  count of the groups holding a positive and the one rule for when the
+  all-positive share warns (#376), computed where the row facts are counted
+  and landed with them (#536); the evaluation nodes' log and the report read
+  the landed values.
 * :func:`compute_pooled_average_precision` /
   :func:`compute_macro_per_item_average_precision` — the HPO objectives that
   score every val row as one binary prediction (#430). Not the report's
   ``pr_auc`` (``evaluation.prediction_quality``): exact where that one is
   binned, and never to be reconciled with it.
+
+The keys of the row facts and of a bundle's population ledger, the settings
+readers (:func:`metric_params`, :func:`resolved_all_k`,
+:func:`drop_all_positive_groups`) and how the share prints
+(``format_share``) live in ``evaluation.result_readers`` since #536; callers
+import them from there.
 
 The dict-shaped per-segment / per-item / overall metrics of the evaluation
 pipeline run on Spark — see ``recsys_tfb.evaluation.metrics_spark``.
@@ -48,89 +47,28 @@ from typing import Optional
 
 import numpy as np
 
+from recsys_tfb.evaluation.result_readers import (
+    ALL_POSITIVE_KEY,
+    ALL_POSITIVE_SHARE_KEY,
+    ALL_POSITIVE_WARN_SHARE,
+    ALL_POSITIVE_WARNS_KEY,
+    N_WITH_POSITIVE_KEY,
+    drop_all_positive_groups,
+)
 from recsys_tfb.utils.ranking import order_by_score_then_item
 
 logger = logging.getLogger(__name__)
-
-
-def metric_params(parameters: dict) -> dict:
-    """Read ``evaluation.metric`` → ``{"k", "weight_alpha", "min_positives", "shrinkage_k"}``.
-
-    The one reader of that block that the metrics / report code uses
-    (ADR-0020 design H): the Spark main metrics and the report call this
-    instead of keeping their own copy. A15
-    (``core.consistency.evaluation_metric_param_errors``) reads the same block
-    separately, only to validate value domains; it resolves no fallbacks.
-
-    Fallback: a missing ``evaluation`` / ``metric`` block, a missing key, or
-    an explicit ``None`` value all resolve to ``k=None`` (no truncation),
-    ``weight_alpha=0.0``, ``min_positives=0``, ``shrinkage_k=0.0`` — the plain
-    equal-weight, untruncated macro. Value domains are validated by A15
-    (``core.consistency.evaluation_metric_param_errors``), not here.
-
-    ``k`` and ``evaluation.k_values`` are independent axes. ``k_values`` is
-    the K grid of the ``@K`` families. ``k`` is the truncation depth of the
-    headline per-item macro family.
-    ``macro_from_per_item`` and ``metrics_spark.macro_average`` do not accept
-    ``k``; callers split it off.
-    """
-    m = ((parameters.get("evaluation", {}) or {}).get("metric", {}) or {})
-    return {
-        "k": None if m.get("k") is None else int(m["k"]),
-        "weight_alpha": float(m.get("weight_alpha", 0.0) or 0.0),
-        "min_positives": int(m.get("min_positives", 0) or 0),
-        "shrinkage_k": float(m.get("shrinkage_k", 0.0) or 0.0),
-    }
-
-
-#: Top-level key of the row facts (``metrics_spark.compute_row_facts``,
-#: ``row_facts.json``) and of their ``category`` grain (#376; in the metrics
-#: bundle before #535): how many of the query groups holding a
-#: positive are *all-positive* — every row carries the same positive label
-#: (with 0/1 labels: every row positive; the rule is
-#: ``metrics_spark._all_positive_group``), so every per-query ranking metric
-#: (``map@K`` / ``precision@K`` / ``recall@K``) comes out the same whatever
-#: the order (with 0/1 labels the untruncated AP is 1; ``map@K`` below the
-#: group's row count is K / rows, ``precision@K`` above it is rows / K). The
-#: per-item metrics (``map_attr@K`` / ``recall@K`` / ``mean_pos``) are not:
-#: with K below the row count, which rows reach the top K still decides which
-#: items get the credit. Always written, whether or not
-#: ``evaluation.query_filter.drop_all_positive_groups`` drops them, because the
-#: report reads only the written facts. ``n_excluded_queries`` keeps counting
-#: only the zero-positive groups.
-ALL_POSITIVE_KEY = "n_all_positive_queries"
-
-#: Row facts key (``metrics_spark.compute_row_facts``): the row count of the
-#: widest query group, what ``evaluation.k_values: "all"`` resolves to on a
-#: frame of event rows.
-WIDEST_GROUP_KEY = "widest_group_rows"
-
-#: With the switch off, the log and the report warn when the all-positive
-#: groups are more than this share of the groups holding a positive (#376).
-#: A constant, not a setting.
-ALL_POSITIVE_WARN_SHARE = 0.10
-
-
-def drop_all_positive_groups(parameters: dict) -> bool:
-    """Read ``evaluation.query_filter.drop_all_positive_groups``; off unless ``True``.
-
-    The one reader of the switch (#376). A missing block, a missing key or an
-    explicit ``None`` all mean off. Not under ``evaluation.metric``:
-    :func:`metric_params` returns four fixed keys and drops any other, so a
-    switch written there would silently do nothing. The value domain (a bool)
-    is validated by A49 in ``core/consistency.py``, not here.
-    """
-    qf = ((parameters.get("evaluation", {}) or {}).get("query_filter", {}) or {})
-    return bool(qf.get("drop_all_positive_groups", False) or False)
 
 
 def n_groups_with_positive(bundle: dict) -> Optional[int]:
     """Query groups holding a positive in one grain of the row facts:
     ``n_queries - n_excluded_queries``.
 
-    The one place that subtraction is written (#376):
-    :func:`all_positive_share`, the report's ledger, warning and query-count
-    rows, and the evaluation nodes' log all read it here. ``n_excluded_queries`` counts only the groups holding no positive,
+    The one place that subtraction is written (#376): :func:`all_positive_share`
+    and :func:`all_positive_accounts` read it here, and the row facts land it
+    (``result_readers.N_WITH_POSITIVE_KEY``, #536) for the report's ledger,
+    warning and query-count rows and the evaluation nodes' log.
+    ``n_excluded_queries`` counts only the groups holding no positive,
     switch on or off, so this is the groups holding a positive either way.
     ``None`` when either count is missing or ``None`` — a bundle older than
     the counts — rather than a guess at the missing one.
@@ -162,29 +100,13 @@ def all_positive_share(bundle: dict) -> Optional[float]:
     return n_all_positive / n_with_positive
 
 
-def format_share(share: float) -> str:
-    """An all-positive share as the log and the report print it: ``5.3%``.
-
-    One decimal, unless the share is above :data:`ALL_POSITIVE_WARN_SHARE` and
-    one decimal rounds it down to the threshold — 1004 of 10000 printed as
-    ``10.0%`` beside "above 10%". Then more decimals, at most four, until the
-    printed value is above the threshold too (``10.04%``). One function, so
-    the log and the report cannot print the same share two ways (#376).
-    """
-    for digits in range(1, 5):
-        text = f"{share:.{digits}%}"
-        if (not share > ALL_POSITIVE_WARN_SHARE
-                or float(text[:-1]) / 100 > ALL_POSITIVE_WARN_SHARE):
-            break
-    return text
-
-
 def all_positive_share_warns(bundle: dict, parameters: dict) -> bool:
     """Whether to warn about a bundle's all-positive share (#376).
 
     Only with the switch off — on, those groups are already dropped — and only
-    strictly above :data:`ALL_POSITIVE_WARN_SHARE`. The log and the report
-    each call this, per grain, so they cannot disagree on when to warn.
+    strictly above :data:`ALL_POSITIVE_WARN_SHARE`. Landed per grain by the
+    row facts (:func:`all_positive_accounts`), which the log and the report
+    both read, so they cannot disagree on when to warn.
     """
     if drop_all_positive_groups(parameters):
         return False
@@ -192,46 +114,24 @@ def all_positive_share_warns(bundle: dict, parameters: dict) -> bool:
     return share is not None and share > ALL_POSITIVE_WARN_SHARE
 
 
-#: Top-level key of a ``metrics_spark.compute_all_metrics`` bundle, at each
-#: grain: the population ledger (ADR-0031 decision 4), what this bundle's
-#: numbers were computed on, so two bundles joined by metric name can be told
-#: comparable or not. Holds :data:`ALL_K_KEY`; ``macro_items``, the items the
-#: per-item macro averaged over; and ``n_scored_queries_with_positive`` /
-#: ``n_scored_queries_without_positive``, the query groups the ranking metrics
-#: scored. The facts of the rows themselves are the row facts', not here
-#: (``metrics_spark.compute_row_facts``).
-POPULATION_KEY = "population"
+def all_positive_accounts(facts: dict, parameters: dict) -> dict:
+    """One grain's all-positive accounts, as the row facts land them beside
+    its counts (#536): :data:`N_WITH_POSITIVE_KEY`
+    (:func:`n_groups_with_positive`), :data:`ALL_POSITIVE_SHARE_KEY`
+    (:func:`all_positive_share`) and :data:`ALL_POSITIVE_WARNS_KEY`
+    (:func:`all_positive_share_warns`).
 
-#: Population ledger key: the K ``evaluation.k_values: "all"`` resolved to
-#: (``resolved_all_k``). Recorded on every bundle since #535; before, only
-#: when the ranked frame held one row per event, and as a top-level key.
-ALL_K_KEY = "all_k"
-
-
-def resolved_all_k(bundle: dict) -> int:
-    """The K a metrics bundle's ``"all"`` values are stored at (``map@{K}``).
-
-    The one reader of that number (#434). ``"all"`` has one producer
-    (``metrics_spark._resolve_all_k``) and several readers — the main report
-    and the comparison report, and training's test mAP until ADR-0028 took K
-    out of it. Each used to count the items itself; with ``event`` declared
-    the producer's K is the widest query group, not the item count, so every
-    lookup missed and nothing raised (a blank ``map@all`` cell, a test mAP
-    logged as 0.0).
-
-    Read off the bundle's own population ledger (:data:`POPULATION_KEY`).
-    The comparison report reads each side at its own; the main report reads
-    the baseline at the model's, which is the same K by construction — the
-    baseline re-scores the model's rows and counts off their row facts. The
-    keys stay the resolved number, not ``map@all``
-    (ADR-0031 decision 15, checked in #535): two sides whose ``"all"``
-    resolved to different K then never pair up under one name.
-
-    Raises ``KeyError`` on a bundle with no ledger, one written before #535:
-    the report refuses such a file first (``report_sections.shared
-    .refuse_pre_ledger``), with the node to re-run.
+    Computed where the counts are (``metrics_spark._grain_row_facts``), so
+    every set of row facts carries them — the model's and, under
+    ``--compare``, each side's — and the report and the log read them rather
+    than computing them again (ADR-0031 principle 1). Formatting the share is
+    the report's (``result_readers.format_share``).
     """
-    return int(bundle[POPULATION_KEY][ALL_K_KEY])
+    return {
+        N_WITH_POSITIVE_KEY: n_groups_with_positive(facts),
+        ALL_POSITIVE_SHARE_KEY: all_positive_share(facts),
+        ALL_POSITIVE_WARNS_KEY: all_positive_share_warns(facts, parameters),
+    }
 
 
 def compute_ap(y_true: np.ndarray, y_score: np.ndarray) -> Optional[float]:

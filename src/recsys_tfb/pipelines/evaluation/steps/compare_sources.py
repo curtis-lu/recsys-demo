@@ -12,6 +12,10 @@ Two source kinds:
 
 The full source dict is staged at ``parameters['evaluation']['compare']`` by
 the CLI dispatcher (``__main__.py``).
+
+Also which of its keys decide what B holds (``compare_source_identity``): every
+comparison artifact records them, so a redraw after the source changed is
+refused rather than printed under the new source's label (#536).
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from recsys_tfb.core.schema import get_schema
 from recsys_tfb.utils.item_columns import combine_item_columns
 from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
     PARTITION_FINGERPRINT_COLUMN,
+    normalised,
 )
 from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
     eval_snap_dates,
@@ -34,6 +39,59 @@ from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+#: What a ``model_version`` source reads when its ``source`` is left out, and
+#: what an ``external_hive`` source does with an item ``prod_mapping`` lacks
+#: when ``unmapped_policy`` is: the loader's defaults, and the identity's.
+DEFAULT_MODEL_VERSION_SOURCE = "enriched_eval_predictions"
+DEFAULT_UNMAPPED_POLICY = "fail"
+
+#: Where every comparison artifact records :func:`compare_source_identity`
+#: (ADR-0031 decision 5).
+COMPARE_SOURCE_KEY = "compare_source"
+
+
+def compare_source_identity(parameters: dict) -> dict:
+    """The keys of ``evaluation.compare`` that decide what side B holds, as
+    the loader reads them, :func:`config_fingerprint.normalised` — "which
+    source a comparison was computed against" (ADR-0031 decision 5).
+
+    Per kind: ``model_version`` reads ``model_version`` off the table
+    ``source`` names; ``external_hive`` reads ``table``, renames by
+    ``columns``, translates by ``prod_mapping`` and treats an unmapped item
+    by ``unmapped_policy``. ``kind`` itself always. ``label`` never: it only
+    names B in the report, so a relabelled source redraws without a re-run.
+    An unknown kind (the loader refuses it) keeps every key but ``label``.
+
+    Defaults are filled in before anything is compared — ``source`` →
+    :data:`DEFAULT_MODEL_VERSION_SOURCE`, ``unmapped_policy`` →
+    :data:`DEFAULT_UNMAPPED_POLICY`, ``prod_mapping`` → ``{}``, the values the
+    loader takes for them — so writing a default out, or deleting it, is the
+    same B and refuses no redraw. The fingerprint compares declared values
+    instead and errs towards raising (``config_fingerprint``); here the
+    loader's own constants are the defaults, so the two cannot drift apart.
+    """
+    src = ((parameters.get("evaluation") or {}).get("compare")) or {}
+    kind = src.get("kind")
+    if kind == "model_version":
+        identity = {
+            "kind": kind,
+            "model_version": src.get("model_version"),
+            "source": src.get("source", DEFAULT_MODEL_VERSION_SOURCE),
+        }
+    elif kind == "external_hive":
+        identity = {
+            "kind": kind,
+            "table": src.get("table"),
+            "columns": src.get("columns"),
+            "prod_mapping": src.get("prod_mapping") or {},
+            "unmapped_policy": src.get("unmapped_policy",
+                                       DEFAULT_UNMAPPED_POLICY),
+        }
+    else:
+        identity = {key: value for key, value in src.items() if key != "label"}
+    return normalised(identity)
 
 
 def load_compare_predictions(parameters: dict, spark: SparkSession) -> SparkDataFrame:
@@ -123,7 +181,7 @@ def _load_model_version(
     src: dict, parameters: dict, spark: SparkSession,
 ) -> SparkDataFrame:
     mv = src["model_version"]
-    source = src.get("source", "enriched_eval_predictions")
+    source = src.get("source", DEFAULT_MODEL_VERSION_SOURCE)
     if source not in MODEL_VERSION_SOURCES:
         raise DataConsistencyError(
             f"compare source={source!r} not in {MODEL_VERSION_SOURCES}"
@@ -176,7 +234,7 @@ def _load_external_hive(
     df = restrict_to_eval_snap_dates(df, parameters)
 
     mapping = src.get("prod_mapping", {}) or {}
-    policy = src.get("unmapped_policy", "fail")
+    policy = src.get("unmapped_policy", DEFAULT_UNMAPPED_POLICY)
     seen_prods = {r[0] for r in df.select(item_col).distinct().collect()}
     unmapped = seen_prods - set(mapping.keys())
     if unmapped:

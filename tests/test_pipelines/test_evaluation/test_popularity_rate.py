@@ -185,6 +185,13 @@ def test_post_training_rate_mode_scores_by_rate(spark):
     assert result["overall"]["map@3"] == pytest.approx(rate_map)
     # label_table's counts stay as they were: the count mode's numbers.
     assert result["purchase_counts"] == {"A": 3, "B": 1}
+    # #536: the window as the report prints it — sample_pool's months.
+    assert result["popularity_window"] == {
+        "lookback_months": 12, "score": "rate", "months_covered": 1,
+        "window_months_covered": {"2025-01-31": 1},
+        "full_window_months": 12, "per_month_divisor": 1,
+        "window_partial": True,
+    }
 
 
 def test_monitoring_with_score_rate_ranks_by_the_count(spark):
@@ -201,6 +208,9 @@ def test_monitoring_with_score_rate_ranks_by_the_count(spark):
     assert "popularity_rate" not in result
     count_map = ((1 + 2 / 3) / 2 + 1 / 2) / 2
     assert result["overall"]["map@3"] == pytest.approx(count_map)
+    # #536: the setting lands with the window, so the report can say why it
+    # ranked by the count without reading the settings itself.
+    assert result["popularity_window"]["score"] == "rate"
 
 
 def test_count_mode_writes_no_rate_keys(spark):
@@ -306,6 +316,30 @@ def test_several_dates_count_each_period_once_in_the_report_block(spark):
     assert block["positives"] == {"A": 3, "B": 1, "C": 0}
     assert block["window_months_covered"] == {
         "2025-01-31": 1, "2025-02-28": 1}
+    # #536: two windows of one covered month each: 2 window-months of 24.
+    assert result["popularity_window"] == {
+        "lookback_months": 12, "score": "rate", "months_covered": 1,
+        "window_months_covered": {"2025-01-31": 1, "2025-02-28": 1},
+        "full_window_months": 24, "per_month_divisor": 2,
+        "window_partial": True,
+    }
+
+
+def test_rate_mode_window_counts_the_months_of_sample_pool_s_table(spark):
+    """#536: in rate mode the report prints sample_pool's monthly positives,
+    so the landed coverage is that table's months. A 2024-07 positive with no
+    candidate row adds a month to label_table's ``monthly_counts`` only."""
+    params = _rate_params()
+    pool, labels = _history(spark)
+    orphan = spark.createDataFrame(pd.DataFrame(
+        [("2024-07-31", "nobody", "C", 1)],
+        columns=["snap_date", "cust_id", "prod_name", "label"]))
+    result = _rate_run(spark, params, pool, labels.unionByName(orphan),
+                       _plan(["2024-06-30"]))
+    assert {mo for per in result["monthly_counts"].values() for mo in per} == {
+        "2024-06", "2024-07"}
+    assert result["popularity_window"]["months_covered"] == 1
+    assert result["popularity_window"]["per_month_divisor"] == 1
 
 
 def test_count_mode_trend_counts_a_positive_sample_pool_lacks(spark):

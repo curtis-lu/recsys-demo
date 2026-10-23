@@ -341,8 +341,9 @@ def _compare_sides(spark, params, written_under):
 def test_compare_mode_resume_refuses_a_partition_written_under_other_settings(
     spark, two_column_entity_params, change,
 ):
-    """#374 review: ``--compare X --only-node generate_comparison_report`` runs
-    only load_compare_predictions, restrict_to_common and the report. After
+    """#374 review: ``--compare X --from-node compute_compare_metrics`` (where
+    another compare source sends the re-run, #536) pulls back only
+    load_compare_predictions and restrict_to_common. After
     the segment settings changed, or the run mode switched, the partition and
     that directory's JSON both still say the old settings; outside
     --compare-only, today's settings are the ones to read for, so
@@ -375,6 +376,33 @@ def test_compare_only_restriction_reads_a_post_training_partition_without_the_fl
     a_common, _b, _coverage = _call_wired(node, **_compare_sides(
         spark, {**post_training, "post_training": False}, post_training))
     assert a_common.count() == 2
+
+
+@pytest.mark.parametrize("compare_only", [False, True])
+def test_the_coverage_lands_what_it_was_computed_with(
+    spark, two_column_entity_params, compare_only,
+):
+    """#536: the coverage lands (``compare_coverage``), and the redraw reads
+    it back, so it records the settings and the compare source it was
+    computed under, in both compare modes."""
+    from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
+        compare_source_identity,
+    )
+    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+        fingerprint,
+    )
+
+    params = {**two_column_entity_params,
+              "evaluation": {"snap_date": "2026-01-31",
+                             "compare": {**_COMPARE_SOURCE, "label": "L"}}}
+    node = _wired_node("restrict_to_common", compare_only=compare_only,
+                       compare_source=_COMPARE_SOURCE)
+    _a, _b, coverage = _call_wired(node, **_compare_sides(spark, params, params))
+    assert node.outputs[2] == "compare_coverage"
+    assert coverage["n_query_group_common"] == 1
+    assert coverage["config_fingerprint"] == fingerprint(params)
+    assert coverage["compare_source"] == compare_source_identity(params) == {
+        "kind": "hive", "model_version": "v1"}
 
 
 def test_a_rewritten_hive_partition_is_refused_on_read(spark):

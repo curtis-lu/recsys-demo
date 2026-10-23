@@ -30,6 +30,7 @@ class TestEvaluationPipelineDefault:
             "enriched_eval_predictions",
             "evaluation_report_aggregates",
             "prediction_quality_metrics",
+            "baseline_comparison", "evaluation_display_ks",
         }
         assert pipeline.outputs == expected
 
@@ -41,6 +42,7 @@ class TestEvaluationPipelineDefault:
             "compute_prediction_quality",
             "compute_report_aggregates",
             "compute_metrics", "compute_baseline_metrics",
+            "compare_to_baseline", "resolve_display_ks",
             "generate_report",
         ]
 
@@ -51,8 +53,8 @@ class TestNoDiagnosisInAnyMode:
     monitoring-mode stub that stood in for those pages. No mode may wire any of
     it back, under any name: a node or dataset whose name says "diagnos".
 
-    The three ``--compare`` nodes are added outside the mode switch, so each
-    mode with a comparison is listed on its own.
+    The ``--compare`` chain is added outside the mode switch, so each mode
+    with a comparison is listed on its own.
     """
 
     MODES = {
@@ -90,15 +92,22 @@ class TestNoDiagnosisInAnyMode:
 
 
 class TestFingerprintRerunNodes:
-    """``COMPUTED_KEYS``' re-run nodes precede every fingerprinted producer.
+    """Where a changed computed key sends the re-run, in each mode, precedes
+    every fingerprinted producer of that mode.
 
     ``require_computed_with_current_config`` answers a changed computed key
-    with ``--from-node <that key's node>``. The advice is only right if that
-    node's forward slice contains every node that writes a JSON with a
-    ``config_fingerprint``; otherwise following it leaves a stale artifact
-    behind and the next report raises again (or, worse, one checked by nobody
-    stays stale). The producer lists are written out here, not derived from
-    the pipeline, so a new producer has to be added on purpose.
+    with ``--from-node <that key's node>`` — or, under ``--compare-only``,
+    which has none of those nodes, with the node its comparison readers pass
+    (``nodes.COMPARISON_RERUN_NODE``; ADR-0031 decision 15, first row: the
+    advice names only nodes of the run; ``test_generate_report.py::
+    test_compare_only_sends_a_changed_computed_setting_to_a_node_it_has``
+    checks the readers pass it). The advice is only right if that node
+    exists in the mode and its forward slice contains every node of the mode
+    that writes a JSON with a ``config_fingerprint``; otherwise following it
+    leaves a stale artifact behind and the next report raises again (or,
+    worse, one checked by nobody stays stale). The producer lists are written
+    out here, not derived from the pipeline, so a new producer has to be
+    added on purpose.
 
     ``prepare_eval_data`` is left out on purpose. Its
     ``evaluation_segment_columns`` is compared on ``PARTITION_CONTENT_KEYS``
@@ -111,44 +120,185 @@ class TestFingerprintRerunNodes:
         "compute_row_facts", "compute_metrics", "compute_baseline_metrics",
         "compute_prediction_quality",
         "compute_report_aggregates",
+        # #536: the comparison layer and the K cut land JSON with a
+        # fingerprint too; neither runs Spark.
+        "compare_to_baseline", "resolve_display_ks",
     }
-    MODES = TestNoDiagnosisInAnyMode.MODES
+    #: The comparison chain's producers (#536), in every mode with it.
+    COMPARISON_PRODUCERS = {
+        "restrict_to_common", "compute_compare_metrics", "compare_to_source",
+        "resolve_comparison_display_ks",
+    }
+    MODES = {**TestNoDiagnosisInAnyMode.MODES,
+             "--compare-only": TestNoDiagnosisInAnyMode.COMPARE_ONLY}
 
     def _producers(self, kwargs):
-        return set(self.FINGERPRINTED_PRODUCERS)
+        main = set() if kwargs.get("compare_only") else self.FINGERPRINTED_PRODUCERS
+        comparison = (self.COMPARISON_PRODUCERS
+                      if kwargs.get("compare_source") else set())
+        return main | comparison
 
-    def test_every_rerun_node_exists_in_every_mode(self):
+    @staticmethod
+    def _rerun_nodes(kwargs):
+        """The nodes a changed computed key is sent to in this mode."""
+        from recsys_tfb.pipelines.evaluation.nodes import COMPARISON_RERUN_NODE
         from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import COMPUTED_KEYS
 
+        if kwargs.get("compare_only"):
+            return [COMPARISON_RERUN_NODE]
+        return [node for _, node in COMPUTED_KEYS]
+
+    @staticmethod
+    def _memory_only(pipeline):
+        """What a slice must re-run to have: outputs with no catalog entry
+        (a stub catalog holding every entry, as a finished run leaves it)."""
+        from pathlib import Path
+
+        import yaml
+
+        catalog = set(yaml.safe_load(
+            (Path(__file__).parents[3] / "conf/base/catalog.yaml").read_text()))
+        return lambda name: name in catalog or name == "parameters"
+
+    def test_every_rerun_node_exists_in_every_mode(self):
         for label, kwargs in self.MODES.items():
             names = [n.name for n in create_pipeline(**kwargs).nodes]
-            missing = sorted({node for _, node in COMPUTED_KEYS} - set(names))
+            missing = sorted(set(self._rerun_nodes(kwargs)) - set(names))
             assert missing == [], f"[{label}] {missing}"
 
     def test_rerun_nodes_are_listed_in_topological_order(self):
-        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import COMPUTED_KEYS
-
         for label, kwargs in self.MODES.items():
             names = [n.name for n in create_pipeline(**kwargs).nodes]
-            positions = [names.index(node) for _, node in COMPUTED_KEYS]
-            assert positions == sorted(positions), (
-                f"[{label}] {[node for _, node in COMPUTED_KEYS]}"
-            )
+            rerun = self._rerun_nodes(kwargs)
+            positions = [names.index(node) for node in rerun]
+            assert positions == sorted(positions), f"[{label}] {rerun}"
 
     def test_latest_rerun_node_slice_covers_every_fingerprinted_producer(self):
-        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import COMPUTED_KEYS
-
         for label, kwargs in self.MODES.items():
             pipeline = create_pipeline(**kwargs)
             names = [n.name for n in pipeline.nodes]
-            latest = max({node for _, node in COMPUTED_KEYS}, key=names.index)
-            sliced, _plan = pipeline.slice_from(latest, lambda _name: True)
+            latest = max(set(self._rerun_nodes(kwargs)), key=names.index)
+            sliced, _plan = pipeline.slice_from(
+                latest, self._memory_only(pipeline))
             left_out = sorted(
                 self._producers(kwargs) - {n.name for n in sliced.nodes}
             )
             assert left_out == [], (
                 f"[{label}] --from-node {latest} does not re-run {left_out}"
             )
+
+
+class TestTheComparisonReRunsOnItsOwn:
+    """Another compare source sends every comparison reader to
+    ``nodes.COMPARISON_RERUN_NODE`` (ADR-0031 decision 5). In each mode with
+    a comparison that node must exist, its slice must re-run every
+    comparison producer — the coverage too, pulled back through the
+    memory-only frames — and under ``--compare`` no Spark node of the main
+    line: switching the compared source changes nothing the main report
+    draws."""
+
+    #: The main line's nodes that run Spark (the rest of it reads JSON).
+    MAIN_LINE_SPARK = {
+        "prepare_eval_data", "build_popularity_period_counts",
+        "compute_row_facts", "compute_metrics", "compute_baseline_metrics",
+        "compute_prediction_quality", "compute_report_aggregates",
+    }
+    MODES = {label: kwargs
+             for label, kwargs in TestFingerprintRerunNodes.MODES.items()
+             if kwargs.get("compare_source")}
+
+    def test_the_slice_holds_the_chain_and_no_spark_of_the_main_line(self):
+        from recsys_tfb.pipelines.evaluation.nodes import COMPARISON_RERUN_NODE
+
+        assert len(self.MODES) == 4, sorted(self.MODES)
+        for label, kwargs in self.MODES.items():
+            pipeline = create_pipeline(**kwargs)
+            sliced, _plan = pipeline.slice_from(
+                COMPARISON_RERUN_NODE,
+                TestFingerprintRerunNodes._memory_only(pipeline))
+            ran = {n.name for n in sliced.nodes}
+            assert TestFingerprintRerunNodes.COMPARISON_PRODUCERS <= ran, (
+                label, sorted(ran))
+            assert "generate_comparison_report" in ran, label
+            assert ran & self.MAIN_LINE_SPARK == set(), (label, sorted(ran))
+
+
+class TestTheKCutComesAfterTheComparison:
+    """ADR-0031 decision 16: the comparison lands every K and the K cut runs
+    after it, so a change of display K re-runs the cut and the report only
+    (``--from-node resolve_display_ks``) and never the comparison. Checked on
+    the graph — the comparison is an ancestor of the cut, and both of the
+    report — not on one topological order, which could put them right by
+    chance. Every mode with the main report, ``--compare`` ones included."""
+
+    MODES = TestNoDiagnosisInAnyMode.MODES
+
+    @staticmethod
+    def _ancestors(pipeline, name):
+        producer = {out: n for n in pipeline.nodes for out in n.outputs}
+        node = next(n for n in pipeline.nodes if n.name == name)
+        seen, stack = set(), [node]
+        while stack:
+            for dataset in stack.pop().inputs:
+                parent = producer.get(dataset)
+                if parent is not None and parent.name not in seen:
+                    seen.add(parent.name)
+                    stack.append(parent)
+        return seen
+
+    def test_the_cut_reads_the_comparison_and_the_report_reads_both(self):
+        for label, kwargs in self.MODES.items():
+            pipeline = create_pipeline(**kwargs)
+            cut = self._ancestors(pipeline, "resolve_display_ks")
+            report = self._ancestors(pipeline, "generate_report")
+            assert "compare_to_baseline" in cut, label
+            assert {"compare_to_baseline", "resolve_display_ks"} <= report, label
+
+    def test_the_comparison_report_s_cut_comes_after_its_comparison(self):
+        """The same order on the comparison side (#536), in both compare
+        modes: the cut reads the comparison, the report reads both, and the
+        comparison reads the metrics the Spark node landed."""
+        modes = {label: kwargs for label, kwargs in {
+            **self.MODES,
+            "--compare-only": TestNoDiagnosisInAnyMode.COMPARE_ONLY}.items()
+            if kwargs.get("compare_source")}
+        assert len(modes) == 4, sorted(modes)
+        for label, kwargs in modes.items():
+            pipeline = create_pipeline(**kwargs)
+            assert "compute_compare_metrics" in self._ancestors(
+                pipeline, "compare_to_source"), label
+            assert "compare_to_source" in self._ancestors(
+                pipeline, "resolve_comparison_display_ks"), label
+            assert {"restrict_to_common", "compute_compare_metrics",
+                    "compare_to_source", "resolve_comparison_display_ks"} \
+                <= self._ancestors(pipeline, "generate_comparison_report"), label
+
+    def test_both_land_next_to_the_metrics(self):
+        """Without an entry the catalog makes each a MemoryDataset: nothing
+        lands, and ``--only-node generate_report`` re-runs both."""
+        from pathlib import Path
+
+        import yaml
+
+        catalog = yaml.safe_load(
+            (Path(__file__).parents[3] / "conf/base/catalog.yaml").read_text())
+        for entry, file in (("baseline_comparison", "baseline_comparison"),
+                            ("evaluation_display_ks", "display_ks"),
+                            # The comparison side (#536): what the redraw
+                            # reads, and what the cut and the report read.
+                            ("compare_coverage", "compare_coverage"),
+                            ("compare_row_facts_a", "compare_row_facts_a"),
+                            ("compare_metrics_a", "compare_metrics_a"),
+                            ("compare_row_facts_b", "compare_row_facts_b"),
+                            ("compare_metrics_b", "compare_metrics_b"),
+                            ("source_comparison", "source_comparison"),
+                            ("comparison_display_ks",
+                             "comparison_display_ks")):
+            assert catalog[entry] == {
+                "type": "JSONDataset",
+                "filepath": "data/evaluation/${model_version}/${snap_date}/"
+                            f"{file}.json",
+            }, entry
 
 
 class TestEvaluationPipelinePostTraining:
@@ -162,6 +312,7 @@ class TestEvaluationPipelinePostTraining:
             "compute_prediction_quality",
             "compute_report_aggregates",
             "compute_metrics", "compute_baseline_metrics",
+            "compare_to_baseline", "resolve_display_ks",
             "generate_report",
         ]
 
@@ -177,8 +328,8 @@ class TestEvaluationPipelinePostTraining:
 
 
 class TestEvaluationPipelineCompareMode:
-    """compare_source set (monitoring) — 3 compare nodes appended, both reports
-    produced."""
+    """compare_source set (monitoring) — the comparison chain appended, both
+    reports produced."""
 
     def test_full_node_name_order(self):
         pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})
@@ -192,8 +343,13 @@ class TestEvaluationPipelineCompareMode:
             "restrict_to_common",
             "compute_metrics",
             "compute_baseline_metrics",
-            "generate_comparison_report",
+            "compute_compare_metrics",
+            "compare_to_baseline",
+            "compare_to_source",
+            "resolve_display_ks",
+            "resolve_comparison_display_ks",
             "generate_report",
+            "generate_comparison_report",
         ]
 
     def test_pipeline_outputs_include_comparison_report(self):
@@ -223,6 +379,9 @@ class TestEvaluationPipelineCompareOnly:
             "validate_enriched_eval_predictions_present",
             "load_compare_predictions",
             "restrict_to_common",
+            "compute_compare_metrics",
+            "compare_to_source",
+            "resolve_comparison_display_ks",
             "generate_comparison_report",
         ]
 
@@ -269,6 +428,17 @@ class TestSegmentColumnsWiring:
                 "evaluation_item_categories"], kwargs
             assert other not in pipeline.inputs, kwargs
 
+    @staticmethod
+    def _bound_to(node, dataset):
+        """The parameter ``dataset`` reaches: by name when the node is wired
+        by name, else by position."""
+        if node.keyword_inputs is not None:
+            (param,) = [p for p, d in node.keyword_inputs.items()
+                        if d == dataset]
+            return param
+        params = list(inspect.signature(node.func).parameters)
+        return params[node.inputs.index(dataset)]
+
     def test_every_segmenting_node_reads_the_list_at_the_right_position(self):
         cases = [
             (kwargs, name)
@@ -276,16 +446,15 @@ class TestSegmentColumnsWiring:
             for name in ("compute_row_facts", "compute_metrics",
                          "compute_baseline_metrics")
         ] + [
-            ({"compare_source": self._COMPARE}, "generate_comparison_report"),
+            ({"compare_source": self._COMPARE}, "compute_compare_metrics"),
             ({"compare_source": self._COMPARE, "compare_only": True},
-             "generate_comparison_report"),
+             "compute_compare_metrics"),
         ]
         for kwargs, name in cases:
             node = self._node(create_pipeline(**kwargs), name)
-            params = list(inspect.signature(node.func).parameters)
             assert "evaluation_segment_columns" in node.inputs, (kwargs, name)
-            assert node.inputs.index("evaluation_segment_columns") == \
-                params.index("segment_columns"), (kwargs, name, node.inputs)
+            assert self._bound_to(node, "evaluation_segment_columns") == \
+                "segment_columns", (kwargs, name, node.inputs)
 
     def test_every_category_reader_reads_the_table_at_the_right_position(self):
         """#379: the category table lands next to the segment list and is read
@@ -299,16 +468,15 @@ class TestSegmentColumnsWiring:
             for name in ("compute_row_facts", "compute_metrics",
                          "compute_baseline_metrics")
         ] + [
-            ({"compare_source": self._COMPARE}, "generate_comparison_report"),
+            ({"compare_source": self._COMPARE}, "compute_compare_metrics"),
             ({"compare_source": self._COMPARE, "compare_only": True},
-             "generate_comparison_report"),
+             "compute_compare_metrics"),
         ]
         for kwargs, name in cases:
             node = self._node(create_pipeline(**kwargs), name)
-            params = list(inspect.signature(node.func).parameters)
             assert "evaluation_item_categories" in node.inputs, (kwargs, name)
-            assert node.inputs.index("evaluation_item_categories") == \
-                params.index("item_categories"), (kwargs, name, node.inputs)
+            assert self._bound_to(node, "evaluation_item_categories") == \
+                "item_categories", (kwargs, name, node.inputs)
 
     def test_every_row_facts_reader_reads_them_at_the_right_position(self):
         """#535: the model's metrics and the baseline's both count off the
@@ -535,77 +703,50 @@ class TestGenerateReportNodeWiring:
             wired = set(node.keyword_inputs) - {"parameters"}
             assert wired == read, (kwargs, sorted(wired), sorted(read))
 
-class TestGenerateComparisonReportNodeWiring:
-    """Same positional-binding hazard as TestGenerateReportNodeWiring, but a
-    strictly more silent failure mode.
+class TestTheComparisonChainIsWiredByName:
+    """The comparison chain's nodes that read several results are wired by
+    name (ADR-0030 decision 8), in both compare modes (one copy of the
+    chain, ``pipeline._comparison_nodes``).
 
-    generate_comparison_report's first two parameters — eval_predictions_common
-    and compare_predictions_common — are *both* SparkDataFrame. Swapping them
-    in the Node's ``inputs=[...]`` raises nothing anywhere: the report is still
-    produced, still has every section, and every number in it is simply the
-    other model's. generate_report's failure at least drops a section; this one
-    silently relabels Model as Compare and vice versa.
-
-    The wiring is duplicated at two call sites in pipeline.py (the
-    ``compare_only=True`` short pipeline and the ``compare_source`` full
-    pipeline), so both are checked — a fix applied to only one is the likely
-    drift.
-
-    Matching rule: the first two catalog keys equal their parameter names
-    verbatim; the third carries a "compare_" prefix the parameter drops
-    (compare_coverage_partial -> coverage_partial). So we accept a key that
-    either equals its parameter or equals it after stripping a leading
-    "compare_". Note this still catches the dangerous swap: putting
-    compare_predictions_common at position 0 matches neither
-    eval_predictions_common nor (stripped) predictions_common.
-    """
+    ``compute_compare_metrics`` takes two Spark frames: by position, swapping
+    them raised nothing — every number in the report was the other side's,
+    under the other side's label. ``generate_comparison_report`` keys each
+    result by its catalog name, so each parameter is named after the entry
+    it is fed, and none has a default (an unwired entry would arrive as the
+    default instead of failing where the Node is built)."""
 
     @staticmethod
-    def _comparison_nodes():
-        """The generate_comparison_report Node from every pipeline that wires it."""
-        pipelines = {
-            "compare_only": create_pipeline(compare_only=True),
-            "compare_source": create_pipeline(
-                compare_source={"kind": "hive", "model_version": "v1"}
-            ),
-        }
+    def _nodes(name):
         nodes = {
-            label: next(
-                n for n in p.nodes if n.name == "generate_comparison_report"
-            )
-            for label, p in pipelines.items()
+            label: next(n for n in create_pipeline(**kwargs).nodes
+                        if n.name == name)
+            for label, kwargs in (
+                ("--compare", {"compare_source": {"kind": "hive",
+                                                  "model_version": "v1"}}),
+                ("--compare-only", TestNoDiagnosisInAnyMode.COMPARE_ONLY))
         }
         assert len(nodes) == 2, "both wire points must be covered"
         return nodes
 
-    def test_inputs_positionally_match_signature(self):
-        for label, node in self._comparison_nodes().items():
-            param_names = list(inspect.signature(node.func).parameters)
+    def test_the_two_frames_reach_their_own_parameters(self):
+        for label, node in self._nodes("compute_compare_metrics").items():
+            assert node.keyword_inputs is not None, label
+            assert node.keyword_inputs["eval_predictions_common"] \
+                == "eval_predictions_common", label
+            assert node.keyword_inputs["compare_predictions_common"] \
+                == "compare_predictions_common", label
 
-            assert len(node.inputs) == len(param_names), (
-                f"[{label}] generate_comparison_report takes "
-                f"{len(param_names)} params {param_names} but the Node wires "
-                f"{len(node.inputs)} inputs {node.inputs} — positional "
-                f"binding would misalign."
-            )
-            for position, (catalog_key, param_name) in enumerate(
-                zip(node.inputs, param_names)
-            ):
-                stripped = catalog_key
-                for prefix in ("compare_", "evaluation_"):
-                    if stripped.startswith(prefix):
-                        stripped = stripped[len(prefix):]
-                assert catalog_key == param_name or stripped == param_name, (
-                    f"[{label}] position {position}: catalog key "
-                    f"{catalog_key!r} would positionally bind to parameter "
-                    f"{param_name!r} — inputs list and function signature are "
-                    f"out of sync. Note both prediction params are "
-                    f"SparkDataFrame, so a swap raises nothing at runtime and "
-                    f"only flips Model/Compare in the report."
-                )
+    def test_every_report_parameter_is_fed_the_entry_it_is_named_after(self):
+        for label, node in self._nodes("generate_comparison_report").items():
+            params = inspect.signature(node.func).parameters
+            assert node.keyword_inputs == {name: name for name in params}, (
+                label, node.keyword_inputs)
+            assert not [name for name, p in params.items()
+                        if p.default is not inspect.Parameter.empty], label
 
-    def test_two_prediction_inputs_are_not_swapped(self):
-        """Explicit, readable pin of the exact swap that raises nothing."""
-        for label, node in self._comparison_nodes().items():
-            assert node.inputs[0] == "eval_predictions_common", label
-            assert node.inputs[1] == "compare_predictions_common", label
+    def test_the_wired_results_are_the_ones_the_report_reads(self):
+        from recsys_tfb.evaluation.comparison.report import READS
+
+        for label, node in self._nodes("generate_comparison_report").items():
+            wired = set(node.keyword_inputs) - {"parameters"}
+            assert wired == set(READS), (label, sorted(wired))

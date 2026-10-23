@@ -283,6 +283,42 @@ prediction_quality_metrics:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/prediction_quality.json
 
+baseline_comparison:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/baseline_comparison.json
+
+evaluation_display_ks:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/display_ks.json
+
+compare_coverage:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/compare_coverage.json
+
+compare_row_facts_a:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/compare_row_facts_a.json
+
+compare_metrics_a:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/compare_metrics_a.json
+
+compare_row_facts_b:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/compare_row_facts_b.json
+
+compare_metrics_b:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/compare_metrics_b.json
+
+source_comparison:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/source_comparison.json
+
+comparison_display_ks:
+  type: JSONDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/comparison_display_ks.json
+
 evaluation_report_aggregates:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/report_aggregates.json

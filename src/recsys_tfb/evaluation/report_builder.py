@@ -7,16 +7,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 
-from recsys_tfb.evaluation.metrics import (
-    ALL_POSITIVE_KEY,
-    ALL_POSITIVE_WARN_SHARE,
-    all_positive_share,
-    all_positive_share_warns,
-    drop_all_positive_groups,
-    format_share,
-    n_groups_with_positive,
-)
 from recsys_tfb.evaluation.report import generate_html_report
+from recsys_tfb.evaluation.result_readers import format_share
 from recsys_tfb.evaluation.report_sections import (
     completeness,
     core_concepts,
@@ -33,9 +25,18 @@ from recsys_tfb.evaluation.report_sections.shared import (
     ALL_POSITIVE_WHY,
     eval_dates_display,
     grain_bundles,
+    refuse_pre_landed_reads,
     refuse_pre_ledger,
     refuse_pre_rename_per_item,
     results_read_by,
+)
+from recsys_tfb.evaluation.result_readers import (
+    ALL_POSITIVE_KEY,
+    ALL_POSITIVE_SHARE_KEY,
+    ALL_POSITIVE_WARN_SHARE,
+    ALL_POSITIVE_WARNS_KEY,
+    N_WITH_POSITIVE_KEY,
+    drop_all_positive_groups,
 )
 
 #: The main report's sections, in page order. Moving a section is moving
@@ -58,24 +59,25 @@ SECTIONS = (
 _METRICS_BUNDLES = ("evaluation_metrics", "baseline_metrics")
 
 
-def _all_positive_warnings(row_facts: dict, parameters: dict) -> dict[str, str]:
-    """報表頭 metadata 的警告列：每個 ``all_positive_share_warns`` 為真的粒度一列。
+def _all_positive_warnings(row_facts: dict) -> dict[str, str]:
+    """報表頭 metadata 的警告列：每個落地的 ``all_positive_warns`` 為真的粒度一列。
 
-    門檻與開關只經 ``metrics.all_positive_share_warns`` 判斷（log 用同一個），這裡
-    不重算。放在 metadata：每個讀者都會經過，而且算進了這些組的 mAP 就在它下面
-    第一段。只陳述數字與設定鍵，不評這個比例高不高。
+    警不警告是列的事實每個粒度落地的帳（``metrics.all_positive_accounts``，
+    #536；log 讀同一份），這裡只讀、不重算。放在 metadata：每個讀者都會經過，
+    而且算進了這些組的 mAP 就在它下面第一段。只陳述數字與設定鍵，不評這個比例
+    高不高。
     """
     out = {}
     for grain, bundle in grain_bundles(row_facts):
-        if not all_positive_share_warns(bundle, parameters):
+        if not bundle[ALL_POSITIVE_WARNS_KEY]:
             continue
-        # all_positive_share_warns is true only when the share is known, so
+        # The flag is true only when the share is known, so the share and
         # both counts are there.
-        n_pos = n_groups_with_positive(bundle)
         out[f"⚠ 全正 query group（{grain}）"] = (
             "有正例的 query group 裡，全正的佔 "
-            f"{format_share(all_positive_share(bundle))}"
-            f"（{bundle[ALL_POSITIVE_KEY]:,}／{n_pos:,} 組），超過 "
+            f"{format_share(bundle[ALL_POSITIVE_SHARE_KEY])}"
+            f"（{bundle[ALL_POSITIVE_KEY]:,}／"
+            f"{bundle[N_WITH_POSITIVE_KEY]:,} 組），超過 "
             f"{ALL_POSITIVE_WARN_SHARE:.0%}。這些組{ALL_POSITIVE_WHY}，照樣算進"
             "衡量指標，模型與熱門度 baseline 在這些組的組層級指標也相同。要排除"
             f"它們，設 {ALL_POSITIVE_SWITCH}: true；組數帳在「衡量指標」段。"
@@ -94,7 +96,9 @@ def assemble_report(results: Mapping[str, dict], parameters: dict) -> str:
     switch is off or it has nothing to show. Before any section, a metrics
     bundle written before the per-item ``recall@K`` rename
     (``refuse_pre_rename_per_item``) or before the population ledger
-    (``refuse_pre_ledger``) is refused.
+    (``refuse_pre_ledger``) is refused, and so is a result landed before it
+    carried what the report reads instead of computing
+    (``refuse_pre_landed_reads``, #536).
 
     spine（目的驅動、由粗到細、克制）：概覽 → 核心概念 → 基本統計 →
     衡量指標 → 預測品質（開了才有）→ per-item 細部拆解 → baseline →
@@ -103,6 +107,7 @@ def assemble_report(results: Mapping[str, dict], parameters: dict) -> str:
     for name in _METRICS_BUNDLES:
         refuse_pre_rename_per_item(name, results.get(name))
         refuse_pre_ledger(name, results.get(name))
+    refuse_pre_landed_reads(results)
     sections = []
     for section in SECTIONS:
         built = section.build(
@@ -132,7 +137,7 @@ def assemble_report(results: Mapping[str, dict], parameters: dict) -> str:
     else:
         metadata["Excluded Queries"] = row_facts.get("n_excluded_queries")
     # The all-positive share warning, right under the counts it is about.
-    metadata.update(_all_positive_warnings(row_facts, parameters))
+    metadata.update(_all_positive_warnings(row_facts))
     return generate_html_report(
         sections, title="Model Evaluation Report", metadata=metadata
     )

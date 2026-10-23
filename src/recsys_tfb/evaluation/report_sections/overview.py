@@ -9,21 +9,26 @@ import pandas as pd
 
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.metric_catalog import ITEM, QUERY_GROUP, entry
-from recsys_tfb.evaluation.metrics import metric_params, resolved_all_k
 from recsys_tfb.evaluation.report import ReportSection
 from recsys_tfb.evaluation.report_sections.shared import (
+    DISPLAY_KS,
     headline_column,
     k_to_lookup,
+    landed_value,
     prediction_quality_shown,
     query_count_rows,
     read_dataset_overview,
-    report_cfg,
-    resolve_display_k,
+)
+from recsys_tfb.evaluation.result_readers import (
+    DISPLAY_PRIMARY_MAP_K,
+    metric_params,
+    resolved_all_k,
 )
 
-#: The results this section reads, by catalog name (ADR-0031 principle 1).
+#: The results this section reads, by catalog name (ADR-0031 principle 1);
+#: the K of its overall card off the cut (#536).
 READS = ("evaluation_row_facts", "evaluation_metrics",
-         "prediction_quality_metrics")
+         "prediction_quality_metrics", DISPLAY_KS)
 
 
 def _headline_key(parameters: dict, all_k: int) -> str:
@@ -57,9 +62,12 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
     pq_shown = prediction_quality_shown(
         results["prediction_quality_metrics"], parameters)
     overall = metrics.get("overall", {})
-    disp = report_cfg(parameters).get("display", {}) or {}
+    display_ks = results[DISPLAY_KS]
+    # "all" is looked up at the K the metrics stored it at; which K columns
+    # the card shows is the cut's (evaluation_display_ks).
     all_k = resolved_all_k(metrics)
-    ks = resolve_display_k(disp.get("primary_map_k", [1, 3, 5, "all"]), all_k)
+    ks = landed_value(display_ks, DISPLAY_KS, "evaluation_metrics",
+                      DISPLAY_PRIMARY_MAP_K)
 
     tables: list[pd.DataFrame] = []
     titles: list[str] = []
@@ -101,7 +109,7 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
     # drop_all_positive_groups on, the rows say which groups each count is
     # (#376, query_count_rows).
     scale = {
-        **query_count_rows(facts, parameters),
+        **query_count_rows(facts, metrics, parameters),
         "正例列數 n_positives": totals.get("n_positives"),
         "母體正樣本率（÷全體候選列）": totals.get("positive_rate"),
         f"每 {entity_str} 平均正例數 avg_positives_per_entity":
@@ -143,7 +151,7 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
             "這份報表幫你判斷這個模型在 per-query 排序上表現如何、好壞落在哪些 "
             "item／segment、以及相對 popularity baseline 的位置。以下攤開多個粒度"
             "與角度，判斷留給你。頭號指標為 macro per-item mAP（item 等權；"
-            f"{headline_column(parameters, all_k, '衡量指標段')}）；overall mAP "
+            f"{headline_column(parameters, display_ks, '衡量指標段')}）；overall mAP "
             "為 per-query 等權，是另一種加權，並列呈現、不比高下。"
         ),
         tables=tables,
