@@ -28,13 +28,16 @@ TITLE = "資料統計"
 TITLE_EN = "Data statistics"
 QUESTION = "資料多大？正例怎麼分布？"
 
-#: The five columns every 正例組成 table has (decision 16 item 6).
+#: The columns every 正例組成 table has: decision 16 item 6's five, and the
+#: slice's entity count (ADR-0031 decision 1, the first row of the acceptance
+#: table: a column added in this section's file only).
 _COMPOSITION_COLUMNS = (
     Column("候選列", "count"),
     Column("候選列佔比", "ratio"),
     Column("正例數", "count"),
     Column("正例佔比", "ratio"),
     Column("正例率", "ratio"),
+    Column("entity 數", "count"),
 )
 
 
@@ -99,7 +102,7 @@ def build(
 def _composition(slices: str, row_header: str, by: Mapping[str, dict],
                  totals: Mapping, notes: tuple = ()) -> Table:
     """「正例組成 · {slices}」: a row per slice of ``by``, in its order, the
-    five columns of :data:`_COMPOSITION_COLUMNS`. A share is the slice's
+    columns of :data:`_COMPOSITION_COLUMNS`. A share is the slice's
     landed count over the landed total — the one division the report does (a
     display of two landed numbers); blank when the total is missing or
     zero."""
@@ -113,6 +116,7 @@ def _composition(slices: str, row_header: str, by: Mapping[str, dict],
             cell.get("n_positives"),
             _share(cell.get("n_positives"), n_positives),
             cell.get("positive_rate"),
+            cell.get("n_entities"),
         )))
     return Table(f"正例組成 · {slices}", row_header, _COMPOSITION_COLUMNS,
                  tuple(rows), notes=notes)

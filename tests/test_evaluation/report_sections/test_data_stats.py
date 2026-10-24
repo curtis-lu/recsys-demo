@@ -1,6 +1,7 @@
 """資料統計 (``report_sections/data_stats``, #537): the ratio table and the
 four 「正例組成」 tables — each period, item, segment and category — with the
-same five columns (ADR-0031 decision 16 item 6). The totals are 核心概念's:
+same columns (ADR-0031 decision 16 item 6, and the entity count decision 1's
+acceptance table adds). The totals are 核心概念's:
 none is printed here, and the description no longer prints one run's
 numbers whatever the data (decision 16 item 17).
 
@@ -19,7 +20,7 @@ from recsys_tfb.report.types import Paragraph, Table
 from tests.test_evaluation import test_report_builder as rbt
 
 _FIVE = [("候選列", "count"), ("候選列佔比", "ratio"), ("正例數", "count"),
-         ("正例佔比", "ratio"), ("正例率", "ratio")]
+         ("正例佔比", "ratio"), ("正例率", "ratio"), ("entity 數", "count")]
 
 
 def _build(row_facts, params=None):
@@ -73,6 +74,20 @@ def test_the_tables_are_the_ratios_and_the_composition_by_each_slice():
     assert "<details" not in generate_html_report([s])  # nothing collapses
 
 
+def test_each_slice_prints_its_landed_entity_count():
+    """ADR-0031 decision 1, first row of the acceptance table: the entity
+    count of each slice is a column of its 正例組成 table, read off the row
+    facts (``compute_dataset_overview`` lands ``n_entities`` per slice)."""
+    rf = rbt._row_facts()
+    by_item = rf["dataset_overview"]["by_item"]
+    for count, cell in zip((7, 3), by_item.values()):
+        cell["n_entities"] = count
+    table = _tables(_build(rf))["正例組成 · 各 item"]
+    column = [c.label for c in table.columns].index("entity 數")
+    assert [row.cells[column] for row in table.rows] == [
+        cell["n_entities"] for cell in by_item.values()]
+
+
 def test_the_ratio_table_reads_the_landed_rates_and_says_how():
     rf = rbt._row_facts()
     totals = rf["dataset_overview"]["totals"]
@@ -92,12 +107,12 @@ def test_each_slice_s_counts_and_its_shares_of_the_totals():
     share column adds up to 1."""
     tables = _tables(_build(rbt._row_facts()))
     assert _rows(tables["正例組成 · 各 item"]) == {
-        "A": (50, 0.5, 12, 0.6, 0.24),
-        "B": (50, 0.5, 8, 0.4, 0.16),
+        "A": (50, 0.5, 12, 0.6, 0.24, 10),
+        "B": (50, 0.5, 8, 0.4, 0.16, 10),
     }
     assert _rows(tables["正例組成 · 各分群"]) == {
-        "X": (60, 0.6, 14, 0.7, pytest.approx(14 / 60)),
-        "Y": (40, 0.4, 6, 0.3, 0.15),
+        "X": (60, 0.6, 14, 0.7, pytest.approx(14 / 60), 6),
+        "Y": (40, 0.4, 6, 0.3, 0.15, 4),
     }
     for title in ("正例組成 · 各期", "正例組成 · 各 item", "正例組成 · 各分群"):
         cells = [r.cells for r in tables[title].rows]
@@ -130,8 +145,8 @@ def test_the_category_table_divides_by_the_category_grain_s_own_totals():
     table = _tables(s)["正例組成 · 各大類"]
     assert table.row_header == "大類"
     assert [(c.label, c.kind) for c in table.columns] == _FIVE
-    assert _rows(table) == {"card": (20, 0.5, 4, 0.25, 0.2),
-                            "fund": (20, 0.5, 12, 0.75, 0.6)}
+    assert _rows(table) == {"card": (20, 0.5, 4, 0.25, 0.2, 10),
+                            "fund": (20, 0.5, 12, 0.75, 0.6, 10)}
     text = _description(s)
     assert "各大類" in text
     assert "佔比的分母用大類粒度自己的合計" in text
