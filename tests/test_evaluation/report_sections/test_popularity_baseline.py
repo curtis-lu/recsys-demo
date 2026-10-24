@@ -168,8 +168,8 @@ def _draw(model=None, baseline=None, parameters=None, facts=None):
         "evaluation_row_facts": facts or _FACTS,
         "baseline_metrics": baseline,
         "baseline_comparison": comparison,
-        "evaluation_display_ks": resolve_display_ks(model, comparison,
-                                                    parameters),
+        "evaluation_display_ks": resolve_display_ks(
+            model, parameters, baseline_comparison=comparison),
     }
     return pb.build(results, parameters)
 
@@ -333,8 +333,8 @@ def test_the_macro_rows_have_both_sides_off_the_real_computation(spark):
     section = pb.build({
         "evaluation_row_facts": facts, "baseline_metrics": baseline,
         "baseline_comparison": comparison,
-        "evaluation_display_ks": resolve_display_ks(metrics, comparison,
-                                                    params)}, params)
+        "evaluation_display_ks": resolve_display_ks(
+            metrics, params, baseline_comparison=comparison)}, params)
 
     for title in ("map_attr@K · 各 item", "per-item recall@K · 各 item"):
         table = _table(section, title, "item 粒度")
@@ -471,16 +471,6 @@ def test_a_listed_cell_the_comparison_lacks_is_refused(side, path, where):
 
 def _lookback(months: int = 12, **baseline) -> dict:
     return _params(baseline={"lookback_months": months, **baseline})
-
-
-def test_the_section_is_absent_when_the_baseline_was_not_computed():
-    stub = {"enabled": False,
-            "config_fingerprint": {"sha256": "0" * 64, "values": {}}}
-    off = _params(report={"sections": {"popularity_baseline": False},
-                          "display": {"compare_k": [1]}})
-    for baseline, params in ((stub, _params()), (None, _params()),
-                             (_baseline(), off)):
-        assert pb.build({"baseline_metrics": baseline}, params) is None
 
 
 def test_count_mode_ranks_by_the_count_with_the_monthly_average():

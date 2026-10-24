@@ -85,7 +85,7 @@ def _plan(periods, existing=(), rebuild=()):
 
 
 def _node(name, **pipeline_kwargs):
-    return next(n for n in create_pipeline(**pipeline_kwargs).nodes
+    return next(n for n in create_pipeline(parameters={}, **pipeline_kwargs).nodes
                 if n.name == name)
 
 
@@ -97,8 +97,8 @@ def _call(node, **datasets):
 class TestPipelineShape:
     @pytest.mark.parametrize("post_training", [False, True])
     def test_switch_off_is_the_pipeline_without_the_feature(self, post_training):
-        default = create_pipeline(post_training=post_training)
-        off = create_pipeline(post_training=post_training, baseline_rate=False)
+        default = create_pipeline(parameters={}, post_training=post_training)
+        off = create_pipeline(parameters={}, post_training=post_training, baseline_rate=False)
         assert [(n.name, n.inputs, n.outputs) for n in off.nodes] == [
             (n.name, n.inputs, n.outputs) for n in default.nodes]
         assert _NODE not in {n.name for n in off.nodes}
@@ -110,12 +110,12 @@ class TestPipelineShape:
             "evaluation_item_categories"]
 
     def test_monitoring_off_reads_no_sample_pool(self):
-        inputs = {i for n in create_pipeline().nodes for i in n.inputs}
+        inputs = {i for n in create_pipeline(parameters={}).nodes for i in n.inputs}
         assert "sample_pool" not in inputs
 
     @pytest.mark.parametrize("post_training", [False, True])
     def test_switch_on_wires_the_counts_before_the_baseline(self, post_training):
-        pipe = create_pipeline(post_training=post_training, baseline_rate=True)
+        pipe = create_pipeline(parameters={}, post_training=post_training, baseline_rate=True)
         names = [n.name for n in pipe.nodes]
         node = pipe.nodes[names.index(_NODE)]
         assert node.inputs == ["sample_pool", "label_table",
@@ -127,7 +127,7 @@ class TestPipelineShape:
             "popularity_period_counts", "popularity_period_counts_month_plan"]
 
     def test_compare_only_wires_no_baseline_either_way(self):
-        pipe = create_pipeline(compare_source={"kind": "hive"},
+        pipe = create_pipeline(parameters={}, compare_source={"kind": "hive"},
                                compare_only=True, baseline_rate=True)
         assert _NODE not in {n.name for n in pipe.nodes}
 

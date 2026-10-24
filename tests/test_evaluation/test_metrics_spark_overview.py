@@ -592,8 +592,7 @@ def _display_ks(out, params):
     )
 
     stamp = {"config_fingerprint": fingerprint(params)}
-    return resolve_display_ks({**out, **stamp}, {"enabled": False, **stamp},
-                              params)
+    return resolve_display_ks({**out, **stamp}, params)
 
 
 def test_the_report_finds_map_and_recall_at_all_with_the_event_role(spark):

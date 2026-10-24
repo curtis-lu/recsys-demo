@@ -45,7 +45,6 @@ from recsys_tfb.evaluation.report_sections.shared import (
     count_items,
     k_to_lookup,
     landed_value,
-    section_on,
     unmatched_last,
 )
 from recsys_tfb.evaluation.result_readers import (
@@ -61,6 +60,10 @@ from recsys_tfb.report.types import Heading, Note, Paragraph
 #: the item counts off the row facts, the values off the metrics, each
 #: grain's K off the cut (#536).
 READS = ("evaluation_row_facts", "evaluation_metrics", DISPLAY_KS)
+
+#: The ``evaluation.report.sections`` switch that turns this section off
+#: (ADR-0031 principle 3: off, the pipeline computes nothing only it reads).
+SWITCH = "ranking_metrics"
 
 #: The heading, its English and the question the section answers; the
 #: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
@@ -195,9 +198,7 @@ def build(
 ) -> ReportSection | None:
     """排序指標: the description, then the item grain's tables and, with a
     category grain, the category grain's — the same skeleton (decision 16
-    item 6). ``None`` when the section is switched off."""
-    if not section_on(parameters, "ranking_metrics"):
-        return None
+    item 6)."""
     facts = results["evaluation_row_facts"]
     metrics = results["evaluation_metrics"]
     display_ks = results[DISPLAY_KS]

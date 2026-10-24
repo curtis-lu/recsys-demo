@@ -388,21 +388,16 @@ def baseline_score(parameters: dict) -> str:
 
 
 def baseline_scores_by_rate(parameters: dict, *, post_training: bool) -> bool:
-    """Whether this run wires the positive-rate path.
+    """Whether this run's baseline scores by positive rate.
 
-    Needs ``score: rate``, the popularity-baseline section on (off computes
-    no baseline at all) and ``--post-training`` (monitoring keeps the count,
-    see above).
-    The pipeline shape, the CLI plan and ``--rebuild-dates`` all read this one
-    answer, so they cannot disagree about it.
+    Needs ``score: rate`` and ``--post-training`` (monitoring keeps the
+    count, see above). Whether a baseline is computed at all is not asked
+    here: the evaluation pipeline's requirement list answers it (ADR-0031
+    principle 3), and the CLI asks both before the pipeline shape, its plan
+    and ``--rebuild-dates`` read the answer, so they cannot disagree about
+    it.
     """
-    eval_params = parameters.get("evaluation", {}) or {}
-    sections = (eval_params.get("report", {}) or {}).get("sections", {}) or {}
-    return (
-        post_training
-        and baseline_score(parameters) == "rate"
-        and bool(sections.get("popularity_baseline", True))
-    )
+    return post_training and baseline_score(parameters) == "rate"
 
 
 def list_candidate_periods(

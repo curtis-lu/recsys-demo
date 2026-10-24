@@ -48,6 +48,10 @@ from recsys_tfb.report.types import Paragraph
 #: The results this section reads, by catalog name (ADR-0031 principle 1).
 READS = (SOURCE_COMPARISON, COMPARISON_DISPLAY_KS)
 
+#: No switch turns this section off (ADR-0031 principle 3:
+#: ``shared.sections_on``).
+SWITCH = None
+
 #: The metrics this section compares on the whole and per segment, in table
 #: order: a program constant, not a setting, empty by default (decision 16
 #: item 2). Each entry is read at ``per_segment``, e.g.

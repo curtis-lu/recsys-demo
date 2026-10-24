@@ -15,7 +15,6 @@ from recsys_tfb.evaluation.report_sections.metric_tables import definitions
 from recsys_tfb.evaluation.report_sections.shared import (
     ALL_POSITIVE_SWITCH,
     MACRO_LABEL,
-    section_on,
 )
 from recsys_tfb.evaluation.result_readers import (
     drop_all_positive_groups,
@@ -33,6 +32,10 @@ from recsys_tfb.report.types import (
 #: The results this section reads, by catalog name (ADR-0031 principle 1):
 #: the distributions off the report aggregates, ``mean_pos`` off the metrics.
 READS = ("evaluation_report_aggregates", "evaluation_metrics")
+
+#: The ``evaluation.report.sections`` switch that turns this section off
+#: (ADR-0031 principle 3: off, the pipeline computes nothing only it reads).
+SWITCH = "rank_distribution"
 
 #: The heading, its English and the question the section answers; the
 #: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
@@ -212,8 +215,6 @@ def build(
     from before #381 that holds only the ``calibration`` key included: the
     score bins are not drawn here.
     """
-    if not section_on(parameters, "rank_distribution"):
-        return None
     report_aggregates = results["evaluation_report_aggregates"]
     if not report_aggregates or "score_histogram" not in report_aggregates:
         return None

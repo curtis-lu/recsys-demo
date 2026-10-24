@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from recsys_tfb.core.consistency import (
-    EVALUATION_REPORT_SECTIONS,
+    report_section_on,
     resolved_zero_positive_group_ratio,
     test_carries_zero_positive_group_weight,
 )
@@ -50,22 +50,22 @@ def report_cfg(parameters: dict) -> dict:
     return (parameters.get("evaluation", {}) or {}).get("report", {}) or {}
 
 
-def section_on(parameters: dict, name: str) -> bool:
-    """Whether report section ``name`` is switched on (default: on).
+def sections_on(sections: tuple, parameters: dict) -> tuple:
+    """The sections of ``sections`` (a report's page-order list of section
+    modules) that this run draws: each declares ``SWITCH``, the
+    ``evaluation.report.sections`` name that turns it off, or ``None`` when
+    nothing does, read by ``core.consistency.report_section_on`` (on when
+    absent, except the prediction-quality section).
 
-    Pre-check: ``name`` is in ``EVALUATION_REPORT_SECTIONS``, the set A34 keeps
-    equal to what the conf declares. A name outside it would read a key no conf
-    declares and quietly default to on, the way ``diagnosis_links`` did.
+    The one answer to "which sections" (ADR-0031 principle 3): the report
+    draws these, and the evaluation pipeline's requirement list wires only
+    the results they declare in ``READS`` — so a switched-off section's
+    computation is not in the pipeline, and a section removed from the list
+    takes its computation with it.
     """
-    if name not in EVALUATION_REPORT_SECTIONS:
-        raise ValueError(
-            f"section_on: {name!r} is not in "
-            f"core.consistency.EVALUATION_REPORT_SECTIONS "
-            f"{sorted(EVALUATION_REPORT_SECTIONS)}. Add it there and declare "
-            f"it under evaluation.report.sections (A34)."
-        )
-    sections = report_cfg(parameters).get("sections", {}) or {}
-    return bool(sections.get(name, True))
+    return tuple(section for section in sections
+                 if section.SWITCH is None
+                 or report_section_on(parameters, section.SWITCH))
 
 
 #: The catalog names of the comparison of the model with its baseline and of
@@ -78,38 +78,48 @@ SOURCE_COMPARISON = "source_comparison"
 COMPARISON_DISPLAY_KS = "comparison_display_ks"
 COMPARE_COVERAGE = "compare_coverage"
 
+#: The node that computes both sides' metrics of the comparison report
+#: (``nodes.COMPARISON_RERUN_NODE``; ``test_pipeline.py`` checks the two
+#: equal): where a refusal sends the reader when what is missing is a value
+#: those metrics never held — re-running a node after it would join the same
+#: metrics again.
+COMPARISON_METRICS_NODE = "compute_compare_metrics"
+
 #: The node that lands each result :func:`landed_value` reads: where a refusal
 #: sends the reader. Each exists in every mode that draws from the result:
 #: the comparison's in ``--compare`` and ``--compare-only`` alike. The
 #: coverage's producer (``restrict_to_common``) reads a memory-only frame, so
-#: its re-run is the comparison's (``nodes.COMPARISON_RERUN_NODE``), whose
-#: slice pulls it back and lands it again.
+#: its re-run is the comparison's metrics node, whose slice pulls it back and
+#: lands it again.
 LANDED_BY = {
     BASELINE_COMPARISON: "compare_to_baseline",
     DISPLAY_KS: "resolve_display_ks",
     SOURCE_COMPARISON: "compare_to_source",
     COMPARISON_DISPLAY_KS: "resolve_comparison_display_ks",
-    COMPARE_COVERAGE: "compute_compare_metrics",
+    COMPARE_COVERAGE: COMPARISON_METRICS_NODE,
 }
 
 
-def landed_value(result: dict | None, name: str, *path):
+def landed_value(result: dict | None, name: str, *path,
+                 rerun_node: str | None = None):
     """``result[path[0]][path[1]]…`` of the landed result ``name``; raises
     ``ValueError`` naming the node to re-run from when it is not there.
 
     For the results the report reads instead of computing (#536, ADR-0031
     principle 1): the comparison's cells and the K cut's lists. A value
-    missing there means the file was landed by an older version of its node
-    (or it is the stub of a section the settings now draw), and drawing on
-    would print blank cells or raise a bare ``KeyError`` with no way out —
+    missing there means the file was landed by an older version of its node,
+    and drawing on would print blank cells or raise a bare ``KeyError`` with
+    no way out —
     #536 acceptance 4. A ``None`` that was landed is returned as it is; only
-    stepping into it raises.
+    stepping into it raises. ``rerun_node`` names the node to re-run from
+    when it is not the result's own (``LANDED_BY``): a value its producer
+    could only have copied from further up.
     """
     cursor = result
     for depth, key in enumerate(path):
         if not isinstance(cursor, dict) or key not in cursor:
             where = ".".join(str(k) for k in path[:depth + 1])
-            node = LANDED_BY[name]
+            node = rerun_node or LANDED_BY[name]
             raise ValueError(
                 f"{name} has no {where}, which the report draws: it was "
                 f"landed by an older {node}, or not for these settings. "
@@ -218,10 +228,10 @@ def refuse_pre_ledger(name: str, bundle: dict | None) -> None:
     **Why refuse**: the ledger is where each bundle says what ``"all"``
     resolved to (``metrics.resolved_all_k``), and a file this old also still
     holds the row facts that now land on their own — the report reads those
-    from ``row_facts.json``, which that run never wrote. The baseline's stub
-    (``{"enabled": false}``, section off) is not a bundle and passes.
+    from ``row_facts.json``, which that run never wrote. A result this run
+    does not read (its section off) is ``None`` and passes.
     """
-    if not isinstance(bundle, dict) or bundle.get("enabled") is False:
+    if not isinstance(bundle, dict):
         return
     if POPULATION_KEY not in bundle:
         raise ValueError(
@@ -244,8 +254,8 @@ def refuse_pre_landed_reads(results: Mapping[str, dict | None]) -> None:
     """Raise when a result was landed before #536 and lacks what the report
     now reads instead of computing (ADR-0031 principle 1): the row facts'
     all-positive accounts, at each grain; the baseline's popularity window;
-    the prediction-quality display tables and threshold sweep. A stub
-    (section off, ``{"enabled": false}``) carries none of them and passes.
+    the prediction-quality display tables and threshold sweep. A result
+    this run does not read (its section off) is absent and passes.
 
     **Why refuse**: no setting changed, so the fingerprint check passes such
     a file, and every read of a missing value draws nothing — the ledger
@@ -260,11 +270,10 @@ def refuse_pre_landed_reads(results: Mapping[str, dict | None]) -> None:
             missing += [f"evaluation_row_facts ({grain}): {key!r}"
                         for key in ROW_FACTS_ACCOUNTS if key not in bundle]
     baseline = results.get("baseline_metrics")
-    if (isinstance(baseline, dict) and baseline.get("enabled") is not False
-            and POPULARITY_WINDOW_KEY not in baseline):
+    if isinstance(baseline, dict) and POPULARITY_WINDOW_KEY not in baseline:
         missing.append(f"baseline_metrics: {POPULARITY_WINDOW_KEY!r}")
     quality = results.get("prediction_quality_metrics")
-    if isinstance(quality, dict) and quality.get("enabled") is True:
+    if isinstance(quality, dict):
         for block, key in (("overall", DISPLAY_BINS_KEY),
                            ("overall", THRESHOLD_SWEEP_KEY),
                            ("per_item", DISPLAY_BINS_KEY)):

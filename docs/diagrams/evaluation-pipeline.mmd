@@ -25,7 +25,7 @@
 %% #351 起 evaluation_metrics、baseline_metrics 落地成 JSONDataset
 %%   （data/evaluation/<model_version>/<snap_date>/metrics.json 與同目錄
 %%   baseline_metrics.json，皆含 config_fingerprint；report.sections.popularity_baseline: false
-%%   時 baseline 是 {"enabled": false, "config_fingerprint": ...} stub），跟
+%%   時 compute_baseline_metrics 與 compare_to_baseline 不在 pipeline 裡，#538），跟
 %%   report_aggregates 一樣畫成實線膠囊（有 catalog entry）。
 %%   #536 起報表只讀落地結果：compare_to_baseline 算模型對 baseline 的差值（baseline_comparison.json），
 %%   resolve_display_ks 把每張表要印的 K 切好（display_ks.json），兩個 node 都不跑 Spark。
@@ -86,7 +86,7 @@ flowchart TB
   d_metrics(["evaluation_metrics<br/><small>JSON</small>"])
   n_baseline["compute_baseline_metrics<br/><small>popularity baseline：近 lookback_months 的購買數當分數<br/>同一批列、跟模型同一套指標計算（含 macro）</small>"]
   d_baseline(["baseline_metrics<br/><small>JSON</small>"])
-  n_pq["compute_prediction_quality<br/><small>每一列候選當二元預測 ・ 一次 groupBy(item, 細箱) ・ 不排除無正例的 query group<br/>report.sections.prediction_quality: false（框架預設）時只寫 stub</small>"]
+  n_pq["compute_prediction_quality<br/><small>每一列候選當二元預測 ・ 一次 groupBy(item, 細箱) ・ 不排除無正例的 query group<br/>report.sections.prediction_quality: false（框架預設）時不在 pipeline 裡</small>"]
   d_pq(["prediction_quality_metrics<br/><small>JSON</small>"])
   n_agg["compute_report_aggregates<br/><small>主報表名次分布段的 Spark 端聚合（bin 計數／quartile／rank 矩陣）</small>"]
   d_agg(["evaluation_report_aggregates<br/><small>JSON</small>"])

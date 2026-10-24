@@ -28,6 +28,10 @@ from recsys_tfb.report.types import Paragraph
 #: The results this section reads, by catalog name (ADR-0031 principle 1).
 READS = (SOURCE_COMPARISON, COMPARISON_DISPLAY_KS, COMPARE_ROW_FACTS_A)
 
+#: No switch turns this section off (ADR-0031 principle 3:
+#: ``shared.sections_on``).
+SWITCH = None
+
 #: The metrics this section compares at the category grain, in table order
 #: (ADR-0031 decision 16 item 2): a program constant, not a setting.
 COMPARED: tuple[CompareEntry, ...] = (

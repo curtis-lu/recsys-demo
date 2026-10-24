@@ -34,6 +34,10 @@ from recsys_tfb.report.types import Note, Paragraph
 #: The results this section reads, by catalog name (ADR-0031 principle 1).
 READS = (SOURCE_COMPARISON,)
 
+#: No switch turns this section off (ADR-0031 principle 3:
+#: ``shared.sections_on``).
+SWITCH = None
+
 #: The heading, its English and the question the section answers; the
 #: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
 #: decision 16). Neither counts the metrics: the catalog lists two today,

@@ -23,6 +23,13 @@ from recsys_tfb.pipelines.training.cache_sources import (
 runner = CliRunner()
 
 
+
+def _pipeline_kwargs(pipeline: str) -> dict:
+    """What a command hands ``get_pipeline`` at the least: evaluation's
+    pipeline takes the settings, which decide what it computes (#538); the
+    framework defaults here."""
+    return {"parameters": {}} if pipeline == "evaluation" else {}
+
 def _partition_rows(specs):
     """A ``SHOW PARTITIONS`` result whose ``collect()`` yields the given specs."""
     result = MagicMock()
@@ -4271,6 +4278,35 @@ class TestEvaluationPositiveRateBaseline:
         assert result.exit_code == 0, result.output
         return execute, manifest, planner, plan
 
+    def test_no_baseline_section_no_rate_path(self, tmp_path):
+        """#538: ``score: rate`` under ``--post-training``, but no
+        switched-on section reads the baseline — the requirement list leaves
+        it out, so the CLI plans no period and wires no rate path (the
+        pipeline would have dropped the counting node anyway)."""
+        execute = MagicMock(return_value=True)
+        planner = MagicMock()
+        result, _ = _run_evaluation_command(
+            tmp_path, ["evaluation", "--model-version", _EVAL_MV,
+                       "--post-training"],
+            evaluation_extra={
+                **self._RATE,
+                "report": {"sections": {"popularity_baseline": False}}},
+            catalog_extra=self._SOURCES, params_dataset=self._DATASET,
+            extra_patches=(
+                patch("recsys_tfb.__main__._execute_pipeline", execute),
+                patch("recsys_tfb.__main__._write_pipeline_manifest"),
+                patch("recsys_tfb.__main__._popularity_period_plan", planner),
+                patch("recsys_tfb.__main__.report_section_key_errors",
+                      return_value=[]),
+            ),
+        )
+        assert result.exit_code == 0, result.output
+        pipeline_kwargs = execute.call_args.args[1]
+        assert pipeline_kwargs["baseline_rate"] is False
+        assert pipeline_kwargs["parameters"]["evaluation"]["report"][
+            "sections"] == {"popularity_baseline": False}
+        planner.assert_not_called()
+
     def test_post_training_hands_the_plan_to_the_node_and_the_slice(
         self, tmp_path,
     ):
@@ -4359,7 +4395,8 @@ def test_rebuild_dates_sliced_away_from_the_counting_node_warns():
     )
     from recsys_tfb.pipelines.evaluation.pipeline import create_pipeline
 
-    pipe, _plan = create_pipeline(post_training=True, baseline_rate=True
+    pipe, _plan = create_pipeline(parameters={}, post_training=True,
+                                  baseline_rate=True
                                   ).slice_from("generate_report",
                                                lambda _name: True)
     lines = _maybe_warn_rebuild_sliced_away(pipe, {
@@ -4953,7 +4990,7 @@ class TestPreprocessorOnDiskWiring:
         config.get_catalog_config.return_value = catalog_config
         with patch("recsys_tfb.__main__.DataCatalog", wraps=DataCatalog) as built, \
                 patch("recsys_tfb.__main__.Runner") as runner:
-            _execute_pipeline(pipeline, {}, {}, config, {}, "local", **kwargs)
+            _execute_pipeline(pipeline, _pipeline_kwargs(pipeline), {}, config, {}, "local", **kwargs)
         return built, runner
 
     @pytest.mark.parametrize("pipeline", ["dataset", "evaluation"])
@@ -4989,7 +5026,7 @@ class TestPreprocessorOnDiskWiring:
         with patch("recsys_tfb.__main__.DataCatalog") as built, \
                 patch("recsys_tfb.__main__.Runner") as runner, \
                 caplog.at_level(logging.ERROR), pytest.raises(typer.Exit):
-            _execute_pipeline(pipeline, {}, {}, config, {}, "local", **mode)
+            _execute_pipeline(pipeline, _pipeline_kwargs(pipeline), {}, config, {}, "local", **mode)
 
         built.assert_not_called()
         runner.assert_not_called()
@@ -5027,7 +5064,8 @@ class TestPredictManifestOnDiskWiring:
         with patch("recsys_tfb.__main__.DataCatalog", wraps=DataCatalog) as built, \
                 patch("recsys_tfb.__main__.Runner"):
             _execute_pipeline(
-                pipeline, pipeline_kwargs or {}, {}, config, {}, "local",
+                pipeline, pipeline_kwargs or _pipeline_kwargs(pipeline), {},
+                config, {}, "local",
                 dry_run=True,
             )
         return built
@@ -5179,7 +5217,8 @@ class TestCacheSourceTablesAreTrainingsAlone:
         with patch("recsys_tfb.__main__.MemoryDataset", wraps=MemoryDataset) as made, \
                 patch("recsys_tfb.__main__.Runner"):
             _execute_pipeline(
-                pipeline, {}, {"model_version": "m"}, config, {}, "local",
+                pipeline, _pipeline_kwargs(pipeline), {"model_version": "m"},
+                config, {}, "local",
                 dry_run=True,
             )
 

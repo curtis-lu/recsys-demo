@@ -279,12 +279,3 @@ def test_no_candidate_row_draws_one_sentence(spark):
     assert s.key == "prediction_quality"
 
 
-def test_not_drawn_for_a_stub_or_when_switched_off(spark):
-    for stub in ({"enabled": False}, None):
-        results, parameters = landed.results(spark)
-        results["prediction_quality_metrics"] = stub
-        assert prediction_quality.build(results, parameters) is None
-    results, parameters = landed.results(spark)
-    parameters["evaluation"]["report"]["sections"] = {
-        "prediction_quality": False}
-    assert prediction_quality.build(results, parameters) is None

@@ -30,6 +30,7 @@ from recsys_tfb.evaluation.report_sections.metric_tables import (
 )
 from recsys_tfb.evaluation.report_sections.shared import (
     COMPARISON_DISPLAY_KS,
+    COMPARISON_METRICS_NODE,
     MACRO_LABEL,
     SOURCE_COMPARISON,
     both_present,
@@ -65,11 +66,15 @@ def landed_cells(comparison: dict, path: Sequence, keys: Iterable[str]) -> dict:
     every K of the grid, so a key it lacks is a comparison landed off results
     computed for other K, or by an older node — not a blank to print, which
     would read as "no value". ``shared.landed_value`` raises naming the node
-    to re-run from.
+    to re-run from: the metrics node, not ``compare_to_source`` — re-run
+    alone, it would join the same metrics and miss the same cell (#538
+    review: a metric added to a list, the two sides' metrics computed before
+    it was).
     """
     cells = landed_value(comparison, SOURCE_COMPARISON, *path)
     for key in keys:
-        landed_value(comparison, SOURCE_COMPARISON, *path, key)
+        landed_value(comparison, SOURCE_COMPARISON, *path, key,
+                     rerun_node=COMPARISON_METRICS_NODE)
     return cells
 
 

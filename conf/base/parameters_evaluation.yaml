@@ -111,10 +111,10 @@ evaluation:
     sections:
       data_stats: true            # 資料統計段
       ranking_metrics: true       # 排序指標段：overall、per-item、per-segment、大類
-      rank_distribution: true     # 名次分布段。算的：false 時 compute_report_aggregates 只寫 stub
-      popularity_baseline: true   # 熱門度基準段。算的：false 時 compute_baseline_metrics 只寫 stub
+      rank_distribution: true     # 名次分布段。算的：false 時 compute_report_aggregates 不在 pipeline 裡
+      popularity_baseline: true   # 熱門度基準段。算的：false 時 compute_baseline_metrics 不在 pipeline 裡
       prediction_quality: false   # 算的：預測品質指標家族（見上方 prediction_quality）；
-                                  # false 時 compute_prediction_quality 只寫 stub
+                                  # false 時 compute_prediction_quality 不在 pipeline 裡
     display:                      # 畫的
       # compare_k：比較表顯示哪些 K——熱門度基準段的每張表、比較報表各 item 與大類段的
       # 每張表（map_attr、per-item recall）。沒寫時等於上面的 k_values。每個整數都要列在

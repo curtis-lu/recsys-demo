@@ -26,12 +26,12 @@ Only computed settings go into the fingerprint. Fingerprinting drawn ones too
 would make every cosmetic change raise, which is the "re-run everything on any
 change" the user rejected. ``sections.popularity_baseline``,
 ``sections.rank_distribution`` and ``sections.prediction_quality`` are
-computed, not drawn: ``popularity_baseline: false`` makes
-``compute_baseline_metrics`` return a stub, and ``rank_distribution: false`` /
-``prediction_quality: false`` do the same for
-``compute_report_aggregates`` / ``compute_prediction_quality``; treated as
-drawn, flipping them back and re-drawing yields a report with a section
-silently missing.
+computed, not drawn: ``popularity_baseline: false`` leaves
+``compute_baseline_metrics`` out of the pipeline (the requirement list,
+#538), and ``rank_distribution: false`` / ``prediction_quality: false`` do
+the same for ``compute_report_aggregates`` / ``compute_prediction_quality``;
+treated as drawn, flipping them back and re-drawing would draw a section off
+whatever file an older run left, or none.
 
 One row of :data:`COMPUTED_KEYS`, ``post_training``, is not a YAML config
 setting at all: it is the ``--post-training`` / monitoring run mode, injected

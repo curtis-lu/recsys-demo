@@ -12,7 +12,7 @@ from recsys_tfb.pipelines.evaluation.pipeline import create_pipeline
 def test_default_pipeline_writes_the_enriched_table_from_prepare_eval_data():
     """ADR-0018 decision 1: the producer writes the table itself; the old
     pass-through node at the end of the DAG is gone."""
-    pipeline = create_pipeline(post_training=False)
+    pipeline = create_pipeline(parameters={}, post_training=False)
     writers = [n.name for n in pipeline.nodes
                if "enriched_eval_predictions" in n.outputs]
     assert writers == ["prepare_eval_data"]
@@ -23,7 +23,7 @@ def test_default_pipeline_writes_the_enriched_table_from_prepare_eval_data():
 
 def test_compare_mode_adds_three_extra_nodes():
     src = {"kind": "model_version", "model_version": "v1", "label": "L"}
-    pipeline = create_pipeline(post_training=False, compare_source=src)
+    pipeline = create_pipeline(parameters={}, post_training=False, compare_source=src)
     node_names = [n.func.__name__ for n in pipeline.nodes]
     assert "load_compare_predictions" in node_names
     assert "restrict_to_common" in node_names
@@ -34,7 +34,7 @@ def test_compare_mode_adds_three_extra_nodes():
 
 def test_compare_only_mode_skips_compute_nodes():
     src = {"kind": "model_version", "model_version": "v1", "label": "L"}
-    pipeline = create_pipeline(post_training=False, compare_source=src, compare_only=True)
+    pipeline = create_pipeline(parameters={}, post_training=False, compare_source=src, compare_only=True)
     node_names = [n.func.__name__ for n in pipeline.nodes]
     assert "validate_enriched_eval_predictions_present" in node_names
     assert "generate_comparison_report" in node_names
@@ -311,7 +311,7 @@ def test_restrict_to_common_refuses_side_a_another_run_rewrote(
 
 
 def _wired_node(name, **pipeline_kwargs):
-    return next(n for n in create_pipeline(**pipeline_kwargs).nodes
+    return next(n for n in create_pipeline(parameters={}, **pipeline_kwargs).nodes
                 if n.name == name)
 
 
@@ -460,8 +460,8 @@ def test_a_rewritten_hive_partition_is_refused_on_read(spark):
         assert "2026-02-28" not in message, message
 
         ds.save(_as_written(_month("2026-01-31"), params))
-        assert compute_report_aggregates(
-            ds.load(), segments, params)["enabled"] is True
+        assert "score_histogram" in compute_report_aggregates(
+            ds.load(), segments, params)
     finally:
         _clean()
 

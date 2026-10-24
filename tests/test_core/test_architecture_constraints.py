@@ -162,6 +162,11 @@ def test_static_coverage_floor():
     """
     total = sum(1 for _ in _node_calls())
     judgeable = sum(1 for _ in _judgeable_nodes())
+    # 60/58: #538 made evaluation's `generate_report` call dynamic (its
+    # inputs are what the switched-on sections read, a computed dict) and
+    # wrote `resolve_display_ks` as two literal calls (with and without the
+    # comparison): total +1, judgeable +0. Both are constructed by every
+    # create_pipeline call, so Node.__init__ checks A5/A6 on them anyway.
     # 59/58: #536 added evaluation's `compare_to_baseline` and
     # `resolve_display_ks`, two literal, statically judgeable calls.
     # 57/56: #535 added evaluation's `compute_row_facts`, one literal,
@@ -202,7 +207,7 @@ def test_static_coverage_floor():
     # of the two `validate_model_input_grain` calls (the branch existed only
     # to append the calibration pair to its input list). All three were
     # literal, so total and judgeable both drop by 3.
-    assert (total, judgeable) == (59, 58), (
+    assert (total, judgeable) == (60, 58), (
         f"Node coverage changed: {judgeable}/{total} statically judgeable. "
         "If this dropped, A5/A6 now have a bigger blind spot -- check why."
     )

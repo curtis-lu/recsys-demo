@@ -267,7 +267,7 @@ def main_report_texts_with_warnings() -> dict[str, str]:
     population = results["baseline_comparison"]["population"]
     assert _differing(population) == list(population), \
         "premise: the baseline differs on all four annotations"
-    html = rb.assemble_report(results, params)
+    html = rb.assemble_report(results, t._as_the_pipeline_wires(results, params))
     texts = section_texts(html)
     notes = _warn_notes(html)
     # 核心概念: one line per grain; 熱門度基準: @all, Macro and the scored
