@@ -31,6 +31,10 @@ from recsys_tfb.report.types import Paragraph
 #: macro line says "all" of).
 READS = (SOURCE_COMPARISON, COMPARISON_DISPLAY_KS, COMPARE_ROW_FACTS_A)
 
+#: No switch turns this section off (ADR-0031 principle 3:
+#: ``shared.sections_on``).
+SWITCH = None
+
 #: The metrics this section compares, in table order (ADR-0031 decision 16
 #: item 2): a program constant, not a setting. Each is a catalog entry read
 #: at the item grain; a table is drawn for every one, so adding an entry the

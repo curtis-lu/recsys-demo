@@ -38,6 +38,13 @@ def _kwargs(kwargs_items: tuple) -> dict:
             for name, value in kwargs_items}
 
 
+def _pipeline(pipeline_name, kwargs_items):
+    """The pipeline a contract key names. Evaluation's takes the settings
+    (#538): the framework defaults, a conf that switches no section."""
+    settings = {"parameters": {}} if pipeline_name == "evaluation" else {}
+    return get_pipeline(pipeline_name, **settings, **_kwargs(kwargs_items))
+
+
 # (pipeline, frozen kwargs) -> {resume node -> exact allowed auto-included set}
 RESUME_CONTRACTS = {
     ("dataset", ()): {
@@ -249,7 +256,7 @@ class TestResumeContracts:
         can_load = lambda name: name in defined
         failures = []
         for (pipeline_name, kwargs_items), contracts in RESUME_CONTRACTS.items():
-            pipe = get_pipeline(pipeline_name, **_kwargs(kwargs_items))
+            pipe = _pipeline(pipeline_name, kwargs_items)
             for start, allowed in contracts.items():
                 _, plan = pipe.slice_from(start, can_load)
                 actual = set(plan.auto_included)
@@ -308,7 +315,7 @@ class TestResumeContracts:
         # slice_from/_node_index resolve nodes BY NAME (first match wins);
         # duplicate names would silently slice from the wrong node.
         for (pipeline_name, kwargs_items) in RESUME_CONTRACTS:
-            pipe = get_pipeline(pipeline_name, **_kwargs(kwargs_items))
+            pipe = _pipeline(pipeline_name, kwargs_items)
             names = [n.name for n in pipe.nodes]
             assert len(names) == len(set(names)), (
                 f"{pipeline_name}: duplicate node names {names}"

@@ -557,8 +557,9 @@ Layer 1 — config-static (implemented here; aggregated by
   upstream of it. Monitoring mode is unaffected: nothing upstream filtered its
   rows. Predicate: ``prediction_quality_population_errors`` (returns errors;
   the evaluation command raises, collected with A22/A34/A42/A43). The switch
-  is read by ``prediction_quality_on``, shared with the node that computes the
-  family. NOT aggregated, for A22's reason: that gate cannot see
+  is read by ``prediction_quality_on`` (``report_section_on``), the one
+  reading the report and the evaluation pipeline's requirement list use to
+  decide whether the family is drawn and computed. NOT aggregated, for A22's reason: that gate cannot see
   ``--post-training``.
 * A47 — offline inference with a candidate-level feature table declared
   (catalog entry ``candidate_feature_table``, ADR-0026). The inference pipeline
@@ -3596,15 +3597,12 @@ def retired_k_key_errors(parameters: dict) -> list[str]:
 
 
 #: The ``evaluation.report.sections`` switches the report reads: one name per
-#: ``section_on(parameters, name)`` call in ``evaluation/report_sections/``,
-#: which refuses any name not listed here (A34). Each is the file name of the
-#: section it switches (#537), so a reader finds the section from the conf.
-#: ``popularity_baseline``, ``rank_distribution`` and ``prediction_quality``
-#: are also read directly by the nodes that skip computing
-#: (``compute_baseline_metrics`` / ``compute_report_aggregates`` /
-#: ``compute_prediction_quality``; ``baselines.baseline_scores_by_rate``);
-#: those reads bypass the ``section_on`` pre-check, so a new direct read of a
-#: name that is not listed here is caught by nothing. The report imports this
+#: section that declares a ``SWITCH`` in ``evaluation/report_sections/``,
+#: read through ``section_on``, which refuses any name not listed here
+#: (A34). Each is the file name of the section it switches (#537), so a
+#: reader finds the section from the conf. No node reads a switch (#538,
+#: ADR-0031 principle 3): the evaluation pipeline's requirement list leaves
+#: out what a switched-off section alone would read. The report imports this
 #: constant, not the other way round: ``core/`` has no import-time dependency
 #: on the layers above it, and the report drags pandas and plotly in.
 EVALUATION_REPORT_SECTIONS: frozenset[str] = frozenset({
@@ -3710,20 +3708,32 @@ def prediction_quality_param_errors(parameters: dict) -> list[str]:
     return errors
 
 
-def prediction_quality_on(parameters: dict) -> bool:
-    """Whether ``evaluation.report.sections.prediction_quality`` switches the
-    family on — **off** when the switch is absent, unlike the report's other
-    sections (ADR-0024 decision 1).
+def report_section_on(parameters: dict, name: str) -> bool:
+    """Whether ``evaluation.report.sections.<name>`` is on. Absent, it is off
+    for the names in :data:`EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT` and on
+    for every other.
 
-    One reading for the node that computes the family and the A46 gate that
-    refuses it: two ``dict.get`` calls with two defaults is how a gate ends up
-    guarding a family the node never runs, or the reverse.
+    The one reading of a section switch (ADR-0031 principle 3): the report
+    draws the sections it says are on, the evaluation pipeline's requirement
+    list wires only what those sections read, and the A46 gate refuses the
+    population for the prediction-quality section by it. Two ``dict.get``
+    calls with two defaults is how a gate ends up guarding a family the
+    pipeline never computes, or the reverse.
     """
+    default = name not in EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT
     eval_params = parameters.get("evaluation") or {}
     report = eval_params.get("report") or {} if isinstance(eval_params, Mapping) else {}
     sections = report.get("sections") or {} if isinstance(report, Mapping) else {}
-    return bool(sections.get("prediction_quality", False)) if isinstance(
-        sections, Mapping) else False
+    return bool(sections.get(name, default)) if isinstance(
+        sections, Mapping) else default
+
+
+def prediction_quality_on(parameters: dict) -> bool:
+    """Whether ``evaluation.report.sections.prediction_quality`` switches the
+    family on — **off** when the switch is absent, unlike the report's other
+    sections (ADR-0024 decision 1). :func:`report_section_on`, named for the
+    A46 gate."""
+    return report_section_on(parameters, "prediction_quality")
 
 
 def prediction_quality_population_errors(
@@ -3795,8 +3805,9 @@ def report_section_key_errors(parameters: dict) -> list[str]:
     is not.
 
     Each switch the report reads must also hold a bool (#505). Every reader
-    takes it by truthiness (``section_on``, ``prediction_quality_on``, the
-    nodes that write a stub), so ``"false"`` — or ``'false`'``, what selecting
+    takes it by truthiness (``report_section_on``, through which
+    ``section_on``, ``prediction_quality_on`` and the evaluation pipeline's
+    requirement list read it), so ``"false"`` — or ``'false`'``, what selecting
     this check's own advice up to the line end copies — reads as on. Those
     readers are left as they are: the evaluation command runs this check
     before any of them.

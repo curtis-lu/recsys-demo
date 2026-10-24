@@ -736,7 +736,7 @@ C000010   0.83    0.83                 1      （示意）</div>
   <div class="meta"><b>產生</b>：evaluation · generate_report（只讀落地的 JSON：evaluation_row_facts、evaluation_metrics、baseline_metrics、evaluation_report_aggregates、prediction_quality_metrics、baseline_comparison、evaluation_display_ks；不算任何東西，見 evaluation.md §5.1）　|
   <b>下游</b>：—（終端產物，給人看）　|
   <b>path</b>：<code>data/evaluation/&lt;model_version&gt;/&lt;snap_date&gt;/report.html</code>（路徑上的 <code>&lt;snap_date&gt;</code> 是 <code>YYYYMMDD</code>；多個評估日期時為 <code>&lt;最早&gt;-&lt;最晚&gt;</code>）</div>
-  <p class="sub">enriched_eval_predictions 由 prepare_eval_data 把預測（情境 1 = training_eval_predictions，label 沿用它自帶的那欄、label_table 的 label 欄在此丟掉；情境 2 = ranked_predictions，label 取自 label_table）連上分群欄而來，join 只算一次、直接落地（ADR-0018 決定 1）。evaluation_metrics / baseline_metrics 落地為 <code>JSONDataset</code>：<code>data/evaluation/&lt;model_version&gt;/&lt;snap_date&gt;/metrics.json</code> 與同目錄的 <code>baseline_metrics.json</code>，皆含 <code>config_fingerprint</code>；<code>report.sections.popularity_baseline: false</code> 時 baseline 那份是 <code>{"enabled": false, "config_fingerprint": ...}</code> stub。</p>
+  <p class="sub">enriched_eval_predictions 由 prepare_eval_data 把預測（情境 1 = training_eval_predictions，label 沿用它自帶的那欄、label_table 的 label 欄在此丟掉；情境 2 = ranked_predictions，label 取自 label_table）連上分群欄而來，join 只算一次、直接落地（ADR-0018 決定 1）。evaluation_metrics / baseline_metrics 落地為 <code>JSONDataset</code>：<code>data/evaluation/&lt;model_version&gt;/&lt;snap_date&gt;/metrics.json</code> 與同目錄的 <code>baseline_metrics.json</code>，皆含 <code>config_fingerprint</code>；<code>report.sections.popularity_baseline: false</code> 時算 baseline 的 node 不在 pipeline 裡，沒有那份檔（#538）。</p>
 </div>
 
 <div class="card" id="enriched_eval_predictions">

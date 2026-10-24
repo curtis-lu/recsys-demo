@@ -19,6 +19,7 @@ to the caller facts). Since #536 the report reads the landed results through
 """
 
 import logging
+from collections.abc import Mapping
 from typing import Optional
 
 from pyspark.sql import DataFrame as SparkDataFrame
@@ -32,7 +33,6 @@ from recsys_tfb.core.consistency import (
     item_category_conflict_errors,
     item_categories_enabled,
     item_list_counted_from_data,
-    prediction_quality_on,
     test_carries_zero_positive_group_weight,
 )
 from recsys_tfb.core.schema import get_schema
@@ -940,12 +940,8 @@ def compute_baseline_metrics(
     slice ranks by it as ``compute_metrics`` does. Which one is the wiring's call
     (ADR-0013): monitoring with ``score: rate`` gets no counts and ranks by
     the count, see ``evaluation/baselines.py``.
-    When the baseline report section is disabled the second metrics pass is
-    skipped entirely and a stub ``{"enabled": False, "config_fingerprint":
-    ...}`` is returned. Not ``None`` (the old return): a ``null`` has nowhere
-    to carry the fingerprint, so ``generate_report`` could not tell "switched
-    off under the current settings" from "left over from an older run"
-    (ADR-0018 decision 2, ADR-0020 decision 2).
+    In the pipeline only while the popularity-baseline section is on (the
+    requirement list, ADR-0031 principle 3); it reads no switch itself.
 
     Returns ``compute_all_metrics``' bundle — ``overall``, ``per_item``,
     ``macro_avg``, the population ledger and the rest, as in
@@ -973,20 +969,12 @@ def compute_baseline_metrics(
             (``steps.config_fingerprint``), checked by
             ``generate_report``.
 
-    Pre-checks (inputs), past the stub: the landed segment list, category
+    Pre-checks (inputs): the landed segment list, category
     table, row facts and each evaluated date's partition were prepared under
     today's settings (``_require_prepared_with_current_config``,
     ``_require_row_facts_current``, ``_landed_category_mapping``,
     ``restrict_to_current_eval_partitions``).
     """
-    eval_params = parameters.get("evaluation", {}) or {}
-    sections = (eval_params.get("report", {}) or {}).get("sections", {}) or {}
-    if not sections.get("popularity_baseline", True):
-        logger.info(
-            "Baseline report section disabled — skipping baseline metrics"
-        )
-        return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
-
     _require_prepared_with_current_config(
         segment_columns, parameters, item_categories)
     _require_row_facts_current(row_facts, parameters)
@@ -1171,28 +1159,19 @@ def compute_prediction_quality(
     reads them. What each number means and cannot mean
     is in ``evaluation/prediction_quality.py``'s docstring.
 
-    Off unless ``evaluation.report.sections.prediction_quality`` is true (the
-    framework's default conf says false; the ad example's says true). Off, it
-    returns the ``{"enabled": False, "config_fingerprint": ...}`` stub, like
-    ``compute_baseline_metrics``, so ``generate_report`` can tell "switched
-    off under today's settings" from "left over from an older run".
+    In the pipeline only while ``evaluation.report.sections.prediction_quality``
+    is true (the requirement list, ADR-0031 principle 3; the framework's
+    default conf says false, the ad example's says true): the family costs
+    one extra shuffle over every evaluated row, and the ranking deployments
+    this framework ships with do not read it (ADR-0024 decision 1).
 
-    Pre-check (inputs), past the stub: each evaluated date's partition was
+    Pre-check (inputs): each evaluated date's partition was
     written under today's settings (``restrict_to_current_eval_partitions``).
     It takes ``evaluation_segment_columns`` for that check's ``joined`` list
     only; it does not segment, so it does not compare that JSON's fingerprint
     (``compute_report_aggregates``' reason).
     """
     eval_params = parameters.get("evaluation", {}) or {}
-    # Decision — off unless switched on. The family costs one extra shuffle
-    # over every evaluated row, and the ranking deployments this framework
-    # ships with do not read it (ADR-0024 decision 1). Read through the same
-    # helper A46 uses, so the gate and this node agree on "on".
-    if not prediction_quality_on(parameters):
-        logger.info(
-            "Prediction-quality report section disabled — writing stub")
-        return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
-
     # Decision — the evaluated dates only, from partitions written under
     # today's settings: the table holds every month this model_version was
     # evaluated on.
@@ -1264,7 +1243,6 @@ def compute_prediction_quality(
         n_display_bins=settings["n_display_bins"],
         top_n=settings["top_n"],
     )
-    out["enabled"] = True
     out["config_fingerprint"] = fingerprint(parameters)
     overall = out["overall"]["summary"] or {}
     logger.info(
@@ -1289,8 +1267,10 @@ def compute_report_aggregates(
     ``--only-node generate_report`` 不重算任何指標就能重繪主報表。也把這 5 次全掃的
     失敗點從 pipeline 的**最後一個 node** 往上游移。
 
-    Both the stub and the full result carry ``config_fingerprint``: the JSON
-    lands, and ``generate_report`` refuses one computed under other settings.
+    In the pipeline only while the rank-distribution section is on (the
+    requirement list, ADR-0031 principle 3). The result carries
+    ``config_fingerprint``: the JSON lands, and ``generate_report`` refuses
+    one computed under other settings.
 
     Reads ``enriched_eval_predictions`` but does not compare the
     ``segment_columns.json`` fingerprint with today's settings: it does not
@@ -1302,12 +1282,7 @@ def compute_report_aggregates(
     """
     eval_params = parameters.get("evaluation", {}) or {}
     report_cfg = eval_params.get("report", {}) or {}
-    sections_cfg = report_cfg.get("sections", {}) or {}
     diag_cfg = report_cfg.get("diagnostics", {}) or {}
-    if not sections_cfg.get("rank_distribution", True):
-        logger.info("report rank_distribution section (名次分布) disabled — "
-                    "writing stub")
-        return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
 
     # Decision — aggregate the evaluated dates only, from partitions written
     # under today's settings: the table holds every month this model_version
@@ -1330,7 +1305,6 @@ def compute_report_aggregates(
     finally:
         # 原本的寫法在例外時不會 unpersist。行為上這是純改善：輸出不變。
         sdf.unpersist()
-    out["enabled"] = True
     logger.info("report aggregates computed: %s", sorted(out))
     out["config_fingerprint"] = fingerprint(parameters)
     return out
@@ -1353,11 +1327,9 @@ def compare_to_baseline(
     by ``resolve_display_ks`` (decision 16), so a change of display K never
     re-runs this node.
 
-    Carries ``config_fingerprint`` like every landed result; with the
-    popularity-baseline section off (``baseline_metrics`` is the stub) the
-    result is a stub too, ``{"enabled": False, "config_fingerprint": ...}``,
-    so the report can tell "switched off under these settings" from "left
-    over".
+    Carries ``config_fingerprint`` like every landed result. In the pipeline
+    only while the popularity-baseline section is on (the requirement list,
+    ADR-0031 principle 3), like the baseline's metrics it reads.
 
     Pre-checks (inputs):
 
@@ -1381,9 +1353,6 @@ def compare_to_baseline(
                        payload=baseline_metrics,
                        produced_by="compute_baseline_metrics"),
     ], parameters)
-    if baseline_metrics.get("enabled") is False:
-        logger.info("Baseline section disabled — writing the comparison stub")
-        return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
     missing = [f"{name} ({key})"
                for name, bundle in (("evaluation_metrics", evaluation_metrics),
                                     ("baseline_metrics", baseline_metrics))
@@ -1401,7 +1370,6 @@ def compare_to_baseline(
     # at every grain both computed, every K included; which cells a table
     # shows is resolve_display_ks' to cut.
     comparison = compare_metric_results(evaluation_metrics, baseline_metrics)
-    comparison["enabled"] = True
     comparison["config_fingerprint"] = fingerprint(parameters)
     # The baseline re-scores the model's rows and counts off their row facts,
     # so the two agree on all four annotations by construction (decision 4,
@@ -1426,8 +1394,9 @@ def compare_to_baseline(
 
 def resolve_display_ks(
     evaluation_metrics: dict,
-    baseline_comparison: dict,
     parameters: dict,
+    *,
+    baseline_comparison: Optional[dict] = None,
 ) -> dict:
     """The K columns each table of the main report shows, cut at what
     ``"all"`` stands for in the result it is drawn from (bug 8, ADR-0020;
@@ -1445,22 +1414,29 @@ def resolve_display_ks(
     draw. Unfingerprinted, ``--only-node generate_report`` would draw the old
     columns under the new setting, exit code 0.
 
-    Pre-checks (inputs): both results were computed under today's computed
-    settings (``require_computed_with_current_config``), and the metrics
-    carry the ledger the cut reads ``"all"`` off
-    (``comparison_layer.ledger_keys_missing``, the comparison's own check:
-    with the popularity-baseline section off the comparison is a stub and
-    checked nothing; re-run from ``compute_row_facts``, why in
-    ``compare_to_baseline``).
+    ``baseline_comparison`` is wired only while the popularity-baseline
+    section is on (the requirement list, ADR-0031 principle 3); without it
+    there is no baseline block to cut, and the result's
+    ``baseline_comparison`` is ``None``. Keyword-only: it used to be the
+    second positional parameter, and a call still passing
+    ``(metrics, comparison, parameters)`` must fail rather than read the
+    comparison as the settings (``known-pitfalls.md`` §12).
+
+    Pre-checks (inputs): the results it reads were computed under today's
+    computed settings (``require_computed_with_current_config``), and the
+    metrics carry the ledger the cut reads ``"all"`` off
+    (``comparison_layer.ledger_keys_missing``, the comparison's own check,
+    repeated here because without the baseline section no comparison runs
+    it; re-run from ``compute_row_facts``, why in ``compare_to_baseline``).
     """
-    require_computed_with_current_config([
-        LoadedArtifact(catalog_name="evaluation_metrics",
-                       payload=evaluation_metrics,
-                       produced_by="compute_metrics"),
-        LoadedArtifact(catalog_name="baseline_comparison",
-                       payload=baseline_comparison,
-                       produced_by="compare_to_baseline"),
-    ], parameters)
+    loaded = [LoadedArtifact(catalog_name="evaluation_metrics",
+                             payload=evaluation_metrics,
+                             produced_by="compute_metrics")]
+    if baseline_comparison is not None:
+        loaded.append(LoadedArtifact(catalog_name="baseline_comparison",
+                                     payload=baseline_comparison,
+                                     produced_by="compare_to_baseline"))
+    require_computed_with_current_config(loaded, parameters)
     missing = ledger_keys_missing(evaluation_metrics)
     if missing:
         raise ValueError(
@@ -1486,7 +1462,7 @@ def resolve_display_ks(
     # (the comparison's all_k annotation says so). None while the section is
     # off: nothing is drawn.
     baseline_block = None
-    if baseline_comparison.get("enabled") is not False:
+    if baseline_comparison is not None:
         compared_category = baseline_comparison["category"]
         baseline_block = baseline_comparison_block(
             baseline_comparison[POPULATION_KEY][ALL_K_KEY][THIS],
@@ -1504,69 +1480,62 @@ def resolve_display_ks(
     return out
 
 
-def generate_report(
-    evaluation_row_facts: dict,
-    evaluation_metrics: dict,
-    baseline_metrics: dict,
-    evaluation_report_aggregates: dict,
-    prediction_quality_metrics: dict,
-    baseline_comparison: dict,
-    evaluation_display_ks: dict,
-    parameters: dict,
-) -> str:
-    """Build the HTML report from the landed results, wired by name
-    (ADR-0030 decision 8); each parameter is named after its catalog entry.
-    The rank-distribution section (名次分布, when enabled) reads the
-    already-aggregated Spark JSON from ``compute_report_aggregates`` (Plan
-    1.5) so this function stays pure — no SparkDataFrame in the signature, no
-    Spark action in the body. The differences the popularity-baseline section
-    prints are ``baseline_comparison``'s and every table's K columns
-    ``evaluation_display_ks``' (#536): the report takes no difference and
-    cuts no K itself (ADR-0031 principle 1).
+#: The settings a landed result's fingerprint carries on top of the computed
+#: ones, by catalog name: the K cut's display keys (``resolve_display_ks``).
+_EXTRA_FINGERPRINT_KEYS = {"evaluation_display_ks": DISPLAY_KEYS_READ}
 
-    Pre-check (inputs): every result was computed with the current computed
-    settings (``steps.config_fingerprint``) — and the K cut also with the
-    current display keys it read (``display_ks.DISPLAY_KEYS_READ``). All of
-    them are landed JSON (ADR-0018 decision 2), and ``--only-node
-    generate_report`` stops at "the JSON exists", so without this a setting
-    changed since the last run is drawn from the old JSON with exit code 0
-    (ADR-0020 bug 2); with it the run raises, naming the key and the node to
-    ``--from-node``: ``resolve_display_ks`` when only a display key it read
-    moved. The other drawn keys still redraw without recomputing anything.
+
+def make_generate_report_node(producers: Mapping[str, str]):
+    """The main report's node, for the results this run's switched-on
+    sections read: ``producers`` maps each to the node that lands it
+    (``pipeline.create_pipeline`` reads both off the requirement list and
+    its own wiring), the node a stale one sends the re-run to.
+
+    Built per run because what it reads is (ADR-0031 principle 3, #538): a
+    switched-off section's result is neither computed nor loaded, so no
+    ``{"enabled": false}`` stub stands in for it, and a file an older run
+    left behind for it is never read.
     """
-    loaded = [
-        LoadedArtifact(catalog_name="evaluation_row_facts",
-                       payload=evaluation_row_facts,
-                       produced_by="compute_row_facts"),
-        LoadedArtifact(catalog_name="evaluation_metrics",
-                       payload=evaluation_metrics,
-                       produced_by="compute_metrics"),
-        LoadedArtifact(catalog_name="baseline_metrics",
-                       payload=baseline_metrics,
-                       produced_by="compute_baseline_metrics"),
-        LoadedArtifact(catalog_name="evaluation_report_aggregates",
-                       payload=evaluation_report_aggregates,
-                       produced_by="compute_report_aggregates"),
-        LoadedArtifact(catalog_name="prediction_quality_metrics",
-                       payload=prediction_quality_metrics,
-                       produced_by="compute_prediction_quality"),
-        LoadedArtifact(catalog_name="baseline_comparison",
-                       payload=baseline_comparison,
-                       produced_by="compare_to_baseline"),
-        LoadedArtifact(catalog_name="evaluation_display_ks",
-                       payload=evaluation_display_ks,
-                       produced_by="resolve_display_ks",
-                       extra_keys=DISPLAY_KEYS_READ),
-    ]
-    require_computed_with_current_config(loaded, parameters)
-    # Decision — hand the report one bundle of results keyed by catalog name
-    # (ADR-0031 principle 1): each section takes the names it declares, so a
-    # new result reaches its section without passing through every signature
-    # on the way. The bundle lives only here; each result already landed.
-    return assemble_report(
-        {artifact.catalog_name: artifact.payload for artifact in loaded},
-        parameters,
-    )
+
+    def generate_report(parameters: dict, **results: dict) -> str:
+        """Build the HTML report from the landed results, wired by name
+        (ADR-0030 decision 8): each keyword is a catalog entry, and only the
+        entries the switched-on sections read are passed. The
+        rank-distribution section reads the already-aggregated Spark JSON
+        from ``compute_report_aggregates`` (Plan 1.5) so this function stays
+        pure — no SparkDataFrame in the signature, no Spark action in the
+        body. The differences the popularity-baseline section prints are
+        ``baseline_comparison``'s and every table's K columns
+        ``evaluation_display_ks``' (#536): the report takes no difference and
+        cuts no K itself (ADR-0031 principle 1).
+
+        Pre-check (inputs): every result was computed with the current
+        computed settings (``steps.config_fingerprint``) — and the K cut
+        also with the current display keys it read
+        (``display_ks.DISPLAY_KEYS_READ``). All of them are landed JSON
+        (ADR-0018 decision 2), and ``--only-node generate_report`` stops at
+        "the JSON exists", so without this a setting changed since the last
+        run is drawn from the old JSON with exit code 0 (ADR-0020 bug 2);
+        with it the run raises, naming the key and the node to
+        ``--from-node``: ``resolve_display_ks`` when only a display key it
+        read moved. The other drawn keys still redraw without recomputing
+        anything.
+        """
+        loaded = [
+            LoadedArtifact(catalog_name=name, payload=payload,
+                           produced_by=producers[name],
+                           extra_keys=_EXTRA_FINGERPRINT_KEYS.get(name, ()))
+            for name, payload in results.items()
+        ]
+        require_computed_with_current_config(loaded, parameters)
+        # Decision — hand the report one bundle of results keyed by catalog
+        # name (ADR-0031 principle 1): each section takes the names it
+        # declares, so a new result reaches its section without passing
+        # through every signature on the way. The bundle lives only here;
+        # each result already landed.
+        return assemble_report(results, parameters)
+
+    return generate_report
 
 
 def load_compare_predictions(parameters: dict) -> SparkDataFrame:

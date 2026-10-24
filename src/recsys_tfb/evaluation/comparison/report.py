@@ -28,6 +28,7 @@ from recsys_tfb.evaluation.report_sections.metric_tables import (
 from recsys_tfb.evaluation.report_sections.shared import (
     eval_dates_display,
     results_read_by,
+    sections_on,
 )
 
 #: The comparison report's sections, in page order (ADR-0031 decision 16
@@ -73,7 +74,7 @@ def assemble_comparison_report(
     the results were computed against, ``compare_source_identity``).
     """
     sections = []
-    for section in SECTIONS:
+    for section in sections_on(SECTIONS, parameters):
         built = section.build(
             results_read_by(section.__name__, section.READS, results),
             parameters)

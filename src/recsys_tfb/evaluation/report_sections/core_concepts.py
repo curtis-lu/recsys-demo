@@ -45,6 +45,10 @@ from recsys_tfb.report.types import (
 #: query groups they scored.
 READS = ("evaluation_row_facts", "evaluation_metrics")
 
+#: No switch turns this section off (ADR-0031 principle 3:
+#: ``shared.sections_on``).
+SWITCH = None
+
 #: The heading, its English and the question the section answers; the
 #: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
 #: decision 16).

@@ -24,6 +24,7 @@ from recsys_tfb.evaluation.report_sections.shared import (
     refuse_pre_ledger,
     refuse_pre_rename_per_item,
     results_read_by,
+    sections_on,
 )
 
 #: The main report's sections, in page order (ADR-0031 decision 16 item 4).
@@ -51,14 +52,16 @@ TITLE_EN = "Model Evaluation Report"
 
 
 def assemble_report(results: Mapping[str, dict], parameters: dict) -> str:
-    """Assemble every enabled section, in ``SECTIONS`` order, into the final
-    HTML string.
+    """Assemble every switched-on section (``shared.sections_on``), in
+    ``SECTIONS`` order, into the final HTML string.
 
     ``results`` holds the landed results by catalog name (``generate_report``
-    builds it). Each section gets the ones it declares in ``READS`` and no
-    other, so a section reading a result it did not declare fails here rather
-    than drifting from its declaration. A section returns ``None`` when its
-    switch is off or it has nothing to show. Before any section, a metrics
+    builds it): what the switched-on sections read, the evaluation
+    pipeline's requirement list, and nothing else — a switched-off section's
+    result was not computed. Each section gets the ones it declares in
+    ``READS`` and no other, so a section reading a result it did not declare
+    fails here rather than drifting from its declaration. A section returns
+    ``None`` when it has nothing to show. Before any section, a metrics
     bundle written before the per-item ``recall@K`` rename
     (``refuse_pre_rename_per_item``) or before the population ledger
     (``refuse_pre_ledger``) is refused, and so is a result landed before it
@@ -77,7 +80,7 @@ def assemble_report(results: Mapping[str, dict], parameters: dict) -> str:
         refuse_pre_ledger(name, results.get(name))
     refuse_pre_landed_reads(results)
     sections = []
-    for section in SECTIONS:
+    for section in sections_on(SECTIONS, parameters):
         built = section.build(
             results_read_by(section.__name__, section.READS, results),
             parameters)

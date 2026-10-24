@@ -376,12 +376,6 @@ def test_no_ledger_no_totals_no_verdict(spark):
     assert f"{facts['n_queries']} " not in text
 
 
-def test_switched_off_the_section_is_not_drawn(spark):
-    results, parameters = landed.results(spark)
-    parameters["evaluation"]["report"]["sections"] = {"ranking_metrics": False}
-    assert ranking_metrics.build(results, parameters) is None
-
-
 def test_shown_ks_resolves_all_and_keeps_each_k_once():
     assert ranking_metrics.shown_ks([1, 2, 3, 4, "all"], 4) == [1, 2, 3, 4]
     assert ranking_metrics.shown_ks([1, 3, "all"], 6) == [1, 3, 6]

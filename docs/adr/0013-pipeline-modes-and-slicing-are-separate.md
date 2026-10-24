@@ -92,3 +92,5 @@ preset 只寫兩個節點名這件事，需要一整段關於 producer map 的�
 ### 修訂（2026-10-21，ADR-0031）
 
 evaluation 的 `create_pipeline` 要從「明列要跑哪些 node」改成「由各計算單元的宣告推導」（[ADR-0031](0031-evaluation-second-pass-layers-and-single-source.md) 原則 3）。模式參數與切片分開這件事不變；變的是 evaluation 組出節點集的方式。細節與預設做法見 ADR-0031 決定 15。
+
+#538 實作時改成由**報表段**的宣告推導（段的 `READS` 與 `SWITCH`），不是由計算單元宣告開關；理由見 ADR-0031 原則 3 底下的更正。

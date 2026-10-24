@@ -207,10 +207,8 @@ def _compute(spark, p: dict, *, unmatched: bool = False,
     quality = {**build_payload(
         binned, item_col="prod_name", score_col="score", label_col="label",
         weight_col=weight_col, n_bins=pq_cfg["n_bins"],
-        n_display_bins=pq_cfg["n_display_bins"], top_n=pq_cfg["top_n"]),
-        "enabled": True}
-    display_ks = resolve_display_ks(
-        _stamped(metrics, p), _stamped({"enabled": False}, p), p)
+        n_display_bins=pq_cfg["n_display_bins"], top_n=pq_cfg["top_n"])}
+    display_ks = resolve_display_ks(_stamped(metrics, p), p)
     return {
         "evaluation_row_facts": facts,
         "evaluation_metrics": metrics,

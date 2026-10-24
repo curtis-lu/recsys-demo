@@ -11,7 +11,6 @@ from recsys_tfb.evaluation.report import ReportSection
 from recsys_tfb.evaluation.report_sections.shared import (
     kept_ratio_phrase,
     read_dataset_overview,
-    section_on,
     unmatched_last,
     zero_positive_draw_on_test,
 )
@@ -20,6 +19,10 @@ from recsys_tfb.report.types import Column, Note, Paragraph, Row, Table
 
 #: The results this section reads, by catalog name (ADR-0031 principle 1).
 READS = ("evaluation_row_facts",)
+
+#: The ``evaluation.report.sections`` switch that turns this section off
+#: (ADR-0031 principle 3: off, the pipeline computes nothing only it reads).
+SWITCH = "data_stats"
 
 #: The heading, its English and the question the section answers; the
 #: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
@@ -44,8 +47,6 @@ _COMPOSITION_COLUMNS = (
 def build(
     results: Mapping[str, dict], parameters: dict
 ) -> ReportSection | None:
-    if not section_on(parameters, "data_stats"):
-        return None
     facts = results["evaluation_row_facts"]
     ov = read_dataset_overview(facts)
     totals = ov.get("totals", {}) or {}

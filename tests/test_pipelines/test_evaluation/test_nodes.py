@@ -1107,23 +1107,6 @@ class TestComputeBaselineMetrics:
             "C": {"2024-06": 0, "2025-01": 0},
         }
 
-    def test_returns_a_fingerprinted_stub_when_section_disabled(self):
-        """Not ``None``: a ``null`` JSON cannot carry the fingerprint, and
-        ``generate_report`` would then refuse it as unfingerprinted. Returns
-        before touching either DataFrame, hence no Spark session."""
-        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
-        from recsys_tfb.pipelines.evaluation.nodes import (
-            compute_baseline_metrics,
-        )
-
-        params = self._parameters(baseline_section=False)
-        result = compute_baseline_metrics(
-            None, None, None, _no_segments(params), params)
-        assert result == {
-            "enabled": False, "config_fingerprint": fingerprint(params),
-        }
-
-
 class TestCompareToBaseline:
     """The comparison layer (#536, ADR-0031 decisions 4 and 5) and its first
     node, ``compare_to_baseline``: two results as the metrics nodes compute
@@ -1218,23 +1201,6 @@ class TestCompareToBaseline:
             "this": three["per_item"]["C"]["recall@1"], "reference": None,
             "diff": None}
         assert out["per_item"]["entries"] == {"this": 3, "reference": 2}
-
-    def test_a_switched_off_baseline_lands_a_stub(self, spark):
-        from recsys_tfb.pipelines.evaluation.nodes import (
-            compute_baseline_metrics,
-            compare_to_baseline,
-        )
-        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
-            fingerprint,
-        )
-
-        params = TestComputeBaselineMetrics._parameters(baseline_section=False)
-        frame = TestComputeBaselineMetrics._eval_predictions(spark)
-        metrics = self._metrics(spark, frame, params)
-        stub = compute_baseline_metrics(
-            None, None, None, _no_segments(params), params)
-        assert compare_to_baseline(metrics, stub, params) == {
-            "enabled": False, "config_fingerprint": fingerprint(params)}
 
     def test_inputs_computed_under_other_settings_are_refused(self, spark):
         """Unchecked, ``--only-node compare_to_baseline`` after a setting
@@ -1352,7 +1318,8 @@ class TestResolveDisplayKs:
         metrics, baseline = TestCompareToBaseline._model_and_baseline(
             spark, params)
         return resolve_display_ks(
-            metrics, compare_to_baseline(metrics, baseline, params), params)
+            metrics, params,
+            baseline_comparison=compare_to_baseline(metrics, baseline, params))
 
     def test_each_list_drops_the_k_above_what_all_stands_for(self, spark):
         """bug 8 (ADR-0020): an int K above ``"all"`` is dropped, ``"all"``
@@ -1416,19 +1383,15 @@ class TestResolveDisplayKs:
         assert configured_compare_k({"evaluation": {}}) == list(
             EVALUATION_K_VALUES_DEFAULT)
 
-    def test_a_switched_off_baseline_has_no_lists(self, spark):
-        from recsys_tfb.pipelines.evaluation.nodes import (
-            compare_to_baseline,
-            compute_baseline_metrics,
-            resolve_display_ks,
-        )
+    def test_without_the_comparison_the_baseline_has_no_lists(self, spark):
+        """The popularity-baseline section off, the pipeline wires no
+        comparison (#538): the cut still lands the metrics section's K."""
+        from recsys_tfb.pipelines.evaluation.nodes import resolve_display_ks
 
         params = TestComputeBaselineMetrics._parameters(baseline_section=False)
         frame = TestComputeBaselineMetrics._eval_predictions(spark)
         metrics = TestCompareToBaseline._metrics(spark, frame, params)
-        stub = compare_to_baseline(metrics, compute_baseline_metrics(
-            None, None, None, _no_segments(params), params), params)
-        out = resolve_display_ks(metrics, stub, params)
+        out = resolve_display_ks(metrics, params)
         assert out.get("baseline_comparison", "absent") is None
         # The ranking-metrics section's K still land: k_values [1, 2, 3] ∪ all,
         # cut at 3.
@@ -1448,7 +1411,7 @@ class TestResolveDisplayKs:
         now = self._parameters([1])
         now["evaluation"]["metric"] = {"min_positives": 1}
         with pytest.raises(ValueError) as exc:
-            resolve_display_ks(metrics, comparison, now)
+            resolve_display_ks(metrics, now, baseline_comparison=comparison)
         assert "baseline_comparison (written by compare_to_baseline)" in str(
             exc.value)
         assert "--from-node compute_row_facts" in str(exc.value)
@@ -1600,24 +1563,6 @@ class TestComputePredictionQuality:
             "rank": [1, 2, 3, 3, 1, 2, 1, 2, 3],
         })), TestComputeBaselineMetrics._parameters(), [])
 
-    @pytest.mark.parametrize("section", [False, None])
-    def test_returns_a_fingerprinted_stub_unless_switched_on(self, section):
-        """Off in the framework's conf, and off when no conf says anything
-        (``None`` leaves the key out). Returns before touching the frame."""
-        from recsys_tfb.pipelines.evaluation.nodes import (
-            compute_prediction_quality,
-        )
-        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
-            fingerprint,
-        )
-
-        params = self._parameters(section=section)
-        if section is None:
-            del params["evaluation"]["report"]["sections"]["prediction_quality"]
-        result = compute_prediction_quality(None, None, params)
-        assert result == {
-            "enabled": False, "config_fingerprint": fingerprint(params)}
-
     def test_counts_the_query_group_without_a_positive(self, spark):
         """ADR-0024 decision 3: nothing between the partition and the bins
         filters on ``total_rel``; c3's three negatives are in every count."""
@@ -1651,7 +1596,6 @@ class TestComputePredictionQuality:
         assert result["bins"]["width"] == pytest.approx(0.1)
         assert len(result["per_item"]["listed"]) == 1
         assert result["per_item"]["n_items"] == 3
-        assert result["enabled"] is True
         assert result["config_fingerprint"] == fingerprint(params)
 
     def test_lands_the_display_bins_and_the_sweep_the_report_draws(
@@ -1825,17 +1769,6 @@ class TestComputePredictionQuality:
         assert result["overall"]["summary"]["n"] == 9
 
 
-def test_compute_report_aggregates_disabled_returns_fingerprinted_stub():
-    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
-    from recsys_tfb.pipelines.evaluation.nodes import (
-        compute_report_aggregates,
-    )
-    params = {"evaluation": {"report": {"sections": {"rank_distribution": False}}}}
-    assert compute_report_aggregates(None, None, params) == {
-        "enabled": False, "config_fingerprint": fingerprint(params),
-    }
-
-
 class TestConsumersSegmentByTheLandedList:
     """Every node that groups by segment reads ``evaluation_segment_columns``
     (ADR-0020 bug 6). The frame here also carries ``stale_seg``, all NULL, as
@@ -1970,7 +1903,7 @@ class TestConsumersSegmentByTheLandedList:
         from recsys_tfb.pipelines.evaluation import create_pipeline
 
         node = next(
-            n for n in create_pipeline(compare_source={
+            n for n in create_pipeline(parameters={}, compare_source={
                 "kind": "model_version", "model_version": "v0"}).nodes
             if n.name == "compute_compare_metrics")
         frame = self._frame(spark)
@@ -2558,8 +2491,8 @@ class TestAllPositiveQueryGroups:
             "evaluation_row_facts": facts, "evaluation_metrics": metrics,
             "prediction_quality_metrics": None,
             "evaluation_display_ks": resolve_display_ks(
-                metrics, compare_to_baseline(
-                    metrics, self._baseline(spark, True), params), params),
+                metrics, params, baseline_comparison=compare_to_baseline(
+                    metrics, self._baseline(spark, True), params)),
         }
         totals = {r.label: r.cells[0] for r in core_concepts.build(
             results, params).blocks[-1].rows}

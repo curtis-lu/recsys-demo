@@ -96,12 +96,14 @@ def _with_landed(results: dict, parameters: dict) -> dict:
             None if metrics is None or baseline is None else
             compare_to_baseline(_stamped(metrics, parameters),
                                 _stamped(baseline, parameters), parameters))
-    if "evaluation_display_ks" not in out:
-        comparison = out["baseline_comparison"] or {"enabled": False}
+    if "evaluation_display_ks" not in out and metrics is not None:
+        comparison = out["baseline_comparison"]
         out["evaluation_display_ks"] = (
-            None if metrics is None else
-            resolve_display_ks(_stamped(metrics, parameters),
-                               _stamped(comparison, parameters), parameters))
+            resolve_display_ks(_stamped(metrics, parameters), parameters)
+            if comparison is None else
+            resolve_display_ks(
+                _stamped(metrics, parameters), parameters,
+                baseline_comparison=_stamped(comparison, parameters)))
     return out
 
 
@@ -111,10 +113,34 @@ def _draw(section, results: dict, parameters: dict):
     return section.build(_with_landed(results, parameters), parameters)
 
 
+#: The results only one switched section reads, and its switch.
+_SWITCH_OF = {"baseline_metrics": "popularity_baseline",
+              "evaluation_report_aggregates": "rank_distribution",
+              "prediction_quality_metrics": "prediction_quality"}
+
+
+def _as_the_pipeline_wires(results: dict, parameters: dict) -> dict:
+    """``parameters`` with the switch of each result of :data:`_SWITCH_OF`
+    set the way the test's ``results`` say, unless the test set it: a result
+    left ``None`` is a section this run does not draw — the pipeline neither
+    computes nor passes its result (#538) — and a result given is one it
+    does."""
+    import copy
+
+    params = copy.deepcopy(parameters)
+    sections = (params.setdefault("evaluation", {})
+                .setdefault("report", {}).setdefault("sections", {}))
+    for name, switch in _SWITCH_OF.items():
+        sections.setdefault(switch, results.get(name) is not None)
+    return params
+
+
 def _assemble(results: dict, parameters: dict) -> str:
     """``rb.assemble_report`` on ``results`` and what the nodes land off them
-    (:func:`_with_landed`)."""
-    return rb.assemble_report(_with_landed(results, parameters), parameters)
+    (:func:`_with_landed`), the switches set as the results say
+    (:func:`_as_the_pipeline_wires`)."""
+    params = _as_the_pipeline_wires(results, parameters)
+    return rb.assemble_report(_with_landed(results, params), params)
 
 
 def _params():
@@ -250,30 +276,25 @@ def test_section_on_refuses_a_name_outside_the_declared_set():
 def test_every_listed_section_is_read_by_the_report():
     """The third side of A34 (ADR-0019 decision 6). A34 keeps the YAML equal to
     ``EVALUATION_REPORT_SECTIONS`` and ``section_on`` keeps the report's names
-    inside it, but neither notices a name left in the constant after its
-    ``section_on`` call is deleted: a dead switch again, everything green.
-    The names here come from the call sites in the source, not from the
-    constant: every module of ``report_sections`` and the assembler, globbed
-    so a section added later is scanned too."""
-    import ast
+    inside it, but neither notices a name left in the constant after the
+    section that declared it is deleted: a dead switch again, everything
+    green. The names here come from the sections' ``SWITCH`` declarations
+    (#538), not from the constant: every section of the page-order list,
+    and every module of ``report_sections`` that declares one, globbed so a
+    section left out of the list is caught too."""
+    import importlib
     from pathlib import Path
 
     from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
 
-    sources = [Path(rb.__file__),
-               *Path(shared.__file__).parent.glob("*.py")]
-    read = set()
-    for source in sources:
-        for node in ast.walk(ast.parse(source.read_text())):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                    and node.func.id == "section_on"):
-                name = node.args[1]
-                assert isinstance(name, ast.Constant) and isinstance(
-                    name.value, str
-                ), (f"section_on call at {source.name}:{node.lineno} has no "
-                    "literal name")
-                read.add(name.value)
-    assert read == EVALUATION_REPORT_SECTIONS
+    listed = {s.SWITCH for s in rb.SECTIONS if s.SWITCH is not None}
+    declared = set()
+    for source in Path(shared.__file__).parent.glob("*.py"):
+        module = importlib.import_module(
+            f"recsys_tfb.evaluation.report_sections.{source.stem}")
+        if getattr(module, "SWITCH", None) is not None:
+            declared.add(module.SWITCH)
+    assert listed == declared == EVALUATION_REPORT_SECTIONS
 
 
 # ---- Task 6: per-item 細部拆解 ----
@@ -442,13 +463,12 @@ class TestPreLedgerRefused:
                                baseline_metrics=baseline,
                                **self._NOT_LANDED), _params())
 
-    def test_the_baseline_stub_carries_no_ledger_and_passes(self):
-        """Section off: ``compute_baseline_metrics`` writes a stub, not a
-        bundle."""
-        html = _assemble(_results(
-            evaluation_metrics=_metrics(),
-            baseline_metrics={"enabled": False}), _params())
+    def test_no_baseline_with_the_section_off_passes(self):
+        """Section off: the pipeline computes no baseline and passes none
+        (#538); there is no bundle to check."""
+        html = _assemble(_results(evaluation_metrics=_metrics()), _params())
         assert html.startswith("<!DOCTYPE html>")
+        assert 'id="s-popularity_baseline"' not in html
 
 
 class TestPreLandedReadsRefused:
@@ -511,6 +531,28 @@ def test_assemble_report_is_html():
 def _section_ids(html: str) -> list[str]:
     """The sections' HTML ids, in page order."""
     return re.findall(r'<(?:div|details) class="section" id="([^"]+)"', html)
+
+
+def test_a_switched_off_section_is_not_on_the_page():
+    """Every switch, alone off, takes its own section off the page and no
+    other (``shared.sections_on``): the assembler decides, the section reads
+    no switch (#538, ADR-0031 principle 3)."""
+    from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
+
+    every = _results(evaluation_metrics=_metrics(),
+                     baseline_metrics=_baseline_metrics_full(),
+                     evaluation_report_aggregates=_report_aggregates(),
+                     prediction_quality_metrics=_pq_payload())
+    switched = [s for s in rb.SECTIONS if s.SWITCH is not None]
+    assert {s.SWITCH for s in switched} == EVALUATION_REPORT_SECTIONS
+    for section in switched:
+        params = _params()
+        params["evaluation"]["report"]["sections"] = {
+            **dict.fromkeys(EVALUATION_REPORT_SECTIONS, True),
+            section.SWITCH: False}
+        ids = _section_ids(_assemble(every, params))
+        assert ids == [f"s-{s.SWITCH or s.__name__.rsplit('.', 1)[1]}"
+                       for s in rb.SECTIONS if s is not section], ids
 
 
 def test_assemble_report_spine_order():

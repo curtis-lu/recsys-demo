@@ -233,11 +233,10 @@ def test_the_description_points_only_to_core_concepts(spark):
         assert other not in text, other
 
 
-def test_not_drawn_when_off_or_without_the_distribution_family(spark):
-    results, parameters = landed.results(spark)
-    parameters["evaluation"]["report"]["sections"] = {
-        "rank_distribution": False}
-    assert rank_distribution.build(results, parameters) is None
+def test_not_drawn_without_the_distribution_family(spark):
+    """Whether the section is on is the assembler's (``shared.sections_on``,
+    ``test_report_builder``); on, it still draws nothing off a file without
+    the distributions."""
     results, parameters = landed.results(spark)
     # A report_aggregates.json from before #381: only the calibration bins.
     results["evaluation_report_aggregates"] = {

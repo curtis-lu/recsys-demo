@@ -14,6 +14,10 @@ from recsys_tfb.report.types import Bullets, Column, Paragraph, Row, Table
 #: 核心概念's (ADR-0031 decision 16 item 12).
 READS = ("evaluation_metrics",)
 
+#: No switch turns this section off (ADR-0031 principle 3:
+#: ``shared.sections_on``).
+SWITCH = None
+
 #: The heading, its English and the question the section answers; the
 #: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
 #: decision 16).

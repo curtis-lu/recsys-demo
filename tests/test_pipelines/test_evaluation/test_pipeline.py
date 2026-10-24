@@ -7,6 +7,121 @@ import textwrap
 from recsys_tfb.pipelines.evaluation import create_pipeline
 
 
+def _sections(**switches):
+    """``parameters`` with ``evaluation.report.sections`` set: every switch
+    on, then ``switches`` on top."""
+    from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
+
+    return {"evaluation": {"report": {"sections": {
+        **{name: True for name in EVALUATION_REPORT_SECTIONS}, **switches}}}}
+
+
+#: Every report section on: the widest main line, the shape the mode tests
+#: below pin.
+ALL_ON = _sections()
+
+
+class TestTheRequirementList:
+    """ADR-0031 principle 3: the switched-on report sections say which
+    results this run needs, and only the nodes that produce them (and what
+    those read) are in the pipeline. No node reads a switch of its own."""
+
+    MODES = {
+        "monitoring": {},
+        "post-training": {"post_training": True},
+        "post-training score: rate": {"post_training": True,
+                                      "baseline_rate": True},
+        "--compare": {"compare_source": {"kind": "hive",
+                                         "model_version": "v1"}},
+    }
+
+    @staticmethod
+    def _names(parameters, **kwargs):
+        return {n.name for n in create_pipeline(parameters=parameters,
+                                                **kwargs).nodes}
+
+    def test_a_section_switched_off_leaves_out_its_computation(self):
+        for label, kwargs in self.MODES.items():
+            names = self._names(_sections(prediction_quality=False), **kwargs)
+            assert "compute_prediction_quality" not in names, label
+            assert "compute_prediction_quality" in self._names(
+                ALL_ON, **kwargs), label
+
+    #: What each switch, alone off, takes out of the pipeline: the nodes
+    #: whose results only that section reads. Written out, not derived, so
+    #: a change in what a section reads has to be made here on purpose.
+    LEFT_OUT = {
+        "prediction_quality": {"compute_prediction_quality"},
+        "rank_distribution": {"compute_report_aggregates"},
+        "popularity_baseline": {"compute_baseline_metrics",
+                                "compare_to_baseline"},
+        # The row facts are read by 核心概念 too, the metrics and the K cut
+        # by other sections: nothing goes.
+        "data_stats": set(),
+        "ranking_metrics": set(),
+    }
+
+    def test_each_switch_leaves_out_only_what_its_section_alone_reads(self):
+        from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
+
+        assert set(self.LEFT_OUT) == EVALUATION_REPORT_SECTIONS
+        for label, kwargs in self.MODES.items():
+            every = self._names(ALL_ON, **kwargs)
+            for switch, expected in self.LEFT_OUT.items():
+                if switch == "popularity_baseline" and kwargs.get("baseline_rate"):
+                    expected = expected | {"build_popularity_period_counts"}
+                gone = every - self._names(_sections(**{switch: False}),
+                                           **kwargs)
+                assert gone == expected, (label, switch, sorted(gone))
+
+    def test_every_switch_off_leaves_the_sections_without_one(self):
+        """概覽、核心概念、完整性檢查 have no switch: their results stay."""
+        off = _sections(**dict.fromkeys(self.LEFT_OUT, False))
+        assert self._names(off) == {
+            "prepare_eval_data", "compute_row_facts", "compute_metrics",
+            "generate_report"}
+
+    def test_a_section_removed_from_the_report_takes_its_computation(
+            self, monkeypatch):
+        """ADR-0031 decision 1, third row: remove a section's line from the
+        page-order list, and its computation is not in the pipeline — its
+        switch still on, nothing else changed."""
+        from recsys_tfb.evaluation import report_builder
+        from recsys_tfb.evaluation.report_sections import prediction_quality
+
+        monkeypatch.setattr(report_builder, "SECTIONS", tuple(
+            s for s in report_builder.SECTIONS if s is not prediction_quality))
+        for label, kwargs in self.MODES.items():
+            assert "compute_prediction_quality" not in self._names(
+                ALL_ON, **kwargs), label
+
+    def test_the_requirement_list_names_no_computation(self):
+        """It collects the sections' declarations; which node produces a
+        result is the wiring's. A node named in it would have to be kept in
+        step by hand (ADR-0031 principle 3)."""
+        from recsys_tfb.pipelines.evaluation.pipeline import required_results
+
+        source = inspect.getsource(required_results)
+        every_node = set().union(*(
+            self._names(ALL_ON, **kwargs) for kwargs in (
+                *self.MODES.values(), TestNoDiagnosisInAnyMode.COMPARE_ONLY)))
+        assert len(every_node) > 15, sorted(every_node)
+        assert sorted(n for n in every_node if n in source) == []
+
+    def test_no_node_reads_a_section_switch(self):
+        """The pipeline decides what runs; a node that read a switch would
+        decide again, and could disagree (ADR-0031 principle 3)."""
+        readers = []
+        for kwargs in (*self.MODES.values(),
+                       TestNoDiagnosisInAnyMode.COMPARE_ONLY):
+            for node in create_pipeline(parameters=ALL_ON, **kwargs).nodes:
+                source = inspect.getsource(node.func)
+                if any(word in source for word in (
+                        '"sections"', "section_on", "prediction_quality_on")):
+                    readers.append(node.name)
+        assert readers == []
+
+
 class TestEvaluationPipelineDefault:
     """Default (post_training=False) — monitoring scenario."""
 
@@ -17,12 +132,12 @@ class TestEvaluationPipelineDefault:
     # name-list check doesn't already provide.
 
     def test_pipeline_reads_ranked_predictions(self):
-        pipeline = create_pipeline()
+        pipeline = create_pipeline(parameters=ALL_ON)
         assert "ranked_predictions" in pipeline.inputs
         assert "training_eval_predictions" not in pipeline.inputs
 
     def test_pipeline_outputs(self):
-        pipeline = create_pipeline()
+        pipeline = create_pipeline(parameters=ALL_ON)
         expected = {
             "evaluation_segment_columns", "evaluation_item_categories",
             "evaluation_row_facts", "evaluation_metrics",
@@ -35,7 +150,7 @@ class TestEvaluationPipelineDefault:
         assert pipeline.outputs == expected
 
     def test_node_names(self):
-        pipeline = create_pipeline()
+        pipeline = create_pipeline(parameters=ALL_ON)
         names = [n.name for n in pipeline.nodes]
         assert names == [
             "prepare_eval_data", "compute_row_facts",
@@ -82,7 +197,7 @@ class TestNoDiagnosisInAnyMode:
 
     def test_no_node_or_dataset_is_a_diagnosis(self):
         for label, kwargs in {**self.MODES, "--compare-only": self.COMPARE_ONLY}.items():
-            pipeline = create_pipeline(**kwargs)
+            pipeline = create_pipeline(parameters=ALL_ON, **kwargs)
             names = {n.name for n in pipeline.nodes}
             datasets = set(pipeline.inputs) | set(pipeline.outputs)
             for n in pipeline.nodes:
@@ -160,28 +275,42 @@ class TestFingerprintRerunNodes:
             (Path(__file__).parents[3] / "conf/base/catalog.yaml").read_text()))
         return lambda name: name in catalog or name == "parameters"
 
+    #: The pipeline's shape follows the settings (#538, ADR-0031 decision 15,
+    #: first row): every switch on, and every switch off.
+    SETTINGS = {"all on": ALL_ON,
+                "all off": _sections(**dict.fromkeys(
+                    TestTheRequirementList.LEFT_OUT, False))}
+
+    def _cases(self):
+        for setting, parameters in self.SETTINGS.items():
+            for label, kwargs in self.MODES.items():
+                yield (f"{label}, {setting}",
+                       create_pipeline(parameters=parameters, **kwargs), kwargs)
+
     def test_every_rerun_node_exists_in_every_mode(self):
-        for label, kwargs in self.MODES.items():
-            names = [n.name for n in create_pipeline(**kwargs).nodes]
+        for label, pipeline, kwargs in self._cases():
+            names = [n.name for n in pipeline.nodes]
             missing = sorted(set(self._rerun_nodes(kwargs)) - set(names))
             assert missing == [], f"[{label}] {missing}"
 
     def test_rerun_nodes_are_listed_in_topological_order(self):
-        for label, kwargs in self.MODES.items():
-            names = [n.name for n in create_pipeline(**kwargs).nodes]
+        for label, pipeline, kwargs in self._cases():
+            names = [n.name for n in pipeline.nodes]
             rerun = self._rerun_nodes(kwargs)
             positions = [names.index(node) for node in rerun]
             assert positions == sorted(positions), f"[{label}] {rerun}"
 
     def test_latest_rerun_node_slice_covers_every_fingerprinted_producer(self):
-        for label, kwargs in self.MODES.items():
-            pipeline = create_pipeline(**kwargs)
+        for label, pipeline, kwargs in self._cases():
             names = [n.name for n in pipeline.nodes]
             latest = max(set(self._rerun_nodes(kwargs)), key=names.index)
             sliced, _plan = pipeline.slice_from(
                 latest, self._memory_only(pipeline))
+            # The producers this run has: a switched-off section's are not
+            # in the pipeline, and nothing reads what they left.
             left_out = sorted(
-                self._producers(kwargs) - {n.name for n in sliced.nodes}
+                (self._producers(kwargs) & set(names))
+                - {n.name for n in sliced.nodes}
             )
             assert left_out == [], (
                 f"[{label}] --from-node {latest} does not re-run {left_out}"
@@ -212,7 +341,7 @@ class TestTheComparisonReRunsOnItsOwn:
 
         assert len(self.MODES) == 4, sorted(self.MODES)
         for label, kwargs in self.MODES.items():
-            pipeline = create_pipeline(**kwargs)
+            pipeline = create_pipeline(parameters=ALL_ON, **kwargs)
             sliced, _plan = pipeline.slice_from(
                 COMPARISON_RERUN_NODE,
                 TestFingerprintRerunNodes._memory_only(pipeline))
@@ -248,7 +377,7 @@ class TestTheKCutComesAfterTheComparison:
 
     def test_the_cut_reads_the_comparison_and_the_report_reads_both(self):
         for label, kwargs in self.MODES.items():
-            pipeline = create_pipeline(**kwargs)
+            pipeline = create_pipeline(parameters=ALL_ON, **kwargs)
             cut = self._ancestors(pipeline, "resolve_display_ks")
             report = self._ancestors(pipeline, "generate_report")
             assert "compare_to_baseline" in cut, label
@@ -264,7 +393,7 @@ class TestTheKCutComesAfterTheComparison:
             if kwargs.get("compare_source")}
         assert len(modes) == 4, sorted(modes)
         for label, kwargs in modes.items():
-            pipeline = create_pipeline(**kwargs)
+            pipeline = create_pipeline(parameters=ALL_ON, **kwargs)
             assert "compute_compare_metrics" in self._ancestors(
                 pipeline, "compare_to_source"), label
             assert "compare_to_source" in self._ancestors(
@@ -305,7 +434,7 @@ class TestEvaluationPipelinePostTraining:
     """post_training=True — read from training_eval_predictions."""
 
     def test_node_names(self):
-        pipeline = create_pipeline(post_training=True)
+        pipeline = create_pipeline(parameters=ALL_ON, post_training=True)
         names = [n.name for n in pipeline.nodes]
         assert names == [
             "prepare_eval_data", "compute_row_facts",
@@ -317,14 +446,14 @@ class TestEvaluationPipelinePostTraining:
         ]
 
     def test_pipeline_reads_training_eval_predictions(self):
-        pipeline = create_pipeline(post_training=True)
+        pipeline = create_pipeline(parameters=ALL_ON, post_training=True)
         assert "training_eval_predictions" in pipeline.inputs
         assert "ranked_predictions" not in pipeline.inputs
 
     def test_pipeline_outputs_match_monitoring(self):
         """Since #532 the modes differ only in the predictions table read."""
-        assert (create_pipeline(post_training=True).outputs
-                == create_pipeline().outputs)
+        assert (create_pipeline(parameters=ALL_ON, post_training=True).outputs
+                == create_pipeline(parameters=ALL_ON).outputs)
 
 
 class TestEvaluationPipelineCompareMode:
@@ -332,7 +461,7 @@ class TestEvaluationPipelineCompareMode:
     reports produced."""
 
     def test_full_node_name_order(self):
-        pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})
+        pipeline = create_pipeline(parameters=ALL_ON, compare_source={"kind": "hive", "model_version": "v1"})
         names = [n.name for n in pipeline.nodes]
         assert names == [
             "prepare_eval_data",
@@ -353,7 +482,7 @@ class TestEvaluationPipelineCompareMode:
         ]
 
     def test_pipeline_outputs_include_comparison_report(self):
-        pipeline = create_pipeline(compare_source={"kind": "hive", "model_version": "v1"})
+        pipeline = create_pipeline(parameters=ALL_ON, compare_source={"kind": "hive", "model_version": "v1"})
         assert "evaluation_comparison_report" in pipeline.outputs
         assert "evaluation_report" in pipeline.outputs
 
@@ -368,12 +497,12 @@ class TestEvaluationPipelineCompareOnly:
     """
 
     def test_pipeline_outputs_only_comparison_report(self):
-        pipeline = create_pipeline(compare_only=True)
+        pipeline = create_pipeline(parameters=ALL_ON, compare_only=True)
         assert "evaluation_comparison_report" in pipeline.outputs
         assert "evaluation_report" not in pipeline.outputs
 
     def test_pipeline_node_names(self):
-        pipeline = create_pipeline(compare_only=True)
+        pipeline = create_pipeline(parameters=ALL_ON, compare_only=True)
         names = [n.name for n in pipeline.nodes]
         assert names == [
             "validate_enriched_eval_predictions_present",
@@ -386,7 +515,7 @@ class TestEvaluationPipelineCompareOnly:
         ]
 
     def test_pipeline_inputs(self):
-        pipeline = create_pipeline(compare_only=True)
+        pipeline = create_pipeline(parameters=ALL_ON, compare_only=True)
         # B copies A's label (ADR-0020 bug 7), so the short path never reads
         # label_table; an input here would be loaded for nothing.
         assert "label_table" not in pipeline.inputs
@@ -395,7 +524,7 @@ class TestEvaluationPipelineCompareOnly:
     def test_the_gate_passes_nothing_on_and_the_restriction_reads_the_table(self):
         """ADR-0018 decision 1: the enriched-partition gate is zero-output, and
         ``restrict_to_common`` reads ``enriched_eval_predictions`` itself."""
-        nodes = {n.name: n for n in create_pipeline(compare_only=True).nodes}
+        nodes = {n.name: n for n in create_pipeline(parameters=ALL_ON, compare_only=True).nodes}
         assert nodes["validate_enriched_eval_predictions_present"].outputs == []
         assert nodes["restrict_to_common"].inputs[0] == "enriched_eval_predictions"
 
@@ -418,7 +547,7 @@ class TestSegmentColumnsWiring:
             ({"post_training": True}, "training_eval_predictions",
              "sample_pool", "inference_population"),
         ):
-            pipeline = create_pipeline(**kwargs)
+            pipeline = create_pipeline(parameters=ALL_ON, **kwargs)
             node = self._node(pipeline, "prepare_eval_data")
             assert node.inputs == [
                 predictions, "label_table", population, "parameters",
@@ -451,7 +580,7 @@ class TestSegmentColumnsWiring:
              "compute_compare_metrics"),
         ]
         for kwargs, name in cases:
-            node = self._node(create_pipeline(**kwargs), name)
+            node = self._node(create_pipeline(parameters=ALL_ON, **kwargs), name)
             assert "evaluation_segment_columns" in node.inputs, (kwargs, name)
             assert self._bound_to(node, "evaluation_segment_columns") == \
                 "segment_columns", (kwargs, name, node.inputs)
@@ -473,7 +602,7 @@ class TestSegmentColumnsWiring:
              "compute_compare_metrics"),
         ]
         for kwargs, name in cases:
-            node = self._node(create_pipeline(**kwargs), name)
+            node = self._node(create_pipeline(parameters=ALL_ON, **kwargs), name)
             assert "evaluation_item_categories" in node.inputs, (kwargs, name)
             assert self._bound_to(node, "evaluation_item_categories") == \
                 "item_categories", (kwargs, name, node.inputs)
@@ -484,7 +613,7 @@ class TestSegmentColumnsWiring:
         against the parameter named ``row_facts``."""
         for kwargs in ({}, {"post_training": True},
                        {"post_training": True, "baseline_rate": True}):
-            pipeline = create_pipeline(**kwargs)
+            pipeline = create_pipeline(parameters=ALL_ON, **kwargs)
             for name in ("compute_metrics", "compute_baseline_metrics"):
                 node = self._node(pipeline, name)
                 params = list(inspect.signature(node.func).parameters)
@@ -629,7 +758,7 @@ class TestEveryEnrichedReaderKeepsTheEvaluatedMonth:
 
     def test_every_reader_in_every_mode_restricts_the_table(self):
         for label, kwargs in self.MODES.items():
-            pipeline = create_pipeline(**kwargs)
+            pipeline = create_pipeline(parameters=ALL_ON, **kwargs)
             readers = [n.name for n in pipeline.nodes
                        if "enriched_eval_predictions" in n.inputs]
             # Guard the scan before trusting its empty answer.
@@ -664,44 +793,49 @@ class TestEveryEnrichedReaderKeepsTheEvaluatedMonth:
 
 class TestGenerateReportNodeWiring:
     """generate_report is wired by name (ADR-0030 decision 8, ADR-0031
-    principle 1): the Node binds each catalog entry to the parameter its
-    ``inputs`` dict names, and the report keys every result by that name.
+    principle 1): the Node passes each catalog entry under the name its
+    ``inputs`` dict gives it, and the report keys every result by that name.
 
-    So the property to pin is that every parameter is named after the entry
-    it is fed: ``{"evaluation_metrics": "baseline_metrics"}`` binds without an
-    error, and the report would draw the baseline where the model's metrics
-    go. And no parameter has a default: an entry left out of the dict would
-    then arrive as the default instead of failing where the Node is built
-    (Plan 1.5; the 2026-07-20 production TypeError was a stale wiring that
-    defaults let through).
+    Since #538 the node takes ``**results``: what it reads depends on which
+    sections are on. So the property to pin is that every entry is passed
+    under its own name — ``{"evaluation_metrics": "baseline_metrics"}`` would
+    bind without an error, and the report would draw the baseline where the
+    model's metrics go — and that ``parameters`` is the one named parameter.
     """
 
-    def test_every_parameter_is_fed_the_entry_it_is_named_after(self):
+    def test_every_entry_is_passed_under_its_own_name(self):
         for kwargs in ({}, {"post_training": True}):
-            node = next(n for n in create_pipeline(**kwargs).nodes
+            node = next(n for n in create_pipeline(parameters=ALL_ON, **kwargs).nodes
                         if n.name == "generate_report")
-            params = inspect.signature(node.func).parameters
             assert node.keyword_inputs is not None, (
                 "generate_report is wired by position again", kwargs)
-            assert node.keyword_inputs == {name: name for name in params}, (
+            assert node.keyword_inputs == {
+                name: name for name in node.keyword_inputs}, (
                 kwargs, node.keyword_inputs)
-            assert not [
-                name for name, p in params.items()
-                if p.default is not inspect.Parameter.empty
-            ], "generate_report grew a defaulted parameter"
+            params = inspect.signature(node.func).parameters
+            assert [(name, p.kind) for name, p in params.items()] == [
+                ("parameters", inspect.Parameter.POSITIONAL_OR_KEYWORD),
+                ("results", inspect.Parameter.VAR_KEYWORD)], kwargs
 
-    def test_the_wired_results_are_the_ones_the_sections_read(self):
-        """A result wired here that no section declares in ``READS`` is
-        loaded for nothing; one a section declares that is not wired fails
-        only when the report is drawn. The two sets are the same."""
+    def test_the_wired_results_are_the_ones_the_switched_on_sections_read(self):
+        """A result wired here that no switched-on section declares in
+        ``READS`` is loaded for nothing — a switched-off section's file left
+        by an older run among them; one a section declares that is not wired
+        fails only when the report is drawn. The two sets are the same."""
         from recsys_tfb.evaluation.report_builder import SECTIONS
+        from recsys_tfb.evaluation.report_sections.shared import sections_on
 
-        read = set().union(*(section.READS for section in SECTIONS))
-        for kwargs in ({}, {"post_training": True}):
-            node = next(n for n in create_pipeline(**kwargs).nodes
-                        if n.name == "generate_report")
-            wired = set(node.keyword_inputs) - {"parameters"}
-            assert wired == read, (kwargs, sorted(wired), sorted(read))
+        for parameters in (ALL_ON, _sections(popularity_baseline=False,
+                                             prediction_quality=False)):
+            read = set().union(*(section.READS for section in
+                                 sections_on(SECTIONS, parameters)))
+            for kwargs in ({}, {"post_training": True}):
+                node = next(n for n in create_pipeline(
+                    parameters=parameters, **kwargs).nodes
+                    if n.name == "generate_report")
+                wired = set(node.keyword_inputs) - {"parameters"}
+                assert wired == read, (kwargs, sorted(wired), sorted(read))
+
 
 class TestTheComparisonChainIsWiredByName:
     """The comparison chain's nodes that read several results are wired by
@@ -718,7 +852,7 @@ class TestTheComparisonChainIsWiredByName:
     @staticmethod
     def _nodes(name):
         nodes = {
-            label: next(n for n in create_pipeline(**kwargs).nodes
+            label: next(n for n in create_pipeline(parameters=ALL_ON, **kwargs).nodes
                         if n.name == name)
             for label, kwargs in (
                 ("--compare", {"compare_source": {"kind": "hive",

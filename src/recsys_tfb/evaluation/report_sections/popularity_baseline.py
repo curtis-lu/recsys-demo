@@ -32,7 +32,6 @@ from recsys_tfb.evaluation.report_sections.shared import (
     MACRO_LABEL,
     count_items,
     landed_value,
-    section_on,
     unmatched_last,
 )
 from recsys_tfb.evaluation.result_readers import (
@@ -62,6 +61,10 @@ from recsys_tfb.report.types import (
 #: table's K off the cut; the row facts for the item count.
 READS = ("evaluation_row_facts", "baseline_metrics", BASELINE_COMPARISON,
          DISPLAY_KS)
+
+#: The ``evaluation.report.sections`` switch that turns this section off
+#: (ADR-0031 principle 3: off, the pipeline computes nothing only it reads).
+SWITCH = "popularity_baseline"
 
 #: The heading, its English and the question the section answers; the
 #: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
@@ -100,13 +103,6 @@ def build(
     results: Mapping[str, dict], parameters: dict
 ) -> ReportSection | None:
     baseline_metrics = results["baseline_metrics"]
-    # compute_baseline_metrics writes {"enabled": False, "config_fingerprint":
-    # ...} when the section is off, so the stub can carry its fingerprint;
-    # None stays accepted for callers that pass no baseline at all.
-    if (not section_on(parameters, "popularity_baseline") or baseline_metrics is None
-            or baseline_metrics.get("enabled") is False):
-        return None
-
     comparison = results[BASELINE_COMPARISON]
     facts = results["evaluation_row_facts"]
     window = baseline_metrics[POPULARITY_WINDOW_KEY]

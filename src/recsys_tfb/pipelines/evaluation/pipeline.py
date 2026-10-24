@@ -91,13 +91,57 @@ def _comparison_nodes(compare_only: bool) -> list[Node]:
     ]
 
 
+#: The catalog names of the two reports: what a run of each mode is for.
+MAIN_REPORT = "evaluation_report"
+COMPARISON_REPORT = "evaluation_comparison_report"
+
+
+def required_results(
+    parameters: dict, *, main_report: bool, comparison_report: bool,
+) -> dict[str, tuple[str, ...]]:
+    """The requirement list (ADR-0031 principle 3): for each report this run
+    draws, the results it reads — the ``READS`` of every section switched on
+    (``report_sections.shared.sections_on``), in page order, each once.
+
+    It collects declarations and names no computation: which node produces a
+    result is the pipeline's wiring (``create_pipeline`` keeps only the nodes
+    these results need). So a switched-off section's computation is not in
+    the pipeline, and removing a section from its report's list removes its
+    computation with it, with nothing else to keep in step.
+    """
+    from recsys_tfb.evaluation import report_builder
+    from recsys_tfb.evaluation.comparison import report as comparison
+    from recsys_tfb.evaluation.report_sections.shared import sections_on
+
+    def reads(sections) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(
+            name for section in sections_on(sections, parameters)
+            for name in section.READS))
+
+    required = {}
+    if main_report:
+        required[MAIN_REPORT] = reads(report_builder.SECTIONS)
+    if comparison_report:
+        required[COMPARISON_REPORT] = reads(comparison.SECTIONS)
+    return required
+
+
 def create_pipeline(
+    *,
+    parameters: dict,
     post_training: bool = False,
     compare_source: dict | None = None,
     compare_only: bool = False,
     baseline_rate: bool = False,
 ) -> Pipeline:
     """Build the evaluation pipeline.
+
+    ``parameters`` decides which computations are in it (ADR-0031 principle
+    3): the requirement list (:func:`required_results`) says what the
+    switched-on report sections read, ``generate_report`` is wired to
+    exactly that, and only the nodes those results need are kept — a
+    switched-off section's computation is not in the pipeline at all, not a
+    node writing ``{"enabled": false}`` (#538).
 
     Modes:
       * default (no flags) — monitoring: ``prepare_eval_data`` writes this
@@ -122,8 +166,10 @@ def create_pipeline(
     and hands its table and month plan to ``compute_baseline_metrics`` as a
     seventh and eighth input. Off (the default, and always in monitoring mode),
     the pipeline is node for node the one without the feature: no extra node,
-    and monitoring mode reads no ``sample_pool``.
+    and monitoring mode reads no ``sample_pool``. Like every node, the two
+    are kept only while a switched-on section reads what they lead to.
     """
+    from recsys_tfb.evaluation.report_sections.shared import BASELINE_COMPARISON
     from recsys_tfb.pipelines.evaluation.nodes import (
         build_popularity_period_counts,
         compare_to_baseline,
@@ -132,7 +178,7 @@ def create_pipeline(
         compute_prediction_quality,
         compute_report_aggregates,
         compute_row_facts,
-        generate_report,
+        make_generate_report_node,
         make_prepare_eval_data_node,
         resolve_display_ks,
         validate_enriched_eval_predictions_present,
@@ -149,6 +195,8 @@ def create_pipeline(
         # directory stamped on its partitions, which they check each partition
         # against (#374). Only this mode takes the settings from that JSON;
         # see make_restrict_to_common_node.
+        # No section of the comparison report has a switch, so the
+        # requirement list keeps every node here.
         return Pipeline([
             Node(
                 validate_enriched_eval_predictions_present,
@@ -249,9 +297,10 @@ def create_pipeline(
             )
         )
     nodes += [
-        # Every evaluated row as a binary prediction (ADR-0024); a stub unless
-        # report.sections.prediction_quality is on. It takes the segment JSON
-        # for the partition check only, like compute_report_aggregates.
+        # Every evaluated row as a binary prediction (ADR-0024); kept only
+        # while the prediction-quality section is on (the requirement list).
+        # It takes the segment JSON for the partition check only, like
+        # compute_report_aggregates.
         Node(
             compute_prediction_quality,
             inputs=["enriched_eval_predictions", "evaluation_segment_columns",
@@ -266,8 +315,6 @@ def create_pipeline(
                     "parameters"],
             outputs="evaluation_report_aggregates",
         ),
-    ]
-    nodes += [
         # The comparison layer's first pair (ADR-0031 decisions 4 and 5): the
         # model against its baseline, cell by cell, every K — no Spark, both
         # inputs landed. The report reads the differences off it.
@@ -276,32 +323,49 @@ def create_pipeline(
             inputs=["evaluation_metrics", "baseline_metrics", "parameters"],
             outputs="baseline_comparison",
         ),
-        # The K each table shows, cut after the comparison (decision 16): a
-        # changed display K re-runs this node and the report, nothing above.
-        # It reads the comparison for the baseline section's lists, which
-        # also keeps it after the comparison in every topological order.
-        Node(
-            resolve_display_ks,
-            inputs=["evaluation_metrics", "baseline_comparison", "parameters"],
-            outputs="evaluation_display_ks",
-        ),
-        # By name (ADR-0030 decision 8): the report keys each result by its
-        # catalog name, so every parameter is named after its entry.
-        Node(
-            generate_report,
-            inputs={
-                "evaluation_row_facts": "evaluation_row_facts",
-                "evaluation_metrics": "evaluation_metrics",
-                "baseline_metrics": "baseline_metrics",
-                "evaluation_report_aggregates": "evaluation_report_aggregates",
-                "prediction_quality_metrics": "prediction_quality_metrics",
-                "baseline_comparison": "baseline_comparison",
-                "evaluation_display_ks": "evaluation_display_ks",
-                "parameters": "parameters",
-            },
-            outputs="evaluation_report",
-        ),
     ]
+    required = required_results(
+        parameters, main_report=True,
+        comparison_report=compare_source is not None)
+    main_reads = required[MAIN_REPORT]
+    # The K each table shows, cut after the comparison (decision 16): a
+    # changed display K re-runs this node and the report, nothing above. It
+    # reads the comparison for the baseline section's lists, which also keeps
+    # it after the comparison in every topological order — while that
+    # section is on. Off, there is no comparison to read, and reading it
+    # would pull the baseline's Spark pass back in. Two literal Node calls
+    # rather than one with a computed input dict, so the architecture tests'
+    # static scan can still read both (A5/A6).
+    if BASELINE_COMPARISON in main_reads:
+        nodes.append(Node(
+            resolve_display_ks,
+            inputs={"evaluation_metrics": "evaluation_metrics",
+                    "baseline_comparison": "baseline_comparison",
+                    "parameters": "parameters"},
+            outputs="evaluation_display_ks",
+        ))
+    else:
+        nodes.append(Node(
+            resolve_display_ks,
+            inputs={"evaluation_metrics": "evaluation_metrics",
+                    "parameters": "parameters"},
+            outputs="evaluation_display_ks",
+        ))
+    # By name (ADR-0030 decision 8): the report keys each result by its
+    # catalog name, so every result is passed under its entry's name — the
+    # ones the switched-on sections read, and no other: a switched-off
+    # section's leftover file from an older run is never loaded. Each is
+    # checked against today's settings with its producer named as the node
+    # to re-run from, read off the wiring above.
+    producers = {out: node.name for node in nodes for out in node.outputs}
+    nodes.append(Node(
+        make_generate_report_node(
+            {name: producers[name] for name in main_reads}),
+        inputs={name: name for name in (*main_reads, "parameters")},
+        outputs=MAIN_REPORT,
+    ))
     if compare_source is not None:
         nodes += _comparison_nodes(compare_only=False)
-    return Pipeline(nodes)
+    # Decision — keep only the nodes the drawn reports need: what produces
+    # the results they read, and what those read in turn.
+    return Pipeline(nodes).only_nodes_with_outputs(list(required))

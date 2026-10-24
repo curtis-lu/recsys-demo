@@ -2039,15 +2039,23 @@ def evaluation(
     # Only under --post-training (monitoring scores the full grid and keeps
     # the count, see evaluation/baselines.py; A22 has already required a
     # configured date there); never under --compare-only, whose short
-    # pipeline has no baseline.
+    # pipeline has no baseline; and only while the requirement list asks for
+    # the baseline at all (a switched-on section reads it, ADR-0031
+    # principle 3).
     from recsys_tfb.evaluation.baselines import (
         baseline_scores_by_rate,
         resolve_lookback_months,
+    )
+    from recsys_tfb.pipelines.evaluation.pipeline import (
+        MAIN_REPORT,
+        required_results,
     )
 
     baseline_rate = (
         baseline_scores_by_rate(params, post_training=post_training)
         and not compare_only
+        and "baseline_metrics" in required_results(
+            params, main_report=True, comparison_report=False)[MAIN_REPORT]
     )
     # (A21) --rebuild-dates needs the rate path and a date inside a lookback
     # window. Checked before Spark starts, like the other commands' A21.
@@ -2103,6 +2111,8 @@ def evaluation(
     }
 
     pipeline_kwargs = {
+        # Which computations are in the DAG (the requirement list).
+        "parameters": params,
         "post_training": post_training,
         "compare_source": compare_source_dict,
         "compare_only": bool(compare_only),

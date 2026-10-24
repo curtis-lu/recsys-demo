@@ -187,6 +187,16 @@ Node(
 
 **跟 ADR-0013 的關係。** [ADR-0013](0013-pipeline-modes-and-slicing-are-separate.md) 的做法是在 `create_pipeline` 裡**明列**要跑哪些 node；本份改成由各單元的宣告**推導**。這是對 ADR-0013 的修訂：核准本份時，在 ADR-0013 的對應段落加一行指向本份。
 
+**更正（#538 實作時定，2026-10-24）。**
+
+- **開關宣告在報表段，不在計算單元（擁有者 2026-10-24 選定）。** 上面作者建議「每個計算單元宣告哪個開關讓我跑」。實作改成從報表段往回推：每個段在自己的檔旁邊宣告 `READS`（讀哪些結果，#533 起就有）與 `SWITCH`（哪個開關關掉它，沒有就是 `None`）；需求清單 `pipelines/evaluation/pipeline.py::required_results` 收集開著的段的 `READS`，`create_pipeline` 把 `generate_report` 接到這些結果，再用框架的 `Pipeline.only_nodes_with_outputs` 只留產出它們、以及它們往上游要用到的 node。計算單元宣告的「我產出什麼」就是它在 `create_pipeline` 裡的 `outputs`，不另寫一份。理由：一個結果常常好幾段在讀（模型的指標有五段讀），單元宣告開關就得寫成「這幾個開關有一個開著就跑」，每加一段要回來改；整段刪掉時單元旁邊還留著一個不存在的開關，不會報錯。往回推的話，刪段落清單的一行，它的計算就自動不跑（決定 1 第三列；`test_pipeline.py::TestTheRequirementList` 測了這件事，沒有真的刪預測品質段，真的刪留給 #541）。代價：要看某個 node 為什麼會跑，得從段往回找。組 pipeline 要載入報表段的模組，但 `nodes.py` 本來就載入它們（`generate_report` 呼叫 `assemble_report`），實測沒有多花時間（macOS 筆電，2026-10-24：`create_pipeline` 在載入 `nodes.py` 之後 0.00 秒）。
+- **開關只在一處讀。** `core/consistency.py::report_section_on`（缺的時候預測品質段算關、其他段算開）；報表的 `shared.section_on`、A46 的 `prediction_quality_on` 都經過它。計算 node 不再讀開關，`compute_baseline_metrics`、`compute_report_aggregates`、`compute_prediction_quality` 的開關判斷拿掉；`baselines.baseline_scores_by_rate` 也不再看熱門度段的開關，改由 CLI 問需求清單「這次要不要 baseline」。
+- **空殼拿掉（決定 15 第二列照預設）。** 關掉的段，它的計算不在 pipeline 裡，不寫 `{"enabled": false}`；`generate_report` 只收需求清單裡的結果（`**results`），關掉之後 `--only-node generate_report` 不讀那一段的舊檔。落地結果也不再寫 `"enabled": true`。`resolve_display_ks` 只在熱門度段開著時才讀比較結果（兩種接法各一個 Node 呼叫），否則讀比較會把 baseline 那次 Spark 拉回 pipeline。
+- **變體（哪幾個 K）不另外推導。** 補充一講的那類 bug（報表要的 K 計算端沒算）在 #537 已經從另一頭擋住：計算端只有一條 K 軸，`k_values` 加上 `all` 一律算（`metrics_spark._resolve_k_grids`），比較表要的 `compare_k` 由 A62 檢查必須在 `k_values` 裡。需求清單再推一次 K，會跟這兩處重複，所以不做。
+- **分 side 的需求。** 需求清單分到報表：主報表要開著的段讀的全部，比較報表要它的段讀的。baseline 只在熱門度段開著時算，預測品質（第三種算法）只有主報表的段讀，所以只有 A 算。前兩種算法在同一個單元（`compute_all_metrics`）一起算，baseline、A′、B′ 也兩種都算：照本原則「同一單元一起算幾乎不花成本的就一起算」，要拆開得先量（原則 2），這張票沒量。「要比的指標」動到沒算過的指標時報錯、指出從哪個 node 重跑，#536／#537 已經做了（熱門度段 `_require_cell`、比較報表 `shared.landed_value`），#538 沒有另寫。
+- **「讀哪些設定」的宣告留給 #539。** 這張票沒有讀者，寫了也測不到對不對。
+- **決定 15 第一列。** 指紋錯誤訊息指向的重跑起點只有 `prepare_eval_data`、`compute_row_facts`，任何設定組合下都在 pipeline 裡；`test_pipeline.py::TestFingerprintRerunNodes` 改成連「全部開關關掉」也檢查。
+
 ---
 
 ### 原則 4　每個結果只算一次、落地，下游照名字取
