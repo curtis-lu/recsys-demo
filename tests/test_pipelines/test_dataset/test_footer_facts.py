@@ -45,6 +45,13 @@ class TestPartitionValue:
         path = "file:///wh/tbl/snap_date=2026-01-31/entity_bucket=3/p-0.parquet"
         assert partition_value(path, "snap_date") == "2026-01-31"
 
+    def test_the_listed_value_is_unescaped_to_what_was_written(self):
+        # How inputFiles() lists a TIMESTAMP month: the URI escapes the space
+        # and the `%` of the directory name's own `%3A`. Read as is, it is no
+        # date, and B10 found no file for the month (#558).
+        path = "file:///wh/tbl/snap_date=2026-01-31%2000%253A00%253A00/p-0.parquet"
+        assert partition_value(path, "snap_date") == "2026-01-31 00:00:00"
+
 
 class TestGroupByPartition:
     def test_groups_paths_under_their_value(self):
@@ -270,6 +277,15 @@ class TestMonthlyCount:
         # Read back, ``20260131`` is an integer partition and ``2026-01-31``
         # the plan's text: the month is found by date and counted.
         df = self._landed(spark, tmp_path, {"20260131": 4})
+        planned = plan_monthly_count(
+            df, base_version=VERSION, time_col="snap_date",
+            months=["2026-01-31"])
+        assert monthly_rows(planned) == {pd.Timestamp("2026-01-31"): (4, 1)}
+
+    def test_a_timestamp_month_on_disk_is_counted(self, spark, tmp_path):
+        # A TIMESTAMP time column lands its month with a time of day, which
+        # the directory name and the listing each escape (#558).
+        df = self._landed(spark, tmp_path, {"2026-01-31 00:00:00": 4})
         planned = plan_monthly_count(
             df, base_version=VERSION, time_col="snap_date",
             months=["2026-01-31"])

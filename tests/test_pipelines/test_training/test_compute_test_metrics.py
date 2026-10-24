@@ -354,6 +354,18 @@ def test_months_in_the_table_but_not_scored_are_named(spark, tmp_path, caplog):
     assert "['2024-12-31', '2025-02-28']" in skipped[0]
 
 
+def test_a_month_with_a_time_of_day_is_listed_as_written(spark, tmp_path):
+    """A TIMESTAMP time column writes its month with a time of day, which the
+    directory name and the listing's URI each escape once (#558)."""
+    from recsys_tfb.pipelines.training.steps import scored_months
+
+    path = str(tmp_path / "predictions")
+    (spark.createDataFrame([("c1", "2025-01-31 00:00:00")], ["cust_id", "snap_date"])
+     .write.partitionBy("snap_date").parquet(path))
+    assert scored_months.partition_months(
+        spark.read.parquet(path), "snap_date") == ["2025-01-31 00:00:00"]
+
+
 def test_a_scored_month_without_predictions_stops_the_node(spark):
     from recsys_tfb.pipelines.training.nodes import compute_test_metrics
 
