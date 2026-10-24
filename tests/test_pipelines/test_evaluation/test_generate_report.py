@@ -163,16 +163,17 @@ def test_generate_report_with_diagnostics(spark):
             _landed_metrics(params), _unread_stub(params), params),
         parameters=params,
     )
-    # 名次分布段畫了：表不收合（ADR-0031 決定 16 第 10 項），只有五張圖各自
-    # 的資料表收起，而且每個都關上了（沒關的 <details> 會吞掉後面的段）。
+    # 名次分布段畫了：八張圖，每張的數字表收在圖底下，而且每個都關上了（沒關
+    # 的 <details> 會吞掉後面的段）；圖以外沒有表。
     section = html[html.index('id="s-rank_distribution"'):]
     section = section[:section.index('<div class="section')]
     assert re.findall(r"<details\b[^>]*>", section) == [
-        '<details class="fig-data">'] * 5
-    assert section.count("</details>") == 5
+        '<details class="fig-data">'] * 8
+    assert section.count("</details>") == 8
+    assert "名次佔比 · 各 item" in section
     shown = re.sub(r'<details class="fig-data">.*?</details>', "", section,
                    flags=re.S)
-    assert "名次佔比 · 各 item" in shown
+    assert '<div class="tblk">' not in shown
     assert html.count("<details") == html.count("</details>")
 
 

@@ -1,7 +1,7 @@
 """名次分布 (ADR-0031 decision 16): the score and rank distributions of the
-same ranking — the figures (each with its data table, collapsed under it)
-and the two share tables drawn from ``compute_report_aggregates``, and each
-item's mean positive rank (``mean_pos``) from the metrics bundle."""
+same ranking — the figures drawn from ``compute_report_aggregates``, and
+each item's mean positive rank (``mean_pos``) from the metrics bundle as a
+bar chart. Every figure has its data table, collapsed under it."""
 
 from __future__ import annotations
 
@@ -43,15 +43,19 @@ QUESTION = "每個 item 的分數與名次落在哪裡？"
 
 
 #: 開關開著時，印在這段的那一句的開頭。
-ALL_POSITIVE_KEPT_NOTE = "圖與兩張名次佔比表沒有排除全正的 query group"
+ALL_POSITIVE_KEPT_NOTE = "正例平均名次以外的圖沒有排除全正的 query group"
 
-#: The figures' titles, in the order they are drawn (decision 16: in
-#: Chinese, named like the tables).
+#: The titles of the figures drawn from the report aggregates, in the order
+#: they are drawn (decision 16: in Chinese, named like the tables); each
+#: figure's data table has its name. A share heatmap follows the count
+#: heatmap it divides. 正例平均名次 comes last, from the metrics.
 FIGURE_TITLES = (
     "分數分布 · 各 item",
     "分數分布 · 依 label",
     "名次計數 · 各 item",
+    "名次佔比 · 各 item",
     "正例名次計數 · 各 item",
+    "正例名次佔比 · 各 item",
     "各名次的正例率 · 各 item",
 )
 
@@ -59,9 +63,9 @@ FIGURE_TITLES = (
 def _all_positive_kept_notes(parameters: dict) -> list[Note]:
     """開關開著時這段的 ⚠ 那一行；關著回空（#376）。
 
-    ``compute_report_aggregates`` 讀全部評估列，開關碰不到它，所以圖與兩張名次
-    佔比表照樣算進全正的組；正例平均名次讀指標結果，跟著開關排除了。只說這段自
-    己的數是哪一批，不提別段。
+    ``compute_report_aggregates`` 讀全部評估列，開關碰不到它，所以正例平均名次
+    以外的圖照樣算進全正的組；正例平均名次讀指標結果，跟著開關排除了。只說這段
+    自己的數是哪一批，不提別段。
     """
     if not drop_all_positive_groups(parameters):
         return []
@@ -75,7 +79,8 @@ def _item_share_by_rank(counts_frame: pd.DataFrame) -> pd.DataFrame:
     """欄正規化：每個 rank 欄 ÷ 欄和 → 各 item 在該 rank 位置的佔比。
 
     每個 rank 欄加總=1（誰佔據該名次）。全 0 欄（0/0）得 NaN、畫成空格。
-    正規化後的矩陣只能在同一欄裡比，所以用數字表、不掛全域色階 heatmap。
+    每個 query group 的候選一樣多時（例如全網格）各欄的和相同，名次佔比圖跟
+    名次計數圖長得一樣，只差一個倍數；段的說明講這件事。
     """
     col_sums = counts_frame.sum(axis=0)
     return counts_frame.divide(col_sums, axis=1)
@@ -88,11 +93,6 @@ def _matrix_table(title: str, matrix: pd.DataFrame, kind: str) -> Table:
     rows = tuple(Row(str(item), tuple(matrix.loc[item]))
                  for item in matrix.index)
     return Table(title, "item", columns, rows)
-
-
-def _share_table(title: str, counts_frame: pd.DataFrame) -> Table:
-    """A share-by-rank table (:func:`_item_share_by_rank`)."""
-    return _matrix_table(title, _item_share_by_rank(counts_frame), "ratio")
 
 
 def _histogram_table(title: str, hist: pd.DataFrame, item_col: str) -> Table:
@@ -129,12 +129,14 @@ def _box_table(title: str, box: pd.DataFrame, item_col: str,
 
 
 def _figures(report_aggregates: dict) -> list[Figure]:
-    """Today's five figures, titled in Chinese (:data:`FIGURE_TITLES`), each
-    with the numbers it draws as its data table, named like it."""
+    """The figures drawn from the report aggregates, titled in Chinese
+    (:data:`FIGURE_TITLES`), each with the numbers it draws as its data
+    table, named like it."""
     from recsys_tfb.evaluation.distributions import (
         plot_positive_rank_heatmap,
         plot_positive_rate_rank_heatmap,
         plot_rank_heatmap,
+        plot_rank_share_heatmap,
         plot_score_boxplot_by_label,
         plot_score_histogram,
     )
@@ -144,7 +146,9 @@ def _figures(report_aggregates: dict) -> list[Figure]:
     hist = frame_from_json(report_aggregates["score_histogram"])
     box = frame_from_json(report_aggregates["score_box_by_label"])
     ranks = frame_from_json(report_aggregates["rank_counts"])
+    rank_share = _item_share_by_rank(ranks)
     positive_ranks = frame_from_json(report_aggregates["positive_rank_counts"])
+    positive_share = _item_share_by_rank(positive_ranks)
     rate = frame_from_json(report_aggregates["positive_rate"])
     drawn = [
         (plot_score_histogram(hist, item_col=item_col),
@@ -154,8 +158,12 @@ def _figures(report_aggregates: dict) -> list[Figure]:
          lambda t: _box_table(t, box, item_col, label_col)),
         (plot_rank_heatmap(ranks),
          lambda t: _matrix_table(t, ranks, "count")),
+        (plot_rank_share_heatmap(rank_share),
+         lambda t: _matrix_table(t, rank_share, "ratio")),
         (plot_positive_rank_heatmap(positive_ranks),
          lambda t: _matrix_table(t, positive_ranks, "count")),
+        (plot_rank_share_heatmap(positive_share),
+         lambda t: _matrix_table(t, positive_share, "ratio")),
         (plot_positive_rate_rank_heatmap(rate),
          lambda t: _matrix_table(t, rate, "ratio")),
     ]
@@ -167,28 +175,40 @@ def _figures(report_aggregates: dict) -> list[Figure]:
 
 
 def _mean_rank_blocks(metrics: Mapping | None) -> list:
-    """「正例平均名次 · 各 item」— Macro 平均 pinned, then each item in name
-    order, the one value the catalog's ``mean_pos`` (item method) — and its
-    definition. Nothing when the bundle has no item."""
+    """「正例平均名次 · 各 item」— a bar per item in name order, Macro 平均
+    a dashed line; its data table pins Macro 平均, then each item, the one
+    value the catalog's ``mean_pos`` (item method) — and its definition.
+    Nothing when the bundle has no item."""
+    import plotly.graph_objects as go
+
     metric = entry("mean_pos", ITEM)
     per_item = sorted(((metrics or {}).get("per_item") or {}).items())
     if not per_item:
         return []
     macro = ((metrics or {}).get("macro_avg") or {}).get("by_item") or {}
+    title = f"{metric.display_name} · 各 item"
+    items = [str(item) for item, _ in per_item]
+    values = [v.get(metric.key()) for _, v in per_item]
+    fig = go.Figure(go.Bar(x=items, y=values, name=metric.display_name))
+    if macro.get(metric.key()) is not None:
+        fig.add_hline(y=macro[metric.key()], line_dash="dash",
+                      annotation_text=MACRO_LABEL)
+    fig.update_layout(title=title, xaxis_title="item",
+                      yaxis_title=metric.display_name)
+    fig.update_xaxes(type="category")
     rows = [Row(MACRO_LABEL, (macro.get(metric.key()),), pinned=True)] if macro else []
-    rows += [Row(str(item), (values.get(metric.key()),))
-             for item, values in per_item]
-    table = Table(f"{metric.display_name} · 各 item", "item",
-                  (Column(metric.display_name, "ratio"),), tuple(rows))
-    return [table, definitions([metric])]
+    rows += [Row(item, (value,)) for item, value in zip(items, values)]
+    table = Table(title, "item", (Column(metric.display_name, "ratio"),),
+                  tuple(rows))
+    return [Figure(fig, table), definitions([metric])]
 
 
 def build(
     results: Mapping[str, dict], parameters: dict
 ) -> ReportSection | None:
-    """名次分布: the description, the figures, the two share tables and the
-    mean positive rank. ``None`` when the section is switched off or the
-    aggregates hold no distribution family — a ``report_aggregates.json``
+    """名次分布: the description and the figures, each with its data
+    table, the mean positive rank's last. ``None`` when the section is
+    switched off or the aggregates hold no distribution family — a ``report_aggregates.json``
     from before #381 that holds only the ``calibration`` key included: the
     score bins are not drawn here.
     """
@@ -199,19 +219,15 @@ def build(
         return None
 
     blocks: list = [Paragraph(
-        "同一批名次的分數與名次分布。先看圖，再看數字表。佔比表每一欄加起來是 "
-        "1，只能在同一欄裡比，所以用數字表、不用熱度圖。名次計數每一欄的合計是"
-        "那個名次上有候選的 query group 數；每個 query group 的候選一樣多時"
-        "（例如全網格），每一欄都＝全部 query group 數（核心概念的總量）。",
+        "同一批名次的分數與名次分布。每張圖底下的數字表就是圖上的數，點開可以"
+        "複製。名次佔比是名次計數每一欄除以那一欄的合計：每一欄加起來是 1，"
+        "讀的是那個名次上各 item 各佔多少。"
+        "名次計數每一欄的合計是那個名次上有候選的 query group 數；每個 query "
+        "group 的候選一樣多時（例如全網格），每一欄都＝全部 query group 數"
+        "（核心概念的總量），名次佔比圖就跟名次計數圖長得一樣。",
         muted=True)]
     blocks += _all_positive_kept_notes(parameters)
     blocks += _figures(report_aggregates)
-    blocks += [
-        _share_table("名次佔比 · 各 item",
-                     frame_from_json(report_aggregates["rank_counts"])),
-        _share_table("正例名次佔比 · 各 item",
-                     frame_from_json(report_aggregates["positive_rank_counts"])),
-    ]
     blocks += _mean_rank_blocks(results["evaluation_metrics"])
     return ReportSection(
         title=TITLE, description="", title_en=TITLE_EN, question=QUESTION,

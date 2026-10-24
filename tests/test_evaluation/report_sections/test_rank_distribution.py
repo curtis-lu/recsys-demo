@@ -1,7 +1,8 @@
-"""名次分布 (``report_sections/rank_distribution``, #537): the figures, the two
-share-by-rank tables (columns 第 r 名) and each item's mean positive rank
-(the catalog's ``mean_pos``, Macro 平均 pinned), not collapsed — only each
-figure's data table, under it, is (owner 2026-10-24).
+"""名次分布 (``report_sections/rank_distribution``, #537): eight figures, each
+with its data table collapsed under it (owner 2026-10-24) — the two
+share-by-rank heatmaps (columns 第 r 名) after the counts they divide, and
+each item's mean positive rank (the catalog's ``mean_pos``, Macro 平均 pinned
+in the table, a dashed line in the bar chart) last.
 
 The aggregates are ``aggregate_report_diagnostics``' and the metrics
 ``compute_all_metrics``', computed on the same rows (``landed``).
@@ -27,7 +28,8 @@ from tests.test_evaluation.report_sections import landed
 #: The demo's figure titles (decision 16: in Chinese, named like the tables).
 DEMO_FIGURE_TITLES = [
     "分數分布 · 各 item", "分數分布 · 依 label", "名次計數 · 各 item",
-    "正例名次計數 · 各 item", "各名次的正例率 · 各 item",
+    "名次佔比 · 各 item", "正例名次計數 · 各 item", "正例名次佔比 · 各 item",
+    "各名次的正例率 · 各 item", "正例平均名次 · 各 item",
 ]
 
 
@@ -37,23 +39,23 @@ def _draw(spark, **settings):
 
 
 def _table(section, title: str) -> Table:
-    (table,) = [b for b in section.blocks
-                if isinstance(b, Table) and b.title == title]
+    """A figure's data table, by its title."""
+    (table,) = [b.data for b in section.blocks
+                if isinstance(b, Figure) and b.data.title == title]
     return table
 
 
-def test_description_figures_then_three_tables_and_the_definition(spark):
+def test_description_eight_figures_then_the_definition(spark):
     s, _ = _draw(spark)
     assert [type(b) for b in s.blocks] == (
-        [Paragraph] + [Figure] * 5 + [Table] * 3 + [Definitions])
-    assert [b.title for b in s.blocks if isinstance(b, Table)] == [
-        "名次佔比 · 各 item", "正例名次佔比 · 各 item", "正例平均名次 · 各 item"]
+        [Paragraph] + [Figure] * 8 + [Definitions])
+    assert not [b for b in s.blocks if isinstance(b, Table)]
     assert (s.key, s.title, s.title_en) == (
         "rank_distribution", "名次分布", "Rank distribution")
     # Not collapsed (decision 16 item 10) — but each figure's data table.
     from recsys_tfb.evaluation.report import generate_html_report
     assert re.findall(r"<details\b[^>]*>", generate_html_report([s])) == [
-        '<details class="fig-data">'] * 5
+        '<details class="fig-data">'] * 8
 
 
 def test_the_figures_are_titled_in_chinese(spark):
@@ -79,6 +81,8 @@ def test_every_figure_s_data_table_is_named_like_it(spark):
     ("名次計數 · 各 item", "count"),
     ("正例名次計數 · 各 item", "count"),
     ("各名次的正例率 · 各 item", "ratio"),
+    ("名次佔比 · 各 item", "ratio"),
+    ("正例名次佔比 · 各 item", "ratio"),
 ])
 def test_a_heatmap_s_data_table_is_the_matrix_it_draws(spark, title, kind):
     """Rows the heatmap's items, columns 第 r 名, the cells its ``z``."""
@@ -182,6 +186,19 @@ def test_the_mean_positive_rank_is_the_catalog_s_mean_pos(spark):
     (defs,) = [b for b in s.blocks if isinstance(b, Definitions)]
     assert defs.entries == (
         ("正例平均名次", entry("mean_pos", ITEM).definition),)
+
+
+def test_the_mean_positive_rank_bar_chart_is_its_table(spark):
+    """A bar per item, the table's item rows; Macro 平均 the dashed line."""
+    s, _ = _draw(spark, min_positives=2)
+    figure = _figure(s, "正例平均名次 · 各 item")
+    (bar,) = figure.fig.data
+    macro, *items = figure.data.rows
+    assert list(bar.x) == [r.label for r in items]
+    assert list(bar.y) == [r.cells[0] for r in items]
+    (line,) = figure.fig.layout.shapes
+    assert line.line.dash == "dash"
+    assert line.y0 == line.y1 == macro.cells[0]
 
 
 def test_the_switch_on_says_which_numbers_keep_the_all_positive_groups(spark):

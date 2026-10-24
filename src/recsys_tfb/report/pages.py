@@ -215,7 +215,7 @@ def render_block(block: Any) -> str:
         return f'<ul class="section-bullets">{items}</ul>'
     if isinstance(block, Figure):
         return (block.fig.to_html(full_html=False, include_plotlyjs=False)
-                + '<details class="fig-data"><summary>這張圖的資料表</summary>'
+                + '<details class="fig-data"><summary>數字表</summary>'
                 + render_report_table(block.data) + "</details>")
     if isinstance(block, Definitions):
         if not block.entries:

@@ -143,7 +143,7 @@ class TestGenerateHtmlReport:
             '<details class="fig-data">']
         start = body.index('<details class="fig-data">')
         fig_data = body[start:body.index("</details>", start)]
-        assert '<summary>這張圖的資料表</summary><div class="tblk">' in fig_data
+        assert '<summary>數字表</summary><div class="tblk">' in fig_data
         assert "圖的數" in fig_data and "一般表" not in fig_data
         assert body.index("plotly-graph-div") < start   # under its figure
         # closed: an open <details> swallows every section after it

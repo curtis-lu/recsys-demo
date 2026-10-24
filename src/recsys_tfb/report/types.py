@@ -95,7 +95,8 @@ class Figure:
     include_plotlyjs=False)``——plotly.js 由外殼內嵌一份。
 
     ``data`` 是這張圖畫的數字（:class:`Table`）：畫在圖正下方，預設收起
-    （``<details class="fig-data">``），點開可以排序、篩選、複製——圖方便看
+    （``<details class="fig-data">``，收合列寫「數字表」），點開可以排序、
+    篩選、複製——圖方便看
     分布，表方便複製。全篇只有它收起，一般表格不收合（擁有者 2026-10-24，
     #537）。每張圖都要有，不是 :class:`Table` 就 raise。
     """
@@ -106,7 +107,7 @@ class Figure:
     def __post_init__(self) -> None:
         if not isinstance(self.data, Table):
             raise TypeError(
-                f"Figure.data 是這張圖的資料表（Table）；收到 {self.data!r}")
+                f"Figure.data 是這張圖的數字表（Table）；收到 {self.data!r}")
 
 
 @dataclass(frozen=True)

@@ -99,9 +99,10 @@ def _heatmap_from_matrix(
     title: str,
     colorscale: str,
     texttemplate: str,
-    rate: bool = False,
+    hover_value: str = "Count: %{z}",
 ) -> go.Figure:
-    """Build a rank heatmap from an item x rank count/rate matrix."""
+    """Build a rank heatmap from an item x rank count/rate/share matrix;
+    ``hover_value`` is the hover line of a cell's value."""
     ranks = list(matrix.columns)
     fig = go.Figure(
         data=go.Heatmap(
@@ -112,9 +113,7 @@ def _heatmap_from_matrix(
             text=matrix.values,
             texttemplate=texttemplate,
             hovertemplate=(
-                "Product: %{y}<br>%{x}<br>"
-                + ("Rate: %{z:.1%}" if rate else "Count: %{z}")
-                + "<extra></extra>"
+                "Product: %{y}<br>%{x}<br>" + hover_value + "<extra></extra>"
             ),
         )
     )
@@ -148,5 +147,16 @@ def plot_positive_rate_rank_heatmap(
     """Positive-rate-by-rank heatmap from an item x rank rate matrix."""
     return _heatmap_from_matrix(
         rate_matrix, f"{title_prefix}Positive Rate by Rank Position",
-        "YlGnBu", "%{text:.1%}", rate=True,
+        "YlGnBu", "%{text:.1%}", hover_value="Rate: %{z:.1%}",
+    )
+
+
+def plot_rank_share_heatmap(
+    share_matrix: pd.DataFrame, title_prefix: str = ""
+) -> go.Figure:
+    """Share-by-rank heatmap from an item x rank matrix whose every column
+    sums to 1 (each item's share of that rank)."""
+    return _heatmap_from_matrix(
+        share_matrix, f"{title_prefix}Rank Share by Item",
+        "Blues", "%{text:.1%}", hover_value="Share: %{z:.1%}",
     )
