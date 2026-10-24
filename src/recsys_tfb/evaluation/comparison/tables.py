@@ -8,7 +8,7 @@ section. A helper only one section uses stays in that section's file.
   apart.
 * :func:`landed_cells` — a row's cells, refusing one that lacks a cell the
   section's list names (``shared.landed_value``: the refusal names the node
-  to re-run from).
+  to re-run from), looked up at ``metric_tables.compared_key``.
 * :func:`metric_names`, :func:`require_grain` — a list's metrics in words,
   and the check that a list reads the grain its section draws.
 
@@ -24,6 +24,8 @@ from recsys_tfb.evaluation.metric_catalog import CompareEntry
 from recsys_tfb.evaluation.report_sections.metric_tables import (
     SliceRow,
     comparability,
+    compared_key,
+    macro_count_note,
     metric_table,
 )
 from recsys_tfb.evaluation.report_sections.shared import (
@@ -35,7 +37,6 @@ from recsys_tfb.evaluation.report_sections.shared import (
 )
 from recsys_tfb.evaluation.result_readers import (
     ALL_K_KEY,
-    ALL_LABEL,
     CELLS,
     DISPLAY_ALL_K,
     DISPLAY_COMPARE_K,
@@ -45,20 +46,14 @@ from recsys_tfb.evaluation.result_readers import (
     REFERENCE,
     THIS,
 )
-from recsys_tfb.report.types import Note
 
 #: The catalog name of this run's side's row facts on the common universe
 #: (``compute_compare_metrics``), as the comparison report reads them: the
-#: item count a macro line says "all" of.
+#: item count a macro line is measured against.
 COMPARE_ROW_FACTS_A = "compare_row_facts_a"
 
-
-def compared_key(entry: CompareEntry, k: int, all_k: int) -> str:
-    """The cell a compared table's column at ``k`` reads — the rule of
-    ``metric_tables.metric_table``: ``name@all`` at the grain's ``all_k``
-    (the comparison's pairing of each side's own "all"), else ``name@{k}``;
-    a metric without K, its one key."""
-    return entry.metric.key(ALL_LABEL if k == all_k else k)
+#: The grain path of the category grain in the comparison and the cut.
+_CATEGORY_PATH = ("category",)
 
 
 def landed_cells(comparison: dict, path: Sequence, keys: Iterable[str]) -> dict:
@@ -110,7 +105,6 @@ def item_grain_blocks(
     grain_path: tuple = (),
     row_header: str,
     slices: str,
-    macro_count_label: str,
     n_items: int,
 ) -> list:
     """One compared table per entry of ``entries`` at an item grain — the
@@ -124,10 +118,11 @@ def item_grain_blocks(
       the two sides' "all" differ and that column is shown; the Macro 平均
       row when the two sides averaged different items. Each says why in one
       line after the tables, once for all of them.
-    * ``macro_count_label`` (``參與 macro 的 item 數``): the line naming how
-      many of the ``n_items`` (this side's row facts; 0 = unknown) the macro
-      averaged over, printed only when that is fewer than all and the two
-      sides agree on them (ADR-0031 decision 16 item 5).
+    * The line naming how many items (at the category grain, categories)
+      the macro averaged over (``metric_tables.macro_count_note``, against
+      ``n_items``: this side's row facts, 0 = unknown), printed only when
+      that is fewer than all and the two sides agree on them (ADR-0031
+      decision 16 item 5).
     """
     ks = landed_value(cut, COMPARISON_DISPLAY_KS, *grain_path,
                       DISPLAY_COMPARE_K)
@@ -169,8 +164,8 @@ def item_grain_blocks(
     if macro_row and flags.macro_items_differs:
         blocks.append(flags.note(MACRO_ITEMS_KEY))
     elif macro_row:
-        n_macro = len(population[MACRO_ITEMS_KEY][THIS])
-        if 0 < n_items and n_macro < n_items:
-            blocks.append(Note(
-                f"{macro_count_label}：{n_macro:,}（全部 {n_items:,} 個）"))
+        note = macro_count_note(len(population[MACRO_ITEMS_KEY][THIS]),
+                                n_items, category=grain_path == _CATEGORY_PATH)
+        if note:
+            blocks.append(note)
     return blocks

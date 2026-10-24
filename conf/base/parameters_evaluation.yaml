@@ -138,13 +138,14 @@ evaluation:
   # 全正的 query group 過濾（#376；預設關，連父鍵一起註解——CONTEXT.md
   # 的「全正的 query group」）。全正＝組內每一筆候選的 label 都是正例
   # （label 有分級時，每一筆都是同一個正值），不管怎麼排，它的組層級排序
-  # 指標（mAP／precision／recall）都一樣、排法分不出好壞。開了之後，衡量
-  # 指標（overall／per-item／分群／大類，含報表的頭號 mAP）、熱門度基準線，
-  # 以及 `--compare`／`--compare-only` 比較報表的兩側都排除這種組（兩側各自
-  # 依自己的列判定）；不論開或關都會多印全正組數與佔比，佔比超過 10%（寫死
-  # 在程式，非設定鍵）就警告。**不套用**：報表的 per-item 細部拆解段、training 的
+  # 指標（mAP／precision／recall）都一樣、排法分不出好壞。開了之後，排序
+  # 指標（overall／per-item／分群／大類；主報表概覽列的模型選擇指標、排序指標段、
+  # 名次分布段的正例平均名次都讀它）、熱門度基準段，以及 `--compare`／
+  # `--compare-only` 比較報表的兩側都排除這種組（兩側各自依自己的列判定）；
+  # 不論開或關都會多印全正組數與佔比，佔比超過 10%（寫死在程式，非設定鍵）就
+  # 警告。**不套用**：報表名次分布段的圖與名次佔比表、training 的
   # test mAP 與 HPO 目標（唯讀入口見
-  # `evaluation/metrics.py::drop_all_positive_groups`；設定檢查見
+  # `evaluation/result_readers.py::drop_all_positive_groups`；設定檢查見
   # `core/consistency.py` A49）。改這個鍵要從 compute_row_facts 重跑
   # （`COMPUTED_KEYS`）。
   # query_filter:

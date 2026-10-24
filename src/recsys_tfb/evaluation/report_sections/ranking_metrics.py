@@ -36,6 +36,7 @@ from recsys_tfb.evaluation.report import ReportSection
 from recsys_tfb.evaluation.report_sections.metric_tables import (
     SliceRow,
     definitions,
+    macro_count_note,
     metric_table,
 )
 from recsys_tfb.evaluation.report_sections.shared import (
@@ -75,17 +76,18 @@ OVERALL_LABEL = "整體"
 @dataclass(frozen=True)
 class _Grain:
     """What one grain's tables are called: its heading, what an item-method
-    table's rows are (items, or categories) and the line saying how many of
-    them the Macro row averages."""
+    table's rows are (items, or categories) and whether they are categories
+    (the line saying how many of them the Macro row averages,
+    ``metric_tables.macro_count_note``)."""
 
     heading: str
     row_header: str
     slices: str
-    macro_count: str
+    category: bool
 
 
-_ITEM_GRAIN = _Grain("item 粒度", "item", "各 item", "參與 macro 的 item 數")
-_CATEGORY_GRAIN = _Grain("大類粒度", "大類", "各大類", "參與 macro 的大類數")
+_ITEM_GRAIN = _Grain("item 粒度", "item", "各 item", category=False)
+_CATEGORY_GRAIN = _Grain("大類粒度", "大類", "各大類", category=True)
 
 
 def shown_ks(landed: Sequence, all_k: int) -> list[int]:
@@ -126,14 +128,13 @@ def _segment_rows(bundle: Mapping) -> list[SliceRow]:
 
 def _macro_notes(bundle: Mapping, n_items: int, grain: _Grain) -> list[Note]:
     """The line under an item table when the Macro row averages fewer than
-    all ``n_items`` (bug 5, ADR-0020; decision 16 item 5): the count is the
-    bundle's ``population.macro_items`` (``result_readers.macro_item_count``),
-    the list the metrics averaged — not ``min_positives`` applied again.
-    ``n_items`` 0 is "unknown" (``shared.count_items``): no line."""
-    n_macro = macro_item_count(bundle)
-    if 0 < n_items and n_macro < n_items:
-        return [Note(f"{grain.macro_count}：{n_macro}")]
-    return []
+    all ``n_items`` (bug 5, ADR-0020; decision 16 item 5;
+    ``metric_tables.macro_count_note``): the count is the bundle's
+    ``population.macro_items`` (``result_readers.macro_item_count``), the
+    list the metrics averaged — not ``min_positives`` applied again."""
+    note = macro_count_note(macro_item_count(bundle), n_items,
+                            category=grain.category)
+    return [note] if note else []
 
 
 def _grain_blocks(bundle: Mapping, ks: list[int], n_items: int, grain: _Grain,

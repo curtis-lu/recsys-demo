@@ -332,8 +332,8 @@ evaluation_item_categories:
 
 # compute_row_facts 的輸出（#535，ADR-0031 決定 4）：評估列的事實——資料概況、組數、
 # 全正組數、分群欄，跟分數無關（同分列數跟分數有關，在 metrics.json）。模型與熱門度 baseline
-# 是同一批列，共用這一份：兩個指標 node 從它讀組數與 item 數，主報表的概覽、基本統計、
-# 組數帳也讀它。帶 config_fingerprint。
+# 是同一批列，共用這一份：兩個指標 node 從它讀組數與 item 數，主報表多數段也讀它
+#（看各段檔的 READS）。帶 config_fingerprint。
 evaluation_row_facts:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/row_facts.json
@@ -421,7 +421,7 @@ comparison_display_ks:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/comparison_display_ks.json
 
-# 主報表 per-item 細部拆解段的 Spark 聚合（Plan 1.5 從 generate_report 拆出）。
+# 主報表名次分布段的 Spark 聚合（Plan 1.5 從 generate_report 拆出）。
 # 落地的理由不只是快取：generate_report 因此是純函式。它的輸入除了 parameters 都是
 # 落地 JSON（本條、evaluation_row_facts、evaluation_metrics、baseline_metrics、
 # prediction_quality_metrics、baseline_comparison、evaluation_display_ks），

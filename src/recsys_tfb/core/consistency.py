@@ -589,7 +589,7 @@ Layer 1 — config-static (implemented here; aggregated by
 * A49 — ``evaluation.query_filter.drop_all_positive_groups`` (#376, the
   all-positive query group filter) must be a ``bool`` when present; the block
   itself, when present, must be a mapping with no other key. The sole reader,
-  ``evaluation/metrics.py::drop_all_positive_groups``, takes the value with
+  ``evaluation/result_readers.py::drop_all_positive_groups``, takes the value with
   plain truthiness and never raises, so a typo'd value or key would silently
   do nothing instead of failing loudly. Not under ``evaluation.metric``, A42's
   reason: a different reader (``metric_params``) drops unknown keys there
@@ -785,8 +785,11 @@ Layer 1 — config-static (implemented here; aggregated by
   membership: the K cut (``pipelines/evaluation/steps/display_ks``) keeps the
   K ``compare_k`` lists, but only ``k_values`` decides which K the results
   hold, so a K outside it is a column every table drawing ``compare_k``
-  prints empty — the overview, the baseline section's per-item tables and
-  the comparison report's per-item tables — with no error anywhere. A
+  prints empty — every table of the popularity-baseline section, and every
+  table of the comparison report's per-item and category sections (and of
+  its segment section, whose list is empty by default) — with no error
+  anywhere. Unwritten, ``compare_k`` is ``k_values``
+  (``display_ks.configured_compare_k``), so there is nothing to check. A
   scalar is refused rather than read as a one-entry list: the cut iterates
   the value, so ``compare_k: 3`` (or ``all``) fails inside
   ``resolve_display_ks``, after every Spark node has run, with an error that
@@ -2923,7 +2926,7 @@ def query_filter_param_errors(parameters: dict) -> list[str]:
     """A49 — ``evaluation.query_filter`` parameter domain (#376).
 
     * ``drop_all_positive_groups`` is a ``bool``. It is the only reader's
-      (``evaluation/metrics.py::drop_all_positive_groups``) sole input; a
+      (``evaluation/result_readers.py::drop_all_positive_groups``) sole input; a
       non-bool there (``"yes"``, ``1``) would be read with plain truthiness
       (``bool(qf.get(...) or False)``) instead of raising, so a typo'd value
       would silently turn the switch on or stay off with nobody told.

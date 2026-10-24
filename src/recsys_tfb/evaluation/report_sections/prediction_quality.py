@@ -11,7 +11,7 @@ from recsys_tfb.evaluation.report import ReportSection
 from recsys_tfb.evaluation.report_sections.shared import (
     ALL_POSITIVE_SWITCH,
     kept_ratio_phrase,
-    prediction_quality_shown,
+    section_on,
     zero_positive_draw_on_test,
 )
 from recsys_tfb.evaluation.result_readers import (
@@ -224,6 +224,15 @@ def _population(facts: dict, parameters: dict, weight_col: str | None) -> str:
     )
 
 
+def _shown(prediction_quality_metrics: dict | None, parameters: dict) -> bool:
+    """Whether this section is on the page: its switch is on and
+    ``compute_prediction_quality`` computed the payload rather than writing
+    its stub."""
+    return bool(section_on(parameters, "prediction_quality")
+                and prediction_quality_metrics
+                and prediction_quality_metrics.get("enabled") is True)
+
+
 def build(
     results: Mapping[str, dict], parameters: dict
 ) -> ReportSection | None:
@@ -244,7 +253,7 @@ def build(
     precision computed elsewhere.
     """
     prediction_quality = results["prediction_quality_metrics"]
-    if not prediction_quality_shown(prediction_quality, parameters):
+    if not _shown(prediction_quality, parameters):
         return None
 
     def section(blocks: list) -> ReportSection:

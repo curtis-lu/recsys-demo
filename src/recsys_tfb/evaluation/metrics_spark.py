@@ -485,8 +485,10 @@ def compute_dataset_overview(
     declared_occasion = bool(schema.get("occasion"))
     declared_event = bool(schema.get("event"))
     if declared_occasion:
+        # An entity at a time: the base key, which occasion does not widen
+        # (core.schema; architecture-constraints S7).
         total_aggs.append(
-            F.countDistinct(F.struct(time_col, *entity_cols)).alias(
+            F.countDistinct(F.struct(*schema["base_key_columns"])).alias(
                 "n_time_entity_combos"))
     if declared_event:
         total_aggs.append(

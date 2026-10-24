@@ -107,10 +107,12 @@ def test_a_cell_the_list_names_but_the_comparison_lacks_is_refused():
 
 def test_the_macro_count_line_only_when_fewer_than_all():
     """Decision 16 item 5: 「參與 macro 的 item 數」 only when the macro
-    averaged fewer items than all, the two sides agreeing on them."""
+    averaged fewer items than all, the two sides agreeing on them — the
+    count alone: the total is 核心概念's (decision 16 item 12), the one
+    wording of ``metric_tables.macro_count_note``."""
     fewer = dict(macro_items=("item_A", "item_B"))
     sec = _section(fx.bundle(0.6, **fewer), fx.bundle(0.5, **fewer))
-    assert "參與 macro 的 item 數：2（全部 3 個）" in fx.notes(sec)
+    assert "參與 macro 的 item 數：2" in fx.notes(sec)
     assert not any("參與 macro" in n for n in fx.notes(
         _section(fx.bundle(0.6), fx.bundle(0.5))))
 

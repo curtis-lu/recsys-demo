@@ -79,10 +79,9 @@ COMPARISON_DISPLAY_KEYS_READ = ("evaluation.report.display.compare_k",)
 def resolve_display_k(raw_k: list, all_k: int) -> list:
     """Map mixed int/'all' display k list to concrete column suffixes.
 
-    Returns labels as strings/ints that are used both as dict keys and for
-    metric lookups. 'all' is looked up at ``all_k``
-    (``report_sections.shared.k_to_lookup``) but is kept as the label 'all'
-    for display.
+    Returns the list filtered, ``'all'`` kept as the label; :func:`k_columns`
+    then resolves it to ``all_k`` for the headers, which write the real K
+    (ADR-0031 decision 16 item 7).
 
     ``all_k`` is the bundle's ``metrics.resolved_all_k``: the K its ``"all"``
     values are stored at, which is the item count unless the frame held one

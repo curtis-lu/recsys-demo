@@ -15,9 +15,17 @@ in its script, which plotly writes with every non-ASCII character escaped.
 titles (``comparison/report.py``'s ``SECTIONS``), on the page
 ``assemble_comparison_report`` draws with every section built. It has no
 核心概念, so a section there may point to none.
+
+**The ⚠ sentences.** Those pages print none: their two sides agree on every
+annotation and no all-positive share warns. So each report is checked again
+on a page that prints them (the end of this file): the two sides differing on
+all four annotations, and in the main report an all-positive share above the
+warning line at both grains.
 """
 from __future__ import annotations
 
+import re
+from html import unescape
 from html.parser import HTMLParser
 
 import pytest
@@ -197,4 +205,133 @@ def test_a_comparison_section_names_no_other_section(comparison_report_html,
     assert sid in texts, f"no section with id {sid!r} on the comparison page"
     others = [COMPARISON_TITLES[o] for o in COMPARISON_TITLES
               if o != key and COMPARISON_TITLES[o] in texts[sid]]
+    assert others == []
+
+
+# ---------------------------------------------------------------------------
+# The ⚠ sentences: pages that print them
+# ---------------------------------------------------------------------------
+
+from tests.test_evaluation.report_sections import (  # noqa: E402
+    test_popularity_baseline as baseline_fixtures,
+)
+
+#: A ``Note(warn=True)`` as the page writes it (``report/pages.py``).
+_WARN_NOTE = re.compile(r'<p class="warn-note">(.*?)</p>', re.S)
+
+#: The ⚠ on a column header, a row label or a 能不能比 cell.
+_WARN_MARK = '<sup class="warn">⚠</sup>'
+
+
+def _warn_notes(html: str) -> list[str]:
+    """The text of every ⚠ line on the page, as a reader sees it."""
+    return [unescape(note) for note in _WARN_NOTE.findall(html)]
+
+
+def _sections_warning(texts: dict[str, str], notes: list[str]) -> set[str]:
+    """The ids of the sections whose text holds one of the ⚠ lines."""
+    return {sid for sid, text in texts.items()
+            if any(note in text for note in notes)}
+
+
+def _differing(population: dict) -> list[str]:
+    return [name for name, annotation in population.items()
+            if not annotation["same"]]
+
+
+@pytest.fixture(scope="module")
+def main_report_texts_with_warnings() -> dict[str, str]:
+    """The main report's section texts on a page with its ⚠ lines: the
+    popularity baseline differs from the model on all four annotations —
+    ``test_popularity_baseline``'s bundles (every catalog metric at every K
+    of the grid), compared by ``compare_to_baseline`` itself — and the row
+    facts' all-positive share is above the warning line at both grains
+    (``test_report_builder._ap_facts``: 300 of 950 groups at the item grain,
+    300 of 900 at the category grain; the accounts are
+    ``all_positive_accounts``'). The premise is asserted here, so no case
+    below can pass on a page without the ⚠ lines."""
+    t, b = fixtures, baseline_fixtures
+    params = t._params()
+    params["evaluation"]["k_values"] = [1, 2, "all"]
+    params["evaluation"]["report"]["display"]["compare_k"] = [1, "all"]
+    facts = t._ap_facts(n_all_positive=300, category=t._ap_category())
+    # The bundles' three items (A, B, C); the count is not in the accounts.
+    facts["dataset_overview"]["totals"]["n_items"] = len(b._ITEMS)
+    results = t._with_landed(t._results(
+        evaluation_row_facts=facts,
+        evaluation_metrics=b._bundle(0.5),
+        baseline_metrics=b._baseline(params, all_k=2, macro_items=("A", "B"),
+                                     scored=9, segment_columns=()),
+        evaluation_report_aggregates=t._report_aggregates(),
+        prediction_quality_metrics=t._pq_payload()), params)
+    population = results["baseline_comparison"]["population"]
+    assert _differing(population) == list(population), \
+        "premise: the baseline differs on all four annotations"
+    html = rb.assemble_report(results, params)
+    texts = section_texts(html)
+    notes = _warn_notes(html)
+    # 核心概念: one line per grain; 熱門度基準: @all, Macro and the scored
+    # groups (the segment columns are said in its 能不能比 table, marked ⚠).
+    assert sum(note.startswith("⚠ 全正 query group") for note in notes) == 2
+    assert len(notes) == 5, notes
+    assert _sections_warning(texts, notes) == {
+        f"s-{CORE}", "s-popularity_baseline"}
+    assert _WARN_MARK in html
+    return texts
+
+
+@pytest.mark.parametrize("key", list(TITLES))
+def test_a_section_names_no_other_section_in_its_warnings(
+        main_report_texts_with_warnings, key):
+    texts = main_report_texts_with_warnings
+    sid = f"s-{key}"
+    assert sid in texts, f"no section with id {sid!r} on the page"
+    assert mentions(key, texts[sid]) == []
+
+
+#: The comparison report's sections on a page whose two sides segment by
+#: different columns: all but the segment section, which draws nothing then
+#: (ADR-0031 decision 16 item 15; its 能不能比 row says why).
+_DRAWN_WITH_OTHER_SEGMENTS = tuple(k for k in COMPARISON_TITLES
+                                   if k != "segment_metrics")
+
+
+@pytest.fixture
+def comparison_texts_with_warnings(monkeypatch) -> dict[str, str]:
+    """The comparison report's section texts on a page with its ⚠ lines:
+    the compared side differs on all four annotations (its "all" is @4,
+    ``event`` rows; two macro items; nine groups scored; no segment
+    column), both bundles ``fixtures.bundle``'s, the comparison and its cut
+    the real nodes' (``fixtures.inputs``). Categories on and a list for the
+    segment section, so every section that can be drawn is. The premise is
+    asserted here, as for the main report."""
+    fx = cmp_fixtures
+    monkeypatch.setattr(segment_metrics, "COMPARED",
+                        (CompareEntry("map", QUERY_GROUP, "per_segment"),))
+    p = fx.params(categories=True)
+    results = fx.inputs(
+        fx.bundle(0.6, category=fx.category_bundle(0.5)),
+        fx.bundle(0.5, all_k=4, macro_items=("item_A", "item_B"), scored=9,
+                  segment_columns=(), category=fx.category_bundle(0.4)),
+        p)
+    population = results["source_comparison"]["population"]
+    assert _differing(population) == list(population), \
+        "premise: the compared side differs on all four annotations"
+    html = comparison_report.assemble_comparison_report(results, p)
+    texts = section_texts(html)
+    assert set(texts) == {f"s-{k}" for k in _DRAWN_WITH_OTHER_SEGMENTS}
+    notes = _warn_notes(html)
+    assert notes, "premise: the page prints ⚠ lines"
+    assert _sections_warning(texts, notes) == {"s-overall_metrics",
+                                               "s-per_item_metrics"}
+    assert _WARN_MARK in html
+    return texts
+
+
+@pytest.mark.parametrize("key", _DRAWN_WITH_OTHER_SEGMENTS)
+def test_a_comparison_section_names_no_other_section_in_its_warnings(
+        comparison_texts_with_warnings, key):
+    text = comparison_texts_with_warnings[f"s-{key}"]
+    others = [COMPARISON_TITLES[o] for o in COMPARISON_TITLES
+              if o != key and COMPARISON_TITLES[o] in text]
     assert others == []

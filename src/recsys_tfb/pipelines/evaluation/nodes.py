@@ -1006,9 +1006,9 @@ def compute_baseline_metrics(
     # count below is per item.
     label_table = combine_item_columns(label_table, schema, "label_table")
     # Single source of the default (bug 1, ADR-0020): before this helper
-    # existed, this node defaulted to 12 while the report's baseline section
-    # defaulted to None (printing nothing), so a run relying on the implicit
-    # default silently disagreed with itself about what it had used.
+    # existed, this node defaulted to 12 while the report's popularity-baseline
+    # section defaulted to None (printing nothing), so a run relying on the
+    # implicit default silently disagreed with itself about what it had used.
     lookback_months = resolve_lookback_months(parameters)
 
     snap_dates = [
@@ -1305,7 +1305,8 @@ def compute_report_aggregates(
     sections_cfg = report_cfg.get("sections", {}) or {}
     diag_cfg = report_cfg.get("diagnostics", {}) or {}
     if not sections_cfg.get("rank_distribution", True):
-        logger.info("report per-item breakdown section disabled — writing stub")
+        logger.info("report rank_distribution section (名次分布) disabled — "
+                    "writing stub")
         return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
 
     # Decision — aggregate the evaluated dates only, from partitions written
@@ -1343,18 +1344,20 @@ def compare_to_baseline(
     """The model's metrics against its popularity baseline's, cell by cell:
     the comparison layer's first pair (ADR-0031 decisions 4 and 5,
     ``steps/comparison_layer``). Lands as ``baseline_comparison``
-    (``baseline_comparison.json``); the main report's baseline section reads
-    the model's value, the baseline's and their difference off it instead of
-    taking the difference itself. No Spark: both inputs are landed JSON.
+    (``baseline_comparison.json``); the main report's popularity-baseline
+    section reads the model's value, the baseline's and their difference off
+    it instead of taking the difference itself. No Spark: both inputs are
+    landed JSON.
 
     Every K the metrics hold is compared; the K a table shows is cut later,
     by ``resolve_display_ks`` (decision 16), so a change of display K never
     re-runs this node.
 
     Carries ``config_fingerprint`` like every landed result; with the
-    baseline section off (``baseline_metrics`` is the stub) the result is a
-    stub too, ``{"enabled": False, "config_fingerprint": ...}``, so the
-    report can tell "switched off under these settings" from "left over".
+    popularity-baseline section off (``baseline_metrics`` is the stub) the
+    result is a stub too, ``{"enabled": False, "config_fingerprint": ...}``,
+    so the report can tell "switched off under these settings" from "left
+    over".
 
     Pre-checks (inputs):
 
@@ -1446,8 +1449,8 @@ def resolve_display_ks(
     settings (``require_computed_with_current_config``), and the metrics
     carry the ledger the cut reads ``"all"`` off
     (``comparison_layer.ledger_keys_missing``, the comparison's own check:
-    with the baseline section off the comparison is a stub and checked
-    nothing; re-run from ``compute_row_facts``, why in
+    with the popularity-baseline section off the comparison is a stub and
+    checked nothing; re-run from ``compute_row_facts``, why in
     ``compare_to_baseline``).
     """
     require_computed_with_current_config([
@@ -1477,11 +1480,11 @@ def resolve_display_ks(
         resolved_all_k(evaluation_metrics),
         resolved_all_k(category) if category else None,
         configured_k_values(parameters))
-    # Decision — the baseline section draws off the comparison, every table
-    # at compare_k, and both of its sides at the model's K: the baseline
-    # re-scores the model's rows, so its "all" is the same number (the
-    # comparison's all_k annotation says so). None while the section is off:
-    # nothing is drawn.
+    # Decision — the popularity-baseline section draws off the comparison,
+    # every table at compare_k, and both of its sides at the model's K: the
+    # baseline re-scores the model's rows, so its "all" is the same number
+    # (the comparison's all_k annotation says so). None while the section is
+    # off: nothing is drawn.
     baseline_block = None
     if baseline_comparison.get("enabled") is not False:
         compared_category = baseline_comparison["category"]
@@ -1513,11 +1516,11 @@ def generate_report(
 ) -> str:
     """Build the HTML report from the landed results, wired by name
     (ADR-0030 decision 8); each parameter is named after its catalog entry.
-    The per-item breakdown section (when enabled) reads the already-aggregated
-    Spark JSON from ``compute_report_aggregates`` (Plan 1.5) so this function
-    stays pure — no SparkDataFrame in the signature, no Spark action in the
-    body. The differences the baseline section prints are
-    ``baseline_comparison``'s and every table's K columns
+    The rank-distribution section (名次分布, when enabled) reads the
+    already-aggregated Spark JSON from ``compute_report_aggregates`` (Plan
+    1.5) so this function stays pure — no SparkDataFrame in the signature, no
+    Spark action in the body. The differences the popularity-baseline section
+    prints are ``baseline_comparison``'s and every table's K columns
     ``evaluation_display_ks``' (#536): the report takes no difference and
     cuts no K itself (ADR-0031 principle 1).
 

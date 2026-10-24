@@ -5,7 +5,10 @@ the two draw a metric, a comparison and its caveats the same way:
 * :func:`metric_table` — one metric, one table (ADR-0031 decision 16): rows
   are slices, columns the K. One side (the main report): a column per K.
   Compared (the comparison report, the popularity baseline): three per K —
-  這次, 對照, 差 — under a two-row header.
+  這次, 對照, 差 — under a two-row header. :func:`compared_key` is the cell a
+  compared column reads, for the sections that check a cell before drawing.
+* :func:`macro_count_note` — the line under an item grain's tables saying
+  how many items (categories) the Macro 平均 averaged.
 * :func:`comparability` / :func:`comparability_table` — the four things two
   results must share to be compared as they are (the comparison's
   ``population``, decision 4 and 15), which of them differ, and the sentence
@@ -173,21 +176,56 @@ def metric_table(
         else:
             columns.append(Column(f"@{k}", "ratio", warn=warn))
 
-    def key_at(k: int) -> str:
-        return m.key(ALL_LABEL if compare and k == all_k else k)
-
     out_rows = []
     for r in rows:
         values = r.values or {}
         cells: list = []
         for k in ks:
             if compare:
-                cells += _sides(values.get(key_at(k)))
+                cells += _sides(values.get(compared_key(m, k, all_k)))
             else:
-                cells.append(values.get(key_at(k)))
+                cells.append(values.get(m.key(k)))
         out_rows.append(Row(r.label, tuple(cells), pinned=r.pinned, warn=r.warn))
     return Table(title, row_header, tuple(columns), tuple(out_rows),
                  tuple(notes))
+
+
+def compared_key(metric: Metric | CompareEntry, k: int, all_k: int) -> str:
+    """The cell a compared table's column at ``k`` reads: ``name@all`` at
+    the grain's ``all_k`` — the comparison's pairing of each side's own
+    "all", which may be another K on the other side — else ``name@{k}``; a
+    metric without K, its one key.
+
+    The one rule: :func:`metric_table` draws by it, and the sections that
+    check a listed cell before drawing (the popularity baseline's
+    ``_require_cell``, the comparison report's ``tables.landed_cells``
+    callers) look up by it, so the cell checked is the cell drawn.
+    """
+    return _metric_of(metric).key(ALL_LABEL if k == all_k else k)
+
+
+#: The line under an item grain's tables naming how many of its slices the
+#: Macro 平均 averaged, by what the slices are.
+_MACRO_COUNT_LABEL = {False: "參與 macro 的 item 數", True: "參與 macro 的大類數"}
+
+
+def macro_count_note(n_macro: int, n_items: int, *,
+                     category: bool = False) -> Note | None:
+    """「參與 macro 的 item 數：N」 (at the category grain 「參與 macro 的大類數：N」)
+    under an item grain's tables, or ``None``: printed only when the Macro
+    averaged fewer than all ``n_items`` (ADR-0031 decision 16 item 5;
+    ``n_items`` is ``shared.count_items``, 0 = unknown: no line). The count
+    alone, without the total: the whole data's totals are printed once, in
+    核心概念 (decision 16 item 12). One wording for every section that draws
+    a Macro row, in both reports.
+
+    The caller decides whether the line belongs under its tables at all — a
+    Macro row drawn, and in a comparison the two sides averaging the same
+    items (else the ⚠ line says so, :meth:`Comparability.note`).
+    """
+    if 0 < n_items and n_macro < n_items:
+        return Note(f"{_MACRO_COUNT_LABEL[category]}：{n_macro:,}")
+    return None
 
 
 # ---------------------------------------------------------------------------

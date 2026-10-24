@@ -13,7 +13,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from recsys_tfb.evaluation.comparison.tables import (
-    compared_key,
     landed_cells,
     metric_names,
     require_grain,
@@ -23,6 +22,7 @@ from recsys_tfb.evaluation.report import ReportSection
 from recsys_tfb.evaluation.report_sections.metric_tables import (
     SliceRow,
     comparability,
+    compared_key,
     definitions,
     metric_table,
 )

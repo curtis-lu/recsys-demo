@@ -30,8 +30,10 @@ from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
 
 def k_to_lookup(k, all_k: int) -> int | str:
-    """Convert display label to metric dict key suffix (the cut's lists are
-    ``steps/display_ks``', landed; ``"all"`` stays a label in them).
+    """The K a label ``k`` is looked up at: ``"all"`` is ``all_k``, an
+    integer is itself. The cut's lists (``steps/display_ks``, landed) are
+    integers already — ``"all"`` was resolved to the block's ``all_k`` when
+    they were cut (``display_ks.k_columns``) — so a landed K passes through.
 
     ``all_k`` comes from the bundle being read (``metrics.resolved_all_k``),
     never from counting its items (#434).
@@ -64,18 +66,6 @@ def section_on(parameters: dict, name: str) -> bool:
         )
     sections = report_cfg(parameters).get("sections", {}) or {}
     return bool(sections.get(name, True))
-
-
-def prediction_quality_shown(
-    prediction_quality_metrics: dict | None, parameters: dict
-) -> bool:
-    """Whether the prediction-quality section is on the page: its switch is on
-    and ``compute_prediction_quality`` computed the payload rather than writing
-    its stub. Only that section asks since the overview lost its navigation
-    table (#537)."""
-    return bool(section_on(parameters, "prediction_quality")
-                and prediction_quality_metrics
-                and prediction_quality_metrics.get("enabled") is True)
 
 
 #: The catalog names of the comparison of the model with its baseline and of
@@ -140,12 +130,6 @@ def has_entries(block: dict, side: str) -> bool:
 def both_present(block: dict) -> bool:
     """Whether both sides had the block at all — empty counts as present."""
     return all(block[ENTRIES][side] is not None for side in (THIS, REFERENCE))
-
-
-def compared_value(cells: dict, key: str, side: str):
-    """One side (or the difference) of the cell ``key``; ``None`` where the
-    comparison holds no such cell."""
-    return (cells.get(key) or {}).get(side)
 
 
 def results_read_by(
@@ -380,27 +364,25 @@ def count_items(facts: dict) -> int:
     """``dataset_overview.totals.n_items`` of the row facts, ``0`` when absent.
 
     ``facts`` is the row facts or one grain of them (``row_facts.json``,
-    #535). ``0`` means "unknown", not "no items". It is the item count the
-    reports show — in the macro-coverage titles and the comparison report's
-    metadata. It is not the K ``"all"`` is looked up at — that is
-    ``metrics.resolved_all_k``, which each metrics bundle records (#434).
+    #535). ``0`` means "unknown", not "no items". It is what the macro-count
+    line under an item grain's tables is measured against
+    (``metric_tables.macro_count_note``: printed only when the macro averaged
+    fewer); the total itself is printed once, in 核心概念. It is not the K
+    ``"all"`` is looked up at — that is ``metrics.resolved_all_k``, which each
+    metrics bundle records (#434).
     """
     return int((read_dataset_overview(facts).get("totals", {}) or {}).get("n_items", 0))
-
-
-def _macro_coverage_mb(n_a: int, n_b: int, n_items: int) -> str:
-    """The M/B coverage wording, one copy for both suffixes."""
-    return f"（參與 macro 的 item 數 M {n_a}／B {n_b}／全部 {n_items}）"
 
 
 # =====================================================================
 # 全正的 query group（#376）
 # =====================================================================
 #
-# ``evaluation.query_filter.drop_all_positive_groups`` 只套用在衡量指標（含頭號
-# 指標）與熱門度 baseline；per-item 細部拆解不跟（使用者 2026-09-18 決定：新開關
-# 不延伸進診斷；當時的診斷頁已隨 #532 拿掉）。所以開關開著時，同一份報表裡有兩批
-# 組，這一段的函式負責讓讀者看得出每個數字是哪一批。開關只經
+# ``evaluation.query_filter.drop_all_positive_groups`` 只套用在讀指標結果的數字：
+# 概覽、排序指標與熱門度基準段，以及名次分布段的正例平均名次；名次分布段的圖與
+# 名次佔比表不跟（使用者 2026-09-18 決定：新開關不延伸進診斷；當時的診斷頁已隨
+# #532 拿掉）。所以開關開著時，同一份報表裡有兩批組，這一段的函式負責讓讀者
+# 看得出每個數字是哪一批。開關只經
 # ``result_readers.drop_all_positive_groups`` 讀；警告與佔比是列的事實每個粒度
 # 落地的帳（``metrics.all_positive_accounts``，#536），log 與報表讀同一份，不會
 # 各說各話。
@@ -435,8 +417,8 @@ def zero_positive_draw_on_test(parameters: dict) -> float | None:
     （``test_carries_zero_positive_group_weight``）回保留比例 r（> 0）；不帶
     權重欄回 ``0.0``（dataset 全丟了）。
 
-    一個判斷、幾段措辭：組數帳的 ``ranking_metrics._zero_positive_origin``、資料統計段的
-    說明與預測品質段的 :func:`kept_zero_positive_groups_note` 都從這裡讀，不各寫一版分支。
+    一個判斷、兩段措辭：資料統計段的說明（``data_stats._description``）與預測品質段
+    的 ``prediction_quality._kept_zero_positive_groups`` 都從這裡讀，不各寫一版分支。
     """
     if not parameters.get("post_training"):
         return None
@@ -458,16 +440,17 @@ def scored_with_positive(metrics: dict) -> int | None:
 
 
 def kept_ratio_phrase(ratio: float) -> str:
-    """「test 表保留了比例 r 的無正例組」的說法，一個來源：資料概況的說明與
-    衡量指標段的組數帳（#376）都印它，兩邊不會各寫一版。"""
+    """「test 表保留了比例 r 的無正例組」的說法，一個來源：資料統計段的說明與
+    預測品質段的母體說明都印它，兩邊不會各寫一版。"""
     return f"test 表保留了比例 r＝{ratio:g} 的無正例 query group"
 
 
 def unmatched_last(by_segment: dict) -> dict:
     """同一份 dict，(unmatched) 移到最後、其餘順序不動。
 
-    它不是一個 segment，列出來是為了交代它有多少 query；三處分群表（基本統計、
-    衡量指標、baseline 對照）用同一個順序，讀者才不會在某張表把它當第一個群。
+    它不是一個 segment，列出來是為了交代它有多少 query；每張分群表（資料統計、
+    排序指標、熱門度基準段，比較報表的分群指標段）用同一個順序，讀者才不會在某張
+    表把它當第一個群。
     """
     rest = {k: v for k, v in by_segment.items() if k != UNMATCHED_SEGMENT}
     if UNMATCHED_SEGMENT in by_segment:

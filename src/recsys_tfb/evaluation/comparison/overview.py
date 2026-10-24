@@ -114,9 +114,7 @@ def _description(parameters: dict, n_items: int, all_k: int) -> str:
     declared it gains those, #428), and what "all" is on this page: the
     common items' count when that is what it resolved to, else the widest
     query group (``event`` rows, #434) — both read off landed results."""
-    schema = get_schema(parameters)
-    query_group = " × ".join([schema["time"], *schema["entity"],
-                              *schema.get("occasion", [])])
+    query_group = " × ".join(get_schema(parameters)["query_group_columns"])
     all_is = (f"，所以表頭的 @{all_k} 就是全部。" if all_k == n_items else
               f"；表頭的 @{all_k} 就是全部：一個 query group 裡最多的候選列數。")
     return (

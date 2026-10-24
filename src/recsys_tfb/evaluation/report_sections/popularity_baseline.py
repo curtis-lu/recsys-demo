@@ -21,7 +21,9 @@ from recsys_tfb.evaluation.report_sections.metric_tables import (
     SliceRow,
     comparability,
     comparability_table,
+    compared_key,
     definitions,
+    macro_count_note,
     metric_table,
 )
 from recsys_tfb.evaluation.report_sections.shared import (
@@ -35,7 +37,6 @@ from recsys_tfb.evaluation.report_sections.shared import (
 )
 from recsys_tfb.evaluation.result_readers import (
     ALL_K_KEY,
-    ALL_LABEL,
     CELLS,
     DISPLAY_ALL_K,
     DISPLAY_COMPARE_K,
@@ -50,7 +51,6 @@ from recsys_tfb.evaluation.result_readers import (
 from recsys_tfb.report.types import (
     Column,
     Heading,
-    Note,
     Paragraph,
     Row,
     Table,
@@ -180,10 +180,10 @@ def _grain_blocks(entries, comparison: dict, cut: dict, prefix: tuple,
     notes = [flags.note(ALL_K_KEY),
              flags.note(MACRO_ITEMS_KEY) if drew_macro else None,
              flags.note(SCORED_QUERIES_KEY)]
-    n_macro = len(compared(POPULATION_KEY, MACRO_ITEMS_KEY, THIS))
-    if (drew_macro and not flags.macro_items_differs
-            and 0 < n_macro < n_items):
-        notes.append(Note(f"參與 macro 的 item 數：{n_macro}"))
+    if drew_macro and not flags.macro_items_differs:
+        notes.append(macro_count_note(
+            len(compared(POPULATION_KEY, MACRO_ITEMS_KEY, THIS)), n_items,
+            category=prefix == (_CATEGORY,)))
     return blocks + [n for n in notes if n], drew_macro
 
 
@@ -238,7 +238,7 @@ def _require_cell(entry: CompareEntry, row: SliceRow, path: tuple,
     values come from the metrics the comparison joined, so the advice is to
     re-compute them, not to re-run the comparison alone, which would join
     the same metrics again."""
-    key = entry.metric.key(ALL_LABEL if k == all_k else k)
+    key = compared_key(entry, k, all_k)
     cell = (row.values or {}).get(key)
     for side in sides:
         if isinstance(cell, Mapping) and cell.get(side) is not None:

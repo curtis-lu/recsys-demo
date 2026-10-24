@@ -60,7 +60,7 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection | None
     blocks += item_grain_blocks(
         results[SOURCE_COMPARISON], results[COMPARISON_DISPLAY_KS], COMPARED,
         grain_path=("category",), row_header="大類", slices="各大類",
-        macro_count_label="參與 macro 的大類數", n_items=count_items(facts))
+        n_items=count_items(facts))
     blocks.append(definitions([*COMPARED, "macro"]))
     return ReportSection(title=TITLE, description="", title_en=TITLE_EN,
                          question=QUESTION, key="category_metrics",

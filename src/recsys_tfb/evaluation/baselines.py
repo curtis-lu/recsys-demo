@@ -150,7 +150,7 @@ def _lookback_window(
             "backfill label_table further back, lower "
             "evaluation.baseline.lookback_months, or set "
             "evaluation.report.sections.popularity_baseline: false to skip the "
-            "baseline section entirely."
+            "popularity-baseline section entirely."
         )
     return window
 
@@ -390,8 +390,9 @@ def baseline_score(parameters: dict) -> str:
 def baseline_scores_by_rate(parameters: dict, *, post_training: bool) -> bool:
     """Whether this run wires the positive-rate path.
 
-    Needs ``score: rate``, the baseline section on (off computes no baseline
-    at all) and ``--post-training`` (monitoring keeps the count, see above).
+    Needs ``score: rate``, the popularity-baseline section on (off computes
+    no baseline at all) and ``--post-training`` (monitoring keeps the count,
+    see above).
     The pipeline shape, the CLI plan and ``--rebuild-dates`` all read this one
     answer, so they cannot disagree about it.
     """
