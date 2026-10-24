@@ -124,9 +124,9 @@ def params(compare: dict | None = None, *, compare_k=(1, 3, "all"),
     return p
 
 
-def landed(result: dict, p: dict) -> dict:
-    """``result`` as its producer lands it under ``p``: with the fingerprint
-    and the compare source every comparison artifact carries."""
+def landed(result: dict, p: dict, node: str = "compute_compare_metrics") -> dict:
+    """``result`` as ``node``, its producer, lands it under ``p``: with the
+    fingerprint and the compare source every comparison artifact carries."""
     from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
         compare_source_identity,
     )
@@ -134,7 +134,7 @@ def landed(result: dict, p: dict) -> dict:
         fingerprint,
     )
 
-    return {**result, "config_fingerprint": fingerprint(p),
+    return {**result, "config_fingerprint": fingerprint(p, node),
             "compare_source": compare_source_identity(p)}
 
 
@@ -190,7 +190,8 @@ def inputs(this: dict, reference: dict, p: dict, *, cov: dict | None = None,
                  else None)
         facts = row_facts_a(len(this["per_item"]), n_cat)
     return {
-        "compare_coverage": landed(cov if cov is not None else coverage(p), p),
+        "compare_coverage": landed(cov if cov is not None else coverage(p), p,
+                                   "restrict_to_common"),
         "compare_row_facts_a": landed(facts, p),
         "source_comparison": comparison,
         "comparison_display_ks": cut,

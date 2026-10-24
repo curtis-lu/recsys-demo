@@ -43,14 +43,15 @@ def _results(**by_name) -> dict:
     return out
 
 
-def _stamped(result: dict, parameters: dict) -> dict:
-    """``result`` as landed under ``parameters``: with its fingerprint, which
-    the comparison and the K cut nodes check before reading it."""
+def _stamped(result: dict, parameters: dict, node: str) -> dict:
+    """``result`` as ``node`` lands it under ``parameters``: with its
+    fingerprint, which the comparison and the K cut nodes check before
+    reading it."""
     from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
         fingerprint,
     )
 
-    return {**result, "config_fingerprint": fingerprint(parameters)}
+    return {**result, "config_fingerprint": fingerprint(parameters, node)}
 
 
 def _with_landed(results: dict, parameters: dict) -> dict:
@@ -94,16 +95,20 @@ def _with_landed(results: dict, parameters: dict) -> dict:
             baseline = {**baseline, "population": metrics["population"]}
         out["baseline_comparison"] = (
             None if metrics is None or baseline is None else
-            compare_to_baseline(_stamped(metrics, parameters),
-                                _stamped(baseline, parameters), parameters))
+            compare_to_baseline(
+                _stamped(metrics, parameters, "compute_metrics"),
+                _stamped(baseline, parameters, "compute_baseline_metrics"),
+                parameters))
     if "evaluation_display_ks" not in out and metrics is not None:
         comparison = out["baseline_comparison"]
         out["evaluation_display_ks"] = (
-            resolve_display_ks(_stamped(metrics, parameters), parameters)
+            resolve_display_ks(
+                _stamped(metrics, parameters, "compute_metrics"), parameters)
             if comparison is None else
             resolve_display_ks(
-                _stamped(metrics, parameters), parameters,
-                baseline_comparison=_stamped(comparison, parameters)))
+                _stamped(metrics, parameters, "compute_metrics"), parameters,
+                baseline_comparison=_stamped(
+                    comparison, parameters, "compare_to_baseline")))
     return out
 
 

@@ -194,7 +194,7 @@ Node(
 - **空殼拿掉（決定 15 第二列照預設）。** 關掉的段，它的計算不在 pipeline 裡，不寫 `{"enabled": false}`；`generate_report` 只收需求清單裡的結果（`**results`），關掉之後 `--only-node generate_report` 不讀那一段的舊檔。落地結果也不再寫 `"enabled": true`。`resolve_display_ks` 只在熱門度段開著時才讀比較結果（兩種接法各一個 Node 呼叫），否則讀比較會把 baseline 那次 Spark 拉回 pipeline。
 - **變體（哪幾個 K）不另外推導。** 補充一講的那類 bug（報表要的 K 計算端沒算）在 #537 已經從另一頭擋住：計算端只有一條 K 軸，`k_values` 加上 `all` 一律算（`metrics_spark._resolve_k_grids`），比較表要的 `compare_k` 由 A62 檢查必須在 `k_values` 裡。需求清單再推一次 K，會跟這兩處重複，所以不做。
 - **分 side 的需求。** 需求清單分到報表：主報表要開著的段讀的全部，比較報表要它的段讀的。baseline 只在熱門度段開著時算，預測品質（第三種算法）只有主報表的段讀，所以只有 A 算。前兩種算法在同一個單元（`compute_all_metrics`）一起算，baseline、A′、B′ 也兩種都算：照本原則「同一單元一起算幾乎不花成本的就一起算」，要拆開得先量（原則 2），這張票沒量。「要比的指標」動到沒算過的指標時報錯、指出從哪個 node 重跑，#536／#537 已經做了（熱門度段 `_require_cell`、比較報表 `comparison/tables.landed_cells`）；#538 審查抓到比較報表那條叫人從 `compare_to_source` 重跑，但缺的格子若是比較的兩份指標本來就沒算，從那裡重跑會一直缺，所以改成從 `compute_compare_metrics` 重跑。決定 4「把分數當機率的那種算法，被清單列到才算」今天走不到：目錄還沒收那種算法（見原則 6 底下 #533 的更正），清單沒辦法列它。等它進目錄（#541），這條推導才有東西可推，那張票要補。比較報表沒有開關，它那邊的需求清單只決定要不要跑整條比較鏈；比較報表 node 的接線照舊寫死，由既有測試守它跟各段 `READS` 相同。
-- **「讀哪些設定」的宣告留給 #539。** 這張票沒有讀者，寫了也測不到對不對。
+- **「讀哪些設定」的宣告留給 #539。** 這張票沒有讀者，寫了也測不到對不對。（#539 做了，見原則 5〈#539 怎麼做的〉。）
 - **原則 2 補充二的「計算單元宣告自己產出什麼（名字、一句話定義、粒度），由測試檢查真的產出」只做了一半（擁有者 2026-10-24 選定）。** 做了的：「每個開著的段要讀的結果，pipeline 裡都有 node 產出」，任何模式、任何開關組合下都檢查（`test_pipeline.py::TestTheRequirementList`）。沒做的：每個結果裡有哪些區塊、各自的定義與粒度，以及跑 Spark 確認真的產出這些區塊；指標的這一層已由指標目錄（決定 6）與它的測試涵蓋，其餘結果（列的事實、母體帳、熱門度視窗、預測品質）另開票。
 - **決定 15 第一列。** 指紋錯誤訊息指向的重跑起點只有 `prepare_eval_data`、`compute_row_facts`，任何設定組合下都在 pipeline 裡；`test_pipeline.py::TestFingerprintRerunNodes` 改成連「全部開關關掉」也檢查。
 
@@ -246,6 +246,16 @@ Node(
 **2026-10-21 更新。** suppression 與「附帶的問題」裡的 `draw_diagnosis_sample_node` 都隨決定 2 拿掉，上面的例子只剩說明用途；規則本身不變。
 
 **作者建議的順序。** 這條會改變「哪些結果算過期」，屬於行為變更。照 flow 規則 3（行為變更先做，純搬移放最後），它排在純搬移之前；又因為要用到原則 3 的宣告，排在原則 3 之後。這條會改動 [ADR-0020](0020-evaluation-bug-round-intended-behaviours.md)「二、bug 2 的修法」定下的指紋機制，是幾條原則裡改動最大的；現況的代價是白白重跑，結果不會錯。
+
+**#539 怎麼做的（2026-10-25）。**
+
+- **宣告是一張表，不放在各單元旁邊。** `pipelines/evaluation/steps/config_fingerprint.py` 的 `APPLIED_SETTINGS`，一個落地結果的 step 一列，寫它讀的設定。原則 3 說宣告放在單元旁邊；改成一張表，是因為重跑建議要找「讀到這個設定的第一個 step」，一張表才排得出先後。新加一個帶指紋的 step 沒在表上，它寫指紋時就 raise。
+- **指紋分兩格（決定 15 第四列）。** `applied` 記這一步讀的設定當時的值；`inputs` 記它讀的每份落地輸入的上游 step 各自套用的值，往上一路帶下來。要有 `inputs` 的理由：`baseline_comparison.json` 自己不讀任何設定，卻帶著兩邊每個 K 的數字。只看 `applied` 的話，改 `k_values` 之後只重跑 `compute_metrics`，舊的比較照樣通過，報表畫出舊 K 的差值，退出碼 0。錯誤訊息把兩格分開列：「這一步讀的設定」與「它的輸入在哪個 step 用了什麼設定」。
+- **比對。** `applied` 一律跟今天的設定比。`inputs` 也跟今天的比，但這次 run 裡沒有的 step 留下的紀錄不比：沒有任何重跑能讓它變新。實際上只有 `--compare-only` 會遇到：那個模式讀之前一般 run 寫的分區，`prepare_eval_data` 的紀錄是寫分區那次的設定，今天帶不帶 `--post-training` 跟它無關。決定 10 更正寫的代價「`--compare-only` 只重畫時，帶不帶 `--post-training` 要跟寫那份結果時一樣」因此消失。換來的缺口：一般 run 用別的分群設定重寫了目錄之後，`--compare-only --only-node generate_comparison_report` 會畫出重寫前算的比較，不報錯（擁有者 2026-10-25 選不補，跟「資料變了只重畫不擋」同一類）。
+- **重跑建議（決定 15 第一列）。** 這次 run 照拓撲順序，第一個讀到變動設定的 step，或沒有指紋的結果的 producer。哪些 node 在 run 裡跟著模式與段開關變，所以兩份報表與比較鏈的讀者由 `create_pipeline` 交給它們這次 run 的順序；其他讀者（主線上檢查輸入的 node）照表的順序，表的主線部分是每種 run 的順序，`test_pipeline.py::TestFingerprintRerunNodes` 檢查這件事，也檢查每個設定的建議 node 存在、而且從它重跑會涵蓋每個讀它的 step。這取代決定 10 更正寫的 `computed_rerun_node` 與 `COMPARE_MODE_DISPLAY_RERUN_NODE`。實作時發現舊做法的一個洞：`--compare` 且主報表的段全關時，主報表的 K 截斷不在 pipeline 裡，改了 `compare_k` 的建議卻指向它。
+- **三個段開關不再進指紋**（`popularity_baseline`、`rank_distribution`、`prediction_quality`）：#538 之後它們只決定 node 在不在，計算 node 不讀。例外是 `popularity_baseline` 記在 `resolve_display_ks`：關掉時那個 node 拿不到比較結果、不寫熱門度段的 K，它的結果跟著接線變。
+- **宣告不到的設定照舊擋不下。** `schema.*`、`dataset.test_zero_positive_group_ratio`（`--post-training` 下 `compute_prediction_quality` 讀）、`hive.db`、`_compare_source_tables` 會改變結果，但不在任何一列；改了它們只重畫不會被擋。#539 之前就是這樣，另開 #564 處理。
+- **舊格式的結果一律算過期**：#539 之前落地的 JSON 沒有兩格，第一次接續會被擋，照訊息重跑一次。
 
 ---
 
@@ -417,6 +427,8 @@ diagnosis/metric/    contract.py
 
 **重畫不啟動 Spark。** 今天就算只重畫，CLI 也會先初始化 Spark（`docs/pipelines/evaluation.md` 4.6 節）。擁有者偏向重畫時連 Spark 都不啟動。只改 `__main__.py` 做得到就做；要動 `core/` 的執行器或 catalog 才做得到，就算太複雜，改開 issue 記著。
 
+**#539（2026-10-25）：只改 `__main__.py` 就做到了。** 讀寫資料的物件（catalog 底下的 Hive、Parquet dataset）本來就是用到才開 Spark，所以只要 CLI 不先開：`evaluation` 指令在初始化 Spark 之前，先用同一條 pipeline、同樣的切片算一次 `--from-node`／`--only-node` 會跑哪些 node，切片裡每個 node 讀寫的都是落地的 JSON 或 HTML（`__main__.py::_slice_needs_no_spark`），就不開 Spark、不列 partition。試切時不問 Hive 表在不在（一問就會開 Spark），一律當作不在，所以只會多開、不會少開。實測（macOS 筆電、本機 `local[*]`、load average 3.4–5.4，同一份本機產物 `--post-training --only-node generate_report`）：改後 1.97–2.35 秒（3 次）；main 的程式 5.54–5.66 秒（3 次，先開 Spark，而且停在指紋檢查、沒畫報表，所以真的重畫還要再多一點）。公司叢集上開 Spark 要 2–4 分鐘（`CLAUDE.md` 的 pre-flight 說明），省下的是那一段。
+
 ### 決定 2　拿掉全部診斷頁
 
 拿掉 `diagnosis.metric.contract.DIAGNOSES` 列的全部診斷：`config_shift`、`item_ability`、`model_capacity`、`suppression`。只為它們存在的東西一起拿掉：共用準備步驟 `make_draw_diagnosis_sample_node`、`render_diagnosis_pages` 與監控模式的 `no_diagnosis_pages`、報表的「排序診斷連結」段（`build_diagnosis_links_section`）與它的開關 `report.sections.diagnosis_links`（A34 要求開關清單跟 `EVALUATION_REPORT_SECTIONS` 完全相等，兩邊一起拿）、`evaluation.diagnosis.*` 設定鍵，以及一致性檢查裡只檢查這些鍵的部分。A15 同時檢查 `evaluation.metric` 與 `evaluation.diagnosis`（`consistency.py:2302`），只拿掉後者那一半；A15 另外擋 `evaluation.segment_columns` 用到保留名 `stratum`／`inclusion_weight`（`consistency.py:2371-2389`），理由是診斷抽樣會自己加這兩欄，這一塊跟著拿掉。A19 整條只檢查 `evaluation.diagnosis.suppression.top_examples`，整條退休，代號不重編（照 A16／A17／A18 的慣例）。
@@ -548,7 +560,7 @@ diagnosis/metric/    contract.py
   - **報表要的值不在落地結果裡時報錯，只做到區塊那一層**（決定 4「清單要的結果沒算到時要報錯」）：報表經 `report_sections/shared.py` 的 `landed_value` 讀比較結果與 K 的區塊，缺了就 `ValueError` 並指出產出它的 node（對照表 `LANDED_BY`）。單一格缺值（例如熱門度基準段寫死印 @1～@5，而 `evaluation.k_values` 沒算 @1～@4）照舊印空白、不報錯：#536 要求兩份 HTML 一字不差，改之前也是印空白。決定 4 要的「不默默留白」要等決定 11 的「要比的指標」清單：清單在，才知道哪一格是一定要有的。#537 照決定 16 第 7 項讓同一段的表用同一組 K 時一起處理。
   - **比較報表那一側全部落地**（決定 4 第一點「比較的涵蓋率只在記憶體」、更正最後一點「A′、B′ 先在記憶體裡算列的事實」、決定 5「`generate_comparison_report` 在 node 裡算」都因此過時）。`--compare` 與 `--compare-only` 共用一串：`load_compare_predictions → restrict_to_common → compute_compare_metrics → compare_to_source → resolve_comparison_display_ks → generate_comparison_report`。前三個跑 Spark，後三個不跑。`restrict_to_common` 的涵蓋率改名 `compare_coverage` 並落地；`compute_compare_metrics` 落地 A′、B′ 各自的列的事實與指標（四份 JSON），今天 `generate_comparison_report` 裡那兩次 Spark 計算搬到這裡；`compare_to_source` 用同一個比較層機制比 A′ 與 B′，落地 `source_comparison.json`；`resolve_comparison_display_ks` 落地比較報表每張表要印的 K（per-item 表照舊只看 A′ 的 `all_k`，overall 表兩邊各看各的）。`generate_comparison_report` 只收落地結果，不收 Spark 物件；`--only-node generate_comparison_report` 不補跑任何 node（`RESUME_CONTRACTS` 釘住），CLI 仍會建 Spark session、查分區清單。`resolve_display_k`、`drop_metric_keys_above_all_k` 搬進 `pipelines/evaluation/steps/display_ks.py`，報表那側不再有截斷或算差值的函式。
   - **「跟誰比」記成每份比較產物的 `compare_source` 欄位，不進設定指紋的 `extra_keys`**（決定 5 最後一點）。內容由 `steps/compare_sources.py::compare_source_identity` 產生：`kind: model_version` 記 `kind`、`model_version`、`source`；`kind: external_hive` 記 `kind`、`table`、`columns`、`prod_mapping`、`unmapped_policy`；`label` 不記。沒寫的鍵先補上 loader 自己的預設值再記，所以「寫出預設值」與「不寫」讀到的是同一個 B′，不會誤擋。不放進指紋的理由：換了比較對象，每份比較產物同時過期，要建議的一律是 `--from-node compute_compare_metrics`；指紋的建議規則遇到多份過期只會建議單一 producer（要連環重跑）或整條 pipeline（在 `--compare` 會重跑主線）。只改 `label` 不擋，重畫就印新名字。
-  - **決定 15 第 1 列的做法：重跑建議依模式指向存在的 node。** `require_computed_with_current_config` 多一個 `computed_rerun_node` 參數；比較側三個不跑 Spark 的 node 由依模式的 factory 建（`make_compare_to_source_node` 等），`--compare-only` 下 `COMPUTED_KEYS` 變了建議 `compute_compare_metrics`，`--compare` 下照舊建議 `COMPUTED_KEYS` 那一列的 node（不能也送 `compute_compare_metrics`：從它往後的切片含 `generate_report`，主線的產物這時也過期）。`test_pipeline.py` 的 `TestFingerprintRerunNodes` 把 `--compare-only` 也納入檢查。代價：`--compare-only` 只重畫時，帶不帶 `--post-training` 要跟寫那份結果時一樣，否則指紋不合而被擋（寧可多擋，照建議重算後結果正確）。
+  - **決定 15 第 1 列的做法：重跑建議依模式指向存在的 node。** `require_computed_with_current_config` 多一個 `computed_rerun_node` 參數；比較側三個不跑 Spark 的 node 由依模式的 factory 建（`make_compare_to_source_node` 等），`--compare-only` 下 `COMPUTED_KEYS` 變了建議 `compute_compare_metrics`，`--compare` 下照舊建議 `COMPUTED_KEYS` 那一列的 node（不能也送 `compute_compare_metrics`：從它往後的切片含 `generate_report`，主線的產物這時也過期）。`test_pipeline.py` 的 `TestFingerprintRerunNodes` 把 `--compare-only` 也納入檢查。代價：`--compare-only` 只重畫時，帶不帶 `--post-training` 要跟寫那份結果時一樣，否則指紋不合而被擋（寧可多擋，照建議重算後結果正確）。（#539 換掉了這個做法與這個代價，見原則 5〈#539 怎麼做的〉。）
   - **決定 16 第 15、16 項的值已落地，報表還沒畫。** 四項標註與 `compare_source` 都在 `source_comparison.json`；「能不能比」表與「跟誰比」表由 #537 畫（#536 要求兩份 HTML 一字不差）。比較報表今天的 coverage 段照舊印 `table_a` 為 "n/a"（node 從沒寫過這個鍵），一併留給 #537。
   - **組數帳的減法改讀母體帳。** 報表原本自己算「算進衡量指標的組數＝有正例的 − 全正的」（`query_count_rows`、排序指標段的組數帳），現在讀 `population.n_scored_queries_with_positive`（`shared.scored_with_positive`）。
   - **`--compare` 下改了 display 鍵，兩份報表一起從 `resolve_display_ks` 接續。** 它往後的切片含兩個 K 截斷 node 與兩份報表，不跑 Spark；只從 `resolve_comparison_display_ks` 接續的話，同一段切片裡的 `generate_report` 會先因 `display_ks.json` 過期而停下。所以比較報表在 `--compare` 下的建議也是 `resolve_display_ks`，`--compare-only`（沒有主報表）才是 `resolve_comparison_display_ks`。
@@ -559,7 +571,7 @@ diagnosis/metric/    contract.py
     - **`scored_queries` 只比組數，不比是哪些組。** A 是全網格時夠用；A 是展示紀錄時，兩邊組數相同、組卻不同，會標成 `same: true`。要比組的集合，得在母體帳記組的雜湊或清單。
     - **衍生產物複製了它讀的值，指紋只看設定、不看資料。** `baseline_comparison.json`、`source_comparison.json`、兩份 K 截斷產物各自帶著兩邊的數字。資料變了（例如 `label_table` 回補）之後只用 `--only-node` 重跑上游某個 node 再重畫，同一頁可能印出新舊兩個數字，不報錯；改之前熱門度段的差值是畫的時候現算的，不會這樣。照文件，資料變了要 `--from-node prepare_eval_data` 或 full run。要擋，得讓衍生產物記下它讀過的輸入的雜湊。
     - **K 截斷產物的形狀跟著報表版面走**（`display_ks.json` 的鍵照段命名，例如 `metrics_section`、`headline_column_shown`）。這是本條把 K 截斷算成計算的代價：#537 改版面時，`steps/display_ks.py` 要跟著改。設計審查認為 K 截斷該算呈現（原則 1 把「排序後挑前幾名來顯示」列為呈現）；本條是擁有者定的，#537 若要翻，回這裡改。
-    - **比較產物用全域的設定指紋。** 跟比較側無關的設定（例如預測品質）改了，也會要求重算比較側的 Spark。原則 5（每份結果只對讀過的設定算指紋）做完就會消失。
+    - **比較產物用全域的設定指紋。** 跟比較側無關的設定（例如預測品質）改了，也會要求重算比較側的 Spark。原則 5（每份結果只對讀過的設定算指紋）做完就會消失。（#539 已做。）
     - **比較層只吃兩份指標結果**，接不了決定 16 第 3 項的兩個 AP（另一種算法、另一個計算單元）。AP 排進哪張票時，一起決定比較層怎麼接。
   - **#536 之前落地的結果要重算。** 它們缺上面這些鍵，設定指紋卻照樣對得上（沒有設定變）。報表看到缺鍵就報錯，指向 `--from-node compute_row_facts`（`refuse_pre_landed_reads`），不讓組數帳與警告默默從頁面消失。
   - **報表裡還留兩個「挑哪句話」的判斷，#536 沒搬。** 預測品質段看落地的組數，判斷它跟排序指標的母體是不是同一批（`n_excluded_queries == 0`，且全正組沒被排除），挑一句說明；熱門度基準段看 `popularity_window` 有幾個評估日，挑「平均每月」的說法。照原則 1 的字面判準（會拿來判斷），兩者都算計算。留下的理由：它們不產出任何印在頁面上或給別處用的數字，只決定印哪一句；要搬，前者得有一個同時讀兩份母體的單元，後者只是多落地一個旗標。代價是熱門度那條跟 node 算除數用的是同一條規則（評估日多於一個），改一邊時要一起改。#537 重畫這兩段時再決定搬不搬。
@@ -613,6 +625,8 @@ PR 怎麼切、先後怎麼排，擁有者決定另用 `/to-spec`、`/to-tickets
 | 指紋分兩種：輸入資料當時的設定、這一步套用的設定。例如 `--compare-only` 的 A′ 用分區記錄的設定檢查分區，卻用今天的 `k_values` 計算 | 指紋 | 兩種都記、分開比對 |
 | 大類算哪一層 | 指標層 | 照今天，當成指標層的一種粒度 |
 | 公式在指標目錄裡怎麼表示（作者建議） | 指標層 | 宣告「由哪幾個共用數字怎麼組合」，不放 Spark 物件；報表讀目錄不必 import Spark 計算模組。不得用 UDF |
+
+**第一列與「指紋分兩種」那列（#539，2026-10-25）**：照預設做了，做法見原則 5〈#539 怎麼做的〉。
 
 **「整數 K 還是邏輯名」的查證結果（#535，2026-10-23）：不改，鍵照舊存解析後的整數。**
 

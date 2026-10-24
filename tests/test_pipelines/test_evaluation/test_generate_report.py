@@ -70,7 +70,7 @@ def _landed_segments(params):
     """``evaluation_segment_columns`` as a run under ``params`` lands it, no
     segment column joined."""
     return {"joined": [], "sources": {}, "missing": {},
-            "config_fingerprint": fingerprint(params)}
+            "config_fingerprint": fingerprint(params, "prepare_eval_data")}
 
 
 def _metrics():
@@ -88,7 +88,8 @@ def _metrics():
 def _landed_metrics(params):
     """``_metrics()`` as ``compute_metrics`` lands it under ``params``: with
     the fingerprint ``generate_report`` checks (ADR-0018 decision 2)."""
-    return {**_metrics(), "config_fingerprint": fingerprint(params)}
+    return {**_metrics(), "config_fingerprint": fingerprint(
+        params, "compute_metrics", (_landed_segments(params),))}
 
 
 def _landed_row_facts(params):
@@ -110,7 +111,8 @@ def _landed_row_facts(params):
     return {
         **counts, **all_positive_accounts(counts, params),
         "segments": _landed_segments(params),
-        "config_fingerprint": fingerprint(params),
+        "config_fingerprint": fingerprint(
+            params, "compute_row_facts", (_landed_segments(params),)),
     }
 
 
@@ -159,7 +161,8 @@ def test_generate_report_with_diagnostics(spark):
     eval_pred = _eval_pred(spark)
     aggregates = compute_report_aggregates(
         eval_pred, _landed_segments(params), params)
-    assert aggregates["config_fingerprint"] == fingerprint(params)
+    assert aggregates["config_fingerprint"]["applied"] == fingerprint(
+        params, "compute_report_aggregates")["applied"]
     html = generate_report(
         evaluation_row_facts=_row_facts_of(eval_pred, params),
         evaluation_metrics=_landed_metrics(params),
@@ -375,11 +378,11 @@ def test_generate_report_refuses_a_computed_setting_flipped_after_the_run():
 
     msg = str(exc.value)
     assert "evaluation.report.sections.popularity_baseline" in msg
-    # compute_row_facts, not compute_baseline_metrics: row_facts.json and
-    # metrics.json carry the same fingerprint and sort first, so re-running
-    # from the baseline would leave them stale and this raise would repeat
-    # (COMPUTED_KEYS).
-    assert "--from-node compute_row_facts" in msg
+    # The K cut is the one step whose result follows the switch: off, it was
+    # given no comparison and cut no baseline section (#539). The rest of
+    # what the report reads is current.
+    assert "--from-node resolve_display_ks," in msg
+    assert "evaluation_metrics (written by" not in msg
 
 
 def test_generate_report_refuses_metrics_computed_with_other_settings():
@@ -401,7 +404,8 @@ def test_generate_report_refuses_metrics_computed_with_other_settings():
 
     msg = str(exc.value)
     assert "evaluation_metrics (written by compute_metrics)" in msg
-    assert "--from-node compute_row_facts" in msg
+    # Only the metrics apply evaluation.metric; the row facts are current.
+    assert "--from-node compute_metrics," in msg
 
 
 def test_generate_report_refuses_metrics_without_a_fingerprint():
@@ -466,8 +470,8 @@ def test_generate_report_refuses_a_display_k_changed_after_the_cut():
         )
 
     msg = str(exc.value)
-    assert ("evaluation_display_ks (written by resolve_display_ks) was "
-            "computed with different settings") in msg
+    assert "evaluation_display_ks (written by resolve_display_ks) is " \
+        "stale" in msg
     assert "evaluation.report.display.compare_k: [1] -> [1, 'all']" in msg
     assert "--from-node resolve_display_ks" in msg
 
@@ -498,31 +502,36 @@ def test_generate_report_refuses_a_comparison_without_a_fingerprint():
     assert "--from-node compare_to_baseline" in msg
 
 
-def test_generate_report_refuses_prediction_quality_switched_on_after_the_run():
-    """Computed with the family off (the framework default), switched on and
-    only redrawn: today's settings computed no prediction quality — the file
-    the report now reads is an older run's — so the redraw must raise rather
-    than print a report drawn off it (#381)."""
+def test_a_prediction_quality_result_switched_back_on_is_checked_on_its_own_settings():
+    """Computed with the family on, switched off, then on again and only
+    redrawn: the file an earlier run left is drawn while the settings its
+    step applied still hold, and refused once one moved (ADR-0031
+    principle 5). The switch itself decides only whether the step runs, so
+    it is not what the refusal names (#539)."""
     computed_with = _params_computed_without_baseline()
-    computed_with["evaluation"]["report"]["sections"][
-        "prediction_quality"] = False
+    computed_with["evaluation"]["prediction_quality"] = {"n_bins": 1000}
     now = copy.deepcopy(computed_with)
     now["evaluation"]["report"]["sections"]["prediction_quality"] = True
+    now["evaluation"]["prediction_quality"]["n_bins"] = 100
 
     with pytest.raises(ValueError) as exc:
         generate_report(
             evaluation_row_facts=_landed_row_facts(computed_with),
             evaluation_metrics=_landed_metrics(computed_with),
-            prediction_quality_metrics={
-                "config_fingerprint": fingerprint(computed_with)},
+            prediction_quality_metrics={"config_fingerprint": fingerprint(
+                computed_with, "compute_prediction_quality")},
             **_landed_after_the_metrics(
                 _landed_metrics(computed_with), None, computed_with),
             parameters=now,
         )
 
     msg = str(exc.value)
-    assert "evaluation.report.sections.prediction_quality" in msg
-    assert "--from-node compute_row_facts" in msg
+    assert "evaluation.prediction_quality.n_bins: 1000 -> 100" in msg
+    assert "sections.prediction_quality" not in msg
+    assert "--from-node compute_prediction_quality," in msg
+    for current in ("evaluation_row_facts", "evaluation_metrics",
+                    "evaluation_display_ks"):
+        assert f"{current} (written by" not in msg
 
 
 def test_generate_report_refuses_a_prediction_quality_json_without_fingerprint():
@@ -560,7 +569,8 @@ def test_generate_report_draws_prediction_quality_from_the_nodes_output(spark):
     pq = compute_prediction_quality(
         eval_pred, _landed_segments(params), params)
     pq = json.loads(json.dumps(pq))
-    assert pq["config_fingerprint"] == fingerprint(params)
+    assert pq["config_fingerprint"]["applied"] == fingerprint(
+        params, "compute_prediction_quality")["applied"]
     assert pq["overall"]["summary"]["n"] == 4
     html = generate_report(
         evaluation_row_facts=_row_facts_of(eval_pred, params),
@@ -824,15 +834,16 @@ _EXTERNAL = {
 _OTHER_MODEL = {"kind": "model_version", "model_version": "v0", "label": "v0"}
 
 
-def _stamped_for_comparison(result, params):
-    """``result`` as a comparison producer lands it under ``params``: the
-    fingerprint and the compare source (``compute_compare_metrics`` stamps
-    both; ``test_nodes.py::TestComputeCompareMetrics`` pins it)."""
+def _stamped_for_comparison(result, params, node="compute_compare_metrics"):
+    """``result`` as ``node``, a comparison producer, lands it under
+    ``params``: the fingerprint and the compare source
+    (``test_nodes.py::TestComputeCompareMetrics`` pins it for
+    ``compute_compare_metrics``)."""
     from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
         compare_source_identity,
     )
 
-    return {**result, "config_fingerprint": fingerprint(params),
+    return {**result, "config_fingerprint": fingerprint(params, node),
             "compare_source": compare_source_identity(params)}
 
 
@@ -856,7 +867,8 @@ def _comparison_inputs(params, compare_only=False):
                 "n_item_B_full": 2, "n_item_common": 2,
                 "dropped_items_A": [], "dropped_items_B": []}
     return {
-        "compare_coverage": _stamped_for_comparison(coverage, params),
+        "compare_coverage": _stamped_for_comparison(
+            coverage, params, "restrict_to_common"),
         "compare_row_facts_a": _stamped_for_comparison(
             {k: v for k, v in _landed_row_facts(params).items()
              if k not in ("segments", "config_fingerprint")}, params),
@@ -946,11 +958,10 @@ def test_a_new_label_redraws_with_the_new_label():
 
 
 def test_compare_only_sends_a_changed_computed_setting_to_a_node_it_has():
-    """ADR-0031 decision 15, first row: ``--compare-only`` has neither
-    ``prepare_eval_data`` nor ``compute_row_facts``, the nodes
-    ``COMPUTED_KEYS`` names, so the advice must be one of its own — and
-    ``--compare`` keeps the ``COMPUTED_KEYS`` node, whose slice also
-    re-runs the main line the change made stale."""
+    """ADR-0031 decision 15, first row: ``--compare-only`` has no main
+    line, so the advice must be one of its own — and ``--compare`` names the
+    main line's first step applying the setting, whose slice also re-runs
+    the main line the change made stale."""
     import re
 
     from recsys_tfb.pipelines.evaluation import create_pipeline
@@ -959,7 +970,7 @@ def test_compare_only_sends_a_changed_computed_setting_to_a_node_it_has():
     now = copy.deepcopy(computed_with)
     now["evaluation"]["metric"] = {"min_positives": 5}
     for compare_only, expected in ((True, "compute_compare_metrics"),
-                                   (False, "compute_row_facts")):
+                                   (False, "compute_metrics")):
         landed = _comparison_inputs(computed_with, compare_only)
         with pytest.raises(ValueError) as exc:
             _comparison_node("generate_comparison_report", compare_only).func(
@@ -1006,7 +1017,7 @@ def test_a_changed_display_k_sends_the_comparison_redraw_to_a_slice_that_draws(
 
     msg = str(exc.value)
     assert ("comparison_display_ks (written by resolve_comparison_display_ks)"
-            " was computed with different settings") in msg
+            " is stale") in msg
     assert f"evaluation.report.display.{key}: " in msg
     assert re.findall(r"--from-node (\w+)", msg) == [expected]
 
@@ -1070,7 +1081,7 @@ def test_the_comparison_and_its_cut_land_what_they_were_computed_with():
         comparison, params)
 
     identity = compare_source_identity(params)
-    assert comparison["config_fingerprint"] == fingerprint(params)
+    assert comparison["config_fingerprint"]["node"] == "compare_to_source"
     assert comparison["compare_source"] == identity
     assert comparison["overall"]["cells"]["map@1"] == {
         "this": 0.5, "reference": 0.25, "diff": 0.25}
@@ -1079,6 +1090,6 @@ def test_the_comparison_and_its_cut_land_what_they_were_computed_with():
         "compare_k": [1, 2],
         "category": None,
         "config_fingerprint": fingerprint(
-            params, ("evaluation.report.display.compare_k",)),
+            params, "resolve_comparison_display_ks", (comparison,)),
         "compare_source": identity,
     }

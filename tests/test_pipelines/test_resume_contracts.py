@@ -196,8 +196,9 @@ RESUME_CONTRACTS = {
         # This stub catalog answers "the table exists"; the evaluated month
         # missing from it is the CLI's month plan's business (test_cli.py).
         "compute_metrics": set(),
-        # Where a changed computed setting sends the re-run (#535,
-        # COMPUTED_KEYS): the same table read back, nothing re-joined.
+        # Where a changed query_filter or category mapping sends the re-run
+        # (config_fingerprint.APPLIED_SETTINGS): the same table read back,
+        # nothing re-joined.
         "compute_row_facts": set(),
         # The comparison layer and the K cut (#536) read landed JSON only:
         # resuming at either re-runs no metrics node. resolve_display_ks is

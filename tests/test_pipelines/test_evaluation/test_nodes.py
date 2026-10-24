@@ -17,7 +17,7 @@ def _no_segments(parameters):
     from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
 
     return {"joined": [], "sources": {}, "missing": {},
-            "config_fingerprint": fingerprint(parameters)}
+            "config_fingerprint": fingerprint(parameters, "prepare_eval_data")}
 
 
 def _row_facts(frame, parameters, segment_columns=None):
@@ -512,7 +512,7 @@ class TestSegmentsFollowThePopulation:
             "joined": ["cust_segment_typ"],
             "sources": {"cust_segment_typ": "inference_population"},
             "missing": {},
-            "config_fingerprint": fingerprint(params),
+            "config_fingerprint": fingerprint(params, "prepare_eval_data"),
         }
 
     def test_post_training_sample_pool_is_finer_grained_without_fanout(self, spark):
@@ -1010,7 +1010,8 @@ class TestComputeBaselineMetrics:
             "observation_items", "purchase_counts", "monthly_counts",
             "popularity_window", "config_fingerprint",
         }
-        assert result["config_fingerprint"] == fingerprint(self._parameters())
+        assert result["config_fingerprint"]["applied"] == fingerprint(
+            self._parameters(), "compute_baseline_metrics")["applied"]
         assert "A" in result["per_item"]
         # purchase_counts comes from _label_table fixture (snap=2024-06-30
         # falls inside the [2024-01-31, 2025-01-31) lookback window for the
@@ -1163,7 +1164,9 @@ class TestCompareToBaseline:
             "this": 1.0, "reference": 0.0, "diff": 1.0}
         macro = out["macro_by_item"]["cells"]["recall@1"]
         assert macro["diff"] == pytest.approx(1 / 3)
-        assert out.get("config_fingerprint") == fingerprint(params)
+        # It applies no setting; it records what both of its inputs did.
+        assert set(out["config_fingerprint"]["inputs"]) >= {
+            "compute_metrics", "compute_baseline_metrics"}
 
     def test_the_all_cells_pair_each_side_s_own_all(self, spark):
         """Two results whose ``"all"`` resolved to different K (3 items
@@ -1214,7 +1217,8 @@ class TestCompareToBaseline:
         with pytest.raises(ValueError) as exc:
             compare_to_baseline(metrics, baseline, now)
         assert "evaluation.metric.min_positives" in str(exc.value)
-        assert "--from-node compute_row_facts" in str(exc.value)
+        # The first step applying evaluation.metric (#539).
+        assert "--from-node compute_metrics," in str(exc.value)
 
     def test_a_ledger_landed_before_its_segment_columns_is_refused(
             self, spark):
@@ -1344,8 +1348,8 @@ class TestResolveDisplayKs:
             "category": {"all_k": 2, "compare_k": [1, 2]}}
         # Its fingerprint holds the display key it read, so a changed
         # compare_k makes it — and only it — stale.
-        assert out.get("config_fingerprint") == fingerprint(
-            params, ("evaluation.report.display.compare_k",))
+        assert "evaluation.report.display.compare_k" in \
+            out["config_fingerprint"]["applied"]
 
     def test_the_metrics_section_follows_k_values(self, spark):
         """ADR-0031 decision 16 / #537: the metrics section shows the K the
@@ -1414,7 +1418,9 @@ class TestResolveDisplayKs:
             resolve_display_ks(metrics, now, baseline_comparison=comparison)
         assert "baseline_comparison (written by compare_to_baseline)" in str(
             exc.value)
-        assert "--from-node compute_row_facts" in str(exc.value)
+        # It applies nothing itself: what moved is what its inputs applied.
+        assert "settings its input from compute_metrics" in str(exc.value)
+        assert "--from-node compute_metrics," in str(exc.value)
 
 
 class TestComputeRowFacts:
@@ -1529,7 +1535,8 @@ class TestComputeRowFacts:
         assert (facts["n_queries"], facts["n_excluded_queries"],
                 facts[ALL_POSITIVE_KEY]) == (3, 1, 1)
         assert facts["segments"] == {"joined": [], "sources": {}, "missing": {}}
-        assert facts["config_fingerprint"] == fingerprint(params)
+        assert facts["config_fingerprint"]["applied"] == fingerprint(
+            params, "compute_row_facts")["applied"]
 
 
 class TestComputePredictionQuality:
@@ -1596,7 +1603,8 @@ class TestComputePredictionQuality:
         assert result["bins"]["width"] == pytest.approx(0.1)
         assert len(result["per_item"]["listed"]) == 1
         assert result["per_item"]["n_items"] == 3
-        assert result["config_fingerprint"] == fingerprint(params)
+        assert result["config_fingerprint"]["applied"] == fingerprint(
+            params, "compute_prediction_quality")["applied"]
 
     def test_lands_the_display_bins_and_the_sweep_the_report_draws(
             self, spark):
@@ -1785,7 +1793,8 @@ class TestConsumersSegmentByTheLandedList:
             "joined": ["cust_segment_typ"],
             "sources": {"cust_segment_typ": "sample_pool"},
             "missing": {"holding_combo": "sample_pool"},
-            "config_fingerprint": fingerprint(cls._parameters()),
+            "config_fingerprint": fingerprint(
+                cls._parameters(), "prepare_eval_data"),
         }
 
     @staticmethod
@@ -1837,8 +1846,10 @@ class TestConsumersSegmentByTheLandedList:
         # (ADR-0018 decision 2, ADR-0020 decision 2); so do the metrics.
         from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
 
-        assert facts["config_fingerprint"] == fingerprint(self._parameters())
-        assert result["config_fingerprint"] == fingerprint(self._parameters())
+        assert facts["config_fingerprint"]["applied"] == fingerprint(
+            self._parameters(), "compute_row_facts")["applied"]
+        assert result["config_fingerprint"]["applied"] == fingerprint(
+            self._parameters(), "compute_metrics")["applied"]
 
     def test_compute_baseline_metrics(self, spark):
         from recsys_tfb.pipelines.evaluation.nodes import (
@@ -1943,7 +1954,8 @@ class TestConsumersSegmentByTheLandedList:
             frame, frame, self._segments(), params)
         assert len(landed) == 4
         for result in landed:
-            assert result.get("config_fingerprint") == fingerprint(params)
+            assert result["config_fingerprint"]["applied"] == fingerprint(
+                params, "compute_compare_metrics")["applied"]
             assert result.get("compare_source") == {
                 "kind": "model_version", "model_version": "v0",
                 "source": "enriched_eval_predictions"}
@@ -2176,9 +2188,9 @@ class TestReadersRefuseAPartitionPreparedUnderOtherSettings:
     """The partition is read back from Hive, so a slice starting after
     ``prepare_eval_data`` does not re-join it. Its landed
     ``evaluation_segment_columns`` fingerprint says which settings it was
-    joined under; the segmenting readers compare it on
-    ``PARTITION_CONTENT_KEYS`` before reading (the #352 sign-off, ADR-0020
-    bug 6).
+    joined under; the segmenting readers compare it on the settings
+    ``prepare_eval_data`` applies before reading (the #352 sign-off,
+    ADR-0020 bug 6).
     """
 
     _READERS = ("compute_row_facts", "compute_metrics",

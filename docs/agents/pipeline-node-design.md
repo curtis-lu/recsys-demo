@@ -396,7 +396,7 @@ train 取 train_dev 那個式子的否定，每一列必定落在剛好一邊。
 為什麼留：
 
 - 四樣都有 catalog 條目、都落地，已經各自撈得出來；拆開不多一個觀察點。
-- 主線拆開，是為了讓設定改了之後有共同的重跑起點（`COMPUTED_KEYS` 指向 `compute_row_facts`）。比較這側的重跑建議（換了比較對象、`--compare-only` 下改了算的設定）都從這個 node 開始（`COMPARISON_RERUN_NODE`），`--compare` 下改了算的設定則從主線的 `COMPUTED_KEYS` 那一列開始；拆出列的事實那一半，沒有人會從它接續。
+- 主線拆開，是因為兩半讀的設定不同，設定改了之後的重跑起點也不同：`query_filter`、`item_categories` 從 `compute_row_facts` 起，`k_values`、`metric` 只從 `compute_metrics` 起（`config_fingerprint.APPLIED_SETTINGS`）。比較這側兩半讀同一組設定，它的重跑建議（換了比較對象、`--compare-only` 下改了算的設定）都從這個 node 開始（`COMPARISON_RERUN_NODE`），`--compare` 下改了算的設定則從主線第一個讀它的 node 開始；拆出列的事實那一半，沒有人會從它接續。
 
 代價：四個輸出照位置對應 `pipeline.py` 的 outputs，對調了不會報錯，比較報表會把兩邊標反。有一條測試在對調時轉紅（斷言經 outputs 名字拿到的 A′ 帶分群欄、B′ 沒有）。
 

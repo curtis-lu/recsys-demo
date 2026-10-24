@@ -89,7 +89,7 @@ def _landed_segments(params):
     )
 
     return {"joined": [], "sources": {}, "missing": {},
-            "config_fingerprint": fingerprint(params)}
+            "config_fingerprint": fingerprint(params, "prepare_eval_data")}
 
 
 def _as_written(df, params):
@@ -403,7 +403,9 @@ def test_the_coverage_lands_what_it_was_computed_with(
     # table the node is wired to read this side from.
     assert coverage["source_a"] == node.inputs[0] == "enriched_eval_predictions"
     assert coverage["n_query_group_common"] == 1
-    assert coverage["config_fingerprint"] == fingerprint(params)
+    # It applies the dates and inherits the partitions' prepared record.
+    assert coverage["config_fingerprint"] == fingerprint(
+        params, "restrict_to_common", (_landed_segments(params),))
     assert coverage["compare_source"] == compare_source_identity(params) == {
         "kind": "hive", "model_version": "v1"}
 

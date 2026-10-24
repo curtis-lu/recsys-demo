@@ -591,7 +591,7 @@ def _display_ks(out, params):
         fingerprint,
     )
 
-    stamp = {"config_fingerprint": fingerprint(params)}
+    stamp = {"config_fingerprint": fingerprint(params, "compute_metrics")}
     return resolve_display_ks({**out, **stamp}, params)
 
 

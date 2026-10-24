@@ -17,7 +17,7 @@ Shape of what that node lands (the key constants are in
           "compare_k": [k, ...],          # ints: every table of the section
           "category": {"all_k": int, "compare_k": [k, ...]} | None,
       } | None,                           # baseline section off
-      "config_fingerprint": {...},        # with the display keys it read
+      "config_fingerprint": {...},        # with the display key it reads
     }
 
 Each block is keyed by the result its tables are drawn from. A list of ints
@@ -34,7 +34,7 @@ columns of every per-K table of the comparison report (:func:`comparison_cut`;
       "all_k": int,                       # this run's side's "all"
       "compare_k": [k, ...],              # ints, ascending; "all" is all_k
       "category": {"all_k": int, "compare_k": [...]} | None,
-      "config_fingerprint": {...},        # with the display keys it read
+      "config_fingerprint": {...},        # with the display key it reads
       "compare_source": {...},            # what it was compared against
     }
 
@@ -58,23 +58,6 @@ from recsys_tfb.evaluation.result_readers import (
     DISPLAY_COMPARE_K,
     DISPLAY_METRICS_SECTION,
 )
-
-#: The display keys the cut reads, as dotted paths: the fingerprint of what
-#: ``resolve_display_ks`` lands carries their values (``extra_keys``), so
-#: ``--only-node generate_report`` after one changed is refused and sent to
-#: ``--from-node resolve_display_ks``. The cut reads ``evaluation.k_values``
-#: too (the metrics section's K, and ``compare_k`` when it is not written);
-#: that one is a computed key, already in every fingerprint
-#: (``config_fingerprint.COMPUTED_KEYS``), so it is not listed here.
-DISPLAY_KEYS_READ = ("evaluation.report.display.compare_k",)
-
-#: The display keys the comparison report's cut reads, for the fingerprint of
-#: what ``resolve_comparison_display_ks`` lands: a change re-runs that node.
-#: The same key as the main report's since #537, which retired the
-#: comparison's own recall K key (A63), so under ``--compare`` a change makes
-#: both cuts stale (``nodes.COMPARE_MODE_DISPLAY_RERUN_NODE``).
-COMPARISON_DISPLAY_KEYS_READ = ("evaluation.report.display.compare_k",)
-
 
 def resolve_display_k(raw_k: list, all_k: int) -> list:
     """Map mixed int/'all' display k list to concrete column suffixes.

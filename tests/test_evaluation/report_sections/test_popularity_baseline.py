@@ -160,9 +160,11 @@ def _draw(model=None, baseline=None, parameters=None, facts=None):
     )
 
     parameters = parameters or _params()
-    stamp = {"config_fingerprint": fingerprint(parameters)}
-    model = {**(model or _bundle(0.5)), **stamp}
-    baseline = {**(baseline or _baseline(parameters)), **stamp}
+    model = {**(model or _bundle(0.5)), "config_fingerprint": fingerprint(
+        parameters, "compute_metrics")}
+    baseline = {**(baseline or _baseline(parameters)),
+                "config_fingerprint": fingerprint(
+                    parameters, "compute_baseline_metrics")}
     comparison = compare_to_baseline(model, baseline, parameters)
     results = {
         "evaluation_row_facts": facts or _FACTS,
