@@ -72,17 +72,15 @@ from recsys_tfb.evaluation.result_readers import (
     ALL_POSITIVE_WARNS_KEY,
     CELLS,
     DISPLAY_ALL_K,
+    DISPLAY_COMPARE_K,
     DISPLAY_METRICS_SECTION,
-    DISPLAY_PRIMARY_MAP_K,
     LEDGER_RERUN_NODE,
     N_WITH_POSITIVE_KEY,
     POPULARITY_WINDOW_KEY,
     POPULATION_KEY,
-    REFERENCE,
     THIS,
     drop_all_positive_groups,
     format_share,
-    metric_params,
     resolved_all_k,
 )
 from recsys_tfb.pipelines.evaluation.steps.comparison_layer import (
@@ -110,12 +108,11 @@ from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
 from recsys_tfb.pipelines.evaluation.steps.display_ks import (
     COMPARISON_DISPLAY_KEYS_READ,
     DISPLAY_KEYS_READ,
-    configured_guardrail_recall_k,
-    configured_primary_map_k,
-    cut_at,
-    every_key_rows,
-    per_item_lists,
-    with_headline_flag,
+    baseline_comparison_block,
+    comparison_cut,
+    configured_compare_k,
+    configured_k_values,
+    evaluation_metrics_block,
 )
 from recsys_tfb.pipelines.evaluation.steps.item_categories import (
     category_of_each_item,
@@ -984,7 +981,7 @@ def compute_baseline_metrics(
     """
     eval_params = parameters.get("evaluation", {}) or {}
     sections = (eval_params.get("report", {}) or {}).get("sections", {}) or {}
-    if not sections.get("baseline", True):
+    if not sections.get("popularity_baseline", True):
         logger.info(
             "Baseline report section disabled — skipping baseline metrics"
         )
@@ -1307,7 +1304,7 @@ def compute_report_aggregates(
     report_cfg = eval_params.get("report", {}) or {}
     sections_cfg = report_cfg.get("sections", {}) or {}
     diag_cfg = report_cfg.get("diagnostics", {}) or {}
-    if not sections_cfg.get("per_item_breakdown", True):
+    if not sections_cfg.get("rank_distribution", True):
         logger.info("report per-item breakdown section disabled — writing stub")
         return {"enabled": False, "config_fingerprint": fingerprint(parameters)}
 
@@ -1471,35 +1468,36 @@ def resolve_display_ks(
             f"with the flags of the run that wrote it (e.g. --post-training) "
             f"— then re-draw."
         )
-    primary_map_k = configured_primary_map_k(parameters)
+    compare_k = configured_compare_k(parameters)
     # Decision — the overview and the metrics section draw off the model's
-    # metrics, so each grain's lists are cut at that grain's "all" there. The
-    # headline note names its column only while the metrics section shows it.
+    # metrics, so each grain's lists are cut at that grain's "all" there; the
+    # metrics section shows the K the run computed (k_values ∪ "all").
     category = evaluation_metrics.get("category")
-    model_block = with_headline_flag(
-        cut_at(resolved_all_k(evaluation_metrics),
-               resolved_all_k(category) if category else None,
-               primary_map_k),
-        metric_params(parameters)["k"])
-    # Decision — the baseline section draws off the comparison, and both of
-    # its sides at the model's K: the baseline re-scores the model's rows,
-    # so its "all" is the same number (the comparison's all_k annotation
-    # says so). None while the section is off: nothing is drawn.
+    model_block = evaluation_metrics_block(
+        resolved_all_k(evaluation_metrics),
+        resolved_all_k(category) if category else None,
+        configured_k_values(parameters))
+    # Decision — the baseline section draws off the comparison, every table
+    # at compare_k, and both of its sides at the model's K: the baseline
+    # re-scores the model's rows, so its "all" is the same number (the
+    # comparison's all_k annotation says so). None while the section is off:
+    # nothing is drawn.
     baseline_block = None
     if baseline_comparison.get("enabled") is not False:
         compared_category = baseline_comparison["category"]
-        baseline_block = cut_at(
+        baseline_block = baseline_comparison_block(
             baseline_comparison[POPULATION_KEY][ALL_K_KEY][THIS],
             (compared_category[POPULATION_KEY][ALL_K_KEY][THIS]
              if compared_category else None),
-            primary_map_k)
+            compare_k)
     out = {"evaluation_metrics": model_block,
            "baseline_comparison": baseline_block,
            "config_fingerprint": fingerprint(parameters, DISPLAY_KEYS_READ)}
     logger.info(
-        "Display K resolved: metrics section %s, primary_map_k %s (all = %d)",
-        model_block[DISPLAY_METRICS_SECTION],
-        model_block[DISPLAY_PRIMARY_MAP_K], model_block[DISPLAY_ALL_K])
+        "Display K resolved: metrics section %s (all = %d), baseline "
+        "section %s",
+        model_block[DISPLAY_METRICS_SECTION], model_block[DISPLAY_ALL_K],
+        baseline_block[DISPLAY_COMPARE_K] if baseline_block else "off")
     return out
 
 
@@ -1691,6 +1689,11 @@ def _restrict_to_common(
     coverage = {
         "kind_a": "model_version",
         "model_version_a": parameters.get("model_version", "(this run)"),
+        # This run's side is read off the table pipeline.py wires as this
+        # node's first input, in both compare modes — the same table a
+        # model_version source names as its `source`; the comparison report
+        # prints it beside the compared source's (#537).
+        "source_a": "enriched_eval_predictions",
         "kind_b": src.get("kind", ""),
         "model_version_b": src.get("model_version", "n/a"),
         "table_b": src.get("table", "n/a"),
@@ -1732,7 +1735,7 @@ COMPARISON_RERUN_NODE = "compute_compare_metrics"
 #: (``resolve_comparison_display_ks``) is the narrowest re-run, but under
 #: ``--compare`` its slice ends in ``generate_report``, and that report
 #: refuses ``display_ks.json``, stale under the same key
-#: (``primary_map_k``), so the comparison report would never be drawn.
+#: (``compare_k``), so the comparison report would never be drawn.
 #: ``resolve_display_ks`` precedes both cuts and both reports and has no Spark
 #: node in its slice. Under ``--compare-only`` there is no main line and the
 #: cut's own node is the answer. ``test_pipeline.py::TestFingerprintRerunNodes``
@@ -1789,6 +1792,14 @@ def compute_compare_metrics(
     are not the same rows, so the run's landed ``evaluation_row_facts`` fit
     neither.
 
+    Both sides segment by the same columns, and B′ takes A′'s values for them
+    (#537; until then B′ was computed with none). A segment column is the
+    entity's attribute, joined from a population table by
+    ``prepare_eval_data``, not something the scoring model produced, so the
+    compared source's query groups belong to the same segments as this
+    run's; computed without them, B′ had no per-segment numbers to compare
+    and its ledger's ``segment_columns`` always differed from A′'s.
+
     Pre-check (inputs): in column mode, the category table was landed and
     read off today's column (``_landed_category_mapping``). The frames are
     ``restrict_to_common``'s, which checked side A's partitions.
@@ -1804,17 +1815,29 @@ def compute_compare_metrics(
     stamp = {"config_fingerprint": fingerprint(parameters),
              COMPARE_SOURCE_KEY: compare_source_identity(parameters)}
     landed = []
-    # Decision — only this run's side segments, by what prepare_eval_data
-    # joined (under --compare-only the copy landed next to the partition):
-    # its frame can hold a column the other run mode joined, all NULL, so
-    # the frame's columns are not asked (ADR-0020 bug 6). The compared side
-    # is another prediction table with no segment columns, so it is computed
-    # with none — the ledger's segment_columns annotation says so.
+    # Decision — both sides segment by what prepare_eval_data joined (under
+    # --compare-only the copy landed next to the partition): this run's
+    # frame can hold a column the other run mode joined, all NULL, so the
+    # frame's columns are not asked (ADR-0020 bug 6).
+    segments = segment_columns["joined"]
+    # Decision — the compared side takes this run's side's segment values,
+    # one per query group, joined on the query group (owner, 2026-10-23): a
+    # segment is the entity's attribute, whoever scored it. Its own copy of a
+    # column, if its table carries one, is dropped first (another run, other
+    # settings). restrict_to_common kept only the query groups both sides
+    # hold, so every compared row finds one; the time is matched as the
+    # label join in trim_to_common_universe matches it.
+    compared = compare_predictions_common
+    if segments:
+        compared = join_segment_columns(
+            compare_predictions_common, eval_predictions_common,
+            get_schema(parameters)["query_group_columns"], segments,
+            source_name="this run's side of the comparison",
+        )
     # Both sides' category passes rank by one table: in column mode the one
     # this run's side landed (#379; the compared side holds only the common
     # items, so it covers them), otherwise the hand-written mapping.
-    for frame, segments in ((eval_predictions_common, segment_columns["joined"]),
-                            (compare_predictions_common, [])):
+    for frame in (eval_predictions_common, compared):
         facts = _count_row_facts(
             frame, parameters, segment_columns=segments,
             category_mapping=category_mapping)
@@ -1876,9 +1899,10 @@ def make_compare_to_source_node(compare_only: bool):
         comparison["config_fingerprint"] = fingerprint(parameters)
         comparison[COMPARE_SOURCE_KEY] = compare_source_identity(parameters)
         # Unlike the baseline, the two sides need not agree: each keeps its
-        # own rows (with event rows their "all" can differ, #434), and the
-        # compared side is computed without segments. Said here; the report
-        # draws no mark for it (#537).
+        # own rows (with event rows their "all" can differ, #434). Their
+        # segment columns are the same since #537 (compute_compare_metrics
+        # gives the compared side this run's), so a difference there is a
+        # wiring error worth the log line.
         differing = populations_that_differ(comparison)
         logger.info(
             "Compared this run with the compared source: %d overall keys, %d "
@@ -1901,11 +1925,12 @@ def make_resolve_comparison_display_ks_node(compare_only: bool):
         source_comparison: dict,
         parameters: dict,
     ) -> dict:
-        """The K columns and rows each table of the comparison report shows,
-        cut at what ``"all"`` stands for (bug 8, ADR-0020; ADR-0031 decision
-        10), landed as ``comparison_display_ks`` (shape in
-        ``steps/display_ks``). After the comparison (decision 16): a changed
-        display K re-runs this node and the report only. No Spark.
+        """The K columns every per-K table of the comparison report shows,
+        at each grain cut at what this run's side's ``"all"`` stands for (bug
+        8, ADR-0020; ADR-0031 decision 10), landed as
+        ``comparison_display_ks`` (shape in ``steps/display_ks``). After the
+        comparison (decision 16): a changed display K re-runs this node and
+        the report only. No Spark.
 
         Its fingerprint carries the display keys it read
         (``display_ks.COMPARISON_DISPLAY_KEYS_READ``), so it alone goes stale
@@ -1921,42 +1946,28 @@ def make_resolve_comparison_display_ks_node(compare_only: bool):
                            payload=source_comparison,
                            produced_by="compare_to_source"),
         ], parameters, compare_only)
-        guardrail_recall_k = configured_guardrail_recall_k(parameters)
-        primary_map_k = configured_primary_map_k(parameters)
+        compare_k = configured_compare_k(parameters)
 
-        # The item grain and, when both sides have it, the category grain are
-        # cut by the same two decisions, so one pass over them.
-        cuts = {}
-        for name, grain in (("item", source_comparison),
-                            ("category", source_comparison["category"])):
-            if grain is None:
-                cuts[name] = None
-                continue
-            all_k = grain[POPULATION_KEY][ALL_K_KEY]
-            cuts[name] = {
-                # Decision — the per-item tables' int K columns are cut at
-                # this run's side's "all" only, as they always were: the two
-                # sides' "all" cell is the comparison's own pairing
-                # (name@all), so only the int columns need a bound, and one
-                # bound keeps every row of a table on the same columns.
-                "per_item": per_item_lists(
-                    all_k[THIS], guardrail_recall_k, primary_map_k),
-                # Decision — a table printing every key cuts each side at its
-                # own "all" (#434): the two sides keep their own rows inside
-                # the common universe, so with event rows their widest groups
-                # differ, and one bound would hide whichever side's "all" row
-                # lies past it. No Δ where a side's cell was cut.
-                "overall": every_key_rows(
-                    grain["overall"][CELLS], all_k[THIS], all_k[REFERENCE]),
-            }
-        out = {**cuts["item"],
-               "category": cuts["category"],
+        # Decision — every per-K table of a grain takes compare_k, cut at
+        # this run's side's "all" only (steps/display_ks.comparison_cut says
+        # why one bound): the per-item ones (map_attr, recall; decision 16
+        # item 7) and whatever the section lists name. No table prints
+        # every key since #537, so no per-side cut of keys either.
+        def cut(grain: dict) -> dict:
+            return comparison_cut(
+                grain[POPULATION_KEY][ALL_K_KEY][THIS], compare_k)
+
+        category = source_comparison["category"]
+        out = {**cut(source_comparison),
+               "category": None if category is None else cut(category),
                "config_fingerprint": fingerprint(
                    parameters, COMPARISON_DISPLAY_KEYS_READ),
                COMPARE_SOURCE_KEY: compare_source_identity(parameters)}
         logger.info(
-            "Comparison report K resolved: per-item %s, overall %d rows",
-            out["per_item"], len(out["overall"]["rows"]))
+            "Comparison report K resolved: %s (all = @%d)%s",
+            out[DISPLAY_COMPARE_K], out[DISPLAY_ALL_K],
+            "" if out["category"] is None else
+            f", category {out['category'][DISPLAY_COMPARE_K]}")
         return out
 
     return resolve_comparison_display_ks

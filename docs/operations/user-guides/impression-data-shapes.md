@@ -92,7 +92,7 @@ label 0 ＝「可以選、沒有選」                  label 0 ＝「看到了�
 
 所以以請求為一組時，**mAP 要跟報表裡的熱門度基準線比，不要跟 0 比**。
 
-對策是只留同時有正例與負例的組再算指標（[#376](https://github.com/curtis-lu/recsys-demo/issues/376) 規劃中的開關，目前還沒有）。在它落地之前，用報表〈規模〉一段估計組有多小：全部列數 ÷ query 數就是平均每組幾列，越接近 1 問題越大。廣告示例 test 週是 1,921 ÷ 445 ≈ 4.3。
+對策是只留同時有正例與負例的組再算指標（[#376](https://github.com/curtis-lu/recsys-demo/issues/376) 規劃中的開關，目前還沒有）。在它落地之前，用報表〈核心概念〉的總量表估計組有多小：全部列數 ÷ query 數就是平均每組幾列，越接近 1 問題越大。廣告示例 test 週是 1,921 ÷ 445 ≈ 4.3。
 
 ### val／test 預設只留下有正例的組
 
@@ -162,7 +162,7 @@ training_eval_predictions:
 | base key | 不變，仍是 `time` ＋ `entity`：特徵表、分群來源照舊這樣接 |
 | 版本號 | `base_dataset_version` 會變：宣告了就進版本雜湊，不會讀回舊形狀的產物 |
 | `k_values: "all"` | 仍解析成 item 的種數。組內 item 不重複，所以沒有一組比 item 種數長，這個 K 不會截斷任何一組。`precision@all` 的分母是這個 K，組小時它會很低——看 `map@all`、`recall@all` |
-| 評估報表〈完整性檢查〉 | 多兩列「同分列數」「同分列佔比」 |
+| 評估報表〈完整性檢查〉 | 多一則「同分的列佔候選列的 X%」 |
 | 同分規則 | 不變：score 由高到低 → `item` 由小到大（再接 `event`，如果也宣告了） |
 | 離線推論 | 照跑，但**忽略** `occasion`：候選是框架替每個 entity 乘上全部 item 產生的，批次評分的當下沒有請求可言。產物沒有 `occasion` 的欄，名次在 `time` ＋ `entity` 裡比 |
 | 評估的**監控模式**（不帶 `--post-training`） | **在 CLI 入口被擋下**（A40）。監控模式評估的是離線推論發布的表，它沒有 `occasion` 的欄，而 `label_table` 有——兩邊認列的方式不同，接出來的是錯的答案不是少的答案。用 `--post-training` |
@@ -192,8 +192,8 @@ training_eval_predictions:
 
 1. `base_dataset_version` 應該**變了**。沒變代表設定沒被讀到，先確認改的是對的 `conf/` 目錄。
 2. `sample_pool` 與 `label_table` 都有 `occasion` 的欄，而且沒有 NULL。
-3. 評估報表〈規模〉一段的「全部 query 數」應該是 test 那段時間**有正例的請求數**，不是 entity 數。廣告示例 test 週是 445。
-4. 報表〈完整性檢查〉出現「同分列數」「同分列佔比」。
+3. 評估報表〈核心概念〉總量表的「全部 query group」應該是 test 那段時間**有正例的請求數**，不是 entity 數。廣告示例 test 週是 445。
+4. 報表〈完整性檢查〉出現「同分的列佔候選列的 X%」。
 
 ## 相關文件
 

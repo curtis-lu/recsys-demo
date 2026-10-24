@@ -136,8 +136,9 @@ N_SCORED_WITHOUT_POSITIVE_KEY = "n_scored_queries_without_positive"
 #: Population ledger key (#536): the segment columns the bundle was computed
 #: with, the ``segment_columns`` ``compute_all_metrics`` was handed — its
 #: ``per_segment`` slices by the first. The comparison layer reads it to tell
-#: a side computed without segments (ADR-0031 decision 4's fourth case: the
-#: compared side of ``--compare`` is computed with none).
+#: two sides computed with different segment columns (ADR-0031 decision 4's
+#: fourth case). Until #537 the compared side of ``--compare`` was computed
+#: with none; it now borrows this run's side's (``compute_compare_metrics``).
 SEGMENT_COLUMNS_KEY = "segment_columns"
 
 
@@ -204,31 +205,20 @@ COMPARED_ANNOTATIONS = (ALL_K_KEY, MACRO_ITEMS_KEY, SCORED_QUERIES_KEY,
 # ---------------------------------------------------------------------------
 # One block per result the tables are drawn from, keyed by its catalog name
 # (``evaluation_metrics``, ``baseline_comparison``); the comparison report's
-# own cut (``comparison_display_ks``) is keyed by block. See that module.
+# own cut (``comparison_display_ks``) is one such block for the item grain,
+# with the category grain's under ``category``. See that module.
 
 #: Block key: the K ``"all"`` stands for in the result the block cuts for.
 #: The lists below never hold an int K above it (bug 8, ADR-0020).
 DISPLAY_ALL_K = ALL_K_KEY
 
-#: Block key: ``evaluation.report.display.primary_map_k``, cut.
-DISPLAY_PRIMARY_MAP_K = "primary_map_k"
+#: Block key: ``evaluation.report.display.compare_k``, cut — in the main
+#: report's blocks and at each grain of the comparison report's cut (there
+#: as ascending integers, ``"all"`` written as :data:`DISPLAY_ALL_K`).
+DISPLAY_COMPARE_K = "compare_k"
 
 #: Block key: the K columns of every metrics-section table, cut.
 DISPLAY_METRICS_SECTION = "metrics_section"
-
-#: Block key of ``evaluation_metrics``' block: whether the metrics section's
-#: per-item ``map_attr`` table shows the ``@{evaluation.metric.k}`` column the
-#: headline note names.
-DISPLAY_HEADLINE_SHOWN = "headline_column_shown"
-
-#: Block key of the comparison report's cut (``comparison_display_ks``):
-#: ``evaluation.report.display.guardrail_recall_k``, cut.
-DISPLAY_GUARDRAIL_RECALL_K = "guardrail_recall_k"
-
-#: Key of an every-key table's cut in ``comparison_display_ks``: the table's
-#: rows, beside the keys whose :data:`THIS`, :data:`REFERENCE` and
-#: :data:`DIFF` cells are drawn.
-DISPLAY_ROWS = "rows"
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +243,7 @@ THRESHOLD_SWEEP_KEY = "threshold_sweep"
 
 
 def metric_params(parameters: dict) -> dict:
-    """Read ``evaluation.metric`` → ``{"k", "weight_alpha", "min_positives", "shrinkage_k"}``.
+    """Read ``evaluation.metric`` → ``{"weight_alpha", "min_positives", "shrinkage_k"}``.
 
     The one reader of that block that the metrics / report code uses
     (ADR-0020 design H): the Spark main metrics and the report call this
@@ -262,20 +252,17 @@ def metric_params(parameters: dict) -> dict:
     separately, only to validate value domains; it resolves no fallbacks.
 
     Fallback: a missing ``evaluation`` / ``metric`` block, a missing key, or
-    an explicit ``None`` value all resolve to ``k=None`` (no truncation),
-    ``weight_alpha=0.0``, ``min_positives=0``, ``shrinkage_k=0.0`` — the plain
-    equal-weight, untruncated macro. Value domains are validated by A15
-    (``core.consistency.evaluation_metric_param_errors``), not here.
+    an explicit ``None`` value all resolve to ``weight_alpha=0.0``,
+    ``min_positives=0``, ``shrinkage_k=0.0`` — the plain equal-weight macro.
+    Value domains are validated by A15, not here.
 
-    ``k`` and ``evaluation.k_values`` are independent axes. ``k_values`` is
-    the K grid of the ``@K`` families. ``k`` is the truncation depth of the
-    headline per-item macro family.
-    ``metrics.macro_from_per_item`` and ``metrics_spark.macro_average`` do not
-    accept ``k``; callers split it off.
+    No truncation depth: #537 removed it from the block (the macro is read
+    untruncated, at "all"; A63 refuses the old key), so the three values pass
+    straight to ``metrics.macro_from_per_item`` / ``metrics_spark
+    .macro_average``. Any other key under the block is dropped here.
     """
     m = ((parameters.get("evaluation", {}) or {}).get("metric", {}) or {})
     return {
-        "k": None if m.get("k") is None else int(m["k"]),
         "weight_alpha": float(m.get("weight_alpha", 0.0) or 0.0),
         "min_positives": int(m.get("min_positives", 0) or 0),
         "shrinkage_k": float(m.get("shrinkage_k", 0.0) or 0.0),
@@ -287,7 +274,7 @@ def drop_all_positive_groups(parameters: dict) -> bool:
 
     The one reader of the switch (#376). A missing block, a missing key or an
     explicit ``None`` all mean off. Not under ``evaluation.metric``:
-    :func:`metric_params` returns four fixed keys and drops any other, so a
+    :func:`metric_params` returns three fixed keys and drops any other, so a
     switch written there would silently do nothing. The value domain (a bool)
     is validated by A49 in ``core/consistency.py``, not here.
     """

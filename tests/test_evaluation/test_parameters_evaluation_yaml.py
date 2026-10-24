@@ -27,16 +27,13 @@ def test_report_display_and_sections():
     # out here rather than read from EVALUATION_REPORT_SECTIONS, so this test
     # is an independent statement of the decision.
     assert rep["sections"] == {
-        "dataset_overview": True, "primary_map": True,
-        "per_item_breakdown": True, "baseline": True,
+        "data_stats": True, "ranking_metrics": True,
+        "rank_distribution": True, "popularity_baseline": True,
         # Off in the framework's conf, on in the ad example's (ADR-0024
         # decision 1).
         "prediction_quality": False,
     }
-    assert rep["display"] == {
-        "primary_map_k": [1, 3, 5, "all"],
-        "guardrail_recall_k": [1, 2, 3, 4, 5],
-    }
+    assert rep["display"] == {"compare_k": [1, 3, 5, "all"]}
     # Diagnostics are aggregated in Spark now -> no row-sampling cap.
     assert "sample_rows" not in rep["diagnostics"]
     assert rep["diagnostics"]["include_distributions"] is True
@@ -50,7 +47,7 @@ def test_baseline_block_is_lookback_only():
 def test_metric_block_and_no_diagnosis_block():
     ev = _load()
     assert ev["metric"] == {
-        "weight_alpha": 0.0, "k": None, "min_positives": 0, "shrinkage_k": 0,
+        "weight_alpha": 0.0, "min_positives": 0, "shrinkage_k": 0,
     }
     # #532 removed the diagnoses; A61 refuses a conf that still has the block.
     assert "diagnosis" not in ev

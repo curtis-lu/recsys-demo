@@ -441,6 +441,59 @@ def test_the_report_finds_map_at_all_with_the_occasion_role(spark):
     assert f"map@{resolved_all_k(out)}" in out["overall"]
 
 
+def test_totals_count_time_entity_combinations_only_with_occasion(spark):
+    """``_occasion_df``: c1 @ 20240331 has two occasions (r1, r2), c2 one
+    (r3), so five rows, three query groups, but two time x entity
+    combinations. No event declared, so no (query group, item) count."""
+    totals = ms.compute_dataset_overview(
+        _occasion_df(spark), _occasion_params())["totals"]
+    assert totals["n_time_entity_combos"] == 2
+    assert "n_query_group_item_combos" not in totals
+
+
+def test_totals_count_query_group_item_combinations_only_with_event(spark):
+    """``_wide_event_df``: c1 holds A three times and B once, c2 A, c3 C —
+    six rows, three query groups, four (query group, item) combinations. No
+    occasion declared, so no time x entity count."""
+    totals = ms.compute_dataset_overview(
+        _wide_event_df(spark), _event_params())["totals"]
+    assert totals["n_query_group_item_combos"] == 4
+    assert "n_time_entity_combos" not in totals
+
+
+def test_totals_without_either_role_carry_neither_count(spark):
+    totals = ms.compute_dataset_overview(_df(spark), _params())["totals"]
+    assert "n_time_entity_combos" not in totals
+    assert "n_query_group_item_combos" not in totals
+
+
+def test_the_two_combination_counts_differ_from_rows_and_query_groups(spark):
+    """Both roles declared. c1 has request r1 (A shown twice, B once) and r2
+    (A once); c2 has r3 (B once). Five rows, three query
+    groups (the occasions), two time x entity combinations, four (query
+    group, item) combinations — four different numbers."""
+    params = {"schema": {"columns": {
+        "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
+        "label": "label", "score": "score", "rank": "rank",
+        "occasion": "req_id", "event": "imp_id"}},
+        "evaluation": {}}
+    df = spark.createDataFrame(
+        [
+            ("20240331", "c1", "r1", "A", "i1", 0.9, 1),
+            ("20240331", "c1", "r1", "A", "i2", 0.8, 0),
+            ("20240331", "c1", "r1", "B", "i3", 0.5, 0),
+            ("20240331", "c1", "r2", "A", "i4", 0.5, 0),
+            ("20240331", "c2", "r3", "B", "i5", 0.3, 0),
+        ],
+        schema=["snap_date", "cust_id", "req_id", "prod_name", "imp_id",
+                "score", "label"],
+    )
+    totals = ms.compute_dataset_overview(df, params)["totals"]
+    assert totals["n_rows"] == 5
+    assert totals["n_time_entity_combos"] == 2
+    assert totals["n_query_group_item_combos"] == 4
+
+
 def test_tied_row_share_is_reported_with_the_occasion_role(spark):
     """B and C tie at 0.5 inside r1. r2's A also scores 0.5 but is alone in
     its occasion — under ``time`` + ``entity`` alone the three 0.5 rows would
@@ -506,9 +559,26 @@ def _wide_event_df(spark):
     )
 
 
-def _table(section, title_part):
-    return next(t for t, tt in zip(section.tables, section.table_titles)
-                if title_part in tt)
+def _metric_table(section, title, grain):
+    """The ranking section's table ``title`` under the heading ``grain``
+    (#537: one table per metric, a heading per grain)."""
+    from recsys_tfb.report.types import Heading, Table
+
+    current = None
+    for block in section.blocks:
+        if isinstance(block, Heading):
+            current = block.text
+        elif (isinstance(block, Table) and current == grain
+              and block.title == title):
+            return block
+    raise AssertionError(f"no table {title!r} under {grain!r}")
+
+
+def _at_all(table, all_k):
+    """The overall row's cell in the column ``@{all_k}`` — "all", written as
+    the K it resolved to."""
+    column = [c.label for c in table.columns].index(f"@{all_k}")
+    return table.rows[0].cells[column]
 
 
 def _display_ks(out, params):
@@ -534,21 +604,24 @@ def test_the_report_finds_map_and_recall_at_all_with_the_event_role(spark):
     params = _event_params_with_categories()
     facts, out = _both(_wide_event_df(spark), params)
 
-    overall = _table(ranking_metrics.build(
+    # The cut lands "all", which the header writes as the K it resolved to:
+    # without an explicit 4 in the list, a lookup at the item count (3)
+    # would show @3 instead.
+    cut = _display_ks(out, params)
+    cut["evaluation_metrics"]["metrics_section"] = [1, "all"]
+    ranking = ranking_metrics.build(
         {"evaluation_row_facts": facts, "evaluation_metrics": out,
-         "evaluation_display_ks": _display_ks(out, params)},
-        params), "overall（")
-    assert overall.loc["map", "@all"] == pytest.approx(0.625)
-    assert overall.loc["recall", "@all"] == pytest.approx(1.0)
-
-    s = overview.build(
-        {"evaluation_row_facts": facts, "evaluation_metrics": out,
-         "prediction_quality_metrics": None,
-         "evaluation_display_ks": _display_ks(out, params)},
+         "evaluation_display_ks": cut},
         params)
-    card = s.tables[s.table_titles.index(
-        "overall mAP@k（per-query 等權，另一種加權）")]
-    assert card.loc["map@all", "value"] == pytest.approx(0.625)
+    assert _at_all(_metric_table(ranking, "map@K · 整體", "item 粒度"),
+                   4) == pytest.approx(0.625)
+    assert _at_all(_metric_table(ranking, "recall@K · 整體", "item 粒度"),
+                   4) == pytest.approx(1.0)
+
+    s = overview.build({"evaluation_metrics": out}, params)
+    (selection,) = [b for b in s.blocks if getattr(b, "title", "") == "模型選擇指標"]
+    assert {r.label: r.cells[0] for r in selection.rows}["overall mAP"] == (
+        pytest.approx(0.625))
 
 
 def test_all_k_is_written_for_every_grain_whatever_it_resolved_to(spark):
@@ -579,9 +652,12 @@ def test_category_all_is_the_category_count_with_the_event_role(spark):
     params = _event_params_with_categories()
     facts, out = _both(_wide_event_df(spark), params)
 
-    cat = _table(ranking_metrics.build(
+    ranking = ranking_metrics.build(
         {"evaluation_row_facts": facts, "evaluation_metrics": out,
          "evaluation_display_ks": _display_ks(out, params)},
-        params), "大類 overall")
-    assert cat.loc["map", "@all"] == pytest.approx(1.0)
-    assert cat.loc["precision", "@all"] == pytest.approx(0.5)
+        params)
+    cat_map = _metric_table(ranking, "map@K · 整體", "大類粒度")
+    assert [c.label for c in cat_map.columns][-1] == "@2"
+    assert _at_all(cat_map, 2) == pytest.approx(1.0)
+    assert _at_all(_metric_table(ranking, "precision@K · 整體", "大類粒度"),
+                   2) == pytest.approx(0.5)

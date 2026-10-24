@@ -267,7 +267,7 @@ python scripts/promote_model.py --env dev --dry-run
 | 訊息帶 `(A26) ... spells one month more than one way` | 同一個月在 `dataset.test_snap_dates` 裡出現了兩種寫法（例如 `2026-01-31` 與 `20260131`）。只留 `YYYY-MM-DD` 那一種，刪掉其餘 |
 | 訊息帶 `(A22) evaluation.snap_date=... is not a test month` | 步驟 4 的日期不在 `dataset.test_snap_dates` 裡。漏做了步驟 1，補做步驟 1–3 |
 | dataset 或 training 的訊息帶 `--rebuild-dates`，還沒起 Spark 就退出 | 你要重算的月份不在 `dataset.test_snap_dates` 裡。先把它加進去 |
-| evaluation 的訊息帶 `(A21)` 與 `popularity_period_counts`，還沒起 Spark 就退出 | 這次的 evaluation 不重數 baseline（沒設 `baseline.score: rate`、關了 `report.sections.baseline`、沒帶 `--post-training`，或用了 `--compare-only`），用不到這個旗標，拿掉 |
+| evaluation 的訊息帶 `(A21)` 與 `popularity_period_counts`，還沒起 Spark 就退出 | 這次的 evaluation 不重數 baseline（沒設 `baseline.score: rate`、關了 `report.sections.popularity_baseline`、沒帶 `--post-training`，或用了 `--compare-only`），用不到這個旗標，拿掉 |
 | evaluation 的訊息帶 `(A21)` 與 `outside every lookback`，還沒起 Spark 就退出 | 點名的月份不在這次評估月份的回看範圍裡（例如評估月份自己），把它從旗標拿掉（〈[上游回補了，要重算某個月份](#上游回補了要重算某個月份)〉） |
 | 重算之後數字跟上次逐位相同 | 只重算了其中一層。dataset 與 training 兩行都要帶 `--rebuild-dates`（〈[上游回補了，要重算某個月份](#上游回補了要重算某個月份)〉） |
 | `[rebuild] WARNING: ... had no effect` 或 `... is only half applied` | 你選的步驟範圍把預測那一步排除掉了。前者是一步都沒選到、旗標完全無事可做；後者是選到了「丟掉舊 cache」那一步、但沒選到重新預測那一步，所以 cache 重建了、預測沒重做。兩者都改用 `--only-node predict_and_write_test_predictions`。evaluation 也會印 `had no effect`，那是切片沒選到重數 baseline 的那一步，照警告下一行改用 `--from-node build_popularity_period_counts` |

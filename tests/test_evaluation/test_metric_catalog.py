@@ -165,3 +165,45 @@ def test_entry_refuses_a_name_the_catalog_lacks():
     assert mc.entry("map", QUERY_GROUP).name == "map"
     with pytest.raises(KeyError, match="no 'map' in method 'item'"):
         mc.entry("map", ITEM)
+
+
+# ---- #537: the lists a section shows, and the model-selection marks ----
+
+
+def test_compare_entry_refuses_a_name_the_catalog_lacks():
+    with pytest.raises(KeyError, match="no 'nope' in method 'query_group'"):
+        mc.CompareEntry("nope", QUERY_GROUP, "overall")
+
+
+def test_compare_entry_refuses_a_grain_the_entry_lacks():
+    """``map`` is a query-group metric: it has no per-item value."""
+    assert mc.CompareEntry("map", QUERY_GROUP, "overall").metric is mc.entry(
+        "map", QUERY_GROUP)
+    with pytest.raises(ValueError, match="'map' in method 'query_group' is "
+                                         "not at grain 'per_item'"):
+        mc.CompareEntry("map", QUERY_GROUP, "per_item")
+
+
+def test_model_selection_marks_and_pending_name_every_registry_metric():
+    """Every metric HPO can select by is either marked on its catalog entry
+    or listed as not computed yet — once. A metric added to the registry
+    turns this red until it is placed in one of the two."""
+    from recsys_tfb.evaluation.metric_registry import METRIC_NAMES
+
+    marked = [m.name for m in mc.MODEL_SELECTION_METRICS]
+    listed = marked + list(mc.MODEL_SELECTION_PENDING)
+    assert len(listed) == len(set(listed)), listed
+    assert set(listed) == set(METRIC_NAMES)
+
+
+def test_model_selection_marks_read_the_entries_their_registry_metric_equals():
+    """ADR-0031 decision 16 (the design's 〈指標目錄〉): ``mean_ap`` is ``map``
+    over query groups, overall; ``macro_per_item_map`` is ``map_attr`` over
+    items, its macro — both at K = all."""
+    by_name = {m.name: m for m in mc.MODEL_SELECTION_METRICS}
+    assert by_name["mean_ap"].source == mc.CompareEntry(
+        "map", QUERY_GROUP, "overall")
+    assert by_name["macro_per_item_map"].source == mc.CompareEntry(
+        "map_attr", ITEM, "macro")
+    assert [m.display_name for m in mc.MODEL_SELECTION_METRICS] == [
+        "overall mAP", "macro per-item mAP"]

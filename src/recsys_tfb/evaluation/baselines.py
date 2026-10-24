@@ -128,7 +128,7 @@ def _lookback_window(
     kept printing an unqualified "reranked by N months of history" sentence
     (bug 1). The user ruled baseline is load-bearing information: raise
     rather than degrade to that silently-leaky stub. Only
-    ``evaluation.report.sections.baseline: false`` skips this computation
+    ``evaluation.report.sections.popularity_baseline: false`` skips this computation
     entirely (``compute_baseline_metrics`` returns before calling in here).
     Not a ``core/consistency.py`` gate: this is the baseline's own scoring
     window, not the B2 feature-leakage invariant.
@@ -149,7 +149,7 @@ def _lookback_window(
             "The baseline cannot be scored without pre-snap_date history — "
             "backfill label_table further back, lower "
             "evaluation.baseline.lookback_months, or set "
-            "evaluation.report.sections.baseline: false to skip the "
+            "evaluation.report.sections.popularity_baseline: false to skip the "
             "baseline section entirely."
         )
     return window
@@ -400,7 +400,7 @@ def baseline_scores_by_rate(parameters: dict, *, post_training: bool) -> bool:
     return (
         post_training
         and baseline_score(parameters) == "rate"
-        and bool(sections.get("baseline", True))
+        and bool(sections.get("popularity_baseline", True))
     )
 
 

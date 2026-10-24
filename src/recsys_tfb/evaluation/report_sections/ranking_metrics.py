@@ -1,377 +1,225 @@
-"""衡量指標 (排序指標 in ADR-0031 decision 16): the ranking metrics, per
-query group (overall, per segment, category overall) and per item."""
+"""排序指標 (ADR-0031 decision 16): the ranking metrics at each grain, one
+table per metric — rows are slices, columns the K.
+
+**The tables are the catalog's** (``metric_catalog``). Every per-K metric of
+the query-group method gets a table of the overall and each segment
+(``map@K · 整體與各分群``); every per-K metric of the item method a table of
+the Macro average and each item (``map_attr@K · 各 item``). Both at the item
+grain, and again at the category grain when the bundle has one. The lists are
+read off the catalog when the section is drawn (:func:`metrics_at_k`), so a
+metric added to the catalog gets its tables with no change here. A metric
+without a K (``mean_pos``) is not drawn here: ``rank_distribution`` shows it.
+
+**The K** are the cut's (``evaluation_display_ks``' ``metrics_section``, each
+grain its own), resolved to integers (:func:`shown_ks`): the header writes
+``@6``, not ``@all``. The cut lands them; this section cuts nothing.
+
+The totals (query groups, rows, positives) are not repeated here: they are in
+核心概念 (decision 16 item 12). The one count printed is the slice the Macro
+row averages, under an item table, when it is fewer than all the items
+(decision 16 item 5; ``population.macro_items``, landed by the metrics).
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
-import pandas as pd
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 from recsys_tfb.evaluation.metric_catalog import (
     ITEM,
+    MODEL_SELECTION_METRICS,
     QUERY_GROUP,
-    entry,
+    Metric,
     metrics_of,
 )
 from recsys_tfb.evaluation.report import ReportSection
-from recsys_tfb.evaluation.result_readers import format_share
+from recsys_tfb.evaluation.report_sections.metric_tables import (
+    SliceRow,
+    definitions,
+    metric_table,
+)
 from recsys_tfb.evaluation.report_sections.shared import (
-    ALL_POSITIVE_WHY,
     DISPLAY_KS,
     MACRO_LABEL,
     count_items,
-    grain_bundles,
-    headline_column,
     k_to_lookup,
-    kept_ratio_phrase,
     landed_value,
-    scored_with_positive,
     section_on,
     unmatched_last,
-    zero_positive_draw_on_test,
 )
 from recsys_tfb.evaluation.result_readers import (
-    ALL_POSITIVE_KEY,
-    ALL_POSITIVE_SHARE_KEY,
+    DISPLAY_ALL_K,
     DISPLAY_METRICS_SECTION,
-    N_WITH_POSITIVE_KEY,
-    drop_all_positive_groups,
+    POPULATION_KEY,
+    SEGMENT_COLUMNS_KEY,
     macro_item_count,
-    resolved_all_k,
 )
-from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
+from recsys_tfb.report.types import Heading, Note, Paragraph
 
-#: The results this section reads, by catalog name (ADR-0031 principle 1);
-#: each grain's K columns off the cut (#536).
+#: The results this section reads, by catalog name (ADR-0031 principle 1):
+#: the item counts off the row facts, the values off the metrics, each
+#: grain's K off the cut (#536).
 READS = ("evaluation_row_facts", "evaluation_metrics", DISPLAY_KS)
 
+#: The heading, its English and the question the section answers; the
+#: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
+#: decision 16).
+TITLE = "排序指標"
+TITLE_EN = "Ranking metrics"
+QUESTION = "模型在各粒度排得怎樣？"
 
-def macro_coverage_suffix(
-    bundle: dict, n_items: int, macro: dict | None
-) -> str:
-    """Title suffix disclosing a single-sided per-item macro's coverage (bug 5):
-    the items ``bundle``'s macro averaged (its ledger's ``macro_items``,
-    ``result_readers.macro_item_count``, #536) of the grain's ``n_items``.
-
-    Returns ``""`` unless ``macro`` is truthy — the same test
-    ``_per_item_metric_table`` uses (``if macro_metrics:``) to prepend the
-    Macro row. The suffix describes that row's denominator, so it has to
-    appear exactly when the row does. ``shared.compared_macro_coverage_suffix``
-    tests both sides present instead, matching its own table; using one helper on the
-    other's table puts the suffix on a table without a Macro row (or drops it
-    from one that has it) for an empty-dict macro, and nothing raises.
-    """
-    if not macro:
-        return ""
-    n = macro_item_count(bundle)
-    return f"（參與 macro 的 item 數 {n}／全部 {n_items}）"
+#: The label of the overall row of a query-group table.
+OVERALL_LABEL = "整體"
 
 
-def _zero_positive_origin(parameters: dict) -> str:
-    """「無正例的組」括號裡接在「不算進衡量指標」後面的那句。
+@dataclass(frozen=True)
+class _Grain:
+    """What one grain's tables are called: its heading, what an item-method
+    table's rows are (items, or categories) and the line saying how many of
+    them the Macro row averages."""
 
-    ``--post-training`` 吃的是 dataset 過濾後的 test 表：r（
-    ``dataset.test_zero_positive_group_ratio``）為 0 時無正例的組在 dataset 就
-    全丟了，帳上恆為 0；r > 0 時留下的是抽過的一部分。不說的話，讀者會把 0 讀成
-    「資料裡沒有這種組」。監控模式沒有 dataset 抽樣，帳上是實際組數，回 ``""``。
-    """
-    ratio = zero_positive_draw_on_test(parameters)
-    if ratio is None:
-        return ""
-    if ratio > 0:
-        return (
-            "；dataset 已依 dataset.test_zero_positive_group_ratio 抽過："
-            f"{kept_ratio_phrase(ratio)}"
-        )
-    return (
-        "；dataset 已依 dataset.test_zero_positive_group_ratio＝0 丟過，test 表"
-        "只剩有正例的組"
+    heading: str
+    row_header: str
+    slices: str
+    macro_count: str
+
+
+_ITEM_GRAIN = _Grain("item 粒度", "item", "各 item", "參與 macro 的 item 數")
+_CATEGORY_GRAIN = _Grain("大類粒度", "大類", "各大類", "參與 macro 的大類數")
+
+
+def shown_ks(landed: Sequence, all_k: int) -> list[int]:
+    """The K of a landed list as the table header writes them: ``"all"``
+    resolved to ``all_k`` (``shared.k_to_lookup``), each K once — ``"all"``
+    and an integer equal to it are one column — in the landed order."""
+    out: list[int] = []
+    for k in landed:
+        resolved = int(k_to_lookup(k, all_k))
+        if resolved not in out:
+            out.append(resolved)
+    return out
+
+
+def metrics_at_k(method: str) -> list[Metric]:
+    """The catalog's per-K metrics of ``method``, one table each, read when
+    the section is drawn: the one a model is selected by first
+    (``MODEL_SELECTION_METRICS``' sources — ``map``, ``map_attr``: the order
+    of decision 16's demo and of the comparison report), the rest in catalog
+    order."""
+    selected = {(m.source.name, m.source.method)
+                for m in MODEL_SELECTION_METRICS}
+    return sorted((m for m in metrics_of(method) if m.per_k),
+                  key=lambda m: (m.name, m.method) not in selected)
+
+
+def _segment_rows(bundle: Mapping) -> list[SliceRow]:
+    """One row per segment of ``bundle["per_segment"]``, the unmatched group
+    last (``shared.unmatched_last``). ``per_segment`` slices by the first of
+    the bundle's segment columns; with more than one, the label names the
+    column (``segment seg_1``)."""
+    per_segment = unmatched_last(bundle.get("per_segment") or {})
+    columns = (bundle.get(POPULATION_KEY) or {}).get(SEGMENT_COLUMNS_KEY) or []
+    prefix = f"{columns[0]} " if len(columns) > 1 else ""
+    return [SliceRow(f"{prefix}{segment}", values)
+            for segment, values in per_segment.items()]
+
+
+def _macro_notes(bundle: Mapping, n_items: int, grain: _Grain) -> list[Note]:
+    """The line under an item table when the Macro row averages fewer than
+    all ``n_items`` (bug 5, ADR-0020; decision 16 item 5): the count is the
+    bundle's ``population.macro_items`` (``result_readers.macro_item_count``),
+    the list the metrics averaged — not ``min_positives`` applied again.
+    ``n_items`` 0 is "unknown" (``shared.count_items``): no line."""
+    n_macro = macro_item_count(bundle)
+    if 0 < n_items and n_macro < n_items:
+        return [Note(f"{grain.macro_count}：{n_macro}")]
+    return []
+
+
+def _grain_blocks(bundle: Mapping, ks: list[int], n_items: int, grain: _Grain,
+                  *, with_definitions: bool) -> list:
+    """One grain: its heading, a table per query-group metric (整體 pinned,
+    then each segment), a table per item metric (Macro 平均 pinned, then
+    each item in name order). The definitions follow each group of tables at
+    the item grain only: the category grain's tables are the same metrics."""
+    blocks: list = [Heading(grain.heading)]
+    segment_rows = _segment_rows(bundle)
+    group_rows = [SliceRow(OVERALL_LABEL, bundle.get("overall") or {},
+                           pinned=True), *segment_rows]
+    group_slices = "整體與各分群" if segment_rows else "整體"
+    group_metrics = metrics_at_k(QUERY_GROUP)
+    blocks += [metric_table(m, ks, group_rows, row_header="分群",
+                            slices=group_slices) for m in group_metrics]
+    if with_definitions:
+        blocks.append(definitions(group_metrics))
+
+    # The Macro row only when the bundle has a macro: an empty one (no item
+    # reached metric.min_positives) would be a row of blanks, and the count
+    # under the table is about that row.
+    macro = (bundle.get("macro_avg") or {}).get("by_item") or {}
+    item_rows = [SliceRow(MACRO_LABEL, macro, pinned=True)] if macro else []
+    item_rows += [SliceRow(str(item), values) for item, values
+                  in sorted((bundle.get("per_item") or {}).items())]
+    notes = _macro_notes(bundle, n_items, grain) if macro else []
+    item_metrics = metrics_at_k(ITEM)
+    blocks += [metric_table(m, ks, item_rows, row_header=grain.row_header,
+                            slices=grain.slices, notes=notes)
+               for m in item_metrics]
+    if with_definitions:
+        blocks.append(definitions([*item_metrics, "macro"]))
+    return blocks
+
+
+def _description(ks: list[int], all_k: int) -> str:
+    """The section's lead: how to read a table, the two methods with their
+    metrics (from the catalog), and what the column at "all" means."""
+    def names(method: str) -> str:
+        return "、".join(m.display_name for m in metrics_at_k(method))
+
+    text = (
+        "模型在各粒度排得怎樣。每張表一個指標：列是切片，欄是 K。指標有兩種"
+        f"算法：每個 query group 先算再平均（{names(QUERY_GROUP)}），以及每個 "
+        f"item 一份、再對 item 平均成 Macro（{names(ITEM)}）。"
     )
-
-
-def _group_ledger_line(grain: str, bundle: dict, metrics: dict | None,
-                       parameters: dict) -> str | None:
-    """一個粒度的組數帳（#376）：有正例的組、其中全正、算進衡量指標、無正例的組。
-
-    開關關：全正的組照樣算進衡量指標，「算進衡量指標」＝「有正例」。開關開：
-    有正例＝全正（已排除）＋算進衡量指標。無正例的組兩種都不算進衡量指標，
-    ``n_excluded_queries`` 也只數它們。帳上不說「算進 mAP」：當初的理由是同一份
-    報表連結的診斷頁也印 macro per-item mAP、而且不排除全正的組；診斷頁隨 #532
-    拿掉之後，這個措辭照留。
-
-    ``bundle`` 是列的事實（``row_facts.json``，#535）的一個粒度；有正例的組數與
-    全正佔比讀它落地的帳（``metrics.all_positive_accounts``，#536），不重算。
-    ``metrics`` 是同一粒度的指標結果：開關開時算進衡量指標的組數讀它的母體帳
-    （``shared.scored_with_positive``），不在這裡拿有正例的減全正的。
-    有正例的組數是 ``None``（缺 ``n_queries``／``n_excluded_queries``）回
-    ``None``。只缺全正組數的，#535 之前是 #376 之前算的 ``metrics.json``；
-    ``compute_row_facts`` 一定寫這個數，所以今天只有手組的 dict 會走到這裡：不
-    報錯，印得出的照印，並說怎麼補。
-    """
-    n_pos = bundle.get(N_WITH_POSITIVE_KEY)
-    if n_pos is None:
-        return None
-    n_zero = bundle["n_excluded_queries"]
-    n_all = bundle.get(ALL_POSITIVE_KEY)
-    drop = drop_all_positive_groups(parameters)
-    if n_all is None:
-        head = (
-            f"有正例的組 {n_pos:,}"
-            + ("" if drop else "，全部算進衡量指標")
-            + "（這份結果沒有全正的組數：它在這個計數加入之前算的，從 "
-            "compute_row_facts 重跑可得）"
+    if all_k in ks:
+        text += (
+            f"@{all_k} 是全部候選：recall 恆為 1，precision 等於有正例那些組的"
+            "正例比例，兩者都不再反映排序。"
         )
-    elif drop:
-        head = (
-            f"有正例的組 {n_pos:,}，其中全正 {n_all:,} 已排除，"
-            f"算進衡量指標的有 {scored_with_positive(metrics):,}"
-        )
-    else:
-        share = bundle[ALL_POSITIVE_SHARE_KEY]
-        pct = f"{format_share(share)}；" if share is not None else ""
-        head = (
-            f"有正例的組 {n_pos:,}，其中全正 {n_all:,}（{pct}{ALL_POSITIVE_WHY}）"
-            f"照樣算進，算進衡量指標的有 {n_pos:,}"
-        )
-    return (
-        f"組數帳（{grain}）：{head}；無正例的組 {n_zero:,}"
-        f"（不算進衡量指標{_zero_positive_origin(parameters)}）。"
-    )
-
-
-def _per_item_metric_table(
-    per_item: dict,
-    ks: list,
-    all_k: int,
-    metric_key: str,
-    col_fmt: str,
-    extra_cols: dict[str, str] | None = None,
-    macro_metrics: dict | None = None,
-) -> pd.DataFrame:
-    """Rows = items; one column per k named ``col_fmt.format(k=k)``, value
-    pulled from ``per_item[item][f"{metric_key}@{k_to_lookup(k, all_k)}"]``.
-
-    ``extra_cols`` maps an output column name to a flat (non-@k) per_item key,
-    e.g. ``{"mean_pos": "mean_pos"}``.
-
-    ``macro_metrics``: when given and non-empty, an equal-weight-average
-    metrics dict (same key shape as a per_item value) is prepended as the
-    top row labelled ``MACRO_LABEL``.
-    """
-    def _row(m: dict) -> dict:
-        row = {
-            col_fmt.format(k=k): m.get(f"{metric_key}@{k_to_lookup(k, all_k)}")
-            for k in ks
-        }
-        for out_name, src_key in (extra_cols or {}).items():
-            row[out_name] = m.get(src_key)
-        return row
-
-    data: dict = {}
-    if macro_metrics:
-        data[MACRO_LABEL] = _row(macro_metrics)
-    for item, m in per_item.items():
-        data[item] = _row(m)
-    return pd.DataFrame(data).T
-
-
-def _per_item_recall_table(
-    per_item: dict, ks: list, all_k: int, macro_metrics: dict | None = None
-) -> pd.DataFrame:
-    """Rows = items; bare ``@k`` cols (from the per-item recall@k) + mean_pos.
-
-    欄名裸 @k、family（recall）在呼叫端的表標題交代——與 A 塊 per-query 表
-    及 per-item map_attr 表的欄名慣例一致（family 不重複塞進欄名）。
-    """
-    mean_pos = entry("mean_pos", ITEM)
-    return _per_item_metric_table(
-        per_item, ks, all_k, entry("recall", ITEM).name, "@{k}",
-        extra_cols={mean_pos.display_name: mean_pos.key()},
-        macro_metrics=macro_metrics,
-    )
-
-
-def _families_by_k_table(overall: dict, ks: list, all_k: int) -> pd.DataFrame:
-    """單一 per-query aggregate → rows=指標目錄裡 query group 那種算法的每個
-    指標、cols=@k。
-
-    給「單一彙總」用（overall、大類 overall）：只有一個實體，故用指標家族當列。
-    """
-    # Rows are labelled by the metric's name, as the report always printed
-    # them; the catalog's display names take over when ADR-0031 decision 16
-    # relabels the section.
-    rows = {}
-    for fam in _query_group_names():
-        rows[fam] = {f"@{k}": overall.get(f"{fam}@{k_to_lookup(k, all_k)}")
-                     for k in ks}
-    return pd.DataFrame(rows).T
-
-
-#: Block B's item metrics drawn in an arrangement of their own: map_attr's
-#: table, then recall's with mean_pos as an extra column. Every
-#: other per-K item entry of the catalog gets a table of its own after them
-#: (:func:`_other_item_metrics`).
-_ARRANGED_ITEM_METRICS = ("map_attr", "recall", "mean_pos")
-
-
-def _other_item_metrics() -> list:
-    """The per-K item entries block B has no arrangement for, in catalog
-    order: each is drawn like map_attr, one table per grain."""
-    return [m for m in metrics_of(ITEM)
-            if m.per_k and m.name not in _ARRANGED_ITEM_METRICS]
-
-
-def _query_group_names() -> list[str]:
-    """Block A's metrics: every query-group entry of ``metric_catalog``, in
-    catalog order — one row of the overall tables, one per-segment table
-    each."""
-    return [m.name for m in metrics_of(QUERY_GROUP)]
-
-
-def _entities_by_k_table(
-    per_entity: dict, macro: dict | None, ks: list, all_k: int, fam: str
-) -> pd.DataFrame:
-    """多實體 per-query → rows=實體（Macro 頂列）、cols=@k，單一 metric family。
-
-    給「多實體拆分」用（per-segment）：拆成 map/precision/recall 各一張，實體當列。
-    """
-    src = {MACRO_LABEL: macro, **per_entity} if macro else dict(per_entity)
-    data = {}
-    for ent, m in src.items():
-        data[ent] = {f"@{k}": (m or {}).get(f"{fam}@{k_to_lookup(k, all_k)}")
-                     for k in ks}
-    return pd.DataFrame(data).T
+    return text
 
 
 def build(
     results: Mapping[str, dict], parameters: dict,
 ) -> ReportSection | None:
-    """衡量指標：分兩塊、各塊內維度與方向一致。
-
-    A｜per-query 指標（map/precision/recall）——overall、per-segment、大類 overall。
-    B｜per-item 歸因（map_attr/recall）——per-item、大類 per-item。A 塊的
-    precision@k 分母是 k（整組 top-k 的性質），拆不到單一 item 頭上，所以不在 B 塊；
-    per-item 的 precision 分母是該 item 排進前 k 名的次數，是另一個指標。
-    方向規則：單一彙總用指標家族當列；多實體拆分用實體當列。所有表 k 欄統一＝
-    [1,2,3,4,5,all]，每張表只一個 metric family（避免寬混表）。全克制、明細收合。
-    """
-    if not section_on(parameters, "primary_map"):
+    """排序指標: the description, then the item grain's tables and, with a
+    category grain, the category grain's — the same skeleton (decision 16
+    item 6). ``None`` when the section is switched off."""
+    if not section_on(parameters, "ranking_metrics"):
         return None
     facts = results["evaluation_row_facts"]
     metrics = results["evaluation_metrics"]
-    overall = metrics.get("overall", {})
-    # per-item 列序全報表統一按字母（與 per-item 細部拆解的 item-share 表對齊）
-    per_item = dict(sorted((metrics.get("per_item", {}) or {}).items()))
-    macro_item = metrics.get("macro_avg", {}).get("by_item", {})
-    n_items = count_items(facts)
     display_ks = results[DISPLAY_KS]
-    all_k = resolved_all_k(metrics)
-    # One K list for every table of a grain, cut before the report
-    # (evaluation_display_ks).
-    ks = landed_value(display_ks, DISPLAY_KS, "evaluation_metrics",
-                      DISPLAY_METRICS_SECTION)
 
-    tables: list[pd.DataFrame] = []
-    titles: list[str] = []
-    collapsed: list[bool] = []
+    def landed_ks(*grain) -> tuple[list[int], int]:
+        # The list first: a cut landed without it is refused naming it.
+        landed = landed_value(display_ks, DISPLAY_KS, "evaluation_metrics",
+                              *grain, DISPLAY_METRICS_SECTION)
+        all_k = landed_value(display_ks, DISPLAY_KS, "evaluation_metrics",
+                             *grain, DISPLAY_ALL_K)
+        return shown_ks(landed, all_k), all_k
 
-    def _add(tbl, title, is_collapsed):
-        tables.append(tbl)
-        titles.append(title)
-        collapsed.append(is_collapsed)
-
-    # ===== Block A：per-query 指標（map / precision / recall）=====
-    families = "/".join(_query_group_names())
-    _add(_families_by_k_table(overall, ks, all_k),
-         f"A · per-query｜overall（列＝{families}）", False)
-    per_segment = unmatched_last(metrics.get("per_segment", {}) or {})
-    if per_segment:
-        macro_seg = metrics.get("macro_avg", {}).get("by_segment", {})
-        # (unmatched) 的定義貼在它出現的表上：列在最後、不在 Macro 列裡。
-        unmatched = (f"；{UNMATCHED_SEGMENT} 不含在 Macro"
-                     if UNMATCHED_SEGMENT in per_segment else "")
-        for fam in _query_group_names():
-            _add(_entities_by_k_table(per_segment, macro_seg, ks, all_k, fam),
-                 f"A · per-query｜per-segment {fam}@k（列＝segment{unmatched}）",
-                 True)
-    cat = metrics.get("category")
-    cks = None
-    if cat:
-        n_cat = count_items(facts.get("category") or {})
-        cat_k = resolved_all_k(cat)
-        cks = landed_value(display_ks, DISPLAY_KS, "evaluation_metrics",
-                           "category", DISPLAY_METRICS_SECTION)
-        _add(_families_by_k_table(cat.get("overall", {}), cks, cat_k),
-             f"A · per-query｜大類 overall（列＝{families}）", True)
-
-    # ===== Block B：per-item 歸因（目錄裡 item 那種算法的指標）=====
-    map_attr = entry("map_attr", ITEM).name
-    attr_label = entry("map_attr", ITEM).display_name
-    recall_label = entry("recall", ITEM).display_name
-    b_map = _per_item_metric_table(
-        per_item, ks, all_k, map_attr, "@{k}", macro_metrics=macro_item,
-    )
-    # bug 5 (ADR-0020): the macro denominator is "items with a positive this
-    # period" (and n_pos >= metric.min_positives); a zero-positive item drops
-    # out of per_item silently. The title discloses N of M, only on a table
-    # that has a Macro row.
-    item_cov = macro_coverage_suffix(metrics, n_items, macro_item)
-    _add(b_map, f"B · per-item 歸因｜{attr_label}@k（列＝item）{item_cov}",
-         True)
-    _add(_per_item_recall_table(per_item, ks, all_k, macro_metrics=macro_item),
-         f"B · per-item 歸因｜{recall_label}@k（列＝item）{item_cov}", True)
-    for metric in _other_item_metrics():
-        _add(_per_item_metric_table(per_item, ks, all_k, metric.name, "@{k}",
-                                    macro_metrics=macro_item),
-             f"B · per-item 歸因｜{metric.display_name}@k（列＝item）{item_cov}",
-             True)
-    if cat:
-        cat_macro_item = cat.get("macro_avg", {}).get("by_item", {})
-        cat_pi = dict(sorted((cat.get("per_item", {}) or {}).items()))
-        cat_item_cov = macro_coverage_suffix(cat, n_cat, cat_macro_item)
-        _add(_per_item_metric_table(cat_pi, cks, cat_k, map_attr,
-                                    "@{k}", macro_metrics=cat_macro_item),
-             f"B · 大類 per-item 歸因｜{attr_label}@k（列＝大類）{cat_item_cov}",
-             True)
-        _add(_per_item_recall_table(cat_pi, cks, cat_k,
-                                    macro_metrics=cat_macro_item),
-             f"B · 大類 per-item 歸因｜{recall_label}@k（列＝大類）"
-             f"{cat_item_cov}", True)
-        for metric in _other_item_metrics():
-            _add(_per_item_metric_table(cat_pi, cks, cat_k, metric.name,
-                                        "@{k}", macro_metrics=cat_macro_item),
-                 f"B · 大類 per-item 歸因｜{metric.display_name}@k（列＝大類）"
-                 f"{cat_item_cov}", True)
-
-    # Each grain's facts beside the same grain's metrics: the ledger line
-    # reads the groups scored off the metrics' ledger.
-    ledger = [
-        line for (grain, bundle), grain_metrics in zip(
-            grain_bundles(facts), (metrics, metrics.get("category")))
-        if (line := _group_ledger_line(grain, bundle, grain_metrics,
-                                       parameters))
-    ]
+    ks, all_k = landed_ks()
+    blocks: list = [Paragraph(_description(ks, all_k), muted=True)]
+    blocks += _grain_blocks(metrics, ks, count_items(facts), _ITEM_GRAIN,
+                            with_definitions=True)
+    category = metrics.get("category")
+    if category:
+        category_ks, _ = landed_ks("category")
+        blocks += _grain_blocks(
+            category, category_ks, count_items(facts.get("category") or {}),
+            _CATEGORY_GRAIN, with_definitions=False)
     return ReportSection(
-        title="衡量指標",
-        description=(
-            "分兩塊、各塊內維度與方向一致。A｜per-query 指標（map／precision／"
-            "recall）——對 overall、per-segment、大類 overall；precision@k 是"
-            " per-query 量（整組 top-k 命中幾個），只在這塊。B｜per-item 歸因"
-            "（map_attr／recall）——對 per-item、大類 per-item；A 塊的 precision@k"
-            " 分母是 k（整組 top-k 的性質），拆不到單一 item 頭上，所以不在這塊。方向規則："
-            "單一彙總（overall、大類 overall）用指標家族當列，多實體拆分（per-"
-            "segment、per-item、大類 per-item）用實體當列；所有表 k 欄一致＝"
-            "[1,2,3,4,5,all]、每張表一個 metric family。頭號指標＝macro per-item "
-            f"mAP（item 等權；{headline_column(parameters, display_ks, '本段')}）；"
-            "overall per-query mAP 是另一種加權，並列不比高下。手算核對：overall "
-            "map@1 = recall@1（見核心概念，AP@k 分母＝R）。K=產品數時 precision "
-            "退化為 base rate、recall 恆為 1。per-item 列序統一按字母。明細表點標題"
-            "展開。"
-        ),
-        # The query-group ledger (#376), one line per grain, always printed:
-        # the reader decides from it whether to turn the switch on.
-        bullets=ledger,
-        tables=tables,
-        table_titles=titles,
-        collapsed_tables=collapsed,
+        title=TITLE, description="", title_en=TITLE_EN, question=QUESTION,
+        key="ranking_metrics", blocks=blocks,
     )

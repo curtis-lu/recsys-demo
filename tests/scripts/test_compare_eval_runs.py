@@ -9,9 +9,10 @@ _PLOT = ('<div id="{id}" class="plotly-graph-div"></div>'
          '{{Plotly.newPlot("{id}", [])}}</script>')
 
 
-def _html(generated_at: str, plot_id: str, value: str = "0.5000") -> str:
+def _html(generated_at: str, plot_id: str, value: str = "0.5000",
+          label: str = "Generated At") -> str:
     return (
-        "<table><tr><th>Generated At</th>"
+        f"<table><tr><th>{label}</th>"
         f"<td>{generated_at}</td></tr></table>"
         + _PLOT.format(id=plot_id)
         + f"<td>{value}</td>"
@@ -24,10 +25,11 @@ _ITEM_ID = "3f2c1a9e-8b7d-4c6e-9a1b-2d3e4f5a6b7c"
 def _run(root, name, *, generated_at="2026-10-22 23:44:01",
          plot_id="0b6f2c5e-1d1a-4c5e-9f00-2b7e6a1c9d10", value="0.5000",
          metrics=None, created_at="2026-10-22T16:56:47", run_id="run-1",
-         git_commit="395c9571", manifest_extra=None):
+         git_commit="395c9571", manifest_extra=None, label="Generated At"):
     run = root / name / "c8de1716" / "20260131"
     run.mkdir(parents=True)
-    (run / "report.html").write_text(_html(generated_at, plot_id, value))
+    (run / "report.html").write_text(
+        _html(generated_at, plot_id, value, label))
     (run / "metrics.json").write_text(
         json.dumps(metrics or {"map@1": 0.5, "recall@1": 0.4}, indent=2))
     (run / "manifest.json").write_text(json.dumps({
@@ -44,6 +46,14 @@ def test_the_run_time_and_the_plot_ids_are_the_only_noise(tmp_path):
              git_commit="83affa56")
     assert {status for status, _ in compare_dirs(a, b)} == {"SAME"}
     assert main([str(a), str(b)]) == 0
+
+
+def test_the_main_report_s_chinese_run_time_cell_is_masked_too(tmp_path):
+    """#537: the main report's metadata says 產生時間; the comparison report
+    still says Generated At."""
+    a = _run(tmp_path, "a", label="產生時間")
+    b = _run(tmp_path, "b", label="產生時間", generated_at="2026-10-23 00:12:59")
+    assert {status for status, _ in compare_dirs(a, b)} == {"SAME"}
 
 
 def test_a_changed_number_in_the_html_is_reported(tmp_path):

@@ -24,12 +24,12 @@
 
 %% #351 起 evaluation_metrics、baseline_metrics 落地成 JSONDataset
 %%   （data/evaluation/<model_version>/<snap_date>/metrics.json 與同目錄
-%%   baseline_metrics.json，皆含 config_fingerprint；report.sections.baseline: false
+%%   baseline_metrics.json，皆含 config_fingerprint；report.sections.popularity_baseline: false
 %%   時 baseline 是 {"enabled": false, "config_fingerprint": ...} stub），跟
 %%   report_aggregates 一樣畫成實線膠囊（有 catalog entry）。
 %%   #536 起報表只讀落地結果：compare_to_baseline 算模型對 baseline 的差值（baseline_comparison.json），
 %%   resolve_display_ks 把每張表要印的 K 切好（display_ks.json），兩個 node 都不跑 Spark。
-%%   改了 report.display.primary_map_k 要 --from-node resolve_display_ks。
+%%   改了 report.display.compare_k 要 --from-node resolve_display_ks。
 %%   generate_report 的輸入全部落地（#532 拿掉最後一個 MemoryDataset 輸入，
 %%   也就是診斷頁清單），所以切片的停止條件 can_load（＝檔案在不在）
 %%   讓 `--only-node generate_report` 不會自動補跑任何 node，也不會沿線把
@@ -41,7 +41,7 @@
 %%   #342 起每份落地 JSON 內帶 config_fingerprint（只涵蓋「算的」設定）：
 %%   改了算的設定再 --only-node 重繪，generate_report
 %%   會 raise 並指出該 --from-node 哪個 node；只改畫的設定（report.sections 其餘鍵）
-%%   照常重繪，report.display.primary_map_k 例外（見上）。分類見 docs/pipelines/evaluation.md §7.2。
+%%   照常重繪，report.display.compare_k 例外（見上）。分類見 docs/pipelines/evaluation.md §7.2。
 
 %% #352 起（ADR-0018 決定 1）prepare_eval_data 的 join 結果直接落地為
 %%   enriched_eval_predictions（既有 Hive 表：partition_filter model_version、
@@ -88,13 +88,13 @@ flowchart TB
   d_baseline(["baseline_metrics<br/><small>JSON</small>"])
   n_pq["compute_prediction_quality<br/><small>每一列候選當二元預測 ・ 一次 groupBy(item, 細箱) ・ 不排除無正例的 query group<br/>report.sections.prediction_quality: false（框架預設）時只寫 stub</small>"]
   d_pq(["prediction_quality_metrics<br/><small>JSON</small>"])
-  n_agg["compute_report_aggregates<br/><small>主報表 per-item 細部拆解段的 Spark 端聚合（bin 計數／quartile／rank 矩陣）</small>"]
+  n_agg["compute_report_aggregates<br/><small>主報表名次分布段的 Spark 端聚合（bin 計數／quartile／rank 矩陣）</small>"]
   d_agg(["evaluation_report_aggregates<br/><small>JSON</small>"])
 
   %% ---------------------- 比較層與 K 截斷 ----------------------
   n_cmpbase["compare_to_baseline<br/><small>不跑 Spark ・ 模型對 baseline 每格的這次、對照、差（全部 K）<br/>＋ 四項能不能比的標註（all、macro item、組數、分群欄）</small>"]
   d_cmpbase(["baseline_comparison<br/><small>JSON ・ baseline_comparison.json</small>"])
-  n_dispk["resolve_display_ks<br/><small>不跑 Spark ・ 每張表要印的 K，超過該粒度 all 的整數 K 已濾掉<br/>改 report.display.primary_map_k 從這裡接續</small>"]
+  n_dispk["resolve_display_ks<br/><small>不跑 Spark ・ 每張表要印的 K，超過該粒度 all 的整數 K 已濾掉<br/>改 report.display.compare_k 從這裡接續</small>"]
   d_dispk(["evaluation_display_ks<br/><small>JSON ・ display_ks.json</small>"])
 
   %% ---------------------- 匯流 ----------------------
@@ -116,7 +116,7 @@ flowchart TB
     d_cmb(["compare_metrics_b<br/><small>JSON</small>"])
     n_csource["compare_to_source<br/><small>不跑 Spark ・ Model A 對 Model B 每格的這次、對照、差（全部 K）<br/>＋ 四項能不能比的標註 ・ 比對「跟誰比」的身分</small>"]
     d_csource(["source_comparison<br/><small>JSON</small>"])
-    n_cdispk["resolve_comparison_display_ks<br/><small>不跑 Spark ・ 比較報表每張表要印的 K 與列<br/>改 guardrail_recall_k、primary_map_k 從這裡接續</small>"]
+    n_cdispk["resolve_comparison_display_ks<br/><small>不跑 Spark ・ 比較報表每張表要印的 K 與列<br/>改 compare_k 從這裡接續</small>"]
     d_cdispk(["comparison_display_ks<br/><small>JSON</small>"])
     n_creport["generate_comparison_report<br/><small><b>純函式</b>：只讀落地的 JSON，不跑 Spark、不取差值、不截斷 K</small>"]
     o_creport(["evaluation_comparison_report　★ report_comparison.html"])

@@ -13,8 +13,8 @@ Two kinds of settings (ADR-0020 decision 2)
   whether something is computed at all. Changing one means re-running from
   the node :data:`COMPUTED_KEYS` names for it (normally its first reader).
 * **Drawn**: ``evaluation.report.display.*`` and every
-  ``evaluation.report.sections.*`` key except ``baseline``,
-  ``per_item_breakdown`` and ``prediction_quality``. They only change what the
+  ``evaluation.report.sections.*`` key except ``popularity_baseline``,
+  ``rank_distribution`` and ``prediction_quality``. They only change what the
   report shows, so ``--only-node generate_report`` is enough and takes
   seconds — except the display keys the K cut reads
   (``steps.display_ks.DISPLAY_KEYS_READ``, #536): ``resolve_display_ks``
@@ -24,11 +24,11 @@ Two kinds of settings (ADR-0020 decision 2)
 
 Only computed settings go into the fingerprint. Fingerprinting drawn ones too
 would make every cosmetic change raise, which is the "re-run everything on any
-change" the user rejected. ``sections.baseline``,
-``sections.per_item_breakdown`` and ``sections.prediction_quality`` are
-computed, not drawn: ``baseline: false`` makes ``compute_baseline_metrics``
-return a stub, and ``per_item_breakdown: false`` / ``prediction_quality:
-false`` do the same for
+change" the user rejected. ``sections.popularity_baseline``,
+``sections.rank_distribution`` and ``sections.prediction_quality`` are
+computed, not drawn: ``popularity_baseline: false`` makes
+``compute_baseline_metrics`` return a stub, and ``rank_distribution: false`` /
+``prediction_quality: false`` do the same for
 ``compute_report_aggregates`` / ``compute_prediction_quality``; treated as
 drawn, flipping them back and re-drawing yields a report with a section
 silently missing.
@@ -80,8 +80,9 @@ outside this pipeline imports it today, and S3 would forbid it.
 What the fingerprint compares
 =============================
 Declared values, not effective ones. A key that is absent is left out of
-``values``; it is not recorded as ``None``, because ``sections.get("baseline",
-True)`` treats a missing key and an explicit ``null`` in opposite ways. The
+``values``; it is not recorded as ``None``, because
+``sections.get("popularity_baseline", True)`` treats a missing key and an
+explicit ``null`` in opposite ways. The
 flip side: writing a default out explicitly (``k_values: [5, "all"]`` where it
 was omitted) counts as a change. That errs towards raising, and the message
 names the key, so it costs one re-run, never a wrong report.
@@ -177,9 +178,9 @@ COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
     ("evaluation.metric", "compute_row_facts"),
     ("evaluation.query_filter", "compute_row_facts"),
     ("evaluation.baseline", "compute_row_facts"),
-    ("evaluation.report.sections.baseline", "compute_row_facts"),
+    ("evaluation.report.sections.popularity_baseline", "compute_row_facts"),
     ("evaluation.report.diagnostics", "compute_row_facts"),
-    ("evaluation.report.sections.per_item_breakdown", "compute_row_facts"),
+    ("evaluation.report.sections.rank_distribution", "compute_row_facts"),
     ("evaluation.prediction_quality", "compute_row_facts"),
     ("evaluation.report.sections.prediction_quality", "compute_row_facts"),
 )

@@ -563,6 +563,42 @@ def test_a61_the_evaluation_command_runs_without_the_block(
     assert _run_evaluation_command(monkeypatch, tmp_path, {})
 
 
+@pytest.mark.parametrize("predicate", [
+    "compare_k_errors", "retired_k_key_errors",
+], ids=["A62", "A63"])
+def test_a62_a63_wired_into_evaluation_command_before_spark(predicate):
+    # Evaluation-only keys: A43/A61's placement, for A34's reason.
+    from recsys_tfb.core.consistency import validate_config_consistency
+
+    assert predicate not in inspect.getsource(validate_config_consistency), (
+        f"{predicate} must stay off the global aggregator (#158 precedent)")
+    src = inspect.getsource(m.evaluation)
+    assert f"{predicate}(params)" in src
+    assert src.index(f"{predicate}(") < src.index(
+        "get_or_create_spark_session("
+    ), f"{predicate} must fail before the Spark cold start, like A34"
+
+
+@pytest.mark.parametrize("extra, code", [
+    ({"report": {"display": {"compare_k": [7]}}, "k_values": [1, "all"]},
+     "A62:"),
+    ({"metric": {"k": None}}, "A63:"),
+    ({"report": {"display": {"primary_map_k": [1, "all"]}}}, "A63:"),
+], ids=["A62-uncomputed-k", "A63-metric-k", "A63-primary-map-k"])
+def test_a62_a63_the_evaluation_command_stops(
+    extra, code, monkeypatch, tmp_path, caplog,
+):
+    """Behavioural half; the control is
+    ``test_a61_the_evaluation_command_runs_without_the_block``."""
+    import logging
+
+    import typer
+
+    with caplog.at_level(logging.ERROR), pytest.raises(typer.Exit):
+        _run_evaluation_command(monkeypatch, tmp_path, extra)
+    assert code in caplog.text
+
+
 def test_a44_reaches_the_global_aggregator():
     # A44's keys feed train_variant_id and base_dataset_version, which every
     # command resolves — A31's placement. Behavioural half:

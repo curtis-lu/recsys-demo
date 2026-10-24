@@ -2570,7 +2570,7 @@ class TestS9ReportsDoNotImportComputation:
                 "from recsys_tfb.evaluation.report_sections.shared import y\n"
                 "from .shared import y\nfrom . import shared\n"
                 "from ..report import z\n"
-                "from recsys_tfb.report.pages import render_table\n"
+                "from recsys_tfb.report.pages import render_block\n"
                 "from recsys_tfb import report\n",
             "evaluation/comparison/report.py":
                 "from ..report_sections import shared\n",

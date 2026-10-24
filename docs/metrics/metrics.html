@@ -48,7 +48,7 @@
 </div>
 
 <h2>1. 主指標：mAP</h2>
-<p>每個 query group 先算 <b>AP（Average Precision）</b>，再對所有「至少有一個正例」的 group 取平均，就是 <b>mAP</b>。這是頭號指標。</p>
+<p>每個 query group 先算 <b>AP（Average Precision）</b>，再對所有「至少有一個正例」的 group 取平均，就是 <b>mAP</b>。</p>
 
 <h3>AP（單一 query group）— <code>compute_ap</code></h3>
 <div class="f">
@@ -92,12 +92,15 @@ prec_at_pos = cumsum(label) / pos  <span class="m"># 到此名次的精確率</s
 <h2>5. 報表怎麼分段</h2>
 <table>
   <tr><th>分段</th><th>內容</th></tr>
-  <tr><td>dataset overview</td><td>評估資料規模（group 數、正例率等，<code>compute_dataset_overview</code>）</td></tr>
-  <tr><td>summary</td><td>總表 mAP ＋ 各 K 的 map@K / precision@K / recall@K，與 baseline 並列</td></tr>
-  <tr><td>per-item</td><td>各 item 的 map_attr@K / recall@K / mean_pos</td></tr>
-  <tr><td>per-segment</td><td>依 <code>segment_columns</code> 分群的指標（欄從該模式的母體表或 <code>segment_sources</code> 覆寫表 join 進來；母體表沒有這欄時該段不出現、報表註明，見 <a href="../pipelines/evaluation.md">evaluation.md</a> §3.2）</td></tr>
+  <tr><td>概覽</td><td>模型選擇指標（training 的 HPO 能選的指標，目前是 overall mAP 與 macro per-item mAP）並列，不分主次</td></tr>
+  <tr><td>核心概念</td><td>query group 的定義、AP 公式與總量表（全資料的總量只在這一段印）</td></tr>
+  <tr><td>資料統計</td><td>正例在各期、各 item、各分群、各大類的分布（<code>compute_dataset_overview</code> 的切片計數）</td></tr>
+  <tr><td>排序指標</td><td>mAP / precision@K / recall@K 的整體與各分群，以及各 item 的 map_attr@K / recall@K；一個指標一張表，列是切片、欄是 K。分群依 <code>segment_columns</code>（欄從該模式的母體表或 <code>segment_sources</code> 覆寫表 join 進來；母體表沒有這欄時該欄不分群、資料統計段註明，見 <a href="../pipelines/evaluation.md">evaluation.md</a> §3.2）</td></tr>
   <tr><td>預測品質（選用，框架預設關）</td><td>把每一列候選當一次二元預測、照分數分箱：precision／recall／F1、<code>pr_auc</code>、<code>roc_auc</code>、分箱表（每格平均分數 vs 實際正例率），整體＋per-item。母體與上面各段不同（不排除沒有正例的 query group），precision 不可互相比較；<code>pr_auc</code> 是分箱後的值，不等於在原始分數上算的 average precision。定義與限制見 <a href="../pipelines/evaluation.md">evaluation.md</a> §3.7</td></tr>
-  <tr><td>comparison（<code>--compare</code>）</td><td>與另一 model_version / 外部表在共同客戶上的對比（見 <a href="../pipelines/evaluation.md">evaluation.md</a>）</td></tr>
+  <tr><td>名次分布</td><td>各 item 的分數分布、名次熱圖與正例位置</td></tr>
+  <tr><td>熱門度基準</td><td>模型與 popularity baseline 並列，每個 K 三欄：這次、對照、差</td></tr>
+  <tr><td>完整性檢查</td><td>這次量了什麼、什麼沒量到</td></tr>
+  <tr><td>comparison（<code>--compare</code>，另一份 <code>report_comparison.html</code>）</td><td>與另一 model_version / 外部表在共同客戶上的對比：概覽、整體指標、各 item 指標、大類指標、分群指標（分群預設不印），見 <a href="../pipelines/evaluation.md">evaluation.md</a> §3.6</td></tr>
 </table>
 <p class="sub">可選：<code>item_categories</code> 設定可把 item 收合成類別後再算指標（<code>collapse_to_categories</code>）。</p>
 

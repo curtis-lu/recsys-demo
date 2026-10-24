@@ -180,7 +180,7 @@ _Avoid_: 跳過訓練（模型照樣訓練，跳過的只有挑參數）
 
 **選版指標**（ADR-0028）:
 在多個 model_version 之間挑出建議 promote 的那一個時所比的指標，算在 test 上；只有計分月份跟現在設定相同的版本才參加比較。沒設定時與 HPO 目標相同。
-_Avoid_: 頭號 mAP（evaluation 報表開頭的數字，不參與挑版本）
+_Avoid_: 頭號 mAP（evaluation 報表的概覽已不分主次，並列 HPO 能選的兩個指標：overall mAP 與 macro per-item mAP；概覽的數字算在 evaluation 的評估資料上，不參與挑版本）
 
 **計分月份**（ADR-0028）:
 training 在 test 上算指標時納入的 time 值（設定鍵 `test_metrics.snap_date`），必須是 `dataset.test_snap_dates` 的一部分，沒設定時就是整份。名字沿用月份字樣，實際單位是 time。
@@ -188,7 +188,7 @@ _Avoid_: test 月份（`test_snap_dates` 決定的是要預測哪些 time 值）
 
 **test mAP**:
 training 在 test 上算的 mAP：每個 query group 的 AP 不截斷、算完再對 query group 平均，產物鍵是 `overall_map`；當 HPO 目標或選版指標時叫 `mean_ap`。
-_Avoid_: 頭號 mAP（evaluation 報表開頭的數字，取自 `metrics.json` 的 macro `map_attr@{evaluation.metric.k}`（未設時 `@all`）：每個 item 先算再平均；兩者不可對帳）
+_Avoid_: 頭號 mAP（舊稱，evaluation 報表的概覽已不分主次。概覽並列的 macro per-item mAP 取自 `metrics.json` 的 macro `map_attr@all`，每個 item 先算再平均，跟本詞不是同一個數，不可對帳）
 
 ### 評估
 
@@ -255,7 +255,7 @@ _Avoid_: `pr_auc`、aucpr；也不要單獨叫 average precision 或 AP（那是
 裡面沒有任何一筆候選的 label 是正例的 query group。排序指標算不了它；把候選當二元預測的指標需要它。每個 split 留多少由 `dataset.*_zero_positive_group_ratio` 決定，整組去留；val／test 留下的組的列帶權重 1／r（ADR-0025）。
 
 **全正的 query group**（#376）:
-裡面每一筆候選的 label 都是正例的 query group；label 有分級時，指每一筆都是同一個正值。不管怎麼排，它的組層級排序指標都一樣，排法分不出好壞。evaluation 預設照樣算進衡量指標，只印出它的佔比；`evaluation.query_filter.drop_all_positive_groups` 打開時才排除。
+裡面每一筆候選的 label 都是正例的 query group；label 有分級時，指每一筆都是同一個正值。不管怎麼排，它的組層級排序指標都一樣，排法分不出好壞。evaluation 預設照樣算進排序指標，只印出它的佔比；`evaluation.query_filter.drop_all_positive_groups` 打開時才排除。
 
 **`roc_auc`**（ADR-0024）:
 ROC 曲線下的面積，母體是全部候選列；同一個分數箱裡的列視為同分，同分算一半。per-item 版本把母體換成該 item 的全部候選列，macro 是 per-item 對 item 平均；`pr_auc` 也一樣。今天只有列數最多的前幾個 item 有 per-item 值、沒有 macro，ADR-0031 決定 7 要補。
