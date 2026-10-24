@@ -43,7 +43,7 @@ agent 每次打開一個檔，會把裡面的註解全部讀進來，並且相�
 `b06e5af1` 的快照，重現：`python scripts/dev/comment_churn.py b06e5af1`。量法：每個 commit 前後各把檔案解析成 AST、拿掉 docstring 後比較（註解本來就不在 AST 裡）；程式碼完全沒動、只有文字變的檔，算「只改註解」。
 
 - `src/` 裡被改到的檔，「只改註解」的比例在 3–4 月是 0%，8–10 月是 22–28%。這是最直接的訊號：越來越多改動，程式碼一行沒動。
-- 2026-08 起 `src/` 改過的非空行，48% 是註解或 docstring。這個數字要對照存量看：`src/` 本來就有 43% 的非空行是註解或 docstring。
+- 2026-08 起 `src/` 改過的非空行，48% 是註解或 docstring。`src/` 非空行裡註解與 docstring 的比例，從 2026-08-01 的 24% 漲到 `b06e5af1` 的 43%：這段期間寫進來的，註解多過程式碼。
 - 2026-08 起有 158 個 commit 至少有一個 `src/` 檔只改了註解，其中 68 個的標題帶「審查」「review」或「收尾」字樣。這些 commit 不一定只改註解，多半同時修了別的問題。
 
 只改註解的 commit 改的是什麼，沒有逐一分類。一個典型的例子是 `87b9f963`：一段註解寫著「`scripts/` 不在掃描範圍，因為它的 schema dict 只是報表 metadata」，那些腳本刪掉之後，這句就在講不存在的檔，要另開一個 commit 改成過去式。
@@ -97,7 +97,9 @@ pool = sample_pool.filter(months_filter_as_date(time_col, train_months))
 
 **例外一：歷史是現在不能改的唯一原因。** 這時把它改寫成現在式的限制，不講故事。判準：拿掉這句，下一個人會不會改出同一個 bug？會就留，寫成限制。
 
-**例外二：指向一個只記在票上的決定。** 有些決定沒有進 ADR，只寫在 spec 票裡，例如 `spec #426 decision D`。這種票號的角色跟 `ADR-0025 decision 1` 一樣，是「規則在這裡」的出處，不是歷史，可以寫。寫成 `#NNN decision X` 的形狀（X 是那張票裡決定的編號），測試才認得出它是出處。只寫 `(#379)` 的，分不出是出處還是歷史，一律算歷史。
+**例外二：指向一個只記在票上的決定。** 有些決定沒有進 ADR，只寫在 spec 票裡，例如 `spec #426 decision D`。這種票號的角色跟 `ADR-0025 decision 1` 一樣，是「規則在這裡」的出處，不是歷史，可以寫。寫成 `#NNN decision X` 的形狀（X 是那張票裡決定的編號），測試才認得出它是出處。
+
+已經存在、是出處但不是這個形狀的，例如 `src/recsys_tfb/pipelines/training/steps/train_data_cache.py:96` 的 `implementation note of #488`、`src/recsys_tfb/pipelines/dataset/pipeline.py:27` 的 `ADR-0006's #521 amendment`：改到它時**不要刪**，改寫成 `#NNN decision X`（或改指 ADR），再把 `tests/test_core/issue_refs_in_src.txt` 上那一行刪掉。判準：這個票號拿掉之後，讀者還找得到那條規則嗎？找不到，它就是出處。
 
 壞例子（`src/recsys_tfb/pipelines/training/nodes.py:226`）——破折號後面那半句是改名史：
 
@@ -123,7 +125,7 @@ pool = sample_pool.filter(months_filter_as_date(time_col, train_months))
 **誰擋得住**：**部分**。
 
 - **擋得住的**：`tests/test_core/test_code_comments.py` 把 `src/recsys_tfb` 註解與 docstring 裡現有的 `#NNN`，逐檔列在 `tests/test_core/issue_refs_in_src.txt`。出現清單上沒有的，測試紅，並印出是哪個檔的哪個票號。清單上有、程式裡已經沒有的，也紅，要你把那一行刪掉，讓它回不來。逐檔比對，所以「刪三個舊的、加一個新的」照樣會紅。`#NNN decision X` 的出處不算。
-- **擋不住的**：`tests/`、`scripts/` 不掃；別的寫法（`GH-483`、票的網址、`issue 483`）看不到；把舊註解連同票號搬到別的檔，測試會紅，但修法是在清單上搬那一行，這一步只能人看有沒有趁機多加。「原本／改名前／誰確認過」這類說法沒有可靠的字串可以 grep，只能人看。
+- **擋不住的**：同一個檔裡刪一個 `#158`、又加一個 `#158`（次數沒變）；`#NNN decision X` 的 X 是不是真的是那張票裡的決定，測試不查；`tests/`、`scripts/` 不掃；別的寫法（`GH-483`、票的網址、`issue 483`）看不到；把舊註解連同票號搬到別的檔，測試會紅，但修法是在清單上搬那一行，這一步只能人看有沒有趁機多加。「原本／改名前／誰確認過」這類說法沒有可靠的字串可以 grep，只能人看。
 
 ## 3. 只寫這段程式碼自己保證得了的事
 
@@ -193,7 +195,10 @@ no edit.
 
 10 行不是上限，不是要你砍到 10 行。它是一個要停下來檢查的點：多出來的內容裡，有沒有規則 2 的歷史、規則 3 的別處現況、規則 4 的重講 ADR？有就拿掉。剩下的都是這個函式該講的事，再長也留著。
 
-node 的 docstring 依 `pipeline-node-design.md` 規則 13 要講的三件事（為什麼不是另一種做法、選錯會不會報錯、成本量級）都算該講的事。例：`src/recsys_tfb/pipelines/dataset/nodes.py:432` 的 `split_train_keys`，docstring 將近 30 行，大部分是兩個檢查各自的成本與選錯的後果，檢查完不該砍。
+node 的 docstring 依 `pipeline-node-design.md` 規則 13 要講的三件事（為什麼不是另一種做法、選錯會不會報錯、成本量級）都算該講的事。例：`src/recsys_tfb/pipelines/dataset/nodes.py:432` 的 `split_train_keys`，docstring 28 行。照這條檢查一次：
+
+- **拿掉**：第一段後半「which records the distinct-and-join shape it replaced. This node was the first to drop that shape; … (6.7s → 3.6s on 16M keys …)」。這是以前的寫法和一次量測，屬於規則 2。
+- **留著**：同一個 entity 不會跨 split、誰決定 entity 由哪些欄組成、兩個檢查各是前置檢查還是後置條件、各自的成本。這些都是規則 13 要的，加起來還是超過 10 行，那就超過。
 
 模組 docstring 不設行數：它常是一整個模組負責的那件事（這個 repo 叫 concern）的地圖，長一點合理。但規則 1–4 一樣適用。
 
@@ -207,7 +212,7 @@ node 的 docstring 依 `pipeline-node-design.md` 規則 13 要講的三件事（
 
 ## 6. 只整理你改到的函式；說錯才改，說法不改
 
-- **改到一個函式，就照這份整理它的註解**：刪掉歷史與票號、把數量改成限制、把長論證縮成一句加出處。這是舊註解唯一的清理管道，沒有另外的全面清理。
+- **改到一個函式，就照這份整理它的註解**：刪掉歷史與講「哪次改動」的票號（出處照規則 2 例外二保留或改寫）、把數量改成限制、把長論證縮成一句加出處。這是舊註解唯一的清理管道，沒有另外的全面清理。
 - **你的改動讓別處的註解變假，就在同一個 PR 改掉那一句**。它算你改到的。不要留給審查去抓，那正是〈這個 repo 已經付了這個代價〉裡另開 commit 的來源。
 - **其他沒改到的函式，不碰它的註解**。不順手潤稿，也不補註解。
 - **審查說註解「錯了」（跟程式碼對不上），就改，或直接刪掉。審查只是建議換個說法，不改。**

@@ -121,20 +121,33 @@ def main():
     print(f"Commits since {a.since} with at least one prose-only src/ file: "
           f"{len(prose_only_commits)}; subject mentions 審查/review/收尾: {len(review)}")
 
-    stock = collections.Counter()
+    def stock_at(rev):
+        stock = collections.Counter()
+        for path in git("ls-tree", "-r", "--name-only", rev, "src/").stdout.split():
+            src = show(rev, path) if path.endswith(".py") else None
+            pl = prose_lines(src) if src is not None else None
+            if pl is None:
+                continue
+            nonblank = {i for i, line in enumerate(src.splitlines(), 1) if line.strip()}
+            stock["prose"] += len(nonblank & pl)
+            stock["all"] += len(nonblank)
+        return stock
+
+    start = git("rev-list", "-1", "--first-parent", f"--before={a.since}", a.rev).stdout.strip()
+    print()
+    for label, rev in ((f"{a.since} ({start[:8]})", start), (a.rev, a.rev)):
+        s = stock_at(rev)
+        print(f"At {label}: src/ non-blank lines that are prose: "
+              f"{s['prose']}/{s['all']} ({100 * s['prose'] / s['all']:.0f}%)")
+
     long_docs = 0
     docs = collections.Counter()
-    files = git("ls-tree", "-r", "--name-only", a.rev, "src/").stdout.split()
-    for path in files:
+    for path in git("ls-tree", "-r", "--name-only", a.rev, "src/").stdout.split():
         if not path.endswith(".py"):
             continue
         src = show(a.rev, path)
-        pl = prose_lines(src)
-        if pl is None:
+        if prose_lines(src) is None:
             continue
-        nonblank = {i for i, line in enumerate(src.splitlines(), 1) if line.strip()}
-        stock["prose"] += len(nonblank & pl)
-        stock["all"] += len(nonblank)
         for node in ast.walk(ast.parse(src)):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 doc = ast.get_docstring(node, clean=False)
@@ -148,8 +161,6 @@ def main():
                 body_lines = body[-1].end_lineno - body[0].lineno + 1
                 if doc_lines >= 15 and doc_lines >= 3 * body_lines:
                     long_docs += 1
-    print(f"\nAt {a.rev}: src/ non-blank lines that are prose: "
-          f"{stock['prose']}/{stock['all']} ({100 * stock['prose'] / stock['all']:.0f}%)")
     print(f"Function docstrings longer than 10 lines: {docs['over_10']}/{docs['all']}")
     print(f"Functions whose docstring is >= 15 lines and >= 3x the body: {long_docs}")
 
