@@ -95,6 +95,53 @@ class TestTheRequirementList:
             assert "compute_prediction_quality" not in self._names(
                 ALL_ON, **kwargs), label
 
+    def test_every_result_a_drawn_section_reads_has_a_producer(self):
+        """ADR-0031 principle 2, second addendum, the half #538 does: each
+        report's wiring is what its switched-on sections declare they read,
+        and every one of those results is landed by a node of this run — in
+        every mode, under every combination of the five switches. A result
+        nothing produces would be a pipeline input, failing only when the
+        catalog finds no file. On the main report's side ``create_pipeline``
+        itself refuses one (it looks each producer up), so a break there
+        fails at the call, naming the result; the assertion below guards the
+        comparison report's side, whose wiring is written out."""
+        from itertools import product
+
+        from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
+
+        switches = sorted(EVALUATION_REPORT_SECTIONS)
+        modes = {**self.MODES,
+                 "--compare-only": TestNoDiagnosisInAnyMode.COMPARE_ONLY}
+        checked = 0
+        for values in product((True, False), repeat=len(switches)):
+            parameters = _sections(**dict(zip(switches, values)))
+            for label, kwargs in modes.items():
+                pipeline = create_pipeline(parameters=parameters, **kwargs)
+                produced = {out for n in pipeline.nodes for out in n.outputs}
+                for report in ("generate_report",
+                               "generate_comparison_report"):
+                    node = next((n for n in pipeline.nodes
+                                 if n.name == report), None)
+                    if node is None:
+                        continue
+                    reads = set(node.keyword_inputs) - {"parameters"}
+                    assert reads, (label, report)
+                    assert reads <= produced, (
+                        label, values, report, sorted(reads - produced))
+                    checked += 1
+        assert checked == 2 ** len(switches) * (len(modes) + 1)
+
+    def test_the_comparison_refusals_name_the_comparison_metrics_node(self):
+        """The report layer cannot import the pipeline (S8), so it spells the
+        node a missing comparison cell sends the reader to; it must be the
+        node that computes both sides' metrics."""
+        from recsys_tfb.evaluation.report_sections.shared import (
+            COMPARISON_METRICS_NODE,
+        )
+        from recsys_tfb.pipelines.evaluation.nodes import COMPARISON_RERUN_NODE
+
+        assert COMPARISON_METRICS_NODE == COMPARISON_RERUN_NODE
+
     def test_the_requirement_list_names_no_computation(self):
         """It collects the sections' declarations; which node produces a
         result is the wiring's. A node named in it would have to be kept in

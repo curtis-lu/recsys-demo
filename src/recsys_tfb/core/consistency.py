@@ -330,7 +330,7 @@ Layer 1 — config-static (implemented here; aggregated by
   ``A33`` retired-not-renumbered afterwards, per A16/A17/A18.
 * A34 — ``evaluation.report.sections`` declares exactly the switches the
   report reads: its key set equals ``EVALUATION_REPORT_SECTIONS``, the constant
-  ``evaluation/report_sections/shared.section_on`` checks every name against. Both
+  ``report_section_on`` checks every name against. Both
   directions (ADR-0019 decision 6): a declared key nothing reads is a switch
   that does nothing (four shipped that way until #351), and a name the report
   reads that no conf declares is a switch with no line to flip it
@@ -3598,7 +3598,7 @@ def retired_k_key_errors(parameters: dict) -> list[str]:
 
 #: The ``evaluation.report.sections`` switches the report reads: one name per
 #: section that declares a ``SWITCH`` in ``evaluation/report_sections/``,
-#: read through ``section_on``, which refuses any name not listed here
+#: read through ``report_section_on``, which refuses any name not listed here
 #: (A34). Each is the file name of the section it switches (#537), so a
 #: reader finds the section from the conf. No node reads a switch (#538,
 #: ADR-0031 principle 3): the evaluation pipeline's requirement list leaves
@@ -3629,7 +3629,7 @@ RENAMED_REPORT_SECTIONS: dict[str, str] = {
 
 #: The switches in :data:`EVALUATION_REPORT_SECTIONS` that are **off** when the
 #: conf leaves them out (``prediction_quality_on``, ADR-0024 decision 1); every
-#: other one is on (``report_sections.shared.section_on``). A34's message names the
+#: other one is on (``report_section_on``). A34's message names the
 #: value that keeps what an absent switch does today, so it needs the side.
 EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT: frozenset[str] = frozenset({
     "prediction_quality",
@@ -3719,7 +3719,19 @@ def report_section_on(parameters: dict, name: str) -> bool:
     population for the prediction-quality section by it. Two ``dict.get``
     calls with two defaults is how a gate ends up guarding a family the
     pipeline never computes, or the reverse.
+
+    Pre-check: ``name`` is in :data:`EVALUATION_REPORT_SECTIONS`, the set A34
+    keeps equal to what the conf declares (ADR-0019 decision 6). A name
+    outside it would read a key no conf declares and quietly take the
+    default, the way ``diagnosis_links`` did.
     """
+    if name not in EVALUATION_REPORT_SECTIONS:
+        raise ValueError(
+            f"report_section_on: {name!r} is not in "
+            f"core.consistency.EVALUATION_REPORT_SECTIONS "
+            f"{sorted(EVALUATION_REPORT_SECTIONS)}. Add it there and declare "
+            f"it under evaluation.report.sections (A34)."
+        )
     default = name not in EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT
     eval_params = parameters.get("evaluation") or {}
     report = eval_params.get("report") or {} if isinstance(eval_params, Mapping) else {}
@@ -3790,7 +3802,7 @@ def report_section_key_errors(parameters: dict) -> list[str]:
       it off.
 
     A check that fires only when the report asks for a name (the pre-check in
-    ``section_on``) never sees the first shape, which is why this runs on the
+    ``report_section_on``) never sees the first shape, which is why this runs on the
     conf itself.
 
     A ``sections`` block that declares no switch at all (absent, null, or an
@@ -3806,7 +3818,7 @@ def report_section_key_errors(parameters: dict) -> list[str]:
 
     Each switch the report reads must also hold a bool (#505). Every reader
     takes it by truthiness (``report_section_on``, through which
-    ``section_on``, ``prediction_quality_on`` and the evaluation pipeline's
+    ``prediction_quality_on``, the report and the evaluation pipeline's
     requirement list read it), so ``"false"`` — or ``'false`'``, what selecting
     this check's own advice up to the line end copies — reads as on. Those
     readers are left as they are: the evaluation command runs this check

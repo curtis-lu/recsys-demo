@@ -264,18 +264,22 @@ def _results_with_n_items(n):
 # ---- Task 5: 衡量指標（合併 primary_map/guardrail/attr/segment/category）----
 
 
-def test_section_on_refuses_a_name_outside_the_declared_set():
-    """Pre-check (ADR-0019 decision 6): a switch the report asks about must be
-    one A34 keeps declared. Without it a new ``section_on("x")`` call reads a
-    key no conf declares and silently defaults to on — the ``diagnosis_links``
-    drift."""
+def test_a_switch_outside_the_declared_set_is_refused():
+    """Pre-check (ADR-0019 decision 6): a switch a section declares must be
+    one A34 keeps declared. Without it a section with ``SWITCH = "x"`` reads
+    a key no conf declares and silently defaults to on — the
+    ``diagnosis_links`` drift. The check is in the one reading of a switch,
+    so the requirement list and the report both hit it."""
+    from types import SimpleNamespace
+
     with pytest.raises(ValueError, match="'per_segment' is not in"):
-        shared.section_on(_params(), "per_segment")
+        shared.sections_on((SimpleNamespace(SWITCH="per_segment"),),
+                           _params())
 
 
 def test_every_listed_section_is_read_by_the_report():
     """The third side of A34 (ADR-0019 decision 6). A34 keeps the YAML equal to
-    ``EVALUATION_REPORT_SECTIONS`` and ``section_on`` keeps the report's names
+    ``EVALUATION_REPORT_SECTIONS`` and ``report_section_on`` keeps the report's names
     inside it, but neither notices a name left in the constant after the
     section that declared it is deleted: a dead switch again, everything
     green. The names here come from the sections' ``SWITCH`` declarations

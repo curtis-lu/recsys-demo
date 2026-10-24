@@ -67,7 +67,9 @@ def test_a_comparison_without_the_all_cell_is_refused():
         _section(this, reference)
     msg = str(exc.value)
     assert "source_comparison has no overall.cells.map@all" in msg
-    assert "--from-node compare_to_source" in msg
+    # The metrics never held it: re-running the join alone would miss it
+    # again (#538 review).
+    assert "--from-node compute_compare_metrics" in msg
 
 
 def test_an_empty_side_keeps_a_blank_difference_and_says_why():

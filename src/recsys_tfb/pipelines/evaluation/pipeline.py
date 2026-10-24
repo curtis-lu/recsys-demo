@@ -358,6 +358,14 @@ def create_pipeline(
     # checked against today's settings with its producer named as the node
     # to re-run from, read off the wiring above.
     producers = {out: node.name for node in nodes for out in node.outputs}
+    unproduced = [name for name in main_reads if name not in producers]
+    if unproduced:
+        raise ValueError(
+            f"The main report's switched-on sections read {unproduced}, which "
+            f"no node of this pipeline produces: a section's READS names a "
+            f"result nothing computes. Wire its producer here, or fix the "
+            f"section's READS."
+        )
     nodes.append(Node(
         make_generate_report_node(
             {name: producers[name] for name in main_reads}),
@@ -367,5 +375,8 @@ def create_pipeline(
     if compare_source is not None:
         nodes += _comparison_nodes(compare_only=False)
     # Decision — keep only the nodes the drawn reports need: what produces
-    # the results they read, and what those read in turn.
+    # the results they read, and what those read in turn. A node with no
+    # output (a gate like --compare-only's) is never anyone's producer and
+    # would be cut here: such a gate on this line must be added back after
+    # the cut, as --compare-only's skips the cut altogether.
     return Pipeline(nodes).only_nodes_with_outputs(list(required))

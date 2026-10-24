@@ -285,36 +285,31 @@ def test_diagnostics_report_size_bounded_by_row_count(spark):
 def test_generate_report_takes_no_spark_dataframe():
     """``generate_report`` 是純函式——這是 ``--only-node generate_report`` 不重算任何 Spark 計算就能重繪主報表的前提。
 
-    用簽章驗而不是「跑跑看有沒有用到 Spark」：後者在 diagnostics 關閉時會
-    假綠（那條路徑本來就不碰 sdf）。
-
-    **不能只用字串比對 ``"SparkDataFrame" in str(annotation)``**：
-    ``nodes.py`` 沒有 ``from __future__ import annotations``，所以
-    annotation 是活的型別物件，``str()`` 印出的是
-    ``"<class 'pyspark.sql.dataframe.DataFrame'>"`` —— 不含字面
-    ``"SparkDataFrame"`` 這個 alias 名稱，字串比對永遠命中不到，改壞了也
-    測不出來（實測：refactor 前跑這條就已經是綠的）。改用型別本身比對，並
-    同時涵蓋兩種可能的 annotation 形式（活物件 或 未來若加了
-    postponed-evaluation 字串）。
+    Since #538 the node takes ``**results``, so its signature says nothing
+    about what it is handed: the wiring does. So every result it can be wired
+    to — every section on, both modes — must be a landed JSON catalog entry,
+    never a Spark table. (The comparison report's node still names its
+    parameters; ``test_generate_comparison_report_takes_no_spark_dataframe``
+    checks its annotations — on the type object, not its string: ``nodes.py``
+    has no postponed annotations, so ``str()`` of the type never contains the
+    ``SparkDataFrame`` alias.)
     """
-    import inspect
+    from pathlib import Path
 
-    from pyspark.sql import DataFrame as SparkDataFrame
+    import yaml
 
-    generate_report = _report_node({}).func
-
-    def _is_spark_dataframe(annotation) -> bool:
-        if annotation is SparkDataFrame:
-            return True
-        return "pyspark.sql.dataframe.DataFrame" in str(annotation) \
-            or "SparkDataFrame" in str(annotation)
-
-    annotations = [
-        p.annotation for p in
-        inspect.signature(generate_report).parameters.values()
-    ]
-    hits = [a for a in annotations if _is_spark_dataframe(a)]
-    assert not hits, f"generate_report 又收了 Spark 物件：{hits}"
+    catalog = yaml.safe_load(
+        (Path(__file__).parents[3] / "conf/base/catalog.yaml").read_text())
+    every_section_on = {"evaluation": {"report": {"sections": {
+        "prediction_quality": True}}}}
+    for post_training in (False, True):
+        node = _report_node({**every_section_on, "post_training": post_training})
+        wired = sorted(set(node.keyword_inputs) - {"parameters"})
+        assert "evaluation_report_aggregates" in wired, wired
+        assert "prediction_quality_metrics" in wired, wired
+        not_json = {name: catalog.get(name, {}).get("type") for name in wired
+                    if catalog.get(name, {}).get("type") != "JSONDataset"}
+        assert not not_json, f"generate_report 又收了不是落地 JSON 的輸入：{not_json}"
 
 
 def test_generate_report_body_has_no_spark_actions():
