@@ -62,7 +62,7 @@ changed setting or produced a result with no fingerprint
 that order, which holds every other node applying that setting and
 everything downstream of them. The nodes ``create_pipeline`` builds per run
 (the two reports and the comparison readers) are given the run's order:
-which nodes a run has follows the mode and the section switches (#538), and
+which nodes a run has follows the mode and the section switches, and
 under ``--compare`` with the main report's sections off the main K cut is
 not in it, so the comparison's cut is where a changed ``compare_k`` must go.
 The other readers fall back on :data:`APPLIED_SETTINGS` order, which only
@@ -136,7 +136,7 @@ APPLIED_SETTINGS: dict[str, tuple[str, ...]] = {
     # and population table by it. Unlike model_version it is in no path, so
     # a monitoring redraw of a post-training directory must be refused here.
     #
-    # The category column is read here (#379), its block's other keys are
+    # The category column is read here, its block's other keys are
     # not: switching `enabled` on while `column` is already written sends the
     # re-run to compute_row_facts, which then refuses the table landed empty
     # and names this node — loud, never a wrong report.
@@ -185,8 +185,7 @@ APPLIED_SETTINGS: dict[str, tuple[str, ...]] = {
 }
 
 #: The fingerprinted steps of the comparison chain in topological order, the
-#: only ones ``--compare-only`` runs: the run order of a comparison reader
-#: built for that mode without one. That mode reads partitions an earlier run
+#: only ones ``--compare-only`` runs. That mode reads partitions an earlier run
 #: wrote, so the ``prepare_eval_data`` record its results inherit (through the
 #: directory's ``evaluation_segment_columns``) is compared with nothing: it is
 #: what the partitions were written under, and today's run mode and segment
@@ -409,8 +408,7 @@ def _sha256(values: dict[str, Any]) -> str:
 
 def _stored(payload: Any) -> Optional[dict]:
     """``payload``'s ``config_fingerprint`` when it has :func:`fingerprint`'s
-    shape, else ``None`` (no fingerprint, or one written before results
-    recorded only what they read)."""
+    shape, else ``None`` (no fingerprint, or one of another shape)."""
     stored = payload.get("config_fingerprint") if isinstance(payload, dict) else None
     if not (isinstance(stored, dict) and isinstance(stored.get("node"), str)
             and isinstance(stored.get("applied"), dict)
@@ -475,6 +473,13 @@ def require_computed_with_current_config(
     """
     problems: list[str] = []
     changed: list[str] = []
+    # Pre-check (runtime backstop): create_pipeline fills the run order
+    # before any node runs. Left empty, every inherited record would be
+    # skipped and a stale input would pass.
+    if run_nodes is not None and not run_nodes:
+        raise RuntimeError(
+            "require_computed_with_current_config was given an empty run "
+            "order: create_pipeline did not fill it.")
     in_run = APPLIED_SETTINGS if run_nodes is None else set(run_nodes)
 
     for artifact in artifacts:
@@ -483,8 +488,8 @@ def require_computed_with_current_config(
         if stored is None:
             problems.append(
                 f"  - {name} has no config_fingerprint in the shape this "
-                "version writes: written before results recorded the settings "
-                "they read, or not by this pipeline."
+                "version writes: written by an older version, or not by this "
+                "pipeline."
             )
             changed.append(artifact.produced_by)
             continue

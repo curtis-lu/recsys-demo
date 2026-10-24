@@ -814,7 +814,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 - 在現行指紋格式之前寫的 JSON（#539 之前的也算）沒有這個格式的 `config_fingerprint`，第一次接續會被擋下（訊息寫 `has no config_fingerprint in the shape this version writes`），照訊息重跑一次即可。
 - 錯誤訊息把兩種不合分開列：`settings <node> applied`（這一步自己讀的設定變了）、`settings its input from <node> was computed with`（它讀的某份輸入當時用的設定變了，例如 `baseline_comparison.json` 自己不讀 `k_values`，但它的兩份指標是舊 K 算的）。
 - 指紋只看設定，不看資料。`label_table` 回補、預測重發布這類資料變更，要照下表自己決定重跑。
-- 有幾個會改變結果的設定沒有任何 step 宣告，改了只重畫**不會被擋**：`schema.*`、`dataset.test_zero_positive_group_ratio`、`hive.db`。改它們要自己 full run（追蹤票 #564）。
+- 有幾個會改變結果的設定沒有任何 step 宣告，改了只重畫**不會被擋**：`schema.*`、`dataset.test_zero_positive_group_ratio`、`hive.db`、`_compare_source_tables`（比較對象 B 從哪張表讀）。改它們要自己 full run（追蹤票 #564）。
 
 與上表設定無關、但同樣要決定怎麼重跑的情況：
 

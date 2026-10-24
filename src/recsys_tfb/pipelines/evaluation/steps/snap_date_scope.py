@@ -254,9 +254,10 @@ def restrict_to_current_eval_partitions(
         if current is None:
             raise ValueError(
                 "evaluation_segment_columns (segment_columns.json) has no "
-                "config_fingerprint, so the settings its partitions were "
-                "written under are unknown: written before fingerprints "
-                "existed. Re-run the standard evaluation of these dates."
+                "config_fingerprint in the shape this version writes, so the "
+                "settings its partitions were written under are unknown: "
+                "written by an older version. Re-run the standard evaluation "
+                "of these dates."
             )
     fingerprints = _first_row_per_date(
         df, time_col, dates,

@@ -770,7 +770,7 @@ Layer 1 — config-static (implemented here; aggregated by
   shape: **presence is the failure, whatever the value** — ``enabled: false``
   switches off nothing that still exists, and nothing reads the block, so a
   conf that keeps it gets no word that it does nothing. Unlike A43's keys it
-  no longer moves a fingerprint: no step declares it (#532), so
+  moves no fingerprint: no step declares it (#532), so
   keeping it and deleting it compute the same artifacts; the harm is the
   silence alone. Keys: :data:`RETIRED_DIAGNOSIS_KEYS`. Predicate:
   ``retired_diagnosis_key_errors`` (returns errors; the evaluation command
@@ -3447,8 +3447,8 @@ def retired_diagnosis_key_errors(parameters: dict) -> list[str]:
 
     Same shape as A43 (``retired_calibration_bin_key_errors``): nothing reads
     it, so left in place it switches nothing and says nothing. Unlike A43's
-    keys it moves no fingerprint any more (no step declares it since
-    #532); the silence is the whole harm.
+    keys it moves no fingerprint (no step declares it, #532); the silence
+    is the whole harm.
     """
     present = [
         dotted for dotted in RETIRED_DIAGNOSIS_KEYS

@@ -336,6 +336,26 @@ class TestFingerprintRerunNodes:
             assert [n for n in names if n in main] == \
                 [n for n in main if n in names], label
 
+    def test_a_reader_without_the_run_s_order_still_names_a_node_of_the_run(
+            self):
+        """The main-line readers that check their inputs are plain
+        functions, not given the run's order: for every setting a step of
+        the run applies, and every such step's own name, the declarations'
+        order must still name a node the run has."""
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            APPLIED_SETTINGS, rerun_node,
+        )
+
+        for label, pipeline, kwargs in self._cases():
+            if kwargs.get("compare_only"):
+                continue  # no main line, so no such reader
+            names = {n.name for n in pipeline.nodes}
+            present = names & self.FINGERPRINTED_PRODUCERS
+            for changed in {*present, *(p for n in present
+                                        for p in APPLIED_SETTINGS[n])}:
+                node = rerun_node([changed])
+                assert node in names, f"[{label}] {changed}: {node}"
+
     def test_each_setting_s_re_run_exists_and_re_runs_every_step_applying_it(
             self):
         from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (

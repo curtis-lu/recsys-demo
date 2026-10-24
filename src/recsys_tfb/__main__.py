@@ -408,9 +408,9 @@ def _slice_needs_no_spark(pipe, catalog_config: dict, catalog, from_node,
     than being asked, since asking a Hive table would start Spark. Such an
     entry pulls its producer into the probed slice, and the answer is no.
     So a yes holds for the run's own slice: the file entries answer the
-    same, and nothing else is in it. A node with no input of that kind and
-    no output of that kind either (``load_compare_predictions`` reads
-    ``parameters`` and makes a frame) is caught by its output.
+    same, and nothing else is in it. Outputs are checked too: a node that
+    reads only ``parameters`` and makes a Spark frame needs Spark as much
+    as one that reads a table.
 
     No slicing flag, no redraw: a full run computes.
     """

@@ -1012,6 +1012,8 @@ class TestComputeBaselineMetrics:
         }
         assert result["config_fingerprint"]["applied"] == fingerprint(
             self._parameters(), "compute_baseline_metrics")["applied"]
+        assert set(result["config_fingerprint"]["inputs"]) == {
+            "prepare_eval_data", "compute_row_facts"}
         assert "A" in result["per_item"]
         # purchase_counts comes from _label_table fixture (snap=2024-06-30
         # falls inside the [2024-01-31, 2025-01-31) lookback window for the
@@ -1537,6 +1539,8 @@ class TestComputeRowFacts:
         assert facts["segments"] == {"joined": [], "sources": {}, "missing": {}}
         assert facts["config_fingerprint"]["applied"] == fingerprint(
             params, "compute_row_facts")["applied"]
+        assert set(facts["config_fingerprint"]["inputs"]) == {
+            "prepare_eval_data"}
 
 
 class TestComputePredictionQuality:
@@ -1605,6 +1609,8 @@ class TestComputePredictionQuality:
         assert result["per_item"]["n_items"] == 3
         assert result["config_fingerprint"]["applied"] == fingerprint(
             params, "compute_prediction_quality")["applied"]
+        assert set(result["config_fingerprint"]["inputs"]) == {
+            "prepare_eval_data"}
 
     def test_lands_the_display_bins_and_the_sweep_the_report_draws(
             self, spark):
@@ -1850,6 +1856,8 @@ class TestConsumersSegmentByTheLandedList:
             self._parameters(), "compute_row_facts")["applied"]
         assert result["config_fingerprint"]["applied"] == fingerprint(
             self._parameters(), "compute_metrics")["applied"]
+        assert set(result["config_fingerprint"]["inputs"]) == {
+            "prepare_eval_data", "compute_row_facts"}
 
     def test_compute_baseline_metrics(self, spark):
         from recsys_tfb.pipelines.evaluation.nodes import (
@@ -1956,6 +1964,8 @@ class TestConsumersSegmentByTheLandedList:
         for result in landed:
             assert result["config_fingerprint"]["applied"] == fingerprint(
                 params, "compute_compare_metrics")["applied"]
+            assert set(result["config_fingerprint"]["inputs"]) == {
+                "prepare_eval_data"}
             assert result.get("compare_source") == {
                 "kind": "model_version", "model_version": "v0",
                 "source": "enriched_eval_predictions"}

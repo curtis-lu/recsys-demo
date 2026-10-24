@@ -10,8 +10,8 @@ def _comparison_nodes(compare_only: bool, run_nodes: list[str]) -> list[Node]:
     compared, K cut, drawn. The mode reaches the nodes whose behaviour
     depends on it through their factories: which settings side A's
     partitions are checked against (``restrict_to_common``), and where a
-    stale input's refusal sends the re-run (the three readers, which also
-    take ``run_nodes``: see :func:`create_pipeline`).
+    stale input's refusal sends the re-run (the readers, through
+    ``run_nodes``: see :func:`create_pipeline`).
 
     Only ``compute_compare_metrics`` runs Spark after the alignment; the
     nodes after it read landed JSON, so ``--only-node
@@ -60,7 +60,7 @@ def _comparison_nodes(compare_only: bool, run_nodes: list[str]) -> list[Node]:
                      "compare_row_facts_b", "compare_metrics_b"],
         ),
         Node(
-            make_compare_to_source_node(compare_only, run_nodes),
+            make_compare_to_source_node(run_nodes),
             inputs={
                 "compare_metrics_a": "compare_metrics_a",
                 "compare_metrics_b": "compare_metrics_b",
@@ -69,7 +69,7 @@ def _comparison_nodes(compare_only: bool, run_nodes: list[str]) -> list[Node]:
             outputs="source_comparison",
         ),
         Node(
-            make_resolve_comparison_display_ks_node(compare_only, run_nodes),
+            make_resolve_comparison_display_ks_node(run_nodes),
             inputs={
                 "source_comparison": "source_comparison",
                 "parameters": "parameters",
@@ -79,7 +79,7 @@ def _comparison_nodes(compare_only: bool, run_nodes: list[str]) -> list[Node]:
         # By name (ADR-0030 decision 8), like generate_report: every
         # parameter is named after the entry it reads.
         Node(
-            make_generate_comparison_report_node(compare_only, run_nodes),
+            make_generate_comparison_report_node(run_nodes),
             inputs={
                 "compare_coverage": "compare_coverage",
                 "compare_row_facts_a": "compare_row_facts_a",

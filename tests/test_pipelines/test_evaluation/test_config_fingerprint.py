@@ -284,7 +284,21 @@ def test_a_key_set_since_is_a_change(path):
     paths too: otherwise setting one would compare nothing."""
     absent = _delete(_params(), path)
     present = _set(copy.deepcopy(absent), path, "x")
-    assert _stale(_main_report(absent), present)
+    artifacts = _main_report(absent)
+    assert _stale(artifacts, present) == _EVERY_RESULT
+    msg = _refusal(artifacts, present)
+    assert f"{path}: <absent> -> 'x'" in msg
+    assert "--from-node prepare_eval_data," in msg
+
+
+def test_an_empty_run_order_is_refused_not_skipped():
+    """Left unfilled, the run order would skip every inherited record and
+    pass a stale input."""
+    old = _params()
+    with pytest.raises(RuntimeError, match="empty run order"):
+        require_computed_with_current_config(
+            _main_report(old), _changed(old, "evaluation.k_values"),
+            run_nodes=[])
 
 
 # ------------------------------------------- the two parts, reported apart

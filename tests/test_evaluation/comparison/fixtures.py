@@ -181,9 +181,9 @@ def inputs(this: dict, reference: dict, p: dict, *, cov: dict | None = None,
         make_resolve_comparison_display_ks_node,
     )
 
-    comparison = make_compare_to_source_node(compare_only=False)(
+    comparison = make_compare_to_source_node()(
         landed(this, p), landed(reference, p), p)
-    cut = make_resolve_comparison_display_ks_node(compare_only=False)(
+    cut = make_resolve_comparison_display_ks_node()(
         comparison, p)
     if facts is None:
         n_cat = (len(this["category"]["per_item"]) if this.get("category")

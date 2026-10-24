@@ -99,7 +99,6 @@ from recsys_tfb.pipelines.evaluation.steps.compare_universe import (
     trim_to_common_universe,
 )
 from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
-    COMPARISON_CHAIN,
     LoadedArtifact,
     fingerprint,
     require_computed_with_current_config,
@@ -153,7 +152,7 @@ def _require_prepared_with_current_config(
     Hive, so a re-run starting after ``prepare_eval_data`` could never make it
     current again.
 
-    It no longer stands for the partitions themselves (#374): one date's
+    It does not stand for the partitions themselves: one date's
     partition is also written by runs over other dates, whose JSON lands in
     another directory. Each partition carries its own fingerprint, checked by
     ``restrict_to_current_eval_partitions``.
@@ -1720,17 +1719,6 @@ restrict_to_common = make_restrict_to_common_node(compare_only=False)
 #: ``test_pipeline.py::TestTheComparisonReRunsOnItsOwn`` pins both.
 COMPARISON_RERUN_NODE = "compute_compare_metrics"
 
-def _comparison_run_nodes(
-    compare_only: bool, run_nodes: Optional[Sequence[str]],
-) -> Optional[Sequence[str]]:
-    """The run order a comparison reader chooses a re-run from: the one
-    ``create_pipeline`` gave it, else, built for ``--compare-only``, that
-    mode's chain."""
-    if run_nodes is not None:
-        return run_nodes
-    return COMPARISON_CHAIN if compare_only else None
-
-
 def _require_comparison_inputs_current(
     artifacts: list[LoadedArtifact], parameters: dict,
     run_nodes: Optional[Sequence[str]],
@@ -1852,15 +1840,12 @@ def compute_compare_metrics(
     return row_facts_a, metrics_a, row_facts_b, metrics_b
 
 
-def make_compare_to_source_node(
-    compare_only: bool, run_nodes: Optional[Sequence[str]] = None,
-):
-    """Build ``compare_to_source`` for ``--compare`` or ``--compare-only``:
-    the mode, and ``run_nodes`` (the run's nodes in topological order,
-    filled by ``create_pipeline``), decide only where its pre-check sends a
-    re-run (``_require_comparison_inputs_current``)."""
-    run_nodes = _comparison_run_nodes(compare_only, run_nodes)
-
+def make_compare_to_source_node(run_nodes: Optional[Sequence[str]] = None):
+    """Build ``compare_to_source`` for one run: ``run_nodes`` (the run's
+    nodes in topological order, filled by ``create_pipeline``) decides only
+    where its pre-check sends a re-run, and which inherited records it
+    compares (``_require_comparison_inputs_current``). Built without one, it
+    uses the declarations' order and compares every record."""
     def compare_to_source(
         compare_metrics_a: dict,
         compare_metrics_b: dict,
@@ -1917,13 +1902,10 @@ def make_compare_to_source_node(
 
 
 def make_resolve_comparison_display_ks_node(
-    compare_only: bool, run_nodes: Optional[Sequence[str]] = None,
+    run_nodes: Optional[Sequence[str]] = None,
 ):
-    """Build ``resolve_comparison_display_ks`` for ``--compare`` or
-    ``--compare-only``; the mode and ``run_nodes`` decide only where its
-    pre-check sends a re-run (``make_compare_to_source_node``)."""
-    run_nodes = _comparison_run_nodes(compare_only, run_nodes)
-
+    """Build ``resolve_comparison_display_ks`` for one run; ``run_nodes`` as
+    for ``make_compare_to_source_node``."""
     def resolve_comparison_display_ks(
         source_comparison: dict,
         parameters: dict,
@@ -1980,13 +1962,10 @@ def make_resolve_comparison_display_ks_node(
 
 
 def make_generate_comparison_report_node(
-    compare_only: bool, run_nodes: Optional[Sequence[str]] = None,
+    run_nodes: Optional[Sequence[str]] = None,
 ):
-    """Build ``generate_comparison_report`` for ``--compare`` or
-    ``--compare-only``; the mode and ``run_nodes`` decide only where its
-    pre-check sends a re-run (``make_compare_to_source_node``)."""
-    run_nodes = _comparison_run_nodes(compare_only, run_nodes)
-
+    """Build ``generate_comparison_report`` for one run; ``run_nodes`` as
+    for ``make_compare_to_source_node``."""
     def generate_comparison_report(
         compare_coverage: dict,
         compare_row_facts_a: dict,
