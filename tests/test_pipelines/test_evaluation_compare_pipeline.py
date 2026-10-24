@@ -399,6 +399,9 @@ def test_the_coverage_lands_what_it_was_computed_with(
                        compare_source=_COMPARE_SOURCE)
     _a, _b, coverage = _call_wired(node, **_compare_sides(spark, params, params))
     assert node.outputs[2] == "compare_coverage"
+    # This side's source, as the comparison report prints it (#537), is the
+    # table the node is wired to read this side from.
+    assert coverage["source_a"] == node.inputs[0] == "enriched_eval_predictions"
     assert coverage["n_query_group_common"] == 1
     assert coverage["config_fingerprint"] == fingerprint(params)
     assert coverage["compare_source"] == compare_source_identity(params) == {

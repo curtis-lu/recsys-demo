@@ -332,8 +332,8 @@ evaluation_item_categories:
 
 # compute_row_facts 的輸出（#535，ADR-0031 決定 4）：評估列的事實——資料概況、組數、
 # 全正組數、分群欄，跟分數無關（同分列數跟分數有關，在 metrics.json）。模型與熱門度 baseline
-# 是同一批列，共用這一份：兩個指標 node 從它讀組數與 item 數，主報表的概覽、基本統計、
-# 組數帳也讀它。帶 config_fingerprint。
+# 是同一批列，共用這一份：兩個指標 node 從它讀組數與 item 數，主報表多數段也讀它
+#（看各段檔的 READS）。帶 config_fingerprint。
 evaluation_row_facts:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/row_facts.json
@@ -342,7 +342,7 @@ evaluation_row_facts:
 # compute_metrics／compute_baseline_metrics 的輸出落地：重繪主報表不必重算指標，也留下
 # 機器可讀的指標歷史。兩份是同一套計算（#535 起 baseline 也有 macro），各帶母體帳
 # population（all 解析成幾、進 macro 的 item、算進的組數）與 config_fingerprint，
-# generate_report 讀回時比對，設定變了就擋下；report.sections.baseline: false 時
+# generate_report 讀回時比對，設定變了就擋下；report.sections.popularity_baseline: false 時
 # baseline_metrics 是 {"enabled": false} stub（一樣帶指紋）。
 evaluation_metrics:
   type: JSONDataset
@@ -371,7 +371,7 @@ baseline_comparison:
 # resolve_display_ks 的輸出（#536，ADR-0031 決定 10、16）：主報表每張表顯示哪些 K——
 # 依表的來源（evaluation_metrics、baseline_comparison）各一塊，int K 超過該粒度 all 的
 # 已濾掉（ADR-0020 bug 8）。報表照名字讀，不自己截斷。設定指紋多帶它讀的 display 鍵
-# （report.display.primary_map_k），所以改了那個鍵只重畫會被擋下、建議
+# （report.display.compare_k），所以改了那個鍵只重畫會被擋下、建議
 # --from-node resolve_display_ks。
 evaluation_display_ks:
   type: JSONDataset
@@ -390,7 +390,8 @@ compare_coverage:
   filepath: data/evaluation/${model_version}/${snap_date}/compare_coverage.json
 
 # compute_compare_metrics 的四個輸出：這次的模型（A′）與比較對象（B′）在共同母體上
-# 各自的列的事實與指標（各帶母體帳）。A′ 依 evaluation_segment_columns 分群，B′ 不分群。
+# 各自的列的事實與指標（各帶母體帳）。兩側都依 evaluation_segment_columns 分群：B′ 借 A′
+# 那幾欄的值（照 query group 接上，分群欄是 entity 的屬性，跟誰打分無關；#537）。
 compare_row_facts_a:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/compare_row_facts_a.json
@@ -414,13 +415,13 @@ source_comparison:
   filepath: data/evaluation/${model_version}/${snap_date}/source_comparison.json
 
 # resolve_comparison_display_ks 的輸出：比較報表每張表顯示哪些 K 與哪些列。指紋多帶
-# 它讀的 display 鍵（guardrail_recall_k、primary_map_k），改了只重畫會被擋下、建議
+# 它讀的 display 鍵（compare_k），改了只重畫會被擋下、建議
 # --from-node resolve_comparison_display_ks。
 comparison_display_ks:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/comparison_display_ks.json
 
-# 主報表 per-item 細部拆解段的 Spark 聚合（Plan 1.5 從 generate_report 拆出）。
+# 主報表名次分布段的 Spark 聚合（Plan 1.5 從 generate_report 拆出）。
 # 落地的理由不只是快取：generate_report 因此是純函式。它的輸入除了 parameters 都是
 # 落地 JSON（本條、evaluation_row_facts、evaluation_metrics、baseline_metrics、
 # prediction_quality_metrics、baseline_comparison、evaluation_display_ks），

@@ -1,159 +1,64 @@
-"""概覽: what the report answers, its scale, the headline numbers and where
-to look for the rest."""
+"""概覽: the metrics training's HPO selects a model by, side by side, each
+at K = all (ADR-0031 decision 16 item 1)."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 
-import pandas as pd
-
-from recsys_tfb.core.schema import get_schema
-from recsys_tfb.evaluation.metric_catalog import ITEM, QUERY_GROUP, entry
+from recsys_tfb.evaluation.metric_catalog import MODEL_SELECTION_METRICS
 from recsys_tfb.evaluation.report import ReportSection
-from recsys_tfb.evaluation.report_sections.shared import (
-    DISPLAY_KS,
-    headline_column,
-    k_to_lookup,
-    landed_value,
-    prediction_quality_shown,
-    query_count_rows,
-    read_dataset_overview,
+from recsys_tfb.evaluation.report_sections.metric_tables import (
+    definitions,
+    model_selection_table,
 )
-from recsys_tfb.evaluation.result_readers import (
-    DISPLAY_PRIMARY_MAP_K,
-    metric_params,
-    resolved_all_k,
+from recsys_tfb.evaluation.result_readers import macro_item_count
+from recsys_tfb.report.types import Note, Paragraph
+
+#: The results this section reads, by catalog name (ADR-0031 principle 1).
+READS = ("evaluation_metrics",)
+
+#: The heading, its English and the question the section answers; the
+#: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
+#: decision 16).
+TITLE = "概覽"
+TITLE_EN = "Overview"
+QUESTION = "模型選擇指標各是多少？"
+
+#: What the section says above its table. It does not count the metrics:
+#: the catalog lists two today (``MODEL_SELECTION_METRICS``), and the two
+#: binary-prediction ones join it later (``MODEL_SELECTION_PENDING``), when
+#: this sentence gains theirs.
+DESCRIPTION = (
+    "training 調參（HPO）與挑模型時能選的指標，並列、不分主次；它們都只看"
+    "同一個 query group 裡的先後。"
 )
-
-#: The results this section reads, by catalog name (ADR-0031 principle 1);
-#: the K of its overall card off the cut (#536).
-READS = ("evaluation_row_facts", "evaluation_metrics",
-         "prediction_quality_metrics", DISPLAY_KS)
-
-
-def _headline_key(parameters: dict, all_k: int) -> str:
-    """The ``macro_avg["by_item"]`` key the headline macro per-item mAP is read at.
-
-    ``map_attr@{evaluation.metric.k}``, or ``@all`` (looked up at ``all_k``)
-    when ``metric.k`` is unset. ``metrics_spark._resolve_k_grids`` puts that
-    K into the per-item grid whether or not ``k_values`` lists it, so the
-    key is computed; its value is ``None`` when no item enters the macro
-    (e.g. ``metric.min_positives`` above every item's count).
-    """
-    mk = metric_params(parameters)["k"]
-    return entry("map_attr", ITEM).key(
-        k_to_lookup("all" if mk is None else mk, all_k))
 
 
 def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
-    """概覽（定向）：這份報表回答什麼、規模／分母、關鍵數、往哪找。
+    """概覽：模型選擇指標表（每個指標一列，值是 K＝全部的那一格）與它們的定義。
 
-    The navigation table gains the prediction-quality row only when that
-    section is on the page (``shared.prediction_quality_shown``), so the row
-    never points at a section the report left out. That is why this section
-    reads ``prediction_quality_metrics``; ADR-0031 decision 9 drops the
-    navigation table, and the read with it.
-
-    presentation §一.1：規模／歸一化分母與嚴重度訊號分開標——分母混進關鍵數
-    表會被讀成好壞。頭號指標＝macro per-item mAP（item 等權）；overall
-    per-query mAP 並列為「另一種加權」，不宣稱哪個才對（不變量 4）。
+    No headline, no ranking among them (decision 16 item 1): each row is the
+    value the metrics computed — ``map@{all_k}`` of ``overall`` and
+    ``map_attr@{all_k}`` of ``macro_avg.by_item`` — read by
+    ``metric_tables.model_selection_table``, so the report holds one number
+    per metric. The page's scale lives in 核心概念's totals; the table of
+    contents replaces the old navigation table.
     """
     metrics = results["evaluation_metrics"]
-    pq_shown = prediction_quality_shown(
-        results["prediction_quality_metrics"], parameters)
-    overall = metrics.get("overall", {})
-    display_ks = results[DISPLAY_KS]
-    # "all" is looked up at the K the metrics stored it at; which K columns
-    # the card shows is the cut's (evaluation_display_ks).
-    all_k = resolved_all_k(metrics)
-    ks = landed_value(display_ks, DISPLAY_KS, "evaluation_metrics",
-                      DISPLAY_PRIMARY_MAP_K)
-
-    tables: list[pd.DataFrame] = []
-    titles: list[str] = []
-
-    # 關鍵指標 1：macro per-item mAP（頭號）——讀 metrics.json 的 macro 列，與
-    # 衡量指標段 B 塊「Macro 平均」同一個數，不另算一份。沒有值（沒有任何
-    # item 進 macro）就不畫這張表：一格空白的頭號表看起來像「算了、結果是空」。
-    macro_item = (metrics.get("macro_avg") or {}).get("by_item") or {}
-    headline = macro_item.get(_headline_key(parameters, all_k))
-    if headline is not None:
-        tables.append(pd.DataFrame(
-            [{"value": headline}], index=["macro per-item mAP"]))
-        titles.append("頭號指標：macro per-item mAP（item 等權）")
-
-    # 關鍵指標 2：overall per-query mAP@k（另一種加權，並列不比高下）
-    overall_map = entry("map", QUERY_GROUP)
-    card = {
-        overall_map.key(k): overall.get(overall_map.key(k_to_lookup(k, all_k)))
-        for k in ks
-    }
-    t_overall = pd.DataFrame([card]).T
-    t_overall.columns = ["value"]
-    tables.append(t_overall)
-    titles.append("overall mAP@k（per-query 等權，另一種加權）")
-
-    # 規模／分母（非好壞，明標與關鍵數分開）
-    # 「每 X 平均正例數」的 X 印使用者自己的 entity 欄，不寫死「客戶」——entity
-    # 是門市時，「每客戶平均」要讀者在腦中翻譯一次才看得懂這個數字在數什麼
-    # （#327）。欄名一律走 core.schema.get_schema，理由同核心概念那一段。
-    facts = results["evaluation_row_facts"]
-    totals = read_dataset_overview(facts).get("totals", {}) or {}
-    entity_str = "×".join(get_schema(parameters)["entity"])
-    # bug 3 (ADR-0020): n_queries is compute_dataset_overview's count of all
-    # queries before filtering, but the old label called it "queries with a
-    # positive" — contradicting the excluded-queries row right below (a
-    # million queries with a positive cannot coexist with 950k excluded).
-    # Fix the label, and add the row the report never gave anywhere:
-    # queries with a positive = n_queries - n_excluded_queries. With
-    # drop_all_positive_groups on, the rows say which groups each count is
-    # (#376, query_count_rows).
-    scale = {
-        **query_count_rows(facts, metrics, parameters),
-        "正例列數 n_positives": totals.get("n_positives"),
-        "母體正樣本率（÷全體候選列）": totals.get("positive_rate"),
-        f"每 {entity_str} 平均正例數 avg_positives_per_entity":
-            totals.get("avg_positives_per_entity"),
-    }
-    t_scale = pd.DataFrame([scale]).T
-    t_scale.columns = ["value"]
-    tables.append(t_scale)
-    titles.append("規模／分母（以下為分母與規模，非好壞）")
-
-    # 導覽：想回答什麼 → 看哪一區（RangeIndex → render 端自動藏流水號）
-    nav = pd.DataFrame({
-        "想回答的問題": [
-            "模型整體排得好不好",
-            "哪些 item／segment 排得弱",
-            "每個 item 的分數與名次分布長怎樣",
-            "跟熱門度（popularity）比如何",
-            "本次量到什麼、沒量到什麼",
-        ],
-        "看哪一區": [
-            "衡量指標",
-            "衡量指標（per-item／per-segment）",
-            "per-item 細部拆解",
-            "baseline",
-            "完整性檢查",
-        ],
-    })
-    if pq_shown:
-        nav.loc[len(nav)] = [
-            "把每一列候選當二元預測：門檻切在哪、precision／recall 多少",
-            "預測品質",
-        ]
-    tables.append(nav)
-    titles.append("導覽：想回答什麼 → 看哪一區")
-
+    blocks = [Paragraph(DESCRIPTION, muted=True), model_selection_table(metrics)]
+    # No item reached the macro (e.g. metric.min_positives above every
+    # item's positives): its row is blank, and a bare blank reads as "computed,
+    # came out empty". Say why, off the ledger's macro items (#536).
+    if macro_item_count(metrics) == 0:
+        blocks += [Note(f"{m.display_name} 沒有值：進 Macro 平均的 item 是 0 個"
+                        "（只算正例數達到 metric.min_positives 的 item）。")
+                   for m in MODEL_SELECTION_METRICS if m.source.grain == "macro"]
+    blocks.append(definitions(MODEL_SELECTION_METRICS))
     return ReportSection(
-        title="概覽",
-        description=(
-            "這份報表幫你判斷這個模型在 per-query 排序上表現如何、好壞落在哪些 "
-            "item／segment、以及相對 popularity baseline 的位置。以下攤開多個粒度"
-            "與角度，判斷留給你。頭號指標為 macro per-item mAP（item 等權；"
-            f"{headline_column(parameters, display_ks, '衡量指標段')}）；overall mAP "
-            "為 per-query 等權，是另一種加權，並列呈現、不比高下。"
-        ),
-        tables=tables,
-        table_titles=titles,
+        title=TITLE,
+        description="",
+        title_en=TITLE_EN,
+        question=QUESTION,
+        key="overview",
+        blocks=blocks,
     )

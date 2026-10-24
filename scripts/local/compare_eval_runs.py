@@ -3,7 +3,8 @@
 Two runs of the same code differ only in run-time noise; anything else is a
 real difference. The noise, and only it, is masked:
 
-* the report's ``Generated At`` cell;
+* the reports' run-time cell: ``產生時間`` on both reports since #537,
+  ``Generated At`` before (still masked, so a run from before #537 compares);
 * the div id of each plotly figure (a fresh uuid4 each run): only the ids
   declared by ``<div id="..." class="plotly-graph-div"``, pinned to their order
   of appearance, so a figure that moved still shows as a difference and a
@@ -40,7 +41,8 @@ SKIPPED = frozenset({"SOURCE"})
 #: The top-level ``manifest.json`` fields that differ between the runs.
 MANIFEST_RUN_FIELDS = ("created_at", "run_id", "git_commit")
 
-_GENERATED_AT = re.compile(r"(<tr><th>Generated At</th><td>)[^<]*(</td></tr>)")
+_GENERATED_AT = re.compile(
+    r"(<tr><th>(?:產生時間|Generated At)</th><td>)[^<]*(</td></tr>)")
 _PLOT_DIV = re.compile(
     r'<div id="([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"'
     r' class="plotly-graph-div"')

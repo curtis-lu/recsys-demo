@@ -87,7 +87,7 @@ python -m recsys_tfb <指令> --env dev
   - `model_version` 類：要寫 `model_version`；`source` 有寫的話只能是 `enriched_eval_predictions`、`ranked_predictions`、`training_eval_predictions`；不能寫 `columns`、`prod_mapping`。
   - `external_hive` 類：要寫 `table`、`prod_mapping`，以及 `columns`：time、每一個 entity 欄、item、score 各要對到外部表的一欄。`unmapped_policy` 只能是 `fail` 或 `drop`，沒寫就是 `fail`。
 - **evaluation 的數值**（`A15`；`A19` 已退休，代號不重編）：
-  - `evaluation.metric.weight_alpha` 在 0 到 1 之間；`evaluation.metric.k` 是 `null` 或大於等於 1 的整數；`evaluation.metric.min_positives`、`evaluation.metric.shrinkage_k` 不能是負數。
+  - `evaluation.metric.weight_alpha` 在 0 到 1 之間；`evaluation.metric.min_positives`、`evaluation.metric.shrinkage_k` 不能是負數。
 - **`evaluation.product_categories`**：已經改名成 `evaluation.item_categories`，還寫舊名就擋（`A33`）。
 
 ### 只在某個指令查
@@ -107,16 +107,18 @@ python -m recsys_tfb <指令> --env dev
   - `catalog.yaml` 不能宣告候選層級特徵表（`A47`）。推論只讀 `feature_table`，而這種設定下訓練的模型需要候選層級表的欄；不擋的話，推論會在啟動 Spark、讀完母體之後才以 `Missing feature columns` 失敗，訊息也不說原因。只宣告 `occasion`、`event` 而沒有候選層級特徵表時照跑。inference 的每一種跑法都查，包含 `--dry-run`、`--list-nodes`。
 - **evaluation**
   - 帶 `--post-training` 時，`evaluation.snap_date` 一定要寫，而且必須在 `dataset.test_snap_dates` 裡（`A22`）。
-  - `evaluation.report.sections` 有寫任何開關的話，開關名稱必須剛好是 `dataset_overview`、`primary_map`、`per_item_breakdown`、`baseline`、`prediction_quality`，多一個或少一個都擋，每個值也必須是不加引號的 true／false，字串 `"false"` 會被擋（`A34`）。舊名 `diagnostics` 與 `diagnosis_links` 同樣在這裡被擋。
+  - `evaluation.report.sections` 有寫任何開關的話，開關名稱必須剛好是 `data_stats`、`ranking_metrics`、`rank_distribution`、`popularity_baseline`、`prediction_quality`（開關名就是該段在 `src/recsys_tfb/evaluation/report_sections/` 底下的檔名），多一個或少一個都擋，每個值也必須是不加引號的 true／false，字串 `"false"` 會被擋（`A34`）。舊名 `diagnostics` 與 `diagnosis_links` 同樣在這裡被擋。#537 把四個開關改名（`dataset_overview`→`data_stats`、`primary_map`→`ranking_metrics`、`per_item_breakdown`→`rank_distribution`、`baseline`→`popularity_baseline`），conf 還寫著舊名時，訊息直接說新名；這一段是過渡期檢查，等部署環境的 conf 都改完就拿掉，擋未知開關的規則不變。
   - `evaluation.prediction_quality` 的 `n_bins`、`n_display_bins` 是大於等於 1 的整數，而且後者要整除前者；`top_n` 是大於等於 0 的整數；這個區塊裡不能有別的鍵（`A42`）。不擋的話，分箱表最後一格會比其他格窄，而報表不會提；寫 `enabled: true` 也打不開這一段，開關在 `report.sections.prediction_quality`。
   - `evaluation.report.diagnostics` 底下不能再寫 `include_calibration`、`n_calibration_bins`，不論值是什麼（`A43`）。它們設定的 calibration 分箱表 #381 已經移除，留著不會有任何作用；分數分箱改由預測品質指標家族提供。
+  - `evaluation.report.display.compare_k` 有寫的話，必須是非空的 list，每項是正整數或 `"all"`，而且每個整數都要列在 `evaluation.k_values` 裡（`A62`；`k_values` 沒寫時，對照框架預設的那一份）。`"all"` 一定會算，不用列。不擋的話，列了 `k_values` 沒有的 K，所有用 `compare_k` 的表（熱門度基準段、比較報表的各 item 與大類表）那一欄會永遠空著，沒有任何錯誤；寫成單一值（例如 `compare_k: 3`）則要到所有 Spark 節點都跑完、`resolve_display_ks` 才失敗，訊息也看不出是哪個鍵。
+  - `evaluation.metric.k`、`evaluation.report.display.guardrail_recall_k`、`evaluation.report.display.primary_map_k` 這三個鍵不能再寫，不論值是什麼，`k: null` 也擋（`A63`）。三個都是 #537 拿掉或改名的：`metric.k` 刪掉即可（overall `map@all` 與 macro `map_attr@all` 一定會算，沒有截斷深度可設）；`guardrail_recall_k` 刪掉即可（比較報表的 recall 表改用 `compare_k`）；`primary_map_k` 改名為 `compare_k`。這一條是過渡期檢查，等部署環境的 conf 都改完就拿掉。
   - `evaluation.diagnosis` 這個區塊不能寫，不論裡面是什麼，`enabled: false` 或空的區塊也擋（`A61`）。診斷頁整批拿掉了（#532），沒有程式讀這一段，刪掉整段即可，沒有替代的設定鍵。
   - 帶 `--post-training` 又打開 `evaluation.report.sections.prediction_quality` 時，`dataset.test_zero_positive_group_ratio` 必須大於 0（`A46`）。r 為 0（預設）的 test 表已經丟掉所有沒有正例的 query group，把每一列當二元預測的指標會系統性偏高。監控模式不查。
   - `evaluation.query_filter.drop_all_positive_groups` 有寫的話必須是 `true`／`false`；這個區塊裡不能有別的鍵（`A49`）。唯一的讀法（`evaluation/metrics.py::drop_all_positive_groups`）只用真假值判斷，寫錯值或鍵名不會報錯，只會悄悄不生效。
   - `evaluation.baseline.score` 有寫的話必須是 `count` 或 `rate`；`evaluation.baseline` 底下只能有 `lookback_months`、`score` 兩個鍵（`A50`）。唯一的讀法（`evaluation/baselines.py::baseline_score`）遇到不認得的值或鍵名不會報錯，只會悄悄維持正例數。
   - `evaluation.item_categories.column` 有寫的話：不能和 `evaluation.item_categories.mapping` 同時寫（`mapping: null` 算沒寫，env 覆蓋層可以用它關掉 base 的 mapping）、必須是欄名字串；`enabled` 打開時，`evaluation.item_categories.unmapped` 有寫的話只能是 `singleton`，而且只能配 `--post-training`（`A51`）。大類從 `sample_pool` 那一欄讀，監控模式的母體是 `inference_population`，沒有這一欄；只下 `--compare-only`、沒加 `--post-training` 也算監控模式。
   - `--compare` 和 `--compare-only` 只能給一個；給的名稱必須是 `evaluation.compare_sources` 裡的鍵（`A12`、`A13`）。
-  - `--rebuild-dates` 只在正例率基準線接上時能用：`evaluation.baseline.score: rate`、`report.sections.baseline` 開著、帶 `--post-training`、不是 `--compare-only`。每個日期要寫成 `YYYY-MM-DD`，而且要落在某個評估日期的回看窗 `[S - lookback_months, S)` 裡（`A21`）。
+  - `--rebuild-dates` 只在正例率基準線接上時能用：`evaluation.baseline.score: rate`、`report.sections.popularity_baseline` 開著、帶 `--post-training`、不是 `--compare-only`。每個日期要寫成 `YYYY-MM-DD`，而且要落在某個評估日期的回看窗 `[S - lookback_months, S)` 裡（`A21`）。
 - **dataset、training、inference**
   - `--rebuild-dates` 的每個日期要寫成 `YYYY-MM-DD`，而且要在設定的月份清單裡：dataset 和 training 對照 `dataset.test_snap_dates`，inference 對照 `inference.snap_dates`（`A21`）。
 

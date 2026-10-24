@@ -781,7 +781,7 @@ class TestMetricParamsA15:
     def test_valid_defaults_are_clean(self):
         from recsys_tfb.core.consistency import evaluation_metric_param_errors
         p = self._params(
-            metric={"weight_alpha": 0.0, "k": None, "min_positives": 0,
+            metric={"weight_alpha": 0.0, "min_positives": 0,
                     "shrinkage_k": 0},
         )
         assert evaluation_metric_param_errors(p) == []
@@ -789,18 +789,25 @@ class TestMetricParamsA15:
     def test_each_bad_value_reports(self):
         from recsys_tfb.core.consistency import evaluation_metric_param_errors
         p = self._params(
-            metric={"weight_alpha": 1.5, "k": 0, "min_positives": -1,
+            metric={"weight_alpha": 1.5, "min_positives": -1,
                     "shrinkage_k": -0.1},
         )
         errors = evaluation_metric_param_errors(p)
         joined = "\n".join(errors)
         # Token check first: if a predicate is dropped, the failure message
         # then names *which* key stopped being validated, instead of only
-        # reporting a count that went from 4 to 3.
-        for token in ["weight_alpha", "metric.k", "min_positives",
-                      "shrinkage_k"]:
+        # reporting a count that went from 3 to 2.
+        for token in ["weight_alpha", "min_positives", "shrinkage_k"]:
             assert token in joined, f"{token} is no longer validated"
-        assert len(errors) == 4
+        assert len(errors) == 3
+
+    def test_metric_k_is_a63s_not_a15s(self):
+        """#537 removed ``evaluation.metric.k``: A63 refuses the key whatever
+        it holds, at the evaluation command. A15 judging its value would
+        answer a key nothing reads with advice to fix the value."""
+        from recsys_tfb.core.consistency import evaluation_metric_param_errors
+        assert evaluation_metric_param_errors(
+            self._params(metric={"k": 0})) == []
 
     def test_wired_into_validate(self):
         import pytest as _pytest
@@ -2673,6 +2680,7 @@ class TestDatasetSourceQualityChecksA32:
 from recsys_tfb.core import consistency as _consistency_module
 from recsys_tfb.core.consistency import (
     EVALUATION_REPORT_SECTIONS,
+    RENAMED_REPORT_SECTIONS,
     report_section_key_errors,
 )
 
@@ -2726,24 +2734,60 @@ class TestReportSectionKeysA34:
 
     def test_a_block_declaring_some_switches_is_checked_in_full(self):
         errors = report_section_key_errors(
-            _sections_params({"baseline": True}))
+            _sections_params({"popularity_baseline": True}))
         assert len(errors) == 1
         assert "does not declare" in errors[0]
-        assert "'per_item_breakdown'" in errors[0]
+        assert "'rank_distribution'" in errors[0]
 
     def test_a_conf_written_before_532_is_refused_naming_each_key(self):
         """#532 removed ``diagnosis_links`` with the diagnosis pages and
-        renamed ``diagnostics`` to ``per_item_breakdown``. A34's equality is
-        the whole check for both: the old names are declared and not read,
-        the new name is read and not declared."""
+        renamed ``diagnostics`` to ``per_item_breakdown``, which #537 renamed
+        again (``rank_distribution``). #532's rename has no message of its
+        own: the old name is declared and not read, the new one read and not
+        declared. #537's three that this conf spells are named with their new
+        names, and not reported a second time as missing."""
         old = {"dataset_overview": True, "primary_map": True,
                "diagnostics": True, "baseline": True,
                "diagnosis_links": True, "prediction_quality": False}
         errors = report_section_key_errors(_sections_params(old))
-        assert len(errors) == 2
-        unread, undeclared = errors
+        assert len(errors) == 3
+        renamed, unread, undeclared = errors
+        assert "`baseline` is now `popularity_baseline`" in renamed
         assert "declares ['diagnosis_links', 'diagnostics']" in unread
-        assert "does not declare ['per_item_breakdown']" in undeclared
+        assert "does not declare ['rank_distribution']" in undeclared
+
+    def test_a_conf_written_before_537_is_told_each_new_name(self):
+        """#537 renamed four switches after the section files. A conf that
+        still spells them gets one message naming each new name — not the
+        old names as "never read" and the new ones as "not declared", which
+        leaves the reader to pair them up."""
+        before = {"dataset_overview": True, "primary_map": True,
+                  "per_item_breakdown": False, "baseline": True,
+                  "prediction_quality": False}
+        errors = report_section_key_errors(_sections_params(before))
+        assert len(errors) == 1, errors
+        assert errors[0].startswith("A34:")
+        for old, new in RENAMED_REPORT_SECTIONS.items():
+            assert f"`{old}` is now `{new}`" in errors[0], old
+        assert "never reads" not in errors[0]
+        assert "does not declare" not in errors[0]
+
+    def test_the_rename_table_maps_old_names_onto_read_ones(self):
+        assert RENAMED_REPORT_SECTIONS == {
+            "dataset_overview": "data_stats",
+            "primary_map": "ranking_metrics",
+            "per_item_breakdown": "rank_distribution",
+            "baseline": "popularity_baseline",
+        }
+        assert set(RENAMED_REPORT_SECTIONS.values()) <= EVALUATION_REPORT_SECTIONS
+        assert not set(RENAMED_REPORT_SECTIONS) & EVALUATION_REPORT_SECTIONS
+
+    def test_an_old_name_beside_its_new_one_is_still_refused(self):
+        sections = {name: True for name in EVALUATION_REPORT_SECTIONS}
+        sections["baseline"] = False
+        errors = report_section_key_errors(_sections_params(sections))
+        assert len(errors) == 1
+        assert "`baseline` is now `popularity_baseline`" in errors[0]
 
     @pytest.mark.parametrize("value", ["false", "true", 0, 1, "false`", None],
                              ids=["str-false", "str-true", "int-0", "int-1",
@@ -2809,7 +2853,8 @@ class TestReportSectionKeysA34:
         assert "True" in errors[0] and "'per_segment'" in errors[0]
 
     def test_a_block_that_is_not_a_mapping_is_reported(self):
-        errors = report_section_key_errors(_sections_params(["baseline"]))
+        errors = report_section_key_errors(
+            _sections_params(["popularity_baseline"]))
         assert len(errors) == 1
         assert errors[0].startswith("A34: evaluation.report.sections")
 
@@ -3016,6 +3061,165 @@ class TestRetiredDiagnosisKeyA61:
 
     def test_the_constant_names_the_block(self):
         assert RETIRED_DIAGNOSIS_KEYS == ("evaluation.diagnosis",)
+
+
+# --- A62: evaluation.report.display.compare_k is a K list the run computes ---
+
+from recsys_tfb.core.consistency import (  # noqa: E402
+    EVALUATION_K_VALUES_DEFAULT,
+    compare_k_errors,
+)
+
+
+def _compare_k_params(compare_k, k_values=None):
+    ev = {"report": {"display": {"compare_k": compare_k}}}
+    if k_values is not None:
+        ev["k_values"] = k_values
+    return {"evaluation": ev}
+
+
+class TestCompareKA62:
+    """A62 (#366 item 2) — ``compare_k`` is a non-empty list of positive ints
+    or ``"all"``, and every int is a K ``evaluation.k_values`` computes. A K
+    outside ``k_values`` is in no result, so its column would be empty in
+    every table that draws ``compare_k``."""
+
+    def test_unwritten_is_clean(self):
+        assert compare_k_errors({}) == []
+        assert compare_k_errors({"evaluation": {"report": {"display": {}}}}) == []
+
+    def test_a_list_of_computed_ks_is_clean(self):
+        assert compare_k_errors(
+            _compare_k_params([1, 3, "all"], [1, 2, 3, "all"])) == []
+        # "all" is always computed, whatever k_values lists.
+        assert compare_k_errors(_compare_k_params(["all"], [1, 2])) == []
+
+    @pytest.mark.parametrize("value", [3, "all", None, {"k": 3}],
+                             ids=["int", "str", "null", "mapping"])
+    def test_a_value_that_is_not_a_list_is_refused(self, value):
+        errors = compare_k_errors(_compare_k_params(value, [1, 3, "all"]))
+        assert len(errors) == 1
+        assert errors[0].startswith("A62:")
+        assert "must be a non-empty list" in errors[0]
+
+    def test_an_empty_list_is_refused(self):
+        errors = compare_k_errors(_compare_k_params([], [1, 3, "all"]))
+        assert len(errors) == 1
+        assert "must be a non-empty list" in errors[0]
+
+    @pytest.mark.parametrize("bad", ["top3", 0, -1, True, 2.0],
+                             ids=["str", "zero", "negative", "bool", "float"])
+    def test_an_entry_that_is_neither_a_positive_int_nor_all_is_refused(
+            self, bad):
+        errors = compare_k_errors(_compare_k_params([1, bad], [1, 2, "all"]))
+        assert len(errors) == 1
+        assert errors[0].startswith("A62:")
+        assert repr(bad) in errors[0]
+        assert "positive int or 'all'" in errors[0]
+
+    def test_an_int_k_values_does_not_compute_is_refused(self):
+        errors = compare_k_errors(_compare_k_params([1, 7, "all"], [1, 3, "all"]))
+        assert len(errors) == 1
+        assert errors[0].startswith("A62:")
+        assert "[7]" in errors[0]
+        assert "evaluation.k_values" in errors[0]
+
+    def test_unwritten_k_values_is_checked_against_its_default(self):
+        """Absent ``k_values`` computes the default the metric layer applies
+        (``metrics_spark._resolve_k_grids`` reads the same constant)."""
+        assert EVALUATION_K_VALUES_DEFAULT == (5, "all")
+        assert compare_k_errors(_compare_k_params([5, "all"])) == []
+        errors = compare_k_errors(_compare_k_params([1, 5]))
+        assert len(errors) == 1 and "[1]" in errors[0]
+
+    def test_the_shipped_confs_pass(self):
+        from pathlib import Path
+
+        from recsys_tfb.core.config import ConfigLoader
+
+        root = Path(__file__).resolve().parents[2]
+        for conf in (root / "conf", root / "examples" / "ad" / "conf"):
+            params = ConfigLoader(str(conf), env="local").get_parameters()
+            assert "compare_k" in params["evaluation"]["report"]["display"], conf
+            assert compare_k_errors(params) == [], conf
+
+    def test_not_aggregated_by_validate_config_consistency(self):
+        """Evaluation-only key, A34's reason (issue #158)."""
+        p = _base({"inference": {"products": ["a", "b"]}})
+        p["evaluation"] = {"report": {"display": {"compare_k": ["top3"]}}}
+        assert compare_k_errors(p), "premise: this conf is bad"
+        validate_config_consistency(p)
+
+
+# --- A63: the K keys #537 removed or renamed ---------------------------------
+
+from recsys_tfb.core.consistency import (  # noqa: E402
+    RETIRED_K_KEYS,
+    retired_k_key_errors,
+)
+
+
+class TestRetiredKKeysA63:
+    """A63 — a conf still spelling ``evaluation.metric.k``,
+    ``evaluation.report.display.guardrail_recall_k`` or
+    ``evaluation.report.display.primary_map_k`` (#537). Presence is the
+    failure, whatever the value (A43's shape)."""
+
+    @pytest.mark.parametrize("value", [None, 3], ids=["null", "int"])
+    def test_metric_k_is_refused_whatever_its_value(self, value):
+        p = {"evaluation": {"metric": {"weight_alpha": 0.0, "k": value}}}
+        errors = retired_k_key_errors(p)
+        assert len(errors) == 1
+        assert errors[0].startswith("A63:")
+        assert repr("evaluation.metric.k") in errors[0]
+        assert "Delete" in errors[0] and "@all" in errors[0]
+
+    def test_guardrail_recall_k_is_refused_pointing_at_compare_k(self):
+        p = {"evaluation": {"report": {"display": {
+            "guardrail_recall_k": [1, 2]}}}}
+        errors = retired_k_key_errors(p)
+        assert len(errors) == 1
+        assert repr("evaluation.report.display.guardrail_recall_k") in errors[0]
+        assert "Delete" in errors[0] and "compare_k" in errors[0]
+
+    def test_primary_map_k_is_refused_naming_its_new_name(self):
+        p = {"evaluation": {"report": {"display": {
+            "primary_map_k": [1, 3, "all"]}}}}
+        errors = retired_k_key_errors(p)
+        assert len(errors) == 1
+        assert ("'evaluation.report.display.primary_map_k' was renamed to "
+                "'evaluation.report.display.compare_k'") in errors[0]
+
+    def test_each_key_gets_its_own_message(self):
+        p = {"evaluation": {
+            "metric": {"k": None},
+            "report": {"display": {"guardrail_recall_k": [1],
+                                   "primary_map_k": [1]}}}}
+        errors = retired_k_key_errors(p)
+        assert [e.split("'")[1] for e in errors] == list(RETIRED_K_KEYS)
+
+    def test_a_conf_without_them_passes(self):
+        assert retired_k_key_errors({}) == []
+        assert retired_k_key_errors({"evaluation": {
+            "metric": {"weight_alpha": 0.0, "min_positives": 0},
+            "report": {"display": {"compare_k": [1, "all"]}}}}) == []
+
+    def test_the_shipped_confs_do_not_spell_them(self):
+        from pathlib import Path
+
+        from recsys_tfb.core.config import ConfigLoader
+
+        root = Path(__file__).resolve().parents[2]
+        for conf in (root / "conf", root / "examples" / "ad" / "conf"):
+            params = ConfigLoader(str(conf), env="local").get_parameters()
+            assert retired_k_key_errors(params) == [], conf
+
+    def test_not_aggregated_by_validate_config_consistency(self):
+        """Evaluation-only keys, A34's reason (issue #158)."""
+        p = _base({"inference": {"products": ["a", "b"]}})
+        p["evaluation"] = {"metric": {"k": 3}}
+        assert retired_k_key_errors(p), "premise: this conf is bad"
+        validate_config_consistency(p)
 
 
 # --- A33: migration-period check for the #327 config key rename --------------

@@ -681,11 +681,26 @@ PR 怎麼切、先後怎麼排，擁有者決定另用 `/to-spec`、`/to-tickets
 - training 算這兩個 AP 時，每一列都要帶 `ZERO_POSITIVE_GROUP_WEIGHT_COL` 這欄權重（`metrics_spark._binary_prediction_rows`）。evaluation 的列要不要帶、權重怎麼給，#541 開工時定。
 - 表格工具的 JavaScript 已經寫在 demo 頁面裡，#537 可以直接拿來改。
 
+**#537 怎麼定的（2026-10-24）。** 上面這幾項，連同決定 10 更正最後留給 #537 的幾件：
+
+- **`evaluation.metric.k` 拿掉**（擁有者 2026-10-23）。query group 與 item 兩條 K 軸都改成 `k_values` 解析後再加上「全部」（`metrics_spark._resolve_k_grids`）。所以第 1 項要的「兩個模型選擇指標一定算到全部」不靠 `metric.k`，也不看 `k_values` 有沒有列 `"all"`。設定檔還寫著這個鍵，A63 會擋下並說怎麼改（過渡期，列進 #524）。A15 不再檢查它。
+- **`report.display.guardrail_recall_k` 拿掉**。比較報表各 item 的兩張表都用 `compare_k`（第 7 項）。A63 擋舊鍵。
+- **`report.display.primary_map_k` 改名 `compare_k`**：它現在只決定比較表（熱門度基準段、比較報表的各 item 與大類段）印哪些 K。A63 擋舊名並說新名。沒寫時等於 `k_values`：原本的預設 `[1, 3, 5, "all"]` 跟 `k_values` 的預設 `[5, "all"]` 對不上，兩個都沒寫時 @1、@3 永遠算不到。寫了卻算不到的值由新的 A62 擋下（#366 第 2 項）。
+- **講頭號指標的地方一起改了**：程式、設定檔註解、`docs/`、`CONTEXT.md` 的兩個 _Avoid_ 條目。
+- **段落開關改成段的檔名**：`data_stats`、`ranking_metrics`、`prediction_quality`、`rank_distribution`、`popularity_baseline`。A34 遇到舊名時會說新名是什麼（`core/consistency.py::RENAMED_REPORT_SECTIONS`，過渡期，列進 #524）。
+- **兩個 AP 不在 #537**（〈影響到哪些票〉最後一條）。目錄的模型選擇指標標記先只有兩筆；兩個 AP 放在另一份「HPO 能選、evaluation 還沒算」的待補清單。測試守著「標記加待補＝`metric_registry.METRIC_NAMES`」，registry 多一個指標時會紅。
+- **對照沒有分群欄（決定 10 更正留的第一件）：B′ 改借 A′ 的分群欄**（擁有者 2026-10-23）。分群欄是 entity 的屬性，跟誰打分無關。所以 `population.segment_columns` 正常情況兩邊相同，「能不能比」表不會每次都在分群欄那列標 ⚠。
+- **K 截斷照舊是計算，落地在 `display_ks.json`**（決定 10 更正留的第五件，不翻）。更正那一條的說法：檔的頂層鍵照**結果**命名（`evaluation_metrics`、`baseline_comparison`），底下才是給哪張表的清單（例如 `metrics_section`、`compare_k`）。#537 改版面時，`steps/display_ks.py` 跟著改了。
+- **排序指標段的 K＝`k_values` 解析後再加上全部**，超過全部的切掉；不再寫死 1～5 與全部。預設設定下長相不變。
+- **「挑哪句話」的兩個判斷留在報表**（決定 10 更正最後一點），理由照那一點。
+- **第 10 項有一個例外：圖的資料表收起**（擁有者 2026-10-24）。名次分布段原本有的圖有對應的表、有的表沒有圖。現在這段每樣東西都是一張圖，正下方接一張「數字表」，就是圖畫的那些數，預設收起，點開可以排序、篩選、複製。圖方便看分布，表方便複製。名次佔比兩張表改成熱度圖、正例平均名次改成長條圖（Macro 平均畫虛線）。原本只給表的理由是「佔比每一欄加起來是 1，只能在同一欄裡比」；擁有者決定照畫，這個讀法寫進段的說明。代價是每個 query group 的候選一樣多時，名次佔比圖跟名次計數圖長得一樣，段的說明講這件事。一般表格照舊不收合，「全篇只有圖的數字表收起」由 `report.types.Figure` 擋：沒有數字表的圖建不起來。
+- **「要比的指標」清單是各段檔裡的常數**（`metric_catalog.CompareEntry`），不是設定鍵。加一個要比的指標，要改那一段的清單；這跟決定 1「兩份報表的程式不改」的衝突照原則 6 更正最後一點，留給 #541。
+
 ### 對既有 ADR 的修訂
 
 - [ADR-0013](0013-pipeline-modes-and-slicing-are-separate.md)：`create_pipeline` 由明列 node 改成由各單元的宣告推導（原則 3）。該份文末加一段修訂指向本份。
 - [ADR-0019](0019-evaluation-modules-split-by-role.md)：`report_builder.py` 與被它拉住的模組（含 `baselines.py`）不再留在根層 `evaluation/`（原則 6）。該份文末加一段修訂指向本份。
-- [ADR-0020](0020-evaluation-bug-round-intended-behaviours.md)：〈橫切決定二〉所有結果共用一張 `COMPUTED_KEYS` 的指紋，改成每份結果只對它讀過的設定算指紋（原則 5）。該份文末加一段修訂指向本份。
+- [ADR-0020](0020-evaluation-bug-round-intended-behaviours.md)：〈橫切決定二〉所有結果共用一張 `COMPUTED_KEYS` 的指紋，改成每份結果只對它讀過的設定算指紋（原則 5）。該份文末加一段修訂指向本份。#537 再改三處（設計 H 的兩條 K 軸相同、`primary_map_k` 改名 `compare_k`、`guardrail_recall_k` 拿掉），見決定 16〈#537 怎麼定的〉，該份文末另加一段。
 - [ADR-0024](0024-prediction-quality-metric-family.md)：〈考慮過、沒選的做法〉第一條因為全量排序的成本沒選精確的 average precision。決定 16 第 3 項改成每次都算 pooled AP 與 macro per-item AP（擁有者知情，成本由 #450 量）。該份文末加一段修訂指向本份。
 
 ---

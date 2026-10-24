@@ -12,6 +12,7 @@ from recsys_tfb.evaluation.distributions import (
     plot_positive_rank_heatmap,
     plot_positive_rate_rank_heatmap,
     plot_rank_heatmap,
+    plot_rank_share_heatmap,
     plot_score_boxplot_by_label,
     plot_score_histogram,
 )
@@ -92,6 +93,15 @@ class TestRankHeatmaps:
     def test_positive_rank_heatmap_from_matrix(self):
         fig = plot_positive_rank_heatmap(self._matrix())
         assert isinstance(fig.data[0], go.Heatmap)
+
+    def test_rank_share_heatmap_hovers_a_share(self):
+        share = pd.DataFrame(
+            [[0.75, 0.25], [0.25, 0.75]], index=["A", "B"], columns=[1, 2]
+        )
+        hm = plot_rank_share_heatmap(share).data[0]
+        assert isinstance(hm, go.Heatmap)
+        assert "Share: %{z:.1%}" in hm.hovertemplate
+        assert hm.texttemplate == "%{text:.1%}"
 
     def test_positive_rate_heatmap_from_matrix(self):
         rate = pd.DataFrame(

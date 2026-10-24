@@ -346,3 +346,11 @@ date: 2026-09-13
 ## 修訂（2026-10-21，ADR-0031）
 
 〈橫切決定二〉讓每份落地結果都用同一張 `COMPUTED_KEYS` 算指紋。[ADR-0031](0031-evaluation-second-pass-layers-and-single-source.md) 原則 5 改成：每份結果只對它真的讀過的設定算指紋，設定改了只有讀過它的結果算過期。「算的」與「畫的」設定分開這件事不變。細節與預設做法見 ADR-0031 決定 15。
+
+## 修訂（2026-10-24，#537）
+
+[ADR-0031](0031-evaluation-second-pass-layers-and-single-source.md) 決定 16〈#537 怎麼定的〉改了本份三處：
+
+- 設計 H 的兩條 K 軸現在相同：`evaluation.metric.k` 拿掉了，query group 與 item 兩條軸都是 `k_values` 解析後再加上「全部」。
+- `display.primary_map_k` 改名 `display.compare_k`；`display.guardrail_recall_k` 拿掉（D-2 那個鍵因此不存在了）。
+- 「算的」與「畫的」設定分開、不准把畫的鍵偷渡進計算層，這兩條不變：`compare_k` 仍然只挑要印的 K，A62 只擋「寫了卻算不到」的值。

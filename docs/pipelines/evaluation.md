@@ -71,7 +71,7 @@ evaluation:
 | 設定 | 說明 |
 |---|---|
 | `snap_date` | 本次評估的時間切點：一個日期，或多個日期（三種寫法見表下）。日期一律使用 `YYYY-MM-DD` |
-| `k_values` | @K 家族（map@K、precision@K、recall@K、map_attr@K）要實際計算的 K 值 superset。`evaluation.metric.k` 是另一個獨立的軸：主指標 per-item macro（含報表的頭號 mAP）的截斷深度。它非 null 時，per-item 那一族（map_attr、recall）會多算 `@metric.k`，overall／per-segment 的 @K 家族不受影響，所以不必自己把它列進 `k_values` |
+| `k_values` | @K 家族（map@K、precision@K、recall@K、map_attr@K）要實際計算的 K 值 superset。query group 與 item 兩條 K 軸都取 `k_values` 解析後再加上 `"all"`（`metrics_spark._resolve_k_grids`），所以 overall `map@all` 與 macro `map_attr@all`（training HPO 能選的兩個指標，概覽並列）一定會算，`k_values` 沒列 `"all"` 也一樣。`evaluation.metric.k` 以前是 per-item 那條軸額外多算的截斷深度，已拿掉；conf 還寫著它會被 A63 擋下 |
 | `"all"` | 在細 item 粒度解析為 distinct item 數；在 category 粒度重新解析為 distinct category 數。宣告 `event` 時，細 item 粒度改取最寬 query group 的列數（一組 30 列、12 個 item 時取 12 會截斷），每份指標結果都把解析成的數記在 `metrics.json`（catalog 的 `evaluation_metrics`）的母體帳 `population.all_k`（#535 之前只有宣告 `event` 時才寫，而且寫在頂層的 `all_k`）；報表與比較報表都照同一個鍵查 `@all`，不自己數 item（#434）。鍵存的是解析後的數（`map@12`），不是 `map@all`：比較兩個模型時兩邊的 `all` 可能解析成不同的數，存成數字才不會被當成同一格相減（[ADR-0031](../adr/0031-evaluation-second-pass-layers-and-single-source.md) 決定 15，#535 查證）。category 粒度不變：聚合之後每組每個大類只剩一列 |
 
 `snap_date` 有三種寫法：
@@ -98,7 +98,7 @@ pipeline 會先依 `model_version` 與 `snap_date` 篩選預測。**每一個**�
 
 帶 `--post-training` 時另有一道更前面的把關（一致性不變量 A22）：`evaluation.snap_date` 的每一個日期都必須是 `dataset.test_snap_dates` 的成員，否則在 Spark 起來之前就報錯退出；多個日期時，訊息列出不在其中的那幾個。這條之所以不能只靠上面那個「零列就中止」的檢查：`training_eval_predictions` 累積該 `model_version` **歷來預測過的每一個月**（test 日期不進版本身分，見 [ADR-0001](../adr/0001-test-dates-out-of-dataset-version-identity.md)），所以一個已經從 `test_snap_dates` 移除的月份照樣抓得到 rows，跑出一份看起來完全正常、卻在量目前設定不評估的月份的報表。**monitoring（不帶旗標）模式不受此限**——它讀 inference 產出的 `ranked_predictions`，月份本來就不必是 test 月份；這也是這條檢查由 CLI 帶旗標呼叫、而不是寫成一般 config predicate 的原因（Layer-1 在 CLI entry 執行，看不到旗標）。
 
-`k_values` 決定 metric computation；`report.display.primary_map_k` 與 `guardrail_recall_k` 只決定報表顯示哪些已計算結果，而 `guardrail_recall_k` **只影響比較報表**（`report_comparison.html` 的 per-item recall@k 與大類 per-item recall@k 兩張表；主報表不讀這個鍵，鍵缺席時比較報表用 `[1, 3, 5]`）。display 中使用的 K 應包含在 `k_values`，否則報表對應欄位會沒有值。display 清單在每個粒度會先濾掉大於該粒度 `"all"` 所解析的 K 的整數 K（`"all"` 保留；bug 8, ADR-0020）。沒宣告 `event` 時那個 K 就是 item 數：預設 `primary_map_k: [1, 3, 5, "all"]` 遇到 3 個大類只印 @1、@3、@all——只是過濾不印，計算層照 `k_values` 全集算。宣告了 `event` 時界線是最寬 query group 的列數，因為比 item 數深的名次上還有真的列要排。比較報表裡把算過的鍵整批攤開的 overall／大類 overall 表，套同一條規則，但兩側**各自**以自己的 K 為界：兩側各保留自己的列、在同一個 common universe 裡最寬的組可能不一樣長；某側超過自己 K 的格子留空，Δ 也留空。這些截斷與 `guardrail_recall_k` 的清單由 `resolve_comparison_display_ks` 切好、落地成 `comparison_display_ks.json`，比較報表只讀（5.2 節）。
+`k_values` 決定 metric computation；`report.display.compare_k` 只決定報表顯示哪些已計算結果：熱門度基準段的全部表、比較報表（`report_comparison.html`）的各 item 與大類表（map_attr 與 per-item recall@k 兩張都用它）都讀這一個鍵；沒寫時等於 `evaluation.k_values`。有寫時必須是非空 list，每項是正整數或 `"all"`，每個整數都要列在 `k_values` 裡（A62；`"all"` 一定會算，不用列），否則那一欄永遠沒有值。舊名 `primary_map_k` 已改名為 `compare_k`、`guardrail_recall_k` 已拿掉（比較報表的 recall 表改用 `compare_k`），conf 還寫著任何一個都會被 A63 擋下。display 清單在每個粒度會先濾掉大於該粒度 `"all"` 所解析的 K 的整數 K（`"all"` 保留；bug 8, ADR-0020）。沒宣告 `event` 時那個 K 就是 item 數：範例 conf 的 `compare_k: [1, 3, 5, "all"]` 遇到 3 個大類只印 @1、@3、@all——只是過濾不印，計算層照 `k_values` 全集算。宣告了 `event` 時界線是最寬 query group 的列數，因為比 item 數深的名次上還有真的列要排。比較報表裡把算過的鍵整批攤開的 overall／大類 overall 表，套同一條規則，但兩側**各自**以自己的 K 為界：兩側各保留自己的列、在同一個 common universe 裡最寬的組可能不一樣長；某側超過自己 K 的格子留空，Δ 也留空。這些截斷與 `compare_k` 的清單由 `resolve_comparison_display_ks` 切好、落地成 `comparison_display_ks.json`，比較報表只讀（5.2 節）。
 
 主要指標包括：
 
@@ -149,7 +149,7 @@ evaluation:
 **對不到與缺欄是兩件事：**
 
 - 母體表**有**這欄、某些 query 在上面沒有值（或覆寫表對不到那個 key）：這群叫 `(unmatched)`，出現在分群表、印 query 數與佔比，但**不進任何 macro 平均**——一個假客群不該等權拉動平均。真實 segment 值剛好叫 `(unmatched)` 時直接失敗，不會被併進去。
-- 母體表**沒有**這欄：這欄本次不算 per-segment，log 印 WARN、報表「基本統計」段印「`<表>` 無欄 `<欄>`」，pipeline 照常跑完。`segment_columns` 的欄名打錯也走這條路（一致性檢查在 Spark 起來前跑，看不到母體表），靠訊息裡的欄名分辨。那句註記只印在「基本統計」段；關掉該段（`report.sections.dataset_overview: false`）時，看 log 的 WARN 或 `segment_columns.json` 的 `missing`。表名：母體表記的是 catalog 條目名（`sample_pool`／`inference_population`），覆寫表記設定的 `table`。
+- 母體表**沒有**這欄：這欄本次不算 per-segment，log 印 WARN、報表「資料統計」段印「母體表 `<表>` 無欄 `<欄>`：這一欄本次不分群」，pipeline 照常跑完。`segment_columns` 的欄名打錯也走這條路（一致性檢查在 Spark 起來前跑，看不到母體表），靠訊息裡的欄名分辨。那句註記只印在「資料統計」段；關掉該段（`report.sections.data_stats: false`）時，看 log 的 WARN 或 `segment_columns.json` 的 `missing`。表名：母體表記的是 catalog 條目名（`sample_pool`／`inference_population`），覆寫表記設定的 `table`。
 
 示例環境的 `conf/sql/etl/inference_population/inference_population.sql` 只有 `(snap_date, cust_id)`，所以示例的監控模式會走「缺欄」這條路。要在示例裡看到分群，是那支 SQL 要多帶分群欄，框架不用改。
 
@@ -227,15 +227,15 @@ evaluation:
 
 baseline 對每個評估日期 `S`，統計 `label_table` 在 `[S - lookback_months, S)` 期間各 item 的正例數，並以歷史正例數作為所有 entity 共用的 score。它不使用個人特徵，可用來判斷模型是否真正優於「所有人都推薦熱門 item」。
 
-baseline 會在與模型相同的 evaluation rows 上重新排名，計算 overall 與 per-item 指標，再於報表呈現 Model、Baseline 與差異。
+baseline 會在與模型相同的 evaluation rows 上重新排名，計算 overall 與 per-item 指標，再於熱門度基準段呈現這次（模型）、對照（baseline）與差。
 
-若指定回看期間完全沒有 label rows，會直接 raise（bug 1, ADR-0020）——不再退回完整 `label_table`。舊行為的退回會把評估日之後的資料算進 baseline，讓 popularity 用答案排名，報表卻照印「以過去 N 個月的歷史購買計數重排」；使用者裁定 baseline 是重要資訊，沒算出來要 raise，不做靜默 fallback。錯誤訊息含視窗範圍與 `label_table` 實際有的月份；解法是補齊 `label_table` 歷史、調整 `evaluation.baseline.lookback_months`，或把 `evaluation.report.sections.baseline` 設 `false` 直接不算這段。
+若指定回看期間完全沒有 label rows，會直接 raise（bug 1, ADR-0020）——不再退回完整 `label_table`。舊行為的退回會把評估日之後的資料算進 baseline，讓 popularity 用答案排名，報表卻照印「以過去 N 個月的歷史購買計數重排」；使用者裁定 baseline 是重要資訊，沒算出來要 raise，不做靜默 fallback。錯誤訊息含視窗範圍與 `label_table` 實際有的月份；解法是補齊 `label_table` 歷史、調整 `evaluation.baseline.lookback_months`，或把 `evaluation.report.sections.popularity_baseline` 設 `false` 直接不算這段。
 
-視窗不是全空、只是沒涵蓋滿 `lookback_months` 時（例：設 12 個月，`label_table` 在視窗內只有 2 個月），不會 raise，但報表會揭露：baseline 段那句寫成「以過去 12 個月的歷史購買計數重排（label_table 在這個視窗內實際只涵蓋 2 個月）」，「平均每月」除以實際涵蓋的月數，不是除以 12。
+視窗不是全空、只是沒涵蓋滿 `lookback_months` 時（例：設 12 個月，`label_table` 在視窗內只有 2 個月），不會 raise，但報表會揭露：熱門度基準段那句寫成「以過去 12 個月的歷史購買計數重排（label_table 在這個視窗內實際只涵蓋 2 個月）」，「平均每月」除以實際涵蓋的月數，不是除以 12。
 
 評估多個日期時，每個日期各有一個視窗，排名組成的 count 是所有視窗的合計，所以「平均每月」除以**各視窗月數的加總**：視窗都滿時是「日期數 × `lookback_months`」，某個視窗沒涵蓋滿時那個視窗改算它實際涵蓋的月數（例：兩個日期、各 12 個月，除以 24）。段落那句改寫成「對 N 個評估日期各以該日期之前 12 個月的歷史購買計數重排」並寫出除數。視窗彼此重疊時，同一個月會被每個涵蓋它的視窗各算一次，月度趨勢表的逐月數字是重複計數後的合計，報表上也會寫這一句。
 
-將 `report.sections.baseline` 設為 `false` 時，pipeline 會直接跳過第二次 baseline metric computation。
+將 `report.sections.popularity_baseline` 設為 `false` 時，pipeline 會直接跳過第二次 baseline metric computation。
 
 #### 正例率模式（`score: rate`，#397，只在 `--post-training`）
 
@@ -261,7 +261,7 @@ evaluation:
 - `--post-training` 評的是 test 列，它們就是從 `sample_pool` 抽出來的。拿 `sample_pool` 算的正例率，描述的正是這些列。
 - 監控模式評的是離線推論的全網格：每個 entity 配上全部 item，沒展示過的配對 label 是 0。在這些列上，一列會不會是正例，要看它被展示過幾次，也要看展示後多常被點——這正是正例數量的東西。這時改用正例率，基準線反而變弱，模型的領先會被灌大。
 
-所以設定是同一份：監控模式遇到 `score: rate` 照舊用正例數、不讀 `sample_pool`，報表 baseline 段會寫出這句原因。將來離線推論若能讀「這期的候選清單」，這條再重新評估。
+所以設定是同一份：監控模式遇到 `score: rate` 照舊用正例數、不讀 `sample_pool`，報表熱門度基準段會寫出這句原因。將來離線推論若能讀「這期的候選清單」，這條再重新評估。
 
 **分母從 `sample_pool` 數，不看 `label_table` 的列數。** `sample_pool` 的一列就是一次當候選。`label_table` 不行，原因有兩個：
 
@@ -277,7 +277,7 @@ evaluation:
 - 回看期間 `sample_pool` 全空 → raise。就算 `label_table` 有資料也一樣。
 - 沒涵蓋滿 → 不 raise。報表寫出「sample_pool 在這個視窗內實際只涵蓋 N 個月」。
 
-**報表。** baseline 段的「popularity 排名組成」改照正例率排，欄位是正例率（4 位有效數字）、當候選次數、正例數。沒有「平均每月」：比率不能按月平均。月度趨勢表印的是同一批正例數的逐月拆分，合計對得上排名組成。`baseline_metrics.json` 多一個 `popularity_rate` 鍵，只在這個模式寫。`purchase_counts`／`monthly_counts` 照舊從 `label_table` 算。
+**報表。** 熱門度基準段的「popularity 排名組成」改照正例率排，欄位是正例率（4 位有效數字）、當候選次數、正例數。沒有「平均每月」：比率不能按月平均。月度趨勢表印的是同一批正例數的逐月拆分，合計對得上排名組成。`baseline_metrics.json` 多一個 `popularity_rate` 鍵，只在這個模式寫。`purchase_counts`／`monthly_counts` 照舊從 `label_table` 算。
 
 評估多個日期時，每個日期各用自己視窗的正例率排名；排名組成表印的是**各視窗涵蓋的期合在一起、每期只算一次**的正例率。所以它不是任何一個日期實際用的那一個，但分母不會因為視窗重疊而變成好幾倍。
 
@@ -306,33 +306,37 @@ evaluation:
 evaluation:
   report:
     sections:
-      dataset_overview: true
-      primary_map: true
-      per_item_breakdown: true
-      baseline: true
+      data_stats: true
+      ranking_metrics: true
+      rank_distribution: true
+      popularity_baseline: true
       prediction_quality: false
     display:
-      primary_map_k: [1, 3, 5, "all"]
-      guardrail_recall_k: [1, 2, 3, 4, 5]   # 只有比較報表讀
+      compare_k: [1, 3, 5, "all"]   # 熱門度基準段與比較報表的 item、大類表；沒寫時等於 k_values
     diagnostics:
       include_distributions: true
 ```
 
-標準報表固定包含 headline 與 glossary，其餘 sections 可個別開關。headline（概覽）的頭號指標是 macro per-item mAP，數字取自 `metrics.json` 的 `macro_avg.by_item.map_attr@{metric.k}`（`metric.k` 未設時是 `@all`），與衡量指標段 per-item `map_attr` 表「Macro 平均」那一列同一個數。正例數低於 `evaluation.metric.min_positives` 的 item（觀察名單）照列在 per-item 表，只是不進 macro 的等權平均。
+標準報表（`report.html`）依序有八段，順序在 `src/recsys_tfb/evaluation/report_builder.py` 的 `SECTIONS`；每段的中文名、英文名與「這段回答什麼問題」，就是各段檔 `src/recsys_tfb/evaluation/report_sections/<段名>.py` 最上面的 `TITLE`、`TITLE_EN`、`QUESTION`。概覽、核心概念、完整性檢查固定印，其餘五段各有一個開關。
 
-| Section | 主要內容 |
-|---|---|
-| `dataset_overview` | rows、entities、items、正例數、正例率與各 item 概況 |
-| `primary_map` | 衡量指標：overall、per-segment、大類 overall 的 mAP／precision／recall，以及 per-item、大類 per-item 的 recall 與 `map_attr` |
-| `per_item_breakdown` | per-item 細部拆解：score 分布、rank heatmap 與正例位置 |
-| `baseline` | popularity 組成、Model／Baseline／Delta |
-| `prediction_quality` | 把每一列候選當二元預測：precision／recall／F1、`pr_auc`、`roc_auc`、分箱表（見 3.7 節）；框架預設 `false`，`false` 時不算、只寫 stub |
+| 段（開關名＝段檔名） | 回答什麼問題 | 印什麼 |
+|---|---|---|
+| 概覽（固定印） | 模型選擇指標各是多少？ | 沒有「頭號指標」：並列 training 的 HPO 能選的指標，不分主次。目前有兩個：overall mAP（`metrics.json` 的 overall `map@all`）與 macro per-item mAP（`macro_avg.by_item.map_attr@all`），後者與排序指標段 per-item `map_attr` 表「Macro 平均」那一列同一個數 |
+| 核心概念（固定印） | 報表的數字從哪個量算出來？總量多少？ | query group 的定義與一個算例、AP 公式，以及總量表。全資料的總量（全部 query group、候選列、正例數這類）**只在這一處印**；別段要用就寫「核心概念的總量」，不重印。宣告 `occasion` 或 `event` 時，總量表各多一列 |
+| `data_stats` 資料統計 | 資料多大？正例怎麼分布？ | 正例組成：各期、各 item、各分群、各大類四張表，欄都是候選列、候選列佔比、正例數、正例佔比、正例率。只印切片的計數，不重印總量 |
+| `ranking_metrics` 排序指標 | 模型在各粒度排得怎樣？ | overall、per-segment、大類、per-item、大類 per-item 的 mAP／precision／recall 與 `map_attr`。一個指標一張表，列是切片（整體與各分群、各 item、各大類），欄是 K，表頭寫實際的 K（`"all"` 寫成它解析成的數） |
+| `prediction_quality` 預測品質 | 把分數當成二元預測，切在哪裡、準不準？ | 把每一列候選當二元預測：precision／recall／F1、`pr_auc`、`roc_auc`、分箱表（見 3.7 節）；框架預設 `false`，`false` 時不算、只寫 stub |
+| `rank_distribution` 名次分布 | 每個 item 的分數與名次落在哪裡？ | 各 item 的分數分布、名次熱圖與正例位置 |
+| `popularity_baseline` 熱門度基準 | 比熱門度排序好多少？ | 熱門度排名的組成、「能不能比」表，以及一個指標一張的比較表，每個 K 三欄：這次、對照、差（差＝這次 − 對照）。全部的表都用 `report.display.compare_k` 當 K |
+| 完整性檢查（固定印） | 這次量了什麼？什麼沒量到？ | 這次算指標用的設定值、同分列的占比等「看起來量了、其實沒量到」的提醒 |
 
-`sections` 的鍵必須剛好是上表這幾個，且每個值都要是 YAML 布林（不加引號的 `true`／`false`；寫成字串 `"false"` 會被當成打開，一樣擋下）：多宣告一個沒有程式在讀的鍵，或少宣告一個程式在讀的鍵，evaluation 的 CLI 入口都會擋下，別的指令不受影響（A34；#532 把 `diagnostics` 改名為 `per_item_breakdown`、拿掉 `diagnosis_links`，舊設定寫著舊名同樣被 A34 擋下；清單在 `core/consistency.py` 的 `EVALUATION_REPORT_SECTIONS`）。per-item、大類、per-segment 的表沒有自己的開關，跟著所在的段落開關。`guardrail_recall`、`per_item_attr`、`category`、`per_segment` 與 `display.recall_colorscale` 以前宣告過、但沒有程式讀，已經刪除（[ADR-0019](../adr/0019-evaluation-modules-split-by-role.md) 決定 6）。舊設定還寫著前四個的話，evaluation 的 CLI 入口會擋下，照錯誤訊息刪掉即可；`display.recall_colorscale` 不在檢查範圍內，留著不會報錯、也沒有作用，一併刪掉。
+整份報表共通的版面：外殼依段落產生目錄，每段標題旁放一句「這段回答什麼問題」；所有段、所有表都不收合，只有每張圖正下方的「數字表」預設收起（圖畫的那些數，點開可排序、篩選、複製）；每張表可排序、篩選，右上角有「複製」（複製出來的是看得到的列，貼進試算表一格一個數）；標題中文為主，英文名放在標題旁的小字。**段與段之間不互相提到**：段的文字最多回頭指向核心概念，核心概念不指向任何段，所以跳過任何一段都不會讓別段的句子失去依據（`tests/test_evaluation/test_section_isolation.py` 守著這條）。詞彙表那一段拿掉了，名詞的解釋跟著各段走。
 
-`per_item_breakdown` 的 row-level aggregation 在 Spark 執行，只將 histogram、quartile 與 rank matrix 等小型結果交給報表層，不會將完整預測資料嵌入 HTML。
+`sections` 的鍵必須剛好是上表這幾個，且每個值都要是 YAML 布林（不加引號的 `true`／`false`；寫成字串 `"false"` 會被當成打開，一樣擋下）：多宣告一個沒有程式在讀的鍵，或少宣告一個程式在讀的鍵，evaluation 的 CLI 入口都會擋下，別的指令不受影響（A34；#532 把 `diagnostics` 改名為 `per_item_breakdown`、拿掉 `diagnosis_links`，舊設定寫著舊名同樣被 A34 擋下；#537 又把四個開關改成段的檔名（`dataset_overview`→`data_stats`、`primary_map`→`ranking_metrics`、`per_item_breakdown`→`rank_distribution`、`baseline`→`popularity_baseline`，`prediction_quality` 不變），舊名同樣被 A34 擋下，而且訊息直接說新名（過渡期檢查，`RENAMED_REPORT_SECTIONS`）；清單在 `core/consistency.py` 的 `EVALUATION_REPORT_SECTIONS`）。per-item、大類、per-segment 的表沒有自己的開關，跟著所在的段落開關。`guardrail_recall`、`per_item_attr`、`category`、`per_segment` 與 `display.recall_colorscale` 以前宣告過、但沒有程式讀，已經刪除（[ADR-0019](../adr/0019-evaluation-modules-split-by-role.md) 決定 6）。舊設定還寫著前四個的話，evaluation 的 CLI 入口會擋下，照錯誤訊息刪掉即可；`display.recall_colorscale` 不在檢查範圍內，留著不會報錯、也沒有作用，一併刪掉。
 
-分數分箱（每格的平均分數 vs 實際正例率）不在 `per_item_breakdown` 段，是 `prediction_quality` 段的分箱表（3.7 節）。#381 之前 `report.diagnostics` 另有 `include_calibration`、`n_calibration_bins` 兩個鍵，算一份在 `[0, 1]` 上等寬切、沒有任何讀者的 calibration bins；#381 把三份分箱表收成一份時一併移除。舊設定還寫著這兩個鍵的話，evaluation 的 CLI 入口會擋下（A43，不論值是什麼），照錯誤訊息刪掉即可；別的指令不受影響。
+`rank_distribution` 的 row-level aggregation 在 Spark 執行，只將 histogram、quartile 與 rank matrix 等小型結果交給報表層，不會將完整預測資料嵌入 HTML。
+
+分數分箱（每格的平均分數 vs 實際正例率）不在 `rank_distribution` 段，是 `prediction_quality` 段的分箱表（3.7 節）。#381 之前 `report.diagnostics` 另有 `include_calibration`、`n_calibration_bins` 兩個鍵，算一份在 `[0, 1]` 上等寬切、沒有任何讀者的 calibration bins；#381 把三份分箱表收成一份時一併移除。舊設定還寫著這兩個鍵的話，evaluation 的 CLI 入口會擋下（A43，不論值是什麼），照錯誤訊息刪掉即可；別的指令不受影響。
 
 ### 3.6 模型與外部結果比較
 
@@ -395,9 +399,19 @@ evaluation:
 | `fail` | 立即中止並列出未映射 items，預設且較安全 |
 | `drop` | 記錄 warning 後排除未映射 items |
 
-比較前會取得雙方 query group（`time × entity`）集合與 item 集合的交集，限制到共同範圍後分別重新排名、重新計算指標，並在報表列出完整與共同 coverage、被排除的 items，以及 Model A、Model B 與 Delta。交集用的是 query group、不是 entity：評估多個日期時，B 只在 1 月評分過的 entity，A 在 2 月的列不會被留下來比。兩側的時間欄一律轉成文字再比對，所以外部表的時間欄是 DATE、A 側是 STRING 分區時照樣對得上（與載入 B 時篩日期的比法相同）。
+比較前會取得雙方 query group（`time × entity`）集合與 item 集合的交集，限制到共同範圍後分別重新排名、重新計算指標，並在比較報表的概覽列出兩邊完整與共同的涵蓋範圍、被排除的 items，其餘各段列兩邊的指標：這次（Model A）、對照（Model B）與差。交集用的是 query group、不是 entity：評估多個日期時，B 只在 1 月評分過的 entity，A 在 2 月的列不會被留下來比。兩側的時間欄一律轉成文字再比對，所以外部表的時間欄是 DATE、A 側是 STRING 分區時照樣對得上（與載入 B 時篩日期的比法相同）。
 
-比較報表沒有統計顯著性檢定；Delta 只表示共同範圍上的指標差值 `A - B`。
+比較報表（`report_comparison.html`）依序有五段，順序在 `src/recsys_tfb/evaluation/comparison/report.py` 的 `SECTIONS`，中文名、英文名與問題在各段檔（同目錄）最上面的 `TITLE`、`TITLE_EN`、`QUESTION`：
+
+| 段 | 回答什麼問題 | 印什麼 |
+|---|---|---|
+| 概覽 | 跟誰比？能不能直接比？ | 「跟誰比」表（決定對照內容的每個鍵）、兩邊的涵蓋表（比較報表沒有核心概念段，兩邊的總量放這裡），以及「能不能比」表：全部＝@幾、進 macro 的 item、算進指標的 query group、分群欄，兩邊不同的地方標 ⚠ |
+| 整體指標 | 模型選擇指標，兩邊各多少？ | 概覽那兩個模型選擇指標，這次、對照、差 |
+| 各 item 指標 | 各 item 的 `map_attr`、per-item recall，兩邊各多少？ | 一個指標一張表，列是 item（最上面固定 Macro 平均），欄是 `compare_k` 的 K，每個 K 三欄：這次、對照、差 |
+| 大類指標 | 大類粒度，兩邊各多少？ | 同各 item 指標的排法，列是大類；只在大類打開、兩邊都有大類粒度時印 |
+| 分群指標 | 整體與各分群，兩邊各多少？ | 照預設清單是空的，所以預設不印這一段；兩邊算分群用的欄不同時，整段的表不印，只在「能不能比」表寫明 |
+
+版面規則同標準報表（目錄、不收合、表格可排序與篩選、段與段互不提到）。比較報表沒有統計顯著性檢定；差只表示共同範圍上的指標差值，差＝這次 − 對照（Model A − Model B）。
 
 **「跟誰比」記在每份比較產物裡。** 比較鏈落地的每份 JSON（5.2 節）都有 `compare_source` 欄位，記下決定 Model B 內容的那幾個鍵；`compare_sources` 是 CLI 每次依 `--compare <key>` 注入的，不在設定指紋裡，所以身分另外記。記哪些鍵看 `kind`：
 
@@ -453,7 +467,7 @@ evaluation:
 
 1. **門檻解析度＝細箱寬。** 報表印出細箱寬。F1 最佳門檻是在這份資料上挑的，換一份資料（下個月、線上）分數分布會變，不能直接搬去當線上的設定值。
 2. **母體跟主指標段不同。** 本段不排除任何 query group；主指標段只算有正例的 query group（排除的數量在 `n_excluded_queries`）。兩段的 precision 不可互相比較。
-   ⚠ `--post-training` 模式下，本段看到的是 dataset 階段過濾過的 test 表（`filter_test_keys`，組裝之前從 keys 丟）：有正例的 query group 全留，沒有正例的只留 `dataset.test_zero_positive_group_ratio`（r）那麼多，每列帶權重 `zero_positive_group_weight`（有正例的組 ＝ 1，留下來的無正例組 ＝ 1／r）。本段的列數、正例數與所有指標都用這個權重加權，代表還原到全部曝光的估計；1／r 是設計權重，不是無偏估計，留下的組少時不穩——報表在母體說明與〈基本統計 — 資料集〉印出 r 與留下來的組數。r 為 0（預設）時 test 表已經沒有無正例的組，二元指標會系統性偏高，所以開了本段又跑 `--post-training` 而 r 為 0 時，evaluation 在 CLI 入口就停下（不變量 A46）。反過來，設定的 r > 0 但被評估的模型是在 r ＝ 0 下建的（預測表沒有權重欄、或權重是 NULL），本段會在計算前停下並說明兩者對不上。監控模式不受影響。設定方式見 [dataset.md §3.7](dataset.md#37-沒有正例的-query-group-留多少)。
+   ⚠ `--post-training` 模式下，本段看到的是 dataset 階段過濾過的 test 表（`filter_test_keys`，組裝之前從 keys 丟）：有正例的 query group 全留，沒有正例的只留 `dataset.test_zero_positive_group_ratio`（r）那麼多，每列帶權重 `zero_positive_group_weight`（有正例的組 ＝ 1，留下來的無正例組 ＝ 1／r）。本段的列數、正例數與所有指標都用這個權重加權，代表還原到全部曝光的估計；1／r 是設計權重，不是無偏估計，留下的組少時不穩——報表在母體說明與〈資料統計〉印出 r 與留下來的組數。r 為 0（預設）時 test 表已經沒有無正例的組，二元指標會系統性偏高，所以開了本段又跑 `--post-training` 而 r 為 0 時，evaluation 在 CLI 入口就停下（不變量 A46）。反過來，設定的 r > 0 但被評估的模型是在 r ＝ 0 下建的（預測表沒有權重欄、或權重是 NULL），本段會在計算前停下並說明兩者對不上。監控模式不受影響。設定方式見 [dataset.md §3.7](dataset.md#37-沒有正例的-query-group-留多少)。
 3. **`pr_auc` 不是外部工具算的 average precision。** 它是分箱後的值，不能拿來跟 sklearn 在原始分數上算的 average precision 直接比較。另外有兩個精確算法的指標 `pooled_average_precision`、`macro_per_item_average_precision`（HPO 在 val 上用它們挑參數，training 在 test 上也算，見 [training.md §3.7](training.md#37-test-上算哪些指標test_metrics)），定義與本段不同，也不可互相比較。名字刻意不叫 average precision：在這個 repo 裡，AP 是排序指標 `map@K` 的說法。
 
 其他要知道的：
@@ -576,12 +590,12 @@ python -m recsys_tfb evaluation \
 
 `generate_report` 是純函式，參數全部是別的 node 算好的產物（見 5.1 節的表）。其中 `evaluation_row_facts`（`row_facts.json`）、`evaluation_metrics`（`metrics.json`）、`baseline_metrics`（`baseline_metrics.json`）、`evaluation_report_aggregates`、`prediction_quality_metrics`（`prediction_quality.json`）、`baseline_comparison`（`baseline_comparison.json`）、`evaluation_display_ks`（`display_ks.json`）都已落地成 `JSONDataset`（`metrics.json` 與 `baseline_metrics.json` 見 [ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 2），沒有記憶體中間結果。切片的自動擴張只看「輸出是否已落地」（見 [`pipeline-slicing.md`](../operations/user-guides/pipeline-slicing.md) 的「自動擴張補跑」），所以從 `generate_report` 接續，前次完整 run 成功時不會自動補跑任何 node，不跑 Spark。補跑清單釘在 `tests/test_pipelines/test_resume_contracts.py` 的 `RESUME_CONTRACTS`，之後改動 node 的形狀，該測試會紅燈提醒同步文件。
 
-接續時直接讀回的落地 JSON（`evaluation_row_facts`、`evaluation_metrics`、`baseline_metrics`、`evaluation_report_aggregates`、`prediction_quality_metrics`、`baseline_comparison`、`evaluation_display_ks`）若是在不同的「算的」設定下算出來的，`generate_report` 會在畫之前 raise，訊息列出哪份產物、哪個鍵從什麼值變成什麼值、該 `--from-node` 哪個 node。`display_ks.json` 的指紋另外帶 `report.display.primary_map_k`，所以改了這個鍵也會被擋。兩類設定的分法見 7.2 節。
+接續時直接讀回的落地 JSON（`evaluation_row_facts`、`evaluation_metrics`、`baseline_metrics`、`evaluation_report_aggregates`、`prediction_quality_metrics`、`baseline_comparison`、`evaluation_display_ks`）若是在不同的「算的」設定下算出來的，`generate_report` 會在畫之前 raise，訊息列出哪份產物、哪個鍵從什麼值變成什麼值、該 `--from-node` 哪個 node。`display_ks.json` 的指紋另外帶 `report.display.compare_k`，所以改了這個鍵也會被擋。兩類設定的分法見 7.2 節。
 
 只改了「畫的」設定時，重繪的接續點有兩個，都不重算任何指標：
 
-- 改 `report.sections` 的其餘鍵（`dataset_overview`、`primary_map`）：`--only-node generate_report`（CLI 仍會照 4.1 節所說初始化 Spark）。
-- 改 `report.display.primary_map_k`：`--from-node resolve_display_ks`。這個 node 讀落地的 `metrics.json` 與 `baseline_comparison.json`，重切每張表要印的 K 再接著畫報表，不跑 Spark。只做 `--only-node generate_report` 會被擋下，訊息寫 `Re-run with --from-node resolve_display_ks.`。
+- 改 `report.sections` 的其餘鍵（`data_stats`、`ranking_metrics`）：`--only-node generate_report`（CLI 仍會照 4.1 節所說初始化 Spark）。
+- 改 `report.display.compare_k`：`--from-node resolve_display_ks`。這個 node 讀落地的 `metrics.json` 與 `baseline_comparison.json`，重切每張表要印的 K 再接著畫報表，不跑 Spark。只做 `--only-node generate_report` 會被擋下，訊息寫 `Re-run with --from-node resolve_display_ks.`。
 
 比較報表（`--compare`、`--compare-only`）也一樣：比較鏈（5.2 節）每一步的結果都落地了，`generate_comparison_report` 只讀這些 JSON（`compare_coverage`、`compare_row_facts_a`、`source_comparison`、`comparison_display_ks`），所以重畫與重切 K 都不跑 Spark（CLI 仍會照 4.1 節所說初始化 Spark）。接續點與接法：
 
@@ -589,7 +603,7 @@ python -m recsys_tfb evaluation \
 |---|---|
 | 沒改設定，只是重畫 | `--only-node generate_comparison_report`，兩種比較模式都不補跑任何 node |
 | 只改 `compare_sources.<key>.label` | 同上；label 不算比較對象的身分，報表印新的名字 |
-| 改 `guardrail_recall_k` 或 `primary_map_k` | `--compare`：`--from-node resolve_display_ks`（兩個 K 截斷與兩份報表一起重跑；只從 `resolve_comparison_display_ks` 接續的話，同一段切片裡的 `generate_report` 會因 `display_ks.json` 也過期而先停下）。`--compare-only`：`--from-node resolve_comparison_display_ks`。只做 `--only-node generate_comparison_report` 會被擋，訊息點名該從哪個 node 接續 |
+| 改 `compare_k` | `--compare`：`--from-node resolve_display_ks`（兩個 K 截斷與兩份報表一起重跑；只從 `resolve_comparison_display_ks` 接續的話，同一段切片裡的 `generate_report` 會因 `display_ks.json` 也過期而先停下）。`--compare-only`：`--from-node resolve_comparison_display_ks`。只做 `--only-node generate_comparison_report` 會被擋，訊息點名該從哪個 node 接續 |
 | 換比較對象，或改了 `prod_mapping` 等身分鍵（3.6 節） | `--from-node compute_compare_metrics`；只重畫會被擋（第 8 節）。這個 node 之前的 `load_compare_predictions`、`restrict_to_common` 輸出在記憶體裡，切片會把它們拉回來，涵蓋率因此一起重寫 |
 | `--compare-only` 下改了「算的」設定（7.2 節） | `--from-node compute_compare_metrics`。這個模式沒有 `compute_row_facts`、`prepare_eval_data`，所以不是 `COMPUTED_KEYS` 那一列指的 node |
 | `--compare` 下改了「算的」設定 | 照 `COMPUTED_KEYS` 那一列的 node（`compute_row_facts` 或 `prepare_eval_data`）：主線的結果也過期了，從比較鏈起跳的切片會在 `generate_report` 被擋 |
@@ -617,12 +631,12 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合拆
 | 列的事實 | `compute_row_facts` | `enriched_eval_predictions`、`evaluation_segment_columns`、`evaluation_item_categories` | 數評估列的事實，跟分數無關：資料概況（列數、entity／item／月份數、正例率、各月份／item／segment 的概況）、query group 數、無正例與全正的組數，以及全正組的帳（有正例的組數、全正佔比、要不要警告；開了 `query_filter.drop_all_positive_groups` 就不警告），item 與大類兩個粒度各一份；把 `joined`／`sources`／`missing` 帶給報表；結果帶設定指紋。模型與 baseline 是同一批列，共用這一份（[ADR-0031](../adr/0031-evaluation-second-pass-layers-and-single-source.md) 決定 4、8）。後置條件：篩完之後的月份數不等於設定的日期數（某個日期的 partition 空的或沒寫過）就 raise，訊息寫出預期數與實際數 | `evaluation_row_facts`（落地 `row_facts.json`） |
 | 模型指標 | `compute_metrics` | `enriched_eval_predictions`、`evaluation_row_facts`、`evaluation_segment_columns`、`evaluation_item_categories` | 計算 overall、per-item、per-segment、macro 與可選 category metrics，組數與 item 數從列的事實讀、不再數一次；照 `joined` 分群；結果帶母體帳 `population`（含分群欄 `segment_columns`）與設定指紋 | `evaluation_metrics`（落地 `metrics.json`） |
 | Baseline 每期彙總（僅 `baseline.score: rate` 且 `--post-training`） | `build_popularity_period_counts` | `sample_pool`、`label_table`、`popularity_period_counts_month_plan`（CLI 算的期計畫）、parameters | 只算計畫裡還沒落地的期（加上 `--rebuild-dates` 點名的）：每個 time 值 × item 的候選數與正例數。與模型無關（見 3.4 節） | `popularity_period_counts`（Hive） |
-| Baseline | `compute_baseline_metrics` | `enriched_eval_predictions`、`evaluation_row_facts`、歷史 labels、`evaluation_segment_columns`、`evaluation_item_categories`；正例率模式再加 `popularity_period_counts`（讀回整張表）與期計畫（只加總計畫裡的期） | 建立 popularity scores（正例數，或正例率模式的正例率），在同一批列上用跟模型同一套計算算對照指標（含 macro，#535 之前沒有）；不產出自己的列的事實；另記 `popularity_window`：lookback 視窗實際涵蓋幾個月、月均的除數；`report.sections.baseline: false` 時不算，只回 `{"enabled": false}` stub（帶設定指紋） | `baseline_metrics`（落地 `baseline_metrics.json`） |
+| Baseline | `compute_baseline_metrics` | `enriched_eval_predictions`、`evaluation_row_facts`、歷史 labels、`evaluation_segment_columns`、`evaluation_item_categories`；正例率模式再加 `popularity_period_counts`（讀回整張表）與期計畫（只加總計畫裡的期） | 建立 popularity scores（正例數，或正例率模式的正例率），在同一批列上用跟模型同一套計算算對照指標（含 macro，#535 之前沒有）；不產出自己的列的事實；另記 `popularity_window`：lookback 視窗實際涵蓋幾個月、月均的除數；`report.sections.popularity_baseline: false` 時不算，只回 `{"enabled": false}` stub（帶設定指紋） | `baseline_metrics`（落地 `baseline_metrics.json`） |
 | 預測品質 | `compute_prediction_quality` | `enriched_eval_predictions`、`evaluation_segment_columns`（只取 `joined` 確認分區指紋，不分群）、parameters | 把每一列候選當二元預測：一次 `groupBy(item, 細箱)` 的分箱表，加上從它推出的 `pr_auc`、`roc_auc`、F1 最佳門檻（見 3.7 節），以及報表印的顯示分箱表（整體與每個 item）與門檻掃描表；不排除沒有正例的 query group。`report.sections.prediction_quality: false`（框架預設）時不算，只回 `{"enabled": false}` stub（帶設定指紋） | `prediction_quality_metrics`（落地 `prediction_quality.json`） |
-| 報表區 Spark 聚合 | `compute_report_aggregates` | `enriched_eval_predictions`、`evaluation_segment_columns`（只取 `joined` 確認分區指紋，不分群）、parameters | 標準報表 per-item 細部拆解段要用的 Spark 端聚合（bin 計數／quartile／rank 矩陣），落地後 `generate_report` 才能是純函式 | `evaluation_report_aggregates` |
-| 比較層 | `compare_to_baseline` | `evaluation_metrics`、`baseline_metrics`、parameters | 不跑 Spark，只讀這兩份已落地的 JSON：把模型與 baseline 的指標照名字與粒度（overall、per-item、macro、per-segment，有大類時另一份）配成格子，每格記這次、對照、差（差＝這次 − 對照，兩邊都有數才算）；落地 `evaluation.k_values` 的全部 K，另外多一格 `name@all`，把兩側各自的 `all` 配在一起。再記四項「兩邊能不能比」的標註，各帶 `same`：`all` 解析成幾、進 macro 的 item、算進指標的 query group 數、分群欄。算前先比對兩份輸入的設定指紋，不合就 raise。`report.sections.baseline: false` 時只寫 `{"enabled": false}` stub（帶設定指紋） | `baseline_comparison`（落地 `baseline_comparison.json`） |
-| K 截斷 | `resolve_display_ks` | `evaluation_metrics`、`baseline_comparison`、parameters | 不跑 Spark。把主報表每張表要印的 K 切好：`report.display.primary_map_k`、衡量指標段與 baseline 段各表的 K 欄，整數 K 超過該粒度 `"all"` 解析成的 K 就濾掉（3.1 節）；每塊以它的表所讀的結果命名（`evaluation_metrics`、`baseline_comparison`），頭號指標的欄是否留在表裡也記在這裡。排在比較之後，因為比較落地全部的 K：改顯示的 K 只需重跑這個 node 與報表。設定指紋多帶 `report.display.primary_map_k` | `evaluation_display_ks`（落地 `display_ks.json`） |
-| 標準報表 | `generate_report` | `evaluation_row_facts`、`evaluation_metrics`、`baseline_metrics`、`evaluation_report_aggregates`、`prediction_quality_metrics`、`baseline_comparison`、`evaluation_display_ks`、parameters（皆為必填參數，無預設值） | 產生互動式 HTML；純函式，不含任何 Spark 物件或 action，也不自己取差值、不自己截斷 K，只讀落地結果。概覽的頭號 macro per-item mAP 就是 `metrics.json` 的 `macro_avg.by_item.map_attr@{metric.k}`（未設時是 `@all`），不另算。畫之前比對上述七份落地 JSON 的設定指紋（`display_ks.json` 另含 `report.display.primary_map_k`），不合就 raise。落地結果缺報表要讀的值時也 raise，見第 8 節 | `evaluation_report` |
+| 報表區 Spark 聚合 | `compute_report_aggregates` | `enriched_eval_predictions`、`evaluation_segment_columns`（只取 `joined` 確認分區指紋，不分群）、parameters | 標準報表 名次分布段要用的 Spark 端聚合（bin 計數／quartile／rank 矩陣），落地後 `generate_report` 才能是純函式 | `evaluation_report_aggregates` |
+| 比較層 | `compare_to_baseline` | `evaluation_metrics`、`baseline_metrics`、parameters | 不跑 Spark，只讀這兩份已落地的 JSON：把模型與 baseline 的指標照名字與粒度（overall、per-item、macro、per-segment，有大類時另一份）配成格子，每格記這次、對照、差（差＝這次 − 對照，兩邊都有數才算）；落地 `evaluation.k_values` 的全部 K，另外多一格 `name@all`，把兩側各自的 `all` 配在一起。再記四項「兩邊能不能比」的標註，各帶 `same`：`all` 解析成幾、進 macro 的 item、算進指標的 query group 數、分群欄。算前先比對兩份輸入的設定指紋，不合就 raise。`report.sections.popularity_baseline: false` 時只寫 `{"enabled": false}` stub（帶設定指紋） | `baseline_comparison`（落地 `baseline_comparison.json`） |
+| K 截斷 | `resolve_display_ks` | `evaluation_metrics`、`baseline_comparison`、parameters | 不跑 Spark。把主報表每張表要印的 K 切好：`report.display.compare_k`、熱門度基準段各表的 K 欄，整數 K 超過該粒度 `"all"` 解析成的 K 就濾掉（3.1 節）；每塊以它的表所讀的結果命名（`evaluation_metrics`、`baseline_comparison`），概覽並列的兩個指標（overall `map@all`、macro `map_attr@all`）的欄是否留在表裡也記在這裡。排在比較之後，因為比較落地全部的 K：改顯示的 K 只需重跑這個 node 與報表。設定指紋多帶 `report.display.compare_k` | `evaluation_display_ks`（落地 `display_ks.json`） |
+| 標準報表 | `generate_report` | `evaluation_row_facts`、`evaluation_metrics`、`baseline_metrics`、`evaluation_report_aggregates`、`prediction_quality_metrics`、`baseline_comparison`、`evaluation_display_ks`、parameters（皆為必填參數，無預設值） | 產生互動式 HTML；純函式，不含任何 Spark 物件或 action，也不自己取差值、不自己截斷 K，只讀落地結果。概覽並列的兩個模型選擇指標，就是 `metrics.json` 的 overall `map@all` 與 `macro_avg.by_item.map_attr@all`，不另算。畫之前比對上述七份落地 JSON 的設定指紋（`display_ks.json` 另含 `report.display.compare_k`），不合就 raise。落地結果缺報表要讀的值時也 raise，見第 8 節 | `evaluation_report` |
 
 讀 `enriched_eval_predictions` 的 node，第一步都先篩到 `evaluation.snap_date` 的日期（一個或多個）：表裡是這個 model_version 評估過的**所有月份**，catalog 只替你篩掉別的 model_version。篩的同時逐日期確認分區指紋（見 4.6 節），再把指紋欄丟掉往下用。忘了篩不會報錯，只會把所有月份一起算進去，所以 `tests/test_pipelines/test_evaluation/test_pipeline.py` 有一條 AST 測試：接上這張表、函式裡卻沒呼叫 `restrict_to_current_eval_partitions` 的 node 會讓測試失敗（只呼叫只篩不驗的 `restrict_to_eval_snap_dates` 也算沒做）。讀表的 node 之中，分群的 `compute_row_facts`、`compute_metrics`、`compute_baseline_metrics` 另外先比對 `segment_columns.json` 的指紋（見 4.6 節）；後兩個也比對 `row_facts.json` 的指紋。
 
@@ -638,10 +652,10 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合拆
 |---|---|---|---|
 | 載入 Model B | `load_compare_predictions` | 依 compare source 載入、篩日期（每個設定的日期都要有 rows，缺的日期會列出來並 raise）、轉欄位與 item mapping | `compare_predictions_raw`（記憶體） |
 | 對齊母體 | `restrict_to_common` | Model A 先篩到評估日期並確認分區指紋（比今天的設定＋`segment_columns.json` 的 `joined`；為什麼不比那份 JSON 記錄的設定，見 5.3 節），再取共同 query groups 與 items、雙方重新排名、Model B 一律沿用 Model A 的 label | `eval_predictions_common`、`compare_predictions_common`（記憶體）；`compare_coverage`（落地 `compare_coverage.json`：兩側裁切前後的 query group 數、item 數與被剔除的 item） |
-| 兩側指標 | `compute_compare_metrics` | 在共同母體上，兩側各算一份列的事實與一份指標（含母體帳）；只有 Model A 照 `evaluation_segment_columns` 分群，Model B 是另一張預測表、沒有分群欄；兩側的大類都照 `evaluation_item_categories`（欄模式）或手寫 mapping 排。`drop_all_positive_groups` 對兩側都套用 | `compare_row_facts_a`、`compare_metrics_a`、`compare_row_facts_b`、`compare_metrics_b`（各落地同名 `.json`） |
+| 兩側指標 | `compute_compare_metrics` | 在共同母體上，兩側各算一份列的事實與一份指標（含母體帳）；兩側都照 `evaluation_segment_columns` 分群：Model B（對照側）自己的預測表沒有分群欄，借 Model A 那側的分群欄與值（`compute_compare_metrics`，#537；以前 B 不分群，所以沒有 per-segment 數字可比）；兩側的大類都照 `evaluation_item_categories`（欄模式）或手寫 mapping 排。`drop_all_positive_groups` 對兩側都套用 | `compare_row_facts_a`、`compare_metrics_a`、`compare_row_facts_b`、`compare_metrics_b`（各落地同名 `.json`） |
 | 比較層 | `compare_to_source` | Model A 對 Model B，形狀與 `baseline_comparison.json` 相同：每格這次（A）、對照（B）、差（A − B，兩邊都有數才算），全部 K，加四項「兩邊能不能比」的標註。算前比對輸入的設定指紋與比較對象的身分（3.6 節） | `source_comparison`（落地 `source_comparison.json`） |
-| K 截斷 | `resolve_comparison_display_ks` | 切好比較報表每張表要印的 K 與列：`guardrail_recall_k`、`primary_map_k`，以及 overall 表兩側各自以自己的 K 為界的列（3.1 節）；設定指紋多帶這兩個 display 鍵 | `comparison_display_ks`（落地 `comparison_display_ks.json`） |
-| 比較報表 | `generate_comparison_report` | 讀 `compare_coverage`、`compare_row_facts_a`、`source_comparison`、`comparison_display_ks` 與 parameters，產生 A/B/Delta 的 HTML；純函式，不含 Spark 物件，也不自己取差值、不自己截斷 K | `evaluation_comparison_report` |
+| K 截斷 | `resolve_comparison_display_ks` | 切好比較報表每張表要印的 K 與列：`compare_k`，以及 overall 表兩側各自以自己的 K 為界的列（3.1 節）；設定指紋多帶這個 display 鍵 | `comparison_display_ks`（落地 `comparison_display_ks.json`） |
+| 比較報表 | `generate_comparison_report` | 讀 `compare_coverage`、`compare_row_facts_a`、`source_comparison`、`comparison_display_ks` 與 parameters，產生這次／對照／差的 HTML；純函式，不含 Spark 物件，也不自己取差值、不自己截斷 K | `evaluation_comparison_report` |
 
 產物位置見 6.1 節。每份比較產物都帶 `config_fingerprint` 與 `compare_source`（3.6 節）。
 
@@ -683,13 +697,13 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合拆
 | `compare_row_facts_a.json`、`compare_row_facts_b.json` | 同目錄（`compare_row_facts_a`、`compare_row_facts_b`：共同母體上 Model A、Model B 各自列的事實；帶 `config_fingerprint` 與 `compare_source`） | `--compare`、`--compare-only` |
 | `compare_metrics_a.json`、`compare_metrics_b.json` | 同目錄（`compare_metrics_a`、`compare_metrics_b`：共同母體上兩側各自的指標與母體帳；Model A 照 `joined` 分群、Model B 不分群；帶 `config_fingerprint` 與 `compare_source`） | `--compare`、`--compare-only` |
 | `source_comparison.json` | 同目錄（`source_comparison`：Model A 對 Model B 每格的這次、對照、差與四項能不能比的標註，形狀同 `baseline_comparison.json`） | `--compare`、`--compare-only` |
-| `comparison_display_ks.json` | 同目錄（`comparison_display_ks`：比較報表每張表要印的 K 與列；指紋多帶 `guardrail_recall_k`、`primary_map_k`） | `--compare`、`--compare-only` |
+| `comparison_display_ks.json` | 同目錄（`comparison_display_ks`：比較報表每張表要印的 K 與列；指紋多帶 `compare_k`） | `--compare`、`--compare-only` |
 | `manifest.json` | `data/evaluation/<model_version>/<YYYYMMDD>/manifest.json` | 所有實際執行模式 |
 | `row_facts.json` | `data/evaluation/<model_version>/<YYYYMMDD>/row_facts.json`（`evaluation_row_facts`：資料概況、query group 數、無正例與全正的組數、分群欄，item 與大類粒度，帶 `config_fingerprint`；每個粒度另記全正組的帳：有正例的組數 `n_groups_with_positive`、全正佔比 `all_positive_share`、要不要警告 `all_positive_warns`） | 標準、`--compare` |
 | `metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/metrics.json`（`evaluation_metrics`：overall、per-item、per-segment、macro 與 category 指標，per-item 指標的共用數字，母體帳 `population`；宣告 `event`／`occasion` 時另有同分列數 `n_tied_rows`／`tied_row_share`；母體帳 `population` 另記分群欄 `segment_columns`；帶 `config_fingerprint`） | 標準、`--compare` |
-| `baseline_metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/baseline_metrics.json`（`baseline_metrics`；另有 `popularity_window` 區塊，記 lookback 視窗實際涵蓋幾個月與月均的除數；`report.sections.baseline: false` 時是 `{"enabled": false}` stub，一樣帶指紋） | 標準、`--compare` |
+| `baseline_metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/baseline_metrics.json`（`baseline_metrics`；另有 `popularity_window` 區塊，記 lookback 視窗實際涵蓋幾個月與月均的除數；`report.sections.popularity_baseline: false` 時是 `{"enabled": false}` stub，一樣帶指紋） | 標準、`--compare` |
 | `prediction_quality.json` | `data/evaluation/<model_version>/<YYYYMMDD>/prediction_quality.json`（`prediction_quality_metrics`，見 3.7 節；報表印的顯示分箱表 `display_bins` 與門檻掃描 `threshold_sweep` 也落在這裡；`report.sections.prediction_quality: false` 時是 `{"enabled": false}` stub，一樣帶指紋） | 標準、`--compare` |
-| `baseline_comparison.json` | `data/evaluation/<model_version>/<YYYYMMDD>/baseline_comparison.json`（`baseline_comparison`：模型對 baseline 每格的這次、對照、差，與四項能不能比的標註；`report.sections.baseline: false` 時是 `{"enabled": false}` stub，一樣帶指紋） | 標準、`--compare` |
+| `baseline_comparison.json` | `data/evaluation/<model_version>/<YYYYMMDD>/baseline_comparison.json`（`baseline_comparison`：模型對 baseline 每格的這次、對照、差，與四項能不能比的標註；`report.sections.popularity_baseline: false` 時是 `{"enabled": false}` stub，一樣帶指紋） | 標準、`--compare` |
 | `display_ks.json` | `data/evaluation/<model_version>/<YYYYMMDD>/display_ks.json`（`evaluation_display_ks`：主報表每張表要印的 K，帶 `config_fingerprint`） | 標準、`--compare` |
 | `segment_columns.json` | `data/evaluation/<model_version>/<YYYYMMDD>/segment_columns.json`（`evaluation_segment_columns`，見 3.2 節） | 標準、`--compare` 寫；`--compare-only` 讀 |
 | `item_categories.json` | `data/evaluation/<model_version>/<YYYYMMDD>/item_categories.json`（`evaluation_item_categories`，見 3.3 節；沒設 `column` 時 `mapping` 是空的） | 標準、`--compare` 寫；`--compare-only` 讀（缺檔只在欄模式擋） |
@@ -709,20 +723,20 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合拆
 
 1. 報表 metadata 的 model version 與 snap date 正確（多個日期時顯示「最早 ~ 最晚（N 個日期）」，N 應等於設定的日期數）。
 2. `row_facts.json` 的 `n_queries` 大於零，`n_excluded_queries` 比例合理。
-3. dataset overview 的 entities、items、rows 與 positives 符合該批次預期。
+3. 核心概念總量表與資料統計的 entities、items、rows 與 positives 符合該批次預期。
 4. 主要 `map@K` 與 `recall@K` 使用的 K 符合實際展示空間。
 5. per-item 與 per-segment 沒有被整體平均掩蓋的明顯退化。
-6. popularity baseline 段有出現（lookback 視窗查無歷史時整條會 raise，不會帶著用答案排名的 baseline 跑完），段落說明寫的 lookback 月數與 `evaluation.baseline.lookback_months` 一致。
-7. `per_item_breakdown` 段的 score/rank 分布沒有異常集中或缺產品。
+6. 熱門度基準段有出現（lookback 視窗查無歷史時整條會 raise，不會帶著用答案排名的 baseline 跑完），段落說明寫的 lookback 月數與 `evaluation.baseline.lookback_months` 一致。
+7. `rank_distribution` 段的 score/rank 分布沒有異常集中或缺產品。
 8. `enriched_eval_predictions` 的本次 model/date partition 有資料且 key 沒有非預期重複。
 9. 打開 `prediction_quality` 時：整體分箱表的列數加總等於該段寫的母體列數；`--post-training` 模式下，母體說明有「test 表在 dataset 階段已經丟掉沒有正例的 query group」那一句。
 
 比較報表另需確認：
 
-1. Model A、Model B source 與 label 顯示正確。
-2. common query group／item coverage 足夠，沒有大量意外被排除的 items。
+1. 概覽的「跟誰比」表裡，Model A、Model B 的 source 與 label 顯示正確。
+2. 概覽涵蓋表的 common query group／item 數足夠，沒有大量意外被排除的 items。
 3. 雙方在共同範圍的 row coverage 與候選集合語意一致。
-4. Delta 的方向為 `Model A - Model B`。
+4. 差的方向為這次 − 對照，即 `Model A - Model B`。
 5. 外部 mapping 沒有非預期 drop 或多對一合併。
 
 範例查詢：
@@ -784,14 +798,14 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 
 | 類別 | 鍵 | 變了要做什麼 | 做錯會怎樣 |
 |---|---|---|---|
-| **算的**：改變 Spark 計算、抽樣，或決定要不要算 | `evaluation.` 底下的 `snap_date`、`segment_columns`、`segment_sources`、`k_values`、`item_categories.*`、`metric.*`、`query_filter.*`（`drop_all_positive_groups`）、`baseline.*`、`prediction_quality.*`、`report.sections.baseline`、`report.sections.per_item_breakdown`、`report.sections.prediction_quality`、`report.diagnostics.*` | 從該鍵對應的 node 重跑（`--from-node`），或標準 full run。每個鍵對應哪個 node，錯誤訊息會直接寫出來；對照表住在 `src/recsys_tfb/pipelines/evaluation/steps/config_fingerprint.py` 的 `COMPUTED_KEYS`（例：`metric.*` → `compute_row_facts`；`item_categories.column` → `prepare_eval_data`，其餘 `item_categories.*` → `compute_row_facts`） | 只做 `--only-node generate_report`，或做了沒涵蓋那個 node 的切片：`generate_report` 在畫之前 raise，訊息列出哪份產物、哪個鍵從什麼值變成什麼值、該 `--from-node` 哪個 node。不會產出混著新舊設定的報表 |
+| **算的**：改變 Spark 計算、抽樣，或決定要不要算 | `evaluation.` 底下的 `snap_date`、`segment_columns`、`segment_sources`、`k_values`、`item_categories.*`、`metric.*`、`query_filter.*`（`drop_all_positive_groups`）、`baseline.*`、`prediction_quality.*`、`report.sections.popularity_baseline`、`report.sections.rank_distribution`、`report.sections.prediction_quality`、`report.diagnostics.*` | 從該鍵對應的 node 重跑（`--from-node`），或標準 full run。每個鍵對應哪個 node，錯誤訊息會直接寫出來；對照表住在 `src/recsys_tfb/pipelines/evaluation/steps/config_fingerprint.py` 的 `COMPUTED_KEYS`（例：`metric.*` → `compute_row_facts`；`item_categories.column` → `prepare_eval_data`，其餘 `item_categories.*` → `compute_row_facts`） | 只做 `--only-node generate_report`，或做了沒涵蓋那個 node 的切片：`generate_report` 在畫之前 raise，訊息列出哪份產物、哪個鍵從什麼值變成什麼值、該 `--from-node` 哪個 node。不會產出混著新舊設定的報表 |
 | **算的**：切換執行模式（`--post-training` ↔ 監控） | 不是 `evaluation.*` 底下的使用者設定，是 CLI 注入 `parameters` 頂層的 run mode（同 `model_version`／`snap_date`），對照表裡的鍵名是 `post_training` | 照錯誤訊息從 `prepare_eval_data` 重跑（`--from-node prepare_eval_data`），或標準 full run | 同一 `(model_version, snap_date)` 先跑過一種模式、再切另一種模式做 `--only-node generate_report`：`prepare_eval_data` 讀的預測表不同（`training_eval_predictions` vs `ranked_predictions`），不擋的話兩種母體的數字會混進同一份報表 |
-| **畫的**：只改報表長相，不重算任何指標 | `evaluation.report.sections` 的其餘鍵（`dataset_overview`、`primary_map`）；比較報表另有 `compare_sources.<key>.label` | 標準報表 `--only-node generate_report`；比較報表 `--only-node generate_comparison_report` | 不會出錯；做 full run 也可以，只是多花時間 |
-| **畫的**：改每張表印哪些 K | `evaluation.report.display.primary_map_k`（標準報表與比較報表都讀）、`evaluation.report.display.guardrail_recall_k`（只有比較報表讀） | 標準報表與帶 `--compare` 的比較報表：`--from-node resolve_display_ks`（它往後的切片含兩個 K 截斷與兩份報表）；`--compare-only`：`--from-node resolve_comparison_display_ks`。都是只重切 K 再畫，不跑 Spark | 只做 `--only-node generate_report`：`display_ks.json` 的指紋帶 `primary_map_k`，`generate_report` 在畫之前 raise，訊息點名 `--from-node resolve_display_ks`。比較報表同理：`comparison_display_ks.json` 的指紋帶這兩個鍵，只做 `--only-node generate_comparison_report` 會被擋，訊息點名上一欄那個 node |
+| **畫的**：只改報表長相，不重算任何指標 | `evaluation.report.sections` 的其餘鍵（`data_stats`、`ranking_metrics`）；比較報表另有 `compare_sources.<key>.label` | 標準報表 `--only-node generate_report`；比較報表 `--only-node generate_comparison_report` | 不會出錯；做 full run 也可以，只是多花時間 |
+| **畫的**：改每張表印哪些 K | `evaluation.report.display.compare_k`（標準報表與比較報表都讀） | 標準報表與帶 `--compare` 的比較報表：`--from-node resolve_display_ks`（它往後的切片含兩個 K 截斷與兩份報表）；`--compare-only`：`--from-node resolve_comparison_display_ks`。都是只重切 K 再畫，不跑 Spark | 只做 `--only-node generate_report`：`display_ks.json` 的指紋帶 `compare_k`，`generate_report` 在畫之前 raise，訊息點名 `--from-node resolve_display_ks`。比較報表同理：`comparison_display_ks.json` 的指紋帶這個鍵，只做 `--only-node generate_comparison_report` 會被擋，訊息點名上一欄那個 node |
 
-`query_filter.drop_all_positive_groups`（預設 `false`，#376）打開後，衡量指標（overall／per-item／分群／大類，含報表的頭號 mAP）、熱門度基準線，以及 `--compare`／`--compare-only` 比較報表的兩側都排除「全正的 query group」——組內每一筆候選的 label 都是正例（label 有分級時，每一筆都是同一個正值），不管怎麼排，它的組層級排序指標（mAP／precision／recall）都一樣、排法分不出好壞（CONTEXT.md 的**全正的 query group**）。比較報表的兩側各自依自己的列判定，候選列不對稱的組可能一側排除、一側保留，報表的 coverage 說明會寫出來。不論開或關都會多印全正組數與佔比，佔比超過 10%（寫死在程式，非設定鍵）就警告。**不套用**：報表 per-item 細部拆解段、training 的 test mAP 與 HPO 目標。唯一讀法是 `evaluation/metrics.py::drop_all_positive_groups`；值域檢查是 A49（`core/consistency.py`，[`pipeline-checks.md`](../operations/user-guides/pipeline-checks.md)）。
+`query_filter.drop_all_positive_groups`（預設 `false`，#376）打開後，排序指標（overall／per-item／分群／大類，含概覽並列的兩個 mAP）、熱門度基準線，以及 `--compare`／`--compare-only` 比較報表的兩側都排除「全正的 query group」——組內每一筆候選的 label 都是正例（label 有分級時，每一筆都是同一個正值），不管怎麼排，它的組層級排序指標（mAP／precision／recall）都一樣、排法分不出好壞（CONTEXT.md 的**全正的 query group**）。比較報表的兩側各自依自己的列判定，候選列不對稱的組可能一側排除、一側保留，報表的 coverage 說明會寫出來。不論開或關都會多印全正組數與佔比，佔比超過 10%（寫死在程式，非設定鍵）就警告。**不套用**：報表名次分布段（正例平均名次除外）、training 的 test mAP 與 HPO 目標。唯一讀法是 `evaluation/metrics.py::drop_all_positive_groups`；值域檢查是 A49（`core/consistency.py`，[`pipeline-checks.md`](../operations/user-guides/pipeline-checks.md)）。
 
-`report.sections.baseline`、`report.sections.per_item_breakdown` 與 `report.sections.prediction_quality` 雖然在 `sections` 底下，卻是「算的」：設成 `false` 時 `compute_baseline_metrics`／`compute_report_aggregates`／`compute_prediction_quality` 直接不算、只寫 stub。把它們從 `false` 翻回 `true` 只重繪，報表會缺那一段，所以指紋把它們算進去。
+`report.sections.popularity_baseline`、`report.sections.rank_distribution` 與 `report.sections.prediction_quality` 雖然在 `sections` 底下，卻是「算的」：設成 `false` 時 `compute_baseline_metrics`／`compute_report_aggregates`／`compute_prediction_quality` 直接不算、只寫 stub。把它們從 `false` 翻回 `true` 只重繪，報表會缺那一段，所以指紋把它們算進去。
 
 判斷依據是 JSON 裡的指紋，不是檔案在不在：
 
@@ -827,7 +841,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 
 - `catalog.exists()` 只能確認產物存在，不能證明內容來自目前 evaluation settings、label snapshot 或預測資料。設定這一半由指紋補上：落地 JSON 帶 `config_fingerprint`，讀到與目前「算的」設定不合的 JSON 會 raise（見 7.2 節）。label snapshot 與預測資料沒有指紋，資料變了仍要自己決定重跑。
 - **這條對 row-level 資料也成立。** `enriched_eval_predictions` 落地之後（[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1），從 `prepare_eval_data` 之後接續會讀表、不重做 join。CLI 只替你問「評估日期的 partition 在不在」（不在就把 `prepare_eval_data` 拉回來），`segment_columns.json` 與 partition 自帶的指紋替你擋「決定 partition 內容的設定變了、或 partition 被另一組設定的執行蓋掉」（見 4.6 節）；partition 在、設定也沒變，但 `label_table` 回補或預測重發布過，讀到的就是舊的列，不會報錯。資料變了要 `--from-node prepare_eval_data` 或 full run。
-- `generate_report` 的輸入（列的事實、指標、baseline、report aggregates、預測品質、比較層與 K 截斷）都已落地，因此從該 node 接續不補跑任何 node，不重算任何指標（見 4.6 節）。已落地的 JSON 讀回時照指紋檢查，不是照單全收；改了「算的」設定、或改了 `report.display.primary_map_k` 而只做這個接續，會在 `generate_report` 被指紋擋下並提示該 `--from-node` 哪個 node，不會悄悄沿用舊結果。指紋只看設定、不看資料：`label_table` 回補或預測重發布之後只做這個接續，畫出來的是上一次 run 的指標（#351 之前這個接續會順便重算指標與 baseline，但 report aggregates 本來就沿用舊的）。資料變了要 `--from-node prepare_eval_data` 或 full run。差值與 K 截斷的產物（`baseline_comparison.json`、`source_comparison.json`、`display_ks.json`、`comparison_display_ks.json`）複製了它們讀的數字：資料變了之後只用 `--only-node` 重跑上游某個 node（例如 `compute_metrics`）再重畫，同一頁可能印出新舊兩個數字，而且不報錯。要用 `--from-node`，讓下游一起重算。
+- `generate_report` 的輸入（列的事實、指標、baseline、report aggregates、預測品質、比較層與 K 截斷）都已落地，因此從該 node 接續不補跑任何 node，不重算任何指標（見 4.6 節）。已落地的 JSON 讀回時照指紋檢查，不是照單全收；改了「算的」設定、或改了 `report.display.compare_k` 而只做這個接續，會在 `generate_report` 被指紋擋下並提示該 `--from-node` 哪個 node，不會悄悄沿用舊結果。指紋只看設定、不看資料：`label_table` 回補或預測重發布之後只做這個接續，畫出來的是上一次 run 的指標（#351 之前這個接續會順便重算指標與 baseline，但 report aggregates 本來就沿用舊的）。資料變了要 `--from-node prepare_eval_data` 或 full run。差值與 K 截斷的產物（`baseline_comparison.json`、`source_comparison.json`、`display_ks.json`、`comparison_display_ks.json`）複製了它們讀的數字：資料變了之後只用 `--only-node` 重跑上游某個 node（例如 `compute_metrics`）再重畫，同一頁可能印出新舊兩個數字，而且不報錯。要用 `--from-node`，讓下游一起重算。
 - `enriched_eval_predictions` 是 evaluation 唯一的 row-level 落地產物：`prepare_eval_data` 寫一次，同一次 run 的其他 node 與之後的 `--compare-only` 都讀它；`--compare-only` 會先驗證指定 model/date partition 非空。
 - `--compare-only` 不會更新 enriched partition，也不會重新產生標準 report。
 - 位於 slicing 起點之前的資料讀取或驗證可能被跳過；來源資料變更時應 full run。
@@ -847,11 +861,11 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 | `compute_row_facts postcondition: N evaluated months ... expected exactly M` | 某個評估日期的 `enriched_eval_predictions` partition 是空的或沒寫過（多半是從 `prepare_eval_data` 之後接續） | 照訊息 `--from-node prepare_eval_data` 重跑 |
 | `N duplicated label_table key(s) on [...]` | `label_table` 在該月的 `time + entity + item` 上有重複列 | 在上游去重。evaluation 不替你挑一列：重複的 key 會讓 LEFT JOIN 把候選複製成多列、rank 全錯，而且不會報錯 |
 | `Type conflict writing to Hive table '…enriched_eval_predictions' (rank: … ／ label: …)` | 這張表是舊版寫的：當時 `--post-training` 補出來的 `rank` 是 INT（現在是 BIGINT），監控模式的 `label` 沿用 `label_table` 的型別（現在一律 INT） | 表內容可由重跑 evaluation 重建：DROP 這張表，再對需要的月份重跑。同一模式重跑也會撞，不是只有換模式；這張表跨所有 model_version 與月份，DROP 之後到重跑之前 `--compare-only` 找不到 Model A |
-| `Evaluation artifacts on disk do not match the current computed settings` | 改了「算的」設定之後只重繪（例如只做 `--only-node generate_report`）；或磁碟上的 JSON 是指紋機制之前寫的（訊息寫 `has no config_fingerprint`） | 照訊息最後一行的 `--from-node` 重跑。只改了「畫的」鍵卻看到它，先對照 7.2 節確認那個鍵的分類（`report.display.primary_map_k` 的接續點是 `resolve_display_ks`） |
+| `Evaluation artifacts on disk do not match the current computed settings` | 改了「算的」設定之後只重繪（例如只做 `--only-node generate_report`）；或磁碟上的 JSON 是指紋機制之前寫的（訊息寫 `has no config_fingerprint`） | 照訊息最後一行的 `--from-node` 重跑。只改了「畫的」鍵卻看到它，先對照 7.2 節確認那個鍵的分類（`report.display.compare_k` 的接續點是 `resolve_display_ks`） |
 | `(A22) evaluation.snap_date=... is not a test month`（多個日期時是 `evaluation.snap_date date(s) [...] are not test months`），還沒起 Spark | 帶了 `--post-training`，但該月（或列出的那幾個月）不在 `dataset.test_snap_dates` | 把該月加進 `dataset.test_snap_dates` 並補跑 dataset ＋ predict（見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)），或把 `evaluation.snap_date` 指回已設定的月份 |
 | `A61: 'evaluation.diagnosis' ...`，還沒起 Spark | 設定裡還寫著 `evaluation.diagnosis` 這一段（含 `ci`）；診斷整批拿掉（#532），沒有程式讀它，不論值是什麼都擋 | 刪掉整段 `diagnosis:`，沒有替代的設定鍵 |
 | `A34: evaluation.report.sections declares [...]`／`does not declare [...]`，還沒起 Spark | `sections` 多了沒有程式讀的鍵（常見：舊設定還留著 `guardrail_recall`、`per_item_attr`、`category`、`per_segment`），或少了程式讀的鍵（常見：v0.4.0 以前的設定少了 `prediction_quality`） | 多的刪掉；少的照訊息反引號裡的值補（`prediction_quality` 是 `false`，其餘是 `true`，這樣行為跟沒寫時一樣）。該有哪些鍵見 3.5 節 |
-| `<名稱> has no <路徑>, which the report draws: it was landed by an older <node>, or not for these settings.`（`<名稱>` 是 `baseline_comparison` 或 `evaluation_display_ks`） | 報表要畫的值不在落地結果裡：那份 JSON 是舊版 node 寫的，或寫它的時候設定不是現在這組（例如 baseline 段先關著、現在打開） | 照訊息 `--from-node` 它指的 node（`compare_to_baseline` 或 `resolve_display_ks`），帶上寫那份結果時的旗標（如 `--post-training`），再重畫 |
+| `<名稱> has no <路徑>, which the report draws: it was landed by an older <node>, or not for these settings.`（`<名稱>` 是 `baseline_comparison` 或 `evaluation_display_ks`） | 報表要畫的值不在落地結果裡：那份 JSON 是舊版 node 寫的，或寫它的時候設定不是現在這組（例如熱門度基準段先關著、現在打開） | 照訊息 `--from-node` 它指的 node（`compare_to_baseline` 或 `resolve_display_ks`），帶上寫那份結果時的旗標（如 `--post-training`），再重畫 |
 | `Landed before #536, these results lack what the report reads instead of computing: ...`，或 `compare_to_baseline`／`resolve_display_ks` 的訊息寫 `landed before #536` | #536 之前落地的 `row_facts.json`、`baseline_metrics.json`、`prediction_quality.json` 或 `metrics.json` 缺新加的鍵（全正組的帳、`popularity_window`、`display_bins`／`threshold_sweep`、`population` 的分群欄）。設定沒變、指紋對得上，所以只重畫不會自己補上，報表會缺帳與警告，或直接 `KeyError` | `--from-node compute_row_facts`（三種訊息建議的都是它），帶上寫那份結果時的旗標，再重畫 |
 | `Evaluation artifacts on disk were computed with another evaluation.compare than today's; drawing from them would mix the two:`，結尾 `Re-run with --from-node compute_compare_metrics, which recomputes every artifact above.`；某份產物沒有記錄時寫 `records no compare_source` | 換了比較對象（`--compare` 換 key，或改了 `compare_sources.<key>` 的 `kind`、`model_version`、`source`、`table`、`columns`、`prod_mapping`、`unmapped_policy`）之後只重畫（`--only-node generate_comparison_report`）：落地的比較產物是跟舊對象比出來的，直接畫會把舊對象的數字印在新對象的 label 底下、退出碼 0。`records no compare_source` 是這個機制之前寫的檔 | 照訊息 `--from-node compute_compare_metrics`，帶上寫那份結果時的旗標。只改 `label` 不會被擋，直接重畫（7.2 節） |
 | 報表正例率異常低 | label 觀察窗未成熟，或 sparse label 的缺 row 不代表負例 | 延後監控、補齊 label，確認資料語意 |
@@ -860,14 +874,14 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 | `evaluation.segment_sources.<鍵> is not in evaluation.segment_columns`，還沒起 Spark（A10） | 覆寫的鍵不是 `segment_columns` 裡的欄名（常見於舊寫法：鍵取別名、靠 `segment_column` 對應） | 把鍵改成它提供的欄名，並確認該欄列在 `segment_columns`；不需要的話刪掉這個條目 |
 | segment source table 無法讀取 | 覆寫的 table 名稱、database 或權限錯誤 | 用 Spark/Hive 確認表存在且可讀 |
 | segment source missing columns | 覆寫的 `key_columns` 或 `segment_column` 拼錯 | 比對覆寫表 schema；覆寫必須提供全部欄位 |
-| log `population table '...' has no such column`；報表寫「`<表>` 無欄 `<欄>`」 | 該模式的母體表沒有這欄，或 `segment_columns` 欄名打錯 | 核對欄名；確實要分群就讓母體表帶這欄，或用 `segment_sources` 覆寫指到有這欄的表 |
+| log `population table '...' has no such column`；報表寫「母體表 `<表>` 無欄 `<欄>`」 | 該模式的母體表沒有這欄，或 `segment_columns` 欄名打錯 | 核對欄名；確實要分群就讓母體表帶這欄，或用 `segment_sources` 覆寫指到有這欄的表 |
 | 分群表出現 `(unmatched)` | 母體表（或覆寫表）對某些 `(time, entity)` 沒有值 | 看它的 query 數與佔比判斷影響；它不進 macro 平均 |
 | `segment value '(unmatched)' is the name evaluation reserves` | 真實的 segment 值就叫 `(unmatched)` | 上游改名 |
-| per-segment 的表沒出現 | `segment_columns.json` 的 `joined` 是空的（母體表缺欄），或 `report.sections.primary_map` 關閉（per-segment 的表沒有自己的開關） | 看報表「基本統計」段的缺欄註記與 `segment_columns.json` |
+| per-segment 的表沒出現 | `segment_columns.json` 的 `joined` 是空的（母體表缺欄），或 `report.sections.ranking_metrics` 關閉（per-segment 的表沒有自己的開關） | 看報表「資料統計」段的缺欄註記與 `segment_columns.json` |
 | `--compare-only` 讀不到 `segment_columns.json` | enriched partition 是這個機制之前寫的 | 重跑一次標準 evaluation |
 | product category unknown product | mapping 引用了未宣告 item | 對齊 `schema.categorical_values[item]` |
 | category 結果不符合預期 | item 重複映射或 max-child 語意不適合業務 | 確認每個 item 只屬於一類，重新檢視 category 定義 |
-| baseline raise `No label_table history in [...) ... label_table has months: [...]` | lookback window 沒有歷史資料（bug 1，不再是 warning + fallback） | 補歷史 labels、調整 `evaluation.baseline.lookback_months`，或把 `evaluation.report.sections.baseline` 設 `false` |
+| baseline raise `No label_table history in [...) ... label_table has months: [...]` | lookback window 沒有歷史資料（bug 1，不再是 warning + fallback） | 補歷史 labels、調整 `evaluation.baseline.lookback_months`，或把 `evaluation.report.sections.popularity_baseline` 設 `false` |
 | `--compare` key 不存在 | CLI key 不在 `compare_sources` | 檢查 YAML key 與錯誤訊息列出的 available keys |
 | compare source 沒有該日期資料 | Model B source、model version 或日期不一致 | 查來源 table 的 model/date partitions |
 | external item unmapped | `prod_mapping` 未涵蓋外部 item | 補 mapping；確認可接受時才使用 `unmapped_policy: drop` |
@@ -875,7 +889,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 | 比較 coverage 大幅縮水 | 候選母體、客戶母體或外部 mapping 不一致 | 檢查 comparison report coverage 與 dropped items |
 | `enriched_eval_predictions has no partition` | 直接使用 `--compare-only`，但 Model A 尚未標準評估 | 先執行標準 evaluation 或 `--compare` |
 | compare-only 讀到錯誤情境 | 同 model/date enriched partition 曾被另一種模式覆寫 | 以正確 `--post-training` 狀態重跑標準 evaluation |
-| `per_item_breakdown` 段過慢 | 多次 Spark aggregation、items 或 bins 過多 | 關閉不需要的段落（例如 `report.sections.per_item_breakdown: false`）或縮減 K／items |
+| `rank_distribution` 段過慢 | 多次 Spark aggregation、items 或 bins 過多 | 關閉不需要的段落（例如 `report.sections.rank_distribution: false`）或縮減 K／items |
 | `Unknown node` | node 名稱拼錯或 compare mode 的 DAG 不同 | 先用相同模式執行 `--list-nodes` |
 | 部分重跑出現大量 auto-included | 該落地的 JSON 不在磁碟（前一次 run 沒跑完），或這個月的 `enriched_eval_predictions` partition 還沒寫過（會把 `prepare_eval_data` 拉回來，見 4.6 節） | 先用 `--dry-run` 看補跑清單；前次完整 run 成功時，`--only-node generate_report` 不補跑任何 node（4.6 節）。要重做比較可改用 `--compare-only` |
 
@@ -885,11 +899,11 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 - post-training 與 monitoring 共用同一 enriched partition 與報表路徑，無法同時保留兩種情境。
 - 目前 per-segment metrics 只使用 `evaluation_segment_columns` 的 `joined` 第一欄，不會在單次 run 中分別計算多個 segment dimensions。
 - segment 對母體表的覆蓋率沒有門檻：對不到的 query 只成為 `(unmatched)` 群並印出佔比，不會因為佔比高而失敗。
-- comparison 先取 query group（`time × entity`）集合與 item 集合的交集，但不會補齊雙方缺少的 `(entity, item)` rows。若候選 coverage 不對稱，即使 query group／item 集合相同，評估母體仍可能不完全一致。報表 coverage 段的 common query group 數只算裁切後兩側都還在的 group，這種情況下它會小於某一側實際評分的 group 數。
+- comparison 先取 query group（`time × entity`）集合與 item 集合的交集，但不會補齊雙方缺少的 `(entity, item)` rows。若候選 coverage 不對稱，即使 query group／item 集合相同，評估母體仍可能不完全一致。比較報表概覽涵蓋表的 common query group 數只算裁切後兩側都還在的 group，這種情況下它會小於某一側實際評分的 group 數。
 - 比較的兩側都用 Model A 那份 label。`--compare-only` 的 A 是寫 enriched partition 那次標準 run 補的；`label_table` 在那之後回補過，要先重跑標準 evaluation，比較才會用上新答案。
 - score 相同時按 item 升冪決定名次（與 inference 同一條規則，`utils/ranking.py`）。名次因此可重現，但同分本身仍代表模型分不出高下。driver 端排名也照這條規則，而且不依賴 Spark 回傳的列順序（#355，當時是診斷抽樣；診斷已隨 #532 整批拿掉）：換個 Spark 平行度，落地 JSON 逐位元相同。例外是 `report_aggregates.json` 裡箱形圖的分位數（`score_box_stats_by_label`）：`percentile_approx` 的結果會隨分區怎麼切而變。這個誤差接受、不換算法（#366 第 4 項，#536 定案）。誤差有上限：回傳值一定是該組裡真的出現過的分數，它在組內的名次落在 floor((p − 1/accuracy)·N) 到 ceil((p + 1/accuracy)·N) 之間（N＝該 (item, label) 組的列數，p＝要的分位，例如 0.25）。這個上下界寫在 PySpark `DataFrame.approxQuantile` 的 docstring；`percentile_approx` 用同一套演算法，它的 docstring 寫 `1/accuracy` 就是相對誤差。程式用 `accuracy=10000`：一百萬列的組，名次最多偏 100。不換成精確分位數，是因為那要把每組的全部分數收進記憶體，生產規模撐不住。
 - zero-positive query groups 會排除於排序指標，因此報表不代表完整 inference entity 母體。預測品質段（3.7 節）不排除它們，但 `--post-training` 讀的 test 表在 dataset 階段就已經排除了。
-- popularity baseline 在 lookback 空窗時會 raise（bug 1），不再 fallback 至完整 label table 產生 leakage；只有 `evaluation.report.sections.baseline: false` 才會整段跳過不算。
+- popularity baseline 在 lookback 空窗時會 raise（bug 1），不再 fallback 至完整 label table 產生 leakage；只有 `evaluation.report.sections.popularity_baseline: false` 才會整段跳過不算。
 - product category 同 item 重複映射目前不會報錯，後出現的 category 會覆蓋前者。
 - 比較報表呈現指標差異但沒有 bootstrap、confidence interval 或顯著性檢定。
 - evaluation metrics 沒有獨立 JSON／table sink，無法直接形成長期監控時序。

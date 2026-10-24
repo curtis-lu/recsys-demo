@@ -143,27 +143,14 @@ def test_test_map_matches_the_report_when_event_is_declared(spark):
     assert result["per_item_map_attr"] == {
         "B": pytest.approx(0.25), "C": pytest.approx(1.0),
     }
-    from recsys_tfb.pipelines.evaluation.nodes import resolve_display_ks
-    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
-        fingerprint,
-    )
-
     facts = compute_row_facts(df, params)
     metrics = compute_all_metrics(df, params, facts)
-    # The card's K columns are the evaluation K cut's (#536); no baseline
-    # here, so the comparison it reads is the stub.
-    stamp = {"config_fingerprint": fingerprint(params)}
-    section = overview.build(
-        {"evaluation_row_facts": facts,
-         "evaluation_metrics": metrics,
-         "prediction_quality_metrics": None,
-         "evaluation_display_ks": resolve_display_ks(
-             {**metrics, **stamp}, {"enabled": False, **stamp}, params)},
-        params)
-    report_card = section.tables[section.table_titles.index(
-        "overall mAP@k（per-query 等權，另一種加權）")]
+    # The overview's model-selection table (#537): overall mAP at K = all.
+    section = overview.build({"evaluation_metrics": metrics}, params)
+    (selection,) = [b for b in section.blocks
+                    if getattr(b, "title", "") == "模型選擇指標"]
     assert result["overall_map"] == pytest.approx(
-        report_card.loc["map@all", "value"])
+        {r.label: r.cells[0] for r in selection.rows}["overall mAP"])
 
 
 def test_test_map_does_not_follow_the_all_positive_switch(spark):
@@ -283,10 +270,9 @@ def _legacy(result):
 @pytest.mark.parametrize("evaluation", [
     {"k_values": [5]},
     {"k_values": [1]},
-    {"k_values": [1, "all"], "metric": {"k": 1}},
     {"k_values": ["all"], "item_categories": {
         "enabled": True, "mapping": {"AB": ["A", "B"]}}},
-], ids=["no-all", "k1", "metric-k1", "categories-on"])
+], ids=["no-all", "k1", "categories-on"])
 def test_the_four_values_do_not_follow_evaluation_settings(spark, evaluation):
     """ADR-0028 background one: the node used to read two of its values off
     keys built from the K ``"all"`` resolved to, so ``k_values`` without

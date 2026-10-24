@@ -16,7 +16,8 @@ evaluation:
   # 單一 k superset。此處列出的每個 k 都會被算進所有 @K metric、所有粒度
   #（fine product overall/per-item/per-segment 與 category）。Report 各段
   # 透過 report.display.* 自行選要展示哪些 k 欄位。"all" 會在 runtime
-  # 解析成該粒度的 distinct item 數。
+  # 解析成該粒度的 distinct item 數；沒列也一定會算（模型選擇的兩個指標
+  # overall mAP、macro per-item mAP 都是 @all，#537）。
   k_values: [1, 2, 3, 4, 5, "all"]
 
   # ★Per-segment metrics 切片用的 segment column（選用：只有想要分群報表才要改，母體表沒有這欄不會中止）。欄從該執行模式的母體表取：
@@ -86,7 +87,7 @@ evaluation:
   # Report 產生選項
   # 這一區的鍵分兩類（ADR-0020 決定二；完整對照表在
   # src/recsys_tfb/pipelines/evaluation/steps/config_fingerprint.py 的 COMPUTED_KEYS）：
-  #   「算的」：sections.baseline、sections.per_item_breakdown、sections.prediction_quality、
+  #   「算的」：sections.popularity_baseline、sections.rank_distribution、sections.prediction_quality、
   #     diagnostics.*、上面的 prediction_quality.*。它們決定要不要算、
   #     怎麼算，會進落地 JSON 的設定指紋。改了要照錯誤訊息點名的 --from-node 重跑
   #     （對照表在 pipelines/evaluation/steps/config_fingerprint.py 的 COMPUTED_KEYS；不一定是產出那份
@@ -94,29 +95,32 @@ evaluation:
   #     哪個鍵、該 --from-node 哪個 node。
   #   「畫的」：sections 其餘鍵、display.*。只改報表長相，不重算任何指標：
   #     sections 其餘鍵改完 --only-node generate_report 即可。
-  #     display.primary_map_k 例外：主報表每張表顯示哪些 K 由 resolve_display_ks 先切好落地
+  #     display.compare_k 例外：主報表每張表顯示哪些 K 由 resolve_display_ks 先切好落地
   #     （display_ks.json，#536），改完要 --from-node resolve_display_ks（只重跑 K 截斷與報表，
   #     不跑 Spark）；只做 --only-node generate_report 會被擋下，錯誤訊息會指出這個 node。
-  #     比較報表（--compare／--compare-only）同理：display.guardrail_recall_k 與 primary_map_k
+  #     比較報表（--compare／--compare-only）同理：display.compare_k
   #     由 resolve_comparison_display_ks 切好落地（comparison_display_ks.json）。帶 --compare 時
   #     改完一律 --from-node resolve_display_ks（兩個 K 截斷與兩份報表一起重跑，不跑 Spark）；
   #     --compare-only 沒有主報表，改完 --from-node resolve_comparison_display_ks。只做
   #     --only-node generate_comparison_report 會被擋下，錯誤訊息會指出該從哪個 node 接續。
   # sections 的鍵必須剛好是報表讀的那幾個：多寫一個（沒人讀、設了沒用）或少寫一個
   # （讀了卻關不掉），evaluation 指令一進來就擋；值必須是 true／false，不加引號
-  # （A34，清單在 core/consistency.py 的 EVALUATION_REPORT_SECTIONS）。
+  # （A34，清單在 core/consistency.py 的 EVALUATION_REPORT_SECTIONS）。鍵名＝段的檔名
+  # （src/recsys_tfb/evaluation/report_sections/<鍵名>.py，#537）。
   report:
     sections:
-      dataset_overview: true
-      primary_map: true          # 衡量指標段：overall、per-item、per-segment、大類
-      per_item_breakdown: true   # per-item 細部拆解段。算的：false 時 compute_report_aggregates 只寫 stub
-      baseline: true             # 算的：false 時 compute_baseline_metrics 只寫 stub
-      prediction_quality: false  # 算的：預測品質指標家族（見上方 prediction_quality）；
-                                 # false 時 compute_prediction_quality 只寫 stub
-    display:                     # 畫的
-      primary_map_k: [1, 3, 5, "all"]
-      guardrail_recall_k: [1, 2, 3, 4, 5]
-    diagnostics:                 # 算的
+      data_stats: true            # 資料統計段
+      ranking_metrics: true       # 排序指標段：overall、per-item、per-segment、大類
+      rank_distribution: true     # 名次分布段。算的：false 時 compute_report_aggregates 只寫 stub
+      popularity_baseline: true   # 熱門度基準段。算的：false 時 compute_baseline_metrics 只寫 stub
+      prediction_quality: false   # 算的：預測品質指標家族（見上方 prediction_quality）；
+                                  # false 時 compute_prediction_quality 只寫 stub
+    display:                      # 畫的
+      # compare_k：比較表顯示哪些 K——熱門度基準段的每張表、比較報表各 item 與大類段的
+      # 每張表（map_attr、per-item recall）。沒寫時等於上面的 k_values。每個整數都要列在
+      # k_values 裡（不然那格永遠算不到；"all" 一定有），A62 檢查。
+      compare_k: [1, 3, 5, "all"]
+    diagnostics:                  # 算的
       include_distributions: true
       # 診斷圖在 Spark 端聚合（bin 計數／quartile／rank 矩陣），體積與列數無關，
       # 不再需要 row 抽樣上限。
@@ -126,25 +130,22 @@ evaluation:
   # shrinkage_k=0 ＝ 不收縮。作用順序：min_positives 先排除 → shrinkage 向
   # pooled（n_pos 加權）平均收縮 → weight_alpha 加權（w_j ∝ n_pos^α）。
   # 只作用於 item 粒度（by_item / by_item_segment）；by_segment 維持等權。
-  # k = 主指標家族（per-item macro，含報表的頭號 mAP）計算 AP 的截斷 k；null ＝ 不截斷
-  # （full mAP）。跟 k_values 是兩個獨立的軸：不必列在 k_values 裡，主線會自己補算
-  # map_attr@k。
   metric:
     weight_alpha: 0.0
-    k: null
     min_positives: 0
     shrinkage_k: 0
 
   # 全正的 query group 過濾（#376；預設關，連父鍵一起註解——CONTEXT.md
   # 的「全正的 query group」）。全正＝組內每一筆候選的 label 都是正例
   # （label 有分級時，每一筆都是同一個正值），不管怎麼排，它的組層級排序
-  # 指標（mAP／precision／recall）都一樣、排法分不出好壞。開了之後，衡量
-  # 指標（overall／per-item／分群／大類，含報表的頭號 mAP）、熱門度基準線，
-  # 以及 `--compare`／`--compare-only` 比較報表的兩側都排除這種組（兩側各自
-  # 依自己的列判定）；不論開或關都會多印全正組數與佔比，佔比超過 10%（寫死
-  # 在程式，非設定鍵）就警告。**不套用**：報表的 per-item 細部拆解段、training 的
+  # 指標（mAP／precision／recall）都一樣、排法分不出好壞。開了之後，排序
+  # 指標（overall／per-item／分群／大類；主報表概覽列的模型選擇指標、排序指標段、
+  # 名次分布段的正例平均名次都讀它）、熱門度基準段，以及 `--compare`／
+  # `--compare-only` 比較報表的兩側都排除這種組（兩側各自依自己的列判定）；
+  # 不論開或關都會多印全正組數與佔比，佔比超過 10%（寫死在程式，非設定鍵）就
+  # 警告。**不套用**：報表名次分布段的圖與名次佔比表、training 的
   # test mAP 與 HPO 目標（唯讀入口見
-  # `evaluation/metrics.py::drop_all_positive_groups`；設定檢查見
+  # `evaluation/result_readers.py::drop_all_positive_groups`；設定檢查見
   # `core/consistency.py` A49）。改這個鍵要從 compute_row_facts 重跑
   # （`COMPUTED_KEYS`）。
   # query_filter:

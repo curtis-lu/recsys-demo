@@ -20,6 +20,7 @@ from recsys_tfb.core.consistency import (
     etl_stage_config_errors,
     inference_grid_errors,
     category_table_needed,
+    compare_k_errors,
     item_category_column_errors,
     candidate_feature_table_inference_errors,
     merged_etl_variables,
@@ -35,6 +36,7 @@ from recsys_tfb.core.consistency import (
     resolved_env_dir,
     retired_calibration_bin_key_errors,
     retired_diagnosis_key_errors,
+    retired_k_key_errors,
     resolved_baseline_rebuild_dates,
     resolved_inference_rebuild_dates,
     resolved_rebuild_dates,
@@ -1968,6 +1970,11 @@ def evaluation(
     # (A61) the evaluation.diagnosis block #515 and #532 retired;
     # evaluation-only, same place.
     section_errs += retired_diagnosis_key_errors(params)
+    # (A62) evaluation.report.display.compare_k lists only K the run computes
+    # (#366 item 2); (A63) the K keys #537 removed or renamed. Evaluation-only
+    # keys, same place.
+    section_errs += compare_k_errors(params)
+    section_errs += retired_k_key_errors(params)
     # (A49) evaluation.query_filter.drop_all_positive_groups's value domain
     # (#376); evaluation-only key, so wired here for A34's reason. The sole
     # reader takes it with plain truthiness and never raises, so a typo'd

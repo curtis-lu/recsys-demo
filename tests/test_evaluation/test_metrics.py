@@ -596,9 +596,7 @@ class TestMetricParams:
     """Imports live inside each test, so the rest of this file still collected
     while the shared helper did not exist yet."""
 
-    DEFAULTS = {
-        "k": None, "weight_alpha": 0.0, "min_positives": 0, "shrinkage_k": 0.0,
-    }
+    DEFAULTS = {"weight_alpha": 0.0, "min_positives": 0, "shrinkage_k": 0.0}
 
     def test_missing_block_falls_back(self):
         from recsys_tfb.evaluation.result_readers import metric_params
@@ -615,18 +613,17 @@ class TestMetricParams:
     def test_none_values_fall_back(self):
         from recsys_tfb.evaluation.result_readers import metric_params
 
-        cfg = {"k": None, "weight_alpha": None, "min_positives": None,
+        cfg = {"weight_alpha": None, "min_positives": None,
                "shrinkage_k": None}
         assert metric_params({"evaluation": {"metric": cfg}}) == self.DEFAULTS
 
     def test_values_are_type_normalised(self):
         from recsys_tfb.evaluation.result_readers import metric_params
 
-        cfg = {"k": 3, "weight_alpha": 1, "min_positives": 2, "shrinkage_k": 5}
+        cfg = {"weight_alpha": 1, "min_positives": 2, "shrinkage_k": 5}
         out = metric_params({"evaluation": {"metric": cfg}})
-        assert out == {"k": 3, "weight_alpha": 1.0, "min_positives": 2,
+        assert out == {"weight_alpha": 1.0, "min_positives": 2,
                        "shrinkage_k": 5.0}
-        assert type(out["k"]) is int
         assert type(out["weight_alpha"]) is float
         assert type(out["min_positives"]) is int
         assert type(out["shrinkage_k"]) is float

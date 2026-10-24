@@ -42,8 +42,8 @@ SPEC_COMPUTED_PATHS = {
     # (fine + category grain) and compute_baseline_metrics.
     "evaluation.query_filter",
     "evaluation.report.diagnostics",
-    "evaluation.report.sections.baseline",
-    "evaluation.report.sections.per_item_breakdown",
+    "evaluation.report.sections.popularity_baseline",
+    "evaluation.report.sections.rank_distribution",
     # ADR-0024 decision 1 / #381: the prediction-quality family.
     "evaluation.prediction_quality",
     "evaluation.report.sections.prediction_quality",
@@ -63,8 +63,8 @@ SPEC_COMPUTED_LEAVES = [
     "evaluation.metric.min_positives",
     "evaluation.query_filter.drop_all_positive_groups",
     "evaluation.report.diagnostics.include_distributions",
-    "evaluation.report.sections.baseline",
-    "evaluation.report.sections.per_item_breakdown",
+    "evaluation.report.sections.popularity_baseline",
+    "evaluation.report.sections.rank_distribution",
     "evaluation.prediction_quality.n_bins",
     "evaluation.prediction_quality.top_n",
     "evaluation.report.sections.prediction_quality",
@@ -72,9 +72,9 @@ SPEC_COMPUTED_LEAVES = [
 
 #: "Drawn" keys: they change what the report shows, never what is computed.
 SPEC_DRAWN_LEAVES = [
-    "evaluation.report.display.primary_map_k",
-    "evaluation.report.display.guardrail_recall_k",
-    "evaluation.report.sections.primary_map",
+    "evaluation.report.display.compare_k",
+    "evaluation.report.sections.ranking_metrics",
+    "evaluation.report.sections.data_stats",
 ]
 
 #: Keys outside the ``evaluation`` subtree, declared through ``extra_keys``.
@@ -109,15 +109,15 @@ def _params() -> dict:
             "baseline": {"lookback_months": 12},
             "prediction_quality": {"n_bins": 1000, "n_display_bins": 10,
                                    "top_n": 30},
-            "metric": {"weight_alpha": 0.0, "k": None,
+            "metric": {"weight_alpha": 0.0,
                        "min_positives": 0, "shrinkage_k": 0.0},
             "query_filter": {"drop_all_positive_groups": False},
             "report": {
-                "sections": {"primary_map": True, "baseline": True,
-                             "per_item_breakdown": True,
+                "sections": {"data_stats": True, "ranking_metrics": True,
+                             "popularity_baseline": True,
+                             "rank_distribution": True,
                              "prediction_quality": True},
-                "display": {"primary_map_k": [1, 3, 5, "all"],
-                            "guardrail_recall_k": [1, 2]},
+                "display": {"compare_k": [1, 3, 5, "all"]},
                 "diagnostics": {"include_distributions": True},
             },
         },
@@ -198,15 +198,15 @@ def test_extra_keys_only_affect_the_fingerprint_that_declares_them():
 
 
 def test_absent_and_null_are_different_settings():
-    """``sections.get("baseline", True)``: a missing key computes the baseline,
+    """``sections.get("popularity_baseline", True)``: a missing key computes the baseline,
     an explicit null does not. One hash for both would let that flip pass."""
-    null = _set(_params(), "evaluation.report.sections.baseline", None)
-    absent = _delete(_params(), "evaluation.report.sections.baseline")
+    null = _set(_params(), "evaluation.report.sections.popularity_baseline", None)
+    absent = _delete(_params(), "evaluation.report.sections.popularity_baseline")
     assert fingerprint(null)["sha256"] != fingerprint(absent)["sha256"]
-    assert "evaluation.report.sections.baseline" not in \
+    assert "evaluation.report.sections.popularity_baseline" not in \
         fingerprint(absent)["values"]
     assert fingerprint(null)["values"][
-        "evaluation.report.sections.baseline"] is None
+        "evaluation.report.sections.popularity_baseline"] is None
 
 
 def test_fingerprint_survives_a_json_round_trip():

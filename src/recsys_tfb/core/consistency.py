@@ -103,7 +103,8 @@ Layer 1 — config-static (implemented here; aggregated by
   ranking task the item must stay a model feature; mirrors A2/A7). Predicate:
   ``feature_selection_excludes_item``.
 * A15 — ``evaluation.metric`` parameter domains: ``weight_alpha`` ∈ [0,1];
-  ``k`` null or int ≥ 1; ``min_positives`` ≥ 0; ``shrinkage_k`` ≥ 0.
+  ``min_positives`` ≥ 0; ``shrinkage_k`` ≥ 0. Until #537 it also checked
+  ``k`` (null or int ≥ 1); the key went with #537 and A63 refuses it.
   Predicate: ``evaluation_metric_param_errors``. Until #532 it also checked
   the ``evaluation.diagnosis`` domains and kept ``evaluation.segment_columns``
   off the diagnosis sampler's own column names; both went with the diagnoses
@@ -339,9 +340,17 @@ Layer 1 — config-static (implemented here; aggregated by
   ones in ``EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT``
   (``prediction_quality``). Each declared value must be a YAML bool (#505):
   every reader takes the switch by truthiness, so a quoted ``"false"`` reads
-  as on. A renamed switch needs no check of its own: the old name is declared
-  and not read, the new one read and not declared (``diagnostics`` became
-  ``per_item_breakdown`` in #532).
+  as on. The equality alone catches a renamed switch: the old name is
+  declared and not read, the new one read and not declared (``diagnostics``
+  became ``per_item_breakdown`` in #532). #537 renamed four switches after
+  their section's file (``RENAMED_REPORT_SECTIONS``: ``dataset_overview`` →
+  ``data_stats``, ``primary_map`` → ``ranking_metrics``,
+  ``per_item_breakdown`` → ``rank_distribution``, ``baseline`` →
+  ``popularity_baseline``); a conf spelling an old one is told its new name
+  in one message instead of two it must pair up. That part is
+  **migration-period**, on #524's retirement list with A33/A60/A63: once the
+  company environment's conf spells the new names, delete the constant and
+  its branch; the equality stays.
   The constant lives in ``core/`` because ``core/`` must not import the
   report layer. A ``sections`` block that declares no switch (absent, null or
   empty) is not checked, a visible opt-out to every default; once any switch
@@ -580,7 +589,7 @@ Layer 1 — config-static (implemented here; aggregated by
 * A49 — ``evaluation.query_filter.drop_all_positive_groups`` (#376, the
   all-positive query group filter) must be a ``bool`` when present; the block
   itself, when present, must be a mapping with no other key. The sole reader,
-  ``evaluation/metrics.py::drop_all_positive_groups``, takes the value with
+  ``evaluation/result_readers.py::drop_all_positive_groups``, takes the value with
   plain truthiness and never raises, so a typo'd value or key would silently
   do nothing instead of failing loudly. Not under ``evaluation.metric``, A42's
   reason: a different reader (``metric_params``) drops unknown keys there
@@ -766,6 +775,50 @@ Layer 1 — config-static (implemented here; aggregated by
   ``retired_diagnosis_key_errors`` (returns errors; the evaluation command
   raises, collected with A22/A34/A42/A43). NOT aggregated, for A43's reason:
   the harm belongs to evaluation alone (A34's reason, issue #158).
+* A62 — ``evaluation.report.display.compare_k`` (#366 item 2, #537), when
+  written, is a non-empty list whose entries are each a positive int or
+  ``"all"`` (case-insensitive, as the cut reads it), and every int is in
+  ``evaluation.k_values`` — or, with that key unwritten, in
+  :data:`EVALUATION_K_VALUES_DEFAULT`, the default the metric layer applies.
+  ``"all"`` is always computed (both K grids add it,
+  ``metrics_spark._resolve_k_grids``), so it needs no listing. Why the
+  membership: the K cut (``pipelines/evaluation/steps/display_ks``) keeps the
+  K ``compare_k`` lists, but only ``k_values`` decides which K the results
+  hold, so a K outside it is a column every table drawing ``compare_k``
+  prints empty — every table of the popularity-baseline section, and every
+  table of the comparison report's per-item and category sections (and of
+  its segment section, whose list is empty by default) — with no error
+  anywhere. Unwritten, ``compare_k`` is ``k_values``
+  (``display_ks.configured_compare_k``), so there is nothing to check. A
+  scalar is refused rather than read as a one-entry list: the cut iterates
+  the value, so ``compare_k: 3`` (or ``all``) fails inside
+  ``resolve_display_ks``, after every Spark node has run, with an error that
+  names no key. Predicate:
+  ``compare_k_errors`` (returns errors; the evaluation command raises,
+  collected with A22/A34/A42/A43/A61). NOT aggregated, for A34's reason
+  (issue #158): only evaluation reads the key.
+* A63 — **MIGRATION-PERIOD CHECK, DELETE ME.** A conf still spelling one of
+  the three K keys #537 removed or renamed (:data:`RETIRED_K_KEYS`):
+  ``evaluation.metric.k`` (the two model-selection metrics are always
+  computed untruncated, so there is no depth to set),
+  ``evaluation.report.display.guardrail_recall_k`` (the comparison report's
+  per-item recall tables now take ``compare_k``, like its ``map_attr``
+  tables) and ``evaluation.report.display.primary_map_k`` (renamed
+  ``compare_k``). Nothing reads any of them, so a conf that keeps one gets a
+  report that ignores it without a word; ``metric.k`` also sits in the
+  fingerprinted ``evaluation.metric`` subtree (``COMPUTED_KEYS``), so keeping
+  it is not the same conf as deleting it. **Presence is the failure,
+  whatever the value** (A43's shape; ``k: null`` included, which the shipped
+  conf spelled until #537). One message per key: the three fixes differ.
+  Predicate: ``retired_k_key_errors`` (returns errors; the evaluation
+  command raises, collected with A22/A34/A42/A43/A61/A62). NOT aggregated,
+  for A43's reason: the harm belongs to evaluation alone.
+
+  **Retirement condition (this is a tool, not a guard):** on #524's list with
+  A33/A60 and A34's rename branch. Once the user confirms the company
+  environment's conf no longer spells these keys, delete the predicate, its
+  constant, its wiring, its tests and this legend entry; leave the code slot
+  ``A63`` retired-not-renumbered, per A16/A17/A18.
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -776,7 +829,7 @@ window of ``evaluation.snap_date`` and be a time value sample_pool holds there.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
-flags), A22/A46/A51 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53/A57/A58/A61 (config keys whose
+flags), A22/A46/A51 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53/A57/A58/A61/A62/A63 (config keys whose
 harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags), A59 (the ETL stage's config keys), A55 (``--only-test-months`` + the
 metastore). A56 needs the resolved catalog too, but hangs off no single command:
@@ -2316,14 +2369,9 @@ def evaluation_metric_param_errors(parameters: dict) -> list[str]:
             f"evaluation.metric.weight_alpha={alpha!r} must be a number in "
             f"[0, 1] (0 = equal-weight macro, 1 = positive-count weighting)."
         )
-    k = metric.get("k", None)
-    if k is not None and not (
-        isinstance(k, int) and not isinstance(k, bool) and k >= 1
-    ):
-        errors.append(
-            f"evaluation.metric.k={k!r} must be null (no truncation) or an "
-            f"int >= 1."
-        )
+    # No truncation depth here: #537 removed it from this block, and A63
+    # refuses the key whatever it holds (judging its value would advise
+    # fixing a key nothing reads).
     mp = metric.get("min_positives", 0)
     if not (isinstance(mp, int) and not isinstance(mp, bool) and mp >= 0):
         errors.append(
@@ -2878,7 +2926,7 @@ def query_filter_param_errors(parameters: dict) -> list[str]:
     """A49 — ``evaluation.query_filter`` parameter domain (#376).
 
     * ``drop_all_positive_groups`` is a ``bool``. It is the only reader's
-      (``evaluation/metrics.py::drop_all_positive_groups``) sole input; a
+      (``evaluation/result_readers.py::drop_all_positive_groups``) sole input; a
       non-bool there (``"yes"``, ``1``) would be read with plain truthiness
       (``bool(qf.get(...) or False)``) instead of raising, so a typo'd value
       would silently turn the switch on or stay off with nobody told.
@@ -3417,23 +3465,169 @@ def retired_diagnosis_key_errors(parameters: dict) -> list[str]:
     ]
 
 
+#: ``evaluation.k_values`` when the conf leaves it out: the K grid the metric
+#: layer computes (``metrics_spark._resolve_k_grids`` reads this constant).
+#: Here, not in ``evaluation/``, so A62 checks ``compare_k`` against the same
+#: list the results hold without ``core/`` importing the metric layer.
+EVALUATION_K_VALUES_DEFAULT: tuple = (5, "all")
+
+
+def _is_all_label(k) -> bool:
+    """``"all"`` in any case, the way the K cut reads it
+    (``display_ks.resolve_display_k``) and the metric layer resolves it."""
+    return isinstance(k, str) and k.lower() == "all"
+
+
+def compare_k_errors(parameters: dict) -> list[str]:
+    """A62 — ``evaluation.report.display.compare_k``, when written, is a K list
+    the run computes.
+
+    A non-empty list; each entry a positive int (not a bool, which YAML's
+    ``true`` loads as and ``int`` would accept) or ``"all"``; each int in
+    ``evaluation.k_values`` (absent: :data:`EVALUATION_K_VALUES_DEFAULT`). The
+    cut keeps whatever ``compare_k`` lists, but the results hold only the K
+    ``k_values`` asks for plus ``"all"``, so an int outside it is a column
+    printed empty in every table that draws ``compare_k``, and nothing raises.
+    A ``k_values`` that is not a list is left to its own readers: the
+    membership is only asked of a list.
+    """
+    eval_params = parameters.get("evaluation", {}) or {}
+    if not isinstance(eval_params, Mapping):
+        return []
+    report = eval_params.get("report") or {}
+    display = report.get("display") if isinstance(report, Mapping) else None
+    if not isinstance(display, Mapping) or "compare_k" not in display:
+        return []
+    compare_k = display["compare_k"]
+    if not isinstance(compare_k, list) or not compare_k:
+        return [
+            f"A62: evaluation.report.display.compare_k={compare_k!r} must be a "
+            f"non-empty list of K, each a positive int or 'all' — e.g. "
+            f"[1, 3, 5, 'all']. A single value is not read as a one-entry "
+            f"list: write it in brackets."
+        ]
+    bad = [k for k in compare_k
+           if not _is_all_label(k)
+           and not (isinstance(k, int) and not isinstance(k, bool) and k >= 1)]
+    if bad:
+        return [
+            f"A62: evaluation.report.display.compare_k holds "
+            f"{', '.join(repr(k) for k in bad)}; each entry must be a positive "
+            f"int or 'all'."
+        ]
+    k_values = eval_params.get("k_values", list(EVALUATION_K_VALUES_DEFAULT))
+    if not isinstance(k_values, (list, tuple)):
+        return []
+    computed = {k for k in k_values
+                if isinstance(k, int) and not isinstance(k, bool)}
+    uncomputed = sorted({k for k in compare_k
+                         if not _is_all_label(k) and k not in computed})
+    if not uncomputed:
+        return []
+    source = ("evaluation.k_values" if "k_values" in eval_params
+              else f"evaluation.k_values (unset: {list(EVALUATION_K_VALUES_DEFAULT)})")
+    return [
+        f"A62: evaluation.report.display.compare_k lists {uncomputed}, which "
+        f"{source} does not compute — those columns would be empty in every "
+        f"table that shows compare_k. Add them to evaluation.k_values (it "
+        f"moves the computed settings: re-run from compute_row_facts), or "
+        f"drop them from compare_k. 'all' is always computed."
+    ]
+
+
+#: A63 (migration-period): the K keys #537 removed or renamed, as dotted
+#: paths from the top of ``parameters``, each with its new name (``None``:
+#: removed, nothing replaces it). On #524's retirement list; delete with the
+#: predicate below. See A63 in the module docstring.
+RETIRED_K_KEYS: dict[str, str | None] = {
+    "evaluation.metric.k": None,
+    "evaluation.report.display.guardrail_recall_k": None,
+    "evaluation.report.display.primary_map_k":
+        "evaluation.report.display.compare_k",
+}
+
+#: Why each removed key of :data:`RETIRED_K_KEYS` went and what to do instead.
+_RETIRED_K_KEY_WHY = {
+    "evaluation.metric.k": (
+        "the two model-selection metrics evaluation reports, overall mAP and "
+        "macro per-item mAP, are always computed untruncated (@all), the way "
+        "HPO scores them, so there is no truncation depth to set. Left in "
+        "place it reads as if the headline were truncated, and it still moves "
+        "the fingerprint of evaluation.metric. Delete the line; a truncated "
+        "map_attr@K is in the report for every K evaluation.k_values lists."
+    ),
+    "evaluation.report.display.guardrail_recall_k": (
+        "the comparison report's per-item recall tables now show the K of "
+        "evaluation.report.display.compare_k, like its map_attr tables. Left "
+        "in place, the K it lists silently do not appear. Delete the line; "
+        "put the K you want into compare_k."
+    ),
+}
+
+
+def retired_k_key_errors(parameters: dict) -> list[str]:
+    """A63 — a conf still spelling a K key #537 removed or renamed, whatever
+    its value.
+
+    ⚠ **A migration tool with a delete-by condition, not an invariant** (A33's
+    kind): it comes out once the company environment's conf is confirmed
+    clean (#524). Presence is the failure — A43's shape: ``k: null`` switches
+    nothing that still exists, and nothing reads any of the three, so a conf
+    keeping one gets a report that ignores it without a word. One message per
+    key, because the fixes differ: delete two, rename the third.
+    """
+    if not isinstance(parameters, Mapping):
+        return []
+    errors = []
+    for dotted, new in RETIRED_K_KEYS.items():
+        if not _dotted_key_present(parameters, dotted):
+            continue
+        if new is None:
+            errors.append(f"A63: {dotted!r} was removed (#537): "
+                          f"{_RETIRED_K_KEY_WHY[dotted]}")
+        else:
+            errors.append(
+                f"A63: {dotted!r} was renamed to {new!r} (#537). There is no "
+                f"fallback to the old name: left as-is, the tables it set "
+                f"ignore it and show compare_k (or its default). Rename the "
+                f"key; the list under it stays."
+            )
+    return errors
+
+
 #: The ``evaluation.report.sections`` switches the report reads: one name per
 #: ``section_on(parameters, name)`` call in ``evaluation/report_sections/``,
-#: which refuses any name not listed here (A34). ``baseline``,
-#: ``per_item_breakdown`` and ``prediction_quality`` are also read directly by the
-#: nodes that skip computing (``compute_baseline_metrics`` /
-#: ``compute_report_aggregates`` / ``compute_prediction_quality``); those reads
-#: bypass the ``section_on`` pre-check, so a new direct read of a name that is
-#: not listed here is caught by nothing. The report imports this constant,
-#: not the other way round: ``core/`` has no import-time dependency on the
-#: layers above it, and the report drags pandas and plotly in.
+#: which refuses any name not listed here (A34). Each is the file name of the
+#: section it switches (#537), so a reader finds the section from the conf.
+#: ``popularity_baseline``, ``rank_distribution`` and ``prediction_quality``
+#: are also read directly by the nodes that skip computing
+#: (``compute_baseline_metrics`` / ``compute_report_aggregates`` /
+#: ``compute_prediction_quality``; ``baselines.baseline_scores_by_rate``);
+#: those reads bypass the ``section_on`` pre-check, so a new direct read of a
+#: name that is not listed here is caught by nothing. The report imports this
+#: constant, not the other way round: ``core/`` has no import-time dependency
+#: on the layers above it, and the report drags pandas and plotly in.
 EVALUATION_REPORT_SECTIONS: frozenset[str] = frozenset({
-    "dataset_overview",
-    "primary_map",
-    "per_item_breakdown",
-    "baseline",
+    "data_stats",
+    "ranking_metrics",
+    "rank_distribution",
+    "popularity_baseline",
     "prediction_quality",
 })
+
+#: A34 (migration-period part): the switches #537 renamed to their section's
+#: file name, ``old -> new``. A conf still spelling an old name is told the
+#: new one instead of reading it as "declared, never read" beside "read, not
+#: declared" and pairing the two up itself. On #524's retirement list: once
+#: the company environment's conf spells the new names, delete this constant
+#: and the branch of ``report_section_key_errors`` that reads it; the
+#: equality check alone then reports an old name as never read.
+RENAMED_REPORT_SECTIONS: dict[str, str] = {
+    "dataset_overview": "data_stats",
+    "primary_map": "ranking_metrics",
+    "per_item_breakdown": "rank_distribution",
+    "baseline": "popularity_baseline",
+}
 
 #: The switches in :data:`EVALUATION_REPORT_SECTIONS` that are **off** when the
 #: conf leaves them out (``prediction_quality_on``, ADR-0024 decision 1); every
@@ -3594,6 +3788,12 @@ def report_section_key_errors(parameters: dict) -> list[str]:
     every default, not a key that drifted quietly. Once any switch is
     declared, the block is checked in full.
 
+    A switch #537 renamed (:data:`RENAMED_REPORT_SECTIONS`) is reported once,
+    with its new name, and its new name is not reported as undeclared: the
+    fix is a rename, and two messages about one key leave the reader to pair
+    them. That branch is migration-period (#524); the equality check below it
+    is not.
+
     Each switch the report reads must also hold a bool (#505). Every reader
     takes it by truthiness (``section_on``, ``prediction_quality_on``, the
     nodes that write a stub), so ``"false"`` — or ``'false`'``, what selecting
@@ -3620,7 +3820,20 @@ def report_section_key_errors(parameters: dict) -> list[str]:
         return []
     declared = set(sections)
     errors = []
-    unread = declared - EVALUATION_REPORT_SECTIONS
+    # A switch #537 renamed is named with its new name, once: not also as
+    # declared-and-unread, nor its new name as read-and-undeclared.
+    renamed = {old: new for old, new in RENAMED_REPORT_SECTIONS.items()
+               if old in declared}
+    if renamed:
+        errors.append(
+            "A34: evaluation.report.sections spells switches #537 renamed "
+            "after their section's file: "
+            + ", ".join(f"`{old}` is now `{new}`"
+                        for old, new in renamed.items())
+            + ". Rename each key and keep its value; where the new name is "
+            "already declared, delete the old line."
+        )
+    unread = declared - EVALUATION_REPORT_SECTIONS - set(renamed)
     if unread:
         # key=str: YAML can hand over a non-str key (``on:`` loads as True),
         # and sorting it against str keys would raise instead of reporting.
@@ -3632,7 +3845,8 @@ def report_section_key_errors(parameters: dict) -> list[str]:
             f"{sorted(EVALUATION_REPORT_SECTIONS)}."
         )
     not_bool = [
-        (name, sections[name]) for name in sorted(declared - unread, key=str)
+        (name, sections[name])
+        for name in sorted(declared & EVALUATION_REPORT_SECTIONS, key=str)
         if not isinstance(sections[name], bool)
     ]
     if not_bool:
@@ -3642,7 +3856,7 @@ def report_section_key_errors(parameters: dict) -> list[str]:
             "quoted 'false' reads as on. Not a bool: "
             + ", ".join(f"`{name}: {value!r}`" for name, value in not_bool)
         )
-    undeclared = EVALUATION_REPORT_SECTIONS - declared
+    undeclared = EVALUATION_REPORT_SECTIONS - declared - set(renamed.values())
     if undeclared:
         # Backticks around each pair: a trailing period copied along would
         # load as the string 'false.', which is truthy.
@@ -5259,7 +5473,7 @@ def resolved_baseline_rebuild_dates(
             "(A21) evaluation --rebuild-dates recounts popularity_period_counts, "
             "which only the positive-rate baseline reads. It is wired only "
             "with evaluation.baseline.score: rate, "
-            "evaluation.report.sections.baseline on, --post-training (monitoring "
+            "evaluation.report.sections.popularity_baseline on, --post-training (monitoring "
             "scores the full grid and keeps the count), and not --compare-only. "
             "This run is missing one of them, so the flag would do nothing; "
             "drop --rebuild-dates."

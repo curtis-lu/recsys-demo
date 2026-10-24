@@ -296,7 +296,7 @@ split 展開出不同的欄位集合（見 §3.4 與
   val zero-positive query groups: r=0.3, kept <留下的組數> of <無正例組總數> (weight 1/r=3.333 on their rows is a design weight — few kept groups means an unstable estimate); <有正例的組數> group(s) holding a positive, all kept
   ```
 
-  r ＝ 0 印「none kept」，r ＝ 1 印「every group kept (not counted)」；計數只在 0 < r < 1 時做（多一次 Spark action）。evaluation 報表的「基本統計 — 資料集」段在 `--post-training` 且 test 的 r > 0 時，也會印出 test 的 r 與這次評估資料裡的無正例組數。
+  r ＝ 0 印「none kept」，r ＝ 1 印「every group kept (not counted)」；計數只在 0 < r < 1 時做（多一次 Spark action）。evaluation 報表的「資料統計」段在 `--post-training` 且 test 的 r > 0 時，也會印出 test 的 r 與這次評估資料裡的無正例組數。
 - 權重欄一路帶到 training 的預測表 `training_eval_predictions`，evaluation 的預測品質指標家族拿它加權，而不是數列數。那張表在 catalog 是**明確列出欄位**的，沒宣告的欄會在寫入時被靜默丟掉，所以 test 的 r > 0 時 catalog 必須宣告 `{name: zero_positive_group_weight, type: DOUBLE}`（不變量 A45 在 training 的 CLI 進入點擋下）。⚠ 明確列出欄位的 Hive 表不會自動加欄：既有的 `training_eval_predictions` 表要先加上這一欄（或換一張新表）再跑 training。
 - 宣告了這一欄之後把 test 的 r 改回 0 也可以：training 照樣寫這一欄，值是 NULL（沒有設計權重可言）。evaluation 只在設定的 test r > 0 時才用權重，而且會先確認每一列都真的有權重——欄不存在、或有 NULL，代表被評估的模型（`--model-version` 或 `best`）是在不同的 test r 下建的，和目前的設定對不上，evaluation 會停下並說明，不會拿 NULL 去加權（那會把那些列丟掉）。
 - 欄名是框架自己的，**不得**與使用者提供的逐列訓練權重（#425）共用。特徵表裡有同名的特徵欄時，資料閘在 dataset 開頭就擋下（不變量 B12）；切片執行跳過資料閘時，組裝 val／test model input 那一步會因為兩欄同名而報錯（Spark 的 `Reference ... is ambiguous`），不會覆寫。

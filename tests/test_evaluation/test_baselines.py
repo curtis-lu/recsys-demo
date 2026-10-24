@@ -292,7 +292,7 @@ class TestBaselineScore:
         assert baseline_scores_by_rate(params, post_training=True)
         # Monitoring scores the full grid: it keeps the count.
         assert not baseline_scores_by_rate(params, post_training=False)
-        params["evaluation"]["report"] = {"sections": {"baseline": False}}
+        params["evaluation"]["report"] = {"sections": {"popularity_baseline": False}}
         assert not baseline_scores_by_rate(params, post_training=True)
         assert not baseline_scores_by_rate(
             _rate_parameters("count"), post_training=True)

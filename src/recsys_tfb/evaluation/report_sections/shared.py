@@ -6,23 +6,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-import pandas as pd
-
 from recsys_tfb.core.consistency import (
     EVALUATION_REPORT_SECTIONS,
-    ZERO_POSITIVE_GROUP_WEIGHT_COL,
     resolved_zero_positive_group_ratio,
     test_carries_zero_positive_group_weight,
 )
 from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.evaluation.result_readers import (
-    ALL_POSITIVE_KEY,
     ALL_POSITIVE_SHARE_KEY,
     ALL_POSITIVE_WARNS_KEY,
-    CELLS,
-    DIFF,
     DISPLAY_BINS_KEY,
-    DISPLAY_HEADLINE_SHOWN,
     ENTRIES,
     LEDGER_RERUN_NODE,
     N_SCORED_WITH_POSITIVE_KEY,
@@ -32,15 +25,15 @@ from recsys_tfb.evaluation.result_readers import (
     REFERENCE,
     THIS,
     THRESHOLD_SWEEP_KEY,
-    drop_all_positive_groups,
-    metric_params,
 )
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
 
 def k_to_lookup(k, all_k: int) -> int | str:
-    """Convert display label to metric dict key suffix (the cut's lists are
-    ``steps/display_ks``', landed; ``"all"`` stays a label in them).
+    """The K a label ``k`` is looked up at: ``"all"`` is ``all_k``, an
+    integer is itself. The cut's lists (``steps/display_ks``, landed) are
+    integers already — ``"all"`` was resolved to the block's ``all_k`` when
+    they were cut (``display_ks.k_columns``) — so a landed K passes through.
 
     ``all_k`` comes from the bundle being read (``metrics.resolved_all_k``),
     never from counting its items (#434).
@@ -48,24 +41,6 @@ def k_to_lookup(k, all_k: int) -> int | str:
     if k == "all":
         return all_k
     return k
-
-
-def headline_column(parameters: dict, display_ks: dict, where: str) -> str:
-    """How the headline is truncated and where it sits in the metrics
-    section's map_attr table, as one phrase both sections show (``where``
-    names that section from the caller's side). Names the column only when
-    that table shows it — the K cut lands that (``resolve_display_ks``'
-    ``DISPLAY_HEADLINE_SHOWN``, off the same list the table draws), so the
-    note cannot name a column the table dropped."""
-    mk = metric_params(parameters)["k"]
-    if mk is None:
-        return (f"不截斷（metric.k 未設），即{where} B 塊「{MACRO_LABEL}」列的 "
-                "map_attr@all")
-    if landed_value(display_ks, DISPLAY_KS, "evaluation_metrics",
-                    DISPLAY_HEADLINE_SHOWN):
-        return (f"截斷在 {mk}（metric.k），即{where} B 塊「{MACRO_LABEL}」列的 "
-                f"map_attr@{mk}")
-    return f"截斷在 {mk}（metric.k），{where}各表不顯示 @{mk} 欄"
 
 
 MACRO_LABEL = "Macro 平均"
@@ -93,35 +68,28 @@ def section_on(parameters: dict, name: str) -> bool:
     return bool(sections.get(name, True))
 
 
-def prediction_quality_shown(
-    prediction_quality_metrics: dict | None, parameters: dict
-) -> bool:
-    """Whether the prediction-quality section is on the page: its switch is on
-    and ``compute_prediction_quality`` computed the payload rather than writing
-    its stub. Here rather than in that section's file because the overview's
-    navigation table asks it too, and sections do not import each other."""
-    return bool(section_on(parameters, "prediction_quality")
-                and prediction_quality_metrics
-                and prediction_quality_metrics.get("enabled") is True)
-
-
 #: The catalog names of the comparison of the model with its baseline and of
 #: the K cut (#536), as the main report reads them; then the comparison of
-#: this run's side with the compared source and its K cut, as the comparison
-#: report reads them.
+#: this run's side with the compared source, its K cut and the two sides'
+#: coverage, as the comparison report reads them.
 BASELINE_COMPARISON = "baseline_comparison"
 DISPLAY_KS = "evaluation_display_ks"
 SOURCE_COMPARISON = "source_comparison"
 COMPARISON_DISPLAY_KS = "comparison_display_ks"
+COMPARE_COVERAGE = "compare_coverage"
 
 #: The node that lands each result :func:`landed_value` reads: where a refusal
 #: sends the reader. Each exists in every mode that draws from the result:
-#: the comparison's two in ``--compare`` and ``--compare-only`` alike.
+#: the comparison's in ``--compare`` and ``--compare-only`` alike. The
+#: coverage's producer (``restrict_to_common``) reads a memory-only frame, so
+#: its re-run is the comparison's (``nodes.COMPARISON_RERUN_NODE``), whose
+#: slice pulls it back and lands it again.
 LANDED_BY = {
     BASELINE_COMPARISON: "compare_to_baseline",
     DISPLAY_KS: "resolve_display_ks",
     SOURCE_COMPARISON: "compare_to_source",
     COMPARISON_DISPLAY_KS: "resolve_comparison_display_ks",
+    COMPARE_COVERAGE: "compute_compare_metrics",
 }
 
 
@@ -162,12 +130,6 @@ def has_entries(block: dict, side: str) -> bool:
 def both_present(block: dict) -> bool:
     """Whether both sides had the block at all — empty counts as present."""
     return all(block[ENTRIES][side] is not None for side in (THIS, REFERENCE))
-
-
-def compared_value(cells: dict, key: str, side: str):
-    """One side (or the difference) of the cell ``key``; ``None`` where the
-    comparison holds no such cell."""
-    return (cells.get(key) or {}).get(side)
 
 
 def results_read_by(
@@ -318,6 +280,40 @@ def refuse_pre_landed_reads(results: Mapping[str, dict | None]) -> None:
         )
 
 
+#: The totals of the row facts' overview that a declared optional role lands
+#: (``metrics_spark.compute_dataset_overview``): ``occasion`` the time x
+#: entity combinations, ``event`` the (query group, item) combinations.
+OCCASION_TOTAL_KEY = "n_time_entity_combos"
+EVENT_TOTAL_KEY = "n_query_group_item_combos"
+
+
+def refuse_pre_landed_role_totals(facts: dict, schema: Mapping) -> None:
+    """Raise when ``occasion`` / ``event`` is declared but the row facts'
+    overview landed before it counted what they add to the totals
+    (:data:`OCCASION_TOTAL_KEY`, :data:`EVENT_TOTAL_KEY`).
+
+    Same refusal as ``refuse_pre_landed_reads`` and for the same reason: no
+    setting changed, so the fingerprint passes, and the row would vanish from
+    the page without a word. Needs the schema, which that function is not
+    given, so the section that prints the totals calls this one. A role not
+    declared is not asked for.
+    """
+    totals = (facts.get("dataset_overview") or {}).get("totals") or {}
+    missing = [f"evaluation_row_facts: dataset_overview.totals.{key!r} "
+               f"({role} declared)"
+               for role, key in (("occasion", OCCASION_TOTAL_KEY),
+                                 ("event", EVENT_TOTAL_KEY))
+               if schema.get(role) and key not in totals]
+    if missing:
+        raise ValueError(
+            f"Landed before #537, these results lack what the report reads "
+            f"instead of computing: {'; '.join(missing)}. Re-compute them — "
+            f"`python -m recsys_tfb evaluation --from-node {LEDGER_RERUN_NODE}`, "
+            f"with the flags of the run that wrote them (e.g. "
+            f"--post-training) — then re-draw."
+        )
+
+
 def read_dataset_overview(facts: dict) -> dict:
     """``facts["dataset_overview"]``, refusing a pre-#327 payload.
 
@@ -368,52 +364,25 @@ def count_items(facts: dict) -> int:
     """``dataset_overview.totals.n_items`` of the row facts, ``0`` when absent.
 
     ``facts`` is the row facts or one grain of them (``row_facts.json``,
-    #535). ``0`` means "unknown", not "no items". It is the item count the
-    reports show — in the macro-coverage titles and the comparison report's
-    metadata. It is not the K ``"all"`` is looked up at — that is
-    ``metrics.resolved_all_k``, which each metrics bundle records (#434).
+    #535). ``0`` means "unknown", not "no items". It is what the macro-count
+    line under an item grain's tables is measured against
+    (``metric_tables.macro_count_note``: printed only when the macro averaged
+    fewer); the total itself is printed once, in 核心概念. It is not the K
+    ``"all"`` is looked up at — that is ``metrics.resolved_all_k``, which each
+    metrics bundle records (#434).
     """
     return int((read_dataset_overview(facts).get("totals", {}) or {}).get("n_items", 0))
-
-
-def compared_macro_coverage_suffix(
-    macro_block: dict, macro_items: dict, n_items: int
-) -> str:
-    """Title suffix disclosing both sides' macro coverage on an M/B/Δ table
-    drawn off a comparison (bug 5, ADR-0020).
-
-    An item with no positive this period has no ``per_item`` cell, and
-    ``evaluation.metric.min_positives`` drops more; both are silent, so the
-    macro's denominator drifts month to month with no visible cause.
-    Disclosure, not a definition change: each side's N is the length of its
-    landed ``macro_items`` (the comparison's annotation) — the metrics
-    computed that list, the report does not apply ``min_positives`` again.
-    The suffix appears exactly when :func:`compared_per_item_table` draws the
-    Macro row: both sides had a macro, an empty one included.
-
-    Generic "M"/"B" labels so the one wording reads right for the model
-    against its baseline (main report) and against a compared source
-    (comparison report).
-    """
-    if not both_present(macro_block):
-        return ""
-    return _macro_coverage_mb(len(macro_items[THIS]),
-                              len(macro_items[REFERENCE]), n_items)
-
-
-def _macro_coverage_mb(n_a: int, n_b: int, n_items: int) -> str:
-    """The M/B coverage wording, one copy for both suffixes."""
-    return f"（參與 macro 的 item 數 M {n_a}／B {n_b}／全部 {n_items}）"
 
 
 # =====================================================================
 # 全正的 query group（#376）
 # =====================================================================
 #
-# ``evaluation.query_filter.drop_all_positive_groups`` 只套用在衡量指標（含頭號
-# 指標）與熱門度 baseline；per-item 細部拆解不跟（使用者 2026-09-18 決定：新開關
-# 不延伸進診斷；當時的診斷頁已隨 #532 拿掉）。所以開關開著時，同一份報表裡有兩批
-# 組，這一段的函式負責讓讀者看得出每個數字是哪一批。開關只經
+# ``evaluation.query_filter.drop_all_positive_groups`` 只套用在讀指標結果的數字：
+# 概覽、排序指標與熱門度基準段，以及名次分布段的正例平均名次；名次分布段的其他
+# 圖不跟（使用者 2026-09-18 決定：新開關不延伸進診斷；當時的診斷頁已隨
+# #532 拿掉）。所以開關開著時，同一份報表裡有兩批組，這一段的函式負責讓讀者
+# 看得出每個數字是哪一批。開關只經
 # ``result_readers.drop_all_positive_groups`` 讀；警告與佔比是列的事實每個粒度
 # 落地的帳（``metrics.all_positive_accounts``，#536），log 與報表讀同一份，不會
 # 各說各話。
@@ -448,8 +417,8 @@ def zero_positive_draw_on_test(parameters: dict) -> float | None:
     （``test_carries_zero_positive_group_weight``）回保留比例 r（> 0）；不帶
     權重欄回 ``0.0``（dataset 全丟了）。
 
-    一個判斷、兩段措辭：組數帳的 ``ranking_metrics._zero_positive_origin`` 與資料概況／預測
-    品質段的 :func:`kept_zero_positive_groups_note` 都從這裡讀，不各寫一版分支。
+    一個判斷、兩段措辭：資料統計段的說明（``data_stats._description``）與預測品質段
+    的 ``prediction_quality._kept_zero_positive_groups`` 都從這裡讀，不各寫一版分支。
     """
     if not parameters.get("post_training"):
         return None
@@ -470,114 +439,23 @@ def scored_with_positive(metrics: dict) -> int | None:
         N_SCORED_WITH_POSITIVE_KEY)
 
 
-def query_count_rows(facts: dict, metrics: dict, parameters: dict) -> dict:
-    """「規模／分母」與「本次執行事實」共用的 query 組數列。
-
-    開關關時與 #376 之前逐字相同。開關開時 ``n_excluded_queries`` 只數無正例的
-    組、實際被排除的還有全正的組，「有正例的 query 數」也不再是算進衡量指標的
-    組數：標籤改成說清楚是哪一批，並另列全正與算進衡量指標兩列（兩列相加＝有
-    正例的 query 數）。``facts`` 與 ``metrics`` 是同一個粒度的列的事實與指標
-    結果；算進衡量指標的那一列讀後者的母體帳（:func:`scored_with_positive`）。
-    """
-    n_queries = facts.get("n_queries")
-    n_zero = facts.get("n_excluded_queries")
-    n_pos = facts.get(N_WITH_POSITIVE_KEY)
-    if not drop_all_positive_groups(parameters):
-        return {
-            "全部 query 數 n_queries": n_queries,
-            "有正例的 query 數": n_pos,
-            "排除 query 數 n_excluded_queries": n_zero,
-        }
-    n_all = facts.get(ALL_POSITIVE_KEY)
-    return {
-        "全部 query 數 n_queries": n_queries,
-        "有正例的 query 數": n_pos,
-        f"其中全正而排除的 query 數 {ALL_POSITIVE_KEY}": n_all,
-        "其中算進衡量指標的 query 數（有正例的 − 全正的）":
-            scored_with_positive(metrics),
-        "無正例而排除的 query 數 n_excluded_queries": n_zero,
-    }
-
-
 def kept_ratio_phrase(ratio: float) -> str:
-    """「test 表保留了比例 r 的無正例組」的說法，一個來源：資料概況的說明與
-    衡量指標段的組數帳（#376）都印它，兩邊不會各寫一版。"""
+    """「test 表保留了比例 r 的無正例組」的說法，一個來源：資料統計段的說明與
+    預測品質段的母體說明都印它，兩邊不會各寫一版。"""
     return f"test 表保留了比例 r＝{ratio:g} 的無正例 query group"
-
-
-def kept_zero_positive_groups_note(facts: dict, parameters: dict) -> str:
-    """How many test query groups holding no positive this run evaluated, and
-    at what ratio they were kept — empty unless ``--post-training`` with
-    ``dataset.test_zero_positive_group_ratio`` above 0 (ADR-0025 decision 3).
-
-    The count is ``n_excluded_queries``: the ranking metrics skip every query
-    group without a positive, and under that mode every such group in the data
-    is one the dataset draw kept. Printed because ``1 / r`` is a design
-    weight: few kept groups means the weighted numbers are not stable, and the
-    reader should see the count next to them.
-    """
-    ratio = zero_positive_draw_on_test(parameters)
-    if not ratio:   # monitoring (None), or the dataset dropped them all (0.0)
-        return ""
-    n_kept = facts.get("n_excluded_queries")
-    kept = f"本次評估資料裡有 {n_kept:,} 個" if n_kept is not None else "本次評估資料裡有一些"
-    return (
-        f"{kept_ratio_phrase(ratio)}"
-        f"（dataset.test_zero_positive_group_ratio）：{kept}，每列帶權重 "
-        f"1／r＝{1 / ratio:.4g}（{ZERO_POSITIVE_GROUP_WEIGHT_COL}）。1／r 是設計"
-        "權重，不是無偏估計：留下的組少時，加權後的比值型指標不穩。"
-    )
 
 
 def unmatched_last(by_segment: dict) -> dict:
     """同一份 dict，(unmatched) 移到最後、其餘順序不動。
 
-    它不是一個 segment，列出來是為了交代它有多少 query；三處分群表（基本統計、
-    衡量指標、baseline 對照）用同一個順序，讀者才不會在某張表把它當第一個群。
+    它不是一個 segment，列出來是為了交代它有多少 query；每張分群表（資料統計、
+    排序指標、熱門度基準段，比較報表的分群指標段）用同一個順序，讀者才不會在某張
+    表把它當第一個群。
     """
     rest = {k: v for k, v in by_segment.items() if k != UNMATCHED_SEGMENT}
     if UNMATCHED_SEGMENT in by_segment:
         rest[UNMATCHED_SEGMENT] = by_segment[UNMATCHED_SEGMENT]
     return rest
-
-
-def compared_per_item_table(
-    per_item: dict,
-    macro: dict,
-    ks: list,
-    metric_key: str,
-    col_base_fmt: str,
-) -> pd.DataFrame:
-    """Per-item M/B/Δ table drawn off a comparison's ``per_item`` and
-    ``macro_by_item`` blocks (``steps/comparison_layer``, #536): the
-    comparison holds both sides and their difference, so nothing is computed
-    here.
-
-    Rows = the Macro row (``MACRO_LABEL``) when both sides had a macro
-    (:func:`both_present`), then the items in the comparison's order (this
-    side's, then the ones only the reference has). Columns =
-    ``f"{base} M"``, ``f"{base} B"``, ``f"{base} Δ"`` for each ``k``, where
-    ``base = col_base_fmt.format(k=k)``; ``"all"`` reads the cell pairing the
-    two sides' own ``"all"`` (``name@all``). A cell the comparison lacks, or
-    a side it lacks, is blank, and so is a difference it did not take
-    (ADR-0020 bug 4).
-    """
-    def _row(cells: dict) -> dict:
-        row: dict = {}
-        for k in ks:
-            key = f"{metric_key}@{k}"
-            base = col_base_fmt.format(k=k)
-            row[f"{base} M"] = compared_value(cells, key, THIS)
-            row[f"{base} B"] = compared_value(cells, key, REFERENCE)
-            row[f"{base} Δ"] = compared_value(cells, key, DIFF)
-        return row
-
-    data: dict = {}
-    if both_present(macro):
-        data[MACRO_LABEL] = _row(macro[CELLS])
-    for item, cells in per_item[CELLS].items():
-        data[item] = _row(cells)
-    return pd.DataFrame(data).T
 
 
 def eval_dates_display(configured):

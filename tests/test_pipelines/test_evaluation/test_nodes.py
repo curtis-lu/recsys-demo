@@ -950,7 +950,7 @@ class TestComputeBaselineMetrics:
                 "snap_date": "2025-01-31",
                 "k_values": [1, 2, 3],
                 "baseline": {"lookback_months": 12},
-                "report": {"sections": {"baseline": baseline_section}},
+                "report": {"sections": {"popularity_baseline": baseline_section}},
             },
         }
 
@@ -1270,7 +1270,7 @@ class TestCompareToBaseline:
 
 
 from recsys_tfb.pipelines.evaluation.steps.display_ks import (  # noqa: E402
-    drop_metric_keys_above_all_k,
+    comparison_cut,
     resolve_display_k,
 )
 
@@ -1301,24 +1301,25 @@ class TestResolveDisplayKClampsToItemCount:
         assert resolve_display_k([1, 3, 5, "all"], 0) == [1, 3, 5, "all"]
 
 
-class TestDropMetricKeysAboveAllK:
-    """bug 8 (ADR-0020) for key-agnostic tables: the same K > all_k rule as
-    resolve_display_k, applied to metric keys instead of a display list.
-    The bounds below are item counts: what all_k is without event."""
+class TestComparisonCut:
+    """The comparison report's K columns at one grain (#537): ``compare_k``
+    cut at this side's "all" by the bug 8 rule, ``"all"`` written as the K
+    it resolved to (a header writes the real K, ADR-0031 decision 16 item
+    7), ascending, each K once — so no table has two @K columns for one K."""
 
-    def test_drops_only_integer_k_above_the_count(self):
-        keys = ["map@3", "precision@4", "recall@5", "mean_pos", "map@all"]
-        assert drop_metric_keys_above_all_k(keys, 3) == [
-            "map@3", "mean_pos", "map@all",
-        ]
+    def test_all_becomes_its_k_and_k_above_it_is_cut(self):
+        assert comparison_cut(3, [1, 3, 5, "all"]) == {
+            "all_k": 3, "compare_k": [1, 3]}
 
-    def test_keeps_k_equal_to_the_count(self):
-        assert drop_metric_keys_above_all_k(["precision@3"], 3) == [
-            "precision@3"
-        ]
+    def test_an_int_equal_to_all_is_one_column(self):
+        assert comparison_cut(5, [1, 3, 5, "all"])["compare_k"] == [1, 3, 5]
 
-    def test_skips_the_filter_when_n_items_is_zero_or_unknown(self):
-        assert drop_metric_keys_above_all_k(["map@5"], 0) == ["map@5"]
+    def test_ascending_whatever_the_configured_order(self):
+        # 8 first: a set of {8, 3, 1} iterates as 8, 1, 3.
+        assert comparison_cut(8, ["all", 3, 1])["compare_k"] == [1, 3, 8]
+
+    def test_a_list_without_all_does_not_gain_it(self):
+        assert comparison_cut(7, [1, 3])["compare_k"] == [1, 3]
 
 
 class TestResolveDisplayKs:
@@ -1329,14 +1330,17 @@ class TestResolveDisplayKs:
     grain."""
 
     @staticmethod
-    def _parameters(primary_map_k, metric_k):
+    def _parameters(compare_k, k_values=None):
+        """``compare_k=None`` leaves it unwritten; ``k_values=None`` keeps
+        ``TestComputeBaselineMetrics``' ``[1, 2, 3]``."""
         params = TestCompareToBaseline._parameters(
             item_categories={"enabled": True, "unmapped": "singleton",
-                             "mapping": {"AB": ["A", "B"]}},
-            metric={"k": metric_k})
+                             "mapping": {"AB": ["A", "B"]}})
         params["schema"]["categorical_values"] = {"prod_name": ["A", "B", "C"]}
-        params["evaluation"]["report"]["display"] = {
-            "primary_map_k": primary_map_k}
+        if compare_k is not None:
+            params["evaluation"]["report"]["display"] = {"compare_k": compare_k}
+        if k_values is not None:
+            params["evaluation"]["k_values"] = k_values
         return params
 
     def _resolved(self, spark, params):
@@ -1352,30 +1356,65 @@ class TestResolveDisplayKs:
 
     def test_each_list_drops_the_k_above_what_all_stands_for(self, spark):
         """bug 8 (ADR-0020): an int K above ``"all"`` is dropped, ``"all"``
-        kept. ``metric.k`` 5 is cut too, so the headline note may not name
-        its column."""
+        kept."""
         from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
             fingerprint,
         )
 
-        params = self._parameters([1, 3, 5, "all"], metric_k=5)
+        params = self._parameters([1, 3, 5, "all"])
         out = self._resolved(spark, params)
-        cut = {"all_k": 3, "primary_map_k": [1, 3, "all"],
-               "metrics_section": [1, 2, 3, "all"],
-               "category": {"all_k": 2, "metrics_section": [1, 2, "all"]}}
+        # The metrics section's K: k_values [1, 2, 3] resolved ∪ "all",
+        # as integers.
         assert out.get("evaluation_metrics") == {
-            **cut, "headline_column_shown": False}
-        # The baseline section's tables, cut at the comparison's K: the
-        # model's, which its baseline shares.
-        assert out.get("baseline_comparison") == cut
+            "all_k": 3,
+            "metrics_section": [1, 2, 3],
+            "category": {"all_k": 2, "metrics_section": [1, 2]}}
+        # The baseline section's tables, every one at compare_k, cut at the
+        # comparison's K (the model's, which its baseline shares) and at the
+        # category grain's: "all" resolves to 3 and to 2, 5 is dropped.
+        assert out.get("baseline_comparison") == {
+            "all_k": 3, "compare_k": [1, 3],
+            "category": {"all_k": 2, "compare_k": [1, 2]}}
         # Its fingerprint holds the display key it read, so a changed
-        # primary_map_k makes it — and only it — stale.
+        # compare_k makes it — and only it — stale.
         assert out.get("config_fingerprint") == fingerprint(
-            params, ("evaluation.report.display.primary_map_k",))
+            params, ("evaluation.report.display.compare_k",))
 
-    def test_the_headline_note_names_a_column_the_section_shows(self, spark):
-        out = self._resolved(spark, self._parameters([1], metric_k=2))
-        assert out["evaluation_metrics"]["headline_column_shown"] is True
+    def test_the_metrics_section_follows_k_values(self, spark):
+        """ADR-0031 decision 16 / #537: the metrics section shows the K the
+        run computed — ``k_values`` resolved ∪ "all", above "all" cut — not
+        a fixed 1..5. ``[1, "all"]`` computes @1 and @3 (three items), @1
+        and @2 at the category grain."""
+        out = self._resolved(spark, self._parameters([1, "all"],
+                                                     k_values=[1, "all"]))
+        assert out["evaluation_metrics"]["metrics_section"] == [1, 3]
+        assert out["evaluation_metrics"]["category"]["metrics_section"] == [
+            1, 2]
+
+    def test_an_unwritten_compare_k_is_k_values(self, spark):
+        """``compare_k`` not written: the K the run computed
+        (``evaluation.k_values``), so no table shows a K nothing computed —
+        the old ``[1, 3, 5, "all"]`` asked for @1 and @3 that the default
+        ``k_values`` (``[5, "all"]``) never computes."""
+        out = self._resolved(spark, self._parameters(None,
+                                                     k_values=[2, "all"]))
+        assert out["baseline_comparison"]["compare_k"] == [2, 3]
+        assert out["baseline_comparison"]["category"]["compare_k"] == [2]
+
+    def test_configured_compare_k_falls_back_to_k_values_then_its_default(
+            self):
+        from recsys_tfb.core.consistency import EVALUATION_K_VALUES_DEFAULT
+        from recsys_tfb.pipelines.evaluation.steps.display_ks import (
+            configured_compare_k,
+        )
+
+        written = {"evaluation": {"k_values": [1, 2],
+                                  "report": {"display": {"compare_k": [1]}}}}
+        assert configured_compare_k(written) == [1]
+        assert configured_compare_k(
+            {"evaluation": {"k_values": [1, 3, "all"]}}) == [1, 3, "all"]
+        assert configured_compare_k({"evaluation": {}}) == list(
+            EVALUATION_K_VALUES_DEFAULT)
 
     def test_a_switched_off_baseline_has_no_lists(self, spark):
         from recsys_tfb.pipelines.evaluation.nodes import (
@@ -1391,7 +1430,9 @@ class TestResolveDisplayKs:
             None, None, None, _no_segments(params), params), params)
         out = resolve_display_ks(metrics, stub, params)
         assert out.get("baseline_comparison", "absent") is None
-        assert out["evaluation_metrics"]["primary_map_k"] == [1, 3, "all"]
+        # The ranking-metrics section's K still land: k_values [1, 2, 3] ∪ all,
+        # cut at 3.
+        assert out["evaluation_metrics"]["metrics_section"] == [1, 2, 3]
 
     def test_a_comparison_computed_under_other_settings_is_refused(
             self, spark):
@@ -1400,11 +1441,12 @@ class TestResolveDisplayKs:
             resolve_display_ks,
         )
 
-        computed_with = self._parameters([1], metric_k=2)
+        computed_with = self._parameters([1])
         metrics, baseline = TestCompareToBaseline._model_and_baseline(
             spark, computed_with)
         comparison = compare_to_baseline(metrics, baseline, computed_with)
-        now = self._parameters([1], metric_k=3)
+        now = self._parameters([1])
+        now["evaluation"]["metric"] = {"min_positives": 1}
         with pytest.raises(ValueError) as exc:
             resolve_display_ks(metrics, comparison, now)
         assert "baseline_comparison (written by compare_to_baseline)" in str(
@@ -1788,7 +1830,7 @@ def test_compute_report_aggregates_disabled_returns_fingerprinted_stub():
     from recsys_tfb.pipelines.evaluation.nodes import (
         compute_report_aggregates,
     )
-    params = {"evaluation": {"report": {"sections": {"per_item_breakdown": False}}}}
+    params = {"evaluation": {"report": {"sections": {"rank_distribution": False}}}}
     assert compute_report_aggregates(None, None, params) == {
         "enabled": False, "config_fingerprint": fingerprint(params),
     }
@@ -1877,23 +1919,45 @@ class TestConsumersSegmentByTheLandedList:
             self._segments(), self._parameters())
         assert set(result["per_segment"]) == {"mass", "hnw"}
 
+    @classmethod
+    def _compared_frame(cls, spark):
+        """The compared side as ``restrict_to_common`` hands it: c2's query
+        group only (a subset of this run's side's), and its own
+        ``cust_segment_typ`` holding a value this run's side does not — what
+        a prediction table landed under other settings could carry. A side
+        segmenting by its own column would show ``b_own``."""
+        from pyspark.sql import functions as F
+
+        return (cls._frame(spark)
+                .filter(F.col("cust_id") == "c2")
+                .withColumn("cust_segment_typ", F.lit("b_own"))
+                .drop("stale_seg", "eval_partition_fingerprint"))
+
     def test_compute_compare_metrics(self, spark):
-        """Only the model side segments, by the landed list; the compared
-        side is a prediction table of its own, computed with none (#536: the
-        ledger says so, and the comparison's annotation reads it). Its frame
-        keeps the segment column here, so segmenting it would show."""
+        """Both sides segment by the landed list, and the compared side takes
+        this run's side's values, joined on the query group (#537): a
+        segment column is the entity's attribute, whoever scored it. c2 is
+        ``hnw`` on this run's side. So the two ledgers name the same segment
+        columns, and the comparison's annotation says the same."""
         from recsys_tfb.pipelines.evaluation.nodes import compute_compare_metrics
+        from recsys_tfb.pipelines.evaluation.steps.comparison_layer import (
+            compare_metric_results,
+        )
 
         frame = self._frame(spark)
         facts_a, metrics_a, facts_b, metrics_b = compute_compare_metrics(
-            frame, frame.drop("eval_partition_fingerprint"),
+            frame, self._compared_frame(spark),
             self._segments(), self._parameters())
         assert set(metrics_a["per_segment"]) == {"mass", "hnw"}
         assert metrics_a["population"]["segment_columns"] == [
             "cust_segment_typ"]
         assert set(facts_a["dataset_overview"]["by_segment"]) == {"mass", "hnw"}
-        assert metrics_b["per_segment"] == {}
-        assert metrics_b["population"]["segment_columns"] == []
+        assert set(metrics_b["per_segment"]) == {"hnw"}
+        assert set(facts_b["dataset_overview"]["by_segment"]) == {"hnw"}
+        assert metrics_b["population"]["segment_columns"] == [
+            "cust_segment_typ"]
+        population = compare_metric_results(metrics_a, metrics_b)["population"]
+        assert population["segment_columns"]["same"] is True
 
     def test_the_pipeline_names_each_output_after_the_side_it_holds(
             self, spark):
@@ -1901,8 +1965,8 @@ class TestConsumersSegmentByTheLandedList:
         them (``pipeline._comparison_nodes``): swap two names there and
         nothing raises — A's metrics would land as the compared source's, and
         the report would draw each side under the other's label. Read through
-        the node's own ``outputs``, side A is the one segmented by the landed
-        list, side B the one computed with none."""
+        the node's own ``outputs``: side A holds both customers' segments,
+        side B c2's only (:meth:`_compared_frame`)."""
         from recsys_tfb.pipelines.evaluation import create_pipeline
 
         node = next(
@@ -1911,20 +1975,20 @@ class TestConsumersSegmentByTheLandedList:
             if n.name == "compute_compare_metrics")
         frame = self._frame(spark)
         landed = dict(zip(node.outputs, node.func(
-            frame, frame.drop("eval_partition_fingerprint"),
+            frame, self._compared_frame(spark),
             self._segments(), self._parameters())))
 
         assert sorted(landed) == ["compare_metrics_a", "compare_metrics_b",
                                   "compare_row_facts_a", "compare_row_facts_b"]
-        assert landed["compare_metrics_a"]["population"]["segment_columns"] \
-            == ["cust_segment_typ"]
-        assert landed["compare_metrics_b"]["population"]["segment_columns"] \
-            == []
         by_segment = {name: set(landed[name]["dataset_overview"].get(
             "by_segment") or {}) for name in ("compare_row_facts_a",
                                               "compare_row_facts_b")}
         assert by_segment == {"compare_row_facts_a": {"mass", "hnw"},
-                              "compare_row_facts_b": set()}
+                              "compare_row_facts_b": {"hnw"}}
+        per_segment = {name: set(landed[name]["per_segment"])
+                       for name in ("compare_metrics_a", "compare_metrics_b")}
+        assert per_segment == {"compare_metrics_a": {"mass", "hnw"},
+                               "compare_metrics_b": {"hnw"}}
 
     def test_compute_compare_metrics_lands_what_it_was_computed_with(
             self, spark):
@@ -2450,36 +2514,21 @@ class TestAllPositiveQueryGroups:
 
     # ---- the report headline follows it -----------------------------------
 
-    def test_the_report_headline_follows_it(self, spark):
-        """The report's headline per-item mAP is read from
-        ``compute_metrics``'s result (``metrics.json``), so the switch reaches
-        it like every other measurement metric: switched on, it equals the
-        headline of the frame without the all-positive groups."""
+    def test_the_report_s_macro_per_item_map_follows_it(self, spark):
+        """The overview's macro per-item mAP (a model-selection metric, #537)
+        is read from ``compute_metrics``'s result (``metrics.json``), so the
+        switch reaches it like every other measurement metric: switched on,
+        it equals the value of the frame without the all-positive groups."""
         from recsys_tfb.evaluation.report_sections import overview
-        from recsys_tfb.pipelines.evaluation.nodes import (
-            compare_to_baseline,
-            resolve_display_ks,
-        )
+        from recsys_tfb.report.types import Table
 
         def headline(switch, without=()):
             params = self._parameters(switch)
-            frame = self._frame(spark, params, without)
             metrics = self._metrics(spark, switch, without=without)
-            # The overview's K columns are the cut's (#536), landed after
-            # the comparison with the baseline.
-            comparison = compare_to_baseline(
-                metrics, self._baseline(spark, switch, without=without),
-                params)
-            s = overview.build(
-                {"evaluation_row_facts": _row_facts(frame, params),
-                 "evaluation_metrics": metrics,
-                 "prediction_quality_metrics": None,
-                 "evaluation_display_ks": resolve_display_ks(
-                     metrics, comparison, params)},
-                params)
-            (i,) = [i for i, t in enumerate(s.table_titles)
-                    if t.startswith("頭號指標")]
-            return s.tables[i].loc["macro per-item mAP", "value"]
+            s = overview.build({"evaluation_metrics": metrics}, params)
+            (table,) = [b for b in s.blocks if isinstance(b, Table)]
+            return {r.label: r.cells[0]
+                    for r in table.rows}["macro per-item mAP"]
 
         on = headline(True)
         assert on == pytest.approx(headline(False, without=self.FINE))
@@ -2488,16 +2537,13 @@ class TestAllPositiveQueryGroups:
 
     def test_the_groups_scored_are_the_metrics_own_count(self, spark):
         """Switched on, the report prints how many groups the measurement
-        metrics scored — in the overview's and the completeness section's
-        count rows and in the metrics section's ledger, at each grain. Read
+        metrics scored — in 核心概念's totals (#537). Read
         off the metrics' landed ledger since #536, it must be the number the
         report printed before, holding a positive less all-positive, here by
         hand: three groups hold a positive at either grain (all but c4); c1
         is all-positive at the fine grain, c1 and c2 at the category one."""
         from recsys_tfb.evaluation.report_sections import (
-            completeness,
-            overview,
-            ranking_metrics,
+            core_concepts,
         )
         from recsys_tfb.pipelines.evaluation.nodes import (
             compare_to_baseline,
@@ -2515,15 +2561,9 @@ class TestAllPositiveQueryGroups:
                 metrics, compare_to_baseline(
                     metrics, self._baseline(spark, True), params), params),
         }
-        label = "其中算進衡量指標的 query 數（有正例的 − 全正的）"
-        for section in (overview, completeness):
-            built = section.build(results, params)
-            (table,) = [t for t in built.tables if label in t.index]
-            assert table.loc[label].iloc[0] == 3 - 1, section.__name__
-        ledger = [b for b in ranking_metrics.build(results, params).bullets
-                  if b.startswith("組數帳")]
-        assert "算進衡量指標的有 2；" in ledger[0], ledger
-        assert "算進衡量指標的有 1；" in ledger[1], ledger
+        totals = {r.label: r.cells[0] for r in core_concepts.build(
+            results, params).blocks[-1].rows}
+        assert totals["　其中算進指標的"] == 3 - 1
 
     # ---- the log -----------------------------------------------------------
 

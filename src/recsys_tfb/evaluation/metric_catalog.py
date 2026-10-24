@@ -18,7 +18,14 @@ methods with two definitions; the two land in different blocks of a metrics
 bundle (``overall`` against ``per_item``), so the pair (name, method) is the key.
 
 **Kept apart from training's** ``metric_registry`` (ADR-0031 decision 6). A
-number both compute under different names says so in ``training_name``.
+number both compute under different names says so in ``training_name``; the
+ones HPO selects a model by are marked here too
+(:data:`MODEL_SELECTION_METRICS`, with the ones not computed yet in
+:data:`MODEL_SELECTION_PENDING`), without importing the registry.
+
+**What a section shows** is a list of :class:`CompareEntry` in its own file —
+an entry and the grain it is read at, checked against this catalog when built.
+``display_name`` is the word a table title uses (``map@K · 整體與各分群``).
 
 **Not in it yet: the third method of decision 7**, the score read as a
 probability (the binned ``pr_auc`` / ``roc_auc`` of the prediction-quality
@@ -97,7 +104,9 @@ class Metric:
     ``per_k`` metrics land as ``name@K`` for every K computed, the others as
     ``name`` (:meth:`key`). ``grains`` lists where the bundle carries it;
     ``population`` which rows it is computed on; ``display_name`` what a report
-    calls it; ``definition`` the one sentence a report reader needs.
+    calls it (the word of a table title, ``map@K · 整體``); ``definition`` the
+    one sentence a report reader needs, printed in the definitions block
+    under the tables (the wording of ADR-0031 decision 16's approved demo).
     """
 
     name: str
@@ -135,10 +144,10 @@ METRICS: tuple[Metric, ...] = (
         per_k=True,
         grains=_QUERY_GROUP_GRAINS,
         population=_QUERY_GROUP_POPULATION,
-        display_name="mAP",
+        display_name="map",
         definition=(
-            "每個 query group 的 AP@K（前 K 名裡每個正例位置的精確率加總，"
-            "除以該組的正例數），再對 query group 等權平均"
+            "每個有正例的 query group 算 AP@K（分母是該組的正例數 R），再對 "
+            "query group 等權平均。"
         ),
         training_name=(
             "mean_ap：等於這裡不截斷（K＝全部）的整體值，前提是 "
@@ -153,7 +162,7 @@ METRICS: tuple[Metric, ...] = (
         grains=_QUERY_GROUP_GRAINS,
         population=_QUERY_GROUP_POPULATION,
         display_name="precision",
-        definition="每個 query group 前 K 名裡的正例數除以 K，再對 query group 平均",
+        definition="前 K 名裡的正例數 ÷ K，再對 query group 等權平均。",
     ),
     Metric(
         name="recall",
@@ -163,10 +172,7 @@ METRICS: tuple[Metric, ...] = (
         grains=_QUERY_GROUP_GRAINS,
         population=_QUERY_GROUP_POPULATION,
         display_name="recall",
-        definition=(
-            "每個 query group 前 K 名裡的正例數除以該組的正例數，再對 query "
-            "group 平均"
-        ),
+        definition="前 K 名裡的正例數 ÷ 該組的正例數，再對 query group 等權平均。",
     ),
     Metric(
         name="recall",
@@ -176,7 +182,10 @@ METRICS: tuple[Metric, ...] = (
         grains=_ITEM_GRAINS,
         population=_ITEM_POPULATION,
         display_name="per-item recall",
-        definition="該 item 為正例的列裡，排進前 K 名的比例",
+        definition=(
+            "這個 item 的正例列裡，排進前 K 名的比例；跟每個 query group 先算的 "
+            "recall@K 是不同的指標。鍵從 hit_rate@K 改名。"
+        ),
     ),
     Metric(
         name="map_attr",
@@ -187,8 +196,8 @@ METRICS: tuple[Metric, ...] = (
         population=_ITEM_POPULATION,
         display_name="map_attr",
         definition=(
-            "該 item 為正例的每一列對所屬 query group 的 AP@K 的貢獻（排名 r "
-            "在前 K 名時是前 r 名的精確率，否則 0），再對這些列平均"
+            "這個 item 是正例時，它在 AP@K 分子裡那一項的平均：排第 r 名且 "
+            "r ≤ K 時是 P@r，否則是 0。"
         ),
         training_name=(
             "macro_per_item_map：等於這裡 Macro 列不截斷（K＝全部）的值，前提是 "
@@ -204,10 +213,19 @@ METRICS: tuple[Metric, ...] = (
         per_k=False,
         grains=_ITEM_GRAINS,
         population=_ITEM_POPULATION,
-        display_name="mean_pos",
-        definition="該 item 為正例的列的平均名次，越小越好",
+        display_name="正例平均名次",
+        definition="這個 item 是正例時的平均名次。鍵是 mean_pos。",
     ),
 )
+
+
+#: The definitions of the grains a table's rows can be, beside the metrics'
+#: (a definitions block under an item table lists "Macro 平均" too):
+#: ``{grain: (term, definition)}``.
+GRAIN_DEFINITIONS: dict[str, tuple[str, str]] = {
+    "macro": ("Macro 平均",
+              "對 item 等權平均；只算正例數達到 metric.min_positives 的 item。"),
+}
 
 
 def metrics_of(method: str) -> tuple[Metric, ...]:
@@ -225,3 +243,86 @@ def entry(name: str, method: str) -> Metric:
         f"metric_catalog has no {name!r} in method {method!r}; it holds "
         f"{[(m.name, m.method) for m in METRICS]}"
     )
+
+
+@dataclass(frozen=True)
+class CompareEntry:
+    """One item of a section's list of metrics to show or compare (#537): a
+    catalog entry and the grain it is read at — ``CompareEntry("map",
+    QUERY_GROUP, "overall")``. The lists live in the section files, as
+    constants, not as settings.
+
+    Checked when built: the catalog must hold ``(name, method)``
+    (:func:`entry` raises ``KeyError``) and ``grain`` must be one of that
+    entry's ``grains`` (``ValueError``), so a list cannot name a number the
+    computation does not land.
+    """
+
+    name: str
+    method: str
+    grain: str
+
+    def __post_init__(self) -> None:
+        metric = entry(self.name, self.method)
+        if self.grain not in metric.grains:
+            raise ValueError(
+                f"metric_catalog's {self.name!r} in method {self.method!r} is "
+                f"not at grain {self.grain!r}; its grains are {metric.grains}")
+
+    @property
+    def metric(self) -> Metric:
+        """The catalog entry."""
+        return entry(self.name, self.method)
+
+
+@dataclass(frozen=True)
+class ModelSelectionMetric:
+    """A metric training's HPO can select a model by
+    (``metric_registry.METRIC_NAMES``), marked on the catalog entry whose
+    untruncated value it equals: ``source`` at K = all (the resolved
+    ``all_k``; ``name@all`` in a comparison). ``name`` is the registry's name,
+    ``display_name`` what both reports call it, ``definition`` the one
+    sentence under the model-selection table."""
+
+    name: str
+    source: CompareEntry
+    display_name: str
+    definition: str
+
+
+#: The model-selection metrics evaluation computes, in the order the reports
+#: list them (ADR-0031 decision 16): each is one catalog entry's value at
+#: K = all.
+MODEL_SELECTION_METRICS: tuple[ModelSelectionMetric, ...] = (
+    ModelSelectionMetric(
+        name="mean_ap",
+        source=CompareEntry("map", QUERY_GROUP, "overall"),
+        display_name="overall mAP",
+        definition=(
+            "每個有正例的 query group 算不截斷的 AP，再對 query group 等權平均；"
+            "數值等於 map@K 整體列、K＝全部那一格。HPO 的名字是 mean_ap。"
+        ),
+    ),
+    ModelSelectionMetric(
+        name="macro_per_item_map",
+        source=CompareEntry("map_attr", ITEM, "macro"),
+        display_name="macro per-item mAP",
+        definition=(
+            "每個 item 的 map_attr 不截斷，再對 item 等權平均；數值等於 "
+            "map_attr@K 的 Macro 平均列、K＝全部那一格。HPO 的名字是 "
+            "macro_per_item_map。"
+        ),
+    ),
+)
+
+#: The model-selection metrics HPO can select by but evaluation does not
+#: compute yet: the two binary-prediction ones, a Spark pass each
+#: (``metric_registry``'s ``POOLED_AP_PASS`` / ``PER_ITEM_AP_PASS``). Not in
+#: #537 (ADR-0031 decision 16, last item of the tickets it affects); until
+#: they are, the reports list only :data:`MODEL_SELECTION_METRICS`. Together
+#: the two lists name every ``metric_registry.METRIC_NAMES`` (a test checks
+#: it), so a metric added to the registry is placed in one of them.
+MODEL_SELECTION_PENDING: tuple[str, ...] = (
+    "pooled_average_precision",
+    "macro_per_item_average_precision",
+)

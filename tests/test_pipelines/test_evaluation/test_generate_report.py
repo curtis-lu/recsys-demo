@@ -7,6 +7,7 @@ that into ``generate_report`` — exactly the two-step path the pipeline wires.
 
 import copy
 import json
+import re
 
 import pytest
 
@@ -38,8 +39,8 @@ def _params(per_item_breakdown=False):
             "time": "snap_date", "entity": ["cust_id"], "item": "prod_name",
             "label": "label", "score": "score", "rank": "rank"}},
         "evaluation": {"snap_date": "20240331", "report": {
-            "sections": {"per_item_breakdown": per_item_breakdown},
-            "display": {"primary_map_k": [1], "guardrail_recall_k": [1]},
+            "sections": {"rank_distribution": per_item_breakdown},
+            "display": {"compare_k": [1]},
             "diagnostics": {"include_distributions": per_item_breakdown}}},
     }
 
@@ -142,9 +143,8 @@ def test_generate_report_html_no_diagnostics(spark):
     )
     assert html.startswith("<!DOCTYPE html>")
     assert "概覽" in html
-    # diagnostics off → 沒有可收合的診斷 section（<details class="section">）。
-    # 注意：明細表級收合 <details class="table-collapse"> 與診斷無關，不在此斷言。
-    assert '<details class="section"' not in html
+    # diagnostics off → 沒有診斷 section；也沒有圖，所以沒有收起的東西。
+    assert "<details" not in html
 
 
 def test_generate_report_with_diagnostics(spark):
@@ -163,10 +163,18 @@ def test_generate_report_with_diagnostics(spark):
             _landed_metrics(params), _unread_stub(params), params),
         parameters=params,
     )
-    # 診斷升為頂層「per-item 細部拆解」段（非收合 section）；其明細數字表用
-    # 逐表收合 <details class="table-collapse">。
-    assert "per-item 細部拆解" in html
-    assert '<details class="table-collapse"' in html
+    # 名次分布段畫了：八張圖，每張的數字表收在圖底下，而且每個都關上了（沒關
+    # 的 <details> 會吞掉後面的段）；圖以外沒有表。
+    section = html[html.index('id="s-rank_distribution"'):]
+    section = section[:section.index('<div class="section')]
+    assert re.findall(r"<details\b[^>]*>", section) == [
+        '<details class="fig-data">'] * 8
+    assert section.count("</details>") == 8
+    assert "名次佔比 · 各 item" in section
+    shown = re.sub(r'<details class="fig-data">.*?</details>', "", section,
+                   flags=re.S)
+    assert '<div class="tblk">' not in shown
+    assert html.count("<details") == html.count("</details>")
 
 
 def test_the_main_report_has_no_diagnosis_section(spark):
@@ -182,7 +190,7 @@ def test_the_main_report_has_no_diagnosis_section(spark):
     params = _params(True)
     params["post_training"] = True
     params["evaluation"]["report"]["sections"].update(
-        {"prediction_quality": True, "baseline": False})
+        {"prediction_quality": True, "popularity_baseline": False})
     params["evaluation"]["prediction_quality"] = {
         "n_bins": 10, "n_display_bins": 5, "top_n": 1}
     eval_pred = stamp_partition_fingerprint(
@@ -202,7 +210,8 @@ def test_the_main_report_has_no_diagnosis_section(spark):
         parameters=params,
     )
     # Premise: the sections that used to name the diagnoses were drawn.
-    assert "概覽" in html and "預測品質" in html and "per-item 細部拆解" in html
+    assert ("概覽" in html and 'id="s-prediction_quality"' in html
+            and 'id="s-rank_distribution"' in html)
     assert "排序診斷" not in html
     assert "item 能力" not in html
     assert "diagnosis/" not in html
@@ -335,7 +344,7 @@ def test_generate_report_body_has_no_spark_actions():
 
 def _params_computed_without_baseline():
     params = _params(False)
-    params["evaluation"]["report"]["sections"]["baseline"] = False
+    params["evaluation"]["report"]["sections"]["popularity_baseline"] = False
     return params
 
 
@@ -358,12 +367,12 @@ def _landed_inputs(params):
 
 def test_generate_report_refuses_a_computed_setting_flipped_after_the_run():
     """ADR-0020 section 3's demonstration, unit version: computed with
-    ``sections.baseline: false``, flipped back to ``true`` and only redrawn,
+    ``sections.popularity_baseline: false``, flipped back to ``true`` and only redrawn,
     it must raise, not return a report quietly missing its baseline section."""
     computed_with = _params_computed_without_baseline()
     baseline, aggregates, pq = _landed_inputs(computed_with)
     now = copy.deepcopy(computed_with)
-    now["evaluation"]["report"]["sections"]["baseline"] = True
+    now["evaluation"]["report"]["sections"]["popularity_baseline"] = True
 
     with pytest.raises(ValueError) as exc:
         generate_report(
@@ -378,7 +387,7 @@ def test_generate_report_refuses_a_computed_setting_flipped_after_the_run():
         )
 
     msg = str(exc.value)
-    assert "evaluation.report.sections.baseline" in msg
+    assert "evaluation.report.sections.popularity_baseline" in msg
     # compute_row_facts, not compute_baseline_metrics: row_facts.json and
     # metrics.json carry the same fingerprint and sort first, so re-running
     # from the baseline would leave them stale and this raise would repeat
@@ -438,13 +447,13 @@ def test_generate_report_refuses_metrics_without_a_fingerprint():
 
 def test_generate_report_redraws_when_only_drawn_settings_changed():
     """A changed drawn key only needs a redraw; a fingerprint that counted
-    drawn keys would block every layout tweak. Not ``primary_map_k``: the
+    drawn keys would block every layout tweak. Not ``compare_k``: the
     main report's K are cut before it since #536 (the next test)."""
     computed_with = _params_computed_without_baseline()
     baseline, aggregates, pq = _landed_inputs(computed_with)
     now = copy.deepcopy(computed_with)
-    now["evaluation"]["report"]["display"]["guardrail_recall_k"] = [1, 2]
-    now["evaluation"]["report"]["sections"]["primary_map"] = False
+    now["evaluation"]["report"]["sections"]["data_stats"] = False
+    now["evaluation"]["report"]["sections"]["ranking_metrics"] = False
 
     html = generate_report(
         evaluation_row_facts=_landed_row_facts(computed_with),
@@ -462,14 +471,14 @@ def test_generate_report_redraws_when_only_drawn_settings_changed():
 
 def test_generate_report_refuses_a_display_k_changed_after_the_cut():
     """#536: the K each table shows is cut by ``resolve_display_ks`` and
-    landed, so a changed ``primary_map_k`` drawn with only a redraw would
+    landed, so a changed ``compare_k`` drawn with only a redraw would
     print the old columns, exit code 0. The cut's fingerprint carries the
     display key, so it alone is stale and the advice is its own node — not
     ``compute_row_facts``: no computed setting moved."""
     computed_with = _params_computed_without_baseline()
     baseline, aggregates, pq = _landed_inputs(computed_with)
     now = copy.deepcopy(computed_with)
-    now["evaluation"]["report"]["display"]["primary_map_k"] = [1, "all"]
+    now["evaluation"]["report"]["display"]["compare_k"] = [1, "all"]
 
     with pytest.raises(ValueError) as exc:
         generate_report(
@@ -486,7 +495,7 @@ def test_generate_report_refuses_a_display_k_changed_after_the_cut():
     msg = str(exc.value)
     assert ("evaluation_display_ks (written by resolve_display_ks) was "
             "computed with different settings") in msg
-    assert "evaluation.report.display.primary_map_k: [1] -> [1, 'all']" in msg
+    assert "evaluation.report.display.compare_k: [1] -> [1, 'all']" in msg
     assert "--from-node resolve_display_ks" in msg
 
 
@@ -635,9 +644,8 @@ class TestTheBaselineIsTheModelsComputation:
                                     "mapping": {"AB": ["A", "B"]}},
                 "baseline": {"lookback_months": 12},
                 "report": {
-                    "sections": {"per_item_breakdown": False},
-                    "display": {"primary_map_k": [1],
-                                "guardrail_recall_k": [1]}},
+                    "sections": {"rank_distribution": False},
+                    "display": {"compare_k": [1]}},
             },
         }
 
@@ -692,12 +700,17 @@ class TestTheBaselineIsTheModelsComputation:
                 metrics, baseline, params),
             parameters=params,
         )
-        table = html[html.index("<summary>per-item recall@k (M/B/Δ)"):]
+        # The ranking-metrics section has a table of the same title (one
+        # side): read the popularity-baseline section's.
+        section = html[html.index('id="s-popularity_baseline"'):]
+        table = section[section.index(
+            '<h4 class="tt">per-item recall@K · 各 item</h4>'):]
         table = table[:table.index("</table>")]
-        assert "<th>Macro 平均</th>" in table, table
-        macro = table[table.index("<th>Macro 平均</th>"):]
-        cells = re.findall(r"<td>([^<]*)</td>", macro[:macro.index("</tr>")])
-        assert cells == ["1", "0", "1"]   # recall@1 M, B, Δ
+        assert '<tr class="pin"><th class="rl">Macro 平均</th>' in table, table
+        macro = table[table.index('<th class="rl">Macro 平均</th>'):]
+        cells = re.findall(r'data-v="([^"]*)"', macro[:macro.index("</tr>")])
+        # recall@1 這次, 對照, 差 (compare_k [1]).
+        assert cells == ["1.000000", "0.000000", "1.000000"]
 
     def _drawn_from(self, params, facts, metrics, baseline, landed):
         """``generate_report`` on the nodes' results, the comparison and the
@@ -721,7 +734,7 @@ class TestTheBaselineIsTheModelsComputation:
         Its fingerprint still matches: no setting changed."""
         params, facts, metrics, baseline = self._computed(spark)
         landed = _landed_after_the_metrics(metrics, baseline, params)
-        assert "per-segment mAP@k (M/B/Δ)" in self._drawn_from(
+        assert "map@K · 整體與各分群" in self._drawn_from(
             params, facts, metrics, baseline, landed)   # drawn when there
         del landed["baseline_comparison"]["per_segment"]
         with pytest.raises(ValueError) as exc:
@@ -741,17 +754,19 @@ class TestTheBaselineIsTheModelsComputation:
                 "metrics_section") in str(exc.value)
         assert "--from-node resolve_display_ks" in str(exc.value)
 
-    @pytest.mark.parametrize("fixture", [
-        "_baseline_metrics_full", "_baseline_with_seg_cat"])
+    @pytest.mark.parametrize("module, fixture", [
+        ("tests.test_evaluation.test_report_builder", "_baseline_metrics_full"),
+        ("tests.test_evaluation.report_sections.test_popularity_baseline",
+         "_baseline")])
     def test_the_hand_written_baseline_holds_only_what_the_node_writes(
-            self, spark, fixture):
-        """The hand-written baselines of ``test_report_builder`` still draw
-        the baseline section in the report tests that need no Spark. Every
-        key path in them must be one ``compute_baseline_metrics`` writes,
-        items, segments and months read as any key — the macro
+            self, spark, module, fixture):
+        """The hand-written baselines of the report tests still draw the
+        baseline section in the tests that need no Spark. Every key path in
+        them must be one ``compute_baseline_metrics`` writes, items,
+        segments and months read as any key — the macro
         ``_baseline_metrics_full`` held before #535 was not. Keys only: the
         values there are made up."""
-        from tests.test_evaluation import test_report_builder
+        import importlib
 
         any_key_below = {"per_item": 1, "per_segment": 1,
                          "per_item_segment": 2, "purchase_counts": 1,
@@ -770,7 +785,7 @@ class TestTheBaselineIsTheModelsComputation:
             return paths
 
         *_, baseline = self._computed(spark)
-        hand_written = getattr(test_report_builder, fixture)()
+        hand_written = getattr(importlib.import_module(module), fixture)()
         unwritten = key_paths(hand_written) - key_paths(baseline)
         assert unwritten == set()
 
@@ -863,14 +878,17 @@ def _stamped_for_comparison(result, params):
 def _comparison_inputs(params, compare_only=False):
     """What ``generate_comparison_report`` reads, landed under ``params``:
     the coverage and A's row facts by hand in their producers' shape, the
-    comparison and the K cut by the real nodes, off ``_metrics()`` against a
-    weaker copy of it."""
-    weaker = copy.deepcopy(_metrics())
-    weaker["overall"]["map@1"] = 0.25
+    comparison and the K cut by the real nodes, off a bundle holding every
+    key the comparison report draws (``tests/test_evaluation/comparison/
+    fixtures.bundle``; ``_metrics()`` lacks the ``@all`` keys it refuses to
+    draw without, #537) against a weaker one."""
+    from tests.test_evaluation.comparison.fixtures import bundle
+
     comparison = _comparison_node("compare_to_source", compare_only).func(
-        _stamped_for_comparison(_metrics(), params),
-        _stamped_for_comparison(weaker, params), params)
+        _stamped_for_comparison(bundle(0.5), params),
+        _stamped_for_comparison(bundle(0.25), params), params)
     coverage = {"kind_a": "model_version", "model_version_a": "(this run)",
+                "source_a": "enriched_eval_predictions",
                 "kind_b": params["evaluation"]["compare"]["kind"],
                 "n_query_group_A_full": 2, "n_query_group_B_full": 2,
                 "n_query_group_common": 2, "n_item_A_full": 2,
@@ -962,9 +980,8 @@ def test_a_new_label_redraws_with_the_new_label():
     html = _comparison_node("generate_comparison_report", False).func(
         **landed, parameters=now)
 
-    assert "Model vs last quarter&#x27;s model" in html \
-        or "Model vs last quarter's model" in html
-    assert "Model vs v0" not in html
+    assert "<tr><th>對照</th><td>last quarter's model</td></tr>" in html
+    assert "<tr><th>對照</th><td>v0</td></tr>" not in html
 
 
 def test_compare_only_sends_a_changed_computed_setting_to_a_node_it_has():
@@ -997,13 +1014,11 @@ def test_compare_only_sends_a_changed_computed_setting_to_a_node_it_has():
 
 @pytest.mark.parametrize("compare_only, key, change, expected", [
     # --compare-only has no main line: the cut's own node is the narrowest.
-    (True, "guardrail_recall_k", [1, 2], "resolve_comparison_display_ks"),
-    (True, "primary_map_k", [1, 2], "resolve_comparison_display_ks"),
+    (True, "compare_k", [1, 2], "resolve_comparison_display_ks"),
     # --compare: the slice from the cut ends in generate_report, which
-    # refuses display_ks.json, stale under primary_map_k too. The advice is
+    # refuses display_ks.json, stale under compare_k too. The advice is
     # the node before both cuts.
-    (False, "guardrail_recall_k", [1, 2], "resolve_display_ks"),
-    (False, "primary_map_k", [1, 2], "resolve_display_ks"),
+    (False, "compare_k", [1, 2], "resolve_display_ks"),
 ])
 def test_a_changed_display_k_sends_the_comparison_redraw_to_a_slice_that_draws(
         compare_only, key, change, expected):
@@ -1074,17 +1089,15 @@ def test_the_comparison_readers_refuse_results_of_another_source(reader):
 
 def test_the_comparison_and_its_cut_land_what_they_were_computed_with():
     """Both carry the fingerprint — the cut's with the display keys it read
-    — and the compare source; the cut holds each table's lists, cut at what
-    ``"all"`` stands for: the per-item columns at this run's side's K, the
-    every-key table each side at its own (``_metrics()`` holds two items).
-    """
+    — and the compare source; the cut holds the K columns of every per-K
+    table, cut at this run's side's "all" (``_metrics()`` holds two items),
+    "all" written as that K (#537)."""
     from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
         compare_source_identity,
     )
 
     params = _compare_params(dict(_OTHER_MODEL))
-    params["evaluation"]["report"]["display"] = {
-        "guardrail_recall_k": [1, 2, 3], "primary_map_k": [1, 3, "all"]}
+    params["evaluation"]["report"]["display"] = {"compare_k": [1, 3, "all"]}
     weaker = copy.deepcopy(_metrics())
     weaker["overall"] = {"map@1": 0.25, "map@3": 0.3}
     weaker["population"] = {**weaker["population"], "all_k": 3}
@@ -1100,13 +1113,10 @@ def test_the_comparison_and_its_cut_land_what_they_were_computed_with():
     assert comparison["overall"]["cells"]["map@1"] == {
         "this": 0.5, "reference": 0.25, "diff": 0.25}
     assert cut == {
-        "per_item": {"guardrail_recall_k": [1, 2],
-                     "primary_map_k": [1, "all"]},
-        "overall": {"rows": ["map@1", "map@3"], "this": ["map@1"],
-                    "reference": ["map@1", "map@3"], "diff": ["map@1"]},
+        "all_k": 2,
+        "compare_k": [1, 2],
         "category": None,
         "config_fingerprint": fingerprint(
-            params, ("evaluation.report.display.guardrail_recall_k",
-                     "evaluation.report.display.primary_map_k")),
+            params, ("evaluation.report.display.compare_k",)),
         "compare_source": identity,
     }

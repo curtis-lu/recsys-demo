@@ -4242,7 +4242,7 @@ class TestEvaluationPositiveRateBaseline:
         result, _ = _run_evaluation_command(
             tmp_path, ["evaluation", "--model-version", _EVAL_MV],
             evaluation_extra={"baseline": {"lookback_months": None},
-                              "report": {"sections": {"baseline": False}}},
+                              "report": {"sections": {"popularity_baseline": False}}},
             extra_patches=(
                 patch("recsys_tfb.__main__._execute_pipeline", execute),
                 patch("recsys_tfb.__main__._write_pipeline_manifest"),

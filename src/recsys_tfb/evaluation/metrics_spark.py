@@ -92,6 +92,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.window import WindowSpec
 
 from recsys_tfb.core.consistency import (
+    EVALUATION_K_VALUES_DEFAULT,
     ZERO_POSITIVE_GROUP_WEIGHT_COL,
     item_category_column,
     item_list_counted_from_data,
@@ -217,38 +218,37 @@ def _resolve_all_k(
 def _resolve_k_grids(
     parameters: dict, all_k: int
 ) -> tuple[list[int], list[int]]:
-    """``(query_ks, item_ks)``: the per-query and the per-item K grids.
+    """``(query_ks, item_ks)``: the per-query and the per-item K grids — since
+    #537 one list, ``evaluation.k_values`` resolved ∪ {``all_k``}, on both.
 
-    Two independent axes (ADR-0020 design H). ``evaluation.k_values`` is the
-    K grid of the ``@K`` families. The headline per-item macro is truncated at
-    its own K — ``evaluation.metric.k``, or ``all_k`` (no truncation) when that
-    is unset — which need not be listed in ``k_values``. So:
+    Why ``all_k`` is added whatever ``k_values`` lists: the two
+    model-selection metrics are read at "all" — overall ``map@{all_k}``
+    (per-query axis) and the macro ``map_attr@{all_k}`` (per-item axis), the
+    numbers HPO selects by (``metric_registry``'s ``mean_ap`` and
+    ``macro_per_item_map``, both untruncated). A ``k_values`` that leaves
+    ``"all"`` out would otherwise leave either cell blank, and nothing would
+    raise.
 
-    * ``query_ks`` = ``k_values``: ``compute_per_query_metrics`` /
-      ``aggregate_overall`` / ``aggregate_per_segment``.
-    * ``item_ks`` = ``k_values`` ∪ {headline K}: ``add_row_contributions``
-      and ``aggregate_item_shared_numbers`` (per_item and per_item_segment),
-      which is what guarantees
-      ``macro_avg["by_item"][f"map_attr@{headline K}"]``, the number the
-      report's headline reads (``report_sections.overview._headline_key``). Without ``all_k`` here a
-      ``k_values`` that leaves out ``"all"`` would leave that cell blank.
-
-    Putting the headline K into the per-query grid is wrong without being an
-    error: ``overall`` / ``per_segment`` silently gain ``map@k`` /
-    ``precision@k`` / ``recall@k`` that nobody listed, and the
-    comparison report prints every ``overall`` key as a row. ``item_ks`` is a
-    superset of ``query_ks``, so the per-query layer only reads a subset of
-    the enriched columns. The two grids are equal when ``k_values`` already
-    holds the headline K (with ``metric.k`` unset: when it lists ``"all"``).
+    Why the two axes are equal now: until #537 the per-item axis also held
+    the headline's own truncation depth (a setting under
+    ``evaluation.metric``), and adding that K to the per-query axis would have
+    given ``overall`` / ``per_segment`` ``map@k`` / ``precision@k`` /
+    ``recall@k`` rows nobody listed, at a time the comparison report printed
+    every ``overall`` key. With that setting gone (A63 refuses it) the only K
+    added is "all", which both axes need. The pair is
+    still returned because the per-query and the per-item layers take their
+    grids as separate arguments.
 
     The model and its baseline both resolve through this one function, in
-    ``_compute_core``, so the two sides line up.
+    ``_compute_core``, so the two sides line up. An unwritten ``k_values`` is
+    ``core.consistency.EVALUATION_K_VALUES_DEFAULT``, the list A62 checks
+    ``evaluation.report.display.compare_k`` against.
     """
     eval_params = parameters.get("evaluation", {}) or {}
-    query_ks = _resolve_k_values(eval_params.get("k_values", [5, "all"]), all_k)
-    metric_k = metric_params(parameters)["k"]
-    headline_k = all_k if metric_k is None else metric_k
-    return query_ks, sorted(set(query_ks) | {headline_k})
+    ks = sorted(set(_resolve_k_values(
+        eval_params.get("k_values", list(EVALUATION_K_VALUES_DEFAULT)), all_k,
+    )) | {all_k})
+    return ks, list(ks)
 
 
 def hand_category_mapping(
@@ -445,6 +445,11 @@ def compute_dataset_overview(
     (ADR-0018 decision 3). What reaches the driver is bounded by the number
     of distinct time / item / segment values, not by rows.
 
+    With ``occasion`` declared ``totals`` also holds ``n_time_entity_combos``
+    (distinct time x entity combinations), with ``event`` declared
+    ``n_query_group_item_combos`` (distinct (query group, item) combinations);
+    undeclared, the key is absent.
+
     ``item_col_override`` lets the caller profile the collapsed
     category-grain DF (item column still named after schema item_col, but
     semantics = category). ``by_segment`` groups by the first of
@@ -475,6 +480,20 @@ def compute_dataset_overview(
         total_aggs.append(
             F.countDistinct(F.struct(*group_cols)).alias("n_queries")
         )
+    # Only a declared optional role lands its count (ADR-0031 decision 16
+    # item 14); an undeclared one writes no key. Both are structs, as above.
+    declared_occasion = bool(schema.get("occasion"))
+    declared_event = bool(schema.get("event"))
+    if declared_occasion:
+        # An entity at a time: the base key, which occasion does not widen
+        # (core.schema; architecture-constraints S7).
+        total_aggs.append(
+            F.countDistinct(F.struct(*schema["base_key_columns"])).alias(
+                "n_time_entity_combos"))
+    if declared_event:
+        total_aggs.append(
+            F.countDistinct(F.struct(*group_cols, item_col)).alias(
+                "n_query_group_item_combos"))
     totals = eval_predictions.agg(*total_aggs).collect()[0]
 
     n_rows = totals["n_rows"]
@@ -537,6 +556,12 @@ def compute_dataset_overview(
         "by_snap_date": _group(time_col),
         "by_item": _group(item_col),
     }
+    if declared_occasion:
+        result["totals"]["n_time_entity_combos"] = int(
+            totals["n_time_entity_combos"])
+    if declared_event:
+        result["totals"]["n_query_group_item_combos"] = int(
+            totals["n_query_group_item_combos"])
     if active_seg_col:
         result["by_segment"] = _group(
             active_seg_col, with_queries=True, to_key=segment_key
@@ -1235,12 +1260,7 @@ def _compute_core(
     _require_segment_columns_in_frame(eval_predictions, segment_columns)
     # One segment dimension per run: the first joined column.
     active_seg_col = segment_columns[0] if segment_columns else None
-    # macro_average does not take k: metric.k reaches the macro through the
-    # per-item K grid (_resolve_k_grids), so by_item's map_attr@{metric.k} is
-    # the headline point estimate truncated at k.
-    macro_params = {
-        name: v for name, v in metric_params(parameters).items() if name != "k"
-    }
+    macro_params = metric_params(parameters)
 
     n_queries_with_pos = n_groups_with_positive(facts)
     n_all_positive = facts[ALL_POSITIVE_KEY]
@@ -1262,8 +1282,8 @@ def _compute_core(
         # them; none without a positive, so that count is 0 by construction.
         # The macro averages the per-item cells kept by min_positives, the
         # rule macro_average applies. The segment columns are the ones this
-        # call was handed (#536): a side computed with none — the compared
-        # side of --compare — says so, and the comparison layer reads it.
+        # call was handed (#536): a side computed with other ones, or none,
+        # says so, and the comparison layer reads it.
         return {POPULATION_KEY: {
             ALL_K_KEY: all_k,
             MACRO_ITEMS_KEY: sorted(
@@ -1692,7 +1712,7 @@ def compute_untruncated_ap(
     ``_keep_scored_query_groups``, ``add_row_contributions``), minus the K: at
     the K ``"all"`` resolves to, no row ranks past it, so ``top_k`` is 1.0 on
     every row and ``ap_contrib = prec_at_pos * label`` exactly. Nothing reads
-    K, so nothing reads ``evaluation.k_values`` / ``evaluation.metric.k``, and
+    K, so nothing reads ``evaluation.k_values``, and
     the category pass and the dataset overview are not computed.
 
     Groups holding no positive are skipped (AP is undefined there); the

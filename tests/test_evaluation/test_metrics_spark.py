@@ -562,8 +562,8 @@ def test_compute_all_metrics_lands_each_items_shared_numbers(spark):
     counts toward n_top@3. C2 holds no positive and counts nowhere."""
     result = _bundle(
         _shared_numbers_predictions(spark), _make_parameters(k_values=[1, 3]))
-    # K = 4 too: "all" (4 items) is computed for the per-item side whenever
-    # evaluation.metric.k is unset (_resolve_k_grids).
+    # K = 4 too: "all" (4 items) is on both K grids whatever k_values lists
+    # (_resolve_k_grids).
     assert result["per_item_shared_numbers"] == {
         "A": {"n_pos": 1, "pos_sum": 1,
               "n_top@1": 1, "hits@1": 1, "ap_sum@1": 1.0,
@@ -1049,20 +1049,20 @@ def test_param_macro_numpy_matches_spark(spark):
 
 
 # ===========================================================================
-# metric.k — truncation depth of the headline per-item family, an axis
-# independent of k_values (ADR-0020 design H)
+# The K grids: k_values ∪ {all} on both axes (#537)
 # ===========================================================================
 
 
-def _metric_k_pdf():
-    """3 items x 3 queries, no ties within a query. metric.k=2 < n_items=3,
-    so the truncation actually bites.
+def _three_item_pdf():
+    """3 items x 3 queries, no ties within a query.
 
-    C0: A .9(1) B .5(0) C .1(1) -> A rank 1 adds 1; C rank 3 adds 2/3 (k=2 -> 0)
+    C0: A .9(1) B .5(0) C .1(1) -> A rank 1 adds 1; C rank 3 adds 2/3
     C1: B .8(1) C .6(0) A .3(0) -> B rank 1 adds 1
-    C2: C .7(0) A .6(1) B .2(1) -> A rank 2 adds 1/2; B rank 3 adds 2/3 (k=2 -> 0)
+    C2: C .7(0) A .6(1) B .2(1) -> A rank 2 adds 1/2; B rank 3 adds 2/3
 
-    Truncated at 2: A=.75, B=.5, C=0 -> macro 5/12; untruncated macro=.75.
+    Untruncated per-query AP (divided by the group's positives): C0
+    (1 + 2/3)/2 = 5/6, C1 1, C2 (1/2 + 2/3)/2 = 7/12 -> mean 29/36. Per item
+    untruncated: A .75, B 5/6, C 2/3 -> macro .75.
     """
     import pandas as pd
 
@@ -1082,26 +1082,46 @@ def _metric_k_pdf():
     )
 
 
-def _metric_k_params():
-    return _make_parameters(k_values=[1, "all"], metric={"k": 2})
+def test_both_k_grids_add_all_when_k_values_leaves_it_out(spark):
+    """The two model-selection metrics are read at "all" — overall
+    ``map@{all_k}`` and the macro ``map_attr@{all_k}`` — so both K grids are
+    ``k_values`` ∪ {all_k} (``_resolve_k_grids``), whatever ``k_values``
+    lists. ``k_values=[1, 2]`` leaves "all" (3 items) out; segments s1 = C0,
+    C1 and s2 = C2."""
+    from recsys_tfb.evaluation.result_readers import resolved_all_k
+
+    pdf = _three_item_pdf()
+    pdf["seg"] = pdf["cust_id"].map({"C0": "s1", "C1": "s1", "C2": "s2"})
+    result = _bundle(spark.createDataFrame(pdf),
+                     _make_parameters(k_values=[1, 2]), segment_columns=["seg"])
+    assert resolved_all_k(result) == 3
+
+    assert result["overall"]["map@3"] == pytest.approx(29 / 36)
+    assert result["per_segment"]["s1"]["map@3"] == pytest.approx(11 / 12)
+    assert result["per_segment"]["s2"]["map@3"] == pytest.approx(7 / 12)
+    assert result["macro_avg"]["by_item"]["map_attr@3"] == pytest.approx(0.75)
+    # One grid, the same on both axes: nothing beyond k_values and all.
+    query_ks = {key.rpartition("@")[2] for key in result["overall"]}
+    item_ks = {key.rpartition("@")[2] for key in result["per_item"]["A"]
+               if "@" in key}
+    assert query_ks == item_ks == {"1", "2", "3"}
 
 
-def test_metric_k_truncates_main_macro_same_as_the_numpy_twin(spark):
-    """metric.k is not in k_values, yet the main path still emits
-    map_attr@{metric.k}, and it equals ``metrics.compute_macro_per_item_map``
-    (the driver-side numpy implementation HPO and the diagnoses use) on the
-    same data — they only match when both are truncated the same way.
-    """
+def test_macro_at_all_matches_the_numpy_twin_hpo_scores_with(spark):
+    """``macro_avg["by_item"]["map_attr@all"]`` equals
+    ``metrics.compute_macro_per_item_map`` (the driver-side numpy twin HPO
+    scores trials with, untruncated) on the same data and the same
+    ``evaluation.metric`` settings."""
     import pandas as pd
 
     from recsys_tfb.evaluation.metrics import compute_macro_per_item_map
     from recsys_tfb.evaluation.result_readers import metric_params
 
-    pdf = _metric_k_pdf()
-    params = _metric_k_params()
+    pdf = _three_item_pdf()
+    params = _make_parameters(k_values=[1, "all"])
     result = _bundle(spark.createDataFrame(pdf), params)
-    main = result["macro_avg"]["by_item"]["map_attr@2"]
-    assert main == pytest.approx(5 / 12)
+    main = result["macro_avg"]["by_item"]["map_attr@3"]
+    assert main == pytest.approx(0.75)
 
     groups = pd.factorize(
         pdf["snap_date"] + "|" + pdf["cust_id"], sort=True)[0]
@@ -1110,57 +1130,6 @@ def test_metric_k_truncates_main_macro_same_as_the_numpy_twin(spark):
         pdf["score"].to_numpy(), **metric_params(params),
     )
     assert driver == pytest.approx(main)
-
-
-def test_metric_k_reaches_only_the_per_item_family(spark):
-    """``metric.k`` truncates the per-item macro family only; ``k_values``
-    alone is the @K grid of the per-query families (ADR-0020 design H).
-
-    ``k_values=[1, "all"]`` (all -> 3 items) with ``metric.k=2``: a leak would
-    silently add ``map@2`` / ``precision@2`` / ``recall@2`` to
-    ``overall`` / ``per_segment``, and the comparison report prints every
-    ``overall`` key as a row, so nobody-configured rows would appear.
-    """
-    pdf = _metric_k_pdf()
-    pdf["seg"] = pdf["cust_id"].map({"C0": "s1", "C1": "s1", "C2": "s2"})
-    params = _make_parameters(k_values=[1, "all"], metric={"k": 2})
-    full = _bundle(
-        spark.createDataFrame(pdf), params, segment_columns=["seg"]
-    )
-
-    assert [k for k in full["overall"] if k.endswith("@2")] == []
-    assert {"map@1", "map@3"} <= set(full["overall"])
-    for seg, cell in full["per_segment"].items():
-        assert [k for k in cell if k.endswith("@2")] == [], seg
-    assert [k for k in full["macro_avg"]["by_segment"] if k.endswith("@2")] == []
-
-    assert "map_attr@2" in full["per_item"]["A"]
-    assert full["macro_avg"]["by_item"]["map_attr@2"] == pytest.approx(5 / 12)
-    assert "map_attr@2" in full["per_item_segment"]["A"]["s1"]
-    assert "map_attr@2" in full["macro_avg"]["by_item_segment"]
-
-
-def test_headline_k_is_computed_when_k_values_leaves_out_all(spark):
-    """With ``metric.k`` unset the report's headline is
-    ``macro_avg["by_item"]["map_attr@{all_k}"]`` (``report_sections.overview.
-    _headline_key``), and ``k_values`` is only the @K grid of the families —
-    it need not list ``"all"``. So the per-item grid adds the headline's K
-    itself, as it does for ``metric.k``; the per-query grid stays
-    ``k_values``.
-
-    ``_metric_k_pdf`` untruncated: A .75, B 5/6, C 2/3 -> macro .75.
-    """
-    from recsys_tfb.evaluation.result_readers import resolved_all_k
-
-    pdf = _metric_k_pdf()
-    params = _make_parameters(k_values=[1, 2])
-    result = _bundle(spark.createDataFrame(pdf), params)
-    all_k = resolved_all_k(result)
-    assert all_k == 3
-
-    assert result["macro_avg"]["by_item"][f"map_attr@{all_k}"] == (
-        pytest.approx(0.75))
-    assert [k for k in result["overall"] if k.endswith(f"@{all_k}")] == []
 
 
 # ===========================================================================
