@@ -1,6 +1,7 @@
 """名次分布 (``report_sections/rank_distribution``, #537): the figures, the two
 share-by-rank tables (columns 第 r 名) and each item's mean positive rank
-(the catalog's ``mean_pos``, Macro 平均 pinned), not collapsed.
+(the catalog's ``mean_pos``, Macro 平均 pinned), not collapsed — only each
+figure's data table, under it, is (owner 2026-10-24).
 
 The aggregates are ``aggregate_report_diagnostics``' and the metrics
 ``compute_all_metrics``', computed on the same rows (``landed``).
@@ -8,6 +9,7 @@ The aggregates are ``aggregate_report_diagnostics``' and the metrics
 from __future__ import annotations
 
 import math
+import re
 
 import pytest
 
@@ -48,9 +50,10 @@ def test_description_figures_then_three_tables_and_the_definition(spark):
         "名次佔比 · 各 item", "正例名次佔比 · 各 item", "正例平均名次 · 各 item"]
     assert (s.key, s.title, s.title_en) == (
         "rank_distribution", "名次分布", "Rank distribution")
-    # Not collapsed (decision 16 item 10).
+    # Not collapsed (decision 16 item 10) — but each figure's data table.
     from recsys_tfb.evaluation.report import generate_html_report
-    assert "<details" not in generate_html_report([s])  # nothing collapses
+    assert re.findall(r"<details\b[^>]*>", generate_html_report([s])) == [
+        '<details class="fig-data">'] * 5
 
 
 def test_the_figures_are_titled_in_chinese(spark):
@@ -58,6 +61,76 @@ def test_the_figures_are_titled_in_chinese(spark):
     titles = [b.fig.layout.title.text for b in s.blocks
               if isinstance(b, Figure)]
     assert titles == DEMO_FIGURE_TITLES
+
+
+def _figure(section, title: str) -> Figure:
+    (figure,) = [b for b in section.blocks if isinstance(b, Figure)
+                 and b.fig.layout.title.text == title]
+    return figure
+
+
+def test_every_figure_s_data_table_is_named_like_it(spark):
+    s, _ = _draw(spark)
+    assert [b.data.title for b in s.blocks if isinstance(b, Figure)] == (
+        DEMO_FIGURE_TITLES)
+
+
+@pytest.mark.parametrize("title, kind", [
+    ("名次計數 · 各 item", "count"),
+    ("正例名次計數 · 各 item", "count"),
+    ("各名次的正例率 · 各 item", "ratio"),
+])
+def test_a_heatmap_s_data_table_is_the_matrix_it_draws(spark, title, kind):
+    """Rows the heatmap's items, columns 第 r 名, the cells its ``z``."""
+    figure = _figure(_draw(spark)[0], title)
+    (heatmap,) = figure.fig.data
+    table = figure.data
+    assert table.row_header == "item"
+    assert [r.label for r in table.rows] == list(heatmap.y) == [
+        "A", "B", "C", "D"]
+    assert [(c.label, c.kind) for c in table.columns] == [
+        (f"第 {r} 名", kind) for r in (1, 2, 3, 4)]
+    assert [x.replace("Rank ", "第 ") + " 名" for x in heatmap.x] == [
+        c.label for c in table.columns]
+    assert [c for r in table.rows for c in r.cells] == pytest.approx(
+        [v for z in heatmap.z for v in z], nan_ok=True)
+
+
+def test_the_histogram_s_data_table_is_its_bars(spark):
+    """One row per item and non-empty bin, in the bars' order: 箱中心, 箱寬,
+    候選列 — each item's trace's x, width and y."""
+    figure = _figure(_draw(spark)[0], "分數分布 · 各 item")
+    table = figure.data
+    assert [(c.label, c.kind) for c in table.columns] == [
+        ("箱中心", "ratio"), ("箱寬", "ratio"), ("候選列", "count")]
+    drawn = [(str(t.name), x, w, y) for t in figure.fig.data
+             for x, w, y in zip(t.x, t.width, t.y)]
+    assert drawn, "premise: bars were drawn"
+    assert [(r.label, *r.cells) for r in table.rows] == drawn
+
+
+def test_the_boxplot_s_data_table_is_its_five_numbers(spark):
+    """One row per item and label (1, then 0), in the boxes' order: the
+    label, 下緣, Q1, 中位數, Q3, 上緣 — each trace's fences and quartiles; the
+    line under it says what the fences are."""
+    s, results = _draw(spark)
+    figure = _figure(s, "分數分布 · 依 label")
+    table = figure.data
+    label_col = results["evaluation_report_aggregates"]["columns"]["label"]
+    assert [(c.label, c.kind) for c in table.columns] == [
+        (label_col, "text"), ("下緣", "ratio"), ("Q1", "ratio"),
+        ("中位數", "ratio"), ("Q3", "ratio"), ("上緣", "ratio")]
+    by_label = {"Positive": "1", "Negative": "0"}
+    drawn = sorted(
+        (str(item), by_label[t.name], lo, q1, med, q3, hi)
+        for t in figure.fig.data
+        for item, lo, q1, med, q3, hi in zip(
+            t.x, t.lowerfence, t.q1, t.median, t.q3, t.upperfence))
+    rows = [(r.label, *r.cells) for r in table.rows]
+    assert rows == sorted(rows, key=lambda r: (r[0], -int(r[1])))
+    assert sorted(rows) == drawn and len(drawn) == 8
+    (note,) = table.notes
+    assert "1.5" in note.text and "四分位距" in note.text
 
 
 @pytest.mark.parametrize("title, matrix", [

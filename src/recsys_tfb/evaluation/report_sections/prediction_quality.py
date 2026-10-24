@@ -135,15 +135,20 @@ def _per_item_bin_table(display_bins: pd.DataFrame, item_col: str,
     return Table("分箱 · 各 item", "item", columns, rows)
 
 
+#: The curves of the threshold figure, and its data table's columns after
+#: 門檻: (the sweep's key, the name).
+_CURVES = (("precision", "precision"), ("recall", "recall"), ("f1", "F1"))
+
+
 def _threshold_figure(sweep: pd.DataFrame) -> Figure:
     """precision / recall / F1 against the threshold, one point per non-empty
     fine bin edge: the shape the user reads to pick a cut, which a 1000-row
-    table would bury."""
+    table would bury — so the points are the figure's data table, collapsed
+    under it, one row per point labelled by its fine bin's number from 1."""
     import plotly.graph_objects as go
 
     fig = go.Figure()
-    for col, name in (("precision", "precision"), ("recall", "recall"),
-                      ("f1", "F1")):
+    for col, name in _CURVES:
         fig.add_trace(go.Scatter(
             x=sweep["threshold"], y=sweep[col], mode="lines", name=name))
     fig.update_layout(
@@ -151,7 +156,12 @@ def _threshold_figure(sweep: pd.DataFrame) -> Figure:
         xaxis_title="門檻（分數 ≥ 此值即預測為正）", yaxis_title="值",
         yaxis_range=[0, 1],
     )
-    return Figure(fig)
+    columns = (Column("門檻", "ratio"),
+               *(Column(name, "ratio") for _, name in _CURVES))
+    rows = tuple(Row(str(int(r["bin"]) + 1),
+                     (r["threshold"], *(r[col] for col, _ in _CURVES)))
+                 for _, r in sweep.iterrows())
+    return Figure(fig, Table(THRESHOLD_FIGURE_TITLE, "細箱", columns, rows))
 
 
 def _kept_zero_positive_groups(weight_col: str, parameters: dict) -> str:

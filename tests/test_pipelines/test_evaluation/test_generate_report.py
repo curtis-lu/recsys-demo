@@ -7,6 +7,7 @@ that into ``generate_report`` — exactly the two-step path the pipeline wires.
 
 import copy
 import json
+import re
 
 import pytest
 
@@ -142,7 +143,7 @@ def test_generate_report_html_no_diagnostics(spark):
     )
     assert html.startswith("<!DOCTYPE html>")
     assert "概覽" in html
-    # diagnostics off → 沒有診斷 section；全篇也不收合。
+    # diagnostics off → 沒有診斷 section；也沒有圖，所以沒有收起的東西。
     assert "<details" not in html
 
 
@@ -162,11 +163,17 @@ def test_generate_report_with_diagnostics(spark):
             _landed_metrics(params), _unread_stub(params), params),
         parameters=params,
     )
-    # 名次分布段畫了，表不收合（ADR-0031 決定 16 第 10 項）。
+    # 名次分布段畫了：表不收合（ADR-0031 決定 16 第 10 項），只有五張圖各自
+    # 的資料表收起，而且每個都關上了（沒關的 <details> 會吞掉後面的段）。
     section = html[html.index('id="s-rank_distribution"'):]
     section = section[:section.index('<div class="section')]
-    assert "名次佔比 · 各 item" in section
-    assert "<details" not in section
+    assert re.findall(r"<details\b[^>]*>", section) == [
+        '<details class="fig-data">'] * 5
+    assert section.count("</details>") == 5
+    shown = re.sub(r'<details class="fig-data">.*?</details>', "", section,
+                   flags=re.S)
+    assert "名次佔比 · 各 item" in shown
+    assert html.count("<details") == html.count("</details>")
 
 
 def test_the_main_report_has_no_diagnosis_section(spark):

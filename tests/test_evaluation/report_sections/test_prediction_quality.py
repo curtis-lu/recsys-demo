@@ -9,6 +9,8 @@ the most rows listed unless ``top_n`` says otherwise).
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from recsys_tfb.evaluation.report_sections import prediction_quality
@@ -70,8 +72,32 @@ def test_the_blocks_come_in_the_demo_s_order(spark):
         "prediction_quality", "預測品質", "Prediction quality")
     figure = next(b for b in s.blocks if isinstance(b, Figure))
     assert figure.fig.layout.title.text == "門檻對 precision、recall、F1 · 整體"
+    # Nothing collapses but the figure's data table (owner 2026-10-24).
     from recsys_tfb.evaluation.report import generate_html_report
-    assert "<details" not in generate_html_report([s])  # nothing collapses
+    assert re.findall(r"<details\b[^>]*>", generate_html_report([s])) == [
+        '<details class="fig-data">']
+
+
+def test_the_threshold_figure_s_data_table_is_its_points(spark):
+    """One row per point of the curves (the sweep's order, highest threshold
+    first), labelled by its fine bin's number from 1: 門檻 and the three
+    curves' values."""
+    s, results = _draw(spark)
+    figure = next(b for b in s.blocks if isinstance(b, Figure))
+    table = figure.data
+    assert table.title == figure.fig.layout.title.text
+    assert table.row_header == "細箱"
+    assert [(c.label, c.kind) for c in table.columns] == [
+        ("門檻", "ratio"), ("precision", "ratio"), ("recall", "ratio"),
+        ("F1", "ratio")]
+    sweep = frame_from_json(
+        results["prediction_quality_metrics"]["overall"]["threshold_sweep"])
+    assert [r.label for r in table.rows] == [
+        str(b + 1) for b in sweep["bin"]]
+    curves = {t.name: list(t.y) for t in figure.fig.data}
+    assert [r.cells for r in table.rows] == [
+        tuple(v) for v in zip(figure.fig.data[0].x, curves["precision"],
+                              curves["recall"], curves["F1"])]
 
 
 def test_the_headline_table_has_no_row_count_positives_or_rate(spark):

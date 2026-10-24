@@ -35,7 +35,7 @@ class ReportSection:
     * ``key`` —— 段檔的模組短名（例 ``"ranking_metrics"``）；HTML id 是
       ``s-{key}``。**必填**：沒有 key 渲染時 raise。
     * ``blocks`` —— 依序畫的內容塊（本模組的 :class:`Heading` …
-      :class:`Note`）。全篇不收合。
+      :class:`Note`）。全篇不收合，只有圖的資料表收起（:class:`Figure`）。
     """
 
     title: str
@@ -91,10 +91,22 @@ class Bullets:
 
 @dataclass(frozen=True, eq=False)
 class Figure:
-    """一張 plotly 圖；畫成 ``fig.to_html(full_html=False,
-    include_plotlyjs=False)``——plotly.js 由外殼內嵌一份。"""
+    """一張 plotly 圖與它的資料表。圖畫成 ``fig.to_html(full_html=False,
+    include_plotlyjs=False)``——plotly.js 由外殼內嵌一份。
+
+    ``data`` 是這張圖畫的數字（:class:`Table`）：畫在圖正下方，預設收起
+    （``<details class="fig-data">``），點開可以排序、篩選、複製——圖方便看
+    分布，表方便複製。全篇只有它收起，一般表格不收合（擁有者 2026-10-24，
+    #537）。每張圖都要有，不是 :class:`Table` 就 raise。
+    """
 
     fig: go.Figure
+    data: Table
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.data, Table):
+            raise TypeError(
+                f"Figure.data 是這張圖的資料表（Table）；收到 {self.data!r}")
 
 
 @dataclass(frozen=True)

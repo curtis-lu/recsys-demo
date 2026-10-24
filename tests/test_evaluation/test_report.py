@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 import plotly.graph_objects as go
+import pytest
 
 from recsys_tfb.evaluation.report import (
     ReportSection,
@@ -30,6 +31,12 @@ def _make_figure():
     return fig
 
 
+def _figure(title="圖的數"):
+    """A figure block with its data table (every figure has one)."""
+    return Figure(_make_figure(), Table(title, "item", (Column("值", "count"),),
+                                        (Row("a", (1,)), Row("b", (2,)))))
+
+
 def _sec(key="s", title="S", **kw):
     return ReportSection(title=title, description=kw.pop("description", "d"),
                          key=key, **kw)
@@ -37,7 +44,7 @@ def _sec(key="s", title="S", **kw):
 
 class TestGenerateHtmlReport:
     def test_self_contained(self):
-        sections = [_sec(title="Metrics", blocks=[Figure(_make_figure())])]
+        sections = [_sec(title="Metrics", blocks=[_figure()])]
         html = generate_html_report(sections)
         assert "plotly" in html.lower()
         assert "<html>" in html
@@ -74,7 +81,7 @@ class TestGenerateHtmlReport:
         """公式要排在圖前面：讀者先知道「這個數字怎麼算的」才看得懂圖。"""
         sections = [_sec(blocks=[
             Formula("F = x + y"), Bullets(("一則重點",)),
-            Figure(_make_figure())])]
+            _figure()])]
         html = generate_html_report(sections)
         body = html[html.index("</nav>"):]
         assert (body.index("F = x + y") < body.index("一則重點")
@@ -108,7 +115,7 @@ class TestGenerateHtmlReport:
         table = Table("t", "product", (Column("map", "ratio"),),
                       (Row("exchange_fx", (0.5,)), Row("fund_bond", (0.3,))))
         sections = [_sec(title="Mixed", blocks=[
-            Figure(_make_figure()), Figure(_make_figure()), table])]
+            _figure(), _figure(), table])]
         html = generate_html_report(sections)
         assert "exchange_fx" in html
         assert "fund_bond" in html
@@ -124,11 +131,28 @@ class TestGenerateHtmlReport:
         html = generate_html_report([_sec(blocks=[Formula("x")])])
         assert "<h3>" not in html
 
-    def test_nothing_collapses(self):
-        """全篇不收合：沒有 ``<details``，也沒有開收合段的 JS。"""
-        html = generate_html_report([_sec(blocks=[Formula("x")])])
-        assert "<details" not in html
+    def test_only_a_figure_s_data_table_collapses(self):
+        """全篇只有圖的資料表收起（擁有者 2026-10-24，#537）：圖正下方一個
+        ``<details class="fig-data">``，沒有 ``open``，裡面是同一種表
+        （``div.tblk``，表格工具照樣認得）；一般表格不收合，也沒有開收合的 JS。"""
+        shown = Table("一般表", "item", (Column("map", "ratio"),),
+                      (Row("a", (0.5,)),))
+        html = generate_html_report([_sec(blocks=[shown, _figure("圖的數")])])
+        body = html[html.index("</nav>"):]
+        assert re.findall(r"<details\b[^>]*>", body) == [
+            '<details class="fig-data">']
+        start = body.index('<details class="fig-data">')
+        fig_data = body[start:body.index("</details>", start)]
+        assert '<summary>這張圖的資料表</summary><div class="tblk">' in fig_data
+        assert "圖的數" in fig_data and "一般表" not in fig_data
+        assert body.index("plotly-graph-div") < start   # under its figure
+        # closed: an open <details> swallows every section after it
+        assert html.count("<details") == html.count("</details>") == 1
         assert ".open = true" not in html and ".open=true" not in html
+
+    def test_a_figure_without_a_data_table_is_refused(self):
+        with pytest.raises(TypeError, match="Figure.data"):
+            Figure(_make_figure(), None)
 
     def test_no_dead_metrics_table_class(self):
         sections = [_sec(blocks=[Table("t", "r", (Column("a", "count"),),

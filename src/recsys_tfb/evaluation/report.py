@@ -4,7 +4,8 @@ sections, shared by the main report and the comparison report.
 The shell draws the title, the metadata block, the table of contents (one
 line per section: its title and the question it answers, static HTML), and
 each section — its heading, description and content blocks
-(``report.types``; drawn by ``report.pages.render_block``); nothing collapses.
+(``report.types``; drawn by ``report.pages.render_block``); nothing collapses
+but a figure's data table, under the figure (owner 2026-10-24, #537).
 Every section needs a ``key`` (its HTML id is ``s-{key}``). It carries the
 page's CSS (light and dark), the table tool (sort, filter, copy for every
 ``div.tblk``) and the one term list (``TERMS``: a key term's first use in each
@@ -99,6 +100,9 @@ nav.toc .q { color: var(--muted); }
 sup.warn, span.warn, .warn-note { color: var(--warn); }
 .warn-note { font-size: 13.5px; margin: 2px 0 10px; }
 .tblk { margin: 16px 0 6px; width: fit-content; max-width: 100%; }
+details.fig-data { margin: 0 0 14px; }
+details.fig-data > summary { width: fit-content; cursor: pointer; font-size: 13.5px; color: var(--accent); }
+details.fig-data > .tblk { margin-top: 6px; }
 .thead-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: end; gap: 6px 16px; margin-bottom: 2px; }
 h4.tt { margin: 0; font-size: 15px; color: var(--head); }
 .cpy { font: inherit; font-size: 12.5px; padding: 2px 10px; border: 1px solid var(--line); border-radius: 4px;

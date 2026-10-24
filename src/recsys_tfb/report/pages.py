@@ -214,7 +214,9 @@ def render_block(block: Any) -> str:
         items = "".join(f"<li>{escape(b)}</li>" for b in block.items)
         return f'<ul class="section-bullets">{items}</ul>'
     if isinstance(block, Figure):
-        return block.fig.to_html(full_html=False, include_plotlyjs=False)
+        return (block.fig.to_html(full_html=False, include_plotlyjs=False)
+                + '<details class="fig-data"><summary>這張圖的資料表</summary>'
+                + render_report_table(block.data) + "</details>")
     if isinstance(block, Definitions):
         if not block.entries:
             return ""

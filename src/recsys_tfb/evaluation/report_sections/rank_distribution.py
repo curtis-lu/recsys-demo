@@ -1,7 +1,7 @@
 """名次分布 (ADR-0031 decision 16): the score and rank distributions of the
-same ranking — the figures and the two share tables drawn from
-``compute_report_aggregates``, and each item's mean positive rank
-(``mean_pos``) from the metrics bundle."""
+same ranking — the figures (each with its data table, collapsed under it)
+and the two share tables drawn from ``compute_report_aggregates``, and each
+item's mean positive rank (``mean_pos``) from the metrics bundle."""
 
 from __future__ import annotations
 
@@ -81,18 +81,56 @@ def _item_share_by_rank(counts_frame: pd.DataFrame) -> pd.DataFrame:
     return counts_frame.divide(col_sums, axis=1)
 
 
-def _share_table(title: str, counts_frame: pd.DataFrame) -> Table:
-    """A share-by-rank table: rows the items (the matrix's order), columns
-    第 r 名 for each rank of the matrix."""
-    share = _item_share_by_rank(counts_frame)
-    columns = tuple(Column(f"第 {rank} 名", "ratio") for rank in share.columns)
-    rows = tuple(Row(str(item), tuple(share.loc[item]))
-                 for item in share.index)
+def _matrix_table(title: str, matrix: pd.DataFrame, kind: str) -> Table:
+    """An item × rank table: rows the items (the matrix's order), columns
+    第 r 名 for each rank of the matrix, every cell of one ``kind``."""
+    columns = tuple(Column(f"第 {rank} 名", kind) for rank in matrix.columns)
+    rows = tuple(Row(str(item), tuple(matrix.loc[item]))
+                 for item in matrix.index)
     return Table(title, "item", columns, rows)
 
 
+def _share_table(title: str, counts_frame: pd.DataFrame) -> Table:
+    """A share-by-rank table (:func:`_item_share_by_rank`)."""
+    return _matrix_table(title, _item_share_by_rank(counts_frame), "ratio")
+
+
+def _histogram_table(title: str, hist: pd.DataFrame, item_col: str) -> Table:
+    """The histogram's bars: one row per item and non-empty bin, in the
+    order they are drawn (item, then bin from low scores up)."""
+    hist = hist.sort_values([item_col, "bin_center"], kind="stable")
+    columns = (Column("箱中心", "ratio"), Column("箱寬", "ratio"),
+               Column("候選列", "count"))
+    rows = tuple(Row(str(r[item_col]), (r["bin_center"], r["bin_width"],
+                                        r["count"]))
+                 for _, r in hist.iterrows())
+    return Table(title, "item", columns, rows)
+
+
+#: The boxplot table's five numbers: (the aggregate's key, the header).
+_BOX_COLUMNS = (("lowerfence", "下緣"), ("q1", "Q1"), ("median", "中位數"),
+                ("q3", "Q3"), ("upperfence", "上緣"))
+
+
+def _box_table(title: str, box: pd.DataFrame, item_col: str,
+               label_col: str) -> Table:
+    """The boxes: one row per item and label, label 1 before 0, the labels
+    the figure draws (``plot_score_boxplot_by_label``)."""
+    drawn = box[box[label_col].isin((0, 1))].sort_values(
+        [item_col, label_col], ascending=[True, False], kind="stable")
+    columns = (Column(label_col, "text"),
+               *(Column(header, "ratio") for _, header in _BOX_COLUMNS))
+    rows = tuple(Row(str(r[item_col]), (str(int(r[label_col])),
+                                        *(r[key] for key, _ in _BOX_COLUMNS)))
+                 for _, r in drawn.iterrows())
+    note = Note("下緣、上緣是 Q1 − 1.5 × 四分位距、Q3 + 1.5 × 四分位距，夾在"
+                "實際的最小、最大分數之內。")
+    return Table(title, "item", columns, rows, notes=(note,))
+
+
 def _figures(report_aggregates: dict) -> list[Figure]:
-    """Today's five figures, titled in Chinese (:data:`FIGURE_TITLES`)."""
+    """Today's five figures, titled in Chinese (:data:`FIGURE_TITLES`), each
+    with the numbers it draws as its data table, named like it."""
     from recsys_tfb.evaluation.distributions import (
         plot_positive_rank_heatmap,
         plot_positive_rate_rank_heatmap,
@@ -103,23 +141,29 @@ def _figures(report_aggregates: dict) -> list[Figure]:
 
     cols = report_aggregates["columns"]
     item_col, label_col = cols["item"], cols["label"]
-    figs = [
-        plot_score_histogram(
-            frame_from_json(report_aggregates["score_histogram"]),
-            item_col=item_col),
-        plot_score_boxplot_by_label(
-            frame_from_json(report_aggregates["score_box_by_label"]),
-            item_col=item_col, label_col=label_col),
-        plot_rank_heatmap(
-            frame_from_json(report_aggregates["rank_counts"])),
-        plot_positive_rank_heatmap(
-            frame_from_json(report_aggregates["positive_rank_counts"])),
-        plot_positive_rate_rank_heatmap(
-            frame_from_json(report_aggregates["positive_rate"])),
+    hist = frame_from_json(report_aggregates["score_histogram"])
+    box = frame_from_json(report_aggregates["score_box_by_label"])
+    ranks = frame_from_json(report_aggregates["rank_counts"])
+    positive_ranks = frame_from_json(report_aggregates["positive_rank_counts"])
+    rate = frame_from_json(report_aggregates["positive_rate"])
+    drawn = [
+        (plot_score_histogram(hist, item_col=item_col),
+         lambda t: _histogram_table(t, hist, item_col)),
+        (plot_score_boxplot_by_label(box, item_col=item_col,
+                                     label_col=label_col),
+         lambda t: _box_table(t, box, item_col, label_col)),
+        (plot_rank_heatmap(ranks),
+         lambda t: _matrix_table(t, ranks, "count")),
+        (plot_positive_rank_heatmap(positive_ranks),
+         lambda t: _matrix_table(t, positive_ranks, "count")),
+        (plot_positive_rate_rank_heatmap(rate),
+         lambda t: _matrix_table(t, rate, "ratio")),
     ]
-    for fig, title in zip(figs, FIGURE_TITLES):
+    figures = []
+    for (fig, data), title in zip(drawn, FIGURE_TITLES):
         fig.update_layout(title=title)
-    return [Figure(fig) for fig in figs]
+        figures.append(Figure(fig, data(title)))
+    return figures
 
 
 def _mean_rank_blocks(metrics: Mapping | None) -> list:
