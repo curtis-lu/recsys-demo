@@ -74,6 +74,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, NamedTuple
+from urllib.parse import unquote
 
 import pandas as pd
 from pyspark.sql import functions as F
@@ -90,6 +91,14 @@ def partition_value(path: str, key: str) -> str | None:
     Matches on ``/<key>=`` so a key never matches as the suffix of a longer one
     (``date`` must not be read out of ``snap_date=``): that failure would be
     silent, collapsing every partition under one wrong value rather than raising.
+
+    The value comes back unescaped twice, because ``path`` is a URI as
+    ``DataFrame.inputFiles()`` lists it: once for the URI (``%20`` for a
+    space), once for the escaping Spark and Hive give a partition directory's
+    name (``%3A`` for ``:``, ``%25`` for ``%`` itself, so the two layers never
+    blur). A TIMESTAMP time column's month ``2026-01-31 00:00:00`` is listed as
+    ``2026-01-31%2000%253A00%253A00``; read as is it was no date at all, and
+    B10 compared a test month's 0 files with 0 files and passed (#558).
     """
     marker = f"/{key}="
     idx = path.find(marker)
@@ -97,7 +106,7 @@ def partition_value(path: str, key: str) -> str | None:
         return None
     rest = path[idx + len(marker):]
     end = rest.find("/")
-    return rest if end < 0 else rest[:end]
+    return unquote(unquote(rest if end < 0 else rest[:end]))
 
 
 def group_by_partition(

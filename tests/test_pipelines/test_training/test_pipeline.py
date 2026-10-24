@@ -432,8 +432,9 @@ class TestSampleWeightReportIsACatalogArtifact:
 class TestTrainingPipelineE2E:
     """End-to-end: dataset pipeline → training pipeline → artifact validation."""
 
-    def test_dataset_then_training(self, tmp_path, spark):
+    def test_dataset_then_training(self, tmp_path, spark, request):
         from recsys_tfb.core.catalog import DataCatalog, MemoryDataset
+        from recsys_tfb.core.config import ConfigLoader
         from recsys_tfb.io.extract import extract_Xy
         from recsys_tfb.io.handles import ParquetHandle
         from recsys_tfb.models.base import ModelAdapter
@@ -563,7 +564,7 @@ class TestTrainingPipelineE2E:
         catalog.add("preprocessor_on_disk", MemoryDataset(None))
         # The run mode the CLI registers for the data gate.
         catalog.add("only_test_months", MemoryDataset(False))
-        for name in (
+        products = (
             "sample_keys", "train_keys", "train_dev_keys", "val_keys", "test_keys",
             "train_set", "train_dev_set", "val_set", "test_set",
             "train_model_input", "train_dev_model_input",
@@ -572,14 +573,44 @@ class TestTrainingPipelineE2E:
             "best_params", "best_iteration", "hpo_best_model",
             "model", "evaluation_results",
             "predict_manifest",
-        ):
+        )
+        for name in products:
             catalog.add(name, MemoryDataset())
+        # The products the real catalog lands in Hive are built from its own
+        # entries, only the database swapped for a throwaway one: B10 counts
+        # rows off the parquet footers of a landed table and refuses an
+        # in-memory frame (#523, #558), so a test catalog that keeps them in
+        # memory stops the dataset run at the grain gate.
+        test_db = "e2e_dataset_then_training"
+        root = Path(__file__).resolve().parents[3]
+        landed_config = ConfigLoader(str(root / "conf")).get_catalog_config(
+            runtime_params={
+                "hive": {"db": test_db},
+                "base_dataset_version": parameters["base_dataset_version"],
+                "train_variant_id": parameters["train_variant_id"],
+            },
+        )
+        landed = [
+            name for name in products
+            if landed_config.get(name, {}).get("type") == "HiveTableDataset"
+        ]
+        landed_catalog = DataCatalog({name: landed_config[name] for name in landed})
+        for name in landed:
+            catalog.add(name, landed_catalog.get_dataset(name))
+        spark.sql(f"DROP DATABASE IF EXISTS {test_db} CASCADE")
+        spark.sql(f"CREATE DATABASE {test_db}")
+        request.addfinalizer(
+            lambda: spark.sql(f"DROP DATABASE IF EXISTS {test_db} CASCADE"))
 
         runner = Runner()
 
         # -- Run dataset pipeline --
         dataset_pipeline = create_dataset_pipeline()
         runner.run(dataset_pipeline, catalog)
+        # snap_date here is a TIMESTAMP, so the test month lands as
+        # `2024-05-31 00:00:00`: B10 must still find and count it (#558).
+        test_grain = catalog.load("model_input_grain_report")["splits"]["test"]
+        assert test_grain["keys_rows"] > 0
 
         # -- Write model_inputs to parquet and inject ParquetHandles into catalog.
         # The training pipeline's cache nodes require Spark DataFrames; in the

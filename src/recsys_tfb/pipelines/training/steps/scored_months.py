@@ -72,11 +72,15 @@ def partition_months(frame: DataFrame, time_col: str) -> Optional[list[str]]:
     ``docs/agents/architecture-constraints.md`` has no check that they are).
     The directory key is matched case-insensitively, as
     ``HiveTableDataset.existing_partition_values`` reads the metastore's, and
-    the value is URL-unescaped for the same reason given there.
+    the value is URL-unescaped twice: once for the URI ``inputFiles()`` lists
+    (``%20`` for a space), once for the directory name's own escaping, the one
+    ``existing_partition_values`` undoes (``%3A`` for ``:``). A month written
+    with a time of day, ``2025-01-31 00:00:00``, is listed as
+    ``2025-01-31%2000%253A00%253A00`` (#558).
     """
     prefix = f"{time_col}=".lower()
     found = {
-        unquote(segment[len(prefix):])
+        unquote(unquote(segment[len(prefix):]))
         for path in frame.inputFiles()
         for segment in path.split("/")
         if segment.lower().startswith(prefix)
