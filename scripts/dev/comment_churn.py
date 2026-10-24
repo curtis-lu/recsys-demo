@@ -1,7 +1,7 @@
 """How much of the edit history in src/ is comments and docstrings.
 
-Reproduces the snapshot numbers in docs/agents/code-comments.md. Read-only:
-it only runs ``git log`` / ``git show`` against the repo it lives in.
+Read-only: it only runs ``git log`` / ``git show`` against the repo it lives
+in.
 
     python scripts/dev/comment_churn.py [REV] [--since YYYY-MM-DD]
 

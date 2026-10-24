@@ -381,7 +381,7 @@ result = feature_table.filter(months_filter_as_date(time_col, months)).select(
 
 **這一條本檔首次寫下**（出處：`pipelines/dataset/` 全部模組的一致慣例，之前沒有寫下來過）。
 
-這一條講 node 的 docstring **要多寫什麼**。所有註解與 docstring 都適用的「不寫什麼、寫多長」（不寫歷史與票號、不寫別處的現況、一件事只講一次、函式 docstring 超過 10 行要停下來問），在 [`code-comments.md`](code-comments.md)，兩份都要守。
+這一條講 node 的 docstring **要多寫什麼**。所有註解與 docstring 都適用的規則（每句 durable、一件事只講一次、超過 10 行逐句檢查）在 [`code-comments.md`](code-comments.md)，兩份都要守。
 
 函式簽章已經說了它做什麼。docstring 要說的是簽章說不出來的三件事：
 

@@ -92,8 +92,8 @@ def test_no_new_issue_numbers_in_src_prose():
         "issue numbers in src/ comments or docstrings that are not in "
         f"{BASELINE.name}:\n  " + "\n  ".join(sorted(new.elements())) + "\n"
         "Put the issue number in the commit or PR; in the comment, say what the "
-        "code must keep doing (docs/agents/code-comments.md, 'do not write "
-        "history'). A pointer to a decision recorded on an issue is allowed when "
+        "code must keep doing (docs/agents/code-comments.md, the 'durable' "
+        "rule). A pointer to a decision recorded on an issue is allowed when "
         "written as '#NNN decision X'. If you only moved existing text to another "
         "file, move its line in the list too."
     )
