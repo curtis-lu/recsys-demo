@@ -1,10 +1,9 @@
-"""The popularity baseline's purchase counts as the report reads them (Spark,
-two small collects).
+"""The popularity baseline's purchase counts as the report reads them (Spark;
+what reaches the driver is per item, or per item and month).
 
-Which score ranks the baseline and which table its window is printed over
-are decided in ``compute_baseline_metrics``; the counting itself is
-``evaluation.baselines``'. This module turns those counts into the landed
-``purchase_counts`` and ``monthly_counts``.
+Which score ranks the baseline is decided in ``compute_baseline_metrics``; the
+counting itself is ``evaluation.baselines``'. This module turns those counts
+into the landed ``purchase_counts`` and ``monthly_counts``.
 """
 
 from typing import Optional

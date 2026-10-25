@@ -1,5 +1,6 @@
 """The evaluated dates (one or several): which they are, keeping only their rows,
-and whether those rows were written under today's settings.
+and whether those rows were written under today's settings; and which dates a
+frame holds (:func:`snap_dates_in_frame`).
 
 ``enriched_eval_predictions`` holds every month this ``model_version`` has been
 evaluated on: ``prepare_eval_data`` writes one time partition per evaluated date,
@@ -34,7 +35,6 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from pyspark.sql import functions as F
 
-from recsys_tfb.core.consistency import DataConsistencyError
 from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
@@ -308,36 +308,3 @@ def snap_dates_in_frame(frame: DataFrame, time_col: str) -> list[str]:
     """The distinct time values ``frame`` holds, as text, in the order Spark
     returns them; one small collect."""
     return [str(r[time_col]) for r in frame.select(time_col).distinct().collect()]
-
-
-def require_eval_partitions_ready(
-    dates_without_rows: list[str],
-    not_current: EvalPartitionsNotCurrentError | None,
-    parameters: dict,
-    table: str,
-) -> None:
-    """Pre-check (input) of a reader of partitions an earlier run wrote:
-    raises one ``DataConsistencyError`` naming every problem
-    :func:`restrict_to_current_eval_partitions` found, the dates without rows
-    in ``table`` first, then the partitions not written under the settings
-    they were checked against (``not_current``, chained as the cause).
-    Neither problem hides the other.
-    """
-    problems = []
-    if dates_without_rows:
-        asked = (
-            f"evaluation.snap_date={dates_without_rows[0]!r}"
-            if len(eval_snap_dates(parameters)) == 1 else
-            f"evaluation.snap_date date(s) {dates_without_rows}"
-        )
-        problems.append(
-            f"{table} has no partition "
-            f"for {asked} "
-            f"model_version={parameters.get('model_version', 'unknown')!r}. "
-            "Run `python -m recsys_tfb evaluation` (with or without "
-            "--compare) first to populate the partition."
-        )
-    if not_current is not None:
-        problems.append(str(not_current))
-    if problems:
-        raise DataConsistencyError("\n".join(problems)) from not_current

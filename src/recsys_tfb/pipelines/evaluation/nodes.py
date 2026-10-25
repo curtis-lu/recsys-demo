@@ -127,7 +127,7 @@ from recsys_tfb.pipelines.evaluation.steps.popularity_counts import (
     monthly_purchase_counts,
     purchase_counts_per_item,
 )
-from recsys_tfb.pipelines.evaluation.steps.ranks import rank_like_inference
+from recsys_tfb.pipelines.evaluation.steps.ranks import rank_within_query_group
 from recsys_tfb.pipelines.evaluation.steps.result_blocks import Block, Produces
 from recsys_tfb.pipelines.evaluation.steps.segments import (
     join_segment_columns,
@@ -138,7 +138,6 @@ from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
     EvalPartitionsNotCurrentError,
     eval_snap_dates,
     eval_snap_dates_without_rows,
-    require_eval_partitions_ready,
     restrict_to_current_eval_partitions,
     restrict_to_eval_snap_dates,
     snap_dates_in_frame,
@@ -352,7 +351,7 @@ def make_prepare_eval_data_node(population_name: str):
                 "core.versioning.resolve_model_version before pipeline run."
             )
         ranked_predictions = restrict_to_model_version(
-            ranked_predictions, model_version, logger)
+            logger, ranked_predictions, model_version)
 
         # Decision — which months: evaluation.snap_date, one date or several
         # (#374), in both pipeline modes (this node serves monitoring and
@@ -456,15 +455,21 @@ def make_prepare_eval_data_node(population_name: str):
         # the table no longer stores it (Spark mAP recomputes rank internally via
         # rank_within_query). Add it here when missing so downstream stays uniform;
         # when present (ranked_predictions source), trust the upstream value.
-        # Today both ways give the same ranks: rank_within_query breaks ties the
-        # way inference does (rank_like_inference). The choice shows once one side's rule
-        # changes: recomputing would silently replace the ranking inference
-        # published; trusting means a `rank` column ever added to
+        # Today both ways give the same ranks: the tie-break is inference's. The
+        # choice shows once one side's rule changes: recomputing would silently
+        # replace the ranking inference published; trusting means a `rank` column ever added to
         # training_eval_predictions is used as is, tie-break included, with no
         # message (ADR-0014 records that hazard).
         rank_col = schema["rank"]
         if rank_col not in eval_predictions.columns:
-            eval_predictions = rank_like_inference(eval_predictions, schema)
+            # Decision — ranked within the query group, where inference ranks
+            # within the base key. The two are the same until an `occasion` is
+            # declared (ADR-0025 decision 2); declared, this side is the right
+            # one: this branch only runs on training_eval_predictions, whose
+            # rows each belong to the occasion they were ranked in. Monitoring
+            # mode, the one place the two would meet, is refused at the CLI
+            # entry while the role is declared (A40).
+            eval_predictions = rank_within_query_group(eval_predictions, schema)
             logger.info(
                 "prepare_eval_data: injected '%s' column via rank_within_query "
                 "(predictions source did not provide it)",
@@ -1022,6 +1027,7 @@ def compute_baseline_metrics(
     counts = compute_purchase_counts(
         label_table, snap_dates, lookback_months, parameters
     )
+    # Summed over the evaluated dates' windows; one date reduces to its own.
     purchase_counts = purchase_counts_per_item(counts, parameters)
     # The same windows per calendar month: the report's monthly popularity
     # trend.
@@ -2094,6 +2100,10 @@ def validate_enriched_eval_predictions_present(
     Its raise is a pre-check (input): an earlier run was to write those rows,
     and nothing in this run computed them.
     """
+    mv = parameters.get("model_version", "unknown")
+    # The table the catalog read, not the entry name (conf/dev prefixes it).
+    table = compare_source_table(parameters, "enriched_eval_predictions")
+
     # Collect-all: a partition not written for this directory must not hide
     # the dates without rows from the same check, nor the other way round.
     not_current = None
@@ -2104,7 +2114,21 @@ def validate_enriched_eval_predictions_present(
         ).dates_without_rows
     except EvalPartitionsNotCurrentError as error:
         not_current, missing = error, error.dates_without_rows
-    # The table the catalog read, not the entry name (conf/dev prefixes it).
-    require_eval_partitions_ready(
-        missing, not_current, parameters,
-        compare_source_table(parameters, "enriched_eval_predictions"))
+    problems = []
+    if missing:
+        asked = (
+            f"evaluation.snap_date={missing[0]!r}"
+            if len(eval_snap_dates(parameters)) == 1 else
+            f"evaluation.snap_date date(s) {missing}"
+        )
+        problems.append(
+            f"{table} has no partition "
+            f"for {asked} "
+            f"model_version={mv!r}. "
+            "Run `python -m recsys_tfb evaluation` (with or without "
+            "--compare) first to populate the partition."
+        )
+    if not_current is not None:
+        problems.append(str(not_current))
+    if problems:
+        raise DataConsistencyError("\n".join(problems)) from not_current

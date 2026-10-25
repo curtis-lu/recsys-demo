@@ -12,8 +12,7 @@ from pyspark.sql import functions as F
 def labels_in_months_of(
     labels: SparkDataFrame, predictions: SparkDataFrame, time_col: str,
 ) -> SparkDataFrame:
-    """``labels`` kept to the time values ``predictions`` holds: an inner
-    join on the distinct times."""
+    """``labels`` kept to the time values ``predictions`` holds."""
     return labels.join(
         predictions.select(time_col).distinct(), on=time_col, how="inner")
 

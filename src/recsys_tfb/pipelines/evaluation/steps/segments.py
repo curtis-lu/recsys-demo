@@ -1,4 +1,5 @@
-"""Segment-column joins for evaluation (Spark).
+"""Segment-column joins for evaluation (Spark), and the warning for a column
+the population table lacks.
 
 A segment column comes from one of two places (ADR-0020 bug 6):
 
@@ -9,8 +10,8 @@ A segment column comes from one of two places (ADR-0020 bug 6):
   An override declares ``table`` (Hive-qualified name), ``key_columns`` and
   ``segment_column``; one that cannot be read fails loud, never a silent skip.
 
-Which of the two a column takes, and what happens when the population table
-lacks it, is decided in ``prepare_eval_data``, not here.
+Which of the two a column takes, and that a column the population table lacks
+is skipped, is decided in ``prepare_eval_data``, not here.
 """
 
 import logging

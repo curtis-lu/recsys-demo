@@ -10,17 +10,10 @@ from pyspark.sql import functions as F
 from recsys_tfb.evaluation.metrics_spark import rank_within_query
 
 
-def rank_like_inference(frame: SparkDataFrame, schema: dict) -> SparkDataFrame:
+def rank_within_query_group(frame: SparkDataFrame, schema: dict) -> SparkDataFrame:
     """``frame`` with ``schema["rank"]`` added: 1-based within each query
-    group, by score descending, ties by item ascending — the rule inference
-    publishes ``rank`` with (``rank_within_query``).
-
-    Grouped by the query group, where inference groups by the base key. The
-    two are the same until an ``occasion`` is declared (ADR-0025 decision 2);
-    then this side is the right one for the rows it is given (each row of
-    ``training_eval_predictions`` belongs to one occasion, the scope it was
-    ranked in), and monitoring, where the two would meet, is refused at the
-    CLI entry (A40).
+    group, by score descending, ties by item ascending, the same tie-break
+    inference publishes ``rank`` with.
 
     BIGINT, the type ``ranked_predictions`` declares for ``rank``: both run
     modes write the same ``enriched_eval_predictions``, whose schema is fixed
