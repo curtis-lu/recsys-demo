@@ -95,7 +95,7 @@ no edit.
 
 函式 docstring 或一段 `#` 註解超過 10 行，就把整份逐句問一遍。模組 docstring 不看行數，但一樣只留拿掉會出事的句子。
 
-例（`src/recsys_tfb/pipelines/evaluation/nodes.py:1896`，`resolve_comparison_display_ks`）：
+例（`src/recsys_tfb/pipelines/evaluation/nodes.py` 的 `resolve_comparison_display_ks`）：
 
 - **刪**：指紋帶哪個鍵、過期後重跑去哪（`config_fingerprint.rerun_node` 管）；落地的形狀（`steps/display_ks` 管）；也記了比較對象（`_require_comparison_inputs_current` 管）。
 - **留**：

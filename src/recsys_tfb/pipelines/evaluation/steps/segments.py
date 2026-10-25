@@ -113,3 +113,21 @@ def join_segment_sources(
         )
 
     return df
+
+
+def warn_segment_columns_skipped(
+    caller_logger: logging.Logger,
+    missing: dict[str, str],
+    population_columns: set[str],
+) -> None:
+    """One warning per segment column the population table lacks
+    (``missing``: column → table), naming the table and the columns it has,
+    so a typo in ``evaluation.segment_columns`` is found from the log.
+    ``caller_logger`` is the node's: the lines keep the logger name they are
+    filtered by."""
+    for col, table in missing.items():
+        caller_logger.warning(
+            "segment column %r: population table %r has no such column "
+            "(it has %s); per-segment metrics skip it this run",
+            col, table, sorted(population_columns),
+        )
