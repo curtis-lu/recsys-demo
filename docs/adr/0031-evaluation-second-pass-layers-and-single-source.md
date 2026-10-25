@@ -370,7 +370,7 @@ diagnosis/metric/    contract.py
 | `metrics.py`、`metrics_spark.py`、`metric_registry.py`、`metric_catalog.py`、`result_readers.py`、`segment_keys.py` | 指標計算、指標目錄、落地結果的鍵名 | 根層 `evaluation/`，不動 |
 | `baselines.py` | 熱門度打分：最簡單的一個模型 | 根層 `evaluation/`，不動 |
 | `prediction_quality.py` | 一族指標（把分數當機率），跟 `metrics_spark.py` 同類 | 根層 `evaluation/`，不動 |
-| 根層 `report/`（`types.py`、`pages.py`） | 中立的呈現層：段落、表格、跳脫，沒有 evaluation 專屬的內容 | 根層 `report/`，不動 |
+| 根層 `report/`（`types.py`、`pages.py`） | 中立的呈現層：段落、表格、跳脫。提到 evaluation 的只有 docstring 措辭與一個預設標題，沒有 evaluation 專屬的機制 | 根層 `report/`，不動 |
 | `diagnostics_spark.py` | 替主報表名次分布段準備圖的資料（`compute_report_aggregates` 叫它） | `pipelines/evaluation/steps/report_aggregates.py`（信心中等：彙總本身也通用）。改名是因為 node 規則 12 不准 backend 後綴 |
 | `distributions.py` | 名次分布段的圖 | `pipelines/evaluation/report/figures.py` |
 | `report.py` | 兩份報表的頁面外殼，含 evaluation 的術語表 `TERMS` | `pipelines/evaluation/report/shell.py` |
