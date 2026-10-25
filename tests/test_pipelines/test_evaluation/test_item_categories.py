@@ -89,7 +89,7 @@ class TestPrepareEvalDataLandsTheTable:
         assert categories == {
             "column": "family",
             "mapping": {"A": "x", "B": "y", "C": "x"},
-            "config_fingerprint": fingerprint(params),
+            "config_fingerprint": fingerprint(params, "prepare_eval_data"),
         }
 
     def test_a_hand_mapping_lands_an_empty_table(self, spark):
@@ -196,7 +196,7 @@ def _stub_facts(params):
         fingerprint,
     )
 
-    return {"config_fingerprint": fingerprint(params)}
+    return {"config_fingerprint": fingerprint(params, "compute_row_facts")}
 
 
 class TestReadersRankTheLandedTable:

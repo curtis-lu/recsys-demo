@@ -1,92 +1,67 @@
 """``steps.config_fingerprint``: which settings make a landed JSON stale.
 
-The expected key lists below are copied from issue #342 / ADR-0020 decision 2,
-not derived from ``COMPUTED_KEYS``: a test whose expectation is read from the
-module under test agrees with whatever the module says.
+The expected lists below are written out from ADR-0031 principle 5 and the
+reads of each node, not derived from ``APPLIED_SETTINGS``: a test whose
+expectation is read from the module under test agrees with whatever the
+module says.
 """
 import ast
 import copy
 import datetime
 import json
-import re
 from pathlib import Path
 
 import pytest
 
 from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
-    COMPUTED_KEYS,
-    PARTITION_CONTENT_KEYS,
+    APPLIED_SETTINGS,
+    COMPARISON_CHAIN,
+    PARTITION_FINGERPRINT_KEYS,
     LoadedArtifact,
     fingerprint,
+    partition_fingerprint,
+    recorded_partition_fingerprint,
     require_computed_with_current_config,
+    rerun_node,
 )
 
-#: The closed enumeration as the issue writes it (dotted from the params root).
-SPEC_COMPUTED_PATHS = {
-    # Not from issue #342: the run mode (--post-training / monitoring),
-    # added by F7 (a later code-review round) because it changes which
-    # predictions table prepare_eval_data reads and is injected into
-    # `parameters` at the top level like model_version/snap_date.
-    "post_training",
-    "evaluation.snap_date",
-    "evaluation.k_values",
-    "evaluation.segment_columns",
-    "evaluation.segment_sources",
-    # #379: the sample_pool column prepare_eval_data reads the category
-    # table off — a row of its own, at prepare_eval_data, under the block's.
-    "evaluation.item_categories.column",
-    "evaluation.item_categories",
-    "evaluation.baseline",
-    "evaluation.metric",
-    # #376: the all-positive query group filter, applied in compute_metrics
-    # (fine + category grain) and compute_baseline_metrics.
-    "evaluation.query_filter",
-    "evaluation.report.diagnostics",
-    "evaluation.report.sections.popularity_baseline",
-    "evaluation.report.sections.rank_distribution",
-    # ADR-0024 decision 1 / #381: the prediction-quality family.
-    "evaluation.prediction_quality",
-    "evaluation.report.sections.prediction_quality",
+_METRIC_READS = {
+    "evaluation.snap_date", "evaluation.item_categories",
+    "evaluation.query_filter", "evaluation.k_values", "evaluation.metric",
 }
 
-#: One leaf per enumerated key, including leaves under the ``.*`` subtrees, so
-#: a subtree listed by its root is shown to cover what sits below it.
-SPEC_COMPUTED_LEAVES = [
-    "post_training",
-    "evaluation.snap_date",
-    "evaluation.k_values",
-    "evaluation.segment_columns",
-    "evaluation.segment_sources",
-    "evaluation.item_categories.enabled",
-    "evaluation.item_categories.column",
-    "evaluation.baseline.lookback_months",
-    "evaluation.metric.min_positives",
-    "evaluation.query_filter.drop_all_positive_groups",
-    "evaluation.report.diagnostics.include_distributions",
-    "evaluation.report.sections.popularity_baseline",
-    "evaluation.report.sections.rank_distribution",
-    "evaluation.prediction_quality.n_bins",
-    "evaluation.prediction_quality.top_n",
-    "evaluation.report.sections.prediction_quality",
-]
-
-#: "Drawn" keys: they change what the report shows, never what is computed.
-SPEC_DRAWN_LEAVES = [
-    "evaluation.report.display.compare_k",
-    "evaluation.report.sections.ranking_metrics",
-    "evaluation.report.sections.data_stats",
-]
-
-#: Keys outside the ``evaluation`` subtree, declared through ``extra_keys``.
-#: The ``config_shift`` diagnosis declared these until #532 removed it; no node
-#: declares any today, so the names below only stand for "some producer".
-OUTSIDE_KEYS = (
-    "dataset.sample_group_keys",
-    "dataset.sample_ratio",
-    "dataset.sample_ratio_overrides",
-    "training.sample_weight_keys",
-    "training.sample_weights",
-)
+#: What each fingerprinted step reads (ADR-0031 principle 5).
+SPEC_APPLIED = {
+    # post_training through its wiring: the predictions and population table.
+    "prepare_eval_data": {
+        "post_training", "evaluation.snap_date", "evaluation.segment_columns",
+        "evaluation.segment_sources", "evaluation.item_categories.column",
+    },
+    "compute_row_facts": {
+        "evaluation.snap_date", "evaluation.item_categories",
+        "evaluation.query_filter",
+    },
+    "compute_prediction_quality": {
+        "post_training", "evaluation.snap_date", "evaluation.prediction_quality",
+    },
+    "compute_report_aggregates": {
+        "evaluation.snap_date", "evaluation.report.diagnostics",
+    },
+    "restrict_to_common": {"evaluation.snap_date"},
+    "compute_metrics": _METRIC_READS,
+    "compute_baseline_metrics": _METRIC_READS | {"evaluation.baseline"},
+    "compute_compare_metrics": _METRIC_READS,
+    "compare_to_baseline": set(),
+    "compare_to_source": set(),
+    # The switch through its wiring: off, no baseline comparison to cut.
+    "resolve_display_ks": {
+        "evaluation.k_values", "evaluation.report.display.compare_k",
+        "evaluation.report.sections.popularity_baseline",
+    },
+    "resolve_comparison_display_ks": {
+        "evaluation.k_values", "evaluation.report.display.compare_k",
+    },
+}
 
 
 def _params() -> dict:
@@ -94,12 +69,7 @@ def _params() -> dict:
         "model_version": "mv_test",
         "snap_date": "20260131",
         "post_training": False,
-        "dataset": {
-            "sample_group_keys": ["segment_a", "label"],
-            "sample_ratio": 1.0,
-            "sample_ratio_overrides": {"x|1": 0.5},
-        },
-        "training": {"sample_weight_keys": [], "sample_weights": {}},
+        "dataset": {"sample_ratio": 1.0},
         "evaluation": {
             "snap_date": "2026-01-31",
             "k_values": [5, "all"],
@@ -138,7 +108,7 @@ def _delete(params: dict, path: str) -> dict:
     *parents, leaf = path.split(".")
     for seg in parents:
         node = node[seg]
-    node.pop(leaf, None)  # already absent in _params (e.g. ...item_categories.column)
+    node.pop(leaf, None)
     return params
 
 
@@ -146,396 +116,427 @@ def _changed(params: dict, path: str) -> dict:
     return _set(copy.deepcopy(params), path, {"changed": "value"})
 
 
-# ---------------------------------------------------------------- fingerprint
+def _landed(params: dict, node: str, *inputs) -> dict:
+    """A result ``node`` lands from ``inputs``, as read back from disk."""
+    return json.loads(json.dumps(
+        {"config_fingerprint": fingerprint(params, node, inputs)}))
 
 
-def test_enumeration_is_exactly_the_issue_list():
-    assert {path for path, _ in COMPUTED_KEYS} == SPEC_COMPUTED_PATHS
+def _main_report(params: dict) -> list[LoadedArtifact]:
+    """Every result the main report reads, landed under ``params`` the way
+    the pipeline wires them, plus the prepared segment list."""
+    seg = _landed(params, "prepare_eval_data")
+    facts = _landed(params, "compute_row_facts", seg, seg)
+    metrics = _landed(params, "compute_metrics", seg, seg, facts)
+    baseline = _landed(params, "compute_baseline_metrics", seg, seg, facts)
+    comparison = _landed(params, "compare_to_baseline", metrics, baseline)
+    landed = {
+        ("evaluation_segment_columns", "prepare_eval_data"): seg,
+        ("evaluation_row_facts", "compute_row_facts"): facts,
+        ("evaluation_metrics", "compute_metrics"): metrics,
+        ("baseline_metrics", "compute_baseline_metrics"): baseline,
+        ("baseline_comparison", "compare_to_baseline"): comparison,
+        ("evaluation_display_ks", "resolve_display_ks"):
+            _landed(params, "resolve_display_ks", metrics, comparison),
+        ("evaluation_report_aggregates", "compute_report_aggregates"):
+            _landed(params, "compute_report_aggregates", seg),
+        ("prediction_quality_metrics", "compute_prediction_quality"):
+            _landed(params, "compute_prediction_quality", seg),
+    }
+    return [LoadedArtifact(catalog_name=name, payload=payload,
+                           produced_by=producer)
+            for (name, producer), payload in landed.items()]
 
 
-def test_same_parameters_same_hash():
-    a = fingerprint(_params())
-    b = fingerprint(copy.deepcopy(_params()))
-    assert a == b
-    assert re.fullmatch(r"[0-9a-f]{64}", a["sha256"])
+def _stale(artifacts, params, **kwargs) -> set[str]:
+    stale = set()
+    for artifact in artifacts:
+        try:
+            require_computed_with_current_config([artifact], params, **kwargs)
+        except ValueError:
+            stale.add(artifact.catalog_name)
+    return stale
 
 
-@pytest.mark.parametrize("path", SPEC_COMPUTED_LEAVES)
-def test_changing_a_computed_key_changes_the_hash(path):
-    base = _params()
-    assert fingerprint(_changed(base, path))["sha256"] != \
-        fingerprint(base)["sha256"]
-
-
-@pytest.mark.parametrize("path", SPEC_COMPUTED_LEAVES)
-def test_adding_an_absent_computed_key_changes_the_hash(path):
-    absent = _delete(_params(), path)
-    present = _set(copy.deepcopy(absent), path, 7)
-    assert fingerprint(present)["sha256"] != fingerprint(absent)["sha256"]
-
-
-@pytest.mark.parametrize("path", SPEC_DRAWN_LEAVES)
-def test_changing_a_drawn_key_keeps_the_hash(path):
-    base = _params()
-    assert fingerprint(_changed(base, path)) == fingerprint(base)
-
-
-def test_evaluation_compare_is_ignored():
-    """The CLI injects ``evaluation.compare`` at run time (``__main__.py``)."""
-    base = _params()
-    with_compare = _set(copy.deepcopy(base), "evaluation.compare",
-                        {"kind": "hive", "model_version": "v_b"})
-    assert fingerprint(with_compare) == fingerprint(base)
-
-
-def test_extra_keys_only_affect_the_fingerprint_that_declares_them():
-    base = _params()
-    moved = _set(copy.deepcopy(base), "dataset.sample_ratio_overrides",
-                 {"x|1": 0.25})
-    assert fingerprint(moved, OUTSIDE_KEYS)["sha256"] != \
-        fingerprint(base, OUTSIDE_KEYS)["sha256"]
-    assert fingerprint(moved) == fingerprint(base)
-
-
-def test_absent_and_null_are_different_settings():
-    """``sections.get("popularity_baseline", True)``: a missing key computes the baseline,
-    an explicit null does not. One hash for both would let that flip pass."""
-    null = _set(_params(), "evaluation.report.sections.popularity_baseline", None)
-    absent = _delete(_params(), "evaluation.report.sections.popularity_baseline")
-    assert fingerprint(null)["sha256"] != fingerprint(absent)["sha256"]
-    assert "evaluation.report.sections.popularity_baseline" not in \
-        fingerprint(absent)["values"]
-    assert fingerprint(null)["values"][
-        "evaluation.report.sections.popularity_baseline"] is None
-
-
-def test_fingerprint_survives_a_json_round_trip():
-    """YAML turns an unquoted ``2026-01-31`` into a ``datetime.date``; the
-    landed JSON holds a string. Reading it back must still compare equal."""
-    params = _set(_params(), "evaluation.snap_date", datetime.date(2026, 1, 31))
-    fp = fingerprint(params)
-    assert json.loads(json.dumps(fp)) == fp
-    require_computed_with_current_config(
-        [LoadedArtifact(
-            catalog_name="baseline_metrics",
-            payload=json.loads(json.dumps(
-                {"enabled": False, "config_fingerprint": fp})),
-            produced_by="compute_baseline_metrics")],
-        params,
-    )
-
-
-# ------------------------------------------------------- non-string dict keys
-
-
-def test_int_vs_str_dict_key_changes_the_hash():
-    """YAML can write ``{1: 0.5}`` or ``{"1": 0.5}``; every lookup against a
-    dict like this (e.g. ``dataset.sample_ratio_overrides``) keys by str, so
-    only the second ever matches at runtime. Fingerprinting them the same
-    would let a real behaviour change ({1: ...} -> {"1": ...}) report "no
-    change" and skip the required re-run."""
-    int_keyed = _set(_params(), "evaluation.metric", {1: 0.5})
-    str_keyed = _set(_params(), "evaluation.metric", {"1": 0.5})
-    assert fingerprint(int_keyed)["sha256"] != fingerprint(str_keyed)["sha256"]
-
-
-def test_mixed_key_types_does_not_raise():
-    """A dict mixing int and str keys is legal YAML; ``json.dumps(...,
-    sort_keys=True)`` raises TypeError comparing them directly, crashing the
-    node on a legal config."""
-    mixed = _set(_params(), "evaluation.metric", {1: 0.5, "a": 0.3})
-    fingerprint(mixed)  # must not raise
-
-
-def test_int_keyed_config_is_stable_and_round_trips():
-    """Same int-keyed config fingerprinted twice agrees, and the stored
-    ``values`` survive a JSON round trip and still compare equal to a fresh
-    fingerprint via ``require_computed_with_current_config`` (no false
-    raise)."""
-    params = _set(_params(), "evaluation.metric", {1: 0.5})
-    fp1 = fingerprint(params)
-    fp2 = fingerprint(copy.deepcopy(params))
-    assert fp1 == fp2
-    stored = json.loads(json.dumps(
-        {"enabled": False, "config_fingerprint": fp1}))
-    require_computed_with_current_config(
-        [LoadedArtifact(catalog_name="baseline_metrics", payload=stored,
-                        produced_by="compute_baseline_metrics")],
-        params,
-    )
-
-
-# ------------------------------------------------------- run mode (post_training)
-
-
-def test_post_training_changes_the_hash():
-    """(#342 F7) --post-training and monitoring runs of the same
-    (model_version, snap_date) write the same catalog paths but
-    prepare_eval_data reads a different predictions table; the fingerprint
-    must tell the two populations apart."""
-    on = _set(_params(), "post_training", True)
-    off = _set(_params(), "post_training", False)
-    assert fingerprint(on)["sha256"] != fingerprint(off)["sha256"]
-
-
-def test_post_training_mismatch_names_the_key_and_rerun_node():
-    old = _set(_params(), "post_training", True)
-    new = _set(copy.deepcopy(old), "post_training", False)
+def _refusal(artifacts, params, **kwargs) -> str:
     with pytest.raises(ValueError) as exc:
-        require_computed_with_current_config(
-            [LoadedArtifact(catalog_name="baseline_metrics",
-                            payload=_payload(old),
-                            produced_by="compute_baseline_metrics")],
-            new,
-        )
-    msg = str(exc.value)
-    assert "post_training" in msg
-    assert "--from-node prepare_eval_data" in msg
+        require_computed_with_current_config(artifacts, params, **kwargs)
+    return str(exc.value)
 
 
-# ------------------------------------------------ require_computed_with_...
+# ------------------------------------------------------------- declarations
 
 
-def _payload(params, extra=()):
-    return {"enabled": False, "config_fingerprint": fingerprint(params, extra)}
+def test_each_step_declares_what_it_reads():
+    assert {node: set(paths) for node, paths in APPLIED_SETTINGS.items()} \
+        == SPEC_APPLIED
 
 
-def test_fresh_artifacts_pass():
+def test_a_result_records_only_what_its_step_applied():
     params = _params()
-    require_computed_with_current_config(
-        [LoadedArtifact(catalog_name="baseline_metrics",
-                        payload=_payload(params),
-                        produced_by="compute_baseline_metrics"),
-         LoadedArtifact(catalog_name="artifact_reading_outside_keys",
-                        payload=_payload(params, OUTSIDE_KEYS),
-                        produced_by="node_reading_outside_keys",
-                        extra_keys=OUTSIDE_KEYS)],
-        params,
-    )
+    recorded = fingerprint(params, "compute_report_aggregates")
+    assert recorded == {
+        "node": "compute_report_aggregates",
+        "applied": {
+            "evaluation.snap_date": "2026-01-31",
+            "evaluation.report.diagnostics": {"include_distributions": True},
+        },
+        "inputs": {},
+    }
 
 
-def test_changed_key_names_the_leaf_values_and_rerun_node():
+def test_a_step_that_declares_nothing_cannot_land_a_fingerprint():
+    with pytest.raises(KeyError):
+        fingerprint(_params(), "a_new_step")
+
+
+def test_a_result_records_what_each_of_its_inputs_applied():
+    params = _params()
+    seg = _landed(params, "prepare_eval_data")
+    facts = _landed(params, "compute_row_facts", seg)
+    recorded = fingerprint(params, "compute_metrics", (seg, facts, None))
+    assert set(recorded["inputs"]) == {"prepare_eval_data", "compute_row_facts"}
+    assert recorded["inputs"]["compute_row_facts"] == \
+        facts["config_fingerprint"]["applied"]
+    # Inherited further down: the comparison holds the metrics' inputs too.
+    comparison = fingerprint(
+        params, "compare_to_baseline",
+        (_landed(params, "compute_metrics", seg, facts),))
+    assert set(comparison["inputs"]) == {
+        "prepare_eval_data", "compute_row_facts", "compute_metrics"}
+
+
+def test_an_input_without_a_fingerprint_contributes_nothing():
+    params = _params()
+    assert fingerprint(params, "compute_metrics",
+                       ({"joined": []}, None))["inputs"] == {}
+
+
+# --------------------------------------------- one changed key, which results
+
+
+#: Which of the main report's results a change to one key makes stale, and
+#: where the re-run is sent. ADR-0031 principle 5: only the results of the
+#: steps that read it, and of every step downstream of them.
+STALE_AFTER = {
+    "evaluation.report.diagnostics.include_distributions": (
+        {"evaluation_report_aggregates"}, "compute_report_aggregates"),
+    "evaluation.prediction_quality.n_bins": (
+        {"prediction_quality_metrics"}, "compute_prediction_quality"),
+    "evaluation.report.display.compare_k": (
+        {"evaluation_display_ks"}, "resolve_display_ks"),
+    "evaluation.report.sections.popularity_baseline": (
+        {"evaluation_display_ks"}, "resolve_display_ks"),
+    "evaluation.baseline.lookback_months": (
+        {"baseline_metrics", "baseline_comparison", "evaluation_display_ks"},
+        "compute_baseline_metrics"),
+    "evaluation.k_values": (
+        {"evaluation_metrics", "baseline_metrics", "baseline_comparison",
+         "evaluation_display_ks"}, "compute_metrics"),
+    "evaluation.metric.min_positives": (
+        {"evaluation_metrics", "baseline_metrics", "baseline_comparison",
+         "evaluation_display_ks"}, "compute_metrics"),
+    "evaluation.query_filter.drop_all_positive_groups": (
+        {"evaluation_row_facts", "evaluation_metrics", "baseline_metrics",
+         "baseline_comparison", "evaluation_display_ks"}, "compute_row_facts"),
+    "evaluation.item_categories.mapping": (
+        {"evaluation_row_facts", "evaluation_metrics", "baseline_metrics",
+         "baseline_comparison", "evaluation_display_ks"}, "compute_row_facts"),
+}
+_EVERY_RESULT = {artifact.catalog_name for artifact in _main_report(_params())}
+# The category column too: the two partition readers inherit the prepared
+# record whole. The partition rows do not depend on it, but the re-run starts
+# at prepare_eval_data for it anyway, so the cost is nothing.
+STALE_AFTER.update({
+    path: (_EVERY_RESULT, "prepare_eval_data")
+    for path in ("post_training", "evaluation.segment_columns",
+                 "evaluation.segment_sources", "evaluation.snap_date",
+                 "evaluation.item_categories.column")
+})
+#: Drawn keys: no result goes stale.
+DRAWN = ["evaluation.report.sections.data_stats",
+         "evaluation.report.sections.ranking_metrics",
+         "evaluation.report.sections.rank_distribution",
+         "evaluation.report.sections.prediction_quality",
+         "evaluation.compare"]
+
+
+@pytest.mark.parametrize("path", sorted(STALE_AFTER))
+def test_a_changed_key_makes_only_its_readers_results_stale(path):
     old = _params()
-    new = _set(copy.deepcopy(old), "evaluation.metric.min_positives", 5)
-    with pytest.raises(ValueError) as exc:
+    expected, node = STALE_AFTER[path]
+    new = _changed(old, path)
+    artifacts = _main_report(old)
+    assert _stale(artifacts, new) == expected
+    assert f"--from-node {node}," in _refusal(artifacts, new)
+
+
+@pytest.mark.parametrize("path", DRAWN)
+def test_a_drawn_key_makes_nothing_stale(path):
+    old = _params()
+    require_computed_with_current_config(_main_report(old), _changed(old, path))
+
+
+@pytest.mark.parametrize("path", ["evaluation.segment_sources",
+                                  "evaluation.item_categories.column"])
+def test_a_key_set_since_is_a_change(path):
+    """Absent keys are not recorded, so the comparison walks the declared
+    paths too: otherwise setting one would compare nothing."""
+    absent = _delete(_params(), path)
+    present = _set(copy.deepcopy(absent), path, "x")
+    artifacts = _main_report(absent)
+    assert _stale(artifacts, present) == _EVERY_RESULT
+    msg = _refusal(artifacts, present)
+    assert f"{path}: <absent> -> 'x'" in msg
+    assert "--from-node prepare_eval_data," in msg
+
+
+def test_an_empty_run_order_is_refused_not_skipped():
+    """Left unfilled, the run order would skip every inherited record and
+    pass a stale input."""
+    old = _params()
+    with pytest.raises(RuntimeError, match="empty run order"):
         require_computed_with_current_config(
-            [LoadedArtifact(catalog_name="baseline_metrics",
-                            payload=_payload(old),
-                            produced_by="compute_baseline_metrics")],
-            new,
-        )
-    msg = str(exc.value)
-    assert "baseline_metrics" in msg
-    assert "compute_baseline_metrics" in msg
-    assert "evaluation.metric.min_positives: 0 -> 5" in msg
-    assert "--from-node compute_row_facts" in msg
+            _main_report(old), _changed(old, "evaluation.k_values"),
+            run_nodes=[])
 
 
-def test_missing_fingerprint_names_the_artifact():
-    params = _params()
-    for payload in ({"enabled": False}, None, {"config_fingerprint": "x"}):
-        with pytest.raises(ValueError) as exc:
-            require_computed_with_current_config(
-                [LoadedArtifact(catalog_name="evaluation_report_aggregates",
-                                payload=payload,
-                                produced_by="compute_report_aggregates")],
-                params,
-            )
-        msg = str(exc.value)
-        assert "evaluation_report_aggregates" in msg
-        assert "has no config_fingerprint" in msg
+# ------------------------------------------- the two parts, reported apart
 
 
-def test_rule_1_earliest_computed_key_wins_over_message_order():
-    """Two stale artifacts; the earliest rerun node among the changed
-    computed keys is suggested, not the first artifact's producer."""
+def test_the_two_parts_are_reported_apart():
+    old = _params()
+    new = _set(copy.deepcopy(old), "evaluation.k_values", [1, 5])
+    by_name = {a.catalog_name: a for a in _main_report(old)}
+
+    own = _refusal([by_name["evaluation_metrics"]], new)
+    assert "settings compute_metrics applied:\n" \
+           "        evaluation.k_values: [5, 'all'] -> [1, 5]" in own
+    assert "its input from" not in own
+
+    inherited = _refusal([by_name["baseline_comparison"]], new)
+    assert "settings compare_to_baseline applied" not in inherited
+    assert "settings its input from compute_metrics was computed with:\n" \
+           "        evaluation.k_values: [5, 'all'] -> [1, 5]" in inherited
+    assert "settings its input from compute_baseline_metrics was computed " \
+           "with:" in inherited
+
+
+def test_collect_all_lists_every_stale_result_and_advises_one_re_run():
     old = _params()
     new = _set(copy.deepcopy(old),
                "evaluation.report.diagnostics.include_distributions", False)
     new = _set(new, "evaluation.k_values", [1, 5])
-    with pytest.raises(ValueError) as exc:
-        require_computed_with_current_config(
-            [LoadedArtifact(catalog_name="evaluation_report_aggregates",
-                            payload=_payload(old),
-                            produced_by="compute_report_aggregates"),
-             LoadedArtifact(catalog_name="baseline_metrics",
-                            payload=_payload(old),
-                            produced_by="compute_baseline_metrics")],
-            new,
-        )
-    msg = str(exc.value)
-    assert "--from-node compute_row_facts" in msg
-    assert "--from-node compute_report_aggregates" not in msg
-    # collect-all: both artifacts are reported
-    assert "evaluation_report_aggregates" in msg
-    assert "baseline_metrics" in msg
+    msg = _refusal(_main_report(old), new)
+    for name in ("evaluation_report_aggregates", "evaluation_metrics",
+                 "baseline_comparison"):
+        assert name in msg
+    # Both moved; compute_report_aggregates sorts before compute_metrics.
+    assert msg.count("--from-node") == 1
+    assert "--from-node compute_report_aggregates," in msg
 
 
-def test_rule_2_one_artifact_with_only_its_own_key_changed():
+def test_the_message_names_where_the_declarations_live():
+    """#368 item 1: the message names the module and table that declare
+    what each step applies."""
     old = _params()
-    new = _set(copy.deepcopy(old), "dataset.sample_ratio_overrides",
-               {"x|1": 0.25})
-    with pytest.raises(ValueError) as exc:
-        require_computed_with_current_config(
-            [LoadedArtifact(catalog_name="artifact_b",
-                            payload=_payload(old),
-                            produced_by="node_b"),
-             LoadedArtifact(catalog_name="artifact_reading_outside_keys",
-                            payload=_payload(old, OUTSIDE_KEYS),
-                            produced_by="node_reading_outside_keys",
-                            extra_keys=OUTSIDE_KEYS)],
-            new,
-        )
-    msg = str(exc.value)
-    assert "dataset.sample_ratio_overrides.x|1: 0.5 -> 0.25" in msg
-    assert "--from-node node_reading_outside_keys" in msg
-    assert "artifact_b" not in msg
+    msg = _refusal(_main_report(old), _changed(old, "evaluation.k_values"))
+    assert "pipelines/evaluation/steps/config_fingerprint.py" in msg
+    assert "config_fingerprint.py (APPLIED_SETTINGS)" in msg
 
 
-# ------------------------------------ what the enriched partition was made with
-
-
-#: The settings ``prepare_eval_data`` reads, as issue #352 and its sign-off list
-#: them (ADR-0020 bug 6). Written out, not derived from ``COMPUTED_KEYS``.
-SPEC_PARTITION_CONTENT_KEYS = {
-    "post_training",
-    "evaluation.snap_date",
-    "evaluation.segment_columns",
-    "evaluation.segment_sources",
-    # #379: prepare_eval_data reads the category table off it and lands it
-    # in the same directory as the segment JSON.
-    "evaluation.item_categories.column",
-}
-
-
-def _partition_artifact(params):
-    return LoadedArtifact(catalog_name="evaluation_segment_columns",
-                          payload=_payload(params),
-                          produced_by="prepare_eval_data",
-                          compared_keys=PARTITION_CONTENT_KEYS)
-
-
-def test_partition_content_keys_match_the_signed_off_list():
-    assert set(PARTITION_CONTENT_KEYS) == SPEC_PARTITION_CONTENT_KEYS
-
-
-@pytest.mark.parametrize("path", sorted(SPEC_PARTITION_CONTENT_KEYS))
-def test_a_partition_setting_change_advises_re_running_the_join(path):
-    old = _params()
-    with pytest.raises(ValueError) as exc:
-        require_computed_with_current_config(
-            [_partition_artifact(old)], _changed(old, path))
-    msg = str(exc.value)
-    assert f"      {path}" in msg
-    assert "--from-node prepare_eval_data" in msg
-
-
-@pytest.mark.parametrize(
-    "path", sorted(SPEC_COMPUTED_PATHS - SPEC_PARTITION_CONTENT_KEYS))
-def test_no_other_computed_setting_makes_the_partition_stale(path):
-    """The loop this comparison is narrowed for: such a change is advised as
-    ``--from-node`` a node after ``prepare_eval_data``, which does not rewrite
-    the partition, so a partition that went stale on it would stay stale."""
-    old = _params()
-    require_computed_with_current_config(
-        [_partition_artifact(old)], _changed(old, path))
-
-
-def test_changing_the_category_column_advises_the_join_from_any_artifact():
-    """#379: the column sits under a block listed at
-    compute_row_facts too, so both rows move; the earlier one — where the table
-    is read — must win, from the segment JSON and from metrics.json alike.
-    Advised at compute_row_facts, the re-run would reuse the old table."""
+def test_a_leaf_under_two_declared_paths_is_listed_once_per_part():
     old = _set(_params(), "evaluation.item_categories",
                {"enabled": True, "column": "family"})
     new = _set(copy.deepcopy(old), "evaluation.item_categories.column", "tier")
-    for artifact in (
-        _partition_artifact(old),
-        LoadedArtifact(catalog_name="evaluation_metrics", payload=_payload(old),
+    metrics = {a.catalog_name: a for a in _main_report(old)}["evaluation_metrics"]
+    msg = _refusal([metrics], new)
+    # Once per part: what compute_metrics applied (its block), and each input
+    # that applied it (prepare_eval_data the column, compute_row_facts the
+    # block) — never twice within one, though both paths reach the leaf.
+    assert msg.count(
+        "evaluation.item_categories.column: 'family' -> 'tier'") == 3, msg
+    assert "--from-node prepare_eval_data," in msg
+
+
+# ---------------------------------------------------------- without a print
+
+
+@pytest.mark.parametrize("payload", [
+    {"enabled": False}, None, {"config_fingerprint": "x"},
+    # A fingerprint in another shape (sha256 + values).
+    {"config_fingerprint": {"sha256": "0" * 64, "values": {}}},
+])
+def test_a_result_without_a_fingerprint_is_stale(payload):
+    msg = _refusal([LoadedArtifact(
+        catalog_name="evaluation_report_aggregates", payload=payload,
+        produced_by="compute_report_aggregates")], _params())
+    assert "evaluation_report_aggregates" in msg
+    assert "has no config_fingerprint in the shape this version writes" in msg
+    assert "--from-node compute_report_aggregates," in msg
+
+
+def test_several_without_a_fingerprint_advise_the_earliest_producer():
+    msg = _refusal([
+        LoadedArtifact(catalog_name="evaluation_display_ks", payload={},
+                       produced_by="resolve_display_ks"),
+        LoadedArtifact(catalog_name="evaluation_metrics", payload={},
                        produced_by="compute_metrics"),
-    ):
-        with pytest.raises(ValueError) as exc:
-            require_computed_with_current_config([artifact], new)
-        msg = str(exc.value)
-        # Once: the block's row and the column's own row reach the same leaf.
-        assert msg.count(
-            "evaluation.item_categories.column: 'family' -> 'tier'") == 1, msg
-        assert "--from-node prepare_eval_data" in msg, artifact.catalog_name
+    ], _params())
+    assert "--from-node compute_metrics," in msg
 
 
-def test_the_partition_rows_do_not_depend_on_the_category_column():
-    """Excluded from PARTITION_FINGERPRINT_KEYS, as evaluation.snap_date is:
-    the rows are the same whichever column the table is read off, so a
-    partition another run wrote under another column is still this run's."""
-    from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
-        partition_fingerprint,
-    )
-
-    one = _set(_params(), "evaluation.item_categories",
-               {"enabled": True, "column": "family"})
-    other = _set(copy.deepcopy(one), "evaluation.item_categories.column", "tier")
-    assert partition_fingerprint(one, []) == partition_fingerprint(other, [])
-
-
-def test_narrowed_comparison_still_refuses_an_unfingerprinted_json():
-    with pytest.raises(ValueError, match="has no config_fingerprint"):
-        require_computed_with_current_config(
-            [LoadedArtifact(catalog_name="evaluation_segment_columns",
-                            payload={"joined": []},
-                            produced_by="prepare_eval_data",
-                            compared_keys=PARTITION_CONTENT_KEYS)],
-            _params(),
-        )
-
-
-def test_rule_2_one_artifact_without_fingerprint():
-    with pytest.raises(ValueError) as exc:
-        require_computed_with_current_config(
-            [LoadedArtifact(catalog_name="artifact_c",
-                            payload={"enabled": False},
-                            produced_by="node_c")],
-            _params(),
-        )
-    assert "--from-node node_c" in str(exc.value)
-
-
-def test_rule_3_several_artifacts_no_computed_key_suggests_full_run():
-    old = _params()
-    new = _set(copy.deepcopy(old), "dataset.sample_ratio", 0.5)
-    with pytest.raises(ValueError) as exc:
-        require_computed_with_current_config(
-            [LoadedArtifact(catalog_name="artifact_reading_outside_keys",
-                            payload=_payload(old, OUTSIDE_KEYS),
-                            produced_by="node_reading_outside_keys",
-                            extra_keys=OUTSIDE_KEYS),
-             LoadedArtifact(catalog_name="artifact_c",
-                            payload={"enabled": False},
-                            produced_by="node_c")],
-            new,
-        )
-    msg = str(exc.value)
+def test_no_node_of_the_run_applies_it_advises_the_full_pipeline():
+    msg = _refusal([LoadedArtifact(
+        catalog_name="evaluation_metrics", payload={},
+        produced_by="compute_metrics")], _params(),
+        run_nodes=COMPARISON_CHAIN)
     assert "--from-node" not in msg
-    assert "--only-node" not in msg
     assert "full pipeline" in msg
+
+
+# --------------------------------------------------------------- the advice
+
+
+#: A --compare run with every main section off: no main K cut in it.
+_COMPARE_WITHOUT_THE_MAIN_CUT = (
+    "prepare_eval_data", "load_compare_predictions", "compute_row_facts",
+    "restrict_to_common", "compute_metrics", "compute_compare_metrics",
+    "compare_to_source", "resolve_comparison_display_ks",
+    "generate_report", "generate_comparison_report",
+)
+
+
+@pytest.mark.parametrize("changed, run_nodes, node", [
+    (["evaluation.item_categories.column"], None, "prepare_eval_data"),
+    (["evaluation.item_categories"], None, "prepare_eval_data"),
+    (["evaluation.item_categories.mapping.a"], None, "compute_row_facts"),
+    (["evaluation.k_values"], None, "compute_metrics"),
+    (["evaluation.k_values"], COMPARISON_CHAIN, "compute_compare_metrics"),
+    (["evaluation.report.display.compare_k"], None, "resolve_display_ks"),
+    (["evaluation.report.display.compare_k"], COMPARISON_CHAIN,
+     "resolve_comparison_display_ks"),
+    (["evaluation.report.display.compare_k"], _COMPARE_WITHOUT_THE_MAIN_CUT,
+     "resolve_comparison_display_ks"),
+    # The run's order wins over the declarations' when the two disagree.
+    (["compare_to_source", "resolve_display_ks"],
+     ("resolve_display_ks", "compare_to_source"), "resolve_display_ks"),
+    (["evaluation.baseline.score"], COMPARISON_CHAIN, None),
+    (["dataset.sample_ratio"], None, None),
+])
+def test_the_re_run_is_the_run_s_first_step_applying_it(
+        changed, run_nodes, node):
+    assert rerun_node(changed, run_nodes=run_nodes) == node
+
+
+# ----------------------------------------- a step the run does not have
+
+
+def _comparison(params: dict) -> LoadedArtifact:
+    seg = _landed(params, "prepare_eval_data")
+    metrics = _landed(params, "compute_compare_metrics", seg, None)
+    return LoadedArtifact(
+        catalog_name="source_comparison",
+        payload=_landed(params, "compare_to_source", metrics, metrics),
+        produced_by="compare_to_source")
+
+
+@pytest.mark.parametrize("path", ["post_training", "evaluation.segment_columns"])
+def test_compare_only_leaves_the_prepared_record_to_the_directory(path):
+    """A record of a step the run does not have is not compared: under
+    --compare-only, the partitions an earlier run wrote, which today's run
+    mode and segment settings say nothing about. The other modes compare
+    it."""
+    old = _params()
+    new = _changed(old, path)
+    require_computed_with_current_config(
+        [_comparison(old)], new, run_nodes=COMPARISON_CHAIN)
+    assert "--from-node prepare_eval_data," in _refusal([_comparison(old)], new)
+
+
+def test_compare_only_still_compares_what_its_own_steps_applied():
+    old = _params()
+    new = _set(copy.deepcopy(old), "evaluation.k_values", [1, 5])
+    msg = _refusal([_comparison(old)], new, run_nodes=COMPARISON_CHAIN)
+    assert "settings its input from compute_compare_metrics was computed " \
+           "with" in msg
+    assert "--from-node compute_compare_metrics," in msg
+
+
+# ------------------------------------------------------------ normalisation
+
+
+def test_absent_and_null_are_different_settings():
+    """``sections.get("popularity_baseline", True)``: a missing key computes
+    the baseline, an explicit null does not."""
+    path = "evaluation.report.sections.popularity_baseline"
+    null = _set(_params(), path, None)
+    absent = _delete(_params(), path)
+    assert path not in fingerprint(absent, "resolve_display_ks")["applied"]
+    assert fingerprint(null, "resolve_display_ks")["applied"][path] is None
+    display = LoadedArtifact(
+        catalog_name="evaluation_display_ks",
+        payload=_landed(absent, "resolve_display_ks"),
+        produced_by="resolve_display_ks")
+    assert _stale([display], null) == {"evaluation_display_ks"}
+
+
+def test_a_result_survives_a_json_round_trip():
+    """YAML turns an unquoted ``2026-01-31`` into a ``datetime.date``; the
+    landed JSON holds a string. Reading it back must still compare equal."""
+    params = _set(_params(), "evaluation.snap_date", datetime.date(2026, 1, 31))
+    require_computed_with_current_config(_main_report(params), params)
+
+
+def test_int_vs_str_dict_key_is_a_change():
+    """YAML can write ``{1: 0.5}`` or ``{"1": 0.5}``, and a lookup keyed by
+    str only ever matches the second: recording them alike would let that
+    change pass."""
+    int_keyed = _set(_params(), "evaluation.metric", {1: 0.5})
+    str_keyed = _set(_params(), "evaluation.metric", {"1": 0.5})
+    assert _stale(_main_report(int_keyed), str_keyed)
+
+
+def test_an_int_keyed_config_round_trips_and_mixed_keys_do_not_raise():
+    params = _set(_params(), "evaluation.metric", {1: 0.5, "a": 0.3})
+    require_computed_with_current_config(_main_report(params), params)
 
 
 def test_long_values_are_truncated_in_the_message():
     old = _params()
     new = _set(copy.deepcopy(old), "evaluation.segment_columns",
                [f"col_{i:03d}" for i in range(100)])
-    with pytest.raises(ValueError) as exc:
-        require_computed_with_current_config(
-            [LoadedArtifact(catalog_name="baseline_metrics",
-                            payload=_payload(old),
-                            produced_by="compute_baseline_metrics")],
-            new,
-        )
-    msg = str(exc.value)
+    msg = _refusal(_main_report(old), new)
     assert "col_099" not in msg
     line = next(ln for ln in msg.splitlines()
                 if "evaluation.segment_columns:" in ln)
-    new_repr = line.split(" -> ", 1)[1]
-    assert len(new_repr) <= 80
+    assert len(line.split(" -> ", 1)[1]) <= 80
+
+
+# ------------------------------------ what the enriched partition was made with
+
+
+def test_the_partition_rows_depend_on_the_run_mode_and_segment_settings():
+    assert set(PARTITION_FINGERPRINT_KEYS) == {
+        "post_training", "evaluation.segment_columns",
+        "evaluation.segment_sources"}
+
+
+def test_the_partition_rows_do_not_depend_on_the_category_column():
+    """The rows are the same whichever column the table is read off, so a
+    partition another run wrote under another column is still this run's."""
+    one = _set(_params(), "evaluation.item_categories",
+               {"enabled": True, "column": "family"})
+    other = _set(copy.deepcopy(one), "evaluation.item_categories.column", "tier")
+    assert partition_fingerprint(one, []) == partition_fingerprint(other, [])
+
+
+def test_the_recorded_partition_print_is_the_one_the_run_stamped():
+    params = _set(_params(), "post_training", True)
+    seg = {"joined": ["segment_a"], **_landed(params, "prepare_eval_data")}
+    assert recorded_partition_fingerprint(seg) == \
+        partition_fingerprint(params, ["segment_a"])
+    assert recorded_partition_fingerprint({"joined": []}) is None
 
 
 # --------------------------------------------------------------- dependencies

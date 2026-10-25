@@ -149,7 +149,8 @@ def _stamped(result: dict, parameters: dict) -> dict:
         fingerprint,
     )
 
-    return {**result, "config_fingerprint": fingerprint(parameters)}
+    return {**result, "config_fingerprint": fingerprint(
+        parameters, "compute_metrics")}
 
 
 _CACHE: dict = {}

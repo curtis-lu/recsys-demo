@@ -393,6 +393,46 @@ def _slice_extra(from_node, only_node):
     return None
 
 
+#: Catalog types read and written on the driver alone: no SparkSession.
+_DRIVER_FILE_TYPES = ("JSONDataset", "TextDataset")
+
+
+def _slice_needs_no_spark(pipe, catalog_config: dict, catalog, from_node,
+                          only_node) -> bool:
+    """Whether the slice ``--from-node`` / ``--only-node`` cut reads and
+    writes landed files only — a redraw — so the run needs no SparkSession.
+
+    Asked before Spark starts, of the same pipeline and the same slicing the
+    run does, with one difference: an entry that is not a driver-side file
+    (a Hive table, a frame held in memory) counts as not loadable rather
+    than being asked, since asking a Hive table would start Spark. Such an
+    entry pulls its producer into the probed slice, and the answer is no.
+    So a yes holds for the run's own slice: the file entries answer the
+    same, and nothing else is in it. Outputs are checked too: a node that
+    reads only ``parameters`` and makes a Spark frame needs Spark as much
+    as one that reads a table.
+
+    No slicing flag, no redraw: a full run computes.
+    """
+    if not (from_node or only_node):
+        return False
+
+    def file_backed(name: str) -> bool:
+        return name == "parameters" or (
+            catalog_config.get(name, {}).get("type") in _DRIVER_FILE_TYPES)
+
+    def can_load(name: str) -> bool:
+        return file_backed(name) and (
+            name == "parameters" or catalog.exists(name))
+
+    try:
+        sliced, _plan = _slice_pipeline(pipe, can_load, from_node, only_node)
+    except ValueError:
+        return False  # the run itself reports a bad flag
+    return all(file_backed(name) for node in sliced.nodes
+               for name in (*node.inputs, *node.outputs, *node.writes))
+
+
 def _evaluation_month_plans(catalog, *, snap_dates, time_col: str) -> dict:
     """``{"enriched_eval_predictions": SnapDatePlan}`` for the evaluated dates.
 
@@ -2069,7 +2109,6 @@ def evaluation(
         logger.error(str(exc))
         raise typer.Exit(code=1)
 
-    get_or_create_spark_session(_load_spark_config(config, "evaluation"))
     data_dir = _find_data_dir()
 
     models_dir = data_dir / "models"
@@ -2102,8 +2141,9 @@ def evaluation(
         "snap_date": snap_date,
         # Also in pipeline_kwargs (which nodes create_pipeline wires in). Both
         # are needed: pipeline_kwargs picks the DAG shape, this makes the mode
-        # visible in `parameters` (config_fingerprint.COMPUTED_KEYS reads it
-        # from there) so a --post-training run followed by a monitoring
+        # visible in `parameters` (config_fingerprint.APPLIED_SETTINGS
+        # declares it, and fingerprint() reads it from there) so a
+        # --post-training run followed by a monitoring
         # --only-node generate_report on the same (model_version, snap_date)
         # is caught as stale rather than silently mixing the two populations'
         # metrics / report aggregates into one report (#342 F7).
@@ -2123,11 +2163,24 @@ def evaluation(
     # enriched_eval_predictions' partition_filter scopes the listing to it,
     # and an unresolved template would list nothing (every month missing).
     _, listing_catalog_config = _resolve_catalog(config, params, runtime_params)
+    # Decision — a redraw starts no Spark (ADR-0031 decision 1): when the
+    # slice the flags cut reads and writes landed files only, the run needs
+    # no SparkSession, no month plan (a metastore listing) and no
+    # --compare-only partition check. Decided before any of them runs.
+    redraw = _slice_needs_no_spark(
+        get_pipeline("evaluation", **pipeline_kwargs), listing_catalog_config,
+        DataCatalog(listing_catalog_config), from_node, only_node)
+    if redraw:
+        logger.info(
+            "[redraw] the slice reads and writes landed files only: Spark is "
+            "not started")
+    else:
+        get_or_create_spark_session(_load_spark_config(config, "evaluation"))
     if baseline_rate:
         # popularity_period_counts' partition key, from the two source
         # entries (no placeholder in them, so this first resolution suffices)
         # and the schema. In runtime_params only in rate mode, so a count-mode
-        # run's parameters are exactly what they were.
+        # run's parameters carry no such key.
         runtime_params["popularity_source_version"] = (
             compute_popularity_source_version(
                 get_schema_for_hash(params),
@@ -2143,7 +2196,7 @@ def evaluation(
     inject_compare_source_tables(runtime_params, listing_catalog_config)
     month_plans = None
     extra_datasets = None
-    if eval_dates:
+    if eval_dates and not redraw:
         # Without a configured month the nodes raise their own message.
         month_plans = _evaluation_month_plans(
             listing_catalog, snap_dates=eval_dates,
@@ -2164,7 +2217,7 @@ def evaluation(
                 month_plan_input("popularity_period_counts"): period_plan}
             month_plans["popularity_period_counts"] = period_plan
     if compare_only:
-        errors = [] if (dry_run or list_nodes) else _compare_only_input_errors(
+        errors = [] if (dry_run or list_nodes or redraw) else _compare_only_input_errors(
             (month_plans or {}).get("enriched_eval_predictions"),
             listing_catalog, listing_catalog_config, params,
         )

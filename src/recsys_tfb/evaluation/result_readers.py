@@ -60,8 +60,8 @@ ALL_POSITIVE_SHARE_KEY = "all_positive_share"
 #: (``metrics.all_positive_share_warns``) — only with
 #: ``evaluation.query_filter.drop_all_positive_groups`` off, and only strictly
 #: above :data:`ALL_POSITIVE_WARN_SHARE`. The one fact of the row facts that
-#: reads a setting; ``evaluation.query_filter`` is a computed key, so a
-#: changed switch re-counts the facts.
+#: reads a setting; ``evaluation.query_filter`` is a setting
+#: ``compute_row_facts`` applies, so a changed switch re-counts the facts.
 ALL_POSITIVE_WARNS_KEY = "all_positive_warns"
 
 #: With the switch off, the log and the report warn when the all-positive

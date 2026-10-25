@@ -624,8 +624,8 @@ class TestEvaluationCLIFlags:
         ``runtime_params`` -> ``substitution_params`` -> the catalog's
         ``parameters`` MemoryDataset), not only ``pipeline_kwargs`` (which
         only picks which nodes are wired). Without this,
-        ``config_fingerprint.COMPUTED_KEYS``'s ``post_training`` row always
-        reads absent, and a mode switch between two runs of the same
+        ``post_training``, which ``config_fingerprint.APPLIED_SETTINGS``
+        declares for ``prepare_eval_data``, always reads absent, and a mode switch between two runs of the same
         (model_version, snap_date) is invisible to the fingerprint check.
 
         Everything upstream of ``_execute_pipeline`` (config loading, Spark
@@ -2408,6 +2408,95 @@ def _run_evaluation_command(
     return result, captured
 
 
+class TestARedrawStartsNoSpark:
+    """ADR-0031 decision 1: a redraw (``--only-node generate_report`` and
+    the like) starts no SparkSession. The CLI decides it from the slice the
+    flags cut: every node in it reads and writes landed files only."""
+
+    _ALL_ON = {"evaluation": {"report": {"sections": dict.fromkeys(
+        ("data_stats", "ranking_metrics", "rank_distribution",
+         "popularity_baseline", "prediction_quality"), True)}}}
+    _COMPARE = {"kind": "model_version", "model_version": "v1"}
+
+    @staticmethod
+    def _answer(*, missing=(), from_node=None, only_node=None, **kwargs):
+        from recsys_tfb.__main__ import _slice_needs_no_spark
+        from recsys_tfb.pipelines.evaluation import create_pipeline
+
+        asked = []
+        catalog = SimpleNamespace(
+            exists=lambda name: asked.append(name) or name not in missing)
+        pipe = create_pipeline(
+            parameters=TestARedrawStartsNoSpark._ALL_ON, **kwargs)
+        answer = _slice_needs_no_spark(
+            pipe, _REAL_CATALOG, catalog, from_node, only_node)
+        return answer, asked
+
+    @pytest.mark.parametrize("flags, kwargs", [
+        ({"only_node": "generate_report"}, {}),
+        ({"from_node": "resolve_display_ks"}, {}),
+        ({"only_node": "generate_comparison_report"},
+         {"compare_source": _COMPARE, "compare_only": True}),
+        ({"from_node": "compare_to_source"},
+         {"compare_source": _COMPARE, "compare_only": True}),
+    ])
+    def test_a_slice_of_landed_files_needs_no_spark(self, flags, kwargs):
+        answer, asked = self._answer(**flags, **kwargs)
+        assert answer is True
+        # Only file entries were asked: asking a Hive table starts Spark.
+        assert all(_REAL_CATALOG[name]["type"] in ("JSONDataset", "TextDataset")
+                   for name in asked), asked
+
+    @pytest.mark.parametrize("flags, kwargs", [
+        ({}, {}),
+        ({"only_node": "compute_metrics"}, {}),
+        ({"from_node": "compute_compare_metrics"},
+         {"compare_source": _COMPARE, "compare_only": True}),
+        ({"only_node": "no_such_node"}, {}),
+        # Reads parameters alone, makes a Spark frame: caught by its output.
+        ({"only_node": "load_compare_predictions"},
+         {"compare_source": _COMPARE, "compare_only": True}),
+    ])
+    def test_a_slice_that_computes_needs_spark(self, flags, kwargs):
+        assert self._answer(**flags, **kwargs)[0] is False
+
+    def test_a_result_not_landed_pulls_its_spark_producer_back(self):
+        answer, _asked = self._answer(
+            only_node="generate_report", missing={"evaluation_metrics"})
+        assert answer is False
+
+    @pytest.mark.parametrize("node, redraw", [
+        ("generate_report", True), ("compute_metrics", False)])
+    def test_the_command_starts_spark_only_for_a_computing_slice(
+            self, tmp_path, node, redraw):
+        """Every result of this run's directory landed: drawing reads them
+        and starts nothing; recomputing the metrics starts Spark."""
+        results = {
+            name: entry for name, entry in _REAL_CATALOG.items()
+            if entry.get("type") == "JSONDataset"
+            and entry["filepath"].startswith(
+                "data/evaluation/${model_version}/${snap_date}/")}
+        for entry in results.values():
+            path = tmp_path / entry["filepath"].replace(
+                "${model_version}", _EVAL_MV).replace("${snap_date}", "20260131")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}")
+        started = MagicMock()
+        result, _captured = _run_evaluation_command(
+            tmp_path,
+            ["evaluation", "--env", "local", "--model-version", _EVAL_MV,
+             "--only-node", node, "--dry-run"],
+            landed=["2026-01-31"],
+            catalog_extra=(*results, "evaluation_report"),
+            extra_patches=(patch(
+                "recsys_tfb.utils.spark.get_or_create_spark_session",
+                started),),
+        )
+        assert result.exit_code == 0, result.output
+        assert started.called is not redraw, result.output
+        assert ("[redraw]" in result.output) is redraw
+
+
 class TestEvaluationMonthPlan:
     """The plan the evaluation command builds for ``enriched_eval_predictions``."""
 
@@ -3199,12 +3288,18 @@ class TestReportSectionKeysA34:
                   "w") as f:
             yaml.dump({"evaluation": {"snap_date": "2026-01-31",
                                       "report": {"sections": sections}}}, f)
+        # The model is resolved before Spark starts: it must be there for a
+        # valid conf to reach Spark at all.
+        (tmp_path / "data" / "models" / "mv").mkdir(parents=True)
         old_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
             with patch(
                 "recsys_tfb.utils.spark.get_or_create_spark_session"
-            ) as mock_spark:
+            ) as mock_spark, patch(
+                "recsys_tfb.__main__._dataset_versions_from_model_manifest",
+                return_value=("basev000", "trainv00"),
+            ):
                 result = runner.invoke(
                     app, ["evaluation", "--model-version", "mv"])
         finally:

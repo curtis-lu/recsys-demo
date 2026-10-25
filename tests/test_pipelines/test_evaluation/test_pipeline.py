@@ -254,33 +254,25 @@ class TestNoDiagnosisInAnyMode:
 
 
 class TestFingerprintRerunNodes:
-    """Where a changed computed key sends the re-run, in each mode, precedes
-    every fingerprinted producer of that mode.
+    """Where a stale result sends the re-run exists in the run, and re-runs
+    every step that applies the moved setting (ADR-0031 decision 15, first
+    row: the advice names only nodes of the run).
 
-    ``require_computed_with_current_config`` answers a changed computed key
-    with ``--from-node <that key's node>`` — or, under ``--compare-only``,
-    which has none of those nodes, with the node its comparison readers pass
-    (``nodes.COMPARISON_RERUN_NODE``; ADR-0031 decision 15, first row: the
-    advice names only nodes of the run; ``test_generate_report.py::
-    test_compare_only_sends_a_changed_computed_setting_to_a_node_it_has``
-    checks the readers pass it). The advice is only right if that node
-    exists in the mode and its forward slice contains every node of the mode
-    that writes a JSON with a ``config_fingerprint``; otherwise following it
-    leaves a stale artifact behind and the next report raises again (or,
-    worse, one checked by nobody stays stale). The producer lists are written
+    ``config_fingerprint.rerun_node`` answers a moved setting with the first
+    step of the run's order that applies it. A reader not given that order
+    falls back on ``APPLIED_SETTINGS`` order, which is right only if its
+    main-line part is every run's topological order — otherwise
+    ``--from-node`` leaves an earlier applier stale. Either way the node must
+    exist and its slice must re-run every applier. Checked in every mode,
+    with every section switch on, every one off, and each one off alone: the
+    pipeline's shape follows the switches. The producer lists are written
     out here, not derived from the pipeline, so a new producer has to be
     added on purpose.
-
-    ``prepare_eval_data`` is left out on purpose. Its
-    ``evaluation_segment_columns`` is compared on ``PARTITION_CONTENT_KEYS``
-    only, the rows already re-run from ``prepare_eval_data``, so no row's
-    advice can leave it stale (``tests/test_pipelines/test_evaluation/
-    test_config_fingerprint.py`` pins both directions).
     """
 
     FINGERPRINTED_PRODUCERS = {
-        "compute_row_facts", "compute_metrics", "compute_baseline_metrics",
-        "compute_prediction_quality",
+        "prepare_eval_data", "compute_row_facts", "compute_metrics",
+        "compute_baseline_metrics", "compute_prediction_quality",
         "compute_report_aggregates",
         # #536: the comparison layer and the K cut land JSON with a
         # fingerprint too; neither runs Spark.
@@ -294,22 +286,6 @@ class TestFingerprintRerunNodes:
     MODES = {**TestNoDiagnosisInAnyMode.MODES,
              "--compare-only": TestNoDiagnosisInAnyMode.COMPARE_ONLY}
 
-    def _producers(self, kwargs):
-        main = set() if kwargs.get("compare_only") else self.FINGERPRINTED_PRODUCERS
-        comparison = (self.COMPARISON_PRODUCERS
-                      if kwargs.get("compare_source") else set())
-        return main | comparison
-
-    @staticmethod
-    def _rerun_nodes(kwargs):
-        """The nodes a changed computed key is sent to in this mode."""
-        from recsys_tfb.pipelines.evaluation.nodes import COMPARISON_RERUN_NODE
-        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import COMPUTED_KEYS
-
-        if kwargs.get("compare_only"):
-            return [COMPARISON_RERUN_NODE]
-        return [node for _, node in COMPUTED_KEYS]
-
     @staticmethod
     def _memory_only(pipeline):
         """What a slice must re-run to have: outputs with no catalog entry
@@ -322,11 +298,13 @@ class TestFingerprintRerunNodes:
             (Path(__file__).parents[3] / "conf/base/catalog.yaml").read_text()))
         return lambda name: name in catalog or name == "parameters"
 
-    #: The pipeline's shape follows the settings (#538, ADR-0031 decision 15,
-    #: first row): every switch on, and every switch off.
-    SETTINGS = {"all on": ALL_ON,
-                "all off": _sections(**dict.fromkeys(
-                    TestTheRequirementList.LEFT_OUT, False))}
+    SETTINGS = {
+        "all on": ALL_ON,
+        "all off": _sections(**dict.fromkeys(
+            TestTheRequirementList.LEFT_OUT, False)),
+        **{f"{switch} off": _sections(**{switch: False})
+           for switch in TestTheRequirementList.LEFT_OUT},
+    }
 
     def _cases(self):
         for setting, parameters in self.SETTINGS.items():
@@ -334,34 +312,123 @@ class TestFingerprintRerunNodes:
                 yield (f"{label}, {setting}",
                        create_pipeline(parameters=parameters, **kwargs), kwargs)
 
-    def test_every_rerun_node_exists_in_every_mode(self):
-        for label, pipeline, kwargs in self._cases():
-            names = [n.name for n in pipeline.nodes]
-            missing = sorted(set(self._rerun_nodes(kwargs)) - set(names))
-            assert missing == [], f"[{label}] {missing}"
+    def test_every_producer_declares_what_it_applies(self):
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            APPLIED_SETTINGS, COMPARISON_CHAIN,
+        )
 
-    def test_rerun_nodes_are_listed_in_topological_order(self):
-        for label, pipeline, kwargs in self._cases():
-            names = [n.name for n in pipeline.nodes]
-            rerun = self._rerun_nodes(kwargs)
-            positions = [names.index(node) for node in rerun]
-            assert positions == sorted(positions), f"[{label}] {rerun}"
+        assert set(APPLIED_SETTINGS) == \
+            self.FINGERPRINTED_PRODUCERS | self.COMPARISON_PRODUCERS
+        assert set(COMPARISON_CHAIN) == self.COMPARISON_PRODUCERS
 
-    def test_latest_rerun_node_slice_covers_every_fingerprinted_producer(self):
-        for label, pipeline, kwargs in self._cases():
+    def test_the_main_line_is_declared_in_every_run_s_order(self):
+        """The readers not given the run's order (the main-line steps that
+        check their inputs) fall back on the declarations' order, and only
+        ever rank main-line steps."""
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            APPLIED_SETTINGS,
+        )
+
+        main = [n for n in APPLIED_SETTINGS
+                if n in self.FINGERPRINTED_PRODUCERS]
+        for label, pipeline, _kwargs in self._cases():
             names = [n.name for n in pipeline.nodes]
-            latest = max(set(self._rerun_nodes(kwargs)), key=names.index)
-            sliced, _plan = pipeline.slice_from(
-                latest, self._memory_only(pipeline))
-            # The producers this run has: a switched-off section's are not
-            # in the pipeline, and nothing reads what they left.
-            left_out = sorted(
-                (self._producers(kwargs) & set(names))
-                - {n.name for n in sliced.nodes}
-            )
-            assert left_out == [], (
-                f"[{label}] --from-node {latest} does not re-run {left_out}"
-            )
+            assert [n for n in names if n in main] == \
+                [n for n in main if n in names], label
+
+    def test_a_reader_without_the_run_s_order_still_names_a_node_of_the_run(
+            self):
+        """The main-line readers that check their inputs are plain
+        functions, not given the run's order: for every setting a step of
+        the run applies, and every such step's own name, the declarations'
+        order must still name a node the run has."""
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            APPLIED_SETTINGS, rerun_node,
+        )
+
+        for label, pipeline, kwargs in self._cases():
+            if kwargs.get("compare_only"):
+                continue  # no main line, so no such reader
+            names = {n.name for n in pipeline.nodes}
+            present = names & self.FINGERPRINTED_PRODUCERS
+            for changed in {*present, *(p for n in present
+                                        for p in APPLIED_SETTINGS[n])}:
+                node = rerun_node([changed])
+                assert node in names, f"[{label}] {changed}: {node}"
+
+    def test_each_setting_s_re_run_exists_and_re_runs_every_step_applying_it(
+            self):
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            APPLIED_SETTINGS, rerun_node,
+        )
+
+        paths = {p for declared in APPLIED_SETTINGS.values() for p in declared}
+        for label, pipeline, _kwargs in self._cases():
+            order = [n.name for n in pipeline.nodes]
+            for path in sorted(paths):
+                appliers = {
+                    node for node, declared in APPLIED_SETTINGS.items()
+                    if node in order and any(
+                        p == path or p.startswith(path + ".")
+                        or path.startswith(p + ".") for p in declared)}
+                if not appliers:
+                    continue
+                node = rerun_node([path], run_nodes=order)
+                assert node in order, f"[{label}] {path}: {node}"
+                sliced, _plan = pipeline.slice_from(
+                    node, self._memory_only(pipeline))
+                left_out = sorted(appliers - {n.name for n in sliced.nodes})
+                assert left_out == [], (
+                    f"[{label}] {path}: --from-node {node} does not re-run "
+                    f"{left_out}")
+
+    def test_the_readers_are_given_the_run_s_order(self):
+        """Under --compare with every main section off the main K cut is not
+        in the run: a changed compare_k must send the comparison report to
+        its own cut, which only the run's order says."""
+        import pytest
+
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            fingerprint,
+        )
+
+        old = {**self.SETTINGS["all off"]}
+        old["evaluation"] = {**old["evaluation"],
+                             "report": {**old["evaluation"]["report"],
+                                        "display": {"compare_k": [5]}}}
+        pipeline = create_pipeline(
+            parameters=old, **self.MODES["monitoring --compare"])
+        names = [n.name for n in pipeline.nodes]
+        assert "resolve_display_ks" not in names
+        report = next(n for n in pipeline.nodes
+                      if n.name == "generate_comparison_report")
+        new = {**old, "evaluation": {
+            **old["evaluation"], "report": {
+                **old["evaluation"]["report"],
+                "display": {"compare_k": [10]}}}}
+        def landed(params, node):
+            return {"config_fingerprint": fingerprint(params, node)}
+
+        with pytest.raises(ValueError) as exc:
+            report.func(
+                compare_coverage=landed(new, "restrict_to_common"),
+                compare_row_facts_a=landed(new, "compute_compare_metrics"),
+                source_comparison=landed(new, "compare_to_source"),
+                comparison_display_ks=landed(
+                    old, "resolve_comparison_display_ks"),
+                parameters=new)
+        assert "--from-node resolve_comparison_display_ks," in str(exc.value)
+
+    def test_a_result_without_a_fingerprint_re_runs_its_own_producer(self):
+        from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
+            rerun_node,
+        )
+
+        for label, pipeline, _kwargs in self._cases():
+            order = [n.name for n in pipeline.nodes]
+            for name in set(order) & (
+                    self.FINGERPRINTED_PRODUCERS | self.COMPARISON_PRODUCERS):
+                assert rerun_node([name], run_nodes=order) == name, label
 
 
 class TestTheComparisonReRunsOnItsOwn:

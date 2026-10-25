@@ -311,8 +311,8 @@ gain_ledger:
 # 不看 frame 欄位——enriched_eval_predictions 兩種模式共用，另一模式 join 過的欄
 # 在這次的列上是全 NULL（ADR-0020 bug 6）。--compare-only 沒有 prepare_eval_data，
 # 靠這份檔知道 enriched 分區當時 join 了哪些欄，所以它必須落地。它的
-# config_fingerprint 也代表同一次寫的 partition：讀表的 node 比對其中決定
-# prepare_eval_data 產出的鍵（config_fingerprint.PARTITION_CONTENT_KEYS）；--compare-only 缺這份
+# config_fingerprint 也代表同一次寫的 partition：讀表的 node 比對其中
+# prepare_eval_data 讀的設定（config_fingerprint.APPLIED_SETTINGS）；--compare-only 缺這份
 # 檔時 CLI 在任何 node 之前就擋下。
 evaluation_segment_columns:
   type: JSONDataset

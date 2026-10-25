@@ -9,56 +9,69 @@ setting is read into the report with exit code 0 (ADR-0020, bug 2).
 
 Two kinds of settings (ADR-0020 decision 2)
 ===========================================
-* **Computed**: they change a Spark computation or the sample, or decide
-  whether something is computed at all. Changing one means re-running from
-  the node :data:`COMPUTED_KEYS` names for it (normally its first reader).
-* **Drawn**: ``evaluation.report.display.*`` and every
-  ``evaluation.report.sections.*`` key except ``popularity_baseline``,
-  ``rank_distribution`` and ``prediction_quality``. They only change what the
-  report shows, so ``--only-node generate_report`` is enough and takes
-  seconds — except the display keys the K cut reads
-  (``steps.display_ks.DISPLAY_KEYS_READ``, #536): ``resolve_display_ks``
-  lands the K each table shows, so its artifact carries them as
-  ``extra_keys`` and a change re-runs from that node, which runs no Spark
-  either.
+* **Applied**: they change a Spark computation, the sample, or a landed
+  result. Each step that reads one declares it in :data:`APPLIED_SETTINGS`.
+* **Drawn**: every other key — ``evaluation.report.display.*`` except
+  ``compare_k``, and the section switches ``evaluation.report.sections.*``
+  except ``popularity_baseline`` at ``resolve_display_ks``. They only change
+  what the report shows, so ``--only-node generate_report`` is enough.
 
-Only computed settings go into the fingerprint. Fingerprinting drawn ones too
-would make every cosmetic change raise, which is the "re-run everything on any
-change" the user rejected. ``sections.popularity_baseline``,
-``sections.rank_distribution`` and ``sections.prediction_quality`` are
-computed, not drawn: ``popularity_baseline: false`` leaves
-``compute_baseline_metrics`` out of the pipeline (the requirement list,
-#538), and ``rank_distribution: false`` / ``prediction_quality: false`` do
-the same for ``compute_report_aggregates`` / ``compute_prediction_quality``;
-treated as drawn, flipping them back and re-drawing would draw a section off
-whatever file an older run left, or none.
+A section switch decides whether a computation is in the pipeline, not what
+it computes, so no result records it (ADR-0031 principle 5) — except
+``popularity_baseline`` at ``resolve_display_ks``: with it off, that node is
+not wired the baseline comparison and lands no baseline block.
 
-One row of :data:`COMPUTED_KEYS`, ``post_training``, is not a YAML config
-setting at all: it is the ``--post-training`` / monitoring run mode, injected
-into ``parameters`` at the top level by the CLI exactly like ``model_version``
-and ``snap_date`` are (never nested under ``evaluation``). Unlike those two,
-which are already in every artifact's path, the mode is not in the path, yet it
-changes which predictions table ``prepare_eval_data`` reads, so two runs of
-the same ``(model_version, snap_date)`` in different modes must not have their
-artifacts read interchangeably. Node-level unit tests that build ``parameters``
-by hand and never set this key see it absent both when a node writes its
-fingerprint and when another node later checks it, so they stay unaffected;
-only a real mode switch between two runs makes it present on one side and
-absent (or the other value) on the other.
+Each result records only what it read (ADR-0031 principle 5)
+============================================================
+A landed JSON's ``config_fingerprint`` is :func:`fingerprint`'s
+``{"node", "applied", "inputs"}``:
 
-Why a closed list, not a hash of the whole ``evaluation`` subtree
-=================================================================
-* ``evaluation.compare`` is injected into that subtree by the CLI at run time
-  (``__main__.py``). Hashing the subtree would make a ``--compare`` run and a
-  plain run disagree on every artifact: raises everywhere, all false.
-* A computation that reads keys outside this list has the caller pass them
-  in as ``extra_keys``; that artifact's fingerprint is this list plus those.
-  The evaluation diagnoses did (``config_shift`` read ``dataset.*`` and
-  ``training.*``) until #532 removed them. Today ``resolve_display_ks`` does
-  (#536): the drawn display keys its K cut reads, so only its artifact goes
-  stale when one changes and the advice is its own node (an extra key is in
-  no :data:`COMPUTED_KEYS` row, so rule 2 of
-  :func:`require_computed_with_current_config` names the producer).
+* ``applied``: the values of the settings ``node`` declares in
+  :data:`APPLIED_SETTINGS`, as they were when it ran;
+* ``inputs``: for every node upstream of it whose landed JSON it took, the
+  values that node applied — each input's own ``applied`` and ``inputs``,
+  merged.
+
+So a changed setting makes stale exactly the results of the steps that apply
+it and of every step downstream of them, and a change to a setting only
+``compute_report_aggregates`` reads leaves ``metrics.json`` current.
+
+Not ``applied`` alone: a result carries numbers its inputs computed, and
+one that applies nothing (``baseline_comparison``) would otherwise pass after
+``k_values`` changed (ADR-0031 principle 5).
+
+:func:`require_computed_with_current_config` compares the two parts
+separately and says which one moved (ADR-0031 decision 15, fourth row).
+``applied`` is always compared with today's settings. An ``inputs`` record is
+too, except one of a step not in ``run_nodes``: no re-run of this run could
+make it current (under ``--compare-only``, ``prepare_eval_data``'s; ADR-0031
+principle 5).
+
+Where a stale result sends the re-run
+=====================================
+To the first node of the run, in its topological order, that applies a
+changed setting or produced a result with no fingerprint
+(:func:`rerun_node`). ``--from-node`` re-runs it and every node after it in
+that order, which holds every other node applying that setting and
+everything downstream of them. A reader given the run's order
+(``run_nodes``) advises within it: which nodes a run has follows the mode and
+the section switches, and under ``--compare`` with the main report's
+sections off the main K cut is not in it, so the comparison's cut is where a
+changed ``compare_k`` must go. A reader not given it falls back on
+:data:`APPLIED_SETTINGS` order, which is right only for main-line steps.
+``tests/test_pipelines/test_evaluation/test_pipeline.py::TestFingerprintRerunNodes``
+pins that the main-line part of that order is every run's, and that the
+advice exists and re-runs every applier in every mode, with every section
+switch on, off, and off alone.
+
+Settings a step reads and declares nowhere
+==========================================
+``schema.*`` and a few other settings change results and are declared
+nowhere, so a change to one is not caught (ADR-0031 principle 5 lists
+them). ``evaluation.compare`` is left out on purpose: the CLI
+injects it per run, and the comparison results record their source under
+their own key instead (:func:`require_same_recorded_values`).
+``model_version`` and the run's dates are in every result's path.
 
 Why the fingerprint lives inside the JSON, not in its path
 ==========================================================
@@ -72,18 +85,19 @@ Why stdlib only
 ===============
 The module itself imports nothing from the project;
 ``tests/test_pipelines/test_evaluation/test_config_fingerprint.py`` pins that by
-scanning its imports. That no longer makes it Spark-free to import: since it
-moved into ``pipelines/evaluation/steps/`` (#365), importing it runs the
-package's ``__init__``, which loads ``pipeline.py`` and with it pyspark. Nothing
-outside this pipeline imports it today, and S3 would forbid it.
+scanning its imports. That does not make it Spark-free to import: it sits in
+``pipelines/evaluation/steps/``, so importing it runs the package's
+``__init__``, which loads ``pipeline.py`` and with it pyspark. S3 forbids a
+module outside this pipeline to import it.
 
 What the fingerprint compares
 =============================
 Declared values, not effective ones. A key that is absent is left out of
-``values``; it is not recorded as ``None``, because
+the recorded values; it is not recorded as ``None``, because
 ``sections.get("popularity_baseline", True)`` treats a missing key and an
-explicit ``null`` in opposite ways. The
-flip side: writing a default out explicitly (``k_values: [5, "all"]`` where it
+explicit ``null`` in opposite ways. The comparison walks the declared paths
+as well as the recorded ones, so a key set since is a change too. The flip
+side: writing a default out explicitly (``k_values: [5, "all"]`` where it
 was omitted) counts as a change. That errs towards raising, and the message
 names the key, so it costs one re-run, never a wrong report.
 """
@@ -94,120 +108,93 @@ import json
 from typing import Any, Iterable, NamedTuple, Optional, Sequence
 
 __all__ = [
-    "COMPUTED_KEYS", "LoadedArtifact", "PARTITION_CONTENT_KEYS",
+    "APPLIED_SETTINGS", "COMPARISON_CHAIN", "LoadedArtifact",
     "PARTITION_FINGERPRINT_COLUMN", "PARTITION_FINGERPRINT_KEYS", "fingerprint",
     "normalised", "partition_fingerprint", "recorded_partition_fingerprint",
     "require_computed_with_current_config", "require_same_recorded_values",
+    "rerun_node",
 ]
 
-#: Computed settings: ``(dotted path from the parameters root, node to re-run
-#: from when it changes)``. Rows are ordered by that node's topological
-#: position (non-decreasing), so the first changed row names the earliest node.
-#:
-#: The node is **the earlier, in topological order, of the key's first reader
-#: and the first node that writes a fingerprinted artifact**
-#: (``compute_row_facts``, #535), not simply the first reader. Every
-#: fingerprinted artifact hashes every row here, so a change makes all of them
-#: stale, and ``--from-node`` must re-run all of their producers. Every row
-#: past ``prepare_eval_data``'s is where the two differ: first read by
-#: ``compute_metrics``, ``compute_baseline_metrics`` or a later node, all
-#: sorting after ``compute_row_facts`` in both modes. Since ``row_facts.json``
-#: lands on disk like the other results (ADR-0018 decision 2), a slice no
-#: longer pulls its producer back on its own, so advising the first reader
-#: would leave ``row_facts.json``'s old fingerprint in place and the next
-#: report would raise with the same advice, a loop with no exit. The price is
-#: one extra ``compute_row_facts`` (and ``compute_metrics``) when only a later
-#: node's setting changed.
-#:
-#: ``tests/test_pipelines/test_evaluation/test_pipeline.py::
-#: TestFingerprintRerunNodes`` pins it in both modes: a row whose node sorts
-#: after a fingerprinted producer turns that test red.
-#:
-#: ``prepare_eval_data`` also writes a fingerprinted artifact
-#: (``evaluation_segment_columns``, landed with the ``enriched_eval_predictions``
-#: partition), yet the rule above does not move every row to it. That artifact
-#: is compared on :data:`PARTITION_CONTENT_KEYS` only, the rows already pointing
-#: at ``prepare_eval_data``, so a change to any other row never makes it stale
-#: and ``--from-node compute_row_facts`` stays enough for those (see that
-#: constant for why this is not the same loop).
-#:
-#: The first row, ``post_training``, is not a user config key: it is the
-#: ``--post-training`` / monitoring run mode, a CLI flag injected into
-#: ``parameters`` at the top level the same way ``model_version`` and
-#: ``snap_date`` are (``__main__.py`` ``evaluation()``'s ``runtime_params``).
-#: It belongs in this enumeration because it changes a Spark computation the
-#: same way any other row here does: ``prepare_eval_data`` reads a different
-#: predictions table (``training_eval_predictions`` vs ``ranked_predictions``)
-#: depending on it. Without it, a ``--post-training`` run followed by a
-#: monitoring ``--only-node generate_report`` on the same ``(model_version,
-#: snap_date)`` writes/reads the same catalog paths, the fingerprints of the
-#: unrelated keys match, and the report mixes report aggregates computed on
-#: one population with metrics computed on the other, exit code 0.
-#: Unit tests that build ``parameters`` without a ``post_training`` key see it
-#: absent on both the write side (``fingerprint()`` in the producing node) and
-#: the check side (``require_computed_with_current_config``), so those stay
-#: green; only a real mode switch between two runs makes it present-then-absent
-#: or True-then-False.
-COMPUTED_KEYS: tuple[tuple[str, str], ...] = (
-    ("post_training", "prepare_eval_data"),
-    ("evaluation.snap_date", "prepare_eval_data"),
-    # prepare_eval_data resolves which segment columns to join and from where
-    # (ADR-0020 bug 6), and the joined columns are stored in the partition.
-    ("evaluation.segment_columns", "prepare_eval_data"),
-    ("evaluation.segment_sources", "prepare_eval_data"),
-    # prepare_eval_data reads the category table off this sample_pool column
-    # and lands it (#379). Its own row although the whole block has one at
-    # compute_row_facts below: changing the column moves both, and the earlier
-    # row decides the advice. At compute_row_facts alone, the re-run would
-    # rank by the old table. A change to the rest of the block (enabled,
-    # mapping) still advises compute_row_facts. One transition takes a second
-    # step: switching `enabled` on while `column` is already written. The
-    # table was landed empty (column mode was off), so compute_row_facts then
-    # refuses it and names prepare_eval_data — loud, never a wrong report.
-    ("evaluation.item_categories.column", "prepare_eval_data"),
-    # Every row from here is listed at compute_row_facts, the first
-    # fingerprinted producer, whichever node first reads it (the rule above):
-    # compute_metrics reads k_values, metric and query_filter, the latter
-    # also compute_baseline_metrics (#376) and compute_row_facts (its
-    # all-positive log and warning); compute_baseline_metrics and
-    # compute_report_aggregates the baseline and report rows;
-    # compute_prediction_quality the last two (ADR-0024). Not on
-    # prepare_eval_data: none of them changes the join.
-    ("evaluation.k_values", "compute_row_facts"),
-    ("evaluation.item_categories", "compute_row_facts"),
-    ("evaluation.metric", "compute_row_facts"),
-    ("evaluation.query_filter", "compute_row_facts"),
-    ("evaluation.baseline", "compute_row_facts"),
-    ("evaluation.report.sections.popularity_baseline", "compute_row_facts"),
-    ("evaluation.report.diagnostics", "compute_row_facts"),
-    ("evaluation.report.sections.rank_distribution", "compute_row_facts"),
-    ("evaluation.prediction_quality", "compute_row_facts"),
-    ("evaluation.report.sections.prediction_quality", "compute_row_facts"),
-)
+#: The settings each fingerprinted step applies: ``node -> dotted paths from
+#: the parameters root``. Listed in topological order: the main-line steps'
+#: order is the advice of the readers that are not given the run's (see the
+#: module docstring). A step reading part of a block declares the block when
+#: another part would change its result too.
+APPLIED_SETTINGS: dict[str, tuple[str, ...]] = {
+    # post_training is the --post-training / monitoring run mode, injected at
+    # the top level by the CLI like model_version, not a YAML key. It is not
+    # read in the node body: create_pipeline wires a different predictions
+    # and population table by it. Unlike model_version it is in no path, so
+    # a monitoring redraw of a post-training directory must be refused here.
+    #
+    # The category column is read here, its block's other keys are
+    # not: switching `enabled` on while `column` is already written sends the
+    # re-run to compute_row_facts, which then refuses the table landed empty
+    # and names this node — loud, never a wrong report.
+    "prepare_eval_data": (
+        "post_training", "evaluation.snap_date", "evaluation.segment_columns",
+        "evaluation.segment_sources", "evaluation.item_categories.column",
+    ),
+    # The category pass and the all-positive accounts.
+    "compute_row_facts": (
+        "evaluation.snap_date", "evaluation.item_categories",
+        "evaluation.query_filter",
+    ),
+    # post_training together with dataset.test_zero_positive_group_ratio
+    # decides the row weights (the latter is undeclared, see the module
+    # docstring).
+    "compute_prediction_quality": (
+        "post_training", "evaluation.snap_date", "evaluation.prediction_quality",
+    ),
+    "compute_report_aggregates": (
+        "evaluation.snap_date", "evaluation.report.diagnostics",
+    ),
+    "restrict_to_common": ("evaluation.snap_date",),
+    "compute_metrics": (
+        "evaluation.snap_date", "evaluation.item_categories",
+        "evaluation.query_filter", "evaluation.k_values", "evaluation.metric",
+    ),
+    "compute_baseline_metrics": (
+        "evaluation.snap_date", "evaluation.item_categories",
+        "evaluation.query_filter", "evaluation.k_values", "evaluation.metric",
+        "evaluation.baseline",
+    ),
+    "compute_compare_metrics": (
+        "evaluation.snap_date", "evaluation.item_categories",
+        "evaluation.query_filter", "evaluation.k_values", "evaluation.metric",
+    ),
+    "compare_to_baseline": (),
+    "compare_to_source": (),
+    # The switch: see the module docstring.
+    "resolve_display_ks": (
+        "evaluation.k_values", "evaluation.report.display.compare_k",
+        "evaluation.report.sections.popularity_baseline",
+    ),
+    "resolve_comparison_display_ks": (
+        "evaluation.k_values", "evaluation.report.display.compare_k",
+    ),
+}
 
-#: The computed settings that decide what ``prepare_eval_data`` writes: the
-#: ``enriched_eval_predictions`` partition and the ``evaluation_segment_columns``
-#: and ``evaluation_item_categories`` JSONs landed with it. They are the
-#: :data:`COMPUTED_KEYS` rows re-run from ``prepare_eval_data``.
-#:
-#: Why that artifact is compared on these rows only (ADR-0020 bug 6, the #352
-#: correction): the partition is read back from Hive, so a slice starting after
-#: ``prepare_eval_data`` does not rewrite it. Compared on every row, changing
-#: ``evaluation.k_values`` would make it stale, the advice would be
-#: ``--from-node compute_row_facts`` (that row's node), the re-run would leave it
-#: as it was, and the next run would raise the same way: a loop with no exit.
-#: Moving every row to ``prepare_eval_data`` instead would end the loop by
-#: re-joining the predictions on any setting change. Neither is needed: no
-#: other row changes what ``prepare_eval_data`` computes.
-#:
-#: The JSON's comparison speaks for the segment list only. The partition
-#: itself carries :data:`PARTITION_FINGERPRINT_COLUMN` since #374 (see there).
-PARTITION_CONTENT_KEYS: tuple[str, ...] = tuple(
-    path for path, node in COMPUTED_KEYS if node == "prepare_eval_data"
+#: The fingerprinted steps of the comparison chain in topological order, the
+#: only ones ``--compare-only`` runs: a declaration the tests use as that
+#: mode's run order; the readers skip a record by ``run_nodes``, not by this.
+#: That mode reads partitions an earlier run
+#: wrote, so the ``prepare_eval_data`` record its results inherit (through the
+#: directory's ``evaluation_segment_columns``) is compared with nothing: it is
+#: what the partitions were written under, and today's run mode and segment
+#: settings say nothing about them. Compared with today's settings, every
+#: partition a ``--post-training`` run wrote would be refused whenever the
+#: flag is left off. The price: after a standard run rewrites the directory
+#: under other settings, ``--compare-only --only-node
+#: generate_comparison_report`` draws the comparison computed before it, exit
+#: code 0 (``docs/pipelines/evaluation.md`` §9).
+COMPARISON_CHAIN: tuple[str, ...] = (
+    "restrict_to_common", "compute_compare_metrics", "compare_to_source",
+    "resolve_comparison_display_ks",
 )
 
 #: What one date's ``enriched_eval_predictions`` partition holds depends on:
-#: :data:`PARTITION_CONTENT_KEYS` without ``evaluation.snap_date`` and
+#: ``prepare_eval_data``'s settings without ``evaluation.snap_date`` and
 #: ``evaluation.item_categories.column``.
 #:
 #: Why ``evaluation.snap_date`` is left out: a partition holds one date, and
@@ -222,7 +209,8 @@ PARTITION_CONTENT_KEYS: tuple[str, ...] = tuple(
 #: month's partition, including the months this run does not rewrite.
 _NOT_IN_THE_ROWS = ("evaluation.snap_date", "evaluation.item_categories.column")
 PARTITION_FINGERPRINT_KEYS: tuple[str, ...] = tuple(
-    path for path in PARTITION_CONTENT_KEYS if path not in _NOT_IN_THE_ROWS
+    path for path in APPLIED_SETTINGS["prepare_eval_data"]
+    if path not in _NOT_IN_THE_ROWS
 )
 
 #: The framework's own column on every ``enriched_eval_predictions`` row:
@@ -230,16 +218,15 @@ PARTITION_FINGERPRINT_KEYS: tuple[str, ...] = tuple(
 #: (these settings plus the segment columns that run actually joined).
 #:
 #: Why the partition carries it, and the ``evaluation_segment_columns`` JSON's
-#: fingerprint no longer speaks for the partition (#374): that JSON sits in the
+#: fingerprint does not speak for the partition: that JSON sits in the
 #: run's directory (``<model_version>/<dates label>/``), and one date's
-#: partition is now written by runs with different directories — March alone
+#: partition is written by runs with different directories — March alone
 #: writes ``20260331/``, January–March writes ``20260131-20260331/``. After
 #: January–March (settings A), March alone (settings B), then a resume of
 #: January–March from ``compute_metrics`` (A), the range directory's JSON still
 #: says A while March holds B's rows. Only the rows can say who wrote them last.
 PARTITION_FINGERPRINT_COLUMN = "eval_partition_fingerprint"
 
-_KEY_ORDER = {path: i for i, (path, _) in enumerate(COMPUTED_KEYS)}
 _ABSENT = object()
 _MAX_REPR = 80
 
@@ -247,27 +234,17 @@ _MAX_REPR = 80
 class LoadedArtifact(NamedTuple):
     """One landed evaluation artifact to check against today's settings.
 
-    A plain positional 4-tuple let ``catalog_name`` and ``produced_by`` —
-    both ``str`` — swap without a type error, silently corrupting only the
-    advice text (``docs/operations/known-pitfalls.md`` §12 positional trap).
+    A plain positional tuple would let ``catalog_name`` and ``produced_by`` —
+    both ``str`` — swap without a type error, silently corrupting the
+    advice (``docs/operations/known-pitfalls.md`` §12 positional trap).
     Construct this with keyword arguments; that makes such a swap visible at
     the call site instead of a silent value error inside the message.
     """
     catalog_name: str
     payload: Any
+    #: The node that lands it, whose :data:`APPLIED_SETTINGS` its ``applied``
+    #: part is compared on.
     produced_by: str
-    extra_keys: Sequence[str] = ()
-    #: ``None`` compares the whole fingerprint. A tuple of paths compares only
-    #: those values: for an artifact that a change to the other rows cannot
-    #: make stale, see :data:`PARTITION_CONTENT_KEYS`.
-    compared_keys: Optional[Sequence[str]] = None
-    #: The node ``--from-node`` names when this is the one stale artifact
-    #: (rule 2 of :func:`require_computed_with_current_config`); ``None`` means
-    #: ``produced_by``. For a reader whose run mode makes the producer's own
-    #: slice miss a node that is stale too: under ``--compare`` the slice from
-    #: ``resolve_comparison_display_ks`` stops at ``generate_report``, which
-    #: refuses the stale ``display_ks.json`` first.
-    rerun_node: Optional[str] = None
 
 
 def _tag_non_str_keys(value: Any) -> Any:
@@ -285,7 +262,7 @@ def _tag_non_str_keys(value: Any) -> Any:
     fingerprints for two configs that behave differently whenever a lookup
     against the dict keys by one type and not the other.
 
-    A ``str`` key is kept as-is so stored ``values`` stay readable for the
+    A ``str`` key is kept as-is so stored values stay readable for the
     common case. A non-``str`` key ``k`` is rewritten to
     ``f"<{type(k).__name__}>{k!r}"`` (e.g. ``int`` key ``1`` -> ``"<int>1"``):
     the ``<...>`` tag cannot be produced by any plain ``str`` key on the same
@@ -305,19 +282,42 @@ def _tag_non_str_keys(value: Any) -> Any:
     return value
 
 
-def fingerprint(parameters: dict, extra_keys: Sequence[str] = ()) -> dict:
-    """``{"sha256": ..., "values": {path: value}}`` over the computed settings.
+def fingerprint(
+    parameters: dict, node: str, inputs: Iterable[Optional[dict]] = (),
+) -> dict:
+    """``{"node", "applied", "inputs"}`` for a result ``node`` lands from
+    ``inputs``, the landed JSON payloads it took (``None`` for an optional
+    entry that was absent).
 
-    ``values`` is kept next to the hash so a mismatch can say which key moved
-    and from what, instead of only "something changed". Values are normalised
-    through a JSON round trip (``default=str``) so that what a landed JSON
-    holds after being read back compares equal to what is computed now, e.g. a
-    YAML ``datetime.date`` against its string. Dict keys are tagged first via
-    :func:`_tag_non_str_keys` (see there for why).
+    ``applied`` maps each path ``node`` declares in :data:`APPLIED_SETTINGS`
+    to its value now; ``inputs`` maps each upstream node to the ``applied``
+    it recorded, gathered from every input's own two parts. Values, not only
+    a hash, so a mismatch can say which key moved and from what. They are
+    normalised through a JSON round trip (:func:`normalised`) so that what a
+    landed JSON holds after being read back compares equal to what is
+    computed now, e.g. a YAML ``datetime.date`` against its string.
+
+    Pass every landed JSON the result is computed from, checked or not: a
+    reader that only takes ``evaluation_segment_columns`` for the partition
+    check still read partitions ``prepare_eval_data`` wrote. An input
+    without a fingerprint in this shape contributes nothing: the caller
+    must refuse one first; this does not.
+
+    A ``node`` missing from :data:`APPLIED_SETTINGS` raises ``KeyError``: a
+    new fingerprinted step must declare what it applies.
     """
-    values = _declared_values(
-        parameters, (*(p for p, _ in COMPUTED_KEYS), *extra_keys))
-    return {"sha256": _sha256(values), "values": values}
+    upstream: dict[str, dict] = {}
+    for payload in inputs:
+        stored = _stored(payload)
+        if stored is None:
+            continue
+        upstream.update(stored["inputs"])
+        upstream[stored["node"]] = stored["applied"]
+    return {
+        "node": node,
+        "applied": _declared_values(parameters, APPLIED_SETTINGS[node]),
+        "inputs": upstream,
+    }
 
 
 #: Where :func:`partition_fingerprint` hashes the segment columns actually
@@ -355,19 +355,19 @@ def partition_fingerprint(parameters: dict, joined: Sequence[str]) -> str:
 def recorded_partition_fingerprint(payload: Any) -> Optional[str]:
     """The :func:`partition_fingerprint` the run that landed ``payload`` (an
     ``evaluation_segment_columns`` JSON) stamped on its partitions; ``None`` if
-    ``payload`` has no ``config_fingerprint`` or no ``joined`` list.
+    ``payload`` has no ``config_fingerprint`` in :func:`fingerprint`'s shape
+    or no ``joined`` list.
 
-    Taken from the recorded values, which :func:`fingerprint` normalised the
-    same way :func:`partition_fingerprint` normalises live parameters, plus the
-    recorded ``joined``. For readers that must compare a partition with the
-    run that wrote a directory rather than with today's parameters
-    (``--compare-only``, where ``post_training`` is inert).
+    Taken from the recorded ``applied`` values, which :func:`fingerprint`
+    normalised the same way :func:`partition_fingerprint` normalises live
+    parameters, plus the recorded ``joined``. For readers that must compare a
+    partition with the run that wrote a directory rather than with today's
+    parameters (``--compare-only``, where ``post_training`` is inert).
     """
-    stored = payload.get("config_fingerprint") if isinstance(payload, dict) else None
-    if not (isinstance(stored, dict) and isinstance(stored.get("values"), dict)
-            and isinstance(payload.get("joined"), list)):
+    stored = _stored(payload)
+    if stored is None or not isinstance(payload.get("joined"), list):
         return None
-    return _sha256({**{path: value for path, value in stored["values"].items()
+    return _sha256({**{path: value for path, value in stored["applied"].items()
                        if path in PARTITION_FINGERPRINT_KEYS},
                     _JOINED: list(payload["joined"])})
 
@@ -398,124 +398,150 @@ def _sha256(values: dict[str, Any]) -> str:
     ).encode("utf-8")).hexdigest()
 
 
+def _stored(payload: Any) -> Optional[dict]:
+    """``payload``'s ``config_fingerprint`` when it has :func:`fingerprint`'s
+    shape, else ``None`` (no fingerprint, or one of another shape)."""
+    stored = payload.get("config_fingerprint") if isinstance(payload, dict) else None
+    if not (isinstance(stored, dict) and isinstance(stored.get("node"), str)
+            and isinstance(stored.get("applied"), dict)
+            and isinstance(stored.get("inputs"), dict)
+            and all(isinstance(v, dict) for v in stored["inputs"].values())):
+        return None
+    return stored
+
+
+def rerun_node(
+    changed: Iterable[str], *, run_nodes: Optional[Sequence[str]] = None,
+) -> Optional[str]:
+    """The node ``--from-node`` should name when ``changed`` moved: the first
+    of ``run_nodes`` — the run's nodes in topological order, by default
+    :data:`APPLIED_SETTINGS` order — that applies one of them. ``None`` when
+    none does.
+
+    ``changed`` holds changed setting paths, at any depth, and node names
+    (a stale result with no fingerprint names its producer). A step applies a
+    path when one of its declared paths contains it or lies inside it: a
+    changed ``evaluation.item_categories.column`` is ``prepare_eval_data``'s,
+    a changed ``evaluation.item_categories.mapping.x`` is not.
+    """
+    changed = list(changed)
+    for node in (APPLIED_SETTINGS if run_nodes is None else run_nodes):
+        paths = APPLIED_SETTINGS.get(node, ())
+        if any(c == node or any(_overlap(c, p) for p in paths) for c in changed):
+            return node
+    return None
+
+
+def _overlap(a: str, b: str) -> bool:
+    return a == b or a.startswith(b + ".") or b.startswith(a + ".")
+
+
 def require_computed_with_current_config(
     artifacts: Iterable[LoadedArtifact],
     parameters: dict,
     *,
-    computed_rerun_node: Optional[str] = None,
+    run_nodes: Optional[Sequence[str]] = None,
 ) -> None:
-    """Pre-check (inputs): every artifact was computed with today's settings.
+    """Pre-check (inputs): every artifact was computed with today's settings —
+    the ones its own step applied, and the ones each of its inputs did.
 
     ``artifacts`` holds :class:`LoadedArtifact` entries — construct each with
     keyword arguments (see that class for why). A pre-check, not a
     postcondition: a mismatch means the inputs on disk are older than the
     config, not that the calling node is wrong.
 
-    Collect-all: every stale artifact is listed in one raise, so whoever fixes
-    it does not re-run, hit the next one, and re-run again.
+    Collect-all: every stale artifact is listed in one raise, each moved
+    setting under the part it moved in (its own step's, or an input's), so
+    whoever fixes it does not re-run, hit the next one, and re-run again.
+    One re-run is advised for all of them, :func:`rerun_node` of every
+    changed path and every producer of an artifact with no fingerprint; when
+    none applies, the full pipeline.
 
-    The suggested re-run, in order:
-
-    1. A key from :data:`COMPUTED_KEYS` changed: ``--from-node`` the node of
-       the first changed row. That node precedes every fingerprinted producer
-       (see :data:`COMPUTED_KEYS`), so it recomputes all of them. A run mode
-       that has none of those nodes passes ``computed_rerun_node`` instead:
-       ``--compare-only`` has no ``prepare_eval_data`` and no
-       ``compute_row_facts``, and advice naming them would point at a node
-       that is not in the run (ADR-0031 decision 15, first row). The caller
-       names a node of its mode whose forward slice holds every
-       fingerprinted producer of that mode;
-       ``test_pipeline.py::TestFingerprintRerunNodes`` pins that.
-    2. Otherwise exactly one artifact is stale (only its own declared keys
-       moved, or it has no fingerprint): ``--from-node`` its producer, or the
-       artifact's ``rerun_node`` where it names one.
-    3. Otherwise no single node is known to cover them all: the full pipeline.
+    ``run_nodes``: the run's nodes in topological order, when the reader
+    knows them. The advice then names one of them, and a record an artifact
+    inherited from a step not among them is not compared (the module
+    docstring says why). ``None``: every fingerprinted step, in
+    :data:`APPLIED_SETTINGS` order.
     """
-    current_by_extra: dict[tuple[str, ...], dict] = {}
     problems: list[str] = []
-    stale_producers: list[str] = []
-    first_computed: int | None = None
+    changed: list[str] = []
+    # Pre-check (runtime backstop): left empty, every inherited record would
+    # be skipped and a stale input would pass.
+    if run_nodes is not None and not run_nodes:
+        raise RuntimeError(
+            "require_computed_with_current_config was given an empty run "
+            "order: create_pipeline did not fill it.")
+    in_run = APPLIED_SETTINGS if run_nodes is None else set(run_nodes)
 
     for artifact in artifacts:
-        extra = tuple(artifact.extra_keys)
-        if extra not in current_by_extra:
-            current_by_extra[extra] = fingerprint(parameters, extra)
-        current = current_by_extra[extra]
-
-        stored = artifact.payload.get("config_fingerprint") \
-            if isinstance(artifact.payload, dict) else None
-        if not (isinstance(stored, dict) and "sha256" in stored
-                and isinstance(stored.get("values"), dict)):
+        name = f"{artifact.catalog_name} (written by {artifact.produced_by})"
+        stored = _stored(artifact.payload)
+        if stored is None:
             problems.append(
-                f"  - {artifact.catalog_name} (written by "
-                f"{artifact.produced_by}) has no config_fingerprint: written "
-                "before fingerprints existed, or not by this pipeline."
+                f"  - {name} has no config_fingerprint in the shape this "
+                "version writes: written by an older version, or not by this "
+                "pipeline."
             )
-            stale_producers.append(artifact.rerun_node or artifact.produced_by)
+            changed.append(artifact.produced_by)
             continue
-        if artifact.compared_keys is None:
-            if stored["sha256"] == current["sha256"]:
+        parts = [(f"settings {artifact.produced_by} applied",
+                  _changed_paths(stored["applied"], parameters,
+                                 APPLIED_SETTINGS.get(artifact.produced_by, ())))]
+        for node, recorded in stored["inputs"].items():
+            if node not in in_run:
                 continue
-            old_values, new_values = stored["values"], current["values"]
-        else:
-            # The stored sha256 covers every row, so only values can be
-            # compared on a subset.
-            keys = set(artifact.compared_keys)
-            old_values = {p: v for p, v in stored["values"].items() if p in keys}
-            new_values = {p: v for p, v in current["values"].items() if p in keys}
-            if _canonical(old_values) == _canonical(new_values):
+            parts.append((f"settings its input from {node} was computed with",
+                          _changed_paths(recorded, parameters,
+                                         APPLIED_SETTINGS.get(node, ()))))
+        lines: list[str] = []
+        for label, leaves in parts:
+            if not leaves:
                 continue
-        paths = [*new_values, *(p for p in old_values if p not in new_values)]
-        # _KEY_ORDER only covers COMPUTED_KEYS; an extra key (not in it) ties
-        # at len(_KEY_ORDER) and keeps its relative position via sort
-        # stability — `paths` is already in COMPUTED_KEYS-then-extra_keys
-        # order because that is the order `fingerprint()` walks to build
-        # `values`. A dict .get() here (O(1)) replaces the previous
-        # `order.index(p)` (O(n) per comparison inside the sort).
-        paths = sorted(paths, key=lambda p: _KEY_ORDER.get(p, len(_KEY_ORDER)))
-        lines = []
-        # A row nested under another row's block (evaluation.item_categories
-        # .column under evaluation.item_categories) reaches the same leaf
-        # twice; it is printed once.
-        shown: set[str] = set()
-        for path in paths:
-            leaves = _changed_leaves(path, old_values.get(path, _ABSENT),
-                                     new_values.get(path, _ABSENT))
-            if leaves and path in _KEY_ORDER:
-                idx = _KEY_ORDER[path]
-                first_computed = idx if first_computed is None \
-                    else min(first_computed, idx)
-            for leaf, old, new in leaves:
-                if leaf not in shown:
-                    shown.add(leaf)
-                    lines.append(f"      {leaf}: {_short(old)} -> {_short(new)}")
-        if not lines:
-            lines.append("      (hash differs but no value does: the "
-                         "fingerprint was written by another hashing version)")
-        problems.append(
-            f"  - {artifact.catalog_name} (written by {artifact.produced_by}) "
-            "was computed with different settings:\n" + "\n".join(lines)
-        )
-        stale_producers.append(artifact.rerun_node or artifact.produced_by)
+            lines.append(f"      {label}:")
+            lines += [f"        {leaf}: {_short(old)} -> {_short(new)}"
+                      for leaf, old, new in leaves]
+            changed += [leaf for leaf, _, _ in leaves]
+        if lines:
+            problems.append(f"  - {name} is stale:\n" + "\n".join(lines))
 
     if not problems:
         return
 
-    if first_computed is not None:
-        node = computed_rerun_node or COMPUTED_KEYS[first_computed][1]
-        advice = (f"Re-run with --from-node {node}, "
-                  "which recomputes every artifact above.")
-    elif len(stale_producers) == 1:
-        advice = f"Re-run with --from-node {stale_producers[0]}."
-    else:
-        advice = ("Re-run the full pipeline (no slicing flags): no single "
-                  "node is known to recompute all of the artifacts above.")
+    node = rerun_node(changed, run_nodes=run_nodes)
+    advice = (
+        f"Re-run with --from-node {node}, which recomputes every artifact "
+        "above." if node is not None else
+        "Re-run the full pipeline (no slicing flags): no node of this run is "
+        "known to recompute all of the artifacts above."
+    )
     raise ValueError(
-        "Evaluation artifacts on disk do not match the current computed "
-        "settings (evaluation.config_fingerprint.COMPUTED_KEYS); drawing a "
-        "report from them would mix old and new settings:\n"
+        "Evaluation artifacts on disk do not match today's settings; drawing "
+        "from them would mix old and new settings. What each step applies is "
+        "declared in pipelines/evaluation/steps/config_fingerprint.py "
+        "(APPLIED_SETTINGS).\n"
         + "\n".join(problems) + "\n" + advice
     )
+
+
+def _changed_paths(
+    recorded: dict, parameters: dict, declared: Sequence[str],
+) -> list[tuple[str, Any, Any]]:
+    """The changed leaves of ``recorded`` against today's values, over the
+    recorded paths and the ``declared`` ones (a path set since it was
+    recorded is a change too). A path nested under another walked one
+    (``evaluation.item_categories.column`` under ``evaluation.item_categories``)
+    reaches the same leaf twice; it is listed once."""
+    current = _declared_values(
+        parameters, (*declared, *(p for p in recorded if p not in declared)))
+    leaves: list[tuple[str, Any, Any]] = []
+    shown: set[str] = set()
+    for path in (*declared, *(p for p in recorded if p not in declared)):
+        for leaf in _changed_leaves(path, recorded.get(path, _ABSENT),
+                                    current.get(path, _ABSENT)):
+            if leaf[0] not in shown:
+                shown.add(leaf[0])
+                leaves.append(leaf)
+    return leaves
 
 
 def require_same_recorded_values(
@@ -530,17 +556,15 @@ def require_same_recorded_values(
 
     For values a fingerprint deliberately leaves out but some artifacts still
     depend on: the compare source (``evaluation.compare``, ADR-0031 decision
-    5) is injected per run by the CLI, so :data:`COMPUTED_KEYS` leaves it out
-    (see the module docstring), yet every comparison artifact holds one
+    5) is injected per run by the CLI, so :data:`APPLIED_SETTINGS` leaves it
+    out (see the module docstring), yet every comparison artifact holds one
     source's numbers. Its writer records the value (``current``, already
     :func:`normalised`) under ``key``; this compares what was recorded.
 
-    Why the re-run is the caller's ``rerun_node`` and not the fingerprint
-    rules: a changed value makes every artifact that records it stale at
-    once, so the advice is the first node whose output depends on it,
-    however many of them the caller happens to read. The fingerprint's rule 2
-    would name a reader's one producer, whose re-run then raises on the next,
-    and its rule 3 the full pipeline.
+    Why the re-run is the caller's ``rerun_node`` and not :func:`rerun_node`:
+    a changed value makes every artifact that records it stale at once, so
+    the advice is the first node whose output depends on it, a node no
+    declaration names.
 
     Collect-all, like :func:`require_computed_with_current_config`; an
     artifact recording nothing under ``key`` is stale too. ``setting`` names
@@ -587,7 +611,7 @@ def _lookup(parameters: dict, path: str) -> tuple[bool, Any]:
 
 def _canonical(value: Any) -> str:
     """Compare by JSON text: ``1``, ``1.0`` and ``true`` are equal in Python
-    but hash differently, and a diff must never miss what the hash saw."""
+    but serialise differently, and the comparison must tell them apart."""
     if value is _ABSENT:
         return "\0absent"
     return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)

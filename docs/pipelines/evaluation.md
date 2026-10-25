@@ -142,7 +142,7 @@ evaluation:
 | `joined` | 這次實際 join 進來的欄，照 `segment_columns` 的順序 |
 | `sources` | 每個 joined 欄取自哪張表（母體表寫 catalog 條目名，覆寫表寫設定的 `table`） |
 | `missing` | 母體表沒有、因此跳過的欄 → 那張表 |
-| `config_fingerprint` | 算它時的「算的」設定（見 7.2 節）；寫進去供事後查看，沒有 node 比對它 |
+| `config_fingerprint` | `prepare_eval_data` 讀的設定當時的值（見 7.2 節）；分群的讀表 node 讀之前比對它，每個讀這張表的結果也把它記進自己的指紋 |
 
 分群的 node（`compute_row_facts`、`compute_metrics`、`compute_baseline_metrics`、`compute_compare_metrics`）照 `joined` 分群，**不看 frame 的欄位**：`enriched_eval_predictions` 兩種模式共用一張表，另一模式 join 過的欄在這次的列上是全 NULL，照欄位挑會把它挑進來。`--compare-only` 沒有 `prepare_eval_data`，靠寫 enriched partition 那次落地的這份檔知道當時 join 了哪些欄。
 
@@ -501,7 +501,7 @@ evaluation:
 
 `--compare` 與 `--compare-only` 互斥，傳入的 key 必須存在於 `evaluation.compare_sources`。`--from-node` 與 `--only-node` 也互斥；`--list-nodes` 不可與兩者併用。
 
-`--dry-run` 與 `--list-nodes` 不會執行 nodes、寫入 Hive 或報表，但 CLI 仍會載入設定、初始化 Spark、解析 `model_version`、讀取 model manifest 並查詢 catalog 產物是否存在。
+`--dry-run` 與 `--list-nodes` 不會執行 nodes、寫入 Hive 或報表，但 CLI 仍會載入設定、初始化 Spark、解析 `model_version`、讀取 model manifest 並查詢 catalog 產物是否存在。例外是只重畫：`--from-node`／`--only-node` 切出來的切片只讀寫落地的 JSON 與 HTML 時（例如 `--only-node generate_report`），CLI 不初始化 Spark、不查 partition，log 印 `[redraw] ... Spark is not started`（4.6 節）。
 
 ### 4.2 Training 後評估
 
@@ -590,31 +590,31 @@ python -m recsys_tfb evaluation \
 
 `generate_report` 是純函式，參數全部是別的 node 算好的產物（見 5.1 節的表）。其中 `evaluation_row_facts`（`row_facts.json`）、`evaluation_metrics`（`metrics.json`）、`baseline_metrics`（`baseline_metrics.json`）、`evaluation_report_aggregates`、`prediction_quality_metrics`（`prediction_quality.json`）、`baseline_comparison`（`baseline_comparison.json`）、`evaluation_display_ks`（`display_ks.json`）都已落地成 `JSONDataset`（`metrics.json` 與 `baseline_metrics.json` 見 [ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 2），沒有記憶體中間結果。切片的自動擴張只看「輸出是否已落地」（見 [`pipeline-slicing.md`](../operations/user-guides/pipeline-slicing.md) 的「自動擴張補跑」），所以從 `generate_report` 接續，前次完整 run 成功時不會自動補跑任何 node，不跑 Spark。補跑清單釘在 `tests/test_pipelines/test_resume_contracts.py` 的 `RESUME_CONTRACTS`，之後改動 node 的形狀，該測試會紅燈提醒同步文件。
 
-接續時直接讀回的落地 JSON（`evaluation_row_facts`、`evaluation_metrics`、`baseline_metrics`、`evaluation_report_aggregates`、`prediction_quality_metrics`、`baseline_comparison`、`evaluation_display_ks`）若是在不同的「算的」設定下算出來的，`generate_report` 會在畫之前 raise，訊息列出哪份產物、哪個鍵從什麼值變成什麼值、該 `--from-node` 哪個 node。`display_ks.json` 的指紋另外帶 `report.display.compare_k`，所以改了這個鍵也會被擋。兩類設定的分法見 7.2 節。
+接續時直接讀回的落地 JSON（`evaluation_row_facts`、`evaluation_metrics`、`baseline_metrics`、`evaluation_report_aggregates`、`prediction_quality_metrics`、`baseline_comparison`、`evaluation_display_ks`）若是在不同的設定下算出來的，`generate_report` 會在畫之前 raise，訊息列出哪份產物、哪個鍵從什麼值變成什麼值、該 `--from-node` 哪個 node。每份結果只記它那一步讀的設定，以及它的輸入當時用的設定，所以改一個鍵只有讀它的 step 與其下游被擋（7.2 節）。`display_ks.json` 記 `report.display.compare_k`，所以改了這個鍵也會被擋。
 
 只改了「畫的」設定時，重繪的接續點有兩個，都不重算任何指標：
 
-- 改 `report.sections` 的其餘鍵（`data_stats`、`ranking_metrics`）：`--only-node generate_report`（CLI 仍會照 4.1 節所說初始化 Spark）。
+- 改 `report.sections` 的鍵：`--only-node generate_report`。切片只有 `generate_report`、只讀落地 JSON，CLI 不初始化 Spark（4.1 節）。打開一段時，它的結果若是之前的 run 留下、而且它讀的設定沒變，就直接畫；設定變了會被擋，檔案不在則切片會把它的計算拉回來（那時就要開 Spark）。只有 `popularity_baseline` 例外：關掉時 `resolve_display_ks` 沒切熱門度段的 K，打開後會被擋並指示 `--from-node resolve_display_ks`。
 - 改 `report.display.compare_k`：`--from-node resolve_display_ks`。這個 node 讀落地的 `metrics.json` 與 `baseline_comparison.json`，重切每張表要印的 K 再接著畫報表，不跑 Spark。只做 `--only-node generate_report` 會被擋下，訊息寫 `Re-run with --from-node resolve_display_ks.`。
 
-比較報表（`--compare`、`--compare-only`）也一樣：比較鏈（5.2 節）每一步的結果都落地了，`generate_comparison_report` 只讀這些 JSON（`compare_coverage`、`compare_row_facts_a`、`source_comparison`、`comparison_display_ks`），所以重畫與重切 K 都不跑 Spark（CLI 仍會照 4.1 節所說初始化 Spark）。接續點與接法：
+比較報表（`--compare`、`--compare-only`）也一樣：比較鏈（5.2 節）每一步的結果都落地了，`generate_comparison_report` 只讀這些 JSON（`compare_coverage`、`compare_row_facts_a`、`source_comparison`、`comparison_display_ks`），所以重畫與重切 K 都不跑 Spark，CLI 也不初始化 Spark（4.1 節）。接續點與接法：
 
 | 情況 | 怎麼接 |
 |---|---|
 | 沒改設定，只是重畫 | `--only-node generate_comparison_report`，兩種比較模式都不補跑任何 node |
 | 只改 `compare_sources.<key>.label` | 同上；label 不算比較對象的身分，報表印新的名字 |
-| 改 `compare_k` | `--compare`：`--from-node resolve_display_ks`（兩個 K 截斷與兩份報表一起重跑；只從 `resolve_comparison_display_ks` 接續的話，同一段切片裡的 `generate_report` 會因 `display_ks.json` 也過期而先停下）。`--compare-only`：`--from-node resolve_comparison_display_ks`。只做 `--only-node generate_comparison_report` 會被擋，訊息點名該從哪個 node 接續 |
+| 改 `compare_k` | `--compare`：`--from-node resolve_display_ks`（兩個 K 截斷與兩份報表一起重跑；只從 `resolve_comparison_display_ks` 接續的話，同一段切片裡的 `generate_report` 會因 `display_ks.json` 也過期而先停下）。主報表的段全關、這次 run 沒有 `resolve_display_ks` 時，以及 `--compare-only`：`--from-node resolve_comparison_display_ks`。只做 `--only-node generate_comparison_report` 會被擋，訊息點名這次 run 裡該從哪個 node 接續 |
 | 換比較對象，或改了 `prod_mapping` 等身分鍵（3.6 節） | `--from-node compute_compare_metrics`；只重畫會被擋（第 8 節）。這個 node 之前的 `load_compare_predictions`、`restrict_to_common` 輸出在記憶體裡，切片會把它們拉回來，涵蓋率因此一起重寫 |
-| `--compare-only` 下改了「算的」設定（7.2 節） | `--from-node compute_compare_metrics`。這個模式沒有 `compute_row_facts`、`prepare_eval_data`，所以不是 `COMPUTED_KEYS` 那一列指的 node |
-| `--compare` 下改了「算的」設定 | 照 `COMPUTED_KEYS` 那一列的 node（`compute_row_facts` 或 `prepare_eval_data`）：主線的結果也過期了，從比較鏈起跳的切片會在 `generate_report` 被擋 |
+| `--compare-only` 下改了「算的」設定（7.2 節） | 錯誤訊息點名的 node，是比較鏈裡第一個讀那個設定的（多半是 `compute_compare_metrics`）。這個模式沒有主線。寫分區那次 run 的 `post_training`、分群設定不跟今天比：今天帶不帶 `--post-training` 都一樣（7.3 節） |
+| `--compare` 下改了「算的」設定 | 錯誤訊息點名的 node，是這次 run 裡第一個讀那個設定的，主線有就是主線的（例如 `k_values` → `compute_metrics`）：主線的結果也過期了，從比較鏈起跳的切片會在 `generate_report` 被擋 |
 
 `RESUME_CONTRACTS`（`--compare` 與 `--compare-only` 各一條）釘住：`compute_compare_metrics` 會把 `load_compare_predictions` 與 `restrict_to_common` 拉回來（它的輸入是記憶體裡的 Spark frame，沒辦法落地），`compare_to_source`、`resolve_comparison_display_ks`、`generate_comparison_report` 都不補跑任何 node。
 
-從列的事實接續（`--from-node compute_row_facts`，設定改了之後錯誤訊息建議的就是這個）也不重做 join：`prepare_eval_data` 把連好 label、rank 與 segment 的列直接寫進 `enriched_eval_predictions`，之後的 node 讀表（[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1）。前次完整 run 成功時，不會補跑任何 node（沒有 memory-only 的中間結果）；清單同樣釘在 `RESUME_CONTRACTS` 的 `"compute_row_facts"`、`"compute_metrics"`。主線的接續點 `generate_report`、`compute_metrics`、`compute_row_facts`、`compare_to_baseline`、`resolve_display_ks` 都釘在 `RESUME_CONTRACTS`，前次完整 run 成功時每一個都不補跑任何 node。`--from-node compute_metrics` 也走得通，但切片照拓撲順序的位置切，它不重數列的事實（讀落地的 `row_facts.json`），也不重跑排在它前面的 `compute_prediction_quality`、`compute_report_aggregates`；partition 用同樣的設定重寫過之後（例如補了遲到的 label 再單跑某個月），列的事實只檢查設定指紋、看不出列變了，要從 `compute_row_facts` 接續。兩個情況會把 `prepare_eval_data` 拉回來或擋下：
+從列的事實接續（`--from-node compute_row_facts`，改了 `query_filter` 或大類對照之後錯誤訊息建議的就是這個）也不重做 join：`prepare_eval_data` 把連好 label、rank 與 segment 的列直接寫進 `enriched_eval_predictions`，之後的 node 讀表（[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1）。前次完整 run 成功時，不會補跑任何 node（沒有 memory-only 的中間結果）；清單同樣釘在 `RESUME_CONTRACTS` 的 `"compute_row_facts"`、`"compute_metrics"`。主線的接續點 `generate_report`、`compute_metrics`、`compute_row_facts`、`compare_to_baseline`、`resolve_display_ks` 都釘在 `RESUME_CONTRACTS`，前次完整 run 成功時每一個都不補跑任何 node。`--from-node compute_metrics` 也走得通，但切片照拓撲順序的位置切，它不重數列的事實（讀落地的 `row_facts.json`），也不重跑排在它前面的 `compute_prediction_quality`、`compute_report_aggregates`；partition 用同樣的設定重寫過之後（例如補了遲到的 label 再單跑某個月），列的事實只檢查設定指紋、看不出列變了，要從 `compute_row_facts` 接續。兩個情況會把 `prepare_eval_data` 拉回來或擋下：
 
 - **評估日期的 partition 不在**：這張表從第一次評估之後就一直存在，所以 CLI 不問「表在不在」，問「`evaluation.snap_date` 的每一個日期的 partition 在不在」。任一個不在就把 `prepare_eval_data` 拉回切片，全都在就直接讀。
 - **partition 在，但寫的時候設定不同**：兩道比對，擋的是兩件事。
-  - `prepare_eval_data` 跟 partition 一起寫的 `segment_columns.json` 帶設定指紋。分群的讀表 node（`compute_row_facts`、`compute_metrics`、`compute_baseline_metrics`）先比對其中五個決定 `prepare_eval_data` 產出的鍵（`post_training`、`evaluation.snap_date`、`evaluation.segment_columns`、`evaluation.segment_sources`、`evaluation.item_categories.column`），不合就 raise，指示 `--from-node prepare_eval_data`。只比這五個鍵的理由：改 `k_values` 這類只影響後段計算的設定，照訊息從 `compute_row_facts` 重跑不會重寫 partition，全部都比的話會一直被擋。`compute_row_facts`、`compute_metrics`、`compute_baseline_metrics` 讀到的 `item_categories.json`（3.3 節）也照同一組鍵比；欄模式下這份檔不在、或是從別的欄讀的，同樣擋下並指示 `--from-node prepare_eval_data`。
+  - `prepare_eval_data` 跟 partition 一起寫的 `segment_columns.json` 帶設定指紋，只記 `prepare_eval_data` 讀的五個鍵（`post_training`、`evaluation.snap_date`、`evaluation.segment_columns`、`evaluation.segment_sources`、`evaluation.item_categories.column`）。分群的讀表 node（`compute_row_facts`、`compute_metrics`、`compute_baseline_metrics`）先比對它，不合就 raise，指示 `--from-node prepare_eval_data`。改 `k_values` 這類只有後段 step 讀的設定，不會讓它過期：從後段重跑不會重寫 partition，要是它也過期，會一直被擋。`compute_row_facts`、`compute_metrics`、`compute_baseline_metrics` 讀到的 `item_categories.json`（3.3 節）也一樣比；欄模式下這份檔不在、或是從別的欄讀的，同樣擋下並指示 `--from-node prepare_eval_data`。
   - 每個 partition 的每一列另外帶 `eval_partition_fingerprint`（#374）：寫它的那次執行的 `post_training`、`segment_columns`、`segment_sources`（不含 `snap_date`），加上那次**實際 join 進去的分群欄**（`segment_columns.json` 的 `joined`）。**每個**讀表 node 讀之前逐日期比對「今天的設定＋這個目錄 JSON 的 `joined`」，不合或是空值就 raise，列出所有有問題的日期，指示 `--from-node prepare_eval_data`。這道擋的是「這個日期後來被另一次執行蓋掉」：同一個日期會被目錄不同的執行寫到（單跑 3 月寫 `20260331/`、1–3 月一起跑寫 `20260131-20260331/`），目錄裡那份 JSON 只代表自己那次寫的東西，看不出分區後來被誰蓋過。詳細的反例與理由見 7.1 節。
 
 `--from-node` 使用拓撲順序語意，會執行指定 node 與拓撲序中其後的 nodes；`--only-node` 則不執行下游 consumers。只要 pipeline 實際執行，CLI 仍會寫 evaluation manifest 並更新 `data/evaluation/latest`，所以單 node 模式應視為進階除錯工具。
@@ -654,7 +654,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合拆
 | 對齊母體 | `restrict_to_common` | Model A 先篩到評估日期並確認分區指紋（比今天的設定＋`segment_columns.json` 的 `joined`；為什麼不比那份 JSON 記錄的設定，見 5.3 節），再取共同 query groups 與 items、雙方重新排名、Model B 一律沿用 Model A 的 label | `eval_predictions_common`、`compare_predictions_common`（記憶體）；`compare_coverage`（落地 `compare_coverage.json`：兩側裁切前後的 query group 數、item 數與被剔除的 item） |
 | 兩側指標 | `compute_compare_metrics` | 在共同母體上，兩側各算一份列的事實與一份指標（含母體帳）；兩側都照 `evaluation_segment_columns` 分群：Model B（對照側）自己的預測表沒有分群欄，借 Model A 那側的分群欄與值（`compute_compare_metrics`，#537；以前 B 不分群，所以沒有 per-segment 數字可比）；兩側的大類都照 `evaluation_item_categories`（欄模式）或手寫 mapping 排。`drop_all_positive_groups` 對兩側都套用 | `compare_row_facts_a`、`compare_metrics_a`、`compare_row_facts_b`、`compare_metrics_b`（各落地同名 `.json`） |
 | 比較層 | `compare_to_source` | Model A 對 Model B，形狀與 `baseline_comparison.json` 相同：每格這次（A）、對照（B）、差（A − B，兩邊都有數才算），全部 K，加四項「兩邊能不能比」的標註。算前比對輸入的設定指紋與比較對象的身分（3.6 節） | `source_comparison`（落地 `source_comparison.json`） |
-| K 截斷 | `resolve_comparison_display_ks` | 切好比較報表每張表要印的 K 與列：`compare_k`，以及 overall 表兩側各自以自己的 K 為界的列（3.1 節）；設定指紋多帶這個 display 鍵 | `comparison_display_ks`（落地 `comparison_display_ks.json`） |
+| K 截斷 | `resolve_comparison_display_ks` | 切好比較報表每張表要印的 K 與列：`compare_k`，以及 overall 表兩側各自以自己的 K 為界的列（3.1 節）；設定指紋記這個 display 鍵 | `comparison_display_ks`（落地 `comparison_display_ks.json`） |
 | 比較報表 | `generate_comparison_report` | 讀 `compare_coverage`、`compare_row_facts_a`、`source_comparison`、`comparison_display_ks` 與 parameters，產生這次／對照／差的 HTML；純函式，不含 Spark 物件，也不自己取差值、不自己截斷 K | `evaluation_comparison_report` |
 
 產物位置見 6.1 節。每份比較產物都帶 `config_fingerprint` 與 `compare_source`（3.6 節）。
@@ -697,7 +697,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合拆
 | `compare_row_facts_a.json`、`compare_row_facts_b.json` | 同目錄（`compare_row_facts_a`、`compare_row_facts_b`：共同母體上 Model A、Model B 各自列的事實；帶 `config_fingerprint` 與 `compare_source`） | `--compare`、`--compare-only` |
 | `compare_metrics_a.json`、`compare_metrics_b.json` | 同目錄（`compare_metrics_a`、`compare_metrics_b`：共同母體上兩側各自的指標與母體帳；Model A 照 `joined` 分群、Model B 不分群；帶 `config_fingerprint` 與 `compare_source`） | `--compare`、`--compare-only` |
 | `source_comparison.json` | 同目錄（`source_comparison`：Model A 對 Model B 每格的這次、對照、差與四項能不能比的標註，形狀同 `baseline_comparison.json`） | `--compare`、`--compare-only` |
-| `comparison_display_ks.json` | 同目錄（`comparison_display_ks`：比較報表每張表要印的 K 與列；指紋多帶 `compare_k`） | `--compare`、`--compare-only` |
+| `comparison_display_ks.json` | 同目錄（`comparison_display_ks`：比較報表每張表要印的 K 與列；指紋記 `compare_k`） | `--compare`、`--compare-only` |
 | `manifest.json` | `data/evaluation/<model_version>/<YYYYMMDD>/manifest.json` | 所有實際執行模式 |
 | `row_facts.json` | `data/evaluation/<model_version>/<YYYYMMDD>/row_facts.json`（`evaluation_row_facts`：資料概況、query group 數、無正例與全正的組數、分群欄，item 與大類粒度，帶 `config_fingerprint`；每個粒度另記全正組的帳：有正例的組數 `n_groups_with_positive`、全正佔比 `all_positive_share`、要不要警告 `all_positive_warns`） | 標準、`--compare` |
 | `metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/metrics.json`（`evaluation_metrics`：overall、per-item、per-segment、macro 與 category 指標，per-item 指標的共用數字，母體帳 `population`；宣告 `event`／`occasion` 時另有同分列數 `n_tied_rows`／`tied_row_share`；母體帳 `population` 另記分群欄 `segment_columns`；帶 `config_fingerprint`） | 標準、`--compare` |
@@ -790,7 +790,7 @@ report path 會將 ISO 日期移除 `-`，例如 `2026-01-31` 寫入 `data/evalu
 同一個 model version 與日期下修改 K、segments、categories、baseline、report sections 或 compare source，都會覆寫相同報表路徑；標準／`--compare` 模式也會覆寫相同 enriched partition。
 manifest 會保存最後一次執行的 evaluation parameters、git commit、run ID、`post_training` 與 slicing metadata。
 
-設定的指紋不進路徑，寫在每份落地 JSON 裡（`config_fingerprint` 鍵，只涵蓋下一節的「算的」設定）。它不區分產物身分、不保留舊版本，只用來讓讀這些 JSON 的 node 在設定已經變了時 raise，而不是把舊設定算的結果畫進報表。不放進路徑的理由見 [ADR-0020](../adr/0020-evaluation-bug-round-intended-behaviours.md) 決定二。
+設定的指紋不進路徑，寫在每份落地 JSON 裡（`config_fingerprint` 鍵，只涵蓋下一節的「算的」設定，而且每份只記產出它的 step 讀的那些，加上它的輸入當時用的）。它不區分產物身分、不保留舊版本，只用來讓讀這些 JSON 的 node 在設定已經變了時 raise，而不是把舊設定算的結果畫進報表。不放進路徑的理由見 [ADR-0020](../adr/0020-evaluation-bug-round-intended-behaviours.md) 決定二。
 
 ### 7.2 設定與重跑矩陣
 
@@ -798,21 +798,23 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 
 | 類別 | 鍵 | 變了要做什麼 | 做錯會怎樣 |
 |---|---|---|---|
-| **算的**：改變 Spark 計算、抽樣，或決定要不要算 | `evaluation.` 底下的 `snap_date`、`segment_columns`、`segment_sources`、`k_values`、`item_categories.*`、`metric.*`、`query_filter.*`（`drop_all_positive_groups`）、`baseline.*`、`prediction_quality.*`、`report.sections.popularity_baseline`、`report.sections.rank_distribution`、`report.sections.prediction_quality`、`report.diagnostics.*` | 從該鍵對應的 node 重跑（`--from-node`），或標準 full run。每個鍵對應哪個 node，錯誤訊息會直接寫出來；對照表住在 `src/recsys_tfb/pipelines/evaluation/steps/config_fingerprint.py` 的 `COMPUTED_KEYS`（例：`metric.*` → `compute_row_facts`；`item_categories.column` → `prepare_eval_data`，其餘 `item_categories.*` → `compute_row_facts`） | 只做 `--only-node generate_report`，或做了沒涵蓋那個 node 的切片：`generate_report` 在畫之前 raise，訊息列出哪份產物、哪個鍵從什麼值變成什麼值、該 `--from-node` 哪個 node。不會產出混著新舊設定的報表 |
+| **算的**：改變 Spark 計算、抽樣，或某一步落地的結果 | `evaluation.` 底下的 `snap_date`、`segment_columns`、`segment_sources`、`k_values`、`item_categories.*`、`metric.*`、`query_filter.*`（`drop_all_positive_groups`）、`baseline.*`、`prediction_quality.*`、`report.diagnostics.*` | 從錯誤訊息點名的 node 重跑（`--from-node`），或標準 full run。點名的是這次 run 裡第一個讀那個鍵的 step；每個 step 讀哪些鍵寫在 `src/recsys_tfb/pipelines/evaluation/steps/config_fingerprint.py` 的 `APPLIED_SETTINGS`（例：`metric.*`、`k_values` → `compute_metrics`；`query_filter.*`、`item_categories.*` → `compute_row_facts`，`item_categories.column` → `prepare_eval_data`；`baseline.*` → `compute_baseline_metrics`；`report.diagnostics.*` → `compute_report_aggregates`）。只有讀它的 step 與其下游過期，其餘結果照用 | 只做 `--only-node generate_report`，或做了沒涵蓋那個 node 的切片：`generate_report` 在畫之前 raise，訊息列出哪份產物、哪個鍵從什麼值變成什麼值、該 `--from-node` 哪個 node。不會產出混著新舊設定的報表 |
 | **算的**：切換執行模式（`--post-training` ↔ 監控） | 不是 `evaluation.*` 底下的使用者設定，是 CLI 注入 `parameters` 頂層的 run mode（同 `model_version`／`snap_date`），對照表裡的鍵名是 `post_training` | 照錯誤訊息從 `prepare_eval_data` 重跑（`--from-node prepare_eval_data`），或標準 full run | 同一 `(model_version, snap_date)` 先跑過一種模式、再切另一種模式做 `--only-node generate_report`：`prepare_eval_data` 讀的預測表不同（`training_eval_predictions` vs `ranked_predictions`），不擋的話兩種母體的數字會混進同一份報表 |
-| **畫的**：只改報表長相，不重算任何指標 | `evaluation.report.sections` 的其餘鍵（`data_stats`、`ranking_metrics`）；比較報表另有 `compare_sources.<key>.label` | 標準報表 `--only-node generate_report`；比較報表 `--only-node generate_comparison_report` | 不會出錯；做 full run 也可以，只是多花時間 |
+| **畫的**：只改報表長相，不重算任何指標 | `evaluation.report.sections.*`；比較報表另有 `compare_sources.<key>.label` | 標準報表 `--only-node generate_report`；比較報表 `--only-node generate_comparison_report`。都不初始化 Spark（4.1 節） | 不會出錯；做 full run 也可以，只是多花時間。打開一段的例外見下面那段 |
 | **畫的**：改每張表印哪些 K | `evaluation.report.display.compare_k`（標準報表與比較報表都讀） | 標準報表與帶 `--compare` 的比較報表：`--from-node resolve_display_ks`（它往後的切片含兩個 K 截斷與兩份報表）；`--compare-only`：`--from-node resolve_comparison_display_ks`。都是只重切 K 再畫，不跑 Spark | 只做 `--only-node generate_report`：`display_ks.json` 的指紋帶 `compare_k`，`generate_report` 在畫之前 raise，訊息點名 `--from-node resolve_display_ks`。比較報表同理：`comparison_display_ks.json` 的指紋帶這個鍵，只做 `--only-node generate_comparison_report` 會被擋，訊息點名上一欄那個 node |
 
 `query_filter.drop_all_positive_groups`（預設 `false`，#376）打開後，排序指標（overall／per-item／分群／大類，含概覽並列的兩個 mAP）、熱門度基準線，以及 `--compare`／`--compare-only` 比較報表的兩側都排除「全正的 query group」——組內每一筆候選的 label 都是正例（label 有分級時，每一筆都是同一個正值），不管怎麼排，它的組層級排序指標（mAP／precision／recall）都一樣、排法分不出好壞（CONTEXT.md 的**全正的 query group**）。比較報表的兩側各自依自己的列判定，候選列不對稱的組可能一側排除、一側保留，報表的 coverage 說明會寫出來。不論開或關都會多印全正組數與佔比，佔比超過 10%（寫死在程式，非設定鍵）就警告。**不套用**：報表名次分布段（正例平均名次除外）、training 的 test mAP 與 HPO 目標。唯一讀法是 `evaluation/metrics.py::drop_all_positive_groups`；值域檢查是 A49（`core/consistency.py`，[`pipeline-checks.md`](../operations/user-guides/pipeline-checks.md)）。
 
-`report.sections.popularity_baseline`、`report.sections.rank_distribution` 與 `report.sections.prediction_quality` 雖然在 `sections` 底下，卻是「算的」：組 pipeline 時，需求清單只放開著的段要讀的結果的計算（ADR-0031 原則 3，#538），所以設成 `false` 時 `compute_baseline_metrics`（連同 `compare_to_baseline`）／`compute_report_aggregates`／`compute_prediction_quality` 根本不在 pipeline 裡，不寫任何檔。把它們從 `false` 翻回 `true` 只重繪，報表會讀到沒算過的結果，所以指紋把它們算進去。反過來，關掉一段之後 `--only-node generate_report` 不讀那一段的結果：上一次留下的舊檔不會被讀到。
+`report.sections.popularity_baseline`、`report.sections.rank_distribution` 與 `report.sections.prediction_quality` 決定哪些計算在 pipeline 裡：組 pipeline 時，需求清單只放開著的段要讀的結果的計算（ADR-0031 原則 3，#538），所以設成 `false` 時 `compute_baseline_metrics`（連同 `compare_to_baseline`）／`compute_report_aggregates`／`compute_prediction_quality` 根本不在 pipeline 裡，不寫任何檔。它們不進那些計算的指紋：計算 node 不讀開關，開著算出來的東西不因開關而不同（ADR-0031 原則 5，#539）。把一段從 `false` 翻回 `true` 只重繪時，報表讀之前某次 run 留下的結果，照它讀的設定檢查：設定沒變就畫，變了就擋。檔案不在，切片會把它的計算拉回來。唯一的例外是 `popularity_baseline`：它關著時 `resolve_display_ks` 拿不到比較結果、不切熱門度段的 K，所以這個開關記在 `display_ks.json` 的指紋裡，翻回 `true` 只重繪會被擋，指示 `--from-node resolve_display_ks`。反過來，關掉一段之後 `--only-node generate_report` 不讀那一段的結果：上一次留下的舊檔不會被讀到。
 
 段落開關在哪裡讀、怎麼推出要跑哪些 node：每個報表段在自己的檔旁邊宣告 `READS`（它讀哪些結果）與 `SWITCH`（哪個開關關掉它，沒有就是 `None`）；`pipelines/evaluation/pipeline.py::required_results` 把開著的段的 `READS` 收起來，`create_pipeline` 只留產出這些結果、以及它們往上游要用到的 node。計算 node 不讀開關。
 
 判斷依據是 JSON 裡的指紋，不是檔案在不在：
 
-- 在指紋機制之前寫的 JSON 沒有 `config_fingerprint`，第一次接續會被擋下（訊息寫 `has no config_fingerprint`），照訊息重跑一次即可。
+- 在現行指紋格式之前寫的 JSON（#539 之前的也算）沒有這個格式的 `config_fingerprint`，第一次接續會被擋下（訊息寫 `has no config_fingerprint in the shape this version writes`），照訊息重跑一次即可。
+- 錯誤訊息把兩種不合分開列：`settings <node> applied`（這一步自己讀的設定變了）、`settings its input from <node> was computed with`（它讀的某份輸入當時用的設定變了，例如 `baseline_comparison.json` 自己不讀 `k_values`，但它的兩份指標是舊 K 算的）。
 - 指紋只看設定，不看資料。`label_table` 回補、預測重發布這類資料變更，要照下表自己決定重跑。
+- 有幾個會改變結果的設定沒有任何 step 宣告，改了只重畫**不會被擋**：`schema.*`、`dataset.test_zero_positive_group_ratio`、`hive.db`、`_compare_source_tables`（比較對象 B 從哪張表讀）。改它們要自己 full run（追蹤票 #564）。
 
 與上表設定無關、但同樣要決定怎麼重跑的情況：
 
@@ -837,11 +839,11 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 - 使用 `--compare-only` 前，先確認最後一次建立 Model A enriched data 的模式。
 - 若同一模型同一日期需要長期保留兩種評估情境，現有儲存鍵不足，需另加 scenario partition 或獨立 evaluation version。
 
-指紋機制（§7.2 新增的「切換執行模式」列）只擋得住**同一次評估流程**裡、模式切換之後才做的部分重跑（例如跑完 `--post-training` 再用另一種模式 `--only-node generate_report`）：每份落地產物的指紋都含 `post_training`，不合就 raise，並指示從 `prepare_eval_data` 重跑。`prepare_eval_data` 跟 partition 一起寫的 `segment_columns.json` 也帶指紋，讀表的 node 只比對其中五個決定 `prepare_eval_data` 產出的鍵（`post_training` 是其中之一，見 4.6 節）；partition 自己也帶指紋（含 `post_training`，見 7.1 節），所以「另一種模式的完整執行蓋掉了這個月，再回頭接續前一種模式」會在讀表時被擋下。擋不住的是**不接續、直接把兩種模式各自完整跑完**：後跑的那次會重寫 partition 與報表，前一次的結果就沒了——指紋比對的是設定，不會替你保留被覆寫的內容，仍需照上面幾條手動判斷。
+指紋機制（§7.2 新增的「切換執行模式」列）只擋得住**同一次評估流程**裡、模式切換之後才做的部分重跑（例如跑完 `--post-training` 再用另一種模式 `--only-node generate_report`）：`prepare_eval_data` 與 `compute_prediction_quality` 讀 `post_training`，讀這張表的每份結果也把 `prepare_eval_data` 的紀錄帶在指紋裡，所以不合就 raise，並指示從 `prepare_eval_data` 重跑。`prepare_eval_data` 跟 partition 一起寫的 `segment_columns.json` 也帶指紋，只記 `prepare_eval_data` 讀的五個鍵（`post_training` 是其中之一，見 4.6 節）；partition 自己也帶指紋（含 `post_training`，見 7.1 節），所以「另一種模式的完整執行蓋掉了這個月，再回頭接續前一種模式」會在讀表時被擋下。擋不住的是**不接續、直接把兩種模式各自完整跑完**：後跑的那次會重寫 partition 與報表，前一次的結果就沒了——指紋比對的是設定，不會替你保留被覆寫的內容，仍需照上面幾條手動判斷。
 
 ### 7.4 部分重跑的安全邊界
 
-- `catalog.exists()` 只能確認產物存在，不能證明內容來自目前 evaluation settings、label snapshot 或預測資料。設定這一半由指紋補上：落地 JSON 帶 `config_fingerprint`，讀到與目前「算的」設定不合的 JSON 會 raise（見 7.2 節）。label snapshot 與預測資料沒有指紋，資料變了仍要自己決定重跑。
+- `catalog.exists()` 只能確認產物存在，不能證明內容來自目前 evaluation settings、label snapshot 或預測資料。設定這一半由指紋補上：落地 JSON 帶 `config_fingerprint`，記產出它的 step 讀的設定與它的輸入當時用的，讀到與目前設定不合的 JSON 會 raise（見 7.2 節）。label snapshot 與預測資料沒有指紋，資料變了仍要自己決定重跑。
 - **這條對 row-level 資料也成立。** `enriched_eval_predictions` 落地之後（[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1），從 `prepare_eval_data` 之後接續會讀表、不重做 join。CLI 只替你問「評估日期的 partition 在不在」（不在就把 `prepare_eval_data` 拉回來），`segment_columns.json` 與 partition 自帶的指紋替你擋「決定 partition 內容的設定變了、或 partition 被另一組設定的執行蓋掉」（見 4.6 節）；partition 在、設定也沒變，但 `label_table` 回補或預測重發布過，讀到的就是舊的列，不會報錯。資料變了要 `--from-node prepare_eval_data` 或 full run。
 - `generate_report` 的輸入（列的事實、指標、baseline、report aggregates、預測品質、比較層與 K 截斷）都已落地，因此從該 node 接續不補跑任何 node，不重算任何指標（見 4.6 節）。已落地的 JSON 讀回時照指紋檢查，不是照單全收；改了「算的」設定、或改了 `report.display.compare_k` 而只做這個接續，會在 `generate_report` 被指紋擋下並提示該 `--from-node` 哪個 node，不會悄悄沿用舊結果。指紋只看設定、不看資料：`label_table` 回補或預測重發布之後只做這個接續，畫出來的是上一次 run 的指標（#351 之前這個接續會順便重算指標與 baseline，但 report aggregates 本來就沿用舊的）。資料變了要 `--from-node prepare_eval_data` 或 full run。差值與 K 截斷的產物（`baseline_comparison.json`、`source_comparison.json`、`display_ks.json`、`comparison_display_ks.json`）複製了它們讀的數字：資料變了之後只用 `--only-node` 重跑上游某個 node（例如 `compute_metrics`）再重畫，同一頁可能印出新舊兩個數字，而且不報錯。要用 `--from-node`，讓下游一起重算。
 - `enriched_eval_predictions` 是 evaluation 唯一的 row-level 落地產物：`prepare_eval_data` 寫一次，同一次 run 的其他 node 與之後的 `--compare-only` 都讀它；`--compare-only` 會先驗證指定 model/date partition 非空。
@@ -863,7 +865,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 | `compute_row_facts postcondition: N evaluated months ... expected exactly M` | 某個評估日期的 `enriched_eval_predictions` partition 是空的或沒寫過（多半是從 `prepare_eval_data` 之後接續） | 照訊息 `--from-node prepare_eval_data` 重跑 |
 | `N duplicated label_table key(s) on [...]` | `label_table` 在該月的 `time + entity + item` 上有重複列 | 在上游去重。evaluation 不替你挑一列：重複的 key 會讓 LEFT JOIN 把候選複製成多列、rank 全錯，而且不會報錯 |
 | `Type conflict writing to Hive table '…enriched_eval_predictions' (rank: … ／ label: …)` | 這張表是舊版寫的：當時 `--post-training` 補出來的 `rank` 是 INT（現在是 BIGINT），監控模式的 `label` 沿用 `label_table` 的型別（現在一律 INT） | 表內容可由重跑 evaluation 重建：DROP 這張表，再對需要的月份重跑。同一模式重跑也會撞，不是只有換模式；這張表跨所有 model_version 與月份，DROP 之後到重跑之前 `--compare-only` 找不到 Model A |
-| `Evaluation artifacts on disk do not match the current computed settings` | 改了「算的」設定之後只重繪（例如只做 `--only-node generate_report`）；或磁碟上的 JSON 是指紋機制之前寫的（訊息寫 `has no config_fingerprint`） | 照訊息最後一行的 `--from-node` 重跑。只改了「畫的」鍵卻看到它，先對照 7.2 節確認那個鍵的分類（`report.display.compare_k` 的接續點是 `resolve_display_ks`） |
+| `Evaluation artifacts on disk do not match today's settings` | 改了「算的」設定之後只重繪（例如只做 `--only-node generate_report`）；或磁碟上的 JSON 是現行指紋格式之前寫的（訊息寫 `has no config_fingerprint in the shape this version writes`）。每份過期產物底下分開列「這一步讀的設定」與「它的輸入當時用的設定」 | 照訊息最後一行的 `--from-node` 重跑。只改了「畫的」鍵卻看到它，先對照 7.2 節確認那個鍵的分類（`report.display.compare_k` 與 `report.sections.popularity_baseline` 的接續點是 `resolve_display_ks`） |
 | `(A22) evaluation.snap_date=... is not a test month`（多個日期時是 `evaluation.snap_date date(s) [...] are not test months`），還沒起 Spark | 帶了 `--post-training`，但該月（或列出的那幾個月）不在 `dataset.test_snap_dates` | 把該月加進 `dataset.test_snap_dates` 並補跑 dataset ＋ predict（見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)），或把 `evaluation.snap_date` 指回已設定的月份 |
 | `A61: 'evaluation.diagnosis' ...`，還沒起 Spark | 設定裡還寫著 `evaluation.diagnosis` 這一段（含 `ci`）；診斷整批拿掉（#532），沒有程式讀它，不論值是什麼都擋 | 刪掉整段 `diagnosis:`，沒有替代的設定鍵 |
 | `A34: evaluation.report.sections declares [...]`／`does not declare [...]`，還沒起 Spark | `sections` 多了沒有程式讀的鍵（常見：舊設定還留著 `guardrail_recall`、`per_item_attr`、`category`、`per_segment`），或少了程式讀的鍵（常見：v0.4.0 以前的設定少了 `prediction_quality`） | 多的刪掉；少的照訊息反引號裡的值補（`prediction_quality` 是 `false`，其餘是 `true`，這樣行為跟沒寫時一樣）。該有哪些鍵見 3.5 節 |
@@ -912,7 +914,7 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 - HTML 由 driver 組裝；雖然 row-level 計算留在 Spark，過多 items、segments、K 或 Plotly 圖表仍會增加報表大小與 driver 負擔。
 - 報表沒有自動 pass/fail threshold。模型是否 promotion 仍需由使用者依整體、per-item、per-segment、baseline 與業務限制人工判斷。
 - 評估多個日期時，目錄名只看起迄兩端（見 7.1 節），而且 baseline 的月度趨勢表在視窗重疊時會重複計數（見 3.4 節）。
-- `--compare-only` 只重畫（`--only-node generate_comparison_report`）時，帶不帶 `--post-training` 要跟寫那份比較結果時一樣。比較產物的設定指紋含 `post_training`，旗標不同就被擋下並建議 `--from-node compute_compare_metrics`，即使資料其實沒變：這是寧可多擋的取捨。
+- `--compare-only` 不拿寫分區那次 run 的設定（`post_training`、分群設定）跟今天比：那個模式讀的是之前一般 run 寫的分區，今天的旗標說不出它們。代價：一般 run 用別的分群設定重寫了目錄之後，`--compare-only --only-node generate_comparison_report` 會畫出重寫前算的比較，不報錯。重寫過目錄就 `--compare-only` 不帶切片旗標重跑（ADR-0031 原則 5〈#539 怎麼做的〉）。
 
 ## 10. 相關文件
 

@@ -170,7 +170,8 @@ def _landed(params, joined=()):
         fingerprint,
     )
 
-    return {"joined": list(joined), "config_fingerprint": fingerprint(params)}
+    return {"joined": list(joined),
+            "config_fingerprint": fingerprint(params, "prepare_eval_data")}
 
 
 def _read(table, params, joined=(), **kwargs):

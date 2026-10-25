@@ -4,13 +4,14 @@ from recsys_tfb.core.node import Node
 from recsys_tfb.core.pipeline import Pipeline
 
 
-def _comparison_nodes(compare_only: bool) -> list[Node]:
+def _comparison_nodes(compare_only: bool, run_nodes: list[str]) -> list[Node]:
     """The comparison chain, one copy for ``--compare`` and ``--compare-only``
     (#536): B's rows aligned with A's, both sides' facts and metrics landed,
     compared, K cut, drawn. The mode reaches the nodes whose behaviour
     depends on it through their factories: which settings side A's
     partitions are checked against (``restrict_to_common``), and where a
-    stale input's refusal sends the re-run (the three readers).
+    stale input's refusal sends the re-run (the readers, through
+    ``run_nodes``: see :func:`create_pipeline`).
 
     Only ``compute_compare_metrics`` runs Spark after the alignment; the
     nodes after it read landed JSON, so ``--only-node
@@ -59,7 +60,7 @@ def _comparison_nodes(compare_only: bool) -> list[Node]:
                      "compare_row_facts_b", "compare_metrics_b"],
         ),
         Node(
-            make_compare_to_source_node(compare_only),
+            make_compare_to_source_node(run_nodes),
             inputs={
                 "compare_metrics_a": "compare_metrics_a",
                 "compare_metrics_b": "compare_metrics_b",
@@ -68,7 +69,7 @@ def _comparison_nodes(compare_only: bool) -> list[Node]:
             outputs="source_comparison",
         ),
         Node(
-            make_resolve_comparison_display_ks_node(compare_only),
+            make_resolve_comparison_display_ks_node(run_nodes),
             inputs={
                 "source_comparison": "source_comparison",
                 "parameters": "parameters",
@@ -78,7 +79,7 @@ def _comparison_nodes(compare_only: bool) -> list[Node]:
         # By name (ADR-0030 decision 8), like generate_report: every
         # parameter is named after the entry it reads.
         Node(
-            make_generate_comparison_report_node(compare_only),
+            make_generate_comparison_report_node(run_nodes),
             inputs={
                 "compare_coverage": "compare_coverage",
                 "compare_row_facts_a": "compare_row_facts_a",
@@ -161,6 +162,14 @@ def create_pipeline(
         ``evaluation_item_categories`` (#379) for the category table it read
         — optional, see its catalog entry.
 
+    The readers that refuse a stale result and are built here are given the
+    run's nodes in topological order, to
+    name the re-run from (``config_fingerprint.rerun_node``): which nodes a
+    run has follows the mode and the switches, so no fixed list names one
+    that is surely there. The list is filled once the pipeline is cut, before
+    any node runs; a slice reuses the nodes, so it keeps the full run's order,
+    which is what ``--from-node`` is resolved against.
+
     ``baseline_rate`` (the CLI's ``baseline_scores_by_rate``, #397: ``score:
     rate`` under ``--post-training``) adds ``build_popularity_period_counts``
     and hands its table and month plan to ``compute_baseline_metrics`` as a
@@ -184,6 +193,7 @@ def create_pipeline(
         validate_enriched_eval_predictions_present,
     )
 
+    run_nodes: list[str] = []
     if compare_only:
         # CLI A12 ensures compare_source is not None when compare_only is True.
         # The catalog loads "enriched_eval_predictions" with WHERE
@@ -197,14 +207,16 @@ def create_pipeline(
         # see make_restrict_to_common_node.
         # No section of the comparison report has a switch, so the
         # requirement list keeps every node here.
-        return Pipeline([
+        pipeline = Pipeline([
             Node(
                 validate_enriched_eval_predictions_present,
                 inputs=["enriched_eval_predictions",
                         "evaluation_segment_columns", "parameters"],
             ),
-            *_comparison_nodes(compare_only=True),
+            *_comparison_nodes(compare_only=True, run_nodes=run_nodes),
         ])
+        run_nodes[:] = [n.name for n in pipeline.nodes]
+        return pipeline
 
     predictions_input = (
         "training_eval_predictions" if post_training else "ranked_predictions"
@@ -219,11 +231,8 @@ def create_pipeline(
     nodes = [
         # The join is computed here once and lands as this month's partition;
         # dynamic partition overwrite replaces that partition only. The
-        # category table (#379) is a third output rather than a node of its
-        # own: a node between this one and compute_row_facts would move
-        # compute_row_facts after compute_prediction_quality /
-        # compute_report_aggregates, and `--from-node compute_row_facts`
-        # would then leave those stale.
+        # category table (#379) is a third output; where it comes from:
+        # prepare_eval_data.
         # `preprocessor_on_disk` last (#379): with the item list counted from
         # the data, the evaluated model's list is read off it and landed for a
         # hand mapping to be checked against. Optional, so an evaluation that
@@ -237,8 +246,7 @@ def create_pipeline(
         ),
         # The facts of the evaluated rows (ADR-0031 decision 4), landed once
         # for the model's metrics, the baseline's and the report. Before
-        # both metrics nodes, which count off it: it is the first
-        # fingerprinted producer, where COMPUTED_KEYS sends a re-run.
+        # both metrics nodes, which count off it.
         Node(
             compute_row_facts,
             inputs=["enriched_eval_predictions", "evaluation_segment_columns",
@@ -368,15 +376,17 @@ def create_pipeline(
         )
     nodes.append(Node(
         make_generate_report_node(
-            {name: producers[name] for name in main_reads}),
+            {name: producers[name] for name in main_reads}, run_nodes),
         inputs={name: name for name in (*main_reads, "parameters")},
         outputs=MAIN_REPORT,
     ))
     if compare_source is not None:
-        nodes += _comparison_nodes(compare_only=False)
+        nodes += _comparison_nodes(compare_only=False, run_nodes=run_nodes)
     # Decision — keep only the nodes the drawn reports need: what produces
     # the results they read, and what those read in turn. A node with no
     # output (a gate like --compare-only's) is never anyone's producer and
     # would be cut here: such a gate on this line must be added back after
     # the cut, as --compare-only's skips the cut altogether.
-    return Pipeline(nodes).only_nodes_with_outputs(list(required))
+    pipeline = Pipeline(nodes).only_nodes_with_outputs(list(required))
+    run_nodes[:] = [n.name for n in pipeline.nodes]
+    return pipeline
