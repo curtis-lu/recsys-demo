@@ -22,27 +22,23 @@ def require_prepared_with_current_config(
     item_categories: Optional[dict] = None,
 ) -> None:
     """Pre-check (inputs): the ``evaluation_segment_columns`` this run's
-    directory holds — and ``evaluation_item_categories``, when the reader was
-    given one — was landed under today's values of the settings
-    ``prepare_eval_data`` applies.
+    directory holds — and
+    ``evaluation_item_categories``, when given — was landed under today's
+    values of the settings ``prepare_eval_data`` applies.
 
-    ``prepare_eval_data`` lands that JSON together with the partitions, and the
-    readers group by its ``joined`` list. Unchecked, ``--from-node
+    The readers group by its ``joined`` list. Unchecked, ``--from-node
     compute_metrics`` after a change to ``segment_columns`` segments by the old
-    list and writes ``metrics.json`` under the new fingerprint, which
-    ``generate_report`` then accepts, exit code 0. A change to a setting only a
-    later step applies leaves it current: the partition is read back from
-    Hive, so a re-run starting after ``prepare_eval_data`` could never make it
-    current again.
+    list and writes ``metrics.json`` under the new fingerprint, exit code 0.
+    Only that step's settings: a re-run starting after it never rewrites the
+    file, so a later step's setting would leave it stale for good.
 
-    It does not stand for the partitions themselves: one date's
-    partition is also written by runs over other dates, whose JSON lands in
-    another directory. Each partition carries its own fingerprint, checked by
-    ``restrict_to_current_eval_partitions``.
+    It does not vouch for the partitions: one date's partition is also written
+    by runs over other dates, whose JSON lands in another directory
+    (``restrict_to_current_eval_partitions`` checks each partition).
 
     ``item_categories`` is ``None`` when its optional catalog entry finds no
-    file; that is only a problem in column mode, where
-    :func:`item_categories.landed_category_mapping` refuses it.
+    file; ``item_categories.landed_category_mapping`` refuses that in column
+    mode.
     """
     artifacts = [LoadedArtifact(
         catalog_name="evaluation_segment_columns (landed with the "
@@ -71,13 +67,11 @@ def require_row_facts_current(row_facts: dict, parameters: dict) -> None:
 
 
 #: Where a comparison artifact computed against another compare source sends
-#: the re-run, in both modes. The first node whose output is side B's
-#: numbers: its inputs are memory-only frames, so its slice pulls
-#: ``load_compare_predictions`` and
-#: ``restrict_to_common`` back with it (the coverage is rewritten too), and
-#: under ``--compare`` runs no Spark node of the main line — every node of
-#: that line sorting after it reads landed JSON only.
-#: ``test_pipeline.py::TestTheComparisonReRunsOnItsOwn`` pins both.
+#: the re-run, in both modes: the first node whose output is side B's numbers.
+#: Its inputs are memory-only frames, so its slice pulls back
+#: ``load_compare_predictions`` and ``restrict_to_common`` (rewriting the
+#: coverage) and, under ``--compare``, no Spark node of the main line
+#: (``test_pipeline.py::TestTheComparisonReRunsOnItsOwn``).
 COMPARISON_RERUN_NODE = "compute_compare_metrics"
 
 
@@ -86,25 +80,17 @@ def require_comparison_inputs_current(
     run_nodes: Optional[Sequence[str]],
 ) -> None:
     """Pre-check (inputs) of every node reading a comparison artifact: each
-    was computed under today's settings, and against today's
-    compare source (``compare_sources.compare_source_identity``, recorded
-    under ``COMPARE_SOURCE_KEY``; ADR-0031 decision 5).
+    was computed under today's settings and against today's compare source
+    (``compare_sources.compare_source_identity``; ADR-0031 decision 5).
 
-    The fingerprint leaves ``evaluation.compare`` out on purpose
-    (``config_fingerprint``: the CLI injects it per run), so without the
-    second check a redraw after switching the compared source, or changing
-    its ``prod_mapping``, would print the old source's numbers under the new
-    one's label, exit code 0.
+    The second check is needed: the fingerprint leaves ``evaluation.compare``
+    out (``config_fingerprint``), so without it a redraw after switching the
+    compared source, or changing its ``prod_mapping``, would print the old
+    source's numbers under the new one's label, exit code 0.
 
-    The advice names a node of the run (ADR-0031 decision 15, first row),
-    the first of ``run_nodes`` applying a changed setting: under
-    ``--compare`` a main-line one when the run has one (the main line is
-    stale too, and a slice from the comparison would stop at
-    ``generate_report``); under ``--compare-only``, which has no main line,
-    a comparison step, and the record of the run that prepared the
-    partitions is not compared with today's settings (it is not among
-    ``run_nodes``). Another source is
-    :data:`COMPARISON_RERUN_NODE` in both.
+    A changed setting is sent to the first of ``run_nodes`` applying it
+    (``config_fingerprint.rerun_node``; ADR-0031 decision 15), another source
+    to :data:`COMPARISON_RERUN_NODE`.
     """
     require_computed_with_current_config(
         artifacts, parameters, run_nodes=run_nodes)

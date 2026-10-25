@@ -95,20 +95,20 @@ def monthly_purchase_counts(
 
 
 def positive_rate_block(period_counts, snap_dates, lookback_months, parameters):
-    """The rate mode's report numbers (#397), from the period counts.
+    """The rate mode's report numbers, from the period counts.
 
-    ``candidates`` / ``positives`` per item are over the periods the evaluated
-    dates' windows cover, **each period once** however many windows cover it,
-    and ``rate`` divides the two (so "rate = positives ÷ candidates" holds on
-    every row of the report). With one date that is the rate the baseline
-    ranked by; with several, each date ranked by its own window's rate and
-    this is their pooled one — summing per window instead would multiply an
+    Over the periods the evaluated dates' windows cover, **each period once**
+    however many windows cover it: summing per window would multiply an
     overlapping period's candidates by the number of dates, and the printed
-    denominator is the reader's cue for an unreliable rate.
-    ``monthly_positives`` is the same numerator by calendar month;
-    ``window_months_covered`` counts each window's months with candidate
-    rows, one date or several. Two small collects: the table is one row per
-    period × item.
+    denominator is the reader's cue for an unreliable rate. With several
+    dates this is their pooled rate, not the one any single date ranked by.
+    Both collects are small: the table is one row per period × item.
+
+    * ``rate``: ``positives ÷ candidates``, per item.
+    * ``candidates``, ``positives``: per item.
+    * ``monthly_positives``: ``positives`` per item and calendar month.
+    * ``window_months_covered``: per window, how many of its months have
+      candidate rows.
     """
     item_col = get_schema(parameters)["item"]
     candidates: dict[str, int] = {}

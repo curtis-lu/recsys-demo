@@ -312,38 +312,25 @@ def trim_to_common_with_coverage(
     segment_columns: dict,
     parameters: dict,
 ) -> tuple[SparkDataFrame, SparkDataFrame, dict]:
-    """Call the pure restrict function + capture coverage dict.
+    """``trim_to_common_universe``, plus the coverage:
+    ``(a_common, b_common, coverage)``.
 
-    ``eval_predictions`` is already kept to the evaluated dates and checked
-    (``make_restrict_to_common_node``).
+    ``eval_predictions`` is already kept to the evaluated dates and its
+    partitions checked (``make_restrict_to_common_node``), so
+    ``segment_columns.json``'s own fingerprint is not compared here.
 
-    Returns ``(a_common, b_common, coverage)`` — the coverage carries
-    full-universe sizes, the common sizes and dropped item lists so the
-    report can show what was filtered. It lands (``compare_coverage``, #536)
-    with ``config_fingerprint`` — inheriting ``segment_columns``' record, the
-    settings A's partitions were written under — and the compare source it
-    was computed against (``compare_sources.compare_source_identity``),
-    which every reader of it checks; the two frames stay in memory.
+    The coverage lands as ``compare_coverage``, with the fingerprint it
+    inherits from ``segment_columns`` and the compare source; its readers
+    check both. The two frames stay in memory.
 
-    Population size is counted in **query groups** — distinct
-    ``query_group_columns`` combinations (time, every column of
-    ``schema.entity``, and ``occasion`` when declared) — because that is the
-    unit mAP divides by. Reporting it in any other unit puts two different
-    scales side by side in one table with nothing telling the reader they
-    differ. See ``docs/adr/0015-compare-population-counted-in-query-groups.md``.
+    Sizes are counted in **query groups** (``query_group_columns``), the unit
+    mAP divides by; any other unit would put two scales side by side in one
+    table (ADR-0015).
 
-    The common count is taken from what the restriction kept, not re-derived
-    from the raw frames (ADR-0020 bug 14): an ``intersect`` of the raw query
-    groups matches ``NULL == NULL`` while the restriction's equi-join drops
-    null keys, so it would count groups no metric saw.
-
-    The node does not compare ``segment_columns.json``'s own fingerprint with
-    today's settings; it checks the partitions it reads instead. Under
-    ``--compare`` A's partitions are checked against today's settings, so a
-    sliced ``--from-node compute_compare_metrics`` after a settings change
-    raises. Under ``--compare-only`` they are checked against the settings that
-    JSON records, because ``post_training`` is inert there (ADR-0020 bug 6, #352
-    correction, and its #374 addendum).
+    The common count is taken from what the restriction kept, not from the raw
+    frames (ADR-0020 bug 14): an ``intersect`` of the raw query groups matches
+    ``NULL == NULL`` where the restriction's equi-join drops null keys, so it
+    would count groups no metric saw.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -381,10 +368,9 @@ def trim_to_common_with_coverage(
     coverage = {
         "kind_a": "model_version",
         "model_version_a": parameters.get("model_version", "(this run)"),
-        # This run's side is read off the table pipeline.py wires as this
-        # node's first input, in both compare modes — the same table a
-        # model_version source names as its `source`; the comparison report
-        # prints it beside the compared source's (#537).
+        # A literal: the table pipeline.py wires as this node's first input in
+        # both compare modes, named the way a model_version source names its
+        # `source`, since the comparison report prints the two side by side.
         "source_a": "enriched_eval_predictions",
         "kind_b": src.get("kind", ""),
         "model_version_b": src.get("model_version", "n/a"),
@@ -397,8 +383,8 @@ def trim_to_common_with_coverage(
         "n_item_common": len(common_items),
         "dropped_items_A": sorted(universe.a_items - common_items),
         "dropped_items_B": sorted(universe.b_items - common_items),
-        # Lands as compare_coverage (#536): the redraw reads it back, so it
-        # says what it was computed under and against.
+        # The redraw reads the landed coverage back, so it records what it
+        # was computed under and against.
         "config_fingerprint": fingerprint(
             parameters, "restrict_to_common", (segment_columns,)),
         COMPARE_SOURCE_KEY: compare_source_identity(parameters),

@@ -84,24 +84,24 @@ def category_of_each_item(rows: Iterable[tuple]) -> dict:
 def landed_category_mapping(
     item_categories: Optional[dict], parameters: dict
 ) -> Optional[dict]:
-    """The ``{item: category}`` table the category pass ranks by: the one
-    ``prepare_eval_data`` read off ``evaluation.item_categories.column`` in
-    column mode (#379); with the item list counted from the data, the
-    hand-written mapping resolved against the evaluated model's item list
-    that ``prepare_eval_data`` landed beside it (``known_items``); else
-    ``None`` — "take the hand-written mapping from ``parameters``", as before.
+    """The ``{item: category}`` table the category pass ranks by:
 
-    Pre-checks (inputs), one per mode that reads the landed file:
+    * column mode: the one ``prepare_eval_data`` read off
+      ``evaluation.item_categories.column``;
+    * item list counted from the data: the hand-written mapping, resolved
+      against the evaluated model's item list landed beside it
+      (``known_items``);
+    * otherwise ``None``: the hand-written mapping in ``parameters`` applies.
 
-    * column mode: the table was read off today's column. It catches what
-      the fingerprint cannot — a table missing altogether — and the
-      ``--compare-only`` path, which compares nothing with today's settings.
-      Otherwise a table from another column, or none, would be ranked or
-      silently replaced by every item its own category.
-    * item list counted from the data, categories enabled: the landed file
-      carries ``known_items``. Without it the hand mapping has no list to be
-      checked against — the conf holds none in this mode — so the run stops
-      and names the node to re-run, rather than skipping the check.
+    Pre-checks (inputs):
+
+    * column mode: the table was read off today's column. The fingerprint
+      misses a table missing altogether and the ``--compare-only`` path;
+      unchecked, a table from another column would be ranked, and with none
+      every item would silently be its own category.
+    * item list counted from the data, categories on: ``known_items`` is
+      there. The conf holds no list in this mode, so without it the mapping
+      could not be checked; the run stops rather than skip the check.
     """
     column = item_category_column(parameters)
     if column is None:

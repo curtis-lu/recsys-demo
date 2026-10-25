@@ -12,11 +12,8 @@ from recsys_tfb.core.consistency import DataConsistencyError
 def require_zero_positive_group_weights(
     eval_predictions: SparkDataFrame, weight_col: str,
 ) -> None:
-    """Pre-check: every evaluated row carries a zero-positive group weight.
-
-    Raises ``DataConsistencyError`` naming both fixes. One action over one
-    column; ``limit(1)`` stops at the first NULL, so a mismatch answers fast.
-    """
+    """Pre-check (inputs): every evaluated row carries a zero-positive group
+    weight."""
     missing = weight_col not in eval_predictions.columns
     if not missing and eval_predictions.filter(
         F.col(weight_col).isNull()
