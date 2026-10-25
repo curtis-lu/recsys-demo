@@ -200,7 +200,7 @@ node 裡的 `raise` 本身合法：`core/consistency.py` 的 legend 登記了「
 
 ## 13. docstring 講「為什麼是這個答案」，不講簽章已經說過的事
 
-所有註解與 docstring 都適用的規則（寫程式碼看不出來的事、每句 durable、一件事只講一次、超過 10 行逐句檢查）在 [`code-comments.md`](code-comments.md)。node 的 docstring 另外要寫簽章說不出來的三件事：
+所有註解與 docstring 都適用的規則（寫程式碼看不出來的事、每句 durable、一件事只講一次、只留拿掉會出事的句子）在 [`code-comments.md`](code-comments.md)。node 的 docstring 另外要寫簽章說不出來的三件事：
 
 1. **為什麼不是另一種做法**：「LEFT + COALESCE，never INNER：INNER 會靜默丟掉 miss，而 miss 是這個 frame 的大多數」。
 2. **選錯的後果，以及會不會有錯誤訊息。** 會靜默出錯的，一律寫出來。
