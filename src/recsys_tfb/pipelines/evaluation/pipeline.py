@@ -390,3 +390,62 @@ def create_pipeline(
     pipeline = Pipeline(nodes).only_nodes_with_outputs(list(required))
     run_nodes[:] = [n.name for n in pipeline.nodes]
     return pipeline
+
+
+def result_readers_table() -> dict[str, dict]:
+    """Who produces and who reads each landed result, with the blocks it
+    holds (ADR-0031 principle 2, supplement 2): nothing is hand-written here,
+    the table is the join of three declarations. No Spark.
+
+    * the wiring of ``create_pipeline`` with every section on, a compare
+      source given and ``baseline_rate`` on, together with the
+      ``--compare-only`` pipeline (a subset, but built apart): the nodes that
+      produce a result and the nodes that take it as input;
+    * the ``READS`` and ``SWITCH`` of every section of both reports, whether
+      or not the switch is on;
+    * the ``Produces`` declared in ``nodes.py``.
+
+    Returns ``{result: {"blocks": tuple[Block, ...], "producers": [node name],
+    "reader_nodes": [node name], "reader_sections": [(report catalog name,
+    section, SWITCH)]}}`` for every declared result, in declaration order.
+    """
+    from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
+    from recsys_tfb.evaluation import report_builder
+    from recsys_tfb.evaluation.comparison import report as comparison
+    from recsys_tfb.pipelines.evaluation import nodes
+    from recsys_tfb.pipelines.evaluation.steps.result_blocks import (
+        declared_results,
+    )
+
+    declared = declared_results(nodes)
+    every_section_on = {"evaluation": {"report": {"sections": {
+        name: True for name in EVALUATION_REPORT_SECTIONS}}}}
+    source = {"kind": "model_version", "model_version": "other"}
+    pipelines = [
+        create_pipeline(parameters=every_section_on, post_training=True,
+                        compare_source=source, baseline_rate=True),
+        create_pipeline(parameters=every_section_on, compare_source=source,
+                        compare_only=True),
+    ]
+    table = {
+        result: {"blocks": produces.blocks, "producers": [],
+                 "reader_nodes": [], "reader_sections": []}
+        for result, produces in declared.items()
+    }
+    for pipeline in pipelines:
+        for node in pipeline.nodes:
+            for name in node.outputs:
+                if name in table and node.name not in table[name]["producers"]:
+                    table[name]["producers"].append(node.name)
+            for name in node.inputs:
+                if name in table and node.name not in table[name]["reader_nodes"]:
+                    table[name]["reader_nodes"].append(node.name)
+    for report, sections in ((MAIN_REPORT, report_builder.SECTIONS),
+                             (COMPARISON_REPORT, comparison.SECTIONS)):
+        for section in sections:
+            for name in section.READS:
+                if name in table:
+                    table[name]["reader_sections"].append(
+                        (report, section.__name__.rsplit(".", 1)[-1],
+                         section.SWITCH))
+    return table
