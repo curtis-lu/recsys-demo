@@ -2,7 +2,7 @@
 
 寫或改 `src/`、`tests/`、`scripts/` 裡的 `#` 註解或 docstring 時照這份做。log 訊息、報表文字這類會給使用者看的字串不在範圍。
 
-目標是**瘦**：每句都刪不得（規則 4）。
+目標是**瘦**：只留拿掉會出事的句子（規則 4）。
 
 - 註解一律英文（`pipeline-node-design.md` 總表下方的體例）。
 - node 的 docstring 另外要寫的三件事，見 [`pipeline-node-design.md`](pipeline-node-design.md) 規則 13。
@@ -77,7 +77,7 @@ no edit.
 """
 ```
 
-## 4. 寫瘦：每句都刪不得
+## 4. 只留拿掉會出事的句子
 
 只留刪了就可能讓人改壞程式的句子。逐句問：「改這段的人沒讀到這句，會做錯什麼？」答不出來，刪整句。
 
@@ -93,7 +93,7 @@ no edit.
 
 刪一句之前，grep 有沒有別處指著它（`see the docstring`、`above`）；有的話，一起改。
 
-函式 docstring 或一段 `#` 註解超過 10 行，就把整份逐句問一遍。模組 docstring 不看行數，每句照樣要刪不得。
+函式 docstring 或一段 `#` 註解超過 10 行，就把整份逐句問一遍。模組 docstring 不看行數，但一樣只留拿掉會出事的句子。
 
 例（`src/recsys_tfb/pipelines/evaluation/nodes.py:1896`，`resolve_comparison_display_ks`）：
 
