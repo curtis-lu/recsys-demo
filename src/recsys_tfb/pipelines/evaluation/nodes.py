@@ -10,12 +10,14 @@ whose pre-check advice depends on the compare mode (``compare_to_source``,
 The architecture audit's AST scan reads top-level definitions only, so it
 does not see those nodes' definitions (ADR-0019 decision 2).
 
-The mechanisms these nodes call come from two places: ``steps/``, which nothing
-outside this pipeline imports, and the ``recsys_tfb.evaluation`` library. The
-library also holds ``baselines``, although only these nodes call its Spark
-functions, because the shared report builder imported it (ADR-0019, correction
-to the caller facts). Since #536 the report reads the landed results through
-``evaluation.result_readers`` and imports ``baselines`` no longer.
+The mechanisms these nodes call come from three places: ``steps/`` and the
+reports in ``report/``, which nothing outside this pipeline imports, and the
+``recsys_tfb.evaluation`` library. The library also holds ``baselines``,
+although only these nodes call its Spark functions: it scores by popularity,
+the simplest model, and the library holds a module by its role, not by who
+calls it (ADR-0031 principle 6, the 2026-10-25 correction). Since #536 the
+report reads the landed results through ``evaluation.result_readers`` and
+imports ``baselines`` no longer.
 """
 
 import logging
@@ -23,7 +25,6 @@ from collections.abc import Mapping, Sequence
 from typing import Optional
 
 from pyspark.sql import DataFrame as SparkDataFrame
-from pyspark.sql import functions as F
 
 from recsys_tfb.core.consistency import (
     PREDICTION_QUALITY_DEFAULTS,
@@ -31,18 +32,13 @@ from recsys_tfb.core.consistency import (
     DataConsistencyError,
     item_category_column,
     item_category_conflict_errors,
-    item_categories_enabled,
     item_list_counted_from_data,
     test_carries_zero_positive_group_weight,
 )
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.baselines import (
-    CANDIDATES_COL,
-    POSITIVES_COL,
     baseline_score,
     build_baseline_frame,
-    compute_monthly_candidate_counts_by_window,
-    compute_monthly_candidate_counts_in_windows,
     compute_period_candidate_counts,
     compute_positive_rates,
     compute_purchase_counts,
@@ -50,18 +46,14 @@ from recsys_tfb.evaluation.baselines import (
     resolve_lookback_months,
     restrict_to_periods,
 )
-from recsys_tfb.evaluation.comparison.report import assemble_comparison_report
-from recsys_tfb.evaluation.diagnostics_spark import aggregate_report_diagnostics
 from recsys_tfb.evaluation.metrics_spark import (
     compute_all_metrics,
     compute_row_facts as _count_row_facts,
-    hand_category_mapping,
 )
 from recsys_tfb.evaluation.prediction_quality import (
     aggregate_score_bins,
     build_payload,
 )
-from recsys_tfb.evaluation.report_builder import assemble_report
 from recsys_tfb.evaluation.result_readers import (
     ALL_K_KEY,
     ALL_POSITIVE_KEY,
@@ -80,6 +72,10 @@ from recsys_tfb.evaluation.result_readers import (
     drop_all_positive_groups,
     resolved_all_k,
 )
+from recsys_tfb.pipelines.evaluation.report.comparison.main import (
+    assemble_comparison_report,
+)
+from recsys_tfb.pipelines.evaluation.report.main import assemble_report
 from recsys_tfb.pipelines.evaluation.steps.all_positive_accounts import (
     log_all_positive_accounts,
 )
@@ -95,14 +91,12 @@ from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
     load_compare_predictions as _load_compare,
 )
 from recsys_tfb.pipelines.evaluation.steps.compare_universe import (
-    query_groups_with_text_time,
-    trim_to_common_universe,
+    trim_to_common_with_coverage,
 )
 from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
     LoadedArtifact,
     fingerprint,
     require_computed_with_current_config,
-    require_same_recorded_values,
 )
 from recsys_tfb.pipelines.evaluation.steps.display_ks import (
     baseline_comparison_block,
@@ -111,8 +105,15 @@ from recsys_tfb.pipelines.evaluation.steps.display_ks import (
     configured_k_values,
     evaluation_metrics_block,
 )
+from recsys_tfb.pipelines.evaluation.steps.fingerprint_checks import (
+    COMPARISON_RERUN_NODE,
+    require_comparison_inputs_current,
+    require_prepared_with_current_config,
+    require_row_facts_current,
+)
 from recsys_tfb.pipelines.evaluation.steps.item_categories import (
     category_of_each_item,
+    landed_category_mapping,
     read_item_category_rows,
 )
 from recsys_tfb.pipelines.evaluation.steps.labels import (
@@ -125,9 +126,13 @@ from recsys_tfb.pipelines.evaluation.steps.model_version_scope import (
 )
 from recsys_tfb.pipelines.evaluation.steps.popularity_counts import (
     monthly_purchase_counts,
+    positive_rate_block,
     purchase_counts_per_item,
 )
 from recsys_tfb.pipelines.evaluation.steps.ranks import rank_within_query_group
+from recsys_tfb.pipelines.evaluation.steps.report_aggregates import (
+    aggregate_report_diagnostics,
+)
 from recsys_tfb.pipelines.evaluation.steps.result_blocks import Block, Produces
 from recsys_tfb.pipelines.evaluation.steps.segments import (
     join_segment_columns,
@@ -142,6 +147,9 @@ from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
     restrict_to_eval_snap_dates,
     snap_dates_in_frame,
     stamp_partition_fingerprint,
+)
+from recsys_tfb.pipelines.evaluation.steps.zero_positive_group_weights import (
+    require_zero_positive_group_weights,
 )
 from recsys_tfb.preprocessing import preprocessor_item_values
 from recsys_tfb.utils.item_columns import combine_item_columns
@@ -162,102 +170,6 @@ _COMPARE_SOURCE_BLOCK = Block(
     "整次執行一份")
 _DISTRIBUTIONS_WHEN = "evaluation.report.diagnostics.include_distributions 為真（預設）"
 _CATEGORY_WHEN = "有 item 大類對照時（手寫 mapping 或 column 模式）"
-
-
-def _require_prepared_with_current_config(
-    segment_columns: dict, parameters: dict,
-    item_categories: Optional[dict] = None,
-) -> None:
-    """Pre-check (inputs): the ``evaluation_segment_columns`` this run's
-    directory holds — and ``evaluation_item_categories``, when the reader was
-    given one — was landed under today's values of the settings
-    ``prepare_eval_data`` applies.
-
-    ``prepare_eval_data`` lands that JSON together with the partitions, and the
-    readers group by its ``joined`` list. Unchecked, ``--from-node
-    compute_metrics`` after a change to ``segment_columns`` segments by the old
-    list and writes ``metrics.json`` under the new fingerprint, which
-    ``generate_report`` then accepts, exit code 0. A change to a setting only a
-    later step applies leaves it current: the partition is read back from
-    Hive, so a re-run starting after ``prepare_eval_data`` could never make it
-    current again.
-
-    It does not stand for the partitions themselves: one date's
-    partition is also written by runs over other dates, whose JSON lands in
-    another directory. Each partition carries its own fingerprint, checked by
-    ``restrict_to_current_eval_partitions``.
-
-    ``item_categories`` is ``None`` when its optional catalog entry finds no
-    file; that is only a problem in column mode, where
-    :func:`_landed_category_mapping` refuses it.
-    """
-    artifacts = [LoadedArtifact(
-        catalog_name="evaluation_segment_columns (landed with the "
-                     "enriched_eval_predictions partition)",
-        payload=segment_columns,
-        produced_by="prepare_eval_data",
-    )]
-    if item_categories is not None:
-        artifacts.append(LoadedArtifact(
-            catalog_name="evaluation_item_categories",
-            payload=item_categories,
-            produced_by="prepare_eval_data",
-        ))
-    require_computed_with_current_config(artifacts, parameters)
-
-
-def _landed_category_mapping(
-    item_categories: Optional[dict], parameters: dict
-) -> Optional[dict]:
-    """The ``{item: category}`` table the category pass ranks by: the one
-    ``prepare_eval_data`` read off ``evaluation.item_categories.column`` in
-    column mode (#379); with the item list counted from the data, the
-    hand-written mapping resolved against the evaluated model's item list
-    that ``prepare_eval_data`` landed beside it (``known_items``); else
-    ``None`` — "take the hand-written mapping from ``parameters``", as before.
-
-    Pre-checks (inputs), one per mode that reads the landed file:
-
-    * column mode: the table was read off today's column. It catches what
-      the fingerprint cannot — a table missing altogether — and the
-      ``--compare-only`` path, which compares nothing with today's settings.
-      Otherwise a table from another column, or none, would be ranked or
-      silently replaced by every item its own category.
-    * item list counted from the data, categories enabled: the landed file
-      carries ``known_items``. Without it the hand mapping has no list to be
-      checked against — the conf holds none in this mode — so the run stops
-      and names the node to re-run, rather than skipping the check.
-    """
-    column = item_category_column(parameters)
-    if column is None:
-        if not item_list_counted_from_data(parameters):
-            return None
-        known = (item_categories.get("known_items")
-                 if isinstance(item_categories, dict) else None)
-        if known is None and item_categories_enabled(parameters):
-            raise ValueError(
-                "The item list is counted from the train months, so a "
-                "hand-written evaluation.item_categories.mapping is checked "
-                "against the evaluated model's list — which prepare_eval_data "
-                "reads off its preprocessor (preprocessor_on_disk) and lands "
-                "as evaluation_item_categories.known_items, and this run has "
-                "none. Re-run with --from-node prepare_eval_data, with the "
-                "model's data/dataset/<base_dataset_version>/preprocessor.json "
-                "in place."
-            )
-        return hand_category_mapping(parameters, known_items=known)
-    if isinstance(item_categories, dict) and item_categories.get("column") == column:
-        return item_categories["mapping"]
-    landed = (
-        "none was landed for this run" if not isinstance(item_categories, dict)
-        else f"the landed one was read off {item_categories.get('column')!r}"
-    )
-    raise ValueError(
-        f"evaluation.item_categories.column={column!r}, but {landed} "
-        f"(evaluation_item_categories). prepare_eval_data reads the table off "
-        f"sample_pool: re-run with --from-node prepare_eval_data (for "
-        f"--compare-only, the standard --post-training run first)."
-    )
 
 
 _PRODUCES_SEGMENT_COLUMNS = Produces("evaluation_segment_columns", (
@@ -514,7 +426,7 @@ def make_prepare_eval_data_node(population_name: str):
         # modes, so a column the other mode joined sits in the frame all NULL.
         # Its fingerprint is what every reader of the partition inherits: the
         # segmenting readers check it before reading the table
-        # (_require_prepared_with_current_config), because a slice starting
+        # (require_prepared_with_current_config), because a slice starting
         # after this node reads the landed partition instead of re-joining.
         # --compare-only does not compare it with today's settings:
         # --post-training is inert on that path, and that run has no
@@ -666,8 +578,8 @@ def compute_row_facts(
     which the report reads too.
 
     Pre-checks (inputs): the landed segment list and category table were
-    prepared under today's settings (``_require_prepared_with_current_config``,
-    ``_landed_category_mapping``), and so was each evaluated date's partition
+    prepared under today's settings (``require_prepared_with_current_config``,
+    ``landed_category_mapping``), and so was each evaluated date's partition
     (``restrict_to_current_eval_partitions``).
 
     Postcondition: every configured date was evaluated, i.e. the number of
@@ -678,9 +590,9 @@ def compute_row_facts(
     query groups (#374). It does not catch a reader that forgot to restrict
     (that reader is another node); the AST test in ``test_pipeline.py`` does.
     """
-    _require_prepared_with_current_config(
+    require_prepared_with_current_config(
         segment_columns, parameters, item_categories)
-    category_mapping = _landed_category_mapping(item_categories, parameters)
+    category_mapping = landed_category_mapping(item_categories, parameters)
     # Decision — count the configured dates only, from partitions written
     # under today's settings: the table holds every month this model_version
     # was evaluated on.
@@ -714,17 +626,6 @@ def compute_row_facts(
         parameters, "compute_row_facts", (segment_columns, item_categories))
     log_all_positive_accounts(logger, facts, drop_all_positive_groups(parameters))
     return facts
-
-
-def _require_row_facts_current(row_facts: dict, parameters: dict) -> None:
-    """Pre-check (inputs): the landed row facts were counted under today's
-    settings. A slice starting at a metrics node reads them back from disk,
-    and facts counted on another population would key every ``@all`` metric
-    at the wrong K with no error (``metrics_spark._compute_core``)."""
-    require_computed_with_current_config(
-        [LoadedArtifact(catalog_name="evaluation_row_facts",
-                        payload=row_facts, produced_by="compute_row_facts")],
-        parameters)
 
 
 #: The bundle ``compute_all_metrics`` returns, shared by the model's metrics,
@@ -791,21 +692,21 @@ def compute_metrics(
 
     The category pass ranks by ``item_categories`` (the landed
     ``evaluation_item_categories``) in column mode, by the hand-written
-    mapping in ``parameters`` otherwise (``_landed_category_mapping``, #379).
+    mapping in ``parameters`` otherwise (``landed_category_mapping``, #379).
 
     Pre-checks (inputs): the landed segment list, category table and row facts
-    were prepared under today's settings (``_require_prepared_with_current_config``,
-    ``_landed_category_mapping``, ``_require_row_facts_current``), and so was
+    were prepared under today's settings (``require_prepared_with_current_config``,
+    ``landed_category_mapping``, ``require_row_facts_current``), and so was
     each evaluated date's partition (``restrict_to_current_eval_partitions``).
     That the row facts were counted on the same partitions is not checked:
     re-running this node alone after the partitions were rewritten under the
     same settings reads facts of rows that are gone (``--from-node
     compute_row_facts`` re-counts them).
     """
-    _require_prepared_with_current_config(
+    require_prepared_with_current_config(
         segment_columns, parameters, item_categories)
-    _require_row_facts_current(row_facts, parameters)
-    category_mapping = _landed_category_mapping(item_categories, parameters)
+    require_row_facts_current(row_facts, parameters)
+    category_mapping = landed_category_mapping(item_categories, parameters)
     # Decision — evaluate the configured dates only, from partitions written
     # under today's settings: the table holds every month this model_version
     # was evaluated on.
@@ -872,52 +773,6 @@ def build_popularity_period_counts(
         periods, parameters)
 
 
-def _positive_rate_block(period_counts, snap_dates, lookback_months, parameters):
-    """The rate mode's report numbers (#397), from the period counts.
-
-    ``candidates`` / ``positives`` per item are over the periods the evaluated
-    dates' windows cover, **each period once** however many windows cover it,
-    and ``rate`` divides the two (so "rate = positives ÷ candidates" holds on
-    every row of the report). With one date that is the rate the baseline
-    ranked by; with several, each date ranked by its own window's rate and
-    this is their pooled one — summing per window instead would multiply an
-    overlapping period's candidates by the number of dates, and the printed
-    denominator is the reader's cue for an unreliable rate.
-    ``monthly_positives`` is the same numerator by calendar month;
-    ``window_months_covered`` counts each window's months with candidate
-    rows, one date or several. Two small collects: the table is one row per
-    period × item.
-    """
-    item_col = get_schema(parameters)["item"]
-    candidates: dict[str, int] = {}
-    positives: dict[str, int] = {}
-    monthly: dict[str, dict[str, int]] = {}
-    for r in compute_monthly_candidate_counts_in_windows(
-        period_counts, snap_dates, lookback_months, parameters
-    ).collect():
-        item, month = str(r[item_col]), str(r["month"])
-        candidates[item] = candidates.get(item, 0) + int(r[CANDIDATES_COL])
-        positives[item] = positives.get(item, 0) + int(r[POSITIVES_COL])
-        monthly.setdefault(item, {})[month] = int(r[POSITIVES_COL])
-    months_by_window: dict[str, set] = {}
-    for r in compute_monthly_candidate_counts_by_window(
-        period_counts, snap_dates, lookback_months, parameters
-    ).select("window_date", "month").distinct().collect():
-        months_by_window.setdefault(r["window_date"], set()).add(str(r["month"]))
-    return {
-        "rate": {
-            item: (positives[item] / c if c else 0.0)
-            for item, c in candidates.items()
-        },
-        "candidates": candidates,
-        "positives": positives,
-        "monthly_positives": monthly,
-        "window_months_covered": {
-            w: len(m) for w, m in sorted(months_by_window.items())
-        },
-    }
-
-
 _PRODUCES_BASELINE_METRICS = Produces("baseline_metrics", (
     *_METRIC_BLOCKS,
     Block("purchase_counts", "各 item 在回溯視窗內的歷史購買次數（label_table 數出），跨評估月份加總（兩種計分模式都是 label_table 的）。",
@@ -974,14 +829,14 @@ def compute_baseline_metrics(
 
     Pre-checks (inputs): the landed segment list, category
     table, row facts and each evaluated date's partition were prepared under
-    today's settings (``_require_prepared_with_current_config``,
-    ``_require_row_facts_current``, ``_landed_category_mapping``,
+    today's settings (``require_prepared_with_current_config``,
+    ``require_row_facts_current``, ``landed_category_mapping``,
     ``restrict_to_current_eval_partitions``).
     """
-    _require_prepared_with_current_config(
+    require_prepared_with_current_config(
         segment_columns, parameters, item_categories)
-    _require_row_facts_current(row_facts, parameters)
-    category_mapping = _landed_category_mapping(item_categories, parameters)
+    require_row_facts_current(row_facts, parameters)
+    category_mapping = landed_category_mapping(item_categories, parameters)
     # Decision — score the evaluated dates only, from partitions written under
     # today's settings: the table holds every month this model_version was
     # evaluated on, and the lookback windows below are anchored on the months
@@ -1049,7 +904,7 @@ def compute_baseline_metrics(
     metrics["purchase_counts"] = purchase_counts
     metrics["monthly_counts"] = monthly_counts
     if rate_mode:
-        metrics["popularity_rate"] = _positive_rate_block(
+        metrics["popularity_rate"] = positive_rate_block(
             popularity_period_counts, snap_dates, lookback_months, parameters)
     # Decision — land the window as the report prints it (#536): over the
     # table it prints (sample_pool's monthly positives in rate mode,
@@ -1072,32 +927,6 @@ def compute_baseline_metrics(
         len({mo for per in monthly_counts.values() for mo in per}),
     )
     return metrics
-
-
-def _require_zero_positive_group_weights(
-    eval_predictions: SparkDataFrame, weight_col: str,
-) -> None:
-    """Pre-check: every evaluated row carries a zero-positive group weight.
-
-    Raises ``DataConsistencyError`` naming both fixes. One action over one
-    column; ``limit(1)`` stops at the first NULL, so a mismatch answers fast.
-    """
-    missing = weight_col not in eval_predictions.columns
-    if not missing and eval_predictions.filter(
-        F.col(weight_col).isNull()
-    ).limit(1).count() == 0:
-        return
-    what = ("have no column" if missing else "hold a NULL in column")
-    raise DataConsistencyError(
-        f"dataset.test_zero_positive_group_ratio is above 0 in this conf, so the "
-        f"prediction-quality family weights every row by {weight_col!r} — but "
-        f"the evaluated predictions {what} {weight_col!r}: they were not written "
-        f"under a positive test ratio. The model being evaluated "
-        f"(--model-version, or `best`) was trained on a dataset whose test ratio "
-        f"differs from this conf's. Evaluate a model built under this conf, or "
-        f"set dataset.test_zero_positive_group_ratio back to the value that "
-        f"model was built with."
-    )
 
 
 _PRODUCES_PREDICTION_QUALITY = Produces("prediction_quality_metrics", (
@@ -1198,7 +1027,7 @@ def compute_prediction_quality(
     # table as a weighted one. One narrow scan of one column, only when
     # weighting at all.
     if weight_col is not None:
-        _require_zero_positive_group_weights(eval_predictions, weight_col)
+        require_zero_positive_group_weights(eval_predictions, weight_col)
     aggregated = aggregate_score_bins(
         eval_predictions.select(
             item_col, score_col, label_col, *([weight_col] if weight_col else [])),
@@ -1610,8 +1439,9 @@ def make_restrict_to_common_node(compare_only: bool):
     ) -> tuple[SparkDataFrame, SparkDataFrame, dict]:
         """Keep side A's evaluated dates, after checking its partitions (see
         ``make_restrict_to_common_node`` for against which settings), then
-        restrict both sides to their common universe (``_restrict_to_common``).
-        Side B is the compared run's own table and is not checked."""
+        restrict both sides to their common universe
+        (``trim_to_common_with_coverage``). Side B is the compared run's own
+        table and is not checked."""
         # Decision — compare the evaluated dates only, from partitions written
         # under the settings this mode reads them for: the table holds every
         # month this model_version was evaluated on.
@@ -1619,159 +1449,17 @@ def make_restrict_to_common_node(compare_only: bool):
             eval_predictions, parameters, segment_columns,
             recorded_settings=compare_only,
         ).frame
-        return _restrict_to_common(
+        return trim_to_common_with_coverage(
             eval_predictions, compare_predictions_raw, segment_columns,
             parameters)
 
     return restrict_to_common
 
 
-def _restrict_to_common(
-    eval_predictions: SparkDataFrame,
-    compare_predictions_raw: SparkDataFrame,
-    segment_columns: dict,
-    parameters: dict,
-) -> tuple[SparkDataFrame, SparkDataFrame, dict]:
-    """Call the pure restrict function + capture coverage dict.
-
-    ``eval_predictions`` is already kept to the evaluated dates and checked
-    (``make_restrict_to_common_node``).
-
-    Returns ``(a_common, b_common, coverage)`` — the coverage carries
-    full-universe sizes, the common sizes and dropped item lists so the
-    report can show what was filtered. It lands (``compare_coverage``, #536)
-    with ``config_fingerprint`` — inheriting ``segment_columns``' record, the
-    settings A's partitions were written under — and the compare source it
-    was computed against (``compare_sources.compare_source_identity``),
-    which every reader of it checks; the two frames stay in memory.
-
-    Population size is counted in **query groups** — distinct
-    ``query_group_columns`` combinations (time, every column of
-    ``schema.entity``, and ``occasion`` when declared) — because that is the
-    unit mAP divides by. Reporting it in any other unit puts two different
-    scales side by side in one table with nothing telling the reader they
-    differ. See ``docs/adr/0015-compare-population-counted-in-query-groups.md``.
-
-    The common count is taken from what the restriction kept, not re-derived
-    from the raw frames (ADR-0020 bug 14): an ``intersect`` of the raw query
-    groups matches ``NULL == NULL`` while the restriction's equi-join drops
-    null keys, so it would count groups no metric saw.
-
-    The node does not compare ``segment_columns.json``'s own fingerprint with
-    today's settings; it checks the partitions it reads instead. Under
-    ``--compare`` A's partitions are checked against today's settings, so a
-    sliced ``--from-node compute_compare_metrics`` after a settings change
-    raises. Under ``--compare-only`` they are checked against the settings that
-    JSON records, because ``post_training`` is inert there (ADR-0020 bug 6, #352
-    correction, and its #374 addendum).
-    """
-    schema = get_schema(parameters)
-    time_col = schema["time"]
-    query_group_cols = schema["query_group_columns"]
-
-    # Decision — B is scored against A's labels: not the label B landed with,
-    # and not a fresh label_table join, since A's own label is not the current
-    # label_table under --post-training / --compare-only. One answer for both
-    # sides in every mode (ADR-0020 bug 7; the full why is in
-    # steps/compare_universe.py).
-    a_common, b_common, universe = trim_to_common_universe(
-        eval_predictions, compare_predictions_raw, parameters
-    )
-
-    a_groups_full = eval_predictions.select(*query_group_cols).distinct().count()
-    b_groups_full = compare_predictions_raw.select(*query_group_cols).distinct().count()
-    # Groups both restricted frames still hold. A left-semi equi-join, so null
-    # keys never match — the same null rule as the restriction's own joins. On
-    # symmetric candidate sets this equals either side's kept group count; when
-    # one side scored a common entity only on items the other lacks, that group
-    # is in one side's metrics but not in "common". The time is matched as
-    # text, by the same helper the restriction uses (B's time column may be
-    # DATE while A's partition is STRING).
-    groups_common = (
-        query_groups_with_text_time(a_common, time_col, query_group_cols)
-        .join(
-            query_groups_with_text_time(b_common, time_col, query_group_cols),
-            on=query_group_cols, how="left_semi",
-        )
-        .count()
-    )
-    common_items = universe.common_items
-
-    src = (parameters.get("evaluation", {}) or {}).get("compare", {}) or {}
-    coverage = {
-        "kind_a": "model_version",
-        "model_version_a": parameters.get("model_version", "(this run)"),
-        # This run's side is read off the table pipeline.py wires as this
-        # node's first input, in both compare modes — the same table a
-        # model_version source names as its `source`; the comparison report
-        # prints it beside the compared source's (#537).
-        "source_a": "enriched_eval_predictions",
-        "kind_b": src.get("kind", ""),
-        "model_version_b": src.get("model_version", "n/a"),
-        "table_b": src.get("table", "n/a"),
-        "n_query_group_A_full": a_groups_full,
-        "n_query_group_B_full": b_groups_full,
-        "n_query_group_common": groups_common,
-        "n_item_A_full": len(universe.a_items),
-        "n_item_B_full": len(universe.b_items),
-        "n_item_common": len(common_items),
-        "dropped_items_A": sorted(universe.a_items - common_items),
-        "dropped_items_B": sorted(universe.b_items - common_items),
-        # Lands as compare_coverage (#536): the redraw reads it back, so it
-        # says what it was computed under and against.
-        "config_fingerprint": fingerprint(
-            parameters, "restrict_to_common", (segment_columns,)),
-        COMPARE_SOURCE_KEY: compare_source_identity(parameters),
-    }
-    return a_common, b_common, coverage
-
-
 #: The ``--compare`` shape, checked against today's settings. Kept as a
 #: module-level name for callers that exercise the node outside
 #: ``create_pipeline``.
 restrict_to_common = make_restrict_to_common_node(compare_only=False)
-
-
-#: Where a comparison artifact computed against another compare source sends
-#: the re-run, in both modes. The first node whose output is side B's
-#: numbers: its inputs are memory-only frames, so its slice pulls
-#: ``load_compare_predictions`` and
-#: ``restrict_to_common`` back with it (the coverage is rewritten too), and
-#: under ``--compare`` runs no Spark node of the main line — every node of
-#: that line sorting after it reads landed JSON only.
-#: ``test_pipeline.py::TestTheComparisonReRunsOnItsOwn`` pins both.
-COMPARISON_RERUN_NODE = "compute_compare_metrics"
-
-def _require_comparison_inputs_current(
-    artifacts: list[LoadedArtifact], parameters: dict,
-    run_nodes: Optional[Sequence[str]],
-) -> None:
-    """Pre-check (inputs) of every node reading a comparison artifact: each
-    was computed under today's settings, and against today's
-    compare source (``compare_sources.compare_source_identity``, recorded
-    under ``COMPARE_SOURCE_KEY``; ADR-0031 decision 5).
-
-    The fingerprint leaves ``evaluation.compare`` out on purpose
-    (``config_fingerprint``: the CLI injects it per run), so without the
-    second check a redraw after switching the compared source, or changing
-    its ``prod_mapping``, would print the old source's numbers under the new
-    one's label, exit code 0.
-
-    The advice names a node of the run (ADR-0031 decision 15, first row),
-    the first of ``run_nodes`` applying a changed setting: under
-    ``--compare`` a main-line one when the run has one (the main line is
-    stale too, and a slice from the comparison would stop at
-    ``generate_report``); under ``--compare-only``, which has no main line,
-    a comparison step, and the record of the run that prepared the
-    partitions is not compared with today's settings (it is not among
-    ``run_nodes``). Another source is
-    :data:`COMPARISON_RERUN_NODE` in both.
-    """
-    require_computed_with_current_config(
-        artifacts, parameters, run_nodes=run_nodes)
-    require_same_recorded_values(
-        artifacts, COMPARE_SOURCE_KEY, compare_source_identity(parameters),
-        setting="evaluation.compare", rerun_node=COMPARISON_RERUN_NODE)
 
 
 #: The row facts of one side of a comparison: the run's own facts without
@@ -1815,10 +1503,10 @@ def compute_compare_metrics(
     A′'s.
 
     Pre-check (inputs): in column mode, the category table was landed and
-    read off today's column (``_landed_category_mapping``). The frames are
+    read off today's column (``landed_category_mapping``). The frames are
     ``restrict_to_common``'s, which checked side A's partitions.
     """
-    category_mapping = _landed_category_mapping(item_categories, parameters)
+    category_mapping = landed_category_mapping(item_categories, parameters)
     # Decision — both sides drop the all-positive query groups, or neither,
     # per evaluation.query_filter.drop_all_positive_groups (#376), read once.
     # Each side decides which of its groups are all-positive on its own
@@ -1883,7 +1571,7 @@ def make_compare_to_source_node(run_nodes: Optional[Sequence[str]] = None):
     """Build ``compare_to_source`` for one run: ``run_nodes`` (the run's
     nodes in topological order, filled by ``create_pipeline``) decides only
     where its pre-check sends a re-run, and which inherited records it
-    compares (``_require_comparison_inputs_current``). Built without one, it
+    compares (``require_comparison_inputs_current``). Built without one, it
     uses the declarations' order and compares every record."""
     def compare_to_source(
         compare_metrics_a: dict,
@@ -1903,10 +1591,10 @@ def make_compare_to_source_node(run_nodes: Optional[Sequence[str]] = None):
 
         Pre-check (inputs): both results were computed under today's
         settings and against today's source
-        (``_require_comparison_inputs_current``). No ledger check:
+        (``require_comparison_inputs_current``). No ledger check:
         ``compute_compare_metrics`` lands both with the full ledger.
         """
-        _require_comparison_inputs_current([
+        require_comparison_inputs_current([
             LoadedArtifact(catalog_name="compare_metrics_a",
                            payload=compare_metrics_a,
                            produced_by=COMPARISON_RERUN_NODE),
@@ -1974,9 +1662,9 @@ def make_resolve_comparison_display_ks_node(
 
         Pre-check (inputs): the comparison was computed under today's
         settings and against today's source
-        (``_require_comparison_inputs_current``).
+        (``require_comparison_inputs_current``).
         """
-        _require_comparison_inputs_current([
+        require_comparison_inputs_current([
             LoadedArtifact(catalog_name="source_comparison",
                            payload=source_comparison,
                            produced_by="compare_to_source"),
@@ -2032,7 +1720,7 @@ def make_generate_comparison_report_node(
         Pre-check (inputs): every input was computed under today's values of
         the settings its step and its inputs applied, and against today's
         compare source
-        (``_require_comparison_inputs_current``). ``label`` is not part of
+        (``require_comparison_inputs_current``). ``label`` is not part of
         that source: the report reads it off today's parameters, so a
         renamed source redraws.
         """
@@ -2050,7 +1738,7 @@ def make_generate_comparison_report_node(
                            payload=comparison_display_ks,
                            produced_by="resolve_comparison_display_ks"),
         ]
-        _require_comparison_inputs_current(loaded, parameters, run_nodes)
+        require_comparison_inputs_current(loaded, parameters, run_nodes)
         return assemble_comparison_report(
             {artifact.catalog_name: artifact.payload for artifact in loaded},
             parameters,

@@ -4,10 +4,10 @@
 from recsys_tfb.report.types import ReportSection
 
 
-def test_old_import_path_still_works_and_is_same_class():
-    from recsys_tfb.evaluation.report import ReportSection as Old
+def test_the_shell_re_exports_the_same_report_section():
+    from recsys_tfb.pipelines.evaluation.report import shell
 
-    assert Old is ReportSection
+    assert shell.ReportSection is ReportSection
 
 
 def test_optional_fields_default_empty():

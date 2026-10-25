@@ -114,7 +114,7 @@ class Figure:
 class Definitions:
     """定義區塊（``<dl class="defs">``）：一組 ``(名詞, 定義)``，放在那組表
     下面。``source`` 是區塊左上角的出處小字；從指標目錄產生的用預設值
-    （``evaluation/report_sections/metric_tables.definitions``）。"""
+    （``pipelines/evaluation/report/sections/metric_tables.definitions``）。"""
 
     entries: tuple[tuple[str, str], ...]
     source: str = "定義（從指標目錄來）"

@@ -1,4 +1,4 @@
-"""報表表格與段落內容的 HTML：主報表與比較報表的外殼（``evaluation/report.py``）
+"""報表表格與段落內容的 HTML：主報表與比較報表的外殼（``pipelines/evaluation/report/shell.py``）
 用它。
 
 這裡原本也是多頁輸出（診斷頁共用一份 plotly.min.js、每頁把 ScopeNote 放在
@@ -178,7 +178,7 @@ def render_note(note: Note) -> str:
 def render_report_table(table: Table) -> str:
     """新長相的一張表：表名與複製鈕、篩選狀態列、表本身，再接表下的行。
 
-    外殼的表格工具（``evaluation/report.py`` 的 JS）認 ``div.tblk``：每個欄頭
+    外殼的表格工具（``pipelines/evaluation/report/shell.py`` 的 JS）認 ``div.tblk``：每個欄頭
     ``th.srt`` 可以排序與篩選，複製鈕複製看得到的列——欄頭取 ``data-full``，
     數字格取 ``data-v``，其餘取看得到的字（不含 ⚠）。``tr.pin`` 永遠在最上面、
     不被篩掉。超過 15 列的表身限高、表頭固定（``.tw.tall``）。

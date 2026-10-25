@@ -583,8 +583,8 @@ def test_generate_report_draws_prediction_quality_from_the_nodes_output(spark):
     assert "預測品質" in html
     # #536: the hand-written payload the report tests draw from holds the
     # node's keys in both blocks the report reads (the display tables).
-    from tests.test_evaluation import test_report_builder
-    hand = test_report_builder._pq_payload()
+    from tests.test_pipelines.test_evaluation.report import test_main
+    hand = test_main._pq_payload()
     for block in ("overall", "per_item"):
         assert set(hand[block]) == set(pq[block]), block
 
@@ -725,8 +725,9 @@ class TestTheBaselineIsTheModelsComputation:
         assert "--from-node resolve_display_ks" in str(exc.value)
 
     @pytest.mark.parametrize("module, fixture", [
-        ("tests.test_evaluation.test_report_builder", "_baseline_metrics_full"),
-        ("tests.test_evaluation.report_sections.test_popularity_baseline",
+        ("tests.test_pipelines.test_evaluation.report.test_main",
+         "_baseline_metrics_full"),
+        ("tests.test_pipelines.test_evaluation.report.sections.test_popularity_baseline",
          "_baseline")])
     def test_the_hand_written_baseline_holds_only_what_the_node_writes(
             self, spark, module, fixture):
@@ -762,7 +763,7 @@ class TestTheBaselineIsTheModelsComputation:
     def test_the_hand_written_row_facts_hold_the_keys_the_node_writes(
             self, spark):
         """#536: the report reads the all-positive accounts the row facts
-        land, and ``test_report_builder`` draws from hand-written row facts.
+        land, and ``report/test_main`` draws from hand-written row facts.
         At the item grain they hold exactly the node's keys, bar the two the
         report never reads; at the category grain none it does not write, and
         every account. Keys only: the values there are made up."""
@@ -771,16 +772,16 @@ class TestTheBaselineIsTheModelsComputation:
             ALL_POSITIVE_WARNS_KEY,
             N_WITH_POSITIVE_KEY,
         )
-        from tests.test_evaluation import test_report_builder
+        from tests.test_pipelines.test_evaluation.report import test_main
 
         accounts = {N_WITH_POSITIVE_KEY, ALL_POSITIVE_SHARE_KEY,
                     ALL_POSITIVE_WARNS_KEY}
         _, facts, *_ = self._computed(spark)
-        hand = test_report_builder._row_facts()
+        hand = test_main._row_facts()
         assert set(hand) == set(facts) - {"segments", "config_fingerprint",
                                           "category"}
-        category = test_report_builder._ap_facts(
-            category=test_report_builder._ap_category())["category"]
+        category = test_main._ap_facts(
+            category=test_main._ap_category())["category"]
         assert set(category) <= set(facts["category"])
         assert accounts <= set(category)
 
@@ -788,13 +789,13 @@ class TestTheBaselineIsTheModelsComputation:
             self, spark):
         """#536: the baseline section reads the window the node lands
         (``popularity_window``), and the report tests draw it from
-        ``test_report_builder._windowed``. Both hold the same keys. Keys only:
+        ``report/test_main._windowed``. Both hold the same keys. Keys only:
         the values follow each fixture's own counts."""
         from recsys_tfb.evaluation.result_readers import POPULARITY_WINDOW_KEY
-        from tests.test_evaluation import test_report_builder
+        from tests.test_pipelines.test_evaluation.report import test_main
 
         *_, baseline = self._computed(spark)
-        hand = test_report_builder._baseline_metrics_full()
+        hand = test_main._baseline_metrics_full()
         assert (set(hand[POPULARITY_WINDOW_KEY])
                 == set(baseline[POPULARITY_WINDOW_KEY]))
 
@@ -851,10 +852,10 @@ def _comparison_inputs(params, compare_only=False):
     """What ``generate_comparison_report`` reads, landed under ``params``:
     the coverage and A's row facts by hand in their producers' shape, the
     comparison and the K cut by the real nodes, off a bundle holding every
-    key the comparison report draws (``tests/test_evaluation/comparison/
-    fixtures.bundle``; ``_metrics()`` lacks the ``@all`` keys it refuses to
+    key the comparison report draws
+    (``tests/test_pipelines/test_evaluation/report/comparison/fixtures.bundle``; ``_metrics()`` lacks the ``@all`` keys it refuses to
     draw without, #537) against a weaker one."""
-    from tests.test_evaluation.comparison.fixtures import bundle
+    from tests.test_pipelines.test_evaluation.report.comparison.fixtures import bundle
 
     comparison = _comparison_node("compare_to_source", compare_only).func(
         _stamped_for_comparison(bundle(0.5), params),

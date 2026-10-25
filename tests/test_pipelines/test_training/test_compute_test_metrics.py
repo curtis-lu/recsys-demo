@@ -113,7 +113,7 @@ def test_test_map_matches_the_report_when_event_is_declared(spark):
     worked out by hand, and the same number the report prints under
     ``map@all``. Per item, B's one positive contributes 1/4 and C's 1.
     """
-    from recsys_tfb.evaluation.report_sections import overview
+    from recsys_tfb.pipelines.evaluation.report.sections import overview
     from recsys_tfb.evaluation.metrics_spark import (
         compute_all_metrics,
         compute_row_facts,

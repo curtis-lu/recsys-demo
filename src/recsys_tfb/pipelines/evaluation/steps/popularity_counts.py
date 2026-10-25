@@ -3,7 +3,8 @@ what reaches the driver is per item, or per item and month).
 
 Which score ranks the baseline is decided in ``compute_baseline_metrics``; the
 counting itself is ``evaluation.baselines``'. This module turns those counts
-into the landed ``purchase_counts`` and ``monthly_counts``.
+into the landed ``purchase_counts`` and ``monthly_counts``, and the rate
+mode's period counts into its report numbers (``positive_rate_block``).
 """
 
 from typing import Optional
@@ -13,6 +14,10 @@ from pyspark.sql import functions as F
 
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.baselines import (
+    CANDIDATES_COL,
+    POSITIVES_COL,
+    compute_monthly_candidate_counts_by_window,
+    compute_monthly_candidate_counts_in_windows,
     compute_monthly_purchase_counts,
     compute_monthly_purchase_counts_by_window,
 )
@@ -87,3 +92,49 @@ def monthly_purchase_counts(
         s: len(months_by_window[s]) for s in sorted(snap_dates)
     }
     return monthly_counts, window_months_covered
+
+
+def positive_rate_block(period_counts, snap_dates, lookback_months, parameters):
+    """The rate mode's report numbers (#397), from the period counts.
+
+    ``candidates`` / ``positives`` per item are over the periods the evaluated
+    dates' windows cover, **each period once** however many windows cover it,
+    and ``rate`` divides the two (so "rate = positives ÷ candidates" holds on
+    every row of the report). With one date that is the rate the baseline
+    ranked by; with several, each date ranked by its own window's rate and
+    this is their pooled one — summing per window instead would multiply an
+    overlapping period's candidates by the number of dates, and the printed
+    denominator is the reader's cue for an unreliable rate.
+    ``monthly_positives`` is the same numerator by calendar month;
+    ``window_months_covered`` counts each window's months with candidate
+    rows, one date or several. Two small collects: the table is one row per
+    period × item.
+    """
+    item_col = get_schema(parameters)["item"]
+    candidates: dict[str, int] = {}
+    positives: dict[str, int] = {}
+    monthly: dict[str, dict[str, int]] = {}
+    for r in compute_monthly_candidate_counts_in_windows(
+        period_counts, snap_dates, lookback_months, parameters
+    ).collect():
+        item, month = str(r[item_col]), str(r["month"])
+        candidates[item] = candidates.get(item, 0) + int(r[CANDIDATES_COL])
+        positives[item] = positives.get(item, 0) + int(r[POSITIVES_COL])
+        monthly.setdefault(item, {})[month] = int(r[POSITIVES_COL])
+    months_by_window: dict[str, set] = {}
+    for r in compute_monthly_candidate_counts_by_window(
+        period_counts, snap_dates, lookback_months, parameters
+    ).select("window_date", "month").distinct().collect():
+        months_by_window.setdefault(r["window_date"], set()).add(str(r["month"]))
+    return {
+        "rate": {
+            item: (positives[item] / c if c else 0.0)
+            for item, c in candidates.items()
+        },
+        "candidates": candidates,
+        "positives": positives,
+        "monthly_positives": monthly,
+        "window_months_covered": {
+            w: len(m) for w, m in sorted(months_by_window.items())
+        },
+    }

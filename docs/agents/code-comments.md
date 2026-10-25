@@ -97,7 +97,7 @@ no edit.
 
 例（`src/recsys_tfb/pipelines/evaluation/nodes.py` 的 `resolve_comparison_display_ks`）：
 
-- **刪**：指紋帶哪個鍵、過期後重跑去哪（`config_fingerprint.rerun_node` 管）；落地的形狀（`steps/display_ks` 管）；也記了比較對象（`_require_comparison_inputs_current` 管）。
+- **刪**：指紋帶哪個鍵、過期後重跑去哪（`config_fingerprint.rerun_node` 管）；落地的形狀（`steps/display_ks` 管）；也記了比較對象（`steps/fingerprint_checks.require_comparison_inputs_current` 管）。
 - **留**：
 
 ```python
@@ -106,7 +106,7 @@ grain at what this side's ``"all"`` stands for (ADR-0031 decision 10). A
 node after the comparison, so a changed display K re-runs this and the
 report only (decision 16). No Spark.
 
-Pre-check (inputs): ``_require_comparison_inputs_current``.
+Pre-check (inputs): ``require_comparison_inputs_current``.
 """
 ```
 

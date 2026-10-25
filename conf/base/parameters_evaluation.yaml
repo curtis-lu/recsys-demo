@@ -106,7 +106,7 @@ evaluation:
   # sections 的鍵必須剛好是報表讀的那幾個：多寫一個（沒人讀、設了沒用）或少寫一個
   # （讀了卻關不掉），evaluation 指令一進來就擋；值必須是 true／false，不加引號
   # （A34，清單在 core/consistency.py 的 EVALUATION_REPORT_SECTIONS）。鍵名＝段的檔名
-  # （src/recsys_tfb/evaluation/report_sections/<鍵名>.py，#537）。
+  # （src/recsys_tfb/pipelines/evaluation/report/sections/<鍵名>.py，#537）。
   report:
     sections:
       data_stats: true            # 資料統計段

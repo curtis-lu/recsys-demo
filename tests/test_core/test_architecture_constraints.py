@@ -680,15 +680,22 @@ def _module_paths_imported(path, root):
         yield module
 
 
+#: The subpackages of a pipeline that only that pipeline imports (S3).
+_PIPELINE_INTERNAL_PACKAGES = ("steps", "report")
+
+
 def _steps_imports_from_outside(root):
-    """``file: module`` for every import of a pipeline's ``steps/`` made from
-    outside that pipeline. Empty means every ``steps/`` module is internal."""
+    """``file: module`` for every import of a pipeline's ``steps/`` or
+    ``report/`` made from outside that pipeline. Empty means every module
+    under them is internal."""
     offenders = []
     for path in sorted(root.rglob("*.py")):
         rel = path.relative_to(root)
         for module in _module_paths_imported(path, root):
             parts = module.split(".")
-            if parts[:2] != ["recsys_tfb", "pipelines"] or parts[3:4] != ["steps"]:
+            if (parts[:2] != ["recsys_tfb", "pipelines"]
+                    or parts[3:4] == []
+                    or parts[3] not in _PIPELINE_INTERNAL_PACKAGES):
                 continue
             if rel.parts[:2] != ("pipelines", parts[2]):
                 offenders.append(f"{rel}: {module}")
@@ -697,7 +704,7 @@ def _steps_imports_from_outside(root):
 
 class TestS3StepsPackagesStayInternal:
     """S3: nothing in ``src/`` outside ``pipelines/<name>/`` may import that
-    pipeline's ``steps/``.
+    pipeline's ``steps/`` or ``report/``.
 
     This is the mechanical half of rule 8 in ``pipeline-node-design.md``: root
     level vs ``steps/`` is decided by whether every **src-side** caller sits
@@ -712,6 +719,10 @@ class TestS3StepsPackagesStayInternal:
       of ``nodes.py`` to the training root under this same rule (issue #234), and
       pinning only training would leave the two pipelines that got there first
       (``dataset`` since #176, ``inference`` since #197) unguarded.
+    * ``report/`` as well as ``steps/``: a pipeline's own reports
+      (``pipelines/evaluation/report/``) are as internal as its steps, and the
+      root-level ``recsys_tfb.report`` presentation layer is a different
+      package the scan leaves alone.
     * **Tests are not scanned, on purpose.** Rule 8 says test imports move
       nothing, because what the criterion protects is the production caller
       graph. ``tests/test_pipelines/test_training/test_hpo_resume.py`` importing
@@ -725,7 +736,8 @@ class TestS3StepsPackagesStayInternal:
     def test_no_src_module_outside_a_pipeline_imports_its_steps(self):
         offenders = _steps_imports_from_outside(SRC)
         assert offenders == [], (
-            "a module outside the pipeline imported its steps/ package (S3): "
+            "a module outside the pipeline imported its steps/ or report/ package "
+            "(S3): "
             f"{offenders}. Either the step belongs at the pipeline root as an "
             "outward contract (as cache_sources.py does), or the caller should "
             "not be reaching into another pipeline's internals; see "
@@ -789,16 +801,75 @@ class TestS3StepsPackagesStayInternal:
             f"the pipeline's own module was reported as an outsider: {found}"
         )
 
+    def test_the_scan_sees_every_spelling_of_a_report_import(self, tmp_path):
+        """The same five spellings, pointed at a pipeline's ``report/``, plus
+        the root-level presentation layer reaching in relatively.
+
+        These are new with ``pipelines/evaluation/report/``: until the
+        evaluation reports moved there they sat in the root ``evaluation/``
+        library, where no spelling names a pipeline's ``report``. A scan that
+        only knows ``steps`` passes on every one of them. The pipeline's own
+        modules -- ``nodes.py``, and a report module importing a sibling --
+        stay legal, and so does the root ``recsys_tfb.report`` package.
+        """
+        inside = tmp_path / "pipelines" / "evaluation"
+        (inside / "report").mkdir(parents=True)
+        (inside / "nodes.py").write_text(
+            "from recsys_tfb.pipelines.evaluation.report.main import x\n"
+        )
+        (inside / "report" / "main.py").write_text(
+            "from .sections import shared\nfrom . import shell\n"
+        )
+        cases = {
+            "abs_module.py":
+                "from recsys_tfb.pipelines.evaluation.report.shell import "
+                "generate_html_report\n",
+            "abs_package.py":
+                "from recsys_tfb.pipelines.evaluation.report import shell\n",
+            "plain_import.py":
+                "import recsys_tfb.pipelines.evaluation.report.shell\n",
+            "abs_names.py":
+                "from recsys_tfb.pipelines.evaluation import report\n",
+            "rel_package.py":
+                "from .pipelines.evaluation import report\n",
+            "report/pages.py":
+                "from ..pipelines.evaluation.report import shell\n",
+        }
+        for name, source in cases.items():
+            (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / name).write_text(source)
+        (tmp_path / "report" / "types.py").write_text(
+            "from recsys_tfb.report.pages import render_block\n"
+            "from recsys_tfb import report\n"
+        )
+
+        found = _steps_imports_from_outside(tmp_path)
+        for name in cases:
+            assert any(line.startswith(f"{name}: ") for line in found), (
+                f"{name}: this spelling escaped the scan; found {found}"
+            )
+        assert not any(
+            line.startswith(("pipelines/", "report/types.py")) for line in found
+        ), f"a legal import was reported: {found}"
+
     def test_steps_packages_re_export_nothing(self):
-        """``steps/__init__.py`` holds no imports and no ``__all__``.
+        """``steps/__init__.py`` and ``report/__init__.py`` hold no imports and
+        no ``__all__``.
 
         The import line in ``nodes.py`` is what says which concern a step came
         from, and a re-export erases that: ``from .steps import build_trial_params``
-        would compile fine and tell the reader nothing. Docstring-only is the
-        shape all three packages have; this keeps it that way.
+        would compile fine and tell the reader nothing. The same holds for a
+        part of a report. Docstring-only is the shape every such package has;
+        this keeps it that way.
         """
+        inits = sorted(
+            [*PIPELINES.glob("*/steps/__init__.py"),
+             *PIPELINES.glob("*/report/__init__.py")])
+        assert PIPELINES / "evaluation" / "report" / "__init__.py" in inits, (
+            "the evaluation report package was not scanned"
+        )
         offenders = {}
-        for init in sorted(PIPELINES.glob("*/steps/__init__.py")):
+        for init in inits:
             tree = ast.parse(init.read_text())
             names = []
             for node in ast.walk(tree):
@@ -815,7 +886,8 @@ class TestS3StepsPackagesStayInternal:
             if names:
                 offenders[str(init.relative_to(SRC))] = sorted(names)
         assert offenders == {}, (
-            f"steps/__init__.py re-exports something (S3): {offenders}. "
+            f"a steps/ or report/ __init__.py re-exports something (S3): "
+            f"{offenders}. "
             "Node modules import each step module by name so the import line "
             "names the concern."
         )
@@ -1599,8 +1671,9 @@ LITERAL_COLUMN_EXCEPTIONS = frozenset({
     ("src/recsys_tfb/__main__.py", "inference"),
     ("src/recsys_tfb/__main__.py", "training"),
     ("src/recsys_tfb/core/consistency.py", "post_training_snap_date_errors"),
-    ("src/recsys_tfb/evaluation/comparison/report.py", "assemble_comparison_report"),
-    ("src/recsys_tfb/evaluation/report_builder.py", "assemble_report"),
+    ("src/recsys_tfb/pipelines/evaluation/report/comparison/main.py",
+     "assemble_comparison_report"),
+    ("src/recsys_tfb/pipelines/evaluation/report/main.py", "assemble_report"),
     # The config loader's list of date settings that accept a range, which
     # names this key among them (#374).
     ("src/recsys_tfb/core/date_ranges.py", "<module>"),
@@ -1724,7 +1797,7 @@ class TestS6NoLiteralExampleColumnNames:
             "src/ spelled an example deployment's column name (S6): "
             f"{offenders}. Column names come from the user's config -- read "
             "them through core/schema.get_schema (see "
-            "evaluation/report_sections/core_concepts.py::build). "
+            "pipelines/evaluation/report/sections/core_concepts.py::build). "
             "Exceptions are registered in R6 of "
             "docs/agents/architecture-constraints.md and need sign-off."
         )
@@ -2380,17 +2453,13 @@ class TestS8PipelinesDoNotImportEachOther:
 #: relative to the ``recsys_tfb`` package; a directory stands for every module
 #: under it. Every other ``recsys_tfb`` module counts as computing.
 _REPORT_MODULES = (
-    "evaluation/report.py",
-    "evaluation/report_builder.py",
-    "evaluation/report_sections",
-    "evaluation/comparison",
+    "pipelines/evaluation/report",
     "report",
 )
 _REPORT_MAY_ALSO_IMPORT = (
     "evaluation/result_readers.py",
     "evaluation/metric_catalog.py",
     "evaluation/segment_keys.py",
-    "evaluation/distributions.py",
     "core/schema.py",
     "core/consistency.py",
     "core/date_ranges.py",
@@ -2509,12 +2578,14 @@ class TestS9ReportsDoNotImportComputation:
             "evaluation/__init__.py": "",
             "evaluation/metrics.py": "",
             "evaluation/result_readers.py": "",
-            "evaluation/report.py": "",
-            "evaluation/report_sections/__init__.py": "",
-            "evaluation/report_sections/shared.py": "",
-            "evaluation/comparison/__init__.py": "",
             "pipelines/__init__.py": "",
             "pipelines/evaluation/__init__.py": "",
+            "pipelines/evaluation/nodes.py": "",
+            "pipelines/evaluation/report/__init__.py": "",
+            "pipelines/evaluation/report/shell.py": "",
+            "pipelines/evaluation/report/sections/__init__.py": "",
+            "pipelines/evaluation/report/sections/shared.py": "",
+            "pipelines/evaluation/report/comparison/__init__.py": "",
             "pipelines/evaluation/steps/__init__.py": "",
             "pipelines/evaluation/steps/config_fingerprint.py": "",
             "report/__init__.py": "",
@@ -2527,36 +2598,44 @@ class TestS9ReportsDoNotImportComputation:
         return root
 
     def test_catches_every_spelling(self, tmp_path):
+        """The relative spellings into ``steps/`` and ``nodes.py`` exist only
+        since the reports moved into ``pipelines/evaluation/report/``; from the
+        root ``evaluation/`` library no relative import reached the pipeline."""
+        sections = "pipelines/evaluation/report/sections"
         files = {
-            "evaluation/report_sections/abs_module.py":
+            f"{sections}/abs_module.py":
                 "from recsys_tfb.evaluation.metrics import x\n",
-            "evaluation/report_sections/plain_import.py":
+            f"{sections}/plain_import.py":
                 "import recsys_tfb.evaluation.metrics\n",
-            "evaluation/report_sections/second_half.py":
+            f"{sections}/second_half.py":
                 "from recsys_tfb.evaluation import metrics\n",
-            "evaluation/report_sections/rel_module.py":
-                "from ..metrics import x\n",
-            "evaluation/report_sections/rel_package.py":
-                "from .. import metrics\n",
-            "evaluation/report_sections/in_function.py":
+            f"{sections}/rel_library.py":
+                "from .....evaluation import metrics\n",
+            f"{sections}/rel_module.py":
+                "from ...steps.config_fingerprint import x\n",
+            f"{sections}/rel_package.py":
+                "from ...steps import config_fingerprint\n",
+            f"{sections}/rel_nodes.py":
+                "from ... import nodes\n",
+            f"{sections}/in_function.py":
                 "def f():\n    from recsys_tfb.evaluation import metrics\n",
-            "evaluation/report_sections/steps.py":
+            f"{sections}/steps.py":
                 "from recsys_tfb.pipelines.evaluation.steps import "
                 "config_fingerprint\n",
-            "evaluation/report_sections/core_names.py":
+            f"{sections}/core_names.py":
                 "from recsys_tfb.core import Runner\n",
-            "evaluation/report_sections/spark.py": "import pyspark\n",
-            "evaluation/report_sections/spark_from.py":
+            f"{sections}/spark.py": "import pyspark\n",
+            f"{sections}/spark_from.py":
                 "from pyspark.sql import functions as F\n",
-            "evaluation/comparison/report.py":
+            "pipelines/evaluation/report/comparison/main.py":
                 "from recsys_tfb.evaluation.metrics import x\n",
-            "evaluation/report_builder.py":
-                "from .metrics import x\n",
+            "pipelines/evaluation/report/main.py":
+                "from ..steps import config_fingerprint\n",
             "report/types.py": "from ..evaluation import metrics\n",
         }
         root = self._tree(tmp_path, files)
         found = _report_import_offenders(root)
-        lines = {"evaluation/report_sections/in_function.py": 2}
+        lines = {f"{sections}/in_function.py": 2}
         for name in files:
             line = lines.get(name, 1)
             assert any(f.startswith(f"{name}:{line}: imports ") for f in found), (
@@ -2566,19 +2645,24 @@ class TestS9ReportsDoNotImportComputation:
 
     def test_allowed_imports_are_left_alone(self, tmp_path):
         files = {
-            "evaluation/report_sections/ok.py":
+            "pipelines/evaluation/report/sections/ok.py":
                 "import json\nimport pandas as pd\n"
                 "from recsys_tfb.evaluation.result_readers import x\n"
                 "from recsys_tfb.evaluation import result_readers\n"
                 "from recsys_tfb.core.schema import get_schema\n"
                 "from recsys_tfb.core import schema\n"
-                "from recsys_tfb.evaluation.report_sections.shared import y\n"
+                "from recsys_tfb.pipelines.evaluation.report.sections.shared "
+                "import y\n"
                 "from .shared import y\nfrom . import shared\n"
-                "from ..report import z\n"
+                "from ..shell import z\n"
+                "from recsys_tfb.pipelines.evaluation.report import shell\n"
+                "from recsys_tfb.pipelines.evaluation import report\n"
                 "from recsys_tfb.report.pages import render_block\n"
                 "from recsys_tfb import report\n",
-            "evaluation/comparison/report.py":
-                "from ..report_sections import shared\n",
+            "pipelines/evaluation/report/comparison/main.py":
+                "from ..sections import shared\nfrom .. import shell\n",
+            "pipelines/evaluation/report/main.py":
+                "from .sections import shared\nfrom .shell import z\n",
             # not a report module: computing modules import what they like
             "evaluation/baselines.py":
                 "import pyspark\nfrom recsys_tfb.evaluation import metrics\n",
@@ -2588,11 +2672,11 @@ class TestS9ReportsDoNotImportComputation:
 
     def test_the_message_names_file_line_and_module(self, tmp_path):
         root = self._tree(tmp_path, {
-            "evaluation/report_sections/foo.py":
-                "import os\n\nfrom ..metrics import x\n",
+            "pipelines/evaluation/report/sections/foo.py":
+                "import os\n\nfrom .....evaluation.metrics import x\n",
         })
         assert _report_import_offenders(root) == [
-            "evaluation/report_sections/foo.py:3: imports "
+            "pipelines/evaluation/report/sections/foo.py:3: imports "
             "recsys_tfb.evaluation.metrics"
         ]
 

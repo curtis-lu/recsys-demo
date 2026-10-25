@@ -319,7 +319,7 @@ evaluation:
       include_distributions: true
 ```
 
-標準報表（`report.html`）依序有八段，順序在 `src/recsys_tfb/evaluation/report_builder.py` 的 `SECTIONS`；每段的中文名、英文名與「這段回答什麼問題」，就是各段檔 `src/recsys_tfb/evaluation/report_sections/<段名>.py` 最上面的 `TITLE`、`TITLE_EN`、`QUESTION`。概覽、核心概念、完整性檢查固定印，其餘五段各有一個開關。
+標準報表（`report.html`）依序有八段，順序在 `src/recsys_tfb/pipelines/evaluation/report/main.py` 的 `SECTIONS`；每段的中文名、英文名與「這段回答什麼問題」，就是各段檔 `src/recsys_tfb/pipelines/evaluation/report/sections/<段名>.py` 最上面的 `TITLE`、`TITLE_EN`、`QUESTION`。概覽、核心概念、完整性檢查固定印，其餘五段各有一個開關。
 
 | 段（開關名＝段檔名） | 回答什麼問題 | 印什麼 |
 |---|---|---|
@@ -332,7 +332,7 @@ evaluation:
 | `popularity_baseline` 熱門度基準 | 比熱門度排序好多少？ | 熱門度排名的組成、「能不能比」表，以及一個指標一張的比較表，每個 K 三欄：這次、對照、差（差＝這次 − 對照）。全部的表都用 `report.display.compare_k` 當 K |
 | 完整性檢查（固定印） | 這次量了什麼？什麼沒量到？ | 這次算指標用的設定值、同分列的占比等「看起來量了、其實沒量到」的提醒 |
 
-整份報表共通的版面：外殼依段落產生目錄，每段標題旁放一句「這段回答什麼問題」；所有段、所有表都不收合，只有每張圖正下方的「數字表」預設收起（圖畫的那些數，點開可排序、篩選、複製）；每張表可排序、篩選，右上角有「複製」（複製出來的是看得到的列，貼進試算表一格一個數）；標題中文為主，英文名放在標題旁的小字。**段與段之間不互相提到**：段的文字最多回頭指向核心概念，核心概念不指向任何段，所以跳過任何一段都不會讓別段的句子失去依據（`tests/test_evaluation/test_section_isolation.py` 守著這條）。詞彙表那一段拿掉了，名詞的解釋跟著各段走。
+整份報表共通的版面：外殼依段落產生目錄，每段標題旁放一句「這段回答什麼問題」；所有段、所有表都不收合，只有每張圖正下方的「數字表」預設收起（圖畫的那些數，點開可排序、篩選、複製）；每張表可排序、篩選，右上角有「複製」（複製出來的是看得到的列，貼進試算表一格一個數）；標題中文為主，英文名放在標題旁的小字。**段與段之間不互相提到**：段的文字最多回頭指向核心概念，核心概念不指向任何段，所以跳過任何一段都不會讓別段的句子失去依據（`tests/test_pipelines/test_evaluation/report/test_section_isolation.py` 守著這條）。詞彙表那一段拿掉了，名詞的解釋跟著各段走。
 
 `sections` 的鍵必須剛好是上表這幾個，且每個值都要是 YAML 布林（不加引號的 `true`／`false`；寫成字串 `"false"` 會被當成打開，一樣擋下）：多宣告一個沒有程式在讀的鍵，或少宣告一個程式在讀的鍵，evaluation 的 CLI 入口都會擋下，別的指令不受影響（A34；#532 把 `diagnostics` 改名為 `per_item_breakdown`、拿掉 `diagnosis_links`，舊設定寫著舊名同樣被 A34 擋下；#537 又把四個開關改成段的檔名（`dataset_overview`→`data_stats`、`primary_map`→`ranking_metrics`、`per_item_breakdown`→`rank_distribution`、`baseline`→`popularity_baseline`，`prediction_quality` 不變），舊名同樣被 A34 擋下，而且訊息直接說新名（過渡期檢查，`RENAMED_REPORT_SECTIONS`）；清單在 `core/consistency.py` 的 `EVALUATION_REPORT_SECTIONS`）。per-item、大類、per-segment 的表沒有自己的開關，跟著所在的段落開關。`guardrail_recall`、`per_item_attr`、`category`、`per_segment` 與 `display.recall_colorscale` 以前宣告過、但沒有程式讀，已經刪除（[ADR-0019](../adr/0019-evaluation-modules-split-by-role.md) 決定 6）。舊設定還寫著前四個的話，evaluation 的 CLI 入口會擋下，照錯誤訊息刪掉即可；`display.recall_colorscale` 不在檢查範圍內，留著不會報錯、也沒有作用，一併刪掉。
 
@@ -403,7 +403,7 @@ evaluation:
 
 比較前會取得雙方 query group（`time × entity`）集合與 item 集合的交集，限制到共同範圍後分別重新排名、重新計算指標，並在比較報表的概覽列出兩邊完整與共同的涵蓋範圍、被排除的 items，其餘各段列兩邊的指標：這次（Model A）、對照（Model B）與差。交集用的是 query group、不是 entity：評估多個日期時，B 只在 1 月評分過的 entity，A 在 2 月的列不會被留下來比。兩側的時間欄一律轉成文字再比對，所以外部表的時間欄是 DATE、A 側是 STRING 分區時照樣對得上（與載入 B 時篩日期的比法相同）。
 
-比較報表（`report_comparison.html`）依序有五段，順序在 `src/recsys_tfb/evaluation/comparison/report.py` 的 `SECTIONS`，中文名、英文名與問題在各段檔（同目錄）最上面的 `TITLE`、`TITLE_EN`、`QUESTION`：
+比較報表（`report_comparison.html`）依序有五段，順序在 `src/recsys_tfb/pipelines/evaluation/report/comparison/main.py` 的 `SECTIONS`，中文名、英文名與問題在各段檔（同目錄）最上面的 `TITLE`、`TITLE_EN`、`QUESTION`：
 
 | 段 | 回答什麼問題 | 印什麼 |
 |---|---|---|

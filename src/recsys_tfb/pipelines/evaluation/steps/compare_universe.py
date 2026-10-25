@@ -94,6 +94,11 @@ from pyspark.sql import functions as F
 from recsys_tfb.core.consistency import DataConsistencyError
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.metrics_spark import rank_within_query
+from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
+    COMPARE_SOURCE_KEY,
+    compare_source_identity,
+)
+from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
 
 
 #: Temporary column holding the time as text on the side being restricted, so
@@ -292,3 +297,103 @@ def trim_to_common_universe(
     b_common = b_common.join(a_labels, on=identity_cols, how="left").fillna({label_col: 0})
 
     return a_common, b_common, universe
+
+
+def trim_to_common_with_coverage(
+    eval_predictions: SparkDataFrame,
+    compare_predictions_raw: SparkDataFrame,
+    segment_columns: dict,
+    parameters: dict,
+) -> tuple[SparkDataFrame, SparkDataFrame, dict]:
+    """Call the pure restrict function + capture coverage dict.
+
+    ``eval_predictions`` is already kept to the evaluated dates and checked
+    (``make_restrict_to_common_node``).
+
+    Returns ``(a_common, b_common, coverage)`` — the coverage carries
+    full-universe sizes, the common sizes and dropped item lists so the
+    report can show what was filtered. It lands (``compare_coverage``, #536)
+    with ``config_fingerprint`` — inheriting ``segment_columns``' record, the
+    settings A's partitions were written under — and the compare source it
+    was computed against (``compare_sources.compare_source_identity``),
+    which every reader of it checks; the two frames stay in memory.
+
+    Population size is counted in **query groups** — distinct
+    ``query_group_columns`` combinations (time, every column of
+    ``schema.entity``, and ``occasion`` when declared) — because that is the
+    unit mAP divides by. Reporting it in any other unit puts two different
+    scales side by side in one table with nothing telling the reader they
+    differ. See ``docs/adr/0015-compare-population-counted-in-query-groups.md``.
+
+    The common count is taken from what the restriction kept, not re-derived
+    from the raw frames (ADR-0020 bug 14): an ``intersect`` of the raw query
+    groups matches ``NULL == NULL`` while the restriction's equi-join drops
+    null keys, so it would count groups no metric saw.
+
+    The node does not compare ``segment_columns.json``'s own fingerprint with
+    today's settings; it checks the partitions it reads instead. Under
+    ``--compare`` A's partitions are checked against today's settings, so a
+    sliced ``--from-node compute_compare_metrics`` after a settings change
+    raises. Under ``--compare-only`` they are checked against the settings that
+    JSON records, because ``post_training`` is inert there (ADR-0020 bug 6, #352
+    correction, and its #374 addendum).
+    """
+    schema = get_schema(parameters)
+    time_col = schema["time"]
+    query_group_cols = schema["query_group_columns"]
+
+    # Decision — B is scored against A's labels: not the label B landed with,
+    # and not a fresh label_table join, since A's own label is not the current
+    # label_table under --post-training / --compare-only. One answer for both
+    # sides in every mode (ADR-0020 bug 7; the full why is in
+    # steps/compare_universe.py).
+    a_common, b_common, universe = trim_to_common_universe(
+        eval_predictions, compare_predictions_raw, parameters
+    )
+
+    a_groups_full = eval_predictions.select(*query_group_cols).distinct().count()
+    b_groups_full = compare_predictions_raw.select(*query_group_cols).distinct().count()
+    # Groups both restricted frames still hold. A left-semi equi-join, so null
+    # keys never match — the same null rule as the restriction's own joins. On
+    # symmetric candidate sets this equals either side's kept group count; when
+    # one side scored a common entity only on items the other lacks, that group
+    # is in one side's metrics but not in "common". The time is matched as
+    # text, by the same helper the restriction uses (B's time column may be
+    # DATE while A's partition is STRING).
+    groups_common = (
+        query_groups_with_text_time(a_common, time_col, query_group_cols)
+        .join(
+            query_groups_with_text_time(b_common, time_col, query_group_cols),
+            on=query_group_cols, how="left_semi",
+        )
+        .count()
+    )
+    common_items = universe.common_items
+
+    src = (parameters.get("evaluation", {}) or {}).get("compare", {}) or {}
+    coverage = {
+        "kind_a": "model_version",
+        "model_version_a": parameters.get("model_version", "(this run)"),
+        # This run's side is read off the table pipeline.py wires as this
+        # node's first input, in both compare modes — the same table a
+        # model_version source names as its `source`; the comparison report
+        # prints it beside the compared source's (#537).
+        "source_a": "enriched_eval_predictions",
+        "kind_b": src.get("kind", ""),
+        "model_version_b": src.get("model_version", "n/a"),
+        "table_b": src.get("table", "n/a"),
+        "n_query_group_A_full": a_groups_full,
+        "n_query_group_B_full": b_groups_full,
+        "n_query_group_common": groups_common,
+        "n_item_A_full": len(universe.a_items),
+        "n_item_B_full": len(universe.b_items),
+        "n_item_common": len(common_items),
+        "dropped_items_A": sorted(universe.a_items - common_items),
+        "dropped_items_B": sorted(universe.b_items - common_items),
+        # Lands as compare_coverage (#536): the redraw reads it back, so it
+        # says what it was computed under and against.
+        "config_fingerprint": fingerprint(
+            parameters, "restrict_to_common", (segment_columns,)),
+        COMPARE_SOURCE_KEY: compare_source_identity(parameters),
+    }
+    return a_common, b_common, coverage
