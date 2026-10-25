@@ -45,7 +45,8 @@ def test_whom_against_another_model_version():
     assert _cells(t) == {
         "kind": ("model_version", "model_version"),
         "model_version": (fx.THIS_MODEL_VERSION, "20260131_v6"),
-        "table": ("—", "—"),
+        # The table B was read off is part of its identity.
+        "table": ("—", "ranked_predictions"),
         "source": ("enriched_eval_predictions", "ranked_predictions"),
         "columns": ("—", "—"),
         "prod_mapping": ("—", "—"),

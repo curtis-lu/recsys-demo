@@ -254,7 +254,11 @@ Node(
 - **比對。** `applied` 一律跟今天的設定比。`inputs` 也跟今天的比，但這次 run 裡沒有的 step 留下的紀錄不比：沒有任何重跑能讓它變新。實際上只有 `--compare-only` 會遇到：那個模式讀之前一般 run 寫的分區，`prepare_eval_data` 的紀錄是寫分區那次的設定，今天帶不帶 `--post-training` 跟它無關。決定 10 更正寫的代價「`--compare-only` 只重畫時，帶不帶 `--post-training` 要跟寫那份結果時一樣」因此消失。換來的缺口：一般 run 用別的分群設定重寫了目錄之後，`--compare-only --only-node generate_comparison_report` 會畫出重寫前算的比較，不報錯（擁有者 2026-10-25 選不補，跟「資料變了只重畫不擋」同一類）。
 - **重跑建議（決定 15 第一列）。** 這次 run 照拓撲順序，第一個讀到變動設定的 step，或沒有指紋的結果的 producer。哪些 node 在 run 裡跟著模式與段開關變，所以兩份報表與比較鏈的讀者由 `create_pipeline` 交給它們這次 run 的順序；其他讀者（主線上檢查輸入的 node）照表的順序，表的主線部分是每種 run 的順序，`test_pipeline.py::TestFingerprintRerunNodes` 檢查這件事，也檢查每個設定的建議 node 存在、而且從它重跑會涵蓋每個讀它的 step。這取代決定 10 更正寫的 `computed_rerun_node` 與 `COMPARE_MODE_DISPLAY_RERUN_NODE`。實作時發現舊做法的一個洞：`--compare` 且主報表的段全關時，主報表的 K 截斷不在 pipeline 裡，改了 `compare_k` 的建議卻指向它。
 - **三個段開關不再進指紋**（`popularity_baseline`、`rank_distribution`、`prediction_quality`）：#538 之後它們只決定 node 在不在，計算 node 不讀。例外是 `popularity_baseline` 記在 `resolve_display_ks`：關掉時那個 node 拿不到比較結果、不寫熱門度段的 K，它的結果跟著接線變。
-- **宣告不到的設定照舊擋不下。** `schema.*`、`dataset.test_zero_positive_group_ratio`（`--post-training` 下 `compute_prediction_quality` 讀）、`hive.db`、`_compare_source_tables` 會改變結果，但不在任何一列；改了它們只重畫不會被擋。#539 之前就是這樣，另開 #564 處理。
+- **宣告不到的設定（#564 補上，2026-10-25）。** #539 時 `schema.*`、`dataset.test_zero_positive_group_ratio`（`--post-training` 下 `compute_prediction_quality` 讀）、`hive.db`、`_compare_source_tables` 會改變結果，但不在任何一列，改了只重畫不會被擋（#539 之前就是這樣）。#564 的補法，擁有者 2026-10-25 選定：
+  - `schema` 整塊記進每個解析欄位角色的 step，不逐角色宣告。逐角色要追 `get_schema` 的每個讀者，漏一個洞就回來；角色很少改，一改通常整個問題定義都變，從 `prepare_eval_data` 重跑的代價可以接受。`prepare_eval_data` 記了它，所以它也進了分區指紋：分區裡的名次照 query group 算，角色決定 query group。
+  - `dataset.test_zero_positive_group_ratio` 記在 `compute_prediction_quality`。
+  - `hive.db` 與 `_compare_source_tables` 只決定 `model_version` 比較對象從哪張實體表讀，所以把那張表名放進比較身分（`compare_sources.compare_source_identity`），不另記這兩個鍵。
+  - 留下的缺口：`--compare-only` 不比 `prepare_eval_data` 的紀錄（見上面「比對」），寫完分區之後才改的角色在那個模式擋不下；比較鏈自己的 step 也記了 `schema`，只擋得下它們跑完之後才改的。跟上面「比對」那條擁有者選不補的缺口同一類，沒有另外補：要補得讓 `--compare-only` 單獨拿 `schema` 跟分區那次的紀錄比，等於在「這次 run 沒有的 step 不比」之外開一個例外。
 - **舊格式的結果一律算過期**：#539 之前落地的 JSON 沒有兩格，第一次接續會被擋，照訊息重跑一次。
 
 ---

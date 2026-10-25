@@ -26,28 +26,30 @@ from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
 )
 
 _METRIC_READS = {
-    "evaluation.snap_date", "evaluation.item_categories",
+    "schema", "evaluation.snap_date", "evaluation.item_categories",
     "evaluation.query_filter", "evaluation.k_values", "evaluation.metric",
 }
 
-#: What each fingerprinted step reads (ADR-0031 principle 5).
+#: What each fingerprinted step reads (ADR-0031 principle 5). ``schema``
+#: whole in every step that resolves a column role.
 SPEC_APPLIED = {
     # post_training through its wiring: the predictions and population table.
     "prepare_eval_data": {
-        "post_training", "evaluation.snap_date", "evaluation.segment_columns",
+        "schema", "post_training", "evaluation.snap_date", "evaluation.segment_columns",
         "evaluation.segment_sources", "evaluation.item_categories.column",
     },
     "compute_row_facts": {
-        "evaluation.snap_date", "evaluation.item_categories",
+        "schema", "evaluation.snap_date", "evaluation.item_categories",
         "evaluation.query_filter",
     },
     "compute_prediction_quality": {
-        "post_training", "evaluation.snap_date", "evaluation.prediction_quality",
+        "schema", "post_training", "dataset.test_zero_positive_group_ratio",
+        "evaluation.snap_date", "evaluation.prediction_quality",
     },
     "compute_report_aggregates": {
-        "evaluation.snap_date", "evaluation.report.diagnostics",
+        "schema", "evaluation.snap_date", "evaluation.report.diagnostics",
     },
-    "restrict_to_common": {"evaluation.snap_date"},
+    "restrict_to_common": {"schema", "evaluation.snap_date"},
     "compute_metrics": _METRIC_READS,
     "compute_baseline_metrics": _METRIC_READS | {"evaluation.baseline"},
     "compute_compare_metrics": _METRIC_READS,
@@ -69,6 +71,12 @@ def _params() -> dict:
         "model_version": "mv_test",
         "snap_date": "20260131",
         "post_training": False,
+        "schema": {
+            "columns": {"time": "snap_date", "entity": ["cust_id"],
+                        "item": "prod_name", "label": "label",
+                        "score": "score", "rank": "rank"},
+            "categorical_values": {"prod_name": ["p1", "p2"]},
+        },
         "dataset": {"sample_ratio": 1.0},
         "evaluation": {
             "snap_date": "2026-01-31",
@@ -178,6 +186,7 @@ def test_a_result_records_only_what_its_step_applied():
     assert recorded == {
         "node": "compute_report_aggregates",
         "applied": {
+            "schema": params["schema"],
             "evaluation.snap_date": "2026-01-31",
             "evaluation.report.diagnostics": {"include_distributions": True},
         },
@@ -223,6 +232,9 @@ STALE_AFTER = {
         {"evaluation_report_aggregates"}, "compute_report_aggregates"),
     "evaluation.prediction_quality.n_bins": (
         {"prediction_quality_metrics"}, "compute_prediction_quality"),
+    # With post_training, it decides whether every row is weighted.
+    "dataset.test_zero_positive_group_ratio": (
+        {"prediction_quality_metrics"}, "compute_prediction_quality"),
     "evaluation.report.display.compare_k": (
         {"evaluation_display_ks"}, "resolve_display_ks"),
     "evaluation.report.sections.popularity_baseline": (
@@ -251,7 +263,11 @@ STALE_AFTER.update({
     path: (_EVERY_RESULT, "prepare_eval_data")
     for path in ("post_training", "evaluation.segment_columns",
                  "evaluation.segment_sources", "evaluation.snap_date",
-                 "evaluation.item_categories.column")
+                 "evaluation.item_categories.column",
+                 # The column roles decide the query groups and the columns
+                 # the partition rows hold; the item list decides the
+                 # category pass and the item count.
+                 "schema.columns.rank", "schema.categorical_values")
 })
 #: Drawn keys: no result goes stale.
 DRAWN = ["evaluation.report.sections.data_stats",
@@ -413,6 +429,9 @@ _COMPARE_WITHOUT_THE_MAIN_CUT = (
     (["evaluation.item_categories.mapping.a"], None, "compute_row_facts"),
     (["evaluation.k_values"], None, "compute_metrics"),
     (["evaluation.k_values"], COMPARISON_CHAIN, "compute_compare_metrics"),
+    (["schema.columns.rank"], None, "prepare_eval_data"),
+    # The comparison chain's first step resolves the roles too.
+    (["schema.columns.rank"], COMPARISON_CHAIN, "restrict_to_common"),
     (["evaluation.report.display.compare_k"], None, "resolve_display_ks"),
     (["evaluation.report.display.compare_k"], COMPARISON_CHAIN,
      "resolve_comparison_display_ks"),
@@ -461,6 +480,16 @@ def test_compare_only_still_compares_what_its_own_steps_applied():
     assert "settings its input from compute_compare_metrics was computed " \
            "with" in msg
     assert "--from-node compute_compare_metrics," in msg
+
+
+def test_compare_only_refuses_a_comparison_computed_under_other_roles():
+    """The prepared record is skipped under --compare-only, so the chain's
+    own steps must hold ``schema`` for a role change to be caught."""
+    old = _params()
+    new = _set(copy.deepcopy(old), "schema.columns.rank", "position")
+    msg = _refusal([_comparison(old)], new, run_nodes=COMPARISON_CHAIN)
+    assert "schema.columns.rank: 'rank' -> 'position'" in msg
+    assert "--from-node restrict_to_common," in msg
 
 
 # ------------------------------------------------------------ normalisation
@@ -516,10 +545,18 @@ def test_long_values_are_truncated_in_the_message():
 # ------------------------------------ what the enriched partition was made with
 
 
-def test_the_partition_rows_depend_on_the_run_mode_and_segment_settings():
+def test_the_partition_rows_depend_on_the_run_mode_schema_and_segment_settings():
     assert set(PARTITION_FINGERPRINT_KEYS) == {
-        "post_training", "evaluation.segment_columns",
+        "schema", "post_training", "evaluation.segment_columns",
         "evaluation.segment_sources"}
+
+
+def test_a_partition_written_under_other_column_roles_is_not_this_runs():
+    """The roles name the columns the rows hold (here the rank column):
+    another run's partition under another ``schema`` holds other columns."""
+    one = _params()
+    other = _set(copy.deepcopy(one), "schema.columns.rank", "position")
+    assert partition_fingerprint(one, []) != partition_fingerprint(other, [])
 
 
 def test_the_partition_rows_do_not_depend_on_the_category_column():

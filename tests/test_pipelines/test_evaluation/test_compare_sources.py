@@ -479,7 +479,32 @@ def test_the_identity_is_what_decides_side_b_and_not_its_label():
     assert (compare_source_identity(relabelled)
             == compare_source_identity(_params_for_mv("MV_B"))
             == {"kind": "model_version", "model_version": "MV_B",
-                "source": "enriched_eval_predictions"})
+                "source": "enriched_eval_predictions",
+                "table": "enriched_eval_predictions"})
+
+
+@pytest.mark.parametrize("where, before, after", [
+    # The table the command took from the catalog.
+    ("_compare_source_tables",
+     {"enriched_eval_predictions": "db_a.enriched_eval_predictions"},
+     {"enriched_eval_predictions": "db_b.enriched_eval_predictions"}),
+    # Its fallback when the catalog names none.
+    ("hive", {"db": "db_a"}, {"db": "db_b"}),
+])
+def test_a_model_version_source_read_off_another_table_is_another_b(
+        where, before, after):
+    """``hive.db`` and ``_compare_source_tables`` decide which physical table
+    B is read off, not ``evaluation.compare``: a redraw after either moved
+    would print another table's numbers under the same label."""
+    from recsys_tfb.pipelines.evaluation.steps.compare_sources import (
+        compare_source_identity,
+    )
+
+    one = {**_params_for_mv("MV_B"), where: before}
+    other = {**_params_for_mv("MV_B"), where: after}
+    assert compare_source_identity(one)["table"] == \
+        "db_a.enriched_eval_predictions"
+    assert compare_source_identity(one) != compare_source_identity(other)
 
 
 def test_an_omitted_default_is_the_source_the_loader_reads():

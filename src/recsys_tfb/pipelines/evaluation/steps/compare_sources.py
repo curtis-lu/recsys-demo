@@ -53,12 +53,17 @@ COMPARE_SOURCE_KEY = "compare_source"
 
 
 def compare_source_identity(parameters: dict) -> dict:
-    """The keys of ``evaluation.compare`` that decide what side B holds, as
-    the loader reads them, :func:`config_fingerprint.normalised` — "which
-    source a comparison was computed against" (ADR-0031 decision 5).
+    """What decides what side B holds, as the loader reads it,
+    :func:`config_fingerprint.normalised` — "which source a comparison was
+    computed against" (ADR-0031 decision 5): the keys of
+    ``evaluation.compare``, plus the physical table a ``model_version``
+    source is read off.
 
     Per kind: ``model_version`` reads ``model_version`` off the table
-    ``source`` names; ``external_hive`` reads ``table``, renames by
+    ``source`` names. Which physical table that is
+    (:func:`compare_source_table`) comes from ``_compare_source_tables`` or
+    ``hive.db``, outside ``evaluation.compare``, so it is recorded as
+    ``table``. ``external_hive`` reads ``table``, renames by
     ``columns``, translates by ``prod_mapping`` and treats an unmapped item
     by ``unmapped_policy``. ``kind`` itself always. ``label`` never: it only
     names B in the report, so a relabelled source redraws without a re-run.
@@ -75,10 +80,12 @@ def compare_source_identity(parameters: dict) -> dict:
     src = ((parameters.get("evaluation") or {}).get("compare")) or {}
     kind = src.get("kind")
     if kind == "model_version":
+        source = src.get("source", DEFAULT_MODEL_VERSION_SOURCE)
         identity = {
             "kind": kind,
             "model_version": src.get("model_version"),
-            "source": src.get("source", DEFAULT_MODEL_VERSION_SOURCE),
+            "source": source,
+            "table": compare_source_table(parameters, source),
         }
     elif kind == "external_hive":
         identity = {

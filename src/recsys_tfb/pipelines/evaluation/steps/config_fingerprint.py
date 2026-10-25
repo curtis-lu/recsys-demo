@@ -64,11 +64,14 @@ pins that the main-line part of that order is every run's, and that the
 advice exists and re-runs every applier in every mode, with every section
 switch on, off, and off alone.
 
-Settings a step reads and declares nowhere
-==========================================
-``schema.*`` and a few other settings change results and are declared
-nowhere, so a change to one is not caught (ADR-0031 principle 5 lists
-them). ``evaluation.compare`` is left out on purpose: the CLI
+Settings outside ``evaluation`` and the ones left out
+=====================================================
+``schema`` and ``dataset.test_zero_positive_group_ratio`` are declared like
+any other (ADR-0031 principle 5). ``hive.db`` and ``_compare_source_tables`` only decide
+which table a ``model_version`` compare source is read off, so they reach the
+comparison results through the source's identity
+(``compare_sources.compare_source_identity``), not through a declaration.
+``evaluation.compare`` is left out on purpose: the CLI
 injects it per run, and the comparison results record their source under
 their own key instead (:func:`require_same_recorded_values`).
 ``model_version`` and the run's dates are in every result's path.
@@ -120,6 +123,12 @@ __all__ = [
 #: order is the advice of the readers that are not given the run's (see the
 #: module docstring). A step reading part of a block declares the block when
 #: another part would change its result too.
+#:
+#: ``schema`` is declared whole by every step that resolves a column role
+#: (``core/schema.py::get_schema``), not role by role: a role change redefines
+#: the query groups, the ranks or the item list, and is rare enough that
+#: re-running from ``prepare_eval_data`` costs less than tracing which role
+#: each reader resolves, where one missed reader reopens the hole.
 APPLIED_SETTINGS: dict[str, tuple[str, ...]] = {
     # post_training is the --post-training / monitoring run mode, injected at
     # the top level by the CLI like model_version, not a YAML key. It is not
@@ -132,35 +141,36 @@ APPLIED_SETTINGS: dict[str, tuple[str, ...]] = {
     # re-run to compute_row_facts, which then refuses the table landed empty
     # and names this node — loud, never a wrong report.
     "prepare_eval_data": (
-        "post_training", "evaluation.snap_date", "evaluation.segment_columns",
-        "evaluation.segment_sources", "evaluation.item_categories.column",
+        "schema", "post_training", "evaluation.snap_date",
+        "evaluation.segment_columns", "evaluation.segment_sources",
+        "evaluation.item_categories.column",
     ),
     # The category pass and the all-positive accounts.
     "compute_row_facts": (
-        "evaluation.snap_date", "evaluation.item_categories",
+        "schema", "evaluation.snap_date", "evaluation.item_categories",
         "evaluation.query_filter",
     ),
     # post_training together with dataset.test_zero_positive_group_ratio
-    # decides the row weights (the latter is undeclared, see the module
-    # docstring).
+    # decides the row weights.
     "compute_prediction_quality": (
-        "post_training", "evaluation.snap_date", "evaluation.prediction_quality",
+        "schema", "post_training", "dataset.test_zero_positive_group_ratio",
+        "evaluation.snap_date", "evaluation.prediction_quality",
     ),
     "compute_report_aggregates": (
-        "evaluation.snap_date", "evaluation.report.diagnostics",
+        "schema", "evaluation.snap_date", "evaluation.report.diagnostics",
     ),
-    "restrict_to_common": ("evaluation.snap_date",),
+    "restrict_to_common": ("schema", "evaluation.snap_date"),
     "compute_metrics": (
-        "evaluation.snap_date", "evaluation.item_categories",
+        "schema", "evaluation.snap_date", "evaluation.item_categories",
         "evaluation.query_filter", "evaluation.k_values", "evaluation.metric",
     ),
     "compute_baseline_metrics": (
-        "evaluation.snap_date", "evaluation.item_categories",
+        "schema", "evaluation.snap_date", "evaluation.item_categories",
         "evaluation.query_filter", "evaluation.k_values", "evaluation.metric",
         "evaluation.baseline",
     ),
     "compute_compare_metrics": (
-        "evaluation.snap_date", "evaluation.item_categories",
+        "schema", "evaluation.snap_date", "evaluation.item_categories",
         "evaluation.query_filter", "evaluation.k_values", "evaluation.metric",
     ),
     "compare_to_baseline": (),
@@ -187,7 +197,10 @@ APPLIED_SETTINGS: dict[str, tuple[str, ...]] = {
 #: flag is left off. The price: after a standard run rewrites the directory
 #: under other settings, ``--compare-only --only-node
 #: generate_comparison_report`` draws the comparison computed before it, exit
-#: code 0 (``docs/pipelines/evaluation.md`` §9).
+#: code 0 (``docs/pipelines/evaluation.md`` §9). And ``schema`` is in that
+#: record too, so a ``--compare-only`` run does not refuse partitions
+#: written under other roles; its own steps declare ``schema``, which only
+#: catches a role changed since they ran.
 COMPARISON_CHAIN: tuple[str, ...] = (
     "restrict_to_common", "compute_compare_metrics", "compare_to_source",
     "resolve_comparison_display_ks",
@@ -198,8 +211,8 @@ COMPARISON_CHAIN: tuple[str, ...] = (
 #: ``evaluation.item_categories.column``.
 #:
 #: Why ``evaluation.snap_date`` is left out: a partition holds one date, and
-#: its rows depend on the run mode and the segment settings, not on which other
-#: dates the same run evaluated. Kept in, a single-date run of March and a
+#: its rows depend on the run mode, the column roles and the segment
+#: settings, not on which other dates the same run evaluated. Kept in, a single-date run of March and a
 #: January–March run with identical settings would refuse each other's March,
 #: though the rows are the same.
 #:

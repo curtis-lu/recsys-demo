@@ -955,9 +955,10 @@ class TestComputeBaselineMetrics:
         }
 
     @classmethod
-    def _eval_predictions(cls, spark):
-        """The partition as ``prepare_eval_data`` under :meth:`_parameters`
-        writes it, settings fingerprint included."""
+    def _eval_predictions(cls, spark, parameters=None):
+        """The partition as ``prepare_eval_data`` under ``parameters``
+        (default :meth:`_parameters`) writes it, settings fingerprint
+        included."""
         import pandas as pd
 
         from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
@@ -971,7 +972,7 @@ class TestComputeBaselineMetrics:
             "label": [1, 0, 1, 0, 1, 0],
             "score": [0.9, 0.5, 0.1, 0.2, 0.8, 0.3],
             "rank": [1, 2, 3, 3, 1, 2],
-        })), cls._parameters(), [])
+        })), parameters or cls._parameters(), [])
 
     @staticmethod
     def _label_table(spark):
@@ -1136,7 +1137,7 @@ class TestCompareToBaseline:
             compute_baseline_metrics,
         )
 
-        frame = TestComputeBaselineMetrics._eval_predictions(spark)
+        frame = TestComputeBaselineMetrics._eval_predictions(spark, params)
         baseline = compute_baseline_metrics(
             frame, _row_facts(frame, params),
             TestComputeBaselineMetrics._label_table(spark),
@@ -1968,7 +1969,8 @@ class TestConsumersSegmentByTheLandedList:
                 "prepare_eval_data"}
             assert result.get("compare_source") == {
                 "kind": "model_version", "model_version": "v0",
-                "source": "enriched_eval_predictions"}
+                "source": "enriched_eval_predictions",
+                "table": "enriched_eval_predictions"}
 
 
 class TestEnrichedReadersKeepTheEvaluatedMonth:
