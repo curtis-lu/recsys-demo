@@ -2475,7 +2475,7 @@ class TestAllPositiveQueryGroups:
         is read from ``compute_metrics``'s result (``metrics.json``), so the
         switch reaches it like every other measurement metric: switched on,
         it equals the value of the frame without the all-positive groups."""
-        from recsys_tfb.evaluation.report_sections import overview
+        from recsys_tfb.pipelines.evaluation.report.sections import overview
         from recsys_tfb.report.types import Table
 
         def headline(switch, without=()):
@@ -2498,7 +2498,7 @@ class TestAllPositiveQueryGroups:
         report printed before, holding a positive less all-positive, here by
         hand: three groups hold a positive at either grain (all but c4); c1
         is all-positive at the fine grain, c1 and c2 at the category one."""
-        from recsys_tfb.evaluation.report_sections import (
+        from recsys_tfb.pipelines.evaluation.report.sections import (
             core_concepts,
         )
         from recsys_tfb.pipelines.evaluation.nodes import (

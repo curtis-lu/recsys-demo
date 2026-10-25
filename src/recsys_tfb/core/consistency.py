@@ -3597,8 +3597,9 @@ def retired_k_key_errors(parameters: dict) -> list[str]:
 
 
 #: The ``evaluation.report.sections`` switches the report reads: one name per
-#: section that declares a ``SWITCH`` in ``evaluation/report_sections/``,
-#: read through ``report_section_on``, which refuses any name not listed here
+#: section that declares a ``SWITCH`` in
+#: ``pipelines/evaluation/report/sections/``, read through
+#: ``report_section_on``, which refuses any name not listed here
 #: (A34). Each is the file name of the section it switches (#537), so a
 #: reader finds the section from the conf. No node reads a switch (#538,
 #: ADR-0031 principle 3): the evaluation pipeline's requirement list leaves

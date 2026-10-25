@@ -39,7 +39,7 @@ columns of every per-K table of the comparison report (:func:`comparison_cut`;
     }
 
 The column at ``all_k`` reads each side's own "all" (``name@all``,
-``report_sections.metric_tables.metric_table``). No list of rows: since #537
+``report/sections/metric_tables.metric_table``). No list of rows: since #537
 no table of that report prints every computed key.
 
 The cut itself is :func:`resolve_display_k` (bug 8, ADR-0020;

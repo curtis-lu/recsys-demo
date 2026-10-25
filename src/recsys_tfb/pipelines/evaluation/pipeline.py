@@ -102,7 +102,7 @@ def required_results(
 ) -> dict[str, tuple[str, ...]]:
     """The requirement list (ADR-0031 principle 3): for each report this run
     draws, the results it reads — the ``READS`` of every section switched on
-    (``report_sections.shared.sections_on``), in page order, each once.
+    (``report/sections/shared.sections_on``), in page order, each once.
 
     It collects declarations and names no computation: which node produces a
     result is the pipeline's wiring (``create_pipeline`` keeps only the nodes
@@ -110,9 +110,9 @@ def required_results(
     the pipeline, and removing a section from its report's list removes its
     computation with it, with nothing else to keep in step.
     """
-    from recsys_tfb.evaluation import report_builder
-    from recsys_tfb.evaluation.comparison import report as comparison
-    from recsys_tfb.evaluation.report_sections.shared import sections_on
+    from recsys_tfb.pipelines.evaluation.report import main
+    from recsys_tfb.pipelines.evaluation.report.comparison import main as comparison
+    from recsys_tfb.pipelines.evaluation.report.sections.shared import sections_on
 
     def reads(sections) -> tuple[str, ...]:
         return tuple(dict.fromkeys(
@@ -121,7 +121,7 @@ def required_results(
 
     required = {}
     if main_report:
-        required[MAIN_REPORT] = reads(report_builder.SECTIONS)
+        required[MAIN_REPORT] = reads(main.SECTIONS)
     if comparison_report:
         required[COMPARISON_REPORT] = reads(comparison.SECTIONS)
     return required
@@ -178,7 +178,9 @@ def create_pipeline(
     and monitoring mode reads no ``sample_pool``. Like every node, the two
     are kept only while a switched-on section reads what they lead to.
     """
-    from recsys_tfb.evaluation.report_sections.shared import BASELINE_COMPARISON
+    from recsys_tfb.pipelines.evaluation.report.sections.shared import (
+        BASELINE_COMPARISON,
+    )
     from recsys_tfb.pipelines.evaluation.nodes import (
         build_popularity_period_counts,
         compare_to_baseline,
@@ -410,8 +412,8 @@ def result_readers_table() -> dict[str, dict]:
     section, SWITCH)]}}`` for every declared result, in declaration order.
     """
     from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
-    from recsys_tfb.evaluation import report_builder
-    from recsys_tfb.evaluation.comparison import report as comparison
+    from recsys_tfb.pipelines.evaluation.report import main
+    from recsys_tfb.pipelines.evaluation.report.comparison import main as comparison
     from recsys_tfb.pipelines.evaluation import nodes
     from recsys_tfb.pipelines.evaluation.steps.result_blocks import (
         declared_results,
@@ -440,7 +442,7 @@ def result_readers_table() -> dict[str, dict]:
             for name in node.inputs:
                 if name in table and node.name not in table[name]["reader_nodes"]:
                     table[name]["reader_nodes"].append(node.name)
-    for report, sections in ((MAIN_REPORT, report_builder.SECTIONS),
+    for report, sections in ((MAIN_REPORT, main.SECTIONS),
                              (COMPARISON_REPORT, comparison.SECTIONS)):
         for section in sections:
             for name in section.READS:

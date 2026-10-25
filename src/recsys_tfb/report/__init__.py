@@ -3,10 +3,10 @@
 Who imports it from outside the package (``grep -rn "recsys_tfb.report" src/
 scripts/``, hits inside ``report/`` itself left out):
 
-* ``evaluation/report.py`` — ``render_block`` and the escapers from
+* ``pipelines/evaluation/report/shell.py`` — ``render_block`` and the escapers from
   ``report.pages``;
   re-exports ``ReportSection``.
-* ``evaluation/report_sections/metric_tables.py`` — the content-block types
+* ``pipelines/evaluation/report/sections/metric_tables.py`` — the content-block types
   (``Table``, ``Column``, ``Row``, ``Cell``, ``Note``, ``Definitions``).
 
 Nothing under ``scripts/`` imports it: ``scripts/profile_feature_table.py``

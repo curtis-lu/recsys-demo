@@ -86,11 +86,11 @@ class TestTheRequirementList:
         """ADR-0031 decision 1, third row: remove a section's line from the
         page-order list, and its computation is not in the pipeline — its
         switch still on, nothing else changed."""
-        from recsys_tfb.evaluation import report_builder
-        from recsys_tfb.evaluation.report_sections import prediction_quality
+        from recsys_tfb.pipelines.evaluation.report import main
+        from recsys_tfb.pipelines.evaluation.report.sections import prediction_quality
 
-        monkeypatch.setattr(report_builder, "SECTIONS", tuple(
-            s for s in report_builder.SECTIONS if s is not prediction_quality))
+        monkeypatch.setattr(main, "SECTIONS", tuple(
+            s for s in main.SECTIONS if s is not prediction_quality))
         for label, kwargs in self.MODES.items():
             assert "compute_prediction_quality" not in self._names(
                 ALL_ON, **kwargs), label
@@ -135,7 +135,7 @@ class TestTheRequirementList:
         """The report layer cannot import the pipeline (S8), so it spells the
         node a missing comparison cell sends the reader to; it must be the
         node that computes both sides' metrics."""
-        from recsys_tfb.evaluation.report_sections.shared import (
+        from recsys_tfb.pipelines.evaluation.report.sections.shared import (
             COMPARISON_METRICS_NODE,
         )
         from recsys_tfb.pipelines.evaluation.nodes import COMPARISON_RERUN_NODE
@@ -936,8 +936,8 @@ class TestGenerateReportNodeWiring:
         ``READS`` is loaded for nothing — a switched-off section's file left
         by an older run among them; one a section declares that is not wired
         fails only when the report is drawn. The two sets are the same."""
-        from recsys_tfb.evaluation.report_builder import SECTIONS
-        from recsys_tfb.evaluation.report_sections.shared import sections_on
+        from recsys_tfb.pipelines.evaluation.report.main import SECTIONS
+        from recsys_tfb.pipelines.evaluation.report.sections.shared import sections_on
 
         for parameters in (ALL_ON, _sections(popularity_baseline=False,
                                              prediction_quality=False)):
@@ -993,7 +993,7 @@ class TestTheComparisonChainIsWiredByName:
                         if p.default is not inspect.Parameter.empty], label
 
     def test_the_wired_results_are_the_ones_the_report_reads(self):
-        from recsys_tfb.evaluation.comparison.report import READS
+        from recsys_tfb.pipelines.evaluation.report.comparison.main import READS
 
         for label, node in self._nodes("generate_comparison_report").items():
             wired = set(node.keyword_inputs) - {"parameters"}

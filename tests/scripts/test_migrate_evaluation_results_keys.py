@@ -9,9 +9,10 @@ import json
 
 import pytest
 
-from recsys_tfb.evaluation.report_sections import shared
-from recsys_tfb.evaluation.report_sections.shared import read_dataset_overview
+from recsys_tfb.pipelines.evaluation.report.sections import shared
+from recsys_tfb.pipelines.evaluation.report.sections.shared import read_dataset_overview
 from scripts.migrations.migrate_evaluation_results_keys import (
+    CELL_GROUPS,
     RENAMES,
     apply_file,
     find_files,
@@ -82,14 +83,16 @@ def test_every_renameable_key_moves_at_both_levels():
     assert len(renames) == 12
 
 
-def test_the_migrator_and_the_reader_share_one_rename_map():
-    """Not equality — *identity*. Two equal copies drift; one object cannot.
+def test_the_migrator_and_the_reader_hold_equal_rename_maps():
+    """The script holds a frozen copy of the reader's two lists rather than
+    importing the report modules, so the copies are compared by content.
 
     The failure this pins is asymmetric and silent: a key added to the reader's
     map but not the migrator's leaves a file that the reader refuses and this
     script reports as "already migrated", with no way forward.
     """
-    assert RENAMES is shared.RENAMED_OVERVIEW_KEYS
+    assert RENAMES == shared.RENAMED_OVERVIEW_KEYS
+    assert CELL_GROUPS == shared.OVERVIEW_CELL_GROUPS
 
 
 def test_the_time_vocabulary_survives_untouched():

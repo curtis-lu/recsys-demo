@@ -46,7 +46,7 @@
 
 ## 16 條約束一覽
 
-`tests/test_core/test_architecture_constraints.py` 執行，**67 個測試，7.37–7.41 秒**（2026-10-23 共 3 次量測，`load average 4.23–4.82`（`uptime` 的 1 分鐘值）；多的五個是 S9）。前一版：62 個測試 7.72–8.36 秒（2026-09-30 共 3 次量測，`load average 2.26–2.41`；多的一個是 ADR-0030 決定 8 的 dict 寫法讀取測試）。再前一版：61 個測試 9.18–9.64 秒（2026-09-29，3 次量測，`load average 5.55–5.75`，那台機器當時有別的 session 在跑，數字偏高；S8 加進來之後——它又多一次各自完整解析 `src/` 的所有檔案）。更早一版：52 個測試 6.17–6.20 秒（2026-09-20，3 次量測，`load average 1.95`）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔前幾版分別量到 39 個測試 2.86–3.23 秒、26 個測試 1.06–1.10 秒、20 個測試 1.4–1.7 秒、17 個測試 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
+`tests/test_core/test_architecture_constraints.py` 執行，**68 個測試，8.06–8.49 秒**（2026-10-25 共 3 次量測，`load average 1.94–2.10`（`uptime` 的 1 分鐘值）；多的一個是 S3 延伸到 `report/` 的寫法測試）。前一版：67 個測試 7.37–7.41 秒（2026-10-23 共 3 次量測，`load average 4.23–4.82`；多的五個是 S9）。再前一版：62 個測試 7.72–8.36 秒（2026-09-30 共 3 次量測，`load average 2.26–2.41`；多的一個是 ADR-0030 決定 8 的 dict 寫法讀取測試）。再往前一版：61 個測試 9.18–9.64 秒（2026-09-29，3 次量測，`load average 5.55–5.75`，那台機器當時有別的 session 在跑，數字偏高；S8 加進來之後——它又多一次各自完整解析 `src/` 的所有檔案）。更早一版：52 個測試 6.17–6.20 秒（2026-09-20，3 次量測，`load average 1.95`）。⚠ **次秒級的數字本來就抖，別當精確值引用**——同一台機器上，本檔前幾版分別量到 39 個測試 2.86–3.23 秒、26 個測試 1.06–1.10 秒、20 個測試 1.4–1.7 秒、17 個測試 1.25 秒，而更早的版本寫 0.62 秒。要引用就自己重跑一次。
 
 | # | 規則 | 管到哪 | 這個檢查看不到 |
 |---|---|---|---|
@@ -59,13 +59,13 @@
 | [A7](#a7-零輸出的-side-effect-node-必須登記) | 零輸出的 side-effect node 必須登記 | 同上 | — |
 | [S1](#s1-dataset-的每個-node-必須定義在-pipelinesdatasetnodespy) | dataset 的每個 node 必須**定義**在 `pipelines/dataset/nodes.py` | 只管 `pipelines/dataset/` | **內容**——12 行轉手 node ＋ 四決策 helper 完全合規 |
 | [S2](#s2-pipelinesdatasetmonth_planspy-不得-import-pyspark) | `pipelines/dataset/month_plans.py` 不得 import pyspark | 只管那一個模組 | `pyspark` 仍會進 `sys.modules`（刻意不驗，見該條） |
-| [S3](#s3-pipeline-以外的-src-模組不得-import-該-pipeline-的-steps) | pipeline 以外的 `src/` 模組不得 import 該 pipeline 的 `steps/` | 三條 pipeline 的 `steps/`，掃整個 `src/`（測試刻意不掃） | 先 import 套件再走屬性（`training.steps.hpo_resume`）；現況零命中 |
+| [S3](#s3-pipeline-以外的-src-模組不得-import-該-pipeline-的-steps-與-report) | pipeline 以外的 `src/` 模組不得 import 該 pipeline 的 `steps/` 與 `report/` | 各 pipeline 的 `steps/` 與 `report/`（`report/` 現在只有 evaluation 有），掃整個 `src/`（測試刻意不掃） | 先 import 套件再走屬性（`training.steps.hpo_resume`）；現況零命中 |
 | [S4](#s4-不得取-schemaentity-的第一欄) | 不得取 `schema.entity` 的第一欄 | `src/recsys_tfb/` ＋ `tests/` | `scripts/` 不在範圍內（原本那一處已隨檔案刪除，現在 0 處）；解包等其他取法；值一離開綁定它的語句就看不到（含同模組的 helper 參數） |
 | [S5](#s5-schema-設定的角色名必須在-columns-底下且不得宣告推導欄) | `schema` 設定的角色名必須在 `columns` 底下，且不得宣告推導欄（`identity_columns`／`query_group_columns`／`base_key_columns`） | `src/recsys_tfb/` ＋ `tests/` 裡的 `{"schema": {...}}` 字面值 | `conf/` 的 YAML；`schema` 區塊先綁到變數再組進 parameters；`scripts/` 不在範圍內（當初是報表 metadata 的假陽性，已隨檔案刪除，現在 0 處） |
 | [S6](#s6-src-不得出現示例部署的字面欄名) | `src/` 不得出現示例部署的字面欄名（`snap_date`／`cust_id`／`prod_name`） | `src/recsys_tfb/`（**只有這一棵**；`tests/`／`scripts/` 刻意在外） | 註解；f-string 片段與任何子字串；字串拼接出來的欄名；不在那三個名字裡的其他示例欄名；`conf/` 的 YAML |
 | [S7](#s7-query-groupbase-keyidentity-只能從-get_schema-取不得手拼) | query group／base key／identity 只能從 `get_schema` 取，不得手拼 | `src/recsys_tfb/` ＋ `tests/` ＋ `scripts/`（比 S4／S5／S6 多一棵，見該條） | 欄名不是從 schema 讀出來的（模組常數、字面字串）；清單多出任何一欄就放行（刻意）；`conf/` 的 YAML |
 | [S8](#s8-pipeline-之間不互相-importpipeline-以外的-src-模組不-import-pipeline) | pipeline 之間不互相 import；pipeline 以外的 `src/` 模組不 import pipeline（CLI `__main__.py` 除外） | 整個 `src/recsys_tfb/`（測試刻意不掃） | `importlib.import_module` 字串 import；先 import 套件再走屬性；經 `get_pipeline` 登記表拿另一條；CLI 例外本身；現況零命中 |
-| [S9](#s9-報表模組不-import-計算模組) | 報表模組不 import 計算模組（只准別的報表模組與一份封閉的可讀清單；不准 `pyspark`） | `evaluation/report.py`、`report_builder.py`、`report_sections/`、`comparison/`、`report/` | 遞移的 import；不靠 import 的計算（報表自己寫的加減與判斷）；可讀清單本身放錯 |
+| [S9](#s9-報表模組不-import-計算模組) | 報表模組不 import 計算模組（只准別的報表模組與一份封閉的可讀清單；不准 `pyspark`） | `pipelines/evaluation/report/`、根層 `report/` | 遞移的 import（import 任一報表模組都會先跑 `pipelines/evaluation/__init__.py`）；不靠 import 的計算（報表自己寫的加減與判斷）；可讀清單本身放錯 |
 
 **CLI 層（`__main__.py`）、`core/`、`io/` 不在 A1／A2 管轄內**——那幾層本來就負責 I/O 與程序級資源。
 
@@ -424,17 +424,17 @@ Runner 先載入全部 inputs 再執行、再存 outputs（`core/runner.py` 的 
 
 S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它的測試不需要 SparkSession，而 2–4 分鐘的成本是 session 不是 import。
 
-## S3. pipeline 以外的 `src/` 模組不得 import 該 pipeline 的 `steps/`
+## S3. pipeline 以外的 `src/` 模組不得 import 該 pipeline 的 `steps/` 與 `report/`
 
-`pipelines/<name>/steps/` 底下的模組，只有 `pipelines/<name>/` 內的 src 模組可以 import。
+`pipelines/<name>/steps/` 與 `pipelines/<name>/report/` 底下的模組，只有 `pipelines/<name>/` 內的 src 模組可以 import。
 
-守的是 [`pipeline-node-design.md`](pipeline-node-design.md) 規則 8 買到的那一件事：**讀一次目錄列表就分得出對外契約與內部步驟**。根層放的是別人會呼叫的（`pipelines/dataset/month_plans.py`、`pipelines/training/cache_sources.py`），`steps/` 放的是這條 pipeline 自己呼叫的。外部模組一旦越過根層直接伸進 `steps/`，那個列表就開始說謊——而且是靜靜地說謊，沒有任何東西會壞。
+守的是 [`pipeline-node-design.md`](pipeline-node-design.md) 規則 8 買到的那一件事：**讀一次目錄列表就分得出對外契約與內部步驟**。根層放的是別人會呼叫的（`pipelines/dataset/month_plans.py`、`pipelines/training/cache_sources.py`），`steps/` 放的是這條 pipeline 自己呼叫的。外部模組一旦越過根層直接伸進 `steps/`，那個列表就開始說謊——而且是靜靜地說謊，沒有任何東西會壞。`report/` 放這條 pipeline 自己的報表（只組裝、不算，[ADR-0031](../adr/0031-evaluation-second-pass-layers-and-single-source.md) 原則 6 的 2026-10-25 更正），跟 `steps/` 一樣只給本 pipeline 自己 import，所以同一條檢查一起守。
 
 **測試不在掃描範圍內，這是刻意的。** 規則 8 明說測試 import 不移動任何模組的位置：判準管的是生產端呼叫圖。`tests/test_pipelines/test_training/test_hpo_resume.py` 直接 import `steps.hpo_resume` 是對的，必須維持合法。
 
-**檢查**：兩個測試。
+**檢查**：三個測試。
 
-1. **掃描**——AST 走過 `src/recsys_tfb/**/*.py` 的每個 import，把相對 import 依所在套件還原成絕對路徑，並且 `from X import Y` 的**兩半都算**（`X` 與 `X.Y`）；模組路徑形如 `recsys_tfb.pipelines.<name>.steps...` 而檔案不在 `pipelines/<name>/` 底下就是違例。
+1. **掃描**——AST 走過 `src/recsys_tfb/**/*.py` 的每個 import，把相對 import 依所在套件還原成絕對路徑，並且 `from X import Y` 的**兩半都算**（`X` 與 `X.Y`）；模組路徑形如 `recsys_tfb.pipelines.<name>.steps...` 或 `recsys_tfb.pipelines.<name>.report...` 而檔案不在 `pipelines/<name>/` 底下就是違例。
 2. **掃描抓得到每一種寫法**——`test_the_scan_sees_every_spelling_of_the_import`，在 `tmp_path` 上建五種 import 寫法並確認五種都被抓。`steps` 藏的位置各不相同，解析器的三個零件各自只被其中一種撐住：
 
    | 寫法 | `steps` 藏在哪 | 少了什麼就漏掉 |
@@ -448,8 +448,9 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
    所以只讀 `ImportFrom` 的 `node.module` 會漏掉其中**三種**而永遠全綠。三個變異各自實測：拿掉 `node.names` 那一半 → 第四種轉紅；拿掉 `ast.Import` 那一支 → 第三種轉紅；拿掉相對還原 → 第五種轉紅。
 
    前三種**是 #234 才寫得出來的**——在那之前 `hpo_resume` 在根層，沒有任何寫法能把它掛在 `steps` 底下。後兩種指的是套件而不是模組，本來就寫得出來（`steps/` 早就有 `hpo_scoring` 與 `local_cache`）。
+3. **`report/` 的每一種寫法也抓得到**——`test_the_scan_sees_every_spelling_of_a_report_import`：同樣五種寫法改指 `pipelines/evaluation/report/`，再加根層 `report/pages.py` 的相對 `from ..pipelines.evaluation.report import shell`；`nodes.py`、報表模組互相 import、根層 `recsys_tfb.report` 都不被報。這六種都是 evaluation 的報表搬進 `pipelines/evaluation/report/` 之後才寫得出來的：在那之前它們在根層 `evaluation/`，沒有任何寫法指得到某條 pipeline 的 `report`；只認 `steps` 的掃描對六種全部放行。
 
-附帶一條同源的檢查：`steps/__init__.py` **不得有任何 import、不得有 `__all__`**（`test_steps_packages_re_export_nothing`）。`nodes.py` 那行 import 之所以有資訊量，是因為它指名了 concern；一個 re-export 會把它抹掉——`from .steps import build_trial_params` 編得過，而讀者什麼也沒學到。
+附帶一條同源的檢查：`steps/`、`report/` 底下每一個 `__init__.py`（含 `report/sections/`、`report/comparison/` 這種子套件）**不得有任何 import、不得有 `__all__`**（`test_steps_packages_re_export_nothing`；它也確認 evaluation 的 `report/`、`report/sections/`、`report/comparison/` 三個 `__init__.py` 真的被掃到）。`nodes.py` 那行 import 之所以有資訊量，是因為它指名了 concern；一個 re-export 會把它抹掉——`from .steps import build_trial_params` 編得過，而讀者什麼也沒學到。
 
 ### 這個檢查看不到
 
@@ -458,7 +459,7 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 - **先 import 套件、再走屬性。** 一個模組 import `recsys_tfb.pipelines.training`，之後讀 `training.steps.hpo_resume`。
 - **字串組出來的 import**（`importlib.import_module("recsys_tfb.pipelines.training.steps.hpo_resume")`）。任何靜態掃描都看不到，不是這條的特例。⚠ `importlib.import_module` 在 `src/` **確實在用**，只是沒有一處指向 `steps/`：`pipelines/__init__.py` 的 `_REGISTRY` 查表（指向 pipeline 套件）。以前還有 `evaluation/` 底下幾處讀 `recsys_tfb.diagnosis.metric.{name}` 的，已隨 #532 刪除。
 
-現況全樹兩類都沒有指向 `steps/` 的命中。值得釘的是 import 語句那個形式——會被順手寫出來的是它，另外兩種要刻意才寫得出來。
+現況全樹兩類都沒有指向 `steps/` 或 `report/` 的命中。值得釘的是 import 語句那個形式——會被順手寫出來的是它，另外兩種要刻意才寫得出來。
 
 ## S4. 不得取 `schema.entity` 的第一欄
 
@@ -607,7 +608,7 @@ tests/params.py:4: schema.identity_columns -- get_schema derives this; a declare
 
 **完全相等，不是包含**，這是這條規則活得下去的關鍵：`"by_snap_date"`、`"test_snap_dates"`、`f"snap_date={v}"` 三者都合法、也都含那串字。改成子字串比對會讓登記表膨脹到沒人讀，而沒人讀的登記表擋不住東西。
 
-**該怎麼寫**：欄名一律走 `core/schema.get_schema`，現成範例是 `evaluation/report_sections/core_concepts.py::build`（它印的每一個欄名都是使用者的）。
+**該怎麼寫**：欄名一律走 `core/schema.get_schema`，現成範例是 `pipelines/evaluation/report/sections/core_concepts.py::build`（它印的每一個欄名都是使用者的）。
 
 **只掃 `src/`，`tests/` 與 `scripts/` 刻意在外**——這跟 S4／S5 的取捨相反，理由也不同：S4／S5 擋的是「這段程式碼把設定讀成什麼」，而**測試正是重災區**；S6 擋的是「框架有沒有替使用者決定欄名」，而一個 fixture 本來就得寫下某個具體欄名，寫示例那組是誠實的選擇。把 `tests/` 擴進來只會生出幾百筆例外。
 
@@ -668,7 +669,7 @@ S4 的登記表是空的而且該維持空的，因為它擋的讀法「永遠�
 
 **留錯了不會報錯。** 下面幾處尤其危險，它們也不受「離線推論忽略新角色、監控模式在 CLI 入口擋下」那道保護：
 
-- 比較報表（`--compare`）對齊兩邊 query group、數「共同的 query group 數」的地方（`pipelines/evaluation/steps/compare_universe.py` 的 `common_universe`／`restrict_to_common`、`pipelines/evaluation/nodes.py::_restrict_to_common`）
+- 比較報表（`--compare`）對齊兩邊 query group、數「共同的 query group 數」的地方（`pipelines/evaluation/steps/compare_universe.py` 的 `common_universe`／`trim_to_common_universe`／`trim_to_common_with_coverage`）
 - 診斷母體的分組（`pipelines/training/nodes.py::select_shap_population`）
 
 反方向也有一個容易歸錯的：**整條離線推論 pipeline 用的是 base key**，包含它的排名 partition（`pipelines/inference/nodes.py::rank_predictions`）。那個 partition 表面上完全符合「界定名次比較的範圍」，但 ADR-0025 決定它維持 `time` ＋ `entity`——批次評分的當下沒有任何「場合」存在，候選是框架替每個 entity 乘上全部 item 產生的。**這是一個決定，不是推導出來的**，所以它必須寫在這裡而不是留給下一個人重推。
@@ -767,8 +768,8 @@ src/recsys_tfb/evaluation/metrics_spark.py:221 in collapse_to_categories(): time
 
 報表模組只讀落地結果、組裝成畫面，不算任何東西（[ADR-0031](../adr/0031-evaluation-second-pass-layers-and-single-source.md) 原則 1）。所以報表模組只准 import 兩種 `recsys_tfb` 模組：別的報表模組，以及一份封閉的「可讀」清單。其他 `recsys_tfb` 模組都算計算模組。第三方套件裡，`pyspark` 也不准。
 
-- **報表模組**（被掃的）：`evaluation/report.py`、`evaluation/report_builder.py`、`evaluation/report_sections/`、`evaluation/comparison/`、`report/`。
-- **可讀清單**：`evaluation/result_readers.py`（讀落地結果的函式與鍵名）、`evaluation/metric_catalog.py`（指標目錄，只放資料）、`evaluation/segment_keys.py`、`evaluation/distributions.py`（畫圖）、`core/schema.py`、`core/consistency.py`、`core/date_ranges.py`。
+- **報表模組**（被掃的）：`pipelines/evaluation/report/`（兩份報表的頁面外殼 `shell.py`、主報表 `main.py` 與各段 `sections/`、名次分布段的圖 `figures.py`、比較報表 `comparison/`）、根層 `report/`。
+- **可讀清單**：`evaluation/result_readers.py`（讀落地結果的函式與鍵名）、`evaluation/metric_catalog.py`（指標目錄，只放資料）、`evaluation/segment_keys.py`、`core/schema.py`、`core/consistency.py`、`core/date_ranges.py`。
 
 兩份清單寫在測試檔的 `_REPORT_MODULES`、`_REPORT_MAY_ALSO_IMPORT`。報表要用一個新的數字，先在計算 node 裡算好、落地，報表再讀回來；不要把計算模組加進可讀清單。
 
@@ -778,15 +779,15 @@ src/recsys_tfb/evaluation/metrics_spark.py:221 in collapse_to_categories(): time
 
 1. **現有程式全綠**——`test_the_real_tree_is_clean`。訊息逐行印 `檔案:行號: imports 模組`。
 2. **清單上的路徑都存在**——`test_every_listed_path_exists`：模組改名後，舊條目不會默默變成空話。
-3. **抓得到每種寫法**——`test_catches_every_spelling`，在 `tmp_path` 造一棵迷你樹：絕對、`import a.b.c`、只有第二半指到計算模組、兩種相對寫法、函式內、import `steps/`、從 `core` 套件取名字、`import pyspark`、`from pyspark.sql import ...`，以及比較報表、`report_builder.py`、`report/` 三處的違例。
-4. **合法的不被抓**——`test_allowed_imports_are_left_alone`：報表模組互相 import、可讀清單、`core` 套件只當路徑、標準庫與 pandas；計算模組 import 什麼都不管。
+3. **抓得到每種寫法**——`test_catches_every_spelling`，在 `tmp_path` 造一棵迷你樹：絕對、`import a.b.c`、只有第二半指到計算模組、相對 import 回根層 `evaluation/`、相對 import 進 `steps/`（模組與套件兩種）與 `nodes.py`、函式內、import `steps/`、從 `core` 套件取名字、`import pyspark`、`from pyspark.sql import ...`，以及比較報表 `report/comparison/main.py`、主報表 `report/main.py`（`from ..steps import ...`）、根層 `report/` 三處的違例。相對 import 進 `steps/` 與 `nodes.py` 是報表搬進 `pipelines/evaluation/report/` 之後才寫得出來的。
+4. **合法的不被抓**——`test_allowed_imports_are_left_alone`：報表模組互相 import（絕對、`from .sections import shared`、`from .. import shell` 等相對寫法、`from recsys_tfb.pipelines.evaluation import report`）、可讀清單、`core` 套件只當路徑、標準庫與 pandas；計算模組 import 什麼都不管。
 5. 訊息格式——`test_the_message_names_file_line_and_module`。
 
 **沒有例外登記表。** 現況全樹零違例。
 
 ### 這個檢查看不到
 
-- **遞移的 import。** 只看報表模組自己寫的 import。可讀清單裡的模組再 import 什麼，不在範圍內：例如 `core/schema.py` 會先執行 `core/__init__.py`，那裡 import 了 Runner。要擋遞移，得照 S2 的 `_spark_reachable_from` 另寫。
+- **遞移的 import。** 只看報表模組自己寫的 import。可讀清單裡的模組再 import 什麼，不在範圍內：例如 `core/schema.py` 會先執行 `core/__init__.py`，那裡 import 了 Runner。報表模組本身也一樣：它們在 `pipelines/evaluation/` 底下，所以 import 任一報表模組都會先跑 `pipelines/evaluation/__init__.py`，經由 `pipeline.py` 連帶載入更多模組（今天是 `core/node.py`、`core/pipeline.py`）。要擋遞移，得照 S2 的 `_spark_reachable_from` 另寫。
 - **字串組出來的 import、先 import 套件再走屬性。** 同 S8。
 - **報表裡不靠 import 的計算。** 報表自己寫一段加減、排序挑名次、判斷兩邊相不相同，這條看不出來。哪些算計算，判準在 ADR-0031 原則 1（「這個數字別的地方會不會用到？會不會拿來比較或判斷？」）。
 - **計算模組放錯清單。** 有人把一個計算模組加進 `_REPORT_MAY_ALSO_IMPORT`，測試照樣綠；清單的改動要在審查時看。
@@ -902,8 +903,8 @@ src/recsys_tfb/evaluation/metrics_spark.py:221 in collapse_to_categories(): time
 | `__main__.py` | `inference` | run context 的 `snap_date` 觀測欄 |
 | `__main__.py` | `evaluation` | 讀 `evaluation.snap_date` 設定鍵 ＋ 兩處 run context／log extra |
 | `core/consistency.py` | `post_training_snap_date_errors` | A22 讀 `evaluation.snap_date` |
-| `evaluation/comparison/report.py` | `assemble_comparison_report` | 比較報表 metadata 讀同一個設定鍵 |
-| `evaluation/report_builder.py` | `assemble_report` | 報表 metadata 讀同一個設定鍵 |
+| `pipelines/evaluation/report/comparison/main.py` | `assemble_comparison_report` | 比較報表 metadata 讀同一個設定鍵 |
+| `pipelines/evaluation/report/main.py` | `assemble_report` | 報表 metadata 讀同一個設定鍵 |
 | `core/date_ranges.py` | `<module>` | `DATE_LIST_KEYS` 列出可以寫成日期區間的設定鍵，`("evaluation", "snap_date")` 是其中一個（#452 起 `("test_metrics", "snap_date")` 也是，同一筆登記涵蓋）；`ConfigLoader` 載入時據此展開（#374）。第一版寫成一整串 `"evaluation.snap_date"` 再切開，掃描器看不到，審查時改成看得到的寫法並登記——帳目要完整 |
 | `pipelines/evaluation/steps/snap_date_scope.py` | `eval_snap_dates` | 同上。`enriched_eval_predictions` 的每個讀者都經 `restrict_to_current_eval_partitions` 從這裡拿評估日期（一個或多個，[ADR-0018](../adr/0018-evaluation-materialize-at-producer.md) 決定 1），所以是一筆、不是每個讀者一筆。#352 加入時同步刪掉 `comparison_nodes.py::validate_enriched_eval_predictions_present` 那筆（它改成跟這裡拿），總數不變。#374 讓設定可以是多個日期時由 `eval_snap_date` 改名而來（使用者同意的替換），同時 `prepare_eval_data` 與 `load_compare_predictions` 也改跟這裡拿，它們各自那筆刪掉 |
 | `core/consistency.py` | `scoring_snap_dates` | 讀 `test_metrics.snap_date`（計分月份）設定鍵；計分 node 與 A53 都經這裡拿月份，所以是一筆、不是每個讀者一筆。#452 使用者同意 |

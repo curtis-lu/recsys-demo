@@ -126,6 +126,7 @@ pipelines/<name>/
   nodes.py        node 函式：這條 pipeline 的 ML 故事唯一的家
   <contract>.py   有本 pipeline 以外的 src 側消費者的模組（對外契約）
   steps/          只有 nodes.py 呼叫的機制模組，一模組一個 concern
+  report/         這條 pipeline 的報表與各段：只組裝、不算；本 pipeline 以外的 src 模組不 import 它
 ```
 
 src 側呼叫端全在本 pipeline 內 → `steps/`；有外部消費者 → 根層。這樣讀者看一次目錄列表就分得出對外契約與內部步驟。
@@ -137,11 +138,11 @@ src 側呼叫端全在本 pipeline 內 → `steps/`；有外部消費者 → 根
   - training：`run_contract.py`（`__main__.py` 問設定檢查、版本、模式與要併進 manifest 的報告，ADR-0030 決定 13）；`cache_sources.py`（各快取 node 從哪張 Hive 表複製，ADR-0014）。
   - evaluation：`compare_tables.py`（`__main__.py` 開跑前讀出比較來源各是哪張 Hive 表）。
   - inference：沒有，根層只有 `pipeline.py` 與 `nodes.py`。
-- **`steps/__init__.py` 只放 docstring，不 re-export。** `nodes.py` 逐模組 import，import 那一行就說出這個步驟來自哪個 concern。
+- **`steps/__init__.py` 只放 docstring，不 re-export。** `nodes.py` 逐模組 import，import 那一行就說出這個步驟來自哪個 concern。`report/` 與它的子套件同理。
 
 誰擋得住，只有一個方向：
 
-- **S3**（`architecture-constraints.md`）：本 pipeline 以外的 `src/` 模組 import `steps/` 就轉紅，也擋 `steps/__init__.py` 出現 re-export（`test_steps_packages_re_export_nothing`）。
+- **S3**（`architecture-constraints.md`）：本 pipeline 以外的 `src/` 模組 import `steps/` 或 `report/` 就轉紅，也擋 `steps/`、`report/` 底下的 `__init__.py` 出現 re-export（`test_steps_packages_re_export_nothing`）。
 - **反方向 S3 看不到**：只有本 pipeline 在呼叫、卻留在根層的模組。新增或改動模組時，自己查它的 src 側呼叫端。
 - S1 只管 `pipelines/dataset/` 的 node 定義位置；純度只有 `month_plans.py` 與 `chunk_plans.py` 有測試。其餘靠 code review。
 

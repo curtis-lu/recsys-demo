@@ -311,7 +311,7 @@ def build_payload(
 
     The fine bin tables are kept too, so the JSON can be re-drawn elsewhere
     without the ``parameters`` that made it (``columns`` and ``bins`` travel
-    with it, as in ``diagnostics_spark.aggregate_report_diagnostics``).
+    with it, as in ``steps/report_aggregates.aggregate_report_diagnostics``).
     """
     lo, width = aggregated["lo"], aggregated["width"]
     overall = aggregated["overall"]

@@ -267,9 +267,9 @@ $ PYTHONPATH=src /Users/curtislu/projects/recsys_tfb/.venv/bin/python -m pytest 
 ## 10. 用 grep report.html 當驗收會假陽性：內嵌 plotly.js 含大量常見英文字（2026-07-19）
 
 - **症狀（第一分鐘認出它）**：明明原始碼已清乾淨，`grep -c "<某個字>" report.html` 仍有命中，看起來像刪除不完整。實例：清掉 quadrant 診斷後，report.html 仍 grep 到 2 個 `quadrant`。
-- **根因**：`generate_html_report`（`evaluation/report.py:82,129`）把整份 plotly.js **內嵌**進 HTML（約 3.5MB）。plotly 內部有四叉樹實作 `En.prototype.quadrant`，以及大量其他常見識別字。**命中的是第三方 minified JS，不是本專案的字串。**
+- **根因**：`generate_html_report`（`pipelines/evaluation/report/shell.py:82,129`）把整份 plotly.js **內嵌**進 HTML（約 3.5MB）。plotly 內部有四叉樹實作 `En.prototype.quadrant`，以及大量其他常見識別字。**命中的是第三方 minified JS，不是本專案的字串。**
 - **規則**：驗證「某個功能的字樣是否清乾淨」一律 **grep 產生 HTML 的原始碼**（`src/recsys_tfb/evaluation/`、`src/recsys_tfb/pipelines/evaluation/`），不要 grep 產物 HTML。
-- **驗證方式**：命中時用 `grep -o ".\{100\}<字>.\{100\}" report.html` 看上下文——落在 minified JS 裡（無空白、大量單字母變數）即為假陽性。決定性檢查是 `grep -rn "<字>" src/recsys_tfb/evaluation/` 為零。
+- **驗證方式**：命中時用 `grep -o ".\{100\}<字>.\{100\}" report.html` 看上下文——落在 minified JS 裡（無空白、大量單字母變數）即為假陽性。決定性檢查是 `grep -rn "<字>" src/recsys_tfb/evaluation/ src/recsys_tfb/pipelines/evaluation/` 為零。
 
 ## 11. pandas `groupby` 預設 `dropna=True` 讓 NULL 群整組消失（診斷層尤其危險，2026-07-20）
 

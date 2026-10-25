@@ -767,7 +767,8 @@ class TestNGroupsWithPositive:
 
 class TestFormatShare:
     """How the report and the log print a share: formatting, so it lives on
-    the report's side since #536 (``report_sections.shared``)."""
+    the report's side since #536 (``pipelines/evaluation/report/sections/
+    shared``)."""
 
     def test_one_decimal_by_default(self):
         from recsys_tfb.evaluation.result_readers import format_share

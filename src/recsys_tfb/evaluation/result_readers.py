@@ -3,11 +3,11 @@ principle 1): the keys the results land under, the readers of the settings a
 report draws by, the readers of a metrics bundle's ledger, and the JSON form
 of a small frame. Nothing here computes a result.
 
-The report modules (``report_sections/*``, ``report_builder``,
-``evaluation/report.py``) read through this module instead of importing the
-modules that compute the results (``metrics``, ``metrics_spark``,
-``baselines``, ``prediction_quality``, ``diagnostics_spark``). Those modules
-do not re-export these names: every caller imports them from here.
+The report modules (``pipelines/evaluation/report/``) read through this
+module instead of importing the modules that compute the results
+(``metrics``, ``metrics_spark``, ``baselines``, ``prediction_quality``,
+``steps/report_aggregates``). Those modules do not re-export these names:
+every caller imports them from here.
 
 Imports nothing from the project and not pyspark, so it cannot close an
 import cycle and loading it costs a report nothing. ``pandas`` is imported
@@ -307,8 +307,8 @@ def resolved_all_k(bundle: dict) -> int:
     resolved to different K then never pair up under one name.
 
     Raises ``KeyError`` on a bundle with no ledger, one written before #535:
-    the report refuses such a file first (``report_sections.shared
-    .refuse_pre_ledger``), with the node to re-run.
+    the report refuses such a file first (``pipelines/evaluation/report/
+    sections/shared.refuse_pre_ledger``), with the node to re-run.
     """
     return int(bundle[POPULATION_KEY][ALL_K_KEY])
 
