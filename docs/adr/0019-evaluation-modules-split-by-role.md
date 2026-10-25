@@ -296,4 +296,4 @@ ADR-0014 在 training 收了 21 處。evaluation 的 13 處全在 `nodes_spark.p
 
 **更正（#536，2026-10-23）**：〈呼叫端事實〉更正寫「`baselines.py` 不搬，因為 `report_builder.py` 在模組層 import `baselines.resolve_lookback_months`」。#536 之後報表不再 import `baselines`：熱門度窗的月數由 `compute_baseline_metrics` 落地，報表讀回來，架構約束 S9 擋報表 import 計算模組。所以這條理由也不成立；`baselines.py` 搬到哪，照 ADR-0031 原則 6 的搬移那一步定。
 
-**更正（2026-10-25，ADR-0031 原則 6 的更正）**：根層放什麼改成看模組的角色，不看今天誰在 import 它。照新判準，`baselines.py`、`prediction_quality.py` 留在根層 `evaluation/`，根層 `report/` 也留著；其餘照上一段搬進 evaluation pipeline。逐模組的表在 ADR-0031 原則 6 末〈更正（#540 開工前）〉。
+**更正（2026-10-25，ADR-0031 原則 6 的更正）**：根層放什麼改成看模組的角色，不看今天誰在 import 它。照新判準，`baselines.py`、`prediction_quality.py` 留在根層 `evaluation/`，根層 `report/` 也留著；其餘照本節〈修訂（2026-10-21，ADR-0031）〉第一段搬進 evaluation pipeline。逐模組的表在 ADR-0031 原則 6 末〈更正（#540 開工前）〉。

@@ -352,7 +352,7 @@ diagnosis/metric/    contract.py
 
 **更正（#540 開工前，擁有者 2026-10-25 決定）：根層放什麼，看模組的角色，不看今天誰在 import 它。**
 
-推翻上面角色表第五列的「看讀者」、〈哪些真的要留在 pipeline 外面〉那張表，以及〈誰擋得住〉第二點的新架構測試。
+推翻上面角色表第五列的「看讀者」、〈哪些真的要留在 pipeline 外面〉那張表、〈改成（示意）〉方塊裡 `baselines.py` 那一行、〈2026-10-21 更新〉裡「根層 `report/` 搬進 pipeline」那一句，以及〈誰擋得住〉第二點的新架構測試。
 
 - **為什麼不看讀者。**
   - 位置會跟著呼叫端變：哪天 training 用上一個只有 evaluation 在用的模組，它就得從 pipeline 搬回根層。位置要說的是模組是什麼，不是今天誰在叫它。
@@ -362,7 +362,7 @@ diagnosis/metric/    contract.py
   - 根層＝積木：吃 DataFrame、欄名、數字或設定，算出一個東西；不知道某條 pipeline 有哪些執行模式、哪些 catalog 條目，也不管報表怎麼畫。讀自己那項功能的設定可以，例如 `metric_registry.py` 讀 `training.hpo_objective`、`baselines.py` 讀 `evaluation.baseline.*`。
   - pipeline 內＝這條 pipeline 自己的事：它的報表與各段，以及只為報表某一段準備資料的計算。
   - 這是判斷題，沒有機械檢查。S8 照舊擋「根層 import pipeline」。
-- **不改的。** pipeline 裡面放根層契約模組還是 `steps/`，照舊看 src 側呼叫端（node 規則 8）。
+- **pipeline 裡面。** 放 pipeline 根層的契約模組還是 `steps/`，照舊看 src 側呼叫端（node 規則 8）。另加一種：`pipelines/<name>/report/` 放這條 pipeline 自己的報表，只組裝、不算（原則 1）；跟 `steps/` 一樣，本 pipeline 以外的 src 模組不 import 它。
 - **照判準重排（取代上面兩張表；#540 照這張搬）。**
 
 | 模組 | 角色 | 放哪 |
@@ -371,16 +371,16 @@ diagnosis/metric/    contract.py
 | `baselines.py` | 熱門度打分：最簡單的一個模型 | 根層 `evaluation/`，不動 |
 | `prediction_quality.py` | 一族指標（把分數當機率），跟 `metrics_spark.py` 同類 | 根層 `evaluation/`，不動 |
 | 根層 `report/`（`types.py`、`pages.py`） | 中立的呈現層：段落、表格、跳脫，沒有 evaluation 專屬的內容 | 根層 `report/`，不動 |
-| `diagnostics_spark.py` | 替主報表名次分布段準備圖的資料 | `pipelines/evaluation/steps/`（信心中等：彙總本身也通用） |
+| `diagnostics_spark.py` | 替主報表名次分布段準備圖的資料（`compute_report_aggregates` 叫它） | `pipelines/evaluation/steps/report_aggregates.py`（信心中等：彙總本身也通用）。改名是因為 node 規則 12 不准 backend 後綴 |
 | `distributions.py` | 名次分布段的圖 | `pipelines/evaluation/report/figures.py` |
 | `report.py` | 兩份報表的頁面外殼，含 evaluation 的術語表 `TERMS` | `pipelines/evaluation/report/shell.py` |
 | `report_builder.py` | 主報表的段落順序 | `pipelines/evaluation/report/main.py` |
 | `report_sections/` | 主報表各段 | `pipelines/evaluation/report/sections/` |
-| `comparison/` | 比較報表 | `pipelines/evaluation/report/comparison/` |
+| `comparison/` | 比較報表 | `pipelines/evaluation/report/comparison/`（`comparison/report.py` 的檔名見下） |
 
 新檔名的理由：`report/report.py`、`report/report_builder.py`、`report/report_sections/` 的名字重複了資料夾名，搬家時順便改（擁有者 2026-10-25 決定）。檔內的程式不改。
 
-**`nodes.py` 的私有 helper 與長 node 分兩張票（擁有者 2026-10-25 決定）。** 上面現況表量到的這兩件事，原本沒有票接：
+**`nodes.py` 的私有 helper 與長 node 分兩張票（擁有者 2026-10-25 決定）。** 上面現況表量到的這兩件事（2026-10-25 在 `0839cca2` 重量：私有 helper 7 個，最長的 node 396 行），原本沒有票接：
 
 - 拆長 node（決策留在 node body、機制抽進 `steps/`，node 規則 4）會改函式的內容，只能靠實跑比對證明輸出不變，所以另開一張（#B），排在 #540 之前（flow 規則 3、4）。
 - `nodes.py` 剩下的私有 helper 原封搬進 `steps/` 是純搬移，併進 #540。
