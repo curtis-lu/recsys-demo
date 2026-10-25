@@ -259,15 +259,15 @@ class TestFingerprintRerunNodes:
     row: the advice names only nodes of the run).
 
     ``config_fingerprint.rerun_node`` answers a moved setting with the first
-    step, in ``APPLIED_SETTINGS`` order, that applies it among the steps of
-    the run's mode. That is only right if the declaration order is the
-    topological order of every pipeline — otherwise the first in the list is
-    not the first in the run, and ``--from-node`` leaves an earlier applier
-    stale — and if the node exists. Checked in every mode, with every section
-    switch on, every one off, and each one off alone: the pipeline's shape
-    follows the switches (#538). The producer lists are written out here,
-    not derived from the pipeline, so a new producer has to be added on
-    purpose.
+    step of the run's order that applies it. A reader not given that order
+    falls back on ``APPLIED_SETTINGS`` order, which is right only if its
+    main-line part is every run's topological order — otherwise
+    ``--from-node`` leaves an earlier applier stale. Either way the node must
+    exist and its slice must re-run every applier. Checked in every mode,
+    with every section switch on, every one off, and each one off alone: the
+    pipeline's shape follows the switches. The producer lists are written
+    out here, not derived from the pipeline, so a new producer has to be
+    added on purpose.
     """
 
     FINGERPRINTED_PRODUCERS = {

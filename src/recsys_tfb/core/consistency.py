@@ -770,9 +770,9 @@ Layer 1 — config-static (implemented here; aggregated by
   shape: **presence is the failure, whatever the value** — ``enabled: false``
   switches off nothing that still exists, and nothing reads the block, so a
   conf that keeps it gets no word that it does nothing. Unlike A43's keys it
-  moves no fingerprint: no step declares it (#532), so
-  keeping it and deleting it compute the same artifacts; the harm is the
-  silence alone. Keys: :data:`RETIRED_DIAGNOSIS_KEYS`. Predicate:
+  moves no fingerprint, so keeping it and deleting it compute the same
+  artifacts; the harm is the silence alone.
+  Keys: :data:`RETIRED_DIAGNOSIS_KEYS`. Predicate:
   ``retired_diagnosis_key_errors`` (returns errors; the evaluation command
   raises, collected with A22/A34/A42/A43). NOT aggregated, for A43's reason:
   the harm belongs to evaluation alone (A34's reason, issue #158).
@@ -3447,8 +3447,7 @@ def retired_diagnosis_key_errors(parameters: dict) -> list[str]:
 
     Same shape as A43 (``retired_calibration_bin_key_errors``): nothing reads
     it, so left in place it switches nothing and says nothing. Unlike A43's
-    keys it moves no fingerprint (no step declares it, #532); the silence
-    is the whole harm.
+    keys it moves no fingerprint; the silence is the whole harm.
     """
     present = [
         dotted for dotted in RETIRED_DIAGNOSIS_KEYS
@@ -3531,7 +3530,8 @@ def compare_k_errors(parameters: dict) -> list[str]:
         f"A62: evaluation.report.display.compare_k lists {uncomputed}, which "
         f"{source} does not compute — those columns would be empty in every "
         f"table that shows compare_k. Add them to evaluation.k_values (it "
-        f"moves the computed settings: re-run from compute_row_facts), or "
+        f"makes the metrics stale; the stale-result message names the node "
+        f"to re-run from), or "
         f"drop them from compare_k. 'all' is always computed."
     ]
 

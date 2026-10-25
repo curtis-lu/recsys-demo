@@ -16,14 +16,10 @@ Two kinds of settings (ADR-0020 decision 2)
   except ``popularity_baseline`` at ``resolve_display_ks``. They only change
   what the report shows, so ``--only-node generate_report`` is enough.
 
-A section switch decides whether a computation is in the pipeline at all
-(the requirement list, ``pipeline.required_results``), not what it computes,
-so the results of the computations it keeps do not record it. Switched back
-on, a section is drawn off the result an earlier run left, which was refused
-if any setting it applied has changed since. The one exception is the K cut:
-with ``popularity_baseline`` off, ``resolve_display_ks`` is not given the
-baseline comparison and lands no baseline block, so its result depends on
-the switch through its wiring and it declares the switch.
+A section switch decides whether a computation is in the pipeline, not what
+it computes, so no result records it (ADR-0031 principle 5) — except
+``popularity_baseline`` at ``resolve_display_ks``: with it off, that node is
+not wired the baseline comparison and lands no baseline block.
 
 Each result records only what it read (ADR-0031 principle 5)
 ============================================================
@@ -40,19 +36,16 @@ So a changed setting makes stale exactly the results of the steps that apply
 it and of every step downstream of them, and a change to a setting only
 ``compute_report_aggregates`` reads leaves ``metrics.json`` current.
 
-Why ``inputs``, and not ``applied`` alone: a result carries numbers its
-inputs computed. ``baseline_comparison.json`` reads no setting, but it holds
-both sides' metrics at every K. Change ``k_values`` and re-run only
-``compute_metrics``: compared on ``applied`` alone, the old comparison would
-still pass and the report would draw the old K's differences, exit code 0.
+Not ``applied`` alone: a result carries numbers its inputs computed, and
+one that applies nothing (``baseline_comparison``) would otherwise pass after
+``k_values`` changed (ADR-0031 principle 5).
 
 :func:`require_computed_with_current_config` compares the two parts
 separately and says which one moved (ADR-0031 decision 15, fourth row).
 ``applied`` is always compared with today's settings. An ``inputs`` record is
-too, except one of a step the run does not have: no re-run of this run could
-make it current. Under ``--compare-only`` that is ``prepare_eval_data``'s,
-the record of the run that wrote the partitions this mode reads
-(:data:`COMPARISON_CHAIN`).
+too, except one of a step not in ``run_nodes``: no re-run of this run could
+make it current (under ``--compare-only``, ``prepare_eval_data``'s; ADR-0031
+principle 5).
 
 Where a stale result sends the re-run
 =====================================
@@ -60,13 +53,12 @@ To the first node of the run, in its topological order, that applies a
 changed setting or produced a result with no fingerprint
 (:func:`rerun_node`). ``--from-node`` re-runs it and every node after it in
 that order, which holds every other node applying that setting and
-everything downstream of them. The nodes ``create_pipeline`` builds per run
-(the two reports and the comparison readers) are given the run's order:
-which nodes a run has follows the mode and the section switches, and
-under ``--compare`` with the main report's sections off the main K cut is
-not in it, so the comparison's cut is where a changed ``compare_k`` must go.
-The other readers fall back on :data:`APPLIED_SETTINGS` order, which only
-ever has to rank main-line steps for them.
+everything downstream of them. A reader given the run's order
+(``run_nodes``) advises within it: which nodes a run has follows the mode and
+the section switches, and under ``--compare`` with the main report's
+sections off the main K cut is not in it, so the comparison's cut is where a
+changed ``compare_k`` must go. A reader not given it falls back on
+:data:`APPLIED_SETTINGS` order, which is right only for main-line steps.
 ``tests/test_pipelines/test_evaluation/test_pipeline.py::TestFingerprintRerunNodes``
 pins that the main-line part of that order is every run's, and that the
 advice exists and re-runs every applier in every mode, with every section
@@ -74,10 +66,9 @@ switch on, off, and off alone.
 
 Settings a step reads and declares nowhere
 ==========================================
-``schema.*``, ``dataset.test_zero_positive_group_ratio`` (read by
-``compute_prediction_quality`` under ``--post-training``), ``hive.db`` and
-``_compare_source_tables`` change results and are not declared: a change to
-one is not caught. ``evaluation.compare`` is left out on purpose: the CLI
+``schema.*`` and a few other settings change results and are declared
+nowhere, so a change to one is not caught (ADR-0031 principle 5 lists
+them). ``evaluation.compare`` is left out on purpose: the CLI
 injects it per run, and the comparison results record their source under
 their own key instead (:func:`require_same_recorded_values`).
 ``model_version`` and the run's dates are in every result's path.
@@ -94,10 +85,10 @@ Why stdlib only
 ===============
 The module itself imports nothing from the project;
 ``tests/test_pipelines/test_evaluation/test_config_fingerprint.py`` pins that by
-scanning its imports. That no longer makes it Spark-free to import: since it
-moved into ``pipelines/evaluation/steps/`` (#365), importing it runs the
-package's ``__init__``, which loads ``pipeline.py`` and with it pyspark. Nothing
-outside this pipeline imports it today, and S3 would forbid it.
+scanning its imports. That does not make it Spark-free to import: it sits in
+``pipelines/evaluation/steps/``, so importing it runs the package's
+``__init__``, which loads ``pipeline.py`` and with it pyspark. S3 forbids a
+module outside this pipeline to import it.
 
 What the fingerprint compares
 =============================
@@ -185,7 +176,9 @@ APPLIED_SETTINGS: dict[str, tuple[str, ...]] = {
 }
 
 #: The fingerprinted steps of the comparison chain in topological order, the
-#: only ones ``--compare-only`` runs. That mode reads partitions an earlier run
+#: only ones ``--compare-only`` runs: a declaration the tests use as that
+#: mode's run order; the readers skip a record by ``run_nodes``, not by this.
+#: That mode reads partitions an earlier run
 #: wrote, so the ``prepare_eval_data`` record its results inherit (through the
 #: directory's ``evaluation_segment_columns``) is compared with nothing: it is
 #: what the partitions were written under, and today's run mode and segment
@@ -194,8 +187,7 @@ APPLIED_SETTINGS: dict[str, tuple[str, ...]] = {
 #: flag is left off. The price: after a standard run rewrites the directory
 #: under other settings, ``--compare-only --only-node
 #: generate_comparison_report`` draws the comparison computed before it, exit
-#: code 0 — the same class as data changing under a redraw, which the
-#: evaluation guide already leaves to ``--from-node``.
+#: code 0 (``docs/pipelines/evaluation.md`` §9).
 COMPARISON_CHAIN: tuple[str, ...] = (
     "restrict_to_common", "compute_compare_metrics", "compare_to_source",
     "resolve_comparison_display_ks",
@@ -226,7 +218,7 @@ PARTITION_FINGERPRINT_KEYS: tuple[str, ...] = tuple(
 #: (these settings plus the segment columns that run actually joined).
 #:
 #: Why the partition carries it, and the ``evaluation_segment_columns`` JSON's
-#: fingerprint does not speak for the partition (#374): that JSON sits in the
+#: fingerprint does not speak for the partition: that JSON sits in the
 #: run's directory (``<model_version>/<dates label>/``), and one date's
 #: partition is written by runs with different directories — March alone
 #: writes ``20260331/``, January–March writes ``20260131-20260331/``. After
@@ -242,7 +234,7 @@ _MAX_REPR = 80
 class LoadedArtifact(NamedTuple):
     """One landed evaluation artifact to check against today's settings.
 
-    A plain positional tuple let ``catalog_name`` and ``produced_by`` —
+    A plain positional tuple would let ``catalog_name`` and ``produced_by`` —
     both ``str`` — swap without a type error, silently corrupting the
     advice (``docs/operations/known-pitfalls.md`` §12 positional trap).
     Construct this with keyword arguments; that makes such a swap visible at
@@ -308,8 +300,8 @@ def fingerprint(
     Pass every landed JSON the result is computed from, checked or not: a
     reader that only takes ``evaluation_segment_columns`` for the partition
     check still read partitions ``prepare_eval_data`` wrote. An input
-    without a fingerprint in this shape contributes nothing; every reader
-    that checks its inputs refuses one first.
+    without a fingerprint in this shape contributes nothing: the caller
+    must refuse one first; this does not.
 
     A ``node`` missing from :data:`APPLIED_SETTINGS` raises ``KeyError``: a
     new fingerprinted step must declare what it applies.
@@ -473,9 +465,8 @@ def require_computed_with_current_config(
     """
     problems: list[str] = []
     changed: list[str] = []
-    # Pre-check (runtime backstop): create_pipeline fills the run order
-    # before any node runs. Left empty, every inherited record would be
-    # skipped and a stale input would pass.
+    # Pre-check (runtime backstop): left empty, every inherited record would
+    # be skipped and a stale input would pass.
     if run_nodes is not None and not run_nodes:
         raise RuntimeError(
             "require_computed_with_current_config was given an empty run "

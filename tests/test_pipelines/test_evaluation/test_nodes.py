@@ -1219,7 +1219,7 @@ class TestCompareToBaseline:
         with pytest.raises(ValueError) as exc:
             compare_to_baseline(metrics, baseline, now)
         assert "evaluation.metric.min_positives" in str(exc.value)
-        # The first step applying evaluation.metric (#539).
+        # The first step applying evaluation.metric.
         assert "--from-node compute_metrics," in str(exc.value)
 
     def test_a_ledger_landed_before_its_segment_columns_is_refused(
@@ -1847,8 +1847,8 @@ class TestConsumersSegmentByTheLandedList:
         # What the report says about segments travels with the row facts.
         assert facts["segments"] == {
             k: self._segments()[k] for k in ("joined", "sources", "missing")}
-        # They land as JSON, so they record the computed settings they
-        # were made with and generate_report can refuse a stale one
+        # They land as JSON, so they record the settings they applied
+        # and generate_report can refuse a stale one
         # (ADR-0018 decision 2, ADR-0020 decision 2); so do the metrics.
         from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import fingerprint
 
@@ -2199,8 +2199,7 @@ class TestReadersRefuseAPartitionPreparedUnderOtherSettings:
     ``prepare_eval_data`` does not re-join it. Its landed
     ``evaluation_segment_columns`` fingerprint says which settings it was
     joined under; the segmenting readers compare it on the settings
-    ``prepare_eval_data`` applies before reading (the #352 sign-off,
-    ADR-0020 bug 6).
+    ``prepare_eval_data`` applies before reading (ADR-0020 bug 6).
     """
 
     _READERS = ("compute_row_facts", "compute_metrics",

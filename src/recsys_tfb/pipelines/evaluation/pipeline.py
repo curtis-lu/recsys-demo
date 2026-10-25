@@ -162,8 +162,8 @@ def create_pipeline(
         ``evaluation_item_categories`` (#379) for the category table it read
         — optional, see its catalog entry.
 
-    The readers that refuse a stale result (the two reports and the
-    comparison readers) are given the run's nodes in topological order, to
+    The readers that refuse a stale result and are built here are given the
+    run's nodes in topological order, to
     name the re-run from (``config_fingerprint.rerun_node``): which nodes a
     run has follows the mode and the switches, so no fixed list names one
     that is surely there. The list is filled once the pipeline is cut, before
@@ -231,11 +231,8 @@ def create_pipeline(
     nodes = [
         # The join is computed here once and lands as this month's partition;
         # dynamic partition overwrite replaces that partition only. The
-        # category table (#379) is a third output rather than a node of its
-        # own: a node between this one and compute_row_facts would move
-        # compute_row_facts after compute_prediction_quality /
-        # compute_report_aggregates, and `--from-node compute_row_facts`
-        # would then leave those stale.
+        # category table (#379) is a third output; where it comes from:
+        # prepare_eval_data.
         # `preprocessor_on_disk` last (#379): with the item list counted from
         # the data, the evaluated model's list is read off it and landed for a
         # hand mapping to be checked against. Optional, so an evaluation that

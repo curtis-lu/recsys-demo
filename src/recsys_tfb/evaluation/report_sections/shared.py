@@ -251,14 +251,15 @@ ROW_FACTS_ACCOUNTS = (N_WITH_POSITIVE_KEY, ALL_POSITIVE_SHARE_KEY,
 
 
 def refuse_pre_landed_reads(results: Mapping[str, dict | None]) -> None:
-    """Raise when a result was landed before #536 and lacks what the report
-    now reads instead of computing (ADR-0031 principle 1): the row facts'
-    all-positive accounts, at each grain; the baseline's popularity window;
-    the prediction-quality display tables and threshold sweep. A result
+    """Raise when a result lacks what the report reads instead of computing
+    (ADR-0031 principle 1): the row facts' all-positive accounts, at each
+    grain; the baseline's popularity window; the prediction-quality display
+    tables and threshold sweep. A result
     this run does not read (its section off) is absent and passes.
 
-    **Why refuse**: no setting changed, so the fingerprint check passes such
-    a file, and every read of a missing value draws nothing — the ledger
+    **Why refuse**: a result landed before a key existed passes the
+    fingerprint check when no setting it applied changed, and every read of
+    a missing value draws nothing — the ledger
     line and the warning would vanish from the page without a word. The fix
     is a re-count, not a migration: the computation that lands these values
     is the one to run.

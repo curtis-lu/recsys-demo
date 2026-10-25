@@ -157,9 +157,9 @@ def _require_prepared_with_current_config(
     another directory. Each partition carries its own fingerprint, checked by
     ``restrict_to_current_eval_partitions``.
 
-    ``item_categories`` (#379) is ``None`` for a directory written before it
-    existed (its catalog entry is optional); that is only a problem in column
-    mode, where :func:`_landed_category_mapping` refuses it.
+    ``item_categories`` is ``None`` when its optional catalog entry finds no
+    file; that is only a problem in column mode, where
+    :func:`_landed_category_mapping` refuses it.
     """
     artifacts = [LoadedArtifact(
         catalog_name="evaluation_segment_columns (landed with the "
@@ -537,8 +537,9 @@ def make_prepare_eval_data_node(population_name: str):
         # (_require_prepared_with_current_config), because a slice starting
         # after this node reads the landed partition instead of re-joining.
         # --compare-only does not compare it with today's settings:
-        # --post-training is inert on that path (config_fingerprint.
-        # COMPARISON_CHAIN).
+        # --post-training is inert on that path, and that run has no
+        # prepare_eval_data (config_fingerprint.
+        # require_computed_with_current_config, run_nodes).
         joined = [c for c in segment_columns if c not in missing]
         segments = {
             "joined": joined,
@@ -560,13 +561,9 @@ def make_prepare_eval_data_node(population_name: str):
         # Decision — where each item's category comes from (#379): in column
         # mode, the sample_pool column evaluation.item_categories.column
         # names; otherwise the readers take the hand-written mapping from
-        # parameters, so the table is landed empty. Read here rather than by
-        # a node of its own: a node added between this one and
-        # compute_metrics moves compute_metrics after
-        # compute_prediction_quality / compute_report_aggregates in the
-        # topological order, and `--from-node compute_metrics` would then
-        # leave those two stale. The price: changing the column re-runs from
-        # here (config_fingerprint.APPLIED_SETTINGS).
+        # parameters, so the table is landed empty. Read here, off the
+        # population this node already holds: changing the column re-runs
+        # from here (config_fingerprint.APPLIED_SETTINGS).
         category_column = item_category_column(parameters)
         item_categories = {"column": category_column, "mapping": {}}
         if category_column is not None:
@@ -949,26 +946,23 @@ def compute_baseline_metrics(
     ``evaluation_metrics`` — plus:
       - purchase_counts: dict[str, int]    per-product popularity count
             aggregated across eval snap_dates (sum). Drives the report's
-            popularity-composition table; consumers must treat absence
-            as backward-compatible (older results may omit it).
+            popularity-composition table.
       - monthly_counts: dict[str, dict[str, int]]  the same counts per
             item per calendar month, summed over the windows.
       - popularity_rate: only in rate mode (see ``_positive_rate_block``);
-            absent otherwise, so a count-mode result is exactly what it was.
+            absent otherwise: a count-mode result carries no rate block.
             ``purchase_counts`` / ``monthly_counts`` stay label_table's in
             both modes.
       - popularity_window (``result_readers.POPULARITY_WINDOW_KEY``, #536):
             the lookback window as the report prints it, in every mode
             (``baselines.popularity_window``): the settings it was counted
             with, the months the printed monthly table holds, each evaluated
-            date's covered months (#374: counted per window when several
-            dates are evaluated — top-level ``window_months_covered`` before
-            #536), whether the window is partial and what the per-month
-            average divides by. The report reads it instead of re-counting
+            date's covered months (counted per window when several dates
+            are evaluated), whether the window is partial and what the
+            per-month average divides by. The report reads it instead of re-counting
             months and re-reading ``evaluation.baseline``.
       - config_fingerprint: the settings it and its inputs were made with
-            (``steps.config_fingerprint``), checked by
-            ``generate_report``.
+            (``steps.config_fingerprint``).
 
     Pre-checks (inputs): the landed segment list, category
     table, row facts and each evaluated date's partition were prepared under
@@ -1266,12 +1260,11 @@ def compute_report_aggregates(
     segment_columns: dict,
     parameters: dict,
 ) -> dict:
-    """主報表診斷區的 Spark 聚合，落地成 JSON。
+    """The Spark aggregates of the main report's diagnostics, landed as JSON.
 
-    從 ``generate_report`` 拆出來（Plan 1.5）。理由不只是效能：它讓
-    ``generate_report`` 變成純函式；指標與 baseline 也落地之後（ADR-0018 決定 2），
-    ``--only-node generate_report`` 不重算任何指標就能重繪主報表。也把這 5 次全掃的
-    失敗點從 pipeline 的**最後一個 node** 往上游移。
+    A node of its own so ``generate_report`` stays pure and ``--only-node
+    generate_report`` redraws without recomputing (ADR-0018 decision 2); a
+    failure of these scans surfaces here, not in the report node.
 
     In the pipeline only while the rank-distribution section is on (the
     requirement list, ADR-0031 principle 3). The result carries
@@ -1280,11 +1273,11 @@ def compute_report_aggregates(
 
     Reads ``enriched_eval_predictions`` but does not compare the
     ``segment_columns.json`` fingerprint with today's settings: it does not
-    segment. It takes that JSON (#374) for its ``joined`` list only, which with
+    segment. It takes that JSON for its ``joined`` list only, which with
     today's settings makes the partition fingerprint each evaluated date must
-    carry (``restrict_to_current_eval_partitions``). That closes the hole
-    ADR-0020 bug 6 (#352 correction) had accepted for a slice running only this
-    node on a stale partition. Its result inherits that JSON's record, so a
+    carry (``restrict_to_current_eval_partitions``), so a slice running only
+    this node on a stale partition raises (ADR-0020 bug 6). Its result
+    inherits that JSON's record, so a
     later switch of the run mode makes it stale too.
     """
     eval_params = parameters.get("evaluation", {}) or {}
@@ -1301,7 +1294,7 @@ def compute_report_aggregates(
     item_col, score_col = schema["item"], schema["score"]
     rank_col, label_col = schema["rank"], schema["label"]
     needed = list(dict.fromkeys([item_col, score_col, rank_col, label_col]))
-    # 每個家族各是一次 action，不 cache 就是 5 次全掃。
+    # Each family is an action of its own: uncached, each rescans the table.
     sdf = eval_predictions.select(*needed).cache()
     try:
         out = aggregate_report_diagnostics(
@@ -1310,7 +1303,6 @@ def compute_report_aggregates(
             include_distributions=diag_cfg.get("include_distributions", True),
         )
     finally:
-        # 原本的寫法在例外時不會 unpersist。行為上這是純改善：輸出不變。
         sdf.unpersist()
     logger.info("report aggregates computed: %s", sorted(out))
     out["config_fingerprint"] = fingerprint(
@@ -1349,11 +1341,8 @@ def compare_to_baseline(
       metrics and stamp today's fingerprint on the result, which the report
       then accepts, exit code 0;
     * both carry the population ledger the layer reads
-      (``comparison_layer.ledger_keys_missing``) — a result landed before
-      #536 lacks ``segment_columns`` and passes the fingerprint check. The
-      advice is ``compute_row_facts``, not ``compute_metrics``: the row facts
-      of such a run lack the all-positive accounts (#536) too, and the report
-      would refuse them next (``shared.refuse_pre_landed_reads``).
+      (``comparison_layer.ledger_keys_missing``); a bundle missing a key was
+      landed before the key existed. The advice is ``LEDGER_RERUN_NODE``.
     """
     require_computed_with_current_config([
         LoadedArtifact(catalog_name="evaluation_metrics",
@@ -1430,8 +1419,7 @@ def resolve_display_ks(
     ``baseline_comparison`` is wired only while the popularity-baseline
     section is on (the requirement list, ADR-0031 principle 3); without it
     there is no baseline block to cut, and the result's
-    ``baseline_comparison`` is ``None``. Keyword-only: it used to be the
-    second positional parameter, and a call still passing
+    ``baseline_comparison`` is ``None``. Keyword-only: a call passing
     ``(metrics, comparison, parameters)`` must fail rather than read the
     comparison as the settings (``known-pitfalls.md`` §12).
 
@@ -1630,9 +1618,9 @@ def _restrict_to_common(
     differ. See ``docs/adr/0015-compare-population-counted-in-query-groups.md``.
 
     The common count is taken from what the restriction kept, not re-derived
-    from the raw frames (ADR-0020 bug 14). It used to ``intersect`` the raw
-    query groups, which matches ``NULL == NULL``, while the restriction's
-    equi-join drops null keys — so it counted groups no metric ever saw.
+    from the raw frames (ADR-0020 bug 14): an ``intersect`` of the raw query
+    groups matches ``NULL == NULL`` while the restriction's equi-join drops
+    null keys, so it would count groups no metric saw.
 
     The node does not compare ``segment_columns.json``'s own fingerprint with
     today's settings; it checks the partitions it reads instead. Under
@@ -1724,7 +1712,7 @@ def _require_comparison_inputs_current(
     run_nodes: Optional[Sequence[str]],
 ) -> None:
     """Pre-check (inputs) of every node reading a comparison artifact: each
-    was computed under today's computed settings, and against today's
+    was computed under today's settings, and against today's
     compare source (``compare_sources.compare_source_identity``, recorded
     under ``COMPARE_SOURCE_KEY``; ADR-0031 decision 5).
 
@@ -1740,8 +1728,8 @@ def _require_comparison_inputs_current(
     stale too, and a slice from the comparison would stop at
     ``generate_report``); under ``--compare-only``, which has no main line,
     a comparison step, and the record of the run that prepared the
-    partitions is not compared with today's settings
-    (``config_fingerprint.COMPARISON_CHAIN``). Another source is
+    partitions is not compared with today's settings (it is not among
+    ``run_nodes``). Another source is
     :data:`COMPARISON_RERUN_NODE` in both.
     """
     require_computed_with_current_config(
@@ -1763,21 +1751,20 @@ def compute_compare_metrics(
     row facts B′, metrics B′)``, landed as ``compare_row_facts_a``,
     ``compare_metrics_a``, ``compare_row_facts_b``, ``compare_metrics_b``
     (ADR-0031 decision 4). Each carries ``config_fingerprint`` and the
-    compare source it was computed against (``COMPARE_SOURCE_KEY``). Until
-    #536 ``generate_comparison_report`` computed all four on every draw and
-    landed none.
+    compare source it was computed against (``COMPARE_SOURCE_KEY``).
 
     Each side's metrics count off that side's own row facts: the two frames
     are not the same rows, so the run's landed ``evaluation_row_facts`` fit
     neither.
 
-    Both sides segment by the same columns, and B′ takes A′'s values for them
-    (#537; until then B′ was computed with none). A segment column is the
+    Both sides segment by the same columns, and B′ takes A′'s values for
+    them. A segment column is the
     entity's attribute, joined from a population table by
     ``prepare_eval_data``, not something the scoring model produced, so the
     compared source's query groups belong to the same segments as this
-    run's; computed without them, B′ had no per-segment numbers to compare
-    and its ledger's ``segment_columns`` always differed from A′'s.
+    run's; computed without them, B′ would have no per-segment numbers to
+    compare and its ledger's ``segment_columns`` would always differ from
+    A′'s.
 
     Pre-check (inputs): in column mode, the category table was landed and
     read off today's column (``_landed_category_mapping``). The frames are
@@ -1864,8 +1851,8 @@ def make_compare_to_source_node(run_nodes: Optional[Sequence[str]] = None):
 
         Pre-check (inputs): both results were computed under today's
         settings and against today's source
-        (``_require_comparison_inputs_current``). No ledger check: the
-        results were first landed with the full ledger (#536).
+        (``_require_comparison_inputs_current``). No ledger check:
+        ``compute_compare_metrics`` lands both with the full ledger.
         """
         _require_comparison_inputs_current([
             LoadedArtifact(catalog_name="compare_metrics_a",
@@ -1919,9 +1906,9 @@ def make_resolve_comparison_display_ks_node(
 
         Its fingerprint carries the display key it reads
         (``evaluation.report.display.compare_k``), so it alone goes stale
-        when that changes and ``generate_comparison_report`` sends the re-run
-        here — under ``--compare``, to ``resolve_display_ks``, the main
-        report's cut, stale under the same key and earlier in the run. Also
+        when that changes. The re-run goes to the first node of the run
+        applying it (``config_fingerprint.rerun_node``): ``resolve_display_ks``
+        when the run has the main report's cut, this node otherwise. Also
         carries the compare source (``COMPARE_SOURCE_KEY``).
 
         Pre-check (inputs): the comparison was computed under today's

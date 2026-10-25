@@ -2141,8 +2141,9 @@ def evaluation(
         "snap_date": snap_date,
         # Also in pipeline_kwargs (which nodes create_pipeline wires in). Both
         # are needed: pipeline_kwargs picks the DAG shape, this makes the mode
-        # visible in `parameters` (config_fingerprint.APPLIED_SETTINGS reads
-        # it from there) so a --post-training run followed by a monitoring
+        # visible in `parameters` (config_fingerprint.APPLIED_SETTINGS
+        # declares it, and fingerprint() reads it from there) so a
+        # --post-training run followed by a monitoring
         # --only-node generate_report on the same (model_version, snap_date)
         # is caught as stale rather than silently mixing the two populations'
         # metrics / report aggregates into one report (#342 F7).
@@ -2179,7 +2180,7 @@ def evaluation(
         # popularity_period_counts' partition key, from the two source
         # entries (no placeholder in them, so this first resolution suffices)
         # and the schema. In runtime_params only in rate mode, so a count-mode
-        # run's parameters are exactly what they were.
+        # run's parameters carry no such key.
         runtime_params["popularity_source_version"] = (
             compute_popularity_source_version(
                 get_schema_for_hash(params),

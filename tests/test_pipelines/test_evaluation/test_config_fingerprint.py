@@ -337,11 +337,12 @@ def test_collect_all_lists_every_stale_result_and_advises_one_re_run():
 
 
 def test_the_message_names_where_the_declarations_live():
-    """#368 item 1: the module moved to pipelines/evaluation/steps/."""
+    """#368 item 1: the message names the module and table that declare
+    what each step applies."""
     old = _params()
     msg = _refusal(_main_report(old), _changed(old, "evaluation.k_values"))
     assert "pipelines/evaluation/steps/config_fingerprint.py" in msg
-    assert "evaluation.config_fingerprint.COMPUTED_KEYS" not in msg
+    assert "config_fingerprint.py (APPLIED_SETTINGS)" in msg
 
 
 def test_a_leaf_under_two_declared_paths_is_listed_once_per_part():
@@ -363,7 +364,7 @@ def test_a_leaf_under_two_declared_paths_is_listed_once_per_part():
 
 @pytest.mark.parametrize("payload", [
     {"enabled": False}, None, {"config_fingerprint": "x"},
-    # The shape before results recorded only what they read.
+    # A fingerprint in another shape (sha256 + values).
     {"config_fingerprint": {"sha256": "0" * 64, "values": {}}},
 ])
 def test_a_result_without_a_fingerprint_is_stale(payload):

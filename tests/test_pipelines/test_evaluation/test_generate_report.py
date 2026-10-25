@@ -379,7 +379,7 @@ def test_generate_report_refuses_a_computed_setting_flipped_after_the_run():
     msg = str(exc.value)
     assert "evaluation.report.sections.popularity_baseline" in msg
     # The K cut is the one step whose result follows the switch: off, it was
-    # given no comparison and cut no baseline section (#539). The rest of
+    # given no comparison and cut no baseline section. The rest of
     # what the report reads is current.
     assert "--from-node resolve_display_ks," in msg
     assert "evaluation_metrics (written by" not in msg
@@ -387,8 +387,8 @@ def test_generate_report_refuses_a_computed_setting_flipped_after_the_run():
 
 def test_generate_report_refuses_metrics_computed_with_other_settings():
     """``evaluation_metrics`` lands as ``metrics.json`` (ADR-0018 decision 2),
-    so a redraw after a computed key changed must refuse it by name, not draw
-    old metrics under the new settings."""
+    so a redraw after a setting it applied changed must refuse it by name,
+    not draw old metrics under the new settings."""
     computed_with = _params_computed_without_baseline()
     now = copy.deepcopy(computed_with)
     now["evaluation"]["metric"] = {"min_positives": 5}
@@ -507,7 +507,7 @@ def test_a_prediction_quality_result_switched_back_on_is_checked_on_its_own_sett
     redrawn: the file an earlier run left is drawn while the settings its
     step applied still hold, and refused once one moved (ADR-0031
     principle 5). The switch itself decides only whether the step runs, so
-    it is not what the refusal names (#539)."""
+    it is not what the refusal names."""
     computed_with = _params_computed_without_baseline()
     computed_with["evaluation"]["prediction_quality"] = {"n_bins": 1000}
     now = copy.deepcopy(computed_with)
