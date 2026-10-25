@@ -82,7 +82,7 @@ date: 2026-10-16
 | 3 | 需求清單在一處決定，關掉的就不算 | 一半：會省，但判斷散在四處 | **可加測試**：關掉某項之後，組出來的 pipeline 不含它的單元 |
 | 4 | 每個結果只算一次、落地，下游照名字取 | 一半：落地做到了，還有重複算 | **部分**：parity 測試只盯得住已知的幾份實作 |
 | 5 | 設定改了，只重算有讀到那個設定的單元 | 沒做到 | **可加測試**：改一個只有某單元讀的鍵，只有它的結果算過期 |
-| 6 | 每個模組的職責符合框架的角色 | 沒做到：約四分之三的 evaluation 程式放在 pipeline 外面 | **部分**：架構稽核 S3 已有；本份另提一條新稽核，見原則 6 |
+| 6 | 每個模組的職責符合框架的角色 | 沒做到：約四分之三的 evaluation 程式放在 pipeline 外面 | **部分**：架構稽核 S3 已有；本份原本另提一條新稽核，2026-10-25 更正拿掉，見原則 6 |
 
 ---
 
@@ -269,7 +269,7 @@ Node(
 | `nodes.py` 的 node | 產出一個或一組落地結果；body 寫出這一步做了哪些決定（`# Decision —`），機制交給 helper | 自己藏機制，例如幾百行的實作細節 | node 規則 2、4（決策寫在 node）、8（機制放哪） |
 | pipeline 根層的契約模組 | 本 pipeline 與 CLI 共用的契約，例如 dataset 的 `month_plans.py`、`run_contract.py`，evaluation 的 `compare_tables.py` | 放只有 node 在用的機制 | node 規則 8 |
 | `pipelines/<name>/steps/` | 只有這條 pipeline 用的機制 | 被本 pipeline 以外的任何 src 模組 import | node 規則 8、架構稽核 S3 |
-| 根層套件（`evaluation/`、`diagnosis/` 等） | 有別的 pipeline 或 `core/` 在用的機制 | 放只有一條 pipeline 在用的東西 | **本份新增**（見下） |
+| 根層套件（`evaluation/`、`diagnosis/` 等） | 有別的 pipeline 或 `core/` 在用的機制 | 放只有一條 pipeline 在用的東西 | **本份新增**（見下）。**2026-10-25 更正：改成看角色，見本原則末〈更正（#540 開工前）〉** |
 
 前四列是 repo 既有的規則。第五列是本份新增的：[ADR-0019](0019-evaluation-modules-split-by-role.md) 寫過「node 規則 8 對 `src/recsys_tfb/evaluation/` 沒有明文」，方向上則對齊 S8 與 ADR-0030 決定 14 的 import 方向。
 
@@ -292,7 +292,7 @@ Node(
 
 現在 `render_diagnosis.py` 已經刪了，只剩 `scripts/migrations/migrate_evaluation_results_keys.py` 一支，而且它是一次性的遷移工具，處理方式見下面的已拍板。
 
-**哪些真的要留在 pipeline 外面。** 拿掉那支 script 這個理由之後，還有下面這些在 pipeline 外面有讀者：
+**哪些真的要留在 pipeline 外面。**（這張表照「看讀者」排，已被本原則末〈更正（#540 開工前）〉的表取代。）拿掉那支 script 這個理由之後，還有下面這些在 pipeline 外面有讀者：
 
 | 模組 | pipeline 外的讀者 | 該放哪裡 |
 |---|---|---|
@@ -324,7 +324,7 @@ diagnosis/metric/    contract.py
 **誰擋得住。**
 
 - S3 已經擋住「pipeline 以外的模組 import `steps/`」。
-- 本份提一條新的架構測試：根層套件的模組，至少要有一個別的 pipeline 或 `core/` 的讀者。直接 import 或經由其他根層模組間接使用都算，例如 `segment_keys.py` 經由 `metrics_spark.py`、`metrics.py` 經由 `metric_registry.py`。只有 CLI 讀的，放 pipeline 根層。
+- ~~本份提一條新的架構測試：根層套件的模組，至少要有一個別的 pipeline 或 `core/` 的讀者。直接 import 或經由其他根層模組間接使用都算，例如 `segment_keys.py` 經由 `metrics_spark.py`、`metrics.py` 經由 `metric_registry.py`。只有 CLI 讀的，放 pipeline 根層。~~ 2026-10-25 更正：不加，理由見本原則末〈更正（#540 開工前）〉。
 - `# Decision` 寫得夠不夠、node 裡有沒有藏機制，只能人看。
 
 **已拍板：遷移 script 保留，但不再 import `report_builder.py`。** 擁有者決定：script 已經不需要，但不刪，保留備查。作者建議的做法：
@@ -349,6 +349,41 @@ diagnosis/metric/    contract.py
   - 目錄 `evaluation/metric_catalog.py` 先只收前兩種算法的指標。第三種（把分數當機率，預測品質段的分箱 `pr_auc`／`roc_auc`）由 `evaluation/prediction_quality.py` 用自己的函式算，沒有可讓公式指名的共用數字；等那種算法備齊共用數字時再進目錄。
   - 決定 6 要 query group 的 `recall@K` 與 per-item 的那一個「報表顯示名要分得出來」。#533 要求兩份 HTML 一字不差，所以目錄裡兩者的顯示名都照今天的報表寫 `recall`；分開它們留給改名那一步（per-item 的 `hit_rate@K` 改叫 `recall@K` 時），那一步的驗收本來就有這一條。#534 已分開，見決定 7 的更正；同一則更正也寫了第三種算法的共用數字是什麼。
   - 決定 11 讓各段自己宣告「要比哪些」，所以熱門度基準段與比較報表各留一份「要比的目錄條目」清單；衡量指標段則對目錄裡每個指標都畫表（per-item 那塊既有的兩張表照舊，其餘每個 per-K 的 item 指標各一張）。照決定 11，新指標要出現在比較表裡，仍要改那兩份清單；這跟決定 1「加指標兩份報表的程式不改」衝突，留給驗收那張票定（例如改成在目錄上加「要比」的標記，決定 16 第 1 項的模型選擇指標標記是同一種做法）。
+
+**更正（#540 開工前，擁有者 2026-10-25 決定）：根層放什麼，看模組的角色，不看今天誰在 import 它。**
+
+推翻上面角色表第五列的「看讀者」、〈哪些真的要留在 pipeline 外面〉那張表、〈改成（示意）〉方塊裡 `baselines.py` 那一行、〈2026-10-21 更新〉裡「根層 `report/` 搬進 pipeline」那一句，以及〈誰擋得住〉第二點的新架構測試。
+
+- **為什麼不看讀者。**
+  - 位置會跟著呼叫端變：哪天 training 用上一個只有 evaluation 在用的模組，它就得從 pipeline 搬回根層。位置要說的是模組是什麼，不是今天誰在叫它。
+  - repo 本來就沒照讀者放：`models/feature_selection.py`、`io/models_root.py`、`utils/hdfs.py`、`diagnosis/hpo/` 只有 training 在 import，都在根層，角色也對。照第五列加那條測試，它們全會轉紅。
+- **「以後可能有人用」也不是理由。** 照這個標準什麼都能放根層，根層又會變回本份要解決的那個雜物間。角色從模組的內容看。
+- **判準。**
+  - 根層＝積木：吃 DataFrame、欄名、數字或設定，算出一個東西；不知道某條 pipeline 有哪些執行模式、哪些 catalog 條目，也不管報表怎麼畫。讀自己那項功能的設定可以，例如 `metric_registry.py` 讀 `training.hpo_objective`、`baselines.py` 讀 `evaluation.baseline.*`。
+  - pipeline 內＝這條 pipeline 自己的事：它的報表與各段，以及只為報表某一段準備資料的計算。
+  - 這是判斷題，沒有機械檢查。S8 照舊擋「根層 import pipeline」。
+- **pipeline 裡面。** 放 pipeline 根層的契約模組還是 `steps/`，照舊看 src 側呼叫端（node 規則 8）。另加一種：`pipelines/<name>/report/` 放這條 pipeline 自己的報表，只組裝、不算（原則 1）；跟 `steps/` 一樣，本 pipeline 以外的 src 模組不 import 它；node 規則 8 的目錄圖與架構約束 S3 由 #540 一起延伸過去（擁有者 2026-10-25 同意）。
+- **照判準重排（取代上面兩張表；#540 照這張搬）。**
+
+| 模組 | 角色 | 放哪 |
+|---|---|---|
+| `metrics.py`、`metrics_spark.py`、`metric_registry.py`、`metric_catalog.py`、`result_readers.py`、`segment_keys.py` | 指標計算、指標目錄、落地結果的鍵名 | 根層 `evaluation/`，不動 |
+| `baselines.py` | 熱門度打分：最簡單的一個模型 | 根層 `evaluation/`，不動 |
+| `prediction_quality.py` | 一族指標（把分數當機率），跟 `metrics_spark.py` 同類 | 根層 `evaluation/`，不動 |
+| 根層 `report/`（`types.py`、`pages.py`） | 中立的呈現層：段落、表格、跳脫。提到 evaluation 的只有 docstring 措辭與一個預設標題，沒有 evaluation 專屬的機制 | 根層 `report/`，不動 |
+| `diagnostics_spark.py` | 替主報表名次分布段準備圖的資料（`compute_report_aggregates` 叫它） | `pipelines/evaluation/steps/report_aggregates.py`（信心中等：彙總本身也通用）。改名是因為 node 規則 12 不准 backend 後綴 |
+| `distributions.py` | 名次分布段的圖 | `pipelines/evaluation/report/figures.py` |
+| `report.py` | 兩份報表的頁面外殼，含 evaluation 的術語表 `TERMS` | `pipelines/evaluation/report/shell.py` |
+| `report_builder.py` | 主報表的段落順序 | `pipelines/evaluation/report/main.py` |
+| `report_sections/` | 主報表各段 | `pipelines/evaluation/report/sections/` |
+| `comparison/` | 比較報表 | `pipelines/evaluation/report/comparison/`；`comparison/report.py` 改名 `main.py`，跟主報表的 `report/main.py` 對稱 |
+
+新檔名的理由：`report/report.py`、`report/report_builder.py`、`report/report_sections/`、`report/comparison/report.py` 的名字重複了資料夾名，搬家時順便改（擁有者 2026-10-25 決定）。檔內的程式不改。
+
+**`nodes.py` 的私有 helper 與長 node 分兩張票（擁有者 2026-10-25 決定）。** 上面現況表量到的這兩件事（2026-10-25 在 `0839cca2` 重量：私有 helper 7 個，最長的 node 396 行），原本沒有票接：
+
+- 拆長 node（決策留在 node body、機制抽進 `steps/`，node 規則 4）會改函式的內容，只能靠實跑比對證明輸出不變，所以另開一張（#568），排在 #540 之前（flow 規則 3、4）。
+- `nodes.py` 剩下的私有 helper 原封搬進 `steps/` 是純搬移，併進 #540。
 
 ---
 
@@ -724,7 +759,7 @@ PR 怎麼切、先後怎麼排，擁有者決定另用 `/to-spec`、`/to-tickets
 ### 對既有 ADR 的修訂
 
 - [ADR-0013](0013-pipeline-modes-and-slicing-are-separate.md)：`create_pipeline` 由明列 node 改成由各單元的宣告推導（原則 3）。該份文末加一段修訂指向本份。
-- [ADR-0019](0019-evaluation-modules-split-by-role.md)：`report_builder.py` 與被它拉住的模組（含 `baselines.py`）不再留在根層 `evaluation/`（原則 6）。該份文末加一段修訂指向本份。
+- [ADR-0019](0019-evaluation-modules-split-by-role.md)：`report_builder.py` 與被它拉住的模組不再留在根層 `evaluation/`（原則 6）；`baselines.py`、`prediction_quality.py` 照原則 6 的 2026-10-25 更正留在根層。該份文末加一段修訂指向本份。
 - [ADR-0020](0020-evaluation-bug-round-intended-behaviours.md)：〈橫切決定二〉所有結果共用一張 `COMPUTED_KEYS` 的指紋，改成每份結果只對它讀過的設定算指紋（原則 5）。該份文末加一段修訂指向本份。#537 再改三處（設計 H 的兩條 K 軸相同、`primary_map_k` 改名 `compare_k`、`guardrail_recall_k` 拿掉），見決定 16〈#537 怎麼定的〉，該份文末另加一段。
 - [ADR-0024](0024-prediction-quality-metric-family.md)：〈考慮過、沒選的做法〉第一條因為全量排序的成本沒選精確的 average precision。決定 16 第 3 項改成每次都算 pooled AP 與 macro per-item AP（擁有者知情，成本由 #450 量）。該份文末加一段修訂指向本份。
 
