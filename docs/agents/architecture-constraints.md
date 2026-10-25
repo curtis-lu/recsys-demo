@@ -434,7 +434,7 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 
 **檢查**：三個測試。
 
-1. **掃描**——AST 走過 `src/recsys_tfb/**/*.py` 的每個 import，把相對 import 依所在套件還原成絕對路徑，並且 `from X import Y` 的**兩半都算**（`X` 與 `X.Y`）；模組路徑形如 `recsys_tfb.pipelines.<name>.steps...` 而檔案不在 `pipelines/<name>/` 底下就是違例。
+1. **掃描**——AST 走過 `src/recsys_tfb/**/*.py` 的每個 import，把相對 import 依所在套件還原成絕對路徑，並且 `from X import Y` 的**兩半都算**（`X` 與 `X.Y`）；模組路徑形如 `recsys_tfb.pipelines.<name>.steps...` 或 `recsys_tfb.pipelines.<name>.report...` 而檔案不在 `pipelines/<name>/` 底下就是違例。
 2. **掃描抓得到每一種寫法**——`test_the_scan_sees_every_spelling_of_the_import`，在 `tmp_path` 上建五種 import 寫法並確認五種都被抓。`steps` 藏的位置各不相同，解析器的三個零件各自只被其中一種撐住：
 
    | 寫法 | `steps` 藏在哪 | 少了什麼就漏掉 |
@@ -450,7 +450,7 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
    前三種**是 #234 才寫得出來的**——在那之前 `hpo_resume` 在根層，沒有任何寫法能把它掛在 `steps` 底下。後兩種指的是套件而不是模組，本來就寫得出來（`steps/` 早就有 `hpo_scoring` 與 `local_cache`）。
 3. **`report/` 的每一種寫法也抓得到**——`test_the_scan_sees_every_spelling_of_a_report_import`：同樣五種寫法改指 `pipelines/evaluation/report/`，再加根層 `report/pages.py` 的相對 `from ..pipelines.evaluation.report import shell`；`nodes.py`、報表模組互相 import、根層 `recsys_tfb.report` 都不被報。這六種都是 evaluation 的報表搬進 `pipelines/evaluation/report/` 之後才寫得出來的：在那之前它們在根層 `evaluation/`，沒有任何寫法指得到某條 pipeline 的 `report`；只認 `steps` 的掃描對六種全部放行。
 
-附帶一條同源的檢查：`steps/__init__.py` 與 `report/__init__.py` **不得有任何 import、不得有 `__all__`**（`test_steps_packages_re_export_nothing`；它也確認 evaluation 的 `report/__init__.py` 真的被掃到）。`nodes.py` 那行 import 之所以有資訊量，是因為它指名了 concern；一個 re-export 會把它抹掉——`from .steps import build_trial_params` 編得過，而讀者什麼也沒學到。
+附帶一條同源的檢查：`steps/`、`report/` 底下每一個 `__init__.py`（含 `report/sections/`、`report/comparison/` 這種子套件）**不得有任何 import、不得有 `__all__`**（`test_steps_packages_re_export_nothing`；它也確認 evaluation 的 `report/`、`report/sections/`、`report/comparison/` 三個 `__init__.py` 真的被掃到）。`nodes.py` 那行 import 之所以有資訊量，是因為它指名了 concern；一個 re-export 會把它抹掉——`from .steps import build_trial_params` 編得過，而讀者什麼也沒學到。
 
 ### 這個檢查看不到
 
@@ -459,7 +459,7 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
 - **先 import 套件、再走屬性。** 一個模組 import `recsys_tfb.pipelines.training`，之後讀 `training.steps.hpo_resume`。
 - **字串組出來的 import**（`importlib.import_module("recsys_tfb.pipelines.training.steps.hpo_resume")`）。任何靜態掃描都看不到，不是這條的特例。⚠ `importlib.import_module` 在 `src/` **確實在用**，只是沒有一處指向 `steps/`：`pipelines/__init__.py` 的 `_REGISTRY` 查表（指向 pipeline 套件）。以前還有 `evaluation/` 底下幾處讀 `recsys_tfb.diagnosis.metric.{name}` 的，已隨 #532 刪除。
 
-現況全樹兩類都沒有指向 `steps/` 的命中。值得釘的是 import 語句那個形式——會被順手寫出來的是它，另外兩種要刻意才寫得出來。
+現況全樹兩類都沒有指向 `steps/` 或 `report/` 的命中。值得釘的是 import 語句那個形式——會被順手寫出來的是它，另外兩種要刻意才寫得出來。
 
 ## S4. 不得取 `schema.entity` 的第一欄
 

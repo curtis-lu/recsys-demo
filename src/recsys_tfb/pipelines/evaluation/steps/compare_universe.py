@@ -82,6 +82,13 @@ computes.
 
 Also returns the ``CommonUniverse`` it restricted by. Coverage reads its item
 sets from there rather than collecting them a second time (ADR-0020 bug 14).
+
+Coverage
+--------
+
+``trim_to_common_with_coverage``: the same restriction, plus the coverage
+that lands as ``compare_coverage`` — full and common sizes, dropped items,
+and the settings and compare source it was computed under.
 """
 
 from __future__ import annotations
@@ -345,8 +352,8 @@ def trim_to_common_with_coverage(
     # Decision — B is scored against A's labels: not the label B landed with,
     # and not a fresh label_table join, since A's own label is not the current
     # label_table under --post-training / --compare-only. One answer for both
-    # sides in every mode (ADR-0020 bug 7; the full why is in
-    # steps/compare_universe.py).
+    # sides in every mode (ADR-0020 bug 7; the full why is in the module
+    # docstring).
     a_common, b_common, universe = trim_to_common_universe(
         eval_predictions, compare_predictions_raw, parameters
     )

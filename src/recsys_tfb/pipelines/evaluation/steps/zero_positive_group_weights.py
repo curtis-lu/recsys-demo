@@ -1,6 +1,6 @@
 """The prediction-quality family's pre-check on its input: every evaluated row
-carries the zero-positive group weight that family weights rows by.
-``compute_prediction_quality`` calls it when the conf weights at all.
+carries the zero-positive group weight that family weights rows by. It
+matters only when the conf weights rows at all.
 """
 
 from pyspark.sql import DataFrame as SparkDataFrame

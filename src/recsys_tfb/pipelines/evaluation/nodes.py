@@ -15,9 +15,7 @@ reports in ``report/``, which nothing outside this pipeline imports, and the
 ``recsys_tfb.evaluation`` library. The library also holds ``baselines``,
 although only these nodes call its Spark functions: it scores by popularity,
 the simplest model, and the library holds a module by its role, not by who
-calls it (ADR-0031 principle 6, the 2026-10-25 correction). Since #536 the
-report reads the landed results through ``evaluation.result_readers`` and
-imports ``baselines`` no longer.
+calls it (ADR-0031 principle 6, the 2026-10-25 correction).
 """
 
 import logging

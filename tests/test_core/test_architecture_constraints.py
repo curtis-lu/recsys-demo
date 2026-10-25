@@ -805,10 +805,8 @@ class TestS3StepsPackagesStayInternal:
         """The same five spellings, pointed at a pipeline's ``report/``, plus
         the root-level presentation layer reaching in relatively.
 
-        These are new with ``pipelines/evaluation/report/``: until the
-        evaluation reports moved there they sat in the root ``evaluation/``
-        library, where no spelling names a pipeline's ``report``. A scan that
-        only knows ``steps`` passes on every one of them. The pipeline's own
+        A scan that only knows ``steps`` passes on every one of them. The
+        pipeline's own
         modules -- ``nodes.py``, and a report module importing a sibling --
         stay legal, and so does the root ``recsys_tfb.report`` package.
         """
@@ -853,8 +851,8 @@ class TestS3StepsPackagesStayInternal:
         ), f"a legal import was reported: {found}"
 
     def test_steps_packages_re_export_nothing(self):
-        """``steps/__init__.py`` and ``report/__init__.py`` hold no imports and
-        no ``__all__``.
+        """Every ``__init__.py`` under ``steps/`` and ``report/`` (the report's
+        subpackages included) holds no imports and no ``__all__``.
 
         The import line in ``nodes.py`` is what says which concern a step came
         from, and a re-export erases that: ``from .steps import build_trial_params``
@@ -863,11 +861,13 @@ class TestS3StepsPackagesStayInternal:
         this keeps it that way.
         """
         inits = sorted(
-            [*PIPELINES.glob("*/steps/__init__.py"),
-             *PIPELINES.glob("*/report/__init__.py")])
-        assert PIPELINES / "evaluation" / "report" / "__init__.py" in inits, (
-            "the evaluation report package was not scanned"
-        )
+            [*PIPELINES.glob("*/steps/**/__init__.py"),
+             *PIPELINES.glob("*/report/**/__init__.py")])
+        report = PIPELINES / "evaluation" / "report"
+        for package in (report, report / "sections", report / "comparison"):
+            assert package / "__init__.py" in inits, (
+                f"{package.relative_to(PIPELINES)} was not scanned"
+            )
         offenders = {}
         for init in inits:
             tree = ast.parse(init.read_text())
@@ -2598,9 +2598,8 @@ class TestS9ReportsDoNotImportComputation:
         return root
 
     def test_catches_every_spelling(self, tmp_path):
-        """The relative spellings into ``steps/`` and ``nodes.py`` exist only
-        since the reports moved into ``pipelines/evaluation/report/``; from the
-        root ``evaluation/`` library no relative import reached the pipeline."""
+        """Absolute and relative spellings alike, including the relative ones
+        a ``report/`` module can write into ``steps/`` and ``nodes.py``."""
         sections = "pipelines/evaluation/report/sections"
         files = {
             f"{sections}/abs_module.py":

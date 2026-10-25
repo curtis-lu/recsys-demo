@@ -307,8 +307,8 @@ def resolved_all_k(bundle: dict) -> int:
     resolved to different K then never pair up under one name.
 
     Raises ``KeyError`` on a bundle with no ledger, one written before #535:
-    the report refuses such a file first (``report.sections.shared
-    .refuse_pre_ledger``), with the node to re-run.
+    the report refuses such a file first (``pipelines/evaluation/report/
+    sections/shared.refuse_pre_ledger``), with the node to re-run.
     """
     return int(bundle[POPULATION_KEY][ALL_K_KEY])
 

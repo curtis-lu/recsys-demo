@@ -102,7 +102,7 @@ def required_results(
 ) -> dict[str, tuple[str, ...]]:
     """The requirement list (ADR-0031 principle 3): for each report this run
     draws, the results it reads — the ``READS`` of every section switched on
-    (``report.sections.shared.sections_on``), in page order, each once.
+    (``report/sections/shared.sections_on``), in page order, each once.
 
     It collects declarations and names no computation: which node produces a
     result is the pipeline's wiring (``create_pipeline`` keeps only the nodes
@@ -178,7 +178,9 @@ def create_pipeline(
     and monitoring mode reads no ``sample_pool``. Like every node, the two
     are kept only while a switched-on section reads what they lead to.
     """
-    from recsys_tfb.pipelines.evaluation.report.sections.shared import BASELINE_COMPARISON
+    from recsys_tfb.pipelines.evaluation.report.sections.shared import (
+        BASELINE_COMPARISON,
+    )
     from recsys_tfb.pipelines.evaluation.nodes import (
         build_popularity_period_counts,
         compare_to_baseline,

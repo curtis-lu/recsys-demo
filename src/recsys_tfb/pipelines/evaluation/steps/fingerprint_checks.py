@@ -1,7 +1,6 @@
-"""Pre-checks the evaluation nodes run on the results they read back from disk:
-each was computed under today's settings and, for a comparison artifact,
-against today's compare source. ``nodes.py`` calls them before it uses a
-landed input.
+"""Pre-checks on the results a node reads back from disk: each was computed
+under today's settings and, for a comparison artifact, against today's
+compare source. A landed input that fails one is not used.
 """
 
 from collections.abc import Sequence
