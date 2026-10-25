@@ -43,8 +43,6 @@ from recsys_tfb.evaluation.baselines import (
     build_baseline_frame,
     compute_monthly_candidate_counts_by_window,
     compute_monthly_candidate_counts_in_windows,
-    compute_monthly_purchase_counts,
-    compute_monthly_purchase_counts_by_window,
     compute_period_candidate_counts,
     compute_positive_rates,
     compute_purchase_counts,
@@ -58,7 +56,6 @@ from recsys_tfb.evaluation.metrics_spark import (
     compute_all_metrics,
     compute_row_facts as _count_row_facts,
     hand_category_mapping,
-    rank_within_query,
 )
 from recsys_tfb.evaluation.prediction_quality import (
     aggregate_score_bins,
@@ -81,8 +78,10 @@ from recsys_tfb.evaluation.result_readers import (
     THIS,
     WIDEST_GROUP_KEY,
     drop_all_positive_groups,
-    format_share,
     resolved_all_k,
+)
+from recsys_tfb.pipelines.evaluation.steps.all_positive_accounts import (
+    log_all_positive_accounts,
 )
 from recsys_tfb.pipelines.evaluation.steps.comparison_layer import (
     compare_metric_results,
@@ -116,10 +115,24 @@ from recsys_tfb.pipelines.evaluation.steps.item_categories import (
     category_of_each_item,
     read_item_category_rows,
 )
+from recsys_tfb.pipelines.evaluation.steps.labels import (
+    count_duplicated_keys,
+    labels_in_months_of,
+    left_join_labels_missing_as_zero,
+)
+from recsys_tfb.pipelines.evaluation.steps.model_version_scope import (
+    restrict_to_model_version,
+)
+from recsys_tfb.pipelines.evaluation.steps.popularity_counts import (
+    monthly_purchase_counts,
+    purchase_counts_per_item,
+)
+from recsys_tfb.pipelines.evaluation.steps.ranks import rank_within_query_group
 from recsys_tfb.pipelines.evaluation.steps.result_blocks import Block, Produces
 from recsys_tfb.pipelines.evaluation.steps.segments import (
     join_segment_columns,
     join_segment_sources,
+    warn_segment_columns_skipped,
 )
 from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
     EvalPartitionsNotCurrentError,
@@ -127,6 +140,7 @@ from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
     eval_snap_dates_without_rows,
     restrict_to_current_eval_partitions,
     restrict_to_eval_snap_dates,
+    snap_dates_in_frame,
     stamp_partition_fingerprint,
 )
 from recsys_tfb.preprocessing import preprocessor_item_values
@@ -336,24 +350,8 @@ def make_prepare_eval_data_node(population_name: str):
                 "parameters['model_version'] missing. CLI should resolve via "
                 "core.versioning.resolve_model_version before pipeline run."
             )
-        if "model_version" in ranked_predictions.columns:
-            logger.info("Filtering predictions to model_version=%s", model_version)
-            ranked_predictions = ranked_predictions.filter(
-                F.col("model_version") == model_version
-            )
-        else:
-            # HiveTableDataset drops partition_filter columns after applying the
-            # WHERE clause. Both of this node's sources declare model_version as a
-            # static partition_filter — training_eval_predictions always did,
-            # ranked_predictions since #187 — so a CLI-loaded DataFrame is already
-            # pruned even though the constant column is no longer present. The
-            # branch above survives for callers that hand this node a frame they
-            # built themselves (tests, --compare paths reading via spark.table).
-            logger.info(
-                "Predictions input has no model_version column; assuming catalog "
-                "partition_filter already selected model_version=%s",
-                model_version,
-            )
+        ranked_predictions = restrict_to_model_version(
+            logger, ranked_predictions, model_version)
 
         # Decision — which months: evaluation.snap_date, one date or several
         # (#374), in both pipeline modes (this node serves monitoring and
@@ -373,10 +371,7 @@ def make_prepare_eval_data_node(population_name: str):
         # whole frame has rows as soon as one month does.
         missing_dates = eval_snap_dates_without_rows(ranked_predictions, parameters)
         if missing_dates:
-            available = sorted(
-                str(r[time_col])
-                for r in ranked_predictions.select(time_col).distinct().collect()
-            )
+            available = sorted(snap_dates_in_frame(ranked_predictions, time_col))
             asked = (
                 f"evaluation.snap_date={snap_date_text!r}"
                 if len(snap_dates) == 1 else
@@ -393,8 +388,7 @@ def make_prepare_eval_data_node(population_name: str):
         )
 
         # Filter labels to snap_dates in predictions
-        pred_snap_dates = ranked_predictions.select(time_col).distinct()
-        labels = labels.join(pred_snap_dates, on=time_col, how="inner")
+        labels = labels_in_months_of(labels, ranked_predictions, time_col)
 
         # Pre-check (input): label_table holds at most one row per identity key in
         # the evaluated month. The LEFT JOIN below copies a prediction row once per
@@ -410,15 +404,7 @@ def make_prepare_eval_data_node(population_name: str):
         # Checked on `labels` after the
         # month join, so it counts exactly the rows about to be joined. The
         # message carries counts only, never key values (they are entity ids).
-        # Cost: one Spark action per run, a groupBy over one month of label rows
-        # (a shuffle of that month) ending in a count; only the count reaches the
-        # driver, whatever the table size.
-        n_duplicated_keys = (
-            labels.groupBy(*identity_cols)
-            .agg(F.count(F.lit(1)).alias("_n_label_rows"))
-            .filter(F.col("_n_label_rows") > 1)
-            .count()
-        )
+        n_duplicated_keys = count_duplicated_keys(labels, identity_cols)
         if n_duplicated_keys:
             raise ValueError(
                 f"{n_duplicated_keys} duplicated label_table key(s) on "
@@ -459,17 +445,8 @@ def make_prepare_eval_data_node(population_name: str):
         # per-group framing the business model never asked for. Missing labels are
         # filled with 0 ("not bought"), matching the existing build_model_input
         # convention (pipelines/dataset/steps/model_input.py, LEFT + COALESCE(0)).
-        eval_predictions = ranked_predictions.join(labels, on=identity_cols, how="left")
-        if label_col in eval_predictions.columns:
-            # INT, the type training_eval_predictions declares for `label`. The
-            # two modes take the label from different tables — that one in
-            # --post-training, the user-defined label_table in monitoring (the
-            # example's synthetic one is BIGINT) — and both write the same
-            # enriched_eval_predictions, whose schema never casts. Same failure as
-            # `rank` below (bug 15); it surfaced on the first real monitoring run.
-            eval_predictions = eval_predictions.fillna({label_col: 0}).withColumn(
-                label_col, F.col(label_col).cast("int")
-            )
+        eval_predictions = left_join_labels_missing_as_zero(
+            ranked_predictions, labels, identity_cols, label_col)
 
         # Decision — a missing rank is computed here, a present one is trusted.
         # Downstream report rendering selects schema["rank"] from eval_predictions.
@@ -478,41 +455,21 @@ def make_prepare_eval_data_node(population_name: str):
         # the table no longer stores it (Spark mAP recomputes rank internally via
         # rank_within_query). Add it here when missing so downstream stays uniform;
         # when present (ranked_predictions source), trust the upstream value.
-        # Today both ways give the same ranks: rank_within_query breaks ties the
-        # way inference does (see below). The choice shows once one side's rule
-        # changes: recomputing would silently replace the ranking inference
-        # published; trusting means a `rank` column ever added to
+        # Today both ways give the same ranks: the tie-break is inference's. The
+        # choice shows once one side's rule changes: recomputing would silently
+        # replace the ranking inference published; trusting means a `rank` column ever added to
         # training_eval_predictions is used as is, tie-break included, with no
         # message (ADR-0014 records that hazard).
         rank_col = schema["rank"]
         if rank_col not in eval_predictions.columns:
-            score_col = schema["score"]
-            query_cols = schema["query_group_columns"]
-            # rank_within_query adds a "pos" 1-based rank within each query
-            # group, by score desc with ties by item asc — the rule inference
-            # publishes `rank` with, so both modes rank the same rows alike.
-            #
-            # "The same" holds because this side groups by the query group
-            # while inference groups by the base key, and the two are equal
-            # until an `occasion` is declared (ADR-0025 decision 2). Declared,
-            # the two rankings part — and this side is the right one: this
-            # branch only runs on training_eval_predictions (--post-training),
-            # whose rows each belong to one occasion, and an occasion is the
-            # scope those rows were ranked in. Inference has no occasion to
-            # rank inside. Monitoring mode, the one place the two would meet,
-            # is refused at the CLI entry while the role is declared (A40).
-            eval_predictions = rank_within_query(
-                eval_predictions, query_cols, score_col, schema["item"],
-                schema.get("event", []),
-            )
-            # BIGINT, the type ranked_predictions declares for `rank`. Both modes
-            # write the same enriched_eval_predictions (columns: "auto"), whose
-            # schema is fixed by the first write and never cast afterwards, so
-            # row_number()'s INT here against the monitoring side's BIGINT is a
-            # type conflict on whichever run comes second (bug 15).
-            eval_predictions = eval_predictions.withColumn(
-                rank_col, F.col("pos").cast("bigint")
-            ).drop("pos")
+            # Decision — ranked within the query group, where inference ranks
+            # within the base key. The two are the same until an `occasion` is
+            # declared (ADR-0025 decision 2); declared, this side is the right
+            # one: this branch only runs on training_eval_predictions, whose
+            # rows each belong to the occasion they were ranked in. Monitoring
+            # mode, the one place the two would meet, is refused at the CLI
+            # entry while the role is declared (A40).
+            eval_predictions = rank_within_query_group(eval_predictions, schema)
             logger.info(
                 "prepare_eval_data: injected '%s' column via rank_within_query "
                 "(predictions source did not provide it)",
@@ -541,12 +498,7 @@ def make_prepare_eval_data_node(population_name: str):
         population_columns = set(population.columns)
         missing = {c: population_name for c in segment_columns
                    if c not in overrides and c not in population_columns}
-        for col, table in missing.items():
-            logger.warning(
-                "segment column %r: population table %r has no such column "
-                "(it has %s); per-segment metrics skip it this run",
-                col, table, sorted(population_columns),
-            )
+        warn_segment_columns_skipped(logger, missing, population_columns)
         from_population = [c for c in segment_columns
                            if c not in overrides and c not in missing]
         if from_population:
@@ -760,41 +712,7 @@ def compute_row_facts(
     }
     facts["config_fingerprint"] = fingerprint(
         parameters, "compute_row_facts", (segment_columns, item_categories))
-    drop_all_positive = drop_all_positive_groups(parameters)
-    # One line of accounts per grain, and a warning when the all-positive
-    # share is high with the switch off — read off the landed accounts
-    # (metrics.all_positive_accounts), which the report reads too. Each
-    # grain decides on its own frame, so the two can disagree.
-    for grain, bundle in (("fine", facts),
-                          ("category", facts.get("category"))):
-        if bundle is None:
-            continue
-        n_with_positive = bundle[N_WITH_POSITIVE_KEY]
-        n_all_positive = bundle[ALL_POSITIVE_KEY]
-        share = bundle[ALL_POSITIVE_SHARE_KEY]
-        share_text = "n/a" if share is None else format_share(share)
-        logger.info(
-            "Row facts counted (%s grain): n_queries=%d, n_excluded=%d "
-            "(no positive); %d hold a positive, of which %d all-positive "
-            "(%s) — %s",
-            grain, bundle["n_queries"], bundle["n_excluded_queries"],
-            n_with_positive, n_all_positive, share_text,
-            (f"dropped (evaluation.query_filter.drop_all_positive_groups "
-             f"on), {n_with_positive - n_all_positive} scored")
-            if drop_all_positive else
-            ("scored like the others (evaluation.query_filter."
-             "drop_all_positive_groups off)"),
-        )
-        if bundle[ALL_POSITIVE_WARNS_KEY]:
-            logger.warning(
-                "All-positive query groups at the %s grain: %d of the %d "
-                "holding a positive (%s). Every row carries the same positive "
-                "label, so every per-query metric of such a group is the same "
-                "whatever the order, and they count in the metrics as they "
-                "are. Set evaluation.query_filter.drop_all_positive_groups: "
-                "true to drop them from the metrics and the baseline.",
-                grain, n_all_positive, n_with_positive, share_text,
-            )
+    log_all_positive_accounts(logger, facts, drop_all_positive_groups(parameters))
     return facts
 
 
@@ -1073,8 +991,6 @@ def compute_baseline_metrics(
 
     schema = get_schema(parameters)
     time_col = schema["time"]
-    item_col = schema["item"]
-    score_col = schema["score"]
     # Decision — a multi-column item is combined on read (ADR-0027): every
     # count below is per item.
     label_table = combine_item_columns(label_table, schema, "label_table")
@@ -1084,10 +1000,7 @@ def compute_baseline_metrics(
     # implicit default silently disagreed with itself about what it had used.
     lookback_months = resolve_lookback_months(parameters)
 
-    snap_dates = [
-        str(r[time_col])
-        for r in eval_predictions.select(time_col).distinct().collect()
-    ]
+    snap_dates = snap_dates_in_frame(eval_predictions, time_col)
     # Decision — which score ranks the baseline: the positive rate when the
     # pipeline wired the period counts (score: rate under --post-training),
     # the count otherwise. Rate first, so an empty sample_pool window raises
@@ -1114,55 +1027,12 @@ def compute_baseline_metrics(
     counts = compute_purchase_counts(
         label_table, snap_dates, lookback_months, parameters
     )
-    # Aggregate per-product count across eval snap_dates (sum). Single-snap
-    # evaluation reduces to that snap's value. cast to int for clean JSON
-    # serialisation in manifests / reports.
-    purchase_counts = {
-        str(r[item_col]): int(r[score_col])
-        for r in counts.groupBy(item_col)
-        .agg(F.sum(F.col(score_col)).alias(score_col))
-        .collect()
-    }
-    # Per-(month, item) breakdown of the same windows → report's monthly
-    # popularity trend. Summed over months, each item reconciles with
-    # purchase_counts (both sum the same per-snap-per-month counts).
-    monthly_counts: dict[str, dict[str, int]] = {}
-    window_months_covered: Optional[dict[str, int]] = None
-    if len(snap_dates) == 1:
-        monthly = compute_monthly_purchase_counts(
-            label_table, snap_dates, lookback_months, parameters
-        )
-        for r in (
-            monthly.groupBy("month", item_col)
-            .agg(F.sum(F.col(score_col)).alias(score_col))
-            .collect()
-        ):
-            monthly_counts.setdefault(str(r[item_col]), {})[str(r["month"])] = int(
-                r[score_col]
-            )
-    else:
-        # Several evaluated dates (#374), one lookback window each. The same
-        # counts kept apart per window (one scan of label_table), so one
-        # collect gives both the trend (summed over windows) and how many
-        # months with label rows each window had. The per-month average
-        # divides by the sum of those, not by one window's lookback:
-        # purchase_counts is summed over all windows (popularity_window).
-        months_by_window: dict[str, set] = {s: set() for s in snap_dates}
-        summed: dict[str, dict[str, float]] = {}
-        for r in compute_monthly_purchase_counts_by_window(
-            label_table, snap_dates, lookback_months, parameters
-        ).collect():
-            month = str(r["month"])
-            months_by_window[r["window_date"]].add(month)
-            per_item = summed.setdefault(str(r[item_col]), {})
-            per_item[month] = per_item.get(month, 0.0) + r[score_col]
-        monthly_counts = {
-            item: {month: int(v) for month, v in per_month.items()}
-            for item, per_month in summed.items()
-        }
-        window_months_covered = {
-            s: len(months_by_window[s]) for s in sorted(snap_dates)
-        }
+    # Summed over the evaluated dates' windows; one date reduces to its own.
+    purchase_counts = purchase_counts_per_item(counts, parameters)
+    # The same windows per calendar month: the report's monthly popularity
+    # trend.
+    monthly_counts, window_months_covered = monthly_purchase_counts(
+        label_table, snap_dates, lookback_months, parameters)
     baseline_frame = build_baseline_frame(
         eval_predictions, rate_scores if rate_mode else counts, parameters)
     # Decision — the model's metrics on the baseline's scores, called as

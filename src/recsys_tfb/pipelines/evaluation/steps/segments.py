@@ -1,4 +1,5 @@
-"""Segment-column joins for evaluation (Spark).
+"""Segment-column joins for evaluation (Spark), and the warning for a column
+the population table lacks.
 
 A segment column comes from one of two places (ADR-0020 bug 6):
 
@@ -9,8 +10,8 @@ A segment column comes from one of two places (ADR-0020 bug 6):
   An override declares ``table`` (Hive-qualified name), ``key_columns`` and
   ``segment_column``; one that cannot be read fails loud, never a silent skip.
 
-Which of the two a column takes, and what happens when the population table
-lacks it, is decided in ``prepare_eval_data``, not here.
+Which of the two a column takes, and that a column the population table lacks
+is skipped, is decided in ``prepare_eval_data``, not here.
 """
 
 import logging
@@ -113,3 +114,21 @@ def join_segment_sources(
         )
 
     return df
+
+
+def warn_segment_columns_skipped(
+    caller_logger: logging.Logger,
+    missing: dict[str, str],
+    population_columns: set[str],
+) -> None:
+    """One warning per segment column the population table lacks
+    (``missing``: column → table), naming the table and the columns it has,
+    so a typo in ``evaluation.segment_columns`` is found from the log.
+    ``caller_logger`` is the node's: the lines keep the logger name they are
+    filtered by."""
+    for col, table in missing.items():
+        caller_logger.warning(
+            "segment column %r: population table %r has no such column "
+            "(it has %s); per-segment metrics skip it this run",
+            col, table, sorted(population_columns),
+        )

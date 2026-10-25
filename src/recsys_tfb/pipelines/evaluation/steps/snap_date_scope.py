@@ -1,5 +1,6 @@
 """The evaluated dates (one or several): which they are, keeping only their rows,
-and whether those rows were written under today's settings.
+and whether those rows were written under today's settings; and which dates a
+frame holds (:func:`snap_dates_in_frame`).
 
 ``enriched_eval_predictions`` holds every month this ``model_version`` has been
 evaluated on: ``prepare_eval_data`` writes one time partition per evaluated date,
@@ -301,3 +302,9 @@ def restrict_to_current_eval_partitions(
         .drop(PARTITION_FINGERPRINT_COLUMN),
         dates_without_rows=dates_without_rows,
     )
+
+
+def snap_dates_in_frame(frame: DataFrame, time_col: str) -> list[str]:
+    """The distinct time values ``frame`` holds, as text, in the order Spark
+    returns them; one small collect."""
+    return [str(r[time_col]) for r in frame.select(time_col).distinct().collect()]

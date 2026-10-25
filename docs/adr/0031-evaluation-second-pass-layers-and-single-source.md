@@ -395,6 +395,15 @@ diagnosis/metric/    contract.py
 - 拆長 node（決策留在 node body、機制抽進 `steps/`，node 規則 4）會改函式的內容，只能靠實跑比對證明輸出不變，所以另開一張（#568），排在 #540 之前（flow 規則 3、4）。
 - `nodes.py` 剩下的私有 helper 原封搬進 `steps/` 是純搬移，併進 #540。
 
+**更正（#568 做完，2026-10-25）：現況表 evaluation 那一欄的兩個數字。** 照附錄二的量法，在 #568 的分支上重量：
+
+| | 拆長 node 前（main `e5493f2f`） | 拆完（#568 的分支 `feat/eval-long-nodes`） |
+|---|---|---|
+| `nodes.py` 裡的私有 helper | 7 個 | 7 個（#568 沒搬既有的，留給 #540；新抽的直接放 `steps/`） |
+| 最長的 node | 387 行（`make_prepare_eval_data_node`） | 325 行（同一個） |
+
+`make_prepare_eval_data_node` 剩下的長度多半是 `# Decision` 註解與前置檢查的 `raise`：前置檢查依 node 規則 11 留在 node；註解寫瘦是 code-comments 規則 4 的事，不在 #568 範圍。
+
 ---
 
 ## 四、動手順序
