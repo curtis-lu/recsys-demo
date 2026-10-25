@@ -382,7 +382,7 @@ diagnosis/metric/    contract.py
 
 **`nodes.py` 的私有 helper 與長 node 分兩張票（擁有者 2026-10-25 決定）。** 上面現況表量到的這兩件事（2026-10-25 在 `0839cca2` 重量：私有 helper 7 個，最長的 node 396 行），原本沒有票接：
 
-- 拆長 node（決策留在 node body、機制抽進 `steps/`，node 規則 4）會改函式的內容，只能靠實跑比對證明輸出不變，所以另開一張（#B），排在 #540 之前（flow 規則 3、4）。
+- 拆長 node（決策留在 node body、機制抽進 `steps/`，node 規則 4）會改函式的內容，只能靠實跑比對證明輸出不變，所以另開一張（#568），排在 #540 之前（flow 規則 3、4）。
 - `nodes.py` 剩下的私有 helper 原封搬進 `steps/` 是純搬移，併進 #540。
 
 ---
