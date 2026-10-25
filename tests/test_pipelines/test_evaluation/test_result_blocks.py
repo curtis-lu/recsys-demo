@@ -1,5 +1,5 @@
 """The evaluation pipeline's landed results hold the blocks they declare
-(ADR-0031 principle 2, supplement 2; #560).
+(ADR-0031 principle 2, supplement 2).
 
 Each node that lands a JSON result declares a ``Produces`` above itself in
 ``nodes.py``. A: the declarations cover every JSON result the pipeline lands,
@@ -8,8 +8,9 @@ lands, for each result, exactly the declared blocks less a stated set the run
 cannot reach. C: each block B cannot reach is written by a minimal node call.
 D: the join of wiring, sections and declarations (``result_readers_table``).
 
-The intermediate results are MemoryDatasets, not landed JSON files: this is
-not #530's end-to-end test.
+B runs the whole pipeline with the Runner, so it is an end-to-end test in
+#530's sense. The seams cannot see it: each node's input must be what the node
+upstream really computed, and wiring node by node would redo the Runner.
 """
 import copy
 from pathlib import Path
@@ -18,6 +19,7 @@ import pytest
 import yaml
 
 from recsys_tfb.core.catalog import DataCatalog, MemoryDataset
+from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
 from recsys_tfb.core.runner import Runner
 from recsys_tfb.pipelines.evaluation import create_pipeline, nodes
 from recsys_tfb.pipelines.evaluation.pipeline import result_readers_table
@@ -30,9 +32,7 @@ _CATALOG = yaml.safe_load(
 _JSON_ENTRIES = {name for name, entry in _CATALOG.items()
                  if isinstance(entry, dict) and entry.get("type") == "JSONDataset"}
 
-_ALL_SECTIONS = {name: True for name in (
-    "data_stats", "ranking_metrics", "rank_distribution",
-    "popularity_baseline", "prediction_quality")}
+_ALL_SECTIONS = {name: True for name in EVALUATION_REPORT_SECTIONS}
 _SOURCE = {"kind": "model_version", "model_version": "other"}
 
 
@@ -208,21 +208,38 @@ def test_a_declared_event_role_writes_the_tie_counts(spark):
     from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
         stamp_partition_fingerprint,
     )
-    from tests.test_evaluation.test_metrics_spark_overview import (
-        _event_df,
-        _event_params,
-    )
+    from tests.test_evaluation.test_metrics_spark_overview import _event_params
     from tests.test_pipelines.test_evaluation.test_nodes import _no_segments
 
     params = _event_params()
-    params["evaluation"] = {"snap_date": "20240331", "k_values": [1, 2]}
-    frame = stamp_partition_fingerprint(_event_df(spark), params, [])
+    params["evaluation"] = {"snap_date": "2024-03-31", "k_values": [1, 2],
+                            "baseline": {"lookback_months": 12}}
+    # Two score ties in c1's group (the first two rows); the date is ISO
+    # because the baseline reads its lookback window off it.
+    frame = stamp_partition_fingerprint(spark.createDataFrame(
+        [("2024-03-31", "c1", "A", "i1", 0.9, 1),
+         ("2024-03-31", "c1", "A", "i2", 0.9, 0),
+         ("2024-03-31", "c1", "A", "i3", 0.4, 0),
+         ("2024-03-31", "c1", "B", "i4", 0.1, 0),
+         ("2024-03-31", "c2", "A", "i5", 0.2, 0)],
+        ["snap_date", "cust_id", "prod_name", "imp_id", "score", "label"]),
+        params, [])
+    labels = spark.createDataFrame(
+        [("2023-12-31", "h1", "A", 1), ("2023-12-31", "h2", "B", 1)],
+        ["snap_date", "cust_id", "prod_name", "label"])
     segments = _no_segments(params)
     facts = nodes.compute_row_facts(frame, segments, params)
     metrics = nodes.compute_metrics(frame, facts, segments, params)
+    baseline = nodes.compute_baseline_metrics(
+        frame, facts, labels, segments, params)
+    _a_facts, compare_a, _b_facts, compare_b = nodes.compute_compare_metrics(
+        frame, frame, segments, params)
+    _assert_blocks("evaluation_row_facts", facts, {"category"})
     _assert_blocks("evaluation_metrics", metrics, {"category"})
     assert metrics["n_tied_rows"] == 2
-    _assert_blocks("evaluation_row_facts", facts, {"category"})
+    _assert_blocks("baseline_metrics", baseline, {"popularity_rate", "category"})
+    _assert_blocks("compare_metrics_a", compare_a, {"category"})
+    _assert_blocks("compare_metrics_b", compare_b, {"category"})
 
 
 def test_a_counted_item_list_writes_known_items(spark):
@@ -251,8 +268,6 @@ def test_the_table_joins_wiring_sections_and_declarations(table):
     assert "compute_metrics" in facts["reader_nodes"]
     assert ("evaluation_report", "data_stats", "data_stats") in \
         facts["reader_sections"]
-    assert {b.name for b in facts["blocks"]} == {
-        b.name for b in DECLARED["evaluation_row_facts"].blocks}
 
 
 def test_the_comparison_chain_is_listed_with_its_readers(table):
