@@ -2,6 +2,8 @@
 
 寫或改 `src/`、`tests/`、`scripts/` 裡的 `#` 註解或 docstring 時照這份做。log 訊息、報表文字這類會給使用者看的字串不在範圍。
 
+目標是**瘦**：每句都刪不得（規則 4）。
+
 - 註解一律英文（`pipeline-node-design.md` 總表下方的體例）。
 - node 的 docstring 另外要寫的三件事，見 [`pipeline-node-design.md`](pipeline-node-design.md) 規則 13。
 - 不變量代號（`A24`、`B6`）直接寫；定義在 `core/consistency.py` 的模組 docstring。
@@ -75,17 +77,38 @@ no edit.
 """
 ```
 
-## 4. 函式 docstring 超過 10 行，就逐句過一遍規則 1–3
+## 4. 寫瘦：每句都刪不得
 
-10 行是檢查點，不是上限。
+只留刪了就可能讓人改壞程式的句子。逐句問：「改這段的人沒讀到這句，會做錯什麼？」答不出來，刪整句。
 
-- **拿掉**：不 durable 的句子、ADR 的副本。
-- **留下**：其他句子都留，再長也留。規則 13 要的三件事都算要留的。
-- **不管行數**：模組 docstring。
+最常刪的三種：
 
-例：`split_train_keys`（`src/recsys_tfb/pipelines/dataset/nodes.py:432`）
-- **拿掉**：「which records the distinct-and-join shape it replaced … (6.7s → 3.6s on 16M keys …)」。這是舊寫法加上一次量測。
-- **留下**：entity 不跨 split 的保證、誰決定 entity 欄、兩個檢查各是哪一種、各自的成本。
+- **別處管的事**：機制歸別的函式、模組或 ADR 管，縮成一個出處，例如 `(config_fingerprint.rerun_node)`。先打開出處確認它真的寫了；沒寫的那部分留著。
+- **同一件事的第二種說法**：例子、情境推演、換句話說。留結論那句。
+- **名字和簽章已經講完的事**（規則 1）。
+
+留下的每件事寫一句：規則 1 的三種、`pipeline-node-design.md` 規則 13 的三件事、前置檢查。選錯會靜默出錯的，後果在這裡留一句，機制才縮成出處。一句寫不完，論證交給 ADR，註解留結論加出處（規則 3）。
+
+簽章說不出的回傳形狀（dict 的鍵、tuple 的位置）也要留：一個鍵一行，只寫它是什麼。
+
+刪一句之前，grep 有沒有別處指著它（`see the docstring`、`above`）；有的話，一起改。
+
+函式 docstring 或一段 `#` 註解超過 10 行，就把整份逐句問一遍。模組 docstring 不看行數，每句照樣要刪不得。
+
+例（`src/recsys_tfb/pipelines/evaluation/nodes.py:1896`，`resolve_comparison_display_ks`）：
+
+- **刪**：指紋帶哪個鍵、過期後重跑去哪（`config_fingerprint.rerun_node` 管）；落地的形狀（`steps/display_ks` 管）；也記了比較對象（`_require_comparison_inputs_current` 管）。
+- **留**：
+
+```python
+"""The K columns each per-K table of the comparison report shows, cut per
+grain at what this side's ``"all"`` stands for (ADR-0031 decision 10). A
+node after the comparison, so a changed display K re-runs this and the
+report only (decision 16). No Spark.
+
+Pre-check (inputs): ``_require_comparison_inputs_current``.
+"""
+```
 
 ## 5. 只整理這次 touched 的註解
 
