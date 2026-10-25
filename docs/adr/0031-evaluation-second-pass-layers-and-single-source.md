@@ -148,6 +148,8 @@ Node(
 
 名字說「它是什麼」，例如「query 粒度的排名指標」，不說「給哪一段報表用」。一個單元的產出多到一句話講不清楚，就該拆。
 
+（evaluation 的實作見原則 3 底下〈更正（#538 實作時定，2026-10-24）〉中「原則 2 補充二……已做（#560）」一條。）
+
 **補充三（已拍板）：共用的準備步驟，只做不會改變指標定義的事。** 組鍵、排序、把資料拉到 driver，這類步驟可以共用。「要不要包含沒有正例的 query」會改變指標定義，要由各個指標自己決定：mAP 本來就不計沒有正例的 query；其他指標要不要計，看那個指標的定義。
 
 - **推翻的既有設計。** 現在的共用準備步驟（`make_draw_diagnosis_sample_node`，名字叫「抽樣」）一開始就只留有正例的 query。這是 2026-07-06 診斷整合設計（`docs/superpowers/specs/2026-07-06-diagnosis-pipeline-integration-design.md`）定的，理由是「指標只由它們定義」。這個理由對 mAP 成立，對 item_ability 的 ROC AUC 不一定成立。
@@ -195,7 +197,11 @@ Node(
 - **變體（哪幾個 K）不另外推導。** 補充一講的那類 bug（報表要的 K 計算端沒算）在 #537 已經從另一頭擋住：計算端只有一條 K 軸，`k_values` 加上 `all` 一律算（`metrics_spark._resolve_k_grids`），比較表要的 `compare_k` 由 A62 檢查必須在 `k_values` 裡。需求清單再推一次 K，會跟這兩處重複，所以不做。
 - **分 side 的需求。** 需求清單分到報表：主報表要開著的段讀的全部，比較報表要它的段讀的。baseline 只在熱門度段開著時算，預測品質（第三種算法）只有主報表的段讀，所以只有 A 算。前兩種算法在同一個單元（`compute_all_metrics`）一起算，baseline、A′、B′ 也兩種都算：照本原則「同一單元一起算幾乎不花成本的就一起算」，要拆開得先量（原則 2），這張票沒量。「要比的指標」動到沒算過的指標時報錯、指出從哪個 node 重跑，#536／#537 已經做了（熱門度段 `_require_cell`、比較報表 `comparison/tables.landed_cells`）；#538 審查抓到比較報表那條叫人從 `compare_to_source` 重跑，但缺的格子若是比較的兩份指標本來就沒算，從那裡重跑會一直缺，所以改成從 `compute_compare_metrics` 重跑。決定 4「把分數當機率的那種算法，被清單列到才算」今天走不到：目錄還沒收那種算法（見原則 6 底下 #533 的更正），清單沒辦法列它。等它進目錄（#541），這條推導才有東西可推，那張票要補。比較報表沒有開關，它那邊的需求清單只決定要不要跑整條比較鏈；比較報表 node 的接線照舊寫死，由既有測試守它跟各段 `READS` 相同。
 - **「讀哪些設定」的宣告留給 #539。** 這張票沒有讀者，寫了也測不到對不對。（#539 做了，見原則 5〈#539 怎麼做的〉。）
-- **原則 2 補充二的「計算單元宣告自己產出什麼（名字、一句話定義、粒度），由測試檢查真的產出」只做了一半（擁有者 2026-10-24 選定）。** 做了的：「每個開著的段要讀的結果，pipeline 裡都有 node 產出」，任何模式、任何開關組合下都檢查（`test_pipeline.py::TestTheRequirementList`）。沒做的：每個結果裡有哪些區塊、各自的定義與粒度，以及跑 Spark 確認真的產出這些區塊；指標的這一層已由指標目錄（決定 6）與它的測試涵蓋，其餘結果（列的事實、母體帳、熱門度視窗、預測品質）另開票。
+- **原則 2 補充二的「計算單元宣告自己產出什麼（名字、一句話定義、粒度），由測試檢查真的產出」已做（#560）。** #538 只做到「每個開著的段要讀的結果，pipeline 裡都有 node 產出」（`test_pipeline.py::TestTheRequirementList`）；#560 補上結果**裡面**的區塊：
+    - **宣告放哪。** `pipelines/evaluation/nodes.py`，每個落地 JSON 的 node 正上方放一個 `Produces(result, blocks)` 常數，十六個落地結果各一個；共用的形狀只宣告一次再組合（指標包 `_METRIC_BLOCKS`、列的事實 `_ROW_FACT_BLOCKS`、比較層 `_COMPARISON_BLOCKS`）。「區塊」指落地結果最上層的鍵；每個 `Block` 寫名、一句話定義、粒度，`when` 非空表示只在某條件下才寫這個鍵。指標格子裡的鍵不重複宣告，由指標目錄（決定 6）與 `test_metric_catalog.py` 守。
+    - **型別在哪。** `pipelines/evaluation/steps/result_blocks.py`（`Block`、`Produces`、`declared_results`）。
+    - **哪條測試檢查。** `tests/test_pipelines/test_evaluation/test_result_blocks.py`：A 宣告涵蓋任何模式下落地的全部 JSON 結果；B 跑一次監控模式、所有段開、有分群欄、有大類對照、有 `--compare` 的 pipeline（不含兩個畫 HTML 的 node），每個結果的鍵集合等於宣告扣掉明列的、這組設定碰不到的條件區塊；C 對碰不到的條件區塊（`popularity_rate`、`n_tied_rows`／`tied_row_share`、`known_items`）各用最小的 node 呼叫證明真的會寫。
+    - **「誰讀了它」。** `pipelines/evaluation/pipeline.py::result_readers_table` 把 `create_pipeline` 的接線（各段全開、有比較來源、`baseline_rate`，加 `--compare-only` 那條）、兩份報表各段的 `READS`／`SWITCH`、上面的宣告三者相接；`scripts/list_evaluation_results.py` 把它印成純文字，不開 Spark。這張對照沒有人手寫。
 - **決定 15 第一列。** 指紋錯誤訊息指向的重跑起點只有 `prepare_eval_data`、`compute_row_facts`，任何設定組合下都在 pipeline 裡；`test_pipeline.py::TestFingerprintRerunNodes` 改成連「全部開關關掉」也檢查。
 
 ---

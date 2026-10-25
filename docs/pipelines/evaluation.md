@@ -118,6 +118,8 @@ per-item 的指標都由每個 item 的**共用數字**相除而來：先在 ove
 
 完全沒有正例的 query group 無法定義 AP，因此會從 metric computation 排除；`n_queries` 與 `n_excluded_queries` 照樣記在列的事實 `row_facts.json`（catalog 的 `evaluation_row_facts`，#535），報表從那裡讀。每份指標結果另記母體帳 `population`：`all` 解析成幾、哪些 item 進了 macro、算進指標的 query group 有幾組（有正例／無正例分開記；今天無正例的一律是 0）。
 
+每個落地 JSON 結果有哪些區塊（名稱、粒度、定義）宣告在 `pipelines/evaluation/nodes.py` 產出它的 node 正上方（`Produces`）；誰產出、誰讀它由 `scripts/list_evaluation_results.py` 從 pipeline 接線與各報表段的 `READS` 算出來印成純文字（不開 Spark，需 `PYTHONPATH=<root>/src`）。
+
 ### 3.2 分群評估
 
 ```yaml
