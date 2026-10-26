@@ -35,8 +35,8 @@ SECTIONS = (
     core_concepts,
     data_stats,
     ranking_metrics,
-    popularity_baseline,
     rank_distribution,
+    popularity_baseline,
     completeness,
 )
 
