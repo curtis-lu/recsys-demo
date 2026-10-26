@@ -1787,7 +1787,7 @@ class TestComputePredictionQuality:
         assert result[PREDICTION_QUALITY_POPULATION_KEY] == {
             "source": "post_training", "evaluated_dates": ["2025-01-31"],
             "test_zero_positive_group_ratio": 0.5,
-            "n_zero_positive_groups": 1}
+            "n_zero_positive_groups": 1, "scope": None}
         params = self._parameters()
         result = compute_prediction_quality(
             self._with_a_query_group_without_a_positive(spark),
@@ -1795,7 +1795,7 @@ class TestComputePredictionQuality:
         assert result[PREDICTION_QUALITY_POPULATION_KEY] == {
             "source": "monitoring", "evaluated_dates": ["2025-01-31"],
             "test_zero_positive_group_ratio": None,
-            "n_zero_positive_groups": None}
+            "n_zero_positive_groups": None, "scope": None}
 
     #: The payloads this function landed before ADR-0032 (when it was a node of
     #: the main report), on these same rows (monitoring, and --post-training
@@ -1900,6 +1900,182 @@ class TestComputePredictionQuality:
         frame = self._weighted(spark, params, 2.0).drop(ZERO_POSITIVE_GROUP_WEIGHT_COL)
         with pytest.raises(DataConsistencyError, match="training wrote them without it"):
             compute_prediction_quality(frame, _no_segments(params), params)
+
+    @staticmethod
+    def _scoped(spark, params, view, rows, columns):
+        """``params`` under ``--scope`` ``view``: the scope table is the temp
+        view ``view`` holding ``rows`` under the column names ``columns``
+        maps the resolved columns to, as the CLI hands the scope on."""
+        import pandas as pd
+
+        theirs = list(columns.values())
+        spark.createDataFrame(pd.DataFrame(rows, columns=theirs)) \
+            .createOrReplaceTempView(view)
+        params["evaluation"]["scope"] = {"table": view, "columns": columns}
+        params["prediction_quality_scope"] = view
+        return params
+
+    @staticmethod
+    def _scope_block(result):
+        from recsys_tfb.evaluation.result_readers import (
+            POPULATION_SCOPE_KEY,
+            PREDICTION_QUALITY_POPULATION_KEY,
+        )
+
+        return result[PREDICTION_QUALITY_POPULATION_KEY][POPULATION_SCOPE_KEY]
+
+    def test_an_entity_scope_keeps_every_item_of_its_entities(self, spark):
+        """ADR-0032 decision 7, entity only. The scope holds c1 (twice), c3,
+        c9 — scored nowhere — and c2 on a date not evaluated. In scope: c1's
+        and c3's six rows, positives c1·A (0.9) and c1·C (0.1) against the
+        negatives 0.5, 0.7, 0.6, 0.4: 0.9 beats all four, 0.1 none, so
+        AUC-ROC = 4/8. Not scored: c9 alone (the duplicate and the other
+        date count nothing)."""
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._scoped(
+            spark, self._parameters(), "pq_scope_entity",
+            [("2025-01-31", "c1"), ("2025-01-31", "c1"),
+             ("2025-01-31", "c3"), ("2025-01-31", "c9"),
+             ("2025-02-28", "c2")],
+            {"snap_date": "as_of_date", "cust_id": "customer_id"})
+        result = compute_prediction_quality(
+            self._with_a_query_group_without_a_positive(spark),
+            _no_segments(params), params)
+        summary = result["overall"]["summary"]
+        assert (summary["n"], summary["n_pos"]) == (6, 2)
+        assert summary["roc_auc"] == pytest.approx(0.5)
+        assert self._scope_block(result) == {
+            "name": "pq_scope_entity", "table": "pq_scope_entity",
+            "columns": {"snap_date": "as_of_date", "cust_id": "customer_id"},
+            "n_rows_in_scope": 6, "n_scope_rows_not_scored": 1,
+        }
+
+    def test_an_entity_by_item_scope_keeps_its_pairs_only(self, spark):
+        """Entity × item. In scope: c1·A (1, 0.9), c1·C (1, 0.1), c2·B (1,
+        0.8), c2·C (0, 0.3), c3·A (0, 0.7); c1·A listed twice. Positives 0.9,
+        0.1, 0.8 against negatives 0.3, 0.7: 2 + 0 + 2 wins of 6, AUC-ROC =
+        2/3. Not scored: c9·A, and c1·D (an item no candidate holds)."""
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._scoped(
+            spark, self._parameters(), "pq_scope_pairs",
+            [("2025-01-31", "c1", "A"), ("2025-01-31", "c1", "A"),
+             ("2025-01-31", "c1", "C"), ("2025-01-31", "c2", "B"),
+             ("2025-01-31", "c2", "C"), ("2025-01-31", "c3", "A"),
+             ("2025-01-31", "c9", "A"), ("2025-01-31", "c1", "D")],
+            {"snap_date": "d", "cust_id": "c", "prod_name": "p"})
+        result = compute_prediction_quality(
+            self._with_a_query_group_without_a_positive(spark),
+            _no_segments(params), params)
+        summary = result["overall"]["summary"]
+        assert (summary["n"], summary["n_pos"]) == (5, 3)
+        assert summary["roc_auc"] == pytest.approx(2 / 3)
+        block = self._scope_block(result)
+        assert (block["n_rows_in_scope"], block["n_scope_rows_not_scored"]) \
+            == (5, 2)
+
+    def test_an_unscoped_run_records_no_scope(self, spark):
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._parameters()
+        result = compute_prediction_quality(
+            self._with_a_query_group_without_a_positive(spark),
+            _no_segments(params), params)
+        assert self._scope_block(result) is None
+
+    def test_the_kept_zero_positive_groups_are_judged_on_all_their_rows(
+            self, spark):
+        """Under --post-training the page counts the kept zero-positive
+        groups behind the weighted rows. c2·C is a negative, but c2 holds a
+        positive (on B), weighs 1 and is no such group: the count is 0, not
+        the 1 the scoped rows alone would say."""
+        from recsys_tfb.evaluation.result_readers import (
+            POPULATION_ZERO_POSITIVE_GROUPS_KEY,
+            PREDICTION_QUALITY_POPULATION_KEY,
+        )
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._scoped(
+            spark, self._post_training(model_ratio=0.5), "pq_scope_c2c",
+            [("2025-01-31", "c2", "C"), ("2025-01-31", "c3", "B")],
+            {"snap_date": "d", "cust_id": "c", "prod_name": "p"})
+        result = compute_prediction_quality(
+            self._weighted(spark, params, 2.0), _no_segments(params), params)
+        # c3·B weighs 2.
+        assert result["overall"]["summary"]["n"] == 3
+        assert result[PREDICTION_QUALITY_POPULATION_KEY][
+            POPULATION_ZERO_POSITIVE_GROUPS_KEY] == 1
+        self._scoped(spark, params, "pq_scope_c2c_only",
+                     [("2025-01-31", "c2", "C")],
+                     {"snap_date": "d", "cust_id": "c", "prod_name": "p"})
+        result = compute_prediction_quality(
+            self._weighted(spark, params, 2.0), _no_segments(params), params)
+        assert result[PREDICTION_QUALITY_POPULATION_KEY][
+            POPULATION_ZERO_POSITIVE_GROUPS_KEY] == 0
+
+    def test_a_missing_table_or_column_is_refused_before_any_row(self, spark):
+        """A67, before anything is computed: the message names the scope and
+        the column."""
+        from recsys_tfb.core.consistency import ConfigConsistencyError
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._scoped(
+            spark, self._parameters(), "pq_scope_cols",
+            [("2025-01-31", "c1")], {"snap_date": "d", "cust_id": "c"})
+        frame = self._with_a_query_group_without_a_positive(spark)
+        params["evaluation"]["scope"]["columns"]["cust_id"] = "customer"
+        with pytest.raises(ConfigConsistencyError,
+                           match=r"A67: scope 'pq_scope_cols'.*'customer'"):
+            compute_prediction_quality(frame, _no_segments(params), params)
+        params["evaluation"]["scope"]["table"] = "no_such_scope_table"
+        with pytest.raises(ConfigConsistencyError,
+                           match="'no_such_scope_table' does not exist"):
+            compute_prediction_quality(frame, _no_segments(params), params)
+
+    def test_an_evaluated_date_the_scope_holds_no_row_for_is_refused(
+            self, spark):
+        """A scope month written in another date format, or not written,
+        would drop that month's rows from every number without a word."""
+        from recsys_tfb.core.consistency import DataConsistencyError
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._scoped(
+            spark, self._parameters(), "pq_scope_month",
+            [("20250131", "c1")], {"snap_date": "d", "cust_id": "c"})
+        with pytest.raises(DataConsistencyError,
+                           match=r"scope 'pq_scope_month'.*2025-01-31"):
+            compute_prediction_quality(
+                self._with_a_query_group_without_a_positive(spark),
+                _no_segments(params), params)
+
+    def test_a_scope_selecting_no_scored_row_is_refused(self, spark):
+        from recsys_tfb.core.consistency import DataConsistencyError
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._scoped(
+            spark, self._parameters(), "pq_scope_none",
+            [("2025-01-31", "c1", "a")],
+            {"snap_date": "d", "cust_id": "c", "prod_name": "p"})
+        with pytest.raises(DataConsistencyError,
+                           match=r"scope 'pq_scope_none' selects no"):
+            compute_prediction_quality(
+                self._with_a_query_group_without_a_positive(spark),
+                _no_segments(params), params)
 
     def test_monitoring_mode_counts_rows(self, spark):
         """Monitoring reads inference output, which no dataset draw touched."""

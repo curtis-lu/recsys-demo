@@ -533,7 +533,7 @@ def _run_evaluation_command(monkeypatch, tmp_path, evaluation_extra):
     m.evaluation(
         env="local", model_version=None, post_training=False,
         compare=None, compare_only=None, prediction_quality=False,
-        rebuild_dates=None,
+        scope=None, rebuild_dates=None,
         from_node=None, only_node=None, dry_run=False, list_nodes=False,
     )
     return bool(reached)
@@ -671,3 +671,17 @@ def test_a13_is_handed_the_prediction_quality_flag():
     src = inspect.getsource(m.evaluation)
     assert ("evaluation_mode_flag_errors(\n        compare, compare_only, "
             "prediction_quality=prediction_quality)") in src
+
+
+def test_a65_a66_wired_into_evaluation_command_before_spark():
+    # Both read the conf and the flags alone: a malformed scope or a mistyped
+    # --scope must not cost a Spark cold start. A65 stays off the aggregator
+    # for A34's reason (only evaluation reads evaluation.scopes).
+    from recsys_tfb.core import consistency
+
+    assert "scope_well_formed_errors" not in inspect.getsource(
+        consistency.validate_config_consistency)
+    src = inspect.getsource(m.evaluation)
+    spark = src.index("get_or_create_spark_session(")
+    assert src.index("scope_well_formed_errors(params)") < spark
+    assert src.index("scope_flag_errors(") < spark

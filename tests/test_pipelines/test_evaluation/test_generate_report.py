@@ -525,6 +525,27 @@ def test_the_prediction_quality_page_refuses_a_result_of_other_settings():
     assert "segment_columns" not in msg
 
 
+def test_the_prediction_quality_page_refuses_a_scope_redefined_since():
+    """The directory carries the scope's name, not what it selects: a scope
+    pointed at another table since must not redraw the old numbers under its
+    name. The run without --scope has no scope on either side."""
+    computed_with = _params(False)
+    computed_with["evaluation"]["scope"] = {
+        "table": "mkt.campaign_a", "columns": {"snap_date": "d", "cust_id": "c"}}
+    now = copy.deepcopy(computed_with)
+    now["evaluation"]["scope"]["table"] = "mkt.campaign_a_v2"
+    landed = {"config_fingerprint": fingerprint(
+        computed_with, "compute_prediction_quality")}
+
+    with pytest.raises(ValueError) as exc:
+        _prediction_quality_report_node(now).func(
+            prediction_quality_metrics=landed, parameters=now)
+    msg = str(exc.value)
+    assert ("evaluation.scope.table: 'mkt.campaign_a' -> "
+            "'mkt.campaign_a_v2'") in msg
+    assert "--from-node compute_prediction_quality," in msg
+
+
 def test_the_prediction_quality_page_refuses_a_json_without_fingerprint():
     params = _params(False)
     with pytest.raises(ValueError) as exc:

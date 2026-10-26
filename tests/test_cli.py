@@ -684,7 +684,7 @@ class TestEvaluationCLIFlags:
             evaluation(
                 env="local", model_version=None, post_training=flag,
                 compare=None, compare_only=None, prediction_quality=False,
-                rebuild_dates=None,
+                scope=None, rebuild_dates=None,
                 from_node=None, only_node=None, dry_run=False,
                 list_nodes=False,
             )
@@ -5426,3 +5426,96 @@ class TestCacheSourceTablesAreTrainingsAlone:
         ]
         assert params, "the parameters dataset was not seen"
         assert all("_cache_source_tables" not in p for p in params)
+
+
+class TestPredictionQualityScope:
+    """ADR-0032 decision 7 at the command: ``--scope <name>`` narrows the
+    ``--prediction-quality`` rows to an ``evaluation.scopes`` entry and lands
+    under the name; the checks that need no Spark refuse before it."""
+
+    _SCOPES = {
+        "campaign_a": {"table": "mkt.campaign_a", "columns": {
+            "snap_date": "as_of_date", "cust_id": "customer_id"}},
+        "campaign_b": {"table": "mkt.campaign_b", "columns": {
+            "snap_date": "d", "cust_id": "c", "prod_name": "p"}},
+    }
+
+    @classmethod
+    def _invoke(cls, tmp_path, flags, scopes=None):
+        """Returns the result and, if the pipeline was reached, what it was
+        handed: the parameters, the runtime ones, and the two output paths as this run's
+        catalog resolves them."""
+        from recsys_tfb.__main__ import _resolve_catalog
+
+        ran = []
+
+        def execute(name, kwargs, runtime_params, config, params, *a, **kw):
+            _, catalog = _resolve_catalog(config, params, runtime_params)
+            ran.append({
+                "params": params, "runtime_params": runtime_params,
+                "paths": [catalog[n]["filepath"] for n in (
+                    "prediction_quality_metrics", "prediction_quality_report")],
+            })
+            return False
+
+        result, _ = _run_evaluation_command(
+            tmp_path, ["evaluation", "--model-version", _EVAL_MV, *flags],
+            landed=("2026-01-31",),
+            evaluation_extra={
+                "scopes": cls._SCOPES if scopes is None else scopes},
+            catalog_extra=("prediction_quality_metrics",
+                           "prediction_quality_report"),
+            extra_patches=(patch("recsys_tfb.__main__._execute_pipeline",
+                                 execute),))
+        return result, ran
+
+    def test_two_scopes_land_apart_and_apart_from_the_unscoped_run(
+            self, tmp_path):
+        paths = {}
+        for i, flags in enumerate(([], ["--scope", "campaign_a"],
+                                   ["--scope", "campaign_b"])):
+            result, ran = self._invoke(
+                tmp_path / str(i), ["--prediction-quality", *flags])
+            assert result.exit_code == 0, result.output
+            paths[tuple(flags)] = ran[0]["paths"]
+        assert paths[()][0].endswith(
+            "/prediction_quality/monitoring/all/prediction_quality.json")
+        assert paths[("--scope", "campaign_a")] == [
+            p.replace("/all/", "/campaign_a/") for p in paths[()]]
+        assert paths[("--scope", "campaign_b")] == [
+            p.replace("/all/", "/campaign_b/") for p in paths[()]]
+
+    def test_the_named_scope_reaches_the_nodes(self, tmp_path):
+        result, ran = self._invoke(
+            tmp_path, ["--prediction-quality", "--scope", "campaign_b"])
+        assert result.exit_code == 0, result.output
+        params = ran[0]["params"]
+        assert params["evaluation"]["scope"] == self._SCOPES["campaign_b"]
+        assert ran[0]["runtime_params"]["prediction_quality_scope"] \
+            == "campaign_b"
+
+    def test_without_scope_no_scope_reaches_the_nodes(self, tmp_path):
+        result, ran = self._invoke(tmp_path, ["--prediction-quality"])
+        assert result.exit_code == 0, result.output
+        assert "scope" not in ran[0]["params"]["evaluation"]
+        assert ran[0]["runtime_params"]["prediction_quality_scope"] == "all"
+
+    @pytest.mark.parametrize("flags, needle", [
+        (["--scope", "campaign_a"], "A66: --scope 'campaign_a' narrows only"),
+        (["--prediction-quality", "--scope", "campaign_c"],
+         "A66: --scope 'campaign_c' is not in evaluation.scopes"),
+    ])
+    def test_a_scope_flag_it_cannot_take_is_refused_before_spark(
+            self, tmp_path, flags, needle):
+        result, ran = self._invoke(tmp_path, flags)
+        assert result.exit_code != 0
+        assert needle in result.output + str(result.exception)
+        assert ran == []
+
+    def test_a_malformed_scope_is_refused_before_spark(self, tmp_path):
+        result, ran = self._invoke(
+            tmp_path, ["--prediction-quality"],
+            scopes={"all": self._SCOPES["campaign_a"]})
+        assert result.exit_code == 1
+        assert "A65: evaluation.scopes['all']" in result.output
+        assert ran == []

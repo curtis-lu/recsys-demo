@@ -118,6 +118,7 @@ python -m recsys_tfb <指令> --env dev
   - `evaluation.baseline.score` 有寫的話必須是 `count` 或 `rate`；`evaluation.baseline` 底下只能有 `lookback_months`、`score` 兩個鍵（`A50`）。唯一的讀法（`evaluation/baselines.py::baseline_score`）遇到不認得的值或鍵名不會報錯，只會悄悄維持正例數。
   - `evaluation.item_categories.column` 有寫的話：不能和 `evaluation.item_categories.mapping` 同時寫（`mapping: null` 算沒寫，env 覆蓋層可以用它關掉 base 的 mapping）、必須是欄名字串；`enabled` 打開時，`evaluation.item_categories.unmapped` 有寫的話只能是 `singleton`，而且只能配 `--post-training`（`A51`）。大類從 `sample_pool` 那一欄讀，監控模式的母體是 `inference_population`，沒有這一欄；只下 `--compare-only`、沒加 `--post-training` 也算監控模式。
   - `--compare` 和 `--compare-only` 只能給一個；給的名稱必須是 `evaluation.compare_sources` 裡的鍵（`A12`、`A13`）。
+  - `evaluation.scopes` 的每個範圍要有 `table` 與 `columns`；`columns` 要寫 time 與 entity 的每一欄，item 可寫可不寫，左邊都是解析出的欄名；不能有別的鍵；名字只能用英數、`_`、`-`，不能叫 `all`（`A65`）。`--scope` 只能跟 `--prediction-quality` 一起用，名字必須是 `evaluation.scopes` 裡的鍵（`A66`）。
   - `--rebuild-dates` 只在正例率基準線接上時能用：`evaluation.baseline.score: rate`、`report.sections.popularity_baseline` 開著、帶 `--post-training`、不是 `--compare-only`。每個日期要寫成 `YYYY-MM-DD`，而且要落在某個評估日期的回看窗 `[S - lookback_months, S)` 裡（`A21`）。
 - **dataset、training、inference**
   - `--rebuild-dates` 的每個日期要寫成 `YYYY-MM-DD`，而且要在設定的月份清單裡：dataset 和 training 對照 `dataset.test_snap_dates`，inference 對照 `inference.snap_dates`（`A21`）。
@@ -200,6 +201,7 @@ dataset 有兩個**資料閘**：專門檢查、本身不改資料的步驟，�
   - **label 重複**：`label_table` 在這個月，同一組 time、entity、item 不能有兩列。不擋的話，join 之後候選會被複製成多列，名次全錯。
   - **沿用上一輪的結果**：`enriched_eval_predictions`、指標這些已經落地的東西，必須是用現在「會影響計算」的那組設定算的。不是就擋，訊息會告訴你從哪一步重跑。
   - **分群**：`evaluation.segment_sources.<名稱>` 的表必須讀得到，而且有宣告的欄。
+  - **範圍（`--prediction-quality --scope`）**：範圍表必須存在，`columns` 右邊的欄都要在表裡（`A67`，訊息點名範圍與欄）；每個評估月份都要有列；範圍至少要圈到一列評估資料。都在開始算之前查。
   - **baseline**：報表有開 baseline 時，`label_table` 在 `evaluation.baseline.lookback_months` 那段期間必須有資料。
   - **item 大類**：`evaluation.item_categories.enabled` 打開時，`evaluation.item_categories.mapping` 用到的 item 必須在 item 清單裡（清單從資料數時，是被評估模型前處理器的清單；前處理器檔不在就擋，訊息說要先補回再從 `prepare_eval_data` 重跑），`evaluation.item_categories.unmapped` 只能是 `singleton`。寫 `evaluation.item_categories.column`（取自候選的某一欄）時：`sample_pool` 必須有這一欄；同一個 item 在評估月份裡（同月或跨月）不能對到兩個不同的非 NULL 值（`B18`）——對照表只用 item 連接，不擋的話它的預測會被算進兩個大類。改了這一欄之後，從 `prepare_eval_data` 之後接續會被擋，訊息指示 `--from-node prepare_eval_data`。
   - **舊格式**：讀到舊格式的 `evaluation_results.json`，訊息會說要跑哪個遷移腳本。

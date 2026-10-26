@@ -61,3 +61,33 @@ def test_the_ranking_metrics_population_is_said_apart(spark):
     assert "只算有正例的組" in off and "不是全正的組" not in off
     assert ("只算有正例、而且不是全正的組（evaluation.query_filter."
             "drop_all_positive_groups 開著）") in on
+
+
+def _scoped(spark, columns):
+    """The monitoring payload as a run under ``--scope campaign_a`` lands
+    it."""
+    results, parameters = landed.results(spark)
+    results["prediction_quality_metrics"]["population"]["scope"] = {
+        "name": "campaign_a", "table": "mkt.campaign_a", "columns": columns,
+        "n_rows_in_scope": 1234, "n_scope_rows_not_scored": 56}
+    return results, parameters
+
+
+def test_a_scope_is_named_with_its_rows_and_the_ones_not_scored(spark):
+    """ADR-0032 decision 7: the page opens with the scope's name, the rows
+    it kept and its rows no evaluated row carries."""
+    text = _text(population.build(*_scoped(
+        spark, {"snap_date": "d", "cust_id": "c", "prod_name": "p"})))
+    assert "campaign_a" in text and "mkt.campaign_a" in text
+    assert "1,234 列" in text and "56 列沒被評分" in text
+    assert "entity × item" in text
+
+
+def test_an_entity_scope_says_it_keeps_every_item(spark):
+    text = _text(population.build(*_scoped(
+        spark, {"snap_date": "d", "cust_id": "c"})))
+    assert "只限 entity" in text and "entity × item" not in text
+
+
+def test_the_unscoped_page_says_nothing_of_a_scope(spark):
+    assert "範圍" not in _text(_draw(spark))

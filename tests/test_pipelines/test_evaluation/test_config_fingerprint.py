@@ -44,9 +44,10 @@ SPEC_APPLIED = {
         "evaluation.query_filter",
     },
     "compute_prediction_quality": {
-        # The evaluated model's r, as the CLI hands it on.
+        # The evaluated model's r and the --scope, as the CLI hands them on.
         "schema", "post_training", DATASET_TEST_RATIO_KEY,
         "evaluation.snap_date", "evaluation.prediction_quality",
+        "evaluation.scope",
     },
     "compute_report_aggregates": {
         "schema", "evaluation.snap_date", "evaluation.report.diagnostics",

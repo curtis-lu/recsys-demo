@@ -230,10 +230,11 @@ def _population(p: dict, facts: dict) -> dict:
     if not p.get("post_training"):
         return {"source": "monitoring", "evaluated_dates": dates,
                 "test_zero_positive_group_ratio": None,
-                "n_zero_positive_groups": None}
+                "n_zero_positive_groups": None, "scope": None}
     return {"source": "post_training", "evaluated_dates": dates,
             "test_zero_positive_group_ratio": p.get(DATASET_TEST_RATIO_KEY),
-            "n_zero_positive_groups": facts["n_excluded_queries"]}
+            "n_zero_positive_groups": facts["n_excluded_queries"],
+            "scope": None}
 
 
 def empty_quality(spark) -> dict:
@@ -255,4 +256,4 @@ def empty_quality(spark) -> dict:
         weight_col=None, n_bins=20, n_display_bins=5, top_n=3),
         "population": {"source": "monitoring", "evaluated_dates": [],
                        "test_zero_positive_group_ratio": None,
-                       "n_zero_positive_groups": None}}
+                       "n_zero_positive_groups": None, "scope": None}}

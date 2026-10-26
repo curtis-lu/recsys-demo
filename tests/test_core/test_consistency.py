@@ -5445,3 +5445,154 @@ class TestOnDiskEntryPathA56:
         assert "'predict_manifest_on_disk'" in err
         assert "'predict_manifest'" in err
         assert "preprocessor" not in err
+
+
+def _scope_params(scopes, *, entity=("cust_id",)):
+    """A deployment whose roles resolve to ``snap_date``, ``entity`` and
+    ``prod_name``, with ``evaluation.scopes`` as given."""
+    return {
+        "schema": {"columns": {
+            "time": "snap_date", "entity": list(entity), "item": "prod_name",
+            "label": "label", "score": "score", "rank": "rank"}},
+        "evaluation": {"scopes": scopes},
+    }
+
+
+class TestScopeWellFormedA65:
+    """A65 — ``evaluation.scopes`` (ADR-0032 decision 7): each scope names a
+    table and maps the resolved time and entity columns, and optionally the
+    item column, to the table's columns. The name is a directory."""
+
+    @staticmethod
+    def _errors(scopes, **kwargs):
+        from recsys_tfb.core.consistency import scope_well_formed_errors
+
+        return scope_well_formed_errors(_scope_params(scopes, **kwargs))
+
+    _ENTITY_ONLY = {"table": "mkt.campaign_a",
+                    "columns": {"snap_date": "as_of_date",
+                                "cust_id": "customer_id"}}
+
+    def test_entity_only_and_entity_by_item_are_both_accepted(self):
+        by_item = {"table": "mkt.campaign_b", "columns": {
+            **self._ENTITY_ONLY["columns"], "prod_name": "product"}}
+        assert self._errors({"a": self._ENTITY_ONLY, "b": by_item}) == []
+
+    def test_no_scopes_is_fine(self):
+        from recsys_tfb.core.consistency import scope_well_formed_errors
+
+        params = _scope_params({})
+        del params["evaluation"]["scopes"]
+        assert scope_well_formed_errors(params) == []
+        assert self._errors(None) == []
+
+    def test_a_scope_must_map_the_time_and_every_entity_column(self):
+        errs = self._errors(
+            {"a": {"table": "t", "columns": {"cust_id": "c"}}},
+            entity=("branch_id", "cust_id"))
+        assert len(errs) == 1
+        assert errs[0].startswith("A65:")
+        assert "'a'" in errs[0]
+        assert "['branch_id', 'snap_date']" in errs[0]
+
+    def test_a_key_that_is_no_resolved_column_is_refused(self):
+        errs = self._errors({"a": {"table": "t", "columns": {
+            **self._ENTITY_ONLY["columns"], "product": "product"}}})
+        assert len(errs) == 1 and "'product'" in errs[0]
+        # The keys it may use are named.
+        assert "prod_name" in errs[0]
+
+    @pytest.mark.parametrize("entry, needle", [
+        ("mkt.t", "must be a mapping"),
+        ({"columns": {"snap_date": "d", "cust_id": "c"}}, "'table'"),
+        ({"table": "", "columns": {"snap_date": "d", "cust_id": "c"}},
+         "'table'"),
+        ({"table": "t", "columns": ["snap_date", "cust_id"]}, "'columns'"),
+        ({"table": "t", "columns": {"snap_date": "", "cust_id": "c"}},
+         "'snap_date'"),
+        ({"table": "t", "columns": {"snap_date": "d", "cust_id": "c"},
+          "prod_mapping": {}}, "'prod_mapping'"),
+    ])
+    def test_a_malformed_entry_is_refused(self, entry, needle):
+        errs = self._errors({"a": entry})
+        assert len(errs) == 1 and errs[0].startswith("A65:"), errs
+        assert needle in errs[0]
+
+    @pytest.mark.parametrize("name", ["all", "a/b", "", "..", 3])
+    def test_a_name_that_is_not_a_directory_of_its_own_is_refused(self, name):
+        # "all" is where the run without --scope lands.
+        errs = self._errors({name: self._ENTITY_ONLY})
+        assert len(errs) == 1 and errs[0].startswith("A65:"), errs
+        assert repr(name) in errs[0]
+
+    def test_scopes_must_be_a_mapping(self):
+        errs = self._errors([self._ENTITY_ONLY])
+        assert len(errs) == 1 and "evaluation.scopes" in errs[0]
+
+
+class TestScopeFlagA66:
+    """A66 — ``--scope`` names a registered scope, and only with
+    ``--prediction-quality`` (ADR-0032 decision 7)."""
+
+    @staticmethod
+    def _errors(scope, *, prediction_quality=True):
+        from recsys_tfb.core.consistency import scope_flag_errors
+
+        params = _scope_params({"campaign_a": {}, "campaign_b": {}})
+        return scope_flag_errors(
+            params, scope, prediction_quality=prediction_quality)
+
+    def test_a_registered_scope_with_the_mode_is_accepted(self):
+        assert self._errors("campaign_a") == []
+
+    def test_no_scope_is_always_fine(self):
+        assert self._errors(None) == []
+        assert self._errors(None, prediction_quality=False) == []
+
+    def test_an_unregistered_name_is_refused_naming_the_registered_ones(self):
+        errs = self._errors("campaign_c")
+        assert len(errs) == 1 and errs[0].startswith("A66:")
+        assert "'campaign_c'" in errs[0]
+        assert "['campaign_a', 'campaign_b']" in errs[0]
+
+    def test_without_the_mode_it_is_refused(self):
+        errs = self._errors("campaign_a", prediction_quality=False)
+        assert len(errs) == 1 and errs[0].startswith("A66:")
+        assert "--prediction-quality" in errs[0]
+
+
+class TestScopeTableA67:
+    """A67 — the scope's table exists and holds every column ``columns``
+    names, checked before anything is computed; the message names the scope,
+    and the column."""
+
+    _SCOPE = {"table": "mkt.campaign_a", "columns": {
+        "snap_date": "as_of_date", "cust_id": "customer_id",
+        "prod_name": "product"}}
+
+    @staticmethod
+    def _errors(table_columns, scope=None):
+        from recsys_tfb.core.consistency import scope_table_errors
+
+        return scope_table_errors(
+            "campaign_a", scope or TestScopeTableA67._SCOPE, table_columns)
+
+    def test_a_table_holding_every_column_is_accepted(self):
+        assert self._errors(["as_of_date", "customer_id", "product", "x"]) == []
+
+    def test_column_names_compare_as_spark_resolves_them(self):
+        # Spark resolves column names case-insensitively, the metastore
+        # lowercases them.
+        assert self._errors(["AS_OF_DATE", "customer_id", "Product"]) == []
+
+    def test_a_missing_table_is_refused_naming_the_scope_and_table(self):
+        errs = self._errors(None)
+        assert len(errs) == 1 and errs[0].startswith("A67:")
+        assert "'campaign_a'" in errs[0] and "'mkt.campaign_a'" in errs[0]
+
+    def test_a_missing_column_is_refused_naming_it_and_its_role_column(self):
+        errs = self._errors(["as_of_date", "customer_id"])
+        assert len(errs) == 1 and errs[0].startswith("A67:")
+        assert "'campaign_a'" in errs[0]
+        assert "'product'" in errs[0] and "'prod_name'" in errs[0]
+        assert "'customer_id'" not in errs[0]

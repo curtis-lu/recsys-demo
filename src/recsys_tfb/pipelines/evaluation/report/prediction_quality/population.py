@@ -6,17 +6,24 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from recsys_tfb.core.schema import get_schema
 from recsys_tfb.pipelines.evaluation.report.shell import ReportSection
 from recsys_tfb.pipelines.evaluation.report.sections.shared import (
     ALL_POSITIVE_SWITCH,
     kept_ratio_phrase,
 )
 from recsys_tfb.evaluation.result_readers import (
+    POPULATION_SCOPE_KEY,
     POPULATION_SOURCE_KEY,
     POPULATION_TEST_RATIO_KEY,
     POPULATION_ZERO_POSITIVE_GROUPS_KEY,
     POST_TRAINING_POPULATION,
     PREDICTION_QUALITY_POPULATION_KEY,
+    SCOPE_COLUMNS_KEY,
+    SCOPE_NAME_KEY,
+    SCOPE_NOT_SCORED_KEY,
+    SCOPE_ROWS_KEY,
+    SCOPE_TABLE_KEY,
     drop_all_positive_groups,
 )
 from recsys_tfb.report.types import Note, Paragraph
@@ -71,6 +78,21 @@ def _source(population: Mapping, weight_col: str | None) -> str:
     return text + "每列權重 1，數字是 test 母體上的精確值。"
 
 
+def _scope(scope: Mapping, parameters: dict) -> str:
+    """Which keys the ``--scope`` names, the rows they kept and the ones no
+    evaluated row carries (ADR-0032 decision 7)."""
+    if get_schema(parameters)["item"] in scope[SCOPE_COLUMNS_KEY]:
+        keys = "列出的 entity × item"
+    else:
+        keys = "列出的 entity（只限 entity：它們的每個候選 item 都算）"
+    return (
+        f"範圍：只在 {scope[SCOPE_NAME_KEY]}（{scope[SCOPE_TABLE_KEY]}）"
+        f"{keys}上算，圈到 {scope[SCOPE_ROWS_KEY]:,} 列。範圍在評估日期有 "
+        f"{scope[SCOPE_NOT_SCORED_KEY]:,} 列沒被評分（那個 entity 或 item "
+        "不在這份 enriched_eval_predictions 裡），不在這一頁的任何數字裡。"
+    )
+
+
 def _against_ranking(parameters: dict) -> str:
     """This page's rows against the main report's ranking metrics' (ADR-0024
     decision 7), without the totals."""
@@ -90,15 +112,18 @@ def build(
     results: Mapping[str, dict], parameters: dict
 ) -> ReportSection:
     """Read off the payload's population block
-    (``compute_prediction_quality``): which run mode's rows, and under
-    ``--post-training`` r and the zero-positive groups kept."""
+    (``compute_prediction_quality``): which run mode's rows, under
+    ``--post-training`` r and the zero-positive groups kept, and the
+    ``--scope``."""
     payload = results["prediction_quality_metrics"]
     population = payload[PREDICTION_QUALITY_POPULATION_KEY]
     weight_col = payload["columns"].get("weight")
+    scope = population[POPULATION_SCOPE_KEY]
     return ReportSection(
         title=TITLE, description="", title_en=TITLE_EN, question=QUESTION,
         key="population", blocks=[
             Paragraph(_source(population, weight_col)
                       + _against_ranking(parameters)),
+            *([Paragraph(_scope(scope, parameters))] if scope else []),
             Note(MATURITY_NOTE, warn=True),
         ])
