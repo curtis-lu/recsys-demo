@@ -457,6 +457,23 @@ def test_aggregate_per_segment_equal_customer_weight(spark):
             "map@3", "precision@3", "recall@3", "f1@3", "hit_rate@3"}
 
 
+def test_per_segment_lands_in_segment_order(spark):
+    """``macro_avg.by_segment`` sums over ``per_segment`` in key order, so the
+    keys must not follow the groupBy's collect order. Twelve segments, one
+    customer each, so a hash-partitioned collect is unlikely to come back
+    sorted by chance."""
+    segments = [f"seg_{i:02d}" for i in range(12)]
+    df = spark.createDataFrame(
+        [("20240331", f"C{i}", item, score, label, seg)
+         for i, seg in enumerate(reversed(segments))
+         for item, score, label in (("A", 0.9, 1), ("B", 0.1, 0))],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label", "seg"],
+    ).repartition(4)
+    result = _bundle(df, _make_parameters(k_values=[1], segment_columns=["seg"]),
+                     segment_columns=["seg"])
+    assert list(result["per_segment"]) == segments
+
+
 def test_aggregate_per_segment_non_string_keys_stringified(spark):
     """seg column with integer values still produces str dict keys."""
     enriched = _enriched(spark, k_values=[3]).withColumn(
@@ -654,20 +671,20 @@ def test_shared_numbers_per_item_and_segment_nest_two_levels(spark):
 
 def test_per_item_cells_come_out_in_item_order_whatever_the_collect_order():
     """A collect's row order follows the execution plan; the nested cells, and
-    the macro summed over them, must not. 0.1 + 0.2 + 0.3 differs from
-    0.3 + 0.2 + 0.1 in the last ulp, so a macro summed in collect order would
-    move with the plan."""
-    rows = [{"item": "c", "v": 0.3}, {"item": "a", "v": 0.1},
-            {"item": "b", "v": 0.2}]
+    the macro summed over them, must not. (0.1 + 0.2 + 0.3) / 3 is
+    0.20000000000000004 and (0.3 + 0.2 + 0.1) / 3 is 0.19999999999999998, so
+    a macro summed in collect order would move with the plan."""
+    rows = [{"item": "c", "v": 0.3}, {"item": "b", "v": 0.2},
+            {"item": "a", "v": 0.1}]
     orders = (rows, rows[::-1])
 
     def nest(order, dims):
         return ms._nest_by_dims(order, dims, lambda r: {"m": r["v"]})
 
     one_level = [nest(order, ["item"]) for order in orders]
+    assert [ms.macro_average(n)["m"] for n in one_level] == [
+        0.20000000000000004] * 2
     assert [list(n) for n in one_level] == [["a", "b", "c"]] * 2
-    macros = [ms.macro_average(n)["m"] for n in one_level]
-    assert macros[0] == macros[1] == (0.1 + 0.2 + 0.3) / 3
 
     # Two levels: the segments sort inside each item, the unmatched (NULL)
     # one by its key like any other.
@@ -677,8 +694,7 @@ def test_per_item_cells_come_out_in_item_order_whatever_the_collect_order():
     two_level = [nest(order, ["item", "seg"])
                  for order in (by_seg, by_seg[::-1])]
     assert [list(n) for n in two_level] == [["a", "b"]] * 2
-    assert list(two_level[0]["a"]) == list(two_level[1]["a"]) == sorted(
-        [ms.segment_key(None), "x"])
+    assert [list(n["a"]) for n in two_level] == [["(unmatched)", "x"]] * 2
 
 
 def test_macro_average_excludes_n_pos_from_output(spark=None):

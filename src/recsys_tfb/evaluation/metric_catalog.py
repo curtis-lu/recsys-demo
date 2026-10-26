@@ -73,9 +73,9 @@ ITEM_SHARED_NUMBERS_PER_K = ("n_top", "hits", "ap_sum")
 
 
 # Two formula shapes: :class:`Ratio`, one shared number over another, and
-# :class:`Expr`, arithmetic over them for a metric that is not a ratio (F1@K,
-# hit_rate@K). ``metrics_spark`` evaluates both, so an entry written in either
-# needs no change to the Spark code.
+# :class:`Expr`, arithmetic over them for a metric that is not a ratio. An
+# entry in either shape needs no Spark code of its own (``metrics_spark``
+# evaluates both).
 
 
 @dataclass(frozen=True)
@@ -122,15 +122,6 @@ class Expr:
 
     def __rtruediv__(self, other) -> Expr:
         return Expr("/", (_expr(other), self))
-
-    def __str__(self) -> str:
-        if self.op in ("shared", "constant"):
-            return str(self.args[0])
-        if self.op == "min":
-            return f"min({self.args[0]}, {self.args[1]})"
-        left, right = (f"({a})" if a.op in ("+", "*", "/") else str(a)
-                       for a in self.args)
-        return f"{left} {self.op} {right}"
 
 
 def _expr(value) -> Expr:

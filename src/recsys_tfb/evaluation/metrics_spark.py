@@ -63,7 +63,10 @@ Degenerate cases (documented, not pruned):
         ``recall@K``   collapses to ``1.0`` for every query (all positives
                        are necessarily ranked in top-all). Mean across
                        queries == 1.0.
-    Both are kept in the output for downstream tooling that iterates
+        ``hit_rate@K`` collapses to ``1.0`` likewise, and ``f1@K`` to
+                       ``2 · total_rel / (n_items + total_rel)``, a function
+                       of label density alone.
+    All are kept in the output for downstream tooling that iterates
     ``k_values``.
 
 All row-level work stays in Spark; only the final small per-dim dicts are
@@ -857,14 +860,14 @@ def compute_per_query_metrics(
         plus any column in ``carry_cols`` (taken via F.first within the query —
         valid for per-customer attributes constant within a query, e.g. segment).
 
-    Shared numbers, summed per query and K, that the formulas divide:
+    Shared numbers, summed per query and K, that the formulas combine:
         ap_sum@K     = sum(ap_contrib@K)
         hits@K       = sum(label * top_k@K)
     Each entry's formula (a ``metric_catalog.Ratio`` or ``Expr``) combines
     them, ``total_rel`` and ``K``.
 
-    See module docstring for the degenerate behaviour of precision@K and
-    recall@K when K >= n_items.
+    See module docstring for the degenerate behaviour of the metrics when
+    K >= n_items.
     """
     carry_cols = list(carry_cols or [])
 
@@ -905,8 +908,9 @@ def aggregate_overall(
 ) -> dict[str, float]:
     """Equal-query weight mean of per-query metrics.
 
-    Returns flat dict ``{map@K, precision@K, recall@K}`` for each K.
-    precision@K / recall@K at K >= n_items: see module docstring.
+    Returns a flat dict: every query-group entry of ``metric_catalog`` at
+    each K (``map@K``, ``precision@K``, …). The metrics at K >= n_items: see
+    module docstring.
     """
     metric_cols = _per_query_metric_cols(k_values)
     row = per_query.agg(*[F.mean(c).alias(c) for c in metric_cols]).collect()[0]
@@ -919,8 +923,10 @@ def aggregate_per_segment(
     """Equal-query weight mean of per-query metrics, grouped by ``seg_col``.
 
     ``per_query`` must carry ``seg_col`` (pass it via ``carry_cols`` when
-    building per_query). Returns ``{seg_value: {map@K, precision@K,
-    recall@K}}``; the seg_value is stringified when not already a string.
+    building per_query). Returns ``{seg_value: {metric@K: value}}``, the
+    metrics as :func:`aggregate_overall`'s; the seg_value is stringified when
+    not already a string. Keys come out sorted: ``macro_average`` sums
+    ``per_segment`` in key order (:func:`_nest_by_dims`).
     """
     metric_cols = _per_query_metric_cols(k_values)
     rows = (
@@ -928,10 +934,9 @@ def aggregate_per_segment(
         .agg(*[F.mean(c).alias(c) for c in metric_cols])
         .collect()
     )
-    out: dict[str, dict[str, float]] = {}
-    for r in rows:
-        out[segment_key(r[seg_col])] = {c: float(r[c]) for c in metric_cols}
-    return out
+    out = {segment_key(r[seg_col]): {c: float(r[c]) for c in metric_cols}
+           for r in rows}
+    return dict(sorted(out.items()))
 
 
 def _item_shared_number_aggs(
@@ -977,8 +982,9 @@ def _nest_by_dims(rows, dim_cols: list[str], cell_of) -> dict[str, dict]:
     earlier one. Dim values are stringified.
 
     Keys come out sorted, items first, then segments within an item: a
-    collect's row order follows the execution plan, and ``macro_average`` sums
-    in key order, so unsorted its last digit would move with the plan.
+    collect's row order follows the execution plan, and unsorted the last
+    digit of a macro over these cells would move with it (``macro_average``
+    sums in key order).
     """
     def keys(r) -> tuple[str, ...]:
         item = str(r[dim_cols[0]])
