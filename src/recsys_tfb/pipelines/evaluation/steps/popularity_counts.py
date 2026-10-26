@@ -1,10 +1,10 @@
-"""The popularity baseline's purchase counts as the report reads them (Spark;
-what reaches the driver is per item, or per item and month).
+"""The popularity baseline's purchase counts as the landed ``purchase_counts``
+and ``monthly_counts``, and the rate mode's period counts as its report numbers
+(``positive_rate_block``). Spark; what reaches the driver is per item, or per
+item and month.
 
 Which score ranks the baseline is decided in ``compute_baseline_metrics``; the
-counting itself is ``evaluation.baselines``'. This module turns those counts
-into the landed ``purchase_counts`` and ``monthly_counts``, and the rate
-mode's period counts into its report numbers (``positive_rate_block``).
+counting itself is ``evaluation.baselines``'.
 """
 
 from typing import Optional
@@ -54,7 +54,7 @@ def monthly_purchase_counts(
       evaluated date's window, sorted by date; ``None`` with one date.
 
     With several dates the counts are kept apart per window in one scan of
-    ``label_table``, so one collect gives both. The per-month average divides
+    ``label_table``. The per-month average divides
     by the sum of those, not by one window's lookback, because
     ``purchase_counts`` is summed over every window
     (``baselines.popularity_window``).

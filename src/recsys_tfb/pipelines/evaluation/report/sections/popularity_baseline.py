@@ -5,7 +5,7 @@ list (:data:`_COMPARED`), each K three columns: 這次, 對照, 差.
 
 Every number is read: the window and the popularity off the baseline's own
 result, the model's value, the baseline's and their difference off the
-comparison (``compare_to_baseline``, #536), the K of every table off the cut
+comparison (``compare_to_baseline``), the K of every table off the cut
 (``resolve_display_ks``: one list, ``compare_k``, decision 16 item 7). The
 one display division is 平均每月 (a landed count over the landed divisor).
 """
@@ -55,10 +55,8 @@ from recsys_tfb.report.types import (
     Table,
 )
 
-#: The results this section reads, by catalog name (ADR-0031 principle 1):
-#: the window facts off the baseline's own result, the model's value, the
-#: baseline's and their difference off the comparison (#536), and each
-#: table's K off the cut; the row facts for the item count.
+#: The results this section reads, by catalog name (ADR-0031 principle 1); the
+#: row facts are for the item count.
 READS = ("evaluation_row_facts", "baseline_metrics", BASELINE_COMPARISON,
          DISPLAY_KS)
 
@@ -66,23 +64,19 @@ READS = ("evaluation_row_facts", "baseline_metrics", BASELINE_COMPARISON,
 #: (ADR-0031 principle 3: off, the pipeline computes nothing only it reads).
 SWITCH = "popularity_baseline"
 
-#: The heading, its English and the question the section answers; the
-#: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
+#: The heading, its English and the question the section answers (ADR-0031
 #: decision 16).
 TITLE = "熱門度基準"
 TITLE_EN = "Popularity baseline"
 QUESTION = "比熱門度排序好多少？"
 
 #: What this section compares, one table each, in this order (ADR-0031
-#: decision 11, as decision 16 item 7 and the demo left it): ``map`` overall
-#: and per segment, ``precision`` and ``recall`` overall, ``map_attr`` and
-#: the per-item ``recall`` per item, the category grain's ``map`` overall.
-#: The grain names a table's rows: ``per_segment`` leads with the 整體 row
-#: and ``per_item`` with the Macro 平均 row, both pinned (decision 16 item
-#: 6); ``category`` is the category grain's 整體, drawn when the comparison
-#: has that grain. Every cell a table of the list draws must be in the
-#: comparison: a missing one raises (``_require_cell``), it is never left
-#: blank (decision 10, correction).
+#: decision 11, as decision 16 item 7 left it). The grain names a table's
+#: rows: ``per_segment`` leads with the 整體 row and ``per_item`` with the
+#: Macro 平均 row, both pinned (decision 16 item 6); ``category`` is drawn
+#: when the comparison has that grain. Every cell a table of the list draws
+#: must be in the comparison: a missing one raises (``_require_cell``), it is
+#: never left blank (decision 10, correction).
 _COMPARED = (
     CompareEntry("map", QUERY_GROUP, "per_segment"),
     CompareEntry("precision", QUERY_GROUP, "overall"),
@@ -92,10 +86,8 @@ _COMPARED = (
     CompareEntry("map", QUERY_GROUP, "category"),
 )
 
-#: The grain whose tables are drawn off the comparison's category grain.
 _CATEGORY = "category"
 
-#: Both sides of a compared cell.
 _BOTH = (THIS, REFERENCE)
 
 
@@ -106,7 +98,7 @@ def build(
     comparison = results[BASELINE_COMPARISON]
     facts = results["evaluation_row_facts"]
     window = baseline_metrics[POPULARITY_WINDOW_KEY]
-    # #397: rate mode (the node wrote a non-empty popularity_rate) ranks by
+    # Rate mode (the node wrote a non-empty popularity_rate) ranks by
     # sample_pool's positive rate; count mode by label_table's counts.
     rate = baseline_metrics.get("popularity_rate") or None
 
@@ -146,8 +138,7 @@ def build(
 def _grain_blocks(entries, comparison: dict, cut: dict, prefix: tuple,
                   n_items: int) -> tuple[list, bool]:
     """One grain's tables, in list order, then the lines under them: the ⚠
-    of each annotation the two sides differ on (the comparison demo's four
-    cases), and how many items the Macro averaged when that is fewer than all
+    of each annotation the two sides differ on, and how many items the Macro averaged when that is fewer than all
     (decision 16 item 5). Returns the blocks and whether a Macro row was
     drawn. ``prefix`` is the grain's path in the comparison and in the cut's
     block (``()``, or ``("category",)``)."""
@@ -230,10 +221,9 @@ def _require_cell(entry: CompareEntry, row: SliceRow, path: tuple,
 
     The list names every cell its tables draw, so a blank one is not "not
     computed" but a result that lacks what the list asks for (ADR-0031
-    decision 10, correction: not left blank once the list exists). The
-    values come from the metrics the comparison joined, so the advice is to
-    re-compute them, not to re-run the comparison alone, which would join
-    the same metrics again."""
+    decision 10, correction). The values come from the metrics the comparison
+    joined, so the advice is to re-compute them, not to re-run the comparison
+    alone, which would join the same metrics again."""
     key = compared_key(entry, k, all_k)
     cell = (row.values or {}).get(key)
     for side in sides:
@@ -259,16 +249,15 @@ def _require_cell(entry: CompareEntry, row: SliceRow, path: tuple,
 
 
 def _ranked(values: Mapping) -> list:
-    """The items by value, highest first (ties by name): the popularity's
-    own order, which the 名次 column numbers."""
+    """The items by value, highest first, ties by name."""
     return sorted(values, key=lambda item: (-values[item], str(item)))
 
 
 def _monthly_table(title: str, monthly: Mapping, order: list,
                    totals: Mapping) -> Table:
     """Items in ``order`` (then any only the monthly table has), months
-    ascending, then 合計: the landed total (``totals``), the same counts
-    summed over the months by the node. A month an item has no entry for
+    ascending, then 合計 from ``totals``, which the node summed over the
+    months. A month an item has no entry for
     held none of its rows: 0."""
     months = sorted({mo for per in monthly.values() for mo in per})
     items = order + sorted((i for i in monthly if i not in order), key=str)
@@ -281,8 +270,8 @@ def _monthly_table(title: str, monthly: Mapping, order: list,
 
 
 def _count_tables(baseline_metrics: Mapping, window: Mapping) -> list:
-    """Count mode: 購買次數 per item with 平均每月 (÷ the node's divisor,
-    ``popularity_window.per_month_divisor``) and 名次; then per month."""
+    """Count mode. 平均每月 divides by the node's divisor,
+    ``popularity_window.per_month_divisor``."""
     counts = baseline_metrics.get("purchase_counts") or {}
     monthly = baseline_metrics.get("monthly_counts") or {}
     divisor = window["per_month_divisor"]
@@ -304,9 +293,8 @@ def _count_tables(baseline_metrics: Mapping, window: Mapping) -> list:
 
 
 def _rate_tables(rate: Mapping) -> list:
-    """Rate mode (#397): the positive rate per item with its denominator
-    (the times it was a candidate) and numerator, and 名次; then the
-    positives per month."""
+    """Rate mode: the denominator is the times an item was a candidate, the
+    numerator its positives."""
     rates = rate.get("rate") or {}
     candidates = rate.get("candidates") or {}
     positives = rate.get("positives") or {}
@@ -329,9 +317,7 @@ def _rate_tables(rate: Mapping) -> list:
 
 def _description(window: Mapping, rate: Mapping | None) -> str:
     """The section's opening paragraph, from the window the node landed
-    (``baselines.popularity_window``): the lookback it used, whether it was
-    covered in full, and with several evaluated dates (#374) what the counts
-    sum over.
+    (``baselines.popularity_window``).
 
     The one judgement left here (ADR-0031 decision 10, correction): which
     sentence to print, by how many evaluated dates the window lists — the
@@ -377,7 +363,7 @@ def _description(window: Mapping, rate: Mapping | None) -> str:
                     + (f"；label_table 在這個視窗內實際只涵蓋 {covered} 個月，"
                        f"平均每月除以 {covered}。" if partial else "。"))
         if window["score"] == "rate":
-            # score: rate but no popularity_rate: monitoring (#397).
+            # score: rate but no popularity_rate: monitoring.
             text += (
                 "設定是 evaluation.baseline.score: rate，但監控模式評的是離線推論"
                 "的全網格（每個 entity × 全部 item，沒展示過的算負例），一列會不會"

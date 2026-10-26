@@ -1,11 +1,10 @@
 """What a segment value is reported under, and the name reserved for "no value".
 
-Stdlib only, on purpose. The metric layer (``evaluation/metrics_spark.py``) and
-the report's sections (``pipelines/evaluation/report/sections/``, which run no
-Spark) both key segments this way. ``pipelines/evaluation/steps/segments.py``, where the
-Spark joins live, is a ``steps/`` module, and modules outside that pipeline may
-not import one (architecture constraint S3), so the shared name cannot live
-there.
+Stdlib only, on purpose: the metric layer (``evaluation/metrics_spark.py``) and
+the report's sections, which run no Spark, both key segments this way.
+``pipelines/evaluation/steps/segments.py``, where the Spark joins live, is a
+``steps/`` module, and modules outside that pipeline may not import one
+(architecture constraint S3), so the shared name cannot live there.
 """
 
 #: The group a query lands in when its segment column exists but holds NULL

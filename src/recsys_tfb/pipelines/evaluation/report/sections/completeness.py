@@ -9,18 +9,15 @@ from recsys_tfb.pipelines.evaluation.report.shell import ReportSection
 from recsys_tfb.evaluation.result_readers import metric_params
 from recsys_tfb.report.types import Bullets, Column, Paragraph, Row, Table
 
-#: The results this section reads, by catalog name (ADR-0031 principle 1):
-#: the model's metrics, for the share of tied rows (#535) — the counts are
-#: 核心概念's (ADR-0031 decision 16 item 12).
+#: The results this section reads, by catalog name (ADR-0031 principle 1).
+#: The counts are 核心概念's (ADR-0031 decision 16 item 12).
 READS = ("evaluation_metrics",)
 
 #: No switch turns this section off (ADR-0031 principle 3:
 #: ``shared.sections_on``).
 SWITCH = None
 
-#: The heading, its English and the question the section answers; the
-#: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
-#: decision 16).
+#: The table of contents prints ``TITLE — QUESTION`` (ADR-0031 decision 16).
 TITLE = "完整性檢查"
 TITLE_EN = "Completeness checks"
 QUESTION = "這次量了什麼？什麼沒量到？"
@@ -37,7 +34,7 @@ _MEANINGS = {
 def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
     """完整性檢查（殿後）：設定表 ＋「什麼看似正常其實沒量到」。
 
-    presentation §一.4：交代邊界。只陳述事實，不評級。設定照讀者寫的印，
+    只陳述事實，不評級。設定照讀者寫的印，
     ``metric.*`` 照 ``result_readers.metric_params`` 解析後的值（沒寫的鍵是它的
     預設），跟計算讀的是同一份。
     """
@@ -66,11 +63,10 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
     ]
     # 同分列佔比：只有宣告了 event 的部署算得出來，也只有它需要看。這個數字
     # 是「名次由決勝規則決定、不是由分數決定」的列佔多少——決勝規則按 event
-    # 由小到大，event 是時間戳時等於早的曝光永遠排前面，而那個方向不是中性的
-    # （廣告示例實測約 0.02 mAP，#378）。框架不替使用者選，把數字印出來讓他
-    # 自己判斷這件事在他的資料上有多大。沒宣告時沒有這一則。數的是模型分數的
-    # 同分，所以在模型的指標結果裡，不在列的事實（#535）。只印佔比：列數是全
-    # 資料的計數，總量只在核心概念（決定 16 第 12 項）。
+    # 由小到大，event 是時間戳時等於早的曝光永遠排前面，而那個方向不是中性的。
+    # 框架不替使用者選，把數字印出來讓他自己判斷。沒宣告時沒有這一則。數的是
+    # 模型分數的同分，所以在模型的指標結果裡，不在列的事實。只印佔比：總量只在
+    # 核心概念（決定 16 第 12 項）。
     share = metrics.get("tied_row_share")
     if share is not None:
         bullets.append(

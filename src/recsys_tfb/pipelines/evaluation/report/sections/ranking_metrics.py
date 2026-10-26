@@ -1,23 +1,19 @@
 """排序指標 (ADR-0031 decision 16): the ranking metrics at each grain, one
 table per metric — rows are slices, columns the K.
 
-**The tables are the catalog's** (``metric_catalog``). Every per-K metric of
-the query-group method gets a table of the overall and each segment
-(``map@K · 整體與各分群``); every per-K metric of the item method a table of
-the Macro average and each item (``map_attr@K · 各 item``). Both at the item
-grain, and again at the category grain when the bundle has one. The lists are
-read off the catalog when the section is drawn (:func:`metrics_at_k`), so a
-metric added to the catalog gets its tables with no change here. A metric
-without a K (``mean_pos``) is not drawn here: ``rank_distribution`` shows it.
+**The tables are the catalog's** (``metric_catalog``), read off it when the
+section is drawn (:func:`metrics_at_k`), so a metric added to the catalog gets
+its tables with no change here. A metric without a K (``mean_pos``) is not
+drawn here: ``rank_distribution`` shows it.
 
 **The K** are the cut's (``evaluation_display_ks``' ``metrics_section``, each
 grain its own), resolved to integers (:func:`shown_ks`): the header writes
-``@6``, not ``@all``. The cut lands them; this section cuts nothing.
+``@6``, not ``@all``. This section cuts nothing.
 
-The totals (query groups, rows, positives) are not repeated here: they are in
-核心概念 (decision 16 item 12). The one count printed is the slice the Macro
-row averages, under an item table, when it is fewer than all the items
-(decision 16 item 5; ``population.macro_items``, landed by the metrics).
+The totals are not repeated here: they are in 核心概念 (decision 16 item 12).
+The one count printed is the slice the Macro row averages, under an item
+table, when it is fewer than all the items (decision 16 item 5;
+``population.macro_items``, landed by the metrics).
 """
 
 from __future__ import annotations
@@ -56,31 +52,25 @@ from recsys_tfb.evaluation.result_readers import (
 )
 from recsys_tfb.report.types import Heading, Note, Paragraph
 
-#: The results this section reads, by catalog name (ADR-0031 principle 1):
-#: the item counts off the row facts, the values off the metrics, each
-#: grain's K off the cut (#536).
+#: The results this section reads, by catalog name (ADR-0031 principle 1).
 READS = ("evaluation_row_facts", "evaluation_metrics", DISPLAY_KS)
 
 #: The ``evaluation.report.sections`` switch that turns this section off
 #: (ADR-0031 principle 3: off, the pipeline computes nothing only it reads).
 SWITCH = "ranking_metrics"
 
-#: The heading, its English and the question the section answers; the
-#: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
-#: decision 16).
+#: The table of contents prints ``TITLE — QUESTION`` (ADR-0031 decision 16).
 TITLE = "排序指標"
 TITLE_EN = "Ranking metrics"
 QUESTION = "模型在各粒度排得怎樣？"
 
-#: The label of the overall row of a query-group table.
 OVERALL_LABEL = "整體"
 
 
 @dataclass(frozen=True)
 class _Grain:
-    """What one grain's tables are called: its heading, what an item-method
-    table's rows are (items, or categories) and whether they are categories
-    (the line saying how many of them the Macro row averages,
+    """What one grain's tables are called, and whether their rows are
+    categories (the line saying how many of them the Macro row averages,
     ``metric_tables.macro_count_note``)."""
 
     heading: str
@@ -95,8 +85,8 @@ _CATEGORY_GRAIN = _Grain("大類粒度", "大類", "各大類", category=True)
 
 def shown_ks(landed: Sequence, all_k: int) -> list[int]:
     """The K of a landed list as the table header writes them: ``"all"``
-    resolved to ``all_k`` (``shared.k_to_lookup``), each K once — ``"all"``
-    and an integer equal to it are one column — in the landed order."""
+    resolved to ``all_k`` (``shared.k_to_lookup``), each K once (``"all"`` and
+    an integer equal to it are one column), in the landed order."""
     out: list[int] = []
     for k in landed:
         resolved = int(k_to_lookup(k, all_k))
@@ -106,11 +96,9 @@ def shown_ks(landed: Sequence, all_k: int) -> list[int]:
 
 
 def metrics_at_k(method: str) -> list[Metric]:
-    """The catalog's per-K metrics of ``method``, one table each, read when
-    the section is drawn: the one a model is selected by first
-    (``MODEL_SELECTION_METRICS``' sources — ``map``, ``map_attr``: the order
-    of decision 16's demo and of the comparison report), the rest in catalog
-    order."""
+    """The catalog's per-K metrics of ``method``, one table each: the one a
+    model is selected by first (``MODEL_SELECTION_METRICS``' sources, the order
+    of the comparison report), the rest in catalog order."""
     selected = {(m.source.name, m.source.method)
                 for m in MODEL_SELECTION_METRICS}
     return sorted((m for m in metrics_of(method) if m.per_k),
@@ -118,10 +106,9 @@ def metrics_at_k(method: str) -> list[Metric]:
 
 
 def _segment_rows(bundle: Mapping) -> list[SliceRow]:
-    """One row per segment of ``bundle["per_segment"]``, the unmatched group
-    last (``shared.unmatched_last``). ``per_segment`` slices by the first of
-    the bundle's segment columns; with more than one, the label names the
-    column (``segment seg_1``)."""
+    """The unmatched group last (``shared.unmatched_last``). ``per_segment``
+    slices by the first of the bundle's segment columns; with more than one,
+    the label names the column (``segment seg_1``)."""
     per_segment = unmatched_last(bundle.get("per_segment") or {})
     columns = (bundle.get(POPULATION_KEY) or {}).get(SEGMENT_COLUMNS_KEY) or []
     prefix = f"{columns[0]} " if len(columns) > 1 else ""
@@ -131,10 +118,9 @@ def _segment_rows(bundle: Mapping) -> list[SliceRow]:
 
 def _macro_notes(bundle: Mapping, n_items: int, grain: _Grain) -> list[Note]:
     """The line under an item table when the Macro row averages fewer than
-    all ``n_items`` (bug 5, ADR-0020; decision 16 item 5;
-    ``metric_tables.macro_count_note``): the count is the bundle's
-    ``population.macro_items`` (``result_readers.macro_item_count``), the
-    list the metrics averaged — not ``min_positives`` applied again."""
+    all ``n_items`` (bug 5, ADR-0020; decision 16 item 5): the count is the
+    bundle's ``population.macro_items`` (``result_readers.macro_item_count``),
+    the list the metrics averaged — not ``min_positives`` applied again."""
     note = macro_count_note(macro_item_count(bundle), n_items,
                             category=grain.category)
     return [note] if note else []
@@ -142,10 +128,8 @@ def _macro_notes(bundle: Mapping, n_items: int, grain: _Grain) -> list[Note]:
 
 def _grain_blocks(bundle: Mapping, ks: list[int], n_items: int, grain: _Grain,
                   *, with_definitions: bool) -> list:
-    """One grain: its heading, a table per query-group metric (整體 pinned,
-    then each segment), a table per item metric (Macro 平均 pinned, then
-    each item in name order). The definitions follow each group of tables at
-    the item grain only: the category grain's tables are the same metrics."""
+    """One grain's tables. The definitions follow each group of tables at the
+    item grain only: the category grain's tables are the same metrics."""
     blocks: list = [Heading(grain.heading)]
     segment_rows = _segment_rows(bundle)
     group_rows = [SliceRow(OVERALL_LABEL, bundle.get("overall") or {},
@@ -175,8 +159,6 @@ def _grain_blocks(bundle: Mapping, ks: list[int], n_items: int, grain: _Grain,
 
 
 def _description(ks: list[int], all_k: int) -> str:
-    """The section's lead: how to read a table, the two methods with their
-    metrics (from the catalog), and what the column at "all" means."""
     def names(method: str) -> str:
         return "、".join(m.display_name for m in metrics_at_k(method))
 
@@ -196,9 +178,8 @@ def _description(ks: list[int], all_k: int) -> str:
 def build(
     results: Mapping[str, dict], parameters: dict,
 ) -> ReportSection | None:
-    """排序指標: the description, then the item grain's tables and, with a
-    category grain, the category grain's — the same skeleton (decision 16
-    item 6)."""
+    """排序指標: the item grain's tables and, with a category grain, the
+    category grain's — the same skeleton (decision 16 item 6)."""
     facts = results["evaluation_row_facts"]
     metrics = results["evaluation_metrics"]
     display_ks = results[DISPLAY_KS]

@@ -26,9 +26,8 @@ from recsys_tfb.pipelines.evaluation.report.sections.shared import (
 from recsys_tfb.evaluation.result_readers import REFERENCE
 from recsys_tfb.report.types import Paragraph
 
-#: The results this section reads, by catalog name (ADR-0031 principle 1):
-#: the comparison, its K cut, and this side's row facts (the item count the
-#: macro line says "all" of).
+#: The results this section reads, by catalog name (ADR-0031 principle 1);
+#: this side's row facts give the item count the macro line says "all" of.
 READS = (SOURCE_COMPARISON, COMPARISON_DISPLAY_KS, COMPARE_ROW_FACTS_A)
 
 #: No switch turns this section off (ADR-0031 principle 3:
@@ -44,9 +43,7 @@ COMPARED: tuple[CompareEntry, ...] = (
     CompareEntry("recall", ITEM, "per_item"),
 )
 
-#: The heading, its English and the question the section answers; the
-#: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
-#: decision 16).
+#: The heading, its English and the question the section answers.
 TITLE = "各 item 指標"
 TITLE_EN = "Per item"
 QUESTION = f"各 item 的 {metric_names(COMPARED)}，兩邊各多少？"

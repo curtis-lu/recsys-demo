@@ -1,11 +1,9 @@
 """Every evaluation metric, one entry per name in one method (ADR-0031 decision 6).
 
-The one list of which metrics exist. The Spark metrics
-(``metrics_spark.compute_per_query_metrics`` / ``aggregate_per_item``), the
-main report's sections and the comparison report read it by name rather than
-each keeping a list of its own; a section that shows only some metrics names
-them here by entry (:func:`entry`), so a name it shows is one the computation
-produces.
+The one list of which metrics exist. Readers look metrics up by name rather
+than each keeping a list of its own; a section that shows only some metrics
+names them here by entry (:func:`entry`), so a name it shows is one the
+computation produces.
 
 **Data only.** No computation and no Spark object: a formula says which shared
 numbers it combines and how (:class:`Ratio`), and ``metrics_spark`` computes it
@@ -23,18 +21,12 @@ ones HPO selects a model by are marked here too
 (:data:`MODEL_SELECTION_METRICS`, with the ones not computed yet in
 :data:`MODEL_SELECTION_PENDING`), without importing the registry.
 
-**What a section shows** is a list of :class:`CompareEntry` in its own file —
-an entry and the grain it is read at, checked against this catalog when built.
-``display_name`` is the word a table title uses (``map@K · 整體與各分群``).
-
 **Not in it yet: the third method of decision 7**, the score read as a
 probability (the binned ``pr_auc`` / ``roc_auc`` of the prediction-quality
 section). Its shared numbers are the bin table of
-``evaluation/prediction_quality.aggregate_score_bins`` — per score bin, the rows
-and the positives, for every item in Spark (only the ``top_n`` items' reach the
-driver) — and ``prediction_quality`` computes the two areas from it by
-functions of its own. Its metrics join the catalog with a formula shape for
-an area under a bin table.
+``evaluation/prediction_quality.aggregate_score_bins``, and ``prediction_quality``
+computes the two areas from it by functions of its own. Its metrics join the
+catalog with a formula shape for an area under a bin table.
 """
 
 from __future__ import annotations
@@ -63,7 +55,7 @@ QUERY_GROUP_SHARED_NUMBERS: dict[str, str] = {
 #: reads it. A positive row is one labelled 1. The ones in
 #: :data:`ITEM_SHARED_NUMBERS_PER_K` exist once per K, as ``name@K``.
 #:
-#: The query groups without a positive are not counted (#534): ``--post-
+#: The query groups without a positive are not counted: ``--post-
 #: training`` evaluates the test split, which keeps none of them unless
 #: ``dataset.test_zero_positive_group_ratio`` is set, and then only a sample
 #: whose rows weigh ``1 / r``.
@@ -102,11 +94,11 @@ class Metric:
     """One metric: a name in one method.
 
     ``per_k`` metrics land as ``name@K`` for every K computed, the others as
-    ``name`` (:meth:`key`). ``grains`` lists where the bundle carries it;
-    ``population`` which rows it is computed on; ``display_name`` what a report
-    calls it (the word of a table title, ``map@K · 整體``); ``definition`` the
-    one sentence a report reader needs, printed in the definitions block
-    under the tables (the wording of ADR-0031 decision 16's approved demo).
+    ``name`` (:meth:`key`). ``population`` is which rows it is computed on;
+    ``display_name`` the word of a table title (``map@K · 整體``);
+    ``definition`` the one sentence a report reader needs, printed in the
+    definitions block under the tables (the wording of ADR-0031 decision 16's
+    approved demo).
     """
 
     name: str
@@ -247,9 +239,8 @@ def entry(name: str, method: str) -> Metric:
 
 @dataclass(frozen=True)
 class CompareEntry:
-    """One item of a section's list of metrics to show or compare (#537): a
-    catalog entry and the grain it is read at — ``CompareEntry("map",
-    QUERY_GROUP, "overall")``. The lists live in the section files, as
+    """One item of a section's list of metrics to show or compare: a catalog
+    entry and the grain it is read at. The lists live in the section files, as
     constants, not as settings.
 
     Checked when built: the catalog must hold ``(name, method)``
@@ -280,9 +271,8 @@ class ModelSelectionMetric:
     """A metric training's HPO can select a model by
     (``metric_registry.METRIC_NAMES``), marked on the catalog entry whose
     untruncated value it equals: ``source`` at K = all (the resolved
-    ``all_k``; ``name@all`` in a comparison). ``name`` is the registry's name,
-    ``display_name`` what both reports call it, ``definition`` the one
-    sentence under the model-selection table."""
+    ``all_k``; ``name@all`` in a comparison). ``name`` is the registry's
+    name."""
 
     name: str
     source: CompareEntry
@@ -317,9 +307,9 @@ MODEL_SELECTION_METRICS: tuple[ModelSelectionMetric, ...] = (
 
 #: The model-selection metrics HPO can select by but evaluation does not
 #: compute yet: the two binary-prediction ones, a Spark pass each
-#: (``metric_registry``'s ``POOLED_AP_PASS`` / ``PER_ITEM_AP_PASS``). Not in
-#: #537 (ADR-0031 decision 16, last item of the tickets it affects); until
-#: they are, the reports list only :data:`MODEL_SELECTION_METRICS`. Together
+#: (``metric_registry``'s ``POOLED_AP_PASS`` / ``PER_ITEM_AP_PASS``), left out
+#: on purpose (ADR-0031 decision 16); until they are in, the reports list
+#: only :data:`MODEL_SELECTION_METRICS`. Together
 #: the two lists name every ``metric_registry.METRIC_NAMES`` (a test checks
 #: it), so a metric added to the registry is placed in one of them.
 MODEL_SELECTION_PENDING: tuple[str, ...] = (

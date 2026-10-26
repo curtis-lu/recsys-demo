@@ -39,19 +39,14 @@ from recsys_tfb.report.types import (
     Table,
 )
 
-#: The results this section reads, by catalog name (ADR-0031 principle 1):
-#: the row facts for the totals and the all-positive warning, the metrics
-#: for what "all" resolved to and, with the all-positive switch on, how many
-#: query groups they scored.
+#: The results this section reads, by catalog name (ADR-0031 principle 1).
 READS = ("evaluation_row_facts", "evaluation_metrics")
 
 #: No switch turns this section off (ADR-0031 principle 3:
 #: ``shared.sections_on``).
 SWITCH = None
 
-#: The heading, its English and the question the section answers; the
-#: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
-#: decision 16).
+#: The table of contents prints ``TITLE — QUESTION`` (ADR-0031 decision 16).
 TITLE = "核心概念"
 TITLE_EN = "Concepts"
 QUESTION = "報表的數字從哪個量算出來？總量多少？"
@@ -64,9 +59,8 @@ _FORMULA = (
     "k < R 時 AP@k 追不到 1（頂多 k 個正例能進前 k、卻除以較大的 R）"
 )
 
-#: The two optional roles, in the words of the demo: what declaring each
-#: changes in the query group (decision 16 item 14). Only this section says
-#: it; no other section's tables change with them.
+#: What declaring each optional role changes in the query group (decision 16
+#: item 14). Only this section says it.
 _EVENT_NOTE = (
     "宣告了 event：同一個 query group 的同一個 item 可以有好幾列（例如好幾次"
     "曝光），每一列各自排出名次，所以「全部」是一個 query group 裡最多的候選"
@@ -78,23 +72,19 @@ _OCCASION_NOTE = (
     "照樣依 entity 的屬性切，不照 occasion 切。"
 )
 
-#: The label of the all-positive row, indented under the groups holding a
-#: positive (a full-width space, as the demo).
+#: Indented under the groups holding a positive (a full-width space).
 _ALL_POSITIVE_ROW = "　其中全正的"
 
 
 def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
     """核心概念（地基）：講清一次原子量，後面各段都是它換切法；再印全資料的總量。
 
-    presentation §一.2：定義 ＋ 用一個具體數字走一遍 ＋「下面每個數字＝它加總到
-    什麼粒度」。不在各段重複這條定義（會漂移）。總量只在這裡印（決定 16 第
-    12 項）：別段要用就寫「核心概念的總量」。
+    不在各段重複這條定義（會漂移）。總量只在這裡印（決定 16 第 12 項）：
+    別段要用就寫「核心概念的總量」。
 
-    角色名一律走 ``core.schema.get_schema``，不在這裡自備一份預設表。這一段
-    印的是讀者自己的欄名，第二份預設表只會在某一天跟 ``core/schema`` 的那份
-    分岔——而分岔的樣子是報表印著「``prod_name``」、其餘各段印著使用者真正的
-    欄名，兩邊都不報錯（#326）。``get_schema`` 也負責把 ``entity`` 正規化成
-    list，所以這裡不必再判斷型別。
+    角色名一律走 ``core.schema.get_schema``，不自備預設表：第二份會跟
+    ``core/schema`` 的那份分岔，報表印著「``prod_name``」、其餘各段印著使用者
+    真正的欄名，兩邊都不報錯。``get_schema`` 也把 ``entity`` 正規化成 list。
 
     The numbers in the text come from the landed results, never from the
     conf or a constant: "@N is all" is the metrics' recorded ``all_k``
@@ -113,9 +103,9 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
     drop = drop_all_positive_groups(parameters)
     refuse_pre_landed_role_totals(facts, schema)
 
-    # The query group, in the reader's own columns; with `occasion` declared
-    # it gains the occasion columns — without them the page's own definition
-    # would name a unit no metric on it is computed in (#428).
+    # With `occasion` declared the query group gains the occasion columns;
+    # without them the page's own definition would name a unit no metric on it
+    # is computed in.
     query_str = f"{time_col} × {entity_str}" + (
         f" × {'×'.join(occasion)}" if occasion else "")
     description = (
@@ -148,8 +138,6 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
 
 def _bullets(item_col: str, metrics: dict, category_facts: dict | None,
              event: bool, drop: bool) -> tuple[str, ...]:
-    """The worked example, the hand check, the grains, which groups each kind
-    of metric counts, and what "all" is this run."""
     grains = (
         "粒度：整體＝跨 query group 等權平均；各 item＝把 AP 歸因到正例所屬的 "
         f"{item_col}，再對 item 等權平均（Macro）；各分群＝依分群欄分組平均"
@@ -190,21 +178,16 @@ def _bullets(item_col: str, metrics: dict, category_facts: dict | None,
 
 def _totals_table(facts: dict, metrics: dict, time_col: str,
                   drop: bool, *, entity_str: str, item_col: str) -> Table:
-    """「總量」: the whole data's counts, read off the row facts as landed;
-    the all-positive warning of each grain under it.
+    """「總量」: the whole data's counts as landed, the all-positive warning of
+    each grain under it.
 
-    With the all-positive switch on, the all-positive rows say they were
-    left out, and one more row gives the groups the metrics scored — off the
-    metrics' own ledger (``shared.scored_with_positive``), not subtracted
-    here (#376, #536).
+    With the all-positive switch on, one more row gives the groups the metrics
+    scored, off the metrics' own ledger (``shared.scored_with_positive``), not
+    subtracted here.
 
-    With ``occasion`` declared, one more row counts the ``time × entity``
-    combinations; with ``event`` declared, one more counts the
-    ``(query group, item)`` combinations (decision 16 item 14). Both are read
-    off the overview's totals as landed
-    (``metrics_spark.compute_dataset_overview``), not counted here; a file
-    landed without them is refused before this runs
-    (``shared.refuse_pre_landed_role_totals``).
+    The ``occasion`` / ``event`` rows (decision 16 item 14) are read off the
+    overview's totals as landed, not counted here; a file landed without them
+    is refused before this runs (``shared.refuse_pre_landed_role_totals``).
     """
     totals = read_dataset_overview(facts).get("totals", {}) or {}
     excluded = "（已排除）" if drop else ""
@@ -237,8 +220,7 @@ def _totals_table(facts: dict, metrics: dict, time_col: str,
             "totals", {}) or {}).get("n_items")))
     rows += [
         (f"{time_col} 數", totals.get("n_snap_dates")),
-        # The value column is a count; this one cell is text, "@6" (decision
-        # 16 item 7: the header and this cell write the K with the @).
+        # The one text cell in a count column, "@6" (decision 16 item 7).
         ("全部＝@幾", Cell(f"@{resolved_all_k(metrics)}", kind="text")),
     ]
     return Table(
@@ -250,12 +232,9 @@ def _totals_table(facts: dict, metrics: dict, time_col: str,
 
 def _all_positive_warnings(facts: dict) -> list[Note]:
     """⚠ under the totals: one line for each grain whose landed
-    ``all_positive_warns`` is true.
-
-    Whether to warn is each grain's landed account
-    (``metrics.all_positive_accounts``, #536; the log reads the same), read
-    here, not recomputed. It states the numbers and the setting, not whether
-    the share is high, and names no other section (decision 16).
+    ``all_positive_warns`` is true, read here, not recomputed
+    (``metrics.all_positive_accounts``). It states the numbers and the setting,
+    not whether the share is high, and names no other section (decision 16).
     """
     out = []
     for grain, bundle in grain_bundles(facts):

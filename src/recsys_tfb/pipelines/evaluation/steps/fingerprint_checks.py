@@ -32,9 +32,8 @@ def require_prepared_with_current_config(
     Only that step's settings: a re-run starting after it never rewrites the
     file, so a later step's setting would leave it stale for good.
 
-    It does not vouch for the partitions: one date's partition is also written
-    by runs over other dates, whose JSON lands in another directory
-    (``restrict_to_current_eval_partitions`` checks each partition).
+    It does not vouch for the partitions
+    (``restrict_to_current_eval_partitions`` checks each).
 
     ``item_categories`` is ``None`` when its optional catalog entry finds no
     file; ``item_categories.landed_category_mapping`` refuses that in column
@@ -70,8 +69,7 @@ def require_row_facts_current(row_facts: dict, parameters: dict) -> None:
 #: the re-run, in both modes: the first node whose output is side B's numbers.
 #: Its inputs are memory-only frames, so its slice pulls back
 #: ``load_compare_predictions`` and ``restrict_to_common`` (rewriting the
-#: coverage) and, under ``--compare``, no Spark node of the main line
-#: (``test_pipeline.py::TestTheComparisonReRunsOnItsOwn``).
+#: coverage) and, under ``--compare``, no Spark node of the main line.
 COMPARISON_RERUN_NODE = "compute_compare_metrics"
 
 

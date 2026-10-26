@@ -1,9 +1,9 @@
 """The K each table of the two reports shows (ADR-0031 decision 10: the K cut
-is a computation, landed; #536). ``resolve_display_ks`` (the main report) and
+is a computation, landed). ``resolve_display_ks`` (the main report) and
 ``resolve_comparison_display_ks`` (the comparison report) decide which lists
 are cut and at what; this module holds the lists and the cut.
 
-Shape of what that node lands (the key constants are in
+Shape of what ``resolve_display_ks`` lands (the key constants are in
 ``evaluation.result_readers``)::
 
     {
@@ -28,7 +28,7 @@ the header writes the real K (``@6``) once (ADR-0031 decision 16 item 7).
 Shape of what ``resolve_comparison_display_ks`` lands, off the comparison of
 this run's side with the compared source (``source_comparison``) — the K
 columns of every per-K table of the comparison report (:func:`comparison_cut`;
-#537: one list for every table of a grain, ADR-0031 decision 16 item 7)::
+one list for every table of a grain, ADR-0031 decision 16 item 7)::
 
     {
       "all_k": int,                       # this run's side's "all"
@@ -39,12 +39,11 @@ columns of every per-K table of the comparison report (:func:`comparison_cut`;
     }
 
 The column at ``all_k`` reads each side's own "all" (``name@all``,
-``report/sections/metric_tables.metric_table``). No list of rows: since #537
-no table of that report prints every computed key.
+``report/sections/metric_tables.metric_table``). No list of rows: no table of
+that report prints every computed key.
 
 The cut itself is :func:`resolve_display_k` (bug 8, ADR-0020;
-:func:`_k_exceeds_all_k`). It lived beside the report sections until the
-comparison report stopped cutting K itself (#536).
+:func:`_k_exceeds_all_k`).
 """
 
 from __future__ import annotations
@@ -66,21 +65,20 @@ def resolve_display_k(raw_k: list, all_k: int) -> list:
     then resolves it to ``all_k`` for the headers, which write the real K
     (ADR-0031 decision 16 item 7).
 
-    ``all_k`` is the bundle's ``metrics.resolved_all_k``: the K its ``"all"``
+    ``all_k`` is the bundle's ``result_readers.resolved_all_k``: the K its ``"all"``
     values are stored at, which is the item count unless the frame held one
-    row per event (then the widest query group, #434).
+    row per event (then the widest query group).
 
-    Filters out any int K > all_k (bug 8, ADR-0020): with e.g. 3 product
-    categories, precision@K's denominator is K itself (not min(K, n_items)),
-    so @4/@5 declined purely because the denominator grew, not because the
-    model did anything different — those columns aren't wrong, they're
-    meaningless. The bound is the longest list, and that is ``all_k``: with
-    ``event`` rows a 30-row group gives @13 real rows to rank although there
-    are 12 items. This is a filter over the given list, not a regenerated
-    one: a caller list without "all" does not gain one, and "all" is always
-    kept. When ``all_k <= 0`` (unknown) skip the filter entirely, since
-    filtering by an unknown bound would collapse every table down to just
-    "@all".
+    Filters out any int K > all_k (bug 8, ADR-0020): precision@K's
+    denominator is K itself (not min(K, n_items)), so a K past the longest
+    list declines purely because the denominator grew, not because the model
+    did anything different: the columns are meaningless. The bound is
+    ``all_k``, not the item count: with ``event`` rows a group can hold more
+    rows than there are items. This is a filter over the given list, not a
+    regenerated one: a caller list without "all" does not gain one, and "all"
+    is always kept. When ``all_k <= 0`` (unknown) skip the filter entirely,
+    since filtering by an unknown bound would collapse every table down to
+    just "@all".
     """
     out = []
     for k in raw_k:
@@ -108,9 +106,7 @@ def k_columns(raw_k: list, all_k: int) -> list[int]:
 
     Integers, not the ``"all"`` label, because the header writes the real K
     (ADR-0031 decision 16 item 7: ``@6``, not ``@all``) and a list holding
-    both ``6`` and ``"all"`` would print the same column twice. A compared
-    table still reads its ``all_k`` column at ``name@all``
-    (``metric_tables.metric_table``), which pairs each side's own "all".
+    both ``6`` and ``"all"`` would print the same column twice.
     """
     return sorted({k if k != ALL_LABEL else all_k
                    for k in resolve_display_k(raw_k, all_k)})
@@ -135,11 +131,10 @@ def configured_k_values(parameters: dict) -> list:
 
 def configured_compare_k(parameters: dict) -> list:
     """``evaluation.report.display.compare_k``; not written, the K the run
-    computes (:func:`configured_k_values`). Not a list of its own: the old
-    default ``[1, 3, 5, "all"]`` asked for @1 and @3, which the default
-    ``k_values`` (``[5, "all"]``) never computes — two columns printed empty
-    in every table that shows ``compare_k``. A62 checks a written list
-    against ``k_values``; an unwritten one is ``k_values`` itself."""
+    computes (:func:`configured_k_values`). Not a list of its own: a K the run
+    never computes would print as an empty column in every table that shows
+    ``compare_k``. A62 checks a written list against ``k_values``; an
+    unwritten one is ``k_values`` itself."""
     display = _display(parameters)
     if "compare_k" in display:
         return display["compare_k"]
@@ -184,8 +179,7 @@ def comparison_cut(all_k: int, compare_k: list) -> dict:
     columns of every per-K table at a grain whose this run's side's ``"all"``
     is ``all_k`` — ``compare_k`` cut at ``all_k`` (:func:`resolve_display_k`),
     ``"all"`` written as ``all_k`` (a table header writes the real K,
-    ADR-0031 decision 16 item 7), ascending, each K once (``[1, 3, 5,
-    "all"]`` at 5 is ``[1, 3, 5]``).
+    ADR-0031 decision 16 item 7), ascending, each K once.
 
     Cut at this side's ``"all"`` only: the column at ``all_k`` reads the cell
     pairing each side's own ``"all"`` (``name@all``), so only the other

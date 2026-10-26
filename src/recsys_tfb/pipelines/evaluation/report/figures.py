@@ -4,12 +4,9 @@ All plotting functions consume the small pre-aggregated frames produced by
 ``steps.report_aggregates`` (bin counts, boxplot stats, rank matrices), so
 the rendered figures embed only aggregated values — never raw per-row arrays.
 
-``item_col`` is required rather than defaulted. It names a column of the
-caller's frame, so a default is a guess about the caller's data, and the guess
-that used to sit here was the example deployment's spelling — a caller who got
-it wrong got a ``KeyError`` naming their own column instead of the default that
-went looking for it. ``label_col`` keeps its default: that column is produced
-by this framework (#326).
+``item_col`` is required rather than defaulted: it names a column of the
+caller's frame, so a default is a guess about the caller's data. ``label_col``
+keeps its default: that column is produced by this framework.
 """
 
 import pandas as pd

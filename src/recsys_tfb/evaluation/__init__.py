@@ -1,1 +1,1 @@
-"""Model evaluation module — metrics, visualizations, baselines, reports, and comparison."""
+"""Model evaluation module — metrics and baselines."""

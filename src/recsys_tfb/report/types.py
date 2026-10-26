@@ -1,19 +1,13 @@
 """主報表與比較報表的段落型別 ``ReportSection``，與段落裡依序畫的內容塊。
 
-``ReportSection`` 從 ``evaluation.report`` 搬過來。這裡原本還有診斷頁用的
-``ScopeNote``（一項診斷的範圍說明）與 ``Page``（多頁輸出的一頁），#532 拿掉
-全部診斷頁時一起拿掉。
-
-**內容塊（#537）**：一段的內容是一串依序畫的塊（``ReportSection.blocks``）——
+**內容塊**：一段的內容是一串依序畫的塊（``ReportSection.blocks``）——
 :class:`Heading`、:class:`Paragraph`、:class:`Formula`、:class:`Bullets`、
 :class:`Figure`、:class:`Table`、:class:`Definitions`、:class:`Note`。畫法在
 ``report.pages``（``render_block``）。塊裡的字串一律是純文字：畫的時候全部
-跳脫（#366 第 1 項），所以不能夾 HTML 標籤。
+跳脫，所以不能夾 HTML 標籤。
 
-:class:`Table` 是新長相的表（ADR-0031 決定 16）：欄有種類（文字、計數、
-比例、差），種類決定數字格式；欄可以掛上層欄頭（比較表的 ``@K``）；列可以
-固定在最上面（整體、Macro 平均）；欄頭、列名、格子可以標 ⚠。表的形狀在
-建構時檢查，錯了就 raise，不等到畫的時候。
+:class:`Table`（ADR-0031 決定 16）的形狀在建構時檢查，錯了就 raise，不等到
+畫的時候。
 """
 from __future__ import annotations
 
@@ -27,15 +21,14 @@ import plotly.graph_objects as go
 class ReportSection:
     """A section in the evaluation report.
 
-    * ``title`` / ``description`` —— 段標題與說明（新長相的段 ``description``
+    * ``title`` / ``description`` —— 段標題與說明（``description``
       給 ``""``，說明用 ``blocks``）。
-    * ``title_en`` —— 段標題旁的英文小字（段檔的 ``TITLE_EN``）。
-    * ``question`` —— 這段回答什麼問題，一句（段檔的 ``QUESTION``）；目錄印在
-      段名後面。
-    * ``key`` —— 段檔的模組短名（例 ``"ranking_metrics"``）；HTML id 是
-      ``s-{key}``。**必填**：沒有 key 渲染時 raise。
+    * ``title_en`` —— 段標題旁的英文小字。
+    * ``question`` —— 這段回答什麼問題，一句。
+    * ``key`` —— 段檔的模組短名；HTML id 是 ``s-{key}``。**必填**：沒有 key
+      渲染時 raise。
     * ``blocks`` —— 依序畫的內容塊（本模組的 :class:`Heading` …
-      :class:`Note`）。全篇不收合，只有圖的資料表收起（:class:`Figure`）。
+      :class:`Note`）。
     """
 
     title: str
@@ -53,7 +46,7 @@ class ReportSection:
 
 @dataclass(frozen=True)
 class Heading:
-    """段裡的小標（``<h3>``），例：「item 粒度」「大類粒度」。"""
+    """段裡的小標（``<h3>``）。"""
 
     text: str
 
@@ -96,9 +89,8 @@ class Figure:
 
     ``data`` 是這張圖畫的數字（:class:`Table`）：畫在圖正下方，預設收起
     （``<details class="fig-data">``，收合列寫「數字表」），點開可以排序、
-    篩選、複製——圖方便看
-    分布，表方便複製。全篇只有它收起，一般表格不收合（擁有者 2026-10-24，
-    #537）。每張圖都要有，不是 :class:`Table` 就 raise。
+    篩選、複製。全篇只有它收起，一般表格不收合。每張圖都要有，不是
+    :class:`Table` 就 raise。
     """
 
     fig: go.Figure
@@ -113,8 +105,7 @@ class Figure:
 @dataclass(frozen=True)
 class Definitions:
     """定義區塊（``<dl class="defs">``）：一組 ``(名詞, 定義)``，放在那組表
-    下面。``source`` 是區塊左上角的出處小字；從指標目錄產生的用預設值
-    （``pipelines/evaluation/report/sections/metric_tables.definitions``）。"""
+    下面。``source`` 是區塊左上角的出處小字。"""
 
     entries: tuple[tuple[str, str], ...]
     source: str = "定義（從指標目錄來）"
@@ -143,9 +134,7 @@ class Note:
 # 表
 # ---------------------------------------------------------------------------
 
-#: 欄的種類，決定格子怎麼印（``report.pages.format_cell``）：
-#: ``text`` 原樣；``count`` 整數加千分位；``ratio`` 四位小數；``diff`` 帶正負號
-#: 四位小數（負號 U+2212「−」，零寫 ``0.0000``）。
+#: 欄的種類，決定格子怎麼印（``report.pages.format_cell``）。
 COLUMN_KINDS = ("text", "count", "ratio", "diff")
 
 
@@ -153,12 +142,12 @@ COLUMN_KINDS = ("text", "count", "ratio", "diff")
 class Column:
     """表的一欄（列名那一欄不算，它的欄頭是 :attr:`Table.row_header`）。
 
-    * ``label`` —— 下層欄頭（「@1」「這次」「候選列」）。
+    * ``label`` —— 下層欄頭。
     * ``kind`` —— :data:`COLUMN_KINDS` 之一。
-    * ``group`` —— 上層欄頭（比較表的「@1」）。同 ``group`` 而且相鄰的欄合成
+    * ``group`` —— 上層欄頭。同 ``group`` 而且相鄰的欄合成
       一格（colspan）。複製時欄頭攤成一格（``data-full="@1 這次"``）。
     * ``warn`` —— 欄頭標 ⚠。一個上層欄頭底下的欄**全部** ``warn`` 時，⚠ 標在
-      上層欄頭（比較表 ``@all`` 那組「@5⚠」），否則標在各自的下層欄頭。
+      上層欄頭，否則標在各自的下層欄頭。
     """
 
     label: str
@@ -176,11 +165,10 @@ class Column:
 @dataclass(frozen=True)
 class Cell:
     """要標 ⚠ 或換格式的格子：``Row.cells`` 裡放 ``Cell(值, warn=True)`` 取代
-    原始值。⚠ 不進 ``data-v``、不跟著複製。例：「能不能比」表的結果欄
-    ``Cell("不同", warn=True)`` 畫成「⚠ 不同」，複製出來是「不同」。
+    原始值。⚠ 不進 ``data-v``、不跟著複製。
 
     ``kind`` 給了就蓋過欄的種類（:data:`COLUMN_KINDS` 之一），只管這一格：
-    計數欄裡的一格要印字，例如總量表的 ``Cell("@6", kind="text")``。文字格
+    計數欄裡的一格要印字。文字格
     不寫 ``data-v``，複製取看得到的字。"""
 
     value: Any
@@ -200,7 +188,7 @@ class Row:
     * ``label`` —— 列名（畫在列首的 ``<th class="rl">``）。
     * ``cells`` —— 原始值，跟 :attr:`Table.columns` 一一對應；``None`` 是空格。
       要標 ⚠ 的格子用 :class:`Cell` 包起來。
-    * ``pinned`` —— 固定在最上面、不被篩掉也不被排序移走（整體、Macro 平均）。
+    * ``pinned`` —— 固定在最上面、不被篩掉也不被排序移走。
       固定的列必須排在其他列前面。
     * ``warn`` —— 列名標 ⚠。
     """
@@ -220,13 +208,13 @@ TALL_TABLE_ROWS = 15
 
 @dataclass(frozen=True)
 class Table:
-    """新長相的一張表（ADR-0031 決定 16）。
+    """一張表（ADR-0031 決定 16）。
 
-    * ``title`` —— 表名＝內容；列是切片時加「 · 列是什麼」
-      （``map@K · 整體與各分群``）。不放括號說明。
-    * ``row_header`` —— 列名那一欄的欄頭：「分群」「item」「指標」「項目」「期」。
+    * ``title`` —— 表名＝內容；列是切片時加「 · 列是什麼」。
+      不放括號說明。
+    * ``row_header`` —— 列名那一欄的欄頭。
     * ``columns`` / ``rows`` —— 見 :class:`Column`、:class:`Row`。
-    * ``notes`` —— 表下的行（:class:`Note`）：⚠ 說明、「參與 macro 的 item 數」。
+    * ``notes`` —— 表下的行（:class:`Note`）。
 
     建構時檢查：每列的格數等於欄數；固定的列排在最前面；有上層欄頭時，沒有
     上層欄頭的欄必須排在有的前面（表頭兩列，沒有上層的欄跨兩列；排在中間的

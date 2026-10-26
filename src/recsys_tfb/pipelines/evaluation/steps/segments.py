@@ -78,10 +78,8 @@ def join_segment_sources(
 ) -> SparkDataFrame:
     """Left-join each overridden segment column from its Hive table onto ``df``.
 
-    For each entry: read the Hive ``table``, check it has ``key_columns +
-    segment_column``, then :func:`join_segment_columns`. Fails loud on a
-    missing table or missing column: an override is explicit configuration,
-    unlike a population table that happens to lack a column.
+    Fails loud on a missing table or missing column: an override is explicit
+    configuration, unlike a population table that happens to lack a column.
     """
     spark = df.sparkSession
     for seg_name, source_config in segment_sources.items():

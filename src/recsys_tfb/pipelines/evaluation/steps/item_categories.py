@@ -1,4 +1,4 @@
-"""Item categories read off a sample_pool column (#379).
+"""Item categories read off a sample_pool column.
 
 ``evaluation.item_categories.column`` names the column; ``prepare_eval_data``
 reads it once and lands the table as ``evaluation_item_categories``. Which
@@ -45,7 +45,7 @@ def read_item_category_rows(
     string, the type the collapsed frame's item column takes.
 
     What reaches the driver is bounded by months × items × categories, not by
-    rows; the caller has already restricted ``population`` to the months.
+    rows.
     """
     time_col, item_col = schema["time"], schema["item"]
     frame = population.withColumn(
@@ -64,11 +64,9 @@ def category_of_each_item(rows: Iterable[tuple]) -> dict:
     no item has two non-NULL categories (B18, checked by the caller).
 
     A NULL category is ignored where another row of the item names one; an
-    item whose every row is NULL is its own category — what
-    ``unmapped: singleton`` does for an item a hand-written mapping leaves
-    out — spelled as text, like every category read off the column, so the
-    table holds one value type whatever the item column's type. A NULL item
-    is skipped: it joins nothing.
+    item whose every row is NULL is its own category (as ``unmapped:
+    singleton`` does), spelled as text so the table holds one value type
+    whatever the item column's type. A NULL item is skipped: it joins nothing.
     """
     named: dict = {}
     seen: set = set()

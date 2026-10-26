@@ -21,13 +21,11 @@ logger = logging.getLogger(__name__)
 def resolve_lookback_months(parameters: dict) -> int:
     """``evaluation.baseline.lookback_months``, defaulting to 12.
 
-    The single place this is read. Before this helper existed the node
-    (``compute_baseline_metrics``) and the report had drifted to two
-    different defaults (node: 12, report: ``None``), so a run using the
-    implicit default silently printed no lookback sentence at all while the
-    node had in fact used 12 months (bug 1, ADR-0020). Since #536 the report
-    does not read it at all: the node lands the value it used
-    (:func:`popularity_window`).
+    The single place this is read: a second reader with its own default lets
+    the node (``compute_baseline_metrics``) and the report disagree, and an
+    implicit default then prints no lookback sentence while the node used 12
+    months (bug 1, ADR-0020). The report does not read it; the node lands the
+    value it used (:func:`popularity_window`).
     """
     eval_params = parameters.get("evaluation", {}) or {}
     return int(
@@ -43,35 +41,34 @@ def popularity_window(
     lookback_months: int,
     score: str,
 ) -> dict:
-    """The lookback window as the report prints it (#536; the report used to
-    work this out itself, ADR-0031 principle 1). Landed by
-    ``compute_baseline_metrics`` as ``result_readers.POPULARITY_WINDOW_KEY``.
+    """The lookback window as the report prints it (ADR-0031 principle 1).
+    Landed by ``compute_baseline_metrics`` as
+    ``result_readers.POPULARITY_WINDOW_KEY``.
 
-    ``monthly`` is the ``{item: {month: count}}`` table the report prints —
-    label_table's ``monthly_counts``, or sample_pool's ``monthly_positives``
-    in rate mode; it holds only months with rows inside the window, so its
+    ``monthly`` is the ``{item: {month: count}}`` table the report prints
+    (label_table's ``monthly_counts``, or sample_pool's ``monthly_positives``
+    in rate mode); it holds only months with rows inside the window, so its
     distinct months are the coverage (``months_covered``).
     ``window_months_covered`` is each evaluated date's months with rows in
-    its own window, where the node counted them per window; ``None`` with one
-    evaluated date (``snap_dates``), whose window's months are ``monthly``'s.
+    its own window; ``None`` with one evaluated date (``snap_dates``), whose
+    window's months are ``monthly``'s.
 
     bug 1 (ADR-0020), partial window: a window with rows in only some of its
     lookback months raises nothing (``_lookback_window`` refuses only an
-    empty one), and dividing the per-month average by the full lookback
-    understated it. So ``window_partial`` is ``0 < months_covered <
-    lookback`` and ``per_month_divisor`` is the covered months when partial,
-    the lookback otherwise. With several windows (#374) the counts are summed
-    over all of them, so the divisor is the window-months behind that sum —
-    each window's covered months under the same partial rule — and the window
-    is partial when that falls short of ``full_window_months`` (windows ×
-    lookback). Distinct months of ``monthly`` cannot stand in for those:
-    overlapping windows share months, and a boundary month can hold rows for
-    one window and not the other.
+    empty one), and dividing by the full lookback understates the per-month
+    average. So ``window_partial`` is ``0 < months_covered < lookback`` and
+    ``per_month_divisor`` is the covered months when partial, the lookback
+    otherwise. With several windows the counts are summed over all of them,
+    so the divisor is the window-months behind that sum (each window's
+    covered months under the same partial rule) and the window is partial
+    when that falls short of ``full_window_months`` (windows × lookback).
+    Distinct months of ``monthly`` cannot stand in for those: overlapping
+    windows share months, and a boundary month can hold rows for one window
+    and not the other.
 
-    ``lookback_months`` and ``score`` (``evaluation.baseline.score`` as
-    configured — monitoring with ``rate`` still ranks by the count) are the
-    settings it was counted with, landed so the report reads them here and
-    not off ``parameters``.
+    ``lookback_months`` and ``score`` (as configured: monitoring with
+    ``rate`` still ranks by the count) are the settings it was counted with,
+    landed so the report does not read ``parameters``.
     """
     months_covered = len({mo for per in monthly.values() for mo in per})
     if window_months_covered is None:
@@ -103,10 +100,10 @@ def popularity_window(
 
 def _window_bounds(snap_date: str, lookback_months: int) -> tuple[str, str]:
     """``(lower, upper)`` of the ``[snap_date - lookback_months, snap_date)``
-    window, as ``YYYY-MM-DD``. Shared by every windowing path here so the
-    windows cannot drift apart; the rule itself is
-    ``core.date_ranges.lookback_window_bounds``, which the evaluation
-    command's ``--rebuild-dates`` check (A21) uses too."""
+    window, as ``YYYY-MM-DD``. Every windowing path here goes through it so the
+    windows cannot drift apart; the rule is
+    ``core.date_ranges.lookback_window_bounds``, which the ``--rebuild-dates``
+    check (A21) uses too."""
     return lookback_window_bounds(snap_date, lookback_months)
 
 
@@ -118,16 +115,14 @@ def _lookback_window(
 ) -> SparkDataFrame:
     """``label_table`` rows in ``[snap_date - lookback_months, snap_date)``.
 
-    ``ts`` is the caller's date-typed time expression. Shared by the total and
-    monthly count paths so their windowing stays identical.
+    ``ts`` is the caller's date-typed time expression.
 
-    Pre-check (input): the window must be non-empty. It used to fall back to
-    the full ``label_table`` when empty — which includes the evaluation
-    month's own answers, so the popularity baseline would then rank by the
-    ground truth it is supposed to be compared against, while the report
-    kept printing an unqualified "reranked by N months of history" sentence
-    (bug 1). The user ruled baseline is load-bearing information: raise
-    rather than degrade to that silently-leaky stub. Only
+    Pre-check (input): the window must be non-empty. Falling back to the full
+    ``label_table`` would include the evaluation month's own answers, so the
+    popularity baseline would rank by the ground truth it is compared
+    against while the report kept printing an unqualified "reranked by N
+    months of history" sentence (bug 1). Raise rather than degrade to that
+    silently-leaky stub. Only
     ``evaluation.report.sections.popularity_baseline: false`` skips this computation
     entirely (``compute_baseline_metrics`` returns before calling in here).
     Not a ``core/consistency.py`` gate: this is the baseline's own scoring
@@ -163,11 +158,9 @@ def compute_purchase_counts(
 ) -> SparkDataFrame:
     """Per ``(snap_date, prod_name)`` historical purchase count.
 
-    For each ``S`` in ``snap_dates``, count ``sum(label)`` grouped by item
-    over ``label_table`` rows whose time falls in
-    ``[S - lookback_months, S)``. Raises if a window is empty — see
-    ``_lookback_window``'s pre-check (bug 1, ADR-0020): it no longer falls
-    back to the full table.
+    For each ``S`` in ``snap_dates``, ``sum(label)`` by item over
+    ``label_table`` rows in ``[S - lookback_months, S)``. Raises if a window
+    is empty: ``_lookback_window``'s pre-check (bug 1, ADR-0020).
 
     Returns a DataFrame with columns ``(time_col, item_col, score_col)``
     where ``score_col`` holds the count and ``time_col`` is the string ``S``.
@@ -210,15 +203,13 @@ def compute_monthly_purchase_counts(
     """Per ``(calendar-month, prod_name)`` purchase count within the windows.
 
     Same windowing (and empty-window raise, bug 1) as
-    ``compute_purchase_counts``, but instead of collapsing each
-    ``[S - lookback_months, S)`` window into one
-    number it breaks the count down by the label row's calendar month
-    (``yyyy-MM``). Drives the report's monthly popularity trend.
+    ``compute_purchase_counts``, but broken down by the label row's calendar
+    month (``yyyy-MM``) instead of one number per window.
 
-    Months are unioned across ``snap_dates`` and summed by the caller — for a
-    single-snap eval this is exact; overlapping multi-snap windows double-count
-    shared months exactly as ``compute_purchase_counts`` does at the window
-    level, so a product's summed monthly counts still reconcile with its total.
+    Months are unioned across ``snap_dates`` and summed by the caller:
+    overlapping multi-snap windows double-count shared months exactly as
+    ``compute_purchase_counts`` does at the window level, so a product's
+    summed monthly counts still reconcile with its total.
 
     Returns a DataFrame with columns ``("month", item_col, score_col)`` where
     ``month`` is the ``yyyy-MM`` string and ``score_col`` holds the count.
@@ -261,18 +252,17 @@ def compute_monthly_purchase_counts_by_window(
 ) -> SparkDataFrame:
     """Per ``(window_date, calendar-month, item)`` purchase count, one scan.
 
-    For several evaluated dates (#374): the counts
-    :func:`compute_monthly_purchase_counts` gives, kept apart per window
-    (``window_date`` is the evaluated date the window ends at) instead of
-    summed. The caller needs both the per-month trend and how many months with
-    label rows each window had, and the months of one window cannot be told
-    from the summed ones: windows overlap, and a boundary month can hold rows
-    for one window and not the other.
+    The counts :func:`compute_monthly_purchase_counts` gives, kept apart per
+    window (``window_date`` is the evaluated date the window ends at) instead
+    of summed. The caller needs how many months with label rows each window
+    had, and the months of one window cannot be told from the summed ones:
+    windows overlap, and a boundary month can hold rows for one window and
+    not the other.
 
-    One scan of ``label_table``: it is filtered once to the span every window
-    falls in, then joined with the small table of window bounds (one row per
-    evaluated date, so the broadcast is bounded by config). A per-window
-    filter unioned together would read the table once per date.
+    One scan of ``label_table``: filtered once to the span every window falls
+    in, then joined with the small table of window bounds (one row per
+    evaluated date). A per-window filter unioned together would read the
+    table once per date.
 
     Same window rule as the other paths (:func:`_window_bounds`). It does not
     repeat the empty-window pre-check: a window with no label rows gives no
@@ -323,10 +313,8 @@ def build_baseline_frame(
 ) -> SparkDataFrame:
     """Replace ``eval_predictions``' model score with the popularity count.
 
-    Drops the model's ``score`` (and ``rank`` / ``model_version`` if present),
-    casts ``time_col`` to string for a type-safe join, then left-joins the
-    per-``(snap_date, prod_name)`` count as the new ``score``. Products with
-    no count get ``score = 0``.
+    ``time_col`` is cast to string for a type-safe join. Products with no
+    count get ``score = 0``.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -354,8 +342,8 @@ def build_baseline_frame(
 # window. The denominator is counted from sample_pool, whose rows are by
 # definition one candidate each (CONTEXT.md: 來源表, 候選), never from
 # label_table's row count: a label_table holding positives only makes every
-# rate 1, and the bank example's label_table keeps only entities with a
-# positive in the group, which ranks worse than random in the #397 simulation.
+# rate 1, and one that keeps only entities with a positive in the group ranks
+# worse than random.
 #
 # The counts are kept per time value in ``popularity_period_counts`` so a
 # period is joined once: they depend on sample_pool, label_table and the
@@ -368,8 +356,7 @@ def build_baseline_frame(
 # 0), where whether a row is positive depends on how often the item was
 # shown as much as on its rate once shown — which is what the positive count
 # measures. There a rate would weaken the baseline and inflate the model's
-# lead, so monitoring keeps the count (#397, 2026-09-23 correction of the
-# grilling's decision 5).
+# lead, so monitoring keeps the count (#397 decision 5).
 
 #: Column names of ``popularity_period_counts`` next to schema time and item.
 CANDIDATES_COL = "n_candidates"
@@ -380,8 +367,7 @@ def baseline_score(parameters: dict) -> str:
     """``evaluation.baseline.score``: ``"count"`` (absent) or ``"rate"``.
 
     The value domain is checked at the evaluation command's entry (A50); this
-    reader only supplies the default, so a missing key keeps the count mode
-    main has always had.
+    reader only supplies the default.
     """
     eval_params = parameters.get("evaluation", {}) or {}
     return (eval_params.get("baseline", {}) or {}).get("score") or "count"
@@ -393,9 +379,7 @@ def baseline_scores_by_rate(parameters: dict, *, post_training: bool) -> bool:
     Needs ``score: rate`` and ``--post-training`` (monitoring keeps the
     count, see above). Whether a baseline is computed at all is not asked
     here: the evaluation pipeline's requirement list answers it (ADR-0031
-    principle 3), and the CLI asks both before the pipeline shape, its plan
-    and ``--rebuild-dates`` read the answer, so they cannot disagree about
-    it.
+    principle 3).
     """
     return post_training and baseline_score(parameters) == "rate"
 
@@ -409,13 +393,11 @@ def list_candidate_periods(
     """The time values sample_pool holds inside any date's lookback window.
 
     These are the periods ``popularity_period_counts`` must hold for this run,
-    and the only ones the baseline sums (a landed period sample_pool no longer
-    holds is left out). Listed from the data because the time grain is the
-    deployment's (the ad example's is weekly) and sample_pool declares no
-    partitions to list. One Spark job: a distinct over the time column of the
-    rows inside the windows. With sample_pool partitioned by time it reads
-    those partitions' time column only; unpartitioned, it scans the whole
-    time column.
+    and the only ones the baseline sums. Listed from the data because the time
+    grain is the deployment's and sample_pool declares no partitions to list.
+    One Spark job: a distinct over the time column of the rows inside the
+    windows. With sample_pool partitioned by time it reads those partitions'
+    time column only; unpartitioned, it scans the whole time column.
     """
     time_col = get_schema(parameters)["time"]
     ts = F.to_date(F.col(time_col))
@@ -442,19 +424,17 @@ def compute_period_candidate_counts(
     ``periods`` are ``YYYY-MM-DD`` time values; only their rows are read. The
     candidate rows are sample_pool's identity columns; label_table attaches by
     identity with a LEFT JOIN, a missing label counting as 0 — the rule
-    ``prepare_eval_data`` uses. With ``event`` declared each row is still one
-    candidate (identity carries the event). ``n_positives`` is ``sum(label)``,
-    as the count mode and ``metrics_spark``'s ``n_positives`` are: with graded
-    labels it is a relevance sum and the rate a mean relevance per candidate.
+    ``prepare_eval_data`` uses. ``n_positives`` is ``sum(label)``, as the
+    count mode and ``metrics_spark``'s ``n_positives`` are: with graded labels
+    it is a relevance sum and the rate a mean relevance per candidate.
 
     Pre-check (input): label_table holds at most one row per identity in these
     periods. A duplicated key copies its candidate row in the join, inflating
-    numerator and denominator at once with nothing raising; same reasoning as
-    ``prepare_eval_data``'s check, which raises rather than deduplicates.
+    numerator and denominator at once with nothing raising; like
+    ``prepare_eval_data``'s check, it raises rather than deduplicates.
 
     Returns columns ``(time_col, item_col, n_candidates, n_positives)`` with
-    ``time_col`` the ``YYYY-MM-DD`` string. No periods, no rows (the filter
-    folds to false, so nothing is scanned).
+    ``time_col`` the ``YYYY-MM-DD`` string. No periods, no rows.
     """
     schema = get_schema(parameters)
     time_col = schema["time"]
@@ -497,9 +477,7 @@ def compute_period_candidate_counts(
 
 
 def _rate(positives, candidates):
-    """0 when there were no candidates, never null. Not reached from the
-    period counts (a row there is at least one candidate); an item with no
-    candidate row at all gets its 0 from ``build_baseline_frame``'s fill."""
+    """0 when there were no candidates, never null."""
     return F.when(candidates > 0, positives / candidates).otherwise(F.lit(0.0))
 
 
@@ -508,11 +486,11 @@ def restrict_to_periods(
 ) -> SparkDataFrame:
     """``popularity_period_counts`` rows of ``periods`` (``YYYY-MM-DD``).
 
-    The table keeps every period it ever counted under this source version;
-    this run sums only the ones sample_pool holds today (the plan's periods).
-    Without it a period dropped from sample_pool, or re-dated, would still be
-    summed into every window covering it, and ``--rebuild-dates`` could not
-    name it (A21 refuses a period sample_pool lacks).
+    The table keeps every period it ever counted; this run sums only the ones
+    sample_pool holds today. Without it a period dropped from sample_pool, or
+    re-dated, would still be summed into every window covering it, and
+    ``--rebuild-dates`` could not name it (A21 refuses a period sample_pool
+    lacks).
     """
     time_col = get_schema(parameters)["time"]
     return period_counts.filter(
@@ -527,8 +505,7 @@ def compute_positive_rates(
 ) -> SparkDataFrame:
     """Per ``(snap_date, item)`` positive rate over ``[S - lookback, S)``.
 
-    ``period_counts`` is ``popularity_period_counts`` read back whole. Same
-    output shape as :func:`compute_purchase_counts` so
+    Same output shape as :func:`compute_purchase_counts` so
     :func:`build_baseline_frame` takes either.
 
     Pre-check (input): each window holds candidate rows. Checked here on the
@@ -580,8 +557,8 @@ def compute_monthly_candidate_counts_by_window(
 
     The rate mode's counterpart of
     :func:`compute_monthly_purchase_counts_by_window`, read off the period
-    counts so the report's numerator, trend and coverage all come from the
-    same rows its rates do. Returns
+    counts so the report's numerator, trend and coverage come from the same
+    rows its rates do. Returns
     ``("window_date", "month", item_col, n_candidates, n_positives)``.
     """
     schema = get_schema(parameters)
@@ -618,11 +595,10 @@ def compute_monthly_candidate_counts_in_windows(
 ) -> SparkDataFrame:
     """Per ``(calendar month, item)`` over the periods any window covers.
 
-    Each period counts once, however many windows cover it. For the report's
-    composition table under several evaluated dates: summing each window's
-    counts instead would count an overlapping period once per window, so the
-    printed denominator — the reader's only cue that a rate rests on few
-    candidates — would grow with the number of dates. Returns
+    Each period counts once, however many windows cover it: summing each
+    window's counts instead would count an overlapping period once per
+    window, so the printed denominator — the reader's only cue that a rate
+    rests on few candidates — would grow with the number of dates. Returns
     ``("month", item_col, n_candidates, n_positives)``.
     """
     schema = get_schema(parameters)

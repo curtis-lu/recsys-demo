@@ -38,10 +38,8 @@ READS = (SOURCE_COMPARISON,)
 #: ``shared.sections_on``).
 SWITCH = None
 
-#: The heading, its English and the question the section answers; the
-#: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
-#: decision 16). Neither counts the metrics: the catalog lists two today,
-#: and the two binary-prediction ones join it later
+#: The heading, its English and the question the section answers. Neither
+#: counts the metrics: more join the catalog later
 #: (``MODEL_SELECTION_PENDING``).
 TITLE = "整體指標"
 TITLE_EN = "Overall"

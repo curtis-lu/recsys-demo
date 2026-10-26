@@ -21,17 +21,13 @@ READS = ("evaluation_metrics",)
 #: ``shared.sections_on``).
 SWITCH = None
 
-#: The heading, its English and the question the section answers; the
-#: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
-#: decision 16).
+#: The table of contents prints ``TITLE — QUESTION`` (ADR-0031 decision 16).
 TITLE = "概覽"
 TITLE_EN = "Overview"
 QUESTION = "模型選擇指標各是多少？"
 
-#: What the section says above its table. It does not count the metrics:
-#: the catalog lists two today (``MODEL_SELECTION_METRICS``), and the two
-#: binary-prediction ones join it later (``MODEL_SELECTION_PENDING``), when
-#: this sentence gains theirs.
+#: Does not count the metrics: the ones in ``MODEL_SELECTION_PENDING`` join
+#: ``MODEL_SELECTION_METRICS`` later, when this sentence gains theirs.
 DESCRIPTION = (
     "training 調參（HPO）與挑模型時能選的指標，並列、不分主次；它們都只看"
     "同一個 query group 裡的先後。"
@@ -45,14 +41,13 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
     value the metrics computed — ``map@{all_k}`` of ``overall`` and
     ``map_attr@{all_k}`` of ``macro_avg.by_item`` — read by
     ``metric_tables.model_selection_table``, so the report holds one number
-    per metric. The page's scale lives in 核心概念's totals; the table of
-    contents replaces the old navigation table.
+    per metric. The page's scale lives in 核心概念's totals.
     """
     metrics = results["evaluation_metrics"]
     blocks = [Paragraph(DESCRIPTION, muted=True), model_selection_table(metrics)]
     # No item reached the macro (e.g. metric.min_positives above every
     # item's positives): its row is blank, and a bare blank reads as "computed,
-    # came out empty". Say why, off the ledger's macro items (#536).
+    # came out empty". Say why, off the ledger's macro items.
     if macro_item_count(metrics) == 0:
         blocks += [Note(f"{m.display_name} 沒有值：進 Macro 平均的 item 是 0 個"
                         "（只算正例數達到 metric.min_positives 的 item）。")

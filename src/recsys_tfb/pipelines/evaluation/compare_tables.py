@@ -1,17 +1,15 @@
 """Which Hive table each ``model_version`` compare source reads on this run.
 
-This module sits at the package root rather than in ``steps/`` because its one
+This module sits at the package root rather than in ``steps/`` because its
 caller is **outside** this pipeline: the evaluation command in ``__main__.py``
-calls :func:`inject_compare_source_tables` before the run. That is the root vs
-``steps/`` criterion in ``docs/agents/pipeline-node-design.md`` rule 8, and it
-makes this the evaluation twin of ``pipelines/training/cache_sources.py``.
+(``docs/agents/pipeline-node-design.md`` rule 8).
 
 Why the command and not the node (rule 15: inject only what a node cannot see):
 the compare loader reads B's rows by table name, outside the catalog, because
 the catalog entry's ``partition_filter`` pins this run's ``model_version``, not
-B's. A node receives ``parameters``, never the catalog, so the table the catalog
-names is out of its sight. It cannot be rebuilt from the entry name either:
-``conf/dev/catalog.yaml`` prefixes every table the framework writes.
+B's. A node receives ``parameters``, never the catalog, and cannot rebuild the
+table from the entry name: ``conf/dev/catalog.yaml`` prefixes every table the
+framework writes.
 """
 
 from recsys_tfb.pipelines.evaluation.steps.compare_sources import (

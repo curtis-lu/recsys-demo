@@ -1,7 +1,5 @@
 """Which settings an evaluation JSON was computed with, and whether they still hold.
 
-Why this exists
-===============
 Slicing (``--only-node`` / ``--from-node``) stops at "the file exists", and an
 evaluation JSON's path only carries ``model_version`` and ``snap_date``. Change
 a setting, re-run only ``generate_report``, and a JSON computed under the old
@@ -32,20 +30,15 @@ A landed JSON's ``config_fingerprint`` is :func:`fingerprint`'s
   values that node applied — each input's own ``applied`` and ``inputs``,
   merged.
 
-So a changed setting makes stale exactly the results of the steps that apply
-it and of every step downstream of them, and a change to a setting only
-``compute_report_aggregates`` reads leaves ``metrics.json`` current.
-
 Not ``applied`` alone: a result carries numbers its inputs computed, and
 one that applies nothing (``baseline_comparison``) would otherwise pass after
-``k_values`` changed (ADR-0031 principle 5).
+``k_values`` changed.
 
 :func:`require_computed_with_current_config` compares the two parts
-separately and says which one moved (ADR-0031 decision 15, fourth row).
-``applied`` is always compared with today's settings. An ``inputs`` record is
-too, except one of a step not in ``run_nodes``: no re-run of this run could
-make it current (under ``--compare-only``, ``prepare_eval_data``'s; ADR-0031
-principle 5).
+separately and says which one moved. ``applied`` is always compared with
+today's settings. An ``inputs`` record is too, except one of a step not in
+``run_nodes``: no re-run of this run could make it current (under
+``--compare-only``, ``prepare_eval_data``'s).
 
 Where a stale result sends the re-run
 =====================================
@@ -59,39 +52,31 @@ the section switches, and under ``--compare`` with the main report's
 sections off the main K cut is not in it, so the comparison's cut is where a
 changed ``compare_k`` must go. A reader not given it falls back on
 :data:`APPLIED_SETTINGS` order, which is right only for main-line steps.
-``tests/test_pipelines/test_evaluation/test_pipeline.py::TestFingerprintRerunNodes``
-pins that the main-line part of that order is every run's, and that the
-advice exists and re-runs every applier in every mode, with every section
-switch on, off, and off alone.
 
 Settings outside ``evaluation`` and the ones left out
 =====================================================
 ``schema`` and ``dataset.test_zero_positive_group_ratio`` are declared like
-any other (ADR-0031 principle 5). ``hive.db`` and ``_compare_source_tables`` only decide
-which table a ``model_version`` compare source is read off, so they reach the
-comparison results through the source's identity
+any other. ``hive.db`` and ``_compare_source_tables`` only decide which table
+a ``model_version`` compare source is read off, so they reach the comparison
+results through the source's identity
 (``compare_sources.compare_source_identity``), not through a declaration.
-``evaluation.compare`` is left out on purpose: the CLI
-injects it per run, and the comparison results record their source under
-their own key instead (:func:`require_same_recorded_values`).
-``model_version`` and the run's dates are in every result's path.
+``evaluation.compare`` is left out on purpose: the CLI injects it per run, and
+the comparison results record their source under their own key instead
+(:func:`require_same_recorded_values`). ``model_version`` and the run's dates
+are in every result's path.
 
 Why the fingerprint lives inside the JSON, not in its path
 ==========================================================
-A hash in the path (``<mv>/<snap>/<hash>/...``) would retire stale files by
-itself, but every config change would grow another directory tree, and every
-directory reader (``--compare-only``, the manifest's artifact list) would
-have to learn to pick one. Inside the file, paths stay put and readers pay
-one check.
+A hash in the path would retire stale files by itself, but every config change
+would grow another directory tree, and every directory reader would have to
+learn to pick one. Inside the file, paths stay put and readers pay one check.
 
 Why stdlib only
 ===============
-The module itself imports nothing from the project;
-``tests/test_pipelines/test_evaluation/test_config_fingerprint.py`` pins that by
-scanning its imports. That does not make it Spark-free to import: it sits in
-``pipelines/evaluation/steps/``, so importing it runs the package's
-``__init__``, which loads ``pipeline.py`` and with it pyspark. S3 forbids a
-module outside this pipeline to import it.
+The module itself imports nothing from the project. That does not make it
+Spark-free to import: it sits in ``pipelines/evaluation/steps/``, so importing
+it runs the package's ``__init__``, which loads ``pipeline.py`` and with it
+pyspark. S3 forbids a module outside this pipeline to import it.
 
 What the fingerprint compares
 =============================
@@ -125,10 +110,9 @@ __all__ = [
 #: another part would change its result too.
 #:
 #: ``schema`` is declared whole by every step that resolves a column role
-#: (``core/schema.py::get_schema``), not role by role: a role change redefines
-#: the query groups, the ranks or the item list, and is rare enough that
-#: re-running from ``prepare_eval_data`` costs less than tracing which role
-#: each reader resolves, where one missed reader reopens the hole.
+#: (``core/schema.py::get_schema``), not role by role: a role change is rare and
+#: redefines the query groups, the ranks or the item list, and one reader missed
+#: in a role-by-role trace reopens the hole.
 APPLIED_SETTINGS: dict[str, tuple[str, ...]] = {
     # post_training is the --post-training / monitoring run mode, injected at
     # the top level by the CLI like model_version, not a YAML key. It is not
@@ -136,16 +120,14 @@ APPLIED_SETTINGS: dict[str, tuple[str, ...]] = {
     # and population table by it. Unlike model_version it is in no path, so
     # a monitoring redraw of a post-training directory must be refused here.
     #
-    # The category column is read here, its block's other keys are
-    # not: switching `enabled` on while `column` is already written sends the
-    # re-run to compute_row_facts, which then refuses the table landed empty
-    # and names this node — loud, never a wrong report.
+    # The category column is read here, its block's other keys are not:
+    # switching `enabled` on while `column` is already written is caught later
+    # by compute_row_facts, loudly.
     "prepare_eval_data": (
         "schema", "post_training", "evaluation.snap_date",
         "evaluation.segment_columns", "evaluation.segment_sources",
         "evaluation.item_categories.column",
     ),
-    # The category pass and the all-positive accounts.
     "compute_row_facts": (
         "schema", "evaluation.snap_date", "evaluation.item_categories",
         "evaluation.query_filter",
@@ -186,21 +168,17 @@ APPLIED_SETTINGS: dict[str, tuple[str, ...]] = {
 }
 
 #: The fingerprinted steps of the comparison chain in topological order, the
-#: only ones ``--compare-only`` runs: a declaration the tests use as that
-#: mode's run order; the readers skip a record by ``run_nodes``, not by this.
-#: That mode reads partitions an earlier run
-#: wrote, so the ``prepare_eval_data`` record its results inherit (through the
+#: only ones ``--compare-only`` runs; the readers skip a record by
+#: ``run_nodes``, not by this. That mode reads partitions an earlier run wrote,
+#: so the ``prepare_eval_data`` record its results inherit (through the
 #: directory's ``evaluation_segment_columns``) is compared with nothing: it is
 #: what the partitions were written under, and today's run mode and segment
-#: settings say nothing about them. Compared with today's settings, every
-#: partition a ``--post-training`` run wrote would be refused whenever the
-#: flag is left off. The price: after a standard run rewrites the directory
-#: under other settings, ``--compare-only --only-node
+#: settings say nothing about them. The price: after a standard run rewrites the
+#: directory under other settings, ``--compare-only --only-node
 #: generate_comparison_report`` draws the comparison computed before it, exit
-#: code 0 (``docs/pipelines/evaluation.md`` §9). And ``schema`` is in that
-#: record too, so a ``--compare-only`` run does not refuse partitions
-#: written under other roles; its own steps declare ``schema``, which only
-#: catches a role changed since they ran.
+#: code 0 (``docs/pipelines/evaluation.md`` §9). ``schema`` is in that record
+#: too, so partitions written under other roles are not refused; the chain's own
+#: steps declare ``schema``, which only catches a role changed since they ran.
 COMPARISON_CHAIN: tuple[str, ...] = (
     "restrict_to_common", "compute_compare_metrics", "compare_to_source",
     "resolve_comparison_display_ks",
@@ -212,14 +190,14 @@ COMPARISON_CHAIN: tuple[str, ...] = (
 #:
 #: Why ``evaluation.snap_date`` is left out: a partition holds one date, and
 #: its rows depend on the run mode, the column roles and the segment
-#: settings, not on which other dates the same run evaluated. Kept in, a single-date run of March and a
-#: January–March run with identical settings would refuse each other's March,
-#: though the rows are the same.
+#: settings, not on which other dates the same run evaluated. Kept in, two runs
+#: with identical settings and different date ranges would refuse each other's
+#: partitions.
 #:
-#: Why the category column is left out, for the same reason (#379): the
-#: column decides the category table, which lands in the run's directory,
-#: not a single value in the rows. Kept in, changing it would refuse every
-#: month's partition, including the months this run does not rewrite.
+#: Why the category column is left out: it decides the category table, which
+#: lands in the run's directory, not a value in the rows. Kept in, changing it
+#: would refuse every month's partition, including the months this run does not
+#: rewrite.
 _NOT_IN_THE_ROWS = ("evaluation.snap_date", "evaluation.item_categories.column")
 PARTITION_FINGERPRINT_KEYS: tuple[str, ...] = tuple(
     path for path in APPLIED_SETTINGS["prepare_eval_data"]
@@ -231,13 +209,11 @@ PARTITION_FINGERPRINT_KEYS: tuple[str, ...] = tuple(
 #: (these settings plus the segment columns that run actually joined).
 #:
 #: Why the partition carries it, and the ``evaluation_segment_columns`` JSON's
-#: fingerprint does not speak for the partition: that JSON sits in the
-#: run's directory (``<model_version>/<dates label>/``), and one date's
-#: partition is written by runs with different directories — March alone
-#: writes ``20260331/``, January–March writes ``20260131-20260331/``. After
-#: January–March (settings A), March alone (settings B), then a resume of
-#: January–March from ``compute_metrics`` (A), the range directory's JSON still
-#: says A while March holds B's rows. Only the rows can say who wrote them last.
+#: fingerprint does not speak for the partition: that JSON sits in the run's
+#: directory (``<model_version>/<dates label>/``), and one date's partition is
+#: written by runs with different directories, so a range directory's JSON can
+#: say settings A while one of its dates holds B's rows. Only the rows can say
+#: who wrote them last.
 PARTITION_FINGERPRINT_COLUMN = "eval_partition_fingerprint"
 
 _ABSENT = object()
@@ -250,8 +226,7 @@ class LoadedArtifact(NamedTuple):
     A plain positional tuple would let ``catalog_name`` and ``produced_by`` —
     both ``str`` — swap without a type error, silently corrupting the
     advice (``docs/operations/known-pitfalls.md`` §12 positional trap).
-    Construct this with keyword arguments; that makes such a swap visible at
-    the call site instead of a silent value error inside the message.
+    Construct this with keyword arguments.
     """
     catalog_name: str
     payload: Any
@@ -264,25 +239,17 @@ def _tag_non_str_keys(value: Any) -> Any:
     """Recursively rewrite dict keys so every key reaching ``json.dumps`` is a
     ``str``.
 
-    Why this is needed: YAML can produce non-``str`` dict keys (e.g.
-    ``dataset.sample_ratio_overrides: {1: 0.5}``), and two problems follow.
-    First, ``json.dumps(..., sort_keys=True)`` sorts by the *original* key
-    objects before stringifying them, so a dict mixing an ``int`` and a
-    ``str`` key raises ``TypeError`` (``'<' not supported between instances
-    of 'str' and 'int'``) — crashing the node on a legal config. Second, JSON
-    itself has no non-string keys, so ``json.dumps({1: 0.5})`` and
-    ``json.dumps({"1": 0.5})`` both serialise to ``{"1": 0.5}`` — identical
-    fingerprints for two configs that behave differently whenever a lookup
-    against the dict keys by one type and not the other.
+    YAML can produce non-``str`` dict keys (e.g.
+    ``dataset.sample_ratio_overrides: {1: 0.5}``). ``json.dumps(...,
+    sort_keys=True)`` sorts by the *original* key objects, so a dict mixing an
+    ``int`` and a ``str`` key raises ``TypeError`` on a legal config; and
+    ``json.dumps({1: 0.5})`` and ``json.dumps({"1": 0.5})`` serialise alike,
+    giving identical fingerprints to two configs that behave differently.
 
-    A ``str`` key is kept as-is so stored values stay readable for the
-    common case. A non-``str`` key ``k`` is rewritten to
-    ``f"<{type(k).__name__}>{k!r}"`` (e.g. ``int`` key ``1`` -> ``"<int>1"``):
-    the ``<...>`` tag cannot be produced by any plain ``str`` key on the same
-    dict without itself starting with a ``<type>`` prefix, which config keys
-    do not, so a real ``str`` key and a tagged non-``str`` key never collide
-    with each other. Lists/tuples recurse into elements so a non-``str`` key
-    nested inside one is caught too.
+    A ``str`` key is kept as-is. A non-``str`` key ``k`` is rewritten to
+    ``f"<{type(k).__name__}>{k!r}"`` (``int`` key ``1`` -> ``"<int>1"``); config
+    keys do not start with such a tag, so a real ``str`` key and a tagged
+    non-``str`` key never collide. Lists/tuples recurse into elements.
     """
     if isinstance(value, dict):
         return {
@@ -302,13 +269,10 @@ def fingerprint(
     ``inputs``, the landed JSON payloads it took (``None`` for an optional
     entry that was absent).
 
-    ``applied`` maps each path ``node`` declares in :data:`APPLIED_SETTINGS`
-    to its value now; ``inputs`` maps each upstream node to the ``applied``
-    it recorded, gathered from every input's own two parts. Values, not only
-    a hash, so a mismatch can say which key moved and from what. They are
-    normalised through a JSON round trip (:func:`normalised`) so that what a
-    landed JSON holds after being read back compares equal to what is
-    computed now, e.g. a YAML ``datetime.date`` against its string.
+    Values, not only a hash, so a mismatch can say which key moved and from
+    what. They are normalised (:func:`normalised`) so that what a landed JSON
+    holds after being read back compares equal to what is computed now, e.g. a
+    YAML ``datetime.date`` against its string.
 
     Pass every landed JSON the result is computed from, checked or not: a
     reader that only takes ``evaluation_segment_columns`` for the partition
@@ -335,8 +299,7 @@ def fingerprint(
 
 #: Where :func:`partition_fingerprint` hashes the segment columns actually
 #: joined, next to the settings' dotted paths. Named after the landed artifact
-#: field it mirrors (``evaluation_segment_columns``' ``joined``), which no
-#: config path can spell.
+#: field it mirrors, which no config path can spell.
 _JOINED = "evaluation_segment_columns.joined"
 
 
@@ -348,14 +311,10 @@ def partition_fingerprint(parameters: dict, joined: Sequence[str]) -> str:
     Why ``joined`` is in it: the settings do not say what the rows hold. A
     segment column the population table lacks is skipped, not raised, so two
     runs with identical settings write different rows when the population
-    changed between them. January–February joined ``tier``; the population
-    then lost it and February was re-run alone (``tier`` NULL in the
-    partition, that run's JSON ``joined: []``); resuming January–February, its
-    own JSON still says ``joined: [tier]`` and every setting matches, so all of
-    February would fall into the unmatched segment, exit code 0. With the
-    joined list hashed in, a reader expecting ``[tier]`` refuses February.
-    Same settings and the same population still give the same hash on every
-    date, whichever run wrote it.
+    changed between them, and a reader whose own JSON says the column was
+    joined would put those rows in the unmatched segment, exit code 0. Same
+    settings and the same population still give the same hash on every date,
+    whichever run wrote it.
 
     Same normalisation as :func:`fingerprint`. Only the hash is stored: it
     repeats on every row, and a mismatch is fixed the same way whichever part
@@ -371,11 +330,10 @@ def recorded_partition_fingerprint(payload: Any) -> Optional[str]:
     ``payload`` has no ``config_fingerprint`` in :func:`fingerprint`'s shape
     or no ``joined`` list.
 
-    Taken from the recorded ``applied`` values, which :func:`fingerprint`
-    normalised the same way :func:`partition_fingerprint` normalises live
-    parameters, plus the recorded ``joined``. For readers that must compare a
-    partition with the run that wrote a directory rather than with today's
-    parameters (``--compare-only``, where ``post_training`` is inert).
+    Taken from the recorded ``applied`` values plus the recorded ``joined``.
+    For readers that must compare a partition with the run that wrote a
+    directory rather than with today's parameters (``--compare-only``, where
+    ``post_training`` is inert).
     """
     stored = _stored(payload)
     if stored is None or not isinstance(payload.get("joined"), list):
@@ -458,17 +416,14 @@ def require_computed_with_current_config(
     """Pre-check (inputs): every artifact was computed with today's settings —
     the ones its own step applied, and the ones each of its inputs did.
 
-    ``artifacts`` holds :class:`LoadedArtifact` entries — construct each with
-    keyword arguments (see that class for why). A pre-check, not a
-    postcondition: a mismatch means the inputs on disk are older than the
-    config, not that the calling node is wrong.
+    A pre-check, not a postcondition: a mismatch means the inputs on disk are
+    older than the config, not that the calling node is wrong.
 
     Collect-all: every stale artifact is listed in one raise, each moved
-    setting under the part it moved in (its own step's, or an input's), so
-    whoever fixes it does not re-run, hit the next one, and re-run again.
-    One re-run is advised for all of them, :func:`rerun_node` of every
-    changed path and every producer of an artifact with no fingerprint; when
-    none applies, the full pipeline.
+    setting under the part it moved in (its own step's, or an input's). One
+    re-run is advised for all of them, :func:`rerun_node` of every changed path
+    and every producer of an artifact with no fingerprint; when none applies,
+    the full pipeline.
 
     ``run_nodes``: the run's nodes in topological order, when the reader
     knows them. The advice then names one of them, and a record an artifact
@@ -581,8 +536,7 @@ def require_same_recorded_values(
 
     Collect-all, like :func:`require_computed_with_current_config`; an
     artifact recording nothing under ``key`` is stale too. ``setting`` names
-    the value in the message, and also prefixes each changed leaf, so the
-    reader is told the setting path to look at.
+    the value in the message and prefixes each changed leaf.
     """
     problems: list[str] = []
     for artifact in artifacts:

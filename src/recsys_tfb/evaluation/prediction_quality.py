@@ -17,8 +17,8 @@ with ``sum(weight)``, ``sum(label * weight)`` and ``sum(score * weight)``.
 Every number the report shows — the threshold sweep, ``pr_auc``, ``roc_auc``,
 the best-F1 threshold and the display bin table — is computed by the pure
 functions below from that one table, so the threshold sweep and the bin table
-can never disagree. All of them are computed when the payload is built
-(:func:`build_payload`) and land with it; the report reads them (#536).
+can never disagree. All of them land with the payload
+(:func:`build_payload`); the report reads them.
 
 Bins are **global and equal-width over this data's ``min(score)`` ..
 ``max(score)``**, never a fixed ``[0, 1]``: at click rates of 0.1%-1% the
@@ -45,10 +45,9 @@ interpolated. Rows inside one bin are treated as one tied score, so:
 
 The weight column
 =================
-``weight_col`` multiplies every sum, so each count is a weighted count. It is
-there for the whole-group sampling of zero-positive query groups (#429), which
-writes ``1 / r`` on the kept rows; without it every row weighs 1 and the sums
-are plain counts.
+``weight_col`` multiplies every sum, so each count is a weighted count. It
+carries the ``1 / r`` that the whole-group sampling of zero-positive query
+groups writes on the kept rows; without it every row weighs 1.
 """
 
 from __future__ import annotations
@@ -96,9 +95,9 @@ def aggregate_score_bins(
       (ties by item), and their bins (``[item_col] + BIN_COLUMNS``).
 
     Why ``top_n``: per-item bins come back to the driver as ``items x bins``
-    rows, and in the ad scenario the item count can run to thousands
-    (ADR-0024 decision 6). The overall bins and every item's totals are
-    computed from all items regardless, in Spark.
+    rows, and the item count can run to thousands (ADR-0024 decision 6). The
+    overall bins and every item's totals are computed from all items
+    regardless, in Spark.
 
     Cost: one aggregate for the range, one ``groupBy(item, bin)`` over the
     rows (the only full pass that shuffles), cached, then three small
@@ -168,7 +167,7 @@ def aggregate_score_bins(
         agg.unpersist()
 
     # groupBy hands rows back in shuffle order; sorted, the same data lands
-    # as the same JSON (#355).
+    # as the same JSON.
     overall = overall.sort_values("bin").reset_index(drop=True)[BIN_COLUMNS]
     per_item = per_item.sort_values([item_col, "bin"]).reset_index(drop=True)
     return {
@@ -301,17 +300,17 @@ def build_payload(
     top_n: int,
 ) -> dict:
     """The landed JSON: :func:`aggregate_score_bins`' tables plus the
-    :func:`binary_summary` of each, and the tables the report draws (#536):
-    the display bin table (:func:`coarse_bin_table`) overall and for every
-    listed item, and the threshold sweep (:func:`threshold_sweep`) the report
-    plots — under ``result_readers.DISPLAY_BINS_KEY`` /
-    ``THRESHOLD_SWEEP_KEY``, ``None`` when there is no row. The report reads
-    them instead of re-deriving them (ADR-0031 principle 1); all come from
-    the same fine bins, so they still cannot disagree.
+    :func:`binary_summary` of each, and the tables the report draws: the
+    display bin table (:func:`coarse_bin_table`) overall and for every listed
+    item, and the threshold sweep (:func:`threshold_sweep`) the report plots
+    — under ``result_readers.DISPLAY_BINS_KEY`` / ``THRESHOLD_SWEEP_KEY``,
+    ``None`` when there is no row. The report reads them instead of
+    re-deriving them (ADR-0031 principle 1); all come from the same fine
+    bins, so they cannot disagree.
 
     The fine bin tables are kept too, so the JSON can be re-drawn elsewhere
     without the ``parameters`` that made it (``columns`` and ``bins`` travel
-    with it, as in ``steps/report_aggregates.aggregate_report_diagnostics``).
+    with it).
     """
     lo, width = aggregated["lo"], aggregated["width"]
     overall = aggregated["overall"]
@@ -370,9 +369,8 @@ def _listed_display_bins(
     n_bins: int,
     n_display_bins: int,
 ) -> pd.DataFrame:
-    """Every listed item's :func:`coarse_bin_table`, in ``listed`` order, the
-    item column first: the report's per-item display table as one long
-    frame."""
+    """Every listed item's :func:`coarse_bin_table`, in ``listed`` order, as
+    one long frame with the item column first."""
     tables = []
     for item in listed:
         tbl = coarse_bin_table(

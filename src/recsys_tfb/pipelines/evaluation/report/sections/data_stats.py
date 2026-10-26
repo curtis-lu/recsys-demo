@@ -24,9 +24,7 @@ READS = ("evaluation_row_facts",)
 #: (ADR-0031 principle 3: off, the pipeline computes nothing only it reads).
 SWITCH = "data_stats"
 
-#: The heading, its English and the question the section answers; the
-#: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
-#: decision 16).
+#: The table of contents prints ``TITLE — QUESTION`` (ADR-0031 decision 16).
 TITLE = "資料統計"
 TITLE_EN = "Data statistics"
 QUESTION = "資料多大？正例怎麼分布？"
@@ -67,10 +65,9 @@ def build(
         _composition("各 item", "item", _sorted(ov.get("by_item")), totals),
     ]
     slices = ["各期", "各 item"]
-    # by_segment groups by the first segment column joined; absent when no
-    # segment column was joined (an older run's facts, or none configured).
-    # The unmatched group sits last: it is not a segment, it is listed to
-    # say how many rows had no value.
+    # by_segment groups by the first segment column joined; absent when none
+    # was joined. The unmatched group sits last: it is not a segment, it is
+    # listed to say how many rows had no value.
     if by_segment:
         notes = ()
         if UNMATCHED_SEGMENT in by_segment:
@@ -102,11 +99,9 @@ def build(
 
 def _composition(slices: str, row_header: str, by: Mapping[str, dict],
                  totals: Mapping, notes: tuple = ()) -> Table:
-    """「正例組成 · {slices}」: a row per slice of ``by``, in its order, the
-    columns of :data:`_COMPOSITION_COLUMNS`. A share is the slice's
-    landed count over the landed total — the one division the report does (a
-    display of two landed numbers); blank when the total is missing or
-    zero."""
+    """「正例組成 · {slices}」. A share is the slice's landed count over the
+    landed total — the one division the report does (a display of two landed
+    numbers); blank when the total is missing or zero."""
     n_rows = totals.get("n_rows")
     n_positives = totals.get("n_positives")
     rows = []
@@ -135,10 +130,8 @@ def _share(part, whole):
 
 
 def _description(facts: dict, parameters: dict, slices: list[str]) -> str:
-    """The section's sentence: what the tables show, where the shares'
-    denominators are, the category grain's rows, where the segment column
-    came from, and — with zero-positive groups kept by the dataset draw —
-    that every count includes them, unweighted."""
+    """With zero-positive groups kept by the dataset draw, every count
+    includes them, unweighted."""
     text = (f"正例怎麼分布在{'、'.join(slices)}。這幾張表的欄都一樣；佔比的"
             "分母是核心概念的總量。")
     if "各大類" in slices:
@@ -160,8 +153,8 @@ def _description(facts: dict, parameters: dict, slices: list[str]) -> str:
 
 def _segment_sentence(segments: dict | None) -> str:
     """Where the segment column came from, and which population table lacks
-    one — the only place that says why a 各分群 table is missing, so the
-    table and the column are both named (a misspelt column lands here).
+    one — the only place that says why a 各分群 table is missing (a misspelt
+    column lands here).
 
     ``segments`` is what ``compute_row_facts`` carries from
     ``evaluation_segment_columns``: ``joined`` / ``sources`` / ``missing``

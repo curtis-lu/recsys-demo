@@ -1,21 +1,19 @@
 """HTML report generation for evaluation results: the page around the
 sections, shared by the main report and the comparison report.
 
-The shell draws the title, the metadata block, the table of contents (one
-line per section: its title and the question it answers, static HTML), and
-each section — its heading, description and content blocks
+The shell draws the title, the metadata block, the table of contents (static
+HTML), and each section — its heading, description and content blocks
 (``report.types``; drawn by ``report.pages.render_block``); nothing collapses
-but a figure's data table, under the figure (owner 2026-10-24, #537).
-Every section needs a ``key`` (its HTML id is ``s-{key}``). It carries the
-page's CSS (light and dark), the table tool (sort, filter, copy for every
-``div.tblk``) and the one term list (``TERMS``: a key term's first use in each
-section gets a dotted underline with its English on hover). No network, no
-package beyond plotly, whose JS is embedded once.
+but a figure's data table, under the figure. Every section needs a ``key`` (its
+HTML id is ``s-{key}``). It carries the page's CSS, the table tool (sort,
+filter, copy for every ``div.tblk``) and the one term list (``TERMS``: a key
+term's first use in each section gets a dotted underline with its English on
+hover). No network, no package beyond plotly, whose JS is embedded once.
 
-**Every string is escaped** (#366 item 1): the ``<title>``, the ``<h1>``, the
-metadata keys and values, the table of contents, section titles and
-descriptions, table titles, headers, row labels, cells, the lines under a
-table and the definitions. A section cannot put markup in any of them.
+**Every string is escaped**: the ``<title>``, the ``<h1>``, the metadata keys
+and values, the table of contents, section titles and descriptions, table
+titles, headers, row labels, cells, the lines under a table and the
+definitions. A section cannot put markup in any of them.
 """
 
 import json
@@ -167,8 +165,7 @@ _NAV_JS = (
 )
 
 #: The key terms, Chinese to English: the one list of the page (ADR-0031
-#: decision 16). A section's first use of each gets a dotted underline with
-#: the English on hover; sections keep no list of their own.
+#: decision 16); sections keep no list of their own.
 TERMS = {
     "分群": "segment", "大類": "category", "正例": "positive（label=1）",
     "熱門度": "popularity", "名次": "rank", "歸因": "attribution",
@@ -395,24 +392,22 @@ _TABLE_JS = r"""
 def _ascii_js(source: str) -> str:
     """``source`` with every non-ASCII character written as a ``\\uXXXX``
     escape. Every one of them sits in a string literal or a comment, where the
-    escape means the same character; written out, the script's words (the
-    term list, the menu labels) would sit in the page source beside the
-    report's own text, and a search of the page — a reader's, or a test's
-    "this section is absent" — would find them there."""
+    escape means the same character; written out, the script's words would
+    sit in the page source beside the report's own text, and a search of the
+    page — a reader's, or a test's "this section is absent" — would find them
+    there."""
     return "".join(c if ord(c) < 128 else f"\\u{ord(c):04x}" for c in source)
 
 
 def section_id(section: ReportSection) -> str:
-    """The HTML id of ``section``: ``s-{key}``. A section without a ``key``
-    raises ``ValueError``."""
+    """The HTML id of ``section``: ``s-{key}``."""
     if not section.key:
         raise ValueError(f"section {section.title!r} has no key")
     return f"s-{section.key}"
 
 
 def _toc(sections: list[ReportSection]) -> list[str]:
-    """The table of contents, static: each section's title, and the question
-    it answers after a dash when it has one."""
+    """The table of contents, static HTML."""
     parts = ['<nav class="toc">', "<strong>目錄</strong>", "<ol>"]
     for section in sections:
         q = (f'<span class="q"> — {escape(section.question)}</span>'
@@ -430,8 +425,7 @@ def _section(section: ReportSection) -> list[str]:
           if section.title_en else "")
     parts = [f'<div class="section" id="{sid}">',
              f"<h2>{escape(section.title)}{en}</h2>"]
-    # Escaped like every other string (#366 item 1). A section that needs
-    # more than text says it with content blocks.
+    # A section that needs more than text says it with content blocks.
     if section.description:
         parts.append(f'<p class="description">{escape(section.description)}</p>')
     parts.extend(render_block(block) for block in section.blocks)

@@ -5,8 +5,8 @@ from recsys_tfb.core.pipeline import Pipeline
 
 
 def _comparison_nodes(compare_only: bool, run_nodes: list[str]) -> list[Node]:
-    """The comparison chain, one copy for ``--compare`` and ``--compare-only``
-    (#536): B's rows aligned with A's, both sides' facts and metrics landed,
+    """The comparison chain, one copy for ``--compare`` and ``--compare-only``:
+    B's rows aligned with A's, both sides' facts and metrics landed,
     compared, K cut, drawn. The mode reaches the nodes whose behaviour
     depends on it through their factories: which settings side A's
     partitions are checked against (``restrict_to_common``), and where a
@@ -35,9 +35,8 @@ def _comparison_nodes(compare_only: bool, run_nodes: list[str]) -> list[Node]:
             outputs="compare_predictions_raw",
         ),
         # Under --compare checks side A's partitions against today's
-        # settings, under --compare-only against the directory JSON's (#374;
-        # see make_restrict_to_common_node). The coverage lands; the two
-        # aligned frames stay in memory.
+        # settings, under --compare-only against the directory JSON's (see
+        # make_restrict_to_common_node).
         Node(
             make_restrict_to_common_node(compare_only=compare_only),
             inputs=["enriched_eval_predictions", "compare_predictions_raw",
@@ -106,9 +105,7 @@ def required_results(
 
     It collects declarations and names no computation: which node produces a
     result is the pipeline's wiring (``create_pipeline`` keeps only the nodes
-    these results need). So a switched-off section's computation is not in
-    the pipeline, and removing a section from its report's list removes its
-    computation with it, with nothing else to keep in step.
+    these results need).
     """
     from recsys_tfb.pipelines.evaluation.report import main
     from recsys_tfb.pipelines.evaluation.report.comparison import main as comparison
@@ -142,7 +139,7 @@ def create_pipeline(
     switched-on report sections read, ``generate_report`` is wired to
     exactly that, and only the nodes those results need are kept — a
     switched-off section's computation is not in the pipeline at all, not a
-    node writing ``{"enabled": false}`` (#538).
+    node writing ``{"enabled": false}``.
 
     Modes:
       * default (no flags) — monitoring: ``prepare_eval_data`` writes this
@@ -159,24 +156,22 @@ def create_pipeline(
         loads ``evaluation_segment_columns``, landed by the run that wrote
         that partition, since there is no ``prepare_eval_data`` here to say
         which segment columns the partition's rows were joined with, and
-        ``evaluation_item_categories`` (#379) for the category table it read
+        ``evaluation_item_categories`` for the category table it read
         — optional, see its catalog entry.
 
     The readers that refuse a stale result and are built here are given the
-    run's nodes in topological order, to
-    name the re-run from (``config_fingerprint.rerun_node``): which nodes a
-    run has follows the mode and the switches, so no fixed list names one
-    that is surely there. The list is filled once the pipeline is cut, before
+    run's nodes in topological order, to name the re-run from
+    (``config_fingerprint.rerun_node``): which nodes a run has follows the
+    mode and the switches, so no fixed list names one that is surely there. The list is filled once the pipeline is cut, before
     any node runs; a slice reuses the nodes, so it keeps the full run's order,
     which is what ``--from-node`` is resolved against.
 
-    ``baseline_rate`` (the CLI's ``baseline_scores_by_rate``, #397: ``score:
+    ``baseline_rate`` (the CLI's ``baseline_scores_by_rate``: ``score:
     rate`` under ``--post-training``) adds ``build_popularity_period_counts``
-    and hands its table and month plan to ``compute_baseline_metrics`` as a
-    seventh and eighth input. Off (the default, and always in monitoring mode),
-    the pipeline is node for node the one without the feature: no extra node,
-    and monitoring mode reads no ``sample_pool``. Like every node, the two
-    are kept only while a switched-on section reads what they lead to.
+    and hands its table and month plan to ``compute_baseline_metrics``. Off
+    (the default, and always in monitoring mode), the pipeline is node for
+    node the one without the feature: no extra node, and monitoring mode
+    reads no ``sample_pool``.
     """
     from recsys_tfb.pipelines.evaluation.report.sections.shared import (
         BASELINE_COMPARISON,
@@ -205,7 +200,7 @@ def create_pipeline(
         # Both A-side readers also take evaluation_segment_columns: it records
         # the settings and the joined segment columns the run that wrote this
         # directory stamped on its partitions, which they check each partition
-        # against (#374). Only this mode takes the settings from that JSON;
+        # against. Only this mode takes the settings from that JSON;
         # see make_restrict_to_common_node.
         # No section of the comparison report has a switch, so the
         # requirement list keeps every node here.
@@ -227,18 +222,12 @@ def create_pipeline(
     # (ADR-0020 bug 6): the test set is drawn from sample_pool, monitoring
     # scores inference_population.
     population_input = "sample_pool" if post_training else "inference_population"
-    # Every node below that reads enriched_eval_predictions reads the Hive
-    # table back (every month this model_version was evaluated on) and keeps
-    # the evaluated month first; test_pipeline.py fails one that does not.
     nodes = [
         # The join is computed here once and lands as this month's partition;
-        # dynamic partition overwrite replaces that partition only. The
-        # category table (#379) is a third output; where it comes from:
-        # prepare_eval_data.
-        # `preprocessor_on_disk` last (#379): with the item list counted from
-        # the data, the evaluated model's list is read off it and landed for a
-        # hand mapping to be checked against. Optional, so an evaluation that
-        # needs no list never starts needing the file.
+        # dynamic partition overwrite replaces that partition only.
+        # `preprocessor_on_disk` last: the evaluated model's item list is read
+        # off it and landed for a hand mapping to be checked against. Optional,
+        # so an evaluation that needs no list never starts needing the file.
         Node(
             make_prepare_eval_data_node(population_input),
             inputs=[predictions_input, "label_table", population_input,
@@ -267,7 +256,7 @@ def create_pipeline(
     # the architecture tests' static scan can still read both (A5/A6).
     if baseline_rate:
         nodes += [
-            # Model-independent counts per time value (#397). Its output is
+            # Model-independent counts per time value. Its output is
             # the Hive table itself: the node returns the periods its plan
             # names and the dynamic partition overwrite adds them;
             # compute_baseline_metrics reads the whole table back (A1). The
@@ -307,9 +296,8 @@ def create_pipeline(
             )
         )
     nodes += [
-        # Every evaluated row as a binary prediction (ADR-0024); kept only
-        # while the prediction-quality section is on (the requirement list).
-        # It takes the segment JSON for the partition check only, like
+        # Every evaluated row as a binary prediction (ADR-0024). It takes the
+        # segment JSON for the partition check only, like
         # compute_report_aggregates.
         Node(
             compute_prediction_quality,
@@ -320,14 +308,14 @@ def create_pipeline(
         Node(
             compute_report_aggregates,
             # evaluation_segment_columns for its joined list: part of the
-            # fingerprint each partition read here must carry (#374).
+            # fingerprint each partition read here must carry.
             inputs=["enriched_eval_predictions", "evaluation_segment_columns",
                     "parameters"],
             outputs="evaluation_report_aggregates",
         ),
         # The comparison layer's first pair (ADR-0031 decisions 4 and 5): the
         # model against its baseline, cell by cell, every K — no Spark, both
-        # inputs landed. The report reads the differences off it.
+        # inputs landed.
         Node(
             compare_to_baseline,
             inputs=["evaluation_metrics", "baseline_metrics", "parameters"],

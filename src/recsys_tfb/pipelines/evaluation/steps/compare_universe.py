@@ -9,9 +9,8 @@ groups (as a Spark DataFrame) and the common items (as a Python set).
 
 **Why query groups, not entities.** A query group is
 ``schema["query_group_columns"]`` — the unit each ranking is made in and mAP
-divides by. With one evaluated date every row shares one time value, so
-"common entities" and "common query groups" are the same set. With several
-dates (#374) they are not: an entity B
+divides by. With one evaluated date "common entities" and "common query
+groups" are the same set. With several dates they are not: an entity B
 scored in January only would, keyed by entity, keep A's February rows for it,
 and the two sides' metrics would be computed over different populations with
 nothing raising.
@@ -21,8 +20,8 @@ time partition is STRING; an ``external_hive`` B may carry its time column as
 DATE. Both sides' time is cast to string before the intersection and before
 each restriction join: the same comparison ``steps/compare_sources.py`` already
 selected B's dates with, rather than whichever way Spark's implicit coercion
-goes for mixed types. For ISO DATE against STRING the two agree (on Spark 3.3.2
-the coercion casts the text to a date), so the DATE test in
+goes for mixed types. On Spark 3.3.2 the implicit coercion gives the same
+answer for ISO DATE against STRING, so the DATE test in
 ``test_compare_universe.py`` pins the result, not the cast.
 
 **Why the two sides are handled differently.** The asymmetry is structural,
@@ -30,24 +29,16 @@ not a tuning choice, and it holds for any instantiation of this framework:
 
 - The **item** universe is bounded by the item list. Consistency invariant
   A3 requires ``schema.item`` to carry a ``schema.categorical_values`` entry
-  (``core/consistency.py::require_item_list_declared``): either the list
-  itself, whose cardinality config states before the job runs, or — counted
-  from the train months (#379) — a list the preprocessor fixed from a finite
-  distinct, plus whatever new items the evaluated months add. Not a constant
-  known before the run any more, but still the size of a product catalogue,
-  not of a population. Collecting items and broadcasting them is correct.
+  (``core/consistency.py::require_item_list_declared``), the size of a product
+  catalogue, not of a population. Collecting items and broadcasting them is
+  correct.
 - The **entity** universe has no such bound. It is discovered from the data,
   and grows with the population being scored. So its intersection is computed
   inside Spark and never returned to the driver.
 
-That second point is not theoretical: ``.collect()`` of an unbounded entity
-universe lands in the driver's *Python* heap, which ``spark.driver.memory``
-does not cover — that setting sizes the JVM heap. This repo has already been
-bitten by exactly that distinction; see
-``docs/notes/2026-07-11-training-oom-investigation.md``. In the banking
-instantiation the numbers are 22 products against a seven-figure customer
-population (#275), which is what made the failure visible, but the rule above
-is what makes it general.
+``.collect()`` of an unbounded entity universe lands in the driver's *Python*
+heap, which ``spark.driver.memory`` does not cover — that setting sizes the JVM
+heap. See ``docs/notes/2026-07-11-training-oom-investigation.md``.
 
 Restricting to it
 -----------------
@@ -59,8 +50,7 @@ A side: already carries ``label`` (added upstream by ``prepare_eval_data``, or
    restrict keeps it unchanged.
 B side: takes A's label, joined on the identity columns, so both sides are
    scored against the same ground truth in every run mode (ADR-0020 bug 7).
-   A label column B brings with it is dropped first: ``enriched_eval_predictions``
-   and ``training_eval_predictions`` both land with one, frozen at whatever
+   A label column B brings with it is dropped first: it is frozen at whatever
    ``label_table`` said when B was persisted.
 
    Why A's label and not a fresh ``label_table`` join: A's label is not always
@@ -69,26 +59,15 @@ B side: takes A's label, joined on the identity columns, so both sides are
    reads the one persisted by the standard run. Re-joining ``label_table`` for
    B alone gives the two sides different answers in both of those modes;
    re-joining it for both makes the comparison disagree with the main report
-   of the same run. Copying A's makes "same answer" hold by construction. The
-   cost: a B row whose (entity, item) A did not score has no answer to copy
-   and counts as 0 — which only happens when the two sides' candidate sets
-   are asymmetric.
+   of the same run. The cost: a B row whose (entity, item) A did not score has
+   no answer to copy and counts as 0 — which only happens when the two sides'
+   candidate sets are asymmetric.
 
 Re-ranks both sides within the query group —
 ``schema["query_group_columns"]``, every column of it — because the candidate
 set just shrank. That is the same grouping ``compute_test_metrics`` ranks
 by, so the metrics the comparison report shows are the metrics the main line
 computes.
-
-Also returns the ``CommonUniverse`` it restricted by. Coverage reads its item
-sets from there rather than collecting them a second time (ADR-0020 bug 14).
-
-Coverage
---------
-
-``trim_to_common_with_coverage``: the same restriction, plus the coverage
-that lands as ``compare_coverage`` — full and common sizes, dropped items,
-and the settings and compare source it was computed under.
 """
 
 from __future__ import annotations
@@ -120,22 +99,17 @@ def query_groups_with_text_time(
     """``df``'s distinct query groups, the time column cast to string.
 
     The one place a two-way comparison builds query groups to match across the
-    sides: the intersection below and the coverage count in the
-    ``restrict_to_common`` node both use it, so they cannot disagree on how a
+    sides, so the intersection and the coverage count cannot disagree on how a
     DATE and a STRING time compare.
 
     Takes the whole ``query_group_columns`` rather than the time and the
-    entity separately, so a query group that grows a column grows here too
-    without this signature being revisited. ``time_col`` stays a parameter
-    because it names the one member that needs the cast.
+    entity separately, so a query group that grows a column grows here too.
+    ``time_col`` stays a parameter because it names the one member that needs
+    the cast.
 
-    The old signature (``time_col`` + the entity columns) put the time in the
-    key by construction. This one cannot, so the membership is checked instead
-    of assumed: a ``time_col`` outside ``query_group_cols`` would skip the cast
-    *and* drop the time from the key — the module docstring's first failure
-    mode, arriving silently. No caller can reach it today (both pass values
-    from one ``get_schema`` call), which is what makes it worth a loud check
-    rather than a comment.
+    The membership is checked, not assumed: a ``time_col`` outside
+    ``query_group_cols`` would skip the cast *and* drop the time from the
+    key — the module docstring's first failure mode, arriving silently.
     """
     if time_col not in query_group_cols:
         raise ValueError(
@@ -170,18 +144,13 @@ def common_universe(
     query_group_cols: list[str],
     item_col: str,
 ) -> CommonUniverse:
-    """Return ``CommonUniverse(common_query_groups, common_items, a_items, b_items)``.
-
-    ``common_query_groups`` is a **lazy** DataFrame with exactly
+    """``common_query_groups`` is a **lazy** DataFrame with exactly
     ``query_group_cols``, one row per shared query group, the time as text.
     That list is taken whole, in the order ``get_schema`` derived it — every
     column of ``schema.entity`` in declaration order, not just the first.
     Callers join on the whole row; intersecting only the first entity column
     would keep entities that exist on one side alone, and leaving out the time
     would keep an entity's months that only one side scored.
-
-    ``time_col`` must be one of ``query_group_cols``; the helper above refuses
-    otherwise.
 
     Lazy means every consumer re-evaluates the intersection's shuffle. That is
     deliberate: caching it here would leak, because the DataFrames the caller
@@ -191,29 +160,22 @@ def common_universe(
     that trade.
 
     ``common_items`` is a Python set — see the module docstring for why this
-    side may come back to the driver and the entity side may not. ``a_items``
-    and ``b_items`` are each side's full item set, the inputs of that
-    intersection.
+    side may come back to the driver and the entity side may not.
 
-    Raises ``DataConsistencyError`` when either intersection is empty —
-    caller will surface this as ``fail loud``.
+    Raises ``DataConsistencyError`` when either intersection is empty.
     """
     a_groups = query_groups_with_text_time(a, time_col, query_group_cols)
     b_groups = query_groups_with_text_time(b, time_col, query_group_cols)
-    # A left-semi join, not ``intersect``. Both compute the same set for
-    # non-null keys, but they disagree on nulls: ``intersect`` treats
-    # ``NULL == NULL`` as a match, while the equi-join that
-    # ``trim_to_common_universe`` then runs drops null keys. Using the join here keeps the empty-universe gate and the
-    # restriction that follows it agreeing on what "common" means — otherwise a
+    # A left-semi join, not ``intersect``: they disagree on nulls.
+    # ``intersect`` treats ``NULL == NULL`` as a match, while the equi-join that
+    # ``trim_to_common_universe`` then runs drops null keys. Otherwise a
     # universe whose only shared entity is null-keyed passes the gate and then
     # restricts to zero rows, silently.
     common_query_groups = a_groups.join(
         b_groups, on=query_group_cols, how="left_semi")
-    # ``isEmpty()`` stays in the JVM — no rows cross into Python — and stops
-    # once one row materialises. It is not free: the join underneath is a
-    # shuffle, so both sides are shuffled before that row exists. What it does
-    # avoid is the two ``count()`` calls below, which are full passes over both
-    # populations and therefore run only when we are already raising.
+    # ``isEmpty()`` stops once one row materialises, though the join underneath
+    # still shuffles both sides. It avoids the two ``count()`` calls below, full
+    # passes over both populations, which run only when we are already raising.
     if common_query_groups.isEmpty():
         raise DataConsistencyError(
             f"compare common_query_groups is empty — A has {a_groups.count()} "
@@ -260,10 +222,8 @@ def trim_to_common_universe(
     common_groups = universe.common_query_groups.withColumnRenamed(
         time_col, _TIME_TEXT
     )
-    # The same query group, spelled the way both sides of the semi join below
-    # carry it: every column as declared, with the time under its temporary
-    # text name. Derived from ``query_group_cols`` rather than respelled, so a
-    # query group that grows a column is joined on that column here too.
+    # Derived from ``query_group_cols`` rather than respelled, so a query group
+    # that grows a column is joined on that column here too.
     common_group_join_key = [
         _TIME_TEXT if c == time_col else c for c in query_group_cols
     ]
@@ -275,11 +235,9 @@ def trim_to_common_universe(
         # No ``F.broadcast`` on the query-group side. That hint does not advise
         # Spark, it overrides ``spark.sql.autoBroadcastJoinThreshold`` — so on
         # an entity universe too large to broadcast it still forces the driver
-        # to assemble the whole table and ship a copy to every executor. Let
-        # Spark pick from the real size. ``left_semi`` restricts without adding
-        # columns, and the temporary text column is dropped again, so ``df``'s
-        # schema is untouched. The item join keeps its hint: that universe is
-        # bounded by config. See ``common_universe`` above for the full rule.
+        # to assemble the whole table and ship a copy to every executor. The
+        # item join keeps its hint: that universe is bounded by config (module
+        # docstring).
         df = (
             df.withColumn(_TIME_TEXT, F.col(time_col).cast("string"))
             .join(common_groups, on=common_group_join_key, how="left_semi")
@@ -319,10 +277,6 @@ def trim_to_common_with_coverage(
     partitions checked (``make_restrict_to_common_node``), so
     ``segment_columns.json``'s own fingerprint is not compared here.
 
-    The coverage lands as ``compare_coverage``, with the fingerprint it
-    inherits from ``segment_columns`` and the compare source; its readers
-    check both. The two frames stay in memory.
-
     Sizes are counted in **query groups** (``query_group_columns``), the unit
     mAP divides by; any other unit would put two scales side by side in one
     table (ADR-0015).
@@ -351,9 +305,7 @@ def trim_to_common_with_coverage(
     # keys never match — the same null rule as the restriction's own joins. On
     # symmetric candidate sets this equals either side's kept group count; when
     # one side scored a common entity only on items the other lacks, that group
-    # is in one side's metrics but not in "common". The time is matched as
-    # text, by the same helper the restriction uses (B's time column may be
-    # DATE while A's partition is STRING).
+    # is in one side's metrics but not in "common".
     groups_common = (
         query_groups_with_text_time(a_common, time_col, query_group_cols)
         .join(
@@ -383,8 +335,6 @@ def trim_to_common_with_coverage(
         "n_item_common": len(common_items),
         "dropped_items_A": sorted(universe.a_items - common_items),
         "dropped_items_B": sorted(universe.b_items - common_items),
-        # The redraw reads the landed coverage back, so it records what it
-        # was computed under and against.
         "config_fingerprint": fingerprint(
             parameters, "restrict_to_common", (segment_columns,)),
         COMPARE_SOURCE_KEY: compare_source_identity(parameters),

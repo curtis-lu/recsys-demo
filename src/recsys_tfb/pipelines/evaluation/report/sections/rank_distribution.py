@@ -29,17 +29,14 @@ from recsys_tfb.report.types import (
     Table,
 )
 
-#: The results this section reads, by catalog name (ADR-0031 principle 1):
-#: the distributions off the report aggregates, ``mean_pos`` off the metrics.
+#: The results this section reads, by catalog name (ADR-0031 principle 1).
 READS = ("evaluation_report_aggregates", "evaluation_metrics")
 
 #: The ``evaluation.report.sections`` switch that turns this section off
 #: (ADR-0031 principle 3: off, the pipeline computes nothing only it reads).
 SWITCH = "rank_distribution"
 
-#: The heading, its English and the question the section answers; the
-#: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
-#: decision 16).
+#: The table of contents prints ``TITLE — QUESTION`` (ADR-0031 decision 16).
 TITLE = "名次分布"
 TITLE_EN = "Rank distribution"
 QUESTION = "每個 item 的分數與名次落在哪裡？"
@@ -48,10 +45,9 @@ QUESTION = "每個 item 的分數與名次落在哪裡？"
 #: 開關開著時，印在這段的那一句的開頭。
 ALL_POSITIVE_KEPT_NOTE = "正例平均名次以外的圖沒有排除全正的 query group"
 
-#: The titles of the figures drawn from the report aggregates, in the order
-#: they are drawn (decision 16: in Chinese, named like the tables); each
-#: figure's data table has its name. A share heatmap follows the count
-#: heatmap it divides. 正例平均名次 comes last, from the metrics.
+#: The titles of the figures drawn from the report aggregates, in drawing
+#: order, in Chinese like the tables (decision 16); each figure's data table
+#: has its name.
 FIGURE_TITLES = (
     "分數分布 · 各 item",
     "分數分布 · 依 label",
@@ -64,7 +60,7 @@ FIGURE_TITLES = (
 
 
 def _all_positive_kept_notes(parameters: dict) -> list[Note]:
-    """開關開著時這段的 ⚠ 那一行；關著回空（#376）。
+    """開關開著時這段的 ⚠ 那一行；關著回空。
 
     ``compute_report_aggregates`` 讀全部評估列，開關碰不到它，所以正例平均名次
     以外的圖照樣算進全正的組；正例平均名次讀指標結果，跟著開關排除了。只說這段
@@ -81,17 +77,14 @@ def _all_positive_kept_notes(parameters: dict) -> list[Note]:
 def _item_share_by_rank(counts_frame: pd.DataFrame) -> pd.DataFrame:
     """欄正規化：每個 rank 欄 ÷ 欄和 → 各 item 在該 rank 位置的佔比。
 
-    每個 rank 欄加總=1（誰佔據該名次）。全 0 欄（0/0）得 NaN、畫成空格。
-    每個 query group 的候選一樣多時（例如全網格）各欄的和相同，名次佔比圖跟
-    名次計數圖長得一樣，只差一個倍數；段的說明講這件事。
+    全 0 欄（0/0）得 NaN、畫成空格。
     """
     col_sums = counts_frame.sum(axis=0)
     return counts_frame.divide(col_sums, axis=1)
 
 
 def _matrix_table(title: str, matrix: pd.DataFrame, kind: str) -> Table:
-    """An item × rank table: rows the items (the matrix's order), columns
-    第 r 名 for each rank of the matrix, every cell of one ``kind``."""
+    """An item × rank table, every cell of one ``kind``."""
     columns = tuple(Column(f"第 {rank} 名", kind) for rank in matrix.columns)
     rows = tuple(Row(str(item), tuple(matrix.loc[item]))
                  for item in matrix.index)
@@ -99,8 +92,8 @@ def _matrix_table(title: str, matrix: pd.DataFrame, kind: str) -> Table:
 
 
 def _histogram_table(title: str, hist: pd.DataFrame, item_col: str) -> Table:
-    """The histogram's bars: one row per item and non-empty bin, in the
-    order they are drawn (item, then bin from low scores up)."""
+    """One row per item and non-empty bin, in the order drawn (item, then bin
+    from low scores up)."""
     hist = hist.sort_values([item_col, "bin_center"], kind="stable")
     columns = (Column("箱中心", "ratio"), Column("箱寬", "ratio"),
                Column("候選列", "count"))
@@ -110,15 +103,15 @@ def _histogram_table(title: str, hist: pd.DataFrame, item_col: str) -> Table:
     return Table(title, "item", columns, rows)
 
 
-#: The boxplot table's five numbers: (the aggregate's key, the header).
+#: (The aggregate's key, the header) of the boxplot table's five numbers.
 _BOX_COLUMNS = (("lowerfence", "下緣"), ("q1", "Q1"), ("median", "中位數"),
                 ("q3", "Q3"), ("upperfence", "上緣"))
 
 
 def _box_table(title: str, box: pd.DataFrame, item_col: str,
                label_col: str) -> Table:
-    """The boxes: one row per item and label, label 1 before 0, the labels
-    the figure draws (``plot_score_boxplot_by_label``)."""
+    """One row per item and label, label 1 before 0, the labels the figure
+    draws (``plot_score_boxplot_by_label``)."""
     drawn = box[box[label_col].isin((0, 1))].sort_values(
         [item_col, label_col], ascending=[True, False], kind="stable")
     columns = (Column(label_col, "text"),
@@ -132,9 +125,8 @@ def _box_table(title: str, box: pd.DataFrame, item_col: str,
 
 
 def _figures(report_aggregates: dict) -> list[Figure]:
-    """The figures drawn from the report aggregates, titled in Chinese
-    (:data:`FIGURE_TITLES`), each with the numbers it draws as its data
-    table, named like it."""
+    """Titled in Chinese (:data:`FIGURE_TITLES`), each with the numbers it
+    draws as its data table."""
     from recsys_tfb.pipelines.evaluation.report.figures import (
         plot_positive_rank_heatmap,
         plot_positive_rate_rank_heatmap,
@@ -178,10 +170,9 @@ def _figures(report_aggregates: dict) -> list[Figure]:
 
 
 def _mean_rank_blocks(metrics: Mapping | None) -> list:
-    """「正例平均名次 · 各 item」— a bar per item in name order, Macro 平均
-    a dashed line; its data table pins Macro 平均, then each item, the one
-    value the catalog's ``mean_pos`` (item method) — and its definition.
-    Nothing when the bundle has no item."""
+    """「正例平均名次 · 各 item」: a bar per item in name order, Macro 平均 a
+    dashed line, the value the catalog's ``mean_pos`` (item method), and its
+    definition. Nothing when the bundle has no item."""
     import plotly.graph_objects as go
 
     metric = entry("mean_pos", ITEM)
@@ -209,11 +200,11 @@ def _mean_rank_blocks(metrics: Mapping | None) -> list:
 def build(
     results: Mapping[str, dict], parameters: dict
 ) -> ReportSection | None:
-    """名次分布: the description and the figures, each with its data
-    table, the mean positive rank's last. ``None`` when the section is
-    switched off or the aggregates hold no distribution family — a ``report_aggregates.json``
-    from before #381 that holds only the ``calibration`` key included: the
-    score bins are not drawn here.
+    """名次分布: the description and the figures, each with its data table,
+    the mean positive rank's last. ``None`` when the section is switched off
+    or the aggregates hold no distribution family (a ``report_aggregates.json``
+    holding only the ``calibration`` key included: the score bins are not
+    drawn here).
     """
     report_aggregates = results["evaluation_report_aggregates"]
     if not report_aggregates or "score_histogram" not in report_aggregates:

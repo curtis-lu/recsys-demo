@@ -83,8 +83,7 @@ _PRODUCES_ROW_FACTS = Produces("evaluation_row_facts", (
     _FINGERPRINT_BLOCK,
 ))
 
-#: The bundle ``compute_all_metrics`` returns, shared by the model's metrics,
-#: the baseline's and both sides of a comparison. The metric cells inside
+#: The bundle ``compute_all_metrics`` returns. The metric cells inside
 #: ``overall``, ``per_item`` ... are checked against the metric catalog
 #: (tests/test_evaluation/test_metric_catalog.py).
 _METRIC_BLOCKS = (
@@ -163,8 +162,7 @@ _PRODUCES_REPORT_AGGREGATES = Produces("evaluation_report_aggregates", (
     _FINGERPRINT_BLOCK,
 ))
 
-#: The cell-by-cell comparison ``compare_metric_results`` returns, shared by
-#: the baseline comparison and the source comparison.
+#: The cell-by-cell comparison ``compare_metric_results`` returns.
 _COMPARISON_BLOCKS = (
     Block("overall", "兩邊整體指標格子的並排：各自的值與差。", "整體的每個指標格子一格"),
     Block("per_item", "兩邊每個 item 指標格子的並排。", "每個 item × 每個指標格子"),

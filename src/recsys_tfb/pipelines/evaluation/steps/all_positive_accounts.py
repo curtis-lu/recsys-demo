@@ -1,9 +1,6 @@
-"""The log lines of the all-positive query group accounts.
-
-Whether those groups leave the metrics is decided in the metric nodes
-(``evaluation.query_filter.drop_all_positive_groups``); the accounts
-themselves are counted into the row facts (``metrics.all_positive_accounts``).
-This module only says them in the log.
+"""The log lines of the all-positive query group accounts. They are counted
+into the row facts (``metrics.all_positive_accounts``); this module only says
+them in the log.
 """
 
 import logging
@@ -24,10 +21,10 @@ def log_all_positive_accounts(
     facts hold it), and a warning per grain whose landed accounts say the
     all-positive share is high with the switch off.
 
-    Read off the landed accounts, which the report reads too, so the log and
-    the report cannot disagree. Each grain decides on its own frame, so the
-    two grains can disagree. ``caller_logger`` is the node's: the lines keep
-    the logger name they are filtered by.
+    Read off the landed accounts, so the log and the report cannot disagree.
+    Each grain decides on its own frame, so the two grains can disagree.
+    ``caller_logger`` is the node's: the lines keep the logger name they are
+    filtered by.
     """
     for grain, bundle in (("fine", facts),
                           ("category", facts.get("category"))):
