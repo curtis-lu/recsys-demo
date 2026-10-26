@@ -1,44 +1,16 @@
 """Metric primitives on numpy arrays, and the rule behind the all-positive accounts.
 
-This is a leaf module: its module-level imports are ``logging`` / ``typing``
-/ ``numpy``, plus ``utils.ranking`` for the within-query order and
-``evaluation.result_readers`` for the names the reports read. Do not add any
-other project import — ``evaluation.metrics_spark`` and several ``scripts/``
-import from here, so a project import risks a cycle. Those two are the
-exceptions because they import nothing from the project, so they cannot close
-one; ``utils.ranking`` is where the tie rule lives, shared with the Spark
-ranking (#355). scikit-learn is imported only inside the two functions that
-need it (the binary-prediction average precision below), so importers of this
-module do not pay its load time.
+A leaf module: besides ``logging`` / ``typing`` / ``numpy`` it imports only
+``utils.ranking`` (the tie rule the Spark ranking shares) and
+``evaluation.result_readers``, and neither imports the project. Add no other
+project import: this module is imported widely (``evaluation.metrics_spark``,
+``scripts/``), so one risks a cycle. scikit-learn is imported inside the two
+functions that need it, so importers do not pay its load time.
 
-What lives here:
-
-* Per-query AP primitives for ``tune_hyperparameters`` (HPO loop in the
-  training pipeline). HPO scores each trial on driver-side numpy arrays;
-  going through Spark for one scalar per trial would be massive overhead.
-* The per-item macro primitives (``positive_row_contributions`` /
-  ``macro_from_per_item`` / ``compute_macro_per_item_map``), shared by HPO
-  and ``metrics_spark.macro_average``.
-* :func:`n_groups_with_positive` / :func:`all_positive_share` /
-  :func:`all_positive_share_warns` / :func:`all_positive_accounts` — the one
-  count of the groups holding a positive and the one rule for when the
-  all-positive share warns (#376), computed where the row facts are counted
-  and landed with them (#536); the evaluation nodes' log and the report read
-  the landed values.
-* :func:`compute_pooled_average_precision` /
-  :func:`compute_macro_per_item_average_precision` — the HPO objectives that
-  score every val row as one binary prediction (#430). Not the report's
-  ``pr_auc`` (``evaluation.prediction_quality``): exact where that one is
-  binned, and never to be reconciled with it.
-
-The keys of the row facts and of a bundle's population ledger, the settings
-readers (:func:`metric_params`, :func:`resolved_all_k`,
-:func:`drop_all_positive_groups`) and how the share prints
-(``format_share``) live in ``evaluation.result_readers`` since #536; callers
-import them from there.
-
-The dict-shaped per-segment / per-item / overall metrics of the evaluation
-pipeline run on Spark — see ``recsys_tfb.evaluation.metrics_spark``.
+The HPO loop scores each trial with these on driver-side arrays: a Spark job
+per trial for one scalar would cost far more than the trial. The two
+binary-prediction average precisions here are exact; the report's ``pr_auc``
+(``evaluation.prediction_quality``) is binned, so the two are never reconciled.
 """
 
 import logging
@@ -64,14 +36,11 @@ def n_groups_with_positive(bundle: dict) -> Optional[int]:
     """Query groups holding a positive in one grain of the row facts:
     ``n_queries - n_excluded_queries``.
 
-    The one place that subtraction is written (#376): :func:`all_positive_share`
-    and :func:`all_positive_accounts` read it here, and the row facts land it
-    (``result_readers.N_WITH_POSITIVE_KEY``, #536) for the report's ledger,
-    warning and query-count rows and the evaluation nodes' log.
-    ``n_excluded_queries`` counts only the groups holding no positive,
-    switch on or off, so this is the groups holding a positive either way.
-    ``None`` when either count is missing or ``None`` — a bundle older than
-    the counts — rather than a guess at the missing one.
+    The one place that subtraction is written; everything else reads it or its
+    landed copy (:data:`N_WITH_POSITIVE_KEY`). ``n_excluded_queries`` counts
+    only the groups holding no positive, switch on or off, so this holds either
+    way. ``None`` when either count is missing or ``None``, rather than a guess
+    at the missing one.
     """
     n_queries = bundle.get("n_queries")
     n_zero = bundle.get("n_excluded_queries")
@@ -84,12 +53,10 @@ def all_positive_share(bundle: dict) -> Optional[float]:
     """All-positive groups ÷ groups holding a positive, for one grain of the
     row facts.
 
-    The denominator is :func:`n_groups_with_positive`, the groups the
-    measurement metrics score with the switch off, so the share reads as
-    "this much of those groups gets the same per-query metrics whatever the
-    order", and the dataset's ``test_zero_positive_group_ratio`` cannot move
-    it. ``None`` when the bundle predates #376 (no :data:`ALL_POSITIVE_KEY`),
-    lacks either group count, or no group holds a positive.
+    Over the groups holding a positive, not every group, so the dataset's
+    ``test_zero_positive_group_ratio`` cannot move it. ``None`` when the bundle
+    has no :data:`ALL_POSITIVE_KEY`, lacks either group count, or no group
+    holds a positive.
     """
     n_all_positive = bundle.get(ALL_POSITIVE_KEY)
     if n_all_positive is None:
@@ -101,12 +68,8 @@ def all_positive_share(bundle: dict) -> Optional[float]:
 
 
 def all_positive_share_warns(bundle: dict, parameters: dict) -> bool:
-    """Whether to warn about a bundle's all-positive share (#376).
-
-    Only with the switch off — on, those groups are already dropped — and only
-    strictly above :data:`ALL_POSITIVE_WARN_SHARE`. Landed per grain by the
-    row facts (:func:`all_positive_accounts`), which the log and the report
-    both read, so they cannot disagree on when to warn.
+    """Whether to warn about a bundle's all-positive share: only with the
+    switch off (on, those groups are already dropped).
     """
     if drop_all_positive_groups(parameters):
         return False
@@ -115,17 +78,9 @@ def all_positive_share_warns(bundle: dict, parameters: dict) -> bool:
 
 
 def all_positive_accounts(facts: dict, parameters: dict) -> dict:
-    """One grain's all-positive accounts, as the row facts land them beside
-    its counts (#536): :data:`N_WITH_POSITIVE_KEY`
-    (:func:`n_groups_with_positive`), :data:`ALL_POSITIVE_SHARE_KEY`
-    (:func:`all_positive_share`) and :data:`ALL_POSITIVE_WARNS_KEY`
-    (:func:`all_positive_share_warns`).
-
-    Computed where the counts are (``metrics_spark._grain_row_facts``), so
-    every set of row facts carries them — the model's and, under
-    ``--compare``, each side's — and the report and the log read them rather
-    than computing them again (ADR-0031 principle 1). Formatting the share is
-    the report's (``result_readers.format_share``).
+    """One grain's all-positive accounts, landed by the row facts beside its
+    counts. The report and the log read the landed values rather than
+    computing them again (ADR-0031 principle 1).
     """
     return {
         N_WITH_POSITIVE_KEY: n_groups_with_positive(facts),
@@ -160,30 +115,20 @@ def compute_mean_ap(
     y_score: np.ndarray,
     event_keys: Sequence[np.ndarray] = (),
 ) -> float:
-    """Mean of per-group Average Precision.
+    """Mean over query groups of each group's Average Precision.
 
-    A "group" represents one query (e.g. one ``(cust_id, snap_date)`` pair).
     Groups with no positive labels are skipped; if every group is skipped or
     the arrays are empty, returns 0.0.
 
-    Used by ``tune_hyperparameters`` to score val predictions as a true mAP
-    (per-customer AP averaged over customers) rather than treating the whole
-    val set as a single ranking problem.
+    One sort, then a slice per group. The naive per-group mask
+    (``groups == g``) is ``O(N × G)``, unusable at production scale.
 
-    Implementation: ``O(N log N)`` via one sort on ``(groups, -y_score,
-    items)`` followed by a slice-per-group walk. The naive
-    ``for g in np.unique(groups): mask = groups == g`` is ``O(N × G)`` and
-    becomes unusable at production scale (5M rows × 200k groups ~ 10 min).
-
-    Tied y_score within a group resolves by ``items`` ascending, then by each
-    array of ``event_keys`` — the rule the Spark metrics rank with,
-    :mod:`recsys_tfb.utils.ranking` — so the same rows score the same whatever
-    order they arrive in. Neither only breaks ties.
-
-    ``event_keys`` is empty unless the deployment declares ``event``, in which
-    case one query group can hold the same item more than once and ``items``
-    alone no longer separates every pair of rows. Empty reproduces the
-    pre-#378 order exactly.
+    Tied scores within a group resolve by ``items`` ascending, then by each
+    array of ``event_keys``: the rule the Spark metrics rank with
+    (:mod:`recsys_tfb.utils.ranking`), so the same rows score the same whatever
+    order they arrive in. Both only break ties. ``event_keys`` is empty unless
+    the deployment declares ``event``, when one group can hold the same item
+    more than once.
     """
     if len(groups) == 0:
         return 0.0
@@ -229,21 +174,15 @@ def positive_row_contributions(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-positive-row AP contribution + original-order row indices.
 
-    contrib[i] is the within-query cumulative precision of positive row
-    row_idx[i] (zeroed when its rank exceeds ``k``). Queries with no
-    positive rows contribute nothing. Within a query rows rank by score
-    descending, ties by ``items`` ascending (:mod:`recsys_tfb.utils.ranking`);
-    ``items`` takes the raw item values and only breaks ties. Used by
-    :func:`compute_macro_per_item_map`; the diagnoses' per-item AP shared it
-    until #532 removed them.
+    Returns ``(contrib, row_idx)``, always this 2-tuple: ``contrib[i]`` is the
+    within-query cumulative precision of positive row ``row_idx[i]`` (zeroed
+    when its rank exceeds ``k``). Queries with no positive rows contribute
+    nothing. Ranking and ties as in :func:`compute_mean_ap`.
 
-    Returns a **fixed 2-tuple** ``(contrib, row_idx)`` — always, for every
-    argument combination. Sampling weights deliberately do NOT belong here:
-    a query counted twice has the same internal ranking, hence the same
-    per-row precisions, so weights cannot influence what this function
-    computes; they only need broadcasting onto the returned positive rows.
-    That broadcast lives in :func:`align_positive_row_weights`, so this
-    function's return arity never varies with its arguments.
+    Sampling weights deliberately stay out: a query counted twice ranks the
+    same, so weights cannot change what this computes, only be broadcast onto
+    the returned rows (:func:`align_positive_row_weights`). Taking them here
+    would make the return arity vary with the arguments.
     """
     if len(groups) == 0:
         return np.array([], dtype=np.float64), np.array([], dtype=np.int64)
@@ -286,20 +225,11 @@ def align_positive_row_weights(
 ) -> np.ndarray:
     """Validate a query-level weight vector and select the positive rows.
 
-    ``weights`` is **row-aligned**: one entry per input row, every row of a
-    query carrying that query's weight. Its one caller passed the inverse
-    inclusion probability of the stratified diagnosis sample; #532 removed
-    the diagnoses, and nothing passes weights now. ``n_rows`` is the input
-    row count the vector must match (``len(groups)``); ``row_idx`` is the
-    original-order index vector returned by
-    :func:`positive_row_contributions`. Returns ``weights[row_idx]`` as
-    float64 — the weight of each positive row, aligned element-for-element
-    with that call's ``contrib``.
-
-    Why this is a separate function rather than an optional argument of
-    :func:`positive_row_contributions`: a return arity that changes with an
-    argument is a footgun for callers that unpack it, and the two things
-    have genuinely different jobs — one ranks, one broadcasts.
+    ``weights`` is **row-aligned**: one entry per input row (``n_rows`` of
+    them), every row of a query carrying that query's weight. Returns
+    ``weights[row_idx]`` as float64, aligned element-for-element with the
+    ``contrib`` of the :func:`positive_row_contributions` call that returned
+    ``row_idx``.
     """
     w = np.asarray(weights, dtype=np.float64)
     if w.shape != (n_rows,):
@@ -322,10 +252,9 @@ def macro_from_per_item(
     Order of operations: (1) drop items with ``n_pos < min_positives``;
     (2) shrink each surviving value toward the pooled (n_pos-weighted)
     mean of the survivors with factor ``n/(n+k)``; (3) weight items
-    ``∝ n_pos**weight_alpha`` (alpha=0 → equal weight). Defaults reproduce
-    the plain equal-weight mean bit-for-bit (``np.dot`` with uniform weights
-    can differ from ``mean`` in the last ulp, so the inactive path returns
-    ``v.mean()`` directly — same principle as metrics_spark.macro_average).
+    ``∝ n_pos**weight_alpha`` (alpha=0 → equal weight). The defaults return
+    ``v.mean()`` directly: ``np.dot`` with uniform weights can differ from
+    ``mean`` in the last ulp (as in ``metrics_spark.macro_average``).
     Returns None when every item is excluded (caller picks the fallback).
     """
     keep = n_pos >= min_positives
@@ -357,64 +286,33 @@ def compute_macro_per_item_map(
 ) -> float:
     """Macro average over items of per-item attributed mAP@k.
 
-    Reproduces ``evaluation.metrics_spark`` ``macro_avg["by_item"]["map_attr@K"]``
-    on numpy arrays so the HPO loop can score a trial without a Spark job.
+    Must equal ``evaluation.metrics_spark``'s
+    ``macro_avg["by_item"]["map_attr@K"]``: HPO scores with this instead of a
+    Spark job.
 
-    Ranking is *within each query* (``groups``, e.g. ``(snap_date, cust_id)``),
-    exactly as in :func:`compute_mean_ap`. Each positive row contributes its
-    within-query cumulative precision ``prec_at_pos`` (zeroed when its rank is
-    beyond ``k``). Per item we average that contribution over the item's
-    positive rows (row-equal-weight); items are then combined via
-    :func:`macro_from_per_item`. ``k=None`` means no truncation — full mAP,
-    equivalent to ``k = n_items``.
+    Each positive row contributes its within-query cumulative precision
+    (:func:`positive_row_contributions`). Per item that contribution is
+    averaged over the item's positive rows (row-equal-weight), and items are
+    combined by :func:`macro_from_per_item`. ``k=None`` means no truncation.
 
-    ``weight_alpha`` / ``min_positives`` / ``shrinkage_k`` default to
-    ``0``/``0``/``0``, which reproduces the original plain equal-weight
-    macro over items — required for backward compatibility with
-    ``tune_hyperparameters`` (HPO loop), which calls this positionally.
-    Order of operations when non-default: (1) ``min_positives`` drops
-    cold items; (2) ``shrinkage_k`` shrinks surviving per-item values
-    toward the pooled (n_pos-weighted) mean of the survivors; (3)
-    ``weight_alpha`` weights items ``∝ n_pos**weight_alpha``. See
-    :func:`macro_from_per_item` for the exact formulas.
+    ``weights`` is **row-aligned, query-level**: giving a query weight ``w``
+    means exactly that query appearing ``w`` times. So each item's AP becomes
+    the weighted mean over its positive rows, and the ``n_pos`` handed to
+    :func:`macro_from_per_item` is the sum of those weights, which
+    ``min_positives`` / ``shrinkage_k`` / ``weight_alpha`` then see. The
+    combine across items stays equal-weight (a replayed query adds no items),
+    so ``weights`` is not passed to :func:`macro_from_per_item` as well: that
+    would count it twice. ``weights=None`` runs the unweighted path, not an
+    ``np.ones`` fill-in, so the unweighted value stays bit-for-bit.
 
-    ``weights`` (optional) is a **row-aligned, query-level** weight vector —
-    the inverse inclusion probability of a stratified sample, where
-    unweighted estimates are biased whenever the sampling ratio is below 1.
-    The diagnosis sample was the one caller that passed it; #532 removed the
-    diagnoses, and no caller passes it now. Semantics: giving a query
-    weight ``w`` is defined to be exactly equivalent to that query appearing
-    ``w`` times in the input. Concretely,
-    each item's AP becomes the *weighted* mean over its positive rows, and the
-    per-item ``n_pos`` handed to :func:`macro_from_per_item` becomes the sum of
-    those weights — so ``min_positives`` / ``shrinkage_k`` / ``weight_alpha``
-    all see the effective (weighted) count rather than the raw row count.
+    Empty input, no positive rows anywhere, or every item excluded by
+    ``min_positives`` returns ``0.0``.
 
-    The macro combine across items stays equal-weight: weighting corrects each
-    item's *within-item* estimate, it does not re-weight the items themselves.
-    That is precisely the duplication semantics — replaying a query does not
-    add items to the catalogue. This is also why ``weights`` is not threaded
-    into :func:`macro_from_per_item`: its ``n_pos`` argument already carries
-    the weight, so a second weight channel there would double-count.
-
-    ``weights=None`` (the default) runs the original unweighted code path
-    verbatim — no ``np.ones`` fill-in — so the main metric path stays
-    bit-for-bit what it was before the weighted path was added.
-
-    Empty input, or no positive rows anywhere, returns ``0.0``. If every
-    item is excluded by ``min_positives``, also returns ``0.0``.
-
-    Implementation mirrors :func:`compute_mean_ap`: one sort on
-    ``(groups, -y_score, items)`` (``O(N log N)``) via
-    :func:`positive_row_contributions`, then a vectorized per-item
-    aggregation via ``np.unique`` + ``np.bincount``. ``items`` is both the
-    tie-break and the per-item key, so HPO may pass the order-preserving codes
-    of :func:`recsys_tfb.utils.ranking.item_sort_codes` in place of the values.
-
-    ``event_keys`` is only the tie-break, never a per-item key: with ``event``
-    declared, one item's several rows in a query group still all attribute to
-    that item, which is what makes the per-item macro comparable across the
-    two shapes.
+    ``items`` is both the tie-break and the per-item key, so HPO may pass the
+    order-preserving codes of :func:`recsys_tfb.utils.ranking.item_sort_codes`
+    in place of the values. ``event_keys`` is only the tie-break, never a
+    per-item key: one item's several rows in a query group all attribute to
+    that item, which keeps the macro comparable with and without ``event``.
     """
     contrib_all, row_idx = positive_row_contributions(
         groups, items, y_true, y_score, k, event_keys
@@ -435,10 +333,9 @@ def compute_macro_per_item_map(
         counts = np.bincount(inv)
     else:
         sums = np.bincount(inv, weights=contrib_all * w_pos)
-        # Weighted denominator: the effective number of positive rows behind
-        # each item, NOT len(rows). Using the raw count here would divide
-        # weighted mass by unweighted support and silently rescale every
-        # per-item AP.
+        # The effective number of positive rows behind each item, not the row
+        # count: dividing weighted mass by the raw count would silently
+        # rescale every per-item AP.
         counts = np.bincount(inv, weights=w_pos)
 
     per_item = sums / counts
@@ -455,32 +352,22 @@ def compute_pooled_average_precision(
 ) -> float:
     """Average precision with every row one binary prediction, all in one pool.
 
-    The HPO objective ``pooled_average_precision`` (#430). No query group and
-    no item enter it: the rows are ranked by score across the whole of val,
-    which is the reading a deployment trained on impression logs looks at
-    (ADR-0024's background). Ranking across groups also rewards telling apart
-    the entities that tend to have positives at all — no help to the ranking
-    inside a group, and the reason this is an objective one opts into.
+    The HPO objective ``pooled_average_precision``. No query group and no item
+    enter it: rows are ranked by score across the whole of val. That also
+    rewards telling apart the entities that tend to have positives at all, no
+    help to the ranking inside a group, which is why it is opt-in.
 
-    Computed by ``sklearn.metrics.average_precision_score``, so the value can
-    be reconciled with it exactly. That is also its tie rule: tied scores form
-    one threshold, whatever order the rows arrive in — unlike the ranking
-    metrics in this module, which break ties by item. ``weights`` is the val
-    table's ``zero_positive_group_weight`` (1, or ``1 / r`` on a kept group
-    holding no positive): a design weight, not an unbiased estimate (ADR-0025
+    Computed by ``sklearn.metrics.average_precision_score``, so it reconciles
+    with it exactly, tie rule included: tied scores form one threshold, unlike
+    the ranking metrics here, which break ties by item. ``weights`` is the val
+    table's ``zero_positive_group_weight``, a design weight (ADR-0025
     decision 3). Leave it out and each kept zero-positive group counts once
-    instead of ``1 / r`` times — a valid number for a different population,
-    with nothing to say so.
+    instead of ``1 / r`` times: a number for a different population, with
+    nothing to say so.
 
-    scikit-learn is imported here rather than at the top: importing
-    ``sklearn.metrics`` takes about 0.6 s, and every importer of this module
-    (the reports, ``scripts/``) would pay it for two functions only
-    the HPO loop calls.
-
-    No positive row raises ``ValueError``: a **pre-check** on the input.
-    scikit-learn would answer ``-0.0`` with a ``UserWarning``, and a constant
-    scores every HPO trial alike. ``tune_hyperparameters`` stops a val set
-    like this before its first trial; this is the backstop for other callers.
+    No positive row raises ``ValueError`` (pre-check): scikit-learn would
+    return ``-0.0`` with a ``UserWarning``, a constant that scores every HPO
+    trial alike.
 
     Test scores the same definition on Spark
     (``metrics_spark.compute_pooled_average_precision``, ADR-0028 decision 4).
@@ -501,37 +388,26 @@ def compute_macro_per_item_average_precision(
 ) -> float:
     """Mean over items of each item's :func:`compute_pooled_average_precision`.
 
-    The HPO objective ``macro_per_item_average_precision`` (#430): one average
+    The HPO objective ``macro_per_item_average_precision``: one average
     precision per item over that item's rows, then the plain mean, so an item
     shown a lot does not drown out one shown rarely. Tie rule and ``weights``
     as in :func:`compute_pooled_average_precision`.
 
-    **It compares a row only with rows of the same item.** Average precision
-    reads the order of scores, not how close they are to 0, and here a row's
-    score counts as high or low only against the same item's other rows. So it
-    checks that an item's positives score above that item's negatives; it does
-    not check that scores are comparable across items. Adding one constant to
-    every score of an item leaves it unchanged, and a negative of item A
-    scored above a positive of item B costs nothing here, while it costs
-    points in :func:`compute_pooled_average_precision`. Fit for scores each
-    item uses on its own (a per-item threshold); for scores compared across
-    items — one item picked per query group, one shared threshold — use the
-    pooled one. Worked example: ``docs/pipelines/training.md`` §3.2; the
-    decision: ADR-0025 decision 4's addendum.
+    **It compares a row only with rows of the same item**, so it does not check
+    that scores are comparable across items: adding a constant to every score
+    of one item leaves it unchanged. For scores compared across items, use the
+    pooled one (``docs/pipelines/training.md`` §3.2; ADR-0025 decision 4's
+    addendum).
 
     **An item with no positive row in val is left out of the mean**, never
-    handed to scikit-learn — it would come back as ``-0.0`` with a warning and
-    pull the mean towards 0. That is also what ``compute_macro_per_item_map``
-    does: it counts items from their positive rows only. The consequence is
-    the caller's to show: with many items and few positives the mean covers a
-    handful of items, and an item with one or two positives weighs as much as
-    a large one. ``evaluation.metric``'s ``min_positives`` / ``weight_alpha``
+    handed to scikit-learn: its ``-0.0`` would pull the mean towards 0. This
+    matches ``compute_macro_per_item_map``, which counts items from their
+    positive rows. ``evaluation.metric``'s ``min_positives`` / ``weight_alpha``
     / ``shrinkage_k`` are not read, matching what the HPO loop passes
-    ``compute_macro_per_item_map`` (#430).
+    ``compute_macro_per_item_map``.
 
-    One stable sort by item, then one contiguous slice per item. Masking
-    ``items == item`` per item instead costs a full pass over val for every
-    item — four times slower at 1000 items and 5 million rows (#430).
+    One stable sort by item, then one slice per item: masking ``items == item``
+    instead costs a full pass over val per item.
 
     No item with a positive raises ``ValueError``, for the reason given in
     :func:`compute_pooled_average_precision`. Its Spark twin on test is
