@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 廣告情境示例的端到端實跑，全 local[*]：
 #   原始表 → source_etl 四條（feature_etl 後比對特徵不偷看）→ dataset → training
-#   → inference（預期在入口被 A47 擋下）→ evaluation --post-training → digest
+#   → inference（預期在入口被 A47 擋下）→ evaluation --post-training
+#   → evaluation --post-training --prediction-quality → digest
 #
 # 這份 conf 宣告了候選層級特徵表（catalog 的 candidate_feature_table ＝ feature_realtime，
 # ADR-0026），所以離線推論不會跑：推論只讀 feature_table，模型卻需要那張表的欄，CLI 在入口
@@ -95,6 +96,8 @@ expect_inference_blocked() {
 run "inference（預期被 A47 擋下）" expect_inference_blocked
 
 run "evaluation --post-training" "$PY" -m recsys_tfb evaluation --env dev --post-training --model-version "$MODEL_VERSION"
+# 全部候選列的指標（ADR-0032）：讀上一步落地的 enriched_eval_predictions，不能跟上一步合成一次
+run "evaluation --post-training --prediction-quality" "$PY" -m recsys_tfb evaluation --env dev --post-training --prediction-quality --model-version "$MODEL_VERSION"
 
 if [ "$COMPARE" = 1 ]; then
   run "digest（比對基準）"     "$PY" digest.py --model-version "$MODEL_VERSION" --out data/digest.json --compare baseline_digest.json
