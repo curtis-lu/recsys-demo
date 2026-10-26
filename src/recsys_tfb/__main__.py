@@ -12,7 +12,7 @@ from recsys_tfb.core.logging import RunContext, setup_logging
 from recsys_tfb.core.runner import Runner
 from recsys_tfb.core.consistency import (
     validate_config_consistency,
-    compare_mutual_exclusive_errors,
+    evaluation_mode_flag_errors,
     compare_source_key_exists,
     date_split_overlap_errors,
     optional_role_monitoring_errors,
@@ -553,12 +553,10 @@ def _compare_only_input_errors(plan, catalog, catalog_config, params) -> list[st
 
 
 def _landed_input_errors(plan, catalog, catalog_config, names) -> list[str]:
-    """What a mode without ``prepare_eval_data`` (``--compare-only``,
-    ``--prediction-quality``) reads from an earlier standard run and cannot
-    find: each evaluated date ``plan`` lists without an
-    ``enriched_eval_predictions`` partition, and each of the JSON entries
-    ``names`` that is not there — one line each. Metadata only: a partition
-    listing and a file check."""
+    """What a mode without ``prepare_eval_data`` reads from an earlier standard
+    run and cannot find: the evaluated dates ``plan`` lists without an
+    ``enriched_eval_predictions`` partition, and the JSON entries ``names``
+    that are not there. Metadata only: a partition listing and a file check."""
     errors = []
     if plan is not None and plan.to_process:
         months = ",".join(d.strftime("%Y-%m-%d") for d in plan.to_process)
@@ -2070,7 +2068,7 @@ def evaluation(
     # so they run before the Spark cold start: a mistyped --compare key should
     # cost seconds, not a session build.
     # A13: mutual-exclusive
-    errs = compare_mutual_exclusive_errors(
+    errs = evaluation_mode_flag_errors(
         compare, compare_only, prediction_quality=prediction_quality)
     if errs:
         raise ConfigConsistencyError("\n".join(errs))
@@ -2267,6 +2265,8 @@ def evaluation(
             ["evaluation_segment_columns"],
         )
         if errors:
+            # The node's check words the same command (steps/snap_date_scope.py);
+            # the CLI may not import steps/ (S3), so each spells it.
             logger.error(
                 "--prediction-quality reads what the standard evaluation of "
                 "the same model_version, evaluation.snap_date and run mode "

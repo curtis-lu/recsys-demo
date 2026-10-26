@@ -1797,9 +1797,10 @@ class TestComputePredictionQuality:
             "test_zero_positive_group_ratio": None,
             "n_zero_positive_groups": None}
 
-    #: The payloads the function landed before ADR-0032 moved it, on these
-    #: same rows (monitoring, and --post-training at r = 0.5), less
-    #: ``config_fingerprint``: dumped from the code at the merge base.
+    #: The payloads this function landed before ADR-0032 (when it was a node of
+    #: the main report), on these same rows (monitoring, and --post-training
+    #: at r = 0.5), less ``config_fingerprint``: the family's numbers do not
+    #: depend on which mode computes them.
     GOLDEN = (Path(__file__).with_name("golden")
               / "prediction_quality_before_adr0032.json")
 

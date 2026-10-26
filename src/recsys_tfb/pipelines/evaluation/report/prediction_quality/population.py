@@ -37,7 +37,9 @@ QUESTION = "這一頁的數字是在哪些列上算的、是哪一種數字？"
 MATURITY_NOTE = (
     "label 觀察窗要成熟才準：評估日期的觀察窗還沒結束時，之後才會出現的正例"
     "在這裡被當成負例，precision、recall 與兩個 AUC 都會偏低。框架沒有資料判斷"
-    "觀察窗結束了沒，請自己確認。"
+    "觀察窗結束了沒，請自己確認。這份報表的 label 取自寫這份 "
+    "enriched_eval_predictions 分區的那次標準 evaluation；label 之後有回補，"
+    "要先重跑那條標準 evaluation 再跑這個模式。"
 )
 
 

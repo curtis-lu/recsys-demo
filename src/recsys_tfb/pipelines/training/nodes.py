@@ -1431,8 +1431,8 @@ def predict_and_write_test_predictions(
     # 0. NULL rather than 1.0 because no design weight applies, and evaluation
     # refuses a NULL weight under a positive ratio (the evaluated model's
     # dataset version and its predictions disagree) instead of reading it as
-    # a weight. Undeclared and ratio 0: the
-    # frame every existing deployment writes, unchanged.
+    # a weight. Undeclared and ratio 0: the frame every existing deployment
+    # writes, unchanged.
     carries_weight = test_carries_zero_positive_group_weight(parameters)
     declared = getattr(training_eval_predictions, "declared_columns", None)
     write_weight = carries_weight or (

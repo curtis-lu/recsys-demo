@@ -382,15 +382,12 @@ def read_manifest(version_dir: Path) -> dict:
 def dataset_version_test_ratio(base_dir: Path) -> float:
     """The ``dataset.test_zero_positive_group_ratio`` a dataset version was
     built with, as its manifest records it (the dataset command writes the
-    ``parameters_dataset`` it ran with there). Today's conf can differ: a
-    ratio raised with no dataset rerun, ``latest`` on an older version, or a
-    model evaluated by ``--model-version``.
+    ``parameters_dataset`` it ran with there). Today's conf can differ.
 
     An absent key reads as the default 0, through the same resolver the
     dataset nodes drew with: a version built before the key existed kept no
-    zero-positive test group. So does an absent manifest — every dataset run
-    writes one before it starts, so a directory without one was not built by
-    it, and nothing says its test kept those groups.
+    zero-positive test group. So does an absent manifest: nothing records
+    that its test kept those groups.
     """
     try:
         manifest = read_manifest(base_dir)
@@ -619,4 +616,3 @@ def compute_popularity_source_version(
         "sample_pool": sample_pool_entry,
         "label_table": label_table_entry,
     })
-

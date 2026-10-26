@@ -162,10 +162,10 @@ def test_static_coverage_floor():
     """
     total = sum(1 for _ in _node_calls())
     judgeable = sum(1 for _ in _judgeable_nodes())
-    # 61/59: ADR-0032 moved evaluation's `compute_prediction_quality` Node
-    # into the --prediction-quality mode's function (still one literal call)
-    # and added that mode's `generate_prediction_quality_report`, one more
-    # literal, statically judgeable call.
+    # 61/59: evaluation's `compute_prediction_quality` Node is one literal
+    # call in the --prediction-quality mode's function, beside that mode's
+    # `generate_prediction_quality_report`, a literal, statically judgeable
+    # call.
     # 60/58: #538 made evaluation's `generate_report` call dynamic (its
     # inputs are what the switched-on sections read, a computed dict) and
     # wrote `resolve_display_ks` as two literal calls (with and without the
@@ -868,7 +868,8 @@ class TestS3StepsPackagesStayInternal:
             [*PIPELINES.glob("*/steps/**/__init__.py"),
              *PIPELINES.glob("*/report/**/__init__.py")])
         report = PIPELINES / "evaluation" / "report"
-        for package in (report, report / "sections", report / "comparison"):
+        for package in (report, report / "sections", report / "comparison",
+                        report / "prediction_quality"):
             assert package / "__init__.py" in inits, (
                 f"{package.relative_to(PIPELINES)} was not scanned"
             )

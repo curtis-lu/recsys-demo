@@ -51,6 +51,8 @@ def test_the_maturity_reminder_is_always_there(spark):
         (note,) = [b for b in _draw(spark, **settings).blocks
                    if isinstance(b, Note)]
         assert note.warn and "觀察窗" in note.text, settings
+        # Where the label came from, and what to do when it was backfilled.
+        assert "那次標準 evaluation" in note.text and "重跑" in note.text, settings
 
 
 def test_the_ranking_metrics_population_is_said_apart(spark):

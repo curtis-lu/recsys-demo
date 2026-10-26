@@ -148,8 +148,6 @@ src/recsys_tfb/core/consistency.py #524
 src/recsys_tfb/core/consistency.py #524
 src/recsys_tfb/core/consistency.py #524
 src/recsys_tfb/core/consistency.py #524
-src/recsys_tfb/core/consistency.py #524
-src/recsys_tfb/core/consistency.py #524
 src/recsys_tfb/core/consistency.py #532
 src/recsys_tfb/core/consistency.py #532
 src/recsys_tfb/core/consistency.py #532

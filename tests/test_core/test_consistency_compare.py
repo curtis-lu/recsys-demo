@@ -7,7 +7,7 @@ from recsys_tfb.core.consistency import (
     _required_external_columns,
     compare_source_well_formed_errors,
     compare_source_key_exists,
-    compare_mutual_exclusive_errors,
+    evaluation_mode_flag_errors,
 )
 
 
@@ -281,16 +281,16 @@ class TestA12_KeyExists:
 
 class TestA13_MutualExclusive:
     def test_neither(self):
-        assert compare_mutual_exclusive_errors(None, None) == []
+        assert evaluation_mode_flag_errors(None, None) == []
 
     def test_only_compare(self):
-        assert compare_mutual_exclusive_errors("x", None) == []
+        assert evaluation_mode_flag_errors("x", None) == []
 
     def test_only_compare_only(self):
-        assert compare_mutual_exclusive_errors(None, "x") == []
+        assert evaluation_mode_flag_errors(None, "x") == []
 
     def test_both_raises(self):
-        errs = compare_mutual_exclusive_errors("x", "y")
+        errs = evaluation_mode_flag_errors("x", "y")
         assert any("mutually exclusive" in e.lower() for e in errs)
 
     @pytest.mark.parametrize("compare, compare_only", [("x", None), (None, "x")])
@@ -299,10 +299,10 @@ class TestA13_MutualExclusive:
         """ADR-0032 decision 6: the comparison's B side carries no weight and
         its common population was narrowed by A's, so the two sides of a
         binary metric would not be comparable."""
-        errs = compare_mutual_exclusive_errors(
+        errs = evaluation_mode_flag_errors(
             compare, compare_only, prediction_quality=True)
         assert any("--prediction-quality" in e for e in errs), errs
 
     def test_prediction_quality_alone_is_fine(self):
-        assert compare_mutual_exclusive_errors(
+        assert evaluation_mode_flag_errors(
             None, None, prediction_quality=True) == []

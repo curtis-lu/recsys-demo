@@ -449,7 +449,7 @@ evaluation:
 
 **r 從被評模型讀。** r（`dataset.test_zero_positive_group_ratio`）取自被評模型建 dataset 時的 dataset version manifest，讀法同 training 入口的 A54，不是今天設定檔的值。「要不要加權」、主報表「資料統計」段印的 r、設定指紋裡的 r，都用這個值；權重的值本身取自預測表的權重欄 `zero_positive_group_weight`。所以用 `--model-version` 評舊模型時，用的是舊模型當時的 r，今天設定檔的 r 改成多少都不影響。r ＝ 0 時 `--post-training` 的 test 表已經沒有無正例的組，二元指標會系統性偏高，入口就停下；打開的方法是設 r ＞ 0、重建 dataset、重訓。設定方式見 [dataset.md §3.7](dataset.md#37-沒有正例的-query-group-留多少)。
 
-**前提。** 這個模式讀已落地的 `enriched_eval_predictions`，不跑 `prepare_eval_data`、不重接 label。同一個模型、同一個月份要先跑過**同一種原料**的標準 evaluation（帶或不帶 `--post-training` 要一致）：這張表每個模型、每個月份只有一份，由最後一次跑的標準 evaluation 決定是哪一份。模式用分區指紋（`steps/snap_date_scope.py::restrict_to_current_eval_partitions` 那套）確認；不一致時停下，並印出要先跑的指令。
+**前提。** 這個模式讀已落地的 `enriched_eval_predictions`，不跑 `prepare_eval_data`、不重接 label：label 取自寫這份分區的那次標準 evaluation，label 之後有回補的話，要先重跑那條標準 evaluation 再跑這個模式。同一個模型、同一個月份要先跑過**同一種原料**的標準 evaluation（帶或不帶 `--post-training` 要一致）：這張表每個模型、每個月份只有一份，由最後一次跑的標準 evaluation 決定是哪一份。模式用分區指紋（`steps/snap_date_scope.py::restrict_to_current_eval_partitions` 那套）確認；不一致時停下，並印出要先跑的指令。
 
 **這個模式回答什麼。** 排序指標（mAP、precision@K、recall@K）看的是同一個 query group 裡誰排前面。有些使用者不這樣用模型：他們把每一列候選當成一次「會不會是正例」的預測，照分數切一刀，想知道切在哪裡、precision 與 recall 各是多少、每一段分數實際有多少正例（[ADR-0024](../adr/0024-prediction-quality-metric-family.md)）。這個模式給的就是這把尺：precision、recall、F1、`pr_auc`、`roc_auc` 與分箱表，整體＋per-item。
 
@@ -647,7 +647,7 @@ python -m recsys_tfb evaluation --env dev --model-version <M> --post-training --
 
 `<M>` 是模型版本，每次不同。第二條在 0 ＜ r ＜ 1 時是加權估計，r ＝ 1 時是精確值，r ＝ 0 在入口被 A64 擋下；r 是被評模型建 dataset 時的值（見 3.7 節）。
 
-前提：同一個模型、同一個月份要先跑過**同一種原料**的標準 evaluation（帶或不帶 `--post-training` 要與本次指令一致），因為這個模式讀它落地的 `enriched_eval_predictions`；不一致會停下並印出要先跑的指令。跟 `--compare`、`--compare-only` 互斥（A13）。
+前提：同一個模型、同一個月份要先跑過**同一種原料**的標準 evaluation（帶或不帶 `--post-training` 要與本次指令一致），因為這個模式讀它落地的 `enriched_eval_predictions`；不一致會停下並印出要先跑的指令。label 取自寫這份分區的那次標準 evaluation；label 之後有回補，要先重跑那條標準 evaluation 再跑這個模式。跟 `--compare`、`--compare-only` 互斥（A13）。
 
 輸出在 `data/evaluation/<model_version>/<snap_date>/prediction_quality/<post_training 或 monitoring>/all/`，內含 `prediction_quality.json` 與 `report.html`。不寫進主報表，也不動主報表的任何檔。
 

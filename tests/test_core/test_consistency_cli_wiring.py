@@ -118,7 +118,7 @@ def test_a12_a13_wired_into_evaluation_command_before_spark():
     # before it). Source inspection for the same reason as A22 above.
     src = inspect.getsource(m.evaluation)
     spark = src.index("get_or_create_spark_session(")
-    assert src.index("compare_mutual_exclusive_errors(") < spark, (
+    assert src.index("evaluation_mode_flag_errors(") < spark, (
         "A13 must fail before the Spark cold start, like A22"
     )
     assert src.index("compare_source_key_exists(") < spark, (
@@ -669,5 +669,5 @@ def test_a64_wired_after_the_model_s_dataset_version_and_before_spark():
 
 def test_a13_is_handed_the_prediction_quality_flag():
     src = inspect.getsource(m.evaluation)
-    assert ("compare_mutual_exclusive_errors(\n        compare, compare_only, "
+    assert ("evaluation_mode_flag_errors(\n        compare, compare_only, "
             "prediction_quality=prediction_quality)") in src

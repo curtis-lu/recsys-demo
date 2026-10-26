@@ -358,9 +358,7 @@ def count_query_groups_without_positive(
     sdf: SparkDataFrame, *, group_cols: list[str], label_col: str,
 ) -> int:
     """How many query groups of ``sdf`` hold no positive: ``sum(label) > 0``
-    is not true, the rule the ranking metrics' ``total_rel > 0`` filter and
-    the dataset's zero-positive draw both use, so a group of NULL labels
-    counts as holding none. One ``groupBy`` and one action."""
+    is not true, so a group of NULL labels counts as holding none."""
     total = F.sum(F.col(label_col))
     return sdf.groupBy(*group_cols).agg(total.alias("_total_rel")).filter(
         ~F.coalesce(F.col("_total_rel") > 0, F.lit(False))).count()

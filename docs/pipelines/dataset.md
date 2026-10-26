@@ -309,7 +309,7 @@ split 展開出不同的欄位集合（見 §3.4 與
 - 不變：**固定整數 K** 的組內排序指標（evaluation 的 Spark 端與 HPO 的 numpy 端都在計算時跳過無正例的組），逐值相同。
 - 會變：算在過濾之前的量。item 種數（某些 item 可能只出現在無正例的組）、由它解析出來的 `"all"` 的 K 與報表上依 item 種數裁掉的 K、evaluation `dataset_overview` 的各項總數與比率（列數、正樣本率……）。這是表裡多了那些組的如實反映，**不是 regression**。注意 `dataset_overview` 的數字**沒有加權**：它描述的是 dataset 留下來的這張表，所以正樣本率這類比率會隨 r 改變，既不是 r ＝ 0 時的值、也不是全部曝光的值；要估全部曝光，看 `--prediction-quality --post-training` 的加權數字。
 
-**evaluation 那一側。** 跑 `evaluation --post-training --prediction-quality` 時，被評模型建 dataset 時的 test r 必須大於 0（不變量 A64 在 evaluation 的 CLI 進入點擋下）：r ＝ 0 的 test 表已經沒有無正例的組，二元指標會系統性偏高。這個 r 是從被評模型的 dataset version manifest 讀的，不是今天設定檔的值；打開的方法是設 r ＞ 0、重建 dataset、重訓。r ＝ 1 時 test 母體上的數字是精確值，0 ＜ r ＜ 1 是加權估計（[evaluation.md §3.7](evaluation.md#37-預測品質指標家族--prediction-quality-模式)）。不加 `--post-training` 的 `--prediction-quality` 不受影響——它把 label 用 LEFT JOIN 接到推論結果上，沒經過 dataset 的篩選。
+**evaluation 那一側。** 跑 `evaluation --post-training --prediction-quality` 時，被評模型建 dataset 時的 test r 必須大於 0（不變量 A64 在 evaluation 的 CLI 進入點擋下）：r ＝ 0 的 test 表已經沒有無正例的組，二元指標會系統性偏高。這個 r 是從被評模型的 dataset version manifest 讀的，不是今天設定檔的值（manifest 缺席或沒記這個鍵也當 0，訊息說的是「沒有記錄大於 0 的 r」）；打開的方法是設 r ＞ 0、重建 dataset、重訓。r ＝ 1 時 test 母體上的數字是精確值，0 ＜ r ＜ 1 是加權估計（[evaluation.md §3.7](evaluation.md#37-預測品質指標家族--prediction-quality-模式)）。不加 `--post-training` 的 `--prediction-quality` 不受影響——它把 label 用 LEFT JOIN 接到推論結果上，沒經過 dataset 的篩選。
 
 r 該設多少、生產規模下撐不撐得住，repo 裡的合成資料推不出來（生產的 entity 母體是百萬級），要在接近生產的量上實測。
 

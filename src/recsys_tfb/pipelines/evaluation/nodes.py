@@ -795,9 +795,6 @@ def compute_prediction_quality(
     which rows the numbers are on. What each number means and cannot mean is
     in ``evaluation/prediction_quality.py``'s docstring.
 
-    Reads the partitions a standard run of the same run mode landed; it joins
-    no label itself, so the rows are exactly the standard run's.
-
     Pre-check (config): A64's predicate again, the runtime backstop of the
     CLI's (the model's r is 0 under ``--post-training``).
 
@@ -807,10 +804,6 @@ def compute_prediction_quality(
     that run. It takes ``evaluation_segment_columns`` for that check's
     ``joined`` list only (``compute_report_aggregates``' reason). Its result
     still inherits that JSON's record.
-
-    Cost: the bin aggregation (one shuffle over every evaluated row), plus
-    under ``--post-training`` one narrow scan of the weight column and one
-    ``groupBy`` per query group for the zero-positive group count.
     """
     post_training = bool(parameters.get("post_training"))
     ratio = evaluated_test_ratio(parameters) if post_training else None
@@ -883,10 +876,8 @@ def compute_prediction_quality(
         top_n=settings["top_n"],
     )
     # Decision — which rows these are, for the page's opening lines (ADR-0032
-    # decision 5): the run mode and the dates, and under --post-training r
-    # and how many
-    # zero-positive groups the dataset kept, the number of groups the weights
-    # stand in for. A key of its own, beside build_payload's.
+    # decision 5): the run mode and the dates, and under --post-training r and
+    # the zero-positive groups kept. A key of its own, beside build_payload's.
     out[PREDICTION_QUALITY_POPULATION_KEY] = {
         POPULATION_SOURCE_KEY: (
             POST_TRAINING_POPULATION if post_training else MONITORING_POPULATION),

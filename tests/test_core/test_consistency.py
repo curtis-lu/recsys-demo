@@ -2821,9 +2821,7 @@ class TestReportSectionKeysA34:
 
     def test_the_suggested_values_keep_what_an_absent_switch_does(self):
         """Writing what the message suggests must switch nothing: the
-        suggested value is the one an absent switch takes. (Before ADR-0032
-        one switch was off when absent, and a message suggesting ``true`` for
-        it turned a computation on.)"""
+        suggested value is the one an absent switch takes."""
         import re
 
         import yaml
@@ -4855,6 +4853,8 @@ class TestPredictionQualityTestRatioA64:
         assert "'abc12345'" in errs[0]
         assert "dataset.test_zero_positive_group_ratio" in errs[0]
         assert "rebuild the dataset" in errs[0] and "retrain" in errs[0]
+        # A missing manifest reads as 0 too, so the message claims no build.
+        assert "no recorded" in errs[0] and "counts as 0" in errs[0]
 
     @pytest.mark.parametrize("ratio", [0.2, 1.0])
     def test_a_model_whose_test_kept_some_is_accepted(self, ratio):
@@ -4862,7 +4862,7 @@ class TestPredictionQualityTestRatioA64:
 
     def test_monitoring_and_the_standard_run_are_not_affected(self):
         # Monitoring reads offline inference's output, which no dataset draw
-        # touched; the standard run computes no binary metric any more.
+        # touched; the standard run computes no binary metric.
         assert self._errors(0.0, post_training=False) == []
         assert self._errors(0.0, prediction_quality=False) == []
 

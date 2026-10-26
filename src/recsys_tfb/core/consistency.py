@@ -101,7 +101,7 @@ Layer 1 — config-static (implemented here; aggregated by
   flag would put two populations side by side: the other side carries no
   zero-positive group weight and its common population is narrowed by this
   side's (ADR-0032 decision 6). Predicate:
-  ``compare_mutual_exclusive_errors``.
+  ``evaluation_mode_flag_errors``.
 * A14 — ``schema.item`` appears in ``training.feature_selection.exclude``.
   Training-stage feature selection must never drop the item column (for a
   ranking task the item must stay a model feature; mirrors A2/A7). Predicate:
@@ -354,9 +354,8 @@ Layer 1 — config-static (implemented here; aggregated by
   the ``prediction_quality`` section out of the main report into the
   ``--prediction-quality`` mode (``MOVED_REPORT_SECTIONS``); a conf still
   spelling its switch, whatever the value, is told the flag in one message.
-  Both parts are **migration-period**, on #524's retirement list with
-  A33/A60/A63: once the company environment's conf spells the new names and
-  no longer the moved one, delete the two constants and their branches; the
+  Both parts are **migration-period**, retired with A33/A60/A63: once the
+  company environment's conf spells the new names and no longer the moved one, delete the two constants and their branches; the
   equality stays.
   The constant lives in ``core/`` because ``core/`` must not import the
   report layer. A ``sections`` block that declares no switch (absent, null or
@@ -834,6 +833,9 @@ Layer 1 — config-static (implemented here; aggregated by
   model's dataset version, before Spark starts). The ratio reaches the nodes
   under ``DATASET_TEST_RATIO_KEY`` (``evaluated_test_ratio``), which weigh
   rows by it. NOT aggregated, for A22's reason: that gate sees neither flag.
+  Runtime backstop: ``compute_prediction_quality`` runs the same predicate
+  again on the ratio the key carries, for a caller that does not go through
+  the evaluation command.
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -2691,8 +2693,9 @@ def evaluated_test_ratio(parameters: dict) -> float:
     """The test ratio of the dataset version the evaluated model was trained
     on (:data:`DATASET_TEST_RATIO_KEY`), not today's conf: a model evaluated
     by ``--model-version`` may predate a change to it (ADR-0032 decision 4).
-    Every evaluation reader of r takes it here — whether rows are weighted,
-    the ratio a report prints, A64.
+    The nodes that read r — whether rows are weighted, the ratio a report
+    prints, A64's runtime backstop — take it here; the evaluation command's
+    A64 check takes the manifest's value directly.
 
     Raises ``KeyError`` when the key is absent: the evaluation command sets it
     on every run, so an absent one means a caller did not, and reading it as
@@ -3668,7 +3671,7 @@ RENAMED_REPORT_SECTIONS: dict[str, str] = {
 #: A34 (migration-period part): a switch whose section left the main report
 #: for a mode of its own, ``switch -> the flag that runs it``. A conf still
 #: spelling one is told the flag, whatever its value, instead of reading the
-#: key as "declared, never read". On #524's retirement list beside
+#: key as "declared, never read". Retired together with
 #: :data:`RENAMED_REPORT_SECTIONS`: once the company environment's conf no
 #: longer spells it, delete this constant and the branch of
 #: ``report_section_key_errors`` that reads it; the equality check alone then
@@ -3801,10 +3804,11 @@ def prediction_quality_test_ratio_errors(
     return [
         f"A64: --prediction-quality --post-training reads the test table of "
         f"dataset version {dataset_version!r}, which the evaluated model was "
-        f"trained on, and that version was built with "
-        f"dataset.test_zero_positive_group_ratio 0: the dataset pipeline "
-        f"dropped every test query group holding no positive before the model "
-        f"scored it, so every metric of this mode would come out biased high. "
+        f"trained on, and that version has no recorded "
+        f"dataset.test_zero_positive_group_ratio above 0 (a missing manifest, "
+        f"or one without that key, counts as 0): a version built at 0 dropped "
+        f"every test query group holding no positive before the model scored "
+        f"it, so every metric of this mode would come out biased high. "
         f"To open it up: set dataset.test_zero_positive_group_ratio above 0, "
         f"rebuild the dataset (it moves base_dataset_version) and retrain. "
         f"Without --post-training this mode reads the inference population, "
@@ -5583,7 +5587,7 @@ def baseline_rebuild_dates_absent_errors(rebuild, periods) -> list[str]:
     ]
 
 
-def compare_mutual_exclusive_errors(
+def evaluation_mode_flag_errors(
     compare: str | None, compare_only: str | None, *,
     prediction_quality: bool = False,
 ) -> list[str]:

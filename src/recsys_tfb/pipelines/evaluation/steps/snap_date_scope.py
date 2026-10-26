@@ -293,10 +293,11 @@ def restrict_to_current_eval_partitions(
     )
 
 
-def standard_run_command(parameters: dict) -> str:
+def _standard_run_command(parameters: dict) -> str:
     """The standard evaluation run that writes the partitions a reader of
     this mode reads: same model, same run mode. ``--env`` is not in
-    ``parameters``, so it stays a placeholder."""
+    ``parameters``, so it stays a placeholder. ``__main__.py`` spells the same
+    command itself: the CLI may not import ``steps/`` (S3)."""
     mode = " --post-training" if parameters.get("post_training") else ""
     model_version = parameters.get("model_version") or "<model_version>"
     return (f"python -m recsys_tfb evaluation --env <env> "
@@ -315,10 +316,10 @@ def require_partitions_of_the_standard_run(
     another run mode or other settings wrote since
     (:func:`restrict_to_current_eval_partitions`, whose fingerprint holds
     ``post_training``). Both name the standard run to do first
-    (:func:`standard_run_command`), not ``--from-node prepare_eval_data``:
+    (:func:`_standard_run_command`), not ``--from-node prepare_eval_data``:
     this mode has no such node. The same one Spark job as that check.
     """
-    advice = (f"Run `{standard_run_command(parameters)}` first, then this "
+    advice = (f"Run `{_standard_run_command(parameters)}` first, then this "
               "mode again.")
     not_current = None
     try:
@@ -329,14 +330,17 @@ def require_partitions_of_the_standard_run(
         not_current, missing = error, error.dates_without_rows
     problems = []
     if missing:
+        # The not-current message ends with the advice; say it once.
         problems.append(
             f"enriched_eval_predictions holds no row for evaluated date(s) "
             f"{missing}: no standard evaluation of this model in this run "
-            f"mode has written them. {advice}")
+            f"mode has written them."
+            + ("" if not_current is not None else f" {advice}"))
     if not_current is not None:
         problems.append(str(not_current))
     if problems:
-        raise DataConsistencyError("\n".join(problems)) from not_current
+        # ``from None``: the cause's text is already in the message.
+        raise DataConsistencyError("\n".join(problems)) from None
     return partitions.frame
 
 
