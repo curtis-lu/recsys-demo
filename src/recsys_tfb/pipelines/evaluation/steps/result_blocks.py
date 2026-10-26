@@ -1,18 +1,14 @@
-"""What each landed result of the evaluation pipeline holds, declared beside
-the node that writes it (ADR-0031 principle 2, supplement 2).
+"""The types the evaluation pipeline declares its landed results with
+(ADR-0031 principle 2, supplement 2); the declarations are in
+``result_catalog``.
 
-A *block* is a top-level key of a landed result (one JSON dict). A node's
-module declares a :class:`Produces` per result it lands, directly above the
-node; ``tests/test_pipelines/test_evaluation/test_result_blocks.py`` checks the
-node writes exactly those blocks, and ``pipeline.result_readers_table`` joins
-the declarations with the wiring and the report sections' ``READS`` to list
-who reads each one.
+A *block* is a top-level key of a landed result (one JSON dict).
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from types import ModuleType
 
 
 @dataclass(frozen=True)
@@ -40,17 +36,14 @@ class Produces:
     blocks: tuple[Block, ...]
 
 
-def declared_results(module: ModuleType) -> dict[str, Produces]:
-    """Every :class:`Produces` among ``module``'s top-level names, by result.
+def by_result(declarations: Iterable[Produces]) -> dict[str, Produces]:
+    """``declarations`` keyed by result, in their order.
 
     Raises when two declare the same result: a result has one producer.
     """
     found: dict[str, Produces] = {}
-    for value in vars(module).values():
-        if not isinstance(value, Produces):
-            continue
-        if value.result in found:
-            raise ValueError(
-                f"{value.result!r} is declared twice in {module.__name__}")
-        found[value.result] = value
+    for produces in declarations:
+        if produces.result in found:
+            raise ValueError(f"{produces.result!r} is declared twice")
+        found[produces.result] = produces
     return found
