@@ -307,7 +307,7 @@ def test_compute_per_query_metrics_shape(spark):
     )
     assert set(per_query.columns) == {
         "snap_date", "cust_id", "total_rel",
-        "map@3", "precision@3", "recall@3",
+        "map@3", "precision@3", "recall@3", "f1@3", "hit_rate@3",
     }
     # One row per (snap_date, cust_id) — 2 customers in the fixture.
     assert per_query.count() == 2
@@ -366,10 +366,45 @@ def test_aggregate_overall_known_values(spark):
         enriched, ["snap_date", "cust_id"], "label", [3]
     )
     overall = ms.aggregate_overall(per_query, [3])
-    assert set(overall.keys()) == {"map@3", "precision@3", "recall@3"}
+    assert set(overall.keys()) == {"map@3", "precision@3", "recall@3",
+                                   "f1@3", "hit_rate@3"}
     assert abs(overall["map@3"] - 11 / 12) < 1e-9
     assert abs(overall["precision@3"] - 0.5) < 1e-9
     assert abs(overall["recall@3"] - 1.0) < 1e-9
+
+
+def test_f1_and_hit_rate_overall_known_values(spark):
+    """Three query groups, worked by hand:
+
+        g1: A(+) B    C(+)   total_rel 2
+        g2: B    C    A(+)   total_rel 1   (no hit before rank 3)
+        g3: C(+) A    B(+)   total_rel 2
+
+    F1@K per group = 2 · hits / (K + total_rel), the harmonic mean of the
+    group's precision@K and recall@K; 0 with no hit. Then the plain mean:
+        K=1: g1 2/3, g2 0,   g3 2/3  → 4/9
+        K=2: g1 1/2, g2 0,   g3 1/2  → 1/3
+        K=3: g1 4/5, g2 1/2, g3 4/5  → 7/10
+    At K=3 that is not the harmonic mean of the averaged precision (5/9) and
+    recall (1), 5/7: F1 is a query-group metric, averaged last.
+
+    hit_rate@K = the share of groups with a positive in the top K:
+        K=1: 2/3 (g2 misses), K=2: 2/3, K=3: 1.
+    """
+    rows = [("g1", "A", 0.9, 1), ("g1", "B", 0.5, 0), ("g1", "C", 0.1, 1),
+            ("g2", "B", 0.8, 0), ("g2", "C", 0.4, 0), ("g2", "A", 0.2, 1),
+            ("g3", "C", 0.7, 1), ("g3", "A", 0.6, 0), ("g3", "B", 0.3, 1)]
+    df = spark.createDataFrame(
+        [("20240331", g, item, score, label) for g, item, score, label in rows],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label"])
+    overall = _bundle(df, _make_parameters(k_values=[1, 2, 3]))["overall"]
+
+    assert overall["f1@1"] == pytest.approx(4 / 9)
+    assert overall["f1@2"] == pytest.approx(1 / 3)
+    assert overall["f1@3"] == pytest.approx(7 / 10)
+    assert overall["hit_rate@1"] == pytest.approx(2 / 3)
+    assert overall["hit_rate@2"] == pytest.approx(2 / 3)
+    assert overall["hit_rate@3"] == pytest.approx(1.0)
 
 
 def test_aggregate_overall_recall_at_k_equals_n_items_is_one(spark):
@@ -418,7 +453,8 @@ def test_aggregate_per_segment_equal_customer_weight(spark):
     assert abs(per_seg["mass"]["map@3"] - 5 / 6) < 1e-9
     assert abs(per_seg["affluent"]["map@3"] - 1.0) < 1e-9
     for seg in per_seg:
-        assert set(per_seg[seg].keys()) == {"map@3", "precision@3", "recall@3"}
+        assert set(per_seg[seg].keys()) == {
+            "map@3", "precision@3", "recall@3", "f1@3", "hit_rate@3"}
 
 
 def test_aggregate_per_segment_non_string_keys_stringified(spark):

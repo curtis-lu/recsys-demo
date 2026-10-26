@@ -10,8 +10,9 @@ Layered structure (each layer has a single responsibility):
 
     Layer 2: per-query metrics                 (Spark DF → Spark DF)
         compute_per_query_metrics      one row per query;
-                                       columns: group_cols, total_rel,
-                                                map@K, precision@K, recall@K
+                                       columns: group_cols, total_rel, and
+                                                every query-group entry of
+                                                metric_catalog at each K
 
     Layer 3: aggregations                      (Spark DF → Python dict)
         aggregate_overall              query-equal-weight mean of per-query
@@ -71,7 +72,9 @@ collected to the driver.
 
 from __future__ import annotations
 
+import functools
 import logging
+import operator
 from typing import Iterable, Mapping, NamedTuple, Sequence
 
 import numpy as np
@@ -92,7 +95,10 @@ from recsys_tfb.evaluation.metric_catalog import (
     ITEM_SHARED_NUMBERS,
     ITEM_SHARED_NUMBERS_PER_K,
     QUERY_GROUP,
+    Expr,
+    Ratio,
     metrics_of,
+    shared,
 )
 from recsys_tfb.evaluation.metrics import (
     all_positive_accounts,
@@ -795,6 +801,47 @@ def _query_group_number(name: str, k: int) -> F.Column:
     return F.col(f"_{name}_{k}")
 
 
+def _spark_least(a, b) -> F.Column:
+    return F.least(*(v if isinstance(v, F.Column) else F.lit(v)
+                     for v in (a, b)))
+
+
+#: The operators of a ``metric_catalog.Expr`` on Spark columns. Spark's
+#: division by 0 is NULL: the metric is undefined there.
+_SPARK_OPS = {"+": operator.add, "*": operator.mul, "/": operator.truediv,
+              "min": _spark_least}
+
+_ARITHMETIC = {"+": operator.add, "*": operator.mul, "/": operator.truediv,
+               "min": min}
+
+
+def _driver_apply(op: str, a, b):
+    """``op`` on collected numbers; ``None``, the metric undefined, for a
+    division by 0 and for anything combined with ``None``."""
+    if a is None or b is None or (op == "/" and b == 0):
+        return None
+    return _ARITHMETIC[op](a, b)
+
+
+#: The same operators on an item's collected cell.
+_DRIVER_OPS = {op: functools.partial(_driver_apply, op) for op in _ARITHMETIC}
+
+
+def _evaluate(formula: Ratio | Expr, number, ops: Mapping):
+    """``formula`` with each shared number read by ``number(name)`` and each
+    operator by ``ops`` — :data:`_SPARK_OPS` per query group,
+    :data:`_DRIVER_OPS` on an item's collected cell. A ``Ratio`` is
+    ``numerator / denominator``."""
+    if isinstance(formula, Ratio):
+        formula = shared(formula.numerator) / shared(formula.denominator)
+    if formula.op == "shared":
+        return number(formula.args[0])
+    if formula.op == "constant":
+        return formula.args[0]
+    left, right = (_evaluate(a, number, ops) for a in formula.args)
+    return ops[formula.op](left, right)
+
+
 def compute_per_query_metrics(
     enriched: SparkDataFrame,
     group_cols: list[str],
@@ -813,8 +860,8 @@ def compute_per_query_metrics(
     Shared numbers, summed per query and K, that the formulas divide:
         ap_sum@K     = sum(ap_contrib@K)
         hits@K       = sum(label * top_k@K)
-    Each entry's formula is a ``metric_catalog.Ratio`` of two of them,
-    ``total_rel`` or ``K``.
+    Each entry's formula (a ``metric_catalog.Ratio`` or ``Expr``) combines
+    them, ``total_rel`` and ``K``.
 
     See module docstring for the degenerate behaviour of precision@K and
     recall@K when K >= n_items.
@@ -838,8 +885,9 @@ def compute_per_query_metrics(
         for metric in metrics_of(QUERY_GROUP):
             per_query = per_query.withColumn(
                 metric.key(k),
-                _query_group_number(metric.formula.numerator, k)
-                / _query_group_number(metric.formula.denominator, k),
+                _evaluate(metric.formula,
+                          lambda name: _query_group_number(name, k),
+                          _SPARK_OPS),
             )
         per_query = per_query.drop(f"_ap_sum_{k}", f"_hits_{k}")
 
@@ -999,14 +1047,12 @@ def _item_metric_cell(cell: dict, k_values: list[int]) -> dict | None:
     numbers by its formula, the ones without K first, then the per-K ones at
     each K; plus ``n_pos``, the weight ``macro_average`` reads.
 
-    A metric whose denominator is 0 is undefined and left out of the cell, and
-    a cell left with no metric is ``None``.
+    A metric that divides by 0 is undefined and left out of the cell, and a
+    cell left with no metric is ``None``.
     """
     def value(metric, k: int | None) -> float | None:
-        denominator = _item_number(cell, metric.formula.denominator, k)
-        if denominator == 0:
-            return None
-        return _item_number(cell, metric.formula.numerator, k) / denominator
+        return _evaluate(metric.formula,
+                         lambda name: _item_number(cell, name, k), _DRIVER_OPS)
 
     entries = [(m.key(), value(m, None))
                for m in metrics_of(ITEM) if not m.per_k]

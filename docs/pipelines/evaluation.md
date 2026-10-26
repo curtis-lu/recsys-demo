@@ -105,7 +105,7 @@ pipeline 會先依 `model_version` 與 `snap_date` 篩選預測。**每一個**�
 
 | 層次 | 指標 |
 |---|---|
-| Overall／per-segment | `map@K`、`precision@K`、`recall@K` |
+| Overall／per-segment | `map@K`、`precision@K`、`recall@K`、`f1@K`、`hit_rate@K` |
 | Per-item | `recall@K`、`map_attr@K`、`mean_pos` |
 | Macro average | 對 item、segment 或 item-segment 等權平均 |
 

@@ -6,8 +6,9 @@ names them here by entry (:func:`entry`), so a name it shows is one the
 computation produces.
 
 **Data only.** No computation and no Spark object: a formula says which shared
-numbers it combines and how (:class:`Ratio`), and ``metrics_spark`` computes it
-— as Spark columns per query group, or from each item's collected numbers. So
+numbers it combines and how (:class:`Ratio`, :class:`Expr`), and
+``metrics_spark`` computes it — as Spark columns per query group, or from
+each item's collected numbers. So
 a report reading the catalog imports nothing that computes (ADR-0031
 principle 1), and reading it pulls in neither Spark nor pandas.
 
@@ -71,9 +72,10 @@ ITEM_SHARED_NUMBERS: dict[str, str] = {
 ITEM_SHARED_NUMBERS_PER_K = ("n_top", "hits", "ap_sum")
 
 
-# :class:`Ratio` says every metric the catalog holds. A metric it cannot say
-# (F1@K combines two ratios) comes with a new shape here and the code in
-# ``metrics_spark`` that builds it.
+# Two formula shapes: :class:`Ratio`, one shared number over another, and
+# :class:`Expr`, arithmetic over them for a metric that is not a ratio (F1@K,
+# hit_rate@K). ``metrics_spark`` evaluates both, so an entry written in either
+# needs no change to the Spark code.
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,63 @@ class Ratio:
 
 
 @dataclass(frozen=True)
+class Expr:
+    """Arithmetic over the method's shared numbers: built from
+    :func:`shared`, plain numbers, ``+``, ``*``, ``/`` and :func:`at_most`,
+    e.g. ``2 * shared("hits") / (shared("K") + shared("total_rel"))``.
+
+    A tree, not a string: ``op`` is ``"shared"`` (``args`` holds the name),
+    ``"constant"`` (the number), or one of ``+ * / min`` on two sub-trees. A
+    division by 0 leaves the metric undefined, as a :class:`Ratio`'s does.
+    """
+
+    op: str
+    args: tuple
+
+    def __add__(self, other) -> Expr:
+        return Expr("+", (self, _expr(other)))
+
+    def __radd__(self, other) -> Expr:
+        return Expr("+", (_expr(other), self))
+
+    def __mul__(self, other) -> Expr:
+        return Expr("*", (self, _expr(other)))
+
+    def __rmul__(self, other) -> Expr:
+        return Expr("*", (_expr(other), self))
+
+    def __truediv__(self, other) -> Expr:
+        return Expr("/", (self, _expr(other)))
+
+    def __rtruediv__(self, other) -> Expr:
+        return Expr("/", (_expr(other), self))
+
+    def __str__(self) -> str:
+        if self.op in ("shared", "constant"):
+            return str(self.args[0])
+        if self.op == "min":
+            return f"min({self.args[0]}, {self.args[1]})"
+        left, right = (f"({a})" if a.op in ("+", "*", "/") else str(a)
+                       for a in self.args)
+        return f"{left} {self.op} {right}"
+
+
+def _expr(value) -> Expr:
+    return value if isinstance(value, Expr) else Expr("constant", (value,))
+
+
+def shared(name: str) -> Expr:
+    """The shared number ``name`` of the entry's method."""
+    return Expr("shared", (name,))
+
+
+def at_most(value, cap) -> Expr:
+    """``min(value, cap)``: ``at_most(shared("hits"), 1)`` is 1 when the
+    group has a hit, else 0."""
+    return Expr("min", (_expr(value), _expr(cap)))
+
+
+@dataclass(frozen=True)
 class Metric:
     """One metric: a name in one method.
 
@@ -103,7 +162,7 @@ class Metric:
 
     name: str
     method: str
-    formula: Ratio
+    formula: Ratio | Expr
     per_k: bool
     grains: tuple[str, ...]
     population: str
@@ -165,6 +224,33 @@ METRICS: tuple[Metric, ...] = (
         population=_QUERY_GROUP_POPULATION,
         display_name="recall",
         definition="前 K 名裡的正例數 ÷ 該組的正例數，再對 query group 等權平均。",
+    ),
+    Metric(
+        name="f1",
+        method=QUERY_GROUP,
+        formula=2 * shared("hits") / (shared("K") + shared("total_rel")),
+        per_k=True,
+        grains=_QUERY_GROUP_GRAINS,
+        population=_QUERY_GROUP_POPULATION,
+        display_name="f1",
+        definition=(
+            "每個 query group 的 precision@K 與 recall@K 的調和平均（前 K 名沒有"
+            "正例時是 0），再對 query group 等權平均；不是先平均 precision 與 "
+            "recall 再取調和平均。"
+        ),
+    ),
+    Metric(
+        name="hit_rate",
+        method=QUERY_GROUP,
+        formula=at_most(shared("hits"), 1),
+        per_k=True,
+        grains=_QUERY_GROUP_GRAINS,
+        population=_QUERY_GROUP_POPULATION,
+        display_name="hit_rate",
+        definition=(
+            "前 K 名裡至少有一個正例的 query group 佔幾成。舊版 metrics.json "
+            "per-item 區塊裡的 hit_rate@K 是 per-item recall，跟這個不同。"
+        ),
     ),
     Metric(
         name="recall",

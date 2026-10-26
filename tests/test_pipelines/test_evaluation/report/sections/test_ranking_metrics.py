@@ -29,12 +29,14 @@ from tests.test_pipelines.test_evaluation.report.sections import landed
 #: The demo's table titles, in page order (decision 16).
 ITEM_GRAIN_TITLES = [
     "map@K · 整體與各分群", "precision@K · 整體與各分群",
-    "recall@K · 整體與各分群", "map_attr@K · 各 item",
+    "recall@K · 整體與各分群", "f1@K · 整體與各分群",
+    "hit_rate@K · 整體與各分群", "map_attr@K · 各 item",
     "per-item recall@K · 各 item",
 ]
 CATEGORY_GRAIN_TITLES = [
     "map@K · 整體與各分群", "precision@K · 整體與各分群",
-    "recall@K · 整體與各分群", "map_attr@K · 各大類",
+    "recall@K · 整體與各分群", "f1@K · 整體與各分群",
+    "hit_rate@K · 整體與各分群", "map_attr@K · 各大類",
     "per-item recall@K · 各大類",
 ]
 
@@ -80,7 +82,7 @@ def test_one_table_per_catalog_metric_at_k_at_each_grain(spark):
     assert [t.title for t in grains["item 粒度"]] == ITEM_GRAIN_TITLES
     assert [t.title for t in grains["大類粒度"]] == CATEGORY_GRAIN_TITLES
     # The count the acceptance names: the catalog's per-K metrics × 2 grains.
-    assert len(_tables(s)) == _per_k_count() * 2 == 10
+    assert len(_tables(s)) == _per_k_count() * 2 == 14
 
 
 def test_without_categories_only_the_item_grain(spark):
@@ -93,9 +95,9 @@ def test_without_categories_only_the_item_grain(spark):
 def test_the_blocks_come_in_the_demo_s_order(spark):
     s, _ = _draw(spark)
     kinds = [type(b).__name__ for b in s.blocks]
-    assert kinds == (["Paragraph", "Heading"] + ["Table"] * 3 + ["Definitions"]
+    assert kinds == (["Paragraph", "Heading"] + ["Table"] * 5 + ["Definitions"]
                      + ["Table"] * 2 + ["Definitions", "Heading"]
-                     + ["Table"] * 5)
+                     + ["Table"] * 7)
     assert s.blocks[0].muted
     assert (s.key, s.title, s.title_en) == (
         "ranking_metrics", "排序指標", "Ranking metrics")
@@ -316,7 +318,7 @@ def test_a_per_k_query_group_metric_added_to_the_catalog_gets_its_tables(
         m["per_segment"]["seg_1"][f"toy@{k}"] = 0.2 * k
     s = ranking_metrics.build(results, parameters)
     item_grain = [t.title for t in _grain_tables(s)["item 粒度"]]
-    assert item_grain[:4] == ITEM_GRAIN_TITLES[:3] + ["toy@K · 整體與各分群"]
+    assert item_grain[:6] == ITEM_GRAIN_TITLES[:5] + ["toy@K · 整體與各分群"]
     toy = _table(s, "toy@K · 整體與各分群")
     assert toy.rows[0].cells == pytest.approx((0.1, 0.2, 0.3, 0.4))
     assert toy.rows[1].cells == pytest.approx((0.2, 0.4, 0.6, 0.8))
@@ -331,7 +333,7 @@ def test_the_tables_and_the_description_name_metrics_by_display_name(
             "map", mc.QUERY_GROUP) else m for m in mc.METRICS))
     s, _ = _draw(spark)
     assert _tables(s)[0].title == "MAP!@K · 整體與各分群"
-    assert "（MAP!、precision、recall）" in s.blocks[0].text
+    assert "（MAP!、precision、recall、f1、hit_rate）" in s.blocks[0].text
 
 
 def test_the_definitions_are_the_catalog_s_under_each_group(spark):
@@ -342,7 +344,9 @@ def test_the_definitions_are_the_catalog_s_under_each_group(spark):
         (f"{m.display_name}@K", m.definition)
         for m in (mc.entry("map", mc.QUERY_GROUP),
                   mc.entry("precision", mc.QUERY_GROUP),
-                  mc.entry("recall", mc.QUERY_GROUP)))
+                  mc.entry("recall", mc.QUERY_GROUP),
+                  mc.entry("f1", mc.QUERY_GROUP),
+                  mc.entry("hit_rate", mc.QUERY_GROUP)))
     assert defs[1].entries == (
         ("map_attr@K", mc.entry("map_attr", mc.ITEM).definition),
         ("per-item recall@K", mc.entry("recall", mc.ITEM).definition),
@@ -354,7 +358,7 @@ def test_the_definitions_are_the_catalog_s_under_each_group(spark):
 def test_the_description_names_the_methods_and_the_column_at_all(spark):
     s, _ = _draw(spark)
     text = s.blocks[0].text
-    assert "（map、precision、recall）" in text
+    assert "（map、precision、recall、f1、hit_rate）" in text
     assert "（map_attr、per-item recall）" in text
     assert "@4 是全部候選" in text
 
