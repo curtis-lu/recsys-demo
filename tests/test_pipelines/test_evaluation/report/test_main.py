@@ -848,8 +848,11 @@ def test_assemble_report_places_prediction_quality_after_the_metrics_section():
 # --- ADR-0025 decision 3: the kept zero-positive groups, where they show -----
 
 def _kept_params(ratio, post_training=True):
+    """``ratio`` is the evaluated model's r, as the CLI hands it on."""
+    from recsys_tfb.core.consistency import DATASET_TEST_RATIO_KEY
+
     p = _pq_params(post_training=post_training)
-    p["dataset"] = {"test_zero_positive_group_ratio": ratio}
+    p[DATASET_TEST_RATIO_KEY] = ratio
     return p
 
 
@@ -949,7 +952,9 @@ def _ap_params(drop=None, *, occasion=False, event=False, post_training=None,
     if post_training is not None:
         p["post_training"] = post_training
     if ratio is not None:
-        p["dataset"] = {"test_zero_positive_group_ratio": ratio}
+        from recsys_tfb.core.consistency import DATASET_TEST_RATIO_KEY
+
+        p[DATASET_TEST_RATIO_KEY] = ratio
     return p
 
 

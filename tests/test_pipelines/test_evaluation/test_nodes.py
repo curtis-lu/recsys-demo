@@ -1705,10 +1705,15 @@ class TestComputePredictionQuality:
         return stamp_partition_fingerprint(
             spark.createDataFrame(rows, schema), params, [])
 
-    def _post_training(self, **dataset):
+    def _post_training(self, model_ratio=0.0, **dataset):
+        """``dataset`` is today's conf, ``model_ratio`` the evaluated model's
+        r as the CLI hands it on (``DATASET_TEST_RATIO_KEY``)."""
+        from recsys_tfb.core.consistency import DATASET_TEST_RATIO_KEY
+
         params = self._parameters()
         params["post_training"] = True
         params["dataset"] = dataset
+        params[DATASET_TEST_RATIO_KEY] = model_ratio
         return params
 
     def test_post_training_weighs_every_row_by_its_group_weight(self, spark):
@@ -1719,13 +1724,27 @@ class TestComputePredictionQuality:
             compute_prediction_quality,
         )
 
-        params = self._post_training(test_zero_positive_group_ratio=0.5)
+        params = self._post_training(model_ratio=0.5)
         result = compute_prediction_quality(
             self._weighted(spark, params, 2.0), _no_segments(params), params)
         summary = result["overall"]["summary"]
         assert (summary["n"], summary["n_pos"]) == (12, 3)
         assert result["per_item"]["summary"]["A"]["n"] == 4
         assert result["columns"]["weight"] == ZERO_POSITIVE_GROUP_WEIGHT_COL
+
+    def test_the_weight_follows_the_evaluated_model_s_ratio_not_the_conf(
+            self, spark):
+        """ADR-0032 decision 4: today's conf says 0, the evaluated model's
+        dataset version kept r = 0.2, so c3's rows weigh 1/r = 5 each."""
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._post_training(
+            model_ratio=0.2, test_zero_positive_group_ratio=0.0)
+        result = compute_prediction_quality(
+            self._weighted(spark, params, 5.0), _no_segments(params), params)
+        assert result["overall"]["summary"]["n"] == 6 + 3 * 5
 
     def test_the_weight_is_decided_by_the_config_not_by_the_column(self, spark):
         """Under ratio 0 the column can still exist — NULL, from the
@@ -1751,8 +1770,8 @@ class TestComputePredictionQuality:
             compute_prediction_quality,
         )
 
-        params = self._post_training(test_zero_positive_group_ratio=0.5)
-        with pytest.raises(DataConsistencyError, match="were not written under"):
+        params = self._post_training(model_ratio=0.5)
+        with pytest.raises(DataConsistencyError, match="training wrote them without it"):
             compute_prediction_quality(
                 self._weighted(spark, params, None), _no_segments(params), params)
 
@@ -1765,20 +1784,21 @@ class TestComputePredictionQuality:
             compute_prediction_quality,
         )
 
-        params = self._post_training(test_zero_positive_group_ratio=0.5)
+        params = self._post_training(model_ratio=0.5)
         frame = self._weighted(spark, params, 2.0).drop(ZERO_POSITIVE_GROUP_WEIGHT_COL)
-        with pytest.raises(DataConsistencyError, match="were not written under"):
+        with pytest.raises(DataConsistencyError, match="training wrote them without it"):
             compute_prediction_quality(frame, _no_segments(params), params)
 
     def test_monitoring_mode_counts_rows(self, spark):
         """Monitoring reads inference output, which no dataset draw touched."""
+        from recsys_tfb.core.consistency import DATASET_TEST_RATIO_KEY
         from recsys_tfb.pipelines.evaluation.nodes import (
             compute_prediction_quality,
         )
 
         params = self._parameters()
         params["post_training"] = False
-        params["dataset"] = {"test_zero_positive_group_ratio": 0.5}
+        params[DATASET_TEST_RATIO_KEY] = 0.5
         result = compute_prediction_quality(
             self._weighted(spark, params, 2.0), _no_segments(params), params)
         assert result["overall"]["summary"]["n"] == 9

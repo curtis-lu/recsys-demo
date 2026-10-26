@@ -24,10 +24,10 @@ from recsys_tfb.core.consistency import (
     PREDICTION_QUALITY_DEFAULTS,
     ZERO_POSITIVE_GROUP_WEIGHT_COL,
     DataConsistencyError,
+    evaluated_test_ratio,
     item_category_column,
     item_category_conflict_errors,
     item_list_counted_from_data,
-    test_carries_zero_positive_group_weight,
 )
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.baselines import (
@@ -813,11 +813,13 @@ def compute_prediction_quality(
     #
     # Decision — under --post-training with that ratio above 0, every row
     # weighs its zero-positive group weight: a kept zero-positive group stands
-    # for 1/r of them (ADR-0025 decision 3). Decided from the config, not from
-    # whether the column is there: the table is `columns: "auto"`, so once any
-    # run added the column, a partition written under ratio 0 holds it as
-    # NULL, and summing NULL weights would drop those rows in silence.
-    # Monitoring reads offline inference's output, which no dataset draw
+    # for 1/r of them (ADR-0025 decision 3). r is the evaluated model's
+    # dataset version's, not today's conf (ADR-0032 decision 4). Decided from
+    # r, not from whether the column is there: the table is `columns:
+    # "auto"`, so once any run added the column, a partition written under
+    # ratio 0 holds it as NULL, and summing NULL weights would drop those rows
+    # in silence. At r = 1 every weight is 1 and the numbers are test's exact
+    # ones. Monitoring reads offline inference's output, which no dataset draw
     # touched: every row weighs 1.
     #
     # Decision — bins are global and equal-width over this run's own
@@ -834,18 +836,15 @@ def compute_prediction_quality(
     weight_col = (
         ZERO_POSITIVE_GROUP_WEIGHT_COL
         if parameters.get("post_training")
-        and test_carries_zero_positive_group_weight(parameters)
+        and evaluated_test_ratio(parameters) > 0.0
         else None
     )
-    # Pre-check (input) — the rows must carry the weight the config promises.
-    # The config says what *today's* dataset settings keep; the predictions
-    # were written by whichever model --model-version (or `best`) names, whose
-    # test ratio is baked into its model_version and may differ. A missing
-    # column, or a NULL weight (training writes NULL when that model's test
-    # kept no zero-positive group), means the two disagree: summing NULL
-    # weights would drop those rows, and counting them would report a filtered
-    # table as a weighted one. One narrow scan of one column, only when
-    # weighting at all.
+    # Pre-check (input) — the rows must carry the weight r promises. A
+    # missing column, or a NULL weight (training writes NULL when its test
+    # kept no zero-positive group), means the predictions were not written by
+    # a model trained on that dataset version: summing NULL weights would drop
+    # those rows, and counting them would report a filtered table as a
+    # weighted one. One narrow scan of one column, only when weighting at all.
     if weight_col is not None:
         require_zero_positive_group_weights(eval_predictions, weight_col)
     aggregated = aggregate_score_bins(

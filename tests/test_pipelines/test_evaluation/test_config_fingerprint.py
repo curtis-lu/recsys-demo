@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from recsys_tfb.core.consistency import DATASET_TEST_RATIO_KEY
 from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
     APPLIED_SETTINGS,
     COMPARISON_CHAIN,
@@ -43,7 +44,8 @@ SPEC_APPLIED = {
         "evaluation.query_filter",
     },
     "compute_prediction_quality": {
-        "schema", "post_training", "dataset.test_zero_positive_group_ratio",
+        # The evaluated model's r, as the CLI hands it on.
+        "schema", "post_training", DATASET_TEST_RATIO_KEY,
         "evaluation.snap_date", "evaluation.prediction_quality",
     },
     "compute_report_aggregates": {
@@ -232,8 +234,9 @@ STALE_AFTER = {
         {"evaluation_report_aggregates"}, "compute_report_aggregates"),
     "evaluation.prediction_quality.n_bins": (
         {"prediction_quality_metrics"}, "compute_prediction_quality"),
-    # With post_training, it decides whether every row is weighted.
-    "dataset.test_zero_positive_group_ratio": (
+    # With post_training, the evaluated model's r decides whether every row
+    # is weighted.
+    DATASET_TEST_RATIO_KEY: (
         {"prediction_quality_metrics"}, "compute_prediction_quality"),
     "evaluation.report.display.compare_k": (
         {"evaluation_display_ks"}, "resolve_display_ks"),

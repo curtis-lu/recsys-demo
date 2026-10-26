@@ -195,8 +195,11 @@ def test_the_main_report_has_no_diagnosis_section(spark):
         compute_prediction_quality,
     )
 
+    from recsys_tfb.core.consistency import DATASET_TEST_RATIO_KEY
+
     params = _params(True)
     params["post_training"] = True
+    params[DATASET_TEST_RATIO_KEY] = 0.0
     params["evaluation"]["report"]["sections"].update(
         {"prediction_quality": True, "popularity_baseline": False})
     params["evaluation"]["prediction_quality"] = {

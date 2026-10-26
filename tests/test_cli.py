@@ -2643,6 +2643,39 @@ class TestEvaluationHandsOverTheCompareTables:
         }
 
 
+def _write_dataset_manifest(tmp_path, ratio, base="basev000"):
+    """The manifest of the dataset version ``_run_evaluation_command``'s model
+    resolves to, recording ``ratio`` as its test ratio."""
+    base_dir = tmp_path / "data" / "dataset" / base
+    base_dir.mkdir(parents=True, exist_ok=True)
+    (base_dir / "manifest.json").write_text(json.dumps({"parameters": {
+        "dataset": {"test_zero_positive_group_ratio": ratio}}}))
+
+
+class TestEvaluationHandsTheModelsRatioOn:
+    """ADR-0032 decision 4: every evaluation reader of r takes the evaluated
+    model's dataset version's, which only the command can read (its
+    manifest), handed on under ``DATASET_TEST_RATIO_KEY``."""
+
+    def test_the_model_s_ratio_reaches_the_nodes_not_the_conf_s(self, tmp_path):
+        from recsys_tfb.core.consistency import DATASET_TEST_RATIO_KEY
+
+        captured = {}
+
+        def execute(name, kwargs, runtime_params, *args, **kw):
+            captured.update(runtime_params)
+            return False
+
+        _write_dataset_manifest(tmp_path, 0.2)
+        result, _ = _run_evaluation_command(
+            tmp_path, ["evaluation", "--model-version", _EVAL_MV],
+            landed=("2026-01-31",),
+            extra_patches=(patch("recsys_tfb.__main__._execute_pipeline",
+                                 execute),))
+        assert result.exit_code == 0, result.output
+        assert captured[DATASET_TEST_RATIO_KEY] == 0.2
+
+
 class TestAnEvaluationMonthNotWrittenPullsTheJoinBack:
     """ADR-0018 decision 1: ``--from-node compute_metrics`` reads the table, and
     the table exists from the first evaluation onwards, so only a month plan can

@@ -1110,11 +1110,14 @@ from recsys_tfb.core.schema import (
 #: Dataset does not: its month plans take ``--rebuild-dates`` from the CLI.
 REBUILD_SNAP_DATES_KEY = "_rebuild_snap_dates"
 
-#: ``parameters`` key the training command hands ``compute_test_metrics`` the
-#: test ratio the dataset version it reads was built with (read off that
-#: version's manifest), for A54's second place (:func:`
-#: binary_test_metrics_verdict`). Absent — a direct call — the version is the
-#: one the config builds.
+#: ``parameters`` key under which the training and evaluation commands hand
+#: the nodes the test ratio of the dataset version the run reads — training's
+#: own, or the evaluated model's — read off that version's manifest
+#: (``core.versioning.dataset_version_test_ratio``). Training's
+#: ``compute_test_metrics`` reads it for A54's second place (:func:`
+#: binary_test_metrics_verdict`) and, absent (a direct call), takes the
+#: version the config builds. Evaluation reads it through
+#: :func:`evaluated_test_ratio`, which refuses an absent key.
 DATASET_TEST_RATIO_KEY = "_dataset_test_zero_positive_group_ratio"
 
 
@@ -2645,9 +2648,9 @@ def resolved_zero_positive_group_ratio(parameters: dict, split: str) -> float:
 
     One resolver so "what an absent key means" has a single definition, read by
     the dataset nodes that draw, the training write that carries the weight,
-    and the evaluation gate that needs to know whether test kept any
-    zero-positive group. Callers may assume the value is legal: A44 rejects
-    anything else at CLI entry.
+    and ``core.versioning.dataset_version_test_ratio``, which reads a dataset
+    version's manifest for training's A54 and evaluation's A64. Callers may
+    assume the value is legal: A44 rejects anything else at CLI entry.
     """
     key = _zero_positive_group_ratio_key(split)
     ds = parameters.get("dataset") or {}
@@ -2660,13 +2663,33 @@ def test_carries_zero_positive_group_weight(parameters: dict) -> bool:
     """Whether the test table carries :data:`ZERO_POSITIVE_GROUP_WEIGHT_COL` —
     ``dataset.test_zero_positive_group_ratio`` above 0.
 
-    The one derivation for every reader of that fact: the training write that
-    carries the column into the prediction table, A45 that makes the catalog
-    declare it, the evaluation node that weights by it, the report note that
-    prints it, and A46. Each deciding it for itself is how a write and the
-    gate that checks it end up disagreeing.
+    The one derivation for the training write that carries the column into
+    the prediction table and for A45 that makes the catalog declare it: two
+    readers deciding it apart is how a write and the gate that checks it end
+    up disagreeing. Evaluation asks the evaluated model instead
+    (:func:`evaluated_test_ratio`).
     """
     return resolved_zero_positive_group_ratio(parameters, "test") > 0.0
+
+
+def evaluated_test_ratio(parameters: dict) -> float:
+    """The test ratio of the dataset version the evaluated model was trained
+    on (:data:`DATASET_TEST_RATIO_KEY`), not today's conf: a model evaluated
+    by ``--model-version`` may predate a change to it (ADR-0032 decision 4).
+    Every evaluation reader of r takes it here — whether rows are weighted,
+    the ratio a report prints, A64.
+
+    Raises ``KeyError`` when the key is absent: the evaluation command sets it
+    on every run, so an absent one means a caller did not, and reading it as
+    0 would silently report a weighted population as unweighted.
+    """
+    if DATASET_TEST_RATIO_KEY not in parameters:
+        raise KeyError(
+            f"parameters has no {DATASET_TEST_RATIO_KEY!r}: the test ratio of "
+            f"the evaluated model's dataset version, which the evaluation "
+            f"command reads off that version's manifest and sets on every run."
+        )
+    return float(parameters[DATASET_TEST_RATIO_KEY])
 
 
 def _is_legal_zero_positive_group_ratio(value) -> bool:

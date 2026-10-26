@@ -7,9 +7,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from recsys_tfb.core.consistency import (
+    evaluated_test_ratio,
     report_section_on,
-    resolved_zero_positive_group_ratio,
-    test_carries_zero_positive_group_weight,
 )
 from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.evaluation.result_readers import (
@@ -396,16 +395,12 @@ def grain_bundles(facts: dict) -> list[tuple[str, dict]]:
 
 
 def zero_positive_draw_on_test(parameters: dict) -> float | None:
-    """dataset 對 test 表無正例 query group 的抽樣：監控模式回 ``None``（沒有
-    dataset 抽樣，數到的是資料本身）；``--post-training`` 且 test 表帶權重欄
-    （``test_carries_zero_positive_group_weight``）回保留比例 r（> 0）；不帶
-    權重欄回 ``0.0``（dataset 全丟了）。
-    """
+    """The share r of zero-positive test query groups the dataset kept:
+    ``None`` in monitoring mode (no dataset draw), else the evaluated model's
+    r (``evaluated_test_ratio``, 0 when the dataset dropped them all)."""
     if not parameters.get("post_training"):
         return None
-    if not test_carries_zero_positive_group_weight(parameters):
-        return 0.0
-    return resolved_zero_positive_group_ratio(parameters, "test")
+    return evaluated_test_ratio(parameters)
 
 
 def scored_with_positive(metrics: dict) -> int | None:

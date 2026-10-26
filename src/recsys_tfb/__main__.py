@@ -54,6 +54,7 @@ from recsys_tfb.core.schema import (
 from recsys_tfb.core.versioning import (
     build_manifest_metadata,
     compute_popularity_source_version,
+    dataset_version_test_ratio,
     find_latest_completed_model_version,
     read_manifest,
     resolve_base_dataset_version,
@@ -2120,6 +2121,11 @@ def evaluation(
     base_v, train_v = _dataset_versions_from_model_manifest(
         models_dir / mv, data_dir
     )
+    # Decision — r is the evaluated model's dataset version's, read off that
+    # version's manifest, not today's conf (ADR-0032 decision 4): a model
+    # evaluated by --model-version may predate a change to it. Only this
+    # command can read it; the nodes take it from parameters.
+    dataset_test_ratio = dataset_version_test_ratio(data_dir / "dataset" / base_v)
 
     logger.info(
         "Evaluation — model_version: %s (%s), post_training: %s, compare: %s%s",
@@ -2148,6 +2154,9 @@ def evaluation(
         # is caught as stale rather than silently mixing the two populations'
         # metrics / report aggregates into one report (#342 F7).
         "post_training": post_training,
+        # Read through core.consistency.evaluated_test_ratio, which refuses
+        # an absent key.
+        DATASET_TEST_RATIO_KEY: dataset_test_ratio,
     }
 
     pipeline_kwargs = {
