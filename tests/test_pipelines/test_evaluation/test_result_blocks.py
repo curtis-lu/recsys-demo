@@ -1,8 +1,8 @@
 """The evaluation pipeline's landed results hold the blocks they declare
 (ADR-0031 principle 2, supplement 2).
 
-Each node that lands a JSON result declares a ``Produces`` above itself in
-``nodes.py``. A: the declarations cover every JSON result the pipeline lands,
+``steps/result_catalog.RESULTS`` lists a ``Produces`` per JSON result a node
+lands. A: the list covers every JSON result the pipeline lands,
 in every mode. B: a monitoring run with every section on and a compare source
 lands, for each result, exactly the declared blocks less a stated set the run
 cannot reach. C: each block B cannot reach is written by a minimal node call.
@@ -23,9 +23,8 @@ from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
 from recsys_tfb.core.runner import Runner
 from recsys_tfb.pipelines.evaluation import create_pipeline, nodes
 from recsys_tfb.pipelines.evaluation.pipeline import result_readers_table
-from recsys_tfb.pipelines.evaluation.steps.result_blocks import declared_results
-
-DECLARED = declared_results(nodes)
+from recsys_tfb.pipelines.evaluation.steps.result_blocks import by_result
+from recsys_tfb.pipelines.evaluation.steps.result_catalog import RESULTS
 
 _CATALOG = yaml.safe_load(
     (Path(__file__).parents[3] / "conf" / "base" / "catalog.yaml").read_text())
@@ -56,13 +55,18 @@ def test_the_declarations_cover_every_json_result_of_every_mode():
                  {"post_training": True, "baseline_rate": True,
                   "compare_source": _SOURCE}):
         landed |= _landed_names(**mode) & _JSON_ENTRIES
-    assert set(DECLARED) == landed, (
-        f"declared but never landed: {sorted(set(DECLARED) - landed)}; "
-        f"landed but not declared: {sorted(landed - set(DECLARED))}")
+    assert set(RESULTS) == landed, (
+        f"declared but never landed: {sorted(set(RESULTS) - landed)}; "
+        f"landed but not declared: {sorted(landed - set(RESULTS))}")
+
+
+def test_a_result_listed_twice_is_refused():
+    with pytest.raises(ValueError, match="'compare_coverage' is declared twice"):
+        by_result((RESULTS["compare_coverage"],) * 2)
 
 
 def test_every_block_says_what_it_is_and_names_a_grain_once_per_result():
-    for result, produces in DECLARED.items():
+    for result, produces in RESULTS.items():
         names = [block.name for block in produces.blocks]
         assert len(names) == len(set(names)), f"{result}: repeated {names}"
         for block in produces.blocks:
@@ -157,7 +161,7 @@ def _run_monitoring_with_compare(spark):
 def _blocks_missing_or_extra(result, landed, unreached):
     """Empty when ``landed`` holds exactly the declared blocks less
     ``unreached``; else a message naming the result and the keys."""
-    expected = {b.name for b in DECLARED[result].blocks} - set(unreached)
+    expected = {b.name for b in RESULTS[result].blocks} - set(unreached)
     got = set(landed)
     if got == expected:
         return ""
@@ -167,7 +171,7 @@ def _blocks_missing_or_extra(result, landed, unreached):
 
 def test_what_cannot_be_reached_is_declared_conditional():
     for result, names in _UNREACHED.items():
-        by_name = {b.name: b for b in DECLARED[result].blocks}
+        by_name = {b.name: b for b in RESULTS[result].blocks}
         for name in names:
             assert by_name[name].when, f"{result}.{name} has no `when`"
 
@@ -175,7 +179,7 @@ def test_what_cannot_be_reached_is_declared_conditional():
 def test_a_run_lands_exactly_the_declared_blocks(spark):
     catalog = _run_monitoring_with_compare(spark)
     problems = [
-        message for result in DECLARED
+        message for result in RESULTS
         if (message := _blocks_missing_or_extra(
             result, catalog.load(result), _UNREACHED.get(result, ())))]
     assert not problems, "\n".join(problems)

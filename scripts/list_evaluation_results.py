@@ -3,8 +3,8 @@ it, and the blocks it holds (ADR-0031 principle 2, supplement 2).
 
 Plain text, no Spark. Nothing here is hand-written: the producers and node
 readers come from ``create_pipeline``'s wiring, the section readers from each
-report section's ``READS``, the blocks from the ``Produces`` declared above
-the nodes in ``pipelines/evaluation/nodes.py``
+report section's ``READS``, the blocks from the ``Produces`` listed in
+``pipelines/evaluation/steps/result_catalog.py``
 (``pipelines.evaluation.pipeline.result_readers_table``).
 
 Run: ``PYTHONPATH=<root>/src python scripts/list_evaluation_results.py``

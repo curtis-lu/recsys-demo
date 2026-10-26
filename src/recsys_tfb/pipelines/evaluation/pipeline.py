@@ -405,21 +405,17 @@ def result_readers_table() -> dict[str, dict]:
       produce a result and the nodes that take it as input;
     * the ``READS`` and ``SWITCH`` of every section of both reports, whether
       or not the switch is on;
-    * the ``Produces`` declared in ``nodes.py``.
+    * the ``Produces`` listed in ``steps/result_catalog.py``.
 
     Returns ``{result: {"blocks": tuple[Block, ...], "producers": [node name],
     "reader_nodes": [node name], "reader_sections": [(report catalog name,
-    section, SWITCH)]}}`` for every declared result, in declaration order.
+    section, SWITCH)]}}`` for every listed result, in list order.
     """
     from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
     from recsys_tfb.pipelines.evaluation.report import main
     from recsys_tfb.pipelines.evaluation.report.comparison import main as comparison
-    from recsys_tfb.pipelines.evaluation import nodes
-    from recsys_tfb.pipelines.evaluation.steps.result_blocks import (
-        declared_results,
-    )
+    from recsys_tfb.pipelines.evaluation.steps.result_catalog import RESULTS
 
-    declared = declared_results(nodes)
     every_section_on = {"evaluation": {"report": {"sections": {
         name: True for name in EVALUATION_REPORT_SECTIONS}}}}
     source = {"kind": "model_version", "model_version": "other"}
@@ -432,7 +428,7 @@ def result_readers_table() -> dict[str, dict]:
     table = {
         result: {"blocks": produces.blocks, "producers": [],
                  "reader_nodes": [], "reader_sections": []}
-        for result, produces in declared.items()
+        for result, produces in RESULTS.items()
     }
     for pipeline in pipelines:
         for node in pipeline.nodes:
