@@ -91,9 +91,42 @@ def _comparison_nodes(compare_only: bool, run_nodes: list[str]) -> list[Node]:
     ]
 
 
-#: The catalog names of the two reports: what a run of each mode is for.
+def _prediction_quality_nodes(run_nodes: list[str]) -> list[Node]:
+    """The ``--prediction-quality`` mode (ADR-0032 decision 2): the
+    every-candidate-row family over the ``enriched_eval_predictions`` a
+    standard run of the same run mode landed, and its page. No label join and
+    no ``prepare_eval_data``: the rows are the standard run's, which
+    ``compute_prediction_quality`` checks. ``evaluation_segment_columns`` is
+    the standard run's too, read for that check's ``joined`` list.
+    """
+    from recsys_tfb.pipelines.evaluation.nodes import (
+        compute_prediction_quality,
+        make_generate_prediction_quality_report_node,
+    )
+
+    return [
+        Node(
+            compute_prediction_quality,
+            inputs=["enriched_eval_predictions", "evaluation_segment_columns",
+                    "parameters"],
+            outputs="prediction_quality_metrics",
+        ),
+        # By name (ADR-0030 decision 8), like generate_report.
+        Node(
+            make_generate_prediction_quality_report_node(run_nodes),
+            inputs={"prediction_quality_metrics": "prediction_quality_metrics",
+                    "parameters": "parameters"},
+            # The literal of PREDICTION_QUALITY_REPORT, so the architecture
+            # tests' static scan can read it (A5/A6).
+            outputs="prediction_quality_report",
+        ),
+    ]
+
+
+#: The catalog names of the three reports: what a run of each mode is for.
 MAIN_REPORT = "evaluation_report"
 COMPARISON_REPORT = "evaluation_comparison_report"
+PREDICTION_QUALITY_REPORT = "prediction_quality_report"
 
 
 def required_results(
@@ -131,6 +164,7 @@ def create_pipeline(
     compare_source: dict | None = None,
     compare_only: bool = False,
     baseline_rate: bool = False,
+    prediction_quality: bool = False,
 ) -> Pipeline:
     """Build the evaluation pipeline.
 
@@ -158,6 +192,11 @@ def create_pipeline(
         which segment columns the partition's rows were joined with, and
         ``evaluation_item_categories`` for the category table it read
         — optional, see its catalog entry.
+      * --prediction-quality — short pipeline: the every-candidate-row
+        family over the ``enriched_eval_predictions`` the standard run of the
+        same run mode (``post_training``) wrote, and its own page
+        (:func:`_prediction_quality_nodes`, ADR-0032 decision 2). No other
+        mode computes the family.
 
     The readers that refuse a stale result and are built here are given the
     run's nodes in topological order, to name the re-run from
@@ -181,7 +220,6 @@ def create_pipeline(
         compare_to_baseline,
         compute_baseline_metrics,
         compute_metrics,
-        compute_prediction_quality,
         compute_report_aggregates,
         compute_row_facts,
         make_generate_report_node,
@@ -191,6 +229,12 @@ def create_pipeline(
     )
 
     run_nodes: list[str] = []
+    if prediction_quality:
+        # Which run mode's rows it reads is the catalog's (the output
+        # directory) and the partition check's; the nodes are the same.
+        pipeline = Pipeline(_prediction_quality_nodes(run_nodes))
+        run_nodes[:] = [n.name for n in pipeline.nodes]
+        return pipeline
     if compare_only:
         # CLI A12 ensures compare_source is not None when compare_only is True.
         # The catalog loads "enriched_eval_predictions" with WHERE
@@ -296,15 +340,6 @@ def create_pipeline(
             )
         )
     nodes += [
-        # Every evaluated row as a binary prediction (ADR-0024). It takes the
-        # segment JSON for the partition check only, like
-        # compute_report_aggregates.
-        Node(
-            compute_prediction_quality,
-            inputs=["enriched_eval_predictions", "evaluation_segment_columns",
-                    "parameters"],
-            outputs="prediction_quality_metrics",
-        ),
         Node(
             compute_report_aggregates,
             # evaluation_segment_columns for its joined list: part of the
@@ -389,10 +424,11 @@ def result_readers_table() -> dict[str, dict]:
 
     * the wiring of ``create_pipeline`` with every section on, a compare
       source given and ``baseline_rate`` on, together with the
-      ``--compare-only`` pipeline (a subset, but built apart): the nodes that
-      produce a result and the nodes that take it as input;
-    * the ``READS`` and ``SWITCH`` of every section of both reports, whether
-      or not the switch is on;
+      ``--compare-only`` and ``--prediction-quality`` pipelines (built
+      apart): the nodes that produce a result and the nodes that take it as
+      input;
+    * the ``READS`` and ``SWITCH`` of every section of the three reports,
+      whether or not the switch is on;
     * the ``Produces`` listed in ``steps/result_catalog.py``.
 
     Returns ``{result: {"blocks": tuple[Block, ...], "producers": [node name],
@@ -402,6 +438,9 @@ def result_readers_table() -> dict[str, dict]:
     from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
     from recsys_tfb.pipelines.evaluation.report import main
     from recsys_tfb.pipelines.evaluation.report.comparison import main as comparison
+    from recsys_tfb.pipelines.evaluation.report.prediction_quality import (
+        main as prediction_quality,
+    )
     from recsys_tfb.pipelines.evaluation.steps.result_catalog import RESULTS
 
     every_section_on = {"evaluation": {"report": {"sections": {
@@ -412,6 +451,8 @@ def result_readers_table() -> dict[str, dict]:
                         compare_source=source, baseline_rate=True),
         create_pipeline(parameters=every_section_on, compare_source=source,
                         compare_only=True),
+        create_pipeline(parameters=every_section_on, post_training=True,
+                        prediction_quality=True),
     ]
     table = {
         result: {"blocks": produces.blocks, "producers": [],
@@ -426,8 +467,10 @@ def result_readers_table() -> dict[str, dict]:
             for name in node.inputs:
                 if name in table and node.name not in table[name]["reader_nodes"]:
                     table[name]["reader_nodes"].append(node.name)
-    for report, sections in ((MAIN_REPORT, main.SECTIONS),
-                             (COMPARISON_REPORT, comparison.SECTIONS)):
+    for report, sections in (
+            (MAIN_REPORT, main.SECTIONS),
+            (COMPARISON_REPORT, comparison.SECTIONS),
+            (PREDICTION_QUALITY_REPORT, prediction_quality.SECTIONS)):
         for section in sections:
             for name in section.READS:
                 if name in table:

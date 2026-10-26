@@ -3,8 +3,8 @@
 # 在那裡，這裡只註解「和銀行示例不一樣、為什麼」。怎麼跑見 examples/ad/README.md。
 #
 # ⚠ 這組 conf 目前打開的新開關有三個：occasion（#428）——一次請求是一個 query
-# group，同一次請求可能展示好幾個素材；預測品質指標家族（#381，開關在
-# parameters_evaluation.yaml 的 report.sections.prediction_quality）；val／test 留下
+# group，同一次請求可能展示好幾個素材；預測品質指標家族（#381，ADR-0032 起是
+# evaluation 的 --prediction-quality 模式，run_e2e.sh 有那一步）；val／test 留下
 # 一半沒有正例的 query group（#429，parameters_dataset.yaml 的
 # *_zero_positive_group_ratio）。其餘仍是框架
 # 今天就支援的功能——只有一張 feature_table、item 清單逐一列出。後面的票各自

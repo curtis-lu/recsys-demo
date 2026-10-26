@@ -29,9 +29,6 @@ def test_report_display_and_sections():
     assert rep["sections"] == {
         "data_stats": True, "ranking_metrics": True,
         "rank_distribution": True, "popularity_baseline": True,
-        # Off in the framework's conf, on in the ad example's (ADR-0024
-        # decision 1).
-        "prediction_quality": False,
     }
     assert rep["display"] == {"compare_k": [1, 3, 5, "all"]}
     # Diagnostics are aggregated in Spark now -> no row-sampling cap.

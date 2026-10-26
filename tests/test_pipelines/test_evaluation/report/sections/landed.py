@@ -210,7 +210,10 @@ def _compute(spark, p: dict, *, unmatched: bool = False,
     quality = {**build_payload(
         binned, item_col="prod_name", score_col="score", label_col="label",
         weight_col=weight_col, n_bins=pq_cfg["n_bins"],
-        n_display_bins=pq_cfg["n_display_bins"], top_n=pq_cfg["top_n"])}
+        n_display_bins=pq_cfg["n_display_bins"], top_n=pq_cfg["top_n"]),
+        # What compute_prediction_quality adds: the one group without a
+        # positive (C3, unless ``filtered``) is the kept one.
+        "population": _population(p, facts)}
     display_ks = resolve_display_ks(_stamped(metrics, p), p)
     return {
         "evaluation_row_facts": facts,
@@ -219,6 +222,18 @@ def _compute(spark, p: dict, *, unmatched: bool = False,
         "prediction_quality_metrics": quality,
         "evaluation_display_ks": display_ks,
     }, p
+
+
+def _population(p: dict, facts: dict) -> dict:
+    # The settings name no date: the page's metadata cell reads none.
+    dates = []
+    if not p.get("post_training"):
+        return {"source": "monitoring", "evaluated_dates": dates,
+                "test_zero_positive_group_ratio": None,
+                "n_zero_positive_groups": None}
+    return {"source": "post_training", "evaluated_dates": dates,
+            "test_zero_positive_group_ratio": p.get(DATASET_TEST_RATIO_KEY),
+            "n_zero_positive_groups": facts["n_excluded_queries"]}
 
 
 def empty_quality(spark) -> dict:
@@ -238,4 +253,6 @@ def empty_quality(spark) -> dict:
     return {**build_payload(
         binned, item_col="prod_name", score_col="score", label_col="label",
         weight_col=None, n_bins=20, n_display_bins=5, top_n=3),
-        "enabled": True}
+        "population": {"source": "monitoring", "evaluated_dates": [],
+                       "test_zero_positive_group_ratio": None,
+                       "n_zero_positive_groups": None}}

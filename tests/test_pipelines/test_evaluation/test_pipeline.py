@@ -42,16 +42,15 @@ class TestTheRequirementList:
 
     def test_a_section_switched_off_leaves_out_its_computation(self):
         for label, kwargs in self.MODES.items():
-            names = self._names(_sections(prediction_quality=False), **kwargs)
-            assert "compute_prediction_quality" not in names, label
-            assert "compute_prediction_quality" in self._names(
+            names = self._names(_sections(rank_distribution=False), **kwargs)
+            assert "compute_report_aggregates" not in names, label
+            assert "compute_report_aggregates" in self._names(
                 ALL_ON, **kwargs), label
 
     #: What each switch, alone off, takes out of the pipeline: the nodes
     #: whose results only that section reads. Written out, not derived, so
     #: a change in what a section reads has to be made here on purpose.
     LEFT_OUT = {
-        "prediction_quality": {"compute_prediction_quality"},
         "rank_distribution": {"compute_report_aggregates"},
         "popularity_baseline": {"compute_baseline_metrics",
                                 "compare_to_baseline"},
@@ -87,12 +86,14 @@ class TestTheRequirementList:
         page-order list, and its computation is not in the pipeline — its
         switch still on, nothing else changed."""
         from recsys_tfb.pipelines.evaluation.report import main
-        from recsys_tfb.pipelines.evaluation.report.sections import prediction_quality
+        from recsys_tfb.pipelines.evaluation.report.sections import (
+            rank_distribution,
+        )
 
         monkeypatch.setattr(main, "SECTIONS", tuple(
-            s for s in main.SECTIONS if s is not prediction_quality))
+            s for s in main.SECTIONS if s is not rank_distribution))
         for label, kwargs in self.MODES.items():
-            assert "compute_prediction_quality" not in self._names(
+            assert "compute_report_aggregates" not in self._names(
                 ALL_ON, **kwargs), label
 
     def test_every_result_a_drawn_section_reads_has_a_producer(self):
@@ -164,7 +165,7 @@ class TestTheRequirementList:
             for node in create_pipeline(parameters=ALL_ON, **kwargs).nodes:
                 source = inspect.getsource(node.func)
                 if any(word in source for word in (
-                        '"sections"', "section_on", "prediction_quality_on")):
+                        '"sections"', "section_on")):
                     readers.append(node.name)
         assert readers == []
 
@@ -191,7 +192,6 @@ class TestEvaluationPipelineDefault:
             "baseline_metrics", "evaluation_report",
             "enriched_eval_predictions",
             "evaluation_report_aggregates",
-            "prediction_quality_metrics",
             "baseline_comparison", "evaluation_display_ks",
         }
         assert pipeline.outputs == expected
@@ -201,7 +201,6 @@ class TestEvaluationPipelineDefault:
         names = [n.name for n in pipeline.nodes]
         assert names == [
             "prepare_eval_data", "compute_row_facts",
-            "compute_prediction_quality",
             "compute_report_aggregates",
             "compute_metrics", "compute_baseline_metrics",
             "compare_to_baseline", "resolve_display_ks",
@@ -253,6 +252,35 @@ class TestNoDiagnosisInAnyMode:
             assert leaked == [], f"[{label}] {leaked}"
 
 
+class TestPredictionQualityMode:
+    """ADR-0032 decision 2: the every-candidate-row family is a mode of its
+    own, like ``--compare-only``: it reads the ``enriched_eval_predictions``
+    a standard run landed, joins no label, and is the only place the family
+    is computed."""
+
+    def test_the_mode_is_the_family_and_its_page(self):
+        for post_training in (False, True):
+            pipeline = create_pipeline(parameters=ALL_ON,
+                                       post_training=post_training,
+                                       prediction_quality=True)
+            assert [n.name for n in pipeline.nodes] == [
+                "compute_prediction_quality",
+                "generate_prediction_quality_report"], post_training
+            assert pipeline.inputs == {
+                "enriched_eval_predictions", "evaluation_segment_columns",
+                "parameters"}, post_training
+            assert pipeline.outputs == {
+                "prediction_quality_metrics", "prediction_quality_report"}
+
+    def test_no_other_mode_computes_the_family(self):
+        modes = {**TestNoDiagnosisInAnyMode.MODES,
+                 "--compare-only": TestNoDiagnosisInAnyMode.COMPARE_ONLY}
+        for label, kwargs in modes.items():
+            names = {n.name for n in create_pipeline(
+                parameters=ALL_ON, **kwargs).nodes}
+            assert "compute_prediction_quality" not in names, label
+
+
 class TestFingerprintRerunNodes:
     """Where a stale result sends the re-run exists in the run, and re-runs
     every step that applies the moved setting (ADR-0031 decision 15, first
@@ -284,7 +312,10 @@ class TestFingerprintRerunNodes:
         "resolve_comparison_display_ks",
     }
     MODES = {**TestNoDiagnosisInAnyMode.MODES,
-             "--compare-only": TestNoDiagnosisInAnyMode.COMPARE_ONLY}
+             "--compare-only": TestNoDiagnosisInAnyMode.COMPARE_ONLY,
+             "--prediction-quality": {"prediction_quality": True},
+             "--prediction-quality --post-training": {
+                 "prediction_quality": True, "post_training": True}}
 
     @staticmethod
     def _memory_only(pipeline):
@@ -347,7 +378,7 @@ class TestFingerprintRerunNodes:
         )
 
         for label, pipeline, kwargs in self._cases():
-            if kwargs.get("compare_only"):
+            if kwargs.get("compare_only") or kwargs.get("prediction_quality"):
                 continue  # no main line, so no such reader
             names = {n.name for n in pipeline.nodes}
             present = names & self.FINGERPRINTED_PRODUCERS
@@ -444,7 +475,7 @@ class TestTheComparisonReRunsOnItsOwn:
     MAIN_LINE_SPARK = {
         "prepare_eval_data", "build_popularity_period_counts",
         "compute_row_facts", "compute_metrics", "compute_baseline_metrics",
-        "compute_prediction_quality", "compute_report_aggregates",
+        "compute_report_aggregates",
     }
     MODES = {label: kwargs
              for label, kwargs in TestFingerprintRerunNodes.MODES.items()
@@ -552,7 +583,6 @@ class TestEvaluationPipelinePostTraining:
         names = [n.name for n in pipeline.nodes]
         assert names == [
             "prepare_eval_data", "compute_row_facts",
-            "compute_prediction_quality",
             "compute_report_aggregates",
             "compute_metrics", "compute_baseline_metrics",
             "compare_to_baseline", "resolve_display_ks",
@@ -581,7 +611,6 @@ class TestEvaluationPipelineCompareMode:
             "prepare_eval_data",
             "load_compare_predictions",
             "compute_row_facts",
-            "compute_prediction_quality",
             "compute_report_aggregates",
             "restrict_to_common",
             "compute_metrics",
@@ -940,7 +969,7 @@ class TestGenerateReportNodeWiring:
         from recsys_tfb.pipelines.evaluation.report.sections.shared import sections_on
 
         for parameters in (ALL_ON, _sections(popularity_baseline=False,
-                                             prediction_quality=False)):
+                                             rank_distribution=False)):
             read = set().union(*(section.READS for section in
                                  sections_on(SECTIONS, parameters)))
             for kwargs in ({}, {"post_training": True}):

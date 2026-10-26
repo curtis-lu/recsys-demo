@@ -1,6 +1,7 @@
 """Tests for evaluation pipeline Spark nodes."""
 
 import logging
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -1546,12 +1547,11 @@ class TestComputeRowFacts:
 
 class TestComputePredictionQuality:
     """compute_prediction_quality: every evaluated row as a binary prediction
-    (ADR-0024)."""
+    (ADR-0024), the ``--prediction-quality`` mode's computation (ADR-0032)."""
 
     @staticmethod
-    def _parameters(section=True, **block):
+    def _parameters(**block):
         params = TestComputeBaselineMetrics._parameters()
-        params["evaluation"]["report"]["sections"]["prediction_quality"] = section
         if block:
             params["evaluation"]["prediction_quality"] = block
         return params
@@ -1740,25 +1740,136 @@ class TestComputePredictionQuality:
             compute_prediction_quality,
         )
 
+        from recsys_tfb.evaluation.result_readers import (
+            POPULATION_TEST_RATIO_KEY,
+            PREDICTION_QUALITY_POPULATION_KEY,
+        )
+
         params = self._post_training(
             model_ratio=0.2, test_zero_positive_group_ratio=0.0)
         result = compute_prediction_quality(
             self._weighted(spark, params, 5.0), _no_segments(params), params)
         assert result["overall"]["summary"]["n"] == 6 + 3 * 5
+        assert result[PREDICTION_QUALITY_POPULATION_KEY][
+            POPULATION_TEST_RATIO_KEY] == 0.2
 
-    def test_the_weight_is_decided_by_the_config_not_by_the_column(self, spark):
-        """Under ratio 0 the column can still exist — NULL, from the
-        ``columns: "auto"`` table another run widened — and summing it would
-        silently drop those rows. Rows count once."""
+    def test_a_model_whose_test_kept_no_zero_positive_group_is_refused(
+            self, spark):
+        """A64's runtime backstop: at r = 0 every zero-positive group was
+        dropped before scoring, and the column can still exist — NULL, from
+        the ``columns: "auto"`` table another run widened."""
+        from recsys_tfb.core.consistency import ConfigConsistencyError
         from recsys_tfb.pipelines.evaluation.nodes import (
             compute_prediction_quality,
         )
 
-        params = self._post_training()
+        params = self._post_training(model_ratio=0.0)
+        with pytest.raises(ConfigConsistencyError, match="^A64:"):
+            compute_prediction_quality(
+                self._weighted(spark, params, None), _no_segments(params),
+                params)
+
+    def test_the_population_names_the_run_mode_and_the_kept_groups(
+            self, spark):
+        """ADR-0032 decision 5: the page opens with which rows these are.
+        c3 is the one query group without a positive; under --post-training
+        it is a kept one, and r is the evaluated model's."""
+        from recsys_tfb.evaluation.result_readers import (
+            PREDICTION_QUALITY_POPULATION_KEY,
+        )
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._post_training(model_ratio=0.5)
         result = compute_prediction_quality(
-            self._weighted(spark, params, None), _no_segments(params), params)
-        summary = result["overall"]["summary"]
-        assert (summary["n"], summary["n_pos"]) == (9, 3)
+            self._weighted(spark, params, 2.0), _no_segments(params), params)
+        assert result[PREDICTION_QUALITY_POPULATION_KEY] == {
+            "source": "post_training", "evaluated_dates": ["2025-01-31"],
+            "test_zero_positive_group_ratio": 0.5,
+            "n_zero_positive_groups": 1}
+        params = self._parameters()
+        result = compute_prediction_quality(
+            self._with_a_query_group_without_a_positive(spark),
+            _no_segments(params), params)
+        assert result[PREDICTION_QUALITY_POPULATION_KEY] == {
+            "source": "monitoring", "evaluated_dates": ["2025-01-31"],
+            "test_zero_positive_group_ratio": None,
+            "n_zero_positive_groups": None}
+
+    #: The payloads the function landed before ADR-0032 moved it, on these
+    #: same rows (monitoring, and --post-training at r = 0.5), less
+    #: ``config_fingerprint``: dumped from the code at the merge base.
+    GOLDEN = (Path(__file__).with_name("golden")
+              / "prediction_quality_before_adr0032.json")
+
+    def test_the_family_s_numbers_are_the_ones_landed_before_the_move(
+            self, spark):
+        """ADR-0032 decision 5: the family only moved, so every key it
+        landed before is the same to the last digit, read back through JSON
+        as the report reads it."""
+        import json
+
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        golden = json.loads(self.GOLDEN.read_text())
+        block = {"n_bins": 8, "n_display_bins": 4, "top_n": 2}
+        monitoring = self._parameters(**block)
+        post_training = self._post_training(model_ratio=0.5)
+        post_training["evaluation"]["prediction_quality"] = block
+        computed = {
+            "monitoring": compute_prediction_quality(
+                self._with_a_query_group_without_a_positive(spark),
+                _no_segments(monitoring), monitoring),
+            "post_training": compute_prediction_quality(
+                self._weighted(spark, post_training, 2.0),
+                _no_segments(post_training), post_training),
+        }
+        for mode, payload in computed.items():
+            landed = json.loads(json.dumps(payload))
+            for key in ("columns", "bins", "overall", "per_item"):
+                assert landed[key] == golden[mode][key], (mode, key)
+
+    def test_rows_the_other_run_mode_wrote_are_refused_with_the_run_to_do(
+            self, spark):
+        """ADR-0032 decision 3: one partition per month, written by the last
+        standard run. Written under --post-training, read without it: the
+        message names the standard run that writes this mode's rows."""
+        from recsys_tfb.core.consistency import DataConsistencyError
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        written = self._post_training(model_ratio=0.5)
+        frame = self._weighted(spark, written, 2.0)
+        params = self._parameters()
+        params["model_version"] = "mv_pq"
+        with pytest.raises(DataConsistencyError) as exc:
+            compute_prediction_quality(frame, _no_segments(params), params)
+        message = str(exc.value)
+        assert ("Run `python -m recsys_tfb evaluation --env <env> "
+                "--model-version mv_pq` first") in message
+        assert "--from-node prepare_eval_data" not in message
+
+    def test_a_date_no_standard_run_wrote_is_refused_with_the_run_to_do(
+            self, spark):
+        from recsys_tfb.core.consistency import DataConsistencyError
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._post_training(model_ratio=0.5)
+        params["model_version"] = "mv_pq"
+        params["evaluation"]["snap_date"] = "2025-02-28"
+        frame = self._weighted(spark, params, 2.0)
+        with pytest.raises(DataConsistencyError) as exc:
+            compute_prediction_quality(frame, _no_segments(params), params)
+        message = str(exc.value)
+        assert "no row for evaluated date(s) ['2025-02-28']" in message
+        assert ("Run `python -m recsys_tfb evaluation --env <env> "
+                "--model-version mv_pq --post-training` first") in message
 
     def test_a_null_weight_under_a_positive_ratio_is_refused(self, spark):
         """The conf says test kept zero-positive groups, the predictions

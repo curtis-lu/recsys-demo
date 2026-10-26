@@ -292,3 +292,17 @@ class TestA13_MutualExclusive:
     def test_both_raises(self):
         errs = compare_mutual_exclusive_errors("x", "y")
         assert any("mutually exclusive" in e.lower() for e in errs)
+
+    @pytest.mark.parametrize("compare, compare_only", [("x", None), (None, "x")])
+    def test_prediction_quality_with_either_compare_flag_raises(
+            self, compare, compare_only):
+        """ADR-0032 decision 6: the comparison's B side carries no weight and
+        its common population was narrowed by A's, so the two sides of a
+        binary metric would not be comparable."""
+        errs = compare_mutual_exclusive_errors(
+            compare, compare_only, prediction_quality=True)
+        assert any("--prediction-quality" in e for e in errs), errs
+
+    def test_prediction_quality_alone_is_fine(self):
+        assert compare_mutual_exclusive_errors(
+            None, None, prediction_quality=True) == []

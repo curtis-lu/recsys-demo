@@ -162,6 +162,10 @@ def test_static_coverage_floor():
     """
     total = sum(1 for _ in _node_calls())
     judgeable = sum(1 for _ in _judgeable_nodes())
+    # 61/59: ADR-0032 moved evaluation's `compute_prediction_quality` Node
+    # into the --prediction-quality mode's function (still one literal call)
+    # and added that mode's `generate_prediction_quality_report`, one more
+    # literal, statically judgeable call.
     # 60/58: #538 made evaluation's `generate_report` call dynamic (its
     # inputs are what the switched-on sections read, a computed dict) and
     # wrote `resolve_display_ks` as two literal calls (with and without the
@@ -207,7 +211,7 @@ def test_static_coverage_floor():
     # of the two `validate_model_input_grain` calls (the branch existed only
     # to append the calibration pair to its input list). All three were
     # literal, so total and judgeable both drop by 3.
-    assert (total, judgeable) == (60, 58), (
+    assert (total, judgeable) == (61, 59), (
         f"Node coverage changed: {judgeable}/{total} statically judgeable. "
         "If this dropped, A5/A6 now have a bigger blind spot -- check why."
     )

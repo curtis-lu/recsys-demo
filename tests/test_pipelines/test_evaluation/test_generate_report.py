@@ -187,41 +187,30 @@ def test_generate_report_with_diagnostics(spark):
 
 def test_the_main_report_has_no_diagnosis_section(spark):
     """#532 (ADR-0031 decision 2) removed the diagnosis pages, the report's
-    "排序診斷（獨立報表）" link section, the overview row pointing at it and
-    the prediction-quality note comparing its AUC with the "item 能力" page.
+    "排序診斷（獨立報表）" link section and the overview row pointing at it.
     ``--post-training`` was the mode that linked to them, so that is the run
     drawn here, with every section that could name them switched on."""
-    from recsys_tfb.pipelines.evaluation.nodes import (
-        compute_prediction_quality,
-    )
-
     from recsys_tfb.core.consistency import DATASET_TEST_RATIO_KEY
 
     params = _params(True)
     params["post_training"] = True
     params[DATASET_TEST_RATIO_KEY] = 0.0
     params["evaluation"]["report"]["sections"].update(
-        {"prediction_quality": True, "popularity_baseline": False})
-    params["evaluation"]["prediction_quality"] = {
-        "n_bins": 10, "n_display_bins": 5, "top_n": 1}
+        {"popularity_baseline": False})
     eval_pred = stamp_partition_fingerprint(
         _eval_pred(spark).drop("eval_partition_fingerprint"), params, [])
-    pq = compute_prediction_quality(
-        eval_pred, _landed_segments(params), params)
     aggregates = compute_report_aggregates(
         eval_pred, _landed_segments(params), params)
     html = generate_report(
         evaluation_row_facts=_row_facts_of(eval_pred, params),
         evaluation_metrics=_landed_metrics(params),
         evaluation_report_aggregates=aggregates,
-        prediction_quality_metrics=pq,
         **_landed_after_the_metrics(
             _landed_metrics(params), None, params),
         parameters=params,
     )
     # Premise: the sections that used to name the diagnoses were drawn.
-    assert ("概覽" in html and 'id="s-prediction_quality"' in html
-            and 'id="s-rank_distribution"' in html)
+    assert "概覽" in html and 'id="s-rank_distribution"' in html
     assert "排序診斷" not in html
     assert "item 能力" not in html
     assert "diagnosis/" not in html
@@ -306,13 +295,10 @@ def test_generate_report_takes_no_spark_dataframe():
 
     catalog = yaml.safe_load(
         (Path(__file__).parents[3] / "conf/base/catalog.yaml").read_text())
-    every_section_on = {"evaluation": {"report": {"sections": {
-        "prediction_quality": True}}}}
     for post_training in (False, True):
-        node = _report_node({**every_section_on, "post_training": post_training})
+        node = _report_node({"post_training": post_training})
         wired = sorted(set(node.keyword_inputs) - {"parameters"})
         assert "evaluation_report_aggregates" in wired, wired
-        assert "prediction_quality_metrics" in wired, wired
         not_json = {name: catalog.get(name, {}).get("type") for name in wired
                     if catalog.get(name, {}).get("type") != "JSONDataset"}
         assert not not_json, f"generate_report 又收了不是落地 JSON 的輸入：{not_json}"
@@ -505,66 +491,58 @@ def test_generate_report_refuses_a_comparison_without_a_fingerprint():
     assert "--from-node compare_to_baseline" in msg
 
 
-def test_a_prediction_quality_result_switched_back_on_is_checked_on_its_own_settings():
-    """Computed with the family on, switched off, then on again and only
-    redrawn: the file an earlier run left is drawn while the settings its
-    step applied still hold, and refused once one moved (ADR-0031
-    principle 5). The switch itself decides only whether the step runs, so
-    it is not what the refusal names."""
-    computed_with = _params_computed_without_baseline()
+def _prediction_quality_report_node(parameters):
+    """``generate_prediction_quality_report`` as the ``--prediction-quality``
+    pipeline builds it."""
+    pipeline = create_pipeline(
+        parameters=parameters, prediction_quality=True,
+        post_training=bool(parameters.get("post_training")))
+    return next(n for n in pipeline.nodes
+                if n.name == "generate_prediction_quality_report")
+
+
+def test_the_prediction_quality_page_refuses_a_result_of_other_settings():
+    """ADR-0031 principle 5 on the mode's page, as generate_report checks
+    its own: a redraw after a setting the computation applied moved names the
+    key and the node to re-run from. The standard run's record the result
+    inherits is not compared: prepare_eval_data is no node of this mode."""
+    computed_with = _params(False)
     computed_with["evaluation"]["prediction_quality"] = {"n_bins": 1000}
     now = copy.deepcopy(computed_with)
-    now["evaluation"]["report"]["sections"]["prediction_quality"] = True
     now["evaluation"]["prediction_quality"]["n_bins"] = 100
+    segments = _landed_segments(computed_with)
+    segments["config_fingerprint"]["applied"]["evaluation.segment_columns"] = [
+        "moved since"]
 
+    node = _prediction_quality_report_node(now)
     with pytest.raises(ValueError) as exc:
-        generate_report(
-            evaluation_row_facts=_landed_row_facts(computed_with),
-            evaluation_metrics=_landed_metrics(computed_with),
-            prediction_quality_metrics={"config_fingerprint": fingerprint(
-                computed_with, "compute_prediction_quality")},
-            **_landed_after_the_metrics(
-                _landed_metrics(computed_with), None, computed_with),
-            parameters=now,
-        )
-
+        node.func(prediction_quality_metrics={"config_fingerprint": fingerprint(
+            computed_with, "compute_prediction_quality", (segments,))},
+            parameters=now)
     msg = str(exc.value)
     assert "evaluation.prediction_quality.n_bins: 1000 -> 100" in msg
-    assert "sections.prediction_quality" not in msg
     assert "--from-node compute_prediction_quality," in msg
-    for current in ("evaluation_row_facts", "evaluation_metrics",
-                    "evaluation_display_ks"):
-        assert f"{current} (written by" not in msg
+    assert "segment_columns" not in msg
 
 
-def test_generate_report_refuses_a_prediction_quality_json_without_fingerprint():
-    params = _params_computed_without_baseline()
-    params["evaluation"]["report"]["sections"]["prediction_quality"] = True
-
+def test_the_prediction_quality_page_refuses_a_json_without_fingerprint():
+    params = _params(False)
     with pytest.raises(ValueError) as exc:
-        generate_report(
-            evaluation_row_facts=_landed_row_facts(params),
-            evaluation_metrics=_landed_metrics(params),
-            prediction_quality_metrics={"overall": {}},
-            **_landed_after_the_metrics(
-                _landed_metrics(params), None, params),
-            parameters=params,
-        )
-
+        _prediction_quality_report_node(params).func(
+            prediction_quality_metrics={"overall": {}}, parameters=params)
     assert ("prediction_quality_metrics (written by "
             "compute_prediction_quality) has no config_fingerprint"
             ) in str(exc.value)
 
 
-def test_generate_report_draws_prediction_quality_from_the_nodes_output(spark):
-    """The two-step path the pipeline wires: compute_prediction_quality on
-    the partition, its JSON round-tripped, generate_report drawing it."""
+def test_the_prediction_quality_page_draws_the_nodes_output(spark):
+    """The two-step path the mode wires: compute_prediction_quality on the
+    standard run's partition, its JSON round-tripped, the page drawing it."""
     from recsys_tfb.pipelines.evaluation.nodes import (
         compute_prediction_quality,
     )
 
     params = _params(False)
-    params["evaluation"]["report"]["sections"]["prediction_quality"] = True
     params["evaluation"]["prediction_quality"] = {
         "n_bins": 10, "n_display_bins": 5, "top_n": 1}
     eval_pred = stamp_partition_fingerprint(
@@ -575,15 +553,9 @@ def test_generate_report_draws_prediction_quality_from_the_nodes_output(spark):
     assert pq["config_fingerprint"]["applied"] == fingerprint(
         params, "compute_prediction_quality")["applied"]
     assert pq["overall"]["summary"]["n"] == 4
-    html = generate_report(
-        evaluation_row_facts=_row_facts_of(eval_pred, params),
-        evaluation_metrics=_landed_metrics(params),
-        prediction_quality_metrics=pq,
-        **_landed_after_the_metrics(
-            _landed_metrics(params), None, params),
-        parameters=params,
-    )
-    assert "預測品質" in html
+    html = _prediction_quality_report_node(params).func(
+        prediction_quality_metrics=pq, parameters=params)
+    assert "預測品質" in html and "上線後的 inference 母體" in html
     # #536: the hand-written payload the report tests draw from holds the
     # node's keys in both blocks the report reads (the display tables).
     from tests.test_pipelines.test_evaluation.report import test_main
@@ -1038,7 +1010,7 @@ def test_a_changed_display_k_sends_the_comparison_redraw_to_a_slice_that_draws(
         assert {"resolve_display_ks", "generate_report"} <= ran
     spark_nodes = {"prepare_eval_data", "compute_row_facts", "compute_metrics",
                    "compute_baseline_metrics", "compute_compare_metrics",
-                   "compute_prediction_quality", "compute_report_aggregates"}
+                   "compute_report_aggregates"}
     assert ran & spark_nodes == set(), sorted(ran)
 
 

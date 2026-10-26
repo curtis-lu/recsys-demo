@@ -1,10 +1,11 @@
 """Run the evaluation pipeline for a "the outputs did not change" check.
 
-One local evaluation that draws every section both reports have:
-``--post-training`` with the prediction-quality section on, and ``--compare``
-against the model itself, so ``report_comparison.html`` is produced too. Each
-run's outputs are copied to ``data/verification/eval_parity/<label>/`` and
-compared with ``compare_eval_runs.py``. The workflow, in a worktree::
+One local evaluation that draws every page the pipeline has:
+``--post-training`` with ``--compare`` against the model itself, so
+``report_comparison.html`` is produced too, then ``--post-training
+--prediction-quality`` on what that run landed. Each run's outputs are copied
+to ``data/verification/eval_parity/<label>/`` and compared with
+``compare_eval_runs.py``. The workflow, in a worktree::
 
     # on the unchanged code
     eval_parity.py prepare                 # dataset + training for the run
@@ -20,11 +21,12 @@ are written to ``conf/local/`` for the length of each command and removed
 after it, whatever happens. A ``conf/local/`` already holding files is
 refused: the overlay would mix with them, and removing it would delete them.
 
-* ``dataset.test_zero_positive_group_ratio`` above 0 — A46 refuses the
-  prediction-quality section under ``--post-training`` without it;
+* ``dataset.test_zero_positive_group_ratio`` above 0 — A64 refuses
+  ``--prediction-quality --post-training`` on a model whose dataset version
+  was built without it, so ``prepare`` builds and trains under it;
 * the zero-positive group weight column on ``training_eval_predictions`` —
   A45, built from the base catalog entry so a column added there is kept;
-* the section switch and the self-comparison source.
+* the self-comparison source.
 
 Each run records ``SOURCE``: a digest of every file under ``src/``, the commit,
 and uncommitted changes under ``src/``. The digest is taken before and after
@@ -73,7 +75,7 @@ def overlay_files(base_conf: Path, model_version: str | None) -> dict[str, str]:
     columns = list(catalog["training_eval_predictions"]["columns"])
     if not any(c["name"] == "zero_positive_group_weight" for c in columns):
         columns.append({"name": "zero_positive_group_weight", "type": "DOUBLE"})
-    evaluation: dict = {"report": {"sections": {"prediction_quality": True}}}
+    evaluation: dict = {}
     if model_version is not None:
         evaluation["compare_sources"] = {COMPARE_KEY: {
             "kind": "model_version",
@@ -175,6 +177,11 @@ def run(root: Path, label: str) -> Path:
         _cli(root, "-m", "recsys_tfb", "evaluation", "--env", "local",
              "--post-training", "--model-version", model_version,
              "--compare", COMPARE_KEY)
+        # The mode reads the partitions the run above landed; it is not
+        # allowed with --compare (A13).
+        _cli(root, "-m", "recsys_tfb", "evaluation", "--env", "local",
+             "--post-training", "--model-version", model_version,
+             "--prediction-quality")
     if src_digest(root / "src") != before:
         raise SystemExit("src/ changed during the run; its outputs belong to "
                          "neither version. Run it again.")

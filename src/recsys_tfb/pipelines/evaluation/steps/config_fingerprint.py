@@ -132,10 +132,11 @@ APPLIED_SETTINGS: dict[str, tuple[str, ...]] = {
         "schema", "evaluation.snap_date", "evaluation.item_categories",
         "evaluation.query_filter",
     ),
-    # post_training together with the evaluated model's test ratio decides
-    # the row weights. The ratio is core.consistency.DATASET_TEST_RATIO_KEY,
-    # injected at the top level by the CLI like post_training (spelled out
-    # here: this module imports nothing from the project).
+    # post_training decides the population and the row weights; the
+    # evaluated model's test ratio is landed with them and gates them (A64).
+    # The ratio is core.consistency.DATASET_TEST_RATIO_KEY, injected at the
+    # top level by the CLI like post_training (spelled out here: this module
+    # imports nothing from the project).
     "compute_prediction_quality": (
         "schema", "post_training", "_dataset_test_zero_positive_group_ratio",
         "evaluation.snap_date", "evaluation.prediction_quality",

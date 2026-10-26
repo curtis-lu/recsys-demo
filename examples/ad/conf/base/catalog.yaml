@@ -279,9 +279,15 @@ baseline_metrics:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/baseline_metrics.json
 
+# --prediction-quality 模式的兩個產物（ADR-0032）；兩個路徑變數由 CLI 設定，
+# 意思見 conf/base/catalog.yaml 同名條目。
 prediction_quality_metrics:
   type: JSONDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/prediction_quality.json
+  filepath: data/evaluation/${model_version}/${snap_date}/prediction_quality/${prediction_quality_population}/${prediction_quality_scope}/prediction_quality.json
+
+prediction_quality_report:
+  type: TextDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/prediction_quality/${prediction_quality_population}/${prediction_quality_scope}/report.html
 
 baseline_comparison:
   type: JSONDataset

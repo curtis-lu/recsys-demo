@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from pyspark.sql import functions as F
 
+from recsys_tfb.core.consistency import DataConsistencyError
 from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
@@ -178,7 +179,7 @@ class EvalPartitions(NamedTuple):
 
 def restrict_to_current_eval_partitions(
     df: DataFrame, parameters: dict, segment_columns: dict, *,
-    recorded_settings: bool = False,
+    recorded_settings: bool = False, rerun_advice: str | None = None,
 ) -> EvalPartitions:
     """The evaluated dates' rows of ``enriched_eval_predictions``, after
     checking each date's partition was written for what the caller reads it
@@ -202,7 +203,9 @@ def restrict_to_current_eval_partitions(
     other settings: another run mode, other segment settings), or none (NULL,
     or no column at all: written before partitions carried one). Fixed by
     rewriting them: ``--from-node prepare_eval_data``, or under
-    ``--compare-only`` a standard run of those dates first.
+    ``--compare-only`` a standard run of those dates first; a reader in a
+    mode with no ``prepare_eval_data`` of its own passes ``rerun_advice``,
+    the sentence that ends the message instead.
 
     Cost: every reader of the table pays one extra small action — one Spark
     job reading one row per evaluated date (:func:`_first_row_per_date`); the
@@ -276,10 +279,11 @@ def restrict_to_current_eval_partitions(
             f"{against} ({', '.join(PARTITION_FINGERPRINT_KEYS)}, joined "
             f"{joined}); reading them would evaluate rows those settings do "
             "not make:\n"
-            + "\n".join(stale)
-            + "\nRe-run with --from-node prepare_eval_data, which rewrites them "
-            "(under --compare-only, which has no prepare_eval_data, re-run the "
-            "standard evaluation of these dates first)."
+            + "\n".join(stale) + "\n"
+            + (rerun_advice or (
+                "Re-run with --from-node prepare_eval_data, which rewrites "
+                "them (under --compare-only, which has no prepare_eval_data, "
+                "re-run the standard evaluation of these dates first)."))
         )
         raise EvalPartitionsNotCurrentError(message, dates_without_rows)
     return EvalPartitions(
@@ -287,6 +291,53 @@ def restrict_to_current_eval_partitions(
         .drop(PARTITION_FINGERPRINT_COLUMN),
         dates_without_rows=dates_without_rows,
     )
+
+
+def standard_run_command(parameters: dict) -> str:
+    """The standard evaluation run that writes the partitions a reader of
+    this mode reads: same model, same run mode. ``--env`` is not in
+    ``parameters``, so it stays a placeholder."""
+    mode = " --post-training" if parameters.get("post_training") else ""
+    model_version = parameters.get("model_version") or "<model_version>"
+    return (f"python -m recsys_tfb evaluation --env <env> "
+            f"--model-version {model_version}{mode}")
+
+
+def require_partitions_of_the_standard_run(
+    df: DataFrame, parameters: dict, segment_columns: dict,
+) -> DataFrame:
+    """The evaluated dates' rows of ``enriched_eval_predictions`` for a mode
+    that writes no partition itself (``--prediction-quality``), after
+    checking the standard run of the same run mode wrote every one of them.
+
+    Pre-check (inputs), ``DataConsistencyError``, collect-all: a date with no
+    row (no standard run evaluated it yet), and a date whose partition
+    another run mode or other settings wrote since
+    (:func:`restrict_to_current_eval_partitions`, whose fingerprint holds
+    ``post_training``). Both name the standard run to do first
+    (:func:`standard_run_command`), not ``--from-node prepare_eval_data``:
+    this mode has no such node. The same one Spark job as that check.
+    """
+    advice = (f"Run `{standard_run_command(parameters)}` first, then this "
+              "mode again.")
+    not_current = None
+    try:
+        partitions = restrict_to_current_eval_partitions(
+            df, parameters, segment_columns, rerun_advice=advice)
+        missing = partitions.dates_without_rows
+    except EvalPartitionsNotCurrentError as error:
+        not_current, missing = error, error.dates_without_rows
+    problems = []
+    if missing:
+        problems.append(
+            f"enriched_eval_predictions holds no row for evaluated date(s) "
+            f"{missing}: no standard evaluation of this model in this run "
+            f"mode has written them. {advice}")
+    if not_current is not None:
+        problems.append(str(not_current))
+    if problems:
+        raise DataConsistencyError("\n".join(problems)) from not_current
+    return partitions.frame
 
 
 def snap_dates_in_frame(frame: DataFrame, time_col: str) -> list[str]:

@@ -1,6 +1,7 @@
 """What more than one section of the main report uses, and what the
-comparison report borrows from it (ADR-0031 principle 6). A helper only
-one section uses stays in that section's file."""
+comparison report and the ``--prediction-quality`` page borrow from it
+(ADR-0031 principle 6). A helper only one section uses stays in that
+section's file."""
 
 from __future__ import annotations
 
@@ -14,7 +15,6 @@ from recsys_tfb.core.date_ranges import as_date_list
 from recsys_tfb.evaluation.result_readers import (
     ALL_POSITIVE_SHARE_KEY,
     ALL_POSITIVE_WARNS_KEY,
-    DISPLAY_BINS_KEY,
     ENTRIES,
     LEDGER_RERUN_NODE,
     N_SCORED_WITH_POSITIVE_KEY,
@@ -23,7 +23,6 @@ from recsys_tfb.evaluation.result_readers import (
     POPULATION_KEY,
     REFERENCE,
     THIS,
-    THRESHOLD_SWEEP_KEY,
 )
 from recsys_tfb.evaluation.segment_keys import UNMATCHED_SEGMENT
 
@@ -51,7 +50,7 @@ def sections_on(sections: tuple, parameters: dict) -> tuple:
     """The sections of ``sections`` that this run draws: each declares
     ``SWITCH``, the ``evaluation.report.sections`` name that turns it off, or
     ``None`` when nothing does, read by ``core.consistency.report_section_on``
-    (on when absent, except the prediction-quality section).
+    (on when absent).
 
     The one answer to "which sections" (ADR-0031 principle 3): the pipeline's
     requirement list wires only the results these declare in ``READS``, so a
@@ -238,9 +237,8 @@ ROW_FACTS_ACCOUNTS = (N_WITH_POSITIVE_KEY, ALL_POSITIVE_SHARE_KEY,
 def refuse_pre_landed_reads(results: Mapping[str, dict | None]) -> None:
     """Raise when a result lacks what the report reads instead of computing
     (ADR-0031 principle 1): the row facts' all-positive accounts, at each
-    grain; the baseline's popularity window; the prediction-quality display
-    tables and threshold sweep. A result this run does not read (its section
-    off) is absent and passes.
+    grain; the baseline's popularity window. A result this run does not read
+    (its section off) is absent and passes.
 
     **Why refuse**: a result landed before a key existed passes the
     fingerprint check when no setting it applied changed, and every read of
@@ -257,13 +255,6 @@ def refuse_pre_landed_reads(results: Mapping[str, dict | None]) -> None:
     baseline = results.get("baseline_metrics")
     if isinstance(baseline, dict) and POPULARITY_WINDOW_KEY not in baseline:
         missing.append(f"baseline_metrics: {POPULARITY_WINDOW_KEY!r}")
-    quality = results.get("prediction_quality_metrics")
-    if isinstance(quality, dict):
-        for block, key in (("overall", DISPLAY_BINS_KEY),
-                           ("overall", THRESHOLD_SWEEP_KEY),
-                           ("per_item", DISPLAY_BINS_KEY)):
-            if key not in (quality.get(block) or {}):
-                missing.append(f"prediction_quality_metrics: {block}.{key}")
     if missing:
         raise ValueError(
             f"Landed before #536, these results lack what the report reads "

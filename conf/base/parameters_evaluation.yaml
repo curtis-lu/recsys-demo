@@ -69,10 +69,11 @@ evaluation:
     #                        --rebuild-dates。前提見 docs/pipelines/evaluation.md §3.4。
     # score: rate
 
-  # 預測品質指標家族（ADR-0024）：把每一列評估資料當一次二元預測，照分數分箱，
-  # 算 precision／recall／F1／pr_auc／roc_auc 與分箱表（每格的平均分數 vs 實際
-  # 正例率），整體＋per-item。開關是下面的 report.sections.prediction_quality
-  # （框架預設關）；這裡只放怎麼算。三個鍵的合法值由 A42 檢查。
+  # 全部候選列的指標（ADR-0024、ADR-0032）：把每一列評估資料當一次二元預測，照分數
+  # 分箱，算 precision／recall／F1／pr_auc／roc_auc 與分箱表（每格的平均分數 vs 實際
+  # 正例率），整體＋per-item。不在主報表裡：要看就跑
+  # `python -m recsys_tfb evaluation --prediction-quality`（加 --post-training 讀 test
+  # 母體）；這裡只放怎麼算。三個鍵的合法值由 A42 檢查。
   #   n_bins          細箱數：全域等寬，範圍取本次資料的最小～最大分數（不是 [0, 1]）。
   #                   門檻只算得到箱的邊界，所以 bin 寬＝F1 最佳門檻的解析度。
   #   n_display_bins  報表分箱表的格數：每格合併 n_bins ÷ n_display_bins 個細箱，
@@ -87,7 +88,7 @@ evaluation:
   # Report 產生選項
   # 這一區的鍵分兩類（ADR-0020 決定二；每個 step 讀哪些設定寫在
   # src/recsys_tfb/pipelines/evaluation/steps/config_fingerprint.py 的 APPLIED_SETTINGS）：
-  #   「算的」：diagnostics.*、上面的 prediction_quality.*。讀它們的 step
+  #   「算的」：diagnostics.*、上面的 prediction_quality.*（--prediction-quality 模式讀）。讀它們的 step
   #     把值記進落地 JSON 的設定指紋，改了只有那些 step 與它們的下游過期，要照錯誤訊息
   #     點名的 --from-node 重跑；只做 --only-node generate_report 會被擋下，錯誤訊息會寫
   #     出變了哪個鍵、該 --from-node 哪個 node。sections.* 只決定哪些計算在 pipeline 裡，
@@ -113,8 +114,6 @@ evaluation:
       ranking_metrics: true       # 排序指標段：overall、per-item、per-segment、大類
       rank_distribution: true     # 名次分布段。算的：false 時 compute_report_aggregates 不在 pipeline 裡
       popularity_baseline: true   # 熱門度基準段。算的：false 時 compute_baseline_metrics 不在 pipeline 裡
-      prediction_quality: false   # 算的：預測品質指標家族（見上方 prediction_quality）；
-                                  # false 時 compute_prediction_quality 不在 pipeline 裡
     display:                      # 畫的
       # compare_k：比較表顯示哪些 K——熱門度基準段的每張表、比較報表各 item 與大類段的
       # 每張表（map_attr、per-item recall）。沒寫時等於上面的 k_values。每個整數都要列在

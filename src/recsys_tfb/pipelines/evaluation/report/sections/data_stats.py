@@ -142,8 +142,8 @@ def _description(facts: dict, parameters: dict, slices: list[str]) -> str:
     ratio = zero_positive_draw_on_test(parameters)
     if ratio:   # monitoring (None) or the dataset dropped them all (0.0): none
         text += (
-            f"{kept_ratio_phrase(ratio)}（dataset.test_zero_positive_group_ratio"
-            f"），每列帶權重 1／r＝{1 / ratio:.4g}（{ZERO_POSITIVE_GROUP_WEIGHT_COL}"
+            f"{kept_ratio_phrase(ratio)}（被評模型的 dataset version 建 test 時的 "
+            f"dataset.test_zero_positive_group_ratio），每列帶權重 1／r＝{1 / ratio:.4g}（{ZERO_POSITIVE_GROUP_WEIGHT_COL}"
             "）。這裡的計數與比率都算進了這些組，而且沒有加權：它們描述的是 "
             "dataset 留下來的這張表，會隨 r 改變，不代表全部曝光。與 r ＝ 0 時"
             "相比數字變了是預期的，不是 regression。"

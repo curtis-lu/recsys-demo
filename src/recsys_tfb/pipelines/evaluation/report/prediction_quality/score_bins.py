@@ -1,5 +1,7 @@
 """預測品質: every candidate row as one binary prediction, binned by score
-(ADR-0024; drawn as ADR-0031 decision 16's demo)."""
+(ADR-0024; drawn as ADR-0031 decision 16's demo), the body of the
+``--prediction-quality`` page (ADR-0032 decision 5). Which rows they are is
+the page's first section (``population``)."""
 
 from __future__ import annotations
 
@@ -8,16 +10,9 @@ from collections.abc import Mapping
 import pandas as pd
 
 from recsys_tfb.pipelines.evaluation.report.shell import ReportSection
-from recsys_tfb.pipelines.evaluation.report.sections.shared import (
-    ALL_POSITIVE_SWITCH,
-    kept_ratio_phrase,
-    zero_positive_draw_on_test,
-)
 from recsys_tfb.evaluation.result_readers import (
-    ALL_POSITIVE_KEY,
     DISPLAY_BINS_KEY,
     THRESHOLD_SWEEP_KEY,
-    drop_all_positive_groups,
     frame_from_json,
 )
 from recsys_tfb.report.types import (
@@ -33,11 +28,11 @@ from recsys_tfb.report.types import (
 )
 
 #: The results this section reads, by catalog name (ADR-0031 principle 1).
-READS = ("prediction_quality_metrics", "evaluation_row_facts")
+READS = ("prediction_quality_metrics",)
 
-#: The ``evaluation.report.sections`` switch that turns this section off
-#: (ADR-0031 principle 3: off, the pipeline computes nothing only it reads).
-SWITCH = "prediction_quality"
+#: No switch turns this section off: the page is the mode (ADR-0031
+#: principle 3, ``shared.sections_on``).
+SWITCH = None
 
 #: The heading, its English and the question the section answers (ADR-0031
 #: decision 16).
@@ -164,74 +159,6 @@ def _threshold_figure(sweep: pd.DataFrame) -> Figure:
     return Figure(fig, Table(THRESHOLD_FIGURE_TITLE, "細箱", columns, rows))
 
 
-def _kept_zero_positive_groups(weight_col: str, parameters: dict) -> str:
-    """The share of zero-positive test groups the dataset kept and the weight
-    each of their rows carries — no count: the groups without a positive are
-    a total of 核心概念."""
-    ratio = zero_positive_draw_on_test(parameters)
-    if not ratio:
-        return ""
-    return (
-        f"{kept_ratio_phrase(ratio)}（dataset.test_zero_positive_group_ratio），"
-        f"每列帶權重 1／r＝{1 / ratio:.4g}（{weight_col}）。1／r 是設計權重，"
-        "不是無偏估計：留下的組少時，加權後的比值型指標不穩。"
-    )
-
-
-def _population(facts: dict, parameters: dict, weight_col: str | None) -> str:
-    """Which rows this section is computed on, against the ranking metrics'
-    (ADR-0024 decision 7) — one sentence per run mode, without naming another
-    section and without the totals (decision 16 item 12). ``--post-training``
-    has two forms: with the zero-positive group weight in the payload the test
-    table kept a share ``r`` of the groups without a positive, weighted back
-    up by ``1 / r`` (ADR-0025 decision 3); without it the dataset pipeline
-    dropped them all, and with nothing else excluded the two populations are
-    the same. A46 refuses the second form at the CLI entry; it stays for a
-    payload computed before the weight existed.
-    """
-    # With drop_all_positive_groups on, the ranking metrics also drop
-    # the all-positive groups; "only groups with a positive" and "the two
-    # populations are the same" would both be false.
-    drop = drop_all_positive_groups(parameters)
-    if drop:
-        ranking_rule = (
-            "map@K、precision@K 這類只看組內先後的指標只算有正例、而且不是全正的"
-            f"組（{ALL_POSITIVE_SWITCH} 開著）"
-        )
-    else:
-        ranking_rule = "map@K、precision@K 這類只看組內先後的指標只算有正例的組"
-    if parameters.get("post_training") and weight_col:
-        return (
-            "母體是本次評估的全部候選列（核心概念的總量），本身不排除任何 query "
-            "group；但這是 --post-training，test 表在 dataset 階段只留下有正例的 "
-            "query group 與一部分沒有正例的（filter_test_keys）。"
-            + _kept_zero_positive_groups(weight_col, parameters)
-            + f"這段的候選列與正例數都是乘上 {weight_col} 之後的加權數，代表"
-            f"還原到全部曝光的估計。{ranking_rule}，所以兩邊的母體不同，"
-            "precision 不能互相比。"
-        )
-    if parameters.get("post_training"):
-        # With the switch on, the populations are the same only if it
-        # dropped no all-positive group.
-        same = (facts.get("n_excluded_queries") == 0
-                and (not drop or facts.get(ALL_POSITIVE_KEY) == 0))
-        return (
-            "母體是本次評估的全部候選列（核心概念的總量），本身不排除任何 query "
-            "group；但這是 --post-training，test 表在 dataset 階段已經丟掉沒有"
-            "正例的 query group（filter_test_keys），所以這些列只來自「有正例的 "
-            "query group」，不是全部曝光。正例佔比因此比全部曝光高，precision 與 "
-            "PR-AUC 會比在全部曝光上算的大；要留下這類 query group，設 "
-            f"dataset.test_zero_positive_group_ratio。{ranking_rule}，"
-            + ("所以兩邊的母體相同，但 precision 的定義不同（見下面 per-item 那"
-               "一條），仍不能互相比。" if same else
-               "所以兩邊的母體不同，precision 不能互相比。")
-        )
-    return (
-        "母體是全部候選列（核心概念的總量），包含沒有正例的 query group；"
-        f"{ranking_rule}，所以兩邊的 precision 不能互相比。"
-    )
-
-
 def build(
     results: Mapping[str, dict], parameters: dict
 ) -> ReportSection | None:
@@ -240,28 +167,25 @@ def build(
 
     Every number here is read off the payload, all computed by
     ``compute_prediction_quality`` from the same fine bins, so the threshold
-    sweep and the bin table cannot disagree. The row facts are read for one
-    thing: whether the ranking metrics' query groups are the same as
-    this section's rows (:func:`_population`).
+    sweep and the bin table cannot disagree.
 
-    Decision 7's three statements are always printed, each where the number
-    it qualifies is: the bin width (the best-F1 threshold's resolution, not an
-    online setting), the two populations, and PR-AUC not being an average
-    precision computed elsewhere.
+    Decision 7's statements are always printed, each where the number it
+    qualifies is: the bin width (the best-F1 threshold's resolution, not an
+    online setting) and PR-AUC not being an average precision computed
+    elsewhere here; the two populations in the page's first section.
     """
     prediction_quality = results["prediction_quality_metrics"]
 
     def section(blocks: list) -> ReportSection:
         return ReportSection(
             title=TITLE, description="", title_en=TITLE_EN, question=QUESTION,
-            key="prediction_quality", blocks=blocks)
+            key="score_bins", blocks=blocks)
 
     overall = prediction_quality["overall"]
     summary = overall.get("summary")
     if summary is None:
         return section([Paragraph(
             "本次評估沒有任何候選列，這一段沒有東西可算。", muted=True)])
-    facts = results["evaluation_row_facts"]
     bins_cfg = prediction_quality["bins"]
     lo, hi, width = bins_cfg["lo"], bins_cfg["hi"], bins_cfg["width"]
     n_bins, n_display = bins_cfg["n_bins"], bins_cfg["n_display_bins"]
@@ -274,7 +198,9 @@ def build(
         Paragraph(
             "把每一列候選當成一次「會不會是正例」的預測：分數 ≥ 門檻就預測為正。"
             "看切在哪裡 precision 與 recall 各多少，以及每段分數裡實際有多少"
-            "正例。" + _population(facts, parameters, weight_col)
+            "正例。"
+            + ("候選列與正例數都是乘上權重之後的加權數（見上面的母體）。"
+               if weight_col else "")
             + f"分箱表一格＝{n_bins // n_display} 個細箱；「{BIN_GROUP}」底下的"
             f"欄只算這一格，「{ABOVE_GROUP}」底下的欄是把門檻放在這格下緣、算"
             "門檻以上的全部候選列。",

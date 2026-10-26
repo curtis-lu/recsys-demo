@@ -1,7 +1,8 @@
-"""預測品質 (``report/sections/prediction_quality``, #537): the headline
-numbers without the totals, the bin tables with three upper headers (分數,
-這一格, 門檻以上), every listed item's bins in one table, and the population
-sentence chosen by run mode without naming another section.
+"""預測品質, the ``--prediction-quality`` page's body
+(``report/prediction_quality/score_bins``, ADR-0032 decision 5; drawn as in
+#537): the headline numbers without the totals, the bin tables with three
+upper headers (分數, 這一格, 門檻以上) and every listed item's bins in one
+table. Which rows they are is ``test_population``'s.
 
 The payload is ``aggregate_score_bins`` + ``build_payload`` on the rows of
 ``landed`` (20 fine bins over [0.1, 0.9], 5 display bins, the 3 items with
@@ -13,7 +14,9 @@ import re
 
 import pytest
 
-from recsys_tfb.pipelines.evaluation.report.sections import prediction_quality
+from recsys_tfb.pipelines.evaluation.report.prediction_quality import (
+    score_bins,
+)
 from recsys_tfb.evaluation.result_readers import frame_from_json
 from recsys_tfb.report.types import (
     Bullets,
@@ -40,7 +43,7 @@ BIN_COLUMNS = [
 
 def _draw(spark, **settings):
     results, parameters = landed.results(spark, **settings)
-    return prediction_quality.build(results, parameters), results
+    return score_bins.build(results, parameters), results
 
 
 def _table(section, title: str) -> Table:
@@ -69,7 +72,7 @@ def test_the_blocks_come_in_the_demo_s_order(spark):
     assert [b.title for b in s.blocks if isinstance(b, Table)] == [
         "關鍵數", "分箱", "關鍵數 · 各 item", "分箱 · 各 item"]
     assert (s.key, s.title, s.title_en) == (
-        "prediction_quality", "預測品質", "Prediction quality")
+        "score_bins", "預測品質", "Prediction quality")
     figure = next(b for b in s.blocks if isinstance(b, Figure))
     assert figure.fig.layout.title.text == "門檻對 precision、recall、F1 · 整體"
     # Nothing collapses but the figure's data table (owner 2026-10-24).
@@ -196,66 +199,12 @@ def test_weighted_counts_print_as_ratios(spark):
     assert _table(s, "分箱 · 各 item").columns[0].kind == "count"   # 格
 
 
-def test_monitoring_population_sentence_is_the_demo_s(spark):
-    s, _ = _draw(spark)
-    assert ("母體是全部候選列（核心概念的總量），包含沒有正例的 query group；"
-            "map@K、precision@K 這類只看組內先後的指標只算有正例的組，所以兩邊"
-            "的 precision 不能互相比。") in s.blocks[0].text
-    assert "分箱表一格＝4 個細箱" in s.blocks[0].text
-
-
-def test_the_population_sentence_names_no_section_and_prints_no_total(spark):
-    for settings in ({}, {"drop": True}, {"post_training": True},
-                     {"post_training": True, "ratio": landed.KEPT_RATIO}):
-        s, results = _draw(spark, **settings)
-        text = _text(s)
-        for other in ("主指標段", "排序指標", "衡量指標", "兩段"):
-            assert other not in text, (settings, other)
-        facts = results["evaluation_row_facts"]
-        assert facts["n_excluded_queries"] == 1
-        for total in ("24 列", "共 24", "排除 1 個", "有 1 個"):
-            assert total not in text, (settings, total)
-
-
-def test_the_ranking_rule_names_the_all_positive_exclusion_when_on(spark):
-    off, _ = _draw(spark, drop=False)
-    on, _ = _draw(spark, drop=True)
-    assert "只算有正例的組" in off.blocks[0].text
-    assert "不是全正的組" not in off.blocks[0].text
-    assert ("只算有正例、而且不是全正的組（evaluation.query_filter."
-            "drop_all_positive_groups 開著）") in on.blocks[0].text
-
-
-def test_post_training_says_the_test_table_was_filtered(spark):
-    """#426: the dataset dropped the groups without a positive. With one
-    still in the rows (C3) the two populations differ; on the filtered table
-    they are the same — and not with the switch on, which drops the
-    all-positive groups too (#376)."""
-    unfiltered, _ = _draw(spark, post_training=True)
-    assert "filter_test_keys" in unfiltered.blocks[0].text
-    assert "所以兩邊的母體不同" in unfiltered.blocks[0].text
-    same, results = _draw(spark, post_training=True, filtered=True)
-    assert results["evaluation_row_facts"]["n_excluded_queries"] == 0
-    assert "所以兩邊的母體相同" in same.blocks[0].text
-    # The switch on with an all-positive group in the rows: the ranking
-    # metrics drop it, this section does not.
-    dropped, results = _draw(spark, post_training=True, filtered=True,
-                             all_positive=True, drop=True)
-    assert results["evaluation_row_facts"]["n_all_positive_queries"] == 1
-    assert "所以兩邊的母體不同" in dropped.blocks[0].text
-    kept, _ = _draw(spark, post_training=True, filtered=True,
-                    all_positive=True, drop=False)
-    assert "所以兩邊的母體相同" in kept.blocks[0].text
-    monitoring, _ = _draw(spark, post_training=False)
-    assert "filter_test_keys" not in monitoring.blocks[0].text
-
-
-def test_the_weighted_note_names_the_weight_and_the_ratio(spark):
-    s, _ = _draw(spark, post_training=True, ratio=landed.KEPT_RATIO)
-    text = s.blocks[0].text
-    assert "zero_positive_group_weight" in text and "加權" in text
-    assert "r＝0.3" in text and "1／r＝3.333" in text
-    assert "所以這些列只來自" not in text
+def test_the_weighted_counts_are_said_to_be_weighted(spark):
+    weighted, _ = _draw(spark, post_training=True, ratio=landed.KEPT_RATIO)
+    assert "加權數" in weighted.blocks[0].text
+    plain, _ = _draw(spark)
+    assert "加權數" not in plain.blocks[0].text
+    assert "分箱表一格＝4 個細箱" in plain.blocks[0].text
 
 
 def test_decision_7_s_statements_are_printed(spark):
@@ -273,9 +222,9 @@ def test_decision_7_s_statements_are_printed(spark):
 def test_no_candidate_row_draws_one_sentence(spark):
     results, parameters = landed.results(spark)
     results["prediction_quality_metrics"] = landed.empty_quality(spark)
-    s = prediction_quality.build(results, parameters)
+    s = score_bins.build(results, parameters)
     assert [type(b) for b in s.blocks] == [Paragraph]
     assert "沒有任何候選列" in s.blocks[0].text
-    assert s.key == "prediction_quality"
+    assert s.key == "score_bins"
 
 

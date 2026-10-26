@@ -27,7 +27,7 @@ from recsys_tfb.core.consistency import (
     parse_etl_var_flags,
     post_training_snap_date_errors,
     prediction_quality_param_errors,
-    prediction_quality_population_errors,
+    prediction_quality_test_ratio_errors,
     on_disk_entry_path_errors,
     baseline_rebuild_dates_absent_errors,
     baseline_score_errors,
@@ -62,6 +62,10 @@ from recsys_tfb.core.versioning import (
     resolve_train_variant_id,
     update_symlink,
     write_manifest,
+)
+from recsys_tfb.evaluation.result_readers import (
+    MONITORING_POPULATION,
+    POST_TRAINING_POPULATION,
 )
 from recsys_tfb.pipelines import get_pipeline, list_pipelines
 from recsys_tfb.pipelines.dataset.month_plans import (
@@ -542,6 +546,19 @@ def _compare_only_input_errors(plan, catalog, catalog_config, params) -> list[st
     Metadata only: a partition listing and a file check. The gate still
     refuses a partition that is listed but holds no rows.
     """
+    names = ["evaluation_segment_columns"]
+    if category_table_needed(params):
+        names.append("evaluation_item_categories")
+    return _landed_input_errors(plan, catalog, catalog_config, names)
+
+
+def _landed_input_errors(plan, catalog, catalog_config, names) -> list[str]:
+    """What a mode without ``prepare_eval_data`` (``--compare-only``,
+    ``--prediction-quality``) reads from an earlier standard run and cannot
+    find: each evaluated date ``plan`` lists without an
+    ``enriched_eval_predictions`` partition, and each of the JSON entries
+    ``names`` that is not there — one line each. Metadata only: a partition
+    listing and a file check."""
     errors = []
     if plan is not None and plan.to_process:
         months = ",".join(d.strftime("%Y-%m-%d") for d in plan.to_process)
@@ -550,9 +567,6 @@ def _compare_only_input_errors(plan, catalog, catalog_config, params) -> list[st
         entry = catalog_config["enriched_eval_predictions"]
         table = ".".join(filter(None, (entry.get("database"), entry["table"])))
         errors.append(f"{table} has no partition for {months}")
-    names = ["evaluation_segment_columns"]
-    if category_table_needed(params):
-        names.append("evaluation_item_categories")
     for name in names:
         if not catalog.exists(name):
             errors.append(f"{name} is missing: {catalog_config[name]['filepath']}")
@@ -1953,6 +1967,14 @@ def evaluation(
         None, "--compare-only",
         help="Like --compare, but skip prepare/compute/baseline/report and read enriched_eval_predictions from Hive (only produces report_comparison.html)",
     ),
+    prediction_quality: bool = typer.Option(
+        False, "--prediction-quality",
+        help="Every candidate row as one binary prediction (bin table, "
+             "threshold sweep, AUC), read off the enriched_eval_predictions "
+             "the standard evaluation of the same mode wrote; lands "
+             "prediction_quality/<post_training|monitoring>/all/ (JSON and "
+             "report.html). Not with --compare / --compare-only.",
+    ),
     rebuild_dates: Optional[str] = typer.Option(
         None, "--rebuild-dates",
         help="Comma-separated time values of popularity_period_counts to "
@@ -2030,16 +2052,10 @@ def evaluation(
     # with A22 for the same reason — validate_config_consistency never sees
     # --post-training — and collected with it so one run reports everything.
     role_errs = optional_role_monitoring_errors(params, post_training)
-    # (A46) the prediction-quality family under --post-training needs a test
-    # table that kept some query groups holding no positive; with
-    # dataset.test_zero_positive_group_ratio at 0 the dataset pipeline dropped
-    # them all and every binary metric comes out biased high. Needs the flag,
-    # so wired here with A22/A40.
-    section_errs += prediction_quality_population_errors(params, post_training)
     # (A51) evaluation.item_categories.column (#379): not with mapping, and
     # only under --post-training — the column is read off sample_pool, which
     # monitoring (and --compare-only without the flag) does not evaluate.
-    # Needs the flag, so wired here with A22/A40/A46.
+    # Needs the flag, so wired here with A22/A40.
     section_errs += item_category_column_errors(params, post_training)
     if snap_date_errs or section_errs or role_errs:
         logger.error("\n".join([*snap_date_errs, *section_errs, *role_errs]))
@@ -2050,11 +2066,12 @@ def evaluation(
     except KeyError:
         params_eval = {}
 
-    # A13 and A12 read only the two flags and evaluation.compare_sources, so
-    # they run before the Spark cold start: a mistyped --compare key should
+    # A13 and A12 read only the three flags and evaluation.compare_sources,
+    # so they run before the Spark cold start: a mistyped --compare key should
     # cost seconds, not a session build.
     # A13: mutual-exclusive
-    errs = compare_mutual_exclusive_errors(compare, compare_only)
+    errs = compare_mutual_exclusive_errors(
+        compare, compare_only, prediction_quality=prediction_quality)
     if errs:
         raise ConfigConsistencyError("\n".join(errs))
 
@@ -2079,10 +2096,10 @@ def evaluation(
     # and whether --rebuild-dates means anything; one answer for all three.
     # Only under --post-training (monitoring scores the full grid and keeps
     # the count, see evaluation/baselines.py; A22 has already required a
-    # configured date there); never under --compare-only, whose short
-    # pipeline has no baseline; and only while the requirement list asks for
-    # the baseline at all (a switched-on section reads it, ADR-0031
-    # principle 3).
+    # configured date there); never under --compare-only or
+    # --prediction-quality, whose short pipelines have no baseline; and only
+    # while the requirement list asks for the baseline at all (a switched-on
+    # section reads it, ADR-0031 principle 3).
     from recsys_tfb.evaluation.baselines import (
         baseline_scores_by_rate,
         resolve_lookback_months,
@@ -2094,7 +2111,7 @@ def evaluation(
 
     baseline_rate = (
         baseline_scores_by_rate(params, post_training=post_training)
-        and not compare_only
+        and not compare_only and not prediction_quality
         and "baseline_metrics" in required_results(
             params, main_report=True, comparison_report=False)[MAIN_REPORT]
     )
@@ -2126,12 +2143,22 @@ def evaluation(
     # evaluated by --model-version may predate a change to it. Only this
     # command can read it; the nodes take it from parameters.
     dataset_test_ratio = dataset_version_test_ratio(data_dir / "dataset" / base_v)
+    # (A64) --prediction-quality --post-training needs that version's test to
+    # have kept some query group holding no positive. Here, the first place
+    # the version is known, and before Spark starts.
+    errs = prediction_quality_test_ratio_errors(
+        prediction_quality=prediction_quality, post_training=post_training,
+        dataset_test_ratio=dataset_test_ratio, dataset_version=base_v)
+    if errs:
+        logger.error("\n".join(errs))
+        raise typer.Exit(code=1)
 
     logger.info(
-        "Evaluation — model_version: %s (%s), post_training: %s, compare: %s%s",
+        "Evaluation — model_version: %s (%s), post_training: %s, compare: %s%s%s",
         mv, model_version if model_version else "best", post_training,
         compare_key or "none",
         " (compare-only)" if compare_only else "",
+        " (prediction-quality)" if prediction_quality else "",
     )
     logger.info("Evaluation — snap_date: %s", snap_date)
     if len(eval_dates) > 1:
@@ -2157,6 +2184,13 @@ def evaluation(
         # Read through core.consistency.evaluated_test_ratio, which refuses
         # an absent key.
         DATASET_TEST_RATIO_KEY: dataset_test_ratio,
+        # The --prediction-quality outputs' directory segments (catalog
+        # placeholders): which population's rows, and the scope, "all" until
+        # a scope can be named (ADR-0032 decisions 5 and 7). Set on every
+        # run, like snap_date, so the entries always resolve.
+        "prediction_quality_population": (
+            POST_TRAINING_POPULATION if post_training else MONITORING_POPULATION),
+        "prediction_quality_scope": "all",
     }
 
     pipeline_kwargs = {
@@ -2166,6 +2200,7 @@ def evaluation(
         "compare_source": compare_source_dict,
         "compare_only": bool(compare_only),
         "baseline_rate": baseline_rate,
+        "prediction_quality": prediction_quality,
     }
 
     # Asked of a catalog resolved after runtime_params holds model_version:
@@ -2225,6 +2260,25 @@ def evaluation(
             extra_datasets = {
                 month_plan_input("popularity_period_counts"): period_plan}
             month_plans["popularity_period_counts"] = period_plan
+    if prediction_quality:
+        errors = [] if (dry_run or list_nodes or redraw) else _landed_input_errors(
+            (month_plans or {}).get("enriched_eval_predictions"),
+            listing_catalog, listing_catalog_config,
+            ["evaluation_segment_columns"],
+        )
+        if errors:
+            logger.error(
+                "--prediction-quality reads what the standard evaluation of "
+                "the same model_version, evaluation.snap_date and run mode "
+                "wrote, and it is not all there:\n  - "
+                + "\n  - ".join(errors) + "\n"
+                f"Run `python -m recsys_tfb evaluation --env {env} "
+                f"--model-version {mv}{' --post-training' if post_training else ''}` "
+                "first, then --prediction-quality."
+            )
+            raise typer.Exit(code=1)
+        # No prepare_eval_data in this mode for a plan to pull back.
+        month_plans = None
     if compare_only:
         errors = [] if (dry_run or list_nodes or redraw) else _compare_only_input_errors(
             (month_plans or {}).get("enriched_eval_predictions"),

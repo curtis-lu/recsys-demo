@@ -14,7 +14,6 @@ from recsys_tfb.pipelines.evaluation.report.sections import (
     data_stats,
     overview,
     popularity_baseline,
-    prediction_quality,
     rank_distribution,
     ranking_metrics,
 )
@@ -29,21 +28,21 @@ from recsys_tfb.pipelines.evaluation.report.sections.shared import (
 
 #: The main report's sections, in page order (ADR-0031 decision 16 item 4).
 #: Moving a section is moving its line; a section reads only the results it
-#: declares (``READS``).
+#: declares (``READS``). The every-candidate-row family is not among them: it
+#: is the ``--prediction-quality`` mode's page (ADR-0032 decision 2).
 SECTIONS = (
     overview,
     core_concepts,
     data_stats,
     ranking_metrics,
-    prediction_quality,
     rank_distribution,
     popularity_baseline,
     completeness,
 )
 
 #: The results that are metrics bundles, the ones with a per-item block. The
-#: others carry a ``per_item`` of their own shape (the prediction-quality
-#: payload's is keyed by item), which the pre-rename check must not read.
+#: others can carry a ``per_item`` of their own shape (the comparison's holds
+#: both sides), which the pre-rename check must not read.
 _METRICS_BUNDLES = ("evaluation_metrics", "baseline_metrics")
 
 #: The page's title, and its English beside it.

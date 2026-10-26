@@ -23,11 +23,13 @@ from pyspark.sql import DataFrame as SparkDataFrame
 from recsys_tfb.core.consistency import (
     PREDICTION_QUALITY_DEFAULTS,
     ZERO_POSITIVE_GROUP_WEIGHT_COL,
+    ConfigConsistencyError,
     DataConsistencyError,
     evaluated_test_ratio,
     item_category_column,
     item_category_conflict_errors,
     item_list_counted_from_data,
+    prediction_quality_test_ratio_errors,
 )
 from recsys_tfb.core.schema import get_schema
 from recsys_tfb.evaluation.baselines import (
@@ -47,6 +49,7 @@ from recsys_tfb.evaluation.metrics_spark import (
 from recsys_tfb.evaluation.prediction_quality import (
     aggregate_score_bins,
     build_payload,
+    count_query_groups_without_positive,
 )
 from recsys_tfb.evaluation.result_readers import (
     ALL_K_KEY,
@@ -55,8 +58,15 @@ from recsys_tfb.evaluation.result_readers import (
     DISPLAY_COMPARE_K,
     DISPLAY_METRICS_SECTION,
     LEDGER_RERUN_NODE,
+    MONITORING_POPULATION,
     POPULARITY_WINDOW_KEY,
+    POPULATION_DATES_KEY,
     POPULATION_KEY,
+    POPULATION_SOURCE_KEY,
+    POPULATION_TEST_RATIO_KEY,
+    POPULATION_ZERO_POSITIVE_GROUPS_KEY,
+    POST_TRAINING_POPULATION,
+    PREDICTION_QUALITY_POPULATION_KEY,
     THIS,
     drop_all_positive_groups,
     resolved_all_k,
@@ -65,6 +75,9 @@ from recsys_tfb.pipelines.evaluation.report.comparison.main import (
     assemble_comparison_report,
 )
 from recsys_tfb.pipelines.evaluation.report.main import assemble_report
+from recsys_tfb.pipelines.evaluation.report.prediction_quality.main import (
+    assemble_prediction_quality_report,
+)
 from recsys_tfb.pipelines.evaluation.steps.all_positive_accounts import (
     log_all_positive_accounts,
 )
@@ -131,6 +144,7 @@ from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
     EvalPartitionsNotCurrentError,
     eval_snap_dates,
     eval_snap_dates_without_rows,
+    require_partitions_of_the_standard_run,
     restrict_to_current_eval_partitions,
     restrict_to_eval_snap_dates,
     snap_dates_in_frame,
@@ -771,32 +785,49 @@ def compute_prediction_quality(
     segment_columns: dict,
     parameters: dict,
 ) -> dict:
-    """The prediction-quality family: every evaluated row as one binary
-    prediction, binned by score (ADR-0024).
+    """The every-candidate-row family: each evaluated row as one binary
+    prediction, binned by score (ADR-0024). The ``--prediction-quality``
+    mode's computation (ADR-0032 decision 2); no other mode wires it.
 
-    Lands as ``prediction_quality_metrics`` (``prediction_quality.json``).
-    What each number means and cannot mean is in
-    ``evaluation/prediction_quality.py``'s docstring.
+    Lands as ``prediction_quality_metrics``, under the run mode's directory
+    (``prediction_quality/<post_training|monitoring>/all/``): its
+    ``build_payload`` keys plus ``result_readers.PREDICTION_QUALITY_POPULATION_KEY``,
+    which rows the numbers are on. What each number means and cannot mean is
+    in ``evaluation/prediction_quality.py``'s docstring.
 
-    In the pipeline only while ``evaluation.report.sections.prediction_quality``
-    is true (ADR-0031 principle 3): the family costs one extra shuffle over
-    every evaluated row, and the ranking deployments this framework ships
-    with do not read it (ADR-0024 decision 1).
+    Reads the partitions a standard run of the same run mode landed; it joins
+    no label itself, so the rows are exactly the standard run's.
 
-    Pre-check (inputs): each evaluated date's partition was written under
-    today's settings (``restrict_to_current_eval_partitions``). It takes
-    ``evaluation_segment_columns`` for that check's ``joined`` list only; it
-    does not segment, so it does not compare that JSON's fingerprint
-    (``compute_report_aggregates``' reason). Its result still inherits that
-    JSON's record.
+    Pre-check (config): A64's predicate again, the runtime backstop of the
+    CLI's (the model's r is 0 under ``--post-training``).
+
+    Pre-check (inputs): every evaluated date has rows, written by the standard
+    run of this run mode under today's settings
+    (``require_partitions_of_the_standard_run``); otherwise the message names
+    that run. It takes ``evaluation_segment_columns`` for that check's
+    ``joined`` list only (``compute_report_aggregates``' reason). Its result
+    still inherits that JSON's record.
+
+    Cost: the bin aggregation (one shuffle over every evaluated row), plus
+    under ``--post-training`` one narrow scan of the weight column and one
+    ``groupBy`` per query group for the zero-positive group count.
     """
-    eval_params = parameters.get("evaluation", {}) or {}
-    # Decision — the evaluated dates only, from partitions written under
-    # today's settings: the table holds every month this model_version was
-    # evaluated on.
-    eval_predictions = restrict_to_current_eval_partitions(
-        eval_predictions, parameters, segment_columns).frame
+    post_training = bool(parameters.get("post_training"))
+    ratio = evaluated_test_ratio(parameters) if post_training else None
+    errors = prediction_quality_test_ratio_errors(
+        prediction_quality=True, post_training=post_training,
+        dataset_test_ratio=ratio if ratio is not None else 0.0,
+        dataset_version=str(parameters.get("base_dataset_version")))
+    if errors:
+        raise ConfigConsistencyError("\n".join(errors))
+    # Decision — the evaluated dates only, from partitions the standard run
+    # of this run mode wrote under today's settings: the table holds every
+    # month this model_version was evaluated on, and one run mode's rows per
+    # month (ADR-0032 decision 3).
+    eval_predictions = require_partitions_of_the_standard_run(
+        eval_predictions, parameters, segment_columns)
 
+    eval_params = parameters.get("evaluation", {}) or {}
     schema = get_schema(parameters)
     item_col, score_col = schema["item"], schema["score"]
     label_col = schema["label"]
@@ -808,19 +839,15 @@ def compute_prediction_quality(
     # here filters on `total_rel`, unlike the ranking metrics, because a binary
     # metric computed only where someone responded is systematically larger
     # (ADR-0024 decision 3). Under --post-training the test table holds only
-    # the share of those groups dataset.test_zero_positive_group_ratio kept
-    # (filter_test_keys); A46 refuses the run when it kept none.
+    # the share r of those groups the evaluated model's dataset version kept
+    # (filter_test_keys); A64 refuses r = 0.
     #
-    # Decision — under --post-training with that ratio above 0, every row
-    # weighs its zero-positive group weight: a kept zero-positive group stands
-    # for 1/r of them (ADR-0025 decision 3). r is the evaluated model's
-    # dataset version's, not today's conf (ADR-0032 decision 4). Decided from
-    # r, not from whether the column is there: the table is `columns:
-    # "auto"`, so once any run added the column, a partition written under
-    # ratio 0 holds it as NULL, and summing NULL weights would drop those rows
-    # in silence. At r = 1 every weight is 1 and the numbers are test's exact
-    # ones. Monitoring reads offline inference's output, which no dataset draw
-    # touched: every row weighs 1.
+    # Decision — under --post-training every row weighs its zero-positive
+    # group weight: a kept zero-positive group stands for 1/r of them
+    # (ADR-0025 decision 3). r is the evaluated model's dataset version's, not
+    # today's conf (ADR-0032 decision 4). At r = 1 every weight is 1 and the
+    # numbers are test's exact ones. Monitoring reads offline inference's
+    # output, which no dataset draw touched: every row weighs 1.
     #
     # Decision — bins are global and equal-width over this run's own
     # min..max score, not a fixed [0, 1]: at low positive rates the scores
@@ -833,18 +860,12 @@ def compute_prediction_quality(
     # (ties by item): item x bin rows come back to the driver, and an ad
     # deployment can have thousands of items (ADR-0024 decision 6). Every
     # item still counts in the overall bins and in the item totals.
-    weight_col = (
-        ZERO_POSITIVE_GROUP_WEIGHT_COL
-        if parameters.get("post_training")
-        and evaluated_test_ratio(parameters) > 0.0
-        else None
-    )
+    weight_col = ZERO_POSITIVE_GROUP_WEIGHT_COL if post_training else None
     # Pre-check (input) — the rows must carry the weight r promises. A
     # missing column, or a NULL weight (training writes NULL when its test
-    # kept no zero-positive group), means the predictions were not written by
-    # a model trained on that dataset version: summing NULL weights would drop
-    # those rows, and counting them would report a filtered table as a
-    # weighted one. One narrow scan of one column, only when weighting at all.
+    # kept no zero-positive group), means the predictions were not written
+    # under that ratio: summing NULL weights would drop those rows, and
+    # counting them would report a filtered table as a weighted one.
     if weight_col is not None:
         require_zero_positive_group_weights(eval_predictions, weight_col)
     aggregated = aggregate_score_bins(
@@ -861,6 +882,22 @@ def compute_prediction_quality(
         n_display_bins=settings["n_display_bins"],
         top_n=settings["top_n"],
     )
+    # Decision — which rows these are, for the page's opening lines (ADR-0032
+    # decision 5): the run mode and the dates, and under --post-training r
+    # and how many
+    # zero-positive groups the dataset kept, the number of groups the weights
+    # stand in for. A key of its own, beside build_payload's.
+    out[PREDICTION_QUALITY_POPULATION_KEY] = {
+        POPULATION_SOURCE_KEY: (
+            POST_TRAINING_POPULATION if post_training else MONITORING_POPULATION),
+        POPULATION_DATES_KEY: eval_snap_dates(parameters),
+        POPULATION_TEST_RATIO_KEY: ratio,
+        POPULATION_ZERO_POSITIVE_GROUPS_KEY: (
+            count_query_groups_without_positive(
+                eval_predictions, group_cols=schema["query_group_columns"],
+                label_col=label_col)
+            if post_training else None),
+    }
     out["config_fingerprint"] = fingerprint(
         parameters, "compute_prediction_quality", (segment_columns,))
     overall = out["overall"]["summary"] or {}
@@ -1147,6 +1184,41 @@ def make_generate_report_node(
         return assemble_report(results, parameters)
 
     return generate_report
+
+
+def make_generate_prediction_quality_report_node(
+    run_nodes: Optional[Sequence[str]] = None,
+):
+    """Build ``generate_prediction_quality_report`` for one run; ``run_nodes``
+    is the run's nodes in topological order, which a stale result's re-run is
+    chosen from (``config_fingerprint.rerun_node``)."""
+    def generate_prediction_quality_report(
+        prediction_quality_metrics: dict, parameters: dict,
+    ) -> str:
+        """Build the ``--prediction-quality`` page from the landed
+        ``prediction_quality.json`` (ADR-0032 decision 5). No Spark: a redraw
+        (``--prediction-quality --only-node
+        generate_prediction_quality_report``) computes nothing.
+
+        Pre-check (inputs): the result was computed with today's values of
+        the settings its step applied (``steps.config_fingerprint``), as
+        ``generate_report`` checks its own. The record it inherits from the
+        standard run's ``evaluation_segment_columns`` is not compared:
+        ``prepare_eval_data`` is not a node of this mode, so no re-run of it
+        could make it current; the partition check of
+        ``compute_prediction_quality`` stands in for it.
+        """
+        loaded = [LoadedArtifact(
+            catalog_name="prediction_quality_metrics",
+            payload=prediction_quality_metrics,
+            produced_by="compute_prediction_quality")]
+        require_computed_with_current_config(
+            loaded, parameters, run_nodes=run_nodes)
+        return assemble_prediction_quality_report(
+            {"prediction_quality_metrics": prediction_quality_metrics},
+            parameters)
+
+    return generate_prediction_quality_report
 
 
 def load_compare_predictions(parameters: dict) -> SparkDataFrame:

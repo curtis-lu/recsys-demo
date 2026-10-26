@@ -111,8 +111,7 @@ def main_report_html() -> str:
     return t._assemble(
         t._results(evaluation_metrics=t._metrics(),
                    baseline_metrics=t._baseline_metrics_full(),
-                   evaluation_report_aggregates=t._report_aggregates(),
-                   prediction_quality_metrics=t._pq_payload()),
+                   evaluation_report_aggregates=t._report_aggregates()),
         t._params())
 
 
@@ -262,8 +261,7 @@ def main_report_texts_with_warnings() -> dict[str, str]:
         evaluation_metrics=b._bundle(0.5),
         baseline_metrics=b._baseline(params, all_k=2, macro_items=("A", "B"),
                                      scored=9, segment_columns=()),
-        evaluation_report_aggregates=t._report_aggregates(),
-        prediction_quality_metrics=t._pq_payload()), params)
+        evaluation_report_aggregates=t._report_aggregates()), params)
     population = results["baseline_comparison"]["population"]
     assert _differing(population) == list(population), \
         "premise: the baseline differs on all four annotations"

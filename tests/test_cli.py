@@ -683,7 +683,8 @@ class TestEvaluationCLIFlags:
             captured.clear()
             evaluation(
                 env="local", model_version=None, post_training=flag,
-                compare=None, compare_only=None, rebuild_dates=None,
+                compare=None, compare_only=None, prediction_quality=False,
+                rebuild_dates=None,
                 from_node=None, only_node=None, dry_run=False,
                 list_nodes=False,
             )
@@ -2415,7 +2416,7 @@ class TestARedrawStartsNoSpark:
 
     _ALL_ON = {"evaluation": {"report": {"sections": dict.fromkeys(
         ("data_stats", "ranking_metrics", "rank_distribution",
-         "popularity_baseline", "prediction_quality"), True)}}}
+         "popularity_baseline"), True)}}}
     _COMPARE = {"kind": "model_version", "model_version": "v1"}
 
     @staticmethod
@@ -2439,6 +2440,8 @@ class TestARedrawStartsNoSpark:
          {"compare_source": _COMPARE, "compare_only": True}),
         ({"from_node": "compare_to_source"},
          {"compare_source": _COMPARE, "compare_only": True}),
+        ({"only_node": "generate_prediction_quality_report"},
+         {"prediction_quality": True}),
     ])
     def test_a_slice_of_landed_files_needs_no_spark(self, flags, kwargs):
         answer, asked = self._answer(**flags, **kwargs)
@@ -2453,6 +2456,7 @@ class TestARedrawStartsNoSpark:
         ({"from_node": "compute_compare_metrics"},
          {"compare_source": _COMPARE, "compare_only": True}),
         ({"only_node": "no_such_node"}, {}),
+        ({}, {"prediction_quality": True}),
         # Reads parameters alone, makes a Spark frame: caught by its output.
         ({"only_node": "load_compare_predictions"},
          {"compare_source": _COMPARE, "compare_only": True}),
@@ -2674,6 +2678,72 @@ class TestEvaluationHandsTheModelsRatioOn:
                                  execute),))
         assert result.exit_code == 0, result.output
         assert captured[DATASET_TEST_RATIO_KEY] == 0.2
+
+
+class TestPredictionQualityTestRatioA64:
+    """A64 at the command: ``--prediction-quality --post-training`` is judged
+    by the evaluated model's r (its dataset version's manifest), not by
+    today's conf, and refused before any pipeline runs."""
+
+    @staticmethod
+    def _invoke(tmp_path, *, conf_ratio, model_ratio):
+        ran = []
+        _write_dataset_manifest(tmp_path, model_ratio)
+        result, _ = _run_evaluation_command(
+            tmp_path,
+            ["evaluation", "--model-version", _EVAL_MV, "--post-training",
+             "--prediction-quality", "--dry-run"],
+            landed=("2026-01-31",),
+            params_dataset={"dataset": {
+                "test_snap_dates": ["2026-01-31"],
+                "test_zero_positive_group_ratio": conf_ratio}},
+            extra_patches=(patch("recsys_tfb.__main__._execute_pipeline",
+                                 lambda *a, **kw: ran.append(1) or False),))
+        return result, ran
+
+    def test_a_model_whose_test_kept_none_is_refused_whatever_the_conf(
+            self, tmp_path):
+        result, ran = self._invoke(tmp_path, conf_ratio=0.2, model_ratio=0.0)
+        assert result.exit_code == 1
+        assert "A64:" in result.output, result.output
+        assert ran == []
+
+    def test_a_model_whose_test_kept_some_runs_whatever_the_conf(
+            self, tmp_path):
+        result, ran = self._invoke(tmp_path, conf_ratio=0.0, model_ratio=0.2)
+        assert result.exit_code == 0, result.output
+        assert ran == [1]
+
+
+class TestPredictionQualityNamesTheStandardRunToDoFirst:
+    """ADR-0032 decision 3: the mode reads what the standard run of the same
+    model, dates and run mode landed. Not listed, or its segment list gone:
+    stop before Spark, naming that run with this command's own flags."""
+
+    def test_a_date_without_a_partition_stops_naming_the_run(self, tmp_path):
+        ran = []
+        result, _ = _run_evaluation_command(
+            tmp_path, ["evaluation", "--model-version", _EVAL_MV,
+                       "--prediction-quality"],
+            landed=("2025-12-31",),
+            extra_patches=(patch("recsys_tfb.__main__._execute_pipeline",
+                                 lambda *a, **kw: ran.append(1) or False),))
+        assert result.exit_code == 1
+        assert "has no partition for 2026-01-31" in result.output
+        assert (f"Run `python -m recsys_tfb evaluation --env local "
+                f"--model-version {_EVAL_MV}` first") in result.output
+        assert ran == []
+
+    def test_the_landed_inputs_reach_the_mode(self, tmp_path):
+        ran = []
+        result, _ = _run_evaluation_command(
+            tmp_path, ["evaluation", "--model-version", _EVAL_MV,
+                       "--prediction-quality"],
+            landed=("2026-01-31",),
+            extra_patches=(patch("recsys_tfb.__main__._execute_pipeline",
+                                 lambda *a, **kw: ran.append(kw) or False),))
+        assert result.exit_code == 0, result.output
+        assert ran and ran[0]["month_plans"] is None
 
 
 class TestAnEvaluationMonthNotWrittenPullsTheJoinBack:

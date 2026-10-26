@@ -22,8 +22,8 @@ ones HPO selects a model by are marked here too
 :data:`MODEL_SELECTION_PENDING`), without importing the registry.
 
 **Not in it yet: the third method of decision 7**, the score read as a
-probability (the binned ``pr_auc`` / ``roc_auc`` of the prediction-quality
-section). Its shared numbers are the bin table of
+probability (the binned ``pr_auc`` / ``roc_auc`` of the
+``--prediction-quality`` page). Its shared numbers are the bin table of
 ``evaluation/prediction_quality.aggregate_score_bins``, and ``prediction_quality``
 computes the two areas from it by functions of its own. Its metrics join the
 catalog with a formula shape for an area under a bin table.

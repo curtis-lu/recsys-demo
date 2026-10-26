@@ -2749,7 +2749,7 @@ class TestReportSectionKeysA34:
         names, and not reported a second time as missing."""
         old = {"dataset_overview": True, "primary_map": True,
                "diagnostics": True, "baseline": True,
-               "diagnosis_links": True, "prediction_quality": False}
+               "diagnosis_links": True}
         errors = report_section_key_errors(_sections_params(old))
         assert len(errors) == 3
         renamed, unread, undeclared = errors
@@ -2763,8 +2763,7 @@ class TestReportSectionKeysA34:
         old names as "never read" and the new ones as "not declared", which
         leaves the reader to pair them up."""
         before = {"dataset_overview": True, "primary_map": True,
-                  "per_item_breakdown": False, "baseline": True,
-                  "prediction_quality": False}
+                  "per_item_breakdown": False, "baseline": True}
         errors = report_section_key_errors(_sections_params(before))
         assert len(errors) == 1, errors
         assert errors[0].startswith("A34:")
@@ -2772,6 +2771,20 @@ class TestReportSectionKeysA34:
             assert f"`{old}` is now `{new}`" in errors[0], old
         assert "never reads" not in errors[0]
         assert "does not declare" not in errors[0]
+
+    @pytest.mark.parametrize("value", [True, False, "false", None])
+    def test_the_moved_prediction_quality_switch_points_at_the_mode(
+            self, value):
+        """ADR-0032 decision 2: the section became ``--prediction-quality``.
+        A conf still spelling its switch, whatever the value, is told so in
+        one message — not as a key nothing reads beside the others."""
+        sections = {name: True for name in EVALUATION_REPORT_SECTIONS}
+        sections["prediction_quality"] = value
+        errors = report_section_key_errors(_sections_params(sections))
+        assert len(errors) == 1, errors
+        assert errors[0].startswith("A34:")
+        assert "--prediction-quality" in errors[0]
+        assert "never reads" not in errors[0]
 
     def test_the_rename_table_maps_old_names_onto_read_ones(self):
         assert RENAMED_REPORT_SECTIONS == {
@@ -2937,8 +2950,8 @@ class TestPredictionQualityParamsA42:
             _pq_params(**PREDICTION_QUALITY_DEFAULTS, enabled=True))
         assert len(errors) == 1
         assert "'enabled'" in errors[0]
-        # The switch lives with the other sections, and the message says so.
-        assert "report.sections.prediction_quality" in errors[0]
+        # The family is a mode of its own, and the message says so.
+        assert "--prediction-quality" in errors[0]
 
     def test_not_aggregated_by_validate_config_consistency(self):
         """Evaluation-only keys, A34's reason (issue #158)."""
@@ -4818,45 +4831,40 @@ class TestZeroPositiveGroupWeightDeclaredA45:
             *self._args(["cust_id"], val_zero_positive_group_ratio=0.5)) == []
 
 
-def _pq_on(**dataset) -> dict:
-    params = _zp_params(**dataset)
-    params["evaluation"] = {"report": {"sections": {"prediction_quality": True}}}
-    return params
+class TestPredictionQualityTestRatioA64:
+    """A64 — ``--prediction-quality --post-training`` reads the test table, so
+    it needs the evaluated model's dataset version to have kept some query
+    groups holding no positive (ADR-0032 decision 4). It takes that version's
+    r, never today's conf: the command reads it off the manifest."""
 
+    @staticmethod
+    def _errors(ratio, *, prediction_quality=True, post_training=True):
+        from recsys_tfb.core.consistency import (
+            prediction_quality_test_ratio_errors,
+        )
 
-class TestPredictionQualityPopulationA46:
-    def test_post_training_with_the_default_test_ratio_is_refused(self):
-        from recsys_tfb.core.consistency import prediction_quality_population_errors
+        return prediction_quality_test_ratio_errors(
+            prediction_quality=prediction_quality, post_training=post_training,
+            dataset_test_ratio=ratio, dataset_version="abc12345")
 
-        for params in (_pq_on(), _pq_on(test_zero_positive_group_ratio=0.0)):
-            errs = prediction_quality_population_errors(params, post_training=True)
-            assert len(errs) == 1
-            assert "A46" in errs[0]
-            assert "dataset.test_zero_positive_group_ratio" in errs[0]
-            assert "evaluation.report.sections.prediction_quality" in errs[0]
+    def test_a_model_whose_test_kept_no_zero_positive_group_is_refused(self):
+        errs = self._errors(0.0)
+        assert len(errs) == 1
+        assert errs[0].startswith("A64:")
+        # The version is named, and the way to open the mode up.
+        assert "'abc12345'" in errs[0]
+        assert "dataset.test_zero_positive_group_ratio" in errs[0]
+        assert "rebuild the dataset" in errs[0] and "retrain" in errs[0]
 
-    def test_a_positive_test_ratio_is_accepted(self):
-        from recsys_tfb.core.consistency import prediction_quality_population_errors
+    @pytest.mark.parametrize("ratio", [0.2, 1.0])
+    def test_a_model_whose_test_kept_some_is_accepted(self, ratio):
+        assert self._errors(ratio) == []
 
-        assert prediction_quality_population_errors(
-            _pq_on(test_zero_positive_group_ratio=0.1), post_training=True) == []
-
-    def test_monitoring_mode_is_not_affected(self):
-        # Monitoring LEFT-joins labels onto inference output; nothing upstream
-        # dropped a group there.
-        from recsys_tfb.core.consistency import prediction_quality_population_errors
-
-        assert prediction_quality_population_errors(
-            _pq_on(), post_training=False) == []
-
-    def test_the_family_switched_off_is_not_affected(self):
-        from recsys_tfb.core.consistency import prediction_quality_population_errors
-
-        params = _pq_on()
-        params["evaluation"]["report"]["sections"]["prediction_quality"] = False
-        assert prediction_quality_population_errors(params, post_training=True) == []
-        assert prediction_quality_population_errors(
-            _zp_params(), post_training=True) == []
+    def test_monitoring_and_the_standard_run_are_not_affected(self):
+        # Monitoring reads offline inference's output, which no dataset draw
+        # touched; the standard run computes no binary metric any more.
+        assert self._errors(0.0, post_training=False) == []
+        assert self._errors(0.0, prediction_quality=False) == []
 
 
 class TestZeroPositiveGroupWeightCollisionB12:
