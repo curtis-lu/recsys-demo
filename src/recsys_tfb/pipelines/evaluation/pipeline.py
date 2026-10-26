@@ -409,7 +409,7 @@ def result_readers_table() -> dict[str, dict]:
 
     Returns ``{result: {"blocks": tuple[Block, ...], "producers": [node name],
     "reader_nodes": [node name], "reader_sections": [(report catalog name,
-    section, SWITCH)]}}`` for every listed result, in list order.
+    section, SWITCH)]}}`` for every result in ``RESULTS``, in its order.
     """
     from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
     from recsys_tfb.pipelines.evaluation.report import main

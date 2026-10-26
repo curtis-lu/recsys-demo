@@ -1,9 +1,9 @@
 """Every JSON result the evaluation pipeline lands and the blocks it holds
-(ADR-0031 principle 2, supplement 2). :data:`RESULTS` is the one list.
+(ADR-0031 principle 2, supplement 2), keyed by result in :data:`RESULTS`.
 
 Declaring a block writes nothing: each node builds its result itself, and
 ``tests/test_pipelines/test_evaluation/test_result_blocks.py`` keeps the two
-equal and checks the list covers every JSON result of every mode.
+equal.
 """
 
 from recsys_tfb.evaluation.result_readers import (
