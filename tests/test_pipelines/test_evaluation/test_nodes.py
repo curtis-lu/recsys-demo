@@ -1926,11 +1926,11 @@ class TestComputePredictionQuality:
 
     def test_an_entity_scope_keeps_every_item_of_its_entities(self, spark):
         """ADR-0032 decision 7, entity only. The scope holds c1 (twice), c3,
-        c9 — scored nowhere — and c2 on a date not evaluated. In scope: c1's
-        and c3's six rows, positives c1·A (0.9) and c1·C (0.1) against the
-        negatives 0.5, 0.7, 0.6, 0.4: 0.9 beats all four, 0.1 none, so
-        AUC-ROC = 4/8. Not scored: c9 alone (the duplicate and the other
-        date count nothing)."""
+        c9 (twice) — scored nowhere — and c2 on a date not evaluated. In
+        scope: c1's and c3's six rows, positives c1·A (0.9) and c1·C (0.1)
+        against the negatives 0.5, 0.7, 0.6, 0.4: 0.9 beats all four, 0.1
+        none, so AUC-ROC = 4/8. Not scored: c9, once (a duplicate counts
+        once, the other date not at all)."""
         from recsys_tfb.pipelines.evaluation.nodes import (
             compute_prediction_quality,
         )
@@ -1939,7 +1939,7 @@ class TestComputePredictionQuality:
             spark, self._parameters(), "pq_scope_entity",
             [("2025-01-31", "c1"), ("2025-01-31", "c1"),
              ("2025-01-31", "c3"), ("2025-01-31", "c9"),
-             ("2025-02-28", "c2")],
+             ("2025-01-31", "c9"), ("2025-02-28", "c2")],
             {"snap_date": "as_of_date", "cust_id": "customer_id"})
         result = compute_prediction_quality(
             self._with_a_query_group_without_a_positive(spark),
