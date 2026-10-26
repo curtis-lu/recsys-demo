@@ -2118,9 +2118,6 @@ class TestEnrichedReadersKeepTheEvaluatedMonth:
     def _parameters(snap_date="2025-01-31"):
         params = TestComputeBaselineMetrics._parameters()
         params["evaluation"]["snap_date"] = snap_date
-        # On, so compute_prediction_quality reads the frame instead of
-        # returning its stub (#381).
-        params["evaluation"]["report"]["sections"]["prediction_quality"] = True
         return params
 
     @staticmethod

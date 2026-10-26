@@ -34,8 +34,7 @@ _PARAMS = {
         "report": {
             "sections": {"data_stats": True, "ranking_metrics": True,
                          "rank_distribution": False,
-                         "popularity_baseline": False,
-                         "prediction_quality": False},
+                         "popularity_baseline": False},
             "display": {"compare_k": [1]},
         },
     },

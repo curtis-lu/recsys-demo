@@ -95,8 +95,7 @@ def _params() -> dict:
             "report": {
                 "sections": {"data_stats": True, "ranking_metrics": True,
                              "popularity_baseline": True,
-                             "rank_distribution": True,
-                             "prediction_quality": True},
+                             "rank_distribution": True},
                 "display": {"compare_k": [1, 3, 5, "all"]},
                 "diagnostics": {"include_distributions": True},
             },

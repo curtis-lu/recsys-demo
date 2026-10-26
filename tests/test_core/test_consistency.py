@@ -2820,10 +2820,10 @@ class TestReportSectionKeysA34:
             assert "true or false" in errors[0], name
 
     def test_the_suggested_values_keep_what_an_absent_switch_does(self):
-        """Writing what the message suggests must switch nothing. It used to
-        say ``true`` for every missing switch, but ``prediction_quality`` is
-        off when absent: a conf/base edited before v0.4.0 that followed the
-        message turned the family on, and ``--post-training`` then hit A46."""
+        """Writing what the message suggests must switch nothing: the
+        suggested value is the one an absent switch takes. (Before ADR-0032
+        one switch was off when absent, and a message suggesting ``true`` for
+        it turned a computation on.)"""
         import re
 
         import yaml
