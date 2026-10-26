@@ -56,8 +56,9 @@ changed ``compare_k`` must go. A reader not given it falls back on
 Settings outside ``evaluation`` and the ones left out
 =====================================================
 ``schema`` and the evaluated model's test ratio
-(``_dataset_test_zero_positive_group_ratio``) are declared like any other. ``hive.db`` and ``_compare_source_tables`` only decide which table
-a ``model_version`` compare source is read off, so they reach the comparison
+(``_dataset_test_zero_positive_group_ratio``) are declared like any other.
+``hive.db`` and ``_compare_source_tables`` only decide which table a
+``model_version`` compare source is read off, so they reach the comparison
 results through the source's identity
 (``compare_sources.compare_source_identity``), not through a declaration.
 ``evaluation.compare`` is left out on purpose: the CLI injects it per run, and
