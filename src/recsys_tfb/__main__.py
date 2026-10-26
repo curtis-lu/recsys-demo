@@ -28,6 +28,9 @@ from recsys_tfb.core.consistency import (
     post_training_snap_date_errors,
     prediction_quality_param_errors,
     prediction_quality_test_ratio_errors,
+    UNSCOPED_PREDICTION_QUALITY,
+    scope_flag_errors,
+    scope_well_formed_errors,
     on_disk_entry_path_errors,
     baseline_rebuild_dates_absent_errors,
     baseline_score_errors,
@@ -1970,8 +1973,15 @@ def evaluation(
         help="Every candidate row as one binary prediction (bin table, "
              "threshold sweep, AUC), read off the enriched_eval_predictions "
              "the standard evaluation of the same mode wrote; lands "
-             "prediction_quality/<post_training|monitoring>/all/ (JSON and "
-             "report.html). Not with --compare / --compare-only.",
+             "prediction_quality/<post_training|monitoring>/<scope or all>/ "
+             "(JSON and report.html). Not with --compare / --compare-only.",
+    ),
+    scope: Optional[str] = typer.Option(
+        None, "--scope",
+        help="With --prediction-quality only: count only the rows an "
+             "evaluation.scopes entry names (its table's time and entity, "
+             "and item if mapped); lands under the scope's name instead of "
+             "all/.",
     ),
     rebuild_dates: Optional[str] = typer.Option(
         None, "--rebuild-dates",
@@ -2026,6 +2036,8 @@ def evaluation(
     # (A42) evaluation.prediction_quality's parameter domains; evaluation-only
     # keys, so wired here for A34's reason.
     section_errs += prediction_quality_param_errors(params)
+    # (A65) evaluation.scopes' shape; evaluation-only keys, same place.
+    section_errs += scope_well_formed_errors(params)
     # (A43) the calibration-bin keys #381 retired; evaluation-only, same place.
     section_errs += retired_calibration_bin_key_errors(params)
     # (A61) the evaluation.diagnosis block #515 and #532 retired;
@@ -2064,12 +2076,16 @@ def evaluation(
     except KeyError:
         params_eval = {}
 
-    # A13 and A12 read only the three flags and evaluation.compare_sources,
-    # so they run before the Spark cold start: a mistyped --compare key should
-    # cost seconds, not a session build.
+    # A13, A66 and A12 read only the flags, evaluation.scopes and
+    # evaluation.compare_sources, so they run before the Spark cold start: a
+    # mistyped --compare or --scope name should cost seconds, not a session
+    # build.
     # A13: mutual-exclusive
     errs = evaluation_mode_flag_errors(
         compare, compare_only, prediction_quality=prediction_quality)
+    # A66: --scope names a registered scope, and only with the mode.
+    errs += scope_flag_errors(
+        params, scope, prediction_quality=prediction_quality)
     if errs:
         raise ConfigConsistencyError("\n".join(errs))
 
@@ -2156,7 +2172,8 @@ def evaluation(
         mv, model_version if model_version else "best", post_training,
         compare_key or "none",
         " (compare-only)" if compare_only else "",
-        " (prediction-quality)" if prediction_quality else "",
+        (f" (prediction-quality, scope: {scope or UNSCOPED_PREDICTION_QUALITY})"
+         if prediction_quality else ""),
     )
     logger.info("Evaluation — snap_date: %s", snap_date)
     if len(eval_dates) > 1:
@@ -2183,12 +2200,12 @@ def evaluation(
         # an absent key.
         DATASET_TEST_RATIO_KEY: dataset_test_ratio,
         # The --prediction-quality outputs' directory segments (catalog
-        # placeholders): which population's rows, and the scope, "all" until
-        # a scope can be named (ADR-0032 decisions 5 and 7). Set on every
-        # run, like snap_date, so the entries always resolve.
+        # placeholders): which population's rows, and the --scope's name
+        # (ADR-0032 decisions 5 and 7). Set on every run, like snap_date, so
+        # the entries always resolve.
         "prediction_quality_population": (
             POST_TRAINING_POPULATION if post_training else MONITORING_POPULATION),
-        "prediction_quality_scope": "all",
+        "prediction_quality_scope": scope or UNSCOPED_PREDICTION_QUALITY,
     }
 
     pipeline_kwargs = {

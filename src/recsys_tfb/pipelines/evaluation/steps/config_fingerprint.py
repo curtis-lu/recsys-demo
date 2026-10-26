@@ -63,7 +63,9 @@ results through the source's identity
 (``compare_sources.compare_source_identity``), not through a declaration.
 ``evaluation.compare`` is left out on purpose: the CLI injects it per run, and
 the comparison results record their source under their own key instead
-(:func:`require_same_recorded_values`). ``model_version`` and the run's dates
+(:func:`require_same_recorded_values`). So is ``evaluation.scopes``: the
+``--prediction-quality`` result records the one entry its run's ``--scope``
+named, and declared whole, editing one scope would refuse every other's. ``model_version`` and the run's dates
 are in every result's path.
 
 Why the fingerprint lives inside the JSON, not in its path

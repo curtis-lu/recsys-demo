@@ -355,7 +355,8 @@ baseline_metrics:
 # --prediction-quality 模式（ADR-0032）的兩個產物，放在這個模型與評估日期底下、依原料分開的
 # 資料夾：${prediction_quality_population} 是 post_training（帶 --post-training，讀 test
 # 母體）或 monitoring（上線後的 inference 母體），${prediction_quality_scope} 是範圍名
-# （目前只有 all）。兩者都由 CLI 每次 evaluation 設定。兩種原料的結果不會互蓋。
+# （--scope 給的名字，沒給是 all）。兩者都由 CLI 每次 evaluation 設定。兩種原料、各個範圍的
+# 結果都不會互蓋。
 # compute_prediction_quality 的輸出（ADR-0024）：分數分箱表（整體＋列數最多的 top_n 個
 # item）與從它算出的 pr_auc／roc_auc／F1 最佳門檻，加上母體（原料、r、留下的無正例 query
 # group 數）。帶 config_fingerprint。

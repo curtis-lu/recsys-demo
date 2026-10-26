@@ -836,6 +836,22 @@ Layer 1 — config-static (implemented here; aggregated by
   Runtime backstop: ``compute_prediction_quality`` runs the same predicate
   again on the ratio the key carries, for a caller that does not go through
   the evaluation command.
+* A65 — an ``evaluation.scopes`` entry is malformed: not ``{table,
+  columns}``, ``columns`` missing the resolved time or an entity column or
+  keyed by something that is not a resolved column, or a name that cannot be
+  its own output directory (``all`` is the unscoped run's). Predicate:
+  ``scope_well_formed_errors``. NOT aggregated, for A34's reason: only the
+  evaluation command reads the block, so it checks it before Spark starts.
+* A66 — ``--scope`` names no ``evaluation.scopes`` entry, or comes without
+  ``--prediction-quality`` (ADR-0032 decision 7). Predicate:
+  ``scope_flag_errors``; wired like A13, before Spark starts.
+* A67 — the scope's table cannot be read, lacks a column its ``columns``
+  names, or holds one in another type than the evaluated rows' column it
+  maps to (the join would cast it, and a bigint ``7`` matches the ids
+  ``"7"`` and ``"007"`` alike). Predicate: ``scope_table_errors`` (takes the
+  table's column types, or ``None`` and Spark's reason); the scope reader of
+  ``compute_prediction_quality`` raises before it reads a row, since only a
+  Spark session sees the metastore.
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -847,7 +863,8 @@ window of ``evaluation.snap_date`` and be a time value sample_pool holds there.
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
 flags), A22/A51 (``--post-training``), A64 (``--prediction-quality
---post-training`` + the evaluated model's dataset version), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53/A57/A58/A61/A62/A63 (config keys whose
+--post-training`` + the evaluated model's dataset version), A66 (``--scope``),
+A67 (the metastore, at run time), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53/A57/A58/A61/A62/A63/A65 (config keys whose
 harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags), A59 (the ETL stage's config keys), A55 (``--only-test-months`` + the
 metastore). A56 needs the resolved catalog too, but hangs off no single command:
@@ -3814,6 +3831,143 @@ def prediction_quality_test_ratio_errors(
         f"Without --post-training this mode reads the inference population, "
         f"which no dataset draw touched."
     ]
+
+
+#: Where ``--prediction-quality`` without ``--scope`` lands, so no scope may
+#: take the name (A65).
+UNSCOPED_PREDICTION_QUALITY = "all"
+#: The keys of one ``evaluation.scopes`` entry.
+_SCOPE_KEYS = {"table", "columns"}
+_SCOPE_NAME = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _scopes(parameters: dict) -> Any:
+    return (parameters.get("evaluation") or {}).get("scopes") or {}
+
+
+def scope_well_formed_errors(parameters: dict) -> list[str]:
+    """A65 — every ``evaluation.scopes`` entry is
+    ``{table, columns}``, ``columns`` mapping the resolved time column and
+    every entity column, and optionally the item column, to the table's
+    columns (ADR-0032 decision 7).
+
+    The keys are resolved column names, never role names or item source
+    columns: the scope table's SQL aligns its values with the framework's
+    item, so a multi-column item is matched as the combined value. The name
+    is the output directory: letters, digits, ``_`` and ``-``, and not
+    :data:`UNSCOPED_PREDICTION_QUALITY`, whose directory holds the unscoped
+    run.
+    """
+    scopes = _scopes(parameters)
+    if not isinstance(scopes, Mapping):
+        return [f"A65: evaluation.scopes must be a mapping of scope name to "
+                f"{{table, columns}}, got {type(scopes).__name__}."]
+    schema = get_schema(parameters)
+    required = list(schema["base_key_columns"])
+    allowed = [*required, schema["item"]]
+    errors = []
+    for name, scope in scopes.items():
+        where = f"A65: evaluation.scopes[{name!r}]"
+        if (not isinstance(name, str) or not _SCOPE_NAME.fullmatch(name)
+                or name == UNSCOPED_PREDICTION_QUALITY):
+            errors.append(
+                f"{where}: a scope name is its output directory, so it is "
+                f"letters, digits, '_' and '-' only, and not "
+                f"{UNSCOPED_PREDICTION_QUALITY!r} (where the run without "
+                f"--scope lands).")
+            continue
+        if not isinstance(scope, Mapping):
+            errors.append(f"{where} must be a mapping of table and columns, "
+                          f"got {type(scope).__name__}.")
+            continue
+        problems = []
+        unknown = sorted(set(scope) - _SCOPE_KEYS)
+        if unknown:
+            problems.append(f"unknown key(s) {unknown}; a scope has "
+                            f"{sorted(_SCOPE_KEYS)} only")
+        if not (isinstance(scope.get("table"), str) and scope["table"]):
+            problems.append("'table' must name the scope's Hive table")
+        columns = scope.get("columns")
+        if not isinstance(columns, Mapping):
+            problems.append(
+                "'columns' must map each resolved column to the table's "
+                "column")
+        else:
+            missing = sorted(set(required) - set(columns))
+            if missing:
+                problems.append(f"'columns' misses {missing}")
+            foreign = sorted(str(k) for k in set(columns) - set(allowed))
+            if foreign:
+                problems.append(
+                    f"'columns' keys {foreign} are not resolved columns; "
+                    f"keys are the time and entity columns {required} and "
+                    f"optionally the item column {schema['item']!r}")
+            blank = sorted(str(k) for k, v in columns.items()
+                           if not (isinstance(v, str) and v))
+            if blank:
+                problems.append(f"'columns' gives no table column for {blank}")
+        if problems:
+            errors.append(f"{where}: " + "; ".join(problems) + ".")
+    return errors
+
+
+def scope_flag_errors(
+    parameters: dict, scope: str | None, *, prediction_quality: bool,
+) -> list[str]:
+    """A66 — ``--scope`` names an ``evaluation.scopes`` entry, and comes
+    with ``--prediction-quality``: a scope narrows only that mode's rows; the
+    ranking metrics would rank a group with some of its items taken away,
+    another question (ADR-0032 decision 7)."""
+    if scope is None:
+        return []
+    if not prediction_quality:
+        return [f"A66: --scope {scope!r} narrows only --prediction-quality's "
+                f"rows; add --prediction-quality, or drop --scope."]
+    scopes = _scopes(parameters)
+    registered = sorted(scopes) if isinstance(scopes, Mapping) else []
+    if scope not in registered:
+        return [f"A66: --scope {scope!r} is not in evaluation.scopes. "
+                f"Registered: {registered}."]
+    return []
+
+
+def scope_table_errors(
+    name: str, scope: Mapping, table_types: Mapping[str, str] | None,
+    row_types: Mapping[str, str], *, unreadable: str = "",
+) -> list[str]:
+    """A67 — scope ``name``'s table can be read (``table_types`` is ``None``
+    when it cannot, ``unreadable`` saying why), holds every column its
+    ``columns`` names, and each holds the type of the evaluated rows' column
+    it maps to (``row_types``, by resolved column). Names compare
+    case-insensitively, as Spark resolves them.
+
+    Types must be equal, not castable: the join casts a mismatch silently,
+    and a bigint ``7`` matches the string ids ``"7"`` and ``"007"`` alike.
+    """
+    table = scope["table"]
+    if table_types is None:
+        return [f"A67: scope {name!r}: table {table!r} cannot be read: "
+                f"{unreadable}"]
+    present = {c.lower(): t for c, t in table_types.items()}
+    missing, mistyped = [], []
+    for ours, theirs in scope["columns"].items():
+        found = present.get(theirs.lower())
+        if found is None:
+            missing.append(f"{ours!r} -> {theirs!r}")
+        elif found != row_types[ours]:
+            mistyped.append(f"{theirs!r} is {found}, the evaluated rows' "
+                            f"{ours!r} is {row_types[ours]}")
+    errors = []
+    if missing:
+        errors.append(
+            f"A67: scope {name!r}: table {table!r} has no column for "
+            f"{', '.join(missing)} (evaluation.scopes[{name!r}].columns: "
+            f"resolved column -> table column).")
+    if mistyped:
+        errors.append(
+            f"A67: scope {name!r}: table {table!r}: {'; '.join(mistyped)}. "
+            f"Cast them in the scope table's SQL.")
+    return errors
 
 
 def report_section_key_errors(parameters: dict) -> list[str]:

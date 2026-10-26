@@ -85,6 +85,33 @@ evaluation:
     n_display_bins: 10
     top_n: 30
 
+  # 範圍（ADR-0032 決定 7）：只在使用者指定的那部分列上算全部候選列的指標。有填內容的
+  # entry 才 unlock `evaluation --prediction-quality --scope <名字>`；名字（campaign_a…）
+  # 即 CLI flag 傳的值，也是輸出資料夾名（prediction_quality/<原料>/<名字>/）。選用；
+  # 整段（含名字與各值）由你定義；預設空。只套在 --prediction-quality，主報表不受影響。
+  # 形狀由 core/consistency.py 的 A65 驗證，範圍表與欄在不在由 A67 在開始算之前檢查；
+  # 用法見 docs/pipelines/evaluation.md。
+  # 可填欄位：
+  #   table    範圍表，Hive-qualified 字串；每列一組 (time, entity) 或 (time, entity, item)
+  #                                                                         （必填）
+  #   columns  我們的欄 → 範圍表欄名 map。time 與 entity 各欄必填；item 選填：不寫＝只限
+  #            entity（它們的每個候選 item 都算），寫了＝只算列出的 entity × item。
+  #            值與型別要跟框架寫的一樣（日期格式、item 值、欄位型別），由範圍表的 SQL
+  #            對齊；沒有對照表。
+  #                                                                         （必填）
+  # 名字只能用英數、_、-，而且不能叫 all（沒有 --scope 的結果放在 all/）。
+  scopes: {}
+  # 範本（拿掉 # 即啟用；所有值由你填）：
+  #scopes:
+  #  campaign_a:                              # 只限 entity
+  #    table: mkt.campaign_a
+  #    # 左邊的 key 是 schema 角色解析出的欄名，下面用的是預設 schema；改過
+  #    # schema.columns 就要換成新欄名，否則 A65 擋下。
+  #    columns: {snap_date: as_of_date, cust_id: customer_id}
+  #  campaign_b:                              # entity × item
+  #    table: mkt.campaign_b
+  #    columns: {snap_date: as_of_date, cust_id: customer_id, prod_name: product}
+
   # Report 產生選項
   # 這一區的鍵分兩類（ADR-0020 決定二；每個 step 讀哪些設定寫在
   # src/recsys_tfb/pipelines/evaluation/steps/config_fingerprint.py 的 APPLIED_SETTINGS）：

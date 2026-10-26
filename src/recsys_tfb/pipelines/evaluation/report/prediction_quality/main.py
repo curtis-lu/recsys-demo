@@ -10,9 +10,11 @@ from datetime import datetime
 
 from recsys_tfb.evaluation.result_readers import (
     POPULATION_DATES_KEY,
+    POPULATION_SCOPE_KEY,
     POPULATION_SOURCE_KEY,
     POST_TRAINING_POPULATION,
     PREDICTION_QUALITY_POPULATION_KEY,
+    SCOPE_NAME_KEY,
 )
 from recsys_tfb.pipelines.evaluation.report.prediction_quality import (
     population,
@@ -60,6 +62,9 @@ def assemble_prediction_quality_report(
         "原料": ("test 母體（--post-training）"
                  if population[POPULATION_SOURCE_KEY] == POST_TRAINING_POPULATION
                  else "上線後的 inference 母體"),
+        "範圍": (population[POPULATION_SCOPE_KEY][SCOPE_NAME_KEY]
+                 if population[POPULATION_SCOPE_KEY]
+                 else "全部候選列（沒有 --scope）"),
         "產生時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     return generate_html_report(

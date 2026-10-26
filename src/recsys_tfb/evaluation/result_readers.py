@@ -234,8 +234,9 @@ THRESHOLD_SWEEP_KEY = "threshold_sweep"
 #: Key of ``prediction_quality.json`` beside ``build_payload``'s: which rows
 #: the numbers are on (ADR-0032 decisions 3-5), the page's opening lines.
 #: A dict of :data:`POPULATION_SOURCE_KEY`, :data:`POPULATION_DATES_KEY`,
-#: :data:`POPULATION_TEST_RATIO_KEY` and
-#: :data:`POPULATION_ZERO_POSITIVE_GROUPS_KEY`.
+#: :data:`POPULATION_TEST_RATIO_KEY`,
+#: :data:`POPULATION_ZERO_POSITIVE_GROUPS_KEY` and
+#: :data:`POPULATION_SCOPE_KEY`.
 PREDICTION_QUALITY_POPULATION_KEY = "population"
 
 #: Under :data:`PREDICTION_QUALITY_POPULATION_KEY`: the run mode the rows
@@ -258,6 +259,29 @@ POPULATION_TEST_RATIO_KEY = "test_zero_positive_group_ratio"
 #: holding no positive the evaluated rows hold under ``--post-training``
 #: (the ones the dataset kept), ``None`` in monitoring mode.
 POPULATION_ZERO_POSITIVE_GROUPS_KEY = "n_zero_positive_groups"
+
+#: Under :data:`PREDICTION_QUALITY_POPULATION_KEY`: the ``--scope`` the rows
+#: were narrowed to (ADR-0032 decision 7), ``None`` when unscoped. A dict:
+#:
+#: * :data:`SCOPE_NAME_KEY`: its name, also the output directory's segment;
+#: * :data:`SCOPE_ROWS_KEY`: the evaluated rows it keeps, unweighted;
+#: * :data:`SCOPE_NOT_SCORED_KEY`: its rows on the evaluated dates, counted
+#:   once each, that no evaluated row carries;
+#: * :data:`SCOPE_DATES_WITHOUT_ROWS_KEY`: the evaluated dates it holds no
+#:   row for.
+POPULATION_SCOPE_KEY = "scope"
+SCOPE_NAME_KEY = "name"
+SCOPE_ROWS_KEY = "n_rows_in_scope"
+SCOPE_NOT_SCORED_KEY = "n_scope_rows_not_scored"
+SCOPE_DATES_WITHOUT_ROWS_KEY = "evaluated_dates_without_rows"
+
+#: Key of ``prediction_quality.json`` beside ``build_payload``'s: what the
+#: scope selects, ``{SCOPE_TABLE_KEY: ..., SCOPE_COLUMNS_KEY: ...}``, or
+#: ``None`` when unscoped. A redraw compares it with today's entry of the
+#: same name, which the output path does not carry.
+PREDICTION_QUALITY_SCOPE_DEFINITION_KEY = "scope_definition"
+SCOPE_TABLE_KEY = "table"
+SCOPE_COLUMNS_KEY = "columns"
 
 
 # ---------------------------------------------------------------------------

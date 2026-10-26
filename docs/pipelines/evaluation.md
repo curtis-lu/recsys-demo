@@ -493,9 +493,42 @@ evaluation:
 - **權重欄。** 分箱時每一列先乘上權重。`--post-training` 時乘上預測表的權重欄（r ＝ 1 時每列都是 1）；不加 `--post-training` 時每列權重 1。被評模型的 r ＞ 0、預測表卻沒有這一欄或有 NULL（training 寫 test 預測時，它自己設定檔的 r 是 0）時，計算前停下：在 r ＞ 0 的設定下重寫這個模型的 test 預測。
 - **label 觀察窗要成熟才準。** 沒有正例的 query group 全留，label 還沒成熟的月份會把「還沒發生」當成負例，數字偏低。觀察窗有沒有結束只有使用者知道，框架沒有資料可以判斷，所以報表開頭提醒，程式不檢查。
 - **成本。** 跑這個模式要多一次取最小、最大分數的聚合，和一次 `groupBy(item, 細箱)` 的全表 shuffle。收回 driver 的量是「細箱數 ×（1 ＋ `top_n`）＋ item 數」列，與資料列數無關。
-- **產物。** 放在 `data/evaluation/<model_version>/<snap_date>/prediction_quality/<post_training 或 monitoring>/all/`（最後一層 `all` 是給之後的範圍功能留的位置），內含兩個檔：`prediction_quality.json`（catalog 名 `prediction_quality_metrics`）：整體與前 `top_n` 個 item 的細箱表、每張表的關鍵數、分數範圍與細箱寬、欄名；帶設定指紋。`report.html`（catalog 名 `prediction_quality_report`）：報表開頭寫哪份原料、r 與留下的無正例 query group 數（`--post-training` 時）、label 觀察窗要成熟才準的提醒，本體是分箱表與門檻掃描。
+- **產物。** 放在 `data/evaluation/<model_version>/<snap_date>/prediction_quality/<post_training 或 monitoring>/<範圍名>/`（沒有 `--scope` 時範圍名是 `all`），內含兩個檔：`prediction_quality.json`（catalog 名 `prediction_quality_metrics`）：整體與前 `top_n` 個 item 的細箱表、每張表的關鍵數、分數範圍與細箱寬、欄名；帶設定指紋。`report.html`（catalog 名 `prediction_quality_report`）：報表開頭寫哪份原料、r 與留下的無正例 query group 數（`--post-training` 時）、範圍（`--scope` 時）、label 觀察窗要成熟才準的提醒，本體是分箱表與門檻掃描。
 - **互斥**：`--prediction-quality` 跟 `--compare`、`--compare-only` 互斥（A13）。比較報表的對照側不帶權重、共同母體也被主側縮過，兩邊不可比，所以不支援。
 - **合法值**（A42，evaluation 指令入口檢查）：`n_bins`、`n_display_bins` 是 ≥ 1 的整數，而且後者整除前者；`top_n` 是 ≥ 0 的整數；這個區塊不能有別的鍵。沒有 `enabled` 這類開關，寫了會被擋下。
+
+#### 範圍（`--scope`）
+
+被打分的母體不一定是真正要行銷（或曝光）的母體。範圍讓這個模式只在使用者指定的那部分列上算（[ADR-0032](../adr/0032-prediction-quality-mode-and-scope.md) 決定 7）。條件有兩種：
+
+- **只限 entity**：「只推給符合某條件的 entity」。圈到的是這些 entity 在那個月的每個候選 item。
+- **entity × item**：「item A 只推給符合 A 條件的 entity」。只圈到列出的 entity 與 item 配對。
+
+範圍表是你自己的 Hive 表，一列一組 `(time, entity)`，或加上 `item` 的 `(time, entity, item)`。在 `evaluation.scopes` 底下每個範圍取一個名字：
+
+```yaml
+evaluation:
+  scopes:
+    campaign_a:                     # 範圍名，也是輸出資料夾名
+      table: mkt.campaign_a
+      # 左邊：schema 角色解析出的欄名（這裡是預設 schema）；右邊：範圍表的欄名
+      columns: {snap_date: as_of_date, cust_id: customer_id, prod_name: product}
+      # 只限 entity 時，columns 不寫 item 那一格
+```
+
+（`campaign_a`、`mkt.campaign_a` 與右邊的欄名都是例子。）
+
+- **`columns`**：time 與 entity 的每一欄必填；item 選填，寫了就是 entity × item。左邊是解析出的欄名，不是角色名；item 由多欄組成時，左邊寫組合後的 item 欄名，範圍表放組合後的值。
+- **值與型別要跟框架的一樣**：日期格式、entity、item 的值都由範圍表的 SQL 對齊，框架不提供 item 對照表（`compare_sources` 的 `prod_mapping` 那種）。每一欄的型別也要跟評估資料的那一欄相同（例如 entity 是字串，範圍表就不能是數字）：不同就在開始算之前停下（A67），因為 join 會自動轉型，數字 `7` 會同時對上字串 `"7"` 與 `"007"`，兩個不同的 entity 被當成一個。在範圍表的 SQL 裡轉型。
+- **只讀評估月份**：範圍表只取 `evaluation.snap_date` 的那幾個月。某個評估月份範圍表沒有列，那個月就不在數字裡，報表開頭會列出是哪幾個月（活動可能只跑某幾個月；日期寫成別的格式也會這樣，看到不該缺的月份就檢查格式）。
+- **同一組 key 寫兩次只算一次**。
+- **範圍裡沒被評分過的列**（例如那個 entity 不在 inference 母體裡，或那個 item 不是候選），數出來印在報表開頭，連同範圍名與圈到的列數；這些列不在任何數字裡。一列都圈不到時停下，多半是值沒對齊。
+- **`--post-training` 也能用**：權重照舊。報表開頭的「無正例 query group 數」是範圍碰到的組裡、整組都沒有正例的那些（看整組的候選，不只範圍裡的列）。這時「沒被評分的列」多半只是沒抽進 test 表的 entity，不代表範圍寫錯；要看範圍跟上線母體對不對得上，用不帶 `--post-training` 的這個模式。
+- **圈到的列數不加權**：`--post-training` 時分箱表的列數是加權後的，兩個數字不會一樣。
+- **只套在這個模式**：主報表的排序指標不受影響。拿掉部分 item 會改變組內名次，問的是另一個問題。
+- **檢查**：`evaluation.scopes` 的形狀（A65）、`--scope` 的名字有沒有登記、有沒有帶 `--prediction-quality`（A66），都在入口、Spark 啟動前擋下。範圍表讀不到（訊息附 Spark 的原因：不存在或沒有權限）、`columns` 右邊的欄不在表裡、或型別跟評估資料不同（A67），在開始算之前擋下，訊息點名範圍與欄。名字只能用英數、`_`、`-`，而且不能叫 `all`。
+- **成本**：範圍表每個評估月份掃一次（它不一定照時間分區），另外一次 semi-join 加計數、一次 anti-join 加計數，之後分箱照舊。
+- **改了範圍的定義**（換表、換欄）之後只重畫報表會被擋下：結果裡記著算的時候的 `table` 與 `columns`，跟今天同名的範圍比對，照訊息從 `compute_prediction_quality` 重跑。改別的範圍不影響這一個。
 
 ## 4. 使用方式
 
@@ -509,13 +542,14 @@ evaluation:
 | `--compare <key>` | 無 | 執行標準評估並額外產生比較報表 |
 | `--compare-only <key>` | 無 | 讀取既有 enriched data，只產生比較報表 |
 | `--prediction-quality` | 關閉 | 全部候選列的指標（分箱表、門檻掃描、AUC-ROC、AUC-PR）自成一個模式，讀既有 enriched data，只產生這一頁報表（3.7、4.7 節） |
+| `--scope <name>` | 無 | 只跟 `--prediction-quality` 一起用：只算 `evaluation.scopes` 裡這個範圍圈到的列，輸出在範圍名的資料夾（3.7 節） |
 | `--rebuild-dates <dates>` | 無 | 逗號分隔的 time 值：`popularity_period_counts` 已落地仍要重算的期（補過 `sample_pool`／`label_table`，或第一次算時 label 還沒成熟）。只在 `evaluation.baseline.score: rate` 加 `--post-training` 可用，見 3.4 節 |
 | `--from-node <name>` | 無 | 從指定 node 的拓撲位置開始，並執行其後 nodes |
 | `--only-node <name>` | 無 | 只執行指定 node，以及缺少輸入時必要的上游 nodes |
 | `--dry-run` | 關閉 | 顯示切片執行計畫後離開 |
 | `--list-nodes` | 關閉 | 列出 node 名稱與接續成本 |
 
-`--compare` 與 `--compare-only` 互斥，傳入的 key 必須存在於 `evaluation.compare_sources`。`--prediction-quality` 跟這兩個都互斥（A13）。`--from-node` 與 `--only-node` 也互斥；`--list-nodes` 不可與兩者併用。
+`--compare` 與 `--compare-only` 互斥，傳入的 key 必須存在於 `evaluation.compare_sources`。`--prediction-quality` 跟這兩個都互斥（A13）。`--scope` 只能跟 `--prediction-quality` 一起用，名字必須存在於 `evaluation.scopes`（A66）。`--from-node` 與 `--only-node` 也互斥；`--list-nodes` 不可與兩者併用。
 
 `--dry-run` 與 `--list-nodes` 不會執行 nodes、寫入 Hive 或報表，但 CLI 仍會載入設定、初始化 Spark、解析 `model_version`、讀取 model manifest 並查詢 catalog 產物是否存在。例外是只重畫：`--from-node`／`--only-node` 切出來的切片只讀寫落地的 JSON 與 HTML 時（例如 `--only-node generate_report`），CLI 不初始化 Spark、不查 partition，log 印 `[redraw] ... Spark is not started`（4.6 節）。
 
@@ -643,13 +677,16 @@ python -m recsys_tfb evaluation --env dev --model-version <M> --prediction-quali
 
 # 上線前估計：test 母體
 python -m recsys_tfb evaluation --env dev --model-version <M> --post-training --prediction-quality
+
+# 限定範圍
+python -m recsys_tfb evaluation --env dev --model-version <M> --prediction-quality --scope <範圍名>
 ```
 
-`<M>` 是模型版本，每次不同。第二條在 0 ＜ r ＜ 1 時是加權估計，r ＝ 1 時是精確值，r ＝ 0 在入口被 A64 擋下；r 是被評模型建 dataset 時的值（見 3.7 節）。
+`<M>` 是模型版本，`<範圍名>` 是 `evaluation.scopes` 登記的名字，每次不同。第二條在 0 ＜ r ＜ 1 時是加權估計，r ＝ 1 時是精確值，r ＝ 0 在入口被 A64 擋下；r 是被評模型建 dataset 時的值（見 3.7 節）。
 
 前提：同一個模型、同一個月份要先跑過**同一種原料**的標準 evaluation（帶或不帶 `--post-training` 要與本次指令一致），因為這個模式讀它落地的 `enriched_eval_predictions`；不一致會停下並印出要先跑的指令。label 取自寫這份分區的那次標準 evaluation；label 之後有回補，要先重跑那條標準 evaluation 再跑這個模式。跟 `--compare`、`--compare-only` 互斥（A13）。
 
-輸出在 `data/evaluation/<model_version>/<snap_date>/prediction_quality/<post_training 或 monitoring>/all/`，內含 `prediction_quality.json` 與 `report.html`。不寫進主報表，也不動主報表的任何檔。
+輸出在 `data/evaluation/<model_version>/<snap_date>/prediction_quality/<post_training 或 monitoring>/<範圍名>/`（沒有 `--scope` 時是 `all/`），內含 `prediction_quality.json` 與 `report.html`。每個範圍各自一個資料夾，互不覆蓋。不寫進主報表，也不動主報表的任何檔。範圍怎麼設定見 3.7 節。
 
 ## 5. 執行流程
 
@@ -722,8 +759,8 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合拆
 
 | 階段 | node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
-| 計算 | `compute_prediction_quality` | `enriched_eval_predictions`、`evaluation_segment_columns`（只取 `joined` 確認分區指紋，不分群）、parameters | 把每一列候選當二元預測：一次 `groupBy(item, 細箱)` 的分箱表，加上從它推出的 `pr_auc`、`roc_auc`、F1 最佳門檻（見 3.7 節），以及報表印的顯示分箱表（整體與每個 item）與門檻掃描表；不排除沒有正例的 query group。先確認分區指紋是同一種原料，不是就停下 | `prediction_quality_metrics`（落地 `prediction_quality.json`） |
-| 報表 | `generate_prediction_quality_report` | `prediction_quality_metrics`、parameters | 產生這一頁 HTML；純函式，只讀落地結果。開頭寫原料、r 與留下的無正例 query group 數、label 觀察窗提醒 | `prediction_quality_report`（`report.html`） |
+| 計算 | `compute_prediction_quality` | `enriched_eval_predictions`、`evaluation_segment_columns`（只取 `joined` 確認分區指紋，不分群）、parameters | 把每一列候選當二元預測：一次 `groupBy(item, 細箱)` 的分箱表，加上從它推出的 `pr_auc`、`roc_auc`、F1 最佳門檻（見 3.7 節），以及報表印的顯示分箱表（整體與每個 item）與門檻掃描表；不排除沒有正例的 query group。先確認分區指紋是同一種原料，不是就停下。`--scope` 時先檢查範圍表（A67），再只留範圍圈到的列（semi-join），數範圍裡沒被評分的列與範圍沒有列的評估日期 | `prediction_quality_metrics`（落地 `prediction_quality.json`） |
+| 報表 | `generate_prediction_quality_report` | `prediction_quality_metrics`、parameters | 產生這一頁 HTML；純函式，只讀落地結果。開頭寫原料、r 與留下的無正例 query group 數、範圍、label 觀察窗提醒 | `prediction_quality_report`（`report.html`） |
 
 ## 6. 產物與驗收
 
@@ -742,7 +779,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合拆
 | `row_facts.json` | `data/evaluation/<model_version>/<YYYYMMDD>/row_facts.json`（`evaluation_row_facts`：資料概況、query group 數、無正例與全正的組數、分群欄，item 與大類粒度，帶 `config_fingerprint`；每個粒度另記全正組的帳：有正例的組數 `n_groups_with_positive`、全正佔比 `all_positive_share`、要不要警告 `all_positive_warns`） | 標準、`--compare` |
 | `metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/metrics.json`（`evaluation_metrics`：overall、per-item、per-segment、macro 與 category 指標，per-item 指標的共用數字，母體帳 `population`；宣告 `event`／`occasion` 時另有同分列數 `n_tied_rows`／`tied_row_share`；母體帳 `population` 另記分群欄 `segment_columns`；帶 `config_fingerprint`） | 標準、`--compare` |
 | `baseline_metrics.json` | `data/evaluation/<model_version>/<YYYYMMDD>/baseline_metrics.json`（`baseline_metrics`；另有 `popularity_window` 區塊，記 lookback 視窗實際涵蓋幾個月與月均的除數；`report.sections.popularity_baseline: false` 時不算、不寫） | 標準、`--compare` |
-| `prediction_quality.json` | `data/evaluation/<model_version>/<YYYYMMDD>/prediction_quality/<post_training 或 monitoring>/all/prediction_quality.json`（`prediction_quality_metrics`，見 3.7 節；報表印的顯示分箱表 `display_bins` 與門檻掃描 `threshold_sweep` 也落在這裡；最後一層 `all` 是給之後的範圍功能留的位置） | `--prediction-quality` |
+| `prediction_quality.json` | `data/evaluation/<model_version>/<YYYYMMDD>/prediction_quality/<post_training 或 monitoring>/<範圍名>/prediction_quality.json`（`prediction_quality_metrics`，見 3.7 節；報表印的顯示分箱表 `display_bins` 與門檻掃描 `threshold_sweep` 也落在這裡；最後一層是範圍名，沒有 `--scope` 時是 `all`） | `--prediction-quality` |
 | `report.html`（預測品質） | 同目錄的 `report.html`（`prediction_quality_report`） | `--prediction-quality` |
 | `baseline_comparison.json` | `data/evaluation/<model_version>/<YYYYMMDD>/baseline_comparison.json`（`baseline_comparison`：模型對 baseline 每格的這次、對照、差，與四項能不能比的標註；`report.sections.popularity_baseline: false` 時不算、不寫） | 標準、`--compare` |
 | `display_ks.json` | `data/evaluation/<model_version>/<YYYYMMDD>/display_ks.json`（`evaluation_display_ks`：主報表每張表要印的 K，帶 `config_fingerprint`） | 標準、`--compare` |
@@ -776,6 +813,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合拆
 1. 報表開頭寫的原料（上線後 inference 或 test）、模型版本與月份是你要的那一份。
 2. 整體分箱表的列數加總等於報表開頭寫的母體列數。
 3. 加 `--post-training` 時，開頭有 r 與留下的無正例 query group 數；r 是被評模型建 dataset 時的 r（見 3.7 節）。
+4. 加 `--scope` 時，開頭的範圍名、範圍表是你要的那一個，圈到的列數合理；沒被評分的列多時，先確認範圍表的 entity、item 值跟框架的一樣。
 
 比較報表另需確認：
 
@@ -916,6 +954,10 @@ evaluation 的設定分兩類，分法是「改了它，已落地的 JSON 還能
 | `Evaluation artifacts on disk do not match today's settings` | 改了「算的」設定之後只重繪（例如只做 `--only-node generate_report`）；或磁碟上的 JSON 是現行指紋格式之前寫的（訊息寫 `has no config_fingerprint in the shape this version writes`）。每份過期產物底下分開列「這一步讀的設定」與「它的輸入當時用的設定」 | 照訊息最後一行的 `--from-node` 重跑。只改了「畫的」鍵卻看到它，先對照 7.2 節確認那個鍵的分類（`report.display.compare_k` 與 `report.sections.popularity_baseline` 的接續點是 `resolve_display_ks`） |
 | `(A22) evaluation.snap_date=... is not a test month`（多個日期時是 `evaluation.snap_date date(s) [...] are not test months`），還沒起 Spark | 帶了 `--post-training`，但該月（或列出的那幾個月）不在 `dataset.test_snap_dates` | 把該月加進 `dataset.test_snap_dates` 並補跑 dataset ＋ predict（見 [新增一個評估月份](../operations/user-guides/adding-an-eval-month.md)），或把 `evaluation.snap_date` 指回已設定的月份 |
 | `A61: 'evaluation.diagnosis' ...`，還沒起 Spark | 設定裡還寫著 `evaluation.diagnosis` 這一段（含 `ci`）；診斷整批拿掉（#532），沒有程式讀它，不論值是什麼都擋 | 刪掉整段 `diagnosis:`，沒有替代的設定鍵 |
+| `A65: evaluation.scopes[...]`，還沒起 Spark | 範圍的設定形狀不對：少了 `table`、`columns` 少了 time 或某個 entity 欄、`columns` 的左邊不是解析出的欄名、多了別的鍵，或名字不能當資料夾名（含 `all`） | 照訊息改 `evaluation.scopes`，寫法見 3.7 節〈範圍〉 |
+| `A66: --scope '...' narrows only --prediction-quality's rows`／`is not in evaluation.scopes` | `--scope` 沒帶 `--prediction-quality`，或名字沒登記 | 加上 `--prediction-quality`；名字照訊息列的已登記名字改 |
+| `A67: scope '...': table '...' cannot be read`／`has no column for ...`／`'...' is bigint, the evaluated rows' '...' is string` | 範圍表讀不到（不存在或沒有權限，訊息附 Spark 的原因）、`columns` 右邊的欄不在表裡，或欄的型別跟評估資料不同 | 檢查表名、權限與欄名；型別不同就在範圍表的 SQL 轉型。訊息寫的是「解析出的欄 -> 範圍表的欄」 |
+| `scope '...' selects no evaluated row` | 範圍的 key 一個都對不上評估的列：多半是日期格式或 entity、item 的值跟框架的不一樣（訊息列出範圍表沒有列的評估日期） | 在範圍表的 SQL 對齊值（框架不提供對照表） |
 | `A34: evaluation.report.sections declares [...]`／`does not declare [...]`，還沒起 Spark | `sections` 多了沒有程式讀的鍵（常見：舊設定還留著 `guardrail_recall`、`per_item_attr`、`category`、`per_segment`、`prediction_quality`），或少了程式讀的鍵 | 多的刪掉（`prediction_quality` 已移出主報表，訊息會指向 `--prediction-quality`，要看這一族指標改用那個模式，見 4.7 節）；少的照訊息反引號裡的值補成 `true`，這樣行為跟沒寫時一樣。該有哪些鍵見 3.5 節 |
 | `<名稱> has no <路徑>, which the report draws: it was landed by an older <node>, or not for these settings.`（`<名稱>` 是 `baseline_comparison` 或 `evaluation_display_ks`） | 報表要畫的值不在落地結果裡：那份 JSON 是舊版 node 寫的，或寫它的時候設定不是現在這組（例如熱門度基準段先關著、現在打開） | 照訊息 `--from-node` 它指的 node（`compare_to_baseline` 或 `resolve_display_ks`），帶上寫那份結果時的旗標（如 `--post-training`），再重畫 |
 | `Landed before #536, these results lack what the report reads instead of computing: ...`，或 `compare_to_baseline`／`resolve_display_ks` 的訊息寫 `landed before #536` | #536 之前落地的 `row_facts.json`、`baseline_metrics.json` 或 `metrics.json` 缺新加的鍵（全正組的帳、`popularity_window`、`population` 的分群欄）。設定沒變、指紋對得上，所以只重畫不會自己補上，報表會缺帳與警告，或直接 `KeyError` | `--from-node compute_row_facts`（三種訊息建議的都是它），帶上寫那份結果時的旗標，再重畫 |

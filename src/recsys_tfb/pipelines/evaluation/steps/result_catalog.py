@@ -16,6 +16,7 @@ from recsys_tfb.evaluation.result_readers import (
     POPULARITY_WINDOW_KEY,
     POPULATION_KEY,
     PREDICTION_QUALITY_POPULATION_KEY,
+    PREDICTION_QUALITY_SCOPE_DEFINITION_KEY,
     WIDEST_GROUP_KEY,
 )
 from recsys_tfb.pipelines.evaluation.steps.compare_sources import COMPARE_SOURCE_KEY
@@ -146,7 +147,10 @@ _PRODUCES_PREDICTION_QUALITY = Produces("prediction_quality_metrics", (
           "bins（細箱表）、display_bins（顯示箱表）。",
           "每個列出的 item 一格，加每個分數區間"),
     Block(PREDICTION_QUALITY_POPULATION_KEY,
-          "這些數字在哪些列上算：原料（post_training 或 monitoring）、評估日期；--post-training 時另有被評模型的 r 與列裡的無正例 query group 數，監控模式兩者為 None。",
+          "這些數字在哪些列上算：原料（post_training 或 monitoring）、評估日期；--post-training 時另有被評模型的 r 與列裡的無正例 query group 數，監控模式兩者為 None；--scope 時另有範圍名、圈到的列數（不加權）、範圍裡沒被評分的列數、範圍沒有列的評估日期，沒有 --scope 時為 None。",
+          "整次執行一份"),
+    Block(PREDICTION_QUALITY_SCOPE_DEFINITION_KEY,
+          "--scope 的範圍算的時候圈什麼：範圍表與欄的對應；重畫時跟今天同名的範圍比對。沒有 --scope 時為 None。",
           "整次執行一份"),
     _FINGERPRINT_BLOCK,
 ))
