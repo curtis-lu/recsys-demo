@@ -68,11 +68,11 @@ from recsys_tfb.evaluation.result_readers import (
     POPULATION_ZERO_POSITIVE_GROUPS_KEY,
     POST_TRAINING_POPULATION,
     PREDICTION_QUALITY_POPULATION_KEY,
-    SCOPE_COLUMNS_KEY,
+    PREDICTION_QUALITY_SCOPE_DEFINITION_KEY,
+    SCOPE_DATES_WITHOUT_ROWS_KEY,
     SCOPE_NAME_KEY,
     SCOPE_NOT_SCORED_KEY,
     SCOPE_ROWS_KEY,
-    SCOPE_TABLE_KEY,
     THIS,
     drop_all_positive_groups,
     resolved_all_k,
@@ -105,6 +105,7 @@ from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
     LoadedArtifact,
     fingerprint,
     require_computed_with_current_config,
+    require_same_recorded_values,
 )
 from recsys_tfb.pipelines.evaluation.steps.display_ks import (
     baseline_comparison_block,
@@ -149,6 +150,8 @@ from recsys_tfb.pipelines.evaluation.steps.segments import (
 from recsys_tfb.pipelines.evaluation.steps.prediction_quality_scopes import (
     count_keys_not_scored,
     read_scope_keys,
+    run_scope,
+    scope_definition,
 )
 from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
     EvalPartitionsNotCurrentError,
@@ -803,21 +806,22 @@ def compute_prediction_quality(
     scope's directory (``prediction_quality/<post_training|monitoring>/
     <scope or all>/``): its ``build_payload`` keys plus
     ``result_readers.PREDICTION_QUALITY_POPULATION_KEY``, which rows the
-    numbers are on. What each number means and cannot mean is in
+    numbers are on, and ``PREDICTION_QUALITY_SCOPE_DEFINITION_KEY``, what the
+    scope selected. What each number means and cannot mean is in
     ``evaluation/prediction_quality.py``'s docstring.
 
     Pre-check (config): A64's predicate again, the runtime backstop of the
     CLI's (the model's r is 0 under ``--post-training``); under ``--scope``,
-    A67 on the scope's table before a row is read.
+    A66's backstop (``run_scope``) and A67 on the scope's table before a row
+    is read.
 
     Pre-check (inputs): every evaluated date has rows, written by the standard
     run of this run mode under today's settings
     (``require_partitions_of_the_standard_run``); otherwise the message names
     that run. It takes ``evaluation_segment_columns`` for that check's
     ``joined`` list only (``compute_report_aggregates``' reason). Its result
-    still inherits that JSON's record. Under ``--scope``: the scope's table
-    has a row for every evaluated date, and selects at least one evaluated
-    row.
+    still inherits that JSON's record. Under ``--scope``: the scope selects
+    at least one evaluated row.
     """
     post_training = bool(parameters.get("post_training"))
     ratio = evaluated_test_ratio(parameters) if post_training else None
@@ -840,29 +844,31 @@ def compute_prediction_quality(
     # (ADR-0032 decision 7): a scope without the item column keeps every
     # item of its entities, one with it the listed pairs. A semi-join, so a
     # key listed twice keeps its row once. The scope's table is read for the
-    # evaluated dates only. `evaluation.scope` is the CLI's resolution of
-    # --scope, absent without it.
-    scope = eval_params.get("scope")
+    # evaluated dates only; a date it skips contributes no row and is named
+    # on the page, not refused (a campaign may skip a month).
+    name, scope = run_scope(parameters)
+    in_scope = eval_predictions
     scope_record = None
-    every_scored_row = eval_predictions
     if scope is not None:
-        name = parameters["prediction_quality_scope"]
-        keys = read_scope_keys(
-            eval_predictions.sparkSession, name, scope, parameters)
-        eval_predictions = eval_predictions.join(
-            keys, keys.columns, "left_semi")
-        n_rows = eval_predictions.count()
-        n_not_scored = count_keys_not_scored(keys, every_scored_row)
+        row_types = dict(eval_predictions.dtypes)
+        keys, dates_without_rows = read_scope_keys(
+            eval_predictions.sparkSession, name, scope,
+            {ours: row_types[ours] for ours in scope["columns"]}, parameters)
+        in_scope = eval_predictions.join(keys, keys.columns, "left_semi")
+        n_rows = in_scope.count()
+        n_not_scored = count_keys_not_scored(keys, eval_predictions)
         if n_rows == 0:
             raise DataConsistencyError(
                 f"scope {name!r} selects no evaluated row: none of its "
-                f"{n_not_scored} key(s) on the evaluated dates is scored. Its "
-                f"values must match the framework's (an item as "
-                f"{schema['item']!r} holds it).")
+                f"{n_not_scored} key(s) on the evaluated dates is scored, and "
+                f"it has no row for the evaluated date(s) "
+                f"{dates_without_rows}. Its values must match the framework's "
+                f"(dates as {schema['time']!r} holds them, an item as "
+                f"{schema['item']!r} does).")
         scope_record = {
-            SCOPE_NAME_KEY: name, SCOPE_TABLE_KEY: scope["table"],
-            SCOPE_COLUMNS_KEY: dict(scope["columns"]),
-            SCOPE_ROWS_KEY: n_rows, SCOPE_NOT_SCORED_KEY: n_not_scored,
+            SCOPE_NAME_KEY: name, SCOPE_ROWS_KEY: n_rows,
+            SCOPE_NOT_SCORED_KEY: n_not_scored,
+            SCOPE_DATES_WITHOUT_ROWS_KEY: dates_without_rows,
         }
     item_col, score_col = schema["item"], schema["score"]
     label_col = schema["label"]
@@ -902,9 +908,9 @@ def compute_prediction_quality(
     # under that ratio: summing NULL weights would drop those rows, and
     # counting them would report a filtered table as a weighted one.
     if weight_col is not None:
-        require_zero_positive_group_weights(eval_predictions, weight_col)
+        require_zero_positive_group_weights(in_scope, weight_col)
     aggregated = aggregate_score_bins(
-        eval_predictions.select(
+        in_scope.select(
             item_col, score_col, label_col, *([weight_col] if weight_col else [])),
         item_col=item_col, score_col=score_col, label_col=label_col,
         n_bins=settings["n_bins"], top_n=settings["top_n"],
@@ -918,8 +924,10 @@ def compute_prediction_quality(
         top_n=settings["top_n"],
     )
     # Decision — which rows these are, for the page's opening lines (ADR-0032
-    # decision 5): the run mode and the dates, and under --post-training r and
-    # the zero-positive groups kept. A key of its own, beside build_payload's.
+    # decisions 5 and 7): the run mode and the dates, under --post-training r
+    # and the zero-positive groups kept, and the scope. Keys of their own,
+    # beside build_payload's.
+    query_group = schema["query_group_columns"]
     out[PREDICTION_QUALITY_POPULATION_KEY] = {
         POPULATION_SOURCE_KEY: (
             POST_TRAINING_POPULATION if post_training else MONITORING_POPULATION),
@@ -930,15 +938,14 @@ def compute_prediction_quality(
         # scope can leave out the item holding its positive.
         POPULATION_ZERO_POSITIVE_GROUPS_KEY: (
             count_query_groups_without_positive(
-                every_scored_row.join(
-                    eval_predictions.select(
-                        *schema["query_group_columns"]).distinct(),
-                    schema["query_group_columns"], "left_semi"),
-                group_cols=schema["query_group_columns"],
-                label_col=label_col)
+                eval_predictions if scope is None else eval_predictions.join(
+                    in_scope.select(*query_group).distinct(), query_group,
+                    "left_semi"),
+                group_cols=query_group, label_col=label_col)
             if post_training else None),
         POPULATION_SCOPE_KEY: scope_record,
     }
+    out[PREDICTION_QUALITY_SCOPE_DEFINITION_KEY] = scope_definition(parameters)
     out["config_fingerprint"] = fingerprint(
         parameters, "compute_prediction_quality", (segment_columns,))
     overall = out["overall"]["summary"] or {}
@@ -1243,7 +1250,9 @@ def make_generate_prediction_quality_report_node(
 
         Pre-check (inputs): the result was computed with today's values of
         the settings its step applied (``steps.config_fingerprint``), as
-        ``generate_report`` checks its own. The record it inherits from the
+        ``generate_report`` checks its own, and with today's definition of
+        the run's scope, which its path names but does not pin. The record it
+        inherits from the
         standard run's ``evaluation_segment_columns`` is not compared:
         ``prepare_eval_data`` is not a node of this mode, so no re-run of it
         could make it current; the partition check of
@@ -1255,6 +1264,11 @@ def make_generate_prediction_quality_report_node(
             produced_by="compute_prediction_quality")]
         require_computed_with_current_config(
             loaded, parameters, run_nodes=run_nodes)
+        require_same_recorded_values(
+            loaded, PREDICTION_QUALITY_SCOPE_DEFINITION_KEY,
+            scope_definition(parameters),
+            setting=f"evaluation.scopes[{run_scope(parameters)[0]!r}]",
+            rerun_node="compute_prediction_quality")
         return assemble_prediction_quality_report(
             {"prediction_quality_metrics": prediction_quality_metrics},
             parameters)

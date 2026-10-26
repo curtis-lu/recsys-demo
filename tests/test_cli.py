@@ -5485,20 +5485,14 @@ class TestPredictionQualityScope:
         assert paths[("--scope", "campaign_b")] == [
             p.replace("/all/", "/campaign_b/") for p in paths[()]]
 
-    def test_the_named_scope_reaches_the_nodes(self, tmp_path):
-        result, ran = self._invoke(
-            tmp_path, ["--prediction-quality", "--scope", "campaign_b"])
+    @pytest.mark.parametrize("flags, name", [
+        (["--scope", "campaign_b"], "campaign_b"), ([], "all")])
+    def test_the_run_s_scope_name_reaches_the_nodes(
+            self, tmp_path, flags, name):
+        # The nodes look the definition up by it (evaluation.scopes).
+        result, ran = self._invoke(tmp_path, ["--prediction-quality", *flags])
         assert result.exit_code == 0, result.output
-        params = ran[0]["params"]
-        assert params["evaluation"]["scope"] == self._SCOPES["campaign_b"]
-        assert ran[0]["runtime_params"]["prediction_quality_scope"] \
-            == "campaign_b"
-
-    def test_without_scope_no_scope_reaches_the_nodes(self, tmp_path):
-        result, ran = self._invoke(tmp_path, ["--prediction-quality"])
-        assert result.exit_code == 0, result.output
-        assert "scope" not in ran[0]["params"]["evaluation"]
-        assert ran[0]["runtime_params"]["prediction_quality_scope"] == "all"
+        assert ran[0]["runtime_params"]["prediction_quality_scope"] == name
 
     @pytest.mark.parametrize("flags, needle", [
         (["--scope", "campaign_a"], "A66: --scope 'campaign_a' narrows only"),

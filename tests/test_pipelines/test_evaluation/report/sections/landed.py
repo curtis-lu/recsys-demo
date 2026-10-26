@@ -213,7 +213,7 @@ def _compute(spark, p: dict, *, unmatched: bool = False,
         n_display_bins=pq_cfg["n_display_bins"], top_n=pq_cfg["top_n"]),
         # What compute_prediction_quality adds: the one group without a
         # positive (C3, unless ``filtered``) is the kept one.
-        "population": _population(p, facts)}
+        "population": _population(p, facts), "scope_definition": None}
     display_ks = resolve_display_ks(_stamped(metrics, p), p)
     return {
         "evaluation_row_facts": facts,
@@ -256,4 +256,5 @@ def empty_quality(spark) -> dict:
         weight_col=None, n_bins=20, n_display_bins=5, top_n=3),
         "population": {"source": "monitoring", "evaluated_dates": [],
                        "test_zero_positive_group_ratio": None,
-                       "n_zero_positive_groups": None, "scope": None}}
+                       "n_zero_positive_groups": None, "scope": None},
+        "scope_definition": None}

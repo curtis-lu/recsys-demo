@@ -63,30 +63,49 @@ def test_the_ranking_metrics_population_is_said_apart(spark):
             "drop_all_positive_groups 開著）") in on
 
 
-def _scoped(spark, columns):
-    """The monitoring payload as a run under ``--scope campaign_a`` lands
-    it."""
-    results, parameters = landed.results(spark)
-    results["prediction_quality_metrics"]["population"]["scope"] = {
-        "name": "campaign_a", "table": "mkt.campaign_a", "columns": columns,
-        "n_rows_in_scope": 1234, "n_scope_rows_not_scored": 56}
+def _scoped(spark, columns, *, post_training=False, without_rows=()):
+    """The payload as a run under ``--scope campaign_a`` lands it."""
+    settings = ({"post_training": True, "ratio": landed.KEPT_RATIO}
+                if post_training else {})
+    results, parameters = landed.results(spark, **settings)
+    payload = results["prediction_quality_metrics"]
+    payload["population"]["scope"] = {
+        "name": "campaign_a", "n_rows_in_scope": 1234,
+        "n_scope_rows_not_scored": 56,
+        "evaluated_dates_without_rows": list(without_rows)}
+    payload["scope_definition"] = {"table": "mkt.campaign_a",
+                                   "columns": columns}
     return results, parameters
 
 
 def test_a_scope_is_named_with_its_rows_and_the_ones_not_scored(spark):
     """ADR-0032 decision 7: the page opens with the scope's name, the rows
-    it kept and its rows no evaluated row carries."""
+    it kept (unweighted) and its rows no evaluated row carries."""
     text = _text(population.build(*_scoped(
         spark, {"snap_date": "d", "cust_id": "c", "prod_name": "p"})))
     assert "campaign_a" in text and "mkt.campaign_a" in text
-    assert "1,234 列" in text and "56 列沒被評分" in text
+    assert "1,234 列（不加權）" in text and "56 列沒被評分" in text
     assert "entity × item" in text
+    assert "沒有列" not in text and "test 表只有" not in text
 
 
 def test_an_entity_scope_says_it_keeps_every_item(spark):
     text = _text(population.build(*_scoped(
         spark, {"snap_date": "d", "cust_id": "c"})))
     assert "只限 entity" in text and "entity × item" not in text
+
+
+def test_the_dates_a_scope_skips_are_named(spark):
+    text = _text(population.build(*_scoped(
+        spark, {"snap_date": "d", "cust_id": "c"},
+        without_rows=("2025-02-28", "2025-03-31"))))
+    assert "範圍在 2025-02-28、2025-03-31 沒有列" in text
+
+
+def test_under_post_training_most_rows_not_scored_are_outside_test(spark):
+    text = _text(population.build(*_scoped(
+        spark, {"snap_date": "d", "cust_id": "c"}, post_training=True)))
+    assert "test 表只有" in text
 
 
 def test_the_unscoped_page_says_nothing_of_a_scope(spark):

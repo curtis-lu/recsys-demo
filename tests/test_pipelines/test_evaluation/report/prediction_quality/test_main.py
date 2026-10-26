@@ -29,9 +29,10 @@ def test_the_metadata_names_the_scope(spark):
         {"prediction_quality_metrics": payload}, parameters)
     assert "全部候選列（沒有 --scope）" in html
     payload["population"]["scope"] = {
-        "name": "campaign_a", "table": "mkt.campaign_a",
-        "columns": {"snap_date": "d", "cust_id": "c"},
-        "n_rows_in_scope": 3, "n_scope_rows_not_scored": 0}
+        "name": "campaign_a", "n_rows_in_scope": 3,
+        "n_scope_rows_not_scored": 0, "evaluated_dates_without_rows": []}
+    payload["scope_definition"] = {
+        "table": "mkt.campaign_a", "columns": {"snap_date": "d", "cust_id": "c"}}
     html = main.assemble_prediction_quality_report(
         {"prediction_quality_metrics": payload}, parameters)
     assert "全部候選列（沒有 --scope）" not in html

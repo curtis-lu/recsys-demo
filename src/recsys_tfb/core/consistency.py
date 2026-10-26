@@ -845,10 +845,13 @@ Layer 1 — config-static (implemented here; aggregated by
 * A66 — ``--scope`` names no ``evaluation.scopes`` entry, or comes without
   ``--prediction-quality`` (ADR-0032 decision 7). Predicate:
   ``scope_flag_errors``; wired like A13, before Spark starts.
-* A67 — the scope's table does not exist, or lacks a column its ``columns``
-  names. Predicate: ``scope_table_errors`` (takes the table's columns, or
-  ``None`` for no table); ``compute_prediction_quality`` raises before it
-  reads a row, since only a Spark session sees the metastore.
+* A67 — the scope's table cannot be read, lacks a column its ``columns``
+  names, or holds one in another type than the evaluated rows' column it
+  maps to (the join would cast it, and a bigint ``7`` matches the ids
+  ``"7"`` and ``"007"`` alike). Predicate: ``scope_table_errors`` (takes the
+  table's column types, or ``None`` and Spark's reason); the scope reader of
+  ``compute_prediction_quality`` raises before it reads a row, since only a
+  Spark session sees the metastore.
 
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
@@ -3929,23 +3932,42 @@ def scope_flag_errors(
 
 
 def scope_table_errors(
-    name: str, scope: Mapping, table_columns: Sequence[str] | None,
+    name: str, scope: Mapping, table_types: Mapping[str, str] | None,
+    row_types: Mapping[str, str], *, unreadable: str = "",
 ) -> list[str]:
-    """A67 — scope ``name``'s table exists (``table_columns`` is ``None``
-    when it does not) and holds every column its ``columns`` names. Names
-    compare case-insensitively, as Spark resolves them."""
+    """A67 — scope ``name``'s table can be read (``table_types`` is ``None``
+    when it cannot, ``unreadable`` saying why), holds every column its
+    ``columns`` names, and each holds the type of the evaluated rows' column
+    it maps to (``row_types``, by resolved column). Names compare
+    case-insensitively, as Spark resolves them.
+
+    Types must be equal, not castable: the join casts a mismatch silently,
+    and a bigint ``7`` matches the string ids ``"7"`` and ``"007"`` alike.
+    """
     table = scope["table"]
-    if table_columns is None:
-        return [f"A67: scope {name!r}: table {table!r} does not exist."]
-    present = {c.lower() for c in table_columns}
-    missing = [f"{ours!r} -> {theirs!r}"
-               for ours, theirs in scope["columns"].items()
-               if theirs.lower() not in present]
-    if not missing:
-        return []
-    return [f"A67: scope {name!r}: table {table!r} has no column for "
+    if table_types is None:
+        return [f"A67: scope {name!r}: table {table!r} cannot be read: "
+                f"{unreadable}"]
+    present = {c.lower(): t for c, t in table_types.items()}
+    missing, mistyped = [], []
+    for ours, theirs in scope["columns"].items():
+        found = present.get(theirs.lower())
+        if found is None:
+            missing.append(f"{ours!r} -> {theirs!r}")
+        elif found != row_types[ours]:
+            mistyped.append(f"{theirs!r} is {found}, the evaluated rows' "
+                            f"{ours!r} is {row_types[ours]}")
+    errors = []
+    if missing:
+        errors.append(
+            f"A67: scope {name!r}: table {table!r} has no column for "
             f"{', '.join(missing)} (evaluation.scopes[{name!r}].columns: "
-            f"resolved column -> table column)."]
+            f"resolved column -> table column).")
+    if mistyped:
+        errors.append(
+            f"A67: scope {name!r}: table {table!r}: {'; '.join(mistyped)}. "
+            f"Cast them in the scope table's SQL.")
+    return errors
 
 
 def report_section_key_errors(parameters: dict) -> list[str]:

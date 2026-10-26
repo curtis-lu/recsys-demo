@@ -5562,37 +5562,55 @@ class TestScopeFlagA66:
 
 
 class TestScopeTableA67:
-    """A67 — the scope's table exists and holds every column ``columns``
-    names, checked before anything is computed; the message names the scope,
-    and the column."""
+    """A67 — the scope's table can be read, holds every column its
+    ``columns`` names, and each holds the type of the evaluated rows' column
+    it maps to; checked before anything is computed, the message naming the
+    scope and the column."""
 
     _SCOPE = {"table": "mkt.campaign_a", "columns": {
         "snap_date": "as_of_date", "cust_id": "customer_id",
         "prod_name": "product"}}
+    _ROWS = {"snap_date": "string", "cust_id": "string",
+             "prod_name": "string", "score": "double"}
 
     @staticmethod
-    def _errors(table_columns, scope=None):
+    def _errors(table_types, **kwargs):
         from recsys_tfb.core.consistency import scope_table_errors
 
         return scope_table_errors(
-            "campaign_a", scope or TestScopeTableA67._SCOPE, table_columns)
+            "campaign_a", TestScopeTableA67._SCOPE, table_types,
+            TestScopeTableA67._ROWS, **kwargs)
 
     def test_a_table_holding_every_column_is_accepted(self):
-        assert self._errors(["as_of_date", "customer_id", "product", "x"]) == []
+        assert self._errors({"as_of_date": "string", "customer_id": "string",
+                             "product": "string", "x": "int"}) == []
 
     def test_column_names_compare_as_spark_resolves_them(self):
         # Spark resolves column names case-insensitively, the metastore
         # lowercases them.
-        assert self._errors(["AS_OF_DATE", "customer_id", "Product"]) == []
+        assert self._errors({"AS_OF_DATE": "string", "customer_id": "string",
+                             "Product": "string"}) == []
 
-    def test_a_missing_table_is_refused_naming_the_scope_and_table(self):
-        errs = self._errors(None)
+    def test_an_unreadable_table_is_refused_with_spark_s_reason(self):
+        # Absent and not readable are two causes; the message passes Spark's.
+        errs = self._errors(None, unreadable="Table or view not found")
         assert len(errs) == 1 and errs[0].startswith("A67:")
         assert "'campaign_a'" in errs[0] and "'mkt.campaign_a'" in errs[0]
+        assert "Table or view not found" in errs[0]
 
     def test_a_missing_column_is_refused_naming_it_and_its_role_column(self):
-        errs = self._errors(["as_of_date", "customer_id"])
+        errs = self._errors({"as_of_date": "string", "customer_id": "string"})
         assert len(errs) == 1 and errs[0].startswith("A67:")
         assert "'campaign_a'" in errs[0]
         assert "'product'" in errs[0] and "'prod_name'" in errs[0]
         assert "'customer_id'" not in errs[0]
+
+    def test_another_type_is_refused_naming_both(self):
+        # A bigint 7 joined to the string ids "7" and "007" matches both:
+        # two entities counted as one, without an error.
+        errs = self._errors({"as_of_date": "string", "customer_id": "bigint",
+                             "product": "string"})
+        assert len(errs) == 1 and errs[0].startswith("A67:")
+        assert "'customer_id' is bigint" in errs[0]
+        assert "'cust_id' is string" in errs[0]
+        assert "'product'" not in errs[0]

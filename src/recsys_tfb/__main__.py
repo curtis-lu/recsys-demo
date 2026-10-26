@@ -2088,10 +2088,6 @@ def evaluation(
         params, scope, prediction_quality=prediction_quality)
     if errs:
         raise ConfigConsistencyError("\n".join(errs))
-    if scope is not None:
-        # The scope's definition, staged where compute_prediction_quality
-        # reads and fingerprints it, as --compare stages its source.
-        params["evaluation"]["scope"] = params["evaluation"]["scopes"][scope]
 
     # A12: resolve key → source dict (also handles None gracefully)
     compare_key = compare or compare_only

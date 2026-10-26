@@ -96,7 +96,8 @@ evaluation:
   #                                                                         （必填）
   #   columns  我們的欄 → 範圍表欄名 map。time 與 entity 各欄必填；item 選填：不寫＝只限
   #            entity（它們的每個候選 item 都算），寫了＝只算列出的 entity × item。
-  #            值要跟框架寫的一樣（日期格式、item 值），由範圍表的 SQL 對齊；沒有對照表。
+  #            值與型別要跟框架寫的一樣（日期格式、item 值、欄位型別），由範圍表的 SQL
+  #            對齊；沒有對照表。
   #                                                                         （必填）
   # 名字只能用英數、_、-，而且不能叫 all（沒有 --scope 的結果放在 all/）。
   scopes: {}

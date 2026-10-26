@@ -528,22 +528,41 @@ def test_the_prediction_quality_page_refuses_a_result_of_other_settings():
 def test_the_prediction_quality_page_refuses_a_scope_redefined_since():
     """The directory carries the scope's name, not what it selects: a scope
     pointed at another table since must not redraw the old numbers under its
-    name. The run without --scope has no scope on either side."""
-    computed_with = _params(False)
-    computed_with["evaluation"]["scope"] = {
-        "table": "mkt.campaign_a", "columns": {"snap_date": "d", "cust_id": "c"}}
-    now = copy.deepcopy(computed_with)
-    now["evaluation"]["scope"]["table"] = "mkt.campaign_a_v2"
-    landed = {"config_fingerprint": fingerprint(
-        computed_with, "compute_prediction_quality")}
+    name. Editing another scope refuses nothing."""
+    from recsys_tfb.pipelines.evaluation.steps.prediction_quality_scopes import (
+        scope_definition,
+    )
 
+    computed_with = _params(False)
+    computed_with["prediction_quality_scope"] = "campaign_a"
+    computed_with["evaluation"]["scopes"] = {
+        "campaign_a": {"table": "mkt.campaign_a",
+                       "columns": {"snap_date": "d", "cust_id": "c"}},
+        "campaign_b": {"table": "mkt.campaign_b",
+                       "columns": {"snap_date": "d", "cust_id": "c"}},
+    }
+    landed = {
+        "config_fingerprint": fingerprint(
+            computed_with, "compute_prediction_quality"),
+        "scope_definition": scope_definition(computed_with),
+    }
+
+    other_edited = copy.deepcopy(computed_with)
+    other_edited["evaluation"]["scopes"]["campaign_b"]["table"] = "mkt.b2"
+    with pytest.raises(KeyError, match="population"):
+        # Past both checks: the hand-made payload has nothing to draw.
+        _prediction_quality_report_node(other_edited).func(
+            prediction_quality_metrics=landed, parameters=other_edited)
+
+    now = copy.deepcopy(computed_with)
+    now["evaluation"]["scopes"]["campaign_a"]["table"] = "mkt.campaign_a_v2"
     with pytest.raises(ValueError) as exc:
         _prediction_quality_report_node(now).func(
             prediction_quality_metrics=landed, parameters=now)
     msg = str(exc.value)
-    assert ("evaluation.scope.table: 'mkt.campaign_a' -> "
-            "'mkt.campaign_a_v2'") in msg
-    assert "--from-node compute_prediction_quality," in msg
+    assert "evaluation.scopes['campaign_a']" in msg
+    assert "'mkt.campaign_a' -> 'mkt.campaign_a_v2'" in msg
+    assert "--from-node compute_prediction_quality" in msg
 
 
 def test_the_prediction_quality_page_refuses_a_json_without_fingerprint():

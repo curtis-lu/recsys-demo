@@ -63,7 +63,9 @@ results through the source's identity
 (``compare_sources.compare_source_identity``), not through a declaration.
 ``evaluation.compare`` is left out on purpose: the CLI injects it per run, and
 the comparison results record their source under their own key instead
-(:func:`require_same_recorded_values`). ``model_version`` and the run's dates
+(:func:`require_same_recorded_values`). So is ``evaluation.scopes``: the
+``--prediction-quality`` result records the one entry its run's ``--scope``
+named, and declared whole, editing one scope would refuse every other's. ``model_version`` and the run's dates
 are in every result's path.
 
 Why the fingerprint lives inside the JSON, not in its path
@@ -138,15 +140,9 @@ APPLIED_SETTINGS: dict[str, tuple[str, ...]] = {
     # The ratio is core.consistency.DATASET_TEST_RATIO_KEY, injected at the
     # top level by the CLI like post_training (spelled out here: this module
     # imports nothing from the project).
-    #
-    # evaluation.scope is the CLI's resolution of --scope (ADR-0032 decision
-    # 7), declared unlike evaluation.compare: only this step applies it, and
-    # the output directory carries the scope's name, not what it selects.
-    # Not evaluation.scopes: editing one scope must not refuse another's.
     "compute_prediction_quality": (
         "schema", "post_training", "_dataset_test_zero_positive_group_ratio",
         "evaluation.snap_date", "evaluation.prediction_quality",
-        "evaluation.scope",
     ),
     "compute_report_aggregates": (
         "schema", "evaluation.snap_date", "evaluation.report.diagnostics",

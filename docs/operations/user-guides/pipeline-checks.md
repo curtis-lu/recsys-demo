@@ -201,7 +201,7 @@ dataset 有兩個**資料閘**：專門檢查、本身不改資料的步驟，�
   - **label 重複**：`label_table` 在這個月，同一組 time、entity、item 不能有兩列。不擋的話，join 之後候選會被複製成多列，名次全錯。
   - **沿用上一輪的結果**：`enriched_eval_predictions`、指標這些已經落地的東西，必須是用現在「會影響計算」的那組設定算的。不是就擋，訊息會告訴你從哪一步重跑。
   - **分群**：`evaluation.segment_sources.<名稱>` 的表必須讀得到，而且有宣告的欄。
-  - **範圍（`--prediction-quality --scope`）**：範圍表必須存在，`columns` 右邊的欄都要在表裡（`A67`，訊息點名範圍與欄）；每個評估月份都要有列；範圍至少要圈到一列評估資料。都在開始算之前查。
+  - **範圍（`--prediction-quality --scope`）**：範圍表必須讀得到，`columns` 右邊的欄都要在表裡，型別也要跟評估資料的那一欄相同（`A67`，訊息點名範圍與欄；型別不同時 join 會自動轉型，數字 `7` 會同時對上字串 `"7"` 與 `"007"`）；範圍至少要圈到一列評估資料。都在開始算之前查。範圍表沒有列的評估月份不擋，列在報表開頭。
   - **baseline**：報表有開 baseline 時，`label_table` 在 `evaluation.baseline.lookback_months` 那段期間必須有資料。
   - **item 大類**：`evaluation.item_categories.enabled` 打開時，`evaluation.item_categories.mapping` 用到的 item 必須在 item 清單裡（清單從資料數時，是被評估模型前處理器的清單；前處理器檔不在就擋，訊息說要先補回再從 `prepare_eval_data` 重跑），`evaluation.item_categories.unmapped` 只能是 `singleton`。寫 `evaluation.item_categories.column`（取自候選的某一欄）時：`sample_pool` 必須有這一欄；同一個 item 在評估月份裡（同月或跨月）不能對到兩個不同的非 NULL 值（`B18`）——對照表只用 item 連接，不擋的話它的預測會被算進兩個大類。改了這一欄之後，從 `prepare_eval_data` 之後接續會被擋，訊息指示 `--from-node prepare_eval_data`。
   - **舊格式**：讀到舊格式的 `evaluation_results.json`，訊息會說要跑哪個遷移腳本。

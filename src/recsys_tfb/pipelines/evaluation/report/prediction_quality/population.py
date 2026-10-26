@@ -19,7 +19,9 @@ from recsys_tfb.evaluation.result_readers import (
     POPULATION_ZERO_POSITIVE_GROUPS_KEY,
     POST_TRAINING_POPULATION,
     PREDICTION_QUALITY_POPULATION_KEY,
+    PREDICTION_QUALITY_SCOPE_DEFINITION_KEY,
     SCOPE_COLUMNS_KEY,
+    SCOPE_DATES_WITHOUT_ROWS_KEY,
     SCOPE_NAME_KEY,
     SCOPE_NOT_SCORED_KEY,
     SCOPE_ROWS_KEY,
@@ -78,19 +80,32 @@ def _source(population: Mapping, weight_col: str | None) -> str:
     return text + "每列權重 1，數字是 test 母體上的精確值。"
 
 
-def _scope(scope: Mapping, parameters: dict) -> str:
-    """Which keys the ``--scope`` names, the rows they kept and the ones no
-    evaluated row carries (ADR-0032 decision 7)."""
-    if get_schema(parameters)["item"] in scope[SCOPE_COLUMNS_KEY]:
+def _scope(scope: Mapping, definition: Mapping, post_training: bool,
+           parameters: dict) -> str:
+    """Which keys the ``--scope`` names, the rows they kept, the ones no
+    evaluated row carries and the evaluated dates it skips (ADR-0032
+    decision 7)."""
+    if get_schema(parameters)["item"] in definition[SCOPE_COLUMNS_KEY]:
         keys = "列出的 entity × item"
     else:
         keys = "列出的 entity（只限 entity：它們的每個候選 item 都算）"
-    return (
-        f"範圍：只在 {scope[SCOPE_NAME_KEY]}（{scope[SCOPE_TABLE_KEY]}）"
-        f"{keys}上算，圈到 {scope[SCOPE_ROWS_KEY]:,} 列。範圍在評估日期有 "
-        f"{scope[SCOPE_NOT_SCORED_KEY]:,} 列沒被評分（那個 entity 或 item "
-        "不在這份 enriched_eval_predictions 裡），不在這一頁的任何數字裡。"
+    text = (
+        f"範圍：只在 {scope[SCOPE_NAME_KEY]}（{definition[SCOPE_TABLE_KEY]}）"
+        f"{keys}上算，圈到 {scope[SCOPE_ROWS_KEY]:,} 列（不加權）。範圍在評估"
+        f"日期有 {scope[SCOPE_NOT_SCORED_KEY]:,} 列沒被評分（那個 entity 或 "
+        "item 不在這份 enriched_eval_predictions 裡），不在這一頁的任何數字裡。"
     )
+    if post_training:
+        text += (
+            "test 表只有抽進 test 的 entity，無正例的組又只留比例 r，所以這裡"
+            "沒被評分的列多半只是沒進 test 表，不代表範圍寫錯；要看範圍跟上線"
+            "母體對不對得上，用不帶 --post-training 的這個模式。"
+        )
+    skipped = scope[SCOPE_DATES_WITHOUT_ROWS_KEY]
+    if skipped:
+        text += (f"範圍在 {'、'.join(skipped)} 沒有列，這幾個月不在數字裡"
+                 "（日期格式跟框架的不同也會這樣）。")
+    return text
 
 
 def _against_ranking(parameters: dict) -> str:
@@ -119,11 +134,15 @@ def build(
     population = payload[PREDICTION_QUALITY_POPULATION_KEY]
     weight_col = payload["columns"].get("weight")
     scope = population[POPULATION_SCOPE_KEY]
+    post_training = (
+        population[POPULATION_SOURCE_KEY] == POST_TRAINING_POPULATION)
     return ReportSection(
         title=TITLE, description="", title_en=TITLE_EN, question=QUESTION,
         key="population", blocks=[
             Paragraph(_source(population, weight_col)
                       + _against_ranking(parameters)),
-            *([Paragraph(_scope(scope, parameters))] if scope else []),
+            *([Paragraph(_scope(
+                scope, payload[PREDICTION_QUALITY_SCOPE_DEFINITION_KEY],
+                post_training, parameters))] if scope else []),
             Note(MATURITY_NOTE, warn=True),
         ])
