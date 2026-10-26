@@ -616,6 +616,35 @@ def test_shared_numbers_per_item_and_segment_nest_two_levels(spark):
     assert shared["B"]["affluent"]["hits@3"] == 1   # C1, rank 1, positive
 
 
+def test_per_item_cells_come_out_in_item_order_whatever_the_collect_order():
+    """A collect's row order follows the execution plan; the nested cells, and
+    the macro summed over them, must not. 0.1 + 0.2 + 0.3 differs from
+    0.3 + 0.2 + 0.1 in the last ulp, so a macro summed in collect order would
+    move with the plan."""
+    rows = [{"item": "c", "v": 0.3}, {"item": "a", "v": 0.1},
+            {"item": "b", "v": 0.2}]
+    orders = (rows, rows[::-1])
+
+    def nest(order, dims):
+        return ms._nest_by_dims(order, dims, lambda r: {"m": r["v"]})
+
+    one_level = [nest(order, ["item"]) for order in orders]
+    assert [list(n) for n in one_level] == [["a", "b", "c"]] * 2
+    macros = [ms.macro_average(n)["m"] for n in one_level]
+    assert macros[0] == macros[1] == (0.1 + 0.2 + 0.3) / 3
+
+    # Two levels: the segments sort inside each item, the unmatched (NULL)
+    # one by its key like any other.
+    by_seg = [{"item": "b", "seg": "y", "v": 0.2},
+              {"item": "a", "seg": None, "v": 0.1},
+              {"item": "a", "seg": "x", "v": 0.4}]
+    two_level = [nest(order, ["item", "seg"])
+                 for order in (by_seg, by_seg[::-1])]
+    assert [list(n) for n in two_level] == [["a", "b"]] * 2
+    assert list(two_level[0]["a"]) == list(two_level[1]["a"]) == sorted(
+        [ms.segment_key(None), "x"])
+
+
 def test_macro_average_excludes_n_pos_from_output(spark=None):
     per_dim = {
         "A": {"map_attr@3": 0.75, "n_pos": 2},

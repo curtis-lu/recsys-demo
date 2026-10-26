@@ -506,7 +506,8 @@ def compute_dataset_overview(
                 cell["n_queries"] = nq
                 cell["query_share"] = (nq / total_queries) if total_queries else 0.0
             out[key] = cell
-        return out
+        # Sorted, so the landed order does not follow the execution plan.
+        return dict(sorted(out.items()))
 
     result = {
         "totals": {
@@ -926,15 +927,24 @@ def _nest_by_dims(rows, dim_cols: list[str], cell_of) -> dict[str, dict]:
     ``"_".join`` turned ``(item="a", seg="b_c")`` and ``(item="a_b",
     seg="c")`` into the same key and the later row silently overwrote the
     earlier one. Dim values are stringified.
+
+    Keys come out sorted, items first, then segments within an item: a
+    collect's row order follows the execution plan, and ``macro_average`` sums
+    in key order, so unsorted its last digit would move with the plan.
     """
-    out: dict[str, dict] = {}
-    for r in rows:
+    def keys(r) -> tuple[str, ...]:
         item = str(r[dim_cols[0]])
         if len(dim_cols) == 1:
-            out[item] = cell_of(r)
+            return (item,)
+        # The second dim is the segment; NULL there is the unmatched group.
+        return item, segment_key(r[dim_cols[1]])
+
+    out: dict[str, dict] = {}
+    for key, r in sorted(((keys(r), r) for r in rows), key=lambda p: p[0]):
+        if len(key) == 1:
+            out[key[0]] = cell_of(r)
         else:
-            # The second dim is the segment; NULL there is the unmatched group.
-            out.setdefault(item, {})[segment_key(r[dim_cols[1]])] = cell_of(r)
+            out.setdefault(key[0], {})[key[1]] = cell_of(r)
     return out
 
 
