@@ -1494,10 +1494,11 @@ def compute_all_metrics(
     ``drop_all_positive_groups`` (default off) also excludes the
     *all-positive* queries: the same positive label on every row, so every
     per-query metric is the same whatever the order. The caller reads the
-    switch — ``metrics.drop_all_positive_groups`` — and this function never
-    reads it from ``parameters``: the switch is the evaluation report's.
-    (Training's test mAP must not move with it either.) Each grain decides
-    on its own frame: at the category grain a query is all-positive when
+    switch — ``result_readers.drop_all_positive_groups`` — and this function
+    never reads it from ``parameters``: the switch is the evaluation report's.
+    (Training's test mAP must not move with it either; it scores through
+    ``compute_untruncated_ap``, which never drops those groups.) Each grain
+    decides on its own frame: at the category grain a query is all-positive when
     every category it holds gets the same positive label (the max of its
     children), which a query mixed row by row can be. Off, every key is
     value-for-value what it was. Known effect, not a bug: per-item keys such

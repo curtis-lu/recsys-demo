@@ -342,7 +342,8 @@ def build_baseline_frame(
 # window. The denominator is counted from sample_pool, whose rows are by
 # definition one candidate each (CONTEXT.md: 來源表, 候選), never from
 # label_table's row count: a label_table holding positives only makes every
-# rate 1.
+# rate 1, and one that keeps only entities with a positive in the group ranks
+# worse than random.
 #
 # The counts are kept per time value in ``popularity_period_counts`` so a
 # period is joined once: they depend on sample_pool, label_table and the

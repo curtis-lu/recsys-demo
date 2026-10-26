@@ -8,9 +8,10 @@ advice depends on the compare mode (``compare_to_source``,
 architecture audit's AST scan reads top-level definitions only, so it does
 not see those nodes' definitions (ADR-0019 decision 2).
 
-The library also holds ``baselines``, although only these nodes call its
-Spark functions: the library holds a module by its role, not by who calls it
-(ADR-0031 principle 6, the 2026-10-25 correction).
+The ``recsys_tfb.evaluation`` library also holds ``baselines``, although
+only these nodes call its Spark functions: it scores by popularity, the
+simplest model, and the library holds a module by its role, not by who calls
+it (ADR-0031 principle 6, the 2026-10-25 correction).
 """
 
 import logging
@@ -688,10 +689,8 @@ def compute_baseline_metrics(
     # Decision — a multi-column item is combined on read (ADR-0027): every
     # count below is per item.
     label_table = combine_item_columns(label_table, schema, "label_table")
-    # Single source of the default (bug 1, ADR-0020): the report's
-    # popularity-baseline section must not default differently from this node,
-    # or a run relying on the implicit default silently disagrees with itself
-    # about what it used.
+    # Single source of the default (bug 1, ADR-0020): the report prints the
+    # value this node lands, never a default of its own.
     lookback_months = resolve_lookback_months(parameters)
 
     snap_dates = snap_dates_in_frame(eval_predictions, time_col)
@@ -822,9 +821,10 @@ def compute_prediction_quality(
     # touched: every row weighs 1.
     #
     # Decision — bins are global and equal-width over this run's own
-    # min..max score, not a fixed [0, 1]: the scores crowd the low end and
-    # [0, 1] bins would put nearly every row in the first few. Equal width keeps per-item bins summing to the overall ones
-    # and fine bins merging into display bins; quantile bins would break both
+    # min..max score, not a fixed [0, 1]: at low positive rates the scores
+    # crowd the low end and [0, 1] bins would put nearly every row in the first
+    # few. Equal width keeps per-item bins summing to the overall ones and fine
+    # bins merging into display bins; quantile bins would break both
     # silently (ADR-0024 decision 4).
     #
     # Decision — per-item bins for the `top_n` items with the most rows only

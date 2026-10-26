@@ -20,7 +20,9 @@ time partition is STRING; an ``external_hive`` B may carry its time column as
 DATE. Both sides' time is cast to string before the intersection and before
 each restriction join: the same comparison ``steps/compare_sources.py`` already
 selected B's dates with, rather than whichever way Spark's implicit coercion
-goes for mixed types.
+goes for mixed types. On Spark 3.3.2 the implicit coercion gives the same
+answer for ISO DATE against STRING, so the DATE test in
+``test_compare_universe.py`` pins the result, not the cast.
 
 **Why the two sides are handled differently.** The asymmetry is structural,
 not a tuning choice, and it holds for any instantiation of this framework:
