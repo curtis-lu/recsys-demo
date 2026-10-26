@@ -96,3 +96,7 @@ date: 2026-09-16
 ## 修訂（2026-10-23，ADR-0031 決定 7，#534）
 
 決定 6 拿來對照的〈per-item 指標沒有 precision〉，已被 [ADR-0031](0031-evaluation-second-pass-layers-and-single-source.md) 決定 7 推翻。那條說 `@K` 家族的 precision 分母是 K、攤不到單一 item 頭上；決定 7 把「這個 item 在某個 query group 排進前 K 名」當成推薦了它一次，所以 per-item 的 precision@K 分母是該 item 排進前 K 名的次數，不是 K。`metrics_spark.py::aggregate_per_item` 的 NOTE 已跟著改寫。決定 6 的結論不變：本家族 per-item 的 precision 分母是「該 item 在門檻以上的曝光數」，跟 per-item 的 precision@K 仍是兩個不同的量。
+
+## 修訂（2026-10-26，ADR-0032）
+
+決定 1 的「主報表新增一段」與「段落開關 `report.sections.prediction_quality`」不再成立。[ADR-0032](0032-prediction-quality-mode-and-scope.md) 把這個家族搬出主報表，改成 evaluation 的一個模式旗標 `--prediction-quality`，產出自己的 `report.html`；`evaluation.report.sections.prediction_quality` 開關拿掉，主報表只留排序指標。node、JSON 產物、`COMPUTED_KEYS` 兩筆中屬於開關的那一筆也隨之改動，其餘形狀與 `evaluation.prediction_quality` 的參數照舊。

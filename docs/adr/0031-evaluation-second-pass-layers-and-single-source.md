@@ -828,3 +828,11 @@ for f in dataset evaluation; do echo "== $f"
 ```
 
 node 長度是用 Python 的 `ast` 模組解析 `nodes.py` 與 `pipeline.py` 量的：node 函式取 `pipeline.py` 裡 `Node(` 的第一個參數，長度取函式的起訖行。
+
+## 修訂（2026-10-26，ADR-0032）
+
+[ADR-0032](0032-prediction-quality-mode-and-scope.md) 把預測品質從主報表搬出，改成 `--prediction-quality` 模式，三處跟著改：
+
+- **決定 3（主報表留下的段）**：段落清單拿掉預測品質。決定 16 第 4 項之後的主報表段落是：概覽、核心概念、資料統計、排序指標、名次分布、熱門度基準、完整性檢查。
+- **決定 16 第 4 項（段名）**：主報表的段名清單拿掉「預測品質」，其餘段名不變。
+- **原則 3〈更正（#538 實作時定，2026-10-24）〉**中「開關只在一處讀」那一條：`report_section_on` 裡「缺的時候預測品質段算關」的特例、以及 A46 的 `prediction_quality_on` 都不存在了。`evaluation.report.sections.prediction_quality` 這個開關拿掉，舊設定寫著它時由 A34 報錯，指向 `--prediction-quality`；`EVALUATION_REPORT_SECTIONS` 不再含它。
