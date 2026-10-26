@@ -114,3 +114,7 @@ ADR-0021 只容得下形狀一：query group 寫死是 `time` ＋ `entity`。
 ### 修訂（2026-09-25，ADR-0029）
 
 決定 3 補記寫「val／test 沒有這個問題（B10 本來就不涵蓋它們），維持在建表之後過濾」。這個理由指向它自己造成的結果：B10 不涵蓋 val／test，正是因為過濾放在建表之後。[ADR-0029](0029-dataset-second-pass-scoped-reads-symmetric-splits.md) 決定 4 把 val／test 也改成在 keys 上過濾（自己接一次窄的 `label_table`，判斷仍用 `label_table` 的 label），B10 改為涵蓋四個 split。r ＝ 0 或 1 時留下的組與列逐列相同；0 < r < 1 時留下的無正例組會換一批（丟組改在落地前做，time 的型別不同，桶號跟著不同；理由與影響見 ADR-0029 決定 4）。
+
+### 修訂（2026-10-26，ADR-0032）
+
+決定 3 之後的〈後果〉說 test 的 r 為 0 時，ADR-0024 的家族要在入口擋下，並以「報表上母體：全部曝光」為由；這個檢查原本是 A46（開關打開且 r＝0）。[ADR-0032](0032-prediction-quality-mode-and-scope.md) 改了三處：r 改從被評模型的 dataset version manifest 讀，不讀今天的設定檔；A46 退休，改成 A64（`--prediction-quality --post-training` 且模型的 r＝0 就擋）；0＜r＜1 時報表寫明「加權估計」與留下的無正例組數。r 的語意與權重規則（1 或 1／r）不變。

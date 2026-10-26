@@ -15,6 +15,7 @@ from recsys_tfb.pipelines.evaluation.steps.snap_date_scope import (
     eval_snap_dates,
     eval_snap_dates_without_rows,
     restrict_to_current_eval_partitions,
+    require_partitions_of_the_standard_run,
     restrict_to_eval_snap_dates,
     stamp_partition_fingerprint,
 )
@@ -359,3 +360,20 @@ def test_dates_without_rows_are_found_in_one_job(spark, monkeypatch):
         _two_months(spark), params))
     assert [kind for kind, _ in calls] == ["collect"]
     assert jobs == 1
+
+
+def test_the_standard_run_to_do_first_is_said_once_when_two_problems_meet(spark):
+    """A date with no row and a date written under other settings: both are
+    named, and the command to run first is named once."""
+    from recsys_tfb.core.consistency import DataConsistencyError
+
+    a, b = _settings(_Q1), _settings(_Q1, ("region",))
+    a["model_version"] = "mv_x"
+    table = _table(spark, (["2026-01-31"], b), (["2026-03-31"], a))
+    with pytest.raises(DataConsistencyError) as excinfo:
+        require_partitions_of_the_standard_run(
+            table, a, _landed(a, ("tier",)))
+    message = str(excinfo.value)
+    assert "2026-02-28" in message and "2026-01-31" in message, message
+    command = "python -m recsys_tfb evaluation --env <env> --model-version mv_x"
+    assert message.count(command) == 1, message

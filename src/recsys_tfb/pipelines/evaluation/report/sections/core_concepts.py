@@ -171,7 +171,7 @@ def _bullets(item_col: str, metrics: dict, category_facts: dict | None,
         "的 map@1 會等於 recall@1。",
         grains,
         f"只看組內先後的指標（map、precision、recall、map_attr）只算{which_groups}"
-        "；把每一列當成二元預測的指標（例如 PR-AUC）算全部候選列。",
+        "；把每一列當成二元預測的指標不在這份報表，見 --prediction-quality 模式。",
         all_sentence + "。",
     )
 

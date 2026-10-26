@@ -35,7 +35,8 @@ def test_the_catalog_overlay_keeps_every_base_column_and_adds_the_weight(conf):
         "evaluation"]
     assert evaluation["compare_sources"]["parity_self"]["model_version"] \
         == "abc12345"
-    assert evaluation["report"]["sections"]["prediction_quality"] is True
+    # The family is the --prediction-quality mode, not a switch (A34).
+    assert "report" not in evaluation
 
 
 def test_the_overlay_is_removed_even_when_the_run_fails(conf):
@@ -88,10 +89,13 @@ def test_a_file_the_new_run_did_not_write_is_not_carried_over(
 
     root = _fake_root(tmp_path, conf)
     out = root / "data" / "evaluation" / "abc12345" / "20260131"
-    writes = iter([("metrics.json", "report_comparison.html"),
-                   ("metrics.json",)])
+    # Two commands a run: the standard one, then --prediction-quality.
+    writes = iter([("metrics.json", "report_comparison.html"), (),
+                   ("metrics.json",), ()])
+    commands = []
 
     def fake_cli(_root, *args):
+        commands.append(args)
         out.mkdir(parents=True, exist_ok=True)
         for name in next(writes):
             (out / name).write_text("{}")
@@ -102,6 +106,9 @@ def test_a_file_the_new_run_did_not_write_is_not_carried_over(
     second = ep.run(root, "second")
     assert (first / "20260131" / "report_comparison.html").is_file()
     assert not (second / "20260131" / "report_comparison.html").exists()
+    # Every page: the mode runs after the standard run, on what it landed.
+    assert [("--compare" in c, "--prediction-quality" in c)
+            for c in commands[:2]] == [(True, False), (False, True)]
 
 
 @pytest.mark.parametrize("label", ["../src", "a/b", "..", ""])

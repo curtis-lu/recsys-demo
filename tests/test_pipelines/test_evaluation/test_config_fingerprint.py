@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from recsys_tfb.core.consistency import DATASET_TEST_RATIO_KEY
 from recsys_tfb.pipelines.evaluation.steps.config_fingerprint import (
     APPLIED_SETTINGS,
     COMPARISON_CHAIN,
@@ -43,7 +44,8 @@ SPEC_APPLIED = {
         "evaluation.query_filter",
     },
     "compute_prediction_quality": {
-        "schema", "post_training", "dataset.test_zero_positive_group_ratio",
+        # The evaluated model's r, as the CLI hands it on.
+        "schema", "post_training", DATASET_TEST_RATIO_KEY,
         "evaluation.snap_date", "evaluation.prediction_quality",
     },
     "compute_report_aggregates": {
@@ -93,8 +95,7 @@ def _params() -> dict:
             "report": {
                 "sections": {"data_stats": True, "ranking_metrics": True,
                              "popularity_baseline": True,
-                             "rank_distribution": True,
-                             "prediction_quality": True},
+                             "rank_distribution": True},
                 "display": {"compare_k": [1, 3, 5, "all"]},
                 "diagnostics": {"include_distributions": True},
             },
@@ -148,8 +149,6 @@ def _main_report(params: dict) -> list[LoadedArtifact]:
             _landed(params, "resolve_display_ks", metrics, comparison),
         ("evaluation_report_aggregates", "compute_report_aggregates"):
             _landed(params, "compute_report_aggregates", seg),
-        ("prediction_quality_metrics", "compute_prediction_quality"):
-            _landed(params, "compute_prediction_quality", seg),
     }
     return [LoadedArtifact(catalog_name=name, payload=payload,
                            produced_by=producer)
@@ -230,11 +229,6 @@ def test_an_input_without_a_fingerprint_contributes_nothing():
 STALE_AFTER = {
     "evaluation.report.diagnostics.include_distributions": (
         {"evaluation_report_aggregates"}, "compute_report_aggregates"),
-    "evaluation.prediction_quality.n_bins": (
-        {"prediction_quality_metrics"}, "compute_prediction_quality"),
-    # With post_training, it decides whether every row is weighted.
-    "dataset.test_zero_positive_group_ratio": (
-        {"prediction_quality_metrics"}, "compute_prediction_quality"),
     "evaluation.report.display.compare_k": (
         {"evaluation_display_ks"}, "resolve_display_ks"),
     "evaluation.report.sections.popularity_baseline": (
@@ -273,7 +267,6 @@ STALE_AFTER.update({
 DRAWN = ["evaluation.report.sections.data_stats",
          "evaluation.report.sections.ranking_metrics",
          "evaluation.report.sections.rank_distribution",
-         "evaluation.report.sections.prediction_quality",
          "evaluation.compare"]
 
 
@@ -285,6 +278,46 @@ def test_a_changed_key_makes_only_its_readers_results_stale(path):
     artifacts = _main_report(old)
     assert _stale(artifacts, new) == expected
     assert f"--from-node {node}," in _refusal(artifacts, new)
+
+
+#: The --prediction-quality mode's run order: its page is given it.
+_PREDICTION_QUALITY_RUN = ["compute_prediction_quality",
+                           "generate_prediction_quality_report"]
+
+
+def _prediction_quality_page(params: dict) -> list[LoadedArtifact]:
+    """What the mode's page reads, landed under ``params`` off the standard
+    run's segment list."""
+    seg = _landed(params, "prepare_eval_data")
+    return [LoadedArtifact(
+        catalog_name="prediction_quality_metrics",
+        payload=_landed(params, "compute_prediction_quality", seg),
+        produced_by="compute_prediction_quality")]
+
+
+@pytest.mark.parametrize("path", [
+    "evaluation.prediction_quality.n_bins",
+    # With post_training, the evaluated model's r decides the row weights.
+    DATASET_TEST_RATIO_KEY,
+    "post_training", "evaluation.snap_date", "schema.columns.rank"])
+def test_a_key_the_mode_applied_makes_its_result_stale(path):
+    old = _params()
+    artifacts = _prediction_quality_page(old)
+    assert _stale(artifacts, _changed(old, path),
+                  run_nodes=_PREDICTION_QUALITY_RUN) == {
+        "prediction_quality_metrics"}
+    assert "--from-node compute_prediction_quality," in _refusal(
+        artifacts, _changed(old, path), run_nodes=_PREDICTION_QUALITY_RUN)
+
+
+def test_the_standard_run_s_record_is_not_compared_in_the_mode():
+    """prepare_eval_data is no node of the mode: no re-run of it could make
+    the record current, and the partition check stands in for it."""
+    old = _params()
+    require_computed_with_current_config(
+        _prediction_quality_page(old),
+        _changed(old, "evaluation.segment_columns"),
+        run_nodes=_PREDICTION_QUALITY_RUN)
 
 
 @pytest.mark.parametrize("path", DRAWN)

@@ -16,7 +16,7 @@
 | 在測試或 `src/` 裡寫一份 `parameters` 的 `schema` 區塊 | S5 |
 | 在 `src/` 裡寫下任何具體欄名（字串、預設參數、log 欄位） | S6 ＋ [ADR-0017](../adr/0017-framework-vocabulary-boundary.md) |
 | 新增跨目錄的 import；想讓兩條 pipeline 共用一段程式 | S8（共用的東西往下搬，不橫向 import）＋ S3 ＋ [ADR-0030](../adr/0030-training-second-pass-honest-adapter-shared-scoring.md) 決定 14 |
-| 改 evaluation 的報表（主報表、比較報表），想讓它多顯示一個數字 | S9（先在計算 node 算好、落地，報表再讀） |
+| 改 evaluation 的報表（主報表、比較報表、預測品質報表），想讓它多顯示一個數字 | S9（先在計算 node 算好、落地，報表再讀） |
 | 新增 catalog 條目 | A1 ＋ F10 |
 | 想破例（寫檔、零輸出 node、`writes=`） | 節三——**要加一筆必須先問使用者** |
 | 覺得「測試綠了應該就沒問題」 | 每條約束底下的「**這個檢查看不到**」 |
@@ -450,7 +450,7 @@ S2 買到的是**結構**邊界——month_plans 不碰 Spark 型別，所以它
    前三種**是 #234 才寫得出來的**——在那之前 `hpo_resume` 在根層，沒有任何寫法能把它掛在 `steps` 底下。後兩種指的是套件而不是模組，本來就寫得出來（`steps/` 早就有 `hpo_scoring` 與 `local_cache`）。
 3. **`report/` 的每一種寫法也抓得到**——`test_the_scan_sees_every_spelling_of_a_report_import`：同樣五種寫法改指 `pipelines/evaluation/report/`，再加根層 `report/pages.py` 的相對 `from ..pipelines.evaluation.report import shell`；`nodes.py`、報表模組互相 import、根層 `recsys_tfb.report` 都不被報。這六種都是 evaluation 的報表搬進 `pipelines/evaluation/report/` 之後才寫得出來的：在那之前它們在根層 `evaluation/`，沒有任何寫法指得到某條 pipeline 的 `report`；只認 `steps` 的掃描對六種全部放行。
 
-附帶一條同源的檢查：`steps/`、`report/` 底下每一個 `__init__.py`（含 `report/sections/`、`report/comparison/` 這種子套件）**不得有任何 import、不得有 `__all__`**（`test_steps_packages_re_export_nothing`；它也確認 evaluation 的 `report/`、`report/sections/`、`report/comparison/` 三個 `__init__.py` 真的被掃到）。`nodes.py` 那行 import 之所以有資訊量，是因為它指名了 concern；一個 re-export 會把它抹掉——`from .steps import build_trial_params` 編得過，而讀者什麼也沒學到。
+附帶一條同源的檢查：`steps/`、`report/` 底下每一個 `__init__.py`（含 `report/sections/`、`report/comparison/`、`report/prediction_quality/` 這種子套件）**不得有任何 import、不得有 `__all__`**（`test_steps_packages_re_export_nothing`；它也確認 evaluation 的 `report/`、`report/sections/`、`report/comparison/`、`report/prediction_quality/` 四個 `__init__.py` 真的被掃到）。`nodes.py` 那行 import 之所以有資訊量，是因為它指名了 concern；一個 re-export 會把它抹掉——`from .steps import build_trial_params` 編得過，而讀者什麼也沒學到。
 
 ### 這個檢查看不到
 
@@ -768,7 +768,7 @@ src/recsys_tfb/evaluation/metrics_spark.py:221 in collapse_to_categories(): time
 
 報表模組只讀落地結果、組裝成畫面，不算任何東西（[ADR-0031](../adr/0031-evaluation-second-pass-layers-and-single-source.md) 原則 1）。所以報表模組只准 import 兩種 `recsys_tfb` 模組：別的報表模組，以及一份封閉的「可讀」清單。其他 `recsys_tfb` 模組都算計算模組。第三方套件裡，`pyspark` 也不准。
 
-- **報表模組**（被掃的）：`pipelines/evaluation/report/`（兩份報表的頁面外殼 `shell.py`、主報表 `main.py` 與各段 `sections/`、名次分布段的圖 `figures.py`、比較報表 `comparison/`）、根層 `report/`。
+- **報表模組**（被掃的）：`pipelines/evaluation/report/`（三份報表的頁面外殼 `shell.py`、主報表 `main.py` 與各段 `sections/`、名次分布段的圖 `figures.py`、比較報表 `comparison/`、`--prediction-quality` 模式的報表 `prediction_quality/`）、根層 `report/`。
 - **可讀清單**：`evaluation/result_readers.py`（讀落地結果的函式與鍵名）、`evaluation/metric_catalog.py`（指標目錄，只放資料）、`evaluation/segment_keys.py`、`core/schema.py`、`core/consistency.py`、`core/date_ranges.py`。
 
 兩份清單寫在測試檔的 `_REPORT_MODULES`、`_REPORT_MAY_ALSO_IMPORT`。報表要用一個新的數字，先在計算 node 裡算好、落地，報表再讀回來；不要把計算模組加進可讀清單。

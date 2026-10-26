@@ -55,9 +55,10 @@ changed ``compare_k`` must go. A reader not given it falls back on
 
 Settings outside ``evaluation`` and the ones left out
 =====================================================
-``schema`` and ``dataset.test_zero_positive_group_ratio`` are declared like
-any other. ``hive.db`` and ``_compare_source_tables`` only decide which table
-a ``model_version`` compare source is read off, so they reach the comparison
+``schema`` and the evaluated model's test ratio
+(``_dataset_test_zero_positive_group_ratio``) are declared like any other.
+``hive.db`` and ``_compare_source_tables`` only decide which table a
+``model_version`` compare source is read off, so they reach the comparison
 results through the source's identity
 (``compare_sources.compare_source_identity``), not through a declaration.
 ``evaluation.compare`` is left out on purpose: the CLI injects it per run, and
@@ -132,10 +133,13 @@ APPLIED_SETTINGS: dict[str, tuple[str, ...]] = {
         "schema", "evaluation.snap_date", "evaluation.item_categories",
         "evaluation.query_filter",
     ),
-    # post_training together with dataset.test_zero_positive_group_ratio
-    # decides the row weights.
+    # post_training decides the population and the row weights; the
+    # evaluated model's test ratio is landed with them and gates them (A64).
+    # The ratio is core.consistency.DATASET_TEST_RATIO_KEY, injected at the
+    # top level by the CLI like post_training (spelled out here: this module
+    # imports nothing from the project).
     "compute_prediction_quality": (
-        "schema", "post_training", "dataset.test_zero_positive_group_ratio",
+        "schema", "post_training", "_dataset_test_zero_positive_group_ratio",
         "evaluation.snap_date", "evaluation.prediction_quality",
     ),
     "compute_report_aggregates": (

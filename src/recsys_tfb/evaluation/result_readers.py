@@ -231,6 +231,34 @@ DISPLAY_BINS_KEY = "display_bins"
 #: non-empty fine bin), as a :func:`frame_to_json` long frame.
 THRESHOLD_SWEEP_KEY = "threshold_sweep"
 
+#: Key of ``prediction_quality.json`` beside ``build_payload``'s: which rows
+#: the numbers are on (ADR-0032 decisions 3-5), the page's opening lines.
+#: A dict of :data:`POPULATION_SOURCE_KEY`, :data:`POPULATION_DATES_KEY`,
+#: :data:`POPULATION_TEST_RATIO_KEY` and
+#: :data:`POPULATION_ZERO_POSITIVE_GROUPS_KEY`.
+PREDICTION_QUALITY_POPULATION_KEY = "population"
+
+#: Under :data:`PREDICTION_QUALITY_POPULATION_KEY`: the run mode the rows
+#: were evaluated in, :data:`POST_TRAINING_POPULATION` or
+#: :data:`MONITORING_POPULATION` — also the output directory's segment
+#: (``prediction_quality_population``, set by the CLI).
+POPULATION_SOURCE_KEY = "source"
+POST_TRAINING_POPULATION = "post_training"
+MONITORING_POPULATION = "monitoring"
+
+#: Under :data:`PREDICTION_QUALITY_POPULATION_KEY`: the evaluated dates, in
+#: configured order.
+POPULATION_DATES_KEY = "evaluated_dates"
+
+#: Under :data:`PREDICTION_QUALITY_POPULATION_KEY`: the evaluated model's
+#: test ratio r under ``--post-training``, ``None`` in monitoring mode.
+POPULATION_TEST_RATIO_KEY = "test_zero_positive_group_ratio"
+
+#: Under :data:`PREDICTION_QUALITY_POPULATION_KEY`: how many query groups
+#: holding no positive the evaluated rows hold under ``--post-training``
+#: (the ones the dataset kept), ``None`` in monitoring mode.
+POPULATION_ZERO_POSITIVE_GROUPS_KEY = "n_zero_positive_groups"
+
 
 # ---------------------------------------------------------------------------
 # Settings a report draws by

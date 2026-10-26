@@ -143,7 +143,9 @@ def build(model_version: str) -> dict:
             },
             # 沒有 inference 層：這份 conf 宣告了候選層級特徵表，離線推論在入口被 A47 擋下
             # （ADR-0026 決定 5），沒有 ranked_predictions 可記。
-            # metrics／baseline_metrics／prediction_quality／segment_columns／report_aggregates。
+            # metrics／baseline_metrics／segment_columns／report_aggregates，以及
+            # --prediction-quality 模式寫在子資料夾的
+            # prediction_quality/post_training/all/prediction_quality.json（鍵是相對路徑）。
             # manifest.json 不收：它是執行紀錄（created_at、run_id、git_commit），每次跑都不同，
             # 不是計算結果（2026-09-17 連跑兩次，61 個欄位只有它不同）
             "evaluation": {

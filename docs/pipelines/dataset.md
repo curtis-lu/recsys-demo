@@ -275,7 +275,7 @@ split 展開出不同的欄位集合（見 §3.4 與
 
 規則只有一條：**有正例的 query group 永遠全留；沒有正例的 query group 整組決定去留，留下比例 r。** 三個鍵都是 [0, 1] 的數字（不變量 A44 在 CLI 進入點擋下其他值，連 YAML 的 `null` 與 `true` 也擋）。預設值就是加鍵之前的行為，所以 `conf/base` 只以註解列出它們——寫成實鍵會翻對應的版本 ID，即使值等於預設。決定與理由見 [ADR-0025](../adr/0025-query-group-widened-by-occasion-role.md) 決定 3。
 
-為什麼要留：組內排序指標（mAP 等）算不了沒有正例的組，丟掉沒損失；但把每一列當成二元預測的指標（evaluation 的預測品質指標家族）對正例佔比很敏感，算在丟過的表上會系統性偏高。這類資料又大到不能全留，所以留一個比例、用權重補回去。
+為什麼要留：組內排序指標（mAP 等）算不了沒有正例的組，丟掉沒損失；但把每一列當成二元預測的指標（evaluation 的 `--prediction-quality` 模式）對正例佔比很敏感，算在丟過的表上會系統性偏高。這類資料又大到不能全留，所以留一個比例、用權重補回去。
 
 **怎麼決定去留。** 對 `query_group_columns` 做決定性雜湊分桶，桶號落在 r 以下的組留下。同 `random_seed`、同設定 → 同一批組。「這一組有沒有正例」看的是 **`label_table` 接上來的 label**，不是 `sample_pool` 自己帶的那欄：那欄是來源 SQL 抄的副本，框架不保證兩者一致，拿它判斷的話，一不一致就會把真正的正例連同整組刪掉。
 
@@ -297,7 +297,7 @@ split 展開出不同的欄位集合（見 §3.4 與
   ```
 
   r ＝ 0 印「none kept」，r ＝ 1 印「every group kept (not counted)」；計數只在 0 < r < 1 時做（多一次 Spark action）。evaluation 報表的「資料統計」段在 `--post-training` 且 test 的 r > 0 時，也會印出 test 的 r 與這次評估資料裡的無正例組數。
-- 權重欄一路帶到 training 的預測表 `training_eval_predictions`，evaluation 的預測品質指標家族拿它加權，而不是數列數。那張表在 catalog 是**明確列出欄位**的，沒宣告的欄會在寫入時被靜默丟掉，所以 test 的 r > 0 時 catalog 必須宣告 `{name: zero_positive_group_weight, type: DOUBLE}`（不變量 A45 在 training 的 CLI 進入點擋下）。⚠ 明確列出欄位的 Hive 表不會自動加欄：既有的 `training_eval_predictions` 表要先加上這一欄（或換一張新表）再跑 training。
+- 權重欄一路帶到 training 的預測表 `training_eval_predictions`，evaluation 的 `--prediction-quality --post-training` 拿它加權，而不是數列數。那張表在 catalog 是**明確列出欄位**的，沒宣告的欄會在寫入時被靜默丟掉，所以 test 的 r > 0 時 catalog 必須宣告 `{name: zero_positive_group_weight, type: DOUBLE}`（不變量 A45 在 training 的 CLI 進入點擋下）。⚠ 明確列出欄位的 Hive 表不會自動加欄：既有的 `training_eval_predictions` 表要先加上這一欄（或換一張新表）再跑 training。
 - 宣告了這一欄之後把 test 的 r 改回 0 也可以：training 照樣寫這一欄，值是 NULL（沒有設計權重可言）。evaluation 只在設定的 test r > 0 時才用權重，而且會先確認每一列都真的有權重——欄不存在、或有 NULL，代表被評估的模型（`--model-version` 或 `best`）是在不同的 test r 下建的，和目前的設定對不上，evaluation 會停下並說明，不會拿 NULL 去加權（那會把那些列丟掉）。
 - 欄名是框架自己的，**不得**與使用者提供的逐列訓練權重（#425）共用。特徵表裡有同名的特徵欄時，資料閘在 dataset 開頭就擋下（不變量 B12）；切片執行跳過資料閘時，組裝 val／test model input 那一步會因為兩欄同名而報錯（Spark 的 `Reference ... is ambiguous`），不會覆寫。
 - 與 `val_sample_ratio` 並用時權重仍然對：那是對 entity 均勻抽，有正例與無正例的組一視同仁，不改變 1 與 1／r 的相對比例。
@@ -307,9 +307,9 @@ split 展開出不同的欄位集合（見 §3.4 與
 **r > 0 時什麼不變、什麼會變。**
 
 - 不變：**固定整數 K** 的組內排序指標（evaluation 的 Spark 端與 HPO 的 numpy 端都在計算時跳過無正例的組），逐值相同。
-- 會變：算在過濾之前的量。item 種數（某些 item 可能只出現在無正例的組）、由它解析出來的 `"all"` 的 K 與報表上依 item 種數裁掉的 K、evaluation `dataset_overview` 的各項總數與比率（列數、正樣本率……）。這是表裡多了那些組的如實反映，**不是 regression**。注意 `dataset_overview` 的數字**沒有加權**：它描述的是 dataset 留下來的這張表，所以正樣本率這類比率會隨 r 改變，既不是 r ＝ 0 時的值、也不是全部曝光的值；要估全部曝光，看預測品質指標家族的加權數字。
+- 會變：算在過濾之前的量。item 種數（某些 item 可能只出現在無正例的組）、由它解析出來的 `"all"` 的 K 與報表上依 item 種數裁掉的 K、evaluation `dataset_overview` 的各項總數與比率（列數、正樣本率……）。這是表裡多了那些組的如實反映，**不是 regression**。注意 `dataset_overview` 的數字**沒有加權**：它描述的是 dataset 留下來的這張表，所以正樣本率這類比率會隨 r 改變，既不是 r ＝ 0 時的值、也不是全部曝光的值；要估全部曝光，看 `--prediction-quality --post-training` 的加權數字。
 
-**evaluation 那一側。** 開了預測品質指標家族（`evaluation.report.sections.prediction_quality: true`）又跑 `--post-training` 時，test 的 r 必須大於 0（不變量 A46 在 evaluation 的 CLI 進入點擋下）：r ＝ 0 的 test 表已經沒有無正例的組，二元指標會系統性偏高。監控模式不受影響——它把 label 用 LEFT JOIN 接到推論結果上，沒經過 dataset 的篩選。
+**evaluation 那一側。** 跑 `evaluation --post-training --prediction-quality` 時，被評模型建 dataset 時的 test r 必須大於 0（不變量 A64 在 evaluation 的 CLI 進入點擋下）：r ＝ 0 的 test 表已經沒有無正例的組，二元指標會系統性偏高。這個 r 是從被評模型的 dataset version manifest 讀的，不是今天設定檔的值（manifest 缺席或沒記這個鍵也當 0，訊息說的是「沒有記錄大於 0 的 r」）；打開的方法是設 r ＞ 0、重建 dataset、重訓。r ＝ 1 時 test 母體上的數字是精確值，0 ＜ r ＜ 1 是加權估計（[evaluation.md §3.7](evaluation.md#37-預測品質指標家族--prediction-quality-模式)）。不加 `--post-training` 的 `--prediction-quality` 不受影響——它把 label 用 LEFT JOIN 接到推論結果上，沒經過 dataset 的篩選。
 
 r 該設多少、生產規模下撐不撐得住，repo 裡的合成資料推不出來（生產的 entity 母體是百萬級），要在接近生產的量上實測。
 

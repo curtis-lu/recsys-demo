@@ -8,7 +8,8 @@ lands, for each result, exactly the declared blocks less a stated set the run
 cannot reach. C: each block B cannot reach is written by a minimal node call.
 D: the join of wiring, sections and declarations (``result_readers_table``).
 
-B runs the whole pipeline with the Runner, so it is an end-to-end test in
+B runs the whole pipeline with the Runner, then the ``--prediction-quality``
+mode on what it landed, so it is an end-to-end test in
 #530's sense. The seams cannot see it: each node's input must be what the node
 upstream really computed, and wiring node by node would redo the Runner.
 """
@@ -53,7 +54,9 @@ def test_the_declarations_cover_every_json_result_of_every_mode():
                  {"compare_source": _SOURCE},
                  {"compare_source": _SOURCE, "compare_only": True},
                  {"post_training": True, "baseline_rate": True,
-                  "compare_source": _SOURCE}):
+                  "compare_source": _SOURCE},
+                 {"prediction_quality": True},
+                 {"prediction_quality": True, "post_training": True}):
         landed |= _landed_names(**mode) & _JSON_ENTRIES
     assert set(RESULTS) == landed, (
         f"declared but never landed: {sorted(set(RESULTS) - landed)}; "
@@ -155,6 +158,12 @@ def _run_monitoring_with_compare(spark):
             if not catalog.exists(out):
                 catalog.add(out, MemoryDataset())
     Runner().run(pipeline, catalog)
+    # The --prediction-quality mode, on the partition the run just landed.
+    quality = create_pipeline(parameters=_PARAMS, prediction_quality=True)
+    quality = type(quality)([n for n in quality.nodes
+                             if n.name == "compute_prediction_quality"])
+    catalog.add("prediction_quality_metrics", MemoryDataset())
+    Runner().run(quality, catalog)
     return catalog
 
 
@@ -272,6 +281,16 @@ def test_the_table_joins_wiring_sections_and_declarations(table):
     assert "compute_metrics" in facts["reader_nodes"]
     assert ("evaluation_report", "data_stats", "data_stats") in \
         facts["reader_sections"]
+
+
+def test_the_prediction_quality_mode_is_listed_with_its_page(table):
+    quality = table["prediction_quality_metrics"]
+    assert quality["producers"] == ["compute_prediction_quality"]
+    assert quality["reader_nodes"] == ["generate_prediction_quality_report"]
+    assert {(report, section) for report, section, _switch
+            in quality["reader_sections"]} == {
+        ("prediction_quality_report", "population"),
+        ("prediction_quality_report", "score_bins")}
 
 
 def test_the_comparison_chain_is_listed_with_its_readers(table):

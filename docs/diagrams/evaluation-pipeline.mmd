@@ -86,8 +86,6 @@ flowchart TB
   d_metrics(["evaluation_metrics<br/><small>JSON</small>"])
   n_baseline["compute_baseline_metrics<br/><small>popularity baseline：近 lookback_months 的購買數當分數<br/>同一批列、跟模型同一套指標計算（含 macro）</small>"]
   d_baseline(["baseline_metrics<br/><small>JSON</small>"])
-  n_pq["compute_prediction_quality<br/><small>每一列候選當二元預測 ・ 一次 groupBy(item, 細箱) ・ 不排除無正例的 query group<br/>report.sections.prediction_quality: false（框架預設）時不在 pipeline 裡</small>"]
-  d_pq(["prediction_quality_metrics<br/><small>JSON</small>"])
   n_agg["compute_report_aggregates<br/><small>主報表名次分布段的 Spark 端聚合（bin 計數／quartile／rank 矩陣）</small>"]
   d_agg(["evaluation_report_aggregates<br/><small>JSON</small>"])
 
@@ -120,6 +118,14 @@ flowchart TB
     d_cdispk(["comparison_display_ks<br/><small>JSON</small>"])
     n_creport["generate_comparison_report<br/><small><b>純函式</b>：只讀落地的 JSON，不跑 Spark、不取差值、不截斷 K</small>"]
     o_creport(["evaluation_comparison_report　★ report_comparison.html"])
+  end
+
+  %% ---------------------- 全部候選列的指標模式（--prediction-quality） ----------------------
+  subgraph PQ[" --prediction-quality 只跑這兩個 node "]
+    n_pq["compute_prediction_quality<br/><small>每一列候選當二元預測 ・ 一次 groupBy(item, 細箱) ・ 不排除無正例的 query group<br/>先確認分區指紋是同一種原料，不是就停下並印出要先跑的指令</small>"]
+    d_pq(["prediction_quality_metrics<br/><small>JSON ・ prediction_quality.json</small>"])
+    n_pqreport["generate_prediction_quality_report<br/><small><b>純函式</b>：只讀落地的 JSON ・ 開頭寫原料、r 與留下的無正例組數</small>"]
+    o_pqreport(["prediction_quality_report　★ report.html<br/><small>data/evaluation/&lt;model_version&gt;/&lt;YYYYMMDD&gt;/prediction_quality/&lt;post_training 或 monitoring&gt;/all/</small>"])
   end
 
   %% ---------------------------- 邊 ------------------------------
@@ -158,6 +164,8 @@ flowchart TB
   n_agg --> d_agg
   o_enriched --> n_pq
   n_pq --> d_pq
+  d_pq --> n_pqreport
+  n_pqreport --> o_pqreport
 
   d_metrics --> n_cmpbase
   d_baseline --> n_cmpbase
@@ -170,7 +178,6 @@ flowchart TB
   d_metrics --> n_report
   d_baseline --> n_report
   d_agg --> n_report
-  d_pq --> n_report
   d_cmpbase --> n_report
   d_dispk --> n_report
   n_report --> o_report
@@ -208,8 +215,8 @@ flowchart TB
 
   class src_ranked,src_teval,src_label,src_seg src
   class cfg_cat cfg
-    class n_prep,n_rowfacts,n_metrics,n_baseline,n_pq,n_agg,n_cmpbase,n_dispk,n_report,n_validate,n_loadb,n_restrict,n_cmetrics,n_csource,n_cdispk,n_creport nd
+    class n_prep,n_rowfacts,n_metrics,n_baseline,n_pq,n_pqreport,n_agg,n_cmpbase,n_dispk,n_report,n_validate,n_loadb,n_restrict,n_cmetrics,n_csource,n_cdispk,n_creport nd
   class d_agg,d_rowfacts,d_metrics,d_baseline,d_pq,d_cmpbase,d_dispk data
   class d_braw,d_common mem
   class d_cover,d_cfa,d_cma,d_cfb,d_cmb,d_csource,d_cdispk data
-  class o_report,o_enriched,o_creport out
+  class o_report,o_enriched,o_creport,o_pqreport out

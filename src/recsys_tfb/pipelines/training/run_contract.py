@@ -47,7 +47,6 @@ from recsys_tfb.core.consistency import (
     hpo_enabled,
     missing_test_month_errors,
     optional_role_columns_declared_errors,
-    resolved_zero_positive_group_ratio,
     scoring_param_errors,
     skip_hpo_param_errors,
     training_algorithm_errors,
@@ -55,7 +54,7 @@ from recsys_tfb.core.consistency import (
 )
 from recsys_tfb.core.versioning import (
     compute_model_version,
-    read_manifest,
+    dataset_version_test_ratio,
     resolve_base_dataset_version,
     resolve_train_variant_id,
 )
@@ -149,27 +148,8 @@ def versions_for_run(
         base_dataset_version=base_v,
         train_variant_id=train_v,
         model_version=compute_model_version(params_training, base_v, train_v),
-        dataset_test_ratio=_dataset_version_test_ratio(base_dir),
+        dataset_test_ratio=dataset_version_test_ratio(base_dir),
     )
-
-
-def _dataset_version_test_ratio(base_dir: Path) -> float:
-    """The ``dataset.test_zero_positive_group_ratio`` a dataset version was
-    built with, as its manifest records it (the dataset command writes the
-    ``parameters_dataset`` it ran with there).
-
-    An absent key reads as the default 0, through the same resolver the
-    dataset nodes drew with: a version built before the key existed kept no
-    zero-positive test group. So does an absent manifest — every dataset run
-    writes one before it starts, so a directory without one was not built by
-    it, and nothing says its test kept those groups.
-    """
-    try:
-        manifest = read_manifest(base_dir)
-    except FileNotFoundError:
-        manifest = {}
-    return resolved_zero_positive_group_ratio(
-        manifest.get("parameters") or {}, "test")
 
 
 def dataset_version_verdict(

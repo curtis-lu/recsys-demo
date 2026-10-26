@@ -352,12 +352,22 @@ baseline_metrics:
   type: JSONDataset
   filepath: data/evaluation/${model_version}/${snap_date}/baseline_metrics.json
 
+# --prediction-quality 模式（ADR-0032）的兩個產物，放在這個模型與評估日期底下、依原料分開的
+# 資料夾：${prediction_quality_population} 是 post_training（帶 --post-training，讀 test
+# 母體）或 monitoring（上線後的 inference 母體），${prediction_quality_scope} 是範圍名
+# （目前只有 all）。兩者都由 CLI 每次 evaluation 設定。兩種原料的結果不會互蓋。
 # compute_prediction_quality 的輸出（ADR-0024）：分數分箱表（整體＋列數最多的 top_n 個
-# item）與從它算出的 pr_auc／roc_auc／F1 最佳門檻。帶 config_fingerprint；
-# report.sections.prediction_quality: false（框架預設）時是 {"enabled": false} stub。
+# item）與從它算出的 pr_auc／roc_auc／F1 最佳門檻，加上母體（原料、r、留下的無正例 query
+# group 數）。帶 config_fingerprint。
 prediction_quality_metrics:
   type: JSONDataset
-  filepath: data/evaluation/${model_version}/${snap_date}/prediction_quality.json
+  filepath: data/evaluation/${model_version}/${snap_date}/prediction_quality/${prediction_quality_population}/${prediction_quality_scope}/prediction_quality.json
+
+# generate_prediction_quality_report 的輸出：上一條畫成的一頁（開頭寫母體，本體是分箱表、
+# 門檻掃描、AUC）。只讀上一條，--only-node generate_prediction_quality_report 不跑 Spark。
+prediction_quality_report:
+  type: TextDataset
+  filepath: data/evaluation/${model_version}/${snap_date}/prediction_quality/${prediction_quality_population}/${prediction_quality_scope}/report.html
 
 # compare_to_baseline 的輸出（#536，ADR-0031 決定 4、5）：比較層的第一對——模型對熱門度
 # baseline，照名字與粒度 join，每格是這次、對照、差（差＝這次 − 對照，兩邊都有才算），
@@ -424,7 +434,7 @@ comparison_display_ks:
 # 主報表名次分布段的 Spark 聚合（Plan 1.5 從 generate_report 拆出）。
 # 落地的理由不只是快取：generate_report 因此是純函式。它的輸入除了 parameters 都是
 # 落地 JSON（本條、evaluation_row_facts、evaluation_metrics、baseline_metrics、
-# prediction_quality_metrics、baseline_comparison、evaluation_display_ks），
+# baseline_comparison、evaluation_display_ks），
 # 所以 --only-node generate_report 不重算任何指標就能重繪主報表（ADR-0018 決定 2；
 # 補跑集合釘在 tests/test_pipelines/test_resume_contracts.py）。
 evaluation_report_aggregates:

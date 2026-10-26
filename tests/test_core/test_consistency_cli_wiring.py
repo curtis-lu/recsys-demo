@@ -118,7 +118,7 @@ def test_a12_a13_wired_into_evaluation_command_before_spark():
     # before it). Source inspection for the same reason as A22 above.
     src = inspect.getsource(m.evaluation)
     spark = src.index("get_or_create_spark_session(")
-    assert src.index("compare_mutual_exclusive_errors(") < spark, (
+    assert src.index("evaluation_mode_flag_errors(") < spark, (
         "A13 must fail before the Spark cold start, like A22"
     )
     assert src.index("compare_source_key_exists(") < spark, (
@@ -532,7 +532,8 @@ def _run_evaluation_command(monkeypatch, tmp_path, evaluation_extra):
         spark_mod, "get_or_create_spark_session", lambda *a, **k: None)
     m.evaluation(
         env="local", model_version=None, post_training=False,
-        compare=None, compare_only=None, rebuild_dates=None,
+        compare=None, compare_only=None, prediction_quality=False,
+        rebuild_dates=None,
         from_node=None, only_node=None, dry_run=False, list_nodes=False,
     )
     return bool(reached)
@@ -647,17 +648,26 @@ def test_a51_wired_into_evaluation_command_before_spark():
     ), "A51 must fail before the Spark cold start, like A22"
 
 
-def test_a46_wired_into_evaluation_command_before_spark():
-    # Needs --post-training (A22/A40's reason); the flag must be forwarded, not
-    # hardcoded — `False` would disable the gate and `True` would block
-    # monitoring runs that nothing upstream filtered.
+def test_a64_wired_after_the_model_s_dataset_version_and_before_spark():
+    # A64 reads the evaluated model's r, which only the dataset version the
+    # model's manifest names can say, so it runs after that is resolved; and
+    # before the Spark cold start, like A22. The flags must be forwarded, not
+    # hardcoded. Source inspection, for A22's reason; the behavioural half
+    # is test_cli.py's TestPredictionQualityTestRatioA64.
     from recsys_tfb.core.consistency import validate_config_consistency
 
-    assert "prediction_quality_population_errors" not in inspect.getsource(
-        validate_config_consistency
-    )
+    assert "prediction_quality_test_ratio_errors" not in inspect.getsource(
+        validate_config_consistency)
     src = inspect.getsource(m.evaluation)
-    assert "prediction_quality_population_errors(params, post_training)" in src
-    assert src.index("prediction_quality_population_errors(") < src.index(
-        "get_or_create_spark_session("
-    ), "A46 must fail before the Spark cold start, like A22"
+    assert ("prediction_quality=prediction_quality, post_training=post_training,"
+            "\n        dataset_test_ratio=dataset_test_ratio") in src
+    call = src.index("prediction_quality_test_ratio_errors(")
+    assert src.index("_dataset_versions_from_model_manifest(") < call
+    assert call < src.index("get_or_create_spark_session("), (
+        "A64 must fail before the Spark cold start, like A22")
+
+
+def test_a13_is_handed_the_prediction_quality_flag():
+    src = inspect.getsource(m.evaluation)
+    assert ("evaluation_mode_flag_errors(\n        compare, compare_only, "
+            "prediction_quality=prediction_quality)") in src

@@ -4,7 +4,7 @@ import pytest
 from recsys_tfb.core.consistency import (
     ConfigConsistencyError,
     DataConsistencyError,
-    compare_mutual_exclusive_errors,
+    evaluation_mode_flag_errors,
 )
 from recsys_tfb.pipelines.evaluation.pipeline import create_pipeline
 
@@ -47,7 +47,7 @@ def test_compare_only_mode_skips_compute_nodes():
 
 
 def test_a13_compare_and_compare_only_mutually_exclusive():
-    errs = compare_mutual_exclusive_errors("x", "y")
+    errs = evaluation_mode_flag_errors("x", "y")
     assert errs and "mutually exclusive" in errs[0].lower()
 
 

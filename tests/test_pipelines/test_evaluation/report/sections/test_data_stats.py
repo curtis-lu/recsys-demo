@@ -223,6 +223,20 @@ def test_nothing_is_said_when_no_zero_positive_group_was_kept(ratio,
     assert "test_zero_positive_group_ratio" not in text
 
 
+def test_the_ratio_said_is_the_evaluated_model_s_not_today_s_conf():
+    """ADR-0032 decision 4: r is what the evaluated model's dataset version was
+    built with (the CLI's ``DATASET_TEST_RATIO_KEY``), not today's conf."""
+    from recsys_tfb.core.consistency import DATASET_TEST_RATIO_KEY
+    from recsys_tfb.pipelines.evaluation.report.sections.shared import (
+        zero_positive_draw_on_test,
+    )
+
+    params = rbt._kept_params(0.0)
+    params[DATASET_TEST_RATIO_KEY] = 0.2
+    assert zero_positive_draw_on_test(params) == 0.2
+    assert "r＝0.2" in _description(_build(rbt._row_facts(), params))
+
+
 def test_the_legacy_overview_is_refused():
     """#327: an overview with the old key names raises, naming the
     migration script, rather than drawing blanks."""

@@ -96,7 +96,7 @@ prec_at_pos = cumsum(label) / pos  <span class="m"># 到此名次的精確率</s
   <tr><td>核心概念</td><td>query group 的定義、AP 公式與總量表（全資料的總量只在這一段印）</td></tr>
   <tr><td>資料統計</td><td>正例在各期、各 item、各分群、各大類的分布（<code>compute_dataset_overview</code> 的切片計數）</td></tr>
   <tr><td>排序指標</td><td>mAP / precision@K / recall@K 的整體與各分群，以及各 item 的 map_attr@K / recall@K；一個指標一張表，列是切片、欄是 K。分群依 <code>segment_columns</code>（欄從該模式的母體表或 <code>segment_sources</code> 覆寫表 join 進來；母體表沒有這欄時該欄不分群、資料統計段註明，見 <a href="../pipelines/evaluation.md">evaluation.md</a> §3.2）</td></tr>
-  <tr><td>預測品質（選用，框架預設關）</td><td>把每一列候選當一次二元預測、照分數分箱：precision／recall／F1、<code>pr_auc</code>、<code>roc_auc</code>、分箱表（每格平均分數 vs 實際正例率），整體＋per-item。母體與上面各段不同（不排除沒有正例的 query group），precision 不可互相比較；<code>pr_auc</code> 是分箱後的值，不等於在原始分數上算的 average precision。定義與限制見 <a href="../pipelines/evaluation.md">evaluation.md</a> §3.7</td></tr>
+  <tr><td>預測品質（獨立的 <code>--prediction-quality</code> 模式，不在主報表）</td><td>把每一列候選當一次二元預測、照分數分箱：precision／recall／F1、<code>pr_auc</code>、<code>roc_auc</code>、分箱表（每格平均分數 vs 實際正例率），整體＋per-item。母體與上面各段不同（不排除沒有正例的 query group），precision 不可互相比較；<code>pr_auc</code> 是分箱後的值，不等於在原始分數上算的 average precision。母體是全部候選列，上線後母體是精確值，<code>--post-training</code> 讀的 test 表在 r &lt; 1 時是加權估計。定義與限制見 <a href="../pipelines/evaluation.md">evaluation.md</a> §3.7</td></tr>
   <tr><td>名次分布</td><td>各 item 的分數分布、名次熱圖與正例位置</td></tr>
   <tr><td>熱門度基準</td><td>模型與 popularity baseline 並列，每個 K 三欄：這次、對照、差</td></tr>
   <tr><td>完整性檢查</td><td>這次量了什麼、什麼沒量到</td></tr>

@@ -23,7 +23,10 @@ from __future__ import annotations
 
 import copy
 
-from recsys_tfb.core.consistency import ZERO_POSITIVE_GROUP_WEIGHT_COL
+from recsys_tfb.core.consistency import (
+    DATASET_TEST_RATIO_KEY,
+    ZERO_POSITIVE_GROUP_WEIGHT_COL,
+)
 
 ITEMS = ("A", "B", "C", "D")
 
@@ -99,7 +102,7 @@ def params(*, min_positives: int = 0, segments: tuple = (SEGMENT_COL,),
     if post_training is not None:
         p["post_training"] = post_training
     if ratio is not None:
-        p["dataset"] = {"test_zero_positive_group_ratio": ratio}
+        p[DATASET_TEST_RATIO_KEY] = ratio
     return p
 
 
@@ -184,8 +187,7 @@ def _compute(spark, p: dict, *, unmatched: bool = False,
     from recsys_tfb.evaluation.result_readers import drop_all_positive_groups
     from recsys_tfb.pipelines.evaluation.nodes import resolve_display_ks
 
-    weighted = bool(p.get("post_training") and (p.get("dataset") or {}).get(
-        "test_zero_positive_group_ratio"))
+    weighted = bool(p.get("post_training") and p.get(DATASET_TEST_RATIO_KEY))
     frame = _frame(spark, weighted=weighted, unmatched=unmatched,
                    filtered=filtered, all_positive=all_positive,
                    event="event" in p["schema"]["columns"])
@@ -208,7 +210,10 @@ def _compute(spark, p: dict, *, unmatched: bool = False,
     quality = {**build_payload(
         binned, item_col="prod_name", score_col="score", label_col="label",
         weight_col=weight_col, n_bins=pq_cfg["n_bins"],
-        n_display_bins=pq_cfg["n_display_bins"], top_n=pq_cfg["top_n"])}
+        n_display_bins=pq_cfg["n_display_bins"], top_n=pq_cfg["top_n"]),
+        # What compute_prediction_quality adds: the one group without a
+        # positive (C3, unless ``filtered``) is the kept one.
+        "population": _population(p, facts)}
     display_ks = resolve_display_ks(_stamped(metrics, p), p)
     return {
         "evaluation_row_facts": facts,
@@ -217,6 +222,18 @@ def _compute(spark, p: dict, *, unmatched: bool = False,
         "prediction_quality_metrics": quality,
         "evaluation_display_ks": display_ks,
     }, p
+
+
+def _population(p: dict, facts: dict) -> dict:
+    # The settings name no date: the page's metadata cell reads none.
+    dates = []
+    if not p.get("post_training"):
+        return {"source": "monitoring", "evaluated_dates": dates,
+                "test_zero_positive_group_ratio": None,
+                "n_zero_positive_groups": None}
+    return {"source": "post_training", "evaluated_dates": dates,
+            "test_zero_positive_group_ratio": p.get(DATASET_TEST_RATIO_KEY),
+            "n_zero_positive_groups": facts["n_excluded_queries"]}
 
 
 def empty_quality(spark) -> dict:
@@ -236,4 +253,6 @@ def empty_quality(spark) -> dict:
     return {**build_payload(
         binned, item_col="prod_name", score_col="score", label_col="label",
         weight_col=None, n_bins=20, n_display_bins=5, top_n=3),
-        "enabled": True}
+        "population": {"source": "monitoring", "evaluated_dates": [],
+                       "test_zero_positive_group_ratio": None,
+                       "n_zero_positive_groups": None}}

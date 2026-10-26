@@ -162,6 +162,10 @@ def test_static_coverage_floor():
     """
     total = sum(1 for _ in _node_calls())
     judgeable = sum(1 for _ in _judgeable_nodes())
+    # 61/59: evaluation's `compute_prediction_quality` Node is one literal
+    # call in the --prediction-quality mode's function, beside that mode's
+    # `generate_prediction_quality_report`, a literal, statically judgeable
+    # call.
     # 60/58: #538 made evaluation's `generate_report` call dynamic (its
     # inputs are what the switched-on sections read, a computed dict) and
     # wrote `resolve_display_ks` as two literal calls (with and without the
@@ -207,7 +211,7 @@ def test_static_coverage_floor():
     # of the two `validate_model_input_grain` calls (the branch existed only
     # to append the calibration pair to its input list). All three were
     # literal, so total and judgeable both drop by 3.
-    assert (total, judgeable) == (60, 58), (
+    assert (total, judgeable) == (61, 59), (
         f"Node coverage changed: {judgeable}/{total} statically judgeable. "
         "If this dropped, A5/A6 now have a bigger blind spot -- check why."
     )
@@ -864,7 +868,8 @@ class TestS3StepsPackagesStayInternal:
             [*PIPELINES.glob("*/steps/**/__init__.py"),
              *PIPELINES.glob("*/report/**/__init__.py")])
         report = PIPELINES / "evaluation" / "report"
-        for package in (report, report / "sections", report / "comparison"):
+        for package in (report, report / "sections", report / "comparison",
+                        report / "prediction_quality"):
             assert package / "__init__.py" in inits, (
                 f"{package.relative_to(PIPELINES)} was not scanned"
             )

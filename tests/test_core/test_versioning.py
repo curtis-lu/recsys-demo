@@ -524,6 +524,35 @@ class TestReadManifest:
             read_manifest(tmp_path / "nonexistent")
 
 
+class TestDatasetVersionTestRatio:
+    """The test ratio a dataset version was built with, off its manifest:
+    what training's A54 and evaluation's A64 read instead of today's conf."""
+
+    @staticmethod
+    def _version(tmp_path, manifest=None):
+        base_dir = tmp_path / "b1111111"
+        base_dir.mkdir()
+        if manifest is not None:
+            (base_dir / "manifest.json").write_text(json.dumps(manifest))
+        return base_dir
+
+    def test_reads_the_ratio_the_manifest_records(self, tmp_path):
+        from recsys_tfb.core.versioning import dataset_version_test_ratio
+
+        base_dir = self._version(tmp_path, {"parameters": {"dataset": {
+            "test_zero_positive_group_ratio": 0.2}}})
+        assert dataset_version_test_ratio(base_dir) == 0.2
+
+    def test_an_absent_key_or_manifest_reads_as_the_default(self, tmp_path):
+        from recsys_tfb.core.versioning import dataset_version_test_ratio
+
+        assert dataset_version_test_ratio(self._version(tmp_path)) == 0.0
+        other = tmp_path / "other"
+        other.mkdir()
+        (other / "manifest.json").write_text(json.dumps({"parameters": {}}))
+        assert dataset_version_test_ratio(other) == 0.0
+
+
 class TestUpdateSymlink:
     def test_create_new_symlink(self, tmp_path):
         target = tmp_path / "v1"

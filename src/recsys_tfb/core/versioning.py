@@ -103,6 +103,8 @@ from pathlib import Path
 
 import yaml
 
+from recsys_tfb.core.consistency import resolved_zero_positive_group_ratio
+
 logger = logging.getLogger(__name__)
 
 
@@ -375,6 +377,24 @@ def read_manifest(version_dir: Path) -> dict:
     manifest_path = version_dir / "manifest.json"
     with open(manifest_path) as f:
         return json.load(f)
+
+
+def dataset_version_test_ratio(base_dir: Path) -> float:
+    """The ``dataset.test_zero_positive_group_ratio`` a dataset version was
+    built with, as its manifest records it (the dataset command writes the
+    ``parameters_dataset`` it ran with there). Today's conf can differ.
+
+    An absent key reads as the default 0, through the same resolver the
+    dataset nodes drew with: a version built before the key existed kept no
+    zero-positive test group. So does an absent manifest: nothing records
+    that its test kept those groups.
+    """
+    try:
+        manifest = read_manifest(base_dir)
+    except FileNotFoundError:
+        manifest = {}
+    return resolved_zero_positive_group_ratio(
+        manifest.get("parameters") or {}, "test")
 
 
 def update_symlink(target: Path, link: Path) -> None:

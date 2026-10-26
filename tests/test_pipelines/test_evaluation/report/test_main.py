@@ -17,8 +17,7 @@ from recsys_tfb.pipelines.evaluation.report.sections import (
 
 #: The results ``generate_report`` hands the report, by catalog name.
 _RESULT_NAMES = ("evaluation_row_facts", "evaluation_metrics",
-                 "baseline_metrics", "evaluation_report_aggregates",
-                 "prediction_quality_metrics")
+                 "baseline_metrics", "evaluation_report_aggregates")
 
 #: The two results the nodes between the metrics and the report land off
 #: them (#536): the comparison with the baseline and the K cut.
@@ -27,8 +26,7 @@ _LANDED_OFF_THEM = ("baseline_comparison", "evaluation_display_ks")
 
 def _results(**by_name) -> dict:
     """The report's input bundle, fed by name; a result not given is ``None``
-    (what a caller passing no baseline / aggregates / prediction quality
-    hands over). The row facts default to ``_row_facts()``: a test that
+    (what a caller passing no baseline / aggregates hands over). The row facts default to ``_row_facts()``: a test that
     changes a row fact (scale, group counts, segments, category) passes its
     own. The comparison and the K cut are left out unless given: they depend
     on the settings, so :func:`_draw` / :func:`_assemble` land them when the
@@ -120,8 +118,7 @@ def _draw(section, results: dict, parameters: dict):
 
 #: The results only one switched section reads, and its switch.
 _SWITCH_OF = {"baseline_metrics": "popularity_baseline",
-              "evaluation_report_aggregates": "rank_distribution",
-              "prediction_quality_metrics": "prediction_quality"}
+              "evaluation_report_aggregates": "rank_distribution"}
 
 
 def _as_the_pipeline_wires(results: dict, parameters: dict) -> dict:
@@ -502,22 +499,6 @@ class TestPreLandedReadsRefused:
         assert repr(key) in msg
         assert "--from-node compute_row_facts" in msg
 
-    @pytest.mark.parametrize("block, key", [
-        ("overall", "display_bins"), ("overall", "threshold_sweep"),
-        ("per_item", "display_bins")])
-    def test_prediction_quality_without_its_display_tables_is_refused(
-            self, block, key):
-        pq = _pq_payload()
-        del pq[block][key]
-        with pytest.raises(ValueError) as exc:
-            _assemble(_results(evaluation_metrics=_metrics(),
-                                        prediction_quality_metrics=pq),
-                               _params())
-        msg = str(exc.value)
-        assert "prediction_quality_metrics" in msg
-        assert f"{block}.{key}" in msg
-        assert "--from-node compute_row_facts" in msg
-
     def test_a_baseline_without_its_window_is_refused(self):
         base = _baseline_metrics_full()
         del base["popularity_window"]
@@ -550,8 +531,7 @@ def test_a_switched_off_section_is_not_on_the_page():
 
     every = _results(evaluation_metrics=_metrics(),
                      baseline_metrics=_baseline_metrics_full(),
-                     evaluation_report_aggregates=_report_aggregates(),
-                     prediction_quality_metrics=_pq_payload())
+                     evaluation_report_aggregates=_report_aggregates())
     switched = [s for s in rb.SECTIONS if s.SWITCH is not None]
     assert {s.SWITCH for s in switched} == EVALUATION_REPORT_SECTIONS
     for section in switched:
@@ -570,8 +550,7 @@ def test_assemble_report_spine_order():
     glossary is gone."""
     html = _assemble(_results(evaluation_metrics=_metrics(),
                               baseline_metrics=_baseline_metrics_full(),
-                              evaluation_report_aggregates=_report_aggregates(),
-                              prediction_quality_metrics=_pq_payload()),
+                              evaluation_report_aggregates=_report_aggregates()),
                      _params())
     ids = _section_ids(html)
     assert len(ids) == len(rb.SECTIONS)
@@ -802,13 +781,14 @@ def _metrics_with_recorded_all_k():
 
 
 
-# ---- 預測品質段（#381，ADR-0024）----
+# ---- 預測品質（#381，ADR-0024；ADR-0032 起是 --prediction-quality 那一頁）----
 
 def _pq_payload(listed=("A",), n_items=2):
     """A ``prediction_quality_metrics`` payload as ``build_payload`` lands it,
-    built from the worked-example bins of ``test_prediction_quality.py``:
-    4 fine bins over [0, 1) (width 0.25), 2 display bins, item A holding
-    every row."""
+    built from the worked-example bins of
+    ``tests/test_evaluation/test_prediction_quality.py``: 4 fine bins over
+    [0, 1) (width 0.25), 2 display bins, item A holding every row; the
+    population block of a monitoring run."""
     from recsys_tfb.evaluation.prediction_quality import build_payload
 
     bins = pd.DataFrame({"bin": [0, 1, 3], "n": [4, 2, 2],
@@ -826,7 +806,10 @@ def _pq_payload(listed=("A",), n_items=2):
         aggregated, item_col="prod_name", score_col="score",
         label_col="label", weight_col=None, n_bins=4, n_display_bins=2,
         top_n=len(listed))
-    return {**payload, "enabled": True}
+    return {**payload, "population": {
+        "source": "monitoring", "evaluated_dates": ["2026-01-31"],
+        "test_zero_positive_group_ratio": None,
+        "n_zero_positive_groups": None}}
 
 
 def _pq_params(post_training=None):
@@ -836,20 +819,31 @@ def _pq_params(post_training=None):
     return p
 
 
-def test_assemble_report_places_prediction_quality_after_the_metrics_section():
-    html = _assemble(_results(evaluation_metrics=_metrics(), prediction_quality_metrics=_pq_payload()), _params())
-    assert html.index("排序指標") < html.index("預測品質")
-    assert html.index("預測品質") < html.index("完整性檢查")
-    # The report's own guard word (test_assemble_report_has_no_reconciliation
-    # _section) stays out even with this section drawn.
-    assert "對帳" not in html
+def test_the_main_report_has_no_prediction_quality_section():
+    """ADR-0032 decision 2: the every-candidate-row family is the
+    ``--prediction-quality`` mode's page; the main report keeps the ranking
+    metrics only, whatever the conf switches on."""
+    from recsys_tfb.core.consistency import EVALUATION_REPORT_SECTIONS
+
+    assert "prediction_quality" not in EVALUATION_REPORT_SECTIONS
+    assert not [s for s in rb.SECTIONS
+                if "prediction_quality" in s.__name__
+                or "prediction_quality_metrics" in s.READS]
+    html = _assemble(_results(evaluation_metrics=_metrics(),
+                              baseline_metrics=_baseline_metrics_full(),
+                              evaluation_report_aggregates=_report_aggregates()),
+                     _params())
+    assert "預測品質" not in html and "s-prediction_quality" not in html
 
 
 # --- ADR-0025 decision 3: the kept zero-positive groups, where they show -----
 
 def _kept_params(ratio, post_training=True):
+    """``ratio`` is the evaluated model's r, as the CLI hands it on."""
+    from recsys_tfb.core.consistency import DATASET_TEST_RATIO_KEY
+
     p = _pq_params(post_training=post_training)
-    p["dataset"] = {"test_zero_positive_group_ratio": ratio}
+    p[DATASET_TEST_RATIO_KEY] = ratio
     return p
 
 
@@ -949,7 +943,9 @@ def _ap_params(drop=None, *, occasion=False, event=False, post_training=None,
     if post_training is not None:
         p["post_training"] = post_training
     if ratio is not None:
-        p["dataset"] = {"test_zero_positive_group_ratio": ratio}
+        from recsys_tfb.core.consistency import DATASET_TEST_RATIO_KEY
+
+        p[DATASET_TEST_RATIO_KEY] = ratio
     return p
 
 

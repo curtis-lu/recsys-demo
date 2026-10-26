@@ -15,6 +15,7 @@ from recsys_tfb.evaluation.result_readers import (
     N_WITH_POSITIVE_KEY,
     POPULARITY_WINDOW_KEY,
     POPULATION_KEY,
+    PREDICTION_QUALITY_POPULATION_KEY,
     WIDEST_GROUP_KEY,
 )
 from recsys_tfb.pipelines.evaluation.steps.compare_sources import COMPARE_SOURCE_KEY
@@ -144,6 +145,9 @@ _PRODUCES_PREDICTION_QUALITY = Produces("prediction_quality_metrics", (
           "totals（每個 item 的列數與正例數）、summary（每個列出 item 的摘要）、"
           "bins（細箱表）、display_bins（顯示箱表）。",
           "每個列出的 item 一格，加每個分數區間"),
+    Block(PREDICTION_QUALITY_POPULATION_KEY,
+          "這些數字在哪些列上算：原料（post_training 或 monitoring）、評估日期；--post-training 時另有被評模型的 r 與列裡的無正例 query group 數，監控模式兩者為 None。",
+          "整次執行一份"),
     _FINGERPRINT_BLOCK,
 ))
 

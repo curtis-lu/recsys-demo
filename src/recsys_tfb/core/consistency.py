@@ -96,8 +96,12 @@ Layer 1 — config-static (implemented here; aggregated by
 * A12 — ``--compare X`` / ``--compare-only X`` resolves to a key in
   ``compare_sources``. Predicate: ``compare_source_key_exists`` (raises
   ``ConfigConsistencyError`` directly; not aggregated by validate).
-* A13 — ``--compare`` and ``--compare-only`` are mutually exclusive (only
-  one or neither). Predicate: ``compare_mutual_exclusive_errors``.
+* A13 — ``--compare``, ``--compare-only`` and ``--prediction-quality`` are
+  mutually exclusive (at most one). ``--prediction-quality`` with a compare
+  flag would put two populations side by side: the other side carries no
+  zero-positive group weight and its common population is narrowed by this
+  side's (ADR-0032 decision 6). Predicate:
+  ``evaluation_mode_flag_errors``.
 * A14 — ``schema.item`` appears in ``training.feature_selection.exclude``.
   Training-stage feature selection must never drop the item column (for a
   ranking task the item must stay a model feature; mirrors A2/A7). Predicate:
@@ -336,9 +340,8 @@ Layer 1 — config-static (implemented here; aggregated by
   reads that no conf declares is a switch with no line to flip it
   (``diagnosis_links``, on by default, until #532 removed it). Containment in
   one direction passes one of the two. For each missing switch the refusal
-  names the value that keeps what leaving it out does: ``true``, except the
-  ones in ``EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT``
-  (``prediction_quality``). Each declared value must be a YAML bool (#505):
+  names the value that keeps what leaving it out does: ``true``, the value
+  every absent switch takes. Each declared value must be a YAML bool (#505):
   every reader takes the switch by truthiness, so a quoted ``"false"`` reads
   as on. The equality alone catches a renamed switch: the old name is
   declared and not read, the new one read and not declared (``diagnostics``
@@ -347,10 +350,13 @@ Layer 1 — config-static (implemented here; aggregated by
   ``data_stats``, ``primary_map`` → ``ranking_metrics``,
   ``per_item_breakdown`` → ``rank_distribution``, ``baseline`` →
   ``popularity_baseline``); a conf spelling an old one is told its new name
-  in one message instead of two it must pair up. That part is
-  **migration-period**, on #524's retirement list with A33/A60/A63: once the
-  company environment's conf spells the new names, delete the constant and
-  its branch; the equality stays.
+  in one message instead of two it must pair up. ADR-0032 decision 2 moved
+  the ``prediction_quality`` section out of the main report into the
+  ``--prediction-quality`` mode (``MOVED_REPORT_SECTIONS``); a conf still
+  spelling its switch, whatever the value, is told the flag in one message.
+  Both parts are **migration-period**, retired with A33/A60/A63: once the
+  company environment's conf spells the new names and no longer the moved one, delete the two constants and their branches; the
+  equality stays.
   The constant lives in ``core/`` because ``core/`` must not import the
   report layer. A ``sections`` block that declares no switch (absent, null or
   empty) is not checked, a visible opt-out to every default; once any switch
@@ -511,9 +517,9 @@ Layer 1 — config-static (implemented here; aggregated by
 * A42 — ``evaluation.prediction_quality`` parameter domains (ADR-0024):
   ``n_bins`` and ``n_display_bins`` are ints >= 1 and the second divides the
   first (every display bin merges the same number of fine bins); ``top_n`` is
-  an int >= 0; no other key (the on/off switch is
-  ``evaluation.report.sections.prediction_quality``, so an ``enabled`` here
-  would switch nothing). Defaults: ``PREDICTION_QUALITY_DEFAULTS``. Predicate:
+  an int >= 0; no other key (the family runs as the ``--prediction-quality``
+  mode, so an ``enabled`` here would switch nothing). Defaults:
+  ``PREDICTION_QUALITY_DEFAULTS``. Predicate:
   ``prediction_quality_param_errors`` (returns errors; the evaluation command
   raises, collected with A22/A34). NOT aggregated, for A34's reason.
 * A43 — a conf still spelling ``evaluation.report.diagnostics.include_calibration``
@@ -547,20 +553,13 @@ Layer 1 — config-static (implemented here; aggregated by
   backstop on training's test scoring: the binary-prediction passes in
   ``evaluation/metrics_spark.py`` raise on a missing column or a NULL weight
   rather than count each row once.
-* A46 — ``evaluation.report.sections.prediction_quality`` on under
-  ``--post-training`` while ``dataset.test_zero_positive_group_ratio`` is 0 (its
-  default). That table is the test table scored, and the dataset pipeline
-  dropped every test query group holding no positive before anything scored
-  it, so the family — every row a binary prediction — comes out biased high
-  and its "every row" population note is false. ADR-0024 decision 3's "before
-  the filter" only reaches the filter inside evaluation; this is the one
-  upstream of it. Monitoring mode is unaffected: nothing upstream filtered its
-  rows. Predicate: ``prediction_quality_population_errors`` (returns errors;
-  the evaluation command raises, collected with A22/A34/A42/A43). The switch
-  is read by ``prediction_quality_on`` (``report_section_on``), the one
-  reading the report and the evaluation pipeline's requirement list use to
-  decide whether the family is drawn and computed. NOT aggregated, for A22's reason: that gate cannot see
-  ``--post-training``.
+* A46 — retired 2026-10-26 with the main report's prediction-quality section
+  (ADR-0032 decision 2): it refused that section under ``--post-training``
+  at today's conf's ``dataset.test_zero_positive_group_ratio`` 0. The
+  family is the ``--prediction-quality`` mode now, and A64 checks the
+  evaluated model's ratio instead. The code is NOT renumbered: existing docs
+  and plans cite invariants by number, so reusing A46 or shifting A47+ would
+  silently repoint those references.
 * A47 — offline inference with a candidate-level feature table declared
   (catalog entry ``candidate_feature_table``, ADR-0026). The inference pipeline
   reads ``feature_table`` alone, while a model trained under this
@@ -581,11 +580,11 @@ Layer 1 — config-static (implemented here; aggregated by
   objectives score every val row as a binary prediction, and at 0 the dataset
   pipeline dropped every val query group holding no positive, so average
   precision would be computed on a population filtered by the label it
-  scores — A46's reason, on val instead of test. A ratio A44 rejects is left
+  scores — A64's reason, on val instead of test. A ratio A44 rejects is left
   to A44. Not raised while ``training.hpo_enabled`` is ``false``: the search
   is skipped and val is neither copied nor read (ADR-0030 decision 11).
   Predicate: ``hpo_objective_population_errors``. Aggregated by
-  ``validate_config_consistency``, unlike A46: the ratio takes effect in the
+  ``validate_config_consistency``, unlike A64: the ratio takes effect in the
   dataset pipeline, so the dataset command has to stop too.
 * A49 — ``evaluation.query_filter.drop_all_positive_groups`` (#376, the
   all-positive query group filter) must be a ``bool`` when present; the block
@@ -596,7 +595,7 @@ Layer 1 — config-static (implemented here; aggregated by
   reason: a different reader (``metric_params``) drops unknown keys there
   without complaint. Predicate: ``query_filter_param_errors`` (returns
   errors; the evaluation command raises, collected with
-  A22/A34/A40/A42/A43/A46). NOT aggregated, A42's reason (issue #158): only
+  A22/A34/A40/A42/A43). NOT aggregated, A42's reason (issue #158): only
   evaluation reads this key.
 * A50 — ``evaluation.baseline.score`` (#397, the popularity baseline's score)
   must be one of ``BASELINE_SCORES`` (``count`` / ``rate``) when present;
@@ -616,7 +615,7 @@ Layer 1 — config-static (implemented here; aggregated by
   ``item_category_column``, shared with the nodes that build and read the
   table. Predicate: ``item_category_column_errors`` (takes the flag, as A40
   does; the evaluation command raises, collected with A22/A34/A40/A42/A43/
-  A46/A49/A50). NOT aggregated, for A22's reason: that gate cannot see
+  A49/A50). NOT aggregated, for A22's reason: that gate cannot see
   ``--post-training``. Runtime backstops: ``prepare_eval_data`` raises
   ``RuntimeError`` when column mode meets a population other than
   sample_pool, and ``metrics_spark.hand_category_mapping`` refuses column
@@ -821,6 +820,23 @@ Layer 1 — config-static (implemented here; aggregated by
   constant, its wiring, its tests and this legend entry; leave the code slot
   ``A63`` retired-not-renumbered, per A16/A17/A18.
 
+* A64 — ``--prediction-quality --post-training`` while the dataset version
+  the evaluated model was trained on was built with
+  ``dataset.test_zero_positive_group_ratio`` 0 (its manifest, never today's
+  conf: ADR-0032 decision 4). That mode reads the test table scored, and at 0
+  the dataset pipeline dropped every test query group holding no positive
+  before anything scored it, so the family — every row a binary prediction —
+  comes out biased high (ADR-0024 decision 3). Monitoring mode is
+  unaffected: no dataset draw touched its rows. Predicate:
+  ``prediction_quality_test_ratio_errors`` (takes the two flags and the
+  version's ratio; the evaluation command raises once it has resolved the
+  model's dataset version, before Spark starts). The ratio reaches the nodes
+  under ``DATASET_TEST_RATIO_KEY`` (``evaluated_test_ratio``), which weigh
+  rows by it. NOT aggregated, for A22's reason: that gate sees neither flag.
+  Runtime backstop: ``compute_prediction_quality`` runs the same predicate
+  again on the ratio the key carries, for a caller that does not go through
+  the evaluation command.
+
 The evaluation command's ``--rebuild-dates`` belongs to A21 (predicates
 ``resolved_baseline_rebuild_dates`` before Spark starts,
 ``baseline_rebuild_dates_absent_errors`` once sample_pool is listed): it only
@@ -830,7 +846,8 @@ window of ``evaluation.snap_date`` and be a time value sample_pool holds there.
 
 Layer 1 invariants that hang off a single command instead of the aggregator,
 because they need context the aggregator never sees: A12/A13 and A21 (CLI
-flags), A22/A46/A51 (``--post-training``), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53/A57/A58/A61/A62/A63 (config keys whose
+flags), A22/A51 (``--post-training``), A64 (``--prediction-quality
+--post-training`` + the evaluated model's dataset version), A23/A24/A26/A27/A34/A36/A42/A43/A49/A50/A53/A57/A58/A61/A62/A63 (config keys whose
 harm belongs to one pipeline), A28/A39/A45/A47 (the resolved catalog), A30 (``--env``
 + the filesystem), A35 (the ``--var`` CLI flags), A59 (the ETL stage's config keys), A55 (``--only-test-months`` + the
 metastore). A56 needs the resolved catalog too, but hangs off no single command:
@@ -1110,11 +1127,14 @@ from recsys_tfb.core.schema import (
 #: Dataset does not: its month plans take ``--rebuild-dates`` from the CLI.
 REBUILD_SNAP_DATES_KEY = "_rebuild_snap_dates"
 
-#: ``parameters`` key the training command hands ``compute_test_metrics`` the
-#: test ratio the dataset version it reads was built with (read off that
-#: version's manifest), for A54's second place (:func:`
-#: binary_test_metrics_verdict`). Absent — a direct call — the version is the
-#: one the config builds.
+#: ``parameters`` key under which the training and evaluation commands hand
+#: the nodes the test ratio of the dataset version the run reads — training's
+#: own, or the evaluated model's — read off that version's manifest
+#: (``core.versioning.dataset_version_test_ratio``). Training's
+#: ``compute_test_metrics`` reads it for A54's second place (:func:`
+#: binary_test_metrics_verdict`) and, absent (a direct call), takes the
+#: version the config builds. Evaluation reads it through
+#: :func:`evaluated_test_ratio`, which refuses an absent key.
 DATASET_TEST_RATIO_KEY = "_dataset_test_zero_positive_group_ratio"
 
 
@@ -2645,9 +2665,9 @@ def resolved_zero_positive_group_ratio(parameters: dict, split: str) -> float:
 
     One resolver so "what an absent key means" has a single definition, read by
     the dataset nodes that draw, the training write that carries the weight,
-    and the evaluation gate that needs to know whether test kept any
-    zero-positive group. Callers may assume the value is legal: A44 rejects
-    anything else at CLI entry.
+    and ``core.versioning.dataset_version_test_ratio``, which reads a dataset
+    version's manifest for training's A54 and evaluation's A64. Callers may
+    assume the value is legal: A44 rejects anything else at CLI entry.
     """
     key = _zero_positive_group_ratio_key(split)
     ds = parameters.get("dataset") or {}
@@ -2660,13 +2680,34 @@ def test_carries_zero_positive_group_weight(parameters: dict) -> bool:
     """Whether the test table carries :data:`ZERO_POSITIVE_GROUP_WEIGHT_COL` —
     ``dataset.test_zero_positive_group_ratio`` above 0.
 
-    The one derivation for every reader of that fact: the training write that
-    carries the column into the prediction table, A45 that makes the catalog
-    declare it, the evaluation node that weights by it, the report note that
-    prints it, and A46. Each deciding it for itself is how a write and the
-    gate that checks it end up disagreeing.
+    The one derivation for the training write that carries the column into
+    the prediction table and for A45 that makes the catalog declare it: two
+    readers deciding it apart is how a write and the gate that checks it end
+    up disagreeing. Evaluation asks the evaluated model instead
+    (:func:`evaluated_test_ratio`).
     """
     return resolved_zero_positive_group_ratio(parameters, "test") > 0.0
+
+
+def evaluated_test_ratio(parameters: dict) -> float:
+    """The test ratio of the dataset version the evaluated model was trained
+    on (:data:`DATASET_TEST_RATIO_KEY`), not today's conf: a model evaluated
+    by ``--model-version`` may predate a change to it (ADR-0032 decision 4).
+    The nodes that read r — whether rows are weighted, the ratio a report
+    prints, A64's runtime backstop — take it here; the evaluation command's
+    A64 check takes the manifest's value directly.
+
+    Raises ``KeyError`` when the key is absent: the evaluation command sets it
+    on every run, so an absent one means a caller did not, and reading it as
+    0 would silently report a weighted population as unweighted.
+    """
+    if DATASET_TEST_RATIO_KEY not in parameters:
+        raise KeyError(
+            f"parameters has no {DATASET_TEST_RATIO_KEY!r}: the test ratio of "
+            f"the evaluated model's dataset version, which the evaluation "
+            f"command reads off that version's manifest and sets on every run."
+        )
+    return float(parameters[DATASET_TEST_RATIO_KEY])
 
 
 def _is_legal_zero_positive_group_ratio(value) -> bool:
@@ -2940,7 +2981,7 @@ def query_filter_param_errors(parameters: dict) -> list[str]:
 
     Not aggregated by ``validate_config_consistency``: only evaluation reads
     this key (A34's reason, issue #158). The evaluation command raises it,
-    collected with A22/A34/A40/A42/A43/A46.
+    collected with A22/A34/A40/A42/A43.
     """
     eval_params = parameters.get("evaluation", {}) or {}
     if not isinstance(eval_params, Mapping):
@@ -2988,7 +3029,7 @@ def baseline_score_errors(parameters: dict) -> list[str]:
     gives. The unknown-key half is A49's shape: a typo'd key looks like it
     worked. Not aggregated by ``validate_config_consistency``: only evaluation
     reads this key (A34's reason, issue #158). The evaluation command raises
-    it, collected with A22/A34/A40/A42/A43/A46/A49.
+    it, collected with A22/A34/A40/A42/A43/A49.
     """
     eval_params = parameters.get("evaluation", {}) or {}
     if not isinstance(eval_params, Mapping):
@@ -3086,7 +3127,7 @@ def item_category_column_errors(parameters: dict, post_training: bool) -> list[s
     Not aggregated by ``validate_config_consistency``: it needs
     ``--post-training``, and only evaluation reads the key (A34's reason,
     issue #158). The evaluation command raises it, collected with
-    A22/A34/A40/A42/A43/A46/A49/A50.
+    A22/A34/A40/A42/A43/A49/A50.
     """
     block = _item_categories_block(parameters)
     if "column" not in block:
@@ -3388,9 +3429,9 @@ def retired_calibration_bin_key_errors(parameters: dict) -> list[str]:
         "A43: the score-bin table these key(s) configured was removed in #381 "
         "and nothing reads " + ", ".join(repr(k) for k in present) + ". "
         "Delete them. The one score-bin table left is the prediction-quality "
-        "family's (evaluation.prediction_quality, switched on by "
-        "evaluation.report.sections.prediction_quality); its bins span this "
-        "run's min..max score rather than [0, 1]."
+        "family's (evaluation.prediction_quality, run by "
+        "`evaluation --prediction-quality`); its bins span this run's "
+        "min..max score rather than [0, 1]."
     ]
 
 
@@ -3611,7 +3652,6 @@ EVALUATION_REPORT_SECTIONS: frozenset[str] = frozenset({
     "ranking_metrics",
     "rank_distribution",
     "popularity_baseline",
-    "prediction_quality",
 })
 
 #: A34 (migration-period part): the switches #537 renamed to their section's
@@ -3628,13 +3668,17 @@ RENAMED_REPORT_SECTIONS: dict[str, str] = {
     "baseline": "popularity_baseline",
 }
 
-#: The switches in :data:`EVALUATION_REPORT_SECTIONS` that are **off** when the
-#: conf leaves them out (``prediction_quality_on``, ADR-0024 decision 1); every
-#: other one is on (``report_section_on``). A34's message names the
-#: value that keeps what an absent switch does today, so it needs the side.
-EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT: frozenset[str] = frozenset({
-    "prediction_quality",
-})
+#: A34 (migration-period part): a switch whose section left the main report
+#: for a mode of its own, ``switch -> the flag that runs it``. A conf still
+#: spelling one is told the flag, whatever its value, instead of reading the
+#: key as "declared, never read". Retired together with
+#: :data:`RENAMED_REPORT_SECTIONS`: once the company environment's conf no
+#: longer spells it, delete this constant and the branch of
+#: ``report_section_key_errors`` that reads it; the equality check alone then
+#: reports the key as never read.
+MOVED_REPORT_SECTIONS: dict[str, str] = {
+    "prediction_quality": "--prediction-quality",
+}
 
 #: ``evaluation.prediction_quality``'s keys and the value each takes when the
 #: conf leaves it out: fine bins over this data's score range (the threshold
@@ -3658,10 +3702,9 @@ def prediction_quality_param_errors(parameters: dict) -> list[str]:
       bins. Otherwise the last display bin is narrower than the rest, and the
       bin table puts two widths side by side with nothing saying so.
     * ``top_n`` is an int >= 0 (0 lists no item, the overall numbers alone).
-    * No other key. The family's on/off switch is
-      ``evaluation.report.sections.prediction_quality`` (the ``baseline``
-      family's shape, ADR-0024 decision 1); an ``enabled: true`` written here
-      would be read by nothing and switch nothing on.
+    * No other key. The family runs as the ``--prediction-quality`` mode
+      (ADR-0032 decision 2); an ``enabled: true`` written here would be read
+      by nothing and switch nothing on.
 
     ``bool`` is not an int here: YAML ``true`` would pass ``isinstance(v,
     int)`` and bin by 1.
@@ -3685,8 +3728,8 @@ def prediction_quality_param_errors(parameters: dict) -> list[str]:
         errors.append(
             f"A42: evaluation.prediction_quality declares {unknown}, which "
             f"nothing reads; its keys are "
-            f"{sorted(PREDICTION_QUALITY_DEFAULTS)}. The switch that turns "
-            f"the family on is evaluation.report.sections.prediction_quality."
+            f"{sorted(PREDICTION_QUALITY_DEFAULTS)}. The family runs as "
+            f"`evaluation --prediction-quality`."
         )
     values = {**PREDICTION_QUALITY_DEFAULTS, **block}
     floors = {"n_bins": 1, "n_display_bins": 1, "top_n": 0}
@@ -3710,16 +3753,13 @@ def prediction_quality_param_errors(parameters: dict) -> list[str]:
 
 
 def report_section_on(parameters: dict, name: str) -> bool:
-    """Whether ``evaluation.report.sections.<name>`` is on. Absent, it is off
-    for the names in :data:`EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT` and on
-    for every other.
+    """Whether ``evaluation.report.sections.<name>`` is on; absent, it is on.
 
     The one reading of a section switch (ADR-0031 principle 3): the report
-    draws the sections it says are on, the evaluation pipeline's requirement
-    list wires only what those sections read, and the A46 gate refuses the
-    population for the prediction-quality section by it. Two ``dict.get``
-    calls with two defaults is how a gate ends up guarding a family the
-    pipeline never computes, or the reverse.
+    draws the sections it says are on, and the evaluation pipeline's
+    requirement list wires only what those sections read. Two ``dict.get``
+    calls with two defaults is how a pipeline ends up computing a family the
+    report never draws, or the reverse.
 
     Pre-check: ``name`` is in :data:`EVALUATION_REPORT_SECTIONS`, the set A34
     keeps equal to what the conf declares (ADR-0019 decision 6). A name
@@ -3733,57 +3773,46 @@ def report_section_on(parameters: dict, name: str) -> bool:
             f"{sorted(EVALUATION_REPORT_SECTIONS)}. Add it there and declare "
             f"it under evaluation.report.sections (A34)."
         )
-    default = name not in EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT
     eval_params = parameters.get("evaluation") or {}
     report = eval_params.get("report") or {} if isinstance(eval_params, Mapping) else {}
     sections = report.get("sections") or {} if isinstance(report, Mapping) else {}
-    return bool(sections.get(name, default)) if isinstance(
-        sections, Mapping) else default
+    return bool(sections.get(name, True)) if isinstance(
+        sections, Mapping) else True
 
 
-def prediction_quality_on(parameters: dict) -> bool:
-    """Whether ``evaluation.report.sections.prediction_quality`` switches the
-    family on — **off** when the switch is absent, unlike the report's other
-    sections (ADR-0024 decision 1). :func:`report_section_on`, named for the
-    A46 gate."""
-    return report_section_on(parameters, "prediction_quality")
-
-
-def prediction_quality_population_errors(
-    parameters: dict, post_training: bool
+def prediction_quality_test_ratio_errors(
+    *, prediction_quality: bool, post_training: bool,
+    dataset_test_ratio: float, dataset_version: str,
 ) -> list[str]:
-    """A46 — the prediction-quality family under ``--post-training`` needs a
-    test table that kept some query groups holding no positive.
+    """A64 — ``--prediction-quality --post-training`` needs the evaluated
+    model's test table to have kept some query groups holding no positive.
 
-    Returns error strings (empty list when fine); the evaluation command raises
-    it, collected with A22/A34/A42/A43. Takes the flag rather than reading it,
-    like A22/A40.
+    That table is the test table scored, and at r = 0 the dataset pipeline
+    dropped every such group before anything scored it: every row is a binary
+    prediction here, so each precision, recall and area would come out biased
+    high (ADR-0024 decision 3, ADR-0032 decision 4). ``dataset_test_ratio`` is
+    the r of ``dataset_version``, the evaluated model's, off its manifest —
+    never today's conf, which a model evaluated by ``--model-version`` may
+    predate. Monitoring mode is untouched: no dataset draw filtered offline
+    inference's output.
 
-    ``--post-training`` evaluates ``training_eval_predictions``, which is the
-    test table scored — and with ``dataset.test_zero_positive_group_ratio`` at
-    its default 0 the dataset pipeline dropped every zero-positive group from
-    that table before anything was scored. The family treats each row as a
-    binary prediction, so on that table every precision, recall and area comes
-    out biased high, and the report's "population: every row" note is false.
-    ADR-0024 decision 3's "computed before the filter" only reaches the filter
-    inside evaluation; this is the one upstream of it (ADR-0025).
-
-    Monitoring mode is untouched: it LEFT-joins the labels onto offline
-    inference's output, a population no dataset filter ever saw.
+    Returns error strings; the evaluation command raises once it has resolved
+    the model's dataset version, before Spark starts.
     """
-    if not post_training or not prediction_quality_on(parameters):
-        return []
-    if test_carries_zero_positive_group_weight(parameters):
+    if not (prediction_quality and post_training) or dataset_test_ratio > 0.0:
         return []
     return [
-        "A46: evaluation.report.sections.prediction_quality is on under "
-        "--post-training, but dataset.test_zero_positive_group_ratio is 0 (its "
-        "default): the dataset pipeline dropped every test query group holding "
-        "no positive before the model scored it. The prediction-quality family "
-        "treats each row as a binary prediction, so on that table every metric "
-        "comes out biased high and its 'every row' population note is false. "
-        "Set dataset.test_zero_positive_group_ratio above 0 and rebuild the "
-        "dataset (it moves base_dataset_version), or switch the section off."
+        f"A64: --prediction-quality --post-training reads the test table of "
+        f"dataset version {dataset_version!r}, which the evaluated model was "
+        f"trained on, and that version has no recorded "
+        f"dataset.test_zero_positive_group_ratio above 0 (a missing manifest, "
+        f"or one without that key, counts as 0): a version built at 0 dropped "
+        f"every test query group holding no positive before the model scored "
+        f"it, so every metric of this mode would come out biased high. "
+        f"To open it up: set dataset.test_zero_positive_group_ratio above 0, "
+        f"rebuild the dataset (it moves base_dataset_version) and retrain. "
+        f"Without --post-training this mode reads the inference population, "
+        f"which no dataset draw touched."
     ]
 
 
@@ -3814,16 +3843,17 @@ def report_section_key_errors(parameters: dict) -> list[str]:
     A switch #537 renamed (:data:`RENAMED_REPORT_SECTIONS`) is reported once,
     with its new name, and its new name is not reported as undeclared: the
     fix is a rename, and two messages about one key leave the reader to pair
-    them. That branch is migration-period (#524); the equality check below it
-    is not.
+    them. A switch whose section became a mode of its own
+    (:data:`MOVED_REPORT_SECTIONS`) is reported once, with the flag that runs
+    it, whatever its value. Both branches are migration-period (#524); the
+    equality check below them is not.
 
     Each switch the report reads must also hold a bool (#505). Every reader
-    takes it by truthiness (``report_section_on``, through which
-    ``prediction_quality_on``, the report and the evaluation pipeline's
-    requirement list read it), so ``"false"`` — or ``'false`'``, what selecting
-    this check's own advice up to the line end copies — reads as on. Those
-    readers are left as they are: the evaluation command runs this check
-    before any of them.
+    takes it by truthiness (``report_section_on``, through which the report
+    and the evaluation pipeline's requirement list read it), so ``"false"`` —
+    or ``'false`'``, what selecting this check's own advice up to the line end
+    copies — reads as on. Those readers are left as they are: the evaluation
+    command runs this check before any of them.
     """
     eval_params = parameters.get("evaluation", {}) or {}
     if not isinstance(eval_params, Mapping):
@@ -3857,7 +3887,20 @@ def report_section_key_errors(parameters: dict) -> list[str]:
             + ". Rename each key and keep its value; where the new name is "
             "already declared, delete the old line."
         )
-    unread = declared - EVALUATION_REPORT_SECTIONS - set(renamed)
+    # A switch whose section became a mode: named with its flag, once, and
+    # not also as declared-and-unread (ADR-0032 decision 2).
+    moved = {name: flag for name, flag in MOVED_REPORT_SECTIONS.items()
+             if name in declared}
+    if moved:
+        errors.append(
+            "A34: evaluation.report.sections spells switches whose section "
+            "left the main report for a mode of its own: "
+            + ", ".join(f"`{name}` is now `evaluation {flag}`"
+                        for name, flag in moved.items())
+            + ". Delete each key (whatever its value) and run the mode when "
+            "you want those numbers."
+        )
+    unread = declared - EVALUATION_REPORT_SECTIONS - set(renamed) - set(moved)
     if unread:
         # key=str: YAML can hand over a non-str key (``on:`` loads as True),
         # and sorting it against str keys would raise instead of reporting.
@@ -3884,11 +3927,7 @@ def report_section_key_errors(parameters: dict) -> list[str]:
     if undeclared:
         # Backticks around each pair: a trailing period copied along would
         # load as the string 'false.', which is truthy.
-        keep = ", ".join(
-            f"`{name}: "
-            f"{'false' if name in EVALUATION_REPORT_SECTIONS_OFF_WHEN_ABSENT else 'true'}`"
-            for name in sorted(undeclared)
-        )
+        keep = ", ".join(f"`{name}: true`" for name in sorted(undeclared))
         errors.append(
             f"A34: evaluation.report.sections does not declare "
             f"{sorted(undeclared)}, which the report reads — this conf has no "
@@ -5548,12 +5587,32 @@ def baseline_rebuild_dates_absent_errors(rebuild, periods) -> list[str]:
     ]
 
 
-def compare_mutual_exclusive_errors(compare: str | None, compare_only: str | None) -> list[str]:
-    """(A13) --compare and --compare-only must not be passed together."""
+def evaluation_mode_flag_errors(
+    compare: str | None, compare_only: str | None, *,
+    prediction_quality: bool = False,
+) -> list[str]:
+    """(A13) At most one of --compare, --compare-only and
+    --prediction-quality.
+
+    ``--prediction-quality`` with either compare flag: the comparison's B side
+    carries no zero-positive group weight and its common population is
+    narrowed by A's, so a binary metric on the two sides compares two
+    populations (ADR-0032 decision 6).
+    """
     if compare is not None and compare_only is not None:
         return [
             f"(A13) --compare={compare!r} and --compare-only={compare_only!r} "
             "are mutually exclusive — pass at most one"
+        ]
+    if prediction_quality and (compare is not None or compare_only is not None):
+        flag = ("--compare", compare) if compare is not None else (
+            "--compare-only", compare_only)
+        return [
+            f"(A13) --prediction-quality and {flag[0]}={flag[1]!r} are "
+            "mutually exclusive: the comparison's other side carries no "
+            "zero-positive group weight and shares a population narrowed by "
+            "this one, so its binary metrics would not be comparable. Run "
+            "--prediction-quality on its own."
         ]
     return []
 

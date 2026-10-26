@@ -39,8 +39,8 @@ dataset:
 
   # 沒有正例的 query group 留一半（ADR-0025 決定 3、#429）。形狀二下一次請求就是一組、
   # 平均約 4 個素材，多數請求沒有點擊；全丟的話 test 只剩「有人點過」的請求，預測品質
-  # 指標家族（把每一列當二元預測）會系統性偏高——report.sections.prediction_quality
-  # 打開時，evaluation --post-training 在入口就擋下 test 的 r ＝ 0（A46）。
+  # 指標家族（把每一列當二元預測）會系統性偏高——evaluation --post-training
+  # --prediction-quality 在入口就擋下被評模型 test 的 r ＝ 0（A64）。
   # r > 0 時表多一欄 zero_positive_group_weight（1 或 1／r），catalog.yaml 的
   # training_eval_predictions 要宣告它（A45）。val 也設，讓 val 那條路被走到；HPO 的
   # 兩個分數都跳過沒有正例的組，所以不受影響。0.5 只是示例值，不是建議值。
