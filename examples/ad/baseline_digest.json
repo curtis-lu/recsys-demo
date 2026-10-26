@@ -1,10 +1,4 @@
 {
-  "measured": {
-    "date": "2026-10-23",
-    "code_commit": "2d2babaa（加上下一筆審查收尾 commit 的改動）",
-    "how": "run_e2e.sh --compare 跑 feat/535-row-facts（#535 列的事實與母體帳落地、baseline 走跟模型同一套指標計算）：預期只有評估層變：metrics.json（拿掉資料概況與組數、加母體帳 population 與同分列數；另含 #534 加的 per-item 共用數字——#534 沒換基準）、baseline_metrics.json（改成完整一份指標）、新增 row_facts.json。結果與預期相同：與舊基準比只有這三份不同（6 處：各自的 hash 與 leaves），versions、source_etl、dataset、training、inference 與 prediction_quality.json、report_aggregates.json、segment_columns.json、item_categories.json 全部相同。本檔即那次跑出的 data/digest.json。"
-  },
-  "noisy": {},
   "versions": {
     "base_dataset_version": "969fe8f3",
     "train_variant_id": "844ca7eb",
@@ -227,29 +221,37 @@
     }
   },
   "evaluation": {
+    "baseline_comparison.json": {
+      "leaves": 1254,
+      "hash": "06226bf7e7f1e773530afd34178b3bd0152903c3236547ad5922e7951a9dadc0"
+    },
     "baseline_metrics.json": {
-      "leaves": 1841,
-      "hash": "088754be2ad2b269559a5ffa2ff0c5146b0b4f74ce6c350678bcb815a6ba86af"
+      "leaves": 1850,
+      "hash": "ae1b9856c5584a22dda91fc2d1c05d2d368c36edeb6a11f551393a8401b6210d"
+    },
+    "display_ks.json": {
+      "leaves": 19,
+      "hash": "541f702c163b417bba2225d439fac9690d119cee3053bf58d815a52debcdf991"
     },
     "item_categories.json": {
       "leaves": 24,
       "hash": "3c72fa9f3afe31efc3940d5f91348d51f9d67bbb1f8235b22dc056e988a480f3"
     },
     "metrics.json": {
-      "leaves": 1806,
-      "hash": "75a09982e806432ac677551f82d8bc79ad81cac653e76e4a4d8fd16fb1765a19"
+      "leaves": 1808,
+      "hash": "40f1cac844ab85519b7c102293b03ffcde360d5e06d5d763fb297f49426d33da"
     },
-    "prediction_quality.json": {
-      "leaves": 12206,
-      "hash": "a76f3a4da70977bc6e09f6661c34225163e0ad3574b9f87dc2babafe69d207b0"
+    "prediction_quality/post_training/all/prediction_quality.json": {
+      "leaves": 19868,
+      "hash": "2e08d7a77bac29d0de8f66a81e81c777c84635a0a584e7a869f26f03227c7cd2"
     },
     "report_aggregates.json": {
-      "leaves": 2045,
-      "hash": "6f70fb59a7f266c6304a1b31987b0d5c08da32ffa83034ab6934535d4cb8689e"
+      "leaves": 2044,
+      "hash": "cf70cc62b16979b7390248f9e596230274480cfe885cb5b58f0c4e52e01e71a4"
     },
     "row_facts.json": {
-      "leaves": 132,
-      "hash": "4c5bf444c2dff77a8a96ece5484001a6e3a3f82ec469f535955155a03db04b77"
+      "leaves": 140,
+      "hash": "286f5e59539a70bc058c17962eb339e640f62dc1397659a3229e19d2ca152e52"
     },
     "segment_columns.json": {
       "leaves": 2,
