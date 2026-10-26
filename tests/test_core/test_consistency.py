@@ -5601,7 +5601,7 @@ class TestScopeTableA67:
     def test_a_missing_column_is_refused_naming_it_and_its_role_column(self):
         errs = self._errors({"as_of_date": "string", "customer_id": "string"})
         assert len(errs) == 1 and errs[0].startswith("A67:")
-        assert "'campaign_a'" in errs[0]
+        assert "has no column for" in errs[0] and "'campaign_a'" in errs[0]
         assert "'product'" in errs[0] and "'prod_name'" in errs[0]
         assert "'customer_id'" not in errs[0]
 
