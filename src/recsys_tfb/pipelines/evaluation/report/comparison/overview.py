@@ -28,18 +28,14 @@ from recsys_tfb.evaluation.result_readers import (
 )
 from recsys_tfb.report.types import Column, Paragraph, Row, Table
 
-#: The results this section reads, by catalog name (ADR-0031 principle 1):
-#: the coverage (both sides' sizes, the dropped items, what each side is) and
-#: the comparison (what "all" resolved to, the four annotations).
+#: The results this section reads, by catalog name (ADR-0031 principle 1).
 READS = (COMPARE_COVERAGE, SOURCE_COMPARISON)
 
 #: No switch turns this section off (ADR-0031 principle 3:
 #: ``shared.sections_on``).
 SWITCH = None
 
-#: The heading, its English and the question the section answers; the
-#: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
-#: decision 16).
+#: The heading, its English and the question the section answers.
 TITLE = "概覽"
 TITLE_EN = "Overview"
 QUESTION = "跟誰比？能不能直接比？"
@@ -115,9 +111,9 @@ def _dropped_table(coverage: dict) -> Table:
 
 def _description(parameters: dict, n_items: int, all_k: int) -> str:
     """The query group in the reader's own columns (with ``occasion``
-    declared it gains those, #428), and what "all" is on this page: the
-    common items' count when that is what it resolved to, else the widest
-    query group (``event`` rows, #434) — both read off landed results."""
+    declared it gains those), and what "all" is on this page: the common
+    items' count when that is what it resolved to, else the widest query
+    group (``event`` rows) — both read off landed results."""
     query_group = " × ".join(get_schema(parameters)["query_group_columns"])
     all_is = (f"，所以表頭的 @{all_k} 就是全部。" if all_k == n_items else
               f"；表頭的 @{all_k} 就是全部：一個 query group 裡最多的候選列數。")
@@ -129,7 +125,7 @@ def _description(parameters: dict, n_items: int, all_k: int) -> str:
     )
 
 
-#: With the all-positive switch on (#376): both sides dropped their
+#: With the all-positive switch on: both sides dropped their
 #: all-positive query groups, each deciding on its own rows
 #: (``compute_compare_metrics``), so a group whose candidate rows differ
 #: between the sides can be dropped on one side only.
@@ -142,11 +138,8 @@ _ALL_POSITIVE_DROPPED = (
 def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
     """概覽：說明、「跟誰比」「涵蓋」「拿掉的 item」「能不能比」四張表。
 
-    Every value is landed: this side's identity and both sides' sizes off
-    the coverage (``restrict_to_common``), the compared side's identity off
-    its ``compare_source``, "all" and the four annotations off the
-    comparison. A value the coverage lacks is refused with the node to
-    re-run (``shared.landed_value``), never printed as "n/a".
+    Every value is landed. A value the coverage lacks is refused with the
+    node to re-run (``shared.landed_value``), never printed as "n/a".
     """
     coverage = results[COMPARE_COVERAGE]
     comparison = results[SOURCE_COMPARISON]

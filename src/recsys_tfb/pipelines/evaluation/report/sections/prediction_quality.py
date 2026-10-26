@@ -39,8 +39,7 @@ READS = ("prediction_quality_metrics", "evaluation_row_facts")
 #: (ADR-0031 principle 3: off, the pipeline computes nothing only it reads).
 SWITCH = "prediction_quality"
 
-#: The heading, its English and the question the section answers; the
-#: report's table of contents prints ``TITLE — QUESTION`` (ADR-0031
+#: The heading, its English and the question the section answers (ADR-0031
 #: decision 16).
 TITLE = "預測品質"
 TITLE_EN = "Prediction quality"
@@ -51,7 +50,7 @@ QUESTION = "把分數當成二元預測，切在哪裡、準不準？"
 SCORE_GROUP, BIN_GROUP, ABOVE_GROUP = "分數", "這一格", "門檻以上"
 
 #: A bin table's columns after 格: the display bin frame's column
-#: (``prediction_quality.DISPLAY_BIN_COLUMNS``, landed), its header, its upper
+#: (``prediction_quality.DISPLAY_BIN_COLUMNS``), its header, its upper
 #: header, its kind. ``None`` kind: a count — ``count``, or ``ratio`` for the
 #: weighted counts of ``--post-training`` (:func:`_count_kind`).
 _BIN_COLUMNS = (
@@ -119,7 +118,6 @@ def _bin_cells(row: pd.Series) -> tuple:
 
 
 def _overall_bin_table(display_bins: pd.DataFrame, count_kind: str) -> Table:
-    """「分箱」: one row per display bin, labelled by its number."""
     rows = tuple(Row(str(i), _bin_cells(row))
                  for i, (_, row) in enumerate(display_bins.iterrows(), 1))
     return Table("分箱", BIN_LABEL, _bin_columns(count_kind), rows)
@@ -127,10 +125,9 @@ def _overall_bin_table(display_bins: pd.DataFrame, count_kind: str) -> Table:
 
 def _per_item_bin_table(display_bins: pd.DataFrame, item_col: str,
                         count_kind: str) -> Table:
-    """「分箱 · 各 item」: every listed item's display bins in one table (the
-    landed long frame, listed order), the item the row label and 格 the bin's
-    number within its item — a reader ticks the items to see in the item
-    column's filter (decision 16 item 11)."""
+    """「分箱 · 各 item」: every listed item's display bins in one table, so a
+    reader ticks the items to see in the item column's filter (decision 16
+    item 11)."""
     number = display_bins.groupby(item_col, sort=False).cumcount() + 1
     columns = (Column(BIN_LABEL, "count"), *_bin_columns(count_kind))
     rows = tuple(Row(str(row[item_col]), (int(n), *_bin_cells(row)))
@@ -145,9 +142,9 @@ _CURVES = (("precision", "precision"), ("recall", "recall"), ("f1", "F1"))
 
 def _threshold_figure(sweep: pd.DataFrame) -> Figure:
     """precision / recall / F1 against the threshold, one point per non-empty
-    fine bin edge: the shape the user reads to pick a cut, which a 1000-row
-    table would bury — so the points are the figure's data table, collapsed
-    under it, one row per point labelled by its fine bin's number from 1."""
+    fine bin edge. A 1000-row table would bury the shape, so the points are
+    the figure's data table, collapsed under it, labelled by the fine bin's
+    number from 1."""
     import plotly.graph_objects as go
 
     fig = go.Figure()
@@ -184,16 +181,15 @@ def _kept_zero_positive_groups(weight_col: str, parameters: dict) -> str:
 def _population(facts: dict, parameters: dict, weight_col: str | None) -> str:
     """Which rows this section is computed on, against the ranking metrics'
     (ADR-0024 decision 7) — one sentence per run mode, without naming another
-    section and without the totals (decision 16 item 12; they are in
-    核心概念). ``--post-training`` has two forms: with the zero-positive
-    group weight in the payload the test table kept a share ``r`` of the
-    groups without a positive, weighted back up by ``1 / r`` (ADR-0025
-    decision 3); without it the dataset pipeline dropped them all, and with
-    nothing else excluded the two populations are the same. A46 refuses the
-    second form at the CLI entry, so a fresh run no longer produces it; it
-    stays for a payload computed before the weight existed.
+    section and without the totals (decision 16 item 12). ``--post-training``
+    has two forms: with the zero-positive group weight in the payload the test
+    table kept a share ``r`` of the groups without a positive, weighted back
+    up by ``1 / r`` (ADR-0025 decision 3); without it the dataset pipeline
+    dropped them all, and with nothing else excluded the two populations are
+    the same. A46 refuses the second form at the CLI entry; it stays for a
+    payload computed before the weight existed.
     """
-    # #376: with drop_all_positive_groups on, the ranking metrics also drop
+    # With drop_all_positive_groups on, the ranking metrics also drop
     # the all-positive groups; "only groups with a positive" and "the two
     # populations are the same" would both be false.
     drop = drop_all_positive_groups(parameters)
@@ -215,9 +211,8 @@ def _population(facts: dict, parameters: dict, weight_col: str | None) -> str:
             "precision 不能互相比。"
         )
     if parameters.get("post_training"):
-        # With the switch on the ranking metrics also dropped the
-        # all-positive groups; the populations are the same only if there
-        # were none.
+        # With the switch on, the populations are the same only if it
+        # dropped no all-positive group.
         same = (facts.get("n_excluded_queries") == 0
                 and (not drop or facts.get(ALL_POSITIVE_KEY) == 0))
         return (
@@ -243,12 +238,10 @@ def build(
     """The prediction-quality section (ADR-0024): every candidate row as one
     binary prediction, binned by score.
 
-    Every number here is read off the payload: the headline numbers, the
-    display bin tables and the threshold sweep, all computed by
-    ``compute_prediction_quality`` from the same fine bins
-    (``evaluation/prediction_quality.py``, landed since #536), so the
-    threshold sweep and the bin table cannot disagree. The row facts are read
-    for one thing: whether the ranking metrics' query groups are the same as
+    Every number here is read off the payload, all computed by
+    ``compute_prediction_quality`` from the same fine bins, so the threshold
+    sweep and the bin table cannot disagree. The row facts are read for one
+    thing: whether the ranking metrics' query groups are the same as
     this section's rows (:func:`_population`).
 
     Decision 7's three statements are always printed, each where the number
@@ -316,9 +309,8 @@ def build(
         blocks.append(_threshold_figure(
             frame_from_json(overall[THRESHOLD_SWEEP_KEY])))
 
-    # The headline numbers, then the bin width and the score range the
-    # threshold is read off. The range is two rows, not one "lo ～ hi" cell:
-    # a number column holds numbers, so each edge prints and copies as one.
+    # The range is two rows, not one "lo ～ hi" cell: a number column holds
+    # numbers, so each edge prints and copies as one.
     headline = [Row(label, (value,)) for (label, _, _), value
                 in zip(_SUMMARY_FIELDS, _summary_values(summary))]
     headline += [Row("細箱寬", (width,)), Row("分數範圍下緣", (lo,)),

@@ -1,8 +1,4 @@
-"""Keeping the evaluated ``model_version``'s predictions (Spark, lazy).
-
-Which version is evaluated is decided in ``prepare_eval_data``; this module
-holds how a predictions frame is kept to it.
-"""
+"""Keeping the evaluated ``model_version``'s predictions (Spark, lazy)."""
 
 import logging
 

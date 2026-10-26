@@ -3,16 +3,10 @@
 cell holding both values and their difference, plus what the two were
 computed on. No Spark: it reads two landed dicts and returns one.
 
-Why one layer: the differences used to be taken in several places — the main
-report's baseline section asked ``compare.build_comparison_result`` for the
-overall and per-item ones and took the per-segment and category ones itself,
-``per_item_metric_compare_table`` took the Macro row's and the ``"all"``
-pairing's, the comparison node took its own. Each took "A − B" its own way;
-here it is taken once and lands, and a report only reads it (principle 1).
-
-Every K the results hold is compared — every key of ``evaluation.k_values``'
-grid — none cut for display: the K a table shows is cut after this layer
-(``steps/display_ks``), so changing it re-runs that cut only (decision 16).
+Every K the results hold is compared, none cut for display: the K a table
+shows is cut after this layer (``steps/display_ks``), so changing it re-runs
+that cut only (decision 16). "A − B" is taken here once and lands; a report
+only reads it (principle 1).
 
 Shape (``this`` is the result compared, ``reference`` the one it is compared
 against; the key constants are in ``evaluation.result_readers``)::
@@ -38,32 +32,26 @@ against; the key constants are in ``evaluation.result_readers``)::
   ``reference`` has. ``diff`` is ``this − reference`` only where both sides
   hold a number; a key one side lacks gets ``None`` there and no ``diff``
   (ADR-0020 bug 4: reading the missing side as 0 printed the other side's
-  value as the difference, and a 0 reads as "the control scored 0").
+  value as the difference).
 * **``name@all``** pairs ``this``' ``name@{its all_k}`` with ``reference``'s
   ``name@{its all_k}``: the two ``"all"`` can resolve to different K (with
-  ``event`` rows, the widest query group, #434), and then no key pairs them
-  by name. The int keys still pair by name, so ``map@12`` beside ``map@all``
-  is "truncated at 12 on both sides" even where 12 is one side's ``all``.
-  A table reads ``name@{label}`` for every label it shows, ``"all"``
+  ``event`` rows, the widest query group), and then no key pairs them by
+  name. A table reads ``name@{label}`` for every label it shows, ``"all"``
   included, and never resolves ``"all"`` itself.
 * **``entries``** is how many entries each side's block held — keys of
   ``overall`` / ``macro_by_item``, items of ``per_item``, segments of
-  ``per_segment`` — and ``None`` where that side has no such block (a
-  ``macro_avg`` without ``by_item``, the empty bundle's). A report decides
-  from it which tables and rows to draw; the cells alone cannot say whether
-  a blank side was empty or absent.
+  ``per_segment`` — and ``None`` where that side has no such block. The cells
+  alone cannot say whether a blank side was empty or absent.
 * **``population``** records each side's ledger (``metrics.POPULATION_KEY``)
   for the four cases decision 4 names where a join by name is silently
   wrong: ``"all"`` resolved to different K, different items in the macro,
   different query groups scored, segments on one side only. ``same`` says
-  whether the two agree; a report marks the ones that do not. The
-  popularity baseline agrees on all four by construction (it re-scores the
-  model's rows, counted off their row facts); they land all the same.
+  whether the two agree. The popularity baseline agrees on all four by
+  construction; they land all the same.
 * ``category`` is compared only when both sides have that grain.
 
 Not compared: ``per_item_segment``, ``macro_avg.by_segment`` /
-``by_item_segment`` and the shared numbers — no report draws a difference of
-them. Add a block here when one does.
+``by_item_segment`` and the shared numbers.
 """
 
 from __future__ import annotations
@@ -96,9 +84,9 @@ def ledger_keys_missing(bundle: dict) -> list[str]:
     """The ledger keys (:data:`LEDGER_KEYS`) ``bundle`` lacks, at each grain
     it holds, as ``"<grain>: <key>"``; empty when it carries them all.
 
-    For the calling node's pre-check: a bundle landed before a key existed
-    passes the fingerprint check (no setting changed), and comparing it would
-    stop on a bare ``KeyError`` deep in here.
+    A bundle landed before a key existed passes the fingerprint check (no
+    setting changed), and comparing it would stop on a bare ``KeyError`` deep
+    in here.
     """
     missing = []
     grains = [("item grain", bundle)]
@@ -213,11 +201,7 @@ def _annotations(this: dict, reference: dict) -> dict:
 def populations_that_differ(comparison: dict) -> list[str]:
     """The annotations of the population ledger on which the two sides of
     ``comparison`` disagree, as ``"<grain>: <name>"`` (the category grain
-    only when compared); empty when they agree on all four.
-
-    One reading of ``SAME`` for both callers: the baseline comparison, whose
-    sides agree by construction (one that does not is a bug upstream), and the
-    comparison with another source, whose sides need not.
+    only when compared); empty when they agree.
     """
     return [
         f"{grain}: {name}"

@@ -1,9 +1,4 @@
-"""Attaching ``label_table`` to the evaluated predictions (Spark).
-
-Whose label is kept, how a missing label counts and when a duplicated key
-stops the run are decided in ``prepare_eval_data``; this module holds how
-those are computed.
-"""
+"""Attaching ``label_table`` to the evaluated predictions (Spark)."""
 
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
@@ -45,10 +40,9 @@ def left_join_labels_missing_as_zero(
 
     ``label_col`` is cast to INT, the type ``training_eval_predictions``
     declares for it. The two run modes take the label from different tables
-    (that one under ``--post-training``, the user-defined ``label_table`` in
-    monitoring) and write the same ``enriched_eval_predictions``, whose schema
-    is fixed by the first write and never cast afterwards: left uncast, the
-    second mode's write is a type conflict (ADR-0020 bug 15).
+    and write the same ``enriched_eval_predictions``, whose schema is fixed by
+    the first write and never cast afterwards: left uncast, the second mode's
+    write is a type conflict (ADR-0020 bug 15).
     """
     joined = predictions.join(labels, on=identity_cols, how="left")
     if label_col not in joined.columns:

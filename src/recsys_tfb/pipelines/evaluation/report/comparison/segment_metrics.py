@@ -1,7 +1,7 @@
 """分群指標 of the comparison report: the query-group metrics of
 :data:`COMPARED` on the whole and per segment, both sides and their
 difference. The list is empty by default (ADR-0031 decision 16 item 2), so
-by default the section is not on the page.
+the section is off the page by default.
 
 When the two sides were computed with different segment columns, no table is
 drawn: a table with one side's segments only cannot answer whether to
@@ -54,8 +54,7 @@ SWITCH = None
 
 #: The metrics this section compares on the whole and per segment, in table
 #: order: a program constant, not a setting, empty by default (decision 16
-#: item 2). Each entry is read at ``per_segment``, e.g.
-#: ``CompareEntry("map", QUERY_GROUP, "per_segment")``.
+#: item 2). Each entry is read at ``per_segment``.
 COMPARED: tuple[CompareEntry, ...] = ()
 
 #: The heading, its English and the question the section answers.
@@ -71,9 +70,7 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection | None
     """分群指標：:data:`COMPARED` 每個指標一張「整體與各分群」比較表。
 
     ``None`` when the list is empty or the two sides' segment columns
-    differ. ⚠ as the comparison demo marks it: the ``@{all_k}`` columns when
-    the two sides' "all" differ, and a line under the table for that and for
-    different query groups scored.
+    differ.
     """
     if not COMPARED:
         return None
@@ -107,7 +104,7 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection | None
         blocks.append(metric_table(
             entry, ks, rows, row_header="分群", slices="整體與各分群",
             compare=True, all_k=all_k, warn_ks=warn_ks))
-    # Once after the tables, for all of them (the demo's place).
+    # Once after the tables, for all of them.
     blocks += notes
     blocks.append(definitions(COMPARED))
     return ReportSection(title=TITLE, description="", title_en=TITLE_EN,

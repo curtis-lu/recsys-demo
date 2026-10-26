@@ -1,12 +1,8 @@
-"""報表表格與段落內容的 HTML：主報表與比較報表的外殼（``pipelines/evaluation/report/shell.py``）
-用它。
-
-這裡原本也是多頁輸出（診斷頁共用一份 plotly.min.js、每頁把 ScopeNote 放在
-數字前面）；#532 拿掉全部診斷頁之後，多頁外殼跟著拿掉。
+"""報表表格與段落內容的 HTML。
 
 :func:`render_block` / :func:`render_report_table` —— 段落的內容塊
 （``report.types`` 的 ``Heading`` … ``Note``）與 ``Table``。數字格式在
-:func:`format_cell`。所有字串都跳脫（#366 第 1 項）。
+:func:`format_cell`。所有字串都跳脫。
 """
 from __future__ import annotations
 
@@ -31,7 +27,7 @@ from recsys_tfb.report.types import (
 
 
 def escape(text: Any) -> str:
-    """Text content: ``&`` ``<`` ``>`` escaped (#366 item 1). Every string the
+    """Text content: ``&`` ``<`` ``>`` escaped. Every string the
     report shell puts between tags goes through this."""
     return (
         str(text)
@@ -47,7 +43,7 @@ def escape_attr(text: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# #537：內容塊與新表
+# 內容塊與表
 # ---------------------------------------------------------------------------
 
 #: 負數的負號（U+2212），畫面上用；``data-v`` 用半形 ``-``，貼進 Excel 才是數字。
@@ -176,12 +172,11 @@ def render_note(note: Note) -> str:
 
 
 def render_report_table(table: Table) -> str:
-    """新長相的一張表：表名與複製鈕、篩選狀態列、表本身，再接表下的行。
+    """一張表：表名與複製鈕、篩選狀態列、表本身，再接表下的行。
 
-    外殼的表格工具（``pipelines/evaluation/report/shell.py`` 的 JS）認 ``div.tblk``：每個欄頭
-    ``th.srt`` 可以排序與篩選，複製鈕複製看得到的列——欄頭取 ``data-full``，
-    數字格取 ``data-v``，其餘取看得到的字（不含 ⚠）。``tr.pin`` 永遠在最上面、
-    不被篩掉。超過 15 列的表身限高、表頭固定（``.tw.tall``）。
+    外殼的表格工具（``pipelines/evaluation/report/shell.py`` 的 JS）認
+    ``div.tblk``、``th.srt``、``tr.pin``、``data-full``、``data-v``：改這些
+    要跟著改它。超過一定列數的表身限高、表頭固定（``.tw.tall``）。
     """
     tw = "tw tall" if table.tall else "tw"
     body = "".join(_tr(r, table.columns) for r in table.rows)

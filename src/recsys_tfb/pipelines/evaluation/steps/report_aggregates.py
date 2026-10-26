@@ -1,13 +1,8 @@
 """Spark-side aggregation for the evaluation report's diagnostics figures.
 
 Each function reduces the (potentially huge) ``eval_predictions`` DataFrame to a
-small pandas frame, so the rendered figures embed *aggregated* values rather
-than raw per-row arrays. Output size is bounded by item/bin/rank counts, never
-by the number of rows.
-
-No UDFs are used (production constraint): binning is arithmetic
-(``floor``/``least``/``greatest``), quartiles use ``percentile_approx``, and the
-rest is ``groupBy`` + ``count``/``sum``.
+small pandas frame: output size is bounded by item/bin/rank counts, never by
+the number of rows. No UDFs (production constraint).
 """
 
 from __future__ import annotations
@@ -17,7 +12,7 @@ import pandas as pd
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
 
-# The landed form of these frames lives with the report's readers (#536): the
+# The landed form of these frames lives with the report's readers, so the
 # report reads it back without importing this Spark module.
 from recsys_tfb.evaluation.result_readers import (
     FRAME_LONG as _LONG,
@@ -39,9 +34,8 @@ def score_histogram_counts(
     edges across items make the overlay histogram directly comparable.
 
     Sorted because ``groupBy`` returns rows in shuffle order, which moves with
-    the parallelism; unsorted, the same data landed as a different
-    ``report_aggregates.json`` (#355). :func:`score_box_stats_by_label` sorts
-    for the same reason.
+    the parallelism; unsorted, the same data lands as a different
+    ``report_aggregates.json``.
     """
     bounds = sdf.agg(
         F.min(score_col).alias("lo"), F.max(score_col).alias("hi")
@@ -109,13 +103,11 @@ def score_box_stats_by_label(
     item then label (why: :func:`score_histogram_counts`).
 
     The quartiles are approximate and may move with how the rows are
-    partitioned; accepted (#366 item 4, settled in #536). The error is
-    bounded: each value is a score that occurs in its group, ranked within
-    floor((p - 1/accuracy) * N) .. ceil((p + 1/accuracy) * N) of the group's
-    N rows (the bound PySpark documents for ``DataFrame.approxQuantile``,
-    the same algorithm). At ``accuracy=10000`` a group of a million rows is
-    off by at most 100 ranks. Exact quartiles would hold every score of a
-    group in memory, which production volumes do not allow.
+    partitioned; accepted (#366 item 4). Each value is a score that occurs in
+    its group, off by at most ``1/accuracy`` of the group's rows in rank (the
+    bound PySpark documents for ``DataFrame.approxQuantile``, the same
+    algorithm). Exact quartiles would hold every score of a group in memory,
+    which production volumes do not allow.
     """
     rows = (
         sdf.groupBy(item_col, label_col)
@@ -135,17 +127,13 @@ def _all_items(sdf: SparkDataFrame, item_col: str) -> list:
 def _n_ranks(sdf: SparkDataFrame, rank_col: str, items: list) -> int:
     """Width of the rank axis: the item count, or the deepest rank if deeper.
 
-    Ranks stop at the item count while items are unique within a query group.
-    With ``event`` declared they are not — one entity shown one creative
-    thirty times is thirty ranks against twelve items — and an axis cut at
-    the item count dropped every rank past it with nothing raised (#434).
-    Read from the whole frame, not the rows a matrix counts, so all three
-    matrices share one axis. Without ``event`` the deepest rank is at most the
-    item count and the axis is what it always was.
+    Items are unique within a query group only without ``event``; with it,
+    ranks run past the item count, and an axis cut there would drop them with
+    nothing raised. Read from the whole frame, not the rows a matrix counts, so
+    all three matrices share one axis.
 
-    Cost: one ``agg(max)`` action per matrix over the frame the caller has
-    cached (``aggregate_report_diagnostics`` requires it) — three per report,
-    each the same size as the ``_all_items`` scan beside it.
+    Cost: one ``agg(max)`` action per matrix over the cached frame, each the
+    size of the ``_all_items`` scan beside it.
     """
     deepest = sdf.agg(F.max(rank_col).alias("_max_rank")).collect()[0]["_max_rank"]
     return max(len(items), int(deepest or 0))
@@ -223,21 +211,22 @@ def aggregate_report_diagnostics(
     label_col: str,
     include_distributions: bool = True,
 ) -> dict:
-    """報表診斷區需要的全部聚合，一次算完並轉成可落地的 dict。
+    """Every aggregate of the report's diagnostics, computed in one pass and
+    returned as a dict that can be landed.
 
-    ``sdf`` 必須由呼叫端先投影並 ``cache()``：這裡每個家族各是一次 action，
-    不 cache 就是 5 次全掃。
+    ``sdf`` must be projected and ``cache()``d by the caller: each family here
+    is its own action, so uncached every one is a full scan.
 
-    分數分箱（每格的平均分數 vs 實際正例率）不在這裡：它是預測品質指標家族
-    （``evaluation/prediction_quality.py``）的分箱表，範圍取資料的最小～最大
-    分數。這裡曾有一份在 ``[0, 1]`` 上等寬切的 calibration bins，沒有任何讀者，
-    #381 把三份分箱表收成那一份時移除（ADR-0024〈後果〉）。
+    Score bins (mean score vs actual positive rate) are not here: they are the
+    bin table of the prediction-quality family
+    (``evaluation/prediction_quality.py``, ADR-0024〈後果〉).
 
-    關掉的家族**不放進 payload**（不是放空的）：空的看起來像「量到了、結果
-    什麼都沒有」，那是這次重構要避免的誤讀。
+    A family that is off is **left out of the payload**, not emptied: an empty
+    one reads as "measured, found nothing".
 
-    ``columns`` 跟著 payload 走：JSON 落地後可能在 ``parameters`` 改過之後
-    才被讀回（切片接續），讀回端不保證拿得到同一份 ``parameters``。
+    ``columns`` travels with the payload: the JSON can be read back after
+    ``parameters`` has changed (slice resume), and the reader is not
+    guaranteed the same ``parameters``.
     """
     out: dict = {
         "columns": {

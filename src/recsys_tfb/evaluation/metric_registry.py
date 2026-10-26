@@ -2,14 +2,8 @@
 (ADR-0028 decision 2).
 
 One row per metric: its name, its family, how val scores it (the numpy
-function HPO calls on the driver) and which Spark pass scores it on test. The
-readers are HPO's choices and A25's domain (``core/consistency.py``), the
-trial scorer (``pipelines/training/steps/hpo_scoring.py``), the test scoring
-node (``compute_test_metrics``) and the ``test_metrics`` checks. Before this
-table the names lived in a tuple in ``core/consistency.py`` and the dispatch
-in a hand-written ``if`` chain in ``hpo_scoring.py``: adding an objective to
-the tuple and forgetting the chain was only found at run time. Adding a metric
-is now adding a row.
+function HPO calls on the driver) and which Spark pass scores it on test.
+Adding a metric is adding a row.
 
 **Two families.**
 
@@ -27,9 +21,8 @@ counted per pass, not per metric. Both ranking metrics share
 binary-prediction metric has a pass of its own (:data:`POOLED_AP_PASS`,
 :data:`PER_ITEM_AP_PASS`), since one ranks every row in one pool and the other
 each item's rows apart. A pass no requested metric needs is not run. Every
-row has a test pass: ``tests/test_pipelines/test_training/test_hpo_scoring.py``
-checks each one, so a metric added with only its val half fails there, not at
-run time.
+row has a test pass:
+``tests/test_pipelines/test_training/test_hpo_scoring.py`` checks each one.
 
 **The same definition twice.** val scores through numpy on the driver (the
 predictions are born there), test through Spark (they are already in Hive).

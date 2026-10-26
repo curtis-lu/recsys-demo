@@ -1,22 +1,7 @@
-"""Tables both reports draw from landed metrics (#537) — not a section, the
-small tools the main report's and the comparison report's sections share, so
-the two draw a metric, a comparison and its caveats the same way:
-
-* :func:`metric_table` — one metric, one table (ADR-0031 decision 16): rows
-  are slices, columns the K. One side (the main report): a column per K.
-  Compared (the comparison report, the popularity baseline): three per K —
-  這次, 對照, 差 — under a two-row header. :func:`compared_key` is the cell a
-  compared column reads, for the sections that check a cell before drawing.
-* :func:`macro_count_note` — the line under an item grain's tables saying
-  how many items (categories) the Macro 平均 averaged.
-* :func:`comparability` / :func:`comparability_table` — the four things two
-  results must share to be compared as they are (the comparison's
-  ``population``, decision 4 and 15), which of them differ, and the sentence
-  under a table each one puts there.
-* :func:`model_selection_table` — the metrics HPO selects a model by
-  (``metric_catalog.MODEL_SELECTION_METRICS``), each at K = all.
-* :func:`definitions` — the definitions block under a group of tables, from
-  the catalog.
+"""Tables both reports draw from landed metrics: the small tools the main
+report's and the comparison report's sections share, so the two draw a metric
+(ADR-0031 decision 16), a comparison and its caveats (the comparison's
+``population``, decisions 4 and 15) the same way.
 
 Reads only landed results — a ``metrics_spark.compute_all_metrics`` bundle, or
 a comparison (``pipelines/evaluation/steps/comparison_layer``'s shape; its
@@ -72,12 +57,10 @@ class SliceRow:
     """One row of a metric table: a slice and its landed values.
 
     ``values`` is that slice's block, keyed by metric key (``map@3``): one
-    side — a bundle's ``overall``, ``macro_avg["by_item"]``,
-    ``per_item[item]``, ``per_segment[segment]`` …; compared — the
-    comparison's cells for it, ``comparison["overall"]["cells"]``,
-    ``comparison["per_item"]["cells"][item]`` …, each ``{this, reference,
-    diff}``. ``None`` or a missing key is a blank cell. ``pinned`` keeps the
-    row on top (整體, Macro 平均); ``warn`` marks its label ⚠.
+    side — a bundle's block for it; compared — the comparison's cells for it,
+    each ``{this, reference, diff}``. ``None`` or a missing key is a blank
+    cell. ``pinned`` keeps the row on top (整體, Macro 平均); ``warn`` marks
+    its label ⚠.
     """
 
     label: str
@@ -113,7 +96,7 @@ def metric_table(
 
     * ``metric`` — a catalog entry (or a :class:`CompareEntry`); its
       ``display_name`` titles the table, ``f"{display_name}@K · {slices}"``
-      (``map@K · 整體與各分群``; no `` · …`` when ``slices`` is empty).
+      (no `` · …`` when ``slices`` is empty).
     * ``ks`` — the K to show, already resolved to integers (the table header
       writes the real K: ``@6``, not ``@all``). Ignored for a metric without
       K (``mean_pos``): the table then has one value column and is titled
@@ -128,13 +111,6 @@ def metric_table(
     * ``warn_ks`` — K whose columns get ⚠ (a compared K's ⚠ sits on its
       ``@K`` header). Put the sentence saying why in ``notes``
       (:meth:`Comparability.note`).
-
-    Example — the main report's map table at K 1..6 (6 = all)::
-
-        metric_table(entry("map", QUERY_GROUP), [1, 2, 3, 4, 5, 6],
-                     [SliceRow("整體", bundle["overall"], pinned=True),
-                      *(SliceRow(s, bundle["per_segment"][s]) for s in segs)],
-                     row_header="分群", slices="整體與各分群")
     """
     m = _metric_of(metric)
     if compare and m.per_k and all_k is None:
@@ -197,15 +173,12 @@ def compared_key(metric: Metric | CompareEntry, k: int, all_k: int) -> str:
     metric without K, its one key.
 
     The one rule: :func:`metric_table` draws by it, and the sections that
-    check a listed cell before drawing (the popularity baseline's
-    ``_require_cell``, the comparison report's ``tables.landed_cells``
-    callers) look up by it, so the cell checked is the cell drawn.
+    check a cell before drawing look up by it, so the cell checked is the
+    cell drawn.
     """
     return _metric_of(metric).key(ALL_LABEL if k == all_k else k)
 
 
-#: The line under an item grain's tables naming how many of its slices the
-#: Macro 平均 averaged, by what the slices are.
 _MACRO_COUNT_LABEL = {False: "參與 macro 的 item 數", True: "參與 macro 的大類數"}
 
 
@@ -216,12 +189,11 @@ def macro_count_note(n_macro: int, n_items: int, *,
     averaged fewer than all ``n_items`` (ADR-0031 decision 16 item 5;
     ``n_items`` is ``shared.count_items``, 0 = unknown: no line). The count
     alone, without the total: the whole data's totals are printed once, in
-    核心概念 (decision 16 item 12). One wording for every section that draws
-    a Macro row, in both reports.
+    核心概念 (decision 16 item 12).
 
     The caller decides whether the line belongs under its tables at all — a
     Macro row drawn, and in a comparison the two sides averaging the same
-    items (else the ⚠ line says so, :meth:`Comparability.note`).
+    items (else the ⚠ line says so).
     """
     if 0 < n_items and n_macro < n_items:
         return Note(f"{_MACRO_COUNT_LABEL[category]}：{n_macro:,}")
@@ -232,8 +204,7 @@ def macro_count_note(n_macro: int, n_items: int, *,
 # Can the two be compared as they are
 # ---------------------------------------------------------------------------
 
-#: The four checks, in the order the table lists them, and each one's row
-#: label.
+#: The four checks, in the order the table lists them.
 _CHECK_LABELS = (
     (ALL_K_KEY, "全部＝@幾"),
     (MACRO_ITEMS_KEY, "進 Macro 的 item"),
@@ -241,7 +212,6 @@ _CHECK_LABELS = (
     (SEGMENT_COLUMNS_KEY, "分群欄"),
 )
 
-#: How many item names a sentence lists before it says how many more.
 _ITEMS_LISTED = 5
 
 
@@ -260,8 +230,7 @@ def _names(items: Iterable) -> str:
 
 
 def _item_difference(this: Sequence, reference: Sequence) -> str:
-    """What the reference's macro items lack and add, from its side:
-    ``少 item_E``, ``多 item_X``, ``少 A、多 B``."""
+    """What the reference's macro items lack and add, from its side."""
     ref = set(map(str, reference))
     mine = set(map(str, this))
     fewer = sorted(mine - ref)
@@ -284,7 +253,7 @@ class Comparability:
     between the two sides (``True`` = differs), with the values to say so.
 
     Built by :func:`comparability`. A section marks what each one affects
-    (decision 16; the comparison demo's four cases):
+    (decision 16):
 
     * ``all_k_differs`` — the ``@{all_k}`` columns (``warn_ks`` of
       :func:`metric_table`).
@@ -304,8 +273,7 @@ class Comparability:
 
     @property
     def differs(self) -> tuple[str, ...]:
-        """The annotation names that differ, in table order
-        (``result_readers.COMPARED_ANNOTATIONS``)."""
+        """The annotation names that differ, in table order."""
         flags = {ALL_K_KEY: self.all_k_differs,
                  MACRO_ITEMS_KEY: self.macro_items_differs,
                  SCORED_QUERIES_KEY: self.scored_queries_differs,
@@ -313,10 +281,9 @@ class Comparability:
         return tuple(name for name, _ in _CHECK_LABELS if flags[name])
 
     def note(self, name: str, subject: str | None = None) -> Note | None:
-        """The ⚠ line under a table for annotation ``name``
-        (``result_readers.ALL_K_KEY`` …), or ``None`` when the two sides agree
-        on it. ``subject`` replaces the default lead-in (``Macro 平均``) —
-        e.g. the row name it is about (``macro per-item mAP``)."""
+        """The ⚠ line under a table for annotation ``name``, or ``None`` when
+        the two sides agree on it. ``subject`` replaces the default lead-in
+        (``Macro 平均``) with the row name it is about."""
         if name not in self.differs:
             return None
         a = self.population[name][THIS]
@@ -366,10 +333,9 @@ def comparability(population: Mapping) -> Comparability:
 
 
 def comparability_table(population: Mapping, title: str = "能不能比") -> Table:
-    """The 「能不能比」 table: four rows (全部＝@幾, 進 Macro 的 item, 算進
-    指標的 query group, 分群欄), columns 這次 / 對照 / 結果. 結果 is 「相同」,
-    or 「⚠ 不同」 (the ⚠ is not copied) when the two sides differ; then the
-    對照 cell of the macro row also says which items."""
+    """The 「能不能比」 table: one row per check, columns 這次 / 對照 / 結果.
+    結果 is 「相同」, or 「⚠ 不同」 (the ⚠ is not copied) when the two sides
+    differ; then the 對照 cell of the macro row also says which items."""
     flags = comparability(population)
 
     def text(name: str, side: str) -> str:
@@ -427,13 +393,12 @@ def model_selection_table(
     """The model-selection metrics, one row each (its ``display_name``), at
     K = all.
 
-    One side: ``result`` is a metrics bundle; one column 值, read at the
-    bundle's own ``all_k`` (``map@{all_k}`` of ``overall``, ``map_attr@{all_k}``
-    of ``macro_avg.by_item``). Compared: ``result`` is a comparison; columns
-    這次 / 對照 / 差, read at ``name@all`` (each side's own all). The values
-    are untruncated, so a different ``all_k`` on the two sides does not touch
-    them; a different set of macro items marks the macro rows ⚠, and that or
-    different query groups scored puts a ⚠ line under the table.
+    One side: ``result`` is a metrics bundle, read at the bundle's own
+    ``all_k``. Compared: ``result`` is a comparison, read at ``name@all``
+    (each side's own all). The values are untruncated, so a different ``all_k``
+    on the two sides does not touch them; a different set of macro items marks
+    the macro rows ⚠, and that or different query groups scored puts a ⚠ line
+    under the table.
     """
     rows = []
     notes = []
@@ -481,10 +446,9 @@ def _term(item: Any) -> tuple[str, str]:
 
 def definitions(items: Iterable) -> Definitions:
     """The definitions block under a group of tables, from the catalog: each
-    item a catalog entry or :class:`CompareEntry` (term ``map@K``; ``mean_pos``
-    has no K), a :class:`ModelSelectionMetric` (``overall mAP``), or a grain
-    name of ``GRAIN_DEFINITIONS`` (``"macro"`` → ``Macro 平均``). A term
-    listed twice is kept once, where it first appears."""
+    item a catalog entry or :class:`CompareEntry`, a
+    :class:`ModelSelectionMetric`, or a grain name of ``GRAIN_DEFINITIONS``.
+    A term listed twice is kept once, where it first appears."""
     out: dict[str, str] = {}
     for item in items:
         term, text = _term(item)

@@ -1,4 +1,4 @@
-"""What more than one section of the comparison report draws (#537) — not a
+"""What more than one section of the comparison report draws — not a
 section. A helper only one section uses stays in that section's file.
 
 * :func:`item_grain_blocks` — the compared per-K tables of an item grain, one
@@ -58,8 +58,7 @@ _CATEGORY_PATH = ("category",)
 
 
 def landed_cells(comparison: dict, path: Sequence, keys: Iterable[str]) -> dict:
-    """The cells at ``path`` of the landed comparison (``("per_item", CELLS,
-    item)``, ``("category", "macro_by_item", CELLS)`` …), after checking that
+    """The cells at ``path`` of the landed comparison, after checking that
     each of ``keys`` is among them.
 
     A row the comparison holds carries every key either side computed, at
@@ -67,9 +66,7 @@ def landed_cells(comparison: dict, path: Sequence, keys: Iterable[str]) -> dict:
     computed for other K, or by an older node — not a blank to print, which
     would read as "no value". ``shared.landed_value`` raises naming the node
     to re-run from: the metrics node, not ``compare_to_source`` — re-run
-    alone, it would join the same metrics and miss the same cell (#538
-    review: a metric added to a list, the two sides' metrics computed before
-    it was).
+    alone, it would join the same metrics and miss the same cell.
     """
     cells = landed_value(comparison, SOURCE_COMPARISON, *path)
     for key in keys:
@@ -90,8 +87,7 @@ def require_grain(entries: Iterable[CompareEntry], grain: str,
 
 
 def metric_names(entries: Iterable[CompareEntry]) -> str:
-    """A list's metrics in words, by their catalog display names:
-    ``map_attr 與 per-item recall``, ``a、b 與 c``."""
+    """A list's metrics in words, by their catalog display names."""
     names = list(dict.fromkeys(e.metric.display_name for e in entries))
     if len(names) <= 1:
         return "".join(names)
@@ -116,13 +112,10 @@ def item_grain_blocks(
     item grain (``grain_path=()``) or the category grain (``("category",)``)
     of the landed comparison — then the lines under them.
 
-    * Columns: the grain's K of the cut (``compare_k``, ``all_k``), three per
-      K. Rows: Macro 平均 (pinned) when both sides had a macro, then the
-      items in the comparison's order.
-    * ⚠ (the comparison demo's case 1 and 2): the ``@{all_k}`` columns when
-      the two sides' "all" differ and that column is shown; the Macro 平均
-      row when the two sides averaged different items. Each says why in one
-      line after the tables, once for all of them.
+    * ⚠: the ``@{all_k}`` columns when the two sides' "all" differ and that
+      column is shown; the Macro 平均 row when the two sides averaged
+      different items. Each says why in one line after the tables, once for
+      all of them.
     * The line naming how many items (at the category grain, categories)
       the macro averaged over (``metric_tables.macro_count_note``, against
       ``n_items``: this side's row facts, 0 = unknown), printed only when

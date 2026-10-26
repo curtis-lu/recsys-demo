@@ -55,21 +55,16 @@ def assemble_report(results: Mapping[str, dict], parameters: dict) -> str:
     """Assemble every switched-on section (``shared.sections_on``), in
     ``SECTIONS`` order, into the final HTML string.
 
-    ``results`` holds the landed results by catalog name (``generate_report``
-    builds it): what the switched-on sections read, the evaluation
-    pipeline's requirement list, and nothing else — a switched-off section's
-    result was not computed. Each section gets the ones it declares in
-    ``READS`` and no other, so a section reading a result it did not declare
-    fails here rather than drifting from its declaration. A section returns
-    ``None`` when it has nothing to show. Before any section, a metrics
-    bundle written before the per-item ``recall@K`` rename
-    (``refuse_pre_rename_per_item``) or before the population ledger
-    (``refuse_pre_ledger``) is refused, and so is a result landed before it
-    carried what the report reads instead of computing
-    (``refuse_pre_landed_reads``, #536).
-
-    段落順序（ADR-0031 決定 16 第 4 項）：概覽 → 核心概念 → 資料統計 →
-    排序指標 → 預測品質（開了才有）→ 名次分布 → 熱門度基準 → 完整性檢查。
+    ``results`` holds the landed results by catalog name: what the switched-on
+    sections read and nothing else — a switched-off section's result was not
+    computed. Each section gets the ones it declares in ``READS`` and no other,
+    so a section reading a result it did not declare fails here rather than
+    drifting from its declaration. A section returns ``None`` when it has
+    nothing to show. Before any section, a metrics bundle written before the
+    per-item ``recall@K`` rename (``refuse_pre_rename_per_item``) or before the
+    population ledger (``refuse_pre_ledger``) is refused, and so is a result
+    landed before it carried what the report reads instead of computing
+    (``refuse_pre_landed_reads``).
 
     The metadata block holds the model version, the evaluated dates and when
     the page was drawn — nothing counted: the totals and the all-positive

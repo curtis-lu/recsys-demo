@@ -1,21 +1,16 @@
-"""Evaluation pipeline nodes, for every run mode ``pipeline.py`` wires
-(monitoring, ``--post-training``, ``--compare``, ``--compare-only``).
+"""Evaluation pipeline nodes, for every run mode ``pipeline.py`` wires.
 
 Every node body lives in this module. Some are built by factories here
-rather than defined at top level: ``prepare_eval_data``
-(``make_prepare_eval_data_node``), ``restrict_to_common``
-(``make_restrict_to_common_node``, #374), and the three comparison readers
-whose pre-check advice depends on the compare mode (``compare_to_source``,
-``resolve_comparison_display_ks``, ``generate_comparison_report``, #536).
-The architecture audit's AST scan reads top-level definitions only, so it
-does not see those nodes' definitions (ADR-0019 decision 2).
+rather than defined at top level: ``prepare_eval_data``,
+``restrict_to_common``, and the three comparison readers whose pre-check
+advice depends on the compare mode (``compare_to_source``,
+``resolve_comparison_display_ks``, ``generate_comparison_report``). The
+architecture audit's AST scan reads top-level definitions only, so it does
+not see those nodes' definitions (ADR-0019 decision 2).
 
-The mechanisms these nodes call come from three places: ``steps/`` and the
-reports in ``report/``, which nothing outside this pipeline imports, and the
-``recsys_tfb.evaluation`` library. The library also holds ``baselines``,
-although only these nodes call its Spark functions: it scores by popularity,
-the simplest model, and the library holds a module by its role, not by who
-calls it (ADR-0031 principle 6, the 2026-10-25 correction).
+The library also holds ``baselines``, although only these nodes call its
+Spark functions: the library holds a module by its role, not by who calls it
+(ADR-0031 principle 6, the 2026-10-25 correction).
 """
 
 import logging
@@ -173,8 +168,7 @@ def make_prepare_eval_data_node(population_name: str):
         lands as this month's ``enriched_eval_predictions`` partition, where
         the join is computed once and every reader reads it back (ADR-0018
         decision 1). ``segments`` and ``item_categories`` land as
-        ``evaluation_segment_columns`` and ``evaluation_item_categories``;
-        their blocks are declared in ``steps/result_catalog.py``.
+        ``evaluation_segment_columns`` and ``evaluation_item_categories``.
 
         Pre-checks. Each fails because something before this node did not
         supply what it needs:
@@ -221,18 +215,14 @@ def make_prepare_eval_data_node(population_name: str):
         ranked_predictions = restrict_to_model_version(
             logger, ranked_predictions, model_version)
 
-        # Decision — which months: evaluation.snap_date, one date or several
-        # (#374), in both pipeline modes (this node serves monitoring and
+        # Decision — which months: evaluation.snap_date, one date or several,
+        # in both pipeline modes (this node serves monitoring and
         # --post-training), failing loud when it is unset or when any one date
         # has no rows. Chosen wrong, the run would silently evaluate the whole
-        # table, or silently drop a month from a several-date evaluation. Each
-        # date is an ISO date string (YYYY-MM-DD); the snap_date partition
-        # column on ranked_predictions / training_eval_predictions is STRING, so
-        # .cast("string") is a no-op here and stays correct if it is ever DATE.
-        # eval_snap_dates raises when none is configured.
+        # table, or silently drop a month from a several-date evaluation.
         snap_dates = eval_snap_dates(parameters)
-        # The dates as the messages below print them: one date prints as it
-        # always did, several as their list.
+        # The dates as the messages below print them: one date alone, several
+        # as their list.
         snap_date_text = snap_dates[0] if len(snap_dates) == 1 else snap_dates
         logger.info("Filtering predictions to snap_date=%s", snap_date_text)
         # Per date, not on the filtered frame as a whole: with several dates the
@@ -255,7 +245,6 @@ def make_prepare_eval_data_node(population_name: str):
             ranked_predictions, parameters
         )
 
-        # Filter labels to snap_dates in predictions
         labels = labels_in_months_of(labels, ranked_predictions, time_col)
 
         # Pre-check (input): label_table holds at most one row per identity key in
@@ -266,12 +255,11 @@ def make_prepare_eval_data_node(population_name: str):
         # counts line up, which hides the problem better than leaving it (bug 10).
         # Not core/consistency.py: a user-defined source table's quality is not a
         # framework invariant — the same boundary as inference_population's
-        # uniqueness, which is guaranteed by source_etl's `primary_key` +
-        # `quality_checks` and is a deliberate exception to the rule that new
-        # consistency invariants go into `core/consistency.py`.
-        # Checked on `labels` after the
-        # month join, so it counts exactly the rows about to be joined. The
-        # message carries counts only, never key values (they are entity ids).
+        # uniqueness, a deliberate exception to the rule that new consistency
+        # invariants go into `core/consistency.py`.
+        # Checked on `labels` after the month join, so it counts exactly the
+        # rows about to be joined. The message carries counts only, never key
+        # values (they are entity ids).
         n_duplicated_keys = count_duplicated_keys(labels, identity_cols)
         if n_duplicated_keys:
             raise ValueError(
@@ -284,16 +272,13 @@ def make_prepare_eval_data_node(population_name: str):
             )
 
         # Decision — whose label under --post-training: the one
-        # training_eval_predictions stores alongside `score` (written by
-        # training's predict_and_write_test_predictions), not label_table's. It
-        # is exactly what the model's test mAP was scored against. Taking
+        # training_eval_predictions stores alongside `score`, not label_table's.
+        # It is exactly what the model's test mAP was scored against. Taking
         # label_table's instead, post-training metrics would disagree with
         # training's wherever label_table's answer for a key has changed since,
         # with no error. One side has to lose it anyway: the merge join below
         # keys on identity_cols only, so a `label` on both sides ->
-        # AnalysisException: reference 'label' is ambiguous. Monitoring mode
-        # (ranked_predictions) has no `label`, so the condition is False there
-        # and behaviour is unchanged.
+        # AnalysisException: reference 'label' is ambiguous.
         if label_col in ranked_predictions.columns and label_col in labels.columns:
             labels = labels.drop(label_col)
             logger.info(
@@ -304,30 +289,25 @@ def make_prepare_eval_data_node(population_name: str):
 
         # Decision — how labels attach: LEFT JOIN, a missing label counts as 0.
         # It preserves every prediction row so per-customer ranking is over
-        # the model's full candidate set (in dev: cust × 8 prod) regardless of
-        # whether label_table covers that (cust, prod) pair. label_table's
-        # per-group cust_pool semantics (conf/sql/etl/label/label_{ccard,exchange,
-        # fund}.sql; cust must have ≥1 apply event in the group to appear) means
+        # the model's full candidate set regardless of whether label_table
+        # covers that (cust, prod) pair. label_table's per-group cust_pool
+        # semantics (cust must have ≥1 apply event in the group to appear) means
         # an INNER JOIN here would silently shrink each customer's rank set to
         # their per-group sub-products, collapsing baseline / mAP metrics to a
-        # per-group framing the business model never asked for. Missing labels are
-        # filled with 0 ("not bought"), matching the existing build_model_input
-        # convention (pipelines/dataset/steps/model_input.py, LEFT + COALESCE(0)).
+        # per-group framing the business model never asked for. Missing labels
+        # are 0 ("not bought"), as in build_model_input (LEFT + COALESCE(0)).
         eval_predictions = left_join_labels_missing_as_zero(
             ranked_predictions, labels, identity_cols, label_col)
 
         # Decision — a missing rank is computed here, a present one is trusted.
-        # Downstream report rendering selects schema["rank"] from eval_predictions.
-        # When the predictions source is
-        # training_eval_predictions (--post-training mode), `rank` is absent because
-        # the table no longer stores it (Spark mAP recomputes rank internally via
-        # rank_within_query). Add it here when missing so downstream stays uniform;
-        # when present (ranked_predictions source), trust the upstream value.
+        # When the predictions source is training_eval_predictions
+        # (--post-training mode), `rank` is absent because the table does not
+        # store it; with the ranked_predictions source it is present.
         # Today both ways give the same ranks: the tie-break is inference's. The
         # choice shows once one side's rule changes: recomputing would silently
-        # replace the ranking inference published; trusting means a `rank` column ever added to
-        # training_eval_predictions is used as is, tie-break included, with no
-        # message (ADR-0014 records that hazard).
+        # replace the ranking inference published; trusting means a `rank`
+        # column ever added to training_eval_predictions is used as is,
+        # tie-break included, with no message (ADR-0014 records that hazard).
         rank_col = schema["rank"]
         if rank_col not in eval_predictions.columns:
             # Decision — ranked within the query group, where inference ranks
@@ -348,8 +328,8 @@ def make_prepare_eval_data_node(population_name: str):
         # its evaluation.segment_sources override when one is configured,
         # otherwise this run mode's population table, the table the evaluated
         # rows were drawn from, keyed by the base key -- it is an entity-level
-        # table, so it has no column for anything finer. Chosen wrong (the one
-        # fixed table both modes used before bug 6), a monitoring run's
+        # table, so it has no column for anything finer. Chosen wrong (one
+        # fixed table for both modes), a monitoring run's
         # entities missing from that table fell into a segment named "None"
         # that entered the per-segment average with equal weight. Joined onto
         # the final eval table, not label_table, so the label side stays
@@ -398,7 +378,7 @@ def make_prepare_eval_data_node(population_name: str):
         }
 
         # Decision — every row carries the settings its partition is written
-        # under, and the segment columns actually joined (#374). One date's
+        # under, and the segment columns actually joined. One date's
         # partition is written by runs over different date sets, whose JSON
         # above lands in different directories, so only the rows can tell a
         # later reader which run wrote them last; and a column the population
@@ -406,7 +386,7 @@ def make_prepare_eval_data_node(population_name: str):
         eval_predictions = stamp_partition_fingerprint(
             eval_predictions, parameters, joined)
 
-        # Decision — where each item's category comes from (#379): in column
+        # Decision — where each item's category comes from: in column
         # mode, the sample_pool column evaluation.item_categories.column
         # names; otherwise the readers take the hand-written mapping from
         # parameters, so the table is landed empty. Read here, off the
@@ -460,7 +440,7 @@ def make_prepare_eval_data_node(population_name: str):
         # a hand mapping is checked against are the evaluated model's: its
         # preprocessor's list (#379 decision 6), not a recount — the model has
         # codes for exactly those. Landed only in that mode, so a listed
-        # deployment's file is what it was. Read from the optional entry: an
+        # deployment's file does not change. Read from the optional entry: an
         # evaluation that needs no list must not start needing the file.
         if item_list_counted_from_data(parameters):
             item_categories["known_items"] = (
@@ -489,21 +469,12 @@ def compute_row_facts(
 
     Lands as ``evaluation_row_facts`` (``row_facts.json``) and carries
     ``config_fingerprint``. One result for the model and its popularity
-    baseline: the baseline re-scores these same rows (a left join,
-    ``baselines.build_baseline_frame``), so ``compute_metrics`` and
-    ``compute_baseline_metrics`` both take it instead of counting again, and
-    the baseline produces no facts of its own (ADR-0031 decision 8).
+    baseline: the baseline re-scores these same rows, so ``compute_metrics``
+    and ``compute_baseline_metrics`` both take it instead of counting again
+    (ADR-0031 decision 8).
 
     Copies ``joined`` / ``sources`` / ``missing`` of ``segment_columns`` as
-    ``segments``: the report says which table each column came from and which
-    one lacked a column.
-
-    ``n_all_positive_queries`` is logged per grain with its share of the
-    groups holding a positive, and warned about when
-    ``evaluation.query_filter.drop_all_positive_groups`` is off and the share
-    is above ``result_readers.ALL_POSITIVE_WARN_SHARE`` (#376) — both read off
-    the accounts the facts land (``metrics.all_positive_accounts``, #536),
-    which the report reads too.
+    ``segments``.
 
     Pre-checks (inputs): the landed segment list and category table were
     prepared under today's settings (``require_prepared_with_current_config``,
@@ -515,8 +486,8 @@ def compute_row_facts(
     restriction leaves at most that many, so what this refuses is fewer, an
     empty or never-written partition for some date; reading a Hive table
     raises nothing for either. The dates are evaluated together, as one set of
-    query groups (#374). It does not catch a reader that forgot to restrict
-    (that reader is another node); the AST test in ``test_pipeline.py`` does.
+    query groups. It does not catch a reader that forgot to restrict (that
+    reader is another node); the AST test in ``test_pipeline.py`` does.
     """
     require_prepared_with_current_config(
         segment_columns, parameters, item_categories)
@@ -576,16 +547,15 @@ def compute_metrics(
     (``metrics.POPULATION_KEY``).
 
     The result lands as ``evaluation_metrics`` (``metrics.json``, ADR-0018
-    decision 2) and carries ``config_fingerprint``, which ``generate_report``
-    checks before drawing from it.
+    decision 2) and carries ``config_fingerprint``.
 
-    ``evaluation.query_filter.drop_all_positive_groups`` (#376) decides whether
-    the all-positive query groups leave the metrics; how many there are is the
-    row facts' to count and log.
+    ``evaluation.query_filter.drop_all_positive_groups`` decides whether the
+    all-positive query groups leave the metrics; how many there are is the row
+    facts' to count and log.
 
     The category pass ranks by ``item_categories`` (the landed
     ``evaluation_item_categories``) in column mode, by the hand-written
-    mapping in ``parameters`` otherwise (``landed_category_mapping``, #379).
+    mapping in ``parameters`` otherwise (``landed_category_mapping``).
 
     Pre-checks (inputs): the landed segment list, category table and row facts
     were prepared under today's settings (``require_prepared_with_current_config``,
@@ -611,7 +581,7 @@ def compute_metrics(
     # only when evaluation.query_filter.drop_all_positive_groups says so.
     # Read here and passed down, never inside metrics_spark: that module also
     # holds training's test scoring (compute_untruncated_ap), which must not
-    # follow the switch (#376).
+    # follow the switch.
     result = compute_all_metrics(
         eval_predictions, parameters, row_facts,
         segment_columns=segment_columns["joined"],
@@ -635,7 +605,7 @@ def build_popularity_period_counts(
     popularity_period_counts_month_plan,
     parameters: dict,
 ) -> SparkDataFrame:
-    """The periods of ``popularity_period_counts`` this run has to count (#397).
+    """The periods of ``popularity_period_counts`` this run has to count.
 
     Wired only when the positive-rate baseline is (``baseline_scores_by_rate``:
     ``score: rate`` under ``--post-training``).
@@ -680,26 +650,21 @@ def compute_baseline_metrics(
 
     Re-scores each eval_predictions row with the product's historical
     purchase count — or, with ``evaluation.baseline.score: rate`` under
-    ``--post-training`` (#397), its positive rate read off
+    ``--post-training``, its positive rate read off
     ``popularity_period_counts``, restricted to the periods the month plan
     lists (both wired as the seventh and eighth input only then) — then
-    computes the model's metrics on it, ``compute_all_metrics`` as
-    ``compute_metrics`` calls it (ADR-0031 decision 8): the same slices, the
-    same macro. ``row_facts`` is the model's (``compute_row_facts``): the
-    baseline re-scores those rows one for one (``build_baseline_frame``, a
-    left join), so it counts nothing of its own and produces no row facts.
+    computes the model's metrics on it as ``compute_metrics`` does (ADR-0031
+    decision 8): the same slices, the same macro. ``row_facts`` is the
+    model's: the baseline re-scores those rows one for one, so it counts
+    nothing of its own and produces no row facts.
     ``row_facts`` is the second input and ``item_categories`` the sixth in
     both wirings, not appended after the two rate inputs: inputs bind by
     position, and appended they would take ``popularity_period_counts``' slot
-    in the wiring without them (``known-pitfalls.md`` §12). Its category
-    slice ranks by it as ``compute_metrics`` does. Which one is the wiring's call
-    (ADR-0013): monitoring with ``score: rate`` gets no counts and ranks by
-    the count, see ``evaluation/baselines.py``.
-    In the pipeline only while the popularity-baseline section is on (the
-    requirement list, ADR-0031 principle 3); it reads no switch itself.
-
-    Lands as ``baseline_metrics``; its blocks are declared in
-    ``steps/result_catalog.py``.
+    in the wiring without them (``known-pitfalls.md`` §12). Which score ranks
+    is the wiring's call (ADR-0013): monitoring with ``score: rate`` gets no
+    counts and ranks by the count.
+    In the pipeline only while the popularity-baseline section is on
+    (ADR-0031 principle 3); it reads no switch itself.
 
     Pre-checks (inputs): the landed segment list, category
     table, row facts and each evaluated date's partition were prepared under
@@ -723,10 +688,10 @@ def compute_baseline_metrics(
     # Decision — a multi-column item is combined on read (ADR-0027): every
     # count below is per item.
     label_table = combine_item_columns(label_table, schema, "label_table")
-    # Single source of the default (bug 1, ADR-0020): before this helper
-    # existed, this node defaulted to 12 while the report's popularity-baseline
-    # section defaulted to None (printing nothing), so a run relying on the
-    # implicit default silently disagreed with itself about what it had used.
+    # Single source of the default (bug 1, ADR-0020): the report's
+    # popularity-baseline section must not default differently from this node,
+    # or a run relying on the implicit default silently disagrees with itself
+    # about what it used.
     lookback_months = resolve_lookback_months(parameters)
 
     snap_dates = snap_dates_in_frame(eval_predictions, time_col)
@@ -758,8 +723,7 @@ def compute_baseline_metrics(
     )
     # Summed over the evaluated dates' windows; one date reduces to its own.
     purchase_counts = purchase_counts_per_item(counts, parameters)
-    # The same windows per calendar month: the report's monthly popularity
-    # trend.
+    # The same windows per calendar month.
     monthly_counts, window_months_covered = monthly_purchase_counts(
         label_table, snap_dates, lookback_months, parameters)
     baseline_frame = build_baseline_frame(
@@ -767,8 +731,8 @@ def compute_baseline_metrics(
     # Decision — the model's metrics on the baseline's scores, called as
     # compute_metrics calls them (ADR-0031 decision 8): the same segment and
     # category slices, the same macro, and the all-positive query groups
-    # dropped exactly when the model's are (#376). The report reads the
-    # baseline against the model, number for number.
+    # dropped exactly when the model's are. The report reads the baseline
+    # against the model, number for number.
     metrics = compute_all_metrics(
         baseline_frame, parameters, row_facts,
         segment_columns=segment_columns["joined"],
@@ -780,7 +744,7 @@ def compute_baseline_metrics(
     if rate_mode:
         metrics["popularity_rate"] = positive_rate_block(
             popularity_period_counts, snap_dates, lookback_months, parameters)
-    # Decision — land the window as the report prints it (#536): over the
+    # Decision — land the window as the report prints it: over the
     # table it prints (sample_pool's monthly positives in rate mode,
     # label_table's monthly counts otherwise), with each window's covered
     # months where they were counted per window.
@@ -811,24 +775,21 @@ def compute_prediction_quality(
     """The prediction-quality family: every evaluated row as one binary
     prediction, binned by score (ADR-0024).
 
-    Lands as ``prediction_quality_metrics`` (``prediction_quality.json``);
-    its blocks are declared in ``steps/result_catalog.py``. What each number
-    means and cannot mean is in ``evaluation/prediction_quality.py``'s
-    docstring.
+    Lands as ``prediction_quality_metrics`` (``prediction_quality.json``).
+    What each number means and cannot mean is in
+    ``evaluation/prediction_quality.py``'s docstring.
 
     In the pipeline only while ``evaluation.report.sections.prediction_quality``
-    is true (the requirement list, ADR-0031 principle 3; the framework's
-    default conf says false, the ad example's says true): the family costs
-    one extra shuffle over every evaluated row, and the ranking deployments
-    this framework ships with do not read it (ADR-0024 decision 1).
+    is true (ADR-0031 principle 3): the family costs one extra shuffle over
+    every evaluated row, and the ranking deployments this framework ships
+    with do not read it (ADR-0024 decision 1).
 
-    Pre-check (inputs): each evaluated date's partition was
-    written under today's settings (``restrict_to_current_eval_partitions``).
-    It takes ``evaluation_segment_columns`` for that check's ``joined`` list
-    only; it does not segment, so it does not compare that JSON's fingerprint
+    Pre-check (inputs): each evaluated date's partition was written under
+    today's settings (``restrict_to_current_eval_partitions``). It takes
+    ``evaluation_segment_columns`` for that check's ``joined`` list only; it
+    does not segment, so it does not compare that JSON's fingerprint
     (``compute_report_aggregates``' reason). Its result still inherits that
-    JSON's record: the rows it binned are the ones ``prepare_eval_data``
-    wrote under it.
+    JSON's record.
     """
     eval_params = parameters.get("evaluation", {}) or {}
     # Decision — the evaluated dates only, from partitions written under
@@ -861,9 +822,8 @@ def compute_prediction_quality(
     # touched: every row weighs 1.
     #
     # Decision — bins are global and equal-width over this run's own
-    # min..max score, not a fixed [0, 1]: at click rates of 0.1%-1% the scores
-    # crowd the low end and [0, 1] bins would put nearly every row in the
-    # first few. Equal width keeps per-item bins summing to the overall ones
+    # min..max score, not a fixed [0, 1]: the scores crowd the low end and
+    # [0, 1] bins would put nearly every row in the first few. Equal width keeps per-item bins summing to the overall ones
     # and fine bins merging into display bins; quantile bins would break both
     # silently (ADR-0024 decision 4).
     #
@@ -926,10 +886,8 @@ def compute_report_aggregates(
     generate_report`` redraws without recomputing (ADR-0018 decision 2); a
     failure of these scans surfaces here, not in the report node.
 
-    In the pipeline only while the rank-distribution section is on (the
-    requirement list, ADR-0031 principle 3). The result carries
-    ``config_fingerprint``: the JSON lands, and ``generate_report`` refuses
-    one computed under other settings.
+    In the pipeline only while the rank-distribution section is on
+    (ADR-0031 principle 3).
 
     Reads ``enriched_eval_predictions`` but does not compare the
     ``segment_columns.json`` fingerprint with today's settings: it does not
@@ -937,8 +895,8 @@ def compute_report_aggregates(
     today's settings makes the partition fingerprint each evaluated date must
     carry (``restrict_to_current_eval_partitions``), so a slice running only
     this node on a stale partition raises (ADR-0020 bug 6). Its result
-    inherits that JSON's record, so a
-    later switch of the run mode makes it stale too.
+    inherits that JSON's record, so a later switch of the run mode makes it
+    stale too.
     """
     eval_params = parameters.get("evaluation", {}) or {}
     report_cfg = eval_params.get("report", {}) or {}
@@ -976,12 +934,10 @@ def compare_to_baseline(
     parameters: dict,
 ) -> dict:
     """The model's metrics against its popularity baseline's, cell by cell:
-    the comparison layer's first pair (ADR-0031 decisions 4 and 5,
-    ``steps/comparison_layer``). Lands as ``baseline_comparison``
-    (``baseline_comparison.json``); the main report's popularity-baseline
-    section reads the model's value, the baseline's and their difference off
-    it instead of taking the difference itself. No Spark: both inputs are
-    landed JSON.
+    the comparison layer's first pair (ADR-0031 decisions 4 and 5). Lands as
+    ``baseline_comparison`` (``baseline_comparison.json``); the report reads
+    the difference off it instead of taking it itself. No Spark: both inputs
+    are landed JSON.
 
     Every K the metrics hold is compared; the K a table shows is cut later,
     by ``resolve_display_ks`` (decision 16), so a change of display K never
@@ -989,9 +945,8 @@ def compare_to_baseline(
 
     Carries ``config_fingerprint`` like every landed result: it applies no
     setting itself, and records what both inputs were computed with. In the
-    pipeline only while the popularity-baseline section is on (the
-    requirement list, ADR-0031 principle 3), like the baseline's metrics it
-    reads.
+    pipeline only while the popularity-baseline section is on (ADR-0031
+    principle 3), like the baseline's metrics it reads.
 
     Pre-checks (inputs):
 
@@ -1077,9 +1032,8 @@ def resolve_display_ks(
     (``config_fingerprint.APPLIED_SETTINGS``).
 
     ``baseline_comparison`` is wired only while the popularity-baseline
-    section is on (the requirement list, ADR-0031 principle 3); without it
-    there is no baseline block to cut, and the result's
-    ``baseline_comparison`` is ``None``. Keyword-only: a call passing
+    section is on (ADR-0031 principle 3); without it there is no baseline
+    block to cut, and the result's ``baseline_comparison`` is ``None``. Keyword-only: a call passing
     ``(metrics, comparison, parameters)`` must fail rather than read the
     comparison as the settings (``known-pitfalls.md`` §12).
 
@@ -1147,14 +1101,11 @@ def make_generate_report_node(
     producers: Mapping[str, str], run_nodes: Optional[Sequence[str]] = None,
 ):
     """The main report's node, for the results this run's switched-on
-    sections read: ``producers`` maps each to the node that lands it
-    (``pipeline.create_pipeline`` reads both off the requirement list and
-    its own wiring). ``run_nodes`` is the run's nodes in topological order,
-    which a stale result's re-run is chosen from
-    (``config_fingerprint.rerun_node``); ``create_pipeline`` fills it once
-    the pipeline is cut.
+    sections read: ``producers`` maps each to the node that lands it.
+    ``run_nodes`` is the run's nodes in topological order, which a stale
+    result's re-run is chosen from (``config_fingerprint.rerun_node``).
 
-    Built per run because what it reads is (ADR-0031 principle 3, #538): a
+    Built per run because what it reads is (ADR-0031 principle 3): a
     switched-off section's result is neither computed nor loaded, so no
     ``{"enabled": false}`` stub stands in for it, and a file an older run
     left behind for it is never read.
@@ -1165,12 +1116,11 @@ def make_generate_report_node(
         (ADR-0030 decision 8): each keyword is a catalog entry, and only the
         entries the switched-on sections read are passed. The
         rank-distribution section reads the already-aggregated Spark JSON
-        from ``compute_report_aggregates`` (Plan 1.5) so this function stays
-        pure — no SparkDataFrame in the signature, no Spark action in the
-        body. The differences the popularity-baseline section prints are
-        ``baseline_comparison``'s and every table's K columns
-        ``evaluation_display_ks``' (#536): the report takes no difference and
-        cuts no K itself (ADR-0031 principle 1).
+        from ``compute_report_aggregates`` so this function stays pure — no
+        SparkDataFrame in the signature, no Spark action in the body. The
+        report takes no difference and cuts no K itself (ADR-0031
+        principle 1): the differences are ``baseline_comparison``'s and every
+        table's K columns ``evaluation_display_ks``'.
 
         Pre-check (inputs): every result was computed with today's values
         of the settings its step and its inputs applied
@@ -1210,7 +1160,7 @@ def make_restrict_to_common_node(compare_only: bool):
     """Build ``restrict_to_common`` for ``--compare`` or ``--compare-only``.
 
     The mode decides which settings side A's partitions are checked against
-    (``restrict_to_current_eval_partitions``, #374), so ``create_pipeline``
+    (``restrict_to_current_eval_partitions``), so ``create_pipeline``
     passes it in, as it does for ``make_prepare_eval_data_node``:
 
     * ``--compare``: today's settings, like every other reader. The same run
@@ -1223,8 +1173,8 @@ def make_restrict_to_common_node(compare_only: bool):
       with that JSON, the old rows would pass.
     * ``--compare-only``: the settings that JSON records. ``--post-training``
       is inert on that path, so today's value of it says nothing about which
-      population an earlier standard run wrote (ADR-0020 bug 6, #352
-      correction); compared with today's settings, a post-training run's
+      population an earlier standard run wrote (ADR-0020 bug 6); compared
+      with today's settings, a post-training run's
       partitions would be refused whenever the flag is left off.
     """
     def restrict_to_common(
@@ -1252,9 +1202,7 @@ def make_restrict_to_common_node(compare_only: bool):
     return restrict_to_common
 
 
-#: The ``--compare`` shape, checked against today's settings. Kept as a
-#: module-level name for callers that exercise the node outside
-#: ``create_pipeline``.
+#: The ``--compare`` shape, checked against today's settings.
 restrict_to_common = make_restrict_to_common_node(compare_only=False)
 
 
@@ -1277,13 +1225,10 @@ def compute_compare_metrics(
     neither.
 
     Both sides segment by the same columns, and B′ takes A′'s values for
-    them. A segment column is the
-    entity's attribute, joined from a population table by
-    ``prepare_eval_data``, not something the scoring model produced, so the
-    compared source's query groups belong to the same segments as this
-    run's; computed without them, B′ would have no per-segment numbers to
-    compare and its ledger's ``segment_columns`` would always differ from
-    A′'s.
+    them (a segment column is the entity's attribute, not something the
+    scoring model produced). Computed without them, B′ would have no
+    per-segment numbers to compare and its ledger's ``segment_columns`` would
+    always differ from A′'s.
 
     Pre-check (inputs): in column mode, the category table was landed and
     read off today's column (``landed_category_mapping``). The frames are
@@ -1291,7 +1236,7 @@ def compute_compare_metrics(
     """
     category_mapping = landed_category_mapping(item_categories, parameters)
     # Decision — both sides drop the all-positive query groups, or neither,
-    # per evaluation.query_filter.drop_all_positive_groups (#376), read once.
+    # per evaluation.query_filter.drop_all_positive_groups, read once.
     # Each side decides which of its groups are all-positive on its own
     # rows, so the Δ can still compare different sets of groups: one group's
     # candidate rows can differ between the frames, all-positive on one side
@@ -1322,7 +1267,7 @@ def compute_compare_metrics(
             source_name="this run's side of the comparison",
         )
     # Both sides' category passes rank by one table: in column mode the one
-    # this run's side landed (#379; the compared side holds only the common
+    # this run's side landed (the compared side holds only the common
     # items, so it covers them), otherwise the hand-written mapping.
     for frame in (eval_predictions_common, compared):
         facts = _count_row_facts(
@@ -1348,20 +1293,19 @@ def compute_compare_metrics(
 
 def make_compare_to_source_node(run_nodes: Optional[Sequence[str]] = None):
     """Build ``compare_to_source`` for one run: ``run_nodes`` (the run's
-    nodes in topological order, filled by ``create_pipeline``) decides only
-    where its pre-check sends a re-run, and which inherited records it
-    compares (``require_comparison_inputs_current``). Built without one, it
-    uses the declarations' order and compares every record."""
+    nodes in topological order) decides only where its pre-check sends a
+    re-run, and which inherited records it compares
+    (``require_comparison_inputs_current``). Built without one, it uses the
+    declarations' order and compares every record."""
     def compare_to_source(
         compare_metrics_a: dict,
         compare_metrics_b: dict,
         parameters: dict,
     ) -> dict:
         """This run's side against the compared source, cell by cell, every
-        K: the comparison layer's second pair (ADR-0031 decisions 4 and 5,
-        ``steps/comparison_layer``), landed as ``source_comparison``. The
-        comparison report reads each side and their difference off it
-        instead of taking the difference itself. No Spark.
+        K: the comparison layer's second pair (ADR-0031 decisions 4 and 5),
+        landed as ``source_comparison``. The comparison report reads the
+        difference off it instead of taking it itself. No Spark.
 
         Carries ``config_fingerprint``, the compare source it was computed
         against (``COMPARE_SOURCE_KEY``), and the four annotations
@@ -1389,10 +1333,10 @@ def make_compare_to_source_node(run_nodes: Optional[Sequence[str]] = None):
             (compare_metrics_a, compare_metrics_b))
         comparison[COMPARE_SOURCE_KEY] = compare_source_identity(parameters)
         # Unlike the baseline, the two sides need not agree: each keeps its
-        # own rows (with event rows their "all" can differ, #434). Their
-        # segment columns are the same since #537 (compute_compare_metrics
-        # gives the compared side this run's), so a difference there is a
-        # wiring error worth the log line.
+        # own rows (with event rows their "all" can differ). Their segment
+        # columns are the same (compute_compare_metrics gives the compared
+        # side this run's), so a difference there is a wiring error worth the
+        # log line.
         differing = populations_that_differ(comparison)
         logger.info(
             "Compared this run with the compared source: %d overall keys, %d "
@@ -1419,9 +1363,8 @@ def make_resolve_comparison_display_ks_node(
         """The K columns every per-K table of the comparison report shows,
         at each grain cut at what this run's side's ``"all"`` stands for (bug
         8, ADR-0020; ADR-0031 decision 10), landed as
-        ``comparison_display_ks`` (shape in ``steps/display_ks``). After the
-        comparison (decision 16): a changed display K re-runs this node and
-        the report only. No Spark.
+        ``comparison_display_ks``. After the comparison (decision 16): a
+        changed display K re-runs this node and the report only. No Spark.
 
         Its fingerprint carries the display key it reads
         (``evaluation.report.display.compare_k``), so it alone goes stale
@@ -1445,7 +1388,7 @@ def make_resolve_comparison_display_ks_node(
         # this run's side's "all" only (steps/display_ks.comparison_cut says
         # why one bound): the per-item ones (map_attr, recall; decision 16
         # item 7) and whatever the section lists name. No table prints
-        # every key since #537, so no per-side cut of keys either.
+        # every key, so no per-side cut of keys either.
         def cut(grain: dict) -> dict:
             return comparison_cut(
                 grain[POPULATION_KEY][ALL_K_KEY][THIS], compare_k)
@@ -1525,14 +1468,12 @@ def validate_enriched_eval_predictions_present(
     """Fail loud if ``enriched_eval_predictions`` holds no rows for an
     evaluated date under this ``model_version``, or rows another run wrote.
 
-    A zero-output gate: it passes nothing on. ``restrict_to_common`` reads the
-    table and keeps the evaluated dates itself, like every other reader
-    (ADR-0018 decision 1). The catalog has already pruned the table to this
-    ``model_version`` via ``partition_filter``; this node keeps the evaluated
-    dates and asserts each one has a row, otherwise raises
+    A zero-output gate: it passes nothing on. The catalog has already pruned
+    the table to this ``model_version`` via ``partition_filter``; this node
+    asserts each evaluated date has a row, otherwise raises
     ``DataConsistencyError`` naming the dates without rows and what to run
     first. Per date: with several dates configured, the kept rows are not
-    empty as soon as one month has rows (#374).
+    empty as soon as one month has rows.
 
     It also refuses a date whose partition was rewritten since by a run under
     other settings, or with other segment columns joined, than
@@ -1551,9 +1492,8 @@ def validate_enriched_eval_predictions_present(
     node runs (``__main__.py::_compare_only_input_errors``). What only this
     gate sees is a partition that is listed but holds no rows.
 
-    Used only in ``--compare-only`` mode. In the other modes
-    ``prepare_eval_data`` writes the partition earlier in the same run, so this
-    gate cannot fire.
+    In the other modes ``prepare_eval_data`` writes the partition earlier in
+    the same run, so this gate cannot fire.
 
     Its raise is a pre-check (input): an earlier run was to write those rows,
     and nothing in this run computed them.

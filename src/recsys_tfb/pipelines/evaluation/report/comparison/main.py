@@ -1,7 +1,6 @@
 """The comparison report (``report_comparison.html``): its sections in page
 order (:data:`SECTIONS`) and the page around them. Each section is a module
-of this package; this module only orders them and adds the metadata block —
-the same arrangement as the main report's ``report/main.py``.
+of this package; this module only orders them and adds the metadata block.
 
 The sections only read and draw (ADR-0031 principle 1): every difference is
 the comparison layer's, every K list the cut's, and a value missing from
@@ -43,8 +42,7 @@ SECTIONS = (
 )
 
 #: Every result the sections read, by catalog name: what
-#: ``generate_comparison_report`` must be wired to (``test_pipeline.py``
-#: checks the two equal).
+#: ``generate_comparison_report`` must be wired to.
 READS = tuple(dict.fromkeys(name for section in SECTIONS
                             for name in section.READS))
 
@@ -62,11 +60,10 @@ def assemble_comparison_report(
     """Assemble every section that has something to show, in
     :data:`SECTIONS` order, into the final HTML string.
 
-    ``results`` holds the landed results by catalog name
-    (``generate_comparison_report`` builds it). Each section gets the ones
-    it declares in ``READS`` and no other, so a section reading a result it
-    did not declare fails here rather than drifting from its declaration. A
-    section returns ``None`` when it has nothing to show.
+    ``results`` holds the landed results by catalog name. Each section gets
+    the ones it declares in ``READS`` and no other, so a section reading a
+    result it did not declare fails here rather than drifting from its
+    declaration. A section returns ``None`` when it has nothing to show.
 
     The metadata names the two sides as today's parameters do — this run by
     its ``model_version``, the compared source by its ``label`` — so a

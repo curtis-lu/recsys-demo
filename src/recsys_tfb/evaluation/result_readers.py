@@ -25,17 +25,14 @@ import math
 # ---------------------------------------------------------------------------
 
 #: Top-level key of the row facts (``metrics_spark.compute_row_facts``,
-#: ``row_facts.json``) and of their ``category`` grain (#376; in the metrics
-#: bundle before #535): how many of the query groups holding a
-#: positive are *all-positive* — every row carries the same positive label
-#: (with 0/1 labels: every row positive; the rule is
-#: ``metrics_spark._all_positive_group``), so every per-query ranking metric
-#: (``map@K`` / ``precision@K`` / ``recall@K``) comes out the same whatever
-#: the order (with 0/1 labels the untruncated AP is 1; ``map@K`` below the
-#: group's row count is K / rows, ``precision@K`` above it is rows / K). The
-#: per-item metrics (``map_attr@K`` / ``recall@K`` / ``mean_pos``) are not:
-#: with K below the row count, which rows reach the top K still decides which
-#: items get the credit. Always written, whether or not
+#: ``row_facts.json``) and of their ``category`` grain: how many of the query
+#: groups holding a positive are *all-positive* — every row carries the same
+#: positive label (the rule is ``metrics_spark._all_positive_group``), so
+#: every per-query ranking metric (``map@K`` / ``precision@K`` /
+#: ``recall@K``) comes out the same whatever the order. The per-item metrics
+#: (``map_attr@K`` / ``recall@K`` / ``mean_pos``) do not: with K below the row
+#: count, which rows reach the top K still decides which items get the
+#: credit. Always written, whether or not
 #: ``evaluation.query_filter.drop_all_positive_groups`` drops them, because the
 #: report reads only the written facts. ``n_excluded_queries`` keeps counting
 #: only the zero-positive groups.
@@ -46,17 +43,17 @@ ALL_POSITIVE_KEY = "n_all_positive_queries"
 #: frame of event rows.
 WIDEST_GROUP_KEY = "widest_group_rows"
 
-#: Row facts key, at each grain (#536): the query groups holding a positive,
+#: Row facts key, at each grain: the query groups holding a positive,
 #: ``n_queries - n_excluded_queries`` (``metrics.n_groups_with_positive``).
 #: ``None`` only when either count is missing.
 N_WITH_POSITIVE_KEY = "n_groups_with_positive"
 
-#: Row facts key, at each grain (#536): the all-positive groups' share of the
+#: Row facts key, at each grain: the all-positive groups' share of the
 #: groups holding a positive (``metrics.all_positive_share``); ``None`` when
 #: no group holds a positive.
 ALL_POSITIVE_SHARE_KEY = "all_positive_share"
 
-#: Row facts key, at each grain (#536): whether that share warns
+#: Row facts key, at each grain: whether that share warns
 #: (``metrics.all_positive_share_warns``) — only with
 #: ``evaluation.query_filter.drop_all_positive_groups`` off, and only strictly
 #: above :data:`ALL_POSITIVE_WARN_SHARE`. The one fact of the row facts that
@@ -65,7 +62,7 @@ ALL_POSITIVE_SHARE_KEY = "all_positive_share"
 ALL_POSITIVE_WARNS_KEY = "all_positive_warns"
 
 #: With the switch off, the log and the report warn when the all-positive
-#: groups are more than this share of the groups holding a positive (#376).
+#: groups are more than this share of the groups holding a positive.
 #: A constant, not a setting. Here because the report prints it beside the
 #: landed warning, and its share format reads it (:func:`format_share`).
 ALL_POSITIVE_WARN_SHARE = 0.10
@@ -78,7 +75,7 @@ def format_share(share: float) -> str:
     and one decimal rounds it down to the threshold — 1004 of 10000 printed
     as ``10.0%`` beside "above 10%". Then more decimals, at most four, until
     the printed value is above the threshold too (``10.04%``). One function,
-    so the log and the report cannot print the same share two ways (#376).
+    so the log and the report cannot print the same share two ways.
     Here, not in the report's modules: the evaluation node's log and the
     report both print it, and neither side may import the other.
     """
@@ -90,11 +87,10 @@ def format_share(share: float) -> str:
     return text
 
 
-#: The node a result landed before #534 / #535 / #536 is re-computed from,
-#: named in every message that refuses such a result (the report's refusals
-#: and the computation layer's pre-checks): it is the first node of the main
-#: line whose slice re-lands the row facts, the metrics and the baseline.
-#: One name, so a rename of the node edits one line.
+#: The node an outdated result (one landed without the row facts or the
+#: ledger) is re-computed from, named in every message that refuses such a
+#: result: the first node of the main line whose slice re-lands the row facts,
+#: the metrics and the baseline. One name, so a rename edits one line.
 LEDGER_RERUN_NODE = "compute_row_facts"
 
 
@@ -115,15 +111,14 @@ LEDGER_RERUN_NODE = "compute_row_facts"
 POPULATION_KEY = "population"
 
 #: Population ledger key: the K ``evaluation.k_values: "all"`` resolved to
-#: (``resolved_all_k``). Recorded on every bundle since #535; before, only
-#: when the ranked frame held one row per event, and as a top-level key.
+#: (``resolved_all_k``).
 ALL_K_KEY = "all_k"
 
 #: Population ledger key: the items ``macro_avg.by_item`` averaged over,
 #: sorted — every item of ``per_item`` with ``n_pos`` at least
 #: ``evaluation.metric.min_positives`` (``metrics_spark._compute_core``). The
 #: reports count it (:func:`macro_item_count`) instead of applying that rule
-#: a second time (#536).
+#: a second time.
 MACRO_ITEMS_KEY = "macro_items"
 
 #: Population ledger keys: the query groups the ranking metrics scored —
@@ -133,12 +128,12 @@ MACRO_ITEMS_KEY = "macro_items"
 N_SCORED_WITH_POSITIVE_KEY = "n_scored_queries_with_positive"
 N_SCORED_WITHOUT_POSITIVE_KEY = "n_scored_queries_without_positive"
 
-#: Population ledger key (#536): the segment columns the bundle was computed
-#: with, the ``segment_columns`` ``compute_all_metrics`` was handed — its
+#: Population ledger key: the segment columns the bundle was computed with,
+#: the ``segment_columns`` ``compute_all_metrics`` was handed — its
 #: ``per_segment`` slices by the first. The comparison layer reads it to tell
 #: two sides computed with different segment columns (ADR-0031 decision 4's
-#: fourth case). Until #537 the compared side of ``--compare`` was computed
-#: with none; it now borrows this run's side's (``compute_compare_metrics``).
+#: fourth case). The compared side of ``--compare`` borrows this run's side's
+#: (``compute_compare_metrics``).
 SEGMENT_COLUMNS_KEY = "segment_columns"
 
 
@@ -146,7 +141,7 @@ SEGMENT_COLUMNS_KEY = "segment_columns"
 # The popularity baseline (``compute_baseline_metrics``)
 # ---------------------------------------------------------------------------
 
-#: Top-level key of ``baseline_metrics.json`` (#536): the lookback window the
+#: Top-level key of ``baseline_metrics.json``: the lookback window the
 #: popularity was counted over, as the report prints it, in every mode
 #: (count or rate, one evaluated date or several) —
 #: ``baselines.popularity_window``. Holds ``lookback_months`` and ``score``
@@ -158,7 +153,7 @@ POPULARITY_WINDOW_KEY = "popularity_window"
 
 
 # ---------------------------------------------------------------------------
-# A comparison (``pipelines/evaluation/steps/comparison_layer``, #536)
+# A comparison (``pipelines/evaluation/steps/comparison_layer``)
 # ---------------------------------------------------------------------------
 # The full shape is in that module's docstring. In short: per grain, a block
 # per metrics block (:data:`COMPARED_BLOCKS`), each ``{ENTRIES: {THIS, REFERENCE},
@@ -186,7 +181,7 @@ COMPARED_BLOCKS = ("overall", "per_item", "macro_by_item", "per_segment")
 
 #: The K label of the cell pairing each side's ``"all"`` (``name@all``): the
 #: two sides' ``"all"`` can resolve to different K (:data:`ALL_K_KEY`), so
-#: their keys never pair up by name (#434).
+#: their keys never pair up by name.
 ALL_LABEL = "all"
 
 #: Annotation key: the query groups each side scored,
@@ -201,7 +196,7 @@ COMPARED_ANNOTATIONS = (ALL_K_KEY, MACRO_ITEMS_KEY, SCORED_QUERIES_KEY,
 
 
 # ---------------------------------------------------------------------------
-# The K each table shows (``pipelines/evaluation/steps/display_ks``, #536)
+# The K each table shows (``pipelines/evaluation/steps/display_ks``)
 # ---------------------------------------------------------------------------
 # One block per result the tables are drawn from, keyed by its catalog name
 # (``evaluation_metrics``, ``baseline_comparison``); the comparison report's
@@ -225,15 +220,15 @@ DISPLAY_METRICS_SECTION = "metrics_section"
 # The prediction-quality payload (``prediction_quality.build_payload``)
 # ---------------------------------------------------------------------------
 
-#: Key under ``overall`` and ``per_item`` of ``prediction_quality.json``
-#: (#536): the report's display bin table (``prediction_quality
-#: .coarse_bin_table``), as :func:`frame_to_json` long frames; under
-#: ``per_item`` one table for every listed item, the item column first.
+#: Key under ``overall`` and ``per_item`` of ``prediction_quality.json``: the
+#: report's display bin table (``prediction_quality.coarse_bin_table``), as
+#: :func:`frame_to_json` long frames; under ``per_item`` one table for every
+#: listed item, the item column first.
 DISPLAY_BINS_KEY = "display_bins"
 
-#: Key under ``overall`` of ``prediction_quality.json`` (#536): the threshold
-#: sweep the report draws (``prediction_quality.threshold_sweep``, one row
-#: per non-empty fine bin), as a :func:`frame_to_json` long frame.
+#: Key under ``overall`` of ``prediction_quality.json``: the threshold sweep
+#: the report draws (``prediction_quality.threshold_sweep``, one row per
+#: non-empty fine bin), as a :func:`frame_to_json` long frame.
 THRESHOLD_SWEEP_KEY = "threshold_sweep"
 
 
@@ -254,12 +249,9 @@ def metric_params(parameters: dict) -> dict:
     Fallback: a missing ``evaluation`` / ``metric`` block, a missing key, or
     an explicit ``None`` value all resolve to ``weight_alpha=0.0``,
     ``min_positives=0``, ``shrinkage_k=0.0`` — the plain equal-weight macro.
-    Value domains are validated by A15, not here.
 
-    No truncation depth: #537 removed it from the block (the macro is read
-    untruncated, at "all"; A63 refuses the old key), so the three values pass
-    straight to ``metrics.macro_from_per_item`` / ``metrics_spark
-    .macro_average``. Any other key under the block is dropped here.
+    No truncation depth: the macro is read untruncated, at "all" (A63 refuses
+    the old key). Any other key under the block is dropped here.
     """
     m = ((parameters.get("evaluation", {}) or {}).get("metric", {}) or {})
     return {
@@ -272,7 +264,7 @@ def metric_params(parameters: dict) -> dict:
 def drop_all_positive_groups(parameters: dict) -> bool:
     """Read ``evaluation.query_filter.drop_all_positive_groups``; off unless ``True``.
 
-    The one reader of the switch (#376). A missing block, a missing key or an
+    The one reader of the switch. A missing block, a missing key or an
     explicit ``None`` all mean off. Not under ``evaluation.metric``:
     :func:`metric_params` returns three fixed keys and drops any other, so a
     switch written there would silently do nothing. The value domain (a bool)
@@ -290,25 +282,23 @@ def drop_all_positive_groups(parameters: dict) -> bool:
 def resolved_all_k(bundle: dict) -> int:
     """The K a metrics bundle's ``"all"`` values are stored at (``map@{K}``).
 
-    The one reader of that number (#434). ``"all"`` has one producer
-    (``metrics_spark._resolve_all_k``) and several readers — the main report
-    and the comparison report, and training's test mAP until ADR-0028 took K
-    out of it. Each used to count the items itself; with ``event`` declared
-    the producer's K is the widest query group, not the item count, so every
-    lookup missed and nothing raised (a blank ``map@all`` cell, a test mAP
-    logged as 0.0).
+    The one reader of that number. ``"all"`` has one producer
+    (``metrics_spark._resolve_all_k``) and several readers. A reader counting
+    the items itself misses with ``event`` declared: the producer's K is the
+    widest query group, not the item count, so every lookup misses and
+    nothing raises (a blank ``map@all`` cell).
 
     Read off the bundle's own population ledger (:data:`POPULATION_KEY`).
     The comparison report reads each side at its own; the main report reads
     the baseline at the model's, which is the same K by construction — the
     baseline re-scores the model's rows and counts off their row facts. The
-    keys stay the resolved number, not ``map@all``
-    (ADR-0031 decision 15, checked in #535): two sides whose ``"all"``
-    resolved to different K then never pair up under one name.
+    keys stay the resolved number, not ``map@all`` (ADR-0031 decision 15):
+    two sides whose ``"all"`` resolved to different K then never pair up under
+    one name.
 
-    Raises ``KeyError`` on a bundle with no ledger, one written before #535:
-    the report refuses such a file first (``pipelines/evaluation/report/
-    sections/shared.refuse_pre_ledger``), with the node to re-run.
+    Raises ``KeyError`` on a bundle with no ledger: the report refuses such a
+    file first (``pipelines/evaluation/report/sections/shared.refuse_pre_ledger``),
+    with the node to re-run.
     """
     return int(bundle[POPULATION_KEY][ALL_K_KEY])
 
@@ -320,7 +310,7 @@ def macro_item_count(bundle: dict) -> int:
     bug 5 (ADR-0020): an item with no positive this period has no
     ``per_item`` cell, and ``evaluation.metric.min_positives`` drops more, so
     the macro's denominator moves month to month; the reports disclose it.
-    Counted off the list the computation landed (#536), not by applying
+    Counted off the list the computation landed, not by applying
     ``min_positives`` to ``per_item`` again. Raises ``KeyError`` on a bundle
     with no ledger, like :func:`resolved_all_k`.
     """

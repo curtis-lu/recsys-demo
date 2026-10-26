@@ -6,16 +6,12 @@ Two source kinds:
     ``--compare-only`` mode; requires the B-side model_version to have also
     been through ``evaluation`` previously). Other accepted values for
     ``source``: ``ranked_predictions`` (inference output) or
-    ``training_eval_predictions`` (training pipeline's test-set predictions
-    — useful for ``--post-training`` mode without re-running inference).
+    ``training_eval_predictions`` (training pipeline's test-set predictions).
   * external_hive  — read external Hive table with column rename + prod_mapping.
-
-The full source dict is staged at ``parameters['evaluation']['compare']`` by
-the CLI dispatcher (``__main__.py``).
 
 Also which of its keys decide what B holds (``compare_source_identity``): every
 comparison artifact records them, so a redraw after the source changed is
-refused rather than printed under the new source's label (#536).
+refused rather than printed under the new source's label.
 """
 
 from __future__ import annotations
@@ -69,13 +65,10 @@ def compare_source_identity(parameters: dict) -> dict:
     names B in the report, so a relabelled source redraws without a re-run.
     An unknown kind (the loader refuses it) keeps every key but ``label``.
 
-    Defaults are filled in before anything is compared — ``source`` →
-    :data:`DEFAULT_MODEL_VERSION_SOURCE`, ``unmapped_policy`` →
-    :data:`DEFAULT_UNMAPPED_POLICY`, ``prod_mapping`` → ``{}``, the values the
-    loader takes for them — so writing a default out, or deleting it, is the
-    same B and refuses no redraw. The fingerprint compares declared values
-    instead and errs towards raising (``config_fingerprint``); here the
-    loader's own constants are the defaults, so the two cannot drift apart.
+    Defaults are filled in before anything is compared, so writing a default
+    out, or deleting it, is the same B and refuses no redraw. They are the
+    loader's own constants (:data:`DEFAULT_MODEL_VERSION_SOURCE`,
+    :data:`DEFAULT_UNMAPPED_POLICY`), so the two cannot drift apart.
     """
     src = ((parameters.get("evaluation") or {}).get("compare")) or {}
     kind = src.get("kind")
@@ -104,7 +97,7 @@ def compare_source_identity(parameters: dict) -> dict:
 def load_compare_predictions(parameters: dict, spark: SparkSession) -> SparkDataFrame:
     """Dispatch on ``compare.kind`` and return raw Model B predictions.
 
-    B is kept to the evaluated dates, one or several (#374), and every one of
+    B is kept to the evaluated dates, and every one of
     them must have rows: a month B lacks would otherwise drop out of the
     common query groups and the comparison would silently cover fewer months
     than configured.
@@ -133,9 +126,8 @@ def _no_rows_for(
 ) -> str | None:
     """``snap_date=…`` naming the evaluated dates ``df`` has no row for, or None.
 
-    One configured date prints as it always did; with several, the missing
-    ones print as a list. ``time_partitioned``: see
-    ``eval_snap_dates_without_rows``.
+    One configured date prints bare; with several, the missing ones print as a
+    list. ``time_partitioned``: see ``eval_snap_dates_without_rows``.
     """
     missing = eval_snap_dates_without_rows(
         df, parameters, time_partitioned=time_partitioned)
@@ -146,13 +138,11 @@ def _no_rows_for(
     return f"snap_date(s) {missing}"
 
 
-# Hive tables allowed as model_version compare source. All three share the
-# (cust_id, snap_date, prod_name, score, model_version) projection used by
-# restrict_to_common. ``enriched_eval_predictions`` additionally carries
-# label / rank / segment columns; ``restrict_to_common`` is schema-agnostic
-# (re-ranks after the universe shrink, and replaces any carried label with
-# A's — ADR-0020 bug 7). Kept here so the loader can
-# fail-loud even if A11 validation was bypassed (e.g. in tests).
+# Hive tables allowed as model_version compare source.
+# ``enriched_eval_predictions`` additionally carries label / rank / segment
+# columns; ``restrict_to_common`` re-ranks after the universe shrink and
+# replaces any carried label with A's (ADR-0020 bug 7). Kept here so the loader
+# can fail-loud even if A11 validation was bypassed.
 MODEL_VERSION_SOURCES = (
     "enriched_eval_predictions",
     "ranked_predictions",
@@ -173,8 +163,8 @@ def compare_source_table(parameters: dict, source: str) -> str:
     ``partition_filter`` pins this run's ``model_version``, not B's. Without
     one (unit tests, or a catalog that does not declare the entry), the entry
     name under ``hive.db``; with ``hive.db`` empty too, the bare name, which
-    Spark resolves in its current database (temp views included — unit tests
-    use that). A set ``hive.db`` is required whenever no default database is
+    Spark resolves in its current database (temp views included). A set
+    ``hive.db`` is required whenever no default database is
     configured in ``spark.sql.catalog``.
     """
     table = (parameters.get(COMPARE_SOURCE_TABLES_KEY) or {}).get(source)
@@ -201,8 +191,8 @@ def _load_model_version(
             f"compare model_version={mv!r} has no rows for {no_rows} "
             f"in source={source!r} (table {table_name})"
         )
-    # enriched_eval_predictions carries each partition's settings fingerprint
-    # (#374). B's are the settings of B's own run, so they are not checked
+    # enriched_eval_predictions carries each partition's settings fingerprint.
+    # B's are the settings of B's own run, so they are not checked
     # against this run's; the column is dropped so it does not travel on.
     df = restrict_to_eval_snap_dates(df, parameters).drop(
         PARTITION_FINGERPRINT_COLUMN)
@@ -223,7 +213,6 @@ def _load_external_hive(
     identity_cols = schema["identity_columns"]
 
     raw = spark.table(table)
-    # Column rename: alias external names → our canonical schema names
     df = raw.select(*[F.col(ext).alias(internal) for internal, ext in cols.items()])
     # A multi-column item is combined once the columns carry our names, and
     # before prod_mapping, whose keys are item values (ADR-0027). Unless the
