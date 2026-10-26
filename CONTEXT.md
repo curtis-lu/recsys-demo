@@ -205,8 +205,8 @@ evaluation 以 `inference_population` 當母體的評估模式。
 一個 item 自己的 @K 指標：把「這個 item 在某個 query group 排進前 K 名」當成推薦了它一次。recall@K＝它的正例裡排進前 K 名的比例；precision@K（尚未實作）＝推薦了它的那些次裡是正例的比例。兩者算進的 query group 不同：recall@K 只用到正例列，而無正例的 query group 裡沒有正例列，所以算不算它們結果都一樣；precision@K 的分母是推薦了它的次數，算進全部的 query group，包含無正例的，抽樣留下的照 1／r 加權（r 與權重見 **無正例的 query group**；擁有者 2026-10-23 定案，見 #541）。K 跟 query group 層級的 @K 是同一個 K；macro 是對 item 平均。
 _Avoid_: 把 K 當成「替這個 item 挑幾個 entity」；把 per-item 的 recall 叫 hit rate（ADR-0031 決定 7 之前程式裡叫 `hit_rate@K`）
 
-**hit_rate@K**（ADR-0031，尚未實作）:
-有正例的 query group 裡，前 K 名至少有一個正例的比例。只有 query group 層級，沒有 per-item 版本。
+**hit_rate@K**（ADR-0031）:
+有正例的 query group 裡，前 K 名至少有一個正例的比例。只有 query group 層級，沒有 per-item 版本；跟其他 query group 層級的指標一樣，有整體、各分群、大類。
 _Avoid_: 跟 per-item 的 recall@K 混用（ADR-0031 決定 7 之前，程式裡叫 `hit_rate@K` 的 per-item 指標是後者）
 
 **大類**:

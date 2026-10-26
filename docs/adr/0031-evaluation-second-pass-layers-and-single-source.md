@@ -359,7 +359,7 @@ diagnosis/metric/    contract.py
 - **更正（#533 實作時發現，2026-10-23）：決定 6、7 的指標目錄。**
   - 目錄 `evaluation/metric_catalog.py` 先只收前兩種算法的指標。第三種（把分數當機率，預測品質段的分箱 `pr_auc`／`roc_auc`）由 `evaluation/prediction_quality.py` 用自己的函式算，沒有可讓公式指名的共用數字；等那種算法備齊共用數字時再進目錄。
   - 決定 6 要 query group 的 `recall@K` 與 per-item 的那一個「報表顯示名要分得出來」。#533 要求兩份 HTML 一字不差，所以目錄裡兩者的顯示名都照今天的報表寫 `recall`；分開它們留給改名那一步（per-item 的 `hit_rate@K` 改叫 `recall@K` 時），那一步的驗收本來就有這一條。#534 已分開，見決定 7 的更正；同一則更正也寫了第三種算法的共用數字是什麼。
-  - 決定 11 讓各段自己宣告「要比哪些」，所以熱門度基準段與比較報表各留一份「要比的目錄條目」清單；衡量指標段則對目錄裡每個指標都畫表（per-item 那塊既有的兩張表照舊，其餘每個 per-K 的 item 指標各一張）。照決定 11，新指標要出現在比較表裡，仍要改那兩份清單；這跟決定 1「加指標兩份報表的程式不改」衝突，留給驗收那張票定（例如改成在目錄上加「要比」的標記，決定 16 第 1 項的模型選擇指標標記是同一種做法）。
+  - 決定 11 讓各段自己宣告「要比哪些」，所以熱門度基準段與比較報表各留一份「要比的目錄條目」清單；衡量指標段則對目錄裡每個指標都畫表（per-item 那塊既有的兩張表照舊，其餘每個 per-K 的 item 指標各一張）。照決定 11，新指標要出現在比較表裡，仍要改那兩份清單；這跟決定 1「加指標兩份報表的程式不改」衝突，留給驗收那張票定（例如改成在目錄上加「要比」的標記，決定 16 第 1 項的模型選擇指標標記是同一種做法）。#541 的答案：新指標預設不進那兩份清單，見決定 7 的更正（#541）。
 
 **更正（#540 開工前，擁有者 2026-10-25 決定）：根層放什麼，看模組的角色，不看今天誰在 import 它。**
 
@@ -476,7 +476,7 @@ diagnosis/metric/    contract.py
 
 **驗收第一列改寫（2026-10-22，決定 16）。** 「衡量指標」段改叫「排序指標」，而且表的欄是 K；能顯示的 K 由 `evaluation.k_values` 決定，多一個 K 要改設定、重跑 Spark，測不到「只改一段」。所以改成「資料統計段的表加一欄 entity 數」：各期、各 item、各分群的 entity 數今天已經落地在 `metrics.json` 的 `dataset_overview`，決定 4 之後搬進列的事實，加這一欄是純呈現的改動。及格線不變：只改那一段的檔，加測試。
 
-驗收用的指標是擁有者列的這批：precision@K、F1@K、AUC-ROC、AUC-PR，各要整體、per-item、macro；加上 query group 層級的 hit_rate@K（只有整體，沒有 per-item）。今天已經有的（整體的 precision@K、整體的分箱 AUC）照舊。定義的邊界情況（例如某個 item 從沒排進前 K 名時 precision 怎麼算、macro 怎麼處理、per-item 那一種算進哪些 query group）在那張票開工時定。
+驗收用的指標是擁有者列的這批：precision@K、F1@K、AUC-ROC、AUC-PR，各要整體、per-item、macro；加上 query group 層級的 hit_rate@K（只有整體，沒有 per-item）。「只有整體」的意思是沒有 per-item 版本，分群與大類照算，見決定 7 的更正（#541）。今天已經有的（整體的 precision@K、整體的分箱 AUC）照舊。定義的邊界情況（例如某個 item 從沒排進前 K 名時 precision 怎麼算、macro 怎麼處理、per-item 那一種算進哪些 query group）在那張票開工時定。
 
 **拿掉一段要連開關一起拿（作者補充）。** 一段有開關時（例如 `report.sections.prediction_quality`），A34 要求開關清單跟報表讀的段一一對應，那份清單放在 `core/`（`EVALUATION_REPORT_SECTIONS`），因為 `core/` 不能 import 報表層；各份設定檔也宣告了它。所以拿掉一段時，那個開關要從 `core/` 的清單與設定檔一起拿掉，A34 會指出漏了哪裡。這兩處算進及格線。
 
@@ -574,9 +574,17 @@ diagnosis/metric/    contract.py
 - **AUC 這輪維持分箱版**（ADR-0024）。補上全部 item 與 macro 是驗收那張票的事；精確版不在這輪。決定 16 第 3 項加的 pooled AP 與 macro per-item AP 是擁有者知情下的例外：它們在原始分數上算，是三種算法之外的第四種，用 training 已有的 Spark 計算，跟分箱 AUC 並存，不是取代。
 - **更正（#534 實作時發現，2026-10-23）。**
   - **沒有正例的 query group 不記。** 上面寫「有正例與無正例的 query group 分開記」，但 `--post-training` 評的 test 表預設不留沒有正例的組（`dataset.test_zero_positive_group_ratio` 預設 0）；設了也只是抽樣，留下的列帶權重 1／r（ADR-0025）。只有監控模式有完整的。直接數列數，抽樣時會算錯。擁有者 2026-10-23 決定：每個 item 那一種只看 query group 那種算進的組，在這些組裡看該 item 的全部列，不只正例列。#541 若要把沒有正例的組算進 per-item 指標，要回來改算法，並一起決定權重（決定 16 已把「evaluation 的列帶不帶權重」留給 #541）。
-  - **另外兩種算法的共用數字本來就齊，這張票不改它們的程式。** query group 那種的 `ap_sum`、`hits`、`total_rel`、`K` 已經算得出 F1@K（＝2·hits／(K＋total_rel)）與 query group 層級的 hit_rate@K（hits ≥ 1）。把分數當機率那種的共用數字，是 `prediction_quality.aggregate_score_bins` 的分箱表：Spark 端每個 item 都有，只有列數最多的 `top_n` 個收回 driver（ADR-0024 決定 6）。全部 item 的 per-item AUC 要放寬 `top_n` 還是改在 Spark 算，#541 定。數字齊了，不等於「之後加指標只是在目錄寫公式」：目錄今天只有一種公式寫法 `Ratio`（兩個共用數字相除）。#541 要加的指標裡，只有 per-item 的 precision@K（`hits`／`n_top`）寫得成 `Ratio`。F1@K（兩種算法都是）、query group 層級的 hit_rate@K、per-item 與 macro 的 AUC，都要先在目錄加一種公式寫法，並在 `metrics_spark` 寫它的算法（`metric_catalog.py` 那段註解寫明了這條路）。這跟決定 1「加指標只在目錄加一筆」衝突，留給 #541 定。
+  - **另外兩種算法的共用數字本來就齊，這張票不改它們的程式。** query group 那種的 `ap_sum`、`hits`、`total_rel`、`K` 已經算得出 F1@K（＝2·hits／(K＋total_rel)）與 query group 層級的 hit_rate@K（hits ≥ 1）。把分數當機率那種的共用數字，是 `prediction_quality.aggregate_score_bins` 的分箱表：Spark 端每個 item 都有，只有列數最多的 `top_n` 個收回 driver（ADR-0024 決定 6）。全部 item 的 per-item AUC 要放寬 `top_n` 還是改在 Spark 算，#541 定。數字齊了，不等於「之後加指標只是在目錄寫公式」：目錄今天只有一種公式寫法 `Ratio`（兩個共用數字相除）。#541 要加的指標裡，只有 per-item 的 precision@K（`hits`／`n_top`）寫得成 `Ratio`。F1@K（兩種算法都是）、query group 層級的 hit_rate@K、per-item 與 macro 的 AUC，都要先在目錄加一種公式寫法，並在 `metrics_spark` 寫它的算法（`metric_catalog.py` 那段註解寫明了這條路；#541 加了 `Expr`，見下一則更正）。這跟決定 1「加指標只在目錄加一筆」衝突，留給 #541 定。
   - **落在哪。** `metrics.json` 的 `per_item_shared_numbers`，有分群欄時另有 `per_item_segment_shared_numbers`，大類 bundle 也各有一份。不塞進 `per_item` 的格子，因為 macro 與報表會把格子裡的每個鍵當成指標。per-item 的三個指標改由這些數照目錄的公式相除，值跟改名前相同。熱門度基準線這張票只改名、不落地共用數字（決定 8 由 #535 讓它走同一套）。
   - **顯示名。** per-item 那個 recall 的顯示名改成「per-item recall」（決定 16 第 5 項），跟 query group 那個 `recall` 分開。熱門度基準段與比較報表的 per-item 表，標題原本在顯示名前加「per-item」，改名後會出現兩次，所以拿掉這個前綴。`map_attr` 的表標題因此不再帶「per-item」。排序指標段 B 塊的標題寫成「B · per-item 歸因｜per-item recall@k」，前一個「per-item 歸因」是塊名，跟顯示名沒有緊貼著重複，所以這張票沒改。這些標題 #537 照決定 16 重定表名時一起處理。
+- **更正（#541 實作，擁有者 2026-10-26 定）。**
+  - **目錄多一種公式寫法 `Expr`。** 一條小算式：共用數字、常數、`+`、`*`、`/` 與 `at_most`（取較小的那個）。`Ratio` 照舊。`metrics_spark._evaluate` 一個函式讀兩種寫法：query group 那種翻成 Spark 欄，item 那種在 driver 上對收回來的數算，除以 0 時指標沒有定義（跟 `Ratio` 一樣）。所以之後只要寫得成這種算式的指標，都只在目錄加一筆；#577 的 per-item F1@K 就是 `2·hits／(n_top＋n_pos)`。擁有者在兩條路裡選了這條；另一條是每個指標配一種專用寫法（例如「調和平均」「至少中一個」），每多一種就要多寫一段 Spark 程式。
+  - **F1@K＝`2 * hits / (K + total_rel)`**，就是每組 precision@K 與 recall@K 的調和平均，前 K 名沒中時是 0，再對組平均。不是先平均 precision 與 recall 再取調和平均。**hit_rate@K＝`at_most(hits, 1)`**：每組中了記 1、沒中記 0，再對組平均。
+  - **兩個都跟其他 query group 指標一樣，有整體、各分群、大類。** 本決定的表與決定 1 寫的「只有整體」，意思是沒有 per-item 版本，不是連分群也不要（擁有者 2026-10-26 確認）。母體也一樣：有正例的組，不讀權重（#541 留言 2026-10-23 的表）。
+  - **不進比較報表與熱門度基準段的「要比的指標」清單**，所以兩份報表的程式不改。原則 6 更正把「新指標要出現在比較表，就得改那兩份清單」跟決定 1 的衝突留給 #541：答案是加指標不等於要比它。要比是那一段的呈現決定，屬於驗收表「改一段報表」那一列，改那一段的清單。
+  - **舊的 `metrics.json` 只重畫時，新指標的表留白，不報錯。** 這跟本決定前面「改名後舊格式要報錯，不能讓那幾格默默留白」不同，理由是：那次是既有的 per-item recall 整欄變空，會被讀成「一個都沒推中」；這次是兩張新表，空格不會被讀成 0。要擋就得加「目錄有、檔裡沒有就報錯」的通用檢查，而報表測試的夾具是手組的、只帶部分鍵，要一起大改。
+  - **排序指標段的說明沒提新指標在「全部」那一欄失去鑑別力**（hit_rate 恆為 1，f1 只由正例數決定）。那句說明在 `report/sections/ranking_metrics.py` 寫死了 recall 與 precision，改它就要改報表程式，跟「兩份報表的程式不改」衝突，這張票沒改。`metrics_spark` 模組說明的〈Degenerate cases〉已列出這兩個。
+  - **落地前排序。** `per_item`、`per_item_segment`、`per_segment`、`dataset_overview` 的 `by_*` 都照鍵排序後落地（`metrics_spark._nest_by_dims`、`aggregate_per_segment`、`compute_dataset_overview`）。這些 dict 的順序原本跟著 Spark collect 的順序走，而 `macro_average` 照鍵的順序加總，所以執行計畫一換，macro 的最後一位就會變。
 
 ### 決定 8　baseline 走跟模型同一套指標計算
 

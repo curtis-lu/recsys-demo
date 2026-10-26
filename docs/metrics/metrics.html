@@ -70,9 +70,11 @@ prec_at_pos = cumsum(label) / pos  <span class="m"># 到此名次的精確率</s
   <tr><td><code>map@K</code></td><td>Σ(prec_at_pos · label · [pos≤K]) / total_rel</td><td>只看前 K 名的 AP</td></tr>
   <tr><td><code>precision@K</code></td><td>hits@K / K</td><td>前 K 名裡有多少比例是正例</td></tr>
   <tr><td><code>recall@K</code></td><td>hits@K / total_rel</td><td>該組正例有多少比例被排進前 K</td></tr>
+  <tr><td><code>f1@K</code></td><td>2 · hits@K / (K + total_rel)</td><td>該組 precision@K 與 recall@K 的調和平均；前 K 名沒中時是 0</td></tr>
+  <tr><td><code>hit_rate@K</code></td><td>min(hits@K, 1)</td><td>該組前 K 名有沒有至少一個正例（1 或 0）</td></tr>
 </table>
 <p class="sub">其中 <code>hits@K = Σ(label·[pos≤K])</code>。總表指標是這些每組值的平均。</p>
-<div class="note"><b>K 的退化情況</b>：當 <code>K ≥ 每組候選 item 數</code> 時，前 K 名涵蓋全組 → <code>precision@K</code> 趨近「正例佔比」、<code>recall@K</code> 恆為 1，兩者失去鑑別力。看 @K 指標時要對照每組候選數。</p>
+<div class="note"><b>K 的退化情況</b>：當 <code>K ≥ 每組候選 item 數</code> 時，前 K 名涵蓋全組 → <code>precision@K</code> 趨近「正例佔比」、<code>recall@K</code> 與 <code>hit_rate@K</code> 恆為 1、<code>f1@K</code> 只由正例數決定，都失去鑑別力。看 @K 指標時要對照每組候選數。</p>
 
 <h2>3. per-item 指標（macro over items）</h2>
 <p>把每個正例的貢獻<b>歸因到它的 item</b>，再對 item 做 macro 平均（每個 item 等權）。讓你看「哪些 item 排得好 / 差」，不被熱門 item 的數量蓋過。</p>

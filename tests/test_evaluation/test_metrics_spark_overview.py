@@ -49,6 +49,18 @@ def test_dataset_overview_by_snap_and_item(spark):
     assert ov["by_item"]["A"]["n_positives"] == 2
 
 
+def test_dataset_overview_by_item_lands_in_item_order(spark):
+    """The groupBy's collect order follows the execution plan; the landed
+    ``by_item`` must not. Twelve items, so a hash-partitioned collect is
+    unlikely to come back sorted by chance."""
+    items = [f"item_{i:02d}" for i in range(12)]
+    df = spark.createDataFrame(
+        [("20240331", "c1", item, 0.5, 0) for item in reversed(items)],
+        schema=["snap_date", "cust_id", "prod_name", "score", "label"],
+    ).repartition(4)
+    assert list(ms.compute_dataset_overview(df, _params())["by_item"]) == items
+
+
 def _df_seg(spark):
     # 在 _df 基礎上加 seg 欄（segment 是 customer 級屬性：c1→X、c2→Y）
     return spark.createDataFrame(

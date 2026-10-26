@@ -10,8 +10,9 @@ Layered structure (each layer has a single responsibility):
 
     Layer 2: per-query metrics                 (Spark DF → Spark DF)
         compute_per_query_metrics      one row per query;
-                                       columns: group_cols, total_rel,
-                                                map@K, precision@K, recall@K
+                                       columns: group_cols, total_rel, and
+                                                every query-group entry of
+                                                metric_catalog at each K
 
     Layer 3: aggregations                      (Spark DF → Python dict)
         aggregate_overall              query-equal-weight mean of per-query
@@ -62,7 +63,10 @@ Degenerate cases (documented, not pruned):
         ``recall@K``   collapses to ``1.0`` for every query (all positives
                        are necessarily ranked in top-all). Mean across
                        queries == 1.0.
-    Both are kept in the output for downstream tooling that iterates
+        ``hit_rate@K`` collapses to ``1.0`` likewise, and ``f1@K`` to
+                       ``2 · total_rel / (n_items + total_rel)``, a function
+                       of label density alone.
+    All are kept in the output for downstream tooling that iterates
     ``k_values``.
 
 All row-level work stays in Spark; only the final small per-dim dicts are
@@ -71,7 +75,9 @@ collected to the driver.
 
 from __future__ import annotations
 
+import functools
 import logging
+import operator
 from typing import Iterable, Mapping, NamedTuple, Sequence
 
 import numpy as np
@@ -92,7 +98,10 @@ from recsys_tfb.evaluation.metric_catalog import (
     ITEM_SHARED_NUMBERS,
     ITEM_SHARED_NUMBERS_PER_K,
     QUERY_GROUP,
+    Expr,
+    Ratio,
     metrics_of,
+    shared,
 )
 from recsys_tfb.evaluation.metrics import (
     all_positive_accounts,
@@ -506,7 +515,8 @@ def compute_dataset_overview(
                 cell["n_queries"] = nq
                 cell["query_share"] = (nq / total_queries) if total_queries else 0.0
             out[key] = cell
-        return out
+        # Sorted, so the landed order does not follow the execution plan.
+        return dict(sorted(out.items()))
 
     result = {
         "totals": {
@@ -794,6 +804,47 @@ def _query_group_number(name: str, k: int) -> F.Column:
     return F.col(f"_{name}_{k}")
 
 
+def _spark_least(a, b) -> F.Column:
+    return F.least(*(v if isinstance(v, F.Column) else F.lit(v)
+                     for v in (a, b)))
+
+
+#: The operators of a ``metric_catalog.Expr`` on Spark columns. Spark's
+#: division by 0 is NULL: the metric is undefined there.
+_SPARK_OPS = {"+": operator.add, "*": operator.mul, "/": operator.truediv,
+              "min": _spark_least}
+
+_ARITHMETIC = {"+": operator.add, "*": operator.mul, "/": operator.truediv,
+               "min": min}
+
+
+def _driver_apply(op: str, a, b):
+    """``op`` on collected numbers; ``None``, the metric undefined, for a
+    division by 0 and for anything combined with ``None``."""
+    if a is None or b is None or (op == "/" and b == 0):
+        return None
+    return _ARITHMETIC[op](a, b)
+
+
+#: The same operators on an item's collected cell.
+_DRIVER_OPS = {op: functools.partial(_driver_apply, op) for op in _ARITHMETIC}
+
+
+def _evaluate(formula: Ratio | Expr, number, ops: Mapping):
+    """``formula`` with each shared number read by ``number(name)`` and each
+    operator by ``ops`` — :data:`_SPARK_OPS` per query group,
+    :data:`_DRIVER_OPS` on an item's collected cell. A ``Ratio`` is
+    ``numerator / denominator``."""
+    if isinstance(formula, Ratio):
+        formula = shared(formula.numerator) / shared(formula.denominator)
+    if formula.op == "shared":
+        return number(formula.args[0])
+    if formula.op == "constant":
+        return formula.args[0]
+    left, right = (_evaluate(a, number, ops) for a in formula.args)
+    return ops[formula.op](left, right)
+
+
 def compute_per_query_metrics(
     enriched: SparkDataFrame,
     group_cols: list[str],
@@ -809,14 +860,14 @@ def compute_per_query_metrics(
         plus any column in ``carry_cols`` (taken via F.first within the query —
         valid for per-customer attributes constant within a query, e.g. segment).
 
-    Shared numbers, summed per query and K, that the formulas divide:
+    Shared numbers, summed per query and K, that the formulas combine:
         ap_sum@K     = sum(ap_contrib@K)
         hits@K       = sum(label * top_k@K)
-    Each entry's formula is a ``metric_catalog.Ratio`` of two of them,
-    ``total_rel`` or ``K``.
+    Each entry's formula (a ``metric_catalog.Ratio`` or ``Expr``) combines
+    them, ``total_rel`` and ``K``.
 
-    See module docstring for the degenerate behaviour of precision@K and
-    recall@K when K >= n_items.
+    See module docstring for the degenerate behaviour of the metrics when
+    K >= n_items.
     """
     carry_cols = list(carry_cols or [])
 
@@ -837,8 +888,9 @@ def compute_per_query_metrics(
         for metric in metrics_of(QUERY_GROUP):
             per_query = per_query.withColumn(
                 metric.key(k),
-                _query_group_number(metric.formula.numerator, k)
-                / _query_group_number(metric.formula.denominator, k),
+                _evaluate(metric.formula,
+                          lambda name: _query_group_number(name, k),
+                          _SPARK_OPS),
             )
         per_query = per_query.drop(f"_ap_sum_{k}", f"_hits_{k}")
 
@@ -856,8 +908,9 @@ def aggregate_overall(
 ) -> dict[str, float]:
     """Equal-query weight mean of per-query metrics.
 
-    Returns flat dict ``{map@K, precision@K, recall@K}`` for each K.
-    precision@K / recall@K at K >= n_items: see module docstring.
+    Returns a flat dict: every query-group entry of ``metric_catalog`` at
+    each K (``map@K``, ``precision@K``, …). The metrics at K >= n_items: see
+    module docstring.
     """
     metric_cols = _per_query_metric_cols(k_values)
     row = per_query.agg(*[F.mean(c).alias(c) for c in metric_cols]).collect()[0]
@@ -870,8 +923,10 @@ def aggregate_per_segment(
     """Equal-query weight mean of per-query metrics, grouped by ``seg_col``.
 
     ``per_query`` must carry ``seg_col`` (pass it via ``carry_cols`` when
-    building per_query). Returns ``{seg_value: {map@K, precision@K,
-    recall@K}}``; the seg_value is stringified when not already a string.
+    building per_query). Returns ``{seg_value: {metric@K: value}}``, the
+    metrics as :func:`aggregate_overall`'s; the seg_value is stringified when
+    not already a string. Keys come out sorted: ``macro_average`` sums
+    ``per_segment`` in key order (:func:`_nest_by_dims`).
     """
     metric_cols = _per_query_metric_cols(k_values)
     rows = (
@@ -879,10 +934,9 @@ def aggregate_per_segment(
         .agg(*[F.mean(c).alias(c) for c in metric_cols])
         .collect()
     )
-    out: dict[str, dict[str, float]] = {}
-    for r in rows:
-        out[segment_key(r[seg_col])] = {c: float(r[c]) for c in metric_cols}
-    return out
+    out = {segment_key(r[seg_col]): {c: float(r[c]) for c in metric_cols}
+           for r in rows}
+    return dict(sorted(out.items()))
 
 
 def _item_shared_number_aggs(
@@ -926,15 +980,25 @@ def _nest_by_dims(rows, dim_cols: list[str], cell_of) -> dict[str, dict]:
     ``"_".join`` turned ``(item="a", seg="b_c")`` and ``(item="a_b",
     seg="c")`` into the same key and the later row silently overwrote the
     earlier one. Dim values are stringified.
+
+    Keys come out sorted, items first, then segments within an item: a
+    collect's row order follows the execution plan, and unsorted the last
+    digit of a macro over these cells would move with it (``macro_average``
+    sums in key order).
     """
-    out: dict[str, dict] = {}
-    for r in rows:
+    def keys(r) -> tuple[str, ...]:
         item = str(r[dim_cols[0]])
         if len(dim_cols) == 1:
-            out[item] = cell_of(r)
+            return (item,)
+        # The second dim is the segment; NULL there is the unmatched group.
+        return item, segment_key(r[dim_cols[1]])
+
+    out: dict[str, dict] = {}
+    for key, r in sorted(((keys(r), r) for r in rows), key=lambda p: p[0]):
+        if len(key) == 1:
+            out[key[0]] = cell_of(r)
         else:
-            # The second dim is the segment; NULL there is the unmatched group.
-            out.setdefault(item, {})[segment_key(r[dim_cols[1]])] = cell_of(r)
+            out.setdefault(key[0], {})[key[1]] = cell_of(r)
     return out
 
 
@@ -989,14 +1053,12 @@ def _item_metric_cell(cell: dict, k_values: list[int]) -> dict | None:
     numbers by its formula, the ones without K first, then the per-K ones at
     each K; plus ``n_pos``, the weight ``macro_average`` reads.
 
-    A metric whose denominator is 0 is undefined and left out of the cell, and
-    a cell left with no metric is ``None``.
+    A metric that divides by 0 is undefined and left out of the cell, and a
+    cell left with no metric is ``None``.
     """
     def value(metric, k: int | None) -> float | None:
-        denominator = _item_number(cell, metric.formula.denominator, k)
-        if denominator == 0:
-            return None
-        return _item_number(cell, metric.formula.numerator, k) / denominator
+        return _evaluate(metric.formula,
+                         lambda name: _item_number(cell, name, k), _DRIVER_OPS)
 
     entries = [(m.key(), value(m, None))
                for m in metrics_of(ITEM) if not m.per_k]

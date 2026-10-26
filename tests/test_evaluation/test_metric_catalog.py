@@ -161,6 +161,34 @@ def test_a_new_entry_is_computed_with_no_change_to_the_spark_code(
     assert full["per_item"]["C"]["toy_i@3"] == pytest.approx(0.5)
 
 
+def test_an_item_expr_entry_is_computed_on_the_collected_cells(
+        spark, monkeypatch):
+    """An item entry written as an ``Expr``, worked by hand on :func:`_frame`
+    (c1 ranks A(+) B C(+), c2 ranks B(+) C A; each item is positive once).
+
+    ``2 * hits / (n_top + n_pos)``, the shape of a per-item F1: A is in the
+    top 1 once, a hit, so 2 / (1 + 1) = 1; C is never in the top 1, so
+    0 / (0 + 1) = 0; in the top 3 twice with one hit, so 2 / (2 + 1).
+
+    ``at_most(2 * hits / n_top, 1)``: A at K=1 is 2 / 1 capped to 1; C at K=1
+    divides by 0 inside the cap, so the metric is undefined and left out of
+    the cell; C at K=3 is 2 / 2."""
+    hits, n_top = mc.shared("hits"), mc.shared("n_top")
+    monkeypatch.setattr(mc, "METRICS", mc.METRICS + (
+        _toy_metric("toy_f1", ITEM, 2 * hits / (n_top + mc.shared("n_pos"))),
+        _toy_metric("toy_cap", ITEM, mc.at_most(2 * hits / n_top, 1)),
+    ))
+    facts = compute_row_facts(_frame(spark), _params(), segment_columns=["seg"])
+    per_item = compute_all_metrics(
+        _frame(spark), _params(), facts, segment_columns=["seg"])["per_item"]
+    assert per_item["A"]["toy_f1@1"] == pytest.approx(1.0)
+    assert per_item["C"]["toy_f1@1"] == pytest.approx(0.0)
+    assert per_item["C"]["toy_f1@3"] == pytest.approx(2 / 3)
+    assert per_item["A"]["toy_cap@1"] == pytest.approx(1.0)
+    assert "toy_cap@1" not in per_item["C"]
+    assert per_item["C"]["toy_cap@3"] == pytest.approx(1.0)
+
+
 def test_entry_refuses_a_name_the_catalog_lacks():
     assert mc.entry("map", QUERY_GROUP).name == "map"
     with pytest.raises(KeyError, match="no 'map' in method 'item'"):
