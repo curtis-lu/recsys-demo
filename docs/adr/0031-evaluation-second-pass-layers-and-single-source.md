@@ -847,7 +847,7 @@ node 長度是用 Python 的 `ast` 模組解析 `nodes.py` 與 `pipeline.py` 量
 
 ## 修訂（2026-10-27，#577）
 
-#577 在 `--prediction-quality` 模式補上每個 item 的 AUC、原始分數上的兩個 AP、per-item precision@K 與 F1@K。母體與權重照 #541 第一則留言（擁有者 2026-10-23）；macro 門檻擁有者 2026-10-27 定：AUC 與 per-item precision、F1 的 macro 都沿用 `evaluation.metric.min_positives`（看正例數），不另設鍵。
+#577 在 `--prediction-quality` 模式補上每個 item 的 AUC、原始分數上的兩個 AP、per-item precision@K 與 F1@K。母體與權重照 #541 第一則留言（擁有者 2026-10-23）；macro 門檻擁有者 2026-10-27 定：AUC 與 per-item precision、F1 的 macro 都沿用 `evaluation.metric.min_positives`（看正例數），不另設鍵；只沿用門檻，`weight_alpha`、`shrinkage_k` 不沿用，一律等權。沒有正例或沒有負例的 item，兩個面積都不給值、不進 macro（票面原文；沒有負例時 PR-AUC 恆為 1）。從沒排進前 K 名的 item 沒有 precision，F1 照公式是 0、照樣進 macro。
 
 - **決定 7 的表，「每個 item 一份」那一列：母體是「全部的組」**，含沒有正例的組，抽樣留下的每列乘 1／r。recall@K、map_attr@K 只用到正例列，算不算沒有正例的組結果一樣；precision@K、F1@K 的分母是排進前 K 名的次數，沒有正例的組也會排 item 進前 K 名，所以必須算進來。#534 更正那句「每個 item 那一種只看 query group 那種算進的組」對 precision 不成立。
   - **算在哪。** 主報表的排序指標只有有正例的組，數不到沒有正例的組排進前 K 名的次數，所以 per-item precision@K、F1@K 算在 `--prediction-quality` 模式（`prediction_quality.item_top_k_metrics`：一次 `groupBy(item)`，用 `enriched_eval_predictions` 已有的名次欄）。指標目錄把它們放在另一種算法 `ITEM_EVERY_GROUP`，跟主報表的 `ITEM` 分開，主報表的 per-item 表就不會在有正例的組上算出一個掛 precision 名字的數。precision 用 `Ratio("hits", "n_top")`，F1 用 `Expr`：`2·hits／(n_top＋n_pos)`。

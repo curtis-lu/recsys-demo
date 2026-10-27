@@ -28,7 +28,7 @@ read as a probability over a bin table (:data:`SCORE_BINS`) — and decision 16
 item 3's fourth, average precision on the raw scores (:data:`RAW_SCORE`). The
 per-item metrics whose denominator holds negatives are a method of their own
 (:data:`ITEM_EVERY_GROUP`): same arithmetic as :data:`ITEM`, counted over
-every query group (#541's first comment). The last three are the
+every query group (decision 7, 2026-10-27 revision). The last three are the
 ``--prediction-quality`` mode's (ADR-0032).
 """
 
@@ -47,7 +47,7 @@ ITEM = "item"
 #: negatives (precision@K, F1@K). Kept apart from :data:`ITEM`, whose shared
 #: numbers count only the query groups the query-group method scores, so the
 #: ranking report's per-item block never computes them on that population
-#: (#541's first comment, 〈怎麼呈現〉 point 2).
+#: (decision 7, 2026-10-27 revision).
 ITEM_EVERY_GROUP = "item_every_group"
 #: Each row read as one binary prediction, the score binned (decision 7,
 #: third method; ADR-0024).
@@ -182,7 +182,7 @@ class BinArea:
     ``curve`` is ``"pr"`` — Σ over bins of n_pos × precision at the bin's lower
     edge, over all positives: scikit-learn's step-rule average precision on
     the bin index — or ``"roc"`` — the ROC area, a tie within a bin counting
-    half. Undefined without a positive, and for ``"roc"`` without a negative.
+    half. Both undefined without a positive or without a negative.
     """
 
     curve: str
@@ -379,7 +379,8 @@ METRICS: tuple[Metric, ...] = (
         display_name="per-item F1",
         definition=(
             "這個 item 的 per-item precision@K 與 per-item recall@K 的調和平均"
-            "（＝2·排進前 K 名的正例 ÷ (排進前 K 名的次數＋正例數)）。"
+            "（＝2·排進前 K 名的正例 ÷ (排進前 K 名的次數＋正例數)）。從沒排進"
+            "前 K 名的 item 沒有 precision，F1 照這條式子是 0，照樣進 Macro。"
         ),
     ),
     Metric(
@@ -524,7 +525,7 @@ MODEL_SELECTION_METRICS: tuple[ModelSelectionMetric, ...] = (
 
 #: The model-selection metrics on the raw scores, computed by the
 #: ``--prediction-quality`` mode, not the main report's run (decision 16 item
-#: 3, revised by #577): their population holds the query groups without a
+#: 3, 2026-10-27 revision): their population holds the query groups without a
 #: positive. The main report's overview points to that page, and the
 #: comparison report does not list them. Together with
 #: :data:`MODEL_SELECTION_METRICS` they name every ``metric_registry.

@@ -38,7 +38,7 @@ DESCRIPTION = (
 
 
 #: The model-selection metrics on another page (ADR-0031 decision 16 item 1,
-#: revised by #577): their population holds the query groups without a
+#: 2026-10-27 revision): their population holds the query groups without a
 #: positive, so the ``--prediction-quality`` mode computes them.
 ELSEWHERE = (
     "、".join(m.display_name for m in MODEL_SELECTION_ON_PREDICTION_QUALITY)

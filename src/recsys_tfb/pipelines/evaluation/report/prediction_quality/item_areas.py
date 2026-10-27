@@ -1,5 +1,5 @@
 """AUC 與 AP: every item's PR-AUC and ROC-AUC and their macro, and the two
-average precisions on the raw scores HPO can select by (#577), on the
+average precisions on the raw scores HPO can select by, on the
 ``--prediction-quality`` page. Which rows they are is the page's first
 section (``population``)."""
 
@@ -17,6 +17,9 @@ from recsys_tfb.evaluation.metric_catalog import (
 from recsys_tfb.evaluation.result_readers import (
     AVERAGE_PRECISION_KEY,
     frame_from_json,
+)
+from recsys_tfb.pipelines.evaluation.report.prediction_quality import (
+    score_bins,
 )
 from recsys_tfb.pipelines.evaluation.report.sections.metric_tables import (
     definitions,
@@ -36,27 +39,22 @@ TITLE_EN = "AUC and AP"
 QUESTION = "每個 item 自己的分數，正例排得比負例前面嗎？"
 
 #: The table titles.
-AP_TABLE = "AP（原始分數）"
+AP_TABLE = "原始分數上的 AP"
 AREA_TABLE = "PR-AUC 與 ROC-AUC · 各 item"
 
-#: The statements #541's first comment asks for beside the per-item areas
-#: (〈怎麼呈現〉 points 3-5).
+#: How to read the per-item areas, printed beside them: PR-AUC against the
+#: positive rate, the scores' comparability across query groups, the blanks.
 READING = (
     "PR-AUC 隨機排序時約等於正例佔比，各 item 的正例佔比不同，所以要對著旁邊"
     "那欄看；Macro 的 PR-AUC 混了不同的正例佔比。ROC-AUC 不受正例佔比影響，"
     "可以直接比。",
     "per-item 的 AUC 是拿同一個 item 在不同 entity 上的分數互比。模型用排序類"
     "目標（lambdarank、rank_xendcg）訓練時，分數只為同一個 query group 內的"
-    "先後而學，跨 group 不保證可比，這兩欄會低估模型；binary 目標沒有這個問題。"
+    "先後而學，跨 group 不保證可比；binary 目標沒有這個問題。"
     "下一段的 per-item precision@K 看的是組內名次，也沒有這個問題。",
-    "空格是沒有定義，不是 0：沒有正例的 item 兩個都沒有，沒有負例的 item 沒有 "
-    "ROC-AUC。這些 item 不進 Macro。",
+    "空格是沒有定義，不是 0：沒有正例或沒有負例的 item 兩個都沒有值，也不進 "
+    "Macro。",
 )
-
-
-def _count_kind(weight_col: str | None) -> str:
-    """Weighted counts (``--post-training``) are not whole numbers."""
-    return "ratio" if weight_col else "count"
 
 
 def _ap_table(average_precision: Mapping) -> Table:
@@ -69,7 +67,8 @@ def _ap_table(average_precision: Mapping) -> Table:
 
 
 def _macro_note(macro: Mapping, names: list[str], labels: list[str]) -> Note:
-    """「參與 Macro 的 item：PR-AUC x／y、ROC-AUC x／y」 (#577)."""
+    """「參與 Macro 的 item：PR-AUC x／y、ROC-AUC x／y」: the count as x of y,
+    always, so a reader sees how many items the macro stands for."""
     n_items = macro["n_items"]
     counts = "、".join(f"{label} {macro[name]['n_items']:,}／{n_items:,}"
                       for name, label in zip(names, labels))
@@ -92,9 +91,8 @@ def _area_table(per_item: Mapping, item_col: str, count_kind: str) -> Table:
                               *(macro[name]["value"] for name in names)),
                 pinned=True)]
     for _, r in totals.iterrows():
-        n, n_pos = r["n"], r["n_pos"]
         rows.append(Row(str(r[item_col]), (
-            n, n_pos, n_pos / n if n else None,
+            r["n"], r["n_pos"], r["positive_rate"],
             *(None if pd.isna(r[name]) else float(r[name])
               for name in names))))
     return Table(AREA_TABLE, "item", columns, tuple(rows),
@@ -105,7 +103,7 @@ def build(
     results: Mapping[str, dict], parameters: dict
 ) -> ReportSection | None:
     """The section, or ``None`` when the page has no row to show. A payload
-    landed before #577 holds neither block: the section says so rather than
+    landed before these blocks existed holds neither: the section says so rather than
     leaving empty tables (rerunning ``--prediction-quality`` fills it)."""
     payload = results["prediction_quality_metrics"]
     if payload["overall"].get("summary") is None:
@@ -122,7 +120,7 @@ def build(
             "這份 prediction_quality.json 是加入各 item 的 AUC 與 AP 之前算的，"
             "沒有這一段的數字；重跑一次 --prediction-quality 就有。",
             muted=True)])
-    count_kind = _count_kind(payload["columns"].get("weight"))
+    count_kind = score_bins.count_kind(payload["columns"].get("weight"))
     return section([
         Paragraph(
             "AP 在原始分數上算，是 training 調參（HPO）能選的兩個指標，跟 "

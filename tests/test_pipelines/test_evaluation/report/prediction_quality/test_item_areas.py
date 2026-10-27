@@ -65,8 +65,9 @@ def test_an_item_row_prints_its_positive_rate_beside_its_areas(spark):
     row = _table(s, item_areas.AREA_TABLE).rows[1]
     first = totals.iloc[0]
     assert row.cells == pytest.approx((
-        first["n"], first["n_pos"], first["n_pos"] / first["n"],
+        first["n"], first["n_pos"], first["positive_rate"],
         first["pr_auc"], first["roc_auc"]))
+    assert first["positive_rate"] == pytest.approx(first["n_pos"] / first["n"])
 
 
 def test_the_macro_counts_print_as_x_of_y(spark):

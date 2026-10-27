@@ -213,11 +213,13 @@ class TestBinAreas:
         assert pd.isna(a["pr_auc"]) and pd.isna(a["roc_auc"])
         assert a["n"] == 5
 
-    def test_no_negative_leaves_roc_auc_undefined(self, spark):
+    def test_no_negative_leaves_both_areas_undefined(self, spark):
+        """#577: an item without a negative gets no value and stays out of
+        the macro — PR-AUC would be 1 whatever the order."""
         bins = pd.DataFrame({"bin": [0, 1], "n": [1, 2], "n_pos": [1, 2]})
         a = _areas_by_item(spark, {"A": bins})["A"]
-        assert pd.isna(a["roc_auc"])
-        assert a["pr_auc"] == pytest.approx(1.0)
+        assert pd.isna(a["roc_auc"]) and pd.isna(a["pr_auc"])
+        assert a["n_pos"] == 3
 
     def test_no_key_column_gives_the_one_overall_row(self, spark):
         bins = _spark_bins(spark, {"A": _bins()}).drop("item")

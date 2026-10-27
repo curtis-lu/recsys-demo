@@ -233,8 +233,14 @@ def test_the_raw_score_aps_read_their_entry_overall_and_macro():
         "average_precision", mc.RAW_SCORE, "overall")
     assert by_name["macro_per_item_average_precision"].source == (
         mc.CompareEntry("average_precision", mc.RAW_SCORE, "macro"))
-    assert isinstance(mc.entry("average_precision", mc.RAW_SCORE).formula,
-                      mc.OwnPass)
+    own = mc.entry("average_precision", mc.RAW_SCORE).formula
+    assert isinstance(own, mc.OwnPass)
+    # The functions it names exist: a rename turns this red, not the text
+    # silently false.
+    from recsys_tfb.evaluation import metrics_spark
+    import re
+    for name in re.findall(r"compute_\w+", own.computed_by):
+        assert hasattr(metrics_spark, name), name
 
 
 def test_the_new_page_s_entries_and_their_formula_shapes():

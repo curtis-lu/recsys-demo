@@ -43,11 +43,6 @@ SPEC_APPLIED = {
         "schema", "evaluation.snap_date", "evaluation.item_categories",
         "evaluation.query_filter",
     },
-    "compute_prediction_quality": {
-        # The evaluated model's r, as the CLI hands it on.
-        "schema", "post_training", DATASET_TEST_RATIO_KEY,
-        "evaluation.snap_date", "evaluation.prediction_quality",
-    },
     "compute_report_aggregates": {
         "schema", "evaluation.snap_date", "evaluation.report.diagnostics",
     },
@@ -64,6 +59,14 @@ SPEC_APPLIED = {
     },
     "resolve_comparison_display_ks": {
         "evaluation.k_values", "evaluation.report.display.compare_k",
+    },
+    "compute_prediction_quality": {
+        # The evaluated model's r, as the CLI hands it on; k_values (the
+        # per-item precision@K grid) and min_positives (every macro over
+        # items).
+        "schema", "post_training", DATASET_TEST_RATIO_KEY,
+        "evaluation.snap_date", "evaluation.prediction_quality",
+        "evaluation.k_values", "evaluation.metric.min_positives",
     },
 }
 
@@ -299,7 +302,8 @@ def _prediction_quality_page(params: dict) -> list[LoadedArtifact]:
     "evaluation.prediction_quality.n_bins",
     # With post_training, the evaluated model's r decides the row weights.
     DATASET_TEST_RATIO_KEY,
-    "post_training", "evaluation.snap_date", "schema.columns.rank"])
+    "post_training", "evaluation.snap_date", "schema.columns.rank",
+    "evaluation.k_values", "evaluation.metric.min_positives"])
 def test_a_key_the_mode_applied_makes_its_result_stale(path):
     old = _params()
     artifacts = _prediction_quality_page(old)

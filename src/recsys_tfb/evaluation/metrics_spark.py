@@ -1092,10 +1092,9 @@ def item_metrics(
     method: str = ITEM,
 ) -> dict[str, dict]:
     """The per-item metric cells of :func:`aggregate_item_shared_numbers`'
-    output, nested the same way (``n_dims`` levels) — or of
-    ``prediction_quality.item_top_k_metrics``' counts, ``method``
-    ``ITEM_EVERY_GROUP``. Plain Python: the formulas divide numbers already
-    on the driver."""
+    output, nested the same way (``n_dims`` levels): the entries of
+    ``method``, whose cells hold that method's shared numbers. Plain Python:
+    the formulas divide numbers already on the driver."""
     if n_dims == 1:
         return {item: m for item, cell in shared.items()
                 if (m := _item_metric_cell(cell, k_values, method)) is not None}

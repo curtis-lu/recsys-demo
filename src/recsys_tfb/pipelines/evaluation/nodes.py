@@ -909,7 +909,7 @@ def compute_prediction_quality(
     # deployment can have thousands of items (ADR-0024 decision 6). So
     # `top_n` decides only what the page draws: every item's PR-AUC and
     # ROC-AUC are computed in Spark from the same bins, one row per item
-    # (#577, ADR-0024 decision 6 revised).
+    # (ADR-0024 decision 6, 2026-10-27 revision).
     weight_col = ZERO_POSITIVE_GROUP_WEIGHT_COL if post_training else None
     # Pre-check (input) — the rows must carry the weight r promises. A
     # missing column, or a NULL weight (training writes NULL when its test
@@ -918,16 +918,18 @@ def compute_prediction_quality(
     # counting them would report a filtered table as a weighted one.
     if weight_col is not None:
         require_zero_positive_group_weights(in_scope, weight_col)
+    in_scope_rows = in_scope.select(
+        item_col, score_col, label_col, *([weight_col] if weight_col else []))
     aggregated = aggregate_score_bins(
-        in_scope.select(
-            item_col, score_col, label_col, *([weight_col] if weight_col else [])),
+        in_scope_rows,
         item_col=item_col, score_col=score_col, label_col=label_col,
         n_bins=settings["n_bins"], top_n=settings["top_n"],
         weight_col=weight_col,
     )
     # Decision — every macro over items here (the areas, per-item precision
     # and F1) drops the items under evaluation.metric.min_positives, as the
-    # ranking metrics' macro does (owner, #577): one knob for every macro.
+    # ranking metrics' macro does (ADR-0031 decision 7, 2026-10-27
+    # revision): one knob for every macro.
     # The average precisions below are training's own passes and keep
     # training's rule (every item with a positive), so they equal its values.
     min_positives = metric_params(parameters)["min_positives"]
@@ -940,14 +942,12 @@ def compute_prediction_quality(
         min_positives=min_positives,
     )
     # Decision — the two model-selection metrics on the raw scores
-    # (ADR-0031 decision 16 item 3, revised by #577): training's own Spark
+    # (ADR-0031 decision 16 item 3, 2026-10-27 revision): training's own Spark
     # passes, on the same rows as the bins, so under --post-training they
     # equal what training scored on test. Weighted as the bins are; without a
     # positive average precision is undefined and the passes raise, so it is
     # left None instead.
-    has_positive = bool((out["overall"]["summary"] or {}).get("n_pos"))
-    in_scope_rows = in_scope.select(
-        item_col, score_col, label_col, *([weight_col] if weight_col else []))
+    has_positive = bool(aggregated["overall"]["n_pos"].sum() > 0)
     out[AVERAGE_PRECISION_KEY] = {
         "overall": (compute_pooled_average_precision(
             in_scope_rows, parameters, weighted=post_training)
@@ -957,7 +957,7 @@ def compute_prediction_quality(
             if has_positive else None),
     }
     # Decision — per-item precision@K and F1@K over every query group, the
-    # ones without a positive included and weighted (#541's first comment):
+    # ones without a positive included and weighted (ADR-0031 decision 7):
     # the denominator is the times the item was ranked in the top K, and a
     # group without a positive ranks items too. The rank is the one landed
     # on the rows, taken within the whole group, so under --scope a row

@@ -1,8 +1,7 @@
 """各 item 的 precision@K: per-item precision@K and F1@K over every query
-group, the ones without a positive included (#541's first comment, #577), on
+group, the ones without a positive included (ADR-0031 decision 7), on
 the ``--prediction-quality`` page — not on the main report's per-item
-tables, whose rows are only the groups holding a positive (〈怎麼呈現〉
-point 2)."""
+tables, whose rows are only the groups holding a positive."""
 
 from __future__ import annotations
 
@@ -10,6 +9,9 @@ from collections.abc import Mapping
 
 from recsys_tfb.evaluation.metric_catalog import ITEM_EVERY_GROUP, metrics_of
 from recsys_tfb.evaluation.result_readers import ITEM_TOP_K_KEY
+from recsys_tfb.pipelines.evaluation.report.prediction_quality import (
+    score_bins,
+)
 from recsys_tfb.pipelines.evaluation.report.sections.metric_tables import (
     definitions,
 )
@@ -30,18 +32,13 @@ QUESTION = "把一個 item 排進前 K 名推出去，幾成會成為正例？"
 #: The counts table's title.
 COUNTS_TABLE = "排進前 K 名的次數 · 各 item"
 
-#: Which rows, said once at the top (#541's first comment, 〈怎麼呈現〉 1-2).
+#: Which rows, said once at the top of the section.
 POPULATION = (
     "分母是這個 item 在全部 query group 裡排進前 K 名的次數，沒有正例的組也算"
     "（它們也會把 item 排進前 K 名）。主報表排序指標段的 per-item 表只看有正例"
     "的組，母體不同，同名的數字不能互相比。名次是 query group 內的名次，跟分數"
     "跨 group 可不可比無關。"
 )
-
-
-def _count_kind(weight_col: str | None) -> str:
-    """Weighted counts (``--post-training``) are not whole numbers."""
-    return "ratio" if weight_col else "count"
 
 
 def _metric_table(metric, top_k: Mapping) -> Table:
@@ -67,7 +64,7 @@ def _metric_table(metric, top_k: Mapping) -> Table:
 
 def _counts_table(top_k: Mapping, count_kind: str) -> Table:
     """The counts each cell divides: positives and, per K, times ranked
-    within the top K (#577: rows and positives beside every cell)."""
+    within the top K, so every cell's denominator is on the page."""
     ks = top_k["k_values"]
     columns = (Column("正例數", count_kind),
                *(Column(f"@{k}", count_kind, group="排進前 K 名")
@@ -82,7 +79,7 @@ def build(
     results: Mapping[str, dict], parameters: dict
 ) -> ReportSection | None:
     """The section, or ``None`` when no item has a row. A payload landed
-    before #577 holds no such block: the section says so."""
+    before this block existed holds none: the section says so."""
     payload = results["prediction_quality_metrics"]
     if payload["overall"].get("summary") is None:
         return None
@@ -104,6 +101,6 @@ def build(
         Paragraph(POPULATION + ("次數都是乘上權重之後的加權數（見上面的母體）。"
                                 if weighted else ""), muted=True),
         *(_metric_table(m, top_k) for m in entries),
-        _counts_table(top_k, _count_kind(weighted)),
+        _counts_table(top_k, score_bins.count_kind(weighted)),
         definitions([*entries, "macro"]),
     ])

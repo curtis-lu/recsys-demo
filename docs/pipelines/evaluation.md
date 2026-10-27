@@ -462,7 +462,7 @@ evaluation:
    - **F1 最佳門檻**：掃描裡 F1 最大的那個下緣（同分取較高的門檻）。
    - **`pr_auc`**：把同一箱的列視為同分之後的 average precision＝Σ（該箱正例 ÷ 全部正例）×（該箱下緣的 precision）。
    - **`roc_auc`**：同一箱視為同分、同分算一半的 ROC 面積。
-   - 兩個面積對**每個 item** 都算，在 Spark 上從 `item × 細箱` 的表直接算完，只收回每個 item 幾個數（`prediction_quality.bin_areas`）；整體的也是同一個函式。macro＝對有值的 item 等權平均：沒有正例的 item 兩個都沒有值、沒有負例的沒有 `roc_auc`，正例數低於 `evaluation.metric.min_positives` 的也不進（跟排序指標的 macro 同一個門檻），報表印「參與的 item 數 x／全部 y」。
+   - 兩個面積對**每個 item** 都算，在 Spark 上從 `item × 細箱` 的表直接算完，只收回每個 item 幾個數（`prediction_quality.bin_areas`）；整體的也是同一個函式。沒有正例或沒有負例的 item 兩個都沒有值（沒有負例時 `pr_auc` 不論怎麼排都是 1，進 macro 會把它當成完美的 item）。macro＝對有值的 item 等權平均，正例數低於 `evaluation.metric.min_positives` 的也不進。只沿用這個門檻，不沿用 `weight_alpha`、`shrinkage_k`：一律等權。報表印「參與的 item 數 x／全部 y」。
    - **分箱表**：每 `n_bins ÷ n_display_bins` 個細箱併成一格，印出分數範圍、列數、正例數、平均分數（分數和 ÷ 列數）、實際正例率，以及「以這格下緣為門檻」的 precision、recall、F1。
 
 箱是等寬的，不是分位數，為的是保住兩個性質：每個 item 的細箱加起來就是整體的細箱；細箱可以直接併成分箱表的格子。分位數箱會讓不同 item 的「第 3 箱」不是同一段分數，這兩個性質都會靜默失效；要換的話先另開一張 ADR。
@@ -491,7 +491,7 @@ evaluation:
 - **一個門檻橫跨所有 query group。** 這要求不同 query group 的分數彼此可比。模型用排序類目標（`lambdarank`、`rank_xendcg`）訓練時，分數只為同一個 query group 內的先後而學，跨 group 用同一個門檻切是模型沒有優化過的用法；`binary` 目標沒有這個問題。報表也印這一句。
 - **極端值會把細箱撐寬。** 範圍取最小～最大，少數特別高的分數會讓多數列擠進少數幾個細箱，門檻解析度跟著變差。分箱表每一格都印列數，看得出來是不是這樣；要改用分位數箱得先另開 ADR（見上）。
 - **per-item 預算只管顯示。** 只有列數最多的前 `top_n` 個 item 的分箱表與 F1 最佳門檻收回 driver、印在報表上（item × 細箱的量要有上限）。每個 item 的 `pr_auc`、`roc_auc` 不受它限制，全部都算。`top_n: 0` 不印各 item 的分箱表。
-- **per-item precision@K、F1@K。** 分母是這個 item 在**全部** query group 裡排進前 K 名的次數，沒有正例的組也算（`--post-training` 時每列乘權重）；名次用 `enriched_eval_predictions` 已有的名次欄，所以 `--scope` 時一列保留它在整組候選裡的名次。K 跟主報表一樣是 `evaluation.k_values` 解析後再加上全部。macro 的門檻同上。主報表排序指標段的 per-item 表只看有正例的組，母體不同，所以這兩個指標只在本模式。名次是組內的，不受分數跨 group 可比性影響。
+- **per-item precision@K、F1@K。** 分母是這個 item 在**全部** query group 裡排進前 K 名的次數，沒有正例的組也算（`--post-training` 時每列乘權重）；名次用 `enriched_eval_predictions` 已有的名次欄，所以 `--scope` 時一列保留它在整組候選裡的名次。K 跟主報表一樣是 `evaluation.k_values` 解析後再加上全部。macro 的門檻同上。從沒排進前 K 名的 item 沒有 precision；F1 照公式是 0，照樣進 macro。主報表排序指標段的 per-item 表只看有正例的組，母體不同，所以這兩個指標只在本模式。名次是組內的，不受分數跨 group 可比性影響。
 - **權重欄。** 分箱時每一列先乘上權重。`--post-training` 時乘上預測表的權重欄（r ＝ 1 時每列都是 1）；不加 `--post-training` 時每列權重 1。被評模型的 r ＞ 0、預測表卻沒有這一欄或有 NULL（training 寫 test 預測時，它自己設定檔的 r 是 0）時，計算前停下：在 r ＞ 0 的設定下重寫這個模型的 test 預測。
 - **label 觀察窗要成熟才準。** 沒有正例的 query group 全留，label 還沒成熟的月份會把「還沒發生」當成負例，數字偏低。觀察窗有沒有結束只有使用者知道，框架沒有資料可以判斷，所以報表開頭提醒，程式不檢查。
 - **成本。** 跑這個模式要多一次取最小、最大分數的聚合，和一次 `groupBy(item, 細箱)` 的全表 shuffle；#577 再加上兩個 average precision 的 Spark 計算（pooled 那個把全部列依分數分段排序，三個 action）、一次 `groupBy(item)` 數排進前 K 名的次數，和一次數 item（解析「全部」這個 K）。收回 driver 的量是「細箱數 ×（1 ＋ `top_n`）＋ item 數 ×（幾個數）」列，與資料列數無關。

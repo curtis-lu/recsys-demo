@@ -290,7 +290,9 @@ def test_the_prediction_quality_mode_is_listed_with_its_page(table):
     assert {(report, section) for report, section, _switch
             in quality["reader_sections"]} == {
         ("prediction_quality_report", "population"),
-        ("prediction_quality_report", "score_bins")}
+        ("prediction_quality_report", "score_bins"),
+        ("prediction_quality_report", "item_areas"),
+        ("prediction_quality_report", "item_top_k")}
 
 
 def test_the_comparison_chain_is_listed_with_its_readers(table):

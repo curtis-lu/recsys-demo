@@ -135,18 +135,6 @@ APPLIED_SETTINGS: dict[str, tuple[str, ...]] = {
         "schema", "evaluation.snap_date", "evaluation.item_categories",
         "evaluation.query_filter",
     ),
-    # post_training decides the population and the row weights; the
-    # evaluated model's test ratio is landed with them and gates them (A64).
-    # The ratio is core.consistency.DATASET_TEST_RATIO_KEY, injected at the
-    # top level by the CLI like post_training (spelled out here: this module
-    # imports nothing from the project).
-    # k_values and metric.min_positives: the per-item precision@K grid and
-    # every macro over items (#577).
-    "compute_prediction_quality": (
-        "schema", "post_training", "_dataset_test_zero_positive_group_ratio",
-        "evaluation.snap_date", "evaluation.prediction_quality",
-        "evaluation.k_values", "evaluation.metric.min_positives",
-    ),
     "compute_report_aggregates": (
         "schema", "evaluation.snap_date", "evaluation.report.diagnostics",
     ),
@@ -173,6 +161,22 @@ APPLIED_SETTINGS: dict[str, tuple[str, ...]] = {
     ),
     "resolve_comparison_display_ks": (
         "evaluation.k_values", "evaluation.report.display.compare_k",
+    ),
+    # Last, after every main-line step: the --prediction-quality mode's own
+    # step, which no main-line run holds. It reads k_values and
+    # metric.min_positives too, so placed earlier it would be the advice a
+    # main-line reader without the run's order gives for those keys.
+    #
+    # post_training decides the population and the row weights; the
+    # evaluated model's test ratio is landed with them and gates them (A64).
+    # The ratio is core.consistency.DATASET_TEST_RATIO_KEY, injected at the
+    # top level by the CLI like post_training (spelled out here: this module
+    # imports nothing from the project). k_values: the per-item precision@K
+    # grid; metric.min_positives: every macro over items.
+    "compute_prediction_quality": (
+        "schema", "post_training", "_dataset_test_zero_positive_group_ratio",
+        "evaluation.snap_date", "evaluation.prediction_quality",
+        "evaluation.k_values", "evaluation.metric.min_positives",
     ),
 }
 

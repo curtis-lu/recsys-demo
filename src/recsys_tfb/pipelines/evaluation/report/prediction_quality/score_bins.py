@@ -50,7 +50,7 @@ SCORE_GROUP, BIN_GROUP, ABOVE_GROUP = "分數", "這一格", "門檻以上"
 #: A bin table's columns after 格: the display bin frame's column
 #: (``prediction_quality.DISPLAY_BIN_COLUMNS``), its header, its upper
 #: header, its kind. ``None`` kind: a count — ``count``, or ``ratio`` for the
-#: weighted counts of ``--post-training`` (:func:`_count_kind`).
+#: weighted counts of ``--post-training`` (:func:`count_kind`).
 _BIN_COLUMNS = (
     ("score_from", "下緣", SCORE_GROUP, "ratio"),
     ("score_to", "上緣", SCORE_GROUP, "ratio"),
@@ -88,7 +88,7 @@ _ITEM_SUMMARY_FIELDS = tuple(f for f in _SUMMARY_FIELDS if f[1] == "best_f1")
 THRESHOLD_FIGURE_TITLE = "門檻對 precision、recall、F1 · 整體"
 
 
-def _count_kind(weight_col: str | None) -> str:
+def count_kind(weight_col: str | None) -> str:
     """The kind of the 候選列 and 正例數 columns: ``count`` — unless the rows
     are weighted (``--post-training`` with a kept share ``r`` of the
     zero-positive groups, each row ``1 / r``): the sums then are not whole
@@ -191,7 +191,7 @@ def build(
     per_item = prediction_quality["per_item"]
     columns = prediction_quality["columns"]
     weight_col = columns.get("weight")
-    count_kind = _count_kind(weight_col)
+    counts = count_kind(weight_col)
 
     blocks: list = [
         Paragraph(
@@ -245,7 +245,7 @@ def build(
         Table("關鍵數", "項目", (Column("值", "ratio"),), tuple(headline)),
         definitions(metrics_of(SCORE_BINS)),
         _overall_bin_table(frame_from_json(overall[DISPLAY_BINS_KEY]),
-                           count_kind),
+                           counts),
     ]
 
     listed = per_item.get("listed") or []
@@ -268,6 +268,6 @@ def build(
                         for item in listed),
                   notes),
             _per_item_bin_table(frame_from_json(per_item[DISPLAY_BINS_KEY]),
-                                columns["item"], count_kind),
+                                columns["item"], counts),
         ]
     return section(blocks)

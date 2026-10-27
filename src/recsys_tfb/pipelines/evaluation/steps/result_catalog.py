@@ -10,8 +10,10 @@ from recsys_tfb.evaluation.result_readers import (
     ALL_POSITIVE_KEY,
     ALL_POSITIVE_SHARE_KEY,
     ALL_POSITIVE_WARNS_KEY,
+    AVERAGE_PRECISION_KEY,
     DISPLAY_ALL_K,
     DISPLAY_COMPARE_K,
+    ITEM_TOP_K_KEY,
     N_WITH_POSITIVE_KEY,
     POPULARITY_WINDOW_KEY,
     POPULATION_KEY,
@@ -142,10 +144,20 @@ _PRODUCES_PREDICTION_QUALITY = Produces("prediction_quality_metrics", (
     Block("overall", "全部評估列當作二元預測的結果：摘要（pr_auc、roc_auc、最佳 F1 的箱界）、細箱表、顯示箱表、門檻掃描。",
           "整體一格，加每個分數區間"),
     Block("per_item",
-          "列數最多的 top_n 個 item 的結果：top_n、n_items（全部 item 數）、listed（列出的 item）、"
-          "totals（每個 item 的列數與正例數）、summary（每個列出 item 的摘要）、"
-          "bins（細箱表）、display_bins（顯示箱表）。",
-          "每個列出的 item 一格，加每個分數區間"),
+          "各 item 的結果：top_n、n_items（全部 item 數）、listed（列出的 item）、"
+          "totals（每個 item 的列數、正例數、正例佔比、pr_auc、roc_auc）、"
+          "macro（兩個面積對 item 的平均與參與的 item 數）、"
+          "summary（每個列出 item 的摘要）、bins（細箱表）、display_bins（顯示箱表）。"
+          "分箱表與摘要只有列數最多的 top_n 個 item。",
+          "每個 item 一格；列出的 item 另加每個分數區間"),
+    Block(AVERAGE_PRECISION_KEY,
+          "原始分數上的 average precision：overall（全部列一起排）、macro（每個 item 各排、"
+          "再對 item 平均）；沒有正例時為 None。",
+          "整體一格，加 Macro 一格"),
+    Block(ITEM_TOP_K_KEY,
+          "per-item precision@K 與 F1@K，分母數全部 query group：k_values、shared_numbers"
+          "（每個 item 的 n_pos、n_top@K、hits@K）、per_item（每個 item 的指標）、macro。",
+          "每個 item × K 一格，加 Macro"),
     Block(PREDICTION_QUALITY_POPULATION_KEY,
           "這些數字在哪些列上算：原料（post_training 或 monitoring）、評估日期；--post-training 時另有被評模型的 r 與列裡的無正例 query group 數，監控模式兩者為 None；--scope 時另有範圍名、圈到的列數（不加權）、範圍裡沒被評分的列數、範圍沒有列的評估日期，沒有 --scope 時為 None。",
           "整次執行一份"),

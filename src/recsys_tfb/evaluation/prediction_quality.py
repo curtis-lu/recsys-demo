@@ -67,6 +67,7 @@ from recsys_tfb.evaluation.metric_catalog import (
     metrics_of,
 )
 from recsys_tfb.evaluation.metrics import macro_from_per_item
+from recsys_tfb.evaluation.metrics_spark import item_metrics
 from recsys_tfb.evaluation.result_readers import (
     DISPLAY_BINS_KEY,
     FRAME_LONG,
@@ -192,6 +193,18 @@ def _area_names() -> list[str]:
     return [m.name for m in metrics_of(SCORE_BINS)]
 
 
+#: Each :class:`~metric_catalog.BinArea` curve: its term per bin — from the
+#: bin's positives and negatives, ``tp`` (the positives at or above it) and
+#: ``seen`` (the rows at or above it) — and what the key's summed terms are
+#: divided by, from its positives P and negatives N.
+_CURVES = {
+    "pr": (lambda pos, neg, tp, seen: pos * tp / seen,
+           lambda p, n: p),
+    "roc": (lambda pos, neg, tp, seen: neg * (tp - pos + F.lit(0.5) * pos),
+            lambda p, n: p * n),
+}
+
+
 def bin_areas(bins: SparkDataFrame, key_cols: list[str]) -> SparkDataFrame:
     """Every :data:`~metric_catalog.SCORE_BINS` entry of ``metric_catalog``
     (``pr_auc``, ``roc_auc``) of each key's bin table, in Spark: one row per
@@ -200,46 +213,38 @@ def bin_areas(bins: SparkDataFrame, key_cols: list[str]) -> SparkDataFrame:
 
     ``bins`` holds ``bin``, ``n`` and ``n_pos``, one row per (key, non-empty
     bin). Each key's bins are walked from the highest down (a window over the
-    key), so each bin knows ``tp``, the positives at or above it, and the rows
-    at or above it; each entry's :class:`~metric_catalog.BinArea` sums a term
-    per bin from them:
+    key), so each bin knows ``tp`` and ``seen``; each entry's curve
+    (:data:`_CURVES`) sums a term per bin from them:
 
     * ``"pr"``: n_pos × precision at the bin's lower edge, over P.
     * ``"roc"``: the bin's negatives × (positives above it + half its own),
       over P × N.
 
-    The same areas the module docstring describes; undefined (NULL) without a
-    positive, and ROC also without a negative. Only these few numbers per key
-    leave the executors: the window runs over ``items x bins`` rows, never
-    over the evaluated rows.
+    The same areas the module docstring describes. Both are undefined (NULL)
+    for a key without a positive or without a negative: without a negative
+    PR-AUC would be 1 whatever the order, and a macro would count it as a
+    perfect item. Only these few numbers per key leave the executors: the
+    window runs over ``items x bins`` rows, never over the evaluated rows.
     """
     walk = (Window.partitionBy(*key_cols) if key_cols else Window).orderBy(
         F.col("bin").desc()).rowsBetween(
             Window.unboundedPreceding, Window.currentRow)
-    pos = F.col("n_pos")
-    neg = F.col("n") - F.col("n_pos")
-    tp = F.col("_tp")
-    terms = {
-        "pr": pos * tp / F.col("_seen"),
-        "roc": neg * (tp - pos + F.lit(0.5) * pos),
-    }
     walked = bins.select(
         *key_cols, "n", "n_pos",
         F.sum("n_pos").over(walk).alias("_tp"),
         F.sum("n").over(walk).alias("_seen"))
     entries = metrics_of(SCORE_BINS)
+    pos, neg = F.col("n_pos"), F.col("n") - F.col("n_pos")
     summed = walked.groupBy(*key_cols).agg(
         F.sum("n").alias("n"), F.sum("n_pos").alias("n_pos"),
-        *(F.sum(terms[m.formula.curve]).alias(f"_{m.name}") for m in entries))
-    p, n = F.col("n_pos"), F.col("n") - F.col("n_pos")
-
-    def area(m) -> F.Column:
-        term = F.col(f"_{m.name}")
-        if m.formula.curve == "pr":
-            return F.when(p > 0, term / p).alias(m.name)
-        return F.when((p > 0) & (n > 0), term / (p * n)).alias(m.name)
-
-    return summed.select(*key_cols, "n", "n_pos", *(area(m) for m in entries))
+        *(F.sum(_CURVES[m.formula.curve][0](
+            pos, neg, F.col("_tp"), F.col("_seen"))).alias(f"_{m.name}")
+          for m in entries))
+    defined = (pos > 0) & (neg > 0)
+    return summed.select(*key_cols, "n", "n_pos", *(
+        F.when(defined, F.col(f"_{m.name}")
+               / _CURVES[m.formula.curve][1](pos, neg)).alias(m.name)
+        for m in entries))
 
 
 def _ratio(num: np.ndarray, den: np.ndarray) -> np.ndarray:
@@ -403,7 +408,10 @@ def build_payload(
     overall = aggregated["overall"]
     per_item = aggregated["per_item"]
     listed = aggregated["listed_items"]
-    totals = aggregated["item_totals"]
+    # Each item's positive rate beside its areas: PR-AUC's level under a
+    # random order, which the page prints next to it.
+    totals = aggregated["item_totals"].copy()
+    totals.insert(3, "positive_rate", _ratio(totals["n_pos"], totals["n"]))
     areas_of = {str(row[item_col]): row
                 for row in totals.to_dict("records")}
     per_item_summary = {}
@@ -460,8 +468,8 @@ def item_top_k_metrics(
 ) -> dict:
     """Every :data:`~metric_catalog.ITEM_EVERY_GROUP` entry of
     ``metric_catalog`` (per-item precision@K, F1@K) of each item, over every
-    row of ``sdf`` — the query groups without a positive included (#541's
-    first comment) — and their macro.
+    row of ``sdf`` — the query groups without a positive included (ADR-0031
+    decision 7, 2026-10-27 revision) — and their macro.
 
     One ``groupBy(item)`` sums, per item, ``n_pos`` and at each K ``n_top@K``
     (rows ranked within the top K) and ``hits@K`` (those positive), each row
@@ -476,8 +484,6 @@ def item_top_k_metrics(
     {item: metrics}, "macro"}``, items sorted, counts beside the metrics so
     the page can print them.
     """
-    from recsys_tfb.evaluation.metrics_spark import item_metrics
-
     weight = F.col(weight_col).cast("double") if weight_col else F.lit(1.0)
     label = F.col(label_col).cast("double")
     aggs = [("n_pos", F.sum(label * weight))]
