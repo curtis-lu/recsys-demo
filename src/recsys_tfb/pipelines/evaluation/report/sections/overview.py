@@ -5,7 +5,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from recsys_tfb.evaluation.metric_catalog import MODEL_SELECTION_METRICS
+from recsys_tfb.evaluation.metric_catalog import (
+    MODEL_SELECTION_METRICS,
+    MODEL_SELECTION_ON_PREDICTION_QUALITY,
+)
 from recsys_tfb.pipelines.evaluation.report.shell import ReportSection
 from recsys_tfb.pipelines.evaluation.report.sections.metric_tables import (
     definitions,
@@ -26,11 +29,21 @@ TITLE = "概覽"
 TITLE_EN = "Overview"
 QUESTION = "模型選擇指標各是多少？"
 
-#: Does not count the metrics: the ones in ``MODEL_SELECTION_PENDING`` join
-#: ``MODEL_SELECTION_METRICS`` later, when this sentence gains theirs.
+#: Does not count the metrics: :data:`ELSEWHERE` names the ones this page
+#: does not hold.
 DESCRIPTION = (
     "training 調參（HPO）與挑模型時能選的指標，並列、不分主次；它們都只看"
     "同一個 query group 裡的先後。"
+)
+
+
+#: The model-selection metrics on another page (ADR-0031 decision 16 item 1,
+#: 2026-10-27 revision): their population holds the query groups without a
+#: positive, so the ``--prediction-quality`` mode computes them.
+ELSEWHERE = (
+    "、".join(m.display_name for m in MODEL_SELECTION_ON_PREDICTION_QUALITY)
+    + " 也是 HPO 能選的指標。它們把每一列當成一次二元預測、母體含沒有正例的 "
+    "query group，所以在 --prediction-quality 模式的報表，不在這一頁。"
 )
 
 
@@ -52,6 +65,7 @@ def build(results: Mapping[str, dict], parameters: dict) -> ReportSection:
         blocks += [Note(f"{m.display_name} 沒有值：進 Macro 平均的 item 是 0 個"
                         "（只算正例數達到 metric.min_positives 的 item）。")
                    for m in MODEL_SELECTION_METRICS if m.source.grain == "macro"]
+    blocks.append(Note(ELSEWHERE))
     blocks.append(definitions(MODEL_SELECTION_METRICS))
     return ReportSection(
         title=TITLE,

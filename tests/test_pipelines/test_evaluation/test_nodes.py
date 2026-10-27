@@ -1545,6 +1545,47 @@ class TestComputeRowFacts:
             "prepare_eval_data"}
 
 
+#: The areas' keys: since #577 Spark computes them (``bin_areas``), summing
+#: in another order than the driver code that landed the golden file, so
+#: they may differ in the last digits — within 1e-12 (#577's acceptance).
+_AREA_KEYS = ("pr_auc", "roc_auc")
+
+
+def _assert_same_as_before(landed: dict, golden: dict, mode: str) -> None:
+    """Every key the family landed before ADR-0032 is the same, the areas
+    within 1e-12; keys added since (every item's areas in ``per_item.totals``,
+    ``per_item.macro``) are not compared here."""
+    for key in ("columns", "bins"):
+        assert landed[key] == golden[key], (mode, key)
+
+    def summaries_match(new: dict, old: dict, where: str) -> None:
+        assert {k: v for k, v in new.items() if k not in _AREA_KEYS} == {
+            k: v for k, v in old.items() if k not in _AREA_KEYS}, (mode, where)
+        for k in _AREA_KEYS:
+            assert (new[k] is None) == (old[k] is None), (mode, where, k)
+            if old[k] is not None:
+                assert abs(new[k] - old[k]) < 1e-12, (mode, where, k)
+
+    for key, value in golden["overall"].items():
+        if key == "summary":
+            summaries_match(landed["overall"]["summary"], value, "overall")
+        else:
+            assert landed["overall"][key] == value, (mode, "overall", key)
+    for key, value in golden["per_item"].items():
+        if key == "summary":
+            assert set(landed["per_item"]["summary"]) == set(value)
+            for item, old in value.items():
+                summaries_match(landed["per_item"]["summary"][item], old, item)
+        elif key == "totals":
+            old_cols = value["columns"]
+            new = landed["per_item"]["totals"]
+            index = [new["columns"].index(c) for c in old_cols]
+            assert [[row[i] for i in index] for row in new["data"]] == (
+                value["data"]), (mode, "totals")
+        else:
+            assert landed["per_item"][key] == value, (mode, "per_item", key)
+
+
 class TestComputePredictionQuality:
     """compute_prediction_quality: every evaluated row as a binary prediction
     (ADR-0024), the ``--prediction-quality`` mode's computation (ADR-0032)."""
@@ -1830,8 +1871,80 @@ class TestComputePredictionQuality:
         }
         for mode, payload in computed.items():
             landed = json.loads(json.dumps(payload))
-            for key in ("columns", "bins", "overall", "per_item"):
-                assert landed[key] == golden[mode][key], (mode, key)
+            _assert_same_as_before(landed, golden[mode], mode)
+
+    def test_lands_the_raw_score_aps_and_per_item_precision(self, spark):
+        """#577, by hand on the nine rows. Pooled: positives at ranks 1, 2, 9
+        of all nine scores -> (1 + 1 + 3/9) / 3 = 7/9. Per item: A's and B's
+        positive tops their own rows (AP 1), C's is last of its three (1/3)
+        -> 7/9. precision@1: A is first in c1 (a hit) and in c3, the group
+        without a positive -> 1/2; B first in c2 only -> 1; C never first ->
+        no value. Every row weighs 1 (monitoring)."""
+        from recsys_tfb.evaluation.result_readers import (
+            AVERAGE_PRECISION_KEY,
+            ITEM_TOP_K_KEY,
+        )
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._parameters()
+        result = compute_prediction_quality(
+            self._with_a_query_group_without_a_positive(spark),
+            _no_segments(params), params)
+        ap = result[AVERAGE_PRECISION_KEY]
+        assert ap["overall"] == pytest.approx(7 / 9)
+        assert ap["macro"] == pytest.approx(7 / 9)
+        top_k = result[ITEM_TOP_K_KEY]
+        assert top_k["k_values"] == [1, 2, 3]
+        assert top_k["per_item"]["A"]["precision@1"] == pytest.approx(0.5)
+        assert top_k["per_item"]["B"]["precision@1"] == pytest.approx(1.0)
+        assert "precision@1" not in top_k["per_item"]["C"]
+        assert top_k["macro"]["precision@1"]["n_items"] == 2
+
+    def test_every_macro_over_items_reads_metric_min_positives(self, spark):
+        """Owner, #577: the areas' and the per-item precision's macro drop the
+        items under evaluation.metric.min_positives, as the ranking macro
+        does. Every item holds one positive, so 2 leaves none — while the
+        raw-score AP, training's own pass, keeps training's rule."""
+        from recsys_tfb.evaluation.result_readers import (
+            AVERAGE_PRECISION_KEY,
+            ITEM_TOP_K_KEY,
+        )
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._parameters()
+        params["evaluation"]["metric"] = {"min_positives": 2}
+        result = compute_prediction_quality(
+            self._with_a_query_group_without_a_positive(spark),
+            _no_segments(params), params)
+        macro = result["per_item"]["macro"]
+        assert macro["min_positives"] == 2
+        assert macro["roc_auc"] == {"value": None, "n_items": 0}
+        assert result[ITEM_TOP_K_KEY]["macro"]["precision@1"] == {
+            "value": None, "n_items": 0}
+        assert result[AVERAGE_PRECISION_KEY]["macro"] == pytest.approx(7 / 9)
+
+    def test_post_training_weighs_the_kept_group_in_both(self, spark):
+        """r = 0.5, c3's rows weigh 2. Pooled: the weight scored at or above
+        C's positive (0.1, last) is 6 + 2·3 = 12 -> (1 + 1 + 3/12) / 3 = 3/4.
+        precision@1 of A: 1 hit over 1 + 2 -> 1/3."""
+        from recsys_tfb.evaluation.result_readers import (
+            AVERAGE_PRECISION_KEY,
+            ITEM_TOP_K_KEY,
+        )
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._post_training(model_ratio=0.5)
+        result = compute_prediction_quality(
+            self._weighted(spark, params, 2.0), _no_segments(params), params)
+        assert result[AVERAGE_PRECISION_KEY]["overall"] == pytest.approx(0.75)
+        assert result[ITEM_TOP_K_KEY]["per_item"]["A"]["precision@1"] == (
+            pytest.approx(1 / 3))
 
     def test_rows_the_other_run_mode_wrote_are_refused_with_the_run_to_do(
             self, spark):

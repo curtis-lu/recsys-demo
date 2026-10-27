@@ -44,19 +44,25 @@ from recsys_tfb.evaluation.baselines import (
 )
 from recsys_tfb.evaluation.metrics_spark import (
     compute_all_metrics,
+    compute_macro_per_item_average_precision,
+    compute_pooled_average_precision,
     compute_row_facts as _count_row_facts,
+    resolve_item_k_grid,
 )
 from recsys_tfb.evaluation.prediction_quality import (
     aggregate_score_bins,
     build_payload,
     count_query_groups_without_positive,
+    item_top_k_metrics,
 )
 from recsys_tfb.evaluation.result_readers import (
     ALL_K_KEY,
+    AVERAGE_PRECISION_KEY,
     CELLS,
     DISPLAY_ALL_K,
     DISPLAY_COMPARE_K,
     DISPLAY_METRICS_SECTION,
+    ITEM_TOP_K_KEY,
     LEDGER_RERUN_NODE,
     MONITORING_POPULATION,
     POPULARITY_WINDOW_KEY,
@@ -75,6 +81,7 @@ from recsys_tfb.evaluation.result_readers import (
     SCOPE_ROWS_KEY,
     THIS,
     drop_all_positive_groups,
+    metric_params,
     resolved_all_k,
 )
 from recsys_tfb.pipelines.evaluation.report.comparison.main import (
@@ -897,10 +904,12 @@ def compute_prediction_quality(
     # bins merging into display bins; quantile bins would break both
     # silently (ADR-0024 decision 4).
     #
-    # Decision — per-item bins for the `top_n` items with the most rows only
-    # (ties by item): item x bin rows come back to the driver, and an ad
-    # deployment can have thousands of items (ADR-0024 decision 6). Every
-    # item still counts in the overall bins and in the item totals.
+    # Decision — per-item bin tables for the `top_n` items with the most rows
+    # only (ties by item): item x bin rows come back to the driver, and an ad
+    # deployment can have thousands of items (ADR-0024 decision 6). So
+    # `top_n` decides only what the page draws: every item's PR-AUC and
+    # ROC-AUC are computed in Spark from the same bins, one row per item
+    # (ADR-0024 decision 6, 2026-10-27 revision).
     weight_col = ZERO_POSITIVE_GROUP_WEIGHT_COL if post_training else None
     # Pre-check (input) — the rows must carry the weight r promises. A
     # missing column, or a NULL weight (training writes NULL when its test
@@ -909,20 +918,56 @@ def compute_prediction_quality(
     # counting them would report a filtered table as a weighted one.
     if weight_col is not None:
         require_zero_positive_group_weights(in_scope, weight_col)
+    in_scope_rows = in_scope.select(
+        item_col, score_col, label_col, *([weight_col] if weight_col else []))
     aggregated = aggregate_score_bins(
-        in_scope.select(
-            item_col, score_col, label_col, *([weight_col] if weight_col else [])),
+        in_scope_rows,
         item_col=item_col, score_col=score_col, label_col=label_col,
         n_bins=settings["n_bins"], top_n=settings["top_n"],
         weight_col=weight_col,
     )
+    # Decision — every macro over items here (the areas, per-item precision
+    # and F1) drops the items under evaluation.metric.min_positives, as the
+    # ranking metrics' macro does (ADR-0031 decision 7, 2026-10-27
+    # revision): one knob for every macro.
+    # The average precisions below are training's own passes and keep
+    # training's rule (every item with a positive), so they equal its values.
+    min_positives = metric_params(parameters)["min_positives"]
     out = build_payload(
         aggregated, item_col=item_col, score_col=score_col,
         label_col=label_col, weight_col=weight_col,
         n_bins=settings["n_bins"],
         n_display_bins=settings["n_display_bins"],
         top_n=settings["top_n"],
+        min_positives=min_positives,
     )
+    # Decision — the two model-selection metrics on the raw scores
+    # (ADR-0031 decision 16 item 3, 2026-10-27 revision): training's own Spark
+    # passes, on the same rows as the bins, so under --post-training they
+    # equal what training scored on test. Weighted as the bins are; without a
+    # positive average precision is undefined and the passes raise, so it is
+    # left None instead.
+    has_positive = bool(aggregated["overall"]["n_pos"].sum() > 0)
+    out[AVERAGE_PRECISION_KEY] = {
+        "overall": (compute_pooled_average_precision(
+            in_scope_rows, parameters, weighted=post_training)
+            if has_positive else None),
+        "macro": (compute_macro_per_item_average_precision(
+            in_scope_rows, parameters, weighted=post_training)
+            if has_positive else None),
+    }
+    # Decision — per-item precision@K and F1@K over every query group, the
+    # ones without a positive included and weighted (ADR-0031 decision 7):
+    # the denominator is the times the item was ranked in the top K, and a
+    # group without a positive ranks items too. The rank is the one landed
+    # on the rows, taken within the whole group, so under --scope a row
+    # keeps its rank among every candidate. The K grid is the main run's,
+    # "all" resolved on every evaluated row, not the scope's.
+    out[ITEM_TOP_K_KEY] = item_top_k_metrics(
+        in_scope, item_col=item_col, label_col=label_col,
+        rank_col=schema["rank"],
+        k_values=resolve_item_k_grid(eval_predictions, parameters),
+        weight_col=weight_col, min_positives=min_positives)
     # Decision — which rows these are, for the page's opening lines (ADR-0032
     # decisions 5 and 7): the run mode and the dates, under --post-training r
     # and the zero-positive groups kept, and the scope. Keys of their own,

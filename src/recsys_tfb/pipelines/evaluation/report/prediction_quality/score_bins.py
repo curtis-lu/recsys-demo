@@ -9,6 +9,10 @@ from collections.abc import Mapping
 
 import pandas as pd
 
+from recsys_tfb.evaluation.metric_catalog import SCORE_BINS, metrics_of
+from recsys_tfb.pipelines.evaluation.report.sections.metric_tables import (
+    definitions,
+)
 from recsys_tfb.pipelines.evaluation.report.shell import ReportSection
 from recsys_tfb.evaluation.result_readers import (
     DISPLAY_BINS_KEY,
@@ -18,7 +22,6 @@ from recsys_tfb.evaluation.result_readers import (
 from recsys_tfb.report.types import (
     Bullets,
     Column,
-    Definitions,
     Figure,
     Formula,
     Note,
@@ -47,7 +50,7 @@ SCORE_GROUP, BIN_GROUP, ABOVE_GROUP = "分數", "這一格", "門檻以上"
 #: A bin table's columns after 格: the display bin frame's column
 #: (``prediction_quality.DISPLAY_BIN_COLUMNS``), its header, its upper
 #: header, its kind. ``None`` kind: a count — ``count``, or ``ratio`` for the
-#: weighted counts of ``--post-training`` (:func:`_count_kind`).
+#: weighted counts of ``--post-training`` (:func:`count_kind`).
 _BIN_COLUMNS = (
     ("score_from", "下緣", SCORE_GROUP, "ratio"),
     ("score_to", "上緣", SCORE_GROUP, "ratio"),
@@ -76,20 +79,16 @@ _SUMMARY_FIELDS = (
     ("該門檻的 F1", "best_f1", "f1"),
 )
 
-#: PR-AUC's definition, under the headline table. Not the catalog's: the
-#: binned areas are not in ``metric_catalog`` yet (its docstring, "Not in it
-#: yet"), so the block says only 定義.
-PR_AUC_DEFINITION = (
-    "PR-AUC",
-    "分數分箱、箱內視為同分之後的 average precision。是近似值，不等於在原始"
-    "分數上算的 pooled AP。鍵是 pr_auc。",
-)
+#: 關鍵數 · 各 item: the best-F1 fields only. Every item's PR-AUC and
+#: ROC-AUC are in the next section (``item_areas``), for every item, not
+#: only the listed ones: one number, one place.
+_ITEM_SUMMARY_FIELDS = tuple(f for f in _SUMMARY_FIELDS if f[1] == "best_f1")
 
 #: The figure's title (decision 16: named like the tables).
 THRESHOLD_FIGURE_TITLE = "門檻對 precision、recall、F1 · 整體"
 
 
-def _count_kind(weight_col: str | None) -> str:
+def count_kind(weight_col: str | None) -> str:
     """The kind of the 候選列 and 正例數 columns: ``count`` — unless the rows
     are weighted (``--post-training`` with a kept share ``r`` of the
     zero-positive groups, each row ``1 / r``): the sums then are not whole
@@ -97,10 +96,10 @@ def _count_kind(weight_col: str | None) -> str:
     return "ratio" if weight_col else "count"
 
 
-def _summary_values(summary: Mapping) -> tuple:
+def _summary_values(summary: Mapping, fields=_SUMMARY_FIELDS) -> tuple:
     best = summary.get("best_f1") or {}
     return tuple((best if where else summary).get(key)
-                 for _, where, key in _SUMMARY_FIELDS)
+                 for _, where, key in fields)
 
 
 def _bin_columns(count_kind: str) -> tuple[Column, ...]:
@@ -192,7 +191,7 @@ def build(
     per_item = prediction_quality["per_item"]
     columns = prediction_quality["columns"]
     weight_col = columns.get("weight")
-    count_kind = _count_kind(weight_col)
+    counts = count_kind(weight_col)
 
     blocks: list = [
         Paragraph(
@@ -218,8 +217,9 @@ def build(
             "面積。兩者都是「分箱後分數」的精確值，但箱內的先後已經丟掉，不等於"
             "在原始分數上算的值——不能拿來跟外部工具（例如 sklearn）在原始分數上"
             "算的 average precision 或 ROC-AUC 直接比較。",
-            "per-item 的 precision 分母是該 item 在門檻以上的候選列數；query "
-            "group 的 precision@K 分母是 K，是不同的量。",
+            "per-item 的 precision 分母是該 item 在門檻以上的候選列數；最後一段"
+            "的 per-item precision@K 分母是排進前 K 名的次數，query group 的 "
+            "precision@K 分母是 K，三個是不同的量。",
             "分箱表把每格的平均分數與實際正例率放在一起，只是並列兩個量：框架"
             "不做校準（#411），分數不保證是機率。上面每個指標都只看分數的大小"
             "順序，兩者相近或相差都不改變它們。",
@@ -243,9 +243,9 @@ def build(
                  Row("分數範圍上緣", (hi,))]
     blocks += [
         Table("關鍵數", "項目", (Column("值", "ratio"),), tuple(headline)),
-        Definitions((PR_AUC_DEFINITION,), source="定義"),
+        definitions(metrics_of(SCORE_BINS)),
         _overall_bin_table(frame_from_json(overall[DISPLAY_BINS_KEY]),
-                           count_kind),
+                           counts),
     ]
 
     listed = per_item.get("listed") or []
@@ -254,18 +254,20 @@ def build(
         # The per-item budget (evaluation.prediction_quality.top_n): said
         # when it left items out, which the table cannot show by itself.
         notes = ((Note(
-            f"只列出候選列最多的前 {len(listed)} 個 item"
-            "（evaluation.prediction_quality.top_n），其餘的只算進整體。"),)
+            f"只列出候選列最多的前 {len(listed)} 個 item 的 F1 最佳門檻與分箱表"
+            "（evaluation.prediction_quality.top_n）；每個 item 的 PR-AUC、"
+            "ROC-AUC 在下一段。"),)
             if n_items is not None and len(listed) < n_items else ())
         blocks += [
-            Table("關鍵數 · 各 item", "item",
+            Table("F1 最佳門檻 · 各 item", "item",
                   tuple(Column(label, "ratio") for label, _, _
-                        in _SUMMARY_FIELDS),
+                        in _ITEM_SUMMARY_FIELDS),
                   tuple(Row(str(item),
-                            _summary_values(per_item["summary"][item]))
+                            _summary_values(per_item["summary"][item],
+                                            _ITEM_SUMMARY_FIELDS))
                         for item in listed),
                   notes),
             _per_item_bin_table(frame_from_json(per_item[DISPLAY_BINS_KEY]),
-                                columns["item"], count_kind),
+                                columns["item"], counts),
         ]
     return section(blocks)

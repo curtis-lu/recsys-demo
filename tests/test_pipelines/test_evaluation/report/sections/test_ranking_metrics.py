@@ -71,8 +71,10 @@ def _grain_tables(section) -> dict[str, list[Table]]:
 
 
 def _per_k_count() -> int:
-    """How many per-K metrics the catalog holds, both methods."""
-    return sum(1 for m in mc.METRICS if m.per_k)
+    """How many per-K metrics the catalog holds in the two methods this
+    section draws (the ``--prediction-quality`` page draws the others)."""
+    return sum(1 for m in mc.METRICS if m.per_k
+               and m.method in (mc.QUERY_GROUP, mc.ITEM))
 
 
 def test_one_table_per_catalog_metric_at_k_at_each_grain(spark):

@@ -231,6 +231,17 @@ DISPLAY_BINS_KEY = "display_bins"
 #: non-empty fine bin), as a :func:`frame_to_json` long frame.
 THRESHOLD_SWEEP_KEY = "threshold_sweep"
 
+#: Key of ``prediction_quality.json`` beside ``build_payload``'s: average
+#: precision on the raw scores (``metric_catalog``'s ``average_precision``),
+#: ``{"overall": pooled, "macro": per item, averaged}`` — ``None`` each when
+#: the rows hold no positive.
+AVERAGE_PRECISION_KEY = "average_precision"
+
+#: Key of ``prediction_quality.json`` beside ``build_payload``'s: the
+#: per-item precision@K and F1@K over every query group,
+#: ``prediction_quality.item_top_k_metrics``' dict.
+ITEM_TOP_K_KEY = "per_item_top_k"
+
 #: Key of ``prediction_quality.json`` beside ``build_payload``'s: which rows
 #: the numbers are on (ADR-0032 decisions 3-5), the page's opening lines.
 #: A dict of :data:`POPULATION_SOURCE_KEY`, :data:`POPULATION_DATES_KEY`,

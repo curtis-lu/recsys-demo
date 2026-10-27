@@ -78,8 +78,9 @@ evaluation:
   #                   門檻只算得到箱的邊界，所以 bin 寬＝F1 最佳門檻的解析度。
   #   n_display_bins  報表分箱表的格數：每格合併 n_bins ÷ n_display_bins 個細箱，
   #                   必須整除 n_bins。
-  #   top_n           per-item 預算：只有列數最多的前 top_n 個 item 有自己的分箱與
-  #                   指標（item × 細箱會回 driver）；其餘 item 仍算進整體。0＝不列。
+  #   top_n           只管顯示：報表只印列數最多的前 top_n 個 item 的分箱表與 F1
+  #                   最佳門檻（item × 細箱會回 driver）。每個 item 的 pr_auc、
+  #                   roc_auc 都會算，不受它限制。0＝不印各 item 的分箱表。
   prediction_quality:
     n_bins: 1000
     n_display_bins: 10

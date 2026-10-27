@@ -53,12 +53,21 @@ groups writes on the kept rows; without it every row weighs 1.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 
 import numpy as np
 import pandas as pd
 from pyspark.sql import DataFrame as SparkDataFrame
+from pyspark.sql import Window
 from pyspark.sql import functions as F
 
+from recsys_tfb.evaluation.metric_catalog import (
+    ITEM_EVERY_GROUP,
+    SCORE_BINS,
+    metrics_of,
+)
+from recsys_tfb.evaluation.metrics import macro_from_per_item
+from recsys_tfb.evaluation.metrics_spark import item_metrics
 from recsys_tfb.evaluation.result_readers import (
     DISPLAY_BINS_KEY,
     FRAME_LONG,
@@ -88,19 +97,20 @@ def aggregate_score_bins(
       score) and one bin's width; ``width`` is ``0.0`` when every score is
       the same, and then every row is in bin 0.
     * ``overall``: :data:`BIN_COLUMNS`, one row per non-empty bin, summed
-      over every item.
-    * ``item_totals``: ``[item_col, "n", "n_pos"]`` for **every** item, most
-      rows first.
+      over every item; ``overall_areas``: its :func:`bin_areas`, a dict.
+    * ``item_totals``: :func:`bin_areas` of **every** item —
+      ``[item_col, "n", "n_pos", "pr_auc", "roc_auc"]`` — most rows first.
     * ``listed_items`` / ``per_item``: the ``top_n`` items with the most rows
       (ties by item), and their bins (``[item_col] + BIN_COLUMNS``).
 
     Why ``top_n``: per-item bins come back to the driver as ``items x bins``
-    rows, and the item count can run to thousands (ADR-0024 decision 6). The
-    overall bins and every item's totals are computed from all items
-    regardless, in Spark.
+    rows, and the item count can run to thousands (ADR-0024 decision 6). So
+    it only decides which items' bin tables the page draws: every item's
+    areas are computed in Spark, from the same bins, and only one row per
+    item comes back.
 
     Cost: one aggregate for the range, one ``groupBy(item, bin)`` over the
-    rows (the only full pass that shuffles), cached, then three small
+    rows (the only full pass that shuffles), cached, then four small
     collects over that aggregate.
     """
     bounds = sdf.agg(
@@ -111,8 +121,9 @@ def aggregate_score_bins(
     if lo is None:
         return {
             "lo": None, "hi": None, "width": None,
-            "overall": empty,
-            "item_totals": pd.DataFrame(columns=[item_col, "n", "n_pos"]),
+            "overall": empty, "overall_areas": None,
+            "item_totals": pd.DataFrame(
+                columns=[item_col, "n", "n_pos", *_area_names()]),
             "listed_items": [],
             "per_item": pd.DataFrame(columns=[item_col] + BIN_COLUMNS),
         }
@@ -139,17 +150,14 @@ def aggregate_score_bins(
         .cache()
     )
     try:
-        overall = (
+        overall_bins = (
             agg.groupBy("bin")
             .agg(F.sum("n").alias("n"), F.sum("n_pos").alias("n_pos"),
                  F.sum("score_sum").alias("score_sum"))
-            .toPandas()
         )
-        item_totals = (
-            agg.groupBy(item_col)
-            .agg(F.sum("n").alias("n"), F.sum("n_pos").alias("n_pos"))
-            .toPandas()
-        )
+        overall = overall_bins.toPandas()
+        overall_areas = bin_areas(overall_bins, []).collect()[0].asDict()
+        item_totals = bin_areas(agg, [item_col]).toPandas()
         # Most rows first, ties by item: the order the budget keeps from.
         item_totals = item_totals.sort_values(
             ["n", item_col], ascending=[False, True], kind="mergesort"
@@ -173,10 +181,70 @@ def aggregate_score_bins(
     return {
         "lo": lo, "hi": hi, "width": width,
         "overall": overall,
-        "item_totals": item_totals[[item_col, "n", "n_pos"]],
+        "overall_areas": {name: overall_areas[name] for name in _area_names()},
+        "item_totals": item_totals,
         "listed_items": listed,
         "per_item": per_item,
     }
+
+
+def _area_names() -> list[str]:
+    """The catalog's :data:`~metric_catalog.SCORE_BINS` entries, in order."""
+    return [m.name for m in metrics_of(SCORE_BINS)]
+
+
+#: Each :class:`~metric_catalog.BinArea` curve: its term per bin — from the
+#: bin's positives and negatives, ``tp`` (the positives at or above it) and
+#: ``seen`` (the rows at or above it) — and what the key's summed terms are
+#: divided by, from its positives P and negatives N.
+_CURVES = {
+    "pr": (lambda pos, neg, tp, seen: pos * tp / seen,
+           lambda p, n: p),
+    "roc": (lambda pos, neg, tp, seen: neg * (tp - pos + F.lit(0.5) * pos),
+            lambda p, n: p * n),
+}
+
+
+def bin_areas(bins: SparkDataFrame, key_cols: list[str]) -> SparkDataFrame:
+    """Every :data:`~metric_catalog.SCORE_BINS` entry of ``metric_catalog``
+    (``pr_auc``, ``roc_auc``) of each key's bin table, in Spark: one row per
+    key, ``[*key_cols, "n", "n_pos", <entry names>]``. No key column gives
+    the one row of the whole table.
+
+    ``bins`` holds ``bin``, ``n`` and ``n_pos``, one row per (key, non-empty
+    bin). Each key's bins are walked from the highest down (a window over the
+    key), so each bin knows ``tp`` and ``seen``; each entry's curve
+    (:data:`_CURVES`) sums a term per bin from them:
+
+    * ``"pr"``: n_pos × precision at the bin's lower edge, over P.
+    * ``"roc"``: the bin's negatives × (positives above it + half its own),
+      over P × N.
+
+    The same areas the module docstring describes. Both are undefined (NULL)
+    for a key without a positive or without a negative: without a negative
+    PR-AUC would be 1 whatever the order, and a macro would count it as a
+    perfect item. Only these few numbers per key leave the executors: the
+    window runs over ``items x bins`` rows, never over the evaluated rows.
+    """
+    walk = (Window.partitionBy(*key_cols) if key_cols else Window).orderBy(
+        F.col("bin").desc()).rowsBetween(
+            Window.unboundedPreceding, Window.currentRow)
+    walked = bins.select(
+        *key_cols, "n", "n_pos",
+        F.sum("n_pos").over(walk).alias("_tp"),
+        F.sum("n").over(walk).alias("_seen"))
+    entries = metrics_of(SCORE_BINS)
+    pos, neg = F.col("n_pos"), F.col("n") - F.col("n_pos")
+    summed = walked.groupBy(*key_cols).agg(
+        F.sum("n").alias("n"), F.sum("n_pos").alias("n_pos"),
+        *(F.sum(_CURVES[m.formula.curve][0](
+            pos, neg, F.col("_tp"), F.col("_seen"))).alias(f"_{m.name}")
+          for m in entries))
+    defined = (pos > 0) & (neg > 0)
+    return summed.select(*key_cols, "n", "n_pos", *(
+        F.when(defined, F.col(f"_{m.name}")
+               / _CURVES[m.formula.curve][1](pos, neg)).alias(m.name)
+        for m in entries))
 
 
 def _ratio(num: np.ndarray, den: np.ndarray) -> np.ndarray:
@@ -242,39 +310,29 @@ def _native(value):
     return int(value) if value.is_integer() and abs(value) < 2**53 else value
 
 
-def binary_summary(bins: pd.DataFrame, *, lo: float, width: float) -> dict:
+def binary_summary(
+    bins: pd.DataFrame, *, lo: float, width: float, areas: Mapping,
+) -> dict:
     """The headline numbers of one bin table (overall, or one item's).
 
-    ``pr_auc`` and ``roc_auc`` are the exact values of the binned score (see
-    the module docstring); ``best_f1`` is the bin edge with the largest F1,
-    the higher threshold on a tie. A metric the data cannot define — no
-    positive, or for ``roc_auc`` no negative — is ``None``, never 0.
+    ``pr_auc`` and ``roc_auc`` are ``areas``' — :func:`bin_areas` of the same
+    bins, computed in Spark for every item; this function does not compute
+    them again. ``best_f1`` is the bin edge with the largest F1, the higher
+    threshold on a tie. A metric the data cannot define — no positive, or for
+    ``roc_auc`` no negative — is ``None``, never 0.
     """
     sweep = threshold_sweep(bins, lo=lo, width=width)
     n = float(sweep["n"].sum())
     n_pos = float(sweep["n_pos"].sum())
-    n_neg = n - n_pos
     out = {
         "n": _native(n),
         "n_pos": _native(n_pos),
         "positive_rate": float(n_pos / n) if n > 0 else None,
-        "pr_auc": None,
-        "roc_auc": None,
+        **{name: _area(areas.get(name)) for name in _area_names()},
         "best_f1": None,
     }
     if n_pos <= 0:
         return out
-
-    # Both read the sweep row by row: a bin's own positives (n_pos), the
-    # precision at its lower edge, and the positives above it (tp - n_pos).
-    pos = sweep["n_pos"].to_numpy(dtype=float)
-    neg = sweep["n"].to_numpy(dtype=float) - pos
-    precision = sweep["precision"].to_numpy(dtype=float)
-    out["pr_auc"] = float(np.sum(pos / n_pos * precision))
-    if n_neg > 0:
-        pos_above = sweep["tp"].to_numpy(dtype=float) - pos
-        out["roc_auc"] = float(np.sum(neg * (pos_above + 0.5 * pos))
-                               / (n_pos * n_neg))
 
     f1 = sweep["f1"].to_numpy(dtype=float)
     if not np.all(np.isnan(f1)):
@@ -288,6 +346,37 @@ def binary_summary(bins: pd.DataFrame, *, lo: float, width: float) -> dict:
     return out
 
 
+def _area(value) -> float | None:
+    """An area as a JSON float, ``None`` when undefined (NULL / NaN)."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    return float(value)
+
+
+def macro_over_items(
+    table: pd.DataFrame, names, *, min_positives: int,
+) -> dict:
+    """The macro of each column ``names`` of ``table`` (one row per item,
+    with ``n_pos``): the plain mean over the items holding a value whose
+    ``n_pos`` reaches ``min_positives`` (``evaluation.metric.min_positives``,
+    as the ranking metrics' macro uses it).
+
+    An item without a value — the metric is undefined for it — is left out
+    rather than counted as 0. Returns ``{name: {"value", "n_items"}}`` plus
+    ``n_items``, every item of ``table``: the page prints "x of y items".
+    """
+    n_pos = table["n_pos"].to_numpy(dtype=float)
+    out: dict = {"n_items": int(len(table)), "min_positives": min_positives}
+    for name in names:
+        values = pd.to_numeric(table[name], errors="coerce").to_numpy(
+            dtype=float)
+        has_value = ~np.isnan(values) & (n_pos >= min_positives)
+        value = (macro_from_per_item(values[has_value], n_pos[has_value])
+                 if has_value.any() else None)
+        out[name] = {"value": value, "n_items": int(has_value.sum())}
+    return out
+
+
 def build_payload(
     aggregated: dict,
     *,
@@ -298,9 +387,12 @@ def build_payload(
     n_bins: int,
     n_display_bins: int,
     top_n: int,
+    min_positives: int = 0,
 ) -> dict:
     """The landed JSON: :func:`aggregate_score_bins`' tables plus the
-    :func:`binary_summary` of each, and the tables the report draws: the
+    :func:`binary_summary` of each, every item's areas and their macro
+    (:func:`macro_over_items`, ``per_item.macro``), and the tables the report
+    draws: the
     display bin table (:func:`coarse_bin_table`) overall and for every listed
     item, and the threshold sweep (:func:`threshold_sweep`) the report plots
     — under ``result_readers.DISPLAY_BINS_KEY`` / ``THRESHOLD_SWEEP_KEY``,
@@ -316,12 +408,19 @@ def build_payload(
     overall = aggregated["overall"]
     per_item = aggregated["per_item"]
     listed = aggregated["listed_items"]
+    # Each item's positive rate beside its areas: PR-AUC's level under a
+    # random order, which the page prints next to it.
+    totals = aggregated["item_totals"].copy()
+    totals.insert(3, "positive_rate", _ratio(totals["n_pos"], totals["n"]))
+    areas_of = {str(row[item_col]): row
+                for row in totals.to_dict("records")}
     per_item_summary = {}
     overall_display = overall_sweep = item_display = None
     if lo is not None:
         for item in listed:
             per_item_summary[item] = binary_summary(
-                bins_of_item(per_item, item_col, item), lo=lo, width=width)
+                bins_of_item(per_item, item_col, item), lo=lo, width=width,
+                areas=areas_of[item])
         overall_display = frame_to_json(coarse_bin_table(
             overall, lo=lo, width=width, n_bins=n_bins,
             n_display_bins=n_display_bins), FRAME_LONG)
@@ -336,7 +435,8 @@ def build_payload(
         "bins": {"n_bins": n_bins, "n_display_bins": n_display_bins,
                  "lo": lo, "hi": aggregated["hi"], "width": width},
         "overall": {
-            "summary": (binary_summary(overall, lo=lo, width=width)
+            "summary": (binary_summary(overall, lo=lo, width=width,
+                                       areas=aggregated["overall_areas"])
                         if lo is not None else None),
             "bins": frame_to_json(overall, FRAME_LONG),
             DISPLAY_BINS_KEY: overall_display,
@@ -344,13 +444,75 @@ def build_payload(
         },
         "per_item": {
             "top_n": top_n,
-            "n_items": int(len(aggregated["item_totals"])),
+            "n_items": int(len(totals)),
             "listed": list(listed),
-            "totals": frame_to_json(aggregated["item_totals"], FRAME_LONG),
+            "totals": frame_to_json(totals, FRAME_LONG),
+            "macro": macro_over_items(totals, _area_names(),
+                                      min_positives=min_positives),
             "summary": per_item_summary,
             "bins": frame_to_json(per_item, FRAME_LONG),
             DISPLAY_BINS_KEY: item_display,
         },
+    }
+
+
+def item_top_k_metrics(
+    sdf: SparkDataFrame,
+    *,
+    item_col: str,
+    label_col: str,
+    rank_col: str,
+    k_values: list[int],
+    weight_col: str | None = None,
+    min_positives: int = 0,
+) -> dict:
+    """Every :data:`~metric_catalog.ITEM_EVERY_GROUP` entry of
+    ``metric_catalog`` (per-item precision@K, F1@K) of each item, over every
+    row of ``sdf`` — the query groups without a positive included (ADR-0031
+    decision 7, 2026-10-27 revision) — and their macro.
+
+    One ``groupBy(item)`` sums, per item, ``n_pos`` and at each K ``n_top@K``
+    (rows ranked within the top K) and ``hits@K`` (those positive), each row
+    times ``weight_col`` (1 without it); only these numbers per item reach
+    the driver. ``rank_col`` is the rank already on the rows, taken within
+    the whole query group. The formulas then divide them
+    (``metrics_spark.item_metrics``); a metric that divides by 0 is undefined
+    and left out of its item's cell. The macro is
+    :func:`macro_over_items`: ``min_positives`` reads ``n_pos``.
+
+    Returns ``{"k_values", "shared_numbers": {item: counts}, "per_item":
+    {item: metrics}, "macro"}``, items sorted, counts beside the metrics so
+    the page can print them.
+    """
+    weight = F.col(weight_col).cast("double") if weight_col else F.lit(1.0)
+    label = F.col(label_col).cast("double")
+    aggs = [("n_pos", F.sum(label * weight))]
+    for k in k_values:
+        top = F.col(rank_col) <= F.lit(k)
+        aggs += [(f"n_top@{k}", F.sum(F.when(top, weight).otherwise(0.0))),
+                 (f"hits@{k}", F.sum(F.when(top, label * weight)
+                                     .otherwise(0.0)))]
+    rows = sdf.groupBy(item_col).agg(
+        *(agg.alias(f"_c{i}") for i, (_, agg) in enumerate(aggs))).collect()
+    shared = {
+        str(r[item_col]): {key: float(r[f"_c{i}"] or 0.0)
+                           for i, (key, _) in enumerate(aggs)}
+        for r in sorted(rows, key=lambda r: str(r[item_col]))
+    }
+    per_item = item_metrics(shared, k_values, 1, method=ITEM_EVERY_GROUP)
+    names = [m.key(k) for k in k_values for m in metrics_of(ITEM_EVERY_GROUP)]
+    table = pd.DataFrame(
+        [{"n_pos": cell["n_pos"],
+          **{name: per_item.get(item, {}).get(name, np.nan)
+             for name in names}}
+         for item, cell in shared.items()],
+        columns=["n_pos", *names])
+    return {
+        "k_values": list(k_values),
+        "shared_numbers": shared,
+        "per_item": {item: {k: v for k, v in cell.items() if k != "n_pos"}
+                     for item, cell in per_item.items()},
+        "macro": macro_over_items(table, names, min_positives=min_positives),
     }
 
 

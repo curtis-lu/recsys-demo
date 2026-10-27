@@ -52,9 +52,10 @@ def test_the_section_is_drawn_in_blocks_with_the_catalog_s_definitions():
     assert s.question == overview.QUESTION
     from recsys_tfb.pipelines.evaluation.report.shell import generate_html_report
     assert "<details" not in generate_html_report([s])  # nothing collapses
-    assert [type(b) for b in s.blocks] == [Paragraph, Table, Definitions]
+    assert [type(b) for b in s.blocks] == [Paragraph, Table, Note,
+                                           Definitions]
     assert s.blocks[0].muted
-    defs = s.blocks[2]
+    defs = s.blocks[3]
     assert defs.entries == tuple((m.display_name, m.definition)
                                  for m in MODEL_SELECTION_METRICS)
 
@@ -83,11 +84,25 @@ def test_a_macro_without_items_is_blank_and_says_why():
     s = rbt._draw(overview, rbt._results(evaluation_metrics=metrics),
                   rbt._params())
     assert _values(_table(s, "模型選擇指標"))["macro per-item mAP"] == (None,)
-    notes = [b for b in s.blocks if isinstance(b, Note)]
+    notes = [b for b in s.blocks
+             if isinstance(b, Note) and b.text != overview.ELSEWHERE]
     assert [n.text for n in notes] == [
         "macro per-item mAP 沒有值：進 Macro 平均的 item 是 0 個（只算正例數"
         "達到 metric.min_positives 的 item）。"]
     # With items in the macro, no such line.
     full = rbt._draw(overview, rbt._results(
         evaluation_metrics=rbt._metrics_with_recorded_all_k()), rbt._params())
-    assert not [b for b in full.blocks if isinstance(b, Note)]
+    assert [b.text for b in full.blocks if isinstance(b, Note)] == [
+        overview.ELSEWHERE]
+
+
+def test_points_to_the_page_holding_the_raw_score_aps():
+    """ADR-0031 decision 16 item 1, revised by #577: the two raw-score APs
+    HPO can select by are on the ``--prediction-quality`` page, named here
+    in one line rather than left out without a word."""
+    s = rbt._draw(overview, rbt._results(evaluation_metrics=rbt._metrics()),
+                  rbt._params())
+    note = s.blocks[2]
+    assert isinstance(note, Note)
+    for name in ("pooled AP", "macro per-item AP", "--prediction-quality"):
+        assert name in note.text

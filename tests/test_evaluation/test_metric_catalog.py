@@ -212,16 +212,49 @@ def test_compare_entry_refuses_a_grain_the_entry_lacks():
         mc.CompareEntry("map", QUERY_GROUP, "per_item")
 
 
-def test_model_selection_marks_and_pending_name_every_registry_metric():
-    """Every metric HPO can select by is either marked on its catalog entry
-    or listed as not computed yet — once. A metric added to the registry
-    turns this red until it is placed in one of the two."""
+def test_model_selection_marks_name_every_registry_metric():
+    """Every metric HPO can select by is marked once, on the main report's
+    list or the ``--prediction-quality`` page's. A metric added to the
+    registry turns this red until it is placed in one of the two."""
     from recsys_tfb.evaluation.metric_registry import METRIC_NAMES
 
-    marked = [m.name for m in mc.MODEL_SELECTION_METRICS]
-    listed = marked + list(mc.MODEL_SELECTION_PENDING)
+    listed = [m.name for m in (mc.MODEL_SELECTION_METRICS
+                               + mc.MODEL_SELECTION_ON_PREDICTION_QUALITY)]
     assert len(listed) == len(set(listed)), listed
     assert set(listed) == set(METRIC_NAMES)
+
+
+def test_the_raw_score_aps_read_their_entry_overall_and_macro():
+    """ADR-0031 decision 16 item 3 (#577): pooled AP is the raw-score
+    ``average_precision`` overall, the per-item one its macro; the entry is
+    a pass of its own, not a formula."""
+    by_name = {m.name: m for m in mc.MODEL_SELECTION_ON_PREDICTION_QUALITY}
+    assert by_name["pooled_average_precision"].source == mc.CompareEntry(
+        "average_precision", mc.RAW_SCORE, "overall")
+    assert by_name["macro_per_item_average_precision"].source == (
+        mc.CompareEntry("average_precision", mc.RAW_SCORE, "macro"))
+    own = mc.entry("average_precision", mc.RAW_SCORE).formula
+    assert isinstance(own, mc.OwnPass)
+    # The functions it names exist: a rename turns this red, not the text
+    # silently false.
+    from recsys_tfb.evaluation import metrics_spark
+    import re
+    for name in re.findall(r"compute_\w+", own.computed_by):
+        assert hasattr(metrics_spark, name), name
+
+
+def test_the_new_page_s_entries_and_their_formula_shapes():
+    """#577's entries: per-item precision as a Ratio and F1 as an Expr over
+    the every-group counts, the two areas as BinArea; none of them in the
+    ranking metrics' item method, whose counts skip the groups without a
+    positive."""
+    assert mc.entry("precision", mc.ITEM_EVERY_GROUP).formula == mc.Ratio(
+        "hits", "n_top")
+    assert isinstance(mc.entry("f1", mc.ITEM_EVERY_GROUP).formula, mc.Expr)
+    assert [(m.name, m.formula) for m in mc.metrics_of(mc.SCORE_BINS)] == [
+        ("pr_auc", mc.BinArea("pr")), ("roc_auc", mc.BinArea("roc"))]
+    assert {m.name for m in mc.metrics_of(mc.ITEM)} == {
+        "recall", "map_attr", "mean_pos"}
 
 
 def test_model_selection_marks_read_the_entries_their_registry_metric_equals():

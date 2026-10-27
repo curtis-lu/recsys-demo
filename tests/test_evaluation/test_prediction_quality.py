@@ -24,8 +24,11 @@ import pytest
 
 from recsys_tfb.evaluation.prediction_quality import (
     aggregate_score_bins,
+    bin_areas,
     binary_summary,
     coarse_bin_table,
+    item_top_k_metrics,
+    macro_over_items,
     threshold_sweep,
 )
 
@@ -75,56 +78,41 @@ class TestThresholdSweep:
         assert list(sweep["precision"]) == pytest.approx([0.0, 0.0])
 
 
+#: The worked example's areas, as ``bin_areas`` hands them over.
+_AREAS = {"pr_auc": 11 / 12, "roc_auc": 14.5 / 15}
+
+
 class TestBinarySummary:
     def test_population_totals(self):
-        s = binary_summary(_bins(), lo=0.0, width=0.25)
+        s = binary_summary(_bins(), lo=0.0, width=0.25, areas=_AREAS)
         assert (s["n"], s["n_pos"]) == (8, 3)
         assert s["positive_rate"] == pytest.approx(3 / 8)
 
-    def test_pr_auc_is_average_precision_of_the_binned_score(self):
-        # sum over bins of (positives in bin / P) x precision at that bin's
-        # lower edge: (2/3) x 1 + (1/3) x 0.75 + 0 = 0.91666...
-        # sklearn.metrics.average_precision_score([1,1,1,0,0,0,0,0],
-        #                                         [3,3,1,1,0,0,0,0]) agrees.
-        s = binary_summary(_bins(), lo=0.0, width=0.25)
-        assert s["pr_auc"] == pytest.approx(11 / 12)
-
-    def test_roc_auc_counts_a_tie_within_a_bin_as_half(self):
-        # 15 (positive, negative) pairs. The bin-1 negative is beaten by the
-        # two bin-3 positives and tied with the bin-1 positive: 2.5. Each of
-        # the four bin-0 negatives is beaten by all three positives: 12.
-        # (2.5 + 12) / 15; sklearn.metrics.roc_auc_score on the bin index
-        # agrees.
-        s = binary_summary(_bins(), lo=0.0, width=0.25)
-        assert s["roc_auc"] == pytest.approx(14.5 / 15)
+    def test_areas_are_the_ones_handed_in_not_recomputed(self):
+        s = binary_summary(_bins(), lo=0.0, width=0.25,
+                           areas={"pr_auc": 0.5, "roc_auc": float("nan")})
+        assert s["pr_auc"] == 0.5
+        assert s["roc_auc"] is None
 
     def test_best_f1_is_taken_at_a_bin_edge(self):
-        s = binary_summary(_bins(), lo=0.0, width=0.25)
+        s = binary_summary(_bins(), lo=0.0, width=0.25, areas=_AREAS)
         best = s["best_f1"]
         assert best["threshold"] == pytest.approx(0.25)
         assert best["f1"] == pytest.approx(6 / 7)
         assert best["precision"] == pytest.approx(0.75)
         assert best["recall"] == pytest.approx(1.0)
 
-    def test_undefined_metrics_are_none_without_positives(self):
+    def test_best_f1_is_none_without_positives(self):
         bins = pd.DataFrame({"bin": [0, 1], "n": [3, 2], "n_pos": [0, 0],
                              "score_sum": [0.3, 0.8]})
-        s = binary_summary(bins, lo=0.0, width=0.5)
-        assert s["pr_auc"] is None
-        assert s["roc_auc"] is None
+        s = binary_summary(bins, lo=0.0, width=0.5,
+                           areas={"pr_auc": None, "roc_auc": None})
         assert s["best_f1"] is None
         assert s["n"] == 5
 
-    def test_roc_auc_undefined_without_negatives(self):
-        bins = pd.DataFrame({"bin": [0, 1], "n": [1, 2], "n_pos": [1, 2],
-                             "score_sum": [0.3, 1.6]})
-        s = binary_summary(bins, lo=0.0, width=0.5)
-        assert s["roc_auc"] is None
-        assert s["pr_auc"] == pytest.approx(1.0)
-
     def test_summary_is_json_native(self):
         # The payload lands as JSON; numpy scalars would not serialise.
-        s = binary_summary(_bins(), lo=0.0, width=0.25)
+        s = binary_summary(_bins(), lo=0.0, width=0.25, areas=_AREAS)
         for key in ("n", "n_pos"):
             assert type(s[key]) in (int, float)
         for key in ("positive_rate", "pr_auc", "roc_auc"):
@@ -132,13 +120,118 @@ class TestBinarySummary:
         assert all(type(v) is float for v in s["best_f1"].values())
 
 
-class TestAgreesWithSklearnOnTheBinnedScore:
-    """``pr_auc`` / ``roc_auc`` are the exact values of the binned score, so
-    scikit-learn run on the bin index (weights as ``sample_weight``) is an
-    independent answer to check them against."""
+class TestMacroOverItems:
+    """``per_item.macro``: the plain mean over the items that have a value,
+    with "x of y items" beside it (#541's first comment, 〈怎麼呈現〉 3-5)."""
 
-    @pytest.mark.parametrize("seed", [0, 1, 2])
-    def test_random_bins(self, seed):
+    TABLE = pd.DataFrame({
+        "item": ["A", "B", "C", "D"],
+        "n_pos": [3, 1, 0, 5],
+        "pr_auc": [0.9, 0.5, float("nan"), 0.4],
+        # B has no negative: no ROC-AUC.
+        "roc_auc": [0.8, float("nan"), float("nan"), 0.6],
+    })
+
+    def test_an_item_without_a_value_is_left_out_not_counted_as_zero(self):
+        m = macro_over_items(self.TABLE, ["pr_auc", "roc_auc"],
+                             min_positives=0)
+        assert m["pr_auc"] == {"value": pytest.approx(0.6), "n_items": 3}
+        assert m["roc_auc"] == {"value": pytest.approx(0.7), "n_items": 2}
+        assert m["n_items"] == 4
+
+    def test_min_positives_drops_items_with_fewer_positives(self):
+        # min 3: only A (3) and D (5) count -> PR (0.9 + 0.4) / 2.
+        m = macro_over_items(self.TABLE, ["pr_auc"], min_positives=3)
+        assert m["pr_auc"] == {"value": pytest.approx(0.65), "n_items": 2}
+
+    def test_no_item_with_a_value_gives_none(self):
+        m = macro_over_items(self.TABLE, ["roc_auc"], min_positives=6)
+        assert m["roc_auc"] == {"value": None, "n_items": 0}
+
+
+def _spark_bins(spark, tables: dict):
+    """``{item: bin table}`` as one Spark frame ``[item, bin, n, n_pos]``:
+    what ``bin_areas`` reads, the shape of ``aggregate_score_bins``' cached
+    ``groupBy(item, bin)``."""
+    rows = [(item, int(r["bin"]), float(r["n"]), float(r["n_pos"]))
+            for item, table in tables.items() for _, r in table.iterrows()]
+    return spark.createDataFrame(rows, ["item", "bin", "n", "n_pos"])
+
+
+def _areas_by_item(spark, tables: dict) -> dict:
+    out = bin_areas(_spark_bins(spark, tables), ["item"]).toPandas()
+    return out.set_index("item").to_dict("index")
+
+
+class TestBinAreas:
+    """``pr_auc`` / ``roc_auc`` of each item's bin table, computed in Spark:
+    every item has them, and only one row per item leaves the executors."""
+
+    def test_one_row_per_item_not_item_by_bin(self, spark):
+        # Item A: the worked example's 3 bins; item B: 2 bins. A function
+        # handing back item x bin would return 5 rows.
+        b = pd.DataFrame({"bin": [0, 2], "n": [3, 1], "n_pos": [1, 1]})
+        out = bin_areas(_spark_bins(spark, {"A": _bins(), "B": b}),
+                        ["item"]).toPandas()
+        assert len(out) == 2
+        assert sorted(out["item"]) == ["A", "B"]
+        assert list(out.columns) == ["item", "n", "n_pos", "pr_auc", "roc_auc"]
+
+    def test_pr_auc_is_average_precision_of_the_binned_score(self, spark):
+        # sum over bins of (positives in bin / P) x precision at that bin's
+        # lower edge: (2/3) x 1 + (1/3) x 0.75 + 0 = 0.91666...
+        # sklearn.metrics.average_precision_score([1,1,1,0,0,0,0,0],
+        #                                         [3,3,1,1,0,0,0,0]) agrees.
+        a = _areas_by_item(spark, {"A": _bins()})["A"]
+        assert (a["n"], a["n_pos"]) == (8, 3)
+        assert a["pr_auc"] == pytest.approx(11 / 12)
+
+    def test_roc_auc_counts_a_tie_within_a_bin_as_half(self, spark):
+        # 15 (positive, negative) pairs. The bin-1 negative is beaten by the
+        # two bin-3 positives and tied with the bin-1 positive: 2.5. Each of
+        # the four bin-0 negatives is beaten by all three positives: 12.
+        # (2.5 + 12) / 15; sklearn.metrics.roc_auc_score on the bin index
+        # agrees.
+        a = _areas_by_item(spark, {"A": _bins()})["A"]
+        assert a["roc_auc"] == pytest.approx(14.5 / 15)
+
+    def test_each_item_is_ranked_within_its_own_bins(self, spark):
+        # B alone: bin 2 holds 1 row, positive; bin 0 holds 3, one positive.
+        # precision at bin 2's edge 1, at bin 0's edge 2/4 -> PR-AUC
+        # (1 x 1 + 1 x 0.5) / 2 = 0.75. ROC: the two bin-0 negatives are
+        # beaten by the bin-2 positive and tied with the bin-0 one: 1.5 each,
+        # 3 / (2 x 2) = 0.75. Pooled with A they would come out otherwise.
+        b = pd.DataFrame({"bin": [0, 2], "n": [3, 1], "n_pos": [1, 1]})
+        areas = _areas_by_item(spark, {"A": _bins(), "B": b})
+        assert areas["B"]["pr_auc"] == pytest.approx(0.75)
+        assert areas["B"]["roc_auc"] == pytest.approx(0.75)
+        assert areas["A"]["pr_auc"] == pytest.approx(11 / 12)
+
+    def test_no_positive_leaves_both_areas_undefined(self, spark):
+        bins = pd.DataFrame({"bin": [0, 1], "n": [3, 2], "n_pos": [0, 0]})
+        a = _areas_by_item(spark, {"A": bins})["A"]
+        assert pd.isna(a["pr_auc"]) and pd.isna(a["roc_auc"])
+        assert a["n"] == 5
+
+    def test_no_negative_leaves_both_areas_undefined(self, spark):
+        """#577: an item without a negative gets no value and stays out of
+        the macro — PR-AUC would be 1 whatever the order."""
+        bins = pd.DataFrame({"bin": [0, 1], "n": [1, 2], "n_pos": [1, 2]})
+        a = _areas_by_item(spark, {"A": bins})["A"]
+        assert pd.isna(a["roc_auc"]) and pd.isna(a["pr_auc"])
+        assert a["n_pos"] == 3
+
+    def test_no_key_column_gives_the_one_overall_row(self, spark):
+        bins = _spark_bins(spark, {"A": _bins()}).drop("item")
+        out = bin_areas(bins, []).toPandas()
+        assert len(out) == 1
+        assert out.loc[0, "pr_auc"] == pytest.approx(11 / 12)
+
+    @pytest.mark.parametrize("seed", [0, 1])
+    def test_agrees_with_sklearn_on_the_binned_score(self, spark, seed):
+        """scikit-learn run on the bin index (weights as ``sample_weight``)
+        is an independent answer: the areas are the binned score's exact
+        values."""
         import numpy as np
         from sklearn.metrics import average_precision_score, roc_auc_score
 
@@ -147,15 +240,13 @@ class TestAgreesWithSklearnOnTheBinnedScore:
         labels = (rng.random(400) < 0.05 + bin_idx / 40).astype(int)
         weights = rng.choice([1.0, 4.0], size=400)
         frame = pd.DataFrame({"bin": bin_idx, "n": weights,
-                              "n_pos": labels * weights,
-                              "score_sum": bin_idx * weights})
-        bins = frame.groupby("bin", as_index=False)[
-            ["n", "n_pos", "score_sum"]].sum()
+                              "n_pos": labels * weights})
+        bins = frame.groupby("bin", as_index=False)[["n", "n_pos"]].sum()
 
-        s = binary_summary(bins, lo=0.0, width=1.0)
-        assert s["pr_auc"] == pytest.approx(average_precision_score(
+        a = _areas_by_item(spark, {"A": bins})["A"]
+        assert a["pr_auc"] == pytest.approx(average_precision_score(
             labels, bin_idx, sample_weight=weights))
-        assert s["roc_auc"] == pytest.approx(roc_auc_score(
+        assert a["roc_auc"] == pytest.approx(roc_auc_score(
             labels, bin_idx, sample_weight=weights))
 
 
@@ -374,6 +465,23 @@ class TestBuildPayload:
         assert payload["per_item"]["summary"]["A"]["n"] == 3
         assert payload["per_item"]["n_items"] == 2
 
+    def test_every_item_has_its_areas_and_the_macro_past_the_budget(
+            self, spark):
+        """``top_n`` only decides which bin tables are drawn: item B, not
+        listed, still lands its areas. B's rows: a positive at 0.0035 above
+        two negatives at 0.001 -> PR-AUC and ROC-AUC 1. A's: a positive at
+        0.011, two negatives tied at 0.0055 -> 1 and 1."""
+        from recsys_tfb.evaluation.result_readers import frame_from_json
+
+        payload = self._payload(spark, top_n=1)
+        totals = frame_from_json(
+            payload["per_item"]["totals"]).set_index("item")
+        assert totals.loc["B", "pr_auc"] == pytest.approx(1.0)
+        assert totals.loc["B", "roc_auc"] == pytest.approx(1.0)
+        macro = payload["per_item"]["macro"]
+        assert macro["n_items"] == 2
+        assert macro["roc_auc"] == {"value": pytest.approx(1.0), "n_items": 2}
+
     def test_items_past_the_budget_are_counted_not_listed(self, spark):
         payload = self._payload(spark, top_n=1)
         assert payload["per_item"]["listed"] == ["A"]
@@ -391,3 +499,82 @@ class TestDenseSweep:
         for col in ("tp", "fp", "precision", "recall", "f1"):
             assert by_bin.loc[2, col] == pytest.approx(by_bin.loc[3, col])
         assert by_bin.loc[2, "n"] == 0
+
+
+class TestItemTopKMetrics:
+    """Per-item precision@K and F1@K over **every** query group (#541's
+    first comment): the denominator counts the times the item was ranked
+    within the top K, in the groups without a positive too, each row times
+    its weight.
+
+    Worked example (group, item, rank, label, weight)::
+
+        g1 (has a positive)   A 1 1 1 | B 2 0 1 | C 3 0 1
+        g2 (has a positive)   B 1 1 1 | A 2 0 1 | C 3 1 1
+        g3 (no positive, 1/r) A 1 0 2 | C 2 0 2 | B 3 0 2
+
+    K = 1: A ranked first in g1 (1) and g3 (2) -> n_top 3, hits 1 ->
+    precision 1/3, F1 2·1 / (3 + 1) = 1/2. B: n_top 1, hits 1 -> 1, F1 1.
+    C: never first -> precision undefined, F1 2·0 / (0 + 1) = 0.
+    K = 2: A n_top 1 + 1 + 2 = 4 -> 1/4; B 2 -> 1/2; C 2, hits 0 -> 0.
+    Unweighted, A@1 would be 1/2; without g3, 1.
+    """
+
+    ROWS = [("g1", "A", 1, 1, 1.0), ("g1", "B", 2, 0, 1.0),
+            ("g1", "C", 3, 0, 1.0), ("g2", "B", 1, 1, 1.0),
+            ("g2", "A", 2, 0, 1.0), ("g2", "C", 3, 1, 1.0),
+            ("g3", "A", 1, 0, 2.0), ("g3", "C", 2, 0, 2.0),
+            ("g3", "B", 3, 0, 2.0)]
+
+    def _out(self, spark, min_positives=0, weight_col="w"):
+        sdf = spark.createDataFrame(
+            self.ROWS, ["grp", "item", "rank", "label", "w"])
+        return item_top_k_metrics(
+            sdf, item_col="item", label_col="label", rank_col="rank",
+            k_values=[1, 2], weight_col=weight_col,
+            min_positives=min_positives)
+
+    def test_precision_counts_the_groups_without_a_positive_weighted(
+            self, spark):
+        per_item = self._out(spark)["per_item"]
+        assert per_item["A"]["precision@1"] == pytest.approx(1 / 3)
+        assert per_item["B"]["precision@1"] == pytest.approx(1.0)
+        assert per_item["A"]["precision@2"] == pytest.approx(1 / 4)
+        assert per_item["B"]["precision@2"] == pytest.approx(1 / 2)
+        assert per_item["C"]["precision@2"] == pytest.approx(0.0)
+
+    def test_without_a_weight_every_row_counts_once(self, spark):
+        per_item = self._out(spark, weight_col=None)["per_item"]
+        assert per_item["A"]["precision@1"] == pytest.approx(1 / 2)
+
+    def test_never_in_the_top_k_leaves_precision_undefined(self, spark):
+        per_item = self._out(spark)["per_item"]
+        assert "precision@1" not in per_item["C"]
+        assert per_item["C"]["f1@1"] == pytest.approx(0.0)
+
+    def test_f1_is_twice_hits_over_times_in_top_k_plus_positives(self, spark):
+        per_item = self._out(spark)["per_item"]
+        assert per_item["A"]["f1@1"] == pytest.approx(1 / 2)
+        assert per_item["B"]["f1@1"] == pytest.approx(1.0)
+        # A@2: hits 1, n_top 4, n_pos 1 -> 2 / 5.
+        assert per_item["A"]["f1@2"] == pytest.approx(2 / 5)
+
+    def test_lands_the_counts_beside_the_metrics(self, spark):
+        shared = self._out(spark)["shared_numbers"]
+        assert shared["A"]["n_top@1"] == pytest.approx(3.0)
+        assert shared["A"]["hits@1"] == pytest.approx(1.0)
+        assert shared["C"]["n_pos"] == pytest.approx(1.0)
+
+    def test_macro_over_items_with_a_value(self, spark):
+        macro = self._out(spark)["macro"]
+        # precision@1: A 1/3 and B 1; C has none -> 2 of 3 items.
+        assert macro["precision@1"] == {"value": pytest.approx(2 / 3),
+                                        "n_items": 2}
+        assert macro["f1@1"] == {"value": pytest.approx(1 / 2),
+                                 "n_items": 3}
+        assert macro["n_items"] == 3
+
+    def test_macro_follows_min_positives(self, spark):
+        # Every item holds one positive: min 2 leaves none.
+        macro = self._out(spark, min_positives=2)["macro"]
+        assert macro["precision@1"] == {"value": None, "n_items": 0}

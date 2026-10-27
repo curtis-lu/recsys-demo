@@ -17,6 +17,8 @@ from recsys_tfb.evaluation.result_readers import (
     SCOPE_NAME_KEY,
 )
 from recsys_tfb.pipelines.evaluation.report.prediction_quality import (
+    item_areas,
+    item_top_k,
     population,
     score_bins,
 )
@@ -27,8 +29,10 @@ from recsys_tfb.pipelines.evaluation.report.sections.shared import (
     sections_on,
 )
 
-#: The page's sections, in page order: which rows first, then the numbers.
-SECTIONS = (population, score_bins)
+#: The page's sections, in page order: which rows first, then the numbers —
+#: the bins, every item's areas (and the raw-score APs), every item's
+#: precision@K.
+SECTIONS = (population, score_bins, item_areas, item_top_k)
 
 #: Every result the sections read, by catalog name: what
 #: ``generate_prediction_quality_report`` must be wired to.
