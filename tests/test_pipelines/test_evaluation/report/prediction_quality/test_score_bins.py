@@ -29,7 +29,8 @@ from recsys_tfb.report.types import (
 from tests.test_pipelines.test_evaluation.report.sections import landed
 
 #: The demo's rows of 關鍵數, less 分數範圍 (two rows here: see
-#: ``prediction_quality``), and its columns of 關鍵數 · 各 item.
+#: ``prediction_quality``); its last four are the columns of
+#: F1 最佳門檻 · 各 item.
 HEADLINE = ["PR-AUC", "ROC-AUC", "F1 最佳門檻", "該門檻的 precision",
             "該門檻的 recall", "該門檻的 F1"]
 #: The demo's bin table columns: (upper header, header).
@@ -70,7 +71,7 @@ def test_the_blocks_come_in_the_demo_s_order(spark):
         Paragraph, Formula, Bullets, Figure, Table, Definitions, Table, Table,
         Table]
     assert [b.title for b in s.blocks if isinstance(b, Table)] == [
-        "關鍵數", "分箱", "關鍵數 · 各 item", "分箱 · 各 item"]
+        "關鍵數", "分箱", "F1 最佳門檻 · 各 item", "分箱 · 各 item"]
     assert (s.key, s.title, s.title_en) == (
         "score_bins", "預測品質", "Prediction quality")
     figure = next(b for b in s.blocks if isinstance(b, Figure))
@@ -119,9 +120,11 @@ def test_the_headline_table_has_no_row_count_positives_or_rate(spark):
         summary["pr_auc"], summary["roc_auc"], best["threshold"],
         best["precision"], best["recall"], best["f1"],
         bins["width"], bins["lo"], bins["hi"]]
+    # Since #577 the two areas are catalog entries: their definitions are
+    # the catalog's.
     (defs,) = [b for b in s.blocks if isinstance(b, Definitions)]
-    assert [term for term, _ in defs.entries] == ["PR-AUC"]
-    assert defs.source == "定義"
+    assert [term for term, _ in defs.entries] == ["PR-AUC", "ROC-AUC"]
+    assert defs.source == "定義（從指標目錄來）"
 
 
 def test_the_bin_table_has_three_upper_headers_and_reads_the_display_bins(
@@ -142,27 +145,30 @@ def test_the_bin_table_has_three_upper_headers_and_reads_the_display_bins(
     assert sum(r.cells[2] for r in table.rows) == 24   # every candidate row
 
 
-def test_the_per_item_headline_table_lists_the_listed_items(spark):
+def test_the_per_item_best_f1_table_lists_the_listed_items(spark):
+    """Best F1 only: every item's PR-AUC and ROC-AUC are ``item_areas``'
+    table (#577), not printed twice."""
     s, results = _draw(spark)
     per_item = results["prediction_quality_metrics"]["per_item"]
-    table = _table(s, "關鍵數 · 各 item")
+    table = _table(s, "F1 最佳門檻 · 各 item")
     assert table.row_header == "item"
-    assert [c.label for c in table.columns] == HEADLINE
+    assert [c.label for c in table.columns] == HEADLINE[2:]
     assert [r.label for r in table.rows] == per_item["listed"] == [
         "A", "B", "C"]
     a = per_item["summary"]["A"]
-    assert table.rows[0].cells == (
-        a["pr_auc"], a["roc_auc"], *(a["best_f1"][k] for k in (
-            "threshold", "precision", "recall", "f1")))
+    assert table.rows[0].cells == tuple(a["best_f1"][k] for k in (
+        "threshold", "precision", "recall", "f1"))
 
 
 def test_the_budget_line_appears_only_when_items_are_left_out(spark):
     s, _ = _draw(spark)            # top_n 3 of 4 items
-    (note,) = _table(s, "關鍵數 · 各 item").notes
-    assert note.text == ("只列出候選列最多的前 3 個 item"
-                         "（evaluation.prediction_quality.top_n），其餘的只算進整體。")
+    (note,) = _table(s, "F1 最佳門檻 · 各 item").notes
+    assert note.text == (
+        "只列出候選列最多的前 3 個 item 的 F1 最佳門檻與分箱表"
+        "（evaluation.prediction_quality.top_n）；每個 item 的 PR-AUC、"
+        "ROC-AUC 在下一段。")
     every, _ = _draw(spark, top_n=4)
-    assert _table(every, "關鍵數 · 各 item").notes == ()
+    assert _table(every, "F1 最佳門檻 · 各 item").notes == ()
 
 
 def test_every_listed_item_s_bins_are_one_table(spark):

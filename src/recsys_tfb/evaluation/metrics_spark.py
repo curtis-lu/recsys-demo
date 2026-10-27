@@ -233,6 +233,18 @@ def _resolve_k_grids(
     return ks, list(ks)
 
 
+def resolve_item_k_grid(frame: SparkDataFrame, parameters: dict) -> list[int]:
+    """The per-item K grid of ``frame`` as the main run resolves it
+    (:func:`_resolve_k_grids`, "all" by :func:`_resolve_all_k` with
+    ``schema.columns.event``), for a caller with no row facts at hand: one
+    action over ``frame``. Pass the rows the ranks were taken over, not a
+    subset of them, or "all" resolves smaller."""
+    schema = get_schema(parameters)
+    all_k = _resolve_all_k(frame, schema["query_group_columns"],
+                           schema["item"], schema.get("event", []))
+    return _resolve_k_grids(parameters, all_k)[1]
+
+
 def hand_category_mapping(
     parameters: dict, known_items: Sequence | None = None
 ) -> dict[str, str] | None:
@@ -1048,10 +1060,13 @@ def _item_number(cell: dict, name: str, k: int) -> float:
                       else name])
 
 
-def _item_metric_cell(cell: dict, k_values: list[int]) -> dict | None:
-    """Every item entry of ``metric_catalog`` computed from one cell of shared
-    numbers by its formula, the ones without K first, then the per-K ones at
-    each K; plus ``n_pos``, the weight ``macro_average`` reads.
+def _item_metric_cell(
+    cell: dict, k_values: list[int], method: str = ITEM,
+) -> dict | None:
+    """Every ``method`` entry of ``metric_catalog`` (:data:`ITEM`, or
+    ``ITEM_EVERY_GROUP``, whose cells hold the same names) computed from one
+    cell of shared numbers by its formula, the ones without K first, then the
+    per-K ones at each K; plus ``n_pos``, the weight ``macro_average`` reads.
 
     A metric that divides by 0 is undefined and left out of the cell, and a
     cell left with no metric is ``None``.
@@ -1061,10 +1076,10 @@ def _item_metric_cell(cell: dict, k_values: list[int]) -> dict | None:
                          lambda name: _item_number(cell, name, k), _DRIVER_OPS)
 
     entries = [(m.key(), value(m, None))
-               for m in metrics_of(ITEM) if not m.per_k]
+               for m in metrics_of(method) if not m.per_k]
     for k in k_values:
         entries.extend((m.key(k), value(m, k))
-                       for m in metrics_of(ITEM) if m.per_k)
+                       for m in metrics_of(method) if m.per_k)
     out = {key: v for key, v in entries if v is not None}
     if not out:
         return None
@@ -1073,17 +1088,20 @@ def _item_metric_cell(cell: dict, k_values: list[int]) -> dict | None:
 
 
 def item_metrics(
-    shared: dict[str, dict], k_values: list[int], n_dims: int
+    shared: dict[str, dict], k_values: list[int], n_dims: int,
+    method: str = ITEM,
 ) -> dict[str, dict]:
     """The per-item metric cells of :func:`aggregate_item_shared_numbers`'
-    output, nested the same way (``n_dims`` levels). Plain Python: the
-    formulas divide numbers already on the driver."""
+    output, nested the same way (``n_dims`` levels) — or of
+    ``prediction_quality.item_top_k_metrics``' counts, ``method``
+    ``ITEM_EVERY_GROUP``. Plain Python: the formulas divide numbers already
+    on the driver."""
     if n_dims == 1:
         return {item: m for item, cell in shared.items()
-                if (m := _item_metric_cell(cell, k_values)) is not None}
+                if (m := _item_metric_cell(cell, k_values, method)) is not None}
     out: dict[str, dict] = {}
     for item, by_seg in shared.items():
-        cells = item_metrics(by_seg, k_values, 1)
+        cells = item_metrics(by_seg, k_values, 1, method)
         if cells:
             out[item] = cells
     return out
@@ -1772,18 +1790,31 @@ def compute_untruncated_ap(
 
 
 def _binary_prediction_rows(
-    frame: SparkDataFrame, parameters: dict, *keep: str,
+    frame: SparkDataFrame, parameters: dict, *keep: str, weighted: bool = True,
 ) -> SparkDataFrame:
     """Score, weight and positive weight per row, plus the columns ``keep``.
 
-    The weight is ``ZERO_POSITIVE_GROUP_WEIGHT_COL``, never 1: these metrics
-    are only computed when test kept query groups holding no positive (A54),
-    and the column is how those groups count ``1 / r`` times, as they do on
-    val. Its absence means the table was not written under a positive test
-    ratio (A45 makes the catalog declare it), so it raises rather than count
-    each row once — a number for a different population, with nothing to say
-    so.
+    ``weighted`` (training's test, and evaluation's ``--post-training``): the
+    weight is ``ZERO_POSITIVE_GROUP_WEIGHT_COL``, never 1. These metrics are
+    only computed when test kept query groups holding no positive (A54), and
+    the column is how those groups count ``1 / r`` times, as they do on val.
+    Its absence means the table was not written under a positive test ratio
+    (A45 makes the catalog declare it), so it raises rather than count each
+    row once — a number for a different population, with nothing to say so.
+
+    Not ``weighted`` (the ``--prediction-quality`` mode on monitoring rows,
+    which no dataset draw touched): every row weighs 1, and no weight column
+    is read.
     """
+    schema = get_schema(parameters)
+    if not weighted:
+        return frame.select(
+            *keep,
+            F.col(schema["label"]).alias("_label"),
+            F.col(schema["score"]).cast("double").alias("_score"),
+            F.lit(1.0).alias("_w"),
+            F.col(schema["label"]).cast("double").alias("_pos_w"),
+        )
     if ZERO_POSITIVE_GROUP_WEIGHT_COL not in frame.columns:
         raise ValueError(
             f"the binary-prediction metrics weight every row by "
@@ -1792,7 +1823,6 @@ def _binary_prediction_rows(
             f"dataset.test_zero_positive_group_ratio (A45 makes the catalog "
             f"entry declare it)."
         )
-    schema = get_schema(parameters)
     weight = F.col(ZERO_POSITIVE_GROUP_WEIGHT_COL).cast("double")
     return frame.select(
         *keep,
@@ -1853,7 +1883,7 @@ MAX_SCORE_SEGMENTS = 512
 
 
 def compute_pooled_average_precision(
-    frame: SparkDataFrame, parameters: dict,
+    frame: SparkDataFrame, parameters: dict, *, weighted: bool = True,
 ) -> float:
     """``pooled_average_precision`` on test: every row ranked by score in one
     pool — the definition ``metrics.compute_pooled_average_precision`` gives
@@ -1876,8 +1906,9 @@ def compute_pooled_average_precision(
 
     The driver handles the cut points, two sums per segment and one number.
     Pre-check: a NULL weight or no positive row raises (in action 2).
+    ``weighted``: :func:`_binary_prediction_rows`.
     """
-    rows = _binary_prediction_rows(frame, parameters).cache()
+    rows = _binary_prediction_rows(frame, parameters, weighted=weighted).cache()
     try:
         n_segments = min(
             int(frame.sparkSession.conf.get("spark.sql.shuffle.partitions")),
@@ -1948,7 +1979,7 @@ def _descending_score_cuts(rows: SparkDataFrame, n_segments: int) -> list:
 
 
 def compute_macro_per_item_average_precision(
-    frame: SparkDataFrame, parameters: dict,
+    frame: SparkDataFrame, parameters: dict, *, weighted: bool = True,
 ) -> float:
     """``macro_per_item_average_precision`` on test: each item's rows ranked
     by score on their own, one average precision per item, then the plain
@@ -1958,9 +1989,11 @@ def compute_macro_per_item_average_precision(
     An item with no positive row is left out of the mean, as on val. Only each
     item's two sums leave the executors, and only the mean reaches the driver.
     Pre-check: a NULL weight or no item with a positive raises.
+    ``weighted``: :func:`_binary_prediction_rows`.
     """
     item_col = get_schema(parameters)["item"]
-    rows = _binary_prediction_rows(frame, parameters, item_col)
+    rows = _binary_prediction_rows(frame, parameters, item_col,
+                                   weighted=weighted)
     above = _scored_at_or_above(item_col)
     precision = F.sum("_pos_w").over(above) / F.sum("_w").over(above)
     per_item = (

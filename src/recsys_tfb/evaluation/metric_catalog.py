@@ -19,15 +19,17 @@ bundle (``overall`` against ``per_item``), so the pair (name, method) is the key
 **Kept apart from training's** ``metric_registry`` (ADR-0031 decision 6). A
 number both compute under different names says so in ``training_name``; the
 ones HPO selects a model by are marked here too
-(:data:`MODEL_SELECTION_METRICS`, with the ones not computed yet in
-:data:`MODEL_SELECTION_PENDING`), without importing the registry.
+(:data:`MODEL_SELECTION_METRICS` on the main report,
+:data:`MODEL_SELECTION_ON_PREDICTION_QUALITY` on the ``--prediction-quality``
+page), without importing the registry.
 
-**Not in it yet: the third method of decision 7**, the score read as a
-probability (the binned ``pr_auc`` / ``roc_auc`` of the
-``--prediction-quality`` page). Its shared numbers are the bin table of
-``evaluation/prediction_quality.aggregate_score_bins``, and ``prediction_quality``
-computes the two areas from it by functions of its own. Its metrics join the
-catalog with a formula shape for an area under a bin table.
+**Four methods.** Decision 7's three — per query group, per item, the score
+read as a probability over a bin table (:data:`SCORE_BINS`) — and decision 16
+item 3's fourth, average precision on the raw scores (:data:`RAW_SCORE`). The
+per-item metrics whose denominator holds negatives are a method of their own
+(:data:`ITEM_EVERY_GROUP`): same arithmetic as :data:`ITEM`, counted over
+every query group (#541's first comment). The last three are the
+``--prediction-quality`` mode's (ADR-0032).
 """
 
 from __future__ import annotations
@@ -40,6 +42,19 @@ QUERY_GROUP = "query_group"
 #: One value per item, averaged over items into the macro (decision 7,
 #: second method).
 ITEM = "item"
+#: The item method over **every** query group, the ones without a positive
+#: included and weighted: the per-item metrics whose denominator counts
+#: negatives (precision@K, F1@K). Kept apart from :data:`ITEM`, whose shared
+#: numbers count only the query groups the query-group method scores, so the
+#: ranking report's per-item block never computes them on that population
+#: (#541's first comment, 〈怎麼呈現〉 point 2).
+ITEM_EVERY_GROUP = "item_every_group"
+#: Each row read as one binary prediction, the score binned (decision 7,
+#: third method; ADR-0024).
+SCORE_BINS = "score_bins"
+#: Average precision on the raw scores, each row one binary prediction
+#: (decision 16 item 3): a Spark pass of its own, no shared numbers.
+RAW_SCORE = "raw_score"
 
 #: The query-group method's shared numbers: what ``compute_per_query_metrics``
 #: sums inside each query group at each K before any formula reads it.
@@ -71,11 +86,32 @@ ITEM_SHARED_NUMBERS: dict[str, str] = {
 }
 ITEM_SHARED_NUMBERS_PER_K = ("n_top", "hits", "ap_sum")
 
+#: :data:`ITEM_EVERY_GROUP`'s shared numbers: what ``prediction_quality.
+#: aggregate_item_top_k`` sums over every row of the item, each times its
+#: weight (``1 / r`` on a kept query group without a positive under
+#: ``--post-training``, else 1). ``n_top`` and ``hits`` exist once per K.
+ITEM_EVERY_GROUP_SHARED_NUMBERS: dict[str, str] = {
+    "n_top": "the item's rows ranked within the top K, weighted (per K)",
+    "hits": "positive rows ranked within the top K (per K)",
+    "n_pos": "the item's positive rows",
+}
 
-# Two formula shapes: :class:`Ratio`, one shared number over another, and
-# :class:`Expr`, arithmetic over them for a metric that is not a ratio. An
-# entry in either shape needs no Spark code of its own (``metrics_spark``
-# evaluates both).
+#: :data:`SCORE_BINS`' shared numbers: one row of the bin table
+#: ``prediction_quality.aggregate_score_bins`` sums per (item, bin) — or per
+#: bin, overall — each count weighted.
+SCORE_BIN_SHARED_NUMBERS: dict[str, str] = {
+    "bin": "the fine bin, by score; every row in it counts as one tied score",
+    "n": "rows in the bin",
+    "n_pos": "positive rows in the bin",
+}
+
+
+# Four formula shapes: :class:`Ratio`, one shared number over another;
+# :class:`Expr`, arithmetic over them for a metric that is not a ratio;
+# :class:`BinArea`, an area under a bin table; :class:`OwnPass`, no formula. An
+# entry in one of the first three needs no Spark code of its own
+# (``metrics_spark`` evaluates the first two, ``prediction_quality.bin_areas``
+# the third).
 
 
 @dataclass(frozen=True)
@@ -140,6 +176,34 @@ def at_most(value, cap) -> Expr:
 
 
 @dataclass(frozen=True)
+class BinArea:
+    """The area under one curve of a bin table (:data:`SCORE_BIN_SHARED_NUMBERS`),
+    the bins walked from the highest score down, each bin one tied score.
+    ``curve`` is ``"pr"`` — Σ over bins of n_pos × precision at the bin's lower
+    edge, over all positives: scikit-learn's step-rule average precision on
+    the bin index — or ``"roc"`` — the ROC area, a tie within a bin counting
+    half. Undefined without a positive, and for ``"roc"`` without a negative.
+    """
+
+    curve: str
+
+    def __str__(self) -> str:
+        return f"area under the {self.curve} curve of the bin table"
+
+
+@dataclass(frozen=True)
+class OwnPass:
+    """No formula: the metric is the result of a Spark pass of its own,
+    ``computed_by`` (decision 16 item 3). Marked here so readers find it by
+    name; adding one is not only an entry."""
+
+    computed_by: str
+
+    def __str__(self) -> str:
+        return f"computed by {self.computed_by}"
+
+
+@dataclass(frozen=True)
 class Metric:
     """One metric: a name in one method.
 
@@ -153,7 +217,7 @@ class Metric:
 
     name: str
     method: str
-    formula: Ratio | Expr
+    formula: Ratio | Expr | BinArea | OwnPass
     per_k: bool
     grains: tuple[str, ...]
     population: str
@@ -174,6 +238,12 @@ _QUERY_GROUP_POPULATION = (
 _ITEM_GRAINS = ("per_item", "per_item_segment", "macro", "category")
 _ITEM_POPULATION = (
     "該 item 為正例的列；只看 query group 那種算法算進的 query group"
+)
+_ITEM_EVERY_GROUP_GRAINS = ("per_item", "macro")
+_SCORE_BIN_GRAINS = ("overall", "per_item", "macro")
+_EVERY_ROW_POPULATION = (
+    "全部候選列，沒有正例的 query group 也算；--post-training 時留下的沒有"
+    "正例的組每列乘 1／r"
 )
 
 #: Every metric, in the order the bundle writes them: within a method, the
@@ -285,6 +355,76 @@ METRICS: tuple[Metric, ...] = (
         display_name="正例平均名次",
         definition="這個 item 是正例時的平均名次。鍵是 mean_pos。",
     ),
+    Metric(
+        name="precision",
+        method=ITEM_EVERY_GROUP,
+        formula=Ratio("hits", "n_top"),
+        per_k=True,
+        grains=_ITEM_EVERY_GROUP_GRAINS,
+        population=_EVERY_ROW_POPULATION,
+        display_name="per-item precision",
+        definition=(
+            "這個 item 排進前 K 名的那些列裡，正例佔幾成。分母數全部的 query "
+            "group，沒有正例的組也算；跟每個 query group 先算的 precision@K "
+            "是不同的指標。"
+        ),
+    ),
+    Metric(
+        name="f1",
+        method=ITEM_EVERY_GROUP,
+        formula=2 * shared("hits") / (shared("n_top") + shared("n_pos")),
+        per_k=True,
+        grains=_ITEM_EVERY_GROUP_GRAINS,
+        population=_EVERY_ROW_POPULATION,
+        display_name="per-item F1",
+        definition=(
+            "這個 item 的 per-item precision@K 與 per-item recall@K 的調和平均"
+            "（＝2·排進前 K 名的正例 ÷ (排進前 K 名的次數＋正例數)）。"
+        ),
+    ),
+    Metric(
+        name="pr_auc",
+        method=SCORE_BINS,
+        formula=BinArea("pr"),
+        per_k=False,
+        grains=_SCORE_BIN_GRAINS,
+        population=_EVERY_ROW_POPULATION,
+        display_name="PR-AUC",
+        definition=(
+            "分數分箱、箱內視為同分之後的 average precision。是近似值，不等於在"
+            "原始分數上算的 pooled AP。隨機排序時它約等於正例佔比，所以正例佔比"
+            "不同的兩個 item 不能直接比。鍵是 pr_auc。"
+        ),
+    ),
+    Metric(
+        name="roc_auc",
+        method=SCORE_BINS,
+        formula=BinArea("roc"),
+        per_k=False,
+        grains=_SCORE_BIN_GRAINS,
+        population=_EVERY_ROW_POPULATION,
+        display_name="ROC-AUC",
+        definition=(
+            "隨機挑一個正例、一個負例，正例分數比較高的機率；分數分箱、同一箱算"
+            "一半。不受正例佔比影響。鍵是 roc_auc。"
+        ),
+    ),
+    Metric(
+        name="average_precision",
+        method=RAW_SCORE,
+        formula=OwnPass(
+            "metrics_spark.compute_pooled_average_precision (overall), "
+            "compute_macro_per_item_average_precision (macro)"),
+        per_k=False,
+        grains=("overall", "macro"),
+        population=_EVERY_ROW_POPULATION,
+        display_name="AP（原始分數）",
+        definition=(
+            "把每一列當成一次二元預測，在原始分數上算 average precision（同分算"
+            "同一個門檻）。整體＝全部列一起排；Macro＝每個 item 自己排、各算一個，"
+            "再對有正例的 item 等權平均。跟 PR-AUC 不同：PR-AUC 先分箱。"
+        ),
+    ),
 )
 
 
@@ -382,14 +522,31 @@ MODEL_SELECTION_METRICS: tuple[ModelSelectionMetric, ...] = (
     ),
 )
 
-#: The model-selection metrics HPO can select by but evaluation does not
-#: compute yet: the two binary-prediction ones, a Spark pass each
-#: (``metric_registry``'s ``POOLED_AP_PASS`` / ``PER_ITEM_AP_PASS``), left out
-#: on purpose (ADR-0031 decision 16); until they are in, the reports list
-#: only :data:`MODEL_SELECTION_METRICS`. Together
-#: the two lists name every ``metric_registry.METRIC_NAMES`` (a test checks
-#: it), so a metric added to the registry is placed in one of them.
-MODEL_SELECTION_PENDING: tuple[str, ...] = (
-    "pooled_average_precision",
-    "macro_per_item_average_precision",
+#: The model-selection metrics on the raw scores, computed by the
+#: ``--prediction-quality`` mode, not the main report's run (decision 16 item
+#: 3, revised by #577): their population holds the query groups without a
+#: positive. The main report's overview points to that page, and the
+#: comparison report does not list them. Together with
+#: :data:`MODEL_SELECTION_METRICS` they name every ``metric_registry.
+#: METRIC_NAMES`` (a test checks it), so a metric added to the registry is
+#: placed in one of them.
+MODEL_SELECTION_ON_PREDICTION_QUALITY: tuple[ModelSelectionMetric, ...] = (
+    ModelSelectionMetric(
+        name="pooled_average_precision",
+        source=CompareEntry("average_precision", RAW_SCORE, "overall"),
+        display_name="pooled AP",
+        definition=(
+            "全部列在原始分數上一起排的 average precision。HPO 的名字是 "
+            "pooled_average_precision。"
+        ),
+    ),
+    ModelSelectionMetric(
+        name="macro_per_item_average_precision",
+        source=CompareEntry("average_precision", RAW_SCORE, "macro"),
+        display_name="macro per-item AP",
+        definition=(
+            "每個 item 的列在原始分數上自己排、各算 average precision，再對有"
+            "正例的 item 等權平均。HPO 的名字是 macro_per_item_average_precision。"
+        ),
+    ),
 )

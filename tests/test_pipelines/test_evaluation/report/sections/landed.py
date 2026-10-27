@@ -183,6 +183,7 @@ def _compute(spark, p: dict, *, unmatched: bool = False,
     from recsys_tfb.evaluation.prediction_quality import (
         aggregate_score_bins,
         build_payload,
+        item_top_k_metrics,
     )
     from recsys_tfb.evaluation.result_readers import drop_all_positive_groups
     from recsys_tfb.pipelines.evaluation.nodes import resolve_display_ks
@@ -207,13 +208,25 @@ def _compute(spark, p: dict, *, unmatched: bool = False,
     binned = aggregate_score_bins(
         frame, item_col="prod_name", score_col="score", label_col="label",
         n_bins=pq_cfg["n_bins"], top_n=pq_cfg["top_n"], weight_col=weight_col)
+    rows = frame.select("prod_name", "score", "label",
+                        *([weight_col] if weight_col else []))
     quality = {**build_payload(
         binned, item_col="prod_name", score_col="score", label_col="label",
         weight_col=weight_col, n_bins=pq_cfg["n_bins"],
         n_display_bins=pq_cfg["n_display_bins"], top_n=pq_cfg["top_n"]),
         # What compute_prediction_quality adds: the one group without a
-        # positive (C3, unless ``filtered``) is the kept one.
-        "population": _population(p, facts), "scope_definition": None}
+        # positive (C3, unless ``filtered``) is the kept one; the raw-score
+        # APs and every item's precision@K over every group (#577).
+        "population": _population(p, facts), "scope_definition": None,
+        "average_precision": {
+            "overall": ms.compute_pooled_average_precision(
+                rows, p, weighted=weighted),
+            "macro": ms.compute_macro_per_item_average_precision(
+                rows, p, weighted=weighted)},
+        "per_item_top_k": item_top_k_metrics(
+            frame, item_col="prod_name", label_col="label", rank_col="rank",
+            k_values=ms.resolve_item_k_grid(frame, p),
+            weight_col=weight_col)}
     display_ks = resolve_display_ks(_stamped(metrics, p), p)
     return {
         "evaluation_row_facts": facts,

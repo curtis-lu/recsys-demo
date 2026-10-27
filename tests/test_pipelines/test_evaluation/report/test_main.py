@@ -795,10 +795,14 @@ def _pq_payload(listed=("A",), n_items=2):
                          "n_pos": [0, 1, 2], "score_sum": [0.4, 0.8, 1.8]})
     per_item = bins.assign(prod_name="A")[
         ["prod_name", "bin", "n", "n_pos", "score_sum"]]
+    # The areas of the worked example (A); B has no row, so none.
     totals = pd.DataFrame({"prod_name": ["A", "B"][:n_items],
-                           "n": [8, 0][:n_items], "n_pos": [3, 0][:n_items]})
+                           "n": [8, 0][:n_items], "n_pos": [3, 0][:n_items],
+                           "pr_auc": [11 / 12, None][:n_items],
+                           "roc_auc": [14.5 / 15, None][:n_items]})
     aggregated = {
         "lo": 0.0, "hi": 1.0, "width": 0.25, "overall": bins,
+        "overall_areas": {"pr_auc": 11 / 12, "roc_auc": 14.5 / 15},
         "item_totals": totals, "listed_items": list(listed),
         "per_item": per_item[per_item["prod_name"].isin(listed)],
     }

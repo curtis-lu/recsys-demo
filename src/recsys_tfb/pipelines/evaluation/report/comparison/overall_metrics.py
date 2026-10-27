@@ -39,8 +39,8 @@ READS = (SOURCE_COMPARISON,)
 SWITCH = None
 
 #: The heading, its English and the question the section answers. Neither
-#: counts the metrics: more join the catalog later
-#: (``MODEL_SELECTION_PENDING``).
+#: counts the metrics. The raw-score APs HPO can select by are not compared
+#: (``MODEL_SELECTION_ON_PREDICTION_QUALITY``, #577).
 TITLE = "整體指標"
 TITLE_EN = "Overall"
 QUESTION = "模型選擇指標，兩邊各多少？"
