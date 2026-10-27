@@ -1902,6 +1902,31 @@ class TestComputePredictionQuality:
         assert "precision@1" not in top_k["per_item"]["C"]
         assert top_k["macro"]["precision@1"]["n_items"] == 2
 
+    def test_every_macro_over_items_reads_metric_min_positives(self, spark):
+        """Owner, #577: the areas' and the per-item precision's macro drop the
+        items under evaluation.metric.min_positives, as the ranking macro
+        does. Every item holds one positive, so 2 leaves none — while the
+        raw-score AP, training's own pass, keeps training's rule."""
+        from recsys_tfb.evaluation.result_readers import (
+            AVERAGE_PRECISION_KEY,
+            ITEM_TOP_K_KEY,
+        )
+        from recsys_tfb.pipelines.evaluation.nodes import (
+            compute_prediction_quality,
+        )
+
+        params = self._parameters()
+        params["evaluation"]["metric"] = {"min_positives": 2}
+        result = compute_prediction_quality(
+            self._with_a_query_group_without_a_positive(spark),
+            _no_segments(params), params)
+        macro = result["per_item"]["macro"]
+        assert macro["min_positives"] == 2
+        assert macro["roc_auc"] == {"value": None, "n_items": 0}
+        assert result[ITEM_TOP_K_KEY]["macro"]["precision@1"] == {
+            "value": None, "n_items": 0}
+        assert result[AVERAGE_PRECISION_KEY]["macro"] == pytest.approx(7 / 9)
+
     def test_post_training_weighs_the_kept_group_in_both(self, spark):
         """r = 0.5, c3's rows weigh 2. Pooled: the weight scored at or above
         C's positive (0.1, last) is 6 + 2·3 = 12 -> (1 + 1 + 3/12) / 3 = 3/4.
