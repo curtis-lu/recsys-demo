@@ -29,42 +29,50 @@ CELLS = [
     Cell(("seg_2", "prod_B"), "prod_B", 40, 39_960),
 ]
 BUDGET = 3_000
-PURE = Knobs(eta=0, pos_floor=0)
+NO_SAFEGUARDS = Knobs(eta=0, pos_floor=0)     # chapter 5: before chapter 6 adds eta and f
 
 
-def name(c) -> str:
-    values = c.values if isinstance(c, Cell) else c.cell.values
-    return f"{values[0]} × {values[1]}"
+def label(cell: Cell) -> str:
+    return f"{cell.values[0]} × {cell.values[1]}"
 
 
-def noise(p) -> list[float]:
+def positive_rate(cell: Cell) -> float:
+    return cell.n_pos / (cell.n_pos + cell.n_neg)
+
+
+def expected_rows(result) -> float:
+    return sum(c.cell.n_pos * c.r_eff_pos + c.cell.n_neg * c.r_eff_neg for c in result.cells)
+
+
+def noise(result) -> list[float]:
     """Relative variance of each cell's HT-estimated log-odds, (1-r)/(n r) per class."""
     return [(1 - c.r_eff_pos) / (c.cell.n_pos * c.r_eff_pos)
-            + (1 - c.r_eff_neg) / (c.cell.n_neg * c.r_eff_neg) for c in p.cells]
+            + (1 - c.r_eff_neg) / (c.cell.n_neg * c.r_eff_neg) for c in result.cells]
 
 
-def excess(p) -> tuple[float, float]:
-    """Expected excess loss: one shared parameter, and one parameter per cell."""
-    M = [c.M for c in p.cells]
-    nz = noise(p)
-    shared = 0.5 * sum(m * m * z for m, z in zip(M, nz)) / sum(M)
-    per_cell = 0.5 * sum(m * z for m, z in zip(M, nz))
+def excess(result) -> tuple[float, float]:
+    """Expected excess loss ``(one shared parameter, one parameter per cell)``."""
+    M = [c.M for c in result.cells]
+    variance = noise(result)
+    shared = 0.5 * sum(m * m * v for m, v in zip(M, variance)) / sum(M)
+    per_cell = 0.5 * sum(m * v for m, v in zip(M, variance))
     return shared, per_cell
 
 
-def show_plan(title: str, p) -> None:
-    print(f"\n{title}: λ = {p.lam:.4f}, k = {p.k:.4f}")
-    for c in p.cells:
-        print(f"  {name(c)}: r+ = {c.r_eff_pos:.5f} (K+ = {c.cell.n_pos * c.r_eff_pos:7.1f}),"
+def show_plan(title: str, result) -> None:
+    print(f"\n{title}: λ = {result.lam:.4f}, k = {result.k:.4f}")
+    for c in result.cells:
+        print(f"  {label(c.cell)}: r+ = {c.r_eff_pos:.5f} (K+ = {c.cell.n_pos * c.r_eff_pos:7.1f}),"
               f" r- = {c.r_eff_neg:.5f} (K- = {c.cell.n_neg * c.r_eff_neg:7.1f}),"
               f" w+ = {c.w_pos:.3f}, w- = {c.w_neg:.3f}")
-    kept = sum(c.cell.n_pos * c.r_eff_pos + c.cell.n_neg * c.r_eff_neg for c in p.cells)
-    s, pc = excess(p)
-    print(f"  expected rows = {kept:.1f}; excess loss: shared = {s:.4f}, per cell = {pc:.4f}")
+    shared, per_cell = excess(result)
+    print(f"  expected rows = {expected_rows(result):.1f};"
+          f" excess loss: shared = {shared:.4f}, per cell = {per_cell:.4f}")
 
 
 def simulate(p, reps: int = 20_000, seed: int = 0) -> tuple[float, float]:
-    """Mean excess loss over ``reps`` Bernoulli draws at ``p``'s keep-rates."""
+    """Mean excess loss ``(one shared parameter, one parameter per cell)`` over
+    ``reps`` Bernoulli draws at ``p``'s keep-rates."""
     rng = np.random.default_rng(seed)
     n_pos = np.array([c.cell.n_pos for c in p.cells])
     n_neg = np.array([c.cell.n_neg for c in p.cells])
@@ -95,26 +103,24 @@ def main() -> None:
     print(f"population = {population:,}, budget = {BUDGET:,}")
 
     print("\n== Ch 1: keep every row at the same rate")
-    r = BUDGET / population
+    rate = BUDGET / population
     for c in CELLS:
-        rate = c.n_pos / (c.n_pos + c.n_neg)
-        print(f"  {name(c)}: purchase rate = {rate:.4f}, kept positives = {c.n_pos * r:.1f},"
-              f" kept negatives = {c.n_neg * r:.0f}")
+        print(f"  {label(c)}: positive rate = {positive_rate(c):.4f},"
+              f" kept positives = {c.n_pos * rate:.1f}, kept negatives = {c.n_neg * rate:.0f}")
 
     print("\n== Ch 2: target weights (t = 1/6, α = 0.5)")
-    p = plan(CELLS, BUDGET, PURE)
-    for item, it in p.items.items():
+    pure = plan(CELLS, BUDGET, NO_SAFEGUARDS)
+    for item, it in pure.items.items():
         print(f"  {item}: P = {it.P}, N = {it.N}, v = {it.v:.6f}, A = {it.A:.6f},"
               f" weighted positive rate = {it.P / (it.P + it.N * it.v):.4f},"
               f" -log v = {-math.log(it.v):.3f}")
     for alpha in (0.0, 0.5, 1.0):
-        its = plan(CELLS, BUDGET, Knobs(eta=0, pos_floor=0, alpha=alpha)).items
-        mass = {i: it.A * (it.P + it.N * it.v) for i, it in its.items()}
-        print(f"  α = {alpha}: loss share " + ", ".join(
+        targets = plan(CELLS, BUDGET, Knobs(eta=0, pos_floor=0, alpha=alpha)).items
+        mass = {i: it.A * (it.P + it.N * it.v) for i, it in targets.items()}
+        print(f"  α = {alpha}: weighted-mass share " + ", ".join(
             f"{i} {m / sum(mass.values()):.3f}" for i, m in mass.items()))
-    for c in p.cells:
-        rate = c.cell.n_pos / (c.cell.n_pos + c.cell.n_neg)
-        print(f"  {name(c)}: p = {rate:.5f}, p̃ = {c.p_tilde:.5f}")
+    for c in pure.cells:
+        print(f"  {label(c.cell)}: π = {positive_rate(c.cell):.5f}, p̃ = {c.p_tilde:.5f}")
 
     print("\n== Ch 3: weights keyed coarser than the draw (prod_B, seg_1 negatives kept 0.5)")
     seg_1, seg_2 = CELLS[2], CELLS[3]
@@ -128,47 +134,48 @@ def main() -> None:
         print(f"  K+ = {k_pos}, K- = {1000 - k_pos}: 1/K+ + 1/K- = {1 / k_pos + 1 / (1000 - k_pos):.4f}")
 
     print("\n== Ch 5: value per row and per cell")
-    for c in p.cells:
-        print(f"  {name(c)}: value+ = {c.value_pos:.5f}, value- = {c.value_neg:.6f},"
+    for c in pure.cells:
+        print(f"  {label(c.cell)}: value+ = {c.value_pos:.5f}, value- = {c.value_neg:.6f},"
               f" M = {c.M:.3f} (n- × value- = {c.cell.n_neg * c.value_neg:.3f})")
-    show_plan("γ = 1, η = 0, f = 0", p)
-    p_half = plan(CELLS, BUDGET, Knobs(eta=0, pos_floor=0, gamma=0.5))
-    show_plan("γ = 0.5, η = 0, f = 0", p_half)
-    for title, q in (("γ = 1", p), ("γ = 0.5", p_half)):
-        s, pc = simulate(q)
-        print(f"  simulated {title}: shared = {s:.4f}, per cell = {pc:.4f}")
+    show_plan("γ = 1, η = 0, f = 0", pure)
+    half = plan(CELLS, BUDGET, Knobs(eta=0, pos_floor=0, gamma=0.5))
+    show_plan("γ = 0.5, η = 0, f = 0", half)
+    for title, result in (("γ = 1", pure), ("γ = 0.5", half)):
+        shared, per_cell = simulate(result)
+        print(f"  simulated {title}: shared = {shared:.4f}, per cell = {per_cell:.4f}")
 
     print("\n== Ch 6: the two safeguards")
-    for title, kn in (("η = 0.2, f = 0", Knobs(pos_floor=0)),
-                      ("η = 0, f = 0.6", Knobs(eta=0)),
-                      ("η = 0.2, f = 0.6 (defaults)", Knobs())):
-        show_plan(title, plan(CELLS, BUDGET, kn))
-    for title, kn in (("η = 0", PURE), ("η = 0.2", Knobs(pos_floor=0))):
-        q = plan(CELLS, BUDGET, kn)
-        a = [c for c in q.cells if c.cell.item == "prod_A"]
-        r_bar = sum(c.cell.n_neg * c.r_eff_neg for c in a) / q.items["prod_A"].N
-        w_bar = q.k * q.items["prod_A"].q_neg / r_bar
+    for title, knobs in (("η = 0.2, f = 0", Knobs(pos_floor=0)),
+                         ("η = 0, f = 0.6", Knobs(eta=0)),
+                         ("η = 0.2, f = 0.6 (defaults)", Knobs())):
+        show_plan(title, plan(CELLS, BUDGET, knobs))
+    for title, knobs in (("η = 0", NO_SAFEGUARDS), ("η = 0.2", Knobs(pos_floor=0))):
+        result = plan(CELLS, BUDGET, knobs)
+        hot = [c for c in result.cells if c.cell.item == "prod_A"]
+        r_bar = sum(c.cell.n_neg * c.r_eff_neg for c in hot) / result.items["prod_A"].N
+        w_bar = result.k * result.items["prod_A"].q_neg / r_bar
         print(f"  {title}: prod_A average negative rate = {r_bar:.6f}, its weight = {w_bar:.3f},"
-              f" largest negative weight = {max(c.w_neg for c in a):.3f}"
-              f" ({max(c.w_neg for c in a) / w_bar:.2f} times)")
+              f" largest negative weight = {max(c.w_neg for c in hot):.3f}"
+              f" ({max(c.w_neg for c in hot) / w_bar:.2f} times)")
 
     print("\n== Ch 7: buckets of the default plan")
-    d = plan(CELLS, BUDGET, Knobs())
-    for c in d.cells:
-        for label, r_cont, b in (("+", c.r_pos, c.b_pos), ("-", c.r_neg, c.b_neg)):
-            print(f"  {name(c)} {label}: continuous r = {r_cont:.7f}, buckets = {b},"
+    default = plan(CELLS, BUDGET, Knobs())
+    for c in default.cells:
+        for sign, r_cont, b in (("+", c.r_pos, c.b_pos), ("-", c.r_neg, c.b_neg)):
+            print(f"  {label(c.cell)} {sign}: continuous r = {r_cont:.7f}, buckets = {b},"
                   f" YAML = {ratio_literal(b)}")
-    kept = sum(c.cell.n_pos * c.r_eff_pos + c.cell.n_neg * c.r_eff_neg for c in d.cells)
-    mass = sum(c.cell.n_pos * d.weight_items[c.cell.item].q_pos
-               + c.cell.n_neg * d.weight_items[c.cell.item].q_neg for c in d.cells)
-    print(f"  k = {kept:.1f} / {mass:.2f} = {d.k:.4f}; one bucket = {1 / HASH_BUCKETS}")
+    mass = sum(c.cell.n_pos * default.weight_items[c.cell.item].q_pos
+               + c.cell.n_neg * default.weight_items[c.cell.item].q_neg for c in default.cells)
+    print(f"  k = {expected_rows(default):.1f} / {mass:.2f} = {default.k:.4f};"
+          f" one bucket = {1 / HASH_BUCKETS}")
 
     print("\n== Ch 8: change only the weight knobs (t_w = 0.25)")
-    w = plan(CELLS, BUDGET, Knobs(weight_t=0.25))
-    same = all((a.b_pos, a.b_neg) == (b.b_pos, b.b_neg) for a, b in zip(d.cells, w.cells))
+    reweighted = plan(CELLS, BUDGET, Knobs(weight_t=0.25))
+    same = all((old.b_pos, old.b_neg) == (new.b_pos, new.b_neg)
+               for old, new in zip(default.cells, reweighted.cells))
     print(f"  buckets unchanged: {same}")
-    for c in w.cells:
-        print(f"  {name(c)}: w+ = {c.w_pos:.3f}, w- = {c.w_neg:.3f}")
+    for c in reweighted.cells:
+        print(f"  {label(c.cell)}: w+ = {c.w_pos:.3f}, w- = {c.w_neg:.3f}")
 
 
 if __name__ == "__main__":
