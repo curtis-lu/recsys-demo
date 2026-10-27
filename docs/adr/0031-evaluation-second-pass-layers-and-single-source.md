@@ -563,7 +563,7 @@ diagnosis/metric/    contract.py
 | 算法 | 母體 | 指標 |
 |---|---|---|
 | 每個 query group 先算、再平均 | 有正例的 query group；全正組照 `evaluation.query_filter` | map@K、precision@K、recall@K、F1@K、hit_rate@K |
-| 每個 item 一份，再對 item 平均成 macro | 該 item 的列（算進哪些 query group，驗收那張票定）；「排進前 K 名」就算推薦了一次 | recall@K（今天的 `hit_rate@K`）、precision@K、F1@K、map_attr@K |
+| 每個 item 一份，再對 item 平均成 macro | 該 item 在全部 query group 的列，含沒有正例的組（#577 修訂，見文末）；「排進前 K 名」就算推薦了一次 | recall@K（今天的 `hit_rate@K`）、precision@K、F1@K、map_attr@K |
 | 把分數當機率 | 全部候選列，包含無正例的 query group（ADR-0025）；分箱近似（ADR-0024） | AUC-ROC、AUC-PR：整體＝全部列、per-item＝該 item 的全部列、macro＝對 item 平均 |
 
 表裡今天還沒有的（F1@K、query group 層級的 hit_rate@K、per-item 的 precision@K 與 F1@K、全部 item 的 per-item AUC 與 macro AUC）都是驗收那張票才加。重構只負責讓三種算法的共用數字齊備。
@@ -844,3 +844,15 @@ node 長度是用 Python 的 `ast` 模組解析 `nodes.py` 與 `pipeline.py` 量
 - **決定 3（主報表留下的段）**：段落清單拿掉預測品質。決定 16 第 4 項之後的主報表段落是：概覽、核心概念、資料統計、排序指標、名次分布、熱門度基準、完整性檢查。
 - **決定 16 第 4 項（段名）**：主報表的段名清單拿掉「預測品質」，其餘段名不變。
 - **原則 3〈更正（#538 實作時定，2026-10-24）〉**中「開關只在一處讀」那一條：`report_section_on` 裡「缺的時候預測品質段算關」的特例、以及 A46 的 `prediction_quality_on` 都不存在了。`evaluation.report.sections.prediction_quality` 這個開關拿掉，舊設定寫著它時由 A34 報錯，指向 `--prediction-quality`；`EVALUATION_REPORT_SECTIONS` 不再含它。
+
+## 修訂（2026-10-27，#577）
+
+#577 在 `--prediction-quality` 模式補上每個 item 的 AUC、原始分數上的兩個 AP、per-item precision@K 與 F1@K。母體與權重照 #541 第一則留言（擁有者 2026-10-23）；macro 門檻擁有者 2026-10-27 定：AUC 與 per-item precision、F1 的 macro 都沿用 `evaluation.metric.min_positives`（看正例數），不另設鍵。
+
+- **決定 7 的表，「每個 item 一份」那一列：母體是「全部的組」**，含沒有正例的組，抽樣留下的每列乘 1／r。recall@K、map_attr@K 只用到正例列，算不算沒有正例的組結果一樣；precision@K、F1@K 的分母是排進前 K 名的次數，沒有正例的組也會排 item 進前 K 名，所以必須算進來。#534 更正那句「每個 item 那一種只看 query group 那種算進的組」對 precision 不成立。
+  - **算在哪。** 主報表的排序指標只有有正例的組，數不到沒有正例的組排進前 K 名的次數，所以 per-item precision@K、F1@K 算在 `--prediction-quality` 模式（`prediction_quality.item_top_k_metrics`：一次 `groupBy(item)`，用 `enriched_eval_predictions` 已有的名次欄）。指標目錄把它們放在另一種算法 `ITEM_EVERY_GROUP`，跟主報表的 `ITEM` 分開，主報表的 per-item 表就不會在有正例的組上算出一個掛 precision 名字的數。precision 用 `Ratio("hits", "n_top")`，F1 用 `Expr`：`2·hits／(n_top＋n_pos)`。
+- **決定 7，AUC 的目錄寫法。** 目錄多一種公式寫法 `BinArea`（`"pr"` 或 `"roc"`）：從分箱表算面積，算法在 `prediction_quality.bin_areas`，在 Spark 上對每個 item 走一次分箱，只收回每個 item 幾個數；整體也走同一個函式。所以 `pr_auc`、`roc_auc` 是目錄裡的一筆（`SCORE_BINS` 算法，粒度是整體、per-item、macro）。
+- **決定 16 第 1 項。** 主報表概覽的模型選擇指標仍只有排序那兩個；pooled AP 與 macro per-item AP 的母體含沒有正例的組，算在 `--prediction-quality`。概覽多一句話指向那一頁。目錄的 `MODEL_SELECTION_PENDING` 改成 `MODEL_SELECTION_ON_PREDICTION_QUALITY`；測試照舊守「兩份清單合起來＝`metric_registry.METRIC_NAMES`」。
+- **決定 16 第 2 項。** 比較報表的預設清單不加這兩個 AP（比較報表不支援 `--prediction-quality`，ADR-0032 決定 6）。
+- **決定 16 第 3 項。** 兩個 AP 不是每次 evaluation 都算，是 `--prediction-quality` 每次都算，用 training 的 `metrics_spark.compute_pooled_average_precision`、`compute_macro_per_item_average_precision`。監控原料沒有權重欄，兩個函式多一條不加權的路徑（`weighted=False`）；training 的呼叫照舊要權重欄。目錄裡它們是 `RAW_SCORE` 算法的 `average_precision` 一筆（整體＝pooled、macro＝per-item），公式寫成 `OwnPass`，只標記、不寫公式。決定 16 留的「evaluation 的列帶不帶權重」：只有全部候選列那幾個指標讀權重，`--post-training` 時讀，監控時每列 1。
+

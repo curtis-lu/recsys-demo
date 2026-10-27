@@ -451,7 +451,7 @@ evaluation:
 
 **前提。** 這個模式讀已落地的 `enriched_eval_predictions`，不跑 `prepare_eval_data`、不重接 label：label 取自寫這份分區的那次標準 evaluation，label 之後有回補的話，要先重跑那條標準 evaluation 再跑這個模式。同一個模型、同一個月份要先跑過**同一種原料**的標準 evaluation（帶或不帶 `--post-training` 要一致）：這張表每個模型、每個月份只有一份，由最後一次跑的標準 evaluation 決定是哪一份。模式用分區指紋（`steps/snap_date_scope.py::restrict_to_current_eval_partitions` 那套）確認；不一致時停下，並印出要先跑的指令。
 
-**這個模式回答什麼。** 排序指標（mAP、precision@K、recall@K）看的是同一個 query group 裡誰排前面。有些使用者不這樣用模型：他們把每一列候選當成一次「會不會是正例」的預測，照分數切一刀，想知道切在哪裡、precision 與 recall 各是多少、每一段分數實際有多少正例（[ADR-0024](../adr/0024-prediction-quality-metric-family.md)）。這個模式給的就是這把尺：precision、recall、F1、`pr_auc`、`roc_auc` 與分箱表，整體＋per-item。
+**這個模式回答什麼。** 排序指標（mAP、precision@K、recall@K）看的是同一個 query group 裡誰排前面。有些使用者不這樣用模型：他們把每一列候選當成一次「會不會是正例」的預測，照分數切一刀，想知道切在哪裡、precision 與 recall 各是多少、每一段分數實際有多少正例（[ADR-0024](../adr/0024-prediction-quality-metric-family.md)）。這個模式給的就是這把尺：precision、recall、F1、`pr_auc`、`roc_auc` 與分箱表，整體＋per-item。另外還有三樣不從分箱表來的（#577）：原始分數上的兩個 average precision（HPO 能選的 `pooled_average_precision`、`macro_per_item_average_precision`），以及每個 item 的 precision@K、F1@K（分母數全部的 query group，見下方〈per-item precision@K〉）。
 
 **怎麼算：一張分箱表，其他全部從它推出來。**
 
@@ -462,6 +462,7 @@ evaluation:
    - **F1 最佳門檻**：掃描裡 F1 最大的那個下緣（同分取較高的門檻）。
    - **`pr_auc`**：把同一箱的列視為同分之後的 average precision＝Σ（該箱正例 ÷ 全部正例）×（該箱下緣的 precision）。
    - **`roc_auc`**：同一箱視為同分、同分算一半的 ROC 面積。
+   - 兩個面積對**每個 item** 都算，在 Spark 上從 `item × 細箱` 的表直接算完，只收回每個 item 幾個數（`prediction_quality.bin_areas`）；整體的也是同一個函式。macro＝對有值的 item 等權平均：沒有正例的 item 兩個都沒有值、沒有負例的沒有 `roc_auc`，正例數低於 `evaluation.metric.min_positives` 的也不進（跟排序指標的 macro 同一個門檻），報表印「參與的 item 數 x／全部 y」。
    - **分箱表**：每 `n_bins ÷ n_display_bins` 個細箱併成一格，印出分數範圍、列數、正例數、平均分數（分數和 ÷ 列數）、實際正例率，以及「以這格下緣為門檻」的 precision、recall、F1。
 
 箱是等寬的，不是分位數，為的是保住兩個性質：每個 item 的細箱加起來就是整體的細箱；細箱可以直接併成分箱表的格子。分位數箱會讓不同 item 的「第 3 箱」不是同一段分數，這兩個性質都會靜默失效；要換的話先另開一張 ADR。
@@ -481,7 +482,7 @@ evaluation:
 1. **門檻解析度＝細箱寬。** 報表印出細箱寬。F1 最佳門檻是在這份資料上挑的，換一份資料（下個月、線上）分數分布會變，不能直接搬去當線上的設定值。
 2. **母體跟主報表不同。** 本模式不排除任何 query group；主報表的排序指標只算有正例的 query group（排除的數量在 `n_excluded_queries`）。兩邊的 precision 不可互相比較。
    ⚠ `--post-training` 讀的是 dataset 階段過濾過的 test 表（`filter_test_keys`，組裝之前從 keys 丟）：有正例的 query group 全留，沒有正例的只留 r 那麼多，每列帶權重 `zero_positive_group_weight`（有正例的組 ＝ 1，留下來的無正例組 ＝ 1／r）。列數、正例數與所有指標都用這個權重加權，代表還原到全部曝光的估計；1／r 是設計權重，不是無偏估計，留下的組少時不穩。報表開頭印出 r 與留下來的無正例組數，並寫「加權估計」（r ＝ 1 時寫精確值）。不加 `--post-training` 時不加權。
-3. **`pr_auc` 不是外部工具算的 average precision。** 它是分箱後的值，不能拿來跟 sklearn 在原始分數上算的 average precision 直接比較。另外有兩個精確算法的指標 `pooled_average_precision`、`macro_per_item_average_precision`（HPO 在 val 上用它們挑參數，training 在 test 上也算，見 [training.md §3.7](training.md#37-test-上算哪些指標test_metrics)），定義與本段不同，也不可互相比較。名字刻意不叫 average precision：在這個 repo 裡，AP 是排序指標 `map@K` 的說法。
+3. **`pr_auc` 不是外部工具算的 average precision。** 它是分箱後的值，不能拿來跟 sklearn 在原始分數上算的 average precision 直接比較。原始分數上的兩個 average precision `pooled_average_precision`、`macro_per_item_average_precision`（HPO 在 val 上用它們挑參數，training 在 test 上也算，見 [training.md §3.7](training.md#37-test-上算哪些指標test_metrics)）本模式也算，用 training 同一套 Spark 計算，列在報表「AUC 與 AP」段；定義與 `pr_auc` 不同，數字會差一點，不可互相對帳。`--post-training`、r ＞ 0、`evaluation.metric` 與 `evaluation.query_filter` 用預設值時，它們等於 training 在同一份 test 預測上算的同名指標。名字刻意不叫 average precision：在這個 repo 裡，AP 是排序指標 `map@K` 的說法。
 
 其他要知道的：
 
@@ -489,11 +490,12 @@ evaluation:
 - **分箱表不是校準。** 框架不做校準（#411），分數不保證是機率；平均分數與實際正例率只是並列。本段每個指標都只看分數的大小順序。
 - **一個門檻橫跨所有 query group。** 這要求不同 query group 的分數彼此可比。模型用排序類目標（`lambdarank`、`rank_xendcg`）訓練時，分數只為同一個 query group 內的先後而學，跨 group 用同一個門檻切是模型沒有優化過的用法；`binary` 目標沒有這個問題。報表也印這一句。
 - **極端值會把細箱撐寬。** 範圍取最小～最大，少數特別高的分數會讓多數列擠進少數幾個細箱，門檻解析度跟著變差。分箱表每一格都印列數，看得出來是不是這樣；要改用分位數箱得先另開 ADR（見上）。
-- **per-item 預算。** 只有列數最多的前 `top_n` 個 item 有自己的分箱與指標（item × 細箱要收回 driver）；其餘 item 仍算進整體，報表會寫出一共幾個 item。`top_n: 0` 只看整體。
+- **per-item 預算只管顯示。** 只有列數最多的前 `top_n` 個 item 的分箱表與 F1 最佳門檻收回 driver、印在報表上（item × 細箱的量要有上限）。每個 item 的 `pr_auc`、`roc_auc` 不受它限制，全部都算。`top_n: 0` 不印各 item 的分箱表。
+- **per-item precision@K、F1@K。** 分母是這個 item 在**全部** query group 裡排進前 K 名的次數，沒有正例的組也算（`--post-training` 時每列乘權重）；名次用 `enriched_eval_predictions` 已有的名次欄，所以 `--scope` 時一列保留它在整組候選裡的名次。K 跟主報表一樣是 `evaluation.k_values` 解析後再加上全部。macro 的門檻同上。主報表排序指標段的 per-item 表只看有正例的組，母體不同，所以這兩個指標只在本模式。名次是組內的，不受分數跨 group 可比性影響。
 - **權重欄。** 分箱時每一列先乘上權重。`--post-training` 時乘上預測表的權重欄（r ＝ 1 時每列都是 1）；不加 `--post-training` 時每列權重 1。被評模型的 r ＞ 0、預測表卻沒有這一欄或有 NULL（training 寫 test 預測時，它自己設定檔的 r 是 0）時，計算前停下：在 r ＞ 0 的設定下重寫這個模型的 test 預測。
 - **label 觀察窗要成熟才準。** 沒有正例的 query group 全留，label 還沒成熟的月份會把「還沒發生」當成負例，數字偏低。觀察窗有沒有結束只有使用者知道，框架沒有資料可以判斷，所以報表開頭提醒，程式不檢查。
-- **成本。** 跑這個模式要多一次取最小、最大分數的聚合，和一次 `groupBy(item, 細箱)` 的全表 shuffle。收回 driver 的量是「細箱數 ×（1 ＋ `top_n`）＋ item 數」列，與資料列數無關。
-- **產物。** 放在 `data/evaluation/<model_version>/<snap_date>/prediction_quality/<post_training 或 monitoring>/<範圍名>/`（沒有 `--scope` 時範圍名是 `all`），內含兩個檔：`prediction_quality.json`（catalog 名 `prediction_quality_metrics`）：整體與前 `top_n` 個 item 的細箱表、每張表的關鍵數、分數範圍與細箱寬、欄名；帶設定指紋。`report.html`（catalog 名 `prediction_quality_report`）：報表開頭寫哪份原料、r 與留下的無正例 query group 數（`--post-training` 時）、範圍（`--scope` 時）、label 觀察窗要成熟才準的提醒，本體是分箱表與門檻掃描。
+- **成本。** 跑這個模式要多一次取最小、最大分數的聚合，和一次 `groupBy(item, 細箱)` 的全表 shuffle；#577 再加上兩個 average precision 的 Spark 計算（pooled 那個把全部列依分數分段排序，三個 action）、一次 `groupBy(item)` 數排進前 K 名的次數，和一次數 item（解析「全部」這個 K）。收回 driver 的量是「細箱數 ×（1 ＋ `top_n`）＋ item 數 ×（幾個數）」列，與資料列數無關。
+- **產物。** 放在 `data/evaluation/<model_version>/<snap_date>/prediction_quality/<post_training 或 monitoring>/<範圍名>/`（沒有 `--scope` 時範圍名是 `all`），內含兩個檔：`prediction_quality.json`（catalog 名 `prediction_quality_metrics`）：整體與前 `top_n` 個 item 的細箱表、每張表的關鍵數、每個 item 的面積與 macro（`per_item.totals`、`per_item.macro`）、`average_precision`、`per_item_top_k`、分數範圍與細箱寬、欄名；帶設定指紋。`report.html`（catalog 名 `prediction_quality_report`）：報表開頭寫哪份原料、r 與留下的無正例 query group 數（`--post-training` 時）、範圍（`--scope` 時）、label 觀察窗要成熟才準的提醒，本體是分箱表與門檻掃描、各 item 的 AUC 與兩個 AP、各 item 的 precision@K 與 F1@K。
 - **互斥**：`--prediction-quality` 跟 `--compare`、`--compare-only` 互斥（A13）。比較報表的對照側不帶權重、共同母體也被主側縮過，兩邊不可比，所以不支援。
 - **合法值**（A42，evaluation 指令入口檢查）：`n_bins`、`n_display_bins` 是 ≥ 1 的整數，而且後者整除前者；`top_n` 是 ≥ 0 的整數；這個區塊不能有別的鍵。沒有 `enabled` 這類開關，寫了會被擋下。
 
@@ -759,7 +761,7 @@ Plan 1.5（2026-07-20）把原本擠在 `generate_report` 裡的 Spark 聚合拆
 
 | 階段 | node | 輸入 | 處理內容 | 主要輸出 |
 |---|---|---|---|---|
-| 計算 | `compute_prediction_quality` | `enriched_eval_predictions`、`evaluation_segment_columns`（只取 `joined` 確認分區指紋，不分群）、parameters | 把每一列候選當二元預測：一次 `groupBy(item, 細箱)` 的分箱表，加上從它推出的 `pr_auc`、`roc_auc`、F1 最佳門檻（見 3.7 節），以及報表印的顯示分箱表（整體與每個 item）與門檻掃描表；不排除沒有正例的 query group。先確認分區指紋是同一種原料，不是就停下。`--scope` 時先檢查範圍表（A67），再只留範圍圈到的列（semi-join），數範圍裡沒被評分的列與範圍沒有列的評估日期 | `prediction_quality_metrics`（落地 `prediction_quality.json`） |
+| 計算 | `compute_prediction_quality` | `enriched_eval_predictions`、`evaluation_segment_columns`（只取 `joined` 確認分區指紋，不分群）、parameters | 把每一列候選當二元預測：一次 `groupBy(item, 細箱)` 的分箱表，加上從它推出的 `pr_auc`、`roc_auc`（每個 item 都有，含 macro）、F1 最佳門檻（見 3.7 節），原始分數上的兩個 average precision、per-item precision@K 與 F1@K，以及報表印的顯示分箱表（整體與每個 item）與門檻掃描表；不排除沒有正例的 query group。先確認分區指紋是同一種原料，不是就停下。`--scope` 時先檢查範圍表（A67），再只留範圍圈到的列（semi-join），數範圍裡沒被評分的列與範圍沒有列的評估日期 | `prediction_quality_metrics`（落地 `prediction_quality.json`） |
 | 報表 | `generate_prediction_quality_report` | `prediction_quality_metrics`、parameters | 產生這一頁 HTML；純函式，只讀落地結果。開頭寫原料、r 與留下的無正例 query group 數、範圍、label 觀察窗提醒 | `prediction_quality_report`（`report.html`） |
 
 ## 6. 產物與驗收

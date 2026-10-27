@@ -100,3 +100,8 @@ date: 2026-09-16
 ## 修訂（2026-10-26，ADR-0032）
 
 決定 1 的「主報表新增一段」與「段落開關 `report.sections.prediction_quality`」不再成立。[ADR-0032](0032-prediction-quality-mode-and-scope.md) 把這個家族搬出主報表，改成 evaluation 的一個模式旗標 `--prediction-quality`，產出自己的 `report.html`；`evaluation.report.sections.prediction_quality` 開關拿掉，主報表只留排序指標。node、JSON 產物、`COMPUTED_KEYS` 兩筆中屬於開關的那一筆也隨之改動，其餘形狀與 `evaluation.prediction_quality` 的參數照舊。
+
+## 修訂（2026-10-27，#577）
+
+決定 6 的 per-item 預算 `top_n` 改成**只管顯示**：只有前 `top_n` 個 item 的分箱表（item × 細箱）收回 driver、畫在報表上。每個 item 的 `pr_auc`、`roc_auc` 改在 Spark 上從 item × 細箱的表直接算（`prediction_quality.bin_areas`），只收回每個 item 幾個數，所以全部 item 都有，再加上對 item 平均的 macro。整體的兩個面積也走同一個函式；前 `top_n` 個 item 的值跟改之前在 driver 上算的相差小於 1e-12（加總順序不同）。
+
