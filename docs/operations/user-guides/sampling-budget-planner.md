@@ -7,7 +7,7 @@
 - `dataset.sample_ratio_overrides`：每個抽樣格、正負兩類各自的**保留率**。
 - `training.sample_weights`（連同 `training.sample_weight_keys`）：對應的**樣本權重**，把抽樣造成的偏差補回來。
 
-詞彙（抽樣預算、抽樣格、分層欄、保留率、目標權重、樣本權重）照 [`CONTEXT.md`](../../../CONTEXT.md) 的「抽樣與權重」。每一步怎麼算，寫在 issue #525 的〈計算規格〉。
+詞彙（抽樣預算、抽樣格、分層欄、保留率、目標權重、樣本權重）照 [`CONTEXT.md`](../../../CONTEXT.md) 的「抽樣與權重」。每一步怎麼算，寫在 issue #525 的〈計算規格〉；為什麼這樣算，見 [抽樣原理 handbook](../../handbooks/sampling/sampling_budget_principles.md)。
 
 **跟 [`sampling_overrides_editor.py`](sampling-overrides-editor.md) 的分工：** 編輯器是讓你一格一格手調、看著數字改的視覺化工具；這兩支腳本是給一個預算、照一套固定的算法一次算完整套。兩者產出的 key 格式相同。
 
@@ -184,6 +184,7 @@ self-checks: 4/4 passed
 
 ## 相關文件
 
+- [`docs/handbooks/sampling/sampling_budget_principles.md`](../../handbooks/sampling/sampling_budget_principles.md)：抽樣原理 handbook，講保留率與權重為什麼這樣算。
 - [`sampling-overrides-editor.md`](sampling-overrides-editor.md)：手調用的視覺化編輯器，key 格式相同。
 - [`CONTEXT.md`](../../../CONTEXT.md)「抽樣與權重」：詞彙。
 - [`docs/pipelines/dataset.md`](../../pipelines/dataset.md)：dataset pipeline 怎麼抽樣。
