@@ -1,12 +1,12 @@
-"""Recompute every number in sampling_budget_principles.md.
+"""Recompute every number in docs/handbooks/sampling/sampling_budget_principles.md.
 
 The worked example (2 items x 2 strata) goes through the budget planner's own
 ``plan`` (scripts/sampling_budget_planner.py); the chapter 5 simulation is
 plain numpy on the keep-rates ``plan`` returns. Output is grouped by chapter,
 in the order the handbook uses the numbers.
 
-Run from the repo root:
-  PYTHONPATH=src .venv/bin/python docs/handbooks/sampling/recompute_examples.py
+Usage (from the repo root):
+  PYTHONPATH=src .venv/bin/python scripts/dev/sampling_handbook_examples.py
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.sampling_budget_planner import (  # noqa: E402
     HASH_BUCKETS, Cell, Knobs, plan, ratio_literal,
 )

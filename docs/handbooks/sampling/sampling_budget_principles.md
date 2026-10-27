@@ -59,7 +59,7 @@
 **重算：** 文中所有數字都可以在 repo 根目錄用這一行重算出來。它把上表交給預算工具的 `plan` 函式（就是 `sampling_budget_planner.py plan` 指令內部呼叫的那一個），第 5 章的模擬也在裡面：
 
 ```bash
-PYTHONPATH=src .venv/bin/python docs/handbooks/sampling/recompute_examples.py
+PYTHONPATH=src .venv/bin/python scripts/dev/sampling_handbook_examples.py
 ```
 
 輸出依章節分段，順序跟本書用到的順序相同。文中有些數字是把印出來的數字再加減乘除得到的（例如差幾筆、差幾 %），算式都寫在旁邊。
@@ -531,7 +531,7 @@ $\lambda$ 就是 5.4 的 $\sqrt\mu$：兩種極端代進去都是 $K^\pm_c=M_c^{
 
 粗體是各欄較小的那一個。共用參數的模型在 $\gamma=1$ 下好 12%；各自參數的模型在 $\gamma=0.5$ 下好 19%。兩端各贏自己那一邊，模擬值也跟 5.3 的公式對得上。
 
-「公式」那一欄用的是 4.2 的完整形式 $(1-r)/K$，全留的類別雜訊為 0。模擬的程式碼在 `recompute_examples.py` 的 `simulate`。
+「公式」那一欄用的是 4.2 的完整形式 $(1-r)/K$，全留的類別雜訊為 0。模擬的程式碼在 `scripts/dev/sampling_handbook_examples.py` 的 `simulate`。
 
 ### 5.7 GBDT 在兩者中間
 
